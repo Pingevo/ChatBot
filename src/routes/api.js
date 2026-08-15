@@ -26,63 +26,68 @@ router.get('/shops', async (req, res) => {
   res.json(shops);
 });
 
-// ⛔ ปิดใช้งานแล้ว (ไม่ใช่ทางหลักอีกต่อไป) — เดิมฟังก์ชันนี้ยิง Shopee API จริงทุก 2 วิ
-// (throttle ต่อ process แต่ "ต่อ browser tab ที่เปิด inbox ค้างไว้" ไม่ถูกแคป) ทำงานซ้ำกับ
-// pollWorker.js เกือบทุกอย่าง (ดึง conversation list ทั้ง unread+all เหมือนกัน) เพียงแต่ถี่กว่า
-// 10 เท่าโดยไม่ได้ประโยชน์เพิ่ม ตอนนี้ทางหลักคือ webhook (sellcenter forward code 10 →
-// ChatBot/src/routes/webhook.js → PushEvent → webhookWorker.js → Message/Conversation เรียลไทม์)
-// ส่วน pollWorker.js (20 วิ) ยังเก็บไว้เป็น reconciliation — ไม่ใช่แค่ safety net ตอน webhook
-// เสีย แต่ยัง sync unread_count/pinned/mute ที่เปลี่ยนจากฝั่ง Shopee ตรงๆ (เช่น notification-type
-// push code 10 ที่ webhookWorker.js ข้ามทิ้งเฉยๆ ไม่อัปเดตอะไรเลย — ดู webhookWorker.js บรรทัด
-// "notification type — skip") ซึ่ง webhook คนเดียวไม่มีทางรู้ได้
+// ปิดไว้เป็น default (production) เพราะยิง Shopee API จริงทุก 2 วิ (throttle ต่อ process แต่
+// "ต่อ browser tab ที่เปิด inbox ค้างไว้" ไม่ถูกแคป) ทำงานซ้ำกับ pollWorker.js เกือบทุกอย่าง
+// (ดึง conversation list ทั้ง unread+all เหมือนกัน) เพียงแต่ถี่กว่า 10 เท่าโดยไม่ได้ประโยชน์เพิ่ม
+// เพราะตอนนี้ทางหลักคือ webhook (sellcenter forward code 10 → webhook.js → PushEvent →
+// webhookWorker.js → Message/Conversation เรียลไทม์) — pollWorker.js (20 วิ) ยังเก็บไว้เป็น
+// reconciliation เหมือนเดิม
 //
-// let lastBackgroundSyncTime = 0;
-// async function triggerBackgroundConversationsSync() {
-//   const now = Date.now();
-//   if (now - lastBackgroundSyncTime < 2000) return; // throttle background sync every 2s (ultra-fast Shopee fetch)
-//   lastBackgroundSyncTime = now;
-//
-//   try {
-//     const shops = await Shop.find({});
-//     for (const shop of shops) {
-//       if (shop.platform === 'shopee') {
-//         const [unreadRes, allRes] = await Promise.all([
-//           shopeeAdapter.fetchConversations(shop, { direction: 'latest', type: 'unread' }).catch(() => null),
-//           shopeeAdapter.fetchConversations(shop, { direction: 'latest', type: 'all' }).catch(() => null),
-//         ]);
-//         const convList = [...((unreadRes && unreadRes.conversations) || []), ...((allRes && allRes.conversations) || [])];
-//         const seen = new Set();
-//         for (const conv of convList) {
-//           if (!conv || !conv.conversation_id || seen.has(String(conv.conversation_id))) continue;
-//           seen.add(String(conv.conversation_id));
-//           const lastTs = conv.last_message_timestamp ? new Date(Number(BigInt(conv.last_message_timestamp) / 1000000n)) : null;
-//           await Conversation.updateOne(
-//             { shop_id: String(shop.shop_id), conversation_id: String(conv.conversation_id) },
-//             {
-//               $set: {
-//                 platform: 'shopee',
-//                 to_id: String(conv.to_id),
-//                 to_name: conv.to_name,
-//                 to_avatar: conv.to_avatar,
-//                 unread_count: conv.unread_count,
-//                 pinned: conv.pinned,
-//                 mute: conv.mute,
-//                 latest_message_id: conv.latest_message_id ? String(conv.latest_message_id) : null,
-//                 latest_message_type: conv.latest_message_type,
-//                 latest_message_content: conv.latest_message_content,
-//                 latest_message_from_id: String(conv.latest_message_from_id),
-//                 last_message_timestamp: lastTs,
-//               },
-//             },
-//             { upsert: true }
-//           );
-//         }
-//       }
-//     }
-//   } catch (err) {
-//     /* ignore background sync errors */
-//   }
-// }
+// ⚡ เปิดใช้ได้ชั่วคราวด้วย ENABLE_BACKGROUND_SHOPEE_SYNC=true ใน .env — ใช้กรณีเครื่อง/
+// environment นี้ยังไม่ได้ต่อ webhook forward จาก sellcenter (เช่นเครื่องเทสที่ยังตั้ง
+// Tailscale/tunnel ไม่เสร็จ) จะได้เห็นข้อมูลจริงจาก Shopee เข้ามาระหว่างรอต่อ webhook ให้ครบ
+// พอต่อ webhook เสร็จแล้วควรปิดกลับ (ลบ env var นี้ทิ้ง หรือตั้งเป็น false) กันยิง Shopee API
+// ซ้ำซ้อนโดยไม่จำเป็น — ดู docs: setup-webhook-forward-to-dev.md
+const ENABLE_BACKGROUND_SHOPEE_SYNC = process.env.ENABLE_BACKGROUND_SHOPEE_SYNC === 'true';
+
+let lastBackgroundSyncTime = 0;
+async function triggerBackgroundConversationsSync() {
+  if (!ENABLE_BACKGROUND_SHOPEE_SYNC) return;
+  const now = Date.now();
+  if (now - lastBackgroundSyncTime < 2000) return; // throttle background sync every 2s (ultra-fast Shopee fetch)
+  lastBackgroundSyncTime = now;
+
+  try {
+    const shops = await Shop.find({});
+    for (const shop of shops) {
+      if (shop.platform === 'shopee') {
+        const [unreadRes, allRes] = await Promise.all([
+          shopeeAdapter.fetchConversations(shop, { direction: 'latest', type: 'unread' }).catch(() => null),
+          shopeeAdapter.fetchConversations(shop, { direction: 'latest', type: 'all' }).catch(() => null),
+        ]);
+        const convList = [...((unreadRes && unreadRes.conversations) || []), ...((allRes && allRes.conversations) || [])];
+        const seen = new Set();
+        for (const conv of convList) {
+          if (!conv || !conv.conversation_id || seen.has(String(conv.conversation_id))) continue;
+          seen.add(String(conv.conversation_id));
+          const lastTs = conv.last_message_timestamp ? new Date(Number(BigInt(conv.last_message_timestamp) / 1000000n)) : null;
+          await Conversation.updateOne(
+            { shop_id: String(shop.shop_id), conversation_id: String(conv.conversation_id) },
+            {
+              $set: {
+                platform: 'shopee',
+                to_id: String(conv.to_id),
+                to_name: conv.to_name,
+                to_avatar: conv.to_avatar,
+                unread_count: conv.unread_count,
+                pinned: conv.pinned,
+                mute: conv.mute,
+                latest_message_id: conv.latest_message_id ? String(conv.latest_message_id) : null,
+                latest_message_type: conv.latest_message_type,
+                latest_message_content: conv.latest_message_content,
+                latest_message_from_id: String(conv.latest_message_from_id),
+                last_message_timestamp: lastTs,
+              },
+            },
+            { upsert: true }
+          );
+        }
+      }
+    }
+  } catch (err) {
+    /* ignore background sync errors */
+  }
+}
 
 // GET /api/conversations — list conversations, filter ผ่าน query
 // ?type=all|pinned|unread|answered  &platform=shopee,lazada  (คั่นด้วยจุลภาค)  &shop_id=id1,id2  &q=ค้นหาชื่อ
@@ -102,10 +107,9 @@ router.get('/conversations', async (req, res) => {
   if (type === 'answered') filter.unread_count = 0;
   if (q) filter.to_name = { $regex: q, $options: 'i' };
 
-  // ⛔ ปิดใช้งานแล้ว — ไม่ใช่ทางหลักอีกต่อไป ตอนนี้มี webhook (เรียลไทม์) + pollWorker.js
-  // (20 วิ, reconciliation) sync ให้อยู่แล้ว ไม่ต้องยิง Shopee API ซ้ำทุกครั้งที่เปิดหน้า inbox
-  // ดูเหตุผลเต็มๆ ที่ comment เหนือฟังก์ชัน triggerBackgroundConversationsSync ด้านบน
-  // triggerBackgroundConversationsSync();
+  // ปิดอยู่ default (ตัวฟังก์ชันเช็ค ENABLE_BACKGROUND_SHOPEE_SYNC เองแล้ว return ทันทีถ้าไม่ได้
+  // เปิดไว้) — ดู comment เหนือฟังก์ชันด้านบนสำหรับตอนไหนควรเปิด/ปิด
+  triggerBackgroundConversationsSync();
 
   const conversations = await Conversation.find(filter).sort({ pinned: -1, last_message_timestamp: -1 }).limit(100).lean();
   res.json(conversations);
