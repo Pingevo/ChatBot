@@ -26,66 +26,94 @@ router.get('/shops', async (req, res) => {
   res.json(shops);
 });
 
-// ปิดไว้เป็น default (production) เพราะยิง Shopee API จริงทุก 2 วิ (throttle ต่อ process แต่
-// "ต่อ browser tab ที่เปิด inbox ค้างไว้" ไม่ถูกแคป) ทำงานซ้ำกับ pollWorker.js เกือบทุกอย่าง
-// (ดึง conversation list ทั้ง unread+all เหมือนกัน) เพียงแต่ถี่กว่า 10 เท่าโดยไม่ได้ประโยชน์เพิ่ม
-// เพราะตอนนี้ทางหลักคือ webhook (sellcenter forward code 10 → webhook.js → PushEvent →
-// webhookWorker.js → Message/Conversation เรียลไทม์) — pollWorker.js (20 วิ) ยังเก็บไว้เป็น
-// reconciliation เหมือนเดิม
+// ปิดไว้เป็น default (production) — ทางหลักคือ webhook (sellcenter forward code 10 →
+// webhook.js → PushEvent → webhookWorker.js → Message/Conversation เรียลไทม์) pollWorker.js
+// (20 วิ, ยิง Shopee API จริง) ทำหน้าที่ reconciliation อยู่แล้ว ไม่ต้องมีตัวนี้เพิ่ม
 //
-// ⚡ เปิดใช้ได้ชั่วคราวด้วย ENABLE_BACKGROUND_SHOPEE_SYNC=true ใน .env — ใช้กรณีเครื่อง/
-// environment นี้ยังไม่ได้ต่อ webhook forward จาก sellcenter (เช่นเครื่องเทสที่ยังตั้ง
-// Tailscale/tunnel ไม่เสร็จ) จะได้เห็นข้อมูลจริงจาก Shopee เข้ามาระหว่างรอต่อ webhook ให้ครบ
-// พอต่อ webhook เสร็จแล้วควรปิดกลับ (ลบ env var นี้ทิ้ง หรือตั้งเป็น false) กันยิง Shopee API
-// ซ้ำซ้อนโดยไม่จำเป็น — ดู docs: setup-webhook-forward-to-dev.md
+// ⚡ เปิดใช้ได้ชั่วคราวด้วย ENABLE_BACKGROUND_SHOPEE_SYNC=true ใน .env — สำหรับ environment
+// ที่ยังไม่ได้ต่อ webhook forward จาก sellcenter เอง (เช่นเครื่องเทส) ใช้ระหว่างรอตั้งค่าให้ครบ
+//
+// ⚠️ ไม่ยิง Shopee API เอง — sellcenter รับ push code 10 จาก Shopee ให้แล้ว (ดู
+// sellcenter/api/controllers/ShpPushController.js case 10) เก็บไว้ใน ShpChatConversations/
+// ShpChatMessages ของตัวเอง ตัวนี้แค่ "อ่าน" ข้อมูลที่ sellcenter เก็บไว้แล้วผ่าน
+// SELLCENTER_MONGO_URI (connection เดียวกับที่ใช้อ่าน Shopee token อยู่แล้ว) มา mirror ใส่
+// Conversation/Message ของตัวเอง — ไม่ต้องมี Shopee partner key/credential ของตัวเองเลย
+// ไม่ต้อง seed Shop collection ล่วงหน้าด้วย (เดิมต้องมี Shop ก่อนถึงจะรู้ว่าจะ sync ร้านไหน)
 const ENABLE_BACKGROUND_SHOPEE_SYNC = process.env.ENABLE_BACKGROUND_SHOPEE_SYNC === 'true';
+const BACKGROUND_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1000; // ดึงเฉพาะห้องที่มี activity ใน 24 ชม.
+// หลังนี้ กันโหลดทั้ง collection ทุก 2 วิตอน collection ใหญ่ขึ้น
 
 let lastBackgroundSyncTime = 0;
 async function triggerBackgroundConversationsSync() {
   if (!ENABLE_BACKGROUND_SHOPEE_SYNC) return;
   const now = Date.now();
-  if (now - lastBackgroundSyncTime < 2000) return; // throttle background sync every 2s (ultra-fast Shopee fetch)
+  if (now - lastBackgroundSyncTime < 2000) return; // throttle background sync every 2s
   lastBackgroundSyncTime = now;
 
   try {
-    const shops = await Shop.find({});
-    for (const shop of shops) {
-      if (shop.platform === 'shopee') {
-        const [unreadRes, allRes] = await Promise.all([
-          shopeeAdapter.fetchConversations(shop, { direction: 'latest', type: 'unread' }).catch(() => null),
-          shopeeAdapter.fetchConversations(shop, { direction: 'latest', type: 'all' }).catch(() => null),
-        ]);
-        const convList = [...((unreadRes && unreadRes.conversations) || []), ...((allRes && allRes.conversations) || [])];
-        const seen = new Set();
-        for (const conv of convList) {
-          if (!conv || !conv.conversation_id || seen.has(String(conv.conversation_id))) continue;
-          seen.add(String(conv.conversation_id));
-          const lastTs = conv.last_message_timestamp ? new Date(Number(BigInt(conv.last_message_timestamp) / 1000000n)) : null;
-          await Conversation.updateOne(
-            { shop_id: String(shop.shop_id), conversation_id: String(conv.conversation_id) },
-            {
-              $set: {
-                platform: 'shopee',
-                to_id: String(conv.to_id),
-                to_name: conv.to_name,
-                to_avatar: conv.to_avatar,
-                unread_count: conv.unread_count,
-                pinned: conv.pinned,
-                mute: conv.mute,
-                latest_message_id: conv.latest_message_id ? String(conv.latest_message_id) : null,
-                latest_message_type: conv.latest_message_type,
-                latest_message_content: conv.latest_message_content,
-                latest_message_from_id: String(conv.latest_message_from_id),
-                last_message_timestamp: lastTs,
-              },
-            },
-            { upsert: true }
-          );
-        }
-      }
+    const { getShpChatConversationsModel, getShpChatMessagesModel } = require('../config/sellcenterDb');
+    const ShpChatConversations = getShpChatConversationsModel();
+    const ShpChatMessages = getShpChatMessagesModel();
+    const cutoff = new Date(Date.now() - BACKGROUND_SYNC_LOOKBACK_MS);
+
+    const convs = await ShpChatConversations.find({ last_message_timestamp: { $gte: cutoff } }).lean();
+    if (!convs.length) return;
+
+    for (const c of convs) {
+      await Conversation.updateOne(
+        { shop_id: String(c.shop_id), conversation_id: String(c.conversation_id) },
+        {
+          $set: {
+            platform: 'shopee',
+            to_id: c.to_id ? String(c.to_id) : null,
+            to_name: c.to_name || undefined, // ไม่ทับด้วยค่าว่างถ้า sellcenter เองก็ยังไม่มีชื่อ
+            unread_count: c.unread_count,
+            latest_message_id: c.latest_message_id ? String(c.latest_message_id) : null,
+            latest_message_type: c.latest_message_type,
+            latest_message_content: c.latest_message_content,
+            latest_message_from_id: c.latest_message_from_id ? String(c.latest_message_from_id) : null,
+            last_message_timestamp: c.last_message_timestamp,
+          },
+          $setOnInsert: { status: 'open' },
+        },
+        { upsert: true }
+      );
+    }
+
+    // mirror ข้อความด้วย — กันกรณีเปิดห้องแชทแล้ว route /conversations/:id/messages
+    // ยิง Shopee API เองไม่สำเร็จ (เช่นเครื่องนี้ไม่มี partner key จริง) อย่างน้อยยังมีข้อความ
+    // ที่ sellcenter เก็บไว้ให้โชว์
+    const convIds = convs.map((c) => String(c.conversation_id));
+    const messages = await ShpChatMessages.find({
+      conversation_id: { $in: convIds },
+      created_timestamp: { $gte: cutoff },
+    }).lean();
+    for (const m of messages) {
+      await Message.updateOne(
+        { message_id: String(m.message_id) },
+        {
+          $set: {
+            platform: 'shopee',
+            shop_id: String(m.shop_id),
+            conversation_id: String(m.conversation_id),
+            from_id: m.from_id ? String(m.from_id) : null,
+            from_shop_id: m.from_shop_id ? String(m.from_shop_id) : null,
+            to_id: m.to_id ? String(m.to_id) : null,
+            to_shop_id: m.to_shop_id ? String(m.to_shop_id) : null,
+            message_type: m.message_type,
+            direction: m.direction,
+            content: m.content,
+            status: m.status,
+            source: m.source,
+            created_timestamp: m.created_timestamp,
+            raw_payload: m.raw_payload,
+          },
+        },
+        { upsert: true }
+      );
     }
   } catch (err) {
-    /* ignore background sync errors */
+    console.error('[api] background sync from sellcenter DB failed:', err.message);
   }
 }
 

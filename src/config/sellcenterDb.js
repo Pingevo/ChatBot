@@ -47,4 +47,27 @@ function getSellcenterUserModel() {
   return conn.models[collectionName] || conn.model(collectionName, usersSchema, collectionName);
 }
 
-module.exports = { getSellcenterConnection, getShpTokenModel, getSellcenterUserModel };
+// ห้องแชท/ข้อความที่ sellcenter เก็บไว้เอง (ShpPushController.js case 10 — รับ push code 10
+// จาก Shopee โดยตรงแล้ว upsert ลง 2 collection นี้) ใช้เป็นแหล่งอ่านสำรอง read-only เหมือนกัน
+// เผื่อ environment นี้ยังไม่ได้ต่อ webhook forward เอง (ดู ENABLE_BACKGROUND_SHOPEE_SYNC ใน
+// routes/api.js) — schema หลวมๆ เหมือนกันเพราะ sellcenter เป็นคนกำหนดโครงสร้างจริง
+const shpChatConversationsSchema = new mongoose.Schema({}, { strict: false, collection: 'ShpChatConversations' });
+const shpChatMessagesSchema = new mongoose.Schema({}, { strict: false, collection: 'ShpChatMessages' });
+
+function getShpChatConversationsModel() {
+  const conn = getSellcenterConnection();
+  return conn.models.ShpChatConversations || conn.model('ShpChatConversations', shpChatConversationsSchema, 'ShpChatConversations');
+}
+
+function getShpChatMessagesModel() {
+  const conn = getSellcenterConnection();
+  return conn.models.ShpChatMessages || conn.model('ShpChatMessages', shpChatMessagesSchema, 'ShpChatMessages');
+}
+
+module.exports = {
+  getSellcenterConnection,
+  getShpTokenModel,
+  getSellcenterUserModel,
+  getShpChatConversationsModel,
+  getShpChatMessagesModel,
+};
