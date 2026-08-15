@@ -14,8 +14,46 @@ const PUSH_CODE = {
 // เพื่อไม่ให้ระบบเดิม (sellcenter) พังเมื่อเปลี่ยน callback URL มา chat-center
 const LEGACY_FORWARD_URL = process.env.SHOPEE_PUSH_LEGACY_FORWARD_URL || 'https://sales.digital.in.th/shp/push';
 
+// ═══ Shopee ลงทะเบียน callback URL ได้เส้นเดียวต่อ partner ═══
+// ตอนนี้เส้นที่ลงทะเบียนจริงคือของ sellcenter (/shp/push) ไม่ใช่ /webhook/shopee ข้างล่างนี้
+// (ดู sellcenter/api/services/WebhookAuthService.js) — chat-center เลยไม่เคยได้รับ push ตรงจาก
+// Shopee เลยในทางปฏิบัติ sellcenter เป็นคน "รับจริง" แล้ว forward code 10 มาที่ /internal/shopee-forward
+// ด้านล่างแทน ใช้ shared secret แทน HMAC ของ Shopee เพราะ payload นี้ไม่ได้ถูกเซ็นด้วย URL ของเรา
+// (เซ็นด้วย URL ของ sellcenter) จึง verifyPushSignature ที่นี่ไม่มีทางผ่านอยู่แล้ว
+const INTERNAL_FORWARD_SECRET = process.env.INTERNAL_FORWARD_SECRET || '';
+
 // ⚠️ raw body ถูกจับที่ global express.json() ใน server.js (verify hook)
 // ไม่ต้องตั้ง express.json ซ้ำที่นี่ — จะทำให้ raw body หาย
+
+/**
+ * เข้าคิว webchat_push (Code 10) ลง PushEvent — ใช้ร่วมกันทั้งตอนรับตรงจาก Shopee
+ * (/shopee) และตอนรับ forward มาจาก sellcenter (/internal/shopee-forward)
+ *
+ * dedupKey คำนวณจาก rawBody ตรงๆ (bytes ดิบ) เพื่อให้ Shopee retry push เดิม (ไม่ว่าจะมาทาง
+ * ไหน) ยุบเหลือ event เดียวกันเสมอ — ต้องได้ rawBody ตัวเดียวกับที่ Shopee เซ็นจริง
+ */
+async function queueWebchatPush(body, rawBody) {
+  const { code, shop_id, timestamp } = body;
+  const dedupKey = `shopee:${shop_id}:${timestamp}:${require('crypto')
+    .createHash('md5').update(rawBody).digest('hex').slice(0, 16)}`;
+
+  await PushEvent.updateOne(
+    { dedup_key: dedupKey },
+    {
+      $setOnInsert: {
+        platform: 'shopee',
+        push_code: code,
+        shop_id: String(shop_id), // String เสมอ (int64 precision)
+        timestamp: timestamp ? new Date(Number(timestamp) * 1000) : null,
+        raw_payload: body,
+        status: 'pending',
+        dedup_key: dedupKey,
+      },
+    },
+    { upsert: true }
+  );
+  return dedupKey;
+}
 
 /**
  * POST /webhook/shopee — callback URL ที่ Shopee ส่ง push มา
@@ -73,25 +111,8 @@ router.post('/shopee', async (req, res) => {
 
   // 3. สนใจเฉพาะ webchat_push (Code 10) — insert ลง queue
   if (code === PUSH_CODE.WEBCHAT) {
-    const dedupKey = `shopee:${shop_id}:${timestamp}:${require('crypto')
-      .createHash('md5').update(rawBody).digest('hex').slice(0, 16)}`;
-
     try {
-      await PushEvent.updateOne(
-        { dedup_key: dedupKey },
-        {
-          $setOnInsert: {
-            platform: 'shopee',
-            push_code: code,
-            shop_id: String(shop_id), // String เสมอ (int64 precision)
-            timestamp: timestamp ? new Date(Number(timestamp) * 1000) : null,
-            raw_payload: req.body,
-            status: 'pending',
-            dedup_key: dedupKey,
-          },
-        },
-        { upsert: true }
-      );
+      const dedupKey = await queueWebchatPush(body, rawBody);
       console.log(`[webhook] queued: shop=${shop_id} code=${code} dedup=${dedupKey}`);
     } catch (err) {
       // ถ้า insert ล้มเหลว ยังตอบ 200 เพื่อไม่ให้ Shopee retry
@@ -113,6 +134,41 @@ router.post('/shopee', async (req, res) => {
   }
 
   // ตอบ 200 ทันที — ไม่รอประมวลผล (Shopee timeout 2 วินาที)
+  res.status(200).end();
+});
+
+/**
+ * POST /webhook/internal/shopee-forward — sellcenter เรียกมาที่นี่ทุกครั้งที่ได้ push code 10
+ * จาก Shopee จริง (Shopee ลงทะเบียน callback ไว้ที่ sellcenter เส้นเดียว เห็นก่อนเราเสมอ)
+ *
+ * ไม่ใช่ Shopee ส่งตรง — ตรวจด้วย shared secret (X-Internal-Secret) แทน HMAC ของ Shopee
+ * เพราะ payload นี้เซ็นด้วย URL ของ sellcenter ไม่ใช่ของเรา verifyPushSignature ที่นี่ไม่มีทางผ่าน
+ *
+ * รับเฉพาะ code 10 — code อื่น sellcenter จัดการเองอยู่แล้ว ไม่ต้อง forward มาซ้ำ
+ */
+router.post('/internal/shopee-forward', async (req, res) => {
+  const given = req.headers['x-internal-secret'] || '';
+  if (!INTERNAL_FORWARD_SECRET) {
+    console.error('[webhook] INTERNAL_FORWARD_SECRET not set — reject internal forward');
+    return res.status(500).end();
+  }
+  if (given !== INTERNAL_FORWARD_SECRET) {
+    console.warn('[webhook] internal forward: secret ไม่ตรง — ปฏิเสธ');
+    return res.status(401).end();
+  }
+
+  const body = req.body || {};
+  const rawBody = req.rawBody || '';
+  if (body.code !== PUSH_CODE.WEBCHAT || !body.shop_id) {
+    return res.status(200).end(); // ไม่ใช่ code 10 หรือข้อมูลไม่ครบ — ack เฉยๆ
+  }
+
+  try {
+    const dedupKey = await queueWebchatPush(body, rawBody);
+    console.log(`[webhook] queued (via sellcenter forward): shop=${body.shop_id} dedup=${dedupKey}`);
+  } catch (err) {
+    console.error(`[webhook] internal forward insert failed: ${err.message}`);
+  }
   res.status(200).end();
 });
 
