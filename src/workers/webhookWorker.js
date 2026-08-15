@@ -121,6 +121,15 @@ async function processPushEvent(pushEvent) {
   const msg = pushData.message;
   const direction = String(msg.from_shop_id) === String(shop.shop_id) ? 'out' : 'in';
 
+  // ⚠️ ผู้ซื้อ (คู่สนทนาคงที่ของ conversation) คือ from_* ถ้าข้อความนี้เข้ามา (in) หรือ to_*
+  // ถ้าข้อความนี้ส่งออก (out) — msg.to_id/msg.to_user_name คือ "ผู้รับข้อความนี้" ไม่ใช่ผู้ซื้อ
+  // เสมอไป สลับข้างตาม direction ทุกครั้ง ถ้าใช้ to_id/to_user_name ตรงๆ โดยไม่เช็ค direction
+  // จะได้ id/ชื่อของร้านตัวเองมาแทนผู้ซื้อทันทีที่ข้อความแรกของ conversation เป็นข้อความเข้า
+  // (เจอบั๊กนี้จริง — conversation ที่สร้างผ่าน webhook ก่อน pollWorker มาถึง แสดง "ไม่ทราบชื่อ"
+  // เพราะ to_name ไม่เคยถูกเซ็ต และ to_id ที่เซ็ตไว้ก็เป็นของร้านเอง ไม่ใช่ผู้ซื้อ)
+  const buyerId = direction === 'in' ? msg.from_id : msg.to_id;
+  const buyerName = direction === 'in' ? msg.from_user_name : msg.to_user_name;
+
   const messageUpsertResult = await Message.updateOne(
     { message_id: String(msg.message_id) },
     {
@@ -156,10 +165,12 @@ async function processPushEvent(pushEvent) {
       last_message_timestamp: secondsToDate(msg.created_timestamp),
     },
     $setOnInsert: {
-      to_id: String(msg.to_id),
+      to_id: String(buyerId),
       status: 'open',
     },
   };
+  // ไม่ $set to_name ถ้าไม่มีค่า กันทับชื่อเดิมที่ถูกต้อง (เช่นจาก pollWorker) ด้วย undefined
+  if (buyerName) update.$set.to_name = buyerName;
   // นับ unread เฉพาะข้อความเข้า (in) — ถ้าเป็นข้อความออก (out) ไม่เพิ่ม unread
   if (direction === 'in') {
     update.$inc = { unread_count: 1 };
