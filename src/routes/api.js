@@ -40,10 +40,23 @@ router.get('/shops', async (req, res) => {
 // Conversation/Message ของตัวเอง — ไม่ต้องมี Shopee partner key/credential ของตัวเองเลย
 // ไม่ต้อง seed Shop collection ล่วงหน้าด้วย (เดิมต้องมี Shop ก่อนถึงจะรู้ว่าจะ sync ร้านไหน)
 const ENABLE_BACKGROUND_SHOPEE_SYNC = process.env.ENABLE_BACKGROUND_SHOPEE_SYNC === 'true';
-const BACKGROUND_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1000; // ดึงเฉพาะห้องที่มี activity ใน 24 ชม.
-// หลังนี้ กันโหลดทั้ง collection ทุก 2 วิตอน collection ใหญ่ขึ้น
 
+// cursor แบบ watermark — จำเวลาล่าสุดที่เคย sync ไปแล้วต่อ collection แยกกัน (conversation/
+// message มีจังหวะมาไม่พร้อมกัน) แทนการ scan ย้อนหลังคงที่ 24 ชม. ทุก 2 วิ กันโหลด DB เปล่าๆ
+// ตอน collection ใหญ่ขึ้น — สแตมป์ cursor ใหม่จาก "เวลาล่าสุดของแชทที่เพิ่งดึงมารอบนี้" เสมอ
+//
+// ⚠️ ใช้ $gte ไม่ใช่ $gt ตอน query —กันเอกสารที่มี timestamp ซ้ำเป๊ะกับ cursor (มาถึงพร้อมกัน
+// ในวินาทีเดียวกัน) หลุดไปเงียบๆ ถ้าเผลอใช้ $gt แล้ว query รอบถัดไปมาคั่นกลางพอดี ผลข้างเคียง
+// คือเอกสารที่ timestamp เท่ากับ cursor จะถูกดึงซ้ำทุกรอบ (ไม่เป็นไร — updateOne เป็น
+// idempotent อยู่แล้ว เขียนทับด้วยค่าเดิมไม่มีผลเสีย)
+//
+// ⚠️ ตัวแปรนี้เก็บไว้ใน memory ของ process เดียว — ถ้า process รีสตาร์ท cursor จะรีเซ็ตกลับ
+// เป็น epoch (1970) ทำให้รอบแรกหลัง restart ดึงข้อมูลทั้งหมดย้อนหลังมาอีกรอบ (ไม่ผิดพลาด
+// แค่ช้ากว่าปกติรอบเดียว) ยอมรับได้เพราะ ENABLE_BACKGROUND_SHOPEE_SYNC ใช้เฉพาะเครื่องเทส
 let lastBackgroundSyncTime = 0;
+let convSyncCursor = new Date(0);
+let msgSyncCursor = new Date(0);
+
 async function triggerBackgroundConversationsSync() {
   if (!ENABLE_BACKGROUND_SHOPEE_SYNC) return;
   const now = Date.now();
@@ -54,10 +67,11 @@ async function triggerBackgroundConversationsSync() {
     const { getShpChatConversationsModel, getShpChatMessagesModel } = require('../config/sellcenterDb');
     const ShpChatConversations = getShpChatConversationsModel();
     const ShpChatMessages = getShpChatMessagesModel();
-    const cutoff = new Date(Date.now() - BACKGROUND_SYNC_LOOKBACK_MS);
 
-    const convs = await ShpChatConversations.find({ last_message_timestamp: { $gte: cutoff } }).lean();
-    if (!convs.length) return;
+    const convs = await ShpChatConversations
+      .find({ last_message_timestamp: { $gte: convSyncCursor } })
+      .sort({ last_message_timestamp: 1 }) // เก่า→ใหม่ เพื่อให้ตัวสุดท้ายคือเวลาล่าสุดจริง
+      .lean();
 
     for (const c of convs) {
       await Conversation.updateOne(
@@ -79,15 +93,21 @@ async function triggerBackgroundConversationsSync() {
         { upsert: true }
       );
     }
+    if (convs.length) {
+      // สแตมป์เวลาล่าสุดจากแชทล่าสุดที่ดึงมารอบนี้ (ตัวท้ายสุดหลัง sort เก่า→ใหม่)
+      const newest = convs[convs.length - 1].last_message_timestamp;
+      if (newest && newest > convSyncCursor) convSyncCursor = newest;
+    }
 
-    // mirror ข้อความด้วย — กันกรณีเปิดห้องแชทแล้ว route /conversations/:id/messages
-    // ยิง Shopee API เองไม่สำเร็จ (เช่นเครื่องนี้ไม่มี partner key จริง) อย่างน้อยยังมีข้อความ
-    // ที่ sellcenter เก็บไว้ให้โชว์
-    const convIds = convs.map((c) => String(c.conversation_id));
-    const messages = await ShpChatMessages.find({
-      conversation_id: { $in: convIds },
-      created_timestamp: { $gte: cutoff },
-    }).lean();
+    // mirror ข้อความด้วย — cursor แยกจากฝั่ง conversation เพราะ created_timestamp ของข้อความ
+    // กับ last_message_timestamp ของห้องอาจไม่ตรงกันเป๊ะ (คนละ field คนละที่มา) กันกรณีเปิด
+    // ห้องแชทแล้ว route /conversations/:id/messages ยิง Shopee API เองไม่สำเร็จ (เช่นเครื่องนี้
+    // ไม่มี partner key จริง) อย่างน้อยยังมีข้อความที่ sellcenter เก็บไว้ให้โชว์
+    const messages = await ShpChatMessages
+      .find({ created_timestamp: { $gte: msgSyncCursor } })
+      .sort({ created_timestamp: 1 })
+      .lean();
+
     for (const m of messages) {
       await Message.updateOne(
         { message_id: String(m.message_id) },
@@ -111,6 +131,10 @@ async function triggerBackgroundConversationsSync() {
         },
         { upsert: true }
       );
+    }
+    if (messages.length) {
+      const newest = messages[messages.length - 1].created_timestamp;
+      if (newest && newest > msgSyncCursor) msgSyncCursor = newest;
     }
   } catch (err) {
     console.error('[api] background sync from sellcenter DB failed:', err.message);
