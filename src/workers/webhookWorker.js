@@ -50,7 +50,10 @@ function extractPushData(pushEvent) {
         message_type: c.message_type || 'text',
         content: c.content || {},
         status: c.status || 'normal',
-        source: c.source_content || {},
+        // ⚠️ Message.source เป็น String (old_webchat/openapi/ios ฯลฯ มาจาก payload field `source`
+        // ตรงๆ) — เดิมอ่านผิดเป็น `source_content` ซึ่งเป็น object ({}) เขียนลง String field
+        // ไม่ได้เลย ทำให้ทุกข้อความจริงจาก Shopee cast fail แล้ว retry วนจนกลายเป็น failed ถาวร
+        source: c.source || '',
         created_timestamp: c.created_timestamp,
         from_user_name: c.from_user_name || '',
         to_user_name: c.to_user_name || '',
