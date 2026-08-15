@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><%= title %></title>
+  <link rel="stylesheet" href="/css/style.css">
+  <style>
+    body { overflow: auto; align-items: center; justify-content: center; }
+    .login-card {
+      width: 100%; max-width: 360px; margin: auto; padding: 40px 32px;
+      background: var(--panel-bg); border: 1px solid var(--border); border-radius: 16px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.06); text-align: center;
+    }
+    .login-logo {
+      width: 48px; height: 48px; border-radius: 12px; margin: 0 auto 16px;
+      background: var(--accent); color: #fff; display: flex; align-items: center;
+      justify-content: center; font-weight: 700; font-size: 20px;
+    }
+    .login-card h1 { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+    .login-card p { font-size: 13px; color: var(--text-tertiary); margin-bottom: 24px; }
+    .login-btn {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      width: 100%; padding: 12px 16px; border-radius: 10px; border: none;
+      background: var(--accent); color: #fff; font-size: 14px; font-weight: 600;
+      cursor: pointer; text-decoration: none;
+    }
+    .login-btn:hover { background: var(--accent-light); }
+    .login-error {
+      background: #FDECEC; color: #C0392B; border: 1px solid #F5C6C6;
+      border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 16px; text-align: left;
+    }
+    .login-note { margin-top: 20px; font-size: 12px; color: var(--text-muted); }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="login-logo">CS</div>
+    <h1>Chat Center</h1>
+    <p>เข้าสู่ระบบด้วยบัญชีพนักงาน (ITSR)</p>
+
+    <% if (error) { %>
+      <div class="login-error"><%= error %></div>
+    <% } %>
+
+    <a href="/auth/redirect<%= typeof returnTo !== 'undefined' && returnTo ? '?returnTo=' + encodeURIComponent(returnTo) : '' %>" class="login-btn">
+      เข้าสู่ระบบด้วย ITSR
+    </a>
+
+    <p class="login-note">สำหรับพนักงานที่ได้รับสิทธิ์เข้าถึงเท่านั้น</p>
+  </div>
+</body>
+</html>

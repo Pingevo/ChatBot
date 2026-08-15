@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ทีม & แบ่งงาน — Unified Chat</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <style>
+    .team-page { flex: 1; padding: 32px 40px; overflow-y: auto; background: var(--page-bg); }
+    .team-page h1 { font-family: 'Space Grotesk', sans-serif; font-size: 22px; margin-bottom: 6px; }
+    .team-card {
+      background: var(--panel-bg); border: 1px solid var(--border); border-radius: 14px;
+      padding: 20px 22px; margin-bottom: 22px;
+    }
+    .team-card h2 { font-size: 15px; margin: 0 0 4px; }
+    .team-card .team-card-hint { font-size: 12.5px; color: var(--text-tertiary); margin-bottom: 16px; }
+    .mode-options { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+    .mode-option { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
+    .mode-option input { margin-top: 3px; accent-color: var(--accent); }
+    .mode-option-title { font-weight: 600; font-size: 13.5px; }
+    .mode-option-desc { font-size: 12px; color: var(--text-tertiary); }
+    .presence-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+    .presence-online { background: #3D9467; }
+    .presence-idle { background: #D9A441; }
+    .presence-offline { background: var(--text-muted); }
+    .row-inline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+    .row-inline select, .row-inline input[type="date"] {
+      padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--input-bg); color: var(--text-primary); font-size: 13px;
+    }
+    .team-remove-btn { color: #C43D3D; cursor: pointer; font-size: 12px; font-weight: 600; background: none; border: none; }
+    .team-empty { padding: 16px; text-align: center; color: var(--text-muted); font-size: 12.5px; }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <nav class="sidebar">
+      <div class="sidebar-logo">Z</div>
+      <div class="sidebar-nav">
+        <a href="/dashboard" title="แดชบอร์ด">📊</a>
+        <a href="/inbox" title="แชท">💬</a>
+        <a href="/contacts" title="ผู้ติดต่อ">👥</a>
+        <a href="/shops" title="ร้านค้า">🏪</a>
+        <a href="/team" class="active" title="ทีม & แบ่งงาน">🎯</a>
+      </div>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-avatar" title="<%= typeof currentUser !== 'undefined' && currentUser ? (currentUser.nickname || currentUser.name) : 'ผู้ดูแลบัญชี' %> / เปลี่ยนธีม"><%= avatarInitials %></div>
+    </nav>
+
+    <div class="team-page">
+      <h1>ทีม & แบ่งงานแชท</h1>
+      <p class="hint">ตั้งโหมดหมุนคิว จัดทีมต่อร้าน ดูสถานะ agent และสรุป KPI</p>
+
+      <div class="team-card">
+        <h2>โหมดแบ่งงาน</h2>
+        <div class="team-card-hint">มีผลกับแชทใหม่ทันที — ดูคิวปัจจุบันในตาราง agent ด้านล่าง</div>
+        <div class="mode-options" id="mode-options">
+          <label class="mode-option">
+            <input type="radio" name="mode" value="equal_global">
+            <span><span class="mode-option-title">equal_global</span><br><span class="mode-option-desc">รวมทุกร้านเป็นคิวเดียว หมุนจ่ายเรียงลำดับทั้งทีม</span></span>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="mode" value="equal_per_shop">
+            <span><span class="mode-option-title">equal_per_shop</span><br><span class="mode-option-desc">แยกคิวตามทีมที่ผูกไว้กับแต่ละร้าน (จัดทีมด้านล่าง)</span></span>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="mode" value="equal_per_platform">
+            <span><span class="mode-option-title">equal_per_platform</span><br><span class="mode-option-desc">แยกคิวตามแพลตฟอร์ม (Shopee/Lazada/TikTok) อัตโนมัติ</span></span>
+          </label>
+        </div>
+        <button class="btn-pill btn-pill-accent" id="save-mode-btn">บันทึกโหมด</button>
+        <span id="mode-save-status" class="hint" style="display:inline;margin-left:8px;"></span>
+      </div>
+
+      <div class="team-card">
+        <h2>รายชื่อ agent</h2>
+        <div class="team-card-hint">🟢 online (ping &lt; 10 นาที) · 🟡 idle · ⚪ offline — "พักอยู่" คือถูกดึงออกจากคิวหมุนอัตโนมัติ ไม่ได้รับแชทใหม่</div>
+        <table class="shops-table">
+          <thead><tr><th>ชื่อ</th><th>role</th><th>สถานะ</th><th>แชทเปิดค้างอยู่</th><th>รับงานอยู่ไหม</th><th></th></tr></thead>
+          <tbody id="agents-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="team-card">
+        <h2>จัดทีมต่อร้าน</h2>
+        <div class="team-card-hint">ใช้เป็นคิวของโหมด equal_per_shop — เลือกร้านเพื่อดู/แก้ทีม</div>
+        <div class="row-inline">
+          <select id="shop-select"></select>
+          <select id="add-agent-select"></select>
+          <button class="btn-pill" id="add-agent-btn">+ เพิ่มเข้าเป็นทีม</button>
+        </div>
+        <table class="shops-table">
+          <thead><tr><th>agent</th><th>role ในร้านนี้</th><th>เข้าร่วมเมื่อ</th><th></th></tr></thead>
+          <tbody id="shop-team-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="team-card">
+        <h2>สรุป KPI</h2>
+        <div class="team-card-hint">ข้อความรับ/ตอบแล้ว/ไม่เปิดอ่าน + เวลาเปิดอ่านและเวลาตอบเฉลี่ย ต่อ agent ในช่วงที่เลือก</div>
+        <div class="row-inline">
+          <label class="hint" style="margin:0;">จาก <input type="date" id="kpi-from"></label>
+          <label class="hint" style="margin:0;">ถึง <input type="date" id="kpi-to"></label>
+          <button class="btn-pill" id="kpi-load-btn">ดูสรุป</button>
+          <button class="btn-pill" id="kpi-week-btn">7 วันล่าสุด</button>
+          <button class="btn-pill" id="kpi-month-btn">30 วันล่าสุด</button>
+        </div>
+        <table class="shops-table">
+          <thead><tr><th>agent</th><th>ข้อความรับ</th><th>ตอบแล้ว</th><th>ไม่เปิดอ่านเลย</th><th>read delay เฉลี่ย</th><th>response time เฉลี่ย</th></tr></thead>
+          <tbody id="kpi-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <%- include('partials/status-bar') %>
+  <%- include('partials/theme-script') %>
+  <script>
+    const CAN_EDIT_CONFIG = <%= currentUser && currentUser.role === 'admin' ? 'true' : 'false' %>;
+    const CAN_MANAGE_TEAM = <%= currentUser && (currentUser.role === 'admin' || currentUser.role === 'lead') ? 'true' : 'false' %>;
+    const CURRENT_USER_ID = '<%= currentUser ? currentUser._id.toString() : '' %>';
+
+    let agentsCache = [];
+    let shopsCache = [];
+
+    function fmtSeconds(s) {
+      if (s === null || s === undefined) return '—';
+      const m = Math.floor(s / 60);
+      const sec = Math.round(s % 60);
+      return `${m}:${String(sec).padStart(2, '0')}`;
+    }
+    function fmtDate(d) {
+      return d ? new Date(d).toLocaleString('th-TH', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+    }
+
+    // ===== โหมดแบ่งงาน =====
+    async function loadConfig() {
+      const config = await (await fetch('/api/assignment-config')).json();
+      document.querySelectorAll('input[name="mode"]').forEach((el) => {
+        el.checked = el.value === config.mode;
+        el.disabled = !CAN_EDIT_CONFIG;
+      });
+    }
+    document.getElementById('save-mode-btn').addEventListener('click', async () => {
+      if (!CAN_EDIT_CONFIG) return;
+      const mode = document.querySelector('input[name="mode"]:checked')?.value;
+      if (!mode) return;
+      const statusEl = document.getElementById('mode-save-status');
+      statusEl.textContent = 'กำลังบันทึก...';
+      try {
+        const res = await fetch('/api/assignment-config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode }),
+        });
+        statusEl.textContent = res.ok ? '✓ บันทึกแล้ว' : 'บันทึกไม่สำเร็จ';
+      } catch (err) { statusEl.textContent = 'บันทึกไม่สำเร็จ: ' + err.message; }
+    });
+    if (!CAN_EDIT_CONFIG) document.getElementById('save-mode-btn').style.display = 'none';
+
+    // ===== รายชื่อ agent =====
+    async function loadAgents() {
+      agentsCache = await (await fetch('/api/agents')).json();
+      const tbody = document.getElementById('agents-tbody');
+      tbody.innerHTML = agentsCache.map((a) => {
+        const canManage = CAN_MANAGE_TEAM || String(a._id) === CURRENT_USER_ID;
+        return `
+          <tr>
+            <td>${a.nickname || a.name}</td>
+            <td>${a.role}</td>
+            <td><span class="presence-dot presence-${a.presence}"></span>${a.presence}${a.last_seen_at ? ' · ' + fmtDate(a.last_seen_at) : ''}</td>
+            <td>${a.open_conversations}</td>
+            <td>${a.isActiveAgent ? 'รับอยู่' : `พักอยู่ (${a.paused_by === 'system' ? 'ระบบสั่งพัก — ไม่มี heartbeat' : 'พักเอง'})`}</td>
+            <td>${canManage ? `<button class="btn-pill agent-toggle-btn" data-id="${a._id}" data-active="${a.isActiveAgent}">${a.isActiveAgent ? 'พักงาน' : 'เปิดรับงาน'}</button>` : ''}</td>
+          </tr>`;
+      }).join('') || '<tr><td colspan="6" class="team-empty">ยังไม่มี agent</td></tr>';
+
+      document.querySelectorAll('.agent-toggle-btn').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const isActiveAgent = btn.dataset.active !== 'true';
+          btn.disabled = true;
+          try {
+            await fetch(`/api/agents/${btn.dataset.id}/active`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ isActiveAgent }),
+            });
+            await loadAgents();
+          } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); btn.disabled = false; }
+        });
+      });
+
+      // เติม dropdown "เพิ่มเข้าเป็นทีม" ด้วย (ใช้ cache เดียวกัน)
+      const addSelect = document.getElementById('add-agent-select');
+      addSelect.innerHTML = agentsCache.map((a) => `<option value="${a._id}">${a.nickname || a.name}</option>`).join('');
+    }
+
+    // ===== จัดทีมต่อร้าน =====
+    async function loadShops() {
+      shopsCache = await (await fetch('/api/shops')).json();
+      const sel = document.getElementById('shop-select');
+      sel.innerHTML = shopsCache.map((s) => `<option value="${s.shop_id}">${s.shop_name || s.shopname || s.shop_id} (${s.platform})</option>`).join('');
+      sel.addEventListener('change', loadShopTeam);
+    }
+    async function loadShopTeam() {
+      const shopId = document.getElementById('shop-select').value;
+      if (!shopId) return;
+      const rows = await (await fetch(`/api/shop-team?shop_id=${encodeURIComponent(shopId)}`)).json();
+      const tbody = document.getElementById('shop-team-tbody');
+      tbody.innerHTML = rows.map((r) => `
+        <tr>
+          <td>${r.user_name}</td>
+          <td>${r.role_on_shop}</td>
+          <td>${fmtDate(r.added_at)}</td>
+          <td>${CAN_MANAGE_TEAM ? `<button class="team-remove-btn" data-id="${r._id}">ถอดออก</button>` : ''}</td>
+        </tr>`).join('') || '<tr><td colspan="4" class="team-empty">ร้านนี้ยังไม่มีทีม (โหมด equal_per_shop จะไม่จ่ายแชทของร้านนี้จนกว่าจะเพิ่มคน)</td></tr>';
+
+      document.querySelectorAll('.team-remove-btn').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          if (!confirm('ถอด agent คนนี้ออกจากทีมร้านนี้?')) return;
+          await fetch(`/api/shop-team/${btn.dataset.id}`, { method: 'DELETE' });
+          loadShopTeam();
+        });
+      });
+    }
+    document.getElementById('add-agent-btn').addEventListener('click', async () => {
+      const shopId = document.getElementById('shop-select').value;
+      const userId = document.getElementById('add-agent-select').value;
+      if (!shopId || !userId) return;
+      try {
+        await fetch('/api/shop-team', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ shop_id: shopId, user_id: userId }),
+        });
+        loadShopTeam();
+      } catch (err) { alert('เพิ่มไม่สำเร็จ: ' + err.message); }
+    });
+    if (!CAN_MANAGE_TEAM) {
+      document.getElementById('add-agent-btn').style.display = 'none';
+      document.getElementById('add-agent-select').style.display = 'none';
+    }
+
+    // ===== สรุป KPI =====
+    function dateStr(d) { return d.toISOString().slice(0, 10); }
+    async function loadKpi() {
+      const from = document.getElementById('kpi-from').value;
+      const to = document.getElementById('kpi-to').value;
+      const rows = await (await fetch(`/api/reports/kpi?from=${from}&to=${to}`)).json();
+      const tbody = document.getElementById('kpi-tbody');
+      tbody.innerHTML = (rows.agents || []).map((r) => `
+        <tr>
+          <td>${r.name}</td>
+          <td>${r.messages_received}</td>
+          <td>${r.messages_replied}</td>
+          <td>${r.unopened_count}</td>
+          <td>${fmtSeconds(r.avg_read_delay_seconds)}</td>
+          <td>${fmtSeconds(r.avg_response_time_seconds)}</td>
+        </tr>`).join('') || '<tr><td colspan="6" class="team-empty">ไม่มีข้อมูลในช่วงที่เลือก</td></tr>';
+    }
+    document.getElementById('kpi-load-btn').addEventListener('click', loadKpi);
+    document.getElementById('kpi-week-btn').addEventListener('click', () => {
+      document.getElementById('kpi-to').value = dateStr(new Date());
+      document.getElementById('kpi-from').value = dateStr(new Date(Date.now() - 6 * 24 * 60 * 60 * 1000));
+      loadKpi();
+    });
+    document.getElementById('kpi-month-btn').addEventListener('click', () => {
+      document.getElementById('kpi-to').value = dateStr(new Date());
+      document.getElementById('kpi-from').value = dateStr(new Date(Date.now() - 29 * 24 * 60 * 60 * 1000));
+      loadKpi();
+    });
+
+    // ===== init =====
+    document.getElementById('kpi-to').value = dateStr(new Date());
+    document.getElementById('kpi-from').value = dateStr(new Date(Date.now() - 6 * 24 * 60 * 60 * 1000));
+    loadConfig();
+    loadAgents();
+    loadShops().then(loadShopTeam);
+    loadKpi();
+  </script>
+</body>
+</html>

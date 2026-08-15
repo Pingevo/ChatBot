@@ -1,8 +1,6 @@
 const mongoose = require('mongoose');
 
-// เก็บการตั้งค่าระดับผู้ใช้ (theme เป็นหลักใน Phase 1)
-// ⚠️ ตอนนี้ยังไม่มีระบบ login จริง — ใช้ user_id = 'admin' เป็น default ชั่วคราว
-// พอมีระบบ auth ทีหลังค่อยผูก user_id จริง (megaplan ข้อ 11/ภายหลัง)
+// เก็บการตั้งค่าระดับผู้ใช้ (theme เป็นหลักใน Phase 1) — ผูกกับ User._id จริงจาก session
 const userSettingSchema = new mongoose.Schema({
   user_id: { type: String, required: true, unique: true, index: true },
   theme: { type: String, default: 'blue' }, // ชื่อ theme preset (ดู THEMES ใน style.css)

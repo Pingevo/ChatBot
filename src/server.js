@@ -1,16 +1,22 @@
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
+const session = require('express-session');
+const { MongoStore } = require('connect-mongo');
 const { connectMainDB } = require('./config/db');
+const { loadUser, requireAuth } = require('./middlewares/authMiddleware');
 
 const apiRoutes = require('./routes/api');
+const teamRoutes = require('./routes/team');
 const inboxRoutes = require('./routes/inbox');
 const webhookRoutes = require('./routes/webhook');
+const authRoutes = require('./routes/auth');
 
 const app = express();
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
+app.set('trust proxy', 1);
 // ⚠️ verify hook เก็บ raw body ไว้ก่อน parse — webhook route ต้องใช้ raw bytes
 // สำหรับ signature verification (Shopee sign: callbackUrl + "|" + rawBody)
 // ใช้ global เพราะ router-level express.json จะไม่ทำงานถ้า body ถูก parse ไปแล้ว
@@ -22,9 +28,28 @@ app.use(express.json({
 }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.use('/api', apiRoutes);
-app.use('/webhook', webhookRoutes); // Shopee push callback (webchat_push Code 10)
-app.use('/', inboxRoutes);
+if (!process.env.SESSION_SECRET) {
+  throw new Error('SESSION_SECRET is not set in .env');
+}
+
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI, collectionName: 'sessions' }),
+  cookie: {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 วัน
+  },
+}));
+app.use(loadUser);
+
+app.use('/auth', authRoutes);
+app.use('/webhook', webhookRoutes); // Shopee push callback (webchat_push Code 10) — ไม่ต้อง login เพราะ Shopee เป็นคนยิงเข้ามา
+app.use('/api', requireAuth, apiRoutes);
+app.use('/api', requireAuth, teamRoutes);
+app.use('/', requireAuth, inboxRoutes);
 
 async function start() {
   await connectMainDB();

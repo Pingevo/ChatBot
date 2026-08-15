@@ -15,9 +15,12 @@
         <a href="/inbox" title="แชท">💬</a>
         <a href="/contacts" title="ผู้ติดต่อ">👥</a>
         <a href="/shops" class="active" title="ร้านค้า">🏪</a>
+        <% if (typeof currentUser !== 'undefined' && currentUser && (currentUser.role === 'admin' || currentUser.role === 'lead')) { %>
+          <a href="/team" title="ทีม & แบ่งงาน">🎯</a>
+        <% } %>
       </div>
       <div class="sidebar-spacer"></div>
-      <div class="sidebar-avatar" title="ผู้ดูแลบัญชี / เปลี่ยนธีม">CS</div>
+      <div class="sidebar-avatar" title="<%= typeof currentUser !== 'undefined' && currentUser ? (currentUser.nickname || currentUser.name) : 'ผู้ดูแลบัญชี' %> / เปลี่ยนธีม"><%= avatarInitials %></div>
     </nav>
 
     <div class="shops-page">

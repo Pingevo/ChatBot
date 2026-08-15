@@ -6,6 +6,7 @@ const Message = require('../models/Message');
 const Shop = require('../models/Shop');
 const shopeeAdapter = require('../platforms/shopee-adapter');
 const RequestLog = require('../models/RequestLog');
+const { handleNewMessage } = require('../services/chatEvents');
 
 const POLL_INTERVAL_MS = Number(process.env.WEBHOOK_WORKER_INTERVAL_MS || 3000);
 const MAX_RETRIES = Number(process.env.WEBHOOK_WORKER_MAX_RETRIES || 5);
@@ -120,7 +121,7 @@ async function processPushEvent(pushEvent) {
   const msg = pushData.message;
   const direction = String(msg.from_shop_id) === String(shop.shop_id) ? 'out' : 'in';
 
-  await Message.updateOne(
+  const messageUpsertResult = await Message.updateOne(
     { message_id: String(msg.message_id) },
     {
       $set: {
@@ -168,6 +169,16 @@ async function processPushEvent(pushEvent) {
     update,
     { upsert: true }
   );
+
+  // ยิง event ต่อเมื่อเป็นข้อความใหม่จริง (ไม่ใช่ push ซ้ำที่เคย insert ไปแล้ว) — auto-assign / เปิด-ปิดรอบ metric
+  if (messageUpsertResult.upsertedCount > 0) {
+    const convDocForEvents = await Conversation.findOne({ shop_id: shop.shop_id, conversation_id: pushData.conversationId }).lean();
+    await handleNewMessage(
+      convDocForEvents,
+      { message_id: String(msg.message_id), created_timestamp: secondsToDate(msg.created_timestamp) },
+      direction
+    );
+  }
 
   // อัปเดต PushEvent — ทำเสร็จ
   await PushEvent.updateOne(

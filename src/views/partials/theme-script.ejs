@@ -20,6 +20,27 @@ const THEME_LABELS = {
 %>
 <!-- Theme switcher popover — เปิดได้จากการคลิก sidebar avatar -->
 <div class="theme-popover" id="theme-popover">
+  <% if (typeof currentUser !== 'undefined' && currentUser) { %>
+    <div class="profile-card">
+      <div class="profile-card-avatar"><%= avatarInitials %></div>
+      <div class="profile-card-info">
+        <div class="profile-card-nickname"><%= currentUser.nickname || currentUser.name %></div>
+        <% if (currentUser.nickname && currentUser.nickname !== currentUser.name) { %>
+          <div class="profile-card-fullname"><%= currentUser.name %></div>
+        <% } %>
+        <% if (currentUser.department || currentUser.position) { %>
+          <div class="profile-card-badges">
+            <% if (currentUser.position) { %><span class="profile-card-badge"><%= currentUser.position %></span><% } %>
+            <% if (currentUser.department) { %><span class="profile-card-badge"><%= currentUser.department %></span><% } %>
+          </div>
+        <% } %>
+      </div>
+      <a href="/auth/logout" class="profile-card-logout" title="ออกจากระบบ">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      </a>
+    </div>
+    <div class="theme-popover-divider"></div>
+  <% } %>
   <div class="theme-popover-title">ธีมสี</div>
   <div class="theme-grid" id="theme-grid">
     <% THEMES.forEach(t => { %>
@@ -31,10 +52,13 @@ const THEME_LABELS = {
     <button class="mode-toggle-btn" data-mode="gray">◐ Gray</button>
     <button class="mode-toggle-btn" data-mode="dark">🌙 Dark</button>
   </div>
-  <div class="theme-popover-hint">เก็บต่อ user ใน DB</div>
+  <div class="theme-popover-hint">ธีมนี้จะถูกจำไว้ให้เฉพาะบัญชีของคุณ</div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+<!-- 🔧 ปิดชั่วคราวเพื่อเช็คว่า GSAP มีผลกับความหน่วงหรือไม่ — โหลดจาก CDN ภายนอก (cdnjs) ถ้าช้า/ติดจะบล็อก script ถัดไป
+     ทุกจุดที่เรียก gsap มี "if (window.gsap)" ครอบไว้แล้ว และมี fallback ตั้ง opacity:1 ให้ธาตุ .gsap-fade-up/.gsap-stagger
+     ดังนั้นปิดแล้วหน้าเว็บไม่หาย แค่ไม่มี animation เข้า/ออก — เอา comment ออกเพื่อเปิดกลับคืน -->
+<!-- <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script> -->
 <script>
 // ===== Theme + mode loader (อ่านจาก DB per user) =====
 (async function loadTheme() {

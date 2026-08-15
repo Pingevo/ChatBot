@@ -8,15 +8,16 @@ const Customer = require('../models/Customer');
 const UserSetting = require('../models/UserSetting');
 const shopeeAdapter = require('../platforms/shopee-adapter');
 const { syncCustomerFromConversation } = require('../services/customerSync');
+const { handleNewMessage } = require('../services/chatEvents');
+const { onConversationOpened, onOutboundMessage } = require('../services/chatMetrics');
+const { reassignConversation } = require('../services/chatAssignment');
+const { logEvent } = require('../services/auditLog');
+const User = require('../models/User');
 
-// ⚠️ ตอนนี้ยังไม่มีระบบ login จริง — ใช้ 'admin' เป็น default user ชั่วคราว
-// พอมีระบบ auth ทีหลังค่อยเปลี่ยนเป็น user_id จริงจาก session/token
-const DEFAULT_USER_ID = process.env.DEFAULT_USER_ID || 'admin';
-
-async function getOrCreateUserSetting() {
-  const setting = await UserSetting.findOne({ user_id: DEFAULT_USER_ID });
+async function getOrCreateUserSetting(userId) {
+  const setting = await UserSetting.findOne({ user_id: userId });
   if (setting) return setting;
-  return await UserSetting.create({ user_id: DEFAULT_USER_ID, theme: 'blue', mode: 'light' });
+  return await UserSetting.create({ user_id: userId, theme: 'blue', mode: 'light' });
 }
 
 // GET /api/shops — list ร้านที่เปิดใช้แชท + สถานะ (อ่านจาก sellcenter แบบ read-only ผ่าน status field)
@@ -159,22 +160,29 @@ router.get('/conversations/:id/messages', async (req, res) => {
     if (conv) {
       const shop = await Shop.findOne({ shop_id: conv.shop_id, platform: conv.platform });
       if (shop) {
-        // 1. ดึงรายละเอียด conversation ล่าสุดจาก Shopee เพื่อให้ได้ opposite_last_read_msg_id
-        try {
-          const detail = await shopeeAdapter.fetchOneConversation(shop, conv.conversation_id);
-          if (detail && detail.opposite_last_read_msg_id) {
-            const oppReadId = String(detail.opposite_last_read_msg_id);
-            await Conversation.updateOne({ _id: conv._id }, { $set: { opposite_last_read_msg_id: oppReadId } });
-            conv.opposite_last_read_msg_id = oppReadId;
-          }
-        } catch (e) { /* ignore single conv fetch error */ }
+        // ยิง 2 คำขอไป Shopee "พร้อมกัน" แทนการรอทีละอัน (เดิม fetchOneConversation เสร็จก่อนถึงเริ่ม fetchMessages
+        // ทำให้หน่วงเท่าตัวของ round-trip ไป Shopee — นี่คือสาเหตุหลักที่คลิกเปิดแชทแล้วรอ 1-2 วินาที)
+        const [detailResult, messagesResult] = await Promise.allSettled([
+          shopeeAdapter.fetchOneConversation(shop, conv.conversation_id),
+          shopeeAdapter.fetchMessages(shop, conv.conversation_id),
+        ]);
 
-        // 2. ดึงข้อความล่าสุดจาก Shopee API
-        const { messages } = await shopeeAdapter.fetchMessages(shop, conv.conversation_id);
-        if (messages && messages.length > 0) {
-          for (const msg of messages) {
+        // 1. รายละเอียด conversation ล่าสุดจาก Shopee — ใช้เอา opposite_last_read_msg_id
+        if (detailResult.status === 'fulfilled' && detailResult.value && detailResult.value.opposite_last_read_msg_id) {
+          const oppReadId = String(detailResult.value.opposite_last_read_msg_id);
+          await Conversation.updateOne({ _id: conv._id }, { $set: { opposite_last_read_msg_id: oppReadId } });
+          conv.opposite_last_read_msg_id = oppReadId;
+        }
+
+        // 2. ข้อความล่าสุดจาก Shopee API
+        const messages = messagesResult.status === 'fulfilled' ? (messagesResult.value.messages || []) : [];
+        if (messages.length > 0) {
+          // เรียงเก่า→ใหม่ก่อนยิง event — messages[0] จาก Shopee คือข้อความล่าสุด (ใหม่→เก่า)
+          const messagesChronological = [...messages].reverse();
+          for (const msg of messagesChronological) {
             const direction = String(msg.from_shop_id) === String(shop.shop_id) ? 'out' : 'in';
-            await Message.updateOne(
+            const msgCreatedTs = msg.created_timestamp ? new Date(Number(msg.created_timestamp) * 1000) : null;
+            const result = await Message.updateOne(
               { message_id: String(msg.message_id) },
               {
                 $set: {
@@ -190,12 +198,18 @@ router.get('/conversations/:id/messages', async (req, res) => {
                   content: msg.content,
                   status: msg.status,
                   source: msg.source,
-                  created_timestamp: msg.created_timestamp ? new Date(Number(msg.created_timestamp) * 1000) : null,
+                  created_timestamp: msgCreatedTs,
                   raw_payload: msg,
                 },
               },
               { upsert: true }
             );
+            // เฉพาะข้อความที่เพิ่งเห็นครั้งแรกจริงๆ — กันเปิด/ปิดรอบ metric ซ้ำตอน sync ซ้ำๆ ทุกครั้งที่ agent เปิดแชท
+            // ⚠️ ไม่ await — เป็นงาน assign/metric เบื้องหลัง ไม่ควรทำให้ผู้ใช้รอหน้าจอ (แต่ละครั้งมีหลาย DB round-trip ไป Mongo ที่อยู่ไกล)
+            if (result.upsertedCount > 0) {
+              handleNewMessage(conv, { message_id: String(msg.message_id), created_timestamp: msgCreatedTs }, direction)
+                .catch((err) => console.error('[api] handleNewMessage failed:', err.message));
+            }
           }
           const latestMsg = messages[0];
           const latestTs = latestMsg.created_timestamp ? new Date(Number(latestMsg.created_timestamp) * 1000) : null;
@@ -217,6 +231,13 @@ router.get('/conversations/:id/messages', async (req, res) => {
     }
   } catch (err) {
     // ถ้าเกิดข้อผิดพลาดในการยิง API ใช้ข้อมูลที่มีใน local DB ทำงานต่อ
+  }
+
+  // เรียก endpoint นี้ = agent เปิดดูแชทนี้จริง (ตอนคลิกเปิด และตอน poll ข้อความระหว่างเปิดค้างไว้)
+  // ใช้เป็นสัญญาณ "เปิดอ่านแล้ว" สำหรับ KPI — ปั๊มแค่ครั้งแรกต่อรอบ ไม่ทับของเดิม
+  // ⚠️ ไม่ await — แค่บันทึกสถิติ ไม่ควรทำให้ผู้ใช้รอหน้าจอ
+  if (conv) {
+    onConversationOpened(conv, req.user).catch(() => {});
   }
 
   const rawMessages = await Message.find({ conversation_id: req.params.id }).sort({ created_timestamp: 1 }).lean();
@@ -343,6 +364,9 @@ router.post('/conversations/:id/reply', async (req, res) => {
       }
     );
 
+    // ปิดรอบ ChatTurnMetric ที่ยังค้างอยู่ — นี่คือ "เวลาตอบกลับ" ที่ใช้คำนวณ KPI
+    await onOutboundMessage(conv, { message_id: sentMessageId, created_timestamp: new Date() }).catch(() => {});
+
     res.json(result);
   } catch (err) {
     // error_code จาก Shopee เช่น user_is_forbidden / reach_5_message_limit / first_chat_without_order_info
@@ -413,6 +437,8 @@ router.post('/conversations/:id/send-image', async (req, res) => {
         },
       }
     );
+
+    await onOutboundMessage(conv, { message_id: sentMessageId, created_timestamp: new Date() }).catch(() => {});
 
     res.json({ success: true, url: imageUrl, result });
   } catch (err) {
@@ -529,6 +555,8 @@ router.post('/conversations/:id/send-video', async (req, res) => {
         },
       }
     );
+
+    await onOutboundMessage(conv, { message_id: String(sentMessageId), created_timestamp: new Date() }).catch(() => {});
 
     res.json({ success: true, video_info: videoInfo, result, isFallbackText });
   } catch (err) {
@@ -656,6 +684,8 @@ router.post('/conversations/:id/send-item', async (req, res) => {
         },
       }
     );
+
+    await onOutboundMessage(conv, { message_id: String(sentMessageId), created_timestamp: new Date() }).catch(() => {});
 
     res.json({ success: true, result });
   } catch (err) {
@@ -851,16 +881,22 @@ router.get('/csat/messages', async (req, res) => {
 
 // ===== Workflow fields ที่เราเพิ่มเอง (ไม่ใช่ของ Shopee) — มอบหมาย/ปิดแชท/แท็ก =====
 
-// POST /api/conversations/:id/assign — มอบหมายแชทให้แอดมิน { agent: 'ชื่อ' | null }
-// local DB เท่านั้น ไม่มี concept นี้บน Shopee ไม่ต้องยิง API ออก
+// POST /api/conversations/:id/assign — มอบหมาย/ย้ายแชทให้แอดมิน { user_id: '...' | null }
+// local DB เท่านั้น ไม่มี concept นี้บน Shopee ไม่ต้องยิง API ออก — เขียน AuditLog (chat_reassigned) ทุกครั้งที่กดเอง
 router.post('/conversations/:id/assign', async (req, res) => {
   try {
     const conv = await Conversation.findOne({ conversation_id: req.params.id });
     if (!conv) return res.status(404).json({ error: 'conversation_not_found' });
 
-    const { agent } = req.body;
-    await Conversation.updateOne({ _id: conv._id }, { $set: { assigned_agent: agent || null } });
-    res.json({ ok: true, assigned_agent: agent || null });
+    const { user_id, reason } = req.body;
+    let agentDoc = null;
+    if (user_id) {
+      agentDoc = await User.findOne({ _id: user_id, isDeleted: false });
+      if (!agentDoc) return res.status(400).json({ error: 'agent_not_found' });
+    }
+
+    await reassignConversation(conv, agentDoc ? agentDoc._id : null, req.user, reason);
+    res.json({ ok: true, assigned_to: agentDoc ? agentDoc._id : null });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -874,6 +910,12 @@ router.post('/conversations/:id/:action(close|reopen)', async (req, res) => {
 
     const status = req.params.action === 'close' ? 'closed' : 'open';
     await Conversation.updateOne({ _id: conv._id }, { $set: { status } });
+    await logEvent({
+      type: req.params.action === 'close' ? 'chat_closed' : 'chat_reopened',
+      actor: req.user,
+      conversationId: conv.conversation_id,
+      shopId: conv.shop_id,
+    });
     res.json({ ok: true, status });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -899,7 +941,7 @@ router.put('/conversations/:id/tags', async (req, res) => {
 // GET /api/settings/theme — ดึง theme + mode ปัจจุบันของ user
 router.get('/settings/theme', async (req, res) => {
   try {
-    const setting = await getOrCreateUserSetting();
+    const setting = await getOrCreateUserSetting(req.user._id.toString());
     res.json({ user_id: setting.user_id, theme: setting.theme, mode: setting.mode });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -917,7 +959,7 @@ router.put('/settings/theme', async (req, res) => {
       return res.status(400).json({ error: 'theme_or_mode_required' });
     }
     const setting = await UserSetting.findOneAndUpdate(
-      { user_id: DEFAULT_USER_ID },
+      { user_id: req.user._id.toString() },
       { $set: update },
       { upsert: true, new: true }
     );

@@ -23,7 +23,10 @@ const conversationSchema = new mongoose.Schema({
   status: { type: String, enum: ['open', 'closed'], default: 'open' },
 
   // ===== field ที่เราเพิ่มเอง ไม่ใช่ของ Shopee (สำหรับ workflow ทีมแอดมิน) =====
-  assigned_agent: { type: String, default: null }, // ชื่อแอดมินที่รับผิดชอบแชทนี้ — ยังไม่มีระบบ login จริง ใช้ free text ไปก่อน
+  assigned_agent: { type: String, default: null }, // ⚠️ เลิกเขียนแล้ว — เก็บไว้เฉพาะข้อมูลเก่าก่อน migrate ไป assigned_to (ดู scripts/migrateAssignedAgent.js)
+  assigned_to: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true }, // แอดมินที่รับผิดชอบแชทนี้จริง — ref User
+  assigned_at: { type: Date, default: null },
+  assignment_mode_used: { type: String, default: null }, // mode ของ AssignmentConfig ตอนที่ assign ครั้งนี้ (เก็บไว้ debug/KPI)
   tags: { type: [String], default: [] },           // เช่น "ลูกค้าประจำ", "VIP", "ร้องเรียน" — จัดการเองผ่าน UI
   recent_messages: { type: [mongoose.Schema.Types.Mixed], default: [] }, // 💬 Array เก็บข้อความล่าสุด (เช่น 10 ข้อความแรก) ประจำแต่ละช่องแชท
 }, { timestamps: true });
@@ -33,5 +36,6 @@ conversationSchema.index({ shop_id: 1, conversation_id: 1 }, { unique: true });
 conversationSchema.index({ platform: 1, shop_id: 1, pinned: -1, last_message_timestamp: -1 });
 conversationSchema.index({ platform: 1, shop_id: 1, unread_count: 1, pinned: -1, last_message_timestamp: -1 });
 conversationSchema.index({ shop_id: 1, to_name: 1 });
+conversationSchema.index({ assigned_to: 1, status: 1 });
 
 module.exports = mongoose.model('Conversation', conversationSchema);

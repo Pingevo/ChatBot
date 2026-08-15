@@ -8,6 +8,7 @@ const RequestLog = require('../models/RequestLog');
 const shopeeAdapter = require('../platforms/shopee-adapter');
 const { syncShopsFromSellcenter } = require('../services/shopSync');
 const { syncCustomerFromConversation } = require('../services/customerSync');
+const { handleNewMessage } = require('../services/chatEvents');
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 20000);
 
@@ -120,7 +121,11 @@ async function pollShop(shop) {
         if (isRecentFromDb || messages.length > 0) {
           console.log(`[poll] debug: shop=${shop.shop_id} conv=${conv.conversation_id} msgs=${messages.length} fromDb=${isRecentFromDb}`);
         }
-        for (const msg of messages) {
+        // เรียงเก่า→ใหม่ก่อนประมวลผล event — Shopee ให้ messages[0] เป็นข้อความล่าสุด (ใหม่→เก่า)
+        // แต่ chatEvents ต้องเห็นลำดับเวลาจริงถึงจะเปิด/ปิด "รอบ" (ChatTurnMetric) ถูกต้อง
+        const messagesChronological = [...messages].reverse();
+        let convDocForEvents = null; // lazy-load ครั้งแรกที่เจอข้อความใหม่จริง กันยิง DB ทุกข้อความที่ sync ซ้ำ
+        for (const msg of messagesChronological) {
           const direction = String(msg.from_shop_id) === String(shop.shop_id) ? 'out' : 'in';
           // ⚠️ idempotency: message_id เป็น unique index ใน schema อยู่แล้ว — insert ซ้ำจะ error
           // ใช้ updateOne+upsert แทน insert ตรงๆ กัน error กรณี poll ซ้อนกัน (megaplan ข้อ 12)
@@ -146,7 +151,19 @@ async function pollShop(shop) {
             },
             { upsert: true }
           );
-          if (result.upsertedCount > 0) newMsgCount++;
+          if (result.upsertedCount > 0) {
+            newMsgCount++;
+            if (!convDocForEvents) {
+              convDocForEvents = await Conversation.findOne({ shop_id: shop.shop_id, conversation_id: conv.conversation_id }).lean();
+            }
+            await handleNewMessage(
+              convDocForEvents,
+              { message_id: String(msg.message_id), created_timestamp: secondsToDate(msg.created_timestamp) },
+              direction
+            );
+            // refresh เผื่อ handleNewMessage เพิ่ง auto-assign ไป (assigned_to เปลี่ยน) ก่อนข้อความถัดไปในลูปเดียวกัน
+            convDocForEvents = await Conversation.findOne({ shop_id: shop.shop_id, conversation_id: conv.conversation_id }).lean();
+          }
         }
 
         // ถ้ามีข้อความใหม่จาก get_message ให้อัปเดต last_message_timestamp, preview และ recent_messages ของ conv

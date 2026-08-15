@@ -114,10 +114,23 @@ async function fallbackRefreshToken(tokenDoc) {
   };
 }
 
+// ⚡ cache token สั้นๆ ในหน่วยความจำ — ก่อนหน้านี้ทุก Shopee API call (แม้แต่ 2 call คู่กันในหน้าเดียว, หรือ poll ทุก
+// 1-2 วิ) ต้องยิง query ไป sellcenter MongoDB (digital.in.th) ใหม่ทุกครั้ง ไม่มี cache เลย — เป็นสาเหตุหลักของดีเลย์
+// 30 วิ สั้นพอที่จะไม่ค้างข้าม token rotation ของ sellcenter (buffer หมดอายุจริงคือ 5 นาที ใน isTokenFresh)
+// แต่ยาวพอตัดรอบ query ซ้ำถี่ๆ ระหว่างนั้นได้เกือบทั้งหมด
+const TOKEN_CACHE_TTL_MS = 30 * 1000;
+const tokenCache = new Map(); // key: shopname || String(shop_id) -> { tokenDoc, cachedAt }
+
 /**
  * ฟังก์ชันหลักที่ adapter เรียกใช้ — คืน access_token ที่ใช้งานได้จริง
  */
 async function getValidAccessToken({ shop_id, shopname }) {
+  const cacheKey = shopname || String(shop_id);
+  const cached = tokenCache.get(cacheKey);
+  if (cached && (Date.now() - cached.cachedAt) < TOKEN_CACHE_TTL_MS && isTokenFresh(cached.tokenDoc)) {
+    return { access_token: cached.tokenDoc.access_token, shop_id: cached.tokenDoc.shop_id };
+  }
+
   let tokenDoc = await getTokenDoc({ shop_id, shopname });
   if (!tokenDoc) {
     throw new Error(`No token found in sellcenter for shop_id=${shop_id} shopname=${shopname}`);
@@ -125,6 +138,8 @@ async function getValidAccessToken({ shop_id, shopname }) {
   if (!isTokenFresh(tokenDoc)) {
     tokenDoc = await fallbackRefreshToken(tokenDoc);
   }
+
+  tokenCache.set(cacheKey, { tokenDoc, cachedAt: Date.now() });
   return {
     access_token: tokenDoc.access_token,
     shop_id: tokenDoc.shop_id,

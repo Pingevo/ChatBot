@@ -37,4 +37,14 @@ function getShpTokenModel() {
   return conn.models[collectionName] || conn.model(collectionName, shpTokenSchema, collectionName);
 }
 
-module.exports = { getSellcenterConnection, getShpTokenModel };
+// ทำเนียบพนักงาน (system81) — อ่าน profile (full_name/department/position/email) มา enrich
+// บัญชี staff ของ chat-center ตอน login เท่านั้น ห้ามเขียนกลับ และห้ามอ่าน field password
+const usersSchema = new mongoose.Schema({}, { strict: false, collection: process.env.SELLCENTER_USERS_COLLECTION || 'Users' });
+
+function getSellcenterUserModel() {
+  const conn = getSellcenterConnection();
+  const collectionName = process.env.SELLCENTER_USERS_COLLECTION || 'Users';
+  return conn.models[collectionName] || conn.model(collectionName, usersSchema, collectionName);
+}
+
+module.exports = { getSellcenterConnection, getShpTokenModel, getSellcenterUserModel };

@@ -8,13 +8,18 @@
     "poll": "node src/workers/pollWorker.js",
     "webhook:worker": "node src/workers/webhookWorker.js",
     "webhook:lost-recovery": "node src/workers/lostPushRecovery.js",
+    "watchdog": "node src/workers/assignmentWatchdog.js",
+    "migrate:assigned-agent": "node src/scripts/migrateAssignedAgent.js",
     "push:config": "node src/scripts/setupPushConfig.js",
     "dev": "node src/server.js"
   },
   "dependencies": {
+    "axios": "^1.19.0",
+    "connect-mongo": "^6.0.0",
     "dotenv": "^16.4.5",
     "ejs": "^3.1.10",
     "express": "^4.19.2",
+    "express-session": "^1.19.0",
     "json-bigint": "^1.0.0",
     "mongoose": "^8.5.0",
     "node-cron": "^3.0.3"

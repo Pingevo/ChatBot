@@ -20,9 +20,12 @@
         <a href="/inbox" class="active" title="แชท">💬</a>
         <a href="/contacts" title="ผู้ติดต่อ">👥</a>
         <a href="/shops" title="ร้านค้า">🏪</a>
+        <% if (typeof currentUser !== 'undefined' && currentUser && (currentUser.role === 'admin' || currentUser.role === 'lead')) { %>
+          <a href="/team" title="ทีม & แบ่งงาน">🎯</a>
+        <% } %>
       </div>
       <div class="sidebar-spacer"></div>
-      <div class="sidebar-avatar" title="ผู้ดูแลบัญชี / เปลี่ยนธีม">CS</div>
+      <div class="sidebar-avatar" title="<%= typeof currentUser !== 'undefined' && currentUser ? (currentUser.nickname || currentUser.name) : 'ผู้ดูแลบัญชี' %> / เปลี่ยนธีม"><%= avatarInitials %></div>
     </nav>
 
     <div class="main-area">
@@ -103,6 +106,24 @@
     let currentConv = null;
     let searchTerm = '';
 
+    // ===== ระบบแบ่งงานแชท — รายชื่อ agent (สำหรับ dropdown มอบหมาย) + presence heartbeat =====
+    let agentsCache = [];
+    async function loadAgents() {
+      try {
+        agentsCache = await (await fetch('/api/agents')).json();
+      } catch (err) { /* เงียบ — ใช้ cache เก่าไปก่อนถ้าโหลดไม่สำเร็จ */ }
+    }
+    function agentName(id) {
+      if (!id) return null;
+      const a = agentsCache.find(x => String(x._id) === String(id));
+      return a ? (a.nickname || a.name) : null;
+    }
+    // heartbeat ทุก 60 วิ ขณะ tab ยัง active — ใช้ตรวจว่า agent ยังอยู่หน้าจอไหม (services/presence.js)
+    async function pingPresence() {
+      if (document.visibilityState !== 'visible') return;
+      try { await fetch('/api/presence/ping', { method: 'POST' }); } catch (err) { /* เงียบ */ }
+    }
+
     // ===== Auto-poll: อ่านจาก MongoDB ทุก 3-5 วินาที (ไม่ใช้ Socket.io) =====
     // - รายการแชท: อัปเดต unread badge ทุก 5 วินาที
     // - ข้อความในแชทที่เปิดอยู่: ดึงข้อความใหม่ทุก 3 วินาที (append เฉพาะของใหม่)
@@ -122,9 +143,9 @@
     // Platform metadata — ใช้ทั้งชื่อ, อักษรย่อ badge, และสีประจำแพลตฟอร์ม
     // เพิ่มแพลตฟอร์มใหม่ที่นี่เป็นจุดเดียว ส่วนอื่น ๆ ใน UI จะอ้างอิงจากตารางนี้
     const PLATFORM_META = {
-      shopee: { name: 'Shopee',      initial: 'S', color: '#EE4D2D' },
-      lazada: { name: 'Lazada',      initial: 'L', color: '#0F146D' },
-      tiktok: { name: 'TikTok Shop', initial: 'T', color: '#000000' },
+      shopee: { name: 'Shopee',      initial: 'S', color: '#EE4D2D', icon: '/assets/icons/ico_shopee_60px.png' },
+      lazada: { name: 'Lazada',      initial: 'L', color: '#0F146D', icon: '/assets/icons/ico_lazada_60px.png' },
+      tiktok: { name: 'TikTok Shop', initial: 'T', color: '#000000', icon: '/assets/icons/ico_tiktok_60px.png' },
     };
     // สีจุดแท็ก — ต้องตรงกับ preset tags ที่เปิดให้เลือกใน info panel (openInfoPanel)
     const TAG_COLORS = {
@@ -146,6 +167,7 @@
     // ข้อความตัวอย่างสั้นๆ สำหรับ banner "มีข้อความใหม่" — คล้าย getConvPreview แต่รับ message เดี่ยวๆ
     function getMsgPreviewText(m) {
       const c = m.content || {};
+      if (m.message_type === 'notification') return c.notification_for_sender || c.notification_for_receiver || '';
       if (c.text) return c.text;
       if (m.message_type === 'image') return '📷 [รูปภาพ]';
       if (m.message_type === 'video') return '🎥 [วิดีโอ]';
@@ -273,6 +295,9 @@
       const nextConvStateMap = new Map();
 
       function getConvPreview(c) {
+        if (c.latest_message_type === 'notification' && c.latest_message_content) {
+          return c.latest_message_content.notification_for_sender || c.latest_message_content.notification_for_receiver || '';
+        }
         if (c.latest_message_content && c.latest_message_content.text) return c.latest_message_content.text;
         if (c.latest_message_type === 'image') return '📷 [รูปภาพ]';
         if (c.latest_message_type === 'video') return '🎥 [วิดีโอ]';
@@ -331,7 +356,7 @@
               <div class="conv-avatar" style="box-shadow: 0 0 0 2px var(--panel-bg), 0 0 0 3.5px ${plat.color};">
                 ${c.to_avatar ? `<img src="${esc(c.to_avatar)}" onerror="this.style.display='none'">` : esc(initials)}
               </div>
-              <span class="conv-platform-badge" style="background:${plat.color};">${esc(plat.initial)}</span>
+              <span class="conv-platform-badge"><img src="${plat.icon}" alt="${esc(plat.name)}"></span>
             </div>
             <div class="conv-platform-label" style="color:${plat.color};">${esc(plat.name)}</div>
           </div>
@@ -347,7 +372,7 @@
             <div class="conv-bottom-row" style="margin-top:6px;">
               <span class="conv-tag-dots">
                 ${(c.tags || []).map(t => `<span class="tag-dot-sm" title="${esc(t)}" style="background:${TAG_COLORS[t] || 'var(--text-muted)'};"></span>`).join('')}
-                ${c.assigned_agent ? `<span class="conv-agent-name">${esc(c.assigned_agent)}</span>` : ''}
+                ${c.assigned_to && agentName(c.assigned_to) ? `<span class="conv-agent-name">${esc(agentName(c.assigned_to))}</span>` : ''}
               </span>
               <span class="conv-bottom-right">
                 ${shopName ? `<span class="conv-shop-name-inline" title="${esc(shopName)}">${esc(shopName)}</span>` : ''}
@@ -505,8 +530,17 @@
     // ⚠️ ข้อมูล order/item ใน Shopee message content มีแค่ order_sn/item_id (reference)
     // ไม่มีชื่อสินค้า/ราคา/สถานะจริง — ต้องเรียก get_order_detail/get_item_base_info เพิ่มถึงจะได้
     // (ยังไม่ implement ใน Phase 1) จึงแสดงเป็น "การ์ดอ้างอิง" ตรงไปตรงมา ไม่ใส่ข้อมูลปลอม
+    // ข้อความระบบ (เข้าร่วม/ปิด/ย้ายบทสนทนา ฯลฯ) — แสดงเป็นข้อความกลางจอ ไม่ใช่บับเบิลแชท
+    function msgRowClass(m) {
+      return m.message_type === 'notification' ? 'msg-row system' : `msg-row ${m.direction}`;
+    }
+
     function renderMessageBody(m) {
       const c = m.content || {};
+      if (m.message_type === 'notification') {
+        const text = c.notification_for_sender || c.notification_for_receiver || '';
+        return `<div class="msg-system-text">${esc(text)}</div>`;
+      }
       if (m.message_type === 'order' && c.order_sn) {
         return `
           <div class="msg-ref-card">
@@ -573,6 +607,7 @@
     }
 
     function renderMessageStatusHtml(m) {
+      if (m.message_type === 'notification') return '';
       const time = m.created_timestamp ? new Date(m.created_timestamp).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) : '';
       if (m.direction !== 'out') {
         return time ? `<div class="msg-time">${time}</div>` : '';
@@ -655,9 +690,14 @@
         fetch(`/api/conversations/${id}`),
         fetch(`/api/conversations/${id}/messages`),
       ]);
+      // ผู้ใช้อาจสลับไปแชทอื่นระหว่างที่ fetch นี้ยังไม่เสร็จ (network ช้า/ไม่แน่นอน)
+      // ถ้า currentConversationId ไม่ตรงกับ id ที่ fetch นี้ขอไว้ แปลว่า response นี้ล้าสมัยแล้ว ห้าม render ทับ
+      if (currentConversationId !== id) return;
       const conv = convRes.ok ? await convRes.json() : null;
+      if (currentConversationId !== id) return;
       currentConv = conv;
       const messages = await msgRes.json();
+      if (currentConversationId !== id) return;
 
       const panel = document.getElementById('thread-panel');
       const plat = platformOf(conv);
@@ -673,13 +713,13 @@
       panel.innerHTML = `
         <div class="thread-header">
           <div class="thread-header-left">
-            <div class="thread-avatar" style="box-shadow: 0 0 0 2px var(--panel-bg), 0 0 0 3.5px ${plat.color};">${esc((conv && conv.to_name || '?').slice(0, 2).toUpperCase())}</div>
+            <div class="thread-avatar" style="box-shadow: 0 0 0 2px var(--panel-bg), 0 0 0 3.5px ${plat.color};">${(conv && conv.to_avatar) ? `<img src="${esc(conv.to_avatar)}" onerror="this.style.display='none'">` : esc((conv && conv.to_name || '?').slice(0, 2).toUpperCase())}</div>
             <div>
               <div class="thread-name">${esc(conv && conv.to_name) || 'ไม่ทราบชื่อ'}</div>
               <div class="thread-sub">
                 <span class="thread-platform-dot" style="background:${plat.color};"></span>${esc(plat.name)}
                 ${unread ? ' · <span style="color:var(--accent);font-weight:700;">ยังไม่อ่าน ' + conv.unread_count + '</span>' : ''}
-                ${conv && conv.assigned_agent ? ` · <span style="color:var(--text-secondary);">มอบหมาย: ${esc(conv.assigned_agent)}</span>` : ''}
+                ${conv && conv.assigned_to && agentName(conv.assigned_to) ? ` · <span style="color:var(--text-secondary);">มอบหมาย: ${esc(agentName(conv.assigned_to))}</span>` : ''}
                 ${isClosed ? ' · <span style="color:var(--text-muted);">ปิดการสนทนาแล้ว</span>' : ''}
               </div>
             </div>
@@ -688,7 +728,10 @@
             <button class="bookmark-btn ${conv && conv.pinned ? 'active' : ''}" id="bookmark-btn" title="ปักหมุด/เลิกปักหมุด">📌</button>
             <button class="bookmark-btn ${conv && conv.mute ? 'active' : ''}" id="mute-btn" title="${conv && conv.mute ? 'เปิดเสียงการแจ้งเตือน (Unmute)' : 'ปิดเสียงการแจ้งเตือน (Mute)'}">${conv && conv.mute ? '🔕' : '🔔'}</button>
             ${unread ? `<button class="btn-pill" id="mark-read-btn" title="${canMarkRead ? 'อ่านแล้ว (sync ไป Shopee)' : 'อ่านแล้ว (local DB เท่านั้น — ENABLE_MARK_READ=false)'}">✓ อ่านแล้ว</button>` : ''}
-            <button class="btn-pill" id="assign-btn" title="มอบหมายแชทนี้ให้แอดมิน">${conv && conv.assigned_agent ? '👤 ' + esc(conv.assigned_agent) : '👤 มอบหมาย'}</button>
+            <select class="btn-pill" id="assign-select" title="มอบหมายแชทนี้ให้แอดมิน (หมุนคิวอัตโนมัติอยู่แล้ว — ใช้ตรงนี้เฉพาะตอนอยากย้ายมือเอง)">
+              <option value="">👤 มอบหมาย</option>
+              ${agentsCache.map(a => `<option value="${esc(a._id)}" ${conv && String(conv.assigned_to) === String(a._id) ? 'selected' : ''}>${a.presence === 'online' ? '🟢' : a.presence === 'idle' ? '🟡' : '⚪'} ${esc(a.nickname || a.name)}${a.isActiveAgent ? '' : ' (พักอยู่)'}</option>`).join('')}
+            </select>
             <button class="btn-pill ${isClosed ? 'btn-pill-accent' : ''}" id="close-toggle-btn" title="${isClosed ? 'เปิดการสนทนาอีกครั้ง' : 'ปิดการสนทนา'}">${isClosed ? '↺ เปิดใหม่' : '✕ ปิดการสนทนา'}</button>
             ${canSend ? '' : '<span class="readonly-tag">ส่งปิดอยู่</span>'}
           </div>
@@ -724,7 +767,7 @@
           <button type="button" class="scroll-to-bottom-btn" id="scroll-to-bottom-btn" title="เลื่อนไปข้อความล่าสุด">↓<span class="unread-dot" id="scroll-to-bottom-dot"></span></button>
           <div class="messages-scroll" id="messages-scroll">
           ${messages.length === 0 ? '<p class="empty-state">ยังไม่มีข้อความใน local DB (ต้องรัน poll worker ครั้งแรกเพื่อ sync)</p>' : messages.map(m => `
-            <div class="msg-row ${m.direction}">
+            <div class="${msgRowClass(m)}">
               ${renderMessageBody(m)}
               ${renderMessageStatusHtml(m)}
             </div>`).join('')}
@@ -834,18 +877,16 @@
         });
       }
 
-      // ปุ่มมอบหมาย — เก็บ local DB เท่านั้น ไม่เกี่ยวกับ Shopee
-      const assignBtn = document.getElementById('assign-btn');
-      if (assignBtn) {
-        assignBtn.addEventListener('click', async () => {
-          const current = conv && conv.assigned_agent || '';
-          const name = prompt('มอบหมายแชทนี้ให้ใคร? (เว้นว่างเพื่อยกเลิกมอบหมาย)', current);
-          if (name === null) return; // ยกเลิก prompt
+      // มอบหมาย/ย้ายมือ — จ่ายแชทใหม่ๆ ใช้ round-robin อัตโนมัติอยู่แล้ว (services/chatAssignment.js) ตรงนี้ไว้ย้ายมือเองเท่านั้น
+      const assignSelect = document.getElementById('assign-select');
+      if (assignSelect) {
+        assignSelect.addEventListener('change', async () => {
+          const userId = assignSelect.value || null;
           try {
             await fetch(`/api/conversations/${id}/assign`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ agent: name.trim() || null }),
+              body: JSON.stringify({ user_id: userId }),
             });
             openConversation(id);
             loadConversations();
@@ -1170,7 +1211,7 @@
       panel.innerHTML = `
         <div class="info-header">
           <div class="info-avatar-wrap">
-            <div class="info-avatar" style="box-shadow: 0 0 0 2px var(--panel-bg), 0 0 0 3.5px ${plat.color};">${esc((conv.to_name || '?').slice(0, 2).toUpperCase())}</div>
+            <div class="info-avatar" style="box-shadow: 0 0 0 2px var(--panel-bg), 0 0 0 3.5px ${plat.color};">${conv.to_avatar ? `<img src="${esc(conv.to_avatar)}" onerror="this.style.display='none'">` : esc((conv.to_name || '?').slice(0, 2).toUpperCase())}</div>
             <span class="info-platform-badge" style="background:${plat.color};" title="${esc(plat.name)}">${esc(plat.name)}</span>
           </div>
           <div class="info-name">${esc(conv.to_name) || 'ไม่ทราบชื่อ'}</div>
@@ -1297,7 +1338,9 @@
         // แสดง 50 ล่าสุด (เรียงใหม่ก่อน)
         const recent = messages.slice(-50).reverse();
         flowEl.innerHTML = recent.map(m => {
-          const text = (m.content && m.content.text) || `[${esc(m.message_type || 'msg')}]`;
+          const text = m.message_type === 'notification'
+            ? ((m.content && (m.content.notification_for_sender || m.content.notification_for_receiver)) || '')
+            : ((m.content && m.content.text) || `[${esc(m.message_type || 'msg')}]`);
           const time = m.created_timestamp ? new Date(m.created_timestamp).toLocaleString('th-TH', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' }) : '';
           return `
             <div class="flow-item">
@@ -1374,7 +1417,7 @@
           for (const m of newMessages) {
             const time = m.created_timestamp ? new Date(m.created_timestamp).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) : '';
             const div = document.createElement('div');
-            div.className = `msg-row ${m.direction}`;
+            div.className = msgRowClass(m);
             div.innerHTML = `${renderMessageBody(m)}${renderMessageStatusHtml(m)}`;
             scroll.appendChild(div);
           }
@@ -1459,7 +1502,7 @@
         return `
           <div class="filter-menu-item" data-platform="${key}">
             <input type="checkbox" ${checked ? 'checked' : ''} />
-            <span class="platform-chip" style="background:${p.color};">${esc(p.initial)}</span>
+            <img class="platform-chip" src="${p.icon}" alt="${esc(p.name)}">
             <span>${esc(p.name)}</span>
           </div>`;
       }).join('');
@@ -1468,14 +1511,14 @@
       });
     }
 
-    // pills ด่วนใต้ search box — ตามภาพที่ออกแบบ (ทั้งหมด + Shopee/Lazada/TikTok แยกทีละแพลตฟอร์ม)
+    // pills ด่วนใต้ search box — ทั้งหมด (text) + โลโก้แพลตฟอร์มแทน text เพื่อประหยัดพื้นที่
     function renderPlatformPills() {
       const container = document.getElementById('platform-pills');
       const allActive = selectedPlatforms.size === 0;
       const pills = [`<button class="platform-pill ${allActive ? 'active' : ''}" data-pill="all">ทั้งหมด</button>`];
       Object.entries(PLATFORM_META).forEach(([key, p]) => {
         const active = selectedPlatforms.has(key);
-        pills.push(`<button class="platform-pill ${active ? 'active' : ''}" data-pill="${key}" style="${active ? `background:${p.color};border-color:${p.color};` : ''}">${esc(p.name)}</button>`);
+        pills.push(`<button class="platform-pill icon-only ${active ? 'active' : ''}" data-pill="${key}" title="${esc(p.name)}" style="${active ? `border-color:${p.color};` : ''}"><img src="${p.icon}" alt="${esc(p.name)}"></button>`);
       });
       container.innerHTML = pills.join('');
       container.querySelectorAll('.platform-pill').forEach(btn => {
@@ -1545,7 +1588,12 @@
       }
     });
     document.addEventListener('click', (e) => {
-      if (!filterMenu.contains(e.target) && e.target !== filterBtn) filterMenu.classList.remove('open');
+      // ⚠️ ใช้ composedPath() แทน filterMenu.contains(e.target) — ตอนติ๊ก checkbox
+      // platform/ร้านค้า เราเรียก renderPlatformFilters()/renderShopFilters() ที่ทำ innerHTML
+      // ใหม่ทั้ง container กลางอากาศตอน event ยัง bubble ไม่ถึง document ทำให้ e.target หลุดจาก DOM
+      // ไปแล้ว — contains() เลย false ทั้งที่คลิกอยู่ในเมนู composedPath() capture path ไว้ตอน dispatch จึงกันปัญหานี้ได้
+      const path = e.composedPath();
+      if (!path.includes(filterMenu) && !path.includes(filterBtn)) filterMenu.classList.remove('open');
     });
 
     document.getElementById('filter-apply').addEventListener('click', () => {
@@ -1566,12 +1614,16 @@
     // เริ่มต้น: โหลดร้าน + render platform filters/pills
     renderPlatformFilters();
     renderPlatformPills();
-    // โหลดร้านก่อน conversations ครั้งแรก เพื่อให้ shopNameOf() มีข้อมูลตั้งแต่ render รอบแรก
-    loadShopsForFilter().then(loadConversations);
+    // โหลดร้าน + รายชื่อ agent ก่อน conversations ครั้งแรก เพื่อให้ shopNameOf()/agentName() มีข้อมูลตั้งแต่ render รอบแรก
+    Promise.all([loadShopsForFilter(), loadAgents()]).then(loadConversations);
     // เริ่ม auto-poll รายการแชท (อัปเดต unread badge ทุก 5 วินาที)
     startConversationPolling();
+    // รายชื่อ agent — รีเฟรชเป็นระยะ (presence/ภาระงานเปลี่ยนได้เรื่อยๆ)
+    setInterval(loadAgents, 60000);
+    pingPresence();
+    const presenceTimer = setInterval(pingPresence, 60000);
     // หยุด polling ตอนปิดหน้า กัน memory leak
-    window.addEventListener('beforeunload', () => { stopMessagePolling(); stopConversationPolling(); });
+    window.addEventListener('beforeunload', () => { stopMessagePolling(); stopConversationPolling(); clearInterval(presenceTimer); });
   </script>
 
   <%- include('partials/status-bar') %>
