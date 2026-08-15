@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ผู้ติดต่อ — Unified Chat</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="sidebar-logo">Z</div>
+      <div class="sidebar-nav">
+        <a href="/dashboard" title="แดชบอร์ด">📊</a>
+        <a href="/inbox" title="แชท">💬</a>
+        <a href="/contacts" class="active" title="ผู้ติดต่อ">👥</a>
+        <a href="/shops" title="ร้านค้า">🏪</a>
+      </div>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-avatar" title="ผู้ดูแลบัญชี / เปลี่ยนธีม">CS</div>
+    </nav>
+
+    <div class="contacts-page">
+      <div class="gsap-fade-up">
+        <h1 class="page-title">ผู้ติดต่อ</h1>
+        <p class="page-subtitle">รวมจากแชทจริงใน local DB — group ตามผู้ซื้อ + แพลตฟอร์ม</p>
+      </div>
+
+      <div class="contacts-toolbar gsap-fade-up">
+        <input type="text" class="search-box" id="contact-search" placeholder="ค้นหาชื่อ…">
+        <div class="platform-filter" id="platform-filter">
+          <button class="active" data-platform="">ทั้งหมด</button>
+          <button data-platform="shopee">Shopee</button>
+          <button data-platform="lazada">Lazada</button>
+          <button data-platform="tiktok">TikTok</button>
+        </div>
+      </div>
+
+      <div class="gsap-stagger">
+        <table class="contacts-table">
+          <thead>
+            <tr>
+              <th>ชื่อ</th><th>แพลตฟอร์ม</th><th>แชท</th><th>ยังไม่อ่าน</th><th>สถานะ</th><th>เมื่อล่าสุด</th>
+            </tr>
+          </thead>
+          <tbody id="contacts-tbody">
+            <tr><td colspan="6" class="empty-card">กำลังโหลด…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <%- include('partials/status-bar') %>
+  <%- include('partials/theme-script') %>
+
+  <script>
+    const PLATFORM_META = {
+      shopee: { name: 'Shopee', initial: 'S', color: '#EE4D2D' },
+      lazada: { name: 'Lazada', initial: 'L', color: '#0F146D' },
+      tiktok: { name: 'TikTok Shop', initial: 'T', color: '#000000' },
+    };
+    function platformOf(p) { return PLATFORM_META[p] || { name: p || 'ไม่ทราบ', initial: '?', color: '#888' }; }
+    function esc(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+    let currentPlatform = '';
+    let currentSearch = '';
+
+    async function loadContacts() {
+      const params = new URLSearchParams();
+      if (currentPlatform) params.set('platform', currentPlatform);
+      if (currentSearch) params.set('q', currentSearch);
+      const tbody = document.getElementById('contacts-tbody');
+      try {
+        const res = await fetch('/api/contacts?' + params.toString());
+        if (!res.ok) throw new Error('fetch_failed');
+        const contacts = await res.json();
+        if (!contacts.length) {
+          tbody.innerHTML = '<tr><td colspan="6" class="empty-card">ไม่พบผู้ติดต่อ — ลองรัน poll worker หรือเปลี่ยนตัวกรอง</td></tr>';
+          return;
+        }
+        tbody.innerHTML = contacts.map(c => {
+          const plat = platformOf(c.platform);
+          const initials = (c.to_name || '?').slice(0, 2).toUpperCase();
+          const lastMsg = c.last_message_timestamp ? new Date(c.last_message_timestamp).toLocaleString('th-TH') : '-';
+          return `
+            <tr>
+              <td>
+                <div class="contact-cell">
+                  <div class="contact-avatar" style="box-shadow:0 0 0 2px var(--panel-bg),0 0 0 3px ${plat.color};">
+                    ${c.to_avatar ? `<img src="${esc(c.to_avatar)}" onerror="this.style.display='none'">` : esc(initials)}
+                  </div>
+                  <div>
+                    <div class="contact-name">${esc(c.to_name) || 'ไม่ทราบชื่อ'}</div>
+                    <div class="contact-sub">user id: ${esc(c.to_id)}</div>
+                  </div>
+                </div>
+              </td>
+              <td><span class="badge" style="background:${plat.color}22;color:${plat.color};">${esc(plat.name)}</span></td>
+              <td>${c.conversation_count}</td>
+              <td>${c.unread_total > 0 ? `<span class="badge badge-unread">${c.unread_total}</span>` : '<span class="badge badge-muted">0</span>'}</td>
+              <td>${c.pinned ? '<span class="badge badge-pinned">📌 ปักหมุด</span>' : '<span class="badge badge-muted">—</span>'}</td>
+              <td>${lastMsg}</td>
+            </tr>`;
+        }).join('');
+
+        if (window.gsap) {
+          gsap.fromTo('#contacts-tbody tr', { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, stagger: 0.03, ease: 'power2.out' });
+        }
+      } catch (err) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty-card">โหลดไม่ได้ — ตรวจสอบ DB</td></tr>';
+      }
+    }
+
+    document.getElementById('contact-search').addEventListener('input', (e) => {
+      currentSearch = e.target.value;
+      loadContacts();
+    });
+    document.querySelectorAll('#platform-filter button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('#platform-filter button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentPlatform = btn.dataset.platform;
+        loadContacts();
+      });
+    });
+
+    loadContacts();
+  </script>
+</body>
+</html>

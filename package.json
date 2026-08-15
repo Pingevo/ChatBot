@@ -1,0 +1,25 @@
+{
+  "name": "chat-center",
+  "version": "0.1.0",
+  "description": "Self-hosted unified chat inbox — Phase 1: Shopee",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "poll": "node src/workers/pollWorker.js",
+    "webhook:worker": "node src/workers/webhookWorker.js",
+    "webhook:lost-recovery": "node src/workers/lostPushRecovery.js",
+    "push:config": "node src/scripts/setupPushConfig.js",
+    "dev": "node src/server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ejs": "^3.1.10",
+    "express": "^4.19.2",
+    "json-bigint": "^1.0.0",
+    "mongoose": "^8.5.0",
+    "node-cron": "^3.0.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shops — Unified Chat</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <nav class="sidebar">
+      <div class="sidebar-logo">Z</div>
+      <div class="sidebar-nav">
+        <a href="/dashboard" title="แดชบอร์ด">📊</a>
+        <a href="/inbox" title="แชท">💬</a>
+        <a href="/contacts" title="ผู้ติดต่อ">👥</a>
+        <a href="/shops" class="active" title="ร้านค้า">🏪</a>
+      </div>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-avatar" title="ผู้ดูแลบัญชี / เปลี่ยนธีม">CS</div>
+    </nav>
+
+    <div class="shops-page">
+      <div class="gsap-fade-up">
+        <h1>ร้านค้าที่เชื่อมต่อ</h1>
+        <p class="hint">Token อ่านจากระบบ sellcenter เดิมแบบ read-only — สถานะที่นี่แค่สะท้อนว่าอ่าน token ได้ปกติหรือไม่</p>
+      </div>
+      <div class="gsap-stagger">
+        <table class="shops-table">
+          <thead>
+            <tr><th>ร้าน</th><th>shop_id</th><th>สถานะ</th><th>poll ล่าสุด</th><th>เปิดใช้แชท</th><th>การจัดการ</th></tr>
+          </thead>
+          <tbody id="shops-tbody">
+            <% shops.forEach(shop => { %>
+              <tr data-shop-id="<%= shop.shop_id %>">
+                <td><%= shop.shop_name || shop.shopname || '-' %></td>
+                <td><%= shop.shop_id %></td>
+                <td><span class="status status-<%= shop.status %>"><%= shop.status %></span></td>
+                <td><%= shop.last_polled_at ? shop.last_polled_at.toLocaleString('th-TH') : 'ยังไม่เคย poll' %></td>
+                <td><%= shop.enabled_for_chat ? 'เปิด' : 'ปิด' %></td>
+                <td><button class="btn-pill reconnect-btn" data-shop-id="<%= shop.shop_id %>" title="ลองอ่าน token ใหม่จาก sellcenter">↻ Reconnect</button></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <%- include('partials/status-bar') %>
+  <%- include('partials/theme-script') %>
+  <script>
+    // ปุ่ม reconnect — ลองดึง token ใหม่ ถ้าสำเร็จรีเซ็ตสถานะเป็น active
+    document.querySelectorAll('.reconnect-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const shopId = btn.dataset.shopId;
+        const row = btn.closest('tr');
+        const statusCell = row.querySelector('.status');
+        btn.disabled = true;
+        btn.textContent = 'กำลังเชื่อมต่อ...';
+        try {
+          const res = await fetch(`/api/shops/${shopId}/reconnect`, { method: 'POST' });
+          const data = await res.json();
+          if (res.ok) {
+            statusCell.innerHTML = '<span class="status status-active">active</span>';
+            btn.textContent = '✓ สำเร็จ';
+            if (window.gsap) gsap.to(btn, { opacity: 0.4, duration: 0.5, delay: 0.5 });
+          } else {
+            statusCell.innerHTML = '<span class="status status-token_error">token_error</span>';
+            btn.textContent = '↻ ลองใหม่';
+            btn.disabled = false;
+            alert('เชื่อมต่อไม่สำเร็จ: ' + (data.error || 'ไม่ทราบสาเหตุ'));
+          }
+        } catch (err) {
+          btn.textContent = '↻ ลองใหม่';
+          btn.disabled = false;
+          alert('เชื่อมต่อไม่สำเร็จ: ' + err.message);
+        }
+      });
+    });
+  </script>
+</body>
+</html>

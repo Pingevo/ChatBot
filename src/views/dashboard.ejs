@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard — Unified Chat</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="sidebar-logo">Z</div>
+      <div class="sidebar-nav">
+        <a href="/dashboard" class="active" title="แดชบอร์ด">📊</a>
+        <a href="/inbox" title="แชท">💬</a>
+        <a href="/contacts" title="ผู้ติดต่อ">👥</a>
+        <a href="/shops" title="ร้านค้า">🏪</a>
+      </div>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-avatar" title="ผู้ดูแลบัญชี / เปลี่ยนธีม">CS</div>
+    </nav>
+
+    <div class="dashboard-page">
+      <div class="dash-header gsap-fade-up">
+        <div>
+          <h1 class="page-title">แดชบอร์ด</h1>
+          <p class="page-subtitle">ภาพรวมจากข้อมูลจริงใน local DB</p>
+        </div>
+        <div class="platform-pills" id="dash-platform-pills"></div>
+      </div>
+
+      <!-- Stat cards -->
+      <div class="stat-grid gsap-stagger" id="stat-grid">
+        <div class="stat-card">
+          <div class="stat-card-top"><span class="stat-label">แชททั้งหมด</span></div>
+          <span class="stat-value" id="stat-conversations">—</span>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-top"><span class="stat-label">ยังไม่อ่าน</span></div>
+          <span class="stat-value accent" id="stat-unread">—</span>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-top"><span class="stat-label">ข้อความวันนี้</span><span class="stat-trend" id="stat-trend"></span></div>
+          <span class="stat-value" id="stat-messages-today">—</span>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-top"><span class="stat-label">ปักหมุด</span></div>
+          <span class="stat-value" id="stat-pinned">—</span>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-top"><span class="stat-label">ร้านค้าทั้งหมด</span></div>
+          <span class="stat-value" id="stat-shops">—</span>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-top"><span class="stat-label">ร้านที่เปิดแชท</span></div>
+          <span class="stat-value" id="stat-shops-enabled">—</span>
+        </div>
+      </div>
+
+      <!-- กราฟกิจกรรม + สัดส่วนแพลตฟอร์ม/แชทรอด่วน (คู่กัน ตาม layout ที่ออกแบบ) -->
+      <div class="dashboard-grid">
+        <div class="dash-card gsap-fade-up">
+          <h3>ข้อความ 7 วันล่าสุด <span class="dash-card-sub">ตามตัวกรองแพลตฟอร์ม</span></h3>
+          <div id="activity-chart"><p class="empty-card">กำลังโหลด…</p></div>
+          <div class="activity-legend">
+            <span><span class="dot in"></span>เข้า (in)</span>
+            <span><span class="dot out"></span>ออก (out)</span>
+          </div>
+        </div>
+
+        <div class="dash-card gsap-fade-up">
+          <h3>สัดส่วนแชทตามแพลตฟอร์ม</h3>
+          <div id="by-platform"><p class="empty-card">กำลังโหลด…</p></div>
+          <div class="dash-subsection">
+            <h4>แชทรอด่วน (ยังไม่อ่านนานสุด)</h4>
+            <div id="urgent-chats"><p class="empty-card">กำลังโหลด…</p></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- กระจายตามร้าน -->
+      <div class="dash-card gsap-fade-up" style="margin-bottom:24px;">
+        <h3>กระจายตามร้าน (Top 8)</h3>
+        <div id="by-shop"><p class="empty-card">กำลังโหลด…</p></div>
+      </div>
+
+      <!-- สถานะร้าน -->
+      <div class="dash-card gsap-fade-up">
+        <h3>สถานะร้านค้า</h3>
+        <div id="shops-status"><p class="empty-card">กำลังโหลด…</p></div>
+      </div>
+    </div>
+  </div>
+
+  <%- include('partials/status-bar') %>
+  <%- include('partials/theme-script') %>
+
+  <script>
+    const PLATFORM_META = {
+      shopee: { name: 'Shopee', color: '#EE4D2D' },
+      lazada: { name: 'Lazada', color: '#0F146D' },
+      tiktok: { name: 'TikTok Shop', color: '#000000' },
+    };
+    function platformName(p) { return (PLATFORM_META[p] || { name: p || 'ไม่ทราบ' }).name; }
+    function esc(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+    let selectedPlatforms = new Set(); // empty = ทั้งหมด
+
+    function renderPlatformPills() {
+      const container = document.getElementById('dash-platform-pills');
+      const allActive = selectedPlatforms.size === 0;
+      const pills = [`<button class="platform-pill ${allActive ? 'active' : ''}" data-pill="all">ทั้งหมด</button>`];
+      Object.entries(PLATFORM_META).forEach(([key, p]) => {
+        const active = selectedPlatforms.has(key);
+        pills.push(`<button class="platform-pill ${active ? 'active' : ''}" data-pill="${key}" style="${active ? `background:${p.color};border-color:${p.color};` : ''}">${esc(p.name)}</button>`);
+      });
+      container.innerHTML = pills.join('');
+      container.querySelectorAll('.platform-pill').forEach(btn => {
+        btn.addEventListener('click', () => {
+          if (btn.dataset.pill === 'all') selectedPlatforms.clear();
+          else if (selectedPlatforms.has(btn.dataset.pill)) selectedPlatforms.delete(btn.dataset.pill);
+          else selectedPlatforms.add(btn.dataset.pill);
+          renderPlatformPills();
+          loadDashboard();
+        });
+      });
+    }
+
+    async function loadDashboard() {
+      try {
+        const params = new URLSearchParams();
+        if (selectedPlatforms.size > 0) params.set('platform', [...selectedPlatforms].join(','));
+        const res = await fetch('/api/dashboard?' + params.toString());
+        if (!res.ok) throw new Error('fetch_failed');
+        const data = await res.json();
+
+        // stats
+        document.getElementById('stat-conversations').textContent = data.totals.conversations;
+        document.getElementById('stat-unread').textContent = data.totals.unread_conversations;
+        document.getElementById('stat-pinned').textContent = data.totals.pinned;
+        document.getElementById('stat-shops').textContent = data.totals.shops;
+        document.getElementById('stat-shops-enabled').textContent = data.totals.shops_enabled;
+        document.getElementById('stat-messages-today').textContent = data.totals.messages_today;
+
+        // เทรนด์ข้อความวันนี้เทียบเมื่อวาน (real data)
+        const trendEl = document.getElementById('stat-trend');
+        const today = data.totals.messages_today, yesterday = data.totals.messages_yesterday;
+        if (yesterday === 0 && today === 0) {
+          trendEl.textContent = '';
+        } else if (yesterday === 0) {
+          trendEl.textContent = '▲ ใหม่'; trendEl.style.color = '#3D9467';
+        } else {
+          const pct = Math.round(((today - yesterday) / yesterday) * 100);
+          trendEl.textContent = (pct >= 0 ? '▲ ' : '▼ ') + Math.abs(pct) + '%';
+          trendEl.style.color = pct >= 0 ? '#3D9467' : '#C43D3D';
+        }
+
+        // สัดส่วนแชทตามแพลตฟอร์ม (แสดงเป็น % ของทั้งหมด — ไม่ผูกกับตัวกรอง เพื่อดูสัดส่วนจริงเทียบกัน)
+        const bpEl = document.getElementById('by-platform');
+        if (!data.by_platform.length) {
+          bpEl.innerHTML = '<p class="empty-card">ยังไม่มีข้อมูล</p>';
+        } else {
+          const totalAll = data.by_platform.reduce((a, r) => a + r.count, 0) || 1;
+          bpEl.innerHTML = data.by_platform.map(r => `
+            <div class="bar-row">
+              <span class="bar-label">${platformName(r.platform)}</span>
+              <span class="bar-track"><span class="bar-fill" style="width:${(r.count/totalAll*100).toFixed(1)}%"></span></span>
+              <span class="bar-count">${Math.round(r.count/totalAll*100)}%</span>
+            </div>`).join('');
+        }
+
+        // แชทรอด่วน — unread จริง เรียงตามรอนานสุด
+        const ucEl = document.getElementById('urgent-chats');
+        if (!data.urgent_chats.length) {
+          ucEl.innerHTML = '<p class="empty-card" style="padding:12px 0;">ไม่มีแชทรอด่วนในตัวกรองนี้</p>';
+        } else {
+          ucEl.innerHTML = data.urgent_chats.map(u => {
+            const plat = PLATFORM_META[u.platform] || { color: '#888' };
+            const time = u.last_message_timestamp ? new Date(u.last_message_timestamp).toLocaleString('th-TH', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' }) : '-';
+            return `<div class="urgent-row">
+              <span class="urgent-dot" style="background:${plat.color};"></span>
+              <div class="urgent-name">${esc(u.name)}</div>
+              <span class="urgent-unread">${u.unread_count}</span>
+              <div class="urgent-time">${time}</div>
+            </div>`;
+          }).join('');
+        }
+
+        // by shop (top 8)
+        const bsEl = document.getElementById('by-shop');
+        const topShops = data.by_shop.slice(0, 8);
+        if (!topShops.length) {
+          bsEl.innerHTML = '<p class="empty-card">ยังไม่มีข้อมูล</p>';
+        } else {
+          const max = Math.max(...topShops.map(r => r.count), 1);
+          bsEl.innerHTML = topShops.map(r => `
+            <div class="bar-row">
+              <span class="bar-label" title="${r.shop_name}">${r.shop_name}</span>
+              <span class="bar-track"><span class="bar-fill" style="width:${(r.count/max*100).toFixed(1)}%"></span></span>
+              <span class="bar-count">${r.count}</span>
+            </div>`).join('');
+        }
+
+        // activity 7d
+        const acEl = document.getElementById('activity-chart');
+        // สร้าง map { day: { in: n, out: n } }
+        const dayMap = new Map();
+        data.message_activity_7d.forEach(r => {
+          if (!dayMap.has(r.day)) dayMap.set(r.day, { in: 0, out: 0 });
+          dayMap.get(r.day)[r.direction === 'in' ? 'in' : 'out'] = r.count;
+        });
+        // เติมวันที่ขาดหาย 7 วันย้อนหลัง
+        const days = [];
+        for (let i = 6; i >= 0; i--) {
+          const d = new Date(Date.now() - i * 86400000);
+          const key = d.toISOString().slice(0, 10);
+          days.push({ key, label: d.toLocaleDateString('th-TH', { weekday: 'short' }), ...dayMap.get(key) || { in: 0, out: 0 } });
+        }
+        const maxAct = Math.max(...days.map(d => Math.max(d.in, d.out)), 1);
+        acEl.innerHTML = `<div class="activity-chart">` + days.map(d => `
+          <div class="activity-day">
+            <div class="activity-bars">
+              <div class="activity-bar in" style="height:${(d.in/maxAct*80).toFixed(0)}px" title="เข้า ${d.in}"></div>
+              <div class="activity-bar out" style="height:${(d.out/maxAct*80).toFixed(0)}px" title="ออก ${d.out}"></div>
+            </div>
+            <span class="activity-day-label">${d.label}</span>
+          </div>`).join('') + `</div>`;
+
+        // shops status
+        const ssEl = document.getElementById('shops-status');
+        if (!data.shops.length) {
+          ssEl.innerHTML = '<p class="empty-card">ยังไม่มีร้าน — รัน shopSync ก่อน</p>';
+        } else {
+          ssEl.innerHTML = `<table class="contacts-table"><thead><tr><th>ร้าน</th><th>สถานะ</th><th>เปิดแชท</th><th>poll ล่าสุด</th></tr></thead><tbody>` +
+            data.shops.map(s => `
+              <tr>
+                <td>${s.shop_name}</td>
+                <td><span class="status status-${s.status}">${s.status}</span></td>
+                <td>${s.enabled_for_chat ? 'เปิด' : 'ปิด'}</td>
+                <td>${s.last_polled_at ? new Date(s.last_polled_at).toLocaleString('th-TH') : 'ยังไม่เคย'}</td>
+              </tr>`).join('') + `</tbody></table>`;
+        }
+
+        // GSAP bar animations
+        if (window.gsap) {
+          gsap.fromTo('.bar-fill', { width: 0 }, { width: (i, el) => el.style.width, duration: 0.7, ease: 'power2.out', stagger: 0.04, delay: 0.3 });
+          gsap.fromTo('.activity-bar', { scaleY: 0, transformOrigin: 'bottom' }, { scaleY: 1, duration: 0.5, ease: 'power2.out', stagger: 0.02, delay: 0.4 });
+          gsap.fromTo('.urgent-row', { opacity: 0, x: -8 }, { opacity: 1, x: 0, duration: 0.3, stagger: 0.05, ease: 'power2.out', delay: 0.3 });
+        }
+      } catch (err) {
+        document.querySelectorAll('.empty-card').forEach(el => el.textContent = 'โหลดข้อมูลไม่ได้ — ตรวจสอบว่ารัน poll worker แล้ว');
+      }
+    }
+    renderPlatformPills();
+    loadDashboard();
+  </script>
+</body>
+</html>

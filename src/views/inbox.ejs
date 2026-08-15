@@ -1,0 +1,1589 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inbox — Unified Chat</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <!-- READ-ONLY DEV MODE banner — แสดงเตือนชัดเจนว่าโหมดนี้ไม่กระทบระบบจริง -->
+  <div class="readonly-banner">
+    ⚠️ READ-ONLY DEV MODE — ไม่ส่ง/อ่าน/ปักหมุดไปยัง Shopee จริง ข้อมูลดึงจาก local DB เท่านั้น ไม่กระทบ Zaapi · auto-poll ทุก 3-5 วิ
+  </div>
+  <div class="app-shell">
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="sidebar-logo">Z</div>
+      <div class="sidebar-nav">
+        <a href="/dashboard" title="แดชบอร์ด">📊</a>
+        <a href="/inbox" class="active" title="แชท">💬</a>
+        <a href="/contacts" title="ผู้ติดต่อ">👥</a>
+        <a href="/shops" title="ร้านค้า">🏪</a>
+      </div>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-avatar" title="ผู้ดูแลบัญชี / เปลี่ยนธีม">CS</div>
+    </nav>
+
+    <div class="main-area">
+      <!-- Ticket list -->
+      <div class="ticket-list-panel">
+        <div class="ticket-list-header">
+          <div class="ticket-list-title-row">
+            <div class="ticket-list-title">ทิกเก็ต</div>
+            <div style="display:flex; gap:6px; position:relative;">
+              <button class="manual-refresh-btn" id="test-sound-btn" title="ทดสอบเสียงแจ้งเตือน (Mario Coin)">🔊</button>
+              <button class="manual-refresh-btn" id="test-popup-btn" title="ทดสอบและเปิดสิทธิ์ Popup แจ้งเตือนบนเบราว์เซอร์">🔔</button>
+              <button class="filter-btn" id="filter-btn" title="ตัวกรอง">☰</button>
+              <div class="filter-menu" id="filter-menu">
+                <div class="filter-menu-section">ช่องทาง (Platform)</div>
+                <div id="platform-filters"></div>
+                <div class="filter-menu-divider"></div>
+                <div class="filter-menu-section">ร้านค้า</div>
+                <div id="shop-filters" style="max-height:240px; overflow-y:auto;"><div style="padding:8px 10px; font-size:12px; color:var(--text-muted);">กำลังโหลด…</div></div>
+                <div class="filter-menu-footer">
+                  <button id="filter-clear">ล้างทั้งหมด</button>
+                  <button class="primary" id="filter-apply">ใช้ตัวกรอง</button>
+                </div>
+              </div>
+              <button class="manual-refresh-btn" id="manual-refresh-btn" title="รีเฟรชด้วยมือ (ไม่ auto)">↻</button>
+            </div>
+          </div>
+          <div class="quick-views">
+            <button class="quick-view-pill active" data-type="all">ทั้งหมด <span class="count" id="count-all"></span></button>
+            <button class="quick-view-pill" data-type="unread">ยังไม่อ่าน <span class="count" id="count-unread"></span></button>
+            <button class="quick-view-pill" data-type="answered">ตอบแล้ว <span class="count" id="count-answered"></span></button>
+            <button class="quick-view-pill" data-type="pinned">ปักหมุด <span class="count" id="count-pinned"></span></button>
+          </div>
+          <input type="text" class="search-box" id="search-box" placeholder="ค้นหาลูกค้า, ออเดอร์...">
+          <div class="platform-pills" id="platform-pills"></div>
+        </div>
+        <div class="conv-scroll" id="conversation-list"></div>
+      </div>
+
+      <!-- Thread -->
+      <div class="thread-panel" id="thread-panel">
+        <p class="empty-state">เลือกแชทเพื่อดูข้อความ</p>
+      </div>
+
+      <!-- Info panel -->
+      <div class="info-panel" id="info-panel" style="display:none;"></div>
+    </div>
+  </div>
+
+  <!-- Floating Context Popover Menu for Conversation Item (ตรงตามภาพ) -->
+  <div class="conv-menu-popover" id="conv-menu-popover">
+    <div class="conv-menu-item" id="popover-item-unread">
+      <span class="conv-menu-icon">🚩</span>
+      <span id="popover-text-unread">Unread</span>
+    </div>
+    <div class="conv-menu-item" id="popover-item-pin">
+      <span class="conv-menu-icon">📌</span>
+      <span id="popover-text-pin">Pin Chat</span>
+    </div>
+    <div class="conv-menu-item" id="popover-item-mute">
+      <span class="conv-menu-icon">🔕</span>
+      <span id="popover-text-mute">Mute</span>
+    </div>
+    <div class="conv-menu-divider"></div>
+    <div class="conv-menu-item delete" id="popover-item-delete">
+      <span class="conv-menu-icon">🗑️</span>
+      <span>Delete Chat</span>
+    </div>
+  </div>
+
+  <script>
+    // ⚠️ ไม่มี auto-refresh — ผู้ใช้กดปุ่ม ↻ เองเท่านั้น
+    // ข้อมูลอ่านจาก local DB ที่ sync ไว้แล้ว ไม่ยิง Shopee API แบบ real-time
+    // env flags ส่งจาก server เพื่อควบคุม UI (composer / markRead)
+    window.ENABLE_SEND_MESSAGE = <%= enableSendMessage ? 'true' : 'false' %>;
+    window.ENABLE_MARK_READ = <%= enableMarkRead ? 'true' : 'false' %>;
+    let currentType = 'all';
+    let currentConversationId = null;
+    let currentConv = null;
+    let searchTerm = '';
+
+    // ===== Auto-poll: อ่านจาก MongoDB ทุก 3-5 วินาที (ไม่ใช้ Socket.io) =====
+    // - รายการแชท: อัปเดต unread badge ทุก 5 วินาที
+    // - ข้อความในแชทที่เปิดอยู่: ดึงข้อความใหม่ทุก 3 วินาที (append เฉพาะของใหม่)
+    // - ไม่ re-render ทั้งหน้า กันเสีย input ตอน admin กำลังพิมพ์
+    let lastMessageCount = 0; // จำนวนข้อความตอนโหลดล่าสุด — ใช้ตรวจว่ามีของใหม่ไหม
+    let pollConversationsTimer = null;
+    let pollMessagesTimer = null;
+    const POLL_CONVERSATIONS_MS = 2000;
+    const POLL_MESSAGES_MS = 1000;
+
+    // Filter state — เก็นว่าเลือก platform/shop ไหนบ้าง (ตามแนวทาง Unified Inbox ที่คุณออกแบบ)
+    // ค่าเริ่มต้นเปิดทุก platform ทุกร้าน (เหมือน "ทั้งหมด")
+    let selectedPlatforms = new Set();  // empty = ทุก platform
+    let selectedShopIds = new Set();    // empty = ทุกร้าน
+    let allShops = [];                  // cache ร้านทั้งหมดจาก API
+
+    // Platform metadata — ใช้ทั้งชื่อ, อักษรย่อ badge, และสีประจำแพลตฟอร์ม
+    // เพิ่มแพลตฟอร์มใหม่ที่นี่เป็นจุดเดียว ส่วนอื่น ๆ ใน UI จะอ้างอิงจากตารางนี้
+    const PLATFORM_META = {
+      shopee: { name: 'Shopee',      initial: 'S', color: '#EE4D2D' },
+      lazada: { name: 'Lazada',      initial: 'L', color: '#0F146D' },
+      tiktok: { name: 'TikTok Shop', initial: 'T', color: '#000000' },
+    };
+    // สีจุดแท็ก — ต้องตรงกับ preset tags ที่เปิดให้เลือกใน info panel (openInfoPanel)
+    const TAG_COLORS = {
+      'ลูกค้าประจำ': '#8A5A3F', 'VIP': '#E0973B', 'ร้องเรียน': '#C43D3D',
+      'ติดตามพัสดุ': '#6B5BD6', 'ยกเลิก/คืนเงิน': '#C43D3D',
+    };
+    function platformOf(conv) {
+      return PLATFORM_META[(conv && conv.platform) || 'shopee'] || PLATFORM_META.shopee;
+    }
+    // หาชื่อร้านจริงจาก allShops (โหลดมาแล้วสำหรับ filter menu) — ใช้ shop_id เป็น key
+    function shopNameOf(conv) {
+      if (!conv || !conv.shop_id) return '';
+      const shop = allShops.find(s => s.shop_id === conv.shop_id);
+      return shop ? (shop.shop_name || shop.shopname || '') : '';
+    }
+
+    function esc(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+    // ข้อความตัวอย่างสั้นๆ สำหรับ banner "มีข้อความใหม่" — คล้าย getConvPreview แต่รับ message เดี่ยวๆ
+    function getMsgPreviewText(m) {
+      const c = m.content || {};
+      if (c.text) return c.text;
+      if (m.message_type === 'image') return '📷 [รูปภาพ]';
+      if (m.message_type === 'video') return '🎥 [วิดีโอ]';
+      if (m.message_type === 'item') return '🛍️ [สินค้า]';
+      if (m.message_type === 'order') return '📦 [คำสั่งซื้อ]';
+      if (m.message_type === 'sticker') return '🖼️ [สติกเกอร์]';
+      return m.message_type || '';
+    }
+
+    // 📝 Draft ข้อความที่พิมพ์ค้างไว้ — เก็บใน localStorage แยกตาม conversation_id เพื่อไม่ให้หายตอนสลับแชท
+    function getDraft(convId) { try { return localStorage.getItem('draft:' + convId) || ''; } catch (e) { return ''; } }
+    function setDraft(convId, text) {
+      try {
+        if (text) localStorage.setItem('draft:' + convId, text);
+        else localStorage.removeItem('draft:' + convId);
+      } catch (e) {}
+    }
+
+    // 🔔 ระบบแจ้งเตือนเสียง Mario Coin + Chat Pop + Desktop Notification + Tab Title
+    function playMarioCoinSound() {
+      try {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContext) return;
+        const ctx = new AudioContext();
+        if (ctx.state === 'suspended') ctx.resume();
+
+        // โน้ตเหรียญ Mario: B5 (987.77 Hz) -> E6 (1318.51 Hz)
+        const notes = [
+          { freq: 987.77, start: 0, duration: 0.08 },
+          { freq: 1318.51, start: 0.08, duration: 0.35 }
+        ];
+
+        notes.forEach(n => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(n.freq, ctx.currentTime + n.start);
+          gain.gain.setValueAtTime(0.2, ctx.currentTime + n.start);
+          gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + n.start + n.duration);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(ctx.currentTime + n.start);
+          osc.stop(ctx.currentTime + n.start + n.duration);
+        });
+      } catch (e) {}
+    }
+
+    function playNotificationSound() {
+      playMarioCoinSound();
+    }
+
+    function requestNotificationPermission() {
+      if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission();
+      }
+    }
+
+    function sendDesktopNotification(title, body) {
+      if ('Notification' in window && Notification.permission === 'granted') {
+        try { new Notification(title, { body }); } catch(e) {}
+      }
+    }
+
+    function testDesktopNotification() {
+      if (!('Notification' in window)) {
+        alert('เบราว์เซอร์นี้ไม่รองรับ Push Notification');
+        return;
+      }
+      if (Notification.permission === 'granted') {
+        new Notification('💬 ทดสอบแจ้งเตือน Chat Center', {
+          body: 'ระบบแจ้งเตือนทำงานปกติ! เมื่อมีแชตใหม่เข้ามา Popup นี้จะเด้งขึ้นมาครับ',
+        });
+      } else if (Notification.permission !== 'denied') {
+        Notification.requestPermission().then(permission => {
+          if (permission === 'granted') {
+            new Notification('💬 ทดสอบแจ้งเตือน Chat Center', {
+              body: 'ยินดีด้วย! คุณเปิดใช้งาน Popup แจ้งเตือนเรียบร้อยแล้ว',
+            });
+          } else {
+            alert('คุณได้ปฏิเสธสิทธิ์การแจ้งเตือน กรุณาคลิกไอคอนกุญแจ 🔒 ข้าง URL เพื่อเปลี่ยน Notifications เป็น Allow');
+          }
+        });
+      } else {
+        alert('สิทธิ์การแจ้งเตือนถูกบล็อกอยู่! กรุณาคลิกที่ไอคอนรูปกุญแจ 🔒 ข้างซ้ายของ URL บนเบราว์เซอร์ แล้วปรับ Notifications ให้เป็น Allow (อนุญาต)');
+      }
+    }
+
+    document.addEventListener('click', () => {
+      requestNotificationPermission();
+    }, { once: true });
+
+    // ตัวเลขบน quick-view pills — นับจริงจาก DB ทั้งหมด ไม่ผูกกับ limit 100 ของ list ที่โหลดแสดงผล
+    async function loadCounts() {
+      try {
+        const params = new URLSearchParams();
+        if (selectedPlatforms.size > 0) params.set('platform', [...selectedPlatforms].join(','));
+        if (selectedShopIds.size > 0) params.set('shop_id', [...selectedShopIds].join(','));
+        const res = await fetch(`/api/conversations/counts?${params.toString()}`);
+        const counts = await res.json();
+        document.getElementById('count-all').textContent = counts.all || '';
+        document.getElementById('count-unread').textContent = counts.unread || '';
+        if (document.getElementById('count-answered')) document.getElementById('count-answered').textContent = counts.answered || '';
+        document.getElementById('count-pinned').textContent = counts.pinned || '';
+      } catch (err) { /* เงียบไว้ ไม่ให้กระทบการโหลด list หลัก */ }
+    }
+
+    let isInitialLoad = true;
+    let prevConvHtml = '';
+    let prevConvStateMap = new Map();
+
+    async function loadConversations(isPoll = false) {
+      // สร้าง query จาก filter ที่เลือก — platform และ shop_id คั่นด้วยจุลภาค
+      const params = new URLSearchParams({ type: currentType });
+      if (selectedPlatforms.size > 0) params.set('platform', [...selectedPlatforms].join(','));
+      if (selectedShopIds.size > 0) params.set('shop_id', [...selectedShopIds].join(','));
+      if (searchTerm) params.set('q', searchTerm);
+      const res = await fetch(`/api/conversations?${params.toString()}`);
+      const conversations = await res.json();
+      const filtered = conversations; // API กรองให้แล้ว ไม่ต้องกรองซ้ำฝั่ง client
+
+      loadCounts(); // ตัวเลขบน pill ต้องเป็นยอดจริงทั้งหมด ไม่ใช่แค่ที่โหลดมา (limit 100 ของ list ด้านบน)
+
+      // ตรวจหารายการที่มีข้อความใหม่ หรือ unread_count เพิ่มขึ้นในรอบ poll
+      const updatedConvIds = new Set();
+      const nextConvStateMap = new Map();
+
+      function getConvPreview(c) {
+        if (c.latest_message_content && c.latest_message_content.text) return c.latest_message_content.text;
+        if (c.latest_message_type === 'image') return '📷 [รูปภาพ]';
+        if (c.latest_message_type === 'video') return '🎥 [วิดีโอ]';
+        if (c.latest_message_type === 'item') return '🛍️ [สินค้า]';
+        if (c.latest_message_type === 'order') return '📦 [คำสั่งซื้อ]';
+        if (c.latest_message_type === 'sticker') return '🖼️ [สติกเกอร์]';
+        return c.latest_message_type || '';
+      }
+
+      for (const c of filtered) {
+        const preview = getConvPreview(c);
+        const msgId = c.latest_message_id || '';
+        const msgTs = c.last_message_timestamp ? new Date(c.last_message_timestamp).getTime() : 0;
+        const prev = prevConvStateMap.get(c.conversation_id);
+
+        if (prev) {
+          if (
+            (msgId && prev.latest_message_id && msgId !== prev.latest_message_id) ||
+            (msgTs && prev.last_message_timestamp && msgTs !== prev.last_message_timestamp) ||
+            c.unread_count > prev.unread_count ||
+            preview !== prev.preview
+          ) {
+            updatedConvIds.add(c.conversation_id);
+          }
+        } else if (!isInitialLoad && isPoll) {
+          updatedConvIds.add(c.conversation_id);
+        }
+
+        nextConvStateMap.set(c.conversation_id, {
+          unread_count: c.unread_count,
+          preview: preview,
+          latest_message_id: msgId,
+          last_message_timestamp: msgTs
+        });
+      }
+
+      // 🔔 เล่นเสียง + แจ้งเตือน Popup เมื่อมีแชทใหม่ในรอบ poll
+      if (updatedConvIds.size > 0 && isPoll && !isInitialLoad) {
+        playNotificationSound();
+        const unreadSum = filtered.reduce((acc, curr) => acc + (curr.unread_count || 0), 0);
+        document.title = unreadSum > 0 ? `(${unreadSum}) Inbox - Unified Chat` : 'Inbox - Unified Chat';
+        sendDesktopNotification('💬 มีแชทใหม่เข้ามา!', `มี ${updatedConvIds.size} รายการแชทได้รับการอัปเดต`);
+      }
+
+      function renderConvItem(c) {
+        const preview = getConvPreview(c);
+        const draft = getDraft(c.conversation_id);
+        const timeStr = c.last_message_timestamp ? new Date(c.last_message_timestamp).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) : '';
+        const initials = (c.to_name || '?').slice(0, 2).toUpperCase();
+        const plat = platformOf(c);
+        const shopName = shopNameOf(c);
+        return `
+        <div class="conv-item ${c.pinned ? 'pinned' : ''} ${c.conversation_id === currentConversationId ? 'active' : ''}" data-id="${c.conversation_id}">
+          <div class="conv-avatar-wrap">
+            <div class="conv-avatar-inner-wrap">
+              <div class="conv-avatar" style="box-shadow: 0 0 0 2px var(--panel-bg), 0 0 0 3.5px ${plat.color};">
+                ${c.to_avatar ? `<img src="${esc(c.to_avatar)}" onerror="this.style.display='none'">` : esc(initials)}
+              </div>
+              <span class="conv-platform-badge" style="background:${plat.color};">${esc(plat.initial)}</span>
+            </div>
+            <div class="conv-platform-label" style="color:${plat.color};">${esc(plat.name)}</div>
+          </div>
+          <div class="conv-info">
+            <div class="conv-top-row">
+              ${c.unread_count > 0 ? '<span class="conv-unread-dot"></span>' : ''}
+              <div class="conv-name ${c.unread_count > 0 ? 'unread' : 'read'}">${esc(c.to_name) || 'ไม่ทราบชื่อ'}</div>
+            </div>
+            <div class="conv-bottom-row">
+              <div class="conv-preview ${c.unread_count > 0 ? 'unread' : ''}">${draft ? `<span class="conv-draft-label">[Draft]</span> ${esc(draft)}` : esc(preview)}</div>
+              <div class="conv-time">${esc(timeStr)}</div>
+            </div>
+            <div class="conv-bottom-row" style="margin-top:6px;">
+              <span class="conv-tag-dots">
+                ${(c.tags || []).map(t => `<span class="tag-dot-sm" title="${esc(t)}" style="background:${TAG_COLORS[t] || 'var(--text-muted)'};"></span>`).join('')}
+                ${c.assigned_agent ? `<span class="conv-agent-name">${esc(c.assigned_agent)}</span>` : ''}
+              </span>
+              <span class="conv-bottom-right">
+                ${shopName ? `<span class="conv-shop-name-inline" title="${esc(shopName)}">${esc(shopName)}</span>` : ''}
+                <button class="conv-mute-btn ${c.mute ? 'active' : ''}" data-mute-id="${c.conversation_id}" data-muted="${c.mute}" title="${c.mute ? 'เปิดเสียงแจ้งเตือน (Unmute)' : 'ปิดเสียงแจ้งเตือน (Mute)'}">${c.mute ? '🔕' : '🔔'}</button>
+                <button class="conv-pin-btn ${c.pinned ? 'active' : ''}" data-pin-id="${c.conversation_id}" data-pinned="${c.pinned}" title="ปักหมุด/เลิกปักหมุด">📌</button>
+                <button class="conv-dropdown-btn" data-id="${c.conversation_id}" data-unread="${c.unread_count > 0}" data-pinned="${c.pinned}" data-muted="${c.mute}" title="เมนูย่อย">˅</button>
+              </span>
+            </div>
+          </div>
+          ${c.unread_count > 0 ? `<div class="conv-unread-badge">${c.unread_count}</div>` : ''}
+        </div>`;
+      }
+
+      let newHtml = '';
+      if (filtered.length === 0) {
+        newHtml = '<p class="empty-state" style="margin:24px;">ไม่พบแชท</p>';
+      } else {
+        newHtml = filtered.map(renderConvItem).join('');
+      }
+
+      if (isPoll && newHtml === prevConvHtml) {
+        prevConvStateMap = nextConvStateMap;
+        return;
+      }
+
+      prevConvHtml = newHtml;
+      prevConvStateMap = nextConvStateMap;
+
+      const list = document.getElementById('conversation-list');
+      list.innerHTML = newHtml;
+
+      list.querySelectorAll('.conv-item').forEach(el => {
+        el.addEventListener('click', (e) => {
+          if (e.target.closest('.conv-pin-btn') || e.target.closest('.conv-mute-btn') || e.target.closest('.conv-dropdown-btn')) return;
+          openConversation(el.dataset.id);
+        });
+      });
+
+      const menuPopover = document.getElementById('conv-menu-popover');
+      let activeMenuConvId = null;
+
+      list.querySelectorAll('.conv-dropdown-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const id = btn.dataset.id;
+          const isUnread = btn.dataset.unread === 'true';
+          const isPinned = btn.dataset.pinned === 'true';
+          const isMuted = btn.dataset.muted === 'true';
+          activeMenuConvId = id;
+
+          document.getElementById('popover-text-unread').textContent = isUnread ? 'Mark as Read' : 'Unread';
+          document.getElementById('popover-text-pin').textContent = isPinned ? 'Unpin Chat' : 'Pin Chat';
+          document.getElementById('popover-text-mute').textContent = isMuted ? 'Unmute' : 'Mute';
+
+          const rect = btn.getBoundingClientRect();
+          menuPopover.style.top = `${rect.bottom + window.scrollY + 4}px`;
+          menuPopover.style.left = `${Math.max(10, Math.min(rect.left + window.scrollX - 110, window.innerWidth - 170))}px`;
+          menuPopover.classList.add('open');
+        });
+      });
+
+      document.addEventListener('click', (e) => {
+        if (!e.target.closest('.conv-dropdown-btn') && !e.target.closest('#conv-menu-popover')) {
+          menuPopover.classList.remove('open');
+        }
+      });
+
+      document.getElementById('popover-item-unread').onclick = async () => {
+        if (!activeMenuConvId) return;
+        const isUnread = document.getElementById('popover-text-unread').textContent === 'Unread';
+        menuPopover.classList.remove('open');
+        try {
+          await fetch(`/api/conversations/${activeMenuConvId}/${isUnread ? 'unread' : 'read'}`, { method: 'POST' });
+          loadConversations();
+        } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
+      };
+
+      document.getElementById('popover-item-pin').onclick = async () => {
+        if (!activeMenuConvId) return;
+        const isPin = document.getElementById('popover-text-pin').textContent === 'Pin Chat';
+        menuPopover.classList.remove('open');
+        try {
+          await fetch(`/api/conversations/${activeMenuConvId}/${isPin ? 'pin' : 'unpin'}`, { method: 'POST' });
+          loadConversations();
+        } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
+      };
+
+      document.getElementById('popover-item-mute').onclick = async () => {
+        if (!activeMenuConvId) return;
+        const isMute = document.getElementById('popover-text-mute').textContent === 'Mute';
+        menuPopover.classList.remove('open');
+        try {
+          await fetch(`/api/conversations/${activeMenuConvId}/${isMute ? 'mute' : 'unmute'}`, { method: 'POST' });
+          loadConversations();
+          if (currentConversationId === activeMenuConvId) openConversation(activeMenuConvId);
+        } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
+      };
+
+      document.getElementById('popover-item-delete').onclick = async () => {
+        if (!activeMenuConvId) return;
+        const idToDelete = activeMenuConvId;
+        menuPopover.classList.remove('open');
+        if (!confirm('คุณต้องการลบแชทนี้ใช่หรือไม่? (การลบจะยิง delete_conversation ไป Shopee)')) return;
+        try {
+          await fetch(`/api/conversations/${idToDelete}`, { method: 'DELETE' });
+          if (currentConversationId === idToDelete) {
+            document.getElementById('thread-panel').innerHTML = '<p class="empty-state">เลือกแชทเพื่อดูข้อความ</p>';
+            currentConversationId = null;
+          }
+          loadConversations();
+        } catch (err) { alert('ลบไม่สำเร็จ: ' + err.message); }
+      };
+      list.querySelectorAll('.conv-mute-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const id = btn.dataset.muteId;
+          const isMuted = btn.dataset.muted === 'true';
+          const action = isMuted ? 'unmute' : 'mute';
+          try {
+            await fetch(`/api/conversations/${id}/${action}`, { method: 'POST' });
+            loadConversations();
+            if (currentConversationId === id) openConversation(id);
+          } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
+        });
+      });
+      list.querySelectorAll('.conv-pin-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const id = btn.dataset.pinId;
+          const pinned = btn.dataset.pinned === 'true';
+          await fetch(`/api/conversations/${id}/${pinned ? 'unpin' : 'pin'}`, { method: 'POST' });
+          loadConversations();
+        });
+      });
+
+      if (window.gsap) {
+        if (isInitialLoad || !isPoll) {
+          const items = list.querySelectorAll('.conv-item');
+          if (items.length) gsap.fromTo(items, { opacity: 0, x: -16 }, { opacity: 1, x: 0, duration: 0.3, stagger: 0.03, ease: 'power2.out' });
+          isInitialLoad = false;
+        } else if (isPoll && updatedConvIds.size > 0) {
+          updatedConvIds.forEach(id => {
+            const itemEl = list.querySelector(`.conv-item[data-id="${id}"]`);
+            if (itemEl) {
+              gsap.fromTo(itemEl, 
+                { backgroundColor: 'rgba(238, 77, 45, 0.25)', scale: 1.02 }, 
+                { backgroundColor: 'transparent', scale: 1, duration: 0.8, ease: 'power2.out' }
+              );
+            }
+          });
+        }
+      }
+    }
+
+    // ⚠️ ข้อมูล order/item ใน Shopee message content มีแค่ order_sn/item_id (reference)
+    // ไม่มีชื่อสินค้า/ราคา/สถานะจริง — ต้องเรียก get_order_detail/get_item_base_info เพิ่มถึงจะได้
+    // (ยังไม่ implement ใน Phase 1) จึงแสดงเป็น "การ์ดอ้างอิง" ตรงไปตรงมา ไม่ใส่ข้อมูลปลอม
+    function renderMessageBody(m) {
+      const c = m.content || {};
+      if (m.message_type === 'order' && c.order_sn) {
+        return `
+          <div class="msg-ref-card">
+            <span class="msg-ref-icon">📦</span>
+            <div class="msg-ref-body">
+              <div class="msg-ref-title">อ้างอิงคำสั่งซื้อ</div>
+              <div class="msg-ref-value">${esc(c.order_sn)}</div>
+            </div>
+          </div>`;
+      }
+      if (m.message_type === 'item' && c.item_id) {
+        const shopId = c.shop_id || m.shop_id || (typeof currentConv !== 'undefined' && currentConv && currentConv.shop_id) || '';
+        const linkUrl = shopId ? `https://shopee.co.th/product/${esc(shopId)}/${esc(c.item_id)}` : `https://shopee.co.th/search?keyword=${esc(c.item_id)}`;
+        return `
+          <div class="msg-ref-card msg-ref-card-item" data-item-id="${esc(c.item_id)}" data-shop-id="${esc(shopId)}">
+            <a href="${linkUrl}" target="_blank" rel="noopener" class="msg-ref-link" title="คลิกเพื่อเปิดสินค้าบน Shopee (${linkUrl})">
+              <div class="msg-ref-img-wrap">
+                <span class="msg-ref-icon">🛍️</span>
+              </div>
+              <div class="msg-ref-body">
+                <div class="msg-ref-title">อ้างอิงสินค้า</div>
+                <div class="msg-ref-value">item_id: ${esc(c.item_id)}</div>
+                <div class="msg-ref-price-row" style="display:none;">
+                  <span class="msg-ref-price"></span>
+                  <span class="msg-ref-price-original"></span>
+                </div>
+                <div class="msg-ref-shipping-badge"></div>
+              </div>
+            </a>
+          </div>`;
+      }
+      if (m.message_type === 'video') {
+        const videoUrl = c.video_url || c.url;
+        if (videoUrl) {
+          return `
+            <div class="msg-video-card">
+              <video class="msg-video" src="${esc(videoUrl)}" controls poster="${esc(c.thumb_url || '')}" preload="metadata"></video>
+            </div>`;
+        }
+        return `<div class="msg-bubble">🎥 วิดีโอแนบ ${c.video_id ? '(vid: ' + esc(c.video_id) + ')' : '(กำลังประมวลผล)'}</div>`;
+      }
+      if (m.message_type === 'image' && (c.image_url || c.url)) {
+        const imgUrl = c.image_url || c.url;
+        return `<img class="msg-image" src="${esc(imgUrl)}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'msg-bubble',textContent:'[รูปภาพ — โหลดไม่ได้]'}))">`;
+      }
+      if (m.message_type === 'sticker') {
+        if (c.image_url) {
+          return `<img class="msg-sticker" src="${esc(c.image_url)}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'msg-bubble',textContent:'🖼️ [สติกเกอร์ — โหลดไม่ได้]'}))">`;
+        }
+        return `<div class="msg-bubble">🖼️ [สติกเกอร์]</div>`;
+      }
+      const text = c.text || `[${esc(m.message_type || 'msg')}]`;
+      const vodMatch = text.match(/(https?:\/\/[^\s]+(?:\.mp4|vod\.susercontent\.com[^\s]*|cvf\.shopee\.co\.th[^\s]*|susercontent\.com\/api\/v4\/[^\s]*))/i);
+      if (vodMatch) {
+        const vUrl = vodMatch[1];
+        const extraText = text.replace(vUrl, '').replace(/^🎥\s*วิดีโอแนบ:\s*/, '').trim();
+        return `
+          <div class="msg-video-card">
+            ${extraText ? `<div class="msg-bubble" style="margin-bottom:6px;">${esc(extraText)}</div>` : ''}
+            <video class="msg-video" src="${esc(vUrl)}" controls preload="metadata"></video>
+          </div>`;
+      }
+      return `<div class="msg-bubble">${esc(text)}</div>`;
+    }
+
+    function renderMessageStatusHtml(m) {
+      const time = m.created_timestamp ? new Date(m.created_timestamp).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) : '';
+      if (m.direction !== 'out') {
+        return time ? `<div class="msg-time">${time}</div>` : '';
+      }
+      let statusBadge = '';
+      if (m.delivery_status === 'read') {
+        statusBadge = `<span class="msg-status msg-status-read" title="อ่านแล้ว">✓✓</span>`;
+      } else if (m.delivery_status === 'failed') {
+        statusBadge = `<span class="msg-status msg-status-failed" title="ส่งไม่ผ่าน">⚠️</span>`;
+      } else {
+        statusBadge = `<span class="msg-status msg-status-sent" title="ส่งแล้ว">✓</span>`;
+      }
+      return `<div class="msg-time">${time} ${statusBadge}</div>`;
+    }
+
+    async function loadProductDetailsAsync() {
+      const itemCards = document.querySelectorAll('.msg-ref-card-item:not(.loaded)');
+      itemCards.forEach(async (card) => {
+        card.classList.add('loaded');
+        const itemId = card.dataset.itemId;
+        const shopId = card.dataset.shopId || '';
+        if (!itemId) return;
+        try {
+          const res = await fetch(`/api/items/${itemId}?shop_id=${shopId}`);
+          if (!res.ok) return;
+          const data = await res.json();
+          const item = data && data.item_list && data.item_list[0];
+          if (item) {
+            const titleEl = card.querySelector('.msg-ref-title');
+            const valueEl = card.querySelector('.msg-ref-value');
+            const imgWrap = card.querySelector('.msg-ref-img-wrap');
+            const priceRowEl = card.querySelector('.msg-ref-price-row');
+            const priceEl = card.querySelector('.msg-ref-price');
+            const priceOriginalEl = card.querySelector('.msg-ref-price-original');
+            const shippingBadgeEl = card.querySelector('.msg-ref-shipping-badge');
+
+            if (item.item_name && titleEl) {
+              titleEl.textContent = item.item_name;
+              titleEl.style.fontSize = '12.5px';
+              titleEl.style.fontWeight = '700';
+              titleEl.style.color = 'var(--text-primary)';
+              titleEl.style.textTransform = 'none';
+              titleEl.style.display = '-webkit-box';
+              titleEl.style.webkitLineClamp = '2';
+              titleEl.style.webkitBoxOrient = 'vertical';
+              titleEl.style.overflow = 'hidden';
+            }
+            if (valueEl) valueEl.style.display = 'none';
+            if (item.image && item.image.image_url_list && item.image.image_url_list[0] && imgWrap) {
+              imgWrap.innerHTML = `<img src="${esc(item.image.image_url_list[0])}" class="msg-ref-thumb">`;
+            }
+            if (item.price_info && item.price_info[0] && priceEl && priceRowEl) {
+              const { current_price, original_price } = item.price_info[0];
+              const p = current_price || original_price;
+              if (p) {
+                priceEl.textContent = `฿${Number(p).toLocaleString('th-TH')}`;
+                if (original_price && current_price && original_price > current_price && priceOriginalEl) {
+                  priceOriginalEl.textContent = `฿${Number(original_price).toLocaleString('th-TH')}`;
+                  priceOriginalEl.style.display = 'inline';
+                }
+                priceRowEl.style.display = 'flex';
+              }
+            }
+            // ⚡ ป้าย "ส่งทันที < 4 ชั่วโมง" — มาจาก logistic_info.logistic_id 70126 "Instant Delivery" ที่เปิดใช้งานสำหรับสินค้านี้
+            const hasInstantDelivery = item.logistic_info && item.logistic_info.some(l => l.logistic_id === 70126 && l.enabled);
+            if (hasInstantDelivery && shippingBadgeEl) {
+              shippingBadgeEl.textContent = '⚡ ส่งทันที < 4 ชั่วโมง';
+              shippingBadgeEl.style.display = 'flex';
+            }
+          }
+        } catch (e) {}
+      });
+    }
+
+    async function openConversation(id) {
+      currentConversationId = id;
+      prevConvHtml = '';
+      document.querySelectorAll('#conversation-list .conv-item').forEach(el => el.classList.toggle('active', el.dataset.id === id));
+      const [convRes, msgRes] = await Promise.all([
+        fetch(`/api/conversations/${id}`),
+        fetch(`/api/conversations/${id}/messages`),
+      ]);
+      const conv = convRes.ok ? await convRes.json() : null;
+      currentConv = conv;
+      const messages = await msgRes.json();
+
+      const panel = document.getElementById('thread-panel');
+      const plat = platformOf(conv);
+      const canSend = window.ENABLE_SEND_MESSAGE === true;
+      const canMarkRead = window.ENABLE_MARK_READ === true;
+      const unread = conv && conv.unread_count > 0;
+      const isClosed = conv && conv.status === 'closed';
+      // 🛍️ "ผู้ซื้อกำลังสอบถามเกี่ยวกับสินค้าต่อไปนี้" — Shopee แนบ source_content.item_id มากับ "ทุก" ข้อความขาเข้า
+      // (ไม่ใช่แค่ message_type: item — เช่น sticker/text ก็มีติดมาด้วย) เป็น context ว่าตอนนั้นลูกค้ากำลังดู/คุยเรื่องสินค้าไหนอยู่
+      // ใช้ message ขาเข้าล่าสุดที่มี source_content.item_id ติดมา — ยืนยันแล้วว่าตรงกับที่ Shopee Seller Centre แสดงจริง
+      const inquiryItem = [...messages].reverse().find(m => m.direction === 'in' && m.raw_payload && m.raw_payload.source_content && m.raw_payload.source_content.item_id);
+      const inquiryItemId = inquiryItem && inquiryItem.raw_payload.source_content.item_id;
+      panel.innerHTML = `
+        <div class="thread-header">
+          <div class="thread-header-left">
+            <div class="thread-avatar" style="box-shadow: 0 0 0 2px var(--panel-bg), 0 0 0 3.5px ${plat.color};">${esc((conv && conv.to_name || '?').slice(0, 2).toUpperCase())}</div>
+            <div>
+              <div class="thread-name">${esc(conv && conv.to_name) || 'ไม่ทราบชื่อ'}</div>
+              <div class="thread-sub">
+                <span class="thread-platform-dot" style="background:${plat.color};"></span>${esc(plat.name)}
+                ${unread ? ' · <span style="color:var(--accent);font-weight:700;">ยังไม่อ่าน ' + conv.unread_count + '</span>' : ''}
+                ${conv && conv.assigned_agent ? ` · <span style="color:var(--text-secondary);">มอบหมาย: ${esc(conv.assigned_agent)}</span>` : ''}
+                ${isClosed ? ' · <span style="color:var(--text-muted);">ปิดการสนทนาแล้ว</span>' : ''}
+              </div>
+            </div>
+          </div>
+          <div class="thread-actions">
+            <button class="bookmark-btn ${conv && conv.pinned ? 'active' : ''}" id="bookmark-btn" title="ปักหมุด/เลิกปักหมุด">📌</button>
+            <button class="bookmark-btn ${conv && conv.mute ? 'active' : ''}" id="mute-btn" title="${conv && conv.mute ? 'เปิดเสียงการแจ้งเตือน (Unmute)' : 'ปิดเสียงการแจ้งเตือน (Mute)'}">${conv && conv.mute ? '🔕' : '🔔'}</button>
+            ${unread ? `<button class="btn-pill" id="mark-read-btn" title="${canMarkRead ? 'อ่านแล้ว (sync ไป Shopee)' : 'อ่านแล้ว (local DB เท่านั้น — ENABLE_MARK_READ=false)'}">✓ อ่านแล้ว</button>` : ''}
+            <button class="btn-pill" id="assign-btn" title="มอบหมายแชทนี้ให้แอดมิน">${conv && conv.assigned_agent ? '👤 ' + esc(conv.assigned_agent) : '👤 มอบหมาย'}</button>
+            <button class="btn-pill ${isClosed ? 'btn-pill-accent' : ''}" id="close-toggle-btn" title="${isClosed ? 'เปิดการสนทนาอีกครั้ง' : 'ปิดการสนทนา'}">${isClosed ? '↺ เปิดใหม่' : '✕ ปิดการสนทนา'}</button>
+            ${canSend ? '' : '<span class="readonly-tag">ส่งปิดอยู่</span>'}
+          </div>
+        </div>
+        ${inquiryItem ? `
+        <div class="buyer-inquiry-banner" id="buyer-inquiry-banner">
+          <div class="buyer-inquiry-header">
+            <span>🛍️ ผู้ซื้อกำลังสอบถามเกี่ยวกับสินค้าต่อไปนี้</span>
+            <button type="button" class="buyer-inquiry-toggle" id="buyer-inquiry-toggle">ย่อ</button>
+          </div>
+          <div class="buyer-inquiry-body" id="buyer-inquiry-body">
+            <div class="msg-ref-card msg-ref-card-item" data-item-id="${esc(inquiryItemId)}" data-shop-id="${esc(inquiryItem.shop_id || (conv && conv.shop_id) || '')}">
+              <a href="${(conv && conv.shop_id) ? `https://shopee.co.th/product/${esc(conv.shop_id)}/${esc(inquiryItemId)}` : `https://shopee.co.th/search?keyword=${esc(inquiryItemId)}`}" target="_blank" rel="noopener" class="msg-ref-link">
+                <div class="msg-ref-img-wrap">
+                  <span class="msg-ref-icon">🛍️</span>
+                </div>
+                <div class="msg-ref-body">
+                  <div class="msg-ref-title">อ้างอิงสินค้า</div>
+                  <div class="msg-ref-value">item_id: ${esc(inquiryItemId)}</div>
+                  <div class="msg-ref-price-row" style="display:none;">
+                    <span class="msg-ref-price"></span>
+                    <span class="msg-ref-price-original"></span>
+                  </div>
+                  <div class="msg-ref-shipping-badge"></div>
+                </div>
+              </a>
+            </div>
+          </div>
+        </div>
+        ` : ''}
+        <div class="messages-scroll-wrap">
+          <div class="new-msg-banner" id="new-msg-banner"><span>↓</span> <span id="new-msg-banner-text"></span></div>
+          <button type="button" class="scroll-to-bottom-btn" id="scroll-to-bottom-btn" title="เลื่อนไปข้อความล่าสุด">↓<span class="unread-dot" id="scroll-to-bottom-dot"></span></button>
+          <div class="messages-scroll" id="messages-scroll">
+          ${messages.length === 0 ? '<p class="empty-state">ยังไม่มีข้อความใน local DB (ต้องรัน poll worker ครั้งแรกเพื่อ sync)</p>' : messages.map(m => `
+            <div class="msg-row ${m.direction}">
+              ${renderMessageBody(m)}
+              ${renderMessageStatusHtml(m)}
+            </div>`).join('')}
+          </div>
+        </div>
+        <div class="composer-area">
+          <div class="composer-error" id="composer-error" style="display:none;"></div>
+          ${canSend ? `
+            <div class="quick-reply-bar">
+              <span class="quick-reply-label">⚡ ตอบด่วน:</span>
+              <button class="quick-reply-pill" data-text="สินค้ามีพร้อมส่งครับ กดสั่งซื้อเข้ามาได้เลยครับ">📦 มีพร้อมส่ง</button>
+              <button class="quick-reply-pill" data-text="จัดส่งสินค้าทุกวันจันทร์ - เสาร์ ตัดรอบ 14:00 น. ครับ">🚚 รอบจัดส่ง</button>
+              <button class="quick-reply-pill" data-text="ขอบคุณที่อุดหนุนสินค้ากับทางร้านครับ หากมีข้อสงสัยสอบถามได้ตลอดนะครับ">❤️ ขอบคุณครับ</button>
+              <button class="quick-reply-pill" data-text="เช็คสถานะพัสดุได้ในรายละเอียดคำสั่งซื้อในแอป Shopee ได้เลยนะครับ">🔎 เช็คพัสดุ</button>
+            </div>
+            <div class="product-picker" id="product-picker" style="display:none;">
+              <div class="product-picker-header">
+                <input type="text" id="product-picker-search" placeholder="ค้นหาสินค้า...">
+                <button type="button" class="product-picker-close" id="product-picker-close" title="ปิด">✕</button>
+              </div>
+              <div class="product-picker-list" id="product-picker-list">
+                <div class="product-picker-empty">กำลังโหลดสินค้า...</div>
+              </div>
+            </div>
+            <div class="composer-pill">
+              <label class="composer-img-btn" title="แนบรูปภาพส่ง">
+                📷
+                <input type="file" id="composer-img-file" accept="image/*" style="display:none;">
+              </label>
+              <label class="composer-img-btn" title="แนบวิดีโอส่ง (สูงสุด 30MB, 1-180 วินาที)">
+                🎥
+                <input type="file" id="composer-video-file" accept="video/*" style="display:none;">
+              </label>
+              <button type="button" class="composer-img-btn" id="composer-item-btn" title="แนะนำสินค้า">🛍️</button>
+              <textarea class="composer-input" id="composer-input" placeholder="พิมพ์ข้อความตอบ... (สูงสุด 600 ตัวอักษร, Shift+Enter ขึ้นบรรทัดใหม่)" maxlength="600" rows="1">${esc(getDraft(id))}</textarea>
+              <span class="composer-char-count" id="composer-char-count">0/600</span>
+              <button class="composer-send" id="composer-send" title="ส่ง">➤</button>
+            </div>
+          ` : `
+            <div class="composer-readonly-notice">
+              🔒 โหมดอ่านอย่างเดียว — ส่งข้อความปิดอยู่ (ENABLE_SEND_MESSAGE=false)
+              ตั้งค่าใน .env เพื่อเปิดใช้งาน
+            </div>
+          `}
+        </div>
+      `;
+
+      const scroll = document.getElementById('messages-scroll');
+      scroll.scrollTop = scroll.scrollHeight;
+      loadProductDetailsAsync();
+
+      // 🛍️ ย่อ/ขยาย banner "ผู้ซื้อกำลังสอบถามเกี่ยวกับสินค้าต่อไปนี้"
+      const inquiryToggleBtn = document.getElementById('buyer-inquiry-toggle');
+      if (inquiryToggleBtn) {
+        inquiryToggleBtn.addEventListener('click', () => {
+          const body = document.getElementById('buyer-inquiry-body');
+          const collapsed = body.style.display === 'none';
+          body.style.display = collapsed ? 'block' : 'none';
+          inquiryToggleBtn.textContent = collapsed ? 'ย่อ' : 'ขยาย';
+        });
+      }
+
+      // 🔽 ปุ่ม/แจ้งเตือน "ข้อความใหม่" เมื่อ scroll ขึ้นไปดูข้อความเก่าอยู่ (คล้ายระบบแชทของ Shopee)
+      const newMsgBanner = document.getElementById('new-msg-banner');
+      const newMsgBannerText = document.getElementById('new-msg-banner-text');
+      const scrollToBottomBtn = document.getElementById('scroll-to-bottom-btn');
+      const scrollToBottomDot = document.getElementById('scroll-to-bottom-dot');
+      const isNearBottom = () => scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
+      const goToBottom = () => {
+        scroll.scrollTop = scroll.scrollHeight;
+        newMsgBanner.classList.remove('show');
+        scrollToBottomBtn.classList.remove('show');
+        scrollToBottomDot.style.display = 'none';
+      };
+      newMsgBanner.addEventListener('click', goToBottom);
+      scrollToBottomBtn.addEventListener('click', goToBottom);
+      scroll.addEventListener('scroll', () => {
+        if (isNearBottom()) {
+          newMsgBanner.classList.remove('show');
+          scrollToBottomBtn.classList.remove('show');
+          scrollToBottomDot.style.display = 'none';
+        } else {
+          scrollToBottomBtn.classList.add('show');
+        }
+      });
+
+      // บันทึกจำนวนข้อความตอนเปิด — ใช้ตรวจข้อความใหม่ตอน poll
+      lastMessageCount = messages.length;
+      // เริ่ม poll ข้อความใหม่สำหรับแชทที่เปิดอยู่
+      startMessagePolling();
+
+      // ปุ่ม markRead — กดเอง ไม่ auto (กันกระทบ unread บน Shopee/Zaapi)
+      const markReadBtn = document.getElementById('mark-read-btn');
+      if (markReadBtn) {
+        markReadBtn.addEventListener('click', async () => {
+          markReadBtn.disabled = true;
+          markReadBtn.textContent = 'กำลังอ่าน...';
+          try {
+            await fetch(`/api/conversations/${id}/read`, { method: 'POST' });
+            markReadBtn.textContent = '✓ อ่านแล้ว';
+            if (window.gsap) gsap.to(markReadBtn, { opacity: 0, duration: 0.5, delay: 0.5, onComplete: () => markReadBtn.remove() });
+            loadConversations();
+          } catch (err) {
+            markReadBtn.disabled = false;
+            markReadBtn.textContent = '✓ อ่านแล้ว (ลองใหม่)';
+          }
+        });
+      }
+
+      // ปุ่มมอบหมาย — เก็บ local DB เท่านั้น ไม่เกี่ยวกับ Shopee
+      const assignBtn = document.getElementById('assign-btn');
+      if (assignBtn) {
+        assignBtn.addEventListener('click', async () => {
+          const current = conv && conv.assigned_agent || '';
+          const name = prompt('มอบหมายแชทนี้ให้ใคร? (เว้นว่างเพื่อยกเลิกมอบหมาย)', current);
+          if (name === null) return; // ยกเลิก prompt
+          try {
+            await fetch(`/api/conversations/${id}/assign`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ agent: name.trim() || null }),
+            });
+            openConversation(id);
+            loadConversations();
+          } catch (err) { alert('มอบหมายไม่สำเร็จ: ' + err.message); }
+        });
+      }
+
+      // ปุ่มปิด/เปิดการสนทนา — local DB เท่านั้น ไม่กระทบ Shopee
+      const closeToggleBtn = document.getElementById('close-toggle-btn');
+      if (closeToggleBtn) {
+        closeToggleBtn.addEventListener('click', async () => {
+          const action = isClosed ? 'reopen' : 'close';
+          try {
+            await fetch(`/api/conversations/${id}/${action}`, { method: 'POST' });
+            openConversation(id);
+            loadConversations();
+          } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
+        });
+      }
+
+      // ปุ่มบันทึกแชท (🔖) — ใช้ field pinned เดียวกับปุ่ม 📌 ในรายการแชท (ไม่ใช่ field ใหม่)
+      const bookmarkBtn = document.getElementById('bookmark-btn');
+      if (bookmarkBtn) {
+        bookmarkBtn.addEventListener('click', async () => {
+          const pinned = conv && conv.pinned;
+          try {
+            await fetch(`/api/conversations/${id}/${pinned ? 'unpin' : 'pin'}`, { method: 'POST' });
+            openConversation(id);
+            loadConversations();
+          } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
+        });
+      }
+
+      // ปุ่มปิด/เปิดเสียงแจ้งเตือน (🔕/🔔) — ยิง mute_conversation / unmute_conversation ไป Shopee
+      const muteBtn = document.getElementById('mute-btn');
+      if (muteBtn) {
+        muteBtn.addEventListener('click', async () => {
+          const isMuted = conv && conv.mute;
+          const action = isMuted ? 'unmute' : 'mute';
+          try {
+            await fetch(`/api/conversations/${id}/${action}`, { method: 'POST' });
+            openConversation(id);
+            loadConversations();
+          } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
+        });
+      }
+
+      // Composer ส่งข้อความ
+      const sendBtn = document.getElementById('composer-send');
+      const input = document.getElementById('composer-input');
+      const errorBox = document.getElementById('composer-error');
+      if (sendBtn && input) {
+        const send = async () => {
+          const text = input.value.trim();
+          if (!text) return;
+          // เคลียร์ช่องพิมพ์ทันทีแบบ optimistic — ไม่ต้องรอ network/Shopee API เสร็จก่อน (กันความรู้สึกหน่วง)
+          input.value = '';
+          input.style.height = 'auto';
+          setDraft(id, '');
+          if (typeof updateCharCount === 'function') updateCharCount();
+          sendBtn.disabled = true;
+          input.disabled = true;
+          errorBox.style.display = 'none';
+          try {
+            const res = await fetch(`/api/conversations/${id}/reply`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              // error จาก Shopee business rules (megaplan ข้อ 2.2) หรือ guard ฝั่งเรา — คืนข้อความกลับช่องพิมพ์ให้ ไม่ให้หายไปเฉยๆ
+              const msg = data.message || data.error || 'ส่งไม่สำเร็จ';
+              errorBox.textContent = '⚠️ ' + msg;
+              errorBox.style.display = 'block';
+              if (window.gsap) gsap.fromTo(errorBox, { opacity: 0, y: -5 }, { opacity: 1, y: 0, duration: 0.3 });
+              input.value = text;
+              setDraft(id, text);
+              if (typeof updateCharCount === 'function') updateCharCount();
+              sendBtn.disabled = false;
+              input.disabled = false;
+              input.focus();
+            } else {
+              // รีโหลดข้อความเพื่อโชว์ข้อความที่ส่ง — openConversation() จะสร้าง input ใหม่และโฟกัสให้เองตอนจบ
+              openConversation(id);
+            }
+          } catch (err) {
+            errorBox.textContent = '⚠️ ส่งไม่สำเร็จ: ' + err.message;
+            errorBox.style.display = 'block';
+            input.value = text;
+            setDraft(id, text);
+            if (typeof updateCharCount === 'function') updateCharCount();
+            sendBtn.disabled = false;
+            input.disabled = false;
+            input.focus();
+          }
+        };
+        // 🔢 นับจำนวนตัวอักษร (สูงสุด 600)
+        const charCountEl = document.getElementById('composer-char-count');
+        const updateCharCount = () => {
+          if (!charCountEl) return;
+          const len = input.value.length;
+          charCountEl.textContent = `${len}/600`;
+          charCountEl.classList.toggle('composer-char-count-warn', len >= 550);
+        };
+        // 📝 บันทึก draft ทุกครั้งที่พิมพ์ + ขยายความสูงช่องพิมพ์อัตโนมัติตามเนื้อหา
+        input.addEventListener('input', () => {
+          setDraft(id, input.value);
+          input.style.height = 'auto';
+          input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+          updateCharCount();
+        });
+        // Enter = ส่ง, Shift+Enter = ขึ้นบรรทัดใหม่
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            send();
+          }
+        });
+        // ตั้งความสูงเริ่มต้น + ตัวนับตัวอักษรให้พอดีกับ draft ที่โหลดมา (ถ้ามี)
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+        updateCharCount();
+        // ⚡ ตอบด่วน (Quick Replies)
+        panel.querySelectorAll('.quick-reply-pill').forEach(pill => {
+          pill.addEventListener('click', () => {
+            if (input) {
+              input.value = pill.dataset.text;
+              input.focus();
+            }
+          });
+        });
+
+        // 📷 ปุ่มแนบส่งรูปภาพ
+        const imgFileInput = document.getElementById('composer-img-file');
+        if (imgFileInput) {
+          imgFileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = async (evt) => {
+              const base64 = evt.target.result;
+              try {
+                sendBtn.disabled = true;
+                const res = await fetch(`/api/conversations/${id}/send-image`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ base64 }),
+                });
+                const data = await res.json();
+                if (res.ok) {
+                  openConversation(id);
+                } else {
+                  alert('ส่งรูปภาพไม่สำเร็จ: ' + (data.message || data.error));
+                }
+              } catch (err) {
+                alert('ส่งรูปภาพไม่สำเร็จ: ' + err.message);
+              }
+              sendBtn.disabled = false;
+            };
+            reader.readAsDataURL(file);
+          });
+        }
+
+        // 🎥 ปุ่มแนบส่งวิดีโอ (v2.sellerchat.upload_video + get_video_upload_result)
+        const videoFileInput = document.getElementById('composer-video-file');
+        if (videoFileInput) {
+          videoFileInput.addEventListener('change', async (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (!file) return;
+            if (file.size > 30 * 1024 * 1024) {
+              alert('ขนาดไฟล์วิดีโอเกิน 30MB (Shopee กำหนดไม่เกิน 30MB และความยาว 1-180 วินาที)');
+              return;
+            }
+            const reader = new FileReader();
+            reader.onload = async (evt) => {
+              const video_data = evt.target.result;
+              try {
+                sendBtn.disabled = true;
+                const res = await fetch(`/api/conversations/${id}/send-video`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ video_data }),
+                });
+                const data = await res.json();
+                if (res.ok) {
+                  openConversation(id);
+                } else {
+                  alert('ส่งวิดีโอไม่สำเร็จ: ' + (data.message || data.error));
+                }
+              } catch (err) {
+                alert('ส่งวิดีโอไม่สำเร็จ: ' + err.message);
+              } finally {
+                sendBtn.disabled = false;
+              }
+            };
+            reader.readAsDataURL(file);
+          });
+        }
+
+        // 🛍️ ปุ่มแนะนำสินค้า (v2.product.get_item_list + get_item_base_info -> ส่งเป็น message_type: item)
+        const itemBtn = document.getElementById('composer-item-btn');
+        const productPicker = document.getElementById('product-picker');
+        const productPickerList = document.getElementById('product-picker-list');
+        const productPickerSearch = document.getElementById('product-picker-search');
+        const productPickerClose = document.getElementById('product-picker-close');
+        if (itemBtn && productPicker) {
+          let productsLoaded = false;
+          let searchDebounce = null;
+
+          function renderProductList(items) {
+            if (!items || items.length === 0) {
+              productPickerList.innerHTML = '<div class="product-picker-empty">ไม่พบสินค้า</div>';
+              return;
+            }
+            productPickerList.innerHTML = items.map(p => `
+              <button type="button" class="product-pick-item" data-item-id="${esc(p.item_id)}">
+                ${p.image_url ? `<img class="product-pick-thumb" src="${esc(p.image_url)}">` : `<div class="product-pick-thumb"></div>`}
+                <div class="product-pick-body">
+                  <div class="product-pick-name">${esc(p.item_name || ('item_id: ' + p.item_id))}</div>
+                  ${p.price ? `<div class="product-pick-price">฿${Number(p.price).toLocaleString('th-TH')}</div>` : ''}
+                  ${p.hasInstantDelivery ? `<div class="product-pick-shipping-badge">⚡ ส่งทันที &lt; 4 ชั่วโมง</div>` : ''}
+                </div>
+              </button>`).join('');
+
+            productPickerList.querySelectorAll('.product-pick-item').forEach(btn => {
+              btn.addEventListener('click', async () => {
+                const itemId = btn.dataset.itemId;
+                productPickerList.querySelectorAll('.product-pick-item').forEach(b => b.disabled = true);
+                try {
+                  const res = await fetch(`/api/conversations/${id}/send-item`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ item_id: itemId }),
+                  });
+                  const data = await res.json();
+                  if (res.ok) {
+                    productPicker.style.display = 'none';
+                    openConversation(id);
+                  } else {
+                    alert('ส่งสินค้าไม่สำเร็จ: ' + (data.message || data.error));
+                    productPickerList.querySelectorAll('.product-pick-item').forEach(b => b.disabled = false);
+                  }
+                } catch (err) {
+                  alert('ส่งสินค้าไม่สำเร็จ: ' + err.message);
+                  productPickerList.querySelectorAll('.product-pick-item').forEach(b => b.disabled = false);
+                }
+              });
+            });
+          }
+
+          async function loadProducts(keyword) {
+            productPickerList.innerHTML = '<div class="product-picker-empty">กำลังโหลดสินค้า...</div>';
+            try {
+              const url = `/api/conversations/${id}/products` + (keyword ? `?keyword=${encodeURIComponent(keyword)}` : '');
+              const res = await fetch(url);
+              const data = await res.json();
+              if (res.ok) {
+                renderProductList(data.items);
+              } else {
+                productPickerList.innerHTML = `<div class="product-picker-empty">โหลดสินค้าไม่สำเร็จ: ${esc(data.message || data.error || '')}</div>`;
+              }
+            } catch (err) {
+              productPickerList.innerHTML = `<div class="product-picker-empty">โหลดสินค้าไม่สำเร็จ: ${esc(err.message)}</div>`;
+            }
+          }
+
+          itemBtn.addEventListener('click', () => {
+            const opening = productPicker.style.display === 'none';
+            productPicker.style.display = opening ? 'flex' : 'none';
+            if (opening && !productsLoaded) {
+              productsLoaded = true;
+              loadProducts('');
+            }
+          });
+          productPickerClose.addEventListener('click', () => { productPicker.style.display = 'none'; });
+          productPickerSearch.addEventListener('input', () => {
+            clearTimeout(searchDebounce);
+            searchDebounce = setTimeout(() => loadProducts(productPickerSearch.value.trim()), 350);
+          });
+          document.addEventListener('click', (e) => {
+            if (productPicker.style.display !== 'none' && !productPicker.contains(e.target) && e.target !== itemBtn) {
+              productPicker.style.display = 'none';
+            }
+          });
+        }
+
+        sendBtn.addEventListener('click', send);
+      }
+
+      // อัปเดต markRead อัตโนมัติเมื่อเปิดอ่านแชทที่มี unread > 0
+      if (conv && conv.unread_count > 0) {
+        fetch(`/api/conversations/${id}/read`, { method: 'POST' }).then(() => {
+          conv.unread_count = 0;
+          const itemEl = document.querySelector(`.conv-item[data-id="${id}"]`);
+          if (itemEl) {
+            const badge = itemEl.querySelector('.conv-unread-badge');
+            if (badge) badge.remove();
+            const dot = itemEl.querySelector('.conv-unread-dot');
+            if (dot) dot.remove();
+            const nameEl = itemEl.querySelector('.conv-name');
+            if (nameEl) nameEl.classList.replace('unread', 'read');
+            const previewEl = itemEl.querySelector('.conv-preview');
+            if (previewEl) previewEl.classList.remove('unread');
+          }
+          const state = prevConvStateMap.get(id);
+          if (state) state.unread_count = 0;
+        }).catch(() => {});
+      }
+      openInfoPanel(conv);
+
+      // โฟกัสช่องพิมพ์ให้พร้อมพิมพ์ทันที (เปิดแชทใหม่ / ส่งข้อความเสร็จแล้ว)
+      const inputToFocus = document.getElementById('composer-input');
+      if (inputToFocus) inputToFocus.focus();
+    }
+
+    function openInfoPanel(conv) {
+      const panel = document.getElementById('info-panel');
+      if (!conv) { panel.style.display = 'none'; return; }
+      const plat = platformOf(conv);
+      panel.style.display = 'block';
+      panel.innerHTML = `
+        <div class="info-header">
+          <div class="info-avatar-wrap">
+            <div class="info-avatar" style="box-shadow: 0 0 0 2px var(--panel-bg), 0 0 0 3.5px ${plat.color};">${esc((conv.to_name || '?').slice(0, 2).toUpperCase())}</div>
+            <span class="info-platform-badge" style="background:${plat.color};" title="${esc(plat.name)}">${esc(plat.name)}</span>
+          </div>
+          <div class="info-name">${esc(conv.to_name) || 'ไม่ทราบชื่อ'}</div>
+          ${shopNameOf(conv) ? `<div class="info-shop-name">${esc(shopNameOf(conv))}</div>` : ''}
+        </div>
+        <div class="info-tabs">
+          <button class="info-tab active" data-tab="info">ข้อมูล</button>
+          <button class="info-tab" data-tab="flow">Flow</button>
+        </div>
+        <div class="info-tab-content active" data-tab-content="info">
+          <div class="info-section">
+            <div class="info-section-title">ข้อมูลการติดต่อ</div>
+            <div class="info-field"><span class="k">${esc(plat.name)} user id</span><span class="v">${esc(conv.to_id)}</span></div>
+            <div class="info-field"><span class="k">conversation_id</span><span class="v">${esc(conv.conversation_id)}</span></div>
+            <div class="info-field"><span class="k">แพลตฟอร์ม</span><span class="v">${esc(plat.name)}</span></div>
+          </div>
+          <div class="info-section">
+            <div class="info-section-title">แท็กการสนทนา</div>
+            <div class="tag-list" id="tag-list">
+              ${(conv.tags || []).map(t => `<span class="tag-chip">${esc(t)}<button class="tag-remove" data-tag="${esc(t)}" title="ลบแท็ก">×</button></span>`).join('') || '<span style="font-size:12px;color:var(--text-muted);">ยังไม่มีแท็ก</span>'}
+            </div>
+            <div class="tag-presets" id="tag-presets">
+              ${['ลูกค้าประจำ','VIP','ร้องเรียน','ติดตามพัสดุ','ยกเลิก/คืนเงิน'].filter(t => !(conv.tags || []).includes(t)).map(t => `<button class="tag-preset-btn" data-tag="${esc(t)}">+ ${esc(t)}</button>`).join('')}
+            </div>
+          </div>
+          <div class="info-section">
+            <div class="info-section-title">📝 โน้ตเกี่ยวกับลูกค้า</div>
+            <textarea class="info-notes-input" id="customer-notes-input" placeholder="พิมพ์โน้ตความจำลูกค้าคนนี้..."></textarea>
+            <button class="btn-save-notes" id="save-notes-btn">💾 บันทึกโน้ต</button>
+          </div>
+        </div>
+        <div class="info-tab-content" data-tab-content="flow">
+          <div class="flow-list" id="flow-list"><div class="flow-empty">กำลังโหลด flow…</div></div>
+        </div>
+      `;
+
+      // แท็ก — เพิ่ม/ลบ แล้วบันทึกลง DB ทันที (local field ไม่เกี่ยวกับ Shopee)
+      async function saveTags(newTags) {
+        try {
+          await fetch(`/api/conversations/${conv.conversation_id}/tags`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tags: newTags }),
+          });
+          conv.tags = newTags;
+          openInfoPanel(conv);
+          loadConversations();
+        } catch (err) { alert('บันทึกแท็กไม่สำเร็จ: ' + err.message); }
+      }
+
+      // โหลดและบันทึกโน้ตลูกค้า
+      const notesInput = panel.querySelector('#customer-notes-input');
+      const saveNotesBtn = panel.querySelector('#save-notes-btn');
+      if (conv.to_id && notesInput) {
+        fetch(`/api/customers?q=${encodeURIComponent(conv.to_name || '')}`).then(r => r.json()).then(custs => {
+          const cust = custs.find(c => String(c.buyer_id) === String(conv.to_id));
+          if (cust && cust.notes) notesInput.value = cust.notes;
+        }).catch(() => {});
+
+        if (saveNotesBtn) {
+          saveNotesBtn.addEventListener('click', async () => {
+            saveNotesBtn.disabled = true;
+            saveNotesBtn.textContent = 'กำลังบันทึก...';
+            try {
+              await fetch(`/api/customers/${conv.to_id}/notes`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ notes: notesInput.value }),
+              });
+              saveNotesBtn.textContent = '✓ บันทึกสำเร็จ';
+              setTimeout(() => { saveNotesBtn.textContent = '💾 บันทึกโน้ต'; saveNotesBtn.disabled = false; }, 1500);
+            } catch (err) {
+              alert('บันทึกโน้ตไม่สำเร็จ: ' + err.message);
+              saveNotesBtn.disabled = false;
+            }
+          });
+        }
+      }
+      panel.querySelectorAll('.tag-remove').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const newTags = (conv.tags || []).filter(t => t !== btn.dataset.tag);
+          saveTags(newTags);
+        });
+      });
+      panel.querySelectorAll('.tag-preset-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const newTags = [...(conv.tags || []), btn.dataset.tag];
+          saveTags(newTags);
+        });
+      });
+
+      // tab switching
+      panel.querySelectorAll('.info-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+          panel.querySelectorAll('.info-tab').forEach(t => t.classList.remove('active'));
+          panel.querySelectorAll('.info-tab-content').forEach(c => c.classList.remove('active'));
+          tab.classList.add('active');
+          panel.querySelector(`[data-tab-content="${tab.dataset.tab}"]`).classList.add('active');
+          if (tab.dataset.tab === 'flow' && !flowLoaded[conv.conversation_id]) loadFlow(conv.conversation_id);
+        });
+      });
+
+      // GSAP panel intro
+      if (window.gsap) {
+        gsap.fromTo(panel, { x: 20, opacity: 0 }, { x: 0, opacity: 1, duration: 0.3, ease: 'power2.out' });
+        gsap.fromTo(panel.querySelectorAll('.info-tab'), { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.25, stagger: 0.05, ease: 'power2.out', delay: 0.1 });
+      }
+    }
+
+    // flow tab — ดึงจาก Message ที่มีอยู่ (ใช้ endpoint เดียวกับ thread) แสดงเป็น timeline กระชับ
+    const flowLoaded = {};
+    async function loadFlow(conversationId) {
+      const flowEl = document.getElementById('flow-list');
+      if (!flowEl) return;
+      try {
+        const res = await fetch(`/api/conversations/${conversationId}/messages`);
+        const messages = await res.json();
+        flowLoaded[conversationId] = true;
+        if (!messages.length) {
+          flowEl.innerHTML = '<div class="flow-empty">ยังไม่มีข้อความใน local DB</div>';
+          return;
+        }
+        // แสดง 50 ล่าสุด (เรียงใหม่ก่อน)
+        const recent = messages.slice(-50).reverse();
+        flowEl.innerHTML = recent.map(m => {
+          const text = (m.content && m.content.text) || `[${esc(m.message_type || 'msg')}]`;
+          const time = m.created_timestamp ? new Date(m.created_timestamp).toLocaleString('th-TH', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' }) : '';
+          return `
+            <div class="flow-item">
+              <span class="flow-dot ${m.direction}"></span>
+              <div class="flow-body">
+                <div class="flow-meta">${m.direction === 'in' ? 'เข้า' : 'ออก'} · ${time}</div>
+                <div class="flow-text">${esc(text)}</div>
+              </div>
+            </div>`;
+        }).join('');
+        if (window.gsap) {
+          gsap.fromTo(flowEl.querySelectorAll('.flow-item'), { opacity: 0, x: 12 }, { opacity: 1, x: 0, duration: 0.3, stagger: 0.02, ease: 'power2.out' });
+        }
+      } catch (err) {
+        flowEl.innerHTML = '<div class="flow-empty">โหลด flow ไม่ได้</div>';
+      }
+    }
+
+    document.querySelectorAll('.quick-view-pill').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.quick-view-pill').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentType = btn.dataset.type;
+        loadConversations();
+      });
+    });
+
+    document.getElementById('search-box').addEventListener('input', (e) => {
+      searchTerm = e.target.value;
+      loadConversations();
+    });
+
+    // รีเฟรชด้วยมือเท่านั้น — ไม่มี auto-refresh กันข้อความเด้งเตือน
+    document.getElementById('manual-refresh-btn').addEventListener('click', () => {
+      loadConversations();
+      if (currentConversationId) openConversation(currentConversationId);
+    });
+
+    // ปุ่มทดสอบเสียงแจ้งเตือน (Mario Coin Sound)
+    const testSoundBtn = document.getElementById('test-sound-btn');
+    if (testSoundBtn) {
+      testSoundBtn.addEventListener('click', () => {
+        playMarioCoinSound();
+      });
+    }
+
+    // ปุ่มทดสอบและขอสิทธิ์ Popup แจ้งเตือน (Desktop Push Notification)
+    const testPopupBtn = document.getElementById('test-popup-btn');
+    if (testPopupBtn) {
+      testPopupBtn.addEventListener('click', () => {
+        testDesktopNotification();
+      });
+    }
+
+    // ===== Auto-poll ข้อความใหม่ในแชทที่เปิดอยู่ =====
+    // ดึงข้อความทุก 3 วินาที แต่ append เฉพาะข้อความใหม่ (ไม่ re-render ทั้งหน้า)
+    // กันเสีย input ตอน admin กำลังพิมพ์ และกัน scroll กระโดด
+    async function pollOpenConversation() {
+      if (!currentConversationId) return;
+      try {
+        const res = await fetch(`/api/conversations/${currentConversationId}/messages`);
+        if (!res.ok) return;
+        const messages = await res.json();
+
+        // มีข้อความใหม่กว่าที่เคยโหลด — append เฉพาะของใหม่
+        if (messages.length > lastMessageCount) {
+          const scroll = document.getElementById('messages-scroll');
+          if (!scroll) return; // ผู้ใช้อาจปิดแชทไปแล้ว
+
+          const newMessages = messages.slice(lastMessageCount);
+          const wasNearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
+
+          // append เฉพาะข้อความใหม่
+          for (const m of newMessages) {
+            const time = m.created_timestamp ? new Date(m.created_timestamp).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) : '';
+            const div = document.createElement('div');
+            div.className = `msg-row ${m.direction}`;
+            div.innerHTML = `${renderMessageBody(m)}${renderMessageStatusHtml(m)}`;
+            scroll.appendChild(div);
+          }
+          lastMessageCount = messages.length;
+          loadProductDetailsAsync();
+
+          // scroll ลงล่างเฉพาะตอนที่ผู้ใช้อยู่ล่างอยู่แล้ว (กัน scroll กระโดดตอนกำลังอ่านของเก่า)
+          if (wasNearBottom) {
+            scroll.scrollTop = scroll.scrollHeight;
+          } else {
+            // ผู้ใช้กำลังเลื่อนดูข้อความเก่าอยู่ — แจ้งเตือนแบบ banner เหมือนระบบแชทของ Shopee แทนการกระโดด scroll
+            const lastNew = newMessages[newMessages.length - 1];
+            const banner = document.getElementById('new-msg-banner');
+            const bannerText = document.getElementById('new-msg-banner-text');
+            const bottomBtn = document.getElementById('scroll-to-bottom-btn');
+            const bottomDot = document.getElementById('scroll-to-bottom-dot');
+            if (banner && bannerText && lastNew) {
+              const senderName = lastNew.direction === 'in'
+                ? (document.querySelector('.thread-name')?.textContent || 'ลูกค้า')
+                : 'คุณ';
+              bannerText.innerHTML = `<b>${esc(senderName)}:</b> ${esc(getMsgPreviewText(lastNew))}`;
+              banner.classList.add('show');
+            }
+            if (bottomBtn) bottomBtn.classList.add('show');
+            if (bottomDot) bottomDot.style.display = 'block';
+          }
+        }
+      } catch (err) { /* เงียบ — ไม่ให้ poll error กระทบ UI */ }
+    }
+
+    function startMessagePolling() {
+      stopMessagePolling();
+      pollMessagesTimer = setInterval(pollOpenConversation, POLL_MESSAGES_MS);
+    }
+    function stopMessagePolling() {
+      if (pollMessagesTimer) { clearInterval(pollMessagesTimer); pollMessagesTimer = null; }
+    }
+
+    // ===== Auto-poll รายการแชท — อัปเดต unread badge ทุก 5 วินาที =====
+    function startConversationPolling() {
+      stopConversationPolling();
+      pollConversationsTimer = setInterval(() => {
+        // ไม่โหลดซ้ำตอนกำลังพิมพ์ใน search box
+        const activeEl = document.activeElement;
+        if (activeEl && activeEl.id === 'search-box') return;
+        loadConversations(true);
+      }, POLL_CONVERSATIONS_MS);
+    }
+    function stopConversationPolling() {
+      if (pollConversationsTimer) { clearInterval(pollConversationsTimer); pollConversationsTimer = null; }
+    }
+
+    // ===== Filter menu (☰) — ตามแนวทาง Unified Inbox ที่คุณออกแบบ =====
+    const filterBtn = document.getElementById('filter-btn');
+    const filterMenu = document.getElementById('filter-menu');
+
+    // โหลดร้านค้าทั้งหมดมาแสดงใน filter menu
+    async function loadShopsForFilter() {
+      try {
+        const res = await fetch('/api/shops');
+        allShops = await res.json();
+        renderShopFilters();
+      } catch (e) {
+        document.getElementById('shop-filters').innerHTML = '<div style="padding:8px 10px; font-size:12px; color:var(--text-muted);">โหลดร้านไม่ได้</div>';
+      }
+    }
+
+    // toggle platform ที่ใช้ร่วมกันทั้ง quick pill กับ dropdown checkbox — sync กันเสมอ
+    function togglePlatform(key) {
+      if (selectedPlatforms.has(key)) selectedPlatforms.delete(key);
+      else selectedPlatforms.add(key);
+      renderPlatformFilters();
+      renderPlatformPills();
+      updateFilterBadge();
+      loadConversations();
+    }
+
+    function renderPlatformFilters() {
+      const container = document.getElementById('platform-filters');
+      container.innerHTML = Object.entries(PLATFORM_META).map(([key, p]) => {
+        const checked = selectedPlatforms.has(key);
+        return `
+          <div class="filter-menu-item" data-platform="${key}">
+            <input type="checkbox" ${checked ? 'checked' : ''} />
+            <span class="platform-chip" style="background:${p.color};">${esc(p.initial)}</span>
+            <span>${esc(p.name)}</span>
+          </div>`;
+      }).join('');
+      container.querySelectorAll('.filter-menu-item').forEach(el => {
+        el.addEventListener('click', () => togglePlatform(el.dataset.platform));
+      });
+    }
+
+    // pills ด่วนใต้ search box — ตามภาพที่ออกแบบ (ทั้งหมด + Shopee/Lazada/TikTok แยกทีละแพลตฟอร์ม)
+    function renderPlatformPills() {
+      const container = document.getElementById('platform-pills');
+      const allActive = selectedPlatforms.size === 0;
+      const pills = [`<button class="platform-pill ${allActive ? 'active' : ''}" data-pill="all">ทั้งหมด</button>`];
+      Object.entries(PLATFORM_META).forEach(([key, p]) => {
+        const active = selectedPlatforms.has(key);
+        pills.push(`<button class="platform-pill ${active ? 'active' : ''}" data-pill="${key}" style="${active ? `background:${p.color};border-color:${p.color};` : ''}">${esc(p.name)}</button>`);
+      });
+      container.innerHTML = pills.join('');
+      container.querySelectorAll('.platform-pill').forEach(btn => {
+        btn.addEventListener('click', () => {
+          if (btn.dataset.pill === 'all') {
+            selectedPlatforms.clear();
+            renderPlatformFilters();
+            renderPlatformPills();
+            updateFilterBadge();
+            loadConversations();
+          } else {
+            togglePlatform(btn.dataset.pill);
+          }
+        });
+      });
+    }
+
+    function renderShopFilters() {
+      const container = document.getElementById('shop-filters');
+      if (!allShops.length) {
+        container.innerHTML = '<div style="padding:8px 10px; font-size:12px; color:var(--text-muted);">ยังไม่มีร้าน</div>';
+        return;
+      }
+      container.innerHTML = allShops.map(shop => {
+        const checked = selectedShopIds.has(shop.shop_id);
+        const name = shop.shop_name || shop.shopname || shop.shop_id;
+        return `
+          <div class="filter-menu-item" data-shop-id="${esc(shop.shop_id)}">
+            <input type="checkbox" ${checked ? 'checked' : ''} />
+            <span class="shop-name">${esc(name)}</span>
+          </div>`;
+      }).join('');
+      container.querySelectorAll('.filter-menu-item').forEach(el => {
+        el.addEventListener('click', () => {
+          const id = el.dataset.shopId;
+          if (selectedShopIds.has(id)) selectedShopIds.delete(id);
+          else selectedShopIds.add(id);
+          el.querySelector('input').checked = selectedShopIds.has(id);
+          updateFilterBadge();
+        });
+      });
+    }
+
+    function updateFilterBadge() {
+      const total = selectedPlatforms.size + selectedShopIds.size;
+      const existing = filterBtn.querySelector('.filter-active-count');
+      if (total > 0) {
+        filterBtn.classList.add('active');
+        if (existing) existing.textContent = total;
+        else {
+          const badge = document.createElement('span');
+          badge.className = 'filter-active-count';
+          badge.textContent = total;
+          filterBtn.appendChild(badge);
+        }
+      } else {
+        filterBtn.classList.remove('active');
+        if (existing) existing.remove();
+      }
+    }
+
+    filterBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      filterMenu.classList.toggle('open');
+      if (filterMenu.classList.contains('open') && window.gsap) {
+        gsap.fromTo(filterMenu, { opacity: 0, y: -8, scale: 0.97 }, { opacity: 1, y: 0, scale: 1, duration: 0.2, ease: 'power2.out' });
+      }
+    });
+    document.addEventListener('click', (e) => {
+      if (!filterMenu.contains(e.target) && e.target !== filterBtn) filterMenu.classList.remove('open');
+    });
+
+    document.getElementById('filter-apply').addEventListener('click', () => {
+      filterMenu.classList.remove('open');
+      renderPlatformPills();
+      loadConversations();
+    });
+    document.getElementById('filter-clear').addEventListener('click', () => {
+      selectedPlatforms.clear();
+      selectedShopIds.clear();
+      renderPlatformFilters();
+      renderShopFilters();
+      renderPlatformPills();
+      updateFilterBadge();
+      loadConversations();
+    });
+
+    // เริ่มต้น: โหลดร้าน + render platform filters/pills
+    renderPlatformFilters();
+    renderPlatformPills();
+    // โหลดร้านก่อน conversations ครั้งแรก เพื่อให้ shopNameOf() มีข้อมูลตั้งแต่ render รอบแรก
+    loadShopsForFilter().then(loadConversations);
+    // เริ่ม auto-poll รายการแชท (อัปเดต unread badge ทุก 5 วินาที)
+    startConversationPolling();
+    // หยุด polling ตอนปิดหน้า กัน memory leak
+    window.addEventListener('beforeunload', () => { stopMessagePolling(); stopConversationPolling(); });
+  </script>
+
+  <%- include('partials/status-bar') %>
+  <%- include('partials/theme-script') %>
+
+  <script>
+    // GSAP animations เฉพาะ inbox — ทำงานหลัง theme-script โหลด gsap
+    document.addEventListener('DOMContentLoaded', () => {
+      if (!window.gsap) return;
+      gsap.fromTo('.thread-panel', { opacity: 0 }, { opacity: 1, duration: 0.4, ease: 'power2.out', delay: 0.2 });
+      gsap.fromTo('.ticket-list-panel', { opacity: 0, x: -20 }, { opacity: 1, x: 0, duration: 0.4, ease: 'power2.out', delay: 0.1 });
+    });
+  </script>
+</body>
+</html>

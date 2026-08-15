@@ -1,0 +1,1344 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<template id="__bundler_thumbnail" data-bg-color="#3B6FE8">
+<svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+<rect width="120" height="120" fill="#3B6FE8"/>
+<circle cx="60" cy="50" r="28" fill="#ffffff" opacity="0.95"/>
+<path d="M40 78 Q60 100 84 82 L78 68 Q60 74 46 66 Z" fill="#ffffff" opacity="0.95"/>
+</svg>
+</template>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<style>
+@keyframes fadeUp { from { opacity:0; transform:translateY(6px);} to { opacity:1; transform:translateY(0);} }
+@keyframes pulseDot { 0%,100% { opacity:1; } 50% { opacity:0.35; } }
+body { margin:0; background:#FFFFFF; }
+::-webkit-scrollbar { width:8px; height:8px; }
+::-webkit-scrollbar-thumb { background:#DAD6CC; border-radius:8px; }
+a { color:#3B6FE8; }
+a:hover { color:#2E58C4; }
+</style>
+</helmet>
+<div style="display:flex; flex-direction:column; height:100vh; width:100%; font-family:'IBM Plex Sans Thai', system-ui, sans-serif; color:{{ T.textPrimary }}; background:{{ T.pageBg }}; overflow:hidden; padding-bottom:{{ statusBarHeight }}; box-sizing:border-box;">
+
+  <div style="display:flex; flex-direction:row; flex:1; min-height:0; overflow:hidden; position:relative;">
+
+  <!-- SIDEBAR (desktop) -->
+  <sc-if value="{{ notMobile }}" hint-placeholder-val="{{ true }}">
+    <div style="width:76px; background:{{ T.panelBg }}; border-right:1px solid {{ T.border }}; display:flex; flex-direction:column; align-items:center; padding:20px 0; gap:28px; flex-shrink:0;">
+      <div style="width:38px; height:38px; border-radius:10px; background:linear-gradient(135deg,{{ T.accent }},{{ T.accentLight }}); display:flex; align-items:center; justify-content:center; font-family:'Space Grotesk',sans-serif; font-weight:700; color:#fff; font-size:16px;">C</div>
+      <div style="display:flex; flex-direction:column; gap:6px; width:100%; align-items:center; position:relative;">
+        <div ref="{{ navIndicatorRef }}" style="position:absolute; left:-12px; top:14px; width:3px; height:20px; border-radius:3px; background:{{ T.accent }};"></div>
+        <sc-for list="{{ navItems }}" as="nav" hint-placeholder-count="4">
+          <div onClick="{{ nav.onClick }}" ref="{{ nav.navRef }}" style="width:48px; height:48px; border-radius:12px; display:flex; align-items:center; justify-content:center; cursor:pointer; position:relative;" style-hover="background:{{ T.hoverBg }};">
+            <div style="width:48px; height:48px; border-radius:12px; display:flex; align-items:center; justify-content:center; background:{{ nav.bg }};">
+              <span style="font-size:19px; filter:{{ nav.filter }};">{{ nav.icon }}</span>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+      <div onClick="{{ toggleNotifPanel }}" title="การแจ้งเตือน" style="width:40px; height:40px; border-radius:12px; display:flex; align-items:center; justify-content:center; cursor:pointer; position:relative;" style-hover="background:{{ T.hoverBg }};">
+        <span style="font-size:18px;">🔔</span>
+        <sc-if value="{{ hasNotif }}">
+          <span style="position:absolute; top:6px; right:8px; width:7px; height:7px; border-radius:50%; background:#E6484B;"></span>
+        </sc-if>
+      </div>
+      <sc-if value="{{ notifPanelOpen }}">
+        <div ref="{{ dropdownRef }}" style="position:absolute; left:76px; top:60px; width:280px; background:{{ T.panelBg }}; border:1px solid {{ T.border }}; border-radius:14px; box-shadow:0 12px 32px rgba(0,0,0,0.12); z-index:20; overflow:hidden;">
+          <div style="display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-bottom:1px solid {{ T.borderSoft }};">
+            <span style="font-weight:700; font-size:13px; color:{{ T.textPrimary }};">การแจ้งเตือน</span>
+            <span style="font-size:14px; cursor:pointer; color:{{ T.textMuted }};">⋮</span>
+          </div>
+          <div style="padding:12px 14px; display:flex; gap:10px;">
+            <span style="font-size:16px; flex-shrink:0;">⚡</span>
+            <div>
+              <div style="font-size:11px; font-weight:700; color:{{ T.textTertiary }}; margin-bottom:3px;">Zaapi · 04 ส.ค. 14:29</div>
+              <div style="font-size:12.5px; color:{{ T.textSecondary }}; line-height:1.5;">ฟีเจอร์ใหม่! เพิ่มช่องข้อมูลลูกค้า และรวมทุกช่องทางแชทในคอนแทคเดียวกัน</div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+      <div style="flex:1;"></div>
+      <div style="position:relative; display:flex; flex-direction:column; align-items:center; gap:4px;">
+        <div onClick="{{ toggleStatusMenu }}" style="width:36px; height:36px; border-radius:50%; background:{{ T.borderSoft }}; display:flex; align-items:center; justify-content:center; color:{{ T.textSecondary }}; font-size:13px; font-weight:600; cursor:pointer; position:relative;">
+          CS
+          <span style="position:absolute; bottom:-1px; right:-1px; width:10px; height:10px; border-radius:50%; background:{{ statusDotColor }}; border:2px solid {{ T.panelBg }};"></span>
+        </div>
+        <span style="font-size:9px; font-weight:700; color:{{ statusDotColor }}; text-align:center; white-space:nowrap;">{{ statusLabel }}</span>
+        <sc-if value="{{ statusMenuOpen }}">
+          <div ref="{{ dropdownRef }}" style="position:absolute; left:44px; bottom:0; width:200px; background:{{ T.panelBg }}; border:1px solid {{ T.border }}; border-radius:14px; box-shadow:0 12px 32px rgba(0,0,0,0.14); z-index:20; overflow:hidden;">
+            <div style="padding:12px 14px; border-bottom:1px solid {{ T.borderSoft }};">
+              <div style="font-weight:700; font-size:13px; color:{{ T.textPrimary }};">คุณ</div>
+              <div style="font-size:11.5px; color:{{ T.textTertiary }};">ผู้ดูแลบัญชี</div>
+            </div>
+            <div style="padding:8px 6px;">
+              <div style="font-size:11px; font-weight:700; color:{{ T.textMuted }}; padding:4px 10px;">ตั้งสถานะเป็น</div>
+              <sc-for list="{{ statusOptions }}" as="so" hint-placeholder-count="2">
+                <div onClick="{{ so.onClick }}" style="display:flex; align-items:center; gap:8px; padding:7px 10px; border-radius:8px; cursor:pointer; font-size:12.5px; color:{{ T.textSecondary }};" style-hover="background:{{ T.hoverBg }};">
+                  <span style="width:8px; height:8px; border-radius:50%; background:{{ so.color }};"></span>{{ so.label }}
+                  <sc-if value="{{ so.active }}"><span style="margin-left:auto; color:{{ T.accent }};">✓</span></sc-if>
+                </div>
+              </sc-for>
+            </div>
+            <div style="border-top:1px solid {{ T.borderSoft }}; padding:8px 6px;">
+              <div style="padding:7px 10px; border-radius:8px; cursor:pointer; font-size:12.5px; color:{{ T.textSecondary }};" style-hover="background:{{ T.hoverBg }};">เปลี่ยนภาษา</div>
+              <div style="padding:7px 10px; border-radius:8px; cursor:pointer; font-size:12.5px; color:#C43D3D;" style-hover="background:#FBEAEA;">ออกจากระบบ</div>
+            </div>
+          </div>
+        </sc-if>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- DASHBOARD SCREEN -->
+  <sc-if value="{{ isDashboard }}" hint-placeholder-val="{{ true }}">
+    <div style="flex:1; overflow-y:auto; padding:{{ pagePad }}; background:{{ T.pageBg }};">
+      <div style="display:flex; align-items:{{ dashHeaderAlign }}; flex-direction:{{ dashHeaderDir }}; justify-content:space-between; gap:14px; margin-bottom:28px;">
+        <div>
+          <div style="font-family:'Space Grotesk',sans-serif; font-size:{{ pageTitleSize }}; font-weight:700; color:{{ T.textPrimary }};">ภาพรวมวันนี้</div>
+          <div style="font-size:14px; color:{{ T.textTertiary }}; margin-top:4px;">10 สิงหาคม 2569 · ทีม CS ร้าน Nova Home</div>
+        </div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <sc-for list="{{ platformFilters }}" as="p" hint-placeholder-count="3">
+            <div onClick="{{ p.onClick }}" style="display:flex; align-items:center; gap:6px; padding:8px 14px; border-radius:999px; background:{{ p.bg }}; border:1px solid {{ p.border }}; font-size:13px; font-weight:600; color:{{ p.fg }}; cursor:pointer;">
+              <span style="width:8px; height:8px; border-radius:50%; background:{{ p.color }};"></span>{{ p.name }}
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="display:grid; grid-template-columns:{{ statGridCols }}; gap:16px; margin-bottom:24px;">
+        <sc-for list="{{ statCards }}" as="s" hint-placeholder-count="4">
+          <div style="background:{{ T.panelBg }}; border:1px solid {{ T.border }}; border-radius:16px; padding:20px; animation:fadeUp .4s ease both;">
+            <div style="display:flex; align-items:center; justify-content:space-between;">
+              <div style="font-size:13px; color:{{ T.textTertiary }}; font-weight:500;">{{ s.label }}</div>
+              <div style="font-size:12px; font-weight:700; color:{{ s.trendColor }};">{{ s.trend }}</div>
+            </div>
+            <div ref="{{ s.countRef }}" style="font-family:'Space Grotesk',sans-serif; font-size:26px; font-weight:700; color:{{ T.textPrimary }}; margin-top:10px;">{{ s.value }}</div>
+            <div style="font-size:12.5px; color:{{ T.textTertiary }}; margin-top:4px;">{{ s.sub }}</div>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="display:grid; grid-template-columns:{{ chartGridCols }}; gap:16px;">
+        <div style="background:{{ T.panelBg }}; border:1px solid {{ T.border }}; border-radius:16px; padding:24px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div style="font-weight:700; font-size:15px; color:{{ T.textPrimary }};">แชทต่อชั่วโมง (7 วันล่าสุด)</div>
+            <div style="font-size:12.5px; color:{{ T.textTertiary }};">รวมทุกแพลตฟอร์ม</div>
+          </div>
+          <div style="display:flex; align-items:flex-end; gap:10px; height:150px; padding:0 4px;">
+            <sc-for list="{{ chartBars }}" as="b" hint-placeholder-count="7">
+              <div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:8px;">
+                <div style="width:100%; border-radius:8px 8px 4px 4px; background:linear-gradient(180deg,{{ T.accentLight }},{{ T.accent }}); height:{{ b.height }};"></div>
+                <div style="font-size:11.5px; color:{{ T.textTertiary }}; font-weight:500;">{{ b.label }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="background:{{ T.panelBg }}; border:1px solid {{ T.border }}; border-radius:16px; padding:24px;">
+          <div style="font-weight:700; font-size:15px; color:{{ T.textPrimary }}; margin-bottom:16px;">สัดส่วนแชทตามแพลตฟอร์ม</div>
+          <div style="display:flex; flex-direction:column; gap:14px;">
+            <sc-for list="{{ platformShare }}" as="ps" hint-placeholder-count="3">
+              <div>
+                <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:6px;">
+                  <span style="font-weight:600; color:{{ T.textSecondary }};">{{ ps.name }}</span>
+                  <span style="color:{{ T.textTertiary }};">{{ ps.pct }}</span>
+                </div>
+                <div style="height:8px; border-radius:6px; background:{{ T.borderSoft }}; overflow:hidden;">
+                  <div style="height:100%; border-radius:6px; background:{{ ps.color }}; width:{{ ps.pct }};"></div>
+                </div>
+              </div>
+            </sc-for>
+            <sc-if value="{{ noPlatformShare }}">
+              <div style="font-size:12.5px; color:{{ T.textMuted }}; padding:6px 0;">เลือกอย่างน้อยหนึ่งแพลตฟอร์มด้านบน</div>
+            </sc-if>
+          </div>
+          <div style="margin-top:22px; padding-top:18px; border-top:1px solid {{ T.borderSoft }};">
+            <div style="font-weight:700; font-size:15px; color:{{ T.textPrimary }}; margin-bottom:12px;">แชทรอด่วน</div>
+            <sc-for list="{{ urgentChats }}" as="u" hint-placeholder-count="3">
+              <div style="display:flex; align-items:center; gap:10px; padding:8px 0;">
+                <span style="width:7px; height:7px; border-radius:50%; background:#E6484B; flex-shrink:0;"></span>
+                <div style="font-size:13px; color:{{ T.textSecondary }}; flex:1;">{{ u.name }}</div>
+                <div style="font-size:12px; color:{{ T.textMuted }};">{{ u.time }}</div>
+              </div>
+            </sc-for>
+            <sc-if value="{{ noUrgentChats }}">
+              <div style="font-size:12.5px; color:{{ T.textMuted }}; padding:6px 0;">ไม่มีแชทด่วนในแพลตฟอร์มที่เลือก</div>
+            </sc-if>
+          </div>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- CONTACTS SCREEN -->
+  <sc-if value="{{ isContacts }}">
+    <div style="flex:1; overflow-y:auto; padding:{{ pagePad }}; background:{{ T.pageBg }};">
+      <div style="font-family:'Space Grotesk',sans-serif; font-size:{{ pageTitleSize }}; font-weight:700; color:{{ T.textPrimary }}; margin-bottom:6px;">ทีม CS</div>
+      <div style="font-size:14px; color:{{ T.textTertiary }}; margin-bottom:22px;">สมาชิกที่ดูแลแชทลูกค้าตอนนี้</div>
+      <div style="display:grid; grid-template-columns:{{ contactsGridCols }}; gap:14px;">
+        <sc-for list="{{ teamMembers }}" as="t" hint-placeholder-count="4">
+          <div style="background:{{ T.panelBg }}; border:1px solid {{ T.border }}; border-radius:16px; padding:18px; display:flex; align-items:center; gap:12px;">
+            <div style="width:44px; height:44px; border-radius:50%; background:{{ t.color }}; display:flex; align-items:center; justify-content:center; font-weight:700; color:#fff; font-size:14px; flex-shrink:0;">{{ t.initials }}</div>
+            <div style="min-width:0;">
+              <div style="font-weight:700; font-size:14px; color:{{ T.textPrimary }};">{{ t.name }}</div>
+              <div style="font-size:12.5px; color:{{ T.textTertiary }}; margin-top:2px;">{{ t.role }} · {{ t.activeChats }} แชทที่ดูแล</div>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- SETTINGS SCREEN -->
+  <sc-if value="{{ isSettings }}">
+    <div style="flex:1; overflow-y:auto; padding:{{ pagePad }}; background:{{ T.pageBg }};">
+      <div style="font-family:'Space Grotesk',sans-serif; font-size:{{ pageTitleSize }}; font-weight:700; color:{{ T.textPrimary }}; margin-bottom:6px;">ตั้งค่า</div>
+      <div style="font-size:14px; color:{{ T.textTertiary }}; margin-bottom:22px;">ปรับการทำงานของกล่องแชทรวม</div>
+
+      <div style="max-width:520px; margin-bottom:24px;">
+        <div style="font-weight:700; font-size:14px; color:{{ T.textPrimary }}; margin-bottom:10px;">ธีมสีและโหมดการแสดงผล</div>
+        <div style="background:{{ T.panelBg }}; border:1px solid {{ T.border }}; border-radius:16px; padding:18px 20px;">
+          <div style="font-size:12px; color:{{ T.textTertiary }}; margin-bottom:10px;">สีธีม</div>
+          <div style="display:flex; gap:12px; margin-bottom:18px; flex-wrap:wrap;">
+            <sc-for list="{{ themeSwatches }}" as="sw" hint-placeholder-count="22">
+              <div onClick="{{ sw.onClick }}" title="{{ sw.label }}" style="width:32px; height:32px; border-radius:50%; background:{{ sw.color }}; cursor:pointer; box-shadow:{{ sw.ring }}; display:flex; align-items:center; justify-content:center;">
+                <sc-if value="{{ sw.active }}"><span style="color:#fff; font-size:13px; font-weight:800;">✓</span></sc-if>
+              </div>
+            </sc-for>
+          </div>
+          <div style="font-size:12px; color:{{ T.textTertiary }}; margin-bottom:10px;">โหมดการแสดงผล</div>
+          <div style="display:flex; gap:8px;">
+            <sc-for list="{{ modeOptions }}" as="mo" hint-placeholder-count="2">
+              <div onClick="{{ mo.onClick }}" style="flex:1; text-align:center; padding:9px; border-radius:10px; cursor:pointer; font-size:13px; font-weight:600; background:{{ mo.bg }}; color:{{ mo.fg }}; border:2px solid {{ mo.border }};">{{ mo.icon }} {{ mo.label }}</div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+
+      <div style="max-width:520px; display:flex; flex-direction:column; gap:1px; background:{{ T.border }}; border-radius:16px; overflow:hidden;">
+        <sc-for list="{{ settingsRows }}" as="r" hint-placeholder-count="3">
+          <div style="background:{{ T.panelBg }}; padding:18px 20px; display:flex; align-items:center; justify-content:space-between; gap:12px;">
+            <div>
+              <div style="font-weight:600; font-size:14px; color:{{ T.textPrimary }};">{{ r.label }}</div>
+              <div style="font-size:12.5px; color:{{ T.textTertiary }}; margin-top:3px;">{{ r.desc }}</div>
+            </div>
+            <div onClick="{{ r.onClick }}" style="width:44px; height:26px; border-radius:999px; background:{{ r.trackBg }}; flex-shrink:0; cursor:pointer; position:relative;">
+              <div style="width:20px; height:20px; border-radius:50%; background:#fff; position:absolute; top:3px; left:{{ r.knobLeft }}; box-shadow:0 1px 3px rgba(0,0,0,0.2);"></div>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- INBOX SCREEN -->
+  <sc-if value="{{ isInbox }}">
+    <sc-if value="{{ showList }}">
+      <div style="width:{{ listWidth }}; height:100%; border-right:1px solid {{ T.border }}; display:flex; flex-direction:column; flex-shrink:0; background:{{ T.panelBg }}; min-width:0; min-height:0;">
+        <div style="padding:16px 20px 12px; border-bottom:1px solid {{ T.borderSoft }};">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+            <div style="font-family:'Space Grotesk',sans-serif; font-size:19px; font-weight:700; color:{{ T.textPrimary }};">ทิกเก็ต</div>
+            <div style="display:flex; gap:4px; position:relative;">
+              <span title="เรียงลำดับ" style="font-size:16px; cursor:pointer; padding:5px; border-radius:8px;" style-hover="background:{{ T.hoverBg }};">⇕</span>
+              <span onClick="{{ toggleFilterMenu }}" title="ตัวกรอง" style="font-size:16px; cursor:pointer; padding:5px; border-radius:8px; background:{{ filterMenuBg }};">☰</span>
+              <sc-if value="{{ filterMenuOpen }}">
+                <div ref="{{ dropdownRef }}" style="position:absolute; right:0; top:32px; width:280px; background:{{ T.panelBg }}; border:1px solid {{ T.border }}; border-radius:12px; box-shadow:0 16px 36px rgba(0,0,0,0.14); z-index:30; padding:6px; max-height:70vh; overflow-y:auto;">
+                  <div onClick="{{ toggleFollowingOnly }}" style="display:flex; align-items:center; justify-content:space-between; padding:9px 10px; border-radius:8px; cursor:pointer; font-size:12.5px; color:{{ T.textSecondary }};" style-hover="background:{{ T.hoverBg }};">
+                    <span>⭐ แสดงเฉพาะแชทที่ติดตาม</span>
+                    <input type="checkbox" checked="{{ followingOnly }}" readOnly="{{ true }}" style="accent-color:{{ T.accent }}; pointer-events:none;" />
+                  </div>
+                  <div style="border-top:1px solid {{ T.borderSoft }}; margin:4px 0;"></div>
+                  <div style="padding:8px 10px; font-size:11px; font-weight:700; color:{{ T.textMuted }}; letter-spacing:0.03em;">สถานะการตอบ</div>
+                  <sc-for list="{{ replyStatusOptions }}" as="rs" hint-placeholder-count="2">
+                    <div onClick="{{ rs.onClick }}" style="display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:8px; cursor:pointer; font-size:12.5px; color:{{ T.textSecondary }};" style-hover="background:{{ T.hoverBg }};">
+                      <span style="width:14px; height:14px; border-radius:50%; border:2px solid {{ rs.active }}; flex-shrink:0;"></span>{{ rs.label }}
+                    </div>
+                  </sc-for>
+                  <div style="border-top:1px solid {{ T.borderSoft }}; margin:4px 0;"></div>
+                  <div style="padding:8px 10px; font-size:11px; font-weight:700; color:{{ T.textMuted }}; letter-spacing:0.03em;">แท็ก</div>
+                  <sc-for list="{{ tagFilterOptions }}" as="tf" hint-placeholder-count="4">
+                    <div onClick="{{ tf.onClick }}" style="display:flex; align-items:center; gap:8px; padding:7px 10px; border-radius:8px; cursor:pointer; font-size:12.5px; color:{{ T.textSecondary }};" style-hover="background:{{ T.hoverBg }};">
+                      <input type="checkbox" checked="{{ tf.checked }}" readOnly="{{ true }}" style="accent-color:{{ T.accent }}; pointer-events:none;" />
+                      <span style="width:8px; height:8px; border-radius:50%; background:{{ tf.color }}; flex-shrink:0;"></span>{{ tf.label }}
+                    </div>
+                  </sc-for>
+                  <div style="border-top:1px solid {{ T.borderSoft }}; margin:4px 0;"></div>
+                  <div style="padding:8px 10px; font-size:11px; font-weight:700; color:{{ T.textMuted }}; letter-spacing:0.03em;">ช่องทาง</div>
+                  <sc-for list="{{ channelFilterOptions }}" as="ch" hint-placeholder-count="3">
+                    <div onClick="{{ ch.onClick }}" style="display:flex; align-items:center; gap:8px; padding:7px 10px; border-radius:8px; cursor:pointer; font-size:12.5px; color:{{ T.textSecondary }};" style-hover="background:{{ T.hoverBg }};">
+                      <input type="checkbox" checked="{{ ch.checked }}" readOnly="{{ true }}" style="accent-color:{{ T.accent }}; pointer-events:none;" />
+                      <span style="width:16px; height:16px; border-radius:5px; background:{{ ch.color }}; color:#fff; font-size:9px; font-weight:800; display:flex; align-items:center; justify-content:center; flex-shrink:0;">{{ ch.initial }}</span>{{ ch.label }}
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+            </div>
+          </div>
+          <div style="display:flex; gap:8px; margin-bottom:12px; overflow-x:auto; padding-bottom:2px;">
+            <sc-for list="{{ quickViews }}" as="qv" hint-placeholder-count="3">
+              <div onClick="{{ qv.onClick }}" style="display:flex; align-items:center; gap:7px; padding:6px 12px; border-radius:9px; cursor:pointer; background:{{ qv.bg }}; flex-shrink:0; white-space:nowrap;">
+                <span style="font-size:12px; font-weight:600; color:{{ qv.fg }};">{{ qv.label }}</span>
+                <span style="font-size:10.5px; font-weight:700; color:#fff; background:{{ qv.countBg }}; padding:1px 7px; border-radius:999px; flex-shrink:0;">{{ qv.count }}</span>
+              </div>
+            </sc-for>
+          </div>
+          <div style="display:flex; gap:8px; margin-bottom:12px;">
+            <input onFocus="{{ onQuickSearchFocus }}" onBlur="{{ onQuickSearchBlur }}" ref="{{ quickSearchRef }}" placeholder="ค้นหาลูกค้า, ออเดอร์..." style="flex:1; border:none; border-radius:10px; padding:9px 12px; font-size:13px; font-family:inherit; outline:none; background:{{ T.inputBg }}; color:{{ T.textPrimary }};" />
+          </div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <sc-for list="{{ inboxFilters }}" as="f" hint-placeholder-count="4">
+              <div onClick="{{ f.onClick }}" style="padding:6px 11px; border-radius:999px; font-size:12.5px; font-weight:600; cursor:pointer; background:{{ f.bg }}; color:{{ f.fg }};">{{ f.label }}</div>
+            </sc-for>
+          </div>
+        </div>
+        <div style="flex:1; overflow-y:auto; overflow-x:hidden; min-height:0;">
+          <sc-if value="{{ showPinnedLabel }}">
+            <div style="padding:10px 18px 4px; font-size:11px; font-weight:700; color:{{ T.textMuted }}; letter-spacing:0.04em;">ปักหมุด</div>
+          </sc-if>
+          <sc-for list="{{ conversations }}" as="c" hint-placeholder-count="8">
+            <sc-if value="{{ c.showAllLabel }}">
+              <div style="padding:12px 18px 4px; font-size:11px; font-weight:700; color:{{ T.textMuted }}; letter-spacing:0.04em;">ทั้งหมด</div>
+            </sc-if>
+            <div onClick="{{ c.onClick }}" onMouseEnter="{{ c.onHover }}" onMouseLeave="{{ c.onLeave }}" ref="{{ c.rowRef }}" style="display:flex; gap:9px; padding:14px 14px; cursor:pointer; border-bottom:1px solid {{ T.divider }}; background:{{ c.selBg }}; border-left:3px solid {{ c.pinned }}; min-width:0;">
+              <div style="flex-shrink:0; width:48px; display:flex; flex-direction:column; align-items:center;">
+                <div style="position:relative; width:42px; height:42px;">
+                  <div style="width:42px; height:42px; border-radius:50%; background:{{ c.avatarBg }}; display:flex; align-items:center; justify-content:center; font-weight:700; color:#fff; font-size:14px; box-shadow:0 0 0 2px {{ T.panelBg }}, 0 0 0 3.5px {{ c.platformColor }};">{{ c.initials }}</div>
+                  <div style="position:absolute; bottom:-2px; right:-4px; width:16px; height:16px; border-radius:5px; background:{{ c.platformColor }}; border:2px solid {{ T.panelBg }}; display:flex; align-items:center; justify-content:center; font-size:9px; line-height:1; color:#fff; font-weight:800;">{{ c.platformInitial }}</div>
+                </div>
+                <div style="text-align:center; font-size:9px; font-weight:700; color:{{ c.platformColor }}; margin-top:5px; max-width:48px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ c.platformName }}</div>
+              </div>
+              <div style="flex:1; min-width:0;">
+                <div style="display:flex; align-items:center; gap:6px; min-width:0;">
+                  <sc-if value="{{ c.unread }}">
+                    <span style="width:8px; height:8px; border-radius:50%; background:{{ T.accent }}; flex-shrink:0; box-shadow:0 0 0 3px {{ T.accentGlow15 }};"></span>
+                  </sc-if>
+                  <div style="font-weight:{{ c.nameWeight }}; font-size:13.5px; color:{{ c.nameColor }}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;">{{ c.name }}</div>
+                  <sc-if value="{{ c.closed }}">
+                    <span style="font-size:10px; font-weight:700; color:{{ T.textTertiary }}; background:{{ T.borderSoft }}; padding:1px 6px; border-radius:5px; flex-shrink:0;">ปิดแล้ว</span>
+                  </sc-if>
+                  <sc-if value="{{ c.following }}">
+                    <span title="ติดตามอยู่" style="font-size:10px; flex-shrink:0;">⭐</span>
+                  </sc-if>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:baseline; gap:6px; margin-top:2px;">
+                  <div style="font-size:12.5px; font-weight:{{ c.previewWeight }}; color:{{ c.previewColor }}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:1;">{{ c.preview }}</div>
+                  <div style="font-size:11px; color:{{ T.textMuted }}; flex-shrink:0;">{{ c.time }}</div>
+                </div>
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:5px; margin-top:6px;">
+                  <div style="display:flex; gap:4px; align-items:center; min-width:0; overflow:hidden;">
+                    <sc-for list="{{ c.tags }}" as="t" hint-placeholder-count="1">
+                      <span title="{{ t.label }}" style="width:7px; height:7px; border-radius:50%; background:{{ t.dotColor }}; flex-shrink:0;"></span>
+                    </sc-for>
+                    <span style="font-size:10.5px; color:{{ T.textMuted }}; margin-left:2px;">{{ c.agentName }}</span>
+                  </div>
+                  <span onClick="{{ c.onPinClick }}" title="ปักหมุด/เลิกปักหมุด" style="font-size:12px; opacity:{{ c.pinOpacity }}; cursor:pointer; flex-shrink:0;">{{ c.pinIcon }}</span>
+                </div>
+              </div>
+              <sc-if value="{{ c.unread }}">
+                <div data-unread-badge="true" style="width:20px; height:20px; border-radius:50%; background:{{ T.accent }}; color:#fff; font-size:11px; font-weight:800; display:flex; align-items:center; justify-content:center; align-self:flex-start; margin-top:2px; flex-shrink:0; box-shadow:0 2px 5px {{ T.accentGlow35 }};">{{ c.unread }}</div>
+              </sc-if>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </sc-if>
+
+    <!-- THREAD -->
+    <sc-if value="{{ showThread }}">
+      <div style="flex:1; display:flex; flex-direction:column; min-width:{{ threadMinWidth }}; height:100%; min-height:0; background:{{ T.pageBg }}; overflow-x:hidden;">
+        <sc-if value="{{ activeChat.hasAlert }}">
+          <div style="display:flex; align-items:center; gap:10px; padding:9px 20px; background:#FDECEC; border-bottom:1px solid #F8D3D3; flex-shrink:0;">
+            <span style="font-size:13px;">⚠️</span>
+            <span style="font-size:12.5px; font-weight:600; color:#B23B3B; flex:1;">{{ activeChat.alertText }}</span>
+            <span style="font-size:12px; font-weight:700; color:#B23B3B; cursor:pointer; text-decoration:underline; flex-shrink:0;">ดูเพิ่ม</span>
+          </div>
+        </sc-if>
+        <div style="display:flex; align-items:center; justify-content:space-between; padding:14px 20px; border-bottom:1px solid {{ T.border }}; background:{{ T.panelBg }}; gap:10px;">
+          <div style="display:flex; align-items:center; gap:10px; min-width:0;">
+            <sc-if value="{{ isMobile }}">
+              <span onClick="{{ backToList }}" style="font-size:20px; cursor:pointer; padding:4px; flex-shrink:0;">←</span>
+            </sc-if>
+            <div style="width:40px; height:40px; border-radius:50%; background:{{ activeChat.avatarBg }}; display:flex; align-items:center; justify-content:center; font-weight:700; color:#fff; font-size:13.5px; flex-shrink:0;">{{ activeChat.initials }}</div>
+            <div style="min-width:0; overflow:hidden;">
+              <div style="font-weight:700; font-size:14.5px; color:{{ T.textPrimary }}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ activeChat.name }}</div>
+              <div style="display:flex; align-items:center; gap:6px; font-size:12px; color:{{ T.textTertiary }}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                <span style="width:6px; height:6px; border-radius:50%; background:{{ activeChat.platformColor }}; flex-shrink:0;"></span>
+                <span style="overflow:hidden; text-overflow:ellipsis;">{{ activeChat.platformName }} · {{ activeChat.orderId }}</span>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex; align-items:center; gap:10px; flex-shrink:0; margin-left:12px;">
+            <sc-if value="{{ isMobile }}">
+              <span onClick="{{ openDetail }}" style="font-size:19px; cursor:pointer; padding:4px 6px;">ⓘ</span>
+            </sc-if>
+            <sc-if value="{{ notMobile }}">
+              <span onClick="{{ activeChat.onBookmark }}" title="บันทึกแชทนี้" style="font-size:17px; cursor:pointer; opacity:{{ activeChat.bookmarkOpacity }};">🔖</span>
+              <div onClick="{{ activeChat.onAssign }}" style="padding:8px 14px; border-radius:10px; border:1px solid {{ T.border }}; font-size:13px; font-weight:600; color:{{ activeChat.assignFg }}; cursor:pointer; background:{{ activeChat.assignBg }}; white-space:nowrap;">{{ activeChat.assignLabel }}</div>
+              <div onClick="{{ activeChat.onClose }}" style="display:flex; align-items:center; gap:6px; padding:8px 14px; border-radius:999px; background:{{ activeChat.closeBg }}; color:{{ activeChat.closeFg }}; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; border:1px solid {{ activeChat.closeBorder }};">
+                <span>{{ activeChat.closeIcon }}</span>{{ activeChat.closeLabel }}
+              </div>
+            </sc-if>
+          </div>
+        </div>
+        <sc-if value="{{ isMobile }}">
+          <div style="display:flex; gap:8px; padding:10px 16px; border-bottom:1px solid {{ T.borderSoft }};">
+            <div onClick="{{ activeChat.onAssign }}" style="flex:1; text-align:center; padding:8px 10px; border-radius:10px; border:1px solid {{ T.border }}; font-size:13px; font-weight:600; color:{{ activeChat.assignFg }}; cursor:pointer; background:{{ activeChat.assignBg }};">{{ activeChat.assignLabel }}</div>
+            <div onClick="{{ activeChat.onClose }}" style="flex:1; text-align:center; padding:8px 10px; border-radius:10px; background:{{ activeChat.closeBg }}; color:{{ activeChat.closeFg }}; font-size:13px; font-weight:600; cursor:pointer;">{{ activeChat.closeIcon }} {{ activeChat.closeLabel }}</div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ toast }}">
+          <div ref="{{ toastRef }}" style="position:fixed; bottom:56px; right:22px; background:{{ T.accent }}; color:#fff; padding:14px 20px; border-radius:14px; font-size:13.5px; font-weight:600; display:flex; align-items:center; gap:12px; box-shadow:0 16px 40px {{ T.accentGlow35 }}, 0 4px 14px rgba(0,0,0,0.2); z-index:50; max-width:300px;">
+            <span style="width:30px; height:30px; border-radius:50%; background:rgba(255,255,255,0.22); display:flex; align-items:center; justify-content:center; font-size:16px; flex-shrink:0;">💬</span>
+            <span>{{ toast.text }}</span>
+          </div>
+        </sc-if>
+
+        <div ref="{{ threadScrollRef }}" style="flex:1; overflow-y:auto; overflow-x:hidden; min-height:0; padding:{{ threadPad }}; display:flex; flex-direction:column; gap:16px;">
+          <sc-for list="{{ messages }}" as="m" hint-placeholder-count="6">
+            <div ref="{{ m.msgRef }}" style="display:flex; flex-direction:column; align-items:{{ m.align }};">
+              <sc-if value="{{ m.isOrderCard }}">
+                <div style="background:{{ T.panelBg }}; border:1px solid {{ T.border }}; border-radius:14px; padding:14px 16px; width:min(280px,100%);">
+                  <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
+                    <div style="width:48px; height:48px; border-radius:10px; background:{{ T.borderSoft }}; flex-shrink:0;"></div>
+                    <div style="min-width:0;">
+                      <div style="font-size:12.5px; font-weight:700; color:{{ T.textPrimary }}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ m.productName }}</div>
+                      <div style="font-size:12px; color:{{ T.textTertiary }}; margin-top:2px;">฿{{ m.price }}</div>
+                    </div>
+                  </div>
+                  <div style="display:flex; justify-content:space-between; align-items:center; padding-top:10px; border-top:1px solid {{ T.borderSoft }};">
+                    <span style="font-size:11.5px; font-weight:700; padding:3px 9px; border-radius:6px; background:{{ m.statusBg }}; color:{{ m.statusFg }};">{{ m.status }}</span>
+                    <span style="font-size:11.5px; color:{{ T.textMuted }};">{{ m.orderRef }}</span>
+                  </div>
+                </div>
+              </sc-if>
+              <sc-if value="{{ m.isText }}">
+                <div style="max-width:min(400px,80%); padding:11px 15px; border-radius:16px; font-size:14px; line-height:1.5; background:{{ m.bubbleBg }}; color:{{ m.bubbleFg }}; border:{{ m.bubbleBorder }}; border-bottom-right-radius:{{ m.brRadius }}; border-bottom-left-radius:{{ m.blRadius }}; word-break:break-word;">{{ m.text }}</div>
+              </sc-if>
+              <div style="font-size:11px; color:{{ T.textMuted }}; margin-top:5px;">{{ m.time }}</div>
+            </div>
+          </sc-for>
+        </div>
+
+        <div style="padding:16px {{ composerPadX }}; border-top:1px solid {{ T.border }}; background:{{ T.panelBg }};">
+          <div style="display:flex; gap:6px; margin-bottom:10px; overflow-x:auto;">
+            <sc-for list="{{ quickReplies }}" as="q" hint-placeholder-count="3">
+              <div style="padding:6px 12px; border-radius:999px; border:1px dashed {{ T.border }}; font-size:12px; color:{{ T.accent }}; font-weight:600; cursor:pointer; flex-shrink:0; white-space:nowrap;">{{ q }}</div>
+            </sc-for>
+          </div>
+          <div ref="{{ composerWrapRef }}" style="display:flex; gap:8px; align-items:center; background:{{ T.inputBg }}; border-radius:999px; padding:10px 10px 10px 22px;">
+            <input onFocus="{{ onComposerFocus }}" onBlur="{{ onComposerBlur }}" placeholder="พิมพ์ข้อความตอบกลับ..." style="flex:1; min-width:0; border:none; background:transparent; padding:10px 0; font-size:15px; font-family:inherit; outline:none; color:{{ T.textPrimary }};" />
+            <div onClick="{{ onSendPunch }}" ref="{{ sendBtnRef }}" style="width:44px; height:44px; border-radius:50%; background:{{ T.accent }}; display:flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0;">
+              <span style="color:#fff; font-size:17px;">➤</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <!-- RIGHT PANEL -->
+    <sc-if value="{{ showDetail }}">
+      <div style="width:{{ detailWidth }}; height:100%; border-left:{{ detailBorder }}; background:{{ T.panelBg }}; overflow-y:auto; flex-shrink:0; min-width:0; min-height:0;">
+        <sc-if value="{{ isMobile }}">
+          <div style="display:flex; align-items:center; gap:10px; padding:16px 20px; border-bottom:1px solid {{ T.borderSoft }};">
+            <span onClick="{{ closeDetail }}" style="font-size:20px; cursor:pointer;">←</span>
+            <div style="font-weight:700; font-size:15px; color:{{ T.textPrimary }};">ข้อมูลลูกค้า</div>
+          </div>
+        </sc-if>
+
+        <div style="display:flex; border-bottom:1px solid {{ T.borderSoft }}; padding:10px 14px; gap:6px;">
+          <sc-for list="{{ rightTabs }}" as="rt" hint-placeholder-count="4">
+            <div onClick="{{ rt.onClick }}" title="{{ rt.title }}" style="flex:1; text-align:center; padding:8px 0; border-radius:10px; cursor:pointer; background:{{ rt.bg }}; font-size:17px;">{{ rt.icon }}</div>
+          </sc-for>
+        </div>
+
+        <!-- PROFILE TAB -->
+        <sc-if value="{{ rightTabIs.profile }}">
+          <div ref="{{ screenMountRef }}" style="padding:18px 20px; border-bottom:1px solid {{ T.borderSoft }}; text-align:center;">
+            <div style="width:56px; height:56px; border-radius:50%; background:{{ activeChat.avatarBg }}; display:flex; align-items:center; justify-content:center; font-weight:700; color:#fff; font-size:18px; margin:0 auto 8px; box-shadow:0 0 0 2px {{ T.panelBg }}, 0 0 0 3.5px {{ activeChat.platformColor }};">{{ activeChat.initials }}</div>
+            <div style="font-size:10.5px; font-weight:700; color:{{ activeChat.platformColor }}; margin-bottom:8px;">{{ activeChat.platformName }}</div>
+            <div style="font-weight:700; font-size:15px; color:{{ T.textPrimary }};">{{ activeChat.name }}</div>
+            <div style="font-size:12.5px; color:{{ T.textTertiary }}; margin-top:3px;">ลูกค้ามาแล้ว {{ activeChat.custSince }}</div>
+          </div>
+          <div style="padding:16px 20px; border-bottom:1px solid {{ T.borderSoft }};">
+            <div style="font-weight:700; font-size:12.5px; color:{{ T.textPrimary }}; margin-bottom:10px;">ข้อมูลการติดต่อ</div>
+            <sc-for list="{{ contactFields }}" as="cf" hint-placeholder-count="6">
+              <div ref="{{ cf.fieldRef }}" style="display:flex; justify-content:space-between; gap:10px; padding:6px 0; font-size:12.5px;">
+                <span style="color:{{ T.textTertiary }};">{{ cf.label }}</span>
+                <span style="color:{{ cf.valueColor }}; font-weight:600; text-align:right;">{{ cf.value }}</span>
+              </div>
+            </sc-for>
+            <div style="display:flex; gap:8px; margin-top:10px;">
+              <div style="flex:1; text-align:center; padding:8px; border-radius:9px; border:1px solid {{ T.border }}; font-size:12px; font-weight:600; color:{{ T.textSecondary }}; cursor:pointer;">แก้ไขข้อมูล</div>
+            </div>
+          </div>
+          <div style="padding:16px 20px; border-bottom:1px solid {{ T.borderSoft }};">
+            <div style="font-weight:700; font-size:12.5px; color:{{ T.textPrimary }}; margin-bottom:10px;">แท็กการสนทนา</div>
+            <div style="display:flex; flex-wrap:wrap; gap:6px;">
+              <sc-for list="{{ activeChat.profileTags }}" as="t" hint-placeholder-count="2">
+                <span style="display:flex; align-items:center; gap:5px; font-size:11px; font-weight:600; padding:3px 9px; border-radius:6px; background:{{ t.bg }}; color:{{ t.fg }};"><span style="width:6px; height:6px; border-radius:50%; background:{{ t.fg }};"></span>{{ t.label }}</span>
+              </sc-for>
+            </div>
+          </div>
+          <div style="padding:16px 20px;">
+            <div style="font-weight:700; font-size:12.5px; color:{{ T.textPrimary }}; margin-bottom:10px;">ประวัติทิกเก็ต</div>
+            <div style="display:flex; align-items:center; gap:8px; font-size:12px; background:{{ T.inputBg }}; border-radius:8px; padding:8px 10px;">
+              <span style="color:{{ T.accent }}; font-weight:700;">{{ activeChat.ticketId }}</span>
+              <span style="color:{{ T.textTertiary }};">· เปิดมาแล้ว {{ activeChat.custSince }}</span>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- NOTES TAB -->
+        <sc-if value="{{ rightTabIs.notes }}">
+          <div ref="{{ screenMountRef }}" style="padding:18px 20px;">
+            <div style="font-weight:700; font-size:12.5px; color:{{ T.textPrimary }}; margin-bottom:10px;">ความคิดเห็นภายใน</div>
+            <textarea placeholder="เขียนโน้ต หรือกด @ แท็กเพื่อนร่วมทีม" style="width:100%; min-height:70px; border:1px solid {{ T.border }}; border-radius:10px; padding:10px 12px; font-size:13px; font-family:inherit; outline:none; resize:vertical; box-sizing:border-box; background:{{ T.panelBg }}; color:{{ T.textPrimary }};"></textarea>
+            <div style="text-align:right; margin-top:8px;">
+              <span style="font-size:12.5px; font-weight:700; color:{{ T.accent }}; cursor:pointer;">เพิ่มความคิดเห็น</span>
+            </div>
+            <div style="margin-top:16px; display:flex; flex-direction:column; gap:12px;">
+              <sc-for list="{{ internalNotes }}" as="n" hint-placeholder-count="2">
+                <div style="background:#FBF7E9; border:1px solid #F0E6BE; border-radius:10px; padding:10px 12px;">
+                  <div style="display:flex; justify-content:space-between; font-size:11px; font-weight:700; color:#A6762F; margin-bottom:4px;">
+                    <span>{{ n.author }}</span><span>{{ n.time }}</span>
+                  </div>
+                  <div style="font-size:12.5px; color:#7A6A2E; line-height:1.5;">{{ n.text }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- AUTOMATION FLOW TAB -->
+        <sc-if value="{{ rightTabIs.flow }}">
+          <div ref="{{ screenMountRef }}" style="padding:18px 20px;">
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:14px;">
+              <span style="width:16px; height:16px; border-radius:50%; background:#3D9467; color:#fff; font-size:10px; display:flex; align-items:center; justify-content:center;">✓</span>
+              <span style="font-weight:700; font-size:13px; color:{{ T.textPrimary }};">{{ flowName }}</span>
+              <span style="font-size:11px; font-weight:700; color:#3D9467; background:#E9F5EE; padding:2px 8px; border-radius:6px;">สำเร็จ</span>
+            </div>
+            <div style="display:flex; flex-direction:column; gap:0;">
+              <sc-for list="{{ flowSteps }}" as="fs" hint-placeholder-count="6">
+                <div style="display:flex; gap:10px; padding-bottom:16px; position:relative;">
+                  <div style="display:flex; flex-direction:column; align-items:center; flex-shrink:0;">
+                    <span style="font-size:14px;">{{ fs.icon }}</span>
+                    <span style="width:1px; flex:1; background:{{ T.border }}; margin-top:4px;"></span>
+                  </div>
+                  <div style="min-width:0;">
+                    <div style="font-size:12.5px; font-weight:600; color:{{ T.textSecondary }};">{{ fs.label }}</div>
+                    <div style="font-size:11px; color:{{ T.textMuted }}; margin-top:2px;">เสร็จสิ้นเมื่อ {{ fs.time }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- ORDERS TAB -->
+        <sc-if value="{{ rightTabIs.orders }}">
+          <div ref="{{ screenMountRef }}" style="display:flex; gap:4px; padding:12px 16px 0;">
+            <sc-for list="{{ ordersSubTabs }}" as="ot" hint-placeholder-count="3">
+              <div onClick="{{ ot.onClick }}" style="flex:1; text-align:center; padding:8px 4px; font-size:12px; font-weight:700; color:{{ ot.color }}; border-bottom:2px solid {{ ot.borderColor }}; cursor:pointer; white-space:nowrap;">{{ ot.label }}</div>
+            </sc-for>
+          </div>
+          <div style="padding:14px 16px;">
+            <input onFocus="{{ onOrderSearchFocus }}" onBlur="{{ onOrderSearchBlur }}" ref="{{ orderSearchRef }}" placeholder="ค้นหารหัสคำสั่งซื้อ" style="width:100%; border:none; background:{{ T.inputBg }}; border-radius:9px; padding:9px 12px; font-size:12.5px; font-family:inherit; outline:none; box-sizing:border-box; margin-bottom:12px; color:{{ T.textPrimary }};" />
+
+            <sc-if value="{{ ordersSubTabIs.history }}">
+              <div ref="{{ screenMountRef }}">
+              <sc-for list="{{ orderHistory }}" as="o" hint-placeholder-count="3">
+                <div style="border:1px solid {{ T.border }}; border-radius:12px; padding:12px; margin-bottom:10px;">
+                  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                    <span style="font-size:12px; font-weight:700; color:{{ T.textSecondary }};">{{ o.ref }}</span>
+                    <span style="font-size:10.5px; font-weight:700; padding:2px 8px; border-radius:6px; background:{{ o.statusBg }}; color:{{ o.statusColor }};">{{ o.status }}</span>
+                  </div>
+                  <div style="font-size:11px; color:{{ T.textMuted }}; margin-bottom:8px;">สร้างเมื่อ {{ o.date }}</div>
+                  <div style="display:flex; gap:8px; align-items:center; padding-top:8px; border-top:1px solid {{ T.divider }};">
+                    <div style="width:38px; height:38px; border-radius:8px; background:{{ T.borderSoft }}; flex-shrink:0;"></div>
+                    <div style="flex:1; min-width:0;">
+                      <div style="font-size:11.5px; color:{{ T.textSecondary }}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ o.item }}</div>
+                    </div>
+                    <div style="font-size:12.5px; font-weight:700; color:{{ T.textPrimary }}; flex-shrink:0;">฿{{ o.amount }}</div>
+                  </div>
+                  <div style="display:flex; gap:8px; margin-top:10px;">
+                    <div style="flex:1; text-align:center; padding:7px; border-radius:8px; border:1px solid {{ T.border }}; font-size:11.5px; font-weight:600; color:{{ T.textSecondary }}; cursor:pointer;">ดูรายละเอียด</div>
+                    <div style="flex:1; text-align:center; padding:7px; border-radius:8px; background:{{ T.accent }}; color:#fff; font-size:11.5px; font-weight:600; cursor:pointer;">ส่ง</div>
+                  </div>
+                </div>
+              </sc-for>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ ordersSubTabIs.products }}">
+              <div ref="{{ screenMountRef }}">
+              <sc-for list="{{ productCatalog }}" as="p" hint-placeholder-count="4">
+                <div style="display:flex; gap:10px; padding:10px 0; border-bottom:1px solid {{ T.divider }};">
+                  <div style="width:44px; height:44px; border-radius:9px; background:{{ T.borderSoft }}; flex-shrink:0;"></div>
+                  <div style="flex:1; min-width:0;">
+                    <div style="font-size:12px; font-weight:600; color:{{ T.textPrimary }}; line-height:1.4;">{{ p.name }}</div>
+                    <div style="font-size:12px; font-weight:700; color:{{ T.textSecondary }}; margin-top:3px;">฿{{ p.price }}</div>
+                    <div style="font-size:10.5px; color:{{ T.textMuted }}; margin-top:2px;">คงคลัง {{ p.stock }}</div>
+                  </div>
+                  <div style="display:flex; flex-direction:column; justify-content:center;">
+                    <div style="padding:6px 12px; border-radius:8px; background:{{ T.accent }}; color:#fff; font-size:11.5px; font-weight:600; cursor:pointer;">ส่ง</div>
+                  </div>
+                </div>
+              </sc-for>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ ordersSubTabIs.coupons }}">
+              <div ref="{{ screenMountRef }}">
+              <sc-for list="{{ coupons }}" as="cp" hint-placeholder-count="3">
+                <div style="display:flex; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid {{ T.divider }};">
+                  <div style="width:36px; height:36px; border-radius:9px; background:{{ T.accentSoft }}; display:flex; align-items:center; justify-content:center; font-size:16px; flex-shrink:0;">🎟️</div>
+                  <div style="flex:1; min-width:0;">
+                    <div style="font-size:12px; font-weight:700; color:{{ T.textPrimary }};">{{ cp.code }}</div>
+                    <div style="font-size:11px; color:{{ T.textTertiary }}; margin-top:2px;">{{ cp.desc }}</div>
+                  </div>
+                  <div style="padding:6px 12px; border-radius:8px; background:{{ T.accent }}; color:#fff; font-size:11.5px; font-weight:600; cursor:pointer; flex-shrink:0;">ส่ง</div>
+                </div>
+              </sc-for>
+              </div>
+            </sc-if>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+  </sc-if>
+  </div>
+
+  <!-- STATUS BAR: fixed at the bottom of the viewport, always expanded (no collapse). The outer viewport column reserves matching padding-bottom so nothing ever renders underneath it. -->
+  <div style="position:fixed; left:{{ statusBarLeft }}; right:0; bottom:0; z-index:15; display:flex; align-items:center; gap:{{ statusGap }}; padding:7px {{ statusPadX }}; border-top:1px solid {{ T.border }}; background:{{ T.panelBg }}; overflow-x:auto; white-space:nowrap;">
+    <sc-for list="{{ statusItems }}" as="st" hint-placeholder-count="5">
+      <sc-if value="{{ st.groupLabel }}">
+        <sc-if value="{{ st.divider }}">
+          <span style="width:1px; height:14px; background:{{ T.textMuted }}; flex-shrink:0;"></span>
+        </sc-if>
+        <span style="font-size:10.5px; font-weight:700; color:{{ T.textMuted }}; flex-shrink:0;">{{ st.groupLabel }}</span>
+      </sc-if>
+      <div style="display:flex; align-items:center; gap:5px; flex-shrink:0;">
+        <span style="width:7px; height:7px; border-radius:50%; background:{{ st.color }}; animation:{{ st.pulse }};"></span>
+        <span style="font-size:11px; font-weight:600; color:{{ T.textSecondary }};">{{ st.label }}</span>
+      </div>
+    </sc-for>
+    <span style="font-size:10.5px; color:{{ T.textMuted }}; flex-shrink:0;">· อัปเดตล่าสุด {{ statusUpdatedAt }}</span>
+  </div>
+
+  <!-- BOTTOM TAB BAR (mobile) -->
+  <sc-if value="{{ showBottomNav }}">
+    <div style="flex-shrink:0; display:flex; border-top:1px solid {{ T.border }}; background:{{ T.panelBg }}; padding:6px 0 8px;">
+      <sc-for list="{{ navItems }}" as="nav" hint-placeholder-count="4">
+        <div onClick="{{ nav.onClick }}" style="flex:1; display:flex; flex-direction:column; align-items:center; gap:2px; cursor:pointer; padding:4px 0;">
+          <span style="font-size:20px; filter:{{ nav.filter }};">{{ nav.icon }}</span>
+          <span style="font-size:10.5px; font-weight:600; color:{{ nav.labelColor }};">{{ nav.label }}</span>
+        </div>
+      </sc-for>
+    </div>
+  </sc-if>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = {
+    screen: 'inbox',
+    activeConvId: 1,
+    inboxFilter: 'all',
+    width: typeof window !== 'undefined' ? window.innerWidth : 1280,
+    mobileView: 'list',
+    settings: { notify: true, autoReply: false, sound: true },
+    rightTab: 'orders',
+    ordersSubTab: 'history',
+    filterMenuOpen: false,
+    followingOnly: false,
+    notifPanelOpen: false,
+    statusMenuOpen: false,
+    agentStatus: 'available',
+    replyStatusFilter: 'all',
+    tagFilter: null,
+    quickView: 'all',
+    toast: null,
+    themeColor: (typeof localStorage !== 'undefined' && localStorage.getItem('ib_theme')) || 'blue',
+    mode: (typeof localStorage !== 'undefined' && localStorage.getItem('ib_mode')) || 'light',
+  };
+
+  navRefs = {}; rowRefs = {}; animatedEls = new WeakSet();
+
+  themeAccents = { blue:'#3B6FE8', violet:'#7A5CF0', teal:'#12A594', rose:'#E0527A', amber:'#E0973B', mint:'#4FAE8C', indigo:'#4A4FC4', crimson:'#C43D5C', forest:'#3D7A52', cocoa:'#8A5A3F', hotpink:'#F0398C', lime:'#7CC02E', orange:'#F5811F', electric:'#2E7FF5', yellow:'#F0C419', redlight:'#E8776B', sky:'#6FB3E0', navylight:'#7C93E0', violetlight:'#B49CE8', greenlight:'#8CC9A0', yellowlight:'#E8D077', orangelight:'#E8A87C' };
+  themeLabels = { blue:'ฟ้า', violet:'ม่วง', teal:'เขียวน้ำทะเล', rose:'ชมพูเข้ม', amber:'ส้มอำพัน', mint:'มินต์', indigo:'สีน้ำเงินม่วง', crimson:'แดงเข้ม', forest:'เขียวป่า', cocoa:'โกโก้', hotpink:'ชมพูสด', lime:'เขียวมะนาว', orange:'ส้มสด', electric:'ฟ้าไฟฟ้า', yellow:'เหลืองสด', redlight:'แดงอ่อน', sky:'ฟ้าอ่อน', navylight:'น้ำเงินอ่อน', violetlight:'ม่วงอ่อน', greenlight:'เขียวอ่อน', yellowlight:'เหลืองอ่อน', orangelight:'ส้มอ่อน' };
+
+  shade(hex, pct) {
+    const num = parseInt(hex.slice(1), 16);
+    let r = (num >> 16) + Math.round(255 * pct), g = ((num >> 8) & 0xff) + Math.round(255 * pct), b = (num & 0xff) + Math.round(255 * pct);
+    r = Math.max(0, Math.min(255, r)); g = Math.max(0, Math.min(255, g)); b = Math.max(0, Math.min(255, b));
+    return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
+  }
+  hexToRgba(hex, a) {
+    const num = parseInt(hex.slice(1), 16);
+    return `rgba(${num >> 16},${(num >> 8) & 0xff},${num & 0xff},${a})`;
+  }
+  modeTokens = {
+    light: { pageBg:'#FFFFFF', panelBg:'#FFFFFF', headerBg:'#FBFAF8', inputBg:'#F5F4F0', hoverBg:'#F5F5F5', border:'#EFEFEF', borderSoft:'#F1EEE5', divider:'#F5F3EC', trackOff:'#E7E3D8', textPrimary:'#1B1A17', textSecondary:'#3A382F', textTertiary:'#8A8678', textMuted:'#B9B4A4', accentAlpha:0.1, focusAlpha:0.12, ringAlpha:0.2 },
+    gray: { pageBg:'#E7E5E0', panelBg:'#EFEDE7', headerBg:'#E2E0DA', inputBg:'#DBD9D2', hoverBg:'#DBD9D2', border:'#D2CFC6', borderSoft:'#D2CFC6', divider:'#D6D3CB', trackOff:'#C7C3B8', textPrimary:'#2B2A26', textSecondary:'#4A4638', textTertiary:'#6B6656', textMuted:'#9A9585', accentAlpha:0.14, focusAlpha:0.16, ringAlpha:0.25 },
+    dark: { pageBg:'#1C1B22', panelBg:'#242329', headerBg:'#1F1E24', inputBg:'#2D2C34', hoverBg:'#2D2C34', border:'#34333B', borderSoft:'#34333B', divider:'#34333B', trackOff:'#3C3A44', textPrimary:'#F1EFEA', textSecondary:'#CFCBC0', textTertiary:'#9A968A', textMuted:'#6E6A62', accentAlpha:0.22, focusAlpha:0.3, ringAlpha:0.45 },
+  };
+  getTokens() {
+    const accent = this.themeAccents[this.state.themeColor] || this.themeAccents.blue;
+    const m = this.modeTokens[this.state.mode] || this.modeTokens.light;
+    return {
+      accent,
+      accentLight: this.shade(accent, 0.22),
+      accentHover: this.shade(accent, -0.12),
+      accentSoft: this.hexToRgba(accent, m.accentAlpha),
+      accentGlow15: this.hexToRgba(accent, 0.15),
+      accentGlow35: this.hexToRgba(accent, 0.35),
+      accentFocusBg: this.hexToRgba(accent, m.focusAlpha),
+      accentFocusRing: this.hexToRgba(accent, m.ringAlpha),
+      pageBg: m.pageBg, panelBg: m.panelBg, headerBg: m.headerBg, inputBg: m.inputBg, hoverBg: m.hoverBg,
+      border: m.border, borderSoft: m.borderSoft, divider: m.divider, trackOff: m.trackOff,
+      textPrimary: m.textPrimary, textSecondary: m.textSecondary, textTertiary: m.textTertiary, textMuted: m.textMuted,
+    };
+  }
+  setTheme(key, e) {
+    if (e && e.currentTarget && window.gsap) gsap.fromTo(e.currentTarget, { scale: 0.8 }, { scale: 1, duration: 0.4, ease: 'back.out(2.5)' });
+    this.setState({ themeColor: key });
+    try { localStorage.setItem('ib_theme', key); } catch (err) {}
+  }
+  setMode(m) {
+    this.setState({ mode: m });
+    try { localStorage.setItem('ib_mode', m); } catch (err) {}
+  }
+
+  componentDidMount() {
+    this._onResize = () => { this.setState({ width: window.innerWidth }); this.moveNavIndicator(); };
+    window.addEventListener('resize', this._onResize);
+    this._demoTimer = setInterval(() => this.simulateIncoming(), 15000);
+    setTimeout(() => this.moveNavIndicator(), 50);
+  }
+  componentWillUnmount() {
+    window.removeEventListener('resize', this._onResize);
+    clearInterval(this._demoTimer);
+    clearTimeout(this._toastTimer);
+  }
+  componentDidUpdate(prevProps, prevState) {
+    if (!prevState) return;
+    if (window.gsap && prevState.activeConvId !== this.state.activeConvId) {
+      const els = (this._msgEls || []).filter(Boolean);
+      if (els.length) gsap.fromTo(els, { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.5, stagger: 0.06, ease: 'power3.out' });
+      if (this._threadScrollEl) {
+        gsap.to(this._threadScrollEl, { scrollTop: this._threadScrollEl.scrollHeight, duration: 0.55, ease: 'power2.out' });
+      }
+    }
+    if (prevState.screen !== this.state.screen) this.moveNavIndicator();
+  }
+  moveNavIndicator() {
+    const key = this.state.screen;
+    const el = this.navRefs[key];
+    if (el && this._navIndicatorEl && window.gsap) {
+      gsap.to(this._navIndicatorEl, { y: el.offsetTop + 14, opacity: 1, duration: 0.4, ease: 'power3.out' });
+    }
+  }
+  simulateIncoming() {
+    if (document.hidden) return;
+    const candidates = this.conversationsData.filter(c => c.id !== this.state.activeConvId && !this.closedIds.has(c.id));
+    if (!candidates.length) return;
+    const conv = candidates[Math.floor(Math.random() * candidates.length)];
+    conv.unread = (conv.unread || 0) + 1;
+    conv.time = 'เมื่อสักครู่';
+    this.showToast(`ข้อความใหม่จาก ${conv.name}`);
+    this.forceUpdate(() => {
+      const rowEl = this.rowRefs[conv.id];
+      if (rowEl && window.gsap) {
+        const T = this.getTokens();
+        gsap.fromTo(rowEl, { backgroundColor: T.accentFocusBg }, { backgroundColor: rowEl.style.background || T.panelBg, duration: 1.1, ease: 'power2.out' });
+      }
+    });
+  }
+  showToast(text) {
+    clearTimeout(this._toastTimer);
+    this.setState({ toast: { text } });
+    this._toastTimer = setTimeout(() => this.setState({ toast: null }), 3200);
+  }
+  toastRef(el) {
+    if (el && window.gsap && !this.animatedEls.has(el)) {
+      this.animatedEls.add(el);
+      gsap.timeline()
+        .fromTo(el, { opacity: 0, y: 34, scale: 0.75, rotate: -3 }, { opacity: 1, y: 0, scale: 1, rotate: 0, duration: 0.55, ease: 'back.out(2.2)' })
+        .to(el, { boxShadow: '0 0 0 6px rgba(255,255,255,0.28)', duration: 0.22, ease: 'power2.out' }, '-=0.1')
+        .to(el, { boxShadow: '0 0 0 0px rgba(255,255,255,0)', duration: 0.5, ease: 'power2.out' });
+    }
+  }
+  dropdownRef(el) {
+    if (el && window.gsap && !this.animatedEls.has(el)) {
+      this.animatedEls.add(el);
+      gsap.fromTo(el, { opacity: 0, y: -8, scale: 0.97 }, { opacity: 1, y: 0, scale: 1, duration: 0.32, ease: 'expo.out' });
+    }
+  }
+  screenMountRef(el) {
+    if (el && window.gsap && !this.animatedEls.has(el)) {
+      this.animatedEls.add(el);
+      gsap.fromTo(el, { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.45, ease: 'power3.out' });
+    }
+  }
+  msgRef(i, el) {
+    this._msgEls = this._msgEls || [];
+    this._msgEls[i] = el;
+  }
+  sendBtnRef(el) { this._sendBtnEl = el; }
+  onSendPunch() {
+    if (this._sendBtnEl && window.gsap) gsap.fromTo(this._sendBtnEl, { scale: 0.85 }, { scale: 1, duration: 0.5, ease: 'elastic.out(1,0.6)' });
+  }
+
+  navConfig = [
+    { key: 'dashboard', icon: '📊', label: 'ภาพรวม' },
+    { key: 'inbox', icon: '💬', label: 'แชท' },
+    { key: 'contacts', icon: '👤', label: 'ทีม' },
+    { key: 'settings', icon: '⚙️', label: 'ตั้งค่า' },
+  ];
+
+  platforms = {
+    shopee: { name: 'Shopee', color: '#EE4D2D', initial: 'S' },
+    lazada: { name: 'Lazada', color: '#0F146D', initial: 'L' },
+    tiktok: { name: 'TikTok Shop', color: '#000000', initial: 'T' },
+  };
+
+  conversationsData = [
+    { id:1, name:'คุณนภัส ใจดี', initials:'นภ', avatarBg:'#5B4FE8', platform:'shopee', time:'2 นาที', preview:'พัสดุยังไม่มาเลยค่ะ สั่งไปตั้งแต่วันจันทร์', unread:2, agentName:'พลอย', following:true, tags:[{label:'ร้องเรียน',dotColor:'#C43D3D'}] },
+    { id:2, name:'ธนกร พงษ์สิน', initials:'ธพ', avatarBg:'#E8A24F', platform:'lazada', time:'12 นาที', preview:'มีไซส์ M ไหมครับ อยากสั่งเพิ่ม', unread:1, agentName:'กานต์', following:false, tags:[{label:'สอบถามสินค้า',dotColor:'#3D6FC4'}] },
+    { id:3, name:'mimi.shops', initials:'MI', avatarBg:'#4FBE8E', platform:'tiktok', time:'25 นาที', preview:'ขอบคุณค่ะ ได้รับของแล้ว 🙏', unread:0, agentName:'พลอย', following:false, tags:[{label:'ปิดเคส',dotColor:'#3D9467'}] },
+    { id:4, name:'อรวี ทองใบ', initials:'อท', avatarBg:'#C4587A', platform:'shopee', time:'40 นาที', preview:'ขอเลขพัสดุหน่อยค่ะ', unread:0, agentName:'มานี', following:true, tags:[{label:'ติดตามพัสดุ',dotColor:'#6B5BD6'}] },
+    { id:5, name:'Kittipong.k', initials:'KK', avatarBg:'#5B8FE8', platform:'lazada', time:'1 ชม.', preview:'ยกเลิกออเดอร์ได้ไหมครับ', unread:1, agentName:'กานต์', following:false, tags:[{label:'ยกเลิก/คืนเงิน',dotColor:'#C43D3D'}] },
+    { id:6, name:'sasi_wan', initials:'SW', avatarBg:'#8B7CFF', platform:'tiktok', time:'2 ชม.', preview:'สินค้าตรงปกไหมคะ', unread:1, agentName:'พลอย', following:false, tags:[{label:'สอบถามสินค้า',dotColor:'#3D6FC4'}] },
+    { id:7, name:'บุญมี รักษ์ไทย', initials:'บร', avatarBg:'#E86F5B', platform:'shopee', time:'3 ชม.', preview:'ได้รับของแล้วครับ พอใจมาก', unread:0, agentName:'มานี', following:false, tags:[{label:'ปิดเคส',dotColor:'#3D9467'}] },
+    { id:8, name:'Nattaya.p', initials:'NP', avatarBg:'#4FAEBE', platform:'lazada', time:'5 ชม.', preview:'ของเสียหายค่ะ ขอเปลี่ยน', unread:3, agentName:'กานต์', following:true, tags:[{label:'ร้องเรียน',dotColor:'#C43D3D'}] },
+  ];
+
+  pinnedIds = new Set([1, 4]);
+  closedIds = new Set();
+  bookmarkedIds = new Set();
+  assignOverrides = {};
+
+  messagesByConv = {
+    1: [
+      { type:'text', from:'them', text:'สวัสดีค่ะ สั่งของไปตั้งแต่วันจันทร์ ตอนนี้ยังไม่ได้รับเลยค่ะ', time:'09:12' },
+      { type:'order', productName:'เซ็ตผ้าปูที่นอน 3.5 ฟุต สีครีม', price:'690', status:'กำลังจัดส่ง', statusBg:'#FDF3E2', statusFg:'#A6762B', orderRef:'#SP-88213', time:'09:12' },
+      { type:'text', from:'me', text:'สวัสดีค่ะคุณนภัส รบกวนรอสักครู่นะคะ ทีมงานขอเช็คสถานะพัสดุให้ก่อนค่ะ', time:'09:15' },
+      { type:'text', from:'them', text:'พัสดุยังไม่มาเลยค่ะ สั่งไปตั้งแต่วันจันทร์', time:'09:20' },
+    ],
+  };
+
+  quickRepliesData = ['ขอบคุณค่ะ 🙏', 'รบกวนรอสักครู่นะคะ', 'เช็คสถานะพัสดุให้ค่ะ'];
+
+  orderHistoryData = [
+    { ref:'#SP-88213', date:'8 ส.ค. 2569', item:'เซ็ตผ้าปูที่นอน 3.5 ฟุต', amount:'690', status:'กำลังจัดส่ง', statusBg:'#FDF3E2', statusColor:'#A6762B' },
+    { ref:'#SP-81044', date:'22 ก.ค. 2569', item:'หมอนรองคอเมมโมรี่โฟม', amount:'1,240', status:'สำเร็จ', statusBg:'#E9F5EE', statusColor:'#3D9467' },
+    { ref:'#SP-77590', date:'3 มิ.ย. 2569', item:'ผ้าห่มขนแกะ', amount:'450', status:'สำเร็จ', statusBg:'#E9F5EE', statusColor:'#3D9467' },
+  ];
+
+  productCatalogData = [
+    { name:'เซ็ตผ้าปูที่นอน 3.5 ฟุต สีครีม', price:'690', stock:169 },
+    { name:'หมอนรองคอเมมโมรี่โฟม รุ่นระบายอากาศ', price:'299', stock:2127 },
+    { name:'ผ้าห่มขนแกะกันหนาว ไซส์ 6 ฟุต', price:'590', stock:96 },
+    { name:'ปลอกหมอนข้างผ้าซาติน', price:'129', stock:410 },
+  ];
+
+  couponsData = [
+    { code:'NOVA10', desc:'ลด 10% สูงสุด ฿100' },
+    { code:'FREESHIP', desc:'ส่งฟรีทุกออเดอร์' },
+    { code:'VIP50', desc:'ลด ฿50 สำหรับลูกค้าประจำ' },
+  ];
+
+  internalNotesData = [
+    { author:'พลอย', time:'วันนี้ 09:16', text:'ลูกค้าเก่า สั่งซ้ำบ่อย ควรดูแลเป็นพิเศษเรื่องพัสดุล่าช้า' },
+  ];
+
+  flowStepsData = [
+    { icon:'▶️', label:'ได้รับข้อความ' },
+    { icon:'⚡', label:'เพิ่มแท็กอัตโนมัติ' },
+    { icon:'🔻', label:'กรองลูกค้าจากแท็ก' },
+    { icon:'⏸️', label:'รอ / หยุด 10 วินาที' },
+    { icon:'🔻', label:'จับคีย์เวิร์ดในข้อความลูกค้า' },
+    { icon:'⚡', label:'ตอบกลับแรกโดยทีมงาน' },
+  ];
+
+  teamMembersData = [
+    { initials:'พ.', name:'พลอย · ทีม CS', role:'CS หลัก', activeChats:5, color:'#5B4FE8' },
+    { initials:'ก.', name:'กานต์ · ทีม CS', role:'CS หลัก', activeChats:3, color:'#4FBE8E' },
+    { initials:'ม.', name:'มานี · หัวหน้าทีม', role:'Supervisor', activeChats:2, color:'#E8A24F' },
+    { initials:'คุณ', name:'คุณ (ตัวเอง)', role:'CS', activeChats:0, color:'#C4587A' },
+  ];
+
+  statusConfig = [
+    { key:'server', label:'Server', color:'#3D9467', groupLabel:'System:' },
+    { key:'db', label:'Database', color:'#3D9467' },
+    { key:'shopee', label:'Shopee', color:'#3D9467', divider:true, groupLabel:'API:' },
+    { key:'lazada', label:'Lazada', color:'#E8A24F' },
+    { key:'tiktok', label:'TikTok', color:'#3D9467' },
+  ];
+
+  platformFilterState = { shopee: true, lazada: true, tiktok: true };
+
+  setScreen(key) { this.setState({ screen: key, mobileView: key === 'inbox' ? 'list' : this.state.mobileView }); }
+  setConv(id) {
+    const conv = this.conversationsData.find(c => c.id === id);
+    if (conv && conv.unread > 0 && window.gsap) {
+      const rowEl = this.rowRefs[id];
+      const badge = rowEl && rowEl.querySelector('[data-unread-badge]');
+      if (badge) {
+        gsap.to(badge, { opacity: 0, scale: 0.3, duration: 0.22, ease: 'power2.in', onComplete: () => { conv.unread = 0; this.forceUpdate(); } });
+      } else { conv.unread = 0; }
+    } else if (conv) { conv.unread = 0; }
+    this.setState({ activeConvId: id, mobileView: 'thread' });
+  }
+  setFilter(f) { this.setState({ inboxFilter: f }); }
+  backToList() { this.setState({ mobileView: 'list' }); }
+  openDetail() { this.setState({ mobileView: 'detail' }); }
+  closeDetail() { this.setState({ mobileView: 'thread' }); }
+  setRightTab(t) { this.setState({ rightTab: t }); }
+  setOrdersSubTab(t) { this.setState({ ordersSubTab: t }); }
+  toggleFilterMenu() { this.setState(s => ({ filterMenuOpen: !s.filterMenuOpen })); }
+  toggleFollowingOnly() { this.setState(s => ({ followingOnly: !s.followingOnly })); }
+  toggleNotifPanel() { this.setState(s => ({ notifPanelOpen: !s.notifPanelOpen, statusMenuOpen: false })); }
+  toggleStatusMenu() { this.setState(s => ({ statusMenuOpen: !s.statusMenuOpen, notifPanelOpen: false })); }
+  setAgentStatus(v) { this.setState({ agentStatus: v, statusMenuOpen: false }); }
+  setReplyStatusFilter(v) { this.setState(s => ({ replyStatusFilter: s.replyStatusFilter === v ? 'all' : v })); }
+  setTagFilter(v) { this.setState(s => ({ tagFilter: s.tagFilter === v ? null : v })); }
+  setQuickView(v) { this.setState({ quickView: v }); }
+  togglePin(id, e) {
+    e.stopPropagation();
+    if (this.pinnedIds.has(id)) this.pinnedIds.delete(id); else this.pinnedIds.add(id);
+    this.forceUpdate();
+  }
+  toggleAssign(id) {
+    this.assignOverrides[id] = this.assignOverrides[id] === 'me' ? 'plamai' : 'me';
+    this.forceUpdate();
+  }
+  toggleClose(id) {
+    if (this.closedIds.has(id)) this.closedIds.delete(id); else this.closedIds.add(id);
+    this.forceUpdate();
+  }
+  toggleBookmark(id) {
+    if (this.bookmarkedIds.has(id)) this.bookmarkedIds.delete(id); else this.bookmarkedIds.add(id);
+    this.forceUpdate();
+  }
+  togglePlatformFilter(key) {
+    this.platformFilterState[key] = !this.platformFilterState[key];
+    this.forceUpdate();
+  }
+  toggleSetting(key, e) {
+    if (e && e.currentTarget && window.gsap) {
+      const knob = e.currentTarget.querySelector('div');
+      if (knob) gsap.fromTo(knob, { scale: 0.75 }, { scale: 1, duration: 0.45, ease: 'power3.out' });
+    }
+    this.setState(s => ({ settings: { ...s.settings, [key]: !s.settings[key] } }));
+  }
+  pinPunch(e) {
+    if (e && e.currentTarget && window.gsap) gsap.fromTo(e.currentTarget, { scale: 1.5 }, { scale: 1, duration: 0.45, ease: 'power3.out' });
+  }
+  btnPunch(e) {
+    if (e && e.currentTarget && window.gsap) gsap.fromTo(e.currentTarget, { scale: 0.92 }, { scale: 1, duration: 0.4, ease: 'power3.out' });
+  }
+  threadScrollRef(el) { this._threadScrollEl = el; }
+  composerWrapRef(el) {
+    this._composerEl = el;
+    if (el && window.gsap && !this.animatedEls.has(el)) {
+      this.animatedEls.add(el);
+      gsap.fromTo(el, { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.4, ease: 'power3.out' });
+    }
+  }
+  rowHover(e) {
+    if (e && e.currentTarget && window.gsap) gsap.to(e.currentTarget, { scale: 1.012, boxShadow: '0 4px 14px rgba(0,0,0,0.06)', duration: 0.25, ease: 'power2.out' });
+  }
+  rowLeave(e) {
+    if (e && e.currentTarget && window.gsap) gsap.to(e.currentTarget, { scale: 1, boxShadow: '0 0 0 rgba(0,0,0,0)', duration: 0.25, ease: 'power2.out' });
+  }
+  quickSearchRef(el) { this._quickSearchEl = el; }
+  onQuickSearchFocus() {
+    const T = this.getTokens();
+    if (this._quickSearchEl && window.gsap) gsap.to(this._quickSearchEl, { backgroundColor: T.accentFocusBg, scale: 1.015, boxShadow: `0 0 0 2px ${T.accentFocusRing}`, duration: 0.3, ease: 'power2.out' });
+  }
+  onQuickSearchBlur() {
+    const T = this.getTokens();
+    if (this._quickSearchEl && window.gsap) gsap.to(this._quickSearchEl, { backgroundColor: T.inputBg, scale: 1, boxShadow: '0 0 0 0px transparent', duration: 0.3, ease: 'power2.out' });
+  }
+  orderSearchRef(el) { this._orderSearchEl = el; }
+  onOrderSearchFocus() {
+    const T = this.getTokens();
+    if (this._orderSearchEl && window.gsap) gsap.to(this._orderSearchEl, { backgroundColor: T.accentFocusBg, scale: 1.015, boxShadow: `0 0 0 2px ${T.accentFocusRing}`, duration: 0.3, ease: 'power2.out' });
+  }
+  onOrderSearchBlur() {
+    const T = this.getTokens();
+    if (this._orderSearchEl && window.gsap) gsap.to(this._orderSearchEl, { backgroundColor: T.inputBg, scale: 1, boxShadow: '0 0 0 0px transparent', duration: 0.3, ease: 'power2.out' });
+  }
+  fieldRefs = [];
+  contactFieldRef(i, el) {
+    this.fieldRefs[i] = el;
+    if (el && window.gsap && !this.animatedEls.has(el)) {
+      this.animatedEls.add(el);
+      gsap.fromTo(el, { opacity: 0, x: -8 }, { opacity: 1, x: 0, duration: 0.4, delay: i * 0.05, ease: 'power3.out' });
+    }
+  }
+  onComposerFocus() {
+    const T = this.getTokens();
+    if (this._composerEl && window.gsap) gsap.to(this._composerEl, { backgroundColor: T.accentFocusBg, scale: 1.015, boxShadow: `0 0 0 2px ${T.accentFocusRing}`, duration: 0.3, ease: 'power2.out' });
+  }
+  onComposerBlur() {
+    const T = this.getTokens();
+    if (this._composerEl && window.gsap) gsap.to(this._composerEl, { backgroundColor: T.inputBg, scale: 1, boxShadow: '0 0 0 0px transparent', duration: 0.3, ease: 'power2.out' });
+  }
+  countUpStat(el, s) {
+    if (!el || !window.gsap || this.animatedEls.has(el)) return;
+    this.animatedEls.add(el);
+    const match = String(s.value).match(/[\d,]+\.?\d*/);
+    if (!match) return;
+    const target = parseFloat(match[0].replace(/,/g, ''));
+    const prefix = s.value.slice(0, match.index);
+    const suffix = s.value.slice(match.index + match[0].length);
+    const decimals = match[0].includes('.') ? 1 : 0;
+    gsap.fromTo({ v: 0 }, { v: 0 }, {
+      v: target, duration: 1.1, ease: 'power2.out',
+      onUpdate: function () {
+        const v = this.targets()[0].v;
+        el.textContent = prefix + (decimals ? v.toFixed(1) : Math.round(v).toLocaleString()) + suffix;
+      },
+    });
+  }
+
+  renderVals() {
+    const { screen, activeConvId, inboxFilter, width, mobileView, settings, rightTab, ordersSubTab, filterMenuOpen, followingOnly, notifPanelOpen, statusMenuOpen, agentStatus, replyStatusFilter, tagFilter, quickView, themeColor, mode, statusExpanded } = this.state;
+    const T = this.getTokens();
+    const isMobile = width < 860;
+    const active = this.conversationsData.find(c => c.id === activeConvId) || this.conversationsData[0];
+    const plat = this.platforms[active.platform];
+    const activeAssignedToMe = this.assignOverrides[activeConvId] === 'me';
+    const activeClosed = this.closedIds.has(activeConvId);
+    const activeBookmarked = this.bookmarkedIds.has(activeConvId);
+
+    const navItems = this.navConfig.map(n => ({
+      icon: n.icon, label: n.label,
+      active: n.key === screen,
+      bg: n.key === screen ? T.accentSoft : 'transparent',
+      filter: n.key === screen ? 'none' : 'grayscale(1) opacity(0.6)',
+      labelColor: n.key === screen ? T.accent : T.textMuted,
+      onClick: () => this.setScreen(n.key),
+      navRef: (el) => { this.navRefs[n.key] = el; },
+    }));
+
+    const activePlatforms = Object.keys(this.platformFilterState).filter(k => this.platformFilterState[k]);
+
+    const conversations = this.conversationsData
+      .filter(c => activePlatforms.includes(c.platform))
+      .filter(c => inboxFilter === 'all' || (inboxFilter === 'unread' && c.unread > 0) || c.platform === inboxFilter)
+      .filter(c => !followingOnly || c.following)
+      .filter(c => replyStatusFilter === 'all' || (replyStatusFilter === 'unreplied' ? c.unread > 0 : c.unread === 0))
+      .filter(c => !tagFilter || c.tags.some(t => t.label === tagFilter))
+      .filter(c => quickView === 'all' || (quickView === 'unread' ? c.unread > 0 : this.closedIds.has(c.id)))
+      .slice()
+      .sort((a, b) => {
+        const ap = this.pinnedIds.has(a.id) ? 1 : 0, bp = this.pinnedIds.has(b.id) ? 1 : 0;
+        return bp - ap;
+      })
+      .map((c, i, arr) => {
+        const p = this.platforms[c.platform];
+        const pinned = this.pinnedIds.has(c.id);
+        const unread = c.unread > 0;
+        const closed = this.closedIds.has(c.id);
+        const showAllLabel = pinned === false && (i === 0 || this.pinnedIds.has(arr[i - 1].id));
+        return {
+          showAllLabel: showAllLabel && this.pinnedIds.size > 0,
+          ...c,
+          closed,
+          platformColor: p.color,
+          platformInitial: p.initial,
+          platformName: p.name,
+          selBg: c.id === activeConvId ? T.accentSoft : (unread ? T.accentSoft : T.panelBg),
+          nameWeight: unread ? 800 : 600,
+          nameColor: unread ? T.textPrimary : T.textSecondary,
+          previewColor: unread ? T.textSecondary : T.textTertiary,
+          previewWeight: unread ? 700 : 400,
+          pinned: pinned ? T.accent : 'transparent',
+          pinIcon: '📌',
+          pinOpacity: pinned ? '1' : '0.22',
+          onClick: () => this.setConv(c.id),
+          onPinClick: (e) => { this.togglePin(c.id, e); this.pinPunch(e); },
+          onHover: (e) => this.rowHover(e), onLeave: (e) => this.rowLeave(e),
+          rowRef: (el) => {
+            this.rowRefs[c.id] = el;
+            if (el && window.gsap && !this.animatedEls.has(el)) {
+              this.animatedEls.add(el);
+              gsap.fromTo(el, { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.35, delay: Math.min(i * 0.03, 0.3), ease: 'power3.out' });
+            }
+          },
+        };
+      });
+
+    const rawMsgs = this.messagesByConv[activeConvId] || this.messagesByConv[1];
+    const messages = rawMsgs.map((m, i) => {
+      const mine = m.from === 'me';
+      const msgRef = (el) => this.msgRef(i, el);
+      if (m.type === 'order') {
+        return { isOrderCard: true, isText: false, align: 'flex-start', msgRef, ...m };
+      }
+      return {
+        isText: true, isOrderCard: false, msgRef,
+        align: mine ? 'flex-end' : 'flex-start',
+        bubbleBg: mine ? T.accent : T.panelBg,
+        bubbleFg: mine ? '#fff' : T.textPrimary,
+        bubbleBorder: mine ? 'none' : `1px solid ${T.border}`,
+        brRadius: mine ? '4px' : '16px',
+        blRadius: mine ? '16px' : '4px',
+        text: m.text, time: m.time,
+      };
+    });
+
+    const inboxFilterConfig = [
+      { key:'all', label:'ทั้งหมด' },
+      { key:'unread', label:'ยังไม่อ่าน' },
+      { key:'shopee', label:'Shopee' },
+      { key:'lazada', label:'Lazada' },
+      { key:'tiktok', label:'TikTok' },
+    ];
+
+    const filteredUrgent = [
+      { name:'Nattaya.p — ของเสียหาย', time:'45 นาที', platform:'lazada' },
+      { name:'คุณนภัส — พัสดุล่าช้า', time:'22 นาที', platform:'shopee' },
+      { name:'Kittipong.k — ขอยกเลิก', time:'12 นาที', platform:'lazada' },
+    ].filter(u => activePlatforms.includes(u.platform));
+
+    const platformShareAll = [
+      { name:'Shopee', pct:46, color:'#EE4D2D', key:'shopee' },
+      { name:'Lazada', pct:31, color:'#0F156D', key:'lazada' },
+      { name:'TikTok Shop', pct:23, color:'#000000', key:'tiktok' },
+    ].filter(p => activePlatforms.includes(p.key));
+    const shareTotal = platformShareAll.reduce((a, p) => a + p.pct, 0) || 1;
+    const platformShare = platformShareAll.map(p => ({ ...p, pct: Math.round(p.pct / shareTotal * 100) + '%' }));
+
+    const isInboxScreen = screen === 'inbox';
+    const showList = isInboxScreen && (!isMobile || mobileView === 'list');
+    const showThread = isInboxScreen && (!isMobile || mobileView === 'thread');
+    const showDetail = isInboxScreen && (!isMobile || mobileView === 'detail');
+
+    const rightTabConfig = [
+      { key:'profile', icon:'👤', title:'ข้อมูลติดต่อ' },
+      { key:'notes', icon:'📝', title:'ความคิดเห็นภายใน' },
+      { key:'flow', icon:'🔀', title:'ลำดับการทำงาน' },
+      { key:'orders', icon:'🛍️', title:'คำสั่งซื้อ/สินค้า' },
+    ];
+    const rightTabs = rightTabConfig.map(rt => ({
+      icon: rt.icon, title: rt.title, onClick: () => this.setRightTab(rt.key),
+      bg: rightTab === rt.key ? T.accentSoft : 'transparent',
+    }));
+
+    const ordersSubTabConfig = [
+      { key:'history', label:'ประวัติคำสั่งซื้อ' },
+      { key:'products', label:'สินค้า' },
+      { key:'coupons', label:'คูปอง' },
+    ];
+    const ordersSubTabs = ordersSubTabConfig.map(ot => ({
+      label: ot.label, onClick: () => this.setOrdersSubTab(ot.key),
+      color: ordersSubTab === ot.key ? T.accent : T.textTertiary,
+      borderColor: ordersSubTab === ot.key ? T.accent : 'transparent',
+    }));
+
+    return {
+      isMobile, notMobile: !isMobile,
+      T,
+      pagePad: isMobile ? '20px 16px' : '36px 44px',
+      pageTitleSize: isMobile ? '21px' : '26px',
+      dashHeaderDir: isMobile ? 'column' : 'row',
+      dashHeaderAlign: isMobile ? 'flex-start' : 'center',
+      statGridCols: isMobile ? '1fr 1fr' : 'repeat(4,1fr)',
+      chartGridCols: isMobile ? '1fr' : '1.4fr 1fr',
+      contactsGridCols: isMobile ? '1fr' : 'repeat(2,1fr)',
+      statusGap: isMobile ? '10px' : '18px',
+      statusPadX: isMobile ? '14px' : '24px',
+      statusItems: this.statusConfig.map(s => ({ label: s.label, color: s.color, divider: !!s.divider, groupLabel: s.groupLabel || null, pulse: s.color === '#3D9467' ? 'none' : 'pulseDot 1.6s ease infinite' })),
+      statusUpdatedAt: 'เมื่อสักครู่',
+      statusBarLeft: isMobile ? '0' : '76px',
+      statusBarHeight: '36px',
+
+      navItems,
+      isDashboard: screen === 'dashboard',
+      isContacts: screen === 'contacts',
+      isSettings: screen === 'settings',
+      isInbox: isInboxScreen,
+      showBottomNav: isMobile,
+      showList, showThread, showDetail,
+      listWidth: isMobile ? '100%' : 'clamp(250px,24vw,320px)',
+      threadMinWidth: isMobile ? '100%' : '260px',
+      threadPad: isMobile ? '18px 16px' : '24px 32px',
+      composerPadX: isMobile ? '16px' : '24px',
+      detailWidth: isMobile ? '100%' : 'clamp(240px,22vw,320px)',
+      detailBorder: isMobile ? 'none' : `1px solid ${T.border}`,
+      backToList: () => this.backToList(),
+      openDetail: () => this.openDetail(),
+      closeDetail: () => this.closeDetail(),
+      toggleFilterMenu: () => this.toggleFilterMenu(),
+      filterMenuOpen, filterMenuBg: filterMenuOpen ? T.accentSoft : 'transparent',
+      followingOnly, toggleFollowingOnly: () => this.toggleFollowingOnly(),
+
+      dropdownRef: (el) => this.dropdownRef(el),
+      screenMountRef: (el) => this.screenMountRef(el),
+      sendBtnRef: (el) => this.sendBtnRef(el),
+      onSendPunch: () => this.onSendPunch(),
+      threadScrollRef: (el) => this.threadScrollRef(el),
+      composerWrapRef: (el) => this.composerWrapRef(el),
+      onComposerFocus: () => this.onComposerFocus(),
+      onComposerBlur: () => this.onComposerBlur(),
+      quickSearchRef: (el) => this.quickSearchRef(el),
+      onQuickSearchFocus: () => this.onQuickSearchFocus(),
+      onQuickSearchBlur: () => this.onQuickSearchBlur(),
+      orderSearchRef: (el) => this.orderSearchRef(el),
+      onOrderSearchFocus: () => this.onOrderSearchFocus(),
+      onOrderSearchBlur: () => this.onOrderSearchBlur(),
+      navIndicatorRef: (el) => { this._navIndicatorEl = el; if (el) this.moveNavIndicator(); },
+      toast: this.state.toast, toastRef: (el) => this.toastRef(el),
+      hasNotif: true,
+      notifPanelOpen, toggleNotifPanel: () => this.toggleNotifPanel(),
+      statusMenuOpen, toggleStatusMenu: () => this.toggleStatusMenu(),
+      statusDotColor: agentStatus === 'available' ? '#3D9467' : T.textMuted,
+      statusLabel: agentStatus === 'available' ? 'ออนไลน์' : 'ออฟไลน์',
+      statusOptions: [
+        { label:'ออนไลน์', color:'#3D9467', active: agentStatus === 'available', onClick: () => this.setAgentStatus('available') },
+        { label:'ออฟไลน์', color: T.textMuted, active: agentStatus === 'away', onClick: () => this.setAgentStatus('away') },
+      ],
+      replyStatusOptions: [
+        { label:'ยังไม่ได้ตอบ', active: replyStatusFilter === 'unreplied' ? T.accent : T.border, onClick: () => this.setReplyStatusFilter('unreplied') },
+        { label:'ตอบแล้ว', active: replyStatusFilter === 'replied' ? T.accent : T.border, onClick: () => this.setReplyStatusFilter('replied') },
+      ],
+      tagFilterOptions: ['ร้องเรียน','สอบถามสินค้า','ปิดเคส','ติดตามพัสดุ','ยกเลิก/คืนเงิน'].map(label => {
+        const dot = this.conversationsData.flatMap(c => c.tags).find(t => t.label === label);
+        return { label, color: dot ? dot.dotColor : T.textMuted, checked: tagFilter === label, onClick: () => this.setTagFilter(label) };
+      }),
+      channelFilterOptions: Object.entries(this.platforms).map(([key, p]) => ({
+        label: p.name, color: p.color, initial: p.initial,
+        checked: this.platformFilterState[key],
+        onClick: () => this.togglePlatformFilter(key),
+      })),
+      quickViews: [
+        { key:'all', label:'ทั้งหมด', count: this.conversationsData.length },
+        { key:'unread', label:'ยังไม่ตอบ', count: this.conversationsData.filter(c => c.unread > 0).length },
+        { key:'closed', label:'ปิดแล้ว', count: this.closedIds.size },
+      ].map(v => ({
+        label: v.label, count: v.count, onClick: () => this.setQuickView(v.key),
+        bg: quickView === v.key ? T.accent : T.borderSoft,
+        fg: quickView === v.key ? '#fff' : T.textSecondary,
+        countBg: quickView === v.key ? 'rgba(255,255,255,0.3)' : T.textMuted,
+      })),
+
+      rightTabs, rightTabIs: {
+        profile: rightTab === 'profile', notes: rightTab === 'notes',
+        flow: rightTab === 'flow', orders: rightTab === 'orders',
+      },
+      ordersSubTabs, ordersSubTabIs: {
+        history: ordersSubTab === 'history', products: ordersSubTab === 'products', coupons: ordersSubTab === 'coupons',
+      },
+
+      platformFilters: Object.entries(this.platforms).map(([key, p]) => {
+        const on = this.platformFilterState[key];
+        return {
+          name: p.name, color: p.color,
+          bg: on ? T.panelBg : T.inputBg,
+          border: on ? T.border : 'transparent',
+          fg: on ? T.textSecondary : T.textMuted,
+          onClick: () => this.togglePlatformFilter(key),
+        };
+      }),
+      statCards: [
+        { label:'แชททั้งหมดวันนี้', value:'184', sub:'จาก 3 แพลตฟอร์ม', trend:'+12%', trendColor:'#3D9467' },
+        { label:'เวลาตอบกลับเฉลี่ย', value:'3.2 นาที', sub:'ดีกว่าเป้าหมาย', trend:'-18%', trendColor:'#3D9467' },
+        { label:'แชทค้างตอบ', value:'9', sub:'เกิน 30 นาที: 2', trend:'+3', trendColor:'#C43D3D' },
+        { label:'ยอดขายจากแชท', value:'฿42,300', sub:'32 ออเดอร์', trend:'+8%', trendColor:'#3D9467' },
+      ].map(s => ({ ...s, countRef: (el) => this.countUpStat(el, s) })),
+      chartBars: [40,55,48,70,62,90,76].map((h,i) => ({ height: h+'%', label: ['จ','อ','พ','พฤ','ศ','ส','อา'][i] })),
+      platformShare, noPlatformShare: platformShare.length === 0,
+      urgentChats: filteredUrgent, noUrgentChats: filteredUrgent.length === 0,
+
+      teamMembers: this.teamMembersData,
+      themeSwatches: ['crimson','rose','hotpink','redlight','orange','orangelight','amber','yellow','yellowlight','lime','greenlight','mint','forest','teal','sky','blue','electric','navylight','indigo','violet','violetlight','cocoa'].map(key => ({
+        key, label: this.themeLabels[key], color: this.themeAccents[key],
+        active: themeColor === key,
+        ring: themeColor === key ? `0 0 0 2px ${T.panelBg}, 0 0 0 4px ${this.themeAccents[key]}` : 'none',
+        onClick: (e) => this.setTheme(key, e),
+      })),
+      modeOptions: [
+        { key:'light', label:'สว่าง', icon:'☀️', swatchBg:'#FFFFFF', swatchFg:'#1B1A17' },
+        { key:'gray', label:'เทา', icon:'◐', swatchBg:'#E7E5E0', swatchFg:'#2B2A26' },
+        { key:'dark', label:'มืด', icon:'🌙', swatchBg:'#1C1B22', swatchFg:'#F1EFEA' },
+      ].map(m => ({
+        ...m, onClick: () => this.setMode(m.key),
+        bg: m.swatchBg, fg: m.swatchFg,
+        border: mode === m.key ? T.accent : T.border,
+      })),
+      settingsRows: [
+        { label:'แจ้งเตือนแบบ Real-time', desc:'รับการแจ้งเตือนทันทีที่มีแชทใหม่', trackBg: settings.notify ? T.accent : T.trackOff, knobLeft: settings.notify ? '21px' : '3px', onClick: (e) => this.toggleSetting('notify', e) },
+        { label:'ตอบกลับอัตโนมัติ', desc:'ส่งข้อความต้อนรับอัตโนมัตินอกเวลางาน', trackBg: settings.autoReply ? T.accent : T.trackOff, knobLeft: settings.autoReply ? '21px' : '3px', onClick: (e) => this.toggleSetting('autoReply', e) },
+        { label:'เสียงแจ้งเตือน', desc:'เล่นเสียงเมื่อมีข้อความใหม่เข้ามา', trackBg: settings.sound ? T.accent : T.trackOff, knobLeft: settings.sound ? '21px' : '3px', onClick: (e) => this.toggleSetting('sound', e) },
+      ],
+
+      inboxFilters: inboxFilterConfig.map(f => ({
+        label: f.label, onClick: () => this.setFilter(f.key),
+        bg: inboxFilter === f.key ? T.accent : T.borderSoft,
+        fg: inboxFilter === f.key ? '#fff' : T.textSecondary,
+      })),
+      conversations,
+      showPinnedLabel: this.pinnedIds.size > 0 && conversations.some(c => this.pinnedIds.has(c.id)),
+      activeChat: {
+        initials: active.initials, avatarBg: active.avatarBg, name: active.name,
+        platformColor: plat.color, platformName: plat.name, orderId: 'ออเดอร์ #SP-88213',
+        custSince: '2 ปี', ticketId: '#260811ASHPD8',
+        hasAlert: activeConvId === 1,
+        alertText: 'พบ 1 ข้อผิดพลาดในบัญชีเชื่อมต่อ',
+        profileTags: [{label:'ลูกค้าประจำ',bg:'#F1EEF9',fg:'#6B5BD6'},{label:'VIP',bg:'#FDF3E2',fg:'#A6762B'}],
+        assigneeInitials: activeAssignedToMe ? 'คุณ' : 'พ.',
+        assigneeName: activeAssignedToMe ? 'คุณ (ตัวเอง)' : 'พลอย · ทีม CS',
+        assigneeColor: activeAssignedToMe ? '#C4587A' : T.accent,
+        assignLabel: activeAssignedToMe ? 'มอบหมายแล้ว: คุณ' : 'มอบหมาย',
+        assignBg: activeAssignedToMe ? T.accentSoft : T.panelBg,
+        assignFg: activeAssignedToMe ? T.accent : T.textSecondary,
+        onAssign: (e) => { this.toggleAssign(activeConvId); this.btnPunch(e); },
+        closeLabel: activeClosed ? 'เปิดแชทอีกครั้ง' : 'ปิดการสนทนา',
+        closeIcon: activeClosed ? '↺' : '✓',
+        closeBg: activeClosed ? T.borderSoft : '#E9F5EE',
+        closeFg: activeClosed ? T.textSecondary : '#3D9467',
+        closeBorder: activeClosed ? T.border : '#CFE9DA',
+        onClose: (e) => { this.toggleClose(activeConvId); this.btnPunch(e); },
+        onBookmark: () => this.toggleBookmark(activeConvId),
+        bookmarkOpacity: activeBookmarked ? '1' : '0.35',
+      },
+      messages,
+      quickReplies: this.quickRepliesData,
+      contactFields: [
+        { label:'ชื่อจริง', value: active.name.split(' ')[0] || active.name, valueColor: T.textPrimary },
+        { label:'นามสกุล', value: active.name.split(' ')[1] || 'ว่าง', valueColor: active.name.split(' ')[1] ? T.textPrimary : T.textMuted },
+        { label:'เบอร์โทรศัพท์', value:'ว่าง', valueColor: T.textMuted },
+        { label:'อีเมล', value:'ว่าง', valueColor: T.textMuted },
+        { label:'ข้อมูลการจัดส่ง', value:'ว่าง', valueColor: T.textMuted },
+        { label:'คำสั่งซื้อล่าสุด', value: this.orderHistoryData[0].ref, valueColor: T.accent },
+      ].map((f, i) => ({ ...f, fieldRef: (el) => this.contactFieldRef(i, el) })),
+      internalNotes: this.internalNotesData,
+      flowName: 'โฟลว์ต้อนรับลูกค้าใหม่',
+      flowSteps: this.flowStepsData.map(s => ({ ...s, time: '11 ส.ค. 2569 17:44' })),
+      orderHistory: this.orderHistoryData,
+      productCatalog: this.productCatalogData,
+      coupons: this.couponsData,
+    };
+  }
+}
+
+</script>
+</body>
+</html>

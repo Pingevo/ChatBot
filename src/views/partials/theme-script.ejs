@@ -1,0 +1,136 @@
+<%
+// 22 theme presets — ตรงกับ themeAccents/themeLabels ใน "Unified Inbox.dc.html" ที่ผู้ใช้ออกแบบเอง
+// ต้องตรงกับ [data-theme="..."] ใน style.css เป๊ะ (ชื่อคีย์ + สี)
+const THEMES = [
+  'blue','violet','teal','rose','amber','mint','indigo','crimson','forest','cocoa','hotpink',
+  'lime','orange','electric','yellow','redlight','sky','navylight','violetlight','greenlight','yellowlight','orangelight'
+];
+const THEME_COLORS = {
+  blue:'#3B6FE8', violet:'#7A5CF0', teal:'#12A594', rose:'#E0527A', amber:'#E0973B', mint:'#4FAE8C',
+  indigo:'#4A4FC4', crimson:'#C43D5C', forest:'#3D7A52', cocoa:'#8A5A3F', hotpink:'#F0398C', lime:'#7CC02E',
+  orange:'#F5811F', electric:'#2E7FF5', yellow:'#F0C419', redlight:'#E8776B', sky:'#6FB3E0', navylight:'#7C93E0',
+  violetlight:'#B49CE8', greenlight:'#8CC9A0', yellowlight:'#E8D077', orangelight:'#E8A87C'
+};
+const THEME_LABELS = {
+  blue:'ฟ้า', violet:'ม่วง', teal:'เขียวน้ำทะเล', rose:'ชมพูเข้ม', amber:'ส้มอำพัน', mint:'มินต์',
+  indigo:'สีน้ำเงินม่วง', crimson:'แดงเข้ม', forest:'เขียวป่า', cocoa:'โกโก้', hotpink:'ชมพูสด', lime:'เขียวมะนาว',
+  orange:'ส้มสด', electric:'ฟ้าไฟฟ้า', yellow:'เหลืองสด', redlight:'แดงอ่อน', sky:'ฟ้าอ่อน', navylight:'น้ำเงินอ่อน',
+  violetlight:'ม่วงอ่อน', greenlight:'เขียวอ่อน', yellowlight:'เหลืองอ่อน', orangelight:'ส้มอ่อน'
+};
+%>
+<!-- Theme switcher popover — เปิดได้จากการคลิก sidebar avatar -->
+<div class="theme-popover" id="theme-popover">
+  <div class="theme-popover-title">ธีมสี</div>
+  <div class="theme-grid" id="theme-grid">
+    <% THEMES.forEach(t => { %>
+      <div class="theme-swatch" data-theme-name="<%= t %>" style="background:<%= THEME_COLORS[t] %>;" title="<%= THEME_LABELS[t] %>"></div>
+    <% }) %>
+  </div>
+  <div class="mode-toggle">
+    <button class="mode-toggle-btn active" data-mode="light">☀️ Light</button>
+    <button class="mode-toggle-btn" data-mode="gray">◐ Gray</button>
+    <button class="mode-toggle-btn" data-mode="dark">🌙 Dark</button>
+  </div>
+  <div class="theme-popover-hint">เก็บต่อ user ใน DB</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+<script>
+// ===== Theme + mode loader (อ่านจาก DB per user) =====
+(async function loadTheme() {
+  try {
+    const res = await fetch('/api/settings/theme');
+    if (res.ok) {
+      const data = await res.json();
+      applyTheme(data.theme);
+      applyMode(data.mode);
+    }
+  } catch (e) { /* ใช้ default blue/light ถ้า DB ยังไม่พร้อม */ }
+})();
+
+function applyTheme(name) {
+  if (!name) return;
+  document.documentElement.setAttribute('data-theme', name);
+  document.querySelectorAll('.theme-swatch').forEach(s => {
+    s.classList.toggle('active', s.dataset.themeName === name);
+  });
+}
+
+function applyMode(mode) {
+  if (!mode) mode = 'light';
+  document.documentElement.setAttribute('data-mode', mode);
+  document.querySelectorAll('.mode-toggle-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === mode);
+  });
+}
+
+// คลิก avatar เปิด/ปิด popover
+document.addEventListener('DOMContentLoaded', () => {
+  const avatar = document.querySelector('.sidebar-avatar');
+  const popover = document.getElementById('theme-popover');
+  if (!avatar || !popover) return;
+
+  avatar.addEventListener('click', (e) => {
+    e.stopPropagation();
+    popover.classList.toggle('open');
+    if (popover.classList.contains('open') && window.gsap) {
+      gsap.fromTo(popover, { opacity: 0, y: 10, scale: 0.96 }, { opacity: 1, y: 0, scale: 1, duration: 0.22, ease: 'power2.out' });
+      gsap.fromTo('.theme-swatch', { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.25, stagger: 0.015, ease: 'back.out(2)' });
+      gsap.fromTo('.mode-toggle-btn', { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.25, stagger: 0.06, ease: 'power2.out', delay: 0.1 });
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (!popover.contains(e.target) && e.target !== avatar) popover.classList.remove('open');
+  });
+
+  // คลิก swatch เปลี่ยน theme + บันทึกลง DB
+  document.querySelectorAll('.theme-swatch').forEach(swatch => {
+    swatch.addEventListener('click', async () => {
+      const name = swatch.dataset.themeName;
+      applyTheme(name);
+      try { await fetch('/api/settings/theme', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ theme: name }) }); } catch (e) {}
+      if (window.gsap) {
+        gsap.fromTo('html', { filter: 'brightness(1.15)' }, { filter: 'brightness(1)', duration: 0.4, ease: 'power2.out' });
+      }
+    });
+  });
+
+  // คลิก mode toggle เปลี่ยน light/dark + บันทึกลง DB
+  document.querySelectorAll('.mode-toggle-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const mode = btn.dataset.mode;
+      applyMode(mode);
+      try { await fetch('/api/settings/theme', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ mode }) }); } catch (e) {}
+      if (window.gsap) {
+        gsap.fromTo('html', { filter: 'brightness(0.85)' }, { filter: 'brightness(1)', duration: 0.4, ease: 'power2.out' });
+      }
+    });
+  });
+
+  // ===== GSAP page intro animations =====
+  if (window.gsap) {
+    // sidebar
+    gsap.from('.sidebar', { x: -76, opacity: 0, duration: 0.5, ease: 'power3.out' });
+    gsap.from('.sidebar-nav a', { opacity: 0, x: -20, stagger: 0.06, duration: 0.4, ease: 'power2.out', delay: 0.15 });
+    // fade-up blocks (กำหนด class .gsap-fade-up เองในแต่ละหน้า)
+    gsap.utils.toArray('.gsap-fade-up').forEach(el => {
+      gsap.to(el, { opacity: 1, y: 0, duration: 0.5, ease: 'power2.out',
+        scrollTrigger: el.closest('.dashboard-page, .contacts-page, .shops-page') ? undefined : undefined,
+        delay: 0.2 });
+      gsap.from(el, { y: 18, duration: 0.5, ease: 'power2.out', delay: 0.2 });
+    });
+    // stagger groups
+    gsap.utils.toArray('.gsap-stagger').forEach(group => {
+      const kids = group.children;
+      if (kids && kids.length) {
+        gsap.to(kids, { opacity: 1, y: 0, duration: 0.4, stagger: 0.05, ease: 'power2.out', delay: 0.25 });
+        gsap.from(kids, { y: 14, duration: 0.4, stagger: 0.05, ease: 'power2.out', delay: 0.25 });
+      }
+    });
+  } else {
+    // fallback ถ้า GSAP โหลดไม่ได้
+    document.querySelectorAll('.gsap-fade-up').forEach(el => { el.style.opacity = 1; });
+    document.querySelectorAll('.gsap-stagger > *').forEach(el => { el.style.opacity = 1; });
+  }
+});
+</script>

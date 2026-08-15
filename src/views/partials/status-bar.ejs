@@ -1,0 +1,49 @@
+<!-- Status bar ล่างสุด — สุขภาพระบบจริง (Server/Database/sellcenter/poll worker/platform token status)
+     ดึงจาก /api/system/status ทุก 15 วิ ไม่ mock — ตามแนวทาง status bar ใน template ที่ผู้ใช้ออกแบบไว้ -->
+<div class="status-bar" id="status-bar">
+  <span class="status-bar-item"><span class="status-bar-dot na"></span><span class="status-bar-label">กำลังตรวจสอบ…</span></span>
+</div>
+
+<script>
+  const PLATFORM_LABELS = { shopee: 'Shopee', lazada: 'Lazada', tiktok: 'TikTok' };
+  function statusDotClass(state) {
+    if (state === 'ok' || state === 'active' || state === 'running') return 'ok';
+    if (state === 'partial' || state === 'stale') return 'warn';
+    if (state === 'down' || state === 'token_error' || state === 'disabled') return 'down';
+    return 'na'; // no_shops, unknown
+  }
+  function statusLabelText(key, state) {
+    const labels = {
+      server: 'Server', database: 'Database', sellcenter_database: 'Sellcenter DB', poll_worker: 'Poll Worker',
+    };
+    const stateLabels = {
+      ok: 'ปกติ', down: 'ล่ม', running: 'กำลังทำงาน', stale: 'ค้าง', disabled: 'ปิดอยู่',
+      active: 'ปกติ', partial: 'บางร้าน', token_error: 'token ผิดพลาด', no_shops: 'ไม่มีร้าน',
+    };
+    return `${labels[key] || key}: ${stateLabels[state] || state}`;
+  }
+
+  async function refreshStatusBar() {
+    const bar = document.getElementById('status-bar');
+    try {
+      const res = await fetch('/api/system/status');
+      const data = await res.json();
+      const items = [];
+      ['server', 'database', 'sellcenter_database', 'poll_worker'].forEach(key => {
+        items.push(`<span class="status-bar-item"><span class="status-bar-dot ${statusDotClass(data[key])}"></span><span class="status-bar-label">${statusLabelText(key, data[key])}</span></span>`);
+      });
+      items.push('<span class="status-bar-divider"></span>');
+      items.push('<span class="status-bar-group-label">Platform:</span>');
+      Object.entries(data.platforms || {}).forEach(([p, state]) => {
+        items.push(`<span class="status-bar-item"><span class="status-bar-dot ${statusDotClass(state)}"></span><span class="status-bar-label">${PLATFORM_LABELS[p] || p}</span></span>`);
+      });
+      const updated = new Date(data.checked_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      items.push(`<span class="status-bar-updated">อัปเดตล่าสุด ${updated}</span>`);
+      bar.innerHTML = items.join('');
+    } catch (err) {
+      bar.innerHTML = '<span class="status-bar-item"><span class="status-bar-dot down"></span><span class="status-bar-label">เชื่อมต่อระบบไม่ได้</span></span>';
+    }
+  }
+  refreshStatusBar();
+  setInterval(refreshStatusBar, 15000);
+</script>
