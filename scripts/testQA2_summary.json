@@ -1,0 +1,14 @@
+{
+  "batch": "all",
+  "total_cases": 13537,
+  "run_cases_this_round": 500,
+  "completed_total": 2647,
+  "remaining": 10890,
+  "completed_at": "2026-08-17T13:48:50.609750",
+  "results_file": "/Users/itdev4/Documents/GitHub/ChatBotProductMS/scripts/testQA2_results.json",
+  "wrong_file": "/Users/itdev4/Documents/GitHub/ChatBotProductMS/scripts/testQA2_wrong.json",
+  "by_source": {
+    "knowledge_base+mongo": 276,
+    "product_store": 2371
+  }
+}

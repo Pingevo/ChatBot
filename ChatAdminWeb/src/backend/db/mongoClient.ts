@@ -1,0 +1,96 @@
+// MongoDB connection singleton — server-side only.
+import { MongoClient, Db, Document, IndexSpecification, CreateIndexesOptions } from "mongodb";
+import { serverConfig } from "../lib/config";
+
+let _client: MongoClient | null = null;
+let _db: Db | null = null;
+
+export async function getDb(): Promise<Db> {
+  if (_db) return _db;
+  _client = new MongoClient(serverConfig.mongoUri, {
+    serverSelectionTimeoutMS: 5000,
+  });
+  await _client.connect();
+  _db = _client.db(serverConfig.mongoDbName);
+  return _db;
+}
+
+export async function getCollection<T extends Document = Document>(
+  name: string
+) {
+  const db = await getDb();
+  return db.collection<T>(name);
+}
+
+// Collection names (from config — matches ADMIN_MONGO_COLLECTION_* env vars)
+export const COLLECTIONS = serverConfig.collections;
+
+/** Create an index, ignoring "already exists with different options" errors
+ * (codes 85/86) — several collections were pre-provisioned with equivalent
+ * indexes (e.g. different `background` flag) before this codebase existed. */
+async function safeCreateIndex(
+  db: Db,
+  collectionName: string,
+  spec: IndexSpecification,
+  options?: CreateIndexesOptions
+): Promise<void> {
+  try {
+    await db.collection(collectionName).createIndex(spec, options);
+  } catch (e) {
+    const code = (e as { code?: number })?.code;
+    if (code === 85 || code === 86) return; // IndexOptionsConflict / IndexKeySpecsConflict
+    throw e;
+  }
+}
+
+export async function ensureIndexes(): Promise<void> {
+  const db = await getDb();
+  await Promise.all([
+    safeCreateIndex(db, COLLECTIONS.admins, { email: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.admins, { username: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.admins, { admin_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.sessions, { token_hash: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.sessions, { admin_id: 1 }, { sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.authTokens, { token_hash: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.authTokens, { expires_at: 1 }, { expireAfterSeconds: 0 }),
+    safeCreateIndex(db, COLLECTIONS.authTokens, { admin_id: 1, purpose: 1, used: 1 }, { sparse: true }),
+    // conversations / messages — these indexes already exist in production
+    // (created previously, likely from the original architecture); creating
+    // them again here is idempotent (safeCreateIndex tolerates option
+    // mismatches) and keeps fresh environments in sync.
+    safeCreateIndex(db, COLLECTIONS.conversations, { shop_id: 1 }),
+    safeCreateIndex(db, COLLECTIONS.conversations, { conversation_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.conversations, { shop_id: 1, conversation_id: 1 }),
+    safeCreateIndex(db, COLLECTIONS.conversations, { platform: 1, shop_id: 1, pinned: -1, last_message_timestamp: -1 }),
+    safeCreateIndex(db, COLLECTIONS.conversations, { platform: 1, shop_id: 1, unread_count: 1, pinned: -1, last_message_timestamp: -1 }),
+    safeCreateIndex(db, COLLECTIONS.conversations, { shop_id: 1, to_name: 1 }),
+    safeCreateIndex(db, COLLECTIONS.messages, { shop_id: 1 }),
+    safeCreateIndex(db, COLLECTIONS.messages, { conversation_id: 1 }),
+    safeCreateIndex(db, COLLECTIONS.messages, { message_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.messages, { conversation_id: 1, created_timestamp: 1 }),
+    safeCreateIndex(db, COLLECTIONS.messages, { shop_id: 1, created_timestamp: -1 }),
+    safeCreateIndex(db, COLLECTIONS.tickets, { ticket_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.tickets, { status: 1 }),
+    safeCreateIndex(db, COLLECTIONS.tickets, { channel: 1 }),
+    safeCreateIndex(db, COLLECTIONS.tickets, { assigned_to: 1 }),
+    safeCreateIndex(db, COLLECTIONS.shops, { shop_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.shops, { shopname: 1 }),
+    safeCreateIndex(db, COLLECTIONS.shops, { platform: 1, shop_id: 1 }),
+    safeCreateIndex(db, COLLECTIONS.customers, { platform: 1 }),
+    safeCreateIndex(db, COLLECTIONS.customers, { buyer_id: 1 }),
+    safeCreateIndex(db, COLLECTIONS.customers, { name: 1 }),
+    safeCreateIndex(db, COLLECTIONS.customers, { platform: 1, buyer_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.customers, { platform: 1, last_active_at: -1 }),
+    safeCreateIndex(db, COLLECTIONS.customers, { platform: 1, name: 1 }),
+    safeCreateIndex(db, COLLECTIONS.adminLogs, { admin_id: 1 }),
+    safeCreateIndex(db, COLLECTIONS.adminLogs, { ticket_id: 1 }, { sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.adminLogs, { timestamp: 1 }),
+    safeCreateIndex(db, COLLECTIONS.adminLogs, { action_type: 1, timestamp: -1 }),
+    // triggers — brand new collection.
+    safeCreateIndex(db, COLLECTIONS.triggers, { trigger_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.triggers, { shop_id: 1 }, { sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.triggers, { enabled: 1 }),
+    // knowledge_base — existing collection, add index for admin UI filtering.
+    safeCreateIndex(db, COLLECTIONS.knowledgeBase, { type: 1, active: 1 }),
+  ]);
+}

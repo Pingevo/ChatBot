@@ -1,0 +1,940 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ChatBotProductMS — แชทบอทสินค้า</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #181b22;
+      --panel-2: #1f232c;
+      --border: #2a2f3a;
+      --text: #e7eaf0;
+      --muted: #9aa3b2;
+      --accent: #4f8cff;
+      --accent-2: #2f6ae0;
+      --user: #2b3a55;
+      --bot: #23272f;
+      --ok: #34d399;
+      --warn: #fbbf24;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, "Segoe UI", "IBM Plex Sans Thai", "Noto Sans Thai", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+    header {
+      padding: 14px 18px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+    header .sub { color: var(--muted); font-size: 12px; }
+    header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+    main {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      min-height: 0;
+    }
+    .chat {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      border-right: 1px solid var(--border);
+    }
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .msg {
+      max-width: 78%;
+      padding: 10px 14px;
+      border-radius: 14px;
+      white-space: pre-wrap;
+      line-height: 1.5;
+      font-size: 14px;
+      word-break: break-word;
+      overflow-wrap: break-word;
+    }
+    /* คำตอบ bot ที่มีเนื้อหาเยอะ (ตาราง/เปรียบเทียบ) ให้กว้างขึ้น */
+    .msg.bot { max-width: 92%; }
+    .msg.user { max-width: 85%; }
+    .msg.user { align-self: flex-end; background: var(--user); border-bottom-right-radius: 4px; }
+    .msg.bot  { align-self: flex-start; background: var(--bot);  border-bottom-left-radius: 4px; }
+    .msg.sys  { align-self: center; max-width: 90%; background: transparent; color: var(--muted); font-size: 12px; }
+    .msg a { color: var(--accent); }
+    .msg .copy-btn {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 11px;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity .15s, color .15s;
+    }
+    .msg { position: relative; }
+    .msg.bot:hover .copy-btn { opacity: 1; }
+    .msg .copy-btn:hover { color: var(--text); border-color: var(--accent); }
+    .msg .copy-btn.copied { color: var(--ok); border-color: var(--ok); opacity: 1; }
+    .usage-info {
+      margin-top: 6px;
+      padding-top: 4px;
+      border-top: 1px dashed var(--border);
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .usage-info small { font-size: 11px; }
+    .msg .feedback-btns {
+      position: absolute;
+      bottom: 6px;
+      right: 6px;
+      display: flex;
+      gap: 4px;
+      opacity: 0;
+      transition: opacity .15s;
+    }
+    .msg.bot:hover .feedback-btns { opacity: 1; }
+    .msg .feedback-btns button {
+      padding: 3px 7px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 13px;
+      cursor: pointer;
+      line-height: 1;
+      transition: color .15s, border-color .15s, background .15s;
+    }
+    .msg .feedback-btns button:hover { color: var(--text); border-color: var(--accent); }
+    .msg .feedback-btns button.active.up { color: var(--ok); border-color: var(--ok); background: rgba(52,211,153,0.1); }
+    .msg .feedback-btns button.active.down { color: var(--warn); border-color: var(--warn); background: rgba(251,191,36,0.1); }
+    /* บนมือถือ แสดง feedback เสมอ (เพราะไม่มี hover) */
+    @media (max-width: 768px) {
+      .msg .feedback-btns { opacity: 1; }
+      .msg .copy-btn { opacity: 1; }
+    }
+    .msg img {
+      max-width: 100%;
+      max-height: 220px;
+      object-fit: contain;
+      border-radius: 10px;
+      margin: 8px 0 4px;
+      background: #000;
+      display: block;
+    }
+    .msg .img-caption {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    /* ตาราง: scroll แนวนอนแทนการตัด เพื่อรองรับตารางเปรียบเทียบหลายคอลัมน์ */
+    .msg .table-wrap {
+      overflow-x: auto;
+      margin: 10px 0 14px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      -webkit-overflow-scrolling: touch;
+    }
+    .msg table {
+      width: 100%;
+      min-width: 400px;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 13px;
+      background: var(--panel-2);
+    }
+    .msg table thead th {
+      background: linear-gradient(180deg, #2a3142 0%, #1f2533 100%);
+      color: var(--text);
+      font-weight: 600;
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    .msg table tbody td {
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+      line-height: 1.45;
+      word-break: break-word;
+      overflow-wrap: break-word;
+    }
+    .msg table tbody tr:last-child td { border-bottom: 0; }
+    .msg table tbody tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+    .msg table tbody tr:hover td { background: rgba(79,140,255,0.08); }
+    .msg table .price { color: var(--ok); font-weight: 600; }
+    .msg table .warranty { color: var(--warn); }
+    .msg table td a, .msg table th a { color: var(--accent); text-decoration: none; }
+    .msg table td a:hover { text-decoration: underline; }
+    .msg ul, .msg ol { margin: 6px 0 6px 18px; padding: 0; }
+    .msg li { margin: 2px 0; }
+    .msg p { margin: 4px 0; }
+    .composer {
+      display: flex;
+      gap: 8px;
+      padding: 12px;
+      border-top: 1px solid var(--border);
+      background: var(--panel);
+    }
+    textarea {
+      flex: 1;
+      resize: none;
+      height: 56px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      font: inherit;
+    }
+    button {
+      padding: 0 18px;
+      border: 0;
+      border-radius: 10px;
+      background: var(--accent);
+      color: white;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    aside {
+      background: var(--panel);
+      overflow-y: auto;
+      padding: 14px;
+    }
+    aside h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+    aside .field { margin-bottom: 14px; }
+    aside label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    aside select, aside input {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      font: inherit;
+    }
+    aside .products { display: flex; flex-direction: column; gap: 8px; }
+    aside .product {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      font-size: 12px;
+    }
+    aside .product .name { font-weight: 600; margin-bottom: 4px; }
+    aside .product .meta { color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 12px; }
+    aside .product .price { color: var(--ok); }
+    aside .product .warranty { color: var(--warn); }
+    aside .product img { width: 100%; max-height: 120px; object-fit: contain; margin-top: 6px; border-radius: 6px; background: #000; }
+    .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .spinner {
+      width: 14px; height: 14px; border: 2px solid var(--muted);
+      border-top-color: var(--accent); border-radius: 50%;
+      animation: spin 0.8s linear infinite; display: inline-block; vertical-align: middle; margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Tab bar (สินค้า / แบรนด์) */
+    .tab-bar {
+      display: flex; gap: 0; margin: 12px 0 8px 0;
+      border-bottom: 2px solid var(--border);
+    }
+    .tab-btn {
+      flex: 1; padding: 8px 12px; border: none; background: none;
+      color: var(--muted); font-size: 13px; cursor: pointer;
+      border-bottom: 2px solid transparent; margin-bottom: -2px;
+      transition: color 0.2s, border-color 0.2s;
+    }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .tab-btn:hover { color: var(--text); }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* Brand list */
+    .brand-search { margin-bottom: 8px; }
+    .brand-search input {
+      width: 100%; padding: 6px 10px; border: 1px solid var(--border);
+      border-radius: 6px; background: var(--card); color: var(--text); font-size: 13px;
+    }
+    .brand-list {
+      display: flex; flex-direction: column; gap: 6px;
+      max-height: 400px; overflow-y: auto;
+    }
+    .brand-item {
+      padding: 8px 10px; border: 1px solid var(--border);
+      border-radius: 6px; background: var(--card); cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .brand-item:hover { border-color: var(--accent); background: rgba(99,102,241,0.08); }
+    .brand-item .brand-name { font-size: 13px; font-weight: 600; color: var(--text); }
+    .brand-item .brand-count { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .brand-item .brand-cats { font-size: 10px; color: var(--muted); margin-top: 2px; line-height: 1.3; }
+
+    /* Brand pagination */
+    .brand-pagination {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-top: 10px; gap: 8px;
+    }
+    .brand-nav-btn {
+      padding: 6px 14px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--card); color: var(--text); font-size: 13px; cursor: pointer;
+      transition: border-color 0.2s, opacity 0.2s;
+    }
+    .brand-nav-btn:hover:not(:disabled) { border-color: var(--accent); }
+    .brand-nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    #brandPageInfo { font-size: 12px; color: var(--muted); }
+
+    /* ปุ่ม toggle sidebar (มือถือ) */
+    .sidebar-toggle {
+      display: none;
+      padding: 4px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      font-size: 13px;
+      cursor: pointer;
+      margin-left: auto;
+    }
+
+    /* ปุ่มคัดลอกทั้งแชท */
+    .copy-chat-btn {
+      padding: 6px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 13px;
+      cursor: pointer;
+      margin-left: auto;
+      transition: color .15s, border-color .15s, background .15s;
+    }
+    .copy-chat-btn:hover { color: var(--text); border-color: var(--accent); }
+    .copy-chat-btn.copied { color: var(--ok); border-color: var(--ok); background: rgba(52,211,153,0.1); }
+
+    /* ---- Responsive ---- */
+    /* Tablet: แคบ sidebar */
+    @media (max-width: 1024px) {
+      main { grid-template-columns: 1fr 260px; }
+    }
+
+    /* Mobile: stack layout + toggle sidebar */
+    @media (max-width: 768px) {
+      main {
+        grid-template-columns: 1fr;
+        position: relative;
+      }
+      .chat {
+        border-right: 0;
+      }
+      /* sidebar เป็น overlay ที่เลื่อนเข้ามาจากขวา */
+      aside {
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: 300px;
+        max-width: 85vw;
+        height: 100vh;
+        z-index: 100;
+        transform: translateX(100%);
+        transition: transform 0.25s ease;
+        box-shadow: -4px 0 20px rgba(0,0,0,0.4);
+      }
+      aside.open { transform: translateX(0); }
+      .sidebar-toggle { display: block; }
+      /* backdrop ตอนเปิด sidebar */
+      .backdrop {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.5);
+        z-index: 99;
+      }
+      .backdrop.show { display: block; }
+      /* คำตอบ bot บนมือถือใช้เต็มกว้าง */
+      .msg.bot { max-width: 95%; }
+      .msg.user { max-width: 88%; }
+      .messages { padding: 12px; }
+      .composer { padding: 8px; }
+      textarea { height: 48px; font-size: 16px; } /* 16px กัน zoom บน iOS */
+      header { padding: 10px 12px; }
+      header h1 { font-size: 14px; }
+      header .sub { font-size: 11px; }
+    }
+
+    /* Mobile เล็กมาก */
+    @media (max-width: 480px) {
+      .msg.bot { max-width: 97%; }
+      .msg.user { max-width: 90%; }
+      .msg { font-size: 13px; padding: 8px 12px; }
+      .msg table { font-size: 12px; min-width: 320px; }
+      .msg table thead th { padding: 8px 10px; }
+      .msg table tbody td { padding: 7px 10px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="dot"></div>
+    <div>
+      <h1>ChatBotProductMS</h1>
+      <div class="sub">แชทบอทสินค้า ร้านในเครือ · Gemini + MongoDB</div>
+    </div>
+    <button class="copy-chat-btn" id="copyChatBtn">⧉ คัดลอกทั้งแชท</button>
+    <button class="sidebar-toggle" id="sidebarToggle">☰ สินค้า</button>
+  </header>
+
+  <div class="backdrop" id="backdrop"></div>
+
+  <main>
+    <section class="chat">
+      <div class="messages" id="msgs">
+        <div class="msg sys">พิมพ์คำถามด้านล่างเพื่อเริ่มต้น เช่น "กล้อง IMILAB รุ่นไหนรับประกันศูนย์ไทย 1 ปี" หรือ "เปรียบเทียบหูฟัง QKZ กับ QCY งบ 500-1500"</div>
+      </div>
+      <div class="composer">
+        <textarea id="input" placeholder="พิมพ์คำถามที่นี่... (Enter ส่ง · Shift+Enter ขึ้นบรรทัด)"></textarea>
+        <button id="send">ส่ง</button>
+      </div>
+    </section>
+
+    <aside>
+      <div class="field">
+        <label>ร้านในเครือ (ถ้ารู้)</label>
+        <select id="shop"><option value="">— ทุกร้าน —</option></select>
+      </div>
+      <div class="field">
+        <label>จำนวนสินค้าใน context</label>
+        <input id="limit" type="number" min="1" max="50" value="10" />
+      </div>
+
+      <!-- Tab: สินค้า / แบรนด์ -->
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="products">สินค้า</button>
+        <button class="tab-btn" data-tab="brands">แบรนด์</button>
+      </div>
+
+      <div class="tab-content active" id="tab-products">
+        <h2>สินค้าที่ใช้ตอบ (context)</h2>
+        <div class="products" id="products"><div class="hint">ยังไม่มี — ลองถามอะไรดู</div></div>
+      </div>
+
+      <div class="tab-content" id="tab-brands">
+        <div class="brand-search">
+          <input type="text" id="brandSearch" placeholder="ค้นหาแบรนด์..." />
+        </div>
+        <div class="brand-list" id="brandList">
+          <div class="hint">กำลังโหลดแบรนด์...</div>
+        </div>
+        <div class="brand-pagination">
+          <button id="brandPrev" class="brand-nav-btn" disabled>‹ ก่อนหน้า</button>
+          <span id="brandPageInfo">1 / 1</span>
+          <button id="brandNext" class="brand-nav-btn" disabled>ถัดไป ›</button>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    const $msgs = document.getElementById('msgs');
+    const $input = document.getElementById('input');
+    const $send = document.getElementById('send');
+    const $shop = document.getElementById('shop');
+    const $limit = document.getElementById('limit');
+    const $products = document.getElementById('products');
+    const $sidebarToggle = document.getElementById('sidebarToggle');
+    const $backdrop = document.getElementById('backdrop');
+    const $aside = document.querySelector('aside');
+    const $copyChatBtn = document.getElementById('copyChatBtn');
+    const history = [];
+    const chatLog = []; // เก็บประวัติข้อความสำหรับคัดลอกทั้งแชท
+
+    // toggle sidebar บนมือถือ
+    function toggleSidebar() {
+      $aside.classList.toggle('open');
+      $backdrop.classList.toggle('show');
+    }
+    $sidebarToggle.addEventListener('click', toggleSidebar);
+    $backdrop.addEventListener('click', toggleSidebar);
+
+    // ---- Tab switching (สินค้า / แบรนด์) ----
+    const $tabBtns = document.querySelectorAll('.tab-btn');
+    const $tabContents = document.querySelectorAll('.tab-content');
+    $tabBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const tab = btn.dataset.tab;
+        $tabBtns.forEach(b => b.classList.toggle('active', b === btn));
+        $tabContents.forEach(c => c.classList.toggle('active', c.id === 'tab-' + tab));
+        if (tab === 'brands' && !brandState.loaded) loadBrands();
+      });
+    });
+
+    // ---- Brand pagination + swipe ----
+    const brandState = { loaded: false, page: 1, perPage: 20, total: 0, totalPages: 1, search: '' };
+    const $brandList = document.getElementById('brandList');
+    const $brandSearch = document.getElementById('brandSearch');
+    const $brandPrev = document.getElementById('brandPrev');
+    const $brandNext = document.getElementById('brandNext');
+    const $brandPageInfo = document.getElementById('brandPageInfo');
+
+    async function loadBrands() {
+      $brandList.innerHTML = '<div class="hint">กำลังโหลด...</div>';
+      try {
+        const params = new URLSearchParams({
+          page: brandState.page,
+          per_page: brandState.perPage,
+        });
+        if (brandState.search) params.set('search', brandState.search);
+        const r = await fetch('/brands?' + params.toString());
+        const j = await r.json();
+        brandState.total = j.total;
+        brandState.totalPages = j.total_pages;
+        brandState.loaded = true;
+        renderBrands(j.brands || []);
+        updateBrandPagination();
+      } catch (e) {
+        $brandList.innerHTML = '<div class="hint">โหลดไม่สำเร็จ</div>';
+      }
+    }
+
+    function renderBrands(brands) {
+      if (!brands.length) {
+        $brandList.innerHTML = '<div class="hint">ไม่พบแบรนด์</div>';
+        return;
+      }
+      $brandList.innerHTML = '';
+      brands.forEach(b => {
+        const d = document.createElement('div');
+        d.className = 'brand-item';
+        const cats = (b.categories || []).slice(0, 4).join(', ');
+        d.innerHTML = `
+          <div class="brand-name">${escapeHtml(b.name)}</div>
+          <div class="brand-count">${b.count} สินค้า</div>
+          ${cats ? `<div class="brand-cats">${escapeHtml(cats)}</div>` : ''}
+        `;
+        d.addEventListener('click', () => {
+          $input.value = `${b.name} ขายอะไรบ้าง`;
+          $input.focus();
+        });
+        $brandList.appendChild(d);
+      });
+    }
+
+    function updateBrandPagination() {
+      $brandPageInfo.textContent = `${brandState.page} / ${brandState.totalPages}`;
+      $brandPrev.disabled = brandState.page <= 1;
+      $brandNext.disabled = brandState.page >= brandState.totalPages;
+    }
+
+    $brandPrev.addEventListener('click', () => {
+      if (brandState.page > 1) { brandState.page--; loadBrands(); }
+    });
+    $brandNext.addEventListener('click', () => {
+      if (brandState.page < brandState.totalPages) { brandState.page++; loadBrands(); }
+    });
+
+    // swipe ซ้ายขวาบน brand list
+    let touchStartX = 0, touchEndX = 0;
+    $brandList.addEventListener('touchstart', e => { touchStartX = e.changedTouches[0].screenX; }, { passive: true });
+    $brandList.addEventListener('touchend', e => {
+      touchEndX = e.changedTouches[0].screenX;
+      const diff = touchEndX - touchStartX;
+      if (Math.abs(diff) < 50) return;
+      if (diff < 0 && brandState.page < brandState.totalPages) { brandState.page++; loadBrands(); }
+      else if (diff > 0 && brandState.page > 1) { brandState.page--; loadBrands(); }
+    }, { passive: true });
+
+    // search แบรนด์ (debounce)
+    let brandSearchTimer = null;
+    $brandSearch.addEventListener('input', () => {
+      clearTimeout(brandSearchTimer);
+      brandSearchTimer = setTimeout(() => {
+        brandState.search = $brandSearch.value.trim();
+        brandState.page = 1;
+        loadBrands();
+      }, 300);
+    });
+
+    function addMsg(text, role, rawText) {
+      const d = document.createElement('div');
+      d.className = 'msg ' + role;
+      d.innerHTML = text;
+      // เก็บประวัติข้อความสำหรับคัดลอกทั้งแชท
+      if (role === 'user' || (role === 'bot' && rawText)) {
+        chatLog.push({ role, text: rawText || text });
+      }
+      // เพิ่มปุ่ม copy เฉพาะข้อความ bot ที่มี rawText (คำตอบจริง ไม่ใช่ spinner)
+      if (role === 'bot' && rawText) {
+        const btn = document.createElement('button');
+        btn.className = 'copy-btn';
+        btn.textContent = 'คัดลอก';
+        btn.addEventListener('click', () => {
+          const t = rawText;
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(t).then(() => {
+              btn.textContent = 'คัดลอกแล้ว ✓';
+              btn.classList.add('copied');
+              setTimeout(() => { btn.textContent = 'คัดลอก'; btn.classList.remove('copied'); }, 1500);
+            }).catch(() => fallbackCopy(t, btn));
+          } else {
+            fallbackCopy(t, btn);
+          }
+        });
+        d.appendChild(btn);
+
+        // เพิ่มปุ่ม feedback (thumbs up/down)
+        if (rawText) {
+          const fb = document.createElement('div');
+          fb.className = 'feedback-btns';
+          const upBtn = document.createElement('button');
+          upBtn.className = 'fb-up';
+          upBtn.innerHTML = '👍';
+          upBtn.title = 'ตอบดี';
+          const downBtn = document.createElement('button');
+          downBtn.className = 'fb-down';
+          downBtn.innerHTML = '👎';
+          downBtn.title = 'ตอบไม่ดี';
+          upBtn.addEventListener('click', () => {
+            const active = upBtn.classList.contains('active');
+            upBtn.classList.toggle('active', !active);
+            upBtn.classList.toggle('up', !active);
+            downBtn.classList.remove('active', 'down');
+            sendFeedback(rawText, active ? 'clear' : 'up');
+          });
+          downBtn.addEventListener('click', () => {
+            const active = downBtn.classList.contains('active');
+            downBtn.classList.toggle('active', !active);
+            downBtn.classList.toggle('down', !active);
+            upBtn.classList.remove('active', 'up');
+            sendFeedback(rawText, active ? 'clear' : 'down');
+          });
+          fb.appendChild(upBtn);
+          fb.appendChild(downBtn);
+          d.appendChild(fb);
+        }
+      }
+      $msgs.appendChild(d);
+      $msgs.scrollTop = $msgs.scrollHeight;
+      return d;
+    }
+
+    function fallbackCopy(text, btn) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+        btn.textContent = 'คัดลอกแล้ว ✓';
+        btn.classList.add('copied');
+        setTimeout(() => { btn.textContent = 'คัดลอก'; btn.classList.remove('copied'); }, 1500);
+      } catch (e) {}
+      document.body.removeChild(ta);
+    }
+
+    // คัดลอกทั้งแชท
+    function copyChat() {
+      if (chatLog.length === 0) {
+        $copyChatBtn.textContent = 'ไม่มีข้อความ';
+        setTimeout(() => { $copyChatBtn.textContent = '⧉ คัดลอกทั้งแชท'; }, 1500);
+        return;
+      }
+      const lines = chatLog.map(m => {
+        const prefix = m.role === 'user' ? '👤 ลูกค้า' : '🤖 แอดมิน';
+        return prefix + ':\n' + m.text;
+      });
+      const text = lines.join('\n\n---\n\n');
+      const doCopy = (t) => {
+        $copyChatBtn.textContent = 'คัดลอกแล้ว ✓';
+        $copyChatBtn.classList.add('copied');
+        setTimeout(() => {
+          $copyChatBtn.textContent = '⧉ คัดลอกทั้งแชท';
+          $copyChatBtn.classList.remove('copied');
+        }, 2000);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(doCopy).catch(() => {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand('copy'); doCopy(text); } catch (e) {}
+          document.body.removeChild(ta);
+        });
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); doCopy(text); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+    }
+    $copyChatBtn.addEventListener('click', copyChat);
+
+    // ส่ง feedback ไป server (best-effort ไม่ block UI)
+    function sendFeedback(answerText, rating) {
+      try {
+        fetch('/feedback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ answer: answerText.slice(0, 500), rating: rating }),
+        }).catch(() => {}); // ไม่สนใจ error
+      } catch (e) {}
+    }
+
+    function copyText(text, btn) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          btn.textContent = 'คัดลอกแล้ว ✓';
+          btn.classList.add('copied');
+          setTimeout(() => { btn.textContent = 'คัดลอก'; btn.classList.remove('copied'); }, 1500);
+        }).catch(() => fallbackCopy(text, btn));
+      } else {
+        fallbackCopy(text, btn);
+      }
+    }
+
+    async function loadShops() {
+      try {
+        const r = await fetch('/shops');
+        const j = await r.json();
+        (j.shops || []).forEach(s => {
+          const o = document.createElement('option');
+          o.value = s; o.textContent = s;
+          $shop.appendChild(o);
+        });
+      } catch (e) {}
+    }
+
+    async function send() {
+      const message = $input.value.trim();
+      if (!message) return;
+      addMsg(escapeHtml(message), 'user');
+      history.push({ role: 'user', text: message });
+      $input.value = '';
+      $send.disabled = true;
+
+      const bot = addMsg('<span class="spinner"></span>กำลังคิด...', 'bot');
+
+      try {
+        const r = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message,
+            shop: $shop.value || null,
+            limit: parseInt($limit.value || '10', 10),
+            history: history.slice(-10),
+          }),
+        });
+        const j = await r.json();
+        const answerText = j.answer || '(ไม่มีคำตอบ)';
+        bot.innerHTML = formatAnswer(answerText);
+        // เพิ่มปุ่ม copy ให้คำตอบ bot
+        if (!bot.querySelector('.copy-btn')) {
+          const btn = document.createElement('button');
+          btn.className = 'copy-btn';
+          btn.textContent = 'คัดลอก';
+          btn.addEventListener('click', () => copyText(answerText, btn));
+          bot.appendChild(btn);
+        }
+        // แสดง usage info (token, ราคา, เวลา)
+        const usage = j.usage || {};
+        const elapsed = j.elapsed || 0;
+        const cost = j.cost || 0;
+        const model = j.model || '?';
+        const source = j.source || '?';
+        const info = document.createElement('div');
+        info.className = 'usage-info';
+        const totalT = usage.total || 0;
+        const promptT = usage.prompt || 0;
+        const outputT = usage.output || 0;
+        const costThb = (cost * 36).toFixed(3);
+        info.innerHTML = `<small>🤖 ${escapeHtml(model)} · ⏱️ ${elapsed}s · 📊 ${promptT}+${outputT}=${totalT} tok · 💵 $${cost.toFixed(5)} (≈${costThb} ฿) · 📦 ${source}</small>`;
+        bot.appendChild(info);
+        history.push({ role: 'model', text: answerText });
+        renderProducts(j.products || []);
+      } catch (e) {
+        bot.innerHTML = '<span style="color:#f87171">เกิดข้อผิดพลาดในการเชื่อมต่อ server</span>';
+      } finally {
+        $send.disabled = false;
+        $input.focus();
+      }
+    }
+
+    function renderProducts(items) {
+      if (!items.length) {
+        $products.innerHTML = '<div class="hint">ไม่พบสินค้าที่เกี่ยวข้อง</div>';
+        return;
+      }
+      $products.innerHTML = '';
+      items.forEach(p => {
+        const d = document.createElement('div');
+        d.className = 'product';
+        const price = p.price ? `${p.price.min}${p.price.min !== p.price.max ? '–' + p.price.max : ''} ${p.price.currency || 'THB'}` : '—';
+        const w = p.warranty ? [p.warranty.type, p.warranty.duration].filter(Boolean).join(' · ') : '';
+        d.innerHTML = `
+          <div class="name">${escapeHtml(p.name || '(ไม่มีชื่อ)')}</div>
+          <div class="meta">
+            <span>🏷️ ${escapeHtml(p.brand || '—')}</span>
+            <span>🏪 ${escapeHtml(p.shop || '—')}</span>
+            <span class="price">💰 ${escapeHtml(price)}</span>
+            ${w ? `<span class="warranty">🛡️ ${escapeHtml(w)}</span>` : ''}
+          </div>
+          ${p.image_url ? `<img src="${escapeHtml(p.image_url)}" alt="" onerror="this.remove()" />` : ''}
+          ${p.short_link ? `<div class="hint"><a href="${escapeHtml(p.short_link)}" target="_blank">${escapeHtml(p.short_link)}</a></div>` : ''}
+        `;
+        $products.appendChild(d);
+      });
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    // markdown เบาๆ สำหรับแสดงในแชท: รองรับ รูป, ตาราง, bold, link, list, ขึ้นบรรทัด
+    function formatAnswer(src) {
+      const lines = String(src).split(/\r?\n/);
+      const out = [];
+      let i = 0;
+      let listType = null; // 'ul' | 'ol'
+
+      function flushList() {
+        if (listType) { out.push(`</${listType}>`); listType = null; }
+      }
+
+      function inline(s) {
+        // รูป: ![alt](url) — รองรับ alt text ที่มี ] ข้างใน (เช่น ชื่อสินค้าที่มี bracket)
+        // ใช้ greedy match ของ alt จนถึง ](url) ตัวสุดท้าย
+        s = s.replace(/!\[([\s\S]*?)\]\((https?:\/\/[^\s)]+)\)/g,
+          (m, alt, url) => `<img src="${url}" alt="${escapeHtml(alt)}" onerror="this.remove()" /><div class="img-caption">${escapeHtml(alt)}</div>`);
+        // bold
+        s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        // link: [text](url) — รองรับ text ที่มี ] ข้างใน
+        s = s.replace(/\[([^\[\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+        // bare url
+        s = s.replace(/(^|[\s(])((?:https?:\/\/)[^\s<)]+)/g, '$1<a href="$2" target="_blank">$2</a>');
+        // ราคา ในตาราง/ทั่วไป — ทำให้สีเขียวเฉพาะที่ขึ้นต้นด้วย ฿ หรือตัวเลข+THB
+        return s;
+      }
+
+      function parseTable(startIdx) {
+        // ตรวจ header separator (บรรทัดถัดไปต้องเป็น |---|---|)
+        const sep = lines[startIdx + 1] || '';
+        if (!/^\s*\|?[\s:|-]+\|?\s*$/.test(sep) || sep.split('|').filter(x => x.trim()).length < 1) {
+          return null;
+        }
+        const rows = [];
+        let j = startIdx + 2;
+        while (j < lines.length) {
+          const ln = lines[j];
+          if (!ln.trim().startsWith('|') && !/\|/.test(ln)) break;
+          if (!ln.trim()) break;
+          rows.push(ln);
+          j++;
+        }
+        if (!rows.length) return null;
+        const splitRow = (r) => r.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim());
+        const headers = splitRow(lines[startIdx]);
+        const body = rows.map(splitRow);
+        let html = '<div class="table-wrap"><table><thead><tr>';
+        headers.forEach(h => html += `<th>${inline(h)}</th>`);
+        html += '</tr></thead><tbody>';
+        body.forEach(row => {
+          html += '<tr>';
+          // ใส่ class พิเศษถ้าคอลัมน์นั้นเป็นราคา/รับประกัน (ดูจาก header)
+          row.forEach((cell, idx) => {
+            const h = (headers[idx] || '').toLowerCase();
+            let cls = '';
+            if (/ราคา|price|฿/.test(h)) cls = ' class="price"';
+            else if (/รับประกัน|warranty|ประกัน/.test(h)) cls = ' class="warranty"';
+            html += `<td${cls}>${inline(cell)}</td>`;
+          });
+          html += '</tr>';
+        });
+        html += '</tbody></table></div>';
+        return { html, nextIdx: j };
+      }
+
+      while (i < lines.length) {
+        const ln = lines[i];
+
+        // ตาราง
+        if (ln.trim().startsWith('|') && i + 1 < lines.length) {
+          const t = parseTable(i);
+          if (t) { flushList(); out.push(t.html); i = t.nextIdx; continue; }
+        }
+
+        // รูปแบบ standalone ในบรรทัดของมันเอง
+        if (/^!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)\s*$/.test(ln.trim())) {
+          flushList();
+          out.push(`<div>${inline(ln.trim())}</div>`);
+          i++; continue;
+        }
+
+        // list
+        const ulMatch = ln.match(/^\s*[-*•]\s+(.*)$/);
+        const olMatch = ln.match(/^\s*\d+\.\s+(.*)$/);
+        if (ulMatch) {
+          if (listType !== 'ul') { flushList(); out.push('<ul>'); listType = 'ul'; }
+          out.push(`<li>${inline(ulMatch[1])}</li>`);
+          i++; continue;
+        }
+        if (olMatch) {
+          if (listType !== 'ol') { flushList(); out.push('<ol>'); listType = 'ol'; }
+          out.push(`<li>${inline(olMatch[1])}</li>`);
+          i++; continue;
+        }
+
+        // บรรทัดว่าง → ยุติ list + ว่าง
+        if (!ln.trim()) {
+          flushList();
+          out.push('');
+          i++; continue;
+        }
+
+        // บรรทัดปกติ
+        flushList();
+        out.push(`<p>${inline(ln.trim())}</p>`);
+        i++;
+      }
+      flushList();
+      return out.join('');
+    }
+
+    $send.addEventListener('click', send);
+    $input.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+
+    loadShops();
+    $input.focus();
+  </script>
+</body>
+</html>

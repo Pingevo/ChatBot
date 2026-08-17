@@ -1,0 +1,666 @@
+
+============================================================
+📊 สถานะ testQA2 (ISOLATED — port 8011)
+============================================================
+  ทั้งหมด: 13537 เคส
+  รันแล้ว: 2147 เคส
+  เหลือ: 11390 เคส
+  batch: all
+  key ที่จะใช้: 7 ตัว (key 1-7)
+  max reqs/key/model: 500
+  test server: port 8011 (หน้าเว็บใช้ port 8010 แยก)
+  ลำดับ: key_1(gemini-3.5-flash-lite) → key_1(gemini-3.1-flash-lite) → key_2(...) → ...
+  รวมความจุ/วัน: 7000 เคส
+  รอบนี้จะรัน: 7000 เคส
+============================================================
+
+🔒 ISOLATED: ไม่แตะ .env — key ส่งเป็น env var ตรงๆ ให้ uvicorn (port 8011)
+   หน้าเว็บ (port 8010) ใช้ key หลักจาก .env ไม่กระทบ
+
+
+────────────────────────────────────────────────────────────
+🔑 รอบ 1/14: key_1 (AQ.Ab8RN...5wwA) | model=gemini-3.5-flash-lite
+────────────────────────────────────────────────────────────
+  🔄 restarting test server (port 8011)... ✅ ready
+  ▶️  รัน testQA2 500 เคส (port 8011)...
+  ▶️  รัน: /Users/itdev4/Documents/GitHub/ChatBotProductMS/.venv/bin/python /Users/itdev4/Documents/GitHub/ChatBotProductMS/scripts/testQA2.py --run --resume --batch all --max-reqs 500
+📥 Resume: พบ 2147 เคสที่รันแล้ว จะข้าม
+
+============================================================
+เริ่มรัน test: 11390 เคส จากทั้งหมด 13537 (ข้าม 2147)
+  batch=all, max=500, resume=True
+============================================================
+
+[2148/13537] ✅ detail-02148 | (ส่งด่วนฟรี!) iSUPER Air Purifier 4 Lite Filter ขอ → src=product_store prods=10 1.1s
+[2149/13537] ✅ detail-02149 | (8.8ลด30บ.วันเดียว) iSUPER ไส้กรอง HEPA สำหรับ Xia → src=product_store prods=10 0.8s
+[2150/13537] ✅ detail-02150 | (รับประกันศูนย์ไทย) Xiaomi Redmi Watch 5 Active นา → src=product_store prods=10 0.9s
+[2151/13537] ✅ detail-02151 | CUKTECH CMC615P 6A 240W สายชาร์จแม่เหล็ก มีจอ USB- → src=product_store prods=10 1.3s
+[2152/13537] ✅ detail-02152 | ZTEC ZC631 สายชาร์จไนลอนถัก แบบแม่เหล็กขดได้ USB-C → src=product_store prods=10 2.2s
+[2153/13537] ❌ detail-02153 | iSUPER Jet Fan 2 / 3 พัดลมมือถือ แบบพกพา 3600mAh ข → src=product_store prods=0 0.5s
+[2154/13537] ✅ detail-02154 | iSUPER HEPA Filters ไส้กรองเครื่องดูดฝุ่น สำหรับรุ → src=product_store prods=10 0.8s
+[2155/13537] ✅ detail-02155 | Black Shark GS3 Ultra Smartwatch สมาร์ทวอทช์ GPS โ → src=product_store prods=8 0.9s
+[2156/13537] ✅ detail-02156 | XiaoVV BQ2 กล้องวงจรปิดภายในอาคาร 2 เลนส์ ความละเอ → src=knowledge_base+mongo prods=14 0.7s
+[2157/13537] ✅ detail-02157 | ZTEC ZC641 สาย Thunder Bolt USB-C to USB-C ขอรายละ → src=product_store prods=10 1.2s
+[2158/13537] ✅ detail-02158 | iSUPER SOUND PRO Air หูฟังบลูทูธ หูฟังไร้สาย หูฟัง → src=product_store prods=10 0.9s
+[2159/13537] ✅ detail-02159 | CUKTECH CMC610 6A 240W สายชาร์จ USB-C to USB-C ขอร → src=product_store prods=10 0.8s
+[2160/13537] ✅ detail-02160 | ZTEC Pencil Stylus Pen ปากกาสไตลัส รองรับการชาร์จ  → src=product_store prods=10 1.9s
+[2161/13537] ✅ detail-02161 | ปลอกคอนิรภัย สำหรับ ZTEC TAG ปลอกคอสุนัข ปลอกคอแมว → src=product_store prods=10 2.0s
+[2162/13537] ✅ detail-02162 | XiaoVV BQ2 กล้องวงจรปิดภายในอาคาร 2 เลนส์ ความละเอ → src=knowledge_base+mongo prods=13 0.8s
+[2163/13537] ✅ detail-02163 | ZTEC Car Charger ZV1651 หัวชาร์จในรถ 165W Max 3 พอ → src=product_store prods=10 1.7s
+[2164/13537] ✅ detail-02164 | CUKTECH AURA PB100S แบตสำรอง CCC / CE ชาร์จเร็ว 10 → src=product_store prods=10 0.8s
+[2165/13537] ✅ detail-02165 | KOSPET TANK S2 สมาร์ทวอทช์ GPS Bluetooth Calling A → src=product_store prods=10 0.6s
+[2166/13537] ✅ detail-02166 | IMILAB EC6 Dual กล้องวงจรปิด 2 เลนส์ ความคมชัด 2K+ → src=product_store prods=10 0.6s
+[2167/13537] ✅ detail-02167 | PISEN Buds P1 Plus True Wireless (BHD-TW6) หูฟังไร → src=product_store prods=10 0.6s
+[2168/13537] ❌ detail-02168 | Yaber TV Stick Google TV 14 / Xiaomi TV Stick 4K ( → src=product_store prods=0 0.4s
+[2169/13537] ✅ detail-02169 | KOSPET Camouflage Strap ขนาด 22 มิลลิเมตร สำหรับ K → src=knowledge_base+mongo prods=16 0.7s
+[2170/13537] ✅ detail-02170 | Kospet Glass Protector Film Smart Watch ฟิล์มกระจก → src=knowledge_base+mongo prods=16 0.6s
+[2171/13537] ✅ detail-02171 | (รับประกันศูนย์ไทย) Xiaomi 212W HyperCharge Power  → src=product_store prods=10 0.8s
+[2172/13537] ✅ detail-02172 | Lagenio Watch Phone K9 Ai นาฬิกาสมาร์ทวอทช์ สำหรับ → src=product_store prods=10 0.6s
+[2173/13537] ✅ detail-02173 | ZTEC ZC541 สายชาร์จเร็วซิลิโคน มีหน้าจอ USB-C to U → src=product_store prods=10 0.5s
+[2174/13537] ✅ detail-02174 | CUKTECH AC30S GaN 30W + LPB100 Powerbank แบตสำรอง  → src=product_store prods=10 1.1s
+[2175/13537] ✅ detail-02175 | IMILAB C40 กล้องวงจรปิด คมชัด 4K Ultra HD หมุนได้  → src=product_store prods=10 0.7s
+[2176/13537] ✅ detail-02176 | (ส่งด่วน 4 ชั่วโมง !) Xiaomi Redmi Buds 6 Play หูฟ → src=product_store prods=10 0.6s
+[2177/13537] ✅ detail-02177 | CUKTECH CL315P 3A สายชาร์จเร็ว USB-C to LN ความยาว → src=product_store prods=10 0.8s
+[2178/13537] ✅ detail-02178 | KOSPET Stainless Steel Double Deployant Strap ขอรา → src=knowledge_base+mongo prods=20 0.7s
+[2179/13537] ✅ detail-02179 | iSUPER SoundActiv Swim หูฟังว่ายน้ำ หูฟังออกกำลังก → src=product_store prods=10 0.6s
+[2180/13537] ✅ detail-02180 | (ประกันศูนย์ไทย) PLAUD NotePin Wearable AI Voice R → src=product_store prods=10 0.7s
+[2181/13537] ✅ detail-02181 | ZTEC ZC631 สายชาร์จไนลอนถัก แบบแม่เหล็กขดได้ USB-C → src=product_store prods=10 0.6s
+[2182/13537] ✅ detail-02182 | (รับประกันศูนย์ไทย) Xiaomi Redmi Watch 5 Active Sm → src=product_store prods=10 1.3s
+[2183/13537] ✅ detail-02183 | ZTEC ZD621 6 in 1 (มีพอร์ต LAN) รองรับ M.2 NVMe &  → src=product_store prods=9 1.2s
+[2184/13537] ✅ detail-02184 | ZTEC ZD621 6 in 1 (มีพอร์ต LAN) รองรับ M.2 NVMe &  → src=product_store prods=9 0.6s
+[2185/13537] ✅ detail-02185 | (ส่งด่วนฟรี) iSUPER ไส้กรอง HEPA สำหรับเครื่องฟอก  → src=product_store prods=10 0.6s
+[2186/13537] ✅ detail-02186 | (รับประกันศูนย์ไทย) Xiaomi Body Composition Scale  → src=knowledge_base+mongo prods=14 0.8s
+[2187/13537] ✅ detail-02187 | ZTEC ZL531 สายชาร์จเร็วเกมมิ่ง มีหน้าจอ USB-C to L → src=product_store prods=10 1.4s
+[2188/13537] ✅ detail-02188 | ZTEC ZC650 สายชาร์จแบบสั้น USB-C to USB-C Thunder  → src=product_store prods=10 0.6s
+[2189/13537] ✅ detail-02189 | Kieslect KS3 / KS3 Elite สมาร์ทวอทช์ หน้าจอ AMOLED → src=product_store prods=8 0.5s
+[2190/13537] ✅ detail-02190 | IMIKI Watch SE1 / SF1 / TG1 สมาร์ทวอทช์ Bluetooth  → src=product_store prods=10 0.5s
+[2191/13537] ✅ detail-02191 | ZTEC ZC322S สายชาร์จเร็ว USB-C to USB-C 5A 240W ขอ → src=product_store prods=10 1.1s
+[2192/13537] ✅ detail-02192 | Black Shark GS3 สมาร์ทวอทช์ GPS โทรได้ กันน้ำ 5ATM → src=product_store prods=10 0.6s
+[2193/13537] ✅ detail-02193 | KOSPET Stainless Steel Double Deployant Strap ขอรา → src=knowledge_base+mongo prods=20 0.7s
+[2194/13537] ✅ detail-02194 | KOSPET TANK S2 สมาร์ทวอทช์ มีGPS Bluetooth Calling → src=product_store prods=10 0.6s
+[2195/13537] ✅ detail-02195 | Black Shark GS3 Sport สมาร์ทวอทช์ GPS คุยโทรศัพท์ไ → src=product_store prods=8 0.5s
+[2196/13537] ✅ detail-02196 | Waterproof Phone Pouch ซองกันน้ำ ซองใส่มือถือ ขอรา → src=knowledge_base+mongo prods=4 1.2s
+[2197/13537] ✅ detail-02197 | ZTEC ZC311 / ZC312 สายชาร์จเร็ว USB-C to USB-C / Z → src=product_store prods=10 1.0s
+[2198/13537] ✅ detail-02198 | CUKTECH AURA PB200N แบตสำรอง CE / CCC ชาร์จเร็ว คว → src=product_store prods=10 1.1s
+[2199/13537] ✅ detail-02199 | ULTIMATE EARS MINIROLL ลำโพงบลูทูธไร้สาย ขอรายละเอ → src=product_store prods=10 0.5s
+[2200/13537] ✅ detail-02200 | Kieslect KS3 / KS3 Eilte สมาร์ทวอทช์ หน้าจอ AMOLED → src=product_store prods=10 0.8s
+[2201/13537] ✅ detail-02201 | CUKTECH CMC615 6A 240W สายชาร์จ Type C to C ยาว 1. → src=product_store prods=10 1.5s
+[2202/13537] ✅ detail-02202 | IMILAB EC6 Panorama กล้องวงจรปิด มุมมองกว้าง 180°  → src=product_store prods=10 0.5s
+[2203/13537] ✅ detail-02203 | Black Shark A3 สมาร์ทวอทช์ คุยโทรศัพท์ได้ ขอบจอบาง → src=knowledge_base+mongo prods=12 0.6s
+[2204/13537] ✅ detail-02204 | ZTEC Travel Charger 65W หัวแปลงปลั๊กไฟ พร้อมพอร์ตช → src=knowledge_base+mongo prods=14 1.3s
+[2205/13537] ✅ detail-02205 | ZTEC Thunder 5 Cable ZC651 สายชาร์จ ส่งข้อมูล 80Gb → src=product_store prods=10 1.0s
+[2206/13537] ✅ detail-02206 | KOSPET TANK T3 ULTRA 2 สมาร์ทวอทช์ หน้าจอ AMOLED 1 → src=product_store prods=10 0.6s
+[2207/13537] ✅ detail-02207 | MiLi LiTag Duo แพ็ค 4 ชิ้น ติดตาม GPS ค้นหา สัตว์เ → src=product_store prods=10 0.8s
+[2208/13537] ✅ detail-02208 | Xiaovv P12 2MP WiFi Outdoor Security Camera with F → src=product_store prods=10 0.6s
+[2209/13537] ✅ detail-02209 | ZTEC ZC631 สายชาร์จไนลอนถัก แบบแม่เหล็กขดได้ USB-C → src=product_store prods=10 0.6s
+[2210/13537] ✅ detail-02210 | IMILAB EC6 Dual กล้องวงจรปิด 2 เลนส์ คมชัด 2K+2K   → src=product_store prods=10 0.8s
+[2211/13537] ✅ detail-02211 | (รับประกันศูนย์ไทย) Xiaomi 165W Power Bank 10000mA → src=product_store prods=10 1.3s
+[2212/13537] ✅ detail-02212 | ZTEC Waterproof ซองกันน้ำ ซองใส่มือถือ ซองโทรศัพท์ → src=knowledge_base+mongo prods=4 0.6s
+[2213/13537] ✅ detail-02213 | ZTEC ZL321 สายชาร์จ Type-C to LN ยาว 1.5 ม. ขอรายล → src=product_store prods=10 0.6s
+[2214/13537] ✅ detail-02214 | CUKTECH C2C515 Ai Charging สายชาร์จ 5 A 100 W ไนลอ → src=product_store prods=10 2.5s
+[2215/13537] ✅ detail-02215 | Lagenio Watch Phone K3 นาฬิกาสมาร์ทวอทช์ สำหรับเด็ → src=product_store prods=10 0.7s
+[2216/13537] ✅ detail-02216 | KIESLECT KS2 สมาร์ทวอทช์ นาฬิกา Smartwatch หน้าจอ  → src=product_store prods=8 0.5s
+[2217/13537] ✅ detail-02217 | Kieslect KS3 สมาร์ทวอทช์ หน้าจอ AMOLED 2.1นิ้ว Ref → src=product_store prods=8 0.5s
+[2218/13537] ✅ detail-02218 | ZTEC ZL221 สายชาร์จ Type-C to Lightning ยาว 1.5 เม → src=product_store prods=10 0.6s
+[2219/13537] ✅ detail-02219 | Black Shark GS3 Sport สมาร์ทวอทช์ GPS คุยโทรศัพท์ไ → src=product_store prods=10 0.7s
+[2220/13537] ✅ detail-02220 | CUKTECH AURA LPB100 33W 10000mAh / AURA LPB200N 40 → src=product_store prods=10 1.0s
+[2221/13537] ✅ detail-02221 | ZTEC ZC541 สายชาร์จเร็วซิลิโคน มีหน้าจอ USB-C to U → src=product_store prods=10 1.1s
+[2222/13537] ✅ detail-02222 | ZTEC ZU202 20W Mini Travel Adapter หัวแปลงปลั๊กไฟ  → src=product_store prods=10 0.6s
+[2223/13537] ✅ detail-02223 | ZTEC ฟิล์มกระจก กันมอง กันรอย ติดง่ายรวดเร็ว ฟิล์ม → src=knowledge_base+mongo prods=29 1.7s
+[2224/13537] ❌ detail-02224 | iQIYI VIP Standard 3 เดือน / 6 เดือน รับโค้ดในช่อง → src=product_store prods=0 0.4s
+[2225/13537] ✅ detail-02225 | CUKTECH CMC615P 6A 240W สายชาร์จแม่เหล็ก มีจอ USB- → src=product_store prods=10 1.4s
+[2226/13537] ✅ detail-02226 | KOSPET ORB / PULSE Smartwatch AMOLED สมาร์ทวอทช์ ก → src=product_store prods=10 0.5s
+[2227/13537] ✅ detail-02227 | ZTEC ZL541 สายชาร์จเร็วซิลิโคน มีหน้าจอ USB-C to L → src=product_store prods=10 0.7s
+[2228/13537] ✅ detail-02228 | Xiaomi Redmi Buds 8 Lite / 6 Lite / Buds 6 Active  → src=product_store prods=10 0.9s
+[2229/13537] ✅ detail-02229 | KOSPET TANK S2 สมาร์ทวอทช์ GPS Bluetooth Calling ห → src=product_store prods=10 0.6s
+[2230/13537] ✅ detail-02230 | CUKTECH GaN3 AD653C / AD653T 65W หัวชาร์จเร็ว รองร → src=product_store prods=10 1.6s
+[2231/13537] ✅ detail-02231 | (ประกันศูนย์ไทย) PLAUD NOTE AI Voice Recorder ขอรา → src=knowledge_base+mongo prods=20 1.1s
+[2232/13537] ✅ detail-02232 | Lagenio Watch Phone K9 Ai สมาร์ทวอทช์เด็ก ติดตามตำ → src=product_store prods=10 0.5s
+[2233/13537] ✅ detail-02233 | CUKTECH (ชุดชาร์จมืออาชีพ) เซตชาร์จไว แบตเตอรี่สำร → src=knowledge_base+mongo prods=19 0.9s
+[2234/13537] ✅ detail-02234 | CUKTECH CTC615P / CTC620P 6A 240W สายชาร์จมีจอ USB → src=product_store prods=10 0.6s
+[2235/13537] ✅ detail-02235 | PISEN​ TP-D080 2-in-1 Wireless magnetic powerbank  → src=product_store prods=10 0.5s
+[2236/13537] ✅ detail-02236 | iSUPER SOUND PRO Max หูฟังไร้สาย ลดเสียงรบกวน Blue → src=product_store prods=10 0.6s
+[2237/13537] ✅ detail-02237 | (ประกันศูนย์ไทย) PLAUD NOTE AI Voice Recorder ขอรา → src=knowledge_base+mongo prods=20 0.7s
+[2238/13537] ✅ detail-02238 | (ส่งด่วนฟรี!) iSUPER Air Purifier Hygienic Filter  → src=product_store prods=10 0.7s
+[2239/13537] ✅ detail-02239 | iSUPER EVOBUDS 3 หูฟังบลูทูธ 5.4 หูฟังไร้สาย InEar → src=product_store prods=10 0.5s
+[2240/13537] ✅ detail-02240 | CUKTECH AC301 / CMC615P / PB1055 Premium Charging  → src=product_store prods=10 1.1s
+[2241/13537] ✅ detail-02241 | CUKTECH A18T 30W GaN หัวชาร์จ / สายชาร์จ สำหรับ iP → src=product_store prods=4 0.4s
+[2242/13537] ✅ detail-02242 | ZTEC ZD622 6 in 1 USB-C 10Gbps รองรับ M.2 NVMe & S → src=product_store prods=7 0.8s
+[2243/13537] ✅ detail-02243 | CUKTECH AURA WPB100L Powerbank แบตสำรอง ชาร์จไร้สา → src=product_store prods=10 0.8s
+[2244/13537] ✅ detail-02244 | Black Shark GS3 Sport สมาร์ทวอทช์ Smartwatch GPS ข → src=product_store prods=8 0.5s
+[2245/13537] ✅ detail-02245 | ZTEC ZM121/ZM122 ไมค์ไร้สาย ตัดเสียงรบกวน ไมค์ไลฟ์ → src=product_store prods=10 0.5s
+[2246/13537] ✅ detail-02246 | ZTEC ZA201 20W / ZA353 35W / ZA453 45W หัวชาร์จ ขา → src=product_store prods=10 0.6s
+[2247/13537] ✅ detail-02247 | KOSPET Versatile Waterproof Rain Jacket เสื้อแจ็คเ → src=knowledge_base+mongo prods=12 0.7s
+[2248/13537] ✅ detail-02248 | ZTEC Waterproof ซองกันน้ำ ซองใส่มือถือ ซองโทรศัพท์ → src=knowledge_base+mongo prods=4 0.5s
+[2249/13537] ✅ detail-02249 | ZTEC ZL531 สายชาร์จเร็วเกมมิ่ง มีหน้าจอ USB-C to L → src=product_store prods=10 0.5s
+[2250/13537] ✅ detail-02250 | (รับประกันศูนย์ไทย) Xiaomi Redmi Watch 5 Lite Smar → src=product_store prods=10 0.9s
+[2251/13537] ✅ detail-02251 | Black Shark GS3 สมาร์ทวอทช์ นาฬิกา Smartwatch GPS  → src=product_store prods=8 0.5s
+[2252/13537] ✅ detail-02252 | (รับประกันศูนย์ไทย) Xiaomi Redmi Buds 6 Active หูฟ → src=product_store prods=10 1.4s
+[2253/13537] ✅ detail-02253 | Xiaovv C1 กล้องวงจรปิดภายใน Wifi 2K กล้อง CCTV ขอร → src=product_store prods=10 0.5s
+[2254/13537] ✅ detail-02254 | Xiaovv P6 Pro กล้องวงจรปิดไร้สาย WiFi IP65 ขอรายละ → src=product_store prods=10 0.6s
+[2255/13537] ✅ detail-02255 | Pisen TP-D105 PowerBank 10000mAh กำลังไฟ 22.5W ขอร → src=product_store prods=10 0.6s
+[2256/13537] ✅ detail-02256 | KOSPET TANK Special Edition / T3 / M3 / T3 Ultra / → src=product_store prods=10 0.9s
+[2257/13537] ✅ detail-02257 | KOSPET Camouflage Strap ขนาด 22 mm. สำหรับ KOSPET  → src=knowledge_base+mongo prods=16 0.8s
+[2258/13537] ✅ detail-02258 | iSUPER SOUND PRO Max Case เคสหูฟังบลูทูธ เคสซิลิโค → src=product_store prods=10 0.6s
+[2259/13537] ✅ detail-02259 | ZTEC ZM121/ZM122 ไมค์ไร้สาย ตัดเสียงรบกวน ไมค์ไลฟ์ → src=product_store prods=10 0.5s
+[2260/13537] ✅ detail-02260 | (รับประกันศูนย์ไทย) Xiaomi Mi Air Purifier Filter  → src=product_store prods=10 0.9s
+[2261/13537] ✅ detail-02261 | KOSPET TANK T3 ULTRA 2 สมาร์ทวอทช์ หน้าจอ AMOLED 1 → src=product_store prods=10 0.9s
+[2262/13537] ✅ detail-02262 | CUKTECH AURA BA651 Fusion 2 in 1 แบตสำรอง พร้อมหัว → src=product_store prods=10 2.4s
+[2263/13537] ✅ detail-02263 | ZTEC ZL312 สายชาร์จ USB-C to Lightning 3A 30W รองร → src=product_store prods=10 1.2s
+[2264/13537] ✅ detail-02264 | ZTEC ZC331 สายชาร์จเร็วแบบแม่เหล็ก สายถัก USB-C to → src=product_store prods=10 0.6s
+[2265/13537] ✅ detail-02265 | CUKTECH A18T 30W GaN หัวชาร์จ / CTC315P / AL870 /  → src=product_store prods=10 1.3s
+[2266/13537] ✅ detail-02266 | Yaber K3 โปรเจคเตอร์ Sound by JBL คมชัด 1080P FHD  → src=product_store prods=10 0.5s
+[2267/13537] ✅ detail-02267 | ZTEC ZL321 สายชาร์จ Type-C to Lightning ยาว 1.5 เม → src=product_store prods=10 0.6s
+[2268/13537] ✅ detail-02268 | Black Shark GS3 Sport สมาร์ทวอทช์ GPS คุยโทรศัพท์ไ → src=product_store prods=10 0.6s
+[2269/13537] ✅ detail-02269 | (รับประกันศูนย์ไทย) Xiaomi WiFi Range Extender N30 → src=product_store prods=10 0.9s
+[2270/13537] ✅ detail-02270 | Yaber L2 Plus 700 ANSI Lumens Projector โปรเจคเตอร → src=product_store prods=10 0.5s
+[2271/13537] ✅ detail-02271 | ZTEC ZC322S สายชาร์จเร็ว USB-C to USB-C 5A 240W ขอ → src=product_store prods=10 0.6s
+[2272/13537] ✅ detail-02272 | Yaber T2 x Keith Haring Special Edition โปรเจคเตอร → src=product_store prods=10 0.5s
+[2273/13537] ✅ detail-02273 | CUKTECH AURA LPB100 Powerbank แบตสำรอง สายในตัว ชา → src=product_store prods=10 1.2s
+[2274/13537] ✅ detail-02274 | (รับประกันศูนย์ไทย) PLAUD NotePin Wearable AI Voic → src=product_store prods=10 0.8s
+[2275/13537] ✅ detail-02275 | IMILAB C30 Dual กล้องวงจรปิด 2 เลนส์ กล้องวงจรปิดใ → src=knowledge_base+mongo prods=6 1.0s
+[2276/13537] ✅ detail-02276 | Lagenio Watch Phone K9 Ai สมาร์ทวอทช์เด็ก ติดตามตำ → src=product_store prods=10 0.6s
+[2277/13537] ✅ detail-02277 | (รับประกันศูนย์ไทย) Xiaomi Watch S5 46mm นาฬิกา สม → src=product_store prods=10 1.4s
+[2278/13537] ✅ detail-02278 | ZTEC ZC331 สายชาร์จเร็วแบบแม่เหล็ก สายถัก USB-C to → src=product_store prods=10 0.5s
+[2279/13537] ✅ detail-02279 | (รับประกันศูนย์ไทย) Xiaomi Redmi Watch 5 Active Sm → src=product_store prods=10 0.9s
+[2280/13537] ✅ detail-02280 | Kieslect KS3 / KS3 Elite สมาร์ทวอทช์ หน้าจอ AMOLED → src=product_store prods=10 0.7s
+[2281/13537] ✅ detail-02281 | CUKTECH CL315P 3A สายชาร์จเร็ว USB-C to Lightning  → src=product_store prods=10 1.8s
+[2282/13537] ✅ detail-02282 | ZTEC ZL221 สายชาร์จ Type-C to LN ยาว 1.5 เมตร ขอรา → src=product_store prods=10 0.7s
+[2283/13537] ✅ detail-02283 | CUKTECH CMC615 6A 240W สายชาร์จ USB-C to USB-C ควา → src=product_store prods=10 1.9s
+[2284/13537] ✅ detail-02284 | (รับประกันศูนย์ไทย) Xiaomi Square Sunglasses/Sport → src=product_store prods=10 1.2s
+[2285/13537] ✅ detail-02285 | (NEW) Xiaomi Oscillation Electric Toothbrush Pro ข → src=product_store prods=10 0.6s
+[2286/13537] ✅ detail-02286 | IMILAB EC3 Lite กล้องวงจรปิด Ai ไล่โจร คมชัด 2K กั → src=product_store prods=10 0.7s
+[2287/13537] ✅ detail-02287 | (ส่งด่วนฟรี) iSUPER Air Purifier HEPA 14 Filter ขอ → src=product_store prods=10 0.5s
+[2288/13537] ✅ detail-02288 | XiaoVV BP3 กล้องวงจรปิดนอกบ้าน 2 เลนส์ ความละเอียด → src=product_store prods=10 0.8s
+[2289/13537] ✅ detail-02289 | KOSPET Stainless Steel Double Deployant Strap ขอรา → src=knowledge_base+mongo prods=18 1.0s
+[2290/13537] ✅ detail-02290 | ZTEC ZL221 สายชาร์จ Type-C to Lightning ยาว 1.5 เม → src=product_store prods=10 1.2s
+[2291/13537] ✅ detail-02291 | ZTEC ZU202 20W Mini Travel Adapter หัวแปลงปลั๊กไฟ  → src=product_store prods=10 0.7s
+[2292/13537] ✅ detail-02292 | ZTEC ZU202 20W Mini Travel Adapter หัวแปลงปลั๊กไฟ  → src=product_store prods=10 1.1s
+[2293/13537] ✅ detail-02293 | ZTEC Car Charger ZV1651 หัวชาร์จในรถ 165W Max 3 พอ → src=product_store prods=10 0.6s
+[2294/13537] ✅ detail-02294 | ZTEC ZD621 6 in 1 (มีพอร์ต LAN) รองรับ M.2 NVMe &  → src=product_store prods=10 0.9s
+[2295/13537] ✅ detail-02295 | iSUPER Sound Pro Air เคสหูฟังบลูทูธ วัสดุซิลิโคน ก → src=knowledge_base+mongo prods=16 0.7s
+[2296/13537] ✅ detail-02296 | Kospet Glass Protector Film Smart Watch ฟิล์มกระจก → src=knowledge_base+mongo prods=16 0.7s
+[2297/13537] ✅ detail-02297 | Lagenio Watch Phone K2 นาฬิกาสมาร์ทวอทช์ สำหรับเด็ → src=product_store prods=10 0.7s
+[2298/13537] ✅ detail-02298 | Kieslect Stainless Steel Double Deployant Strap ขอ → src=product_store prods=10 0.7s
+[2299/13537] ✅ detail-02299 | ZTEC ZD622 6 in 1 (USB-C 10Gbps) รองรับ M.2 NVMe & → src=product_store prods=10 0.8s
+[2300/13537] ✅ detail-02300 | CUKTECH CTC615P / CTC620P 6A 240W สายชาร์จมีจอ จอ  → src=product_store prods=10 1.5s
+[2301/13537] ✅ detail-02301 | XiaoVV BP3 กล้องวงจรปิด กล้องวงจรปิดนอกบ้าน 2 เลนส → src=knowledge_base+mongo prods=14 0.6s
+[2302/13537] ✅ detail-02302 | IMILAB EC6 Dual กล้องวงจรปิด 2 เลนส์ ความคมชัด 2K+ → src=product_store prods=10 0.7s
+[2303/13537] ✅ detail-02303 | Kieslect Actor สมาร์ทวอทช์ หน้าจอ LTPO 1.6 นิ้ว มี → src=product_store prods=10 0.8s
+[2304/13537] ✅ detail-02304 | iSUPER SOUND PRO Max หูฟังบลูทูธ หูฟังไร้สาย หูฟัง → src=product_store prods=10 0.6s
+[2305/13537] ✅ detail-02305 | CUKTECH AURA PB100S แบตสำรอง ชาร์จไว 10000mAh USB- → src=product_store prods=10 0.8s
+[2306/13537] ❌ detail-02306 | iSUPER Jet Fan 2 พัดลมมือถือ แบบพกพา 3600mAh ปรับร → src=product_store prods=0 0.4s
+[2307/13537] ✅ detail-02307 | CUKTECH CMC615P 6A 240W สายชาร์จแม่เหล็ก มีจอ USB- → src=product_store prods=10 0.8s
+[2308/13537] ✅ detail-02308 | (รับประกันศูนย์ไทย) Xiaomi Redmi Buds 6 Play หูฟัง → src=product_store prods=10 1.5s
+[2309/13537] ✅ detail-02309 | iSUPER SoundActiv Swim หูฟังวิ่ง หูฟังว่ายน้ำ ออกก → src=knowledge_base+mongo prods=11 0.7s
+[2310/13537] ✅ detail-02310 | CUKTECH PB250 แบตสำรอง 210W ความจุ 25000mAh USB-A  → src=product_store prods=10 1.9s
+[2311/13537] ✅ detail-02311 | (รับประกันศูนย์ไทย) Xiaomi Sound Pocket 5W ลำโพงบล → src=product_store prods=10 0.8s
+[2312/13537] ✅ detail-02312 | Lagenio Watch Phone K5 นาฬิกาสมาร์ทวอทช์ สำหรับเด็ → src=product_store prods=10 0.6s
+[2313/13537] ✅ detail-02313 | CUKTECH C2C515 Ai Charging สายชาร์จ 100W /CMC610 / → src=product_store prods=10 1.5s
+[2314/13537] ✅ detail-02314 | (รับประกันศูนย์ไทย) Xiaomi Outdoor Camera CW300 /  → src=product_store prods=10 0.8s
+[2315/13537] ✅ detail-02315 | Yaber L2s โปรเจคเตอร์ 1080P FHD 700 ANSI Lumens So → src=product_store prods=10 0.6s
+[2316/13537] ✅ detail-02316 | IMILAB C21 (GB V.) กล้องวงจรปิด ภายในบ้านคมชัด 2.5 → src=product_store prods=10 0.6s
+[2317/13537] ✅ detail-02317 | PISEN C1 (BHD-TW11) เกมหูฟังไร้สายบลูทูธ 5.3 60dB  → src=product_store prods=10 0.7s
+[2318/13537] ✅ detail-02318 | ZTEC ZC321S / ZL221 สายชาร์จ iPhone 17 Type C to C → src=product_store prods=4 0.6s
+[2319/13537] ✅ detail-02319 | CUKTECH AURA BA301 Fusion 2 in 1 แบตสำรอง พร้อมหัว → src=product_store prods=10 1.1s
+[2320/13537] ✅ detail-02320 | ZTEC Car Charger ZV1651 หัวชาร์จในรถ 165W Max 3 พอ → src=product_store prods=10 1.0s
+[2321/13537] ✅ detail-02321 | ZTEC รวมสายชาร์จ สำหรับ iPhone  17 , 16 , 15 , 14  → src=product_store prods=1 0.4s
+[2322/13537] ✅ detail-02322 | iSUPER Sound Pro Air เคสหูฟังบลูทูธ เคสซิลิโคน กัน → src=knowledge_base+mongo prods=15 0.7s
+[2323/13537] ❌ detail-02323 | iSUPER SOUND COMFORT PRO หูฟังครอบหู Headphone รอง → src=product_store prods=0 0.4s
+[2324/13537] ✅ detail-02324 | (รับประกันศูนย์ไทย) Xiaomi 120W Charging Combo (Ty → src=product_store prods=10 1.2s
+[2325/13537] ❌ detail-02325 | iQIYI VIP Standard 1 ปี รับโค้ดในช่องแชท แอปดูหนัง → src=product_store prods=0 0.4s
+[2326/13537] ✅ detail-02326 | CUKTECH AD653W GaN 65W หัวชาร์จเร็วพร้อมสาย รองรับ → src=product_store prods=10 1.2s
+[2327/13537] ✅ detail-02327 | IMILAB EC6 Dual Pro / EC6 Dual กล้องวงจรปิด 2 เลนส → src=knowledge_base+mongo prods=15 0.7s
+[2328/13537] ✅ detail-02328 | Xiaovv P9 กล้องวงจรปิดนอกบ้านไร้สาย 2.5K WiFi ขอรา → src=product_store prods=10 0.6s
+[2329/13537] ✅ detail-02329 | ZTEC ZC322S สายชาร์จเร็ว USB-C to USB-C 5A 240W ขอ → src=product_store prods=10 0.7s
+[2330/13537] ✅ detail-02330 | ZTEC Waterproof ซองกันน้ำ ซองใส่มือถือ ซองโทรศัพท์ → src=knowledge_base+mongo prods=4 0.6s
+[2331/13537] ✅ detail-02331 | CUKTECH CTC615S 6A 240W สายชาร์จเร็ว USB-C ยาว 15  → src=product_store prods=10 2.0s
+[2332/13537] ✅ detail-02332 | IMILAB C22 กล้องวงจรปิด คมชัด 3K Wi-Fi6 ใช้กับแอป  → src=product_store prods=10 0.6s
+[2333/13537] ✅ detail-02333 | (ส่งด่วนฟรี!) iSUPER ไส้กรองอากาศ HEPA สำหรับ Xiao → src=product_store prods=10 1.0s
+[2334/13537] ✅ detail-02334 | Xiaomi 120W Charging Combo (Type-A) หัวชาร์จเร็ว 1 → src=product_store prods=10 0.8s
+[2335/13537] ✅ detail-02335 | ZTEC ZA201 20W / ZA353 35W / ZA453 45W หัวชาร์จ ขอ → src=product_store prods=10 1.1s
+[2336/13537] ✅ detail-02336 | ZTEC ZD621 6 in 1 (มีพอร์ต LAN) รองรับ M.2 NVMe &  → src=product_store prods=9 1.3s
+[2337/13537] ✅ detail-02337 | ZTEC ZM121/ZM122 ไมค์ไร้สาย ตัดเสียงรบกวน ไมค์ไลฟ์ → src=product_store prods=2 0.4s
+[2338/13537] ✅ detail-02338 | Black Shark GS3 Sport สมาร์ทวอทช์ GPS คุยโทรศัพท์ไ → src=product_store prods=8 0.5s
+[2339/13537] ✅ detail-02339 | Yaber L2s โปรเจคเตอร์ Sound by JBL 700 ANSI Lumens → src=product_store prods=10 0.7s
+[2340/13537] ✅ detail-02340 | (รับประกันศูนย์ไทย) Xiaomi vacuum cleaner G20 lite → src=product_store prods=10 0.9s
+[2341/13537] ✅ detail-02341 | iSUPER Evo Buds ANC Pro หูฟังไร้สาย LDAC ตัดเสียงร → src=product_store prods=10 0.5s
+[2342/13537] ✅ detail-02342 | KOSPET Stainless Steel Double Deployant Strap สำหร → src=knowledge_base+mongo prods=19 0.8s
+[2343/13537] ✅ detail-02343 | CUKTECH CTC520P 5A 240W สายชาร์จไนลอนถัก USB-C to  → src=product_store prods=10 0.7s
+[2344/13537] ✅ detail-02344 | KOSPET ORB Smartwatch AMOLED สมาร์ทวอทช์ กันน้ำ IP → src=product_store prods=10 0.7s
+[2345/13537] ✅ detail-02345 | CUKTECH C2C615 Ai Charging 6A 140W สายชาร์จ USB C  → src=product_store prods=10 0.7s
+[2346/13537] ✅ detail-02346 | ZTEC ZL311 / ZL312 / ZL221 สายชาร์จ MFI Lightning  → src=product_store prods=10 1.0s
+[2347/13537] ✅ detail-02347 | ZTEC ZL331 สายชาร์จเร็วแบบแม่เหล็ก สายถัก USB-C to → src=product_store prods=10 1.0s
+[2348/13537] ✅ detail-02348 | Yaber T2 x Keith Haring Special Edition โปรเจคเตอร → src=product_store prods=10 0.5s
+[2349/13537] ✅ detail-02349 | CUKTECH AURA WPB100N แบตสำรอง ชาร์จไร้สาย CCC / CE → src=product_store prods=10 0.8s
+[2350/13537] ✅ detail-02350 | Lagenio Watch Phone K3 สมาร์ทวอทช์สำหรับเด็ก ติดตา → src=product_store prods=10 0.5s
+[2351/13537] ❌ detail-02351 | (E-voucher) iQIYI VIP Standard 1 วัน / 3 วัน / 7 ว → src=product_store prods=0 0.4s
+[2352/13537] ✅ detail-02352 | Black Shark T23 / T24 หูฟังบลูทูธ หูฟังไร้สาย หูฟั → src=product_store prods=10 0.4s
+[2353/13537] ✅ detail-02353 | ZTEC ZC641 สาย Thunder Bolt USB-C to USB-C ขอรายละ → src=product_store prods=10 0.6s
+[2354/13537] ✅ detail-02354 | KOSPET TANK X2 / X2 Ultra สมาร์ทวอทช์ Bluetooth Ca → src=product_store prods=10 0.6s
+[2355/13537] ✅ detail-02355 | CUKTECH C2C515 Ai Charging สายชาร์จ 100W /CMC610 / → src=product_store prods=10 1.0s
+[2356/13537] ✅ detail-02356 | CUKTECH CTC615S 6A 240W สายชาร์จเร็ว USB-C ความยาว → src=product_store prods=10 1.1s
+[2357/13537] ✅ detail-02357 | CUKTECH AURA LPB100 33W 10000mAh / LPB200NL 40W 20 → src=product_store prods=10 1.0s
+[2358/13537] ✅ detail-02358 | Black Shark T18 หูฟังบลูทูธ หูฟังไร้สาย หูฟังANC ข → src=product_store prods=10 0.5s
+[2359/13537] ✅ detail-02359 | ZTEC ZL331 สายชาร์จเร็วแบบแม่เหล็ก สายถัก USB-C to → src=product_store prods=10 0.6s
+[2360/13537] ✅ detail-02360 | PISEN iWatch Magnetic Charging Cable 1m (USB) -1Y  → src=product_store prods=10 0.6s
+[2361/13537] ✅ detail-02361 | ZTEC ZC331 สายชาร์จเร็วแบบแม่เหล็ก USB-C to USB-C  → src=product_store prods=10 0.6s
+[2362/13537] ✅ detail-02362 | CUKTECH CTC520P 5A 240W สายชาร์จไนลอนถัก USB-C to  → src=product_store prods=10 1.3s
+[2363/13537] ✅ detail-02363 | iSUPER SOUND Pro Max เคสหูฟังบลูทูธ เคสซิลิโคน กัน → src=knowledge_base+mongo prods=15 0.7s
+[2364/13537] ✅ detail-02364 | CUKTECH AURA WPB100N แบตสำรอง ชาร์จไร้สาย พร้อมแท่ → src=product_store prods=10 0.9s
+[2365/13537] ✅ detail-02365 | CUKTECH BF01 พัดลม Jet Fan แบบ USB-A ลมแรง 10.5 m/ → src=product_store prods=10 1.3s
+[2366/13537] ✅ detail-02366 | Xiaovv P6 Pro กล้องวงจรปิดไร้สาย WiFi IP65 ขอรายละ → src=product_store prods=10 0.6s
+[2367/13537] ✅ detail-02367 | IMILAB EC6 Dual Pro 3K กล้องวงจรปิด 2 เลนส์ ความคม → src=product_store prods=10 0.6s
+[2368/13537] ✅ detail-02368 | Yaber K3 โปรเจคเตอร์ Google TV ในตัว 1,600 ANSI Lu → src=product_store prods=10 0.5s
+[2369/13537] ✅ detail-02369 | ZTEC ZA201 20W / ZA353 35W / ZA453 45W / ZA651 65W → src=product_store prods=10 1.2s
+[2370/13537] ✅ detail-02370 | ZTEC ZC541 สายชาร์จเร็วซิลิโคน มีหน้าจอ USB-C to U → src=product_store prods=10 0.7s
+[2371/13537] ✅ detail-02371 | KOSPET TANK Special Edition T3 / M3 / T3 Ultra / M → src=product_store prods=10 0.5s
+[2372/13537] ✅ detail-02372 | CUKTECH AURA LPB100 Powerbank แบตสำรอง สายในตัว ชา → src=product_store prods=10 0.7s
+[2373/13537] ✅ detail-02373 | (Gift) Waterproof ซองกันน้ำ ซองใส่มือถือ ซองโทรศัพ → src=product_store prods=10 0.6s
+[2374/13537] ❌ detail-02374 | iSUPER Jet Fan 3 พัดลมมือถือ แบบพกพา 3600mAh ปรับร → src=product_store prods=0 0.4s
+[2375/13537] ✅ detail-02375 | iQIYI VIP Premium 1 วัน / 3 วัน / 7 วัน รับโค้ดในช → src=product_store prods=8 1.1s
+[2376/13537] ✅ detail-02376 | Xiaovv P9 กล้องวงจรปิดนอกบ้านไร้สาย 2.5K WiFi ขอรา → src=product_store prods=10 0.7s
+[2377/13537] ❌ detail-02377 | iSUPER Jet Fan 3 พัดลมมือถือ แบบพกพา 3600mAh ปรับร → src=product_store prods=0 0.4s
+[2378/13537] ✅ detail-02378 | Xiaovv P6 Pro กล้องวงจรปิดไร้สาย WiFi IP65 ขอรายละ → src=product_store prods=10 0.4s
+[2379/13537] ✅ detail-02379 | ZTEC ZC541 สายชาร์จเร็วซิลิโคน มีหน้าจอ USB-C to U → src=product_store prods=10 0.6s
+[2380/13537] ✅ detail-02380 | ZTEC ZL331 สายชาร์จเร็วแบบแม่เหล็ก สายถัก USB-C to → src=product_store prods=10 0.6s
+[2381/13537] ✅ detail-02381 | (รับประกันศูนย์ไทย) Xiaomi Redmi Watch 5 Lite Smar → src=product_store prods=10 1.1s
+[2382/13537] ✅ detail-02382 | IMILAB EC6 Panorama กล้องวงจรปิด มุมมองกว้าง 180°  → src=product_store prods=10 0.6s
+[2383/13537] ✅ detail-02383 | IMILAB EC6 Panorama กล้องวงจรปิด มุมมองกว้าง 180°  → src=product_store prods=10 0.8s
+[2384/13537] ✅ detail-02384 | CUKTECH CMC610 6A 240W สายชาร์จ USB-C to USB-C ขอร → src=product_store prods=10 1.0s
+[2385/13537] ✅ detail-02385 | ZTEC ZC622 สายชาร์จไนลอนถัก 240W USB-C to USB-C Th → src=product_store prods=10 0.9s
+[2386/13537] ❌ detail-02386 | ZTEC Tag ZT100 gps อุปกรณ์ติดตาม ค้นหา สัตว์เลี้ยง → src=product_store prods=0 0.4s
+[2387/13537] ✅ detail-02387 | iSUPER Headset Case กระเป๋าใส่หูฟังครอบหู กระเป๋าเ → src=product_store prods=10 0.5s
+[2388/13537] ✅ detail-02388 | CUKTECH CMC610 / CMC615 6A 240W สายชาร์จ USB-C to  → src=product_store prods=10 1.3s
+[2389/13537] ✅ detail-02389 | CUKTECH CTC615P 6A 240W สายชาร์จมีจอ USB-C to USB- → src=product_store prods=10 0.8s
+[2390/13537] ✅ detail-02390 | Kieslect Actor นาฬิกา Smartwatch สมาร์ทวอทช์ หน้าจ → src=product_store prods=8 0.5s
+[2391/13537] ✅ detail-02391 | CUKTECH GaN3 AD1003 120W / AD1003T 100W / CMC610 / → src=product_store prods=10 1.1s
+[2392/13537] ✅ detail-02392 | ZTEC ZC322S สายชาร์จเร็ว USB-C to USB-C 5A 240W ขอ → src=product_store prods=10 0.6s
+[2393/13537] ✅ detail-02393 | ZTEC ZM121/ZM122 ไมค์ไร้สาย ตัดเสียงรบกวน ไมค์ไลฟ์ → src=product_store prods=3 0.4s
+[2394/13537] ✅ detail-02394 | (รับประกันศูนย์ไทย) Xiaomi Sound Pocket 5W ลำโพงบล → src=product_store prods=8 0.7s
+[2395/13537] ✅ detail-02395 | KOSPET Stainless Steel Double Deployant Strap ขอรา → src=knowledge_base+mongo prods=18 0.7s
+[2396/13537] ✅ detail-02396 | ZTEC Waterproof ซองกันน้ำ ซองใส่มือถือ ซองโทรศัพท์ → src=knowledge_base+mongo prods=4 0.6s
+[2397/13537] ✅ detail-02397 | CUKTECH CTC520P 5A 240W สายชาร์จไนลอนถัก USB-C to  → src=product_store prods=10 0.6s
+[2398/13537] ✅ detail-02398 | ZTEC ZA353 GaN 35W  / ZC321S / ZC711 ชุดชาร์จไว ขอ → src=product_store prods=10 0.6s
+[2399/13537] ✅ detail-02399 | (รับประกันศูนย์ไทย) Xiaomi Tag อุปกรณ์ติดตาม ขนาดเ → src=knowledge_base+mongo prods=15 0.7s
+[2400/13537] ✅ detail-02400 | ZTEC data cable สายชาร์จไนลอนถัก สายชาร์จแม่เหล็ก  → src=product_store prods=10 1.1s
+[2401/13537] ✅ detail-02401 | PISEN CL-PD10-1000 สายชาร์จเร็ว PD USB-C to LN 3A  → src=product_store prods=10 0.7s
+[2402/13537] ✅ detail-02402 | Kieslect สายนาฬิกาสเตนเลส 22 mm สำหรับ Actor / Eli → src=product_store prods=8 0.5s
+[2403/13537] ❌ detail-02403 | iSUPER Jet Fan 2 / 3 พัดลมมือถือ แบบพกพา 3600mAh ข → src=product_store prods=0 0.5s
+[2404/13537] ✅ detail-02404 | MiLi MiTag Duo ติดตาม GPS ค้นหา อุ่นใจทุกทริป พร้อ → src=product_store prods=10 0.5s
+[2405/13537] ✅ detail-02405 | ZTEC ZC622 สายชาร์จไนลอนถัก 240W USB-C to USB-C Th → src=product_store prods=10 0.6s
+[2406/13537] ✅ detail-02406 | Black Shark FunCooler 5 Pro พัดลมระบายความร้อนมือถ → src=product_store prods=10 0.5s
+[2407/13537] ✅ detail-02407 | KOSPET Stainless Steel Double Deployant Strap ขอรา → src=knowledge_base+mongo prods=19 0.7s
+[2408/13537] ✅ detail-02408 | CUKTECH CTC620P 6A 240W สายชาร์จมีจอ USB-C to USB- → src=product_store prods=10 0.6s
+[2409/13537] ✅ detail-02409 | ZTEC Ear Tips จุกหูฟัง Memory Foam ใช้สำหรับหูฟัง  → src=product_store prods=6 0.4s
+[2410/13537] ✅ detail-02410 | Yaber T2 Plus GTV โปรเจคเตอร์ มีแบตในตัว Sound by  → src=product_store prods=10 0.5s
+[2411/13537] ✅ detail-02411 | ZTEC ZC631 สายชาร์จไนลอนถัก แบบแม่เหล็กขดได้ USB-C → src=product_store prods=10 0.6s
+[2412/13537] ✅ detail-02412 | ZTEC ZC531 สายชาร์จเร็วเกมมิ่ง มีหน้าจอ USB-C to U → src=product_store prods=10 0.5s
+[2413/13537] ✅ detail-02413 | ZTEC Pencil Stylus Pen ปากกาสไตลัส ปากกาไอแพด แรงเ → src=knowledge_base+mongo prods=13 1.1s
+[2414/13537] ✅ detail-02414 | CUKTECH AURA BA301 Fusion 2 in 1 5000mAh / PB100 / → src=product_store prods=10 0.7s
+[2415/13537] ✅ detail-02415 | CUKTECH CTC620P 6A 240W สายชาร์จมีจอ USB-C to USB- → src=product_store prods=10 1.5s
+[2416/13537] ✅ detail-02416 | KOSPET TANK M3 Special Edition สมาร์ทวอทช์ Bluetoo → src=product_store prods=10 0.6s
+[2417/13537] ✅ detail-02417 | CUKTECH AURA WPB100L Powerbank แบตสำรอง ชาร์จไร้สา → src=product_store prods=10 0.8s
+[2418/13537] ✅ detail-02418 | iSUPER HEPA Filters ไส้กรองเครื่องดูดฝุ่น ล้างได้  → src=product_store prods=10 0.8s
+[2419/13537] ✅ detail-02419 | ZTEC ZC321S สายชาร์จเร็ว USB-C to USB-C 5A สำหรับ  → src=product_store prods=4 0.5s
+[2420/13537] ✅ detail-02420 | CUKTECH CTC620P 6A 240W สายชาร์จมีจอ USB-C to USB- → src=product_store prods=10 0.7s
+[2421/13537] ✅ detail-02421 | iSUPER Evo Buds ANC Pro หูฟังไร้สาย ตัดเสียงรบกวน  → src=product_store prods=10 0.6s
+[2422/13537] ✅ detail-02422 | CUKTECH PB200 แบตสำรอง CE / CCC ความจุ 20000 mAh พ → src=product_store prods=10 0.8s
+[2423/13537] ✅ detail-02423 | iSUPER Headset Case กระเป๋าใส่หูฟังครอบหู กระเป๋าเ → src=product_store prods=10 0.9s
+[2424/13537] ✅ detail-02424 | CUKTECH CTC615P / CTC620P 6A 240W สายชาร์จมีจอ USB → src=product_store prods=10 0.9s
+[2425/13537] ✅ detail-02425 | (รับประกันศูนย์ไทย) Xiaomi Sound Outdoor 30W ลำโพง → src=product_store prods=8 0.7s
+[2426/13537] ✅ detail-02426 | Yaber T2 Plus GTV โปรเจคเตอร์ พร้อมแบตในตัว Sound  → src=product_store prods=10 0.6s
+[2427/13537] ✅ detail-02427 | Black Shark S3 สมาร์ทวอทช์ มี GPS รองรับการโทร Blu → src=product_store prods=10 0.8s
+[2428/13537] ✅ detail-02428 | Xiaovv P12 กล้องวงจรปิด นอกบ้าน CCTV 2MP WiFi Outd → src=product_store prods=10 0.5s
+[2429/13537] ✅ detail-02429 | IMILAB EC6 Dual Pro 3K กล้องวงจรปิด 2 เลนส์ ความคม → src=product_store prods=10 0.6s
+[2430/13537] ✅ detail-02430 | (รับประกันศูนย์ไทย) Xiaomi Redmi Buds 6 Active หูฟ → src=product_store prods=10 1.1s
+[2431/13537] ✅ detail-02431 | CUKTECH ชุด READY TO GO เซตชาร์จเร็ว หัวชาร์จ 140W → src=product_store prods=10 1.3s
+[2432/13537] ✅ detail-02432 | CUKTECH BF01 พัดลม Jet Fan แบบ USB-A ลมแรง 10.5 m/ → src=product_store prods=10 0.7s
+[2433/13537] ✅ detail-02433 | ZTEC Pencil Stylus Pen ปากกาสไตลัส รองรับการชาร์จ  → src=product_store prods=10 0.6s
+[2434/13537] ✅ detail-02434 | (ส่งด่วนฟรี) iSUPER Smart Air Purifier 4 Compact F → src=product_store prods=10 0.6s
+[2435/13537] ✅ detail-02435 | CUKTECH A18T / A18C / AC30S GaN 30W หัวชาร์จเร็ว P → src=product_store prods=10 1.3s
+[2436/13537] ✅ detail-02436 | ZTEC ZA652 / ZA651 หัวชาร์จ GaN 65W 3 พอร์ต รองรับ → src=product_store prods=10 1.3s
+[2437/13537] ✅ detail-02437 | Kieslect KS3 สมาร์ทวอทช์ หน้าจอ AMOLED 2.1 นิ้ว Re → src=product_store prods=8 0.5s
+[2438/13537] ✅ detail-02438 | (รับประกันศูนย์ไทย) Xiaomi Sound Pocket 5W ลำโพงบล → src=product_store prods=9 0.7s
+[2439/13537] ✅ detail-02439 | (รับประกันศูนย์ไทย) Xiaomi Smart Projector L1 โปรเ → src=product_store prods=9 0.9s
+[2440/13537] ✅ detail-02440 | Lagenio Watch Phone K2 สมาร์ทวอทช์สำหรับเด็ก ติดตา → src=product_store prods=10 0.5s
+[2441/13537] ✅ detail-02441 | MiLi MiTag Duo & Travel Wallet กระเป๋าสตางค์ พาสปอ → src=product_store prods=10 0.5s
+[2442/13537] ✅ detail-02442 | CUKTECH PB060 แบตสำรอง ความจุ 6000 mAh CE จ่ายไฟสู → src=product_store prods=10 0.9s
+[2443/13537] ✅ detail-02443 | (ส่งด่วนฟรี) iSUPER ไส้กรองสำหรับ Xiaomi Air Purif → src=product_store prods=10 0.5s
+[2444/13537] ✅ detail-02444 | Kospet Glass Protector Film Smart Watch ฟิล์มกระจก → src=knowledge_base+mongo prods=16 0.7s
+[2445/13537] ✅ detail-02445 | (NEW) Xiaomi UltraThin Magnetic Power Bank 5000 15 → src=product_store prods=4 0.4s
+[2446/13537] ✅ detail-02446 | ZTEC ZC641 สายชาร์จ Thunder Bolt USB-C to USB-C ขอ → src=product_store prods=10 0.5s
+[2447/13537] ✅ detail-02447 | ZTEC ZC531 สายชาร์จเร็วเกมมิ่ง มีหน้าจอ USB-C to U → src=product_store prods=10 0.6s
+[2448/13537] ✅ detail-02448 | PISEN XY-C56 3 in 1 Magnetic Wireless Charger 22.5 → src=product_store prods=10 0.6s
+[2449/13537] ✅ detail-02449 | ZTEC ZL321 สายชาร์จ Type-C to Lightning ยาว 1.5 เม → src=product_store prods=10 0.9s
+[2450/13537] ✅ detail-02450 | CUKTECH C2C515 Ai Charging สายชาร์จ 100W /CMC610 / → src=product_store prods=10 1.3s
+[2451/13537] ✅ detail-02451 | IMILAB C30 Dual กล้องวงจรปิด 2 เลนส์ กล้องวงจรปิดใ → src=knowledge_base+mongo prods=6 1.1s
+[2452/13537] ✅ detail-02452 | ZTEC ZC531 / ZL531 สายชาร์จเร็วเกมมิ่ง มีหน้าจอ Ty → src=product_store prods=10 1.2s
+[2453/13537] ✅ detail-02453 | PISEN CC12-1000 สายชาร์จเร็ว USB-C to USB-C PD 100 → src=product_store prods=10 0.7s
+[2454/13537] ✅ detail-02454 | ZTEC ZC541 สายชาร์จเร็วซิลิโคน USB-C to USB-C / ZL → src=product_store prods=10 0.6s
+[2455/13537] ✅ detail-02455 | ZTEC ZD622 6 in 1 (USB-C 10Gbps) รองรับ M.2 NVMe&S → src=product_store prods=6 0.7s
+[2456/13537] ✅ detail-02456 | (รับประกันศูนย์ไทย) Xiaomi Smart Projector L1 โปรเ → src=product_store prods=9 0.8s
+[2457/13537] ✅ detail-02457 | CUKTECH (แพ็คคู่) AC30S GaN 30W + LPB100 Powerbank → src=product_store prods=10 1.6s
+[2458/13537] ✅ detail-02458 | CUKTECH PB150P ความจุ 15000mAh 120W Max ขนาดเล็ก C → src=product_store prods=10 0.8s
+[2459/13537] ❌ detail-02459 | iSUPER Jet Fan 2 พัดลมมือถือ แบบพกพา 3600mAh ปรับร → src=product_store prods=0 0.5s
+[2460/13537] ✅ detail-02460 | Black Shark FunCooler 4 Pro พัดลมเกมมิ่ง ระบายความ → src=knowledge_base+mongo prods=17 0.8s
+[2461/13537] ✅ detail-02461 | (รับประกันศูนย์ไทย) Xiaomi WiFi Range Extender N30 → src=product_store prods=10 1.0s
+[2462/13537] ✅ detail-02462 | CUKTECH PB200 แบตสำรอง ความจุ 20000 mAh CE / CCC พ → src=product_store prods=10 0.7s
+[2463/13537] ✅ detail-02463 | ZTEC ZC531 สายชาร์จเร็วเกมมิ่ง มีหน้าจอ USB-C to U → src=product_store prods=10 1.5s
+[2464/13537] ✅ detail-02464 | (รับประกันศูนย์ไทย) Xiaomi Robot Vacuum E10/E10C ข → src=product_store prods=10 1.2s
+[2465/13537] ✅ detail-02465 | ZTEC ZC622 สายชาร์จไนลอนถัก 240W USB-C to USB-C Th → src=product_store prods=10 0.6s
+[2466/13537] ✅ detail-02466 | ZTEC ZL531 สายชาร์จเร็วเกมมิ่ง มีหน้าจอ USB-C to L → src=product_store prods=10 0.7s
+[2467/13537] ✅ detail-02467 | CUKTECH CL315P 3A สายชาร์จเร็ว USB-C to LN ความยาว → src=product_store prods=10 0.7s
+[2468/13537] ✅ detail-02468 | CUKTECH CMC610 / CMC615 6A 240W สายชาร์จ USB-C to  → src=product_store prods=10 1.4s
+[2469/13537] ✅ detail-02469 | ZTEC Thunder 5 Cable ZC651 สายชาร์จ ส่งข้อมูล 80Gb → src=product_store prods=10 0.7s
+[2470/13537] ✅ detail-02470 | (ส่งด่วนฟรี!) iSUPER Smart Air Purifier 4 Compact  → src=product_store prods=10 0.7s
+[2471/13537] ✅ detail-02471 | Kieslect Kr3 สมาร์ทวอทช์ หน้าจอ AMOLED 1.5 นิ้ว มี → src=product_store prods=10 0.6s
+[2472/13537] ✅ detail-02472 | ZTEC Tune Buds E200 หูฟังไร้สาย ANC Earbuds -25dB  → src=product_store prods=6 0.5s
+[2473/13537] ✅ detail-02473 | Black Shark T18 หูฟังบลูทูธ หูฟังไร้สาย หูฟัง ANC  → src=product_store prods=10 1.0s
+[2474/13537] ✅ detail-02474 | ZTEC ZA201 20W / ZA353 35W / ZA453 45W หัวชาร์จ ขา → src=product_store prods=10 1.2s
+[2475/13537] ✅ detail-02475 | Black Shark FunCooler 5 Pro พัดลมระบายความร้อนมือถ → src=product_store prods=10 1.3s
+[2476/13537] ✅ detail-02476 | MiLi MiTag Duo พร้อมเคสหนังPU อุปกรณ์ติดตาม ค้นหา  → src=product_store prods=10 0.4s
+[2477/13537] ✅ detail-02477 | MiLi MiTag Duo & Bicycle Bell กระดิ่งจักรยาน ขอราย → src=product_store prods=10 0.5s
+[2478/13537] ✅ detail-02478 | CUKTECH AURA BA651 Fusion 2 in 1 หัวชาร์จ 67W / PB → src=product_store prods=10 1.2s
+[2479/13537] ✅ detail-02479 | Lagenio Watch Phone K2 สมาร์ทวอทช์สำหรับเด็ก GPS ข → src=product_store prods=10 0.5s
+[2480/13537] ✅ detail-02480 | KOSPET PULSE Smartwatch AMOLED สมาร์ทวอทช์ กันน้ำ  → src=product_store prods=10 0.6s
+[2481/13537] ✅ detail-02481 | MiLi LiTag Duo ติดตาม GPS ค้นหา สัตว์เลี้ยง กุญแจ  → src=product_store prods=10 0.6s
+[2482/13537] ✅ detail-02482 | (รับประกันศูนย์ไทย) Xiaomi Robot Vacuum X20+ / X20 → src=product_store prods=10 0.9s
+[2483/13537] ✅ detail-02483 | CUKTECH AURA BA301 Fusion 2 in 1 / LPB100 แบตสำรอง → src=product_store prods=10 0.7s
+[2484/13537] ✅ detail-02484 | (รับประกันศูนย์ไทย) Xiaomi vacuum cleaner G20 lite → src=product_store prods=10 1.6s
+[2485/13537] ✅ detail-02485 | (รับประกันศูนย์ไทย) Xiaomi Polarized Fitover/Sport → src=product_store prods=10 0.7s
+[2486/13537] ✅ detail-02486 | Cuktech LPB200NL / A18T เซตชาร์จเร็วสุดคุ้ม 30W หั → src=product_store prods=10 1.0s
+[2487/13537] ✅ detail-02487 | CUKTECH DC Adaptor Type A1 / B1 / D / I / K / L /  → src=product_store prods=8 1.0s
+[2488/13537] ✅ detail-02488 | CUKTECH AURA BA651 Fusion 2 in 1 แบตสำรอง พร้อมหัว → src=product_store prods=10 1.1s
+[2489/13537] ✅ detail-02489 | Lagenio Watch Phone K2 สมาร์ทวอทช์สำหรับเด็ก ติดตา → src=product_store prods=10 0.5s
+[2490/13537] ✅ detail-02490 | Black Shark T11 หูฟังเล่นเกมไร้สาย ดีเลย์ต่ำ 45ms  → src=product_store prods=10 0.5s
+[2491/13537] ✅ detail-02491 | (รับประกันศูนย์ไทย) Xiaomi Smart Dehumidifier 22L  → src=product_store prods=10 0.6s
+[2492/13537] ✅ detail-02492 | Black Shark FunCooler 5 Neo พัดลมระบายความร้อนมือถ → src=product_store prods=10 0.5s
+[2493/13537] ✅ detail-02493 | Black Shark FunCooler 5 Series พัดลมระบายความร้อนม → src=product_store prods=10 0.5s
+[2494/13537] ✅ detail-02494 | (รับประกันศูนย์ไทย) Xiaomi TV Box S 3rd Gen 4K ขอร → src=product_store prods=10 0.8s
+[2495/13537] ✅ detail-02495 | Black Shark Gaming Finger Sleeves ถุงนิ้วเล่นเกม ข → src=product_store prods=10 0.5s
+[2496/13537] ✅ detail-02496 | (รับประกันศูนย์ไทย) Xiaomi Mijia Lint Remover 2 ขอ → src=product_store prods=10 0.8s
+[2497/13537] ✅ detail-02497 | CUKTECH AURA PB100 แบตสำรอง 10000mAh ชาร์จเร็ว USB → src=product_store prods=10 0.7s
+[2498/13537] ✅ detail-02498 | Lagenio Watch Phone K5 สมาร์ทวอทช์สำหรับเด็ก ติดตา → src=product_store prods=10 0.5s
+[2499/13537] ❌ detail-02499 | iSUPER GameLink Adapter Dongle อุปกรณ์เสริมหูฟัง G → src=product_store prods=0 0.5s
+[2500/13537] ✅ detail-02500 | MiLi MiTag Duo ที่ติดตาม GPS ค้นหา พร้อมกระดิ่งจัก → src=product_store prods=10 0.6s
+[2501/13537] ✅ detail-02501 | (รับประกันศูนย์ไทย) Philips VTR5010 ขอรายละเอียดสิ → src=product_store prods=4 1.1s
+[2502/13537] ✅ detail-02502 | Black Shark C3 หูฟัง Clip-on ออกกำลังกาย Bluetooth → src=product_store prods=10 0.5s
+[2503/13537] ✅ detail-02503 | IMILAB C30 Dual กล้องวงจรปิด 2 เลนส์ ตรวจจับ ความค → src=knowledge_base+mongo prods=7 0.7s
+[2504/13537] ✅ detail-02504 | CUKTECH AURA PB200N แบตสำรอง CE / CCC ชาร์จเร็ว 20 → src=product_store prods=10 0.9s
+[2505/13537] ✅ detail-02505 | IMILAB C40 กล้องวงจรปิด คมชัด 4K Ultra HD หมุนได้  → src=product_store prods=10 0.6s
+[2506/13537] ✅ detail-02506 | Black Shark T11 หูฟังเล่นเกมไร้สาย ดีเลย์ต่ำ 45ms  → src=product_store prods=10 0.6s
+[2507/13537] ✅ detail-02507 | iSUPER SOUNDActiv Free หูฟัง Open-Ear หูฟังบลูทูธ  → src=product_store prods=10 0.6s
+[2508/13537] ✅ detail-02508 | KOSPET Magic R10 smartwatch AMOLED สมาร์ทวอทช์ โทร → src=product_store prods=10 0.5s
+[2509/13537] ✅ detail-02509 | (รับประกันศูนย์ไทย) Xiaomi Robot Vacuum H40 ขอรายล → src=product_store prods=10 0.8s
+[2510/13537] ✅ detail-02510 | Kospet Glass Protector Film Smart Watch ฟิล์มกระจก → src=knowledge_base+mongo prods=16 0.6s
+[2511/13537] ✅ detail-02511 | IMILAB EC6 Pro กล้องวงจรปิดคมชัด 4K กันน้ำ กันฝุ่น → src=product_store prods=10 0.5s
+[2512/13537] ✅ detail-02512 | (ส่งด่วนฟรี) Black Shark Pad 7 แท็บเล็ต จอใหญ่ 11  → src=product_store prods=8 1.0s
+[2513/13537] ✅ detail-02513 | CUKTECH CUBE AC301 / CTC315P หัวชาร์จ เร็ว 30W รอง → src=product_store prods=10 1.3s
+[2514/13537] ✅ detail-02514 | MiLi MiTag Duo อุปกรณ์ติดตาม ค้นหา สัตว์เลี้ยง กุญ → src=knowledge_base+mongo prods=13 0.7s
+[2515/13537] ✅ detail-02515 | (ประกันศูนย์ไทย) PLAUD Note Pro AI Voice Recorder  → src=product_store prods=9 0.5s
+[2516/13537] ✅ detail-02516 | CUKTECH WPB100P Powerbank แบตสำรอง มาตรฐาน CCC ชาร → src=product_store prods=10 0.8s
+[2517/13537] ✅ detail-02517 | CUKTECH AD1203P GaN 120W หัวชาร์จเร็ว PD , PPS , U → src=product_store prods=10 1.4s
+[2518/13537] ✅ detail-02518 | CUKTECH AD653U GaN 65W (สูงสุด100W) หัวชาร์จมีจอ ช → src=product_store prods=10 1.9s
+[2519/13537] ✅ detail-02519 | (รับประกันศูนย์ไทย) Xiaomi Redmi Watch 6 นาฬิกา สม → src=product_store prods=10 0.9s
+[2520/13537] ✅ detail-02520 | (รับประกันศูนย์ไทย) Xiaomi Watch S4 41mm Smartwatc → src=product_store prods=10 1.2s
+[2521/13537] ✅ detail-02521 | (ส่งด่วนฟรี) Black Shark Pad 7 แท็บเล็ต จอใหญ่ 11  → src=product_store prods=6 0.9s
+[2522/13537] ✅ detail-02522 | KOSPET TANK T4 Rugged Smartwatch With GPS สมาร์ทวอ → src=product_store prods=10 0.5s
+[2523/13537] ✅ detail-02523 | Lagenio Watch Phone K5 สมาร์ทวอทช์สำหรับเด็ก ติดตา → src=product_store prods=10 0.5s
+[2524/13537] ✅ detail-02524 | CUKTECH CTC615P 6A 240W สายชาร์จมีจอ USB-C to USB- → src=product_store prods=10 1.7s
+[2525/13537] ✅ detail-02525 | (รับประกันศูนย์ไทย) Xiaomi Soundbar 2.0ch Desktop  → src=product_store prods=7 0.7s
+[2526/13537] ✅ detail-02526 | (รับประกันศูนย์ไทย) Xiaomi Magnetic Power Bank 100 → src=product_store prods=10 0.9s
+[2527/13537] ✅ detail-02527 | (ส่งด่วนฟรี) iSUPER Air Purifier Medical Grade Fil → src=product_store prods=10 0.6s
+[2528/13537] ✅ detail-02528 | (รับประกันศูนย์ไทย) Xiaomi Air Purifier Filter ขอร → src=product_store prods=7 0.6s
+[2529/13537] ✅ detail-02529 | Lagenio Watch Phone K3 สมาร์ทวอทช์สำหรับเด็ก ขอราย → src=product_store prods=10 0.5s
+[2530/13537] ✅ detail-02530 | KOSPET AIR LOOP ALPHA Nylon Watch Strap ขอรายละเอี → src=knowledge_base+mongo prods=16 0.6s
+[2531/13537] ✅ detail-02531 | CUKTECH CMC615P 6A 240W สายชาร์จแม่เหล็ก มีจอ USB- → src=product_store prods=10 1.3s
+[2532/13537] ✅ detail-02532 | Black Shark FunCooler 5 พัดลมระบายความร้อนมือถือ 2 → src=product_store prods=10 0.6s
+[2533/13537] ✅ detail-02533 | Cuktech LPB200NL / AD653T เซตชาร์จเร็วสุดคุ้ม 65W  → src=product_store prods=10 1.6s
+[2534/13537] ✅ detail-02534 | IMILAB แก้วเก็บความเย็น ขนาด 20 oz. ขอรายละเอียดสิ → src=product_store prods=1 0.8s
+[2535/13537] ✅ detail-02535 | IMILAB EC6 Dual กล้องวงจรปิด cctv ตรวจจับ คมชัด กั → src=product_store prods=10 0.6s
+[2536/13537] ✅ detail-02536 | (รับประกันศูนย์ไทย) Xiaomi Computer Monitor Light  → src=product_store prods=10 0.7s
+[2537/13537] ✅ detail-02537 | ZTEC ZA453 GaN 45W  / ZC321S / ZC711 ชุดชาร์จเร็ว  → src=product_store prods=10 0.9s
+[2538/13537] ✅ detail-02538 | (รับประกันศูนย์ไทย) Xiaomi Smart Camera C300 / C40 → src=product_store prods=10 0.7s
+[2539/13537] ✅ detail-02539 | CUKTECH TA3005U แท่นชาร์จ Desktop Charger DC Port  → src=product_store prods=10 0.9s
+[2540/13537] ❌ detail-02540 | (Gift) Waterproof Phone Pouch (TPU) ซองกันน้ำ กันฝ → src=product_store prods=0 0.3s
+[2541/13537] ✅ detail-02541 | Black Shark S3 สมาร์ทวอทช์ มี GPS รองรับการโทร Blu → src=product_store prods=10 0.5s
+[2542/13537] ❌ detail-02542 | ZTEC ZMH113 แท่นแม่เหล็กสุญญากาศ 16 ชิ้น ติดมือถือ → src=product_store prods=0 0.4s
+[2543/13537] ✅ detail-02543 | iQIYI VIP Premium 14 วัน / 1 เดือน / 3 เดือน ขอราย → src=product_store prods=8 1.0s
+[2544/13537] ✅ detail-02544 | Ztec Car Charger 45W + ZTEC ZMH113 + ZC321S Car Ki → src=product_store prods=10 0.6s
+[2545/13537] ✅ detail-02545 | ZTEC ZM421 สายชาร์จ 4 in 1 รองรับชาร์จเร็ว 240W สา → src=product_store prods=10 0.6s
+[2546/13537] ✅ detail-02546 | CUKTECH AURA PB200N แบตสำรอง CE / CCC ชาร์จเร็ว 20 → src=product_store prods=10 1.0s
+[2547/13537] ✅ detail-02547 | (ส่งด่วนฟรี!) iSUPER ไส้กรองสำหรับ Xiaomi Smart Ai → src=product_store prods=10 0.6s
+[2548/13537] ✅ detail-02548 | IMILAB EC6 Pro กล้องวงจรปิด กล้องภายนอก คมชัด 4K ก → src=knowledge_base+mongo prods=15 0.8s
+[2549/13537] ✅ detail-02549 | CUKTECH TA3005U / TA1406U แท่นชาร์จ Desktop Charge → src=product_store prods=10 1.4s
+[2550/13537] ✅ detail-02550 | Black Shark S3 Smartwatch สมาร์ทวอทช์ มี GPS Bluet → src=product_store prods=8 0.5s
+[2551/13537] ✅ detail-02551 | CUKTECH Silicone Protective Case เคสซิลิโคน สำหรับ → src=product_store prods=10 0.9s
+[2552/13537] ✅ detail-02552 | CUKTECH LPB200N แบตสำรอง ชาร์จเร็ว 20000 mAh CE /  → src=product_store prods=10 0.7s
+[2553/13537] ✅ detail-02553 | iSUPER EVOBUDS Air 3 หูฟังบลูทูธ 5.4 หูฟังไร้สาย E → src=product_store prods=10 0.6s
+[2554/13537] ✅ detail-02554 | (รับประกันศูนย์ไทย) Xiaomi Watch S4 41mm Smartwatc → src=product_store prods=10 0.8s
+[2555/13537] ✅ detail-02555 | Xiaomi Mi Smart Camera C701 Home Security Camera ข → src=product_store prods=10 0.5s
+[2556/13537] ✅ detail-02556 | CUKTECH CL315P 3A สายชาร์จเร็ว USB-C to Lightning  → src=product_store prods=10 1.0s
+[2557/13537] ✅ detail-02557 | KOSPET ARCHLAN LEATHER Watch Strap  สายนาฬิกาข้อมื → src=knowledge_base+mongo prods=12 0.7s
+[2558/13537] ✅ detail-02558 | IMILAB Display Stand ชั้นวางกล้องวงจรปิด ขอรายละเอ → src=product_store prods=10 0.7s
+[2559/13537] ✅ detail-02559 | CUKTECH ATC615 6A 100W USB A to C สายชาร์จ Huawei  → src=product_store prods=10 1.1s
+[2560/13537] ✅ detail-02560 | CUKTECH AURA LPB100 Powerbank แบตสำรอง สายในตัว ชา → src=product_store prods=10 0.9s
+[2561/13537] ✅ detail-02561 | ZTEC ZMO1316 เมาส์ เมาส์ไร้สาย เมาส์บลูทูธ Bluetoo → src=product_store prods=6 0.7s
+[2562/13537] ✅ detail-02562 | ZMI QPB60 แบตสำรอง บอดี้สแตนเลส 6000mAh รองรับชาร์ → src=product_store prods=10 1.0s
+[2563/13537] ✅ detail-02563 | (รับประกันศูนย์ไทย) Xiaomi OpenWear Stereo Pro ขอร → src=product_store prods=2 0.6s
+[2564/13537] ✅ detail-02564 | KOSPET TANK T4 / M4 Rugged Smartwatch With GPS สมา → src=product_store prods=10 0.8s
+[2565/13537] ✅ detail-02565 | Black Shark Gaming Combo Set แท็บเล็ตจอ 8.8 นิ้ว ค → src=product_store prods=10 0.6s
+[2566/13537] ✅ detail-02566 | CUKTECH CTC615P / CTC620P 6A 240W สายชาร์จมีจอ USB → src=product_store prods=10 1.4s
+[2567/13537] ✅ detail-02567 | ZTEC ZA453 45W ชุดชาร์จไว รองรับการชาร์จด่วน สำหรั → src=product_store prods=10 1.4s
+[2568/13537] ✅ detail-02568 | Yaber New L1 โปรเจกเตอร์ FHD 1080P รองรับ Netflix  → src=product_store prods=10 0.5s
+[2569/13537] ✅ detail-02569 | ZTEC ZC661 สายชาร์จเร็วแบบแม่เหล็ก 240W USB-C to U → src=product_store prods=10 0.7s
+[2570/13537] ✅ detail-02570 | (รับประกันศูนย์ไทย) Xiaomi Smart Dehumidifier 22L  → src=product_store prods=10 0.8s
+[2571/13537] ✅ detail-02571 | Yaber K3 Pro โปรเจคเตอร์ Google TV ในตัว 1,600 ANS → src=product_store prods=10 0.5s
+[2572/13537] ✅ detail-02572 | ZTEC ZC661 สายชาร์จเร็วแบบแม่เหล็ก 240W USB-C to U → src=product_store prods=10 1.0s
+[2573/13537] ✅ detail-02573 | Lagenio Watch Phone K5 สมาร์ทวอทช์สำหรับเด็ก ติดตา → src=product_store prods=10 0.5s
+[2574/13537] ✅ detail-02574 | (รับประกันศูนย์ไทย) Xiaomi Smart Band 10 สมาร์ทวอท → src=product_store prods=10 1.2s
+[2575/13537] ✅ detail-02575 | CUKTECH (ชุดREADYTOGO) เซตชาร์จไว แบตเตอรี่สำรอง ห → src=product_store prods=10 1.5s
+[2576/13537] ✅ detail-02576 | (รับประกันศูนย์ไทย) Xiaomi Mi Electric Shaver S101 → src=product_store prods=10 0.6s
+[2577/13537] ✅ detail-02577 | CUKTECH LPB200NL แบตสำรอง 20000 mAh มาตรฐาน CCC ขอ → src=product_store prods=10 0.7s
+[2578/13537] ✅ detail-02578 | Black Shark T23 หูฟังบลูทูธ หูฟังไร้สาย หูฟัง In-E → src=product_store prods=10 0.5s
+[2579/13537] ✅ detail-02579 | ZTEC ZC811 สายชาร์จตั้งได้ มีขาตั้งในตัว ชาร์จเร็ว → src=product_store prods=10 0.6s
+[2580/13537] ✅ detail-02580 | ปลอกคอนิรภัย สำหรับ ZTEC TAG ปลอกคอสุนัข ปลอกคอแมว → src=product_store prods=10 0.9s
+[2581/13537] ✅ detail-02581 | Yaber K3 Pro โปรเจคเตอร์ Sound by JBL พร้อมSubwoof → src=product_store prods=10 0.5s
+[2582/13537] ✅ detail-02582 | ZTEC ZMO1316 เมาส์ เมาส์ไร้สาย เมาส์บลูทูธ Bluetoo → src=product_store prods=10 0.8s
+[2583/13537] ✅ detail-02583 | Yaber K300s Laser Projector โปรเจคเตอร์ UST คมชัด  → src=product_store prods=10 0.5s
+[2584/13537] ✅ detail-02584 | CUKTECH CTC615S 6A 240W สายชาร์จเร็ว USB-C ยาว 15  → src=product_store prods=10 0.7s
+[2585/13537] ✅ detail-02585 | (ส่งด่วนฟรี!) iSUPER ไส้กรองสำหรับ Xiaomi Smart Ai → src=product_store prods=10 0.6s
+[2586/13537] ✅ detail-02586 | iSUPER EVOBUDS Air 3 เคสหูฟังบลูทูธ เคสซิลิโคน ลดแ → src=knowledge_base+mongo prods=27 0.9s
+[2587/13537] ✅ detail-02587 | กระเป๋าเก็บโปรเจคเตอร์แบบพกพา บุกันกระแทก สำหรับ Y → src=knowledge_base+mongo prods=21 1.1s
+[2588/13537] ✅ detail-02588 | Lagenio Watch Phone K2 สมาร์ทวอทช์สำหรับเด็ก ติดตา → src=product_store prods=10 0.5s
+[2589/13537] ✅ detail-02589 | KOSPET ARCHLAN LEATHER Watch Strap  สายนาฬิกาข้อมื → src=knowledge_base+mongo prods=12 0.7s
+[2590/13537] ✅ detail-02590 | (รับประกันศูนย์ไทย) Xiaomi Smart Camera C201 ขอราย → src=product_store prods=10 0.9s
+[2591/13537] ✅ detail-02591 | Black Shark FunCooler 5 พัดลมระบายความร้อนมือถือ 2 → src=product_store prods=10 0.5s
+[2592/13537] ✅ detail-02592 | ZTEC ZA201 20W / ZA353 35W / ZA453 45W หัวชาร์จ /  → src=product_store prods=10 1.2s
+[2593/13537] ✅ detail-02593 | CUKTECH AD1003T / CMC610 / PB100P Set หัวชาร์จ 120 → src=product_store prods=10 1.8s
+[2594/13537] ✅ detail-02594 | ZTEC ZC341 5A 240W สายชาร์จแม่เหล็ก มีจอ USB-C to  → src=product_store prods=10 0.7s
+[2595/13537] ✅ detail-02595 | MiLi MiTag Duo ติดตาม GPS ค้นหา สัตว์เลี้ยง กุญแจ  → src=product_store prods=10 0.6s
+[2596/13537] ✅ detail-02596 | (NewArrival) KIESLECT AI NotePods 10S หูฟัง AI ขอร → src=product_store prods=1 0.4s
+[2597/13537] ✅ detail-02597 | ZTEC ZC661 สายชาร์จเร็วแบบแม่เหล็ก 240W USB-C to U → src=product_store prods=10 0.7s
+[2598/13537] ✅ detail-02598 | (รับประกันศูนย์ไทย) Xiaomi Smart Dehumidifier 22L  → src=product_store prods=10 0.7s
+[2599/13537] ✅ detail-02599 | CUKTECH (รวมสายชาร์จ) สาย C to C สำหรับ iPhone 15  → src=product_store prods=2 0.4s
+[2600/13537] ✅ detail-02600 | (รับประกันศูนย์ไทย) Xiaomi Smart Camera C500 เลนส์ → src=product_store prods=10 1.0s
+[2601/13537] ✅ detail-02601 | ZTEC ZMO1316 เมาส์ เมาส์ไร้สาย เมาส์บลูทูธ Bluetoo → src=product_store prods=10 0.5s
+[2602/13537] ✅ detail-02602 | (NewArrival) KIESLECT BioKoop Smart Health Tracker → src=product_store prods=10 0.6s
+[2603/13537] ✅ detail-02603 | (รับประกันศูนย์ไทย) Xiaomi Redmi Buds 6 Active / 8 → src=product_store prods=10 0.7s
+[2604/13537] ✅ detail-02604 | Lagenio Watch Phone K5 สมาร์ทวอทช์สำหรับเด็ก ขอราย → src=product_store prods=10 0.6s
+[2605/13537] ✅ detail-02605 | ZTEC Tune Buds E200 หูฟังไร้สาย ANC Earbuds -25dB  → src=product_store prods=10 0.7s
+[2606/13537] ✅ detail-02606 | CUKTECH PB150S ความจุ 15000mAh 100W Max มาตรฐาน CC → src=product_store prods=10 0.9s
+[2607/13537] ✅ detail-02607 | IMILAB EC3 Lite กล้องวงจรปิด Ai ไล่โจร คมชัด 2K กั → src=product_store prods=10 0.7s
+[2608/13537] ✅ detail-02608 | (รับประกันศูนย์ไทย) Xiaomi Smart Band 9 Active Sma → src=product_store prods=10 0.9s
+[2609/13537] ✅ detail-02609 | (รับประกันศูนย์ไทย) Xiaomi In-Ear Headphones Basic → src=product_store prods=7 1.3s
+[2610/13537] ✅ detail-02610 | iQIYI VIP Premium 6 เดือน / 1ปี รับโค้ดในช่องแชท ข → src=product_store prods=8 0.8s
+[2611/13537] ✅ detail-02611 | Black Shark Rokas 5 หูฟังเล่นเกมไร้สาย ดีเลย์ต่ำ 2 → src=product_store prods=10 0.7s
+[2612/13537] ✅ detail-02612 | CUKTECH ชุดชาร์จมืออาชีพ AD1003T หัวชาร์จ 100W 3 พ → src=product_store prods=10 2.2s
+[2613/13537] ✅ detail-02613 | Yaber K300s Laser Projector โปรเจคเตอร์ UST คมชัด  → src=product_store prods=10 0.5s
+[2614/13537] ✅ detail-02614 | CUKTECH CUBE AC301 รองรับ PD3.0 Dynamic 40W / AC30 → src=product_store prods=10 0.9s
+[2615/13537] ✅ detail-02615 | Black Shark FunCooler 5 Neo พัดลมระบายความร้อนมือถ → src=product_store prods=10 0.6s
+[2616/13537] ✅ detail-02616 | CUKTECH AD1204U หัวชาร์จ 120W 4 พอร์ต เชื่อมต่อแอป → src=product_store prods=10 1.2s
+[2617/13537] ✅ detail-02617 | Black Shark FunCooler 5 พัดลมระบายความร้อนมือถือ 2 → src=product_store prods=10 0.6s
+[2618/13537] ✅ detail-02618 | (รับประกันศูนย์ไทย) Xiaomi Smart Camera C201 ขอราย → src=product_store prods=10 1.4s
+[2619/13537] ✅ detail-02619 | IMILAB C21 (GB V.) กล้องวงจรปิด กล้องภายในบ้าน cct → src=product_store prods=10 0.7s
+[2620/13537] ✅ detail-02620 | iSUPER EVOBUDS 3 เคสหูฟังบลูทูธ เคสซิลิโคน ลดแรงกร → src=knowledge_base+mongo prods=24 1.0s
+[2621/13537] ✅ detail-02621 | Black Shark GS3 Ultra (REFINED EDITION) สมาร์ทวอทช → src=product_store prods=8 0.5s
+[2622/13537] ✅ detail-02622 | iSUPER EVOBUDS Air 3 หูฟังบลูทูธ หูฟัง Earbuds ANC → src=product_store prods=10 0.7s
+[2623/13537] ✅ detail-02623 | CUKTECH ATC615 6A 100W USB A to USB C สายชาร์จ Hua → src=product_store prods=10 0.7s
+[2624/13537] ✅ detail-02624 | (NEW) Xiaomi Redmi Watch 6 Active จอใหญ่ 1.85 นิ้ว → src=product_store prods=10 0.6s
+[2625/13537] ✅ detail-02625 | Black Shark T24 หูฟังบลูทูธ หูฟังไร้สาย หูฟัง Earb → src=product_store prods=10 0.6s
+[2626/13537] ✅ detail-02626 | Black Shark T24 หูฟังบลูทูธ หูฟังไร้สาย หูฟัง Earb → src=product_store prods=10 0.4s
+[2627/13537] ✅ detail-02627 | (รับประกันศูนย์ไทย) Xiaomi Watch S4 41mm Smartwatc → src=product_store prods=10 1.6s
+[2628/13537] ✅ detail-02628 | (NewArrival) Black Shark Supercharged Laptop Coole → src=product_store prods=4 0.4s
+[2629/13537] ✅ detail-02629 | ZTEC ZMO1316 เมาส์ เมาส์ไร้สาย เมาส์บลูทูธ Bluetoo → src=product_store prods=6 0.5s
+[2630/13537] ✅ detail-02630 | ZTEC Tune Buds E200 หูฟังไร้สาย ANC Earbuds -25dB  → src=product_store prods=6 0.5s
+[2631/13537] ✅ detail-02631 | CUKTECH CTC615P 6A 240W สายชาร์จมีจอ USB-C to USB- → src=product_store prods=10 0.7s
+[2632/13537] ✅ detail-02632 | Yaber K300s โปรเจคเตอร์เลเซอร์ UST ฉายใกล้ผนัง 108 → src=product_store prods=10 0.5s
+[2633/13537] ✅ detail-02633 | Black Shark MagCooler 3 Pro พัดลมระบายความร้อน ลดอ → src=knowledge_base+mongo prods=20 0.8s
+[2634/13537] ✅ detail-02634 | Black Shark FunCooler 5 พัดลมระบายความร้อนมือถือ 2 → src=product_store prods=10 0.6s
+[2635/13537] ✅ detail-02635 | MiLi MiTag Duo & Leather Luggage Tag แท็กติดกระเป๋ → src=product_store prods=10 0.5s
+[2636/13537] ✅ detail-02636 | CUKTECH Charge anywhere AD653T /PB1055 /PB100P /CC → src=product_store prods=10 1.2s
+[2637/13537] ✅ detail-02637 | CUKTECH GaN3 AD1003 120W / AD1003T 100W หัวชาร์จเร → src=product_store prods=10 1.0s
+[2638/13537] ✅ detail-02638 | IMILAB EC6 Dual Pro 3K กล้องวงจรปิด 2 เลนส์ คมชัด  → src=product_store prods=10 0.6s
+[2639/13537] ✅ detail-02639 | (NewArrival) Black Shark Magcooler 6 Max ขอรายละเอ → src=product_store prods=10 0.6s
+[2640/13537] ✅ detail-02640 | (รับประกันศูนย์ไทย)  Xiaomi Mi Smart Camera C701 H → src=product_store prods=10 1.1s
+[2641/13537] ✅ detail-02641 | Black Shark FunCooler 5 Neo พัดลมระบายความร้อนมือถ → src=product_store prods=10 0.5s
+[2642/13537] ✅ detail-02642 | (NewArrival) Black Shark Magcooler 6 Ultra ขอรายละ → src=product_store prods=10 0.5s
+[2643/13537] ✅ detail-02643 | CUKTECH BF01 พัดลม Jet Fan แบบ USB-A ลมแรง 10.5 m/ → src=product_store prods=10 1.3s
+[2644/13537] ✅ detail-02644 | CUKTECH AC301 + CL315P Set หัวชาร์จ Adapter Dynami → src=product_store prods=10 1.2s
+[2645/13537] ✅ detail-02645 | กระเป๋าเก็บโปรเจคเตอร์แบบพกพา สามารถถือ แขวน หรือส → src=product_store prods=10 0.4s
+[2646/13537] ✅ detail-02646 | CUKTECH Silicone Protective Case เคสซิลิโคน สำหรับ → src=product_store prods=10 0.5s
+[2647/13537] ❌ detail-02647 | CUKTECH AL003 ไฟอ่านหนังสือ USB LAMP แบบ Warm Whit → src=product_store prods=0 0.5s
+
+⚠️  ถึงจำนวน request สูงสุด (500) หยุดที่เคสที่ 501
+   รันแล้ว 500 เคสในรอบนี้ (รวม 2647/13537)
+   คำสั่งรันต่อ: python scripts/testQA2.py --run --batch all --max-reqs 500 --resume
+
+============================================================
+เสร็จสิ้นรอบนี้: 500 เคส | รวมสะสม 2647/13537
+  เหลืออีก: 10890 เคส
+  results: /Users/itdev4/Documents/GitHub/ChatBotProductMS/scripts/testQA2_results.json
+  wrong:   /Users/itdev4/Documents/GitHub/ChatBotProductMS/scripts/testQA2_wrong.json
+  summary: /Users/itdev4/Documents/GitHub/ChatBotProductMS/scripts/testQA2_summary.json
+
+📌 รันต่อ: python scripts/testQA2.py --run --batch all --max-reqs 500 --resume
+============================================================
+
+  📈 รอบนี้รัน: 500 เคส | รวมสะสม: 2647/13537 | เหลือ: 10890
+
+────────────────────────────────────────────────────────────
+🔑 รอบ 2/14: key_1 (AQ.Ab8RN...5wwA) | model=gemini-3.1-flash-lite
+────────────────────────────────────────────────────────────
+  🔄 restarting test server (port 8011)... ✅ ready
+  ▶️  รัน testQA2 500 เคส (port 8011)...
+  ▶️  รัน: /Users/itdev4/Documents/GitHub/ChatBotProductMS/.venv/bin/python /Users/itdev4/Documents/GitHub/ChatBotProductMS/scripts/testQA2.py --run --resume --batch all --max-reqs 500
+📥 Resume: พบ 2647 เคสที่รันแล้ว จะข้าม
+
+============================================================
+เริ่มรัน test: 10890 เคส จากทั้งหมด 13537 (ข้าม 2647)
+  batch=all, max=500, resume=True
+============================================================
+
+[2648/13537] ✅ detail-02648 | (NewArrival) KOSPET TANK T4 Special Edition Rugged → src=product_store prods=10 2.5s
+[2649/13537] ✅ detail-02649 | KFI Smart Body Fat Scale FG2317WB ขอรายละเอียดสินค → src=product_store prods=10 3.6s
+[2650/13537] ✅ detail-02650 | ZTEC ZM421 สายชาร์จ 4 in 1 รองรับชาร์จเร็ว 240W สา → src=product_store prods=10 4.5s
+[2651/13537] ✅ detail-02651 | (รับประกันศูนย์ไทย) Xiaomi Smart Temperature and H → src=product_store prods=10 3.1s
+[2652/13537] ✅ detail-02652 | CUKTECH CTC620P 6A 240W สายชาร์จมีจอ จอ OLED USB-C → src=product_store prods=10 5.2s
+[2653/13537] ✅ detail-02653 | CUKTECH AD653T / CMC610 / PB200 หัวชาร์จ 65W สายชา → src=product_store prods=10 6.3s
+[2654/13537] ✅ detail-02654 | (รับประกันศูนย์ไทย) Xiaomi Redmi Watch 6 / Watch 5 → src=product_store prods=10 5.8s
+[2655/13537] ✅ detail-02655 | IMILAB C30 Dual กล้องวงจรปิด 2 เลนส์ ความคมชัด 3K+ → src=product_store prods=10 3.0s
+[2656/13537] ✅ detail-02656 | (รับประกันศูนย์ไทย) Xiaomi Smart Pet Food Feeder 2 → src=product_store prods=1 2.8s
+[2657/13537] ✅ detail-02657 | Yaber T1 Pro โปรเจคเตอร์ หมุนได้ 180° คมชัด 1080P  → src=product_store prods=10 3.3s
+[2658/13537] ✅ detail-02658 | KOSPET Magic P10 smartwatch AMOLED สมาร์ทวอทช์ โทร → src=product_store prods=10 3.2s
+[2659/13537] ✅ detail-02659 | ZTEC ZC661 สายชาร์จเร็วแบบแม่เหล็ก 240W USB-C to U → src=product_store prods=10 4.1s
+[2660/13537] ✅ detail-02660 | (Gift) อุปกรณ์ติดตาม Tile Slim เหมาะสำหรับกระเป๋าส → src=product_store prods=10 3.2s
+[2661/13537] ✅ detail-02661 | IMILAB C40 กล้องวงจรปิด คมชัด 4K Ultra HD หมุนได้  → src=product_store prods=10 4.6s
+[2662/13537] ✅ detail-02662 | (รับประกันศูนย์ไทย) Xiaomi vacuum cleaner G20 lite → src=product_store prods=10 4.1s
+[2663/13537] ✅ detail-02663 | IMILAB C40 กล้องวงจรปิด คมชัด 4K Ultra HD หมุนได้  → src=product_store prods=10 3.4s
+[2664/13537] ✅ detail-02664 | iSUPER GameLink Adapter Dongle อุปกรณ์เสริมหูฟัง G → src=product_store prods=10 3.6s
+[2665/13537] ✅ detail-02665 | CUKTECH AURA  LPB100 33W 10000mAh / AURA LPB200NL  → src=product_store prods=10 4.5s
+[2666/13537] ✅ detail-02666 | IMILAB C22 กล้องวงจรปิด กล้องภายในบ้าน คมชัด 3K Wi → src=product_store prods=10 4.0s
+[2667/13537] ✅ detail-02667 | IMILAB EC6 Panorama กล้องวงจรปิด มุมมองกว้าง 180°  → src=product_store prods=10 5.1s
+[2668/13537] ✅ detail-02668 | ZTEC ZC711 สายชาร์จ Ai Charging 100W แปลงเทคโนโลยี → src=product_store prods=10 3.5s
+[2669/13537] ✅ detail-02669 | (รับประกันศูนย์ไทย) iFLYTEK Smart Dictionary Pen ข → src=product_store prods=9 2.2s
+[2670/13537] ✅ detail-02670 | ZTEC ZH841 8 in 1 Mini Hub USB-C 100W ,HDMI 4K ,LA → src=product_store prods=7 3.8s
+[2671/13537] ✅ detail-02671 | CUKTECH AURA BA301 Fusion 2 in 1 หัวชาร์จ 33W แบตส → src=product_store prods=10 4.0s
+[2672/13537] ✅ detail-02672 | (รับประกันศูนย์ไทย) Xiaomi Smart Band 9 Pro สมาร์ท → src=product_store prods=10 4.2s
+[2673/13537] ✅ detail-02673 | Black Shark FunCooler 5 Pro พัดลมระบายความร้อนมือถ → src=product_store prods=10 2.1s
+[2674/13537] ✅ detail-02674 | CUKTECH AD1203P 120W หัวชาร์จเร็ว PD , PPS , UFCS  → src=product_store prods=10 6.0s
+[2675/13537] ✅ detail-02675 | BLACK SHARK BS-SP1 ลําโพงซาวด์บาร์ ต่อบลูทูธได้ ดอ → src=product_store prods=10 3.2s
+[2676/13537] ✅ detail-02676 | (ศูนย์ไทย) Xiaomi Mijia Smart Standing Fan Pro Sli → src=product_store prods=9 5.0s
+[2677/13537] ✅ detail-02677 | MiLi MiTag Duo อุปกรณ์ติดตาม ค้นหา สัตว์เลี้ยง กุญ → src=knowledge_base+mongo prods=14 3.5s
+[2678/13537] ✅ detail-02678 | CUKTECH ATC310N สายชาร์จ USB-A to USB-C 3A 60W ขอร → src=product_store prods=10 4.0s
+[2679/13537] ✅ detail-02679 | (NEW) Xiaomi Robot Vacuum H50 Pro 15000Pa หุ่นยนต์ → src=product_store prods=10 2.4s
+[2680/13537] ✅ detail-02680 | (ประกันศูนย์ไทย) Xiaomi Robot Vacuum H50 Pro 15000 → src=product_store prods=10 5.6s
+[2681/13537] ✅ detail-02681 | CUKTECH PB1055 แบตสำรอง 55W ขนาด 10000mAh CCC ชาร์ → src=product_store prods=10 5.2s
+[2682/13537] ✅ detail-02682 | ZTEC ZA453 GaN 45W  / ZC321S / ZC711 ชุดชาร์จไว ขอ → src=product_store prods=10 3.6s
+[2683/13537] ✅ detail-02683 | (รับประกันศูนย์ไทย) Xiaomi Sound Party คุณภาพเสียง → src=product_store prods=9 2.6s
+[2684/13537] ✅ detail-02684 | BLACK SHARK BS-SP1 ลําโพงซาวด์บาร์ ต่อบลูทูธได้ ดอ → src=product_store prods=8 3.2s
+[2685/13537] ✅ detail-02685 | (รับประกันศูนย์ไทย) Xiaomi Smart Kids Watch นาฬิกา → src=product_store prods=10 3.9s
+[2686/13537] ✅ detail-02686 | Kieslect Kr3 Smartwatch สมาร์ทวอทช์ หน้าจอ AMOLED  → src=product_store prods=8 5.0s
+[2687/13537] ✅ detail-02687 | CUKTECH LPB200NL แบตสำรอง 20000 mAh มาตรฐาน CCC ขอ → src=product_store prods=10 5.7s
+[2688/13537] ✅ detail-02688 | IMILAB EC6 Pro กล้องวงจรปิดคมชัด 4K กันน้ำ กันฝุ่น → src=product_store prods=10 4.2s
+[2689/13537] ✅ detail-02689 | ZTEC ZU351 Travel Adapter 35W หัวแปลงปลั๊กไฟ ขอราย → src=product_store prods=10 4.6s
+[2690/13537] ✅ detail-02690 | (รับประกันศูนย์ไทย) Xiaomi Bluetooth Speaker Essen → src=product_store prods=8 3.7s
+[2691/13537] ✅ detail-02691 | CUKTECH PB150S ความจุ 15000mAh 100W Max มาตรฐาน CC → src=product_store prods=10 4.0s
+[2692/13537] ✅ detail-02692 | CUKTECH LPB200N แบตสำรอง ชาร์จเร็ว 20000 mAh  มาตร → src=product_store prods=10 4.5s
+[2693/13537] ✅ detail-02693 | ZTEC ZA652 / ZA651 หัวชาร์จ GaN 65W ขอรายละเอียดสิ → src=product_store prods=10 3.7s
+[2694/13537] ✅ detail-02694 | CUKTECH LPB200N แบตสำรอง ชาร์จเร็ว 20000mAh CE / C → src=product_store prods=10 4.2s
+[2695/13537] ✅ detail-02695 | Black Shark Rokas 3 หูฟังเล่นเกมไร้สาย ดีเลย์ต่ำ 4 → src=product_store prods=10 3.2s
+[2696/13537] ✅ detail-02696 | (NEW) Xiaomi OpenWear Stereo Pro หูฟังไดรเวอร์ขนาด → src=product_store prods=10 3.3s
+[2697/13537] ✅ detail-02697 | iSUPER SOUNDActiv Free หูฟังทรงสปอร์ต ออกกำลังกาย  → src=product_store prods=10 3.7s
+[2698/13537] ✅ detail-02698 | (รับประกันศูนย์ไทย) Xiaomi  Robot Vacuum S40C ขอรา → src=product_store prods=10 3.8s
+[2699/13537] ✅ detail-02699 | Yaber T1 Pro โปรเจคเตอร์ หมุนได้ 180° คมชัด 1080P  → src=product_store prods=10 3.6s
+[2700/13537] ✅ detail-02700 | KOSPET ORB / PULSE Smartwatch AMOLED สมาร์ทวอทช์ ก → src=product_store prods=10 3.8s
+[2701/13537] ✅ detail-02701 | IMILAB EC4 (GB V.) กล้องวงจรปิดไร้สาย กล้องภายนอก  → src=knowledge_base+mongo prods=13 4.1s
+[2702/13537] ✅ detail-02702 | KOSPET TANK T4 / M4 Rugged Smartwatch With GPS สมา → src=product_store prods=10 16.0s
+[2703/13537] ✅ detail-02703 | (รับประกันศูนย์ไทย) Xiaomi Smart Temperature and H → src=product_store prods=10 2.3s
+[2704/13537] ✅ detail-02704 | iSUPER EVOBUDS Air 3 หูฟังบลูทูธ 5.4 Earbuds ANC ข → src=product_store prods=10 3.9s
+[2705/13537] ✅ detail-02705 | MiLi MiTag Duo With Silicone Luggage Tag แท็กกระเป → src=product_store prods=10 3.6s
+[2706/13537] ✅ detail-02706 | Yaber L2s โปรเจคเตอร์ Sound by JBL 700 ANSI Lumens → src=product_store prods=10 3.5s
+[2707/13537] ✅ detail-02707 | CUKTECH Silicone Protective Case เคสซิลิโคน สำหรับ → src=product_store prods=10 5.7s
+[2708/13537] ✅ detail-02708 | (รับประกันศูนย์ไทย) Xiaomi Robot Vacuum H40 robot  → src=product_store prods=9 4.9s
+[2709/13537] ✅ detail-02709 | CUKTECH AL003 ไฟอ่านหนังสือ USB LAMP แบบ Warm Whit → src=product_store prods=10 2.1s
+[2710/13537] ✅ detail-02710 | CUKTECH HA716T GaN 20W / AL870 หัวชาร์จ / สายชาร์จ → src=product_store prods=10 4.2s
+[2711/13537] ✅ detail-02711 | BLACK SHARK BS-SP1 ลําโพงซาวด์บาร์ ต่อบลูทูธได้ ดอ → src=product_store prods=1 3.0s
+[2712/13537] ✅ detail-02712 | (รับประกันศูนย์ไทย) Xiaomi Smart Temperature and H → src=product_store prods=10 2.7s
+[2713/13537] ✅ detail-02713 | CUKTECH AD653W GaN 65W หัวชาร์จ หัวชาร์จเร็วพร้อมส → src=product_store prods=10 5.1s
+[2714/13537] ✅ detail-02714 | Black Shark T20 หูฟังออกกำลังกายไร้สาย Open Ear Bl → src=product_store prods=10 3.3s
+[2715/13537] ✅ detail-02715 | (รับประกันศูนย์ไทย) Xiaomi Sound Party ขอรายละเอีย → src=product_store prods=10 2.5s
+[2716/13537] ✅ detail-02716 | CUKTECH LPB200NL / AD653T เซตชาร์จเร็วสุดคุ้ม 65W  → src=product_store prods=10 4.2s
+[2717/13537] ✅ detail-02717 | (รับประกันศูนย์ไทย) Xiaomi Buds 6 หูฟังบลูทูธ ไดรเ → src=knowledge_base+mongo prods=15 5.9s
+[2718/13537] ✅ detail-02718 | (รับประกันศูนย์ไทย) Xiaomi Square Sunglasses/Sport → src=product_store prods=10 2.5s
+[2719/13537] ✅ detail-02719 | Black Shark FunCooler 5 Neo พัดลมระบายความร้อนมือถ → src=product_store prods=10 2.9s
+[2720/13537] ✅ detail-02720 | CUKTECH AD1003T / CMC610 / PB100P Set หัวชาร์จ 120 → src=product_store prods=10 5.6s
+[2721/13537] ✅ detail-02721 | (รับประกันศูนย์ไทย) Xiaomi Smart Band 9 Active สมา → src=product_store prods=10 4.3s
+[2722/13537] ✅ detail-02722 | CUKTECH CUBE AC301 หัวชาร์จเร็ว 30W PD3.0 Dynamic  → src=product_store prods=10 4.8s
+[2723/13537] ✅ detail-02723 | KOSPET ORB / PULSE Smartwatch AMOLED สมาร์ทวอทช์ ก → src=product_store prods=10 4.8s
+[2724/13537] ✅ detail-02724 | Black Shark S3 Classic สมาร์ทวอทช์ Smartwatch ขอรา → src=product_store prods=8 3.7s
+[2725/13537] ✅ detail-02725 | (รับประกันศูนย์ไทย) Xiaomi Mi Smart Band 10 สมาร์ท → src=product_store prods=10 16.9s
+[2726/13537] ✅ detail-02726 | (NewArrival) BLACK SHARK RUN สมาร์ทวอทช์ออกกำลังกา → src=product_store prods=8 5.1s
+[2727/13537] ✅ detail-02727 | Lagenio Watch Phone K9 Ai สมาร์ทวอทช์เด็ก ระบุตำแห → src=product_store prods=10 6.0s
+[2728/13537] ✅ detail-02728 | ZTEC ZMH113 แท่นแม่เหล็กสุญญากาศ ติดมือถือ พลังการ → src=knowledge_base+mongo prods=5 5.7s
+[2729/13537] ✅ detail-02729 | Yaber T1 Pro โปรเจคเตอร์พกพา ขาตั้งหมุน 180° คมชัด → src=product_store prods=10 8.8s
+[2730/13537] ✅ detail-02730 | CUKTECH GaN3 AD1003 120W / AD1003T 100W หัวชาร์จเร → src=product_store prods=10 13.1s
+[2731/13537] ✅ detail-02731 | Black Shark FunCooler 3 Pro พัดลมระบายความร้อนความ → src=knowledge_base+mongo prods=17 7.7s
+[2732/13537] ✅ detail-02732 | CUKTECH CC903P Car Charger หัวชาร์จในรถ 100W Max ข → src=product_store prods=10 6.2s
+[2733/13537] ✅ detail-02733 | ZTEC ZM212 สายชาร์จ MFI 2 in 1 5A 240W USB-C to US → src=product_store prods=10 8.0s
+[2734/13537] ✅ detail-02734 | (รับประกันศูนย์ไทย) Xiaomi Robot Vacuum H40 หุ่นยน → src=product_store prods=10 8.0s
+[2735/13537] ✅ detail-02735 | CUKTECH PB1055 แบตสำรอง 55W ขนาด 10000mAh CCC ชาร์ → src=product_store prods=10 8.1s
+[2736/13537] ✅ detail-02736 | CUKTECH A18T 30W  / CUKTECH AC45B 45W / ZMI HA722  → src=product_store prods=10 31.3s
+[2737/13537] ✅ detail-02737 | Black Shark T24 หูฟังบลูทูธ หูฟังไร้สาย หูฟัง Earb → src=product_store prods=10 4.7s
+[2738/13537] ✅ detail-02738 | Black Shark FunCooler 4 พัดลมเกมมิ่ง ระบายความร้อน → src=knowledge_base+mongo prods=25 5.4s
+[2739/13537] ✅ detail-02739 | (รับประกันศูนย์ไทย) Xiaomi Smart Camera C500 เลนส์ → src=product_store prods=10 3.6s
+[2740/13537] ✅ detail-02740 | (รับประกันศูนย์ไทย) Xiaomi Smart Band 10 สมาร์ทวอท → src=product_store prods=10 5.6s
+[2741/13537] ✅ detail-02741 | MiLi MiTag Duo & Bicycle Bottle Holder ขากระติกน้ำ → src=product_store prods=10 2.9s
+[2742/13537] ✅ detail-02742 | CUKTECH TA1406U แท่นชาร์จ Desktop Charger 140W Max → src=product_store prods=10 6.6s
+[2743/13537] ✅ detail-02743 | Black Shark T23 หูฟังบลูทูธ หูฟังไร้สาย หูฟัง In-E → src=product_store prods=10 3.3s
+[2744/13537] ✅ detail-02744 | (รับประกันศูนย์ไทย) Xiaomi Smart Camera C500 กล้อง → src=product_store prods=10 4.3s
+[2745/13537] ✅ detail-02745 | Black Shark Pad 7 / Pad 7 Pro แท็บเล็ต จอใหญ่ 11 น → src=product_store prods=5 5.8s
+[2746/13537] ✅ detail-02746 | KOSPET TANK T4 / M4 Rugged Smartwatch With GPS สมา → src=product_store prods=10 6.8s
+[2747/13537] ✅ detail-02747 | ZTEC ZA353 GaN 35W  / ZC321S / ZC711 ชุดชาร์จเร็ว  → src=product_store prods=10 8.3s
+[2748/13537] ✅ detail-02748 | ZTEC Tune Buds E200 หูฟังไร้สาย ANC Earbuds -25dB  → src=product_store prods=10 3.5s
+[2749/13537] ✅ detail-02749 | KOSPET Magic P10 / R10 smartwatch AMOLED สมาร์ทวอท → src=product_store prods=10 7.9s
+[2750/13537] ✅ detail-02750 | IMILAB EC3 Lite กล้องวงจรปิด Ai ไล่โจร คมชัด 2K กั → src=product_store prods=10 6.1s

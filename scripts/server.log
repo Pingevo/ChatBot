@@ -1,0 +1,849 @@
+INFO:     Started server process [81526]
+INFO:     Waiting for application startup.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/391 [00:00<?, ?it/s]Loading weights: 100%|██████████| 391/391 [00:00<00:00, 52238.42it/s]
+[WARMUP] embedding model loaded
+[WARMUP] vector store loaded
+[WARMUP] MongoDB connected
+[WARMUP] admin MongoDB connected
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8010 (Press CTRL+C to quit)
+INFO:     127.0.0.1:52446 - "GET /health HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.13s  query='ศูนย์ไทย  Xiaobai IMILAB EC2 + Gateway กล้องวงจรปิด (GB V.) '
+[TIMING] fetch_products: 0.26s  (retrieval='ศูนย์ไทย  Xiaobai IMILAB EC2 + Gateway กล้องวงจรปิด (GB V.) ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='ศูนย์ไทย  Xiaobai IMILAB EC2 + Gateway กล้องวงจรปิด (GB V.) ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=8
+[LLM DEBUG]   [0] SuperITMall  ศูนย์ไทย [เหลือ 2540 บ. โค้ด EKLNS5G8] IMILAB EC2 
+[LLM DEBUG]   [1] SuperITMall  ศูนย์ไทย [รับ 99 Coins โค้ด SPCCB28VX]  Xiaobai IM
+[LLM DEBUG]   [2] SuperITMall  ศูนย์ไทย [เหลือ 2540 บ. โค้ด EKLNS5G8] Xiaobai IMI
+[LLM DEBUG]   [3] SuperITMall  [ลดเหลือ 2999] IMILAB EC4 (GB V.) กล้องวงจรปิด Xia
+[LLM DEBUG]   [4] SuperITMall  [เหลือ 2789 บ. โค้ด 24VQP5ZK] Xiaomi Mi Outdoor Ca
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: SuperITMall\nจำนวนสินค้าใน context: 8\n⚠️ สำคัญมาก: มี 3 สินค้าที่ไม่มี description_excerpt (ระบุว่า \'ไม่มีรายละเอียดสินค้าเพิ่มเติม\') ห้ามเอา description_excerpt ของสินค้าอื่นมาตอบแทนสินค้าเหล่านั้นเด็ดขาด แม้จะเป็นสินค้ารุ่นเดียวกันจากร้านอื่นก็ตาม ถ้าลูกค้าถามรายละเอียดของสินค้าที่ไม่มี desc ให้บอก \'ขออภัยค่ะ สินค้ารุ่นนี้ไม่มีรายละเอียดเพิ่มเติม ทักแอดมินได้เลยนะคะ\'\n\n[\n  {\n    "name": "ศูนย์ไทย [เหลือ 2540 บ. โค้ด EKLNS5'
+[TIMING] LLM: 3.47s  TOTAL: 4.14s
+[LLM] model=gemini-3.5-flash-lite  prompt=11770  output=675  total=12445  products=8
+INFO:     127.0.0.1:52449 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='ROIDMI P6 Car Air Purifier ขอรายละเอียดสินค้าหน่อยค่ะ'
+[TIMING] fetch_products: 0.33s  (retrieval='ROIDMI P6 Car Air Purifier ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='ROIDMI P6 Car Air Purifier ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=9
+[LLM DEBUG]   [0] SuperITMall  [ลดเหลือ 759] iSUPER ไส้กรอง RFID สีดำ (HEPA) สำหร
+[LLM DEBUG]   [1] SuperITMall  [ลดเหลือ 659] iSUPER ไส้กรอง RFID สีเขียว (Formald
+[LLM DEBUG]   [2] SuperITMall  [ลดเหลือ 709] iSUPER ไส้กรอง RFID สีม่วง (Anti-Bac
+[LLM DEBUG]   [3] SuperITMall  (พร้อมส่ง) iSUPER ไส้กรองสำหรับ Xiaomi Air Purifie
+[LLM DEBUG]   [4] SuperITMall  [1487 บ. โค้ด CXSPB3XX] Deerma DEM-DX1000W เครื่อง
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: SuperITMall\nจำนวนสินค้าใน context: 9\n\n[\n  {\n    "name": "[ลดเหลือ 759] iSUPER ไส้กรอง RFID สีดำ (HEPA) สำหรับเครื่องฟอกอากาศ Xiaomi",\n    "shop": "SuperITMall",\n    "price": {\n      "min": 999,\n      "max": 999,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/2qJ3he1vJj",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-7rdvd-mdranf5lnqz92d",\n    "has_promotion": true,'
+[TIMING] LLM: 1.51s  TOTAL: 1.93s
+[LLM] model=gemini-3.5-flash-lite  prompt=16311  output=25  total=16336  products=9
+INFO:     127.0.0.1:52474 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.06s  query='ศูนย์ไทย  70mai Mini Dash Cam (Global Ver.) 1600P กว้าง140 ข'
+[TIMING] fetch_products: 0.14s  (retrieval='ศูนย์ไทย  70mai Mini Dash Cam (Global Ver.) 1600P กว้าง140 ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='ศูนย์ไทย  70mai Mini Dash Cam (Global Ver.) 1600P กว้าง140 ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=9
+[LLM DEBUG]   [0] LuckyHomeMart  ศูนย์ไทย [เหลือ 1,299 บาท ใช้โค้ด WOWAUG30 + ประกั
+[LLM DEBUG]   [1] LuckyHomeMart  ศูนย์ไทย [269 บ. โค้ด FBSMAY10DD22] 70mai GPS Modu
+[LLM DEBUG]   [2] LuckyHomeMart  ศูนย์ไทย [ราคาพิเศษ 0บ.] 70mai Mini Dash Cam (Glob
+[LLM DEBUG]   [3] LuckyHomeMart  [ทักแชทรับโค้ด] 70mai Lite (Global Ver.)1080P เซนเ
+[LLM DEBUG]   [4] LuckyHomeMart  ศูนย์ไทย [ทักแชทรับโค้ด] ศูนย์ไทย 70mai Car Purifi
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: LuckyHomeMart\nจำนวนสินค้าใน context: 9\n⚠️ สำคัญมาก: มี 3 สินค้าที่ไม่มี description_excerpt (ระบุว่า \'ไม่มีรายละเอียดสินค้าเพิ่มเติม\') ห้ามเอา description_excerpt ของสินค้าอื่นมาตอบแทนสินค้าเหล่านั้นเด็ดขาด แม้จะเป็นสินค้ารุ่นเดียวกันจากร้านอื่นก็ตาม ถ้าลูกค้าถามรายละเอียดของสินค้าที่ไม่มี desc ให้บอก \'ขออภัยค่ะ สินค้ารุ่นนี้ไม่มีรายละเอียดเพิ่มเติม ทักแอดมินได้เลยนะคะ\'\n\n[\n  {\n    "name": "ศูนย์ไทย [เหลือ 1,299 บาท ใช้โค้ด'
+[TIMING] LLM: 3.74s  TOTAL: 3.97s
+[LLM] model=gemini-3.5-flash-lite  prompt=11722  output=778  total=12500  products=9
+INFO:     127.0.0.1:52489 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='OneDer V01 16W mini soundbar หน้าจอ LED stereo sound ขอรายละ'
+[TIMING] fetch_products: 0.03s  (retrieval='OneDer V01 16W mini soundbar หน้าจอ LED stereo sound ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='OneDer V01 16W mini soundbar หน้าจอ LED stereo sound ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=2
+[LLM DEBUG]   [0] KingGadgets  [ทักแชทรับโค้ด] OneDer V01 16W mini soundbar หน้าจ
+[LLM DEBUG]   [1] KingGadgets  [ราคาพิเศษ 8990บ.] BINNIFA Live 3 Plus Cinema 5.1 
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 2\n\n[\n  {\n    "name": "[ทักแชทรับโค้ด] OneDer V01 16W mini soundbar หน้าจอ LED stereo sound subwoofer-30D",\n    "shop": "KingGadgets",\n    "price": {\n      "min": 1299,\n      "max": 1299,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/3VYkhNC6zD",\n    "image_url": "https://cf.shopee.co.th/file/995cfe6ae880b498d6ee9db5f20fcc40",\n    "has_promoti'
+[TIMING] LLM: 2.65s  TOTAL: 2.78s
+[LLM] model=gemini-3.5-flash-lite  prompt=3162  output=418  total=3580  products=2
+INFO:     127.0.0.1:52508 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='Xiaomi Redmi Xiao AI Speaker Play ลำโพงอัจฉริยะ ขอรายละเอียด'
+[TIMING] fetch_products: 0.08s  (retrieval='Xiaomi Redmi Xiao AI Speaker Play ลำโพงอัจฉริยะ ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Xiaomi Redmi Xiao AI Speaker Play ลำโพงอัจฉริยะ ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=9
+[LLM DEBUG]   [0] KingGadgets  [ทักแชทรับโค้ด] Xiaomi Redmi Xiao AI Speaker Play 
+[LLM DEBUG]   [1] KingGadgets  [เหลือ 869 บ. โค้ด SALEHE25] Xiaomi ai speaker pla
+[LLM DEBUG]   [2] KingGadgets  [ราคาพิเศษ 299บ.] Xiaomi Xiaoai ลำโพงบลูทูธ BT5.0 
+[LLM DEBUG]   [3] KingGadgets  [เหลือ 1315 บ. โค้ด X4GGEKC] ศูนย์ไทย Xiaomi Mi Po
+[LLM DEBUG]   [4] KingGadgets  [เหลือ 219 บ. โค้ด LABSFEB15] พร้อมส่ง Xiaomi Mi C
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 9\n\n[\n  {\n    "name": "[ทักแชทรับโค้ด] Xiaomi Redmi Xiao AI Speaker Play ลำโพงอัจฉริยะ เสียงดีเบสหนัก-30D",\n    "shop": "KingGadgets",\n    "price": {\n      "min": 1999,\n      "max": 1999,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "1 Month"\n    },\n    "short_link": "https://s.shopee.co.th/5VJoxqHsBf",\n    "image_url": "https://cf.shopee.co.th/file/c552b45ec0c0fc3c53'
+[TIMING] LLM: 3.96s  TOTAL: 4.14s
+[LLM] model=gemini-3.5-flash-lite  prompt=10483  output=765  total=11248  products=9
+INFO:     127.0.0.1:52526 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.06s  query='AirPOP Sport ankle ขอรายละเอียดสินค้าหน่อยค่ะ'
+[TIMING] fetch_products: 0.06s  (retrieval='AirPOP Sport ankle ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='AirPOP Sport ankle ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] KingGadgets  [ราคาพิเศษ 679บ.] Eloop E38 แบตสำรอง 22000mAh ชาร์
+[LLM DEBUG]   [1] KingGadgets  [ราคาพิเศษ 524บ.] Eloop Orsen E41 แบตสำรอง 10000mA
+[LLM DEBUG]   [2] KingGadgets  [ทักแชทรับโค้ด] ELOOP E13 แบตเตอรี่สำรอง 13000mAh 
+[LLM DEBUG]   [3] KingGadgets  [เหลือ 441 บ. โค้ด D5HBQ7] Eloop E33 Power Bank 10
+[LLM DEBUG]   [4] KingGadgets  [ทักแชทรับโค้ด] ELOOP E30 แบตสำรอง 5000mAh แท้ 100
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ราคาพิเศษ 679บ.] Eloop E38 แบตสำรอง 22000mAh ชาร์จเร็ว Quick Charge 3.0 + PD -1M",\n    "shop": "KingGadgets",\n    "price": {\n      "min": 699,\n      "max": 699,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "1 Month"\n    },\n    "short_link": "https://s.shopee.co.th/9f9Nw8t0DK",\n    "image_url": "https://cf.shopee.co.th/file/3bdffea6c2539a1cd4bc'
+[TIMING] LLM: 1.36s  TOTAL: 1.51s
+[LLM] model=gemini-3.5-flash-lite  prompt=12065  output=28  total=12093  products=10
+INFO:     127.0.0.1:52547 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='Xiaomi Mijia Yiyohome หวี ป้องกันไฟฟ้าสถิตย์ จับถนัดมือ ขอรา'
+[TIMING] fetch_products: 0.71s  (retrieval='Xiaomi Mijia Yiyohome หวี ป้องกันไฟฟ้าสถิตย์ จับถนัดมือ ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Xiaomi Mijia Yiyohome หวี ป้องกันไฟฟ้าสถิตย์ จับถนัดมือ ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] YoupinOfficialS  (รับประกันศูนย์ไทย) Xiaomi Redmi Watch 6 / Watch 5
+[LLM DEBUG]   [1] YoupinOfficialS  (รับประกันศูนย์ไทย) Xiaomi Redmi Watch 5 Lite Smar
+[LLM DEBUG]   [2] YoupinOfficialS  (รับประกันศูนย์ไทย) Xiaomi mi Band 10 / mi Band 9 
+[LLM DEBUG]   [3] YoupinOfficialS  (รับประกันศูนย์ไทย) Xiaomi Redmi Watch 5 Lite Smar
+[LLM DEBUG]   [4] YoupinOfficialS  (รับประกันศูนย์ไทย) Xiaomi Redmi Watch 5 Smartwatc
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: YoupinOfficialStore\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "(รับประกันศูนย์ไทย) Xiaomi Redmi Watch 6 / Watch 5 Smartwatch นาฬิกา สมาร์ทวอทช์ จอ 2.07 นิ้ว 60Hz กันน้ำ ตรวจวัดสุขภาพ",\n    "shop": "YoupinOfficialStore",\n    "price": {\n      "min": 2999,\n      "max": 3699,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/5AgyY67cAS",\n    "image_url": "https://cf.shopee.co.th/fi'
+[TIMING] LLM: 1.37s  TOTAL: 2.17s
+[LLM] model=gemini-3.5-flash-lite  prompt=14058  output=28  total=14086  products=10
+INFO:     127.0.0.1:52560 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='ZMI B508 ลำโพงบลูทูธ 2in1 ขอรายละเอียดสินค้าหน่อยค่ะ'
+[TIMING] fetch_products: 0.06s  (retrieval='ZMI B508 ลำโพงบลูทูธ 2in1 ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='ZMI B508 ลำโพงบลูทูธ 2in1 ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=2
+[LLM DEBUG]   [0] ZMIThailand  ZMI B508 ลำโพงบลูทูธ 2in1 ระบบเสียงรอบทิศทาง+แท่นช
+[LLM DEBUG]   [1] ZMIThailand  ZMI B508 ลำโพงบลูทูธ 2in1 ระบบเสียงรอบทิศทาง+แท่นช
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: ZMIThailand\nจำนวนสินค้าใน context: 2\n\n[\n  {\n    "name": "ZMI B508 ลำโพงบลูทูธ 2in1 ระบบเสียงรอบทิศทาง+แท่นชาร์จไร้สาย พร้อม XiaoAI ผู้ช่วยอัจฉริยะ -1Y",\n    "shop": "ZMIThailand",\n    "price": {\n      "min": 999,\n      "max": 999,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/5VJovVseY8",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-82595-mrtryvr4m60w1e",\n    "ha'
+[TIMING] LLM: 3.36s  TOTAL: 3.51s
+[LLM] model=gemini-3.5-flash-lite  prompt=4982  output=789  total=5771  products=2
+INFO:     127.0.0.1:52576 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='Lexiu RS1 / RS101 Sweeping Robot ควบคุมผ่าน App ขอรายละเอียด'
+[TIMING] fetch_products: 0.40s  (retrieval='Lexiu RS1 / RS101 Sweeping Robot ควบคุมผ่าน App ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Lexiu RS1 / RS101 Sweeping Robot ควบคุมผ่าน App ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=4
+[LLM DEBUG]   [0] SuperITMall  [4649 บ. โค้ด PAYDAY1125] Lexiu RS1 / RS101 Sweepi
+[LLM DEBUG]   [1] SuperITMall  [ลดเหลือ 3599] LEXIU Rosou GS1 เตารีดผ้า ด้วยแรงดั
+[LLM DEBUG]   [2] SuperITMall  [เหลือ 2649 บ. โค้ด 3EZLTWVM] Lexiu SS320 พัดลมตั้
+[LLM DEBUG]   [3] SuperITMall  [เหลือ 959 บ. โค้ด HABLH33NW] Lexiu Rosou SS5 DC F
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: SuperITMall\nจำนวนสินค้าใน context: 4\n\n[\n  {\n    "name": "[4649 บ. โค้ด PAYDAY1125] Lexiu RS1 / RS101 Sweeping Robot ควบคุมผ่าน App ถูแห้งและเปียก-30D",\n    "shop": "SuperITMall",\n    "price": {\n      "min": 15999,\n      "max": 15999,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "1 Month"\n    },\n    "short_link": "https://s.shopee.co.th/qXzKA012C",\n    "image_url": "https://cf.shopee.co.th/file/sg-1113'
+[TIMING] LLM: 2.60s  TOTAL: 3.10s
+[LLM] model=gemini-3.5-flash-lite  prompt=6893  output=550  total=7443  products=4
+INFO:     127.0.0.1:52601 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='พร้อมส่ง Mist Fan H9 Pro พัดลมไอน้ำ ไร้สาย แรงลม 3 ระดับ ขอร'
+[TIMING] fetch_products: 0.13s  (retrieval='พร้อมส่ง Mist Fan H9 Pro พัดลมไอน้ำ ไร้สาย แรงลม 3 ระดับ ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='พร้อมส่ง Mist Fan H9 Pro พัดลมไอน้ำ ไร้สาย แรงลม 3 ระดับ ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] SuperITMall  [รับ 70 Coins โค้ด SPCCBF4XN]  พร้อมส่ง Mist Fan H
+[LLM DEBUG]   [1] SuperITMall  [1529 บ. โค้ด FBSMAY10DD22] Xiaomi Mijia Smart Sta
+[LLM DEBUG]   [2] SuperITMall  [ราคาพิเศษ 999บ.] FIVE Circulation Fan พัดลมตั้งโต
+[LLM DEBUG]   [3] SuperITMall  [ราคาพิเศษ 399บ.] Zaiwan ZW2811 Fan พัดลม โคมไฟ 2i
+[LLM DEBUG]   [4] SuperITMall  [ลดเหลือ 439] Zaiwan BP35S พัดลมพกพา ตัวฐานคลิปหนี
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: SuperITMall\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[รับ 70 Coins โค้ด SPCCBF4XN]  พร้อมส่ง Mist Fan H9 Pro พัดลมไอน้ำ ไร้สาย แรงลม 3 ระดับ มีไฟอ่านหนังสือ",\n    "shop": "SuperITMall",\n    "price": {\n      "min": 999,\n      "max": 999,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/4VRHh6lxfL",\n    "image_url": "https://cf.shopee.co.th/file/c4df50135d5e9fc9b439d4e7aa35ee7'
+[TIMING] LLM: 2.38s  TOTAL: 2.61s
+[LLM] model=gemini-3.5-flash-lite  prompt=13988  output=402  total=14390  products=10
+INFO:     127.0.0.1:52617 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='YASE CLIP-FAN รุ่น YS2007 พัดลมพกพา พัดลมยืดได้ ขอรายละเอียด'
+[TIMING] fetch_products: 0.09s  (retrieval='YASE CLIP-FAN รุ่น YS2007 พัดลมพกพา พัดลมยืดได้ ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='YASE CLIP-FAN รุ่น YS2007 พัดลมพกพา พัดลมยืดได้ ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=9
+[LLM DEBUG]   [0] YoupinOfficialS  [ลดเหลือ 279] YASE CLIP-FAN รุ่น YS2007 พัดลมพกพา 
+[LLM DEBUG]   [1] YoupinOfficialS  (ศูนย์ไทย) Xiaomi Mijia Smart Standing Fan Pro Sli
+[LLM DEBUG]   [2] YoupinOfficialS  (รับประกันศูนย์ไทย) Xiaomi Robot Vacuum E10/E10C ห
+[LLM DEBUG]   [3] YoupinOfficialS  (รับประกันศูนย์ไทย) Xiaomi Robot Vacuum E10/E10C ห
+[LLM DEBUG]   [4] YoupinOfficialS  [ลดเหลือ 699] FIVE Circulation Fan พัดลมตั้งโต๊ะ พ
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: YoupinOfficialStore\nจำนวนสินค้าใน context: 9\n\n[\n  {\n    "name": "[ลดเหลือ 279] YASE CLIP-FAN รุ่น YS2007 พัดลมพกพา พัดลมยืดได้ พัดลมตั้งโต๊ะ แบตในตัว -30D",\n    "shop": "YoupinOfficialStore",\n    "price": {\n      "min": 399,\n      "max": 399,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/30cTxcbfLp",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-825ai-mru1dhh62ubr'
+[TIMING] LLM: 2.93s  TOTAL: 3.09s
+[LLM] model=gemini-3.5-flash-lite  prompt=12284  output=546  total=12830  products=9
+INFO:     127.0.0.1:52634 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='ZHIBAI TL3 แปรงสีฟันไฟฟ้า โซนิค ไร้สาย 3 ขอรายละเอียดสินค้าห'
+[TIMING] fetch_products: 0.32s  (retrieval='ZHIBAI TL3 แปรงสีฟันไฟฟ้า โซนิค ไร้สาย 3 ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='ZHIBAI TL3 แปรงสีฟันไฟฟ้า โซนิค ไร้สาย 3 ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] YoupinOfficialS  [ลดเหลือ 209] ZTEC ZC811 สายชาร์จตั้งได้ มีขาตั้งใ
+[LLM DEBUG]   [1] YoupinOfficialS  [ลดเหลือ 224] ZTEC ZC660 5A 240W สายชาร์จพร้อมพวงก
+[LLM DEBUG]   [2] YoupinOfficialS  [ลดเหลือ 194] ZTEC ZC351 5A 240W สายชาร์จเกมมิ่ง U
+[LLM DEBUG]   [3] YoupinOfficialS  [ลดเหลือ 419] ZTEC ZC341 5A 240W สายชาร์จแม่เหล็ก 
+[LLM DEBUG]   [4] YoupinOfficialS  [ลดเหลือ 1124] ZTEC ZU701 Travel Adapter 70W หัวแป
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: YoupinOfficialStore\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ลดเหลือ 209] ZTEC ZC811 สายชาร์จตั้งได้ มีขาตั้งในตัว ชาร์จเร็ว 5A 240W ที่วางโทรศัพท์ หมุนได้ 360° Type C -2Y",\n    "shop": "YoupinOfficialStore",\n    "price": {\n      "min": 279,\n      "max": 279,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "24 Months",\n      "type": "Supplier Warranty"\n    },\n    "short_link": "https://s.shopee.co.'
+[TIMING] LLM: 1.55s  TOTAL: 1.96s
+[LLM] model=gemini-3.5-flash-lite  prompt=14918  output=46  total=14964  products=10
+INFO:     127.0.0.1:52650 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='JIMMY JV52 Vacuum Cleaner ไร้สาย ความจุแบตเตอรี่2500mah ขอรา'
+[TIMING] fetch_products: 0.17s  (retrieval='JIMMY JV52 Vacuum Cleaner ไร้สาย ความจุแบตเตอรี่2500mah ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='JIMMY JV52 Vacuum Cleaner ไร้สาย ความจุแบตเตอรี่2500mah ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] LuckyHomeMart  [ราคาพิเศษ 4599บ.] JIMMY JV52 Vacuum Cleaner ไร้สา
+[LLM DEBUG]   [1] LuckyHomeMart  [ลดเหลือ 999] iSuper Vacuum Cleaner 3 IN 1 เครื่อง
+[LLM DEBUG]   [2] LuckyHomeMart  [14540 บ. โค้ด PAYDAY1225] IMILAB ROBOT V1 หุ่นยนต
+[LLM DEBUG]   [3] LuckyHomeMart  [2502 บ. โค้ด 7DISCOUNT25] iSuper Mite Vacuum Clea
+[LLM DEBUG]   [4] LuckyHomeMart  [ลดเหลือ 999] Deerma DX810 Vacuum Cleaner เครื่องด
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: LuckyHomeMart\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ราคาพิเศษ 4599บ.] JIMMY JV52 Vacuum Cleaner ไร้สาย ความจุแบตเตอรี่2500mah ถังเก็บฝุ่นขนาดใหญ่ -30D",\n    "shop": "LuckyHomeMart",\n    "price": {\n      "min": 12990,\n      "max": 12990,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "1 Month"\n    },\n    "short_link": "https://s.shopee.co.th/4fki2VuKUP",\n    "image_url": "https://cf.shopee.co.th'
+[TIMING] LLM: 2.08s  TOTAL: 2.34s
+[LLM] model=gemini-3.5-flash-lite  prompt=14469  output=283  total=14752  products=10
+INFO:     127.0.0.1:52668 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='QCY T7 หูฟังบลูทูธ ไร้สาย True Wireless 5.0 ขอรายละเอียดสินค'
+[TIMING] fetch_products: 0.29s  (retrieval='QCY T7 หูฟังบลูทูธ ไร้สาย True Wireless 5.0 ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='QCY T7 หูฟังบลูทูธ ไร้สาย True Wireless 5.0 ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] KingGadgets  [ทักแชทรับโค้ด] QCY T7 หูฟังบลูทูธ ไร้สาย True Wir
+[LLM DEBUG]   [1] KingGadgets  [ทักแชทรับโค้ด] 1MORE ComfoBuds Pro ตัดเสียงรบกวน 
+[LLM DEBUG]   [2] KingGadgets  [ราคาพิเศษ 1699บ.] QCY HT01 หูฟังไร้สาย True wirel
+[LLM DEBUG]   [3] KingGadgets  [เหลือ 1311 บ. โค้ด HADEAL2D] ศูนย์ไทย SoundPeats 
+[LLM DEBUG]   [4] KingGadgets  [เหลือ 1311 บ. โค้ด HADEAL2D] ศูนย์ไทย SoundPeats 
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ทักแชทรับโค้ด] QCY T7 หูฟังบลูทูธ ไร้สาย True Wireless 5.0 ไดร์เวอร์ลูกใหญ่ 13 มม.-30D",\n    "shop": "KingGadgets",\n    "price": {\n      "min": 899,\n      "max": 899,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "1 Month"\n    },\n    "short_link": "https://s.shopee.co.th/8UxQXGLnfN",\n    "image_url": "https://cf.shopee.co.th/file/cbe3a7a56d2327'
+[TIMING] LLM: 2.39s  TOTAL: 2.77s
+[LLM] model=gemini-3.5-flash-lite  prompt=13703  output=414  total=14117  products=10
+INFO:     127.0.0.1:52685 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.05s  query='XiaoVV Pro 1080P กล้องวงจรปิด มุมมองกว้าง กันน้ำ ขอรายละเอีย'
+[TIMING] fetch_products: 0.11s  (retrieval='XiaoVV Pro 1080P กล้องวงจรปิด มุมมองกว้าง กันน้ำ ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='XiaoVV Pro 1080P กล้องวงจรปิด มุมมองกว้าง กันน้ำ ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] KingGadgets  [รับ 90 Coins โค้ด SPCCBAIP3] XiaoVV Pro 1080P กล้
+[LLM DEBUG]   [1] KingGadgets  [ทักแชทรับโค้ด] Xiaovv P1 PTZ กล้องวงจรปิด (Chines
+[LLM DEBUG]   [2] KingGadgets  ศูนย์ไทย [เหลือ 2470 บ. โค้ด HADEAL2D] IMILAB EC2 
+[LLM DEBUG]   [3] KingGadgets  [ทักแชทรับโค้ด] Xiaomi Mi Outdoor Camera กล้องวงจร
+[LLM DEBUG]   [4] KingGadgets  ศูนย์ไทย [รับ 99 Coins โค้ด SPCCB28VX] Xiaomi IMIL
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[รับ 90 Coins โค้ด SPCCBAIP3] XiaoVV Pro 1080P กล้องวงจรปิด มุมมองกว้าง กันน้ำ มีอินฟาเรด-30D",\n    "shop": "KingGadgets",\n    "price": {\n      "min": 1399,\n      "max": 1799,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "1 Month"\n    },\n    "short_link": "https://s.shopee.co.th/4L7rZdB0Qz",\n    "image_url": "https://cf.shopee.co.th/file/e71811'
+[TIMING] LLM: 2.44s  TOTAL: 2.61s
+[LLM] model=gemini-3.5-flash-lite  prompt=14448  output=458  total=14906  products=10
+INFO:     127.0.0.1:52703 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='Liushu Sterilization Toothbrush Holder ที่แขวนแปรงสีฟัน ขอรา'
+[TIMING] fetch_products: 0.13s  (retrieval='Liushu Sterilization Toothbrush Holder ที่แขวนแปรงสีฟัน ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Liushu Sterilization Toothbrush Holder ที่แขวนแปรงสีฟัน ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=2
+[LLM DEBUG]   [0] KingGadgets  [ราคาพิเศษ 2190บ.] Xiaoda Multifunctional Steriliz
+[LLM DEBUG]   [1] KingGadgets  [ลดเหลือ 659] Liushu Sterilization Toothbrush Hold
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 2\n\n[\n  {\n    "name": "[ราคาพิเศษ 2190บ.] Xiaoda Multifunctional Sterilization Dryer ราวตากผ้า แขวนแปรงสีฟัน ฆ่าเชื้อโรค -30D",\n    "shop": "KingGadgets",\n    "price": {\n      "min": 2999,\n      "max": 2999,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "1 Month"\n    },\n    "short_link": "https://s.shopee.co.th/6fVmOpPvoV",\n    "image_url": "https://cf.shopee.co.th/fil'
+[TIMING] LLM: 2.37s  TOTAL: 2.59s
+[LLM] model=gemini-3.5-flash-lite  prompt=4342  output=490  total=4832  products=2
+INFO:     127.0.0.1:52719 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='CUKTECH HA716T / A18T หัวชาร์จ 20W - 30W / สายชาร์จ Type C ข'
+[TIMING] fetch_products: 1.82s  (retrieval='CUKTECH HA716T / A18T หัวชาร์จ 20W - 30W / สายชาร์จ Type C ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='CUKTECH HA716T / A18T หัวชาร์จ 20W - 30W / สายชาร์จ Type C ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] ZMIThailand  CUKTECH HA716T / A18T หัวชาร์จ 20W - 30W / สายชาร์
+[LLM DEBUG]   [1] ZMIThailand  CUKTECH HA716T / A18T / AL870 / CL315P หัวชาร์จ / 
+[LLM DEBUG]   [2] ZMIThailand  CUKTECH HA716T / A18T หัวชาร์จสำหรับ iPhone 20W / 
+[LLM DEBUG]   [3] ZMIThailand  CUKTECH HA716T / CL315P หัวชาร์จ / สายชาร์จ สำหรับ
+[LLM DEBUG]   [4] ZMIThailand  CUKTECH HA716T / AL870 หัวชาร์จ / สายชาร์จเร็ว สำห
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: ZMIThailand\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "CUKTECH HA716T / A18T หัวชาร์จ 20W - 30W / สายชาร์จ Type C / Lightning MFI iPhone 11-17 PD -2Y",\n    "shop": "ZMIThailand",\n    "price": {\n      "min": 259,\n      "max": 859,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "24 Months"\n    },\n    "short_link": "https://s.shopee.co.th/4L7rXPds57",\n    "image_url": "https://cf.shopee.co.th/file/th-11'
+[TIMING] LLM: 3.29s  TOTAL: 5.19s
+[LLM] model=gemini-3.5-flash-lite  prompt=25539  output=701  total=26240  products=10
+INFO:     127.0.0.1:52736 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='Deerma DX900 เครื่องดูดฝุ่นไส้กรอง HEPA แรงดูด 15,000 Pa ขอร'
+[TIMING] fetch_products: 0.19s  (retrieval='Deerma DX900 เครื่องดูดฝุ่นไส้กรอง HEPA แรงดูด 15,000 Pa ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Deerma DX900 เครื่องดูดฝุ่นไส้กรอง HEPA แรงดูด 15,000 Pa ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] LuckyHomeMart  [ราคาพิเศษ 859บ.] Deerma DX900 เครื่องดูดฝุ่นไส้กร
+[LLM DEBUG]   [1] LuckyHomeMart  [2345 บ. โค้ด FBSJUNEDD2702] Deerma VC01 MAX เครื่
+[LLM DEBUG]   [2] LuckyHomeMart  [ราคาพิเศษ 1999บ.] Deerma VC01 Vacuum Cleaner เครื
+[LLM DEBUG]   [3] LuckyHomeMart  ศูนย์ไทย [เหลือ 669 บ. โค้ด JUL100LIFE] Deerma CM3
+[LLM DEBUG]   [4] LuckyHomeMart  [1299 บ. โค้ด DD101225] HUTT Muggle MM6  เครื่องดู
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: LuckyHomeMart\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ราคาพิเศษ 859บ.] Deerma DX900 เครื่องดูดฝุ่นไส้กรอง HEPA แรงดูด 15,000 Pa น้ำหนักเบา ศูนย์ไทย  -1Y",\n    "shop": "LuckyHomeMart",\n    "price": {\n      "min": 2999,\n      "max": 2999,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "12 Months"\n    },\n    "short_link": "https://s.shopee.co.th/3AvuEpt1S0",\n    "image_url": "https://cf.shopee.co.th'
+[TIMING] LLM: 3.77s  TOTAL: 4.07s
+[LLM] model=gemini-3.5-flash-lite  prompt=14478  output=887  total=15365  products=10
+INFO:     127.0.0.1:52765 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='Wellskins WX-ZF105 หวีไฟฟ้า 3 in 1 ยืดผม ม้วนผม เป่าแห้ง ขอร'
+[TIMING] fetch_products: 0.18s  (retrieval='Wellskins WX-ZF105 หวีไฟฟ้า 3 in 1 ยืดผม ม้วนผม เป่าแห้ง ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Wellskins WX-ZF105 หวีไฟฟ้า 3 in 1 ยืดผม ม้วนผม เป่าแห้ง ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=5
+[LLM DEBUG]   [0] SuperITMall  [ราคาพิเศษ 1290บ.] Wellskins WX-ZF105 หวีไฟฟ้า 3 i
+[LLM DEBUG]   [1] SuperITMall  [ทักแชทรับโค้ด] Wellskins WX-TM01 2 in 1 กันคิ้ว โ
+[LLM DEBUG]   [2] SuperITMall  [ทักแชทรับโค้ด] Wellskins WX-FT09 หวีไฟฟ้า ประจุไฟ
+[LLM DEBUG]   [3] SuperITMall  [ทักแชทรับโค้ด] Wellskins WX-JM150 เครื่องขัดหน้า 
+[LLM DEBUG]   [4] SuperITMall  [เหลือ 815 บ. โค้ด 15OFFNWJUN] Wellskins WX-BJ819 
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: SuperITMall\nจำนวนสินค้าใน context: 5\n\n[\n  {\n    "name": "[ราคาพิเศษ 1290บ.] Wellskins WX-ZF105 หวีไฟฟ้า 3 in 1 ยืดผม ม้วนผม เป่าแห้ง ร้อนไว ฟังก์ชั่นครบ-30D",\n    "shop": "SuperITMall",\n    "price": {\n      "min": 1690,\n      "max": 1690,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/50NYHmgpvm",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-23010-tcy6pdsefdmv29",'
+[TIMING] LLM: 3.38s  TOTAL: 3.65s
+[LLM] model=gemini-3.5-flash-lite  prompt=8011  output=743  total=8754  products=5
+INFO:     127.0.0.1:52787 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='YUELI Anion Hair Massage Brush พกพาง่าย ขอรายละเอียดสินค้าหน'
+[TIMING] fetch_products: 0.05s  (retrieval='YUELI Anion Hair Massage Brush พกพาง่าย ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='YUELI Anion Hair Massage Brush พกพาง่าย ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=8
+[LLM DEBUG]   [0] YoupinOfficialS  [ลดเหลือ 1049] Yesoul MG11 หัว 4 แบบ ปรับได้ 3 ระด
+[LLM DEBUG]   [1] YoupinOfficialS  [ลดเหลือ 2392] Leravan LF-Y001 เครื่องนวดตา อัจฉริ
+[LLM DEBUG]   [2] YoupinOfficialS  [ลดเหลือ 1492] Leravan LF-ME001 เครื่องนวดรอบดวงตา
+[LLM DEBUG]   [3] YoupinOfficialS  [ลดเหลือ 1192] Leravan Leband LBN001 หมอนรองคออเนก
+[LLM DEBUG]   [4] YoupinOfficialS  [ลดเหลือ 1492] LERAVAN RSW-326 เครื่องนวดสูญญากาศ 
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: YoupinOfficialStore\nจำนวนสินค้าใน context: 8\n\n[\n  {\n    "name": "[ลดเหลือ 1049] Yesoul MG11 หัว 4 แบบ ปรับได้ 3 ระดับ ปืนนวดกล้ามเนื้อ เครื่องนวดคลายกล้ามเนื้อ แบบพกพา -30D",\n    "shop": "YoupinOfficialStore",\n    "price": {\n      "min": 1399,\n      "max": 1399,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/5VTmBz48Cr",\n    "image_url": "https://cf.shopee.co.th/file/sg-1113420'
+[TIMING] LLM: 1.68s  TOTAL: 1.83s
+[LLM] model=gemini-3.5-flash-lite  prompt=11276  output=78  total=11354  products=8
+INFO:     127.0.0.1:52806 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='Deerma F327 Air Humidifier เครื่องเพิ่มความชื้น ในอากาศ 5 ขอ'
+[TIMING] fetch_products: 0.17s  (retrieval='Deerma F327 Air Humidifier เครื่องเพิ่มความชื้น ในอากาศ 5 ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Deerma F327 Air Humidifier เครื่องเพิ่มความชื้น ในอากาศ 5 ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] LuckyHomeMart  [ราคาพิเศษ 999บ.] Deerma EX919 เครื่องดูดฝุ่น ดูดท
+[LLM DEBUG]   [1] LuckyHomeMart  [ราคาพิเศษ 2850บ.] Deerma VC25Plus Wireless Vacuum
+[LLM DEBUG]   [2] LuckyHomeMart  [เหลือ 1208 บ. โค้ด 450DISCOUNT] Deerma DX300 Vacu
+[LLM DEBUG]   [3] LuckyHomeMart  [ราคาพิเศษ 2290บ.] Deerma VC811 handheld wireless 
+[LLM DEBUG]   [4] LuckyHomeMart  [899 บ. โค้ด 10DISCOUNT425] Deerma CM818 เครื่องดู
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: LuckyHomeMart\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ราคาพิเศษ 999บ.] Deerma EX919 เครื่องดูดฝุ่น ดูดที่นอน ฝุ่นในบ้าน -1Y",\n    "shop": "LuckyHomeMart",\n    "price": {\n      "min": 1990,\n      "max": 1990,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/10rPfaDTjo",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-7rced-ls994t7v0b5h05",\n    "has_promotion": tr'
+[TIMING] LLM: 1.45s  TOTAL: 1.71s
+[LLM] model=gemini-3.5-flash-lite  prompt=15403  output=46  total=15449  products=10
+INFO:     127.0.0.1:52821 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='Beheart Negative ion Hair Dryer ไดร์เป่าผม 1200W ปรับได้ 3 ข'
+[TIMING] fetch_products: 0.17s  (retrieval='Beheart Negative ion Hair Dryer ไดร์เป่าผม 1200W ปรับได้ 3 ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Beheart Negative ion Hair Dryer ไดร์เป่าผม 1200W ปรับได้ 3 ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] YoupinOfficialS  [ลดเหลือ 194] ZTEC ZL311 / ZL312 สายชาร์จ USB-C to
+[LLM DEBUG]   [1] YoupinOfficialS  [ลดเหลือ 116] ZTEC Eva Bag กระเป๋าใส่อุปกรณ์ เก็บห
+[LLM DEBUG]   [2] YoupinOfficialS  [ลดเหลือ 349] ZTEC ZC621 / ZC622 สายชาร์จไนลอนถัก 
+[LLM DEBUG]   [3] YoupinOfficialS  [ลดเหลือ 244] ZTEC ZC611 สายชาร์จ USB-C to USB-C U
+[LLM DEBUG]   [4] YoupinOfficialS  [ลดเหลือ 179] ZTEC ZC321S / ZC322S สายชาร์จเร็ว US
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: YoupinOfficialStore\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ลดเหลือ 194] ZTEC ZL311 / ZL312 สายชาร์จ USB-C to LN 3A 30W รองรับ PD และเชื่อมต่อ CarPlay -2Y",\n    "shop": "YoupinOfficialStore",\n    "price": {\n      "min": 259,\n      "max": 299,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/AKP5q78aKj",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-825as-mrtwl'
+[TIMING] LLM: 1.54s  TOTAL: 1.80s
+[LLM] model=gemini-3.5-flash-lite  prompt=15662  output=90  total=15752  products=10
+INFO:     127.0.0.1:52835 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='Jipin Desktop Fan พัดลมพกพา แบบตั้งโต๊ะ ไร้สาย รุ่นใหม่  7 ข'
+[TIMING] fetch_products: 0.07s  (retrieval='Jipin Desktop Fan พัดลมพกพา แบบตั้งโต๊ะ ไร้สาย รุ่นใหม่  7 ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Jipin Desktop Fan พัดลมพกพา แบบตั้งโต๊ะ ไร้สาย รุ่นใหม่  7 ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] LuckyHomeMart  [1529 บ. โค้ด FBSMAY10DD22] Xiaomi Mijia Smart Sta
+[LLM DEBUG]   [1] LuckyHomeMart  [ราคาพิเศษ 1999บ.] Xiaomi Mi Smart Standing Fan 2 
+[LLM DEBUG]   [2] LuckyHomeMart  [ราคาพิเศษ 300บ.] Tinymu JZF01 พัดลมตั้งโต๊ะ พัดลม
+[LLM DEBUG]   [3] LuckyHomeMart  [ราคาพิเศษ 299บ.] Zaiwan ZW2811 Fan พัดลม โคมไฟ 2i
+[LLM DEBUG]   [4] LuckyHomeMart  [449 บ. โค้ด FHBBAU10210] Nesugar 3 in 1 Desktop F
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: LuckyHomeMart\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[1529 บ. โค้ด FBSMAY10DD22] Xiaomi Mijia Smart Standing Fan 2 Lite พัดลมตั้งพื้น พัดลมตั้งโต๊ะ -30D",\n    "shop": "LuckyHomeMart",\n    "price": {\n      "min": 4999,\n      "max": 4999,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/LbirgXG1E",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-7qvg0-lh30yvmd7g24'
+[TIMING] LLM: 1.39s  TOTAL: 1.55s
+[LLM] model=gemini-3.5-flash-lite  prompt=14265  output=35  total=14300  products=10
+INFO:     127.0.0.1:52849 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.09s  query='(รับประกันศูนย์ไทย) ลำโพง Xiaomi Sound Party ลำโพง ขอรายละเอ'
+[TIMING] fetch_products: 0.23s  (retrieval='(รับประกันศูนย์ไทย) ลำโพง Xiaomi Sound Party ลำโพง ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='(รับประกันศูนย์ไทย) ลำโพง Xiaomi Sound Party ลำโพง ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=8
+[LLM DEBUG]   [0] XiaomiEcoSystem  [NEW] Xiaomi Sound Party ลำโพง Bluetooth แต่งเสียง
+[LLM DEBUG]   [1] XiaomiEcoSystem  [ราคาพิเศษ 3199บ.] Xiaomi TV Speaker Soundbar Thea
+[LLM DEBUG]   [2] XiaomiEcoSystem  (รับประกันศูนย์ไทย) ลำโพง Xiaomi Sound Party ลำโพง
+[LLM DEBUG]   [3] XiaomiEcoSystem  (รับประกันศูนย์ไทย) Xiaomi Sound Pocket 5W ลำโพงบล
+[LLM DEBUG]   [4] XiaomiEcoSystem  (รับประกันศูนย์ไทย) Xiaomi Sound Outdoor 30W ลำโพง
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: XiaomiEcoSystem\nจำนวนสินค้าใน context: 8\n⚠️ สำคัญมาก: มี 3 สินค้าที่ไม่มี description_excerpt (ระบุว่า \'ไม่มีรายละเอียดสินค้าเพิ่มเติม\') ห้ามเอา description_excerpt ของสินค้าอื่นมาตอบแทนสินค้าเหล่านั้นเด็ดขาด แม้จะเป็นสินค้ารุ่นเดียวกันจากร้านอื่นก็ตาม ถ้าลูกค้าถามรายละเอียดของสินค้าที่ไม่มี desc ให้บอก \'ขออภัยค่ะ สินค้ารุ่นนี้ไม่มีรายละเอียดเพิ่มเติม ทักแอดมินได้เลยนะคะ\'\n\n[\n  {\n    "name": "[NEW] Xiaomi Sound Party ลำโพง '
+[TIMING] LLM: 3.24s  TOTAL: 3.62s
+[LLM] model=gemini-3.5-flash-lite  prompt=10426  output=710  total=11136  products=8
+INFO:     127.0.0.1:52865 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='Xiaomi Electric Sticky Shoe เครื่องหุ้มรองเท้าอัตโนมัติ ขอรา'
+[TIMING] fetch_products: 0.31s  (retrieval='Xiaomi Electric Sticky Shoe เครื่องหุ้มรองเท้าอัตโนมัติ ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Xiaomi Electric Sticky Shoe เครื่องหุ้มรองเท้าอัตโนมัติ ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] LuckyHomeMart  [ทักแชทรับโค้ด] Xiaomi Mijia Self-Cleaning Robot P
+[LLM DEBUG]   [1] LuckyHomeMart  [ทักแชทรับโค้ด] Xiaomi Vacuum Cleaner G11 เครื่องด
+[LLM DEBUG]   [2] LuckyHomeMart  [ทักแชทรับโค้ด] Xiaomi Mijia dust collecting sweep
+[LLM DEBUG]   [3] LuckyHomeMart  [เหลือ 6540 บ. โค้ด 715DD450NW] Xiaomi Robot Vacuu
+[LLM DEBUG]   [4] LuckyHomeMart  [รับ 200 Coins โค้ด ADVC212] พร้อมส่ง Deerma VC20 
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: LuckyHomeMart\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ทักแชทรับโค้ด] Xiaomi Mijia Self-Cleaning Robot Pro หุ่นยนต์ดูดฝุ่น ซักแห้งผ้าม็อบ -30D",\n    "shop": "LuckyHomeMart",\n    "price": {\n      "min": 29990,\n      "max": 29990,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/1BAprAvpgR",\n    "image_url": "https://cf.shopee.co.th/file/b2182a35ad2aae458169d1f354e0ecd7",\n   '
+[TIMING] LLM: 1.27s  TOTAL: 1.80s
+[LLM] model=gemini-3.5-flash-lite  prompt=14715  output=25  total=14740  products=10
+INFO:     127.0.0.1:52886 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.09s  query='ศูนย์ไทย  ศูนย์ไทย 70mai PRO (Global Ver.) 2K ใช้งานผ่านแอพ '
+[TIMING] fetch_products: 0.16s  (retrieval='ศูนย์ไทย  ศูนย์ไทย 70mai PRO (Global Ver.) 2K ใช้งานผ่านแอพ ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='ศูนย์ไทย  ศูนย์ไทย 70mai PRO (Global Ver.) 2K ใช้งานผ่านแอพ ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] KingGadgets  [รับ 329 Coins โค้ด SPCCBLOAS] 70mai A800 4K กล้อง
+[LLM DEBUG]   [1] KingGadgets  ศูนย์ไทย [เหลือ 1840 บ. โค้ด POFLWQ150] ศูนย์ไทย 7
+[LLM DEBUG]   [2] KingGadgets  ศูนย์ไทย [ทักแชทรับโค้ด] พร้อมส่ง 70mai Lite (Glob
+[LLM DEBUG]   [3] KingGadgets  ศูนย์ไทย [รับ 149 Coins โค้ด SPCCBLOAS] 70mai Car 
+[LLM DEBUG]   [4] KingGadgets  ศูนย์ไทย [ทักแชทรับโค้ด] 70mai Qi Wireless แท่นชาร
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 10\n⚠️ สำคัญมาก: มี 4 สินค้าที่ไม่มี description_excerpt (ระบุว่า \'ไม่มีรายละเอียดสินค้าเพิ่มเติม\') ห้ามเอา description_excerpt ของสินค้าอื่นมาตอบแทนสินค้าเหล่านั้นเด็ดขาด แม้จะเป็นสินค้ารุ่นเดียวกันจากร้านอื่นก็ตาม ถ้าลูกค้าถามรายละเอียดของสินค้าที่ไม่มี desc ให้บอก \'ขออภัยค่ะ สินค้ารุ่นนี้ไม่มีรายละเอียดเพิ่มเติม ทักแอดมินได้เลยนะคะ\'\n\n[\n  {\n    "name": "[รับ 329 Coins โค้ด SPCCBLOAS] 70m'
+[TIMING] LLM: 3.21s  TOTAL: 3.65s
+[LLM] model=gemini-3.5-flash-lite  prompt=12539  output=708  total=13247  products=10
+INFO:     127.0.0.1:52900 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='Weiyuan F1 Smart Handheld Bladeless Fan พัดลมไร้ใบพัด ขอรายล'
+[TIMING] fetch_products: 0.11s  (retrieval='Weiyuan F1 Smart Handheld Bladeless Fan พัดลมไร้ใบพัด ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Weiyuan F1 Smart Handheld Bladeless Fan พัดลมไร้ใบพัด ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] KingGadgets  [ทักแชทรับโค้ด] Weiyuan F1 Smart Handheld Bladeles
+[LLM DEBUG]   [1] KingGadgets  [1529 บ. โค้ด FBSMAY10DD22] Xiaomi Mijia Smart Sta
+[LLM DEBUG]   [2] KingGadgets  [ราคาพิเศษ 999บ.] FIVE Circulation Fan พัดลมตั้งโต
+[LLM DEBUG]   [3] KingGadgets  [ลดเหลือ 439] Zaiwan BP35S พัดลมพกพา ตัวฐานคลิปหนี
+[LLM DEBUG]   [4] KingGadgets  [ราคาพิเศษ 299บ.] Tinymu JZF01 พัดลมตั้งโต๊ะ พัดลม
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ทักแชทรับโค้ด] Weiyuan F1 Smart Handheld Bladeless Fan พัดลมไร้ใบพัด แบบพกพา -30D",\n    "shop": "KingGadgets",\n    "price": {\n      "min": 999,\n      "max": 999,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "1 Month"\n    },\n    "short_link": "https://s.shopee.co.th/9f9NyVsbcx",\n    "image_url": "https://cf.shopee.co.th/file/fc12c93f785b20f6756'
+[TIMING] LLM: 2.78s  TOTAL: 2.98s
+[LLM] model=gemini-3.5-flash-lite  prompt=13157  output=483  total=13640  products=10
+INFO:     127.0.0.1:52923 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.06s  query='Yeelight Wireless Charger แท่นชาร์จมือถือจ่ายไฟ 10W ขอรายละเ'
+[TIMING] fetch_products: 0.15s  (retrieval='Yeelight Wireless Charger แท่นชาร์จมือถือจ่ายไฟ 10W ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Yeelight Wireless Charger แท่นชาร์จมือถือจ่ายไฟ 10W ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] KingGadgets  [ราคาพิเศษ 5699บ.] Xiaomi Redmi 10 2022 ศูนย์ไทย (
+[LLM DEBUG]   [1] KingGadgets  [30990 บ. โค้ด 10DD725] Xiaomi 12 Pro (12/256GB) S
+[LLM DEBUG]   [2] KingGadgets  [23990 บ. โค้ด 10DD725] Xiaomi 12 (8/256GB) Smartp
+[LLM DEBUG]   [3] KingGadgets  [4370 บ. โค้ด 7DD415] Xiaomi Redmi 10C (4/64GB - 4
+[LLM DEBUG]   [4] KingGadgets  [9449 บ. โค้ด 1200DD1215] Xiaomi Redmi Note 11 Pro
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ราคาพิเศษ 5699บ.] Xiaomi Redmi 10 2022 ศูนย์ไทย (4/128GB) สมาร์ทโฟน จอ 6.5 นิ้ว 90Hz กล้อง 50MP -15M",\n    "shop": "KingGadgets",\n    "price": {\n      "min": 9999,\n      "max": 9999,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/2LMnF6WAwE",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-7rbl6-llpr8flcfk2h3'
+[TIMING] LLM: 2.12s  TOTAL: 2.34s
+[LLM] model=gemini-3.5-flash-lite  prompt=16583  output=260  total=16843  products=10
+INFO:     127.0.0.1:52941 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='Jimmy VC-S101W เครื่องดูดฝุ่น 2in1 (ดูด-ถู) พลังไซโคลน - 30D'
+[TIMING] fetch_products: 0.15s  (retrieval='Jimmy VC-S101W เครื่องดูดฝุ่น 2in1 (ดูด-ถู) พลังไซโคลน - 30D ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Jimmy VC-S101W เครื่องดูดฝุ่น 2in1 (ดูด-ถู) พลังไซโคลน - 30D ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] KingGadgets  [899 บ. โค้ด DD101225] Jimmy VC-S101W เครื่องดูดฝุ
+[LLM DEBUG]   [1] KingGadgets  [ลดเหลือ 999] iSuper Vacuum Cleaner 3 IN 1 เครื่อง
+[LLM DEBUG]   [2] KingGadgets  [ทักแชทรับโค้ด] Xiaomi Robot Vacuum X10+ หุ่นยนต์ด
+[LLM DEBUG]   [3] KingGadgets  [14540 บ. โค้ด PAYDAY1225] IMILAB ROBOT V1 หุ่นยนต
+[LLM DEBUG]   [4] KingGadgets  [2502 บ. โค้ด 7DISCOUNT25] iSuper Mite Vacuum Clea
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[899 บ. โค้ด DD101225] Jimmy VC-S101W เครื่องดูดฝุ่น 2in1 (ดูด-ถู) พลังไซโคลน - 30D",\n    "shop": "KingGadgets",\n    "price": {\n      "min": 2999,\n      "max": 2999,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "1 Month"\n    },\n    "short_link": "https://s.shopee.co.th/7AS2wyaRqX",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-2212'
+[TIMING] LLM: 3.02s  TOTAL: 3.27s
+[LLM] model=gemini-3.5-flash-lite  prompt=14786  output=570  total=15356  products=10
+INFO:     127.0.0.1:52956 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='70mai hardware kit ชุดฮาร์ดแวร์เฝ้าระวังที่จอดรถ 24 ชม. -30D'
+[TIMING] fetch_products: 0.07s  (retrieval='70mai hardware kit ชุดฮาร์ดแวร์เฝ้าระวังที่จอดรถ 24 ชม. -30D ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='70mai hardware kit ชุดฮาร์ดแวร์เฝ้าระวังที่จอดรถ 24 ชม. -30D ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=4
+[LLM DEBUG]   [0] SuperITMall  [รับ 49 Coins โค้ด CCB2329AUGNW] 70mai hardware ki
+[LLM DEBUG]   [1] SuperITMall  [รับ 70 Coins โค้ด CCB2329AUGNW] 70mai Air Compres
+[LLM DEBUG]   [2] SuperITMall  ศูนย์ไทย [รับ 149 Coins โค้ด SPCCBLOAS] 70mai Car 
+[LLM DEBUG]   [3] SuperITMall  ศูนย์ไทย [รับ 76 Coins โค้ด CCB1622AUGNW] 70mai Ai
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: SuperITMall\nจำนวนสินค้าใน context: 4\n\n[\n  {\n    "name": "[รับ 49 Coins โค้ด CCB2329AUGNW] 70mai hardware kit ชุดฮาร์ดแวร์เฝ้าระวังที่จอดรถ 24 ชม. -30D",\n    "shop": "SuperITMall",\n    "price": {\n      "min": 999,\n      "max": 999,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "1 Month"\n    },\n    "short_link": "https://s.shopee.co.th/6VCM5I4fMm",\n    "image_url": "https://cf.shopee.co.th/file/310a2bf0d'
+[TIMING] LLM: 2.46s  TOTAL: 2.63s
+[LLM] model=gemini-3.5-flash-lite  prompt=7337  output=492  total=7829  products=4
+INFO:     127.0.0.1:52981 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='Mojietu Lightning Air pump ปั้มลมไร้สาย ปั้มเร็ว ชาร์จไว ขอร'
+[TIMING] fetch_products: 0.06s  (retrieval='Mojietu Lightning Air pump ปั้มลมไร้สาย ปั้มเร็ว ชาร์จไว ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Mojietu Lightning Air pump ปั้มลมไร้สาย ปั้มเร็ว ชาร์จไว ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=6
+[LLM DEBUG]   [0] LuckyHomeMart  [เหลือ 1099 บ. โค้ด PQWEGS100] Mojietu Lightning A
+[LLM DEBUG]   [1] LuckyHomeMart  [เหลือ 659 บ. โค้ด AUG100LIFE] ศูนย์ไทย 70mai Air 
+[LLM DEBUG]   [2] LuckyHomeMart  ศูนย์ไทย [ราคาพิเศษ 0บ.] 70mai Mini Dash Cam (Glob
+[LLM DEBUG]   [3] LuckyHomeMart  ศูนย์ไทย [ทักแชทรับโค้ด] ศูนย์ไทย 70mai Car Purifi
+[LLM DEBUG]   [4] LuckyHomeMart  [ทักแชทรับโค้ด] 70mai Lite (Global Ver.)1080P เซนเ
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: LuckyHomeMart\nจำนวนสินค้าใน context: 6\n\n[\n  {\n    "name": "[เหลือ 1099 บ. โค้ด PQWEGS100] Mojietu Lightning Air pump ปั้มลมไร้สาย ปั้มเร็ว ชาร์จไว มีไฟส่องสว่าง ไฟ SOS-30D",\n    "shop": "LuckyHomeMart",\n    "price": {\n      "min": 1999,\n      "max": 1999,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/1qQWfGn9hX",\n    "image_url": "https://cf.shopee.co.th/file/78ee141f2b7770bb9'
+[TIMING] LLM: 2.93s  TOTAL: 3.09s
+[LLM] model=gemini-3.5-flash-lite  prompt=8762  output=577  total=9339  products=6
+INFO:     127.0.0.1:52999 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='Deerma DEM-ZC10 เครื่องทำอาหารเช้า 3 in 1 ปิ้งขนมปัง ทอด ขอร'
+[TIMING] fetch_products: 0.42s  (retrieval='Deerma DEM-ZC10 เครื่องทำอาหารเช้า 3 in 1 ปิ้งขนมปัง ทอด ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Deerma DEM-ZC10 เครื่องทำอาหารเช้า 3 in 1 ปิ้งขนมปัง ทอด ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=2
+[LLM DEBUG]   [0] YoupinOfficialS  [ลดเหลือ 1649] Deerma DEM-ZC10 เครื่องทำอาหารเช้า 
+[LLM DEBUG]   [1] YoupinOfficialS  [ลดเหลือ 1874] Bear 3 in 1 Breakfast station DSL-A
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: YoupinOfficialStore\nจำนวนสินค้าใน context: 2\n\n[\n  {\n    "name": "[ลดเหลือ 1649] Deerma DEM-ZC10 เครื่องทำอาหารเช้า 3 in 1 ปิ้งขนมปัง ทอด นึ่ง จบในตัว ศูนย์ไทย -30D",\n    "shop": "YoupinOfficialStore",\n    "price": {\n      "min": 2199,\n      "max": 2199,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/2B3MywnXWg",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-825bb-m'
+[TIMING] LLM: 2.79s  TOTAL: 3.30s
+[LLM] model=gemini-3.5-flash-lite  prompt=4550  output=622  total=5172  products=2
+INFO:     127.0.0.1:53017 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='ลำโพงคอมพิวเตอร์ BINNIFA Desktop Bar Computer Bluetooth ขอรา'
+[TIMING] fetch_products: 0.14s  (retrieval='ลำโพงคอมพิวเตอร์ BINNIFA Desktop Bar Computer Bluetooth ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='ลำโพงคอมพิวเตอร์ BINNIFA Desktop Bar Computer Bluetooth ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] SuperITMall  [ราคาพิเศษ 799บ.] ลำโพงคอมพิวเตอร์ BINNIFA Desktop
+[LLM DEBUG]   [1] SuperITMall  [รับ 119 Coins โค้ด CCB18736] ศูนย์ไทย Xiaomi Mi P
+[LLM DEBUG]   [2] SuperITMall  [ลดเหลือ 699] ลำโพง Bluetooth wireless คาราโอเกะรุ
+[LLM DEBUG]   [3] SuperITMall  [ราคาพิเศษ 2599บ.] Binnifa Live 1T ลำโพง ซาวด์บาร์
+[LLM DEBUG]   [4] SuperITMall  [ราคาพิเศษ 2190บ.] BINNIFA Play 6D ซาวด์บาร์ บลูทู
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: SuperITMall\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ราคาพิเศษ 799บ.] ลำโพงคอมพิวเตอร์ BINNIFA Desktop Bar Computer Bluetooth Speaker รุ่น Play 1D -30D",\n    "shop": "SuperITMall",\n    "price": {\n      "min": 1599,\n      "max": 1599,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/BIIWqmySD",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-7rcdo-lrd3r34dr5qnc6",'
+[TIMING] LLM: 4.02s  TOTAL: 4.24s
+[LLM] model=gemini-3.5-flash-lite  prompt=11805  output=892  total=12697  products=10
+INFO:     127.0.0.1:53037 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='Fiil T1 XS หูฟังไร้สาย เสียงเบสกระชับ บาลานซ์เสียงดี ขอรายละ'
+[TIMING] fetch_products: 0.17s  (retrieval='Fiil T1 XS หูฟังไร้สาย เสียงเบสกระชับ บาลานซ์เสียงดี ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Fiil T1 XS หูฟังไร้สาย เสียงเบสกระชับ บาลานซ์เสียงดี ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] SuperITMall  [ราคาพิเศษ 1299บ.] Fiil T1 XS หูฟังไร้สาย เสียงเบส
+[LLM DEBUG]   [1] SuperITMall  [ราคาพิเศษ 459บ.] QCY T12 หูฟังบลูทูธไร้สาย Blueto
+[LLM DEBUG]   [2] SuperITMall  [เหลือ 979 บ. โค้ด 5WJBER2L] Fiil T1 Lite หูฟังไร้
+[LLM DEBUG]   [3] SuperITMall  [449 บ. โค้ด 442DD100] IMILAB IMIKI T11 เสียงดี ได
+[LLM DEBUG]   [4] SuperITMall  [เหลือ 373 บ. โค้ด GADGET15] ศูนย์ไทย iSuper T5 หู
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: SuperITMall\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ราคาพิเศษ 1299บ.] Fiil T1 XS หูฟังไร้สาย เสียงเบสกระชับ บาลานซ์เสียงดี ไมค์คู่ตัดเสียง แบตอึด 24ชม. -30D",\n    "shop": "SuperITMall",\n    "price": {\n      "min": 2490,\n      "max": 2490,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "1 Month"\n    },\n    "short_link": "https://s.shopee.co.th/50NYGEt4z3",\n    "image_url": "https://cf.shopee.co.th'
+[TIMING] LLM: 2.54s  TOTAL: 2.80s
+[LLM] model=gemini-3.5-flash-lite  prompt=13857  output=440  total=14297  products=10
+INFO:     127.0.0.1:53056 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.09s  query='IMILAB EC4 (GB V.) กล้องวงจรปิดไร้สาย คมชัด 2.5K 4MP ขอรายละ'
+[TIMING] fetch_products: 0.89s  (retrieval='IMILAB EC4 (GB V.) กล้องวงจรปิดไร้สาย คมชัด 2.5K 4MP ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='IMILAB EC4 (GB V.) กล้องวงจรปิดไร้สาย คมชัด 2.5K 4MP ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] IMILabThailand  IMILAB EC4 (GB V.) กล้องวงจรปิดไร้สาย คมชัด 2.5K 4
+[LLM DEBUG]   [1] IMILabThailand  IMILAB EC4 (GB V.) กล้องวงจรปิดไร้สาย คมชัด 2.5K 4
+[LLM DEBUG]   [2] IMILabThailand  IMILAB EC4 (GB V.) กล้องวงจรปิดไร้สาย คมชัด 2.5K แ
+[LLM DEBUG]   [3] IMILabThailand  IMILAB EC4 (GB V.) กล้องวงจรปิดไร้สาย กล้องภายนอก 
+[LLM DEBUG]   [4] IMILabThailand  IMILAB EC4 (GB V.) กล้องวงจรปิด ไร้สาย คมชัด 2.5K 
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: IMILabThailand\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "IMILAB EC4 (GB V.) กล้องวงจรปิดไร้สาย คมชัด 2.5K 4MP แสดงภาพสีกลางคืน ประกันศูนย์ไทย -1Y",\n    "shop": "IMILabThailand",\n    "price": {\n      "min": 2690,\n      "max": 5499,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "12 Months",\n      "type": "Supplier Warranty"\n    },\n    "short_link": "https://s.shopee.co.th/5AgyKbX40m",\n    "image_url"'
+[TIMING] LLM: 3.20s  TOTAL: 4.21s
+[LLM] model=gemini-3.5-flash-lite  prompt=16882  output=681  total=17563  products=10
+INFO:     127.0.0.1:53079 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='OnePlus 7T (8/256GB) กล้อง 48 ล้านพิกเซล - SDM™855 Plus ขอรา'
+[TIMING] fetch_products: 0.11s  (retrieval='OnePlus 7T (8/256GB) กล้อง 48 ล้านพิกเซล - SDM™855 Plus ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='OnePlus 7T (8/256GB) กล้อง 48 ล้านพิกเซล - SDM™855 Plus ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] SuperITMall  [ลดเหลือ 4290] IMILAB Video Doorbell กล้องกริ่งประ
+[LLM DEBUG]   [1] SuperITMall  [ลดเหลือ 2999] IMILAB EC4 (GB V.) กล้องวงจรปิด Xia
+[LLM DEBUG]   [2] SuperITMall  [ลดเหลือ 759] Mijia Doorbell 2 Lite กล้องวงจรปิด พ
+[LLM DEBUG]   [3] SuperITMall  [เหลือ 2789 บ. โค้ด 24VQP5ZK] Xiaomi Mi Outdoor Ca
+[LLM DEBUG]   [4] SuperITMall  [เหลือ 2300 บ. โค้ด 3EZLTWVM] REOLINK RLC-410W กล้
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: SuperITMall\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ลดเหลือ 4290] IMILAB Video Doorbell กล้องกริ่งประตู คมชัดถึง 2.5K มุมมองกว้าง 150° แจ้งเตือนผ่านมือถือ -12M",\n    "shop": "SuperITMall",\n    "price": {\n      "min": 4290,\n      "max": 5190,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/4VRHqkYQhe",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-7repc-m1wj1f'
+[TIMING] LLM: 1.70s  TOTAL: 1.90s
+[LLM] model=gemini-3.5-flash-lite  prompt=11858  output=78  total=11936  products=10
+INFO:     127.0.0.1:53098 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.10s  query='1Plus 7T Pro McLaren (12/256GB)-1Y ขอรายละเอียดสินค้าหน่อยค่'
+[TIMING] fetch_products: 0.14s  (retrieval='1Plus 7T Pro McLaren (12/256GB)-1Y ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='1Plus 7T Pro McLaren (12/256GB)-1Y ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] SuperITMall  [ลดเหลือ 199] IMILAB หัวชาร์จ 20W สำหรับ Phone พอร
+[LLM DEBUG]   [1] SuperITMall  [ลดเหลือ 1290] Hagibis U2H USB Video Converter อะแ
+[LLM DEBUG]   [2] SuperITMall  [ลดเหลือ 699] Hagibis UHC06 วีดีโอแคปเจอร์การ์ด สต
+[LLM DEBUG]   [3] SuperITMall  [ลดเหลือ 999] Hagibis ENC02 CAT8 Ethernet Cable สา
+[LLM DEBUG]   [4] SuperITMall  [ราคาพิเศษ 199บ.] Hagibis ENC02 CAT8 Ethernet Cabl
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: SuperITMall\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ลดเหลือ 199] IMILAB หัวชาร์จ 20W สำหรับ Phone พอร์ต USB-C รองรับการใช้งานกับทุกอุปกรณ์ เทคโนโลยีการชาร์จเร็ว PD",\n    "shop": "SuperITMall",\n    "price": {\n      "min": 399,\n      "max": 399,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/7KlUHE2Ob2",\n    "image_url": "https://cf.shopee.co.th/file/th-11134207-7r98z-lv2x'
+[TIMING] LLM: 1.49s  TOTAL: 1.73s
+[LLM] model=gemini-3.5-flash-lite  prompt=13528  output=51  total=13579  products=10
+INFO:     127.0.0.1:53113 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='สายชาร์จ USB Type C Huawei Supercharge 5A ของแท้ 100% ขอรายล'
+[TIMING] fetch_products: 0.13s  (retrieval='สายชาร์จ USB Type C Huawei Supercharge 5A ของแท้ 100% ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='สายชาร์จ USB Type C Huawei Supercharge 5A ของแท้ 100% ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] KingGadgets  สายชาร์จ USB Type C Huawei Supercharge 5A ของแท้ 1
+[LLM DEBUG]   [1] KingGadgets  [ลดเหลือ 109] Mcdodo(ของแท้) สายชาร์จ สำหรับ iP, M
+[LLM DEBUG]   [2] KingGadgets  [101 บ. โค้ด 15DD1025] Eloop S7 สายชาร์จ USB-A To 
+[LLM DEBUG]   [3] KingGadgets  [ทักแชทรับโค้ด] Eloop S6 สายชาร์จ Type-C to Type-C
+[LLM DEBUG]   [4] KingGadgets  [ทักแชทรับโค้ด] ELOOP รุ่นS51/S53 สายชาร์จ Type C 
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "สายชาร์จ USB Type C Huawei Supercharge 5A ของแท้ 100%",\n    "shop": "KingGadgets",\n    "price": {\n      "min": 199,\n      "max": 299,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/AKP4jSGHq4",\n    "image_url": "https://cf.shopee.co.th/file/2071311f2b3eb05e4106c108633d37b1",\n    "has_promotion": false,\n    "is_flash_sale'
+[TIMING] LLM: 2.22s  TOTAL: 2.43s
+[LLM] model=gemini-3.5-flash-lite  prompt=14338  output=314  total=14652  products=10
+INFO:     127.0.0.1:53127 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.09s  query='P90XS นาฬิกาอัจฉริยะมีระบบ Touch screen วัดคลื่นหัวใจได้-30D'
+[TIMING] fetch_products: 0.18s  (retrieval='P90XS นาฬิกาอัจฉริยะมีระบบ Touch screen วัดคลื่นหัวใจได้-30D ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='P90XS นาฬิกาอัจฉริยะมีระบบ Touch screen วัดคลื่นหัวใจได้-30D ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] KingGadgets  P90XS นาฬิกาอัจฉริยะมีระบบ Touch screen วัดคลื่นหั
+[LLM DEBUG]   [1] KingGadgets  [ลดเหลือ 699] IMILAB W01 ศูนย์ไทย สมาร์ทวอทช์ 1.69
+[LLM DEBUG]   [2] KingGadgets  [ราคาพิเศษ 799บ.] Kepup Smart Watch นาฬิกา นาฬิกาส
+[LLM DEBUG]   [3] KingGadgets  [ลดเหลือ 6490] Xiaomi Watch S1 สมาร์ทวอทช์ 1.43 AM
+[LLM DEBUG]   [4] KingGadgets  [ราคาพิเศษ 1999บ.] Xiaomi Heyplus Watch สมาร์ทวอทช
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "P90XS นาฬิกาอัจฉริยะมีระบบ Touch screen วัดคลื่นหัวใจได้-30D",\n    "shop": "KingGadgets",\n    "price": {\n      "min": 1499,\n      "max": 1499,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/6fVmOm9PID",\n    "image_url": "https://cf.shopee.co.th/file/d4e4c953f0eaa0c87ccaa2d56cf3807c",\n    "has_promotion": false,\n    "is_f'
+[TIMING] LLM: 3.27s  TOTAL: 3.56s
+[LLM] model=gemini-3.5-flash-lite  prompt=9901  output=687  total=10588  products=10
+INFO:     127.0.0.1:53144 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.09s  query='JIMMY JV52 Modular Vacuum Cleaner เครื่องดูดฝุ่นไร้สาย-30D ข'
+[TIMING] fetch_products: 0.31s  (retrieval='JIMMY JV52 Modular Vacuum Cleaner เครื่องดูดฝุ่นไร้สาย-30D ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='JIMMY JV52 Modular Vacuum Cleaner เครื่องดูดฝุ่นไร้สาย-30D ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] SuperITMall  [ราคาพิเศษ 4599บ.] JIMMY JV52 Modular Vacuum Clean
+[LLM DEBUG]   [1] SuperITMall  [ลดเหลือ 999] iSuper Vacuum Cleaner 3 IN 1 เครื่อง
+[LLM DEBUG]   [2] SuperITMall  [ทักแชทรับโค้ด] Xiaomi Robot Vacuum X10+ หุ่นยนต์ด
+[LLM DEBUG]   [3] SuperITMall  [ราคาพิเศษ 7299บ.] Xiaomi Mijia Robot Vacuum Mop 3
+[LLM DEBUG]   [4] SuperITMall  [14540 บ. โค้ด PAYDAY1225] IMILAB ROBOT V1 หุ่นยนต
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: SuperITMall\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ราคาพิเศษ 4599บ.] JIMMY JV52 Modular Vacuum Cleaner เครื่องดูดฝุ่นไร้สาย-30D",\n    "shop": "SuperITMall",\n    "price": {\n      "min": 12999,\n      "max": 12999,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/9zmEG49X4D",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-22120-i111zb1aqdlv81",\n    "has_promotion'
+[TIMING] LLM: 1.27s  TOTAL: 1.69s
+[LLM] model=gemini-3.5-flash-lite  prompt=13915  output=25  total=13940  products=10
+INFO:     127.0.0.1:53162 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.06s  query='ZMI B508 2 in 1 ลำโพงบลูทูธ + แท่นชาร์จไร้สาย พร้อม XiaoAI ข'
+[TIMING] fetch_products: 0.06s  (retrieval='ZMI B508 2 in 1 ลำโพงบลูทูธ + แท่นชาร์จไร้สาย พร้อม XiaoAI ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='ZMI B508 2 in 1 ลำโพงบลูทูธ + แท่นชาร์จไร้สาย พร้อม XiaoAI ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=7
+[LLM DEBUG]   [0] YoupinOfficialS  [ลดเหลือ 699] ZMI B508 2 in 1 ลำโพงบลูทูธ + แท่นชา
+[LLM DEBUG]   [1] YoupinOfficialS  (NEW) Xiaomi Sound Play ลำโพงบลูทูธ 18W พกพาง่าย เ
+[LLM DEBUG]   [2] YoupinOfficialS  (รับประกันศูนย์ไทย) Xiaomi Soundbar 2.0ch Desktop 
+[LLM DEBUG]   [3] YoupinOfficialS  (รับประกันศูนย์ไทย) Xiaomi Sound Pocket 5W ลำโพงบล
+[LLM DEBUG]   [4] YoupinOfficialS  (รับประกันศูนย์ไทย) Xiaomi Sound Outdoor 30W ลำโพง
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: YoupinOfficialStore\nจำนวนสินค้าใน context: 7\n⚠️ สำคัญมาก: มี 1 สินค้าที่ไม่มี description_excerpt (ระบุว่า \'ไม่มีรายละเอียดสินค้าเพิ่มเติม\') ห้ามเอา description_excerpt ของสินค้าอื่นมาตอบแทนสินค้าเหล่านั้นเด็ดขาด แม้จะเป็นสินค้ารุ่นเดียวกันจากร้านอื่นก็ตาม ถ้าลูกค้าถามรายละเอียดของสินค้าที่ไม่มี desc ให้บอก \'ขออภัยค่ะ สินค้ารุ่นนี้ไม่มีรายละเอียดเพิ่มเติม ทักแอดมินได้เลยนะคะ\'\n\n[\n  {\n    "name": "[ลดเหลือ 699] ZMI B508 2 in'
+[TIMING] LLM: 3.28s  TOTAL: 3.42s
+[LLM] model=gemini-3.5-flash-lite  prompt=8283  output=752  total=9035  products=7
+INFO:     127.0.0.1:53177 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='Dreame V10 / V10 Plus (T100) เครื่องดูดฝุ่นไร้สาย ขอรายละเอี'
+[TIMING] fetch_products: 0.25s  (retrieval='Dreame V10 / V10 Plus (T100) เครื่องดูดฝุ่นไร้สาย ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Dreame V10 / V10 Plus (T100) เครื่องดูดฝุ่นไร้สาย ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] LuckyHomeMart  [เหลือ 5899 บ. โค้ด AUG100LIFE] Dreame V10 Plus (T
+[LLM DEBUG]   [1] LuckyHomeMart  [รับ 500 Coins โค้ด CCB0309JANNW] Dreame V10 / V10
+[LLM DEBUG]   [2] LuckyHomeMart  [ลดเหลือ 999] iSuper Vacuum Cleaner 3 IN 1 เครื่อง
+[LLM DEBUG]   [3] LuckyHomeMart  [14540 บ. โค้ด PAYDAY1225] IMILAB ROBOT V1 หุ่นยนต
+[LLM DEBUG]   [4] LuckyHomeMart  [2502 บ. โค้ด 7DISCOUNT25] iSuper Mite Vacuum Clea
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: LuckyHomeMart\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[เหลือ 5899 บ. โค้ด AUG100LIFE] Dreame V10 Plus (T100) รุ่นใหม่!! เพิ่มหัวดูดฝุ่นบนพรม เครื่องดูดฝุ่นไร้สาย -30D",\n    "shop": "LuckyHomeMart",\n    "price": {\n      "min": 13999,\n      "max": 13999,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "1 Month"\n    },\n    "short_link": "https://s.shopee.co.th/7fOJbOdQ4u",\n    "image_url": "https://cf'
+[TIMING] LLM: 4.09s  TOTAL: 4.44s
+[LLM] model=gemini-3.5-flash-lite  prompt=15620  output=1141  total=16761  products=10
+INFO:     127.0.0.1:53198 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.06s  query='VIOMI เครื่องวางจาน อบแห้ง ฆ่าเชื้อแบคทีเรีย ด้วยรังสี UV ขอ'
+[TIMING] fetch_products: 0.21s  (retrieval='VIOMI เครื่องวางจาน อบแห้ง ฆ่าเชื้อแบคทีเรีย ด้วยรังสี UV ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='VIOMI เครื่องวางจาน อบแห้ง ฆ่าเชื้อแบคทีเรีย ด้วยรังสี UV ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] LuckyHomeMart  [ลดเหลือ 999] iSuper Vacuum Cleaner 3 IN 1 เครื่อง
+[LLM DEBUG]   [1] LuckyHomeMart  [14540 บ. โค้ด PAYDAY1225] IMILAB ROBOT V1 หุ่นยนต
+[LLM DEBUG]   [2] LuckyHomeMart  [2502 บ. โค้ด 7DISCOUNT25] iSuper Mite Vacuum Clea
+[LLM DEBUG]   [3] LuckyHomeMart  [ลดเหลือ 999] Deerma DX810 Vacuum Cleaner เครื่องด
+[LLM DEBUG]   [4] LuckyHomeMart  [ราคาพิเศษ 999บ.] Deerma EX919 เครื่องดูดฝุ่น ดูดท
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: LuckyHomeMart\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ลดเหลือ 999] iSuper Vacuum Cleaner 3 IN 1 เครื่องดูดฝุ่นมือถือ แรงดูดสูง 16Kpa เครื่องดูดฝุ่น พร้อมผ้าถูพื้นสะอาด -1Y",\n    "shop": "LuckyHomeMart",\n    "price": {\n      "min": 1299,\n      "max": 1299,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/ysUQ3Cu3",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-'
+[TIMING] LLM: 1.67s  TOTAL: 1.95s
+[LLM] model=gemini-3.5-flash-lite  prompt=15487  output=79  total=15566  products=10
+INFO:     127.0.0.1:53220 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='Xiaomi Mi AloT Router AC2350 (CN.Ver) เร้าเตอร์ ขอรายละเอียด'
+[TIMING] fetch_products: 0.06s  (retrieval='Xiaomi Mi AloT Router AC2350 (CN.Ver) เร้าเตอร์ ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Xiaomi Mi AloT Router AC2350 (CN.Ver) เร้าเตอร์ ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=6
+[LLM DEBUG]   [0] LuckyHomeMart  [254 โค้ด 15DD99] Xiaomi Mi 20W charger Type-C EU 
+[LLM DEBUG]   [1] LuckyHomeMart  [ทักแชทรับโค้ด] Mi Smart Band 5 Charging Cable สาย
+[LLM DEBUG]   [2] LuckyHomeMart  [ลดเหลือ 355] ZMI A01 Crystal 20W หัวชาร์จใช้สำหรั
+[LLM DEBUG]   [3] LuckyHomeMart  [ลดเหลือ 459] Flash Drive Netac รุ่น U782C แฟลชไดร
+[LLM DEBUG]   [4] LuckyHomeMart  [เหลือ 499 บ. โค้ด JUL100LIFE] Eloop C5 หัวชาร์จเร
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: LuckyHomeMart\nจำนวนสินค้าใน context: 6\n\n[\n  {\n    "name": "[254 โค้ด 15DD99] Xiaomi Mi 20W charger Type-C EU หัวชาร์จเร็ว รองรับเทคโนโลยี PD 20W รองรับกระแสไฟได้ทั่วโลก -6M",\n    "shop": "LuckyHomeMart",\n    "price": {\n      "min": 399,\n      "max": 399,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/8zthC1795K",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-7rdwm-'
+[TIMING] LLM: 1.52s  TOTAL: 1.67s
+[LLM] model=gemini-3.5-flash-lite  prompt=9428  output=77  total=9505  products=6
+INFO:     127.0.0.1:53235 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.33s  query='พร้อมส่ง Eloop EQ-24BUS แท้ 100% หัวชาร์จเร็ว 24W รอบรับ QC '
+[TIMING] fetch_products: 0.18s  (retrieval='พร้อมส่ง Eloop EQ-24BUS แท้ 100% หัวชาร์จเร็ว 24W รอบรับ QC ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='พร้อมส่ง Eloop EQ-24BUS แท้ 100% หัวชาร์จเร็ว 24W รอบรับ QC ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] KingGadgets  [รับ 28 Coins โค้ด SPCCB6LHA] พร้อมส่ง Eloop EQ-24
+[LLM DEBUG]   [1] KingGadgets  [เหลือ 499 บ. โค้ด AUG100LIFE] Eloop C5 หัวชาร์จเร
+[LLM DEBUG]   [2] KingGadgets  [เหลือ 499 บ. โค้ด 96MBKV] Eloop C6 หัวชาร์จเร็ว P
+[LLM DEBUG]   [3] KingGadgets  [ทักแชทรับโค้ด] Eloop C2 หัวชาร์จเร็ว USB C Quick 
+[LLM DEBUG]   [4] KingGadgets  [ทักแชทรับโค้ด] พร้อมส่ง Eloop E45 20000mAh QC 3.0
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[รับ 28 Coins โค้ด SPCCB6LHA] พร้อมส่ง Eloop EQ-24BUS แท้ 100% หัวชาร์จเร็ว 24W รอบรับ QC 3.0-30D",\n    "shop": "KingGadgets",\n    "price": {\n      "min": 299,\n      "max": 299,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/7AS2zghRtT",\n    "image_url": "https://cf.shopee.co.th/file/972fa591c41a95a2a47bdfeb979e10e2",\n  '
+[TIMING] LLM: 2.97s  TOTAL: 3.49s
+[LLM] model=gemini-3.5-flash-lite  prompt=14113  output=701  total=14814  products=10
+INFO:     127.0.0.1:53250 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.10s  query='Huawei CP84 Super Charge 40W Quick ขอรายละเอียดสินค้าหน่อยค่'
+[TIMING] fetch_products: 0.13s  (retrieval='Huawei CP84 Super Charge 40W Quick ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Huawei CP84 Super Charge 40W Quick ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] KingGadgets  [เหลือ 773 บ. โค้ด 5XWU5F95] Huawei CP84 Super Cha
+[LLM DEBUG]   [1] KingGadgets  สายชาร์จ USB Type C Huawei Supercharge 5A ของแท้ 1
+[LLM DEBUG]   [2] KingGadgets  [รับ 25 Coins โค้ด SPCCBJJF4] Eloop C4 หัวชาร์จเร็
+[LLM DEBUG]   [3] KingGadgets  [ทักแชทรับโค้ด] Eloop C2 หัวชาร์จเร็ว USB C Quick 
+[LLM DEBUG]   [4] KingGadgets  [ราคาพิเศษ 599บ.] Xiaomi Vertical Wireless Charger
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[เหลือ 773 บ. โค้ด 5XWU5F95] Huawei CP84 Super Charge 40W Quick Chargerหัวชาร์พร้อมสายรองรับการชาร์จไว QC-30D",\n    "shop": "KingGadgets",\n    "price": {\n      "min": 1499,\n      "max": 1499,\n      "currency": "THB"\n    },\n    "warranty": {\n      "duration": "1 Month"\n    },\n    "short_link": "https://s.shopee.co.th/6VCM9pRxcv",\n    "image_url": "https://cf.shopee.c'
+[TIMING] LLM: 3.45s  TOTAL: 3.70s
+[LLM] model=gemini-3.5-flash-lite  prompt=14758  output=599  total=15357  products=10
+INFO:     127.0.0.1:53267 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.09s  query='Mahootec AS-T300 ถังขยะไฟฟ้า Automatic Sensor ขนาด 12 ลิตร ข'
+[TIMING] fetch_products: 0.33s  (retrieval='Mahootec AS-T300 ถังขยะไฟฟ้า Automatic Sensor ขนาด 12 ลิตร ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Mahootec AS-T300 ถังขยะไฟฟ้า Automatic Sensor ขนาด 12 ลิตร ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=6
+[LLM DEBUG]   [0] KingGadgets  [ราคาพิเศษ 1100บ.] Ninestars DZT-15-10 Smart Trash
+[LLM DEBUG]   [1] KingGadgets  [ราคาพิเศษ 590บ.] Ninestars QDT-15-6 Smart Trash C
+[LLM DEBUG]   [2] KingGadgets  [ราคาพิเศษ 890บ.] Ninestars DZT-16-27 Smart Trash 
+[LLM DEBUG]   [3] KingGadgets  [ราคาพิเศษ 1250บ.] TOWNEW T1S ถังขยะอัจฉริยะ สัมผั
+[LLM DEBUG]   [4] KingGadgets  [ราคาพิเศษ 690บ.] Ninestars DZT-10-11 Smart Trash 
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: KingGadgets\nจำนวนสินค้าใน context: 6\n\n[\n  {\n    "name": "[ราคาพิเศษ 1100บ.] Ninestars DZT-15-10 Smart Trash Can มาพร้อม เซ็นเซอร์ในตัว ความจุมากถึง 15 ลิตร -1Y",\n    "shop": "KingGadgets",\n    "price": {\n      "min": 1990,\n      "max": 1990,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/8paGwe1D6Y",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-7qveb-lgfyg0bephxhe'
+[TIMING] LLM: 3.72s  TOTAL: 4.16s
+[LLM] model=gemini-3.5-flash-lite  prompt=9599  output=964  total=10563  products=6
+INFO:     127.0.0.1:53286 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.09s  query='HUTT DDC55 หุ่นยนต์เช็ดกระจก เช็ดได้หมดจด ขอรายละเอียดสินค้า'
+[TIMING] fetch_products: 0.17s  (retrieval='HUTT DDC55 หุ่นยนต์เช็ดกระจก เช็ดได้หมดจด ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='HUTT DDC55 หุ่นยนต์เช็ดกระจก เช็ดได้หมดจด ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] SuperITMall  [ลดเหลือ 999] iSuper Vacuum Cleaner 3 IN 1 เครื่อง
+[LLM DEBUG]   [1] SuperITMall  [ทักแชทรับโค้ด] Xiaomi Robot Vacuum X10+ หุ่นยนต์ด
+[LLM DEBUG]   [2] SuperITMall  [ราคาพิเศษ 7299บ.] Xiaomi Mijia Robot Vacuum Mop 3
+[LLM DEBUG]   [3] SuperITMall  [14540 บ. โค้ด PAYDAY1225] IMILAB ROBOT V1 หุ่นยนต
+[LLM DEBUG]   [4] SuperITMall  [2502 บ. โค้ด 7DISCOUNT25] iSuper Mite Vacuum Clea
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: SuperITMall\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ลดเหลือ 999] iSuper Vacuum Cleaner 3 IN 1 เครื่องดูดฝุ่นมือถือ แรงดูดสูง 16000Pa เครื่องดูดฝุ่น พร้อมผ้าถูพื้น -12M",\n    "shop": "SuperITMall",\n    "price": {\n      "min": 1299,\n      "max": 1299,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/9AD7PH0l4T",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-7rep'
+[TIMING] LLM: 2.52s  TOTAL: 2.79s
+[LLM] model=gemini-3.5-flash-lite  prompt=14965  output=378  total=15343  products=10
+INFO:     127.0.0.1:53305 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='WellSkins WX-HT100 เครื่องกำจัดสิวเสี้ยนสูญญากาศ ศูนย์ไทย ขอ'
+[TIMING] fetch_products: 0.32s  (retrieval='WellSkins WX-HT100 เครื่องกำจัดสิวเสี้ยนสูญญากาศ ศูนย์ไทย ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='WellSkins WX-HT100 เครื่องกำจัดสิวเสี้ยนสูญญากาศ ศูนย์ไทย ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] SuperITMall  [ลดเหลือ 999] iSuper Vacuum Cleaner 3 IN 1 เครื่อง
+[LLM DEBUG]   [1] SuperITMall  [ทักแชทรับโค้ด] Xiaomi Robot Vacuum X10+ หุ่นยนต์ด
+[LLM DEBUG]   [2] SuperITMall  [ราคาพิเศษ 25990บ.] Lydsto W2 หุ่นยนต์ดูดฝุ่น 3 in
+[LLM DEBUG]   [3] SuperITMall  [ราคาพิเศษ 7299บ.] Xiaomi Mijia Robot Vacuum Mop 3
+[LLM DEBUG]   [4] SuperITMall  [ราคาพิเศษ 9990บ.] Lydsto H4 เครื่องดูดฝุ่นไร้สายม
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: SuperITMall\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[ลดเหลือ 999] iSuper Vacuum Cleaner 3 IN 1 เครื่องดูดฝุ่นมือถือ แรงดูดสูง 16000Pa เครื่องดูดฝุ่น พร้อมผ้าถูพื้น -12M",\n    "shop": "SuperITMall",\n    "price": {\n      "min": 1299,\n      "max": 1299,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/9AD7PH0l4T",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-7rep'
+[TIMING] LLM: 2.23s  TOTAL: 2.63s
+[LLM] model=gemini-3.5-flash-lite  prompt=15180  output=249  total=15429  products=10
+INFO:     127.0.0.1:53325 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='DJI OSMO Base ฐานสำหรับ DJI OSMO ทุกรุ่น วัสดุแข็งแรง ขอรายล'
+[TIMING] fetch_products: 0.16s  (retrieval='DJI OSMO Base ฐานสำหรับ DJI OSMO ทุกรุ่น วัสดุแข็งแรง ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='DJI OSMO Base ฐานสำหรับ DJI OSMO ทุกรุ่น วัสดุแข็งแรง ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=6
+[LLM DEBUG]   [0] YoupinOfficialS  (รับประกันศูนย์ไทย) Xiaomi Tag อุปกรณ์ติดตาม ขนาดเ
+[LLM DEBUG]   [1] YoupinOfficialS  (รับประกันศูนย์ไทย) Xiaomi In-Ear Headphones Basic
+[LLM DEBUG]   [2] YoupinOfficialS  (รับประกันศูนย์ไทย) Xiaomi 165W Power Bank 10000mA
+[LLM DEBUG]   [3] YoupinOfficialS  [ลดเหลือ 273] Lydsto Waterproof Pad สำหรับรุ่น G1 
+[LLM DEBUG]   [4] YoupinOfficialS  [ลดเหลือ 59] DJI OSMO Base ฐานสำหรับ DJI OSMO ทุกร
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: YoupinOfficialStore\nจำนวนสินค้าใน context: 6\n\n[\n  {\n    "name": "(รับประกันศูนย์ไทย) Xiaomi Tag อุปกรณ์ติดตาม ขนาดเล็กน้ำหนักเบา ค้นหาอย่าง รวดเร็ว แม่นยำ กันน้ำ IP67 -1Y",\n    "shop": "YoupinOfficialStore",\n    "price": {\n      "min": 519,\n      "max": 1769,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/8AQsmZM6OO",\n    "image_url": "https://cf.shopee.co.th/file/th-11134207-8'
+[TIMING] LLM: 2.13s  TOTAL: 2.37s
+[LLM] model=gemini-3.5-flash-lite  prompt=7535  output=336  total=7871  products=6
+INFO:     127.0.0.1:53344 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.08s  query='(รับประกันศูนย์ไทย) Xiaomi Mi Computer Monitor Light Bar ขอร'
+[TIMING] fetch_products: 0.25s  (retrieval='(รับประกันศูนย์ไทย) Xiaomi Mi Computer Monitor Light Bar ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='(รับประกันศูนย์ไทย) Xiaomi Mi Computer Monitor Light Bar ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=9
+[LLM DEBUG]   [0] YoupinOfficialS  (รับประกันศูนย์ไทย) Xiaomi Soundbar 2.0ch Desktop 
+[LLM DEBUG]   [1] YoupinOfficialS  (รับประกันศูนย์ไทย) Philips TAB3000 Soundbar ลำโพง
+[LLM DEBUG]   [2] YoupinOfficialS  [3099 ดูโค้ดรูป 2] Xiaomi TV Speaker Soundbar Thea
+[LLM DEBUG]   [3] YoupinOfficialS  [ราคาพิเศษ 595บ.] AJ Soundbar Wireless Speaker AJ-
+[LLM DEBUG]   [4] YoupinOfficialS  [629บ.โค้ดWSQBE85U] AJ Soundbar Wireless Speaker B
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: YoupinOfficialStore\nจำนวนสินค้าใน context: 9\n⚠️ สำคัญมาก: มี 1 สินค้าที่ไม่มี description_excerpt (ระบุว่า \'ไม่มีรายละเอียดสินค้าเพิ่มเติม\') ห้ามเอา description_excerpt ของสินค้าอื่นมาตอบแทนสินค้าเหล่านั้นเด็ดขาด แม้จะเป็นสินค้ารุ่นเดียวกันจากร้านอื่นก็ตาม ถ้าลูกค้าถามรายละเอียดของสินค้าที่ไม่มี desc ให้บอก \'ขออภัยค่ะ สินค้ารุ่นนี้ไม่มีรายละเอียดเพิ่มเติม ทักแอดมินได้เลยนะคะ\'\n\n[\n  {\n    "name": "(รับประกันศูนย์ไทย) Xiaomi '
+[TIMING] LLM: 1.25s  TOTAL: 1.60s
+[LLM] model=gemini-3.5-flash-lite  prompt=11450  output=30  total=11480  products=9
+INFO:     127.0.0.1:53361 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.07s  query='ศูนย์ไทย  70mai Car Purifier Pro Midrive AC02 ขอรายละเอียดสิ'
+[TIMING] fetch_products: 0.17s  (retrieval='ศูนย์ไทย  70mai Car Purifier Pro Midrive AC02 ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='ศูนย์ไทย  70mai Car Purifier Pro Midrive AC02 ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=6
+[LLM DEBUG]   [0] SuperITMall  ศูนย์ไทย [269 บ. โค้ด FBSMAY10DD22] 70mai GPS Modu
+[LLM DEBUG]   [1] SuperITMall  ศูนย์ไทย [ราคาพิเศษ 1750บ.] 70mai Air Compressor ป
+[LLM DEBUG]   [2] SuperITMall  ศูนย์ไทย [รับ 149 Coins โค้ด SPCCBLOAS] 70mai Car 
+[LLM DEBUG]   [3] SuperITMall  ศูนย์ไทย [รับ 76 Coins โค้ด CCB1622AUGNW] 70mai Ai
+[LLM DEBUG]   [4] SuperITMall  [รับ 49 Coins โค้ด CCB2329AUGNW] 70mai hardware ki
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: SuperITMall\nจำนวนสินค้าใน context: 6\n⚠️ สำคัญมาก: มี 1 สินค้าที่ไม่มี description_excerpt (ระบุว่า \'ไม่มีรายละเอียดสินค้าเพิ่มเติม\') ห้ามเอา description_excerpt ของสินค้าอื่นมาตอบแทนสินค้าเหล่านั้นเด็ดขาด แม้จะเป็นสินค้ารุ่นเดียวกันจากร้านอื่นก็ตาม ถ้าลูกค้าถามรายละเอียดของสินค้าที่ไม่มี desc ให้บอก \'ขออภัยค่ะ สินค้ารุ่นนี้ไม่มีรายละเอียดเพิ่มเติม ทักแอดมินได้เลยนะคะ\'\n\n[\n  {\n    "name": "ศูนย์ไทย [269 บ. โค้ด FBSMAY10DD22]'
+[TIMING] LLM: 2.69s  TOTAL: 2.98s
+[LLM] model=gemini-3.5-flash-lite  prompt=7554  output=542  total=8096  products=6
+INFO:     127.0.0.1:53380 - "POST /chat HTTP/1.1" 200 OK
+[TIMING] KB lookup: 0.09s  query='Nesugar 3 in 1 Desktop Fan Mist Humidifier LED Light ขอรายละ'
+[TIMING] fetch_products: 0.06s  (retrieval='Nesugar 3 in 1 Desktop Fan Mist Humidifier LED Light ขอรายละเอียดสินค้าหน่อยค่ะ')
+
+[LLM DEBUG] message='Nesugar 3 in 1 Desktop Fan Mist Humidifier LED Light ขอรายละเอียดสินค้าหน่อยค่ะ'
+[LLM DEBUG] products=10
+[LLM DEBUG]   [0] LuckyHomeMart  [449 บ. โค้ด FHBBAU10210] Nesugar 3 in 1 Desktop F
+[LLM DEBUG]   [1] LuckyHomeMart  [ราคาพิเศษ 299บ.] Zaiwan ZW2811 Fan พัดลม โคมไฟ 2i
+[LLM DEBUG]   [2] LuckyHomeMart  [ราคาพิเศษ 0บ.] Mist Fan H9 Pro พัดลมไอน้ำไร้สาย 5
+[LLM DEBUG]   [3] LuckyHomeMart  [1529 บ. โค้ด FBSMAY10DD22] Xiaomi Mijia Smart Sta
+[LLM DEBUG]   [4] LuckyHomeMart  [ราคาพิเศษ 1999บ.] Xiaomi Mi Smart Standing Fan 2 
+[LLM DEBUG] include_desc=True
+[LLM DEBUG] history_len=0
+[LLM DEBUG] context (first 500): 'ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\nลูกค้าทักจากร้าน: LuckyHomeMart\nจำนวนสินค้าใน context: 10\n\n[\n  {\n    "name": "[449 บ. โค้ด FHBBAU10210] Nesugar 3 in 1 Desktop Fan Mist Humidifier LED Light Portable พัดลมตั้งโต๊ะ มีไฟ LED",\n    "shop": "LuckyHomeMart",\n    "price": {\n      "min": 2999,\n      "max": 2999,\n      "currency": "THB"\n    },\n    "warranty": {},\n    "short_link": "https://s.shopee.co.th/60G5cuDUCA",\n    "image_url": "https://cf.shopee.co.th/file/sg-11134201-23030-'
+[TIMING] LLM: 3.14s  TOTAL: 3.31s
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [81526]
+/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/resource_tracker.py:475: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown: {'/loky-81526-kgxhbivy'}
+  warnings.warn(

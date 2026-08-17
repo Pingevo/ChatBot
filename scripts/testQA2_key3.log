@@ -1,0 +1,59 @@
+📥 Resume: พบ 500 เคสที่รันแล้ว จะข้าม
+
+============================================================
+เริ่มรัน test: 13037 เคส จากทั้งหมด 13537 (ข้าม 500)
+  batch=all, max=500, resume=True
+============================================================
+
+[501/13537] ✅ detail-00501 | ศูนย์ไทย  Xiaobai IMILAB EC2 + Gateway กล้องวงจรปิ → src=product_store prods=8 4.1s
+[502/13537] ✅ detail-00502 | ROIDMI P6 Car Air Purifier ขอรายละเอียดสินค้าหน่อย → src=product_store prods=9 1.9s
+[503/13537] ✅ detail-00503 | ศูนย์ไทย  70mai Mini Dash Cam (Global Ver.) 1600P  → src=product_store prods=9 4.0s
+[504/13537] ✅ detail-00504 | OneDer V01 16W mini soundbar หน้าจอ LED stereo sou → src=product_store prods=2 2.8s
+[505/13537] ✅ detail-00505 | Xiaomi Redmi Xiao AI Speaker Play ลำโพงอัจฉริยะ ขอ → src=product_store prods=9 4.1s
+[506/13537] ✅ detail-00506 | AirPOP Sport ankle ขอรายละเอียดสินค้าหน่อยค่ะ → src=product_store prods=10 1.5s
+[507/13537] ✅ detail-00507 | Xiaomi Mijia Yiyohome หวี ป้องกันไฟฟ้าสถิตย์ จับถน → src=product_store prods=10 2.2s
+[508/13537] ✅ detail-00508 | ZMI B508 ลำโพงบลูทูธ 2in1 ขอรายละเอียดสินค้าหน่อยค → src=product_store prods=2 3.5s
+[509/13537] ✅ detail-00509 | Lexiu RS1 / RS101 Sweeping Robot ควบคุมผ่าน App ขอ → src=product_store prods=4 3.1s
+[510/13537] ✅ detail-00510 | พร้อมส่ง Mist Fan H9 Pro พัดลมไอน้ำ ไร้สาย แรงลม 3 → src=product_store prods=10 2.6s
+[511/13537] ✅ detail-00511 | YASE CLIP-FAN รุ่น YS2007 พัดลมพกพา พัดลมยืดได้ ขอ → src=product_store prods=9 3.1s
+[512/13537] ✅ detail-00512 | ZHIBAI TL3 แปรงสีฟันไฟฟ้า โซนิค ไร้สาย 3 ขอรายละเอ → src=product_store prods=10 2.0s
+[513/13537] ✅ detail-00513 | JIMMY JV52 Vacuum Cleaner ไร้สาย ความจุแบตเตอรี่25 → src=product_store prods=10 2.3s
+[514/13537] ✅ detail-00514 | QCY T7 หูฟังบลูทูธ ไร้สาย True Wireless 5.0 ขอรายล → src=product_store prods=10 2.8s
+[515/13537] ✅ detail-00515 | XiaoVV Pro 1080P กล้องวงจรปิด มุมมองกว้าง กันน้ำ ข → src=product_store prods=10 2.6s
+[516/13537] ✅ detail-00516 | Liushu Sterilization Toothbrush Holder ที่แขวนแปรง → src=product_store prods=2 2.6s
+[517/13537] ✅ detail-00517 | CUKTECH HA716T / A18T หัวชาร์จ 20W - 30W / สายชาร์ → src=product_store prods=10 5.2s
+[518/13537] ✅ detail-00518 | Deerma DX900 เครื่องดูดฝุ่นไส้กรอง HEPA แรงดูด 15, → src=product_store prods=10 4.1s
+[519/13537] ✅ detail-00519 | Wellskins WX-ZF105 หวีไฟฟ้า 3 in 1 ยืดผม ม้วนผม เป → src=product_store prods=5 3.6s
+[520/13537] ✅ detail-00520 | YUELI Anion Hair Massage Brush พกพาง่าย ขอรายละเอี → src=product_store prods=8 1.8s
+[521/13537] ✅ detail-00521 | Deerma F327 Air Humidifier เครื่องเพิ่มความชื้น ใน → src=product_store prods=10 1.7s
+[522/13537] ✅ detail-00522 | Beheart Negative ion Hair Dryer ไดร์เป่าผม 1200W ป → src=product_store prods=10 1.8s
+[523/13537] ✅ detail-00523 | Jipin Desktop Fan พัดลมพกพา แบบตั้งโต๊ะ ไร้สาย รุ่ → src=product_store prods=10 1.6s
+[524/13537] ✅ detail-00524 | (รับประกันศูนย์ไทย) ลำโพง Xiaomi Sound Party ลำโพง → src=product_store prods=8 3.6s
+[525/13537] ✅ detail-00525 | Xiaomi Electric Sticky Shoe เครื่องหุ้มรองเท้าอัตโ → src=product_store prods=10 1.8s
+[526/13537] ✅ detail-00526 | ศูนย์ไทย  ศูนย์ไทย 70mai PRO (Global Ver.) 2K ใช้ง → src=product_store prods=10 3.6s
+[527/13537] ✅ detail-00527 | Weiyuan F1 Smart Handheld Bladeless Fan พัดลมไร้ใบ → src=product_store prods=10 3.0s
+[528/13537] ✅ detail-00528 | Yeelight Wireless Charger แท่นชาร์จมือถือจ่ายไฟ 10 → src=product_store prods=10 2.3s
+[529/13537] ✅ detail-00529 | Jimmy VC-S101W เครื่องดูดฝุ่น 2in1 (ดูด-ถู) พลังไซ → src=product_store prods=10 3.3s
+[530/13537] ✅ detail-00530 | 70mai hardware kit ชุดฮาร์ดแวร์เฝ้าระวังที่จอดรถ 2 → src=product_store prods=4 2.6s
+[531/13537] ✅ detail-00531 | Mojietu Lightning Air pump ปั้มลมไร้สาย ปั้มเร็ว ช → src=product_store prods=6 3.1s
+[532/13537] ✅ detail-00532 | Deerma DEM-ZC10 เครื่องทำอาหารเช้า 3 in 1 ปิ้งขนมป → src=product_store prods=2 3.3s
+[533/13537] ✅ detail-00533 | ลำโพงคอมพิวเตอร์ BINNIFA Desktop Bar Computer Blue → src=product_store prods=10 4.2s
+[534/13537] ✅ detail-00534 | Fiil T1 XS หูฟังไร้สาย เสียงเบสกระชับ บาลานซ์เสียง → src=product_store prods=10 2.8s
+[535/13537] ✅ detail-00535 | IMILAB EC4 (GB V.) กล้องวงจรปิดไร้สาย คมชัด 2.5K 4 → src=product_store prods=10 4.2s
+[536/13537] ✅ detail-00536 | OnePlus 7T (8/256GB) กล้อง 48 ล้านพิกเซล - SDM™855 → src=product_store prods=10 1.9s
+[537/13537] ✅ detail-00537 | 1Plus 7T Pro McLaren (12/256GB)-1Y ขอรายละเอียดสิน → src=product_store prods=10 1.7s
+[538/13537] ✅ detail-00538 | สายชาร์จ USB Type C Huawei Supercharge 5A ของแท้ 1 → src=product_store prods=10 2.4s
+[539/13537] ✅ detail-00539 | P90XS นาฬิกาอัจฉริยะมีระบบ Touch screen วัดคลื่นหั → src=product_store prods=10 3.6s
+[540/13537] ✅ detail-00540 | JIMMY JV52 Modular Vacuum Cleaner เครื่องดูดฝุ่นไร → src=product_store prods=10 1.7s
+[541/13537] ✅ detail-00541 | ZMI B508 2 in 1 ลำโพงบลูทูธ + แท่นชาร์จไร้สาย พร้อ → src=product_store prods=7 3.4s
+[542/13537] ✅ detail-00542 | Dreame V10 / V10 Plus (T100) เครื่องดูดฝุ่นไร้สาย  → src=product_store prods=10 4.4s
+[543/13537] ✅ detail-00543 | VIOMI เครื่องวางจาน อบแห้ง ฆ่าเชื้อแบคทีเรีย ด้วยร → src=product_store prods=10 1.9s
+[544/13537] ✅ detail-00544 | Xiaomi Mi AloT Router AC2350 (CN.Ver) เร้าเตอร์ ขอ → src=product_store prods=6 1.7s
+[545/13537] ✅ detail-00545 | พร้อมส่ง Eloop EQ-24BUS แท้ 100% หัวชาร์จเร็ว 24W  → src=product_store prods=10 3.5s
+[546/13537] ✅ detail-00546 | Huawei CP84 Super Charge 40W Quick ขอรายละเอียดสิน → src=product_store prods=10 3.7s
+[547/13537] ✅ detail-00547 | Mahootec AS-T300 ถังขยะไฟฟ้า Automatic Sensor ขนาด → src=product_store prods=6 4.2s
+[548/13537] ✅ detail-00548 | HUTT DDC55 หุ่นยนต์เช็ดกระจก เช็ดได้หมดจด ขอรายละเ → src=product_store prods=10 2.8s
+[549/13537] ✅ detail-00549 | WellSkins WX-HT100 เครื่องกำจัดสิวเสี้ยนสูญญากาศ ศ → src=product_store prods=10 2.6s
+[550/13537] ✅ detail-00550 | DJI OSMO Base ฐานสำหรับ DJI OSMO ทุกรุ่น วัสดุแข็ง → src=product_store prods=6 2.4s
+[551/13537] ✅ detail-00551 | (รับประกันศูนย์ไทย) Xiaomi Mi Computer Monitor Lig → src=product_store prods=9 1.6s
+[552/13537] ✅ detail-00552 | ศูนย์ไทย  70mai Car Purifier Pro Midrive AC02 ขอรา → src=product_store prods=6 3.0s
