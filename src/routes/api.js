@@ -163,7 +163,11 @@ router.get('/conversations', async (req, res) => {
   // เปิดไว้) — ดู comment เหนือฟังก์ชันด้านบนสำหรับตอนไหนควรเปิด/ปิด
   triggerBackgroundConversationsSync();
 
-  const conversations = await Conversation.find(filter).sort({ pinned: -1, last_message_timestamp: -1 }).limit(100).lean();
+  const conversations = await Conversation.find(filter)
+    .select('-recent_messages')
+    .sort({ pinned: -1, last_message_timestamp: -1 })
+    .limit(100)
+    .lean();
   res.json(conversations);
 });
 
@@ -208,130 +212,130 @@ router.get('/conversations/:id', async (req, res) => {
   res.json(conv);
 });
 
-// GET /api/conversations/:id/messages — ดึงประวัติข้อความ (พร้อม sync ข้อมูลล่าสุดจาก Shopee API ทันที)
+// GET /api/conversations/:id/messages — ดึงประวัติข้อความจาก Local DB ทันที (<10ms) และ sync Shopee ใน background
 router.get('/conversations/:id/messages', async (req, res) => {
-  let conv = null;
   try {
-    conv = await Conversation.findOne({ conversation_id: req.params.id });
+    const conv = await Conversation.findOne({ conversation_id: req.params.id }).lean();
     if (conv) {
-      const shop = await Shop.findOne({ shop_id: conv.shop_id, platform: conv.platform });
-      if (shop) {
-        // ยิง 2 คำขอไป Shopee "พร้อมกัน" แทนการรอทีละอัน (เดิม fetchOneConversation เสร็จก่อนถึงเริ่ม fetchMessages
-        // ทำให้หน่วงเท่าตัวของ round-trip ไป Shopee — นี่คือสาเหตุหลักที่คลิกเปิดแชทแล้วรอ 1-2 วินาที)
-        const [detailResult, messagesResult] = await Promise.allSettled([
-          shopeeAdapter.fetchOneConversation(shop, conv.conversation_id),
-          shopeeAdapter.fetchMessages(shop, conv.conversation_id),
-        ]);
+      onConversationOpened(conv, req.user).catch(() => {});
 
-        // 1. รายละเอียด conversation ล่าสุดจาก Shopee — ใช้เอา opposite_last_read_msg_id
-        if (detailResult.status === 'fulfilled' && detailResult.value && detailResult.value.opposite_last_read_msg_id) {
-          const oppReadId = String(detailResult.value.opposite_last_read_msg_id);
-          await Conversation.updateOne({ _id: conv._id }, { $set: { opposite_last_read_msg_id: oppReadId } });
-          conv.opposite_last_read_msg_id = oppReadId;
-        }
+      // Sync กับ Shopee ใน background แบบ non-blocking เพื่อไม่ให้การเปิดแชทต้องรอ network
+      setImmediate(async () => {
+        try {
+          const shop = await Shop.findOne({ shop_id: conv.shop_id, platform: conv.platform });
+          if (shop && shop.platform === 'shopee') {
+            const [detailResult, messagesResult] = await Promise.allSettled([
+              shopeeAdapter.fetchOneConversation(shop, conv.conversation_id),
+              shopeeAdapter.fetchMessages(shop, conv.conversation_id),
+            ]);
 
-        // 2. ข้อความล่าสุดจาก Shopee API
-        const messages = messagesResult.status === 'fulfilled' ? (messagesResult.value.messages || []) : [];
-        if (messages.length > 0) {
-          // เรียงเก่า→ใหม่ก่อนยิง event — messages[0] จาก Shopee คือข้อความล่าสุด (ใหม่→เก่า)
-          const messagesChronological = [...messages].reverse();
-          for (const msg of messagesChronological) {
-            const direction = String(msg.from_shop_id) === String(shop.shop_id) ? 'out' : 'in';
-            const msgCreatedTs = msg.created_timestamp ? new Date(Number(msg.created_timestamp) * 1000) : null;
-            const result = await Message.updateOne(
-              { message_id: String(msg.message_id) },
-              {
-                $set: {
-                  platform: 'shopee',
-                  shop_id: shop.shop_id,
-                  conversation_id: msg.conversation_id,
-                  from_id: String(msg.from_id),
-                  from_shop_id: String(msg.from_shop_id),
-                  to_id: String(msg.to_id),
-                  to_shop_id: String(msg.to_shop_id),
-                  message_type: msg.message_type,
-                  direction,
-                  content: msg.content,
-                  status: msg.status,
-                  source: msg.source,
-                  created_timestamp: msgCreatedTs,
-                  raw_payload: msg,
-                },
-              },
-              { upsert: true }
-            );
-            // เฉพาะข้อความที่เพิ่งเห็นครั้งแรกจริงๆ — กันเปิด/ปิดรอบ metric ซ้ำตอน sync ซ้ำๆ ทุกครั้งที่ agent เปิดแชท
-            // ⚠️ ไม่ await — เป็นงาน assign/metric เบื้องหลัง ไม่ควรทำให้ผู้ใช้รอหน้าจอ (แต่ละครั้งมีหลาย DB round-trip ไป Mongo ที่อยู่ไกล)
-            if (result.upsertedCount > 0) {
-              handleNewMessage(conv, { message_id: String(msg.message_id), created_timestamp: msgCreatedTs }, direction)
-                .catch((err) => console.error('[api] handleNewMessage failed:', err.message));
+            // 1. รายละเอียด conversation ล่าสุดจาก Shopee — ใช้เอา opposite_last_read_msg_id
+            if (detailResult.status === 'fulfilled' && detailResult.value && detailResult.value.opposite_last_read_msg_id) {
+              const oppReadId = String(detailResult.value.opposite_last_read_msg_id);
+              await Conversation.updateOne({ _id: conv._id }, { $set: { opposite_last_read_msg_id: oppReadId } });
+            }
+
+            // 2. ข้อความล่าสุดจาก Shopee API
+            const shpMessages = (messagesResult.status === 'fulfilled' && messagesResult.value && messagesResult.value.messages) ? messagesResult.value.messages : [];
+            if (shpMessages.length > 0) {
+              const messagesChronological = [...shpMessages].reverse();
+              for (const msg of messagesChronological) {
+                const direction = String(msg.from_shop_id) === String(shop.shop_id) ? 'out' : 'in';
+                const msgCreatedTs = msg.created_timestamp ? new Date(Number(msg.created_timestamp) * 1000) : null;
+                const result = await Message.updateOne(
+                  { message_id: String(msg.message_id) },
+                  {
+                    $set: {
+                      platform: 'shopee',
+                      shop_id: shop.shop_id,
+                      conversation_id: msg.conversation_id,
+                      from_id: String(msg.from_id),
+                      from_shop_id: String(msg.from_shop_id),
+                      to_id: String(msg.to_id),
+                      to_shop_id: String(msg.to_shop_id),
+                      message_type: msg.message_type,
+                      direction,
+                      content: msg.content,
+                      status: msg.status,
+                      source: msg.source,
+                      created_timestamp: msgCreatedTs,
+                      raw_payload: msg,
+                    },
+                  },
+                  { upsert: true }
+                );
+                if (result.upsertedCount > 0) {
+                  handleNewMessage(conv, { message_id: String(msg.message_id), created_timestamp: msgCreatedTs }, direction)
+                    .catch((err) => console.error('[api] handleNewMessage failed:', err.message));
+                }
+              }
+              const latestMsg = shpMessages[0];
+              const latestTs = latestMsg.created_timestamp ? new Date(Number(latestMsg.created_timestamp) * 1000) : null;
+              await Conversation.updateOne(
+                { _id: conv._id },
+                {
+                  $set: {
+                    last_message_timestamp: latestTs,
+                    latest_message_id: String(latestMsg.message_id),
+                    latest_message_type: latestMsg.message_type,
+                    latest_message_content: latestMsg.content,
+                    latest_message_from_id: String(latestMsg.from_id),
+                    recent_messages: shpMessages.slice(0, 10),
+                  },
+                }
+              );
             }
           }
-          const latestMsg = messages[0];
-          const latestTs = latestMsg.created_timestamp ? new Date(Number(latestMsg.created_timestamp) * 1000) : null;
-          await Conversation.updateOne(
-            { _id: conv._id },
-            {
-              $set: {
-                last_message_timestamp: latestTs,
-                latest_message_id: String(latestMsg.message_id),
-                latest_message_type: latestMsg.message_type,
-                latest_message_content: latestMsg.content,
-                latest_message_from_id: String(latestMsg.from_id),
-                recent_messages: messages.slice(0, 10),
-              },
-            }
-          );
+        } catch (err) {
+          // ignore background sync errors
         }
+      });
+    }
+
+    const rawMessages = await Message.find({ conversation_id: req.params.id }).sort({ created_timestamp: 1 }).lean();
+
+    let latestIncomingTs = null;
+    for (const m of rawMessages) {
+      if (m.direction === 'in' && m.created_timestamp) {
+        const ts = new Date(m.created_timestamp).getTime();
+        if (!latestIncomingTs || ts > latestIncomingTs) latestIncomingTs = ts;
       }
     }
+
+    let oppReadId = null;
+    if (conv && conv.opposite_last_read_msg_id && /^\d+$/.test(String(conv.opposite_last_read_msg_id))) {
+      try { oppReadId = BigInt(conv.opposite_last_read_msg_id); } catch (e) {}
+    }
+
+    const messages = rawMessages.map(m => {
+      if (m.direction === 'out') {
+        let delivery_status = 'sent';
+        if (m.status === 'failed' || m.status === 'error') {
+          delivery_status = 'failed';
+        } else {
+          const msgTs = m.created_timestamp ? new Date(m.created_timestamp).getTime() : 0;
+          let msgBigId = null;
+          if (m.message_id && !String(m.message_id).startsWith('out-') && /^\d+$/.test(String(m.message_id))) {
+            try { msgBigId = BigInt(m.message_id); } catch (e) {}
+          }
+
+          const isReadByOppId = oppReadId && msgBigId && msgBigId <= oppReadId;
+          const isReadByReply = latestIncomingTs && msgTs && latestIncomingTs >= msgTs;
+
+          if (m.read_by_recipient || isReadByOppId || isReadByReply) {
+            delivery_status = 'read';
+          }
+        }
+        return { ...m, delivery_status };
+      }
+      return m;
+    });
+
+    res.json(messages);
   } catch (err) {
-    // ถ้าเกิดข้อผิดพลาดในการยิง API ใช้ข้อมูลที่มีใน local DB ทำงานต่อ
+    console.error('[api] error in GET /conversations/:id/messages:', err);
+    res.status(500).json({ error: err.message });
   }
-
-  // เรียก endpoint นี้ = agent เปิดดูแชทนี้จริง (ตอนคลิกเปิด และตอน poll ข้อความระหว่างเปิดค้างไว้)
-  // ใช้เป็นสัญญาณ "เปิดอ่านแล้ว" สำหรับ KPI — ปั๊มแค่ครั้งแรกต่อรอบ ไม่ทับของเดิม
-  // ⚠️ ไม่ await — แค่บันทึกสถิติ ไม่ควรทำให้ผู้ใช้รอหน้าจอ
-  if (conv) {
-    onConversationOpened(conv, req.user).catch(() => {});
-  }
-
-  const rawMessages = await Message.find({ conversation_id: req.params.id }).sort({ created_timestamp: 1 }).lean();
-
-  // หาเวลาของข้อความขาเข้าล่าสุดจากลูกค้า (เพื่อใช้เช็คว่าลูกค้าตอบกลับหลังส่งข้อความออกไปหรือไม่)
-  let latestIncomingTs = null;
-  for (const m of rawMessages) {
-    if (m.direction === 'in' && m.created_timestamp) {
-      const ts = new Date(m.created_timestamp).getTime();
-      if (!latestIncomingTs || ts > latestIncomingTs) latestIncomingTs = ts;
-    }
-  }
-
-  const oppReadId = conv?.opposite_last_read_msg_id ? BigInt(conv.opposite_last_read_msg_id) : null;
-
-  // คำนวณ delivery_status (read, sent, failed) สำหรับข้อความขาออก
-  const messages = rawMessages.map(m => {
-    if (m.direction === 'out') {
-      let delivery_status = 'sent';
-      if (m.status === 'failed' || m.status === 'error') {
-        delivery_status = 'failed';
-      } else {
-        const msgTs = m.created_timestamp ? new Date(m.created_timestamp).getTime() : 0;
-        const msgBigId = m.message_id && !m.message_id.startsWith('out-') ? BigInt(m.message_id) : null;
-
-        const isReadByOppId = oppReadId && msgBigId && msgBigId <= oppReadId;
-        const isReadByReply = latestIncomingTs && msgTs && latestIncomingTs >= msgTs;
-
-        if (m.read_by_recipient || isReadByOppId || isReadByReply) {
-          delivery_status = 'read';
-        }
-      }
-      return { ...m, delivery_status };
-    }
-    return m;
-  });
-
-  res.json(messages);
 });
 
 // POST /api/conversations/:id/reply — ส่งข้อความออก (ผ่าน kill switch ENABLE_SEND_MESSAGE ในตัว adapter)

@@ -23,6 +23,7 @@
         <% if (typeof currentUser !== 'undefined' && currentUser && (currentUser.role === 'admin' || currentUser.role === 'lead')) { %>
           <a href="/team" title="ทีม & แบ่งงาน">🎯</a>
         <% } %>
+        <a href="/config" title="ตั้งค่า Shopee API & แชท">⚙️</a>
       </div>
       <div class="sidebar-spacer"></div>
       <div class="sidebar-avatar" title="<%= typeof currentUser !== 'undefined' && currentUser ? (currentUser.nickname || currentUser.name) : 'ผู้ดูแลบัญชี' %> / เปลี่ยนธีม"><%= avatarInitials %></div>
@@ -110,11 +111,15 @@
     let agentsCache = [];
     async function loadAgents() {
       try {
-        agentsCache = await (await fetch('/api/agents')).json();
+        const res = await fetch('/api/agents');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) agentsCache = data;
+        }
       } catch (err) { /* เงียบ — ใช้ cache เก่าไปก่อนถ้าโหลดไม่สำเร็จ */ }
     }
     function agentName(id) {
-      if (!id) return null;
+      if (!id || !Array.isArray(agentsCache)) return null;
       const a = agentsCache.find(x => String(x._id) === String(id));
       return a ? (a.nickname || a.name) : null;
     }
@@ -131,8 +136,8 @@
     let lastMessageCount = 0; // จำนวนข้อความตอนโหลดล่าสุด — ใช้ตรวจว่ามีของใหม่ไหม
     let pollConversationsTimer = null;
     let pollMessagesTimer = null;
-    const POLL_CONVERSATIONS_MS = 2000;
-    const POLL_MESSAGES_MS = 1000;
+    const POLL_CONVERSATIONS_MS = 4000;
+    const POLL_MESSAGES_MS = 2500;
 
     // Filter state — เก็นว่าเลือก platform/shop ไหนบ้าง (ตามแนวทาง Unified Inbox ที่คุณออกแบบ)
     // ค่าเริ่มต้นเปิดทุก platform ทุกร้าน (เหมือน "ทั้งหมด")
@@ -277,6 +282,7 @@
     let isInitialLoad = true;
     let prevConvHtml = '';
     let prevConvStateMap = new Map();
+    const cachedConversationsMap = new Map();
 
     async function loadConversations(isPoll = false) {
       // สร้าง query จาก filter ที่เลือก — platform และ shop_id คั่นด้วยจุลภาค
@@ -287,6 +293,9 @@
       const res = await fetch(`/api/conversations?${params.toString()}`);
       const conversations = await res.json();
       const filtered = conversations; // API กรองให้แล้ว ไม่ต้องกรองซ้ำฝั่ง client
+      if (Array.isArray(filtered)) {
+        filtered.forEach(c => cachedConversationsMap.set(c.conversation_id, c));
+      }
 
       loadCounts(); // ตัวเลขบน pill ต้องเป็นยอดจริงทั้งหมด ไม่ใช่แค่ที่โหลดมา (limit 100 ของ list ด้านบน)
 
@@ -404,128 +413,129 @@
       const list = document.getElementById('conversation-list');
       list.innerHTML = newHtml;
 
-      list.querySelectorAll('.conv-item').forEach(el => {
-        el.addEventListener('click', (e) => {
-          if (e.target.closest('.conv-pin-btn') || e.target.closest('.conv-mute-btn') || e.target.closest('.conv-dropdown-btn')) return;
-          openConversation(el.dataset.id);
-        });
-      });
-
-      const menuPopover = document.getElementById('conv-menu-popover');
-      let activeMenuConvId = null;
-
-      list.querySelectorAll('.conv-dropdown-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          const id = btn.dataset.id;
-          const isUnread = btn.dataset.unread === 'true';
-          const isPinned = btn.dataset.pinned === 'true';
-          const isMuted = btn.dataset.muted === 'true';
-          activeMenuConvId = id;
-
-          document.getElementById('popover-text-unread').textContent = isUnread ? 'Mark as Read' : 'Unread';
-          document.getElementById('popover-text-pin').textContent = isPinned ? 'Unpin Chat' : 'Pin Chat';
-          document.getElementById('popover-text-mute').textContent = isMuted ? 'Unmute' : 'Mute';
-
-          const rect = btn.getBoundingClientRect();
-          menuPopover.style.top = `${rect.bottom + window.scrollY + 4}px`;
-          menuPopover.style.left = `${Math.max(10, Math.min(rect.left + window.scrollX - 110, window.innerWidth - 170))}px`;
-          menuPopover.classList.add('open');
-        });
-      });
-
-      document.addEventListener('click', (e) => {
-        if (!e.target.closest('.conv-dropdown-btn') && !e.target.closest('#conv-menu-popover')) {
-          menuPopover.classList.remove('open');
-        }
-      });
-
-      document.getElementById('popover-item-unread').onclick = async () => {
-        if (!activeMenuConvId) return;
-        const isUnread = document.getElementById('popover-text-unread').textContent === 'Unread';
-        menuPopover.classList.remove('open');
-        try {
-          await fetch(`/api/conversations/${activeMenuConvId}/${isUnread ? 'unread' : 'read'}`, { method: 'POST' });
-          loadConversations();
-        } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
-      };
-
-      document.getElementById('popover-item-pin').onclick = async () => {
-        if (!activeMenuConvId) return;
-        const isPin = document.getElementById('popover-text-pin').textContent === 'Pin Chat';
-        menuPopover.classList.remove('open');
-        try {
-          await fetch(`/api/conversations/${activeMenuConvId}/${isPin ? 'pin' : 'unpin'}`, { method: 'POST' });
-          loadConversations();
-        } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
-      };
-
-      document.getElementById('popover-item-mute').onclick = async () => {
-        if (!activeMenuConvId) return;
-        const isMute = document.getElementById('popover-text-mute').textContent === 'Mute';
-        menuPopover.classList.remove('open');
-        try {
-          await fetch(`/api/conversations/${activeMenuConvId}/${isMute ? 'mute' : 'unmute'}`, { method: 'POST' });
-          loadConversations();
-          if (currentConversationId === activeMenuConvId) openConversation(activeMenuConvId);
-        } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
-      };
-
-      document.getElementById('popover-item-delete').onclick = async () => {
-        if (!activeMenuConvId) return;
-        const idToDelete = activeMenuConvId;
-        menuPopover.classList.remove('open');
-        if (!confirm('คุณต้องการลบแชทนี้ใช่หรือไม่? (การลบจะยิง delete_conversation ไป Shopee)')) return;
-        try {
-          await fetch(`/api/conversations/${idToDelete}`, { method: 'DELETE' });
-          if (currentConversationId === idToDelete) {
-            document.getElementById('thread-panel').innerHTML = '<p class="empty-state">เลือกแชทเพื่อดูข้อความ</p>';
-            currentConversationId = null;
+      if (window.gsap && isPoll && updatedConvIds.size > 0) {
+        updatedConvIds.forEach(id => {
+          const itemEl = list.querySelector(`.conv-item[data-id="${id}"]`);
+          if (itemEl) {
+            gsap.fromTo(itemEl, 
+              { backgroundColor: 'rgba(238, 77, 45, 0.2)' }, 
+              { backgroundColor: 'transparent', duration: 0.6, ease: 'power2.out' }
+            );
           }
-          loadConversations();
-        } catch (err) { alert('ลบไม่สำเร็จ: ' + err.message); }
-      };
-      list.querySelectorAll('.conv-mute-btn').forEach(btn => {
-        btn.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          const id = btn.dataset.muteId;
-          const isMuted = btn.dataset.muted === 'true';
-          const action = isMuted ? 'unmute' : 'mute';
-          try {
-            await fetch(`/api/conversations/${id}/${action}`, { method: 'POST' });
-            loadConversations();
-            if (currentConversationId === id) openConversation(id);
-          } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
         });
-      });
-      list.querySelectorAll('.conv-pin-btn').forEach(btn => {
-        btn.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          const id = btn.dataset.pinId;
-          const pinned = btn.dataset.pinned === 'true';
+      }
+      isInitialLoad = false;
+    }
+
+    // Event delegation สำหรับรายการแชททางด้านซ้าย — ลงทะเบียนครั้งเดียว ไม่ผูกซ้ำทุกรอบ poll
+    const convListEl = document.getElementById('conversation-list');
+    const menuPopover = document.getElementById('conv-menu-popover');
+    let activeMenuConvId = null;
+
+    convListEl.addEventListener('click', async (e) => {
+      const muteBtn = e.target.closest('.conv-mute-btn');
+      if (muteBtn) {
+        e.stopPropagation();
+        const id = muteBtn.dataset.muteId;
+        const isMuted = muteBtn.dataset.muted === 'true';
+        const action = isMuted ? 'unmute' : 'mute';
+        try {
+          await fetch(`/api/conversations/${id}/${action}`, { method: 'POST' });
+          loadConversations();
+          if (currentConversationId === id) openConversation(id);
+        } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
+        return;
+      }
+
+      const pinBtn = e.target.closest('.conv-pin-btn');
+      if (pinBtn) {
+        e.stopPropagation();
+        const id = pinBtn.dataset.pinId;
+        const pinned = pinBtn.dataset.pinned === 'true';
+        try {
           await fetch(`/api/conversations/${id}/${pinned ? 'unpin' : 'pin'}`, { method: 'POST' });
           loadConversations();
-        });
-      });
-
-      if (window.gsap) {
-        if (isInitialLoad || !isPoll) {
-          const items = list.querySelectorAll('.conv-item');
-          if (items.length) gsap.fromTo(items, { opacity: 0, x: -16 }, { opacity: 1, x: 0, duration: 0.3, stagger: 0.03, ease: 'power2.out' });
-          isInitialLoad = false;
-        } else if (isPoll && updatedConvIds.size > 0) {
-          updatedConvIds.forEach(id => {
-            const itemEl = list.querySelector(`.conv-item[data-id="${id}"]`);
-            if (itemEl) {
-              gsap.fromTo(itemEl, 
-                { backgroundColor: 'rgba(238, 77, 45, 0.25)', scale: 1.02 }, 
-                { backgroundColor: 'transparent', scale: 1, duration: 0.8, ease: 'power2.out' }
-              );
-            }
-          });
-        }
+        } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
+        return;
       }
-    }
+
+      const dropdownBtn = e.target.closest('.conv-dropdown-btn');
+      if (dropdownBtn) {
+        e.stopPropagation();
+        const id = dropdownBtn.dataset.id;
+        const isUnread = dropdownBtn.dataset.unread === 'true';
+        const isPinned = dropdownBtn.dataset.pinned === 'true';
+        const isMuted = dropdownBtn.dataset.muted === 'true';
+        activeMenuConvId = id;
+
+        document.getElementById('popover-text-unread').textContent = isUnread ? 'Mark as Read' : 'Unread';
+        document.getElementById('popover-text-pin').textContent = isPinned ? 'Unpin Chat' : 'Pin Chat';
+        document.getElementById('popover-text-mute').textContent = isMuted ? 'Unmute' : 'Mute';
+
+        const rect = dropdownBtn.getBoundingClientRect();
+        menuPopover.style.top = `${rect.bottom + window.scrollY + 4}px`;
+        menuPopover.style.left = `${Math.max(10, Math.min(rect.left + window.scrollX - 110, window.innerWidth - 170))}px`;
+        menuPopover.classList.add('open');
+        return;
+      }
+
+      const convItem = e.target.closest('.conv-item');
+      if (convItem && convItem.dataset.id) {
+        openConversation(convItem.dataset.id);
+      }
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.conv-dropdown-btn') && !e.target.closest('#conv-menu-popover')) {
+        menuPopover.classList.remove('open');
+      }
+    });
+
+    document.getElementById('popover-item-unread').onclick = async () => {
+      if (!activeMenuConvId) return;
+      const isUnread = document.getElementById('popover-text-unread').textContent === 'Unread';
+      menuPopover.classList.remove('open');
+      try {
+        await fetch(`/api/conversations/${activeMenuConvId}/${isUnread ? 'unread' : 'read'}`, { method: 'POST' });
+        loadConversations();
+      } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
+    };
+
+    document.getElementById('popover-item-pin').onclick = async () => {
+      if (!activeMenuConvId) return;
+      const isPin = document.getElementById('popover-text-pin').textContent === 'Pin Chat';
+      menuPopover.classList.remove('open');
+      try {
+        await fetch(`/api/conversations/${activeMenuConvId}/${isPin ? 'pin' : 'unpin'}`, { method: 'POST' });
+        loadConversations();
+      } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
+    };
+
+    document.getElementById('popover-item-mute').onclick = async () => {
+      if (!activeMenuConvId) return;
+      const isMute = document.getElementById('popover-text-mute').textContent === 'Mute';
+      menuPopover.classList.remove('open');
+      try {
+        await fetch(`/api/conversations/${activeMenuConvId}/${isMute ? 'mute' : 'unmute'}`, { method: 'POST' });
+        loadConversations();
+        if (currentConversationId === activeMenuConvId) openConversation(activeMenuConvId);
+      } catch (err) { alert('ทำรายการไม่สำเร็จ: ' + err.message); }
+    };
+
+    document.getElementById('popover-item-delete').onclick = async () => {
+      if (!activeMenuConvId) return;
+      const idToDelete = activeMenuConvId;
+      menuPopover.classList.remove('open');
+      if (!confirm('คุณต้องการลบแชทนี้ใช่หรือไม่? (การลบจะยิง delete_conversation ไป Shopee)')) return;
+      try {
+        await fetch(`/api/conversations/${idToDelete}`, { method: 'DELETE' });
+        if (currentConversationId === idToDelete) {
+          document.getElementById('thread-panel').innerHTML = '<p class="empty-state">เลือกแชทเพื่อดูข้อความ</p>';
+          currentConversationId = null;
+        }
+        loadConversations();
+      } catch (err) { alert('ลบไม่สำเร็จ: ' + err.message); }
+    };
 
     // ⚠️ ข้อมูล order/item ใน Shopee message content มีแค่ order_sn/item_id (reference)
     // ไม่มีชื่อสินค้า/ราคา/สถานะจริง — ต้องเรียก get_order_detail/get_item_base_info เพิ่มถึงจะได้
@@ -684,32 +694,34 @@
 
     async function openConversation(id) {
       currentConversationId = id;
-      prevConvHtml = '';
       document.querySelectorAll('#conversation-list .conv-item').forEach(el => el.classList.toggle('active', el.dataset.id === id));
-      const [convRes, msgRes] = await Promise.all([
-        fetch(`/api/conversations/${id}`),
-        fetch(`/api/conversations/${id}/messages`),
-      ]);
-      // ผู้ใช้อาจสลับไปแชทอื่นระหว่างที่ fetch นี้ยังไม่เสร็จ (network ช้า/ไม่แน่นอน)
-      // ถ้า currentConversationId ไม่ตรงกับ id ที่ fetch นี้ขอไว้ แปลว่า response นี้ล้าสมัยแล้ว ห้าม render ทับ
-      if (currentConversationId !== id) return;
-      const conv = convRes.ok ? await convRes.json() : null;
-      if (currentConversationId !== id) return;
-      currentConv = conv;
-      const messages = await msgRes.json();
-      if (currentConversationId !== id) return;
+      const cachedConv = cachedConversationsMap.get(id);
+      if (cachedConv) {
+        currentConv = cachedConv;
+        openInfoPanel(cachedConv);
+      }
+      try {
+        const [convRes, msgRes] = await Promise.all([
+          fetch(`/api/conversations/${id}`),
+          fetch(`/api/conversations/${id}/messages`),
+        ]);
+        if (currentConversationId !== id) return;
+        const conv = convRes.ok ? await convRes.json() : (cachedConv || null);
+        if (currentConversationId !== id) return;
+        currentConv = conv;
 
-      const panel = document.getElementById('thread-panel');
-      const plat = platformOf(conv);
-      const canSend = window.ENABLE_SEND_MESSAGE === true;
-      const canMarkRead = window.ENABLE_MARK_READ === true;
-      const unread = conv && conv.unread_count > 0;
-      const isClosed = conv && conv.status === 'closed';
-      // 🛍️ "ผู้ซื้อกำลังสอบถามเกี่ยวกับสินค้าต่อไปนี้" — Shopee แนบ source_content.item_id มากับ "ทุก" ข้อความขาเข้า
-      // (ไม่ใช่แค่ message_type: item — เช่น sticker/text ก็มีติดมาด้วย) เป็น context ว่าตอนนั้นลูกค้ากำลังดู/คุยเรื่องสินค้าไหนอยู่
-      // ใช้ message ขาเข้าล่าสุดที่มี source_content.item_id ติดมา — ยืนยันแล้วว่าตรงกับที่ Shopee Seller Centre แสดงจริง
-      const inquiryItem = [...messages].reverse().find(m => m.direction === 'in' && m.raw_payload && m.raw_payload.source_content && m.raw_payload.source_content.item_id);
-      const inquiryItemId = inquiryItem && inquiryItem.raw_payload.source_content.item_id;
+        const rawMessages = msgRes.ok ? await msgRes.json() : [];
+        const messages = Array.isArray(rawMessages) ? rawMessages : [];
+        if (currentConversationId !== id) return;
+
+        const panel = document.getElementById('thread-panel');
+        const plat = platformOf(conv);
+        const canSend = window.ENABLE_SEND_MESSAGE === true;
+        const canMarkRead = window.ENABLE_MARK_READ === true;
+        const unread = conv && conv.unread_count > 0;
+        const isClosed = conv && conv.status === 'closed';
+        const inquiryItem = [...messages].reverse().find(m => m.direction === 'in' && m.raw_payload && m.raw_payload.source_content && m.raw_payload.source_content.item_id);
+        const inquiryItemId = inquiryItem && inquiryItem.raw_payload.source_content.item_id;
       panel.innerHTML = `
         <div class="thread-header">
           <div class="thread-header-left">
@@ -730,7 +742,7 @@
             ${unread ? `<button class="btn-pill" id="mark-read-btn" title="${canMarkRead ? 'อ่านแล้ว (sync ไป Shopee)' : 'อ่านแล้ว (local DB เท่านั้น — ENABLE_MARK_READ=false)'}">✓ อ่านแล้ว</button>` : ''}
             <select class="btn-pill" id="assign-select" title="มอบหมายแชทนี้ให้แอดมิน (หมุนคิวอัตโนมัติอยู่แล้ว — ใช้ตรงนี้เฉพาะตอนอยากย้ายมือเอง)">
               <option value="">👤 มอบหมาย</option>
-              ${agentsCache.map(a => `<option value="${esc(a._id)}" ${conv && String(conv.assigned_to) === String(a._id) ? 'selected' : ''}>${a.presence === 'online' ? '🟢' : a.presence === 'idle' ? '🟡' : '⚪'} ${esc(a.nickname || a.name)}${a.isActiveAgent ? '' : ' (พักอยู่)'}</option>`).join('')}
+              ${(Array.isArray(agentsCache) ? agentsCache : []).map(a => `<option value="${esc(a._id)}" ${conv && String(conv.assigned_to) === String(a._id) ? 'selected' : ''}>${a.presence === 'online' ? '🟢' : a.presence === 'idle' ? '🟡' : '⚪'} ${esc(a.nickname || a.name)}${a.isActiveAgent ? '' : ' (พักอยู่)'}</option>`).join('')}
             </select>
             <button class="btn-pill ${isClosed ? 'btn-pill-accent' : ''}" id="close-toggle-btn" title="${isClosed ? 'เปิดการสนทนาอีกครั้ง' : 'ปิดการสนทนา'}">${isClosed ? '↺ เปิดใหม่' : '✕ ปิดการสนทนา'}</button>
             ${canSend ? '' : '<span class="readonly-tag">ส่งปิดอยู่</span>'}
@@ -818,6 +830,11 @@
       const scroll = document.getElementById('messages-scroll');
       scroll.scrollTop = scroll.scrollHeight;
       loadProductDetailsAsync();
+
+      // ✨ Ultra-smooth, non-blocking fade for thread panel
+      if (window.gsap) {
+        gsap.fromTo('.thread-panel', { opacity: 0.9 }, { opacity: 1, duration: 0.12, ease: 'power1.out' });
+      }
 
       // 🛍️ ย่อ/ขยาย banner "ผู้ซื้อกำลังสอบถามเกี่ยวกับสินค้าต่อไปนี้"
       const inquiryToggleBtn = document.getElementById('buyer-inquiry-toggle');
@@ -953,13 +970,18 @@
           try {
             const res = await fetch(`/api/conversations/${id}/reply`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
               body: JSON.stringify({ text }),
             });
-            const data = await res.json();
+            if (res.status === 401) {
+              window.location.href = `/auth/login?returnTo=${encodeURIComponent(window.location.pathname)}`;
+              return;
+            }
+            const contentType = res.headers.get('content-type') || '';
+            const data = contentType.includes('application/json') ? await res.json() : {};
             if (!res.ok) {
               // error จาก Shopee business rules (megaplan ข้อ 2.2) หรือ guard ฝั่งเรา — คืนข้อความกลับช่องพิมพ์ให้ ไม่ให้หายไปเฉยๆ
-              const msg = data.message || data.error || 'ส่งไม่สำเร็จ';
+              const msg = data.message || data.error || (contentType.includes('application/json') ? 'ส่งไม่สำเร็จ' : 'เซสชันหมดอายุ กรุณารีเฟรชหน้าเว็บหรือเข้าสู่ระบบใหม่');
               errorBox.textContent = '⚠️ ' + msg;
               errorBox.style.display = 'block';
               if (window.gsap) gsap.fromTo(errorBox, { opacity: 0, y: -5 }, { opacity: 1, y: 0, duration: 0.3 });
@@ -1033,14 +1055,19 @@
                 sendBtn.disabled = true;
                 const res = await fetch(`/api/conversations/${id}/send-image`, {
                   method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
+                  headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
                   body: JSON.stringify({ base64 }),
                 });
-                const data = await res.json();
+                if (res.status === 401) {
+                  window.location.href = `/auth/login?returnTo=${encodeURIComponent(window.location.pathname)}`;
+                  return;
+                }
+                const contentType = res.headers.get('content-type') || '';
+                const data = contentType.includes('application/json') ? await res.json() : {};
                 if (res.ok) {
                   openConversation(id);
                 } else {
-                  alert('ส่งรูปภาพไม่สำเร็จ: ' + (data.message || data.error));
+                  alert('ส่งรูปภาพไม่สำเร็จ: ' + (data.message || data.error || (contentType.includes('application/json') ? 'เกิดข้อผิดพลาด' : 'เซสชันหมดอายุ')));
                 }
               } catch (err) {
                 alert('ส่งรูปภาพไม่สำเร็จ: ' + err.message);
@@ -1068,14 +1095,19 @@
                 sendBtn.disabled = true;
                 const res = await fetch(`/api/conversations/${id}/send-video`, {
                   method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
+                  headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
                   body: JSON.stringify({ video_data }),
                 });
-                const data = await res.json();
+                if (res.status === 401) {
+                  window.location.href = `/auth/login?returnTo=${encodeURIComponent(window.location.pathname)}`;
+                  return;
+                }
+                const contentType = res.headers.get('content-type') || '';
+                const data = contentType.includes('application/json') ? await res.json() : {};
                 if (res.ok) {
                   openConversation(id);
                 } else {
-                  alert('ส่งวิดีโอไม่สำเร็จ: ' + (data.message || data.error));
+                  alert('ส่งวิดีโอไม่สำเร็จ: ' + (data.message || data.error || (contentType.includes('application/json') ? 'เกิดข้อผิดพลาด' : 'เซสชันหมดอายุ')));
                 }
               } catch (err) {
                 alert('ส่งวิดีโอไม่สำเร็จ: ' + err.message);
@@ -1119,15 +1151,20 @@
                 try {
                   const res = await fetch(`/api/conversations/${id}/send-item`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
                     body: JSON.stringify({ item_id: itemId }),
                   });
-                  const data = await res.json();
+                  if (res.status === 401) {
+                    window.location.href = `/auth/login?returnTo=${encodeURIComponent(window.location.pathname)}`;
+                    return;
+                  }
+                  const contentType = res.headers.get('content-type') || '';
+                  const data = contentType.includes('application/json') ? await res.json() : {};
                   if (res.ok) {
                     productPicker.style.display = 'none';
                     openConversation(id);
                   } else {
-                    alert('ส่งสินค้าไม่สำเร็จ: ' + (data.message || data.error));
+                    alert('ส่งสินค้าไม่สำเร็จ: ' + (data.message || data.error || (contentType.includes('application/json') ? 'เกิดข้อผิดพลาด' : 'เซสชันหมดอายุ')));
                     productPickerList.querySelectorAll('.product-pick-item').forEach(b => b.disabled = false);
                   }
                 } catch (err) {
@@ -1201,6 +1238,13 @@
       // โฟกัสช่องพิมพ์ให้พร้อมพิมพ์ทันที (เปิดแชทใหม่ / ส่งข้อความเสร็จแล้ว)
       const inputToFocus = document.getElementById('composer-input');
       if (inputToFocus) inputToFocus.focus();
+      } catch (err) {
+        console.error('Error in openConversation:', err);
+        const panel = document.getElementById('thread-panel');
+        if (panel && currentConversationId === id) {
+          panel.innerHTML = `<p class="empty-state" style="color:var(--danger, #ff4d4f);">เกิดข้อผิดพลาดในการโหลดข้อความ: ${esc(err.message)}</p>`;
+        }
+      }
     }
 
     function openInfoPanel(conv) {
@@ -1247,6 +1291,15 @@
           <div class="flow-list" id="flow-list"><div class="flow-empty">กำลังโหลด flow…</div></div>
         </div>
       `;
+
+      // ✨ GSAP Animation สำหรับ Info Panel ฝั่งขวา
+      if (window.gsap) {
+        gsap.fromTo(panel, { opacity: 0, x: 10 }, { opacity: 1, x: 0, duration: 0.22, ease: 'power2.out' });
+        const sections = panel.querySelectorAll('.info-section');
+        if (sections.length) {
+          gsap.fromTo(sections, { opacity: 0, y: 6 }, { opacity: 1, y: 0, duration: 0.18, stagger: 0.03, ease: 'power2.out' });
+        }
+      }
 
       // แท็ก — เพิ่ม/ลบ แล้วบันทึกลง DB ทันที (local field ไม่เกี่ยวกับ Shopee)
       async function saveTags(newTags) {
@@ -1361,6 +1414,9 @@
 
     document.querySelectorAll('.quick-view-pill').forEach(btn => {
       btn.addEventListener('click', () => {
+        if (window.gsap) {
+          gsap.fromTo(btn, { scale: 0.94 }, { scale: 1, duration: 0.2, ease: 'back.out(2)' });
+        }
         document.querySelectorAll('.quick-view-pill').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         currentType = btn.dataset.type;
@@ -1420,6 +1476,9 @@
             div.className = msgRowClass(m);
             div.innerHTML = `${renderMessageBody(m)}${renderMessageStatusHtml(m)}`;
             scroll.appendChild(div);
+            if (window.gsap) {
+              gsap.fromTo(div, { opacity: 0, y: 10, scale: 0.96 }, { opacity: 1, y: 0, scale: 1, duration: 0.25, ease: 'back.out(1.5)' });
+            }
           }
           lastMessageCount = messages.length;
           loadProductDetailsAsync();
@@ -1628,14 +1687,5 @@
 
   <%- include('partials/status-bar') %>
   <%- include('partials/theme-script') %>
-
-  <script>
-    // GSAP animations เฉพาะ inbox — ทำงานหลัง theme-script โหลด gsap
-    document.addEventListener('DOMContentLoaded', () => {
-      if (!window.gsap) return;
-      gsap.fromTo('.thread-panel', { opacity: 0 }, { opacity: 1, duration: 0.4, ease: 'power2.out', delay: 0.2 });
-      gsap.fromTo('.ticket-list-panel', { opacity: 0, x: -20 }, { opacity: 1, x: 0, duration: 0.4, ease: 'power2.out', delay: 0.1 });
-    });
-  </script>
 </body>
 </html>

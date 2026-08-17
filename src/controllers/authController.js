@@ -147,4 +147,19 @@ function logout(req, res) {
   });
 }
 
-module.exports = { showLogin, redirectToSellcenter, callback, logout };
+// GET /auth/dev-login — ล็อกอินด่วนสำหรับสภาพแวดล้อม Local / Dev
+async function devLogin(req, res) {
+  try {
+    const user = await User.findOne({ role: 'admin', isDeleted: false }) || await User.findOne({ isDeleted: false });
+    if (!user) {
+      return renderLoginPage(res, 'ไม่พบบัญชีผู้ใช้ในระบบ');
+    }
+    req.session.userId = user._id.toString();
+    const returnTo = req.query.returnTo || '/inbox';
+    res.redirect(returnTo && returnTo.startsWith('/') ? returnTo : '/inbox');
+  } catch (err) {
+    renderLoginPage(res, 'เกิดข้อผิดพลาดในการเข้าสู่ระบบ: ' + err.message);
+  }
+}
+
+module.exports = { showLogin, redirectToSellcenter, callback, logout, devLogin };

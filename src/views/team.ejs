@@ -41,6 +41,7 @@
         <a href="/contacts" title="ผู้ติดต่อ">👥</a>
         <a href="/shops" title="ร้านค้า">🏪</a>
         <a href="/team" class="active" title="ทีม & แบ่งงาน">🎯</a>
+        <a href="/config" title="ตั้งค่า Shopee API & แชท">⚙️</a>
       </div>
       <div class="sidebar-spacer"></div>
       <div class="sidebar-avatar" title="<%= typeof currentUser !== 'undefined' && currentUser ? (currentUser.nickname || currentUser.name) : 'ผู้ดูแลบัญชี' %> / เปลี่ยนธีม"><%= avatarInitials %></div>
@@ -159,9 +160,16 @@
 
     // ===== รายชื่อ agent =====
     async function loadAgents() {
-      agentsCache = await (await fetch('/api/agents')).json();
+      try {
+        const res = await fetch('/api/agents');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) agentsCache = data;
+        }
+      } catch (err) { /* ignore */ }
+      const list = Array.isArray(agentsCache) ? agentsCache : [];
       const tbody = document.getElementById('agents-tbody');
-      tbody.innerHTML = agentsCache.map((a) => {
+      tbody.innerHTML = list.map((a) => {
         const canManage = CAN_MANAGE_TEAM || String(a._id) === CURRENT_USER_ID;
         return `
           <tr>
@@ -191,14 +199,21 @@
 
       // เติม dropdown "เพิ่มเข้าเป็นทีม" ด้วย (ใช้ cache เดียวกัน)
       const addSelect = document.getElementById('add-agent-select');
-      addSelect.innerHTML = agentsCache.map((a) => `<option value="${a._id}">${a.nickname || a.name}</option>`).join('');
+      addSelect.innerHTML = list.map((a) => `<option value="${a._id}">${a.nickname || a.name}</option>`).join('');
     }
 
     // ===== จัดทีมต่อร้าน =====
     async function loadShops() {
-      shopsCache = await (await fetch('/api/shops')).json();
+      try {
+        const res = await fetch('/api/shops');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) shopsCache = data;
+        }
+      } catch (err) { /* ignore */ }
+      const list = Array.isArray(shopsCache) ? shopsCache : [];
       const sel = document.getElementById('shop-select');
-      sel.innerHTML = shopsCache.map((s) => `<option value="${s.shop_id}">${s.shop_name || s.shopname || s.shop_id} (${s.platform})</option>`).join('');
+      sel.innerHTML = list.map((s) => `<option value="${s.shop_id}">${s.shop_name || s.shopname || s.shop_id} (${s.platform})</option>`).join('');
       sel.addEventListener('change', loadShopTeam);
     }
     async function loadShopTeam() {

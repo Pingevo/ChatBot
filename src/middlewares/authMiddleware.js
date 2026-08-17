@@ -9,16 +9,41 @@ function computeInitials(name) {
 }
 
 async function loadUser(req, res, next) {
-  if (req.session && req.session.userId) {
-    req.user = await User.findOne({ _id: req.session.userId, isDeleted: false });
+  try {
+    if (req.session && req.session.userId) {
+      req.user = await User.findOne({ _id: req.session.userId, isDeleted: false });
+    }
+    
+    // ⚡ Auto-login: หากรันบน localhost / dev หรือตั้งค่า DEV_AUTO_LOGIN=true
+    // ให้ล็อกอินด้วยบัญชี Admin อัตโนมัติ เพื่อไม่ให้ผู้ใช้ต้องมากดล็อกอินซ้ำๆ ตลอดเวลา
+    const shouldAutoLogin = process.env.DEV_AUTO_LOGIN !== 'false' && (process.env.NODE_ENV !== 'production' || process.env.DEV_AUTO_LOGIN === 'true');
+    if (!req.user && shouldAutoLogin) {
+      const defaultAdmin = await User.findOne({ role: 'admin', isDeleted: false }) || await User.findOne({ isDeleted: false });
+      if (defaultAdmin) {
+        req.user = defaultAdmin;
+        if (req.session) {
+          req.session.userId = defaultAdmin._id.toString();
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[authMiddleware] loadUser error:', err.message);
   }
+
   res.locals.currentUser = req.user || null;
   res.locals.avatarInitials = req.user ? computeInitials(req.user.name) : 'CS';
   next();
 }
 
 function isAjaxRequest(req) {
-  return req.xhr || (req.headers.accept && req.headers.accept.includes('application/json'));
+  return Boolean(
+    req.xhr ||
+    (req.headers.accept && req.headers.accept.includes('application/json')) ||
+    (req.headers['content-type'] && req.headers['content-type'].includes('application/json')) ||
+    (req.path && req.path.startsWith('/api')) ||
+    (req.baseUrl && req.baseUrl.startsWith('/api')) ||
+    (req.originalUrl && req.originalUrl.startsWith('/api'))
+  );
 }
 
 function requireAuth(req, res, next) {

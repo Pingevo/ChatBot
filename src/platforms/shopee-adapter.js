@@ -1,6 +1,7 @@
 const BaseChatAdapter = require('./base-adapter');
 const { signShopLevel, PARTNER_ID } = require('../services/shopeeSign');
 const { getValidAccessToken } = require('../services/tokenReader');
+const { getSystemConfig } = require('../services/configService');
 const RequestLog = require('../models/RequestLog');
 
 // ⚠️ ใช้ json-bigint แทน JSON.parse ธรรมดา — message_id/conversation_id เป็น int64
@@ -73,6 +74,12 @@ async function callSellerChatApi(shop, apiName, { method = 'GET', query = {}, bo
 
 class ShopeeAdapter extends BaseChatAdapter {
   async fetchConversations(shop, { cursor = null, direction = 'latest', type = 'all' } = {}) {
+    const config = await getSystemConfig();
+    if (!config.shopee_live_read_enabled) {
+      // ⚠️ โหมดไม่อ่านข้อมูลจริงจาก Shopee API — ข้ามการยิง API คืนค่าว่าง เพื่อให้ระบบใช้ข้อมูลใน Local DB เท่านั้น
+      return { conversations: [], nextCursor: null, hasMore: false };
+    }
+
     const query = { direction, type, page_size: 25, business_type: 0 };
     if (cursor && cursor.next_timestamp_nano) {
       query.next_timestamp_nano = cursor.next_timestamp_nano;
@@ -86,11 +93,20 @@ class ShopeeAdapter extends BaseChatAdapter {
   }
 
   async fetchOneConversation(shop, conversationId) {
+    const config = await getSystemConfig();
+    if (!config.shopee_live_read_enabled) {
+      return null;
+    }
     const query = { conversation_id: conversationId, business_type: 0 };
     return callSellerChatApi(shop, 'get_one_conversation', { query });
   }
 
   async fetchMessages(shop, conversationId, { offset = null, pageSize = 25 } = {}) {
+    const config = await getSystemConfig();
+    if (!config.shopee_live_read_enabled) {
+      return { messages: [], nextOffset: null };
+    }
+
     const query = { conversation_id: conversationId, page_size: pageSize, business_type: 0 };
     if (offset) query.offset = offset;
     const response = await callSellerChatApi(shop, 'get_message', { query });
@@ -101,9 +117,21 @@ class ShopeeAdapter extends BaseChatAdapter {
   }
 
   async sendMessage(shop, { toId, conversationId, messageType, content, sourceContent } = {}) {
-    if (process.env.ENABLE_SEND_MESSAGE !== 'true') {
-      throw new Error('ENABLE_SEND_MESSAGE is off — kill switch active (megaplan ข้อ 12)');
+    const config = await getSystemConfig();
+    if (!config.shopee_live_send_enabled) {
+      if (config.mock_mode_enabled) {
+        // โหมดจำลอง Mock — คืน mock response กลับไปให้บันทึกลง local DB
+        return {
+          message_id: 'mock-out-' + Date.now(),
+          conversation_id: String(conversationId || 'mock-conv-' + toId),
+          to_id: String(toId),
+          created_timestamp: Math.floor(Date.now() / 1000),
+          status: 'sent',
+        };
+      }
+      throw new Error('Shopee Live Send is disabled in API Configuration');
     }
+
     const body = {
       // ⚠️ to_id และ conversation_id เป็น int64 — ต้องส่งเป็น BigInt เพื่อรักษา precision
       // JSONbig.stringify จะแปลง BigInt เป็น number ใน JSON โดยไม่สูญเสีย precision (megaplan ข้อ 3.1)
@@ -118,6 +146,12 @@ class ShopeeAdapter extends BaseChatAdapter {
   }
 
   async markRead(shop, conversationId, lastReadMessageId) {
+    const config = await getSystemConfig();
+    if (!config.shopee_live_mark_read_enabled) {
+      if (config.mock_mode_enabled) return { ok: true, mock: true };
+      return { ok: false, skipped: 'live_mark_read_disabled' };
+    }
+
     const body = {
       conversation_id: BigInt(conversationId),
     };
@@ -131,6 +165,10 @@ class ShopeeAdapter extends BaseChatAdapter {
   }
 
   async pinConversation(shop, conversationId, pinned) {
+    const config = await getSystemConfig();
+    if (!config.shopee_live_pin_enabled) {
+      return { ok: true, local_only: true };
+    }
     const apiName = pinned ? 'pin_conversation' : 'unpin_conversation';
     return callSellerChatApi(shop, apiName, { method: 'POST', body: { conversation_id: BigInt(conversationId) } });
   }

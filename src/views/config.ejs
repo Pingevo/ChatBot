@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shopee API Config & Channel Control — Unified Chat</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <style>
+    .config-page { flex: 1; padding: 32px 40px; overflow-y: auto; background: var(--page-bg); }
+    .config-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; flex-wrap: wrap; gap: 16px; }
+    .config-header h1 { font-family: 'Space Grotesk', sans-serif; font-size: 22px; margin: 0 0 4px; }
+    .config-header-badges { display: flex; gap: 10px; align-items: center; }
+
+    .status-badge-lg {
+      display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px;
+      border-radius: 20px; font-size: 13px; font-weight: 600;
+    }
+    .badge-live-on { background: rgba(34, 197, 94, 0.15); color: #16a34a; border: 1px solid rgba(34, 197, 94, 0.3); }
+    .badge-live-off { background: rgba(239, 68, 68, 0.15); color: #dc2626; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .badge-mock { background: rgba(59, 130, 246, 0.15); color: #2563eb; border: 1px solid rgba(59, 130, 246, 0.3); }
+
+    .config-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(460px, 1fr)); gap: 22px; margin-bottom: 24px; }
+    @media (max-width: 992px) { .config-grid { grid-template-columns: 1fr; } }
+
+    .config-card {
+      background: var(--panel-bg); border: 1px solid var(--border); border-radius: 14px;
+      padding: 22px 24px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+      display: flex; flex-direction: column;
+    }
+    .config-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+    .config-card-title { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; margin: 0; }
+    .config-card-hint { font-size: 12.5px; color: var(--text-tertiary); margin-bottom: 16px; line-height: 1.5; }
+
+    /* Switch item styling */
+    .switch-list { display: flex; flex-direction: column; gap: 14px; }
+    .switch-item {
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      padding: 12px 14px; background: var(--input-bg); border: 1px solid var(--border);
+      border-radius: 10px; transition: all 0.2s ease;
+    }
+    .switch-item:hover { border-color: var(--accent); }
+    .switch-info { flex: 1; }
+    .switch-title { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 6px; }
+    .switch-desc { font-size: 12px; color: var(--text-tertiary); margin-top: 3px; }
+
+    /* Toggle Switch UI */
+    .toggle-switch {
+      position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0;
+    }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider {
+      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+      background-color: var(--border); transition: .3s; border-radius: 24px;
+    }
+    .toggle-slider:before {
+      position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px;
+      background-color: white; transition: .3s; border-radius: 50%;
+    }
+    input:checked + .toggle-slider { background-color: var(--accent); }
+    input:checked + .toggle-slider:before { transform: translateX(20px); }
+
+    /* Tables */
+    .config-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+    .config-table th, .config-table td { padding: 12px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+    .config-table th { color: var(--text-secondary); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+
+    /* Diagnostic box */
+    .diag-box {
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px; margin-top: 12px; font-family: monospace; font-size: 12.5px;
+      max-height: 220px; overflow-y: auto; white-space: pre-wrap; line-height: 1.6;
+    }
+    .diag-item { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed var(--border); }
+    .diag-item:last-child { border-bottom: none; }
+
+    /* Form controls in simulator */
+    .sim-form { display: flex; flex-direction: column; gap: 12px; }
+    .sim-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 600px) { .sim-row { grid-template-columns: 1fr; } }
+    .sim-label { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); margin-bottom: 4px; }
+    .sim-input, .sim-select, .sim-textarea {
+      width: 100%; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--input-bg); color: var(--text-primary); font-size: 13px; box-sizing: border-box;
+    }
+    .sim-textarea { resize: vertical; min-height: 60px; }
+
+    .btn-save-wrap { margin-top: 18px; display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+    .save-status { font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+
+    .copy-chip {
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 6px;
+      padding: 4px 8px; font-family: monospace; font-size: 11.5px; display: inline-flex;
+      align-items: center; gap: 6px; cursor: pointer;
+    }
+    .copy-chip:hover { border-color: var(--accent); color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <nav class="sidebar">
+      <div class="sidebar-logo">Z</div>
+      <div class="sidebar-nav">
+        <a href="/dashboard" title="แดชบอร์ด">📊</a>
+        <a href="/inbox" title="แชท">💬</a>
+        <a href="/contacts" title="ผู้ติดต่อ">👥</a>
+        <a href="/shops" title="ร้านค้า">🏪</a>
+        <% if (typeof currentUser !== 'undefined' && currentUser && (currentUser.role === 'admin' || currentUser.role === 'lead')) { %>
+          <a href="/team" title="ทีม & แบ่งงาน">🎯</a>
+        <% } %>
+        <a href="/config" class="active" title="ตั้งค่า Shopee API & แชท">⚙️</a>
+      </div>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-avatar" title="<%= typeof currentUser !== 'undefined' && currentUser ? (currentUser.nickname || currentUser.name) : 'ผู้ดูแลบัญชี' %> / เปลี่ยนธีม"><%= avatarInitials %></div>
+    </nav>
+
+    <div class="config-page">
+      <div class="config-header">
+        <div>
+          <h1>Shopee API Configuration & Integration</h1>
+          <p class="hint" style="margin:0;">ควบคุมการเชื่อมต่อ Shopee API, สลับโหมดอ่านข้อมูลจริง/ออฟไลน์ และจัดการช่องแชทแยกรายร้าน</p>
+        </div>
+        <div class="config-header-badges">
+          <span id="badge-live-status" class="status-badge-lg badge-live-off">● ตรวจสอบสถานะ...</span>
+          <span id="badge-mock-status" class="status-badge-lg badge-mock" style="display:none;">🧪 Mock Mode</span>
+        </div>
+      </div>
+
+      <!-- Quick Save bar if changes occur -->
+      <div class="config-card" style="margin-bottom: 20px; padding: 14px 20px; background: rgba(var(--accent-rgb, 238, 77, 45), 0.06); border-color: var(--accent);">
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+          <div style="font-size: 13.5px; font-weight: 600;">
+            ⚙️ การตั้งค่าในหน้านี้มีผลทันทีในระดับระบบ (Runtime Configuration) โดยไม่ต้องรีสตาร์ทเซิร์ฟเวอร์
+          </div>
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <span id="global-save-status" class="save-status"></span>
+            <button type="button" class="btn-pill btn-pill-accent" id="btn-save-all-config" style="padding: 8px 18px; font-size: 13px;">💾 บันทึกการตั้งค่าทั้งหมด</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="config-grid">
+        <!-- 1. Master Live API Switches -->
+        <div class="config-card">
+          <div class="config-card-header">
+            <h2 class="config-card-title">📡 สวิตช์การสื่อสาร Shopee API (Master Switches)</h2>
+          </div>
+          <div class="config-card-hint">
+            ควบคุมการยิง API ตรงไปยัง Shopee หากต้องการทดสอบระบบโดย<b>ไม่อ่านข้อมูลจริงจาก Shopee</b> ให้ปิด "อ่านข้อมูลจริงจาก Shopee API"
+          </div>
+          
+          <div class="switch-list">
+            <div class="switch-item">
+              <div class="switch-info">
+                <div class="switch-title">📥 อ่านข้อมูลจริงจาก Shopee API (Live Read)</div>
+                <div class="switch-desc">เมื่อ<b>ปิด</b> ระบบจะไม่อ่าน/ไม่ยิง API ไป Shopee แต่จะใช้ข้อมูลที่บันทึกอยู่ใน Local DB เท่านั้น (ประหยัดโควต้า & ปลอดภัย)</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="switch-shopee-live-read">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+
+            <div class="switch-item">
+              <div class="switch-info">
+                <div class="switch-title">📤 ส่งข้อความออกไปยัง Shopee จริง (Live Send)</div>
+                <div class="switch-desc">อนุญาตให้แอดมินส่งข้อความออกไปยังแชท Shopee ของลูกค้าจริงผ่าน Shopee Open API</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="switch-shopee-live-send">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+
+            <div class="switch-item">
+              <div class="switch-info">
+                <div class="switch-title">✓ มาร์คอ่านแล้วไปยัง Shopee จริง (Live Mark Read)</div>
+                <div class="switch-desc">ส่งคำสั่ง read_conversation เพื่อลดตัวเลข Unread บน Seller Centre ของ Shopee</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="switch-shopee-live-mark-read">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+
+            <div class="switch-item">
+              <div class="switch-info">
+                <div class="switch-title">📌 ปักหมุดแชทไปยัง Shopee จริง (Live Pin)</div>
+                <div class="switch-desc">ซิงก์สถานะ Pin / Unpin ไปยัง Shopee API</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="switch-shopee-live-pin">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+
+            <div class="switch-item" style="border-color: rgba(59, 130, 246, 0.4); background: rgba(59, 130, 246, 0.04);">
+              <div class="switch-info">
+                <div class="switch-title" style="color: #2563eb;">🧪 โหมดจำลองข้อมูล (Mock Mode สำหรับทีมพัฒนา)</div>
+                <div class="switch-desc">จำลองการตอบกลับและส่งข้อความอัตโนมัติโดยไม่ยิง Shopee API เหมาะสำหรับทดสอบ UI/UX และโฟลว์แชท</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="switch-mock-mode">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. Background Sync & Worker Switches -->
+        <div class="config-card">
+          <div class="config-card-header">
+            <h2 class="config-card-title">⚙️ กลไกการซิงก์ & Background Workers</h2>
+          </div>
+          <div class="config-card-hint">
+            กำหนดการทำงานของ Background Process ในการซิงก์ข้อความและรับ Event
+          </div>
+
+          <div class="switch-list">
+            <div class="switch-item">
+              <div class="switch-info">
+                <div class="switch-title">🔄 Polling Worker (get_conversation_list & get_message)</div>
+                <div class="switch-desc">ดึงรอบตกหล่นจาก Shopee API เป็นระยะ (ใช้ร่วมกับคำสั่ง <code>npm run poll</code>)</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="switch-shopee-poll">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+
+            <div class="switch-item">
+              <div class="switch-info">
+                <div class="switch-title">⚡ Webhook Worker (Push Queue Consumer)</div>
+                <div class="switch-desc">ดึงคิว PushEvent (Code 10) ที่ Forward มาแปลงเป็นข้อความเข้าสู่ระบบแบบเรียลไทม์</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="switch-shopee-webhook-worker">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+
+            <div class="switch-item">
+              <div class="switch-info">
+                <div class="switch-title">🗄️ Background Sync จาก Sellcenter DB (dbWallet)</div>
+                <div class="switch-desc">อ่านข้อความที่ Sellcenter เก็บไว้มา Mirror ลง DB ของ Chat Center โดยตรงแบบ Read-only</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="switch-shopee-background-sync">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+
+            <div style="margin-top: 12px; padding: 14px; background: var(--input-bg); border-radius: 10px; border: 1px solid var(--border);">
+              <div style="font-size: 13px; font-weight: 600; margin-bottom: 6px;">⏱️ ระยะเวลารอบ Polling (Poll Interval)</div>
+              <div style="display: flex; gap: 10px; align-items: center;">
+                <input type="number" id="input-poll-interval" class="sim-input" style="width: 140px;" min="2000" step="1000" value="20000">
+                <span style="font-size: 12.5px; color: var(--text-secondary);">มิลลิวินาที (ms)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. Shop Channels Management -->
+      <div class="config-card" style="margin-bottom: 24px;">
+        <div class="config-card-header">
+          <div>
+            <h2 class="config-card-title">🏪 การเปิด/ปิดช่องทางแชทแยกตามร้านค้า (Shop Channels Control)</h2>
+            <div class="config-card-hint" style="margin: 4px 0 0;">
+              เปิดหรือปิดการรับส่งข้อความสำหรับแต่ละร้านค้า (หากปิด ร้านนั้นจะไม่ถูกดึงแชทและไม่แสดงในช่องแชท)
+            </div>
+          </div>
+          <button type="button" class="btn-pill" id="btn-refresh-shops">↻ รีเฟรชรายชื่อร้าน</button>
+        </div>
+
+        <table class="config-table">
+          <thead>
+            <tr>
+              <th>แพลตฟอร์ม</th>
+              <th>ชื่อร้านค้า</th>
+              <th>Shop ID</th>
+              <th>สถานะ Token</th>
+              <th>สถานะร้าน</th>
+              <th style="text-align: right;">เปิดใช้งานแชท</th>
+            </tr>
+          </thead>
+          <tbody id="shops-config-tbody">
+            <tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:20px;">กำลังโหลดรายชื่อร้าน...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="config-grid">
+        <!-- 4. Diagnostic & Connection Testing -->
+        <div class="config-card">
+          <div class="config-card-header">
+            <h2 class="config-card-title">🔍 ตรวจสอบการเชื่อมต่อ API (API Diagnostics)</h2>
+            <button type="button" class="btn-pill btn-pill-accent" id="btn-run-diag">🚀 ทดสอบการเชื่อมต่อ</button>
+          </div>
+          <div class="config-card-hint">
+            ทดสอบการเข้าถึง Shopee API Partner Host และการอ่าน Token จากฐานข้อมูล Sellcenter
+          </div>
+          <div id="diag-results" class="diag-box">กดปุ่ม "ทดสอบการเชื่อมต่อ" เพื่อเริ่มการตรวจสอบ...</div>
+        </div>
+
+        <!-- 5. Mock Chat Simulator -->
+        <div class="config-card">
+          <div class="config-card-header">
+            <h2 class="config-card-title">💬 ตัวจำลองสร้างข้อความแชททดสอบ (Mock Message Simulator)</h2>
+          </div>
+          <div class="config-card-hint">
+            สร้างข้อความจำลองเข้าสู่ระบบทันทีเพื่อทดสอบหน้า Inbox และเสียงแจ้งเตือน โดยไม่ต้องพึ่งพาลูกค้าจริงใน Shopee
+          </div>
+
+          <form id="mock-sim-form" class="sim-form">
+            <div class="sim-row">
+              <div>
+                <div class="sim-label">เลือกร้านค้า</div>
+                <select id="sim-shop-id" class="sim-select" required></select>
+              </div>
+              <div>
+                <div class="sim-label">ทิศทางข้อความ</div>
+                <select id="sim-direction" class="sim-select">
+                  <option value="in">📥 ลูกค้าส่งเข้ามา (Incoming)</option>
+                  <option value="out">📤 ร้านค้าตอบออกไป (Outgoing)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="sim-row">
+              <div>
+                <div class="sim-label">ชื่อลูกค้าจำลอง</div>
+                <input type="text" id="sim-buyer-name" class="sim-input" value="ลูกค้าทดสอบ (Mock Buyer)">
+              </div>
+              <div>
+                <div class="sim-label">Buyer ID (จำลอง)</div>
+                <input type="text" id="sim-buyer-id" class="sim-input" value="99001">
+              </div>
+            </div>
+
+            <div>
+              <div class="sim-label">ข้อความจำลอง</div>
+              <textarea id="sim-message-text" class="sim-textarea" placeholder="พิมพ์ข้อความทดสอบที่นี่...">สวัสดีครับ สอบถามสินค้าชิ้นนี้หน่อยครับ มีพร้อมส่งไหมครับ?</textarea>
+            </div>
+
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 6px;">
+              <span id="sim-status" style="font-size: 12.5px; font-weight: 600;"></span>
+              <button type="submit" class="btn-pill btn-pill-accent" id="sim-submit-btn">⚡ ยิงข้อความทดสอบ</button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <!-- 6. Developer Reference Info -->
+      <div class="config-card" style="margin-top: 8px;">
+        <div class="config-card-header">
+          <h2 class="config-card-title">📖 ข้อมูลอ้างอิงสำหรับทีมนักพัฒนา (Developer Endpoints & Credentials)</h2>
+        </div>
+        <div class="config-card-hint">
+          ข้อมูล Endpoint สำหรับการตั้งค่าเชื่อมต่อระบบแชทในเครือ
+        </div>
+
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; font-size: 13px;">
+          <div style="padding: 12px; background: var(--input-bg); border-radius: 8px; border: 1px solid var(--border);">
+            <div style="color: var(--text-secondary); font-size: 11.5px; margin-bottom: 4px;">SHOPEE PARTNER ID</div>
+            <div style="font-weight: 700;" id="env-partner-id">-</div>
+          </div>
+
+          <div style="padding: 12px; background: var(--input-bg); border-radius: 8px; border: 1px solid var(--border);">
+            <div style="color: var(--text-secondary); font-size: 11.5px; margin-bottom: 4px;">SHOPEE HOST URL</div>
+            <div style="font-weight: 700; word-break: break-all;" id="env-host-url">-</div>
+          </div>
+
+          <div style="padding: 12px; background: var(--input-bg); border-radius: 8px; border: 1px solid var(--border);">
+            <div style="color: var(--text-secondary); font-size: 11.5px; margin-bottom: 4px;">INTERNAL FORWARD WEBHOOK (จาก Sellcenter)</div>
+            <div class="copy-chip" onclick="navigator.clipboard.writeText(location.origin + '/webhook/internal/shopee-forward'); alert('คัดลอก URL แล้ว!');">
+              <span id="env-internal-url">/webhook/internal/shopee-forward</span> 📋
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <%- include('partials/status-bar') %>
+  <%- include('partials/theme-script') %>
+
+  <script>
+    let currentConfig = {};
+    let shopsList = [];
+
+    async function loadConfigData() {
+      try {
+        const res = await fetch('/api/config/shopee');
+        if (!res.ok) throw new Error('โหลดการตั้งค่าไม่สำเร็จ');
+        const data = await res.json();
+        
+        currentConfig = data.config || {};
+        shopsList = data.shops || [];
+
+        // เติมค่า Master Switches
+        document.getElementById('switch-shopee-live-read').checked = !!currentConfig.shopee_live_read_enabled;
+        document.getElementById('switch-shopee-live-send').checked = !!currentConfig.shopee_live_send_enabled;
+        document.getElementById('switch-shopee-live-mark-read').checked = !!currentConfig.shopee_live_mark_read_enabled;
+        document.getElementById('switch-shopee-live-pin').checked = !!currentConfig.shopee_live_pin_enabled;
+        document.getElementById('switch-mock-mode').checked = !!currentConfig.mock_mode_enabled;
+
+        // เติมค่า Sync switches
+        document.getElementById('switch-shopee-poll').checked = !!currentConfig.shopee_poll_enabled;
+        document.getElementById('switch-shopee-webhook-worker').checked = !!currentConfig.shopee_webhook_worker_enabled;
+        document.getElementById('switch-shopee-background-sync').checked = !!currentConfig.shopee_background_sync_enabled;
+        document.getElementById('input-poll-interval').value = currentConfig.poll_interval_ms || 20000;
+
+        // อัปเดต Badges
+        updateHeaderBadges();
+
+        // แสดงผลตารางร้านค้า
+        renderShopsTable();
+
+        // อัปเดตร้านใน Dropdown Simulator
+        renderSimShopSelect();
+
+        // ข้อมูล Developer
+        if (data.envInfo) {
+          document.getElementById('env-partner-id').textContent = data.envInfo.partner_id || '-';
+          document.getElementById('env-host-url').textContent = data.envInfo.host_url || '-';
+          document.getElementById('env-internal-url').textContent = window.location.origin + '/webhook/internal/shopee-forward';
+        }
+      } catch (err) {
+        alert('เกิดข้อผิดพลาดในการโหลดข้อมูล: ' + err.message);
+      }
+    }
+
+    function updateHeaderBadges() {
+      const liveReadOn = document.getElementById('switch-shopee-live-read').checked;
+      const mockOn = document.getElementById('switch-mock-mode').checked;
+
+      const badgeLive = document.getElementById('badge-live-status');
+      if (liveReadOn) {
+        badgeLive.className = 'status-badge-lg badge-live-on';
+        badgeLive.innerHTML = '● Live Shopee: อ่านข้อมูลจริง';
+      } else {
+        badgeLive.className = 'status-badge-lg badge-live-off';
+        badgeLive.innerHTML = '○ Offline Mode: ใช้ Local DB เท่านั้น';
+      }
+
+      const badgeMock = document.getElementById('badge-mock-status');
+      badgeMock.style.display = mockOn ? 'inline-flex' : 'none';
+    }
+
+    function renderShopsTable() {
+      const tbody = document.getElementById('shops-config-tbody');
+      if (!shopsList || shopsList.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:20px;">ไม่พบข้อมูลร้านค้าในระบบ</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = shopsList.map(shop => {
+        const isEnabled = !!shop.enabled_for_chat;
+        return `
+          <tr data-shop-id="${shop.shop_id}">
+            <td><span style="font-weight:600; text-transform:capitalize;">${shop.platform || 'shopee'}</span></td>
+            <td><b>${shop.shop_name || shop.shopname || shop.shop_id}</b></td>
+            <td><code>${shop.shop_id}</code></td>
+            <td><span class="status status-${shop.status === 'active' ? 'active' : 'token_error'}">${shop.status || 'unknown'}</span></td>
+            <td><span style="font-size:12px; color:var(--text-secondary);">${isEnabled ? '🟢 พร้อมรับแชท' : '⚪ ปิดรับแชท'}</span></td>
+            <td style="text-align: right;">
+              <label class="toggle-switch">
+                <input type="checkbox" class="shop-toggle-switch" data-shop-id="${shop.shop_id}" ${isEnabled ? 'checked' : ''}>
+                <span class="toggle-slider"></span>
+              </label>
+            </td>
+          </tr>`;
+      }).join('');
+
+      // ผูก Event toggle ร้าน
+      document.querySelectorAll('.shop-toggle-switch').forEach(el => {
+        el.addEventListener('change', async (e) => {
+          const shopId = e.target.dataset.shopId;
+          const enabled = e.target.checked;
+          try {
+            const res = await fetch(`/api/config/shopee/shop/${shopId}/toggle`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ enabled_for_chat: enabled }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'บันทึกสถานะร้านไม่สำเร็จ');
+            loadConfigData();
+          } catch (err) {
+            alert('ไม่สามารถอัปเดตร้านได้: ' + err.message);
+            e.target.checked = !enabled; // คืนค่าเดิม
+          }
+        });
+      });
+    }
+
+    function renderSimShopSelect() {
+      const select = document.getElementById('sim-shop-id');
+      if (!shopsList || shopsList.length === 0) {
+        select.innerHTML = '<option value="">ไม่มีร้านค้า</option>';
+        return;
+      }
+      select.innerHTML = shopsList.map(s => `
+        <option value="${s.shop_id}">${s.shop_name || s.shopname || s.shop_id} (${s.shop_id})</option>
+      `).join('');
+    }
+
+    // Event: บันทึกการตั้งค่าทั้งหมด
+    document.getElementById('btn-save-all-config').addEventListener('click', async () => {
+      const statusEl = document.getElementById('global-save-status');
+      const btn = document.getElementById('btn-save-all-config');
+      
+      const payload = {
+        shopee_live_read_enabled: document.getElementById('switch-shopee-live-read').checked,
+        shopee_live_send_enabled: document.getElementById('switch-shopee-live-send').checked,
+        shopee_live_mark_read_enabled: document.getElementById('switch-shopee-live-mark-read').checked,
+        shopee_live_pin_enabled: document.getElementById('switch-shopee-live-pin').checked,
+        mock_mode_enabled: document.getElementById('switch-mock-mode').checked,
+        shopee_poll_enabled: document.getElementById('switch-shopee-poll').checked,
+        shopee_webhook_worker_enabled: document.getElementById('switch-shopee-webhook-worker').checked,
+        shopee_background_sync_enabled: document.getElementById('switch-shopee-background-sync').checked,
+        poll_interval_ms: Number(document.getElementById('input-poll-interval').value) || 20000,
+      };
+
+      btn.disabled = true;
+      statusEl.textContent = 'กำลังบันทึก...';
+      try {
+        const res = await fetch('/api/config/shopee', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'บันทึกไม่สำเร็จ');
+        statusEl.textContent = '✓ บันทึกสำเร็จแล้ว!';
+        statusEl.style.color = '#16a34a';
+        updateHeaderBadges();
+        setTimeout(() => { statusEl.textContent = ''; }, 4000);
+      } catch (err) {
+        statusEl.textContent = '❌ ' + err.message;
+        statusEl.style.color = '#dc2626';
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // Auto-update badge on switch changes
+    ['switch-shopee-live-read', 'switch-mock-mode'].forEach(id => {
+      document.getElementById(id).addEventListener('change', updateHeaderBadges);
+    });
+
+    document.getElementById('btn-refresh-shops').addEventListener('click', loadConfigData);
+
+    // Event: ทดสอบ Diagnostic
+    document.getElementById('btn-run-diag').addEventListener('click', async () => {
+      const btn = document.getElementById('btn-run-diag');
+      const box = document.getElementById('diag-results');
+      btn.disabled = true;
+      box.textContent = '⏳ กำลังทดสอบการเชื่อมต่อ API Host และ Token Database...';
+
+      try {
+        const res = await fetch('/api/config/shopee/test-connection', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'การทดสอบล้มเหลว');
+
+        const r = data.results;
+        let out = '';
+        out += `[1] SELLCENTER TOKEN DATABASE:\n`;
+        out += `    Status: ${r.sellcenterDb.ok ? '✓ ONLINE' : '❌ OFFLINE'}\n`;
+        out += `    Detail: ${r.sellcenterDb.message}\n\n`;
+
+        out += `[2] SHOPEE API HOST:\n`;
+        out += `    Status: ${r.shopeeHost.ok ? '✓ REACHABLE' : '❌ UNREACHABLE'}\n`;
+        out += `    Latency: ${r.shopeeHost.latencyMs} ms\n`;
+        out += `    Detail: ${r.shopeeHost.message}\n\n`;
+
+        out += `[3] SHOPEE SHOPS TOKEN CHECK (${(r.shops || []).length} ร้าน):\n`;
+        (r.shops || []).forEach(s => {
+          out += `    • ${s.shop_name} (${s.shop_id}): Token ${s.tokenStatus.toUpperCase()} | Chat: ${s.enabled_for_chat ? 'ENABLED' : 'DISABLED'}\n`;
+        });
+
+        box.textContent = out;
+      } catch (err) {
+        box.textContent = '❌ เกิดข้อผิดพลาดในการทดสอบ: ' + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // Event: ยิงข้อความทดสอบ Mock Simulator
+    document.getElementById('mock-sim-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const statusEl = document.getElementById('sim-status');
+      const btn = document.getElementById('sim-submit-btn');
+
+      const payload = {
+        shop_id: document.getElementById('sim-shop-id').value,
+        direction: document.getElementById('sim-direction').value,
+        buyer_name: document.getElementById('sim-buyer-name').value,
+        buyer_id: document.getElementById('sim-buyer-id').value,
+        message_text: document.getElementById('sim-message-text').value,
+      };
+
+      btn.disabled = true;
+      statusEl.textContent = 'กำลังส่งข้อความจำลอง...';
+      try {
+        const res = await fetch('/api/config/shopee/mock-message', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'ส่งไม่สำเร็จ');
+        statusEl.textContent = '✓ ส่งข้อความจำลองเข้า Inbox สำเร็จ!';
+        statusEl.style.color = '#16a34a';
+        setTimeout(() => { statusEl.textContent = ''; }, 4000);
+      } catch (err) {
+        statusEl.textContent = '❌ ' + err.message;
+        statusEl.style.color = '#dc2626';
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // Initial load
+    loadConfigData();
+  </script>
+</body>
+</html>

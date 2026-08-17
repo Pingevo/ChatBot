@@ -33,6 +33,10 @@ const conversationSchema = new mongoose.Schema({
 
 conversationSchema.index({ shop_id: 1, conversation_id: 1 }, { unique: true });
 // ⚡ High-performance compound indexes สำหรับสเกล 10,000,000+ แชท (B-Tree Covered Queries < 5ms)
+conversationSchema.index({ pinned: -1, last_message_timestamp: -1 });
+conversationSchema.index({ unread_count: 1, pinned: -1, last_message_timestamp: -1 });
+conversationSchema.index({ pinned: 1 });
+conversationSchema.index({ unread_count: 1 });
 conversationSchema.index({ platform: 1, shop_id: 1, pinned: -1, last_message_timestamp: -1 });
 conversationSchema.index({ platform: 1, shop_id: 1, unread_count: 1, pinned: -1, last_message_timestamp: -1 });
 conversationSchema.index({ shop_id: 1, to_name: 1 });

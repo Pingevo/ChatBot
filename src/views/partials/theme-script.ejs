@@ -55,9 +55,7 @@ const THEME_LABELS = {
   <div class="theme-popover-hint">ธีมนี้จะถูกจำไว้ให้เฉพาะบัญชีของคุณ</div>
 </div>
 
-<!-- 🔧 ปิดชั่วคราวเพื่อเช็คว่า GSAP มีผลกับความหน่วงหรือไม่ — โหลดจาก CDN ภายนอก (cdnjs) ถ้าช้า/ติดจะบล็อก script ถัดไป
-     ทุกจุดที่เรียก gsap มี "if (window.gsap)" ครอบไว้แล้ว และมี fallback ตั้ง opacity:1 ให้ธาตุ .gsap-fade-up/.gsap-stagger
-     ดังนั้นปิดแล้วหน้าเว็บไม่หาย แค่ไม่มี animation เข้า/ออก — เอา comment ออกเพื่อเปิดกลับคืน -->
+<!-- GSAP ปิดชั่วคราวเพื่อทดสอบบั๊ก -->
 <!-- <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script> -->
 <script>
 // ===== Theme + mode loader (อ่านจาก DB per user) =====

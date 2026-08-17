@@ -8,6 +8,7 @@ const { loadUser, requireAuth } = require('./middlewares/authMiddleware');
 
 const apiRoutes = require('./routes/api');
 const teamRoutes = require('./routes/team');
+const configRoutes = require('./routes/config');
 const inboxRoutes = require('./routes/inbox');
 const webhookRoutes = require('./routes/webhook');
 const authRoutes = require('./routes/auth');
@@ -39,14 +40,16 @@ app.use(session({
   store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI, collectionName: 'sessions' }),
   cookie: {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 วัน
+    secure: process.env.COOKIE_SECURE === 'true', // ไม่บังคับ secure บน HTTP/Localhost กัน cookie หลุด
+    sameSite: 'lax',
+    maxAge: 60 * 24 * 60 * 60 * 1000, // 60 วัน
   },
 }));
 app.use(loadUser);
 
 app.use('/auth', authRoutes);
 app.use('/webhook', webhookRoutes); // Shopee push callback (webchat_push Code 10) — ไม่ต้อง login เพราะ Shopee เป็นคนยิงเข้ามา
+app.use('/api/config', requireAuth, configRoutes);
 app.use('/api', requireAuth, apiRoutes);
 app.use('/api', requireAuth, teamRoutes);
 app.use('/', requireAuth, inboxRoutes);

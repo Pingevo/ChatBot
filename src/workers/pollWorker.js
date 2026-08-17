@@ -46,7 +46,9 @@ async function upsertConversation(shop, conv) {
         to_name: conv.to_name,
         to_avatar: conv.to_avatar,
         unread_count: conv.unread_count,
-        pinned: conv.pinned,
+        // ⚠️ ไม่ sync pinned จาก Shopee — API pin_conversation/unpin_conversation ของ Shopee
+        // ตอบ success แต่ไม่เปลี่ยนสถานะจริง (ยืนยันแล้วด้วยการทดสอบยิง API ตรง) เลยใช้ pinned
+        // เป็น local-only state ของเราเองแทน ไม่ให้ poll ทับค่าที่ผู้ใช้ปักหมุดในระบบเรา
         mute: conv.mute,
         last_read_message_id: conv.last_read_message_id ? String(conv.last_read_message_id) : null,
         opposite_last_read_msg_id: conv.opposite_last_read_msg_id ? String(conv.opposite_last_read_msg_id) : null,

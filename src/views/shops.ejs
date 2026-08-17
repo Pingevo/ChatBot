@@ -18,6 +18,7 @@
         <% if (typeof currentUser !== 'undefined' && currentUser && (currentUser.role === 'admin' || currentUser.role === 'lead')) { %>
           <a href="/team" title="ทีม & แบ่งงาน">🎯</a>
         <% } %>
+        <a href="/config" title="ตั้งค่า Shopee API & แชท">⚙️</a>
       </div>
       <div class="sidebar-spacer"></div>
       <div class="sidebar-avatar" title="<%= typeof currentUser !== 'undefined' && currentUser ? (currentUser.nickname || currentUser.name) : 'ผู้ดูแลบัญชี' %> / เปลี่ยนธีม"><%= avatarInitials %></div>

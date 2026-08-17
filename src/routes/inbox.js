@@ -28,4 +28,7 @@ router.get('/contacts', (req, res) => res.render('contacts'));
 // ทีม & แบ่งงาน — ตั้งโหมด round-robin, จัดทีมต่อร้าน, ดู KPI (admin/lead เท่านั้น)
 router.get('/team', requireRole('admin', 'lead'), (req, res) => res.render('team'));
 
+// การตั้งค่า API และ Shopee Integration Control
+router.get('/config', (req, res) => res.render('config'));
+
 module.exports = router;
