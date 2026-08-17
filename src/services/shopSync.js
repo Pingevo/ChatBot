@@ -47,8 +47,11 @@ async function syncShopsFromSellcenter({ enableForChat = true } = {}) {
           shopname: shopName,
           shop_name: shopName || (existing && existing.shop_name) || `Shop ${shopIdStr}`,
           // ตั้ง enabled_for_chat เฉพาะถ้ายังไม่เคยตั้ง (existing ยังไม่มี) หรือสั่ง enable ตรงๆ
-          // ไม่เขียนทับ enabled_for_chat ที่ user ปิดไว้เอง ถ้าไม่ได้สั่ง enableForChat
-          ...(enableForChat && (!existing || !existing.enabled_for_chat) ? { enabled_for_chat: true } : {}),
+          // ⚠️ ห้าม re-enable ถ้า user สั่งปิดร้านนี้เอง (disabled_by_user) — เดิม bug: เช็คแค่
+          // enabled_for_chat===false ทำให้ sync ทุกรอบ (20s) เปิดร้านที่เพิ่งปิดกลับมาเสมอ
+          ...(enableForChat && !(existing && existing.disabled_by_user) && (!existing || !existing.enabled_for_chat)
+            ? { enabled_for_chat: true }
+            : {}),
         },
       },
       { upsert: true }

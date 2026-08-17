@@ -8,6 +8,7 @@ const shopSchema = new mongoose.Schema({
   shopname: { type: String, index: true }, // key อ้างอิงไปหา Shp2022Token
   shop_name: { type: String }, // ชื่อแสดงผลใน UI
   enabled_for_chat: { type: Boolean, default: false },
+  disabled_by_user: { type: Boolean, default: false }, // ผู้ใช้สั่งปิดร้านนี้เอง (เช่น token ตายถาวร) — sync ห้าม auto re-enable ทับ
   last_polled_at: { type: Date },
   poll_cursor: { type: mongoose.Schema.Types.Mixed, default: null }, // next_timestamp_nano ต่อร้าน
   status: { type: String, enum: ['active', 'token_error', 'disabled'], default: 'disabled' },
