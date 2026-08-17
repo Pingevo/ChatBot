@@ -10,7 +10,19 @@ const { syncShopsFromSellcenter } = require('../services/shopSync');
 const { syncCustomerFromConversation } = require('../services/customerSync');
 const { handleNewMessage } = require('../services/chatEvents');
 
-const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 20000);
+// ⚠️ webhook (webhookWorker.js) คือ real-time delivery หลักอยู่แล้ว (รับ push จาก sellcenter โดยตรง)
+// poll ที่นี่เป็นแค่ safety-net เก็บตกข้อความที่ webhook พลาด — ไม่ควรถี่
+// กัน .env ตั้ง POLL_INTERVAL_MS ต่ำเกินไปทับ production เฉยๆ (เคยเกิดจริง 2026-08-15 ตั้งไว้ 2000ms
+// ทำให้แต่ละรอบ poll ซ้อนทับกันเอง เพราะ 1 รอบดึงจริงใช้เวลานานกว่า 2 วิ — ยิง Shopee API รัวจนกระทบทั้งระบบ)
+// production (NODE_ENV=production) บังคับขั้นต่ำ 30 วิ โดย default
+// แต่ถ้าตั้งใจอยากทดสอบ poll ถี่กว่านั้นจริงๆ (เช่นบน dev) ให้ set ALLOW_FAST_POLL=true คู่กับ
+// POLL_INTERVAL_MS ที่ต้องการ — เป็น opt-in ชัดเจน ป้องกันไม่ให้ตั้ง POLL_INTERVAL_MS เฉยๆ แล้วหลุดมาโดนใน prod
+const RAW_POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 20000);
+const ALLOW_FAST_POLL = process.env.ALLOW_FAST_POLL === 'true';
+const PROD_MIN_POLL_INTERVAL_MS = 30000;
+const POLL_INTERVAL_MS = (process.env.NODE_ENV === 'production' && !ALLOW_FAST_POLL)
+  ? Math.max(RAW_POLL_INTERVAL_MS, PROD_MIN_POLL_INTERVAL_MS)
+  : RAW_POLL_INTERVAL_MS;
 
 // ⚠️ get_conversation_list ให้ last_message_timestamp เป็นนาโนวินาที (19 หลัก)
 // ส่วน get_message ให้ created_timestamp เป็นวินาที (10 หลัก) — สองหน่วยต่างกันจริง (megaplan ข้อ 2)
@@ -216,7 +228,22 @@ async function pollShop(shop) {
   }
 }
 
+let isCycleRunning = false; // ⚠️ กัน setInterval ยิงรอบใหม่ซ้อนรอบเก่าที่ยังไม่จบ (เคยเกิดจริงตอน interval ตั้งไว้ต่ำกว่าเวลาที่ 1 รอบใช้จริง)
+
 async function pollAllShops() {
+  if (isCycleRunning) {
+    console.warn('[poll] previous cycle still running — skip this tick (interval สั้นกว่าเวลาที่ 1 รอบใช้จริง)');
+    return;
+  }
+  isCycleRunning = true;
+  try {
+    await pollAllShopsOnce();
+  } finally {
+    isCycleRunning = false;
+  }
+}
+
+async function pollAllShopsOnce() {
   // auto-discover shops จาก sellcenter ก่อนทุกรอบ — ร้านใหม่ที่ authorize จะถูกเพิ่มอัตโนมัติ
   try {
     const result = await syncShopsFromSellcenter({ enableForChat: true });
@@ -257,7 +284,7 @@ async function main() {
     return;
   }
 
-  console.log(`[poll] worker started (POLL ENABLED), interval=${POLL_INTERVAL_MS}ms`);
+  console.log(`[poll] worker started (POLL ENABLED), interval=${POLL_INTERVAL_MS}ms${ALLOW_FAST_POLL ? ' (ALLOW_FAST_POLL=true — prod floor bypassed)' : ''}`);
   // รันทันทีครั้งแรก แล้วค่อยตั้ง interval
   await pollAllShops();
   setInterval(pollAllShops, POLL_INTERVAL_MS);
