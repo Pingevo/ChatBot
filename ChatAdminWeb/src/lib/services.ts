@@ -11,30 +11,53 @@ import type {
   TriggerRule,
   DashboardStats,
   Platform,
+  CloseHistoryRecord,
 } from "./types";
 
 // ---- Auth (re-export from authService.ts) ----
 export { authService } from "./authService";
 
 // ---- Conversations ----
-// NOTE: these endpoints will be implemented in the Next.js API layer later.
-// For now they point to /api/admin/* which will be wired up when chat
-// integration is built.
+// API routes อยู่ที่ /api/admin/conversations/*
 export const chatService = {
-  list: (params?: { platform?: Platform; status?: string; shop?: string; q?: string }) =>
+  list: (params?: { platform?: Platform; status?: string; shop?: string; q?: string; assigned_to?: string }) =>
     api().get<Conversation[]>("/admin/conversations", { params }).then((r) => r.data),
   get: (id: string) =>
     api().get<Conversation>(`/admin/conversations/${id}`).then((r) => r.data),
   messages: (id: string) =>
-    api().get<ChatMessage[]>(`/admin/conversations/${id}/messages`).then((r) => r.data),
-  send: (id: string, text: string) =>
-    api().post<{ message: ChatMessage }>(`/admin/conversations/${id}/send`, { text }).then((r) => r.data),
+    api().get<ChatMessage[]>(`/admin/conversations/${id}/messages?all=1`).then((r) => r.data),
+  messagesPage: (id: string, opts?: { limit?: number; before?: string; after?: string }) => {
+    const params: Record<string, string> = {};
+    if (opts?.limit) params.limit = String(opts.limit);
+    if (opts?.before) params.before = opts.before;
+    if (opts?.after) params.after = opts.after;
+    return api().get<{ messages: ChatMessage[]; total: number; has_more: boolean; oldest?: string; newest?: string }>(
+      `/admin/conversations/${id}/messages`, { params }
+    ).then((r) => r.data);
+  },
+  send: (id: string, text: string, force?: boolean) =>
+    api().post<{ message: ChatMessage; assigned_to?: string | null; conflict?: boolean; ok?: boolean }>(
+      `/admin/conversations/${id}/send`,
+      { text, force }
+    ).then((r) => r.data),
   assign: (id: string, adminId: string) =>
     api().post(`/admin/conversations/${id}/assign`, { admin_id: adminId }).then((r) => r.data),
   resolve: (id: string) =>
     api().post(`/admin/conversations/${id}/resolve`).then((r) => r.data),
   handoff: (id: string) =>
     api().post(`/admin/conversations/${id}/handoff`).then((r) => r.data),
+  // Phase 5 — open/close workflow
+  close: (id: string, data: { reason: string; category: string; resolution: string; note?: string }) =>
+    api().post(`/conversations/${id}/close`, data).then((r) => r.data),
+  reopen: (id: string, reason?: string) =>
+    api().post(`/conversations/${id}/reopen`, { reason }).then((r) => r.data),
+  closeHistory: (id: string) =>
+    api().get<{ history: CloseHistoryRecord[] }>(`/conversations/${id}/close-history`).then((r) => r.data),
+  // Phase 7.9 — toggle สถานะรับแชทของตัวเอง
+  setAcceptingChats: (accepting: boolean) =>
+    api().patch<{ ok: boolean; is_accepting_chats: boolean }>("/profile/accepting-chats", {
+      is_accepting_chats: accepting,
+    }).then((r) => r.data),
 };
 
 // ---- Tickets ----
@@ -64,8 +87,10 @@ export interface KbRow {
   warranty_period?: string;
   platform?: string;
   active?: boolean;
+  created_at?: string;
   updated_at?: string;
-  updated_by?: string;
+  admin_id?: string; // created by
+  updated_by?: string; // edited by
   source_file?: string;
 }
 
@@ -74,7 +99,7 @@ export const kbService = {
     api().get<{ rows: KbRow[]; total: number }>("/kb", { params }).then((r) => r.data),
   create: (data: { topic: string; answer: string; question_patterns?: string[]; platform?: string }) =>
     api().post<KbRow>("/kb", data).then((r) => r.data),
-  update: (id: string, data: Partial<{ topic: string; answer: string; question_patterns: string[]; platform: string }>) =>
+  update: (id: string, data: Partial<{ topic: string; answer: string; question_patterns: string[]; platform: string; brand: string; model: string; category: string; highlights: string; description: string; warranty_period: string }>) =>
     api().put(`/kb/${id}`, data).then((r) => r.data),
   delete: (id: string) => api().delete(`/kb/${id}`).then((r) => r.data),
   toggle: (id: string, active: boolean) =>
@@ -93,28 +118,76 @@ export const kbService = {
   templateUrl: "/api/kb/template",
 };
 
+// ---- Quick Replies (per-admin) ----
+export interface QuickReplyRow {
+  quick_reply_id: string;
+  admin_id: string;
+  platforms: string[];
+  shop_ids: string[];
+  category: string;
+  title: string;
+  body: string;
+  enabled: boolean;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+  updated_by?: string; // edited by
+}
+
+export const quickReplyService = {
+  list: (params?: { platform?: string; shop_id?: string; category?: string; enabled_only?: string }) =>
+    api().get<{ rows: QuickReplyRow[] }>("/quick-replies", { params }).then((r) => r.data.rows),
+  create: (data: { category?: string; title: string; body: string; platforms?: string[]; shop_ids?: string[]; sort_order?: number }) =>
+    api().post<QuickReplyRow>("/quick-replies", data).then((r) => r.data),
+  update: (id: string, data: Partial<{ category: string; title: string; body: string; platforms: string[]; shop_ids: string[]; enabled: boolean; sort_order: number }>) =>
+    api().put(`/quick-replies/${id}`, data).then((r) => r.data),
+  delete: (id: string) => api().delete(`/quick-replies/${id}`).then((r) => r.data),
+};
+
 // ---- Trigger Rules ----
+// Phase 7.10 — trigger ใช้ API จริง (ไม่ใช่ mockup)
 export const triggerService = {
-  list: (shopId?: string) =>
-    api().get<TriggerRule[]>("/admin/triggers", { params: { shop_id: shopId } }).then((r) => r.data),
-  create: (data: Partial<TriggerRule>) =>
-    api().post<TriggerRule>("/admin/triggers", data).then((r) => r.data),
-  update: (id: string, data: Partial<TriggerRule>) =>
-    api().put<TriggerRule>(`/admin/triggers/${id}`, data).then((r) => r.data),
-  delete: (id: string) => api().delete(`/admin/triggers/${id}`).then((r) => r.data),
+  list: (params?: { shop_id?: string; platform?: string; enabled_only?: boolean }) =>
+    api().get<{ rows: TriggerRule[]; total: number }>("/triggers", { params }).then((r) => r.data.rows),
+  create: (data: {
+    name: string;
+    keywords: string[];
+    shop_ids?: string[];
+    platforms?: Platform[];
+    topic?: string;
+    action: "bot_answer" | "handoff_admin";
+    bot_template?: string;
+    enabled?: boolean;
+  }) => api().post<{ trigger: TriggerRule }>("/triggers", data).then((r) => r.data.trigger),
+  update: (id: string, data: Partial<{
+    name: string;
+    keywords: string[];
+    shop_ids: string[];
+    platforms: Platform[];
+    topic: string;
+    action: "bot_answer" | "handoff_admin";
+    bot_template: string;
+    enabled: boolean;
+  }>) => api().patch(`/triggers/${id}`, data).then((r) => r.data),
+  toggle: (id: string, enabled: boolean) =>
+    api().post(`/triggers/${id}/toggle`, { enabled }).then((r) => r.data),
+  delete: (id: string) => api().delete(`/triggers/${id}`).then((r) => r.data),
 };
 
 // ---- Dashboard / Analytics ----
 export interface LiveStats {
   has_real_data: boolean;
+  range?: string;
   connected_shops: number;
   open_total: number;
   open_assigned: number;
   open_unassigned: number;
+  closed_total: number;
   unanswered_total: number;
   unanswered_threshold_minutes: number;
   workload_by_admin: { admin_id: string; name: string; count: number }[];
   breakdown_by_connection: { name: string; value: number }[];
+  breakdown_by_status: { status: string; count: number }[];
   generated_at: string;
 }
 
@@ -180,10 +253,14 @@ export interface AdminActivityStats {
 }
 
 export const statsService = {
-  dashboard: () => api().get<DashboardStats & { has_real_data: boolean }>("/stats/dashboard").then((r) => r.data),
-  live: () => api().get<LiveStats>("/stats/live").then((r) => r.data),
-  performance: () => api().get<PerformanceStats>("/stats/performance").then((r) => r.data),
-  adminActivity: () => api().get<AdminActivityStats>("/stats/admin-activity").then((r) => r.data),
+  dashboard: (params?: { range?: string; start_date?: string; end_date?: string }) =>
+    api().get<DashboardStats & { has_real_data: boolean }>("/stats/dashboard", { params }).then((r) => r.data),
+  live: (params?: { range?: string; start_date?: string; end_date?: string }) =>
+    api().get<LiveStats>("/stats/live", { params }).then((r) => r.data),
+  performance: (params?: { range?: string; start_date?: string; end_date?: string }) =>
+    api().get<PerformanceStats>("/stats/performance", { params }).then((r) => r.data),
+  adminActivity: (params?: { range?: string; start_date?: string; end_date?: string }) =>
+    api().get<AdminActivityStats>("/stats/admin-activity", { params }).then((r) => r.data),
 };
 
 // ---- Shops (proxied to chatbot service) ----

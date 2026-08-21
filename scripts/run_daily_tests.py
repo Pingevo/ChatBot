@@ -151,7 +151,7 @@ def start_test_server(api_key: str, model: str) -> subprocess.Popen | None:
         return None
 
 
-def wait_test_server_ready(timeout: int = 30) -> bool:
+def wait_test_server_ready(timeout: int = 60) -> bool:
     """รอจนกว่า test server จะพร้อม (poll /health)."""
     import urllib.request
     import urllib.error
@@ -173,7 +173,7 @@ def restart_test_server(api_key: str, model: str) -> bool:
     kill_test_server()
     time.sleep(1)
     start_test_server(api_key, model)
-    if wait_test_server_ready(timeout=30):
+    if wait_test_server_ready(timeout=60):
         print("✅ ready")
         return True
     else:

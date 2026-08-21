@@ -7,13 +7,11 @@ const COOKIE_NAME = "cc_session";
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET || "dev-only-secret-change-me";
 
 // Paths that don't require authentication
-const PUBLIC_PAGES = ["/login", "/signup", "/reset-password"];
+// ⚠️ /signup และ /reset-password ถูกลบแล้ว — ระบบใช้ SSO ขององค์กร
+const PUBLIC_PAGES = ["/login"];
 const PUBLIC_API = [
-  "/api/auth/signin",
-  "/api/auth/signup/request",
-  "/api/auth/signup/confirm",
-  "/api/auth/reset/request",
-  "/api/auth/reset/confirm",
+  "/api/auth/sso/login", // SSO login — redirect ไป system81
+  "/api/auth/sso/callback", // SSO callback — รับ token จาก system81
 ];
 
 function isPublic(pathname: string): boolean {

@@ -20,6 +20,8 @@ export interface AdminDoc extends Document {
   role: "superadmin" | "admin" | "dev";
   password_hash: string;
   active: boolean;
+  // Phase 7.9 — admin เปิด/ปิดสถานะรับแชทของตัวเอง (ลาหยุด, พัก)
+  is_accepting_chats?: boolean;
   channels_access?: string[];
   failed_login_count?: number;
   locked_until?: Date | null;
@@ -27,6 +29,10 @@ export interface AdminDoc extends Document {
   last_login_ip?: string;
   created_at: Date;
   created_by?: string;
+  // Soft delete
+  is_deleted?: boolean;
+  deleted_at?: Date | null;
+  deleted_by?: string;
 }
 
 export interface SafeAdmin {
@@ -37,6 +43,7 @@ export interface SafeAdmin {
   role: "superadmin" | "admin" | "dev";
   channels_access: string[];
   active: boolean;
+  is_accepting_chats?: boolean;
   last_login_at: string | null;
   created_at: string;
 }
@@ -50,6 +57,7 @@ function safeAdmin(admin: AdminDoc): SafeAdmin {
     role: admin.role,
     channels_access: admin.channels_access || [],
     active: admin.active ?? true,
+    is_accepting_chats: admin.is_accepting_chats ?? true,
     last_login_at: admin.last_login_at ? admin.last_login_at.toISOString() : null,
     created_at: admin.created_at ? admin.created_at.toISOString() : "",
   };
@@ -63,12 +71,12 @@ function genAdminId(): string {
 
 export async function getAdminByEmail(email: string): Promise<AdminDoc | null> {
   const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
-  return coll.findOne({ email: email.toLowerCase() });
+  return coll.findOne({ email: email.toLowerCase(), is_deleted: { $ne: true } });
 }
 
 export async function getAdminByUsername(username: string): Promise<AdminDoc | null> {
   const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
-  return coll.findOne({ username });
+  return coll.findOne({ username, is_deleted: { $ne: true } });
 }
 
 export async function getAdminById(adminId: string): Promise<AdminDoc | null> {
@@ -249,7 +257,7 @@ export async function updatePassword(adminId: string, newPassword: string): Prom
 
 export async function listAdmins(): Promise<SafeAdmin[]> {
   const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
-  const docs = await coll.find({}, { projection: { password_hash: 0 } }).toArray();
+  const docs = await coll.find({ is_deleted: { $ne: true } }, { projection: { password_hash: 0 } }).toArray();
   return docs.map(safeAdmin);
 }
 
@@ -267,22 +275,27 @@ export async function updateAdminRole(adminId: string, role: "superadmin" | "adm
 
 export async function updateAdminProfile(
   adminId: string,
-  fields: { name?: string; username?: string; channels_access?: string[] }
+  fields: { name?: string; username?: string; channels_access?: string[]; is_accepting_chats?: boolean }
 ): Promise<boolean> {
   const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
   const update: Record<string, unknown> = {};
   if (fields.name !== undefined) update.name = fields.name;
   if (fields.username !== undefined) update.username = fields.username;
   if (fields.channels_access !== undefined) update.channels_access = fields.channels_access;
+  if (fields.is_accepting_chats !== undefined) update.is_accepting_chats = fields.is_accepting_chats;
   if (Object.keys(update).length === 0) return false;
   const result = await coll.updateOne({ admin_id: adminId }, { $set: update });
   return result.modifiedCount > 0;
 }
 
-export async function deleteAdmin(adminId: string): Promise<boolean> {
+export async function deleteAdmin(adminId: string, deletedBy?: string): Promise<boolean> {
   const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
-  const result = await coll.deleteOne({ admin_id: adminId });
-  return result.deletedCount > 0;
+  // Soft delete — never hard delete
+  const result = await coll.updateOne(
+    { admin_id: adminId, is_deleted: { $ne: true } },
+    { $set: { is_deleted: true, deleted_at: new Date(), deleted_by: deletedBy, active: false } }
+  );
+  return result.modifiedCount > 0;
 }
 
 // ---- OTP (self-service password change confirmation) ----

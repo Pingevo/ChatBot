@@ -45,15 +45,41 @@ export const serverConfig = {
     triggers: required("ADMIN_MONGO_COLLECTION_TRIGGERS", "triggers"),
     pushEvents: required("ADMIN_MONGO_COLLECTION_PUSH_EVENTS", "pushevents"),
     requestLogs: required("ADMIN_MONGO_COLLECTION_REQUEST_LOGS", "requestlogs"),
+    // Phase 0 — new collections adapted from ChatBotPDigg (all in our own chatbot DB)
+    systemConfigs: required("ADMIN_MONGO_COLLECTION_SYSTEM_CONFIGS", "system_configs"),
+    assignmentConfigs: required("ADMIN_MONGO_COLLECTION_ASSIGNMENT_CONFIGS", "assignment_configs"),
+    assignmentCursors: required("ADMIN_MONGO_COLLECTION_ASSIGNMENT_CURSORS", "assignment_cursors"),
+    shopTeamAssignments: required("ADMIN_MONGO_COLLECTION_SHOP_TEAM_ASSIGNMENTS", "shop_team_assignments"),
+    platformTeamAssignments: required("ADMIN_MONGO_COLLECTION_PLATFORM_TEAM_ASSIGNMENTS", "platform_team_assignments"),
+    shadowReplies: required("ADMIN_MONGO_COLLECTION_SHADOW_REPLIES", "shadow_replies"),
+    quickReplies: required("ADMIN_MONGO_COLLECTION_QUICK_REPLIES", "quick_replies"),
+    // Phase 5 — conversation close history (open/close workflow)
+    closeHistory: required("ADMIN_MONGO_COLLECTION_CLOSE_HISTORY", "close_history"),
+    // Phase 8 — admin chat accept/pause sessions (track รับแชท/พัก + เวลาทำงาน)
+    chatAcceptSessions: required("ADMIN_MONGO_COLLECTION_CHAT_ACCEPT_SESSIONS", "chat_accept_sessions"),
+    // Phase 9 — bot worker (polling pipeline: trigger → bot → handoff)
+    // ⚠️ คำตอบบอทเก็บใน shadow_replies (ไม่เขียนลง messages_shp)
+    chatProcessing: required("ADMIN_MONGO_COLLECTION_CHAT_PROCESSING", "chat_processing"),
   },
   jwtSecret: required("ADMIN_JWT_SECRET", "dev-only-secret-change-me"),
   jwtAlgo: "HS256" as const,
   sessionHours: parseInt(required("ADMIN_SESSION_TIMEOUT_HOURS", "8"), 10),
   authTokenMinutes: parseInt(required("AUTH_TOKEN_EXPIRES_MINUTES", "15"), 10),
   cookieName: "cc_session",
-  // Internal secret for Next.js -> Python chatbot calls
+  // Internal secret for Next.js -> Python chatbot calls (shared across all bots)
   chatbotInternalSecret: required("CHATBOT_INTERNAL_SECRET", "dev-internal-secret-change-me"),
-  chatbotBaseUrl: required("CHATBOT_BASE_URL", "http://127.0.0.1:8010"),
+  // Per-platform chatbot base URLs (3 separate FastAPI processes)
+  // shopee  → CHATBOT_BASE_URL_SHOPEE (default 8010)
+  // lazada  → CHATBOT_BASE_URL_LAZADA (default 8011)
+  // tiktok  → CHATBOT_BASE_URL_TIKTOK (default 8012)
+  // Legacy: CHATBOT_BASE_URL falls back to shopee for backward compat
+  chatbotBaseUrls: {
+    shopee: required("CHATBOT_BASE_URL_SHOPEE", required("CHATBOT_BASE_URL", "http://127.0.0.1:8010")),
+    lazada: required("CHATBOT_BASE_URL_LAZADA", "http://127.0.0.1:8011"),
+    tiktok: required("CHATBOT_BASE_URL_TIKTOK", "http://127.0.0.1:8012"),
+  } as Record<"shopee" | "lazada" | "tiktok", string>,
+  // Legacy single base URL (kept for backward compat — points to shopee)
+  get chatbotBaseUrl() { return this.chatbotBaseUrls.shopee; },
   // Email service (Resend) — only used for signup/reset emails
   resendApiKey: process.env.RESEND_API_KEY?.trim() || "",
   emailFrom: process.env.RESEND_FROM_EMAIL?.trim() || "onboarding@resend.dev",

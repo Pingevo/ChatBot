@@ -1,4 +1,4 @@
-// GET /api/users — list all admins (superadmin: full, dev: read-only, admin: 403)
+// GET /api/users — list all admins (superadmin & dev: full, admin: 403)
 import { NextRequest } from "next/server";
 import { auth } from "@/backend/service/authService";
 import { requireAuth } from "@/backend/middleware/authorize";
@@ -12,5 +12,6 @@ export async function GET(req: NextRequest) {
     return error("forbidden — user management is not available for your role", 403);
   }
   const users = await auth.listAdmins();
-  return json({ users, canEdit: r.ctx.admin.role === "superadmin" });
+  // superadmin และ dev มีสิทธิ์เท่ากัน — แก้ไขได้ทั้งคู่
+  return json({ users, canEdit: r.ctx.admin.role === "superadmin" || r.ctx.admin.role === "dev" });
 }

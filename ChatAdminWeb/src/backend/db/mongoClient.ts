@@ -69,6 +69,11 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.messages, { message_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.messages, { conversation_id: 1, created_timestamp: 1 }),
     safeCreateIndex(db, COLLECTIONS.messages, { shop_id: 1, created_timestamp: -1 }),
+    // Phase 7 — platform field + idempotency + data writer monitoring
+    safeCreateIndex(db, COLLECTIONS.messages, { platform: 1, shop_id: 1, created_timestamp: -1 }),
+    safeCreateIndex(db, COLLECTIONS.messages, { reply_to_message_id: 1 }, { sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.messages, { data_received_at: -1 }, { sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.conversations, { platform: 1, status: 1, unread_count: 1 }),
     safeCreateIndex(db, COLLECTIONS.tickets, { ticket_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.tickets, { status: 1 }),
     safeCreateIndex(db, COLLECTIONS.tickets, { channel: 1 }),
@@ -92,5 +97,30 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.triggers, { enabled: 1 }),
     // knowledge_base — existing collection, add index for admin UI filtering.
     safeCreateIndex(db, COLLECTIONS.knowledgeBase, { type: 1, active: 1 }),
+    // Phase 0 — new collections adapted from ChatBotPDigg
+    // system_configs — single config key (main_config)
+    safeCreateIndex(db, COLLECTIONS.systemConfigs, { config_key: 1 }, { unique: true, sparse: true }),
+    // assignment_configs — mode selection (equal_global/equal_per_shop/equal_per_platform)
+    safeCreateIndex(db, COLLECTIONS.assignmentConfigs, { config_key: 1 }, { unique: true, sparse: true }),
+    // assignment_cursors — one cursor per pool (global/shop_id/platform)
+    safeCreateIndex(db, COLLECTIONS.assignmentCursors, { pool_key: 1 }, { unique: true, sparse: true }),
+    // shop_team_assignments — agent membership per shop
+    safeCreateIndex(db, COLLECTIONS.shopTeamAssignments, { shop_id: 1, admin_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.shopTeamAssignments, { admin_id: 1, active: 1 }),
+    // platform_team_assignments — agent membership per platform
+    safeCreateIndex(db, COLLECTIONS.platformTeamAssignments, { platform: 1, admin_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.platformTeamAssignments, { admin_id: 1, is_active: 1 }),
+    // shadow_replies — bot output stored locally (never sent to Shopee)
+    safeCreateIndex(db, COLLECTIONS.shadowReplies, { inbound_message_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.shadowReplies, { shop_id: 1, created_at: -1 }),
+    safeCreateIndex(db, COLLECTIONS.shadowReplies, { conversation_id: 1, created_at: -1 }),
+    // quick_replies — admin-configurable canned responses
+    safeCreateIndex(db, COLLECTIONS.quickReplies, { quick_reply_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.quickReplies, { shop_id: 1, enabled: 1 }),
+    safeCreateIndex(db, COLLECTIONS.quickReplies, { category: 1, enabled: 1 }),
+    // chat_accept_sessions — track เวลาเปิด/ปิดรับแชทของ admin
+    safeCreateIndex(db, COLLECTIONS.chatAcceptSessions, { session_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.chatAcceptSessions, { admin_id: 1, started_at: -1 }),
+    safeCreateIndex(db, COLLECTIONS.chatAcceptSessions, { admin_id: 1, state: 1, started_at: -1 }),
   ]);
 }

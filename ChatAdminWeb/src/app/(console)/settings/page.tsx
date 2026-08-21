@@ -8,12 +8,15 @@ import { Loading } from "@/components/ui/Loading";
 import { useAuth } from "@/lib/authStore";
 import { canEdit } from "@/lib/roles";
 import { api } from "@/lib/apiClient";
+import { toast, useToastError } from "@/components/ui/Toast";
+import { confirm } from "@/components/ui/ConfirmDialog";
 import { OtpVerification } from "@/components/auth/OtpVerification";
 import { Shield, Key, Bell, Save, CheckCircle2, Mail } from "lucide-react";
 
 export default function SettingsPage() {
   const { user, fetchMe } = useAuth();
   const editable = canEdit(user);
+  const { catchError } = useToastError();
 
   // Profile
   const [name, setName] = useState(user?.name ?? "");
@@ -36,15 +39,21 @@ export default function SettingsPage() {
 
   async function handleSaveProfile() {
     if (!name.trim()) return;
+    const ok = await confirm.ask({
+      title: "บันทึกโปรไฟล์?",
+      message: "ยืนยันการเปลี่ยนชื่อของคุณ",
+      confirmText: "บันทึก",
+    });
+    if (!ok) return;
     setSavingProfile(true);
     try {
       await api().patch("/profile", { name: name.trim() });
       await fetchMe?.();
       setProfileSaved(true);
       setTimeout(() => setProfileSaved(false), 2500);
+      toast.success("บันทึกโปรไฟล์แล้ว");
     } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "บันทึกไม่สำเร็จ";
-      alert(msg);
+      catchError(e, "บันทึกไม่สำเร็จ");
     } finally {
       setSavingProfile(false);
     }

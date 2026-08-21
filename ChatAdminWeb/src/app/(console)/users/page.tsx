@@ -3,12 +3,13 @@ import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "@/lib/authStore";
 import { canManageUsers, canViewUsers } from "@/lib/roles";
 import { Button } from "@/components/ui/Button";
-import { Input } from "@/components/ui/Input";
 import { Badge } from "@/components/ui/Badge";
 import { Loading } from "@/components/ui/Loading";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { UserPlus, KeyRound, Trash2, Power, Mail, Users, X } from "lucide-react";
+import { Power, Users, X } from "lucide-react";
 import { api } from "@/lib/apiClient";
+import { toast, useToastError } from "@/components/ui/Toast";
+import { confirm } from "@/components/ui/ConfirmDialog";
 
 interface UserRow {
   admin_id: string;
@@ -28,19 +29,7 @@ export default function UsersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [canEditFlag, setCanEditFlag] = useState(false);
-
-  // Invite modal
-  const [showInvite, setShowInvite] = useState(false);
-  const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteName, setInviteName] = useState("");
-  const [inviteRole, setInviteRole] = useState<"admin" | "dev">("admin");
-  const [inviteResult, setInviteResult] = useState<{ message: string; link?: string; email_sent: boolean; dev_mode: boolean } | null>(null);
-  const [inviteLoading, setInviteLoading] = useState(false);
-
-  // Reset password modal
-  const [resetTarget, setResetTarget] = useState<UserRow | null>(null);
-  const [newPassword, setNewPassword] = useState("");
-  const [resetLoading, setResetLoading] = useState(false);
+  const { catchError } = useToastError();
 
   const loadUsers = useCallback(async () => {
     setLoading(true);
@@ -62,63 +51,22 @@ export default function UsersPage() {
     else setLoading(false);
   }, [user, loadUsers]);
 
-  async function handleInvite() {
-    if (!inviteEmail || !inviteEmail.includes("@")) return;
-    setInviteLoading(true);
-    setError(null);
-    try {
-      const r = await api().post<{
-        message: string;
-        link?: string;
-        email_sent: boolean;
-        dev_mode: boolean;
-      }>("/users/invite", { email: inviteEmail, name: inviteName, role: inviteRole });
-      setInviteResult(r.data);
-    } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "เชิญไม่สำเร็จ";
-      setError(msg);
-    } finally {
-      setInviteLoading(false);
-    }
-  }
-
-  async function handleResetPassword() {
-    if (!resetTarget || newPassword.length < 8) return;
-    setResetLoading(true);
-    setError(null);
-    try {
-      await api().post(`/users/${resetTarget.admin_id}/reset-password`, { password: newPassword });
-      setResetTarget(null);
-      setNewPassword("");
-      await loadUsers();
-    } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "รีเซตรหัสผ่านไม่สำเร็จ";
-      setError(msg);
-    } finally {
-      setResetLoading(false);
-    }
-  }
-
   async function handleToggleActive(u: UserRow) {
+    const newState = !u.active;
+    const ok = await confirm.ask({
+      title: newState ? "เปิดใช้งานผู้ใช้?" : "ปิดใช้งานผู้ใช้?",
+      message: `"${u.name || u.username}" — ${newState ? "จะสามารถเข้าสู่ระบบได้" : "จะไม่สามารถเข้าสู่ระบบได้"}`,
+      confirmText: newState ? "เปิดใช้งาน" : "ปิดใช้งาน",
+      variant: newState ? "primary" : "danger",
+    });
+    if (!ok) return;
     setError(null);
     try {
-      await api().patch(`/users/${u.admin_id}`, { active: !u.active });
+      await api().patch(`/users/${u.admin_id}`, { active: newState });
       await loadUsers();
+      toast.success(`${newState ? "เปิด" : "ปิด"} "${u.name || u.username}" แล้ว`);
     } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "เปลี่ยนสถานะไม่สำเร็จ";
-      setError(msg);
-    }
-  }
-
-  async function handleDelete(u: UserRow) {
-    if (!confirm(`ต้องการลบผู้ใช้ "${u.email}" ใช่ไหม?`)) return;
-    setError(null);
-    try {
-      await api().delete(`/users/${u.admin_id}`);
-      await loadUsers();
-    } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "ลบไม่สำเร็จ";
-      setError(msg);
+      catchError(e, "เปลี่ยนสถานะไม่สำเร็จ");
     }
   }
 
@@ -138,31 +86,42 @@ export default function UsersPage() {
   const roleTone = (r: string) => r === "superadmin" ? "deep" : r === "dev" ? "brand" : "neutral";
 
   return (
-    <div className="p-6 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-text">จัดการผู้ใช้</h1>
-          <p className="text-sm text-text-muted mt-0.5">
-            {canEditFlag ? "เชิญ เพิ่ม รีเซตรหัสผ่าน และจัดการแอดมิน" : "ดูรายการผู้ใช้ (read-only)"}
-          </p>
+    <div className="h-full overflow-y-auto">
+      {/* Header — navbar แบบ shops/team */}
+      <div className="px-6 py-5 border-b border-border bg-surface sticky top-0 z-10">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-brand/15 flex items-center justify-center">
+              <Users size={20} className="text-brand" />
+            </div>
+            <div>
+              <h1 className="text-lg font-bold text-text">จัดการผู้ใช้</h1>
+              <p className="text-xs text-text-muted">
+                {canEditFlag ? "เปิด/ปิดสถานะผู้ใช้ — ผู้ใช้ใหม่เข้าผ่าน SSO อัตโนมัติ" : "ดูรายการผู้ใช้ (read-only)"}
+              </p>
+            </div>
+          </div>
+          {/* ปุ่ม "เชิญสมาชิก" ถูกซ่อนไว้ — ระบบใช้ SSO ขององค์กรแล้ว ไม่มีการเชิญทาง email */}
         </div>
-        {canEditFlag && (
-          <Button onClick={() => { setShowInvite(true); setInviteResult(null); setInviteEmail(""); setInviteName(""); }}>
-            <UserPlus size={16} /> เชิญสมาชิก
-          </Button>
-        )}
       </div>
+
+      <div className="p-6 space-y-6">
 
       {error && (
         <div className="text-sm text-vibrant-coral bg-vibrant-coral-soft rounded-lg px-3 py-2">{error}</div>
       )}
 
+      {/* Info banner */}
+      <div className="bg-pale-sky-soft rounded-lg px-4 py-3 text-sm text-text-muted">
+        ผู้ใช้ใหม่ login ผ่าน SSO แล้วจะถูกสร้างเป็น <Badge tone="neutral">admin</Badge> อัตโนมัติ
+        — หากต้องการเปลี่ยน role เป็น superadmin หรือ dev ให้แก้ใน collection <code className="text-brand">admins</code> โดยตรง
+      </div>
+
       {/* Table */}
       {loading ? (
         <div className="flex justify-center py-12"><Loading size={24} /></div>
       ) : users.length === 0 ? (
-        <EmptyState icon={Users} title="ยังไม่มีผู้ใช้" description="เชิญสมาชิกเพื่อเริ่มต้น" />
+        <EmptyState icon={Users} title="ยังไม่มีผู้ใช้" description="ผู้ใช้จะเข้ามาเองผ่าน SSO" />
       ) : (
         <div className="bg-surface rounded-xl border border-border overflow-hidden">
           <table className="w-full text-sm">
@@ -194,21 +153,18 @@ export default function UsersPage() {
                   {canEditFlag && (
                     <td className="px-4 py-3">
                       <div className="flex items-center justify-end gap-1">
-                        {/* Only show action buttons for admin role (not superadmin/dev) */}
-                        {u.role === "admin" && (
-                          <>
-                            <Button variant="ghost" size="sm" onClick={() => { setResetTarget(u); setNewPassword(""); }}>
-                              <KeyRound size={14} /> รีเซต
-                            </Button>
-                            <Button variant="ghost" size="sm" onClick={() => handleToggleActive(u)}>
-                              <Power size={14} /> {u.active ? "ปิด" : "เปิด"}
-                            </Button>
-                            <Button variant="ghost" size="sm" onClick={() => handleDelete(u)}>
-                              <Trash2 size={14} />
-                            </Button>
-                          </>
-                        )}
-                        {u.role !== "admin" && (
+                        {/* Toggle active/inactive — เฉพาะ superadmin/dev เท่านั้น (canEditFlag) */}
+                        {/* ห้าม toggle ตัวเอง */}
+                        {u.admin_id !== user?.admin_id ? (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleToggleActive(u)}
+                            title={u.active ? "ปิดใช้งาน" : "เปิดใช้งาน"}
+                          >
+                            <Power size={14} /> {u.active ? "ปิดใช้งาน" : "เปิดใช้งาน"}
+                          </Button>
+                        ) : (
                           <span className="text-xs text-text-subtle">—</span>
                         )}
                       </div>
@@ -220,124 +176,6 @@ export default function UsersPage() {
           </table>
         </div>
       )}
-
-      {/* Invite Modal */}
-      {showInvite && (
-        <Modal onClose={() => setShowInvite(false)} title="เชิญสมาชิกใหม่">
-          {inviteResult ? (
-            <div className="space-y-3">
-              {inviteResult.email_sent ? (
-                <>
-                  <div className="flex items-center gap-2 text-brand">
-                    <Mail size={18} />
-                    <span className="text-sm font-medium">ส่งคำเชิญไปยังอีเมลเรียบร้อย</span>
-                  </div>
-                  <p className="text-sm text-text-muted">
-                    ระบบได้ส่งลิงก์สมัครไปยัง <strong>{inviteEmail}</strong> แล้ว
-                    ผู้ใช้ใหม่สามารถกดลิงก์ในอีเมลเพื่อสมัครได้โดยตรง
-                  </p>
-                </>
-              ) : inviteResult.dev_mode ? (
-                <>
-                  <div className="flex items-center gap-2 text-deep-space">
-                    <Mail size={18} />
-                    <span className="text-sm font-medium">โหมดพัฒนา — ยังไม่ได้ตั้งค่า Resend</span>
-                  </div>
-                  <p className="text-sm text-text-muted">
-                    ระบบสร้างลิงก์สมัครแล้ว แต่ยังไม่ส่งอีเมลอัตโนมัติเพราะไม่ได้ตั้งค่า RESEND_API_KEY
-                    ก๊อปลิงก์ด้านล่างส่งให้ผู้ใช้เอง:
-                  </p>
-                  <div className="bg-surface-2 rounded-lg p-3 text-xs break-all font-mono text-brand">
-                    {inviteResult.link}
-                  </div>
-                  <Button
-                    variant="outline"
-                    className="w-full"
-                    onClick={() => inviteResult.link && navigator.clipboard?.writeText(inviteResult.link)}
-                  >
-                    คัดลอกลิงก์
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <div className="flex items-center gap-2 text-vibrant-coral">
-                    <Mail size={18} />
-                    <span className="text-sm font-medium">ส่งอีเมลไม่สำเร็จ</span>
-                  </div>
-                  <p className="text-sm text-text-muted">{inviteResult.message}</p>
-                </>
-              )}
-              <Button
-                variant="ghost"
-                className="w-full"
-                onClick={() => { setInviteResult(null); setInviteEmail(""); setInviteName(""); }}
-              >
-                เชิญเพิ่มอีก
-              </Button>
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <Input label="อีเมล" type="email" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="user@example.com" />
-              <Input label="ชื่อ (ไม่บังคับ)" value={inviteName} onChange={(e) => setInviteName(e.target.value)} placeholder="ชื่อที่แสดง" />
-              <div>
-                <span className="block text-sm font-medium text-text mb-1.5">บทบาท</span>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setInviteRole("admin")}
-                    className={`flex-1 h-10 rounded-lg border text-sm ${inviteRole === "admin" ? "border-brand bg-brand/10 text-brand" : "border-border text-text-muted"}`}
-                  >admin</button>
-                  <button
-                    onClick={() => setInviteRole("dev")}
-                    className={`flex-1 h-10 rounded-lg border text-sm ${inviteRole === "dev" ? "border-brand bg-brand/10 text-brand" : "border-border text-text-muted"}`}
-                  >dev</button>
-                </div>
-              </div>
-              <p className="text-xs text-text-muted">
-                ระบบจะส่งลิงก์สมัครไปยังอีเมลโดยอัตโนมัติ (ใช้ Resend)
-              </p>
-              <Button className="w-full" onClick={handleInvite} disabled={inviteLoading || !inviteEmail}>
-                {inviteLoading ? <Loading size={16} /> : <Mail size={16} />} ส่งคำเชิญทางอีเมล
-              </Button>
-            </div>
-          )}
-        </Modal>
-      )}
-
-      {/* Reset Password Modal */}
-      {resetTarget && (
-        <Modal onClose={() => setResetTarget(null)} title={`รีเซตรหัสผ่าน — ${resetTarget.email}`}>
-          <div className="space-y-4">
-            <Input
-              label="รหัสผ่านใหม่ (อย่างน้อย 8 ตัว)"
-              type="password"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              placeholder="••••••••"
-            />
-            <p className="text-xs text-text-muted">เซสชันทั้งหมดของผู้ใช้นี้จะถูกยกเลิกทันที</p>
-            <Button
-              className="w-full"
-              onClick={handleResetPassword}
-              disabled={resetLoading || newPassword.length < 8}
-            >
-              {resetLoading ? <Loading size={16} /> : <KeyRound size={16} />} รีเซตรหัสผ่าน
-            </Button>
-          </div>
-        </Modal>
-      )}
-    </div>
-  );
-}
-
-function Modal({ children, onClose, title }: { children: React.ReactNode; onClose: () => void; title: string }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div className="bg-surface rounded-2xl shadow-xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-base font-semibold text-text">{title}</h2>
-          <button onClick={onClose} className="text-text-muted hover:text-text"><X size={18} /></button>
-        </div>
-        {children}
       </div>
     </div>
   );

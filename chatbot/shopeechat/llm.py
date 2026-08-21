@@ -61,6 +61,13 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
 - **ถ้าลูกค้าระบุงบประมาณ/ช่วงราคา แต่ใน context มีสินค้าประเภทนั้นที่ราคาใกล้เคียง (แม้ไม่ตรงช่วง)**:
   ให้บอกลูกค้าว่าไม่มีในงบที่ระบุ แล้ว **เสนอสินค้าที่ถูกที่สุดหรือใกล้เคียงที่สุดจาก context** พร้อมราคาและรายละเอียด
   อย่าตอบสั้นๆ ว่า "ไม่มี" แล้วจบ — ต้องเสนอทางเลือกเสมอ
+- **สำคัญอย่างยิ่งเรื่องขอบเขตร้าน**: ถ้า context ระบุว่า "ลูกค้าทักจากร้าน: <ชื่อร้าน>"
+  แปลว่าลูกค้าทักเข้ามาที่ร้านนั้นโดยเฉพาะ ต้องตอบเฉพาะสินค้าจากร้านนั้นเท่านั้น
+  - ห้ามเสนอ/แนะนำ/เปรียบเทียบสินค้าจากร้านอื่นในเครือเด็ดขาด แม้จะเป็นรุ่นเดียวกันก็ตาม
+  - ถ้าร้านที่ลูกค้าทักมาไม่มีสินค้าที่ถาม ให้บอกตรงๆ ว่าร้านนี้ไม่มี
+    แล้ว **แนะนำสินค้าอื่นจากร้านเดียวกัน** ที่ใกล้เคียงที่สุดแทน (เช่น ถามโทรศัพท์แต่ร้านไม่มี ให้แนะนำ pad/สินค้าอื่นจากร้านเดียวกัน)
+  - อย่าตอบสั้นๆ ว่า "ไม่มี" แล้วจบ — ต้องเสนอทางเลือกจากร้านเดียวกันเสมอ
+  - ถ้าร้านนั้นไม่มีสินค้าใกล้เคียงเลย ให้บอกลูกค้าตรงๆ แล้วเชิญทักแอดมินร้านสอบถามเพิ่ม
 - เมื่อเสนอสินค้า ให้ระบุ: ชื่อสินค้า, ร้าน (shop), ราคา (ถ้ามี), รับประกัน (ถ้ามี), และ short_link
 - **หากลูกค้าขอเปรียบเทียบสินค้า 2 รายการขึ้นไป ต้องตอบในรูปแบบ "สเปคต่อสเปค ละเอียด" เท่านั้น ห้ามใช้รูปแบบอื่น**
   โครงสร้างคำตอบที่บังคับ (เรียงตามลำดับนี้เท่านั้น):
@@ -102,10 +109,52 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
 """
 
 
+# ---- API key rotation (round-robin) -------------------------------------------
+# รองรับหลาย key เพื่อหลีกเลี่ยง rate limit
+# อ่าน GEMINI_API_KEY_1 .. GEMINI_API_KEY_9 (หรือ GEMINI_API_KEY ตัวเดียวก็ได้)
+# วนรอบทุกครั้งที่เรียก _client()
+
+import itertools as _itertools
+
+def _load_api_keys() -> list[str]:
+    """โหลด API keys ทั้งหมดจาก env (GEMINI_API_KEY_1 .. _9, และ GEMINI_API_KEY)."""
+    keys: list[str] = []
+    # ลอง GEMINI_API_KEY_1 .. _9 ก่อน
+    for i in range(1, 10):
+        k = os.environ.get(f"GEMINI_API_KEY_{i}", "").strip()
+        if k:
+            keys.append(k)
+    # fallback: GEMINI_API_KEY ตัวเดียว (ถ้าไม่มี _1.._9)
+    if not keys:
+        k = os.environ.get("GEMINI_API_KEY", "").strip()
+        if k:
+            keys.append(k)
+    return keys
+
+
+_API_KEYS: list[str] = _load_api_keys()
+_KEY_CYCLE = _itertools.cycle(_API_KEYS) if _API_KEYS else None
+_KEY_INDEX = 0
+
+# debug log — ยืนยันว่าโหลด keys ครบ
+import sys as _sys
+print(f"[KEYS] โหลด API keys จำนวน: {len(_API_KEYS)}", file=_sys.stderr)
+for i, k in enumerate(_API_KEYS):
+    print(f"[KEYS]   key[{i}] = {k[:8]}...{k[-4:]}", file=_sys.stderr)
+
+
+def _next_api_key() -> str:
+    """หา key ถัดไปแบบ round-robin."""
+    global _KEY_INDEX
+    if not _API_KEYS:
+        raise RuntimeError("ไม่พบ GEMINI_API_KEY หรือ GEMINI_API_KEY_1..9 ใน .env")
+    key = next(_KEY_CYCLE)
+    _KEY_INDEX = (_KEY_INDEX + 1) % len(_API_KEYS)
+    return key
+
+
 def _client() -> genai.Client:
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY ไม่ถูกตั้งใน .env")
+    api_key = _next_api_key()
     return genai.Client(api_key=api_key)
 
 
@@ -158,6 +207,14 @@ def _build_context(products: list[dict], shop_hint: str | None = None,
     header = "ข้อมูลสินค้าที่เกี่ยวข้อง (จาก MongoDB ของร้านในเครือ):\n"
     if shop_hint:
         header += f"ลูกค้าทักจากร้าน: {shop_hint}\n"
+        header += (
+            f"⚠️ สำคัญอย่างยิ่ง: ลูกค้าทักเข้ามาที่ร้าน {shop_hint} โดยเฉพาะ "
+            f"ให้ตอบเฉพาะสินค้าจากร้าน {shop_hint} เท่านั้น "
+            f"ห้ามเสนอ/แนะนำ/เปรียบเทียบสินค้าจากร้านอื่นในเครือเด็ดขาด "
+            f"ถ้าร้าน {shop_hint} ไม่มีสินค้าที่ลูกค้าถาม ให้บอกตรงๆ ว่าร้านนี้ไม่มี "
+            f"แล้วแนะนำสินค้าอื่นจากร้าน {shop_hint} ที่ใกล้เคียงที่สุดแทน "
+            f"อย่าตอบสั้นๆ ว่า 'ไม่มี' แล้วจบ — ต้องเสนอทางเลือกจากร้าน {shop_hint} เสมอ\n"
+        )
     header += f"จำนวนสินค้าใน context: {len(products)}\n"
     # ถ้ามีสินค้าที่ไม่มี description_excerpt → เตือน LLM ชัดๆ
     no_desc_count = sum(1 for p in products if not (p.get("description_excerpt") or "").strip())
@@ -368,6 +425,7 @@ def answer_general(
     qtype: str,
     history: list[dict] | None = None,
     model: str | None = None,
+    shop_hint: str | None = None,
 ) -> tuple[str, dict]:
     """สร้างคำตอบสำหรับคำถามทั่วไป (policy/brands/categories/shops/brand_info).
 
@@ -377,6 +435,8 @@ def answer_general(
         qtype: ประเภทคำถาม (warranty_policy, brands, etc.)
         history: ประวัติแชท
         model: ชื่อโมเดล Gemini
+        shop_hint: ถ้าระบุ (ลูกค้าทักมาจากร้านนี้) บังคับให้ตอบเฉพาะขอบเขตร้านนี้
+            ห้ามพูดถึงสินค้า/หมวดหมู่ของร้านอื่นในเครือ
 
     คืน (answer, usage_info).
     """
@@ -392,8 +452,16 @@ def answer_general(
         "ลงท้ายประโยคด้วย 'ค่ะ' 'นะคะ' หรือ 'คะ' เท่านั้น ห้ามใช้ 'ครับ' หรือ 'คับ' "
         "ตอบจากข้อมูลใน context ที่ให้เท่านั้น ห้ามแต่งเรื่อง "
         "ถ้า context ไม่พอตอบ ให้บอกลูกค้าว่าทักแอดมินได้เลยนะคะ "
-        "ตอบเป็นข้อๆ ให้อ่านง่าย ไม่ต้องยาวเกินไป"
+        "ตอบเป็นข้อๆ ให้อ่านง่าย ไม่ต้องยาวเกินไป "
+        "ห้ามใช้คำสร้อยฟุ่มเฟือยที่ไม่มีข้อมูลจริง"
     )
+    if shop_hint and qtype in ("categories", "brands", "brand_info"):
+        general_instruction += (
+            f" ลูกค้ากำลังทักแชทเข้ามาที่ร้าน {shop_hint} โดยเฉพาะ "
+            "context ที่ให้มาเป็นข้อมูลของร้านนี้เท่านั้น "
+            "ห้ามพูดถึงสินค้าหรือหมวดหมู่ของร้านอื่นในเครือเด็ดขาด "
+            "ให้แนะนำสินค้าเด่นของร้านนี้สัก 2-3 ชิ้นก่อน แล้วค่อยสรุปว่าร้านนี้ขายหมวดหมู่อะไรบ้าง"
+        )
 
     user_prompt = f"{context}\n\nคำถามของลูกค้า: {message}"
 

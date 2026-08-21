@@ -437,10 +437,10 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         .tc-msg .stats .pill.model { color: var(--muted, #64748b); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
         .tc-msg img { max-width: 100%; max-height: 220px; object-fit: contain; border-radius: 10px; margin: 8px 0 4px; background: var(--surface-2, #f1f5f9); display: block; }
         .tc-msg .img-caption { font-size: 11px; color: var(--muted, #64748b); margin-bottom: 8px; }
-        .tc-msg .table-wrap { overflow-x: auto; margin: 10px 0 14px; border: 1px solid var(--border, #e2e8f0); border-radius: 10px; }
-        .tc-msg table { width: 100%; min-width: 400px; border-collapse: separate; border-spacing: 0; font-size: 13px; background: var(--surface-2, #f1f5f9); }
-        .tc-msg table thead th { background: var(--surface-2, #f1f5f9); color: var(--text, #0f172a); font-weight: 600; text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border, #e2e8f0); white-space: nowrap; }
-        .tc-msg table tbody td { padding: 9px 12px; border-bottom: 1px solid var(--border, #e2e8f0); vertical-align: top; word-break: break-word; }
+        .tc-msg .table-wrap { overflow-x: auto; max-width: 100%; margin: 10px 0 14px; border: 1px solid var(--border, #e2e8f0); border-radius: 10px; -webkit-overflow-scrolling: touch; }
+        .tc-msg table { width: 100%; max-width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; background: var(--surface-2, #f1f5f9); table-layout: fixed; }
+        .tc-msg table thead th { background: var(--surface-2, #f1f5f9); color: var(--text, #0f172a); font-weight: 600; text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border, #e2e8f0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .tc-msg table tbody td { padding: 7px 10px; border-bottom: 1px solid var(--border, #e2e8f0); vertical-align: top; word-break: break-word; overflow: hidden; text-overflow: ellipsis; }
         .tc-msg table tbody tr:last-child td { border-bottom: 0; }
         .tc-msg table tbody tr:nth-child(even) td { background: rgba(0,0,0,0.02); }
         .tc-msg table .price { color: #34d399; font-weight: 600; }
@@ -491,11 +491,11 @@ export function TestChatClient({ platform }: { platform: Platform }) {
               {messages.map((m) => (
                 <div
                   key={m.id}
-                  className={`tc-msg relative max-w-[88%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed break-words ${
+                  className={`tc-msg relative max-w-[min(88%,680px)] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed break-words overflow-hidden ${
                     m.role === "user"
                       ? "self-end bg-brand text-white rounded-br-md"
                       : m.role === "bot"
-                      ? "self-start bg-surface-2 border border-border rounded-bl-md max-w-[92%]"
+                      ? "self-start bg-surface-2 border border-border rounded-bl-md max-w-[min(92%,720px)]"
                       : "self-center bg-transparent text-text-muted text-xs"
                   }`}
                 >

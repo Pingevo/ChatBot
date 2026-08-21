@@ -860,6 +860,11 @@ def _detect_product_types_fuzzy(message: str) -> set[str]:
         for i in range(len(tokens) - n + 1):
             candidates.append("".join(tokens[i:i + n]))
     candidates = [c for c in candidates if len(c) >= 2]
+    # ตัดชื่อแบรนด์ที่รู้จักออกจาก candidates เพราะเป็นชื่อเฉพาะ ไม่ใช่คำพิมพ์ผิด
+    # ป้องกัน false positive เช่น "yaber" (แบรนด์โปรเจคเตอร์) ไป fuzzy match "cable" (60 คะแนน)
+    # ทำให้คำถาม "yaber t1 pro มีไหม" ถูกเข้าใจผิดเป็นคำถามเรื่องสายชาร์จ
+    _known_brands_lower = {b.lower() for b in KNOWN_BRANDS}
+    candidates = [c for c in candidates if c.lower() not in _known_brands_lower]
 
     # เทียบแต่ละ candidate กับ keywords ทั้งหมด
     matches: list[tuple[str, float, int]] = []  # (type, score, candidate_len)
@@ -885,6 +890,11 @@ def _detect_product_types_fuzzy(message: str) -> set[str]:
         # "สายสุย" (6) / "สาย type-c" (10) = 0.60 < 0.65 → ข้าม
         # "โทสับ" (5) / "โทรศัพท์" (7) = 0.71 ≥ 0.65 → เก็บ
         if cand_len < kw_len * 0.65:
+            continue
+        # hard cutoff: ถ้า candidate ยาวกว่า keyword มากเกินไป → ข้ามเลย
+        # ป้องกัน n-gram ที่รวมชื่อแบรนด์/รุ่นเข้าด้วยกัน (เช่น "yabert1pro" 10 ตัว)
+        # ไป fuzzy match คำสั้น ๆ อย่าง "cable" (5 ตัว) โดยบังเอิญ (ratio 2.0 แต่ score ผ่าน threshold)
+        if cand_len > kw_len * 1.4:
             continue
         if kw_len <= 4:
             threshold = 80.0
@@ -1010,13 +1020,18 @@ def build_query(
     if "warranty" in intents:
         q.pop("item_status", None)
 
+    # shopname/brand ใน DB เก็บมาจากผู้ขาย case ไม่แน่นอน (เช่น "yaber" vs "Yaber")
+    # ต้อง match แบบ case-insensitive ไม่งั้น exact $in จะพลาด แม้สินค้ามีอยู่จริง
     if shop_filter:
-        q["shopname"] = shop_filter
+        q["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
     elif shops:
-        q["shopname"] = {"$in": shops}
+        q["shopname"] = {"$regex": "|".join(f"^{re.escape(s)}$" for s in shops), "$options": "i"}
 
     if brands:
-        q["brand.original_brand_name"] = {"$in": brands}
+        q["brand.original_brand_name"] = {
+            "$regex": "|".join(f"^{re.escape(b)}$" for b in brands),
+            "$options": "i",
+        }
 
     if categories:
         q["cat_name"] = {"$in": categories}
@@ -1546,7 +1561,7 @@ def fetch_products(
                         "item_id": {"$in": id_values},
                     }
                     if shop_filter:
-                        id_filter["shopname"] = shop_filter
+                        id_filter["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
 
                     cursor = collection.find(id_filter, PRODUCT_PROJECTION)
                     cursor = cursor.limit(len(top_results))
@@ -1570,7 +1585,7 @@ def fetch_products(
                                 "item_name": {"$regex": token_regex.pattern, "$options": "i"},
                             }
                             if shop_filter:
-                                model_filter["shopname"] = shop_filter
+                                model_filter["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
                             model_docs = list(
                                 collection.find(model_filter, PRODUCT_PROJECTION).limit(5)
                             )
@@ -1637,6 +1652,9 @@ def fetch_products(
                         {"description": {"$regex": "|".join(re.escape(w) for w in words[:5]), "$options": "i"}},
                     ],
                 }
+                # ⚠️ ถ้ามี shop_filter ต้องกรองเฉพาะร้านนั้น — ห้ามค้นข้ามร้าน
+                if shop_filter:
+                    text_q["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
                 cursor = collection.find(text_q, PRODUCT_PROJECTION).limit(limit * 2)
             else:
                 cursor = cursor.limit(limit)
@@ -1825,6 +1843,45 @@ def fetch_products(
 
     # จำกัดสุดท้าย
     return cards[:limit]
+
+
+def fetch_product_by_id(
+    db,
+    item_id: int | str,
+    shop_filter: str | None = None,
+    desc_message: str | None = None,
+) -> dict | None:
+    """ดึงสินค้า 1 ชิ้นตรงจาก item_id (เช่น ลูกค้าแชร์การ์ดสินค้ามาในแชท).
+
+    ใช้ตอนที่รู้ item_id ชัดเจน (จาก Shopee product-share tag เช่น "[สินค้า: 43360743407]")
+    แม่นยำกว่าการค้นด้วยข้อความมาก เพราะไม่ต้องเดา/เสี่ยง false positive จาก NLP retrieval
+
+    Returns: product card (dict) หรือ None ถ้าไม่เจอ
+    """
+    coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+    collection = db[coll_name]
+
+    # item_id ใน DB อาจเก็บเป็น int หรือ float — ลองทั้งสองแบบ
+    id_values: list = []
+    try:
+        f = float(item_id)
+        id_values.append(int(f))
+        id_values.append(f)
+    except (ValueError, TypeError):
+        id_values.append(item_id)
+
+    query: dict[str, Any] = {"item_id": {"$in": id_values}}
+    if shop_filter:
+        query["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
+
+    doc = collection.find_one(query, PRODUCT_PROJECTION)
+    if doc is None and shop_filter:
+        # ถ้าไม่เจอในร้านที่ระบุ ลองหาไม่จำกัดร้าน (เผื่อ shop_filter ไม่ตรง/สินค้าย้ายร้าน)
+        doc = collection.find_one({"item_id": {"$in": id_values}}, PRODUCT_PROJECTION)
+    if doc is None:
+        return None
+
+    return to_product_card(doc, desc_message or "")
 
 
 def list_shops(db) -> list[str]:
