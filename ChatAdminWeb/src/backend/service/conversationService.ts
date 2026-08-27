@@ -9,9 +9,24 @@
 //   shop_id_1_to_name_1
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
+import { logAdminEvent } from "./adminLogService";
+import { closeHistoryService } from "./closeHistoryService";
 
 export type Platform = "shopee" | "tiktok" | "lazada";
-export type ConversationStatus = "bot" | "handoff" | "resolved" | "pending";
+// "open" = แชทเปิดอยู่ (ใหม่หรือ reopen), "closed" = แอดมินปิดแล้ว
+// เก็บค่าเดิมไว้ backward compat: bot/handoff/resolved/pending
+export type ConversationStatus = "open" | "closed" | "bot" | "handoff" | "resolved" | "pending";
+
+// ประเภทปัญหา — ใช้ตอนปิดแชท
+export type ProblemCategory =
+  | "shipping"        // การจัดส่ง
+  | "product"         // สินค้า
+  | "payment"         // การชำระเงิน
+  | "return_refund"   // คืนสินค้า/คืนเงิน
+  | "warranty"        // รับประกัน
+  | "account"         // บัญชี/ล็อกอิน
+  | "promotion"       // โปรโมชั่น/ส่วนลด
+  | "other";          // อื่นๆ
 
 export interface ConversationDoc extends Document {
   conversation_id: string;
@@ -31,6 +46,10 @@ export interface ConversationDoc extends Document {
   assigned_to?: string; // admin_id
   created_at: Date;
   updated_at: Date;
+  // Phase 5 — close tracking
+  closed_at?: Date | null;
+  closed_by?: string; // admin_id
+  close_count?: number; // จำนวนครั้งที่ปิดแล้วเปิดใหม่
 }
 
 function genConversationId(): string {
@@ -56,7 +75,7 @@ export async function createConversation(opts: {
     customer_id: opts.customerId,
     to_name: opts.toName,
     customer_avatar: opts.customerAvatar,
-    status: "bot",
+    status: "open",
     item_ids: opts.itemIds || [],
     pinned: false,
     unread_count: 0,
@@ -64,13 +83,15 @@ export async function createConversation(opts: {
     last_message_timestamp: now,
     created_at: now,
     updated_at: now,
+    closed_at: null,
+    close_count: 0,
   };
   await coll.insertOne(doc);
   return doc;
 }
 
 /** Find an existing open conversation for a customer, or create one. Used by
- * the webhook layer so each (shop, customer) pair maps to one active thread. */
+ * the data writer layer so each (shop, customer) pair maps to one active thread. */
 export async function findOrCreateConversation(opts: {
   shopId: string;
   shopName: string;
@@ -80,10 +101,11 @@ export async function findOrCreateConversation(opts: {
   customerAvatar?: string;
 }): Promise<ConversationDoc> {
   const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
+  // หา conversation ที่ยังไม่ปิด — ถ้ามี closed อยู่ จะไม่ reuse (ต้อง reopen แทน)
   const existing = await coll.findOne({
     shop_id: opts.shopId,
     customer_id: opts.customerId,
-    status: { $ne: "resolved" },
+    status: { $nin: ["closed", "resolved"] },
   });
   if (existing) return existing;
   return createConversation(opts);
@@ -123,12 +145,29 @@ export async function listConversations(opts: {
 export async function updateConversationStatus(
   conversationId: string,
   status: ConversationStatus,
-  assignedTo?: string
+  assignedTo?: string,
+  actor?: string
 ): Promise<boolean> {
   const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
   const update: Record<string, unknown> = { status, updated_at: new Date() };
   if (assignedTo !== undefined) update.assigned_to = assignedTo;
   const result = await coll.updateOne({ conversation_id: conversationId }, { $set: update });
+  if (result.modifiedCount > 0 && actor) {
+    const actionMap: Record<ConversationStatus, "conversation.open" | "conversation.handoff" | "conversation.resolve" | "conversation.close" | "conversation.status_change"> = {
+      open: "conversation.open",
+      closed: "conversation.close",
+      bot: "conversation.status_change",
+      handoff: "conversation.handoff",
+      resolved: "conversation.resolve",
+      pending: "conversation.status_change",
+    };
+    await logAdminEvent({
+      action_type: actionMap[status],
+      actor,
+      conversation_id: conversationId,
+      metadata: { new_status: status, assigned_to: assignedTo },
+    });
+  }
   return result.modifiedCount > 0;
 }
 
@@ -191,4 +230,80 @@ export const conversationService = {
   togglePinned,
   touchLastMessage,
   resetUnread,
+  closeConversation,
+  reopenConversation,
 };
+
+/** ปิดแชท — แอดมินกรอก reason/category/resolution/note */
+export async function closeConversation(opts: {
+  conversationId: string;
+  closedBy: string;
+  reason: string;
+  category: ProblemCategory;
+  resolution: string;
+  note?: string;
+}): Promise<boolean> {
+  const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
+  const conv = await coll.findOne({ conversation_id: opts.conversationId });
+  if (!conv) return false;
+
+  const closeCount = (conv.close_count || 0) + 1;
+  const result = await coll.updateOne(
+    { conversation_id: opts.conversationId },
+    {
+      $set: {
+        status: "closed",
+        closed_at: new Date(),
+        closed_by: opts.closedBy,
+        close_count: closeCount,
+        updated_at: new Date(),
+      },
+    }
+  );
+
+  if (result.modifiedCount > 0) {
+    await closeHistoryService.recordClose({
+      conversationId: opts.conversationId,
+      shopId: conv.shop_id,
+      customerId: conv.customer_id,
+      closedBy: opts.closedBy,
+      reason: opts.reason,
+      category: opts.category,
+      resolution: opts.resolution,
+      note: opts.note,
+    });
+  }
+
+  return result.modifiedCount > 0;
+}
+
+/** เปิดแชทใหม่ — ใช้ตอนบอทส่งต่อแอดมิน หรือ แอดมินเปิด手动 */
+export async function reopenConversation(opts: {
+  conversationId: string;
+  reopenedBy: string; // "bot" หรือ admin_id
+  reopenReason?: string;
+  assignedTo?: string; // ถ้ามีการ assign ใหม่
+}): Promise<boolean> {
+  const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
+  const update: Record<string, unknown> = {
+    status: "open",
+    closed_at: null,
+    updated_at: new Date(),
+  };
+  if (opts.assignedTo !== undefined) update.assigned_to = opts.assignedTo;
+
+  const result = await coll.updateOne(
+    { conversation_id: opts.conversationId },
+    { $set: update }
+  );
+
+  if (result.modifiedCount > 0) {
+    await closeHistoryService.recordReopen({
+      conversationId: opts.conversationId,
+      reopenedBy: opts.reopenedBy,
+      reopenReason: opts.reopenReason,
+    });
+  }
+
+  return result.modifiedCount > 0;
+}

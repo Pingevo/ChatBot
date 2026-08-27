@@ -442,8 +442,15 @@ def _extract_policy_from_descriptions(mongo_coll, policy_type: str, limit: int =
 def build_general_context(
     qtype: str,
     mongo_db=None,
+    shop_filter: str | None = None,
 ) -> dict[str, Any] | None:
     """สร้าง context สำหรับคำถามทั่วไป (policy/brands/categories/shops).
+
+    Args:
+        qtype: ประเภทคำถามทั่วไป
+        mongo_db: mongo database handle
+        shop_filter: ถ้าระบุ (ลูกค้าทักมาจากร้านนี้) ให้จำกัด categories/brands
+            เฉพาะสินค้าของร้านนี้เท่านั้น ไม่ปนร้านอื่นในเครือ
 
     คืน dict:
     {
@@ -454,6 +461,12 @@ def build_general_context(
     หรือ None ถ้าไม่รองรับ.
     """
     import os
+    import re
+
+    _shop_q = (
+        {"shopname": {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}}
+        if shop_filter else {}
+    )
 
     # ---- warranty/return/shipping policy ----
     if qtype in ("warranty_policy", "return_policy", "shipping_policy"):
@@ -505,7 +518,7 @@ def build_general_context(
         from collections import Counter
         brand_counts = Counter()
         brand_cats: dict[str, set[str]] = {}
-        for d in mongo_coll.find({"item_status": "NORMAL"}, {"brand": 1, "cat_name": 1}).limit(10000):
+        for d in mongo_coll.find({"item_status": "NORMAL", **_shop_q}, {"brand": 1, "cat_name": 1}).limit(10000):
             b = d.get("brand", "")
             if isinstance(b, dict):
                 bname = b.get("original_brand_name", "") or ""
@@ -528,16 +541,35 @@ def build_general_context(
     if qtype == "categories" and mongo_db is not None:
         coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
         mongo_coll = mongo_db[coll_name]
-        cats = sorted(str(c) for c in mongo_coll.distinct("cat_name") if c)
-        # นับสินค้าต่อหมวด
+        base_q = {"item_status": "NORMAL", **_shop_q}
+
+        # นับสินค้าต่อหมวด (เฉพาะร้านนี้ ถ้าระบุ shop_filter)
         from collections import Counter
         cat_counts = Counter()
-        for d in mongo_coll.find({"item_status": "NORMAL"}, {"cat_name": 1}).limit(10000):
+        sample_products: list[str] = []
+        for d in mongo_coll.find(base_q, {"cat_name": 1, "item_name": 1}).limit(10000):
             c = d.get("cat_name", "")
             if c:
                 cat_counts[str(c)] += 1
+            name = d.get("item_name", "")
+            if name and len(sample_products) < 30:
+                sample_products.append(str(name)[:80])
+
+        if shop_filter and not cat_counts:
+            # ร้านนี้ไม่มีสินค้า NORMAL เลย → คืน None ให้ caller ตัดสินใจ fallback
+            return None
+
+        cats = sorted(cat_counts.keys())
         lines = [f"- {c} ({cat_counts.get(c, 0)} สินค้า)" for c in cats]
-        context = f"=== หมวดหมู่สินค้า ({len(cats)} หมวด) ===\n" + "\n".join(lines)
+        if shop_filter:
+            context = (
+                f"=== หมวดหมู่สินค้าของร้าน {shop_filter} ({len(cats)} หมวด) ===\n"
+                + "\n".join(lines)
+                + "\n\nตัวอย่างสินค้าในร้านนี้ (เลือกแนะนำสัก 3 ชิ้นที่หลากหลาย):\n"
+                + "\n".join(f"- {p}" for p in sample_products[:15])
+            )
+        else:
+            context = f"=== หมวดหมู่สินค้า ({len(cats)} หมวด) ===\n" + "\n".join(lines)
         return {"qtype": qtype, "context": context, "meta": {"category_count": len(cats)}}
 
     # ---- shops ----

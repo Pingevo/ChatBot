@@ -12,11 +12,11 @@ export interface AuthContext {
   safeAdmin: ReturnType<typeof auth.safeAdmin>;
 }
 
-// Hierarchy: superadmin > admin > dev
+// Hierarchy: superadmin = dev (full access) > admin (read-only on team/config)
 const ROLE_LEVEL: Record<Role, number> = {
   superadmin: 3,
+  dev: 3,
   admin: 2,
-  dev: 1,
 };
 
 function hasRole(role: Role, required: Role): boolean {
@@ -75,7 +75,8 @@ export async function requireEditor(req: NextRequest): Promise<
 }
 
 /**
- * Require superadmin only.
+ * Require superadmin or dev (both have full access).
+ * admin users get 403.
  */
 export async function requireSuperadmin(req: NextRequest): Promise<
   | { ok: true; ctx: AuthContext }
@@ -83,10 +84,29 @@ export async function requireSuperadmin(req: NextRequest): Promise<
 > {
   const r = await requireAuth(req);
   if (!r.ok) return r;
-  if (r.ctx.admin.role !== "superadmin") {
+  if (r.ctx.admin.role !== "superadmin" && r.ctx.admin.role !== "dev") {
     return {
       ok: false,
-      response: NextResponse.json({ detail: "forbidden — superadmin access required" }, { status: 403 }),
+      response: NextResponse.json({ detail: "forbidden — superadmin or dev access required" }, { status: 403 }),
+    };
+  }
+  return r;
+}
+
+/**
+ * Require dev only — เฉพาะ dev เท่านั้น (superadmin/admin → 403)
+ * ใช้สำหรับหน้าที่เป็น evaluation/shadow testing
+ */
+export async function requireDev(req: NextRequest): Promise<
+  | { ok: true; ctx: AuthContext }
+  | { ok: false; response: NextResponse }
+> {
+  const r = await requireAuth(req);
+  if (!r.ok) return r;
+  if (r.ctx.admin.role !== "dev") {
+    return {
+      ok: false,
+      response: NextResponse.json({ detail: "forbidden — dev access required" }, { status: 403 }),
     };
   }
   return r;
@@ -95,12 +115,12 @@ export async function requireSuperadmin(req: NextRequest): Promise<
 /**
  * Check if a target admin can be edited by the current admin.
  * Rules:
- *   - superadmin can edit admin only (not superadmin, not dev)
+ *   - superadmin and dev can edit admin only (not superadmin, not dev)
  *   - nobody can edit superadmin or dev via the user management UI
  *   - nobody can edit themselves via this path (use settings)
  */
 export function canEditTarget(actor: AdminDoc, target: AdminDoc): boolean {
-  if (actor.role !== "superadmin") return false;
+  if (actor.role !== "superadmin" && actor.role !== "dev") return false;
   if (target.role !== "admin") return false;
   if (actor.admin_id === target.admin_id) return false;
   return true;

@@ -6,13 +6,13 @@ import {
   XAxis,
   YAxis,
   Tooltip,
-  ResponsiveContainer,
   BarChart,
   Bar,
   PieChart,
   Pie,
   Cell,
 } from "recharts";
+import { DebouncedResponsiveContainer as ResponsiveContainer } from "./DebouncedResponsiveContainer";
 
 const BRAND = "#8b1e28";
 const NAVY = "#0b2340";

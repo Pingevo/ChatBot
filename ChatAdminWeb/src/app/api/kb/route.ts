@@ -4,6 +4,7 @@ import { NextRequest } from "next/server";
 import { requireAuth, requireEditor } from "@/backend/middleware/authorize";
 import { json, error } from "@/backend/lib/http";
 import { knowledgeBaseService, type KbType } from "@/backend/service/knowledgeBaseService";
+import { logAdminEvent } from "@/backend/service/adminLogService";
 
 export async function GET(req: NextRequest) {
   const r = await requireAuth(req);
@@ -42,6 +43,11 @@ export async function POST(req: NextRequest) {
     questionPatterns: body.question_patterns || [],
     platform: body.platform || "all",
     createdBy: r.ctx.admin.admin_id,
+  });
+  await logAdminEvent({
+    action_type: "kb.create",
+    actor: r.ctx.admin.admin_id,
+    metadata: { kb_id: doc.kb_id, topic: body.topic, platform: body.platform || "all" },
   });
   return json(doc, 201);
 }

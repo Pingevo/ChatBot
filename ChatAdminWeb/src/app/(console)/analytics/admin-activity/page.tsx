@@ -1,6 +1,6 @@
 "use client";
-import { useEffect, useState } from "react";
-import { Loading } from "@/components/ui/Loading";
+import { useEffect, useState, useMemo } from "react";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { statsService, type AdminActivityStats } from "@/lib/services";
 import {
   ConnectedChannelsHeader,
@@ -9,86 +9,8 @@ import {
   avatarColor,
 } from "@/components/charts/ZaapiStats";
 import { ChevronDown } from "lucide-react";
-
-const mockDays = Array.from({ length: 7 }, (_, i) => {
-  const d = new Date();
-  d.setDate(d.getDate() - (6 - i));
-  return d.toLocaleDateString("th-TH", { day: "2-digit", month: "short" });
-});
-
-const mockAdminNames = ["Toey", "Dunkin", "Chris", "Trung", "Looppad"];
-const mockColors = ["#3b82c4", "#e0578a", "#4a9d6f", "#f0a13a", "#8b5fbf"];
-
-function mockSeries() {
-  return mockDays.map((date) => {
-    const row: Record<string, unknown> = { date };
-    mockAdminNames.forEach((n) => {
-      row[n] = Math.round(Math.random() * 5);
-    });
-    return row;
-  });
-}
-
-const mockActivity: AdminActivityStats = {
-  has_real_data: false,
-  connected_shops: 6,
-  date_range_label: "ก.ค. 1-7, 2026",
-  compare_label: "7 วันที่แล้ว",
-  conversations_by_admin_per_day: mockSeries(),
-  admin_series_keys: mockAdminNames,
-  rankings: {
-    most_conversations: {
-      admin_id: "a1",
-      name: "Toey",
-      role: "admin",
-      conversations: 3,
-      unanswered_12h: 0,
-      response_rate_12h: 100,
-      response_rate_10min: 100,
-      avg_response_time_seconds: 0,
-    },
-    least_responses: {
-      admin_id: "a5",
-      name: "Looppad",
-      role: "admin",
-      conversations: 1,
-      unanswered_12h: 0,
-      response_rate_12h: 100,
-      response_rate_10min: 0,
-      avg_response_time_seconds: 0,
-    },
-    fastest_10min: {
-      admin_id: "a1",
-      name: "Toey",
-      role: "admin",
-      conversations: 3,
-      unanswered_12h: 0,
-      response_rate_12h: 100,
-      response_rate_10min: 100,
-      avg_response_time_seconds: 0,
-    },
-    fastest_overall: {
-      admin_id: "a1",
-      name: "Toey",
-      role: "admin",
-      conversations: 3,
-      unanswered_12h: 0,
-      response_rate_12h: 100,
-      response_rate_10min: 100,
-      avg_response_time_seconds: 0,
-    },
-  },
-  individual_performance: mockAdminNames.map((n, i) => ({
-    admin_id: `a${i + 1}`,
-    name: n,
-    role: "admin",
-    conversations: 3 - (i % 3),
-    unanswered_12h: i === 1 ? 1 : 0,
-    response_rate_12h: 100 - i * 10,
-    response_rate_10min: 100 - i * 20,
-    avg_response_time_seconds: i * 60,
-  })),
-};
+import { UnifiedDateRangePicker, rangeToParams, type DateRangeValue } from "@/components/ui/UnifiedDateRangePicker";
+import { AnalyticsSkeleton } from "@/components/ui/StatsSkeleton";
 
 const roleTone: Record<string, string> = {
   superadmin: "bg-deep-space text-white",
@@ -105,46 +27,46 @@ function fmtDuration(seconds: number): string {
 export default function AdminActivityPage() {
   const [data, setData] = useState<AdminActivityStats | null>(null);
   const [loading, setLoading] = useState(true);
-  const [usingMock, setUsingMock] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [dateRange, setDateRange] = useState<DateRangeValue>({
+    preset: "daily",
+    startDate: null,
+    endDate: null,
+  });
+
+  const params = useMemo(() => rangeToParams(dateRange), [dateRange]);
 
   useEffect(() => {
+    setLoading(true);
     statsService
-      .adminActivity()
+      .adminActivity(params)
       .then((d) => {
-        if (d.has_real_data) {
-          setData(d);
-          setUsingMock(false);
-        } else {
-          setData(mockActivity);
-          setUsingMock(true);
-        }
+        setData(d);
+        setError(null);
       })
-      .catch(() => {
-        setData(mockActivity);
-        setUsingMock(true);
-      })
+      .catch((e) => setError(e?.message || "โหลดข้อมูลไม่สำเร็จ"))
       .finally(() => setLoading(false));
-  }, []);
+  }, [params]);
 
-  if (loading) return <div className="flex justify-center py-12"><Loading size={28} /></div>;
+  if (loading && !data) return <AnalyticsSkeleton />;
+  if (error && !data) return <EmptyState icon={undefined as never} title="โหลดข้อมูลไม่สำเร็จ" description={error} />;
   if (!data) return null;
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <h2 className="text-lg font-bold text-text">การทำงานของแอดมิน</h2>
+        <UnifiedDateRangePicker value={dateRange} onChange={setDateRange} />
       </div>
 
-      <ConnectedChannelsHeader
-        connectedCount={data.connected_shops}
-        dateRangeLabel={data.date_range_label}
-        compareLabel={data.compare_label}
-      />
-      {usingMock && <p className="text-xs text-text-subtle -mt-2">ตัวอย่างข้อมูล (ยังไม่มีข้อมูลจริง)</p>}
+      <ConnectedChannelsHeader connectedCount={data.connected_shops} />
+      {!data.has_real_data && <p className="text-xs text-text-subtle -mt-2">ยังไม่มีข้อมูลจริง</p>}
+
+      <div className={loading ? "opacity-50 pointer-events-none transition-opacity" : "transition-opacity"}>
 
       {/* ---- Ranking cards ---- */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <RankingCard
           title="จำนวนการสนทนาสูงสุด"
           name={data.rankings.most_conversations?.name ?? null}
@@ -172,12 +94,12 @@ export default function AdminActivityPage() {
       </div>
 
       {/* ---- Conversations by admin chart ---- */}
-      <div className="bg-surface rounded-xl border border-border p-4">
-        <h3 className="text-sm font-semibold text-text mb-3">จำนวนการสนทนาของแต่ละเจ้าหน้าที่</h3>
+      <div className="bg-surface rounded-xl border border-border p-5">
+        <h3 className="text-sm font-semibold text-text mb-4">จำนวนการสนทนาของแต่ละเจ้าหน้าที่</h3>
         <MultiLineChart
           data={data.conversations_by_admin_per_day}
           seriesKeys={data.admin_series_keys}
-          colors={mockColors}
+          colors={["#3b82c4", "#e0578a", "#4a9d6f", "#f0a13a", "#8b5fbf", "#c8912b", "#ee4d2d", "#111827"]}
         />
       </div>
 
@@ -224,7 +146,7 @@ export default function AdminActivityPage() {
                     />
                   </button>
                   {isOpen && (
-                    <div className="px-4 pb-4 pt-1 grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+                    <div className="px-4 pb-4 pt-2 grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
                       <div>
                         <div className="text-[10px] text-text-subtle">การสนทนา</div>
                         <div className="font-medium text-text">{row.conversations}</div>
@@ -252,6 +174,7 @@ export default function AdminActivityPage() {
             })}
           </div>
         )}
+      </div>
       </div>
     </div>
   );

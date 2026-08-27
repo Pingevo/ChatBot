@@ -1,6 +1,6 @@
 "use client";
-import { useEffect, useState } from "react";
-import { Loading } from "@/components/ui/Loading";
+import { useEffect, useState, useMemo } from "react";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { statsService, type PerformanceStats } from "@/lib/services";
 import {
   ConnectedChannelsHeader,
@@ -10,6 +10,8 @@ import {
   MultiLineChart,
   Heatmap,
 } from "@/components/charts/ZaapiStats";
+import { UnifiedDateRangePicker, rangeToParams, type DateRangeValue } from "@/components/ui/UnifiedDateRangePicker";
+import { AnalyticsSkeleton } from "@/components/ui/StatsSkeleton";
 
 function fmtDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -20,80 +22,32 @@ function fmtDuration(seconds: number): string {
 const CHANNEL_COLORS = ["#ee4d2d", "#111827", "#1a2e8c"];
 const CHANNEL_KEYS = ["shopee", "tiktok", "lazada"];
 
-const mockDays = Array.from({ length: 7 }, (_, i) => {
-  const d = new Date();
-  d.setDate(d.getDate() - (6 - i));
-  return d.toLocaleDateString("th-TH", { day: "2-digit", month: "short" });
-});
-
-function mockSpark(base: number, variance: number) {
-  return mockDays.map((date) => ({ date, value: Math.max(0, Math.round(base + (Math.random() - 0.5) * variance)) }));
-}
-
-function mockChannelSeries(bases: number[]) {
-  return mockDays.map((date) => {
-    const row: Record<string, unknown> = { date };
-    CHANNEL_KEYS.forEach((k, i) => {
-      row[k] = Math.max(0, Math.round(bases[i] + (Math.random() - 0.5) * bases[i]));
-    });
-    return row;
-  });
-}
-
-const mockPerformance: PerformanceStats = {
-  has_real_data: false,
-  connected_shops: 6,
-  date_range_label: "ก.ค. 1-7, 2026",
-  compare_label: "7 วันที่แล้ว",
-  overview: {
-    new_vs_existing: { new: 1, existing: 5 },
-    conversations: { value: 6, spark: mockSpark(4, 4) },
-    unanswered_12h: { value: 4, spark: mockSpark(3, 3) },
-    response_rate_12h: { value: 63.6, spark: mockSpark(60, 30) },
-    response_rate_10min: { value: 54.5, spark: mockSpark(50, 30) },
-    avg_response_time_seconds: { value: 232, spark: mockSpark(200, 100) },
-    messages_received: { value: 16, spark: mockSpark(10, 8) },
-    messages_sent: { value: 30, spark: mockSpark(20, 12) },
-  },
-  insight: {
-    customers_by_channel: mockChannelSeries([2, 1, 1]),
-    unanswered_by_channel: mockChannelSeries([1, 1, 1]),
-    response_rate_12h_by_channel: mockChannelSeries([60, 50, 70]),
-    response_rate_10min_by_channel: mockChannelSeries([40, 30, 50]),
-    avg_response_time_by_channel: mockChannelSeries([180, 220, 150]),
-  },
-  heatmap: {
-    rows: ["0:00-3:00", "3:00-6:00", "6:00-9:00", "9:00-12:00", "12:00-15:00", "15:00-18:00", "18:00-21:00", "21:00-00:00"],
-    cols: ["จ", "อ", "พ", "พฤ", "ศ", "ส", "อา"],
-    values: Array.from({ length: 8 }, () => Array.from({ length: 7 }, () => Math.round(Math.random() * 5))),
-  },
-};
-
 export default function PerformanceStatsPage() {
   const [data, setData] = useState<PerformanceStats | null>(null);
   const [loading, setLoading] = useState(true);
-  const [usingMock, setUsingMock] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [dateRange, setDateRange] = useState<DateRangeValue>({
+    preset: "daily",
+    startDate: null,
+    endDate: null,
+  });
+
+  const params = useMemo(() => rangeToParams(dateRange), [dateRange]);
 
   useEffect(() => {
+    setLoading(true);
     statsService
-      .performance()
+      .performance(params)
       .then((d) => {
-        if (d.has_real_data) {
-          setData(d);
-          setUsingMock(false);
-        } else {
-          setData(mockPerformance);
-          setUsingMock(true);
-        }
+        setData(d);
+        setError(null);
       })
-      .catch(() => {
-        setData(mockPerformance);
-        setUsingMock(true);
-      })
+      .catch((e) => setError(e?.message || "โหลดข้อมูลไม่สำเร็จ"))
       .finally(() => setLoading(false));
-  }, []);
+  }, [params]);
 
-  if (loading) return <div className="flex justify-center py-12"><Loading size={28} /></div>;
+  if (loading && !data) return <AnalyticsSkeleton />;
+  if (error && !data) return <EmptyState icon={undefined as never} title="โหลดข้อมูลไม่สำเร็จ" description={error} />;
   if (!data) return null;
 
   const maxHeat = Math.max(...data.heatmap.values.flat(), 1);
@@ -102,15 +56,13 @@ export default function PerformanceStatsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <h2 className="text-lg font-bold text-text">ภาพรวม Performance</h2>
+        <UnifiedDateRangePicker value={dateRange} onChange={setDateRange} />
       </div>
 
-      <ConnectedChannelsHeader
-        connectedCount={data.connected_shops}
-        dateRangeLabel={data.date_range_label}
-        compareLabel={data.compare_label}
-      />
-      {usingMock && <p className="text-xs text-text-subtle -mt-2">ตัวอย่างข้อมูล (ยังไม่มีข้อมูลจริง)</p>}
+      <ConnectedChannelsHeader connectedCount={data.connected_shops} />
+      {!data.has_real_data && <p className="text-xs text-text-subtle -mt-2">ยังไม่มีข้อมูลจริง — แสดงค่า 0</p>}
 
+      <div className={loading ? "opacity-50 pointer-events-none transition-opacity" : "transition-opacity"}>
       {/* ---- Overview KPI grid ---- */}
       <div>
         <h3 className="text-sm font-semibold text-text mb-3">ภาพรวม</h3>
@@ -170,6 +122,7 @@ export default function PerformanceStatsPage() {
         <p className="text-[11px] text-text-subtle mt-3">
           คำนวณจากการตอบกลับของแอดมินบนระบบเท่านั้น ข้อมูลอาจมีความแตกต่างจากช่องทางอื่น
         </p>
+      </div>
       </div>
     </div>
   );

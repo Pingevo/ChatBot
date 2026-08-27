@@ -1,8 +1,9 @@
 // Shared components for the Zaapi-style analytics pages (ข้อมูลสด,
 // ภาพรวม Performance, การทำงานของแอดมิน).
 "use client";
-import { AreaChart, Area, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, LineChart, Line } from "recharts";
-import { Info, RefreshCw, Calendar } from "lucide-react";
+import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, LineChart, Line } from "recharts";
+import { DebouncedResponsiveContainer as ResponsiveContainer } from "./DebouncedResponsiveContainer";
+import { Info, RefreshCw } from "lucide-react";
 import type { Platform } from "@/lib/types";
 
 /* ---- Connected channels header (platform icons + live status + refresh) ---- */
@@ -18,15 +19,11 @@ export function ConnectedChannelsHeader({
   live = false,
   lastUpdatedSeconds,
   onRefresh,
-  dateRangeLabel,
-  compareLabel,
 }: {
   connectedCount: number;
   live?: boolean;
   lastUpdatedSeconds?: number;
   onRefresh?: () => void;
-  dateRangeLabel?: string;
-  compareLabel?: string;
 }) {
   const platforms: Platform[] = ["shopee", "tiktok", "lazada"];
   return (
@@ -48,15 +45,6 @@ export function ConnectedChannelsHeader({
       </div>
 
       <div className="flex items-center gap-3 flex-wrap">
-        {dateRangeLabel && (
-          <div className="flex items-center gap-1.5 text-sm text-text bg-surface-2 rounded-lg px-3 py-1.5">
-            <Calendar size={13} className="text-text-muted" />
-            {dateRangeLabel}
-          </div>
-        )}
-        {compareLabel && (
-          <span className="text-xs text-text-subtle bg-surface-2 rounded-lg px-2.5 py-1.5">{compareLabel}</span>
-        )}
         {live && (
           <div className="flex items-center gap-1.5 text-xs text-text-muted">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse-soft" />
@@ -146,7 +134,12 @@ export function KpiCard({
 
 /* ---- Donut with center label ---- */
 import { PieChart, Pie, Cell } from "recharts";
-export function DonutCenterChart({
+import { memo } from "react";
+
+// Smooth ease-out cubic for the entry sweep animation.
+const EASE_OUT_CUBIC = "cubic-bezier(0.22, 1, 0.36, 1)";
+
+function DonutCenterChartImpl({
   data,
   centerLabel,
   colors,
@@ -161,7 +154,18 @@ export function DonutCenterChart({
       <div className="relative shrink-0" style={{ width: 140, height: 140 }}>
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
-            <Pie data={data} dataKey="value" nameKey="name" innerRadius={42} outerRadius={62} paddingAngle={2}>
+            <Pie
+              data={data}
+              dataKey="value"
+              nameKey="name"
+              innerRadius={42}
+              outerRadius={62}
+              paddingAngle={2}
+              isAnimationActive
+              animationDuration={900}
+              animationEasing={EASE_OUT_CUBIC}
+              animationBegin={0}
+            >
               {data.map((_, i) => (
                 <Cell key={i} fill={colors[i % colors.length]} />
               ))}
@@ -187,6 +191,11 @@ export function DonutCenterChart({
     </div>
   );
 }
+
+// Memoized so parent re-renders (e.g. the 1s "seconds ago" tick on the live
+// stats page) do NOT retrigger the pie's entry animation, which was the cause
+// of the stutter while spinning.
+export const DonutCenterChart = memo(DonutCenterChartImpl);
 
 /* ---- Stacked bar by channel (daily) ---- */
 export function StackedChannelBarChart({

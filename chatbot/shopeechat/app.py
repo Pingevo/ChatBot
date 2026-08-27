@@ -23,7 +23,10 @@ from pydantic import BaseModel, Field
 from . import llm, product_store, knowledge_base
 
 
-load_dotenv()
+# โหลด .env จาก root ของ repo (เดียวกับที่เก็บ GEMINI_API_KEY_1..9)
+# ไม่ใช้ cwd เพราะอาจรันจาก directory อื่น
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+load_dotenv(_REPO_ROOT / ".env")
 
 app = FastAPI(
     title="ChatBotProductMS",
@@ -105,6 +108,11 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(..., description="คำถาม/ข้อความลูกค้ารอบปัจจุบัน")
     shop: str | None = Field(None, description="ชื่อร้านที่ลูกค้าทักเข้ามา (ถ้ามี) เช่น IMILabThailand")
+    item_id: str | int | None = Field(
+        None,
+        description="item_id ของสินค้าที่ลูกค้าอ้างถึง (เช่น แชร์การ์ดสินค้ามาในแชท) "
+                    "ถ้าระบุ จะตอบจากสินค้านี้โดยตรง แม่นยำกว่าการค้นด้วยข้อความ",
+    )
     history: list[ChatMessage] = Field(default_factory=list, description="ประวัติแชทก่อนหน้า")
     limit: int = Field(20, ge=1, le=50, description="จำนวนสินค้าสูงสุดที่จะส่งเป็น context")
 
@@ -254,6 +262,16 @@ def brands(
         client.close()
 
 
+# tag ที่ Shopee/Zaapi แนบมาเมื่อลูกค้าแชร์การ์ดสินค้าในแชท เช่น "🛍️ [สินค้า: 43360743407]"
+_ITEM_TAG_RE = re.compile(r"\[(?:สินค้า|item|item_id|product)\s*[:：]\s*(\d+)\]", re.IGNORECASE)
+
+
+def _extract_item_id_tag(text: str) -> str | None:
+    """ดึง item_id จาก tag ที่แนบมาในข้อความ (เช่น '[สินค้า: 43360743407]')."""
+    m = _ITEM_TAG_RE.search(text or "")
+    return m.group(1) if m else None
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
     import time as _time
@@ -262,6 +280,76 @@ def chat(req: ChatRequest) -> ChatResponse:
     client, db = _db()
     try:
         history = [{"role": m.role, "text": m.text} for m in req.history]
+
+        # ===== ขั้นที่ -1: ลูกค้าแชร์การ์ดสินค้ามาในแชท (มี item_id ชัดเจน) =====
+        # กรณีนี้ตอบจากสินค้านั้นโดยตรง แม่นยำกว่าการค้นด้วยข้อความมาก
+        # รองรับ 3 ทาง: (1) req.item_id ที่ระบบส่งมาเป็น field ตรง ๆ
+        #              (2) tag ฝังอยู่ในข้อความปัจจุบัน เช่น "🛍️ [สินค้า: 43360743407]"
+        #              (3) tag เคยปรากฏใน history (ลูกค้าแชร์การ์ดไว้ก่อนหน้า แล้วถามต่อ
+        #                  เช่น "โหลดแอปอื่นมาดูได้ไหม") — ใช้เป็น anchor ต่อ ถ้าคำถามปัจจุบัน
+        #                  ไม่ได้เอ่ยถึงรุ่น/แบรนด์อื่นที่ชัดเจน (ไม่ใช่การเปลี่ยนหัวข้อ)
+        _tagged_item_id = req.item_id or _extract_item_id_tag(req.message)
+        _is_from_history_anchor = False
+        if not _tagged_item_id and history:
+            _current_model_kw = knowledge_base.extract_model_keywords(req.message)
+            _looks_like_new_topic = bool(_current_model_kw) or len(req.message.split()) > 15
+            if not _looks_like_new_topic:
+                for h in reversed(req.history):
+                    if h.role == "user":
+                        found = _extract_item_id_tag(h.text)
+                        if found:
+                            _tagged_item_id = found
+                            _is_from_history_anchor = True
+                            break
+        # ข้อความที่เหลือหลังตัด tag ออก (ถ้ามีคำถามต่อท้าย เช่น "[สินค้า: 123] มีไหม")
+        _clean_message = _ITEM_TAG_RE.sub("", req.message).strip()
+        if not _tagged_item_id and not _clean_message and history:
+            # ข้อความปัจจุบันไม่มี tag และว่างเปล่า (ไม่ควรเกิด แต่กันไว้)
+            _clean_message = req.message
+        if _tagged_item_id:
+            print(f"[ITEM-TAG] พบ item_id={_tagged_item_id} ในข้อความ", file=sys.stderr)
+            anchor_card = product_store.fetch_product_by_id(
+                db, _tagged_item_id, shop_filter=req.shop,
+                desc_message=_clean_message or req.message,
+            )
+            if anchor_card:
+                # ถ้าลูกค้าไม่ได้พิมพ์คำถามเพิ่ม (ส่งแค่การ์ดสินค้ามาเฉย ๆ)
+                # ให้ตั้งคำถามแทน โดยบอกชัดว่าลูกค้าระบุสินค้านี้แล้ว (ผ่านการแชร์การ์ดสินค้า)
+                # ป้องกัน LLM เข้าใจผิดว่า "ยังไม่ได้ระบุสินค้า"
+                _followup_q = (
+                    _clean_message
+                    or "ลูกค้าส่งการ์ดสินค้าชิ้นนี้มาในแชท สนใจสอบถามว่ามีของไหม ราคาเท่าไหร่ และรับประกันแบบไหน"
+                )
+                try:
+                    answer, usage_info = llm.answer(
+                        message=_followup_q,
+                        products=[anchor_card],
+                        shop_hint=req.shop,
+                        history=history,
+                    )
+                except RuntimeError as exc:
+                    raise HTTPException(status_code=500, detail=str(exc))
+                _total_elapsed = _time.time() - _total_start
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+                prompt_t = usage_info.get("prompt", 0)
+                output_t = usage_info.get("output", 0)
+                cost = (prompt_t * 0.30 + output_t * 2.50) / 1_000_000
+                answer = _append_base_warranty(answer, _followup_q, source="item_tag")
+                return ChatResponse(
+                    answer=answer,
+                    products=[anchor_card],
+                    shop=req.shop,
+                    model=model_name,
+                    source="item_tag",
+                    usage=usage_info,
+                    elapsed=round(_total_elapsed, 2),
+                    cost=round(cost, 6),
+                )
+            else:
+                print(f"[ITEM-TAG] ไม่พบสินค้า item_id={_tagged_item_id} ในระบบ", file=sys.stderr)
+            # ถ้าไม่เจอสินค้า (ถูกลบ/item_id ผิด) ให้ตกไปใช้ flow ปกติต่อด้วยข้อความที่ตัด tag แล้ว
+            if _clean_message:
+                req.message = _clean_message
 
         # ===== ขั้นที่ 0: ตรวจคำถามทั่วไป (policy/brands/categories/shops) =====
         # ถ้าลูกค้าถามคำถามทั่วไปที่ไม่เจาะรุ่น → ตอบจาก policy/meta โดยตรง
@@ -320,7 +408,16 @@ def chat(req: ChatRequest) -> ChatResponse:
 
         if general_qtype:
             print(f"[TIMING] General question detected: {general_qtype}  ({_time.time()-_t0:.2f}s)", file=sys.stderr)
-            gen_result = knowledge_base.build_general_context(general_qtype, mongo_db=db)
+            # ถ้ารู้ว่าลูกค้าทักมาจากร้านไหน (req.shop) ให้จำกัด categories/brands
+            # เฉพาะร้านนั้น ไม่ปนร้านอื่นในเครือ (shops question ยังคงตอบภาพรวมทั้งเครือ)
+            _gen_shop_filter = req.shop if general_qtype in ("categories", "brands") else None
+            gen_result = knowledge_base.build_general_context(
+                general_qtype, mongo_db=db, shop_filter=_gen_shop_filter,
+            )
+            if _gen_shop_filter and not gen_result:
+                # ร้านนี้ไม่มีสินค้า NORMAL เลย → fallback เป็นคำตอบทั้งเครือแทน 0 ผลลัพธ์
+                gen_result = knowledge_base.build_general_context(general_qtype, mongo_db=db)
+                _gen_shop_filter = None  # ไม่ใช่คำตอบเฉพาะร้านแล้ว ไม่ต้องบอก LLM ว่าจำกัดร้าน
             if gen_result and gen_result.get("context"):
                 gen_context = gen_result["context"]
                 try:
@@ -329,6 +426,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         context=gen_context,
                         qtype=general_qtype,
                         history=history,
+                        shop_hint=_gen_shop_filter,
                     )
                 except RuntimeError as exc:
                     raise HTTPException(status_code=500, detail=str(exc))
@@ -353,7 +451,11 @@ def chat(req: ChatRequest) -> ChatResponse:
         brand_q = _detect_brand_question(req.message)
         if brand_q and not general_qtype:
             print(f"[TIMING] Brand question detected: {brand_q}  ({_time.time()-_t0:.2f}s)", file=sys.stderr)
-            brand_result = _build_brand_context(db, brand_q)
+            # ถ้ารู้ว่าลูกค้าทักมาจากร้านไหน ให้จำกัดเฉพาะสินค้าแบรนด์นี้ในร้านนั้น
+            # (ลูกค้าซื้อได้แค่จากร้านที่กำลังคุยอยู่ ไม่ใช่ร้านอื่นในเครือ)
+            brand_result = _build_brand_context(db, brand_q, shop_filter=req.shop)
+            if req.shop and not brand_result:
+                brand_result = _build_brand_context(db, brand_q)
             if brand_result and brand_result.get("context"):
                 try:
                     answer, usage_info = llm.answer_general(
@@ -361,6 +463,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         context=brand_result["context"],
                         qtype="brand_info",
                         history=history,
+                        shop_hint=req.shop if brand_result.get("meta", {}).get("shop_scoped") else None,
                     )
                 except RuntimeError as exc:
                     raise HTTPException(status_code=500, detail=str(exc))
@@ -529,8 +632,12 @@ def chat(req: ChatRequest) -> ChatResponse:
                         model_tokens = [model_short] if model_short and len(model_short) >= 3 else []
                     for token in model_tokens[:2]:
                         # ค้นใน Mongo ด้วย regex ตรงใน item_name (word boundary)
+                        # ⚠️ ถ้ามี shop_filter ต้องกรองเฉพาะร้านนั้น — ห้ามค้นข้ามร้าน
+                        direct_q = {"item_status": "NORMAL", "item_name": {"$regex": re.escape(token), "$options": "i"}}
+                        if req.shop:
+                            direct_q["shopname"] = {"$regex": f"^{re.escape(req.shop)}$", "$options": "i"}
                         direct_docs = list(_mongo_coll.find(
-                            {"item_status": "NORMAL", "item_name": {"$regex": re.escape(token), "$options": "i"}},
+                            direct_q,
                             limit=5
                         ))
                         for d in direct_docs:
@@ -548,37 +655,52 @@ def chat(req: ChatRequest) -> ChatResponse:
 
                 # merge: KB ให้ warranty/specs/highlights, Mongo ให้ ราคา/ร้าน/ลิงก์/image
                 merged_products = _merge_kb_mongo(kb_docs, mongo_products)
-                # สร้าง context ใหม่ที่รวม KB + Mongo
-                merged_context = llm._build_context(merged_products, shop_hint=req.shop,
-                                                     include_description=True)
+                # ⚠️ ถ้ามี shop_filter ให้กรองสินค้าที่ไม่ใช่ร้านนั้นออก
+                # (KB docs ไม่ถูกกรอง by shop ตอน lookup — ต้องกรองที่นี่)
+                if req.shop and merged_products:
+                    filtered = []
+                    for p in merged_products:
+                        pshop = (p.get("shop") or "").strip()
+                        # เก็บเฉพาะสินค้าที่ shop ตรงกับร้านที่ลูกค้าทักมา
+                        # (KB-only cards ที่ไม่มี shop field ก็ตัดออกด้วย เพราะไม่ใช่สินค้าร้านนี้)
+                        if pshop and pshop.lower() == req.shop.lower():
+                            filtered.append(p)
+                    merged_products = filtered
+                    print(f"[SHOP-FILTER] KB merge filtered to {len(merged_products)} products (shop={req.shop})", file=sys.stderr)
+                # ⚠️ ถ้ากรองแล้วเหลือ 0 (ร้านนี้ไม่มีสินค้าที่ถาม) ให้ skip KB path
+                # แล้ว fall through ไปค้นสินค้าอื่นในร้านเดียวกันแทน (เพื่อแนะนำทางเลือก)
+                if merged_products:
+                    # สร้าง context ใหม่ที่รวม KB + Mongo
+                    merged_context = llm._build_context(merged_products, shop_hint=req.shop,
+                                                         include_description=True)
 
-                try:
-                    answer, usage_info = llm.answer(
-                        message=getattr(req, "_followup_original", None) or req.message,
-                        products=merged_products,
-                        shop_hint=req.shop,
-                        history=history,
+                    try:
+                        answer, usage_info = llm.answer(
+                            message=getattr(req, "_followup_original", None) or req.message,
+                            products=merged_products,
+                            shop_hint=req.shop,
+                            history=history,
+                        )
+                    except RuntimeError as exc:
+                        raise HTTPException(status_code=500, detail=str(exc))
+                    _total_elapsed = _time.time() - _total_start
+                    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+                    prompt_t = usage_info.get("prompt", 0)
+                    output_t = usage_info.get("output", 0)
+                    cost = (prompt_t * 0.30 + output_t * 2.50) / 1_000_000
+                    # ส่ง merged_products เป็น products (เพื่อให้ frontend แสดงได้)
+                    products = [_kb_doc_to_card(d) if "_kb_only" in d else d for d in merged_products]
+                    answer = _append_base_warranty(answer, getattr(req, "_followup_original", None) or req.message)
+                    return ChatResponse(
+                        answer=answer,
+                        products=products,
+                        shop=req.shop,
+                        model=model_name,
+                        source="knowledge_base+mongo",
+                        usage=usage_info,
+                        elapsed=round(_total_elapsed, 2),
+                        cost=round(cost, 6),
                     )
-                except RuntimeError as exc:
-                    raise HTTPException(status_code=500, detail=str(exc))
-                _total_elapsed = _time.time() - _total_start
-                model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-                prompt_t = usage_info.get("prompt", 0)
-                output_t = usage_info.get("output", 0)
-                cost = (prompt_t * 0.30 + output_t * 2.50) / 1_000_000
-                # ส่ง merged_products เป็น products (เพื่อให้ frontend แสดงได้)
-                products = [_kb_doc_to_card(d) if "_kb_only" in d else d for d in merged_products]
-                answer = _append_base_warranty(answer, getattr(req, "_followup_original", None) or req.message)
-                return ChatResponse(
-                    answer=answer,
-                    products=products,
-                    shop=req.shop,
-                    model=model_name,
-                    source="knowledge_base+mongo",
-                    usage=usage_info,
-                    elapsed=round(_total_elapsed, 2),
-                    cost=round(cost, 6),
-                )
 
         # ===== ขั้นที่ 2: ไม่เจอใน KB → ใช้ product_store เดิม =====
         # แยก 2 ส่วน:
@@ -940,6 +1062,27 @@ def chat(req: ChatRequest) -> ChatResponse:
         )
         print(f"[TIMING] fetch_products: {_time.time()-_t1:.2f}s  (retrieval={retrieval_message!r})", file=sys.stderr)
 
+        # ⚠️ Fallback: ถ้าไม่เจอสินค้าเลย และลูกค้าทักจากร้านใดร้านหนึ่ง
+        # ให้ดึงสินค้าอื่นจากร้านเดียวกันมาเป็นทางเลือกให้ LLM แนะนำ
+        # (เช่น ถาม "imilab ec4" ที่ร้าน BlackShark → ไม่มี → ดึงสินค้าอื่นของ BlackShark มาแนะนำ)
+        if not products and req.shop:
+            _t_alt = _time.time()
+            alt_products = product_store.fetch_products(
+                db,
+                message="สินค้า แนะนำ มาใหม่ โปรด",  # คำค้นกว้างๆ เพื่อดึงสินค้าทั่วไปของร้าน
+                shop_filter=req.shop,
+                limit=5,
+            )
+            if alt_products:
+                products = alt_products
+                # ใส่ note ให้ LLM รู้ว่าเป็นสินค้าทางเลือก (ไม่ใช่สินค้าที่ลูกค้าถาม)
+                if products:
+                    products[0]["_context_note"] = (
+                        f"⚠️ สินค้าเหล่านี้เป็นสินค้าอื่นจากร้าน {req.shop} "
+                        f"ที่นำมาเสนอเป็นทางเลือก เพราะร้าน {req.shop} ไม่มีสินค้าที่ลูกค้าถาม "
+                        f"ให้บอกลูกค้าก่อนว่าร้านนี้ไม่มีสินค้าที่ถาม แล้วค่อยแนะนำสินค้าเหล่านี้แทน"
+                    )
+                print(f"[TIMING] Shop fallback (alt products): {_time.time()-_t_alt:.2f}s  products={len(products)}", file=sys.stderr)
         # ถ้าเป็น follow-up (retrieval_message != req.message) ให้เก็บแค่สินค้า top 1
         # ที่ตรงกับ model ที่ลูกค้าถาม ไม่ส่งสินค้าอื่นปน เพื่อให้ LLM ตอบตรงจุด
         if retrieval_message != req.message and products:
@@ -1146,18 +1289,26 @@ def _detect_brand_question(message: str) -> str | None:
     return None
 
 
-def _build_brand_context(db, brand: str) -> dict[str, Any] | None:
-    """สร้าง context สำหรับ brand-specific question (เช่น Xiaomi ขายอะไรบ้าง)."""
+def _build_brand_context(db, brand: str, shop_filter: str | None = None) -> dict[str, Any] | None:
+    """สร้าง context สำหรับ brand-specific question (เช่น Xiaomi ขายอะไรบ้าง).
+
+    Args:
+        shop_filter: ถ้าระบุ (ลูกค้าทักมาจากร้านนี้) จำกัดเฉพาะสินค้าแบรนด์นี้ในร้านนั้น
+    """
     import os
+    import re
     from collections import Counter
 
     coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
     coll = db[coll_name]
 
-    # ดึงสินค้าของแบรนด์นี้
+    # ดึงสินค้าของแบรนด์นี้ (จำกัดร้าน ถ้ามี shop_filter)
     brand_lower = brand.lower()
+    query: dict[str, Any] = {"item_status": "NORMAL"}
+    if shop_filter:
+        query["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
     docs = list(coll.find(
-        {"item_status": "NORMAL"},
+        query,
         {"brand": 1, "cat_name": 1, "item_name": 1}
     ).limit(10000))
 
@@ -1184,8 +1335,9 @@ def _build_brand_context(db, brand: str) -> dict[str, Any] | None:
         return None
 
     cats = sorted(brand_cats.keys())
+    scope_label = f"ร้าน {shop_filter}" if shop_filter else f"แบรนด์ {brand}"
     parts = [
-        f"=== สินค้าของแบรนด์ {brand} ({product_count} สินค้า) ===",
+        f"=== สินค้าของแบรนด์ {brand} ใน{scope_label} ({product_count} สินค้า) ===",
         f"หมวดหมู่ที่มี: {', '.join(cats)}",
         f"\nตัวอย่างสินค้า:",
     ]
@@ -1193,7 +1345,11 @@ def _build_brand_context(db, brand: str) -> dict[str, Any] | None:
         parts.append(f"- {name}")
 
     context = "\n".join(parts)
-    return {"qtype": "brand_info", "context": context, "meta": {"product_count": product_count, "categories": cats}}
+    return {
+        "qtype": "brand_info",
+        "context": context,
+        "meta": {"product_count": product_count, "categories": cats, "shop_scoped": bool(shop_filter)},
+    }
 
 
 def _merge_kb_mongo(kb_docs: list[dict], mongo_products: list[dict]) -> list[dict]:

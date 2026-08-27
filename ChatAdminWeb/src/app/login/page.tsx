@@ -1,104 +1,84 @@
 "use client";
-import { useState, FormEvent } from "react";
-import { useRouter } from "next/navigation";
+// /login — SSO login page
+// ปุ่ม "เข้าสู่ระบบด้วย SSO" จะ redirect ไป /api/auth/sso/login → system81 login
+import { Suspense, useEffect } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/authStore";
 import { Loading } from "@/components/ui/Loading";
-import { Eye, EyeOff } from "lucide-react";
 
-export default function LoginPage() {
-  const { login, loading, error, clearError } = useAuth();
+const ERROR_MESSAGES: Record<string, string> = {
+  sso_failed: "การเข้าสู่ระบบผ่าน ITSR ไม่สำเร็จ กรุณาลองใหม่",
+  no_token: "ไม่ได้รับ token จาก ITSR กรุณาลองใหม่",
+  userinfo_failed: "ไม่สามารถตรวจสอบ token กับ ITSR ได้",
+  invalid_token: "ITSR token ไม่ถูกต้อง",
+  not_allowed: "บัญชี ITSR นี้ไม่มีสิทธิ์เข้าถึง Chat Admin",
+  account_disabled: "บัญชีนี้ถูกปิดใช้งาน กรุณาติดต่อผู้ดูแลระบบ",
+};
+
+function LoginContent() {
   const router = useRouter();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
+  const searchParams = useSearchParams();
+  const { user, initialized, fetchMe } = useAuth();
+  const errorCode = searchParams.get("error");
+  const errorMsg = errorCode ? ERROR_MESSAGES[errorCode] || "เกิดข้อผิดพลาดในการเข้าสู่ระบบ" : null;
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    const ok = await login(email, password);
-    if (ok) router.push("/chats");
+  useEffect(() => {
+    if (!initialized) fetchMe();
+  }, [initialized, fetchMe]);
+
+  useEffect(() => {
+    if (initialized && user) router.replace("/dashboard");
+  }, [initialized, user, router]);
+
+  if (initialized && user) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center auth-gradient-bg gap-3">
+        <Loading size={32} />
+        <p className="text-pale-sky/70 text-sm">กำลังเข้าระบบ...</p>
+      </div>
+    );
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center auth-gradient-bg p-4">
-      <div className="w-full max-w-[420px] bg-surface rounded-2xl shadow-2xl p-8 animate-fade-in">
-        {/* Logo */}
-        <div className="flex flex-col items-center mb-6">
-          <div className="w-14 h-14 rounded-2xl bg-brand flex items-center justify-center mb-4 shadow-lg">
-            <span className="text-white font-bold text-lg">IT</span>
+    <div className="h-screen flex flex-col items-center justify-center auth-gradient-bg px-4">
+      <div className="w-full max-w-sm bg-surface rounded-2xl shadow-xl p-8 space-y-6">
+        <div className="text-center space-y-2">
+          <div className="w-14 h-14 rounded-xl bg-brand flex items-center justify-center font-bold text-white text-xl mx-auto">
+            IT
           </div>
-          <h1 className="text-2xl font-bold text-deep-space tracking-wide">ITSRC PANEL</h1>
-          <p className="text-text-muted text-sm mt-1">ระบบจัดการห้องแชทอัจฉริยะ</p>
+          <h1 className="text-xl font-bold text-text">ITSRC PANEL</h1>
+          <p className="text-sm text-text-muted">ระบบบริหารแชทและทีมซัพพอร์ต</p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-text mb-1.5">อีเมลผู้ใช้งาน</label>
-            <input
-              type="email"
-              placeholder="name@itsrc.co.th"
-              value={email}
-              onChange={(e) => { setEmail(e.target.value); if (error) clearError(); }}
-              required
-              autoFocus
-              className="w-full h-11 px-3.5 rounded-lg bg-surface-2 border border-transparent text-sm text-text placeholder:text-text-subtle focus:outline-none focus:border-brand focus:bg-surface transition-colors"
-            />
+        {errorMsg && (
+          <div className="bg-vibrant-coral-soft text-vibrant-coral text-sm rounded-lg px-3 py-2 text-center">
+            {errorMsg}
           </div>
+        )}
 
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <label className="block text-sm font-medium text-text">รหัสผ่าน</label>
-              <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                className="text-xs font-medium text-brand hover:underline"
-              >
-                {showPassword ? "ซ่อน" : "แสดง"}
-              </button>
-            </div>
-            <div className="relative">
-              <input
-                type={showPassword ? "text" : "password"}
-                placeholder="••••••••••••"
-                value={password}
-                onChange={(e) => { setPassword(e.target.value); if (error) clearError(); }}
-                required
-                className="w-full h-11 px-3.5 pr-10 rounded-lg bg-surface-2 border border-transparent text-sm text-text placeholder:text-text-subtle focus:outline-none focus:border-brand focus:bg-surface transition-colors"
-              />
-              <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-text-subtle hover:text-text-muted"
-                tabIndex={-1}
-              >
-                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
-            </div>
-          </div>
+        <a
+          href="/api/auth/sso/login"
+          className="w-full h-11 rounded-lg bg-brand text-white font-medium flex items-center justify-center hover:bg-brand-dark transition-colors"
+        >
+          เข้าสู่ระบบด้วย SSO
+        </a>
 
-          {error && (
-            <div className="text-sm text-vibrant-coral bg-vibrant-coral-soft rounded-lg px-3 py-2">
-              {error}
-            </div>
-          )}
-
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full h-12 rounded-xl bg-brand hover:bg-brand-dark text-white font-semibold text-base transition-colors disabled:opacity-60 flex items-center justify-center mt-2"
-          >
-            {loading ? <Loading size={18} /> : "เข้าสู่ระบบ"}
-          </button>
-        </form>
-
-        <div className="mt-5 text-center">
-          <button
-            onClick={() => router.push("/reset-password")}
-            className="text-sm text-brand hover:underline"
-          >
-            ลืมรหัสผ่าน?
-          </button>
-        </div>
+        <p className="text-xs text-text-subtle text-center">
+          ระบบใช้ Single Sign-On ขององค์กร — กรุณาติดต่อผู้ดูแลระบบหากไม่สามารถเข้าได้
+        </p>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={
+      <div className="h-screen flex flex-col items-center justify-center auth-gradient-bg">
+        <Loading size={32} />
+      </div>
+    }>
+      <LoginContent />
+    </Suspense>
   );
 }

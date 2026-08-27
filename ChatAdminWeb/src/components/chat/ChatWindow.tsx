@@ -7,6 +7,7 @@ import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import type { Conversation, ChatMessage, Topic } from "@/lib/types";
+import { MessageContent } from "./MessageContent";
 
 interface Props {
   conversation: Conversation | null;
@@ -65,6 +66,10 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
     <div className={`flex gap-2.5 ${isUser ? "justify-start" : "justify-end"} animate-fade-in`}>
       {isUser && <Avatar name="User" size={32} className="mt-1 shrink-0" />}
       <div className={`max-w-[70%] ${isUser ? "" : "flex flex-col items-end"}`}>
+        {/* แสดงชื่อ admin ถ้าเป็น admin message */}
+        {isAdmin && msg.admin_name && (
+          <div className="text-[10px] text-text-muted mb-0.5 pr-1">{msg.admin_name}</div>
+        )}
         <div
           className={`rounded-2xl px-3.5 py-2 text-sm ${
             isUser
@@ -74,35 +79,8 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
               : "bg-brand text-white rounded-tr-sm"
           }`}
         >
-          {msg.text}
+          <MessageContent msg={msg} variant={isUser ? "user" : "out"} />
         </div>
-
-        {/* Product cards */}
-        {msg.products && msg.products.length > 0 && (
-          <div className="mt-1.5 space-y-1">
-            {msg.products.slice(0, 3).map((p) => (
-              <div
-                key={p.item_id}
-                className={`flex items-center gap-2 rounded-lg p-2 text-xs ${
-                  isUser ? "bg-surface-2" : "bg-white/10"
-                }`}
-              >
-                {p.image && (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={p.image} alt={p.name} className="w-10 h-10 rounded object-cover" />
-                )}
-                <div className="min-w-0">
-                  <div className={`truncate font-medium ${isUser ? "text-text" : "text-white"}`}>
-                    {p.name}
-                  </div>
-                  <div className={isUser ? "text-text-muted" : "text-white/70"}>
-                    ฿{p.price.toLocaleString()}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
 
         {/* Meta */}
         <div className={`flex items-center gap-1.5 mt-1 text-[10px] text-text-subtle`}>
@@ -138,10 +116,21 @@ export function ChatWindow({
   const [text, setText] = useState("");
   const [showActions, setShowActions] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // track ว่า user อยู่ใกล้ล่างไหม — ถ้าไม่ใช่ (กำลังเลื่อนขึ้นอ่าน) จะไม่ auto-scroll
+  const wasNearBottomRef = useRef(true);
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    const el = scrollRef.current;
+    if (!el) return;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    wasNearBottomRef.current = distFromBottom < 80;
+  }, [messages]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (wasNearBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
     }
   }, [messages]);
 

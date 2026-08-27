@@ -2,6 +2,7 @@
 // `tickets`: ticket_id_1, status_1, channel_1, assigned_to_1.
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
+import { logAdminEvent } from "./adminLogService";
 import type { Platform } from "./conversationService";
 
 export type TicketStatus = "open" | "in_progress" | "resolved" | "closed";
@@ -21,6 +22,10 @@ export interface TicketDoc extends Document {
   assigned_to?: string; // admin_id — matches `assigned_to_1` index
   summary: string;
   created_at: Date;
+  // Soft delete
+  is_deleted?: boolean;
+  deleted_at?: Date | null;
+  deleted_by?: string;
   updated_at: Date;
 }
 
@@ -59,12 +64,27 @@ export async function createTicket(opts: {
     updated_at: now,
   };
   await coll.insertOne(doc);
+
+  await logAdminEvent({
+    action_type: "ticket.create",
+    actor: opts.createdBy || "system",
+    conversation_id: opts.conversationId,
+    shop_id: opts.shopId,
+    metadata: {
+      ticket_id: doc.ticket_id,
+      topic: opts.topic,
+      priority: doc.priority,
+      channel: opts.channel,
+      customer_name: opts.customerName,
+    },
+  });
+
   return doc;
 }
 
 export async function getTicket(ticketId: string): Promise<TicketDoc | null> {
   const coll = await getCollection<TicketDoc>(COLLECTIONS.tickets);
-  return coll.findOne({ ticket_id: ticketId });
+  return coll.findOne({ ticket_id: ticketId, is_deleted: { $ne: true } });
 }
 
 export async function listTickets(opts: {
@@ -74,7 +94,7 @@ export async function listTickets(opts: {
   limit?: number;
 } = {}): Promise<TicketDoc[]> {
   const coll = await getCollection<TicketDoc>(COLLECTIONS.tickets);
-  const filter: Record<string, unknown> = {};
+  const filter: Record<string, unknown> = { is_deleted: { $ne: true } };
   if (opts.status) filter.status = opts.status;
   if (opts.channel) filter.channel = opts.channel;
   if (opts.assignedTo) filter.assigned_to = opts.assignedTo;
@@ -89,20 +109,39 @@ export async function updateTicket(
   ticketId: string,
   fields: Partial<
     Pick<TicketDoc, "status" | "priority" | "assigned_to" | "summary" | "topic">
-  >
+  >,
+  actor?: string
 ): Promise<boolean> {
   const coll = await getCollection<TicketDoc>(COLLECTIONS.tickets);
   const result = await coll.updateOne(
     { ticket_id: ticketId },
     { $set: { ...fields, updated_at: new Date() } }
   );
+  if (result.modifiedCount > 0 && actor) {
+    await logAdminEvent({
+      action_type: "ticket.update",
+      actor,
+      metadata: { ticket_id: ticketId, changes: fields },
+    });
+  }
   return result.modifiedCount > 0;
 }
 
-export async function deleteTicket(ticketId: string): Promise<boolean> {
+export async function deleteTicket(ticketId: string, actor?: string): Promise<boolean> {
   const coll = await getCollection<TicketDoc>(COLLECTIONS.tickets);
-  const result = await coll.deleteOne({ ticket_id: ticketId });
-  return result.deletedCount > 0;
+  // Soft delete — never hard delete
+  const result = await coll.updateOne(
+    { ticket_id: ticketId, is_deleted: { $ne: true } },
+    { $set: { is_deleted: true, deleted_at: new Date(), deleted_by: actor, status: "closed", updated_at: new Date() } }
+  );
+  if (result.modifiedCount > 0 && actor) {
+    await logAdminEvent({
+      action_type: "ticket.delete",
+      actor,
+      metadata: { ticket_id: ticketId },
+    });
+  }
+  return result.modifiedCount > 0;
 }
 
 export const ticketService = {

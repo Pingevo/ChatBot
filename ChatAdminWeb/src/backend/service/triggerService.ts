@@ -11,8 +11,9 @@ export interface TriggerDoc extends Document {
   trigger_id: string;
   name: string;
   keywords: string[];
-  shop_id?: string | null; // null/undefined = applies to all shops
-  platform?: Platform | null; // null/undefined = applies to all platforms
+  // Phase 7.10 — เปลี่ยนเป็น array (multi-select)
+  shop_ids: string[]; // [] = applies to all shops
+  platforms: Platform[]; // [] = applies to all platforms
   topic?: string;
   action: TriggerAction;
   bot_template?: string;
@@ -20,6 +21,11 @@ export interface TriggerDoc extends Document {
   created_by: string;
   created_at: Date;
   updated_at: Date;
+  updated_by?: string; // edited by
+  // Soft delete
+  is_deleted?: boolean;
+  deleted_at?: Date | null;
+  deleted_by?: string;
 }
 
 function genTriggerId(): string {
@@ -29,8 +35,8 @@ function genTriggerId(): string {
 export async function createTrigger(opts: {
   name: string;
   keywords: string[];
-  shopId?: string | null;
-  platform?: Platform | null;
+  shopIds?: string[];
+  platforms?: Platform[];
   topic?: string;
   action: TriggerAction;
   botTemplate?: string;
@@ -43,8 +49,8 @@ export async function createTrigger(opts: {
     trigger_id: genTriggerId(),
     name: opts.name,
     keywords: opts.keywords,
-    shop_id: opts.shopId || null,
-    platform: opts.platform || null,
+    shop_ids: opts.shopIds || [],
+    platforms: opts.platforms || [],
     topic: opts.topic,
     action: opts.action,
     bot_template: opts.botTemplate,
@@ -63,9 +69,9 @@ export async function listTriggers(opts: {
   enabledOnly?: boolean;
 } = {}): Promise<TriggerDoc[]> {
   const coll = await getCollection<TriggerDoc>(COLLECTIONS.triggers);
-  const filter: Record<string, unknown> = {};
-  if (opts.shopId) filter.$or = [{ shop_id: opts.shopId }, { shop_id: null }];
-  if (opts.platform) filter.platform = { $in: [opts.platform, null] };
+  const filter: Record<string, unknown> = { is_deleted: { $ne: true } };
+  if (opts.shopId) filter.$or = [{ shop_ids: opts.shopId }, { shop_ids: { $size: 0 } }];
+  if (opts.platform) filter.platforms = { $in: [opts.platform] };
   if (opts.enabledOnly) filter.enabled = true;
   return coll.find(filter).sort({ created_at: -1 }).toArray();
 }
@@ -78,30 +84,35 @@ export async function getTrigger(triggerId: string): Promise<TriggerDoc | null> 
 export async function updateTrigger(
   triggerId: string,
   fields: Partial<
-    Pick<TriggerDoc, "name" | "keywords" | "shop_id" | "platform" | "topic" | "action" | "bot_template" | "enabled">
-  >
+    Pick<TriggerDoc, "name" | "keywords" | "shop_ids" | "platforms" | "topic" | "action" | "bot_template" | "enabled">
+  >,
+  updatedBy?: string
 ): Promise<boolean> {
   const coll = await getCollection<TriggerDoc>(COLLECTIONS.triggers);
   const result = await coll.updateOne(
     { trigger_id: triggerId },
-    { $set: { ...fields, updated_at: new Date() } }
+    { $set: { ...fields, updated_at: new Date(), updated_by: updatedBy } }
   );
   return result.modifiedCount > 0;
 }
 
-export async function toggleTrigger(triggerId: string, enabled: boolean): Promise<boolean> {
+export async function toggleTrigger(triggerId: string, enabled: boolean, updatedBy?: string): Promise<boolean> {
   const coll = await getCollection<TriggerDoc>(COLLECTIONS.triggers);
   const result = await coll.updateOne(
     { trigger_id: triggerId },
-    { $set: { enabled, updated_at: new Date() } }
+    { $set: { enabled, updated_at: new Date(), updated_by: updatedBy } }
   );
   return result.modifiedCount > 0;
 }
 
-export async function deleteTrigger(triggerId: string): Promise<boolean> {
+export async function deleteTrigger(triggerId: string, deletedBy?: string): Promise<boolean> {
   const coll = await getCollection<TriggerDoc>(COLLECTIONS.triggers);
-  const result = await coll.deleteOne({ trigger_id: triggerId });
-  return result.deletedCount > 0;
+  // Soft delete — never hard delete
+  const result = await coll.updateOne(
+    { trigger_id: triggerId, is_deleted: { $ne: true } },
+    { $set: { is_deleted: true, deleted_at: new Date(), deleted_by: deletedBy, enabled: false } }
+  );
+  return result.modifiedCount > 0;
 }
 
 /** Match a customer message against enabled triggers (simple substring match). */

@@ -63,7 +63,7 @@ export async function listKbEntries(opts: {
   skip?: number;
 } = {}): Promise<Document[]> {
   const coll = await getCollection(COLLECTIONS.knowledgeBase);
-  const filter: Record<string, unknown> = {};
+  const filter: Record<string, unknown> = { is_deleted: { $ne: true } };
   if (opts.type) filter.type = opts.type;
   if (opts.activeOnly) filter.active = { $ne: false };
   if (opts.search) {
@@ -84,7 +84,7 @@ export async function listKbEntries(opts: {
 
 export async function countKbEntries(type?: KbType): Promise<number> {
   const coll = await getCollection(COLLECTIONS.knowledgeBase);
-  return coll.countDocuments(type ? { type } : {});
+  return coll.countDocuments({ is_deleted: { $ne: true }, ...(type ? { type } : {}) });
 }
 
 export async function getKbEntry(id: string): Promise<Document | null> {
@@ -133,6 +133,26 @@ export async function updateGeneralFaq(
   return result.modifiedCount > 0;
 }
 
+/** Update any KB entry (general_faq or product_spec) by _id — used by the
+ * unified edit form which may edit either type. */
+export async function updateKbEntry(
+  id: string,
+  fields: Record<string, unknown>,
+  updatedBy: string
+): Promise<boolean> {
+  const coll = await getCollection(COLLECTIONS.knowledgeBase);
+  // Strip undefined values so we don't overwrite existing fields with null
+  const cleanFields: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(fields)) {
+    if (v !== undefined) cleanFields[k] = v;
+  }
+  const result = await coll.updateOne(
+    { _id: new ObjectId(id), is_deleted: { $ne: true } },
+    { $set: { ...cleanFields, updated_at: new Date(), updated_by: updatedBy }, $inc: { version: 1 } }
+  );
+  return result.modifiedCount > 0;
+}
+
 /** Upsert product_spec entries from parsed Excel rows (same shape as
  * scripts/import_adminbase.py). Matches by source_file + source_row so
  * re-uploading the same file updates rather than duplicates. */
@@ -158,10 +178,14 @@ export async function toggleKbActive(id: string, active: boolean): Promise<boole
   return result.modifiedCount > 0;
 }
 
-export async function deleteKbEntry(id: string): Promise<boolean> {
+export async function deleteKbEntry(id: string, deletedBy?: string): Promise<boolean> {
   const coll = await getCollection(COLLECTIONS.knowledgeBase);
-  const result = await coll.deleteOne({ _id: new ObjectId(id) });
-  return result.deletedCount > 0;
+  // Soft delete — never hard delete
+  const result = await coll.updateOne(
+    { _id: new ObjectId(id), is_deleted: { $ne: true } },
+    { $set: { is_deleted: true, deleted_at: new Date(), deleted_by: deletedBy, active: false } }
+  );
+  return result.modifiedCount > 0;
 }
 
 export const knowledgeBaseService = {
@@ -170,6 +194,7 @@ export const knowledgeBaseService = {
   getKbEntry,
   createGeneralFaq,
   updateGeneralFaq,
+  updateKbEntry,
   upsertProductSpecFromExcelRow,
   toggleKbActive,
   deleteKbEntry,

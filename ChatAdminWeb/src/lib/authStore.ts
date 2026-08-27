@@ -1,6 +1,8 @@
 // Auth store (zustand) — manages admin session state.
 // Token is stored in an HttpOnly cookie by the server; this store only
 // tracks the user profile and auth flow state (no token handling).
+// ⚠️ ระบบใช้ SSO ขององค์กร — ไม่มี login/signup/reset ผ่าน store อีกต่อไป
+// login ทำผ่าน browser redirect ไป /api/auth/sso/login โดยตรง
 
 import { create } from "zustand";
 import { AdminUser } from "./types";
@@ -11,12 +13,6 @@ interface AuthState {
   loading: boolean;
   error: string | null;
   initialized: boolean;
-  // login flow
-  login: (email: string, password: string) => Promise<boolean>;
-  // signup flow
-  signupConfirm: (token: string, username: string, password: string, name?: string) => Promise<boolean>;
-  // reset flow
-  resetConfirm: (token: string, password: string) => Promise<boolean>;
   // session
   logout: () => Promise<void>;
   fetchMe: () => Promise<void>;
@@ -28,45 +24,6 @@ export const useAuth = create<AuthState>((set) => ({
   loading: false,
   error: null,
   initialized: false,
-
-  login: async (email, password) => {
-    set({ loading: true, error: null });
-    try {
-      const data = await authService.signin(email, password);
-      set({ user: data.admin, loading: false, initialized: true });
-      return true;
-    } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "เข้าสู่ระบบไม่สำเร็จ";
-      set({ loading: false, error: msg });
-      return false;
-    }
-  },
-
-  signupConfirm: async (token, username, password, name) => {
-    set({ loading: true, error: null });
-    try {
-      await authService.signupConfirm(token, username, password, name);
-      set({ loading: false });
-      return true;
-    } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "สมัครสมาชิกไม่สำเร็จ";
-      set({ loading: false, error: msg });
-      return false;
-    }
-  },
-
-  resetConfirm: async (token, password) => {
-    set({ loading: true, error: null });
-    try {
-      await authService.resetConfirm(token, password);
-      set({ loading: false });
-      return true;
-    } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "รีเซตรหัสผ่านไม่สำเร็จ";
-      set({ loading: false, error: msg });
-      return false;
-    }
-  },
 
   fetchMe: async () => {
     try {
