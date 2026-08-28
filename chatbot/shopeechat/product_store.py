@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import re
 from pathlib import Path
 from typing import Any, Iterable
@@ -214,7 +215,12 @@ PRODUCT_PROJECTION = {
 def _warranty_info(doc: dict) -> dict:
     """ดึงข้อมูลรับประกันจาก attribute_list (Warranty Type / Warranty Duration).
 
-    ถ้า attribute_list ไม่มี → สกัดจาก item_name (เช่น "ประกันศูนย์ไทย 15 เดือน").
+    ลำดับความสำคัญ:
+    1. attribute_list (Warranty Type / Warranty Duration) — แอดมินดูแล, ละเอียดที่สุด
+    2. สกัดจาก item_name ด้วย warranty.extract_warranty_from_name
+       (รองรับ pattern ใหม่ที่พบในข้อมูลจริง: "-2Y", "-15M", "-12M", "- 1Y",
+        "ประกันศูนย์ไทย 1Y", "ประกัน 2 ปี")
+    3. fallback เดิม: pattern "X Year/Month Warranty" (อังกฤษ)
     """
     info: dict[str, str] = {}
     for attr in doc.get("attribute_list") or []:
@@ -228,25 +234,44 @@ def _warranty_info(doc: dict) -> dict:
         elif "warranty duration" in low or "ระยะเวลารับประกัน" in name:
             info["duration"] = ", ".join(v for v in vals if v)
 
-    # fallback: สกัด warranty จาก item_name (เช่น "ประกันศูนย์ไทย 15 เดือน", "1 Year Warranty")
-    if not info:
+    # fallback 1: สกัด warranty จาก item_name ด้วย warranty module (รองรับ pattern ใหม่)
+    if not info.get("duration"):
+        from . import warranty as _warranty_mod
+        item_name = doc.get("item_name") or ""
+        w = _warranty_mod.extract_warranty_from_name(item_name)
+        if w:
+            info["duration"] = w["text"]
+            info["duration_months"] = str(w["months"])
+            info["duration_source"] = "item_name"  # บอก LLM ว่าดึงจากชื่อ ไม่ใช่ attribute
+            # สกัด type ด้วยถ้ามีคำว่า "ศูนย์ไทย" ใกล้คำว่า "ประกัน"
+            import re as _re
+            m2 = _re.search(r"ประกัน(\S+?)\s*\d+", item_name)
+            if m2 and "type" not in info:
+                info["type"] = m2.group(1).strip()
+
+    # fallback 2: pattern "X Year/Month Warranty" (อังกฤษ) — สำรอง
+    if not info.get("duration"):
         import re as _re
         item_name = doc.get("item_name") or ""
-        # pattern: "ประกัน...X เดือน/ปี" หรือ "X เดือน/ปี" ใกล้คำว่าประกัน
-        m = _re.search(r"ประกัน[^\d]{0,20}(\d+)\s*(เดือน|ปี|year|month)", item_name, _re.IGNORECASE)
-        if m:
-            num = m.group(1)
-            unit = m.group(2)
-            info["duration"] = f"{num} {unit}"
-            # สกัด type ด้วย (เช่น "ศูนย์ไทย")
-            m2 = _re.search(r"ประกัน(\S+?)\s*\d+", item_name)
-            if m2:
-                info["type"] = m2.group(1).strip()
-        # pattern: "X Year Warranty" หรือ "X Month Warranty"
-        elif _re.search(r"\d+\s*(year|month)s?\s*warranty", item_name, _re.IGNORECASE):
+        if _re.search(r"\d+\s*(year|month)s?\s*warranty", item_name, _re.IGNORECASE):
             m3 = _re.search(r"(\d+)\s*(year|month)s?\s*warranty", item_name, _re.IGNORECASE)
             if m3:
                 info["duration"] = f"{m3.group(1)} {m3.group(2)}"
+                info["duration_source"] = "item_name_en"
+
+    # ถ้ามี duration แล้ว แต่ยังไม่มี duration_months → คำนวณจาก duration text
+    # เช่น "24 Months" → 24, "1 Year" → 12, "2 ปี" → 24, "15 เดือน" → 15
+    if info.get("duration") and not info.get("duration_months"):
+        import re as _re
+        dur = info["duration"]
+        m = _re.search(r"(\d+)\s*(year|month|ปี|เดือน)", dur, _re.IGNORECASE)
+        if m:
+            val = int(m.group(1))
+            unit = m.group(2).lower()
+            if unit in ("year", "ปี"):
+                info["duration_months"] = str(val * 12)
+            else:
+                info["duration_months"] = str(val)
 
     return info
 
@@ -296,13 +321,43 @@ def _clean_description(desc: str, message: str = "") -> str:
                "ความจุ", "หน่วยความจำ", "ระบบปฏิบัติการ", "เชื่อมต่อ", "เครือข่าย",
                "สี", "ขนาด", "น้ำหนัก", "อุปกรณ์ในกล่อง", "ในกล่อง", "box",
                "ข้อมูลตัวเครื่อง", "มัลติมีเดีย", "เซ็นเซอร์",
-               "เปรียบเทียบ", " vs ", "เทียบ", "compare", "เทียบกับ")
+               "เปรียบเทียบ", " vs ", "เทียบ", "compare", "เทียบกับ",
+               "ของแถม", "แถม", "gift", "free", "โปรโมชัน", "promotion",
+               "อุปกรณ์", "accessories", "ฟรี", "คู่มือ", "แท่นชาร์จ", "สายชาร์จ")
     shipping_kw = ("จัดส่ง", "ส่งสินค้า", "เวลาทำการ", "บริการแชท",
                    "shipping", "delivery", "เปิดทำการ", "ตัดรอบ")
 
     want_warranty = any(kw in msg_lower for kw in warranty_kw)
     want_spec = any(kw in msg_lower for kw in spec_kw)
     want_shipping = any(kw in msg_lower for kw in shipping_kw)
+
+    # ถ้าเป็นคำถามเกี่ยวกับสินค้า (มี product keyword ใดๆ) → ส่ง spec เสมอ
+    # เพราะลูกค้าถาม "สายชาร์จ 65w" หรือ "หัวชาร์จ 100w" ก็ต้องเห็นสเปก
+    # จะได้ตอบได้ว่าสินค้าไหนรองรับ 65w/100w บ้าง
+    product_kw = (
+        "สายชาร์จ", "หัวชาร์จ", "ชุดชาร์จ", "แท่นชาร์จ", "พาวเวอร์แบงค์", "แบตเตอรี่สำรอง",
+        "หูฟัง", "earbuds", "tws", "สมาร์ทวอช", "smartwatch", "นาฬิกา",
+        "โทรศัพท์", "phone", "สมาร์ทโฟน", "เคส", "ฟิล์ม", "ลำโพง",
+        "cable", "charger", "adapter", "powerbank", "power bank",
+        "iphone", "samsung", "xiaomi", "huawei", "oppo", "vivo", "realme",
+        "cuktech", "anker", "baseus", "ugreen", "romoss",
+        "65w", "100w", "120w", "240w", "w ", "pd", "qc",
+        "usb-c", "type-c", "usb a", "lightning", "micro usb",
+        "ใช้กับ", "รองรับ", "สำหรับ", "compatible",
+        # app/compatibility questions — ต้องเห็น description เพื่อบอกชื่อแอพ
+        "แอพ", "แอป", "app", "ต่อมือถือ", "เชื่อมต่อมือถือ",
+    )
+    want_product = any(kw in msg_lower for kw in product_kw)
+    if want_product:
+        want_spec = True
+
+    # ถาม "รับประกันกี่ปี" → ข้อมูลอยู่ใน warranty field ของ product card อยู่แล้ว
+    # ไม่ต้องส่งเงื่อนไขรับประกันเบื้องต้น (warranty section) เพราะ LLM ตอบจาก field ได้
+    # ส่ง warranty section เฉพาะเมื่อถามเรื่องเคลม/ซ่อม/เปลี่ยน เท่านั้น
+    warranty_claim_kw = ("เคลม", "claim", "ซ่อม", "เปลี่ยน", "เสีย", "พัง", "ไม่ทำงาน", "ส่งเคลม")
+    want_warranty_claim = any(kw in msg_lower for kw in warranty_claim_kw)
+    if not want_warranty_claim:
+        want_warranty = False  # ไม่ส่ง warranty section ถ้าไม่ใช่คำถามเคลม
 
     # ถ้าไม่ได้ถามอะไรเฉพาะเจาะจง → คืน "" (ประหยัด token)
     if not (want_warranty or want_spec or want_shipping):
@@ -431,6 +486,12 @@ def to_product_card(doc: dict, message: str = "") -> dict:
     doc = _to_serializable(doc)
     brand = (doc.get("brand") or {}).get("original_brand_name", "")
     price = _price_range(doc)
+    # คำนวณ total stock จาก stock_info_v2 ของทุก model
+    total_stock = 0
+    for m in (doc.get("model") or []):
+        si = m.get("stock_info_v2") or {}
+        summary = si.get("summary_info") or {}
+        total_stock += summary.get("total_available_stock", 0) or 0
     return {
         "item_id": doc.get("item_id"),
         "name": doc.get("item_name"),
@@ -445,6 +506,8 @@ def to_product_card(doc: dict, message: str = "") -> dict:
         "image_url": _first_image_url(doc),
         "weight": doc.get("weight"),
         "dimension": doc.get("dimension"),
+        "total_stock": total_stock,
+        "sold_out": total_stock == 0,
         # ข้อมูลโปรโมชั่น (ใช้ตอน re-rank และให้ LLM บอกลูกค้าได้)
         "has_promotion": _has_active_promotion(doc),
         "is_flash_sale": bool(doc.get("is_flash_sale")),
@@ -464,6 +527,21 @@ def to_product_card(doc: dict, message: str = "") -> dict:
             for tv in (doc.get("tier_variation") or [])
         ],
     }
+
+
+def _is_sold_out(doc: dict) -> bool:
+    """ตรวจว่าสินค้า sold out (stock=0 ทุก model) หรือไม่.
+
+    ใช้กรองสินค้าที่ item_status=NORMAL แต่ Shopee ขึ้น sold out แล้ว
+    (เพราะ stock_info_v2.summary_info.total_available_stock = 0)
+    """
+    for m in (doc.get("model") or []):
+        si = m.get("stock_info_v2") or {}
+        summary = si.get("summary_info") or {}
+        if (summary.get("total_available_stock", 0) or 0) > 0:
+            return False
+    # ถ้าไม่มี model เลย หรือทุก model stock=0 → sold out
+    return bool(doc.get("model"))
 
 
 # ---- filtering ----------------------------------------------------------------
@@ -686,14 +764,29 @@ PRODUCT_TYPES: tuple[tuple[str, tuple[str, ...], str], ...] = (
      r"พาวแบงค์|พาวแบงก์|"
      r"พอร์เวอร์แบงค์|พอร์เวอร์แบงก์|"
      r"power\s*bank|powerbank|\bpb\b\s*\d)"),
-    # หัวชาร์จ/สายชาร์จ/adapter
+    # หัวชาร์จ/สายชาร์จ/adapter/ชุดชาร์จ
     ("charger",
-     ("หัวชาร์จ", "สายชาร์จ", "สายชาร์ต", "charger", "cable", "คาเบิล",
+     ("หัวชาร์จ", "สายชาร์จ", "สายชาร์ต", "ชุดชาร์จ", "ชุดชาร์ต",
+      "charger", "cable", "คาเบิล",
       "adapter", "แอ็ดอปเตอร์", "สาย type-c", "สาย type c", "สาย micro",
-      "สาย usb", "gan"),
-     r"(?:หัวชาร์จ|สายชาร์จ|สายชาร์ต|charger|\bcable\b|คาเบิล|"
+      "สาย usb", "gan", "แท่นชาร์จ", "wireless charger",
+      "สายไนลอน", "สายถัก", "สายซิลิโคน", "สาย c", "สาย pd",
+      "สายชาร์จไนลอน", "สายชาร์จถัก", "สายชาร์จซิลิโคน",
+      # ⚡ Lightning ลอยๆ (ลูกค้าถามแค่ "ไลนิ่ง" ไม่มี "สาย" นำหน้า)
+      "lightning", "ไลนิ่ง", "ไลนิง",
+      # ⚡ connector variants ลอยๆ (c to lightning, a to lightning ไม่มี "สาย" นำหน้า)
+      "c to lightning", "a to lightning", "usb-c to lightning", "usb-a to lightning",
+      "type c to lightning", "type-c to lightning",
+      "c to l", "a to l",
+      ),
+     r"(?:หัวชาร์จ|สายชาร์จ|สายชาร์ต|ชุดชาร์จ|ชุดชาร์ต|"
+     r"charger|\bcable\b|คาเบิล|"
      r"adapter|แอ็ดอปเตอร์|type[\s-]*c|micro\s*usb|usb[-\s]*a|"
-     r"\bgan\b|\bqc\s*3|pd\s*fast)"),
+     r"\bgan\b|\bqc\s*3|pd\s*fast|แท่นชาร์จ|wireless\s*charger|"
+     r"สายไนลอน|สายถัก|สายซิลิโคน|สายชาร์จไนลอน|สายชาร์จถัก|สายชาร์จซิลิโคน|"
+     r"\blightning\b|ไลนิ่ง|ไลนิง|"
+     r"\bc\s*to\s*l(?:ightning)?\b|\ba\s*to\s*l(?:ightning)?\b|"
+     r"usb[-\s]*[ca]\s*to\s*lightning|type[\s-]*c\s*to\s*lightning)"),
     # เคส/cover
     ("case",
      ("เคส", "case", "cover", "สายคล้อง", "เคสโทรศัพท์"),
@@ -784,6 +877,273 @@ PRODUCT_TYPES: tuple[tuple[str, tuple[str, ...], str], ...] = (
      ("air compressor", "ปั้มลม", "เครื่องปั้มลม", "70mai", "ทราคเจอร์",
       "อุปกรณ์รถยนต์"),
      r"(?:air\s*compressor|ปั้มลม|เครื่องปั้มลม|70mai|ทราคเจอร์|อุปกรณ์รถยนต์)"),
+    # ── Power & Charging sub-types ที่เพิ่มจาก CSV schema ──
+    # หัวชาร์จในรถ — แยกจาก charger เพราะลูกค้าอาจถามเฉพาะ
+    ("car_charger",
+     ("หัวชาร์จในรถ", "หัวชาร์จรถ", "car charger", "car charger",
+      "ชาร์จในรถ", "ชาร์จรถ", "ที่ชาร์จในรถ", "ที่ชาร์จรถ",
+      "cigarette lighter", "ชาร์จบุหรี่"),
+     r"(?:car\s*charger|หัวชาร์จในรถ|หัวชาร์จรถ|ชาร์จในรถ|ชาร์จรถ|"
+     r"ที่ชาร์จในรถ|ที่ชาร์จรถ|cigarette\s*lighter|ชาร์จบุหรี่)"),
+    # แท่นชาร์จไร้สาย / wireless charger
+    ("wireless_charger",
+     ("แท่นชาร์จไร้สาย", "ชาร์จไร้สาย", "wireless charger",
+      "ชาร์จไม่มีสาย", "qi charger", "magSafe", "แม็กเซฟ"),
+     r"(?:wireless\s*charger|แท่นชาร์จไร้สาย|ชาร์จไร้สาย|"
+     r"ชาร์จไม่มีสาย|qi\s*charger|magsafe|แม็กเซฟ)"),
+    # แท่นชาร์จตั้งโต๊ะ / desktop charger
+    ("desktop_charger",
+     ("แท่นชาร์จตั้งโต๊ะ", "แท่นชาร์จเดสก์ท็อป", "desktop charger",
+      "แท่นชาร์จหลายพอร์ต", "charging station", "ชาร์จสเตชัน"),
+     r"(?:desktop\s*charger|แท่นชาร์จตั้งโต๊ะ|แท่นชาร์จเดสก์ท็อป|"
+     r"แท่นชาร์จหลายพอร์ต|charging\s*station|ชาร์จ\s*สเตชัน)"),
+    # ปลั๊กไฟอัจฉริยะ / smart socket
+    ("smart_socket",
+     ("ปลั๊กไฟอัจฉริยะ", "ปลั๊กอัจฉริยะ", "smart plug", "smart socket",
+      "ปลั๊ก smart", "ปลั๊ก wifi", "ปลั๊กไฟ wifi", "tapo plug"),
+     r"(?:smart\s*plug|smart\s*socket|ปลั๊กไฟอัจฉริยะ|ปลั๊กอัจฉริยะ|"
+     r"ปลั๊ก\s*smart|ปลั๊ก\s*wifi|ปลั๊กไฟ\s*wifi|tapo\s*plug)"),
+    # แบตเตอรี่ / battery (ไม่ใช่ powerbank — เป็นแบตเตอรี่เปล่า)
+    ("battery",
+     ("แบตเตอรี่", "battery", "แบตเตอรี่เปล่า", "แบต AA",
+      "แบต AAA", "rechargeable battery", "แบตเตอรี่ชาร์จได้"),
+     r"(?:rechargeable\s*battery|แบตเตอรี่ชาร์จได้|แบต\s*aa|แบต\s*aaa|"
+     r"แบตเตอรี่เปล่า)"),
+    # ── Home Appliances ที่ขาด ──
+    # เครื่องฟอกอากาศ — แยกจาก air_filter (air_filter = ไส้กรอง, air_purifier = เครื่อง)
+    ("air_purifier",
+     ("เครื่องฟอกอากาศ", "เครื่องกรองอากาศ", "air purifier",
+      "เครื่องฟอก", "ฟอกอากาศ", "เครื่องกรอง", "smartmi car air",
+      "รอยด์มี่", "roidmi", "70mai purifier", "car air purifier",
+      "เครื่องฟอกอากาศในรถ", "เครื่องฟอกอากาศรถยนต์"),
+     r"(?:เครื่องฟอกอากาศ|เครื่องกรองอากาศ|air\s*purifier|"
+     r"เครื่องฟอก|ฟอกอากาศ|เครื่องกรอง|"
+     r"car\s*air\s*purifier|เครื่องฟอกอากาศในรถ|เครื่องฟอกอากาศรถยนต์|"
+     r"roidmi|รอยด์มี่|70mai\s*purifier)"),
+    # เครื่องทำความชื้น / humidifier
+    ("humidifier",
+     ("เครื่องทำความชื้น", "humidifier", "เครื่องเพิ่มความชื้น",
+      "เครื่องดันความชื้น", "dehumidifier", "เครื่องลดความชื้น"),
+     r"(?:เครื่องทำความชื้น|humidifier|เครื่องเพิ่มความชื้น|"
+     r"dehumidifier|เครื่องลดความชื้น)"),
+    # หลอดไฟอัจฉริยะ / smart lamp
+    ("smart_lamp",
+     ("หลอดไฟอัจฉริยะ", "หลอดไฟ smart", "smart lamp", "smart bulb",
+      "หลอดไฟ wifi", "yeelight", "yeelight bulb", "tapo bulb",
+      "หลอดไฟ yeelight", "โคมไฟอัจฉริยะ", "โคมไฟ uv", "sterilizer lamp",
+      "germicidal lamp", "โคมฆ่าเชื้อ"),
+     r"(?:หลอดไฟอัจฉริยะ|หลอดไฟ\s*smart|smart\s*lamp|smart\s*bulb|"
+     r"หลอดไฟ\s*wifi|yeelight|tapo\s*bulb|"
+     r"โคมไฟอัจฉริยะ|โคมไฟ\s*uv|sterilizer\s*lamp|germicidal\s*lamp|โคมฆ่าเชื้อ)"),
+    # กลอนอัจฉริยะ / smart lock
+    ("smart_lock",
+     ("กลอนอัจฉริยะ", "กลอน smart", "smart lock", "กลอนประตู",
+      "กลอน wifi", "กลอน fingerprint", "กลอนลายนิ้วมือ",
+      "กลอนแตะบัตร", "door lock smart"),
+     r"(?:smart\s*lock|กลอนอัจฉริยะ|กลอน\s*smart|กลอนประตู|"
+     r"กลอน\s*wifi|กลอน\s*fingerprint|กลอนลายนิ้วมือ|กลอนแตะบัตร)"),
+    # ถังขยะอัจฉริยะ / smart bin
+    ("smart_bin",
+     ("ถังขยะอัจฉริยะ", "ถังขยะ smart", "smart trash can", "smart bin",
+      "ถังขยะอัตโนมัติ", "ถังขยะไร้สาย", "ninestars"),
+     r"(?:smart\s*trash\s*can|smart\s*bin|ถังขยะอัจฉริยะ|ถังขยะ\s*smart|"
+     r"ถังขยะอัตโนมัติ|ninestars)"),
+    # เครื่องเป่าผม / hair dryer
+    ("hair_dryer",
+     ("เครื่องเป่าผม", "เครื่องเป่าผมไฟฟ้า", "hair dryer", "ไดร์เป่าผม",
+      "ไดร์เป่า", "เป่าผม", "ที่เป่าผม", "trouver hair dryer"),
+     r"(?:เครื่องเป่าผม|hair\s*dryer|ไดร์เป่าผม|ไดร์เป่า|"
+     r"เป่าผม|ที่เป่าผม|trouver\s*hair)"),
+    # เครื่องโกนหนวด / shaver
+    ("shaver",
+     ("เครื่องโกนหนวด", "เครื่องโกนหนวดไฟฟ้า", "shaver", "ปัตตาเลี่ยน",
+      "ที่โกนหนวดไฟฟ้า", "razor electric", "enchen shaver",
+      "mi shaver", "mijia hair clipper"),
+     r"(?:เครื่องโกนหนวด|shaver|ปัตตาเลี่ยน|ที่โกนหนวดไฟฟ้า|"
+     r"razor\s*electric|enchen|mijia\s*hair\s*clipper)"),
+    # ที่ตัดขนจมูก / nose hair trimmer
+    ("nose_trimmer",
+     ("ที่ตัดขนจมูก", "ที่ตัดจมูก", "nose hair trimmer",
+      "เครื่องตัดขนจมูก", "winben nose", "trimmer จมูก"),
+     r"(?:nose\s*hair\s*trimmer|ที่ตัดขนจมูก|ที่ตัดจมูก|"
+     r"เครื่องตัดขนจมูก|winben\s*nose|trimmer\s*จมูก)"),
+    # เครื่องดูดสิว / blackhead cleaner
+    ("blackhead_cleaner",
+     ("เครื่องดูดสิว", "ที่ดูดสิว", "blackhead cleaner",
+      "เครื่องดูดสิวเสี้ยน", "ที่กดสิว", "meishi godness",
+      "meishi wisdom"),
+     r"(?:เครื่องดูดสิว|ที่ดูดสิว|blackhead\s*cleaner|"
+     r"เครื่องดูดสิวเสี้ยน|ที่กดสิว|meishi)"),
+    # แปรงฟันไฟฟ้า / electric toothbrush
+    ("toothbrush",
+     ("แปรงฟันไฟฟ้า", "แปรงฟันอัจฉริยะ", "electric toothbrush",
+      "smart toothbrush", "ที่แขวนแปรงฟัน", "toothbrush holder",
+      "เครื่องแขวนแปรงฟัน", "dr meng toothbrush"),
+     r"(?:แปรงฟันไฟฟ้า|แปรงฟันอัจฉริยะ|electric\s*toothbrush|"
+     r"smart\s*toothbrush|toothbrush\s*holder|เครื่องแขวนแปรงฟัน|dr\s*meng)"),
+    # เครื่องกรองน้ำ / water purifier
+    ("water_purifier",
+     ("เครื่องกรองน้ำ", "เครื่องกรองน้ำดื่ม", "water purifier",
+      "เครื่องผลิตน้ำดื่ม", "water dispenser", "เครื่องจ่ายน้ำ",
+      "petoneer water", "pet water fountain", "น้ำพุแมว",
+      "เครื่องให้น้ำสัตว์", "pet water dispenser"),
+     r"(?:water\s*purifier|เครื่องกรองน้ำ|เครื่องผลิตน้ำดื่ม|"
+     r"water\s*dispenser|เครื่องจ่ายน้ำ|pet\s*water\s*fountain|น้ำพุแมว|"
+     r"pet\s*water\s*dispenser|petoneer\s*water)"),
+    # เครื่องให้อาหารสัตว์อัตโนมัติ / pet feeder
+    ("pet_feeder",
+     ("เครื่องให้อาหารสัตว์", "เครื่องให้อาหารแมว", "เครื่องให้อาหารหมา",
+      "pet feeder", "automatic feeder", "เครื่องให้อาหารอัตโนมัติ",
+      "petoneer nutri", "petkit feeder", "cat litter box",
+      "ห้องน้ำแมว", "ตู้อุปกรณ์เลี้ยงสัตว์"),
+     r"(?:pet\s*feeder|เครื่องให้อาหารสัตว์|เครื่องให้อาหารแมว|"
+     r"เครื่องให้อาหารหมา|automatic\s*feeder|เครื่องให้อาหารอัตโนมัติ|"
+     r"petoneer\s*nutri|petkit\s*feeder|cat\s*litter\s*box|ห้องน้ำแมว)"),
+    # ตู้ปลา / fish tank
+    ("fish_tank",
+     ("ตู้ปลา", "ตู้ปลาอัจฉริยะ", "fish tank", "aquarium",
+      "ตู้ปลาพลาสติก", "huafajihe"),
+     r"(?:fish\s*tank|ตู้ปลา|aquarium|huafajihe)"),
+    # จักรยานออกกำลังกาย / exercise bike
+    ("exercise_bike",
+     ("จักรยานออกกำลังกาย", "จักรยาน exercise", "exercise bike",
+      "yesoul", "smart bike", "จักรยาน smart"),
+     r"(?:exercise\s*bike|จักรยานออกกำลังกาย|yesoul|smart\s*bike)"),
+    # ลู่เดิน / walking pad
+    ("walking_pad",
+     ("ลู่เดิน", "ลู่วิ่ง", "walking pad", "walkingpad",
+      "treadmill", "kingsmith", "ลู่เดินออกกำลังกาย", "ลู่วิ่งไฟฟ้า"),
+     r"(?:walking\s*pad|walkingpad|treadmill|ลู่เดิน|ลู่วิ่ง|"
+     r"kingsmith|ลู่เดินออกกำลังกาย|ลู่วิ่งไฟฟ้า)"),
+    # สเก็ตบอร์ด / surfskate
+    ("skateboard",
+     ("สเก็ตบอร์ด", "สเก็ตบอร์ด", "skateboard", "surfskate",
+      "เซิร์ฟสเก็ต", "boils dragon", "longboard"),
+     r"(?:skateboard|สเก็ตบอร์ด|surfskate|เซิร์ฟสเก็ต|boils\s*dragon|longboard)"),
+    # รถเข็นเด็ก / stroller
+    ("stroller",
+     ("รถเข็นเด็ก", "รถเข็นทารก", "stroller", "baby stroller",
+      "รถเข็นเด็กน้อย", "ที่นั่งรถเข็น"),
+     r"(?:stroller|รถเข็นเด็ก|รถเข็นทารก|baby\s*stroller)"),
+    # เครื่องปั้มลมยางพกพา / air pump (แยกจาก car_accessory เพราะมีหลายแบบ)
+    ("air_pump",
+     ("เครื่องปั้มลมยาง", "ปั้มลมยาง", "ปั้มลมพกพา", "air pump",
+      "electric air pump", "mojietu air pump", "mijia air pump",
+      "เครื่องปั้มลมไฟฟ้า", "ปั้มลม 70mai"),
+     r"(?:air\s*pump|เครื่องปั้มลมยาง|ปั้มลมยาง|ปั้มลมพกพา|"
+     r"electric\s*air\s*pump|mojietu|mijia\s*air\s*pump|"
+     r"เครื่องปั้มลมไฟฟ้า|ปั้มลม\s*70mai)"),
+    # กล้องติดรถยนต์ / dashcam
+    ("dashcam",
+     ("กล้องติดรถยนต์", "กล้องติดรถ", "dashcam", "dash cam",
+      "yi dash", "70mai dash", "car dvr", "กล้อง dashboard"),
+     r"(?:dash\s*cam|dashcam|กล้องติดรถยนต์|กล้องติดรถ|"
+     r"yi\s*dash|70mai\s*dash|car\s*dvr|กล้อง\s*dashboard)"),
+    # เครื่องวัดแอลกอฮอล์ / alcohol tester
+    ("alcohol_tester",
+     ("เครื่องวัดแอลกอฮอล์", "เครื่องเป่าแอลกอฮอล์", "alcohol tester",
+      "breathalyzer", "เครื่องวัดหายใจ"),
+     r"(?:alcohol\s*tester|breathalyzer|เครื่องวัดแอลกอฮอล์|"
+     r"เครื่องเป่าแอลกอฮอล์|เครื่องวัดหายใจ)"),
+    # คีย์บอร์ด / keyboard
+    ("keyboard",
+     ("คีย์บอร์ด", "keyboard", "คีย์บอร์ดไร้สาย", "wireless keyboard",
+      "mechanical keyboard", "คีย์บอร์ดเกมมิ่ง", "gaming keyboard"),
+     r"(?:คีย์บอร์ด|keyboard|wireless\s*keyboard|mechanical\s*keyboard|"
+     r"gaming\s*keyboard)"),
+    # เมาส์ / mouse
+    ("mouse",
+     ("เมาส์", "mouse", "เมาส์ไร้สาย", "wireless mouse",
+      "เมาส์เกมมิ่ง", "gaming mouse", "logitech mouse"),
+     r"(?:เมาส์|mouse|wireless\s*mouse|gaming\s*mouse|logitech\s*mouse)"),
+    # แรม / RAM
+    ("ram",
+     ("แรม", "ram", "memory ram", "dram", "ddr4", "ddr5",
+      "ram laptop", "ram pc", "ความจำแรม"),
+     r"(?:\bram\b|memory\s*ram|dram|ddr[45]|ram\s*laptop|ram\s*pc|ความจำแรม)"),
+    # แอสเอสดี / SSD
+    ("ssd",
+     ("ssd", "solid state drive", "แอสเอสดี", "hard disk ssd",
+      "nvme", "m.2 ssd", "sata ssd"),
+     r"(?:\bssd\b|solid\s*state\s*drive|แอสเอสดี|nvme|m\.2\s*ssd|sata\s*ssd)"),
+    # หม้อทอดไร้น้ำมัน / air fryer
+    ("air_fryer",
+     ("หม้อทอดไร้น้ำมัน", "หม้อทอด", "air fryer", "เครื่องทอด",
+      "หม้อทอดอากาศ", "airfryer"),
+     r"(?:air\s*fryer|หม้อทอดไร้น้ำมัน|หม้อทอด|เครื่องทอด|"
+     r"หม้อทอดอากาศ|airfryer)"),
+    # เครื่องทำกาแฟ / coffee machine
+    ("coffee_machine",
+     ("เครื่องทำกาแฟ", "coffee machine", "เครื่องชงกาแฟ",
+      "coffee maker", "เครื่องกาแฟ", "nespresso", "dolce gusto"),
+     r"(?:coffee\s*machine|เครื่องทำกาแฟ|เครื่องชงกาแฟ|"
+     r"coffee\s*maker|เครื่องกาแฟ|nespresso|dolce\s*gusto)"),
+    # กาต้มน้ำไฟฟ้า / kettle
+    ("kettle",
+     ("กาต้มน้ำไฟฟ้า", "กาต้มน้ำ", "kettle", "electric kettle",
+      "เตาต้มน้ำ", "เครื่องต้มน้ำ"),
+     r"(?:kettle|กาต้มน้ำไฟฟ้า|กาต้มน้ำ|electric\s*kettle|"
+     r"เตาต้มน้ำ|เครื่องต้มน้ำ)"),
+    # เตาอบ / oven
+    ("oven",
+     ("เตาอบ", "oven", "เตาอบไฟฟ้า", "electric oven",
+      "microwave", "ไมโครเวฟ", "เตาอบไมโครเวฟ", "เตาอบขนม"),
+     r"(?:oven|เตาอบ|electric\s*oven|microwave|ไมโครเวฟ|เตาอบไมโครเวฟ|เตาอบขนม)"),
+    # เครื่องปิ้งย่าง / BBQ grill
+    ("grill",
+     ("เครื่องปิ้งย่าง", "เตาปิ้งย่าง", "grill", "bbq",
+      "เตาย่าง", "เครื่องย่าง", "barbecue"),
+     r"(?:grill|เครื่องปิ้งย่าง|เตาปิ้งย่าง|bbq|เตาย่าง|เครื่องย่าง|barbecue)"),
+    # เครื่องอบผ้า / cloth dryer
+    ("cloth_dryer",
+     ("เครื่องอบผ้า", "เครื่องอบของ", "cloth dryer", "cloth dryer",
+      "เครื่องอบ", "ที่อบผ้า", "shoe dryer", "เครื่องอบรองเท้า",
+      "towel dryer", "เครื่องอบผ้าขนหนู"),
+     r"(?:cloth\s*dryer|เครื่องอบผ้า|เครื่องอบของ|เครื่องอบ|"
+     r"ที่อบผ้า|shoe\s*dryer|เครื่องอบรองเท้า|towel\s*dryer|เครื่องอบผ้าขนหนู)"),
+    # เตารีดไอน้ำ / garment steamer
+    ("garment_steamer",
+     ("เตารีดไอน้ำ", "เตารีด", "garment steamer", "steam iron",
+      "เครื่องอัดไอน้ำ", "ที่รีดผ้า", "เตารีดไอ"),
+     r"(?:garment\s*steamer|เตารีดไอน้ำ|เตารีด|steam\s*iron|"
+     r"เครื่องอัดไอน้ำ|ที่รีดผ้า|เตารีดไอ)"),
+    # ไม้ถูพื้น / spray mop
+    ("spray_mop",
+     ("ไม้ถูพื้น", "ไม้กวาด", "spray mop", "mop", "ไม้ถู",
+      "deerma mop", "ไม้ถูพื้น spray", "ผ้าถูพื้น"),
+     r"(?:spray\s*mop|ไม้ถูพื้น|ไม้กวาด|ไม้ถู|deerma\s*mop|ผ้าถูพื้น)"),
+    # เครื่องดูดฝุ่นโซฟา / sofa cleaner
+    ("sofa_cleaner",
+     ("เครื่องดูดฝุ่นโซฟา", "เครื่องดูดฝุ่นที่นอน", "sofa cleaner",
+      "เครื่องดูดฝุ่นของ", "bed vacuum", "เครื่องดูดฝุ่นเตียง",
+      "mijia bed vacuum"),
+     r"(?:sofa\s*cleaner|เครื่องดูดฝุ่นโซฟา|เครื่องดูดฝุ่นที่นอน|"
+     r"เครื่องดูดฝุ่นของ|bed\s*vacuum|เครื่องดูดฝุ่นเตียง|mijia\s*bed)"),
+    # เครื่องกระตุ้นสำหรับออกกำลังกาย / EMS massager (แยกจาก massager)
+    ("ems_massager",
+     ("เครื่องกระตุ้นกล้ามเนื้อ", "ems massager", "ems",
+      "แผ่นกระตุ้นกล้ามเนื้อ", "แผ่นนวด ems", "leravan ems",
+      "lejia pulse", "เครื่องนวด ems"),
+     r"(?:ems\s*massager|เครื่องกระตุ้นกล้ามเนื้อ|แผ่นกระตุ้นกล้ามเนื้อ|"
+     r"แผ่นนวด\s*ems|leravan\s*ems|lejia\s*pulse|เครื่องนวด\s*ems)"),
+    # ที่นั่งรถยนต์ / car seat
+    ("car_seat",
+     ("ที่นั่งรถยนต์", "เบาะรถยนต์", "car seat", "เบาะนั่งรถ",
+      "ที่นั่งรถเด็ก", "baby car seat"),
+     r"(?:car\s*seat|ที่นั่งรถยนต์|เบาะรถยนต์|เบาะนั่งรถ|"
+     r"ที่นั่งรถเด็ก|baby\s*car\s*seat)"),
+    # กระจกแต่งหน้า / makeup mirror
+    ("makeup_mirror",
+     ("กระจกแต่งหน้า", "กระจก led", "makeup mirror",
+      "vanity mirror", "กระจกแต่งหน้า led", "jordan judy mirror"),
+     r"(?:makeup\s*mirror|vanity\s*mirror|กระจกแต่งหน้า|กระจก\s*led|"
+     r"กระจกแต่งหน้า\s*led|jordan\s*judy\s*mirror)"),
+    # เครื่องเป่าผมขนาดเล็ก / mini razor
+    ("mini_razor",
+     ("เครื่องโกนหนวดพกพา", "mini razor", "winben mini razor",
+      "ที่โกนหนวดพกพา", "ปัตตาเลี่ยนพกพา"),
+     r"(?:mini\s*razor|เครื่องโกนหนวดพกพา|winben\s*mini|"
+     r"ที่โกนหนวดพกพา|ปัตตาเลี่ยนพกพา)"),
 )
 
 
@@ -794,6 +1154,11 @@ def _detect_product_types(message: str) -> set[str]:
     1. exact match กับ user_kws (เช่น "โทรศัพท์", "มือถือ", "phone")
     2. ถ้าไม่ match ในขั้น 1 ให้ลอง regex (เช่น "redmi 8a" match phone regex)
        เพื่อจับกรณีลูกค้าพิมพ์แค่ชื่อรุ่นโดยไม่ระบุประเภท
+
+    กรณีพิเศษ: compatibility question
+    - "สายชาร์จที่ใช้กับ iphone" → สินค้าคือ charger ไม่ใช่ phone
+    - "พาวเวอร์แบงค์ใช้กับ mi 17" → สินค้าคือ powerbank ไม่ใช่ phone
+    - ถ้ามี non-phone type + "ใช้กับ/รองรับ" + phone brand → ลบ phone ออก
     """
     low = message.lower()
     found: set[str] = set()
@@ -802,7 +1167,236 @@ def _detect_product_types(message: str) -> set[str]:
             found.add(type_name)
         elif _regex and re.search(_regex, low):
             found.add(type_name)
+
+    # ── compatibility question: ลบ phone เมื่อมี "ใช้กับ/รองรับ" ──
+    # เช่น "สายชาร์จที่ใช้กับ iphone 17" → ลบ phone เหลือ charger
+    # เช่น "พาวเวอร์แบงค์ใช้กับ mi 17 ultra" → ลบ phone เหลือ powerbank
+    # เช่น "cuktech ctc612w 6a 240w ใช้กับ iphone 16 pro" → ลบ phone (เป็น compat question)
+    if "phone" in found:
+        _compat_kws = ("ใช้กับ", "รองรับ", "เชื่อมต่อ", "สำหรับ", "สำหรับใช้กับ")
+        if any(kw in low for kw in _compat_kws):
+            # phone เป็นแค่ compatibility target ไม่ใช่สินค้าที่ลูกค้าต้องการ
+            found.discard("phone")
+
+    # ── Charger model prefix/wattage detection ──
+    # ถ้า message มี charger model prefix (CTC, CTL, ATC, CMC, AD, ZA, HA, AL)
+    # หรือ wattage pattern (6a 240w, 5a 100w, 65w, 45w, 30w, 20w)
+    # → เป็น charger type (สายหรือหัวชาร์จ)
+    if "charger" not in found:
+        _charger_model_prefixes = (
+            r"\bctc\b", r"\bctl\b", r"\batc\b", r"\bcmc\b",  # สายชาร์จ CUKTECH
+            r"\bad\d", r"\bza\d", r"\bha\d", r"\bal\d",      # หัวชาร์จ ZTEC/ZMI
+            r"\bac\d", r"\ba18", r"\ba15",                    # หัวชาร์จ CUKTECH
+        )
+        _wattage_patterns = (
+            r"\b\d+a\s*\d+w\b",  # 6a 240w
+            r"\b\d+w\b",         # 65w, 45w, 30w
+            r"\bgan\d?\b",       # gan, gan3
+        )
+        if any(re.search(p, low) for p in _charger_model_prefixes) or \
+           any(re.search(p, low) for p in _wattage_patterns):
+            found.add("charger")
+
     return found
+
+
+# ── Charger subtype detection ──
+# สายชาร์จ = cable only, หัวชาร์จ = adapter/head only, ชุดชาร์จ = set (head + cable)
+_CHARGER_SUBTYPES = {
+    "cable": ("สายชาร์จ", "สายชาร์ต", "cable", "คาเบิล",
+              "สาย type-c", "สาย type c", "สาย micro", "สาย usb",
+              "สาย c to c", "สาย lightning", "สาย usb-c",
+              "สาย c to lightning", "สาย usb to c",
+              "สายไนลอน", "สายถัก", "สายซิลิโคน", "สาย c", "สาย pd",
+              "สายชาร์จไนลอน", "สายชาร์จถัก", "สายชาร์จซิลิโคน",
+              # ⚡ Lightning ลอยๆ (ลูกค้าถามแค่ "ไลนิ่ง"/"lightning" ไม่มี "สาย" นำหน้า)
+              "lightning", "ไลนิ่ง", "ไลนิง",
+              # ⚡ connector variants ลอยๆ (c to lightning, a to lightning ไม่มี "สาย" นำหน้า)
+              "c to lightning", "a to lightning",
+              "usb-c to lightning", "usb-a to lightning",
+              "type c to lightning", "type-c to lightning",
+              "c to l", "a to l",
+              ),
+    "adapter": ("หัวชาร์จ", "หัวชาร์ต", "adapter", "แอ็ดอปเตอร์",
+                "gan", "หัว adapter", "หัวชาร์จ gan", "qc 3", "pd fast",
+                "หัวชาร์จ 65w", "หัวชาร์จ 20w", "หัวชาร์จ 30w",
+                "หัวชาร์จ 100w", "หัวชาร์จ 120w", "หัวชาร์จ 140w",
+                "หัวชาร์จ 240w", "หัวชาร์จ 300w"),
+    "set": ("ชุดชาร์จ", "ชุดชาร์ต", "ชุดหัวชาร์จ", "ชุดสายชาร์จ",
+            "ชุด adapter", "set ชาร์จ", "ชาร์จ set", "ชุดอุปกรณ์ชาร์จ",
+            "set หัวชาร์จ", "set adapter", "พร้อมสาย"),
+    "car_charger": ("หัวชาร์จในรถ", "หัวชาร์จรถ", "car charger",
+                    "ชาร์จในรถ", "ชาร์จรถ", "ที่ชาร์จในรถ", "ที่ชาร์จรถ",
+                    "cigarette lighter", "ชาร์จบุหรี่"),
+    "wireless": ("แท่นชาร์จไร้สาย", "ชาร์จไร้สาย", "wireless charger",
+                 "ชาร์จไม่มีสาย", "qi charger", "magSafe", "แม็กเซฟ",
+                 "magnetic charger", "ชาร์จแม่เหล็ก"),
+    "desktop": ("แท่นชาร์จตั้งโต๊ะ", "แท่นชาร์จเดสก์ท็อป", "desktop charger",
+                "แท่นชาร์จหลายพอร์ต", "charging station", "ชาร์จสเตชัน",
+                "แท่นชาร์จ desktop"),
+    "socket": ("ปลั๊กไฟอัจฉริยะ", "ปลั๊กอัจฉริยะ", "smart plug", "smart socket",
+               "ปลั๊ก smart", "ปลั๊ก wifi", "ปลั๊กไฟ wifi"),
+}
+
+
+def _detect_charger_subtype(message: str) -> str | None:
+    """ตรวจ charger subtype: cable / adapter / set / None.
+
+    ถ้าลูกค้าเรียก "สายชาร์จ" → cable
+    ถ้าลูกค้าเรียก "หัวชาร์จ" → adapter
+    ถ้าลูกค้าเรียก "ชุดชาร์จ" → set
+    ถ้าเรียก "ชาร์จ" ทั่วไป → None (ไม่กรอง subtype)
+
+    ถ้า message มีทั้ง "หัวชาร์จ" และ "สายชาร์จ" → เช็คว่าอันไหนเป็นประธาน
+    เช่น "หาหัวชาร์จ ที่ใช้กับสายชาร์จรุ่นนี้" → adapter (หัวชาร์จเป็นประธาน)
+    เช่น "เอาแค่สายชาร์จ ผมมีหัวชาร์จแล้ว" → cable (สายชาร์จเป็นประธาน)
+
+    รองรับคำพิมพ์ผิด เช่น "สายชาาร์จ" (า เกิน), "สายชาร์จจ" (จ เกิน)
+    """
+    low = message.lower()
+    # แก้คำพิมพ์ผิดที่พบบ่อยก่อนเช็ค keyword
+    # "สายชาาร์จ" → "สายชาร์จ", "หัวชาาร์จ" → "หัวชาร์จ"
+    # "สายชาร์จจ" → "สายชาร์จ", "หัวชาร์จจ" → "หัวชาร์จ"
+    # "สายชารต" → "สายชาร์ต", "หัวชารต" → "หัวชาร์ต"
+    _typo_fixes = [
+        ("สายชาาร์จ", "สายชาร์จ"), ("หัวชาาร์จ", "หัวชาร์จ"),
+        ("สายชาร์จจ", "สายชาร์จ"), ("หัวชาร์จจ", "หัวชาร์จ"),
+        ("สายชารต", "สายชาร์ต"), ("หัวชารต", "หัวชาร์ต"),
+        ("สายชาต", "สายชาร์ต"), ("หัวชาต", "หัวชาร์ต"),
+        ("สายชารจ", "สายชาร์จ"), ("หัวชารจ", "หัวชาร์จ"),
+        ("หัวชาจ", "หัวชาร์จ"),  # พิมพ์ตก ร์
+        ("หัวชาจะ", "หัวชาร์จ"),  # พิมพ์ตก ร์ + ะ
+        ("หัวชาร", "หัวชาร์จ"),  # พิมพ์ตก ์จ
+        ("ชุดชาาร์จ", "ชุดชาร์จ"), ("ชุดชาร์จจ", "ชุดชาร์จ"),
+    ]
+    _low_fixed = low
+    for wrong, right in _typo_fixes:
+        _low_fixed = _low_fixed.replace(wrong, right)
+    low = _low_fixed
+    # เช็ค set ก่อน เพราะ "ชุดชาร์จ" อาจมี "ชาร์จ" อยู่ด้วย
+    for sub, kws in _CHARGER_SUBTYPES.items():
+        if sub in ("cable", "adapter"):
+            continue  # เช็ค cable/adapter ทีหลัง เพราะต้องดู position
+        if any(kw in low for kw in kws):
+            return sub
+    # เช็ค adapter และ cable พร้อมกัน
+    adapter_kws = _CHARGER_SUBTYPES["adapter"]
+    cable_kws = _CHARGER_SUBTYPES["cable"]
+    # "gan" ต้องเป็น word boundary ไม่ใช่ส่วนของ "gan3"/"gan2" (ชื่อรุ่น)
+    _has_adapter = any(kw in low for kw in adapter_kws if kw != "gan")
+    # เช็ค "gan" เป็นคำเดี่ยวเท่านั้น (ไม่ใช่ gan3, gan2, ฯลฯ)
+    if not _has_adapter and re.search(r'\bgan\b', low):
+        _has_adapter = True
+    _has_cable = any(kw in low for kw in cable_kws)
+    # ── Compatibility constraint: "ใช้กับสาย c to c", "ใช้สาย c to c" ──
+    # ถ้า message มี "ใช้กับสาย" หรือ "ใช้สาย" + cable keyword แต่ไม่มี adapter keyword
+    # → ลูกค้าถามว่าหัวชาร์จที่ใช้กับสายนี้ได้ไหม (constraint) ไม่ใช่ขอซื้อสาย
+    # → ไม่คืน cable subtype (ให้ subtype carry จาก history ทำงานแทน)
+    _cable_compat_patterns = ("ใช้กับสาย", "ใช้สาย", "รองรับสาย", "ใช้ได้กับสาย",
+                               "ใช้กับ c to c", "ใช้กับ type c", "ใช้กับ usb-c",
+                               "ใช้กับสาย type", "ใช้กับสาย usb")
+    _is_cable_compat = (
+        not _has_adapter
+        and _has_cable
+        and any(p in low for p in _cable_compat_patterns)
+    )
+    if _is_cable_compat:
+        # ไม่คืน cable — เป็น constraint ไม่ใช่ product type
+        return None
+    if _has_adapter and _has_cable:
+        # มีทั้งคู่ → ดูว่าอันไหนเป็นประธาน
+        _adapter_pos = min((low.find(kw) for kw in adapter_kws if kw in low and kw != "gan"), default=999)
+        if _adapter_pos == 999 and re.search(r'\bgan\b', low):
+            _adapter_pos = low.find("gan")
+        _cable_pos = min((low.find(kw) for kw in cable_kws if kw in low), default=999)
+        # ถ้า message มี "ผมมีหัวชาร์จแล้ว" หรือ "มีหัวแล้ว" → cable (มีหัวแล้ว เอาสาย)
+        if "มีหัว" in low or "มีแล้ว" in low:
+            return "cable"
+        # ถ้ามี "ใช้กับ/คู่กับ/สำหรับ" ระหว่างสองคำ → อันแรกเป็นประธาน
+        _between = low[_adapter_pos:_cable_pos] if _adapter_pos < _cable_pos else low[_cable_pos:_adapter_pos]
+        if any(w in _between for w in ("ใช้กับ", "คู่กับ", "สำหรับ", "กับ")):
+            return "adapter" if _adapter_pos < _cable_pos else "cable"
+        # default: อันไหนอยู่ก่อนเป็นประธาน
+        return "adapter" if _adapter_pos < _cable_pos else "cable"
+    if _has_adapter:
+        return "adapter"
+    if _has_cable:
+        return "cable"
+    return None
+
+
+def _filter_charger_subtype(docs: list[dict], subtype: str) -> list[dict]:
+    """กรอง charger docs ตาม subtype ที่ลูกค้าถาม.
+
+    ลำดับการตรวจ (เพื่อกันสินค้าตกหล่น):
+    1. set: มี "ชุด"/"set" ในชื่อ หรือ มีทั้ง "หัวชาร์จ" และ "สายชาร์จ" ในชื่อ
+    2. adapter: มี "หัวชาร์จ"/"adapter"/"gan" ในชื่อ (แม้จะมี "สาย" ด้วยก็ตาม)
+    3. cable: มี "สาย" ในชื่อ และไม่มี "หัวชาร์จ"/"adapter"/"gan"
+
+    ถ้าลูกค้าถาม "หัวชาร์จ" → เอา adapter + set (เพราะ set ก็มีหัว)
+    ถ้าลูกค้าถาม "สายชาร์จ" → เอา cable + set (เพราะ set ก็มีสาย)
+    ถ้าลูกค้าถาม "ชุดชาร์จ" → เอา set อย่างเดียว
+    """
+    if not subtype:
+        return docs
+
+    adapter_kw = ("หัวชาร์จ", "หัวชาร์ต", "adapter", "แอ็ดอปเตอร์", "gan",
+                  "car charger", "หัวชาร์จในรถ")
+    cable_kw = ("สายชาร์จ", "สายชาร์ต", "สาย usb", "สาย type", "สาย c to",
+                "สาย micro", "สาย lightning", "cable", "คาเบิล",
+                "usb-c to", "usb a to", "type-c to")
+    set_kw = ("ชุดชาร์จ", "ชุดชาร์ต", "ชุดหัวชาร์จ", "ชุดสายชาร์จ", "ชุด adapter",
+              "set ชาร์จ", "charging combo", "ready to go", "ชุดอุปกรณ์ชาร์จ",
+              "ชุด ready", "set samsung", "set iphone", "combo",
+              "premium charging set", "charge anywhere")
+    # แท่นชาร์จ = desktop charger (ไม่ใช่หัวชาร์จ) ต้องแยกออก
+    desktop_kw = ("แท่นชาร์จ", "desktop charger", "desktop charge")
+
+    classified: dict[str, list[dict]] = {"cable": [], "adapter": [], "set": [], "other": []}
+    for d in docs:
+        name = (d.get("item_name") or "").lower()
+        # แท่นชาร์จ = ไม่ใช่ adapter และไม่ใช่ set
+        is_desktop = any(kw in name for kw in desktop_kw)
+        # set = มี indicator ชัดเจน (ชุด/set/combo/ready to go)
+        is_set = (
+            any(kw in name for kw in set_kw)
+            or ("ชุด" in name and ("ชาร์จ" in name or "charger" in name))
+            or ("set" in name and ("ชาร์จ" in name or "charger" in name))
+        )
+        # adapter = มี "หัวชาร์จ"/"adapter"/"gan" ในชื่อ (ไม่ใช่แท่นชาร์จ)
+        is_adapter = any(kw in name for kw in adapter_kw) and not is_desktop
+        # cable = มี "สายชาร์จ"/"cable"/"สาย type" ฯลฯ ในชื่อ
+        # ระวัง "ไร้สาย" (wireless) ไม่ใช่สายชาร์จ
+        is_cable = any(kw in name for kw in cable_kw) or (
+            "สาย" in name and not is_adapter and not is_desktop
+            and "ไร้สาย" not in name and "ไร้ สาย" not in name
+        )
+
+        if is_set:
+            classified["set"].append(d)
+        elif is_adapter:
+            classified["adapter"].append(d)
+        elif is_cable:
+            classified["cable"].append(d)
+        else:
+            classified["other"].append(d)
+
+    # เลือกตาม subtype ที่ลูกค้าถาม
+    if subtype == "cable":
+        result = classified["cable"] + classified["set"]
+    elif subtype == "adapter":
+        result = classified["adapter"] + classified["set"]
+    elif subtype == "set":
+        result = classified["set"]
+    else:
+        result = docs
+
+    # ถ้ากรองแล้วเหลือน้อยเกินไป ให้คืน docs เดิม (ดีกว่าไม่มีอะไรตอบ)
+    # แต่ถ้าเป็น charger subtype (adapter/cable/set) ไม่ควร fallback
+    # เพราะอาจส่งสินค้าผิดประเภท (เช่น แท่นชาร์จแทนหัวชาร์จ)
+    if len(result) < 1 and subtype not in ("adapter", "cable", "set"):
+        return docs
+    return result
 
 
 # ---- fuzzy product type detection (จับคำพิมพ์ผิด) ---------------------------
@@ -965,6 +1559,50 @@ _PRODUCT_TYPE_CATEGORIES: dict[str, tuple[str, ...]] = {
     "flash_drive": ("Computers & Accessories", "Mobile & Gadgets"),
     "air_filter": ("Home Appliances", "Home & Living"),
     "car_accessory": ("Automobiles", "Mobile & Gadgets"),
+    # ── Power & Charging sub-types ──
+    "car_charger": ("Mobile & Gadgets", "Automobiles"),
+    "wireless_charger": ("Mobile & Gadgets",),
+    "desktop_charger": ("Mobile & Gadgets", "Computers & Accessories"),
+    "smart_socket": ("Home Appliances", "Home & Living", "Mobile & Gadgets"),
+    "battery": ("Mobile & Gadgets",),
+    # ── Home Appliances ──
+    "air_purifier": ("Home Appliances", "Home & Living", "Automobiles"),
+    "humidifier": ("Home Appliances", "Home & Living"),
+    "smart_lamp": ("Home & Living", "Home Appliances"),
+    "smart_lock": ("Home & Living", "Home Appliances", "Mobile & Gadgets"),
+    "smart_bin": ("Home & Living", "Home Appliances"),
+    "hair_dryer": ("Beauty", "Home Appliances"),
+    "shaver": ("Beauty", "Home Appliances"),
+    "nose_trimmer": ("Beauty",),
+    "blackhead_cleaner": ("Beauty",),
+    "toothbrush": ("Beauty", "Health", "Home & Living"),
+    "water_purifier": ("Home Appliances", "Home & Living", "Pets"),
+    "pet_feeder": ("Pets", "Home Appliances"),
+    "fish_tank": ("Pets",),
+    "exercise_bike": ("Sports & Outdoors", "Home Appliances"),
+    "walking_pad": ("Sports & Outdoors", "Home Appliances"),
+    "skateboard": ("Sports & Outdoors",),
+    "stroller": ("Mom & Baby", "Sports & Outdoors"),
+    "air_pump": ("Automobiles", "Sports & Outdoors", "Mobile & Gadgets"),
+    "dashcam": ("Automobiles", "Cameras & Drones"),
+    "alcohol_tester": ("Automobiles",),
+    "keyboard": ("Computers & Accessories",),
+    "mouse": ("Computers & Accessories",),
+    "ram": ("Computers & Accessories",),
+    "ssd": ("Computers & Accessories",),
+    "air_fryer": ("Home Appliances",),
+    "coffee_machine": ("Home Appliances",),
+    "kettle": ("Home Appliances",),
+    "oven": ("Home Appliances",),
+    "grill": ("Home Appliances",),
+    "cloth_dryer": ("Home Appliances", "Home & Living"),
+    "garment_steamer": ("Home Appliances", "Home & Living"),
+    "spray_mop": ("Home & Living", "Home Appliances"),
+    "sofa_cleaner": ("Home Appliances", "Home & Living"),
+    "ems_massager": ("Health", "Sports & Outdoors"),
+    "car_seat": ("Automobiles", "Mom & Baby"),
+    "makeup_mirror": ("Beauty",),
+    "mini_razor": ("Beauty",),
 }
 
 
@@ -1014,11 +1652,11 @@ def build_query(
     if product_types is None:
         product_types = _detect_product_types(message)
 
-    q: dict = {"item_status": "NORMAL"}
-
-    # ถ้าเป็นคำถามเรื่องรับประกัน ไม่จำกัดเฉพาะ NORMAL (ลูกค้าอาจถามสินค้าเก่า)
-    if "warranty" in intents:
-        q.pop("item_status", None)
+    q: dict = {}
+    # ดึงสินค้าทุก status (NORMAL, UNLIST, SELLER_DELETE, BANNED, ฯลฯ)
+    # เพื่อให้ LLM ตอบสเปค/รายละเอียด/รับประกัน ของสินค้าย้อนหลังได้
+    # LLM จะแนะนำเฉพาะ NORMAL + stock > 0 เอง (ตาม instructions)
+    # (ไม่กรอง item_status ที่นี่แล้ว)
 
     # shopname/brand ใน DB เก็บมาจากผู้ขาย case ไม่แน่นอน (เช่น "yaber" vs "Yaber")
     # ต้อง match แบบ case-insensitive ไม่งั้น exact $in จะพลาด แม้สินค้ามีอยู่จริง
@@ -1085,13 +1723,32 @@ def build_query(
         q["model.price_info.current_price"] = price_cond
 
     if "warranty" in intents:
-        # เน้นสินค้าที่มีข้อมูล Warranty ใน attribute_list หรือ description
-        # ใช้ $or เพื่อให้ครอบคลุมสินค้าที่เก็บ warranty ใน description แทน attribute
-        q["$or"] = [
-            {"attribute_list.original_attribute_name": {"$regex": "warranty", "$options": "i"}},
-            {"description": {"$regex": "รับประกัน|ประกัน|เคลม|warranty", "$options": "i"}},
-            {"item_name": {"$regex": "ประกัน|รับประกัน|warranty", "$options": "i"}},
-        ]
+        # แยก "ชื่อสินค้า" ออกจากคำถามรับประกัน
+        # เช่น "LOGITECH G PRO X รับประกันกี่ปี" → "LOGITECH G PRO X"
+        # ถ้ามีชื่อสินค้า → กรอง item_name ด้วยชื่อ + มี warranty info
+        # ถ้าไม่มีชื่อสินค้า (เช่น "รับประกันไหม") → ใช้ $or warranty อย่างเดียว
+        from . import warranty as _warranty_mod
+        model_kw = _warranty_mod.strip_warranty_keywords(message)
+        if model_kw:
+            # มีชื่อสินค้า → กรองด้วยชื่อสินค้า AND มี warranty info ใน attribute/desc/name
+            # ใช้ $and เพราะ $or อยู่ข้างนอก และเราต้องการ (model_kw) AND (warranty_info)
+            q["$and"] = [
+                {"item_name": {"$regex": re.escape(model_kw), "$options": "i"}},
+                {
+                    "$or": [
+                        {"attribute_list.original_attribute_name": {"$regex": "warranty", "$options": "i"}},
+                        {"description": {"$regex": "รับประกัน|ประกัน|เคลม|warranty", "$options": "i"}},
+                        {"item_name": {"$regex": "ประกัน|รับประกัน|warranty|-\\d+[yYmM]\\s*$", "$options": "i"}},
+                    ]
+                },
+            ]
+        else:
+            # ไม่มีชื่อสินค้า → ใช้ $or warranty อย่างเดียว (เหมือนเดิม)
+            q["$or"] = [
+                {"attribute_list.original_attribute_name": {"$regex": "warranty", "$options": "i"}},
+                {"description": {"$regex": "รับประกัน|ประกัน|เคลม|warranty", "$options": "i"}},
+                {"item_name": {"$regex": "ประกัน|รับประกัน|warranty", "$options": "i"}},
+            ]
 
     return q
 
@@ -1195,12 +1852,46 @@ def _get_recency_score(doc: dict) -> float:
     return 1.0 - (age / five_years)
 
 
+def _is_bundle_product(doc: dict) -> bool:
+    """ตรวจว่าสินค้าเป็นชุด/แพ็คคู่ (bundle) หรือไม่.
+
+    ชุด = มี indicator ของการรวมหลายสินค้าในชื่อ:
+    - "set", "combo", "ชุด", "แพ็คคู่", "ready to go", "+", "/"
+    - แต่ "/" ที่เป็นตัวคั่นขนาด/สี (เช่น "iPhone 16 Pro / Pro Max") ไม่นับ
+
+    รองรับทั้ง product document (item_name) และ product card (name).
+    """
+    name = (doc.get("item_name") or doc.get("name") or "").lower()
+    bundle_kw = ("set", "combo", "ชุด", "แพ็คคู่", "แพ็ค คู่", "ready to go",
+                 "charge anywhere", "pack", "bundle", "พร้อมสาย", "พร้อมหัวชาร์จ")
+    if any(kw in name for kw in bundle_kw):
+        return True
+    # มี "+" หรือ " + " ในชื่อ (เช่น "AD653T + CMC610 + PB100P")
+    if " + " in name or "+" in name:
+        # แต่ถ้าเป็นแค่ "2 in 1" ไม่นับเป็น bundle
+        if "2 in 1" in name or "2-in-1" in name or "fusion" in name:
+            return False
+        return True
+    # มี "/" ในชื่อ (เช่น "AURA LPB100 33W / LPB200NL" หรือ "PB100P /PB200P /PB200U")
+    # ถ้ามี "/" อย่างน้อย 1 ตัว และไม่ใช่ "CCC / CE" (มาตรฐาน) ให้นับเป็น bundle
+    if "/" in name:
+        # ตัด "CCC / CE", "CE / CCC", "USB-C / USB-A" ที่เป็นมาตรฐานออก
+        _standards = ("ccc / ce", "ce / ccc", "usb-c / usb-a", "usb a / usb c")
+        _name_clean = name
+        for s in _standards:
+            _name_clean = _name_clean.replace(s, "")
+        # ถ้ายังมี "/" เหลือ แปลว่าเป็นการรวมรุ่น
+        if "/" in _name_clean:
+            return True
+    return False
+
+
 def _rerank_by_promo_latest(
     docs: list[dict],
     similarity_scores: dict[str, float] | None = None,
     limit: int = 20,
 ) -> list[dict]:
-    """เรียงสินค้าตาม: มีโปรขึ้นก่อน → ใหม่ล่าสุด → similarity สูง.
+    """เรียงสินค้าตาม: standalone > มีโปร > ใหม่ล่าสุด > similarity สูง.
 
     Args:
         docs: list ของ product documents จาก Mongo
@@ -1214,13 +1905,14 @@ def _rerank_by_promo_latest(
         return []
 
     def sort_key(d: dict) -> tuple:
+        # standalone (ไม่ใช่ชุด) ขึ้นก่อน เพื่อให้สินค้าเดี่ยวไม่ถูกชุดแซง
+        is_standalone = not _is_bundle_product(d)
         has_promo = _has_active_promotion(d)
         recency = _get_recency_score(d)
         iid = str(d.get("item_id", ""))
         sim = (similarity_scores or {}).get(iid, 0.0)
-        # เรียงจากมากไปน้อย: (has_promo, recency, sim)
-        # has_promo เป็น bool → True > False อัตโนมัติเวลาเรียงจากมากไปน้อย
-        return (has_promo, recency, sim)
+        # เรียงจากมากไปน้อย: (is_standalone, has_promo, recency, sim)
+        return (is_standalone, has_promo, recency, sim)
 
     ranked = sorted(docs, key=sort_key, reverse=True)
     return ranked[:limit]
@@ -1426,25 +2118,54 @@ def _filter_false_positives(docs: list[dict], product_types: set[str]) -> list[d
 
     # กรอง false positive สำหรับ powerbank: ตัดสินค้าที่มี "แบตสำรอง" ในชื่อ
     # แต่เป็นอุปกรณ์อื่น (เครื่องดูดฝุ่น/ปั๊มลม/จั้มสตาร์ทรถ/หูฟัง ที่มีแบตสำรองเป็นฟีเจอร์)
+    # และตัด charger เดี่ยวที่ไม่มีแบตสำรองออก (เช่น "หัวชาร์จ 65W" ไม่ใช่ powerbank)
+    # แต่เก็บชุดที่มีแบตสำรองรวมอยู่ (เช่น "Charge anywhere หัวชาร์จ+สาย+แบต")
     if "powerbank" in product_types:
         not_powerbank_kw = (
             "เครื่องดูดฝุ่น", "ดูดฝุ่น", "ปั๊มลม", "จั้มสตาร์ท", "จั้ม",
             "หุ่นยนต์กวาด", "กวาดพื้น", "robot vacuum",
             "หูฟัง", "earphone", "earbuds", "tws",
+            "เคส", "case", "silicone case", "protective case",
+            "สายนาฬิกา", "strap",
         )
         docs = [d for d in docs
                 if not any(kw in (d.get("item_name") or "").lower() for kw in not_powerbank_kw)]
+        # กรองเอาเฉพาะที่มี indicator ของ powerbank จริงในชื่อ
+        powerbank_name_kw = (
+            "แบตสำรอง", "แบตเตอรี่สำรอง", "powerbank", "power bank", "power-bank",
+            "pb1", "pb2", "pb3", "pb4", "pb5", "pb6", "pb7", "pb8", "pb9",
+            "lpb", "wpb", "mpb", "spb",
+            # รุ่น 2-in-1 (หัวชาร์จ+แบตสำรอง) เช่น BA652U Fusion
+            "fusion", "2 in 1", "2-in-1", "2in1",
+            # model code ที่เป็น powerbank แต่ชื่อไม่มีคำว่า "แบตสำรอง"
+            "ba6", "ba7", "ba8", "ba9",
+            "p23", "p17", "p30", "p50",
+        )
+        docs = [d for d in docs
+                if any(kw in (d.get("item_name") or "").lower() for kw in powerbank_name_kw)]
 
     # กรอง false positive สำหรับ charger: ตัดสินค้าที่มี "Type-C/USB" ในชื่อ
     # แต่เป็นอุปกรณ์อื่น (เครื่องนวด/พัดลม ที่มี Type-C เป็นพอร์ตชาร์จ)
+    # ไม่ตัดชุดที่มี "แบตสำรอง" ออก เพราะชุดมี charger รวมอยู่ด้วย
+    # แต่ตัด powerbank เดี่ยว (ที่ไม่มี หัวชาร์จ/สายชาร์จ/adapter ในชื่อ) ออก
     if "charger" in product_types:
         not_charger_kw = (
             "เครื่องนวด", "นวด", "พัดลม", "fan", "เครื่องดูดฝุ่น",
             "หุ่นยนต์กวาด", "กวาดพื้น", "หูฟัง", "earphone", "earbuds",
-            "แบตสำรอง", "powerbank", "power bank",
         )
         docs = [d for d in docs
                 if not any(kw in (d.get("item_name") or "").lower() for kw in not_charger_kw)]
+        # ตัด powerbank เดี่ยวออก (มี "แบตสำรอง"/"powerbank" แต่ไม่มี charger indicator)
+        charger_indicator_kw = (
+            "หัวชาร์จ", "หัวชาร์ต", "adapter", "gan", "สายชาร์จ", "สายชาร์ต",
+            "cable", "ชุดชาร์จ", "ชุดชาร์ต", "set", "ชุด", "combo",
+            "ready to go", "charge anywhere", "charging set",
+        )
+        docs = [d for d in docs
+                if not (
+                    any(kw in (d.get("item_name") or "").lower() for kw in ("แบตสำรอง", "powerbank", "power bank"))
+                    and not any(kw in (d.get("item_name") or "").lower() for kw in charger_indicator_kw)
+                )]
 
     # กรอง false positive สำหรับ smartwatch: ตัดสายนาฬิกา/strap/อุปกรณ์เสริม
     if "smartwatch" in product_types:
@@ -1468,6 +2189,9 @@ def fetch_products(
     shop_filter: str | None = None,
     limit: int = 20,
     desc_message: str | None = None,
+    is_compat_check: bool = False,
+    skip_charger_subtype: bool = False,
+    product_types_override: set[str] | None = None,
 ) -> list[dict]:
     """กรองและดึงสินค้าที่เกี่ยวข้อง แล้วย่อเป็น product card ส่งให้ LLM.
 
@@ -1477,6 +2201,10 @@ def fetch_products(
         limit: จำนวนสินค้าสูงสุด
         desc_message: คำถามสำหรับกรอง description (ถ้าไม่ระบุ ใช้ message)
             ใช้ตอน follow-up: ค้นสินค้าด้วย "redmi 8a" แต่กรอง description ด้วย "รับประกัน"
+        is_compat_check: ถ้าเป็น compatibility check ให้ดึงสินค้าเยอะขึ้น
+            เพื่อให้ LLM เห็นทุกรุ่นในหมวด แล้วเลือกรุ่นที่รองรับ device จริงๆ
+        product_types_override: ถ้าระบุ (ไม่ใช่ None) → ใช้ค่านี้แทนการ detect อัตโนมัติ
+            ใช้ตอน caller รู้ประเภทสินค้าดีกว่า (เช่น charging spec question ไม่ควรกรองเป็น charger)
 
     ใช้ hybrid approach:
     1. ถ้ามี product type regex (phone/smartwatch/earphone/ฯลฯ) ใช้ regex approach เดิม
@@ -1489,9 +2217,23 @@ def fetch_products(
     collection = db[coll_name]
 
     # ตรวจ product type: ลอง exact match ก่อน ถ้าไม่เจอให้ลอง fuzzy (ทนคำพิมพ์ผิด)
-    exact_product_types = _detect_product_types(message)
-    fuzzy_product_types: set[str] = set()
-    if not exact_product_types:
+    # ถ้า caller ส่ง product_types_override มา → ใช้ค่านั้นแทน (เช่น charging spec question)
+    if product_types_override is not None:
+        exact_product_types = product_types_override
+        fuzzy_product_types = set()
+    else:
+        exact_product_types = _detect_product_types(message)
+        fuzzy_product_types: set[str] = set()
+    # สำหรับ warranty intent ที่มี model keyword ชัดเจน (เช่น "Tile Mate", "LOGITECH G PRO X")
+    # ให้ข้าม fuzzy detection เพราะ fuzzy อาจจับผิด (เช่น "Mate" → "filter")
+    # และเราต้องการกรองด้วย model keyword เป็นหลัก ไม่ใช่ product type
+    _is_warranty_with_model = False
+    if "warranty" in _detect_intent(message):
+        from . import warranty as _warranty_mod
+        _model_kw = _warranty_mod.strip_warranty_keywords(message)
+        if _model_kw and len(_model_kw) >= 3:
+            _is_warranty_with_model = True
+    if not exact_product_types and not _is_warranty_with_model:
         fuzzy_product_types = _detect_product_types_fuzzy(message)
     product_types = exact_product_types or fuzzy_product_types
 
@@ -1525,6 +2267,10 @@ def fetch_products(
     # สร้าง filter สำหรับกรองใน Mongo
     base_filter = build_query(message, shop_filter=shop_filter, product_types=product_types)
 
+    # ตรวจ intent เพื่อใช้ใน vector search path
+    # (vector search มี hardcode item_status=NORMAL เพื่อความปลอดภัย แต่ warranty intent ต้องเห็น non-NORMAL)
+    _is_warranty_intent = "warranty" in _detect_intent(message)
+
     # ตรวจว่ามี product type regex หรือไม่
     # ใช้ regex approach เมื่อ exact หรือ fuzzy detection จับได้
     # (ถ้ารู้ประเภทสินค้าแล้ว regex บน MongoDB แม่นยำกว่า vector search)
@@ -1557,9 +2303,9 @@ def fetch_products(
                         except (ValueError, TypeError):
                             id_values.append(iid)
                     id_filter = {
-                        "item_status": "NORMAL",
                         "item_id": {"$in": id_values},
                     }
+                    # ดึงสินค้าทุก status — LLM จะแนะนำเฉพาะ NORMAL เอง
                     if shop_filter:
                         id_filter["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
 
@@ -1581,9 +2327,9 @@ def fetch_products(
                                 r"\b" + re.escape(token) + r"\b", re.IGNORECASE
                             )
                             model_filter = {
-                                "item_status": "NORMAL",
                                 "item_name": {"$regex": token_regex.pattern, "$options": "i"},
                             }
+                            # ดึงสินค้าทุก status — LLM จะแนะนำเฉพาะ NORMAL เอง
                             if shop_filter:
                                 model_filter["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
                             model_docs = list(
@@ -1623,6 +2369,14 @@ def fetch_products(
                             docs, similarity_scores=sim_scores, limit=limit
                         )
 
+                    # ── กรอง charger subtype สำหรับ vector search path ด้วย ──
+                    # ยกเว้น superlative question ที่ต้องเปรียบเทียบทุกประเภท
+                    if "charger" in product_types and not skip_charger_subtype:
+                        _charger_sub = _detect_charger_subtype(message)
+                        if _charger_sub:
+                            docs = _filter_charger_subtype(docs, _charger_sub)
+                            print(f"[CHARGER-SUBTYPE] subtype={_charger_sub} → {len(docs)} docs (vector)", file=sys.stderr)
+
                     used_vector_search = True
             except Exception as exc:
                 print(f"WARN: vector search failed: {exc}")
@@ -1640,13 +2394,14 @@ def fetch_products(
         if has_specific:
             # ดึงเยอะกว่า limit*2 เพื่อให้หลังกรอง false positive ยังเหลือพอ
             # (เช่น โทรศัพท์งบ 5000: 20 ตัวแรกเป็น accessories หมด โทรศัพท์จริงอยู่หลังจากนั้น)
-            cursor = cursor.limit(max(limit * 5, 100))
+            # สำหรับ compatibility check ดึงเยอะขึ้นเพื่อให้ครอบคลุมทุกรุ่นในหมวด
+            _compat_limit = max(limit * 20, 500) if is_compat_check else max(limit * 5, 100)
+            cursor = cursor.limit(_compat_limit)
         else:
             # fallback: text search บน item_name + description
             words = [w for w in re.split(r"\s+", message.strip()) if len(w) >= 2]
             if words:
                 text_q = {
-                    "item_status": "NORMAL",
                     "$or": [
                         {"item_name": {"$regex": "|".join(re.escape(w) for w in words[:5]), "$options": "i"}},
                         {"description": {"$regex": "|".join(re.escape(w) for w in words[:5]), "$options": "i"}},
@@ -1665,6 +2420,28 @@ def fetch_products(
     # ถ้าใช้ vector search อยู่แล้ว กรองไปแล้วด้านบน ไม่ต้องทำซ้ำ
     if not used_vector_search:
         docs = _filter_false_positives(docs, product_types)
+
+    # ⚡ Compatibility check: ถ้าเป็น compat check ให้เสริมด้วย text search
+    # เพื่อให้ครอบคลุมสินค้าทุกรุ่นในหมวด (บางรุ่นอาจไม่ติด top N ตาม natural order)
+    if is_compat_check and product_types and not used_vector_search:
+        type_regex = _product_type_regex(product_types)
+        if type_regex:
+            # ค้นด้วย item_name regex อย่างเดียว (ไม่กรอง cat_name) เพื่อให้ครอบคลุมทุกรุ่น
+            text_q = {"item_name": {"$regex": type_regex, "$options": "i"}}
+            if shop_filter:
+                text_q["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
+            extra_docs = list(collection.find(text_q, PRODUCT_PROJECTION).limit(max(limit * 10, 200)))
+            # merge กับ docs เดิม (dedup by item_id)
+            _docs_before = len(docs)
+            existing_ids = {str(d.get("item_id")) for d in docs}
+            _added = 0
+            for d in extra_docs:
+                iid = str(d.get("item_id"))
+                if iid not in existing_ids:
+                    docs.append(d)
+                    existing_ids.add(iid)
+                    _added += 1
+            print(f"[COMPAT-SUPPLEMENT] docs_before={_docs_before} extra={len(extra_docs)} added={_added} total={len(docs)}", file=sys.stderr)
 
     # fallback ระดับ 2: ถ้ากรองด้วย product type (item_name regex) แล้วได้ 0
     # แปลว่าไม่มีสินค้าประเภทนั้นในสต็อก (เช่น โทรศัพท์ในร้านนี้เป็น UNLIST หมด)
@@ -1719,6 +2496,15 @@ def fetch_products(
             if product_types:
                 docs = _filter_false_positives(docs, product_types)
 
+    # ── กรอง charger subtype (สาย/หัว/ชุด) ก่อน re-rank ──
+    # ต้องกรองก่อน re-rank เพราะ re-rank ตัดเหลือ limit แล้ว set products อาจตกไป
+    # ยกเว้น superlative question ที่ต้องเปรียบเทียบทุกประเภท (charger + powerbank)
+    if "charger" in product_types and not skip_charger_subtype:
+        _charger_sub = _detect_charger_subtype(message)
+        if _charger_sub:
+            docs = _filter_charger_subtype(docs, _charger_sub)
+            print(f"[CHARGER-SUBTYPE] subtype={_charger_sub} → {len(docs)} docs (pre-rerank)", file=sys.stderr)
+
     # re-rank ตามโปรโมชั่น + ความใหม่ (สำหรับ regex path ที่ไม่ได้ผ่าน vector search)
     # ถ้าผ่าน vector search มาแล้ว docs ถูก re-rank แล้ว ไม่ต้องทำซ้ำ
     # สำคัญ: ก่อน re-rank ให้ตรวจดูก่อนว่ามีสินค้าที่ชื่อตรงกับคำถาม (exact model match) ไหม
@@ -1750,11 +2536,13 @@ def fetch_products(
 
         # re-rank เฉพาะส่วนที่ไม่ใช่ exact match
         model_tokens = _extract_model_tokens(message)
+        # สำหรับ compatibility check ให้ดึงเยอะกว่า limit เพื่อให้ LLM เห็นทุกรุ่น
+        _rerank_limit = max(limit * 3, 50) if is_compat_check else limit
         if rest_docs:
             if model_tokens:
-                rest_docs = _rerank_with_diversity(rest_docs, model_tokens, limit=limit)
+                rest_docs = _rerank_with_diversity(rest_docs, model_tokens, limit=_rerank_limit)
             else:
-                rest_docs = _rerank_by_promo_latest(rest_docs, similarity_scores=None, limit=limit)
+                rest_docs = _rerank_by_promo_latest(rest_docs, similarity_scores=None, limit=_rerank_limit)
 
         # รวม exact matches ขึ้นก่อน + rest_docs
         docs = exact_matches + rest_docs
@@ -1789,7 +2577,9 @@ def fetch_products(
                 score += sum(len(w) for w in msg_words if w in name) / 10
                 return score
             docs.sort(key=_name_match_score, reverse=True)
-            docs = docs[:limit]
+            # สำหรับ compatibility check ให้ดึงเยอะกว่า limit เพื่อให้ LLM เห็นทุกรุ่น
+            _sort_limit = max(limit * 3, 50) if is_compat_check else limit
+            docs = docs[:_sort_limit]
 
     # กระทำเสมอ (ไม่ว่าจะมี brand filter หรือไม่):
     # ถ้ามีสินค้าที่ชื่อตรงกับคำถามมาก (exact model match) ให้ยกขึ้น top
@@ -1815,12 +2605,33 @@ def fetch_products(
                 exact_ids = {str(d.get("item_id")) for d in exact_matches}
                 rest = [d for d in docs if str(d.get("item_id")) not in exact_ids]
                 docs = exact_matches + rest
-                docs = docs[:limit]
+                _exact_limit = max(limit * 3, 50) if is_compat_check else limit
+                docs = docs[:_exact_limit]
+
+    # ── กรอง sold out (stock=0 ทุก model) ──
+    # ไม่กรองออกจาก context — ส่งให้ LLM เห็นทุกสินค้าเพื่อตอบสเปค/รายละเอียดได้
+    # LLM จะไม่แนะนำ sold_out เอง (ตาม instructions)
+    # แต่ถ้าลูกค้าถามเฉพาะรุ่นที่ sold_out → บอก "หมดสต็อกชั่วคราว" + แนะนำรุ่นอื่น
+    # (ไม่ต้องกรองที่นี่แล้ว — to_product_card มี sold_out field ให้ LLM รู้อยู่แล้ว)
+
+    # ── re-filter charger subtype อีกครั้งหลัง brand fallback ──
+    # (brand fallback ดึงสินค้าเพิ่ม อาจนำ cable/adapter ปนเข้ามา)
+    # ยกเว้น superlative question ที่ต้องเปรียบเทียบทุกประเภท
+    if "charger" in product_types and not skip_charger_subtype:
+        _charger_sub_final = _detect_charger_subtype(message)
+        if _charger_sub_final:
+            docs = _filter_charger_subtype(docs, _charger_sub_final)
+            print(f"[CHARGER-SUBTYPE] re-filter after brand fallback: subtype={_charger_sub_final} → {len(docs)} docs", file=sys.stderr)
+
+    # NOTE: charger subtype filter ถูกกรองก่อน re-rank แล้ว (ด้านบน)
+    # เพื่อกัน set products ตกหล่นจาก top-N
 
     cards = [to_product_card(d, desc_message or message) for d in docs]
 
     # จำกัดสุดท้าย (ถ้ายังไม่ถูกตัดจาก _rerank_by_promo_latest)
-    cards = cards[:limit]
+    # สำหรับ compatibility check ให้ส่งเยอะกว่า limit เพื่อให้ LLM เห็นทุกรุ่น
+    _final_limit = max(limit * 3, 50) if is_compat_check else limit
+    cards = cards[:_final_limit]
 
     # ฝัง note ใน card แรกเพื่อให้ LLM รู้ว่าเป็น fallback (ไม่มีสินค้าประเภทที่ถาม)
     # LLM จะได้ตอบลูกค้าว่า "ไม่มีโทรศัพท์ตอนนี้ แต่มี..." แทนที่จะตอบว่ามีสมาร์ทวอชโดยไม่อธิบาย

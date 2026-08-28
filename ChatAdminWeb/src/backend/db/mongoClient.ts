@@ -122,5 +122,17 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.chatAcceptSessions, { session_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.chatAcceptSessions, { admin_id: 1, started_at: -1 }),
     safeCreateIndex(db, COLLECTIONS.chatAcceptSessions, { admin_id: 1, state: 1, started_at: -1 }),
+    // Phase 3 — shop_personas (per-shop bot persona: bot_name + platform)
+    // 1 persona per shop — unique on (shopname, platform) หรือแค่ shopname ถ้า cross-platform
+    safeCreateIndex(db, COLLECTIONS.shopPersonas, { persona_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.shopPersonas, { shopname: 1, platform: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.shopPersonas, { platform: 1, enabled: 1 }),
+    // ⚡ test_chat_ratings — unique on (session_id, msg_index)
+    safeCreateIndex(db, COLLECTIONS.testChatRatings, { session_id: 1, msg_index: 1 }, { unique: true }),
+    safeCreateIndex(db, COLLECTIONS.testChatRatings, { platform: 1, rated_at: -1 }),
+    // ⚡ test_assignment — replay results + ratings
+    safeCreateIndex(db, COLLECTIONS.testAssignment, { conversation_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.testAssignment, { platform: 1, created_at: -1 }),
+    safeCreateIndex(db, COLLECTIONS.testAssignment, { final_status: 1, created_at: -1 }),
   ]);
 }

@@ -72,6 +72,21 @@ export type AdminActionType =
   | "shadow_reply.generate_conversation"
   | "shadow_reply.rate"
   | "shadow_reply.delete"
+  | "shadow_reply.clear_all"
+  | "shadow_reply.restore"
+  | "shadow_reply.restore_all"
+  | "test_chat.rate"
+  | "test_assignment.rate_message"
+  | "test_assignment.rate_conversation"
+  // Phase 3 — per-shop bot persona management
+  | "shop_persona.create"
+  | "shop_persona.update"
+  | "shop_persona.delete"
+  | "shop_persona.toggle"
+  // Phase 10 — per-shop behavior settings (faq_liveagent, etc.)
+  | "shop_settings.create"
+  | "shop_settings.update"
+  | "shop_settings.delete"
   // Chat accept/pause — admin เปิด/ปิดรับแชท
   | "chat_accept.start"
   | "chat_accept.stop";

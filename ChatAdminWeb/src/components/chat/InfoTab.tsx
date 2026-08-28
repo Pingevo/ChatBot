@@ -1,10 +1,10 @@
 "use client";
 // InfoTab — แสดงข้อมูล conversation + stats + ประวัติปิดแชท (card ยืด/หด ได้)
 import { useState } from "react";
-import { ChevronDown, ChevronRight, User, Store, MessageSquare, Bot, Headset, History } from "lucide-react";
+import { ChevronDown, ChevronRight, User, Store, MessageSquare, Bot, Headset, History, Package } from "lucide-react";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Badge } from "@/components/ui/Badge";
-import type { Conversation, ChatMessage, CloseHistoryRecord, ProblemCategory } from "@/lib/types";
+import type { Conversation, ChatMessage, CloseHistoryRecord, ProblemCategory, ProductCard } from "@/lib/types";
 
 const CATEGORY_LABELS: Record<ProblemCategory, string> = {
   shipping: "การจัดส่ง",
@@ -46,6 +46,21 @@ export function InfoTab({ conversation, messages, closeHistory }: Props) {
       ? (conversation.assigned_to_name || conversation.assigned_to.slice(0, 8))
       : "—";
 
+  // รวมสินค้าที่ถูกเสนอ/แชร์ในแชททั้งหมด — จากทุก message (item card ที่ลูกค้าแชร์ + สินค้าที่ bot/admin แนบ)
+  // dedup ตาม item_id เพื่อกันซ้ำ (สินค้าเดียวกันอาจถูกแชร์หลายครั้ง)
+  const productsOffered: ProductCard[] = (() => {
+    const seen = new Map<string, ProductCard>();
+    for (const m of messages) {
+      if (!m.products) continue;
+      for (const p of m.products) {
+        if (p.item_id && !seen.has(p.item_id)) {
+          seen.set(p.item_id, p);
+        }
+      }
+    }
+    return [...seen.values()];
+  })();
+
   return (
     <div className="h-full overflow-y-auto p-4 space-y-4 text-sm">
       {/* ── ข้อมูลผู้ใช้ ── */}
@@ -84,6 +99,44 @@ export function InfoTab({ conversation, messages, closeHistory }: Props) {
                 {id}
               </span>
             ))}
+          </div>
+        </Section>
+      )}
+
+      {/* ── สินค้าที่ถูกเสนอในแชท ── */}
+      {productsOffered.length > 0 && (
+        <Section title={`สินค้าที่ถูกเสนอในแชท (${productsOffered.length})`} icon={Package}>
+          <div className="space-y-1.5">
+            {productsOffered.map((p) => {
+              const safeUrl = typeof p.url === "string" && p.url.startsWith("http") ? p.url : undefined;
+              return (
+                <a
+                  key={p.item_id}
+                  {...(safeUrl ? { href: safeUrl, target: "_blank", rel: "noopener noreferrer" } : {})}
+                  className="flex items-center gap-2 rounded-md bg-surface-2 p-1.5 hover:bg-pale-sky-soft transition-colors"
+                >
+                  {p.image ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={p.image} alt={p.name} className="w-9 h-9 rounded object-cover shrink-0" loading="lazy" />
+                  ) : (
+                    <div className="w-9 h-9 rounded bg-surface shrink-0 flex items-center justify-center">
+                      <Package size={14} className="text-text-subtle" />
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-medium text-text truncate">{p.name}</div>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      {p.price > 0 && (
+                        <span className="text-[10px] text-brand font-medium">฿{p.price.toLocaleString()}</span>
+                      )}
+                      {p.shop && (
+                        <span className="text-[10px] text-text-muted truncate">{p.shop}</span>
+                      )}
+                    </div>
+                  </div>
+                </a>
+              );
+            })}
           </div>
         </Section>
       )}

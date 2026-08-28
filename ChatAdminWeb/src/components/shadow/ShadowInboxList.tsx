@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/Badge";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import {
   Search, ChevronDown, Check, ArrowDownUp,
-  FlaskConical, CheckCircle2, XCircle, MinusCircle, AlertTriangle,
+  FlaskConical, CheckCircle2, XCircle, AlertTriangle,
 } from "lucide-react";
 import type { Platform } from "@/lib/types";
 
@@ -24,9 +24,15 @@ export interface ShadowReplyListItem {
   bot_tokens?: { prompt: number; output: number; total: number };
   bot_products?: any[];
   zaapi_reply_text?: string;
-  rating?: "better" | "worse" | "tie" | "unrated";
+  rating?: "good" | "bad" | "unrated";
+  star_rating?: number;
+  comment?: string;
   origin?: "worker" | "manual" | "manual_conversation";
   created_at: string;
+  // soft delete
+  deleted_at?: string;
+  deleted_by?: string;
+  delete_reason?: string;
 }
 
 interface Props {
@@ -38,14 +44,13 @@ interface Props {
   headerExtra?: React.ReactNode;
 }
 
-type RatingFilter = "all" | "better" | "worse" | "tie" | "unrated";
+type RatingFilter = "all" | "good" | "bad" | "unrated";
 type PlatformFilter = "all" | Platform;
 type SortOption = "recent" | "oldest" | "platform";
 
 const ratingMeta: Record<string, { label: string; icon: typeof CheckCircle2; color: string }> = {
-  better: { label: "Bot ดีกว่า", icon: CheckCircle2, color: "text-green-600" },
-  worse: { label: "Bot แย่กว่า", icon: XCircle, color: "text-red-600" },
-  tie: { label: "เสมอ", icon: MinusCircle, color: "text-blue-600" },
+  good: { label: "Good", icon: CheckCircle2, color: "text-green-600" },
+  bad: { label: "Bad", icon: XCircle, color: "text-red-600" },
   unrated: { label: "ยังไม่ให้คะแนน", icon: AlertTriangle, color: "text-yellow-600" },
 };
 
@@ -168,7 +173,7 @@ export function ShadowInboxList({ rows, selectedId, onSelect, loading, total, he
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowRatingDd(false)} />
                 <div className="absolute top-full left-0 mt-1 w-full bg-surface border border-border rounded-md shadow-lg z-40 py-0.5">
-                  {(["all", "better", "worse", "tie", "unrated"] as RatingFilter[]).map((v) => (
+                  {(["all", "good", "bad", "unrated"] as RatingFilter[]).map((v) => (
                     <button
                       key={v}
                       onClick={() => { setRatingFilter(v); setShowRatingDd(false); }}

@@ -32,6 +32,23 @@ const COLLECTION_MAP: Record<Platform, string> = {
 };
 
 /**
+ * แปลง item_id (string) → array ของค่าที่เป็นไปได้ทั้ง string และ number
+ *
+ * item_id ใน ShpProducts อาจเก็บเป็น number (int/long/double) ไม่ใช่ string
+ * MongoDB เปรียบเทียบแบบ type-strict → query ด้วย string "46051234150"
+ * จะไม่ match number 46051234150 ใน DB
+ * ต้อง query ด้วยทั้ง string และ number (เหมือนฝั่ง Python ที่ลอง int + float)
+ */
+function itemIdVariants(itemId: string): (string | number)[] {
+  const variants: (string | number)[] = [itemId];
+  const n = Number(itemId);
+  if (!Number.isNaN(n) && Number.isFinite(n)) {
+    variants.push(n);
+  }
+  return variants;
+}
+
+/**
  * ดึงสินค้าของร้าน — กรองตาม shop_id, shop_name หรือ shopname และ platform
  * รองรับ search (ค้นหาจาก name)
  * ⚠️ Product collections ใช้ `shopname` (string) ไม่ใช่ shop_id (number)
@@ -95,9 +112,13 @@ export async function getProduct(opts: {
   itemId: string;
 }): Promise<ProductDoc | null> {
   const coll = await getDbWalletCollection<ProductDoc>(COLLECTION_MAP[opts.platform]);
+  const variants = itemIdVariants(opts.itemId);
 
   return coll.findOne({
-    $or: [{ itemid: opts.itemId }, { item_id: opts.itemId }],
+    $or: [
+      { itemid: { $in: variants } },
+      { item_id: { $in: variants } },
+    ],
   });
 }
 
@@ -111,11 +132,18 @@ export async function getProductsByIds(opts: {
   if (opts.itemIds.length === 0) return [];
   const coll = await getDbWalletCollection<ProductDoc>(COLLECTION_MAP[opts.platform]);
 
+  // รวบรวมทุก variant (string + number) ของทุก item_id
+  // เพราะ item_id ใน DB อาจเก็บเป็น number ไม่ใช่ string
+  const allVariants: (string | number)[] = [];
+  for (const id of opts.itemIds) {
+    allVariants.push(...itemIdVariants(id));
+  }
+
   const docs = await coll
     .find({
       $or: [
-        { itemid: { $in: opts.itemIds } },
-        { item_id: { $in: opts.itemIds } },
+        { itemid: { $in: allVariants } },
+        { item_id: { $in: allVariants } },
       ],
     })
     .toArray();

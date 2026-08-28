@@ -21,8 +21,9 @@ import { serverConfig } from "../lib/config";
 import { triggerService } from "./triggerService";
 import { assignmentService } from "./assignmentService";
 import { logAdminEvent } from "./adminLogService";
-import { listMessages, getHistoryForBot } from "./messageService";
-import { getConversation } from "./conversationService";
+import { listMessages, getHistoryForBot, toBotText } from "./messageService";
+import { getConversation, reopenConversation } from "./conversationService";
+import { handoffService } from "./handoffService";
 import { assertPlatformApiDisabled, type Platform } from "../lib/safety";
 import type { ShadowReplyDoc } from "./shadowReplyService";
 
@@ -168,26 +169,26 @@ async function storeBotReply(opts: {
   return shadowReplyId;
 }
 
-// ─── Pick next agent (round-robin) + เขียน assigned_to ลง conversations_shp ──
-// conversations_shp เป็น collection ของเรา (พี่เขา mirror ให้ test) → เขียน assigned_to ได้
+// ─── Pick next agent — ใช้ handoffService เพื่อหา admin เดิมก่อน round-robin ──
+// ลำดับ:
+//   1. ถ้ามี assigned_to อยู่แล้ว → ใช้คนเดิม
+//   2. ถ้าไม่มี → หา admin คนสุดท้ายที่เคยตอบ (getLastReplyAdmin)
+//   3. ถ้าไม่มี → round-robin (autoAssignConversation)
+//   4. ถ้า conversation ปิดอยู่ → reopen ก่อน
 async function pickAgent(
   shopId: string,
   platform: Platform,
-  conversationId: string
+  conversationId: string,
+  reason?: string
 ): Promise<{ agentId: string | null; mode: string }> {
   const mode = await assignmentService.getActiveAssignmentConfig();
-  const { poolKey, orderedAgentIds } = await assignmentService.buildPool(mode, { shop_id: shopId, platform });
-  if (!orderedAgentIds.length) return { agentId: null, mode };
-  const agentId = await assignmentService.pickNextAgent(poolKey, orderedAgentIds);
-  if (agentId) {
-    // เขียน assigned_to + status ลง conversations_shp (พี่เขาให้เราใช้ test)
-    const coll = await getCollection<{ assigned_to: string; assigned_at: Date; assignment_mode_used: string; status: string }>(COLLECTIONS.conversations);
-    await coll.updateOne(
-      { conversation_id: conversationId },
-      { $set: { assigned_to: agentId, assigned_at: new Date(), assignment_mode_used: mode, status: "handoff" } }
-    );
-  }
-  return { agentId, mode };
+  const result = await handoffService.handoffToAdmin({
+    conversationId,
+    shopId,
+    platform,
+    reason: reason || "bot-worker handoff",
+  });
+  return { agentId: result.assignedTo, mode };
 }
 
 // ─── Process one message ──────────────────────────────────
@@ -198,6 +199,7 @@ export async function processMessage(msg: {
   shop_id: string;
   platform: Platform;
   text: string;
+  raw_payload?: unknown;
 }): Promise<{ status: string; detail: string }> {
   // 1. ตรวจซ้ำ — ถ้าประมวลผลแล้ว ข้าม
   if (await isProcessed(msg.message_id)) {
@@ -212,6 +214,44 @@ export async function processMessage(msg: {
   // เพื่อกรองสินค้าเฉพาะร้านที่ลูกค้าทักเข้ามา
   const conv = await getConversation(msg.conversation_id);
   const shopName = conv?.shop_name || undefined;
+
+  // ── Guard: จ่ายงานเฉพาะแอดมิน + ตรวจสถานะ conversation ──
+  // 1. ถ้ามี assigned_to และ status เปิดอยู่ (ไม่ใช่ closed/resolved) → ข้าม (ปล่อยให้แอดมินตอบ)
+  // 2. ถ้า status === closed/resolved → reopen + เคลียร์ assigned_to + ประมวลผลปกติ
+  // 3. ถ้าไม่มี assigned_to → ประมวลผลปกติ
+  if (conv) {
+    const isClosed = conv.status === "closed" || conv.status === "resolved";
+    if (conv.assigned_to && !isClosed) {
+      // แอดมินกำลังดูแชทอยู่ → ข้าม (ปล่อยให้แอดมินตอบ)
+      await markProcessed({
+        message_id: msg.message_id,
+        conversation_id: msg.conversation_id,
+        shop_id: msg.shop_id,
+        platform: msg.platform,
+        status: "no_action",
+      });
+      return { status: "skip_assigned", detail: `conversation has assigned_to=${conv.assigned_to} (open) — skip` };
+    }
+    if (isClosed) {
+      // conversation ปิดแล้ว → reopen + เคลียร์ assigned_to เพื่อให้ pipeline ทำงาน
+      await reopenConversation({
+        conversationId: msg.conversation_id,
+        reopenedBy: "bot-worker",
+        reopenReason: "ลูกค้าทักกลับมา — reopen เพื่อประมวลผล",
+      });
+      // เคลียร์ assigned_to เก่า
+      const convColl = await getCollection<{ assigned_to: string | null }>(COLLECTIONS.conversations);
+      await convColl.updateOne(
+        { conversation_id: msg.conversation_id },
+        { $set: { assigned_to: null } }
+      );
+    }
+  }
+
+  // ⚠️ Enrich text สำหรับ rich-media messages (item card, order card, ...)
+  // ถ้าลูกค้าแชร์การ์ดสินค้า `text` จะเป็น placeholder "[item]" แต่ raw_payload มี item_id
+  // แปลงเป็น tag "[สินค้า: <item_id>]" ที่ Python bot เข้าใจ ก่อนส่งให้ trigger/bot
+  const botText = toBotText(msg);
 
   try {
     // 2. Check trigger
@@ -253,14 +293,14 @@ export async function processMessage(msg: {
       });
       const botResp = await callBot({
         platform: msg.platform,
-        message: msg.text,
+        message: botText,
         shopId: msg.shop_id,
         shopName,
         history,
       });
       const shadowReplyId = await storeBotReply({
         messageId: msg.message_id,
-        messageText: msg.text,
+        messageText: botText,
         conversationId: msg.conversation_id,
         shopId: msg.shop_id,
         platform: msg.platform,
@@ -294,7 +334,7 @@ export async function processMessage(msg: {
     });
     const botResp = await callBot({
       platform: msg.platform,
-      message: msg.text,
+      message: botText,
       shopId: msg.shop_id,
       shopName,
       history,
@@ -324,7 +364,7 @@ export async function processMessage(msg: {
     // บอทตอบได้ → เก็บใน shadow_replies (ไม่เขียน messages_shp)
     const shadowReplyId = await storeBotReply({
       messageId: msg.message_id,
-      messageText: msg.text,
+      messageText: botText,
       conversationId: msg.conversation_id,
       shopId: msg.shop_id,
       platform: msg.platform,
@@ -383,9 +423,12 @@ export async function pollNewMessages(limit = 20): Promise<{
   const coll = await getCollection<{
     message_id: string; conversation_id: string; shop_id: string;
     platform: Platform; role: string; direction: string; text: string;
+    raw_payload?: unknown;
   }>(COLLECTIONS.messages);
 
   // หาข้อความใหม่: role=user, direction=in, เรียงใหม่ล่าสุดก่อน
+  // ดึง raw_payload มาด้วย — สำหรับ rich-media messages (item card, order card, ...)
+  // ที่ text เป็น placeholder "[item]" ต้องใช้ raw_payload แปลงเป็น tag [สินค้า: <item_id>]
   const docs = await coll
     .find({ role: "user", direction: "in" })
     .sort({ created_timestamp: -1 })
@@ -419,6 +462,7 @@ export async function pollNewMessages(limit = 20): Promise<{
           shop_id: doc.shop_id,
           platform: doc.platform,
           text: doc.text,
+          raw_payload: doc.raw_payload,
         });
         console.log(`  [worker] ${doc.message_id.slice(0, 20)}... → ${result.status}: ${result.detail}`);
       } catch (err) {

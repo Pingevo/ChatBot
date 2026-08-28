@@ -1,0 +1,18 @@
+# ไฟล์ที่ไม่ต้อง copy เข้า Docker image
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+node_modules
+.next
+.DS_Store
+*.log
+test_results/
+exports/*.json
+# เก็บ product_embeddings.npz ไว้ (ต้องใช้)
+!exports/product_embeddings.npz

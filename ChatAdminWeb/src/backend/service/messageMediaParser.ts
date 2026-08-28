@@ -14,6 +14,10 @@ interface RawContent {
 
 interface RawPayload {
   data?: { content?: RawContent };
+  // fallback schemas (บาง message อาจเก็บตรงๆ ไม่ nested ใน data.content)
+  message_type?: string;
+  content?: Record<string, unknown>;
+  msg_type?: string;
 }
 
 // Shopee image host — thumb_url ใน raw_payload อาจเป็นแค่ hash ต้อง prepend
@@ -45,9 +49,80 @@ export function parseRawMessage(
   fallbackText: string
 ): ParsedMessage {
   const raw = rawPayload as RawPayload | undefined;
-  const content = raw?.data?.content;
-  const msgType = (content?.message_type || "unknown") as MessageType;
-  const inner = content?.content || {};
+  // ⚡ ลองหา message_type จากหลาย schema
+  //   1. raw_payload.data.content.message_type (schema หลัก)
+  //   2. raw_payload.message_type (schema fallback)
+  //   3. raw_payload.msg_type (schema fallback 2)
+  const nestedContent = raw?.data?.content;
+  const msgType = (
+    nestedContent?.message_type
+    || raw?.message_type
+    || raw?.msg_type
+    || "unknown"
+  ) as MessageType;
+  const inner = nestedContent?.content || raw?.content || {};
+
+  // ⚡ ลองอนุมานจาก fallbackText ก่อนเสมอ
+  //    placeholder เช่น "[รูปภาพ]", "[item]", "[วิดีโอ]" บอกชนิดข้อความ
+  //    ทำก่อน switch เพราะบาง message มี message_type="text" แต่จริงๆ เป็น [item]
+  //    (data writer อาจใส่ placeholder แทน raw media)
+  const ft = fallbackText.trim();
+  // ⚡ ใช้ includes แทน ^ เพื่อ match ทุกที่ใน text (ไม่จำเป็นต้องขึ้นต้น)
+  if (/\[รูปภาพ\]|\[image\]/i.test(ft)) {
+    if (msgType === "image") {
+      // ไป switch case ข้างล่าง (มี url จาก raw_payload)
+    } else {
+      return { message_type: "image", text: fallbackText || "(รูปภาพ)" };
+    }
+  } else if (/\[วิดิโอ\]|\[วิดีโอ\]|\[video\]/i.test(ft)) {
+    if (msgType === "video") {
+      // ไป switch case
+    } else {
+      return { message_type: "video", text: fallbackText || "(วิดีโอ)" };
+    }
+  } else if (/\[item\]|\[itemid\]|\[สินค้า\]/i.test(ft)) {
+    const idMatch = ft.match(/(\d{6,})/);
+    if (msgType === "item" || msgType === "variation_card") {
+      // ไป switch case (มี product_ref จาก raw_payload)
+    } else {
+      return {
+        message_type: "item",
+        text: fallbackText || "(สินค้า)",
+        product_ref: idMatch ? { item_id: idMatch[1] } : undefined,
+      };
+    }
+  } else if (/\[order\]|\[คำสั่งซื้อ\]/i.test(ft)) {
+    if (msgType === "order") {
+      // ไป switch case
+    } else {
+      const snMatch = ft.match(/(\d{8,})/);
+      return {
+        message_type: "order",
+        text: fallbackText || "(คำสั่งซื้อ)",
+        order_sn: snMatch ? snMatch[1] : "",
+      };
+    }
+  } else if (/\[sticker\]|\[สติกเกอร์\]/i.test(ft)) {
+    return { message_type: "sticker", text: fallbackText || "(สติกเกอร์)" };
+  } else if (/\[notification\]|\[แจ้งเตือน\]/i.test(ft)) {
+    return { message_type: "notification", text: fallbackText || "", notification_text: "" };
+  } else if (/\[variation_card\]|\[ตัวเลือกสินค้า\]/i.test(ft)) {
+    if (msgType === "variation_card") {
+      // ไป switch case
+    } else {
+      const idMatch = ft.match(/(\d{6,})/);
+      return {
+        message_type: "variation_card",
+        text: fallbackText || "(สินค้าพร้อมตัวเลือก)",
+        product_ref: idMatch ? { item_id: idMatch[1] } : undefined,
+      };
+    }
+  }
+
+  // ถ้า msgType เป็น unknown และไม่ match placeholder → text ปกติ
+  if (msgType === "unknown") {
+    return { message_type: "text", text: fallbackText };
+  }
 
   switch (msgType) {
     case "text": {
@@ -158,6 +233,20 @@ export function parseRawMessage(
         message_type: "notification",
         text: fallbackText || "",
         notification_text: String(c.notification_for_receiver || c.notification_for_sender || ""),
+      };
+    }
+
+    // faq_liveagent — Shopee ส่งตอนโอนจากบอทไปคน (Live Agent) หรือตอนแสดง FAQ
+    // แสดงเป็น notification style แทน text ดิบๆ ที่เป็น "[faq_liveagent]"
+    case "faq_liveagent": {
+      const c = inner as any;
+      const faqText = String(
+        c.faq_text || c.text || c.message || fallbackText || ""
+      );
+      return {
+        message_type: "faq_liveagent",
+        text: faqText || "(โอนไปยังเจ้าหน้าที่)",
+        notification_text: faqText || "โอนไปยังเจ้าหน้าที่",
       };
     }
 
