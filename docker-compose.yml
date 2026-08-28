@@ -1,5 +1,9 @@
 # docker-compose.yml — ChatBotProductMS
-# Deploy บน host digital.in.th (MongoDB รันบน host เดียวกัน ไม่ได้ containerize)
+# Deploy บน host (MongoDB รันบน host เดียวกัน ไม่ได้ containerize)
+#
+# ไฟล์ env ที่ต้องสร้างบน server (2 ไฟล์):
+#   1. .env          ← chatbot ทั้ง 3 แพลตฟอร์ม (shopee/lazada/tiktok) ใช้ร่วมกัน
+#   2. .env.web      ← Next.js admin + bot-worker
 #
 # รัน: docker compose up -d
 # ดู log: docker compose logs -f
@@ -8,7 +12,8 @@
 
 services:
   # ─────────────────────────────────────────────────────────────
-  # Shopee Chatbot (port 8010)
+  # Shopee Chatbot (port 8010) — ใช้ .env ร่วมกับ lazada/tiktok
+  # ต่างกันแค่ APP_MODULE + UVICORN_PORT + MONGO_COLLECTION
   # ─────────────────────────────────────────────────────────────
   chatbot-shopee:
     build:
@@ -20,11 +25,14 @@ services:
     ports:
       - "8010:8010"
     env_file:
-      - .env.chatbot.shopee
+      - .env
     environment:
       - APP_MODULE=chatbot.shopeechat.app:app
+      - UVICORN_HOST=0.0.0.0
       - UVICORN_PORT=8010
       - EMBEDDING_DEVICE=cpu
+      # override collection สำหรับ Shopee (ถ้า .env ตั้งไว้แล้วก็ไม่ทับ)
+      - MONGO_COLLECTION=ShpProducts
     volumes:
       # HF model cache — ไม่ต้องโหลด 4GB ใหม่ทุกครั้งที่ restart
       - hf_cache:/app/.hf_cache
@@ -35,7 +43,8 @@ services:
       - chatbot-net
 
   # ─────────────────────────────────────────────────────────────
-  # Lazada Chatbot (port 8011) — ยังไม่มีโค้ด พร้อมใช้เมื่อเขียนแล้ว
+  # Lazada Chatbot (port 8011) — ใช้ .env ร่วมกับ shopee
+  # ต่างกันแค่ APP_MODULE + UVICORN_PORT + MONGO_COLLECTION
   # ─────────────────────────────────────────────────────────────
   chatbot-lazada:
     build:
@@ -47,11 +56,14 @@ services:
     ports:
       - "8011:8011"
     env_file:
-      - .env.chatbot.lazada
+      - .env
     environment:
       - APP_MODULE=chatbot.lazadachat.app:app
+      - UVICORN_HOST=0.0.0.0
       - UVICORN_PORT=8011
       - EMBEDDING_DEVICE=cpu
+      # override collection สำหรับ Lazada
+      - MONGO_COLLECTION=OpenLazadaProducts
     volumes:
       - hf_cache:/app/.hf_cache
     extra_hosts:
@@ -61,7 +73,8 @@ services:
     profiles: ["lazada"]  # ไม่รัน default — ใช้: docker compose --profile lazada up -d
 
   # ─────────────────────────────────────────────────────────────
-  # TikTok Chatbot (port 8012) — ยังไม่มีโค้ด พร้อมใช้เมื่อเขียนแล้ว
+  # TikTok Chatbot (port 8012) — ใช้ .env ร่วมกับ shopee
+  # ต่างกันแค่ APP_MODULE + UVICORN_PORT + MONGO_COLLECTION
   # ─────────────────────────────────────────────────────────────
   chatbot-tiktok:
     build:
@@ -73,11 +86,14 @@ services:
     ports:
       - "8012:8012"
     env_file:
-      - .env.chatbot.tiktok
+      - .env
     environment:
       - APP_MODULE=chatbot.tiktokchat.app:app
+      - UVICORN_HOST=0.0.0.0
       - UVICORN_PORT=8012
       - EMBEDDING_DEVICE=cpu
+      # override collection สำหรับ TikTok
+      - MONGO_COLLECTION=TiksProduct
     volumes:
       - hf_cache:/app/.hf_cache
     extra_hosts:
@@ -103,7 +119,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
-      # บอท base URLs — เชื่อม container อื่นผ่านชื่อ service
+      # บอท base URLs — เชื่อม container อื่นผ่านชื่อ service (ไม่ต้องตั้งใน .env.web)
       - CHATBOT_BASE_URL_SHOPEE=http://chatbot-shopee:8010
       - CHATBOT_BASE_URL_LAZADA=http://chatbot-lazada:8011
       - CHATBOT_BASE_URL_TIKTOK=http://chatbot-tiktok:8012
@@ -117,7 +133,7 @@ services:
   # ─────────────────────────────────────────────────────────────
   # Bot Worker — pipeline ประมวลผลข้อความ (trigger → bot → handoff)
   # poll messages ทุก N วินาที → เช็ค trigger → เรียก bot / จ่ายงาน
-  # ⚠️ ต้องเปิด bot_worker_enabled=true ใน .env.web หรือหน้า config
+  # ⚠️ BOT_WORKER_ENABLED=true ถูก override ด้านล่างแล้ว
   # ─────────────────────────────────────────────────────────────
   bot-worker:
     build:

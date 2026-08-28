@@ -86,6 +86,7 @@ export default function ShadowInboxPage() {
 
   // ⚡ tab "ทั้งหมด" — ใช้ ChatList เหมือน ticket inbox
   const [chatConversations, setChatConversations] = useState<Conversation[]>([]);
+  const [chatTotalCount, setChatTotalCount] = useState<number>(0);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [loadingChatMessages, setLoadingChatMessages] = useState(false);
 
@@ -104,13 +105,15 @@ export default function ShadowInboxPage() {
         // "ทั้งหมด" = ดึงจาก ticket inbox (conversations) เหมือนหน้า ticket
         // ⚡ ใช้ limit 2000 (default ของ backend) แทน 10000 — กัน timeout 30s
         // ถ้าต้องการดูเก่ากว่านั้นให้ scroll ใน ChatList (filter/sort ทำใน frontend)
-        const r = await api().get<Conversation[]>("/admin/conversations", {
-          params: { assigned_to: "all", limit: 2000 },
+        // ⚡ include_count=true เพื่อขอ total_count จริงจาก DB
+        const r = await api().get<{ rows: Conversation[]; total_count: number } | Conversation[]>("/admin/conversations", {
+          params: { assigned_to: "all", limit: 2000, include_count: "true" },
           // ⚡ ตั้ง timeout 45s กัน axios ตัดก่อน backend ทำเสร็จ
           timeout: 45000,
         });
-        const data = Array.isArray(r.data) ? r.data : ((r.data as unknown as { rows?: Conversation[] }).rows || []);
+        const data = Array.isArray(r.data) ? r.data : ((r.data as { rows?: Conversation[] }).rows || []);
         setChatConversations(data);
+        setChatTotalCount(Array.isArray(r.data) ? data.length : (r.data as { total_count?: number }).total_count || data.length);
       } else if (originFilter === "history") {
         // "History" = ดึง conversations ที่ถูก generate ทั้งแชท (origin=manual_conversation)
         // + ดึง shadow_replies origin=manual_conversation เพื่อ map เข้า panel
@@ -524,6 +527,7 @@ export default function ShadowInboxPage() {
             onSelect={handleSelect}
             admins={[]}
             onChatFilterChange={() => {}}
+            totalCount={originFilter === "all" ? chatTotalCount : undefined}
           />
         ) : originFilter === "trash" ? (
           /* ⚡ tab "ถังขยะ" — แสดงรายการที่ถูก soft delete + ปุ่ม restore */

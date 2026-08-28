@@ -22,6 +22,12 @@ export { authService } from "./authService";
 export const chatService = {
   list: (params?: { platform?: Platform; status?: string; shop?: string; q?: string; assigned_to?: string }) =>
     api().get<Conversation[]>("/admin/conversations", { params }).then((r) => r.data),
+  // ⚡ list พร้อม total_count (จำนวนจริงทั้งหมด ไม่จำกัดด้วย limit)
+  // ⚠️ API อาจคืน array ตรงๆ (cache hit) หรือ { rows, total_count } — frontend ต้อง guard
+  listWithCount: (params?: { platform?: Platform; status?: string; shop?: string; q?: string; assigned_to?: string; limit?: number }) =>
+    api().get<{ rows: Conversation[]; total_count: number } | Conversation[]>("/admin/conversations", {
+      params: { ...params, include_count: "true" },
+    }).then((r) => r.data),
   get: (id: string) =>
     api().get<Conversation>(`/admin/conversations/${id}`).then((r) => r.data),
   messages: (id: string) =>

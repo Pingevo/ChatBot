@@ -473,6 +473,73 @@ def chat(req: ChatRequest) -> ChatResponse:
         from . import warranty as _warranty_check_mod
         _is_claim_request = _warranty_check_mod.detect_claim_request(req.message)
 
+        # ===== Tax invoice → handoff แอดมินเลย (ก่อน general_qtype และ claim_request) =====
+        # ถ้าลูกค้าขอใบกำกับภาษี หรือส่งข้อมูลใบกำกับภาษี → ส่งแอดมินโดยตรง
+        # ไม่ต้องให้บอทตอบเอง เพราะใบกำกับภาษีต้องแอดมินดำเนินการ
+        # ตรวจก่อน claim_request เพราะ "เลขผู้เสียภาษี" มีคำว่า "เสีย" ที่ match claim request
+        _is_tax_invoice = _warranty_check_mod.detect_tax_invoice_request(req.message)
+        if _is_tax_invoice:
+            _tax_answer = (
+                f"ได้ค่ะ เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
+                f"เพื่อดำเนินการเรื่องใบกำกับภาษีให้นะคะ "
+                f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+            )
+            _total_elapsed = _time.time() - _total_start
+            model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+            # ส่งต่อแอดมิน (best-effort)
+            if req.conversation_id:
+                try:
+                    import urllib.request
+                    import urllib.error
+                    _handoff_url = os.environ.get(
+                        "ADMIN_HANDOFF_URL",
+                        "http://127.0.0.1:3000/api/admin/conversations/bot-handoff",
+                    )
+                    _handoff_payload = {
+                        "conversation_id": req.conversation_id,
+                        "shop_id": req.shop or "",
+                        "platform": req.platform or "shopee",
+                        "reason": "tax_invoice_request",
+                        "claim": {"topic": "ใบกำกับภาษี"},
+                    }
+                    _handoff_body = json.dumps(_handoff_payload).encode("utf-8")
+                    _handoff_req = urllib.request.Request(
+                        _handoff_url,
+                        data=_handoff_body,
+                        headers={
+                            "Content-Type": "application/json",
+                            "X-Internal-Secret": os.environ.get("CHATBOT_INTERNAL_SECRET", ""),
+                        },
+                        method="POST",
+                    )
+                    try:
+                        urllib.request.urlopen(_handoff_req, timeout=3)
+                        print("[TAX-HANDOFF] sent to admin", file=sys.stderr)
+                    except Exception as _he:
+                        print(f"[TAX-HANDOFF] handoff failed: {_he}", file=sys.stderr)
+                except Exception as _he:
+                    print(f"[TAX-HANDOFF] error: {_he}", file=sys.stderr)
+            print(f"[TIMING] TAX-HANDOFF: {_total_elapsed:.2f}s", file=sys.stderr)
+            return ChatResponse(
+                answer=_tax_answer,
+                answer_segments=llm.split_segments(_tax_answer),
+                products=[],
+                shop=req.shop,
+                model=model_name,
+                source="tax_invoice_handoff",
+                usage={},
+                elapsed=round(_total_elapsed, 2),
+                cost=0.0,
+                handoff_to_admin=True,
+                handoff_reason="tax_invoice_request",
+                timing=_timing_breakdown,
+                steps=_steps,
+                routing_decision=_routing(
+                    "handoff", "tax_invoice: ลูกค้าขอใบกำกับภาษี → ส่งแอดมิน",
+                    handoff_reason="tax_invoice_request",
+                ),
+            )
+
         # ===== Pass 1: LLM Intent Classification (เฉพาะจุดอ่อน) =====
         # เรียก LLM รอบแรกเพื่อจำแนก intent ก่อนเข้า flow หลัก
         # ใช้เฉพาะเมื่อ hardcoded detection ไม่มั่นใจ (ประหยัดเวลาในกรณีชัดเจน)
@@ -1055,10 +1122,10 @@ def chat(req: ChatRequest) -> ChatResponse:
                 routing_decision=_routing("bot_reply", "warranty_date_followup: คำนวณวันหมดประกัน"),
             )
 
-        # ===== Tax invoice consent handoff =====
-        # ถ้าบอทเคยตอบเรื่องใบกำกับภาษี และลูกค้าตอบว่าต้องการ/อยากคุยแอดมิน
-        # → ส่งต่อแอดมิน (เช็คก่อน general_qtype เพราะ "ขอใบกำกับภาษี" อาจ match tax_invoice keyword)
-        if history and not _is_claim_request:
+        # ===== Tax invoice follow-up from history =====
+        # ถ้าบอทเคยตอบเรื่องใบกำกับภาษี และลูกค้าตอบต่อ (เช่น "ต้องการค่ะ", "ส่งข้อมูลแล้ว")
+        # → ส่งต่อแอดมินเลย ไม่ต้องถามต่อ
+        if history and not _is_tax_invoice and not _is_claim_request:
             _last_model_msgs_tax = [h for h in history if h.get("role") == "model"][-1:]
             _last_model_text_tax = " ".join(h.get("text", "") for h in _last_model_msgs_tax).lower()
             _bot_answered_tax = any(
@@ -1066,15 +1133,16 @@ def chat(req: ChatRequest) -> ChatResponse:
                 for kw in ("ใบกำกับภาษี", "ใบกำกับ", "ภาษี", "tax invoice", "invoice")
             )
             if _bot_answered_tax:
-                # ตรวจว่าลูกค้าต้องการ/อยากคุยแอดมิน
+                # ถ้าลูกค้าตอบสั้นๆ (consent หรือ follow-up) → handoff เลย
                 _tax_consent = _warranty_mod.detect_consent(req.message)
-                _tax_decline = _warranty_mod.detect_decline(req.message) if hasattr(_warranty_mod, "detect_decline") else False
-                # ถ้าลูกค้าพิมพ์เกี่ยวกับใบกำกับภาษีต่อ → ถือว่าต้องการ
                 _tax_followup = any(
                     kw in req.message.lower()
-                    for kw in ("ใบกำกับ", "ภาษี", "invoice", "เอกสาร", "จัดส่ง", "ไปรษณีย์")
+                    for kw in ("ใบกำกับ", "ภาษี", "invoice", "เอกสาร", "จัดส่ง", "ไปรษณีย์",
+                               "เลขผู้เสียภาษี", "เลขภาษี", "หจก.", "บจก.", "สนง.")
                 )
-                if _tax_consent or _tax_followup:
+                # ถ้า message สั้น (<= 8 คำ) และไม่มี model keyword → น่าจะ follow-up
+                _tax_short_followup = len(req.message.split()) <= 8 and not _current_has_model
+                if _tax_consent or _tax_followup or _tax_short_followup:
                     _tax_answer = (
                         f"ได้ค่ะ เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
                         f"เพื่อดำเนินการเรื่องใบกำกับภาษีให้นะคะ "
@@ -1082,7 +1150,6 @@ def chat(req: ChatRequest) -> ChatResponse:
                     )
                     _total_elapsed = _time.time() - _total_start
                     model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-                    # ส่งต่อแอดมิน (best-effort)
                     if req.conversation_id:
                         try:
                             import urllib.request
@@ -1110,12 +1177,12 @@ def chat(req: ChatRequest) -> ChatResponse:
                             )
                             try:
                                 urllib.request.urlopen(_handoff_req, timeout=3)
-                                print("[TAX-HANDOFF] sent to admin", file=sys.stderr)
+                                print("[TAX-HANDOFF] sent to admin (follow-up)", file=sys.stderr)
                             except Exception as _he:
                                 print(f"[TAX-HANDOFF] handoff failed: {_he}", file=sys.stderr)
                         except Exception as _he:
                             print(f"[TAX-HANDOFF] error: {_he}", file=sys.stderr)
-                    print(f"[TIMING] TAX-HANDOFF: {_total_elapsed:.2f}s", file=sys.stderr)
+                    print(f"[TIMING] TAX-HANDOFF: {_total_elapsed:.2f}s (follow-up)", file=sys.stderr)
                     return ChatResponse(
                         answer=_tax_answer,
                         answer_segments=llm.split_segments(_tax_answer),
@@ -1131,7 +1198,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         timing=_timing_breakdown,
                         steps=_steps,
                         routing_decision=_routing(
-                            "handoff", "tax_invoice: ลูกค้าขอใบกำกับภาษี → ส่งแอดมิน",
+                            "handoff", "tax_invoice: follow-up จาก history → ส่งแอดมิน",
                             handoff_reason="tax_invoice_request",
                         ),
                     )
@@ -1389,13 +1456,56 @@ def chat(req: ChatRequest) -> ChatResponse:
                 # desc_message ใช้ original message (ที่มี "การรับประกัน" ฯลฯ)
                 # เพื่อให้ _clean_description กรอง section ที่เกี่ยวข้องได้ถูก
                 _desc_msg = getattr(req, "_followup_original", None) or req.message
-                mongo_products = product_store.fetch_products(
-                    db,
-                    message=mongo_query,
-                    shop_filter=req.shop,
-                    limit=10,
-                    desc_message=_desc_msg,
-                )
+
+                # ⚡ MODEL-REGEX in KB path — ถ้า message มี model keyword ชัดเจน
+                # ให้ดึงด้วย Mongo regex ก่อน vector search (แม่นยำกว่าสำหรับชื่อสินค้าเฉพาะ)
+                _kb_regex_products: list[dict] = []
+                _kb_model_kws = re.findall(r"[A-Za-z]+\d+[A-Za-z]*", req.message)
+                _kb_model_kws = [w for w in _kb_model_kws if len(w) >= 4]
+                if not _kb_model_kws:
+                    _kb_alpha_kws = re.findall(r"[A-Za-z]{5,}", req.message)
+                    _kb_common = {"watch", "smart", "phone", "cable", "charger", "adapter",
+                                  "power", "bank", "band", "type", "usb", "wireless",
+                                  "what", "how", "please", "thank", "hello", "hi"}
+                    _kb_alpha_kws = [w for w in _kb_alpha_kws if w.lower() not in _kb_common]
+                    _kb_model_kws = _kb_alpha_kws[:1]
+                if _kb_model_kws:
+                    _kb_kw = _kb_model_kws[0]
+                    _kb_kw_clean = re.sub(r"(.)\1{2,}$", r"\1", _kb_kw.lower())
+                    if _kb_kw_clean != _kb_kw.lower():
+                        _kb_kw = _kb_kw_clean
+                    _kb_alpha = re.match(r"[A-Za-z]+", _kb_kw).group(0)
+                    _kb_rest = _kb_kw[len(_kb_alpha):]
+                    if _kb_rest:
+                        _kb_pattern = re.escape(_kb_alpha) + r".?" + re.escape(_kb_rest)
+                    else:
+                        _kb_prefix = _kb_kw[:6] if len(_kb_kw) >= 6 else _kb_kw
+                        _kb_pattern = re.escape(_kb_prefix)
+                    try:
+                        _kb_coll = db[os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"]
+                        _kb_filter = {
+                            "item_status": "NORMAL",
+                            "item_name": {"$regex": _kb_pattern, "$options": "i"},
+                        }
+                        if req.shop:
+                            _kb_filter["shopname"] = {"$regex": f"^{re.escape(req.shop)}$", "$options": "i"}
+                        _kb_docs = list(_kb_coll.find(_kb_filter, product_store.PRODUCT_PROJECTION).limit(5))
+                        if _kb_docs:
+                            _kb_regex_products = [product_store.to_product_card(d, req.message) for d in _kb_docs]
+                            print(f"[KB-MODEL-REGEX] ดึงสินค้าตรง model keyword '{_kb_kw}' (pattern={_kb_pattern!r}): {len(_kb_regex_products)} ตัว", file=sys.stderr)
+                    except Exception as _e:
+                        print(f"[KB-MODEL-REGEX] error: {_e}", file=sys.stderr)
+
+                if _kb_regex_products:
+                    mongo_products = _kb_regex_products
+                else:
+                    mongo_products = product_store.fetch_products(
+                        db,
+                        message=mongo_query,
+                        shop_filter=req.shop,
+                        limit=10,
+                        desc_message=_desc_msg,
+                    )
                 print(f"[TIMING] Mongo (KB merge): {_time.time()-_t1:.2f}s  query={mongo_query[:60]!r}  products={len(mongo_products)}", file=sys.stderr)
 
                 # ถ้า KB ไม่มีรุ่นที่ถาม → ค้น Mongo ด้วยคำถามเดิมด้วย แล้วเอามาต่อท้าย
@@ -1764,7 +1874,21 @@ def chat(req: ChatRequest) -> ChatResponse:
         # เพราะ vector search ใช้ query เต็ม จะทำให้สินค้าที่ไม่มี "mi 17" ในชื่อตกไป
         # แต่จริงๆ สินค้าทุกรุ่นในหมวด powerbank อาจรองรับ mi 17 ultra ได้
         # LLM จะเป็นคนตัดสินใจว่ารุ่นไหนรองรับจริง จาก description ใน context
-        if _intent_result.get("intent") == "compatibility_check" and _intent_result.get("product_type"):
+        # ⚡ ข้อยกเว้น: ถ้าเป็น charging spec question (เช่น "biokoop ใช้สายชาร์จอะไรได้บ้าง")
+        # ต้องไม่ override retrieval เป็น charger type เพราะลูกค้าถามเรื่องสเปกชาร์จของสินค้า X
+        # ไม่ใช่ถามหาสินค้า charger
+        _charging_spec_kws_pre = (
+            "ใช้สายชาร์จอะไร", "ใช้สายอะไรชาร์จ", "ใช้สายอะไร",
+            "ชาร์จยังไง", "ชาร์จอะไร", "ชาร์จ type c", "ชาร์จ type-c",
+            "ชาร์จได้ไหม", "ชาร์จกี่วัต", "ชาร์จกี่แอม", "ชาร์จกี่w",
+            "พอร์ตอะไร", "พอร์ตชาร์จ", "พอร์ตไหน",
+            "wireless ได้ไหม", "ชาร์จไร้สาย", "ชาร์จไม่ต้องเสียบ",
+            "ใช้สาย c to c", "ใช้สาย c to a", "ใช้สาย usb",
+            "ชาร์จเร็วไหม", "ชาร์จเร็วกี่", "แทนอันเดิม", "แทนของเดิม",
+            "สายชาร์จเดิม", "สายเดิมเสีย", "สายชาร์จใหม่",
+        )
+        _is_charging_spec_pre = any(kw in req.message.lower() for kw in _charging_spec_kws_pre)
+        if _intent_result.get("intent") == "compatibility_check" and _intent_result.get("product_type") and not _is_charging_spec_pre:
             _compat_type = _intent_result.get("product_type")
             _compat_device = _intent_result.get("target_device", "")
             _compat_sub = _intent_result.get("charger_subtype", "")
@@ -2476,10 +2600,153 @@ def chat(req: ChatRequest) -> ChatResponse:
                 except Exception as _e:
                     print(f"[REF-REGEX] error: {_e}", file=sys.stderr)
 
+        # ⚡ Model keyword detection สำหรับ message ปัจจุบัน (ไม่ใช่ follow-up)
+        # ถ้า message มี model keyword ชัดเจน (เช่น "Watch6", "BioKoop", "KS2")
+        # → ดึงด้วย Mongo regex ก่อน เพื่อความแม่นยำ (vector search semantic อาจไป match สินค้าอื่น)
+        # เช่น "Watch6สามารถตอบแอพรุ้งกับแอพเขียวได้ไหมครับ" → ดึงสินค้าที่ชื่อมี "Watch 6"
+        if not _ref_regex_products and not _ref_handled:
+            # หา model keyword ที่เป็นคำอังกฤษ+ตัวเลข (เช่น Watch6, KS2, P23)
+            # ต้องมีอย่างน้อย 4 ตัวอักษร เพื่อกัน false positive (เช่น "A3", "EC4")
+            _cur_model_kws = re.findall(r"[A-Za-z]+\d+[A-Za-z]*", req.message)
+            _cur_model_kws = [w for w in _cur_model_kws if len(w) >= 4]
+            # ถ้าไม่มีคำอังกฤษ+ตัวเลข ลองหาคำอังกฤษยาวๆ ที่ไม่ใช่คำทั่วไป (เช่น "biokoop", "elite2")
+            # ต้องมีอย่างน้อย 5 ตัวอักษร เพื่อกัน false positive
+            if not _cur_model_kws:
+                _cur_alpha_kws = re.findall(r"[A-Za-z]{5,}", req.message)
+                # กรองคำทั่วไปที่ไม่ใช่ชื่อสินค้า
+                _common_words = {"watch", "smart", "phone", "cable", "charger", "adapter",
+                                 "power", "bank", "band", "type", "usb", "wireless",
+                                 "what", "how", "please", "thank", "hello", "hi"}
+                _cur_alpha_kws = [w for w in _cur_alpha_kws if w.lower() not in _common_words]
+                _cur_model_kws = _cur_alpha_kws[:1]  # เอาแค่คำแรก
+            if _cur_model_kws:
+                _cur_kw = _cur_model_kws[0]
+                # จัดการคำผิด (พิมพ์ซ้ำ) เช่น "biokoopp" → "biokoop", "bikooppppp" → "bikoop"
+                # โดยตัด tail ที่ซ้ำกัน 3+ ครั้งออก
+                _cur_kw_clean = re.sub(r"(.)\1{2,}$", r"\1", _cur_kw.lower())
+                if _cur_kw_clean != _cur_kw.lower():
+                    print(f"[MODEL-REGEX] ตัด tail ซ้ำ: {_cur_kw!r} → {_cur_kw_clean!r}", file=sys.stderr)
+                    _cur_kw = _cur_kw_clean
+                # สร้าง regex pattern:
+                # - ถ้ามีตัวเลข (เช่น "Watch6") → "Watch.?6" (ยอมรับ space ระหว่างคำและตัวเลข)
+                # - ถ้าเป็นคำอังกฤษล้วน (เช่น "biokoop") → "biokoop" (case-insensitive)
+                _alpha_part = re.match(r"[A-Za-z]+", _cur_kw).group(0)
+                _rest_part = _cur_kw[len(_alpha_part):]
+                if _rest_part:  # มีตัวเลขต่อท้าย
+                    _cur_kw_pattern = re.escape(_alpha_part) + r".?" + re.escape(_rest_part)
+                else:  # คำอังกฤษล้วน — ใช้ prefix 6 ตัวแรกเพื่อจัดการคำผิด
+                    _prefix = _cur_kw[:6] if len(_cur_kw) >= 6 else _cur_kw
+                    _cur_kw_pattern = re.escape(_prefix)
+                try:
+                    _ref_coll = db[os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"]
+                    _ref_filter = {
+                        "item_status": "NORMAL",
+                        "item_name": {"$regex": _cur_kw_pattern, "$options": "i"},
+                    }
+                    if req.shop:
+                        _ref_filter["shopname"] = {"$regex": f"^{re.escape(req.shop)}$", "$options": "i"}
+                    _ref_docs = list(_ref_coll.find(_ref_filter, product_store.PRODUCT_PROJECTION).limit(5))
+                    if _ref_docs:
+                        _ref_regex_products = [product_store.to_product_card(d, req.message) for d in _ref_docs]
+                        print(f"[MODEL-REGEX] ดึงสินค้าตรง model keyword '{_cur_kw}' (pattern={_cur_kw_pattern!r}) ด้วย Mongo regex: {len(_ref_regex_products)} ตัว", file=sys.stderr)
+                except Exception as _e:
+                    print(f"[MODEL-REGEX] error: {_e}", file=sys.stderr)
+
+        # ⚡ Fuzzy matching fallback — ถ้า MODEL-REGEX ไม่เจอ ให้ลอง fuzzy match
+        # รับพิมพ์ผิด เช่น biokooooooooop, biokooppppppp, redmi wach 6
+        if not _ref_regex_products and not _ref_handled:
+            try:
+                _fuzzy_products = product_store.fuzzy_match_products(
+                    db, req.message, shop=req.shop, limit=5, score_threshold=75
+                )
+                if _fuzzy_products:
+                    _ref_regex_products = _fuzzy_products
+                    print(f"[FUZZY-MATCH] พิมพ์ผิด → fuzzy match: {len(_ref_regex_products)} ตัว", file=sys.stderr)
+            except Exception as _e:
+                print(f"[FUZZY-MATCH] error: {_e}", file=sys.stderr)
+
+        # ⚡ Carry-forward products จาก history — ถ้า message ปัจจุบันเป็น follow-up
+        # และไม่มี model keyword ชัดเจน ให้ลอง fuzzy match กับ model answer ล่าสุด
+        # เพื่อหาสินค้าที่เคยตอบไปแล้ว ทำให้ถามซ้ำได้โดยไม่ลืมสินค้า
+        _is_carry_forward = False
+        if not _ref_regex_products and not _ref_handled and req.history:
+            _cur_has_model_kw = bool(knowledge_base.extract_model_keywords(req.message))
+            _cur_msg_lower = (req.message or "").lower().strip()
+            # ถ้า message ปัจจุบันสั้น (<= 8 คำ) และไม่มี model keyword → น่าจะ follow-up
+            _is_short_followup = len(req.message.split()) <= 8 and not _cur_has_model_kw
+            # ไม่ใช่ new topic (เช่น "สวัสดี", "มีอะไรแนะนำไหม")
+            _new_topic_kws = ("สวัสดี", "หวัดดี", "hi", "hello", "แนะนำ", "มีอะไร", "มีไร", "ขอดู")
+            _is_new_topic = any(kw in _cur_msg_lower for kw in _new_topic_kws)
+            if _is_short_followup and not _is_new_topic:
+                # หา model answer ล่าสุดจาก history
+                _last_model_text = ""
+                for h in reversed(req.history):
+                    if h.role == "model" and h.text.strip():
+                        _last_model_text = h.text
+                        break
+                if _last_model_text:
+                    try:
+                        _carry_products = product_store.fuzzy_match_products(
+                            db, _last_model_text, shop=req.shop, limit=5, score_threshold=70
+                        )
+                        if _carry_products:
+                            _ref_regex_products = _carry_products
+                            _is_carry_forward = True
+                            print(f"[CARRY-FORWARD] ใช้สินค้าจาก model answer ล่าสุด: {len(_ref_regex_products)} ตัว", file=sys.stderr)
+                    except Exception as _e:
+                        print(f"[CARRY-FORWARD] error: {_e}", file=sys.stderr)
+
+        # ⚡ Charging spec question detection (ทำก่อน if _ref_regex_products)
+        # ถ้าลูกค้าถาม "สินค้าX ใช้สายชาร์จอะไรได้บ้าง" / "X ชาร์จยังไง" / "X พอร์ตอะไร"
+        # → เป็นคำถามเรื่อง charging spec ของสินค้า X ไม่ใช่หาสินค้า charger
+        _charging_spec_kws = (
+            "ใช้สายชาร์จอะไร", "ใช้สายอะไรชาร์จ", "ใช้สายอะไร",
+            "ชาร์จยังไง", "ชาร์จอะไร", "ชาร์จ type c", "ชาร์จ type-c",
+            "ชาร์จได้ไหม", "ชาร์จกี่วัต", "ชาร์จกี่แอม", "ชาร์จกี่w",
+            "พอร์ตอะไร", "พอร์ตชาร์จ", "พอร์ตไหน",
+            "wireless ได้ไหม", "ชาร์จไร้สาย", "ชาร์จไม่ต้องเสียบ",
+            "ใช้สาย c to c", "ใช้สาย c to a", "ใช้สาย usb",
+            "ชาร์จเร็วไหม", "ชาร์จเร็วกี่", "แทนอันเดิม", "แทนของเดิม",
+            "สายชาร์จเดิม", "สายเดิมเสีย", "สายชาร์จใหม่",
+            "ใช้สายชาร์จแบบไหน", "สายชาร์จแบบไหน",
+        )
+        _is_charging_spec_q = any(kw in req.message.lower() for kw in _charging_spec_kws)
+        if _is_charging_spec_q:
+            print(f"[CHARGING-SPEC-Q] ลูกค้าถาม charging spec ของสินค้า: {req.message!r}", file=sys.stderr)
+
         # ถ้า Mongo regex เจอ → ใช้สิ่งนั้น (แม่นยำกว่า vector search)
         # ถ้าไม่เจอ → ใช้ vector search ปกติ
         if _ref_regex_products:
             products = _ref_regex_products
+            # ⚡ ถ้าเป็น carry-forward จาก history → เพิ่ม context note บอก LLM
+            # ว่าสินค้าเหล่านี้คือสินค้าที่ลูกค้าสนใจจากคำถามก่อนหน้า
+            # ลูกค้าถามซ้ำเพราะอยากได้ข้อมูลเพิ่ม ไม่ใช่ถามหาสินค้าใหม่
+            if _is_carry_forward and products:
+                _carry_note = (
+                    "⚠️ สินค้าใน context คือสินค้าที่ลูกค้าสนใจจากคำถามก่อนหน้า "
+                    "ลูกค้าถามซ้ำเพราะอยากได้ข้อมูลเพิ่มเติมเกี่ยวกับสินค้าเดิม "
+                    "ห้ามบอกว่าไม่มีสินค้ารุ่นนี้ หรือแนะนำสินค้าอื่นแทน "
+                    "ให้ตอบข้อมูลเพิ่มเติมของสินค้าใน context เท่านั้น"
+                )
+                if "_context_note" not in products[0]:
+                    products[0]["_context_note"] = _carry_note
+                else:
+                    products[0]["_context_note"] = products[0]["_context_note"] + " " + _carry_note
+            # ⚡ ถ้าเป็น charging spec question → เพิ่ม context note ให้ LLM
+            # บอก LLM ว่าลูกค้าถามเรื่องสเปกชาร์จของสินค้า ไม่ใช่ถามซื้อสายชาร์จ
+            if _is_charging_spec_q and products:
+                _charging_note = (
+                    "⚠️ คำถามนี้เป็นการถามสเปกการชาร์จของสินค้าใน context "
+                    "(เช่น ใช้สายชาร์จแบบไหน พอร์ตอะไร ชาร์จยังไง) "
+                    "ไม่ใช่ถามซื้อสายชาร์จ/หัวชาร์จแยก — "
+                    "ให้ตอบจากข้อมูล description ของสินค้าใน context "
+                    "ถ้า description ระบุประเภทสายชาร์จ/พอร์ต/การชาร์จ ให้บอกข้อมูลนั้น "
+                    "ถ้าไม่มีข้อมูล ให้บอกว่าไม่มีระบุในระบบ"
+                )
+                if "_context_note" not in products[0]:
+                    products[0]["_context_note"] = _charging_note
+                else:
+                    products[0]["_context_note"] = products[0]["_context_note"] + " " + _charging_note
         else:
             # สำหรับ compatibility check ให้ดึงสินค้าเยอะกว่าปกติ
             # เพราะต้องการให้ LLM เห็นสินค้าทุกรุ่นในหมวด เพื่อเลือกรุ่นที่รองรับ device จริงๆ

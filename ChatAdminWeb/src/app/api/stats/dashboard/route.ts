@@ -88,18 +88,26 @@ export async function GET(req: NextRequest) {
     computeResponseStats(msgColl, { start, end }),
     // 4. Total conversations
     convColl.countDocuments({ ...dateFilter("created_at") }),
-    // 5. ปิดแล้ว = มี closed_at
-    convColl.countDocuments({ closed_at: { $exists: true, $ne: null }, ...dateFilter("created_at") }),
-    // 6. กำลังตอบอยู่ = มี assigned_to และไม่มี closed_at
+    // 5. ปิดแล้ว = มี closed_at หรือ status=closed/resolved (sellcenter อาจเขียน status แต่ไม่เขียน closed_at)
+    convColl.countDocuments({
+      $or: [
+        { closed_at: { $exists: true, $ne: null } },
+        { status: { $in: ["closed", "resolved"] } },
+      ],
+      ...dateFilter("created_at"),
+    }),
+    // 6. กำลังตอบอยู่ = มี assigned_to และไม่มี closed_at และ status ไม่ใช่ closed/resolved
     convColl.countDocuments({
       assigned_to: { $exists: true, $nin: [null, ""] },
       closed_at: { $in: [null, undefined] },
+      status: { $nin: ["closed", "resolved"] },
       ...dateFilter("created_at"),
     }),
-    // 7. บอทตอบ = ไม่มี assigned_to และไม่มี closed_at
+    // 7. บอทตอบ = ไม่มี assigned_to และไม่มี closed_at และ status ไม่ใช่ closed/resolved
     convColl.countDocuments({
       assigned_to: { $in: [null, undefined, ""] },
       closed_at: { $in: [null, undefined] },
+      status: { $nin: ["closed", "resolved"] },
       ...dateFilter("created_at"),
     }),
     // 8. Unread conversations (unread_count > 0)

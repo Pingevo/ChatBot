@@ -626,3 +626,39 @@ def detect_warranty_duration_question(message: str) -> bool:
     # กรณี "imilab ec4 รับประกันกี่ปี" — มีทั้งสินค้าและ warranty
     return has_warranty and (has_duration_q or "รับประกัน" in msg_lower or "ประกัน" in msg_lower)
 
+
+# ── Tax invoice detection ──
+_TAX_INVOICE_REQUEST_KWS = (
+    "ใบกำกับภาษี", "ใบกำกับ", "ขอใบกำกับ", "ขอใบเสร็จ",
+    "tax invoice", "invoice", "etax", "e-tax",
+    "ออกใบกำกับ", "ออกภาษี", "มีใบกำกับ", "มีภาษี",
+    "ใบกำกับภาษีได้ไหม", "ออกภาษีได้ไหม", "มีใบกำกับภาษีไหม",
+)
+
+# คำที่บ่งบอกว่าลูกค้าส่งข้อมูลใบกำกับภาษีมาแล้ว
+_TAX_INVOICE_DATA_KWS = (
+    "เลขผู้เสียภาษี", "เลขภาษี", "tax id", "เลขที่",
+    "หจก.", "บจก.", "จำกัด", "co.,ltd", "co., ltd", "company",
+    "เลขประจำตัวผู้เสียภาษี", "สำนักงานใหญ่", "สนง.",
+)
+
+
+def detect_tax_invoice_request(message: str) -> bool:
+    """ตรวจว่าลูกค้าขอใบกำกับภาษี หรือส่งข้อมูลใบกำกับภาษี หรือไม่.
+
+    คืน True ถ้า:
+    - ลูกค้าขอใบกำกับภาษี (เช่น "ขอใบกำกับภาษีด้วยนะคะ")
+    - ลูกค้าส่งข้อมูลใบกำกับภาษี (เช่น เลขผู้เสียภาษี, ชื่อบริษัท, ที่อยู่)
+    - ลูกค้าพิมพ์เกี่ยวกับใบกำกับภาษีต่อจากที่เคยถามแล้ว
+
+    ใช้สำหรับ handoff แอดมินโดยตรง — ไม่ต้องให้บอทตอบเอง.
+    """
+    msg_lower = message.lower().strip()
+    # ตรวจ request keywords
+    if any(kw in msg_lower for kw in _TAX_INVOICE_REQUEST_KWS):
+        return True
+    # ตรวจ data submission keywords (ลูกค้าส่งข้อมูลใบกำกับภาษี)
+    if any(kw in msg_lower for kw in _TAX_INVOICE_DATA_KWS):
+        return True
+    return False
+

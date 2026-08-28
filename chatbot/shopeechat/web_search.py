@@ -153,9 +153,26 @@ def should_use_web_search(
     except Exception:
         pass
     _is_implicit_comparison = _model_count >= 2 and _non_model_word_count == 0
-    # ถ้าเป็น warranty/spec/comparison question และมีสินค้าใน context → ไม่ควร search
+    # ถ้าเป็น warranty/spec/comparison/charging-spec question และมีสินค้าใน context → ไม่ควร search
     # เพราะ context สินค้ามีข้อมูลอยู่แล้ว ไม่ควรดึงจาก external (อาจได้สินค้าแบรนด์อื่นมา)
-    _skip_search = (_is_warranty_q or _is_comparison_q or _is_implicit_comparison) and _has_products
+    _charging_spec_kws = (
+        "ใช้สายชาร์จอะไร", "ใช้สายอะไรชาร์จ", "ใช้สายอะไร",
+        "ชาร์จยังไง", "ชาร์จอะไร", "ชาร์จ type c", "ชาร์จ type-c",
+        "ชาร์จได้ไหม", "ชาร์จกี่วัต", "ชาร์จกี่แอม", "ชาร์จกี่w",
+        "พอร์ตอะไร", "พอร์ตชาร์จ", "พอร์ตไหน",
+        "wireless ได้ไหม", "ชาร์จไร้สาย", "ชาร์จไม่ต้องเสียบ",
+        "ใช้สาย c to c", "ใช้สาย c to a", "ใช้สาย usb",
+        "ชาร์จเร็วไหม", "ชาร์จเร็วกี่", "แทนอันเดิม", "แทนของเดิม",
+        "สายชาร์จเดิม", "สายเดิมเสีย", "สายชาร์จใหม่",
+        "ใช้สายชาร์จแบบไหน", "สายชาร์จแบบไหน",
+    )
+    _is_charging_spec_q = any(kw in _msg_lower for kw in _charging_spec_kws)
+    # carry-forward follow-up: ถามซ้ำ/อยากได้ข้อมูลเพิ่ม และมีสินค้าใน context → ไม่ควร search
+    _followup_kws = ("อยากได้ข้อมูลเพิ่ม", "ข้อมูลเพิ่ม", "รายละเอียดเพิ่ม", "ราคาเท่าไหร่",
+                     "ราคา", "รับประกัน", "สเปค", "สเปก", "รีวิว", "ขอดู", "ดูรุ่น",
+                     "อยากรู้เพิ่ม", "บอกรายละเอียด", "อธิบายเพิ่ม")
+    _is_followup_q = any(kw in _msg_lower for kw in _followup_kws) and len(message.split()) <= 8
+    _skip_search = (_is_warranty_q or _is_comparison_q or _is_implicit_comparison or _is_charging_spec_q or _is_followup_q) and _has_products
 
     # 1. คำตอบมี uncertainty markers
     uncertain, marker = detect_uncertainty(answer)

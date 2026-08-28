@@ -98,6 +98,7 @@ interface Msg {
   products?: Product[];
   stats?: MsgStats;
   sessionMsgIndex?: number;  // index ใน messages array ของ session (สำหรับ rate API)
+  isGroupLast?: boolean;     // bubble สุดท้ายของกลุ่ม bot answer → RateBox แสดงที่นี่เท่านั้น
 }
 
 /* ---- markdown → HTML (port จากเดิม) ---- */
@@ -392,14 +393,35 @@ export function TestChatClient({ platform }: { platform: Platform }) {
           loadedMsgs.push({ id: msgIdCounter++, role: "user", html: escapeHtml(m.text), raw: m.text, sessionMsgIndex: msgIdx });
           hist.push({ role: "user", text: m.text });
         } else if (m.role === "model") {
+          // ⚡ Multi-bubble — split คำตอบด้วย ||| เหมือนตอนส่งใหม่
+          const segments = splitAnswerSegments(m.text);
+          const bubbles = segments.length > 0 ? segments : [m.text];
+          const groupStats = m.stats || {};
+          // segment แรก → มี stats (สำหรับ stats panel)
           loadedMsgs.push({
             id: msgIdCounter++,
             role: "bot",
-            html: formatAnswer(m.text),
-            raw: m.text,
-            stats: m.stats || {},
-            sessionMsgIndex: msgIdx,
+            html: formatAnswer(bubbles[0]),
+            raw: bubbles[0],
+            stats: groupStats,
           });
+          // segment ถัดไป → bubble ใหม่ (ไม่มี stats ซ้ำ)
+          for (let si = 1; si < bubbles.length; si++) {
+            const isLast = si === bubbles.length - 1;
+            loadedMsgs.push({
+              id: msgIdCounter++,
+              role: "bot",
+              html: formatAnswer(bubbles[si]),
+              raw: bubbles[si],
+              // ⚡ segment สุดท้าย → มี sessionMsgIndex + stats (สำหรับ RateBox)
+              ...(isLast ? { isGroupLast: true, sessionMsgIndex: msgIdx, stats: groupStats } : {}),
+            });
+          }
+          // ⚡ ถ้ามี segment เดียว → มันคือ first และ last พร้อมกัน
+          if (bubbles.length === 1) {
+            loadedMsgs[loadedMsgs.length - 1].isGroupLast = true;
+            loadedMsgs[loadedMsgs.length - 1].sessionMsgIndex = msgIdx;
+          }
           hist.push({ role: "model", text: m.text });
           const s = m.stats || {};
           tot.turns++;
@@ -447,9 +469,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
           message: { role, text, stats: stats || {} },
         }),
       });
-      // track sessionMsgIndex ใน local state
+      // track sessionMsgIndex ใน local state — เฉพาะ groupLast (bubble สุดท้ายของกลุ่ม)
       setMessages(prev => prev.map(m =>
-        m.role !== "sys" && !m.sessionMsgIndex ? { ...m, sessionMsgIndex: msgIndex } : m
+        m.role === "bot" && m.isGroupLast && !m.sessionMsgIndex ? { ...m, sessionMsgIndex: msgIndex } : m
       ));
       loadSessions(); // refresh sidebar
     } catch {}
@@ -659,27 +681,34 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         wsCost: t.wsCost + (stats.web_search_used ? (stats.cost || 0) : 0),
         wsTokens: t.wsTokens + (stats.web_search_used ? (stats.usage?.total || 0) : 0),
       }));
-      // segment แรก → แทนที่ spinnerMsg (มี stats + products + feedback)
-      // segment ถัดไป → เพิ่มเป็น message ใหม่ (สืบต่อจาก segment แรก)
+      // segment แรก → แทนที่ spinnerMsg (มี stats + products สำหรับ stats panel)
+      // segment สุดท้าย → มี sessionMsgIndex + isGroupLast (สำหรับ RateBox)
       setMessages((prev) => {
         const next = [...prev];
         const idx = next.findIndex((m) => m.id === spinnerMsg.id);
         if (idx === -1) return prev;
-        // แทนที่ spinner ด้วย segment แรก (พร้อม stats + products + feedback)
+        // แทนที่ spinner ด้วย segment แรก (พร้อม stats + products)
         next[idx] = {
           ...next[idx],
           html: formatAnswer(bubbles[0]),
           raw: bubbles[0],
           products: j.products || [],
           stats,
+          // ⚡ ถ้ามี segment เดียว → เป็น first และ last พร้อมกัน
+          ...(bubbles.length === 1 ? { isGroupLast: true } : {}),
         };
-        // เพิ่ม segment ถัดไปเป็น bubble ใหม่ (stats/products อยู่ที่ segment แรก ไม่ซ้ำ)
-        const extraMsgs: Msg[] = bubbles.slice(1).map((seg) => ({
-          id: msgIdCounter++,
-          role: "bot",
-          html: formatAnswer(seg),
-          raw: seg,
-        }));
+        // เพิ่ม segment ถัดไปเป็น bubble ใหม่
+        const extraMsgs: Msg[] = bubbles.slice(1).map((seg, si) => {
+          const isLast = si === bubbles.length - 2; // si เริ่มจาก 0 สำหรับ segment 1
+          return {
+            id: msgIdCounter++,
+            role: "bot",
+            html: formatAnswer(seg),
+            raw: seg,
+            // ⚡ segment สุดท้าย → มี stats + isGroupLast (สำหรับ RateBox)
+            ...(isLast ? { isGroupLast: true, stats } : {}),
+          } as Msg;
+        });
         next.splice(idx + 1, 0, ...extraMsgs);
         return next;
       });
@@ -1249,8 +1278,8 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                         </button>
                       </div>
 
-                      {/* ── RateBox — ใช้ component ร่วมกับ shadow panels ── */}
-                      {m.sessionMsgIndex != null && (
+                      {/* ── RateBox — แสดงเฉพาะ bubble สุดท้ายของกลุ่ม bot answer ── */}
+                      {m.isGroupLast && m.sessionMsgIndex != null && (
                         <RateBox
                           starRating={m.stats?.star_rating}
                           rating={m.stats?.rating}

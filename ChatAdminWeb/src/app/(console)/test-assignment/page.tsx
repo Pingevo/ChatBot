@@ -18,6 +18,7 @@ import {
   CheckCircle, XCircle, AlertCircle, ChevronDown,
   Store, Bot, User, Star, Search, BarChart3,
   PlayCircle, PauseCircle, MessageSquare, Clock,
+  Copy, Check,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
 import { api } from "@/lib/apiClient";
@@ -187,6 +188,91 @@ export default function TestAssignmentPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [replaying, setReplaying] = useState(false);
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number; handedOff: number; errors: number } | null>(null);
+  const [copiedSide, setCopiedSide] = useState<"zaapi" | "bot" | null>(null);
+
+  // ⚡ Copy chat — แยกฝั่ง zaapi หรือ bot (เหมือน shadow-inbox)
+  // side="zaapi" → ลูกค้า + Zaapi/Admin reply (จาก detail.messages)
+  // side="bot"   → ลูกค้า + Bot เรา reply (จาก detail.replay.qa)
+  const copyChat = useCallback(async (side: "zaapi" | "bot") => {
+    if (!detail) return;
+    const label = side === "zaapi" ? "Zaapi / Admin" : "Bot เรา";
+    const conv = detail.conversation;
+    const lines: string[] = [];
+    lines.push(`# ${label} Chat — ${conv?.shop_name || conv?.conversation_id || ""}`);
+    lines.push(`Platform: ${conv?.platform || "?"} · Shop: ${conv?.shop_name || "?"}`);
+    lines.push("");
+
+    if (side === "zaapi") {
+      // ฝั่ง Zaapi/Admin — ใช้ detail.messages
+      if (detail.messages.length === 0) return;
+      let qIdx = 0;
+      for (const m of detail.messages) {
+        const isUser = m.direction === "in";
+        if (isUser) {
+          qIdx++;
+          lines.push(`── Q${qIdx} ──`);
+          lines.push(`ลูกค้า: ${m.text || ""}`);
+        } else {
+          const role = m.source === "admin" ? `Admin${m.admin_id ? ` (${m.admin_id})` : ""}` : (m.source || "Zaapi");
+          lines.push(`${role}: ${m.text || ""}`);
+          lines.push("");
+        }
+      }
+    } else {
+      // ฝั่ง Bot เรา — ใช้ detail.replay.qa
+      const rp = detail.replay;
+      if (!rp || rp.qa.length === 0) return;
+      for (let i = 0; i < rp.qa.length; i++) {
+        const qa = rp.qa[i];
+        lines.push(`── Q${i + 1} ──`);
+        lines.push(`ลูกค้า: ${qa.user_text || ""}`);
+        if (qa.trigger_name) {
+          lines.push(`[trigger: ${qa.trigger_name} → ${qa.trigger_action || ""}]`);
+        }
+        if (qa.bot_reply) {
+          lines.push(`Bot เรา: ${qa.bot_reply}`);
+        } else if (qa.status === "handed_off") {
+          lines.push(`ระบบ: ส่งต่อแอดมิน (${qa.detail || ""})`);
+        } else if (qa.status === "no_agent") {
+          lines.push(`ระบบ: ไม่มีแอดมินรับงาน (${qa.detail || ""})`);
+        }
+        lines.push("");
+      }
+    }
+
+    const text = lines.join("\n");
+    // fallback: textarea + execCommand
+    const copyViaTextarea = () => {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.top = "0";
+      ta.style.left = "0";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      if (!ok) throw new Error("execCommand copy failed");
+    };
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          copyViaTextarea();
+        }
+      } else {
+        copyViaTextarea();
+      }
+      setCopiedSide(side);
+      setTimeout(() => setCopiedSide(null), 2000);
+      toast.success(`คัดลอกแชท${label}แล้ว`);
+    } catch (e) {
+      toast.error(`คัดลอกไม่สำเร็จ: ${e instanceof Error ? e.message : "unknown"}`);
+    }
+  }, [detail]);
 
   // ── Load list + status ──
   const loadList = useCallback(async () => {
@@ -619,14 +705,24 @@ export default function TestAssignmentPage() {
                   {/* ── ฝั่งซ้าย: Zaapi / admin / user (แชทจริง DB) ── */}
                   <div className="flex-1 flex flex-col border-r border-border min-w-0">
                     <div className="px-3 py-2 border-b border-border bg-surface-2 shrink-0">
-                      <div className="flex items-center gap-1.5">
-                        <div className="w-6 h-6 rounded-md bg-deep-space/10 flex items-center justify-center">
-                          <Bot size={12} className="text-deep-space" />
+                      <div className="flex items-center justify-between gap-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-6 h-6 rounded-md bg-deep-space/10 flex items-center justify-center">
+                            <Bot size={12} className="text-deep-space" />
+                          </div>
+                          <div>
+                            <div className="text-xs font-semibold text-text">Zaapi / Admin</div>
+                            <div className="text-[10px] text-text-subtle">แชทจริงใน DB</div>
+                          </div>
                         </div>
-                        <div>
-                          <div className="text-xs font-semibold text-text">Zaapi / Admin</div>
-                          <div className="text-[10px] text-text-subtle">แชทจริงใน DB</div>
-                        </div>
+                        <button
+                          onClick={() => copyChat("zaapi")}
+                          disabled={detail.messages.length === 0}
+                          title="คัดลอกแชทฝั่ง Zaapi / Admin"
+                          className="w-7 h-7 rounded-md flex items-center justify-center text-text-muted hover:text-text hover:bg-surface transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {copiedSide === "zaapi" ? <Check size={14} className="text-green-600" /> : <Copy size={14} />}
+                        </button>
                       </div>
                     </div>
                     <div className="flex-1 p-3 space-y-2 overflow-y-auto">
@@ -662,14 +758,24 @@ export default function TestAssignmentPage() {
                   {/* ── ฝั่งขวา: Bot ของเรา (replay) ── */}
                   <div className="flex-1 flex flex-col min-w-0">
                     <div className="px-3 py-2 border-b border-border bg-brand/5 shrink-0">
-                      <div className="flex items-center gap-1.5">
-                        <div className="w-6 h-6 rounded-md bg-brand/15 flex items-center justify-center">
-                          <FlaskConical size={12} className="text-brand" />
+                      <div className="flex items-center justify-between gap-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-6 h-6 rounded-md bg-brand/15 flex items-center justify-center">
+                            <FlaskConical size={12} className="text-brand" />
+                          </div>
+                          <div>
+                            <div className="text-xs font-semibold text-text">Bot ของเรา (Replay)</div>
+                            <div className="text-[10px] text-text-subtle">trigger → bot → handoff</div>
+                          </div>
                         </div>
-                        <div>
-                          <div className="text-xs font-semibold text-text">Bot ของเรา (Replay)</div>
-                          <div className="text-[10px] text-text-subtle">trigger → bot → handoff</div>
-                        </div>
+                        <button
+                          onClick={() => copyChat("bot")}
+                          disabled={!replay || replay.qa.length === 0}
+                          title="คัดลอกแชทฝั่ง Bot เรา"
+                          className="w-7 h-7 rounded-md flex items-center justify-center text-text-muted hover:text-text hover:bg-surface transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {copiedSide === "bot" ? <Check size={14} className="text-green-600" /> : <Copy size={14} />}
+                        </button>
                       </div>
                     </div>
                     <div className="flex-1 p-3 space-y-3 overflow-y-auto">
@@ -734,15 +840,24 @@ export default function TestAssignmentPage() {
                                   {qa.bot_reply ? (
                                     <>
                                       {/* ⚡ Multi-bubble: split ด้วย ||| เหมือน TicketChatPanel
-                                          แต่ละ segment = 1 bubble, RateBox อยู่หลัง segment สุดท้าย */}
+                                          แต่ละ segment = 1 bubble, RateBox อยู่หลัง segment สุดท้าย
+                                          ใช้ MessageContent เพื่อ render markdown (รูป, ลิงก์, bold) */}
                                       {(() => {
                                         const segments = splitAnswerSegments(qa.bot_reply);
                                         return segments.map((seg, i) => (
                                           <div
                                             key={i}
-                                            className="bg-brand text-white rounded-lg rounded-tr-sm px-3 py-2 text-sm whitespace-pre-wrap"
+                                            className="bg-brand text-white rounded-lg rounded-tr-sm px-3 py-2 text-sm max-w-full overflow-hidden"
                                           >
-                                            {seg}
+                                            <MessageContent
+                                              msg={{
+                                                id: qa.message_id,
+                                                role: "model",
+                                                text: seg,
+                                                timestamp: "",
+                                              } as never}
+                                              variant="out"
+                                            />
                                           </div>
                                         ));
                                       })()}
