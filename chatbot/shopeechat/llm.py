@@ -108,6 +108,16 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
   ให้ตอบจากข้อมูลที่มีใน context อย่างมั่นใจ — ถ้า description บอกว่ารองรับแอปอะไร ให้บอกแอปนั้น
   ถ้าไม่มีข้อมูลใน context ให้บอกสั้นๆ ว่า "ไม่มีข้อมูลในระบบ ทักแอดมินได้เลยนะคะ" แล้วจบ
   **ห้ามเดาความเข้ากันได้จากความรู้ของคุณ** — ตอบเฉพาะจากข้อมูลใน context
+- **คำศัพท์แอปสี (slang ไทย)** — ลูกค้าอาจใช้คำเหล่านี้แทนชื่อแอปจริง:
+  - "แอปรุ้ง" / "แอพรุ้ง" = Instagram
+  - "แอปเขียว" / "แอพเขียว" = LINE
+  - "แอปฟ้า" / "แอพฟ้า" = Facebook Messenger / Facebook
+  - "แอปแดง" / "แอพแดง" = YouTube
+  - "แอปดำ" / "แอพดำ" = TikTok
+  - "แอปส้ม" / "แอพส้ม" = Shopee
+  - "แอปดำ" / "แอพดำ" = X (Twitter) หรือ TikTok
+  เมื่อลูกค้าถาม "ตอบแอปรุ้งได้ไหม" ให้เข้าใจว่าถามเรื่อง Instagram
+  และตอบจากข้อมูลใน context ว่าสินค้ารองรับแอปนั้นไหม
 - **คำถามเรื่อง "สินค้าไหนรองรับ/ใช้กับ <device> ได้บ้าง"** (compatibility check เช่น "พาวเวอร์แบงค์ไหนรองรับ mi 17 ultra"):
   - ลูกค้าอยากรู้ว่ามีสินค้าในร้านอะไรบ้างที่รองรับ device นั้น
   - **แนะนำไม่เกิน 3 รุ่น** ที่รองรับได้จริง จากข้อมูลสเปกใน context (เช่น จ่ายไฟวัตต์, โปรโตคอลชาร์จเร็ว)
@@ -414,6 +424,23 @@ def answer(
                        ถ้าว่าง = ใช้ SYSTEM_INSTRUCTION เดิม (default behavior)
         intent_result: ผลจาก Pass 1 intent classification (ถ้ามี) — ใช้กำหนด include_desc
     """
+    # แปลงแอปสี slang เป็นชื่อจริง เพื่อให้ LLM เข้าใจ
+    _app_color_map = {
+        "แอปรุ้ง": "Instagram", "แอพรุ้ง": "Instagram",
+        "แอปเขียว": "LINE", "แอพเขียว": "LINE",
+        "แอปฟ้า": "Facebook Messenger", "แอพฟ้า": "Facebook Messenger",
+        "แอปแดง": "YouTube", "แอพแดง": "YouTube",
+        "แอปดำ": "TikTok", "แอพดำ": "TikTok",
+        "แอปส้ม": "Shopee", "แอพส้ม": "Shopee",
+        "แอปชมพู": "TikTok", "แอพชมพู": "TikTok",
+    }
+    _msg_for_llm = message
+    for slang, real in _app_color_map.items():
+        if slang in _msg_for_llm:
+            _msg_for_llm = _msg_for_llm.replace(slang, f"{real} ({slang})")
+    if _msg_for_llm != message:
+        print(f"[APP-COLOR] แปลง slang: {message!r} → {_msg_for_llm!r}", file=_sys.stderr)
+
     try:
         client = _client()
     except RuntimeError as exc:
@@ -450,7 +477,7 @@ def answer(
     if extra_context:
         user_prompt += f"{extra_context}\n\n"
     user_prompt += (
-        f"คำถามของลูกค้า: {message}\n\n"
+        f"คำถามของลูกค้า: {_msg_for_llm}\n\n"
         f"สำคัญมาก: ตอบจากข้อมูลสินค้าใน context ด้านบนเท่านั้น "
         f"ห้ามอ้างอิงสินค้าจากคำตอบก่อนหน้าหรือ history "
         f"สินค้าที่ตรงกับคำถามมากที่สุดอยู่ลำดับแรกของ context"

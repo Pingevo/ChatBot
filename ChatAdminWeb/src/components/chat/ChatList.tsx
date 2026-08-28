@@ -19,6 +19,8 @@ interface Props {
   acceptingChats?: boolean;
   onToggleAccepting?: () => void;
   togglingAccept?: boolean;
+  // ⚡ total count จริงจาก DB (ไม่จำกัดด้วย limit) — ถ้าไม่ส่ง จะใช้ filtered.length
+  totalCount?: number;
 }
 
 // Status ใหม่: ยังไม่อ่าน / อ่านแล้ว / ยังไม่ตอบ (อ่านแล้วแต่ยังไม่ตอบ) / ปิด / เปิด / บอทตอบ
@@ -105,6 +107,7 @@ export function ChatList({
   acceptingChats = true,
   onToggleAccepting,
   togglingAccept = false,
+  totalCount,
 }: Props) {
   const [search, setSearch] = useState("");
   const [platforms, setPlatforms] = useState<Set<Platform>>(new Set());
@@ -240,7 +243,7 @@ export function ChatList({
               <MessageSquare size={13} className="text-brand" />
             </div>
             <h2 className="font-semibold text-text text-sm truncate">กล่องข้อความ</h2>
-            <Badge tone="brand">{filtered.length}</Badge>
+            <Badge tone="brand">{totalCount != null ? totalCount : filtered.length}</Badge>
             {activeFilterCount > 0 && (
               <button onClick={clearAll} className="text-[10px] text-text-muted hover:text-vibrant-coral transition-colors">
                 ล้าง ({activeFilterCount})

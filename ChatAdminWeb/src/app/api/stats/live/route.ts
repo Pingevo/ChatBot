@@ -59,14 +59,20 @@ export async function GET(req: NextRequest) {
     return Object.keys(f).length ? { created_at: f } : {};
   };
 
-  // 1. Open conversation counts — "เปิด" = ไม่มี closed_at
+  // 1. Open conversation counts — "เปิด" = ไม่มี closed_at และ status ไม่ใช่ closed/resolved
   const openAgg = await convColl.aggregate<{
     _id: null;
     total: number;
     assigned: number;
     unassigned: number;
   }>([
-    { $match: { closed_at: { $in: [null, undefined] }, ...dateFilter() } },
+    {
+      $match: {
+        closed_at: { $in: [null, undefined] },
+        status: { $nin: ["closed", "resolved"] },
+        ...dateFilter(),
+      },
+    },
     {
       $group: {
         _id: null,
@@ -78,9 +84,13 @@ export async function GET(req: NextRequest) {
   ]).toArray();
   const openStats = openAgg[0] || { _id: null, total: 0, assigned: 0, unassigned: 0 };
 
-  // 2. Closed conversations count — มี closed_at
+  // 2. Closed conversations count — มี closed_at หรือ status=closed/resolved
+  //    (sellcenter อาจเขียน status แต่ไม่เขียน closed_at)
   const closedCount = await convColl.countDocuments({
-    closed_at: { $exists: true, $ne: null },
+    $or: [
+      { closed_at: { $exists: true, $ne: null } },
+      { status: { $in: ["closed", "resolved"] } },
+    ],
     ...dateFilter(),
   });
 
@@ -89,6 +99,7 @@ export async function GET(req: NextRequest) {
   const threshold = new Date(Date.now() - UNANSWERED_MINUTES * 60_000);
   const unansweredCount = await convColl.countDocuments({
     closed_at: { $in: [null, undefined] },
+    status: { $nin: ["closed", "resolved"] },
     unread_count: { $gt: 0 },
     last_message_timestamp: { $lt: threshold },
     ...dateFilter(),
@@ -96,7 +107,14 @@ export async function GET(req: NextRequest) {
 
   // 4. Workload by admin — aggregation (เฉพาะที่มี assigned_to)
   const workloadAgg = await convColl.aggregate<{ _id: string; count: number }>([
-    { $match: { closed_at: { $in: [null, undefined] }, assigned_to: { $exists: true, $nin: [null, ""] }, ...dateFilter() } },
+    {
+      $match: {
+        closed_at: { $in: [null, undefined] },
+        status: { $nin: ["closed", "resolved"] },
+        assigned_to: { $exists: true, $nin: [null, ""] },
+        ...dateFilter(),
+      },
+    },
     { $group: { _id: "$assigned_to", count: { $sum: 1 } } },
     { $sort: { count: -1 } },
   ]).toArray();
@@ -109,7 +127,13 @@ export async function GET(req: NextRequest) {
 
   // 5. Breakdown by shop — all open conversations
   const shopAgg = await convColl.aggregate<{ _id: string; count: number }>([
-    { $match: { closed_at: { $in: [null, undefined] }, ...dateFilter() } },
+    {
+      $match: {
+        closed_at: { $in: [null, undefined] },
+        status: { $nin: ["closed", "resolved"] },
+        ...dateFilter(),
+      },
+    },
     { $group: { _id: { $ifNull: ["$shop_name", "unknown"] }, count: { $sum: 1 } } },
     { $sort: { count: -1 } },
     { $limit: 20 },
@@ -117,9 +141,20 @@ export async function GET(req: NextRequest) {
   const byConnection = shopAgg.map((s) => ({ name: s._id, value: s.count }));
 
   // 6. Breakdown by derived status (บอทตอบ / เปิด / ปิด)
+  //    "ปิด" = มี closed_at หรือ status=closed/resolved (เหมือน closedCount)
   const [botAnsweredCount, openHandoffCount] = await Promise.all([
-    convColl.countDocuments({ closed_at: { $in: [null, undefined] }, assigned_to: { $in: [null, undefined, ""] }, ...dateFilter() }),
-    convColl.countDocuments({ closed_at: { $in: [null, undefined] }, assigned_to: { $exists: true, $nin: [null, ""] }, ...dateFilter() }),
+    convColl.countDocuments({
+      closed_at: { $in: [null, undefined] },
+      status: { $nin: ["closed", "resolved"] },
+      assigned_to: { $in: [null, undefined, ""] },
+      ...dateFilter(),
+    }),
+    convColl.countDocuments({
+      closed_at: { $in: [null, undefined] },
+      status: { $nin: ["closed", "resolved"] },
+      assigned_to: { $exists: true, $nin: [null, ""] },
+      ...dateFilter(),
+    }),
   ]);
   const statusBreakdown = [
     { status: "bot_answered", label: "บอทตอบ", count: botAnsweredCount },

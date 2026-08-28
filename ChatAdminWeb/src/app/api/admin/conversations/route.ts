@@ -99,7 +99,8 @@ function mapToConversation(
 // ⚡ In-memory cache แบบ short-lived — ลด query ซ้ำจาก polling รัวๆ
 //    แต่ invalidate ทันทีเมื่อมีการส่ง/อ่าน/assign/resolve (ผ่าน invalidateCache)
 //    → ตอบ/อ่านแล้ว list อัปเดตทันที ไม่รอ 5 วิ
-let cache: { key: string; data: Conversation[]; ts: number } | null = null;
+//    เก็บทั้ง data และ totalCount (สำหรับ include_count=true)
+let cache: { key: string; data: Conversation[]; totalCount?: number; ts: number } | null = null;
 const CACHE_TTL = 3000; // 3 วิ — สั้นๆ เผื่อ invalidate ไม่ทัน
 
 /** Invalidate cache — เรียกจาก send/assign/resolve/handoff route */
@@ -117,6 +118,7 @@ export async function GET(req: NextRequest) {
   const shopId = url.searchParams.get("shop") || url.searchParams.get("shop_id") || undefined;
   const search = url.searchParams.get("q") || url.searchParams.get("search") || undefined;
   const assignedToParam = url.searchParams.get("assigned_to") || "all";
+  const includeCount = url.searchParams.get("include_count") === "true";
   const limitParam = parseInt(url.searchParams.get("limit") || "2000", 10);
   const limit = Math.min(Math.max(limitParam, 1), 10000);
 
@@ -125,6 +127,10 @@ export async function GET(req: NextRequest) {
   const cacheKey = `${assignedToParam}|${platform || ""}|${status || ""}|${shopId || ""}|${search || ""}|${limit}`;
   const now = Date.now();
   if (canCache && cache && cache.key === cacheKey && now - cache.ts < CACHE_TTL) {
+    // ⚡ ถ้า include_count=true → คืน { rows, total_count } ถ้าไม่ใช่ → คืน array ตรงๆ
+    if (includeCount) {
+      return json({ rows: cache.data, total_count: cache.totalCount ?? cache.data.length });
+    }
     return json(cache.data);
   }
 
@@ -154,7 +160,27 @@ export async function GET(req: NextRequest) {
   const conversations: Conversation[] = filtered.map((d) =>
     mapToConversation(d, adminMap, unansweredMap.get(d.conversation_id) || 0)
   );
-  // ⚡ save cache เฉพาะ assigned_to=all
+  // ⚡ ถ้า include_count=true → นับ total_count แบบไม่จำกัด limit แล้วส่งกลับ { rows, total_count }
+  if (includeCount) {
+    const countFilter: Record<string, unknown> = {};
+    if (platform) countFilter.platform = platform;
+    if (status) countFilter.status = status;
+    if (shopId) countFilter.shop_id = shopId;
+    if (search) {
+      countFilter.$or = [
+        { to_name: { $regex: search, $options: "i" } },
+        { last_message_text: { $regex: search, $options: "i" } },
+        { shop_name: { $regex: search, $options: "i" } },
+      ];
+    }
+    const convColl = await getCollection(COLLECTIONS.conversations);
+    const totalCount = await convColl.countDocuments(countFilter);
+    // ⚡ save cache พร้อม totalCount
+    if (canCache) cache = { key: cacheKey, data: conversations, totalCount, ts: now };
+    return json({ rows: conversations, total_count: totalCount });
+  }
+
+  // ⚡ save cache (ไม่มี totalCount — ไม่จำเป็นถ้าไม่ใช่ include_count)
   if (canCache) cache = { key: cacheKey, data: conversations, ts: now };
   return json(conversations);
 }

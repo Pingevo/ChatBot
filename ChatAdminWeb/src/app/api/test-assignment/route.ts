@@ -51,6 +51,7 @@ async function callBot(params: {
   history: { role: "user" | "model"; text: string }[];
   shopId: string;
   shopName?: string;
+  itemId?: string;  // ⚡ item_id จากการ์ดสินค้าที่ลูกค้าแชร์
 }): Promise<{
   answer: string;
   source?: string;
@@ -60,7 +61,7 @@ async function callBot(params: {
   cost?: number;
   products?: unknown[];
 }> {
-  const { platform, message, history, shopId, shopName } = params;
+  const { platform, message, history, shopId, shopName, itemId } = params;
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
   const headers: Record<string, string> = {
@@ -70,6 +71,8 @@ async function callBot(params: {
   const body: Record<string, unknown> = { message, history, limit: 5 };
   if (shopName) body.shop = shopName;
   else if (shopId) body.shop = shopId;
+  // ⚡ ส่ง item_id ถ้าลูกค้าแชร์การ์ดสินค้ามาในแชท
+  if (itemId) body.item_id = itemId;
 
   // ⚡ 429 retry: รอ 60 วิ แล้วยิงใหม่ — สูงสุด 3 ครั้ง ถ้าเกินให้ throw
   const MAX_429_RETRIES = 3;
@@ -454,15 +457,8 @@ export async function POST(req: NextRequest) {
           }
         } catch { /* ignore */ }
       }
-      // map message_id → parsed info
-      const userParsedMap = new Map<string, {
-        message_type?: string;
-        media?: unknown;
-        products?: unknown[];
-        order_sn?: string;
-        notification_text?: string;
-        table?: unknown;
-      }>();
+      // map message_id → parsed info (key ตรงกับ ReplayQa interface: user_*)
+      const userParsedMap = new Map<string, Omit<ReplayQa, "index" | "message_id" | "user_text" | "trigger_name" | "trigger_action" | "bot_reply" | "bot_source" | "bot_model" | "bot_elapsed" | "status" | "assigned_to" | "detail">>();
       for (const { doc, parsed: p } of userParsed) {
         const products: unknown[] = [];
         if (p?.product_ref?.item_id) {
@@ -473,12 +469,12 @@ export async function POST(req: NextRequest) {
           }
         }
         userParsedMap.set(doc.message_id, {
-          message_type: p?.message_type,
-          media: p?.media,
-          products: products.length > 0 ? products : undefined,
-          order_sn: p?.order_sn,
-          notification_text: p?.notification_text,
-          table: p?.table,
+          user_message_type: p?.message_type,
+          user_media: p?.media as ReplayQa["user_media"],
+          user_products: products.length > 0 ? (products as ReplayQa["user_products"]) : undefined,
+          user_order_sn: p?.order_sn,
+          user_notification_text: p?.notification_text,
+          user_table: p?.table as ReplayQa["user_table"],
         });
       }
 
@@ -527,12 +523,18 @@ export async function POST(req: NextRequest) {
           }
 
           // 2. call bot
+          // ⚡ ส่ง item_id ถ้าลูกค้าแชร์การ์ดสินค้ามาในแชท
+          const userParsedInfo = userParsedMap.get(msg.message_id);
+          const userItemId = userParsedInfo?.user_products && Array.isArray(userParsedInfo.user_products) && userParsedInfo.user_products.length > 0
+            ? String((userParsedInfo.user_products[0] as Record<string, unknown>).item_id || "")
+            : undefined;
           const botResp = await callBot({
             platform,
             message: userText,
             shopId,
             shopName,
             history,
+            itemId: userItemId,
           });
 
           if (!botResp.answer || botResp.answer.trim() === "") {

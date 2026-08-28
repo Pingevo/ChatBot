@@ -19,7 +19,8 @@ const FILE_PATTERN = /results.*\.json$|.*_results\.json$/i;
 const SEARCH_DIRS = [
   ".",                                    // ChatAdminWeb/
   "..",                                   // ChatBotProductMS/
-  join("..", "test_results"),             // ChatBotProductMS/test_results/
+  join("..", "testresult"),               // ChatBotProductMS/testresult/ (โฟลเดอร์จริง)
+  join("..", "test_results"),             // ChatBotProductMS/test_results/ (fallback)
   join("..", "scripts"),                  // ChatBotProductMS/scripts/
   join("..", ".."),                       // ขึ้นไปอีกระดับ
 ];

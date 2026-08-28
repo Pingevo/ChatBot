@@ -544,6 +544,121 @@ def _is_sold_out(doc: dict) -> bool:
     return bool(doc.get("model"))
 
 
+def _extract_product_name_tokens(name: str) -> list[str]:
+    """สกัด alphanumeric tokens จากชื่อสินค้า เพื่อใช้เปรียบเทียบ fuzzy.
+
+    เช่น "KIESLECT BioKoop Smart Health Tracker" → ["kieslect", "biokoop", "smart", "health", "tracker"]
+    """
+    if not name:
+        return []
+    # แย่งเฉพาะคำอังกฤษ+ตัวเลข ที่ยาว >= 4 ตัว
+    tokens = re.findall(r"[A-Za-z]+\d*[A-Za-z]*", name)
+    return [t.lower() for t in tokens if len(t) >= 4]
+
+
+def fuzzy_match_products(
+    db,
+    message: str,
+    shop: str | None = None,
+    limit: int = 5,
+    score_threshold: int = 75,
+) -> list[dict]:
+    """ค้นสินค้าด้วย fuzzy matching (rapidfuzz) สำหรับรับพิมพ์ผิด.
+
+    ใช้เมื่อ MODEL-REGEX ไม่เจอ เพราะลูกค้าพิมพ์ผิด เช่น
+    - biokooooooooop → BioKoop
+    - biokooppppppp → BioKoop
+    - redmi wach 6 → Redmi Watch 6
+
+    Args:
+        db: MongoDB database
+        message: คำถามลูกค้า
+        shop: ชื่อร้าน (ถ้ามี)
+        limit: จำนวนสินค้าสูงสุด
+        score_threshold: คะแนนขั้นต่ำ (0-100) สำหรับถือว่า match
+
+    Returns:
+        list ของ product cards ที่ fuzzy match
+    """
+    try:
+        from rapidfuzz import fuzz
+    except ImportError:
+        return []
+
+    # สกัด alphanumeric tokens จาก message
+    msg_tokens = re.findall(r"[A-Za-z]+\d*[A-Za-z]*", message)
+    # กรองคำทั่วไป + brand names (เพราะ brand match สินค้าทุกตัวในร้าน) + ต้องยาว >= 4 ตัว
+    _common = {"watch", "smart", "phone", "cable", "charger", "adapter",
+               "power", "bank", "band", "type", "usb", "wireless",
+               "what", "how", "please", "thank", "hello", "hi",
+               "health", "tracker", "lite", "pro", "max", "ultra",
+               "active", "color", "black", "white", "blue", "red",
+               # brand names — กรองออกเพราะ match สินค้าทุกตัวในร้าน
+               "kieslect", "xiaomi", "redmi", "samsung", "iphone", "galaxy",
+               "anker", "baseus", "ugreen", "cuktech", "zmi", "mibro",
+               "imilab", "qcy", "jbl", "sony", "oraimo", "70mai",
+               "nillkin", "ks", "elite", "actor"}
+    msg_tokens = [t.lower() for t in msg_tokens if len(t) >= 4 and t.lower() not in _common]
+    if not msg_tokens:
+        return []
+
+    coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+    coll = db[coll_name]
+
+    # ดึง candidate products จาก DB — ใช้ regex contains (ไม่ใช่ ^) เพราะชื่อสินค้า
+    # มักขึ้นต้นด้วย brand เช่น "KIESLECT BioKoop" ไม่ใช่ "BioKoop"
+    # ใช้ prefix 3 ตัวแรกของ token เพื่อลดจำนวน docs ที่ต้อง score
+    candidates: list[dict] = []
+    for token in msg_tokens[:3]:  # เอาแค่ 3 tokens แรก
+        prefix = token[:3]
+        q = {
+            "item_status": "NORMAL",
+            "item_name": {"$regex": re.escape(prefix), "$options": "i"},
+        }
+        if shop:
+            q["shopname"] = {"$regex": f"^{re.escape(shop)}$", "$options": "i"}
+        docs = list(coll.find(q, PRODUCT_PROJECTION).limit(30))
+        for d in docs:
+            if d.get("item_id") and not any(c.get("item_id") == d.get("item_id") for c in candidates):
+                candidates.append(d)
+
+    # ถ้า prefix regex ไม่เจอ ลองดึงสินค้าทั้งหมดของร้าน (limit 50)
+    if not candidates and shop:
+        q = {
+            "item_status": "NORMAL",
+            "shopname": {"$regex": f"^{re.escape(shop)}$", "$options": "i"},
+        }
+        candidates = list(coll.find(q, PRODUCT_PROJECTION).limit(50))
+
+    if not candidates:
+        return []
+
+    # คำนวณ fuzzy score ระหว่าง msg_tokens กับ product name tokens
+    scored: list[tuple[int, dict]] = []
+    for doc in candidates:
+        name = doc.get("item_name") or ""
+        name_tokens = _extract_product_name_tokens(name)
+        if not name_tokens:
+            continue
+        best_score = 0
+        for mt in msg_tokens:
+            for nt in name_tokens:
+                # ใช้ partial_ratio เพราะพิมพ์ผิดอาจมีตัวซ้ำ/ขาด
+                # เช่น biokooooooooop vs biokoop → partial_ratio จะดีกว่า ratio
+                score = fuzz.partial_ratio(mt, nt)
+                if score > best_score:
+                    best_score = score
+        if best_score >= score_threshold:
+            scored.append((best_score, doc))
+
+    # เรียงตาม score สูงสุด แล้วแปลงเป็น product cards
+    scored.sort(key=lambda x: -x[0])
+    result = []
+    for _, doc in scored[:limit]:
+        result.append(to_product_card(doc, message))
+    return result
+
+
 # ---- filtering ----------------------------------------------------------------
 
 # คำเกี่ยวกับรับประกัน/เคลม ใช้จับคำถามลูกค้า

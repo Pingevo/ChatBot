@@ -23,6 +23,7 @@ export default function TicketsPage() {
   const { user } = useAuth();
   const me = user?.admin_id ?? "";
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [totalCount, setTotalCount] = useState<number>(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sending, setSending] = useState(false);
@@ -56,13 +57,18 @@ export default function TicketsPage() {
   // status/sort/platform/shop filter ทำใน ChatList เพื่อความเร็ว (ไม่ต้อง reload API)
   const loadConversations = useCallback(async () => {
     try {
-      const rows = await chatService.list({
+      const data = await chatService.listWithCount({
         assigned_to: chatFilter === "me" ? "me" : chatFilter === "all" ? "all" : chatFilter,
       });
+      // ⚡ guard: ถ้า API คืน array ตรงๆ (backward compat) → ใช้ array นั้น
+      const rows = Array.isArray(data) ? data : (data.rows || []);
+      const totalCount = Array.isArray(data) ? data.length : (data.total_count ?? 0);
       setConversations(rows);
+      setTotalCount(totalCount);
     } catch (err) {
       console.error("load conversations failed", err);
       setConversations([]);
+      setTotalCount(0);
     }
   }, [chatFilter]);
 
@@ -339,6 +345,7 @@ export default function TicketsPage() {
           acceptingChats={acceptingChats}
           onToggleAccepting={handleToggleAccepting}
           togglingAccept={togglingAccept}
+          totalCount={totalCount}
         />
       </div>
 

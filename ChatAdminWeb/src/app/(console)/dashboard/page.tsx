@@ -15,6 +15,19 @@ const platformColors: Record<string, string> = {
   lazada: "#1a2e8c",
 };
 
+// ⚡ แปลงวินาที → "X ชม Y นาที Z วิ" หรือ "Y นาที Z วิ" หรือ "Z วิ"
+function formatDuration(seconds: number): string {
+  if (seconds <= 0) return "—";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.round(seconds % 60);
+  const parts: string[] = [];
+  if (h > 0) parts.push(`${h} ชม`);
+  if (m > 0) parts.push(`${m} นาที`);
+  if (s > 0 || parts.length === 0) parts.push(`${s} วิ`);
+  return parts.join(" ");
+}
+
 export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -112,9 +125,29 @@ export default function DashboardPage() {
               <Clock size={16} className="text-text-muted" />
             </div>
             <div className="text-2xl font-bold text-text">
-              {stats.avg_response_time > 0 ? `${stats.avg_response_time}s` : "—"}
+              {stats.avg_response_time > 0 ? formatDuration(stats.avg_response_time) : "—"}
             </div>
-            <div className="text-[10px] text-text-subtle mt-1">diff ลูกค้าถาม → ตอบ</div>
+            <div className="text-[10px] text-text-subtle mt-1">เฉลี่ย ลูกค้าถาม → ตอบ ต่อ message</div>
+          </Card>
+        </div>
+
+        {/* ⚡ Message stats — ข้อความเข้า/ออก */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+          <Card className="p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs text-text-muted">ข้อความเข้า (ลูกค้าส่ง)</span>
+              <MessageSquare size={16} className="text-deep-space" />
+            </div>
+            <div className="text-2xl font-bold text-text">{(stats.messages_received ?? 0).toLocaleString()}</div>
+            <div className="text-[10px] text-text-subtle mt-1">message ที่ลูกค้าส่งเข้ามาในช่วงเวลานี้</div>
+          </Card>
+          <Card className="p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs text-text-muted">ข้อความตอบกลับ (บอท/แอดมิน)</span>
+              <Bot size={16} className="text-brand" />
+            </div>
+            <div className="text-2xl font-bold text-brand">{(stats.messages_sent ?? 0).toLocaleString()}</div>
+            <div className="text-[10px] text-text-subtle mt-1">message ที่บอท/แอดมินตอบกลับในช่วงเวลานี้</div>
           </Card>
         </div>
 
