@@ -95,6 +95,11 @@ interface QaItem {
   bot_source?: string;
   bot_model?: string;
   bot_elapsed?: number;
+  // ⚡ pipeline info
+  bot_intent?: unknown;
+  bot_retrieval_info?: unknown;
+  bot_web_search_used?: boolean;
+  bot_web_search_reason?: string;
   status: "bot_answered" | "trigger_matched" | "handed_off" | "no_agent" | "error";
   assigned_to?: string | null;
   detail: string;
@@ -150,6 +155,15 @@ interface Stats {
   msg_avg_star: number;
   msg_good: number;
   msg_bad: number;
+  // ⚡ message counts (all history)
+  total_messages?: number;       // ข้อความทั้งหมดที่ถามมา
+  total_bot_replies?: number;    // บอทตอบไปกี่ข้อความ
+  total_handed_off?: number;     // ข้ามไปเท่าไหร่ (ส่งต่อแอดมิน)
+  // ⚡ pipeline counts
+  intent_count?: number;
+  rag_count?: number;
+  llm2_count?: number;
+  web_search_count?: number;
 }
 
 // ─── Constants ────────────────────────────────────────────
@@ -179,6 +193,9 @@ function timeAgo(iso?: string): string {
 export default function TestAssignmentPage() {
   const { catchError } = useToastError();
   const [replayOrder, setReplayOrder] = useState<"recent" | "oldest">("recent");
+  // ⚡ limit ใส่เองได้ (default 100) + replay mode resume/overwrite
+  const [limitInput, setLimitInput] = useState("100");
+  const [replayMode, setReplayMode] = useState<"overwrite" | "resume">("overwrite");
   const [convs, setConvs] = useState<ConvRow[]>([]);
   const [status, setStatus] = useState<StatusData | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -187,7 +204,7 @@ export default function TestAssignmentPage() {
   const [detail, setDetail] = useState<ConvDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [replaying, setReplaying] = useState(false);
-  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number; handedOff: number; errors: number } | null>(null);
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number; handedOff: number; errors: number; skipped: number } | null>(null);
   const [copiedSide, setCopiedSide] = useState<"zaapi" | "bot" | null>(null);
 
   // ⚡ Copy chat — แยกฝั่ง zaapi หรือ bot (เหมือน shadow-inbox)
@@ -277,8 +294,9 @@ export default function TestAssignmentPage() {
   // ── Load list + status ──
   const loadList = useCallback(async () => {
     try {
+      const lim = Math.max(1, Math.min(parseInt(limitInput, 10) || 100, 10000));
       const [convRes, statusRes] = await Promise.all([
-        api().get<{ rows: ConvRow[]; total: number }>("/test-assignment", { params: { list: "1", limit: "100", order: replayOrder } }),
+        api().get<{ rows: ConvRow[]; total: number }>("/test-assignment", { params: { list: "1", limit: String(lim), order: replayOrder } }),
         api().get<StatusData>("/test-assignment"),
       ]);
       setConvs(convRes.data.rows || []);
@@ -288,7 +306,7 @@ export default function TestAssignmentPage() {
     } finally {
       setLoading(false);
     }
-  }, [catchError, replayOrder]);
+  }, [catchError, replayOrder, limitInput]);
 
   const loadStats = useCallback(async () => {
     try {
@@ -320,8 +338,12 @@ export default function TestAssignmentPage() {
   async function handleReplay(convId: string) {
     setReplaying(true);
     try {
-      await api().post("/test-assignment", { action: "replay_conversation", conversation_id: convId });
-      toast.success("Replay สำเร็จ");
+      const resp = await api().post("/test-assignment", { action: "replay_conversation", conversation_id: convId, mode: replayMode });
+      if (resp.data?.skipped) {
+        toast.info("ข้าม — มี result ครบแล้ว (resume mode)");
+      } else {
+        toast.success("Replay สำเร็จ");
+      }
       await loadDetail(convId);
       await loadList();
       await loadStats();
@@ -332,28 +354,36 @@ export default function TestAssignmentPage() {
     }
   }
 
-  // ── Batch replay (100 max) ──
+  // ── Batch replay (จำนวนตามที่ user ใส่) ──
   async function handleBatchReplay() {
     if (convs.length === 0) { toast.error("ไม่มี conversation"); return; }
-    setBatchProgress({ done: 0, total: convs.length, handedOff: 0, errors: 0 });
+    setBatchProgress({ done: 0, total: convs.length, handedOff: 0, errors: 0, skipped: 0 });
     setReplaying(true);
     let handedOff = 0;
     let errors = 0;
+    let skipped = 0;
     try {
       for (let i = 0; i < convs.length; i++) {
         try {
-          await api().post("/test-assignment", { action: "replay_conversation", conversation_id: convs[i].conversation_id }, { timeout: 300000 });
-          if (convs[i]) handedOff++; // approximate
+          const resp = await api().post("/test-assignment",
+            { action: "replay_conversation", conversation_id: convs[i].conversation_id, mode: replayMode },
+            { timeout: 300000 }
+          );
+          if (resp.data?.skipped) {
+            skipped++;
+          } else {
+            handedOff++;
+          }
         } catch {
           errors++;
         }
-        setBatchProgress({ done: i + 1, total: convs.length, handedOff, errors });
+        setBatchProgress({ done: i + 1, total: convs.length, handedOff, errors, skipped });
         if (errors >= 3 && errors === i + 1) {
           toast.error("หยุด — error 3 ครั้งแรก");
           break;
         }
       }
-      toast.success(`เสร็จ: ${convs.length} conversation, ${handedOff} สำเร็จ, ${errors} error`);
+      toast.success(`เสร็จ: ${convs.length} conversation, ${handedOff} สำเร็จ, ${skipped} ข้าม, ${errors} error`);
       await loadList();
       await loadStats();
     } catch (err) {
@@ -549,22 +579,51 @@ export default function TestAssignmentPage() {
           </div>
         </div>
 
-        {/* Batch replay button + order toggle */}
+        {/* Batch replay button + order toggle + limit input + mode toggle */}
         <div className="px-3 py-2 border-b border-border bg-surface-2/50 shrink-0 space-y-2">
-          {/* Order toggle */}
-          <div className="flex items-center gap-1 text-[10px]">
-            <span className="text-text-muted shrink-0">เลือก:</span>
-            <button onClick={() => setReplayOrder("recent")}
+          {/* Row 1: limit input + order toggle */}
+          <div className="flex items-center gap-2 text-[10px]">
+            <span className="text-text-muted shrink-0">จำนวน:</span>
+            <input
+              type="number"
+              min={1}
+              max={10000}
+              value={limitInput}
+              onChange={(e) => setLimitInput(e.target.value)}
+              onBlur={() => { const n = Math.max(1, Math.min(parseInt(limitInput, 10) || 100, 10000)); setLimitInput(String(n)); loadList(); }}
+              onKeyDown={(e) => { if (e.key === "Enter") { (e.target as HTMLInputElement).blur(); } }}
+              className="w-16 px-1.5 py-0.5 rounded-md bg-surface border border-border text-text text-xs focus:outline-none focus:border-brand"
+              placeholder="100"
+            />
+            <span className="text-text-muted">|</span>
+            <span className="text-text-muted shrink-0">เรียง:</span>
+            <button onClick={() => { setReplayOrder("recent"); }}
               className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
                 replayOrder === "recent" ? "bg-brand text-white" : "bg-surface text-text-muted hover:text-text"
               }`}>
-              100 ใหม่สุด
+              ใหม่สุด
             </button>
-            <button onClick={() => setReplayOrder("oldest")}
+            <button onClick={() => { setReplayOrder("oldest"); }}
               className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
                 replayOrder === "oldest" ? "bg-brand text-white" : "bg-surface text-text-muted hover:text-text"
               }`}>
-              100 เก่าสุด
+              เก่าสุด
+            </button>
+          </div>
+          {/* Row 2: mode toggle */}
+          <div className="flex items-center gap-1 text-[10px]">
+            <span className="text-text-muted shrink-0">โหมด:</span>
+            <button onClick={() => setReplayMode("overwrite")}
+              className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
+                replayMode === "overwrite" ? "bg-brand text-white" : "bg-surface text-text-muted hover:text-text"
+              }`}>
+              ทำใหม่ทับ
+            </button>
+            <button onClick={() => setReplayMode("resume")}
+              className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
+                replayMode === "resume" ? "bg-brand text-white" : "bg-surface text-text-muted hover:text-text"
+              }`}>
+              ทำต่อ (ข้ามที่ครบแล้ว)
             </button>
           </div>
           {/* Replay button */}
@@ -572,7 +631,7 @@ export default function TestAssignmentPage() {
             className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-brand text-white text-xs font-medium hover:bg-brand-dark disabled:opacity-50 transition-colors">
             {replaying ? <Loading size={12} /> : <Zap size={12} />}
             {batchProgress
-              ? `replay... ${batchProgress.done}/${batchProgress.total} (✓${batchProgress.handedOff} ✗${batchProgress.errors})`
+              ? `replay... ${batchProgress.done}/${batchProgress.total} (✓${batchProgress.handedOff} ⏭${batchProgress.skipped} ✗${batchProgress.errors})`
               : `Replay ทั้งหมด (${filteredConvs.length})`}
           </button>
         </div>
@@ -618,10 +677,10 @@ export default function TestAssignmentPage() {
 
       {/* ── Panel กลาง: Chat (เหมือน ShadowReplyPanel + ChatList) ── */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Header */}
-        <div className="px-4 py-3 border-b border-border bg-surface flex items-center justify-between shrink-0">
+        {/* Header — min-h ให้ตรง panel ขวา */}
+        <div className="px-4 py-3 min-h-[60px] flex items-center justify-between border-b border-border bg-surface shrink-0">
           <div className="flex items-center gap-2 min-w-0">
-            <Activity size={16} className="text-text-muted shrink-0" />
+            <FlaskConical size={16} className="text-brand shrink-0" />
             <h2 className="text-sm font-semibold text-text truncate">
               {detail?.conversation ? `${detail.conversation.to_name || detail.conversation.conversation_id}` : "เลือก conversation"}
             </h2>
@@ -903,8 +962,8 @@ export default function TestAssignmentPage() {
       {!rightCollapsed && (
         <div className="hidden md:flex h-full shrink-0 overflow-hidden w-72 border-l border-border">
           <div className="h-full flex flex-col w-full overflow-hidden">
-            {/* Tab menu */}
-            <div className="px-3 py-2 border-b border-border bg-surface shrink-0">
+            {/* Tab menu — min-h + flex items-center ให้ตรง panel กลาง */}
+            <div className="px-4 py-3 min-h-[60px] flex items-center border-b border-border bg-surface shrink-0">
               <div className="flex items-center gap-1">
                 {([
                   { k: "per_chat", l: "Per Chat" },
@@ -967,6 +1026,62 @@ export default function TestAssignmentPage() {
                           {replay.stopped_at_handoff && (
                             <div className="text-[10px] text-coral mt-1">หยุดที่ handoff</div>
                           )}
+                        </div>
+                      </Card>
+
+                      {/* ⚡ Per-chat ข้อความ — ถาม/ตอบ/ข้าม/รวม */}
+                      <Card className="p-3">
+                        <div className="text-[10px] text-text-muted mb-2 font-medium">ข้อความในแชทนี้</div>
+                        <div className="space-y-1.5 text-xs">
+                          <div className="flex items-center justify-between">
+                            <span className="flex items-center gap-1 text-text-muted"><MessageSquare size={10} /> ถามมา</span>
+                            <span className="text-text font-bold">{replay.qa.length}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="flex items-center gap-1 text-green-500"><Bot size={10} /> บอทตอบ</span>
+                            <span className="text-green-500 font-bold">{replay.qa.filter(q => q.status === "bot_answered" || q.status === "trigger_matched").length}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="flex items-center gap-1 text-brand"><Users size={10} /> ส่งต่อแอดมิน (ข้าม)</span>
+                            <span className="text-brand font-bold">{replay.qa.filter(q => q.status === "handed_off" || q.status === "no_agent").length}</span>
+                          </div>
+                          <div className="border-t border-border/50 pt-1.5 mt-1.5 space-y-1">
+                            <div className="flex items-center justify-between">
+                              <span className="text-text-muted">รวมคำถาม</span>
+                              <span className="text-text font-bold">{replay.qa.length}</span>
+                            </div>
+                            <div className="flex items-center justify-between text-[10px] text-text-subtle">
+                              <span>└ บอทตอบ + ส่งต่อ</span>
+                              <span>{replay.qa.filter(q => q.status === "bot_answered" || q.status === "trigger_matched" || q.status === "handed_off" || q.status === "no_agent").length}</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span className="text-text-muted">รวมข้อความในแชท (ถาม+ตอบ)</span>
+                              <span className="text-text font-bold">{replay.qa.length + replay.qa.filter(q => q.status === "bot_answered" || q.status === "trigger_matched").length}</span>
+                            </div>
+                          </div>
+                        </div>
+                      </Card>
+
+                      {/* ⚡ Per-chat Pipeline — intent/rag/llm2/search */}
+                      <Card className="p-3">
+                        <div className="text-[10px] text-text-muted mb-2 font-medium">Pipeline ในแชทนี้</div>
+                        <div className="space-y-1.5 text-xs">
+                          <div className="flex items-center justify-between">
+                            <span className="text-text-muted">Intent (Pass 1)</span>
+                            <span className="text-text font-bold">{replay.qa.filter(q => q.bot_intent || q.status === "bot_answered" || q.status === "trigger_matched").length}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-text-muted">RAG (ดึงสินค้า/KB)</span>
+                            <span className="text-text font-bold">{replay.qa.filter(q => { const s = (q.bot_source || "").toLowerCase(); return s.includes("product_store") || s.includes("knowledge_base") || s.includes("kb") || s.includes("item_tag"); }).length}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-text-muted">LLM2 (ทั่วไป)</span>
+                            <span className="text-text font-bold">{replay.qa.filter(q => (q.bot_source || "").toLowerCase().includes("general")).length}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-text-muted">Search (OpenRouter)</span>
+                            <span className="text-text font-bold">{replay.qa.filter(q => q.bot_web_search_used || (q.bot_source || "").toLowerCase().includes("web_search")).length}</span>
+                          </div>
                         </div>
                       </Card>
                     </>
@@ -1038,6 +1153,66 @@ export default function TestAssignmentPage() {
                         <span className="text-text-muted">Closed (mock)</span>
                         <span className="font-bold">{stats.closed}</span>
                       </div>
+                    </div>
+                  </div>
+                </Card>
+              )}
+
+              {/* ⚡ ข้อความทั้งหมด — ถาม/ตอบ/ข้าม/รวม */}
+              {stats && (
+                <Card className="p-3">
+                  <div className="text-[10px] text-text-muted mb-2 font-medium">ข้อความทั้งหมด</div>
+                  <div className="space-y-1.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="flex items-center gap-1 text-text-muted"><MessageSquare size={10} /> ถามมาทั้งหมด</span>
+                      <span className="text-text font-bold">{stats.total_messages ?? "—"}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="flex items-center gap-1 text-green-500"><Bot size={10} /> บอทตอบ</span>
+                      <span className="text-green-500 font-bold">{stats.total_bot_replies ?? "—"}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="flex items-center gap-1 text-brand"><Users size={10} /> ส่งต่อแอดมิน (ข้าม)</span>
+                      <span className="text-brand font-bold">{stats.total_handed_off ?? "—"}</span>
+                    </div>
+                    <div className="border-t border-border/50 pt-1.5 mt-1.5 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-text-muted">รวมคำถาม</span>
+                        <span className="text-text font-bold">{stats.total_messages ?? 0}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-[10px] text-text-subtle">
+                        <span>└ บอทตอบ + ส่งต่อ</span>
+                        <span>{(stats.total_bot_replies ?? 0) + (stats.total_handed_off ?? 0)}</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-text-muted">รวมข้อความในแชท (ถาม+ตอบ)</span>
+                        <span className="text-text font-bold">{(stats.total_messages ?? 0) + (stats.total_bot_replies ?? 0)}</span>
+                      </div>
+                    </div>
+                  </div>
+                </Card>
+              )}
+
+              {/* ⚡ Pipeline — intent/rag/llm2/search */}
+              {stats && (
+                <Card className="p-3">
+                  <div className="text-[10px] text-text-muted mb-2 font-medium">Pipeline</div>
+                  <div className="space-y-1.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-text-muted">Intent (Pass 1)</span>
+                      <span className="text-text font-bold">{stats.intent_count ?? "—"}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-text-muted">RAG (ดึงสินค้า/KB)</span>
+                      <span className="text-text font-bold">{stats.rag_count ?? "—"}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-text-muted">LLM2 (ทั่วไป)</span>
+                      <span className="text-text font-bold">{stats.llm2_count ?? "—"}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-text-muted">Search (OpenRouter)</span>
+                      <span className="text-text font-bold">{stats.web_search_count ?? "—"}</span>
                     </div>
                   </div>
                 </Card>

@@ -49,6 +49,11 @@ export interface QaItem {
   bot_source?: string;
   bot_model?: string;
   bot_elapsed?: number;
+  // ⚡ pipeline info — intent/rag/llm2/search counts
+  bot_intent?: unknown;
+  bot_retrieval_info?: unknown;
+  bot_web_search_used?: boolean;
+  bot_web_search_reason?: string;
   status: "bot_answered" | "trigger_matched" | "handed_off" | "no_agent" | "error";
   assigned_to?: string | null;
   detail: string;
@@ -240,6 +245,15 @@ export async function getTestAssignmentStats(): Promise<{
   msg_avg_star: number;
   msg_good: number;
   msg_bad: number;
+  // ⚡ message counts (all history)
+  total_messages: number;
+  total_bot_replies: number;
+  total_handed_off: number;
+  // ⚡ pipeline counts
+  intent_count: number;
+  rag_count: number;
+  llm2_count: number;
+  web_search_count: number;
 }> {
   const coll = await getCollection<TestAssignmentDoc>(COLLECTIONS.testAssignment);
   const docs = await coll.find({}).sort({ created_at: -1 }).limit(5000).toArray();
@@ -248,6 +262,10 @@ export async function getTestAssignmentStats(): Promise<{
   let open = 0, closed = 0;
   let convStarRated = 0, convStarSum = 0, convGood = 0, convBad = 0;
   let msgStarRated = 0, msgStarSum = 0, msgGood = 0, msgBad = 0;
+  // ⚡ message counts
+  let totalMessages = 0, totalBotReplies = 0, totalHandedOff = 0;
+  // ⚡ pipeline counts
+  let intentCount = 0, ragCount = 0, llm2Count = 0, webSearchCount = 0;
 
   for (const d of docs) {
     if (d.final_status === "bot_answered") botAnswered++;
@@ -257,6 +275,26 @@ export async function getTestAssignmentStats(): Promise<{
 
     if (d.mock_status === "open") open++;
     else if (d.mock_status === "closed") closed++;
+
+    // ⚡ message counts — นับจาก qa array
+    if (Array.isArray(d.qa)) {
+      totalMessages += d.qa.length; // ข้อความที่ถามมา = จำนวน qa pairs
+      for (const q of d.qa) {
+        if (q.status === "bot_answered" || q.status === "trigger_matched") totalBotReplies++;
+        else if (q.status === "handed_off" || q.status === "no_agent") totalHandedOff++;
+
+        // ⚡ pipeline counts
+        // intent = ทุกคำถามที่เข้า bot (Pass 1 รันทุกครั้ง)
+        if (q.bot_intent || q.status === "bot_answered" || q.status === "trigger_matched") intentCount++;
+        // rag = source มี product_store / knowledge_base / kb / item_tag
+        const src = (q.bot_source || "").toLowerCase();
+        if (src.includes("product_store") || src.includes("knowledge_base") || src.includes("kb") || src.includes("item_tag")) ragCount++;
+        // llm2 = source มี general: (LLM2 ตอบคำถามทั่วไป)
+        if (src.includes("general")) llm2Count++;
+        // web search = bot_web_search_used หรือ source มี web_search
+        if (q.bot_web_search_used || src.includes("web_search")) webSearchCount++;
+      }
+    }
 
     // conversation rating
     if (d.conv_star_rating != null && d.conv_star_rating > 0) {
@@ -295,6 +333,13 @@ export async function getTestAssignmentStats(): Promise<{
     msg_avg_star: msgStarRated > 0 ? Math.round((msgStarSum / msgStarRated) * 100) / 100 : 0,
     msg_good: msgGood,
     msg_bad: msgBad,
+    total_messages: totalMessages,
+    total_bot_replies: totalBotReplies,
+    total_handed_off: totalHandedOff,
+    intent_count: intentCount,
+    rag_count: ragCount,
+    llm2_count: llm2Count,
+    web_search_count: webSearchCount,
   };
 }
 

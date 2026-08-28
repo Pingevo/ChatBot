@@ -117,6 +117,8 @@ class ChatRequest(BaseModel):
     # conversation_id ของแชทในระบบ admin (ถ้ามี) — ใช้ตอนบอทส่งต่อแอดมิน
     conversation_id: str | None = Field(None, description="conversation_id ในระบบ admin (สำหรับ handoff)")
     platform: str | None = Field(None, description="platform ของแชท (shopee/tiktok/lazada) — สำหรับ handoff")
+    # ⚡ simulate mode — จำลองการจ่ายงานโดยไม่กระทบ conversations จริง (ใช้ใน test chat)
+    simulate_assignment: bool = Field(False, description="ถ้า true → handoff จะเก็บลง test_chat_sessions ไม่ใช่ conversations")
 
 
 class ChatResponse(BaseModel):
@@ -179,6 +181,7 @@ def _routing(
     trigger_matched: str | None = None,
     shop_settings_action: str | None = None,
     assigned_admin: str | None = None,
+    assigned_admin_name: str | None = None,
     handoff_reason: str | None = None,
 ) -> dict:
     """สร้าง routing_decision dict สำหรับ observability"""
@@ -188,6 +191,7 @@ def _routing(
         "trigger_matched": trigger_matched,
         "shop_settings_action": shop_settings_action,
         "assigned_admin": assigned_admin,
+        "assigned_admin_name": assigned_admin_name,
         "handoff_reason": handoff_reason,
     }
 
@@ -913,6 +917,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                             "shop_id": req.shop or "",
                             "platform": req.platform or "shopee",
                             "reason": _warranty_claim_ctx.get("handoff_reason", "warranty_claim"),
+                            "simulate": req.simulate_assignment,
                             "claim": {
                                 k: v for k, v in _warranty_claim_ctx.items()
                                 if k != "handoff_reason" and v
@@ -978,6 +983,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         f"warranty_claim: {_warranty_claim_ctx.get('handoff_reason', 'in_progress')}",
                         handoff_reason=_warranty_claim_ctx.get("handoff_reason"),
                         assigned_admin=_handoff_result.get("assigned_to") if _warranty_claim_handoff and req.conversation_id else None,
+                        assigned_admin_name=_assigned_admin_name if _warranty_claim_handoff and req.conversation_id else None,
                         shop_settings_action=None,
                         trigger_matched=None,
                     ),
@@ -1140,9 +1146,8 @@ def chat(req: ChatRequest) -> ChatResponse:
                     for kw in ("ใบกำกับ", "ภาษี", "invoice", "เอกสาร", "จัดส่ง", "ไปรษณีย์",
                                "เลขผู้เสียภาษี", "เลขภาษี", "หจก.", "บจก.", "สนง.")
                 )
-                # ถ้า message สั้น (<= 8 คำ) และไม่มี model keyword → น่าจะ follow-up
-                _tax_short_followup = len(req.message.split()) <= 8 and not _current_has_model
-                if _tax_consent or _tax_followup or _tax_short_followup:
+                # ⚡ ใช้แค่ consent + tax keywords — ไม่ใช้ short_followup เพราะจะจับ "สายชาร์จ" ที่เป็นคำถามใหม่
+                if _tax_consent or _tax_followup:
                     _tax_answer = (
                         f"ได้ค่ะ เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
                         f"เพื่อดำเนินการเรื่องใบกำกับภาษีให้นะคะ "
@@ -2940,7 +2945,11 @@ def chat(req: ChatRequest) -> ChatResponse:
         # เพื่อให้สินค้าที่แรงสุดจริงขึ้น top ของ context ที่ส่ง LLM
         # (ปัญหาเดิม: RAG sort ตาม relevance score ทั่วไป ทำให้ P23 210W ตกไปอันดับ 11+)
         # ใช้ spec fields จาก CSV schema: output_power_w, capacity_mah, package_weight
-        if _is_superlative_q and len(products) > req.limit:
+        # ⚡ ขยาย: trigger เมื่อ superlative_q หรือ compatibility_check (ถามหาสินค้าที่รองรับ device)
+        # เพื่อให้สินค้าสเปคสูงสุดที่รองรับขึ้น top ของ context
+        _is_compat_check = _intent_result.get("intent") == "compatibility_check"
+        _is_charger_compat = _is_compat_check and _intent_result.get("product_type") in ("charger", "powerbank")
+        if (_is_superlative_q or _is_charger_compat) and len(products) > 1:
             import re as _re_super
             def _extract_max_watt(p: dict) -> float:
                 """extract ค่า W สูงสุดจาก spec field ก่อน ถ้าไม่มีค่อยดึงจากชื่อ.
@@ -3008,7 +3017,12 @@ def chat(req: ChatRequest) -> ChatResponse:
             _is_watt_q = any(kw in _super_msg_lower for kw in _watt_kw)
             _is_cap_q = any(kw in _super_msg_lower for kw in _cap_kw)
             _is_weight_q = any(kw in _super_msg_lower for kw in _weight_kw)
-            if _is_watt_q:
+            # ⚡ compatibility_check สำหรับ charger/cable → sort by wattage desc เสมอ
+            # เพื่อให้สินค้าสเปคสูงสุด (เช่น 6A 240W) ขึ้น top ของ context
+            if _is_charger_compat and not _is_watt_q:
+                products.sort(key=lambda p: _extract_max_watt(p), reverse=True)
+                print(f"[COMPAT-RANK] sort by wattage (desc)  top3: {[_extract_max_watt(p) for p in products[:3]]}", file=sys.stderr)
+            elif _is_watt_q:
                 products.sort(key=lambda p: _extract_max_watt(p), reverse=True)
                 print(f"[SUPERLATIVE-RANK] sort by wattage (desc)  top3: {[_extract_max_watt(p) for p in products[:3]]}", file=sys.stderr)
             elif _is_cap_q:
