@@ -60,6 +60,10 @@ async function callBot(params: {
   usage?: { prompt: number; output: number; total: number };
   cost?: number;
   products?: unknown[];
+  intent?: unknown;
+  retrieval_info?: unknown;
+  web_search_used?: boolean;
+  web_search_reason?: string;
 }> {
   const { platform, message, history, shopId, shopName, itemId } = params;
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
@@ -107,6 +111,10 @@ async function callBot(params: {
         usage: data.usage,
         cost: typeof data.cost === "number" ? data.cost : undefined,
         products: data.products,
+        intent: data.intent,
+        retrieval_info: data.retrieval_info,
+        web_search_used: data.web_search_used === true,
+        web_search_reason: data.web_search_reason,
       };
     } catch (err) {
       // ถ้า error เป็น 429-related → retry
@@ -234,7 +242,8 @@ export async function GET(req: NextRequest) {
     // ── list conversations ──
     if (list) {
       const platform = (url.searchParams.get("platform") || undefined) as Platform | undefined;
-      const limit = Math.min(parseInt(url.searchParams.get("limit") || "100", 10), 100);
+      // ⚡ ปลด cap 100 → รับสูงสุด 10000 (ให้ user ใส่เอง)
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "100", 10), 1), 10000);
       const order = url.searchParams.get("order") || "recent"; // recent | oldest
 
       const coll = await getCollection<{
@@ -336,6 +345,11 @@ interface ReplayQa {
   bot_source?: string;
   bot_model?: string;
   bot_elapsed?: number;
+  // ⚡ pipeline info — intent/rag/llm2/search counts
+  bot_intent?: unknown;
+  bot_retrieval_info?: unknown;
+  bot_web_search_used?: boolean;
+  bot_web_search_reason?: string;
   status: "bot_answered" | "trigger_matched" | "handed_off" | "no_agent" | "error";
   assigned_to?: string | null;
   detail: string;
@@ -400,6 +414,28 @@ export async function POST(req: NextRequest) {
     if (body.action === "replay_conversation") {
       const conversation_id = body.conversation_id as string;
       if (!conversation_id) return error("conversation_id required", 422);
+
+      // ⚡ mode: "overwrite" (default) = ทำใหม่ทับ, "resume" = ข้ามถ้ามี result ครบแล้ว
+      const mode = (body.mode as "overwrite" | "resume") || "overwrite";
+
+      // ⚡ resume mode: เช็คว่ามี replay result ครบแล้ว (bot_answered, ไม่ handoff) → ข้าม
+      if (mode === "resume") {
+        const existing = await testAssignmentService.getTestAssignment(conversation_id);
+        if (existing && existing.final_status === "bot_answered" && !existing.stopped_at_handoff) {
+          return json({
+            ok: true,
+            conversation_id,
+            skipped: true,
+            reason: "already replayed (bot_answered) — skipped in resume mode",
+            qa: existing.qa,
+            total_messages: existing.total_messages,
+            processed_messages: existing.processed_messages,
+            final_status: existing.final_status,
+            assigned_to: existing.assigned_to ?? null,
+            stopped_at_handoff: existing.stopped_at_handoff,
+          });
+        }
+      }
 
       // ดึง user messages (oldest first)
       const msgColl = await getCollection<{
@@ -578,6 +614,10 @@ export async function POST(req: NextRequest) {
             bot_source: botResp.source,
             bot_model: botResp.model,
             bot_elapsed: botResp.elapsed,
+            bot_intent: botResp.intent,
+            bot_retrieval_info: botResp.retrieval_info,
+            bot_web_search_used: botResp.web_search_used,
+            bot_web_search_reason: botResp.web_search_reason,
             status: trigger ? "trigger_matched" : "bot_answered",
             detail: trigger ? `trigger "${trigger.name}" → bot ตอบ` : "bot ตอบปกติ",
           });

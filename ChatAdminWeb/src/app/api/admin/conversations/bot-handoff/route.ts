@@ -23,6 +23,7 @@ interface BotHandoffBody {
   shop_id?: string;
   platform?: string;
   reason?: string;
+  simulate?: boolean; // ⚡ simulate mode — เก็บลง test_chat_sessions ไม่กระทบ conversations
   claim?: {
     customer_name?: string;
     customer_phone?: string;
@@ -48,7 +49,13 @@ export async function POST(req: NextRequest) {
     return error("conversation_id is required", 422);
   }
 
-  const { conversation_id, reason, claim } = body;
+  const { conversation_id, reason, claim, simulate } = body;
+
+  // ⚡ Simulate mode — จำลองการจ่ายงานโดยไม่กระทบ conversations จริง
+  // เก็บประวัติ assign ลง test_chat_sessions เท่านั้น
+  if (simulate) {
+    return await simulateHandoff(conversation_id, body.shop_id, body.platform, reason, claim);
+  }
 
   // ดึง conversation เพื่อหา shop_id/platform
   const conv = await conversationService.getConversation(conversation_id);
@@ -114,5 +121,105 @@ export async function POST(req: NextRequest) {
     assigned_to_name: result.assignedToName,
     reopened: result.reopened,
     assignment_reason: result.assignmentReason,
+  });
+}
+
+// ── Simulate handoff — จำลองการจ่ายงานโดยไม่กระทบ conversations จริง ──
+// เก็บประวัติ assign ลง test_chat_sessions เท่านั้น
+// ใช้ session_id ของ test chat เป็น conversation_id
+async function simulateHandoff(
+  sessionId: string,
+  shopId?: string,
+  platform?: string,
+  reason?: string,
+  claim?: BotHandoffBody["claim"]
+) {
+  const { ObjectId } = await import("mongodb");
+  type TestChatSessionDoc = {
+    _id: typeof ObjectId.prototype;
+    assigned_to?: string | null;
+    assigned_to_name?: string | null;
+    assignment_reason?: string | null;
+    assignment_history?: unknown[];
+  };
+  const adminDb = await getCollection<TestChatSessionDoc>("test_chat_sessions" as never);
+
+  // หา admin ที่จะรับงาน — ใช้ logic เดียวกับ handoffService แต่ไม่เขียน conversations
+  // Step 1: เช็ค assigned_to เดิมใน session
+  const session = await adminDb.findOne({ _id: new ObjectId(sessionId) as never });
+  let assignedTo: string | null = session?.assigned_to || null;
+  let assignmentReason = "unknown";
+
+  // Step 2: ถ้าไม่มี → round-robin (เรียก assignmentService แบบ dry-run)
+  if (!assignedTo) {
+    try {
+      const { assignmentService } = await import("@/backend/service/assignmentService");
+      const agentId = await assignmentService.autoAssignConversation({
+        conversation_id: `sim_${sessionId}`, // ใช้ prefix sim_ เพื่อไม่ให้ชนกับของจริง
+        shop_id: shopId || "",
+        platform: platform || "shopee",
+        assigned_to: null,
+      });
+      if (agentId) {
+        assignedTo = agentId;
+        assignmentReason = "round_robin: ไม่มี admin เดิม → จ่ายคิว (simulate)";
+      }
+    } catch (e) {
+      console.error("[bot-handoff:simulate] autoAssign failed:", e);
+    }
+  } else {
+    assignmentReason = "existing_assignment: มี admin ดูแลอยู่แล้ว (simulate)";
+  }
+
+  // ดึงชื่อ admin
+  let assignedToName: string | null = null;
+  if (assignedTo) {
+    try {
+      const adminColl = await getCollection<{ admin_id: string; name: string }>(COLLECTIONS.admins);
+      const admin = await adminColl.findOne({ admin_id: assignedTo });
+      assignedToName = admin?.name || null;
+    } catch { /* ignore */ }
+  }
+
+  // บันทึกลง test_chat_sessions — เก็บ assigned_to + assignment_history
+  const historyEntry = {
+    assigned_to: assignedTo,
+    assigned_to_name: assignedToName,
+    reason: reason || "simulate handoff",
+    assignment_reason: assignmentReason,
+    timestamp: new Date(),
+    claim: claim || null,
+  };
+  await adminDb.updateOne(
+    { _id: new ObjectId(sessionId) as never },
+    {
+      $set: { assigned_to: assignedTo, assigned_to_name: assignedToName, assignment_reason: assignmentReason, updated_at: new Date() } as never,
+      $push: { assignment_history: historyEntry } as never,
+    }
+  );
+
+  await logAdminEvent({
+    action_type: "conversation.handoff" as never,
+    actor: "bot",
+    conversation_id: sessionId,
+    metadata: {
+      assigned_to: assignedTo,
+      assigned_to_name: assignedToName,
+      reason,
+      assignment_reason: assignmentReason,
+      simulate: true,
+      claim,
+    },
+  });
+
+  console.log(`[bot-handoff:simulate] session=${sessionId} assigned_to=${assignedTo} (${assignedToName}) reason=${reason}`);
+
+  return json({
+    ok: true,
+    simulate: true,
+    assigned_to: assignedTo,
+    assigned_to_name: assignedToName,
+    reopened: false,
+    assignment_reason: assignmentReason,
   });
 }

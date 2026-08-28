@@ -4,6 +4,7 @@ import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Button } from "@/components/ui/Button";
 import { Loading } from "@/components/ui/Loading";
 import { Badge } from "@/components/ui/Badge";
+import { toast } from "@/components/ui/Toast";
 import {
   Send,
   Copy,
@@ -69,6 +70,7 @@ interface MsgStats {
     trigger_matched?: string | null;
     shop_settings_action?: string | null;
     assigned_admin?: string | null;
+    assigned_admin_name?: string | null;
     handoff_reason?: string | null;
   };
   // rating fields (admin ให้คะแนน)
@@ -299,6 +301,11 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   const [shops, setShops] = useState<string[]>([]);
   const [limit, setLimit] = useState(10);
   const [sending, setSending] = useState(false);
+  // ⚡ handoff state — หลังส่งต่อแอดมิน บอทจะไม่ตอบจนกว่าจะกด "ปิดแชท"
+  const [handedOff, setHandedOff] = useState(false);
+  const [assignedAdmin, setAssignedAdmin] = useState<string | null>(null);
+  const [assignedAdminName, setAssignedAdminName] = useState<string | null>(null);
+  const [assignmentReason, setAssignmentReason] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [logPanelOpen, setLogPanelOpen] = useState(false);
   const [lastProducts, setLastProducts] = useState<Product[]>([]);
@@ -384,6 +391,18 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       const d = await r.json();
       setCurrentSessionId(id);
       setShop(d.shop || "");
+      // ⚡ reset handoff state เมื่อเปลี่ยน session
+      setHandedOff(false);
+      setAssignedAdmin(null);
+      setAssignedAdminName(null);
+      setAssignmentReason(null);
+      // ⚡ ถ้า session มี assigned_to อยู่แล้ว → ตั้ง handedOff
+      if (d.assigned_to) {
+        setHandedOff(true);
+        setAssignedAdmin(d.assigned_to);
+        setAssignedAdminName(d.assigned_to_name || null);
+        setAssignmentReason(d.assignment_reason || null);
+      }
       const loadedMsgs: Msg[] = [];
       let hist: { role: "user" | "model"; text: string }[] = [];
       let tot = { turns: 0, elapsed: 0, prompt: 0, output: 0, total: 0, cost: 0, wsTurns: 0, wsCost: 0, wsTokens: 0 };
@@ -618,6 +637,11 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     e?.preventDefault();
     const message = input.trim();
     if (!message || sending) return;
+    // ⚡ ถ้า handedOff แล้ว — บอทไม่ตอบ ให้กดปุ่มปิดแชทก่อน
+    if (handedOff) {
+      toast.info("แชทถูกส่งต่อแอดมินแล้ว — กด 'ปิดแชท (ให้บอทตอบต่อ)' เพื่อคุยกับบอทอีกครั้ง");
+      return;
+    }
     setInput("");
     setSending(true);
 
@@ -631,6 +655,11 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     try {
       const payload: Record<string, unknown> = { message, limit, history: priorHistory };
       if (shop) payload.shop = shop;
+      // ⚡ ส่ง conversation_id (ใช้ session_id) + simulate_assignment เพื่อจำลองการจ่ายงาน
+      if (currentSessionId) {
+        payload.conversation_id = currentSessionId;
+        payload.simulate_assignment = true;
+      }
       const r = await fetch("/api/chatbot/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -670,6 +699,18 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         handoff_reason: j.handoff_reason || undefined,
         routing_decision: j.routing_decision || undefined,
       };
+      // ⚡ เด้ง toast แจ้ง handoff + ตั้ง handedOff state
+      if (stats.handoff_to_admin) {
+        const adminName = (stats.routing_decision?.assigned_admin_name as string) || (stats.routing_decision?.assigned_admin as string) || null;
+        const reason = stats.handoff_reason || "unknown";
+        setHandedOff(true);
+        setAssignedAdmin(stats.routing_decision?.assigned_admin as string || null);
+        setAssignedAdminName(adminName);
+        setAssignmentReason(reason);
+        toast.success(`🔀 ส่งต่อแอดมิน${adminName ? `: ${adminName}` : ""}\nเหตุผล: ${reason}`);
+      } else if (stats.routing_decision?.trigger_matched) {
+        toast.info(`⚡ trigger: ${stats.routing_decision.trigger_matched}`);
+      }
       setTotals((t) => ({
         turns: t.turns + 1,
         elapsed: t.elapsed + (stats.elapsed || 0),
@@ -1298,20 +1339,47 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             </div>
 
             {/* Composer */}
-            <div className="flex gap-2 p-3 border-t border-border bg-surface shrink-0">
+            <div className="flex flex-col gap-2 p-3 border-t border-border bg-surface shrink-0">
+              {/* ⚡ Handoff banner + ปุ่มปิดแชท */}
+              {handedOff && (
+                <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                  <div className="flex items-center gap-2 text-xs text-amber-600 min-w-0">
+                    <span className="shrink-0">🔀</span>
+                    <span className="truncate">
+                      ส่งต่อแอดมินแล้ว{assignedAdminName ? `: ${assignedAdminName}` : ""} — บอทจะไม่ตอบจนกว่าจะปิดแชท
+                    </span>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setHandedOff(false);
+                      setAssignedAdmin(null);
+                      setAssignedAdminName(null);
+                      setAssignmentReason(null);
+                      toast.success("ปิดแชทแล้ว — บอทตอบได้ต่อ");
+                    }}
+                    className="shrink-0 text-xs"
+                  >
+                    ปิดแชท (ให้บอทตอบต่อ)
+                  </Button>
+                </div>
+              )}
+              <div className="flex gap-2">
               <textarea
                 ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="พิมพ์คำถามที่นี่... (Enter ส่ง · Shift+Enter ขึ้นบรรทัด)"
-                disabled={sending}
+                placeholder={handedOff ? "แชทถูกส่งต่อแอดมิน — กดปุ่มปิดแชทก่อน" : "พิมพ์คำถามที่นี่... (Enter ส่ง · Shift+Enter ขึ้นบรรทัด)"}
+                disabled={sending || handedOff}
                 className="flex-1 resize-none h-14 px-3 py-2.5 rounded-xl border border-border bg-surface-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30 disabled:opacity-60"
               />
-              <Button onClick={() => send()} disabled={sending || !input.trim()} className="self-end">
+              <Button onClick={() => send()} disabled={sending || !input.trim() || handedOff} className="self-end">
                 {sending ? <Loading size={16} /> : <Send size={16} />}
                 <span className="hidden sm:inline">ส่ง</span>
               </Button>
+              </div>
             </div>
           </section>
 
