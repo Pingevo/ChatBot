@@ -267,3 +267,35 @@ export const statsService = {
 export const shopService = {
   list: () => api().get<{ shops: string[] }>("/chatbot/shops").then((r) => r.data),
 };
+
+// ---- Shop Personas (per-shop bot persona — admin ตั้งชื่อตัวแทนบอทของแต่ละร้าน) ----
+export type PersonaPlatform = "shopee" | "tiktok" | "lazada";
+
+export interface ShopPersonaRow {
+  persona_id: string;
+  shopname: string;
+  platform: PersonaPlatform;
+  bot_name: string;
+  enabled: boolean;
+  notes?: string;
+  created_at: string;
+  updated_at: string;
+  updated_by?: string;
+}
+
+export const personaService = {
+  list: (params?: { platform?: PersonaPlatform; search?: string; enabled_only?: boolean }) => {
+    const query: Record<string, string> = {};
+    if (params?.platform) query.platform = params.platform;
+    if (params?.search) query.search = params.search;
+    if (params?.enabled_only) query.enabled_only = "1";
+    return api().get<{ rows: ShopPersonaRow[] }>("/persona", { params: query }).then((r) => r.data.rows);
+  },
+  upsert: (data: { shopname: string; platform: PersonaPlatform; bot_name: string; enabled?: boolean; notes?: string }) =>
+    api().post<ShopPersonaRow>("/persona", data).then((r) => r.data),
+  patch: (id: string, data: Partial<{ enabled: boolean; notes: string; bot_name: string }>) =>
+    api().patch<ShopPersonaRow>(`/persona/${id}`, data).then((r) => r.data),
+  toggle: (id: string, enabled: boolean) =>
+    api().patch<{ ok: boolean; enabled: boolean }>(`/persona/${id}`, { enabled }).then((r) => r.data),
+  delete: (id: string) => api().delete(`/persona/${id}`).then((r) => r.data),
+};

@@ -41,6 +41,9 @@ const ACTION_CATEGORIES: { label: string; types: string[] }[] = [
   { label: "Config", types: ["config.update", "config.shop_toggle", "config.test_integration"] },
   { label: "Bot/Data", types: ["bot.reply", "bot.handoff_to_admin", "bot.process_started", "bot.process_completed", "bot.process_failed", "bot.guard_violation", "bot.idempotency_skip", "data_writer.message_received", "data_writer.conversation_upserted", "data_writer.duplicate_message", "platform_api.blocked"] },
   { label: "Quick reply", types: ["quick_reply.create", "quick_reply.update", "quick_reply.delete", "quick_reply.use"] },
+  { label: "Persona", types: ["shop_persona.create", "shop_persona.update", "shop_persona.delete", "shop_persona.toggle"] },
+  { label: "Shop settings", types: ["shop_settings.create", "shop_settings.update", "shop_settings.delete"] },
+  { label: "Shadow", types: ["shadow_reply.delete", "shadow_reply.clear_all", "shadow_reply.restore", "shadow_reply.restore_all", "shadow_reply.rate", "shadow_reply.generate_conversation"] },
 ];
 
 const ACTION_TONE: Record<string, "brand" | "coral" | "neutral" | "pale"> = {
@@ -56,6 +59,16 @@ const ACTION_TONE: Record<string, "brand" | "coral" | "neutral" | "pale"> = {
   "bot.guard_violation": "coral",
   "platform_api.blocked": "coral",
   "user.delete": "coral",
+  "shop_persona.create": "brand",
+  "shop_persona.update": "brand",
+  "shop_persona.delete": "coral",
+  "shop_persona.toggle": "pale",
+  "shop_settings.create": "brand",
+  "shop_settings.update": "brand",
+  "shop_settings.delete": "coral",
+  "shadow_reply.delete": "coral",
+  "shadow_reply.restore": "brand",
+  "shadow_reply.clear_all": "coral",
 };
 
 export default function LogsPage() {

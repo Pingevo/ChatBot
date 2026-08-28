@@ -29,6 +29,8 @@ import {
   ScrollText,
   FlaskConical,
   History,
+  TestTube2,
+  Settings2,
   type LucideIcon,
 } from "lucide-react";
 
@@ -75,11 +77,13 @@ const navGroups: NavGroup[] = [
       { href: "/triggers", label: "ทริกเกอร์", icon: Zap },
       { href: "/quick-replies", label: "คำตอบเร็ว", icon: Reply },
       { href: "/knowledge", label: "ฐานความรู้", icon: BookOpen },
+      { href: "/persona", label: "ตัวแทนร้าน", icon: Bot, roles: ["superadmin", "admin", "dev"] },
+      { href: "/shop-settings", label: "ตั้งค่าร้าน", icon: Settings2, roles: ["superadmin", "admin", "dev"] },
       {
         href: "/test-chat/shopee",
         label: "ทดสอบบอท",
         icon: Bot,
-        roles: ["superadmin", "admin", "dev"],
+        roles: ["dev"],
         badgeTag: "Dev",
         children: [
           { href: "/test-chat/shopee", label: "Shopee" },
@@ -88,6 +92,8 @@ const navGroups: NavGroup[] = [
         ],
       },
       { href: "/shadow-inbox", label: "Shadow Inbox", icon: FlaskConical, roles: ["dev"], badgeTag: "Dev" },
+      { href: "/test-assignment", label: "ทดสอบจ่ายงาน", icon: TestTube2, roles: ["dev"], badgeTag: "Dev" },
+      { href: "/test-results", label: "Test Results", icon: TestTube2, roles: ["dev"], badgeTag: "Dev" },
     ],
   },
   {

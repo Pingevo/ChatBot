@@ -176,6 +176,13 @@ GENERAL_QUESTION_KEYWORDS: dict[str, list[str]] = {
         "มีกี่ร้าน", "ร้านในเครือ", "ร้านในเครืออะไรบ้าง",
         "มีร้านค้าในเครือ", "ร้านค้าในเครือ", "มีร้านค้าในเครืออะไร",
     ],
+    "tax_invoice": [
+        "ใบกำกับภาษี", "ใบกำกับ", "ภาษี", "e-tax", "etax",
+        "tax invoice", "invoice", "ใบเสร็จ", "ใบกำกับภาษีออกได้ไหม",
+        "ออกใบกำกับภาษี", "ขอใบกำกับภาษี", "มีใบกำกับภาษีไหม",
+        "มีใบกำกับภาษี", "ออกใบกำกับ", "ขอใบเสร็จ",
+        "ใบกำกับภาษีได้ไหม", "ออกภาษีได้ไหม", "มีภาษีไหม",
+    ],
 }
 
 
@@ -280,14 +287,44 @@ def search_kb_by_model(message: str, limit: int = 5) -> list[dict[str, Any]]:
     """
     # กรณี comparison: แยกค้นแต่ละรุ่น
     msg_lower = message.lower()
-    if " vs " in msg_lower or "เปรียบเทียบ" in msg_lower or "เทียบ" in msg_lower:
-        parts = re.split(r"\s+vs\s+|\s*เปรียบเทียบ\s*|\s*เทียบ\s*", message, flags=re.IGNORECASE)
+    # ตรวจ comparison: "vs", "เปรียบเทียบ", "เทียบ", "กับ...ต่างกัน", "ต่างกันยังไง"
+    # หรือ implicit comparison: message สั้นๆ ที่มี 2+ model keywords (เช่น "k5 k9")
+    _is_comparison = (
+        " vs " in msg_lower
+        or "เปรียบเทียบ" in msg_lower
+        or "เทียบ" in msg_lower
+        or ("กับ" in msg_lower and "ต่าง" in msg_lower)
+        or "ต่างกัน" in msg_lower
+        or "ต่างกันยังไง" in msg_lower
+    )
+    # implicit comparison: message สั้นๆ มี 2+ model keywords
+    # แต่ต้องไม่มีคำถามอื่น (เช่น "สเปค", "รับประกัน", "spec") เพราะอาจเป็น "brand + model" ของรุ่นเดียว
+    if not _is_comparison:
+        _models_check = extract_model_keywords(message)
+        _models_check = [m for m in _models_check if m.lower() != "vs"]
+        _non_model_words = [w for w in message.split() if w.lower() not in [m.lower() for m in _models_check] and w.lower() != "vs"]
+        # implicit comparison เฉพาะเมื่อไม่มีคำอื่นนอกจาก model keywords (เช่น "k5 k9")
+        if len(_models_check) >= 2 and len(_non_model_words) == 0:
+            _is_comparison = True
+    if _is_comparison:
+        # แยกตาม " vs ", "เปรียบเทียบ", "เทียบ", "กับ", "ต่างกัน"
+        parts = re.split(
+            r"\s+vs\s+|\s*เปรียบเทียบ\s*|\s*เทียบ\s*|\s+กับ\s+|\s*ต่างกัน.*",
+            message, flags=re.IGNORECASE
+        )
+        # ถ้าแยกแล้วได้แค่ 1 part (เช่น "K3 k5 k2 k9 ต่างกันยังไง")
+        # ให้ใช้ model keywords แยกแต่ละรุ่นแทน
+        _valid_parts = [p.strip() for p in parts if p.strip()]
+        if len(_valid_parts) <= 1:
+            # ใช้ extract_model_keywords เพื่อแยกแต่ละรุ่น
+            _models = extract_model_keywords(message)
+            # กรอง "vs" ออก
+            _models = [m for m in _models if m.lower() != "vs"]
+            if len(_models) >= 2:
+                _valid_parts = _models
         all_docs: list[dict] = []
         seen_ids: set = set()
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
+        for part in _valid_parts:
             sub_docs = _search_kb_single(part, limit=limit)
             for d in sub_docs:
                 if d["_id"] not in seen_ids:
@@ -580,6 +617,18 @@ def build_general_context(
         lines = [f"- {s}" for s in shops]
         context = f"=== ร้านค้าในเครือ ({len(shops)} ร้าน) ===\n" + "\n".join(lines)
         return {"qtype": qtype, "context": context, "meta": {"shop_count": len(shops)}}
+
+    # ---- tax invoice ----
+    if qtype == "tax_invoice":
+        context = (
+            "=== นโยบายใบกำกับภาษี ===\n"
+            "ทางร้านสามารถออกใบกำกับภาษีได้ในรูปแบบเอกสารเท่านั้น "
+            "(ไม่มีรูปแบบ electronics หรือ e-tax)\n"
+            "สามารถจัดส่งไปรษณีย์เป็นเอกสารได้\n"
+            "หากลูกค้าต้องการใบกำกับภาษี หรือต้องการติดต่อแอดมินเพิ่มเติม "
+            "สามารถแจ้งได้เลย แล้วทางเราจะส่งต่อให้แอดมินดำเนินการต่อให้ค่ะ"
+        )
+        return {"qtype": qtype, "context": context, "meta": {}}
 
     return None
 

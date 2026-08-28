@@ -37,4 +37,7 @@ htmlcov/
 exports/
 *.export.json
 *.export.csv
-test_results/
+
+# Test logs + results (เก็บในเครื่องเท่านั้น ไม่ commit)
+testlog/
+testresult/

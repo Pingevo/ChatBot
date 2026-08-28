@@ -1,14 +1,14 @@
 "use client";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, Fragment } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Loading } from "@/components/ui/Loading";
 import {
-  Users, RefreshCw, Settings, UserPlus, UserMinus, Crown,
+  Users, RefreshCw, Settings,
   MessageSquare, AlertCircle, Activity, Store, Globe,
-  Clock, PauseCircle, PlayCircle,
+  Clock, PauseCircle, PlayCircle, ChevronDown, ChevronRight,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
 import { canManage } from "@/lib/roles";
@@ -99,6 +99,9 @@ export default function TeamPage() {
   const [loading, setLoading] = useState(true);
   const [savingMode, setSavingMode] = useState(false);
   const [tab, setTab] = useState<Tab>("overview");
+  const [shopFilter, setShopFilter] = useState<"all" | "in" | "out">("all");
+  const [shopPlatformFilter, setShopPlatformFilter] = useState<"all" | Platform>("all");
+  const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
 
   // shop-team state
   const [shops, setShops] = useState<ShopRow[]>([]);
@@ -183,6 +186,19 @@ export default function TeamPage() {
     if (tab === "shop-team") loadShopTeam();
     if (tab === "platform-team") loadPlatformTeam();
   }, [tab, loadShopTeam, loadPlatformTeam]);
+
+  // ⚡ derived: shops กรองตาม platform filter (ใช้ใน tab shop-team)
+  const filteredShops = shopPlatformFilter === "all"
+    ? shops
+    : shops.filter((s) => s.platform === shopPlatformFilter);
+
+  // เมื่อ platform filter เปลี่ยน → เลือกร้านแรกของแพลตฟอร์มนั้น
+  useEffect(() => {
+    if (tab !== "shop-team") return;
+    if (filteredShops.length > 0 && !filteredShops.some((s) => s.shop_id === selectedShopId)) {
+      setSelectedShopId(filteredShops[0].shop_id);
+    }
+  }, [shopPlatformFilter, filteredShops, selectedShopId, tab]);
 
   async function handleModeChange(mode: AssignmentMode) {
     if (!editable || !data) return;
@@ -371,6 +387,29 @@ export default function TeamPage() {
         {/* === Tab: Overview === */}
         {tab === "overview" && (
           <>
+            {/* ⚠️ Unassigned banner — ด้านบน, แดงเลือดหมู (brand) */}
+            {data.unassigned > 0 && (
+              <div className="flex items-center gap-3 bg-brand border border-brand-dark rounded-xl p-4 shadow-md">
+                <div className="w-10 h-10 rounded-full bg-white/15 flex items-center justify-center shrink-0">
+                  <AlertCircle size={22} className="text-white" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-bold text-white">
+                    มี {data.unassigned.toLocaleString()} การสนทนาที่ยังไม่ได้มอบหมาย
+                  </div>
+                  <div className="text-xs text-white/80 mt-0.5">
+                    ระบบจะมอบหมายอัตโนมัติตามโหมด {modeLabels[data.mode]} หรือมอบหมายเองได้จากหน้าแชท
+                  </div>
+                </div>
+                <button
+                  onClick={() => setTab("shop-team")}
+                  className="hidden md:flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-white text-brand hover:bg-pale-sky-soft transition-colors shrink-0"
+                >
+                  <Store size={12} /> จัดทีม
+                </button>
+              </div>
+            )}
+
             {/* Summary cards */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <SummaryCard icon={Users} label="Agent ทั้งหมด" value={data.total_agents} sub={`${data.active_agents} ทำงาน`} />
@@ -439,6 +478,7 @@ export default function TeamPage() {
               <div className="px-4 py-3 border-b border-border flex items-center gap-2">
                 <Users size={14} className="text-text-muted" />
                 <h2 className="text-sm font-semibold text-text">รายชื่อ Agent</h2>
+                <span className="text-[11px] text-text-subtle ml-1">กดชื่อเพื่อดูร้าน/แพลตฟอร์มที่ดูแล</span>
                 <Badge tone="brand" className="ml-auto">{sortedAgents.length} คน</Badge>
               </div>
               {sortedAgents.length === 0 ? (
@@ -463,76 +503,146 @@ export default function TeamPage() {
                     {sortedAgents.map((a, i) => {
                       const st = statusOf(a.admin_id);
                       const accepting = st?.current_state === "accepting";
+                      const isExpanded = expandedAgent === a.admin_id;
+                      // ร้านที่ agent นี้ดูแล (จาก shopTeam)
+                      const agentShops = shops.filter((s) =>
+                        shopTeam.some((r) => r.shop_id === s.shop_id && r.admin_id === a.admin_id && r.is_active)
+                      );
+                      // แพลตฟอร์มที่ agent นี้ดูแล (จาก platformTeam)
+                      const agentPlatforms = platforms.filter((p) =>
+                        platformTeam.some((r) => r.platform === p.value && r.admin_id === a.admin_id && r.is_active)
+                      );
                       return (
-                      <tr key={a.admin_id} className={`border-b border-border/50 hover:bg-surface-2/30 transition-colors ${i % 2 === 0 ? "" : "bg-surface-2/20"}`}>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2.5">
-                            <div className="w-8 h-8 rounded-full bg-brand/15 flex items-center justify-center text-xs font-medium text-brand flex-shrink-0">
-                              {a.name?.charAt(0).toUpperCase() || a.username?.charAt(0).toUpperCase() || "?"}
-                            </div>
-                            <div className="min-w-0">
-                              <div className="font-medium text-text truncate">{a.name || a.username}</div>
-                              <div className="text-[11px] text-text-muted truncate">@{a.username}</div>
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <Badge tone={a.role === "superadmin" ? "brand" : a.role === "dev" ? "pale" : "neutral"}>{a.role}</Badge>
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <span className={`inline-flex items-center gap-1 text-xs ${a.is_active_agent ? "text-green-400" : "text-text-subtle"}`}>
-                            <span className={`w-1.5 h-1.5 rounded-full ${a.is_active_agent ? "bg-green-400" : "bg-text-subtle"}`} />
-                            {a.is_active_agent ? "ออนไลน์" : "ปิด"}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          {st ? (
-                            <span className={`inline-flex items-center gap-1 text-xs ${accepting ? "text-green-400" : "text-yellow-500"}`}>
-                              {accepting ? <PlayCircle size={12} /> : <PauseCircle size={12} />}
-                              <span className={`w-1.5 h-1.5 rounded-full ${accepting ? "bg-green-400" : "bg-yellow-500"}`} />
-                              {accepting ? "รับ" : "พัก"}
-                            </span>
-                          ) : <span className="text-[11px] text-text-subtle">—</span>}
-                        </td>
-                        <td className="px-4 py-3">
-                          {st ? (
-                            <div className="text-[11px] leading-tight">
-                              <div className="text-text-muted">
-                                <Clock size={10} className="inline mr-1 text-green-400" />
-                                {formatDuration(st.accepting_ms)}
-                                <span className="text-text-subtle"> รับ</span>
+                        <Fragment key={`${a.admin_id}-${i}`}>
+                          <tr
+                            className={`border-b border-border/50 hover:bg-surface-2/30 transition-colors cursor-pointer ${i % 2 === 0 ? "" : "bg-surface-2/20"} ${isExpanded ? "bg-brand/5" : ""}`}
+                            onClick={() => setExpandedAgent(isExpanded ? null : a.admin_id)}
+                          >
+                            <td className="px-4 py-3">
+                              <div className="flex items-center gap-2.5">
+                                {isExpanded ? <ChevronDown size={14} className="text-text-muted shrink-0" /> : <ChevronRight size={14} className="text-text-muted shrink-0" />}
+                                <div className="w-8 h-8 rounded-full bg-brand/15 flex items-center justify-center text-xs font-medium text-brand flex-shrink-0">
+                                  {a.name?.charAt(0).toUpperCase() || a.username?.charAt(0).toUpperCase() || "?"}
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="font-medium text-text truncate">{a.name || a.username}</div>
+                                  <div className="text-[11px] text-text-muted truncate">@{a.username}</div>
+                                </div>
                               </div>
-                              <div className="text-text-subtle mt-0.5">
-                                <PauseCircle size={10} className="inline mr-1 text-yellow-500" />
-                                {formatDuration(st.paused_ms)} พัก
-                              </div>
-                              <div className="text-text-subtle mt-0.5">
-                                ต่อเนื่อง: {formatSince(st.current_since)}
-                              </div>
-                            </div>
-                          ) : <span className="text-[11px] text-text-subtle">—</span>}
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <span className={`font-semibold ${a.workload.open > 0 ? "text-text" : "text-text-subtle"}`}>{a.workload.open}</span>
-                        </td>
-                        <td className="px-4 py-3 text-center text-text-muted">{a.workload.bot}</td>
-                        <td className="px-4 py-3 text-center">
-                          {a.workload.handoff > 0 ? <span className="text-vibrant-coral font-medium">{a.workload.handoff}</span> : <span className="text-text-subtle">0</span>}
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          {a.workload.pending > 0 ? <span className="text-yellow-500 font-medium">{a.workload.pending}</span> : <span className="text-text-subtle">0</span>}
-                        </td>
-                        <td className="px-4 py-3">
-                          {a.assigned_shops.length > 0 ? (
-                            <div className="flex flex-wrap gap-1">
-                              {a.assigned_shops.slice(0, 3).map((s) => (
-                                <code key={s} className="text-[10px] text-text-muted bg-surface-2 px-1.5 py-0.5 rounded">{s}</code>
-                              ))}
-                              {a.assigned_shops.length > 3 && <span className="text-[10px] text-text-subtle">+{a.assigned_shops.length - 3}</span>}
-                            </div>
-                          ) : <span className="text-[11px] text-text-subtle">—</span>}
-                        </td>
-                      </tr>
+                            </td>
+                            <td className="px-4 py-3">
+                              <Badge tone={a.role === "superadmin" ? "brand" : a.role === "dev" ? "pale" : "neutral"}>{a.role}</Badge>
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              <span className={`inline-flex items-center gap-1 text-xs ${a.is_active_agent ? "text-green-400" : "text-text-subtle"}`}>
+                                <span className={`w-1.5 h-1.5 rounded-full ${a.is_active_agent ? "bg-green-400" : "bg-text-subtle"}`} />
+                                {a.is_active_agent ? "ออนไลน์" : "ปิด"}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              {st ? (
+                                <span className={`inline-flex items-center gap-1 text-xs ${accepting ? "text-green-400" : "text-yellow-500"}`}>
+                                  {accepting ? <PlayCircle size={12} /> : <PauseCircle size={12} />}
+                                  <span className={`w-1.5 h-1.5 rounded-full ${accepting ? "bg-green-400" : "bg-yellow-500"}`} />
+                                  {accepting ? "รับ" : "พัก"}
+                                </span>
+                              ) : <span className="text-[11px] text-text-subtle">—</span>}
+                            </td>
+                            <td className="px-4 py-3">
+                              {st ? (
+                                <div className="text-[11px] leading-tight">
+                                  <div className="text-text-muted">
+                                    <Clock size={10} className="inline mr-1 text-green-400" />
+                                    {formatDuration(st.accepting_ms)}
+                                    <span className="text-text-subtle"> รับ</span>
+                                  </div>
+                                  <div className="text-text-subtle mt-0.5">
+                                    <PauseCircle size={10} className="inline mr-1 text-yellow-500" />
+                                    {formatDuration(st.paused_ms)} พัก
+                                  </div>
+                                  <div className="text-text-subtle mt-0.5">
+                                    ต่อเนื่อง: {formatSince(st.current_since)}
+                                  </div>
+                                </div>
+                              ) : <span className="text-[11px] text-text-subtle">—</span>}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              <span className={`font-semibold ${a.workload.open > 0 ? "text-text" : "text-text-subtle"}`}>{a.workload.open}</span>
+                            </td>
+                            <td className="px-4 py-3 text-center text-text-muted">{a.workload.bot}</td>
+                            <td className="px-4 py-3 text-center">
+                              {a.workload.handoff > 0 ? <span className="text-vibrant-coral font-medium">{a.workload.handoff}</span> : <span className="text-text-subtle">0</span>}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              {a.workload.pending > 0 ? <span className="text-yellow-500 font-medium">{a.workload.pending}</span> : <span className="text-text-subtle">0</span>}
+                            </td>
+                            <td className="px-4 py-3">
+                              {a.assigned_shops.length > 0 ? (
+                                <div className="flex flex-wrap gap-1">
+                                  {a.assigned_shops.slice(0, 3).map((s, si) => (
+                                    <code key={`${a.admin_id}-${si}-${s}`} className="text-[10px] text-text-muted bg-surface-2 px-1.5 py-0.5 rounded">{s}</code>
+                                  ))}
+                                  {a.assigned_shops.length > 3 && <span className="text-[10px] text-text-subtle">+{a.assigned_shops.length - 3}</span>}
+                                </div>
+                              ) : <span className="text-[11px] text-text-subtle">—</span>}
+                            </td>
+                          </tr>
+                          {isExpanded && (
+                            <tr className="bg-surface-2/40">
+                              <td colSpan={10} className="px-4 py-4">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 ml-6">
+                                  {/* ร้านที่ดูแล */}
+                                  <div>
+                                    <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-text-muted">
+                                      <Store size={12} /> ร้านที่ดูแล ({agentShops.length})
+                                    </div>
+                                    {agentShops.length > 0 ? (
+                                      <div className="flex flex-wrap gap-1.5">
+                                        {agentShops.map((s, si) => {
+                                          const pf = platforms.find((p) => p.value === s.platform);
+                                          return (
+                                            <span
+                                              key={`exp-shop-${a.admin_id}-${si}`}
+                                              className="inline-flex items-center gap-1.5 text-[11px] bg-surface border border-border rounded-full px-2 py-1"
+                                            >
+                                              <span className="w-1.5 h-1.5 rounded-full" style={{ background: pf?.color || "#888" }} />
+                                              <span className="text-text">{s.shopname}</span>
+                                              <span className="text-text-subtle capitalize">· {s.platform}</span>
+                                            </span>
+                                          );
+                                        })}
+                                      </div>
+                                    ) : (
+                                      <div className="text-[11px] text-text-subtle">ไม่ได้ดูแลร้านใด (ใช้โหมด Global)</div>
+                                    )}
+                                  </div>
+
+                                  {/* แพลตฟอร์มที่ดูแล */}
+                                  <div>
+                                    <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-text-muted">
+                                      <Globe size={12} /> แพลตฟอร์มที่ดูแล ({agentPlatforms.length})
+                                    </div>
+                                    {agentPlatforms.length > 0 ? (
+                                      <div className="flex flex-wrap gap-1.5">
+                                        {agentPlatforms.map((p) => (
+                                          <span
+                                            key={`exp-pf-${a.admin_id}-${p.value}`}
+                                            className="inline-flex items-center gap-1.5 text-[11px] bg-surface border border-border rounded-full px-2 py-1"
+                                          >
+                                            <span className="w-1.5 h-1.5 rounded-full" style={{ background: p.color }} />
+                                            <span className="text-text">{p.label}</span>
+                                          </span>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <div className="text-[11px] text-text-subtle">ไม่ได้ดูแลแพลตฟอร์มใดโดยเฉพาะ</div>
+                                    )}
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
                       );
                     })}
                   </tbody>
@@ -540,218 +650,305 @@ export default function TeamPage() {
               )}
             </Card>
 
-            {data.unassigned > 0 && (
-              <div className="flex items-start gap-3 bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4">
-                <AlertCircle size={18} className="text-yellow-500 flex-shrink-0 mt-0.5" />
-                <div>
-                  <div className="text-sm font-medium text-yellow-200">มี {data.unassigned} การสนทนาที่ยังไม่ได้มอบหมาย</div>
-                  <div className="text-xs text-yellow-200/70 mt-0.5">
-                    ระบบจะมอบหมายอัตโนมัติตามโหมด {modeLabels[data.mode]} หรือมอบหมายเองได้จากหน้าแชท
-                  </div>
-                </div>
-              </div>
-            )}
           </>
         )}
 
         {/* === Tab: Shop Team === */}
         {tab === "shop-team" && (
-          <Card className="p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <Store size={14} className="text-text-muted" />
+          <div className="space-y-4">
+            {/* Header */}
+            <div className="flex items-center gap-2">
+              <Store size={16} className="text-text-muted" />
               <h2 className="text-sm font-semibold text-text">จัดทีมร้าน — ใครตอบร้านไหน</h2>
+              <span className="text-xs text-text-muted ml-2">ใช้กับโหมด "ตามร้าน"</span>
             </div>
-            <p className="text-xs text-text-muted mb-4">
-              เลือกร้าน → เพิ่ม/ลด agent ที่จะรับงานจากร้านนั้น (ใช้กับโหมด "ตามร้าน")
-            </p>
 
             {shopTeamLoading ? (
               <div className="flex justify-center py-8"><Loading size={24} /></div>
             ) : shops.length === 0 ? (
-              <EmptyState icon={Store} title="ไม่มีร้านค้า" description="ยังไม่มีร้านในระบบ — รอ Phase 6 sync จาก dbWallet" />
+              <EmptyState icon={Store} title="ไม่มีร้านค้า" description="ยังไม่มีร้านในระบบ" />
             ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                {/* Shop list */}
-                <div className="space-y-1.5">
-                  <div className="text-xs text-text-muted mb-2">เลือกร้าน</div>
-                  <div className="space-y-1 max-h-96 overflow-y-auto">
-                    {shops.map((s) => {
-                      const count = shopTeam.filter((r) => r.shop_id === s.shop_id && r.is_active).length;
-                      return (
+              <>
+                {/* Filter bar: platform tabs + shop dropdown */}
+                <Card className="p-3">
+                  <div className="flex flex-col md:flex-row md:items-center gap-3">
+                    {/* Platform filter */}
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-xs text-text-muted whitespace-nowrap">แพลตฟอร์ม:</span>
+                      <div className="flex items-center gap-1">
                         <button
-                          key={s.shop_id}
-                          onClick={() => setSelectedShopId(s.shop_id)}
-                          className={`w-full text-left p-2.5 rounded-lg border transition-colors ${
-                            selectedShopId === s.shop_id
-                              ? "border-brand bg-brand/10"
-                              : "border-border bg-surface-2 hover:bg-pale-sky-soft"
+                          onClick={() => setShopPlatformFilter("all")}
+                          className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                            shopPlatformFilter === "all"
+                              ? "bg-brand text-white"
+                              : "bg-surface-2 text-text-muted hover:text-text"
                           }`}
                         >
-                          <div className="flex items-center justify-between">
-                            <div className="min-w-0">
-                              <div className="text-sm font-medium text-text truncate">{s.shopname}</div>
-                              <div className="text-[11px] text-text-muted capitalize">{s.platform}</div>
-                            </div>
-                            <Badge tone={count > 0 ? "brand" : "neutral"}>{count} agent</Badge>
-                          </div>
+                          ทั้งหมด
                         </button>
-                      );
-                    })}
-                  </div>
-                </div>
+                        {platforms.map((p) => {
+                          const count = shops.filter((s) => s.platform === p.value).length;
+                          return (
+                            <button
+                              key={p.value}
+                          onClick={() => setShopPlatformFilter(p.value)}
+                              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                                shopPlatformFilter === p.value
+                                  ? "bg-brand text-white"
+                                  : "bg-surface-2 text-text-muted hover:text-text"
+                              }`}
+                            >
+                              <span className="w-1.5 h-1.5 rounded-full" style={{ background: p.color }} />
+                              {p.label}
+                              <span className="opacity-60">({count})</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
 
-                {/* Agent assignment for selected shop */}
-                <div className="lg:col-span-2">
-                  <div className="text-xs text-text-muted mb-2">
-                    Agent ของร้าน: {selectedShop?.shopname || "—"}
+                    {/* Shop dropdown */}
+                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                      <span className="text-xs text-text-muted whitespace-nowrap shrink-0">ร้าน:</span>
+                      <div className="relative flex-1 min-w-0">
+                        <select
+                          value={selectedShopId}
+                          onChange={(e) => setSelectedShopId(e.target.value)}
+                          className="w-full appearance-none bg-surface-2 border border-border rounded-lg px-3 py-2 pr-9 text-sm text-text focus:outline-none focus:border-brand cursor-pointer"
+                        >
+                          {filteredShops.map((s, si) => {
+                            const count = shopTeam.filter((r) => r.shop_id === s.shop_id && r.is_active).length;
+                            return (
+                              <option key={`${s.shop_id}-${si}`} value={s.shop_id}>
+                                {s.shopname} ({s.platform}) — {count} agent
+                              </option>
+                            );
+                          })}
+                        </select>
+                        <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" />
+                      </div>
+                      {selectedShop && (
+                        <Badge tone="brand" className="shrink-0">
+                          {shopTeamAgentIds.length} agent
+                        </Badge>
+                      )}
+                    </div>
                   </div>
-                  {editable && selectedShopId ? (
-                    <div className="space-y-1.5 max-h-96 overflow-y-auto">
-                      {sortedAgents.map((a) => {
-                        const isInTeam = shopTeamAgentIds.includes(a.admin_id);
-                        return (
-                          <div key={a.admin_id} className="flex items-center justify-between p-2.5 rounded-lg bg-surface-2">
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <div className="w-7 h-7 rounded-full bg-brand/15 flex items-center justify-center text-[10px] font-medium text-brand flex-shrink-0">
-                                {a.name?.charAt(0).toUpperCase() || "?"}
+                </Card>
+
+                {/* Agent list with toggle switches */}
+                {selectedShopId ? (
+                  <Card className="overflow-hidden">
+                    {/* Filter sub-tabs */}
+                    <div className="flex items-center gap-1 px-3 py-2 border-b border-border bg-surface-2/50">
+                      {([
+                        { key: "all", label: "ทั้งหมด" },
+                        { key: "in", label: `ในทีม (${shopTeamAgentIds.length})` },
+                        { key: "out", label: `ยังไม่เพิ่ม (${sortedAgents.length - shopTeamAgentIds.length})` },
+                      ] as const).map((f) => (
+                        <button
+                          key={f.key}
+                          onClick={() => setShopFilter(f.key)}
+                          className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                            shopFilter === f.key
+                              ? "bg-brand text-white"
+                              : "text-text-muted hover:text-text hover:bg-surface"
+                          }`}
+                        >
+                          {f.label}
+                        </button>
+                      ))}
+                      <div className="ml-auto text-[10px] text-text-subtle">
+                        กดสวิตช์เพื่อเพิ่ม/นำออก
+                      </div>
+                    </div>
+
+                    {/* Agent rows */}
+                    <div className="divide-y divide-border/50 max-h-[480px] overflow-y-auto">
+                      {sortedAgents
+                        .filter((a) => {
+                          const isIn = shopTeamAgentIds.includes(a.admin_id);
+                          if (shopFilter === "in") return isIn;
+                          if (shopFilter === "out") return !isIn;
+                          return true;
+                        })
+                        .map((a, i) => {
+                          const isInTeam = shopTeamAgentIds.includes(a.admin_id);
+                          const busy = shopAgentAdding === a.admin_id;
+                          return (
+                            <div
+                              key={`shop-${a.admin_id}-${i}`}
+                              className={`flex items-center gap-3 px-4 py-2.5 transition-colors ${
+                                isInTeam ? "bg-brand/5" : "hover:bg-surface-2/30"
+                              }`}
+                            >
+                              {/* Avatar */}
+                              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium flex-shrink-0 ${
+                                isInTeam ? "bg-brand/20 text-brand" : "bg-surface-2 text-text-muted"
+                              }`}>
+                                {a.name?.charAt(0).toUpperCase() || a.username?.charAt(0).toUpperCase() || "?"}
                               </div>
-                              <div className="min-w-0">
-                                <div className="text-sm font-medium text-text truncate">{a.name || a.username}</div>
-                                <div className="text-[11px] text-text-muted">@{a.username} · {a.role}</div>
+
+                              {/* Name + meta */}
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-sm font-medium text-text truncate">{a.name || a.username}</span>
+                                  <Badge tone={a.role === "superadmin" ? "brand" : a.role === "dev" ? "pale" : "neutral"}>
+                                    {a.role}
+                                  </Badge>
+                                </div>
+                                <div className="text-[11px] text-text-muted truncate">
+                                  @{a.username} · {a.workload.open} งานเปิด
+                                  {a.assigned_shops.length > 0 && ` · ${a.assigned_shops.length} ร้าน`}
+                                </div>
                               </div>
+
+                              {/* Toggle switch */}
+                              <ToggleSwitch
+                                checked={isInTeam}
+                                disabled={!editable || busy}
+                                onChange={() => isInTeam ? handleRemoveAgentFromShop(a.admin_id) : handleAddAgentToShop(a.admin_id)}
+                                loading={busy}
+                              />
                             </div>
-                            {isInTeam ? (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => handleRemoveAgentFromShop(a.admin_id)}
-                                disabled={shopAgentAdding === a.admin_id}
-                                className="text-vibrant-coral"
-                              >
-                                {shopAgentAdding === a.admin_id ? <Loading size={12} /> : <UserMinus size={14} />} ลบ
-                              </Button>
-                            ) : (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => handleAddAgentToShop(a.admin_id)}
-                                disabled={shopAgentAdding === a.admin_id}
-                              >
-                                {shopAgentAdding === a.admin_id ? <Loading size={12} /> : <UserPlus size={14} />} เพิ่ม
-                              </Button>
-                            )}
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
+                      {sortedAgents.filter((a) => {
+                        const isIn = shopTeamAgentIds.includes(a.admin_id);
+                        if (shopFilter === "in") return isIn;
+                        if (shopFilter === "out") return !isIn;
+                        return true;
+                      }).length === 0 && (
+                        <div className="py-8 text-center text-xs text-text-subtle">
+                          {shopFilter === "in" ? "ยังไม่มี agent ในทีมนี้" : "เพิ่ม agent ครบแล้ว"}
+                        </div>
+                      )}
                     </div>
-                  ) : (
-                    <div className="text-xs text-text-muted bg-surface-2 rounded-lg p-3">
-                      {editable ? "เลือกร้านก่อน" : "ต้องมีสิทธิ์ editor เพื่อจัดทีม"}
-                    </div>
-                  )}
-                </div>
-              </div>
+                  </Card>
+                ) : (
+                  <div className="text-xs text-text-muted bg-surface-2 rounded-lg p-3">
+                    เลือกร้านก่อน
+                  </div>
+                )}
+
+                {!editable && (
+                  <div className="flex items-center gap-2 text-[11px] text-text-subtle bg-surface-2 rounded-lg px-3 py-2">
+                    <AlertCircle size={12} /> คุณเป็น Admin — ดูได้อย่างเดียว
+                  </div>
+                )}
+              </>
             )}
-          </Card>
+          </div>
         )}
 
-        {/* === Tab: Platform Team === */}
+        {/* === Tab: Platform Team — Matrix view === */}
         {tab === "platform-team" && (
-          <Card className="p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <Globe size={14} className="text-text-muted" />
+          <div className="space-y-4">
+            {/* Header */}
+            <div className="flex items-center gap-2">
+              <Globe size={16} className="text-text-muted" />
               <h2 className="text-sm font-semibold text-text">จัดทีมแพลตฟอร์ม — ใครตอบแพลตฟอร์มไหน</h2>
+              <span className="text-xs text-text-muted ml-2">ใช้กับโหมด "ตามแพลตฟอร์ม"</span>
             </div>
-            <p className="text-xs text-text-muted mb-4">
-              เลือกแพลตฟอร์ม → เพิ่ม/ลด agent ที่จะรับงานจากแพลตฟอร์มนั้น (ใช้กับโหมด "ตามแพลตฟอร์ม")
-            </p>
 
             {platformTeamLoading ? (
               <div className="flex justify-center py-8"><Loading size={24} /></div>
             ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                {/* Platform list */}
-                <div className="space-y-1.5">
-                  <div className="text-xs text-text-muted mb-2">เลือกแพลตฟอร์ม</div>
-                  <div className="space-y-1">
-                    {platforms.map((p) => {
-                      const count = platformTeam.filter((r) => r.platform === p.value && r.is_active).length;
-                      return (
-                        <button
-                          key={p.value}
-                          onClick={() => setSelectedPlatform(p.value)}
-                          className={`w-full text-left p-2.5 rounded-lg border transition-colors ${
-                            selectedPlatform === p.value
-                              ? "border-brand bg-brand/10"
-                              : "border-border bg-surface-2 hover:bg-pale-sky-soft"
-                          }`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <span className="w-2.5 h-2.5 rounded-full" style={{ background: p.color }} />
-                              <span className="text-sm font-medium text-text">{p.label}</span>
-                            </div>
-                            <Badge tone={count > 0 ? "brand" : "neutral"}>{count} agent</Badge>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
+              <>
+                {/* Summary: agent count per platform */}
+                <div className="grid grid-cols-3 gap-3">
+                  {platforms.map((p) => {
+                    const count = platformTeam.filter((r) => r.platform === p.value && r.is_active).length;
+                    return (
+                      <div
+                        key={p.value}
+                        className="flex items-center gap-2.5 rounded-lg border border-border bg-surface-2 px-3 py-2.5"
+                      >
+                        <span className="w-3 h-3 rounded-full shrink-0" style={{ background: p.color }} />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium text-text">{p.label}</div>
+                          <div className="text-[11px] text-text-muted">{count} agent</div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
 
-                {/* Agent assignment for selected platform */}
-                <div className="lg:col-span-2">
-                  <div className="text-xs text-text-muted mb-2">
-                    Agent ของแพลตฟอร์ม: {platforms.find((p) => p.value === selectedPlatform)?.label}
+                {/* Matrix table: agents × platforms */}
+                <Card className="overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-border bg-surface-2/50">
+                          <th className="text-left px-4 py-3 font-medium text-text-muted text-xs sticky left-0 bg-surface-2/95 backdrop-blur">
+                            Agent
+                          </th>
+                          {platforms.map((p) => (
+                            <th key={p.value} className="px-4 py-3 text-center">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <span className="w-2 h-2 rounded-full" style={{ background: p.color }} />
+                                <span className="text-xs font-medium text-text">{p.label}</span>
+                              </div>
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sortedAgents.map((a, i) => {
+                          const pf = platforms.find((pp) => pp.value === a.assigned_shops[0] as Platform);
+                          return (
+                            <tr
+                              key={`pf-matrix-${a.admin_id}-${i}`}
+                              className={`border-b border-border/50 hover:bg-surface-2/20 transition-colors ${i % 2 === 0 ? "" : "bg-surface-2/10"}`}
+                            >
+                              <td className="px-4 py-3 sticky left-0 bg-inherit">
+                                <div className="flex items-center gap-2.5">
+                                  <div className="w-7 h-7 rounded-full bg-brand/15 flex items-center justify-center text-[10px] font-medium text-brand flex-shrink-0">
+                                    {a.name?.charAt(0).toUpperCase() || "?"}
+                                  </div>
+                                  <div className="min-w-0">
+                                    <div className="text-sm font-medium text-text truncate">{a.name || a.username}</div>
+                                    <div className="text-[10px] text-text-muted truncate">
+                                      @{a.username} · {a.role}
+                                    </div>
+                                  </div>
+                                </div>
+                              </td>
+                              {platforms.map((p) => {
+                                const isInTeam = platformTeam.some(
+                                  (r) => r.platform === p.value && r.admin_id === a.admin_id && r.is_active
+                                );
+                                const busy = platformAgentAdding === a.admin_id;
+                                return (
+                                  <td key={p.value} className="px-4 py-3 text-center">
+                                    <ToggleSwitch
+                                      checked={isInTeam}
+                                      disabled={!editable || busy}
+                                      onChange={() => isInTeam ? handleRemoveAgentFromPlatform(a.admin_id) : handleAddAgentToPlatform(a.admin_id)}
+                                      loading={busy}
+                                    />
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
                   </div>
-                  {editable ? (
-                    <div className="space-y-1.5 max-h-96 overflow-y-auto">
-                      {sortedAgents.map((a) => {
-                        const isInTeam = platformTeamAgentIds.includes(a.admin_id);
-                        return (
-                          <div key={a.admin_id} className="flex items-center justify-between p-2.5 rounded-lg bg-surface-2">
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <div className="w-7 h-7 rounded-full bg-brand/15 flex items-center justify-center text-[10px] font-medium text-brand flex-shrink-0">
-                                {a.name?.charAt(0).toUpperCase() || "?"}
-                              </div>
-                              <div className="min-w-0">
-                                <div className="text-sm font-medium text-text truncate">{a.name || a.username}</div>
-                                <div className="text-[11px] text-text-muted">@{a.username} · {a.role}</div>
-                              </div>
-                            </div>
-                            {isInTeam ? (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => handleRemoveAgentFromPlatform(a.admin_id)}
-                                disabled={platformAgentAdding === a.admin_id}
-                                className="text-vibrant-coral"
-                              >
-                                {platformAgentAdding === a.admin_id ? <Loading size={12} /> : <UserMinus size={14} />} ลบ
-                              </Button>
-                            ) : (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => handleAddAgentToPlatform(a.admin_id)}
-                                disabled={platformAgentAdding === a.admin_id}
-                              >
-                                {platformAgentAdding === a.admin_id ? <Loading size={12} /> : <UserPlus size={14} />} เพิ่ม
-                              </Button>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="text-xs text-text-muted bg-surface-2 rounded-lg p-3">
-                      ต้องมีสิทธิ์ editor เพื่อจัดทีม
-                    </div>
+                  {sortedAgents.length === 0 && (
+                    <div className="py-8"><EmptyState icon={Users} title="ไม่มี agent" /></div>
                   )}
-                </div>
-              </div>
+                </Card>
+
+                {!editable && (
+                  <div className="flex items-center gap-2 text-[11px] text-text-subtle bg-surface-2 rounded-lg px-3 py-2">
+                    <AlertCircle size={12} /> คุณเป็น Admin — ดูได้อย่างเดียว
+                  </div>
+                )}
+              </>
             )}
-          </Card>
+          </div>
         )}
       </div>
     </div>
@@ -801,5 +998,43 @@ function SummaryCard({
       </div>
       {sub && <div className="text-[11px] text-text-subtle mt-0.5">{sub}</div>}
     </Card>
+  );
+}
+
+/** Toggle switch — ใช้ในจัดทีมร้าน/แพลตฟอร์ม แทนปุ่ม add/remove */
+function ToggleSwitch({
+  checked,
+  disabled,
+  loading,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  loading?: boolean;
+  onChange: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled || loading}
+      onClick={onChange}
+      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+        checked ? "bg-brand" : "bg-surface-2 border border-border"
+      }`}
+    >
+      {loading ? (
+        <span className="absolute left-1/2 -translate-x-1/2">
+          <Loading size={10} />
+        </span>
+      ) : (
+        <span
+          className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${
+            checked ? "translate-x-[18px]" : "translate-x-1"
+          }`}
+        />
+      )}
+    </button>
   );
 }

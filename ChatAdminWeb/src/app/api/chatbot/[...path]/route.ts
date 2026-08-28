@@ -11,6 +11,7 @@
 // it uses shopee's base URL (backward compat with old callers).
 import { NextRequest, NextResponse } from "next/server";
 import { serverConfig } from "@/backend/lib/config";
+import { getCurrentAdmin } from "@/backend/middleware/authorize";
 
 type Platform = "shopee" | "lazada" | "tiktok";
 
@@ -42,6 +43,17 @@ async function proxy(req: NextRequest, segments: string[]) {
   headers.delete("connection");
   // Attach internal secret
   headers.set("X-Internal-Secret", serverConfig.chatbotInternalSecret);
+
+  // ⚡ Attach admin identity (for logging in Python)
+  try {
+    const admin = await getCurrentAdmin(req);
+    if (admin) {
+      headers.set("X-Admin-Id", admin.admin_id);
+      headers.set("X-Admin-Name", encodeURIComponent(admin.name || ""));
+    }
+  } catch {
+    // ignore — ไม่มี admin ก็ผ่านได้
+  }
 
   let body: BodyInit | undefined;
   if (method !== "GET" && method !== "HEAD") {
@@ -87,6 +99,11 @@ export async function PUT(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const segments = req.nextUrl.pathname.replace(/^\/api\/chatbot\//, "").split("/");
+  return proxy(req, segments);
+}
+
+export async function PATCH(req: NextRequest) {
   const segments = req.nextUrl.pathname.replace(/^\/api\/chatbot\//, "").split("/");
   return proxy(req, segments);
 }

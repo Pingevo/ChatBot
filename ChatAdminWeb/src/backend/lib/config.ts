@@ -60,6 +60,14 @@ export const serverConfig = {
     // Phase 9 — bot worker (polling pipeline: trigger → bot → handoff)
     // ⚠️ คำตอบบอทเก็บใน shadow_replies (ไม่เขียนลง messages_shp)
     chatProcessing: required("ADMIN_MONGO_COLLECTION_CHAT_PROCESSING", "chat_processing"),
+    // Phase 3 — per-shop bot persona (admin ตั้งชื่อตัวแทนบอทของแต่ละร้านในหน้า /persona)
+    shopPersonas: required("ADMIN_MONGO_COLLECTION_SHOP_PERSONAS", "shop_personas"),
+    // Phase 10 — per-shop behavior settings (faq_liveagent handoff toggle, etc.)
+    shopSettings: required("ADMIN_MONGO_COLLECTION_SHOP_SETTINGS", "shop_settings"),
+    // ⚡ test chat ratings — เก็บคะแนน/คอมเมนต์/ดาว ของ test chat messages (admin mongo)
+    testChatRatings: required("ADMIN_MONGO_COLLECTION_TEST_CHAT_RATINGS", "test_chat_ratings"),
+    // ⚡ test_assignment — replay results + ratings (per-message + overall conversation)
+    testAssignment: required("ADMIN_MONGO_COLLECTION_TEST_ASSIGNMENT", "test_assignment"),
   },
   jwtSecret: required("ADMIN_JWT_SECRET", "dev-only-secret-change-me"),
   jwtAlgo: "HS256" as const,

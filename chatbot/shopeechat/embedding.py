@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -25,7 +26,8 @@ _model_load_time: float = 0.0
 
 MODEL_NAME = "BAAI/bge-m3"
 EMBEDDING_DIM = 1024  # bge-m3 ให้ vector 1024 มิติ
-DEVICE = "mps"  # Apple Silicon GPU
+# device อ่านจาก env — "mps" (Apple Silicon), "cuda" (NVIDIA GPU), "cpu" (server ทั่วไป)
+DEVICE = os.environ.get("EMBEDDING_DEVICE", "mps").strip() or "mps"
 
 
 def _get_model() -> Any:

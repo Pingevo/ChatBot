@@ -135,20 +135,41 @@ export async function PATCH(
 
   const { shadowReplyId } = await params;
   const body = await readJson<{
-    rating?: "better" | "worse" | "tie" | "unrated";
+    rating?: "good" | "bad" | "unrated";
     notes?: string;
+    star_rating?: number;   // 0-5
+    comment?: string;       // คอมเมนต์
   }>(req);
 
-  if (!body || !body.rating) {
-    return error("rating is required (better|worse|tie|unrated)", 422);
+  if (!body) {
+    return error("body required", 422);
   }
 
-  const validRatings = ["better", "worse", "tie", "unrated"];
-  if (!validRatings.includes(body.rating)) {
+  // ⚡ ไม่บังคับ rating อีกต่อไป — ถ้าไม่ส่ง rating มา ให้ใช้ค่าเดิม (ถ้ามี) หรือ "unrated"
+  let rating = body.rating;
+  if (!rating) {
+    // ดึงค่าปัจจุบันมาก่อน
+    const existing = await shadowReplyService.get(shadowReplyId);
+    rating = (existing?.rating as "good" | "bad" | "unrated" | undefined) || "unrated";
+  }
+
+  const validRatings = ["good", "bad", "unrated"];
+  if (!validRatings.includes(rating)) {
     return error("rating must be better|worse|tie|unrated", 422);
   }
 
-  const ok = await shadowReplyService.rate(shadowReplyId, body.rating, r.ctx.admin.admin_id, body.notes);
+  // validate star_rating ถ้าส่งมา
+  if (body.star_rating != null) {
+    if (typeof body.star_rating !== "number" || body.star_rating < 0 || body.star_rating > 5) {
+      return error("star_rating must be a number 0-5", 422);
+    }
+  }
+
+  const ok = await shadowReplyService.rate(shadowReplyId, rating, r.ctx.admin.admin_id, {
+    notes: body.notes,
+    starRating: body.star_rating,
+    comment: body.comment,
+  });
   if (!ok) return error("shadow reply not found", 404);
 
   await logAdminEvent({
@@ -156,8 +177,10 @@ export async function PATCH(
     actor: r.ctx.admin.admin_id,
     metadata: {
       shadow_reply_id: shadowReplyId,
-      rating: body.rating,
+      rating,
       notes: body.notes,
+      star_rating: body.star_rating,
+      comment: body.comment,
     },
   });
 
@@ -172,14 +195,41 @@ export async function DELETE(
   if (!r.ok) return r.response;
 
   const { shadowReplyId } = await params;
-  const ok = await shadowReplyService.delete(shadowReplyId);
-  if (!ok) return error("shadow reply not found", 404);
+  // soft delete — เก็บประวัติ
+  const ok = await shadowReplyService.delete(shadowReplyId, r.ctx.admin.admin_id, "manual_delete");
+  if (!ok) return error("shadow reply not found (or already deleted)", 404);
 
   await logAdminEvent({
     action_type: "shadow_reply.delete",
     actor: r.ctx.admin.admin_id,
-    metadata: { shadow_reply_id: shadowReplyId },
+    metadata: { shadow_reply_id: shadowReplyId, soft_delete: true },
   });
 
-  return json({ ok: true });
+  return json({ ok: true, soft_deleted: true });
+}
+
+// POST /api/shadow-inbox/[shadowReplyId]?action=restore — restore soft-deleted
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ shadowReplyId: string }> }
+) {
+  const r = await requireDev(req);
+  if (!r.ok) return r.response;
+
+  const { shadowReplyId } = await params;
+  const url = new URL(req.url);
+  const action = url.searchParams.get("action");
+
+  if (action === "restore") {
+    const ok = await shadowReplyService.restore(shadowReplyId);
+    if (!ok) return error("shadow reply not found", 404);
+    await logAdminEvent({
+      action_type: "shadow_reply.restore",
+      actor: r.ctx.admin.admin_id,
+      metadata: { shadow_reply_id: shadowReplyId },
+    });
+    return json({ ok: true, restored: true });
+  }
+
+  return error("unknown action — use ?action=restore", 422);
 }

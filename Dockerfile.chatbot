@@ -1,0 +1,45 @@
+# Dockerfile สำหรับ chatbot backend (ใช้ร่วมทั้ง 3 แพลตฟอร์ม — ต่างกันที่ env)
+# Build: docker build -f Dockerfile.chatbot -t chatbot-shopee .
+# Run:   docker run -p 8010:8010 --env-file .env.chatbot.shopee chatbot-shopee
+
+FROM python:3.11-slim AS base
+
+# ติดตั้ง system deps ที่จำเป็น (sentence-transformers/torch ต้องการ)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# ติดตั้ง Python deps ก่อน (cache layer)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir \
+        sentence-transformers \
+        pythainlp \
+        rapidfuzz
+
+# copy โค้ดทั้งหมด
+COPY chatbot/ ./chatbot/
+COPY exports/ ./exports/
+COPY adminbase/ ./adminbase/
+COPY scripts/ ./scripts/
+
+# โฟลเดอร์เก็บ HF model cache (mount volume ตรงนี้เพื่อไม่ต้องโหลดใหม่ทุกครั้ง)
+ENV HF_HOME=/app/.hf_cache
+ENV TRANSFORMERS_CACHE=/app/.hf_cache
+# default device = cpu (server ทั่วไป) — override ผ่าน env ได้
+ENV EMBEDDING_DEVICE=cpu
+# default port — override ผ่าน env
+ENV UVICORN_HOST=0.0.0.0
+ENV UVICORN_PORT=8010
+
+EXPOSE 8010
+
+# healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=60s \
+    CMD curl -fs http://localhost:${UVICORN_PORT}/health || exit 1
+
+# รัน uvicorn — ตัวแปร APP_MODULE ใช้เลือกบอท (chatbot.shopeechat.app:app / chatbot.lazadachat.app:app / ...)
+CMD ["sh", "-c", "uvicorn ${APP_MODULE:-chatbot.shopeechat.app:app} --host ${UVICORN_HOST:-0.0.0.0} --port ${UVICORN_PORT:-8010}"]

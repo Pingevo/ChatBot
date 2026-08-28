@@ -13,7 +13,7 @@
 //   5. UI แสดงเปรียบเทียบ: inbound | Zaapi reply | Bot shadow reply
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
-import { listMessages, getHistoryForBot } from "./messageService";
+import { listMessages, getHistoryForBot, toBotText } from "./messageService";
 import { getConversation } from "./conversationService";
 import { assertPlatformApiDisabled, type Platform } from "../lib/safety";
 
@@ -36,12 +36,32 @@ export interface ShadowReplyDoc extends Document {
   zaapi_reply_text?: string;       // คำตอมของ Zaapi/sellcenter (ถ้ามีใน messages)
   zaapi_reply_message_id?: string;
   // evaluation — admin ให้คะแนน
-  rating?: "better" | "worse" | "tie" | "unrated";  // bot vs zaapi
+  rating?: "good" | "bad" | "unrated";  // bot vs zaapi
   rated_by?: string;
   rated_at?: Date;
   notes?: string;                  // หมายเหตุของ admin
+  star_rating?: number;            // คะแนนดาว 0-5 (รองรับทศนิยม เช่น 4.5)
+  star_rated_by?: string;
+  star_rated_at?: Date;
+  comment?: string;                // คอมเมนต์ว่าบอทตอบดี/ไม่ดี มีปัญหายังไง
+  comment_by?: string;
+  comment_at?: Date;
+  // soft delete — ไม่ hard delete เก็บประวัติ
+  deleted_at?: Date;
+  deleted_by?: string;
+  delete_reason?: string;
   origin?: "worker" | "manual" | "manual_conversation";    // ที่มา — worker (auto) / manual (Generate เอง) / manual_conversation (Generate ทั้งหมด)
   trigger_id?: string;             // ถ้าตอบเพราะ trigger match (worker เท่านั้น)
+  bot_routing_decision?: {         // routing decision จาก bot (observability)
+    path?: string;
+    reason?: string;
+    trigger_matched?: string | null;
+    shop_settings_action?: string | null;
+    assigned_admin?: string | null;
+    handoff_reason?: string | null;
+  };
+  bot_handoff_to_admin?: boolean;
+  bot_handoff_reason?: string;
   created_at: Date;
   updated_at: Date;
 }
@@ -57,9 +77,11 @@ export async function listShadowReplies(opts: {
   platform?: Platform;
   shopId?: string;
   conversationId?: string;
-  rating?: "better" | "worse" | "tie" | "unrated";
+  rating?: "good" | "bad" | "unrated";
   origin?: "worker" | "manual" | "manual_conversation";
   limit?: number;
+  includeDeleted?: boolean;  // ถ้า true → รวม soft-deleted
+  deletedOnly?: boolean;     // ถ้า true → ดึงเฉพาะที่ถูก soft delete
 } = {}): Promise<ShadowReplyDoc[]> {
   const coll = await getCollection<ShadowReplyDoc>(COLLECTIONS.shadowReplies);
   const filter: Record<string, unknown> = {};
@@ -68,6 +90,12 @@ export async function listShadowReplies(opts: {
   if (opts.conversationId) filter.conversation_id = opts.conversationId;
   if (opts.rating) filter.rating = opts.rating;
   if (opts.origin) filter.origin = opts.origin;
+  // soft delete — กรองออก by default
+  if (opts.deletedOnly) {
+    filter.deleted_at = { $exists: true };
+  } else if (!opts.includeDeleted) {
+    filter.deleted_at = { $exists: false };
+  }
   return coll
     .find(filter)
     .sort({ created_at: -1 })
@@ -78,9 +106,13 @@ export async function listShadowReplies(opts: {
 /**
  * Get one shadow reply
  */
-export async function getShadowReply(shadowReplyId: string): Promise<ShadowReplyDoc | null> {
+export async function getShadowReply(shadowReplyId: string, opts?: { includeDeleted?: boolean }): Promise<ShadowReplyDoc | null> {
   const coll = await getCollection<ShadowReplyDoc>(COLLECTIONS.shadowReplies);
-  return coll.findOne({ shadow_reply_id: shadowReplyId });
+  const filter: Record<string, unknown> = { shadow_reply_id: shadowReplyId };
+  if (!opts?.includeDeleted) {
+    filter.deleted_at = { $exists: false };
+  }
+  return coll.findOne(filter);
 }
 
 /**
@@ -142,11 +174,16 @@ export async function generateShadowReply(opts: {
     maxMessages: 10,
   });
 
+  // ⚠️ Enrich text สำหรับ rich-media messages — ถ้าลูกค้าแชร์การ์ดสินค้า
+  // `text` จะเป็น placeholder "[item]" แต่ raw_payload มี item_id แปลงเป็น tag
+  // "[สินค้า: <item_id>]" ที่ Python bot เข้าใจ ก่อนส่งให้ bot
+  const botText = toBotText(inboundMsg);
+
   // เรียก bot ของเรา (ผ่าน botCaller — ไม่ได้เรียก platform API)
   // ⚠️ ส่ง shopName (ชื่อร้าน) ให้ bot ด้วย เพราะ Python bot กรองสินค้าด้วยชื่อร้าน
   const botResp = await botCaller({
     platform: conv.platform,
-    message: inboundMsg.text,
+    message: botText,
     history,
     shopId: conv.shop_id,
     shopName: conv.shop_name,
@@ -172,7 +209,7 @@ export async function generateShadowReply(opts: {
     shop_id: conv.shop_id,
     platform: conv.platform,
     inbound_message_id: inboundMsg.message_id,
-    inbound_text: inboundMsg.text,
+    inbound_text: botText,  // snapshot สิ่งที่ bot เห็นจริง (อาจเป็น tag [สินค้า: <item_id>] ถ้าเป็นการ์ดสินค้า)
     bot_reply_text: botResp.answer,
     bot_source: botResp.source,
     bot_model: botResp.model,
@@ -185,6 +222,9 @@ export async function generateShadowReply(opts: {
     zaapi_reply_message_id: zaapiReply?.message_id,
     rating: "unrated",
     origin: "manual",  // สร้างจากหน้า Shadow Inbox (กด Generate)
+    bot_routing_decision: (botResp as any).routing_decision,
+    bot_handoff_to_admin: (botResp as any).handoff_to_admin,
+    bot_handoff_reason: (botResp as any).handoff_reason,
     created_at: now,
     updated_at: now,
   };
@@ -278,13 +318,16 @@ export async function generateConversationShadowReplies(opts: {
 
   for (let idx = 0; idx < pairs.length; idx++) {
     const pair = pairs[idx];
-    onProgress?.(idx + 1, pairs.length, { inbound_text: pair.inboundMsg.text });
+    // ⚠️ Enrich text สำหรับ rich-media messages — ถ้าลูกค้าแชร์การ์ดสินค้า
+    // `text` จะเป็น placeholder "[item]" แปลงเป็น tag [สินค้า: <item_id>] ก่อนส่ง bot
+    const botText = toBotText(pair.inboundMsg);
+    onProgress?.(idx + 1, pairs.length, { inbound_text: botText });
 
     // เรียก bot ของเรา — ส่ง history ที่สะสม (เก็บเฉพาะ 20 ข้อความล่าสุด)
     const trimmedHistory = accumulatedHistory.slice(-MAX_HISTORY);
     const botResp = await botCaller({
       platform: conv.platform,
-      message: pair.inboundMsg.text,
+      message: botText,
       history: [...trimmedHistory], // copy เพื่อกัน mutation
       shopId: conv.shop_id,
       shopName: conv.shop_name,
@@ -298,7 +341,7 @@ export async function generateConversationShadowReplies(opts: {
       shop_id: conv.shop_id,
       platform: conv.platform,
       inbound_message_id: pair.inboundMsg.message_id,
-      inbound_text: pair.inboundMsg.text,
+      inbound_text: botText,  // snapshot สิ่งที่ bot เห็นจริง
       bot_reply_text: botResp.answer,
       bot_source: botResp.source,
       bot_model: botResp.model,
@@ -311,6 +354,9 @@ export async function generateConversationShadowReplies(opts: {
       zaapi_reply_message_id: pair.zaapiReply?.message_id,
       rating: "unrated",
       origin: "manual_conversation",  // Generate ทั้งหมด — ไม่ปนกับ Generate เอง
+      bot_routing_decision: (botResp as any).routing_decision,
+      bot_handoff_to_admin: (botResp as any).handoff_to_admin,
+      bot_handoff_reason: (botResp as any).handoff_reason,
       created_at: now,
       updated_at: now,
     };
@@ -318,9 +364,9 @@ export async function generateConversationShadowReplies(opts: {
     results.push(doc);
 
     // ⚡ เพิ่ม Q&A นี้เข้า history สำหรับรอบถัดไป
-    //    user question → role "user"
+    //    user question → role "user" (ใช้ botText เพื่อให้รอบถัดไป bot เห็น tag สินค้าถ้ามี)
     //    bot reply เรา → role "model" (ไม่ใช่ Zaapi reply)
-    accumulatedHistory.push({ role: "user", text: pair.inboundMsg.text });
+    accumulatedHistory.push({ role: "user", text: botText });
     accumulatedHistory.push({ role: "model", text: botResp.answer });
   }
 
@@ -329,22 +375,87 @@ export async function generateConversationShadowReplies(opts: {
 
 /**
  * Rate a shadow reply — admin ให้คะแนนเปรียบเทียบ bot vs zaapi
+ * + star rating (0-5) + comment
  */
 export async function rateShadowReply(
   shadowReplyId: string,
-  rating: "better" | "worse" | "tie" | "unrated",
+  rating: "good" | "bad" | "unrated",
   ratedBy: string,
-  notes?: string
+  opts?: {
+    notes?: string;
+    starRating?: number;   // 0-5
+    comment?: string;      // คอมเมนต์
+  }
+): Promise<boolean> {
+  const coll = await getCollection<ShadowReplyDoc>(COLLECTIONS.shadowReplies);
+  const update: Record<string, unknown> = {
+    rating,
+    rated_by: ratedBy,
+    rated_at: new Date(),
+    updated_at: new Date(),
+  };
+  if (opts?.notes !== undefined) update.notes = opts.notes;
+  if (opts?.starRating !== undefined) {
+    const star = Math.max(0, Math.min(5, opts.starRating));
+    update.star_rating = star;
+    update.star_rated_by = ratedBy;
+    update.star_rated_at = new Date();
+  }
+  if (opts?.comment !== undefined) {
+    update.comment = opts.comment;
+    update.comment_by = ratedBy;
+    update.comment_at = new Date();
+  }
+  const result = await coll.updateOne(
+    { shadow_reply_id: shadowReplyId },
+    { $set: update }
+  );
+  return result.modifiedCount > 0;
+}
+
+/**
+ * Soft delete all shadow replies — ล้างข้อมูลทั้งหมด (soft delete)
+ * ใช้ตอนอยากเริ่มใหม่ แต่ยังเก็บประวัติ
+ */
+export async function clearAllShadowReplies(opts?: {
+  platform?: Platform;
+  shopId?: string;
+  deletedBy?: string;
+  reason?: string;
+}): Promise<{ softDeletedCount: number }> {
+  const coll = await getCollection<ShadowReplyDoc>(COLLECTIONS.shadowReplies);
+  const filter: Record<string, unknown> = { deleted_at: { $exists: false } };
+  if (opts?.platform) filter.platform = opts.platform;
+  if (opts?.shopId) filter.shop_id = opts.shopId;
+  const now = new Date();
+  const result = await coll.updateMany(filter, {
+    $set: {
+      deleted_at: now,
+      deleted_by: opts?.deletedBy || "system",
+      delete_reason: opts?.reason || "clear_all",
+      updated_at: now,
+    },
+  });
+  return { softDeletedCount: result.modifiedCount };
+}
+
+/**
+ * Soft delete a shadow reply — ไม่ hard delete เก็บประวัติ
+ * ตั้ง deleted_at + deleted_by + delete_reason
+ */
+export async function deleteShadowReply(
+  shadowReplyId: string,
+  deletedBy: string,
+  reason?: string
 ): Promise<boolean> {
   const coll = await getCollection<ShadowReplyDoc>(COLLECTIONS.shadowReplies);
   const result = await coll.updateOne(
-    { shadow_reply_id: shadowReplyId },
+    { shadow_reply_id: shadowReplyId, deleted_at: { $exists: false } },
     {
       $set: {
-        rating,
-        rated_by: ratedBy,
-        rated_at: new Date(),
-        notes: notes,
+        deleted_at: new Date(),
+        deleted_by: deletedBy,
+        delete_reason: reason || "",
         updated_at: new Date(),
       },
     }
@@ -353,12 +464,36 @@ export async function rateShadowReply(
 }
 
 /**
- * Delete a shadow reply (hard delete — เป็น data ทดสอบ ไม่ใช่ production data)
+ * Restore a soft-deleted shadow reply
  */
-export async function deleteShadowReply(shadowReplyId: string): Promise<boolean> {
+export async function restoreShadowReply(shadowReplyId: string): Promise<boolean> {
   const coll = await getCollection<ShadowReplyDoc>(COLLECTIONS.shadowReplies);
-  const result = await coll.deleteOne({ shadow_reply_id: shadowReplyId });
-  return result.deletedCount > 0;
+  const result = await coll.updateOne(
+    { shadow_reply_id: shadowReplyId },
+    {
+      $unset: { deleted_at: "", deleted_by: "", delete_reason: "" },
+      $set: { updated_at: new Date() },
+    }
+  );
+  return result.modifiedCount > 0;
+}
+
+/**
+ * Restore ทั้งหมดที่ถูก soft delete — ใช้ในหน้าถังขยะ
+ */
+export async function restoreAllShadowReplies(opts?: {
+  platform?: Platform;
+  shopId?: string;
+}): Promise<{ restoredCount: number }> {
+  const coll = await getCollection<ShadowReplyDoc>(COLLECTIONS.shadowReplies);
+  const filter: Record<string, unknown> = { deleted_at: { $exists: true } };
+  if (opts?.platform) filter.platform = opts.platform;
+  if (opts?.shopId) filter.shop_id = opts.shopId;
+  const result = await coll.updateMany(filter, {
+    $unset: { deleted_at: "", deleted_by: "", delete_reason: "" },
+    $set: { updated_at: new Date() },
+  });
+  return { restoredCount: result.modifiedCount };
 }
 
 /**
@@ -367,14 +502,23 @@ export async function deleteShadowReply(shadowReplyId: string): Promise<boolean>
 export async function getShadowReplyStats(opts: {
   platform?: Platform;
   shopId?: string;
+  conversationId?: string;
 } = {}): Promise<{
   total: number;
   rated: number;
-  better: number;
-  worse: number;
-  tie: number;
+  good: number;
+  bad: number;
   unrated: number;
-  bot_win_rate: number; // (better + tie*0.5) / rated
+  bot_win_rate: number; // good / rated
+  // star rating
+  star_rated: number;          // จำนวนที่ให้ดาว
+  avg_star: number;            // คะแนนดาวเฉลี่ย (0-5)
+  star_5: number;
+  star_4: number;              // 4-4.9
+  star_3: number;              // 3-3.9
+  star_below3: number;         // < 3
+  // comment
+  commented: number;           // จำนวนที่มี comment
   // cost + performance metrics
   total_cost_usd: number;
   total_cost_thb: number;
@@ -384,18 +528,31 @@ export async function getShadowReplyStats(opts: {
   avg_tokens: number;
 }> {
   const coll = await getCollection<ShadowReplyDoc>(COLLECTIONS.shadowReplies);
-  const filter: Record<string, unknown> = {};
+  const filter: Record<string, unknown> = { deleted_at: { $exists: false } };
   if (opts.platform) filter.platform = opts.platform;
   if (opts.shopId) filter.shop_id = opts.shopId;
+  if (opts.conversationId) filter.conversation_id = opts.conversationId;
 
   const docs = await coll.find(filter).toArray();
   const total = docs.length;
   const rated = docs.filter((d) => d.rating && d.rating !== "unrated").length;
-  const better = docs.filter((d) => d.rating === "better").length;
-  const worse = docs.filter((d) => d.rating === "worse").length;
-  const tie = docs.filter((d) => d.rating === "tie").length;
+  const good = docs.filter((d) => d.rating === "good").length;
+  const bad = docs.filter((d) => d.rating === "bad").length;
   const unrated = docs.filter((d) => !d.rating || d.rating === "unrated").length;
-  const bot_win_rate = rated > 0 ? (better + tie * 0.5) / rated : 0;
+  const bot_win_rate = rated > 0 ? good / rated : 0;
+
+  // star rating
+  const starDocs = docs.filter((d) => d.star_rating != null);
+  const star_rated = starDocs.length;
+  const starSum = starDocs.reduce((s, d) => s + (d.star_rating || 0), 0);
+  const avg_star = star_rated > 0 ? starSum / star_rated : 0;
+  const star_5 = starDocs.filter((d) => (d.star_rating || 0) >= 5).length;
+  const star_4 = starDocs.filter((d) => (d.star_rating || 0) >= 4 && (d.star_rating || 0) < 5).length;
+  const star_3 = starDocs.filter((d) => (d.star_rating || 0) >= 3 && (d.star_rating || 0) < 4).length;
+  const star_below3 = starDocs.filter((d) => (d.star_rating || 0) < 3).length;
+
+  // comment
+  const commented = docs.filter((d) => d.comment && d.comment.trim().length > 0).length;
 
   // cost + performance
   const costs = docs.map((d) => d.bot_cost_usd || 0);
@@ -411,7 +568,9 @@ export async function getShadowReplyStats(opts: {
   const avg_tokens = total > 0 ? total_tokens / total : 0;
 
   return {
-    total, rated, better, worse, tie, unrated, bot_win_rate,
+    total, rated, good, bad, unrated, bot_win_rate,
+    star_rated, avg_star, star_5, star_4, star_3, star_below3,
+    commented,
     total_cost_usd, total_cost_thb, avg_cost_usd, avg_elapsed_ms,
     total_tokens, avg_tokens,
   };
@@ -424,5 +583,8 @@ export const shadowReplyService = {
   generateConversation: generateConversationShadowReplies,
   rate: rateShadowReply,
   delete: deleteShadowReply,
+  restore: restoreShadowReply,
+  restoreAll: restoreAllShadowReplies,
+  clearAll: clearAllShadowReplies,
   stats: getShadowReplyStats,
 };

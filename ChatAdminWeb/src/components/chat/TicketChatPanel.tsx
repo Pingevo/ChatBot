@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/Button";
 import { quickReplyService, type QuickReplyRow } from "@/lib/services";
 import type { Conversation, ChatMessage, Topic } from "@/lib/types";
 import { MessageContent } from "./MessageContent";
+import { splitAnswerSegments } from "@/lib/answerSegments";
 
 // ─── label maps ────────────────────────────────────────────────────────────────
 
@@ -143,25 +144,45 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
     );
   }
 
+  // ⚡ Multi-bubble — bot แบ่งคำตอบด้วย ||| → render เป็นหลาย bubble แยก
+  // แต่ละ segment เป็น bubble ของตัวเอง (มี gap), products/table แสดงที่ segment สุดท้าย
+  // user/admin message ทั่วไปที่ไม่มี ||| จะผ่าน path เดิม (1 bubble)
+  const segments = !isUser && !isSystem ? splitAnswerSegments(msg.text) : [msg.text];
+  const hasMultiSegments = segments.length > 1;
+
+  // สร้าง msg สำหรับแต่ละ segment — segment สุดท้ายเก็บ products/table เดิม
+  const segmentMsgs = hasMultiSegments
+    ? segments.map((seg, i) => ({
+        ...msg,
+        // segment สุดท้ายเก็บ products/table ไว้แสดง ที่อื่นละทิ้ง (กันซ้ำ)
+        text: seg,
+        products: i === segments.length - 1 ? msg.products : undefined,
+        table: i === segments.length - 1 ? msg.table : undefined,
+      }))
+    : [msg];
+
   return (
     <div className={`flex gap-2.5 ${isUser ? "justify-start" : "justify-end"} animate-fade-in`}>
       {isUser && <Avatar name="User" size={32} className="mt-1 shrink-0" />}
-      <div className={`max-w-[70%] ${isUser ? "" : "flex flex-col items-end"}`}>
+      <div className={`max-w-[70%] ${isUser ? "" : "flex flex-col items-end gap-1"}`}>
         {/* แสดงชื่อ admin ถ้าเป็น admin message */}
         {isAdmin && msg.admin_name && (
           <div className="text-[10px] text-text-muted mb-0.5 pr-1">{msg.admin_name}</div>
         )}
-        <div
-          className={`rounded-2xl px-3.5 py-2 text-sm ${
-            isUser
-              ? "bg-surface border border-border text-text rounded-tl-sm"
-              : isAdmin
-              ? "bg-deep-space text-white rounded-tr-sm"
-              : "bg-brand text-white rounded-tr-sm"
-          }`}
-        >
-          <MessageContent msg={msg} variant={isUser ? "user" : "out"} />
-        </div>
+        {segmentMsgs.map((segMsg, i) => (
+          <div
+            key={i}
+            className={`rounded-2xl px-3.5 py-2 text-sm ${
+              isUser
+                ? "bg-surface border border-border text-text rounded-tl-sm"
+                : isAdmin
+                ? "bg-deep-space text-white rounded-tr-sm"
+                : "bg-brand text-white rounded-tr-sm"
+            }`}
+          >
+            <MessageContent msg={segMsg} variant={isUser ? "user" : "out"} />
+          </div>
+        ))}
 
         <div className="flex items-center gap-1.5 mt-1 text-[10px] text-text-subtle">
           {isBot && <Bot size={10} />}

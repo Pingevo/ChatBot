@@ -8,7 +8,7 @@
 // ⛔ ห้ามเรียก Shopee API
 // เฉพาะ dev เท่านั้น
 import { useState, useEffect, useCallback } from "react";
-import { ArrowLeft, Info, PanelRightClose, PanelRightOpen, Zap, RefreshCw } from "lucide-react";
+import { ArrowLeft, Info, PanelRightClose, PanelRightOpen, Zap, RefreshCw, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Loading } from "@/components/ui/Loading";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -67,15 +67,22 @@ export default function ShadowInboxPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ShadowReplyDetail | null>(null);
   const [stats, setStats] = useState<ShadowStats | null>(null);
+  const [convStats, setConvStats] = useState<ShadowStats | null>(null);
+  const [loadingConvStats, setLoadingConvStats] = useState(false);
+  const [clearingAll, setClearingAll] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [ratingId, setRatingId] = useState<string | null>(null);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [mobileView, setMobileView] = useState<MobileView>("list");
-  // origin filter — "all" = ทั้งหมด, "manual" = Generate เอง, "history" = ประวัติ bot ตอบ
-  const [originFilter, setOriginFilter] = useState<"all" | "manual" | "history">("all");
+  // origin filter — "all" = ทั้งหมด, "manual" = Generate เอง, "history" = ประวัติ bot ตอบ, "trash" = ถังขยะ
+  const [originFilter, setOriginFilter] = useState<"all" | "manual" | "history" | "trash">("all");
+  // ⚡ trash tab — soft-deleted shadow replies
+  const [trashRows, setTrashRows] = useState<ShadowReplyListItem[]>([]);
   // ⚡ history tab — ดึง shadow_replies ทั้งหมด จัดกลุ่มตาม conversation
   const [historyReplies, setHistoryReplies] = useState<ShadowReplyListItem[]>([]);
+  // ⚡ history conversations — ดึงเฉพาะที่มี shadow_replies (endpoint เฉพาะ) แทนโหลดทั้งหมด
+  const [historyConversations, setHistoryConversations] = useState<Conversation[]>([]);
 
   // ⚡ tab "ทั้งหมด" — ใช้ ChatList เหมือน ticket inbox
   const [chatConversations, setChatConversations] = useState<Conversation[]>([]);
@@ -95,16 +102,43 @@ export default function ShadowInboxPage() {
     try {
       if (originFilter === "all") {
         // "ทั้งหมด" = ดึงจาก ticket inbox (conversations) เหมือนหน้า ticket
+        // ⚡ ใช้ limit 2000 (default ของ backend) แทน 10000 — กัน timeout 30s
+        // ถ้าต้องการดูเก่ากว่านั้นให้ scroll ใน ChatList (filter/sort ทำใน frontend)
         const r = await api().get<Conversation[]>("/admin/conversations", {
-          params: { assigned_to: "all", limit: 10000 },
+          params: { assigned_to: "all", limit: 2000 },
+          // ⚡ ตั้ง timeout 45s กัน axios ตัดก่อน backend ทำเสร็จ
+          timeout: 45000,
         });
         const data = Array.isArray(r.data) ? r.data : ((r.data as unknown as { rows?: Conversation[] }).rows || []);
         setChatConversations(data);
       } else if (originFilter === "history") {
-        // "History" = ดึง shadow_replies ทั้งหมด (ทุก origin) จัดกลุ่มตาม conversation
-        const params: Record<string, string> = { limit: "500" };
-        const r = await api().get<{ rows: ShadowReplyListItem[] }>("/shadow-inbox", { params });
-        setHistoryReplies(r.data.rows || []);
+        // "History" = ดึง conversations ที่ถูก generate ทั้งแชท (origin=manual_conversation)
+        // + ดึง shadow_replies origin=manual_conversation เพื่อ map เข้า panel
+        // แยก fetch แบบ parallel เพื่อความเร็ว
+        // ⚡ cache-buster timestamp กัน browser/Next.js cache ข้อมูลเก่า
+        const _bust = Date.now();
+        const [convR, repliesR] = await Promise.all([
+          api().get<Conversation[]>("/shadow-inbox/conversations", {
+            timeout: 30000,
+            headers: { "Cache-Control": "no-cache, no-store, must-revalidate", "X-Bust": String(_bust) },
+            params: { _t: _bust },
+          }),
+          api().get<{ rows: ShadowReplyListItem[] }>("/shadow-inbox", {
+            params: { limit: "500", origin: "manual_conversation", _t: _bust },
+            timeout: 30000,
+            headers: { "Cache-Control": "no-cache, no-store, must-revalidate", "X-Bust": String(_bust) },
+          }),
+        ]);
+        setHistoryConversations(Array.isArray(convR.data) ? convR.data : []);
+        // filter เฉพาะ rows ที่ bot_reply_text ไม่ว่าง — กัน conversation ที่ bot ไม่ได้ตอบโผล่ใน panel
+        const allRows = repliesR.data.rows || [];
+        setHistoryReplies(allRows.filter((r) => r.bot_reply_text && r.bot_reply_text.trim().length > 0));
+      } else if (originFilter === "trash") {
+        // "ถังขยะ" = ดึงเฉพาะที่ถูก soft delete
+        const r = await api().get<{ rows: ShadowReplyListItem[] }>("/shadow-inbox", {
+          params: { limit: "500", deleted: "1" },
+        });
+        setTrashRows(r.data.rows || []);
       } else {
         // "Generate เอง" = ดึงจาก shadow_replies (origin=manual เท่านั้น ไม่รวม manual_conversation)
         const params: Record<string, string> = { limit: "500", origin: "manual" };
@@ -116,6 +150,8 @@ export default function ShadowInboxPage() {
       setRows([]);
       setChatConversations([]);
       setHistoryReplies([]);
+      setHistoryConversations([]);
+      setTrashRows([]);
     } finally {
       setLoading(false);
     }
@@ -127,6 +163,23 @@ export default function ShadowInboxPage() {
       setStats(r.data.stats);
     } catch {
       setStats(null);
+    }
+  }, []);
+
+  // load per-conversation stats — สถิติเฉพาะ conversation ที่เลือก
+  const loadConvStats = useCallback(async (conversationId: string | null) => {
+    if (!conversationId) {
+      setConvStats(null);
+      return;
+    }
+    setLoadingConvStats(true);
+    try {
+      const r = await api().get<{ stats: ShadowStats }>(`/shadow-inbox?stats=1&conversation_id=${encodeURIComponent(conversationId)}`);
+      setConvStats(r.data.stats);
+    } catch {
+      setConvStats(null);
+    } finally {
+      setLoadingConvStats(false);
     }
   }, []);
 
@@ -165,15 +218,34 @@ export default function ShadowInboxPage() {
   }, [canView, load, loadStats]);
 
   useEffect(() => {
-    if (selectedId) loadDetail(selectedId);
-    else {
+    if (selectedId) {
+      loadDetail(selectedId);
+      // หา conversation_id จาก context — ใช้สำหรับ per-conv stats
+      // tab "Generate เอง": ใช้ detail.conversation_id (หลัง load)
+      // tab "ทั้งหมด"/"History": ใช้ selectedId เป็น conversation_id โดยตรง
+      if (originFilter === "all" || originFilter === "history") {
+        loadConvStats(selectedId);
+      } else {
+        // ใน tab manual — ต้องรอ detail load เสร็จก่อน (ดู useEffect ด้านล่าง)
+        loadConvStats(null);
+      }
+    } else {
       setDetail(null);
       setChatMessages([]);
+      setConvStats(null);
     }
-  }, [selectedId, loadDetail]);
+  }, [selectedId, loadDetail, loadConvStats, originFilter]);
 
-  // Polling — ลด rate เพื่อลดการกระพริบ
-  usePolling(load, 10000, { enabled: canView });
+  // เมื่อ detail โหลดเสร็จ (tab manual) → โหลด per-conv stats
+  useEffect(() => {
+    if (detail?.conversation_id && originFilter === "manual") {
+      loadConvStats(detail.conversation_id);
+    }
+  }, [detail?.conversation_id, detail?.shadow_reply_id, originFilter, loadConvStats]);
+
+  // Polling — ลด rate เพื่อลด timeout/กระพริบ
+  // ⚡ tab History โหลดหนัก → poll ช้ากว่า tab อื่น (20s vs 10s)
+  usePolling(load, originFilter === "history" ? 20000 : 10000, { enabled: canView });
   usePolling(loadStats, 30000, { enabled: canView });
 
   const handleSelect = useCallback((id: string) => {
@@ -236,7 +308,7 @@ export default function ShadowInboxPage() {
     }
   }
 
-  async function handleRate(id: string, rating: "better" | "worse" | "tie" | "unrated") {
+  async function handleRate(id: string, rating: "good" | "bad" | "unrated") {
     setRatingId(id);
     try {
       await api().patch(`/shadow-inbox/${id}`, { rating });
@@ -247,6 +319,7 @@ export default function ShadowInboxPage() {
       }
       setRows((prev) => prev.map((r) => r.shadow_reply_id === id ? { ...r, rating } : r));
       await loadStats();
+      if (detail?.conversation_id) await loadConvStats(detail.conversation_id);
     } catch (err) {
       catchError(err, "ให้คะแนนไม่สำเร็จ");
     } finally {
@@ -254,17 +327,80 @@ export default function ShadowInboxPage() {
     }
   }
 
+  async function handleStar(id: string, star: number) {
+    setRatingId(id);
+    try {
+      // ถ้ายังไม่มี rating → default เป็น "unrated" (เพื่อให้ PATCH ผ่าน)
+      const currentRating = detail?.rating || "unrated";
+      await api().patch(`/shadow-inbox/${id}`, { rating: currentRating, star_rating: star });
+      toast.success(star > 0 ? `ให้ดาว ${star} ดาว` : "ล้างดาวแล้ว");
+      if (detail && detail.shadow_reply_id === id) {
+        setDetail({ ...detail, star_rating: star });
+      }
+      await loadStats();
+      if (detail?.conversation_id) await loadConvStats(detail.conversation_id);
+    } catch (err) {
+      catchError(err, "ให้ดาวไม่สำเร็จ");
+    } finally {
+      setRatingId(null);
+    }
+  }
+
+  async function handleComment(id: string, comment: string) {
+    setRatingId(id);
+    try {
+      const currentRating = detail?.rating || "unrated";
+      await api().patch(`/shadow-inbox/${id}`, { rating: currentRating, comment });
+      toast.success(comment ? "บันทึกคอมเมนต์แล้ว" : "ล้างคอมเมนต์แล้ว");
+      if (detail && detail.shadow_reply_id === id) {
+        setDetail({ ...detail, comment });
+      }
+      await loadStats();
+      if (detail?.conversation_id) await loadConvStats(detail.conversation_id);
+    } catch (err) {
+      catchError(err, "บันทึกคอมเมนต์ไม่สำเร็จ");
+    } finally {
+      setRatingId(null);
+    }
+  }
+
+  async function handleClearAll() {
+    const ok = await confirm.ask({
+      title: "ล้างข้อมูล Shadow Replies ทั้งหมด?",
+      message: "จะ soft delete shadow replies ที่บอทเคยตอบทั้งหมด (เก็บประวัติ สามารถ restore ได้) — ไม่ได้ลบถาวร",
+      confirmText: "ล้างทั้งหมด",
+      variant: "danger",
+    });
+    if (!ok) return;
+    setClearingAll(true);
+    try {
+      const r = await api().delete<{ soft_deleted_count: number }>("/shadow-inbox?clear_all=1");
+      toast.success(`ล้างข้อมูลแล้ว (${r.data.soft_deleted_count} รายการ — soft delete)`);
+      setSelectedId(null);
+      setDetail(null);
+      setRows([]);
+      setHistoryReplies([]);
+      setConvStats(null);
+      await load();
+      await loadStats();
+    } catch (err) {
+      catchError(err, "ล้างข้อมูลไม่สำเร็จ");
+    } finally {
+      setClearingAll(false);
+    }
+  }
+
   async function handleDelete(id: string) {
     const ok = await confirm.ask({
       title: "ลบ shadow reply?",
-      message: "ลบรายการเปรียบเทียบนี้ — ไม่สามารถกู้คืนได้",
+      message: "รายการนี้จะถูก soft delete (เก็บประวัติ สามารถ restore ได้) — ไม่ได้ลบถาวร",
       confirmText: "ลบ",
       variant: "danger",
     });
     if (!ok) return;
     try {
       await api().delete(`/shadow-inbox/${id}`);
-      toast.success("ลบ shadow reply แล้ว");
+      toast.success("ลบ shadow reply แล้ว (soft delete)");
       if (selectedId === id) {
         setSelectedId(null);
         setDetail(null);
@@ -273,6 +409,37 @@ export default function ShadowInboxPage() {
       await loadStats();
     } catch (err) {
       catchError(err, "ลบไม่สำเร็จ");
+    }
+  }
+
+  // ⚡ restore ทีละรายการ
+  async function handleRestore(id: string) {
+    try {
+      await api().post(`/shadow-inbox/${id}?action=restore`);
+      toast.success("กู้คืนแล้ว");
+      setTrashRows((prev) => prev.filter((r) => r.shadow_reply_id !== id));
+      await loadStats();
+    } catch (err) {
+      catchError(err, "กู้คืนไม่สำเร็จ");
+    }
+  }
+
+  // ⚡ restore ทั้งหมด
+  async function handleRestoreAll() {
+    const ok = await confirm.ask({
+      title: "กู้คืนทั้งหมด?",
+      message: `จะกู้คืน shadow replies ที่ถูก soft delete ทั้งหมด (${trashRows.length} รายการ)`,
+      confirmText: "กู้คืนทั้งหมด",
+      variant: "primary",
+    });
+    if (!ok) return;
+    try {
+      const r = await api().put<{ restored_count: number }>("/shadow-inbox?action=restore_all");
+      toast.success(`กู้คืนแล้ว ${r.data.restored_count} รายการ`);
+      setTrashRows([]);
+      await loadStats();
+    } catch (err) {
+      catchError(err, "กู้คืนทั้งหมดไม่สำเร็จ");
     }
   }
 
@@ -312,43 +479,45 @@ export default function ShadowInboxPage() {
   }
 
   return (
-    <div className="h-full flex">
+    <div className="h-full flex overflow-hidden">
       {/* ── Panel ซ้าย: Shadow Inbox List ── */}
-      <div className={`${mobileView === "list" ? "flex" : "hidden"} md:flex h-full flex-col w-full md:w-72 shrink-0 border-r border-border`}>
-        {/* Origin filter tabs — ทั้งหมด / Generate เอง / History */}
-        <div className="flex items-center gap-1 px-3 py-2 border-b border-border bg-surface-2">
+      <div className={`${mobileView === "list" ? "flex" : "hidden"} md:flex h-full flex-col w-full md:w-72 min-w-0 shrink-0 border-r border-border overflow-hidden relative`}>
+        {/* Origin filter tabs — ทั้งหมด / Message / History / ถังขยะ */}
+        <div className="grid grid-cols-4 gap-0 border-b border-border bg-surface-2 shrink-0">
           {([
             { key: "all", label: "ทั้งหมด" },
-            { key: "manual", label: "Generate เอง" },
+            { key: "manual", label: "Message" },
             { key: "history", label: "History" },
-          ] as const).map((t) => (
-            <button
-              key={t.key}
-              onClick={() => {
-                setOriginFilter(t.key);
-                setSelectedId(null);
-                setDetail(null);
-                setChatMessages([]);
-                setLoading(true);
-              }}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
-                originFilter === t.key
-                  ? "bg-brand text-white"
-                  : "bg-surface text-text-muted hover:text-text"
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
+            { key: "trash", label: "ถังขยะ" },
+          ] as const).map((t) => {
+            const active = originFilter === t.key;
+            return (
+              <button
+                key={t.key}
+                onClick={() => {
+                  setOriginFilter(t.key);
+                  setSelectedId(null);
+                  setDetail(null);
+                  setChatMessages([]);
+                  setLoading(true);
+                }}
+                className={`flex items-center justify-center px-1 py-2 text-[10px] font-medium transition-colors border-b-2 whitespace-nowrap ${
+                  active
+                    ? "border-brand text-brand bg-surface"
+                    : "border-transparent text-text-muted hover:text-text hover:bg-surface"
+                }`}
+              >
+                {t.label}
+              </button>
+            );
+          })}
         </div>
         {originFilter === "all" || originFilter === "history" ? (
           /* ⚡ tab "ทั้งหมด" และ "History" — ใช้ ChatList เหมือน ticket inbox */
           <ChatList
             conversations={
               originFilter === "history"
-                ? chatConversations.filter((c) =>
-                    historyReplies.some((r) => r.conversation_id === c.id)
-                  )
+                ? historyConversations
                 : chatConversations
             }
             selectedId={selectedId}
@@ -356,6 +525,56 @@ export default function ShadowInboxPage() {
             admins={[]}
             onChatFilterChange={() => {}}
           />
+        ) : originFilter === "trash" ? (
+          /* ⚡ tab "ถังขยะ" — แสดงรายการที่ถูก soft delete + ปุ่ม restore */
+          <div className="flex-1 flex flex-col min-h-0">
+            <div className="px-3 py-2 border-b border-border bg-surface-2 flex items-center justify-between gap-2">
+              <span className="text-[11px] text-text-muted">
+                {trashRows.length} รายการ (soft delete)
+              </span>
+              {trashRows.length > 0 && (
+                <button
+                  onClick={handleRestoreAll}
+                  className="text-[10px] px-2 py-1 rounded-md bg-green-600 text-white hover:bg-green-700 font-medium"
+                >
+                  ↩ กู้คืนทั้งหมด
+                </button>
+              )}
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {loading ? (
+                <div className="text-center text-xs text-text-muted py-8">กำลังโหลด...</div>
+              ) : trashRows.length === 0 ? (
+                <div className="text-center text-xs text-text-muted py-8">ไม่มีรายการในถังขยะ</div>
+              ) : (
+                <ul className="divide-y divide-border">
+                  {trashRows.map((r) => (
+                    <li key={r.shadow_reply_id} className="px-3 py-2 hover:bg-surface-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[10px] text-text-subtle truncate">
+                            {r.platform} · {r.shop_id}
+                          </div>
+                          <div className="text-xs text-text truncate mt-0.5">
+                            {r.inbound_text?.slice(0, 60) || "(ไม่มีข้อความ)"}
+                          </div>
+                          <div className="text-[9px] text-text-subtle mt-0.5">
+                            ลบเมื่อ {r.deleted_at ? new Date(r.deleted_at).toLocaleString("th-TH") : "-"}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => handleRestore(r.shadow_reply_id)}
+                          className="text-[10px] px-2 py-1 rounded-md border border-green-300 text-green-700 hover:bg-green-50 shrink-0"
+                        >
+                          ↩ กู้คืน
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
         ) : (
           /* tab "Generate เอง" — ใช้ ShadowInboxList เหมือนเดิม */
           <ShadowInboxList
@@ -463,7 +682,7 @@ export default function ShadowInboxPage() {
       </div>
 
       {/* ── Panel กลาง ── */}
-      <div className={`${mobileView === "chat" ? "flex" : "hidden"} md:flex flex-1 h-full min-w-0 relative`}>
+      <div className={`${mobileView === "chat" ? "flex" : "hidden"} md:flex flex-1 h-full min-w-0 relative overflow-hidden`}>
         {/* Mobile back button */}
         <button
           onClick={handleBack}
@@ -486,13 +705,20 @@ export default function ShadowInboxPage() {
           <ShadowConversationPanel
             conversation={
               (originFilter === "history"
-                ? chatConversations.find((c) => c.id === selectedId && historyReplies.some((r) => r.conversation_id === c.id))
+                ? historyConversations.find((c) => c.id === selectedId)
                 : chatConversations.find((c) => c.id === selectedId)) ?? null
             }
             messages={chatMessages}
             loadingMessages={loadingChatMessages}
             historyReplies={originFilter === "history" ? historyReplies.filter((r) => r.conversation_id === selectedId) : undefined}
           />
+        ) : originFilter === "trash" ? (
+          /* ⚡ tab "ถังขยะ" — แสดงข้อความว่าง ไม่มี panel */
+          <div className="flex-1 flex flex-col items-center justify-center text-center px-6">
+            <Trash2 size={40} className="text-text-subtle mb-3" />
+            <p className="text-sm text-text-muted">เลือกรายการจากถังขยะด้านซ้ายเพื่อดูรายละเอียด</p>
+            <p className="text-xs text-text-subtle mt-1">หรือกด "กู้คืนทั้งหมด" เพื่อ restore รายการทั้งหมด</p>
+          </div>
         ) : (
           /* tab "Generate เอง" — แสดง ShadowReplyPanel */
           loadingDetail ? (
@@ -503,6 +729,8 @@ export default function ShadowInboxPage() {
             <ShadowReplyPanel
               reply={detail}
               onRate={handleRate}
+              onStar={handleStar}
+              onComment={handleComment}
               onDelete={handleDelete}
               ratingId={ratingId}
             />
@@ -511,8 +739,8 @@ export default function ShadowInboxPage() {
       </div>
 
       {/* ── Panel ขวา: Stats ── */}
-      <div className={`${mobileView === "stat" ? "flex" : "hidden"} ${rightCollapsed ? "md:hidden" : "md:flex"} h-full shrink-0`}>
-        <div className="relative h-full flex flex-col w-full md:w-[300px] border-l border-border bg-surface">
+      <div className={`${mobileView === "stat" ? "flex" : "hidden"} ${rightCollapsed ? "md:hidden" : "md:flex"} h-full shrink-0 overflow-hidden`}>
+        <div className="relative h-full flex flex-col w-full md:w-[300px] min-w-0 border-l border-border bg-surface overflow-hidden">
           {/* Mobile back button */}
           <button
             onClick={() => setMobileView("chat")}
@@ -531,11 +759,29 @@ export default function ShadowInboxPage() {
             <PanelRightClose size={14} />
           </button>
 
-          <ShadowStatPanel stats={stats} />
+          {/* Clear all button */}
+          <button
+            onClick={handleClearAll}
+            disabled={clearingAll}
+            className="hidden md:flex absolute top-3 right-12 z-10 h-7 px-2 rounded-md text-text-muted hover:text-red-600 hover:bg-red-50 items-center justify-center gap-1 transition-colors text-[10px] disabled:opacity-50"
+            title="ล้างข้อมูล shadow replies ทั้งหมด"
+          >
+            {clearingAll ? <Loading size={10} /> : <Trash2 size={11} />}
+            ล้าง
+          </button>
+
+          {/* Stats panel with tab: Per Chat | All History */}
+          <div className="flex-1 min-h-0">
+            <ShadowStatPanel
+              stats={stats}
+              convStats={convStats}
+              title="สถิติ"
+            />
+          </div>
         </div>
       </div>
 
-      {/* Expand button (desktop, when collapsed) */}
+      {/* Expand button ขวา (desktop, when collapsed) */}
       {rightCollapsed && (
         <button
           onClick={() => setRightCollapsed(false)}

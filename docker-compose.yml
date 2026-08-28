@@ -1,0 +1,155 @@
+# docker-compose.yml — ChatBotProductMS
+# Deploy บน host digital.in.th (MongoDB รันบน host เดียวกัน ไม่ได้ containerize)
+#
+# รัน: docker compose up -d
+# ดู log: docker compose logs -f
+# หยุด: docker compose down
+# rebuild: docker compose up -d --build
+
+services:
+  # ─────────────────────────────────────────────────────────────
+  # Shopee Chatbot (port 8010)
+  # ─────────────────────────────────────────────────────────────
+  chatbot-shopee:
+    build:
+      context: .
+      dockerfile: Dockerfile.chatbot
+    image: chatbot-shopee:latest
+    container_name: chatbot-shopee
+    restart: unless-stopped
+    ports:
+      - "8010:8010"
+    env_file:
+      - .env.chatbot.shopee
+    environment:
+      - APP_MODULE=chatbot.shopeechat.app:app
+      - UVICORN_PORT=8010
+      - EMBEDDING_DEVICE=cpu
+    volumes:
+      # HF model cache — ไม่ต้องโหลด 4GB ใหม่ทุกครั้งที่ restart
+      - hf_cache:/app/.hf_cache
+    extra_hosts:
+      # ให้ container เข้าถึง MongoDB บน host (host.docker.internal → host IP)
+      - "host.docker.internal:host-gateway"
+    networks:
+      - chatbot-net
+
+  # ─────────────────────────────────────────────────────────────
+  # Lazada Chatbot (port 8011) — ยังไม่มีโค้ด พร้อมใช้เมื่อเขียนแล้ว
+  # ─────────────────────────────────────────────────────────────
+  chatbot-lazada:
+    build:
+      context: .
+      dockerfile: Dockerfile.chatbot
+    image: chatbot-lazada:latest
+    container_name: chatbot-lazada
+    restart: unless-stopped
+    ports:
+      - "8011:8011"
+    env_file:
+      - .env.chatbot.lazada
+    environment:
+      - APP_MODULE=chatbot.lazadachat.app:app
+      - UVICORN_PORT=8011
+      - EMBEDDING_DEVICE=cpu
+    volumes:
+      - hf_cache:/app/.hf_cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - chatbot-net
+    profiles: ["lazada"]  # ไม่รัน default — ใช้: docker compose --profile lazada up -d
+
+  # ─────────────────────────────────────────────────────────────
+  # TikTok Chatbot (port 8012) — ยังไม่มีโค้ด พร้อมใช้เมื่อเขียนแล้ว
+  # ─────────────────────────────────────────────────────────────
+  chatbot-tiktok:
+    build:
+      context: .
+      dockerfile: Dockerfile.chatbot
+    image: chatbot-tiktok:latest
+    container_name: chatbot-tiktok
+    restart: unless-stopped
+    ports:
+      - "8012:8012"
+    env_file:
+      - .env.chatbot.tiktok
+    environment:
+      - APP_MODULE=chatbot.tiktokchat.app:app
+      - UVICORN_PORT=8012
+      - EMBEDDING_DEVICE=cpu
+    volumes:
+      - hf_cache:/app/.hf_cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - chatbot-net
+    profiles: ["tiktok"]  # ไม่รัน default — ใช้: docker compose --profile tiktok up -d
+
+  # ─────────────────────────────────────────────────────────────
+  # ChatAdminWeb — Next.js (port 3000)
+  # ─────────────────────────────────────────────────────────────
+  chatadmin-web:
+    build:
+      context: ./ChatAdminWeb
+      dockerfile: Dockerfile
+    image: chatadmin-web:latest
+    container_name: chatadmin-web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.web
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      # บอท base URLs — เชื่อม container อื่นผ่านชื่อ service
+      - CHATBOT_BASE_URL_SHOPEE=http://chatbot-shopee:8010
+      - CHATBOT_BASE_URL_LAZADA=http://chatbot-lazada:8011
+      - CHATBOT_BASE_URL_TIKTOK=http://chatbot-tiktok:8012
+    depends_on:
+      - chatbot-shopee
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - chatbot-net
+
+  # ─────────────────────────────────────────────────────────────
+  # Bot Worker — pipeline ประมวลผลข้อความ (trigger → bot → handoff)
+  # poll messages ทุก N วินาที → เช็ค trigger → เรียก bot / จ่ายงาน
+  # ⚠️ ต้องเปิด bot_worker_enabled=true ใน .env.web หรือหน้า config
+  # ─────────────────────────────────────────────────────────────
+  bot-worker:
+    build:
+      context: ./ChatAdminWeb
+      dockerfile: Dockerfile
+    image: chatadmin-web:latest
+    container_name: bot-worker
+    restart: unless-stopped
+    command: ["npx", "tsx", "scripts/bot-worker.ts"]
+    env_file:
+      - .env.web
+    environment:
+      - NODE_ENV=production
+      # บอท base URLs — เชื่อม container อื่นผ่านชื่อ service
+      - CHATBOT_BASE_URL_SHOPEE=http://chatbot-shopee:8010
+      - CHATBOT_BASE_URL_LAZADA=http://chatbot-lazada:8011
+      - CHATBOT_BASE_URL_TIKTOK=http://chatbot-tiktok:8012
+      # ⚡ เปิด bot worker อัตโนมัติ
+      - BOT_WORKER_ENABLED=true
+      - BOT_WORKER_INTERVAL_MS=2000
+    depends_on:
+      - chatbot-shopee
+      - chatadmin-web
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - chatbot-net
+
+volumes:
+  hf_cache:
+    driver: local
+
+networks:
+  chatbot-net:
+    driver: bridge

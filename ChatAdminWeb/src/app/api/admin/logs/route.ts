@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
   const actionType = url.searchParams.get("action_type") || undefined;
   const sinceParam = url.searchParams.get("since");
   const since = sinceParam ? new Date(sinceParam) : undefined;
-  const limitParam = parseInt(url.searchParams.get("limit") || "100", 10);
+  const limitParam = parseInt(url.searchParams.get("limit") || "200", 10);
   const limit = Math.min(Math.max(limitParam, 1), 500);
 
   const logs = await listAdminLogsExtended({ actionType, since, limit });

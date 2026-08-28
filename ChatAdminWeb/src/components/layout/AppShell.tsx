@@ -11,6 +11,7 @@ import { Sidebar } from "./Sidebar";
 import { Loading } from "@/components/ui/Loading";
 import { ToastContainer } from "@/components/ui/Toast";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { ImageViewerOverlay } from "@/components/ui/ImageViewer";
 import { Menu } from "lucide-react";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -66,12 +67,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Menu size={20} className="text-text-muted" />
           </button>
         </div>
-        <main className="flex-1 overflow-hidden">{children}</main>
+        <main className="flex-1 min-h-0 overflow-hidden">{children}</main>
       </div>
 
-      {/* Global UI: Toast notifications + Confirm dialogs */}
+      {/* Global UI: Toast notifications + Confirm dialogs + Image viewer */}
       <ToastContainer />
       <ConfirmDialog />
+      <ImageViewerOverlay />
     </div>
   );
 }

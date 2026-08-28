@@ -11,6 +11,7 @@ import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { touchLastMessage } from "./conversationService";
 import { logAdminEvent } from "./adminLogService";
+import { parseRawMessage } from "./messageMediaParser";
 
 export type MessageRole = "user" | "bot" | "admin" | "system";
 export type MessageDirection = "in" | "out"; // in = ลูกค้า, out = ร้าน/bot
@@ -46,6 +47,48 @@ export interface MessageDoc extends Document {
 
 function genMessageId(): string {
   return "msg_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
+// ─── Bot-facing text ─────────────────────────────────────
+// เมื่อลูกค้าแชร์การ์ดสินค้า/คำสั่งซื้อในแชท Shopee ข้อความที่ mirror เก็บใน `text`
+// เป็น placeholder สั้นๆ เช่น "[item]" หรือ "[order]" — ไม่มีข้อมูลสินค้าจริง
+// แต่ `raw_payload` มี item_id / order_sn อยู่ครบ
+// Python bot รองรับ tag รูปแบบ "[สินค้า: <item_id>]" (ดู _ITEM_TAG_RE ใน chatbot/shopeechat/app.py)
+// ดังนั้นฝั่ง Next.js ต้องแปลง rich-media message เป็น tag text ก่อนส่งให้ bot
+// (ทั้งใน `message` ปัจจุบันและใน `history`) ไม่งั้น bot ตอบไม่รู้เรื่อง
+
+// placeholder ที่ data writer ใส่ให้ rich-media messages — ให้แทนที่ด้วย tag แทน
+const _PLACEHOLDER_RE = /^\s*\[(item|order|image|video|sticker|notification)\]\s*$/i;
+
+/**
+ * แปลง message → text ที่ bot ควรเห็น
+ *
+ * สำหรับ rich-media message (item card, order card, variation card) ที่ DB เก็บเป็น
+ * placeholder เช่น "[item]" ให้แปลงเป็น tag ที่ Python bot เข้าใจ เช่น "[สินค้า: 46051234150]"
+ * ถ้ามีข้อความลูกค้าต่อท้าย (ไม่ใช่ placeholder) จะต่อท้าย tag ให้ด้วย
+ * ถ้าเป็น message ปกติ (text) จะคืน text เดิมเปล่าๆ
+ */
+export function toBotText(msg: { text: string; raw_payload?: unknown }): string {
+  const raw = msg.raw_payload;
+  if (!raw) return msg.text;
+
+  let parsed;
+  try {
+    parsed = parseRawMessage(raw, msg.text);
+  } catch {
+    return msg.text;
+  }
+
+  const itemId = parsed.product_ref?.item_id;
+  if (itemId) {
+    const isPlaceholder = _PLACEHOLDER_RE.test(msg.text);
+    const extra = isPlaceholder ? "" : msg.text.trim();
+    return extra ? `[สินค้า: ${itemId}] ${extra}` : `[สินค้า: ${itemId}]`;
+  }
+
+  // ปล่อย order/other ไปตามเดิม (Python bot ยังไม่มี logic จับ order tag ใน message —
+  // ถ้าจะรองรับต้องเพิ่ม regex ที่ฝั่ง Python ด้วย)
+  return msg.text;
 }
 
 export async function addMessage(opts: {
@@ -197,7 +240,12 @@ export async function getHistoryForBot(opts: {
     .toArray();
   return docs
     .reverse()
-    .map((d) => ({ role: d.role === "user" ? ("user" as const) : ("model" as const), text: d.text }));
+    .map((d) => ({
+      role: d.role === "user" ? ("user" as const) : ("model" as const),
+      // ⚠️ ใช้ toBotText แทน d.text ตรงๆ — ถ้า message เป็นการ์ดสินค้า (text="[item]")
+      // ต้องแปลงเป็น tag [สินค้า: <item_id>] ไม่งั้น bot เห็น history เป็น "[item]" ตอบไม่รู้เรื่อง
+      text: d.role === "user" ? toBotText(d) : d.text,
+    }));
 }
 
 export const messageService = {
@@ -205,4 +253,5 @@ export const messageService = {
   listMessages,
   listMessagesPaginated,
   getHistoryForBot,
+  toBotText,
 };
