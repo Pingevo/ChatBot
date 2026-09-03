@@ -1062,7 +1062,119 @@ export function TestChatClient({ platform }: { platform: Platform }) {
 
     const priorHistory = historyRef.current.slice(-10).map((h) => ({ role: h.role, text: h.text }));
 
+    // ⚡ Workflow step helper — เรียก workflow engine (เหมือน bot-worker ①②) แล้วจัดการผล
+    // phase "entry" = จุดเริ่ม (resume + workflow_first/both) / "after_trigger" = trigger ไม่ match (trigger_first)
+    // return true = workflow จัดการแล้ว (จบ flow นี้) / false = ไป trigger/bot ตามเดิม
+    const runWorkflowStep = async (phase: "entry" | "after_trigger"): Promise<boolean> => {
+      try {
+        const wsRes = await fetch("/api/test-chat/workflow-step", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: currentSessionId,
+            message: combinedText,
+            shop,
+            platform: "shopee",
+            history: priorHistory,
+            phase,
+          }),
+        });
+        const ws = await wsRes.json().catch(() => ({}));
+
+        if (ws.status === "workflow_actioned" || ws.status === "workflow_resumed") {
+          const flowMsgs: { text: string; source: string }[] = Array.isArray(ws.messages) ? ws.messages : [];
+          // ⚡ workflow handoff (assign_ticket action) → แสดงสถานะส่งต่อ
+          if (ws.handoff && ws.handoff.agentId) {
+            const agentName = ws.handoff.agentId;
+            const handoffReason = ws.handoff.reason || "workflow assign_ticket";
+            setHandedOff(true);
+            setAssignedAdminName(agentName);
+            setAssignmentReason(handoffReason);
+            toast.success(`🔀 workflow จ่ายงานให้: ${agentName}`);
+          }
+          // render delivered messages ของ flow (แบบเดียวกับ template — split + format)
+          historyRef.current.push({ role: "user", text: combinedText });
+          if (flowMsgs.length === 0) {
+            // flow ทำ action แต่ไม่มี message (เช่น assign อย่างเดียว) → แสดง status box
+            historyRef.current.push({ role: "model", text: `⚙️ workflow: ${ws.detail}` });
+            setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
+              ...m,
+              html: `<div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:8px 12px;color:#6366f1;font-size:13px">🔀 workflow: ${escapeHtml(ws.detail || "")}</div>`,
+              stats: { source: "workflow_action" } as MsgStats,
+              isGroupLast: true,
+            } : m));
+            saveMessageToSession("model", `⚙️ workflow: ${ws.detail}`);
+          } else {
+            for (const fm of flowMsgs) historyRef.current.push({ role: "model", text: fm.text });
+            let firstRendered = false;
+            setMessages((prev) => {
+              let next = [...prev];
+              for (const fm of flowMsgs) {
+                const segs = splitAnswerSegments(fm.text);
+                const bubbles = segs.length > 0 ? segs : [fm.text];
+                const stats: MsgStats = { source: fm.source || "workflow" };
+                if (!firstRendered) {
+                  // message แรก → แทนที่ spinner
+                  const idx = next.findIndex((m) => m.id === spinnerId);
+                  if (idx !== -1) {
+                    next[idx] = { ...next[idx], html: formatAnswer(bubbles[0]), raw: bubbles[0], stats, ...(bubbles.length === 1 ? { isGroupLast: true } : {}) };
+                    firstRendered = true;
+                  }
+                  const extraMsgs: Msg[] = bubbles.slice(1).map((seg, si) => ({
+                    id: msgIdCounter++, role: "bot", html: formatAnswer(seg), raw: seg, stats,
+                    ...(si === bubbles.length - 2 ? { isGroupLast: true } : {}),
+                  }));
+                  next = [...next, ...extraMsgs];
+                } else {
+                  const extraMsgs: Msg[] = bubbles.map((seg, si) => ({
+                    id: msgIdCounter++, role: "bot", html: formatAnswer(seg), raw: seg, stats,
+                    ...(si === bubbles.length - 1 ? { isGroupLast: true } : {}),
+                  }));
+                  next = [...next, ...extraMsgs];
+                }
+              }
+              // ถ้า spinner ยังไม่ถูกแทนที่ (firstRendered=false ไม่ได้เกิด) → ลบทิ้ง
+              if (!firstRendered && spinnerId !== null) next = next.filter((m) => m.id !== spinnerId);
+              return next;
+            });
+            for (const fm of flowMsgs) saveMessageToSession("model", fm.text);
+          }
+          toast.info(`🔀 workflow: ${ws.detail}`);
+          bufferSpinnerIdRef.current = null;
+          setIsBuffering(false);
+          setBufferedCount(0);
+          setSending(false);
+          return true; // workflow จัดการแล้ว — ไม่ไป trigger/bot
+        }
+
+        if (ws.status === "exit_drop") {
+          // flow cancel + ทิ้งข้อความ → แสดง hint แล้วจบ (ลูกค้าต้องพิมพ์ใหม่)
+          setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
+            ...m,
+            html: `<div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:8px 12px;color:#ef4444;font-size:13px">⛔ workflow: condition ไม่ผ่าน (exit_drop) — รบกวนพิมพ์ใหม่อีกครั้งนะคะ</div>`,
+            isGroupLast: true,
+          } : m));
+          toast.info(`⛔ workflow exit_drop: ${ws.detail}`);
+          bufferSpinnerIdRef.current = null;
+          setIsBuffering(false);
+          setBufferedCount(0);
+          setSending(false);
+          return true;
+        }
+
+        // no_workflow → ไป trigger/bot ตามเดิม
+        return false;
+      } catch (err) {
+        console.error("[WORKFLOW-STEP] error:", err);
+        return false; // fail-safe → ไป trigger/bot ตามเดิม
+      }
+    };
+
     try {
+      // ⚡ ① Workflow step (entry) — resume active flow + workflow_first/both priority
+      // server เป็นคนตัดสิน priority (trigger_first จะตอบ no_workflow ทันทีใน phase entry)
+      if (await runWorkflowStep("entry")) return;
+
       // ⚡ Check trigger บน combined message (เหมือน bot-worker ตอน flush)
       let triggerMatched: { name: string; action: string; bot_template?: string; topic?: string } | null = null;
       try {
@@ -1170,6 +1282,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         setSending(false);
         return;
       }
+
+      // ⚡ ② Workflow step (after_trigger) — trigger ไม่ match → ลอง workflow ก่อนบอท (trigger_first)
+      if (await runWorkflowStep("after_trigger")) return;
 
       // ⚡ ไม่ match trigger → flush ผ่าน API (ส่ง combined ไป bot)
       const fr = await fetch("/api/test-chat/flush", {
@@ -1744,8 +1859,8 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                             <span className="debug-label">Pipeline:</span>
                             {m.stats.steps && m.stats.steps.length > 0 ? (
                               m.stats.steps.map((s, i) => (
-                                <span key={i} className="pill step-detail" title={`${s.model} · in:${s.tokens_in} out:${s.tokens_out} · ${s.time_s}s · ฿${s.cost_thb}`}>
-                                  <strong>{s.name}</strong> · {s.model.split("/").pop()} · in:{s.tokens_in} out:{s.tokens_out} · {s.time_s}s · ฿{s.cost_thb}
+                                <span key={i} className="pill step-detail" title={`${s.model || ""} · in:${s.tokens_in} out:${s.tokens_out} · ${s.time_s}s · ฿${s.cost_thb}`}>
+                                  <strong>{s.name}</strong>{s.model ? ` · ${s.model.split("/").pop()}` : ""} · in:{s.tokens_in} out:{s.tokens_out} · {s.time_s}s · ฿{s.cost_thb}
                                 </span>
                               ))
                             ) : (

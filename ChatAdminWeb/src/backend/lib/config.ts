@@ -79,6 +79,9 @@ export const serverConfig = {
     testAssignment: required("ADMIN_MONGO_COLLECTION_TEST_ASSIGNMENT", "test_assignment"),
     // ⚡ buffer_messages — message buffering (debounce) ก่อนเข้า processMessage
     bufferMessages: required("ADMIN_MONGO_COLLECTION_BUFFER_MESSAGES", "buffer_messages"),
+    // ⚡ workflow engine (แบบ Zaapi Flow Builder)
+    workflows: required("ADMIN_MONGO_COLLECTION_WORKFLOWS", "workflows"),
+    workflowRuns: required("ADMIN_MONGO_COLLECTION_WORKFLOW_RUNS", "workflow_runs"),
   },
   jwtSecret: requiredStrict("ADMIN_JWT_SECRET"),
   jwtAlgo: "HS256" as const,

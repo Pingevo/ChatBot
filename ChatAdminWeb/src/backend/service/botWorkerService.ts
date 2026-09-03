@@ -17,7 +17,6 @@
 //   - ไม่ยุ่งกับ sellcenter
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
-import { serverConfig } from "../lib/config";
 import { triggerService } from "./triggerService";
 import { assignmentService } from "./assignmentService";
 import { logAdminEvent } from "./adminLogService";
@@ -28,6 +27,10 @@ import { assertPlatformApiDisabled, type Platform } from "../lib/safety";
 import type { ShadowReplyDoc } from "./shadowReplyService";
 import { bufferService, type BufferConfig } from "./bufferService";
 import { getSystemConfig } from "./systemConfigService";
+// ⚡ callBot ย้ายไป botCallService (แก้ circular dependency กับ workflowEngine)
+import { callBot } from "./botCallService";
+// ⚡ Workflow engine (แบบ Zaapi Flow Builder) — ① resume ② priority ③ บอท
+import { workflowEngine, type EngineResult, type DeliveredMessage } from "./workflowEngine";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -36,7 +39,7 @@ export interface ChatProcessingDoc extends Document {
   conversation_id: string;
   shop_id: string;
   platform: Platform;
-  status: "trigger_matched" | "bot_answered" | "handed_off" | "bot_failed" | "no_action";
+  status: "trigger_matched" | "bot_answered" | "handed_off" | "bot_failed" | "no_action" | "workflow_actioned" | "workflow_resumed";
   trigger_id?: string;
   trigger_action?: "bot_answer" | "handoff_admin";
   shadow_reply_id?: string;     // ref to shadow_replies
@@ -46,51 +49,7 @@ export interface ChatProcessingDoc extends Document {
   processed_at: Date;
 }
 
-// ─── Bot Caller ───────────────────────────────────────────
-
-async function callBot(params: {
-  platform: Platform;
-  message: string;
-  shopId: string;
-  shopName?: string;
-  history: { role: "user" | "model"; text: string }[];
-}): Promise<{
-  answer: string;
-  source?: string;
-  model?: string;
-  elapsed?: number;
-  usage?: { prompt: number; output: number; total: number };
-  cost?: number;
-  products?: unknown[];
-}> {
-  const baseUrl = serverConfig.chatbotBaseUrls[params.platform] || serverConfig.chatbotBaseUrls.shopee;
-  const url = baseUrl.replace(/\/$/, "") + "/chat";
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-internal-secret": serverConfig.chatbotInternalSecret,
-    },
-    body: JSON.stringify({
-      message: params.message,
-      // ⚠️ Python bot รับ field "shop" (ชื่อร้าน) ไม่ใช่ "shop_id" (ตัวเลข)
-      // ถ้าไม่มี shopName ใช้ shopId เป็น fallback (อาจไม่กรองร้านได้)
-      shop: params.shopName || params.shopId,
-      history: params.history,
-    }),
-  });
-  if (!resp.ok) throw new Error(`bot call failed: ${resp.status}`);
-  const data = await resp.json();
-  return {
-    answer: data.answer || "",
-    source: data.source,
-    model: data.model,
-    elapsed: typeof data.elapsed === "number" ? data.elapsed : undefined,
-    usage: data.usage,
-    cost: typeof data.cost === "number" ? data.cost : undefined,
-    products: data.products,
-  };
-}
+// ─── Bot Caller — ย้ายไป botCallService.ts (re-export ผ่าน botWorkerService ด้านล่าง) ──
 
 // ─── Check if message already processed ───────────────────
 
@@ -171,6 +130,104 @@ async function storeBotReply(opts: {
   return shadowReplyId;
 }
 
+// ─── Store workflow delivered messages in shadow_replies ──
+// เหมือน storeBotReply แต่ origin="workflow" — 1 delivered message = 1 shadow reply
+// ⚠️ inbound_message_id มี unique index — หลาย delivered ต่อ inbound เดียว → ต่อท้าย suffix __wf<N>
+async function storeWorkflowDelivered(opts: {
+  messageId: string;
+  messageText: string;
+  conversationId: string;
+  shopId: string;
+  platform: Platform;
+  delivered: DeliveredMessage[];
+  workflowId: string;
+}): Promise<string[]> {
+  const coll = await getCollection<ShadowReplyDoc>(COLLECTIONS.shadowReplies);
+  const ids: string[] = [];
+  const now = new Date();
+  for (let i = 0; i < opts.delivered.length; i++) {
+    const d = opts.delivered[i];
+    const shadowReplyId = genShadowReplyId();
+    await coll.insertOne({
+      shadow_reply_id: shadowReplyId,
+      conversation_id: opts.conversationId,
+      shop_id: opts.shopId,
+      platform: opts.platform,
+      inbound_message_id: `${opts.messageId}__wf${i}`,
+      inbound_text: opts.messageText,
+      bot_reply_text: d.text,
+      bot_source: d.source,
+      rating: "unrated",
+      origin: "workflow",  // สร้างจาก workflow engine (Flow Builder)
+      created_at: now,
+      updated_at: now,
+    } as ShadowReplyDoc);
+    ids.push(shadowReplyId);
+  }
+  return ids;
+}
+
+/** จัดการผล workflow แบบเดียวกันทั้ง resume และ match ใหม่ — deliver + mark + return shape */
+async function settleWorkflowResult(
+  msg: { message_id: string; conversation_id: string; shop_id: string; platform: Platform },
+  botText: string,
+  wfResult: EngineResult,
+  statusLabel: "workflow_actioned" | "workflow_resumed"
+): Promise<{ status: string; detail: string }> {
+  // เก็บ delivered ลง shadow_replies (worker path — ไม่ส่งจริงเหมือนเดิม)
+  const shadowReplyIds = await storeWorkflowDelivered({
+    messageId: msg.message_id,
+    messageText: botText,
+    conversationId: msg.conversation_id,
+    shopId: msg.shop_id,
+    platform: msg.platform,
+    delivered: wfResult.delivered,
+    workflowId: wfResult.workflow_id || "",
+  });
+
+  if (wfResult.handoff) {
+    // assign_ticket action → จ่ายงานแล้ว (engine ทำแล้ว) — แค่ mark + log
+    await markProcessed({
+      message_id: msg.message_id,
+      conversation_id: msg.conversation_id,
+      shop_id: msg.shop_id,
+      platform: msg.platform,
+      status: "handed_off",
+      assigned_to: wfResult.handoff.agentId || undefined,
+    });
+    await logAdminEvent({
+      action_type: "bot.reply",
+      actor: "bot-worker",
+      conversation_id: msg.conversation_id,
+      metadata: {
+        workflow_id: wfResult.workflow_id,
+        assigned_to: wfResult.handoff.agentId,
+        delivered_to_platform: false,
+      },
+    });
+    return { status: "workflow_handed_off", detail: `${wfResult.detail} → ${wfResult.handoff.agentId || "no agent"}` };
+  }
+
+  await markProcessed({
+    message_id: msg.message_id,
+    conversation_id: msg.conversation_id,
+    shop_id: msg.shop_id,
+    platform: msg.platform,
+    status: statusLabel,
+  });
+  await logAdminEvent({
+    action_type: "bot.reply",
+    actor: "bot-worker",
+    conversation_id: msg.conversation_id,
+    metadata: {
+      workflow_id: wfResult.workflow_id,
+      shadow_reply_ids: shadowReplyIds,
+      delivered_to_platform: false,
+    },
+  });
+  return { status: statusLabel, detail: wfResult.detail };
+}
+
 // ─── Pick next agent — ใช้ handoffService เพื่อหา admin เดิมก่อน round-robin ──
 // ลำดับ:
 //   1. ถ้ามี assigned_to อยู่แล้ว → ใช้คนเดิม
@@ -224,6 +281,11 @@ export async function processMessage(msg: {
   if (conv) {
     const isClosed = conv.status === "closed" || conv.status === "resolved";
     if (conv.assigned_to && !isClosed) {
+      // ⚡ Workflow guard — admin รับแชทแล้ว → flow ที่รอ reply ต้อง cancel อัตโนมัติ (planner ข้อ 3)
+      await workflowEngine.cancelActiveRuns(
+        msg.conversation_id,
+        `admin ${conv.assigned_to} กำลังดูแชท — cancel flow ที่รอ reply`
+      );
       // แอดมินกำลังดูแชทอยู่ → ข้าม (ปล่อยให้แอดมินตอบ)
       await markProcessed({
         message_id: msg.message_id,
@@ -254,6 +316,70 @@ export async function processMessage(msg: {
   // ถ้าลูกค้าแชร์การ์ดสินค้า `text` จะเป็น placeholder "[item]" แต่ raw_payload มี item_id
   // แปลงเป็น tag "[สินค้า: <item_id>]" ที่ Python bot เข้าใจ ก่อนส่งให้ trigger/bot
   const botText = toBotText(msg);
+
+  // ⚡ Workflow engine (แบบ Zaapi Flow Builder) — อ้างอิง workflow-planner.md
+  // ① Active Flow Resume (เสมอ ไม่สน priority) — แชทนี้มี flow ที่กำลังรอ reply อยู่ไหม?
+  //    มี → ส่งข้อความเข้า flow เดิม (resume) → จบ
+  // ② Priority (workflow_first default) — workflow ก่อน trigger
+  //    workflow_first: workflow ฮิต → จบ / ไม่ฮิต → trigger → บอท
+  //    both: workflow ฮิต → deliver แล้วไป trigger ต่อ (⚠️ ตอบซ้ำได้ — planner เตือนแล้ว)
+  //    trigger_first: ตรวจหลัง trigger ไม่ match (ดูด้านล่าง)
+  // ③ บอท — เหมือนเดิม ไม่แตะ
+  const wfConfig = await getSystemConfig();
+  const engineMsg = {
+    message_id: msg.message_id,
+    conversation_id: msg.conversation_id,
+    shop_id: msg.shop_id,
+    platform: msg.platform,
+    text: botText,
+    customer_id: conv?.customer_id,
+  };
+
+  if (wfConfig.workflow_enabled) {
+    // ① Active Flow Resume — flow รอ reply อยู่ → ข้อความใหม่เข้า flow ก่อนเสมอ
+    const activeRun = await workflowEngine.getActiveRun(msg.conversation_id);
+    if (activeRun) {
+      const wfResult = await workflowEngine.resumeFlow(activeRun, engineMsg);
+      if (wfResult.status === "error") {
+        // resume พัง → ข้อความนี้ตกไป trigger/bot ตามปกติ (ไม่ทิ้งลูกค้า)
+        console.error(`[worker] workflow resume error: ${wfResult.detail}`);
+      } else {
+        return settleWorkflowResult(msg, botText, wfResult, "workflow_resumed");
+      }
+    }
+
+    // ② workflow_first / both — ลอง match workflow ก่อน trigger
+    if (wfConfig.workflow_priority === "workflow_first" || wfConfig.workflow_priority === "both") {
+      const wfResult = await workflowEngine.matchAndRun(engineMsg);
+      if (wfResult.status === "actioned" || wfResult.status === "resumed") {
+        if (wfConfig.workflow_priority === "workflow_first") {
+          return settleWorkflowResult(msg, botText, wfResult, "workflow_actioned");
+        }
+        // both → deliver แล้วไป trigger ต่อ (ตอบซ้ำได้ — ไม่แนะนำ แต่ planner ให้เลือกได้)
+        await storeWorkflowDelivered({
+          messageId: msg.message_id,
+          messageText: botText,
+          conversationId: msg.conversation_id,
+          shopId: msg.shop_id,
+          platform: msg.platform,
+          delivered: wfResult.delivered,
+          workflowId: wfResult.workflow_id || "",
+        });
+        // ไม่ return — ไป trigger ต่อ
+      } else if (wfResult.status === "exit_drop") {
+        // condition false + exit_drop → cancel flow + ทิ้งข้อความ
+        await markProcessed({
+          message_id: msg.message_id,
+          conversation_id: msg.conversation_id,
+          shop_id: msg.shop_id,
+          platform: msg.platform,
+          status: "no_action",
+        });
+        return { status: "workflow_exit_drop", detail: wfResult.detail };
+      }
+      // exit_to_bot / no_match / error → fall through ไป trigger → บอท (ตาม pipeline ปกติ)
+    }
+  }
 
   try {
     // 2. Check trigger
@@ -326,6 +452,25 @@ export async function processMessage(msg: {
         metadata: { trigger_id: trigger.trigger_id, shadow_reply_id: shadowReplyId, delivered_to_platform: false },
       });
       return { status: "trigger_matched", detail: `trigger→bot_answer→${shadowReplyId}` };
+    }
+
+    // ⚡ trigger_first — trigger ไม่ match → ลอง workflow ก่อนไปบอท (planner ②)
+    if (wfConfig.workflow_enabled && wfConfig.workflow_priority === "trigger_first") {
+      const wfResult = await workflowEngine.matchAndRun(engineMsg);
+      if (wfResult.status === "actioned" || wfResult.status === "resumed") {
+        return settleWorkflowResult(msg, botText, wfResult, "workflow_actioned");
+      }
+      if (wfResult.status === "exit_drop") {
+        await markProcessed({
+          message_id: msg.message_id,
+          conversation_id: msg.conversation_id,
+          shop_id: msg.shop_id,
+          platform: msg.platform,
+          status: "no_action",
+        });
+        return { status: "workflow_exit_drop", detail: wfResult.detail };
+      }
+      // exit_to_bot / no_match / error → ไปบอท (fall through)
     }
 
     // ── ไม่แมทช์ trigger → ส่งให้บอทตอบ → เก็บใน shadow_replies ──

@@ -480,7 +480,7 @@ export function TicketChatPanel({
               <ChevronDown size={12} className={showQuickReplies ? "rotate-180" : ""} />
             </button>
             {showQuickReplies && (
-              <div className="absolute bottom-full left-0 mb-1 w-full max-w-md max-h-64 overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-20">
+              <div className="absolute top-full left-0 mt-1 w-full max-w-md max-h-64 overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-20">
                 {quickReplies.map((qr) => (
                   <button
                     key={qr.quick_reply_id}

@@ -1,7 +1,7 @@
 "use client";
 // InfoTab — แสดงข้อมูล conversation + stats + ประวัติปิดแชท (card ยืด/หด ได้)
-import { useState } from "react";
-import { ChevronDown, ChevronRight, User, Store, MessageSquare, Bot, Headset, History, Package } from "lucide-react";
+import { useState, useEffect } from "react";
+import { ChevronDown, ChevronRight, User, Store, MessageSquare, Bot, Headset, History, Package, ShoppingCart } from "lucide-react";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Badge } from "@/components/ui/Badge";
 import type { Conversation, ChatMessage, CloseHistoryRecord, ProblemCategory, ProductCard } from "@/lib/types";
@@ -156,7 +156,125 @@ export function InfoTab({ conversation, messages, closeHistory }: Props) {
       </Section>
 
       {/* ── ประวัติปิดแชท (card ยืด/หด ได้) ── */}
+      {/* ── ประวัติคำสั่งซื้อ ── */}
+      <OrderHistorySection conversationId={conversation.id} />
+
       <CloseHistoryCards history={closeHistory} />
+    </div>
+  );
+}
+
+/* ---------- Order History Section ---------- */
+
+interface OrderItem {
+  name: string;
+  model_name: string;
+  quantity: number;
+}
+interface OrderRecord {
+  order_sn: string;
+  order_status: string;
+  order_status_raw: string;
+  create_time: string;
+  shopname: string;
+  shipping_carrier: string;
+  items: OrderItem[];
+  item_count: number;
+  total_quantity: number;
+}
+
+function OrderHistorySection({ conversationId }: { conversationId: string }) {
+  const [orders, setOrders] = useState<OrderRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetch(`/api/admin/conversations/${encodeURIComponent(conversationId)}/orders`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data) => {
+        if (cancelled) return;
+        setOrders(data.orders || []);
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e.message || "โหลดไม่ได้");
+        setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [conversationId]);
+
+  const shown = expanded ? orders : orders.slice(0, 5);
+
+  return (
+    <div className="rounded-xl border border-border bg-surface p-3.5 space-y-2">
+      <div className="flex items-center gap-2 text-text-muted">
+        <ShoppingCart size={14} />
+        <h3 className="text-xs font-semibold uppercase tracking-wide">
+          ประวัติคำสั่งซื้อ {orders.length > 0 && `(${orders.length})`}
+        </h3>
+      </div>
+
+      {loading && (
+        <p className="text-xs text-text-subtle">กำลังโหลด…</p>
+      )}
+
+      {error && (
+        <p className="text-xs text-vibrant-coral">โหลดไม่ได้: {error}</p>
+      )}
+
+      {!loading && !error && orders.length === 0 && (
+        <p className="text-xs text-text-subtle">ยังไม่มีประวัติการสั่งซื้อ</p>
+      )}
+
+      {!loading && !error && orders.length > 0 && (
+        <>
+          <div className="space-y-2">
+            {shown.map((o) => (
+              <div key={o.order_sn} className="rounded-lg bg-surface-2 p-2 space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-mono text-text-muted">{o.order_sn}</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                    o.order_status_raw === "COMPLETED" ? "bg-green-100 text-green-700" :
+                    o.order_status_raw === "CANCELLED" ? "bg-red-100 text-red-700" :
+                    o.order_status_raw === "SHIPPED" || o.order_status_raw === "TO_CONFIRM_RECEIVE" ? "bg-blue-100 text-blue-700" :
+                    "bg-surface text-text-muted"
+                  }`}>
+                    {o.order_status}
+                  </span>
+                </div>
+                <div className="text-[11px] text-text-muted">
+                  {o.create_time} · {o.shipping_carrier || "ไม่ระบุขนส่ง"} · {o.shopname}
+                </div>
+                {o.items.length > 0 && (
+                  <div className="text-[11px] text-text space-y-0.5">
+                    {o.items.slice(0, 3).map((i, idx) => (
+                      <div key={idx} className="truncate">
+                        · {i.name} {i.quantity > 1 && `×${i.quantity}`}
+                      </div>
+                    ))}
+                    {o.items.length > 3 && (
+                      <div className="text-text-subtle">+{o.items.length - 3} รายการ</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          {orders.length > 5 && (
+            <button
+              onClick={() => setExpanded(!expanded)}
+              className="w-full text-xs text-brand hover:underline py-1"
+            >
+              {expanded ? "ย่อ" : `ดูทั้งหมด (${orders.length})`}
+            </button>
+          )}
+        </>
+      )}
     </div>
   );
 }

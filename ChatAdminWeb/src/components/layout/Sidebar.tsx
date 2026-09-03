@@ -21,6 +21,7 @@ import {
   Shield,
   ContactIcon,
   Headset,
+  GitBranch,
   PanelLeftClose,
   PanelLeftOpen,
   LogOut,
@@ -77,6 +78,7 @@ const navGroups: NavGroup[] = [
     label: "เครื่องมือ",
     items: [
       { href: "/triggers", label: "ทริกเกอร์", icon: Zap },
+      { href: "/workflows", label: "Workflows", icon: GitBranch },
       { href: "/quick-replies", label: "คำตอบเร็ว", icon: Reply },
       { href: "/knowledge", label: "ฐานความรู้", icon: BookOpen },
       { href: "/persona", label: "ตัวแทนร้าน", icon: Bot, roles: ["superadmin", "admin", "dev"] },

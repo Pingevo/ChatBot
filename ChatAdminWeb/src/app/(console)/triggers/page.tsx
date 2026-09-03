@@ -172,9 +172,23 @@ export default function TriggersPage() {
   const [admins, setAdmins] = useState<{ admin_id: string; name?: string; username?: string }[]>([]);
 
   // โหลด shops list (สำหรับ multi-select ในฟอร์ม)
+  // ⚡ dedupe by shop_id — /api/shops ส่งกลับ shop เดียวหลายบรรทัด (หนึ่งบรรทัดต่อ platform)
+  //    รวม platform ทั้งหมดของร้านนั้นเป็น list ใน record เดียว — กัน duplicate React key
   useEffect(() => {
     api().get<{ rows: ShopOption[]; total: number }>("/shops")
-      .then((r) => setAllShops(r.data.rows || []))
+      .then((r) => {
+        const rows = r.data.rows || [];
+        const map = new Map<string, ShopOption>();
+        for (const s of rows) {
+          const existing = map.get(s.shop_id);
+          if (existing) {
+            // ร้านเดียวกัน — รักษาไว้ ไม่เพิ่มซ้ำ (platform แรกที่เจอ)
+          } else {
+            map.set(s.shop_id, s);
+          }
+        }
+        setAllShops(Array.from(map.values()));
+      })
       .catch(() => setAllShops([]));
     api().get<{ users: { admin_id: string; name?: string; username?: string }[] }>("/users/list")
       .then((r) => setAdmins(r.data.users || []))

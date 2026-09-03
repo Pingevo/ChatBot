@@ -35,6 +35,10 @@ interface SystemConfig {
   polling_interval_ms: number;
   bot_worker_enabled: boolean;
   bot_worker_interval_ms: number;
+  // ⚡ Workflow engine (แบบ Zaapi Flow Builder)
+  workflow_enabled: boolean;
+  workflow_priority: "workflow_first" | "trigger_first" | "both";
+  workflow_run_timeout_ms: number;
   // Bot URLs
   shopee_bot_url: string;
   tiktok_bot_url: string;
@@ -106,6 +110,7 @@ const safeSwitches: { key: keyof SystemConfig; label: string; description: strin
   { key: "mock_mode_enabled", label: "Mock Mode", description: "ใช้ข้อมูลจำลอง ไม่ยิง API จริง" },
   { key: "shadow_bot_enabled", label: "Shadow Bot", description: "bot generate reply แต่เก็บใน shadow_replies ไม่ส่งจริง" },
   { key: "bot_worker_enabled", label: "Bot Worker (Auto)", description: "ประมวลผลแชทใหม่อัตโนมัติ: trigger → bot → handoff (ต้องรัน scripts/bot-worker.ts)" },
+  // ⚡ workflow_enabled ย้ายไป /admin-config แล้ว — admin เปิด/ปิดเองได้
 ];
 
 const platformColors: Record<Platform, string> = {
@@ -126,6 +131,7 @@ export default function ConfigPage() {
   const [testResults, setTestResults] = useState<TestResults | null>(null);
   const [testing, setTesting] = useState(false);
   const [pollingInterval, setPollingInterval] = useState(1000);
+  // ⚡ Workflow engine settings ย้ายไป /admin-config แล้ว
   const [editingBotUrl, setEditingBotUrl] = useState<Platform | null>(null);
   const [botUrlDraft, setBotUrlDraft] = useState("");
 
@@ -196,6 +202,8 @@ export default function ConfigPage() {
       setSaving(false);
     }
   }
+
+  // ⚡ handleSaveWorkflow ย้ายไป /admin-config แล้ว
 
   async function handleShopToggle(shop: ShopRow) {
     const newState = !shop.enabled_for_chat;
@@ -481,6 +489,8 @@ export default function ConfigPage() {
                 </div>
               )}
             </Card>
+
+            {/* ⚡ Workflow Engine ย้ายไป /admin-config แล้ว — admin เปิด/ปิด + priority + timeout ได้เอง */}
           </div>
 
           {/* Right — per-shop toggle + test + data activity */}

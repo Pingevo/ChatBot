@@ -674,6 +674,30 @@ web_search.should_use_web_search(answer, intent, products, message)
 - **ก่อนแก้:** รับเฉพาะ name/phone เป็นข้อมูลบางส่วน → ถ้าลูกค้าให้แค่ order_id ถือว่าไม่มีข้อมูล → ขอข้อมูลใหม่ทั้งหมด
 - **หลังแก้:** รับ order_id ด้วย → ทวนข้อมูลที่ให้มา + ถามข้อมูลที่เหลือ (name/phone/order_id ที่ขาด)
 
+**`app.py` State 7 — awaiting_claim_info (line ~1011, เพิ่ม 2026-09-10):**
+- **Purpose:** รับรูป/วิดีโอ/ข้อมูลที่ลูกค้าส่งตามที่บอทขอใน claim flow (หลัง handoff แล้ว) → ขอบคุณ + บอกรอแอดมิน
+- **Flow ใหม่:** ขอข้อมูล + handoff ทันที → ลูกค้าตอบมา → ขอบคุณ + บอกรอแอดมิน (ไม่ต้องทวน/ถามยืนยัน)
+- **Input:** `req.message` (อาจเป็น `[รูปภาพ]`, `[วิดีโอ]`, หรือมี placeholder + ข้อมูลอื่น), `history` (last model message ขอ claim info)
+- **Output:** `_warranty_claim_answer` (ขอบคุณ + บอกรอแอดมิน), `_warranty_claim_ctx` (เก็บข้อมูลที่ได้รับ)
+- **Detection:** `_bot_asked_claim_info` — last model message มี "วันที่ซื้อ" + "เลขที่คำสั่งซื้อ" + "รูป/วิดีโอ" พร้อมกัน
+- **Image detection:** `_msg_is_image` (message = `[รูปภาพ]` อย่างเดียว) หรือ `_msg_has_image_placeholder` (มี placeholder ผสมกับ text)
+- **Cleanup:** ตัด image placeholder + date pattern ออกจาก message ก่อน `extract_customer_info` (กัน `[รูปภาพ]` หรือ "ซื้อวันที่..." ถูกตีความเป็นชื่อ)
+- **Called by:** `chat()` หลัง post-handoff block, ก่อน state awaiting_customer_info
+- **Side effects:** ไม่มี DB write (เก็บใน memory เฉพาะรอบปัจจุบัน)
+- **Error/fallback:** ถ้าไม่มี image และไม่มีข้อมูลใดเลย → ไม่ตั้ง `_warranty_claim_answer` → ตกไป state อื่นตามปกติ
+
+**`app.py` ข้าม order_lookup ใน claim flow (line ~495, เพิ่ม 2026-09-10):**
+- **Purpose:** กัน order_sn ในข้อความลูกค้า (ที่ส่งมาเป็น claim info) ถูกจับโดย order_lookup ก่อนเข้า warranty state machine
+- **Detection:** ตรวจ history ว่า last model message ขอ "วันที่ซื้อ" + "เลขที่คำสั่งซื้อ" + "รูป/วิดีโอ" → ถ้าใช่ ตั้ง `_in_claim_flow=True`
+- **Behavior:** ถ้า `_in_claim_flow` → ข้าม order_lookup ทั้งหมด → order_sn ไปอยู่ใน claim info ของ State 7
+
+**`app.py` handoff ทันทีที่ขอข้อมูลเคลม (line ~1170 + ~1504, เพิ่ม 2026-09-10):**
+- **Purpose:** เปลี่ยน flow เดิม (ขอข้อมูล→รอครบ→ทวน→ยืนยัน→handoff) เป็น "ขอข้อมูล + handoff ทันที" — บอทตั้งคำถามเบื้องต้นทิ้งไว้ แอดมินมาอ่านแชทต่อ
+- **จุดที่เปลี่ยน:**
+  1. State 6 (duration_answered + claim_request) — ตั้ง `_warranty_claim_handoff = True` พร้อมขอข้อมูล
+  2. first_message path (claim request ไม่มี history) — เรียก handoff API ทันที + ตั้ง `handoff_to_admin=True`
+- **Behavior หลัง handoff:** ลูกค้าตอบกลับมา → State 7 รับข้อมูล + ขอบคุณ + บอกรอแอดมิน (ไม่ handoff ซ้ำ)
+
 **`app.py` LLM override (line 631):**
 - **ก่อนแก้:** LLM บอก warranty_claim + `not _prev_is_product` → override เป็น True เสมอ แม้เป็นคำถาม policy
 - **หลังแก้:** เพิ่มเช็ค question marker (ไหม/มั้ย/?) + ไม่มี strong kw → ไม่ override (เป็น policy question)
@@ -893,6 +917,7 @@ Mongo document schema:
 | 4 | ลิงก์นอกหลุดจาก search_info | search_info มี URL ส่งให้ LLM | ✅ แก้แล้ว (strip URLs + prompt ห้ามใส่ลิงก์นอก) | `app.py` + `llm.py` |
 | 5 | Charger subtype ปน | shorthand ไม่ detect + filter ไม่ครบ + brand fallback ฆ่า subtype | ✅ แก้แล้ว | `product_store.py` |
 | 6 | Carry-forward ทับ subtype ใหม่ | follow-up detector บังคับสินค้าเก่า | ✅ แก้แล้ว (skip carry-forward เมื่อมี charger subtype ชัด) | `app.py` |
+| 6b | Carry subtype ไม่ทำงานเมื่อ message พิมพ์ตก "หัวชาจ" หรือไม่มีคำ charger | `_detect_product_types` ไม่แก้พิมพ์ผิด → carry type ไม่จับ → `current_types` ว่าง → carry subtype ไม่ทำงาน → RAG ดึงสายชาร์จแทนหัวชาร์จ | ✅ แก้แล้ว (carry type เพิ่ม fallback `_detect_charger_subtype` + carry subtype เพิ่ม `_is_charger_ctx` รองรับ message ที่มี subtype ชัด) | `app.py` |
 | 7 | KB merge return ก่อน reference | KB path early-return | ✅ แก้แล้ว (ref-indicator guard) | `app.py` |
 | 8 | Web search ใช้ query ไม่ระบุสินค้า | ส่ง `req.message` ลอยๆ | ✅ แก้แล้ว (ส่ง `retrieval_message` ที่รวม model name) | `app.py` |
 | 9 | `_score_card` / `_is_sold_out` ไม่ถูกเรียก | นิยามไว้แต่ไม่เชื่อม | ระยะกลาง: เชื่อมหรือลบ | `product_store.py` |

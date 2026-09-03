@@ -46,8 +46,20 @@ export async function PUT(req: NextRequest) {
           return error(`Field "${key}" must be between 1 and 20`, 400);
         }
         filtered[key] = num;
-      } else if (key === "bot_buffer_enabled") {
+      } else if (key === "bot_buffer_enabled" || key === "workflow_enabled") {
         filtered[key] = Boolean(value);
+      } else if (key === "workflow_priority") {
+        const validPriorities = ["workflow_first", "trigger_first", "both"];
+        if (!validPriorities.includes(String(value))) {
+          return error(`Field "${key}" must be one of: ${validPriorities.join(", ")}`, 400);
+        }
+        filtered[key] = String(value);
+      } else if (key === "workflow_run_timeout_ms") {
+        const num = Number(value);
+        if (isNaN(num) || num < 60000 || num > 86400000) {
+          return error(`Field "${key}" must be between 60000 and 86400000`, 400);
+        }
+        filtered[key] = num;
       } else {
         filtered[key] = value;
       }

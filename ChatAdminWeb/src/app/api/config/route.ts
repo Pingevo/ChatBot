@@ -85,6 +85,17 @@ export async function PUT(req: NextRequest) {
     }
   }
 
+  // ⚡ Workflow engine — validate priority + timeout ก่อนบันทึก
+  if ("workflow_priority" in body && !["workflow_first", "trigger_first", "both"].includes(String(body.workflow_priority))) {
+    return error("workflow_priority must be workflow_first | trigger_first | both", 422);
+  }
+  if ("workflow_run_timeout_ms" in body) {
+    const t = Number(body.workflow_run_timeout_ms);
+    if (!Number.isFinite(t) || t < 60000 || t > 86400000) {
+      return error("workflow_run_timeout_ms must be between 60000 (1 min) and 86400000 (24 h)", 422);
+    }
+  }
+
   const updatedBy = r.ctx.admin.username || r.ctx.admin.email || 'admin';
   const updated = await systemConfigService.updateSystemConfig(body, updatedBy);
 

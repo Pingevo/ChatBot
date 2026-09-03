@@ -138,5 +138,16 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.bufferMessages, { message_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.bufferMessages, { conversation_id: 1, received_at: 1 }),
     safeCreateIndex(db, COLLECTIONS.bufferMessages, { shop_id: 1, received_at: -1 }),
+    // ⚡ workflow engine (แบบ Zaapi Flow Builder)
+    // workflows — flow definitions (nodes + edges)
+    safeCreateIndex(db, COLLECTIONS.workflows, { workflow_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.workflows, { enabled: 1, status: 1 }),
+    safeCreateIndex(db, COLLECTIONS.workflows, { shop_ids: 1, enabled: 1 }),
+    // workflow_runs — state ของ flow ที่กำลังรัน/รอ reply
+    safeCreateIndex(db, COLLECTIONS.workflowRuns, { run_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.workflowRuns, { conversation_id: 1, status: 1 }),
+    safeCreateIndex(db, COLLECTIONS.workflowRuns, { workflow_id: 1, conversation_id: 1, status: 1 }),
+    safeCreateIndex(db, COLLECTIONS.workflowRuns, { customer_id: 1, workflow_id: 1, status: 1 }),
+    safeCreateIndex(db, COLLECTIONS.workflowRuns, { updated_at: -1 }),
   ]);
 }
