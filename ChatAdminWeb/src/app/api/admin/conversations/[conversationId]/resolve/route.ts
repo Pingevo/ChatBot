@@ -14,6 +14,7 @@ export async function POST(
   if (!r.ok) return r.response;
 
   const { conversationId } = await params;
+  // ℹ️ Shared inbox — admin ทุกคน resolve ได้
   const ok = await conversationService.updateConversationStatus(
     conversationId,
     "resolved",

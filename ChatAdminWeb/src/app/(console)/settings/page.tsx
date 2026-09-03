@@ -10,8 +10,7 @@ import { canEdit } from "@/lib/roles";
 import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
-import { OtpVerification } from "@/components/auth/OtpVerification";
-import { Shield, Key, Bell, Save, CheckCircle2, Mail } from "lucide-react";
+import { Shield, Bell, Save, CheckCircle2 } from "lucide-react";
 
 export default function SettingsPage() {
   const { user, fetchMe } = useAuth();
@@ -22,15 +21,6 @@ export default function SettingsPage() {
   const [name, setName] = useState(user?.name ?? "");
   const [savingProfile, setSavingProfile] = useState(false);
   const [profileSaved, setProfileSaved] = useState(false);
-
-  // Password
-  const [currentPwd, setCurrentPwd] = useState("");
-  const [newPwd, setNewPwd] = useState("");
-  const [confirmPwd, setConfirmPwd] = useState("");
-  const [showOtp, setShowOtp] = useState(false);
-  const [pwdLoading, setPwdLoading] = useState(false);
-  const [pwdError, setPwdError] = useState<string | null>(null);
-  const [pwdSuccess, setPwdSuccess] = useState(false);
 
   // Notifications (local state only — no backend yet)
   const [notifNewTicket, setNotifNewTicket] = useState(true);
@@ -56,47 +46,6 @@ export default function SettingsPage() {
       catchError(e, "บันทึกไม่สำเร็จ");
     } finally {
       setSavingProfile(false);
-    }
-  }
-
-  async function handleChangePassword() {
-    setPwdError(null);
-    if (!currentPwd || !newPwd || !confirmPwd) {
-      setPwdError("กรุณากรอกข้อมูลให้ครบ");
-      return;
-    }
-    if (newPwd !== confirmPwd) {
-      setPwdError("รหัสผ่านใหม่ไม่ตรงกัน");
-      return;
-    }
-    if (newPwd.length < 8) {
-      setPwdError("รหัสผ่านใหม่ต้องอย่างน้อย 8 ตัวอักษร");
-      return;
-    }
-    setShowOtp(true);
-  }
-
-  async function handleOtpVerified() {
-    setPwdLoading(true);
-    setPwdError(null);
-    try {
-      await api().post("/profile/password", {
-        current_password: currentPwd,
-        new_password: newPwd,
-        otp_code: "", // OTP already consumed by verify endpoint; backend re-checks
-      });
-      setPwdSuccess(true);
-      setShowOtp(false);
-      setCurrentPwd("");
-      setNewPwd("");
-      setConfirmPwd("");
-      setTimeout(() => setPwdSuccess(false), 3500);
-    } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "เปลี่ยนรหัสผ่านไม่สำเร็จ";
-      setPwdError(msg);
-      setShowOtp(false);
-    } finally {
-      setPwdLoading(false);
     }
   }
 
@@ -158,76 +107,6 @@ export default function SettingsPage() {
               </div>
             )}
           </div>
-        </Card>
-
-        {/* Security — change password with OTP */}
-        <Card className="p-5">
-          <div className="flex items-center gap-2 mb-4">
-            <Key size={18} className="text-brand" />
-            <h3 className="font-semibold text-text">ความปลอดภัย</h3>
-          </div>
-
-          {pwdSuccess ? (
-            <div className="flex items-center gap-2 text-sm text-brand bg-brand-soft rounded-lg px-3 py-3">
-              <CheckCircle2 size={18} />
-              เปลี่ยนรหัสผ่านสำเร็จ
-            </div>
-          ) : showOtp ? (
-            <OtpVerification
-              purpose="เปลี่ยนรหัสผ่าน"
-              onVerified={handleOtpVerified}
-              onCancel={() => setShowOtp(false)}
-            />
-          ) : (
-            <div className="space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-text mb-1.5">รหัสผ่านปัจจุบัน</label>
-                <input
-                  type="password"
-                  value={currentPwd}
-                  onChange={(e) => setCurrentPwd(e.target.value)}
-                  placeholder="••••••••"
-                  disabled={!editable}
-                  className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text focus:outline-none focus:ring-2 focus:ring-brand/30 disabled:opacity-60"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-text mb-1.5">รหัสผ่านใหม่</label>
-                <input
-                  type="password"
-                  value={newPwd}
-                  onChange={(e) => setNewPwd(e.target.value)}
-                  placeholder="อย่างน้อย 8 ตัวอักษร"
-                  disabled={!editable}
-                  className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text focus:outline-none focus:ring-2 focus:ring-brand/30 disabled:opacity-60"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-text mb-1.5">ยืนยันรหัสผ่านใหม่</label>
-                <input
-                  type="password"
-                  value={confirmPwd}
-                  onChange={(e) => setConfirmPwd(e.target.value)}
-                  placeholder="••••••••"
-                  disabled={!editable}
-                  className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text focus:outline-none focus:ring-2 focus:ring-brand/30 disabled:opacity-60"
-                />
-              </div>
-              {pwdError && (
-                <div className="text-xs text-vibrant-coral bg-vibrant-coral-soft rounded-lg px-3 py-2">
-                  {pwdError}
-                </div>
-              )}
-              <p className="text-xs text-text-muted flex items-center gap-1">
-                <Mail size={11} /> ระบบจะส่งรหัส OTP ไปยังอีเมลของคุณเพื่อยืนยัน
-              </p>
-              {editable && (
-                <Button size="sm" onClick={handleChangePassword} disabled={pwdLoading}>
-                  {pwdLoading ? <Loading size={14} /> : <Key size={14} />} เปลี่ยนรหัสผ่าน
-                </Button>
-              )}
-            </div>
-          )}
         </Card>
 
         {/* Notifications */}

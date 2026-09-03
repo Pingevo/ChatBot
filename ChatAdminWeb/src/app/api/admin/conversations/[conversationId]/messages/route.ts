@@ -43,6 +43,8 @@ export async function GET(
   const conv = await conversationService.getConversation(conversationId);
   if (!conv) return error("conversation not found", 404);
 
+  // ℹ️ Shared inbox model — admin ทุกคนอ่าน messages ได้
+
   // ดึง total count สำหรับแสดงใน UI
   const msgColl = await getCollection(COLLECTIONS.messages);
   const total = await msgColl.countDocuments({ conversation_id: conversationId });

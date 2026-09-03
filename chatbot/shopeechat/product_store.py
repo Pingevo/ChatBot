@@ -1381,12 +1381,16 @@ def _detect_charger_subtype(message: str) -> str | None:
         ("สายชารจ", "สายชาร์จ"), ("หัวชารจ", "หัวชาร์จ"),
         ("หัวชาจ", "หัวชาร์จ"),  # พิมพ์ตก ร์
         ("หัวชาจะ", "หัวชาร์จ"),  # พิมพ์ตก ร์ + ะ
-        ("หัวชาร", "หัวชาร์จ"),  # พิมพ์ตก ์จ
         ("ชุดชาาร์จ", "ชุดชาร์จ"), ("ชุดชาร์จจ", "ชุดชาร์จ"),
     ]
     _low_fixed = low
     for wrong, right in _typo_fixes:
         _low_fixed = _low_fixed.replace(wrong, right)
+    # ⚡ "หัวชาร" (พิมพ์ตก ์จ) — เช็คก่อนว่าไม่ใช่ส่วนของ "หัวชาร์จ" ที่ถูกต้อง
+    # เพราะ "หัวชาร" เป็น substring ของ "หัวชาร์จ" → replace จะทำลายคำที่ถูกต้อง
+    # (เช่น "หัวชาร์จในรถ" → "หัวชาร์จ์จในรถ" → car_charger keyword ไม่ match)
+    if "หัวชาร" in _low_fixed and "หัวชาร์จ" not in _low_fixed:
+        _low_fixed = _low_fixed.replace("หัวชาร", "หัวชาร์จ")
     low = _low_fixed
     # เช็ค set ก่อน เพราะ "ชุดชาร์จ" อาจมี "ชาร์จ" อยู่ด้วย
     for sub, kws in _CHARGER_SUBTYPES.items():
@@ -1403,6 +1407,29 @@ def _detect_charger_subtype(message: str) -> str | None:
     if not _has_adapter and re.search(r'\bgan\b', low):
         _has_adapter = True
     _has_cable = any(kw in low for kw in cable_kws)
+    # ⚡ Shorthand: "หัว" ลอยๆ / "สาย" ลอยๆ — ลูกค้าพิมพ์สั้น "มีหัวไหม"/"มีสายไหม"
+    # ในบริบทร้าน charger ล้วน = adapter/cable 100%
+    # guard: ถ้ามีคำของสินค้าอื่น (นาฬิกา/หูฟัง/ฯลฯ) → ไม่ถือเป็น charger shorthand
+    _other_prod_kws = (
+        "นาฬิกา", "วอช", "watch", "หูฟัง", "earphone", "earbuds", "tws",
+        "โทรศัพท์", "phone", "แท็บเล็ต", "tablet", "ไฟฉาย", "flashlight",
+        "กระเป๋า", "bag", "pouch", "ฟิล์ม", "เคส", "case", "ไม้เซลฟี่",
+        "สมาร์ท", "smart", "หูหนู", "เมาส์", "mouse", "คีย์บอร์ด",
+        "ลำโพง", "speaker", "หัวหอย", "หัวใจ", "สายตา", "สายรัด",
+        "สายคล้อง", "สายนาฬิกา", "สายเชือก", "สายสพาก", "หัวเลี้ยว",
+    )
+    _has_other_prod = any(kw in low for kw in _other_prod_kws)
+    if not _has_other_prod:
+        # "หัว" ลอยๆ → adapter (เช่น "มีหัวไหม", "ขอหัว", "หัว 140w")
+        # ใช้ "หัว" in low แทน regex \b เพราะ \b ไม่ทำงานกับภาษาไทย
+        # false positive กันด้วย _other_prod_kws (หัวใจ/หัวหอย/หัวนาฬิกา/ฯลฯ)
+        if not _has_adapter and "หัว" in low:
+            _has_adapter = True
+        # "สาย" ลอยๆ → cable (เช่น "มีสายไหม", "ขอสาย", "สาย 1.5 เมตร")
+        # guard: ต้องไม่ใช่ "ไร้สาย" (wireless) — เพราะ "ไร้สาย" = wireless charger
+        # false positive กันด้วย _other_prod_kws (สายตา/สายนาฬิกา/สายคล้อง/ฯลฯ)
+        if not _has_cable and "สาย" in low and "ไร้สาย" not in low and "ไร้ สาย" not in low:
+            _has_cable = True
     # ── Compatibility constraint: "ใช้กับสาย c to c", "ใช้สาย c to c" ──
     # ถ้า message มี "ใช้กับสาย" หรือ "ใช้สาย" + cable keyword แต่ไม่มี adapter keyword
     # → ลูกค้าถามว่าหัวชาร์จที่ใช้กับสายนี้ได้ไหม (constraint) ไม่ใช่ขอซื้อสาย
@@ -1443,51 +1470,97 @@ def _detect_charger_subtype(message: str) -> str | None:
 def _filter_charger_subtype(docs: list[dict], subtype: str) -> list[dict]:
     """กรอง charger docs ตาม subtype ที่ลูกค้าถาม.
 
-    ลำดับการตรวจ (เพื่อกันสินค้าตกหล่น):
-    1. set: มี "ชุด"/"set" ในชื่อ หรือ มีทั้ง "หัวชาร์จ" และ "สายชาร์จ" ในชื่อ
-    2. adapter: มี "หัวชาร์จ"/"adapter"/"gan" ในชื่อ (แม้จะมี "สาย" ด้วยก็ตาม)
-    3. cable: มี "สาย" ในชื่อ และไม่มี "หัวชาร์จ"/"adapter"/"gan"
+    ลำดับการตรวจ (priority สูง → ต่ำ เพื่อกันสินค้าตกหล่น):
+    1. set: มี "ชุด"/"set"/"combo"/"ready to go" ในชื่อ
+    2. desktop: มี "แท่นชาร์จ"/"desktop charger"/"charging station" ในชื่อ
+       (ต้องเช็คก่อน adapter เพราะ "แท่นชาร์จ desktop" มี "ชาร์จ" ลอยๆ)
+    3. car_charger: มี "car charger"/"หัวชาร์จในรถ"/"ชาร์จในรถ"/"ที่ชาร์จรถ" ในชื่อ
+       (ต้องเช็คก่อน adapter เพราะ "หัวชาร์จในรถ" มี "หัวชาร์จ" ลอยๆ)
+    4. wireless: มี "ไร้สาย"/"wireless charger"/"magsafe"/"แม็กเซฟ"/"magnetic" ในชื่อ
+       (ต้องเช็คก่อน cable เพราะ "ชาร์จไร้สาย" มี "สาย" ลอยๆ)
+    5. socket: มี "ปลั๊กไฟ"/"smart plug"/"smart socket"/"ปลั๊ก wifi" ในชื่อ
+    6. adapter: มี "หัวชาร์จ"/"adapter"/"gan" ในชื่อ (ไม่ใช่ desktop/car)
+    7. cable: มี "สายชาร์จ"/"cable"/"สาย type" ฯลฯ ในชื่อ (ไม่ใช่ wireless)
 
-    ถ้าลูกค้าถาม "หัวชาร์จ" → เอา adapter + set (เพราะ set ก็มีหัว)
-    ถ้าลูกค้าถาม "สายชาร์จ" → เอา cable + set (เพราะ set ก็มีสาย)
+    ถ้าลูกค้าถาม "หัวชาร์จ" → เอา adapter + set
+    ถ้าลูกค้าถาม "สายชาร์จ" → เอา cable + set
     ถ้าลูกค้าถาม "ชุดชาร์จ" → เอา set อย่างเดียว
+    ถ้าลูกค้าถาม "หัวชาร์จในรถ" → เอา car_charger (ไม่เอา adapter ธรรมดา)
+    ถ้าลูกค้าถาม "แท่นชาร์จตั้งโต๊ะ" → เอา desktop
+    ถ้าลูกค้าถาม "ชาร์จไร้สาย" → เอา wireless
+    ถ้าลูกค้าถาม "ปลั๊กไฟอัจฉริยะ" → เอา socket
     """
     if not subtype:
         return docs
 
     adapter_kw = ("หัวชาร์จ", "หัวชาร์ต", "adapter", "แอ็ดอปเตอร์", "gan",
-                  "car charger", "หัวชาร์จในรถ")
+                  "qc 3", "pd fast")
     cable_kw = ("สายชาร์จ", "สายชาร์ต", "สาย usb", "สาย type", "สาย c to",
                 "สาย micro", "สาย lightning", "cable", "คาเบิล",
-                "usb-c to", "usb a to", "type-c to")
+                "usb-c to", "usb a to", "type-c to", "สาย c",
+                "สาย pd", "สายไนลอน", "สายถัก", "สายซิลิโคน")
     set_kw = ("ชุดชาร์จ", "ชุดชาร์ต", "ชุดหัวชาร์จ", "ชุดสายชาร์จ", "ชุด adapter",
               "set ชาร์จ", "charging combo", "ready to go", "ชุดอุปกรณ์ชาร์จ",
               "ชุด ready", "set samsung", "set iphone", "combo",
               "premium charging set", "charge anywhere")
-    # แท่นชาร์จ = desktop charger (ไม่ใช่หัวชาร์จ) ต้องแยกออก
-    desktop_kw = ("แท่นชาร์จ", "desktop charger", "desktop charge")
+    # desktop = แท่นชาร์จตั้งโต๊ะ (multi-port charger, ไม่ใช่หัวชาร์จปกติ)
+    desktop_kw = ("แท่นชาร์จ", "desktop charger", "desktop charge",
+                  "charging station", "ชาร์จสเตชัน")
+    # car_charger = หัวชาร์จในรถ (ใช้กับที่ชาร์จบุหรี่รถ)
+    car_charger_kw = ("car charger", "หัวชาร์จในรถ", "หัวชาร์จรถ",
+                      "ชาร์จในรถ", "ชาร์จรถ", "ที่ชาร์จในรถ", "ที่ชาร์จรถ",
+                      "cigarette lighter", "ชาร์จบุหรี่", "ในรถ")
+    # wireless = ชาร์จไร้สาย (magsafe/qi/magnetic)
+    wireless_kw = ("ไร้สาย", "wireless charger", "wireless charge",
+                   "qi charger", "magsafe", "แม็กเซฟ", "magnetic charger",
+                   "ชาร์จแม่เหล็ก", "magnetic charge")
+    # socket = ปลั๊กไฟอัจฉริยะ (smart plug/wifi plug)
+    socket_kw = ("ปลั๊กไฟอัจฉริยะ", "ปลั๊กอัจฉริยะ", "smart plug", "smart socket",
+                 "ปลั๊ก smart", "ปลั๊ก wifi", "ปลั๊กไฟ wifi", "ปลั๊กอัจฉริยะ")
 
-    classified: dict[str, list[dict]] = {"cable": [], "adapter": [], "set": [], "other": []}
+    classified: dict[str, list[dict]] = {
+        "cable": [], "adapter": [], "set": [], "other": [],
+        "car_charger": [], "wireless": [], "desktop": [], "socket": [],
+    }
     for d in docs:
         name = (d.get("item_name") or "").lower()
-        # แท่นชาร์จ = ไม่ใช่ adapter และไม่ใช่ set
+        # ลำดับ priority: desktop → car_charger → wireless → socket → set → adapter → cable → other
+        # (เช็ค subtype เฉพาะก่อน เพื่อกัน keyword ลอยๆ ทำให้ classify ผิด)
         is_desktop = any(kw in name for kw in desktop_kw)
+        is_car = any(kw in name for kw in car_charger_kw)
+        is_wireless = any(kw in name for kw in wireless_kw)
+        is_socket = any(kw in name for kw in socket_kw)
         # set = มี indicator ชัดเจน (ชุด/set/combo/ready to go)
         is_set = (
             any(kw in name for kw in set_kw)
             or ("ชุด" in name and ("ชาร์จ" in name or "charger" in name))
             or ("set" in name and ("ชาร์จ" in name or "charger" in name))
         )
-        # adapter = มี "หัวชาร์จ"/"adapter"/"gan" ในชื่อ (ไม่ใช่แท่นชาร์จ)
-        is_adapter = any(kw in name for kw in adapter_kw) and not is_desktop
-        # cable = มี "สายชาร์จ"/"cable"/"สาย type" ฯลฯ ในชื่อ
+        # adapter = มี "หัวชาร์จ"/"adapter"/"gan" ในชื่อ (ไม่ใช่ desktop/car/wireless/socket)
+        is_adapter = (
+            any(kw in name for kw in adapter_kw)
+            and not is_desktop and not is_car and not is_wireless and not is_socket
+        )
+        # cable = มี "สายชาร์จ"/"cable"/"สาย type" ฯลฯ ในชื่อ (ไม่ใช่ wireless)
         # ระวัง "ไร้สาย" (wireless) ไม่ใช่สายชาร์จ
-        is_cable = any(kw in name for kw in cable_kw) or (
-            "สาย" in name and not is_adapter and not is_desktop
-            and "ไร้สาย" not in name and "ไร้ สาย" not in name
+        is_cable = (
+            any(kw in name for kw in cable_kw)
+            or ("สาย" in name and not is_adapter and not is_desktop
+                and not is_wireless and not is_socket
+                and "ไร้สาย" not in name and "ไร้ สาย" not in name)
         )
 
-        if is_set:
+        # classify ตาม priority — subtype เฉพาะก่อน ไม่งั้น "แท่นชาร์จ desktop"
+        # จะโดนจับเป็น adapter เพราะมี "ชาร์จ" ลอยๆ
+        if is_socket:
+            classified["socket"].append(d)
+        elif is_desktop:
+            classified["desktop"].append(d)
+        elif is_car:
+            classified["car_charger"].append(d)
+        elif is_wireless:
+            classified["wireless"].append(d)
+        elif is_set:
             classified["set"].append(d)
         elif is_adapter:
             classified["adapter"].append(d)
@@ -1503,13 +1576,24 @@ def _filter_charger_subtype(docs: list[dict], subtype: str) -> list[dict]:
         result = classified["adapter"] + classified["set"]
     elif subtype == "set":
         result = classified["set"]
+    elif subtype == "car_charger":
+        # car_charger = หัวชาร์จในรถโดยเฉพาะ ไม่เอา adapter ธรรมดา
+        result = classified["car_charger"]
+    elif subtype == "wireless":
+        result = classified["wireless"]
+    elif subtype == "desktop":
+        result = classified["desktop"]
+    elif subtype == "socket":
+        result = classified["socket"]
     else:
         result = docs
 
     # ถ้ากรองแล้วเหลือน้อยเกินไป ให้คืน docs เดิม (ดีกว่าไม่มีอะไรตอบ)
-    # แต่ถ้าเป็น charger subtype (adapter/cable/set) ไม่ควร fallback
-    # เพราะอาจส่งสินค้าผิดประเภท (เช่น แท่นชาร์จแทนหัวชาร์จ)
-    if len(result) < 1 and subtype not in ("adapter", "cable", "set"):
+    # แต่ถ้าเป็น charger subtype ที่ชัดเจน (adapter/cable/set/car/wireless/desktop/socket)
+    # ไม่ควร fallback เพราะอาจส่งสินค้าผิดประเภท (เช่น ส่งสายชาร์จแทนหัวชาร์จในรถ)
+    _strict_subtypes = ("adapter", "cable", "set", "car_charger",
+                        "wireless", "desktop", "socket")
+    if len(result) < 1 and subtype not in _strict_subtypes:
         return docs
     return result
 
@@ -2307,6 +2391,7 @@ def fetch_products(
     is_compat_check: bool = False,
     skip_charger_subtype: bool = False,
     product_types_override: set[str] | None = None,
+    charger_subtype_override: str | None = None,
 ) -> list[dict]:
     """กรองและดึงสินค้าที่เกี่ยวข้อง แล้วย่อเป็น product card ส่งให้ LLM.
 
@@ -2320,6 +2405,9 @@ def fetch_products(
             เพื่อให้ LLM เห็นทุกรุ่นในหมวด แล้วเลือกรุ่นที่รองรับ device จริงๆ
         product_types_override: ถ้าระบุ (ไม่ใช่ None) → ใช้ค่านี้แทนการ detect อัตโนมัติ
             ใช้ตอน caller รู้ประเภทสินค้าดีกว่า (เช่น charging spec question ไม่ควรกรองเป็น charger)
+        charger_subtype_override: ถ้าระบุ (adapter/cable/set/ฯลฯ) → ใช้ค่านี้แทนการ detect
+            จาก message ในทุกจุดกรอง charger subtype เพราะ retrieval_message อาจถูกปนเปื้อน
+            จาก reference/carry logic ทำให้ detect ผิด (เช่น ถามหัวชาร์จแต่ query มีชื่อสายชาร์จจาก history)
 
     ใช้ hybrid approach:
     1. ถ้ามี product type regex (phone/smartwatch/earphone/ฯลฯ) ใช้ regex approach เดิม
@@ -2351,6 +2439,26 @@ def fetch_products(
     if not exact_product_types and not _is_warranty_with_model:
         fuzzy_product_types = _detect_product_types_fuzzy(message)
     product_types = exact_product_types or fuzzy_product_types
+
+    # ⚡ Shorthand charger subtype ("หัว"/"สาย" ลอยๆ) → _detect_product_types ไม่จับเป็น "charger"
+    # แต่ _detect_charger_subtype จับได้ — ถ้าได้ subtype ใดๆ แปลว่าเป็นคำถามเรื่อง charger
+    # → เพิ่ม "charger" เข้า product_types เพื่อให้ subtype filter ทำงาน
+    # (เช่น "มีหัวไหม" → _detect_charger_subtype = "adapter" → product_types += "charger")
+    # ⚡ ถ้า product_types เป็น {"phone"} (false positive จาก "mi 17 ultra" ใน retrieval_message)
+    # แต่ message มี charger subtype keyword ชัดเจน และไม่มี phone keyword ชัดเจน
+    # → override เป็น {"charger"} เพราะลูกค้าถามเรื่อง charger ไม่ใช่ phone
+    _shorthand_sub = _detect_charger_subtype(message)
+    if _shorthand_sub:
+        if not product_types:
+            product_types = {"charger"}
+            print(f"[PRODUCT-TYPE] shorthand charger subtype={_shorthand_sub!r} → เพิ่ม 'charger' เข้า product_types", file=sys.stderr)
+        elif product_types == {"phone"} and not any(kw in message.lower() for kw in (
+            "phone", "โทรศัพท์", "มือถือ", "smartphone", "สมาร์ทโฟน"
+        )):
+            # phone เป็น false positive จากชื่อรุ่นที่ carry มา (เช่น "mi 17 ultra")
+            # แต่ message มี charger subtype keyword → override เป็น charger
+            product_types = {"charger"}
+            print(f"[PRODUCT-TYPE] override phone→charger (shorthand subtype={_shorthand_sub!r}, false positive from device name)", file=sys.stderr)
 
     # ถ้าเป็นคำถามเปรียบเทียบหลายรุ่น (มี model tokens เช่น "ec4 vs ec5 vs ec6")
     # ให้ข้าม fuzzy detection ที่อาจจับผิด (เช่น จับ "ec4" เป็น screen_protector)
@@ -2487,7 +2595,7 @@ def fetch_products(
                     # ── กรอง charger subtype สำหรับ vector search path ด้วย ──
                     # ยกเว้น superlative question ที่ต้องเปรียบเทียบทุกประเภท
                     if "charger" in product_types and not skip_charger_subtype:
-                        _charger_sub = _detect_charger_subtype(message)
+                        _charger_sub = charger_subtype_override or _detect_charger_subtype(message)
                         if _charger_sub:
                             docs = _filter_charger_subtype(docs, _charger_sub)
                             print(f"[CHARGER-SUBTYPE] subtype={_charger_sub} → {len(docs)} docs (vector)", file=sys.stderr)
@@ -2615,7 +2723,7 @@ def fetch_products(
     # ต้องกรองก่อน re-rank เพราะ re-rank ตัดเหลือ limit แล้ว set products อาจตกไป
     # ยกเว้น superlative question ที่ต้องเปรียบเทียบทุกประเภท (charger + powerbank)
     if "charger" in product_types and not skip_charger_subtype:
-        _charger_sub = _detect_charger_subtype(message)
+        _charger_sub = charger_subtype_override or _detect_charger_subtype(message)
         if _charger_sub:
             docs = _filter_charger_subtype(docs, _charger_sub)
             print(f"[CHARGER-SUBTYPE] subtype={_charger_sub} → {len(docs)} docs (pre-rerank)", file=sys.stderr)
@@ -2680,6 +2788,14 @@ def fetch_products(
             if iid not in existing_ids:
                 docs.append(d)
                 existing_ids.add(iid)
+        # ⚡ กรอง charger subtype ก่อน sort+cut
+        # ไม่งั้น cable ที่ชื่อมี model name (เช่น CTC615N) จะ match msg_words มากกว่า adapter
+        # → sort แซง → cut เหลือ cable หมด → re-filter ฆ่าทิ้ง → ได้ 0 ทั้งที่มี adapter อยู่จริง
+        if "charger" in product_types and not skip_charger_subtype:
+            _charger_sub_pre_sort = charger_subtype_override or _detect_charger_subtype(message)
+            if _charger_sub_pre_sort:
+                docs = _filter_charger_subtype(docs, _charger_sub_pre_sort)
+                print(f"[CHARGER-SUBTYPE] pre-sort (brand fallback) subtype={_charger_sub_pre_sort} → {len(docs)} docs", file=sys.stderr)
         # re-rank: สินค้าที่ชื่อตรงกับคำถามมากที่สุดขึ้นก่อน
         # ใช้ text matching score (จำนวนคำใน message ที่อยู่ใน item_name)
         if docs:
@@ -2733,7 +2849,7 @@ def fetch_products(
     # (brand fallback ดึงสินค้าเพิ่ม อาจนำ cable/adapter ปนเข้ามา)
     # ยกเว้น superlative question ที่ต้องเปรียบเทียบทุกประเภท
     if "charger" in product_types and not skip_charger_subtype:
-        _charger_sub_final = _detect_charger_subtype(message)
+        _charger_sub_final = charger_subtype_override or _detect_charger_subtype(message)
         if _charger_sub_final:
             docs = _filter_charger_subtype(docs, _charger_sub_final)
             print(f"[CHARGER-SUBTYPE] re-filter after brand fallback: subtype={_charger_sub_final} → {len(docs)} docs", file=sys.stderr)

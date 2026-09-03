@@ -7,7 +7,7 @@
 // ⛔ ห้ามส่งข้อความจริง — เก็บใน shadow_replies เท่านั้น
 // ⛔ ห้ามเรียก Shopee/TikTok/Lazada API
 import { NextRequest } from "next/server";
-import { requireDev } from "@/backend/middleware/authorize";
+import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { shadowReplyService } from "@/backend/service/shadowReplyService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
@@ -75,7 +75,7 @@ async function callOurBot(params: {
 }
 
 export async function POST(req: NextRequest) {
-  const r = await requireDev(req);
+  const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
   const body = await readJson<{ conversation_id: string }>(req);
@@ -83,9 +83,12 @@ export async function POST(req: NextRequest) {
     return error("conversation_id is required", 422);
   }
 
+  // 🔒 coerce เพื่อป้องกัน NoSQL injection
+  const conversationId = String(body.conversation_id);
+
   try {
     const docs = await shadowReplyService.generateConversation({
-      conversationId: body.conversation_id,
+      conversationId,
       botCaller: callOurBot,
     });
 
@@ -93,7 +96,7 @@ export async function POST(req: NextRequest) {
     await logAdminEvent({
       action_type: "shadow_reply.generate_conversation",
       actor: r.ctx.admin.admin_id,
-      conversation_id: body.conversation_id,
+      conversation_id: conversationId,
       metadata: {
         count: docs.length,
         delivered_to_platform: false,

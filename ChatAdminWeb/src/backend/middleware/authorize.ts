@@ -56,8 +56,8 @@ export async function requireAuth(req: NextRequest): Promise<
 }
 
 /**
- * Require editor role (superadmin or admin).
- * dev users get 403.
+ * Require editor role (superadmin, dev, or admin).
+ * dev ผ่านได้เพราะมี ROLE_LEVEL เท่า superadmin (3 >= 2).
  */
 export async function requireEditor(req: NextRequest): Promise<
   | { ok: true; ctx: AuthContext }
@@ -124,4 +124,21 @@ export function canEditTarget(actor: AdminDoc, target: AdminDoc): boolean {
   if (target.role !== "admin") return false;
   if (actor.admin_id === target.admin_id) return false;
   return true;
+}
+
+/**
+ * Check if actor can access/modify a conversation.
+ * Rules:
+ *   - superadmin and dev: full access to any conversation
+ *   - admin: only conversations assigned to them
+ *
+ * Returns true if access is granted.
+ */
+export function canAccessConversation(
+  actor: AdminDoc,
+  assignedTo: string | null | undefined
+): boolean {
+  if (actor.role === "superadmin" || actor.role === "dev") return true;
+  if (!assignedTo) return false; // unassigned → only superadmin/dev
+  return assignedTo === actor.admin_id;
 }

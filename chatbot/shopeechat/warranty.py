@@ -395,6 +395,27 @@ _CLAIM_REQUEST_INDICATORS = [
     "สอบถามประกัน", "เรื่องเคลม", "เรื่องซ่อม",
 ]
 
+# ⚡ Negative patterns — ถ้า message ตรงกับสิ่งเหล่านี้ ไม่ถือว่าเป็น claim request
+# เพราะเป็นการ "ถามเงื่อนไข" ไม่ใช่ "ขอเคลมจริง"
+_CLAIM_QUESTION_PATTERNS = [
+    "ถ้ามีปัญหาเคลม",  # "ถ้ามีปัญหาเคลมได้ไหม" — ถามเงื่อนไข
+    "ถ้ามีปัญหา",
+    "เคลมได้ไหม",     # "เคลมได้ไหม" — ถามเงื่อนไข
+    "เคลมได้ใช่ไหม",
+    "เคลมได้ป่าว",
+    "เคลมกี่วัน",     # ถามระยะเวลา
+    "เคลมกี่ปี",
+    "ประกันกี่ปี",    # ถามระยะเวลา
+    "ประกันกี่วัน",
+    "ประกันกี่เดือน",
+    "รับประกันกี่",
+    "รับประกันไหม",   # ถามว่ามีประกันไหม
+    "รับประกันใช่ไหม",
+    "มีประกันไหม",
+    "มีการรับประกันไหม",
+    "มีการรับประกัน",
+]
+
 # คำที่บอกว่าลูกค้าสนใจปรึกษาแอดมิน (หลังนอกช่วงประกัน)
 _CONSENT_INDICATORS = [
     "สนใจ", "โอเค", "ok", "okay", "ได้ค่ะ", "ได้ครับ",
@@ -411,8 +432,28 @@ _DECLINE_INDICATORS = [
 
 
 def detect_claim_request(message: str) -> bool:
-    """ตรวจว่าลูกค้าอยากเคลม/ซ่อม/สินค้าเสีย หรือไม่."""
+    """ตรวจว่าลูกค้าอยากเคลม/ซ่อม/สินค้าเสีย หรือไม่.
+
+    ⚡ แยก "ขอเคลมจริง" จาก "ถามเงื่อนไขเคลม":
+    - "ส่งเคลมสินค้า" → claim request (จริง)
+    - "ถ้ามีปัญหาเคลมได้ไหม" → ไม่ใช่ claim request (เป็นคำถามทั่วไป)
+    - "จอมีรอยไหม้ เคลมได้ไหม" → claim request (จริง เพราะมีอาการเสียจริง)
+    """
     msg_lower = message.lower()
+    # ⚡ ถ้าตรงกับ question pattern ก่อน → ตรวจต่อว่ามีอาการเสียจริงไหม
+    if any(p in msg_lower for p in _CLAIM_QUESTION_PATTERNS):
+        # ถ้ามีอาการเสียจริง (ไหม้/รอย/เสีย/พัง/ฯลฯ) → เป็น claim request จริง
+        # แม้จะมี "เคลมได้ไหม" ก็ตาม เพราะลูกค้ากำลังเล่าอาการ + ถามเคลม
+        _symptom_kws = (
+            "ไหม้", "รอย", "ร้าว", "แตก", "หัก", "บุบ", "เสีย", "พัง",
+            "ไม่ทำงาน", "ไม่ติด", "ไม่เปิด", "ค้าง", "ดับ", "มืด",
+            "แบตเสีย", "จอเสีย", "ปุ่มเสีย", "น้ำเข้า", "ตก",
+            "เสียงดัง", "เสียงแปลก", "ไม่ชาร์จ", "ชาร์จไม่เข้า",
+            "ไม่เชื่อมต่อ", "หาย", "ไม่แสดง", "ไม่สแกน",
+        )
+        if any(kw in msg_lower for kw in _symptom_kws):
+            return True
+        return False
     return any(ind in msg_lower for ind in _CLAIM_REQUEST_INDICATORS)
 
 
@@ -442,6 +483,8 @@ def detect_confirmation(message: str) -> bool:
 _PHONE_PATTERN = re.compile(r"\b0\d{8,9}\b")
 # เลขคำสั่งซื้อ Shopee มัก 9-16 หลัก อาจมี suffix เช่น "123456789shp"
 _ORDER_ID_PATTERN = re.compile(r"\b\d{9,16}(?:[a-zA-Z]{1,5})?\b")
+# ⚡ Shopee mixed alphanumeric order ID เช่น "2508088B5T4W1D" (มีตัวอักษรผสม)
+_ORDER_ID_MIXED_PATTERN = re.compile(r"\b\d{6,}[A-Za-z][A-Za-z0-9]{1,12}\b")
 
 # โหลด NER (lazy load — โหลดครั้งแรกที่เรียกใช้)
 _NER_INSTANCE = None
@@ -534,6 +577,13 @@ def extract_customer_info(message: str) -> dict:
         if candidate != phone and len(candidate) >= 10:
             order_id = candidate
             break
+    # ⚡ Fallback: ลอง mixed alphanumeric pattern (Shopee format เช่น "2508088B5T4W1D")
+    if not order_id:
+        for m in _ORDER_ID_MIXED_PATTERN.finditer(msg):
+            candidate = m.group(0)
+            if candidate != phone and len(candidate) >= 8:
+                order_id = candidate
+                break
 
     # ── ดึงชื่อด้วย NER (หลัก) ──
     name = _extract_name_ner(msg)
@@ -637,10 +687,12 @@ _TAX_INVOICE_REQUEST_KWS = (
 )
 
 # คำที่บ่งบอกว่าลูกค้าส่งข้อมูลใบกำกับภาษีมาแล้ว
+# ⚡ ไม่รวม "เลขที่" เพราะเป็นคำทั่วไปในที่อยู่ (เช่น "เลขที่ 303") — เป็น false positive
 _TAX_INVOICE_DATA_KWS = (
-    "เลขผู้เสียภาษี", "เลขภาษี", "tax id", "เลขที่",
+    "เลขผู้เสียภาษี", "เลขภาษี", "tax id",
     "หจก.", "บจก.", "จำกัด", "co.,ltd", "co., ltd", "company",
     "เลขประจำตัวผู้เสียภาษี", "สำนักงานใหญ่", "สนง.",
+    "head office", "สาขา",
 )
 
 

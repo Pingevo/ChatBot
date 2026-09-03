@@ -15,6 +15,7 @@ import { requireAuth } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { conversationService } from "@/backend/service/conversationService";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
+import { safeRegexSearch } from "@/backend/lib/regexEscape";
 import type { Platform, ConversationStatus } from "@/backend/service/conversationService";
 import type { Conversation } from "@/lib/types";
 
@@ -154,6 +155,14 @@ export async function GET(req: NextRequest) {
     filtered = docs.filter((d) => d.assigned_to === assignedToParam);
   }
 
+  // 🔒 channels_access filter — admin ธรรมดาเห็นเฉพาะ conversation ใน channel ที่ตนมีสิทธิ์
+  // superadmin/dev เห็นทั้งหมด (channels_access ว่าง = เห็นทั้งหมดด้วย เพื่อ backward compat)
+  const isPrivileged = r.ctx.admin.role === "superadmin" || r.ctx.admin.role === "dev";
+  const channelsAccess = r.ctx.admin.channels_access || [];
+  if (!isPrivileged && channelsAccess.length > 0) {
+    filtered = filtered.filter((d) => channelsAccess.includes(d.platform));
+  }
+
   const adminMap = await buildAdminNameMap();
   // ⚡ batch compute unanswered counts (0.5s สำหรับ 1377 conversations)
   const unansweredMap = await buildUnansweredMap();
@@ -167,11 +176,15 @@ export async function GET(req: NextRequest) {
     if (status) countFilter.status = status;
     if (shopId) countFilter.shop_id = shopId;
     if (search) {
-      countFilter.$or = [
-        { to_name: { $regex: search, $options: "i" } },
-        { last_message_text: { $regex: search, $options: "i" } },
-        { shop_name: { $regex: search, $options: "i" } },
-      ];
+      // 🔒 escape regex metacharacters
+      const safeSearch = safeRegexSearch(search);
+      if (safeSearch) {
+        countFilter.$or = [
+          { to_name: { $regex: safeSearch, $options: "i" } },
+          { last_message_text: { $regex: safeSearch, $options: "i" } },
+          { shop_name: { $regex: safeSearch, $options: "i" } },
+        ];
+      }
     }
     const convColl = await getCollection(COLLECTIONS.conversations);
     const totalCount = await convColl.countDocuments(countFilter);

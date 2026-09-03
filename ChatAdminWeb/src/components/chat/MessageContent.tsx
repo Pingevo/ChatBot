@@ -226,6 +226,26 @@ export function MessageContent({ msg, variant }: Props) {
     );
   }
 
+  // ── bundle_message → แสดง sub-messages ทั้งหมด ──
+  if (msg.message_type === "bundle_message" || msg.message_type === "bundle_deal") {
+    if (msg.bundle && msg.bundle.length > 0) {
+      return (
+        <div className="space-y-2">
+          {msg.bundle.map((sub, i) => (
+            <MessageContent key={i} msg={sub} variant={variant} />
+          ))}
+        </div>
+      );
+    }
+    // bundle แต่ไม่มี sub-messages → แสดง text ธรรมดา
+    return (
+      <div className={`flex items-center gap-1.5 ${bubbleText}`}>
+        <Package size={16} className={isUser ? "text-text-muted" : "text-white/60"} />
+        <span className="text-sm opacity-80">{msg.text && msg.text !== "[bundle_message]" ? msg.text : "Bundle"}</span>
+      </div>
+    );
+  }
+
   // ── fallback: text + product cards (กรณี bot/admin ตอบพร้อม product) ──
   return (
     <div className="space-y-1.5">

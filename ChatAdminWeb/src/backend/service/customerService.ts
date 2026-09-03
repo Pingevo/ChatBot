@@ -4,6 +4,7 @@
 // name ของลูกค้าดึงจาก conversations_shp.to_name (join ตอน list)
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
+import { safeRegexSearch } from "../lib/regexEscape";
 import type { Platform } from "./conversationService";
 
 export interface CustomerDoc extends Document {
@@ -95,11 +96,15 @@ export async function listCustomers(opts: {
   const filter: Record<string, unknown> = {};
   if (opts.platform) filter.platform = opts.platform;
   if (opts.search) {
-    filter.$or = [
-      { name: { $regex: opts.search, $options: "i" } },
-      { buyer_id: { $regex: opts.search, $options: "i" } },
-      { customer_id: { $regex: opts.search, $options: "i" } },
-    ];
+    // 🔒 escape regex
+    const safeSearch = safeRegexSearch(opts.search);
+    if (safeSearch) {
+      filter.$or = [
+        { name: { $regex: safeSearch, $options: "i" } },
+        { buyer_id: { $regex: safeSearch, $options: "i" } },
+        { customer_id: { $regex: safeSearch, $options: "i" } },
+      ];
+    }
   }
   const sortBy = opts.sortBy || "last_active_at";
   const sortDir = opts.sortDir || -1;

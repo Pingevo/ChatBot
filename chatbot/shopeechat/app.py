@@ -397,8 +397,14 @@ def chat(req: ChatRequest) -> ChatResponse:
         _is_from_history_anchor = False
         if not _tagged_item_id and history:
             _current_model_kw = knowledge_base.extract_model_keywords(req.message)
-            _looks_like_new_topic = bool(_current_model_kw) or len(req.message.split()) > 15
-            if not _looks_like_new_topic:
+            # ⚡ ถ้ามี model keyword ของสินค้าอื่น → new topic (เปลี่ยนรุ่น)
+            # ⚡ ถ้ามี new topic keywords → new topic
+            # ⚡ ไม่จำกัดความยาว — คำถามยาวก็เป็น follow-up ได้ (เช่น "ถ้าผมซื้อแล้วผมเชื่อถือได้ใช่ไหมครับมีการรับประกันนะครับ")
+            _cur_msg_lower = (req.message or "").lower().strip()
+            _new_topic_kws = ("สวัสดี", "หวัดดี", "hi", "hello", "แนะนำ", "มีอะไร", "มีไร",
+                              "สอบถาม", "สนใจ", "อยากได้", "หาสินค้า", "ดูสินค้า")
+            _is_new_topic = bool(_current_model_kw) or any(kw in _cur_msg_lower for kw in _new_topic_kws)
+            if not _is_new_topic:
                 for h in reversed(req.history):
                     if h.role == "user":
                         found = _extract_item_id_tag(h.text)
@@ -408,6 +414,13 @@ def chat(req: ChatRequest) -> ChatResponse:
                             break
         # ข้อความที่เหลือหลังตัด tag ออก (ถ้ามีคำถามต่อท้าย เช่น "[สินค้า: 123] มีไหม")
         _clean_message = _ITEM_TAG_RE.sub("", req.message).strip()
+        # ⚡ ถ้า message เป็นแค่ placeholder อย่างเช่น "[item]", "[variation_card]",
+        #   "[bundle_message]", "[สินค้า]" (ไม่มี item_id ต่อท้าย) → ถือว่าว่าง
+        #   ไม่งั้น LLM จะได้รับ "[item]" เป็นคำถามและตอบสับสน
+        if _clean_message in ("[item]", "[itemid]", "[สินค้า]", "[variation_card]",
+                              "[ตัวเลือกสินค้า]", "[bundle_message]", "[bundle_deal]",
+                              "[bundle]", "[order]", "[คำสั่งซื้อ]"):
+            _clean_message = ""
         if not _tagged_item_id and not _clean_message and history:
             # ข้อความปัจจุบันไม่มี tag และว่างเปล่า (ไม่ควรเกิด แต่กันไว้)
             _clean_message = req.message
@@ -419,6 +432,23 @@ def chat(req: ChatRequest) -> ChatResponse:
                 db, _tagged_item_id, shop_filter=req.shop,
                 desc_message=_desc_msg,
             )
+            # ⚡ บันทึก anchor product ลง conversation timeline
+            if anchor_card and req.conversation_id:
+                try:
+                    from . import conversation_products as _cp
+                    _cp.add_product(
+                        conversation_id=req.conversation_id,
+                        platform=req.platform,
+                        shop=req.shop,
+                        item_id=_tagged_item_id,
+                        name=anchor_card.get("name", ""),
+                        source="user_item_card",
+                        card=anchor_card,
+                        is_anchor=True,
+                    )
+                    print(f"[CONV-PRODUCTS] anchor added: item_id={_tagged_item_id} conv={req.conversation_id}", file=sys.stderr)
+                except Exception as _e:
+                    print(f"[CONV-PRODUCTS] error adding anchor: {_e}", file=sys.stderr)
             if anchor_card:
                 # ถ้าลูกค้าไม่ได้พิมพ์คำถามเพิ่ม (ส่งแค่การ์ดสินค้ามาเฉย ๆ)
                 # ให้ตั้งคำถามแทน โดยบอกชัดว่าลูกค้าระบุสินค้านี้แล้ว (ผ่านการแชร์การ์ดสินค้า)
@@ -614,6 +644,14 @@ def chat(req: ChatRequest) -> ChatResponse:
                     _warranty_kw_strong = ("เคลม", "เสีย", "ซ่อม", "พัง", "ไม่ทำงาน",
                         "เปลี่ยนสินค้า", "คืนเงิน", "warranty", "claim", "broken")
                     _has_warranty_kw = any(kw in req.message.lower() for kw in _warranty_kw_strong)
+                    # ⚡ เช็คว่าเป็นคำถาม policy ทั่วไปไหม (มี question marker แต่ไม่มี strong kw)
+                    # เช่น "จะหลุดประกันไหม" "รับประกันกี่ปี" → ไม่ใช่ claim request จริง
+                    _question_markers = ("ไหม", "มั้ย", "ไหมครับ", "ไหมคะ", "?", "ใช่ไหม",
+                                         "กี่ปี", "กี่วัน", "กี่เดือน", "ได้ไหม", "ได้ป่าว")
+                    _is_policy_question = (
+                        any(m in req.message.lower() for m in _question_markers)
+                        and not _has_warranty_kw
+                    )
                     # เช็คว่า history ก่อนหน้าเป็น product recommendation ไหม
                     _prev_is_product = bool(history and any(
                         (m.get("role") if isinstance(m, dict) else m.role) == "user" and any(
@@ -622,7 +660,9 @@ def chat(req: ChatRequest) -> ChatResponse:
                              "รุ่น", "สเปค", "ราคา", "มีไหม", "แนะนำ")
                         ) for m in history
                     ))
-                    if _has_warranty_kw or not _prev_is_product:
+                    if _is_policy_question:
+                        print(f"[INTENT] skip warranty override: policy question (has ? marker, no strong kw)", file=sys.stderr)
+                    elif _has_warranty_kw or not _prev_is_product:
                         print(f"[INTENT] override: claim_request=True (LLM says warranty_claim)", file=sys.stderr)
                         _is_claim_request = True
                     else:
@@ -779,6 +819,27 @@ def chat(req: ChatRequest) -> ChatResponse:
                 any(kw in _last_model_text for kw in _info_request_kws)
                 and any(verb in _last_model_text for verb in _ask_verbs)
             )
+            # ⚡ ถ้า last message ไม่ใช่ info request แต่ bot เคยขอข้อมูลใน history
+            # (เช่น มี policy question แทรกกลาง) → ให้ตรวจ history ทั้งหมด
+            if not _bot_asked_info:
+                _all_model_text = " ".join(
+                    h.get("text", "") for h in history if h.get("role") == "model"
+                ).lower()
+                _bot_asked_info_ever = (
+                    any(kw in _all_model_text for kw in _info_request_kws)
+                    and any(verb in _all_model_text for verb in _ask_verbs)
+                )
+                # ใช้แค่เมื่อลูกค้าให้ข้อมูลจริง (มี order_id/name/phone) ไม่ใช่ถามคำถาม
+                if _bot_asked_info_ever:
+                    _pre_info = _warranty_mod.extract_customer_info(req.message)
+                    _pre_has_info = (
+                        bool(_pre_info["order_id"])
+                        or (_pre_info["name"] and len(_pre_info["name"]) <= 40 and " " in _pre_info["name"])
+                        or bool(_pre_info["phone"])
+                    )
+                    if _pre_has_info:
+                        _bot_asked_info = True
+                        print(f"[WARRANTY-CLAIM] bot asked info earlier in history → treat as info submission", file=sys.stderr)
 
             # State 4: บอทเคยทวนข้อมูล → ลูกค้าอาจยืนยัน
             # ต้องมี "ทวน" หรือ "ถูกต้องไหม" หรือ "ข้อมูลถูกต้อง" อย่างน้อยหนึ่งอย่าง
@@ -794,8 +855,46 @@ def chat(req: ChatRequest) -> ChatResponse:
                 for kw in ("ไม่อยู่ในช่วงประกัน", "หมดช่วงประกัน", "หมดประกัน", "out of warranty")
             ) and any(kw in _last_model_text for kw in ("สนใจ", "ปรึกษา", "แอดมิน", "admin"))
 
+            # State 6: post-handoff — บอทเคย handoff แอดมินแล้ว (คำตอบมี "มอบหมายงาน" / "รอการติดต่อกลับ")
+            # ลูกค้าทักใหม่ → ถ้าถามสินค้า/สเปค → ตอบปกติ, ถ้าไม่ → บอก "อยู่ระหว่างแอดมินตรวจสอบ"
+            _bot_handed_off = any(
+                kw in _last_model_text
+                for kw in ("มอบหมายงาน", "รอการติดต่อกลับ", "ดำเนินการเรื่อง", "แอดมินดูแล")
+            )
+
             # ตรวจว่าลูกค้าให้วันที่จริงไหม (ใช้ในหลาย state)
             _msg_has_date = _warranty_mod.parse_purchase_date(req.message) is not None
+
+            # ⚡ Post-handoff: ถ้าบอทเคย handoff แล้ว และลูกค้าทักใหม่ (ไม่ใช่ claim info)
+            # → บอทหยุดตอบทุกอย่าง ปล่อยให้แอดมินดูแล
+            # เหตุผล: เรื่องเคลม/รับประกัน sensitive, แอดมินเห็นประวัติ, ลูกค้าต้องการคนจริง
+            # บอทแค่บอกลูกค้าว่าส่งต่อแอดมินแล้ว รอการติดต่อกลับ
+            if _bot_handed_off and not _bot_asked_info and not _bot_reviewed_info and not _msg_has_date:
+                _warranty_claim_answer = (
+                    "ระบบได้บันทึกข้อมูลของคุณและส่งต่อให้แอดมินดูแลเรียบร้อยแล้วค่ะ "
+                    "รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ "
+                    "ทางเราจะดำเนินการโดยเร็วที่สุดค่ะ"
+                )
+                print(f"[POST-HANDOFF] ลูกค้าทักใหม่ หลัง handoff → บอทหยุดตอบ บอกลูกค้ารอแอดมิน", file=sys.stderr)
+                return ChatResponse(
+                    answer=_warranty_claim_answer,
+                    answer_segments=llm.split_segments(_warranty_claim_answer),
+                    products=[],
+                    shop=req.shop,
+                    model=model_name,
+                    source="warranty_claim_flow",
+                    usage={},
+                    elapsed=round(_time.time() - _t0, 2),
+                    cost=0.0,
+                    handoff_to_admin=True,
+                    handoff_reason="post_handoff_waiting",
+                    handoff_claim={},
+                    steps=_steps + [("post_handoff", "รอแอดมิน → ลูกค้าทักใหม่ → บอทหยุดตอบ")],
+                    routing_decision=_routing(
+                        "handoff", "post_handoff: รอแอดมิน → บอทหยุดตอบ",
+                        handoff_reason="post_handoff_waiting",
+                    ),
+                )
 
             # ── State: awaiting_customer_info → ลูกค้าให้ข้อมูล → ทวน + ถามยืนยัน ──
             # ต้องเป็น info request จริง (ไม่ใช่วันที่) และลูกค้าให้ข้อมูลจริง
@@ -804,22 +903,44 @@ def chat(req: ChatRequest) -> ChatResponse:
                 # ต้องมี phone หรือ name ที่สั้นและดูเป็นชื่อจริง (ไม่ใช่ประโยคยาว)
                 _has_valid_name = _info["name"] and len(_info["name"]) <= 40 and " " in _info["name"]
                 _has_valid_phone = bool(_info["phone"])
-                if _has_valid_name or _has_valid_phone:
-                    # ทวนข้อมูล + ถามยืนยัน
+                # ⚡ ต้องมี order_id ก็นับว่าเป็นข้อมูลบางส่วน (เช่น ลูกค้าให้เลขคำสั่งซื้อก่อน)
+                _has_valid_order = bool(_info["order_id"])
+                if _has_valid_name or _has_valid_phone or _has_valid_order:
+                    # ทวนข้อมูลที่ให้มา + ถามข้อมูลที่เหลือ
                     _review_lines = []
+                    _missing_lines = []
                     if _info["name"]:
                         _review_lines.append(f"• ชื่อ-นามสกุล: {_info['name']}")
+                    else:
+                        _missing_lines.append("• ชื่อ-นามสกุล")
                     if _info["phone"]:
                         _review_lines.append(f"• เบอร์โทร: {_info['phone']}")
+                    else:
+                        _missing_lines.append("• เบอร์โทร")
+                    if _info["order_id"]:
+                        _review_lines.append(f"• เลขที่คำสั่งซื้อ: {_info['order_id']}")
+                    else:
+                        _missing_lines.append("• เลขที่คำสั่งซื้อ")
                     _review_text = "\n".join(_review_lines)
-                    _warranty_claim_answer = (
-                        f"รบกวนทวนข้อมูลนะคะ ข้อมูลที่ลูกค้าให้มา:\n"
-                        f"{_review_text}\n\n"
-                        f"ข้อมูลถูกต้องไหมคะ ถ้าถูกต้องเดี๋ยวจะส่งต่อให้แอดมินดำเนินการต่อให้นะคะ"
-                    )
+                    if _missing_lines:
+                        _missing_text = "\n".join(_missing_lines)
+                        _warranty_claim_answer = (
+                            f"รับทราบค่ะ ข้อมูลที่ลูกค้าให้มา:\n"
+                            f"{_review_text}\n\n"
+                            f"รบกวนแจ้งข้อมูลที่เหลือเพิ่มเติมด้วยนะคะ:\n"
+                            f"{_missing_text}\n\n"
+                            f"และหากมีรูปหรือวิดีโอแสดงอาการ ส่งมาได้เลยค่ะ"
+                        )
+                    else:
+                        _warranty_claim_answer = (
+                            f"รบกวนทวนข้อมูลนะคะ ข้อมูลที่ลูกค้าให้มา:\n"
+                            f"{_review_text}\n\n"
+                            f"ข้อมูลถูกต้องไหมคะ ถ้าถูกต้องเดี๋ยวจะส่งต่อให้แอดมินดำเนินการต่อให้นะคะ"
+                        )
                     _warranty_claim_ctx = {
                         "customer_name": _info["name"],
                         "customer_phone": _info["phone"],
+                        "customer_order_id": _info["order_id"],
                         "claim_topic": "เคลม/ซ่อม/ประกันสินค้า",
                     }
                     print(f"[WARRANTY-CLAIM] info collected: {_info}", file=sys.stderr)
@@ -839,12 +960,15 @@ def chat(req: ChatRequest) -> ChatResponse:
                     _info = _warranty_mod.extract_customer_info(req.message)
                     _has_valid_name = _info["name"] and len(_info["name"]) <= 40 and " " in _info["name"]
                     _has_valid_phone = bool(_info["phone"])
-                    if _has_valid_name or _has_valid_phone:
+                    _has_valid_order = bool(_info["order_id"])
+                    if _has_valid_name or _has_valid_phone or _has_valid_order:
                         _review_lines = []
                         if _info["name"]:
                             _review_lines.append(f"• ชื่อ-นามสกุล: {_info['name']}")
                         if _info["phone"]:
                             _review_lines.append(f"• เบอร์โทร: {_info['phone']}")
+                        if _info["order_id"]:
+                            _review_lines.append(f"• เลขที่คำสั่งซื้อ: {_info['order_id']}")
                         _review_text = "\n".join(_review_lines)
                         _warranty_claim_answer = (
                             f"รับทราบค่ะ ขออนุญาตทวนข้อมูลใหม่นะคะ:\n"
@@ -854,6 +978,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         _warranty_claim_ctx = {
                             "customer_name": _info["name"],
                             "customer_phone": _info["phone"],
+                            "customer_order_id": _info["order_id"],
                             "claim_topic": "เคลม/ซ่อม/ประกันสินค้า",
                         }
                         print(f"[WARRANTY-CLAIM] info corrected: {_info}", file=sys.stderr)
@@ -1371,7 +1496,30 @@ def chat(req: ChatRequest) -> ChatResponse:
                         _compat_followup_skip_kb = True
                         print(f"[COMPAT-FOLLOWUP] skip KB — charger in history, msg has compat keyword", file=sys.stderr)
                         break
-        if req.history and not _wattage_followup_skip_kb and not _compat_followup_skip_kb:
+        # ⚡ Reference indicator skip KB: ถ้า message มี reference indicator ("รุ่นนี้", "ตัวนี้" ฯลฯ)
+        # และมี history (bot เคยตอบ) → skip KB merge ทั้งก้อน
+        # เพราะ KB merge path จะ early-return ก่อน reference logic รัน ทำให้ดึงสินค้าผิด
+        # (เช่น ถาม "รุ่นนี้ละคะ มีแบตในตัวไหม" หลัง bot คุยเรื่อง IMILAB EC4
+        #  → KB merge เจอ sd card → คืน 7 SD card ก่อน → reference logic ไม่ได้ทำงาน)
+        # ให้ข้าม KB ไป reference logic ซึ่งจะดึง EC4 จากคำตอบ bot ล่าสุดมาเป็น retrieval
+        _ref_indicator_skip_kb = False
+        _ref_indicators_kb = (
+            "รุ่นนี้", "ตัวนี้", "เรือนนี้", "อันนี้", "สินค้านี้", "ชิ้นนี้",
+            "รุ่นที่แนะนำ", "ที่แนะนำ", "ขอรายละเอียด", "ขอสเปก",
+            "ขอข้อมูลเพิ่มเติม", "ขอรายละเอียดเพิ่มเติม", "ขอดูสเปก",
+            "ขอดูรายละเอียด", "ขอข้อมูลสินค้า", "ขอรายละเอียดสินค้า",
+        )
+        if req.history and any(ind in req.message for ind in _ref_indicators_kb):
+            # ตรวจว่า history มี model answer (bot เคยตอบ) — ถ้าไม่มีก็ skip ไม่ได้
+            _has_bot_answer = any(
+                (m.role if hasattr(m, 'role') else m.get('role', '')) == "model"
+                and ((m.text if hasattr(m, 'text') else m.get('text', '')) or "").strip()
+                for m in req.history
+            )
+            if _has_bot_answer:
+                _ref_indicator_skip_kb = True
+                print(f"[REF-INDICATOR] skip KB merge — message มี reference indicator + มี history bot answer", file=sys.stderr)
+        if req.history and not _wattage_followup_skip_kb and not _compat_followup_skip_kb and not _ref_indicator_skip_kb:
             # สกัด model words จาก user messages ใน history
             import re as _re
             history_user_text = " ".join(
@@ -1394,9 +1542,13 @@ def chat(req: ChatRequest) -> ChatResponse:
                            "กว่านี้", "เร็วกว่า", "แรงกว่า", "ไวกว่า", "ดีกว่า", "มากกว่า",
                            "ไวๆ", "เร็วๆ", "แรงๆ", "ชาร์จไว", "ชาร์จเร็ว")
         _is_superlative_q = any(kw in _msg_lower_super for kw in _superlative_kw)
-        if _wattage_followup_skip_kb or _compat_followup_skip_kb:
+        if _wattage_followup_skip_kb or _compat_followup_skip_kb or _ref_indicator_skip_kb:
             kb_result = None
-            _skip_reason = "wattage" if _wattage_followup_skip_kb else "compat"
+            _skip_reason = (
+                "wattage" if _wattage_followup_skip_kb
+                else "compat" if _compat_followup_skip_kb
+                else "ref_indicator"
+            )
             print(f"[TIMING] KB lookup SKIPPED ({_skip_reason} follow-up)", file=sys.stderr)
         else:
             kb_result = knowledge_base.lookup_kb(kb_query)
@@ -2004,7 +2156,34 @@ def chat(req: ChatRequest) -> ChatResponse:
                     retrieval_message = f"{' '.join(_constraint_kws)} {retrieval_message}"
                     print(f"[CONSTRAINT-CARRY] retrieval_message={retrieval_message!r}", file=sys.stderr)
 
-        if req.history:
+        # ⚡ CONV-ACTIVE: ดึง active product จาก conversation_products timeline ก่อน history-words
+        # ต้องทำก่อน history block เพราะ history-words อาจดึงสินค้าอื่นในร้านมาทับ anchor
+        # เช่น "kieslect" ใน history → ดึง Ks, Lora 2, KR Pro ทั้งที่ active = BioKoop
+        _is_conv_active = False
+        _cur_charger_sub = product_store._detect_charger_subtype(req.message)
+        if not _ref_handled and req.conversation_id and not _cur_charger_sub:
+            try:
+                from . import conversation_products as _cp
+                _cur_model_kw = knowledge_base.extract_model_keywords(req.message)
+                _active_card = _cp.resolve_active_by_message(
+                    conversation_id=req.conversation_id,
+                    message=req.message,
+                    model_keywords=_cur_model_kw,
+                )
+                if _active_card and _active_card.get("item_id"):
+                    _cur_msg_lower = (req.message or "").lower().strip()
+                    _new_topic_kws_cp = ("สวัสดี", "หวัดดี", "hi", "hello", "แนะนำ",
+                                         "มีอะไร", "มีไร", "สอบถาม",
+                                         "สนใจ", "อยากได้", "หาสินค้า")
+                    _is_new_topic_cp = any(kw in _cur_msg_lower for kw in _new_topic_kws_cp)
+                    if not _is_new_topic_cp and not _cur_model_kw:
+                        _ref_regex_products = [_active_card]
+                        _is_conv_active = True
+                        print(f"[CONV-ACTIVE] ใช้ active product จาก timeline: item_id={_active_card.get('item_id')} name={_active_card.get('name','')[:40]}", file=sys.stderr)
+            except Exception as _e:
+                print(f"[CONV-ACTIVE] error: {_e}", file=sys.stderr)
+
+        if req.history and not _is_conv_active:
             # เช็คว่าข้อความปัจจุบันมี product type ชัดเจนไหม (exact match เท่านั้น)
             current_types = product_store._detect_product_types(req.message)
             # ถ้าไม่มี exact type → เช็ค fuzzy
@@ -2023,6 +2202,8 @@ def chat(req: ChatRequest) -> ChatResponse:
                     "ราคา", "สี", "ขนาด", "น้ำหนัก",
                     "เหมาะ", "เลือก", "แนะนำ", "รายละเอียด", "สเปก", "สเปค",
                     "รับประกัน", "ประกัน", "เคลม", "จัดส่ง", "เปรียบเทียบ",
+                    "ต่างกัน", "ต่างไหม", "ต่างกันไหม", "ต่างกันยังไง",
+                    "อะไรต่าง", "อะไรดี", "ดีกว่า", "สูงกว่า", "แรงกว่า",
                     "1080p", "4k", "2k", "3k", "1080", "720",
                     "amoled", "oled", "lcd", "ips",
                     "mah", "watt", "gan", "pd",
@@ -2209,10 +2390,23 @@ def chat(req: ChatRequest) -> ChatResponse:
             # หรือ "ประกัน" ล้วน ๆ หลัง bot แนะนำ KOSPET TANK M3
             # → retrieval = "KOSPET TANK M3 ประกัน"
             # ยกเว้นถ้าเป็น other_model_question ("ขอรายละเอียดรุ่นอื่น") → ไม่ใช่ reference
+            # ⚡ ถ้าคำถามปัจจุบันระบุ charger subtype ชัดเจน (หัวชาร์จ/สายชาร์จ/ชุดชาร์จ)
+            # → เป็นคำถามใหม่เกี่ยวกับ subtype นั้น ไม่ใช่ follow-up ถึงสินค้าเดิม
+            # ห้ามให้ reference logic ดึงชื่อสินค้าเก่า (ที่อาจเป็น subtype ต่างกัน) มาปนใน retrieval
+            # เพราะทำให้ brand/model filter กรองสินค้า subtype ที่ลูกค้าถามออกหมด
+            # (เช่น ถาม "มีหัวชาร์จไหม" หลัง bot แนะนำสายชาร์จ CTC615N → ได้แต่ CTC615N)
+            _cur_charger_sub_ref = (
+                (_intent_result or {}).get("charger_subtype")
+                if (_intent_result or {}).get("product_type") == "charger"
+                else product_store._detect_charger_subtype(req.message)
+            )
+            _skip_ref_due_to_subtype = _cur_charger_sub_ref in ("adapter", "cable", "set")
             _is_ref_like = (
                 is_reference_question
-                or (_is_short_followup and not is_other_model_question and not is_new_topic)
-                or (_is_generic_followup and not is_other_model_question)
+                or (_is_short_followup and not is_other_model_question and not is_new_topic
+                    and not _skip_ref_due_to_subtype)
+                or (_is_generic_followup and not is_other_model_question
+                    and not _skip_ref_due_to_subtype)
             )
             if _is_ref_like and not is_new_topic and not is_other_model_question:
                 all_model_texts_ref = [
@@ -2230,15 +2424,19 @@ def chat(req: ChatRequest) -> ChatResponse:
                         latest_bot_answer,
                     )
                     ref_models = []
+                    # ⚡ เช็คว่าเป็น comparison question ไหม — ถ้าใช่ ดึงทุกรุ่นจาก markdown link
+                    _comparison_kws_ref = ("ต่างกัน", "ต่างไหม", "เปรียบเทียบ", "vs", "ดีกว่า", "สูงกว่า", "แรงกว่า")
+                    _is_comparison_ref = any(kw in req.message.lower() for kw in _comparison_kws_ref)
                     if _md_link_products:
-                        # ใช้ product name จาก markdown link แรกที่ไม่ใช่ "สั่งซื้อ..."
+                        # ใช้ product name จาก markdown link ที่ไม่ใช่ "สั่งซื้อ..."
                         for _pname in _md_link_products:
                             if _pname.lower().startswith(("สั่งซื้อ", "ดูรายละเอียด", "ลิงก์")):
                                 continue
                             ref_models.append(_pname.strip())
-                            break
+                            if not _is_comparison_ref:
+                                break  # กรณีปกติ เอาแค่รุ่นแรก
                         if ref_models:
-                            print(f"[REFERENCE] ดึงชื่อสินค้าจาก markdown link: {ref_models[0]}", file=sys.stderr)
+                            print(f"[REFERENCE] ดึงชื่อสินค้าจาก markdown link: {ref_models}", file=sys.stderr)
 
                     # ── Fallback: ดึง brand + model pattern จากคำตอบ bot ──
                     if not ref_models:
@@ -2314,16 +2512,31 @@ def chat(req: ChatRequest) -> ChatResponse:
                     if ref_models and not _is_superlative_q:
                         # เช็ค subtype ของ message ปัจจุบัน ถ้าเป็น cable และ ref_model เป็น adapter → ไม่ดึง
                         _cur_sub_ref = product_store._detect_charger_subtype(req.message)
-                        _ref_is_adapter = any(kw in ref_models[0].lower() for kw in ("หัวชาร์จ", "adapter", "gan", "หัวชาร์ต"))
-                        _ref_is_cable = any(kw in ref_models[0].lower() for kw in ("สายชาร์จ", "cable", "สาย type", "สาย usb", "สาย c"))
+                        # ⚡ คำนวณ subtype ของ ref_models (จากชื่อสินค้าในคำตอบล่าสุด)
+                        _ref_text = " ".join(ref_models)
+                        _ref_sub = product_store._detect_charger_subtype(_ref_text)
+                        _ref_is_cable = _ref_sub == "cable"
+                        _ref_is_adapter = _ref_sub == "adapter"
                         if _cur_sub_ref == "cable" and _ref_is_adapter and not _ref_is_cable:
                             print(f"[REFERENCE] skip: ลูกค้าถาม cable แต่ ref เป็น adapter: {ref_models[0]}", file=sys.stderr)
                         elif _cur_sub_ref == "adapter" and _ref_is_cable and not _ref_is_adapter:
                             print(f"[REFERENCE] skip: ลูกค้าถาม adapter แต่ ref เป็น cable: {ref_models[0]}", file=sys.stderr)
+                        elif _cur_sub_ref in ("adapter", "cable", "set") and not _ref_is_adapter and not _ref_is_cable:
+                            # ⚡ ref ไม่มี charger keyword เลย (เช่น "CUKTECH CTC615N" จาก markdown link รูป)
+                            # → ยืนยัน subtype ของ ref ไม่ได้ → ห้าม override กันกรองสินค้าผิดประเภท
+                            print(f"[REFERENCE] skip: คำถามเป็น charger subtype={_cur_sub_ref} แต่ ref ไม่มี charger keyword: {ref_models[0]}", file=sys.stderr)
                         else:
-                            # ใช้ model name แรกที่เจอ + คำถามปัจจุบัน
-                            retrieval_message = f"{ref_models[0]} {req.message}"
-                            print(f"[REFERENCE] ดึงสินค้าจากคำตอบล่าสุด: {ref_models[0]}", file=sys.stderr)
+                            # ⚡ comparison follow-up: ถ้าคำถามเป็นการเปรียบเทียบ ("ต่างกัน", "vs", "ดีกว่า")
+                            # และมี ref_models มากกว่า 1 → ใช้ทุกรุ่นใน retrieval
+                            _comparison_kws = ("ต่างกัน", "ต่างไหม", "เปรียบเทียบ", "vs", "ดีกว่า", "สูงกว่า", "แรงกว่า")
+                            _is_comparison_q = any(kw in req.message.lower() for kw in _comparison_kws)
+                            if _is_comparison_q and len(ref_models) >= 2:
+                                retrieval_message = f"{' vs '.join(ref_models[:4])} {req.message}"
+                                print(f"[REFERENCE] comparison follow-up: ดึง {len(ref_models[:4])} รุ่นจากคำตอบล่าสุด: {ref_models[:4]}", file=sys.stderr)
+                            else:
+                                # ใช้ model name แรกที่เจอ + คำถามปัจจุบัน
+                                retrieval_message = f"{ref_models[0]} {req.message}"
+                                print(f"[REFERENCE] ดึงสินค้าจากคำตอบล่าสุด: {ref_models[0]}", file=sys.stderr)
 
             # ถ้า fuzzy เจอ type แต่เป็นคำถามต่อ → ถือว่า false positive ให้เป็น follow-up
             # ถ้า fuzzy เจอ type และไม่ใช่คำถามต่อ → เป็นคำถามใหม่
@@ -2578,7 +2791,9 @@ def chat(req: ChatRequest) -> ChatResponse:
         # ถ้าเป็น follow-up (ref_handled) ที่มี model name ชัดเจน (มี digit)
         # → ดึงด้วย Mongo regex ก่อน เพื่อความแม่นยำ (vector search semantic อาจไป match สินค้าอื่น)
         # ถ้า Mongo regex เจอ → ใช้สิ่งนั้น ถ้าไม่เจอ → ตกไปใช้ vector search ปกติ
-        _ref_regex_products: list[dict] = []
+        # ⚡ อย่า reset _ref_regex_products ถ้า CONV-ACTIVE ตั้งไว้แล้ว
+        if not _is_conv_active:
+            _ref_regex_products: list[dict] = []
         if _ref_handled and retrieval_message != req.message:
             # หา model word ที่มี digit (เช่น "A3", "EC4", "Note 13")
             _ref_model_words = [
@@ -2587,21 +2802,89 @@ def chat(req: ChatRequest) -> ChatResponse:
                 and not re.fullmatch(r"\d+\.?", w)  # ไม่เอาตัวเลขล้วน
             ]
             if _ref_model_words:
-                # ดึงสินค้าที่ชื่อมี model word แรก (regex match) + shop filter
-                # ใช้ word boundary เพื่อความแม่นยำ (A3 ไม่ match A30)
-                _ref_kw = _ref_model_words[0]
+                # ⚡ Comparison question: ถ้ามีหลาย model words (เช่น "ctc615u", "ctc615w")
+                # ให้ดึงสินค้าที่ match ทุกรุ่น ไม่ใช่แค่รุ่นแรก
+                _comparison_kws_ref2 = ("ต่างกัน", "ต่างไหม", "เปรียบเทียบ", "vs", "ดีกว่า", "สูงกว่า", "แรงกว่า")
+                _is_comparison_ref2 = any(kw in req.message.lower() for kw in _comparison_kws_ref2)
+                _ref_kws_to_query = _ref_model_words if _is_comparison_ref2 else _ref_model_words[:1]
+                # ⚡ Comparison: ถ้า message ลูกค้ามี model token ที่มี digit (เช่น "615u")
+                # ให้ใช้ model token จาก req.message เป็นหลัก ไม่ใช่จาก retrieval_message
+                # ที่ปนกับ reference extraction (เช่น "ctc620p" จากคำตอบก่อนหน้า)
+                # เพราะลูกค้าถามเปรียบเทียบรุ่นที่ตนเองระบุ ไม่ใช่รุ่นที่ bot แนะนำ
+                if _is_comparison_ref2:
+                    _msg_model_words = [
+                        w for w in re.split(r"\s+", req.message.lower().strip())
+                        if any(c.isdigit() for c in w) and len(w) >= 2
+                        and not re.fullmatch(r"\d+\.?", w)
+                    ]
+                    if _msg_model_words:
+                        _ref_kws_to_query = _msg_model_words
+                        # ⚡ ตีความตัวอักษรลอยๆ ("w", "u", "p", "s", "n") เป็น "{prefix}{letter}"
+                        # (เช่น "615u กับ w" → "615w", "615w กับ u" → "615u")
+                        # โดยใช้ digit prefix จาก model token อื่นใน message
+                        _msg_lower = req.message.lower()
+                        # หา digit prefix จาก model token แรกที่มี digit
+                        _digit_prefix = None
+                        for _mw in _msg_model_words:
+                            _digit_part = re.match(r"(\d+)", _mw)
+                            if _digit_part:
+                                _digit_prefix = _digit_part.group(1)
+                                break
+                        if _digit_prefix:
+                            # หาตัวอักษรลอยๆ ที่ตามหลัง "กับ" หรืออยู่ท้ายประโยค
+                            _lone_letters = re.findall(r"\b([a-z])\b", _msg_lower)
+                            # กรองตัวที่เป็นส่วนหนึ่งของ model token แล้ว
+                            _existing_suffixes = set()
+                            for _mw in _msg_model_words:
+                                _suffix = re.match(r"\d+([a-z]+)", _mw)
+                                if _suffix:
+                                    _existing_suffixes.add(_suffix.group(1))
+                            for _letter in _lone_letters:
+                                if _letter in _existing_suffixes:
+                                    continue
+                                _derived = f"{_digit_prefix}{_letter}"
+                                if _derived not in _ref_kws_to_query:
+                                    _ref_kws_to_query.append(_derived)
+                                    print(f"[REF-REGEX] ตีความ '{_letter}' ลอยๆ → {_derived!r} (จาก prefix {_digit_prefix!r})", file=sys.stderr)
                 try:
                     _ref_coll = db[os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"]
-                    _ref_filter = {
-                        "item_status": "NORMAL",
-                        "item_name": {"$regex": rf"\b{re.escape(_ref_kw)}\b", "$options": "i"},
-                    }
-                    if req.shop:
-                        _ref_filter["shopname"] = {"$regex": f"^{re.escape(req.shop)}$", "$options": "i"}
-                    _ref_docs = list(_ref_coll.find(_ref_filter, product_store.PRODUCT_PROJECTION).limit(5))
-                    if _ref_docs:
-                        _ref_regex_products = [product_store.to_product_card(d, req.message) for d in _ref_docs]
-                        print(f"[REF-REGEX] ดึงสินค้าตรง model '{_ref_kw}' ด้วย Mongo regex: {len(_ref_regex_products)} ตัว", file=sys.stderr)
+                    _seen_ids: set = set()
+                    for _ref_kw in _ref_kws_to_query:
+                        # ⚡ model token สั้น (เช่น "615u") ไม่มี letter prefix → \b ไม่ match "CTC615U"
+                        # ใช้ regex แบบไม่มี \b ที่ต้น แต่มี \b ท้าย (กัน match ผิด เช่น "615u" ไม่ match "615uu")
+                        _has_alpha_prefix = bool(re.match(r"^[a-z]+", _ref_kw))
+                        if _has_alpha_prefix:
+                            _kw_pattern = rf"\b{re.escape(_ref_kw)}\b"
+                        else:
+                            _kw_pattern = rf"{re.escape(_ref_kw)}\b"
+                        _ref_filter = {
+                            "item_status": "NORMAL",
+                            "item_name": {"$regex": _kw_pattern, "$options": "i"},
+                        }
+                        if req.shop:
+                            _ref_filter["shopname"] = {"$regex": f"^{re.escape(req.shop)}$", "$options": "i"}
+                        _ref_docs = list(_ref_coll.find(_ref_filter, product_store.PRODUCT_PROJECTION).limit(10))
+                        # ⚡ Comparison: กรองเอาเฉพาะสินค้าที่ชื่อขึ้นต้นด้วย model token (standalone)
+                        # ไม่เอาชุด/แถมที่มี model token แค่เป็นส่วนประกอบ (เช่น "AC30S / CTC615W หัวชาร์จ")
+                        if _is_comparison_ref2:
+                            _ref_docs_filtered = []
+                            for d in _ref_docs:
+                                _name = (d.get("item_name") or "").strip()
+                                _name_lower = _name.lower()
+                                # ข้ามสินค้าที่มี keyword บอกว่าเป็นชุด/แถม/หัวชาร์จ
+                                _skip_kws = ("แถมฟรี", "หัวชาร์จ", "ชุดชาร์จ", "เซ็ต", "set", "combo",
+                                             "adapter", "gan", "หัวชาร์ต", "พาวเวอร์แบงค์", "powerbank")
+                                # ต้องมี model token อยู่ในชื่อ และไม่ใช่ชุด/แถม
+                                if _ref_kw in _name_lower and not any(kw in _name_lower for kw in _skip_kws):
+                                    _ref_docs_filtered.append(d)
+                            _ref_docs = _ref_docs_filtered if _ref_docs_filtered else _ref_docs
+                        for d in _ref_docs[:5]:
+                            iid = str(d.get("item_id"))
+                            if iid not in _seen_ids:
+                                _seen_ids.add(iid)
+                                _ref_regex_products.append(product_store.to_product_card(d, req.message))
+                    if _ref_regex_products:
+                        print(f"[REF-REGEX] ดึงสินค้าตรง model {_ref_kws_to_query} ด้วย Mongo regex: {len(_ref_regex_products)} ตัว", file=sys.stderr)
                 except Exception as _e:
                     print(f"[REF-REGEX] error: {_e}", file=sys.stderr)
 
@@ -2673,14 +2956,22 @@ def chat(req: ChatRequest) -> ChatResponse:
         # ⚡ Carry-forward products จาก history — ถ้า message ปัจจุบันเป็น follow-up
         # และไม่มี model keyword ชัดเจน ให้ลอง fuzzy match กับ model answer ล่าสุด
         # เพื่อหาสินค้าที่เคยตอบไปแล้ว ทำให้ถามซ้ำได้โดยไม่ลืมสินค้า
+        # ⚡ ห้าม carry-forward เมื่อคำถามปัจจุบันระบุ charger subtype ชัด (หัว/สาย/ชุด/ฯลฯ)
+        # เพราะแปลว่าลูกค้าถามหา subtype ใหม่ ไม่ใช่ follow-up สินค้าเดิม
+        # (เช่น "มีหัวไหม" หลัง bot แนะนำสายชาร์จ → ห้ามดึงสายชาร์จเดิมมา carry)
         _is_carry_forward = False
-        if not _ref_regex_products and not _ref_handled and req.history:
+        # ⚡ _is_conv_active และ _cur_charger_sub ถูก set ก่อน history block (ที่บรรทัด ~2124)
+        # ไม่ต้อง reset ที่นี่ เพราะอาจถูก set แล้วจาก CONV-ACTIVE check
+
+        if not _ref_regex_products and not _ref_handled and req.history and not _cur_charger_sub:
             _cur_has_model_kw = bool(knowledge_base.extract_model_keywords(req.message))
             _cur_msg_lower = (req.message or "").lower().strip()
-            # ถ้า message ปัจจุบันสั้น (<= 8 คำ) และไม่มี model keyword → น่าจะ follow-up
-            _is_short_followup = len(req.message.split()) <= 8 and not _cur_has_model_kw
+            # ⚡ ขยาย carry-forward ให้รองรับ message ยาวขึ้น (<= 25 คำ)
+            # เพราะคำถาม follow-up อาจยาว เช่น "ถ้าผมซื้อแล้วผมเชื่อถือได้ใช่ไหมครับมีการรับประกันนะครับ"
+            _is_short_followup = len(req.message.split()) <= 25 and not _cur_has_model_kw
             # ไม่ใช่ new topic (เช่น "สวัสดี", "มีอะไรแนะนำไหม")
-            _new_topic_kws = ("สวัสดี", "หวัดดี", "hi", "hello", "แนะนำ", "มีอะไร", "มีไร", "ขอดู")
+            _new_topic_kws = ("สวัสดี", "หวัดดี", "hi", "hello", "แนะนำ", "มีอะไร", "มีไร",
+                              "สอบถาม", "สนใจ", "อยากได้", "หาสินค้า", "ดูสินค้า")
             _is_new_topic = any(kw in _cur_msg_lower for kw in _new_topic_kws)
             if _is_short_followup and not _is_new_topic:
                 # หา model answer ล่าสุดจาก history
@@ -2737,6 +3028,20 @@ def chat(req: ChatRequest) -> ChatResponse:
                     products[0]["_context_note"] = _carry_note
                 else:
                     products[0]["_context_note"] = products[0]["_context_note"] + " " + _carry_note
+            # ⚡ ถ้าใช้ active product จาก conversation_products timeline
+            # บอก LLM ชัดๆ ว่าสินค้านี้คือสินค้าที่ลูกค้าสนใจ ห้ามสลับไปสินค้าอื่น
+            if _is_conv_active and products:
+                _conv_note = (
+                    "⚠️ สินค้าใน context คือสินค้าที่ลูกค้าส่งมา/สนใจในแชทนี้ "
+                    "ลูกค้ากำลังถามเกี่ยวกับสินค้านี้ต่อเนื่อง "
+                    "ห้ามสลับไปแนะนำสินค้าอื่นที่ไม่ใช่สินค้าใน context "
+                    "ถ้า bot เคยแนะนำสินค้าอื่นใน history ให้ถือว่าเป็นคำแนะนำ "
+                    "ไม่ใช่สินค้าที่ลูกค้าสนใจ — ให้ตอบเกี่ยวกับสินค้าใน context เท่านั้น"
+                )
+                if "_context_note" not in products[0]:
+                    products[0]["_context_note"] = _conv_note
+                else:
+                    products[0]["_context_note"] = products[0]["_context_note"] + " " + _conv_note
             # ⚡ ถ้าเป็น charging spec question → เพิ่ม context note ให้ LLM
             # บอก LLM ว่าลูกค้าถามเรื่องสเปกชาร์จของสินค้า ไม่ใช่ถามซื้อสายชาร์จ
             if _is_charging_spec_q and products:
@@ -2805,7 +3110,12 @@ def chat(req: ChatRequest) -> ChatResponse:
                                           for kw in _charger_kws_set if len(_msg_first_word) >= 2)
             # ข้อยกเว้น: ถ้า message มีชื่อสินค้า/แบรนด์ที่ไม่ใช่ charger keyword นำหน้า
             # เช่น "biokoop ใช้สายชาร์จอะไร" → _starts_with_charger_kw=False (biokoop ไม่ใช่ charger kw)
-            if _is_charging_spec_q and not _starts_with_charger_kw:
+            # ⚡ กำหนด _intent_sub = None ก่อนเข้า if/else (ใช้ใน fallback ด้วย)
+            _intent_sub = None
+            # ⚡ ถ้ามี _ref_regex_products จาก CONV-ACTIVE หรือ MODEL-REGEX แล้ว → ข้าม fetch_products
+            # เพราะสินค้าที่ลูกค้าสนใจได้ระบุแล้ว ไม่ต้องค้นใหม่ (products ถูกตั้งที่ if _ref_regex_products บรรทัด ~2975)
+            if not _ref_regex_products:
+              if _is_charging_spec_q and not _starts_with_charger_kw:
                 print(f"[CHARGING-SPEC-Q] ลูกค้าถาม charging spec ของสินค้า → ไม่กรอง charger type: {req.message!r}", file=sys.stderr)
                 # override product_types เป็น set() เพื่อไม่กรองด้วย charger
                 # และตั้ง desc_message ให้รวม keyword เรื่องชาร์จ เพื่อดึง description ที่เกี่ยวข้อง
@@ -2821,7 +3131,38 @@ def chat(req: ChatRequest) -> ChatResponse:
                     skip_charger_subtype=True,
                     product_types_override=set(),
                 )
-            else:
+              else:
+                # ⚡ ใช้ charger_subtype เป็น override เพื่อกัน retrieval_message ปนเปื้อน
+                # ลำดับความสำคัญ: intent.charger_subtype > _detect(req.message) > _detect(retrieval_message)
+                # - intent แม่นสุด (LLM อ่านประโยคเข้าใจ)
+                # - req.message = คำถามจริงของลูกค้า (ไม่ปนเปื้อนด้วยชื่อสินค้าจาก history)
+                # - retrieval_message ใช้เป็น last resort (อาจมี "สายชาร์จ" จาก reference logic)
+                if (_intent_result
+                        and _intent_result.get("product_type") == "charger"
+                        and _intent_result.get("charger_subtype") in (
+                            "adapter", "cable", "set", "car_charger",
+                            "wireless", "desktop", "socket",
+                        )):
+                    _intent_sub = _intent_result.get("charger_subtype")
+                    if _intent_sub != product_store._detect_charger_subtype(retrieval_message):
+                        print(f"[INTENT-SUBTYPE-OVERRIDE] intent={_intent_sub} != detected from retrieval={retrieval_message!r} → ใช้ intent", file=sys.stderr)
+                else:
+                    # ⚡ intent ไม่ได้รัน → detect จาก req.message (คำถามจริง) แทน retrieval_message
+                    # เพราะ retrieval_message อาจถูกปนเปื้อนด้วยชื่อสายชาร์จจาก reference/carry logic
+                    # ทำให้ detect ได้ cable ทั้งที่ลูกค้าถามหัวชาร์จ
+                    _msg_sub = product_store._detect_charger_subtype(req.message)
+                    _retr_sub = product_store._detect_charger_subtype(retrieval_message)
+                    if _msg_sub and _msg_sub != _retr_sub:
+                        _intent_sub = _msg_sub
+                        print(f"[MSG-SUBTYPE-OVERRIDE] req.message sub={_msg_sub} != retrieval sub={_retr_sub} → ใช้ req.message (intent skipped)", file=sys.stderr)
+                # เติม subtype keyword นำหน้า retrieval เพื่อให้ MongoDB query/vector search เจอสินค้า subtype ที่ถาม
+                if _intent_sub:
+                    _sub_kw = {"adapter": "หัวชาร์จ", "cable": "สายชาร์จ", "set": "ชุดชาร์จ",
+                               "car_charger": "หัวชาร์จในรถ", "wireless": "ชาร์จไร้สาย",
+                               "desktop": "แท่นชาร์จ", "socket": "ปลั๊กไฟอัจฉริยะ"}.get(_intent_sub, "")
+                    if _sub_kw and not any(kw in retrieval_message.lower() for kw in (_sub_kw, "หัวชาร์จ", "สายชาร์จ", "ชุดชาร์จ", "แท่นชาร์จ", "ชาร์จไร้สาย", "หัวชาร์จในรถ", "ปลั๊กไฟ")):
+                        retrieval_message = f"{_sub_kw} {retrieval_message}"
+                        print(f"[SUBTYPE-PREFIX] retrieval_message → {retrieval_message!r}", file=sys.stderr)
                 products = product_store.fetch_products(
                 db,
                 message=retrieval_message,
@@ -2830,7 +3171,9 @@ def chat(req: ChatRequest) -> ChatResponse:
                 desc_message=desc_message,
                 is_compat_check=_is_compat,
                 skip_charger_subtype=_skip_sub,
+                charger_subtype_override=_intent_sub,
             )
+            # ⚡ ปิด block if not _ref_regex_products (ข้าม fetch ถ้ามี active product แล้ว)
         print(f"[TIMING] fetch_products: {_time.time()-_t1:.2f}s  (retrieval={retrieval_message!r})  products={len(products)}", file=sys.stderr)
 
         # ── Superlative ที่ไม่ match product type ใดๆ ชัดเจน ──
@@ -3114,7 +3457,8 @@ def chat(req: ChatRequest) -> ChatResponse:
         if not products and req.shop:
             _t_alt = _time.time()
             # ตรวจว่าเป็น charger subtype ที่ไม่เจอไหม
-            _req_charger_sub = product_store._detect_charger_subtype(retrieval_message)
+            # ⚡ ใช้ subtype จาก intent ก่อน (แม่นกว่า) แล้วค่อย fallback เป็น detection จาก message
+            _req_charger_sub = _intent_sub or product_store._detect_charger_subtype(req.message)
             if _req_charger_sub:
                 # ดึง charger ทั่วไป (ไม่กรอง subtype) เพื่อให้ LLM แนะนำชุด/สาย แทน
                 # ใช้ "charger" เฉยๆ (ไม่มี subtype keyword) เพื่อไม่ให้ subtype filter ทำงาน
@@ -3149,6 +3493,11 @@ def chat(req: ChatRequest) -> ChatResponse:
                                 _filtered_alt.append(p)
                     if _filtered_alt:
                         alt_products = _filtered_alt
+                    else:
+                        # ⚡ ถ้ากรองแล้วไม่เหลือ adapter/set เลย → ห้ามส่ง cable มาแทน
+                        # (เดิม: alt_products ค้างเป็น cable ทั้งหมด ทำให้ถามหัวชาร์จแต่ได้สายชาร์จ)
+                        print(f"[CHARGER-SUBTYPE-FALLBACK] ไม่มีสินค้า subtype={_req_charger_sub} ในร้าน → ไม่ส่ง subtype อื่นแทน", file=sys.stderr)
+                        alt_products = []
                 if alt_products:
                     products = alt_products
                     _sub_label = {"adapter": "หัวชาร์จเดี่ยว", "cable": "สายชาร์จเดี่ยว", "set": "ชุดชาร์จ"}.get(_req_charger_sub, _req_charger_sub)
@@ -3181,7 +3530,12 @@ def chat(req: ChatRequest) -> ChatResponse:
         # ที่ตรงกับ model ที่ลูกค้าถาม ไม่ส่งสินค้าอื่นปน เพื่อให้ LLM ตอบตรงจุด
         # ⚡ ข้ามสำหรับ app question — ต้องส่ง 10 ชิ้นเข้า LLM ให้ครบ
         # ⚡ ข้ามสำหรับ superlative question — ต้องส่งทุกรุ่นเข้า LLM เพื่อเปรียบเทียบ
-        if retrieval_message != req.message and products and not _is_app_question and not _is_superlative_q:
+        # ⚡ ข้ามสำหรับ comparison question — ต้องส่งทุกรุ่นที่ลูกค้าถามเข้า LLM
+        #   (ถ้ากรองเฉพาะที่มีทุก model word จะเหลือแค่ชุด/แถม ไม่ใช่สินค้าเดี่ยว)
+        _is_comparison_followup = any(kw in req.message.lower() for kw in (
+            "ต่างกัน", "ต่างไหม", "เปรียบเทียบ", "vs", "ดีกว่า", "สูงกว่า", "แรงกว่า"
+        ))
+        if retrieval_message != req.message and products and not _is_app_question and not _is_superlative_q and not _is_comparison_followup:
             # หา model words จาก retrieval_message
             known_brands = {"redmi", "xiaomi", "mi", "iphone", "galaxy",
                             "samsung", "oppo", "vivo", "realme", "poco",
@@ -3279,7 +3633,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         seen_names.add(pname)
                     merged.append(p)
                 # สำหรับ compatibility check ให้เก็บเยอะกว่า req.limit เพื่อให้ LLM เห็นทุกรุ่น
-                _merge_limit = max(req.limit * 4, 40) if _is_compat else req.limit
+                _merge_limit = max(req.limit * 4, 40) if _is_compat_check else req.limit
                 products = merged[:_merge_limit]
 
             # ใส่ context note ชัดๆ (ทุกกรณี ไม่ใช่แค่ตอนมี ptypes)
@@ -3424,8 +3778,17 @@ def chat(req: ChatRequest) -> ChatResponse:
                 print(f"[WEB-SEARCH] triggered: {_search_reason}", file=sys.stderr)
 
                 # Step 1+2: OpenRouter + Google Search → extract keywords
+                # ⚠️ ถ้ามี reference (เช่น "รุ่นนี้" → IMILAB EC4) ให้ส่ง retrieval_message
+                # (ที่รวมชื่อสินค้าจาก history) ไปแทน req.message
+                # ไม่งั้น web_search จะตีความ "มีแบตไหม" เป็นคำถามทั่วไป แล้วไปค้น phone อื่นมาตอบ
+                # (เช่น ค้น "มีแบตไหม" → ได้ Vivo Y200 ทั้งที่ลูกค้าถามเรื่อง IMILAB SC230)
+                _ws_search_query = retrieval_message if (
+                    retrieval_message and retrieval_message != req.message
+                    and len(retrieval_message) > len(req.message)
+                ) else req.message
+                print(f"[WEB-SEARCH] search query: {_ws_search_query!r}", file=sys.stderr)
                 _ws_result = _ws.search_and_extract(
-                    message=req.message,
+                    message=_ws_search_query,
                     shop=req.shop,
                     platform=req.platform,
                     history=history,
@@ -3531,11 +3894,54 @@ def chat(req: ChatRequest) -> ChatResponse:
                     # Step 4: LLM ปั้นประโยคจากสินค้า DB + KB + ข้อมูล search
                     _llm2_start = _time.time()
                     if _final_products and _ws_search_info:
+                        # ⚠️ strip URLs ออกจาก search_info ก่อนส่งให้ LLM
+                        # เพื่อกัน LLM เอาลิงก์จาก Google Search มาใส่ในคำตอบ
+                        # (ลิงก์ที่ใช้ได้มีแค่ short_link ของสินค้าใน context เท่านั้น)
+                        import re as _re_strip_urls
+                        # Step 1: ลบ markdown link [text](url) ออกทั้งก้อน (รวม text)
+                        _ws_search_info_clean = _re_strip_urls.sub(
+                            r'\[([^\]]+)\]\([^)]+\)', r'', _ws_search_info
+                        )
+                        # Step 2: ลบ plain URL ที่เหลือ (http(s)://...)
+                        _ws_search_info_clean = _re_strip_urls.sub(
+                            r'https?://[^\s\)\]]+', r'', _ws_search_info_clean,
+                            flags=_re_strip_urls.IGNORECASE
+                        )
+                        # Step 3: ลบ markdown link เปล่าที่เหลือ [text]() หรือ [text]( )
+                        _ws_search_info_clean = _re_strip_urls.sub(
+                            r'\[([^\]]*)\]\(\s*\)', r'', _ws_search_info_clean
+                        ).strip()
+                        # Step 4: กรอบ whitespace ที่เหลือหลายๆ อัน
+                        _ws_search_info_clean = _re_strip_urls.sub(
+                            r'\s{2,}', r' ', _ws_search_info_clean
+                        ).strip()
+                        # กรณีที่ strip แล้วสั้นเกินไป → ใช้ตัวเดิม (กันข้อมูลหายหมด)
+                        if len(_ws_search_info_clean) < 20:
+                            _ws_search_info_clean = _ws_search_info
+                        if _ws_search_info_clean != _ws_search_info:
+                            print(f"[WEB-SEARCH] stripped external URLs from search_info", file=sys.stderr)
                         # รวม context ทั้งหมด: search info + KB
-                        _extra_parts = [f"=== ข้อมูลจาก Google Search (ใช้ประกอบคำตอบ แต่ห้ามอ้างอิงลิงก์) ===\n{_ws_search_info}"]
+                        # ⚠️ สำคัญ: search_info เป็นแค่ "ข้อมูลประกอบ" ไม่ใช่แหล่งข้อมูลหลัก
+                        # - ห้ามเอา search_info มาเป็นหัวข้อคำตอบหลัก (เช่น ห้ามตอบเรื่อง Vivo Y200
+                        #   ทั้งที่ลูกค้าถามเรื่อง IMILAB SC230)
+                        # - ห้ามแนะนำสินค้าที่ไม่อยู่ใน products list
+                        # - ใช้ search_info เฉพาะเพื่อเติม spec ที่ขาดใน product (เช่น ขนาดแบต, เวลาชาร์จ,
+                        #   ความเร็วโปรโตคอล) ของสินค้าที่อยู่ใน context เท่านั้น
+                        _extra_parts = [
+                            "=== ข้อมูลจาก Google Search (ข้อมูลประกอบเท่านั้น — ห้ามใช้เป็นแหล่งหลัก) ===",
+                            f"คำเตือน: ข้อมูลด้านล่างนี้เป็นข้อมูลเสริมจาก Google Search เพื่อช่วยเติม spec ที่อาจขาด",
+                            f"ของสินค้าใน context เท่านั้น — ห้ามนำมาเป็นหัวข้อคำตอบหลัก, ห้ามแนะนำสินค้าที่ไม่อยู่ใน context,",
+                            f"ห้ามตอบเรื่องสินค้า/แบรนด์อื่นที่ไม่ใช่สินค้าใน context",
+                            f"ถ้า search_info พูดถึงสินค้าที่ไม่ใช่สินค้าใน context → ห้ามใช้, ข้ามไป",
+                            f"ห้ามใส่ลิงก์ใดๆ ในคำตอบ นอกจาก short_link ของสินค้าใน context (ที่อยู่ใน products list)",
+                            f"ตัวอย่างที่ผิด: ลูกค้าถาม 'IMILAB SC230 มีแบตไหม' แล้ว search_info พูดเรื่อง Vivo Y200 → ห้ามตอบเรื่อง Vivo",
+                            f"ตัวอย่างที่ถูก: ลูกค้าถาม 'IMILAB EC4 แบตกี่ mAh' แล้ว search_info บอก EC4 มี 5200mAh → ใช้เติม spec ของ EC4 ได้",
+                            f"---",
+                            _ws_search_info_clean,
+                        ]
                         if _ws_kb_context:
                             _extra_parts.append(f"=== ข้อมูลจาก Knowledge Base ===\n{_ws_kb_context}")
-                        _extra_context = "\n\n".join(_extra_parts)
+                        _extra_context = "\n".join(_extra_parts)
                         try:
                             _ws_answer, _ws_llm_usage = llm.answer(
                                 message=req.message,
@@ -3638,6 +4044,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         }
                         print(f"[WEB-SEARCH] used web search answer  total={_total_ws}s  products={len(_final_products)}", file=sys.stderr)
                         _final_response_products = _final_products[:req.limit]
+                        _record_suggestion_products(req, _final_response_products)
                         return ChatResponse(
                             answer=_ws_answer,
                             answer_segments=llm.split_segments(_ws_answer),
@@ -3661,6 +4068,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 else:
                     print(f"[WEB-SEARCH] skipped (error: {_ws_result.get('error')})", file=sys.stderr)
 
+        _record_suggestion_products(req, products_for_response)
         return ChatResponse(
             answer=answer,
             answer_segments=llm.split_segments(answer),
@@ -3678,6 +4086,36 @@ def chat(req: ChatRequest) -> ChatResponse:
         )
     finally:
         pass  # ไม่ปิด client เพราะใช้ cache
+
+
+def _record_suggestion_products(req, products: list[dict]) -> None:
+    """บันทึกสินค้าที่ bot แนะนำลง conversation_products timeline.
+
+    เรียกก่อน return ChatResponse ทุกจุดที่ bot ตอบพร้อม products.
+    บันทึกเฉพาะสินค้าที่มี item_id และ req.conversation_id มีค่า.
+    สินค้าที่ bot แนะนำ = is_anchor=False (suggestion).
+    """
+    if not req or not getattr(req, "conversation_id", None) or not products:
+        return
+    try:
+        from . import conversation_products as _cp
+        for p in products[:3]:  # จำกัด 3 ชิ้นแรก (ประหยัด DB write)
+            item_id = p.get("item_id")
+            name = p.get("name") or ""
+            if not item_id:
+                continue
+            _cp.add_product(
+                conversation_id=req.conversation_id,
+                platform=getattr(req, "platform", None),
+                shop=getattr(req, "shop", None),
+                item_id=item_id,
+                name=name,
+                source="bot_suggestion",
+                card=p,
+                is_anchor=False,
+            )
+    except Exception as _e:
+        print(f"[CONV-PRODUCTS] error recording suggestions: {_e}", file=sys.stderr)
 
 
 def _append_base_warranty(answer: str, message: str, source: str = "") -> str:

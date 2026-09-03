@@ -52,6 +52,8 @@ export type MessageType =
   | "image_with_text"
   | "faq_liveagent"
   | "rating_card"
+  | "bundle_message"
+  | "bundle_deal"
   | "unknown";
 
 // ข้อมูล media (รูป/วิดีโอ) ที่ดึงจาก raw_payload
@@ -88,6 +90,8 @@ export interface ChatMessage {
   order_sn?: string;          // สำหรับ message_type=order
   notification_text?: string; // สำหรับ message_type=notification
   table?: MessageTable;       // สำหรับ structured content (variation_card)
+  // ⚡ bundle_message — sub-messages หลายตัว
+  bundle?: ChatMessage[];
   // Derived — ไม่ได้มาจาก sellcenter โดยตรง
   replied?: boolean;          // user message: มี admin/bot ตอบแล้วไหม (derive จาก timestamp)
 }

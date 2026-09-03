@@ -11,7 +11,7 @@
 // ⚡ force-dynamic — กัน Next.js cache GET response (กันข้อมูลเก่าค้าง)
 export const dynamic = "force-dynamic";
 import { NextRequest } from "next/server";
-import { requireAuth, requireDev } from "@/backend/middleware/authorize";
+import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { shadowReplyService } from "@/backend/service/shadowReplyService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
@@ -78,7 +78,7 @@ async function callOurBot(params: {
 
 // GET — list shadow replies หรือ stats (dev เท่านั้น)
 export async function GET(req: NextRequest) {
-  const r = await requireDev(req);
+  const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
   const url = new URL(req.url);
@@ -111,7 +111,7 @@ export async function GET(req: NextRequest) {
 
 // POST — generate shadow reply for a conversation (dev เท่านั้น)
 export async function POST(req: NextRequest) {
-  const r = await requireDev(req);
+  const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
   const body = await readJson<{
@@ -123,10 +123,14 @@ export async function POST(req: NextRequest) {
     return error("conversation_id is required", 422);
   }
 
+  // 🔒 coerce เพื่อป้องกัน NoSQL injection
+  const conversationId = String(body.conversation_id);
+  const inboundMessageId = body.inbound_message_id != null ? String(body.inbound_message_id) : undefined;
+
   try {
     const doc = await shadowReplyService.generate({
-      conversationId: body.conversation_id,
-      inboundMessageId: body.inbound_message_id,
+      conversationId,
+      inboundMessageId,
       botCaller: callOurBot,
     });
 
@@ -134,7 +138,7 @@ export async function POST(req: NextRequest) {
     await logAdminEvent({
       action_type: "shadow_reply.generate",
       actor: r.ctx.admin.admin_id,
-      conversation_id: body.conversation_id,
+      conversation_id: conversationId,
       shop_id: doc.shop_id,
       metadata: {
         shadow_reply_id: doc.shadow_reply_id,
@@ -156,7 +160,7 @@ export async function POST(req: NextRequest) {
 // DELETE — clear all shadow replies (dev เท่านั้น)
 // ใช้ตอนอยากเริ่มใหม่ ล้างข้อมูลทั้งหมด
 export async function DELETE(req: NextRequest) {
-  const r = await requireDev(req);
+  const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
   const url = new URL(req.url);
@@ -190,7 +194,7 @@ export async function DELETE(req: NextRequest) {
 
 // POST ?action=restore_all — restore ทั้งหมดที่ถูก soft delete
 export async function PUT(req: NextRequest) {
-  const r = await requireDev(req);
+  const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
   const url = new URL(req.url);

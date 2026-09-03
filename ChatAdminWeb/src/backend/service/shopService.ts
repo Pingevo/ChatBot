@@ -2,6 +2,7 @@
 // shop_id_1, shopname_1, platform_1_shop_id_1.
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
+import { safeRegexSearch } from "../lib/regexEscape";
 import type { Platform } from "./conversationService";
 
 export interface ShopDoc extends Document {
@@ -43,10 +44,14 @@ export async function listShopsPaged(opts: {
   const filter: Record<string, unknown> = {};
   if (opts.platform) filter.platform = opts.platform;
   if (opts.search) {
-    filter.$or = [
-      { shopname: { $regex: opts.search, $options: "i" } },
-      { shop_id: { $regex: opts.search, $options: "i" } },
-    ];
+    // 🔒 escape regex
+    const safeSearch = safeRegexSearch(opts.search);
+    if (safeSearch) {
+      filter.$or = [
+        { shopname: { $regex: safeSearch, $options: "i" } },
+        { shop_id: { $regex: safeSearch, $options: "i" } },
+      ];
+    }
   }
   const sortBy = opts.sortBy || "created_at";
   const sortDir = opts.sortDir || -1;

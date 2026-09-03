@@ -7,6 +7,7 @@
 // ⚠️ READ-ONLY เสมอ — ใช้สำหรับแสดงในแชทเท่านั้น ห้ามเขียน
 import type { Document } from "mongodb";
 import { getDbWalletCollection } from "../db/dbWalletClient";
+import { safeRegexSearch } from "../lib/regexEscape";
 import type { Platform } from "./conversationService";
 
 export interface ProductDoc extends Document {
@@ -81,13 +82,17 @@ export async function listProducts(opts: {
     });
   }
   if (opts.search) {
-    andClauses.push({
-      $or: [
-        { name: { $regex: opts.search, $options: "i" } },
-        { product_name: { $regex: opts.search, $options: "i" } },
-        { item_name: { $regex: opts.search, $options: "i" } },
-      ],
-    });
+    // 🔒 escape regex
+    const safeSearch = safeRegexSearch(opts.search);
+    if (safeSearch) {
+      andClauses.push({
+        $or: [
+          { name: { $regex: safeSearch, $options: "i" } },
+          { product_name: { $regex: safeSearch, $options: "i" } },
+          { item_name: { $regex: safeSearch, $options: "i" } },
+        ],
+      });
+    }
   }
   if (andClauses.length > 0) {
     filter.$and = andClauses;

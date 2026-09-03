@@ -34,6 +34,7 @@ export async function POST(
   }
   if (!body?.resolution?.trim()) return error("กรุณาระบุวิธีการแก้ไข", 422);
 
+  // ℹ️ Shared inbox — admin ทุกคน close ได้
   const ok = await conversationService.closeConversation({
     conversationId,
     closedBy: r.ctx.admin.admin_id,

@@ -38,6 +38,31 @@ export interface ParsedMessage {
   order_sn?: string;
   notification_text?: string;
   table?: MessageTable;
+  // ⚡ bundle_message — มี sub-messages หลายตัว (Shopee bundle)
+  bundle?: ParsedMessage[];
+}
+
+/**
+ * Normalize item_id ให้เป็น canonical int string (ไม่มี .0 ต่อท้าย)
+ * Shopee ส่ง item_id มาเป็น float เช่น 47615436122.0 → แปลงเป็น "47615436122"
+ * รองรับ: number, string, float, int, string ที่มี .0 ต่อท้าย
+ */
+export function normalizeItemId(id: unknown): string {
+  if (id === null || id === undefined || id === "") return "";
+  // ถ้าเป็น number → แปลงเป็น int ก่อน (ตัด .0)
+  if (typeof id === "number") {
+    return String(Math.trunc(id));
+  }
+  // ถ้าเป็น string → ลอง parse เป็น number แล้วตัดทศนิยม
+  const s = String(id).trim();
+  if (s === "") return "";
+  // รูปแบบ "47615436122.0" → ตัด .0 ออก
+  if (/^\d+\.\d+$/.test(s)) {
+    const n = parseFloat(s);
+    if (!isNaN(n)) return String(Math.trunc(n));
+  }
+  // รูปแบบ "47615436122" → คืนเดิม
+  return s;
 }
 
 /**
@@ -178,7 +203,7 @@ export function parseRawMessage(
 
     case "item": {
       const c = inner as any;
-      const itemId = String(c.item_id || "");
+      const itemId = normalizeItemId(c.item_id);
       return {
         message_type: "item",
         text: fallbackText || "(สินค้า)",
@@ -188,7 +213,7 @@ export function parseRawMessage(
 
     case "variation_card": {
       const c = inner as any;
-      const itemId = String(c.product_id || c.item_id || "");
+      const itemId = normalizeItemId(c.product_id || c.item_id);
       // พยายามดึงข้อมูลตารางจาก item_card_v2 (ถ้ามี)
       let table: MessageTable | undefined;
       const card = c.item_card_v2;
@@ -248,6 +273,30 @@ export function parseRawMessage(
         text: faqText || "(โอนไปยังเจ้าหน้าที่)",
         notification_text: faqText || "โอนไปยังเจ้าหน้าที่",
       };
+    }
+
+    // ⚡ bundle_message — Shopee ส่งมาเมื่อลูกค้าแชร์สินค้าหลายชิ้นพร้อมกัน
+    // raw_payload.content.messages = array ของ message_id strings (ไม่ใช่ sub-message objects)
+    // raw_payload.source_content.item_id = item_id ของสินค้าหลักใน bundle
+    // เรา extract item_id จาก source_content แล้ว treat เหมือน item card
+    case "bundle_message":
+    case "bundle_deal": {
+      const c = inner as any;
+      // อ่าน item_id จาก source_content (อยู่ใน raw_payload ไม่ใช่ content)
+      const rawAny = raw as any;
+      const sourceContent = rawAny?.source_content || rawAny?.data?.source_content;
+      const itemId = sourceContent?.item_id
+        ? normalizeItemId(sourceContent.item_id)
+        : c.item_id ? normalizeItemId(c.item_id) : "";
+      if (itemId) {
+        return {
+          message_type: "item" as MessageType,
+          text: fallbackText || "(สินค้า)",
+          product_ref: { item_id: itemId },
+        };
+      }
+      // ไม่มี item_id → แสดงเป็น placeholder
+      return { message_type: "text", text: fallbackText || "(bundle)" };
     }
 
     default:

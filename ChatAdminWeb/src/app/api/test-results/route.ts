@@ -8,7 +8,8 @@
 // ทุก schema ถูก normalize เป็น unified format ก่อนส่งกลับ
 import { NextRequest, NextResponse } from "next/server";
 import { readFile, readdir, stat } from "fs/promises";
-import { join, basename } from "path";
+import { join, basename, resolve, relative } from "path";
+import { requireAuth } from "@/backend/middleware/authorize";
 
 export const dynamic = "force-dynamic";
 
@@ -16,13 +17,12 @@ export const dynamic = "force-dynamic";
 const FILE_PATTERN = /results.*\.json$|.*_results\.json$/i;
 
 // directories ที่จะสแกน (relative จาก cwd = ChatAdminWeb/)
+// 🔒 ไม่รวม ".." หรือ "../.." เพื่อป้องกัน path traversal
 const SEARCH_DIRS = [
   ".",                                    // ChatAdminWeb/
-  "..",                                   // ChatBotProductMS/
   join("..", "testresult"),               // ChatBotProductMS/testresult/ (โฟลเดอร์จริง)
   join("..", "test_results"),             // ChatBotProductMS/test_results/ (fallback)
   join("..", "scripts"),                  // ChatBotProductMS/scripts/
-  join("..", ".."),                       // ขึ้นไปอีกระดับ
 ];
 
 interface TestFileInfo {
@@ -34,7 +34,7 @@ interface TestFileInfo {
 async function listTestFiles(cwd: string): Promise<TestFileInfo[]> {
   const found = new Map<string, string>(); // filename → full path (กันซ้ำ)
   for (const dir of SEARCH_DIRS) {
-    const absDir = join(cwd, dir);
+    const absDir = resolve(cwd, dir);
     try {
       const entries = await readdir(absDir);
       for (const e of entries) {
@@ -51,23 +51,33 @@ async function listTestFiles(cwd: string): Promise<TestFileInfo[]> {
   const result: { filename: string; path: string; label: string }[] = [];
   for (const [filename, path] of found) {
     // label ที่อ่านง่าย — แสดง subdirectory ถ้ามี
-    const relPath = path.replace(cwd + "/", "").replace(/^\.\.\//, "");
+    const relPath = relative(cwd, path);
     result.push({ filename, path, label: relPath });
   }
   return result.sort((a, b) => a.filename.localeCompare(b.filename));
 }
 
 // หา full path ของไฟล์จาก filename
+// 🔒 ป้องกัน path traversal — ใช้ basename เท่านั้น และตรวจว่า resolved path อยู่ใน SEARCH_DIRS
 async function resolveFilePath(filename: string, cwd: string): Promise<string | null> {
+  // 🔒 strip path components — รับเฉพาะชื่อไฟล์เท่านั้น
+  const safeFilename = basename(filename);
+  if (!safeFilename || !FILE_PATTERN.test(safeFilename)) return null;
+
   const files = await listTestFiles(cwd);
-  const found = files.find((f) => f.filename === filename || f.label === filename);
+  const found = files.find((f) => f.filename === safeFilename);
   if (found) return found.path;
-  // fallback: ลองอ่านตรงจาก path ที่ส่งมา
+
+  // fallback: ลองอ่านตรงจาก SEARCH_DIRS — แต่ต้อง validate ว่า path อยู่ใน dir ที่อนุญาต
   for (const dir of SEARCH_DIRS) {
-    const p = join(cwd, dir, filename);
+    const absDir = resolve(cwd, dir);
+    const candidate = resolve(absDir, safeFilename);
+    // 🔒 ตรวจว่า candidate อยู่ภายใต้ absDir จริงๆ
+    const rel = relative(absDir, candidate);
+    if (rel.startsWith("..") || rel.includes("..")) continue;
     try {
-      await stat(p);
-      return p;
+      await stat(candidate);
+      return candidate;
     } catch {}
   }
   return null;
@@ -187,6 +197,8 @@ function normalizeResults(raw: any[]): UnifiedResult[] {
 }
 
 export async function GET(req: NextRequest) {
+  const r = await requireAuth(req);
+  if (!r.ok) return r.response;
   const url = new URL(req.url);
   const cwd = process.cwd();
 
@@ -203,7 +215,9 @@ export async function GET(req: NextRequest) {
         file_details: files.map((f) => ({ filename: f.filename, label: f.label })),
       });
     } catch (e) {
-      return NextResponse.json({ error: "failed to list files", detail: String(e) }, { status: 500 });
+      // 🔒 อย่าเปิดเผย error detail ให้ client — log ฝั่ง server เท่านั้น
+      console.error("[test-results] failed to list files:", e);
+      return NextResponse.json({ error: "failed to list files" }, { status: 500 });
     }
   }
 
@@ -273,8 +287,10 @@ export async function GET(req: NextRequest) {
       file: filename,
     });
   } catch (e) {
+    // 🔒 อย่าเปิดเผย error detail ให้ client — log ฝั่ง server เท่านั้น
+    console.error("[test-results] failed to read test results:", e);
     return NextResponse.json(
-      { error: "failed to read test results", detail: String(e) },
+      { error: "failed to read test results" },
       { status: 500 }
     );
   }

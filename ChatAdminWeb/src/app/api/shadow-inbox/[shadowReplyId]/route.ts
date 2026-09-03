@@ -4,7 +4,7 @@
 //
 // ⛔ IRON RULE: ห้ามส่งข้อความจริง — rating เป็น metadata เท่านั้น
 import { NextRequest } from "next/server";
-import { requireDev } from "@/backend/middleware/authorize";
+import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { shadowReplyService } from "@/backend/service/shadowReplyService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
@@ -19,7 +19,7 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ shadowReplyId: string }> }
 ) {
-  const r = await requireDev(req);
+  const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
   const { shadowReplyId } = await params;
@@ -130,7 +130,7 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ shadowReplyId: string }> }
 ) {
-  const r = await requireDev(req);
+  const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
   const { shadowReplyId } = await params;
@@ -191,7 +191,7 @@ export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ shadowReplyId: string }> }
 ) {
-  const r = await requireDev(req);
+  const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
   const { shadowReplyId } = await params;
@@ -213,7 +213,7 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ shadowReplyId: string }> }
 ) {
-  const r = await requireDev(req);
+  const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
   const { shadowReplyId } = await params;

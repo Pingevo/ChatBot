@@ -3,6 +3,7 @@
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { logAdminEvent } from "./adminLogService";
+import { pickAllowed } from "../lib/sanitizeFields";
 import type { Platform } from "./conversationService";
 
 export type TicketStatus = "open" | "in_progress" | "resolved" | "closed";
@@ -113,15 +114,18 @@ export async function updateTicket(
   actor?: string
 ): Promise<boolean> {
   const coll = await getCollection<TicketDoc>(COLLECTIONS.tickets);
+  // 🔒 allowlist fields (defense-in-depth)
+  const TICKET_UPDATE_ALLOWLIST = ["status", "priority", "assigned_to", "summary", "topic"] as const;
+  const safeFields = pickAllowed(fields as Record<string, unknown>, TICKET_UPDATE_ALLOWLIST);
   const result = await coll.updateOne(
     { ticket_id: ticketId },
-    { $set: { ...fields, updated_at: new Date() } }
+    { $set: { ...safeFields, updated_at: new Date() } }
   );
   if (result.modifiedCount > 0 && actor) {
     await logAdminEvent({
       action_type: "ticket.update",
       actor,
-      metadata: { ticket_id: ticketId, changes: fields },
+      metadata: { ticket_id: ticketId, changes: safeFields },
     });
   }
   return result.modifiedCount > 0;

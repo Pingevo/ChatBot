@@ -4,6 +4,8 @@
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import type { Platform } from "./conversationService";
+import { logAdminEvent } from "./adminLogService";
+import { pickAllowed } from "../lib/sanitizeFields";
 
 export type TriggerAction = "bot_answer" | "handoff_admin";
 
@@ -60,6 +62,11 @@ export async function createTrigger(opts: {
     updated_at: now,
   };
   await coll.insertOne(doc);
+  await logAdminEvent({
+    action_type: "trigger.create",
+    actor: opts.createdBy,
+    metadata: { trigger_id: doc.trigger_id, name: doc.name, action: doc.action },
+  });
   return doc;
 }
 
@@ -70,8 +77,17 @@ export async function listTriggers(opts: {
 } = {}): Promise<TriggerDoc[]> {
   const coll = await getCollection<TriggerDoc>(COLLECTIONS.triggers);
   const filter: Record<string, unknown> = { is_deleted: { $ne: true } };
-  if (opts.shopId) filter.$or = [{ shop_ids: opts.shopId }, { shop_ids: { $size: 0 } }];
-  if (opts.platform) filter.platforms = { $in: [opts.platform] };
+
+  // ⚡ ใช้ $and สำหรับ shop + platform conditions (ทั้งคู่ต้อง match)
+  const andConditions: Record<string, unknown>[] = [];
+  if (opts.shopId) {
+    andConditions.push({ $or: [{ shop_ids: opts.shopId }, { shop_ids: { $size: 0 } }] });
+  }
+  // ⚡ platforms: [] = ทุก platform (เหมือน shop_ids)
+  if (opts.platform) {
+    andConditions.push({ $or: [{ platforms: opts.platform }, { platforms: { $size: 0 } }] });
+  }
+  if (andConditions.length > 0) filter.$and = andConditions;
   if (opts.enabledOnly) filter.enabled = true;
   return coll.find(filter).sort({ created_at: -1 }).toArray();
 }
@@ -89,10 +105,22 @@ export async function updateTrigger(
   updatedBy?: string
 ): Promise<boolean> {
   const coll = await getCollection<TriggerDoc>(COLLECTIONS.triggers);
+  // 🔒 allowlist fields (defense-in-depth — route กรองแล้ว)
+  const TRIGGER_UPDATE_ALLOWLIST = [
+    "name", "keywords", "shop_ids", "platforms", "topic", "action", "bot_template", "enabled",
+  ] as const;
+  const safeFields = pickAllowed(fields as Record<string, unknown>, TRIGGER_UPDATE_ALLOWLIST);
   const result = await coll.updateOne(
     { trigger_id: triggerId },
-    { $set: { ...fields, updated_at: new Date(), updated_by: updatedBy } }
+    { $set: { ...safeFields, updated_at: new Date(), updated_by: updatedBy } }
   );
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "trigger.update",
+      actor: updatedBy || "system",
+      metadata: { trigger_id: triggerId, fields: safeFields },
+    });
+  }
   return result.modifiedCount > 0;
 }
 
@@ -102,6 +130,13 @@ export async function toggleTrigger(triggerId: string, enabled: boolean, updated
     { trigger_id: triggerId },
     { $set: { enabled, updated_at: new Date(), updated_by: updatedBy } }
   );
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "trigger.toggle",
+      actor: updatedBy || "system",
+      metadata: { trigger_id: triggerId, enabled },
+    });
+  }
   return result.modifiedCount > 0;
 }
 
@@ -112,6 +147,13 @@ export async function deleteTrigger(triggerId: string, deletedBy?: string): Prom
     { trigger_id: triggerId, is_deleted: { $ne: true } },
     { $set: { is_deleted: true, deleted_at: new Date(), deleted_by: deletedBy, enabled: false } }
   );
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "trigger.delete",
+      actor: deletedBy || "system",
+      metadata: { trigger_id: triggerId, soft_delete: true },
+    });
+  }
   return result.modifiedCount > 0;
 }
 

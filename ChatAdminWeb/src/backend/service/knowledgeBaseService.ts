@@ -9,6 +9,9 @@
 import { Document, ObjectId } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import type { Platform } from "./conversationService";
+import { logAdminEvent } from "./adminLogService";
+import { safeRegexSearch } from "../lib/regexEscape";
+import { pickAllowed } from "../lib/sanitizeFields";
 
 export type KbType = "general_faq" | "product_spec";
 
@@ -67,12 +70,16 @@ export async function listKbEntries(opts: {
   if (opts.type) filter.type = opts.type;
   if (opts.activeOnly) filter.active = { $ne: false };
   if (opts.search) {
-    filter.$or = [
-      { topic: { $regex: opts.search, $options: "i" } },
-      { answer: { $regex: opts.search, $options: "i" } },
-      { brand: { $regex: opts.search, $options: "i" } },
-      { model: { $regex: opts.search, $options: "i" } },
-    ];
+    // 🔒 escape regex
+    const safeSearch = safeRegexSearch(opts.search);
+    if (safeSearch) {
+      filter.$or = [
+        { topic: { $regex: safeSearch, $options: "i" } },
+        { answer: { $regex: safeSearch, $options: "i" } },
+        { brand: { $regex: safeSearch, $options: "i" } },
+        { model: { $regex: safeSearch, $options: "i" } },
+      ];
+    }
   }
   return coll
     .find(filter)
@@ -117,6 +124,11 @@ export async function createGeneralFaq(opts: {
   };
   const result = await coll.insertOne(doc);
   doc._id = result.insertedId;
+  await logAdminEvent({
+    action_type: "kb.create",
+    actor: opts.createdBy,
+    metadata: { type: "general_faq", topic: opts.topic, platform: opts.platform || "all" },
+  });
   return doc;
 }
 
@@ -130,6 +142,13 @@ export async function updateGeneralFaq(
     { _id: new ObjectId(id), type: "general_faq" },
     { $set: { ...fields, updated_at: new Date(), updated_by: updatedBy }, $inc: { version: 1 } }
   );
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "kb.update",
+      actor: updatedBy,
+      metadata: { id, fields },
+    });
+  }
   return result.modifiedCount > 0;
 }
 
@@ -141,15 +160,24 @@ export async function updateKbEntry(
   updatedBy: string
 ): Promise<boolean> {
   const coll = await getCollection(COLLECTIONS.knowledgeBase);
-  // Strip undefined values so we don't overwrite existing fields with null
-  const cleanFields: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(fields)) {
-    if (v !== undefined) cleanFields[k] = v;
-  }
+  // 🔒 allowlist fields ที่อนุญาตให้ update ได้ (defense-in-depth — route กรองแล้ว)
+  const KB_UPDATE_ALLOWLIST = [
+    "type", "topic", "answer", "brand", "model", "category", "category_id",
+    "highlights", "description", "box_contents", "warranty_period", "warranty_note",
+    "weight", "dimensions", "platform", "notes", "active", "source_file", "source_row",
+  ] as const;
+  const cleanFields = pickAllowed(fields, KB_UPDATE_ALLOWLIST);
   const result = await coll.updateOne(
     { _id: new ObjectId(id), is_deleted: { $ne: true } },
     { $set: { ...cleanFields, updated_at: new Date(), updated_by: updatedBy }, $inc: { version: 1 } }
   );
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "kb.update",
+      actor: updatedBy,
+      metadata: { id, fields: cleanFields },
+    });
+  }
   return result.modifiedCount > 0;
 }
 
@@ -162,19 +190,38 @@ export async function upsertProductSpecFromExcelRow(
 ): Promise<void> {
   const coll = await getCollection<KbProductSpecDoc>(COLLECTIONS.knowledgeBase);
   const now = new Date();
+  // 🔒 allowlist fields จาก Excel row
+  const KB_EXCEL_ALLOWLIST = [
+    "type", "brand", "model", "category", "category_id", "highlights",
+    "description", "box_contents", "warranty_period", "warranty_note",
+    "weight", "dimensions", "platform", "notes", "source_file", "source_row",
+  ] as const;
+  const safeRow = pickAllowed(row as Record<string, unknown>, KB_EXCEL_ALLOWLIST);
   await coll.updateOne(
     { type: "product_spec", source_file: row.source_file, source_row: row.source_row },
     {
-      $set: { ...row, type: "product_spec", updated_at: now, updated_by: updatedBy },
+      $set: { ...safeRow, type: "product_spec", updated_at: now, updated_by: updatedBy },
       $setOnInsert: { created_at: now, active: true },
     },
     { upsert: true }
   );
+  await logAdminEvent({
+    action_type: "kb.import_excel",
+    actor: updatedBy,
+    metadata: { type: "product_spec", source_file: row.source_file, source_row: row.source_row },
+  });
 }
 
 export async function toggleKbActive(id: string, active: boolean): Promise<boolean> {
   const coll = await getCollection(COLLECTIONS.knowledgeBase);
   const result = await coll.updateOne({ _id: new ObjectId(id) }, { $set: { active } });
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "kb.toggle",
+      actor: "system",
+      metadata: { id, active },
+    });
+  }
   return result.modifiedCount > 0;
 }
 
@@ -185,6 +232,13 @@ export async function deleteKbEntry(id: string, deletedBy?: string): Promise<boo
     { _id: new ObjectId(id), is_deleted: { $ne: true } },
     { $set: { is_deleted: true, deleted_at: new Date(), deleted_by: deletedBy, active: false } }
   );
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "kb.delete",
+      actor: deletedBy || "system",
+      metadata: { id, soft_delete: true },
+    });
+  }
   return result.modifiedCount > 0;
 }
 

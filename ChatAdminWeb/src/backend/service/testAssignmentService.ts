@@ -42,6 +42,14 @@ export interface QaItem {
   user_order_sn?: string;
   user_notification_text?: string;
   user_table?: { headers?: string[]; rows?: string[][] };
+  // ⚡ bundle_message — sub-messages หลายตัว
+  user_bundle?: {
+    message_type: string;
+    text: string;
+    media?: { type: string; url?: string; thumb_url?: string };
+    product_ref?: { item_id: string };
+    products?: { item_id: string; name: string; price?: number; image?: string; url?: string }[];
+  }[];
   // bot reply
   trigger_name?: string;
   trigger_action?: string;
@@ -49,6 +57,8 @@ export interface QaItem {
   bot_source?: string;
   bot_model?: string;
   bot_elapsed?: number;
+  // ⚡ bot products (item cards ที่บอทแนะนำ)
+  bot_products?: { item_id: string; name: string; price?: number; image?: string; url?: string }[];
   // ⚡ pipeline info — intent/rag/llm2/search counts
   bot_intent?: unknown;
   bot_retrieval_info?: unknown;

@@ -9,6 +9,7 @@
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { logAdminEvent } from "./adminLogService";
+import { safeRegexSearch } from "../lib/regexEscape";
 import type { PersonaPlatform } from "./personaService";
 
 export type FaqLiveagentAction = "handoff" | "bot_reply";
@@ -49,7 +50,11 @@ export async function listShopSettings(opts: {
   const filter: Record<string, unknown> = { is_deleted: { $ne: true } };
   if (opts.platform) filter.platform = opts.platform;
   if (opts.search) {
-    filter.shopname = { $regex: opts.search, $options: "i" };
+    // 🔒 escape regex
+    const safeSearch = safeRegexSearch(opts.search);
+    if (safeSearch) {
+      filter.shopname = { $regex: safeSearch, $options: "i" };
+    }
   }
   return coll
     .find(filter)

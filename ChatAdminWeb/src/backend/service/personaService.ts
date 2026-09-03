@@ -11,6 +11,7 @@
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { logAdminEvent } from "./adminLogService";
+import { safeRegexSearch } from "../lib/regexEscape";
 
 export type PersonaPlatform = "shopee" | "tiktok" | "lazada";
 
@@ -47,10 +48,14 @@ export async function listPersonas(opts: {
   if (opts.platform) filter.platform = opts.platform;
   if (opts.enabledOnly) filter.enabled = true;
   if (opts.search) {
-    filter.$or = [
-      { shopname: { $regex: opts.search, $options: "i" } },
-      { bot_name: { $regex: opts.search, $options: "i" } },
-    ];
+    // 🔒 escape regex
+    const safeSearch = safeRegexSearch(opts.search);
+    if (safeSearch) {
+      filter.$or = [
+        { shopname: { $regex: safeSearch, $options: "i" } },
+        { bot_name: { $regex: safeSearch, $options: "i" } },
+      ];
+    }
   }
   return coll
     .find(filter)

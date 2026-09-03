@@ -11,6 +11,7 @@ import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { logAdminEvent } from "./adminLogService";
 import { closeHistoryService } from "./closeHistoryService";
+import { safeRegexSearch } from "../lib/regexEscape";
 
 export type Platform = "shopee" | "tiktok" | "lazada";
 // "open" = แชทเปิดอยู่ (ใหม่หรือ reopen), "closed" = แอดมินปิดแล้ว
@@ -129,11 +130,15 @@ export async function listConversations(opts: {
   if (opts.shopId) filter.shop_id = opts.shopId;
   if (opts.status) filter.status = opts.status;
   if (opts.search) {
-    filter.$or = [
-      { to_name: { $regex: opts.search, $options: "i" } },
-      { last_message_text: { $regex: opts.search, $options: "i" } },
-      { shop_name: { $regex: opts.search, $options: "i" } },
-    ];
+    // 🔒 escape regex metacharacters ป้องกัน $regex injection / ReDoS
+    const safeSearch = safeRegexSearch(opts.search);
+    if (safeSearch) {
+      filter.$or = [
+        { to_name: { $regex: safeSearch, $options: "i" } },
+        { last_message_text: { $regex: safeSearch, $options: "i" } },
+        { shop_name: { $regex: safeSearch, $options: "i" } },
+      ];
+    }
   }
   return coll
     .find(filter)
@@ -272,6 +277,16 @@ export async function closeConversation(opts: {
       resolution: opts.resolution,
       note: opts.note,
     });
+    await logAdminEvent({
+      action_type: "conversation.close",
+      actor: opts.closedBy,
+      metadata: {
+        conversation_id: opts.conversationId,
+        reason: opts.reason,
+        category: opts.category,
+        close_count: closeCount,
+      },
+    });
   }
 
   return result.modifiedCount > 0;
@@ -302,6 +317,15 @@ export async function reopenConversation(opts: {
       conversationId: opts.conversationId,
       reopenedBy: opts.reopenedBy,
       reopenReason: opts.reopenReason,
+    });
+    await logAdminEvent({
+      action_type: "conversation.open",
+      actor: opts.reopenedBy,
+      metadata: {
+        conversation_id: opts.conversationId,
+        reopen_reason: opts.reopenReason,
+        assigned_to: opts.assignedTo,
+      },
     });
   }
 

@@ -4,7 +4,7 @@ import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { MessageSquare, Bot, Headset, Clock, LayoutDashboard } from "lucide-react";
 import { statsService } from "@/lib/services";
-import { TrendLineChart } from "@/components/charts/StatsCharts";
+import { TrendLineChart, WeeklyBarChart, ComboBarLineChart, SmartChart } from "@/components/charts/StatsCharts";
 import { UnifiedDateRangePicker, rangeToParams, type DateRangeValue } from "@/components/ui/UnifiedDateRangePicker";
 import { DashboardSkeleton } from "@/components/ui/StatsSkeleton";
 import type { DashboardStats } from "@/lib/types";
@@ -32,13 +32,17 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [dateRange, setDateRange] = useState<DateRangeValue>({
-    preset: "daily",
+    preset: "weekly",
     startDate: null,
     endDate: null,
   });
   const [error, setError] = useState<string | null>(null);
 
-  const params = useMemo(() => rangeToParams(dateRange), [dateRange]);
+  const params = useMemo(() => {
+    const p = rangeToParams(dateRange);
+    // ⚡ cache-busting — ป้องกัน browser/Next.js cache ค้าง
+    return { ...p, _t: Date.now() };
+  }, [dateRange]);
 
   useEffect(() => {
     setLoading(true);
@@ -153,8 +157,14 @@ export default function DashboardPage() {
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
           <Card className="p-4">
-            <h3 className="font-semibold text-text mb-2">แชทรายวัน (7 วัน)</h3>
-            <TrendLineChart data={stats.daily_trend} dataKey="count" xKey="date" color="#8b1e28" unit=" แชท" />
+            <h3 className="font-semibold text-text mb-2">
+              {dateRange.preset === "daily" ? "แชทรายวัน" :
+               dateRange.preset === "weekly" ? "แชทรายสัปดาห์ (7 วัน)" :
+               dateRange.preset === "monthly" ? "แชทรายเดือน" :
+               dateRange.preset === "yearly" ? "แชทรายปี" :
+               dateRange.preset === "custom" ? "แชทตามช่วงที่เลือก" : "แชททั้งหมด"}
+            </h3>
+            <SmartChart data={stats.daily_trend} dataKey="count" xKey="date" color="#8b1e28" unit=" แชท" />
           </Card>
 
           <Card className="p-4">

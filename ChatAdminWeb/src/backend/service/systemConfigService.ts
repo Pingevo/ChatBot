@@ -16,6 +16,7 @@
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { SAFETY } from "../lib/safety";
+import { isSafeFetchUrl } from "../lib/urlSafety";
 
 export type Platform = "shopee" | "tiktok" | "lazada";
 
@@ -41,6 +42,11 @@ export interface SystemConfigDoc extends Document {
   bot_worker_enabled: boolean;       // Phase 9 — เปิด/ปิด bot worker (auto pipeline)
   bot_worker_interval_ms: number;    // Phase 9 — worker poll interval (default 2000)
 
+  // === Bot Message Buffering (Debounce) — admin-configurable ===
+  bot_buffer_enabled: boolean;       // เปิด/ปิด message buffering
+  bot_buffer_window_ms: number;      // รอ X ms หลัง message สุดท้ายก่อนประมวลผล
+  bot_buffer_max_messages: number;   // ถ้าครบ X ข้อความใน window → ประมวลผลเลย
+
   // === Bot service URLs (3 ตัว แยก port) ===
   shopee_bot_url: string;
   tiktok_bot_url: string;
@@ -63,6 +69,9 @@ function getSafeDefaults(): Partial<SystemConfigDoc> {
     polling_interval_ms: Number(process.env.POLLING_INTERVAL_MS || 1000),
     bot_worker_enabled: process.env.BOT_WORKER_ENABLED === 'true',
     bot_worker_interval_ms: Number(process.env.BOT_WORKER_INTERVAL_MS || 1000),
+    bot_buffer_enabled: process.env.BOT_BUFFER_ENABLED === 'true',
+    bot_buffer_window_ms: Number(process.env.BOT_BUFFER_WINDOW_MS || 6000),
+    bot_buffer_max_messages: Number(process.env.BOT_BUFFER_MAX_MESSAGES || 5),
     shopee_bot_url: process.env.CHATBOT_BASE_URL_SHOPEE || 'http://127.0.0.1:8010',
     tiktok_bot_url: process.env.CHATBOT_BASE_URL_TIKTOK || 'http://127.0.0.1:8011',
     lazada_bot_url: process.env.CHATBOT_BASE_URL_LAZADA || 'http://127.0.0.1:8012',
@@ -95,6 +104,11 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
     polling_interval_ms: dbConfig.polling_interval_ms ?? safeDefaults.polling_interval_ms ?? 1000,
     bot_worker_enabled: dbConfig.bot_worker_enabled ?? safeDefaults.bot_worker_enabled ?? false,
     bot_worker_interval_ms: dbConfig.bot_worker_interval_ms ?? safeDefaults.bot_worker_interval_ms ?? 1000,
+
+    // Buffer — จาก DB หรือ env
+    bot_buffer_enabled: dbConfig.bot_buffer_enabled ?? safeDefaults.bot_buffer_enabled ?? false,
+    bot_buffer_window_ms: dbConfig.bot_buffer_window_ms ?? safeDefaults.bot_buffer_window_ms ?? 6000,
+    bot_buffer_max_messages: dbConfig.bot_buffer_max_messages ?? safeDefaults.bot_buffer_max_messages ?? 5,
 
     // Bot URLs — จาก DB หรือ env
     shopee_bot_url: dbConfig.shopee_bot_url ?? safeDefaults.shopee_bot_url ?? 'http://127.0.0.1:8010',
@@ -140,6 +154,9 @@ export async function getSystemConfig(forceRefresh = false): Promise<SystemConfi
         polling_interval_ms: safeDefaults.polling_interval_ms ?? 1000,
         bot_worker_enabled: safeDefaults.bot_worker_enabled ?? false,
         bot_worker_interval_ms: safeDefaults.bot_worker_interval_ms ?? 1000,
+        bot_buffer_enabled: safeDefaults.bot_buffer_enabled ?? false,
+        bot_buffer_window_ms: safeDefaults.bot_buffer_window_ms ?? 6000,
+        bot_buffer_max_messages: safeDefaults.bot_buffer_max_messages ?? 5,
         shopee_bot_url: safeDefaults.shopee_bot_url ?? 'http://127.0.0.1:8010',
         tiktok_bot_url: safeDefaults.tiktok_bot_url ?? 'http://127.0.0.1:8011',
         lazada_bot_url: safeDefaults.lazada_bot_url ?? 'http://127.0.0.1:8012',
@@ -175,6 +192,9 @@ export async function updateSystemConfig(
     'polling_interval_ms',
     'bot_worker_enabled',
     'bot_worker_interval_ms',
+    'bot_buffer_enabled',
+    'bot_buffer_window_ms',
+    'bot_buffer_max_messages',
     'shopee_bot_url',
     'tiktok_bot_url',
     'lazada_bot_url',
@@ -256,6 +276,12 @@ export async function testIntegration(): Promise<{
 
   await Promise.all(botUrls.map(async ({ key, url }) => {
     try {
+      // 🔒 SSRF defense-in-depth — ตรวจ URL อีกครั้งก่อน fetch
+      const safe = isSafeFetchUrl(url);
+      if (!safe.ok) {
+        results[key].message = `URL rejected: ${safe.reason}`;
+        return;
+      }
       const resp = await fetch(`${url.replace(/\/$/, '')}/health`, {
         signal: AbortSignal.timeout(3000),
       });
@@ -290,8 +316,55 @@ export async function testIntegration(): Promise<{
   return results;
 }
 
+// ─── Admin-configurable fields ───────────────────────────
+// Fields ที่ admin (ไม่ใช่ superadmin/dev) แก้ได้ — ปลอดภัย ไม่กระทบระบบหลัก
+export const ADMIN_CONFIGURABLE_KEYS = [
+  'bot_buffer_enabled',
+  'bot_buffer_window_ms',
+  'bot_buffer_max_messages',
+] as const;
+
+export type AdminConfigKey = (typeof ADMIN_CONFIGURABLE_KEYS)[number];
+
+export async function getAdminConfig(): Promise<Pick<SystemConfigDoc, AdminConfigKey | 'updated_by' | 'updated_at'>> {
+  const config = await getSystemConfig();
+  const result: Record<string, unknown> = {};
+  for (const key of ADMIN_CONFIGURABLE_KEYS) {
+    result[key] = config[key];
+  }
+  result.updated_by = config.updated_by;
+  result.updated_at = config.updated_at;
+  return result as Pick<SystemConfigDoc, AdminConfigKey | 'updated_by' | 'updated_at'>;
+}
+
+export async function updateAdminConfig(
+  updates: Partial<Pick<SystemConfigDoc, AdminConfigKey>>,
+  updatedBy = 'admin'
+): Promise<Pick<SystemConfigDoc, AdminConfigKey | 'updated_by' | 'updated_at'>> {
+  // Whitelist — อนุญาตเฉพาะ admin-configurable keys
+  const sanitized: Record<string, unknown> = { updated_by: updatedBy, updated_at: new Date() };
+  for (const key of ADMIN_CONFIGURABLE_KEYS) {
+    if (updates[key] !== undefined) {
+      sanitized[key] = updates[key];
+    }
+  }
+
+  const coll = await getCollection<SystemConfigDoc>(COLLECTIONS.systemConfigs);
+  await coll.updateOne(
+    { config_key: 'main_config' },
+    { $set: sanitized },
+    { upsert: true }
+  );
+
+  // Force refresh cache
+  cachedConfig = null;
+  return getAdminConfig();
+}
+
 export const systemConfigService = {
   getSystemConfig,
   updateSystemConfig,
   testIntegration,
+  getAdminConfig,
+  updateAdminConfig,
 };

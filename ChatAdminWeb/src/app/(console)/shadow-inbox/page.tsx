@@ -60,7 +60,7 @@ function timeAgoShort(iso: string): string {
 
 export default function ShadowInboxPage() {
   const { user } = useAuth();
-  const canView = user?.role === "dev";
+  const canView = user?.role === "dev" || user?.role === "admin" || user?.role === "superadmin";
   const { catchError } = useToastError();
 
   const [rows, setRows] = useState<ShadowReplyListItem[]>([]);

@@ -66,7 +66,17 @@ export default function QuickRepliesPage() {
 
   // โหลดร้านค้า + admins list (สำหรับเลือกในฟอร์ม + filter)
   useEffect(() => {
-    api().get<{ rows: ShopOption[] }>("/shops").then((r) => setAllShops(r.data.rows)).catch(() => setAllShops([]));
+    api().get<{ rows: ShopOption[] }>("/shops").then((r) => {
+      // deduplicate by shop_id + platform (same shop may appear on multiple platforms)
+      const seen = new Set<string>();
+      const deduped = (r.data.rows || []).filter((s) => {
+        const k = `${s.shop_id}|${s.platform}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      setAllShops(deduped);
+    }).catch(() => setAllShops([]));
     api().get<{ users: { admin_id: string; name?: string; username?: string }[] }>("/users/list")
       .then((r) => setAdmins(r.data.users || []))
       .catch(() => setAdmins([]));
@@ -343,7 +353,7 @@ export default function QuickRepliesPage() {
                   {filterShopOptions.map((s) => {
                     const sel = filterShopIds.includes(s.shop_id);
                     return (
-                      <button key={s.shop_id} onClick={() => setFilterShopIds(sel ? filterShopIds.filter((x) => x !== s.shop_id) : [...filterShopIds, s.shop_id])}
+                      <button key={`${s.shop_id}|${s.platform}`} onClick={() => setFilterShopIds(sel ? filterShopIds.filter((x) => x !== s.shop_id) : [...filterShopIds, s.shop_id])}
                         className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${sel ? "text-brand font-medium" : "text-text"}`}>
                         <Check size={11} className={sel ? "" : "opacity-0"} />
                         <span className="truncate">{s.shopname}</span>
@@ -650,7 +660,7 @@ export default function QuickRepliesPage() {
                   <div className="mt-1 max-h-40 overflow-y-auto rounded-lg border border-border bg-surface-2">
                     {availableShops.map((shop) => (
                       <label
-                        key={shop.shop_id}
+                        key={`${shop.shop_id}|${shop.platform}`}
                         className="flex items-center gap-2 px-3 py-2 hover:bg-surface cursor-pointer border-b border-border last:border-0"
                       >
                         <input
