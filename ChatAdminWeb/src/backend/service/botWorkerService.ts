@@ -26,6 +26,8 @@ import { getConversation, reopenConversation } from "./conversationService";
 import { handoffService } from "./handoffService";
 import { assertPlatformApiDisabled, type Platform } from "../lib/safety";
 import type { ShadowReplyDoc } from "./shadowReplyService";
+import { bufferService, type BufferConfig } from "./bufferService";
+import { getSystemConfig } from "./systemConfigService";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -443,6 +445,14 @@ export async function pollNewMessages(limit = 20): Promise<{
       .map((d) => d.message_id)
   );
 
+  // อ่าน buffer config จาก system config
+  const sysConfig = await getSystemConfig();
+  const bufferConfig: BufferConfig = {
+    bufferEnabled: sysConfig.bot_buffer_enabled,
+    bufferWindowMs: sysConfig.bot_buffer_window_ms,
+    bufferMaxMessages: sysConfig.bot_buffer_max_messages,
+  };
+
   const results: { message_id: string; status: string; detail: string }[] = [];
   let kicked = 0;
 
@@ -453,17 +463,23 @@ export async function pollNewMessages(limit = 20): Promise<{
     }
 
     // ⚡ FIRE-AND-FORGET — ยิงไปเลย ไม่ await
-    // แต่ละข้อความทำงานแยกอิสระ บอทตอบเสร็จก่อนก็เสร็จก่อน
+    // ถ้าเปิด buffer → bufferOrProcess จะ insert ลง buffer_messages + ตั้ง timer
+    // ถ้าปิด buffer → bufferOrProcess เรียก processMessage ทันที (เหมือนเดิม)
     const p = (async () => {
       try {
-        const result = await processMessage({
-          message_id: doc.message_id,
-          conversation_id: doc.conversation_id,
-          shop_id: doc.shop_id,
-          platform: doc.platform,
-          text: doc.text,
-          raw_payload: doc.raw_payload,
-        });
+        const result = await bufferService.bufferOrProcess(
+          {
+            message_id: doc.message_id,
+            conversation_id: doc.conversation_id,
+            shop_id: doc.shop_id,
+            platform: doc.platform,
+            text: doc.text,
+            raw_payload: doc.raw_payload,
+          },
+          bufferConfig,
+          processMessage,
+          markProcessed
+        );
         console.log(`  [worker] ${doc.message_id.slice(0, 20)}... → ${result.status}: ${result.detail}`);
       } catch (err) {
         console.error(`  [worker] ${doc.message_id.slice(0, 20)}... → error:`, err instanceof Error ? err.message : err);
@@ -497,4 +513,6 @@ export const botWorkerService = {
   callBot,
   isProcessed,
   waitForInFlight,
+  recoverStaleBuffers: () => bufferService.recoverStaleBuffers(processMessage, markProcessed),
+  clearAllBufferTimers: bufferService.clearAllBufferTimers,
 };

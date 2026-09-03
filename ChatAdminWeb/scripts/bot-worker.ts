@@ -31,6 +31,8 @@ async function shutdown() {
   shuttingDown = true;
   console.log("\n[bot-worker] shutting down... waiting for in-flight messages");
   running = false;
+  // เคลียร์ buffer timers ทั้งหมด (ข้อความใน buffer_messages ยังอยู่ → recover ตอน boot)
+  botWorkerService.clearAllBufferTimers();
   await botWorkerService.waitForInFlight(10000);
   console.log("[bot-worker] stopped.");
   process.exit(0);
@@ -43,6 +45,17 @@ async function main() {
   console.log("[bot-worker] ⚡ FIRE-AND-FORGET: แต่ละข้อความยิงไปบอทแยกอิสระ ไม่รอคิว ไม่รอ batch");
   console.log("[bot-worker] ⚠️ READ-ONLY messages_shp → writes to shadow_replies + chat_processing");
   console.log("[bot-worker] ⚠️ No Shopee API calls. No real message delivery.");
+
+  // Recover stale buffers จาก buffer_messages collection (ถ้ามี)
+  // กรณี bot-worker restart ขณะมีข้อความค้างใน buffer
+  try {
+    const recovered = await botWorkerService.recoverStaleBuffers();
+    if (recovered.recovered > 0) {
+      console.log(`[bot-worker] recovered ${recovered.recovered} stale buffer conversations`);
+    }
+  } catch (err) {
+    console.error("[bot-worker] buffer recovery error:", err instanceof Error ? err.message : err);
+  }
 
   let cycle = 0;
   while (running) {

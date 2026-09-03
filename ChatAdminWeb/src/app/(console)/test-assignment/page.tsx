@@ -88,6 +88,14 @@ interface QaItem {
   user_order_sn?: string;
   user_notification_text?: string;
   user_table?: { headers?: string[]; rows?: string[][] };
+  // ⚡ bundle_message — sub-messages หลายตัว
+  user_bundle?: {
+    message_type: string;
+    text: string;
+    media?: { type: string; url?: string; thumb_url?: string };
+    product_ref?: { item_id: string };
+    products?: { item_id: string; name: string; price?: number; image?: string; url?: string }[];
+  }[];
   // bot reply
   trigger_name?: string;
   trigger_action?: string;
@@ -95,6 +103,8 @@ interface QaItem {
   bot_source?: string;
   bot_model?: string;
   bot_elapsed?: number;
+  // ⚡ bot products (item cards ที่บอทแนะนำ)
+  bot_products?: { item_id: string; name: string; price?: number; image?: string; url?: string }[];
   // ⚡ pipeline info
   bot_intent?: unknown;
   bot_retrieval_info?: unknown;
@@ -854,7 +864,7 @@ export default function TestAssignmentPage() {
                                     <User size={8} /> ลูกค้า · Q{qa.index + 1}
                                   </div>
                                   <div className="bg-surface border border-border rounded-lg rounded-tl-sm px-3 py-2 text-sm text-text">
-                                    {qa.user_message_type || qa.user_media || qa.user_products ? (
+                                    {qa.user_message_type || qa.user_media || qa.user_products || qa.user_bundle ? (
                                       <MessageContent
                                         msg={{
                                           id: qa.message_id,
@@ -867,6 +877,16 @@ export default function TestAssignmentPage() {
                                           order_sn: qa.user_order_sn,
                                           notification_text: qa.user_notification_text,
                                           table: qa.user_table as never,
+                                          // ⚡ bundle_message — ส่ง sub-messages ไป render
+                                          bundle: qa.user_bundle?.map((sub, i) => ({
+                                            id: `${qa.message_id}_b${i}`,
+                                            role: "user" as const,
+                                            text: sub.text,
+                                            timestamp: "",
+                                            message_type: sub.message_type as never,
+                                            media: sub.media as never,
+                                            products: sub.products as never,
+                                          })),
                                         }}
                                         variant="user"
                                       />
@@ -914,6 +934,8 @@ export default function TestAssignmentPage() {
                                                 role: "model",
                                                 text: seg,
                                                 timestamp: "",
+                                                // ⚡ ส่ง products ให้ segment สุดท้าย เพื่อ render item cards
+                                                products: (i === segments.length - 1 && qa.bot_products?.length ? qa.bot_products : undefined) as never,
                                               } as never}
                                               variant="out"
                                             />

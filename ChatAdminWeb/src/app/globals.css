@@ -95,3 +95,27 @@ html, body {
 .rdp { --rdp-accent-color: #8b1e28; }
 .rdp-vhidden { display: none; }
 
+/* ⚡ Range highlight — ช่วงวันที่ที่เลือก */
+.rdp .rdp-day_range_middle {
+  background-color: rgba(139, 30, 40, 0.25);
+  color: #fff;
+  border-radius: 0;
+}
+.rdp .rdp-day_range_start {
+  background-color: #8b1e28;
+  color: #fff;
+  border-radius: 50% 0 0 50%;
+}
+.rdp .rdp-day_range_end {
+  background-color: #8b1e28;
+  color: #fff;
+  border-radius: 0 50% 50% 0;
+}
+.rdp .rdp-day_range_start.rdp-day_range_end {
+  border-radius: 50%;
+}
+.rdp .rdp-day_selected {
+  background-color: #8b1e28;
+  color: #fff;
+}
+

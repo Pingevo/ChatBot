@@ -134,5 +134,9 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.testAssignment, { conversation_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.testAssignment, { platform: 1, created_at: -1 }),
     safeCreateIndex(db, COLLECTIONS.testAssignment, { final_status: 1, created_at: -1 }),
+    // ⚡ buffer_messages — message buffering (debounce) ก่อนเข้า processMessage
+    safeCreateIndex(db, COLLECTIONS.bufferMessages, { message_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.bufferMessages, { conversation_id: 1, received_at: 1 }),
+    safeCreateIndex(db, COLLECTIONS.bufferMessages, { shop_id: 1, received_at: -1 }),
   ]);
 }

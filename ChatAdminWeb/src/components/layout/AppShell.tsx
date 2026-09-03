@@ -21,20 +21,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
+  // ⚡ test-chat pages — bypass login (ไม่ต้อง login ก็เข้าได้)
+  const isTestChatPage = pathname?.startsWith("/test-chat") || false;
+
   useEffect(() => {
     if (!initialized) fetchMe();
   }, [initialized, fetchMe]);
 
   useEffect(() => {
-    if (initialized && !user) router.replace("/login");
-  }, [initialized, user, router]);
+    // ⚡ ไม่ redirect ถ้าอยู่ในหน้า test-chat
+    if (initialized && !user && !isTestChatPage) router.replace("/login");
+  }, [initialized, user, router, isTestChatPage]);
 
   // Close mobile drawer on route change
   useEffect(() => {
     setMobileOpen(false);
   }, [pathname]);
 
-  if (!initialized || !user) {
+  // ⚡ test-chat pages — แสดงเลยไม่ต้องรอ login (แต่ถ้า login แล้วก็แสดง sidebar ปกติ)
+  if (!initialized || (!user && !isTestChatPage)) {
     return (
       <div className="h-screen flex flex-col items-center justify-center auth-gradient-bg gap-3">
         <Loading size={32} />

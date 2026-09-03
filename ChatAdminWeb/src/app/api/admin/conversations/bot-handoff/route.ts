@@ -44,17 +44,38 @@ export async function POST(req: NextRequest) {
     return error("unauthorized — internal secret required", 401);
   }
 
+  // 🔒 IP allowlist (optional) — ถ้าตั้ง BOT_HANDOFF_ALLOWED_IPS จะกรองเฉพาะ IP ที่อนุญาต
+  // รูปแบบ: comma-separated, เช่น "127.0.0.1,10.0.0.5,::1"
+  // ถ้าไม่ตั้ง = อนุญาตทุก IP (backward compat — ใช้ secret อย่างเดียว)
+  const allowedIps = process.env.BOT_HANDOFF_ALLOWED_IPS;
+  if (allowedIps) {
+    const xff = req.headers.get("x-forwarded-for");
+    const xri = req.headers.get("x-real-ip");
+    const clientIp = (xff ? xff.split(",")[0].trim() : xri || "").trim();
+    const allowlist = allowedIps.split(",").map((ip) => ip.trim()).filter(Boolean);
+    if (!allowlist.includes(clientIp)) {
+      console.warn(`[bot-handoff] rejected IP: ${clientIp || "(unknown)"}`);
+      return error("unauthorized — IP not allowed", 401);
+    }
+  }
+
   const body = await readJson<BotHandoffBody>(req);
   if (!body || !body.conversation_id) {
     return error("conversation_id is required", 422);
   }
 
-  const { conversation_id, reason, claim, simulate } = body;
+  // 🔒 ป้องกัน NoSQL injection — coerce ค่าจาก body เป็น string เสมอ
+  const conversation_id = String(body.conversation_id);
+  const reason = body.reason != null ? String(body.reason) : undefined;
+  const claim = body.claim;
+  const simulate = body.simulate === true;
+  const shopId = body.shop_id != null ? String(body.shop_id) : undefined;
+  const platform = body.platform != null ? String(body.platform) : undefined;
 
   // ⚡ Simulate mode — จำลองการจ่ายงานโดยไม่กระทบ conversations จริง
   // เก็บประวัติ assign ลง test_chat_sessions เท่านั้น
   if (simulate) {
-    return await simulateHandoff(conversation_id, body.shop_id, body.platform, reason, claim);
+    return await simulateHandoff(conversation_id, shopId, platform, reason, claim);
   }
 
   // ดึง conversation เพื่อหา shop_id/platform
@@ -113,7 +134,8 @@ export async function POST(req: NextRequest) {
   // 4. ส่งแจ้งเตือน (best-effort — ถ้ามี notification service)
   // TODO: เชื่อมกับ notification service (telegram/line/email) ถ้ามี
   // ตอนนี้ log ไว้ก่อน
-  console.log(`[bot-handoff] conversation=${conversation_id} assigned_to=${result.assignedTo} (${result.assignedToName}) reason=${reason} assignment_reason=${result.assignmentReason}`);
+  // 🔒 ไม่ log PII (assigned_to_name, reason) ไปยัง stdout — audit log ใน DB พอแล้ว
+  console.log(`[bot-handoff] conversation=${conversation_id} assigned_to=${result.assignedTo} assignment_reason=${result.assignmentReason}`);
 
   return json({
     ok: true,
@@ -212,7 +234,8 @@ async function simulateHandoff(
     },
   });
 
-  console.log(`[bot-handoff:simulate] session=${sessionId} assigned_to=${assignedTo} (${assignedToName}) reason=${reason}`);
+  // 🔒 ไม่ log PII (assigned_to_name, reason) ไปยัง stdout
+  console.log(`[bot-handoff:simulate] session=${sessionId} assigned_to=${assignedTo}`);
 
   return json({
     ok: true,

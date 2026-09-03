@@ -172,7 +172,21 @@ def should_use_web_search(
                      "ราคา", "รับประกัน", "สเปค", "สเปก", "รีวิว", "ขอดู", "ดูรุ่น",
                      "อยากรู้เพิ่ม", "บอกรายละเอียด", "อธิบายเพิ่ม")
     _is_followup_q = any(kw in _msg_lower for kw in _followup_kws) and len(message.split()) <= 8
-    _skip_search = (_is_warranty_q or _is_comparison_q or _is_implicit_comparison or _is_charging_spec_q or _is_followup_q) and _has_products
+
+    # yes/no spec question: ถาม "มี...ไหม/รองรับ...ไหม/ได้...ไหม/กัน...ไหม" แบบสั้นๆ
+    # และมีสินค้าใน context → "ไม่มี/ไม่รองรับ" เป็น spec จริง ไม่ใช่ความไม่มั่นใจ
+    # (เช่น "มีแบตไหม" → "ไม่มีแบต" = spec, ไม่ใช่ "ไม่รู้")
+    import re as _re_yn
+    _yesno_pat = _re_yn.search(
+        r"(มี|รองรับ|ได้|กัน|สำรอง|เสียบ|ใช้งาน|เป็น|มาพร้อม|มีในตัว|ติดในตัว)"
+        r".{0,40}(ไหม|มั้ย|หรือเปล่า|อะไรแน่|ป่าว)",
+        _msg_lower,
+    )
+    _is_yesno_spec_q = bool(_yesno_pat) and len(message.split()) <= 12
+    _skip_search = (
+        _is_warranty_q or _is_comparison_q or _is_implicit_comparison
+        or _is_charging_spec_q or _is_followup_q or _is_yesno_spec_q
+    ) and _has_products
 
     # 1. คำตอบมี uncertainty markers
     uncertain, marker = detect_uncertainty(answer)
@@ -199,8 +213,13 @@ def should_use_web_search(
     if intent_result and intent_result.get("intent") == "compatibility_check":
         ans_lower = answer.lower()
         # ถ้า LLM ตอบ "ไม่มี/ไม่รองรับ/ไม่แน่ใจ" → ต้อง search
+        # แต่ถ้าเป็น yes/no spec question ของสินค้าใน context (เช่น "รองรับ wifi 5G ไหม")
+        # → "ไม่รองรับ" เป็น spec จริง ไม่ใช่ความไม่มั่นใจ → ไม่ search
         if any(neg in ans_lower for neg in ["ไม่มี", "ไม่รองรับ", "ไม่สามารถ", "ไม่พบ", "ไม่แน่ใจ", "ไม่ทราบ", "ไม่แน่นอน"]):
-            return True, "compatibility_check_negative_answer"
+            if _skip_search:
+                pass  # yes/no spec question ของสินค้าใน context → ไม่ search
+            else:
+                return True, "compatibility_check_negative_answer"
         # ถ้าไม่มีสินค้าใน context → search
         if products is not None and len(products) == 0:
             return True, "compatibility_check_no_products"

@@ -156,6 +156,11 @@ export async function setAssignmentMode(mode: AssignmentMode, updatedBy = "admin
     { $set: { mode, updated_by: updatedBy, updated_at: new Date() } },
     { upsert: true }
   );
+  await logAdminEvent({
+    action_type: "assignment.mode_change",
+    actor: updatedBy,
+    metadata: { mode },
+  });
 }
 
 // เรียกตอนมีข้อความขาเข้าใหม่ — assign แบบ atomic กัน race condition
@@ -183,10 +188,14 @@ export async function autoAssignConversation(conv: {
 
   // Atomic guard — กันสองแชทชนกัน
   const convColl = await getCollection<{
-    _id: ObjectId; assigned_to: string | null; assigned_at: Date; assignment_mode_used: string;
+    _id: ObjectId; conversation_id: string; assigned_to: string | null; assigned_at: Date; assignment_mode_used: string;
   }>(COLLECTIONS.conversations);
+  // ⚡ รองรับกรณี caller ส่งแค่ conversation_id (ไม่มี _id) — เช่น handoffService
+  const filter = conv._id
+    ? { _id: conv._id, assigned_to: null }
+    : { conversation_id: conv.conversation_id, assigned_to: null };
   const updated = await convColl.findOneAndUpdate(
-    { _id: conv._id, assigned_to: null },
+    filter,
     { $set: { assigned_to: agentId, assigned_at: new Date(), assignment_mode_used: mode } },
     { returnDocument: "after" }
   );
@@ -240,6 +249,11 @@ export async function addAgentToShop(shopId: string, adminId: string, roleOnShop
     { $set: { is_active: true, role_on_shop: roleOnShop }, $setOnInsert: { added_at: new Date() } },
     { upsert: true }
   );
+  await logAdminEvent({
+    action_type: "assignment.shop_team_add",
+    actor: adminId,
+    metadata: { shop_id: shopId, role_on_shop: roleOnShop },
+  });
 }
 
 export async function removeAgentFromShop(shopId: string, adminId: string): Promise<void> {
@@ -248,6 +262,11 @@ export async function removeAgentFromShop(shopId: string, adminId: string): Prom
     { shop_id: shopId, admin_id: adminId },
     { $set: { is_active: false } }
   );
+  await logAdminEvent({
+    action_type: "assignment.shop_team_remove",
+    actor: adminId,
+    metadata: { shop_id: shopId },
+  });
 }
 
 // เพิ่ม/ลบ agent ในทีมของแพลตฟอร์ม
@@ -258,6 +277,11 @@ export async function addAgentToPlatform(platform: string, adminId: string): Pro
     { $set: { is_active: true }, $setOnInsert: { added_at: new Date() } },
     { upsert: true }
   );
+  await logAdminEvent({
+    action_type: "assignment.platform_team_add",
+    actor: adminId,
+    metadata: { platform },
+  });
 }
 
 export async function removeAgentFromPlatform(platform: string, adminId: string): Promise<void> {
@@ -266,6 +290,11 @@ export async function removeAgentFromPlatform(platform: string, adminId: string)
     { platform, admin_id: adminId },
     { $set: { is_active: false } }
   );
+  await logAdminEvent({
+    action_type: "assignment.platform_team_remove",
+    actor: adminId,
+    metadata: { platform },
+  });
 }
 
 export const assignmentService = {

@@ -19,6 +19,7 @@ export async function POST(
   const conv = await conversationService.getConversation(conversationId);
   if (!conv) return error("conversation not found", 404);
 
+  // ℹ️ Shared inbox — admin ทุกคน handoff ได้
   const result = await handoffService.handoffToAdmin({
     conversationId,
     platform: conv.platform,

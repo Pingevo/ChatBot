@@ -10,7 +10,7 @@
 // ⚡ force-dynamic — กัน Next.js cache GET response (กันข้อมูลเก่าค้างใน tab History)
 export const dynamic = "force-dynamic";
 import { NextRequest } from "next/server";
-import { requireDev } from "@/backend/middleware/authorize";
+import { requireAuth } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import type { Conversation } from "@/lib/types";
@@ -76,7 +76,7 @@ async function listShadowConversations(): Promise<Conversation[]> {
 }
 
 export async function GET(req: NextRequest) {
-  const r = await requireDev(req);
+  const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
   const conversations = await listShadowConversations();

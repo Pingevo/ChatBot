@@ -16,6 +16,7 @@ import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { listMessages, getHistoryForBot, toBotText } from "./messageService";
 import { getConversation } from "./conversationService";
 import { assertPlatformApiDisabled, type Platform } from "../lib/safety";
+import { logAdminEvent } from "./adminLogService";
 
 export interface ShadowReplyDoc extends Document {
   shadow_reply_id: string;
@@ -229,6 +230,16 @@ export async function generateShadowReply(opts: {
     updated_at: now,
   };
   await coll.insertOne(doc);
+  await logAdminEvent({
+    action_type: "shadow_reply.generate",
+    actor: "system",
+    metadata: {
+      shadow_reply_id: doc.shadow_reply_id,
+      conversation_id: doc.conversation_id,
+      message_id: doc.message_id,
+      origin: doc.origin,
+    },
+  });
   return doc;
 }
 
@@ -370,6 +381,15 @@ export async function generateConversationShadowReplies(opts: {
     accumulatedHistory.push({ role: "model", text: botResp.answer });
   }
 
+  await logAdminEvent({
+    action_type: "shadow_reply.generate_conversation",
+    actor: "system",
+    metadata: {
+      conversation_id: opts.conversationId,
+      generated_count: results.length,
+    },
+  });
+
   return results;
 }
 
@@ -410,6 +430,13 @@ export async function rateShadowReply(
     { shadow_reply_id: shadowReplyId },
     { $set: update }
   );
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "shadow_reply.rate",
+      actor: ratedBy,
+      metadata: { shadow_reply_id: shadowReplyId, rating, star_rating: opts?.starRating },
+    });
+  }
   return result.modifiedCount > 0;
 }
 
@@ -436,6 +463,13 @@ export async function clearAllShadowReplies(opts?: {
       updated_at: now,
     },
   });
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "shadow_reply.clear_all",
+      actor: opts?.deletedBy || "system",
+      metadata: { count: result.modifiedCount, platform: opts?.platform, shop_id: opts?.shopId, reason: opts?.reason },
+    });
+  }
   return { softDeletedCount: result.modifiedCount };
 }
 
@@ -460,6 +494,13 @@ export async function deleteShadowReply(
       },
     }
   );
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "shadow_reply.delete",
+      actor: deletedBy,
+      metadata: { shadow_reply_id: shadowReplyId, reason, soft_delete: true },
+    });
+  }
   return result.modifiedCount > 0;
 }
 
@@ -475,6 +516,13 @@ export async function restoreShadowReply(shadowReplyId: string): Promise<boolean
       $set: { updated_at: new Date() },
     }
   );
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "shadow_reply.restore",
+      actor: "system",
+      metadata: { shadow_reply_id: shadowReplyId },
+    });
+  }
   return result.modifiedCount > 0;
 }
 
@@ -493,6 +541,13 @@ export async function restoreAllShadowReplies(opts?: {
     $unset: { deleted_at: "", deleted_by: "", delete_reason: "" },
     $set: { updated_at: new Date() },
   });
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "shadow_reply.restore_all",
+      actor: "system",
+      metadata: { count: result.modifiedCount, platform: opts?.platform, shop_id: opts?.shopId },
+    });
+  }
   return { restoredCount: result.modifiedCount };
 }
 

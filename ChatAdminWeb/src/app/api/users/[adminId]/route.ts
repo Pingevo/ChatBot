@@ -1,7 +1,7 @@
 // PATCH /api/users/[adminId] — superadmin/dev updates an admin's profile (name, username, active)
 // DELETE /api/users/[adminId] — soft delete (superadmin/dev only, admin target only)
 // ⚠️ ไม่มีการเปลี่ยน role ผ่าน API แล้ว — แก้ role ใน collection ตรงๆ
-// ⚠️ active toggle ทำได้ทุก role (รวม superadmin/dev) เพื่อให้ปิดบัญชีตัวเอง/กันได้
+// ⚠️ active toggle ทำได้เฉพาะ admin role เท่านั้น (ป้องกัน superadmin lockout superadmin คนอื่น)
 import { NextRequest } from "next/server";
 import { auth } from "@/backend/service/authService";
 import { requireSuperadmin, canEditTarget } from "@/backend/middleware/authorize";
@@ -56,11 +56,11 @@ export async function PATCH(
     });
   }
 
-  // Active toggle — allowed for ANY role target (including superadmin/dev)
-  // แต่ห้าม toggle ตัวเอง
+  // Active toggle — 🔒 ใช้ canEditTarget เพื่อป้องกัน superadmin lockout superadmin/dev คนอื่น
+  // อนุญาตเฉพาะ admin role target เท่านั้น (superadmin/dev ปิด/เปิด admin ได้ แต่ห้าม toggle กันเอง)
   if (body.active !== undefined) {
-    if (r.ctx.admin.admin_id === adminId) {
-      return error("cannot toggle your own account", 400);
+    if (!canEditTarget(r.ctx.admin, target)) {
+      return error("cannot toggle active for this user — only admin role targets can be toggled", 403);
     }
     await auth.toggleAdminActive(adminId, Boolean(body.active));
     await logAdminEvent({

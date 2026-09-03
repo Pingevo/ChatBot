@@ -11,6 +11,7 @@ import {
   PieChart,
   Pie,
   Cell,
+  ComposedChart,
 } from "recharts";
 import { DebouncedResponsiveContainer as ResponsiveContainer } from "./DebouncedResponsiveContainer";
 
@@ -41,7 +42,17 @@ export function TrendLineChart({
           formatter={(value) => [`${value ?? 0}${unit}`, ""]}
           contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }}
         />
-        <Line type="monotone" dataKey={dataKey} stroke={color} strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+        <Line
+          type="monotone"
+          dataKey={dataKey}
+          stroke={color}
+          strokeWidth={2.5}
+          dot={{ r: 3 }}
+          activeDot={{ r: 5 }}
+          isAnimationActive
+          animationDuration={600}
+          animationEasing="ease-in-out"
+        />
       </LineChart>
     </ResponsiveContainer>
   );
@@ -71,6 +82,124 @@ export function WeeklyBarChart({
         />
         <Bar dataKey={dataKey} fill={color} radius={[6, 6, 0, 0]} />
       </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+// ⚡ ComboChart — กราฟแท่ง + เส้น (Bar + Line)
+export function ComboBarLineChart({
+  data,
+  barKey,
+  lineKey,
+  xKey,
+  barColor = BRAND,
+  lineColor = GREY_BLUE,
+  unit = "",
+}: {
+  data: Record<string, unknown>[];
+  barKey: string;
+  lineKey?: string;
+  xKey: string;
+  barColor?: string;
+  lineColor?: string;
+  unit?: string;
+}) {
+  return (
+    <ResponsiveContainer width="100%" height={180}>
+      <ComposedChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+        <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
+        <YAxis tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
+        <Tooltip
+          formatter={(value) => [`${value ?? 0}${unit}`, ""]}
+          contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }}
+        />
+        <Bar
+          dataKey={barKey}
+          fill={barColor}
+          radius={[6, 6, 0, 0]}
+          barSize={32}
+          isAnimationActive
+          animationDuration={600}
+          animationEasing="ease-in-out"
+        />
+        {lineKey && (
+          <Line
+            type="monotone"
+            dataKey={lineKey}
+            stroke={lineColor}
+            strokeWidth={2}
+            dot={{ r: 3 }}
+            isAnimationActive
+            animationDuration={800}
+            animationEasing="ease-in-out"
+          />
+        )}
+      </ComposedChart>
+    </ResponsiveContainer>
+  );
+}
+
+// ⚡ SmartChart — เลือก bar หรือ line อัตโนมัติตามจำนวนจุด
+//   1 จุด → กราฟแท่ง (bar)
+//   2+ จุด → กราฟเส้น (line) พร้อม animation
+export function SmartChart({
+  data,
+  dataKey,
+  xKey,
+  color = BRAND,
+  unit = "",
+}: {
+  data: Record<string, unknown>[];
+  dataKey: string;
+  xKey: string;
+  color?: string;
+  unit?: string;
+}) {
+  const isSinglePoint = data.length <= 1;
+  if (isSinglePoint) {
+    return (
+      <ResponsiveContainer width="100%" height={180}>
+        <BarChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+          <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
+          <Tooltip
+            formatter={(value) => [`${value ?? 0}${unit}`, ""]}
+            contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }}
+          />
+          <Bar
+            dataKey={dataKey}
+            fill={color}
+            radius={[6, 6, 0, 0]}
+            barSize={48}
+            isAnimationActive
+            animationDuration={600}
+            animationEasing="ease-in-out"
+          />
+        </BarChart>
+      </ResponsiveContainer>
+    );
+  }
+  return (
+    <ResponsiveContainer width="100%" height={180}>
+      <LineChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+        <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
+        <YAxis tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
+        <Tooltip
+          formatter={(value) => [`${value ?? 0}${unit}`, ""]}
+          contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }}
+        />
+        <Line
+          type="monotone"
+          dataKey={dataKey}
+          stroke={color}
+          strokeWidth={2.5}
+          dot={{ r: 3 }}
+          activeDot={{ r: 5 }}
+          isAnimationActive
+          animationDuration={800}
+          animationEasing="ease-in-out"
+        />
+      </LineChart>
     </ResponsiveContainer>
   );
 }

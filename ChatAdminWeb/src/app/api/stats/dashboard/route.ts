@@ -1,25 +1,34 @@
 // GET /api/stats/dashboard — top-line KPI cards + daily trend + platform/topic breakdown.
 // Phase 4: ใช้ MongoDB aggregation สด แทน load-all + filter ใน memory
-// Query: range = daily (default) | monthly | yearly | all
+// Query: range = daily (default) | weekly | monthly | yearly | all
 import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { computeResponseStats } from "@/backend/lib/responseStats";
 
+// ⚡ ป้องกัน Next.js cache — ต้องดึงข้อมูลสดทุกครั้ง
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 function getBounds(range: string): { start: Date | null; end: Date | null } {
   const now = new Date();
   if (range === "all") return { start: null, end: null };
+  if (range === "weekly") {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - 6);
+    return { start, end: now };
+  }
   if (range === "monthly") {
     return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now };
   }
   if (range === "yearly") {
     return { start: new Date(now.getFullYear(), 0, 1), end: now };
   }
-  // daily — 7 วันล่าสุด
+  // daily — วันนี้ 00:00 ถึง ตอนนี้
   const start = new Date();
   start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - 6);
   return { start, end: now };
 }
 
@@ -33,18 +42,28 @@ export async function GET(req: NextRequest) {
   const customEnd = url.searchParams.get("end_date");
 
   // ถ้ามี custom date ให้ใช้แทน range
+  // ⚡ สร้าง Date จาก "YYYY-MM-DD" โดยตรง ไม่ใช้ new Date(string) เพราะมัน parse เป็น UTC midnight
+  // แล้ว setHours ใช้ local timezone → ผิด 1 วันใน timezone +7
   let start: Date | null;
   let end: Date | null;
   if (customStart) {
-    start = new Date(customStart);
-    start.setHours(0, 0, 0, 0);
-    end = customEnd ? new Date(customEnd) : new Date(start);
-    end.setHours(23, 59, 59, 999);
+    // parse "YYYY-MM-DD" → local date 00:00
+    const [sy, sm, sd] = customStart.split("-").map(Number);
+    start = new Date(sy, sm - 1, sd, 0, 0, 0, 0);
+    if (customEnd) {
+      const [ey, em, ed] = customEnd.split("-").map(Number);
+      end = new Date(ey, em - 1, ed, 23, 59, 59, 999);
+    } else {
+      end = new Date(sy, sm - 1, sd, 23, 59, 59, 999);
+    }
   } else {
     const bounds = getBounds(range);
     start = bounds.start;
     end = bounds.end;
   }
+
+  // ⚡ debug log — เช็คว่า range ส่งมาถูกไหม + ช่วงเวลาที่คำนวณ
+  console.log(`[dashboard] range=${range} customStart=${customStart || "-"} start=${start?.toISOString()} end=${end?.toISOString()}`);
 
   const convColl = await getCollection(COLLECTIONS.conversations);
   const msgColl = await getCollection(COLLECTIONS.messages);
@@ -122,6 +141,9 @@ export async function GET(req: NextRequest) {
   const total = totalConv;
   const [messagesReceived, messagesSent] = msgCounts;
 
+  // ⚡ debug log ผลลัพธ์ KPI หลัก
+  console.log(`[dashboard] totalConv=${totalConv} messagesReceived=${messagesReceived} messagesSent=${messagesSent}`);
+
   const topicMap = new Map<string, number>();
   for (const t of convTopics) topicMap.set(t._id, (topicMap.get(t._id) || 0) + t.count);
   for (const t of ticketTopics) topicMap.set(t._id, (topicMap.get(t._id) || 0) + t.count);
@@ -130,12 +152,26 @@ export async function GET(req: NextRequest) {
   //    เพราะ user ต้องการรายงาน conversation รายวัน (00:00-23:59 ของแต่ละวัน)
   let dailyTrend: { date: string; count: number }[] = [];
   if (range === "daily") {
+    // รายวัน — โชว์แค่วันที่เลือก (1 แท่ง) ใช้ start/end ที่คำนวณแล้ว
+    const dayCount = await convColl.countDocuments({
+      created_at: { $gte: start as Date, $lt: end as Date },
+    });
+    dailyTrend = [{
+      date: (start as Date).toLocaleDateString("th-TH", { weekday: "short", day: "numeric", month: "short" }),
+      count: dayCount,
+    }];
+  } else if (range === "weekly") {
+    // รายสัปดาห์ — แยกตามวัน ใช้ timezone Asia/Bangkok
     const sevenDaysAgo = start || new Date(Date.now() - 7 * 86400000);
     const dailyAgg = await convColl.aggregate<{ _id: { year: number; month: number; day: number }; count: number }>([
       { $match: { created_at: { $gte: sevenDaysAgo, ...(end ? { $lt: end } : {}) } } },
       {
         $group: {
-          _id: { year: { $year: "$created_at" }, month: { $month: "$created_at" }, day: { $dayOfMonth: "$created_at" } },
+          _id: {
+            year: { $year: { date: "$created_at", timezone: "Asia/Bangkok" } },
+            month: { $month: { date: "$created_at", timezone: "Asia/Bangkok" } },
+            day: { $dayOfMonth: { date: "$created_at", timezone: "Asia/Bangkok" } },
+          },
           count: { $sum: 1 },
         },
       },
@@ -151,20 +187,20 @@ export async function GET(req: NextRequest) {
       dailyTrend.push({ date: day.toLocaleDateString("th-TH", { weekday: "short", day: "numeric", month: "short" }), count: dailyMap.get(key) || 0 });
     }
   } else if (range === "monthly") {
-    // แยกตามวันในเดือน — นับ conversation
+    // แยกตามวันในเดือน — นับ conversation (timezone Asia/Bangkok)
     const monthStart = start || new Date(new Date().getFullYear(), new Date().getMonth(), 1);
     const dailyAgg = await convColl.aggregate<{ _id: { day: number }; count: number }>([
       { $match: { created_at: { $gte: monthStart, ...(end ? { $lt: end } : {}) } } },
-      { $group: { _id: { day: { $dayOfMonth: "$created_at" } }, count: { $sum: 1 } } },
+      { $group: { _id: { day: { $dayOfMonth: { date: "$created_at", timezone: "Asia/Bangkok" } } }, count: { $sum: 1 } } },
       { $sort: { "_id.day": 1 } },
     ]).toArray();
     dailyTrend = dailyAgg.map((d) => ({ date: `${d._id.day}`, count: d.count }));
   } else if (range === "yearly") {
-    // แยกตามเดือนในปี — นับ conversation
+    // แยกตามเดือนในปี — นับ conversation (timezone Asia/Bangkok)
     const yearStart = start || new Date(new Date().getFullYear(), 0, 1);
     const monthlyAgg = await convColl.aggregate<{ _id: { month: number }; count: number }>([
       { $match: { created_at: { $gte: yearStart, ...(end ? { $lt: end } : {}) } } },
-      { $group: { _id: { month: { $month: "$created_at" } }, count: { $sum: 1 } } },
+      { $group: { _id: { month: { $month: { date: "$created_at", timezone: "Asia/Bangkok" } } }, count: { $sum: 1 } } },
       { $sort: { "_id.month": 1 } },
     ]).toArray();
     const monthNames = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
@@ -204,5 +240,15 @@ export async function GET(req: NextRequest) {
     platform_breakdown: platformBreakdown.map((p) => ({ platform: p._id || "unknown", count: p.count })),
     topic_breakdown: Array.from(topicMap.entries()).map(([topic, count]) => ({ topic, count })).sort((a, b) => b.count - a.count).slice(0, 10),
     daily_trend: dailyTrend,
+    // ⚡ debug — ลบทิ้งภายหลัง
+    _debug: {
+      range,
+      customStart: customStart || null,
+      start: start?.toISOString() || null,
+      end: end?.toISOString() || null,
+      totalConv,
+      messagesReceived,
+      messagesSent,
+    },
   });
 }

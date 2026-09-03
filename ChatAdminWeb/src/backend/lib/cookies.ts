@@ -2,10 +2,19 @@
 import { serverConfig } from "./config";
 import { NextResponse } from "next/server";
 
+// 🔒 Cookie security:
+//   - secure: ใช้ NODE_ENV=production เป็นหลัก แต่อนุญาตให้ override ด้วย COOKIE_SECURE env
+//   - sameSite: "strict" เป็น default (admin panel ไม่มี cross-origin API)
+//     แต่อนุญาตให้ override ด้วย COOKIE_SAMESITE env (สำหรับกรณีพิเศษ)
+const cookieSecure = process.env.COOKIE_SECURE === "true" ? true
+  : process.env.COOKIE_SECURE === "false" ? false
+  : serverConfig.isProd;
+const cookieSameSite = (process.env.COOKIE_SAMESITE as "strict" | "lax" | "none" | undefined) || "strict";
+
 const COOKIE_OPTIONS = {
   httpOnly: true,
-  secure: serverConfig.isProd,
-  sameSite: "lax" as const,
+  secure: cookieSecure,
+  sameSite: cookieSameSite as "strict" | "lax" | "none",
   path: "/",
   maxAge: serverConfig.sessionHours * 3600,
 };

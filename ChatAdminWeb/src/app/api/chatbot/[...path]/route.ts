@@ -11,7 +11,7 @@
 // it uses shopee's base URL (backward compat with old callers).
 import { NextRequest, NextResponse } from "next/server";
 import { serverConfig } from "@/backend/lib/config";
-import { getCurrentAdmin } from "@/backend/middleware/authorize";
+import { requireAuth } from "@/backend/middleware/authorize";
 
 type Platform = "shopee" | "lazada" | "tiktok";
 
@@ -32,6 +32,10 @@ function pickUpstream(segments: string[]): { upstream: string; remaining: string
 }
 
 async function proxy(req: NextRequest, segments: string[]) {
+  // 🔒 ต้อง login ก่อนถึงจะใช้ chatbot proxy ได้
+  const authResult = await requireAuth(req);
+  if (!authResult.ok) return authResult.response;
+
   const { upstream, remaining } = pickUpstream(segments);
   const path = remaining.join("/");
   const url = `${upstream}/${path}${req.nextUrl.search}`;
@@ -45,15 +49,8 @@ async function proxy(req: NextRequest, segments: string[]) {
   headers.set("X-Internal-Secret", serverConfig.chatbotInternalSecret);
 
   // ⚡ Attach admin identity (for logging in Python)
-  try {
-    const admin = await getCurrentAdmin(req);
-    if (admin) {
-      headers.set("X-Admin-Id", admin.admin_id);
-      headers.set("X-Admin-Name", encodeURIComponent(admin.name || ""));
-    }
-  } catch {
-    // ignore — ไม่มี admin ก็ผ่านได้
-  }
+  headers.set("X-Admin-Id", authResult.ctx.admin.admin_id);
+  headers.set("X-Admin-Name", encodeURIComponent(authResult.ctx.admin.name || ""));
 
   let body: BodyInit | undefined;
   if (method !== "GET" && method !== "HEAD") {
@@ -76,8 +73,10 @@ async function proxy(req: NextRequest, segments: string[]) {
     });
   } catch (err) {
     const msg = (err as Error).message || "chatbot unreachable";
+    // 🔒 อย่าเปิดเผย upstream URL ให้ client — log ฝั่ง server เท่านั้น
+    console.error("[chatbot-proxy] upstream error:", msg, "upstream:", upstream);
     return NextResponse.json(
-      { error: "chatbot_proxy_error", message: msg, upstream },
+      { error: "chatbot_proxy_error", message: "chatbot service unreachable" },
       { status: 502 }
     );
   }

@@ -17,6 +17,9 @@ export async function GET(
   const doc = await conversationService.getConversation(conversationId);
   if (!doc) return error("conversation not found", 404);
 
+  // ℹ️ Shared inbox model — admin ทุกคนเห็น conversation ได้
+  // channels_access filter ทำที่ list route แล้ว
+
   const conv: Conversation = {
     id: doc.conversation_id,
     platform: doc.platform,

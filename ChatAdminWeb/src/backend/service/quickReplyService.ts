@@ -7,6 +7,7 @@
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { logAdminEvent } from "./adminLogService";
+import { pickAllowed } from "../lib/sanitizeFields";
 
 export interface QuickReplyDoc extends Document {
   quick_reply_id: string;
@@ -110,15 +111,20 @@ export async function updateQuickReply(
   actor?: string
 ): Promise<boolean> {
   const coll = await getCollection<QuickReplyDoc>(COLLECTIONS.quickReplies);
+  // 🔒 allowlist fields (defense-in-depth)
+  const QR_UPDATE_ALLOWLIST = [
+    "platforms", "shop_ids", "category", "title", "body", "enabled", "sort_order",
+  ] as const;
+  const safeUpdates = pickAllowed(updates as Record<string, unknown>, QR_UPDATE_ALLOWLIST);
   const result = await coll.updateOne(
     { quick_reply_id: quickReplyId, is_deleted: { $ne: true } },
-    { $set: { ...updates, updated_at: new Date() } }
+    { $set: { ...safeUpdates, updated_at: new Date() } }
   );
   if (result.modifiedCount > 0 && actor) {
     await logAdminEvent({
       action_type: "quick_reply.update",
       actor,
-      metadata: { quick_reply_id: quickReplyId, changes: updates },
+      metadata: { quick_reply_id: quickReplyId, changes: safeUpdates },
     });
   }
   return result.modifiedCount > 0;

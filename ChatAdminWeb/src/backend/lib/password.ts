@@ -1,4 +1,6 @@
 // Password hashing — bcrypt with sha256 pre-hash (matches Python admin/auth.py).
+// ⚠️ ระบบใช้ SSO เท่านั้น — hashPassword ยังจำเป็นเพราะ createAdmin ใช้ตอน auto-provision
+// verifyPassword ถูกลบแล้วเพราะไม่มี local password login อีกต่อไป
 import bcrypt from "bcryptjs";
 import { createHash } from "crypto";
 
@@ -13,13 +15,4 @@ export async function hashPassword(plain: string): Promise<string> {
   const pre = preHash(plain);
   const salt = await bcrypt.genSalt(BCRYPT_ROUNDS);
   return bcrypt.hash(pre, salt);
-}
-
-export async function verifyPassword(plain: string, hashed: string): Promise<boolean> {
-  try {
-    const pre = preHash(plain);
-    return bcrypt.compare(pre, hashed);
-  } catch {
-    return false;
-  }
 }

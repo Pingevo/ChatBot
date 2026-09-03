@@ -1,16 +1,16 @@
 // Auth logic — server-side only.
-// Handles: login, signup, reset, session, logout, admin CRUD.
+// Handles: SSO login, session, logout, admin CRUD.
+// ⚠️ ระบบใช้ SSO ขององค์กร — ไม่มี signin/signup/reset/OTP ผ่าน API ของเราอีกต่อไม
 import { Document } from "mongodb";
-import { getCollection, COLLECTIONS, ensureIndexes } from "../db/mongoClient";
-import { hashPassword, verifyPassword } from "../lib/password";
+import { getCollection, COLLECTIONS } from "../db/mongoClient";
+import { hashPassword } from "../lib/password";
 import {
   createSessionToken,
   verifySessionToken,
-  createAuthToken,
-  verifyAuthToken,
   hashToken,
 } from "../lib/jwt";
-import { serverConfig, MAX_FAILED_LOGIN, LOCK_MINUTES } from "../lib/config";
+import { serverConfig } from "../lib/config";
+import { logAdminEvent } from "./adminLogService";
 
 export interface AdminDoc extends Document {
   admin_id: string;
@@ -18,7 +18,7 @@ export interface AdminDoc extends Document {
   username: string;
   name: string;
   role: "superadmin" | "admin" | "dev";
-  password_hash: string;
+  password_hash?: string;  // SSO-only — ไม่จำเป็นแล้ว แต่เก็บไว้สำหรับ admin เก่า
   active: boolean;
   // Phase 7.9 — admin เปิด/ปิดสถานะรับแชทของตัวเอง (ลาหยุด, พัก)
   is_accepting_chats?: boolean;
@@ -84,29 +84,7 @@ export async function getAdminById(adminId: string): Promise<AdminDoc | null> {
   return coll.findOne({ admin_id: adminId });
 }
 
-// ---- Lockout ----
-
-export function isLocked(admin: AdminDoc): boolean {
-  if (!admin.locked_until) return false;
-  return new Date(admin.locked_until).getTime() > Date.now();
-}
-
-export async function recordLoginFailure(adminId: string): Promise<{ locked: boolean }> {
-  const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
-  const admin = await coll.findOne({ admin_id: adminId });
-  const count = (admin?.failed_login_count || 0) + 1;
-  const locked = count >= MAX_FAILED_LOGIN;
-  await coll.updateOne(
-    { admin_id: adminId },
-    {
-      $set: {
-        failed_login_count: count,
-        locked_until: locked ? new Date(Date.now() + LOCK_MINUTES * 60_000) : null,
-      },
-    }
-  );
-  return { locked };
-}
+// ---- Login tracking (SSO only — no password login) ----
 
 export async function recordLoginSuccess(adminId: string, ip: string): Promise<void> {
   const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
@@ -128,20 +106,20 @@ export async function recordLoginSuccess(adminId: string, ip: string): Promise<v
 export async function createAdmin(opts: {
   email: string;
   username: string;
-  password: string;
+  password?: string;  // SSO-only — ไม่จำเป็น แต่ SSO callback ยังส่ง random password มา (จะ unset ทีหลัง)
   name?: string;
   role?: "superadmin" | "admin" | "dev";
   createdBy?: string;
 }): Promise<AdminDoc> {
   const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
-  const passwordHash = await hashPassword(opts.password);
+  const passwordHash = opts.password ? await hashPassword(opts.password) : undefined;
   const doc: AdminDoc = {
     admin_id: genAdminId(),
     email: opts.email.toLowerCase(),
     username: opts.username,
     name: opts.name || "",
     role: opts.role || "admin",
-    password_hash: passwordHash,
+    ...(passwordHash ? { password_hash: passwordHash } : {}),
     active: true,
     channels_access: [],
     failed_login_count: 0,
@@ -151,6 +129,11 @@ export async function createAdmin(opts: {
     created_by: opts.createdBy || "system",
   };
   await coll.insertOne(doc);
+  await logAdminEvent({
+    action_type: "user.create",
+    actor: opts.createdBy || "system",
+    metadata: { new_admin_id: doc.admin_id, username: doc.username, role: doc.role },
+  });
   return doc;
 }
 
@@ -212,47 +195,6 @@ export async function updateSessionActivity(token: string): Promise<void> {
 
 // ---- Auth tokens (signup / reset) ----
 
-export async function storeAuthToken(
-  token: string,
-  purpose: "signup" | "reset_password",
-  email: string,
-  exp: number,
-  adminId?: string
-): Promise<void> {
-  const coll = await getCollection(COLLECTIONS.authTokens);
-  await coll.insertOne({
-    token_hash: hashToken(token),
-    purpose,
-    email,
-    admin_id: adminId,
-    expires_at: new Date(exp * 1000),
-    used: false,
-    created_at: new Date(),
-  });
-}
-
-export async function consumeAuthToken(
-  token: string
-): Promise<{ purpose: string; email: string; admin_id?: string } | null> {
-  const payload = await verifyAuthToken(token);
-  if (!payload) return null;
-  const coll = await getCollection(COLLECTIONS.authTokens);
-  const doc = await coll.findOne({ token_hash: hashToken(token) });
-  if (!doc) return null;
-  if (doc.used) return null;
-  await coll.updateOne({ token_hash: hashToken(token) }, { $set: { used: true, used_at: new Date() } });
-  return { purpose: payload.purpose, email: payload.email, admin_id: payload.admin_id };
-}
-
-// ---- Password update ----
-
-export async function updatePassword(adminId: string, newPassword: string): Promise<boolean> {
-  const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
-  const hash = await hashPassword(newPassword);
-  const result = await coll.updateOne({ admin_id: adminId }, { $set: { password_hash: hash } });
-  return result.modifiedCount > 0;
-}
-
 // ---- User Management ----
 
 export async function listAdmins(): Promise<SafeAdmin[]> {
@@ -264,12 +206,13 @@ export async function listAdmins(): Promise<SafeAdmin[]> {
 export async function toggleAdminActive(adminId: string, active: boolean): Promise<boolean> {
   const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
   const result = await coll.updateOne({ admin_id: adminId }, { $set: { active } });
-  return result.modifiedCount > 0;
-}
-
-export async function updateAdminRole(adminId: string, role: "superadmin" | "admin" | "dev"): Promise<boolean> {
-  const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
-  const result = await coll.updateOne({ admin_id: adminId }, { $set: { role } });
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "user.toggle_active",
+      actor: adminId,
+      metadata: { active },
+    });
+  }
   return result.modifiedCount > 0;
 }
 
@@ -285,6 +228,13 @@ export async function updateAdminProfile(
   if (fields.is_accepting_chats !== undefined) update.is_accepting_chats = fields.is_accepting_chats;
   if (Object.keys(update).length === 0) return false;
   const result = await coll.updateOne({ admin_id: adminId }, { $set: update });
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "user.update",
+      actor: adminId,
+      metadata: { fields: update },
+    });
+  }
   return result.modifiedCount > 0;
 }
 
@@ -295,68 +245,14 @@ export async function deleteAdmin(adminId: string, deletedBy?: string): Promise<
     { admin_id: adminId, is_deleted: { $ne: true } },
     { $set: { is_deleted: true, deleted_at: new Date(), deleted_by: deletedBy, active: false } }
   );
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "user.delete",
+      actor: deletedBy || "system",
+      metadata: { deleted_admin_id: adminId, soft_delete: true },
+    });
+  }
   return result.modifiedCount > 0;
-}
-
-// ---- OTP (self-service password change confirmation) ----
-// Reuses the existing `auth_tokens` collection (purpose: "self_password_change")
-// instead of a new collection. Unlike the JWT-based signup/reset tokens, this
-// flow is a short numeric code the admin types in manually, so lookup is by
-// admin_id + hashed code rather than by verifying a JWT.
-
-function genOtpCode(): string {
-  return String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
-}
-
-const OTP_EXPIRES_MINUTES = 10;
-
-export async function createSelfOtp(adminId: string, email: string): Promise<string> {
-  const coll = await getCollection(COLLECTIONS.authTokens);
-  const code = genOtpCode();
-  const exp = new Date(Date.now() + OTP_EXPIRES_MINUTES * 60_000);
-  // Invalidate any previous unused OTPs for this admin/purpose first.
-  await coll.updateMany(
-    { admin_id: adminId, purpose: "self_password_change", used: false },
-    { $set: { used: true, used_at: new Date() } }
-  );
-  await coll.insertOne({
-    purpose: "self_password_change",
-    admin_id: adminId,
-    email,
-    otp_code_hash: hashToken(code),
-    expires_at: exp,
-    used: false,
-    created_at: new Date(),
-  });
-  return code;
-}
-
-export async function verifySelfOtp(adminId: string, code: string): Promise<boolean> {
-  const coll = await getCollection(COLLECTIONS.authTokens);
-  const doc = await coll.findOne({
-    admin_id: adminId,
-    purpose: "self_password_change",
-    used: false,
-    otp_code_hash: hashToken(code),
-    expires_at: { $gt: new Date() },
-  });
-  if (!doc) return false;
-  await coll.updateOne({ _id: doc._id }, { $set: { used: true, used_at: new Date() } });
-  return true;
-}
-
-// ---- Admin-initiated password reset (superadmin resets another admin) ----
-// Sends a reset link to the TARGET admin's own email (reuses the existing
-// reset_password token flow) rather than an OTP to the acting superadmin.
-
-export async function createResetLinkForAdmin(
-  targetAdminId: string
-): Promise<{ token: string; email: string } | null> {
-  const target = await getAdminById(targetAdminId);
-  if (!target) return null;
-  const { token, exp } = await createAuthToken("reset_password", target.email, target.admin_id);
-  await storeAuthToken(token, "reset_password", target.email, exp, target.admin_id);
-  return { token, email: target.email };
 }
 
 // ---- Public API ----
@@ -366,8 +262,6 @@ export const auth = {
   getAdminByEmail,
   getAdminByUsername,
   getAdminById,
-  isLocked,
-  recordLoginFailure,
   recordLoginSuccess,
   createAdmin,
   createSessionToken,
@@ -376,20 +270,10 @@ export const auth = {
   revokeSession,
   revokeAllSessions,
   updateSessionActivity,
-  createAuthToken,
-  storeAuthToken,
-  consumeAuthToken,
-  updatePassword,
-  verifyPassword,
-  ensureIndexes,
   listAdmins,
   toggleAdminActive,
-  updateAdminRole,
   updateAdminProfile,
   deleteAdmin,
-  createSelfOtp,
-  verifySelfOtp,
-  createResetLinkForAdmin,
 };
 
 export { serverConfig };

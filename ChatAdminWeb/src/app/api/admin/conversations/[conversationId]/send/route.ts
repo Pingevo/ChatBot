@@ -45,6 +45,10 @@ export async function POST(
   assertPlatformApiDisabled(conv.platform, "send");
 
   // Phase 7.9 — เช็ค assigned_to สดๆ
+  // ℹ️ Shared inbox model — admin ทุกคนตอบได้ แต่มี conflict detection
+  //   - ถ้า assigned ให้คนอื่น → 409 + frontend เตือน popup
+  //   - ถ้า assigned ให้ตัวเอง หรือ ยังไม่ assigned → ตอบได้
+  //   - force=true ข้าม conflict ได้ (audit log บันทึกไว้)
   const me = r.ctx.admin.admin_id;
   const assignedToOther = conv.assigned_to && conv.assigned_to !== me;
   if (assignedToOther && !force) {

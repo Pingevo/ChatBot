@@ -21,12 +21,19 @@ export async function POST(req: NextRequest) {
   }>(req);
   if (!body?.conversation_id) return error("conversation_id is required");
 
-  const conv = await conversationService.getConversation(body.conversation_id);
+  // 🔒 ป้องกัน NoSQL injection — coerce ค่าจาก body เป็น string เสมอ
+  const conversationId = String(body.conversation_id);
+  const newAdminId = body.new_admin_id != null ? String(body.new_admin_id) : null;
+  const reason = body.reason != null ? String(body.reason) : undefined;
+
+  const conv = await conversationService.getConversation(conversationId);
   if (!conv) return error("conversation not found", 404);
 
+  // ℹ️ Shared inbox — editor ทุกคน reassign ได้
+
   // ตรวจสอบว่า target admin เป็น role=admin เท่านั้น
-  if (body.new_admin_id) {
-    const targetAdmin = await auth.getAdminById(body.new_admin_id);
+  if (newAdminId) {
+    const targetAdmin = await auth.getAdminById(newAdminId);
     if (!targetAdmin) return error("target admin not found", 404);
     if (targetAdmin.role !== "admin") {
       return error("ไม่สามารถมอบหมายงานให้ superadmin หรือ dev ได้ — เฉพาะ admin เท่านั้น", 403);
@@ -41,9 +48,9 @@ export async function POST(req: NextRequest) {
       shop_id: conv.shop_id,
       assigned_to: conv.assigned_to,
     },
-    body.new_admin_id || null,
+    newAdminId,
     actor,
-    body.reason
+    reason
   );
 
   return json({ ok: true });

@@ -8,7 +8,7 @@ import { format } from "date-fns";
 import { Calendar, ChevronDown } from "lucide-react";
 import "react-day-picker/dist/style.css";
 
-export type DateRangePreset = "daily" | "monthly" | "yearly" | "all" | "custom";
+export type DateRangePreset = "daily" | "weekly" | "monthly" | "yearly" | "all" | "custom";
 
 export interface DateRangeValue {
   preset: DateRangePreset;
@@ -23,9 +23,10 @@ interface Props {
 }
 
 const PRESETS: { key: DateRangePreset; label: string; short: string }[] = [
-  { key: "daily", label: "7 วันล่าสุด", short: "รายวัน" },
-  { key: "monthly", label: "เดือนนี้", short: "รายเดือน" },
-  { key: "yearly", label: "ปีนี้", short: "รายปี" },
+  { key: "daily", label: "วันนี้", short: "วันนี้" },
+  { key: "weekly", label: "7 วันล่าสุด", short: "สัปดาห์" },
+  { key: "monthly", label: "เดือนนี้", short: "เดือน" },
+  { key: "yearly", label: "ปีนี้", short: "ปี" },
   { key: "all", label: "ทั้งหมด", short: "ทั้งหมด" },
 ];
 
@@ -34,11 +35,18 @@ function getPresetRange(preset: DateRangePreset): { start: Date | null; end: Dat
   if (preset === "all") return { start: null, end: null };
   if (preset === "monthly") return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now };
   if (preset === "yearly") return { start: new Date(now.getFullYear(), 0, 1), end: now };
-  // daily
+  if (preset === "weekly") {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - 6);
+    return { start, end: now };
+  }
+  // daily — วันนี้ 00:00 - 23:59
   const start = new Date();
   start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - 6);
-  return { start, end: now };
+  const end = new Date();
+  end.setHours(23, 59, 59, 999);
+  return { start, end };
 }
 
 function fmt(d: Date | null): string {
@@ -47,7 +55,11 @@ function fmt(d: Date | null): string {
 }
 
 function fmtISO(d: Date): string {
-  return d.toISOString().split("T")[0];
+  // ⚡ ใช้ local date ไม่ใช่ UTC — กัน off-by-one ใน timezone ที่เป็น +7
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 /** แปลง DateRangeValue เป็น params สำหรับ API */
@@ -125,6 +137,24 @@ export function UnifiedDateRangePicker({ value, onChange, className = "" }: Prop
     }
   }
 
+  // ⚡ range สำหรับ DayPicker mode="range" — ใช้ highlight ช่วง
+  const rangeSelected = tempStart && tempEnd
+    ? { from: tempStart, to: tempEnd }
+    : tempStart
+    ? { from: tempStart, to: tempStart }
+    : undefined;
+
+  function handleRangeSelect(range: { from?: Date | undefined; to?: Date | undefined } | undefined) {
+    if (!range) {
+      setTempStart(null);
+      setTempEnd(null);
+      return;
+    }
+    setActivePreset("custom");
+    setTempStart(range.from || null);
+    setTempEnd(range.to || null);
+  }
+
   function handleApply() {
     if (tempStart) {
       onChange({
@@ -145,7 +175,6 @@ export function UnifiedDateRangePicker({ value, onChange, className = "" }: Prop
     setOpen(false);
   }
 
-  const disabledDays = mode === "end" && tempStart ? { before: tempStart } : undefined;
   const displayLabel = rangeLabel(value);
 
   return (
@@ -163,7 +192,7 @@ export function UnifiedDateRangePicker({ value, onChange, className = "" }: Prop
       {open && (
         <div className="absolute right-0 top-full mt-1.5 z-50 bg-surface rounded-xl shadow-xl border border-border w-[380px] overflow-hidden">
           {/* Preset buttons row */}
-          <div className="grid grid-cols-4 gap-1 p-3 border-b border-border bg-surface-2/50">
+          <div className="grid grid-cols-5 gap-1 p-3 border-b border-border bg-surface-2/50">
             {PRESETS.map((p) => (
               <button
                 key={p.key}
@@ -207,13 +236,32 @@ export function UnifiedDateRangePicker({ value, onChange, className = "" }: Prop
               </button>
             </div>
 
+            {/* ⚡ Banner แสดงช่วงวันที่ที่เลือก */}
+            {tempStart && (
+              <div className="mb-3 px-3 py-2 rounded-lg bg-brand/10 border border-brand/20 text-xs text-text">
+                <span className="text-text-muted">ช่วงที่เลือก: </span>
+                <span className="font-medium text-brand">{fmt(tempStart)}</span>
+                {tempEnd && tempEnd.getTime() !== tempStart.getTime() && (
+                  <>
+                    <span className="text-text-muted"> ถึง </span>
+                    <span className="font-medium text-brand">{fmt(tempEnd)}</span>
+                  </>
+                )}
+                {tempEnd && (
+                  <span className="text-text-subtle ml-2">
+                    ({Math.round((tempEnd.getTime() - tempStart.getTime()) / 86400000) + 1} วัน)
+                  </span>
+                )}
+              </div>
+            )}
+
             {/* Calendar */}
             <div className="flex justify-center">
               <DayPicker
-                mode="single"
-                selected={mode === "start" ? tempStart || undefined : tempEnd || undefined}
-                onSelect={(day) => day && handleDaySelect(day)}
-                disabled={disabledDays}
+                mode="range"
+                selected={rangeSelected}
+                onSelect={handleRangeSelect}
+                numberOfMonths={1}
                 locale={th}
                 startMonth={new Date(2020, 0)}
                 endMonth={new Date(new Date().getFullYear() + 1, 11)}

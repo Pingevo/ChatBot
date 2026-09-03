@@ -6,6 +6,10 @@ import { knowledgeBaseService } from "@/backend/service/knowledgeBaseService";
 
 // Minimal XLSX reader: unzip + parse sheet1 XML + extract rows.
 // Avoids adding a runtime dependency on a sheet library.
+// 🔒 มีข้อจำกัดขนาดเพื่อป้องกัน zip bomb / OOM
+const MAX_UNCOMPRESSED_ENTRY = 50 * 1024 * 1024; // 50MB ต่อ entry
+const MAX_TOTAL_UNCOMPRESSED = 100 * 1024 * 1024; // 100MB รวมทุก entry
+
 async function parseXlsx(buf: Buffer): Promise<Record<string, string>[]> {
   const { inflateRawSync } = require("zlib") as typeof import("zlib");
 
@@ -21,6 +25,7 @@ async function parseXlsx(buf: Buffer): Promise<Record<string, string>[]> {
   const cdOffset = buf.readUInt32LE(i + 16);
   let p = cdOffset;
   const cdEnd = cdOffset + cdSize;
+  let totalUncompressed = 0;
   while (p < cdEnd) {
     if (buf.readUInt32LE(p) !== 0x02014b50) break;
     const method = buf.readUInt16LE(p + 10);
@@ -31,6 +36,14 @@ async function parseXlsx(buf: Buffer): Promise<Record<string, string>[]> {
     const commentLen = buf.readUInt16LE(p + 32);
     const localOffset = buf.readUInt32LE(p + 42);
     const name = buf.slice(p + 46, p + 46 + nameLen).toString("utf8");
+    // 🔒 ป้องกัน zip bomb — ตรวจขนาดก่อน decompress
+    if (uncompSize > MAX_UNCOMPRESSED_ENTRY) {
+      throw new Error(`entry "${name}" too large when decompressed (${uncompSize} bytes)`);
+    }
+    totalUncompressed += uncompSize;
+    if (totalUncompressed > MAX_TOTAL_UNCOMPRESSED) {
+      throw new Error("total uncompressed size exceeds limit");
+    }
     // Read local header to find data start
     const localNameLen = buf.readUInt16LE(localOffset + 26);
     const localExtraLen = buf.readUInt16LE(localOffset + 28);
@@ -110,12 +123,26 @@ export async function POST(req: NextRequest) {
   const r = await requireEditor(req);
   if (!r.ok) return r.response;
 
+  // 🔒 จำกัดขนาดไฟล์ — 10 MB สูงสุด
+  const MAX_FILE_SIZE = 10 * 1024 * 1024;
+  const MAX_ROWS = 10000;
+
   const form = await req.formData();
   const file = form.get("file");
   if (!(file instanceof File)) return error("file is required", 400);
   if (!file.name.match(/\.xlsx$/i)) return error("only .xlsx files are supported", 400);
+  if (file.size > MAX_FILE_SIZE) {
+    return error(`file too large — max ${MAX_FILE_SIZE / 1024 / 1024}MB, got ${Math.round(file.size / 1024 / 1024)}MB`, 413);
+  }
 
   const buf = Buffer.from(await file.arrayBuffer());
+
+  // 🔒 ตรวจ magic bytes ของ XLSX (ZIP archive — PK\x03\x04)
+  // XLSX เป็น ZIP-based format จริง — ต้องขึ้นต้นด้วย PK signature
+  if (buf.length < 4 || buf[0] !== 0x50 || buf[1] !== 0x4b || buf[2] !== 0x03 || buf[3] !== 0x04) {
+    return error("invalid file — not a valid XLSX (ZIP) archive", 400);
+  }
+
   let rows: Record<string, string>[];
   try {
     rows = await parseXlsx(buf);
@@ -124,6 +151,10 @@ export async function POST(req: NextRequest) {
   }
 
   if (rows.length === 0) return error("xlsx contains no data rows", 400);
+  // 🔒 จำกัดจำนวน rows ป้องกัน resource exhaustion
+  if (rows.length > MAX_ROWS) {
+    return error(`too many rows — max ${MAX_ROWS}, got ${rows.length}`, 413);
+  }
 
   const sourceFile = file.name;
   let upserted = 0;

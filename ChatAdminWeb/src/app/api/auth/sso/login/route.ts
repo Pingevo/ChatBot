@@ -14,7 +14,8 @@ function getBaseUrl(req: NextRequest): string {
 }
 
 export async function GET(req: NextRequest) {
-  const baseUrl = process.env.BASE_URL?.replace(/\/+$/, "") || getBaseUrl(req);
+  // Prefer APP_BASE_URL env var (secure) — fallback to request headers only for local dev
+  const baseUrl = process.env.APP_BASE_URL?.replace(/\/+$/, "") || getBaseUrl(req);
   const callbackUrl = `${baseUrl}/api/auth/sso/callback`;
 
   const params = new URLSearchParams({

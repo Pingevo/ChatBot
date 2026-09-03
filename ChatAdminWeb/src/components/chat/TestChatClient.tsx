@@ -108,11 +108,66 @@ function escapeHtml(s: unknown): string {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
 }
 
+/* ---- format log stats เป็น text สำหรับ copy ---- */
+function formatLogForCopy(stats: MsgStats, rawText: string): string {
+  const lines: string[] = [];
+  lines.push("=== Bot Answer Log ===");
+  lines.push(`Text: ${rawText.slice(0, 200)}`);
+  lines.push("");
+  lines.push(`Elapsed: ${stats.elapsed ?? "—"}s`);
+  lines.push(`Model: ${stats.model || "—"}`);
+  lines.push(`Source: ${stats.source || "—"}`);
+  lines.push(`Cost: $${stats.cost?.toFixed(6) ?? "—"} (฿${stats.cost ? (stats.cost * 36).toFixed(2) : "—"})`);
+  if (stats.usage) {
+    lines.push(`Tokens: in=${stats.usage.prompt ?? 0} out=${stats.usage.output ?? 0} total=${stats.usage.total ?? 0}`);
+  }
+  if (stats.intent) {
+    lines.push(`Intent: ${stats.intent.intent || "—"} (confidence: ${stats.intent.confidence ?? "—"})`);
+    if (stats.intent.product_type) lines.push(`  product_type: ${stats.intent.product_type}`);
+    if (stats.intent.charger_subtype) lines.push(`  charger_subtype: ${stats.intent.charger_subtype}`);
+    if (stats.intent.target_device) lines.push(`  target_device: ${stats.intent.target_device}`);
+  }
+  if (stats.timing) {
+    lines.push(`Timing: pass1=${stats.timing.pass1 ?? "—"}s retrieval=${stats.timing.retrieval ?? "—"}s llm=${stats.timing.llm ?? "—"}s llm2=${stats.timing.llm2 ?? "—"}s total=${stats.timing.total ?? "—"}s`);
+  }
+  if (stats.web_search_used) {
+    lines.push(`Web search: used (reason: ${stats.web_search_reason || "—"}, model: ${stats.web_search_model || "—"})`);
+  }
+  if (stats.retrieval_info) {
+    lines.push(`Retrieval: path=${stats.retrieval_info.path || "—"} products=${stats.retrieval_info.product_count ?? 0} fallback=${stats.retrieval_info.fallback_used ?? false}`);
+  }
+  if (stats.handoff_to_admin) {
+    lines.push(`Handoff: ${stats.handoff_reason || "—"}`);
+  }
+  if (stats.routing_decision) {
+    lines.push(`Routing: path=${stats.routing_decision.path || "—"} reason=${stats.routing_decision.reason || "—"}`);
+  }
+  if (stats.steps && stats.steps.length > 0) {
+    lines.push("");
+    lines.push("=== Steps ===");
+    stats.steps.forEach((s, i) => {
+      lines.push(`[${i + 1}] ${s.name} (${s.model})`);
+      lines.push(`  tokens: in=${s.tokens_in} out=${s.tokens_out} · ${s.time_s}s · $${s.cost_usd.toFixed(6)} (฿${s.cost_thb})`);
+      if (s.input && Object.keys(s.input).length > 0) {
+        lines.push(`  input: ${JSON.stringify(s.input)}`);
+      }
+      if (s.output && Object.keys(s.output).length > 0) {
+        lines.push(`  output: ${JSON.stringify(s.output)}`);
+      }
+    });
+  }
+  lines.push("");
+  lines.push(`Copied at: ${new Date().toLocaleString("th-TH")}`);
+  return lines.join("\n");
+}
+
 function inlineFmt(s: string): string {
+  // Escape HTML first to prevent XSS, then apply markdown formatting
+  s = escapeHtml(s);
   s = s.replace(
     /!\[([\s\S]*?)\]\((https?:\/\/[^\s)]+)\)/g,
     (_, alt, url) =>
-      `<img src="${url}" alt="${escapeHtml(alt)}" onerror="this.remove()" /><div class="img-caption">${escapeHtml(alt)}</div>`
+      `<img src="${url}" alt="${alt}" onerror="this.remove()" /><div class="img-caption">${alt}</div>`
   );
   s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/\[([^\[\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
@@ -308,6 +363,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   const [assignmentReason, setAssignmentReason] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [logPanelOpen, setLogPanelOpen] = useState(false);
+  const [logViewMode, setLogViewMode] = useState<"grouped" | "all">("grouped");
   const [lastProducts, setLastProducts] = useState<Product[]>([]);
   const [totals, setTotals] = useState<{ turns: number; elapsed: number; prompt: number; output: number; total: number; cost: number; wsTurns: number; wsCost: number; wsTokens: number }>({
     turns: 0, elapsed: 0, prompt: 0, output: 0, total: 0, cost: 0, wsTurns: 0, wsCost: 0, wsTokens: 0,
@@ -315,6 +371,13 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   const [copyAllLabel, setCopyAllLabel] = useState("คัดลอกแชททั้งหมด");
   const historyRef = useRef<{ role: "user" | "model"; text: string }[]>([]);
   const msgsRef = useRef<HTMLDivElement>(null);
+  // ── Buffer mode state — ใช้ระบบ buffer เหมือนลูกค้าจริง ──
+  const [bufferConfig, setBufferConfig] = useState<{ enabled: boolean; window_ms: number; max_messages: number } | null>(null);
+  const [isBuffering, setIsBuffering] = useState(false);
+  const [bufferedCount, setBufferedCount] = useState(0);
+  const bufferTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bufferedMessagesRef = useRef<string[]>([]); // messages ที่กำลัง buffer (ยังไม่ส่ง bot)
+  const bufferSpinnerIdRef = useRef<number | null>(null); // id ของ spinner msg ใน UI
   // ── Right panel tab + all-sessions stats ──
   const [rightTab, setRightTab] = useState<"session" | "all">("session");
   const [allStats, setAllStats] = useState<{
@@ -396,6 +459,15 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       setAssignedAdmin(null);
       setAssignedAdminName(null);
       setAssignmentReason(null);
+      // ⚡ เคลียร์ buffer state เมื่อเปลี่ยน session (กันข้อความ session เก่า ปน session ใหม่)
+      if (bufferTimerRef.current) {
+        clearTimeout(bufferTimerRef.current);
+        bufferTimerRef.current = null;
+      }
+      bufferedMessagesRef.current = [];
+      bufferSpinnerIdRef.current = null;
+      setIsBuffering(false);
+      setBufferedCount(0);
       // ⚡ ถ้า session มี assigned_to อยู่แล้ว → ตั้ง handedOff
       if (d.assigned_to) {
         setHandedOff(true);
@@ -614,6 +686,11 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       .catch(() => setShops([]));
     loadSessions();
     loadAllStats();
+    // ⚡ โหลด buffer config จาก system config
+    fetch("/api/test-chat/buffer-status")
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((d) => setBufferConfig({ enabled: d.buffer_enabled, window_ms: d.buffer_window_ms, max_messages: d.buffer_max_messages }))
+      .catch(() => setBufferConfig({ enabled: false, window_ms: 6000, max_messages: 5 }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -643,16 +720,200 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       return;
     }
     setInput("");
-    setSending(true);
 
     const userMsg: Msg = { id: msgIdCounter++, role: "user", html: escapeHtml(message) };
+
+    // ⚡ Buffer mode — ใช้ระบบ buffer เหมือนลูกค้าจริง
+    // ถ้า buffer เปิดอยู่และมี session → เข้า buffer flow (ไม่ส่ง bot ทันที)
+    // ⚡ สำคัญ: buffer mode ไม่ล็อค input — ให้พิมพ์ต่อได้เลย
+    if (bufferConfig?.enabled && currentSessionId) {
+      // เก็บ message ไว้ใน buffer ref (ยังไม่ push ลง historyRef — จะใส่ combined ตอน flush)
+      bufferedMessagesRef.current.push(message);
+      saveMessageToSession("user", message);
+
+      // ⚡ แทรก user msg ก่อน spinner (ถ้ามี) — ไม่งั้น b2 จะไปอยู่หลัง spinner
+      // ตอนสด: [b1, spinner, b2] ← ผิด → แก้เป็น [b1, b2, spinner] ← ถูก
+      const spinnerId = bufferSpinnerIdRef.current;
+      if (spinnerId !== null) {
+        setMessages((prev) => {
+          const spinnerIdx = prev.findIndex((m) => m.id === spinnerId);
+          if (spinnerIdx === -1) return [...prev, userMsg];
+          const next = [...prev];
+          next.splice(spinnerIdx, 0, userMsg);
+          return next;
+        });
+      } else {
+        setMessages((prev) => [...prev, userMsg]);
+      }
+
+      // สร้าง/อัปเดต buffering indicator
+      if (bufferSpinnerIdRef.current === null) {
+        const bufMsg: Msg = {
+          id: msgIdCounter++,
+          role: "bot",
+          html: `<div style="color:#6366f1;font-size:13px">⏳ <span class="tc-spinner"></span>กำลัง buffer ข้อความ... (1 ข้อความ)</div>`,
+        };
+        bufferSpinnerIdRef.current = bufMsg.id;
+        setMessages((prev) => [...prev, bufMsg]);
+      } else {
+        const count = bufferedMessagesRef.current.length;
+        setMessages((prev) => prev.map((m) => m.id === bufferSpinnerIdRef.current ? {
+          ...m,
+          html: `<div style="color:#6366f1;font-size:13px">⏳ <span class="tc-spinner"></span>กำลัง buffer ข้อความ... (${count} ข้อความ)</div>`,
+        } : m));
+      }
+
+      // ส่งไป buffer endpoint
+      try {
+        const br = await fetch("/api/test-chat/buffer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: currentSessionId, message, shop, platform: "shopee" }),
+        });
+        const bj = await br.json().catch(() => ({}));
+
+        if (bj.status === "buffer_disabled") {
+          // buffer ถูกปิดระหว่างทาง → flush ทันที
+          await flushBuffer();
+          return;
+        }
+
+        setBufferedCount(bj.buffered_count || bufferedMessagesRef.current.length);
+        setIsBuffering(true);
+
+        // ถ้าครบ max → flush ทันที
+        if (bj.should_flush) {
+          await flushBuffer();
+          return;
+        }
+
+        // รีเซ็ต debounce timer
+        if (bufferTimerRef.current) clearTimeout(bufferTimerRef.current);
+        bufferTimerRef.current = setTimeout(() => {
+          flushBuffer();
+        }, bufferConfig.window_ms);
+
+        // ⚡ ไม่ setSending(false) เพราะไม่ได้ set true ใน buffer mode
+        // input ไม่ถูกล็อค → พิมพ์ต่อได้เลย
+      } catch (err) {
+        console.error("[buffer] send error:", err);
+        await flushBuffer();
+      }
+      return;
+    }
+
+    // ── Normal flow (ไม่มี buffer) — ส่ง bot ทันทีเหมือนเดิม ──
+    setSending(true); // ⚡ ล็อค input เฉพาะ normal mode (รอ bot ตอบ)
     const spinnerMsg: Msg = { id: msgIdCounter++, role: "bot", html: '<span class="tc-spinner"></span>กำลังคิด...' };
-    setMessages((prev) => [...prev, userMsg, spinnerMsg]);
+    setMessages((prev) => [...prev, spinnerMsg]);
     const priorHistory = historyRef.current.slice(-10).map((h) => ({ role: h.role, text: h.text }));
     historyRef.current.push({ role: "user", text: message });
     saveMessageToSession("user", message);
 
     try {
+      // ⚡ Step 1: Check trigger ก่อน (เหมือน bot-worker)
+      let triggerMatched: { name: string; action: string; bot_template?: string; topic?: string } | null = null;
+      try {
+        const tr = await fetch("/api/triggers/match", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message, shop_id: shop, platform: "shopee" }),
+        });
+        const tj = await tr.json().catch(() => ({}));
+        console.log("[TRIGGER-CHECK] response:", tr.status, tj);
+        if (tj?.matched && tj?.trigger) {
+          triggerMatched = tj.trigger;
+          toast.info(`⚡ trigger: ${tj.trigger.name} → ${tj.trigger.action}`);
+        }
+      } catch (err) {
+        console.error("[TRIGGER-CHECK] error:", err);
+      }
+
+      // ⚡ Step 2: ถ้า trigger action = handoff_admin → ส่งต่อแอดมินเลย ไม่เรียก bot
+      if (triggerMatched && triggerMatched.action === "handoff_admin") {
+        // เรียก handoff API (simulate mode)
+        let adminName = "";
+        let assignReason = triggerMatched.name;
+        if (currentSessionId) {
+          try {
+            const hr = await fetch("/api/admin/conversations/bot-handoff", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                conversation_id: currentSessionId,
+                shop_id: shop,
+                platform: "shopee",
+                reason: triggerMatched.name,
+                simulate: true,
+              }),
+            });
+            const hj = await hr.json().catch(() => ({}));
+            if (hj?.assigned_to_name) adminName = hj.assigned_to_name;
+            if (hj?.assignment_reason) assignReason = hj.assignment_reason;
+          } catch {}
+        }
+        const handoffText = `🔀 ส่งต่อแอดมิน${adminName ? `: ${adminName}` : ""}\nเหตุผล: ${assignReason}`;
+        setHandedOff(true);
+        setAssignedAdmin(null);
+        setAssignedAdminName(adminName || null);
+        setAssignmentReason(assignReason);
+        toast.success(handoffText);
+        setMessages((prev) =>
+          prev.map((m) => (m.id === spinnerMsg.id ? {
+            ...m,
+            html: `<div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:8px 12px;color:#6366f1;font-size:13px">⚡ trigger: ${escapeHtml(triggerMatched!.name)} → 🔀 ส่งต่อแอดมิน${adminName ? `: <b>${escapeHtml(adminName)}</b>` : ""}<br><span style="font-size:11px;opacity:0.7">เหตุผล: ${escapeHtml(assignReason)}</span></div>`,
+            stats: {
+              source: "trigger_handoff",
+              handoff_to_admin: true,
+              handoff_reason: assignReason,
+              routing_decision: { path: "handoff", trigger_matched: triggerMatched.name, assigned_admin_name: adminName },
+            } as MsgStats,
+            isGroupLast: true,
+          } : m))
+        );
+        historyRef.current.push({ role: "model", text: handoffText });
+        saveMessageToSession("model", handoffText);
+        setSending(false);
+        return;
+      }
+
+      // ⚡ Step 3: ถ้า trigger action = bot_answer และมี bot_template → ใช้ template ตอบเลย ไม่เรียก bot
+      if (triggerMatched && triggerMatched.action === "bot_answer" && triggerMatched.bot_template) {
+        const templateText = triggerMatched.bot_template;
+        const segments = splitAnswerSegments(templateText);
+        const bubbles = segments.length > 0 ? segments : [templateText];
+        historyRef.current.push({ role: "model", text: templateText });
+        const stats: MsgStats = {
+          source: "trigger_bot_answer",
+          routing_decision: { path: "bot_reply", trigger_matched: triggerMatched.name },
+        };
+        setMessages((prev) => {
+          const next = [...prev];
+          const idx = next.findIndex((m) => m.id === spinnerMsg.id);
+          if (idx === -1) return prev;
+          next[idx] = {
+            ...next[idx],
+            html: formatAnswer(bubbles[0]),
+            raw: bubbles[0],
+            stats,
+            ...(bubbles.length === 1 ? { isGroupLast: true } : {}),
+          };
+          const extraMsgs: Msg[] = bubbles.slice(1).map((seg, si) => ({
+            id: msgIdCounter++,
+            role: "bot",
+            html: formatAnswer(seg),
+            raw: seg,
+            stats,
+            ...(si === bubbles.length - 2 ? { isGroupLast: true } : {}),
+          }));
+          return [...next, ...extraMsgs];
+        });
+        saveMessageToSession("model", templateText, stats);
+        setSending(false);
+        return;
+      }
+
+      // ⚡ Step 4: ปกติ — ส่งให้ bot
       const payload: Record<string, unknown> = { message, limit, history: priorHistory };
       if (shop) payload.shop = shop;
       // ⚡ ส่ง conversation_id (ใช้ session_id) + simulate_assignment เพื่อจำลองการจ่ายงาน
@@ -762,6 +1023,272 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         )
       );
     } finally {
+      setSending(false);
+      inputRef.current?.focus();
+    }
+  }
+
+  // ── Flush buffer — รวมข้อความที่ buffer ไว้ → ส่ง bot → แสดงคำตอบ ──
+  async function flushBuffer() {
+    if (bufferTimerRef.current) {
+      clearTimeout(bufferTimerRef.current);
+      bufferTimerRef.current = null;
+    }
+
+    const spinnerId = bufferSpinnerIdRef.current;
+    const msgs = bufferedMessagesRef.current;
+    if (msgs.length === 0) {
+      if (spinnerId !== null) {
+        setMessages((prev) => prev.filter((m) => m.id !== spinnerId));
+      }
+      bufferSpinnerIdRef.current = null;
+      setIsBuffering(false);
+      setBufferedCount(0);
+      setSending(false);
+      return;
+    }
+
+    const combinedText = msgs.join(" ");
+    bufferedMessagesRef.current = [];
+    setSending(true);
+
+    // เปลี่ยน spinner เป็น "กำลังคิด..."
+    if (spinnerId !== null) {
+      setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
+        ...m,
+        html: `<span class="tc-spinner"></span>กำลังคิด... (รวม ${msgs.length} ข้อความ)`,
+      } : m));
+    }
+
+    const priorHistory = historyRef.current.slice(-10).map((h) => ({ role: h.role, text: h.text }));
+
+    try {
+      // ⚡ Check trigger บน combined message (เหมือน bot-worker ตอน flush)
+      let triggerMatched: { name: string; action: string; bot_template?: string; topic?: string } | null = null;
+      try {
+        const tr = await fetch("/api/triggers/match", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: combinedText, shop_id: shop, platform: "shopee" }),
+        });
+        const tj = await tr.json().catch(() => ({}));
+        if (tj?.matched && tj?.trigger) {
+          triggerMatched = tj.trigger;
+          toast.info(`⚡ trigger: ${tj.trigger.name} → ${tj.trigger.action} (จาก ${msgs.length} ข้อความรวม)`);
+        }
+      } catch (err) {
+        console.error("[TRIGGER-CHECK] error:", err);
+      }
+
+      // ⚡ trigger handoff_admin → ส่งต่อแอดมิน
+      if (triggerMatched && triggerMatched.action === "handoff_admin") {
+        let adminName = "";
+        let assignReason = triggerMatched.name;
+        if (currentSessionId) {
+          try {
+            const hr = await fetch("/api/admin/conversations/bot-handoff", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                conversation_id: currentSessionId,
+                shop_id: shop,
+                platform: "shopee",
+                reason: triggerMatched.name,
+                simulate: true,
+              }),
+            });
+            const hj = await hr.json().catch(() => ({}));
+            if (hj?.assigned_to_name) adminName = hj.assigned_to_name;
+            if (hj?.assignment_reason) assignReason = hj.assignment_reason;
+          } catch {}
+        }
+        const handoffText = `🔀 ส่งต่อแอดมิน${adminName ? `: ${adminName}` : ""}\nเหตุผล: ${assignReason}`;
+        setHandedOff(true);
+        setAssignedAdmin(null);
+        setAssignedAdminName(adminName || null);
+        setAssignmentReason(assignReason);
+        toast.success(handoffText);
+        historyRef.current.push({ role: "user", text: combinedText });
+        historyRef.current.push({ role: "model", text: handoffText });
+        // ⚡ ไม่ save combinedText ซ้ำ — b1, b2 ถูก save ไปแล้วตอนพิมพ์ (saveMessageToSession ใน buffer flow)
+        saveMessageToSession("model", handoffText);
+        setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
+          ...m,
+          html: `<div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:8px 12px;color:#6366f1;font-size:13px">⚡ trigger: ${escapeHtml(triggerMatched!.name)} → 🔀 ส่งต่อแอดมิน${adminName ? `: <b>${escapeHtml(adminName)}</b>` : ""}<br><span style="font-size:11px;opacity:0.7">เหตุผล: ${escapeHtml(assignReason)}</span><br><span style="font-size:11px;opacity:0.5">รวมจาก ${msgs.length} ข้อความ</span></div>`,
+          stats: {
+            source: "trigger_handoff",
+            handoff_to_admin: true,
+            handoff_reason: assignReason,
+            routing_decision: { path: "handoff", trigger_matched: triggerMatched.name, assigned_admin_name: adminName },
+          } as MsgStats,
+          isGroupLast: true,
+        } : m));
+        bufferSpinnerIdRef.current = null;
+        setIsBuffering(false);
+        setBufferedCount(0);
+        setSending(false);
+        return;
+      }
+
+      // ⚡ trigger bot_answer + bot_template → ใช้ template
+      if (triggerMatched && triggerMatched.action === "bot_answer" && triggerMatched.bot_template) {
+        const templateText = triggerMatched.bot_template;
+        const segments = splitAnswerSegments(templateText);
+        const bubbles = segments.length > 0 ? segments : [templateText];
+        historyRef.current.push({ role: "user", text: combinedText });
+        historyRef.current.push({ role: "model", text: templateText });
+        const stats: MsgStats = {
+          source: "trigger_bot_answer",
+          routing_decision: { path: "bot_reply", trigger_matched: triggerMatched.name },
+        };
+        setMessages((prev) => {
+          const next = [...prev];
+          const idx = next.findIndex((m) => m.id === spinnerId);
+          if (idx === -1) return prev;
+          next[idx] = {
+            ...next[idx],
+            html: formatAnswer(bubbles[0]),
+            raw: bubbles[0],
+            stats,
+            ...(bubbles.length === 1 ? { isGroupLast: true } : {}),
+          };
+          const extraMsgs: Msg[] = bubbles.slice(1).map((seg, si) => ({
+            id: msgIdCounter++,
+            role: "bot",
+            html: formatAnswer(seg),
+            raw: seg,
+            stats,
+            ...(si === bubbles.length - 2 ? { isGroupLast: true } : {}),
+          }));
+          return [...next, ...extraMsgs];
+        });
+        // ⚡ ไม่ save combinedText ซ้ำ — b1, b2 ถูก save ไปแล้วตอนพิมพ์
+        saveMessageToSession("model", templateText, stats);
+        bufferSpinnerIdRef.current = null;
+        setIsBuffering(false);
+        setBufferedCount(0);
+        setSending(false);
+        return;
+      }
+
+      // ⚡ ไม่ match trigger → flush ผ่าน API (ส่ง combined ไป bot)
+      const fr = await fetch("/api/test-chat/flush", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: currentSessionId,
+          shop,
+          platform: "shopee",
+          history: priorHistory,
+          limit,
+        }),
+      });
+      const fj = await fr.json().catch(() => ({}));
+
+      if (fj.status === "empty") {
+        if (spinnerId !== null) setMessages((prev) => prev.filter((m) => m.id !== spinnerId));
+        bufferSpinnerIdRef.current = null;
+        setIsBuffering(false);
+        setBufferedCount(0);
+        setSending(false);
+        return;
+      }
+
+      if (fj.status === "bot_error") {
+        const errText = `เกิดข้อผิดพลาด: ${fj.error || "ไม่ทราบสาเหตุ"}`;
+        setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
+          ...m, html: `<span style="color:#f87171">${escapeHtml(errText)}</span>`,
+        } : m));
+        bufferSpinnerIdRef.current = null;
+        setIsBuffering(false);
+        setBufferedCount(0);
+        setSending(false);
+        return;
+      }
+
+      // ⚡ ประมวลผล bot response (เหมือน normal flow)
+      const answerText = fj.answer || "(ไม่มีคำตอบ)";
+      const segments: string[] = Array.isArray(fj.answer_segments) && fj.answer_segments.length > 0
+        ? fj.answer_segments.map((s: string) => String(s).trim()).filter((s: string) => s.length > 0)
+        : splitAnswerSegments(answerText);
+      const bubbles = segments.length > 0 ? segments : [answerText];
+      historyRef.current.push({ role: "user", text: combinedText });
+      historyRef.current.push({ role: "model", text: answerText });
+      setLastProducts(fj.products || []);
+      const stats: MsgStats = {
+        elapsed: typeof fj.elapsed === "number" ? fj.elapsed : undefined,
+        usage: fj.usage || undefined,
+        cost: typeof fj.cost === "number" ? fj.cost : undefined,
+        model: fj.model,
+        source: fj.source,
+        intent: fj.intent || undefined,
+        timing: fj.timing || undefined,
+        retrieval_info: fj.retrieval_info || undefined,
+        web_search_used: fj.web_search_used === true,
+        web_search_reason: fj.web_search_reason || undefined,
+        web_search_model: fj.web_search_model || undefined,
+        steps: Array.isArray(fj.steps) ? fj.steps : undefined,
+        handoff_to_admin: fj.handoff_to_admin === true,
+        handoff_reason: fj.handoff_reason || undefined,
+        routing_decision: fj.routing_decision || undefined,
+      };
+      if (stats.handoff_to_admin) {
+        const adminName = (stats.routing_decision?.assigned_admin_name as string) || (stats.routing_decision?.assigned_admin as string) || null;
+        const reason = stats.handoff_reason || "unknown";
+        setHandedOff(true);
+        setAssignedAdmin(stats.routing_decision?.assigned_admin as string || null);
+        setAssignedAdminName(adminName);
+        setAssignmentReason(reason);
+        toast.success(`🔀 ส่งต่อแอดมิน${adminName ? `: ${adminName}` : ""}\nเหตุผล: ${reason}`);
+      } else if (stats.routing_decision?.trigger_matched) {
+        toast.info(`⚡ trigger: ${stats.routing_decision.trigger_matched}`);
+      }
+      setTotals((t) => ({
+        turns: t.turns + 1,
+        elapsed: t.elapsed + (stats.elapsed || 0),
+        prompt: t.prompt + (stats.usage?.prompt || 0),
+        output: t.output + (stats.usage?.output || 0),
+        total: t.total + (stats.usage?.total || 0),
+        cost: t.cost + (stats.cost || 0),
+        wsTurns: t.wsTurns + (stats.web_search_used ? 1 : 0),
+        wsCost: t.wsCost + (stats.web_search_used ? (stats.cost || 0) : 0),
+        wsTokens: t.wsTokens + (stats.web_search_used ? (stats.usage?.total || 0) : 0),
+      }));
+      setMessages((prev) => {
+        const next = [...prev];
+        const idx = next.findIndex((m) => m.id === spinnerId);
+        if (idx === -1) return prev;
+        next[idx] = {
+          ...next[idx],
+          html: formatAnswer(bubbles[0]),
+          raw: bubbles[0],
+          products: fj.products || [],
+          stats,
+          ...(bubbles.length === 1 ? { isGroupLast: true } : {}),
+        };
+        const extraMsgs: Msg[] = bubbles.slice(1).map((seg, si) => {
+          const isLast = si === bubbles.length - 2;
+          return {
+            id: msgIdCounter++,
+            role: "bot",
+            html: formatAnswer(seg),
+            raw: seg,
+            ...(isLast ? { isGroupLast: true, stats } : {}),
+          } as Msg;
+        });
+        next.splice(idx + 1, 0, ...extraMsgs);
+        return next;
+      });
+      // ⚡ ไม่ save combinedText ซ้ำ — b1, b2 ถูก save ไปแล้วตอนพิมพ์
+      saveMessageToSession("model", answerText, stats);
+    } catch {
+      setMessages((prev) => prev.map((m) =>
+        m.id === spinnerId ? { ...m, html: '<span style="color:#f87171">เกิดข้อผิดพลาดในการเชื่อมต่อ server</span>' } : m
+      ));
+    } finally {
+      bufferSpinnerIdRef.current = null;
+      setIsBuffering(false);
+      setBufferedCount(0);
       setSending(false);
       inputRef.current?.focus();
     }
@@ -1388,9 +1915,55 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             <aside className="hidden lg:flex w-96 shrink-0 flex-col border-l border-border bg-surface overflow-y-auto">
               <div className="flex items-center justify-between px-3 py-2.5 border-b border-border sticky top-0 bg-surface z-10">
                 <span className="text-xs font-semibold text-text-muted">Log / Process Detail</span>
-                <button onClick={() => setLogPanelOpen(false)} className="text-text-muted hover:text-text p-1">
-                  <X size={14} />
-                </button>
+                <div className="flex items-center gap-1">
+                  {/* Copy all logs button */}
+                  <button
+                    onClick={() => {
+                      const botMsgs = messages.filter((m) => m.role === "bot" && m.stats);
+                      if (botMsgs.length === 0) {
+                        toast.error("ยังไม่มี log ใน session นี้");
+                        return;
+                      }
+                      // รวม log ทุกคำถามเป็น text เดียว (รวม input/output ที่ปิดอยู่)
+                      const allLogs = botMsgs.map((m, i) => {
+                        const header = `\n${"=".repeat(60)}\n[${i + 1}/${botMsgs.length}] Question log\n${"=".repeat(60)}`;
+                        return header + "\n" + formatLogForCopy(m.stats!, m.raw || "");
+                      }).join("\n");
+                      const fullText = `=== Session Log (all ${botMsgs.length} questions) ===\nShop: ${shop || "—"}\nSession: ${currentSessionId || "—"}\nDate: ${new Date().toLocaleString("th-TH")}\n\n${allLogs}`;
+                      navigator.clipboard.writeText(fullText).then(() => {
+                        toast.success(`คัดลอก log ทั้งหมด ${botMsgs.length} คำถาม แล้ว`);
+                      }).catch(() => toast.error("คัดลอกไม่สำเร็จ"));
+                    }}
+                    className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded border border-border bg-surface-2 text-text-muted hover:text-brand hover:border-brand/40 transition-colors"
+                    title="คัดลอก log ทุกคำถามใน session นี้ (รวม input/output)"
+                  >
+                    <Copy size={11} /> กอปทั้งหมด
+                  </button>
+                  {/* Toggle: grouped (รายคำถาม) vs all (ทั้งหมด) */}
+                  <div className="flex items-center rounded-lg border border-border overflow-hidden">
+                    <button
+                      onClick={() => setLogViewMode("grouped")}
+                      className={`px-2 py-1 text-[10px] font-medium transition-colors ${
+                        logViewMode === "grouped" ? "bg-brand/10 text-brand" : "bg-surface-2 text-text-muted hover:text-text"
+                      }`}
+                      title="รวมหลาย bubble เป็น 1 entry ต่อคำถาม"
+                    >
+                      รายคำถาม
+                    </button>
+                    <button
+                      onClick={() => setLogViewMode("all")}
+                      className={`px-2 py-1 text-[10px] font-medium transition-colors ${
+                        logViewMode === "all" ? "bg-brand/10 text-brand" : "bg-surface-2 text-text-muted hover:text-text"
+                      }`}
+                      title="แสดงทุก bubble แยกกัน"
+                    >
+                      ทั้งหมด
+                    </button>
+                  </div>
+                  <button onClick={() => setLogPanelOpen(false)} className="text-text-muted hover:text-text p-1">
+                    <X size={14} />
+                  </button>
+                </div>
               </div>
               <div className="p-3 flex flex-col gap-3">
                 {/* Session stats */}
@@ -1408,58 +1981,110 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                   </div>
                 </div>
 
-                {/* Per-message log */}
-                {messages.filter((m) => m.role === "bot" && m.stats).map((m) => (
-                  <div
-                    key={m.id}
-                    className={`rounded-lg border p-2.5 cursor-pointer hover:border-brand/40 ${selectedLogMsg?.id === m.id ? "border-brand bg-brand/5" : "border-border bg-surface-2"}`}
-                    onClick={() => setSelectedLogMsg(selectedLogMsg?.id === m.id ? null : m)}
-                  >
-                    <div className="text-xs font-medium mb-1 truncate">{m.raw?.slice(0, 60) || "(bot)"}</div>
-                    <div className="flex flex-wrap gap-1 text-[10px]">
-                      <span className="px-1.5 py-0.5 rounded bg-surface-3">⏱ {fmtElapsed(m.stats!.elapsed)}</span>
-                      <span className="px-1.5 py-0.5 rounded bg-surface-3">🎯 {m.stats!.intent?.intent || "—"}</span>
-                      {m.stats!.web_search_used && <span className="px-1.5 py-0.5 rounded bg-brand/10 text-brand">🔍 search</span>}
-                    </div>
-                    {selectedLogMsg?.id === m.id && m.stats!.steps && (
-                      <div className="mt-2 flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
-                        {m.stats!.steps.map((s, i) => (
-                          <div key={i} className="text-[10px] rounded bg-surface-3 p-2 border border-border/50">
-                            {/* Step header */}
-                            <div className="flex items-center justify-between">
-                              <span className="font-semibold text-text">{s.name}</span>
-                              <span className="text-text-muted">{s.model}</span>
-                            </div>
-                            <div className="text-text-muted mt-0.5">
-                              tokens: in={s.tokens_in} out={s.tokens_out} · {s.time_s}s · ${s.cost_usd.toFixed(6)} (฿{s.cost_thb})
-                            </div>
-                            {/* Input — collapsible */}
-                            {s.input && Object.keys(s.input).length > 0 && (
-                              <details className="mt-1.5">
-                                <summary className="cursor-pointer text-text-muted hover:text-text select-none">📥 Input</summary>
-                                <pre className="mt-1 text-[9px] text-text-muted whitespace-pre-wrap break-all max-h-40 overflow-y-auto bg-surface rounded p-1.5">
-                                  {JSON.stringify(s.input, null, 1)}
-                                </pre>
-                              </details>
-                            )}
-                            {/* Output — collapsible */}
-                            {s.output && Object.keys(s.output).length > 0 && (
-                              <details className="mt-1">
-                                <summary className="cursor-pointer text-text-muted hover:text-text select-none">📤 Output</summary>
-                                <pre className="mt-1 text-[9px] text-text-muted whitespace-pre-wrap break-all max-h-40 overflow-y-auto bg-surface rounded p-1.5">
-                                  {JSON.stringify(s.output, null, 1)}
-                                </pre>
-                              </details>
-                            )}
-                          </div>
-                        ))}
+                {/* Per-message log — grouped (รายคำถาม) หรือ all (ทั้งหมด) */}
+                {(() => {
+                  // Group consecutive bot messages (1 คำตอบบอท = 1 กลุ่ม อาจมีหลาย bubble)
+                  const botGroups: Msg[][] = [];
+                  let curGroup: Msg[] = [];
+                  for (const m of messages) {
+                    if (m.role === "bot") {
+                      curGroup.push(m);
+                    } else {
+                      if (curGroup.length > 0) { botGroups.push(curGroup); curGroup = []; }
+                    }
+                  }
+                  if (curGroup.length > 0) botGroups.push(curGroup);
+
+                  // grouped mode: 1 entry ต่อกลุ่ม (ใช้ stats ของ bubble แรกที่มี stats)
+                  // all mode: ทุก bubble ที่มี stats แสดงแยก
+                  const logEntries: { msg: Msg; bubbleCount: number; groupIdx: number }[] = 
+                    logViewMode === "grouped"
+                      ? botGroups.map((g, gi) => ({
+                          msg: g.find((m) => m.stats) || g[0],
+                          bubbleCount: g.length,
+                          groupIdx: gi,
+                        })).filter((e) => e.msg && e.msg.stats)
+                      : messages
+                          .filter((m) => m.role === "bot" && m.stats)
+                          .map((m, i) => ({ msg: m, bubbleCount: 1, groupIdx: i }));
+
+                  if (logEntries.length === 0) {
+                    return (
+                      <div className="text-xs text-text-muted text-center py-4">ยังไม่มี log — ส่งคำถามเพื่อเริ่ม</div>
+                    );
+                  }
+
+                  return logEntries.map(({ msg: m, bubbleCount, groupIdx }) => (
+                    <div
+                      key={m.id}
+                      className={`rounded-lg border p-2.5 cursor-pointer hover:border-brand/40 ${selectedLogMsg?.id === m.id ? "border-brand bg-brand/5" : "border-border bg-surface-2"}`}
+                      onClick={() => setSelectedLogMsg(selectedLogMsg?.id === m.id ? null : m)}
+                    >
+                      <div className="text-xs font-medium mb-1 truncate">
+                        {m.raw?.slice(0, 60) || "(bot)"}
+                        {bubbleCount > 1 && (
+                          <span className="ml-1.5 text-[9px] text-brand bg-brand/10 px-1 py-0.5 rounded">
+                            {bubbleCount} bubbles
+                          </span>
+                        )}
                       </div>
-                    )}
-                  </div>
-                ))}
-                {messages.filter((m) => m.role === "bot" && m.stats).length === 0 && (
-                  <div className="text-xs text-text-muted text-center py-4">ยังไม่มี log — ส่งคำถามเพื่อเริ่ม</div>
-                )}
+                      <div className="flex flex-wrap gap-1 text-[10px]">
+                        <span className="px-1.5 py-0.5 rounded bg-surface-3">⏱ {fmtElapsed(m.stats!.elapsed)}</span>
+                        <span className="px-1.5 py-0.5 rounded bg-surface-3">🎯 {m.stats!.intent?.intent || "—"}</span>
+                        {m.stats!.web_search_used && <span className="px-1.5 py-0.5 rounded bg-brand/10 text-brand">🔍 search</span>}
+                      </div>
+                      {selectedLogMsg?.id === m.id && m.stats!.steps && (
+                        <div className="mt-2 flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
+                          {/* Copy log button */}
+                          <div className="flex justify-end">
+                            <button
+                              onClick={() => {
+                                const logText = formatLogForCopy(m.stats!, m.raw || "");
+                                navigator.clipboard.writeText(logText).then(() => {
+                                  toast.success("คัดลอก log แล้ว");
+                                }).catch(() => toast.error("คัดลอกไม่สำเร็จ"));
+                              }}
+                              className="inline-flex items-center gap-1 px-2 py-1 text-[10px] rounded border border-border bg-surface-2 text-text-muted hover:text-text hover:border-brand/40 transition-colors"
+                              title="คัดลอก log ทั้งหมด"
+                            >
+                              <Copy size={11} /> คัดลอก log
+                            </button>
+                          </div>
+                          {m.stats!.steps.map((s, i) => (
+                            <div key={i} className="text-[10px] rounded bg-surface-3 p-2 border border-border/50">
+                              {/* Step header */}
+                              <div className="flex items-center justify-between">
+                                <span className="font-semibold text-text">{s.name}</span>
+                                <span className="text-text-muted">{s.model}</span>
+                              </div>
+                              <div className="text-text-muted mt-0.5">
+                                tokens: in={s.tokens_in} out={s.tokens_out} · {s.time_s}s · ${s.cost_usd.toFixed(6)} (฿{s.cost_thb})
+                              </div>
+                              {/* Input — collapsible */}
+                              {s.input && Object.keys(s.input).length > 0 && (
+                                <details className="mt-1.5">
+                                  <summary className="cursor-pointer text-text-muted hover:text-text select-none">📥 Input</summary>
+                                  <pre className="mt-1 text-[9px] text-text-muted whitespace-pre-wrap break-all max-h-40 overflow-y-auto bg-surface rounded p-1.5">
+                                    {JSON.stringify(s.input, null, 1)}
+                                  </pre>
+                                </details>
+                              )}
+                              {/* Output — collapsible */}
+                              {s.output && Object.keys(s.output).length > 0 && (
+                                <details className="mt-1">
+                                  <summary className="cursor-pointer text-text-muted hover:text-text select-none">📤 Output</summary>
+                                  <pre className="mt-1 text-[9px] text-text-muted whitespace-pre-wrap break-all max-h-40 overflow-y-auto bg-surface rounded p-1.5">
+                                    {JSON.stringify(s.output, null, 1)}
+                                  </pre>
+                                </details>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ));
+                })()}
               </div>
             </aside>
           )}

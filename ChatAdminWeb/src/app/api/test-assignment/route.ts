@@ -29,7 +29,7 @@
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 import { NextRequest } from "next/server";
-import { requireDev } from "@/backend/middleware/authorize";
+import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { getSystemConfig, updateSystemConfig } from "@/backend/service/systemConfigService";
@@ -64,6 +64,9 @@ async function callBot(params: {
   retrieval_info?: unknown;
   web_search_used?: boolean;
   web_search_reason?: string;
+  // ⚡ handoff fields จาก bot (tax_invoice, warranty claim, etc.)
+  handoff_to_admin?: boolean;
+  handoff_reason?: string;
 }> {
   const { platform, message, history, shopId, shopName, itemId } = params;
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
@@ -115,6 +118,9 @@ async function callBot(params: {
         retrieval_info: data.retrieval_info,
         web_search_used: data.web_search_used === true,
         web_search_reason: data.web_search_reason,
+        // ⚡ handoff fields
+        handoff_to_admin: data.handoff_to_admin === true,
+        handoff_reason: data.handoff_reason,
       };
     } catch (err) {
       // ถ้า error เป็น 429-related → retry
@@ -132,7 +138,7 @@ async function callBot(params: {
 // ─── GET ──────────────────────────────────────────────────
 
 export async function GET(req: NextRequest) {
-  const r = await requireDev(req);
+  const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
   const url = new URL(req.url);
@@ -338,6 +344,14 @@ interface ReplayQa {
   user_order_sn?: string;
   user_notification_text?: string;
   user_table?: { headers?: string[]; rows?: string[][] };
+  // ⚡ bundle_message — sub-messages หลายตัว
+  user_bundle?: {
+    message_type: string;
+    text: string;
+    media?: { type: string; url?: string; thumb_url?: string };
+    product_ref?: { item_id: string };
+    products?: { item_id: string; name: string; price?: number; image?: string; url?: string }[];
+  }[];
   // bot reply
   trigger_name?: string;
   trigger_action?: string;
@@ -345,6 +359,8 @@ interface ReplayQa {
   bot_source?: string;
   bot_model?: string;
   bot_elapsed?: number;
+  // ⚡ bot products (item cards ที่บอทแนะนำ)
+  bot_products?: { item_id: string; name: string; price?: number; image?: string; url?: string }[];
   // ⚡ pipeline info — intent/rag/llm2/search counts
   bot_intent?: unknown;
   bot_retrieval_info?: unknown;
@@ -356,7 +372,7 @@ interface ReplayQa {
 }
 
 export async function POST(req: NextRequest) {
-  const r = await requireDev(req);
+  const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
   const body = await readJson<Record<string, unknown>>(req);
@@ -372,8 +388,9 @@ export async function POST(req: NextRequest) {
 
     // ── rate message ──
     if (body.action === "rate_message") {
-      const conversationId = body.conversation_id as string;
-      const messageId = body.message_id as string;
+      // 🔒 coerce เพื่อป้องกัน NoSQL injection
+      const conversationId = String(body.conversation_id ?? "");
+      const messageId = String(body.message_id ?? "");
       if (!conversationId || !messageId) return error("conversation_id + message_id required", 422);
       const ok = await testAssignmentService.rateMessage({
         conversationId,
@@ -393,7 +410,8 @@ export async function POST(req: NextRequest) {
 
     // ── rate conversation (ใหม่ — ทั้งแชท) ──
     if (body.action === "rate_conversation") {
-      const conversationId = body.conversation_id as string;
+      // 🔒 coerce เพื่อป้องกัน NoSQL injection
+      const conversationId = String(body.conversation_id ?? "");
       if (!conversationId) return error("conversation_id required", 422);
       const ok = await testAssignmentService.rateConversation({
         conversationId,
@@ -412,7 +430,8 @@ export async function POST(req: NextRequest) {
 
     // ── replay conversation ──
     if (body.action === "replay_conversation") {
-      const conversation_id = body.conversation_id as string;
+      // 🔒 coerce เพื่อป้องกัน NoSQL injection
+      const conversation_id = String(body.conversation_id ?? "");
       if (!conversation_id) return error("conversation_id required", 422);
 
       // ⚡ mode: "overwrite" (default) = ทำใหม่ทับ, "resume" = ข้ามถ้ามี result ครบแล้ว
@@ -504,6 +523,26 @@ export async function POST(req: NextRequest) {
             products.push(card);
           }
         }
+        // ⚡ แปลง bundle sub-messages → ส่งไป frontend
+        let userBundle: ReplayQa["user_bundle"];
+        if (p?.bundle && p.bundle.length > 0) {
+          userBundle = p.bundle.map((sub) => {
+            const subProducts: unknown[] = [];
+            if (sub.product_ref?.item_id) {
+              const prod = userProductMap.get(sub.product_ref.item_id);
+              if (prod && conv) {
+                subProducts.push(toProductCard(prod as Record<string, unknown>, platform as Platform));
+              }
+            }
+            return {
+              message_type: String(sub.message_type || "text"),
+              text: sub.text || "",
+              media: sub.media as { type: string; url?: string; thumb_url?: string } | undefined,
+              product_ref: sub.product_ref,
+              products: subProducts.length > 0 ? (subProducts as ReplayQa["user_products"]) : undefined,
+            };
+          });
+        }
         userParsedMap.set(doc.message_id, {
           user_message_type: p?.message_type,
           user_media: p?.media as ReplayQa["user_media"],
@@ -511,6 +550,7 @@ export async function POST(req: NextRequest) {
           user_order_sn: p?.order_sn,
           user_notification_text: p?.notification_text,
           user_table: p?.table as ReplayQa["user_table"],
+          user_bundle: userBundle,
         });
       }
 
@@ -603,6 +643,42 @@ export async function POST(req: NextRequest) {
           history.push({ role: "user", text: userText });
           history.push({ role: "model", text: botResp.answer });
 
+          // ⚡ เช็ค handoff_to_admin จาก bot (tax_invoice, warranty claim, etc.)
+          // ถ้า bot บอกให้ handoff → หยุด replay ที่นี่
+          if (botResp.handoff_to_admin) {
+            const handoff = await handoffService.handoffToAdmin({
+              conversationId: conversation_id,
+              shopId,
+              platform,
+              reason: botResp.handoff_reason || "bot handoff",
+            });
+            const agentId = handoff.assignedTo;
+            qa.push({
+              index: i,
+              message_id: msg.message_id,
+              user_text: userText,
+              ...userParsedMap.get(msg.message_id),
+              trigger_name: trigger?.name,
+              trigger_action: trigger?.action,
+              bot_reply: botResp.answer,
+              bot_source: botResp.source,
+              bot_model: botResp.model,
+              bot_elapsed: botResp.elapsed,
+              bot_products: (botResp.products as { item_id: string; name: string; price?: number; image?: string; url?: string }[]) || [],
+              bot_intent: botResp.intent,
+              bot_retrieval_info: botResp.retrieval_info,
+              bot_web_search_used: botResp.web_search_used,
+              bot_web_search_reason: botResp.web_search_reason,
+              status: agentId ? "handed_off" : "no_agent",
+              assigned_to: agentId,
+              detail: `bot handoff (${botResp.handoff_reason || "unknown"}) → ${handoff.assignmentReason} → ${agentId || "no agent"}`,
+            });
+            assignedTo = agentId;
+            finalStatus = agentId ? "handed_off" : "no_agent";
+            stopped = true;
+            break;
+          }
+
           qa.push({
             index: i,
             message_id: msg.message_id,
@@ -614,6 +690,7 @@ export async function POST(req: NextRequest) {
             bot_source: botResp.source,
             bot_model: botResp.model,
             bot_elapsed: botResp.elapsed,
+            bot_products: (botResp.products as { item_id: string; name: string; price?: number; image?: string; url?: string }[]) || [],
             bot_intent: botResp.intent,
             bot_retrieval_info: botResp.retrieval_info,
             bot_web_search_used: botResp.web_search_used,

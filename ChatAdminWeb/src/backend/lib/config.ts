@@ -7,6 +7,15 @@ function required(name: string, fallback: string): string {
   return v || fallback;
 }
 
+// Strict required — throws if env var is missing. Use for secrets.
+function requiredStrict(name: string): string {
+  const v = process.env[name]?.trim();
+  if (!v) {
+    throw new Error(`Required env var ${name} is not set — refusing to start with insecure default`);
+  }
+  return v;
+}
+
 // Build MongoDB URI from ADMIN_MONGO_* env vars (same logic as admin/db.py)
 function buildAdminMongoUri(): string {
   const directUri = process.env.ADMIN_MONGO_URI?.trim();
@@ -68,14 +77,15 @@ export const serverConfig = {
     testChatRatings: required("ADMIN_MONGO_COLLECTION_TEST_CHAT_RATINGS", "test_chat_ratings"),
     // ⚡ test_assignment — replay results + ratings (per-message + overall conversation)
     testAssignment: required("ADMIN_MONGO_COLLECTION_TEST_ASSIGNMENT", "test_assignment"),
+    // ⚡ buffer_messages — message buffering (debounce) ก่อนเข้า processMessage
+    bufferMessages: required("ADMIN_MONGO_COLLECTION_BUFFER_MESSAGES", "buffer_messages"),
   },
-  jwtSecret: required("ADMIN_JWT_SECRET", "dev-only-secret-change-me"),
+  jwtSecret: requiredStrict("ADMIN_JWT_SECRET"),
   jwtAlgo: "HS256" as const,
   sessionHours: parseInt(required("ADMIN_SESSION_TIMEOUT_HOURS", "8"), 10),
-  authTokenMinutes: parseInt(required("AUTH_TOKEN_EXPIRES_MINUTES", "15"), 10),
   cookieName: "cc_session",
   // Internal secret for Next.js -> Python chatbot calls (shared across all bots)
-  chatbotInternalSecret: required("CHATBOT_INTERNAL_SECRET", "dev-internal-secret-change-me"),
+  chatbotInternalSecret: requiredStrict("CHATBOT_INTERNAL_SECRET"),
   // Per-platform chatbot base URLs (3 separate FastAPI processes)
   // shopee  → CHATBOT_BASE_URL_SHOPEE (default 8010)
   // lazada  → CHATBOT_BASE_URL_LAZADA (default 8011)
