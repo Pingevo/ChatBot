@@ -6,7 +6,7 @@ import { Card } from "@/components/ui/Card";
 import { Loading } from "@/components/ui/Loading";
 import {
   RefreshCw, Sliders, Clock, MessageCircle, Save,
-  Check, AlertCircle, Info,
+  Check, AlertCircle, Info, GitBranch,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
 import { canEdit } from "@/lib/roles";
@@ -20,6 +20,9 @@ interface AdminConfig {
   bot_buffer_enabled: boolean;
   bot_buffer_window_ms: number;
   bot_buffer_max_messages: number;
+  workflow_enabled: boolean;
+  workflow_priority: string;
+  workflow_run_timeout_ms: number;
   updated_by: string;
   updated_at: string;
 }
@@ -142,6 +145,9 @@ export default function AdminConfigPage() {
   const [bufferEnabled, setBufferEnabled] = useState(false);
   const [bufferWindow, setBufferWindow] = useState(6000);
   const [bufferMaxMsgs, setBufferMaxMsgs] = useState(5);
+  const [workflowEnabled, setWorkflowEnabled] = useState(false);
+  const [workflowPriority, setWorkflowPriority] = useState("workflow_first");
+  const [workflowTimeout, setWorkflowTimeout] = useState(1800000);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -151,6 +157,9 @@ export default function AdminConfigPage() {
       setBufferEnabled(r.data.config.bot_buffer_enabled);
       setBufferWindow(r.data.config.bot_buffer_window_ms);
       setBufferMaxMsgs(r.data.config.bot_buffer_max_messages);
+      setWorkflowEnabled(r.data.config.workflow_enabled ?? false);
+      setWorkflowPriority(r.data.config.workflow_priority ?? "workflow_first");
+      setWorkflowTimeout(r.data.config.workflow_run_timeout_ms ?? 1800000);
     } catch (err) {
       catchError(err, "โหลดการตั้งค่าไม่สำเร็จ");
     } finally {
@@ -166,7 +175,9 @@ export default function AdminConfigPage() {
   const hasChanges = config
     ? bufferEnabled !== config.bot_buffer_enabled ||
       bufferWindow !== config.bot_buffer_window_ms ||
-      bufferMaxMsgs !== config.bot_buffer_max_messages
+      bufferMaxMsgs !== config.bot_buffer_max_messages ||
+      workflowPriority !== (config.workflow_priority ?? "workflow_first") ||
+      workflowTimeout !== (config.workflow_run_timeout_ms ?? 1800000)
     : false;
 
   async function handleSave() {
@@ -182,6 +193,8 @@ export default function AdminConfigPage() {
         bot_buffer_enabled: bufferEnabled,
         bot_buffer_window_ms: bufferWindow,
         bot_buffer_max_messages: bufferMaxMsgs,
+        workflow_priority: workflowPriority,
+        workflow_run_timeout_ms: workflowTimeout,
       });
       setConfig(r.data.config);
       toast.success("บันทึกการตั้งค่าแล้ว");
@@ -192,7 +205,7 @@ export default function AdminConfigPage() {
     }
   }
 
-  async function handleQuickToggle(key: "bot_buffer_enabled", value: boolean) {
+  async function handleQuickToggle(key: "bot_buffer_enabled" | "workflow_enabled", value: boolean) {
     // Toggle แบบกดแล้วบันทึกทันที (ไม่ต้องกดปุ่มบันทึก)
     setSaving(true);
     try {
@@ -201,10 +214,13 @@ export default function AdminConfigPage() {
       });
       setConfig(r.data.config);
       setBufferEnabled(r.data.config.bot_buffer_enabled);
-      toast.success(`${value ? "เปิด" : "ปิด"} Buffering แล้ว`);
+      setWorkflowEnabled(r.data.config.workflow_enabled ?? false);
+      const label = key === "workflow_enabled" ? "Workflow Engine" : "Buffering";
+      toast.success(`${value ? "เปิด" : "ปิด"} ${label} แล้ว`);
     } catch (err) {
       catchError(err, "บันทึกไม่สำเร็จ");
-      setBufferEnabled(!value); // revert
+      if (key === "bot_buffer_enabled") setBufferEnabled(!value);
+      if (key === "workflow_enabled") setWorkflowEnabled(!value);
     } finally {
       setSaving(false);
     }
@@ -336,6 +352,84 @@ export default function AdminConfigPage() {
           </div>
         </ConfigSection>
 
+        {/* ─── Section: Workflow Engine ─── */}
+        <ConfigSection
+          icon={<GitBranch size={16} />}
+          title="Workflow Engine (Flow Builder)"
+          description="สวิตช์หลักเปิด/ปิดระบบ workflow — เมื่อเปิด ข้อความเข้าจะผ่าน workflow engine ก่อน trigger/bot"
+          badge={workflowEnabled ? "เปิดอยู่" : "ปิดอยู่"}
+        >
+          {/* Toggle */}
+          <div className="flex items-center justify-between py-2 px-3 rounded-lg bg-surface-2">
+            <div className="flex-1 mr-3">
+              <div className="text-sm font-medium text-text">เปิด Workflow Engine</div>
+              <div className="text-[11px] text-text-muted mt-0.5">
+                เปิดใช้งานระบบ flow builder — ข้อความเข้าจะ match workflow ก่อน (หรือหลัง trigger ตาม priority)
+              </div>
+            </div>
+            <ToggleSwitch
+              enabled={workflowEnabled}
+              onChange={() => editable && handleQuickToggle("workflow_enabled", !workflowEnabled)}
+              disabled={!editable || saving}
+            />
+          </div>
+
+          {/* Priority select */}
+          <div className={`py-3 px-3 rounded-lg bg-surface-2 space-y-2 ${!workflowEnabled ? "pointer-events-none opacity-60" : ""}`}>
+            <div className="flex items-center gap-2">
+              <GitBranch size={13} className="text-text-muted" />
+              <span className="text-sm font-medium text-text">ลำดับการทำงาน</span>
+            </div>
+            <p className="text-[11px] text-text-muted">
+              เมื่อข้อความเข้า — workflow และ trigger ตรวจสอบตามลำดับนี้
+            </p>
+            <select
+              value={workflowPriority}
+              onChange={(e) => setWorkflowPriority(e.target.value)}
+              disabled={!editable || !workflowEnabled}
+              className="w-full h-9 px-3 rounded-lg border border-border bg-surface text-text text-sm focus:outline-none focus:ring-2 focus:ring-brand/30"
+            >
+              <option value="workflow_first">Workflow ก่อน → ถ้าไม่ match ไป trigger</option>
+              <option value="trigger_first">Trigger ก่อน → ถ้าไม่ match ไป workflow</option>
+              <option value="both">ทั้งสองอย่าง (workflow + trigger)</option>
+            </select>
+          </div>
+
+          {/* Timeout slider */}
+          <div className={`py-3 px-3 rounded-lg bg-surface-2 space-y-2 ${!workflowEnabled ? "pointer-events-none opacity-60" : ""}`}>
+            <div className="flex items-center gap-2">
+              <Clock size={13} className="text-text-muted" />
+              <span className="text-sm font-medium text-text">Timeout รอ reply (นาที)</span>
+            </div>
+            <p className="text-[11px] text-text-muted">
+              ถ้า flow รอ reply เกินเวลานี้ → ยกเลิก run อัตโนมัติ (ใช้กับ legacy run ที่ไม่มี per-node timeout)
+            </p>
+            <MinimalSlider
+              value={workflowTimeout}
+              min={60000}
+              max={3600000}
+              step={60000}
+              onChange={setWorkflowTimeout}
+              disabled={!editable || !workflowEnabled}
+              format={(v) => `${Math.round(v / 60000)} นาที`}
+            />
+            <div className="flex justify-between text-[10px] text-text-subtle">
+              <span>1 นาที</span>
+              <span>60 นาที</span>
+            </div>
+          </div>
+
+          {/* Info box */}
+          <div className="flex items-start gap-2 rounded-lg bg-blue-500/5 border border-blue-500/15 p-3">
+            <Info size={14} className="text-blue-400 flex-shrink-0 mt-0.5" />
+            <div className="text-[11px] text-text-muted leading-relaxed">
+              <span className="text-blue-400 font-medium">วิธีใช้:</span> สร้าง workflow ในหน้า Workflows →
+              กำหนด trigger + flow → เปิดใช้งานที่นี่เพื่อให้ engine ทำงาน ·
+              ปิดได้ทุกเมื่อ — ข้อความจะกลับไป trigger/bot ตามปกติ
+            </div>
+          </div>
+        </ConfigSection>
+
         {/* ─── Save bar (sticky bottom) ─── */}
         {hasChanges && (
           <div className="sticky bottom-0 -mx-6 px-6 py-3 bg-surface border-t border-border flex items-center justify-between">
@@ -365,7 +459,7 @@ export default function AdminConfigPage() {
         {/* ─── Placeholder for future sections ─── */}
         <div className="text-center py-4">
           <span className="text-[10px] text-text-subtle">
-            การตั้งค่าเพิ่มเติมจะเพิ่มที่นี่ในอนาคต (Workflow, Routing, ฯลฯ)
+            การตั้งค่าเพิ่มเติมจะเพิ่มที่นี่ในอนาคต (Routing, ฯลฯ)
           </span>
         </div>
       </div>

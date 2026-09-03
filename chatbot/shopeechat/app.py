@@ -492,6 +492,106 @@ def chat(req: ChatRequest) -> ChatResponse:
             if _clean_message:
                 req.message = _clean_message
 
+        # ===== Order lookup — ลูกค้าส่งเลขคำสั่งซื้อ หรือ [order: XXX] =====
+        # ดึงข้อมูล order จาก MongoDB (read-only) แล้วส่งให้ LLM ตอบ
+        # ⚡ ข้ามถ้าอยู่ใน warranty claim flow (บอทเคยขอ วันที่+order+รูป)
+        from . import order_store as _order_store
+        _order_sn = _order_store.extract_order_sn(req.message)
+        _in_claim_flow = False
+        if _order_sn and history:
+            _last_model_msgs = [h for h in history if h.get("role") == "model"][-1:]
+            _last_model_text_check = " ".join(h.get("text", "") for h in _last_model_msgs).lower()
+            if (any(kw in _last_model_text_check for kw in ("วันที่ซื้อ", "ซื้อวันที่", "purchase date"))
+                and any(kw in _last_model_text_check for kw in ("เลขที่คำสั่งซื้อ", "หมายเลขคำสั่งซื้อ", "order number", "คำสั่งซื้อ"))
+                and any(kw in _last_model_text_check for kw in ("รูป", "วิดีโอ", "photo", "video", "แสดงอาการ", "ความเสียหาย"))):
+                _in_claim_flow = True
+                print(f"[ORDER] ข้าม order_lookup เพราะอยู่ใน claim flow", file=sys.stderr)
+        if _order_sn and not _in_claim_flow:
+            print(f"[ORDER] พบ order_sn={_order_sn} ในข้อความ", file=sys.stderr)
+            _order_info = _order_store.lookup_order(_order_sn, shop_filter=req.shop)
+            if _order_info:
+                _order_ctx = _order_store.build_order_context(_order_info)
+                print(f"[ORDER] พบ order: status={_order_info['order_status']} items={_order_info['item_count']}", file=sys.stderr)
+                # สร้างคำถามที่ส่งให้ LLM — ตัด order_sn ออกจาก message
+                _order_msg = _order_store._ORDER_TAG_RE.sub("", req.message).strip() if _order_store._ORDER_TAG_RE.search(req.message) else req.message
+                # ถ้าลูกค้าส่งแค่เลข order ไม่มีคำถาม → ตั้งคำถามเอง
+                _order_clean = re.sub(r"(?:เลข)?คำสั่งซื้อ\s*" + re.escape(_order_sn), "", _order_msg, flags=re.IGNORECASE).strip()
+                _order_clean = _order_clean.replace(_order_sn, "").strip()
+                if not _order_clean:
+                    _order_clean = "ลูกค้าส่งเลขคำสั่งซื้อมา ต้องการดูสถานะและรายละเอียดสินค้าในคำสั่งซื้อนี้"
+                # เรียก LLM พร้อม order context
+                try:
+                    _order_answer, _order_usage = llm.answer_general(
+                        message=_order_clean,
+                        context=_order_ctx,
+                        qtype="order_status",
+                        history=history,
+                        persona_extra=_persona_extra,
+                    )
+                except RuntimeError as exc:
+                    raise HTTPException(status_code=500, detail=str(exc))
+                _total_elapsed = _time.time() - _total_start
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+                prompt_t = _order_usage.get("prompt", 0)
+                output_t = _order_usage.get("output", 0)
+                cost = (prompt_t * 0.30 + output_t * 2.50) / 1_000_000
+                _steps.append({
+                    "name": "order_lookup",
+                    "model": model_name,
+                    "tokens_in": prompt_t,
+                    "tokens_out": output_t,
+                    "time_s": round(_total_elapsed, 2),
+                    "cost_usd": round(cost, 6),
+                    "cost_thb": round(cost * 36, 4),
+                    "detail": f"order_sn={_order_sn} status={_order_info['order_status']}",
+                })
+                return ChatResponse(
+                    answer=_order_answer,
+                    answer_segments=llm.split_segments(_order_answer),
+                    products=[],
+                    shop=req.shop,
+                    model=model_name,
+                    source="order_lookup",
+                    usage=_order_usage,
+                    elapsed=round(_total_elapsed, 2),
+                    cost=round(cost, 6),
+                    steps=_steps,
+                    routing_decision=_routing("bot_reply", f"order_lookup: order_sn={_order_sn} → ตอบจาก order info"),
+                )
+            else:
+                # พบ order_sn แต่ไม่พบใน DB → บอกลูกค้า
+                print(f"[ORDER] ไม่พบ order_sn={_order_sn} ในระบบ", file=sys.stderr)
+                _order_not_found = (
+                    f"ขออภัยค่ะ ไม่พบข้อมูลคำสั่งซื้อเลข {_order_sn} ในระบบ "
+                    f"อาจเป็นคำสั่งซื้อจากร้านอื่น หรือเลขคำสั่งซื้อไม่ถูกต้อง "
+                    f"รบกวนตรวจสอบเลขคำสั่งซื้ออีกครั้ง หรือทักแอดมินเพื่อสอบถามได้นะคะ"
+                )
+                _total_elapsed = _time.time() - _total_start
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+                _steps.append({
+                    "name": "order_lookup",
+                    "model": model_name,
+                    "tokens_in": 0,
+                    "tokens_out": 0,
+                    "time_s": round(_total_elapsed, 2),
+                    "cost_usd": 0.0,
+                    "cost_thb": 0.0,
+                    "detail": f"order_sn={_order_sn} not found",
+                })
+                return ChatResponse(
+                    answer=_order_not_found,
+                    answer_segments=llm.split_segments(_order_not_found),
+                    products=[],
+                    shop=req.shop,
+                    model=model_name,
+                    source="order_lookup",
+                    usage={"prompt": 0, "output": 0, "total": 0},
+                    elapsed=round(_total_elapsed, 2),
+                    cost=0.0,
+                    steps=_steps,
+                    routing_decision=_routing("bot_reply", f"order_lookup: order_sn={_order_sn} not found"),
+                )
+
         # ===== ขั้นที่ 0: ตรวจคำถามทั่วไป (policy/brands/categories/shops) =====
         # ถ้าลูกค้าถามคำถามทั่วไปที่ไม่เจาะรุ่น → ตอบจาก policy/meta โดยตรง
         # แต่ถ้าเป็น warranty/return/shipping question และ history มีสินค้า → ถือว่าเป็น follow-up
@@ -862,6 +962,18 @@ def chat(req: ChatRequest) -> ChatResponse:
                 for kw in ("มอบหมายงาน", "รอการติดต่อกลับ", "ดำเนินการเรื่อง", "แอดมินดูแล")
             )
 
+            # State 7: บอทเคยขอข้อมูลเคลม (วันที่+order+รูป) → ลูกค้าอาจส่งรูป/วิดีโอหรือข้อมูลบางส่วน
+            # ⚡ สำคัญ: ลูกค้าส่ง [รูปภาพ] หรือ [วิดีโอ] ตามที่บอทขอ → ต้องรับและเก็บเป็นข้อมูลเคลม
+            _bot_asked_claim_info = (
+                any(kw in _last_model_text for kw in ("วันที่ซื้อ", "ซื้อวันที่", "วันที่ ซื้อ", "purchase date", "ซื้อมาวันที่"))
+                and any(kw in _last_model_text for kw in ("เลขที่คำสั่งซื้อ", "หมายเลขคำสั่งซื้อ", "order number", "คำสั่งซื้อ"))
+                and any(kw in _last_model_text for kw in ("รูป", "วิดีโอ", "photo", "video", "แสดงอาการ", "ความเสียหาย"))
+            )
+            # ลูกค้าส่งรูป/วิดีโอ (placeholder text จาก Shopee)
+            _msg_is_image = req.message.strip() in ("[รูปภาพ]", "[image]", "[วิดีโอ]", "[video]", "[sticker]", "[สติกเกอร์]")
+            # ลูกค้าส่งรูปพร้อมข้อความ (image_with_text) — มี placeholder + text อื่น
+            _msg_has_image_placeholder = bool(re.search(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", req.message, re.IGNORECASE))
+
             # ตรวจว่าลูกค้าให้วันที่จริงไหม (ใช้ในหลาย state)
             _msg_has_date = _warranty_mod.parse_purchase_date(req.message) is not None
 
@@ -869,7 +981,16 @@ def chat(req: ChatRequest) -> ChatResponse:
             # → บอทหยุดตอบทุกอย่าง ปล่อยให้แอดมินดูแล
             # เหตุผล: เรื่องเคลม/รับประกัน sensitive, แอดมินเห็นประวัติ, ลูกค้าต้องการคนจริง
             # บอทแค่บอกลูกค้าว่าส่งต่อแอดมินแล้ว รอการติดต่อกลับ
-            if _bot_handed_off and not _bot_asked_info and not _bot_reviewed_info and not _msg_has_date:
+            # ⚡ post-handoff: ถ้าบอทเคย handoff แล้ว และลูกค้าไม่ได้ส่งข้อมูลเคลม → บอกรอแอดมิน
+            #   ถ้าลูกค้าส่งข้อมูลเคลม (image/date/order/name/phone) → ให้ State 7 รับข้อมูล
+            _post_handoff_has_info = (
+                _msg_is_image or _msg_has_image_placeholder or _msg_has_date
+                or bool(_warranty_mod.extract_customer_info(
+                    re.sub(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", "", req.message, flags=re.IGNORECASE).strip()
+                )["order_id"])
+            )
+            if _bot_handed_off and not _post_handoff_has_info:
+                _model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
                 _warranty_claim_answer = (
                     "ระบบได้บันทึกข้อมูลของคุณและส่งต่อให้แอดมินดูแลเรียบร้อยแล้วค่ะ "
                     "รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ "
@@ -881,7 +1002,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     answer_segments=llm.split_segments(_warranty_claim_answer),
                     products=[],
                     shop=req.shop,
-                    model=model_name,
+                    model=_model_name,
                     source="warranty_claim_flow",
                     usage={},
                     elapsed=round(_time.time() - _t0, 2),
@@ -889,12 +1010,65 @@ def chat(req: ChatRequest) -> ChatResponse:
                     handoff_to_admin=True,
                     handoff_reason="post_handoff_waiting",
                     handoff_claim={},
-                    steps=_steps + [("post_handoff", "รอแอดมิน → ลูกค้าทักใหม่ → บอทหยุดตอบ")],
+                    steps=_steps + [{"name": "post_handoff", "model": _model_name, "detail": "รอแอดมิน → ลูกค้าทักใหม่ → บอทหยุดตอบ"}],
                     routing_decision=_routing(
                         "handoff", "post_handoff: รอแอดมิน → บอทหยุดตอบ",
                         handoff_reason="post_handoff_waiting",
                     ),
                 )
+
+            # ── State 7: awaiting_claim_info → ลูกค้าส่งรูป/วิดีโอ หรือข้อมูลบางส่วน ──
+            # ถ้าบอทเคยขอ วันที่+order+รูป แล้วลูกค้าส่งรูป/วิดีโอ หรือให้ข้อมูลบางส่วน
+            # → รับรูป + ถามข้อมูลที่เหลือ (วันที่/order) หรือถ้าครบแล้ว → ทวน + ถามยืนยัน
+            if _bot_asked_claim_info and not _bot_reviewed_info:
+                # ⚡ ตัด image placeholder ออกก่อน extract info (กัน [รูปภาพ] ถูกตีความเป็นชื่อ)
+                _claim_clean_msg = re.sub(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", "", req.message, flags=re.IGNORECASE).strip()
+                # ⚡ ตัด date pattern ออกอีก (กัน "ซื้อวันที่ 15 ส.ค. 2567" ถูกตีความเป็นชื่อ)
+                if _msg_has_date:
+                    _parsed_date_val = _warranty_mod.parse_purchase_date(req.message)
+                    if _parsed_date_val is not None:
+                        _parsed_date_str = _parsed_date_val.strftime("%Y-%m-%d") if hasattr(_parsed_date_val, "strftime") else str(_parsed_date_val)
+                        _claim_clean_msg = _claim_clean_msg.replace(_parsed_date_str, "")
+                    # ตัด phrase นำหน้าด้วย เช่น "ซื้อวันที่ ...", "วันที่ซื้อ ..."
+                    _claim_clean_msg = re.sub(r"(?:ซื้อวันที่|วันที่ซื้อ|วันที่ ซื้อ|ซื้อมาวันที่)\s*\d{1,2}\s*[A-Za-zก-ฮ\.]+\s*\d{2,4}", "", _claim_clean_msg, flags=re.IGNORECASE)
+                    _claim_clean_msg = re.sub(r"(?:ซื้อวันที่|วันที่ซื้อ|วันที่ ซื้อ|ซื้อมาวันที่)", "", _claim_clean_msg, flags=re.IGNORECASE)
+                _info = _warranty_mod.extract_customer_info(_claim_clean_msg)
+                _has_date = _msg_has_date
+                _has_order = bool(_info["order_id"])
+                _has_name = _info["name"] and len(_info["name"]) <= 40 and " " in _info["name"]
+                _has_phone = bool(_info["phone"])
+                _has_image = _msg_is_image or _msg_has_image_placeholder
+
+                # ⚡ Flow ใหม่: handoff แล้ว → บอทรับข้อมูลเบื้องต้น + บอกรอแอดมิน
+                #   ไม่ต้องทวน/ถามยืนยัน — แอดมินมาอ่านแชทต่อ
+                #   ถ้าลูกค้าส่งอะไรมา (รูป/วันที่/order/ชื่อ/เบอร์) → ขอบคุณ + บอกรอแอดมิน
+                if _has_image or _has_date or _has_order or _has_name or _has_phone:
+                    _received_items = []
+                    if _has_image:
+                        _received_items.append("รูป/วิดีโอแสดงอาการ")
+                    if _has_date:
+                        _received_items.append("วันที่ซื้อสินค้า")
+                    if _has_order:
+                        _received_items.append("เลขที่คำสั่งซื้อ")
+                    if _has_name:
+                        _received_items.append("ชื่อ-นามสกุล")
+                    if _has_phone:
+                        _received_items.append("เบอร์โทร")
+                    _received_text = " · ".join(_received_items)
+                    _warranty_claim_answer = (
+                        f"ขอบคุณค่ะ ได้รับข้อมูล({_received_text}) เรียบร้อยแล้ว "
+                        f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ "
+                        f"ทางเราจะดำเนินการโดยเร็วที่สุดค่ะ"
+                    )
+                    # ⚡ handoff=True เสมอ — แอดมินต้องรู้ว่าลูกค้าส่งข้อมูลใหม่มา
+                    _warranty_claim_handoff = True
+                    _warranty_claim_ctx = {
+                        "customer_name": _info["name"],
+                        "customer_phone": _info["phone"],
+                        "customer_order_id": _info["order_id"],
+                        "claim_topic": "เคลม/ซ่อม/ประกันสินค้า",
+                    }
+                    print(f"[WARRANTY-CLAIM] post-handoff info received: date={_has_date} order={_has_order} name={_has_name} phone={_has_phone} image={_has_image}", file=sys.stderr)
 
             # ── State: awaiting_customer_info → ลูกค้าให้ข้อมูล → ทวน + ถามยืนยัน ──
             # ต้องเป็น info request จริง (ไม่ใช่วันที่) และลูกค้าให้ข้อมูลจริง
@@ -1003,9 +1177,10 @@ def chat(req: ChatRequest) -> ChatResponse:
                     _warranty_claim_ctx = {"handoff_reason": "warranty_claim_out_of_warranty"}
                     print(f"[WARRANTY-CLAIM] out-of-warranty consent → handoff", file=sys.stderr)
 
-            # ── State: duration_answered → ลูกค้า claim request → ถามวันที่ซื้อ ──
-            # เงื่อนไข: บอทเคยตอบ duration + ลูกค้าไม่ได้ให้วันที่ + เป็น claim request
-            # (ถ้าลูกค้าให้วันที่ → เข้า warranty_date_followup block ด้านล่าง)
+            # ── State: duration_answered → ลูกค้า claim request → ถามวันที่ซื้อ + handoff ทันที ──
+            # ⚡ เปลี่ยน flow: ขอข้อมูลเคลม + handoff แอดมินทันที
+            #   บอทตั้งคำถามเบื้องต้นทิ้งไว้ให้ลูกค้าตอบ → แอดมินมาอ่านแชทต่อ
+            #   ถ้าลูกค้าตอบกลับมา → State 7 รับข้อมูล + บอกรอแอดมิน (ไม่ต้องทวน/ถามยืนยัน)
             elif _bot_answered_duration and not _msg_has_date:
                 if _warranty_mod.detect_claim_request(req.message):
                     _warranty_claim_answer = (
@@ -1017,7 +1192,10 @@ def chat(req: ChatRequest) -> ChatResponse:
                         f"และไม่ใช่ความเสียหายจากการใช้งานผิดวิธี น้ำเข้า หรือตกกระแทก "
                         f"(ขึ้นกับเงื่อนไขเฉพาะรุ่น) หากข้อมูลครบ abubu จะตรวจสอบและประสานงานต่อให้ค่ะ"
                     )
-                    print(f"[WARRANTY-CLAIM] claim request → ask date+order+photo", file=sys.stderr)
+                    # ⚡ handoff ทันที — ส่งให้แอดมินดูแล บอทยังรับข้อมูลเบื้องต้นได้
+                    _warranty_claim_handoff = True
+                    _warranty_claim_ctx = {"handoff_reason": "warranty_claim_in_warranty"}
+                    print(f"[WARRANTY-CLAIM] claim request → ask date+order+photo + handoff immediately", file=sys.stderr)
 
             # ถ้ามี warranty claim answer → ส่งตอบก่อนเข้า flow อื่น
             if _warranty_claim_answer:
@@ -1335,6 +1513,7 @@ def chat(req: ChatRequest) -> ChatResponse:
 
         # ===== Claim request ที่ state machine ไม่ได้จัดการ (first message, ไม่มี history) =====
         # ถ้าเป็น claim request แต่ state machine ไม่ได้ตอบ (ไม่มี history) → ตอบเลย ห้ามแนะนำสินค้า
+        # ⚡ handoff ทันที — บอทขอข้อมูลเบื้องต้นทิ้งไว้ แอดมินมาอ่านแชทต่อ
         if _is_claim_request and not _warranty_claim_answer:
             _total_elapsed = _time.time() - _total_start
             model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
@@ -1347,7 +1526,58 @@ def chat(req: ChatRequest) -> ChatResponse:
                 f"และไม่ใช่ความเสียหายจากการใช้งานผิดวิธี น้ำเข้า หรือตกกระแทก "
                 f"(ขึ้นกับเงื่อนไขเฉพาะรุ่น) หากข้อมูลครบ abubu จะตรวจสอบและประสานงานต่อให้ค่ะ"
             )
-            print(f"[WARRANTY-CLAIM] first-message claim request → ask info (no products)", file=sys.stderr)
+            print(f"[WARRANTY-CLAIM] first-message claim request → ask info + handoff immediately", file=sys.stderr)
+
+            # ⚡ handoff ทันที
+            _handoff_result: dict = {}
+            _assigned_admin_name: str | None = None
+            _assignment_reason: str | None = None
+            if req.conversation_id:
+                try:
+                    import urllib.request
+                    import urllib.error
+                    _handoff_url = os.environ.get(
+                        "ADMIN_HANDOFF_URL",
+                        "http://127.0.0.1:3000/api/admin/conversations/bot-handoff",
+                    )
+                    _handoff_payload = {
+                        "conversation_id": req.conversation_id,
+                        "shop_id": req.shop or "",
+                        "platform": req.platform or "shopee",
+                        "reason": "warranty_claim",
+                        "simulate": req.simulate_assignment,
+                        "claim": {"claim_topic": "เคลม/ซ่อม/ประกันสินค้า"},
+                    }
+                    _handoff_body = json.dumps(_handoff_payload).encode("utf-8")
+                    _handoff_req = urllib.request.Request(
+                        _handoff_url,
+                        data=_handoff_body,
+                        headers={
+                            "Content-Type": "application/json",
+                            "X-Internal-Secret": os.environ.get("CHATBOT_INTERNAL_SECRET", ""),
+                        },
+                        method="POST",
+                    )
+                    try:
+                        _handoff_resp = urllib.request.urlopen(_handoff_req, timeout=5)
+                        _handoff_result = json.loads(_handoff_resp.read().decode("utf-8"))
+                        _assigned_admin_name = _handoff_result.get("assigned_to_name")
+                        _assignment_reason = _handoff_result.get("assignment_reason")
+                        print(f"[HANDOFF] first-message claim → assigned_to={_handoff_result.get('assigned_to')} name={_assigned_admin_name}", file=sys.stderr)
+                    except urllib.error.HTTPError as _he:
+                        print(f"[HANDOFF] HTTP error: {_he.code} {_he.reason}", file=sys.stderr)
+                    except Exception as _he:
+                        print(f"[HANDOFF] error: {_he}", file=sys.stderr)
+                except Exception as _e:
+                    print(f"[HANDOFF] setup error: {_e}", file=sys.stderr)
+
+            if _assigned_admin_name:
+                _claim_first_answer += (
+                    f"\n\n📌 ขณะนี้ได้มอบหมายงานให้ {_assigned_admin_name} "
+                    f"ดำเนินการเรื่องรับประกัน/เคลมต่อนะคะ "
+                    f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+                )
+
             return ChatResponse(
                 answer=_claim_first_answer,
                 answer_segments=llm.split_segments(_claim_first_answer),
@@ -1361,7 +1591,12 @@ def chat(req: ChatRequest) -> ChatResponse:
                 intent=_intent_result,
                 timing=_timing_breakdown,
                 steps=_steps,
-                routing_decision=_routing("bot_reply", "warranty_claim: ขอข้อมูลลูกค้าก่อน (first message)"),
+                handoff_to_admin=True,
+                handoff_reason="warranty_claim",
+                routing_decision=_routing(
+                    "handoff", "warranty_claim: ขอข้อมูลลูกค้า + handoff ทันที (first message)",
+                    handoff_reason="warranty_claim",
+                ),
             )
 
         if general_qtype:
@@ -2310,6 +2545,10 @@ def chat(req: ChatRequest) -> ChatResponse:
                     pt = product_store._detect_product_types(hmsg)
                     if not pt:
                         pt = product_store._detect_product_types_fuzzy(hmsg)
+                    # ⚡ fallback: ถ้ายังไม่จับ ลอง charger_subtype (มี logic แก้พิมพ์ผิด "หัวชาจ" → "หัวชาร์จ")
+                    # ทำให้ history "หัวชาจ" (พิมพ์ตก ร์) ถูก carry เป็น charger type ได้
+                    if not pt and product_store._detect_charger_subtype(hmsg):
+                        pt = {"charger"}
                     if pt and "phone" not in pt:
                         # ข้าม type ที่เป็น false positive บ่อย (fuzzy detect ผิด)
                         if pt & _fuzzy_false_positive_types and not (pt - _fuzzy_false_positive_types):
@@ -2330,7 +2569,13 @@ def chat(req: ChatRequest) -> ChatResponse:
             # ถ้า message ปัจจุบันเป็น charger type แต่ไม่มี subtype ชัด (ไม่มี "หัวชาร์จ"/"สายชาร์จ"/"ชุดชาร์จ")
             # และไม่ใช่ new topic → ดึง subtype จาก history ล่าสุดที่มี charger subtype
             # เช่น คุยเรื่องหัวชาร์จ 3 คำถาม แล้วถาม "มีชาร์จไว กว่านี้ไหม" → ใช้ adapter subtype
-            if ("charger" in (current_types or set())) and not is_new_topic and not product_store._detect_charger_subtype(req.message):
+            # ⚡ เพิ่ม: ถ้า message ปัจจุบันมี charger_subtype ชัด (เช่น "หัวชาจ") ก็ถือว่าเป็น charger context
+            #   เพราะ _detect_product_types ไม่จับ "หัวชาจ" (พิมพ์ตก) แต่ _detect_charger_subtype จับได้
+            _is_charger_ctx = (
+                "charger" in (current_types or set())
+                or product_store._detect_charger_subtype(req.message) is not None
+            )
+            if _is_charger_ctx and not is_new_topic and not product_store._detect_charger_subtype(req.message):
                 try:
                     _all_prev_user_msgs = [
                         (m.text if hasattr(m, 'text') else m.get('text', ''))

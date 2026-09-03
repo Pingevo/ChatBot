@@ -18,6 +18,7 @@
 import "dotenv/config";
 import { botWorkerService } from "../src/backend/service/botWorkerService";
 import { getSystemConfig } from "../src/backend/service/systemConfigService";
+import { workflowEngine } from "../src/backend/service/workflowEngine";
 
 const DEFAULT_INTERVAL_MS = 1000;
 const BATCH_LIMIT = 20;
@@ -74,6 +75,18 @@ async function main() {
 
         if (result.processed > 0) {
           console.log(`[bot-worker] cycle ${cycle}: found=${result.found} fired=${result.processed} (fire-and-forget)`);
+        }
+
+        // ⚡ Phase 2 — เช็ค wait_for_reply timeout (ทุก cycle ถ้า workflow เปิด)
+        if (config.workflow_enabled) {
+          try {
+            const timedOut = await workflowEngine.checkWaitTimeouts();
+            if (timedOut > 0) {
+              console.log(`[bot-worker] cycle ${cycle}: wait_timeout processed=${timedOut}`);
+            }
+          } catch (err) {
+            console.error(`[bot-worker] cycle ${cycle}: wait_timeout error:`, err instanceof Error ? err.message : err);
+          }
         }
 
         // รอตาม interval ที่ตั้งใน config — ไม่รอให้ batch เสร็จ แต่ละข้อความทำงานของมันอยู่แล้ว

@@ -51,7 +51,7 @@ export interface ShadowReplyDoc extends Document {
   deleted_at?: Date;
   deleted_by?: string;
   delete_reason?: string;
-  origin?: "worker" | "manual" | "manual_conversation";    // ที่มา — worker (auto) / manual (Generate เอง) / manual_conversation (Generate ทั้งหมด)
+  origin?: "worker" | "manual" | "manual_conversation" | "workflow";    // ที่มา — worker (auto) / manual (Generate เอง) / manual_conversation (Generate ทั้งหมด) / workflow (Flow Builder)
   trigger_id?: string;             // ถ้าตอบเพราะ trigger match (worker เท่านั้น)
   bot_routing_decision?: {         // routing decision จาก bot (observability)
     path?: string;
@@ -79,7 +79,7 @@ export async function listShadowReplies(opts: {
   shopId?: string;
   conversationId?: string;
   rating?: "good" | "bad" | "unrated";
-  origin?: "worker" | "manual" | "manual_conversation";
+  origin?: "worker" | "manual" | "manual_conversation" | "workflow";
   limit?: number;
   includeDeleted?: boolean;  // ถ้า true → รวม soft-deleted
   deletedOnly?: boolean;     // ถ้า true → ดึงเฉพาะที่ถูก soft delete

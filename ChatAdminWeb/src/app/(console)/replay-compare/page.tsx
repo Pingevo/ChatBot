@@ -18,7 +18,7 @@ import {
   Inbox, ListFilter, History,
 } from "lucide-react";
 import { api } from "@/lib/apiClient";
-import type { Conversation, Platform } from "@/lib/types";
+import type { Conversation, Platform, ChatMessage } from "@/lib/types";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -216,7 +216,17 @@ export default function ReplayComparePage() {
   const [limitInput, setLimitInput] = useState("50");
 
   // ⚡ 3 tabs: inbox (เลือกแชทใหม่) | history (แชทที่เคย replay แล้ว) | files (ไฟล์ batch)
-  const [mode, setMode] = useState<"inbox" | "history" | "files">("inbox");
+  const [mode, setModeState] = useState<"inbox" | "history" | "files">("inbox");
+  // ⚡ wrapper: เคลียร์ center panel ทุกครั้งที่สลับ tab
+  const setMode = useCallback((m: "inbox" | "history" | "files") => {
+    setModeState(m);
+    setData(null);
+    setPreviewConv(null);
+    setPreviewMessages([]);
+    setSelectedInboxId(null);
+    setSelectedConvIdx(0);
+    setSelectedQIdx(0);
+  }, []);
   const [inboxConvs, setInboxConvs] = useState<Conversation[]>([]);
   const [inboxLoading, setInboxLoading] = useState(false);
   const [inboxSearch, setInboxSearch] = useState("");
@@ -224,6 +234,10 @@ export default function ReplayComparePage() {
   const [inboxShop, setInboxShop] = useState<string>("");
   const [selectedInboxId, setSelectedInboxId] = useState<string | null>(null);
   const [replayConvRunning, setReplayConvRunning] = useState(false);
+  // ⚡ preview messages ก่อนเรียก replay
+  const [previewConv, setPreviewConv] = useState<Conversation | null>(null);
+  const [previewMessages, setPreviewMessages] = useState<ChatMessage[]>([]);
+  const [previewLoading, setPreviewLoading] = useState(false);
   // shops ที่มีใน inbox (extract จาก conversations ที่โหลดมา)
   const [inboxShops, setInboxShops] = useState<string[]>([]);
   const [inboxLoaded, setInboxLoaded] = useState(false);
@@ -248,7 +262,7 @@ export default function ReplayComparePage() {
     setLoading(true);
     try {
       const params = file ? { file } : {};
-      const resp = await api().get("/replay-compare", { params, validateStatus: () => true });
+      const resp = await api().get("/replay-compare", { params, validateStatus: () => true, timeout: 60000 });
       if (resp.status === 404 || resp.data?.error === "file_not_found") {
         setData(null);
         // ไม่ toast error — แค่แสดง empty state
@@ -268,24 +282,27 @@ export default function ReplayComparePage() {
 
   const loadFiles = useCallback(async () => {
     try {
-      const resp = await api().get("/replay-compare", { params: { files: "1" } });
+      const resp = await api().get("/replay-compare", { params: { files: "1" }, timeout: 60000 });
       setFiles(resp.data?.files || []);
     } catch {
       // silent
     }
   }, []);
 
+  // ⚡ โหลด data เฉพาะตอนอยู่ tab files หรือ history — ไม่โหลดตอน inbox
   useEffect(() => {
-    loadData();
-    loadFiles();
-  }, [loadData, loadFiles]);
+    if (mode === "files") {
+      loadData();
+      loadFiles();
+    }
+  }, [loadData, loadFiles, mode]);
 
   // ⚡ โหลด inbox conversations จาก /admin/conversations
   const loadInbox = useCallback(async () => {
     setInboxLoading(true);
     try {
       const r = await api().get<{ rows: Conversation[] } | Conversation[]>("/admin/conversations", {
-        params: { assigned_to: "all", limit: 2000, include_count: "true" },
+        params: { assigned_to: "all", limit: 10000, include_count: "true" },
         timeout: 45000,
       });
       const data = Array.isArray(r.data) ? r.data : ((r.data as { rows?: Conversation[] }).rows || []);
@@ -309,12 +326,23 @@ export default function ReplayComparePage() {
     }
   }, [mode, inboxLoaded, inboxLoading, loadInbox]);
 
+  // ⚡ เคลียร์ center panel ตอนเข้าหน้า (mount) — กันของเก่าค้าง
+  useEffect(() => {
+    setData(null);
+    setPreviewConv(null);
+    setPreviewMessages([]);
+    setSelectedInboxId(null);
+    setSelectedConvIdx(0);
+    setSelectedQIdx(0);
+  }, []);
+
   // ⚡ โหลด history — แชทที่เคย replay ผ่าน inbox แล้ว
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
     try {
       const r = await api().get<{ history: HistoryItem[] }>("/replay-compare", {
         params: { history: "1" },
+        timeout: 60000,
       });
       setHistoryItems(r.data?.history || []);
     } catch (err) {
@@ -333,6 +361,39 @@ export default function ReplayComparePage() {
     }
   }, [mode, historyLoaded, historyLoading, loadHistory]);
 
+  // ⚡ โหลด preview messages ของ conversation (ก่อนตัดสินใจ replay)
+  const loadPreview = useCallback(async (conv: Conversation) => {
+    setPreviewConv(conv);
+    setSelectedInboxId(conv.id);
+    setPreviewMessages([]);
+    setPreviewLoading(true);
+    // ⚡ เคลียร์ผล replay เก่า เพื่อให้ preview แสดง
+    setData(null);
+    setSelectedConvIdx(0);
+    setSelectedQIdx(0);
+    try {
+      const resp = await api().get(`/admin/conversations/${conv.id}/messages`, {
+        params: { all: "1" },
+        validateStatus: () => true,
+        timeout: 60000,
+      });
+      console.log("[PREVIEW] conv.id=", conv.id, "status=", resp.status, "data type=", Array.isArray(resp.data) ? "array" : "object");
+      // ⚡ API ส่งกลับ array ตรงๆ ถ้า all=1, หรือ { messages: [...] } ถ้าไม่ใช่
+      const msgs = Array.isArray(resp.data) ? resp.data : resp.data?.messages;
+      if (msgs && msgs.length > 0) {
+        setPreviewMessages(msgs);
+      } else if (resp.data?.error) {
+        toast.error(resp.data.error);
+      } else {
+        console.warn("[PREVIEW] no messages, resp=", resp.data);
+      }
+    } catch (e: any) {
+      catchError(e, "โหลดข้อความไม่สำเร็จ");
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, [catchError]);
+
   // ⚡ รัน replay แค่ conversation เดียว
   const runReplayConv = useCallback(async (convId: string, shopName?: string) => {
     setSelectedInboxId(convId);
@@ -343,7 +404,7 @@ export default function ReplayComparePage() {
         action: "run_conv",
         conversation_id: convId,
         shop: shopName,
-      }, { validateStatus: () => true });
+      }, { validateStatus: () => true, timeout: 60000 });
 
       if (resp.data?.alreadyRunning) {
         toast.info(`มี replay script รันอยู่แล้ว (PID: ${resp.data.pid}) — รอให้เสร็จก่อน`);
@@ -360,9 +421,11 @@ export default function ReplayComparePage() {
           const r = await api().get("/replay-compare", {
             params: { file: savePath },
             validateStatus: () => true,
+            timeout: 60000,
           });
           if (r.data && !r.data?.error) {
             setData(r.data);
+            setPreviewConv(null); // ⚡ เคลียร์ preview เมื่อมีผลแล้ว
             setSelectedConvIdx(0);
             setSelectedQIdx(0);
             if (r.data?.status === "done") {
@@ -396,7 +459,7 @@ export default function ReplayComparePage() {
         action: "run",
         limit,
         oldest: true,
-      }, { validateStatus: () => true });
+      }, { validateStatus: () => true, timeout: 60000 });
 
       // ⚡ ถ้ามี script รันอยู่แล้ว → ไม่รันซ้อน
       if (resp.data?.alreadyRunning) {
@@ -424,6 +487,7 @@ export default function ReplayComparePage() {
           const r = await api().get("/replay-compare", {
             params: { file: savePath },
             validateStatus: () => true,
+            timeout: 60000,
           });
           if (r.data && !r.data?.error) {
             setData(r.data);
@@ -742,7 +806,7 @@ export default function ReplayComparePage() {
                   return (
                     <button
                       key={c.id}
-                      onClick={() => runReplayConv(c.id, c.shop_name)}
+                      onClick={() => loadPreview(c)}
                       disabled={replayConvRunning}
                       className={`w-full text-left px-3 py-2 hover:bg-gray-50 transition disabled:opacity-50 ${
                         isSelected ? "bg-blue-50 border-l-2 border-blue-500" : ""
@@ -896,11 +960,72 @@ export default function ReplayComparePage() {
 
         {/* Center: Chat comparison */}
         <div className="flex-1 overflow-y-auto bg-gray-50">
-          {!selectedConv && !loading && (
+          {/* ⚡ Preview panel — ก่อน replay แสดงข้อความต้นฉบับให้ดูก่อน */}
+          {previewConv && !selectedConv && (
+            <div className="p-4 space-y-3">
+              <div className="flex items-center justify-between bg-white rounded-lg border p-3">
+                <div>
+                  <h2 className="font-semibold text-sm">
+                    {previewConv.shop_name} · {previewConv.id?.slice(-12)}
+                  </h2>
+                  <span className="text-xs text-gray-500">
+                    {previewConv.customer_name || "ไม่ระบุชื่อ"} · {previewConv.platform || "?"}
+                  </span>
+                </div>
+                <Button
+                  size="sm"
+                  onClick={() => runReplayConv(previewConv.id, previewConv.shop_name)}
+                  disabled={replayConvRunning}
+                >
+                  <PlayCircle className="w-4 h-4 mr-1" />
+                  {replayConvRunning ? "กำลัง replay..." : "รัน Replay Compare"}
+                </Button>
+              </div>
+              {previewLoading && <Loading />}
+              {!previewLoading && previewMessages.length === 0 && (
+                <EmptyState
+                  icon={Bot}
+                  title="ไม่มีข้อความ"
+                  description="ไม่สามารถโหลดข้อความของแชทนี้ได้"
+                />
+              )}
+              {!previewLoading && previewMessages.length > 0 && (
+                <div className="bg-white rounded-lg border p-3 space-y-2 max-h-[60vh] overflow-y-auto">
+                  <div className="text-xs text-gray-400 mb-2">
+                    {previewMessages.length} ข้อความ · ตรวจดูก่อน แล้วกด "รัน Replay Compare"
+                  </div>
+                  {previewMessages.map((m, i) => (
+                    <div
+                      key={i}
+                      className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}
+                    >
+                      <div
+                        className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
+                          m.role === "user"
+                            ? "bg-blue-100 text-gray-900"
+                            : "bg-green-600 text-white"
+                        }`}
+                      >
+                        <div className={`text-[10px] mb-0.5 ${m.role === "user" ? "text-gray-500" : "text-green-100"}`}>
+                          {m.role === "user" ? (
+                            <><User className="w-3 h-3 inline mr-1" />ลูกค้า</>
+                          ) : (
+                            <><Bot className="w-3 h-3 inline mr-1" />{m.admin_name || m.source || "บอท/แอดมิน"}</>
+                          )}
+                        </div>
+                        <MessageContent msg={m} variant={m.role === "user" ? "user" : "out"} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {!previewConv && !selectedConv && !loading && (
             <EmptyState
               icon={Bot}
               title="เลือกแชทจาก list"
-              description="คลิกแชททางซ้ายเพื่อดูเปรียบเทียบ"
+              description="คลิกแชททางซ้ายเพื่อดูข้อความ แล้วกดรัน Replay Compare"
             />
           )}
           {selectedConv && (

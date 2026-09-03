@@ -47,6 +47,11 @@ export interface SystemConfigDoc extends Document {
   bot_buffer_window_ms: number;      // รอ X ms หลัง message สุดท้ายก่อนประมวลผล
   bot_buffer_max_messages: number;   // ถ้าครบ X ข้อความใน window → ประมวลผลเลย
 
+  // === Workflow Engine (แบบ Zaapi Flow Builder) — superadmin/dev configurable ===
+  workflow_enabled: boolean;              // สวิตช์เปิด/ปิด workflow engine ทั้งหมด
+  workflow_priority: 'workflow_first' | 'trigger_first' | 'both';  // ลำดับ workflow vs trigger
+  workflow_run_timeout_ms: number;        // flow รอ reply เกินเวลานี้ → cancel อัตโนมัติ
+
   // === Bot service URLs (3 ตัว แยก port) ===
   shopee_bot_url: string;
   tiktok_bot_url: string;
@@ -72,6 +77,9 @@ function getSafeDefaults(): Partial<SystemConfigDoc> {
     bot_buffer_enabled: process.env.BOT_BUFFER_ENABLED === 'true',
     bot_buffer_window_ms: Number(process.env.BOT_BUFFER_WINDOW_MS || 6000),
     bot_buffer_max_messages: Number(process.env.BOT_BUFFER_MAX_MESSAGES || 5),
+    workflow_enabled: process.env.WORKFLOW_ENABLED === 'true',
+    workflow_priority: (process.env.WORKFLOW_PRIORITY as 'workflow_first' | 'trigger_first' | 'both') || 'workflow_first',
+    workflow_run_timeout_ms: Number(process.env.WORKFLOW_RUN_TIMEOUT_MS || 1800000),
     shopee_bot_url: process.env.CHATBOT_BASE_URL_SHOPEE || 'http://127.0.0.1:8010',
     tiktok_bot_url: process.env.CHATBOT_BASE_URL_TIKTOK || 'http://127.0.0.1:8011',
     lazada_bot_url: process.env.CHATBOT_BASE_URL_LAZADA || 'http://127.0.0.1:8012',
@@ -109,6 +117,11 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
     bot_buffer_enabled: dbConfig.bot_buffer_enabled ?? safeDefaults.bot_buffer_enabled ?? false,
     bot_buffer_window_ms: dbConfig.bot_buffer_window_ms ?? safeDefaults.bot_buffer_window_ms ?? 6000,
     bot_buffer_max_messages: dbConfig.bot_buffer_max_messages ?? safeDefaults.bot_buffer_max_messages ?? 5,
+
+    // Workflow engine — จาก DB หรือ env (default: ปิด + workflow_first + timeout 30 นาที)
+    workflow_enabled: dbConfig.workflow_enabled ?? safeDefaults.workflow_enabled ?? false,
+    workflow_priority: dbConfig.workflow_priority ?? safeDefaults.workflow_priority ?? 'workflow_first',
+    workflow_run_timeout_ms: dbConfig.workflow_run_timeout_ms ?? safeDefaults.workflow_run_timeout_ms ?? 1800000,
 
     // Bot URLs — จาก DB หรือ env
     shopee_bot_url: dbConfig.shopee_bot_url ?? safeDefaults.shopee_bot_url ?? 'http://127.0.0.1:8010',
@@ -157,6 +170,9 @@ export async function getSystemConfig(forceRefresh = false): Promise<SystemConfi
         bot_buffer_enabled: safeDefaults.bot_buffer_enabled ?? false,
         bot_buffer_window_ms: safeDefaults.bot_buffer_window_ms ?? 6000,
         bot_buffer_max_messages: safeDefaults.bot_buffer_max_messages ?? 5,
+        workflow_enabled: safeDefaults.workflow_enabled ?? false,
+        workflow_priority: safeDefaults.workflow_priority ?? 'workflow_first',
+        workflow_run_timeout_ms: safeDefaults.workflow_run_timeout_ms ?? 1800000,
         shopee_bot_url: safeDefaults.shopee_bot_url ?? 'http://127.0.0.1:8010',
         tiktok_bot_url: safeDefaults.tiktok_bot_url ?? 'http://127.0.0.1:8011',
         lazada_bot_url: safeDefaults.lazada_bot_url ?? 'http://127.0.0.1:8012',
@@ -195,6 +211,9 @@ export async function updateSystemConfig(
     'bot_buffer_enabled',
     'bot_buffer_window_ms',
     'bot_buffer_max_messages',
+    'workflow_enabled',
+    'workflow_priority',
+    'workflow_run_timeout_ms',
     'shopee_bot_url',
     'tiktok_bot_url',
     'lazada_bot_url',
@@ -322,6 +341,10 @@ export const ADMIN_CONFIGURABLE_KEYS = [
   'bot_buffer_enabled',
   'bot_buffer_window_ms',
   'bot_buffer_max_messages',
+  // Workflow engine — admin เปิด/ปิด + ปรับ priority ได้
+  'workflow_enabled',
+  'workflow_priority',
+  'workflow_run_timeout_ms',
 ] as const;
 
 export type AdminConfigKey = (typeof ADMIN_CONFIGURABLE_KEYS)[number];

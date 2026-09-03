@@ -186,7 +186,7 @@ export function ChatWindow({
           {showActions && (
             <>
               <div className="fixed inset-0 z-10" onClick={() => setShowActions(false)} />
-              <div className="absolute right-0 top-9 z-20 w-44 bg-surface rounded-lg shadow-lg border border-border py-1 text-sm">
+              <div className="absolute right-0 top-full mt-1 z-20 w-44 bg-surface rounded-lg shadow-lg border border-border py-1 text-sm">
                 <button
                   onClick={() => { setShowActions(false); onSuggestProduct?.(); }}
                   className="w-full flex items-center gap-2 px-3 py-2 hover:bg-surface-2 text-text"
