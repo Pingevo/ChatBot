@@ -18,6 +18,13 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # build Next.js (standalone output)
+# `next build` collects page data for every API route, which imports config.ts and
+# evaluates its requiredStrict() secret checks eagerly (module load time) — these
+# placeholders only satisfy that check at build time. They do NOT leak to the runner
+# stage below (fresh FROM, no ENV inherited) — real secrets still come from env_file
+# (.env.web) at container runtime, and requiredStrict() still enforces them there.
+ENV ADMIN_JWT_SECRET=build-time-placeholder \
+    CHATBOT_INTERNAL_SECRET=build-time-placeholder
 RUN npm run build
 
 # ── Stage 3: runner (production) ──
