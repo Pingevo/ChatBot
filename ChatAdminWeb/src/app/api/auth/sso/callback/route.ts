@@ -11,9 +11,15 @@ import { setSessionCookie } from "@/backend/lib/cookies";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import type { AdminDoc } from "@/backend/service/authService";
+import { serverConfig } from "@/backend/lib/config";
 
 const SSO_BASE_URL = (process.env.SELLCENTER_OAUTH_BASE_URL || "https://data.digital.in.th").replace(/\/+$/, "");
 const AUTO_PROVISION_DOMAIN = process.env.SSO_AUTO_PROVISION_DOMAIN || "@itsr.co.th";
+// ⚠️ ห้ามใช้ req.url เป็น base ของ redirect ที่นี่ — Next.js standalone server (behind
+// nginx reverse proxy) resolve req.url ด้วย HOSTNAME/PORT ของ container เอง
+// (เช่น http://0.0.0.0:3000) ไม่ใช่โดเมนจริงที่ผู้ใช้เห็น แม้ nginx จะส่ง Host header
+// ที่ถูกต้องมาแล้วก็ตาม — ต้องใช้ APP_BASE_URL เป็น base เสมอ
+const REDIRECT_BASE = serverConfig.appBaseUrl;
 
 function cleanName(str: string): string {
   return str ? String(str).trim().replace(/\s+/g, " ") : str;
@@ -36,11 +42,11 @@ export async function GET(req: NextRequest) {
   };
 
   if (ssoError) {
-    const res = NextResponse.redirect(new URL(`/login?error=sso_failed`, req.url));
+    const res = NextResponse.redirect(new URL(`/login?error=sso_failed`, REDIRECT_BASE));
     return clearCookie(res);
   }
   if (!token) {
-    const res = NextResponse.redirect(new URL(`/login?error=no_token`, req.url));
+    const res = NextResponse.redirect(new URL(`/login?error=no_token`, REDIRECT_BASE));
     return clearCookie(res);
   }
 
@@ -54,12 +60,12 @@ export async function GET(req: NextRequest) {
     const data = await resp.json();
     userInfo = data.success ? data.user : data;
   } catch {
-    const res = NextResponse.redirect(new URL(`/login?error=userinfo_failed`, req.url));
+    const res = NextResponse.redirect(new URL(`/login?error=userinfo_failed`, REDIRECT_BASE));
     return clearCookie(res);
   }
 
   if (!userInfo?.username) {
-    const res = NextResponse.redirect(new URL(`/login?error=invalid_token`, req.url));
+    const res = NextResponse.redirect(new URL(`/login?error=invalid_token`, REDIRECT_BASE));
     return clearCookie(res);
   }
 
@@ -77,7 +83,7 @@ export async function GET(req: NextRequest) {
   // Auto-provision: สร้าง admin ใหม่ถ้าอีเมลอยู่ในโดเมนที่อนุญาต
   if (!admin) {
     if (!ssoUsername.toLowerCase().endsWith(AUTO_PROVISION_DOMAIN)) {
-      const res = NextResponse.redirect(new URL(`/login?error=not_allowed`, req.url));
+      const res = NextResponse.redirect(new URL(`/login?error=not_allowed`, REDIRECT_BASE));
       return clearCookie(res);
     }
 
@@ -98,7 +104,7 @@ export async function GET(req: NextRequest) {
   }
 
   if (!admin.active) {
-    const res = NextResponse.redirect(new URL(`/login?error=account_disabled`, req.url));
+    const res = NextResponse.redirect(new URL(`/login?error=account_disabled`, REDIRECT_BASE));
     return clearCookie(res);
   }
 
@@ -125,7 +131,7 @@ export async function GET(req: NextRequest) {
 
   // Redirect ไปหน้า dashboard พร้อม set cookie
   const target = returnTo.startsWith("/") ? returnTo : "/dashboard";
-  const res = NextResponse.redirect(new URL(target, req.url));
+  const res = NextResponse.redirect(new URL(target, REDIRECT_BASE));
   setSessionCookie(res, sessionToken);
   res.cookies.delete("sso_return_to");
   return res;
