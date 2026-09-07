@@ -104,7 +104,10 @@ def parse_raw_message(raw_payload, fallback_text: str) -> dict:
             return {'message_type': 'order', 'text': fallback_text or '(คำสั่งซื้อ)',
                     'order_sn': m.group(1) if m else ''}
     elif re.search(r'\[sticker\]|\[สติกเกอร์\]', ft, re.I):
-        return {'message_type': 'sticker', 'text': fallback_text or '(สติกเกอร์)'}
+        # ⚡ ถ้า msg_type === 'sticker' → ไป switch case ดึง URL จาก raw_payload
+        if msg_type != 'sticker':
+            return {'message_type': 'sticker', 'text': fallback_text or '(สติกเกอร์)'}
+        # ไป switch case ข้างล่าง
     elif re.search(r'\[notification\]|\[แจ้งเตือน\]', ft, re.I):
         return {'message_type': 'notification', 'text': fallback_text or '',
                 'notification_text': ''}
@@ -136,13 +139,46 @@ def parse_raw_message(raw_payload, fallback_text: str) -> dict:
                 'order_sn': str(c.get('order_sn') or '')}
 
     if msg_type == 'image':
-        return {'message_type': 'image', 'text': fallback_text or '(รูปภาพ)'}
+        c = inner
+        img_url = c.get('image_url') or ''
+        if not img_url:
+            img_list = c.get('image_url_list') or []
+            if isinstance(img_list, list) and img_list:
+                img_url = img_list[0]
+        return {
+            'message_type': 'image',
+            'text': fallback_text or '(รูปภาพ)',
+            'media': {'type': 'image', 'url': img_url} if img_url else None,
+        }
 
     if msg_type == 'video':
-        return {'message_type': 'video', 'text': fallback_text or '(วิดีโอ)'}
+        c = inner
+        vid_url = c.get('video_url') or ''
+        return {
+            'message_type': 'video',
+            'text': fallback_text or '(วิดีโอ)',
+            'media': {'type': 'video', 'url': vid_url} if vid_url else None,
+        }
 
     if msg_type == 'sticker':
-        return {'message_type': 'sticker', 'text': f'(สติกเกอร์ {inner.get("sticker_id","")})'}
+        c = inner
+        # ⚡ ดึง URL จากหลาย field (Shopee ใช้หลาย schema)
+        sticker_url = c.get('url') or c.get('image_url') or c.get('sticker_url') or c.get('sticker_image_url') or c.get('image') or c.get('pic') or c.get('file_url') or ''
+        # ⚡ normalize URL — ถ้าเป็น hash ให้ prepend host
+        if sticker_url and not sticker_url.startswith('http'):
+            sticker_url = SHOPEE_IMG_HOST + sticker_url
+        # ⚡ fallback — ถ้าไม่มี URL แต่มี sticker_id + sticker_package_id → สร้าง URL จาก pattern
+        #    pattern: https://deo.shopeemobile.com/shopee/shopee-sticker-live-th/packs/{package_id}/{sticker_id}@1x.png
+        if not sticker_url and c.get('sticker_id') and c.get('sticker_package_id'):
+            sticker_url = f'https://deo.shopeemobile.com/shopee/shopee-sticker-live-th/packs/{c["sticker_package_id"]}/{c["sticker_id"]}@1x.png'
+        sticker_thumb = c.get('thumb_url') or c.get('thumbnail_url') or ''
+        if sticker_thumb and not sticker_thumb.startswith('http'):
+            sticker_thumb = SHOPEE_IMG_HOST + sticker_thumb
+        return {
+            'message_type': 'sticker',
+            'text': f'(สติกเกอร์ {c.get("sticker_id", "")})'.strip(),
+            'media': {'type': 'image', 'url': sticker_url, 'thumb_url': sticker_thumb} if sticker_url else None,
+        }
 
     if msg_type == 'notification':
         c = inner
@@ -175,7 +211,10 @@ def parse_raw_message(raw_payload, fallback_text: str) -> dict:
 # แต่ถ้าเป็น system message (faq_liveagent, sticker, notification) → ข้ามเลย
 #   เพราะ route.ts ก็ไม่ได้กรอง แต่ production จะไม่เข้า path นี้เพราะ trigger เป็น handoff
 #   ใน replay เรากรองเองเพื่อไม่ให้เสีย context
-SYSTEM_MSG_TYPES = {'faq_liveagent', 'sticker', 'notification', 'image', 'video'}
+# ⚡ Phase 1F — เอา 'image', 'video' ออกจาก SYSTEM_MSG_TYPES
+# เพราะต้องส่ง image/video ไปให้ bot เพื่อทำ vision pass (เหมือนของจริง)
+# เดิม: SYSTEM_MSG_TYPES = {'faq_liveagent', 'sticker', 'notification', 'image', 'video'}
+SYSTEM_MSG_TYPES = {'faq_liveagent', 'sticker', 'notification'}
 # item/variation_card/order/bundle → แปลงเป็น [item: xxx] ส่งให้ bot (เหมือน callBot ที่ส่ง itemId)
 
 
@@ -183,8 +222,8 @@ SYSTEM_MSG_TYPES = {'faq_liveagent', 'sticker', 'notification', 'image', 'video'
 _PLACEHOLDER_RE = re.compile(r'^\s*\[(item|order|image|video|sticker|notification|variation_card|bundle_message|bundle_deal|bundle|สินค้า|ตัวเลือกสินค้า|คำสั่งซื้อ)\]\s*$', re.IGNORECASE)
 
 
-def build_bot_message(parsed: dict, raw_doc: dict) -> tuple[str, str | None]:
-    """คืน (message_to_bot, item_id) — เหมือน messageService.toBotText + callBot.
+def build_bot_message(parsed: dict, raw_doc: dict) -> tuple[str, str | None, list[str]]:
+    """คืน (message_to_bot, item_id, images) — เหมือน messageService.toBotText + toBotImages + callBot.
 
     วิธีการเหมือน shadowbot (messageService.toBotText):
     - ถ้าเป็น item/variation_card ที่มี item_id → แปลงเป็น tag [สินค้า: <item_id>]
@@ -192,13 +231,22 @@ def build_bot_message(parsed: dict, raw_doc: dict) -> tuple[str, str | None]:
       เพราะ Python bot มี _ITEM_TAG_RE ที่ match [สินค้า: digits] และตัดออก
       ถ้าส่งเป็น [item] ธรรมดา → _ITEM_TAG_RE ไม่ match → LLM ได้รับ "[item]" เป็นคำถาม → สับสน
     - ถ้ามี extra text (ไม่ใช่ placeholder) → "[สินค้า: 123] extra text"
+
+    ⚡ Phase 1D — ส่ง images ด้วย (เหมือน toBotImages ใน messageService.ts)
     """
     mt = parsed.get('message_type')
     text = parsed.get('text', '') or (raw_doc.get('text') or '')
     item_id = parsed.get('item_id')
 
+    # ⚡ Phase 1D — ดึง image URL จาก media (เหมือน toBotImages)
+    images: list[str] = []
+    media = parsed.get('media')
+    if media and isinstance(media, dict):
+        if media.get('type') in ('image', 'video') and media.get('url'):
+            images = [media['url']]
+
     if mt in SYSTEM_MSG_TYPES:
-        return '', None  # ข้าม system message
+        return '', None, []  # ข้าม system message
 
     if mt in ('item', 'variation_card') and item_id:
         # ⚡ เหมือน toBotText — แปลงเป็น [สินค้า: <item_id>] ฝังใน message
@@ -206,13 +254,13 @@ def build_bot_message(parsed: dict, raw_doc: dict) -> tuple[str, str | None]:
         is_placeholder = bool(_PLACEHOLDER_RE.match(text or ''))
         extra = '' if is_placeholder else (text or '').strip()
         bot_msg = f'[สินค้า: {item_id}] {extra}'.strip() if extra else f'[สินค้า: {item_id}]'
-        return bot_msg, None  # ไม่ส่ง item_id แยก — ฝังใน message แล้ว
+        return bot_msg, None, images  # ไม่ส่ง item_id แยก — ฝังใน message แล้ว
 
     if mt == 'order':
-        return text, None
+        return text, None, images
 
     # text ปกติ
-    return text, item_id
+    return text, item_id, images
 
 
 # ─── Triggers (ลอกจาก triggerService.matchTrigger) ──────
@@ -283,7 +331,8 @@ def match_trigger(msg_coll_db, message: str, shop_id: str | None, platform: str)
 def call_bot(message: str, history: list, shop_name: str | None,
              shop_id: str | None, item_id: str | None = None,
              conversation_id: str | None = None,
-             platform: str | None = None) -> dict:
+             platform: str | None = None,
+             images: list[str] | None = None) -> dict:
     body = {'message': message, 'history': history, 'limit': 5}
     if shop_name:
         body['shop'] = shop_name
@@ -296,6 +345,9 @@ def call_bot(message: str, history: list, shop_name: str | None,
         body['conversation_id'] = conversation_id
     if platform:
         body['platform'] = platform
+    # ⚡ Phase 1D — ส่ง images (เหมือน botCallService ใน Next.js)
+    if images:
+        body['images'] = images
     headers = {'Content-Type': 'application/json'}
     if INTERNAL_SECRET:
         headers['X-Internal-Secret'] = INTERNAL_SECRET
@@ -415,7 +467,7 @@ def replay_one(admin_db, prod_db, conv_id: str, verbose: bool = True) -> dict:
 
     for i, um in enumerate(user_msgs):
         parsed = parse_raw_message(um.get('raw_payload'), um.get('text') or '')
-        bot_msg, item_id = build_bot_message(parsed, um)
+        bot_msg, item_id, msg_images = build_bot_message(parsed, um)
 
         # ข้าม system messages (เหมือนที่ trigger จะ handoff ใน production)
         if not bot_msg:
@@ -455,11 +507,14 @@ def replay_one(admin_db, prod_db, conv_id: str, verbose: bool = True) -> dict:
 
         # call bot
         bot = call_bot(bot_msg, history, shop_name, shop_id, item_id,
-                       conversation_id=conv_id, platform=platform)
+                       conversation_id=conv_id, platform=platform,
+                       images=msg_images)
         bot_answer = bot.get('answer', '')
         bot_source = bot.get('source', '')
         bot_ws = bot.get('web_search_used', False)
         bot_handoff = bot.get('handoff_to_admin', False)
+        # ⚡ A2 — cache image_desc จาก bot response (กัน re-read รูปซ้ำใน turn ถัดไป)
+        bot_image_desc = bot.get('image_desc', '')
         # ⚡ เก็บ debug info สำหรับ LLM judge
         bot_log = bot.get('bot_log', '')
         bot_intent = bot.get('intent', {})
@@ -484,6 +539,7 @@ def replay_one(admin_db, prod_db, conv_id: str, verbose: bool = True) -> dict:
             'zaapi_text': zaapi_text, 'zaapi_role': zaapi_role, 'zaapi_source': zaapi_source,
             'bot_answer': bot_answer, 'bot_source': bot_source, 'bot_ws': bot_ws,
             'bot_handoff': bot_handoff, 'bot_error': bot.get('error'),
+            'bot_image_desc': bot_image_desc or None, # ⚡ A2 — vision description
             'status': 'bot_handoff' if bot_handoff else ('trigger_matched' if trigger else 'bot_answered'),
             # ⚡ user message rich media info (เพื่อให้หน้าเว็บแสดงว่าลูกค้าส่งอะไรมา)
             'user_message_type': parsed.get('message_type', 'text'),
@@ -494,6 +550,8 @@ def replay_one(admin_db, prod_db, conv_id: str, verbose: bool = True) -> dict:
                 'order_sn': parsed.get('order_sn'),
                 'notification_text': parsed.get('notification_text'),
             },
+            # ⚡ Phase 1F — ส่ง media URL ให้หน้าเว็บแสดงรูป/วิดีโอจริง
+            'user_media': parsed.get('media'),
             # ⚡ product cards สำหรับแสดงในหน้าเว็บ (lookup จาก dbWallet)
             'user_products': _user_products if _user_products else None,
             # ⚡ debug info สำหรับ LLM judge
@@ -508,7 +566,13 @@ def replay_one(admin_db, prod_db, conv_id: str, verbose: bool = True) -> dict:
         })
 
         # update history (เหมือน route.ts)
-        history.append({'role': 'user', 'text': bot_msg})
+        # ⚡ A2 — รวม images + image_desc ใน history เพื่อให้ bot ใช้ cached description ไม่ re-read รูปเก่า
+        user_hist: dict = {'role': 'user', 'text': bot_msg}
+        if msg_images:
+            user_hist['images'] = msg_images
+        if bot_image_desc:
+            user_hist['image_desc'] = bot_image_desc
+        history.append(user_hist)
         history.append({'role': 'model', 'text': bot_answer or '(no answer)'})
 
         if verbose:

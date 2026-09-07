@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { ChevronDown, ChevronRight, User, Store, MessageSquare, Bot, Headset, History, Package, ShoppingCart } from "lucide-react";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Badge } from "@/components/ui/Badge";
+import { ZAAPI_COLOR, BOT_COLOR, ADMIN_COLOR } from "@/lib/bubbleColors";
 import type { Conversation, ChatMessage, CloseHistoryRecord, ProblemCategory, ProductCard } from "@/lib/types";
 
 const CATEGORY_LABELS: Record<ProblemCategory, string> = {
@@ -32,11 +33,15 @@ export function InfoTab({ conversation, messages, closeHistory }: Props) {
   const botMsgs = messages.filter((m) => m.role === "bot").length;
   const adminMsgs = messages.filter((m) => m.role === "admin");
 
-  // นับ admin คนไหนตอบกี่ msg
-  const adminCounts: Record<string, number> = {};
+  // นับ admin คนไหนตอบกี่ msg — dedup ตาม admin_id แต่แสดง admin_name
+  const adminCounts: Record<string, { name: string; count: number }> = {};
   adminMsgs.forEach((m) => {
-    const id = m.admin_id || m.admin_name || "unknown";
-    adminCounts[id] = (adminCounts[id] || 0) + 1;
+    const id = m.admin_id || "unknown";
+    const name = m.admin_name || m.admin_id || "unknown";
+    if (!adminCounts[id]) adminCounts[id] = { name, count: 0 };
+    adminCounts[id].count += 1;
+    // อัปเดต name ถ้ายังเป็น id แต่ได้ name มาในภายหลัง
+    if (m.admin_name && adminCounts[id].name === id) adminCounts[id].name = m.admin_name;
   });
 
   const statusLabel = conversation.status === "closed" ? "ปิด" : conversation.status === "handoff" || conversation.status === "open" ? "เปิด" : conversation.status;
@@ -107,11 +112,11 @@ export function InfoTab({ conversation, messages, closeHistory }: Props) {
       {productsOffered.length > 0 && (
         <Section title={`สินค้าที่ถูกเสนอในแชท (${productsOffered.length})`} icon={Package}>
           <div className="space-y-1.5">
-            {productsOffered.map((p) => {
+            {productsOffered.map((p, idx) => {
               const safeUrl = typeof p.url === "string" && p.url.startsWith("http") ? p.url : undefined;
               return (
                 <a
-                  key={p.item_id}
+                  key={`${p.item_id}-${idx}`}
                   {...(safeUrl ? { href: safeUrl, target: "_blank", rel: "noopener noreferrer" } : {})}
                   className="flex items-center gap-2 rounded-md bg-surface-2 p-1.5 hover:bg-pale-sky-soft transition-colors"
                 >
@@ -146,11 +151,34 @@ export function InfoTab({ conversation, messages, closeHistory }: Props) {
         <div className="space-y-2">
           <StatRow icon={<User size={12} />} label="user" count={userMsgs} tone="coral" />
           <StatRow icon={<Bot size={12} />} label="bot" count={botMsgs} tone="brand" />
-          {Object.entries(adminCounts).map(([id, count]) => (
-            <StatRow key={id} icon={<Headset size={12} />} label={`admin: ${id}`} count={count} tone="neutral" />
+          {Object.entries(adminCounts).map(([id, { name, count }]) => (
+            <StatRow key={id} icon={<Headset size={12} />} label={`admin: ${name}`} count={count} tone="neutral" />
           ))}
           <div className="pt-2 border-t border-border text-xs text-text-muted">
             รวมทั้งหมด {messages.length} ข้อความ
+          </div>
+        </div>
+
+        {/* ⚡ Legend สี role — ย้ายมาจาก botworker topbar */}
+        <div className="mt-3 pt-2 border-t border-border">
+          <div className="text-[10px] text-text-muted mb-1.5 font-medium uppercase tracking-wide">สีบอทบู</div>
+          <div className="flex items-center gap-3 text-[10px] text-text-muted flex-wrap">
+            <div className="flex items-center gap-1.5">
+              <div className="w-3 h-3 rounded-full bg-surface-2 border border-border" />
+              <span>user</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <div className="w-3 h-3 rounded-full" style={{ backgroundColor: ZAAPI_COLOR }} />
+              <span>zaapi</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <div className="w-3 h-3 rounded-full" style={{ backgroundColor: ADMIN_COLOR }} />
+              <span>admin</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <div className="w-3 h-3 rounded-full" style={{ backgroundColor: BOT_COLOR }} />
+              <span>bot</span>
+            </div>
           </div>
         </div>
       </Section>
@@ -170,17 +198,30 @@ interface OrderItem {
   name: string;
   model_name: string;
   quantity: number;
+  price?: number;
+  image_url?: string;
+  sku?: string;
+  item_id?: string;
+  model_id?: string;
 }
 interface OrderRecord {
   order_sn: string;
   order_status: string;
   order_status_raw: string;
+  logistics_status?: string;
   create_time: string;
+  create_time_raw?: number;
   shopname: string;
   shipping_carrier: string;
+  tracking_no?: string;
+  tracking_numbers?: string[];
   items: OrderItem[];
   item_count: number;
   total_quantity: number;
+  total_amount?: number;
+  currency?: string;
+  buyer_username?: string;
+  payment_method?: string;
 }
 
 function OrderHistorySection({ conversationId }: { conversationId: string }) {
@@ -188,6 +229,8 @@ function OrderHistorySection({ conversationId }: { conversationId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
+  // ⚡ Phase 1C — collapsible per-order card
+  const [openOrders, setOpenOrders] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -209,6 +252,15 @@ function OrderHistorySection({ conversationId }: { conversationId: string }) {
   }, [conversationId]);
 
   const shown = expanded ? orders : orders.slice(0, 5);
+
+  const toggleOrder = (sn: string) => {
+    setOpenOrders((prev) => {
+      const next = new Set(prev);
+      if (next.has(sn)) next.delete(sn);
+      else next.add(sn);
+      return next;
+    });
+  };
 
   return (
     <div className="rounded-xl border border-border bg-surface p-3.5 space-y-2">
@@ -234,36 +286,103 @@ function OrderHistorySection({ conversationId }: { conversationId: string }) {
       {!loading && !error && orders.length > 0 && (
         <>
           <div className="space-y-2">
-            {shown.map((o) => (
-              <div key={o.order_sn} className="rounded-lg bg-surface-2 p-2 space-y-1">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[11px] font-mono text-text-muted">{o.order_sn}</span>
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                    o.order_status_raw === "COMPLETED" ? "bg-green-100 text-green-700" :
-                    o.order_status_raw === "CANCELLED" ? "bg-red-100 text-red-700" :
-                    o.order_status_raw === "SHIPPED" || o.order_status_raw === "TO_CONFIRM_RECEIVE" ? "bg-blue-100 text-blue-700" :
-                    "bg-surface text-text-muted"
-                  }`}>
-                    {o.order_status}
-                  </span>
-                </div>
-                <div className="text-[11px] text-text-muted">
-                  {o.create_time} · {o.shipping_carrier || "ไม่ระบุขนส่ง"} · {o.shopname}
-                </div>
-                {o.items.length > 0 && (
-                  <div className="text-[11px] text-text space-y-0.5">
-                    {o.items.slice(0, 3).map((i, idx) => (
-                      <div key={idx} className="truncate">
-                        · {i.name} {i.quantity > 1 && `×${i.quantity}`}
-                      </div>
-                    ))}
-                    {o.items.length > 3 && (
-                      <div className="text-text-subtle">+{o.items.length - 3} รายการ</div>
-                    )}
+            {shown.map((o) => {
+              const isOpen = openOrders.has(o.order_sn);
+              return (
+                <div key={o.order_sn} className="rounded-lg bg-surface-2 p-2 space-y-1.5">
+                  {/* Header row — click to expand */}
+                  <button
+                    onClick={() => toggleOrder(o.order_sn)}
+                    className="w-full flex items-center justify-between gap-2 text-left"
+                  >
+                    <span className="text-[11px] font-mono text-text-muted truncate">{o.order_sn}</span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                        o.order_status_raw === "COMPLETED" ? "bg-green-100 text-green-700" :
+                        o.order_status_raw === "CANCELLED" ? "bg-red-100 text-red-700" :
+                        o.order_status_raw === "SHIPPED" || o.order_status_raw === "TO_CONFIRM_RECEIVE" ? "bg-blue-100 text-blue-700" :
+                        "bg-surface text-text-muted"
+                      }`}>
+                        {o.order_status}
+                      </span>
+                      <span className="text-[10px] text-text-subtle">{isOpen ? "▲" : "▼"}</span>
+                    </div>
+                  </button>
+                  {/* Summary row — always visible */}
+                  <div className="text-[11px] text-text-muted">
+                    {o.create_time} · {o.shipping_carrier || "ไม่ระบุขนส่ง"} · {o.shopname}
                   </div>
-                )}
-              </div>
-            ))}
+                  {/* Items preview — always visible (first 2) */}
+                  {o.items.length > 0 && !isOpen && (
+                    <div className="text-[11px] text-text space-y-0.5">
+                      {o.items.slice(0, 2).map((i, idx) => (
+                        <div key={idx} className="flex items-center gap-1.5 truncate">
+                          {i.image_url && (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={i.image_url} alt="" className="w-6 h-6 rounded object-cover shrink-0" />
+                          )}
+                          <span className="truncate">
+                            {i.name} {i.quantity > 1 && `×${i.quantity}`}
+                          </span>
+                        </div>
+                      ))}
+                      {o.items.length > 2 && (
+                        <div className="text-text-subtle">+{o.items.length - 2} รายการ (กดเปิดดู)</div>
+                      )}
+                    </div>
+                  )}
+                  {/* Expanded details */}
+                  {isOpen && (
+                    <div className="pt-1.5 border-t border-border/40 space-y-1.5">
+                      {/* All items with image + price + variant */}
+                      {o.items.length > 0 && (
+                        <div className="space-y-1.5">
+                          {o.items.map((i, idx) => (
+                            <div key={idx} className="flex items-start gap-2">
+                              {i.image_url ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img src={i.image_url} alt="" className="w-12 h-12 rounded object-cover shrink-0" />
+                              ) : (
+                                <div className="w-12 h-12 rounded bg-surface shrink-0 flex items-center justify-center text-[10px] text-text-subtle">ไม่มีรูป</div>
+                              )}
+                              <div className="flex-1 min-w-0 space-y-0.5">
+                                <div className="text-[11px] text-text leading-tight">{i.name}</div>
+                                {i.model_name && i.model_name !== i.name && (
+                                  <div className="text-[10px] text-text-muted">รุ่น: {i.model_name}</div>
+                                )}
+                                <div className="flex items-center gap-2 text-[10px] text-text-muted">
+                                  <span>×{i.quantity}</span>
+                                  {i.price ? <span>฿{i.price.toLocaleString()}</span> : null}
+                                  {i.sku && <span className="truncate">SKU: {i.sku}</span>}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {/* Order meta */}
+                      <div className="pt-1 border-t border-border/40 text-[10px] text-text-muted space-y-0.5">
+                        {o.total_amount ? (
+                          <div>ยอดรวม: ฿{(o.total_amount || 0).toLocaleString()} {o.currency || "THB"}</div>
+                        ) : null}
+                        {o.tracking_no && (
+                          <div>เลขพัสดุ: <span className="font-mono">{o.tracking_numbers?.length && o.tracking_numbers.length > 1 ? o.tracking_numbers.join(", ") : o.tracking_no}</span></div>
+                        )}
+                        {o.logistics_status && (
+                          <div>สถานะขนส่ง: {o.logistics_status}</div>
+                        )}
+                        {o.payment_method && (
+                          <div>ชำระเงิน: {o.payment_method}</div>
+                        )}
+                        {o.buyer_username && (
+                          <div>ผู้ซื้อ: {o.buyer_username}</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
           {orders.length > 5 && (
             <button
@@ -376,7 +495,7 @@ function CloseHistoryCards({ history }: { history: CloseHistoryRecord[] }) {
                 </div>
               </div>
               <span className={`text-[10px] px-1.5 py-0.5 rounded ${isReopened ? "bg-brand/10 text-brand" : "bg-surface-2 text-text-muted"}`}>
-                {isReopened ? "เปิดใหม่แล้ว" : "ปิดอยู่"}
+                {isReopened ? "เปิดใหม่แล้ว" : "ปิดแล้ว"}
               </span>
             </button>
             {expanded && (

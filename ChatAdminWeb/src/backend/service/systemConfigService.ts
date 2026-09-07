@@ -46,11 +46,20 @@ export interface SystemConfigDoc extends Document {
   bot_buffer_enabled: boolean;       // เปิด/ปิด message buffering
   bot_buffer_window_ms: number;      // รอ X ms หลัง message สุดท้ายก่อนประมวลผล
   bot_buffer_max_messages: number;   // ถ้าครบ X ข้อความใน window → ประมวลผลเลย
+  // ⚡ Phase 1E — media-aware buffer: รอนานกว่า + รับได้มากกว่าเมื่อมีรูป/วิดีโอ
+  bot_buffer_window_media_ms: number;    // window สำหรับ media (default = window * 2)
+  bot_buffer_max_media_messages: number; // max สำหรับ media (default = max * 2)
+  // ⚡ Phase 2Q — concurrency limit (จำนวน callBot ขนานกันสูงสุด)
+  bot_concurrency_limit: number;         // default 50 — ป้องกัน Python bot โอเวอร์โหลด
 
   // === Workflow Engine (แบบ Zaapi Flow Builder) — superadmin/dev configurable ===
   workflow_enabled: boolean;              // สวิตช์เปิด/ปิด workflow engine ทั้งหมด
   workflow_priority: 'workflow_first' | 'trigger_first' | 'both';  // ลำดับ workflow vs trigger
   workflow_run_timeout_ms: number;        // flow รอ reply เกินเวลานี้ → cancel อัตโนมัติ
+
+  // === Assignment — admin-configurable ===
+  // ⚡ G2 — true = จ่ายงานให้แอดมินคนเดิมที่เคยตอบก่อน, false = round-robin เลย
+  assignment_prefer_previous_admin: boolean;
 
   // === Bot service URLs (3 ตัว แยก port) ===
   shopee_bot_url: string;
@@ -77,9 +86,14 @@ function getSafeDefaults(): Partial<SystemConfigDoc> {
     bot_buffer_enabled: process.env.BOT_BUFFER_ENABLED === 'true',
     bot_buffer_window_ms: Number(process.env.BOT_BUFFER_WINDOW_MS || 6000),
     bot_buffer_max_messages: Number(process.env.BOT_BUFFER_MAX_MESSAGES || 5),
+    bot_buffer_window_media_ms: Number(process.env.BOT_BUFFER_WINDOW_MEDIA_MS || 12000),
+    bot_buffer_max_media_messages: Number(process.env.BOT_BUFFER_MAX_MEDIA_MESSAGES || 10),
+    bot_concurrency_limit: Number(process.env.BOT_CONCURRENCY_LIMIT || 50),
     workflow_enabled: process.env.WORKFLOW_ENABLED === 'true',
     workflow_priority: (process.env.WORKFLOW_PRIORITY as 'workflow_first' | 'trigger_first' | 'both') || 'workflow_first',
     workflow_run_timeout_ms: Number(process.env.WORKFLOW_RUN_TIMEOUT_MS || 1800000),
+    // ⚡ G2 — default true = จ่ายงานให้แอดมินคนเดิม (behavior เดิม)
+    assignment_prefer_previous_admin: process.env.ASSIGNMENT_PREFER_PREVIOUS_ADMIN !== 'false',
     shopee_bot_url: process.env.CHATBOT_BASE_URL_SHOPEE || 'http://127.0.0.1:8010',
     tiktok_bot_url: process.env.CHATBOT_BASE_URL_TIKTOK || 'http://127.0.0.1:8011',
     lazada_bot_url: process.env.CHATBOT_BASE_URL_LAZADA || 'http://127.0.0.1:8012',
@@ -117,11 +131,17 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
     bot_buffer_enabled: dbConfig.bot_buffer_enabled ?? safeDefaults.bot_buffer_enabled ?? false,
     bot_buffer_window_ms: dbConfig.bot_buffer_window_ms ?? safeDefaults.bot_buffer_window_ms ?? 6000,
     bot_buffer_max_messages: dbConfig.bot_buffer_max_messages ?? safeDefaults.bot_buffer_max_messages ?? 5,
+    bot_buffer_window_media_ms: dbConfig.bot_buffer_window_media_ms ?? safeDefaults.bot_buffer_window_media_ms ?? 12000,
+    bot_buffer_max_media_messages: dbConfig.bot_buffer_max_media_messages ?? safeDefaults.bot_buffer_max_media_messages ?? 10,
+    bot_concurrency_limit: dbConfig.bot_concurrency_limit ?? safeDefaults.bot_concurrency_limit ?? 50,
 
     // Workflow engine — จาก DB หรือ env (default: ปิด + workflow_first + timeout 30 นาที)
     workflow_enabled: dbConfig.workflow_enabled ?? safeDefaults.workflow_enabled ?? false,
     workflow_priority: dbConfig.workflow_priority ?? safeDefaults.workflow_priority ?? 'workflow_first',
     workflow_run_timeout_ms: dbConfig.workflow_run_timeout_ms ?? safeDefaults.workflow_run_timeout_ms ?? 1800000,
+
+    // ⚡ G2 — assignment: จ่ายงานให้แอดมินคนเดิม (default true = behavior เดิม)
+    assignment_prefer_previous_admin: dbConfig.assignment_prefer_previous_admin ?? safeDefaults.assignment_prefer_previous_admin ?? true,
 
     // Bot URLs — จาก DB หรือ env
     shopee_bot_url: dbConfig.shopee_bot_url ?? safeDefaults.shopee_bot_url ?? 'http://127.0.0.1:8010',
@@ -170,9 +190,14 @@ export async function getSystemConfig(forceRefresh = false): Promise<SystemConfi
         bot_buffer_enabled: safeDefaults.bot_buffer_enabled ?? false,
         bot_buffer_window_ms: safeDefaults.bot_buffer_window_ms ?? 6000,
         bot_buffer_max_messages: safeDefaults.bot_buffer_max_messages ?? 5,
+        bot_buffer_window_media_ms: safeDefaults.bot_buffer_window_media_ms ?? 12000,
+        bot_buffer_max_media_messages: safeDefaults.bot_buffer_max_media_messages ?? 10,
+        bot_concurrency_limit: safeDefaults.bot_concurrency_limit ?? 50,
         workflow_enabled: safeDefaults.workflow_enabled ?? false,
         workflow_priority: safeDefaults.workflow_priority ?? 'workflow_first',
         workflow_run_timeout_ms: safeDefaults.workflow_run_timeout_ms ?? 1800000,
+        // ⚡ G2 — default true = จ่ายงานให้แอดมินคนเดิม
+        assignment_prefer_previous_admin: safeDefaults.assignment_prefer_previous_admin ?? true,
         shopee_bot_url: safeDefaults.shopee_bot_url ?? 'http://127.0.0.1:8010',
         tiktok_bot_url: safeDefaults.tiktok_bot_url ?? 'http://127.0.0.1:8011',
         lazada_bot_url: safeDefaults.lazada_bot_url ?? 'http://127.0.0.1:8012',
@@ -211,6 +236,8 @@ export async function updateSystemConfig(
     'bot_buffer_enabled',
     'bot_buffer_window_ms',
     'bot_buffer_max_messages',
+    'bot_buffer_window_media_ms',
+    'bot_buffer_max_media_messages',
     'workflow_enabled',
     'workflow_priority',
     'workflow_run_timeout_ms',
@@ -341,10 +368,16 @@ export const ADMIN_CONFIGURABLE_KEYS = [
   'bot_buffer_enabled',
   'bot_buffer_window_ms',
   'bot_buffer_max_messages',
+  'bot_buffer_window_media_ms',
+  'bot_buffer_max_media_messages',
+  // ⚡ Phase 2Q — concurrency limit (admin ปรับได้)
+  'bot_concurrency_limit',
   // Workflow engine — admin เปิด/ปิด + ปรับ priority ได้
   'workflow_enabled',
   'workflow_priority',
   'workflow_run_timeout_ms',
+  // ⚡ G2 — assignment: จ่ายงานให้แอดมินคนเดิมที่เคยตอบ หรือ round-robin
+  'assignment_prefer_previous_admin',
 ] as const;
 
 export type AdminConfigKey = (typeof ADMIN_CONFIGURABLE_KEYS)[number];

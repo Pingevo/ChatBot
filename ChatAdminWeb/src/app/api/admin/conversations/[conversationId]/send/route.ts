@@ -20,6 +20,15 @@ import { logAdminEvent } from "@/backend/service/adminLogService";
 import { assertPlatformApiDisabled } from "@/backend/lib/safety";
 import { auth } from "@/backend/service/authService";
 import { invalidateConversationsCache } from "@/app/api/admin/conversations/route";
+// ⚡ G-fix — invalidate botworker cache ด้วย
+async function invalidateBotworkerCache() {
+  try {
+    const mod = await import("@/app/api/botworker/conversations/route");
+    if (typeof (mod as unknown as { invalidateBotworkerCache?: () => void }).invalidateBotworkerCache === "function") {
+      (mod as unknown as { invalidateBotworkerCache: () => void }).invalidateBotworkerCache();
+    }
+  } catch { /* ignore */ }
+}
 import type { ChatMessage } from "@/lib/types";
 
 export async function POST(
@@ -105,5 +114,6 @@ export async function POST(
 
   // ⚡ invalidate cache — ให้ list อัปเดตทันที (unanswered count เปลี่ยน)
   invalidateConversationsCache();
+  invalidateBotworkerCache();
   return json({ message, assigned_to: conv.assigned_to || null });
 }

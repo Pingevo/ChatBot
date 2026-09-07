@@ -1,5 +1,5 @@
 "use client";
-import { useState, useRef, useEffect, FormEvent } from "react";
+import React, { useState, useRef, useEffect, FormEvent } from "react";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Button } from "@/components/ui/Button";
 import { Loading } from "@/components/ui/Loading";
@@ -25,10 +25,16 @@ import {
   MessageCircle,
   Save,
   BarChart3,
+  Paperclip,
+  Film,
+  History,
 } from "lucide-react";
 import type { Platform } from "@/lib/types";
 import { splitAnswerSegments } from "@/lib/answerSegments";
 import { RateBox } from "@/components/shadow/RateBox";
+import { imageViewer } from "@/components/ui/ImageViewer";
+import { quickReplyService, type QuickReplyRow } from "@/lib/services";
+import { DateBanner, dayKey } from "@/components/shadow/DateBanner";
 
 interface Product {
   item_id?: string;
@@ -101,6 +107,7 @@ interface Msg {
   stats?: MsgStats;
   sessionMsgIndex?: number;  // index ใน messages array ของ session (สำหรับ rate API)
   isGroupLast?: boolean;     // bubble สุดท้ายของกลุ่ม bot answer → RateBox แสดงที่นี่เท่านั้น
+  timestamp?: string;        // ⚡ ISO timestamp — สำหรับ date separator (เหมือน LINE)
 }
 
 /* ---- markdown → HTML (port จากเดิม) ---- */
@@ -354,6 +361,8 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   const [input, setInput] = useState("");
   const [shop, setShop] = useState("");
   const [shops, setShops] = useState<string[]>([]);
+  // ⚡ Phase 2E — quick replies (floating chips above text box)
+  const [quickReplies, setQuickReplies] = useState<QuickReplyRow[]>([]);
   const [limit, setLimit] = useState(10);
   const [sending, setSending] = useState(false);
   // ⚡ handoff state — หลังส่งต่อแอดมิน บอทจะไม่ตอบจนกว่าจะกด "ปิดแชท"
@@ -361,6 +370,8 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   const [assignedAdmin, setAssignedAdmin] = useState<string | null>(null);
   const [assignedAdminName, setAssignedAdminName] = useState<string | null>(null);
   const [assignmentReason, setAssignmentReason] = useState<string | null>(null);
+  // ⚡ Phase 2A — session status จาก DB (open|closed) ส่งให้บอทเป็น ticket_state
+  const [sessionStatus, setSessionStatus] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [logPanelOpen, setLogPanelOpen] = useState(false);
   const [logViewMode, setLogViewMode] = useState<"grouped" | "all">("grouped");
@@ -369,7 +380,8 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     turns: 0, elapsed: 0, prompt: 0, output: 0, total: 0, cost: 0, wsTurns: 0, wsCost: 0, wsTokens: 0,
   });
   const [copyAllLabel, setCopyAllLabel] = useState("คัดลอกแชททั้งหมด");
-  const historyRef = useRef<{ role: "user" | "model"; text: string }[]>([]);
+  // ⚡ A2 — เพิ่ม image_desc ใน history เพื่อให้ bot ใช้ cached description ไม่ re-read รูปเก่า
+  const historyRef = useRef<{ role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[]>([]);
   const msgsRef = useRef<HTMLDivElement>(null);
   // ── Buffer mode state — ใช้ระบบ buffer เหมือนลูกค้าจริง ──
   const [bufferConfig, setBufferConfig] = useState<{ enabled: boolean; window_ms: number; max_messages: number } | null>(null);
@@ -377,9 +389,10 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   const [bufferedCount, setBufferedCount] = useState(0);
   const bufferTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bufferedMessagesRef = useRef<string[]>([]); // messages ที่กำลัง buffer (ยังไม่ส่ง bot)
+  const bufferedImagesRef = useRef<string[]>([]); // ⚡ Phase 1F — images ที่กำลัง buffer
   const bufferSpinnerIdRef = useRef<number | null>(null); // id ของ spinner msg ใน UI
   // ── Right panel tab + all-sessions stats ──
-  const [rightTab, setRightTab] = useState<"session" | "all">("session");
+  const [rightTab, setRightTab] = useState<"session" | "all" | "logs">("session");
   const [allStats, setAllStats] = useState<{
     total_ratings: number;
     good: number;
@@ -400,6 +413,10 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   const [commentDraft, setCommentDraft] = useState("");
   const [commentMsgId, setCommentMsgId] = useState<number | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // ⚡ Phase 1F — image upload state
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [pendingImages, setPendingImages] = useState<{ url: string; type: string; name: string }[]>([]);
+  const [uploading, setUploading] = useState(false);
 
   // ── Session management ──
   const [sessions, setSessions] = useState<{ id: string; shop: string; title: string; message_count: number; updated_at?: string; created_at?: string }[]>([]);
@@ -459,12 +476,14 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       setAssignedAdmin(null);
       setAssignedAdminName(null);
       setAssignmentReason(null);
+      setSessionStatus(null);
       // ⚡ เคลียร์ buffer state เมื่อเปลี่ยน session (กันข้อความ session เก่า ปน session ใหม่)
       if (bufferTimerRef.current) {
         clearTimeout(bufferTimerRef.current);
         bufferTimerRef.current = null;
       }
       bufferedMessagesRef.current = [];
+      bufferedImagesRef.current = [];  // ⚡ Phase 1F
       bufferSpinnerIdRef.current = null;
       setIsBuffering(false);
       setBufferedCount(0);
@@ -475,14 +494,31 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         setAssignedAdminName(d.assigned_to_name || null);
         setAssignmentReason(d.assignment_reason || null);
       }
+      // ⚡ Phase 2A — เก็บ session status จาก DB (open|closed)
+      setSessionStatus(d.status || null);
       const loadedMsgs: Msg[] = [];
-      let hist: { role: "user" | "model"; text: string }[] = [];
+      // ⚡ A2 — hist รวม image_desc ด้วย (ถ้ามีใน session)
+      let hist: { role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[] = [];
       let tot = { turns: 0, elapsed: 0, prompt: 0, output: 0, total: 0, cost: 0, wsTurns: 0, wsCost: 0, wsTokens: 0 };
       for (const m of d.messages || []) {
         const msgIdx = loadedMsgs.length;  // track array index in session
         if (m.role === "user") {
-          loadedMsgs.push({ id: msgIdCounter++, role: "user", html: escapeHtml(m.text), raw: m.text, sessionMsgIndex: msgIdx });
-          hist.push({ role: "user", text: m.text });
+          // ⚡ Phase 1F — render รูปจาก m.images ตอน reload (ไม่ใช่ escapeHtml ทั้งหมด)
+          const userImages: string[] = Array.isArray(m.images) ? m.images : [];
+          const imageHtml = userImages.length > 0
+            ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">${userImages.map((url) =>
+                url.match(/\.(mp4|webm|mov)$/i)
+                  ? `<div style="position:relative;width:80px;height:80px;border-radius:6px;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center"><span style="font-size:24px">🎬</span></div>`
+                  : `<img src="${escapeHtml(url)}" alt="" style="width:80px;height:80px;object-fit:cover;border-radius:6px" />`
+              ).join("")}</div>`
+            : "";
+          loadedMsgs.push({ id: msgIdCounter++, role: "user", html: escapeHtml(m.text) + imageHtml, raw: m.text, sessionMsgIndex: msgIdx, timestamp: m.created_at || m.timestamp });
+          hist.push({
+            role: "user",
+            text: m.text,
+            ...(userImages.length > 0 ? { images: userImages } : {}),
+            ...(m.image_desc ? { image_desc: String(m.image_desc) } : {}),
+          });
         } else if (m.role === "model") {
           // ⚡ Multi-bubble — split คำตอบด้วย ||| เหมือนตอนส่งใหม่
           const segments = splitAnswerSegments(m.text);
@@ -495,6 +531,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             html: formatAnswer(bubbles[0]),
             raw: bubbles[0],
             stats: groupStats,
+            timestamp: m.created_at || m.timestamp,
           });
           // segment ถัดไป → bubble ใหม่ (ไม่มี stats ซ้ำ)
           for (let si = 1; si < bubbles.length; si++) {
@@ -504,6 +541,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
               role: "bot",
               html: formatAnswer(bubbles[si]),
               raw: bubbles[si],
+              timestamp: m.created_at || m.timestamp,
               // ⚡ segment สุดท้าย → มี sessionMsgIndex + stats (สำหรับ RateBox)
               ...(isLast ? { isGroupLast: true, sessionMsgIndex: msgIdx, stats: groupStats } : {}),
             });
@@ -547,7 +585,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     } catch {}
   }
 
-  async function saveMessageToSession(role: "user" | "model", text: string, stats?: MsgStats) {
+  async function saveMessageToSession(role: "user" | "model", text: string, stats?: MsgStats, images?: string[]) {
     if (!currentSessionId) return;
     try {
       // คำนวณ index ของ message ใหม่ใน array (ก่อน push)
@@ -557,7 +595,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           session_id: currentSessionId,
-          message: { role, text, stats: stats || {} },
+          message: { role, text, stats: stats || {}, ...(images && images.length > 0 ? { images } : {}) },
         }),
       });
       // track sessionMsgIndex ใน local state — เฉพาะ groupLast (bubble สุดท้ายของกลุ่ม)
@@ -623,6 +661,41 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       const r = await fetch(`/api/test-chat-ratings?mode=stats`);
       if (r.ok) setAllStats(await r.json());
     } catch {}
+  }
+
+  // ── Load test chat action logs (จาก Python ผ่าน proxy) ──
+  // ⚡ Phase 3 — ประวัติการใช้งาน: ใคร ทำอะไร แชทไหน เมื่อไหร่
+  const [actionLogs, setActionLogs] = useState<Array<{
+    id: string;
+    action: string;
+    session_id: string | null;
+    admin_id: string;
+    admin_name: string;
+    shop?: string;
+    timestamp: string;
+    role?: string;
+    text_preview?: string;
+    title?: string;
+    [k: string]: unknown;
+  }>>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsScope, setLogsScope] = useState<"me" | "all">("me");
+
+  async function loadActionLogs() {
+    setLogsLoading(true);
+    try {
+      const scope = logsScope === "all" ? "all" : "";
+      const url = `/api/chatbot/shopee/test-chat/logs?limit=200${scope ? `&admin_id=${scope}` : ""}`;
+      const r = await fetch(url);
+      if (r.ok) {
+        const d = await r.json();
+        setActionLogs(d.logs || []);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLogsLoading(false);
+    }
   }
 
   // ── Load ratings ของ session นี้ แล้ว merge เข้า messages ──
@@ -694,6 +767,14 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ⚡ Phase 2E — โหลด quick replies เมื่อ shop เปลี่ยน (กรองตาม platform + shop + enabled)
+  useEffect(() => {
+    if (!shop) { setQuickReplies([]); return; }
+    quickReplyService.list({ platform: "shopee", shop_id: shop, enabled_only: "1" })
+      .then((rows) => setQuickReplies(rows))
+      .catch(() => setQuickReplies([]));
+  }, [shop]);
+
   // ⚡ ไม่ต้อง reload sessions เมื่อเปลี่ยนร้าน — โหลดทุกร้านแล้ว ใช้ filter ใน frontend
 
   useEffect(() => {
@@ -710,18 +791,64 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     } catch {}
   }
 
-  async function send(e?: FormEvent) {
+  // ⚡ Phase 1F — image upload handler
+  async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    try {
+      for (const file of Array.from(files)) {
+        const fd = new FormData();
+        fd.append("file", file);
+        const r = await fetch("/api/test-chat/upload", { method: "POST", body: fd });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.url) {
+          toast.error(j.error || `อัปโหลดล้มเหลว (${r.status})`);
+          continue;
+        }
+        setPendingImages((prev) => [...prev, { url: j.url, type: j.content_type || "image/jpeg", name: j.filename || "upload" }]);
+      }
+    } catch (err) {
+      toast.error("อัปโหลดล้มเหลว — กรุณาลองใหม่");
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  function removePendingImage(idx: number) {
+    setPendingImages((prev) => prev.filter((_, i) => i !== idx));
+  }
+
+  async function send(e?: FormEvent, overrideMessage?: string) {
     e?.preventDefault();
-    const message = input.trim();
-    if (!message || sending) return;
+    const message = (overrideMessage ?? input).trim();
+    const images = [...pendingImages];
+    if ((!message && images.length === 0) || sending) return;
     // ⚡ ถ้า handedOff แล้ว — บอทไม่ตอบ ให้กดปุ่มปิดแชทก่อน
     if (handedOff) {
       toast.info("แชทถูกส่งต่อแอดมินแล้ว — กด 'ปิดแชท (ให้บอทตอบต่อ)' เพื่อคุยกับบอทอีกครั้ง");
       return;
     }
     setInput("");
+    setPendingImages([]);
+    // ⚡ reset textarea height หลังส่ง
+    if (inputRef.current) inputRef.current.style.height = "auto";
 
-    const userMsg: Msg = { id: msgIdCounter++, role: "user", html: escapeHtml(message) };
+    // ⚡ Phase 1F — สร้าง user message bubble (รวมรูป preview)
+    const imagePreviewHtml = images.length > 0
+      ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">${images.map((img) =>
+          img.type.startsWith("video/")
+            ? `<div style="position:relative;width:80px;height:80px;border-radius:6px;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center"><span style="font-size:24px">🎬</span></div>`
+            : `<img src="${escapeHtml(img.url)}" alt="" style="width:80px;height:80px;object-fit:cover;border-radius:6px" />`
+        ).join("")}</div>`
+      : "";
+    const userMsg: Msg = {
+      id: msgIdCounter++,
+      role: "user",
+      html: (message ? escapeHtml(message) : "") + imagePreviewHtml,
+      timestamp: new Date().toISOString(),
+    };
 
     // ⚡ Buffer mode — ใช้ระบบ buffer เหมือนลูกค้าจริง
     // ถ้า buffer เปิดอยู่และมี session → เข้า buffer flow (ไม่ส่ง bot ทันที)
@@ -729,7 +856,19 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     if (bufferConfig?.enabled && currentSessionId) {
       // เก็บ message ไว้ใน buffer ref (ยังไม่ push ลง historyRef — จะใส่ combined ตอน flush)
       bufferedMessagesRef.current.push(message);
-      saveMessageToSession("user", message);
+      // ⚡ Phase 1F — เก็บ images ด้วย
+      if (images.length > 0) {
+        const origin = window.location.origin;
+        for (const img of images) {
+          const absUrl = img.url.startsWith("http") ? img.url : `${origin}${img.url}`;
+          if (!bufferedImagesRef.current.includes(absUrl)) bufferedImagesRef.current.push(absUrl);
+        }
+      }
+      // ⚡ Phase 1F — save พร้อม images (สำหรับ reload)
+      const savedImages = images.length > 0
+        ? images.map((img) => img.url.startsWith("http") ? img.url : `${window.location.origin}${img.url}`)
+        : undefined;
+      saveMessageToSession("user", message, undefined, savedImages);
 
       // ⚡ แทรก user msg ก่อน spinner (ถ้ามี) — ไม่งั้น b2 จะไปอยู่หลัง spinner
       // ตอนสด: [b1, spinner, b2] ← ผิด → แก้เป็น [b1, b2, spinner] ← ถูก
@@ -752,6 +891,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
           id: msgIdCounter++,
           role: "bot",
           html: `<div style="color:#6366f1;font-size:13px">⏳ <span class="tc-spinner"></span>กำลัง buffer ข้อความ... (1 ข้อความ)</div>`,
+          timestamp: new Date().toISOString(),
         };
         bufferSpinnerIdRef.current = bufMsg.id;
         setMessages((prev) => [...prev, bufMsg]);
@@ -768,7 +908,13 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         const br = await fetch("/api/test-chat/buffer", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: currentSessionId, message, shop, platform: "shopee" }),
+          body: JSON.stringify({
+            session_id: currentSessionId,
+            message,
+            shop,
+            platform: "shopee",
+            images: images.map((i) => i.url),  // ⚡ Phase 1F — ส่ง image URLs
+          }),
         });
         const bj = await br.json().catch(() => ({}));
 
@@ -804,11 +950,23 @@ export function TestChatClient({ platform }: { platform: Platform }) {
 
     // ── Normal flow (ไม่มี buffer) — ส่ง bot ทันทีเหมือนเดิม ──
     setSending(true); // ⚡ ล็อค input เฉพาะ normal mode (รอ bot ตอบ)
-    const spinnerMsg: Msg = { id: msgIdCounter++, role: "bot", html: '<span class="tc-spinner"></span>กำลังคิด...' };
+    // ⚡ แสดง user message ทันทีก่อนสร้าง spinner — ไม่งั้นต้องรีเฟรชหน้าถึงจะเห็น
+    setMessages((prev) => [...prev, userMsg]);
+    const spinnerMsg: Msg = { id: msgIdCounter++, role: "bot", html: '<span class="tc-spinner"></span>กำลังคิด...', timestamp: new Date().toISOString() };
     setMessages((prev) => [...prev, spinnerMsg]);
-    const priorHistory = historyRef.current.slice(-10).map((h) => ({ role: h.role, text: h.text }));
-    historyRef.current.push({ role: "user", text: message });
-    saveMessageToSession("user", message);
+    // ⚡ A2 — ส่ง image_desc ใน history ด้วย เพื่อให้ bot ใช้ cached description ไม่ re-read รูปเก่า
+    const priorHistory = historyRef.current.slice(-10).map((h) => ({
+      role: h.role,
+      text: h.text,
+      ...(h.images ? { images: h.images } : {}),
+      ...(h.image_desc ? { image_desc: h.image_desc } : {}),
+    }));
+    historyRef.current.push({ role: "user", text: message, ...(images.length > 0 ? { images: images.map((i) => i.url.startsWith("http") ? i.url : `${window.location.origin}${i.url}`) } : {}) });
+    // ⚡ Phase 1F — save พร้อม images (สำหรับ reload)
+    const directImages = images.length > 0
+      ? images.map((i) => i.url.startsWith("http") ? i.url : `${window.location.origin}${i.url}`)
+      : undefined;
+    saveMessageToSession("user", message, undefined, directImages);
 
     try {
       // ⚡ Step 1: Check trigger ก่อน (เหมือน bot-worker)
@@ -921,6 +1079,15 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         payload.conversation_id = currentSessionId;
         payload.simulate_assignment = true;
       }
+      // ⚡ Phase 2A — ส่ง ticket_state ให้บอท (state-driven handoff reset)
+      if (sessionStatus) {
+        payload.ticket_state = sessionStatus;
+      }
+      // ⚡ Phase 1F — ส่ง images ให้ bot (แปลง URL สัมพันธ์เป็น absolute)
+      if (images.length > 0) {
+        const origin = window.location.origin;
+        payload.images = images.map((i) => (i.url.startsWith("http") ? i.url : `${origin}${i.url}`));
+      }
       const r = await fetch("/api/chatbot/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -935,6 +1102,14 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         return;
       }
       const answerText = j.answer || "(ไม่มีคำตอบ)";
+      // ⚡ A2 — cache image_desc ที่ bot คืนกลับมา ลง history entry ล่าสุด (user message)
+      //   ทำให้ turn ถัดไปส่ง image_desc ใน history → bot ไม่ต้อง re-read รูปซ้ำ
+      if (j.image_desc && historyRef.current.length > 0) {
+        const lastIdx = historyRef.current.length - 1;
+        if (historyRef.current[lastIdx].role === "user") {
+          historyRef.current[lastIdx].image_desc = String(j.image_desc);
+        }
+      }
       // ⚡ Multi-bubble — bot แบ่งคำตอบด้วย ||| (หรือ answer_segments จาก Python)
       // split เป็นหลาย segment แล้วสร้างหลาย message (แทนที่ spinnerMsg ด้วย segment แรก + เพิ่มที่เหลือ)
       const segments: string[] = Array.isArray(j.answer_segments) && j.answer_segments.length > 0
@@ -1049,7 +1224,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     }
 
     const combinedText = msgs.join(" ");
+    const flushedImages = [...bufferedImagesRef.current];  // ⚡ เก็บก่อน clear
     bufferedMessagesRef.current = [];
+    bufferedImagesRef.current = [];  // ⚡ Phase 1F — clear หลัง flush
     setSending(true);
 
     // เปลี่ยน spinner เป็น "กำลังคิด..."
@@ -1060,7 +1237,13 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       } : m));
     }
 
-    const priorHistory = historyRef.current.slice(-10).map((h) => ({ role: h.role, text: h.text }));
+    // ⚡ A2 — ส่ง image_desc ใน history ด้วย เพื่อให้ bot ใช้ cached description ไม่ re-read รูปเก่า
+    const priorHistory = historyRef.current.slice(-10).map((h) => ({
+      role: h.role,
+      text: h.text,
+      ...(h.images ? { images: h.images } : {}),
+      ...(h.image_desc ? { image_desc: h.image_desc } : {}),
+    }));
 
     // ⚡ Workflow step helper — เรียก workflow engine (เหมือน bot-worker ①②) แล้วจัดการผล
     // phase "entry" = จุดเริ่ม (resume + workflow_first/both) / "after_trigger" = trigger ไม่ match (trigger_first)
@@ -1093,7 +1276,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             toast.success(`🔀 workflow จ่ายงานให้: ${agentName}`);
           }
           // render delivered messages ของ flow (แบบเดียวกับ template — split + format)
-          historyRef.current.push({ role: "user", text: combinedText });
+          historyRef.current.push({ role: "user", text: combinedText, ...(bufferedImagesRef.current.length > 0 ? { images: [...bufferedImagesRef.current] } : {}) });
           if (flowMsgs.length === 0) {
             // flow ทำ action แต่ไม่มี message (เช่น assign อย่างเดียว) → แสดง status box
             historyRef.current.push({ role: "model", text: `⚙️ workflow: ${ws.detail}` });
@@ -1220,7 +1403,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         setAssignedAdminName(adminName || null);
         setAssignmentReason(assignReason);
         toast.success(handoffText);
-        historyRef.current.push({ role: "user", text: combinedText });
+        historyRef.current.push({ role: "user", text: combinedText, ...(bufferedImagesRef.current.length > 0 ? { images: [...bufferedImagesRef.current] } : {}) });
         historyRef.current.push({ role: "model", text: handoffText });
         // ⚡ ไม่ save combinedText ซ้ำ — b1, b2 ถูก save ไปแล้วตอนพิมพ์ (saveMessageToSession ใน buffer flow)
         saveMessageToSession("model", handoffText);
@@ -1247,7 +1430,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         const templateText = triggerMatched.bot_template;
         const segments = splitAnswerSegments(templateText);
         const bubbles = segments.length > 0 ? segments : [templateText];
-        historyRef.current.push({ role: "user", text: combinedText });
+        historyRef.current.push({ role: "user", text: combinedText, ...(bufferedImagesRef.current.length > 0 ? { images: [...bufferedImagesRef.current] } : {}) });
         historyRef.current.push({ role: "model", text: templateText });
         const stats: MsgStats = {
           source: "trigger_bot_answer",
@@ -1327,7 +1510,14 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         ? fj.answer_segments.map((s: string) => String(s).trim()).filter((s: string) => s.length > 0)
         : splitAnswerSegments(answerText);
       const bubbles = segments.length > 0 ? segments : [answerText];
-      historyRef.current.push({ role: "user", text: combinedText });
+      // ⚡ A2 — push user พร้อม images แล้ว cache image_desc หลัง bot ตอบ
+      historyRef.current.push({ role: "user", text: combinedText, ...(bufferedImagesRef.current.length > 0 ? { images: [...bufferedImagesRef.current] } : {}) });
+      if (fj.image_desc && historyRef.current.length > 0) {
+        const lastIdx = historyRef.current.length - 1;
+        if (historyRef.current[lastIdx].role === "user") {
+          historyRef.current[lastIdx].image_desc = String(fj.image_desc);
+        }
+      }
       historyRef.current.push({ role: "model", text: answerText });
       setLastProducts(fj.products || []);
       const stats: MsgStats = {
@@ -1816,7 +2006,15 @@ export function TestChatClient({ platform }: { platform: Platform }) {
           {/* ── Chat column ── */}
           <section className="flex-1 min-h-0 flex flex-col border-r border-border">
             <div ref={msgsRef} className="flex-1 min-h-0 overflow-y-auto p-4 md:p-5 flex flex-col gap-3">
-              {messages.map((m) => (
+              {messages.map((m, _i) => {
+                // ⚡ Date separator — แทรก DateBanner เมื่อวันเปลี่ยน (เหมือน LINE)
+                const _ts = m.timestamp || new Date().toISOString();
+                const _dk = dayKey(_ts);
+                const _prevTs = messages[_i - 1]?.timestamp || new Date().toISOString();
+                const _showDate = _i === 0 || _dk !== dayKey(_prevTs);
+                return (
+                <React.Fragment key={m.id}>
+                {_showDate && <DateBanner timestamp={_ts} onlyToday />}
                 <div
                   key={m.id}
                   className={`tc-msg relative max-w-[min(88%,680px)] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed break-words overflow-hidden shrink-0 ${
@@ -1974,10 +2172,23 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                       )}
                     </>
                   ) : (
-                    <span dangerouslySetInnerHTML={{ __html: m.html }} />
+                    <span
+                      dangerouslySetInnerHTML={{ __html: m.html }}
+                      onClick={(e) => {
+                        // ⚡ Phase 1F — กดที่ <img> แล้วเปิด imageViewer
+                        const target = e.target as HTMLElement;
+                        if (target.tagName === "IMG") {
+                          const src = (target as HTMLImageElement).src;
+                          if (src) imageViewer.show(src, { type: "image", alt: "รูปที่ส่ง" });
+                        }
+                      }}
+                      style={{ cursor: m.html.includes("<img") ? "pointer" : undefined }}
+                    />
                   )}
                 </div>
-              ))}
+                </React.Fragment>
+                );
+              })}
             </div>
 
             {/* Composer */}
@@ -1994,11 +2205,22 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => {
+                    onClick={async () => {
+                      // ⚡ Phase 2A — เรียก API ปิดแชท (state-driven) ไม่ใช่แค่ client toggle
+                      if (currentSessionId) {
+                        try {
+                          await fetch(`/api/chatbot/shopee/test-chat/sessions/${currentSessionId}/close`, {
+                            method: "POST",
+                          });
+                        } catch (e) {
+                          console.error("[close-chat] failed:", e);
+                        }
+                      }
                       setHandedOff(false);
                       setAssignedAdmin(null);
                       setAssignedAdminName(null);
                       setAssignmentReason(null);
+                      setSessionStatus("closed"); // ⚡ Phase 2A — อัปเดต session status
                       toast.success("ปิดแชทแล้ว — บอทตอบได้ต่อ");
                     }}
                     className="shrink-0 text-xs"
@@ -2007,21 +2229,85 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                   </Button>
                 </div>
               )}
+              {/* ⚡ Phase 2E — quick replies floating chips (เหนือ textarea) — กดแล้วส่งเลย */}
+              {quickReplies.length > 0 && !handedOff && (
+                <div className="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto">
+                  {quickReplies.map((qr) => (
+                    <button
+                      key={qr.quick_reply_id}
+                      type="button"
+                      onClick={() => send(undefined, qr.body)}
+                      title={qr.body}
+                      className="px-2.5 py-1 rounded-full border border-brand/30 bg-brand/5 text-xs text-brand hover:bg-brand/10 hover:border-brand/50 transition-colors whitespace-nowrap max-w-[160px] truncate"
+                    >
+                      {qr.title}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="flex gap-2">
+              {/* ⚡ Phase 1F — hidden file input */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*,video/*"
+                multiple
+                onChange={handleFileSelect}
+                className="hidden"
+              />
               <textarea
                 ref={inputRef}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => {
+                  setInput(e.target.value);
+                  // ⚡ auto-expand — ขยายตามจำนวนบรรทัด (ไม่ scroll) สูงสุด 120px
+                  const ta = e.target;
+                  ta.style.height = "auto";
+                  ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
+                }}
                 onKeyDown={handleKeyDown}
                 placeholder={handedOff ? "แชทถูกส่งต่อแอดมิน — กดปุ่มปิดแชทก่อน" : "พิมพ์คำถามที่นี่... (Enter ส่ง · Shift+Enter ขึ้นบรรทัด)"}
                 disabled={sending || handedOff}
-                className="flex-1 resize-none h-14 px-3 py-2.5 rounded-xl border border-border bg-surface-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30 disabled:opacity-60"
+                className="flex-1 resize-none min-h-[56px] max-h-[120px] px-3 py-2.5 rounded-xl border border-border bg-surface-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30 disabled:opacity-60 overflow-hidden"
               />
-              <Button onClick={() => send()} disabled={sending || !input.trim() || handedOff} className="self-end">
+              {/* ⚡ Phase 1F — upload button */}
+              <Button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={sending || handedOff || uploading}
+                title="แนบรูป/วิดีโอ"
+                className="self-end"
+              >
+                {uploading ? <Loading size={16} /> : <Paperclip size={16} />}
+              </Button>
+              <Button onClick={() => send()} disabled={sending || (!input.trim() && pendingImages.length === 0) || handedOff} className="self-end">
                 {sending ? <Loading size={16} /> : <Send size={16} />}
                 <span className="hidden sm:inline">ส่ง</span>
               </Button>
               </div>
+              {/* ⚡ Phase 1F — pending image previews */}
+              {pendingImages.length > 0 && (
+                <div className="flex flex-wrap gap-2 mt-2">
+                  {pendingImages.map((img, idx) => (
+                    <div key={idx} className="relative group">
+                      {img.type.startsWith("video/") ? (
+                        <div className="w-16 h-16 rounded-lg bg-black flex items-center justify-center border border-border">
+                          <Film size={20} className="text-white/70" />
+                        </div>
+                      ) : (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={img.url} alt="" className="w-16 h-16 object-cover rounded-lg border border-border" />
+                      )}
+                      <button
+                        onClick={() => removePendingImage(idx)}
+                        className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="ลบ"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </section>
 
@@ -2228,12 +2514,16 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                 {([
                   { id: "session" as const, label: "Session", icon: BarChart3 },
                   { id: "all" as const, label: "All Sessions", icon: BarChart3 },
+                  { id: "logs" as const, label: "ประวัติ", icon: History },
                 ]).map((t) => {
                   const active = rightTab === t.id;
                   return (
                     <button
                       key={t.id}
-                      onClick={() => setRightTab(t.id)}
+                      onClick={() => {
+                        setRightTab(t.id);
+                        if (t.id === "logs" && actionLogs.length === 0) loadActionLogs();
+                      }}
                       className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-medium border-b-2 transition-colors ${
                         active
                           ? "border-brand text-brand"
@@ -2493,6 +2783,92 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                           <div className="text-sm font-semibold text-emerald-500">${"$"}{allStats.avg_cost_usd.toFixed(6)}</div>
                         </div>
                       </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Tab: Logs (ประวัติการใช้งาน — ใคร ทำอะไร แชทไหน) ── */}
+              {rightTab === "logs" && (
+                <div className="space-y-3">
+                  {/* Scope toggle + refresh */}
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center rounded-lg border border-border bg-surface-2 p-0.5">
+                      <button
+                        onClick={() => { setLogsScope("me"); setTimeout(loadActionLogs, 0); }}
+                        className={`h-6 px-2 rounded-md text-[10px] transition-colors ${logsScope === "me" ? "bg-brand text-white" : "text-text-muted hover:text-text"}`}
+                      >
+                        ฉัน
+                      </button>
+                      <button
+                        onClick={() => { setLogsScope("all"); setTimeout(loadActionLogs, 0); }}
+                        className={`h-6 px-2 rounded-md text-[10px] transition-colors ${logsScope === "all" ? "bg-brand text-white" : "text-text-muted hover:text-text"}`}
+                      >
+                        ทุกคน
+                      </button>
+                    </div>
+                    <button
+                      onClick={loadActionLogs}
+                      className="inline-flex items-center gap-1 h-6 px-2 rounded-md text-[10px] border border-border text-text-muted hover:text-text hover:bg-surface-2"
+                    >
+                      <RotateCcw size={11} /> รีเฟรช
+                    </button>
+                    {logsLoading && <span className="text-[10px] text-text-muted">กำลังโหลด...</span>}
+                  </div>
+
+                  {/* Log list */}
+                  {actionLogs.length === 0 ? (
+                    <div className="text-center py-6 text-xs text-text-muted">
+                      {logsLoading ? "กำลังโหลด..." : "ยังไม่มีประวัติ"}
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5 max-h-[60vh] overflow-y-auto pr-1">
+                      {actionLogs.map((log) => {
+                        const actionLabel: Record<string, string> = {
+                          create_session: "สร้างแชท",
+                          add_message: "ส่งข้อความ",
+                          delete_session: "ลบแชท",
+                          update_session: "แก้ไขแชท",
+                          close_session: "ปิดแชท",
+                          reopen_session: "เปิดแชทใหม่",
+                        };
+                        const label = actionLabel[log.action] || log.action;
+                        const time = (() => {
+                          try {
+                            return new Date(log.timestamp).toLocaleString("th-TH", {
+                              day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
+                            });
+                          } catch { return log.timestamp; }
+                        })();
+                        return (
+                          <div key={log.id} className="rounded-md border border-border bg-surface-2 p-2 text-[11px]">
+                            <div className="flex items-center justify-between gap-2 mb-0.5">
+                              <span className="font-medium text-text">{label}</span>
+                              <span className="text-text-subtle font-mono text-[10px]">{time}</span>
+                            </div>
+                            <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-text-muted text-[10px]">
+                              <span>👤 {log.admin_name || log.admin_id || "—"}</span>
+                              {log.shop && <span>🏪 {log.shop}</span>}
+                              {log.session_id && (
+                                <span className="font-mono text-text-subtle">
+                                  #{log.session_id.slice(-6)}
+                                </span>
+                              )}
+                            </div>
+                            {log.text_preview && (
+                              <div className="mt-1 text-text-muted text-[10px] truncate">
+                                {log.role === "user" ? "❓ " : log.role === "model" ? "🤖 " : ""}
+                                {log.text_preview}
+                              </div>
+                            )}
+                            {log.title && log.action === "create_session" && (
+                              <div className="mt-1 text-text-muted text-[10px] truncate">
+                                ชื่อ: {log.title}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>

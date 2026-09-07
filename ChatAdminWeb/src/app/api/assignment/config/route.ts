@@ -1,7 +1,7 @@
 // GET /api/assignment/config — ดึงโหมด assignment ปัจจุบัน
 // PUT /api/assignment/config — เปลี่ยนโหมด (equal_global | equal_per_shop | equal_per_platform)
 import { NextRequest } from "next/server";
-import { requireEditor } from "@/backend/middleware/authorize";
+import { requirePageAccess, requirePageEdit } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { assignmentService, type AssignmentMode } from "@/backend/service/assignmentService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
@@ -9,7 +9,7 @@ import { logAdminEvent } from "@/backend/service/adminLogService";
 const VALID_MODES: AssignmentMode[] = ["equal_global", "equal_per_shop", "equal_per_platform"];
 
 export async function GET(req: NextRequest) {
-  const r = await requireEditor(req);
+  const r = await requirePageAccess(req, "team");
   if (!r.ok) return r.response;
 
   const mode = await assignmentService.getActiveAssignmentConfig();
@@ -17,7 +17,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "team");
   if (!r.ok) return r.response;
 
   const body = await readJson<{ mode?: string }>(req);

@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY chatbot/ ./chatbot/
 COPY exports/ ./exports/
 COPY adminbase/ ./adminbase/
-COPY scripts/ ./scripts/
+# note: root script/ (export_mongo.py, import_adminbase.py) เป็น manual tool — ไม่จำเป็นตอน runtime
 
 # โฟลเดอร์เก็บ HF model cache (mount volume ตรงนี้เพื่อไม่ต้องโหลดใหม่ทุกครั้ง)
 ENV HF_HOME=/app/.hf_cache

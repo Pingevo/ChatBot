@@ -2,7 +2,7 @@
 // PATCH  /api/workflows/[workflowId] — update workflow (name/settings/graph)
 // DELETE /api/workflows/[workflowId] — soft delete
 import { NextRequest } from "next/server";
-import { requireAuth, requireEditor } from "@/backend/middleware/authorize";
+import { requireAuth, requirePageEdit } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { workflowService } from "@/backend/service/workflowService";
 import type { Platform } from "@/backend/service/conversationService";
@@ -27,7 +27,7 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ workflowId: string }> }
 ) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "workflow");
   if (!r.ok) return r.response;
   const { workflowId } = await params;
 
@@ -87,7 +87,7 @@ export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ workflowId: string }> }
 ) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "workflow");
   if (!r.ok) return r.response;
   const { workflowId } = await params;
 

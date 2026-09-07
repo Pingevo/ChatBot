@@ -26,28 +26,33 @@ function renderMarkdownInline(text: string): ReactNode[] {
     }
     if (match[2] !== undefined && match[3]) {
       // ![alt](url) → <img> (click to zoom)
+      // capture ค่าไว้ใน const เพื่อป้องกัน closure จับ match ที่เป็น null หลัง loop จบ
+      const imgUrl = match[3];
+      const imgAlt = match[2] || "รูปภาพ";
       nodes.push(
         // eslint-disable-next-line @next/next/no-img-element
         <img
           key={`img-${key++}`}
-          src={match[3]}
-          alt={match[2] || "รูปภาพ"}
+          src={imgUrl}
+          alt={imgAlt}
           className="rounded-lg max-w-[200px] max-h-[200px] object-cover my-1 cursor-pointer hover:opacity-80 transition-opacity"
           loading="lazy"
-          onClick={() => imageViewer.show(match![3], { type: "image", alt: match![2] || "รูปภาพ" })}
+          onClick={() => imageViewer.show(imgUrl, { type: "image", alt: imgAlt })}
         />
       );
     } else if (match[5] && match[6]) {
       // [text](url) → <a>
+      const linkUrl = match[6];
+      const linkText = match[5];
       nodes.push(
         <a
           key={`a-${key++}`}
-          href={match[6]}
+          href={linkUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="underline hover:opacity-80"
         >
-          {match[5]}
+          {linkText}
         </a>
       );
     } else if (match[8]) {
@@ -96,6 +101,25 @@ export function MessageContent({ msg, variant }: Props) {
 
   // ── sticker ──
   if (msg.message_type === "sticker") {
+    // ⚡ ถ้ามี media.url → แสดงเป็นรูปสติกเกอร์
+    if (msg.media?.url) {
+      return (
+        <div className="space-y-1">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={msg.media.url}
+            alt={msg.text || "สติกเกอร์"}
+            className="rounded-lg max-w-[160px] max-h-[160px] object-contain cursor-pointer hover:opacity-80 transition-opacity"
+            loading="lazy"
+            onClick={() => imageViewer.show(msg.media!.url!, { type: "image", alt: msg.text || "สติกเกอร์" })}
+          />
+          {msg.text && msg.text !== "(สติกเกอร์)" && !msg.text.startsWith("(สติกเกอร์") && (
+            <div className={`text-[10px] ${bubbleText} opacity-60`}>{msg.text}</div>
+          )}
+        </div>
+      );
+    }
+    // ไม่มี URL → แสดงเป็น icon + text
     return (
       <div className={`flex items-center gap-1.5 ${bubbleText}`}>
         <Sticker size={16} />
@@ -195,7 +219,7 @@ export function MessageContent({ msg, variant }: Props) {
           onClick={() => imageViewer.show(msg.media!.url!, { type: "image", alt: msg.text || "รูปภาพ" })}
         />
         {msg.text && (
-          <div className={`text-sm ${bubbleText}`}>{renderMarkdownInline(msg.text)}</div>
+          <div className={`text-sm ${bubbleText} whitespace-pre-wrap break-words`}>{renderMarkdownInline(msg.text)}</div>
         )}
       </div>
     );
@@ -208,7 +232,7 @@ export function MessageContent({ msg, variant }: Props) {
       return (
         <div className="space-y-1.5">
           {msg.text && msg.text !== "(สินค้า)" && msg.text !== "(สินค้าพร้อมตัวเลือก)" && msg.text !== "[item]" && msg.text !== "[variation_card]" && (
-            <div className={`text-sm ${bubbleText}`}>{renderMarkdownInline(msg.text)}</div>
+            <div className={`text-sm ${bubbleText} whitespace-pre-wrap break-words`}>{renderMarkdownInline(msg.text)}</div>
           )}
           {msg.products.map((p) => (
             <ProductCardView key={p.item_id} product={p} variant={variant} />
@@ -249,7 +273,7 @@ export function MessageContent({ msg, variant }: Props) {
   // ── fallback: text + product cards (กรณี bot/admin ตอบพร้อม product) ──
   return (
     <div className="space-y-1.5">
-      {msg.text && <div className={bubbleText}>{renderMarkdownInline(msg.text)}</div>}
+      {msg.text && <div className={`${bubbleText} whitespace-pre-wrap break-words`}>{renderMarkdownInline(msg.text)}</div>}
       {msg.products && msg.products.length > 0 && (
         <div className="space-y-1.5">
           {msg.products.map((p) => (

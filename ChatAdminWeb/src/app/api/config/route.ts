@@ -2,7 +2,7 @@
 // PUT /api/config — อัปเดตสวิตช์ปลอดภัย (mock_mode, shadow_bot, polling, bot URLs) เท่านั้น
 //   สวิตช์อันตราย (live_read/send/mark_read/pin/poll — ทุก platform) ไม่สามารถเปลี่ยนได้
 import { NextRequest } from "next/server";
-import { requireSuperadmin } from "@/backend/middleware/authorize";
+import { requirePageEdit } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { systemConfigService } from "@/backend/service/systemConfigService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
@@ -10,8 +10,8 @@ import { SAFETY } from "@/backend/lib/safety";
 import { isSafeFetchUrl } from "@/backend/lib/urlSafety";
 
 export async function GET(req: NextRequest) {
-  // 🔒 จำกัดเฉพาะ superadmin/dev — config มี infrastructure metadata ที่ไม่ควรเปิดให้ admin ทั่วไป
-  const r = await requireSuperadmin(req);
+  // 🔒 จำกัดเฉพาะ dev — config มี infrastructure metadata ที่ไม่ควรเปิดให้ admin/superadmin ทั่วไป
+  const r = await requirePageEdit(req, "config");
   if (!r.ok) return r.response;
 
   const config = await systemConfigService.getSystemConfig(true);
@@ -46,7 +46,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
-  const r = await requireSuperadmin(req); // superadmin or dev only — admin is read-only
+  const r = await requirePageEdit(req, "config"); // dev only
   if (!r.ok) return r.response;
 
   const body = await readJson<Record<string, unknown>>(req);

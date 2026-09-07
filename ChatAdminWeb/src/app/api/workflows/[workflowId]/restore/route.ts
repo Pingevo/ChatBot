@@ -1,6 +1,6 @@
 // POST /api/workflows/[workflowId]/restore — กู้คืน workflow ที่ถูก soft delete
 import { NextRequest } from "next/server";
-import { requireEditor } from "@/backend/middleware/authorize";
+import { requirePageEdit } from "@/backend/middleware/authorize";
 import { json, error } from "@/backend/lib/http";
 import { workflowService } from "@/backend/service/workflowService";
 
@@ -8,7 +8,7 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ workflowId: string }> }
 ) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "workflow");
   if (!r.ok) return r.response;
   const { workflowId } = await params;
 

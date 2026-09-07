@@ -1,17 +1,17 @@
 // GET /api/admin-config — ดึงค่าที่ admin แก้ได้ (buffer config + อนาคตเพิ่มได้)
-// PUT /api/admin-config — อัปเดตค่าที่ admin แก้ได้ (requireEditor — admin/superadmin/dev)
+// PUT /api/admin-config — อัปเดตค่าที่ admin แก้ได้ (requirePageEdit — superadmin/dev เท่านั้น, admin read-only)
 //
-// ต่างจาก /api/config (requireSuperadmin):
-//   /api/config        = system config (dev/superadmin เท่านั้น — สวิตช์อันตราย, bot URLs, polling)
-//   /api/admin-config  = admin config (admin ขึ้นไป — buffer, และ settings ที่ปลอดภัยอื่นๆ)
+// ต่างจาก /api/config (requirePageEdit "config" — dev เท่านั้น):
+//   /api/config        = system config (dev เท่านั้น — สวิตช์อันตราย, bot URLs, polling)
+//   /api/admin-config  = admin config (admin อ่านได้, superadmin/dev แก้ได้ — buffer, และ settings ที่ปลอดภัยอื่นๆ)
 import { NextRequest } from "next/server";
-import { requireEditor } from "@/backend/middleware/authorize";
+import { requirePageAccess, requirePageEdit } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { systemConfigService, ADMIN_CONFIGURABLE_KEYS } from "@/backend/service/systemConfigService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 
 export async function GET(req: NextRequest) {
-  const r = await requireEditor(req);
+  const r = await requirePageAccess(req, "admin-config");
   if (!r.ok) return r.response;
 
   const config = await systemConfigService.getAdminConfig();
@@ -22,7 +22,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "admin-config");
   if (!r.ok) return r.response;
 
   const body = await readJson<Record<string, unknown>>(req);
@@ -34,7 +34,9 @@ export async function PUT(req: NextRequest) {
   for (const [key, value] of Object.entries(body)) {
     if (allowedSet.has(key)) {
       // ตรวจค่าเบื้องต้น
-  if (key === "bot_buffer_window_ms" || key === "bot_buffer_max_messages") {
+  if (key === "bot_buffer_window_ms" || key === "bot_buffer_max_messages" ||
+        key === "bot_buffer_window_media_ms" || key === "bot_buffer_max_media_messages" ||
+        key === "bot_concurrency_limit") {
         const num = Number(value);
         if (isNaN(num) || num < 1) {
           return error(`Field "${key}" must be a positive number`, 400);
@@ -44,6 +46,17 @@ export async function PUT(req: NextRequest) {
         }
         if (key === "bot_buffer_max_messages" && (num < 1 || num > 20)) {
           return error(`Field "${key}" must be between 1 and 20`, 400);
+        }
+        // ⚡ Phase 1F — media buffer validation
+        if (key === "bot_buffer_window_media_ms" && (num < 3000 || num > 60000)) {
+          return error(`Field "${key}" must be between 3000 and 60000`, 400);
+        }
+        if (key === "bot_buffer_max_media_messages" && (num < 3 || num > 30)) {
+          return error(`Field "${key}" must be between 3 and 30`, 400);
+        }
+        // ⚡ Phase 2Q — concurrency limit validation
+        if (key === "bot_concurrency_limit" && (num < 1 || num > 500)) {
+          return error(`Field "${key}" must be between 1 and 500`, 400);
         }
         filtered[key] = num;
       } else if (key === "bot_buffer_enabled" || key === "workflow_enabled") {

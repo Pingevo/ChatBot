@@ -3,7 +3,7 @@
 // new_admin_id = null หมายถึงปล่อยงาน (unassign)
 // ⚠️ ไม่สามารถ reassign ให้ superadmin หรือ dev ได้ — เฉพาะ role=admin เท่านั้น
 import { NextRequest } from "next/server";
-import { requireEditor } from "@/backend/middleware/authorize";
+import { requirePageEdit } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { assignmentService } from "@/backend/service/assignmentService";
 import { conversationService } from "@/backend/service/conversationService";
@@ -11,7 +11,7 @@ import { auth } from "@/backend/service/authService";
 import { ObjectId } from "mongodb";
 
 export async function POST(req: NextRequest) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "team");
   if (!r.ok) return r.response;
 
   const body = await readJson<{

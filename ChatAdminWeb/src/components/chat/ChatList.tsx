@@ -5,8 +5,10 @@ import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import { Avatar } from "@/components/ui/Avatar";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Badge } from "@/components/ui/Badge";
-import { Search, ChevronDown, Check, X, ArrowDownUp, MessageSquare } from "lucide-react";
+import { Search, ChevronDown, Check, X, ArrowDownUp, MessageSquare, Trash2 } from "lucide-react";
 import type { Conversation, Platform, AdminUser } from "@/lib/types";
+import { formatDateLabel } from "@/components/shadow/DateBanner";
+import { AnnotationDot, type Annotation } from "@/components/ui/AnnotationDot";
 
 interface Props {
   conversations: Conversation[];
@@ -21,26 +23,36 @@ interface Props {
   togglingAccept?: boolean;
   // ⚡ total count จริงจาก DB (ไม่จำกัดด้วย limit) — ถ้าไม่ส่ง จะใช้ filtered.length
   totalCount?: number;
+  // ⚡ server-side search — เมื่อส่ง callback นี้ จะใช้ server search แทน client filter
+  //   ทำให้เจอแชทที่อยู่นอก 2000 ล่าสุด (เช่น ลูกค้าคนเดียวทักหลายร้าน)
+  onSearchChange?: (search: string) => void;
+  // ⚡ loading state — แสดง skeleton ตอนกำลัง fetch (กันหน้าว่างกระพริบ)
+  loading?: boolean;
+  // ⚡ Phase 3B-1 — annotations (markup) — ถ้าส่งมาจะ render AnnotationDot ในแต่ละ row
+  annotationsMap?: Map<string, Annotation>;
+  annotationsScope?: "test_assignment" | "shadow_bot";
+  onAnnotationsChange?: () => void;
+  // ⚡ Phase 3B-5 — ปุ่มลบรายแชท (soft delete) — ถ้าส่งมาจะ render ในแต่ละ row
+  //   ใช้ span role=button เพื่อกัน nested <button> (hydration error)
+  onDeleteConversation?: (conversationId: string) => void;
 }
 
-// Status ใหม่: ยังไม่อ่าน / อ่านแล้ว / ยังไม่ตอบ (อ่านแล้วแต่ยังไม่ตอบ) / ปิด / เปิด / บอทตอบ
-type StatusFilter =
-  | "all"
-  | "unread"
-  | "read"
-  | "unreplied"
-  | "closed"
-  | "open"
-  | "open_bot";
+// ⚡ แยก filter เป็น 2 ประเภท: สถานะแชท + สถานะข้อความ
+type ChatStatusFilter = "all" | "bot" | "handoff" | "closed";
+type MsgStatusFilter = "all" | "unread" | "read" | "unreplied";
 
-const statusFilterOptions: { value: StatusFilter; label: string }[] = [
+const chatStatusOptions: { value: ChatStatusFilter; label: string }[] = [
+  { value: "all", label: "ทั้งหมด" },
+  { value: "bot", label: "บอทตอบ" },
+  { value: "handoff", label: "ส่งต่อแอดมิน" },
+  { value: "closed", label: "ปิดแล้ว" },
+];
+
+const msgStatusOptions: { value: MsgStatusFilter; label: string }[] = [
   { value: "all", label: "ทั้งหมด" },
   { value: "unread", label: "ยังไม่อ่าน" },
   { value: "read", label: "อ่านแล้ว" },
   { value: "unreplied", label: "ยังไม่ตอบ" },
-  { value: "open", label: "เปิด" },
-  { value: "open_bot", label: "บอทตอบ" },
-  { value: "closed", label: "ปิด" },
 ];
 
 type SortOption = "recent" | "oldest" | "unread" | "name";
@@ -59,6 +71,8 @@ function timeAgo(iso: string): string {
   const h = Math.floor(m / 60);
   if (h < 24) return `${h} ชม.`;
   const d = Math.floor(h / 24);
+  // ⚡ เกิน 7 วัน → แสดงวันที่ (เช่น "5 ก.ย. 2569") ภายใน 7 วัน → แสดงจำนวนวัน
+  if (d > 7) return formatDateLabel(iso);
   return `${d} วัน`;
 }
 
@@ -80,21 +94,15 @@ function timeLabel(iso: string): string {
 }
 
 const statusTone: Record<string, "brand" | "coral" | "neutral" | "pale"> = {
-  open: "coral",
   closed: "neutral",
   bot: "brand",
   handoff: "coral",
-  resolved: "neutral",
-  pending: "pale",
 };
 
 const statusLabel: Record<string, string> = {
-  open: "เปิด",
   closed: "ปิด",
   bot: "บอท",
   handoff: "แอดมิน",
-  resolved: "เสร็จ",
-  pending: "รอตอบ",
 };
 
 export function ChatList({
@@ -108,17 +116,36 @@ export function ChatList({
   onToggleAccepting,
   togglingAccept = false,
   totalCount,
+  onSearchChange,
+  loading = false,
+  annotationsMap,
+  annotationsScope = "shadow_bot",
+  onAnnotationsChange,
+  onDeleteConversation,
 }: Props) {
   const [search, setSearch] = useState("");
+  // ⚡ server-side search debounce — ถ้ามี onSearchChange จะส่งไป API แทน client filter
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleSearchChange = useCallback((value: string) => {
+    setSearch(value);
+    if (onSearchChange) {
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+      searchTimerRef.current = setTimeout(() => {
+        onSearchChange(value);
+      }, 300);
+    }
+  }, [onSearchChange]);
   const [platforms, setPlatforms] = useState<Set<Platform>>(new Set());
-  const [status, setStatus] = useState<StatusFilter>("all");
+  const [chatStatus, setChatStatus] = useState<ChatStatusFilter>("all");
+  const [msgStatus, setMsgStatus] = useState<MsgStatusFilter>("all");
   const [shops, setShops] = useState<Set<string>>(new Set());
   const [sort, setSort] = useState<SortOption>("recent");
   const [showPlatformDropdown, setShowPlatformDropdown] = useState(false);
   const [showShopDropdown, setShowShopDropdown] = useState(false);
   const [showAdminDropdown, setShowAdminDropdown] = useState(false);
   const [showSortDropdown, setShowSortDropdown] = useState(false);
-  const [showStatusDropdown, setShowStatusDropdown] = useState(false);
+  const [showChatStatusDropdown, setShowChatStatusDropdown] = useState(false);
+  const [showMsgStatusDropdown, setShowMsgStatusDropdown] = useState(false);
 
   // ดึงรายชื่อร้านทั้งหมดจาก conversations (กรองตาม platform ที่เลือก)
   const availableShops = useMemo(() => {
@@ -142,15 +169,22 @@ export function ChatList({
       result = result.filter((c) => platforms.has(c.platform));
     }
 
-    // Status filter
-    if (status !== "all") {
+    // ⚡ แยก filter: สถานะแชท + สถานะข้อความ
+    // สถานะแชท: bot / handoff / closed
+    if (chatStatus !== "all") {
       result = result.filter((c) => {
-        if (status === "unread") return (c.unread || 0) > 0;
-        if (status === "read") return (c.unread || 0) === 0;
-        if (status === "unreplied") return (c.unread || 0) === 0 && (c.status === "handoff" || c.status === "pending");
-        if (status === "closed") return c.status === "closed" || c.status === "resolved";
-        if (status === "open") return c.status === "open" || c.status === "handoff" || c.status === "pending";
-        if (status === "open_bot") return c.status === "bot";
+        if (chatStatus === "bot") return c.status === "bot";
+        if (chatStatus === "handoff") return c.status === "handoff";
+        if (chatStatus === "closed") return c.status === "closed";
+        return true;
+      });
+    }
+    // สถานะข้อความ: unread / read / unreplied
+    if (msgStatus !== "all") {
+      result = result.filter((c) => {
+        if (msgStatus === "unread") return (c.unread || 0) > 0;
+        if (msgStatus === "read") return (c.unread || 0) === 0;
+        if (msgStatus === "unreplied") return (c.unread || 0) === 0 && c.status === "handoff";
         return true;
       });
     }
@@ -161,7 +195,8 @@ export function ChatList({
     }
 
     // Search
-    if (search) {
+    // ⚡ ถ้ามี onSearchChange → server กรองให้แล้ว ไม่ต้อง filter ซ้ำใน client
+    if (search && !onSearchChange) {
       const q = search.toLowerCase();
       result = result.filter(
         (c) =>
@@ -188,15 +223,28 @@ export function ChatList({
         break;
     }
     return sorted;
-  }, [conversations, platforms, status, shops, search, sort]);
+  }, [conversations, platforms, chatStatus, msgStatus, shops, search, sort]);
 
   // ⚡ Incremental rendering — โหลดทีละ 50 รายการ เพื่อลดการหน่วง
   //    เมื่อ filter/sort เปลี่ยน รีเซ็ตเป็น 50 รายการแรก
   //    เมื่อ scroll ใกล้ล่าง โหลดเพิ่ม 50 รายการ
+  //    ⚡ A1 — แยก "filter/sort เปลี่ยน" (reset renderCount) จาก "conversations poll ใหม่" (ไม่ reset)
+  //      กัน scroll กระโดดกลับบนทุก 3 วิเมื่อ poll ดึง conversations ใหม่
   const RENDER_BATCH = 50;
   const [renderCount, setRenderCount] = useState(RENDER_BATCH);
   const listRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { setRenderCount(RENDER_BATCH); }, [filtered]);
+  // track filter/sort signature — ถ้าเปลี่ยน → reset renderCount
+  // ถ้าแค่ conversations เปลี่ยน (poll) → ไม่ reset (กัน scroll กระโดด)
+  const filterSignature = `${platforms.size}|${chatStatus}|${msgStatus}|${shops.size}|${search}|${sort}`;
+  const prevFilterSigRef = useRef(filterSignature);
+  useEffect(() => {
+    if (prevFilterSigRef.current !== filterSignature) {
+      prevFilterSigRef.current = filterSignature;
+      setRenderCount(RENDER_BATCH);
+      // ⚡ scroll กลับบนเฉพาะตอน filter เปลี่ยน
+      if (listRef.current) listRef.current.scrollTop = 0;
+    }
+  }, [filterSignature]);
   const visibleItems = filtered.slice(0, renderCount);
   const handleListScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
@@ -225,12 +273,14 @@ export function ChatList({
 
   function clearAll() {
     setPlatforms(new Set());
-    setStatus("all");
+    setChatStatus("all");
+    setMsgStatus("all");
     setShops(new Set());
     setSearch("");
+    if (onSearchChange) onSearchChange("");
   }
 
-  const activeFilterCount = platforms.size + (status !== "all" ? 1 : 0) + shops.size;
+  const activeFilterCount = platforms.size + (chatStatus !== "all" ? 1 : 0) + (msgStatus !== "all" ? 1 : 0) + shops.size;
 
   return (
     <div className="w-full bg-surface flex flex-col h-full">
@@ -272,7 +322,7 @@ export function ChatList({
           <input
             type="text"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => handleSearchChange(e.target.value)}
             placeholder="ค้นหา ชื่อ / ข้อความ / ร้าน..."
             className="w-full h-8 pl-8 pr-3 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
           />
@@ -284,7 +334,7 @@ export function ChatList({
           {onChatFilterChange && (
             <div className="relative">
               <button
-                onClick={() => { setShowAdminDropdown(!showAdminDropdown); setShowPlatformDropdown(false); setShowShopDropdown(false); setShowSortDropdown(false); setShowStatusDropdown(false); }}
+                onClick={() => { setShowAdminDropdown(!showAdminDropdown); setShowPlatformDropdown(false); setShowShopDropdown(false); setShowSortDropdown(false); setShowChatStatusDropdown(false); setShowMsgStatusDropdown(false); }}
                 style={{ minWidth: "84px" }}
                 className={`h-7 px-2 text-[11px] rounded-md border border-border bg-surface flex items-center gap-1 transition-colors text-text-muted hover:text-text hover:bg-surface-2 ${chatFilter !== "me" ? "border-brand/40 text-text" : ""}`}
               >
@@ -323,7 +373,7 @@ export function ChatList({
             selectedCount={platforms.size}
             minLabelWidth={48}
             open={showPlatformDropdown}
-            onToggle={() => { setShowPlatformDropdown(!showPlatformDropdown); setShowAdminDropdown(false); setShowShopDropdown(false); setShowSortDropdown(false); setShowStatusDropdown(false); }}
+            onToggle={() => { setShowPlatformDropdown(!showPlatformDropdown); setShowAdminDropdown(false); setShowShopDropdown(false); setShowSortDropdown(false); setShowChatStatusDropdown(false); setShowMsgStatusDropdown(false); }}
             onClose={() => setShowPlatformDropdown(false)}
           >
             {(["shopee", "tiktok", "lazada"] as Platform[]).map((p) => (
@@ -338,21 +388,42 @@ export function ChatList({
             ))}
           </Dropdown>
 
-          {/* Status dropdown — ใช้ Dropdown component แบบเดียวกับตัวอื่น + แสดง label ที่เลือก */}
+          {/* ⚡ สถานะแชท dropdown — bot / handoff / closed */}
           <Dropdown
-            label="สถานะ"
-            displayLabel={statusFilterOptions.find((s) => s.value === status)?.label || "ทั้งหมด"}
-            selectedCount={status !== "all" ? 1 : 0}
-            minLabelWidth={52}
-            open={showStatusDropdown}
-            onToggle={() => { setShowStatusDropdown(!showStatusDropdown); setShowAdminDropdown(false); setShowPlatformDropdown(false); setShowShopDropdown(false); setShowSortDropdown(false); }}
-            onClose={() => setShowStatusDropdown(false)}
+            label="แชท"
+            displayLabel={chatStatusOptions.find((s) => s.value === chatStatus)?.label || "ทั้งหมด"}
+            selectedCount={chatStatus !== "all" ? 1 : 0}
+            minLabelWidth={40}
+            open={showChatStatusDropdown}
+            onToggle={() => { setShowChatStatusDropdown(!showChatStatusDropdown); setShowMsgStatusDropdown(false); setShowAdminDropdown(false); setShowPlatformDropdown(false); setShowShopDropdown(false); setShowSortDropdown(false); }}
+            onClose={() => setShowChatStatusDropdown(false)}
           >
-            {statusFilterOptions.map((s) => (
+            {chatStatusOptions.map((s) => (
               <DropdownCheckItem
                 key={s.value}
-                checked={status === s.value}
-                onClick={() => { setStatus(s.value); setShowStatusDropdown(false); }}
+                checked={chatStatus === s.value}
+                onClick={() => { setChatStatus(s.value); setShowChatStatusDropdown(false); }}
+              >
+                <span>{s.label}</span>
+              </DropdownCheckItem>
+            ))}
+          </Dropdown>
+
+          {/* ⚡ สถานะข้อความ dropdown — unread / read / unreplied */}
+          <Dropdown
+            label="ข้อความ"
+            displayLabel={msgStatusOptions.find((s) => s.value === msgStatus)?.label || "ทั้งหมด"}
+            selectedCount={msgStatus !== "all" ? 1 : 0}
+            minLabelWidth={52}
+            open={showMsgStatusDropdown}
+            onToggle={() => { setShowMsgStatusDropdown(!showMsgStatusDropdown); setShowChatStatusDropdown(false); setShowAdminDropdown(false); setShowPlatformDropdown(false); setShowShopDropdown(false); setShowSortDropdown(false); }}
+            onClose={() => setShowMsgStatusDropdown(false)}
+          >
+            {msgStatusOptions.map((s) => (
+              <DropdownCheckItem
+                key={s.value}
+                checked={msgStatus === s.value}
+                onClick={() => { setMsgStatus(s.value); setShowMsgStatusDropdown(false); }}
               >
                 <span>{s.label}</span>
               </DropdownCheckItem>
@@ -366,7 +437,7 @@ export function ChatList({
             selectedCount={shops.size}
             minLabelWidth={48}
             open={showShopDropdown}
-            onToggle={() => { setShowShopDropdown(!showShopDropdown); setShowAdminDropdown(false); setShowPlatformDropdown(false); setShowSortDropdown(false); setShowStatusDropdown(false); }}
+            onToggle={() => { setShowShopDropdown(!showShopDropdown); setShowAdminDropdown(false); setShowPlatformDropdown(false); setShowSortDropdown(false); setShowChatStatusDropdown(false); setShowMsgStatusDropdown(false); }}
             onClose={() => setShowShopDropdown(false)}
             disabled={availableShops.length === 0}
           >
@@ -394,7 +465,7 @@ export function ChatList({
             selectedCount={sort !== "recent" ? 1 : 0}
             minLabelWidth={52}
             open={showSortDropdown}
-            onToggle={() => { setShowSortDropdown(!showSortDropdown); setShowAdminDropdown(false); setShowPlatformDropdown(false); setShowShopDropdown(false); setShowStatusDropdown(false); }}
+            onToggle={() => { setShowSortDropdown(!showSortDropdown); setShowAdminDropdown(false); setShowPlatformDropdown(false); setShowShopDropdown(false); setShowChatStatusDropdown(false); setShowMsgStatusDropdown(false); }}
             onClose={() => setShowSortDropdown(false)}
           >
             {sortOptions.map((s) => (
@@ -414,16 +485,28 @@ export function ChatList({
       {/* List */}
       <div ref={listRef} onScroll={handleListScroll} className="flex-1 overflow-y-auto">
         {filtered.length === 0 ? (
-          <div className="p-6 text-center text-sm text-text-muted">ไม่พบแชท</div>
+          loading ? (
+            <div className="p-6 text-center text-sm text-text-muted">กำลังค้นหา...</div>
+          ) : (
+            <div className="p-6 text-center text-sm text-text-muted">ไม่พบแชท</div>
+          )
         ) : (
           <>
           {visibleItems.map((c) => {
             const active = c.id === selectedId;
             return (
-              <button
+              <div
                 key={c.id}
+                role="button"
+                tabIndex={0}
                 onClick={() => onSelect(c.id)}
-                className={`w-full flex items-start gap-3 p-3 border-b border-border text-left transition-colors ${
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onSelect(c.id);
+                  }
+                }}
+                className={`w-full flex items-start gap-3 p-3 border-b border-border text-left transition-colors cursor-pointer ${
                   active ? "bg-pale-sky-soft border-l-2 border-l-brand" : "hover:bg-surface-2"
                 }`}
               >
@@ -435,9 +518,35 @@ export function ChatList({
                 </div>
 
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-1">
-                    <span className="text-sm font-medium text-text truncate">{c.customer_name}</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-sm font-medium text-text truncate flex-1 min-w-0">{c.customer_name}</span>
                     <span className="text-[10px] text-text-subtle shrink-0">{timeLabel(c.last_timestamp)}</span>
+                    {annotationsMap && onAnnotationsChange && (
+                      <AnnotationDot
+                        scope={annotationsScope}
+                        conversationId={c.id}
+                        annotation={annotationsMap.get(c.id)}
+                        onChange={onAnnotationsChange}
+                        size={10}
+                      />
+                    )}
+                    {onDeleteConversation && (
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => { e.stopPropagation(); onDeleteConversation(c.id); }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.stopPropagation(); e.preventDefault();
+                            onDeleteConversation(c.id);
+                          }
+                        }}
+                        className="text-text-subtle hover:text-rose-500 transition-colors cursor-pointer inline-flex shrink-0"
+                        title="ลบ (soft delete)"
+                      >
+                        <Trash2 size={11} />
+                      </span>
+                    )}
                   </div>
                   <div className="text-[11px] text-text-muted truncate">{c.shop_name}</div>
                   <div className="text-xs text-text-muted truncate mt-0.5">{c.last_message}</div>
@@ -458,7 +567,7 @@ export function ChatList({
                     )}
                   </div>
                 </div>
-              </button>
+              </div>
             );
           })}
           {renderCount < filtered.length && (

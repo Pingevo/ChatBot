@@ -6,6 +6,7 @@ import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/authStore";
+import { canAccessPage, type PageKey } from "@/lib/roles";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import { toast } from "@/components/ui/Toast";
 import {
@@ -28,12 +29,17 @@ import {
   ChevronDown,
   ChevronRight,
   ScrollText,
-  FlaskConical,
   History,
   TestTube2,
   Scale,
   Settings2,
   Sliders,
+  Ghost,
+  Wrench,
+  Sparkles,
+  ClipboardCheck,
+  Gauge,
+  FileSearch,
   type LucideIcon,
 } from "lucide-react";
 
@@ -52,12 +58,15 @@ interface NavItem {
   icon: LucideIcon;
   badge?: string;
   badgeTag?: string;
-  roles?: ("superadmin" | "admin" | "dev")[];
+  page?: PageKey;          // maps to permission system — if set, filtered by canAccessPage
+  roles?: ("superadmin" | "admin" | "dev")[]; // legacy — used if page is not set
   children?: NavChild[];
 }
 
 interface NavGroup {
   label: string;
+  icon?: LucideIcon;       // optional — shown when sidebar is collapsed
+  collapsible?: boolean;   // if true, group label is a toggle button (expand/collapse items)
   items: NavItem[];
 }
 
@@ -69,47 +78,62 @@ const navGroups: NavGroup[] = [
   {
     label: "หลัก",
     items: [
-      { href: "/dashboard", label: "แดชบอร์ด", icon: LayoutDashboard },
-      { href: "/analytics/live", label: "สถิติ", icon: BarChart3 },
-      { href: "/tickets", label: "แชท / ตั๋ว", icon: MessageSquare, badge: "live" },
+      { href: "/dashboard", label: "แดชบอร์ด", icon: LayoutDashboard, page: "dashboard" },
+      { href: "/analytics/live", label: "สถิติ", icon: BarChart3, page: "analytics" },
+      { href: "/tickets", label: "แชท / ตั๋ว", icon: MessageSquare, badge: "live", page: "ticket" },
     ],
   },
   {
-    label: "เครื่องมือ",
+    label: "กระบวนการ",
     items: [
-      { href: "/triggers", label: "ทริกเกอร์", icon: Zap },
-      { href: "/workflows", label: "Workflows", icon: GitBranch },
-      { href: "/quick-replies", label: "คำตอบเร็ว", icon: Reply },
-      { href: "/knowledge", label: "ฐานความรู้", icon: BookOpen },
-      { href: "/persona", label: "ตัวแทนร้าน", icon: Bot, roles: ["superadmin", "admin", "dev"] },
-      { href: "/shop-settings", label: "ตั้งค่าร้าน", icon: Settings2, roles: ["superadmin", "admin", "dev"] },
+      { href: "/triggers", label: "ทริกเกอร์", icon: Zap, page: "trigger" },
+      { href: "/workflows", label: "Workflows", icon: GitBranch, page: "workflow" },
+      { href: "/quick-replies", label: "คำตอบเร็ว", icon: Reply, page: "quickreply" },
+      { href: "/knowledge", label: "ฐานความรู้", icon: BookOpen, page: "kb" },
+      { href: "/persona", label: "ตัวแทนร้าน", icon: Sparkles, page: "persona" },
+      { href: "/shop-settings", label: "ตั้งค่าร้าน", icon: Settings2, page: "shop-setting" },
+    ],
+  },
+  {
+    label: "การทดสอบบอท",
+    items: [
       {
         href: "/test-chat/shopee",
         label: "ทดสอบบอท",
         icon: Bot,
-        roles: ["superadmin", "admin", "dev"],
+        page: "testchat",
         children: [
           { href: "/test-chat/shopee", label: "Shopee" },
           { href: "/test-chat/tiktok", label: "TikTok" },
           { href: "/test-chat/lazada", label: "Lazada" },
         ],
       },
-      { href: "/shadow-inbox", label: "Shadow Inbox", icon: FlaskConical, roles: ["superadmin", "admin", "dev"] },
-      { href: "/test-assignment", label: "ทดสอบจ่ายงาน", icon: TestTube2, roles: ["superadmin", "admin", "dev"] },
-      { href: "/replay-compare", label: "Replay Compare", icon: Scale, roles: ["superadmin", "admin", "dev"] },
-      { href: "/test-results", label: "Test Results", icon: TestTube2, roles: ["superadmin", "admin", "dev"] },
+      { href: "/shadow-inbox", label: "Shadow Inbox", icon: Ghost, page: "shadow-inbox" },
+      { href: "/botworker", label: "Bot Worker", icon: Wrench, badge: "auto", page: "botworker" },
+      { href: "/test-assignment", label: "ทดสอบจ่ายงาน", icon: TestTube2, page: "test-assignment" },
+      { href: "/live-assignment", label: "Live Assignment", icon: Headset, page: "live-assignment" },
+      { href: "/replay-compare", label: "Replay Compare", icon: Scale, page: "replay-compare" },
+      { href: "/test-results", label: "Test Results", icon: ClipboardCheck, page: "test-result" },
+      { href: "/admin-review-kpi", label: "Admin Review KPI", icon: Gauge, page: "admin-review-kpi" },
+      { href: "/admin-chat-result", label: "Admin Chat Result", icon: FileSearch, page: "admin-chat-result" },
+      { href: "/test-chat-result", label: "Test Chat Result", icon: FileSearch, page: "test-chat-result" },
     ],
   },
   {
     label: "จัดการ",
     items: [
-      { href: "/shops", label: "ร้านค้า", icon: Store },
-      { href: "/contacts", label: "รายชื่อลูกค้า", icon: ContactIcon },
-      { href: "/team", label: "ทีม & มอบหมาย", icon: Headset, roles: ["superadmin", "admin", "dev"] },
-      { href: "/users", label: "จัดการผู้ใช้", icon: Users, roles: ["superadmin", "dev"], badgeTag: "Super" },
-      { href: "/logs", label: "บันทึกระบบ", icon: ScrollText, roles: ["superadmin", "dev"] },
-      { href: "/admin-config", label: "ตั้งค่าแอดมิน", icon: Sliders, roles: ["superadmin", "admin", "dev"] },
-      { href: "/config", label: "ตั้งค่าระบบ", icon: Shield, roles: ["superadmin", "dev"] },
+      { href: "/shops", label: "ร้านค้า", icon: Store, page: "shop" },
+      { href: "/contacts", label: "รายชื่อลูกค้า", icon: ContactIcon, page: "customer" },
+      { href: "/team", label: "ทีม & มอบหมาย", icon: Headset, page: "team" },
+      { href: "/users", label: "จัดการผู้ใช้", icon: Users, badgeTag: "Super", page: "user" },
+    ],
+  },
+  {
+    label: "ตั้งค่า",
+    items: [
+      { href: "/admin-config", label: "ตั้งค่าแอดมิน", icon: Sliders, page: "admin-config" },
+      { href: "/config", label: "ตั้งค่าระบบ", icon: Shield, page: "config" },
+      { href: "/logs", label: "บันทึกระบบ", icon: ScrollText, page: "log" },
     ],
   },
 ];
@@ -267,17 +291,51 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
     }
   }
 
-  // Filter items by role
+  // Filter items by permission (page-based) or legacy role list
   const filteredGroups = navGroups
     .map((g) => ({
       ...g,
       items: g.items.filter((item) => {
-        if (!item.roles) return true;
-        if (!user) return false;
-        return item.roles.includes(user.role);
+        if (item.page) return canAccessPage(user, item.page);
+        if (item.roles) return user ? item.roles.includes(user.role) : false;
+        return true; // no restriction
       }),
     }))
     .filter((g) => g.items.length > 0);
+
+  // Collapsible group state — track which collapsible groups are expanded
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+
+  // Auto-expand collapsible group when a child route is active
+  // ⚠️ ใช้ navGroups (static) แทน filteredGroups เพื่อกัน infinite loop
+  //   filteredGroups ถูกสร้างใหม่ทุก render → ถ้าเป็น dependency จะ setState ทุก render → วนซ้ำ
+  useEffect(() => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      for (const g of navGroups) {
+        if (!g.collapsible) continue;
+        const childActive = g.items.some(
+          (item) =>
+            pathname === item.href ||
+            pathname.startsWith(item.href + "/") ||
+            item.children?.some(
+              (c) => pathname === c.href || pathname.startsWith(c.href + "/")
+            )
+        );
+        if (childActive) next.add(g.label);
+      }
+      return next;
+    });
+  }, [pathname]);
+
+  function toggleGroup(label: string) {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  }
 
   return (
     <>
@@ -330,79 +388,114 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
 
         {/* ---- SidebarContent ---- */}
         <div className="flex-1 overflow-y-auto py-2 px-2 space-y-4 sidebar-scroll">
-          {filteredGroups.map((group) => (
-            <div key={group.label}>
-              {/* SidebarGroupLabel */}
-              {!collapsed && (
-                <div className="px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-pale-sky/40">
-                  {group.label}
-                </div>
-              )}
-              {collapsed && (
-                <div className="mx-auto my-1 h-px w-6 bg-white/10" />
-              )}
+          {filteredGroups.map((group) => {
+            const isExpanded = expandedGroups.has(group.label);
+            const GroupIcon = group.icon;
 
-              {/* SidebarMenu */}
-              <div className="space-y-0.5">
-                {group.items.map((item) => {
-                  const active =
-                    pathname === item.href || pathname.startsWith(item.href + "/");
-                  const Icon = item.icon;
-                  const hasChildren = item.children && item.children.length > 0;
+            // Check if any item in this group is active (for styling)
+            const groupChildActive = group.items.some(
+              (item) =>
+                pathname === item.href ||
+                pathname.startsWith(item.href + "/") ||
+                item.children?.some(
+                  (c) => pathname === c.href || pathname.startsWith(c.href + "/")
+                )
+            );
 
-                  if (hasChildren) {
-                    return (
-                      <SubMenu
-                        key={item.href}
-                        item={item}
-                        pathname={pathname}
-                        collapsed={collapsed}
-                        onMobileClose={onMobileClose}
-                      />
-                    );
-                  }
+            return (
+              <div key={group.label}>
+                {/* Group label — collapsible groups have a toggle button */}
+                {!collapsed && group.collapsible && (
+                  <button
+                    onClick={() => toggleGroup(group.label)}
+                    className={`flex items-center gap-3 w-full px-3 py-2 text-sm font-medium rounded-md transition-colors ${
+                      groupChildActive
+                        ? "text-white"
+                        : "text-pale-sky/70 hover:bg-white/5 hover:text-white"
+                    }`}
+                  >
+                    {GroupIcon && <GroupIcon size={18} className="shrink-0" />}
+                    <span className="flex-1 text-left whitespace-nowrap">{group.label}</span>
+                    {isExpanded ? (
+                      <ChevronDown size={14} className="shrink-0 text-pale-sky/50" />
+                    ) : (
+                      <ChevronRight size={14} className="shrink-0 text-pale-sky/50" />
+                    )}
+                  </button>
+                )}
+                {!collapsed && !group.collapsible && (
+                  <div className="px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-pale-sky/40">
+                    {group.label}
+                  </div>
+                )}
+                {collapsed && (
+                  <div className="mx-auto my-1 h-px w-6 bg-white/10" />
+                )}
 
-                  return (
-                    <Link
-                      key={item.href}
-                      href={item.href}
-                      prefetch
-                      onClick={onMobileClose}
-                      title={collapsed ? item.label : undefined}
-                      className={`
-                        flex items-center gap-3 rounded-md text-sm transition-colors relative
-                        ${collapsed ? "justify-center px-2 py-2" : "px-3 py-2"}
-                        ${active
-                          ? "bg-brand/15 text-white font-medium"
-                          : "text-pale-sky/70 hover:bg-white/5 hover:text-white"
-                        }
-                      `}
-                    >
-                      {/* Active indicator bar (shadcn style) */}
-                      {active && (
-                        <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 rounded-r-full bg-brand" />
-                      )}
-                      <Icon size={18} className="shrink-0" />
-                      {!collapsed && (
-                        <span className="flex-1 whitespace-nowrap">{item.label}</span>
-                      )}
-                      {!collapsed && item.badgeTag && (
-                        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-white/10 text-pale-sky/70 shrink-0">
-                          {item.badgeTag}
-                        </span>
-                      )}
-                      {!collapsed && item.badge === "live" && (
-                        <span className="w-2 h-2 rounded-full bg-vibrant-coral animate-pulse-soft shrink-0" />
-                      )}
-                      {collapsed && item.badge === "live" && (
-                        <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-vibrant-coral animate-pulse-soft" />
-                      )}
-                    </Link>
-                  );
-                })}
+                {/* SidebarMenu — hidden if collapsible group is collapsed */}
+                {(!group.collapsible || isExpanded || collapsed) && (
+                  <div className="space-y-0.5">
+                    {group.items.map((item) => {
+                      const active =
+                        pathname === item.href || pathname.startsWith(item.href + "/");
+                      const Icon = item.icon;
+                      const hasChildren = item.children && item.children.length > 0;
+
+                      if (hasChildren) {
+                        return (
+                          <SubMenu
+                            key={item.href}
+                            item={item}
+                            pathname={pathname}
+                            collapsed={collapsed}
+                            onMobileClose={onMobileClose}
+                          />
+                        );
+                      }
+
+                      return (
+                        <Link
+                          key={item.href}
+                          href={item.href}
+                          prefetch
+                          onClick={onMobileClose}
+                          title={collapsed ? item.label : undefined}
+                          className={`
+                            flex items-center gap-3 rounded-md text-sm transition-colors relative
+                            ${collapsed ? "justify-center px-2 py-2" : "px-3 py-2"}
+                            ${active
+                              ? "bg-brand/15 text-white font-medium"
+                              : "text-pale-sky/70 hover:bg-white/5 hover:text-white"
+                            }
+                          `}
+                        >
+                          {/* Active indicator bar (shadcn style) */}
+                          {active && (
+                            <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 rounded-r-full bg-brand" />
+                          )}
+                          <Icon size={18} className="shrink-0" />
+                          {!collapsed && (
+                            <span className="flex-1 whitespace-nowrap">{item.label}</span>
+                          )}
+                          {!collapsed && item.badgeTag && (
+                            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-white/10 text-pale-sky/70 shrink-0">
+                              {item.badgeTag}
+                            </span>
+                          )}
+                          {!collapsed && item.badge === "live" && (
+                            <span className="w-2 h-2 rounded-full bg-vibrant-coral animate-pulse-soft shrink-0" />
+                          )}
+                          {collapsed && item.badge === "live" && (
+                            <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-vibrant-coral animate-pulse-soft" />
+                          )}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         {/* ---- SidebarFooter ---- */}

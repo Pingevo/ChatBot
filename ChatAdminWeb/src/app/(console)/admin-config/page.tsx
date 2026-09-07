@@ -6,10 +6,10 @@ import { Card } from "@/components/ui/Card";
 import { Loading } from "@/components/ui/Loading";
 import {
   RefreshCw, Sliders, Clock, MessageCircle, Save,
-  Check, AlertCircle, Info, GitBranch,
+  Check, AlertCircle, Info, GitBranch, Image as ImageIcon, Film,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
-import { canEdit } from "@/lib/roles";
+import { canEditPage } from "@/lib/roles";
 import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
@@ -20,9 +20,16 @@ interface AdminConfig {
   bot_buffer_enabled: boolean;
   bot_buffer_window_ms: number;
   bot_buffer_max_messages: number;
+  // ⚡ Phase 1F — media buffer config (แยกจาก text)
+  bot_buffer_window_media_ms: number;
+  bot_buffer_max_media_messages: number;
+  // ⚡ Phase 2Q — concurrency limit
+  bot_concurrency_limit: number;
   workflow_enabled: boolean;
   workflow_priority: string;
   workflow_run_timeout_ms: number;
+  // ⚡ G2 — assignment: จ่ายงานให้แอดมินคนเดิม
+  assignment_prefer_previous_admin: boolean;
   updated_by: string;
   updated_at: string;
 }
@@ -135,7 +142,7 @@ function ConfigSection({ icon, title, description, badge, children, disabled }: 
 
 export default function AdminConfigPage() {
   const { user } = useAuth();
-  const editable = canEdit(user);
+  const editable = canEditPage(user, "admin-config");
   const { catchError } = useToastError();
   const [config, setConfig] = useState<AdminConfig | null>(null);
   const [loading, setLoading] = useState(true);
@@ -145,9 +152,16 @@ export default function AdminConfigPage() {
   const [bufferEnabled, setBufferEnabled] = useState(false);
   const [bufferWindow, setBufferWindow] = useState(6000);
   const [bufferMaxMsgs, setBufferMaxMsgs] = useState(5);
+  // ⚡ Phase 1F — media buffer state
+  const [bufferMediaWindow, setBufferMediaWindow] = useState(12000);
+  const [bufferMediaMaxMsgs, setBufferMediaMaxMsgs] = useState(10);
+  // ⚡ Phase 2Q — concurrency limit state
+  const [concurrencyLimit, setConcurrencyLimit] = useState(50);
   const [workflowEnabled, setWorkflowEnabled] = useState(false);
   const [workflowPriority, setWorkflowPriority] = useState("workflow_first");
   const [workflowTimeout, setWorkflowTimeout] = useState(1800000);
+  // ⚡ G2 — assignment: จ่ายงานให้แอดมินคนเดิม
+  const [preferPreviousAdmin, setPreferPreviousAdmin] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -157,9 +171,15 @@ export default function AdminConfigPage() {
       setBufferEnabled(r.data.config.bot_buffer_enabled);
       setBufferWindow(r.data.config.bot_buffer_window_ms);
       setBufferMaxMsgs(r.data.config.bot_buffer_max_messages);
+      // ⚡ Phase 1F — media buffer
+      setBufferMediaWindow(r.data.config.bot_buffer_window_media_ms ?? 12000);
+      setBufferMediaMaxMsgs(r.data.config.bot_buffer_max_media_messages ?? 10);
+      // ⚡ Phase 2Q — concurrency limit
+      setConcurrencyLimit(r.data.config.bot_concurrency_limit ?? 50);
       setWorkflowEnabled(r.data.config.workflow_enabled ?? false);
       setWorkflowPriority(r.data.config.workflow_priority ?? "workflow_first");
       setWorkflowTimeout(r.data.config.workflow_run_timeout_ms ?? 1800000);
+      setPreferPreviousAdmin(r.data.config.assignment_prefer_previous_admin ?? true);
     } catch (err) {
       catchError(err, "โหลดการตั้งค่าไม่สำเร็จ");
     } finally {
@@ -176,8 +196,12 @@ export default function AdminConfigPage() {
     ? bufferEnabled !== config.bot_buffer_enabled ||
       bufferWindow !== config.bot_buffer_window_ms ||
       bufferMaxMsgs !== config.bot_buffer_max_messages ||
+      bufferMediaWindow !== (config.bot_buffer_window_media_ms ?? 12000) ||
+      bufferMediaMaxMsgs !== (config.bot_buffer_max_media_messages ?? 10) ||
+      concurrencyLimit !== (config.bot_concurrency_limit ?? 50) ||
       workflowPriority !== (config.workflow_priority ?? "workflow_first") ||
-      workflowTimeout !== (config.workflow_run_timeout_ms ?? 1800000)
+      workflowTimeout !== (config.workflow_run_timeout_ms ?? 1800000) ||
+      preferPreviousAdmin !== (config.assignment_prefer_previous_admin ?? true)
     : false;
 
   async function handleSave() {
@@ -193,8 +217,15 @@ export default function AdminConfigPage() {
         bot_buffer_enabled: bufferEnabled,
         bot_buffer_window_ms: bufferWindow,
         bot_buffer_max_messages: bufferMaxMsgs,
+        // ⚡ Phase 1F — media buffer
+        bot_buffer_window_media_ms: bufferMediaWindow,
+        bot_buffer_max_media_messages: bufferMediaMaxMsgs,
+        // ⚡ Phase 2Q — concurrency limit
+        bot_concurrency_limit: concurrencyLimit,
         workflow_priority: workflowPriority,
         workflow_run_timeout_ms: workflowTimeout,
+        // ⚡ G2 — assignment
+        assignment_prefer_previous_admin: preferPreviousAdmin,
       });
       setConfig(r.data.config);
       toast.success("บันทึกการตั้งค่าแล้ว");
@@ -342,12 +373,98 @@ export default function AdminConfigPage() {
             </div>
           </div>
 
+          {/* ⚡ Phase 1F — Media Buffer (รูป/วิดีโอ) */}
+          <div className={`py-3 px-3 rounded-lg bg-surface-2 space-y-2 ${!bufferEnabled ? "pointer-events-none" : ""}`}>
+            <div className="flex items-center gap-2">
+              <ImageIcon size={13} className="text-text-muted" />
+              <span className="text-sm font-medium text-text">Buffer รูป/วิดีโอ — รอ X วินาที</span>
+            </div>
+            <p className="text-[11px] text-text-muted">
+              ถ้าลูกค้าส่งรูป/วิดีโอ → ใช้เวลารอนานกว่า text (ให้ส่งรูปได้หลายรูปก่อน flush)
+            </p>
+            <MinimalSlider
+              value={bufferMediaWindow}
+              min={3000}
+              max={60000}
+              step={1000}
+              onChange={setBufferMediaWindow}
+              disabled={!editable || !bufferEnabled}
+              format={(v) => `${(v / 1000).toFixed(0)}s`}
+            />
+            <div className="flex justify-between text-[10px] text-text-subtle">
+              <span>3s</span>
+              <span>60s</span>
+            </div>
+          </div>
+
+          <div className={`py-3 px-3 rounded-lg bg-surface-2 space-y-2 ${!bufferEnabled ? "pointer-events-none" : ""}`}>
+            <div className="flex items-center gap-2">
+              <Film size={13} className="text-text-muted" />
+              <span className="text-sm font-medium text-text">Buffer รูป/วิดีโอ — สูงสุด X รูป/ข้อความ</span>
+            </div>
+            <p className="text-[11px] text-text-muted">
+              จำนวนสูงสุดของรูป/วิดีโอ + ข้อความที่รวมใน buffer ถ้าครบ → flush ทันที
+            </p>
+            <MinimalSlider
+              value={bufferMediaMaxMsgs}
+              min={3}
+              max={30}
+              step={1}
+              onChange={setBufferMediaMaxMsgs}
+              disabled={!editable || !bufferEnabled}
+              format={(v) => `${v} รูป/ข้อความ`}
+            />
+            <div className="flex justify-between text-[10px] text-text-subtle">
+              <span>3</span>
+              <span>30</span>
+            </div>
+          </div>
+
           {/* Info box */}
           <div className="flex items-start gap-2 rounded-lg bg-blue-500/5 border border-blue-500/15 p-3">
             <Info size={14} className="text-blue-400 flex-shrink-0 mt-0.5" />
             <div className="text-[11px] text-text-muted leading-relaxed">
               <span className="text-blue-400 font-medium">ตัวอย่าง:</span> ลูกค้าพิมพ์ &quot;สนใจหัวชาร์จ&quot; → &quot;มี 220W ไหม&quot; → &quot;ส่งรูปได้ไหม&quot; รัวๆ
               ระบบจะรวมเป็น 1 คำถาม ส่งบอท 1 ครั้ง ตอบ 1 คำตอบ
+            </div>
+          </div>
+        </ConfigSection>
+
+        {/* ─── Section: Bot Concurrency Limit (⚡ Phase 2Q) ─── */}
+        <ConfigSection
+          icon={<Sliders size={16} />}
+          title="จำนวนการยิงบอทขนานกัน (Concurrency)"
+          description="จำกัดจำนวน callBot ที่ยิงไป Python bot พร้อมกัน — ป้องกันบอทโอเวอร์โหลดเมื่อข้อความเข้าเยอะ"
+          badge={`${concurrencyLimit} reqs`}
+        >
+          <div className="py-3 px-3 rounded-lg bg-surface-2 space-y-2">
+            <div className="flex items-center gap-2">
+              <Sliders size={13} className="text-text-muted" />
+              <span className="text-sm font-medium text-text">ยิงบอทสูงสุด X ข้อความพร้อมกัน</span>
+            </div>
+            <p className="text-[11px] text-text-muted">
+              ถ้าข้อความเข้าเยอะ → ยิงบอทขนานกันได้สูงสุด X ครั้ง ที่เหลือรอในคิว — ปรับตามความสามารถของ Python bot
+            </p>
+            <MinimalSlider
+              value={concurrencyLimit}
+              min={1}
+              max={200}
+              step={1}
+              onChange={setConcurrencyLimit}
+              disabled={!editable}
+              format={(v) => `${v} reqs`}
+            />
+            <div className="flex justify-between text-[10px] text-text-subtle">
+              <span>1 (ช้า ปลอดภัย)</span>
+              <span>200 (เร็ว กล้าเสี่ยง)</span>
+            </div>
+          </div>
+
+          <div className="flex items-start gap-2 rounded-lg bg-blue-500/5 border border-blue-500/15 p-3">
+            <Info size={14} className="text-blue-400 flex-shrink-0 mt-0.5" />
+            <div className="text-[11px] text-text-muted leading-relaxed">
+              <span className="text-blue-400 font-medium">ตัวอย่าง:</span> 500 ข้อความเข้ามา → buffer รวมเป็น 200 context
+              → ถ้าตั้ง 50 → ยิงบอท 50 ขนานกัน → เสร็จ → ยิง 50 ถัดไป → ใช้เวลา ~4 รอบ
             </div>
           </div>
         </ConfigSection>
@@ -426,6 +543,41 @@ export default function AdminConfigPage() {
               <span className="text-blue-400 font-medium">วิธีใช้:</span> สร้าง workflow ในหน้า Workflows →
               กำหนด trigger + flow → เปิดใช้งานที่นี่เพื่อให้ engine ทำงาน ·
               ปิดได้ทุกเมื่อ — ข้อความจะกลับไป trigger/bot ตามปกติ
+            </div>
+          </div>
+        </ConfigSection>
+
+        {/* ─── Section: Assignment (G2) ─── */}
+        <ConfigSection
+          title="การมอบหมายงาน (Assignment)"
+          icon={<GitBranch size={16} className="text-brand" />}
+          description="ตั้งค่าวิธีจ่ายงานเมื่อบอทส่งต่อแอดมิน"
+        >
+          <div className="space-y-4">
+            {/* Toggle: prefer previous admin */}
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex-1">
+                <div className="text-sm font-medium text-text">จ่ายงานให้แอดมินคนเดิม</div>
+                <div className="text-[11px] text-text-muted mt-0.5">
+                  เปิด = ส่งคืนแอดมินคนเดิมที่เคยตอบแชทนั้นก่อน ·
+                  ปิด = จ่าย round-robin ตามคิวเลย (อาจได้แอดมินคนใหม่)
+                </div>
+              </div>
+              <ToggleSwitch
+                enabled={preferPreviousAdmin}
+                disabled={!editable}
+                onChange={() => editable && setPreferPreviousAdmin(!preferPreviousAdmin)}
+              />
+            </div>
+
+            {/* Info box */}
+            <div className="flex items-start gap-2 rounded-lg bg-blue-500/5 border border-blue-500/15 p-3">
+              <Info size={14} className="text-blue-400 flex-shrink-0 mt-0.5" />
+              <div className="text-[11px] text-text-muted leading-relaxed">
+                <span className="text-blue-400 font-medium">วิธีใช้:</span> เปิดไว้ถ้าอยากให้ลูกค้าได้คุยกับแอดมินคนเดิมตลอด ·
+                ปิดถ้าอยากกระจายงานเท่ากัน (round-robin) ·
+                โหมด round-robin ตั้งค่าเพิ่มได้ที่หน้า Assignment Config
+              </div>
             </div>
           </div>
         </ConfigSection>

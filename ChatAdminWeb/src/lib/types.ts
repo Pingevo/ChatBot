@@ -22,6 +22,8 @@ export type ProblemCategory =
   | "warranty" | "account" | "promotion" | "other";
 
 // Phase 5 — ประวัติการปิด/เปิดแชท
+// ⚡ Phase 2O — record ปิดเท่านั้น (sequence = จำนวนครั้งที่ปิด)
+//   reopen แก้ใน record เดิม (reopened_at) ไม่สร้าง record ใหม่
 export interface CloseHistoryRecord {
   record_id: string;
   conversation_id: string;
@@ -34,7 +36,7 @@ export interface CloseHistoryRecord {
   reopened_by?: string;
   reopened_at?: string; // ISO
   reopen_reason?: string;
-  sequence: number;
+  sequence: number; // จำนวนครั้งที่ปิด (1, 2, 3...)
 }
 
 export type MessageRole = "user" | "bot" | "admin" | "system";
@@ -144,6 +146,7 @@ export interface AdminUser {
   channels_access?: string[];
   active?: boolean;
   is_accepting_chats?: boolean; // Phase 7.9 — เปิด/ปิดรับแชท
+  bubble_color?: string; // ⚡ สี bubble ของ admin คนนี้ (hex) — ใช้ใน ChatWindow/TicketChatPanel
   last_login_at?: string | null;
   created_at?: string;
 }

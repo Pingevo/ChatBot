@@ -16,6 +16,9 @@ const PUBLIC_PAGES = ["/login"];
 const PUBLIC_API = [
   "/api/auth/sso/login", // SSO login — redirect ไป system81
   "/api/auth/sso/callback", // SSO callback — รับ token จาก system81
+  // ⚡ Phase 1F — test chat uploads (รูปที่อัปโหลด) — public เพื่อให้ <img> ดึงได้
+  //    ปลอดภัยเพราะใช้ ObjectId สุ่ม 24 hex chars (ไม่สามารถเดาได้)
+  "/api/test-chat/uploads",
 ];
 
 function isPublic(pathname: string): boolean {

@@ -296,13 +296,13 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `categories` | 272 | `GET /categories` | `_db()`, `product_store.list_categories` |
 | `brands` | 281 | `GET /brands` — paginated | `_db()`, `os`, `re`, `Counter` |
 | `chat` | 368 | **`POST /chat` — main orchestrator** | ทุก pipeline stage (ดู section 5) |
-| `list_test_chat_sessions` | 4110 | `GET /test-chat/sessions` | `_admin_db()` |
-| `create_test_chat_session` | 4132 | `POST /test-chat/sessions` | `_admin_db()`, `_log_testchat_action` |
-| `get_test_chat_session` | 4154 | `GET /test-chat/sessions/{id}` | `_admin_db()` |
-| `add_test_chat_message` | 4177 | `POST /test-chat/sessions/{id}/messages` | `_admin_db()`, `_log_testchat_action` |
-| `delete_test_chat_session` | 4217 | `DELETE /test-chat/sessions/{id}` | `_admin_db()`, `_log_testchat_action` |
-| `update_test_chat_session` | 4241 | `PATCH /test-chat/sessions/{id}` | `_admin_db()`, `_log_testchat_action` |
-| `list_test_chat_logs` | 4283 | `GET /test-chat/logs` | `_admin_db()` |
+| `list_test_chat_sessions` | 5345 | `GET /test-chat/sessions` — กรองตาม admin_id (Phase 3) | `_admin_db()`, `Request.headers` |
+| `create_test_chat_session` | 5385 | `POST /test-chat/sessions` — เก็บ admin_id + admin_name (Phase 3) | `_admin_db()`, `_log_testchat_action`, `urllib.parse.unquote` |
+| `get_test_chat_session` | 5414 | `GET /test-chat/sessions/{id}` | `_admin_db()` |
+| `add_test_chat_message` | 5437 | `POST /test-chat/sessions/{id}/messages` | `_admin_db()`, `_log_testchat_action` |
+| `delete_test_chat_session` | 5477 | `DELETE /test-chat/sessions/{id}` | `_admin_db()`, `_log_testchat_action` |
+| `update_test_chat_session` | 5501 | `PUT /test-chat/sessions/{id}` | `_admin_db()`, `_log_testchat_action` |
+| `list_test_chat_logs` | 5612 | `GET /test-chat/logs` — รองรับ filter admin_id (Phase 3) | `_admin_db()`, `Request.headers` |
 | `feedback` | 4304 | `POST /feedback` — thumbs up/down | — |
 
 #### 6.1.2 Pipeline helpers (top-level)
@@ -311,7 +311,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 |---|---|---|---|
 | `_extract_item_id_tag` | 361 | extract `[item: xxx]` tag | `_ITEM_TAG_RE` |
 | `_record_suggestion_products` | 3938 | บันทึกสินค้าที่ bot แนะนำลง conversation_products timeline | `conversation_products.add_product` |
-| `_append_base_warranty` | 3971 | append warranty text ถ้าเป็นคำถามรับประกัน | `knowledge_base.is_warranty_question`, `warranty` |
+| `_append_base_warranty` | 4455 | append warranty text เฉพาะเมื่อลูกค้าขอเงื่อนไขรับประกัน (มี "เงื่อนไข", "ยังไง", "อะไรบ้าง") ไม่ใช่ทุก warranty question | `knowledge_base.is_warranty_question`, `warranty` |
 | `_detect_brand_question` | 3866 | detect "Xiaomi ขายอะไรบ้าง" | `re` |
 | `_build_brand_context` | 3896 | สร้าง context ของแบรนด์ | `os`, `re`, `Counter` |
 | `_merge_kb_mongo` | 3959 | รวม KB doc + Mongo product card | `_kb_doc_to_card`, `re` |
@@ -348,7 +348,52 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `ChatRequest` | 106 | body `/chat` (message, shop, item_id, history, limit, handoff fields, simulate) |
 | `ChatResponse` | 124 | response `/chat` (answer, products, source, usage, timing, web_search, handoff, routing_decision) |
 | `FeedbackRequest` | 170 | body `/feedback` |
-| `TestChatMessage`, `CreateSessionRequest`, `AddMessageRequest`, `UpdateSessionRequest` | 4086-4104 | test-chat schemas |
+| `TestChatMessage`, `CreateSessionRequest`, `AddMessageRequest`, `UpdateSessionRequest` | 5320-5343 | test-chat schemas |
+
+#### 6.1.6 Test Chat Sessions — detail (Phase 3 ownership + log filter)
+
+**`list_test_chat_sessions` (line 5345) — `GET /test-chat/sessions`**
+- **Purpose:** list test chat sessions ของ admin คนนั้น (กรองตาม `admin_id`)
+- **Input:** `request: Request` (header `X-Admin-Id`), query `shop?: str`, `limit?: int`
+- **Output:** `{sessions: [{id, shop, title, message_count, created_at, updated_at, admin_id, admin_name}]}`
+- **Calls:** `_admin_db()`
+- **Called by:** Next.js `TestChatClient.loadSessions()` → proxy `/api/chatbot/shopee/test-chat/sessions`
+- **How it works:**
+  1. ดึง `admin_id` จาก header `X-Admin-Id`
+  2. สร้าง query `$or`: `admin_id == ผู้เรียก` OR `admin_id` ไม่มี field / None / "" (legacy)
+  3. ถ้ามี `shop` เพิ่มเงื่อนไข `shop` เข้าไป
+  4. sort `updated_at` desc, limit
+- **Side effects:** อ่าน MongoDB admin DB (`test_chat_sessions`)
+- **Error/fallback:** ถ้าไม่มี header `X-Admin-Id` → ไม่กรอง (เห็นทั้งหมด) — ปลอดภัยเพราะ proxy แนบ header เสมอ
+
+**`create_test_chat_session` (line 5385) — `POST /test-chat/sessions`**
+- **Purpose:** สร้าง session ใหม่ พร้อมเก็บ `admin_id` + `admin_name` ของผู้สร้าง
+- **Input:** `req: CreateSessionRequest` (shop, title), `request: Request` (header `X-Admin-Id`, `X-Admin-Name`)
+- **Output:** `{id, shop, title}`
+- **Calls:** `_admin_db()`, `_log_testchat_action()`, `urllib.parse.unquote`
+- **Called by:** Next.js `TestChatClient.createSession()` → proxy `/api/chatbot/shopee/test-chat/sessions`
+- **How it works:**
+  1. ดึง `admin_id` จาก header (default "anonymous")
+  2. ดึง `admin_name` จาก header แล้ว URL-decode (default "anonymous")
+  3. insert doc พร้อม `admin_id` + `admin_name`
+  4. log action "create_session"
+- **Side effects:** write `test_chat_sessions` + write `test_chat_logs`
+- **Error/fallback:** exception → HTTP 500
+
+**`list_test_chat_logs` (line 5612) — `GET /test-chat/logs`**
+- **Purpose:** ดู log การใช้งาน testchat — ใคร ทำอะไร แชทไหน เมื่อไหร่
+- **Input:** `request: Request` (header `X-Admin-Id`), query `limit?: int`, `action?: str`, `admin_id?: str`
+- **Output:** `{logs: [{id, action, session_id, admin_id, admin_name, shop, timestamp, ...extra}], count}`
+- **Calls:** `_admin_db()`
+- **Called by:** Next.js `TestChatClient.loadActionLogs()` → proxy `/api/chatbot/shopee/test-chat/logs`
+- **How it works:**
+  1. resolve `admin_id` filter: ถ้าส่ง query param `admin_id` มาใช้ค่านั้น, ถ้าไม่ส่งดึงจาก header
+  2. ถ้า `admin_id == "all"` → ไม่กรอง (ดูทุกคน)
+  3. ถ้ามี `admin_id` ปกติ → กรอง `admin_id` ใน query
+  4. ถ้ามี `action` → เพิ่มเงื่อนไข `action`
+  5. sort `timestamp` desc, limit
+- **Side effects:** อ่าน MongoDB admin DB (`test_chat_logs`)
+- **Error/fallback:** exception → HTTP 500
 
 ---
 
@@ -361,6 +406,8 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `answer` | 434 | ตอบคำถามสินค้าจาก product context | `_client()`, `_build_context()` |
 | `answer_with_kb` | 604 | ตอบจาก KB context (ไม่มี product_store) | `_client()` |
 | `answer_general` | 664 | ตอบคำถามทั่วไป (policy/brands/categories) | `_client()` |
+| `describe_image` | 476 | **Phase 1A** vision pass — อ่านรูป 1 รูปด้วย `gemini-3.1-flash-lite` (โหลด bytes → `Part.from_bytes`) → คืน (text, usage) | `_client()`, `urllib.request`, `types.Part.from_bytes()` |
+| `describe_images` | 516 | **Phase 1A** vision pass — อ่านหลายรูป (max 3) → คืน (combined_text, total_usage) | `describe_image()` |
 
 #### 6.2.2 API key management
 
@@ -381,7 +428,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ชื่อ | Line | สรุปกฎสำคัญ |
 |---|---|---|
-| `SYSTEM_INSTRUCTION` | 19-280 | บุคลิกหญิงใช้ `ค่ะ/นะคะ`, ตอบจาก context เท่านั้น, แยก bubble `|||`, แนะนำ 2-3 ชิ้น, ห้ามบอกราคา, ร้าน isolation, **ห้ามแนะนำรุ่นอื่นเมื่อถาม spec รุ่นเดิม (เว้นแต่สัมพันธ์กับคำถาม)**, **ห้ามใส่ลิงก์ภายนอก** |
+| `SYSTEM_INSTRUCTION` | 19-320 | บุคลิกหญิงใช้ `ค่ะ/นะคะ`, ตอบจาก context เท่านั้น, แยก bubble `|||`, แนะนำ 2-3 ชิ้น, ห้ามบอกราคา, ร้าน isolation, **ห้ามแนะนำรุ่นอื่นเมื่อถาม spec รุ่นเดิม (เว้นแต่สัมพันธ์กับคำถาม)**, **ห้ามใส่ลิงก์ภายนอก**, **คำถามสั้น/กำกวม ให้ใช้ history ตีความ ห้ามตอบ "คำถามสั้นไป"**, **ตอบให้ละเอียด 2-3 ประโยค ไม่สั้นเกิน**, **คำถามเล่นๆ/นอกเรื่อง ตอบเป็นมิตรแล้วกลับสู่บริบทร้าน**, **ห้ามแนบลิงก์/รูปเมื่อลูกค้าถาม trust ไม่ได้ขอซื้อ** |
 | `KB_SYSTEM_INSTRUCTION` | 572-601 | บุคลิกเดียวกัน, ตอบจาก KB context, สั้นกระชับเรื่องรับประกัน |
 | `_SEGMENT_DELIMITER` | 334 | `"|||"` |
 
@@ -403,7 +450,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | ฟังก์ชัน | Line | หน้าที่ |
 |---|---|---|
 | `_detect_charger_subtype` | 1357 | detect `cable`/`adapter`/`set`/`car_charger`/`wireless`/`desktop`/`socket` จากข้อความ (รวม shorthand `"หัว"`/`"สาย"`) |
-| `_filter_charger_subtype` | 1470 | กรอง docs ให้ตรง subtype (พร้อมกฎ set/cable/adapter cross-inclusion) |
+| `_filter_charger_subtype` | 1477 | กรอง docs ให้ตรง subtype (พร้อมกฎ set/cable/adapter cross-inclusion) — อ่านทั้ง `item_name` และ `name` field |
 
 #### 6.3.3 Reranking
 
@@ -420,7 +467,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ฟังก์ชัน | Line | หน้าที่ | เรียก |
 |---|---|---|---|
-| `build_query` | 1829 | สร้าง MongoDB filter (shop/brand/category/price/type/warranty) | `_detect_*`, `_product_type_*`, `warranty.strip_warranty_keywords` |
+| `build_query` | 1829 | สร้าง MongoDB filter (shop/brand/category/price/type/warranty) + feature-based search สำหรับ earphone (ANC/กันน้ำ/วิ่ง 2026-09-07) | `_detect_*`, `_product_type_*`, `warranty.strip_warranty_keywords` |
 | `_product_type_regex` | 1816 | join regex ของ detected types | — |
 | `_product_type_categories` | 1808 | ดึง candidate `cat_name` ของ types | — |
 | `_detect_product_types` | 1265 | exact keyword + regex detect product types | — |
@@ -482,6 +529,13 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 **Output keys**: `intent`, `product_type`, `charger_subtype`, `target_device`, `needs_description`, `confidence`, `model`, `usage`
 
+**`llm.py` include_desc merge (line ~539, แก้ 2026-09-03):**
+- **Purpose**: merge intent `needs_description` กับ keyword matching — ถ้าอย่างใดอย่างหนึ่งบอก True → ส่ง description
+- **เหตุผล**: intent classifier อาจบอก False แต่ keyword ("รายละเอียด", "สเปก") บอก True → ต้องส่ง desc เพื่อให้ LLM เห็นข้อมูล
+- **Logic**: `include_desc = _intent_desc or _kw_match` (OR merge)
+- **Called by**: `llm.answer()` ก่อนเรียก `_build_context()`
+- **Side effects**: ถ้า `include_desc=True` → `_build_context` ใส่ `description_excerpt`, `weight`, `dimension` ใน context
+
 #### 6.4.2 Gate
 
 | ฟังก์ชัน | Line | หน้าที่ |
@@ -529,10 +583,42 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ฟังก์ชัน | Line | หน้าที่ |
 |---|---|---|
-| `extract_model_keywords` | 235 | tokenize + filter stopwords → model keyword candidates |
+| `extract_model_keywords` | 235 | tokenize + filter stopwords → model keyword candidates (เพิ่ม version/region stop_words 2026-09-03: กัน "Version" ถูก extract เป็น model keyword และดึง TP-Link "Global Version" มาทับ anchor CW400; เพิ่ม target device filter 2026-09-07: กรอง "11โปรแม๊ก"/"iphone" ออกจาก candidates เพราะเป็นอุปกรณ์ ไม่ใช่ model สินค้าในร้าน → กัน CONV-ACTIVE ข้าม) |
+| `is_target_device_kw` | 268 | ตรวจว่า token เป็นชื่ออุปกรณ์ (iPhone/Samsung/โปรแม็ก/ฯลฯ) ไม่ใช่ model สินค้าในร้าน — ใช้ใน `extract_model_keywords` และ CONV-ACTIVE check (เพิ่ม 2026-09-07: จับ "13คะ"/"15ครับ" ที่เป็นเลขรุ่น iPhone + คำลงท้ายไทย) |
 | `detect_general_question` | 189 | detect warranty/return/shipping policy / brands / categories / shops / tax_invoice |
 | `detect_topic` | 223 | match `TOPIC_KEYWORDS` → `warranty`/`specs`/`box_contents`/`highlights`/`description`/`comparison` |
 | `is_warranty_question` | 76 | simple warranty/claim keyword check |
+
+##### `is_target_device_kw` (Phase 3, 2026-09-07)
+
+- **Purpose**: ตรวจว่า token เป็นชื่ออุปกรณ์ (target device) เช่น iPhone/Samsung/โปรแม็ก ไม่ใช่ model สินค้าในร้าน — ใช้แยก "11โปรแม๊ก" (อุปกรณ์) ออกจาก "AL870" (model สินค้า)
+- **Input**: `kw: str` — token ที่สกัดจาก message
+- **Output**: `bool` — True ถ้าเป็น target device
+- **Calls**: `re.fullmatch` (built-in)
+- **Called by**:
+  - `extract_model_keywords` (ในไฟล์เดียวกัน) — กรอง target device ออกจาก candidates
+  - `app.py` CONV-ACTIVE block (บรรทัด ~2894) — กรอง target device ออกจาก `_cur_model_kw` ก่อนเช็ค
+- **How it works**:
+  1. เช็คว่า token อยู่ใน `_TARGET_DEVICE_KWS` (iphone/ไอโฟน/samsung/โปรแม็ก/ultra/ฯลฯ) หรือไม่
+  2. เช็ค regex รุ่น iPhone เฉยๆ เช่น "11โปรแม็ก", "15พลัส", "13มินิ", "14pro" — ใช้ `re.search` (ไม่ใช่ fullmatch) เพื่อจับ token ยาว เช่น "11โปรแม๊กอันไหนคับ"
+  3. เช็ค regex "iphone" + ตัวเลข เช่น "iphone11", "iphone15promax" — ใช้ `re.search` เช่นกัน
+  4. เช็ค regex "ไอโฟน" (Thai) + ตัวเลข เช่น "ไอโฟน13", "ไอโฟน13คะ" — ใช้ `re.search(r"ไอโฟน\s*\d+")` (เพิ่ม 2026-09-07: regex ด้านบนจับแค่ "iphone" ภาษาอังกฤษ ไม่จับ "ไอโฟน" ภาษาไทย)
+  5. เช็ค regex ตัวเลขรุ่น iPhone (11-17) + คำลงท้ายไทย เช่น "13คะ", "15ครับ", "17นะ" — ใช้ `re.match(r"^1[1-7][\u0E00-\u0E7F]+$")` (เพิ่ม 2026-09-07: กัน "13คะ" ถูกจับเป็น model keyword แล้วข้าม CONV-ACTIVE ทำให้บอทไม่ใช้ active product และตอบว่าไม่มีสาย Lightning)
+- **Side effects**: ไม่มี
+- **Error/fallback**: ไม่มี — เป็น pure function
+
+##### `extract_model_keywords` — Phase 3 update (2026-09-07)
+
+- **Purpose**: สกัดคำที่น่าจะเป็นชื่อรุ่นสินค้าในร้าน กรอง target device ออกจาก candidates
+- **Input**: `message: str` — ข้อความลูกค้า
+- **Output**: `list[str]` — model keyword candidates (กรอง target device แล้ว)
+- **Calls**: `is_target_device_kw`
+- **Called by**: `app.py` (CONV-ACTIVE, carry-forward, KB path), `search_kb_by_model`, `_search_kb_single`, `should_use_web_search`
+- **How it works**:
+  1. tokenize + filter stopwords (เดิม)
+  2. กรอง target device ออกจาก candidates ด้วย `is_target_device_kw` (ใหม่ Phase 3)
+- **Side effects**: ไม่มี
+- **Error/fallback**: ไม่มี
 
 #### 6.5.3 Context building
 
@@ -638,6 +724,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `detect_purchase_date_and_order` | 649 | extract purchase_date + order_id |
 | `detect_warranty_duration_question` | 671 | detect "รับประกันกี่ปี" |
 | `detect_tax_invoice_request` | 699 | detect ขอใบกำกับภาษี — ไม่รวม "เลขที่" เพราะเป็น false positive จากที่อยู่ |
+| `auto_check_warranty` | 717 | ⚡ Phase 1C — auto-check ระยะประกันจาก order_sn → ดึง order จาก MongoDB → คำนวณ is_in_warranty → สร้าง warranty_text ให้ LLM |
 
 #### 6.8.2 Helpers
 
@@ -674,17 +761,38 @@ web_search.should_use_web_search(answer, intent, products, message)
 - **ก่อนแก้:** รับเฉพาะ name/phone เป็นข้อมูลบางส่วน → ถ้าลูกค้าให้แค่ order_id ถือว่าไม่มีข้อมูล → ขอข้อมูลใหม่ทั้งหมด
 - **หลังแก้:** รับ order_id ด้วย → ทวนข้อมูลที่ให้มา + ถามข้อมูลที่เหลือ (name/phone/order_id ที่ขาด)
 
-**`app.py` State 7 — awaiting_claim_info (line ~1011, เพิ่ม 2026-09-10):**
+**`app.py` State 7 — awaiting_claim_info (line ~1011, เพิ่ม 2026-09-10, ขยับ Phase 2B 2026-09-12):**
 - **Purpose:** รับรูป/วิดีโอ/ข้อมูลที่ลูกค้าส่งตามที่บอทขอใน claim flow (หลัง handoff แล้ว) → ขอบคุณ + บอกรอแอดมิน
 - **Flow ใหม่:** ขอข้อมูล + handoff ทันที → ลูกค้าตอบมา → ขอบคุณ + บอกรอแอดมิน (ไม่ต้องทวน/ถามยืนยัน)
 - **Input:** `req.message` (อาจเป็น `[รูปภาพ]`, `[วิดีโอ]`, หรือมี placeholder + ข้อมูลอื่น), `history` (last model message ขอ claim info)
 - **Output:** `_warranty_claim_answer` (ขอบคุณ + บอกรอแอดมิน), `_warranty_claim_ctx` (เก็บข้อมูลที่ได้รับ)
 - **Detection:** `_bot_asked_claim_info` — last model message มี "วันที่ซื้อ" + "เลขที่คำสั่งซื้อ" + "รูป/วิดีโอ" พร้อมกัน
+- **⚡ Phase 2B — Warranty context image:** ถ้า history มี warranty/claim keywords (เคลม/ประกัน/ซ่อม/เสีย/พัง/ใช้ไม่ได้/ชาร์จไม่เข้า/ฯลฯ) และลูกค้าส่งรูป/วิดีโอ → ถือเป็น claim evidence แม้บอทไม่ได้ขอ claim info ใน last message (กัน Q11: บอทตอบเรื่องระยะเวลาเคลม → ลูกค้าส่งรูป → บอทตอบเป็น product info ผิด)
 - **Image detection:** `_msg_is_image` (message = `[รูปภาพ]` อย่างเดียว) หรือ `_msg_has_image_placeholder` (มี placeholder ผสมกับ text)
 - **Cleanup:** ตัด image placeholder + date pattern ออกจาก message ก่อน `extract_customer_info` (กัน `[รูปภาพ]` หรือ "ซื้อวันที่..." ถูกตีความเป็นชื่อ)
 - **Called by:** `chat()` หลัง post-handoff block, ก่อน state awaiting_customer_info
 - **Side effects:** ไม่มี DB write (เก็บใน memory เฉพาะรอบปัจจุบัน)
 - **Error/fallback:** ถ้าไม่มี image และไม่มีข้อมูลใดเลย → ไม่ตั้ง `_warranty_claim_answer` → ตกไป state อื่นตามปกติ
+
+**`warranty.py` `_CLAIM_REQUEST_INDICATORS` (Phase 2B 2026-09-12):**
+- **ก่อนแก้:** "ชาร์จไม่เข้า" อยู่แค่ใน `_symptom_kws` (ใช้ต่อเมื่อ match `_CLAIM_QUESTION_PATTERNS` ก่อน) → "รู้สึกน้องชาร์จไม่เข้าเลยค่ะ" ไม่ถูกตรวจจับเป็น claim request
+- **หลังแก้:** เพิ่ม "ชาร์จไม่เข้า", "ไม่ชาร์จ", "ชาร์จไม่ติด", "ชาร์จไม่ได้", "ไม่เข้าเลย", "ไฟไม่เข้า", "ไม่สแกน", "ไม่เชื่อมต่อ", "ไม่แสดงผล", "ไม่ได้เสียง" ใน `_CLAIM_REQUEST_INDICATORS` โดยตรง
+
+**`app.py` Repeated complaint guard (Phase 2B 2026-09-12):**
+- **Purpose:** กัน LLM override claim_request เป็น False เมื่อลูกค้าแจ้งปัญหาซ้ำ 2+ ครั้งใน history
+- **Detection:** นับ user messages ใน history ที่มี complaint keywords (ชาร์จไม่เข้า/ใช้ไม่ได้/เสีย/พัง/ฯลฯ) → ถ้า >= 2 → ตั้ง `_repeated_complaint=True`
+- **Behavior:** ถ้า `_repeated_complaint=True` → ห้าม LLM override `_is_claim_request` เป็น False (แม้ LLM จะบอก intent != warranty_claim ด้วย confidence >= 0.7)
+
+**`app.py` State-driven open/closed (Phase 2A 2026-09-12):**
+- **Purpose:** ปุ่ม "ปิดแชท" ใน test chat อัปเดต DB จริง → botCallService ดึง status ส่ง `ticket_state` ให้บอท → บอทใช้ state ตัดสินใจ ไม่ใช้ keyword scan
+- **Input:** `req.ticket_state` ("open"|"closed"|"handoff"|"resolved"|"pending"|None)
+- **Behavior:**
+  - `closed` → `_bot_handed_off = False` (ข้าม post-handoff lock ทั้งหมด บอทตอบปกติ)
+  - `handoff`/`open` + มี history marker → ล็อค (ยกเว้น exceptions ใน ShopSettings)
+  - `None` → fallback ใช้ history scan แบบเดิม (backward compat)
+- **Endpoints:** `/test-chat/sessions/{id}/close` + `/reopen` (Python bot, simulate mode)
+- **ShopSettings:** `post_handoff_exceptions: string[]` — แอดมินตั้งได้ต่อร้าน (เช่น "ทวนข้อมูลเคลม", "ส่งลิงก์กรอกฟอร์ม")
+- **Called by:** `botCallService.resolveTicketState()` ดึงจาก `test_chat_sessions` (simulate) หรือ `conversations` (production)
 
 **`app.py` ข้าม order_lookup ใน claim flow (line ~495, เพิ่ม 2026-09-10):**
 - **Purpose:** กัน order_sn ในข้อความลูกค้า (ที่ส่งมาเป็น claim info) ถูกจับโดย order_lookup ก่อนเข้า warranty state machine
@@ -775,6 +883,8 @@ Mongo document schema:
 | conv-active resolution | ~2835 | ดึง active product จาก timeline ก่อน carry-forward |
 | conv-active context note | ~2927 | บอก LLM ห้ามสลับสินค้า |
 | suggestion recording | ~3938 | `_record_suggestion_products()` บันทึกสินค้าที่ bot แนะนำ |
+| kb+mongo+web_search return | ~2671 | ⚡ เรียก `_record_suggestion_products` ก่อน return (source=knowledge_base+mongo+web_search) |
+| kb+mongo return | ~2695 | ⚡ เรียก `_record_suggestion_products` ก่อน return (source=knowledge_base+mongo) |
 | web_search return | ~3894 | เรียก `_record_suggestion_products` ก่อน return |
 | product_store return | ~3920 | เรียก `_record_suggestion_products` ก่อน return |
 
@@ -797,6 +907,82 @@ Mongo document schema:
 - ทุก function catch exception เอง → ไม่ crash chat flow
 - ถ้า Mongo ไม่ available → return None / ข้ามไป
 - ถ้า conversation_id ว่าง → ไม่ทำอะไร
+
+---
+
+### 6.10 `order_store.py` — Order & tracking lookup (read-only)
+
+> **MongoDB order DB** (env `ORDER_URI_MONGO` / `ORDER_DB` / `ORDER_COLLECTION`) — read-only
+
+#### 6.10.1 Purpose
+
+ดึงข้อมูลคำสั่งซื้อ + tracking จาก MongoDB เพื่อ:
+- ตอบลูกค้าเรื่องสถานะคำสั่งซื้อ/การจัดส่ง
+- ⚡ Phase 1B — ค้น order จาก tracking number (ลูกค้าส่งเลขพัสดุ)
+- ⚡ Phase 1C — แสดง order history ใน ticket panel + warranty auto-check
+
+#### 6.10.2 Main functions
+
+| ฟังก์ชัน | Line | หน้าที่ |
+|---|---|---|
+| `extract_order_sn` | 74 | ดึง order_sn จากข้อความ (รองรับ `[order: xxx]` tag + pattern ทั่วไป) |
+| `extract_tracking_number` | 117 | ⚡ Phase 1B — ดึง tracking number จาก text/vision OCR (SPX/Kerry/Flash/J&T/ไปรษณีย์) |
+| `lookup_by_tracking` | 144 | ⚡ Phase 1B — ค้น order จาก tracking number (MongoDB) |
+| `lookup_order` | 227 | ดึงข้อมูล order จาก order_sn — คืน status + items + tracking + variant + price + image |
+| `lookup_orders_by_buyer` | 372 | ⚡ Phase 1C — ดึง order history ของลูกค้าจาก buyer_username |
+| `build_order_context` | 425 | สร้าง context string สำหรับส่งให้ LLM (รวม tracking_no) |
+
+#### 6.10.3 Helpers
+
+| ฟังก์ชัน | Line | หน้าที่ |
+|---|---|---|
+| `_get_order_client` | 33 | lazy singleton MongoClient สำหรับ order DB |
+| `_get_order_collection` | 49 | คืน PyMongo collection สำหรับ orders |
+| `_map_order_status` | 196 | แปล order_status เป็นภาษาไทย |
+| `_map_logistics_status` | 201 | แปล logistics_status เป็นภาษาไทย |
+| `_format_create_time` | 206 | แปล unix timestamp เป็นวันที่ภาษาไทย (UTC+7) |
+| `_normalize_tracking` | 137 | normalize tracking number (ตัดช่องว่าง + ใหญ่) |
+
+#### 6.10.4 Data structures
+
+`lookup_order` return:
+```python
+{
+  "order_sn": "240215MCEQMT60",
+  "order_status": "จัดส่งแล้ว",  # ภาษาไทย
+  "order_status_raw": "SHIPPED",
+  "logistics_status": "ขนส่งรับพัสดุแล้ว",
+  "logistics_status_raw": "LOGISTICS_PICKUP_DONE",
+  "items": [{"name": "...", "model_name": "...", "quantity": 1, "price": 259.0, "image_url": "...", "sku": "...", "item_id": "...", "model_id": "..."}],
+  "shipping_carrier": "Kerry",
+  "tracking_no": "SPX1234567890",
+  "tracking_numbers": ["SPX1234567890"],  # ทุก tracking ถ้ามีหลาย package
+  "create_time": "15 ก.พ. 2567",
+  "create_time_raw": 1708012800,  # unix ts สำหรับ warranty calc
+  "total_amount": 259.0,
+  "currency": "THB",
+  "buyer_username": "witchayaporn773",
+  "payment_method": "Cash on Delivery",
+  "shopname": "ThaiSuperPhone",
+  "found": True,
+}
+```
+
+#### 6.10.5 Called by
+
+- `app.py:chat()` — order lookup + tracking lookup + warranty auto-check
+- `warranty.py:auto_check_warranty()` — ดึง order เพื่อคำนวณระยะประกัน
+- Next.js API `/api/admin/conversations/[id]/orders` — ดึง order history สำหรับ ticket panel
+
+#### 6.10.6 Side effects
+
+- MongoDB read (read-only — ไม่เขียน)
+
+#### 6.10.7 Error/fallback
+
+- ทุก function catch PyMongoError + Exception → return None / []
+- ถ้า ORDER_URI_MONGO ไม่ตั้ง → raise RuntimeError
+- ถ้าไม่พบ order → return None
 
 ---
 
@@ -855,6 +1041,7 @@ Mongo document schema:
 - ✅ Prompt: ห้ามแนะนำรุ่นอื่นเมื่อถาม spec รุ่นเดิม (เว้นแต่สัมพันธ์)
 - ✅ Prompt: ห้ามใส่ลิงก์ภายนอก (ยกเว้น shopee short_link/image)
 - ✅ Web search skip สำหรับ yes/no spec question ที่มีสินค้าใน context
+- ✅ **Multimodal vision pass (Phase 1A)** — บอทอ่านรูภาพที่ลูกค้าส่งด้วย `gemini-3-flash-preview` → ส่ง description เป็น context ให้ LLM หลัก
 
 ### 8.2 Placeholder / ยังไม่ใช้
 
@@ -941,9 +1128,23 @@ chat()
 ├── _detect_brand_question → _build_brand_context → llm.answer_general
 ├── knowledge_base.lookup_kb → _merge_kb_mongo → llm.answer
 │   └── web_search.should_use_web_search → search_and_extract → llm.answer
-├── product_store.fetch_products → _rerank_* → llm.answer
+├── product_store.fetch_products → _rerank_* → rejection_memory → llm.answer
 │   └── web_search.should_use_web_search → search_and_extract → llm.answer
 └── _append_base_warranty → return ChatResponse
+```
+
+### `app.py` rejection memory (line ~3920, เพิ่ม 2026-09-03)
+- **Purpose:** สแกน history หาสินค้าที่ลูกค้าปฏิเสธ → ส่ง extra_context ให้ LLM ว่าห้ามแนะนำซ้ำ
+- **Input:** `req.history` (ChatMessage[]), `products` (dict[] — context ปัจจุบัน), `req.message` (current message)
+- **Output:** `_rejection_extra` (str — extra_context สำหรับ llm.answer)
+- **Detection:**
+  1. สแกน model messages ใน history หา product codes (regex `[A-Z][A-Z0-9]{3,11}` + มีตัวเลข)
+  2. สแกน user message ถัดไป (หรือ req.message ถ้าเป็น last model message) หา negative signals
+  3. Negative signals: ทำไม, ไม่โอเค, ดีกว่า, ไม่เอา, จ่ายได้แค่, แล้วทำไมไม่, ฯลฯ
+  4. Matching: code ตรงๆ (case-insensitive) หรือ indirect reference ("สาย" → cable, "หัว" → adapter)
+- **Called by:** `chat()` ก่อนเรียก `llm.answer()`
+- **Side effects:** ไม่มี DB write — ส่งเป็น extra_context ให้ LLM เท่านั้น
+- **Error/fallback:** ถ้าไม่พบ rejected products → `_rejection_extra = ""` → ไม่กระทบ flow ปกติ
 ```
 
 ### `product_store.fetch_products()` internal

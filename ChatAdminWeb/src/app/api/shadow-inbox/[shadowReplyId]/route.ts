@@ -29,8 +29,9 @@ export async function GET(
   // enrich: ดึง raw_payload ของ inbound message เพื่อ parse media + ดึง chat history
   let inboundMessage: ChatMessage | undefined;
   let chatHistory: ChatMessage[] = [];
+  let conv: Awaited<ReturnType<typeof conversationService.getConversation>> = null;
   try {
-    const conv = await conversationService.getConversation(doc.conversation_id);
+    conv = await conversationService.getConversation(doc.conversation_id);
     if (conv) {
       const messages = await messageService.listMessages(doc.conversation_id, {
         platform: conv.platform,
@@ -122,6 +123,9 @@ export async function GET(
       inbound_message: inboundMessage,
       chat_history: chatHistory,
       bot_products: botProducts,
+      // ⚡ ส่ง customer info ไปแสดง avatar ใน ShadowReplyPanel
+      customer_name: conv?.to_name,
+      customer_avatar: conv?.customer_avatar,
     },
   });
 }

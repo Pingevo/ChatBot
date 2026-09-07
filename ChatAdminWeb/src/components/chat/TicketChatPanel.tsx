@@ -12,8 +12,8 @@ import {
   User,
   CheckCircle2,
   Hash,
-  Zap,
   RotateCcw,
+  Zap,
   Lock,
   UserCog,
 } from "lucide-react";
@@ -24,6 +24,9 @@ import { Button } from "@/components/ui/Button";
 import { quickReplyService, type QuickReplyRow } from "@/lib/services";
 import type { Conversation, ChatMessage, Topic } from "@/lib/types";
 import { MessageContent } from "./MessageContent";
+import { DateSeparatedList } from "./DateSeparator";
+import { adminBubbleColor, ZAAPI_COLOR, BOT_COLOR } from "@/lib/bubbleColors";
+import { useAuth } from "@/lib/authStore";
 import { splitAnswerSegments } from "@/lib/answerSegments";
 
 // ─── label maps ────────────────────────────────────────────────────────────────
@@ -128,11 +131,13 @@ function InlineDropdown({ label, value, options, onChange }: DropdownProps) {
 
 // ─── Message bubble ────────────────────────────────────────────────────────────
 
-function MessageBubble({ msg }: { msg: ChatMessage }) {
+function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage; customerName?: string; customerAvatar?: string }) {
   const isUser = msg.role === "user";
-  const isAdmin = msg.role === "admin";
   const isBot = msg.role === "bot";
   const isSystem = msg.role === "system";
+  // ⚡ แยก admin จริง vs Zaapi
+  const isAdmin = msg.role === "admin" && !!msg.admin_id;
+  const isZaapi = msg.role === "admin" && !msg.admin_id;
 
   if (isSystem) {
     return (
@@ -145,41 +150,67 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
   }
 
   // ⚡ Multi-bubble — bot แบ่งคำตอบด้วย ||| → render เป็นหลาย bubble แยก
-  // แต่ละ segment เป็น bubble ของตัวเอง (มี gap), products/table แสดงที่ segment สุดท้าย
-  // user/admin message ทั่วไปที่ไม่มี ||| จะผ่าน path เดิม (1 bubble)
   const segments = !isUser && !isSystem ? splitAnswerSegments(msg.text) : [msg.text];
   const hasMultiSegments = segments.length > 1;
 
-  // สร้าง msg สำหรับแต่ละ segment — segment สุดท้ายเก็บ products/table เดิม
   const segmentMsgs = hasMultiSegments
     ? segments.map((seg, i) => ({
         ...msg,
-        // segment สุดท้ายเก็บ products/table ไว้แสดง ที่อื่นละทิ้ง (กันซ้ำ)
         text: seg,
         products: i === segments.length - 1 ? msg.products : undefined,
         table: i === segments.length - 1 ? msg.table : undefined,
       }))
     : [msg];
 
+  // ⚡ ดึง admin_id + bubble_color ปัจจุบันจาก authStore — admin ปัจจุบัน → ใช้สีที่ตั้งใน profile
+  const myAdminId = useAuth((s) => s.user?.admin_id);
+  const myBubbleColor = useAuth((s) => s.user?.bubble_color);
+  const adminColor = adminBubbleColor(msg.admin_id, myAdminId, myBubbleColor);
+
+  // ⚡ สี bubble: zaapi=#11302e/ขาว, bot=#0b2340 (sidebar navy)/ขาว, admin=#560C0E (แดงเข้ม)/ขาว
+  const bubbleCls = isUser
+    ? "bg-surface border border-border text-text rounded-tl-sm"
+    : isZaapi
+    ? "text-white rounded-tr-sm"
+    : isBot
+    ? "text-white rounded-tr-sm"
+    : isAdmin
+    ? "text-white rounded-tr-sm"
+    : "bg-deep-space text-white rounded-tr-sm";
+
+  const bubbleStyle = isZaapi
+    ? { backgroundColor: ZAAPI_COLOR }
+    : isBot
+    ? { backgroundColor: BOT_COLOR }
+    : isAdmin
+    ? { backgroundColor: adminColor }
+    : undefined;
+
+  const avatarBg = "";
+  const avatarStyle = isZaapi
+    ? { backgroundColor: ZAAPI_COLOR }
+    : isBot
+    ? { backgroundColor: BOT_COLOR }
+    : isAdmin
+    ? { backgroundColor: adminColor }
+    : undefined;
+
   return (
     <div className={`flex gap-2.5 ${isUser ? "justify-start" : "justify-end"} animate-fade-in`}>
-      {isUser && <Avatar name="User" size={32} className="mt-1 shrink-0" />}
+      {isUser && <Avatar name={customerName || "User"} src={customerAvatar} size={32} className="mt-1 shrink-0" />}
       <div className={`max-w-[70%] ${isUser ? "" : "flex flex-col items-end gap-1"}`}>
-        {/* แสดงชื่อ admin ถ้าเป็น admin message */}
+        {/* แสดงชื่อ admin ถ้าเป็น admin message จริง */}
         {isAdmin && msg.admin_name && (
           <div className="text-[10px] text-text-muted mb-0.5 pr-1">{msg.admin_name}</div>
         )}
+        {/* แสดง label ฝั่ง out */}
+        {!isUser && (
+          <div className="text-[10px] text-text-subtle mb-0.5 pr-1">
+            {isZaapi ? "Zaapi" : isBot ? "Bot" : isAdmin ? "Admin" : ""}
+          </div>
+        )}
         {segmentMsgs.map((segMsg, i) => (
-          <div
-            key={i}
-            className={`rounded-2xl px-3.5 py-2 text-sm ${
-              isUser
-                ? "bg-surface border border-border text-text rounded-tl-sm"
-                : isAdmin
-                ? "bg-deep-space text-white rounded-tr-sm"
-                : "bg-brand text-white rounded-tr-sm"
-            }`}
-          >
+          <div key={i} className={`rounded-2xl px-3.5 py-2 text-sm ${bubbleCls}`} style={bubbleStyle}>
             <MessageContent msg={segMsg} variant={isUser ? "user" : "out"} />
           </div>
         ))}
@@ -187,17 +218,14 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
         <div className="flex items-center gap-1.5 mt-1 text-[10px] text-text-subtle">
           {isBot && <Bot size={10} />}
           {isAdmin && <Headset size={10} />}
+          {isZaapi && <Zap size={10} />}
           <span>{new Date(msg.timestamp).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })}</span>
           {msg.source && <span className="opacity-60">· {msg.source}</span>}
         </div>
       </div>
       {!isUser && !isSystem && (
-        <div
-          className={`mt-1 w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-            isAdmin ? "bg-deep-space" : "bg-brand"
-          }`}
-        >
-          {isAdmin ? <Headset size={16} className="text-white" /> : <Bot size={16} className="text-white" />}
+        <div className={`mt-1 w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${avatarBg}`} style={avatarStyle}>
+          {isZaapi ? <Zap size={16} className="text-white" /> : isBot ? <Bot size={16} className="text-white" /> : <Headset size={16} className="text-white" />}
         </div>
       )}
     </div>
@@ -324,8 +352,8 @@ export function TicketChatPanel({
 }: Props) {
   const [text, setText] = useState("");
   const [quickReplies, setQuickReplies] = useState<QuickReplyRow[]>([]);
-  const [showQuickReplies, setShowQuickReplies] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   // track ว่า user อยู่ใกล้ล่างไหม — ถ้าไม่ใช่ (กำลังเลื่อนขึ้นอ่าน) จะไม่ auto-scroll
   const wasNearBottomRef = useRef(true);
   // track conversation id เพื่อบังคับ scroll ลงล่างเมื่อเปลี่ยน conversation
@@ -357,17 +385,14 @@ export function TicketChatPanel({
     }
   }, [messages, conversation?.id]);
 
-  // track scroll position ของ user (เพื่อรู้ว่ากำลังอ่านข้อความเก่าอยู่ไหม)
-  // ⚠️ ต้องรันหลัง effect scroll เสมอ — ใช้ setTimeout เพื่อให้แน่ใจ
-  useEffect(() => {
+  // ⚡ track scroll position จาก onScroll handler จริง (ไม่ใช่ effect หลัง re-render)
+  //    ปัญหาเดิม: effect track หลัง messages เปลี่ยน → scroll position ถูกรีเซ็ตกลับบนแล้ว → ตั้ง false ตลอด
+  function handleScroll() {
     const el = scrollRef.current;
     if (!el) return;
-    const convId = conversation?.id ?? null;
-    // ข้ามการ track เมื่อเพิ่งเปลี่ยน conversation (ปล่อยให้ effect scroll ทำงานก่อน)
-    if (convId === prevConvIdRef.current && wasNearBottomRef.current) return;
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     wasNearBottomRef.current = distFromBottom < 80;
-  }, [messages, conversation?.id]);
+  }
 
   // โหลด quick replies ของ admin คนนี้ (เฉพาะที่ enabled, กรองตาม platform/shop ของแชทปัจจุบัน)
   useEffect(() => {
@@ -379,9 +404,11 @@ export function TicketChatPanel({
       .catch(() => setQuickReplies([]));
   }, [conversation?.platform, conversation?.shop_id]);
 
+  // ⚡ Phase 2E — กด quick reply แล้วส่งเลย (ไม่ต้องมาแอดใน textarea ก่อน)
   function handleQuickReply(qr: QuickReplyRow) {
-    setText(qr.body);
-    setShowQuickReplies(false);
+    if (sending) return;
+    onSend(qr.body);
+    setText("");
   }
 
   function handleSubmit(e: FormEvent) {
@@ -389,6 +416,8 @@ export function TicketChatPanel({
     if (!text.trim() || sending) return;
     onSend(text.trim());
     setText("");
+    // ⚡ reset textarea height หลังส่ง
+    if (textareaRef.current) textareaRef.current.style.height = "auto";
   }
 
   if (!conversation) {
@@ -457,49 +486,49 @@ export function TicketChatPanel({
       </div>
 
       {/* ── Messages ── */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
         {messages.length === 0 ? (
           <div className="text-center text-sm text-text-muted py-8">ยังไม่มีข้อความในบทสนทนานี้</div>
         ) : (
-          messages.map((m) => <MessageBubble key={m.id} msg={m} />)
+          <DateSeparatedList
+            items={messages}
+            getKey={(m) => m.id}
+            getTimestamp={(m) => m.timestamp}
+            renderItem={(m) => <MessageBubble msg={m} customerName={conversation?.customer_name} customerAvatar={conversation?.customer_avatar} />}
+            onlyToday
+          />
         )}
       </div>
 
       {/* ── Composer ── */}
       <form onSubmit={handleSubmit} className="p-3 border-t border-border bg-surface shrink-0">
-        {/* Quick replies dropdown */}
+        {/* ⚡ Quick replies — floating chips above text box (ไม่ใช่ dropdown ใหญ่) */}
         {quickReplies.length > 0 && (
-          <div className="relative mb-2">
-            <button
-              type="button"
-              onClick={() => setShowQuickReplies(!showQuickReplies)}
-              className="flex items-center gap-1.5 text-xs text-brand hover:text-brand/80 font-medium"
-            >
-              <Zap size={12} />
-              คำตอบเร็ว ({quickReplies.length})
-              <ChevronDown size={12} className={showQuickReplies ? "rotate-180" : ""} />
-            </button>
-            {showQuickReplies && (
-              <div className="absolute top-full left-0 mt-1 w-full max-w-md max-h-64 overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-20">
-                {quickReplies.map((qr) => (
-                  <button
-                    key={qr.quick_reply_id}
-                    type="button"
-                    onClick={() => handleQuickReply(qr)}
-                    className="w-full text-left px-3 py-2 hover:bg-surface-2 border-b border-border last:border-0"
-                  >
-                    <div className="text-xs font-medium text-text">{qr.title}</div>
-                    <div className="text-xs text-text-muted line-clamp-1">{qr.body}</div>
-                  </button>
-                ))}
-              </div>
-            )}
+          <div className="flex flex-wrap gap-1.5 mb-2 max-h-20 overflow-y-auto">
+            {quickReplies.map((qr) => (
+              <button
+                key={qr.quick_reply_id}
+                type="button"
+                onClick={() => handleQuickReply(qr)}
+                title={qr.body}
+                className="px-2.5 py-1 rounded-full border border-brand/30 bg-brand/5 text-xs text-brand hover:bg-brand/10 hover:border-brand/50 transition-colors whitespace-nowrap max-w-[160px] truncate"
+              >
+                {qr.title}
+              </button>
+            ))}
           </div>
         )}
         <div className="flex items-end gap-2">
           <textarea
+            ref={textareaRef}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value);
+              // ⚡ auto-expand — ขยายตามจำนวนบรรทัด (ไม่ scroll) สูงสุด 128px
+              const ta = e.target;
+              ta.style.height = "auto";
+              ta.style.height = `${Math.min(ta.scrollHeight, 128)}px`;
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
@@ -508,7 +537,7 @@ export function TicketChatPanel({
             }}
             placeholder="พิมพ์ข้อความตอบลูกค้า..."
             rows={1}
-            className="flex-1 resize-none rounded-xl border border-border bg-surface-2 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand max-h-32"
+            className="flex-1 resize-none min-h-[44px] max-h-[128px] rounded-xl border border-border bg-surface-2 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand overflow-hidden"
           />
           <Button type="submit" size="icon" disabled={!text.trim() || sending}>
             <Send size={16} />

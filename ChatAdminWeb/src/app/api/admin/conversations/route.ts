@@ -14,6 +14,7 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { conversationService } from "@/backend/service/conversationService";
+import { statusConversationService } from "@/backend/service/statusConversationService";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { safeRegexSearch } from "@/backend/lib/regexEscape";
 import type { Platform, ConversationStatus } from "@/backend/service/conversationService";
@@ -64,17 +65,21 @@ function mapToConversation(
   doc: Awaited<ReturnType<typeof conversationService.listConversations>>[number],
   adminMap: Map<string, { name: string; username: string }>,
   unansweredCount: number,
+  meta?: { status?: string; assigned_to?: string | null; topic?: string; item_ids?: string[]; pinned?: boolean },
 ): Conversation {
-  const adminInfo = doc.assigned_to ? adminMap.get(doc.assigned_to) : undefined;
-  // ⚠️ derive status จากข้อมูลจริง เพราะ sellcenter ไม่เขียน status
-  // - ปิด: มี closed_at
-  // - เปิด: มี assigned_to (บอทส่งต่อแอดมินแล้ว แอดมินยังไม่ปิด)
-  // - บอทตอบ: ค่าเริ่มต้น (ไม่มี assigned_to และไม่มี closed_at)
+  // ⚡ Phase 2J — อ่าน status/assigned_to จาก meta (ไม่ใช่ conversations ที่โดน dump ทับ)
+  //   ถ้า meta มี → ใช้ meta; ถ้าไม่มี → derive จาก conversations (backward compat)
+  const metaStatus = meta?.status;
+  const metaAssignedTo = meta?.assigned_to ?? null;
+  const effectiveAssignedTo = metaAssignedTo || doc.assigned_to || null;
+  const adminInfo = effectiveAssignedTo ? adminMap.get(effectiveAssignedTo) : undefined;
   let derivedStatus: Conversation["status"];
-  if (doc.closed_at) {
+  if (metaStatus) {
+    derivedStatus = metaStatus as Conversation["status"];
+  } else if (doc.closed_at) {
     derivedStatus = "closed";
-  } else if (doc.assigned_to) {
-    derivedStatus = "open";
+  } else if (effectiveAssignedTo) {
+    derivedStatus = "handoff";
   } else {
     derivedStatus = "bot";
   }
@@ -86,13 +91,13 @@ function mapToConversation(
     customer_id: doc.customer_id,
     customer_name: doc.to_name,
     customer_avatar: doc.customer_avatar,
-    item_ids: doc.item_ids || [],
+    item_ids: meta?.item_ids || doc.item_ids || [],
     status: derivedStatus,
-    topic: (doc.topic as Conversation["topic"]) || "general",
+    topic: ((meta?.topic as Conversation["topic"]) || (doc.topic as Conversation["topic"]) || "general"),
     last_message: doc.last_message_text,
     last_timestamp: doc.last_message_timestamp.toISOString(),
     unread: unansweredCount,  // ⚠️ ใช้ unanswered แทน unread_count ของ sellcenter
-    assigned_to: doc.assigned_to,
+    assigned_to: effectiveAssignedTo || undefined,
     assigned_to_name: adminInfo?.name || adminInfo?.username,
   };
 }
@@ -101,8 +106,10 @@ function mapToConversation(
 //    แต่ invalidate ทันทีเมื่อมีการส่ง/อ่าน/assign/resolve (ผ่าน invalidateCache)
 //    → ตอบ/อ่านแล้ว list อัปเดตทันที ไม่รอ 5 วิ
 //    เก็บทั้ง data และ totalCount (สำหรับ include_count=true)
-let cache: { key: string; data: Conversation[]; totalCount?: number; ts: number } | null = null;
+//    ⚡ v2 — dedupe cache version (กัน cache เก่าที่มี duplicate)
+let cache: { key: string; data: Conversation[]; totalCount?: number; ts: number; ver: number } | null = null;
 const CACHE_TTL = 3000; // 3 วิ — สั้นๆ เผื่อ invalidate ไม่ทัน
+const CACHE_VER = 2; // ⚡ bump version เมื่อเปลี่ยน cache shape
 
 /** Invalidate cache — เรียกจาก send/assign/resolve/handoff route */
 export function invalidateConversationsCache() {
@@ -127,7 +134,7 @@ export async function GET(req: NextRequest) {
   const canCache = assignedToParam === "all";
   const cacheKey = `${assignedToParam}|${platform || ""}|${status || ""}|${shopId || ""}|${search || ""}|${limit}`;
   const now = Date.now();
-  if (canCache && cache && cache.key === cacheKey && now - cache.ts < CACHE_TTL) {
+  if (canCache && cache && cache.key === cacheKey && cache.ver === CACHE_VER && now - cache.ts < CACHE_TTL) {
     // ⚡ ถ้า include_count=true → คืน { rows, total_count } ถ้าไม่ใช่ → คืน array ตรงๆ
     if (includeCount) {
       return json({ rows: cache.data, total_count: cache.totalCount ?? cache.data.length });
@@ -143,16 +150,74 @@ export async function GET(req: NextRequest) {
     limit,
   });
 
+  // ⚡ dedupe by conversation_id — DB อาจมี doc ซ้ำ (same conversation_id)
+  const _seenConv = new Set<string>();
+  const _dedupedDocs = docs.filter((d) => {
+    if (_seenConv.has(d.conversation_id)) return false;
+    _seenConv.add(d.conversation_id);
+    return true;
+  });
+
+  // ⚡ Phase 2J — โหลด meta ทั้งหมดของ conversations ที่ได้มา (batch)
+  const _convIds = _dedupedDocs.map((d) => d.conversation_id);
+  const _metaMap = await statusConversationService.getMetaMap(_convIds);
+
+  // ⚡ Phase 2X — auto-reopen closed conversations ที่มีข้อความใหม่หลัง closed_at
+  //   ทำที่นี่ (ไม่ใช่ใน botworker) เพื่อให้ /tickets ทำงานอิสระจาก botworker
+  //   เขียน status_conversation (จริง) — แยกจาก test_status_conversation ของ botworker
+  const _closedConvIds = _dedupedDocs
+    .filter((d) => {
+      const m = _metaMap.get(d.conversation_id);
+      const status = m?.status || (d.closed_at ? "closed" : "bot");
+      return status === "closed" || status === "resolved";
+    })
+    .map((d) => d.conversation_id);
+  if (_closedConvIds.length > 0) {
+    // ตรวจแต่ละ closed conversation ว่ามีข้อความใหม่หลัง closed_at ไหม
+    for (const convId of _closedConvIds) {
+      const doc = _dedupedDocs.find((d) => d.conversation_id === convId);
+      const meta = _metaMap.get(convId);
+      if (!doc) continue;
+      const closedAt = meta?.closed_at || doc.closed_at;
+      if (!closedAt) continue;
+      // เช็ค last_message_timestamp ของ conversation — ถ้าใหม่กว่า closed_at → reopen
+      if (doc.last_message_timestamp && doc.last_message_timestamp > closedAt) {
+        try {
+          await statusConversationService.updateStatus(convId, "bot", undefined);
+          // อัปเดต meta ใน map ทันทีเพื่อให้ response ส่งกลับเห็น status ใหม่
+          _metaMap.set(convId, {
+            ...meta!,
+            status: "bot",
+            assigned_to: undefined,
+            updated_at: new Date(),
+          });
+        } catch (err) {
+          console.error(`[admin/conversations] auto-reopen failed for ${convId}:`, err);
+        }
+      }
+    }
+  }
+
   // Phase 7.9 — filter assigned_to ที่นี่ (service ยังไม่รองรับ field นี้)
-  let filtered = docs;
+  // ⚡ Phase 2J — ใช้ assigned_to จาก meta ถ้ามี ไม่ใช่จาก conversations
+  let filtered = _dedupedDocs;
   const me = r.ctx.admin.admin_id;
   if (assignedToParam === "me") {
-    filtered = docs.filter((d) => d.assigned_to === me);
+    filtered = _dedupedDocs.filter((d) => {
+      const m = _metaMap.get(d.conversation_id);
+      return (m?.assigned_to || d.assigned_to) === me;
+    });
   } else if (assignedToParam === "unassigned") {
-    filtered = docs.filter((d) => !d.assigned_to);
+    filtered = _dedupedDocs.filter((d) => {
+      const m = _metaMap.get(d.conversation_id);
+      return !(m?.assigned_to || d.assigned_to);
+    });
   } else if (assignedToParam !== "all") {
     // กรองตาม admin_id เฉพาะเจาะจง
-    filtered = docs.filter((d) => d.assigned_to === assignedToParam);
+    filtered = _dedupedDocs.filter((d) => {
+      const m = _metaMap.get(d.conversation_id);
+      return (m?.assigned_to || d.assigned_to) === assignedToParam;
+    });
   }
 
   // 🔒 channels_access filter — admin ธรรมดาเห็นเฉพาะ conversation ใน channel ที่ตนมีสิทธิ์
@@ -167,7 +232,7 @@ export async function GET(req: NextRequest) {
   // ⚡ batch compute unanswered counts (0.5s สำหรับ 1377 conversations)
   const unansweredMap = await buildUnansweredMap();
   const conversations: Conversation[] = filtered.map((d) =>
-    mapToConversation(d, adminMap, unansweredMap.get(d.conversation_id) || 0)
+    mapToConversation(d, adminMap, unansweredMap.get(d.conversation_id) || 0, _metaMap.get(d.conversation_id))
   );
   // ⚡ ถ้า include_count=true → นับ total_count แบบไม่จำกัด limit แล้วส่งกลับ { rows, total_count }
   if (includeCount) {
@@ -189,11 +254,11 @@ export async function GET(req: NextRequest) {
     const convColl = await getCollection(COLLECTIONS.conversations);
     const totalCount = await convColl.countDocuments(countFilter);
     // ⚡ save cache พร้อม totalCount
-    if (canCache) cache = { key: cacheKey, data: conversations, totalCount, ts: now };
+    if (canCache) cache = { key: cacheKey, data: conversations, totalCount, ts: now, ver: CACHE_VER };
     return json({ rows: conversations, total_count: totalCount });
   }
 
   // ⚡ save cache (ไม่มี totalCount — ไม่จำเป็นถ้าไม่ใช่ include_count)
-  if (canCache) cache = { key: cacheKey, data: conversations, ts: now };
+  if (canCache) cache = { key: cacheKey, data: conversations, ts: now, ver: CACHE_VER };
   return json(conversations);
 }

@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "@/lib/authStore";
-import { canManageUsers, canViewUsers } from "@/lib/roles";
+import { canAccessPage } from "@/lib/roles";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Loading } from "@/components/ui/Loading";
@@ -47,7 +47,7 @@ export default function UsersPage() {
   }, []);
 
   useEffect(() => {
-    if (canViewUsers(user)) loadUsers();
+    if (canAccessPage(user, "user")) loadUsers();
     else setLoading(false);
   }, [user, loadUsers]);
 
@@ -71,7 +71,7 @@ export default function UsersPage() {
   }
 
   // Access control
-  if (!canViewUsers(user)) {
+  if (!canAccessPage(user, "user")) {
     return (
       <div className="p-6">
         <EmptyState

@@ -16,18 +16,21 @@ import { json, error, readJson } from "@/backend/lib/http";
 import { shadowReplyService } from "@/backend/service/shadowReplyService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { serverConfig } from "@/backend/lib/config";
+import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import type { Platform } from "@/backend/lib/safety";
 
 /**
  * เรียก bot ของเราผ่าน proxy (เหมือน test-chat)
  * ไม่ได้เรียก platform API — เรียก Python chatbot service ของเราเท่านั้น
+ * ⚡ A2 — รองรับ images (current turn) + คืน image_desc ให้ caller cache
  */
 async function callOurBot(params: {
   platform: Platform;
   message: string;
-  history: { role: "user" | "model"; text: string }[];
+  history: { role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[];
   shopId: string;
   shopName?: string;
+  images?: string[];
 }): Promise<{
   answer: string;
   source?: string;
@@ -36,8 +39,9 @@ async function callOurBot(params: {
   usage?: { prompt: number; output: number; total: number };
   cost?: number;
   products?: unknown[];
+  image_desc?: string;
 }> {
-  const { platform, message, history, shopId, shopName } = params;
+  const { platform, message, history, shopId, shopName, images } = params;
   // ใช้ platform-specific bot URL (shopee/tiktok/lazada แยกกัน)
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
@@ -52,6 +56,8 @@ async function callOurBot(params: {
   const body: Record<string, unknown> = { message, history, limit: 5 };
   if (shopName) body.shop = shopName;
   else if (shopId) body.shop = shopId;
+  // ⚡ A2 — ส่ง current-turn images ให้ bot (ถ้ามี)
+  if (images && images.length > 0) body.images = images;
 
   const resp = await fetch(url, {
     method: "POST",
@@ -73,6 +79,7 @@ async function callOurBot(params: {
     usage: data.usage,
     cost: typeof data.cost === "number" ? data.cost : undefined,
     products: data.products,
+    image_desc: data.image_desc, // ⚡ A2 — คืน image_desc ให้ caller cache
   };
 }
 
@@ -92,6 +99,17 @@ export async function GET(req: NextRequest) {
     return json({ stats: result });
   }
 
+  // ⚡ Phase 3B-6 — endpoint ดึง distinct generation batches ของ conversation
+  //   GET /api/shadow-inbox?batches=1&conversation_id=xxx
+  //   คืน { batches: [{ generation_batch_id, conversation_id, created_at, count, generated_by, origin }] }
+  const batches = url.searchParams.get("batches") === "1";
+  if (batches) {
+    const conversationId = url.searchParams.get("conversation_id") || undefined;
+    if (!conversationId) return error("conversation_id required for batches", 422);
+    const result = await shadowReplyService.listGenerationBatches(conversationId);
+    return json({ batches: result, total: result.length });
+  }
+
   const platform = (url.searchParams.get("platform") || undefined) as Platform | undefined;
   const shopId = url.searchParams.get("shop_id") || undefined;
   const conversationId = url.searchParams.get("conversation_id") || undefined;
@@ -101,11 +119,27 @@ export async function GET(req: NextRequest) {
     | "unrated"
     | undefined;
   const origin = (url.searchParams.get("origin") || undefined) as "worker" | "manual" | "manual_conversation" | undefined;
+  // ⚡ Phase 2R — filter ตาม mode (standalone/shadowbot/ticket)
+  const mode = (url.searchParams.get("mode") || undefined) as "standalone" | "shadowbot" | "ticket" | undefined;
+  // ⚡ Phase 3B-6 — filter ตามรอบ generate
+  const generationBatchId = url.searchParams.get("generation_batch_id") || undefined;
   const deleted = url.searchParams.get("deleted") === "1"; // ⚡ ดึงเฉพาะที่ถูก soft delete
   const limitParam = parseInt(url.searchParams.get("limit") || "100", 10);
   const limit = Math.min(Math.max(limitParam, 1), 500);
 
-  const rows = await shadowReplyService.list({ platform, shopId, conversationId, rating, origin, limit, includeDeleted: deleted, deletedOnly: deleted });
+  // ⚡ Phase 2R — ถ้ามี mode → filter เพิ่ม โดยใช้ list() แล้ว filter ใน JS (service ยังไม่รองรับ mode)
+  // ⚡ Phase 3A — visibility: admin ทั่วไปเห็นเฉพาะ shadow reply ที่ตัวเอง Generate ไว้
+  // superadmin/dev เห็นทั้งหมด
+  const isSuperadmin = r.ctx.admin.role === "superadmin" || r.ctx.admin.role === "dev";
+  let rows = await shadowReplyService.list({
+    platform, shopId, conversationId, rating, origin,
+    generatedBy: isSuperadmin ? undefined : r.ctx.admin.admin_id,
+    generationBatchId,  // ⚡ Phase 3B-6
+    limit, includeDeleted: deleted, deletedOnly: deleted,
+  });
+  if (mode) {
+    rows = rows.filter((r) => (r as { mode?: string }).mode === mode);
+  }
   return json({ rows, total: rows.length });
 }
 
@@ -117,9 +151,84 @@ export async function POST(req: NextRequest) {
   const body = await readJson<{
     conversation_id: string;
     inbound_message_id?: string;
+    // ⚡ Phase 3B-3 — batch roll
+    action?: "batch_roll";
+    count?: number;
+    order?: "recent" | "oldest";
+    mode?: "overwrite" | "resume";
+    platform?: string;
   }>(req);
 
-  if (!body || !body.conversation_id) {
+  if (!body) return error("body required", 422);
+
+  // ── ⚡ Phase 3B-3 — batch roll: คืนรายการ conversation_ids ที่จะ generate ──
+  if (body.action === "batch_roll") {
+    const count = Math.min(Math.max(parseInt(String(body.count ?? "10"), 10) || 10, 1), 1000);
+    const order = (body.order as "recent" | "oldest") || "recent";
+    const mode = (body.mode as "overwrite" | "resume") || "overwrite";
+    const platformFilter = body.platform ? String(body.platform) : undefined;
+    const adminId = r.ctx.admin.admin_id;
+
+    // ดึง conversations (เรียงตาม last_message_timestamp)
+    const convColl = await getCollection<{
+      conversation_id: string; platform: string; last_message_timestamp?: Date;
+    }>(COLLECTIONS.conversations);
+    const convFilter: Record<string, unknown> = {};
+    if (platformFilter) convFilter.platform = platformFilter;
+    const allConvs = await convColl
+      .find(convFilter)
+      .sort({ last_message_timestamp: order === "oldest" ? 1 : -1 })
+      .limit(count * 3)
+      .project({ conversation_id: 1 })
+      .toArray();
+
+    if (allConvs.length === 0) {
+      return json({ conversation_ids: [], total: 0, skipped: 0 });
+    }
+
+    let skipped = 0;
+    let conversationIds: string[] = [];
+
+    if (mode === "resume") {
+      // ⚡ Phase 3B-3 — ข้ามเฉพาะแชทที่ admin คนนี้เคย generate แล้ว (ไม่ใช่ของทุกคน)
+      const shadowColl = await getCollection<{
+        conversation_id: string; origin: string; generated_by?: string;
+      }>(COLLECTIONS.shadowReplies);
+      const myGeneratedConvIds = await shadowColl
+        .find({ origin: "manual_conversation", generated_by: adminId })
+        .project({ conversation_id: 1 })
+        .toArray();
+      const myDoneSet = new Set(myGeneratedConvIds.map((x) => x.conversation_id));
+
+      for (const c of allConvs) {
+        if (conversationIds.length >= count) break;
+        if (myDoneSet.has(c.conversation_id)) {
+          skipped++;
+          continue;
+        }
+        conversationIds.push(c.conversation_id);
+      }
+    } else {
+      conversationIds = allConvs.slice(0, count).map((c) => c.conversation_id);
+    }
+
+    await logAdminEvent({
+      action_type: "shadow_reply.batch_roll",
+      actor: adminId,
+      metadata: { count: conversationIds.length, order, mode, platform: platformFilter, skipped },
+    });
+
+    return json({
+      conversation_ids: conversationIds,
+      total: conversationIds.length,
+      skipped,
+      order,
+      mode,
+    });
+  }
+
+  // ── normal generate (single message) ──
+  if (!body.conversation_id) {
     return error("conversation_id is required", 422);
   }
 
@@ -131,6 +240,7 @@ export async function POST(req: NextRequest) {
     const doc = await shadowReplyService.generate({
       conversationId,
       inboundMessageId,
+      generatedBy: r.ctx.admin.admin_id,  // ⚡ Phase 3A — บันทึกใครกด Generate (KPI)
       botCaller: callOurBot,
     });
 

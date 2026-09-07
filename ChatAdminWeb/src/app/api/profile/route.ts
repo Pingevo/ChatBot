@@ -9,12 +9,21 @@ export async function PATCH(req: NextRequest) {
   const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
-  const body = await readJson<{ name?: string; channels_access?: string[] }>(req).catch(() => null);
+  const body = await readJson<{ name?: string; channels_access?: string[]; bubble_color?: string }>(req).catch(() => null);
   if (!body) return error("invalid body", 400);
 
-  const updates: { name?: string; channels_access?: string[] } = {};
+  const updates: { name?: string; channels_access?: string[]; bubble_color?: string } = {};
   if (typeof body.name === "string" && body.name.trim()) updates.name = body.name.trim();
   if (Array.isArray(body.channels_access)) updates.channels_access = body.channels_access;
+  // ⚡ สี bubble — validate เป็น hex 7 ตัว (#RRGGBB)
+  if (typeof body.bubble_color === "string") {
+    const hex = body.bubble_color.trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(hex)) {
+      updates.bubble_color = hex;
+    } else if (hex === "") {
+      updates.bubble_color = ""; // เคลียร์กลับเป็น default
+    }
+  }
 
   if (Object.keys(updates).length === 0) return error("no fields to update", 400);
 

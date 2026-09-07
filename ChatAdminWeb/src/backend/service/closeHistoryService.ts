@@ -1,6 +1,9 @@
 // Close history service — เก็บประวัติการปิด/เปิดแชท
-// ทุกครั้งที่แอดมินปิดแชท จะบันทึก: reason, category, resolution, note
-// ทุกครั้งที่ reopen (บอทส่งต่อแอดมิน) จะบันทึก: reopened_by, reason
+// ⚡ Phase 2O — record ปิดเท่านั้น (sequence = จำนวนครั้งที่ปิด)
+//   - ปิดครั้งที่ 1 → record ใหม่ (sequence=1)
+//   - reopen → update record เดิม (เก็บ reopened_by, reopened_at, reopen_reason)
+//   - ปิดครั้งที่ 2 → record ใหม่ (sequence=2)
+//   - แสดงใน panel: "ครั้งที่ 1 · ปิดแล้ว" / "ครั้งที่ 2 · ปิดแล้ว"
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { logAdminEvent } from "./adminLogService";
@@ -12,18 +15,18 @@ export interface CloseHistoryDoc extends Document {
   shop_id: string;
   customer_id: string;
   // close info
-  closed_by: string; // admin_id
+  closed_by: string;
   closed_at: Date;
-  reason: string;            // เหตุผลที่ปิด (คำอธิบายสั้น)
-  category: ProblemCategory; // ประเภทปัญหา
-  resolution: string;        // วิธีการแก้ไข
-  note?: string;             // หมายเหตุเพิ่มเติม
-  // reopen info (กรอกภายหลังเมื่อบอทส่งต่อแอดมิน)
+  reason: string;
+  category: ProblemCategory;
+  resolution: string;
+  note?: string;
+  // reopen info (กรอกภายหลังเมื่อ reopen)
   reopened_by?: string;      // "bot" หรือ admin_id
   reopened_at?: Date;
-  reopen_reason?: string;    // เหตุผลที่เปิดใหม่ (เช่น "ลูกค้าทักกลับมา บอทส่งต่อแอดมิน")
-  // sequence
-  sequence: number; // ครั้งที่ 1, 2, 3...
+  reopen_reason?: string;
+  // sequence = จำนวนครั้งที่ปิด (1, 2, 3...)
+  sequence: number;
 }
 
 function genRecordId(): string {
@@ -43,7 +46,7 @@ export async function recordClose(opts: {
 }): Promise<CloseHistoryDoc> {
   const coll = await getCollection<CloseHistoryDoc>(COLLECTIONS.closeHistory);
 
-  // หา sequence ล่าสุด
+  // หา sequence ล่าสุด (นับเฉพาะ record ปิด)
   const lastRecord = await coll.findOne(
     { conversation_id: opts.conversationId },
     { sort: { sequence: -1 } }
@@ -81,15 +84,18 @@ export async function recordClose(opts: {
   return doc;
 }
 
-/** บันทึกการ reopen — บอทส่งต่อแอดมิน หรือ แอดมินเปิดใหม่手动 */
+/** บันทึกการ reopen — update record ปิดล่าสุด (เก็บ reopened_by, reopened_at, reopen_reason)
+ *  ⚡ Phase 2O — ไม่สร้าง record ใหม่ แค่อัปเดต record ปิดล่าสุด
+ *  sequence ยังนับเฉพาะการปิด (1, 2, 3...) ไม่นับ reopen
+ */
 export async function recordReopen(opts: {
   conversationId: string;
-  reopenedBy: string; // "bot" หรือ admin_id
+  reopenedBy: string;
   reopenReason?: string;
 }): Promise<void> {
   const coll = await getCollection<CloseHistoryDoc>(COLLECTIONS.closeHistory);
 
-  // หา record ล่าสุดที่ยังไม่มี reopened_at
+  // หา record ปิดล่าสุดที่ยังไม่มี reopened_at
   const lastRecord = await coll.findOne(
     { conversation_id: opts.conversationId, reopened_at: { $exists: false } },
     { sort: { sequence: -1 } }

@@ -907,10 +907,17 @@ PRODUCT_TYPES: tuple[tuple[str, tuple[str, ...], str], ...] = (
      ("เคส", "case", "cover", "สายคล้อง", "เคสโทรศัพท์"),
      r"(?:เคส|\bcase\b|\bcover\b|สายคล้อง|flip\s*case)"),
     # หูฟัง/earbuds
+    # ⚡ Phase 3 — เพิ่ม ANC/ตัดเสียงรบกวน keywords
+    # กันไม่ให้ _detect_product_types("ตัดเสียงรบกวน") ไม่เจอ earphone
     ("earphone",
-     ("หูฟัง", "earphone", "earbuds", "หูฟังบลูทูธ", "airpods", "headphone"),
+     ("หูฟัง", "earphone", "earbuds", "หูฟังบลูทูธ", "airpods", "headphone",
+      "ตัดเสียงรบกวน", "ตัดเสียง", "กันเสียงรบกวน", "กันเสียง",
+      "ANC", "noise cancelling", "active noise", "降噪",
+      "หูฟัง ANC", "หูฟังตัดเสียง"),
      r"(?:หูฟัง|earphone|earbuds|airpods|headphone|หูฟังบลูทูธ|"
-     r"pods\s*pro|airbuds)"),
+     r"pods\s*pro|airbuds|"
+     r"ตัดเสียง(?:รบกวน)?|กันเสียง(?:รบกวน)?|"
+     r"anc\b|noise\s*cancel|active\s*noise|降噪)"),
     # ลำโพง
     ("speaker",
      ("ลำโพง", "speaker", "บลูทูธลำโพง"),
@@ -1523,7 +1530,7 @@ def _filter_charger_subtype(docs: list[dict], subtype: str) -> list[dict]:
         "car_charger": [], "wireless": [], "desktop": [], "socket": [],
     }
     for d in docs:
-        name = (d.get("item_name") or "").lower()
+        name = (d.get("item_name") or d.get("name") or "").lower()
         # ลำดับ priority: desktop → car_charger → wireless → socket → set → adapter → cable → other
         # (เช็ค subtype เฉพาะก่อน เพื่อกัน keyword ลอยๆ ทำให้ classify ผิด)
         is_desktop = any(kw in name for kw in desktop_kw)
@@ -1912,6 +1919,36 @@ def build_query(
                 {"item_name": {"$regex": kw, "$options": "i"}}
                 for kw in accessory_patterns
             ]
+
+    # ⚡ Phase 3 — Feature-based search สำหรับ earphone
+    # ถ้าลูกค้าถาม feature เฉพาะ (เช่น ANC, ตัดเสียงรบกวน, กันน้ำ, วิ่ง)
+    # ให้ค้นใน item_name ด้วย feature keyword เพิ่มเติมจาก type regex
+    # เพื่อให้ดึงสินค้าที่มี feature นั้นในชื่อได้
+    if "earphone" in (product_types or set()):
+        _feature_kws = {
+            "anc": r"anc\b|ตัดเสียง(?:รบกวน)?|กันเสียง(?:รบกวน)?|noise\s*cancel|active\s*noise|降噪",
+            "กันน้ำ": r"ipx\d|กันน้ำ|waterproof|water\s*resistant",
+            "วิ่ง": r"วิ่ง|run\b|sport|ออกกำลัง|exercise|fitness",
+        }
+        _msg_lower = message.lower()
+        _feature_regexes = []
+        for _feat_kw, _feat_pat in _feature_kws.items():
+            _feat_match = (
+                _feat_kw in _msg_lower
+                or _feat_kw.upper() in message
+                or re.search(_feat_pat, message, re.IGNORECASE)
+            )
+            if _feat_match:
+                _feature_regexes.append(_feat_pat)
+        if _feature_regexes and "item_name" in q:
+            # ใช้ $and: สินค้าต้องมี type regex (หูฟัง) + มี feature ในชื่อ
+            _feat_combined = "|".join(_feature_regexes)
+            _type_filter = q.pop("item_name")
+            q["$and"] = [
+                {"item_name": _type_filter},
+                {"item_name": {"$regex": _feat_combined, "$options": "i"}},
+            ]
+            print(f"[FEATURE-SEARCH] earphone feature filter: {_feat_combined!r}", file=sys.stderr)
 
     if price_min is not None or price_max is not None:
         price_cond: dict = {}
@@ -2448,6 +2485,14 @@ def fetch_products(
     # แต่ message มี charger subtype keyword ชัดเจน และไม่มี phone keyword ชัดเจน
     # → override เป็น {"charger"} เพราะลูกค้าถามเรื่อง charger ไม่ใช่ phone
     _shorthand_sub = _detect_charger_subtype(message)
+    # ⚡ Phase 1F — ถ้ามี charger_subtype_override (จาก intent) ให้ใช้ค่านั้น
+    #   และเพิ่ม "charger" เข้า product_types เสมอ (กัน product_types={"phone"} ข้าม subtype filter)
+    if charger_subtype_override:
+        _shorthand_sub = charger_subtype_override
+        print(f"[PRODUCT-TYPE-DEBUG] override={charger_subtype_override!r} product_types_before={product_types}", file=sys.stderr)
+        if not product_types or product_types == {"phone"}:
+            product_types = {"charger"}
+            print(f"[PRODUCT-TYPE] charger_subtype_override={charger_subtype_override!r} → product_types={product_types}", file=sys.stderr)
     if _shorthand_sub:
         if not product_types:
             product_types = {"charger"}

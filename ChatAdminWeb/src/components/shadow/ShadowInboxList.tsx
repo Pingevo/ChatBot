@@ -9,6 +9,7 @@ import {
   FlaskConical, CheckCircle2, XCircle, AlertTriangle,
 } from "lucide-react";
 import type { Platform } from "@/lib/types";
+import { formatDateLabel } from "@/components/shadow/DateBanner";
 
 export interface ShadowReplyListItem {
   shadow_reply_id: string;
@@ -29,6 +30,7 @@ export interface ShadowReplyListItem {
   comment?: string;
   origin?: "worker" | "manual" | "manual_conversation";
   created_at: string;
+  generation_batch_id?: string;  // ⚡ Phase 3B-6 — รอบ generate
   // soft delete
   deleted_at?: string;
   deleted_by?: string;
@@ -62,6 +64,8 @@ function timeAgo(iso: string): string {
   const h = Math.floor(m / 60);
   if (h < 24) return `${h} ชม.`;
   const d = Math.floor(h / 24);
+  // ⚡ เกิน 7 วัน → แสดงวันที่ (เช่น "5 ก.ย. 2569") ภายใน 7 วัน → แสดงจำนวนวัน
+  if (d > 7) return formatDateLabel(iso);
   return `${d} วัน`;
 }
 

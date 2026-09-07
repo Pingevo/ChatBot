@@ -6,6 +6,16 @@ import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { conversationService } from "@/backend/service/conversationService";
 import type { ProblemCategory } from "@/backend/service/conversationService";
+// ⚡ G-fix — invalidate conversation caches เมื่อ close
+import { invalidateConversationsCache } from "@/app/api/admin/conversations/route";
+async function invalidateBotworkerCache() {
+  try {
+    const mod = await import("@/app/api/botworker/conversations/route");
+    if (typeof (mod as unknown as { invalidateBotworkerCache?: () => void }).invalidateBotworkerCache === "function") {
+      (mod as unknown as { invalidateBotworkerCache: () => void }).invalidateBotworkerCache();
+    }
+  } catch { /* ignore */ }
+}
 
 const VALID_CATEGORIES: ProblemCategory[] = [
   "shipping", "product", "payment", "return_refund",
@@ -45,5 +55,7 @@ export async function POST(
   });
 
   if (!ok) return error("ไม่พบแชท หรือไม่สามารถปิดได้", 404);
+  invalidateConversationsCache();
+  invalidateBotworkerCache();
   return json({ ok: true });
 }

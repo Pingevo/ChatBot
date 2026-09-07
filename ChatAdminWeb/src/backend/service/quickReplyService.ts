@@ -79,6 +79,18 @@ export async function createQuickReply(opts: {
 }): Promise<QuickReplyDoc> {
   const coll = await getCollection<QuickReplyDoc>(COLLECTIONS.quickReplies);
   const now = new Date();
+
+  // ⚡ Auto-increment sort_order — หา max(sort_order) ของ admin คนนี้ + 1
+  //   กันทับตำแหน่งเดิม: ถ้ามี QR ที่ sort_order=0 แล้ว → อันใหม่ไป 1, ถ้ามี 0,1 → ไป 2
+  //   ไม่สนค่าที่ user ส่งมา (เพราะ user มักใส่ 0 ทุกครั้ง → ทับกัน)
+  const existingMax = await coll
+    .find({ admin_id: opts.adminId, is_deleted: { $ne: true } })
+    .sort({ sort_order: -1 })
+    .limit(1)
+    .project<{ sort_order: number }>({ sort_order: 1 })
+    .toArray();
+  const nextSortOrder = existingMax.length > 0 ? (existingMax[0].sort_order ?? 0) + 1 : 0;
+
   const doc: Omit<QuickReplyDoc, "_id"> = {
     quick_reply_id: genId(),
     admin_id: opts.adminId,
@@ -88,7 +100,7 @@ export async function createQuickReply(opts: {
     title: opts.title,
     body: opts.body,
     enabled: true,
-    sort_order: opts.sortOrder ?? 0,
+    sort_order: nextSortOrder,
     created_by: opts.createdBy,
     created_at: now,
     updated_at: now,
@@ -99,7 +111,7 @@ export async function createQuickReply(opts: {
   await logAdminEvent({
     action_type: "quick_reply.create",
     actor: opts.createdBy,
-    metadata: { quick_reply_id: created.quick_reply_id, title: opts.title, category: opts.category },
+    metadata: { quick_reply_id: created.quick_reply_id, title: opts.title, category: opts.category, sort_order: nextSortOrder },
   });
 
   return created;

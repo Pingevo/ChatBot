@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Zap, Plus, X, Pencil, Trash2, RefreshCw, Check, ChevronDown, Search, ArrowDownUp } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
-import { canEdit } from "@/lib/roles";
+import { canEditPage } from "@/lib/roles";
 import { triggerService } from "@/lib/services";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
@@ -145,7 +145,7 @@ function MultiSelect<T extends string>({
 
 export default function TriggersPage() {
   const { user } = useAuth();
-  const editable = canEdit(user);
+  const editable = canEditPage(user, "trigger");
   const { catchError } = useToastError();
   const [triggers, setTriggers] = useState<TriggerRule[]>([]);
   const [loading, setLoading] = useState(true);

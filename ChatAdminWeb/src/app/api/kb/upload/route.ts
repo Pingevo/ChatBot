@@ -1,8 +1,9 @@
 // POST /api/kb/upload — upload an .xlsx file and upsert product_spec entries
 import { NextRequest } from "next/server";
-import { requireEditor } from "@/backend/middleware/authorize";
+import { requirePageEdit } from "@/backend/middleware/authorize";
 import { json, error } from "@/backend/lib/http";
 import { knowledgeBaseService } from "@/backend/service/knowledgeBaseService";
+import { logAdminEvent } from "@/backend/service/adminLogService";
 
 // Minimal XLSX reader: unzip + parse sheet1 XML + extract rows.
 // Avoids adding a runtime dependency on a sheet library.
@@ -120,7 +121,7 @@ function colLetterToIndex(letters: string): number {
 }
 
 export async function POST(req: NextRequest) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "kb");
   if (!r.ok) return r.response;
 
   // 🔒 จำกัดขนาดไฟล์ — 10 MB สูงสุด
@@ -184,6 +185,14 @@ export async function POST(req: NextRequest) {
     );
     upserted++;
   }
+
+  // ⚡ G1 — log KB excel import
+  await logAdminEvent({
+    action_type: "kb.import_excel",
+    actor: r.ctx.admin.admin_id,
+    metadata: { source_file: sourceFile, upserted, total_rows: rows.length },
+    ip: r.ctx.ip,
+  });
 
   return json({ ok: true, upserted, total_rows: rows.length, source_file: sourceFile });
 }

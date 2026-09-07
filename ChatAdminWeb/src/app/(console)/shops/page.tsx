@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -7,12 +7,13 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Loading } from "@/components/ui/Loading";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Pagination } from "@/components/ui/Pagination";
+import { ShopDetailDrawer } from "@/components/shops/ShopDetailDrawer";
 import {
   Store, RefreshCw, Search,
   ArrowUpDown, ArrowUp, ArrowDown, MessageSquare, Package,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
-import { canEdit } from "@/lib/roles";
+import { canEditPage } from "@/lib/roles";
 import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
@@ -57,7 +58,7 @@ const sortOptions: { value: SortBy; label: string }[] = [
 
 export default function ShopsPage() {
   const { user } = useAuth();
-  const editable = canEdit(user);
+  const editable = canEditPage(user, "shop");
   const { catchError } = useToastError();
   const [shops, setShops] = useState<ShopRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -65,12 +66,24 @@ export default function ShopsPage() {
   const [search, setSearch] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [sortBy, setSortBy] = useState<SortBy>("created_at");
+  // ⚡ G-fix — debounce search 300ms — พิมพ์แล้วค้นหาทันที ไม่ต้องกด Enter
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => {
+      setSearch(searchInput.trim());
+      setPage(1);
+    }, 300);
+    return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
+  }, [searchInput]);
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [page, setPage] = useState(1);
   const [pageSize] = useState(12);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
-  const [toggling, setToggling] = useState<string | null>(null);
+  // ⚡ G3 — toggling state ย้ายไปหน้า config แล้ว
+  // ⚡ G4 — selected shop สำหรับ detail drawer
+  const [selectedShop, setSelectedShop] = useState<ShopRow | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -101,10 +114,7 @@ export default function ShopsPage() {
     load();
   }, [load]);
 
-  function handleSearch() {
-    setSearch(searchInput.trim());
-    setPage(1);
-  }
+  // ⚡ G-fix — handleSearch ไม่ต้องแล้ว (debounce ทำให้)
 
   function handleSort(column: SortBy) {
     if (sortBy === column) {
@@ -123,26 +133,7 @@ export default function ShopsPage() {
       : <ArrowDown size={12} className="text-brand" />;
   }
 
-  async function handleToggle(shop: ShopRow) {
-    const newState = !shop.connected;
-    const ok = await confirm.ask({
-      title: newState ? "เชื่อมต่อร้านนี้?" : "ยกเลิกการเชื่อมต่อ?",
-      message: `"${shop.shopname}" — ${newState ? "ระบบจะเริ่มรับข้อมูลจากร้านนี้" : "ระบบจะหยุดรับข้อมูลจากร้านนี้"}`,
-      confirmText: newState ? "เชื่อมต่อ" : "ยกเลิก",
-      variant: newState ? "primary" : "danger",
-    });
-    if (!ok) return;
-    setToggling(shop.shop_id);
-    try {
-      await api().patch(`/shops/${shop.shop_id}`, { connected: newState });
-      await load();
-      toast.success(`${newState ? "เชื่อมต่อ" : "ยกเลิก"} "${shop.shopname}" แล้ว`);
-    } catch (err) {
-      catchError(err, "เปลี่ยนสถานะไม่สำเร็จ");
-    } finally {
-      setToggling(null);
-    }
-  }
+  // ⚡ G3 — handleToggle ย้ายไปหน้า config แล้ว (เปิด/ปิดระบบแชทร้านค้า)
 
   return (
     <div className="h-full overflow-y-auto">
@@ -190,16 +181,14 @@ export default function ShopsPage() {
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle" />
               <input
                 type="text"
-                placeholder="ค้นหาร้าน..."
+                placeholder="ค้นหาร้าน... (พิมพ์แล้วค้นหาทันที)"
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-                className="w-48 h-9 pl-9 pr-3 rounded-lg border border-border bg-surface-2 text-text text-sm placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
+                className="w-56 h-9 pl-9 pr-3 rounded-lg border border-border bg-surface-2 text-text text-sm placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
               />
             </div>
-            <Button size="sm" variant="outline" onClick={handleSearch}>ค้นหา</Button>
             {search && (
-              <Button size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchInput(""); setPage(1); }}>
+              <Button size="sm" variant="ghost" onClick={() => { setSearchInput(""); }}>
                 ล้าง
               </Button>
             )}
@@ -240,7 +229,11 @@ export default function ShopsPage() {
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
               {shops.map((s) => (
-                <Card key={s.shop_id} className="p-4 hover:border-pale-sky transition-colors">
+                <Card
+                  key={`${s.platform}-${s.shop_id}`}
+                  className="p-4 hover:border-brand cursor-pointer transition-colors"
+                  onClick={() => setSelectedShop(s)}
+                >
                   <div className="flex items-center gap-3 mb-3">
                     <PlatformIcon platform={s.platform} size={32} />
                     <div className="flex-1 min-w-0">
@@ -275,19 +268,17 @@ export default function ShopsPage() {
                     </div>
                   )}
 
-                  {editable && (
-                    <Button
-                      size="sm"
-                      variant={s.connected ? "ghost" : "outline"}
-                      className="w-full"
-                      disabled={toggling === s.shop_id}
-                      onClick={() => handleToggle(s)}
-                    >
-                      {toggling === s.shop_id ? (
-                        <Loading size={14} />
-                      ) : s.connected ? "ปิดการเชื่อมต่อ" : "เปิดการเชื่อมต่อ"}
-                    </Button>
+                  {/* ⚡ G3 — ย้าย toggle ไปหน้า config แล้ว ที่นี่แค่ badge */}
+                  {s.enabled_for_chat === false && (
+                    <div className="text-[10px] text-yellow-400 mb-2">
+                      ⚠ ระบบแชทปิดอยู่ (เปิดได้ที่หน้า Config)
+                    </div>
                   )}
+
+                  {/* ⚡ G4 — hint ว่ากดเพื่อดูรายละเอียด */}
+                  <div className="text-[10px] text-text-subtle text-center pt-1 border-t border-border/50">
+                    กดเพื่อดู Workflow · Trigger · Persona · KB
+                  </div>
                 </Card>
               ))}
             </div>
@@ -304,6 +295,9 @@ export default function ShopsPage() {
           </>
         )}
       </div>
+
+      {/* ⚡ G4 — Shop detail drawer */}
+      <ShopDetailDrawer shop={selectedShop} onClose={() => setSelectedShop(null)} />
     </div>
   );
 }

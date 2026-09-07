@@ -14,7 +14,18 @@ import { handoffService } from "@/backend/service/handoffService";
 import { conversationService } from "@/backend/service/conversationService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { invalidateConversationsCache } from "@/app/api/admin/conversations/route";
+// ⚡ G-fix — invalidate botworker cache ด้วย
+async function invalidateBotworkerCache() {
+  try {
+    const mod = await import("@/app/api/botworker/conversations/route");
+    if (typeof (mod as unknown as { invalidateBotworkerCache?: () => void }).invalidateBotworkerCache === "function") {
+      (mod as unknown as { invalidateBotworkerCache: () => void }).invalidateBotworkerCache();
+    }
+  } catch { /* ignore */ }
+}
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
+// ⚡ Phase 2J — simulate mode ใช้ test_status_conversation แทน test_chat_sessions
+import { testStatusConversationService } from "@/backend/service/testStatusConversationService";
 
 export const dynamic = "force-dynamic";
 
@@ -72,10 +83,36 @@ export async function POST(req: NextRequest) {
   const shopId = body.shop_id != null ? String(body.shop_id) : undefined;
   const platform = body.platform != null ? String(body.platform) : undefined;
 
-  // ⚡ Simulate mode — จำลองการจ่ายงานโดยไม่กระทบ conversations จริง
-  // เก็บประวัติ assign ลง test_chat_sessions เท่านั้น
+  // ⚡ Phase 2J — Simulate mode ใช้ test_status_conversation (ไม่กระทบ status_conversation จริง)
+  //   ใช้ round-robin จริง (cursor ขยับจริง) แต่เก็บใน test_status_conversation
   if (simulate) {
-    return await simulateHandoff(conversation_id, shopId, platform, reason, claim);
+    const result = await handoffService.handoffToAdminTest({
+      conversationId: conversation_id,
+      shopId: shopId || "",
+      platform: platform || "shopee",
+      reason: reason || "simulate handoff",
+      source: "test_chat",
+    });
+    // เก็บ claim info ลง test_chat_sessions เหมือนเดิม (ถ้ามี)
+    if (claim && Object.keys(claim).length > 0) {
+      try {
+        const { ObjectId } = await import("mongodb");
+        type TestChatSessionClaimDoc = { _id: typeof ObjectId.prototype; bot_claim_info?: unknown; bot_handoff_at?: Date };
+        const sessionColl = await getCollection<TestChatSessionClaimDoc>(COLLECTIONS.testChatSessions);
+        await sessionColl.updateOne(
+          { _id: new ObjectId(conversation_id) as never },
+          { $set: { bot_claim_info: claim, bot_handoff_at: new Date() } as never }
+        );
+      } catch { /* ignore */ }
+    }
+    return json({
+      ok: true,
+      simulate: true,
+      assigned_to: result.assignedTo,
+      assigned_to_name: result.assignedToName,
+      reopened: result.reopened,
+      assignment_reason: result.assignmentReason,
+    });
   }
 
   // ดึง conversation เพื่อหา shop_id/platform
@@ -130,6 +167,7 @@ export async function POST(req: NextRequest) {
   });
 
   invalidateConversationsCache();
+  invalidateBotworkerCache();
 
   // 4. ส่งแจ้งเตือน (best-effort — ถ้ามี notification service)
   // TODO: เชื่อมกับ notification service (telegram/line/email) ถ้ามี
@@ -164,7 +202,7 @@ async function simulateHandoff(
     assignment_reason?: string | null;
     assignment_history?: unknown[];
   };
-  const adminDb = await getCollection<TestChatSessionDoc>("test_chat_sessions" as never);
+  const adminDb = await getCollection<TestChatSessionDoc>(COLLECTIONS.testChatSessions);
 
   // หา admin ที่จะรับงาน — ใช้ logic เดียวกับ handoffService แต่ไม่เขียน conversations
   // Step 1: เช็ค assigned_to เดิมใน session
@@ -172,22 +210,29 @@ async function simulateHandoff(
   let assignedTo: string | null = session?.assigned_to || null;
   let assignmentReason = "unknown";
 
-  // Step 2: ถ้าไม่มี → round-robin (เรียก assignmentService แบบ dry-run)
+  // Step 2: ถ้าไม่มี → round-robin (เรียก pickNextAgent โดยตรง ไม่ผ่าน autoAssignConversation)
+  // ⚡ Phase 2D — แก้ bug: เดิมเรียก autoAssignConversation({ conversation_id: "sim_xxx" })
+  //   แต่ sim_xxx ไม่มีใน conversations → findOneAndUpdate ล้มเหลว → คืน null
+  //   แต่ pickNextAgent ขยับ cursor ไปแล้ว → replay ครั้งถัดไปได้ admin คนใหม่ทุกครั้ง
+  //   แก้: เรียก pickNextAgent โดยตรง + เก็บใน test_chat_sessions (ไม่ต้อง atomic update conversations)
   if (!assignedTo) {
     try {
       const { assignmentService } = await import("@/backend/service/assignmentService");
-      const agentId = await assignmentService.autoAssignConversation({
-        conversation_id: `sim_${sessionId}`, // ใช้ prefix sim_ เพื่อไม่ให้ชนกับของจริง
-        shop_id: shopId || "",
-        platform: platform || "shopee",
-        assigned_to: null,
-      });
-      if (agentId) {
-        assignedTo = agentId;
-        assignmentReason = "round_robin: ไม่มี admin เดิม → จ่ายคิว (simulate)";
+      const mode = await assignmentService.getActiveAssignmentConfig();
+      const { poolKey, orderedAgentIds } = await assignmentService.buildPool(
+        mode,
+        { shop_id: shopId || "", platform: platform || "shopee" },
+        "test_chat"
+      );
+      if (orderedAgentIds.length > 0) {
+        const agentId = await assignmentService.pickNextAgent(poolKey, orderedAgentIds);
+        if (agentId) {
+          assignedTo = agentId;
+          assignmentReason = "round_robin: ไม่มี admin เดิม → จ่ายคิว (simulate)";
+        }
       }
     } catch (e) {
-      console.error("[bot-handoff:simulate] autoAssign failed:", e);
+      console.error("[bot-handoff:simulate] pickNextAgent failed:", e);
     }
   } else {
     assignmentReason = "existing_assignment: มี admin ดูแลอยู่แล้ว (simulate)";

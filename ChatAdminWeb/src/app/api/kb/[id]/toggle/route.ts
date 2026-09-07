@@ -1,12 +1,12 @@
 // PATCH /api/kb/[id]/toggle — enable/disable a KB entry
 import { NextRequest } from "next/server";
-import { requireEditor } from "@/backend/middleware/authorize";
+import { requirePageEdit } from "@/backend/middleware/authorize";
 import { json, error } from "@/backend/lib/http";
 import { knowledgeBaseService } from "@/backend/service/knowledgeBaseService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "kb");
   if (!r.ok) return r.response;
   const { id } = await params;
   let body: any;

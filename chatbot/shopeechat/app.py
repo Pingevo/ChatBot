@@ -101,6 +101,11 @@ def _warmup():
 class ChatMessage(BaseModel):
     role: str = Field("user", description="user | model")
     text: str
+    # ⚡ multimodal — URL รูปที่ลูกค้าส่งใน message นี้ (ถ้ามี)
+    images: list[str] = Field(default_factory=list, description="URL รูปภาพใน message นี้ (ถ้ามี)")
+    # ⚡ multimodal — description ที่สกัดจากรูปใน message นี้ (ถ้ามี — ส่งกลับจาก turn ก่อนหน้า)
+    #    ถ้ามี field นี้ → vision pass จะใช้ desc เดิม ไม่อ่านรูปซ้ำ (ประหยัด token + latency)
+    image_desc: str = Field("", description="text description ที่สกัดจากรูปใน message นี้ (cache จาก turn ก่อนหน้า)")
 
 
 class ChatRequest(BaseModel):
@@ -113,12 +118,19 @@ class ChatRequest(BaseModel):
     )
     history: list[ChatMessage] = Field(default_factory=list, description="ประวัติแชทก่อนหน้า")
     limit: int = Field(10, ge=1, le=50, description="จำนวนสินค้าสูงสุดที่จะส่งเป็น context")
+    # ⚡ multimodal — URL รูปที่ลูกค้าส่งใน message ปัจจุบัน (สูงสุด 3 รูป/turn)
+    images: list[str] = Field(default_factory=list, description="URL รูปภาพที่ลูกค้าส่งใน turn นี้ (สูงสุด 3 รูป)")
     # ── Warranty claim handoff ──
     # conversation_id ของแชทในระบบ admin (ถ้ามี) — ใช้ตอนบอทส่งต่อแอดมิน
     conversation_id: str | None = Field(None, description="conversation_id ในระบบ admin (สำหรับ handoff)")
     platform: str | None = Field(None, description="platform ของแชท (shopee/tiktok/lazada) — สำหรับ handoff")
     # ⚡ simulate mode — จำลองการจ่ายงานโดยไม่กระทบ conversations จริง (ใช้ใน test chat)
     simulate_assignment: bool = Field(False, description="ถ้า true → handoff จะเก็บลง test_chat_sessions ไม่ใช่ conversations")
+    # ⚡ Phase 2A — state-driven handoff: สถานะ ticket จาก DB (open|closed|handoff|...)
+    #    ถ้า "closed" → บอทตอบปกติ (ข้าม post-handoff lock)
+    #    ถ้า "handoff"/"open" + มี handoff marker → ล็อค (ยกเว้น exceptions ใน KB)
+    #    ถ้า None → fallback ใช้ history scan แบบเดิม (backward compat)
+    ticket_state: str | None = Field(None, description="สถานะ ticket จาก DB: open|closed|handoff|resolved|pending (None = ไม่ทราบ ใช้ history scan)")
 
 
 class ChatResponse(BaseModel):
@@ -153,6 +165,10 @@ class ChatResponse(BaseModel):
     web_search_used: bool = Field(False, description="ใช้ OpenRouter + Google Search หรือไม่")
     web_search_reason: str | None = Field(None, description="เหตุผลที่ใช้ web search เช่น 'answer_uncertain' | 'pass1_low_confidence'")
     web_search_model: str | None = Field(None, description="โมเดล OpenRouter ที่ใช้")
+    # ⚡ Phase 1A multimodal — description ที่สกัดจากรูปใน turn นี้
+    #    caller (Next.js) เก็บไว้ใน message doc เพื่อส่งกลับใน history ของ turn ถัดไป
+    #    ทำให้ turn ถัดไปไม่ต้องอ่านรูปซ้ำ (ประหยัด token + latency)
+    image_desc: str = Field("", description="text description ที่สกัดจากรูปใน turn นี้ (ส่งกลับให้ caller เก็บใน message doc)")
     # ── Per-step breakdown (สำหรับ log panel) ──
     steps: list[dict[str, Any]] = Field(
         default_factory=list,
@@ -212,6 +228,35 @@ def _admin_db():
     """DB สำหรับ admin data (test_chat_sessions, etc.) — ใช้ admin client."""
     db_name = os.environ.get("ADMIN_MONGO_DB", "chatbot_admin").strip()
     return knowledge_base._build_admin_client()[db_name]
+
+
+def _get_post_handoff_exceptions(shop: str | None, platform: str | None) -> list[str]:
+    """⚡ Phase 2A — ดึง post_handoff_exceptions จาก shop_settings ใน admin DB.
+
+    แอดมินตั้งได้ต่อร้าน — รายการ keywords ที่บอทยังตอบได้หลัง handoff (ก่อนปิดแชท)
+    เช่น ["ทวนข้อมูลเคลม", "ส่งลิงก์กรอกฟอร์ม", "เปลี่ยนเบอร์", "แก้ที่อยู่"]
+
+    ถ้า message match exception → บอทตอบปกติ ไม่ล็อค post-handoff
+    ถ้าไม่พบร้านหรือไม่มี field → คืน [] (ไม่มี exception)
+    """
+    if not shop:
+        return []
+    try:
+        db = _admin_db()
+        # shop_settings เก็บด้วย shopname + platform
+        _plat = platform or "shopee"
+        doc = db["shop_settings"].find_one({
+            "shopname": shop,
+            "platform": _plat,
+            "is_deleted": {"$ne": True},
+        })
+        exceptions = (doc or {}).get("post_handoff_exceptions") or []
+        if isinstance(exceptions, list):
+            return [str(e) for e in exceptions if e]
+        return []
+    except Exception as _e:
+        print(f"[POST-HANDOFF-EXCEPTIONS] error: {_e}", file=sys.stderr)
+        return []
 
 
 def _log_testchat_action(action: str, request, session_id: str | None = None, **extra):
@@ -374,7 +419,7 @@ def chat(req: ChatRequest) -> ChatResponse:
     _GEMINI_COST_PER_M = {"prompt": 0.30, "output": 2.50}  # gemini-3.5-flash-lite
     client, db = _db()
     try:
-        history = [{"role": m.role, "text": m.text} for m in req.history]
+        history = [{"role": m.role, "text": m.text, "images": m.images, "image_desc": m.image_desc} for m in req.history]
 
         # ===== ดึง persona ของร้าน (Phase 3 — admin ตั้งชื่อตัวแทนบอทในหน้า /persona) =====
         # ถ้าร้านยังไม่ได้ตั้ง persona → persona_extra = "" → ใช้ SYSTEM_INSTRUCTION เดิม (default behavior)
@@ -385,6 +430,88 @@ def chat(req: ChatRequest) -> ChatResponse:
         # ===== Phase 2 (ลบแล้ว) — เคยใช้ random variation pool แต่ทำให้คำตอบงง/ไม่เป็นธรรมชาติ =====
         # ตอนนี้ใช้แค่ persona_extra (ถ้ามี) + SYSTEM_INSTRUCTION อย่างเดียว
         # การตอบเป็นธรรมชาติอยู่ที่ temperature 0.3 + กฎ multi-bubble ใน SYSTEM_INSTRUCTION
+
+        # ===== Multimodal Vision Pass (Phase 1A) =====
+        # ⚡ ถ้าลูกค้าส่งรูปภาพมา (req.images ไม่ว่าง) → ใช้ Gemini vision อ่านรูป
+        #    ได้ text description → เก็บไว้ใน _vision_context เพื่อส่งเป็น context ให้ LLM หลัก
+        #    ทำงานแบบ 2-pass: vision (gemini-3.1-flash-lite) → answer (gemini-3.5-flash-lite)
+        #    ถ้า req.images ว่าง → _vision_context = "" (ไม่กระทบ flow เดิม)
+        # ⚡ รวมรูปจาก history ล่าสุดด้วย — ลูกค้าอาจส่งรูปสินค้าเสียใน turn ก่อนหน้า
+        #    แล้วถามต่อใน turn ปัจจุบัน (โดยเฉพาะ claim flow)
+        # ⚡ ถ้า history message มี image_desc อยู่แล้ว (สกัดจาก turn ก่อนหน้า) → ใช้เลย ไม่อ่านซ้ำ
+        #    ประหยัด token + latency + คงความสม่ำเสมอของ description
+        # ⚡ ส่ง history_context ให้ vision ด้วย — ช่วยให้เข้าใจบริบทก่อนหน้ารูป
+        #    เช่น ลูกค้าคุยเรื่องเคลมอยู่ → vision รู้ว่ารูปนี้น่าจะเป็นสินค้าเสีย
+        _vision_context = ""
+        _vision_usage = {"prompt": 0, "output": 0, "total": 0}
+        _vision_desc_parts: list[str] = []  # description รวมจากทุกรูป
+        _image_desc_out = ""  # description ใหม่ที่สกัดใน turn นี้ (ส่งกลับใน ChatResponse)
+
+        # 1) รูปจาก history ที่มี image_desc อยู่แล้ว → ใช้เลย (ไม่อ่านซ้ำ)
+        _history_ctx_for_vision = ""  # text สรุป history ส่งให้ vision
+        if history:
+            _hist_lines = []
+            for h in history[-6:]:  # สรุป history 6 ล่าสุด ส่งให้ vision เข้าใจบริบท
+                _h_role = "ลูกค้า" if h.get("role") == "user" else "บอท"
+                _h_text = h.get("text", "")[:100]
+                if _h_text:
+                    _hist_lines.append(f"{_h_role}: {_h_text}")
+                # ถ้า history message มี image_desc → ใช้เลย
+                _h_desc = h.get("image_desc", "")
+                if _h_desc:
+                    _vision_desc_parts.append(f"[รูปเก่าจาก history] {_h_desc}")
+            _history_ctx_for_vision = "\n".join(_hist_lines)
+
+        # 2) รูปจาก history ที่ยังไม่มี image_desc → ต้องอ่านใหม่
+        _urls_to_read: list[str] = []
+        if history:
+            for h in history[-2:]:
+                _h_imgs = h.get("images") or []
+                _h_desc = h.get("image_desc") or ""
+                if _h_imgs and not _h_desc:
+                    _urls_to_read.extend(_h_imgs)
+                # ถ้ามี image_desc อยู่แล้ว → ไม่ต้องอ่านรูปซ้ำ (ใช้ desc เดิม)
+
+        # 3) รูปจาก turn ปัจจุบัน → ต้องอ่านใหม่เสมอ
+        _urls_to_read.extend(req.images or [])
+        print(f"[VISION-DBG] req.images={req.images} history_imgs={[h.get('images') for h in (history or [])[-2:]]} urls_to_read={_urls_to_read}", file=sys.stderr)
+
+        if _urls_to_read:
+            try:
+                from . import llm as _llm_vision
+                # ⚡ Phase 1F — max_images อ่านจาก env (default 5) ไม่ใช่ fixed 3
+                #    ปรับได้จาก BOT_MAX_IMAGES_PER_TURN env var
+                _max_imgs = int(os.environ.get("BOT_MAX_IMAGES_PER_TURN", "5"))
+                _new_desc, _vision_usage = _llm_vision.describe_images(
+                    _urls_to_read,
+                    shop_hint=req.shop,
+                    max_images=_max_imgs,
+                    history_context=_history_ctx_for_vision,
+                )
+                if _new_desc:
+                    _vision_desc_parts.append(_new_desc)
+                    print(f"[VISION-PASS] {len(_urls_to_read)} รูปใหม่ → {_new_desc[:100]!r}", file=sys.stderr)
+            except Exception as _ve:
+                print(f"[VISION-PASS] error: {_ve}", file=sys.stderr)
+
+        # รวม description ทั้งหมด (เก่า + ใหม่) เป็น _vision_context
+        if _vision_desc_parts:
+            _all_desc = "\n".join(_vision_desc_parts)
+            _vision_context = (
+                f"=== รูปภาพที่ลูกค้าส่งมา ===\n{_all_desc}\n"
+                f"⚠️ สำคัญ: ลูกค้าส่งรูปนี้มาเพราะสนใจสินค้า/เรื่องในรูป "
+                f"ถ้ารูปเป็นสินค้า → ตอบเกี่ยวกับสินค้านั้น (ถ้าร้านมีให้แนะนำ, ถ้าไม่มีให้บอกว่าไม่มี) "
+                f"ถ้ารูปเป็นเลขพัสดุ/สถานะการจัดส่ง → ตอบเกี่ยวกับสถานะ "
+                f"ถ้ารูปเป็นสินค้าเสีย **และลูกค้าบอกชัดว่าเคลม/สินค้าเสีย/ซ่อม** → ถามรายละเอียดเพิ่มเพื่อเคลม "
+                f"ถ้ารูปเป็นสินค้าปกติ (ไม่มีอาการเสีย) → แนะนำขายปกติ ห้ามตีว่าเป็น claim "
+                f"ถ้ารูปไม่เกี่ยวกับสินค้า → ตอบเป็นมิตรแล้วเชื่อมกับสินค้าในร้าน "
+                f"⚠️ ห้ามตีว่ารูปเป็น 'สินค้าเสีย' หรือ 'claim warranty' ถ้าลูกค้าไม่ได้พิมพ์บอกว่าเคลม/สินค้าเสีย/ซ่อม "
+                f"การส่งรูปเฉยๆ ไม่ใช่การขอเคลม — ต้องตอบตามบริบทรูปปกติ\n"
+            )
+            # เก็บเฉพาะ description ใหม่ (ไม่รวม history desc) ส่งกลับให้ caller
+            _image_desc_out = _new_desc if _urls_to_read and _new_desc else ""
+            if not _urls_to_read:
+                print(f"[VISION-PASS] ใช้ image_desc จาก history ({len(_vision_desc_parts)} desc) → {_all_desc[:80]!r}", file=sys.stderr)
 
         # ===== ขั้นที่ -1: ลูกค้าแชร์การ์ดสินค้ามาในแชท (มี item_id ชัดเจน) =====
         # กรณีนี้ตอบจากสินค้านั้นโดยตรง แม่นยำกว่าการค้นด้วยข้อความมาก
@@ -402,7 +529,9 @@ def chat(req: ChatRequest) -> ChatResponse:
             # ⚡ ไม่จำกัดความยาว — คำถามยาวก็เป็น follow-up ได้ (เช่น "ถ้าผมซื้อแล้วผมเชื่อถือได้ใช่ไหมครับมีการรับประกันนะครับ")
             _cur_msg_lower = (req.message or "").lower().strip()
             _new_topic_kws = ("สวัสดี", "หวัดดี", "hi", "hello", "แนะนำ", "มีอะไร", "มีไร",
-                              "สอบถาม", "สนใจ", "อยากได้", "หาสินค้า", "ดูสินค้า")
+                              "สนใจ", "อยากได้", "หาสินค้า", "ดูสินค้า")
+            # ⚡ Phase 3 — เอา "สอบถาม" ออก เพราะใช้ได้ทั้งคำถามใหม่และต่อเนื่อง
+            # เช่น "รอบกวนสอบถาม 2 รุ้นครับ" ต่อจาก Q1 ไม่ใช่ new topic
             _is_new_topic = bool(_current_model_kw) or any(kw in _cur_msg_lower for kw in _new_topic_kws)
             if not _is_new_topic:
                 for h in reversed(req.history):
@@ -464,11 +593,12 @@ def chat(req: ChatRequest) -> ChatResponse:
                         shop_hint=req.shop,
                         history=history,
                         persona_extra=_persona_extra,
+                        extra_context=_vision_context,
                     )
                 except RuntimeError as exc:
                     raise HTTPException(status_code=500, detail=str(exc))
                 _total_elapsed = _time.time() - _total_start
-                model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
                 prompt_t = usage_info.get("prompt", 0)
                 output_t = usage_info.get("output", 0)
                 cost = (prompt_t * 0.30 + output_t * 2.50) / 1_000_000
@@ -485,6 +615,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     cost=round(cost, 6),
                     steps=_steps,
                     routing_decision=_routing("bot_reply", "item_tag: ลูกค้าคลิกสินค้า → ตอบจาก tag"),
+                    image_desc=_image_desc_out,
                 )
             else:
                 print(f"[ITEM-TAG] ไม่พบสินค้า item_id={_tagged_item_id} ในระบบ", file=sys.stderr)
@@ -495,10 +626,16 @@ def chat(req: ChatRequest) -> ChatResponse:
         # ===== Order lookup — ลูกค้าส่งเลขคำสั่งซื้อ หรือ [order: XXX] =====
         # ดึงข้อมูล order จาก MongoDB (read-only) แล้วส่งให้ LLM ตอบ
         # ⚡ ข้ามถ้าอยู่ใน warranty claim flow (บอทเคยขอ วันที่+order+รูป)
+        # ⚡ Phase 1C — ข้ามถ้าเป็น claim request (ลูกค้าถามเคลม + มี order_sn → ไป warranty auto-check)
         from . import order_store as _order_store
+        from . import warranty as _warranty_pre_check
         _order_sn = _order_store.extract_order_sn(req.message)
         _in_claim_flow = False
-        if _order_sn and history:
+        _is_claim_request_pre = _warranty_pre_check.detect_claim_request(req.message) if _order_sn else False
+        if _order_sn and _is_claim_request_pre:
+            _in_claim_flow = True
+            print(f"[ORDER] ข้าม order_lookup เพราะเป็น claim request → ไป warranty auto-check", file=sys.stderr)
+        if _order_sn and not _in_claim_flow and history:
             _last_model_msgs = [h for h in history if h.get("role") == "model"][-1:]
             _last_model_text_check = " ".join(h.get("text", "") for h in _last_model_msgs).lower()
             if (any(kw in _last_model_text_check for kw in ("วันที่ซื้อ", "ซื้อวันที่", "purchase date"))
@@ -506,6 +643,71 @@ def chat(req: ChatRequest) -> ChatResponse:
                 and any(kw in _last_model_text_check for kw in ("รูป", "วิดีโอ", "photo", "video", "แสดงอาการ", "ความเสียหาย"))):
                 _in_claim_flow = True
                 print(f"[ORDER] ข้าม order_lookup เพราะอยู่ใน claim flow", file=sys.stderr)
+
+        # ===== Phase 1B — Tracking lookup =====
+        # ⚡ ถ้าไม่มี order_sn แต่มี tracking number (ในข้อความหรือ vision desc) → lookup จาก tracking
+        #    รองรับ: ลูกค้าส่งรูป tracking → vision อ่านได้เลข → lookup → ตอบสถานะ
+        #          ลูกค้าพิมพ์เลขพัสดุตรงๆ → lookup → ตอบสถานะ
+        _tracking_no = None
+        if not _order_sn and not _in_claim_flow:
+            # ลองดึง tracking จากข้อความลูกค้า
+            _tracking_no = _order_store.extract_tracking_number(req.message)
+            # ถ้าไม่เจอในข้อความ → ลองดึงจาก vision description
+            if not _tracking_no and _vision_context:
+                _tracking_no = _order_store.extract_tracking_number(_vision_context)
+                if _tracking_no:
+                    print(f"[TRACKING] พบ tracking จาก vision: {_tracking_no}", file=sys.stderr)
+        if _tracking_no and not _in_claim_flow:
+            print(f"[TRACKING] พบ tracking_no={_tracking_no} → lookup", file=sys.stderr)
+            _tracking_order = _order_store.lookup_by_tracking(_tracking_no, shop_filter=req.shop)
+            if _tracking_order:
+                _order_ctx = _order_store.build_order_context(_tracking_order)
+                print(f"[TRACKING] พบ order: sn={_tracking_order['order_sn']} status={_tracking_order['order_status']}", file=sys.stderr)
+                _tracking_clean = re.sub(re.escape(_tracking_no), "", req.message, flags=re.IGNORECASE).strip()
+                if not _tracking_clean:
+                    _tracking_clean = "ลูกค้าส่งเลขพัสดุมา ต้องการดูสถานะการจัดส่ง"
+                try:
+                    _tracking_answer, _tracking_usage = llm.answer_general(
+                        message=_tracking_clean,
+                        context=_order_ctx,
+                        qtype="order_status",
+                        history=history,
+                        persona_extra=_persona_extra,
+                    )
+                except RuntimeError as exc:
+                    raise HTTPException(status_code=500, detail=str(exc))
+                _total_elapsed = _time.time() - _total_start
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+                prompt_t = _tracking_usage.get("prompt", 0)
+                output_t = _tracking_usage.get("output", 0)
+                cost = (prompt_t * 0.30 + output_t * 2.50) / 1_000_000
+                _steps.append({
+                    "name": "tracking_lookup",
+                    "model": model_name,
+                    "tokens_in": prompt_t,
+                    "tokens_out": output_t,
+                    "time_s": round(_total_elapsed, 2),
+                    "cost_usd": round(cost, 6),
+                    "cost_thb": round(cost * 36, 4),
+                    "detail": f"tracking_no={_tracking_no} order_sn={_tracking_order['order_sn']} status={_tracking_order['order_status']}",
+                })
+                return ChatResponse(
+                    answer=_tracking_answer,
+                    answer_segments=llm.split_segments(_tracking_answer),
+                    products=[],
+                    shop=req.shop,
+                    model=model_name,
+                    source="tracking_lookup",
+                    usage=_tracking_usage,
+                    elapsed=round(_total_elapsed, 2),
+                    cost=round(cost, 6),
+                    steps=_steps,
+                    routing_decision=_routing("bot_reply", f"tracking_lookup: tracking={_tracking_no} → order={_tracking_order['order_sn']}"),
+                    image_desc=_image_desc_out,
+                )
+            else:
+                print(f"[TRACKING] ไม่พบ tracking_no={_tracking_no} ในระบบ", file=sys.stderr)
+
         if _order_sn and not _in_claim_flow:
             print(f"[ORDER] พบ order_sn={_order_sn} ในข้อความ", file=sys.stderr)
             _order_info = _order_store.lookup_order(_order_sn, shop_filter=req.shop)
@@ -531,7 +733,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 except RuntimeError as exc:
                     raise HTTPException(status_code=500, detail=str(exc))
                 _total_elapsed = _time.time() - _total_start
-                model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
                 prompt_t = _order_usage.get("prompt", 0)
                 output_t = _order_usage.get("output", 0)
                 cost = (prompt_t * 0.30 + output_t * 2.50) / 1_000_000
@@ -557,6 +759,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     cost=round(cost, 6),
                     steps=_steps,
                     routing_decision=_routing("bot_reply", f"order_lookup: order_sn={_order_sn} → ตอบจาก order info"),
+                    image_desc=_image_desc_out,
                 )
             else:
                 # พบ order_sn แต่ไม่พบใน DB → บอกลูกค้า
@@ -567,7 +770,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     f"รบกวนตรวจสอบเลขคำสั่งซื้ออีกครั้ง หรือทักแอดมินเพื่อสอบถามได้นะคะ"
                 )
                 _total_elapsed = _time.time() - _total_start
-                model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
                 _steps.append({
                     "name": "order_lookup",
                     "model": model_name,
@@ -590,6 +793,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     cost=0.0,
                     steps=_steps,
                     routing_decision=_routing("bot_reply", f"order_lookup: order_sn={_order_sn} not found"),
+                    image_desc=_image_desc_out,
                 )
 
         # ===== ขั้นที่ 0: ตรวจคำถามทั่วไป (policy/brands/categories/shops) =====
@@ -607,6 +811,19 @@ def chat(req: ChatRequest) -> ChatResponse:
         from . import warranty as _warranty_check_mod
         _is_claim_request = _warranty_check_mod.detect_claim_request(req.message)
 
+        # ===== Phase 1C — Warranty auto-check from order_sn =====
+        # ⚡ ถ้าลูกค้าถามเคลม + มี order_sn ในข้อความ → เช็ควันซื้อจาก order → คำนวณระยะประกัน
+        #    ส่ง context ให้ LLM ตอบเงื่อนไข + ระยะเวลา ก่อนเข้า warranty_claim flow
+        _warranty_auto_ctx = ""
+        _warranty_auto_info: dict = {}
+        if _is_claim_request_pre and _order_sn:
+            print(f"[WARRANTY-AUTO] ลูกค้าถามเคลม + order_sn={_order_sn} → auto-check", file=sys.stderr)
+            _auto_result = _warranty_check_mod.auto_check_warranty(_order_sn, shop_filter=req.shop)
+            if _auto_result:
+                _warranty_auto_ctx = _auto_result.get("warranty_text", "")
+                _warranty_auto_info = _auto_result
+                print(f"[WARRANTY-AUTO] in_warranty={_auto_result.get('in_warranty')} days_left={_auto_result.get('days_remaining')}", file=sys.stderr)
+
         # ===== Tax invoice → handoff แอดมินเลย (ก่อน general_qtype และ claim_request) =====
         # ถ้าลูกค้าขอใบกำกับภาษี หรือส่งข้อมูลใบกำกับภาษี → ส่งแอดมินโดยตรง
         # ไม่ต้องให้บอทตอบเอง เพราะใบกำกับภาษีต้องแอดมินดำเนินการ
@@ -619,7 +836,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
             )
             _total_elapsed = _time.time() - _total_start
-            model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+            model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
             # ส่งต่อแอดมิน (best-effort)
             if req.conversation_id:
                 try:
@@ -672,6 +889,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     "handoff", "tax_invoice: ลูกค้าขอใบกำกับภาษี → ส่งแอดมิน",
                     handoff_reason="tax_invoice_request",
                 ),
+                image_desc=_image_desc_out,
             )
 
         # ===== Pass 1: LLM Intent Classification (เฉพาะจุดอ่อน) =====
@@ -731,10 +949,36 @@ def chat(req: ChatRequest) -> ChatResponse:
             })
             # ใช้ intent ปรับ hardcoded detection:
             # 1. ถ้า LLM บอกไม่ใช่ warranty_claim แต่ hardcoded บอกใช่ → ยกเลิก
+            #    ⚡ Phase 2B — ยกเว้น "repeated complaint" และ "strong complaint keyword":
+            #    - ถ้าลูกค้าแจ้งปัญหาซ้ำ 2+ ครั้งใน history → ห้าม override
+            #    - ถ้า message มี strong complaint keyword (ชาร์จไม่เข้า/ใช้ไม่ได้/ไม่ทำงาน/ฯลฯ) → ห้าม override
+            #    (ลูกค้ากำลังเล่าอาการจริง → ต้องเข้า claim flow ไม่ใช่ให้ LLM ตีความเป็น product question)
+            _strong_complaint_kws = (
+                "ชาร์จไม่เข้า", "ไม่ชาร์จ", "ชาร์จไม่ติด", "ชาร์จไม่ได้", "ใช้ไม่ได้",
+                "ไม่ทำงาน", "ไม่ติด", "ค้าง", "ไฟไม่เข้า", "ไม่เข้าเลย",
+            )
+            _has_strong_complaint = any(kw in req.message.lower() for kw in _strong_complaint_kws)
+            _repeated_complaint = False
+            if history and _is_claim_request:
+                _complaint_kws = (
+                    "ชาร์จไม่เข้า", "ไม่ชาร์จ", "ชาร์จไม่ติด", "ใช้ไม่ได้", "ไม่ทำงาน",
+                    "เสีย", "พัง", "เคลม", "ซ่อม", "ไม่ติด", "ค้าง",
+                )
+                _prev_complaints = 0
+                for _h in history:
+                    _ht = ((_h.get("text") if isinstance(_h, dict) else _h.text) or "").lower()
+                    if ((_h.get("role") if isinstance(_h, dict) else _h.role) == "user") and any(kw in _ht for kw in _complaint_kws):
+                        _prev_complaints += 1
+                if _prev_complaints >= 2:
+                    _repeated_complaint = True
+                    print(f"[INTENT] repeated complaint ({_prev_complaints}x in history) → ห้าม LLM override claim_request=False", file=sys.stderr)
+            _skip_llm_override = _repeated_complaint or _has_strong_complaint
             if _is_claim_request and _intent_result.get("intent") != "warranty_claim":
-                if _intent_result.get("confidence", 0) >= 0.7:
+                if _intent_result.get("confidence", 0) >= 0.7 and not _skip_llm_override:
                     print(f"[INTENT] override: claim_request=False (LLM says {_intent_result.get('intent')})", file=sys.stderr)
                     _is_claim_request = False
+                elif _skip_llm_override:
+                    print(f"[INTENT] skip override (strong complaint kw={_has_strong_complaint} repeated={_repeated_complaint}) — keep claim_request=True even though LLM says {_intent_result.get('intent')}", file=sys.stderr)
             # 2. ถ้า LLM บอกเป็น warranty_claim แต่ hardcoded ไม่บอก → เชื่อ LLM
             #    แต่ถ้า context ก่อนหน้าเป็น product recommendation และ message ไม่มี warranty keywords
             #    ให้ไม่เชื่อ LLM (ป้องกัน false positive เช่น "ทำไมเอา 3 a มาให้")
@@ -848,7 +1092,14 @@ def chat(req: ChatRequest) -> ChatResponse:
         if _is_comparison_followup:
             print(f"[FOLLOWUP-COMP] triggered: msg={req.message!r}  history={len(history)}  has_model={_current_has_model}", file=sys.stderr)
             # ดึง model keywords จาก history ทั้งหมด (user + model)
+            # ⚡ กรอง placeholder/tag ออกก่อน (เช่น [variation_card], [สินค้า: 123], [item])
+            #   ไม่งั้น extract_model_keywords จะจับ "[variation_card]" เป็น model
             _all_history_text2 = " ".join(h.get("text", "") for h in history)
+            _all_history_text2 = _ITEM_TAG_RE.sub("", _all_history_text2)
+            for _ph in ("[variation_card]", "[item]", "[itemid]", "[สินค้า]",
+                        "[ตัวเลือกสินค้า]", "[bundle_message]", "[bundle_deal]",
+                        "[bundle]", "[order]", "[คำสั่งซื้อ]"):
+                _all_history_text2 = _all_history_text2.replace(_ph, "")
             _history_models2 = knowledge_base.extract_model_keywords(_all_history_text2)
             # กรอง "vs" ออก
             _history_models2 = [m for m in _history_models2 if m.lower() != "vs"]
@@ -885,7 +1136,110 @@ def chat(req: ChatRequest) -> ChatResponse:
             from . import warranty as _warranty_mod
             _last_model_msgs = [h for h in history if h.get("role") == "model"][-1:]
             _last_model_text = " ".join(h.get("text", "") for h in _last_model_msgs).lower()
+            # ⚡ Guard: ถ้า last model message ไม่เกี่ยวกับ warranty เลย → ข้าม state machine
+            #   ป้องกัน trigger cascade (เคส Q1 warranty → Q2-Q4 product → Q5 โดนจับ)
+            _last_model_is_warranty = any(
+                kw in _last_model_text
+                for kw in ("รับประกัน", "ประกัน", "เคลม", "warranty", "claim",
+                           "วันที่ซื้อ", "เลขที่คำสั่งซื้อ", "ชื่อ-นามสกุล", "เบอร์โทร",
+                           "รูปหรือวิดีโอ", "แสดงอาการ", "ความเสียหาย", "มอบหมายงาน",
+                           "รอการติดต่อกลับ", "ส่งต่อให้แอดมิน", "แอดมินดูแล",
+                           "นอกช่วงประกัน", "หมดช่วงประกัน")
+            )
             _all_history_text = " ".join(h.get("text", "") for h in history)
+
+            # ⚡ Phase 1F — Review request: ลูกค้าขอทวนข้อมูลที่ให้ไป
+            #   ต้องเช็คก่อน State 3/6 เพราะ "ทวนข้อมูลที่ผมให้ไปหน่อย" อาจถูก extract_customer_info
+            #   ตีความเป็นชื่อได้ → ตกเข้า State 6 ผิด
+            _review_request_kws = (
+                "ทวนข้อมูล", "ทวน ข้อมูล", "ข้อมูลที่ให้ไป", "ข้อมูลที่ผมให้",
+                "ยืนยันข้อมูล", "ยืนยัน ข้อมูล", "ข้อมูลที่ส่งไป", "ข้อมูลที่แจ้งไป",
+                "สรุปข้อมูล", "สรุป ข้อมูล", "ข้อมูลเคลม",
+            )
+            _is_review_request = any(kw in req.message for kw in _review_request_kws)
+            if _is_review_request and _last_model_is_warranty:
+                # ดึงข้อมูลจาก history — extract จากแต่ละ user message แยก เพื่อความแม่นยำ
+                _hist_name = None
+                _hist_phone = None
+                _hist_order = None
+                _hist_has_image = False
+                for h in history:
+                    if h.get("role") != "user":
+                        continue
+                    if h.get("images") or h.get("image_desc"):
+                        _hist_has_image = True
+                    _htext = (h.get("text") or "").strip()
+                    if not _htext:
+                        continue
+                    # ข้าม placeholder และ message ที่ไม่ใช่ข้อมูล
+                    _htext_clean = re.sub(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", "", _htext, flags=re.IGNORECASE).strip()
+                    if not _htext_clean:
+                        continue
+                    _hinfo = _warranty_mod.extract_customer_info(_htext_clean)
+                    if _hinfo["phone"] and not _hist_phone:
+                        _hist_phone = _hinfo["phone"]
+                    if _hinfo["order_id"] and not _hist_order:
+                        _hist_order = _hinfo["order_id"]
+                    if _hinfo["name"] and not _hist_name:
+                        _hname = _hinfo["name"]
+                        # กรอง name ที่ไม่ใช่ชื่อจริง: ต้องมี space, สั้น, ไม่มีคำแปลกๆ
+                        # และต้องไม่มีตัวเลข (ถ้ามีตัวเลข → น่าจะเป็นเบอร์/order ไม่ใช่ชื่อ)
+                        if (len(_hname) <= 40 and " " in _hname
+                                and not any(c.isdigit() for c in _hname)
+                                and not any(kw in _hname.lower() for kw in (
+                                    "ทวน", "ทน", "คอย", "รูป", "ภาพ", "เคลม", "ส่ง", "พัสดุ",
+                                    "สินค้า", "ไม่ทราบ", "ได้รับ", "หรือยัง",
+                                ))):
+                            _hist_name = _hname
+                _review_lines = []
+                if _hist_name:
+                    _review_lines.append(f"• ชื่อ-นามสกุล: {_hist_name}")
+                if _hist_phone:
+                    _review_lines.append(f"• เบอร์โทร: {_hist_phone}")
+                if _hist_order:
+                    _review_lines.append(f"• เลขที่คำสั่งซื้อ: {_hist_order}")
+                if _hist_has_image:
+                    _review_lines.append("• รูป/วิดีโอแสดงอาการ: ส่งมาแล้ว")
+                if _review_lines:
+                    _review_text = "\n".join(_review_lines)
+                    _warranty_claim_answer = (
+                        f"รับทราบค่ะ ทวนข้อมูลที่ลูกค้าให้ไปนะคะ:\n"
+                        f"{_review_text}\n\n"
+                        f"ข้อมูลถูกต้องไหมคะ ถ้าถูกต้องเดี๋ยวส่งต่อให้แอดมินดำเนินการต่อนะคะ "
+                        f"ถ้าต้องการแก้ไขหรือเพิ่มเติม แจ้ง abubu ได้เลยค่ะ"
+                    )
+                else:
+                    _warranty_claim_answer = (
+                        f"ขออภัยค่ะ abubu ไม่พบข้อมูลที่ลูกค้าให้ไปในประวัติแชท "
+                        f"รบกวนแจ้งข้อมูลใหม่อีกครั้งนะคะ: วันที่ซื้อ · เลขที่คำสั่งซื้อ · "
+                        f"เบอร์โทร · รูป/วิดีโอแสดงอาการ"
+                    )
+                _model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+                print(f"[WARRANTY-REVIEW] ลูกค้าขอทวนข้อมูล → สรุปจาก history", file=sys.stderr)
+                return ChatResponse(
+                    answer=_warranty_claim_answer,
+                    answer_segments=llm.split_segments(_warranty_claim_answer),
+                    products=[],
+                    shop=req.shop,
+                    model=_model_name,
+                    source="warranty_claim_flow",
+                    usage={},
+                    elapsed=round(_time.time() - _t0, 2),
+                    cost=0.0,
+                    handoff_to_admin=True,
+                    handoff_reason="review_request",
+                    handoff_claim={
+                        "customer_name": _hist_name,
+                        "customer_phone": _hist_phone,
+                        "customer_order_id": _hist_order,
+                    },
+                    steps=_steps + [{"name": "warranty_review", "model": _model_name, "detail": "ลูกค้าขอทวนข้อมูล → สรุปจาก history"}],
+                    routing_decision=_routing(
+                        "handoff", "warranty_review: ทวนข้อมูลจาก history",
+                        handoff_reason="review_request",
+                    ),
+                    image_desc=_image_desc_out,
+                )
 
             # ตรวจ state จาก history
             # State 1: บอทเคยตอบ "รับประกัน X ปี" → ลูกค้าอาจจะถาม claim request
@@ -921,7 +1275,9 @@ def chat(req: ChatRequest) -> ChatResponse:
             )
             # ⚡ ถ้า last message ไม่ใช่ info request แต่ bot เคยขอข้อมูลใน history
             # (เช่น มี policy question แทรกกลาง) → ให้ตรวจ history ทั้งหมด
-            if not _bot_asked_info:
+            # ⚡ Guard: ถ้า last model msg ไม่ใช่ warranty เลย → ไม่ใช้ fallback นี้
+            #   ป้องกัน trigger cascade (Q1 warranty → Q2-Q4 product → Q5 โดนจับ)
+            if not _bot_asked_info and _last_model_is_warranty:
                 _all_model_text = " ".join(
                     h.get("text", "") for h in history if h.get("role") == "model"
                 ).lower()
@@ -932,9 +1288,13 @@ def chat(req: ChatRequest) -> ChatResponse:
                 # ใช้แค่เมื่อลูกค้าให้ข้อมูลจริง (มี order_id/name/phone) ไม่ใช่ถามคำถาม
                 if _bot_asked_info_ever:
                     _pre_info = _warranty_mod.extract_customer_info(req.message)
+                    _pre_valid_name = (
+                        _pre_info["name"] and len(_pre_info["name"]) <= 40 and " " in _pre_info["name"]
+                        and not any(c.isdigit() for c in _pre_info["name"])
+                    )
                     _pre_has_info = (
                         bool(_pre_info["order_id"])
-                        or (_pre_info["name"] and len(_pre_info["name"]) <= 40 and " " in _pre_info["name"])
+                        or _pre_valid_name
                         or bool(_pre_info["phone"])
                     )
                     if _pre_has_info:
@@ -957,10 +1317,25 @@ def chat(req: ChatRequest) -> ChatResponse:
 
             # State 6: post-handoff — บอทเคย handoff แอดมินแล้ว (คำตอบมี "มอบหมายงาน" / "รอการติดต่อกลับ")
             # ลูกค้าทักใหม่ → ถ้าถามสินค้า/สเปค → ตอบปกติ, ถ้าไม่ → บอก "อยู่ระหว่างแอดมินตรวจสอบ"
-            _bot_handed_off = any(
+            # ⚡ Phase 2A — state-driven: ใช้ ticket_state เป็น primary source (ไม่ใช่ keyword scan)
+            #    ถ้า ticket_state == "closed" → บอทตอบปกติ (ข้าม post-handoff lock ทั้งหมด)
+            #    ถ้า ticket_state == "handoff"/"open" + มี handoff marker → ล็อค (ยกเว้น exceptions)
+            #    ถ้า ticket_state == None → fallback ใช้ history scan แบบเดิม (backward compat)
+            _history_handoff_marker = any(
                 kw in _last_model_text
                 for kw in ("มอบหมายงาน", "รอการติดต่อกลับ", "ดำเนินการเรื่อง", "แอดมินดูแล")
             )
+            if req.ticket_state == "closed":
+                # แอดมินปิดแชทแล้ว → บอทตอบปกติ ไม่ล็อค post-handoff
+                _bot_handed_off = False
+                if _history_handoff_marker:
+                    print(f"[POST-HANDOFF] ticket_state=closed → ข้าม lock แม้ history มี handoff marker", file=sys.stderr)
+            elif req.ticket_state in ("handoff", "open"):
+                # ยังเปิดอยู่ / ส่งต่อแอดมิน → ใช้ history marker เป็น secondary check
+                _bot_handed_off = _history_handoff_marker
+            else:
+                # None — fallback แบบเดิม (backward compat สำหรับ caller เก่าที่ไม่ส่ง ticket_state)
+                _bot_handed_off = _history_handoff_marker
 
             # State 7: บอทเคยขอข้อมูลเคลม (วันที่+order+รูป) → ลูกค้าอาจส่งรูป/วิดีโอหรือข้อมูลบางส่วน
             # ⚡ สำคัญ: ลูกค้าส่ง [รูปภาพ] หรือ [วิดีโอ] ตามที่บอทขอ → ต้องรับและเก็บเป็นข้อมูลเคลม
@@ -983,14 +1358,50 @@ def chat(req: ChatRequest) -> ChatResponse:
             # บอทแค่บอกลูกค้าว่าส่งต่อแอดมินแล้ว รอการติดต่อกลับ
             # ⚡ post-handoff: ถ้าบอทเคย handoff แล้ว และลูกค้าไม่ได้ส่งข้อมูลเคลม → บอกรอแอดมิน
             #   ถ้าลูกค้าส่งข้อมูลเคลม (image/date/order/name/phone) → ให้ State 7 รับข้อมูล
+            _post_handoff_info = _warranty_mod.extract_customer_info(
+                re.sub(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", "", req.message, flags=re.IGNORECASE).strip()
+            )
             _post_handoff_has_info = (
                 _msg_is_image or _msg_has_image_placeholder or _msg_has_date
-                or bool(_warranty_mod.extract_customer_info(
-                    re.sub(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", "", req.message, flags=re.IGNORECASE).strip()
-                )["order_id"])
+                or bool(_post_handoff_info["order_id"])
+                or bool(_post_handoff_info["phone"])
+                or (_post_handoff_info["name"] and len(_post_handoff_info["name"]) <= 40 and " " in _post_handoff_info["name"])
             )
-            if _bot_handed_off and not _post_handoff_has_info:
-                _model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+            # ⚡ Phase 1F — Post-handoff escape: ถ้าลูกค้าถาม product question ชัด (ไม่เกี่ยว warranty)
+            #   → ปล่อยออกจาก lock ให้ไปเส้นทางปกติ (เช่น แอดมินปิดแชทแล้วลูกค้าทักใหม่)
+            #   ตรวจ: มี product keyword และไม่มี warranty keyword
+            _product_q_kws = (
+                "สายชาร์จ", "หัวชาร์จ", "ชุดชาร์จ", "แท่นชาร์จ", "พาวเวอร์แบงค์", "แบตสำรอง",
+                "แบตเตอรี่", "สาย usb", "สาย c", "สาย type", "หาสาย", "หาหัว", "หาแบต",
+                "มีสาย", "มีหัว", "มีแบต", "มีพาวเวอร์", "มีสินค้า", "ดูสินค้า", "แนะนำ",
+                "สอบถามสินค้า", "รุ่นไหนดี", "ราคา", "กี่บาท", "ชาร์จเร็ว", "watt", "วัตต์",
+                "สายแรง", "หัวแรง", "แบตแรง", "ชาร์จแรง", "pd 3.1", "gan", "wireless",
+                "สวัสดี", "hello", "hi ", "ขอดูสินค้า", "ขอสอบถาม",
+            )
+            _warranty_q_kws = (
+                "เคลม", "ประกัน", "ทวนข้อมูล", "ส่งสินค้า", "พัสดุ", "tracking", "EMS",
+                "เบอร์", "เลขคำสั่ง", "วันที่ซื้อ", "รูปสินค้า", "แสดงอาการ", "ความเสียหาย",
+                "เปลี่ยนสินค้า", "คืนสินค้า", "refund", "return", "เคลมสาย", "เคลมหัว",
+                # ⚡ Phase 2B — เพิ่ม complaint keywords กัน "เปลี่ยนหัวชาร์จก็ใช้ไม่ได้ค่ะ" หลุดไป product flow
+                "ใช้ไม่ได้", "ไม่ทำงาน", "ชาร์จไม่เข้า", "ไม่ชาร์จ", "ชาร์จไม่ติด",
+                "เสีย", "พัง", "ซ่อม", "ไม่ติด", "ค้าง",
+            )
+            _msg_lower_for_check = req.message.lower()
+            _has_product_kw = any(kw in _msg_lower_for_check for kw in _product_q_kws)
+            _has_warranty_kw = any(kw in _msg_lower_for_check for kw in _warranty_q_kws)
+            _is_post_handoff_product_q = _has_product_kw and not _has_warranty_kw
+            if _is_post_handoff_product_q:
+                print(f"[POST-HANDOFF-ESCAPE] ลูกค้าถาม product question หลัง handoff → ปล่อยไปเส้นทางปกติ: {req.message!r}", file=sys.stderr)
+            # ⚡ Phase 2A — post-handoff exceptions (จาก ShopSettings, แอดมินตั้งได้ต่อร้าน)
+            #    ถ้า message match exception → ปล่อยผ่าน ไม่ล็อค (เช่น "ทวนข้อมูลเคลม", "ส่งลิงก์กรอกฟอร์ม")
+            _post_handoff_exceptions = _get_post_handoff_exceptions(req.shop, req.platform)
+            _is_post_handoff_exception = bool(_post_handoff_exceptions) and any(
+                exc.lower() in _msg_lower_for_check for exc in _post_handoff_exceptions
+            )
+            if _is_post_handoff_exception:
+                print(f"[POST-HANDOFF-EXCEPTION] message match exception → ปล่อยไปเส้นทางปกติ: {req.message!r} exceptions={_post_handoff_exceptions}", file=sys.stderr)
+            if _bot_handed_off and not _post_handoff_has_info and not _is_post_handoff_product_q and not _is_post_handoff_exception:
+                _model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
                 _warranty_claim_answer = (
                     "ระบบได้บันทึกข้อมูลของคุณและส่งต่อให้แอดมินดูแลเรียบร้อยแล้วค่ะ "
                     "รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ "
@@ -1015,12 +1426,54 @@ def chat(req: ChatRequest) -> ChatResponse:
                         "handoff", "post_handoff: รอแอดมิน → บอทหยุดตอบ",
                         handoff_reason="post_handoff_waiting",
                     ),
+                    image_desc=_image_desc_out,
                 )
 
             # ── State 7: awaiting_claim_info → ลูกค้าส่งรูป/วิดีโอ หรือข้อมูลบางส่วน ──
             # ถ้าบอทเคยขอ วันที่+order+รูป แล้วลูกค้าส่งรูป/วิดีโอ หรือให้ข้อมูลบางส่วน
             # → รับรูป + ถามข้อมูลที่เหลือ (วันที่/order) หรือถ้าครบแล้ว → ทวน + ถามยืนยัน
-            if _bot_asked_claim_info and not _bot_reviewed_info:
+            # ⚡ Phase 2B — ขยับ State 7 ให้กว้างขึ้น: ถ้า history มี warranty/claim discussion
+            #    และลูกค้าส่งรูป/วิดีโอ → ถือว่าเป็น claim evidence แม้บอทไม่ได้ขอ claim info ใน last message
+            #    (ป้องกัน Q11: บอทตอบเรื่องระยะเวลาเคลม → ลูกค้าส่งรูป → บอทตอบเป็น product info ผิด)
+            # ⚡ Phase 2Z+ — จำกัดให้เช็คเฉพาะ history ล่าสุด (3 ข้อความ) แทนทั้งหมด
+            #    กัน case: ลูกค้าถาม "ประกัน" ไป 10 ข้อความก่อน → ส่งรูปเฉยๆ ก็โดนตีเป็น claim evidence
+            #    + ต้องเช็คด้วยว่า message ปัจจุบินมี warranty keyword หรือเปล่า (ถ้าไม่มีเลย → ไม่ใช่ claim)
+            _warranty_ctx_in_history = False
+            if history and (_msg_is_image or _msg_has_image_placeholder):
+                _warranty_ctx_kws = (
+                    "เคลม", "ประกัน", "ซ่อม", "เสีย", "พัง", "ใช้ไม่ได้", "ไม่ทำงาน",
+                    "ชาร์จไม่เข้า", "ไม่ชาร์จ", "ชาร์จไม่ติด", "รับประกัน", "warranty",
+                    "แอดมินดูแล", "รอการติดต่อกลับ", "ตรวจสอบ", "ส่งเคลม",
+                )
+                # ⚡ Phase 2Z+ — เช็คเฉพาะ history ล่าสุด 3 ข้อความ (ไม่ใช่ทั้งหมด)
+                _recent_history = history[-3:] if len(history) > 3 else history
+                for _h in _recent_history:
+                    _ht = ((_h.get("text") if isinstance(_h, dict) else _h.text) or "").lower()
+                    if any(kw in _ht for kw in _warranty_ctx_kws):
+                        _warranty_ctx_in_history = True
+                        break
+                # ⚡ Phase 2Z+ — ถ้า message ปัจจุบันเป็นแค่รูปเฉยๆ (ไม่มี warranty keyword เลย)
+                #    และ history ล่าสุด 3 ข้อความก็ไม่มี warranty discussion → ไม่ใช่ claim evidence
+                _current_msg_lower = req.message.lower()
+                _current_has_warranty_kw = any(kw in _current_msg_lower for kw in _warranty_ctx_kws)
+                if _warranty_ctx_in_history and not _current_has_warranty_kw and (_msg_is_image or _msg_has_image_placeholder):
+                    # ⚡ ตรวจว่า message หลังตัด image placeholder แล้วว่างไหม
+                    #    (ถ้าว่าง = ลูกค้าส่งแค่รูปเฉยๆ ไม่ได้พิมพ์อะไร → ไม่ใช่ claim evidence)
+                    _msg_without_placeholder = re.sub(
+                        r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]",
+                        "", req.message, flags=re.IGNORECASE
+                    ).strip()
+                    if not _msg_without_placeholder:
+                        _warranty_ctx_in_history = False
+                        print(f"[WARRANTY-CTX-IMAGE] skip: ลูกค้าส่งรูปเฉยๆ ไม่มี warranty keyword → ปล่อยไปเส้นทางปกติ", file=sys.stderr)
+                # ⚡ Guard: ถ้า message มี product keywords และไม่มี warranty keywords → ไม่ถือเป็น claim evidence
+                #    (กัน case: ลูกค้าถาม "มีสายแรงกว่านี้ไหม [รูปภาพ]" ใน context warranty → ไม่ควรเป็น claim evidence)
+                if _warranty_ctx_in_history and _is_post_handoff_product_q:
+                    _warranty_ctx_in_history = False
+                    print(f"[WARRANTY-CTX-IMAGE] skip: message มี product keywords ไม่มี warranty keywords → ปล่อยไปเส้นทางปกติ", file=sys.stderr)
+                elif _warranty_ctx_in_history:
+                    print(f"[WARRANTY-CTX-IMAGE] ลูกค้าส่งรูป/วิดีโอ ใน context warranty → ถือเป็น claim evidence", file=sys.stderr)
+            if (_bot_asked_claim_info or _warranty_ctx_in_history) and not _bot_reviewed_info:
                 # ⚡ ตัด image placeholder ออกก่อน extract info (กัน [รูปภาพ] ถูกตีความเป็นชื่อ)
                 _claim_clean_msg = re.sub(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", "", req.message, flags=re.IGNORECASE).strip()
                 # ⚡ ตัด date pattern ออกอีก (กัน "ซื้อวันที่ 15 ส.ค. 2567" ถูกตีความเป็นชื่อ)
@@ -1079,11 +1532,14 @@ def chat(req: ChatRequest) -> ChatResponse:
                 _has_valid_phone = bool(_info["phone"])
                 # ⚡ ต้องมี order_id ก็นับว่าเป็นข้อมูลบางส่วน (เช่น ลูกค้าให้เลขคำสั่งซื้อก่อน)
                 _has_valid_order = bool(_info["order_id"])
+                # ⚡ Phase 1F — ถ้า name มีตัวเลข → น่าจะเป็นเบอร์/order ไม่ใช่ชื่อ → ไม่นับเป็น valid name
+                if _has_valid_name and any(c.isdigit() for c in _info["name"]):
+                    _has_valid_name = False
                 if _has_valid_name or _has_valid_phone or _has_valid_order:
                     # ทวนข้อมูลที่ให้มา + ถามข้อมูลที่เหลือ
                     _review_lines = []
                     _missing_lines = []
-                    if _info["name"]:
+                    if _has_valid_name:
                         _review_lines.append(f"• ชื่อ-นามสกุล: {_info['name']}")
                     else:
                         _missing_lines.append("• ชื่อ-นามสกุล")
@@ -1135,9 +1591,12 @@ def chat(req: ChatRequest) -> ChatResponse:
                     _has_valid_name = _info["name"] and len(_info["name"]) <= 40 and " " in _info["name"]
                     _has_valid_phone = bool(_info["phone"])
                     _has_valid_order = bool(_info["order_id"])
+                    # ⚡ Phase 1F — ถ้า name มีตัวเลข → ไม่นับเป็น valid name
+                    if _has_valid_name and any(c.isdigit() for c in _info["name"]):
+                        _has_valid_name = False
                     if _has_valid_name or _has_valid_phone or _has_valid_order:
                         _review_lines = []
-                        if _info["name"]:
+                        if _has_valid_name:
                             _review_lines.append(f"• ชื่อ-นามสกุล: {_info['name']}")
                         if _info["phone"]:
                             _review_lines.append(f"• เบอร์โทร: {_info['phone']}")
@@ -1200,7 +1659,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             # ถ้ามี warranty claim answer → ส่งตอบก่อนเข้า flow อื่น
             if _warranty_claim_answer:
                 _total_elapsed = _time.time() - _total_start
-                model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
                 print(f"[TIMING] WARRANTY-CLAIM: {_total_elapsed:.2f}s  handoff={_warranty_claim_handoff}", file=sys.stderr)
 
                 # ถ้าต้องส่งต่อแอดมิน → เรียก handoff API (best-effort, ไม่ block คำตอบ)
@@ -1290,6 +1749,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         shop_settings_action=None,
                         trigger_matched=None,
                     ),
+                    image_desc=_image_desc_out,
                 )
 
         if history and not _is_followup_policy:
@@ -1415,7 +1875,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         # เพื่อความชัดเจนของ flow: ในช่วงประกัน → ถาม info, นอกช่วง → ถามสนใจปรึกษาแอดมิน
         if _warranty_date_followup and _warranty_claim_answer:
             _total_elapsed = _time.time() - _total_start
-            model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+            model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
             print(f"[TIMING] WARRANTY-DATE: {_total_elapsed:.2f}s", file=sys.stderr)
             return ChatResponse(
                 answer=_warranty_claim_answer,
@@ -1429,6 +1889,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 cost=0.0,
                 steps=_steps,
                 routing_decision=_routing("bot_reply", "warranty_date_followup: คำนวณวันหมดประกัน"),
+                image_desc=_image_desc_out,
             )
 
         # ===== Tax invoice follow-up from history =====
@@ -1457,7 +1918,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
                     )
                     _total_elapsed = _time.time() - _total_start
-                    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+                    model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
                     if req.conversation_id:
                         try:
                             import urllib.request
@@ -1509,6 +1970,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                             "handoff", "tax_invoice: follow-up จาก history → ส่งแอดมิน",
                             handoff_reason="tax_invoice_request",
                         ),
+                        image_desc=_image_desc_out,
                     )
 
         # ===== Claim request ที่ state machine ไม่ได้จัดการ (first message, ไม่มี history) =====
@@ -1516,7 +1978,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         # ⚡ handoff ทันที — บอทขอข้อมูลเบื้องต้นทิ้งไว้ แอดมินมาอ่านแชทต่อ
         if _is_claim_request and not _warranty_claim_answer:
             _total_elapsed = _time.time() - _total_start
-            model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+            model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
             _claim_first_answer = (
                 f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
                 f"• วันที่ซื้อสินค้า\n"
@@ -1526,6 +1988,10 @@ def chat(req: ChatRequest) -> ChatResponse:
                 f"และไม่ใช่ความเสียหายจากการใช้งานผิดวิธี น้ำเข้า หรือตกกระแทก "
                 f"(ขึ้นกับเงื่อนไขเฉพาะรุ่น) หากข้อมูลครบ abubu จะตรวจสอบและประสานงานต่อให้ค่ะ"
             )
+            # ⚡ Phase 1C — ถ้ามี warranty auto-check context (เช็คจาก order_sn แล้ว) → แนบ
+            if _warranty_auto_ctx:
+                _claim_first_answer = f"{_warranty_auto_ctx}\n\n{_claim_first_answer}"
+                print(f"[WARRANTY-AUTO] แนบ auto-check context ใน first-message claim answer", file=sys.stderr)
             print(f"[WARRANTY-CLAIM] first-message claim request → ask info + handoff immediately", file=sys.stderr)
 
             # ⚡ handoff ทันที
@@ -1597,14 +2063,15 @@ def chat(req: ChatRequest) -> ChatResponse:
                     "handoff", "warranty_claim: ขอข้อมูลลูกค้า + handoff ทันที (first message)",
                     handoff_reason="warranty_claim",
                 ),
+                image_desc=_image_desc_out,
             )
 
         if general_qtype:
             # ถ้าเป็น warranty_policy/return_policy แต่ message มี model keyword (เช่น "P01 รับประกันกี่ปี")
-            # ให้ skip general flow ไป product flow แทน เพราะลูกค้าถามรับประกันของสินค้าเฉพาะรุ่น
-            # ต้องดึงสินค้า (รวม UNLIST/sold_out) มาให้ LLM ตอบสเปค/รับประกันเฉพาะรุ่นได้
-            if general_qtype in ("warranty_policy", "return_policy") and _current_has_model:
-                print(f"[INTENT] warranty_policy with model keyword → skip general, go to product flow", file=sys.stderr)
+            # หรือมี item_id (ลูกค้าคลิกสินค้ามา) ให้ skip general flow ไป product flow แทน
+            # เพราะลูกค้าถามรับประกันของสินค้าเฉพาะรุ่น ต้องดึงสินค้า (รวม UNLIST/sold_out) มาให้ LLM ตอบ
+            if general_qtype in ("warranty_policy", "return_policy") and (_current_has_model or _tagged_item_id):
+                print(f"[INTENT] warranty_policy with model/item_id → skip general, go to product flow", file=sys.stderr)
                 general_qtype = None
             else:
                 print(f"[TIMING] General question detected: {general_qtype}  ({_time.time()-_t0:.2f}s)", file=sys.stderr)
@@ -1632,7 +2099,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 except RuntimeError as exc:
                     raise HTTPException(status_code=500, detail=str(exc))
                 _total_elapsed = _time.time() - _total_start
-                model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
                 prompt_t = usage_info.get("prompt", 0)
                 output_t = usage_info.get("output", 0)
                 cost = (prompt_t * 0.30 + output_t * 2.50) / 1_000_000
@@ -1649,6 +2116,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     cost=round(cost, 6),
                     steps=_steps,
                     routing_decision=_routing("bot_reply", f"general_qtype: {general_qtype} — ไม่โดน trigger/shop_settings → บอทตอบ"),
+                    image_desc=_image_desc_out,
                 )
 
         # ===== ขั้นที่ 0b: ตรวจ brand-specific question (เช่น "Xiaomi ขายอะไรบ้าง") =====
@@ -1673,7 +2141,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 except RuntimeError as exc:
                     raise HTTPException(status_code=500, detail=str(exc))
                 _total_elapsed = _time.time() - _total_start
-                model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
                 prompt_t = usage_info.get("prompt", 0)
                 output_t = usage_info.get("output", 0)
                 cost = (prompt_t * 0.30 + output_t * 2.50) / 1_000_000
@@ -1689,6 +2157,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     cost=round(cost, 6),
                     steps=_steps,
                     routing_decision=_routing("bot_reply", f"brand_question: {brand_q} — บอทตอบจากข้อมูลแบรนด์"),
+                    image_desc=_image_desc_out,
                 )
 
         # ===== ขั้นที่ 1: เช็ค Knowledge Base ก่อน =====
@@ -1858,7 +2327,9 @@ def chat(req: ChatRequest) -> ChatResponse:
                     _kb_alpha_kws = re.findall(r"[A-Za-z]{5,}", req.message)
                     _kb_common = {"watch", "smart", "phone", "cable", "charger", "adapter",
                                   "power", "bank", "band", "type", "usb", "wireless",
-                                  "what", "how", "please", "thank", "hello", "hi"}
+                                  "what", "how", "please", "thank", "hello", "hi",
+                                  "version", "global", "china", "international", "original",
+                                  "authentic", "local", "origin", "korea", "hongkong"}
                     _kb_alpha_kws = [w for w in _kb_alpha_kws if w.lower() not in _kb_common]
                     _kb_model_kws = _kb_alpha_kws[:1]
                 if _kb_model_kws:
@@ -2055,11 +2526,12 @@ def chat(req: ChatRequest) -> ChatResponse:
                             history=history,
                             persona_extra=_persona_extra,
                             intent_result=_intent_result,
+                            extra_context=_vision_context,
                         )
                     except RuntimeError as exc:
                         raise HTTPException(status_code=500, detail=str(exc))
                     _total_elapsed = _time.time() - _total_start
-                    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+                    model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
                     prompt_t = usage_info.get("prompt", 0)
                     output_t = usage_info.get("output", 0)
                     cost = (prompt_t * 0.30 + output_t * 2.50) / 1_000_000
@@ -2193,6 +2665,10 @@ def chat(req: ChatRequest) -> ChatResponse:
                                 _total_ws = round(_time.time() - _total_start, 2)
                                 _timing_breakdown["web_search"] = _ws_elapsed
                                 _timing_breakdown["total"] = _total_ws
+                                # ⚡ บันทึก suggestion products ลง conversation_products timeline
+                                #    กัน case: kb+mongo+web_search ตอบแล้วไม่บันทึก → active product ว่าง
+                                #    → คำถามถัดไป (เช่น "ขอลิงค์กับรูป") ไม่มี active ใช้ → ดึงสินค้าอื่นมาแทน
+                                _record_suggestion_products(req, products[:req.limit])
                                 return ChatResponse(
                                     answer=_ws_answer,
                                     answer_segments=llm.split_segments(_ws_answer),
@@ -2210,8 +2686,13 @@ def chat(req: ChatRequest) -> ChatResponse:
                                     web_search_model=_ws_result.get("model"),
                                     steps=_steps,
                                     routing_decision=_routing("bot_reply", f"web_search: {_search_reason} → ค้นเพิ่มแล้วตอบ"),
+                                    image_desc=_image_desc_out,
                                 )
 
+                    # ⚡ บันทึก suggestion products ลง conversation_products timeline
+                    #    กัน case: kb+mongo ตอบแล้วไม่บันทึก → active product ว่าง
+                    #    → คำถามถัดไป (เช่น "ขอลิงค์กับรูป") ไม่มี active ใช้ → ดึงสินค้าอื่นมาแทน
+                    _record_suggestion_products(req, products[:req.limit])
                     return ChatResponse(
                         answer=answer,
                         answer_segments=llm.split_segments(answer),
@@ -2226,6 +2707,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         timing=_timing_breakdown,
                         steps=_steps,
                         routing_decision=_routing("bot_reply", "kb+mongo: พบใน knowledge base + product store → บอทตอบ"),
+                        image_desc=_image_desc_out,
                     )
 
         # ===== ขั้นที่ 2: ไม่เจอใน KB → ใช้ product_store เดิม =====
@@ -2243,6 +2725,27 @@ def chat(req: ChatRequest) -> ChatResponse:
         _followup_orig = getattr(req, "_followup_original", None)
         desc_message = _followup_orig or req.message
         retrieval_message = req.message
+        # ⚡ Phase 1F — ถ้า message เป็น placeholder รูป/วิดีโอทั้งหมด + มี vision context
+        #    ให้ใช้ vision description แทนใน retrieval (กัน "[รูปภาพ]" ดึงสินค้าไม่ได้)
+        # ⚡ ขยาย: ถ้า message อ้างถึงรูป ("ในรูป", "รูปนี้", "ตัวนี้") + มี vision context
+        #    ให้ใช้ vision desc เป็น retrieval query ด้วย (เช่น "น้องในรูปคือตัวอะไร")
+        _placeholder_pattern = r'^(?:\s*\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]\s*)+$'
+        _image_ref_pattern = r'(?:ในรูป|ในรุป|รูปนี้|รูปที่|ตัวนี้|ตัวในรูป|น้องในรูป|น้องในรุป|สินค้าในรูป|ของในรูป)'
+        _use_vision_for_retrieval = (
+            _vision_context and (
+                re.match(_placeholder_pattern, req.message.strip())
+                or re.search(_image_ref_pattern, req.message, re.IGNORECASE)
+            )
+        )
+        if _use_vision_for_retrieval:
+            # สกัด text จาก vision context (ตัด header/footer)
+            _vision_text = re.sub(
+                r'=== รูปภาพที่ลูกค้าส่งมา ===\n', '', _vision_context
+            )
+            _vision_text = re.sub(r'⚠️.*$', '', _vision_text, flags=re.DOTALL).strip()
+            if _vision_text:
+                retrieval_message = _vision_text[:200]  # จำกัดความยาว
+                print(f"[VISION-RETRIEVAL] using vision desc for retrieval: {retrieval_message[:80]!r}", file=sys.stderr)
         _ref_handled = False  # default — จะถูก set ใน block if req.history
         is_other_model_question = False  # default — จะถูก set ใน block if req.history
 
@@ -2394,27 +2897,55 @@ def chat(req: ChatRequest) -> ChatResponse:
         # ⚡ CONV-ACTIVE: ดึง active product จาก conversation_products timeline ก่อน history-words
         # ต้องทำก่อน history block เพราะ history-words อาจดึงสินค้าอื่นในร้านมาทับ anchor
         # เช่น "kieslect" ใน history → ดึง Ks, Lora 2, KR Pro ทั้งที่ active = BioKoop
+        # ⚡ Phase 2Z+++ — อนุญาตให้ CONV-ACTIVE ทำงานแม้ _ref_handled=True
+        #    กัน case: ลูกค้าส่ง [item] → bot ตอบ → ลูกค้าถาม "อันนี้..." (ref_handled)
+        #    → CONV-ACTIVE ไม่ทำงาน → ดึงสินค้าอื่น → ตอบผิด
         _is_conv_active = False
         _cur_charger_sub = product_store._detect_charger_subtype(req.message)
-        if not _ref_handled and req.conversation_id and not _cur_charger_sub:
+        print(f"[CONV-ACTIVE-DBG] conversation_id={req.conversation_id!r} charger_sub={_cur_charger_sub!r} ref_handled={_ref_handled}", file=sys.stderr)
+        # ⚡ Phase 3 — ยกเลิกเงื่อนไข `not _cur_charger_sub` เพราะ "สายแท้" ถูก detect เป็น cable
+        #   ทำให้ CONV-ACTIVE ไม่ทำงานทั้งที่ลูกค้าถามต่อเรื่องสายชาร์จเดิม
+        #   แต่เช็คเพิ่ม: ถ้า _cur_charger_sub มีค่าและต่างจาก subtype ของ active_card → เปลี่ยนหมวด ไป fetch ใหม่
+        if req.conversation_id:
             try:
                 from . import conversation_products as _cp
                 _cur_model_kw = knowledge_base.extract_model_keywords(req.message)
+                # ⚡ Phase 3 — กรอง target device ออกจาก _cur_model_kw
+                _cur_model_kw = [kw for kw in _cur_model_kw if not knowledge_base.is_target_device_kw(kw)]
                 _active_card = _cp.resolve_active_by_message(
                     conversation_id=req.conversation_id,
                     message=req.message,
                     model_keywords=_cur_model_kw,
                 )
                 if _active_card and _active_card.get("item_id"):
-                    _cur_msg_lower = (req.message or "").lower().strip()
-                    _new_topic_kws_cp = ("สวัสดี", "หวัดดี", "hi", "hello", "แนะนำ",
-                                         "มีอะไร", "มีไร", "สอบถาม",
-                                         "สนใจ", "อยากได้", "หาสินค้า")
-                    _is_new_topic_cp = any(kw in _cur_msg_lower for kw in _new_topic_kws_cp)
-                    if not _is_new_topic_cp and not _cur_model_kw:
-                        _ref_regex_products = [_active_card]
-                        _is_conv_active = True
-                        print(f"[CONV-ACTIVE] ใช้ active product จาก timeline: item_id={_active_card.get('item_id')} name={_active_card.get('name','')[:40]}", file=sys.stderr)
+                    # ⚡ Phase 3 — เช็ค subtype ของ active_card ว่าตรงกับ _cur_charger_sub ไหม
+                    #   ถ้าลูกค้าเปลี่ยนจาก cable → adapter จริงๆ → ไม่ใช้ active (ไป fetch ใหม่)
+                    #   แต่ "หัว" ลอยๆ (เช่น "ปัญหาเรื่องหัว ชาน") ไม่ใช่การเปลี่ยนหมวด จึงต้องเช็ค
+                    #   adapter keyword ชัดเจน (หัวชาร์จ/adapter/gan) ไม่ใช่แค่ "หัว" ลอยๆ
+                    _active_sub = product_store._detect_charger_subtype(
+                        _active_card.get("name") or _active_card.get("item_name") or ""
+                    )
+                    _strong_adapter_kw = ("หัวชาร์จ", "หัวชาร์ต", "adapter", "แอ็ดอปเตอร์", "gan", "qc 3", "pd fast")
+                    _has_strong_adapter = any(kw in (req.message or "").lower() for kw in _strong_adapter_kw)
+                    if _cur_charger_sub == "adapter" and _active_sub == "cable" and not _has_strong_adapter:
+                        # "หัว" ลอยๆ ไม่ใช่การเปลี่ยนหมวด → ใช้ active ต่อ
+                        print(f"[CONV-ACTIVE] 'หัว' ลอยๆ ไม่ใช่ adapter จริง → ใช้ active ต่อ", file=sys.stderr)
+                        _cur_charger_sub = None  # reset เพื่อไม่ให้กรอง subtype ผิด
+                    elif _cur_charger_sub and _active_sub and _cur_charger_sub != _active_sub:
+                        print(f"[CONV-ACTIVE] subtype เปลี่ยน {_active_sub} → {_cur_charger_sub} → ไม่ใช้ active", file=sys.stderr)
+                        # ไม่ใช้ active → ไป fetch ใหม่ (ข้าม block ด้านล่าง)
+                        _active_card = None
+                    # (fall through ไปเช็ค _is_new_topic_cp ข้างล่าง)
+                    if _active_card:
+                        _cur_msg_lower = (req.message or "").lower().strip()
+                        _new_topic_kws_cp = ("สวัสดี", "หวัดดี", "hi", "hello", "แนะนำ",
+                                             "มีอะไร", "มีไร",
+                                             "สนใจ", "อยากได้", "หาสินค้า")
+                        _is_new_topic_cp = any(kw in _cur_msg_lower for kw in _new_topic_kws_cp)
+                        if not _is_new_topic_cp and not _cur_model_kw:
+                            _ref_regex_products = [_active_card]
+                            _is_conv_active = True
+                            print(f"[CONV-ACTIVE] ใช้ active product จาก timeline: item_id={_active_card.get('item_id')} name={_active_card.get('name','')[:40]}", file=sys.stderr)
             except Exception as _e:
                 print(f"[CONV-ACTIVE] error: {_e}", file=sys.stderr)
 
@@ -2480,6 +3011,10 @@ def chat(req: ChatRequest) -> ChatResponse:
                 "ขอรายละเอียด", "ขอสเปก", "ขอข้อมูลเพิ่มเติม",
                 "ขอรายละเอียดเพิ่มเติม", "ขอดูสเปก", "ขอดูรายละเอียด",
                 "ขอข้อมูลสินค้า", "ขอรายละเอียดสินค้า",
+                # ⚡ Phase 2Z+++ — เพิ่ม "รุ่นไหนประกัน" เป็น reference indicator
+                #    กัน case: "รุ่นไหนประกันยังไงบ้าง" หลัง bot แนะนำพาวเวอร์แบงค์ → ตอบสายชาร์จผิด
+                #    (เจาะจงเฉพาะ "รุ่นไหนประกัน" ไม่ใช่ "รุ่นไหน" เฉยๆ เพราะอาจเป็นคำถามใหม่)
+                "รุ่นไหนประกัน", "รุ่นไหนรับประกัน", "รุ่นไหนบ้างประกัน",
             ]
             # "new topic indicator" = คำที่บอกว่าลูกค้าเปลี่ยนหัวข้อไปแล้ว ไม่ใช่ follow-up
             # เช่น "อุปกรณ์ป้องกันตัว", "โทสับ", "มีโทสับไหม", "อยากได้กล้อง"
@@ -3149,7 +3684,10 @@ def chat(req: ChatRequest) -> ChatResponse:
                 # กรองคำทั่วไปที่ไม่ใช่ชื่อสินค้า
                 _common_words = {"watch", "smart", "phone", "cable", "charger", "adapter",
                                  "power", "bank", "band", "type", "usb", "wireless",
-                                 "what", "how", "please", "thank", "hello", "hi"}
+                                 "what", "how", "please", "thank", "hello", "hi",
+                                 # ⚡ version/region words — กัน "Version" ดึง TP-Link "Global Version"
+                                 "version", "global", "china", "international", "original",
+                                 "authentic", "local", "origin", "korea", "hongkong"}
                 _cur_alpha_kws = [w for w in _cur_alpha_kws if w.lower() not in _common_words]
                 _cur_model_kws = _cur_alpha_kws[:1]  # เอาแค่คำแรก
             if _cur_model_kws:
@@ -3216,7 +3754,8 @@ def chat(req: ChatRequest) -> ChatResponse:
             _is_short_followup = len(req.message.split()) <= 25 and not _cur_has_model_kw
             # ไม่ใช่ new topic (เช่น "สวัสดี", "มีอะไรแนะนำไหม")
             _new_topic_kws = ("สวัสดี", "หวัดดี", "hi", "hello", "แนะนำ", "มีอะไร", "มีไร",
-                              "สอบถาม", "สนใจ", "อยากได้", "หาสินค้า", "ดูสินค้า")
+                              "สนใจ", "อยากได้", "หาสินค้า", "ดูสินค้า")
+            # ⚡ Phase 3 — เอา "สอบถาม" ออก (เหตุผลเดียวกับด้านบน)
             _is_new_topic = any(kw in _cur_msg_lower for kw in _new_topic_kws)
             if _is_short_followup and not _is_new_topic:
                 # หา model answer ล่าสุดจาก history
@@ -3257,8 +3796,29 @@ def chat(req: ChatRequest) -> ChatResponse:
 
         # ถ้า Mongo regex เจอ → ใช้สิ่งนั้น (แม่นยำกว่า vector search)
         # ถ้าไม่เจอ → ใช้ vector search ปกติ
+        # ⚡ set default ก่อน if block (กัน UnboundLocalError ถ้า _ref_regex_products ผ่าน path นี้)
+        _super_has_charge = "ชาร์จ" in retrieval_message or "charger" in retrieval_message.lower()
+        _super_has_pb = "พาวเวอร์แบงค์" in retrieval_message or "แบตสำรอง" in retrieval_message or "powerbank" in retrieval_message.lower()
         if _ref_regex_products:
             products = _ref_regex_products
+            # ⚡ Phase 1F — กรอง charger subtype สำหรับ _ref_regex_products (FUZZY-MATCH/MODEL-REGEX)
+            #   เพราะ path เหล่านี้บายพาส fetch_products จึงไม่กรอง subtype
+            #   เช่น "สายแรงๆ กว่านี้ใช้กับ mi 17 ultra" → FUZZY-MATCH ดึงแบตสำรองที่ชื่อมี "mi"
+            #   แต่ intent บอก cable → ต้องกรองเหลือเฉพาะ cable
+            _ref_intent_sub = (
+                (_intent_result or {}).get("charger_subtype")
+                if (_intent_result or {}).get("product_type") == "charger"
+                else None
+            )
+            if _ref_intent_sub:
+                _before_ref_filter = len(products)
+                products = product_store._filter_charger_subtype(products, _ref_intent_sub)
+                print(f"[REF-SUBTYPE-FILTER] subtype={_ref_intent_sub} → {len(products)} products (was {_before_ref_filter})", file=sys.stderr)
+                # ถ้ากรองเหลือ 0 → ไม่ใช้ _ref_regex_products ให้ไป fetch_products ปกติ
+                if not products:
+                    products = []
+                    _ref_regex_products = None
+                    print(f"[REF-SUBTYPE-FILTER] เหลือ 0 → ยกเลิก _ref_regex_products ไป fetch_products ปกติ", file=sys.stderr)
             # ⚡ ถ้าเป็น carry-forward จาก history → เพิ่ม context note บอก LLM
             # ว่าสินค้าเหล่านี้คือสินค้าที่ลูกค้าสนใจจากคำถามก่อนหน้า
             # ลูกค้าถามซ้ำเพราะอยากได้ข้อมูลเพิ่ม ไม่ใช่ถามหาสินค้าใหม่
@@ -3305,6 +3865,11 @@ def chat(req: ChatRequest) -> ChatResponse:
         else:
             # สำหรับ compatibility check ให้ดึงสินค้าเยอะกว่าปกติ
             # เพราะต้องการให้ LLM เห็นสินค้าทุกรุ่นในหมวด เพื่อเลือกรุ่นที่รองรับ device จริงๆ
+            # ⚡ Phase 1F — ถ้า _ref_regex_products ถูกยกเลิก (กรอง subtype เหลือ 0) → ต้องเข้า block นี้ด้วย
+            pass  # placeholder — logic จริงอยู่ข้างล่าง
+        # ⚡ Phase 1F — ย้าย superlative/fetch logic ออกจาก else block
+        #   เพื่อให้ทำงานแม้ _ref_regex_products ถูกยกเลิกใน if block ด้านบน
+        if not _ref_regex_products:
             _fetch_limit = req.limit
             _is_compat = _intent_result.get("intent") == "compatibility_check"
             if _is_compat:
@@ -3313,8 +3878,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             # เพื่อให้ LLM เห็นทุกรุ่นแล้วเปรียบเทียบหาอันที่สุดจริง
             _is_superlative = any(kw in _msg_lower_super for kw in _superlative_kw)
             # เก็บ context สำหรับ superlative clarification (ใช้ตอนเรียก LLM)
-            _super_has_charge = "ชาร์จ" in retrieval_message or "charger" in retrieval_message.lower()
-            _super_has_pb = "พาวเวอร์แบงค์" in retrieval_message or "แบตสำรอง" in retrieval_message or "powerbank" in retrieval_message.lower()
+            # ⚡ _super_has_charge/_super_has_pb ถูก set ก่อน if _ref_regex_products block แล้ว
             _super_has_history = bool(req.history and any(m.role == "user" and m.text.strip() for m in req.history))
             if _is_superlative:
                 _fetch_limit = max(_fetch_limit * 5, 50)
@@ -3329,7 +3893,15 @@ def chat(req: ChatRequest) -> ChatResponse:
                     print(f"[SUPERLATIVE-CHARGE] เพิ่ม powerbank ใน retrieval: {retrieval_message!r}", file=sys.stderr)
             # skip charger subtype เฉพาะ superlative ที่ไม่ได้ระบุ subtype ชัด
             # (เช่น "ชาร์จไวสุด" ไม่มี "สาย"/"หัว") — ถ้ามี subtype ชัด ให้กรองปกติ
-            _skip_sub = _is_superlative and not product_store._detect_charger_subtype(retrieval_message)
+            # ⚡ Phase 1F — ถ้า intent บอก charger_subtype ชัดเจน → ไม่ skip แม้เป็น superlative
+            #   (เช่น "สายแรงๆ กว่านี้" → intent=cable → ต้องกรองเป็น cable ไม่ดึงแบต)
+            _intent_sub_early = (
+                (_intent_result or {}).get("product_type") == "charger"
+                and (_intent_result or {}).get("charger_subtype") in (
+                    "adapter", "cable", "set", "car_charger", "wireless", "desktop", "socket",
+                )
+            )
+            _skip_sub = _is_superlative and not product_store._detect_charger_subtype(retrieval_message) and not _intent_sub_early
 
             # ── Charging spec question detection ──
             # ถ้าลูกค้าถาม "สินค้าX ใช้สายชาร์จอะไรได้บ้าง" / "X ชาร์จยังไง" / "X พอร์ตอะไร"
@@ -3359,8 +3931,8 @@ def chat(req: ChatRequest) -> ChatResponse:
             _intent_sub = None
             # ⚡ ถ้ามี _ref_regex_products จาก CONV-ACTIVE หรือ MODEL-REGEX แล้ว → ข้าม fetch_products
             # เพราะสินค้าที่ลูกค้าสนใจได้ระบุแล้ว ไม่ต้องค้นใหม่ (products ถูกตั้งที่ if _ref_regex_products บรรทัด ~2975)
-            if not _ref_regex_products:
-              if _is_charging_spec_q and not _starts_with_charger_kw:
+            # ⚡ Phase 1F — if not _ref_regex_products ถูกย้ายขึ้นไปข้างบนแล้ว (รวม superlative logic)
+            if _is_charging_spec_q and not _starts_with_charger_kw:
                 print(f"[CHARGING-SPEC-Q] ลูกค้าถาม charging spec ของสินค้า → ไม่กรอง charger type: {req.message!r}", file=sys.stderr)
                 # override product_types เป็น set() เพื่อไม่กรองด้วย charger
                 # และตั้ง desc_message ให้รวม keyword เรื่องชาร์จ เพื่อดึง description ที่เกี่ยวข้อง
@@ -3376,7 +3948,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     skip_charger_subtype=True,
                     product_types_override=set(),
                 )
-              else:
+            else:
                 # ⚡ ใช้ charger_subtype เป็น override เพื่อกัน retrieval_message ปนเปื้อน
                 # ลำดับความสำคัญ: intent.charger_subtype > _detect(req.message) > _detect(retrieval_message)
                 # - intent แม่นสุด (LLM อ่านประโยคเข้าใจ)
@@ -3408,16 +3980,50 @@ def chat(req: ChatRequest) -> ChatResponse:
                     if _sub_kw and not any(kw in retrieval_message.lower() for kw in (_sub_kw, "หัวชาร์จ", "สายชาร์จ", "ชุดชาร์จ", "แท่นชาร์จ", "ชาร์จไร้สาย", "หัวชาร์จในรถ", "ปลั๊กไฟ")):
                         retrieval_message = f"{_sub_kw} {retrieval_message}"
                         print(f"[SUBTYPE-PREFIX] retrieval_message → {retrieval_message!r}", file=sys.stderr)
-                products = product_store.fetch_products(
-                db,
-                message=retrieval_message,
-                shop_filter=req.shop,
-                limit=_fetch_limit,
-                desc_message=desc_message,
-                is_compat_check=_is_compat,
-                skip_charger_subtype=_skip_sub,
-                charger_subtype_override=_intent_sub,
-            )
+                # ⚡ Phase 3 — Multi-use-case: ถ้าลูกค้าถามหลาย use case พร้อมกัน
+                # เช่น "สำหรับวิ่ง และตัดเสียงรบกวน" → แยกค้นตามแต่ละ use case แล้วรวมผล
+                # กันไม่ให้ดึงแค่กลุ่มเดียวแล้วบอทตอบไม่ครบ
+                _multi_case_patterns = [
+                    (r"สำหรับวิ่ง|วิ่ง|ออกกำลังกาย|exercise|fitness|run\b", "หูฟัง วิ่ง run sport ออกกำลังกาย"),
+                    (r"ตัดเสียงรบกวน|ตัดเสียง|กันเสียง|ANC|noise\s*cancel|active\s*noise|降噪|ขึ้นเครื่อง|เครื่องบิน",
+                     "หูฟัง ตัดเสียงรบกวน ANC noise cancelling ขึ้นเครื่อง"),
+                ]
+                _is_multi_case = (
+                    re.search(r"\b2\s*รุ[น้]น?\b|สอง\s*รุ[n้]n?|ทั้ง\s*2|ทั้งสอง", req.message, re.IGNORECASE)
+                    or (req.message.count("และ") + req.message.count("และรุ้น") + req.message.count(" และ ")) >= 1
+                )
+                _multi_case_products: list[dict] = []
+                if _is_multi_case and "earphone" in (product_store._detect_product_types(req.message) or set()):
+                    _seen_ids: set[str] = set()
+                    for _pat, _query in _multi_case_patterns:
+                        if re.search(_pat, req.message, re.IGNORECASE):
+                            _sub = product_store.fetch_products(
+                                db,
+                                message=_query,
+                                shop_filter=req.shop,
+                                limit=5,
+                                desc_message=desc_message,
+                            )
+                            for _p in _sub:
+                                _iid = str(_p.get("item_id") or _p.get("id") or "")
+                                if _iid and _iid not in _seen_ids:
+                                    _multi_case_products.append(_p)
+                                    _seen_ids.add(_iid)
+                    if _multi_case_products:
+                        print(f"[MULTI-CASE] แยกค้นตาม use case → products={len(_multi_case_products)}", file=sys.stderr)
+                if _multi_case_products:
+                    products = _multi_case_products[:_fetch_limit]
+                else:
+                    products = product_store.fetch_products(
+                        db,
+                        message=retrieval_message,
+                        shop_filter=req.shop,
+                        limit=_fetch_limit,
+                        desc_message=desc_message,
+                        is_compat_check=_is_compat,
+                        skip_charger_subtype=_skip_sub,
+                        charger_subtype_override=_intent_sub,
+                    )
             # ⚡ ปิด block if not _ref_regex_products (ข้าม fetch ถ้ามี active product แล้ว)
         print(f"[TIMING] fetch_products: {_time.time()-_t1:.2f}s  (retrieval={retrieval_message!r})  products={len(products)}", file=sys.stderr)
 
@@ -3438,7 +4044,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 "source": "superlative_no_match_clarify",
                 "shop": req.shop,
                 "platform": req.platform,
-                "model": os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
+                "model": os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite"),
                 "usage": {"prompt": 0, "output": 0, "total": 0},
                 "intent": _intent_result if isinstance(_intent_result, dict) else {},
                 "intent_confidence": (_intent_result or {}).get("confidence", 0) if isinstance(_intent_result, dict) else 0,
@@ -3699,6 +4305,48 @@ def chat(req: ChatRequest) -> ChatResponse:
         # (เช่น ถาม "imilab ec4" ที่ร้าน BlackShark → ไม่มี → ดึงสินค้าอื่นของ BlackShark มาแนะนำ)
         # แต่ถ้าเป็น charger subtype (หัวชาร์จ/สายชาร์จ/ชุดชาร์จ) ที่ไม่เจอ → ดึง charger ทั่วไปแทน
         #   (ไม่ใช่สินค้าสุ่ม เพราะอาจได้สินค้าไม่เกี่ยว เช่น พาวเวอร์แบงค์)
+        # ⚡ Phase 2Z++ — ถ้าเป็น follow-up ที่มี ref_models (ดึงชื่อสินค้าจากคำตอบ bot ล่าสุด)
+        #    แต่ vector search ไม่เจอ → ลองดึงด้วย Mongo regex จากชื่อสินค้าเต็มก่อนไป shop fallback
+        #    (กัน case: "iSUPER SoundActiv Swim" ไม่มี digit → REF-REGEX ไม่ทำงาน → ดึงสินค้าอื่น → ตอบผิด)
+        # ⚡ debug Phase 2Z++
+        try:
+            _dbg_ref_models = ref_models
+        except NameError:
+            _dbg_ref_models = None
+        if not products and req.shop and _ref_handled and _dbg_ref_models:
+            try:
+                _ref_full_coll = db[os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"]
+                _ref_full_products: list[dict] = []
+                _seen_ref_ids: set = set()
+                for _ref_name in _dbg_ref_models[:2]:
+                    # ใช้ชื่อสินค้าเต็มใน regex match กับ field "item_name"
+                    # ⚡ Phase 2Z+++ — แก้ field จาก "name" เป็น "item_name" (field จริงใน DB)
+                    _ref_name_esc = re.escape(_ref_name)
+                    _ref_full_filter = {
+                        "item_name": {"$regex": _ref_name_esc, "$options": "i"},
+                    }
+                    # ⚡ Phase 2Z+++ — ลองดึงด้วย shop filter ก่อน
+                    #    ถ้าไม่เจอ → ลองอีกครั้งโดยไม่ใส่ shop filter
+                    #    (เพราะ shopname ใน MongoDB อาจไม่ตรงกับ req.shop เลย)
+                    if req.shop:
+                        _ref_full_filter["shopname"] = {"$regex": re.escape(req.shop), "$options": "i"}
+                    _ref_docs = list(_ref_full_coll.find(_ref_full_filter, product_store.PRODUCT_PROJECTION).limit(3))
+                    # ⚡ ถ้าไม่เจอและมี shop filter → ลองอีกครั้งโดยไม่ใส่ shop filter
+                    #    ชื่อสินค้าเต็มๆ มักเจาะจงพอ ไม่ต้องกลัว match ข้ามร้าน
+                    if not _ref_docs and "shopname" in _ref_full_filter:
+                        del _ref_full_filter["shopname"]
+                        _ref_docs = list(_ref_full_coll.find(_ref_full_filter, product_store.PRODUCT_PROJECTION).limit(3))
+                        print(f"[REF-NAME-FALLBACK] retry without shop filter: {len(_ref_docs)} docs", file=sys.stderr)
+                    for d in _ref_docs:
+                        iid = str(d.get("item_id"))
+                        if iid not in _seen_ref_ids:
+                            _seen_ref_ids.add(iid)
+                            _ref_full_products.append(product_store.to_product_card(d, req.message))
+                if _ref_full_products:
+                    products = _ref_full_products
+                    print(f"[REF-NAME-FALLBACK] ดึงสินค้าด้วยชื่อเต็ม {ref_models[:2]}: {len(products)} ตัว", file=sys.stderr)
+            except Exception as _e:
+                print(f"[REF-NAME-FALLBACK] error: {_e}", file=sys.stderr)
         if not products and req.shop:
             _t_alt = _time.time()
             # ตรวจว่าเป็น charger subtype ที่ไม่เจอไหม
@@ -3919,6 +4567,109 @@ def chat(req: ChatRequest) -> ChatResponse:
 
         import time as _time
         _llm_start = _time.time()
+
+        # ── Rejection memory: สแกน history หาสินค้าที่ลูกค้าปฏิเสธ ──
+        # ถ้าลูกค้าเคยแย้ง/ปฏิเสธสินค้าที่บอทแนะนำ → ส่ง context ให้ LLM ว่าห้ามแนะนำซ้ำ
+        _rejection_extra = ""
+        if req.history and products:
+            _neg_signals = (
+                "ทำไม", "ไม่โอเค", "ไม่ดี", "ดีกว่า", "ไม่เอา", "ไม่ต้อง",
+                "จ่ายได้แค่", "แค่", "ไม่พอ", "ไม่ใช่", "ผิด", "ไม่ตรง",
+                "แล้วทำไมไม่", "ทำไมไม่", "ไม่เหมาะ", "ไม่เหมาะสม",
+                "เลว", "แย่", "ไม่น่า", "ไม่คุ้ม",
+            )
+            # ดึง model codes จาก products ใน context ปัจจุบัน (เช่น C2C515, CTC615W)
+            _ctx_model_codes: dict[str, str] = {}  # code (UPPER) → full name
+            for _p in products:
+                _pname = (_p.get("name") or "").strip()
+                if not _pname:
+                    continue
+                # หา model code: alphanumeric token ที่ขึ้นต้นด้วยตัวอักษร และมีทั้งตัวอักษรและตัวเลข
+                # (เช่น C2C515, CTC615W, PB100P, AD1404U — ไม่จับ 100W หรือ 240W)
+                _tokens = re.findall(r"[A-Z][A-Z0-9]{3,11}", _pname)
+                for _c in _tokens:
+                    if any(ch.isdigit() for ch in _c):
+                        _ctx_model_codes[_c.upper()] = _pname
+            # สแกน history: model message → user message ถัดไป
+            _rejected: list[tuple[str, str]] = []  # (model_code, reason_snippet)
+            _hist = req.history
+            for _i in range(len(_hist) - 1):
+                _h = _hist[_i]
+                _h_role = getattr(_h, "role", None) or (_h.get("role") if isinstance(_h, dict) else None)
+                _h_text = getattr(_h, "text", None) or (_h.get("text", "") if isinstance(_h, dict) else "")
+                if _h_role != "model":
+                    continue
+                _model_text = _h_text
+                # หา model codes ที่บอทเคยแนะนำในข้อความนี้ (ขึ้นต้นด้วยตัวอักษร มีทั้งตัวอักษรและตัวเลข)
+                _bot_tokens = re.findall(r"[A-Z][A-Z0-9]{3,11}", _model_text)
+                _bot_codes = [c for c in _bot_tokens if any(ch.isdigit() for ch in c)]
+                if not _bot_codes:
+                    continue
+                # ดู user message ถัดไป
+                _next_user = None
+                for _j in range(_i + 1, len(_hist)):
+                    _nh = _hist[_j]
+                    _nh_role = getattr(_nh, "role", None) or (_nh.get("role") if isinstance(_nh, dict) else None)
+                    if _nh_role == "user":
+                        _next_user = getattr(_nh, "text", None) or (_nh.get("text", "") if isinstance(_nh, dict) else "")
+                        break
+                # ⚡ ถ้าไม่มี user message ถัดไปใน history → ใช้ current message (req.message)
+                if not _next_user and _i == len(_hist) - 1:
+                    _next_user = req.message
+                if not _next_user:
+                    continue
+                _has_neg = any(_sig in _next_user for _sig in _neg_signals)
+                if not _has_neg:
+                    continue
+                # ถ้า user message มี negative signal + พูดถึงสินค้าที่บอทแนะนำ
+                # ⚡ รองรับทั้ง code ตรงๆ (case-insensitive) และ indirect reference ("สายชาร์จนี้", "อันนี้")
+                _next_lower = _next_user.lower()
+                _matched_code = None
+                for _bc in _bot_codes:
+                    if _bc.lower() in _next_lower:
+                        _matched_code = _bc
+                        break
+                # ถ้าไม่ match code ตรง แต่ user พูดถึง "สาย"/"หัว"/"อันนี้"/"รุ่นนี้" + negative → ถือว่าปฏิเสธ
+                if not _matched_code and _bot_codes:
+                    _indirect_kws = ("สาย", "หัว", "อันนี้", "รุ่นนี้", "ตัวนี้", "อันนั้น", "รุ่นนั้น", "ตัวนั้น", "อันเดิม", "ของเดิม")
+                    if any(_kw in _next_user for _kw in _indirect_kws):
+                        # พยายาม match ประเภท: "สาย" → cable code, "หัว" → adapter code
+                        _has_sai = "สาย" in _next_user
+                        _has_hua = "หัว" in _next_user
+                        if _has_sai and not _has_hua:
+                            # หา code ที่น่าจะเป็นสาย (C2C, CTC, CL)
+                            _cable_codes = [c for c in _bot_codes if re.match(r"^(C2C|CTC|CL)", c)]
+                            _matched_code = _cable_codes[0] if _cable_codes else _bot_codes[0]
+                        elif _has_hua and not _has_sai:
+                            # หา code ที่น่าจะเป็นหัวชาร์จ (AD)
+                            _adapter_codes = [c for c in _bot_codes if re.match(r"^AD", c)]
+                            _matched_code = _adapter_codes[0] if _adapter_codes else _bot_codes[0]
+                        else:
+                            _matched_code = _bot_codes[0]  # สินค้าแรกที่บอทแนะนำ
+                if _matched_code:
+                    _reason = _next_user[:120].replace("\n", " ")
+                    _rejected.append((_matched_code, _reason))
+            # debug log
+            if _rejected:
+                print(f"[REJECTION] detected: {[(c, r[:50]) for c, r in _rejected]}", file=sys.stderr)
+                print(f"[REJECTION] ctx_model_codes: {list(_ctx_model_codes.keys())}", file=sys.stderr)
+            # ส่งทุก rejected products ให้ LLM — ไม่กรองเฉพาะที่อยู่ใน context
+            # เพราะถ้าสินค้าที่ถูกปฏิเสธอยู่ใน context รอบนี้ LLM ต้องรู้ว่าห้ามแนะนำ
+            _rejected_in_ctx = _rejected[:]
+            if _rejected_in_ctx:
+                _rejection_lines = []
+                for _code, _reason in _rejected_in_ctx:
+                    _fname = _ctx_model_codes.get(_code, _code)
+                    _rejection_lines.append(
+                        f"  • {_code} ({_fname[:40]}) — ลูกค้าปฏิเสธเพราะ: {_reason}"
+                    )
+                _rejection_extra = (
+                    "\n⚠️ สินค้าที่ลูกค้าปฏิเสธในรอบก่อน — ห้ามแนะนำซ้ำ:\n"
+                    + "\n".join(_rejection_lines)
+                    + "\nหากสินค้าเหล่านี้อยู่ใน context ให้ข้ามไปแนะนำรุ่นอื่นแทน\n"
+                )
+                print(f"[REJECTION-MEMORY] พบสินค้าที่ลูกค้าปฏิเสธ: {[c for c, _ in _rejected_in_ctx]}", file=sys.stderr)
+
         # สำหรับ superlative question ที่ไม่ชัดว่าลูกค้าต้องการประเภทใด
         # (เช่น "ชาร์จไวสุด" อาจหมายถึง หัวชาร์จ สายชาร์จ หรือพาวเวอร์แบงค์)
         # → เพิ่ม instruction ให้ LLM ถามกลับถ้าไม่ชัด แทนการคิดแทนลูกค้า
@@ -3936,6 +4687,8 @@ def chat(req: ChatRequest) -> ChatResponse:
                 "ให้แนะนำสินค้าที่แรง/ไวสุดจริงจาก context พร้อมถามกลับว่า "
                 "ลูกค้าสนใจประเภทใดโดยเฉพาะ อย่าคิดแทนลูกค้า\n"
             )
+        # รวม extra_context: rejection memory + superlative clarification + vision description
+        _combined_extra = (_vision_context + _rejection_extra + _superlative_clarify_extra).strip()
         try:
             answer, usage_info = llm.answer(
                 message=desc_message,
@@ -3944,17 +4697,20 @@ def chat(req: ChatRequest) -> ChatResponse:
                 history=history,
                 persona_extra=_persona_extra,
                 intent_result=_intent_result,
-                extra_context=_superlative_clarify_extra,
+                extra_context=_combined_extra,
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
         _llm_elapsed = _time.time() - _llm_start
         _total_elapsed = _time.time() - _total_start
         print(f"[TIMING] LLM: {_llm_elapsed:.2f}s  TOTAL: {_total_elapsed:.2f}s", file=sys.stderr)
-        model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
         # คำนวณต้นทุนประมาณ (gemini-3.5-flash-lite: $0.30/M input, $2.50/M output)
         prompt_t = usage_info.get("prompt", 0)
         output_t = usage_info.get("output", 0)
+        # ⚡ เพิ่ม vision pass tokens เข้าคำนวณด้วย
+        prompt_t += _vision_usage.get("prompt", 0)
+        output_t += _vision_usage.get("output", 0)
         cost = (prompt_t * 0.30 + output_t * 2.50) / 1_000_000
         _timing_breakdown["llm"] = round(_llm_elapsed, 3)
         # record RAG step (retrieval) — ก่อน LLM2 เพราะ RAG ดึงสินค้าก่อนส่งให้ LLM
@@ -4010,9 +4766,13 @@ def chat(req: ChatRequest) -> ChatResponse:
 
         # ── Web search fallback (ด่านสุดท้าย) ──
         # Flow ใหม่: search_and_extract → query DB ใหม่ → LLM ปั้นประโยค
+        # ⚡ Phase 3 — ถ้า _is_conv_active (มี anchor จาก conversation timeline)
+        #   ไม่ trigger web_search เพราะ anchor คือสินค้าที่ลูกค้าสนใจแล้ว
+        #   ถ้า LLM ตอบ "ไม่มี" น่าจะเป็น LLM ตอบผิด ไม่ใช่สินค้าไม่มีจริง
+        #   การดึงสินค้าอื่นมาทับจะทำให้ context loss รุนแรงขึ้น
         from . import web_search as _ws
         _extra_context = ""
-        if _ws.is_configured():
+        if _ws.is_configured() and not _is_conv_active:
             _should_search, _search_reason = _ws.should_use_web_search(
                 answer=answer,
                 intent_result=_intent_result,
@@ -4187,6 +4947,8 @@ def chat(req: ChatRequest) -> ChatResponse:
                         if _ws_kb_context:
                             _extra_parts.append(f"=== ข้อมูลจาก Knowledge Base ===\n{_ws_kb_context}")
                         _extra_context = "\n".join(_extra_parts)
+                        if _vision_context:
+                            _extra_context = (_vision_context + "\n" + _extra_context).strip()
                         try:
                             _ws_answer, _ws_llm_usage = llm.answer(
                                 message=req.message,
@@ -4307,6 +5069,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                             web_search_reason=_search_reason,
                             web_search_model=_ws_result.get("model"),
                             routing_decision=_routing("bot_reply", f"product_store+web_search: {_search_reason} → ค้นเพิ่มแล้วตอบ"),
+                            image_desc=_image_desc_out,
                         )
                     else:
                         print(f"[WEB-SEARCH] skipped (no answer from LLM re-answer)", file=sys.stderr)
@@ -4328,6 +5091,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             timing=_timing_breakdown,
             steps=_steps,
             routing_decision=_routing("bot_reply", "product_store: ค้นพบสินค้า → บอทตอบ"),
+            image_desc=_image_desc_out,
         )
     finally:
         pass  # ไม่ปิด client เพราะใช้ cache
@@ -4378,20 +5142,21 @@ def _append_base_warranty(answer: str, message: str, source: str = "") -> str:
     # ถ้าเป็น general:warranty_policy → context มี general_faq อยู่แล้ว ไม่ต้องแนบซ้ำ
     if source == "general:warranty_policy":
         return answer
-    # ถ้าเป็น duration question เฉพาะเจาะจง (เช่น "X รับประกันกี่ปี")
-    # → แนบเงื่อนไขการรับประกันเบื้องต้นด้วย (ลูกค้าต้องรู้เงื่อนไข เช่น ถ่ายคลิปแกะกล่อง)
-    # แต่ใช้รูปแบบสั้นกระชับ ไม่ใช่นโยบายเต็ม
+    # ถ้าเป็น duration question เฉพาะเจาะจง (เช่น "X รับประกันกี่ปี", "มีประกัน")
+    # → ไม่แนบเงื่อนไขรับประกันเต็ม เพราะลูกค้าแค่ถามระยะเวลา คำตอบ LLM สั้นๆ เพียงพอ
+    # ถ้าลูกค้าอยากรู้เงื่อนไขเต็ม ถามเป็นการเฉพาะได้
     from . import warranty as _w_check
-    if _w_check.detect_warranty_duration_question(message) and not _w_check.detect_claim_request(message):
-        # แนบเงื่อนไขสั้นๆ ท้ายคำตอบ duration
-        short_conditions = knowledge_base.get_base_warranty_text()
-        if short_conditions and short_conditions.strip():
-            # ตรวจซ้ำ
-            if not any(marker in answer for marker in (
-                "เงื่อนไขการรับประกันสินค้าเบื้องต้น",
-                "กรุณาถ่ายวิดีโอขณะแกะกล่อง",
-            )):
-                return f"{answer}\n\n---\n**เงื่อนไขการรับประกันสินค้าเบื้องต้น**\n{short_conditions}"
+    # เช็ค terms indicators ก่อน duration — เพราะ "เงื่อนไขรับประกันเป็นยังไง" มี "ประกัน"
+    # และ detect_warranty_duration_question จับทุกข้อความที่มี "ประกัน"
+    _warranty_terms_indicators = (
+        "เงื่อนไข", "อะไรบ้าง", "ยังไง", "ยังไงคะ", "เป็นยังไง",
+        "ครอบคลุม", "เคลมยังไง", "เคลมไง", "ซ่อมยังไง",
+        "condition", "terms", "policy",
+    )
+    _msg_lower = message.lower()
+    _asks_terms = any(ind in _msg_lower for ind in _warranty_terms_indicators)
+    if not _asks_terms:
+        # ไม่ใช่คำถามเงื่อนไข → เป็น duration หรือ statement → ไม่แนบเงื่อนไขเต็ม
         return answer
     base_text = knowledge_base.get_base_warranty_text()
     # ตรวจว่าคำตอบมีเงื่อนไขเบื้องต้นอยู่แล้วไหม (กันซ้ำ)
@@ -4623,9 +5388,13 @@ def _kb_doc_to_card(doc: dict) -> dict:
 
 # ---- Test Chat Sessions API ----
 # เก็บประวัติแชทจากหน้า testchat ลง MongoDB collection "test_chat_sessions"
+# ⚡ ใช้ env var ADMIN_MONGO_COLLECTION_TEST_CHAT_SESSIONS (default: test_chat_sessions)
+#    ต้องตรงกับ Next.js COLLECTIONS.testChatSessions
 
 from pydantic import BaseModel as _BM, Field as _F
 from datetime import datetime, timezone
+
+_TEST_CHAT_SESSIONS_COLL = os.environ.get("ADMIN_MONGO_COLLECTION_TEST_CHAT_SESSIONS", "test_chat_sessions").strip() or "test_chat_sessions"
 
 
 class TestChatMessage(_BM):
@@ -4634,6 +5403,8 @@ class TestChatMessage(_BM):
     timestamp: str = _F(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     # metadata สำหรับ bot response
     stats: dict[str, Any] = _F(default_factory=dict, description="source, timing, usage, cost, intent, steps, products")
+    # ⚡ Phase 1F — images URL ที่ลูกค้าส่งใน message นี้ (persist สำหรับ reload)
+    images: list[str] = _F(default_factory=list, description="URL รูปภาพใน message นี้ (ถ้ามี)")
 
 
 class CreateSessionRequest(_BM):
@@ -4652,12 +5423,28 @@ class UpdateSessionRequest(_BM):
 
 
 @app.get("/test-chat/sessions")
-def list_test_chat_sessions(shop: str | None = None, limit: int = 50):
-    """list sessions — ถ้ามี shop กรองเฉพาะร้านนั้น"""
+def list_test_chat_sessions(request: Request, shop: str | None = None, limit: int = 50):
+    """list sessions — ถ้ามี shop กรองเฉพาะร้านนั้น
+
+    ⚡ Phase 3 — กรองตาม admin_id จาก header X-Admin-Id
+    - session ที่มี admin_id == ผู้เรียก → เห็น
+    - session legacy (ไม่มี field admin_id) → เห็นทุกคน (backward compat)
+    """
     try:
         db = _admin_db()
-        query = {"shop": shop} if shop else {}
-        cursor = db["test_chat_sessions"].find(query).sort("updated_at", -1).limit(limit)
+        admin_id = (request.headers.get("X-Admin-Id") or "").strip()
+        query: dict[str, Any] = {}
+        if shop:
+            query["shop"] = shop
+        if admin_id:
+            # เห็น session ของตัวเอง + legacy session (ไม่มี admin_id field)
+            query["$or"] = [
+                {"admin_id": admin_id},
+                {"admin_id": {"$exists": False}},
+                {"admin_id": None},
+                {"admin_id": ""},
+            ]
+        cursor = db[_TEST_CHAT_SESSIONS_COLL].find(query).sort("updated_at", -1).limit(limit)
         sessions = []
         for doc in cursor:
             sessions.append({
@@ -4667,6 +5454,8 @@ def list_test_chat_sessions(shop: str | None = None, limit: int = 50):
                 "message_count": len(doc.get("messages", [])),
                 "created_at": doc.get("created_at"),
                 "updated_at": doc.get("updated_at"),
+                "admin_id": doc.get("admin_id", ""),
+                "admin_name": doc.get("admin_name", ""),
             })
         return {"sessions": sessions}
     except Exception as e:
@@ -4675,19 +5464,28 @@ def list_test_chat_sessions(shop: str | None = None, limit: int = 50):
 
 @app.post("/test-chat/sessions")
 def create_test_chat_session(req: CreateSessionRequest, request: Request) -> dict:
-    """สร้าง session ใหม่"""
+    """สร้าง session ใหม่
+
+    ⚡ Phase 3 — เก็บ admin_id + admin_name ของผู้สร้างลง doc
+    """
     try:
         from bson import ObjectId
+        from urllib.parse import unquote
         db = _admin_db()
         now = datetime.now(timezone.utc)
+        admin_id = (request.headers.get("X-Admin-Id") or "").strip() or "anonymous"
+        admin_name_raw = (request.headers.get("X-Admin-Name") or "").strip()
+        admin_name = unquote(admin_name_raw) if admin_name_raw else "anonymous"
         doc = {
             "shop": req.shop,
             "title": req.title or "แชทใหม่",
             "messages": [],
             "created_at": now,
             "updated_at": now,
+            "admin_id": admin_id,
+            "admin_name": admin_name,
         }
-        result = db["test_chat_sessions"].insert_one(doc)
+        result = db[_TEST_CHAT_SESSIONS_COLL].insert_one(doc)
         session_id = str(result.inserted_id)
         _log_testchat_action("create_session", request, session_id, shop=req.shop, title=doc["title"])
         return {"id": session_id, "shop": req.shop, "title": doc["title"]}
@@ -4701,7 +5499,7 @@ def get_test_chat_session(session_id: str) -> dict:
     try:
         from bson import ObjectId
         db = _admin_db()
-        doc = db["test_chat_sessions"].find_one({"_id": ObjectId(session_id)})
+        doc = db[_TEST_CHAT_SESSIONS_COLL].find_one({"_id": ObjectId(session_id)})
         if not doc:
             raise HTTPException(status_code=404, detail="session not found")
         # แปลง ObjectId → string
@@ -4726,7 +5524,7 @@ def add_test_chat_message(session_id: str, req: AddMessageRequest, request: Requ
         db = _admin_db()
         now = datetime.now(timezone.utc)
         msg_doc = req.message.model_dump()
-        result = db["test_chat_sessions"].update_one(
+        result = db[_TEST_CHAT_SESSIONS_COLL].update_one(
             {"_id": ObjectId(session_id)},
             {
                 "$push": {"messages": msg_doc},
@@ -4737,10 +5535,10 @@ def add_test_chat_message(session_id: str, req: AddMessageRequest, request: Requ
             raise HTTPException(status_code=404, detail="session not found")
         # auto title from first user message
         if req.message.role == "user":
-            doc = db["test_chat_sessions"].find_one({"_id": ObjectId(session_id)})
+            doc = db[_TEST_CHAT_SESSIONS_COLL].find_one({"_id": ObjectId(session_id)})
             if doc and doc.get("title", "แชทใหม่") == "แชทใหม่":
                 title = req.message.text[:40] + ("..." if len(req.message.text) > 40 else "")
-                db["test_chat_sessions"].update_one(
+                db[_TEST_CHAT_SESSIONS_COLL].update_one(
                     {"_id": ObjectId(session_id)},
                     {"$set": {"title": title}},
                 )
@@ -4749,7 +5547,7 @@ def add_test_chat_message(session_id: str, req: AddMessageRequest, request: Requ
             "add_message", request, session_id,
             role=req.message.role,
             text_preview=req.message.text[:120],
-            shop=(db["test_chat_sessions"].find_one({"_id": ObjectId(session_id)}) or {}).get("shop", ""),
+            shop=(db[_TEST_CHAT_SESSIONS_COLL].find_one({"_id": ObjectId(session_id)}) or {}).get("shop", ""),
         )
         return {"ok": True}
     except HTTPException:
@@ -4765,8 +5563,8 @@ def delete_test_chat_session(session_id: str, request: Request) -> dict:
         from bson import ObjectId
         db = _admin_db()
         # เก็บ info ก่อนลบ เพื่อ log
-        doc = db["test_chat_sessions"].find_one({"_id": ObjectId(session_id)})
-        result = db["test_chat_sessions"].delete_one({"_id": ObjectId(session_id)})
+        doc = db[_TEST_CHAT_SESSIONS_COLL].find_one({"_id": ObjectId(session_id)})
+        result = db[_TEST_CHAT_SESSIONS_COLL].delete_one({"_id": ObjectId(session_id)})
         if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="session not found")
         _log_testchat_action(
@@ -4789,7 +5587,7 @@ def update_test_chat_session(session_id: str, req: UpdateSessionRequest, request
         from bson import ObjectId
         db = _admin_db()
         # เก็บค่าเดิมก่อนอัปเดต เพื่อ log
-        old_doc = db["test_chat_sessions"].find_one({"_id": ObjectId(session_id)})
+        old_doc = db[_TEST_CHAT_SESSIONS_COLL].find_one({"_id": ObjectId(session_id)})
         old_shop = (old_doc or {}).get("shop", "")
         old_title = (old_doc or {}).get("title", "")
         update_fields: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
@@ -4797,7 +5595,7 @@ def update_test_chat_session(session_id: str, req: UpdateSessionRequest, request
             update_fields["shop"] = req.shop
         if req.title is not None:
             update_fields["title"] = req.title
-        result = db["test_chat_sessions"].update_one(
+        result = db[_TEST_CHAT_SESSIONS_COLL].update_one(
             {"_id": ObjectId(session_id)},
             {"$set": update_fields},
         )
@@ -4815,6 +5613,73 @@ def update_test_chat_session(session_id: str, req: UpdateSessionRequest, request
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Test chat session close/reopen — state-driven handoff reset ──
+# ⚡ Phase 2A — ปุ่ม "ปิดแชท (ให้บอทตอบต่อ)" ใน TestChatClient เรียก endpoint นี้
+#    อัปเดต test_chat_sessions.status = "closed" → botCallService ดึง status ส่งให้บอท
+#    บอทเห็น ticket_state="closed" → ข้าม post-handoff lock → ตอบปกติ
+@app.post("/test-chat/sessions/{session_id}/close")
+def close_test_chat_session(session_id: str, request: Request) -> dict:
+    """ปิดแชท — อัปเดต status เป็น 'closed' + closed_at + closed_by (simulate mode)
+
+    หลังปิด → บอทจะตอบปกติ (ไม่ล็อค post-handoff) เพราะ botCallService ดึง status นี้ส่งให้บอท
+    """
+    try:
+        from bson import ObjectId
+        db = _admin_db()
+        now = datetime.now(timezone.utc)
+        # ดึง admin id จาก header (proxy แนบมา)
+        closed_by = request.headers.get("x-admin-id", "test_chat_user")
+        result = db[_TEST_CHAT_SESSIONS_COLL].update_one(
+            {"_id": ObjectId(session_id)},
+            {
+                "$set": {
+                    "status": "closed",
+                    "closed_at": now,
+                    "closed_by": closed_by,
+                    "updated_at": now,
+                },
+            },
+        )
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="session not found")
+        _log_testchat_action("close_session", request, session_id, status="closed")
+        return {"ok": True, "status": "closed", "closed_at": now.isoformat()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/test-chat/sessions/{session_id}/reopen")
+def reopen_test_chat_session(session_id: str, request: Request) -> dict:
+    """เปิดแชทใหม่ — อัปเดต status เป็น 'open' + clear closed_at (simulate mode)
+
+    ใช้ตอนแอดมินอยากให้บอทหยุดตอบอีกครั้งหลังปิดไปแล้ว
+    """
+    try:
+        from bson import ObjectId
+        db = _admin_db()
+        now = datetime.now(timezone.utc)
+        result = db[_TEST_CHAT_SESSIONS_COLL].update_one(
+            {"_id": ObjectId(session_id)},
+            {
+                "$set": {
+                    "status": "open",
+                    "closed_at": None,
+                    "updated_at": now,
+                },
+            },
+        )
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="session not found")
+        _log_testchat_action("reopen_session", request, session_id, status="open")
+        return {"ok": True, "status": "open"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class RateMessageRequest(_BM):
     star_rating: float | None = _F(None, description="ดาว 0-5")
     comment: str | None = _F(None, description="คอมเมนต์")
@@ -4825,13 +5690,25 @@ class RateMessageRequest(_BM):
 
 
 @app.get("/test-chat/logs")
-def list_test_chat_logs(limit: int = 100, action: str | None = None):
-    """ดู log การใช้งาน testchat — ใคร ทำอะไร แชทไหน เมื่อไหร่."""
+def list_test_chat_logs(request: Request, limit: int = 100, action: str | None = None, admin_id: str | None = None):
+    """ดู log การใช้งาน testchat — ใคร ทำอะไร แชทไหน เมื่อไหร่.
+
+    ⚡ Phase 3 — รองรับ filter ตาม admin_id
+    - ถ้าส่ง query param `admin_id` มา → กรองเฉพาะ admin นั้น
+    - ถ้าไม่ส่ง → ดึงจาก header X-Admin-Id (default: เห็นเฉพาะของตัวเอง)
+    - ถ้าส่ง `admin_id=all` → ดูทุกคน (สำหรับ superadmin)
+    """
     try:
         db = _admin_db()
         query: dict[str, Any] = {}
         if action:
             query["action"] = action
+        # resolve admin_id filter
+        effective_admin_id = admin_id
+        if not effective_admin_id:
+            effective_admin_id = (request.headers.get("X-Admin-Id") or "").strip()
+        if effective_admin_id and effective_admin_id != "all":
+            query["admin_id"] = effective_admin_id
         cursor = db["test_chat_logs"].find(query).sort("timestamp", -1).limit(limit)
         logs = []
         for doc in cursor:

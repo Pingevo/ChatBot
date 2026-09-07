@@ -39,19 +39,38 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
      ดึงอัตโนมัติจากชื่อสินค้า (เช่น "-2Y", "-15M", "-12M", "ประกันศูนย์ไทย 1Y")
      ใช้ได้เหมือนกัน แต่ระบุที่มาให้ลูกค้ารู้ เช่น "จากชื่อรุ่น รับประกัน 2 ปี"
   3. `description_excerpt` — ใช้เป็นทางเลือกสุดท้าย (มักเป็นนโยบายร้านทั่วไป)
-- **ถ้าลูกค้าถามเรื่องรับประกัน**: ให้ตอบเงื่อนไขรับประกันเฉพาะสินค้าก่อน แล้วจึงเติมข้อมูล
+- **ถ้าลูกค้าถามเงื่อนไขรับประกันเป็นการเฉพาะ** (เช่น "เงื่อนไขรับประกันเป็นยังไง",
+  "รับประกันอะไรบ้าง", "เคลมยังไง"): ให้ตอบเงื่อนไขรับประกันเฉพาะสินค้าก่อน แล้วจึงเติมข้อมูล
   นโยบายร้าน (เช่น เวลาทำการ, นโยบายรับคืน) จาก `description_excerpt` ท้ายคำตอบ
-- รูปแบบคำตอบเรื่องรับประกัน: ขึ้นหัวข้อ `[[ การรับประกันและบริการ ]]` แล้วสรุปเงื่อนไข
+- รูปแบบคำตอบเงื่อนไขรับประกันเต็ม: ขึ้นหัวข้อ `[[ การรับประกันและบริการ ]]` แล้วสรุปเงื่อนไข
   รับประกันเฉพาะสินค้า (ระยะเวลา, ความครอบคลุม, ข้อยกเว้น) ตามด้วยนโยบายร้าน (รับคืน, เวลาทำการ)
+  **ใช้เฉพาะเมื่อลูกค้าขอเงื่อนไขเต็ม** — ไม่ใช้กับคำถาม duration สั้นๆ หรือ statement
 
 **flow การตอบคำถามรับประกัน (สำคัญมาก — อ่านให้จบ):**
 - บอทตอบได้แม้สินค้าจะไม่ใช่ status=NORMAL (เพราะลูกค้าอาจซื้อไปแล้ว มาถามเรื่องเคลม)
-- **คำถาม duration เฉพาะเจาะจง** (เช่น "X รับประกันกี่ปี", "X รับประกันกี่เดือน"):
+- **คำถาม duration เฉพาะเจาะจง** (เช่น "X รับประกันกี่ปี", "X รับประกันกี่เดือน",
+  "มีประกัน", "มีประกันไหม", "รับประกันมั้ย", "มีรับประกันไหม", "มีรับประกันป่าว"):
   ตอบเฉพาะระยะเวลารับประกันเท่านั้น สั้นๆ 1-2 ประโยค เช่น "สินค้า X รับประกัน 2 ปีค่ะ"
   ห้ามถามวันที่ซื้อ ห้ามถามชื่อ-เบอร์ ห้ามชวนเคลม — รอลูกค้าเป็นฝ่ายบอกเอง
+  **ห้ามแนบเงื่อนไขรับประกันเต็ม** (หัวข้อ `[[ การรับประกันและบริการ ]]`) เด็ดขาด
+- **ถ้าลูกค้าเอ่ยถึงรับประกันเป็น statement/ยืนยัน** (เช่น "มีประกันถูกต้องนะครับ",
+  "อยากได้ที่มีประกัน", "ส่งจากเมืองไทยมีประกันนะครับ"):
+  ตอบรับรู้สั้นๆ 1 ประโยค ไม่แนบเงื่อนไขรับประกันเต็ม
+- **แนบเงื่อนไขรับประกันเต็ม** (หัวข้อ `[[ การรับประกันและบริการ ]]`) **ต่อเมื่อ** ลูกค้าถาม
+  เงื่อนไขรับประกันเป็นการเฉพาะ เช่น "เงื่อนไขรับประกันเป็นยังไง", "รับประกันอะไรบ้าง",
+  "เคลมยังไง", "รับประกันครอบคลุมอะไรบ้าง" — และสรุปสั้นๆ ไม่เกิน 200 ตัวอักษร
 - **ถ้าลูกค้าแจ้งเคลม/ซ่อม/สินค้าเสีย** (เช่น "เคลมยังไง", "สินค้าเสีย", "อยากซ่อม"):
   ระบบ state machine จะจัดการ flow ทั้งหมด — LLM ไม่ต้องเก็บข้อมูลเอง
   flow ที่ระบบทำให้: ถามวันที่ซื้อ → คำนวณช่วงประกัน → ถามข้อมูลลูกค้า → ทวนยืนยัน → ส่งต่อแอดมิน
+- **⚡ กฎสำคัญเกี่ยวกับรูปภาพและ claim warranty (ห้ามสับสนเด็ดขาด):**
+  การส่งรูปภาพเฉยๆ **ไม่ใช่**การขอเคลม — ต้องแยกให้ชัด:
+  - ลูกค้าส่งรูป + พิมพ์ "เคลม" / "สินค้าเสีย" / "ซ่อม" / "พัง" / "ไม่ทำงาน" → เป็น claim request
+  - ลูกค้าส่งรูปเฉยๆ (ไม่มีข้อความ หรือข้อความทั่วไป) → **ห้ามตีว่าเป็น claim warranty**
+  - ถ้ามี vision_context บอกว่ารูปเป็นสินค้า → แนะนำขายปกติ ไม่ใช่ส่งแอดมิน
+  - ถ้ามี vision_context บอกว่ารูปเป็นสินค้าเสีย **แต่ลูกค้าไม่ได้พิมพ์ว่าเคลม** → ถามลูกค้าก่อนว่า
+    "สินค้ามีปัญหาหรือเปล่าคะ อยากให้แอดมินตรวจสอบให้ไหมคะ" — ห้ามส่งแอดมินเฉยเลย
+  - **ห้ามตอบว่า "ได้รับข้อมูลแล้ว รอแอดมินติดต่อกลับ" ถ้าลูกค้าไม่ได้ขอเคลม**
+  - **ห้ามตั้งค่า handoff_to_admin=true ถ้าลูกค้าไม่ได้ขอเคลมหรือไม่ได้ขอให้แอดมินช่วย**
 - **ห้าม LLM ทำสิ่งต่อไปนี้เด็ดขาดใน flow เคลม:**
   1. ห้ามเก็บชื่อ-นามสกุล/เบอร์โทร/เลขคำสั่งซื้อเอง — state machine ทำให้
   2. ห้ามคำนวณวันที่ประกันหมดเอง — state machine คำนวณให้แล้ว
@@ -81,6 +100,27 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
   - ตัวอย่างที่ดี: "รุ่นนี้มีแบตเตอรี่ในตัว 5200mAh ค่ะ ชาร์จ 1 ครั้งใช้ได้นานสูงสุด 100 วัน ค่ะ ||| สนใจรุ่นนี้ไหมคะ"
   - ตัวอย่างที่ไม่ดี: "มีค่ะ" หรือ "ไม่มีค่ะ" แล้วจบ
   - แต่ก็อย่า dump สเปคทั้งหมด — ใส่แค่ข้อมูลที่เกี่ยวข้องกับคำถามโดยตรง
+- **สำคัญมาก — คำถามสั้น/กำกวม**: ถ้าลูกค้าพิมพ์สั้นๆ กำกวม (เช่น "ใช้มั๊ย", "ใช้ได้ไหม",
+  "ตัวไหน", "มีไหม", "ราคาเท่าไหร่", "ส่งไวไหม") และมีประวัติการคุย (history) ก่อนหน้า
+  → ให้ใช้ history เพื่อเข้าใจว่าลูกค้ากำลังถามเกี่ยวกับสินค้าใด แล้วตอบเกี่ยวกับสินค้านั้นจาก context
+  **ห้ามตอบว่า "คำถามสั้นไป" หรือ "ไม่แน่ใจว่าหมายถึงอะไร" หรือ "กรุณาระบุให้ชัดเจน"**
+  ถ้ายังไม่ชัดว่าลูกค้าถามเรื่องใดโดยเฉพาะ ให้ตอบเกี่ยวกับสินค้าที่กำลังคุยอยู่แบบกว้างๆ
+  พร้อมเชิญถามเพิ่มเติม เช่น "สินค้า X ใช้งานได้ค่ะ มีฟังก์ชัน ... หากสนใจเรื่องใดเป็นพิเศษสอบถามได้เลยนะคะ"
+  ตัวอย่าง: history คุยเรื่อง BioKoop แล้วลูกค้าถาม "ใช้มั๊ย" → ตอบเกี่ยวกับการใช้งาน BioKoop
+  ตัวอย่าง: history คุยเรื่องหัวชาร์จ แล้วลูกค้าถาม "มีไหม" → ตอบเกี่ยวกับหัวชาร์จที่มีใน context
+- **สำคัญมาก — ตอบให้ละเอียดและเป็นประโยชน์ ไม่สั้นเกินไป**:
+  ทุกคำถามเกี่ยวกับสินค้า (spec, การใช้งาน, ความเข้ากันได้, การเปลี่ยน/ซ่อม) ต้องตอบให้ครบและมีประโยชน์
+  ห้ามตอบแค่คำตอบสั้นๆ แล้วจบ เช่น "เปลี่ยนได้ค่ะ 22 มม." หรือ "ใช้ได้ค่ะ" อย่างเดียว
+  ให้เสริมข้อมูลที่เป็นประโยชน์ 2-3 ประโยค เช่น:
+  - คำถาม "สายนาฬิกาเปลี่ยนได้ไหม" → ตอบ "เปลี่ยนได้ค่ะ ขนาด 22 มม. สามารถหาซื้อสายรุ่นอื่นที่ขนาดเดียวกันได้ตามร้านนาฬิกาทั่วไป หรือทักแอดมินสอบถามสายเพิ่มเติมได้ค่ะ"
+  - คำถาม "ใช้กับ iPhone ได้ไหม" → ตอบ "ใช้ได้ค่ะ รองรับ iOS 13 ขึ้นไป เชื่อมต่อผ่าน Bluetooth ได้เลย แอปที่ใช้ดาวน์โหลดจาก App Store ฟรีค่ะ"
+  - คำถาม "กันน้ำไหม" → ตอบ "กันน้ำได้ค่ะ มาตรฐาน IP68 ใส่ว่ายน้ำได้ อาบน้ำได้ แต่ไม่แนะนำให้ใช้ในน้ำอุ่นหรือซาวน่าค่ะ"
+  ข้อมูลที่เสริมต้องเกี่ยวข้องกับคำถามโดยตรง และต้องมีใน context หรือเป็นความรู้ทั่วไปที่ใช้ได้
+  ห้าม invent ข้อมูลที่ไม่มี — ถ้าไม่มีข้อมูลเพิ่ม ให้บอก "ทักแอดมินสอบถามเพิ่มได้ค่ะ"
+- **คำถามเล่นๆ/นอกเรื่อง** (เช่น "มี Pokemon ขายไหม", "มีหุ่นยนต์ไหม", "ขายของกินไหม"):
+  ตอบเป็นมิตร เล่นด้วยได้สั้นๆ 1 ประโยค แล้วกลับสู่บริบทร้าน/สินค้าที่มี
+  เช่น "ขออภัยค่ะ ทางร้านไม่มี Pokemon ขายนะคะ แต่มีสินค้าไอทีและแกดเจ็ตน่าสนใจมากมาย สนใจหมวดไหนเป็นพิเศษไหมคะ"
+  ห้ามตอบยาวเกินเรื่อง ห้ามพาลูกค้าออกจากบริบทร้าน — ต้องกลับสู่สินค้า/บริการร้านเสมอ
 - **ถ้าลูกค้าถามสเปก/รายละเอียดสินค้าแบบกว้างๆ** (เช่น "สเปคเต็ม", "รายละเอียดทั้งหมด", "สเปคหน่อย"):
   ให้ตอบครบทุกสเปกที่มีใน `description_excerpt` เช่น จอ, OS, CPU, RAM/ROM, กล้อง, แบต, การเชื่อมต่อ
   อย่าตอบแค่ RAM/CPU แล้วจบ — ต้องเอาสเปกทั้งหมดที่มีใน context มาตอบ
@@ -137,6 +177,22 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
   - **เสนอเฉพาะสินค้า status=NORMAL และ sold_out=false เท่านั้น**
   - ถ้าเป็น powerbank → แนะนำเฉพาะตัวที่เป็นพาวเวอร์แบงค์จริง ไม่ใช่หัวชาร์จ/สาย/เคส/ชุด
   - ถ้ารุ่นไหน sold_out → บอก "รุ่นนี้หมดสต็อกชั่วคราว" แล้วข้ามไปรุ่นอื่น
+- **⚡ กฎสำคัญเกี่ยวกับ MagSafe / แม่เหล็ก (ห้ามสับสนเด็ดขาด):**
+  "MagSafe" มี 2 ความหมายที่ลูกค้าอาจถาม ต้องแยกให้ชัด:
+  1. **"ยึดด้วยแม่เหล็ก" (magnetic attachment)** — สินค้าติดเข้ากับเครื่องด้วยแม่เหล็ก
+     เช่น พัดลมระบายความร้อน MagCooler ทุกรุ่นยึดด้วยแม่เหล็กได้
+  2. **"ชาร์จไฟผ่านแม่เหล็ก" (MagSafe wireless charging)** — ใช้แม่เหล็กชาร์จไฟเข้าเครื่อง
+     เช่น แผ่นชาร์จ MagSafe, พาวเวอร์แบงค์ที่รองรับ MagSafe charging
+  **กฎ:**
+  - ถ้าลูกค้าถาม "ชาร์จ MagSafe ได้ไหม" / "มีตัวไหนชาร์จ MagSafe ได้" →
+    ลูกค้าถามเรื่อง **การชาร์จไฟ** ไม่ใช่การยึดแม่เหล็ก
+  - พัดลมระบายความร้อน (MagCooler, FunCooler) **ไม่มีฟังก์ชันชาร์จไฟ**
+    ตอบชัดเจนว่า "พัดลมระบายความร้อนเป็นอุปกรณ์ยึดด้วยแม่เหล็กเท่านั้น ไม่มีฟังก์ชันชาร์จไฟค่ะ"
+  - ห้ามตอบ "รองรับ MagSafe" หรือ "ใช้กับ MagSafe ได้" กับสินค้าที่ไม่มีชาร์จไฟ
+    เพราะจะทำให้ลูกค้าเข้าใจผิดว่าชาร์จได้
+  - ถ้าลูกค้าถาม "ติดแม่เหล็กได้ไหม" / "ยึดแม่เหล็กได้ไหม" → ตอบเรื่อง magnetic attachment ได้
+  - **สรุป: แยก "ยึดแม่เหล็ก" จาก "ชาร์จแม่เหล็ก" อย่างชัดเจน ห้ามใช้คำว่า "รองรับ MagSafe"
+    กับสินค้าที่ไม่มีฟังก์ชันชาร์จไฟ**
 - **คำถามเกี่ยวกับแอพที่ใช้ต่อสมาร์ทวอชกับมือถือ** (เช่น "ใช้แอพอะไรต่อมือถือบ้าง", "สมาร์ทวอชใช้แอพอะไร"):
   - ถ้าลูกค้า **ไม่ระบุรุ่น** → ยกตัวอย่างสมาร์ทวอช **2-3 ชิ้น** จาก context
     **ต้องเขียนชื่อรุ่นเต็มในคำตอบ** (เช่น "Black Shark GS3 Sport", "Black Shark A3") เพื่อให้แสดง product card ได้
@@ -214,6 +270,16 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
   - ถ้า context มี section "ข้อมูลจาก Google Search" ให้ใช้แค่ข้อมูล spec ที่เกี่ยวกับสินค้าใน context เท่านั้น
     ห้าม copy ลิงก์จาก section นั้นมาใส่ในคำตอบเด็ดขาด
   - ถ้าไม่แน่ใจว่าลิงก์เป็นของสินค้าใน context หรือไม่ → ห้ามใส่
+- **สำคัญมาก — ห้ามแนบลิงก์/รูปเมื่อลูกค้าถาม trust/ความน่าเชื่อถือ**:
+  ถ้าลูกค้าถามเรื่องความน่าเชื่อถือ, ของแท้/ของปลอม, โดนหลอก, วีดีโอรีวิว, ร้านไหน, ขายได้กี่ชิ้น
+  (เช่น "ไม่แน่ใจว่ามีความน่าเชื่อถือ", "โดนหลอกไหม", "ของแท้ไหม", "มีวีดีโอรีวิวไหม")
+  → ตอบเรื่อง trust อย่างเดียว ไม่แนบลิงก์สั่งซื้อ ไม่แนบรูป ไม่ push sales
+  ตอบสั้นๆ 1-2 ประโยค เช่น "ทางร้านเป็นร้านทางการ สินค้าของแท้ 100% รับประกันศูนย์ไทยค่ะ"
+  รอลูกค้าเป็นฝ่ายถามซื้อเอง — ห้าม push ลิงก์/รูปก่อน
+  **ยกเว้น**: ถ้าลูกค้าบอกมั่นใจแล้ว (เช่น "มั่นใจได้นะครับไม่โดนหลอก") → สามารถแนบลิงก์สั่งซื้อได้
+- **แนบลิงก์/รูปเฉพาะเมื่อลูกค้าแสดงความสนใจซื้อหรือขอดูสินค้า**:
+  เช่น "สนใจสั่งซื้อ", "ขอดูสินค้า", "มีไหม", "ตัวไหนดี", "แนะนำหน่อย"
+  ถ้าลูกค้ายังไม่ได้แสดงความสนใจซื้อ → ตอบข้อมูลอย่างเดียว ไม่แนบลิงก์/รูป
 - **หากลูกค้าขอเปรียบเทียบสินค้า 2 รายการขึ้นไป ต้องตอบในรูปแบบ "สเปคต่อสเปค ละเอียด" เท่านั้น ห้ามใช้รูปแบบอื่น**
   โครงสร้างคำตอบที่บังคับ (เรียงตามลำดับนี้เท่านั้น):
   1. บรรทัดเปิดสั้นๆ เป็นมิตร (เช่น "ยินดีเลยค่ะ เดี๋ยวเรามาเทียบสเปคแบบละเอียดระหว่าง ... และ ... กันแบบชัด ๆ สเปคต่อสเปคเลยนะคะ")
@@ -431,6 +497,145 @@ def _build_context(products: list[dict], shop_hint: str | None = None,
     return header + body
 
 
+# ---- multimodal vision pass (Phase 1A) ---------------------------------------
+# ⚡ describe_image — ใช้ Gemini 3.1 Flash Lite (รองรับ multimodal) อ่านรูปที่ลูกค้าส่ง
+# คืน text อธิบายสั้นๆ เป็นภาษาไทย เพื่อใช้เป็น context ให้ LLM หลักตอบ
+# ⚠️ ต้องโหลดรูปเป็น bytes แล้วส่งเป็น inline_data (Part.from_bytes)
+#    เพราะ Part.from_uri ใช้ได้เฉพาะ GCS URL ไม่ใช่ HTTP URL ทั่วไป
+_VISION_MODEL = os.environ.get("VISION_MODEL", "gemini-3.1-flash-lite")
+
+_VISION_PROMPT = """คุณเป็นผู้ช่วยแชทบอทร้านค้าออนไลน์
+ลูกค้าส่งรูปนี้มาในแชท อธิบายเป็นภาษาไทยว่ารูปนี้เป็นอะไร ใช้ไม่เกิน 5 บรรทัด
+
+พิจารณาตามประเภทรูป:
+- ถ้าเป็นสินค้า → บอก: ชนิดสินค้า + แบรนด์ + รุ่น (ถ้าเห็น) + ลักษณะเด่น
+- ถ้าเป็นสินค้าเสีย/ชำรุด → บอก: สินค้าอะไร + อาการเสียที่เห็น (เช่น หน้าจอแตก, ไม่เปิด, สีผิด, ขอด, บวม, รอยไหม้, น้ำเข้า, หลุดหาย) + รุ่น/แบรนด์ (ถ้าเห็น)
+- ถ้าเป็นกล่อง/ฉลากสินค้า → บอก: ชื่อสินค้า + รุ่น + หมายเลขผลิตภัณฑ์/SN (ถ้าเห็น)
+- ถ้าเป็นเลขพัสดุ/tracking → อ่านเลขที่เห็นทั้งหมด + ชื่อขนส่ง (ถ้าเห็น)
+- ถ้าเป็นสกรีนช็อตสถานะการจัดส่ง → บอก: สถานะ + เลขพัสดุ (ถ้ามี) + ขนส่ง (ถ้าเห็น)
+- ถ้าเป็นรูปอื่นๆ (สัตว์/การ์ตูน/ทิวทัศน์/อาหาร/คน) → บอกสั้นๆ ว่าเป็นรูปอะไร
+- ถ้ามีตัวอักษร/ตัวเลขในรูป → อ่านให้ครบ โดยเฉพาะหมายเลขคำสั่งซื้อ/เลขพัสดุ/รุ่นสินค้า
+- ถ้ารูปมืด/ไม่ชัด/อ่านไม่ได้ → บอกว่า "รูปไม่ชัด อ่านรายละเอียดไม่ได้"
+"""
+
+
+def describe_image(
+    image_url: str,
+    shop_hint: str | None = None,
+    history_context: str = "",
+) -> tuple[str, dict]:
+    """อ่านรูปภาพด้วย Gemini vision แล้วคืน text อธิบายสั้นๆ.
+
+    Args:
+        image_url: URL รูปภาพ (ต้องเป็น public URL เช่น cf.shopee.co.th)
+        shop_hint: ชื่อร้าน (optional — ใส่ใน prompt ให้ vision เข้าใจ context)
+        history_context: text สรุป history ก่อนหน้ารูป (optional — ช่วยให้ vision
+                         เข้าใจบริบท เช่น "ลูกค้าคุยเรื่องเคลมสินค้าอยู่")
+
+    Returns:
+        (description_text, usage_info) — description เป็นภาษาไทย, usage_info มี prompt/output/total tokens
+    """
+    usage_info = {"prompt": 0, "output": 0, "total": 0}
+    if not image_url or not image_url.strip():
+        return "", usage_info
+
+    try:
+        import urllib.request as _urllib_req
+        from google.genai import types as _genai_types
+        # ⚠️ โหลดสื่อเป็น bytes ก่อน — Part.from_uri ใช้ได้เฉพาะ GCS URL
+        #    HTTP URL ทั่วไปต้องโหลดเป็น inline_data (Part.from_bytes)
+        _req = _urllib_req.Request(image_url, headers={"User-Agent": "Mozilla/5.0"})
+        _resp = _urllib_req.urlopen(_req, timeout=15)
+        img_bytes = _resp.read()
+        if not img_bytes:
+            print(f"[VISION] empty bytes from {image_url[:60]}", file=sys.stderr)
+            return "(ไม่สามารถโหลดสื่อได้)", usage_info
+
+        # ⚡ detect mime_type จาก URL + content-type header
+        #    รองรับทั้งรูป (image/jpeg) และวิดีโอ (video/mp4)
+        _url_lower = image_url.lower()
+        _ct = (_resp.headers.get("Content-Type") or "").lower()
+        if "video" in _ct or _url_lower.endswith((".mp4", ".mov", ".avi", ".webm", ".mkv")):
+            _mime = "video/mp4"
+        elif "png" in _ct or _url_lower.endswith(".png"):
+            _mime = "image/png"
+        elif "webp" in _ct or _url_lower.endswith(".webp"):
+            _mime = "image/webp"
+        elif "gif" in _ct or _url_lower.endswith(".gif"):
+            _mime = "image/gif"
+        else:
+            _mime = "image/jpeg"
+
+        client = _client()
+        part = _genai_types.Part.from_bytes(data=img_bytes, mime_type=_mime)
+        prompt = _VISION_PROMPT
+        if shop_hint:
+            prompt += f"\nร้าน: {shop_hint}"
+        # ⚡ ส่ง history context ให้ vision ด้วย — ช่วยให้เข้าใจบริบท
+        #    เช่น ลูกค้าคุยเรื่องเคลมอยู่ → vision รู้ว่ารูปนี้น่าจะเป็นสินค้าเสีย
+        if history_context:
+            prompt += f"\n\nบริบทก่อนหน้ารูปนี้:\n{history_context[:500]}"
+        resp = client.models.generate_content(
+            model=_VISION_MODEL,
+            contents=[prompt, part],
+            config={
+                "temperature": 0.0,
+                "max_output_tokens": 300,
+            },
+        )
+        desc = (resp.text or "").strip()
+        usage = getattr(resp, "usage_metadata", None)
+        if usage:
+            usage_info = {
+                "prompt": getattr(usage, "prompt_token_count", 0) or 0,
+                "output": getattr(usage, "candidates_token_count", 0) or 0,
+                "total": getattr(usage, "total_token_count", 0) or 0,
+            }
+        print(f"[VISION] model={_VISION_MODEL} url={image_url[:60]}... bytes={len(img_bytes)} desc={desc[:80]!r} tokens={usage_info['total']}", file=sys.stderr)
+        return desc, usage_info
+    except genai_errors.ClientError as exc:
+        print(f"[VISION] ClientError: {exc}", file=sys.stderr)
+        return f"(ไม่สามารถอ่านรูปได้: {exc})", usage_info
+    except Exception as exc:
+        print(f"[VISION] error: {exc}", file=sys.stderr)
+        return f"(ไม่สามารถอ่านรูปได้: {exc})", usage_info
+
+
+def describe_images(
+    image_urls: list[str],
+    shop_hint: str | None = None,
+    max_images: int = 3,
+    history_context: str = "",
+) -> tuple[str, dict]:
+    """อ่านหลายรูปพร้อมกัน → คืน description รวม + usage รวม.
+
+    Args:
+        image_urls: list ของ URL รูป
+        shop_hint: ชื่อร้าน
+        max_images: จำกัดจำนวนรูปสูงสุดต่อ turn (default 3)
+        history_context: text สรุป history ก่อนหน้ารูป (ช่วยให้ vision เข้าใจบริบท)
+
+    Returns:
+        (combined_description, total_usage_info)
+    """
+    if not image_urls:
+        return "", {"prompt": 0, "output": 0, "total": 0}
+
+    urls = image_urls[:max_images]
+    descriptions = []
+    total_usage = {"prompt": 0, "output": 0, "total": 0}
+
+    for i, url in enumerate(urls):
+        desc, usage = describe_image(url, shop_hint=shop_hint, history_context=history_context)
+        if desc:
+            descriptions.append(f"[รูปที่ {i+1}] {desc}")
+        total_usage["prompt"] += usage.get("prompt", 0)
+        total_usage["output"] += usage.get("output", 0)
+        total_usage["total"] += usage.get("total", 0)
+
+    return "\n".join(descriptions), total_usage
+
+
 def answer(
     message: str,
     products: list[dict],
@@ -448,7 +653,7 @@ def answer(
         products: product cards ที่กรองแล้ว
         shop_hint: ชื่อร้านที่ลูกค้าทักเข้ามา (ถ้ามี)
         history: ประวัติแชทก่อนหน้า [{"role":"user","text":"..."},{"role":"model","text":"..."}]
-        model: ชื่อโมเดล Gemini (default จาก env GEMINI_MODEL หรือ gemini-2.0-flash)
+        model: ชื่อโมเดล Gemini (default จาก env GEMINI_MODEL หรือ gemini-3.5-flash-lite)
         persona_extra: instruction เพิ่มเติมจาก persona ของร้าน (ชื่อตัวแทนบอท)
                        ถ้าว่าง = ใช้ SYSTEM_INSTRUCTION เดิม (default behavior)
         intent_result: ผลจาก Pass 1 intent classification (ถ้ามี) — ใช้กำหนด include_desc
@@ -474,7 +679,7 @@ def answer(
         client = _client()
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ", {"prompt": 0, "output": 0, "total": 0}
-    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")).strip()
+    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
     system_instruction = SYSTEM_INSTRUCTION + persona_extra if persona_extra else SYSTEM_INSTRUCTION
 
     # ตรวจว่าคำถามเกี่ยวกับรับประกัน/เคลม/สเปก/รายละเอียดไหม
@@ -497,12 +702,16 @@ def answer(
     )
     # ถ้ามี intent_result จาก Pass 1 → ใช้ needs_description จาก LLM
     # (LLM เข้าใจได้ดีกว่า keyword matching — รองรับรุ่นเก่า/แบรนด์ใหม่ที่ไม่มีใน list)
+    # ⚡ แต่ merge กับ keyword matching: ถ้าอย่างใดอย่างหนึ่งบอกว่าต้องมี desc → ส่ง desc
+    #   (กัน intent บอก False แต่ keyword บอก True เช่น "ขอรายละเอียดเพิ่มเติม")
+    _kw_match = any(kw in message.lower() for kw in desc_kw)
     if intent_result and intent_result.get("confidence", 0) >= 0.7:
-        include_desc = bool(intent_result.get("needs_description", False))
-        print(f"[LLM] include_desc from intent: {include_desc}  (intent={intent_result.get('intent')})", file=_sys.stderr)
+        _intent_desc = bool(intent_result.get("needs_description", False))
+        include_desc = _intent_desc or _kw_match
+        print(f"[LLM] include_desc: {include_desc}  (intent={_intent_desc}, kw={_kw_match}, intent_label={intent_result.get('intent')})", file=_sys.stderr)
     else:
         # fallback: ใช้ keyword matching เดิม (กรณีไม่ได้เรียก Pass 1)
-        include_desc = any(kw in message.lower() for kw in desc_kw)
+        include_desc = _kw_match
 
     context = _build_context(products, shop_hint=shop_hint,
                              include_description=include_desc)
@@ -534,6 +743,11 @@ def answer(
             text = h.get("text", "")
             if role not in ("user", "model"):
                 role = "user"
+            # ⚡ Phase 1A multimodal — แนบ image_desc ใน history text ถ้ามี
+            #    ทำให้ LLM หลักเห็น description ของรูปเก่าโดยไม่ต้องอ่านรูปซ้ำ
+            _h_img_desc = h.get("image_desc", "")
+            if _h_img_desc and role == "user":
+                text = f"{text} (รูปที่ส่ง: {_h_img_desc})"
             # สำหรับคำตอบ model ก่อนหน้า ให้ส่งแค่สรุปสั้นๆ ไม่ส่ง full answer
             # เพื่อป้องกัน LLM อ้างอิงสินค้าจากคำตอบเดิมแทน context ปัจจุบัน
             # ⚡ แต่ถ้ามีแค่ 1 สินค้าใน context = คุยเรื่องเดียวกัน → ส่ง history เต็ม
@@ -552,7 +766,11 @@ def answer(
     print(f"[LLM DEBUG] history_len={len(history) if history else 0}", file=sys.stderr)
     if history:
         for i, h in enumerate(history):
-            print(f"[LLM DEBUG]   hist[{i}] role={h.get('role')} text={h.get('text','')[:60]!r}", file=sys.stderr)
+            _h_desc = h.get("image_desc", "")
+            _h_text = h.get("text", "")[:60]
+            if _h_desc:
+                _h_text += f" +img_desc={_h_desc[:40]}"
+            print(f"[LLM DEBUG]   hist[{i}] role={h.get('role')} text={_h_text!r}", file=sys.stderr)
     print(f"[LLM DEBUG] context (first 500): {context[:500]!r}", file=sys.stderr)
 
     usage_info = {"prompt": 0, "output": 0, "total": 0}
@@ -637,7 +855,7 @@ def answer_with_kb(
         client = _client()
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ"
-    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")).strip()
+    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
     system_instruction = KB_SYSTEM_INSTRUCTION + persona_extra if persona_extra else KB_SYSTEM_INSTRUCTION
 
     user_prompt = f"{kb_context}\n\nคำถามของลูกค้า: {message}"
@@ -649,6 +867,10 @@ def answer_with_kb(
             text = h.get("text", "")
             if role not in ("user", "model"):
                 role = "user"
+            # ⚡ Phase 1A multimodal — แนบ image_desc ใน history text ถ้ามี
+            _h_img_desc = h.get("image_desc", "")
+            if _h_img_desc and role == "user":
+                text = f"{text} (รูปที่ส่ง: {_h_img_desc})"
             contents.append({"role": role, "parts": [{"text": text}]})
     contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
@@ -704,7 +926,7 @@ def answer_general(
         client = _client()
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ", {}
-    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")).strip()
+    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
 
     general_instruction = (
         "คุณเป็นพนักงานบริการลูกค้าหญิงของร้านค้าออนไลน์ในเครือ Shopee "
@@ -734,6 +956,10 @@ def answer_general(
             text = h.get("text", "")
             if role not in ("user", "model"):
                 role = "user"
+            # ⚡ Phase 1A multimodal — แนบ image_desc ใน history text ถ้ามี
+            _h_img_desc = h.get("image_desc", "")
+            if _h_img_desc and role == "user":
+                text = f"{text} (รูปที่ส่ง: {_h_img_desc})"
             contents.append({"role": role, "parts": [{"text": text}]})
     contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 

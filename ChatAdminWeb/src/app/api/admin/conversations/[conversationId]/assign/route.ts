@@ -1,12 +1,21 @@
 // POST /api/admin/conversations/:id/assign — assign conversation to admin
 // body: { admin_id: string }
+// ⚡ C1 — เขียน statusConversation เท่านั้น (ไม่เขียน conversations ที่โดน dump ทับ)
 import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { conversationService } from "@/backend/service/conversationService";
-import { logAdminEvent } from "@/backend/service/adminLogService";
+import { statusConversationService } from "@/backend/service/statusConversationService";
 import { invalidateConversationsCache } from "@/app/api/admin/conversations/route";
-import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
+// ⚡ G-fix — invalidate botworker cache ด้วย (dynamic import กัน circular dep)
+async function invalidateBotworkerCache() {
+  try {
+    const mod = await import("@/app/api/botworker/conversations/route");
+    if (typeof (mod as unknown as { invalidateBotworkerCache?: () => void }).invalidateBotworkerCache === "function") {
+      (mod as unknown as { invalidateBotworkerCache: () => void }).invalidateBotworkerCache();
+    }
+  } catch { /* ignore */ }
+}
 
 export async function POST(
   req: NextRequest,
@@ -24,29 +33,20 @@ export async function POST(
   const conv = await conversationService.getConversation(conversationId);
   if (!conv) return error("conversation not found", 404);
 
-  // ℹ️ Shared inbox — admin ทุกคน assign ได้
-  // 🔒 Race condition fix — ใช้ findOneAndUpdate แบบ atomic
-  const coll = await getCollection(COLLECTIONS.conversations);
-  const result = await coll.findOneAndUpdate(
-    {
-      conversation_id: conversationId,
-      // ต้องยังเป็น assigned_to เดิม หรือยังไม่ assigned (กันทับคนอื่น)
-      $or: [
-        { assigned_to: conv.assigned_to },
-        { assigned_to: null },
-      ],
-    },
-    {
-      $set: {
-        status: "handoff",
-        assigned_to: targetAdminId,
-        updated_at: new Date(),
-      },
-    },
-    { returnDocument: "after" }
+  // ⚡ C1 — ใช้ statusConversationService.manualAssign (atomic guard + เขียน statusConversation)
+  //   ไม่เขียน conversations อีกต่อไป เพราะโดน sellcenter dump ทับทุก 2 วิ
+  //   อ่าน previousAssignedTo จาก statusConversation (source of truth) แทน conv.assigned_to
+  const meta = await statusConversationService.getMeta(conversationId);
+  const previousAssignedTo = meta?.assigned_to ?? conv.assigned_to ?? null;
+
+  const ok = await statusConversationService.manualAssign(
+    conversationId,
+    targetAdminId,
+    previousAssignedTo,
+    r.ctx.admin.admin_id
   );
 
-  if (!result) {
+  if (!ok) {
     // conversation ถูกเปลี่ยน assigned_to ระหว่างที่เราตรวจ — ปฏิเสธ
     return json({
       ok: false,
@@ -55,16 +55,7 @@ export async function POST(
     }, 409);
   }
 
-  await logAdminEvent({
-    action_type: "conversation.handoff",
-    actor: r.ctx.admin.admin_id,
-    conversation_id: conversationId,
-    metadata: {
-      assigned_to: targetAdminId,
-      previous_assigned_to: conv.assigned_to || null,
-    },
-  });
-
   invalidateConversationsCache();
+  invalidateBotworkerCache();
   return json({ ok: true, assigned_to: targetAdminId });
 }

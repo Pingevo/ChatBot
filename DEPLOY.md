@@ -1,11 +1,15 @@
 # คู่มือ Deploy — ChatBotProductMS (Docker)
 
+> สำหรับ lead tech ที่จะ deploy ระบบบน server
+> ทุกคำสั่งรันจาก root ของ project (`ChatBotProductMS/`)
+
 ## ภาพรวมระบบ
 
 ```
 ChatBotProductMS/                    (root — chatbot backend)
 ├── .env                             ← env รวมของ chatbot ทั้ง 3 แพลตฟอร์ม
 ├── .env.web                         ← env ของ Next.js admin + bot-worker
+├── Caddyfile                        ← config reverse proxy + auto SSL
 ├── Dockerfile.chatbot               ← build chatbot image (ใช้ร่วม 3 แพลตฟอร์ม)
 ├── docker-compose.yml               ← คุมทุก service
 │
@@ -14,23 +18,74 @@ ChatBotProductMS/                    (root — chatbot backend)
     └── Dockerfile                   ← build Next.js image
 ```
 
-## Services ที่รัน
+## Services ที่รัน (default)
 
 | Service | Container | Port | ใช้ env จาก | สถานะ |
 |---------|-----------|------|-------------|-------|
-| chatbot-shopee | chatbot-shopee | 8010 | `.env` | พร้อมใช้ |
-| chatbot-lazada | chatbot-lazada | 8011 | `.env` | อนาคต (profile: lazada) |
-| chatbot-tiktok | chatbot-tiktok | 8012 | `.env` | อนาคต (profile: tiktok) |
-| chatadmin-web | chatadmin-web | 3000 | `.env.web` | พร้อมใช้ |
+| chatbot-shopee | chatbot-shopee | 8010 (internal) | `.env` | พร้อมใช้ |
+| chatadmin-web | chatadmin-web | 3000 (internal) | `.env.web` | พร้อมใช้ |
 | bot-worker | bot-worker | — | `.env.web` | พร้อมใช้ |
+| caddy | caddy | 80, 443 | `Caddyfile` | พร้อมใช้ |
+
+### Services อนาคต (profile — ยังไม่เปิด default)
+
+| Service | Container | Port | Profile | สถานะ |
+|---------|-----------|------|---------|-------|
+| chatbot-lazada | chatbot-lazada | 8011 | `lazada` | ⚠️ placeholder — ยังไม่มี app.py |
+| chatbot-tiktok | chatbot-tiktok | 8012 | `tiktok` | ⚠️ placeholder — ยังไม่มี app.py |
+
+> ⚠️ **lazada/tiktok เป็น placeholder** — `chatbot/lazadachat/` และ `chatbot/tiktokchat/` มีแค่ `__init__.py` ว่าง ไม่มี `app.py` ถ้าเปิดด้วย `--profile lazada` หรือ `--profile tiktok` container จะ crash ทันที (uvicorn หา module ไม่เจอ) ต้อง implement `app.py` จริงก่อนถึงจะเปิดได้
 
 **หลักการ:** chatbot ทั้ง 3 แพลตฟอร์มใช้ `.env` ไฟล์เดียวกัน (ค่า DB, Gemini, OpenRouter ฯลฯ เหมือนกัน) ต่างกันแค่ `APP_MODULE` + `UVICORN_PORT` + `MONGO_COLLECTION` ที่ docker-compose override ผ่าน `environment:`
 
 ---
 
+## สถาปัตยกรรม traffic
+
+```
+Internet ──→ Caddy (80/443, auto SSL)
+              ├── admin.example.com  → chatadmin-web:3000 (Next.js)
+              └── bot.example.com    → chatbot-shopee:8010 (FastAPI)
+
+chatadmin-web ──→ chatbot-shopee:8010  (internal, ผ่าน docker network)
+bot-worker    ──→ chatbot-shopee:8010  (internal, ผ่าน docker network)
+chatbot-shopee ──→ host.docker.internal:27017  (MongoDB บน host)
+```
+
+- **Caddy** รับ traffic ภายนอกที่ port 80/443 ทำ SSL อัตโนมัติ (Let's Encrypt)
+- **chatadmin-web** และ **chatbot-shopee** ไม่ expose port ออก internet โดยตรง (ใช้ `expose` / `127.0.0.1:` binding)
+- **MongoDB** รันบน host ไม่ได้ containerize — container เข้าผ่าน `host.docker.internal`
+
+---
+
 ## ขั้นตอน Deploy
 
-### 1. เตรียมไฟล์ env บน server (2 ไฟล์)
+### 0. ตรวจสอบ prerequisites บน server
+
+```bash
+# ต้องมี Docker + Docker Compose v2
+docker --version          # >= 20.10
+docker compose version    # >= 2.20
+
+# ต้องมี MongoDB รันอยู่บน host (port 27017)
+mongosh --eval "db.adminCommand('ping')"   # หรือ mongo / mongod status
+
+# ต้องเปิด port 80 + 443 บน firewall (สำหรับ Caddy + Let's Encrypt)
+# ถ้าใช้ ufw:
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw allow 443/udp   # HTTP/3
+```
+
+### 1. โคลน/อัปเดตโค้ดบน server
+
+```bash
+git clone <repo-url> ChatBotProductMS
+cd ChatBotProductMS
+# หรือถ้า clone แล้ว: git pull
+```
+
+### 2. เตรียมไฟล์ env บน server (2 ไฟล์)
 
 สร้างไฟล์ 2 ไฟล์ที่ root ของ project (ที่เดียวกับ docker-compose.yml):
 
@@ -99,7 +154,7 @@ AUTH_TOKEN_EXPIRES_MINUTES=15
 RESEND_API_KEY=re_...
 RESEND_FROM_EMAIL=noreply@itsr.com
 RESEND_FROM_NAME=Chatbot Admin
-APP_BASE_URL=https://โดเมนจริง.com
+APP_BASE_URL=https://admin.โดเมนจริง.com
 
 # ===== SSO (system81/sellcenter) =====
 SELLCENTER_OAUTH_BASE_URL=https://...
@@ -186,7 +241,7 @@ SSO_AUTO_PROVISION_DOMAIN=...
 RESEND_API_KEY=re_...
 RESEND_FROM_EMAIL=noreply@itsr.com
 RESEND_FROM_NAME=Chatbot Admin
-APP_BASE_URL=https://โดเมนจริง.com
+APP_BASE_URL=https://admin.โดเมนจริง.com
 
 # ===== Bot Worker (docker-compose override เป็น true แล้ว แต่ตั้งไว้ก็ได้) =====
 BOT_WORKER_ENABLED=true
@@ -200,22 +255,81 @@ BACKGROUND_SYNC_INTERVAL_MS=2000
 #   http://chatbot-shopee:8010 / http://chatbot-lazada:8011 / http://chatbot-tiktok:8012
 ```
 
-### 2. Build + Start
+#### สุ่ม secret values
+
+```bash
+# สุ่ม CHATBOT_INTERNAL_SECRET (ต้องเหมือนกันใน .env และ .env.web)
+openssl rand -hex 32
+
+# สุ่ม ADMIN_JWT_SECRET (ต้องเหมือนกันใน .env และ .env.web)
+openssl rand -hex 32
+```
+
+### 3. ตั้งค่า Caddy (domain + SSL)
+
+Caddy เป็น reverse proxy ที่ทำ SSL อัตโนมัติ (Let's Encrypt) — config อยู่ใน `Caddyfile` ที่ root ของ project
+
+#### กรณี A: มีโดเมนจริง (แนะนำ — SSL อัตโนมัติ)
+
+แก้ `Caddyfile` — uncomment บล็อกกรณี A แล้วแก้โดเมน พร้อม comment บล็อกกรณี B:
+
+```caddyfile
+admin.example.com {
+    encode zstd gzip
+    reverse_proxy chatadmin-web:3000 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}
+
+# ถ้าไม่ต้องการ expose chatbot API ออก internet ให้ comment บล็อกนี้
+bot.example.com {
+    encode zstd gzip
+    reverse_proxy chatbot-shopee:8010 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}
+```
+
+**สำคัญ:** ตั้ง DNS A record ให้โดเมนชี้มาที่ IP ของ server ก่อน `docker compose up` ไม่งั้น Caddy จะขอ cert ไม่สำเร็จ
+
+#### กรณี B: ยังไม่มีโดเมน (HTTP, ไม่ SSL — default)
+
+`Caddyfile` ค่า default รัน HTTP บน port 80 อยู่แล้ว — ไม่ต้องแก้อะไร
+
+เข้าผ่าน:
+- `http://IP-ของ-server/` → admin web
+- `http://IP-ของ-server/bot/health` → chatbot API (มี prefix `/bot`)
+
+พอมีโดเมนแล้ว สลับไปกรณี A (uncomment + แก้โดเมน + comment กรณี B) แล้ว reload:
+```bash
+docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+```
+
+### 4. Build + Start
 
 ```bash
 cd ChatBotProductMS
 
-# build + start ทุก service พร้อมกัน
+# build + start ทุก service พร้อมกัน (default = shopee + admin + worker + caddy)
 docker compose up -d --build
 
-# ถ้าจะเปิด lazada/tiktok ด้วย
-docker compose --profile lazada --profile tiktok up -d --build
+# ถ้าจะเปิด lazada/tiktok ด้วย (⚠️ ยังไม่มี app.py — container จะ crash)
+# docker compose --profile lazada --profile tiktok up -d --build
 ```
 
-### 3. ตรวจสอบ
+ครั้งแรกใช้เวลานาน (~10-20 นาที) เพราะ:
+- โหลด Python deps + sentence-transformers + torch (~4GB)
+- โหลด Node deps + build Next.js
+- โหลด HF model cache (เก็บใน volume `hf_cache` รอบต่อไปเร็ว)
+
+### 5. ตรวจสอบ
 
 ```bash
-# ดู status ทุก container
+# ดู status ทุก container (ทุกตัวควรเป็น Up)
 docker compose ps
 
 # ดู log ทั้งหมด
@@ -225,13 +339,38 @@ docker compose logs -f
 docker compose logs -f chatbot-shopee
 docker compose logs -f chatadmin-web
 docker compose logs -f bot-worker
+docker compose logs -f caddy
 
-# ตรวจ health
+# ตรวจ health (จากใน host)
 curl http://localhost:8010/health    # chatbot → {"ok":true,...}
-curl http://localhost:3000/api/auth/me  # Next.js
+curl http://localhost:3000/api/auth/me  # Next.js (expected 401 — ปกติ)
+
+# ตรวจผ่าน Caddy — กรณี B (ยังไม่มีโดเมน)
+curl http://IP-ของ-server/api/auth/me        # expected 401 (admin)
+curl http://IP-ของ-server/bot/health         # {"ok":true,...} (chatbot)
+
+# ตรวจผ่าน Caddy — กรณี A (มีโดเมน)
+curl https://admin.example.com/api/auth/me   # expected 401
+curl https://bot.example.com/health          # {"ok":true,...}
+
+# ตรวจ Caddy cert (กรณี A)
+docker compose logs caddy | grep "certificate obtained"
 ```
 
-### 4. คำสั่งที่ใช้บ่อย
+### 6. สร้าง superadmin (ครั้งแรก)
+
+ระบบต้องมี superadmin อย่างน้อย 1 คนเพื่อ login ครั้งแรก:
+
+```bash
+# รัน script สร้าง superadmin (อยู่ใน ChatAdminWeb/scripts/)
+docker compose exec chatadmin-web npx tsx scripts/seed-superadmin.mjs
+# หรือรันจาก host:
+cd ChatAdminWeb && npx tsx scripts/seed-superadmin.mjs
+```
+
+---
+
+## คำสั่งที่ใช้บ่อย
 
 ```bash
 # rebuild หลังแก้โค้ด
@@ -241,12 +380,29 @@ docker compose up -d --build
 docker compose restart chatbot-shopee
 docker compose restart chatadmin-web
 docker compose restart bot-worker
+docker compose restart caddy
 
-# หยุดทั้งหมด
+# ดู log ย้อนหลัง 100 บรรทัด
+docker compose logs --tail 100 chatbot-shopee
+
+# หยุดทั้งหมด (container ยังอยู่)
+docker compose stop
+
+# หยุด + ลบ container (volume ยังอยู่)
 docker compose down
 
-# หยุด + ลบ volume (ระวัง! ลบ HF cache ด้วย ต้องโหลดใหม่)
+# หยุด + ลบ container + volume (ระวัง! ลบ HF cache ด้วย ต้องโหลดใหม่)
 docker compose down -v
+
+# รันเฉพาะ chatbot (debug)
+docker compose up chatbot-shopee
+
+# เข้า shell ใน container
+docker compose exec chatbot-shopee bash
+docker compose exec chatadmin-web sh
+
+# reload Caddy หลังแก้ Caddyfile (ไม่ต้อง restart)
+docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
 ---
@@ -255,6 +411,8 @@ docker compose down -v
 
 ### 1. MongoDB host
 MongoDB รันบน host ไม่ได้ containerize — ใน env ใช้ `host.docker.internal:27017` แทน `127.0.0.1:27017` (docker-compose ตั้ง `extra_hosts` ให้แล้ว)
+
+ถ้า MongoDB รันอยู่อีกเครื่อง (ไม่ใช่ host) ให้แก้ `MONGO_URI` และ `ADMIN_MONGO_URI` เป็น IP จริงของเครื่อง MongoDB และเอา `host.docker.internal` ออก
 
 ### 2. ค่าที่ต้องตรงกันทั้ง 2 ไฟล์
 - `CHATBOT_INTERNAL_SECRET` — ต้องเหมือนกันใน `.env` และ `.env.web`
@@ -266,6 +424,8 @@ MongoDB รันบน host ไม่ได้ containerize — ใน env ใ�
 
 ### 4. HF model cache
 ครั้งแรกที่ `docker compose up` chatbot จะโหลด sentence-transformers model (~4GB) ใช้เวลานานหน่อย หลังจากนั้นเก็บใน volume `hf_cache` รีสตาร์ทเร็ว
+
+ถ้า `docker compose down -v` จะลบ `hf_cache` ด้วย → ต้องโหลดใหม่อีกครั้ง
 
 ### 5. CHATBOT_BASE_URL_* ใน .env.web
 **ไม่ต้องตั้ง** — docker-compose override เป็น `http://chatbot-shopee:8010` ฯลฯ ให้แล้ว ถ้าตั้งใน .env.web จะถูก override ทับอยู่ดี
@@ -281,6 +441,68 @@ docker-compose override `MONGO_COLLECTION` สำหรับแต่ละแ�
 
 ถ้าใน `.env` ตั้ง `MONGO_COLLECTION` ไว้ ค่าใน `environment:` ของ docker-compose จะทับ
 
+### 8. Caddy + Let's Encrypt rate limit
+Caddy ขอ SSL cert อัตโนมัติตอน start — ถ้า DNS ยังไม่ชี้มาที่ server จะขอไม่สำเร็จและ retry จนโดน rate limit
+
+**ทางแก้:** ตั้ง DNS ให้ถูกก่อน `docker compose up` หรือใช้กรณี B (HTTP, ไม่ SSL) จนกว่า DNS จะพร้อม
+
+### 9. Safety switches
+ค่า default ทุก switch เป็น `false` (ปิดหมด) เพื่อความปลอดภัยสูงสุด — บอทตอบใน shadow mode (เก็บคำตอบใน `shadow_replies` ไม่ส่งจริง)
+
+ถ้าต้องการให้บอทส่งข้อความจริง ต้องเปิด `ENABLE_SEND_MESSAGE=true` ใน `.env` **หลังจากทดสอบเรียบร้อยแล้ว**
+
+---
+
+## Troubleshooting
+
+### chatbot-shopee container รันไม่ขึ้น / restart วนลูป
+
+```bash
+docker compose logs chatbot-shopee --tail 50
+```
+
+สาเหตุที่พบบ่อย:
+- **MongoDB เชื่อมไม่ได้** — ตรวจ `MONGO_URI` ใน `.env` ว่าใช้ `host.docker.internal` และ MongoDB รันอยู่บน host
+- **Gemini API key ผิด/หมดโควต้า** — ตรวจ `GEMINI_API_KEY` ใน `.env`
+- **HF model โหลดไม่ได้** — ครั้งแรกต้องออนไลน์ ถ้า offline ใช้ volume `hf_cache` ที่เคยโหลดแล้ว
+
+### chatadmin-web ขึ้น 401 ทุกหน้า
+ปกติ — ต้อง login ก่อน ถ้ายังไม่มี superadmin รัน `seed-superadmin.mjs` (ดูขั้นตอนที่ 6)
+
+### bot-worker ไม่ทำงาน
+```bash
+docker compose logs bot-worker --tail 50
+```
+ตรวจ:
+- `BOT_WORKER_ENABLED` ต้องเป็น `true` (docker-compose override ให้แล้ว)
+- `ADMIN_MONGO_COLLECTION_MESSAGES` ใน `.env.web` ต้องถูกต้อง
+- chatbot-shopee ต้อง healthy (`docker compose ps`)
+
+### Caddy ขอ cert ไม่สำเร็จ
+```bash
+docker compose logs caddy --tail 50
+```
+สาเหตุ:
+- DNS ยังไม่ชี้มาที่ server → รอ DNS propagate หรือใช้ HTTP ไปก่อน (กรณี B)
+- Port 80/443 ถูก block บน firewall → เปิด port
+- โดน Let's Encrypt rate limit → รอ 1 ชม. แล้ว retry
+
+### container เข้าถึง MongoDB ไม่ได้ (host.docker.internal ไม่ work)
+```bash
+# ทดสอบจากใน container
+docker compose exec chatbot-shopee curl -v telnet://host.docker.internal:27017
+```
+ถ้าไม่ติด:
+- ตรวจ `extra_hosts` ใน docker-compose.yml (ต้องมี `host.docker.internal:host-gateway`)
+- ถ้า MongoDB รันอีกเครื่อง แก้ `MONGO_URI` เป็น IP จริง
+
+### โหลด HF model นานมาก / โหลดซ้ำทุกครั้ง
+ตรวจว่า volume `hf_cache` ยังอยู่:
+```bash
+docker volume ls | grep hf_cache
+```
+ถ้าหาย (จาก `docker compose down -v`) ต้องโหลดใหม่ครั้งเดียว รอบต่อไปเร็ว
+
 ---
 
 ## โครงสร้างไฟล์ env สรุป
@@ -289,7 +511,57 @@ docker-compose override `MONGO_COLLECTION` สำหรับแต่ละแ�
 ChatBotProductMS/
 ├── .env          ← chatbot ทั้ง 3 แพลตฟอร์ม (shopee/lazada/tiktok)
 ├── .env.web      ← Next.js admin + bot-worker
+├── Caddyfile     ← reverse proxy + SSL config
 └── docker-compose.yml
 ```
 
 **ไม่ต้องสร้าง:** `.env.chatbot.shopee`, `.env.chatbot.lazada`, `.env.chatbot.tiktok` (เดิมใช้ 3 ไฟล์ ตอนนี้รวมเป็น `.env` ไฟล์เดียว)
+
+---
+
+## อัปเดตระบบ (หลัง deploy แล้ว)
+
+```bash
+cd ChatBotProductMS
+
+# 1. ดึงโค้ดใหม่
+git pull
+
+# 2. rebuild + restart
+docker compose up -d --build
+
+# 3. ตรวจสอบ
+docker compose ps
+docker compose logs -f --tail 50
+```
+
+ถ้าแก้แค่ `Caddyfile` ไม่ต้อง rebuild:
+```bash
+docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+```
+
+ถ้าแก้แค่ `.env` / `.env.web` ไม่ต้อง rebuild แค่ restart:
+```bash
+docker compose restart
+```
+
+---
+
+## Backup
+
+### สำคัญ: MongoDB อยู่บน host (ไม่ใช่ใน Docker)
+backup MongoDB ด้วยเครื่องมือปกติของ MongoDB (`mongodump` / `mongorestore`) ไม่เกี่ยวกับ Docker
+
+### Docker volumes ที่ควร backup
+- `hf_cache` — ไม่จำเป็น (โหลดใหม่ได้)
+- `caddy_data` — เก็บ SSL cert (โหลดใหม่ได้ แต่เสียเวลา)
+
+```bash
+# backup caddy cert
+docker run --rm -v chatbotproductms_caddy_data:/data -v $(pwd):/backup alpine \
+  tar czf /backup/caddy_data_backup.tar.gz -C /data .
+
+# restore
+docker run --rm -v chatbotproductms_caddy_data:/data -v $(pwd):/backup alpine \
+  tar xzf /backup/caddy_data_backup.tar.gz -C /data
+```

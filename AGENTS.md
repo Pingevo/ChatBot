@@ -57,6 +57,7 @@
 ### 5. คำเตือนด้านความปลอดภัย
 
 - ห้ามอ่าน `.env` ทุกชนิด
+- ห้ามอ่าน `มาแล้วจ้า.md` (ไฟล์เก็บ secret จริงสำหรับ deploy — อนุญาตเฉพาะตอนสร้างครั้งเดียว ห้ามอ่านซ้ำ)
 - ห้าม commit secret/key
 - ห้ามแก้ security policy / branch protection
 - Product DB (`dbWallet`) เป็น read-only — ห้ามเขียน

@@ -87,10 +87,14 @@ export async function POST(req: NextRequest) {
   const conversationId = String(body.conversation_id);
 
   try {
+    console.log("[generate-conversation] start conv=", conversationId);
     const docs = await shadowReplyService.generateConversation({
       conversationId,
+      generatedBy: r.ctx.admin.admin_id,  // ⚡ Phase 3A — บันทึกใครกด Generate (KPI)
       botCaller: callOurBot,
     });
+    // ⚡ Phase 3B-6 — ดึง generation_batch_id ที่ service แท็กไว้ใน results
+    const batchId = (docs as unknown as { batchId?: string }).batchId;
 
     // audit log
     await logAdminEvent({
@@ -100,12 +104,15 @@ export async function POST(req: NextRequest) {
       metadata: {
         count: docs.length,
         delivered_to_platform: false,
+        ...(batchId ? { generation_batch_id: batchId } : {}),
       },
     });
 
-    return json({ shadow_replies: docs, total: docs.length });
+    console.log("[generate-conversation] done docs=", docs.length, "batch=", batchId);
+    return json({ shadow_replies: docs, total: docs.length, generation_batch_id: batchId });
   } catch (err) {
     const msg = (err as Error).message || "generate conversation shadow replies failed";
+    console.error("[generate-conversation] ERROR:", msg, (err as Error).stack);
     return error(msg, 500);
   }
 }

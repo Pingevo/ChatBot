@@ -62,6 +62,7 @@ export async function listKbEntries(opts: {
   type?: KbType;
   search?: string;
   activeOnly?: boolean;
+  platform?: string; // ⚡ G4 — filter by platform (include "all" items)
   limit?: number;
   skip?: number;
 } = {}): Promise<Document[]> {
@@ -69,18 +70,33 @@ export async function listKbEntries(opts: {
   const filter: Record<string, unknown> = { is_deleted: { $ne: true } };
   if (opts.type) filter.type = opts.type;
   if (opts.activeOnly) filter.active = { $ne: false };
+  // ⚡ G4 — กรองตาม platform รวม items ที่ platform="all" หรือไม่มี field platform
+  //   ใช้ $and ครอบเพื่อกันทับกับ search $or
+  const andConditions: Record<string, unknown>[] = [];
+  if (opts.platform) {
+    andConditions.push({
+      $or: [
+        { platform: opts.platform },
+        { platform: "all" },
+        { platform: { $exists: false } },
+      ],
+    });
+  }
   if (opts.search) {
     // 🔒 escape regex
     const safeSearch = safeRegexSearch(opts.search);
     if (safeSearch) {
-      filter.$or = [
-        { topic: { $regex: safeSearch, $options: "i" } },
-        { answer: { $regex: safeSearch, $options: "i" } },
-        { brand: { $regex: safeSearch, $options: "i" } },
-        { model: { $regex: safeSearch, $options: "i" } },
-      ];
+      andConditions.push({
+        $or: [
+          { topic: { $regex: safeSearch, $options: "i" } },
+          { answer: { $regex: safeSearch, $options: "i" } },
+          { brand: { $regex: safeSearch, $options: "i" } },
+          { model: { $regex: safeSearch, $options: "i" } },
+        ],
+      });
     }
   }
+  if (andConditions.length > 0) filter.$and = andConditions;
   return coll
     .find(filter)
     .sort({ updated_at: -1 })

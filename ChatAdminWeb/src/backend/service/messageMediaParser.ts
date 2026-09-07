@@ -128,7 +128,42 @@ export function parseRawMessage(
       };
     }
   } else if (/\[sticker\]|\[สติกเกอร์\]/i.test(ft)) {
-    return { message_type: "sticker", text: fallbackText || "(สติกเกอร์)" };
+    // ⚡ ถ้า msgType === "sticker" → ไป switch case เพื่อดึง URL จาก raw_payload
+    //    ถ้าไม่ใช่ → พยายามดู raw_payload อยู่ดี (Shopee บางทีส่ง msg_type ผิด)
+    if (msgType !== "sticker") {
+      // ⚡ พยายามดึง URL จาก inner content แม้ msgType ไม่ใช่ sticker
+      const c = (inner as any) || {};
+      const nestedSticker = c.sticker && typeof c.sticker === "object" ? c.sticker : null;
+      let tryUrl = normalizeImageUrl(
+        c.url || c.image_url || c.sticker_url || c.sticker_image_url ||
+        c.image || c.pic || c.file_url ||
+        (nestedSticker as any)?.url || (nestedSticker as any)?.image_url
+      );
+      // ⚡ fallback — สร้าง URL จาก sticker_id + sticker_package_id ถ้าไม่มี URL ตรงๆ
+      if (!tryUrl && c.sticker_id && c.sticker_package_id) {
+        tryUrl = `https://deo.shopeemobile.com/shopee/shopee-sticker-live-th/packs/${c.sticker_package_id}/${c.sticker_id}@1x.png`;
+      }
+      if (tryUrl) {
+        // มี URL → ส่งเป็น sticker พร้อมรูป
+        const tryThumb = normalizeImageUrl(
+          c.thumb_url || c.thumbnail_url || c.sticker_thumb_url ||
+          (nestedSticker as any)?.thumb_url
+        );
+        return {
+          message_type: "sticker",
+          text: `(สติกเกอร์${c.sticker_id ? ` ${c.sticker_id}` : ""})`,
+          media: {
+            type: "image" as const,
+            url: tryUrl,
+            thumb_url: tryThumb,
+            thumb_width: c.width || c.thumb_width,
+            thumb_height: c.height || c.thumb_height,
+          },
+        };
+      }
+      return { message_type: "sticker", text: fallbackText || "(สติกเกอร์)" };
+    }
+    // ไป switch case ข้างล่าง (มี URL จาก raw_payload)
   } else if (/\[notification\]|\[แจ้งเตือน\]/i.test(ft)) {
     return { message_type: "notification", text: fallbackText || "", notification_text: "" };
   } else if (/\[variation_card\]|\[ตัวเลือกสินค้า\]/i.test(ft)) {
@@ -246,9 +281,40 @@ export function parseRawMessage(
 
     case "sticker": {
       const c = inner as any;
+      // ⚡ Shopee sticker raw_payload มีหลาย schema:
+      //   - url / image_url / sticker_url / sticker_image_url — URL รูปสติกเกอร์เต็ม
+      //   - thumb_url / thumbnail_url — thumbnail (อาจเป็น hash ต้อง normalize)
+      //   - image / pic / file_url — field อื่นที่ Shopee อาจใช้
+      //   - sticker.{url,image_url} — nested object
+      //   - width / height — ขนาด
+      //   - sticker_id — ID ของสติกเกอร์
+      //   - sticker_package_id — package ID (ใช้สร้าง URL ถ้าไม่มี image_url)
+      const nestedSticker = c.sticker && typeof c.sticker === "object" ? c.sticker : null;
+      let stickerUrl = normalizeImageUrl(
+        c.url || c.image_url || c.sticker_url || c.sticker_image_url ||
+        c.image || c.pic || c.file_url ||
+        (nestedSticker as any)?.url || (nestedSticker as any)?.image_url
+      );
+      // ⚡ fallback — ถ้าไม่มี URL แต่มี sticker_id + sticker_package_id → สร้าง URL จาก pattern
+      //    pattern: https://deo.shopeemobile.com/shopee/shopee-sticker-live-th/packs/{package_id}/{sticker_id}@1x.png
+      //    (เห็นจากของจริง: shogi_oct_2023/0001@1x.png)
+      if (!stickerUrl && c.sticker_id && c.sticker_package_id) {
+        stickerUrl = `https://deo.shopeemobile.com/shopee/shopee-sticker-live-th/packs/${c.sticker_package_id}/${c.sticker_id}@1x.png`;
+      }
+      const stickerThumb = normalizeImageUrl(
+        c.thumb_url || c.thumbnail_url || c.sticker_thumb_url ||
+        (nestedSticker as any)?.thumb_url
+      );
       return {
         message_type: "sticker",
-        text: `(สติกเกอร์ ${c.sticker_id || ""})`,
+        text: `(สติกเกอร์${c.sticker_id ? ` ${c.sticker_id}` : ""})`,
+        media: stickerUrl ? {
+          type: "image" as const,
+          url: stickerUrl,
+          thumb_url: stickerThumb,
+          thumb_width: c.width || c.thumb_width,
+          thumb_height: c.height || c.thumb_height,
+        } : undefined,
       };
     }
 

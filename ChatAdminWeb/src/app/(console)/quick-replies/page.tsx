@@ -682,15 +682,25 @@ export default function QuickRepliesPage() {
                 )}
               </div>
 
-              <div>
-                <label className="text-xs text-text-muted">ลำดับ</label>
-                <input
-                  type="number"
-                  value={form.sort_order}
-                  onChange={(e) => setForm({ ...form, sort_order: Number(e.target.value) })}
-                  className="w-full mt-1 h-9 rounded-lg border border-border bg-surface-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-brand/40"
-                />
-              </div>
+              {/* ⚡ sort_order — สร้างใหม่: auto (ซ่อน input) / แก้ไข: ให้เปลี่ยนได้ */}
+              {editing ? (
+                <div>
+                  <label className="text-xs text-text-muted">ลำดับ</label>
+                  <input
+                    type="number"
+                    value={form.sort_order}
+                    onChange={(e) => setForm({ ...form, sort_order: Number(e.target.value) })}
+                    className="w-full mt-1 h-9 rounded-lg border border-border bg-surface-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-brand/40"
+                  />
+                </div>
+              ) : (
+                <div>
+                  <label className="text-xs text-text-muted">ลำดับ</label>
+                  <div className="mt-1 h-9 rounded-lg border border-border bg-surface-2/50 px-3 flex items-center text-sm text-text-muted">
+                    กำหนดอัตโนมัติ (ต่อจากอันล่าสุด)
+                  </div>
+                </div>
+              )}
 
               <div className="flex justify-end gap-2 pt-2">
                 <Button variant="ghost" onClick={() => setShowForm(false)}>ยกเลิก</Button>

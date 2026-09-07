@@ -1,5 +1,8 @@
 "use client";
 // CloseHistoryPanel — แสดงประวัติการปิด/เปิดแชท ทางขวาของหน้า tickets
+// ⚡ Phase 2O — record ปิดเท่านั้น (sequence = จำนวนครั้งที่ปิด)
+//   - แสดง "ครั้งที่ 1 · ปิดแล้ว" / "ครั้งที่ 2 · ปิดแล้ว"
+//   - ถ้า reopen แล้ว → แสดง "เปิดใหม่แล้ว" ข้างใน record เดิม
 import { History, RotateCcw, CheckCircle2, MessageSquare } from "lucide-react";
 import type { CloseHistoryRecord, ProblemCategory } from "@/lib/types";
 
@@ -38,7 +41,7 @@ export function CloseHistoryPanel({ history }: Props) {
       <div className="flex items-center gap-2 mb-2">
         <History size={16} className="text-text-muted" />
         <h3 className="text-sm font-semibold text-text">
-          ประวัติปิด/เปิดแชท ({history.length})
+          ประวัติปิดแชท ({history.length})
         </h3>
       </div>
 
@@ -66,7 +69,7 @@ export function CloseHistoryPanel({ history }: Props) {
                   </span>
                 ) : (
                   <span className="inline-flex items-center gap-1 text-xs text-text-muted">
-                    <CheckCircle2 size={11} /> ปิดอยู่
+                    <CheckCircle2 size={11} /> ปิดแล้ว
                   </span>
                 )}
               </div>

@@ -55,9 +55,13 @@ async function allAgentsOrdered(): Promise<string[]> {
 
 // สร้าง { poolKey, orderedAgentIds } ตามโหมด — จุดเดียวที่ตัดสินใจ "ขอบเขตคิว"
 // ⚠️ กรองเฉพาะ role=admin เท่านั้น — superadmin และ dev ไม่ถูกจ่ายแชท
+// ⚡ C1 — เพิ่ม source ใน pool_key เพื่อแยก cursor ตามหน้า (ticket/botworker/shadowbot/...)
+//   ตัวอย่าง: pool_key = "global:ticket" / "shop:12345:shadowbot" / "platform:shopee:botworker"
+//   ทำให้แต่ละหน้ามี cursor อิสระ ไม่กระทบกัน
 async function buildPool(
   mode: AssignmentMode,
-  shop: { shop_id: string; platform: string }
+  shop: { shop_id: string; platform: string },
+  source: string = "ticket"
 ): Promise<{ poolKey: string; orderedAgentIds: string[] }> {
   // ดึง admin_ids ที่เป็น role=admin ทั้งหมด เพื่อใช้กรอง
   const adminOnlyIds = new Set(await allAgentsOrdered());
@@ -73,7 +77,7 @@ async function buildPool(
     const agentIds = rows.map((r) => r.admin_id).filter((id) => id && adminOnlyIds.has(id));
     // ถ้าไม่มีทีมร้านเลย → fallback ใช้ทุก admin (กันงานตกหล่น)
     const finalIds = agentIds.length > 0 ? agentIds : Array.from(adminOnlyIds);
-    return { poolKey: `shop:${shop.shop_id}`, orderedAgentIds: finalIds };
+    return { poolKey: `shop:${shop.shop_id}:${source}`, orderedAgentIds: finalIds };
   }
   if (mode === "equal_per_platform") {
     const coll = await getCollection<PlatformTeamAssignmentDoc>(COLLECTIONS.platformTeamAssignments);
@@ -86,10 +90,10 @@ async function buildPool(
     const agentIds = rows.map((r) => r.admin_id).filter((id) => id && adminOnlyIds.has(id));
     // ถ้าไม่มีทีมแพลตฟอร์มเลย → fallback ใช้ทุก admin (กันงานตกหล่น)
     const finalIds = agentIds.length > 0 ? agentIds : Array.from(adminOnlyIds);
-    return { poolKey: `platform:${shop.platform}`, orderedAgentIds: finalIds };
+    return { poolKey: `platform:${shop.platform}:${source}`, orderedAgentIds: finalIds };
   }
   // equal_global (default)
-  return { poolKey: "global", orderedAgentIds: Array.from(adminOnlyIds) };
+  return { poolKey: `global:${source}`, orderedAgentIds: Array.from(adminOnlyIds) };
 }
 
 // เดินคิว 1→2→3→4→1 ไม่สนภาระงาน — ข้าม agent ที่ active=false แต่ไม่ขยับตำแหน่งคิว
@@ -164,13 +168,14 @@ export async function setAssignmentMode(mode: AssignmentMode, updatedBy = "admin
 }
 
 // เรียกตอนมีข้อความขาเข้าใหม่ — assign แบบ atomic กัน race condition
+// ⚡ C1 — เพิ่ม source parameter เพื่อแยก cursor ตามหน้า (default: "ticket")
 export async function autoAssignConversation(conv: {
   _id?: ObjectId;
   conversation_id: string;
   shop_id: string;
   platform: string;
   assigned_to?: string | null;
-}): Promise<string | null> {
+}, source: string = "ticket"): Promise<string | null> {
   if (conv.assigned_to) return null; // มีคนรับผิดชอบอยู่แล้ว
 
   const shopColl = await getCollection<{ shop_id: string; platform: string; enabled_for_chat: boolean }>(COLLECTIONS.shops);
@@ -180,26 +185,21 @@ export async function autoAssignConversation(conv: {
   if (shop.enabled_for_chat === false) return null;
 
   const mode = await getActiveAssignmentConfig();
-  const { poolKey, orderedAgentIds } = await buildPool(mode, shop);
+  const { poolKey, orderedAgentIds } = await buildPool(mode, shop, source);
   if (!orderedAgentIds.length) return null;
 
   const agentId = await pickNextAgent(poolKey, orderedAgentIds);
   if (!agentId) return null;
 
-  // Atomic guard — กันสองแชทชนกัน
-  const convColl = await getCollection<{
-    _id: ObjectId; conversation_id: string; assigned_to: string | null; assigned_at: Date; assignment_mode_used: string;
-  }>(COLLECTIONS.conversations);
-  // ⚡ รองรับกรณี caller ส่งแค่ conversation_id (ไม่มี _id) — เช่น handoffService
-  const filter = conv._id
-    ? { _id: conv._id, assigned_to: null }
-    : { conversation_id: conv.conversation_id, assigned_to: null };
-  const updated = await convColl.findOneAndUpdate(
-    filter,
-    { $set: { assigned_to: agentId, assigned_at: new Date(), assignment_mode_used: mode } },
-    { returnDocument: "after" }
+  // ⚡ Phase 2J — atomic guard เขียน assigned_to ลง status_conversation (ไม่ใช่ conversations ที่โดน dump ทับ)
+  //   ใช้ statusConversationService.tryAssign (atomic upsert กัน race condition)
+  const { statusConversationService } = await import("./statusConversationService");
+  const assigned = await statusConversationService.tryAssign(
+    conv.conversation_id,
+    agentId,
+    mode
   );
-  if (!updated) return null; // มีคนอื่น assign ไปแล้ว — เสียตาคิวไปหนึ่งตา ยอมรับได้
+  if (!assigned) return null; // มีคนอื่น assign ไปแล้ว — เสียตาคิวไปหนึ่งตา ยอมรับได้
 
   await logAdminEvent({
     action_type: "chat_assigned",
@@ -214,6 +214,7 @@ export async function autoAssignConversation(conv: {
 }
 
 // lead/admin ย้ายงานเอง — ไม่แตะคิว round-robin
+// ⚡ Phase 2J — เขียน assigned_to ลง status_conversation (ไม่ใช่ conversations ที่โดน dump ทับ)
 export async function reassignConversation(
   conv: { _id: ObjectId; conversation_id: string; shop_id: string; assigned_to?: string | null },
   newAgentId: string | null,
@@ -223,18 +224,19 @@ export async function reassignConversation(
   const fromAdminId = conv.assigned_to || null;
   const mode = await getActiveAssignmentConfig();
 
-  const convColl = await getCollection<{
-    assigned_to: string | null; assigned_at: Date; assignment_mode_used: string;
-  }>(COLLECTIONS.conversations);
-  await convColl.updateOne(
-    { _id: conv._id },
-    { $set: { assigned_to: newAgentId, assigned_at: new Date(), assignment_mode_used: mode } }
+  // ⚡ Phase 2J — เขียนลง status_conversation แทน conversations
+  const { statusConversationService } = await import("./statusConversationService");
+  await statusConversationService.updateStatus(
+    conv.conversation_id,
+    "handoff",
+    newAgentId || undefined,
+    actor
   );
 
   await logAdminEvent({
     action_type: "chat_reassigned",
     actor,
-    target_admin_id: newAgentId,
+    target_admin_id: newAgentId || undefined,
     conversation_id: conv.conversation_id,
     shop_id: conv.shop_id,
     metadata: { from_admin_id: fromAdminId, reason: reason || null },

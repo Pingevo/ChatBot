@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { ArrowLeft, Info, X, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { ChatList } from "@/components/chat/ChatList";
 import { TicketChatPanel } from "@/components/chat/TicketChatPanel";
@@ -11,6 +11,7 @@ import { chatService } from "@/lib/services";
 import { api } from "@/lib/apiClient";
 import { usePolling } from "@/lib/usePolling";
 import { useAuth } from "@/lib/authStore";
+import { useSharedConversations, invalidateSharedConversations } from "@/lib/useSharedConversations";
 import type { Conversation, ChatMessage, CloseHistoryRecord, ProblemCategory, AdminUser } from "@/lib/types";
 
 // Phase 7.4 — mock data ลบแล้ว โหลดจาก chatbot DB ผ่าน /api/admin/conversations
@@ -22,8 +23,38 @@ type ChatFilter = "me" | "all" | string;
 export default function TicketsPage() {
   const { user } = useAuth();
   const me = user?.admin_id ?? "";
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [totalCount, setTotalCount] = useState<number>(0);
+  const [chatFilter, setChatFilter] = useState<ChatFilter>("all");
+  // ⚡ server-side search — ส่ง q ไป API ให้ค้นที่ DB ทั้งหมด (ไม่จำกัดแค่ 2000 ล่าสุด)
+  const [searchQuery, setSearchQuery] = useState("");
+  // ⚡ G-share — ใช้ shared conversation store (แชร์กับ shadow-inbox)
+  const { conversations: sharedConversations, totalCount, loading: sharedLoading, refresh: refreshConversations } = useSharedConversations({
+    assigned_to: chatFilter === "me" ? "me" : chatFilter === "all" ? "all" : chatFilter,
+    q: searchQuery || undefined,
+    limit: 2000,
+  });
+  // ⚡ local override สำหรับ optimistic update (close/reopen/handoff/assign)
+  //   ใช้ map id → partial patch ที่ทับข้อมูลจาก shared store
+  const [localOverrides, setLocalOverrides] = useState<Record<string, Partial<Conversation>>>({});
+  const conversations = sharedConversations.map((c) =>
+    localOverrides[c.id] ? { ...c, ...localOverrides[c.id] } : c
+  );
+  const setConversations = useCallback((updater: (prev: Conversation[]) => Conversation[]) => {
+    // ใช้ conversations ปัจจุบัน (รวม override) เป็น prev — กันทับ optimistic update ก่อนหน้า
+    const current = sharedConversations.map((c) =>
+      localOverrides[c.id] ? { ...c, ...localOverrides[c.id] } : c
+    );
+    const next = updater(current);
+    const overrides: Record<string, Partial<Conversation>> = {};
+    for (const c of next) {
+      const orig = sharedConversations.find((o) => o.id === c.id);
+      if (orig && (c.status !== orig.status || c.assigned_to !== orig.assigned_to)) {
+        overrides[c.id] = { status: c.status, assigned_to: c.assigned_to };
+      }
+    }
+    if (Object.keys(overrides).length > 0) {
+      setLocalOverrides((prev) => ({ ...prev, ...overrides }));
+    }
+  }, [sharedConversations, localOverrides]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sending, setSending] = useState(false);
@@ -36,7 +67,6 @@ export default function TicketsPage() {
   const [rightTab, setRightTab] = useState<"info" | "chatlog" | "products">("info");
   const [rightCollapsed, setRightCollapsed] = useState(false);
   // Phase 7.9 — filter + admins list + accept state (status/sort ย้ายไป ChatList แล้ว)
-  const [chatFilter, setChatFilter] = useState<ChatFilter>("all");
   const [admins, setAdmins] = useState<AdminUser[]>([]);
   const [acceptingChats, setAcceptingChats] = useState<boolean>(user?.is_accepting_chats ?? true);
   const [togglingAccept, setTogglingAccept] = useState(false);
@@ -53,39 +83,33 @@ export default function TicketsPage() {
     }).catch(() => setAdmins([]));
   }, [user?.role]);
 
-  // Phase 7.4 — โหลด conversations จาก chatbot DB จริง (รองรับ chatFilter)
-  // status/sort/platform/shop filter ทำใน ChatList เพื่อความเร็ว (ไม่ต้อง reload API)
-  const loadConversations = useCallback(async () => {
-    try {
-      const data = await chatService.listWithCount({
-        assigned_to: chatFilter === "me" ? "me" : chatFilter === "all" ? "all" : chatFilter,
-      });
-      // ⚡ guard: ถ้า API คืน array ตรงๆ (backward compat) → ใช้ array นั้น
-      const rows = Array.isArray(data) ? data : (data.rows || []);
-      const totalCount = Array.isArray(data) ? data.length : (data.total_count ?? 0);
-      setConversations(rows);
-      setTotalCount(totalCount);
-    } catch (err) {
-      console.error("load conversations failed", err);
-      setConversations([]);
-      setTotalCount(0);
-    }
-  }, [chatFilter]);
-
+  // ⚡ G-share — conversations มาจาก shared store แล้ว (poll ร่วมกับ shadow-inbox)
+  //   ไม่ต้อง loadConversations/usePolling แยกอีก — store ดึงทุก 5 วิให้เอง
+  //   เคลียร์ localOverrides เมื่อ shared store อัปเดต (ค่าจริงมาแล้ว)
+  //   ⚡ ใช้ ref เก็บ reference เดิม — กัน infinite loop ตอน filterKey เปลี่ยน (sharedConversations เป็น [] ใหม่ทุก render)
+  const prevSharedRef = useRef<Conversation[] | null>(null);
   useEffect(() => {
-    loadConversations();
-  }, [loadConversations]);
-
-  // Phase 7.5 — polling 3 วิ หยุดเมื่อ tab inactive
-  usePolling(loadConversations, 3000);
+    if (prevSharedRef.current !== sharedConversations) {
+      prevSharedRef.current = sharedConversations;
+      setLocalOverrides({});
+    }
+  }, [sharedConversations]);
 
   // Load messages when conversation changes — โหลดทั้งหมด (เหมือนเดิม)
+  // ⚡ dedupe by id กัน duplicate key warning (DB อาจมี message ซ้ำ)
   useEffect(() => {
     if (!selectedId) { setMessages([]); return; }
     setLoadingMessages(true);
     chatService
       .messages(selectedId)
-      .then(setMessages)
+      .then((rows) => {
+        const seen = new Set<string>();
+        setMessages(rows.filter((m) => {
+          if (seen.has(m.id)) return false;
+          seen.add(m.id);
+          return true;
+        }));
+      })
       .catch((err) => {
         console.error("load messages failed", err);
         setMessages([]);
@@ -154,11 +178,11 @@ export default function TicketsPage() {
         return false;
       }
       if (res.message) setMessages((prev) => [...prev, res.message]);
-      // ⚡ reload conversations ทันที — ให้ list อัปเดต (unanswered count เปลี่ยน)
-      loadConversations();
+      // ⚡ G-share — invalidate shared store ให้ poll รอบถัดไปดึงใหม่ทันที
+      invalidateSharedConversations();
       return true;
     },
-    [selectedId, loadConversations]
+    [selectedId]
   );
 
   const handleSend = useCallback(
@@ -200,14 +224,14 @@ export default function TicketsPage() {
       await chatService.assign(selectedId, me);
       await sendInternal(conflictPopup.text, false);
       setConflictPopup(null);
-      // refresh list
-      loadConversations();
+      // ⚡ G-share — invalidate shared store
+      invalidateSharedConversations();
     } catch {
       // ignore
     } finally {
       setSending(false);
     }
-  }, [selectedId, conflictPopup, me, sendInternal, loadConversations]);
+  }, [selectedId, conflictPopup, me, sendInternal]);
 
   const handleHandoff = useCallback(() => {
     if (!selectedId) return;
@@ -265,7 +289,7 @@ export default function TicketsPage() {
     try {
       await chatService.reopen(selectedId, "แอดมินเปิดแชทใหม่");
       setConversations((prev) =>
-        prev.map((c) => (c.id === selectedId ? { ...c, status: "open" as never } : c))
+        prev.map((c) => (c.id === selectedId ? { ...c, status: "handoff" as never } : c))
       );
       const d = await chatService.closeHistory(selectedId);
       setCloseHistory(d.history || []);
@@ -346,6 +370,8 @@ export default function TicketsPage() {
           onToggleAccepting={handleToggleAccepting}
           togglingAccept={togglingAccept}
           totalCount={totalCount}
+          onSearchChange={setSearchQuery}
+          loading={sharedLoading}
         />
       </div>
 

@@ -10,7 +10,7 @@ import {
   Bot, Activity, Cpu, Server,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
-import { canManage } from "@/lib/roles";
+import { canEditPage } from "@/lib/roles";
 import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
@@ -121,7 +121,7 @@ const platformColors: Record<Platform, string> = {
 
 export default function ConfigPage() {
   const { user } = useAuth();
-  const editable = canManage(user); // superadmin or dev only
+  const editable = canEditPage(user, "config"); // dev only
   const { catchError } = useToastError();
   const [config, setConfig] = useState<SystemConfig | null>(null);
   const [shops, setShops] = useState<ShopRow[]>([]);
