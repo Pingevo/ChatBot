@@ -358,6 +358,8 @@ export function TicketChatPanel({
   const wasNearBottomRef = useRef(true);
   // track conversation id เพื่อบังคับ scroll ลงล่างเมื่อเปลี่ยน conversation
   const prevConvIdRef = useRef<string | null>(null);
+  // ⚡ track จำนวน messages ก่อนหน้า — รู้ว่า messages เพิ่งโหลดมา (0 → >0)
+  const prevMsgCountRef = useRef(0);
 
   // ⚡ scroll logic รวมใน effect เดียว — แก้ปัญหาลำดับการรัน
   //    - เปลี่ยน conversation → บังคับ scroll ลงล่าง (เปิดแชทมาเห็นข้อความล่าสุด)
@@ -367,15 +369,32 @@ export function TicketChatPanel({
     if (!el) return;
     const convId = conversation?.id ?? null;
     const isConvChange = convId !== prevConvIdRef.current;
+    const msgCount = messages.length;
+    // ⚡ messages เพิ่งโหลดมา (0 → >0) หลังเปลี่ยน conversation → บังคับ scroll ล่าง
+    const msgsJustLoaded = prevMsgCountRef.current === 0 && msgCount > 0;
+    prevMsgCountRef.current = msgCount;
+
     if (isConvChange) {
       prevConvIdRef.current = convId;
       wasNearBottomRef.current = true;
+      prevMsgCountRef.current = msgCount;
       // รอให้ DOM render ก่อน (messages อาจยังโหลดอยู่) — double rAF เพื่อให้แน่ใจ
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           const el2 = scrollRef.current;
           if (el2) el2.scrollTop = el2.scrollHeight;
         });
+      });
+      // ⚡ ถ้า messages โหลดเสร็จแล้ว (ไม่ใช่ 0) → scroll เลยด้วย
+      if (msgCount > 0) {
+        el.scrollTop = el.scrollHeight;
+      }
+      return;
+    }
+    // ⚡ messages เพิ่งโหลดมาหลังเปลี่ยน conversation → บังคับ scroll ล่าง
+    if (msgsJustLoaded && wasNearBottomRef.current) {
+      requestAnimationFrame(() => {
+        if (el) el.scrollTop = el.scrollHeight;
       });
       return;
     }

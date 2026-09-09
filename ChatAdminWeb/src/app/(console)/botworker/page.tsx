@@ -8,7 +8,7 @@
 //   - ไม่มี composer (อ่านอย่างเดียว — botworker รันอัตโนมัติ)
 //   - แสดง 3 สี: user (เทา) + zaapi (เขียว) + bot เรา (ฟ้า)
 //   - ข้อความ bot มาจาก shadow_replies (ไม่ใช่ messages_shp)
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { ArrowLeft, Info, X, PanelRightClose, PanelRightOpen, Bot, AlertCircle, Headset, RotateCcw, Lock, UserCog, ChevronDown } from "lucide-react";
 import { ChatList } from "@/components/chat/ChatList";
 import { InfoTab } from "@/components/chat/InfoTab";
@@ -61,6 +61,11 @@ export default function BotWorkerPage() {
   const { user } = useAuth();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [totalCount, setTotalCount] = useState<number>(0);
+  // ⚡ pagination — head (200 newest, poll 3s) + tail (load more on scroll)
+  const [tail, setTail] = useState<Conversation[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   // ⚡ server-side search — ส่ง q ไป API ให้ค้นที่ DB ทั้งหมด
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -89,17 +94,13 @@ export default function BotWorkerPage() {
     }).catch(() => setAdmins([]));
   }, [user?.role]);
 
-  // โหลด conversations (เหมือน tickets แต่อ่าน status จาก test_status_conversation source=botworker)
+  // โหลด conversations (head — 200 ล่าสุด, poll 3 วิ)
   const loadConversations = useCallback(async () => {
     setLoadingConversations(true);
     try {
-      // ⚡ Phase 2V — ใช้ /api/botworker/conversations แทน /admin/conversations
-      //   เพื่อให้เห็น status ที่ botworker เขียน (ไม่กระทบ /tickets)
-      // ⚡ G-fix — เพิ่ม timeout 45s กัน axios ตัดก่อน backend ทำเสร็จ (เหมือน shadow-inbox)
-      // ⚡ server-side search — ส่ง q ไปให้ API ค้นที่ DB ทั้งหมด (ไม่จำกัดแค่ 2000 ล่าสุด)
-      const r = await api().get<{ rows: Conversation[]; total_count: number }>(
+      const r = await api().get<{ rows: Conversation[]; total_count: number; has_more?: boolean; cursor?: string | null }>(
         "/botworker/conversations",
-        { params: { limit: "2000", ...(searchQuery ? { q: searchQuery } : {}) }, timeout: 45000 }
+        { params: { limit: "200", include_count: "true", ...(searchQuery ? { q: searchQuery } : {}) }, timeout: 45000 }
       );
       const rows = r.data.rows || [];
       const total = r.data.total_count || rows.length;
@@ -111,6 +112,10 @@ export default function BotWorkerPage() {
       });
       setConversations(deduped);
       setTotalCount(total);
+      setHasMore(r.data.has_more ?? false);
+      setCursor(r.data.cursor ?? null);
+      // ⚡ reset tail เมื่อ head โหลดใหม่ (search เปลี่ยน หรือ filter เปลี่ยน)
+      setTail([]);
     } catch (err) {
       console.error("load conversations failed", err);
       // ⚡ G-fix — ไม่ clear conversations เดิมเวลา poll ล้มเหลว (กันหน้าว่าง)
@@ -118,6 +123,45 @@ export default function BotWorkerPage() {
       setLoadingConversations(false);
     }
   }, [searchQuery]);
+
+  // ⚡ loadMore — โหลด page ถัดไป (tail) ตอน scroll ใกล้ล่าง
+  const loadMore = useCallback(async () => {
+    if (!cursor || !hasMore || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const r = await api().get<{ rows: Conversation[]; has_more?: boolean; cursor?: string | null }>(
+        "/botworker/conversations",
+        { params: { limit: "200", cursor, ...(searchQuery ? { q: searchQuery } : {}) }, timeout: 45000 }
+      );
+      const rows = r.data.rows || [];
+      const existingIds = new Set([...conversations.map((c) => c.id), ...tail.map((c) => c.id)]);
+      const newRows = rows.filter((c) => {
+        if (existingIds.has(c.id)) return false;
+        existingIds.add(c.id);
+        return true;
+      });
+      setTail((prev) => [...prev, ...newRows]);
+      setHasMore(r.data.has_more ?? false);
+      setCursor(r.data.cursor ?? null);
+    } catch (err) {
+      console.error("load more failed", err);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [cursor, hasMore, loadingMore, conversations, tail, searchQuery]);
+
+  // ⚡ combined conversations = head + tail (deduped)
+  const allConversations = useMemo(() => {
+    const seen = new Set<string>();
+    const result: Conversation[] = [];
+    for (const c of [...conversations, ...tail]) {
+      if (!seen.has(c.id)) {
+        seen.add(c.id);
+        result.push(c);
+      }
+    }
+    return result;
+  }, [conversations, tail]);
 
   useEffect(() => {
     loadConversations();
@@ -294,7 +338,7 @@ export default function BotWorkerPage() {
       {/* ── Panel ซ้าย: ChatList (เหมือน tickets) ── */}
       <div className={`${mobileView === "list" ? "flex" : "hidden"} md:flex h-full flex-col w-full md:w-80 shrink-0 border-r border-border`}>
         <ChatList
-          conversations={conversations}
+          conversations={allConversations}
           selectedId={selectedId}
           onSelect={handleSelect}
           admins={admins}
@@ -306,6 +350,9 @@ export default function BotWorkerPage() {
           totalCount={totalCount}
           onSearchChange={setSearchQuery}
           loading={loadingConversations}
+          loadMore={loadMore}
+          hasMore={hasMore}
+          loadingMore={loadingMore}
         />
       </div>
 
@@ -661,6 +708,8 @@ function UnifiedBubble({ msg, customerName, customerAvatar }: { msg: UnifiedMess
     order_sn: m.order_sn,
     notification_text: m.notification_text,
     table: m.table as ChatMessage["table"],
+    // ⚡ bundle_message — ส่ง sub-messages ไป MessageContent ให้แสดง bundle ได้
+    bundle: m.bundle as ChatMessage["bundle"],
   });
 
   return (

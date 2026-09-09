@@ -1,7 +1,7 @@
 // GET  /api/workflows — list workflows (multi-platform/shop aware)
 // POST /api/workflows — create new workflow (Flow Builder)
 //
-// ⚡ Workflow engine (แบบ Zaapi Flow Builder) — อ้างอิง workflow-planner.md
+// ⚡ Workflow engine (แบบ Zaapi Flow Builder) — อ้างอิง docs/plans/workflow-planner.md
 // Graph validation อยู่ใน workflowService.validateWorkflowGraph (service ตรวจซ้ำอีกชั้น)
 import { NextRequest } from "next/server";
 import { requireAuth, requirePageEdit } from "@/backend/middleware/authorize";

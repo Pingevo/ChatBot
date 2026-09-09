@@ -31,15 +31,17 @@ async function buildAdminNameMap(): Promise<Map<string, { name: string; username
 
 /**
  * นับ unanswered = user messages ที่ยังไม่มี out message (admin/bot) ตอบหลังจากนั้น
- * ใช้ aggregation 2 ตัวเพื่อความเร็ว (0.5s แทน 118s สำหรับ 1377 conversations)
- *   1. หา last out timestamp ของแต่ละ conversation
- *   2. นับ user messages ที่ timestamp > last_out ของแต่ละ conversation
+ * ⚡ page-scoped — กรองเฉพาะ conversations ใน page นี้ (ใช้ index { conversation_id: 1 })
+ *   ก่อนหน้านี้สแกนทั้ง messages collection → ช้ามากเวลา DB ใหญ่
+ *   ตอนนี้กรอง conversation_id: { $in: [...] } → ใช้ index → เร็วมาก
  */
-async function buildUnansweredMap(): Promise<Map<string, number>> {
+async function buildUnansweredMap(convIds: string[]): Promise<Map<string, number>> {
+  if (convIds.length === 0) return new Map();
   const msgColl = await getCollection<{ conversation_id: string; created_timestamp: Date }>(COLLECTIONS.messages);
-  // 1. last out timestamp ของแต่ละ conversation
+  const convFilter = { conversation_id: { $in: convIds } };
+  // 1. last out timestamp ของแต่ละ conversation (เฉพาะที่อยู่ใน page นี้)
   const lastOutAgg = await msgColl.aggregate<{ _id: string; last_out: Date }>([
-    { $match: { direction: "out" } },
+    { $match: { ...convFilter, direction: "out" } },
     { $group: { _id: "$conversation_id", last_out: { $max: "$created_timestamp" } } },
   ]).toArray();
   const lastOutMap = new Map<string, Date>();
@@ -47,7 +49,7 @@ async function buildUnansweredMap(): Promise<Map<string, number>> {
 
   // 2. นับ user messages ที่ timestamp > last_out (หรือไม่มี out เลย)
   const userAgg = await msgColl.aggregate<{ _id: string; user_msgs: Date[] }>([
-    { $match: { role: "user", direction: "in" } },
+    { $match: { ...convFilter, role: "user", direction: "in" } },
     { $group: { _id: "$conversation_id", user_msgs: { $push: "$created_timestamp" } } },
   ]).toArray();
   const unansweredMap = new Map<string, number>();
@@ -59,6 +61,69 @@ async function buildUnansweredMap(): Promise<Map<string, number>> {
     if (unanswered > 0) unansweredMap.set(r._id, unanswered);
   }
   return unansweredMap;
+}
+
+/**
+ * ⚡ Pre-fetch conversation_ids ที่ assigned ให้ admin คนใดคนหนึ่ง
+ *   จาก status_conversation (source of truth) + conversations (legacy fallback)
+ *   ใช้แทนการกรองใน JS หลังดึงข้อมูลแล้ว — ทำให้ paginate ได้ถูกต้อง
+ *
+ *   - ถ้าส่ง adminId → คืน ids ที่ assigned ให้คนนั้น
+ *   - ถ้าไม่ส่ง adminId → คืน ids ที่ assigned ให้ใครก็ตาม (ใช้สำหรับ "unassigned" filter)
+ */
+async function getAssignedConversationIds(adminId?: string): Promise<string[]> {
+  // ⚡ ใช้ type ที่ยอมรับ null/undefined สำหรับ assigned_to (MongoDB อาจเก็บ null ได้)
+  type StatusDoc = { conversation_id: string; assigned_to?: string | null };
+  const statusColl = await getCollection<StatusDoc>(COLLECTIONS.statusConversation);
+  const convColl = await getCollection<StatusDoc>(COLLECTIONS.conversations);
+
+  if (adminId) {
+    // 1. ids จาก status_conversation ที่ assigned ให้ admin คนนี้
+    const fromStatus = await statusColl
+      .find({ assigned_to: adminId }, { projection: { conversation_id: 1 } })
+      .toArray();
+    const setA = new Set(fromStatus.map((d) => d.conversation_id));
+
+    // 2. ids จาก conversations (legacy) ที่ assigned ให้ admin คนนี้
+    const fromConv = await convColl
+      .find({ assigned_to: adminId }, { projection: { conversation_id: 1 } })
+      .toArray();
+    const setB = new Set(fromConv.map((d) => d.conversation_id));
+
+    // 3. ids ที่ status_conversation บอก assigned ให้คนอื่น → ต้องยกเว้น (meta แทนที่ legacy)
+    const fromStatusOther = await statusColl
+      .find({ assigned_to: { $exists: true, $nin: [null, "", adminId] } }, { projection: { conversation_id: 1 } })
+      .toArray();
+    const setC = new Set(fromStatusOther.map((d) => d.conversation_id));
+
+    // final = (A ∪ B) - C
+    const final = new Set<string>();
+    for (const id of setA) final.add(id);
+    for (const id of setB) final.add(id);
+    for (const id of setC) final.delete(id);
+    return Array.from(final);
+  } else {
+    // คืน ids ที่ assigned ให้ใครก็ตาม (จาก status_conversation — source of truth)
+    const fromStatus = await statusColl
+      .find({ assigned_to: { $exists: true, $nin: [null, ""] } }, { projection: { conversation_id: 1 } })
+      .toArray();
+    const setD = new Set(fromStatus.map((d) => d.conversation_id));
+
+    // รวมจาก conversations (legacy) ที่ assigned และไม่ถูก status_conversation override
+    const fromConv = await convColl
+      .find({ assigned_to: { $exists: true, $nin: [null, ""] } }, { projection: { conversation_id: 1 } })
+      .toArray();
+    for (const d of fromConv) {
+      if (!setD.has(d.conversation_id)) {
+        // เช็คว่า status_conversation มี entry นี้ไหม — ถ้ามีและ assigned_to เป็น null → ไม่นับ
+        const meta = await statusColl.findOne({ conversation_id: d.conversation_id });
+        if (!meta || !meta.assigned_to) {
+          setD.add(d.conversation_id);
+        }
+      }
+    }
+    return Array.from(setD);
+  }
 }
 
 function mapToConversation(
@@ -105,11 +170,11 @@ function mapToConversation(
 // ⚡ In-memory cache แบบ short-lived — ลด query ซ้ำจาก polling รัวๆ
 //    แต่ invalidate ทันทีเมื่อมีการส่ง/อ่าน/assign/resolve (ผ่าน invalidateCache)
 //    → ตอบ/อ่านแล้ว list อัปเดตทันที ไม่รอ 5 วิ
-//    เก็บทั้ง data และ totalCount (สำหรับ include_count=true)
-//    ⚡ v2 — dedupe cache version (กัน cache เก่าที่มี duplicate)
-let cache: { key: string; data: Conversation[]; totalCount?: number; ts: number; ver: number } | null = null;
-const CACHE_TTL = 3000; // 3 วิ — สั้นๆ เผื่อ invalidate ไม่ทัน
-const CACHE_VER = 2; // ⚡ bump version เมื่อเปลี่ยน cache shape
+//    เก็บทั้ง data, totalCount, hasMore, cursor (สำหรับ pagination)
+//    ⚡ v3 — รองรับ pagination (has_more + cursor) + cache ทุก assigned_to
+let cache: { key: string; data: Conversation[]; totalCount?: number; hasMore?: boolean; cursor?: string | null; ts: number; ver: number } | null = null;
+const CACHE_TTL = 5000; // ⚡ 5 วิ — ยาวกว่า poll interval (3 วิ) เพื่อให้บางรอบใช้ cache
+const CACHE_VER = 3; // ⚡ bump version เมื่อเปลี่ยน cache shape
 
 /** Invalidate cache — เรียกจาก send/assign/resolve/handoff route */
 export function invalidateConversationsCache() {
@@ -127,19 +192,49 @@ export async function GET(req: NextRequest) {
   const search = url.searchParams.get("q") || url.searchParams.get("search") || undefined;
   const assignedToParam = url.searchParams.get("assigned_to") || "all";
   const includeCount = url.searchParams.get("include_count") === "true";
-  const limitParam = parseInt(url.searchParams.get("limit") || "2000", 10);
+  // ⚡ compound cursor — "timestamp|conversation_id" (tiebreaker กันข้ามแชทที่ timestamp เดียวกัน)
+  const cursorParam = url.searchParams.get("cursor") || undefined;
+  let parsedCursor: { ts: Date; id: string } | undefined;
+  if (cursorParam) {
+    const sepIdx = cursorParam.indexOf("|");
+    if (sepIdx > 0) {
+      const tsStr = cursorParam.substring(0, sepIdx);
+      const idStr = cursorParam.substring(sepIdx + 1);
+      const ts = new Date(tsStr);
+      if (!isNaN(ts.getTime()) && idStr) {
+        parsedCursor = { ts, id: idStr };
+      }
+    } else {
+      // backward compat — cursor เดิมที่เป็นแค่ timestamp
+      const ts = new Date(cursorParam);
+      if (!isNaN(ts.getTime())) parsedCursor = { ts, id: "" };
+    }
+  }
+  const limitParam = parseInt(url.searchParams.get("limit") || "50", 10);
   const limit = Math.min(Math.max(limitParam, 1), 10000);
+  const me = r.ctx.admin.admin_id;
 
-  // ⚡ cache เฉพาะ assigned_to=all (เหมือนกันทุกคน) — กรณีอื่นไม่ cache
-  const canCache = assignedToParam === "all";
-  const cacheKey = `${assignedToParam}|${platform || ""}|${status || ""}|${shopId || ""}|${search || ""}|${limit}`;
+  // ⚡ cache ทุก assigned_to (key รวม assigned_to + cursor)
+  const canCache = true;
+  const cacheKey = `${assignedToParam}|${platform || ""}|${status || ""}|${shopId || ""}|${search || ""}|${limit}|${cursorParam || ""}`;
   const now = Date.now();
   if (canCache && cache && cache.key === cacheKey && cache.ver === CACHE_VER && now - cache.ts < CACHE_TTL) {
-    // ⚡ ถ้า include_count=true → คืน { rows, total_count } ถ้าไม่ใช่ → คืน array ตรงๆ
     if (includeCount) {
-      return json({ rows: cache.data, total_count: cache.totalCount ?? cache.data.length });
+      return json({ rows: cache.data, total_count: cache.totalCount ?? cache.data.length, has_more: cache.hasMore ?? false, cursor: cache.cursor ?? null });
     }
     return json(cache.data);
+  }
+
+  // ⚡ Pre-fetch assigned_to conversation_ids — กรองใน Mongo ไม่ใช่ใน JS
+  //   ทำให้ paginate ถูกต้อง (ไม่ใช่ดึง 2000 แล้วกรองเหลือ 50)
+  let conversationIds: string[] | undefined;
+  let excludeConversationIds: string[] | undefined;
+  if (assignedToParam === "me") {
+    conversationIds = await getAssignedConversationIds(me);
+  } else if (assignedToParam === "unassigned") {
+    excludeConversationIds = await getAssignedConversationIds();
+  } else if (assignedToParam !== "all") {
+    conversationIds = await getAssignedConversationIds(assignedToParam);
   }
 
   const docs = await conversationService.listConversations({
@@ -148,7 +243,17 @@ export async function GET(req: NextRequest) {
     shopId,
     search,
     limit,
+    cursor: parsedCursor,
+    conversationIds,
+    excludeConversationIds,
   });
+
+  // ⚡ hasMore — ถ้าดึงได้ครบ limit → อาจมีอีก
+  const hasMore = docs.length === limit;
+  // ⚡ compound cursor สำหรับ page ถัดไป = "timestamp|conversation_id" ของ doc สุดท้าย
+  const nextCursor = docs.length > 0
+    ? `${docs[docs.length - 1].last_message_timestamp.toISOString()}|${docs[docs.length - 1].conversation_id}`
+    : null;
 
   // ⚡ dedupe by conversation_id — DB อาจมี doc ซ้ำ (same conversation_id)
   const _seenConv = new Set<string>();
@@ -198,27 +303,8 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // Phase 7.9 — filter assigned_to ที่นี่ (service ยังไม่รองรับ field นี้)
-  // ⚡ Phase 2J — ใช้ assigned_to จาก meta ถ้ามี ไม่ใช่จาก conversations
+  // ⚡ assigned_to filter ทำใน Mongo แล้ว (pre-fetch) — ไม่ต้องกรองใน JS อีก
   let filtered = _dedupedDocs;
-  const me = r.ctx.admin.admin_id;
-  if (assignedToParam === "me") {
-    filtered = _dedupedDocs.filter((d) => {
-      const m = _metaMap.get(d.conversation_id);
-      return (m?.assigned_to || d.assigned_to) === me;
-    });
-  } else if (assignedToParam === "unassigned") {
-    filtered = _dedupedDocs.filter((d) => {
-      const m = _metaMap.get(d.conversation_id);
-      return !(m?.assigned_to || d.assigned_to);
-    });
-  } else if (assignedToParam !== "all") {
-    // กรองตาม admin_id เฉพาะเจาะจง
-    filtered = _dedupedDocs.filter((d) => {
-      const m = _metaMap.get(d.conversation_id);
-      return (m?.assigned_to || d.assigned_to) === assignedToParam;
-    });
-  }
 
   // 🔒 channels_access filter — admin ธรรมดาเห็นเฉพาะ conversation ใน channel ที่ตนมีสิทธิ์
   // superadmin/dev เห็นทั้งหมด (channels_access ว่าง = เห็นทั้งหมดด้วย เพื่อ backward compat)
@@ -229,17 +315,24 @@ export async function GET(req: NextRequest) {
   }
 
   const adminMap = await buildAdminNameMap();
-  // ⚡ batch compute unanswered counts (0.5s สำหรับ 1377 conversations)
-  const unansweredMap = await buildUnansweredMap();
+  // ⚡ page-scoped unanswered — กรองเฉพาะ conversations ใน page นี้ (ใช้ index { conversation_id: 1 })
+  //   ก่อนหน้านี้สแกนทั้ง messages collection → ช้ามาก
+  const pageConvIds = filtered.map((d) => d.conversation_id);
+  const unansweredMap = await buildUnansweredMap(pageConvIds);
   const conversations: Conversation[] = filtered.map((d) =>
     mapToConversation(d, adminMap, unansweredMap.get(d.conversation_id) || 0, _metaMap.get(d.conversation_id))
   );
-  // ⚡ ถ้า include_count=true → นับ total_count แบบไม่จำกัด limit แล้วส่งกลับ { rows, total_count }
+  // ⚡ ถ้า include_count=true → นับ total_count แบบไม่จำกัด limit แล้วส่งกลับ { rows, total_count, has_more, cursor }
   if (includeCount) {
     const countFilter: Record<string, unknown> = {};
     if (platform) countFilter.platform = platform;
     if (status) countFilter.status = status;
     if (shopId) countFilter.shop_id = shopId;
+    if (conversationIds) countFilter.conversation_id = { $in: conversationIds };
+    if (excludeConversationIds) {
+      const existing = countFilter.conversation_id as Record<string, unknown> | undefined;
+      countFilter.conversation_id = { ...(existing || {}), $nin: excludeConversationIds };
+    }
     if (search) {
       // 🔒 escape regex metacharacters
       const safeSearch = safeRegexSearch(search);
@@ -253,12 +346,12 @@ export async function GET(req: NextRequest) {
     }
     const convColl = await getCollection(COLLECTIONS.conversations);
     const totalCount = await convColl.countDocuments(countFilter);
-    // ⚡ save cache พร้อม totalCount
-    if (canCache) cache = { key: cacheKey, data: conversations, totalCount, ts: now, ver: CACHE_VER };
-    return json({ rows: conversations, total_count: totalCount });
+    // ⚡ save cache พร้อม totalCount + hasMore + cursor
+    if (canCache) cache = { key: cacheKey, data: conversations, totalCount, hasMore, cursor: nextCursor, ts: now, ver: CACHE_VER };
+    return json({ rows: conversations, total_count: totalCount, has_more: hasMore, cursor: nextCursor });
   }
 
   // ⚡ save cache (ไม่มี totalCount — ไม่จำเป็นถ้าไม่ใช่ include_count)
-  if (canCache) cache = { key: cacheKey, data: conversations, ts: now, ver: CACHE_VER };
+  if (canCache) cache = { key: cacheKey, data: conversations, hasMore, cursor: nextCursor, ts: now, ver: CACHE_VER };
   return json(conversations);
 }

@@ -10,6 +10,8 @@ import type { Platform } from "./conversationService";
 interface RawContent {
   message_type?: string;
   content?: Record<string, unknown>;
+  // ⚡ Shopee bundle_message เก็บ source_content ที่ raw.data.content.source_content
+  source_content?: Record<string, unknown> | null;
 }
 
 interface RawPayload {
@@ -22,12 +24,23 @@ interface RawPayload {
 
 // Shopee image host — thumb_url ใน raw_payload อาจเป็นแค่ hash ต้อง prepend
 const SHOPEE_IMAGE_HOST = "https://img.sp.mms.shopee.sg/";
+// ⚡ Shopee product image host — image_id_list ใน dbWallet ใช้ CDN คนละตัวกับ message media
+//    เหมือน Python _first_image_url: https://cf.shopee.co.th/file/{hash}
+const SHOPEE_PRODUCT_IMAGE_HOST = "https://cf.shopee.co.th/file/";
 
 function normalizeImageUrl(url: string | undefined): string | undefined {
   if (!url) return undefined;
   if (url.startsWith("http://") || url.startsWith("https://")) return url;
   // เป็น hash — prepend host
   return SHOPEE_IMAGE_HOST + url;
+}
+
+// ⚡ สำหรับ product image จาก dbWallet — ใช้ CDN ของ Shopee Thailand (มี /file/ ใน path)
+function normalizeProductImageUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  if (url.startsWith("http://") || url.startsWith("https://")) return url;
+  // เป็น hash — prepend product image host
+  return SHOPEE_PRODUCT_IMAGE_HOST + url;
 }
 
 export interface ParsedMessage {
@@ -40,6 +53,9 @@ export interface ParsedMessage {
   table?: MessageTable;
   // ⚡ bundle_message — มี sub-messages หลายตัว (Shopee bundle)
   bundle?: ParsedMessage[];
+  // ⚡ bundle_message — ถ้า source_content ว่าง แต่มี messages array (message_id strings)
+  //    API route จะ fetch sub-messages จาก DB ด้วย IDs เหล่านี้ แล้ว parse เป็น bundle field
+  bundle_message_ids?: string[];
 }
 
 /**
@@ -79,11 +95,19 @@ export function parseRawMessage(
   //   2. raw_payload.message_type (schema fallback)
   //   3. raw_payload.msg_type (schema fallback 2)
   const nestedContent = raw?.data?.content;
-  const msgType = (
+  // ⚡ normalize alias — Shopee บางครั้งส่งชื่อ tag ต่างจากที่เราใช้:
+  //   item_card → item, picture → image, faq_liveagents → faq_liveagent
+  const _rawMsgType = (
     nestedContent?.message_type
     || raw?.message_type
     || raw?.msg_type
     || "unknown"
+  ) as string;
+  const msgType = (
+    _rawMsgType === "item_card" ? "item"
+    : _rawMsgType === "picture" ? "image"
+    : _rawMsgType === "faq_liveagents" ? "faq_liveagent"
+    : _rawMsgType
   ) as MessageType;
   const inner = nestedContent?.content || raw?.content || {};
 
@@ -93,7 +117,7 @@ export function parseRawMessage(
   //    (data writer อาจใส่ placeholder แทน raw media)
   const ft = fallbackText.trim();
   // ⚡ ใช้ includes แทน ^ เพื่อ match ทุกที่ใน text (ไม่จำเป็นต้องขึ้นต้น)
-  if (/\[รูปภาพ\]|\[image\]/i.test(ft)) {
+  if (/\[รูปภาพ\]|\[image\]|\[picture\]/i.test(ft)) {
     if (msgType === "image") {
       // ไป switch case ข้างล่าง (มี url จาก raw_payload)
     } else {
@@ -105,7 +129,7 @@ export function parseRawMessage(
     } else {
       return { message_type: "video", text: fallbackText || "(วิดีโอ)" };
     }
-  } else if (/\[item\]|\[itemid\]|\[สินค้า\]/i.test(ft)) {
+  } else if (/\[item\]|\[itemid\]|\[item_card\]|\[สินค้า\]/i.test(ft)) {
     const idMatch = ft.match(/(\d{6,})/);
     if (msgType === "item" || msgType === "variation_card") {
       // ไป switch case (มี product_ref จาก raw_payload)
@@ -166,6 +190,13 @@ export function parseRawMessage(
     // ไป switch case ข้างล่าง (มี URL จาก raw_payload)
   } else if (/\[notification\]|\[แจ้งเตือน\]/i.test(ft)) {
     return { message_type: "notification", text: fallbackText || "", notification_text: "" };
+  } else if (/\[faq_liveagent\]|\[faq_liveagents\]|\[โอนเจ้าหน้าที่\]/i.test(ft)) {
+    // ⚡ faq_liveagent placeholder — แสดงเป็น system-style "โอนไปยังเจ้าหน้าที่"
+    return {
+      message_type: "faq_liveagent" as MessageType,
+      text: fallbackText || "(โอนไปยังเจ้าหน้าที่)",
+      notification_text: fallbackText || "โอนไปยังเจ้าหน้าที่",
+    };
   } else if (/\[variation_card\]|\[ตัวเลือกสินค้า\]/i.test(ft)) {
     if (msgType === "variation_card") {
       // ไป switch case
@@ -348,9 +379,16 @@ export function parseRawMessage(
     case "bundle_message":
     case "bundle_deal": {
       const c = inner as any;
-      // อ่าน item_id จาก source_content (อยู่ใน raw_payload ไม่ใช่ content)
+      // ⚡ อ่าน item_id จาก source_content — ลองหลายตำแหน่ง:
+      //    1. raw.source_content (top level)
+      //    2. raw.data.source_content
+      //    3. nestedContent.source_content (= raw.data.content.source_content) ← พบจริงใน DB
+      //    4. inner.source_content (= raw.data.content.content.source_content)
       const rawAny = raw as any;
-      const sourceContent = rawAny?.source_content || rawAny?.data?.source_content;
+      const sourceContent = rawAny?.source_content
+        || rawAny?.data?.source_content
+        || nestedContent?.source_content
+        || c?.source_content;
       const itemId = sourceContent?.item_id
         ? normalizeItemId(sourceContent.item_id)
         : c.item_id ? normalizeItemId(c.item_id) : "";
@@ -361,7 +399,19 @@ export function parseRawMessage(
           product_ref: { item_id: itemId },
         };
       }
-      // ไม่มี item_id → แสดงเป็น placeholder
+      // ⚡ ถ้าไม่มี item_id แต่มี messages array (message_id strings) →
+      //    เก็บ IDs ไว้ให้ API route fetch sub-messages จาก DB แล้ว parse เป็น bundle
+      const subMessageIds = c?.messages;
+      if (Array.isArray(subMessageIds) && subMessageIds.length > 0) {
+        return {
+          message_type: "bundle_message" as MessageType,
+          text: fallbackText && fallbackText !== "[bundle_message]"
+            ? fallbackText
+            : `Bundle (${subMessageIds.length} ข้อความ)`,
+          bundle_message_ids: subMessageIds.map(String),
+        };
+      }
+      // ไม่มี item_id และไม่มี messages → แสดงเป็น placeholder
       return { message_type: "text", text: fallbackText || "(bundle)" };
     }
 
@@ -383,22 +433,32 @@ export function toProductCard(
     doc.name || doc.item_name || doc.product_name || doc.title || "(ไม่มีชื่อสินค้า)"
   );
 
-  // ดึงรูป — schema ต่างกัน
+  // ดึงรูป — schema ต่างกันของแต่ละ platform
+  // ⚡ Shopee dbWallet: doc.image.image_id_list = ["hash1", "hash2"] (singular "image")
+  //    Python bot ใช้ https://cf.shopee.co.th/file/{hash} — ต้องใช้ host + path เดียวกัน
   let image: string | undefined;
-  const images = doc.images as any;
-  if (typeof images === "string") {
-    image = images;
-  } else if (Array.isArray(images)) {
-    image = images[0];
-  } else if (images && typeof images === "object") {
+  const imagesField = doc.images as any;
+  const imageField = doc.image as any;
+  if (typeof imagesField === "string") {
+    image = normalizeProductImageUrl(imagesField);
+  } else if (Array.isArray(imagesField)) {
+    image = normalizeProductImageUrl(String(imagesField[0] || ""));
+  } else if (imagesField && typeof imagesField === "object") {
     // Shopee: { image_id_list: [...] } หรือ { image_url_list: [...] }
-    const list = images.image_url_list || images.image_id_list;
+    const list = imagesField.image_url_list || imagesField.image_id_list;
     if (Array.isArray(list) && list.length > 0) {
-      image = normalizeImageUrl(String(list[0]));
+      image = normalizeProductImageUrl(String(list[0]));
     }
   }
-  if (!image && doc.image_url) image = String(doc.image_url);
-  if (!image && doc.image) image = String(doc.image);
+  // ⚡ Shopee dbWallet ใช้ doc.image (singular) มี image_id_list ข้างใน — เหมือน Python _first_image_url
+  if (!image && imageField && typeof imageField === "object") {
+    const list = imageField.image_url_list || imageField.image_id_list;
+    if (Array.isArray(list) && list.length > 0) {
+      image = normalizeProductImageUrl(String(list[0]));
+    }
+  }
+  if (!image && doc.image_url) image = normalizeProductImageUrl(String(doc.image_url));
+  if (!image && doc.image && typeof doc.image === "string") image = normalizeProductImageUrl(String(doc.image));
 
   // ดึง URL
   let url: string | undefined;

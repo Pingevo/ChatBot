@@ -71,6 +71,9 @@ export interface ShadowReplyDoc extends Document {
   bot_handoff_to_admin?: boolean;
   bot_handoff_reason?: string;
   bot_image_desc?: string;           // ⚡ A2 — vision description ของรูป current turn (cache กัน re-read)
+  // ⚡ chat_engine — บันทึกว่าคำตอบนี้มาจาก engine ไหน (legacy / v2)
+  //    ใช้ตอนเปรียบเทียบ — แยกคำตอบ legacy vs v2 ใน shadow inbox
+  chat_engine?: "legacy" | "v2";
   // ⚡ Phase 3B-6 — id กลุ่มรอบ generate (unique ต่อรอบ กด Generate ซ้ำแชทเดิมแยกกัน)
   //   format: gen_<convId>_<ts36>_<rand>
   //   ใช้ group + sort รอบใน UI, แยก annotation ตามรอบ
@@ -152,6 +155,8 @@ export async function generateShadowReply(opts: {
   conversationId: string;
   inboundMessageId?: string;
   generatedBy?: string;  // ⚡ Phase 3A — admin_id ของคนกด Generate (KPI)
+  // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
+  chatEngine?: "legacy" | "v2";
   botCaller: (params: {
     platform: Platform;
     message: string;
@@ -170,7 +175,7 @@ export async function generateShadowReply(opts: {
     image_desc?: string;
   }>;
 }): Promise<ShadowReplyDoc> {
-  const { conversationId, botCaller, generatedBy } = opts;
+  const { conversationId, botCaller, generatedBy, chatEngine } = opts;
 
   // อ่าน conversation จาก DB (ไม่เรียก platform API)
   const conv = await getConversation(conversationId);
@@ -309,6 +314,7 @@ export async function generateShadowReply(opts: {
     bot_handoff_to_admin: (botResp as any).handoff_to_admin,
     bot_handoff_reason: (botResp as any).handoff_reason,
     bot_image_desc: botResp.image_desc, // ⚡ A2 — cache vision description
+    chat_engine: chatEngine || "legacy", // ⚡ บันทึก engine ที่ใช้
     created_at: now,
     updated_at: now,
   };
@@ -349,6 +355,8 @@ export async function generateShadowReply(opts: {
 export async function generateConversationShadowReplies(opts: {
   conversationId: string;
   generatedBy?: string;  // ⚡ Phase 3A — admin_id ของคนกด Generate (KPI)
+  // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
+  chatEngine?: "legacy" | "v2";
   botCaller: (params: {
     platform: Platform;
     message: string;
@@ -368,7 +376,7 @@ export async function generateConversationShadowReplies(opts: {
   }>;
   onProgress?: (current: number, total: number, pair: { inbound_text: string }) => void;
 }): Promise<ShadowReplyDoc[]> {
-  const { conversationId, botCaller, onProgress, generatedBy } = opts;
+  const { conversationId, botCaller, onProgress, generatedBy, chatEngine } = opts;
 
   // ⚡ Phase 3B-6 — สร้าง batch_id สำหรับรอบนี้ (tag ทุก Q&A pair ในรอบเดียวกัน)
   const batchId = genGenerationBatchId(conversationId);
@@ -463,6 +471,7 @@ export async function generateConversationShadowReplies(opts: {
       bot_handoff_to_admin: (botResp as any).handoff_to_admin,
       bot_handoff_reason: (botResp as any).handoff_reason,
       bot_image_desc: botResp.image_desc, // ⚡ A2 — cache vision description
+      chat_engine: chatEngine || "legacy", // ⚡ บันทึก engine ที่ใช้
       generation_batch_id: batchId,  // ⚡ Phase 3B-6 — tag รอบ generate
       created_at: now,
       updated_at: now,

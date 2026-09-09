@@ -32,7 +32,7 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
-import { getSystemConfig, updateSystemConfig } from "@/backend/service/systemConfigService";
+import { getSystemConfig, updateSystemConfig, shouldUseChatV2 } from "@/backend/service/systemConfigService";
 import { assignmentService } from "@/backend/service/assignmentService";
 import { handoffService } from "@/backend/service/handoffService";
 // ⚡ Phase 2J — test-assignment ใช้ test version (เก็บใน test_status_conversation ไม่ใช่ status_conversation จริง)
@@ -45,16 +45,19 @@ import { parseRawMessage, toProductCard } from "@/backend/service/messageMediaPa
 import { productService } from "@/backend/service/productService";
 import { serverConfig } from "@/backend/lib/config";
 import type { Platform } from "@/backend/lib/safety";
+import { toBotText, toBotImages } from "@/backend/service/messageService";
 
 // ─── Helpers ──────────────────────────────────────────────
 
 async function callBot(params: {
   platform: Platform;
   message: string;
-  history: { role: "user" | "model"; text: string }[];
+  history: { role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[];
   shopId: string;
   shopName?: string;
   itemId?: string;  // ⚡ item_id จากการ์ดสินค้าที่ลูกค้าแชร์
+  orderSn?: string;  // ⚡ Phase 3C — order_sn จากการ์ดคำสั่งซื้อที่ลูกค้าแชร์
+  images?: string[];  // ⚡ Phase 1A — URL รูป/วิดีโอที่ลูกค้าส่ง (ส่งให้ bot vision pass)
 }): Promise<{
   answer: string;
   source?: string;
@@ -70,8 +73,10 @@ async function callBot(params: {
   // ⚡ handoff fields จาก bot (tax_invoice, warranty claim, etc.)
   handoff_to_admin?: boolean;
   handoff_reason?: string;
+  // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
+  chat_engine?: "legacy" | "v2";
 }> {
-  const { platform, message, history, shopId, shopName, itemId } = params;
+  const { platform, message, history, shopId, shopName, itemId, orderSn, images } = params;
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
   const headers: Record<string, string> = {
@@ -83,6 +88,13 @@ async function callBot(params: {
   else if (shopId) body.shop = shopId;
   // ⚡ ส่ง item_id ถ้าลูกค้าแชร์การ์ดสินค้ามาในแชท
   if (itemId) body.item_id = itemId;
+  // ⚡ Phase 3C — ส่ง order_sn ถ้าลูกค้าแชร์การ์ดคำสั่งซื้อมาในแชท
+  if (orderSn) body.order_sn = orderSn;
+  // ⚡ Phase 1A — ส่ง URL รูป/วิดีโอให้ bot ใช้ Gemini vision อ่าน
+  if (images && images.length > 0) body.images = images;
+  // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
+  const useV2 = await shouldUseChatV2();
+  if (useV2) body.use_v2 = true;
 
   // ⚡ 429 retry: รอ 60 วิ แล้วยิงใหม่ — สูงสุด 3 ครั้ง ถ้าเกินให้ throw
   const MAX_429_RETRIES = 3;
@@ -124,6 +136,8 @@ async function callBot(params: {
         // ⚡ handoff fields
         handoff_to_admin: data.handoff_to_admin === true,
         handoff_reason: data.handoff_reason,
+        // ⚡ chat_engine — บันทึก engine ที่ใช้
+        chat_engine: useV2 ? "v2" : "legacy",
       };
     } catch (err) {
       // ถ้า error เป็น 429-related → retry
@@ -424,6 +438,8 @@ interface ReplayQa {
   bot_source?: string;
   bot_model?: string;
   bot_elapsed?: number;
+  // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน (legacy / v2)
+  chat_engine?: "legacy" | "v2";
   // ⚡ bot products (item cards ที่บอทแนะนำ)
   bot_products?: { item_id: string; name: string; price?: number; image?: string; url?: string }[];
   // ⚡ pipeline info — intent/rag/llm2/search counts
@@ -774,15 +790,20 @@ export async function POST(req: NextRequest) {
       let assignedTo: string | null = null;
       let stopped = false;
 
-      const history: { role: "user" | "model"; text: string }[] = [];
+      const history: { role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[] = [];
 
       for (let i = 0; i < messages.length && !stopped; i++) {
         const msg = messages[i];
+        // ⚡ ใช้ toBotText แปลง rich media → tag ส่งบอท (เหมือน shadowbot/botworker)
+        //   เช่น [item] → [สินค้า: 12345], [order] → [order: ABC123]
+        //   ส่วน user_text ใน QA ยังเก็บ msg.text ดิบไว้สำหรับ display (MessageContent จัดการเอง)
+        const botText = toBotText(msg);
+        const userImages = toBotImages(msg);
         const userText = msg.text || "(empty)";
 
         try {
-          // 1. check trigger
-          const trigger = await triggerService.matchTrigger(userText, {
+          // 1. check trigger — ใช้ botText (แปลง rich media เป็น tag แล้ว) เพื่อ match คำจริง
+          const trigger = await triggerService.matchTrigger(botText, {
             shopId,
             platform,
           });
@@ -820,13 +841,16 @@ export async function POST(req: NextRequest) {
           const userItemId = userParsedInfo?.user_products && Array.isArray(userParsedInfo.user_products) && userParsedInfo.user_products.length > 0
             ? String((userParsedInfo.user_products[0] as Record<string, unknown>).item_id || "")
             : undefined;
+          const userOrderSn = userParsedInfo?.user_order_sn || undefined;  // ⚡ Phase 3C
           const botResp = await callBot({
             platform,
-            message: userText,
+            message: botText,
             shopId,
             shopName,
             history,
             itemId: userItemId,
+            orderSn: userOrderSn,  // ⚡ Phase 3C
+            images: userImages.length > 0 ? userImages : undefined,  // ⚡ Phase 1A
           });
 
           if (!botResp.answer || botResp.answer.trim() === "") {
@@ -856,8 +880,8 @@ export async function POST(req: NextRequest) {
             break;
           }
 
-          // bot ตอบได้ → สะสม history
-          history.push({ role: "user", text: userText });
+          // bot ตอบได้ → สะสม history (ใช้ botText + images เหมือนของจริง)
+          history.push({ role: "user", text: botText, ...(userImages.length > 0 ? { images: userImages } : {}) });
           history.push({ role: "model", text: botResp.answer });
 
           // ⚡ เช็ค handoff_to_admin จาก bot (tax_invoice, warranty claim, etc.)
@@ -882,6 +906,7 @@ export async function POST(req: NextRequest) {
               bot_source: botResp.source,
               bot_model: botResp.model,
               bot_elapsed: botResp.elapsed,
+              chat_engine: botResp.chat_engine || "legacy",
               bot_products: (botResp.products as { item_id: string; name: string; price?: number; image?: string; url?: string }[]) || [],
               bot_intent: botResp.intent,
               bot_retrieval_info: botResp.retrieval_info,
@@ -908,6 +933,7 @@ export async function POST(req: NextRequest) {
             bot_source: botResp.source,
             bot_model: botResp.model,
             bot_elapsed: botResp.elapsed,
+            chat_engine: botResp.chat_engine || "legacy",
             bot_products: (botResp.products as { item_id: string; name: string; price?: number; image?: string; url?: string }[]) || [],
             bot_intent: botResp.intent,
             bot_retrieval_info: botResp.retrieval_info,

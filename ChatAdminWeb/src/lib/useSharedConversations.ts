@@ -1,12 +1,18 @@
 "use client";
-// ⚡ G-share — Shared conversation store
+// ⚡ G-share — Shared conversation store with pagination
 //   หน้า tickets / shadow-inbox / replay-compare ดึง /admin/conversations ซ้ำกัน
 //   ใช้ store เดียว poll ครั้งเดียว แชร์กันหลายหน้า — ลดโหลด DB
 //
-//   วิธีใช้:
-//     const { conversations, totalCount, loading, refresh } = useSharedConversations({ filter });
+//   ⚡ Phase 1 pagination:
+//     - head = page 1 (50 ล่าสุด) — poll ทุก 3 วิ (real-time)
+//     - tail = page 2+ — โหลดเพิ่มตอน scroll (loadMore)
+//     - cursor = last_message_timestamp ของ tail สุดท้าย
+//     - hasMore = ยังมีของให้โหลดไหม
 //
-//   filter: { assigned_to?, platform?, status?, shop?, q?, limit? }
+//   วิธีใช้:
+//     const { conversations, totalCount, loading, loadMore, hasMore, loadingMore, refresh } = useSharedConversations({ filter });
+//
+//   filter: { assigned_to?, platform?, status?, shop?, q?, pageSize? }
 //   ถ้า filter เหมือนกัน → ใช้ cache ร่วมกัน (poll ครั้งเดียว)
 //   ถ้า filter ต่างกัน → ดึงแยก (แต่ยังใช้ store ร่วม)
 import { useEffect, useRef, useState, useCallback } from "react";
@@ -18,18 +24,26 @@ import type { Conversation } from "@/lib/types";
 const EMPTY_CONVERSATIONS: Conversation[] = [];
 
 interface StoreState {
-  data: Conversation[];
+  head: Conversation[];          // ⚡ page 1 (newest) — poll ทุก 3 วิ
+  tail: Conversation[];          // ⚡ page 2+ — โหลดเพิ่มตอน scroll
   totalCount: number;
-  loading: boolean;
+  hasMore: boolean;              // ⚡ ยังมี page ถัดไปไหม
+  cursor: string | null;         // ⚡ cursor สำหรับ page ถัดไป
+  loading: boolean;              // loading head (initial / filter change)
+  loadingMore: boolean;          // ⚡ loading tail (scroll)
   error: unknown;
   lastFetch: number;
   filterKey: string;
 }
 
 let store: StoreState = {
-  data: [],
+  head: [],
+  tail: [],
   totalCount: 0,
+  hasMore: false,
+  cursor: null,
   loading: false,
+  loadingMore: false,
   error: null,
   lastFetch: 0,
   filterKey: "",
@@ -49,15 +63,16 @@ function setStore(patch: Partial<StoreState>) {
 
 // ─── Polling controller ─────────────────────────────────────
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-const POLL_INTERVAL = 3000; // ⚡ 3 วิ — เท่า tickets เดิม
+const POLL_INTERVAL = 3000; // ⚡ 3 วิ — real-time
 let activeFilterKey = "";
 let activeFilter: Record<string, string> = {};
+let activePageSize = 50;
 
 function startPolling() {
   if (pollTimer) return;
   pollTimer = setInterval(async () => {
     if (store.loading) return; // กันซ้อน
-    await fetchConversations(activeFilterKey, activeFilter, true);
+    await fetchHead(activeFilterKey, activeFilter, activePageSize, true);
   }, POLL_INTERVAL);
 }
 
@@ -68,14 +83,16 @@ function stopPolling() {
   }
 }
 
-async function fetchConversations(
+// ⚡ fetchHead — ดึง page 1 (newest) — ใช้สำหรับ initial load + poll
+async function fetchHead(
   filterKey: string,
   filter: Record<string, string>,
+  pageSize: number,
   isPoll: boolean
 ): Promise<void> {
   // ถ้า filter เปลี่ยน → reset และ fetch ใหม่
   if (filterKey !== store.filterKey) {
-    setStore({ filterKey, data: [], totalCount: 0, loading: true });
+    setStore({ filterKey, head: [], tail: [], totalCount: 0, hasMore: false, cursor: null, loading: true, loadingMore: false });
   } else if (isPoll && store.loading) {
     return; // กันซ้อน
   }
@@ -83,15 +100,17 @@ async function fetchConversations(
   //   (เฉพาะ initial fetch / filter change เท่านั้นที่ loading=true)
 
   try {
-    const r = await api().get<{ rows: Conversation[]; total_count: number } | Conversation[]>(
+    const r = await api().get<{ rows: Conversation[]; total_count: number; has_more: boolean; cursor: string | null } | Conversation[]>(
       "/admin/conversations",
       {
-        params: { ...filter, include_count: "true" },
-        timeout: 45000,
+        params: { ...filter, include_count: "true", limit: String(pageSize) },
+        timeout: 15000,
       }
     );
     const rows = Array.isArray(r.data) ? r.data : (r.data.rows || []);
     const totalCount = Array.isArray(r.data) ? rows.length : (r.data.total_count ?? 0);
+    const hasMore = Array.isArray(r.data) ? false : (r.data.has_more ?? false);
+    const cursor = Array.isArray(r.data) ? null : (r.data.cursor ?? null);
     // dedupe
     const seen = new Set<string>();
     const deduped = rows.filter((c) => {
@@ -99,10 +118,17 @@ async function fetchConversations(
       seen.add(c.id);
       return true;
     });
+    // ⚡ merge head — ถ้ามี tail อยู่ ให้เอา head ใหม่ แล้วตัด tail ที่ซ้ำกับ head ออก
+    const headIds = new Set(deduped.map((c) => c.id));
+    const newTail = store.tail.filter((c) => !headIds.has(c.id));
     setStore({
-      data: deduped,
+      head: deduped,
+      tail: newTail,
       totalCount,
+      hasMore,
+      cursor,
       loading: false,
+      loadingMore: false,
       error: null,
       lastFetch: Date.now(),
       filterKey,
@@ -113,6 +139,49 @@ async function fetchConversations(
   }
 }
 
+// ⚡ fetchTail — ดึง page ถัดไป (เก่ากว่า cursor) — ใช้สำหรับ scroll load more
+async function fetchTail(
+  filterKey: string,
+  filter: Record<string, string>,
+  pageSize: number
+): Promise<void> {
+  // ต้องเป็น filter เดียวกัน + มี cursor + ไม่กำลังโหลดอยู่
+  if (filterKey !== store.filterKey) return;
+  if (!store.cursor || !store.hasMore) return;
+  if (store.loadingMore) return;
+
+  setStore({ loadingMore: true });
+
+  try {
+    const r = await api().get<{ rows: Conversation[]; total_count: number; has_more: boolean; cursor: string | null } | Conversation[]>(
+      "/admin/conversations",
+      {
+        params: { ...filter, include_count: "true", limit: String(pageSize), cursor: store.cursor },
+        timeout: 15000,
+      }
+    );
+    const rows = Array.isArray(r.data) ? r.data : (r.data.rows || []);
+    const hasMore = Array.isArray(r.data) ? false : (r.data.has_more ?? false);
+    const cursor = Array.isArray(r.data) ? null : (r.data.cursor ?? null);
+    // dedupe — กันซ้ำกับ head + tail ที่มีอยู่
+    const existingIds = new Set([...store.head.map((c) => c.id), ...store.tail.map((c) => c.id)]);
+    const newRows = rows.filter((c) => {
+      if (existingIds.has(c.id)) return false;
+      existingIds.add(c.id);
+      return true;
+    });
+    setStore({
+      tail: [...store.tail, ...newRows],
+      hasMore,
+      cursor,
+      loadingMore: false,
+      error: null,
+    });
+  } catch (err) {
+    setStore({ loadingMore: false, error: err });
+  }
+}
+
 // ─── Hook ───────────────────────────────────────────────────
 export interface ConversationFilter {
   assigned_to?: string; // "me" | "all" | "<admin_id>"
@@ -120,6 +189,8 @@ export interface ConversationFilter {
   status?: string;
   shop?: string;
   q?: string;
+  pageSize?: number; // ⚡ จำนวนต่อ page (default 50)
+  // ⚡ backward compat — หน้าเก่าส่ง limit มา แต่ตอนนี้ใช้ pageSize แทน
   limit?: number;
 }
 
@@ -130,7 +201,7 @@ function buildFilterKey(filter: ConversationFilter): string {
     filter.status || "",
     filter.shop || "",
     filter.q || "",
-    String(filter.limit || 2000),
+    String(filter.pageSize || filter.limit || 200),
   ].join("|");
 }
 
@@ -141,13 +212,13 @@ function buildFilterParams(filter: ConversationFilter): Record<string, string> {
   if (filter.status) params.status = filter.status;
   if (filter.shop) params.shop = filter.shop;
   if (filter.q) params.q = filter.q;
-  if (filter.limit) params.limit = String(filter.limit);
   return params;
 }
 
 export function useSharedConversations(filter: ConversationFilter = {}) {
   const filterKey = buildFilterKey(filter);
   const filterParams = buildFilterParams(filter);
+  const pageSize = filter.pageSize || filter.limit || 200;
   const [, forceRender] = useState(0);
   const subscribedRef = useRef(false);
 
@@ -166,7 +237,8 @@ export function useSharedConversations(filter: ConversationFilter = {}) {
   useEffect(() => {
     activeFilterKey = filterKey;
     activeFilter = filterParams;
-    fetchConversations(filterKey, filterParams, false);
+    activePageSize = pageSize;
+    fetchHead(filterKey, filterParams, pageSize, false);
     startPolling();
     return () => {
       // ถ้าไม่มี subscriber แล้ว → หยุด polling
@@ -179,21 +251,52 @@ export function useSharedConversations(filter: ConversationFilter = {}) {
   }, [filterKey]);
 
   const refresh = useCallback(async () => {
-    await fetchConversations(filterKey, filterParams, false);
-  }, [filterKey, filterParams]);
+    await fetchHead(filterKey, filterParams, pageSize, false);
+  }, [filterKey, filterParams, pageSize]);
+
+  // ⚡ loadMore — เรียกตอน scroll ใกล้ล่างเพื่อโหลด page ถัดไป
+  const loadMore = useCallback(async () => {
+    await fetchTail(filterKey, filterParams, pageSize);
+  }, [filterKey, filterParams, pageSize]);
+
+  // ⚡ conversations = head + tail — ใช้ ref-based comparison แทน useMemo
+  //   useMemo dep บน module-level store ไม่เสถียรในบางกรณี → infinite loop
+  //   ใช้ ref เก็บ reference เดิม + เปรียบเทียบโดยตรง → ได้ reference เดียวกันถ้า head/tail ไม่เปลี่ยน
+  const prevConvsRef = useRef<Conversation[]>(EMPTY_CONVERSATIONS);
+  const prevHeadRef = useRef<Conversation[] | null>(null);
+  const prevTailRef = useRef<Conversation[] | null>(null);
+  const prevFilterKeyRef = useRef<string>("");
+  let allConversations: Conversation[];
+  if (store.filterKey !== filterKey) {
+    allConversations = EMPTY_CONVERSATIONS;
+  } else if (store.head === prevHeadRef.current && store.tail === prevTailRef.current && filterKey === prevFilterKeyRef.current) {
+    // head/tail เดิม → ใช้ reference เดิม (กัน infinite loop)
+    allConversations = prevConvsRef.current;
+  } else {
+    allConversations = store.head.length === 0 ? store.tail
+      : store.tail.length === 0 ? store.head
+      : [...store.head, ...store.tail];
+    prevConvsRef.current = allConversations;
+    prevHeadRef.current = store.head;
+    prevTailRef.current = store.tail;
+    prevFilterKeyRef.current = filterKey;
+  }
 
   return {
-    conversations: store.filterKey === filterKey ? store.data : EMPTY_CONVERSATIONS,
+    conversations: allConversations,
     totalCount: store.filterKey === filterKey ? store.totalCount : 0,
     loading: store.filterKey === filterKey ? store.loading : true,
+    loadingMore: store.filterKey === filterKey ? store.loadingMore : false,
+    hasMore: store.filterKey === filterKey ? store.hasMore : false,
     error: store.filterKey === filterKey ? store.error : null,
     refresh,
+    loadMore,
   };
 }
 
 // ⚡ ใช้สำหรับ invalidate cache เมื่อมี mutation (send/assign/close)
 export function invalidateSharedConversations() {
   store = { ...store, lastFetch: 0 };
-  // trigger immediate refetch on next poll
-  fetchConversations(activeFilterKey, activeFilter, false).catch(() => {});
+  // trigger immediate refetch on next poll (head only — tail ไม่ reset)
+  fetchHead(activeFilterKey, activeFilter, activePageSize, false).catch(() => {});
 }

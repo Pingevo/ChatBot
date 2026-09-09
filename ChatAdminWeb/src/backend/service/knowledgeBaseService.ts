@@ -198,7 +198,7 @@ export async function updateKbEntry(
 }
 
 /** Upsert product_spec entries from parsed Excel rows (same shape as
- * scripts/import_adminbase.py). Matches by source_file + source_row so
+ * docs/adminbase/script/import_adminbase.py). Matches by source_file + source_row so
  * re-uploading the same file updates rather than duplicates. */
 export async function upsertProductSpecFromExcelRow(
   row: Partial<KbProductSpecDoc>,

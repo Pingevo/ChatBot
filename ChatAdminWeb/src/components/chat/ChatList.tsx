@@ -35,6 +35,11 @@ interface Props {
   // ⚡ Phase 3B-5 — ปุ่มลบรายแชท (soft delete) — ถ้าส่งมาจะ render ในแต่ละ row
   //   ใช้ span role=button เพื่อกัน nested <button> (hydration error)
   onDeleteConversation?: (conversationId: string) => void;
+  // ⚡ Phase 1 pagination — server-side infinite scroll
+  //   ถ้าส่งมา จะเรียก loadMore ตอน scroll ใกล้ล่างแทนการ slice ใน memory
+  loadMore?: () => void;
+  hasMore?: boolean;
+  loadingMore?: boolean;
 }
 
 // ⚡ แยก filter เป็น 2 ประเภท: สถานะแชท + สถานะข้อความ
@@ -122,6 +127,9 @@ export function ChatList({
   annotationsScope = "shadow_bot",
   onAnnotationsChange,
   onDeleteConversation,
+  loadMore,
+  hasMore = false,
+  loadingMore = false,
 }: Props) {
   const [search, setSearch] = useState("");
   // ⚡ server-side search debounce — ถ้ามี onSearchChange จะส่งไป API แทน client filter
@@ -230,6 +238,7 @@ export function ChatList({
   //    เมื่อ scroll ใกล้ล่าง โหลดเพิ่ม 50 รายการ
   //    ⚡ A1 — แยก "filter/sort เปลี่ยน" (reset renderCount) จาก "conversations poll ใหม่" (ไม่ reset)
   //      กัน scroll กระโดดกลับบนทุก 3 วิเมื่อ poll ดึง conversations ใหม่
+  //    ⚡ Phase 1 — ถ้ามี loadMore (server-side pagination) → เรียก API แทน slice
   const RENDER_BATCH = 50;
   const [renderCount, setRenderCount] = useState(RENDER_BATCH);
   const listRef = useRef<HTMLDivElement>(null);
@@ -245,13 +254,35 @@ export function ChatList({
       if (listRef.current) listRef.current.scrollTop = 0;
     }
   }, [filterSignature]);
+  // ⚡ หลัง loadMore โหลดเสร็จ (filtered.length เพิ่มขึ้น) → เพิ่ม renderCount อัตโนมัติ
+  //   กันกรณีผู้ใช้อยู่ล่างสุดแล้วไม่มี scroll event ใหม่มา trigger
+  const prevFilteredLenRef = useRef(filtered.length);
+  useEffect(() => {
+    if (filtered.length > prevFilteredLenRef.current) {
+      prevFilteredLenRef.current = filtered.length;
+      setRenderCount((c) => Math.min(c + RENDER_BATCH, filtered.length));
+    } else if (filtered.length < prevFilteredLenRef.current) {
+      // filter เปลี่ยนหรือ refresh → sync ref
+      prevFilteredLenRef.current = filtered.length;
+    }
+  }, [filtered.length]);
+  // ⚡ ใช้ incremental rendering เสมอ — slice 0..renderCount เพื่อลดจำนวน DOM
+  //   ถ้ามี loadMore (server-side pagination) → เรียก API เมื่อ render ครบที่โหลดแล้ว
+  //   ถ้าไม่มี loadMore → ใช้ client-side incremental rendering เดิม
   const visibleItems = filtered.slice(0, renderCount);
   const handleListScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
-    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200 && renderCount < filtered.length) {
-      setRenderCount((c) => Math.min(c + RENDER_BATCH, filtered.length));
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200) {
+      // เพิ่ม renderCount ก่อน (client-side incremental)
+      if (renderCount < filtered.length) {
+        setRenderCount((c) => Math.min(c + RENDER_BATCH, filtered.length));
+      }
+      // ⚡ ถ้า render ครบที่โหลดแล้ว + มี loadMore → เรียก API โหลด page ถัดไป
+      if (loadMore && hasMore && !loadingMore && renderCount >= filtered.length) {
+        loadMore();
+      }
     }
-  }, [renderCount, filtered.length]);
+  }, [renderCount, filtered.length, loadMore, hasMore, loadingMore]);
 
   function togglePlatform(p: Platform) {
     setPlatforms((prev) => {
@@ -483,7 +514,7 @@ export function ChatList({
       </div>
 
       {/* List */}
-      <div ref={listRef} onScroll={handleListScroll} className="flex-1 overflow-y-auto">
+      <div ref={listRef} onScroll={handleListScroll} className="flex-1 overflow-y-auto pb-2">
         {filtered.length === 0 ? (
           loading ? (
             <div className="p-6 text-center text-sm text-text-muted">กำลังค้นหา...</div>
@@ -573,6 +604,11 @@ export function ChatList({
           {renderCount < filtered.length && (
             <div className="p-2 text-center text-[10px] text-text-subtle">
               โหลดเพิ่ม... ({renderCount}/{filtered.length})
+            </div>
+          )}
+          {loadMore && hasMore && renderCount >= filtered.length && (
+            <div className="p-2 text-center text-[10px] text-text-subtle">
+              {loadingMore ? "กำลังโหลด..." : "เลื่อนลงเพื่อโหลดเพิ่ม..."}
             </div>
           )}
           </>

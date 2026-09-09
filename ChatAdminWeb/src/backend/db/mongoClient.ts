@@ -85,6 +85,11 @@ export async function ensureIndexes(): Promise<void> {
     //   โดยไม่มี compound index (leading fields = platform/shop_id) รองรับ → ต้องมี standalone index
     safeCreateIndex(db, COLLECTIONS.conversations, { last_message_timestamp: -1 }),
     safeCreateIndex(db, COLLECTIONS.conversations, { pinned: -1, last_message_timestamp: -1 }),
+    // ⚡ Phase 1 pagination — compound sort + cursor tiebreaker (กันข้ามแชทที่ timestamp เดียวกัน)
+    safeCreateIndex(db, COLLECTIONS.conversations, { pinned: -1, last_message_timestamp: -1, conversation_id: -1 }),
+    // ⚡ Phase 1 pagination — index สำหรับ pre-fetch assigned_to ids
+    safeCreateIndex(db, COLLECTIONS.statusConversation, { conversation_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.statusConversation, { assigned_to: 1 }, { sparse: true }),
     safeCreateIndex(db, COLLECTIONS.tickets, { ticket_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.tickets, { status: 1 }),
     safeCreateIndex(db, COLLECTIONS.tickets, { channel: 1 }),

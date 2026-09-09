@@ -10,6 +10,7 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { shadowReplyService } from "@/backend/service/shadowReplyService";
+import { shouldUseChatV2 } from "@/backend/service/systemConfigService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { serverConfig } from "@/backend/lib/config";
 import type { Platform } from "@/backend/lib/safety";
@@ -27,6 +28,7 @@ async function callOurBot(params: {
   history: { role: "user" | "model"; text: string }[];
   shopId: string;
   shopName?: string;
+  use_v2?: boolean;
 }): Promise<{
   answer: string;
   source?: string;
@@ -36,7 +38,7 @@ async function callOurBot(params: {
   cost?: number;
   products?: unknown[];
 }> {
-  const { platform, message, history, shopId, shopName } = params;
+  const { platform, message, history, shopId, shopName, use_v2 } = params;
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
 
@@ -48,6 +50,8 @@ async function callOurBot(params: {
   const body: Record<string, unknown> = { message, history, limit: 5 };
   if (shopName) body.shop = shopName;
   else if (shopId) body.shop = shopId;
+  // ⚡ chat_v2 — ส่ง use_v2 เพื่อบังคับใช้ chat_v2 (replay test)
+  if (use_v2) body.use_v2 = true;
 
   const resp = await fetch(url, {
     method: "POST",
@@ -78,20 +82,29 @@ export async function POST(req: NextRequest) {
   const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
-  const body = await readJson<{ conversation_id: string }>(req);
+  const body = await readJson<{ conversation_id: string; use_v2?: boolean }>(req);
   if (!body || !body.conversation_id) {
     return error("conversation_id is required", 422);
   }
 
   // 🔒 coerce เพื่อป้องกัน NoSQL injection
   const conversationId = String(body.conversation_id);
+  // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
+  //    ถ้า body ส่ง use_v2 มา explicit → override config
+  const configUseV2 = await shouldUseChatV2();
+  const useV2 = body.use_v2 === true || (body.use_v2 === undefined && configUseV2);
+  const chatEngine = useV2 ? "v2" : "legacy";
+  const botCaller = useV2
+    ? (p: Parameters<typeof callOurBot>[0]) => callOurBot({ ...p, use_v2: true })
+    : callOurBot;
 
   try {
-    console.log("[generate-conversation] start conv=", conversationId);
+    console.log("[generate-conversation] start conv=", conversationId, "engine=", chatEngine);
     const docs = await shadowReplyService.generateConversation({
       conversationId,
       generatedBy: r.ctx.admin.admin_id,  // ⚡ Phase 3A — บันทึกใครกด Generate (KPI)
-      botCaller: callOurBot,
+      chatEngine,  // ⚡ บันทึก engine ที่ใช้ใน shadow reply
+      botCaller,
     });
     // ⚡ Phase 3B-6 — ดึง generation_batch_id ที่ service แท็กไว้ใน results
     const batchId = (docs as unknown as { batchId?: string }).batchId;

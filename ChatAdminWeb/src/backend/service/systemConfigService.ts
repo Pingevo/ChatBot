@@ -66,6 +66,12 @@ export interface SystemConfigDoc extends Document {
   tiktok_bot_url: string;
   lazada_bot_url: string;
 
+  // === Chat Engine — เลือก logic ตอบของบอท ===
+  // "legacy" = app.py chat() (default, ปลอดภัย)
+  // "v2"     = chat_v2.py (pipeline ใหม่ 8 stages)
+  // มีผลทุกหน้า: shadowbot, botworker, test-assignment, live-assignment, replay-compare, testchat
+  chat_engine: 'legacy' | 'v2';
+
   updated_by: string;
   updated_at: Date;
 }
@@ -97,6 +103,8 @@ function getSafeDefaults(): Partial<SystemConfigDoc> {
     shopee_bot_url: process.env.CHATBOT_BASE_URL_SHOPEE || 'http://127.0.0.1:8010',
     tiktok_bot_url: process.env.CHATBOT_BASE_URL_TIKTOK || 'http://127.0.0.1:8011',
     lazada_bot_url: process.env.CHATBOT_BASE_URL_LAZADA || 'http://127.0.0.1:8012',
+    // ⚡ chat_engine — default "legacy" (ปลอดภัย), เปลี่ยนได้จากหน้า config
+    chat_engine: (process.env.CHAT_ENGINE as 'legacy' | 'v2') || 'legacy',
   };
 }
 
@@ -147,6 +155,9 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
     shopee_bot_url: dbConfig.shopee_bot_url ?? safeDefaults.shopee_bot_url ?? 'http://127.0.0.1:8010',
     tiktok_bot_url: dbConfig.tiktok_bot_url ?? safeDefaults.tiktok_bot_url ?? 'http://127.0.0.1:8011',
     lazada_bot_url: dbConfig.lazada_bot_url ?? safeDefaults.lazada_bot_url ?? 'http://127.0.0.1:8012',
+
+    // ⚡ chat_engine — "legacy" (default) หรือ "v2"
+    chat_engine: dbConfig.chat_engine ?? safeDefaults.chat_engine ?? 'legacy',
 
     updated_by: dbConfig.updated_by || 'system',
     updated_at: dbConfig.updated_at || new Date(),
@@ -201,6 +212,8 @@ export async function getSystemConfig(forceRefresh = false): Promise<SystemConfi
         shopee_bot_url: safeDefaults.shopee_bot_url ?? 'http://127.0.0.1:8010',
         tiktok_bot_url: safeDefaults.tiktok_bot_url ?? 'http://127.0.0.1:8011',
         lazada_bot_url: safeDefaults.lazada_bot_url ?? 'http://127.0.0.1:8012',
+        // ⚡ chat_engine — default "legacy"
+        chat_engine: safeDefaults.chat_engine ?? 'legacy',
         updated_by: 'initial_setup',
         updated_at: new Date(),
       };
@@ -244,6 +257,7 @@ export async function updateSystemConfig(
     'shopee_bot_url',
     'tiktok_bot_url',
     'lazada_bot_url',
+    'chat_engine',
   ];
 
   const sanitized: Record<string, unknown> = { updated_by: updatedBy, updated_at: new Date() };
@@ -263,6 +277,17 @@ export async function updateSystemConfig(
   // Force refresh cache
   cachedConfig = null;
   return getSystemConfig(true);
+}
+
+/**
+ * ⚡ shouldUseChatV2 — อ่าน chat_engine จาก SystemConfig
+ * ใช้ตัดสินใจว่าจะส่ง use_v2=true ให้ bot หรือไม่
+ * "legacy" → false (default, ปลอดภัย)
+ * "v2"     → true (ใช้ chat_v2 pipeline)
+ */
+export async function shouldUseChatV2(): Promise<boolean> {
+  const config = await getSystemConfig();
+  return config.chat_engine === 'v2';
 }
 
 /**

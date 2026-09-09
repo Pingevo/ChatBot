@@ -23,7 +23,7 @@ export type WorkflowNodeType = "trigger" | "condition" | "action" | "wait";
 export interface WorkflowNode {
   node_id: string;
   type: WorkflowNodeType;
-  subtype: string;         // ดูตารางใน workflow-planner.md
+  subtype: string;         // ดูตารางใน docs/plans/workflow-planner.md
   config: Record<string, unknown>;
   position: { x: number; y: number }; // สำหรับ canvas
 }

@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 
 // Minimal XLSX writer — no external deps. Produces a valid .xlsx file with one sheet.
-// Columns mirror scripts/import_adminbase.py expected fields.
+// Columns mirror docs/adminbase/script/import_adminbase.py expected fields.
 const COLUMNS = [
   "brand",
   "model",

@@ -102,10 +102,10 @@ export default function ShadowInboxPage() {
   // ⚡ G-share — ใช้ shared conversation store (แชร์กับ tickets)
   // ⚡ server-side search — ส่ง q ไป API ให้ค้นที่ DB ทั้งหมด
   const [searchQuery, setSearchQuery] = useState("");
-  const { conversations: sharedConvs, totalCount: sharedTotalCount, loading: sharedLoading } = useSharedConversations({
+  const { conversations: sharedConvs, totalCount: sharedTotalCount, loading: sharedLoading, loadMore: sharedLoadMore, hasMore: sharedHasMore, loadingMore: sharedLoadingMore } = useSharedConversations({
     assigned_to: "all",
     q: searchQuery || undefined,
-    limit: 2000,
+    pageSize: 200,
   });
   const [chatConversations, setChatConversations] = useState<Conversation[]>([]);
   const [chatTotalCount, setChatTotalCount] = useState<number>(0);
@@ -674,6 +674,9 @@ export default function ShadowInboxPage() {
             totalCount={originFilter === "all" ? chatTotalCount : undefined}
             onSearchChange={originFilter === "all" ? setSearchQuery : undefined}
             loading={sharedLoading}
+            loadMore={originFilter === "all" ? sharedLoadMore : undefined}
+            hasMore={originFilter === "all" ? sharedHasMore : false}
+            loadingMore={originFilter === "all" ? sharedLoadingMore : false}
             // ⚡ Phase 3B-6 — คืน annotation dot ใน conversation list (โชว์อันล่าสุดต่อแชท)
             //   mark รอบละเฉพาะทำใน ShadowConversationPanel (ต่อ batch selector) แทน
             annotationsMap={originFilter === "history" ? shadowAnnotationsMap : undefined}

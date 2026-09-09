@@ -295,7 +295,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `shops` | 263 | `GET /shops` | `_db()`, `product_store.list_shops` |
 | `categories` | 272 | `GET /categories` | `_db()`, `product_store.list_categories` |
 | `brands` | 281 | `GET /brands` — paginated | `_db()`, `os`, `re`, `Counter` |
-| `chat` | 368 | **`POST /chat` — main orchestrator** | ทุก pipeline stage (ดู section 5) |
+| `chat` | 368 | **`POST /chat` — main orchestrator** — **2026-09-14 (DEVICE-SPEC-LOOKUP + FILTER-UNAVAILABLE + COMPAT-RETRIEVAL GUARD + HYBRID-SUBTYPE)**: (1) เปิด `filter_unavailable` สำหรับ intent=product_recommend + compatibility_check (ปิดเฉพาะ product_spec/warranty ที่ลูกค้าอาจถามสินค้าที่ซื้อไปแล้ว) — กันแนะนำสินค้า sold_out ใน compat case; (2) guard `_hybrid_anchor_card` ครอบ compat-retrieval override — ถ้ามี hybrid anchor ให้ข้าม override (anchor มี subtype จากสินค้าจริงแม่นกว่า intent classifier); (3) guard `_hybrid_anchor_card` ใน charger_subtype_override — ถ้ามี anchor ให้ใช้ subtype จาก anchor แทน intent; (4) device spec lookup — ถ้า intent=compatibility_check + มี target_device → เรียก `web_search.search_and_extract` ดึง spec + keywords แล้ว re-query DB หาสินค้าที่ compatible + merge เข้า products + inject spec ใน `_combined_extra` ก่อน LLM ตอบ — กัน LLM แนะนำ 45W ให้เครื่องที่ชาร์จ 90W | ทุก pipeline stage (ดู section 5) |
 | `list_test_chat_sessions` | 5345 | `GET /test-chat/sessions` — กรองตาม admin_id (Phase 3) | `_admin_db()`, `Request.headers` |
 | `create_test_chat_session` | 5385 | `POST /test-chat/sessions` — เก็บ admin_id + admin_name (Phase 3) | `_admin_db()`, `_log_testchat_action`, `urllib.parse.unquote` |
 | `get_test_chat_session` | 5414 | `GET /test-chat/sessions/{id}` | `_admin_db()` |
@@ -309,9 +309,10 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ฟังก์ชัน | Line | หน้าที่ | เรียก |
 |---|---|---|---|
-| `_extract_item_id_tag` | 361 | extract `[item: xxx]` tag | `_ITEM_TAG_RE` |
+| `_extract_item_id_tag` | 361 | extract `[item: xxx]` tag — **2026-09-12**: (1) เพิ่ม charger subtype mismatch check — ถ้า message มี charger subtype ชัดและต่างจาก anchor → fall through ไป fetch_products; (2) เพิ่ม compat+target_device hybrid — ถ้า message มี "ใช้กับ/รองรับ" + phone brand → เก็บ anchor ใน context + fetch สินค้าที่รองรับ + merge anchor กับ products (ทั้ง KB+Mongo และ main flow) + เพิ่ม context note บอก LLM; (3) guard "อยากได้" ด้วย compat indicator — ถ้ามี "อยากได้" + "ใช้กับ" → ไม่ใช่ new topic; (4) guard "หัว" ลอยๆ — ถ้า _detect_charger_subtype=adapter แต่ไม่มี strong adapter kw (หัวชาร์จ/adapter/gan) → ใช้ anchor ต่อ (เหมือน CONV-ACTIVE guard); (5) เพิ่ม car_charger ใน _skip_ref_due_to_subtype — กัน REFERENCE block ดึง anchor จาก history ทับ car_charger retrieval | `_ITEM_TAG_RE`, `product_store._detect_charger_subtype`, `product_store._detect_product_types` |
 | `_record_suggestion_products` | 3938 | บันทึกสินค้าที่ bot แนะนำลง conversation_products timeline | `conversation_products.add_product` |
-| `_append_base_warranty` | 4455 | append warranty text เฉพาะเมื่อลูกค้าขอเงื่อนไขรับประกัน (มี "เงื่อนไข", "ยังไง", "อะไรบ้าง") ไม่ใช่ทุก warranty question | `knowledge_base.is_warranty_question`, `warranty` |
+| `_strip_kb_markup` | 5563 | **BUG-2 fix** — ขจัด KB markup `[[ ... ]]`, `---`, `หมายเหตุ:` ที่หลุดจาก LLM ก่อนส่งลูกค้า | `re` |
+| `_append_base_warranty` | 5590 | append warranty text เฉพาะเมื่อลูกค้าขอเงื่อนไขรับประกัน — **2026-09-14 (BUG-2)**: เรียก `_strip_kb_markup` ก่อนแนบ + หลังแนบ | `knowledge_base.is_warranty_question`, `warranty`, `_strip_kb_markup` |
 | `_detect_brand_question` | 3866 | detect "Xiaomi ขายอะไรบ้าง" | `re` |
 | `_build_brand_context` | 3896 | สร้าง context ของแบรนด์ | `os`, `re`, `Counter` |
 | `_merge_kb_mongo` | 3959 | รวม KB doc + Mongo product card | `_kb_doc_to_card`, `re` |
@@ -345,7 +346,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | Schema | Line | หน้าที่ |
 |---|---|---|
 | `ChatMessage` | 101 | `{role, text}` history entry |
-| `ChatRequest` | 106 | body `/chat` (message, shop, item_id, history, limit, handoff fields, simulate) |
+| `ChatRequest` | 106 | body `/chat` (message, shop, item_id, order_sn, history, limit, handoff fields, simulate) |
 | `ChatResponse` | 124 | response `/chat` (answer, products, source, usage, timing, web_search, handoff, routing_decision) |
 | `FeedbackRequest` | 170 | body `/feedback` |
 | `TestChatMessage`, `CreateSessionRequest`, `AddMessageRequest`, `UpdateSessionRequest` | 5320-5343 | test-chat schemas |
@@ -395,6 +396,26 @@ web_search.should_use_web_search(answer, intent, products, message)
 - **Side effects:** อ่าน MongoDB admin DB (`test_chat_logs`)
 - **Error/fallback:** exception → HTTP 500
 
+#### 6.1.7 NO-PRODUCT-GUARD — ห้าม LLM ตอบจาก context ที่ไม่น่าเชื่อถือ (BUG-10, 2026-09-08)
+
+- **Purpose**: กัน QA BUG-10 — เมื่อค้นสินค้าไม่เจอ หรือเจอแต่ผลมาจาก vector fuzzy ล้วน (ไม่มี product intent ใดๆ กำกับ) แล้วปล่อยไปให้ LLM ตอบ → LLM แต่งคำอธิบายสต็อก/แคตตาล็อกของร้านเอง (เช่น "สินค้าทุกรายการหมดสต็อก", "ร้านขายหัวชาร์จเป็นหลัก") — แทนที่ด้วยคำตอบตายตัว "ไม่พบข้อมูล + ส่งต่อแอดมิน"
+- **Input** (อ่านจากตัวแปรใน `chat()` หลัง shop fallback บรรทัด ~4638):
+  - `products` (list[dict]) — ผลค้นหาหลัง fallback ทุกชั้น (REF-NAME, charger subtype, shop)
+  - `_vision_context` (str) — ถ้ามีรูป (ไม่ว่าง) → ยกเว้น guard
+  - `_guard_has_intent` (bool) — มี product intent ไหม: `_guard_ptypes` (จาก `product_store._detect_product_types`) + `_guard_ref_models` (จาก `ref_models`) + `_guard_charger_sub` (จาก `_intent_sub` หรือ `product_store._detect_charger_subtype`) + `_guard_model_kw` (จาก `_cur_model_kw`) + `_is_conv_active`
+  - `_guard_seek_specific` (bool) — ถามหาของเฉพาะ: `("มี"+"ไหม") / "มีไหม"/"หาไหม"/"อยากได้"/"มีขาย"/"ขายไหม"` และไม่ใช่ browse (`แนะนำ/มาใหม่/โปร/ลดราคา/ขายดี/การ์ด/มือใหม่/ครบ/ดูสินค้า`)
+- **Output**: dict response (return ก่อนเข้า LLM) — `answer` ตายตัว, `products=[]`, `source="no_product_found_handoff"`, `handoff_to_admin=True`, `handoff_reason="no_product_found"`, `routing_decision=_routing("handoff", ...)`, `usage` ทั้งหมด 0 (ไม่เรียก LLM)
+- **Calls**: `product_store._detect_product_types`, `product_store._detect_charger_subtype`, `_routing`
+- **Called by**: `chat()` (inline block บรรทัด ~4638 — หลัง shop fallback ก่อน follow-up filter)
+- **How it works**:
+  1. ถ้า `_vision_context` ไม่ว่าง (ลูกค้าส่งรูป) → skip guard (ปล่อยไป LLM ตอบเรื่องรูป)
+  2. คำนวณ `_guard_has_intent` + `_guard_seek_specific`
+  3. แขน 1: `not products and (_guard_has_intent or _guard_seek_specific)` → guard
+  4. แขน 2: `products and not _guard_has_intent and _guard_seek_specific` → guard (ผล vector fuzzy ล้วนไม่น่าเชื่อ — เคส QA "หัวฉีด" ดึงพัดลมมา)
+  5. Guard ทำงาน → log `[NO-PRODUCT-GUARD]` + return คำตอบตายตัว + handoff
+- **Side effects**: log `[NO-PRODUCT-GUARD]` — ไม่มี DB write ในตัว (handoff ทำโดย caller ผ่าน `handoff_to_admin` field ใน response)
+- **Error/fallback**: ใช้ try/except NameError กับ `ref_models`/`_cur_model_kw` (อาจไม่ถูกประกาศในบาง path) → default None
+
 ---
 
 ### 6.2 `llm.py` — Gemini LLM
@@ -406,7 +427,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `answer` | 434 | ตอบคำถามสินค้าจาก product context | `_client()`, `_build_context()` |
 | `answer_with_kb` | 604 | ตอบจาก KB context (ไม่มี product_store) | `_client()` |
 | `answer_general` | 664 | ตอบคำถามทั่วไป (policy/brands/categories) | `_client()` |
-| `describe_image` | 476 | **Phase 1A** vision pass — อ่านรูป 1 รูปด้วย `gemini-3.1-flash-lite` (โหลด bytes → `Part.from_bytes`) → คืน (text, usage) | `_client()`, `urllib.request`, `types.Part.from_bytes()` |
+| `describe_image` | 476 | **Phase 1A** vision pass — อ่านรูป 1 รูปด้วย `gemini-3.1-flash-lite` (โหลด bytes → `Part.from_bytes`) → คืน (text, usage). **2026-09-12**: `_VISION_PROMPT` เพิ่ม guard กัน hallucination — อธิบายเฉพาะที่เห็นในรูปจริง ห้ามให้ `history_context` ไปกำหนดประเภทของรูป (เช่น คุยเรื่องพาวเวอร์แบงค์แล้วรูปแมวกลายเป็นพาวเวอร์แบงค์) | `_client()`, `urllib.request`, `types.Part.from_bytes()` |
 | `describe_images` | 516 | **Phase 1A** vision pass — อ่านหลายรูป (max 3) → คืน (combined_text, total_usage) | `describe_image()` |
 
 #### 6.2.2 API key management
@@ -421,7 +442,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ฟังก์ชัน | Line | หน้าที่ |
 |---|---|---|
-| `_build_context` | 357 | แปลง product cards → context string (พร้อม description_excerpt/weight/dimension) |
+| `_build_context` | 357 | แปลง product cards → context string (พร้อม description_excerpt/weight/dimension) — **2026-09-08 (BUG-10)**: (1) body เมื่อ products ว่าง เพิ่มคำเตือน "ห้ามสรุปว่าหมดสต็อก/เลิกขาย/ไม่มีจำหน่าย ห้ามอธิบายว่าร้านขายอะไรเป็นหลัก → บอกไม่พบข้อมูล + ชวนทักแอดมิน"; (2) header เปลี่ยน "ให้บอกตรงๆ ว่าร้านนี้ไม่มี" → "ให้บอกว่าไม่พบข้อมูลรุ่นนี้ในระบบค่ะ ห้ามบอกว่าหมดสต็อก/เลิกขาย เว้นแต่เห็น sold_out=true หรือ status != NORMAL ของรุ่นนั้นใน context จริงๆ" |
 | `split_segments` | 337 | แยก answer ด้วย `|||` |
 
 #### 6.2.4 Module constants
@@ -440,7 +461,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ฟังก์ชัน | Line | หน้าที่ | เรียก |
 |---|---|---|---|
-| `fetch_products` | 2385 | **central retrieval** — สร้าง query + filter + rerank + card | `_detect_*`, `build_query`, `vector_search`, `_filter_*`, `_rerank_*`, `to_product_card` |
+| `fetch_products` | 2385 | **central retrieval** — สร้าง query + filter + rerank + card — **2026-09-12 (FILTER-UNAVAILABLE)**: เพิ่ม param `filter_unavailable: bool = False` — เมื่อ True กรองสินค้า `status != NORMAL` หรือ `sold_out=True` ออกจาก cards; fallback ถ้ากรองแล้วว่าง → ปล่อยทั้งหมด + ฝัง `_context_note` ห้ามแนะนำขาย | `_detect_*`, `build_query`, `vector_search`, `_filter_*`, `_rerank_*`, `to_product_card` |
 | `fetch_product_by_id` | 2880 | ดึงสินค้าเดียวโดย `item_id` | `to_product_card` |
 | `fuzzy_match_products` | 559 | rapidfuzz fallback สำหรับพิมพ์ผิด | `_extract_product_name_tokens`, `to_product_card` |
 | `vector_search` | 68 | cosine similarity กับ embedding NPZ | `_load_vector_store`, `embedding.embed_query` |
@@ -449,8 +470,16 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ฟังก์ชัน | Line | หน้าที่ |
 |---|---|---|
-| `_detect_charger_subtype` | 1357 | detect `cable`/`adapter`/`set`/`car_charger`/`wireless`/`desktop`/`socket` จากข้อความ (รวม shorthand `"หัว"`/`"สาย"`) |
-| `_filter_charger_subtype` | 1477 | กรอง docs ให้ตรง subtype (พร้อมกฎ set/cable/adapter cross-inclusion) — อ่านทั้ง `item_name` และ `name` field |
+| `_detect_charger_subtype` | 1357 | detect `cable`/`adapter`/`set`/`car_charger`/`wireless`/`desktop`/`socket` จากข้อความ (รวม shorthand `"หัว"`/`"สาย"`) — มี typo normalization `"หัวชาจ"`→`"หัวชาร์จ"` ฯลฯ — **2026-09-08 (BUG-10)**: `_other_prod_kws` เพิ่ม `"หัวฉีด"`, `"หัวพ่น"`, `"หัวข้อ"` — กัน "หัวฉีด" (อะไหล่เครื่องฟอก/พ่นน้ำ) โดน shorthand "หัว" จับเป็น adapter → ดึงหัวชาร์จมาเป็น context ผิดประเภท → LLM แต่งแคตตาล็อกร้าน |
+| `_filter_charger_subtype` | 1477 | กรอง docs ให้ตรง subtype (พร้อมกฎ set/cable/adapter cross-inclusion) — อ่านทั้ง `item_name` และ `name` field — `car_charger_kw` ไม่มี `"ในรถ"` ลอยๆ (กัน false positive สายชาร์จ "ใช้งานในรถยนต์") |
+
+**`fetch_products` car_charger query split (Phase 2Z+++++, 2026-09-13):**
+- **Purpose**: car_charger มี cat_name เฉพาะ (`Spare Parts and Accessories for Vehicles`) แต่ charger ทั่วไปอยู่ใน `Mobile & Gadgets` มี 130+ ตัว → query limit 100 กด car charger ออก
+- **Input**: `product_types` (set), `query` (dict), `collection` (Mongo)
+- **Logic**: ถ้า `"car_charger" in product_types` และ `"cat_name" in query` → คำนวณ `car_only_cats` (cat_name ของ car_charger ที่ไม่อยู่ใน charger ทั่วไป) → query ด้วย `car_only_cats` อย่างเดียวก่อน (limit `max(limit*5, 50)`) → ถ้าได้ผล ใช้ผลนั้น (ไม่รวม charger ทั่วไป)
+- **Called by**: `fetch_products` (บรรทัด 2677-2695)
+- **Side effects**: print `[CAR-CHARGER-ONLY]` log ไป stderr
+- **Error/fallback**: ถ้า query car_charger อย่างเดียวได้ 0 → ใช้ query เดิม (รวม charger ทั่วไป)
 
 #### 6.3.3 Reranking
 
@@ -470,7 +499,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `build_query` | 1829 | สร้าง MongoDB filter (shop/brand/category/price/type/warranty) + feature-based search สำหรับ earphone (ANC/กันน้ำ/วิ่ง 2026-09-07) | `_detect_*`, `_product_type_*`, `warranty.strip_warranty_keywords` |
 | `_product_type_regex` | 1816 | join regex ของ detected types | — |
 | `_product_type_categories` | 1808 | ดึง candidate `cat_name` ของ types | — |
-| `_detect_product_types` | 1265 | exact keyword + regex detect product types | — |
+| `_detect_product_types` | 1265 | exact keyword + regex detect product types — มี typo fix `"หัวชาจ"`→`"หัวชาร์จ"` ฯลฯ ก่อน detect (Phase 2Z+++++) | — |
 | `_detect_product_types_fuzzy` | 1631 | pythainlp + rapidfuzz typo-tolerant detect | — |
 | `_extract_price_range` | 694 | regex ช่วงราคา (`1000-3000`, `ไม่เกิน 2000`) | — |
 | `_detect_shops` | 733 | detect known shop names | — |
@@ -515,7 +544,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `KNOWN_CATEGORIES` / `CATEGORY_ALIASES` | 764/771 | หมวดหมู่ + alias ไทย |
 | `PRODUCT_TYPES` | 829 | ~50 product types (name, user_kws, name_regex) |
 | `_CHARGER_SUBTYPES` | 1320 | cable/adapter/set/car_charger/wireless/desktop/socket keywords |
-| `_PRODUCT_TYPE_CATEGORIES` | 1736 | product type → candidate cat_name |
+| `_PRODUCT_TYPE_CATEGORIES` | 1736 | product type → candidate cat_name — `car_charger` เพิ่ม `Spare Parts and Accessories for Vehicles` (Phase 2Z+++++) |
 
 ---
 
@@ -528,6 +557,11 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `classify_intent` | 132 | **Pass 1 LLM classifier** — ถาม Gemini ให้คืน JSON intent | `_client()` |
 
 **Output keys**: `intent`, `product_type`, `charger_subtype`, `target_device`, `needs_description`, `confidence`, `model`, `usage`
+
+**`charger_subtype` values (Phase 2Z+++++, 2026-09-13):**
+- prompt กำหนดครบ: `cable`/`adapter`/`set`/`car_charger`/`wireless`/`desktop`/`socket`/`null`
+- มีตัวอย่าง: "มีหัวชาร์จในรถไหม"→`car_charger`, "มีแท่นชาร์จไร้สายไหม"→`wireless`
+- เหตุผล: เดิม prompt กำหนดแค่ `cable|adapter|set|null` → follow-up car charger ถูก classify เป็น adapter ผิด
 
 **`llm.py` include_desc merge (line ~539, แก้ 2026-09-03):**
 - **Purpose**: merge intent `needs_description` กับ keyword matching — ถ้าอย่างใดอย่างหนึ่งบอก True → ส่ง description
@@ -653,7 +687,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | ฟังก์ชัน | Line | หน้าที่ | เรียก |
 |---|---|---|---|
 | `detect_uncertainty` | 97 | scan answer หา uncertainty markers | — |
-| `should_use_web_search` | 119 | **multi-rule trigger** — config + skip + uncertainty + compat + spec + negative | `is_configured`, `detect_uncertainty`, `knowledge_base.extract_model_keywords` |
+| `should_use_web_search` | 119 | **multi-rule trigger** — config + skip + uncertainty + compat + spec + negative — **2026-09-14 (BUG-11)**: เพิ่ม guard greeting/thanks + ordinary_product_query_with_context (มี products อยู่แล้ว → skip) | `is_configured`, `detect_uncertainty`, `knowledge_base.extract_model_keywords` |
 
 **Skip conditions** (เมื่อ `_has_products=True`):
 - warranty / spec / comparison question
@@ -666,7 +700,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | ฟังก์ชัน | Line | หน้าที่ | เรียก |
 |---|---|---|---|
 | `search_and_extract` | 272 | **เรียก OpenRouter + parse JSON + extract keywords** | `is_configured`, `_get_openrouter_*`, `_log_ai_usage` |
-| `search_and_answer` | 502 | deprecated wrapper | `search_and_extract` |
+| `search_and_answer` | 502 | deprecated wrapper — **2026-09-14**: เพิ่ม URL stripping ก่อนคืนคำตอบ (กันลิงก์เว็บนอกหลุดไปลูกค้า) | `search_and_extract` |
 
 #### 6.6.3 Helpers
 
@@ -832,6 +866,11 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `get_suggestion_latest` | 210 | ดึง suggestion product ล่าสุด (bot แนะนำ) |
 | `resolve_active_by_message` | 230 | resolve active product ตามกฎ priority (ชื่อรุ่น → ตัวเดิม → อันที่แนะนำ → default) |
 | `is_generic_question` | 280 | ตรวจว่าคำถามเป็น generic (ไม่ระบุสินค้า) หรือไม่ |
+| `add_order_anchor` | 340 | ⚡ Phase 3C — บันทึก order_sn เป็น anchor ใน timeline (field `order_anchors` + `active_order_sn`) |
+| `get_active_order_sn` | 420 | ⚡ Phase 3C — ดึง active order_sn (order ล่าสุดที่ลูกค้าส่งมา) |
+| `get_order_anchors` | 430 | ⚡ Phase 3C — ดึง order anchors ทั้งหมด (เรียงใหม่→เก่า) |
+| `resolve_active_order_sn` | 450 | ⚡ Phase 3C — resolve order_sn ตามกฎ (order_sn ใน message → order เดิม → order generic → None) |
+| `is_order_question` | 490 | ⚡ Phase 3C — ตรวจว่าคำถามเกี่ยวกับ order หรือไม่ |
 
 #### 6.9.3 Helpers
 
@@ -863,6 +902,15 @@ Mongo document schema:
     }
   ],
   active_item_id: 47615436122,  // anchor ล่าสุด
+  // ⚡ Phase 3C — order anchors
+  order_anchors: [
+    {
+      order_sn: "240215MCEQMT60",
+      mentioned_at: ISODate,
+      summary: { order_status: "จัดส่งแล้ว", shipping_carrier: "Kerry", total_amount: 259, item_count: 1, create_time: "15 ก.พ. 2567" }
+    }
+  ],
+  active_order_sn: "240215MCEQMT60",  // order ล่าสุด
   last_updated: ISODate,
 }
 ```
@@ -874,6 +922,13 @@ Mongo document schema:
 3. ถ้า message พูด "อันที่แนะนำ/ที่ส่งมา" → suggestion ล่าสุด
 4. ถ้า message เป็น generic question → active product (anchor ล่าสุด)
 5. default → active product
+
+#### 6.9.5b Priority rules (active order — Phase 3C)
+
+1. ถ้า message มี order_sn อยู่แล้ว → ใช้ order_sn นั้น
+2. ถ้า message พูด "order เดิม/คำสั่งซื้อเดิม" → active order (ล่าสุด)
+3. ถ้า message เป็น order generic question ("สถานะ order", "order ถึงยัง") → active order
+4. ถ้าไม่ตรงเงื่อนไขไหน → None (ไม่ใช่คำถามเรื่อง order)
 
 #### 6.9.6 Integration in app.py
 
@@ -887,6 +942,8 @@ Mongo document schema:
 | kb+mongo return | ~2695 | ⚡ เรียก `_record_suggestion_products` ก่อน return (source=knowledge_base+mongo) |
 | web_search return | ~3894 | เรียก `_record_suggestion_products` ก่อน return |
 | product_store return | ~3920 | เรียก `_record_suggestion_products` ก่อน return |
+| ⚡ order anchor resolve | ~640 | Phase 3C — ถ้าไม่มี order_sn ใน message แต่เป็น order question → ใช้ active order anchor |
+| ⚡ order anchor save | ~730 | Phase 3C — บันทึก order anchor หลัง lookup_order สำเร็จ |
 
 #### 6.9.7 Called by
 
@@ -940,12 +997,15 @@ Mongo document schema:
 | `_get_order_collection` | 49 | คืน PyMongo collection สำหรับ orders |
 | `_map_order_status` | 196 | แปล order_status เป็นภาษาไทย |
 | `_map_logistics_status` | 201 | แปล logistics_status เป็นภาษาไทย |
-| `_format_create_time` | 206 | แปล unix timestamp เป็นวันที่ภาษาไทย (UTC+7) |
+| `_format_create_time` | 250 | แปล unix timestamp เป็นวันที่ภาษาไทย (UTC+7) — alias ของ `_format_unix_ts` |
+| `_format_unix_ts` | 257 | ⚡ Phase 3C — แปล unix timestamp / ISO string เป็นวันที่ภาษาไทย (รองรับทั้ง int และ ISO string) |
+| `_format_unix_ts_with_time` | 285 | ⚡ Phase 3C — แปล unix timestamp เป็นวันที่+เวลาภาษาไทย |
+| `_format_address` | 310 | ⚡ Phase 3C — แปล recipient_address dict เป็น string อ่านง่าย (ปกปิด sensitive) |
 | `_normalize_tracking` | 137 | normalize tracking number (ตัดช่องว่าง + ใหญ่) |
 
 #### 6.10.4 Data structures
 
-`lookup_order` return:
+`lookup_order` return (Phase 3C — ขยายจากเดิม):
 ```python
 {
   "order_sn": "240215MCEQMT60",
@@ -953,12 +1013,26 @@ Mongo document schema:
   "order_status_raw": "SHIPPED",
   "logistics_status": "ขนส่งรับพัสดุแล้ว",
   "logistics_status_raw": "LOGISTICS_PICKUP_DONE",
-  "items": [{"name": "...", "model_name": "...", "quantity": 1, "price": 259.0, "image_url": "...", "sku": "...", "item_id": "...", "model_id": "..."}],
+  "items": [{"name": "...", "model_name": "...", "quantity": 1, "price": 259.0, "original_price": 318.0, "image_url": "...", "sku": "...", "item_id": "...", "model_id": "..."}],
   "shipping_carrier": "Kerry",
   "tracking_no": "SPX1234567890",
-  "tracking_numbers": ["SPX1234567890"],  # ทุก tracking ถ้ามีหลาย package
+  "tracking_numbers": ["SPX1234567890"],
   "create_time": "15 ก.พ. 2567",
-  "create_time_raw": 1708012800,  # unix ts สำหรับ warranty calc
+  "create_time_raw": 1708012800,
+  # ⚡ Phase 3C — ฟิลด์ใหม่
+  "pay_time": "15 ก.พ. 2567",              # วันที่ชำระเงิน
+  "ship_by_date": "17 ก.พ. 2567",          # วันที่ส่งกำหนด
+  "pickup_done_time": "16 ก.พ. 2567",      # วันที่ขนส่งรับพัสดุ
+  "delivery_time": "ไม่ระบุ",               # วันที่ส่งถึง (จาก update_time เมื่อ COMPLETED)
+  "update_time": "18 ก.พ. 2567",           # วันที่อัปเดตล่าสุด
+  "recipient_address": "****** คลองโยง อำเภอพุทธมณฑล จังหวัดนครปฐม 73170 · ชื่อ: ล******ง · เบอร์: ******31",
+  "estimated_shipping_fee": 48.0,
+  "actual_shipping_fee": 0.0,
+  "days_to_ship": 2,
+  "cod": False,                             # เก็บเงินปลายทาง
+  "cancel_by": "",                          # ยกเลิกโดยใคร (ถ้า CANCELLED)
+  "cancel_reason": "",
+  "buyer_cancel_reason": "",
   "total_amount": 259.0,
   "currency": "THB",
   "buyer_username": "witchayaporn773",
@@ -1164,6 +1238,143 @@ fetch_products
 └── to_product_card
     └── _price_range / _warranty_info / _first_image_url / _clean_description
 ```
+
+---
+
+### 6.11 `chat_v2.py` — Pipeline ใหม่ 8 stages (alternative to legacy `chat()`)
+
+> **Feature flag**: `USE_LEGACY_CHAT=1` (default) → legacy `chat()` / `USE_LEGACY_CHAT=0` → `chat_v2()`
+> **Status**: syntax + unit test ผ่าน, ยังไม่ได้ทดสอบ runtime (ต้องมี google.genai + MongoDB)
+
+#### 6.11.1 Purpose
+
+แทนที่ legacy `chat()` ใน `app.py` (5000+ บรรทัด, 15+ early return, 20+ shared mutable state) ด้วย pipeline 8 stages ที่:
+- แต่ละ stage เป็น function แยก ไม่มี shared mutable state
+- คืน None ถ้าไม่จับเคส → ไป stage ถัดไป
+- ไม่มี early return ใน main `chat_v2()` นอกจาก deterministic check
+
+#### 6.11.2 Pipeline stages
+
+| Stage | Function | หน้าที่ |
+|---|---|---|
+| 1 | `_build_context(req)` | setup + history + persona + vision |
+| 2 | `_check_deterministic(req, ctx, history)` | order/tracking/tax/human/warranty/general/brand |
+| 3 | `_classify_intent(req, ctx, history)` | LLM intent + superlative/multi-usecase/charging-spec/wattage |
+| 4 | `_detect_anchor(req, ctx, history, db)` | anchor + subtype mismatch check |
+| 5 | `_retrieve_products(req, ctx, history, intent, anchor, db)` | RAG (KB+DB) + follow-up + rerank + filter |
+| 6 | `_search_if_needed(req, ctx, history, intent, products, db)` | search → RAG → LLM2 (ไม่ตอบตรง) |
+| 7 | `_no_product_guard(req, ctx, intent, products, extra_context)` | ด่านสุดท้าย หลัง search แล้วไม่เจอ |
+| 8 | `_build_answer(req, ctx, history, intent, anchor, products, extra_context)` | LLM2 ตอบ |
+
+#### 6.11.3 Helper functions
+
+| ฟังก์ชัน | หน้าที่ |
+|---|---|
+| `_extract_item_id(message)` | สกัด item_id จาก `[สินค้า: XXX]` |
+| `_extract_order_sn(message)` | สกัด order_sn จาก `[order: XXX]` + fallback |
+| `_extract_tracking(message)` | สกัด tracking number |
+| `_has_image_placeholder(message)` | ตรวจ `[รูปภาพ]/[วิดีโอ]/[sticker]` |
+| `_is_image_only(message)` | ตรวจ message เป็นแค่ placeholder |
+| `_extract_product_subtype(message)` | สกัด charger subtype |
+| `_extract_product_types(message)` | สกัด product types |
+| `_extract_target_device(message)` | สกัด target device (Xiaomi 17 Ultra, iPhone 13) |
+| `_is_superlative_question(message)` | ตรวจ "สุด/ที่สุด/แรงสุด/ไวสุด" |
+| `_is_charging_spec_question(message)` | ตรวจ "ใช้สายชาร์จอะไร/ชาร์จยังไง/พอร์ตอะไร" |
+| `_detect_multi_usecase(message)` | ตรวจ scenario+feature pairs (วิ่ง+ANC, ในรถ+แม่เหล็ก) |
+| `_extract_wattage(message)` | สกัด "65w", "100 วัตต์" → int |
+| `_adjust_fetch_limit_for_superlative()` | superlative → limit * 5 (สูงสุด 50) |
+| `_augment_retrieval_for_superlative()` | superlative + "ชาร์จ" → เพิ่ม powerbank ใน retrieval |
+| `_detect_followup_products(req, history, db)` | ดึงสินค้าจาก conversation_products timeline |
+| MODEL-REGEX pre-filter (inline in `_retrieve_products` 5.2c) | สกัด model keyword จาก message → Mongo `item_name` regex search → ใช้เป็น products หลัก แทน broad vector search |
+| `_rerank_products(products, message, intent, anchor)` | เรียงตาม anchor → normal → match → watt → usecase |
+| `_filter_unavailable_products(products)` | กรอง sold_out/non-NORMAL (เฉพาะ product_recommend) |
+| `_make_response(answer, products, ctx, ...)` | สร้าง ChatResponse dict สม่ำเสมอ |
+| `_check_warranty_state_machine(req, ctx, history)` | เรียก `warranty_flow.handle_warranty_flow()` |
+
+#### 6.11.4 Calls
+
+- `_build_context` → `app._db()`, `persona.get_persona()`, `llm.describe_images()`
+- `_check_deterministic` → `order_store`, `warranty.detect_*`, `app._routing()`
+- `_check_warranty_state_machine` → `warranty_flow.handle_warranty_flow()`
+- `_classify_intent` → `intent_classifier.classify_intent()`, `product_store._detect_*`
+- `_detect_anchor` → `product_store.fetch_product_by_id()`, `conversation_products.add_item_anchor()`
+- `_retrieve_products` → `knowledge_base.lookup_kb()`, `product_store.fetch_products()`, `product_store.to_product_card()`, `conversation_products.get_timeline()`, Mongo `db[coll].find()` (MODEL-REGEX pre-filter)
+- `_search_if_needed` → `web_search.search_and_extract()`, `product_store.fetch_products()`
+- `_build_answer` → `llm.answer()`, `app._append_base_warranty()`
+
+#### 6.11.5 Called by
+
+- `app.chat()` เมื่อ `USE_LEGACY_CHAT=0` → เรียก `chat_v2.chat_v2(req)`
+
+#### 6.11.6 Side effects
+
+- DB write: `conversation_products.add_item_anchor()` (anchor timeline)
+- HTTP call: handoff API (ผ่าน `warranty_flow`)
+- Log: `[RAG-V2]`, `[ANCHOR-V2]`, `[SUPERLATIVE-V2]`, `[COMPAT-V2]`, `[INTENT-V2]`
+
+#### 6.11.7 Error/fallback
+
+- ถ้า LLM error → `HTTPException(500)`
+- ถ้า DB error → log + ดึงสินค้า 0 ตัว → no_product_guard
+- ถ้า search error → ใช้ products เดิม
+- ถ้า anchor ไม่เจอ → ดึงสินค้าปกติ
+
+---
+
+### 6.12 `warranty_flow.py` — Warranty state machine (ย้ายจาก legacy)
+
+> **Source**: ย้ายจาก `app.py` บรรทัด 1413-2351 (Warranty Claim State Machine)
+> **Status**: logic เดิม 100%, verify ผ่าน 12 แชทใน ledger
+
+#### 6.12.1 Purpose
+
+ห่อ warranty state machine จาก legacy `app.py` ให้ `chat_v2` เรียกได้โดยไม่ต้องเขียน logic ใหม่
+
+#### 6.12.2 Main function
+
+| ฟังก์ชัน | หน้าที่ |
+|---|---|
+| `handle_warranty_flow(req, ctx, history, db)` | จัดการ warranty state machine ทั้ง 10 states |
+| `_handle_review_request()` | State 1: ลูกค้าขอทวนข้อมูล |
+| `_build_post_handoff_response()` | State 2: post-handoff lock |
+| `_build_warranty_claim_response()` | สร้าง response + handoff API call |
+| `_handle_warranty_date_followup()` | State 8: คำนวณช่วงประกัน |
+| `_handle_tax_invoice_followup()` | State 9: tax invoice follow-up |
+| `_handle_first_message_claim()` | State 10: first-message claim |
+
+#### 6.12.3 States ที่จัดการ
+
+1. Review request — ลูกค้าขอทวนข้อมูล
+2. Post-handoff lock — บอทเคย handoff แล้ว ลูกค้าทักใหม่
+3. Awaiting claim info — ลูกค้าส่งรูป/วิดีโอ/ข้อมูลบางส่วน
+4. Awaiting customer info — ลูกค้าให้ชื่อ/เบอร์/order
+5. Awaiting confirmation — ลูกค้ายืนยันหรือแก้ข้อมูล
+6. Out of warranty consult — ลูกค้าสนใจปรึกษาแอดมิน
+7. Duration answered + claim request — ถามวันที่ซื้อ + handoff
+8. Warranty date follow-up — คำนวณช่วงประกัน
+9. Tax invoice follow-up — บอทเคยตอบใบกำกับ ลูกค้าตอบต่อ
+10. First-message claim — claim request ไม่มี history
+
+#### 6.12.4 Calls
+
+- `handle_warranty_flow` → `warranty.detect_claim_request()`, `warranty.parse_purchase_date()`, `warranty.extract_customer_info()`, `warranty.is_in_warranty()`, `product_store._warranty_info()`, `app._get_post_handoff_exceptions()`, `app._routing()`
+- `_build_warranty_claim_response` → handoff API (urllib)
+
+#### 6.12.5 Called by
+
+- `chat_v2._check_warranty_state_machine()` → `warranty_flow.handle_warranty_flow()`
+
+#### 6.12.6 Side effects
+
+- HTTP call: handoff API (`ADMIN_HANDOFF_URL`)
+- DB read: `db[ShpProducts].find()` (สำหรับ warranty date followup)
+- Log: `[WARRANTY-CLAIM]`, `[HANDOFF-V2]`, `[WARRANTY-DATE-V2]`
+
+#### 6.12.7 Error/fallback
+
+- ถ้า DB error → log + คืน None (ไป pipeline หลัก)
+- ถ้า handoff API error → log + ยังส่งคำตอบให้ลูกค้า
+- ถ้าไม่ใช่ warranty flow → คืน None → ไป pipeline หลัก
 
 ---
 

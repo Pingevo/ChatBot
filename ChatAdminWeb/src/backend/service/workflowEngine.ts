@@ -1,5 +1,5 @@
 // Workflow Engine — รัน flow + resume + eval condition + ทำ action
-// (แบบ Zaapi Flow Builder — อ้างอิง workflow-planner.md)
+// (แบบ Zaapi Flow Builder — อ้างอิง docs/plans/workflow-planner.md)
 //
 // Pipeline ที่เสียบใน processMessage:
 //   ① Active Flow Resume (เสมอ ไม่สน priority)

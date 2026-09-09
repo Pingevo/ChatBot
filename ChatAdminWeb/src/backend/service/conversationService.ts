@@ -125,26 +125,59 @@ export async function listConversations(opts: {
   status?: ConversationStatus;
   search?: string;
   limit?: number;
+  cursor?: { ts: Date; id: string };       // ⚡ compound cursor — timestamp + conversation_id (tiebreaker)
+  conversationIds?: string[];              // ⚡ filter by conversation_id (for assigned_to)
+  excludeConversationIds?: string[];       // ⚡ exclude conversation_ids (for unassigned)
 } = {}): Promise<ConversationDoc[]> {
   const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
   const filter: Record<string, unknown> = {};
   if (opts.platform) filter.platform = opts.platform;
   if (opts.shopId) filter.shop_id = opts.shopId;
   if (opts.status) filter.status = opts.status;
+  // ⚡ compound cursor — กันข้ามแชทที่มี timestamp เดียวกัน
+  //   sort: { pinned:-1, last_message_timestamp:-1, conversation_id:-1 }
+  //   cursor filter: (ts < cursor.ts) OR (ts = cursor.ts AND conversation_id < cursor.id)
+  if (opts.cursor) {
+    filter.$or = [
+      { last_message_timestamp: { $lt: opts.cursor.ts } },
+      { last_message_timestamp: opts.cursor.ts, conversation_id: { $lt: opts.cursor.id } },
+    ];
+  }
+  // ⚡ assigned_to filter — กรองใน Mongo ไม่ใช่ใน JS (กัน paginate แล้วเหลือน้อยเกิน)
+  if (opts.conversationIds && opts.conversationIds.length > 0) {
+    filter.conversation_id = { $in: opts.conversationIds };
+  }
+  if (opts.excludeConversationIds && opts.excludeConversationIds.length > 0) {
+    const existing = filter.conversation_id as Record<string, unknown> | undefined;
+    filter.conversation_id = { ...(existing || {}), $nin: opts.excludeConversationIds };
+  }
   if (opts.search) {
     // 🔒 escape regex metacharacters ป้องกัน $regex injection / ReDoS
     const safeSearch = safeRegexSearch(opts.search);
     if (safeSearch) {
-      filter.$or = [
-        { to_name: { $regex: safeSearch, $options: "i" } },
-        { last_message_text: { $regex: safeSearch, $options: "i" } },
-        { shop_name: { $regex: safeSearch, $options: "i" } },
-      ];
+      // ถ้ามี cursor $or อยู่แล้ว → ต้องใช้ $and รวม search $or
+      if (filter.$or) {
+        filter.$and = [
+          { $or: filter.$or },
+          { $or: [
+            { to_name: { $regex: safeSearch, $options: "i" } },
+            { last_message_text: { $regex: safeSearch, $options: "i" } },
+            { shop_name: { $regex: safeSearch, $options: "i" } },
+          ]},
+        ];
+        delete filter.$or;
+      } else {
+        filter.$or = [
+          { to_name: { $regex: safeSearch, $options: "i" } },
+          { last_message_text: { $regex: safeSearch, $options: "i" } },
+          { shop_name: { $regex: safeSearch, $options: "i" } },
+        ];
+      }
     }
   }
   return coll
     .find(filter)
-    .sort({ pinned: -1, last_message_timestamp: -1 })
+    .sort({ pinned: -1, last_message_timestamp: -1, conversation_id: -1 })
     .limit(opts.limit || 200)
     .toArray();
 }

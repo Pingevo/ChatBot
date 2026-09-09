@@ -130,6 +130,32 @@ export async function GET(
     parsed: parseRawMessage(d.raw_payload, d.text),
   }));
 
+  // ⚡ 3.1 fetch sub-messages สำหรับ bundle_message ที่มี bundle_message_ids
+  //    (Shopee bundle_message ส่ง message_id strings มา ต้อง fetch จาก DB แล้ว parse)
+  const allBundleIds: string[] = [];
+  for (const { parsed: p } of parsedMsgs) {
+    if (p.bundle_message_ids && p.bundle_message_ids.length > 0) {
+      allBundleIds.push(...p.bundle_message_ids);
+    }
+  }
+  if (allBundleIds.length > 0) {
+    const subDocs = await msgColl
+      .find({ message_id: { $in: allBundleIds } })
+      .toArray();
+    const subDocMap = new Map(subDocs.map((d) => [d.message_id, d]));
+    for (const { parsed: p } of parsedMsgs) {
+      if (p.bundle_message_ids && p.bundle_message_ids.length > 0) {
+        p.bundle = p.bundle_message_ids
+          .map((mid) => {
+            const sd = subDocMap.get(mid);
+            if (!sd) return undefined;
+            return parseRawMessage(sd.raw_payload, sd.text);
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== undefined);
+      }
+    }
+  }
+
   // ⚡ 3.5 batch lookup admin names (เหมือน /admin/conversations/:id/messages)
   const adminIds = new Set<string>();
   for (const { doc } of parsedMsgs) {
@@ -148,10 +174,16 @@ export async function GET(
     }
   }
 
-  // ⚡ 4. รวบรวม item_ids ที่ต้อง lookup จาก product collection (item + variation_card)
+  // ⚡ 4. รวบรวม item_ids ที่ต้อง lookup จาก product collection (item + variation_card + bundle sub-messages)
   const itemIdsToLookup = new Set<string>();
   for (const { parsed: p } of parsedMsgs) {
     if (p.product_ref?.item_id) itemIdsToLookup.add(p.product_ref.item_id);
+    // ⚡ bundle sub-messages อาจมี product_ref ด้วย
+    if (p.bundle) {
+      for (const sub of p.bundle) {
+        if (sub.product_ref?.item_id) itemIdsToLookup.add(sub.product_ref.item_id);
+      }
+    }
   }
 
   // ⚡ 5. batch lookup products จาก dbWallet (read-only) — เหมือน admin route
@@ -197,6 +229,29 @@ export async function GET(
         notification_text: p.notification_text,
         table: p.table,
         products: products.length > 0 ? products : undefined,
+        // ⚡ bundle_message — แปลง sub-messages เป็น UnifiedMessage[] ส่งไป frontend
+        bundle: p.bundle && p.bundle.length > 0
+          ? p.bundle.map((sub, si) => {
+              const subProducts: ProductCard[] = [];
+              if (sub.product_ref?.item_id) {
+                const card = productMap.get(sub.product_ref.item_id);
+                if (card) subProducts.push(card);
+              }
+              return {
+                id: `${d.message_id}_bundle_${si}`,
+                role: "user" as const,
+                text: sub.text || "",
+                timestamp: d.created_timestamp.toISOString(),
+                source: MSG_SOURCE,
+                message_type: sub.message_type,
+                media: sub.media,
+                order_sn: sub.order_sn,
+                notification_text: sub.notification_text,
+                table: sub.table,
+                products: subProducts.length > 0 ? subProducts : undefined,
+              } as UnifiedMessage;
+            })
+          : undefined,
       });
     } else if (d.role === "bot") {
       // role=bot ใน messages_shp = Zaapi reply (sellcenter dump)

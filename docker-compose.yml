@@ -22,7 +22,7 @@ services:
   chatbot-shopee:
     build:
       context: .
-      dockerfile: Dockerfile.chatbot
+      dockerfile: docker/Dockerfile.chatbot
     image: chatbot-shopee:latest
     container_name: chatbot-shopee
     restart: unless-stopped
@@ -55,7 +55,7 @@ services:
   chatbot-lazada:
     build:
       context: .
-      dockerfile: Dockerfile.chatbot
+      dockerfile: docker/Dockerfile.chatbot
     image: chatbot-lazada:latest
     container_name: chatbot-lazada
     restart: unless-stopped
@@ -85,7 +85,7 @@ services:
   chatbot-tiktok:
     build:
       context: .
-      dockerfile: Dockerfile.chatbot
+      dockerfile: docker/Dockerfile.chatbot
     image: chatbot-tiktok:latest
     container_name: chatbot-tiktok
     restart: unless-stopped
@@ -175,7 +175,7 @@ services:
   # ─────────────────────────────────────────────────────────────
   # Caddy — reverse proxy + auto SSL (Let's Encrypt)
   # รับ traffic ภายนอกที่ port 80/443 → ส่งต่อให้ chatadmin-web / chatbot-shopee
-  # config ที่ Caddyfile (root) — แก้ domain ที่นั่น
+  # config ที่ docker/Caddyfile — แก้ domain ที่นั่น
   # ─────────────────────────────────────────────────────────────
   caddy:
     image: caddy:2-alpine
@@ -186,7 +186,7 @@ services:
       - "443:443"
       - "443:443/udp"  # HTTP/3
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:

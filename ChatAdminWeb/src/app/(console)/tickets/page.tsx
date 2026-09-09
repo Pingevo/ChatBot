@@ -27,10 +27,11 @@ export default function TicketsPage() {
   // ⚡ server-side search — ส่ง q ไป API ให้ค้นที่ DB ทั้งหมด (ไม่จำกัดแค่ 2000 ล่าสุด)
   const [searchQuery, setSearchQuery] = useState("");
   // ⚡ G-share — ใช้ shared conversation store (แชร์กับ shadow-inbox)
-  const { conversations: sharedConversations, totalCount, loading: sharedLoading, refresh: refreshConversations } = useSharedConversations({
+  //   ⚡ Phase 1 — pagination: head (50 newest, poll 3s) + tail (load more on scroll)
+  const { conversations: sharedConversations, totalCount, loading: sharedLoading, refresh: refreshConversations, loadMore, hasMore, loadingMore } = useSharedConversations({
     assigned_to: chatFilter === "me" ? "me" : chatFilter === "all" ? "all" : chatFilter,
     q: searchQuery || undefined,
-    limit: 2000,
+    pageSize: 200,
   });
   // ⚡ local override สำหรับ optimistic update (close/reopen/handoff/assign)
   //   ใช้ map id → partial patch ที่ทับข้อมูลจาก shared store
@@ -372,6 +373,9 @@ export default function TicketsPage() {
           totalCount={totalCount}
           onSearchChange={setSearchQuery}
           loading={sharedLoading}
+          loadMore={loadMore}
+          hasMore={hasMore}
+          loadingMore={loadingMore}
         />
       </div>
 

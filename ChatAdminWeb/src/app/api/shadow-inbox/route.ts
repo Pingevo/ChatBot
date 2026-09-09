@@ -16,6 +16,7 @@ import { json, error, readJson } from "@/backend/lib/http";
 import { shadowReplyService } from "@/backend/service/shadowReplyService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { serverConfig } from "@/backend/lib/config";
+import { shouldUseChatV2 } from "@/backend/service/systemConfigService";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import type { Platform } from "@/backend/lib/safety";
 
@@ -31,6 +32,7 @@ async function callOurBot(params: {
   shopId: string;
   shopName?: string;
   images?: string[];
+  use_v2?: boolean;
 }): Promise<{
   answer: string;
   source?: string;
@@ -41,7 +43,7 @@ async function callOurBot(params: {
   products?: unknown[];
   image_desc?: string;
 }> {
-  const { platform, message, history, shopId, shopName, images } = params;
+  const { platform, message, history, shopId, shopName, images, use_v2 } = params;
   // ใช้ platform-specific bot URL (shopee/tiktok/lazada แยกกัน)
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
@@ -58,6 +60,8 @@ async function callOurBot(params: {
   else if (shopId) body.shop = shopId;
   // ⚡ A2 — ส่ง current-turn images ให้ bot (ถ้ามี)
   if (images && images.length > 0) body.images = images;
+  // ⚡ chat_v2 — ส่ง use_v2 เพื่อบังคับใช้ chat_v2 (replay test)
+  if (use_v2) body.use_v2 = true;
 
   const resp = await fetch(url, {
     method: "POST",
@@ -157,6 +161,8 @@ export async function POST(req: NextRequest) {
     order?: "recent" | "oldest";
     mode?: "overwrite" | "resume";
     platform?: string;
+    // ⚡ chat_v2 — บังคับใช้ chat_v2 (สำหรับ replay test)
+    use_v2?: boolean;
   }>(req);
 
   if (!body) return error("body required", 422);
@@ -236,12 +242,22 @@ export async function POST(req: NextRequest) {
   const conversationId = String(body.conversation_id);
   const inboundMessageId = body.inbound_message_id != null ? String(body.inbound_message_id) : undefined;
 
+  // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
+  //    ถ้า body ส่ง use_v2 มา explicit → override config
+  const configUseV2 = await shouldUseChatV2();
+  const useV2 = body.use_v2 === true || (body.use_v2 === undefined && configUseV2);
+  const chatEngine = useV2 ? "v2" : "legacy";
+  const botCaller = useV2
+    ? (p: Parameters<typeof callOurBot>[0]) => callOurBot({ ...p, use_v2: true })
+    : callOurBot;
+
   try {
     const doc = await shadowReplyService.generate({
       conversationId,
       inboundMessageId,
       generatedBy: r.ctx.admin.admin_id,  // ⚡ Phase 3A — บันทึกใครกด Generate (KPI)
-      botCaller: callOurBot,
+      chatEngine,  // ⚡ บันทึก engine ที่ใช้ใน shadow reply
+      botCaller,
     });
 
     // audit log — บันทึกว่า admin สั่ง generate shadow reply

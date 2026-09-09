@@ -12,6 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { serverConfig } from "@/backend/lib/config";
 import { requireAuth } from "@/backend/middleware/authorize";
+import { shouldUseChatV2 } from "@/backend/service/systemConfigService";
 
 type Platform = "shopee" | "lazada" | "tiktok";
 
@@ -54,7 +55,23 @@ async function proxy(req: NextRequest, segments: string[]) {
 
   let body: BodyInit | undefined;
   if (method !== "GET" && method !== "HEAD") {
-    body = await req.text();
+    const rawBody = await req.text();
+    // ⚡ chat_engine — ถ้าเป็น POST /chat ให้ inject use_v2 จาก SystemConfig
+    if (method === "POST" && path === "chat") {
+      try {
+        const parsed = JSON.parse(rawBody);
+        if (parsed.use_v2 === undefined) {
+          const useV2 = await shouldUseChatV2();
+          if (useV2) parsed.use_v2 = true;
+        }
+        body = JSON.stringify(parsed);
+      } catch {
+        // ถ้า parse ไม่ได้ → ส่ง body เดิม
+        body = rawBody;
+      }
+    } else {
+      body = rawBody;
+    }
   }
 
   try {

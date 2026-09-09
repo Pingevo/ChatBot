@@ -419,7 +419,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   const [uploading, setUploading] = useState(false);
 
   // ── Session management ──
-  const [sessions, setSessions] = useState<{ id: string; shop: string; title: string; message_count: number; updated_at?: string; created_at?: string }[]>([]);
+  const [sessions, setSessions] = useState<{ id: string; shop: string; title: string; message_count: number; updated_at?: string; created_at?: string; source?: string; script_test?: boolean }[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [selectedLogMsg, setSelectedLogMsg] = useState<Msg | null>(null);
   // ⚡ sidebar filter/sort state
@@ -1532,7 +1532,25 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         web_search_used: fj.web_search_used === true,
         web_search_reason: fj.web_search_reason || undefined,
         web_search_model: fj.web_search_model || undefined,
-        steps: Array.isArray(fj.steps) ? fj.steps : undefined,
+        // ⚡ เพิ่ม buffer_flush step ที่จุดเริ่มต้นของ steps (แสดงว่า merge อะไรบ้าง)
+        steps: Array.isArray(fj.steps) ? [
+          {
+            name: "buffer_flush",
+            model: "",
+            tokens_in: 0,
+            tokens_out: 0,
+            time_s: 0,
+            cost_usd: 0,
+            cost_thb: 0,
+            input: {
+              message_count: fj.message_count || 0,
+              combined_message: (fj.combined_message || "").slice(0, 500),
+              message_ids: fj.message_ids || [],
+            },
+            output: null,
+          },
+          ...fj.steps,
+        ] : undefined,
         handoff_to_admin: fj.handoff_to_admin === true,
         handoff_reason: fj.handoff_reason || undefined,
         routing_decision: fj.routing_decision || undefined,
@@ -1968,7 +1986,12 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                           className="w-full h-6 px-1.5 text-xs rounded border border-brand/40 bg-surface focus:outline-none focus:ring-1 focus:ring-brand/40"
                         />
                       ) : (
-                        <div className="text-xs font-medium text-text truncate">{s.title || "ไม่มีชื่อ"}</div>
+                        <div className="text-xs font-medium text-text truncate">
+                          {s.source === "script_test" && (
+                            <span className="inline-block mr-1 px-1 py-0.5 text-[9px] rounded bg-amber-100 text-amber-700 border border-amber-300 align-middle">🧪 Script</span>
+                          )}
+                          {s.title || "ไม่มีชื่อ"}
+                        </div>
                       )}
                       <div className="text-[10px] text-text-muted truncate">
                         {s.shop || "—"} · {s.message_count} ข้อความ
@@ -2056,11 +2079,16 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                           <div className="debug-row">
                             <span className="debug-label">Pipeline:</span>
                             {m.stats.steps && m.stats.steps.length > 0 ? (
-                              m.stats.steps.map((s, i) => (
-                                <span key={i} className="pill step-detail" title={`${s.model || ""} · in:${s.tokens_in} out:${s.tokens_out} · ${s.time_s}s · ฿${s.cost_thb}`}>
-                                  <strong>{s.name}</strong>{s.model ? ` · ${s.model.split("/").pop()}` : ""} · in:{s.tokens_in} out:{s.tokens_out} · {s.time_s}s · ฿{s.cost_thb}
-                                </span>
-                              ))
+                              m.stats.steps.map((s, i) => {
+                                const inputStr = s.input ? `\n📥 Input: ${JSON.stringify(s.input).slice(0, 200)}` : "";
+                                const outputStr = s.output ? `\n📤 Output: ${JSON.stringify(s.output).slice(0, 200)}` : "";
+                                const tooltip = `${s.model || ""} · in:${s.tokens_in} out:${s.tokens_out} · ${s.time_s}s · ฿${s.cost_thb}${inputStr}${outputStr}`;
+                                return (
+                                  <span key={i} className="pill step-detail" title={tooltip}>
+                                    <strong>{s.name}</strong>{s.model ? ` · ${s.model.split("/").pop()}` : ""} · in:{s.tokens_in} out:{s.tokens_out} · {s.time_s}s · ฿{s.cost_thb}
+                                  </span>
+                                );
+                              })
                             ) : (
                               <>
                                 <span className={`pill ${m.stats.intent?.intent ? "intent" : "muted"}`}>

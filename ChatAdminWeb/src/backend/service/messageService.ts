@@ -72,21 +72,22 @@ const _PLACEHOLDER_RE = /^\s*\[(item|order|image|video|sticker|notification)\]\s
  * ถ้ามีข้อความลูกค้าต่อท้าย (ไม่ใช่ placeholder) จะต่อท้าย tag ให้ด้วย
  * ถ้าเป็น message ปกติ (text) จะคืน text เดิมเปล่าๆ
  */
-export function toBotText(msg: { text: string; raw_payload?: unknown }): string {
+export function toBotText(msg: { text?: string; raw_payload?: unknown }): string {
+  const text = msg.text ?? "";
   const raw = msg.raw_payload;
-  if (!raw) return msg.text;
+  if (!raw) return text;
 
   let parsed;
   try {
-    parsed = parseRawMessage(raw, msg.text);
+    parsed = parseRawMessage(raw, text);
   } catch {
-    return msg.text;
+    return text;
   }
 
   const itemId = parsed.product_ref?.item_id;
   if (itemId) {
-    const isPlaceholder = _PLACEHOLDER_RE.test(msg.text);
-    const extra = isPlaceholder ? "" : msg.text.trim();
+    const isPlaceholder = _PLACEHOLDER_RE.test(text);
+    const extra = isPlaceholder ? "" : text.trim();
     return extra ? `[สินค้า: ${itemId}] ${extra}` : `[สินค้า: ${itemId}]`;
   }
 
@@ -94,13 +95,13 @@ export function toBotText(msg: { text: string; raw_payload?: unknown }): string 
   // Python bot มี _ORDER_TAG_RE จับ [order: XXX] แล้ว (order_store.py)
   const orderSn = parsed.order_sn;
   if (orderSn) {
-    const isPlaceholder = _PLACEHOLDER_RE.test(msg.text);
-    const extra = isPlaceholder ? "" : msg.text.trim();
+    const isPlaceholder = _PLACEHOLDER_RE.test(text);
+    const extra = isPlaceholder ? "" : text.trim();
     return extra ? `[order: ${orderSn}] ${extra}` : `[order: ${orderSn}]`;
   }
 
   // ปล่อย other (image/video/sticker/notification) ไปตามเดิม
-  return msg.text;
+  return text;
 }
 
 /**
@@ -114,13 +115,14 @@ export function toBotText(msg: { text: string; raw_payload?: unknown }): string 
  * ⚡ Phase 1A+ — รองรับวิดีโอด้วย (เช่น ลูกค้าถ่ายวิดีโอแสดงอาการเสีย)
  *    ส่งเป็น string URL ธรรมดา — Python ฝั่งจะ detect mime_type จาก URL หรือ content-type
  */
-export function toBotImages(msg: { text: string; raw_payload?: unknown }): string[] {
+export function toBotImages(msg: { text?: string; raw_payload?: unknown }): string[] {
+  const text = msg.text ?? "";
   const raw = msg.raw_payload;
   if (!raw) return [];
 
   let parsed;
   try {
-    parsed = parseRawMessage(raw, msg.text);
+    parsed = parseRawMessage(raw, text);
   } catch {
     return [];
   }

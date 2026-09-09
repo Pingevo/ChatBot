@@ -17,7 +17,7 @@ import type { ConversationDoc } from "@/backend/service/conversationService";
 import type { Platform, ConversationStatus } from "@/backend/service/conversationService";
 
 // ⚡ G-fix — in-memory cache (เหมือน /admin/conversations) ลด query ซ้ำจาก polling
-let bwCache: { key: string; data: Conversation[]; totalCount: number; ts: number } | null = null;
+let bwCache: { key: string; data: Conversation[]; totalCount: number; hasMore: boolean; cursor: string | null; ts: number } | null = null;
 const BW_CACHE_TTL = 2500; // ⚡ 2.5 วิ — สั้นกว่า poll interval (3s) เล็กน้อย
 
 /** Invalidate botworker cache — เรียกจาก close/reopen/handoff/assign route */
@@ -34,13 +34,30 @@ export async function GET(req: NextRequest) {
   const shopId = url.searchParams.get("shop_id") || undefined;
   // ⚡ รองรับทั้ง search และ q (เพื่อให้ตรงกับ /admin/conversations)
   const search = url.searchParams.get("search") || url.searchParams.get("q") || undefined;
-  const limitParam = parseInt(url.searchParams.get("limit") || "2000", 10);
+  const cursorParam = url.searchParams.get("cursor") || undefined;
+  const includeCount = url.searchParams.get("include_count") === "true";
+  const limitParam = parseInt(url.searchParams.get("limit") || "200", 10);
   const limit = Math.min(Math.max(limitParam, 1), 5000);
 
-  // ⚡ G-fix — เช็ค cache ก่อน query DB
-  const cacheKey = `${platform || ""}|${shopId || ""}|${search || ""}|${limit}`;
+  // ⚡ parse cursor (timestamp|conversation_id — เหมือน /admin/conversations)
+  let parsedCursor: { ts: Date; id: string } | undefined;
+  if (cursorParam) {
+    const sepIdx = cursorParam.indexOf("|");
+    if (sepIdx > 0) {
+      const tsStr = cursorParam.substring(0, sepIdx);
+      const idStr = cursorParam.substring(sepIdx + 1);
+      const ts = new Date(tsStr);
+      if (!isNaN(ts.getTime()) && idStr) parsedCursor = { ts, id: idStr };
+    }
+  }
+
+  // ⚡ G-fix — เช็ค cache ก่อน query DB (เฉพาะ head — ไม่ cache tail)
+  const cacheKey = `${platform || ""}|${shopId || ""}|${search || ""}|${limit}|${cursorParam || ""}`;
   const now = Date.now();
   if (bwCache && bwCache.key === cacheKey && now - bwCache.ts < BW_CACHE_TTL) {
+    if (includeCount) {
+      return json({ rows: bwCache.data, total_count: bwCache.totalCount ?? bwCache.data.length, has_more: bwCache.hasMore ?? false, cursor: bwCache.cursor ?? null });
+    }
     return json({ rows: bwCache.data, total_count: bwCache.totalCount ?? bwCache.data.length });
   }
 
@@ -49,22 +66,42 @@ export async function GET(req: NextRequest) {
   const filter: Record<string, unknown> = {};
   if (platform) filter.platform = platform;
   if (shopId) filter.shop_id = shopId;
+  // ⚡ cursor filter — ดึงแชทที่เก่ากว่า cursor
+  if (parsedCursor) {
+    filter.$or = [
+      { last_message_timestamp: { $lt: parsedCursor.ts } },
+      { last_message_timestamp: parsedCursor.ts, conversation_id: { $lt: parsedCursor.id } },
+    ];
+  }
   if (search) {
     // 🔒 escape regex metacharacters ป้องกัน $regex injection / ReDoS
     const { safeRegexSearch } = await import("@/backend/lib/regexEscape");
     const safe = safeRegexSearch(search);
     if (safe) {
-      filter.$or = [
-        { to_name: { $regex: safe, $options: "i" } },
-        { last_message_text: { $regex: safe, $options: "i" } },
-        { shop_name: { $regex: safe, $options: "i" } },
-      ];
+      if (filter.$or) {
+        // มี cursor $or อยู่แล้ว → ใช้ $and รวม search $or
+        filter.$and = [
+          { $or: filter.$or },
+          { $or: [
+            { to_name: { $regex: safe, $options: "i" } },
+            { last_message_text: { $regex: safe, $options: "i" } },
+            { shop_name: { $regex: safe, $options: "i" } },
+          ]},
+        ];
+        delete filter.$or;
+      } else {
+        filter.$or = [
+          { to_name: { $regex: safe, $options: "i" } },
+          { last_message_text: { $regex: safe, $options: "i" } },
+          { shop_name: { $regex: safe, $options: "i" } },
+        ];
+      }
     }
   }
 
   const docs = await coll
     .find(filter, { maxTimeMS: 5000 })
-    .sort({ last_message_timestamp: -1 })
+    .sort({ last_message_timestamp: -1, conversation_id: -1 })
     .limit(limit)
     .toArray();
 
@@ -113,11 +150,22 @@ export async function GET(req: NextRequest) {
     };
   });
 
-  // ⚡ นับ total_count แบบไม่จำกัด limit (เหมือน /admin/conversations)
-  const totalCount = await coll.countDocuments(filter);
+  // ⚡ hasMore + cursor สำหรับ pagination (เหมือน /admin/conversations)
+  const hasMore = docs.length === limit;
+  const nextCursor = docs.length > 0
+    ? `${docs[docs.length - 1].last_message_timestamp.toISOString()}|${docs[docs.length - 1].conversation_id}`
+    : null;
 
-  // ⚡ G-fix — save cache
-  bwCache = { key: cacheKey, data: conversations, totalCount, ts: now };
+  // ⚡ นับ total_count แบบไม่จำกัด limit (เฉพาะ head — ไม่นับตอนมี cursor เพื่อลด query)
+  const totalCount = parsedCursor ? 0 : await coll.countDocuments(filter);
 
+  // ⚡ G-fix — save cache (เฉพาะ head)
+  if (!parsedCursor) {
+    bwCache = { key: cacheKey, data: conversations, totalCount, hasMore, cursor: nextCursor, ts: now };
+  }
+
+  if (includeCount) {
+    return json({ rows: conversations, total_count: totalCount, has_more: hasMore, cursor: nextCursor });
+  }
   return json({ rows: conversations, total_count: totalCount });
 }

@@ -20,7 +20,7 @@ const FILE_PATTERN = /results.*\.json$|.*_results\.json$/i;
 // 🔒 ไม่รวม ".." หรือ "../.." เพื่อป้องกัน path traversal
 const SEARCH_DIRS = [
   ".",                                    // ChatAdminWeb/
-  join("..", "testresult"),               // ChatBotProductMS/testresult/ (โฟลเดอร์จริง)
+  join("..", "docs", "test", "results"),           // ChatBotProductMS/docs/test/results/ (โฟลเดอร์จริง)
   join("..", "test_results"),             // ChatBotProductMS/test_results/ (fallback)
   join("..", "scripts"),                  // ChatBotProductMS/scripts/
 ];

@@ -13,6 +13,7 @@ import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { serverConfig } from "@/backend/lib/config";
+import { shouldUseChatV2 } from "@/backend/service/systemConfigService";
 import type { Platform } from "@/backend/service/systemConfigService";
 
 export async function POST(req: NextRequest) {
@@ -84,6 +85,9 @@ export async function POST(req: NextRequest) {
     const origin = new URL(req.url).origin;
     payload.images = allImages.map((u) => (u.startsWith("http") ? u : `${origin}${u}`));
   }
+  // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
+  const useV2 = await shouldUseChatV2();
+  if (useV2) payload.use_v2 = true;
 
   try {
     const resp = await fetch(url, {

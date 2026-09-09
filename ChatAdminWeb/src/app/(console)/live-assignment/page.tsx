@@ -178,6 +178,11 @@ export default function LiveAssignmentPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [docs, setDocs] = useState<LiveAssignmentDoc[]>([]);
   const [loading, setLoading] = useState(true);
+  // ⚡ pagination — head (200 newest, poll 5s) + tail (load more on scroll)
+  const [tailDocs, setTailDocs] = useState<LiveAssignmentDoc[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sending, setSending] = useState(false);
@@ -200,19 +205,19 @@ export default function LiveAssignmentPage() {
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
   const [batchRunning, setBatchRunning] = useState(false);
 
-  // แปลง docs → Conversation[] สำหรับ ChatList
+  // แปลง docs + tailDocs → Conversation[] สำหรับ ChatList
   // ⚡ dedupe by conversation_id — test_assignment เก็บ 1 doc ต่อ (conversation_id, replayed_by)
   //   ถ้าหลายแอดมิน replay แชทเดียวกันจะมี conversation_id ซ้ำ → ใช้ doc ล่าสุด (updated_at มากสุด)
   const conversations = useMemo(() => {
     const seen = new Map<string, LiveAssignmentDoc>();
-    for (const d of docs) {
+    for (const d of [...docs, ...tailDocs]) {
       const existing = seen.get(d.conversation_id);
       if (!existing || new Date(d.updated_at) > new Date(existing.updated_at)) {
         seen.set(d.conversation_id, d);
       }
     }
     return Array.from(seen.values()).map(liveDocToConversation);
-  }, [docs]);
+  }, [docs, tailDocs]);
   const selected = conversations.find((c) => c.id === selectedId) ?? null;
   const selectedDoc = docs.find((d) => d.conversation_id === selectedId) ?? null;
 
@@ -224,14 +229,17 @@ export default function LiveAssignmentPage() {
     }).catch(() => setAdmins([]));
   }, [user?.role]);
 
-  // ── Load list ──
+  // ── Load list (head — 200 ล่าสุด) ──
   const loadList = useCallback(async () => {
     setLoading(true);
     try {
-      const params: Record<string, string> = { list: "1", limit: "500" };
+      const params: Record<string, string> = { list: "1", limit: "200", include_count: "true" };
       if (batchPlatform !== "all") params.platform = batchPlatform;
-      const r = await api().get<{ conversations: LiveAssignmentDoc[]; total: number }>("/live-assignment", { params });
+      const r = await api().get<{ conversations: LiveAssignmentDoc[]; total: number; has_more?: boolean; cursor?: string | null }>("/live-assignment", { params });
       setDocs(r.data.conversations || []);
+      setHasMore(r.data.has_more ?? false);
+      setCursor(r.data.cursor ?? null);
+      setTailDocs([]); // ⚡ reset tail เมื่อ head โหลดใหม่
     } catch (err) {
       console.error("load list failed", err);
       setDocs([]);
@@ -244,14 +252,41 @@ export default function LiveAssignmentPage() {
     loadList();
   }, [loadList]);
 
-  // ── Poll list ──
+  // ⚡ loadMore — โหลด page ถัดไป (tail) ตอน scroll ใกล้ล่าง
+  const loadMore = useCallback(async () => {
+    if (!cursor || !hasMore || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const params: Record<string, string> = { list: "1", limit: "200", cursor };
+      if (batchPlatform !== "all") params.platform = batchPlatform;
+      const r = await api().get<{ conversations: LiveAssignmentDoc[]; has_more?: boolean; cursor?: string | null }>("/live-assignment", { params });
+      const newDocs = r.data.conversations || [];
+      const existingIds = new Set([...docs.map((d) => d.conversation_id), ...tailDocs.map((d) => d.conversation_id)]);
+      const deduped = newDocs.filter((d) => {
+        if (existingIds.has(d.conversation_id)) return false;
+        existingIds.add(d.conversation_id);
+        return true;
+      });
+      setTailDocs((prev) => [...prev, ...deduped]);
+      setHasMore(r.data.has_more ?? false);
+      setCursor(r.data.cursor ?? null);
+    } catch (err) {
+      console.error("load more failed", err);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [cursor, hasMore, loadingMore, docs, tailDocs, batchPlatform]);
+
+  // ── Poll list (head only — ไม่กระทบ tail) ──
   usePolling(
     useCallback(async () => {
       try {
-        const params: Record<string, string> = { list: "1", limit: "500" };
+        const params: Record<string, string> = { list: "1", limit: "200", include_count: "true" };
         if (batchPlatform !== "all") params.platform = batchPlatform;
-        const r = await api().get<{ conversations: LiveAssignmentDoc[]; total: number }>("/live-assignment", { params });
+        const r = await api().get<{ conversations: LiveAssignmentDoc[]; total: number; has_more?: boolean; cursor?: string | null }>("/live-assignment", { params });
         setDocs(r.data.conversations || []);
+        setHasMore(r.data.has_more ?? false);
+        setCursor(r.data.cursor ?? null);
       } catch {
         // ignore
       }
@@ -593,6 +628,9 @@ export default function LiveAssignmentPage() {
             totalCount={conversations.length}
             onSearchChange={setSearchQuery}
             loading={loading}
+            loadMore={loadMore}
+            hasMore={hasMore}
+            loadingMore={loadingMore}
           />
         </div>
 

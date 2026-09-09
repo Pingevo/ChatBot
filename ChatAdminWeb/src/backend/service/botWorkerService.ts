@@ -124,6 +124,7 @@ async function storeBotReply(opts: {
     origin: "worker",  // สร้างจาก worker (auto pipeline)
     mode: "standalone",  // ⚡ Phase 2R — โหมด standalone (botworker รันอัตโนมัติ)
     trigger_id: opts.triggerId,
+    chat_engine: opts.botResp.chat_engine || "legacy", // ⚡ บันทึก engine ที่ใช้
     created_at: now,
     updated_at: now,
   });
@@ -171,6 +172,7 @@ async function storeWorkflowDelivered(opts: {
       rating: "unrated",
       origin: "workflow",  // สร้างจาก workflow engine (Flow Builder)
       mode: "standalone",  // ⚡ Phase 2R — โหมด standalone (worker path)
+      chat_engine: "legacy", // ⚡ workflow ยังใช้ legacy path (ไม่ผ่าน callBot)
       created_at: now,
       updated_at: now,
     } as ShadowReplyDoc);
@@ -365,7 +367,7 @@ export async function processMessage(msg: {
   // ⚡ Phase 1F — ถ้ามี msg.images (จาก buffer flush รวมหลายรูป) ให้ใช้แทน toBotImages
   const botImages = msg.images && msg.images.length > 0 ? msg.images : toBotImages(msg);
 
-  // ⚡ Workflow engine (แบบ Zaapi Flow Builder) — อ้างอิง workflow-planner.md
+  // ⚡ Workflow engine (แบบ Zaapi Flow Builder) — อ้างอิง docs/plans/workflow-planner.md
   // ① Active Flow Resume (เสมอ ไม่สน priority) — แชทนี้มี flow ที่กำลังรอ reply อยู่ไหม?
   //    มี → ส่งข้อความเข้า flow เดิม (resume) → จบ
   // ② Priority (workflow_first default) — workflow ก่อน trigger

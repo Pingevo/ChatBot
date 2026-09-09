@@ -16,8 +16,10 @@ import { handoffService } from "./handoffService";
 import { triggerService } from "./triggerService";
 import { logAdminEvent } from "./adminLogService";
 import { serverConfig } from "../lib/config";
+import { shouldUseChatV2 } from "./systemConfigService";
 import { parseRawMessage, toProductCard } from "./messageMediaParser";
 import { productService } from "./productService";
+import { toBotText, toBotImages } from "./messageService";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -47,6 +49,8 @@ export interface LiveQaItem {
   bot_source?: string;
   bot_model?: string;
   bot_elapsed?: number;
+  // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
+  chat_engine?: "legacy" | "v2";
   bot_products?: { item_id: string; name: string; price?: number; image?: string; url?: string }[];
   bot_intent?: unknown;
   bot_retrieval_info?: unknown;
@@ -101,10 +105,12 @@ export interface LiveAssignmentDoc {
 async function callBot(params: {
   platform: Platform;
   message: string;
-  history: { role: "user" | "model"; text: string }[];
+  history: { role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[];
   shopId: string;
   shopName?: string;
   itemId?: string;
+  orderSn?: string;  // ⚡ Phase 3C — order_sn จากการ์ดคำสั่งซื้อที่ลูกค้าแชร์
+  images?: string[];  // ⚡ Phase 1A — URL รูป/วิดีโอที่ลูกค้าส่ง (ส่งให้ bot vision pass)
 }): Promise<{
   answer: string;
   source?: string;
@@ -117,8 +123,10 @@ async function callBot(params: {
   web_search_reason?: string;
   handoff_to_admin?: boolean;
   handoff_reason?: string;
+  // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
+  chat_engine?: "legacy" | "v2";
 }> {
-  const { platform, message, history, shopId, shopName, itemId } = params;
+  const { platform, message, history, shopId, shopName, itemId, orderSn, images } = params;
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
   const headers: Record<string, string> = {
@@ -129,6 +137,13 @@ async function callBot(params: {
   if (shopName) body.shop = shopName;
   else if (shopId) body.shop = shopId;
   if (itemId) body.item_id = itemId;
+  // ⚡ Phase 3C — ส่ง order_sn ให้ bot (เหมือน item_id)
+  if (orderSn) body.order_sn = orderSn;
+  // ⚡ Phase 1A — ส่ง URL รูป/วิดีโอให้ bot ใช้ Gemini vision อ่าน
+  if (images && images.length > 0) body.images = images;
+  // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
+  const useV2 = await shouldUseChatV2();
+  if (useV2) body.use_v2 = true;
 
   const MAX_429_RETRIES = 3;
   const RATE_LIMIT_WAIT_MS = 60_000;
@@ -151,7 +166,10 @@ async function callBot(params: {
         const txt = await resp.text().catch(() => "");
         throw new Error(`bot ${resp.status}: ${txt.slice(0, 200)}`);
       }
-      return await resp.json();
+      const data = await resp.json();
+      // ⚡ chat_engine — บันทึก engine ที่ใช้ (อ่านจาก config ตอนส่ง use_v2)
+      data.chat_engine = useV2 ? "v2" : "legacy";
+      return data;
     } catch (err) {
       lastErr = err instanceof Error ? err : new Error(String(err));
       if (lastErr.message.includes("429") && attempt < MAX_429_RETRIES) continue;
@@ -245,6 +263,7 @@ export async function listLiveAssignments(opts?: {
   replayedBy?: string;
   batchId?: string;
   limit?: number;
+  cursor?: { ts: Date; id: string };
 }): Promise<LiveAssignmentDoc[]> {
   const coll = await getCollection<LiveAssignmentDoc>(COLLECTIONS.testAssignment);
   const filter: Record<string, unknown> = { deleted_at: { $exists: false } };
@@ -254,8 +273,15 @@ export async function listLiveAssignments(opts?: {
   if (opts?.assignedTo) filter.assigned_to = opts.assignedTo;
   if (opts?.replayedBy) filter.replayed_by = opts.replayedBy;
   if (opts?.batchId) filter.batch_id = opts.batchId;
+  // ⚡ cursor filter — ดึง docs ที่เก่ากว่า cursor
+  if (opts?.cursor) {
+    filter.$or = [
+      { updated_at: { $lt: opts.cursor.ts } },
+      { updated_at: opts.cursor.ts, conversation_id: { $lt: opts.cursor.id } },
+    ];
+  }
   const limit = opts?.limit || 500;
-  return coll.find(filter).sort({ updated_at: -1 }).limit(limit).toArray();
+  return coll.find(filter).sort({ updated_at: -1, conversation_id: -1 }).limit(limit).toArray();
 }
 
 // ─── Admin reply ──────────────────────────────────────────────────────────────
@@ -425,7 +451,7 @@ export async function closeChat(opts: {
   // 4. ประมวลผลข้อความที่เหลือ
   const qa = [...(doc.qa || [])];
   // สร้าง history จาก qa เดิม + admin reply
-  const history: { role: "user" | "model"; text: string }[] = [];
+  const history: { role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[] = [];
   for (const q of qa) {
     history.push({ role: "user", text: q.user_text });
     if (q.bot_reply) history.push({ role: "model", text: q.bot_reply });
@@ -510,12 +536,15 @@ export async function closeChat(opts: {
 
   for (let i = 0; i < remainingMsgs.length && !stopped; i++) {
     const msg = remainingMsgs[i];
+    // ⚡ ใช้ toBotText แปลง rich media → tag ส่งบอท (เหมือน shadowbot/botworker)
+    const botText = toBotText(msg);
+    const userImages = toBotImages(msg);
     const userText = msg.text || "(empty)";
     const qaIndex = processedCount + i;
 
     try {
-      // 1. check trigger
-      const trigger = await triggerService.matchTrigger(userText, {
+      // 1. check trigger — ใช้ botText (แปลง rich media เป็น tag แล้ว)
+      const trigger = await triggerService.matchTrigger(botText, {
         shopId,
         platform,
       });
@@ -553,13 +582,16 @@ export async function closeChat(opts: {
       const userItemId = userParsedInfo?.user_products && Array.isArray(userParsedInfo.user_products) && userParsedInfo.user_products.length > 0
         ? String((userParsedInfo.user_products[0] as Record<string, unknown>).item_id || "")
         : undefined;
+      const userOrderSn = userParsedInfo?.user_order_sn || undefined;  // ⚡ Phase 3C
       const botResp = await callBot({
         platform,
-        message: userText,
+        message: botText,
         shopId,
         shopName,
         history,
         itemId: userItemId,
+        orderSn: userOrderSn,  // ⚡ Phase 3C
+        images: userImages.length > 0 ? userImages : undefined,  // ⚡ Phase 1A
       });
 
       if (!botResp.answer || botResp.answer.trim() === "") {
@@ -591,8 +623,8 @@ export async function closeChat(opts: {
         break;
       }
 
-      // bot ตอบได้ → สะสม history
-      history.push({ role: "user", text: userText });
+      // bot ตอบได้ → สะสม history (ใช้ botText + images เหมือนของจริง)
+      history.push({ role: "user", text: botText, ...(userImages.length > 0 ? { images: userImages } : {}) });
       history.push({ role: "model", text: botResp.answer });
 
       if (botResp.handoff_to_admin) {
@@ -615,6 +647,7 @@ export async function closeChat(opts: {
           bot_source: botResp.source,
           bot_model: botResp.model,
           bot_elapsed: botResp.elapsed,
+          chat_engine: botResp.chat_engine || "legacy",
           bot_products: (botResp.products as { item_id: string; name: string; price?: number; image?: string; url?: string }[]) || [],
           bot_intent: botResp.intent,
           bot_retrieval_info: botResp.retrieval_info,
@@ -643,6 +676,7 @@ export async function closeChat(opts: {
         bot_source: botResp.source,
         bot_model: botResp.model,
         bot_elapsed: botResp.elapsed,
+        chat_engine: botResp.chat_engine || "legacy",
         bot_products: (botResp.products as { item_id: string; name: string; price?: number; image?: string; url?: string }[]) || [],
         bot_intent: botResp.intent,
         bot_retrieval_info: botResp.retrieval_info,
@@ -853,14 +887,17 @@ export async function batchReplay(opts: {
       let finalStatus = "bot_answered";
       let assignedTo: string | null = null;
       let stopped = false;
-      const history: { role: "user" | "model"; text: string }[] = [];
+      const history: { role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[] = [];
 
       for (let i = 0; i < messages.length && !stopped; i++) {
         const msg = messages[i];
+        // ⚡ ใช้ toBotText แปลง rich media → tag ส่งบอท (เหมือน shadowbot/botworker)
+        const botText = toBotText(msg);
+        const userImages = toBotImages(msg);
         const userText = msg.text || "(empty)";
 
         try {
-          const trigger = await triggerService.matchTrigger(userText, {
+          const trigger = await triggerService.matchTrigger(botText, {
             shopId,
             platform,
           });
@@ -895,13 +932,16 @@ export async function batchReplay(opts: {
           const userItemId = userParsedInfo?.user_products && Array.isArray(userParsedInfo.user_products) && userParsedInfo.user_products.length > 0
             ? String((userParsedInfo.user_products[0] as Record<string, unknown>).item_id || "")
             : undefined;
+          const userOrderSn = userParsedInfo?.user_order_sn || undefined;  // ⚡ Phase 3C
           const botResp = await callBot({
             platform,
-            message: userText,
+            message: botText,
             shopId,
             shopName,
             history,
             itemId: userItemId,
+            orderSn: userOrderSn,  // ⚡ Phase 3C
+            images: userImages.length > 0 ? userImages : undefined,  // ⚡ Phase 1A
           });
 
           if (!botResp.answer || botResp.answer.trim() === "") {
@@ -930,7 +970,7 @@ export async function batchReplay(opts: {
             break;
           }
 
-          history.push({ role: "user", text: userText });
+          history.push({ role: "user", text: botText, ...(userImages.length > 0 ? { images: userImages } : {}) });
           history.push({ role: "model", text: botResp.answer });
 
           if (botResp.handoff_to_admin) {
@@ -953,6 +993,7 @@ export async function batchReplay(opts: {
               bot_source: botResp.source,
               bot_model: botResp.model,
               bot_elapsed: botResp.elapsed,
+              chat_engine: botResp.chat_engine || "legacy",
               bot_products: (botResp.products as { item_id: string; name: string; price?: number; image?: string; url?: string }[]) || [],
               bot_intent: botResp.intent,
               bot_retrieval_info: botResp.retrieval_info,
@@ -979,6 +1020,7 @@ export async function batchReplay(opts: {
             bot_source: botResp.source,
             bot_model: botResp.model,
             bot_elapsed: botResp.elapsed,
+            chat_engine: botResp.chat_engine || "legacy",
             bot_products: (botResp.products as { item_id: string; name: string; price?: number; image?: string; url?: string }[]) || [],
             bot_intent: botResp.intent,
             bot_retrieval_info: botResp.retrieval_info,

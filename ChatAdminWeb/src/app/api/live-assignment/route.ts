@@ -53,7 +53,21 @@ export async function GET(req: NextRequest) {
       const finalStatus = url.searchParams.get("final_status") || undefined;
       const mockStatus = url.searchParams.get("mock_status") as "open" | "closed" | null;
       const assignedTo = url.searchParams.get("assigned_to") || undefined;
-      const limit = parseInt(url.searchParams.get("limit") || "500", 10);
+      const cursorParam = url.searchParams.get("cursor") || undefined;
+      const includeCount = url.searchParams.get("include_count") === "true";
+      const limit = parseInt(url.searchParams.get("limit") || "200", 10);
+
+      // ⚡ parse cursor (updated_at|conversation_id)
+      let parsedCursor: { ts: Date; id: string } | undefined;
+      if (cursorParam) {
+        const sepIdx = cursorParam.indexOf("|");
+        if (sepIdx > 0) {
+          const tsStr = cursorParam.substring(0, sepIdx);
+          const idStr = cursorParam.substring(sepIdx + 1);
+          const ts = new Date(tsStr);
+          if (!isNaN(ts.getTime()) && idStr) parsedCursor = { ts, id: idStr };
+        }
+      }
 
       const isSuperadmin = r.ctx.admin.role === "superadmin" || r.ctx.admin.role === "dev";
       const replayedBy = isSuperadmin ? undefined : r.ctx.admin.admin_id;
@@ -65,8 +79,18 @@ export async function GET(req: NextRequest) {
         assignedTo,
         replayedBy,
         limit,
+        cursor: parsedCursor,
       });
 
+      // ⚡ hasMore + cursor สำหรับ pagination
+      const hasMore = docs.length === limit;
+      const nextCursor = docs.length > 0
+        ? `${docs[docs.length - 1].updated_at.toISOString()}|${docs[docs.length - 1].conversation_id}`
+        : null;
+
+      if (includeCount) {
+        return json({ conversations: docs, total: docs.length, has_more: hasMore, cursor: nextCursor });
+      }
       return json({ conversations: docs, total: docs.length });
     }
 
@@ -99,51 +123,67 @@ export async function GET(req: NextRequest) {
         .limit(200)
         .toArray();
 
+      // ⚡ ดึง conversation เพื่อหา platform สำหรับ product lookup
+      const convColl = await getCollection<{
+        conversation_id: string; platform: string; shop_name?: string; to_name?: string;
+      }>(COLLECTIONS.conversations);
+      const conv = await convColl.findOne({ conversation_id: conversationId });
+      const convPlatform = (conv?.platform || "shopee") as Platform;
+
+      // ⚡ parse raw_payload ทุก message เสมอ (แม้ไม่มี raw_payload — parser infer จาก placeholder text)
+      const parsedMsgs = messages.map((m) => ({
+        doc: m,
+        parsed: parseRawMessage(m.raw_payload, m.text || ""),
+      }));
+
+      // ⚡ batch lookup products สำหรับ item/variation_card (เหมือน admin/conversations API)
+      const itemIdsToLookup = new Set<string>();
+      for (const { parsed: p } of parsedMsgs) {
+        if (p?.product_ref?.item_id) itemIdsToLookup.add(p.product_ref.item_id);
+      }
+      const productMap = new Map<string, unknown>();
+      if (itemIdsToLookup.size > 0) {
+        try {
+          const products = await productService.getProductsByIds({
+            platform: convPlatform,
+            itemIds: [...itemIdsToLookup],
+          });
+          for (const p of products) {
+            const id = String((p as Record<string, unknown>).item_id || (p as Record<string, unknown>).itemid || "");
+            if (id) productMap.set(id, p);
+          }
+        } catch { /* ignore product lookup errors */ }
+      }
+
       // แปลงเป็น ChatMessage format
-      const chatMessages = messages.map((m) => {
+      const chatMessages = parsedMsgs.map(({ doc: m, parsed: p }) => {
         const isUser = m.role === "user";
         const isAdmin = m.role === "admin" || (m.sender && m.sender !== "bot" && m.sender !== "zaapi" && m.role !== "user");
         const isBot = m.role === "bot" || m.sender === "bot";
-        const isZaapi = m.sender === "zaapi" || (m.role === "admin" && !m.sender);
+        // const isZaapi = m.sender === "zaapi" || (m.role === "admin" && !m.sender);
 
-        let products: unknown[] | undefined;
-        let messageType: string | undefined;
-        let media: unknown | undefined;
-        let orderSn: string | undefined;
-        let notificationText: string | undefined;
-        let table: unknown | undefined;
-        let bundle: unknown[] | undefined;
-
-        if (m.raw_payload && typeof m.raw_payload === "object") {
-          try {
-            const p = parseRawMessage(m.raw_payload, m.text || "");
-            messageType = p?.message_type;
-            media = p?.media;
-            orderSn = p?.order_sn;
-            notificationText = p?.notification_text;
-            table = p?.table;
-            bundle = p?.bundle;
-            if (p?.product_ref?.item_id) {
-              // products จะดึงที่ frontend หรือใช้จาก qa
-            }
-          } catch {
-            // ignore
+        // ⚡ ดึง products จาก product lookup สำหรับ item/variation_card
+        const products: unknown[] = [];
+        if (p?.product_ref?.item_id) {
+          const prod = productMap.get(p.product_ref.item_id);
+          if (prod) {
+            products.push(toProductCard(prod as Record<string, unknown>, convPlatform));
           }
         }
 
         return {
           id: m.message_id,
           role: isUser ? "user" : isBot ? "bot" : isAdmin ? "admin" : "system",
-          text: m.text || "",
+          text: p?.text || m.text || "",
           timestamp: m.created_timestamp?.toISOString() || new Date().toISOString(),
           admin_id: isAdmin ? m.sender : undefined,
-          message_type: messageType,
-          media,
-          order_sn: orderSn,
-          notification_text: notificationText,
-          table,
-          bundle,
-          products,
+          message_type: p?.message_type,
+          media: p?.media,
+          order_sn: p?.order_sn,
+          notification_text: p?.notification_text,
+          table: p?.table,
+          bundle: p?.bundle,
+          products: products.length > 0 ? products : undefined,
         };
       });
 
@@ -303,32 +343,29 @@ export async function POST(req: NextRequest) {
         return error("no user messages", 422);
       }
 
-      // parse user messages
+      // parse user messages — เรียก parseRawMessage เสมอ (แม้ไม่มี raw_payload — parser infer จาก placeholder text)
       const userParsedMap = new Map<string, Record<string, unknown>>();
       for (const msg of messages) {
-        const raw = msg.raw_payload;
-        if (raw && typeof raw === "object") {
-          try {
-            const p = parseRawMessage(raw, msg.text || "");
-            const products: unknown[] = [];
-            if (p?.product_ref?.item_id) {
-              const prod = await productService.getProduct({ platform, itemId: p.product_ref.item_id });
-              if (prod && conv) {
-                const card = toProductCard(prod as Record<string, unknown>, platform);
-                products.push(card);
-              }
+        try {
+          const p = parseRawMessage(msg.raw_payload, msg.text || "");
+          const products: unknown[] = [];
+          if (p?.product_ref?.item_id) {
+            const prod = await productService.getProduct({ platform, itemId: p.product_ref.item_id });
+            if (prod && conv) {
+              const card = toProductCard(prod as Record<string, unknown>, platform);
+              products.push(card);
             }
-            userParsedMap.set(msg.message_id, {
-              user_message_type: p?.message_type,
-              user_media: p?.media,
-              user_products: products.length > 0 ? products : undefined,
-              user_order_sn: p?.order_sn,
-              user_notification_text: p?.notification_text,
-              user_table: p?.table,
-            });
-          } catch {
-            // ignore
           }
+          userParsedMap.set(msg.message_id, {
+            user_message_type: p?.message_type,
+            user_media: p?.media,
+            user_products: products.length > 0 ? products : undefined,
+            user_order_sn: p?.order_sn,
+            user_notification_text: p?.notification_text,
+            user_table: p?.table,
+          });
+        } catch {
+          // ignore
         }
       }
 

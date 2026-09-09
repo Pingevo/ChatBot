@@ -43,6 +43,8 @@ interface SystemConfig {
   shopee_bot_url: string;
   tiktok_bot_url: string;
   lazada_bot_url: string;
+  // ⚡ chat_engine — "legacy" (app.py) หรือ "v2" (chat_v2.py)
+  chat_engine: "legacy" | "v2";
   updated_by: string;
   updated_at: string;
 }
@@ -134,6 +136,7 @@ export default function ConfigPage() {
   // ⚡ Workflow engine settings ย้ายไป /admin-config แล้ว
   const [editingBotUrl, setEditingBotUrl] = useState<Platform | null>(null);
   const [botUrlDraft, setBotUrlDraft] = useState("");
+  const [chatEngineDraft, setChatEngineDraft] = useState<"legacy" | "v2">("legacy");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -144,6 +147,7 @@ export default function ConfigPage() {
       ]);
       setConfig(configRes.data.config);
       setPollingInterval(configRes.data.config.polling_interval_ms || 1000);
+      setChatEngineDraft(configRes.data.config.chat_engine || "legacy");
       setShops(shopsRes.data.rows || []);
     } catch (err) {
       console.error("load config failed", err);
@@ -260,6 +264,31 @@ export default function ConfigPage() {
       toast.success(`บันทึก Bot URL (${platform}) แล้ว`);
     } catch (err) {
       catchError(err, "บันทึก URL ไม่สำเร็จ");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ⚡ chat_engine — เลือก logic ตอบของบอท (legacy / v2)
+  async function handleSaveChatEngine() {
+    if (!config) return;
+    const ok = await confirm.ask({
+      title: `เปลี่ยน Chat Engine เป็น "${chatEngineDraft}"?`,
+      message: chatEngineDraft === "v2"
+        ? "⚠️ จะใช้ chat_v2 (pipeline ใหม่ 8 stages) สำหรับทุกหน้า — shadowbot, botworker, test-assignment, live-assignment, replay-compare, testchat"
+        : "จะกลับใช้ legacy app.py chat() สำหรับทุกหน้า (default ปลอดภัย)",
+      confirmText: "บันทึก",
+    });
+    if (!ok) return;
+    setSaving(true);
+    try {
+      const r = await api().put<{ ok: boolean; config: SystemConfig }>("/config", {
+        chat_engine: chatEngineDraft,
+      });
+      setConfig(r.data.config);
+      toast.success(`เปลี่ยน Chat Engine เป็น "${chatEngineDraft}" แล้ว`);
+    } catch (err) {
+      catchError(err, "บันทึก Chat Engine ไม่สำเร็จ");
     } finally {
       setSaving(false);
     }
@@ -392,6 +421,44 @@ export default function ConfigPage() {
                 </div>
               );
             })}
+          </div>
+        </Card>
+
+        {/* ⚡ Chat Engine — เลือก logic ตอบของบอท (legacy / v2) */}
+        <Card className="p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Cpu size={14} className="text-brand" />
+            <h2 className="text-sm font-semibold text-text">Chat Engine (logic ตอบของบอท)</h2>
+            <Badge tone={config?.chat_engine === "v2" ? "brand" : "neutral"} className="ml-auto">
+              {config?.chat_engine === "v2" ? "v2" : "legacy"}
+            </Badge>
+          </div>
+          <div className="rounded-lg bg-surface-2 p-3">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-xs text-text-muted">
+                มีผลทุกหน้า: shadowbot, botworker, test-assignment, live-assignment, replay-compare, testchat
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <select
+                value={chatEngineDraft}
+                onChange={(e) => setChatEngineDraft(e.target.value as "legacy" | "v2")}
+                disabled={!editable || saving}
+                className="rounded-md bg-surface border border-border px-2 py-1 text-xs text-text"
+              >
+                <option value="legacy">legacy — app.py chat() (default, ปลอดภัย)</option>
+                <option value="v2">v2 — chat_v2.py (pipeline ใหม่ 8 stages)</option>
+              </select>
+              <Button size="sm" onClick={handleSaveChatEngine} disabled={saving || !editable || chatEngineDraft === config?.chat_engine}>
+                {saving ? <Loading size={12} /> : "บันทึก"}
+              </Button>
+            </div>
+            {config?.chat_engine === "v2" && (
+              <div className="mt-2 text-[11px] text-amber-500 flex items-center gap-1">
+                <AlertCircle size={11} />
+                กำลังใช้ chat_v2 — ทุกการเรียกบอทจะผ่าน pipeline ใหม่
+              </div>
+            )}
           </div>
         </Card>
 

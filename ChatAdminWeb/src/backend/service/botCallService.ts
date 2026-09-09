@@ -4,6 +4,7 @@
 // ถ้าทั้งคู่ import กันตรงๆ จะเกิด circular dependency → แยก callBot เป็น module ตรงกลาง
 import { serverConfig } from "../lib/config";
 import type { Platform } from "./systemConfigService";
+import { shouldUseChatV2 } from "./systemConfigService";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 
 export interface BotCallParams {
@@ -32,6 +33,8 @@ export interface BotCallResponse {
   // ⚡ Phase 1A multimodal — description ที่สกัดจากรูปใน turn นี้
   //    caller เก็บไว้ใน message doc เพื่อส่งกลับใน history ของ turn ถัดไป
   image_desc?: string;
+  // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน (legacy / v2)
+  chat_engine?: "legacy" | "v2";
 }
 
 /**
@@ -69,6 +72,8 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
   const url = baseUrl.replace(/\/$/, "") + "/chat";
   // ⚡ Phase 2A — ดึง ticket_state จาก DB
   const ticketState = await resolveTicketState(params.conversationId, params.simulate);
+  // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
+  const useV2 = await shouldUseChatV2();
   const resp = await fetch(url, {
     method: "POST",
     headers: {
@@ -88,6 +93,8 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       // ⚡ Phase 2A — ส่ง conversation_id + simulate ให้บอท (สำหรับ handoff API)
       ...(params.conversationId ? { conversation_id: params.conversationId } : {}),
       ...(params.simulate ? { simulate_assignment: true } : {}),
+      // ⚡ chat_engine — ส่ง use_v2=true ถ้า config เลือก "v2"
+      ...(useV2 ? { use_v2: true } : {}),
     }),
   });
   if (!resp.ok) throw new Error(`bot call failed: ${resp.status}`);
@@ -101,5 +108,6 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
     cost: typeof data.cost === "number" ? data.cost : undefined,
     products: data.products,
     image_desc: typeof data.image_desc === "string" ? data.image_desc : undefined,
+    chat_engine: useV2 ? "v2" : "legacy",
   };
 }

@@ -10,6 +10,8 @@ import { api } from "@/lib/apiClient";
 import { splitAnswerSegments } from "@/lib/answerSegments";
 import { useToastError } from "@/components/ui/Toast";
 import { Loading } from "@/components/ui/Loading";
+import { MessageContent } from "@/components/chat/MessageContent";
+import type { ChatMessage } from "@/lib/types";
 import {
   MessageSquare, Star, Search, User, Bot, ShieldCheck,
   Eye, EyeOff, ArrowLeft, X, ZoomIn,
@@ -95,6 +97,24 @@ interface SessionMessage {
   timestamp?: string;
   stats?: Record<string, unknown>;
   images?: string[];
+}
+
+// ⚡ แปลง SessionMessage → ChatMessage สำหรับ MessageContent
+//   - ถ้ามี images → message_type: "image_with_text" (text + รูป)
+//   - ถ้าไม่มี images → message_type: "text"
+function sessionMsgToChatMsg(m: SessionMessage, index: number): ChatMessage {
+  const hasImages = m.images && m.images.length > 0;
+  return {
+    id: `session_msg_${index}`,
+    role: m.role === "user" ? "user" : "bot",
+    text: m.text || "",
+    timestamp: m.timestamp || new Date().toISOString(),
+    // ⚡ ถ้ามี images → ใช้ message_type: "image_with_text" + media (รูปแรก)
+    //   สำหรับรูปเพิ่มเติม → แสดงใต้ text (MessageContent รองรับ media เดียว)
+    //   แต่ test-chat-result ใช้ lightbox ของตัวเอง → แสดงรูปแรกใน MessageContent + รูปที่เหลือใน lightbox
+    message_type: hasImages ? "image_with_text" : "text",
+    media: hasImages ? { type: "image", url: m.images![0] } : undefined,
+  };
 }
 
 interface SessionRating {
@@ -495,15 +515,16 @@ export default function TestChatResultPage() {
                                 </span>
                               )}
                             </div>
-                            {m.text && m.text.trim() && (
-                              <div className="bg-surface border border-border rounded-lg rounded-tl-sm px-3 py-2 text-sm text-text whitespace-pre-wrap break-words max-w-[85%] w-fit">
-                                {m.text}
+                            {/* ⚡ ใช้ MessageContent สำหรับ render rich content (text + image + รองรับ tag อื่นๆ) */}
+                            {(m.text || (m.images && m.images.length > 0)) && (
+                              <div className="bg-surface border border-border rounded-lg rounded-tl-sm px-3 py-2 text-sm text-text max-w-[85%] w-fit">
+                                <MessageContent msg={sessionMsgToChatMsg(m, i)} variant="user" />
                               </div>
                             )}
-                            {/* ⚡ Phase 3B-7 — images ขนาดใหญ่ + กดเปิด lightbox */}
-                            {m.images && m.images.length > 0 && (
+                            {/* ⚡ Phase 3B-7 — images ขนาดใหญ่ + กดเปิด lightbox (รูปที่ 2-N ที่ไม่อยู่ใน MessageContent) */}
+                            {m.images && m.images.length > 1 && (
                               <div className="flex gap-2 mt-2 flex-wrap">
-                                {m.images.map((img, j) => (
+                                {m.images.slice(1).map((img, j) => (
                                   <button
                                     key={j}
                                     onClick={() => setLightbox(img)}
@@ -512,7 +533,7 @@ export default function TestChatResultPage() {
                                   >
                                     <img
                                       src={img}
-                                      alt={`รูป ${j + 1}`}
+                                      alt={`รูป ${j + 2}`}
                                       className="w-28 h-28 object-cover"
                                     />
                                     <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center">
@@ -541,10 +562,19 @@ export default function TestChatResultPage() {
                             {botSegments.map((seg, si) => {
                               const segKey = `${i}-seg-${si}`;
                               const isFullSeg = showFullBot.has(segKey);
+                              const segText = isFullSeg ? seg : (seg.length > 400 ? seg.slice(0, 400) + "..." : seg);
                               return (
                                 <div key={si} className="space-y-0.5 flex flex-col items-end">
-                                  <div className="bg-brand text-white rounded-lg rounded-tr-sm px-3 py-2 text-sm max-w-[85%] w-fit whitespace-pre-wrap break-words">
-                                    {isFullSeg ? renderMarkdownInline(seg) : (seg.length > 400 ? renderMarkdownInline(seg.slice(0, 400) + "...") : renderMarkdownInline(seg))}
+                                  <div className="bg-brand text-white rounded-lg rounded-tr-sm px-3 py-2 text-sm max-w-[85%] w-fit">
+                                    <MessageContent
+                                      msg={{
+                                        id: `bot_${i}_${si}`,
+                                        role: "bot",
+                                        text: segText,
+                                        timestamp: m.timestamp || new Date().toISOString(),
+                                      }}
+                                      variant="out"
+                                    />
                                   </div>
                                   {seg.length > 400 && (
                                     <button
