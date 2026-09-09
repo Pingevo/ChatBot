@@ -363,15 +363,34 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
         shop_filter: ชื่อร้าน (optional — กรองเฉพาะร้านที่ระบุ)
 
     Returns:
-        dict ที่มี:
+        dict ที่มี (Phase 3C — ขยายจากเดิม):
         - order_sn: str
         - order_status: str (ภาษาไทย)
         - order_status_raw: str (original)
         - logistics_status: str (ภาษาไทย)
         - logistics_status_raw: str (original)
-        - items: list[{name, quantity, model_name}]
+        - items: list[{name, quantity, model_name, price, original_price, image_url, sku, item_id, model_id}]
         - shipping_carrier: str
-        - create_time: str (วันที่ภาษาไทย)
+        - tracking_no: str
+        - tracking_numbers: list[str]
+        - create_time: str (วันที่สั่งซื้อ ภาษาไทย)
+        - pay_time: str (วันที่ชำระเงิน ภาษาไทย)
+        - ship_by_date: str (วันที่ส่งกำหนด ภาษาไทย)
+        - pickup_done_time: str (วันที่ขนส่งรับพัสดุ ภาษาไทย)
+        - delivery_time: str (วันที่ส่งถึง ภาษาไทย — จาก update_time เมื่อ COMPLETED)
+        - update_time: str (วันที่อัปเดตล่าสุด ภาษาไทย)
+        - recipient_address: str (ที่อยู่ลูกค้า ปกปิด sensitive)
+        - total_amount: float
+        - currency: str
+        - estimated_shipping_fee: float
+        - actual_shipping_fee: float
+        - payment_method: str
+        - cod: bool (เก็บเงินปลายทาง)
+        - days_to_ship: int
+        - cancel_by: str
+        - cancel_reason: str
+        - buyer_cancel_reason: str
+        - buyer_username: str
         - shopname: str
         - found: True
 
@@ -398,6 +417,7 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
             qty = item.get("model_quantity_purchased") or 1
             # ⚡ Phase 1C — เพิ่ม variant/price/image/brand สำหรับ order panel
             _price = item.get("model_discounted_price") or item.get("model_original_price") or 0
+            _orig_price = item.get("model_original_price") or 0
             _image_info = item.get("image_info") or {}
             _image_url = _image_info.get("image_url") if isinstance(_image_info, dict) else ""
             # model_sku มักมี brand prefix (เช่น ZMI-HA716-CN-WH)
@@ -407,6 +427,7 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
                 "model_name": model_name,
                 "quantity": int(qty) if qty else 1,
                 "price": float(_price) if _price else 0.0,
+                "original_price": float(_orig_price) if _orig_price else 0.0,
                 "image_url": _image_url or "",
                 "sku": _sku,
                 "item_id": str(item.get("item_id") or "").replace(".0", ""),
@@ -435,6 +456,25 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
 
         order_status_raw = doc.get("order_status") or ""
 
+        # ⚡ Phase 3C — ดึงฟิลด์เพิ่ม
+        _pay_time = doc.get("pay_time")
+        _ship_by_date = doc.get("ship_by_date")
+        _pickup_done_time = doc.get("pickup_done_time")
+        _update_time = doc.get("update_time") or doc.get("update_time_unix")
+        _recipient_address = doc.get("recipient_address")
+        _cod = doc.get("cod")
+        _estimated_shipping_fee = doc.get("estimated_shipping_fee") or 0
+        _actual_shipping_fee = doc.get("actual_shipping_fee") or 0
+        _days_to_ship = doc.get("days_to_ship") or 0
+        _cancel_by = doc.get("cancel_by") or ""
+        _cancel_reason = doc.get("cancel_reason") or ""
+        _buyer_cancel_reason = doc.get("buyer_cancel_reason") or ""
+
+        # วันที่ส่งถึง — ใช้ update_time เมื่อ order_status=COMPLETED หรือ logistics=DELIVERY_DONE
+        _delivery_time = "ไม่ระบุ"
+        if order_status_raw == "COMPLETED" or logistics_status_raw == "LOGISTICS_DELIVERY_DONE":
+            _delivery_time = _format_unix_ts(_update_time)
+
         return {
             "order_sn": doc.get("order_sn") or order_sn,
             "order_status": _map_order_status(order_status_raw),
@@ -449,6 +489,20 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
             "tracking_numbers": tracking_numbers,  # ทุก tracking ถ้ามีหลาย package
             "create_time": _format_create_time(doc.get("create_time")),
             "create_time_raw": doc.get("create_time"),  # ⚡ Phase 1C — unix ts สำหรับ warranty calc
+            # ⚡ Phase 3C — ฟิลด์ใหม่
+            "pay_time": _format_unix_ts(_pay_time),
+            "ship_by_date": _format_unix_ts(_ship_by_date),
+            "pickup_done_time": _format_unix_ts(_pickup_done_time),
+            "delivery_time": _delivery_time,
+            "update_time": _format_unix_ts(_update_time),
+            "recipient_address": _format_address(_recipient_address) if isinstance(_recipient_address, dict) else "",
+            "estimated_shipping_fee": float(_estimated_shipping_fee) if _estimated_shipping_fee else 0.0,
+            "actual_shipping_fee": float(_actual_shipping_fee) if _actual_shipping_fee else 0.0,
+            "days_to_ship": int(_days_to_ship) if _days_to_ship else 0,
+            "cod": bool(_cod) if _cod is not None else False,
+            "cancel_by": _cancel_by,
+            "cancel_reason": _cancel_reason,
+            "buyer_cancel_reason": _buyer_cancel_reason,
             "shopname": doc.get("shopname") or "",
             "total_amount": float(doc.get("total_amount") or 0),
             "currency": doc.get("currency") or "THB",
@@ -505,17 +559,28 @@ def lookup_orders_by_buyer(
 def build_order_context(order: dict[str, Any]) -> str:
     """สร้าง context string สำหรับส่งให้ LLM.
 
+    ⚡ Phase 3C — ขยายให้ครบ: วันที่ซื้อ/ชำระ/ส่ง/ถึง, ที่อยู่, ราคา, วิธีชำระ, สถานะ, ขนส่ง, สินค้า+ราคา
+
     รูปแบบ:
     === ข้อมูลคำสั่งซื้อ ===
     เลขที่คำสั่งซื้อ: 240215MCEQMT60
     สถานะ: จัดส่งแล้ว
     สถานะขนส่ง: ขนส่งรับพัสดุแล้ว
     วันที่สั่งซื้อ: 15 ก.พ. 2567
+    วันที่ชำระเงิน: 15 ก.พ. 2567
+    วันที่ส่งกำหนด: 17 ก.พ. 2567
+    วันที่ขนส่งรับพัสดุ: 16 ก.พ. 2567
+    วันที่ส่งถึง: ไม่ระบุ
     ขนส่ง: Kerry
+    เลขพัสดุ: SPX1234567890
+    ที่อยู่จัดส่ง: ****** คลองโยง อำเภอพุทธมณฑล จังหวัดนครปฐม 73170
+    วิธีชำระเงิน: บัตรเครดิต (ไม่ใช่เก็บเงินปลายทาง)
+    ราคารวม: 2,206 บาท
+    ค่าส่ง: 48 บาท
     สินค้า:
-    - [ชื่อสินค้า] (รุ่น: XXX) จำนวน 1 ชิ้น
+    - [ชื่อสินค้า] (รุ่น: XXX) จำนวน 2 ชิ้น ราคา 1,079 บาท/ชิ้น (จาก 1,590 บาท)
     - ...
-    รวม 2 ชิ้น 2 รายการ
+    รวม 2 ชิ้น 2 รายการ ยอดรวม 2,206 บาท
     """
     if not order or not order.get("found"):
         return ""
@@ -525,9 +590,22 @@ def build_order_context(order: dict[str, Any]) -> str:
     lines.append(f"สถานะ: {order['order_status']}")
     if order.get("logistics_status"):
         lines.append(f"สถานะขนส่ง: {order['logistics_status']}")
+
+    # วันที่ต่างๆ
     lines.append(f"วันที่สั่งซื้อ: {order['create_time']}")
+    if order.get("pay_time") and order["pay_time"] != "ไม่ระบุ":
+        lines.append(f"วันที่ชำระเงิน: {order['pay_time']}")
+    if order.get("ship_by_date") and order["ship_by_date"] != "ไม่ระบุ":
+        lines.append(f"วันที่ส่งกำหนด: {order['ship_by_date']}")
+    if order.get("pickup_done_time") and order["pickup_done_time"] != "ไม่ระบุ":
+        lines.append(f"วันที่ขนส่งรับพัสดุ: {order['pickup_done_time']}")
+    if order.get("delivery_time") and order["delivery_time"] != "ไม่ระบุ":
+        lines.append(f"วันที่ส่งถึง: {order['delivery_time']}")
+    if order.get("update_time") and order["update_time"] != "ไม่ระบุ":
+        lines.append(f"วันที่อัปเดตล่าสุด: {order['update_time']}")
+
+    # ขนส่ง + tracking
     lines.append(f"ขนส่ง: {order['shipping_carrier']}")
-    # ⚡ Phase 1B — แสดง tracking number ถ้ามี
     _tracking = order.get("tracking_no") or ""
     _all_tracking = order.get("tracking_numbers") or []
     if _all_tracking and len(_all_tracking) > 1:
@@ -535,6 +613,48 @@ def build_order_context(order: dict[str, Any]) -> str:
     elif _tracking:
         lines.append(f"เลขพัสดุ: {_tracking}")
 
+    # ที่อยู่
+    _addr = order.get("recipient_address") or ""
+    if _addr:
+        lines.append(f"ที่อยู่จัดส่ง: {_addr}")
+
+    # วิธีชำระเงิน
+    _payment = order.get("payment_method") or ""
+    _cod = order.get("cod")
+    if _cod:
+        lines.append("วิธีชำระเงิน: เก็บเงินปลายทาง (COD)")
+    elif _payment:
+        lines.append(f"วิธีชำระเงิน: {_payment}")
+    else:
+        lines.append("วิธีชำระเงิน: ไม่ระบุ")
+
+    # ราคา
+    _total = order.get("total_amount", 0)
+    _currency = order.get("currency", "THB")
+    _est_ship = order.get("estimated_shipping_fee", 0)
+    if _total:
+        lines.append(f"ราคารวม: {_total:,.0f} {_currency}")
+    if _est_ship:
+        lines.append(f"ค่าส่ง (โดยประมาณ): {_est_ship:,.0f} {_currency}")
+
+    # สถานะยกเลิก
+    _cancel_by = order.get("cancel_by") or ""
+    _cancel_reason = order.get("cancel_reason") or ""
+    _buyer_cancel = order.get("buyer_cancel_reason") or ""
+    if _cancel_by:
+        _cancel_text = f"ยกเลิกโดย: {_cancel_by}"
+        if _cancel_reason:
+            _cancel_text += f" (เหตุผล: {_cancel_reason})"
+        elif _buyer_cancel and _buyer_cancel != _cancel_reason:
+            _cancel_text += f" (เหตุผล: {_buyer_cancel})"
+        lines.append(_cancel_text)
+
+    # วันที่ส่งภายในกี่วัน
+    _days = order.get("days_to_ship") or 0
+    if _days:
+        lines.append(f"ส่งภายใน: {_days} วัน")
+
+    # สินค้า
     items = order.get("items", [])
     if items:
         lines.append("สินค้า:")
@@ -542,11 +662,26 @@ def build_order_context(order: dict[str, Any]) -> str:
             name = item["name"]
             model = item.get("model_name", "")
             qty = item["quantity"]
+            price = item.get("price", 0)
+            orig_price = item.get("original_price", 0)
+            # สร้างบรรทัดสินค้า
             if model and model != name:
-                lines.append(f"- {name} (รุ่น: {model}) จำนวน {qty} ชิ้น")
+                _item_line = f"- {name} (รุ่น: {model}) จำนวน {qty} ชิ้น"
             else:
-                lines.append(f"- {name} จำนวน {qty} ชิ้น")
-        lines.append(f"รวม {order.get('total_quantity', 0)} ชิ้น {order.get('item_count', 0)} รายการ")
+                _item_line = f"- {name} จำนวน {qty} ชิ้น"
+            # เพิ่มราคา
+            if price:
+                if orig_price and orig_price > price:
+                    _item_line += f" ราคา {price:,.0f} บาท/ชิ้น (จาก {orig_price:,.0f} บาท)"
+                else:
+                    _item_line += f" ราคา {price:,.0f} บาท/ชิ้น"
+            lines.append(_item_line)
+        _total_qty = order.get("total_quantity", 0)
+        _total_items = order.get("item_count", 0)
+        _summary = f"รวม {_total_qty} ชิ้น {_total_items} รายการ"
+        if _total:
+            _summary += f" ยอดรวม {_total:,.0f} {_currency}"
+        lines.append(_summary)
 
     return "\n".join(lines)
 

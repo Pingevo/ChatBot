@@ -1283,6 +1283,19 @@ def _detect_product_types(message: str) -> set[str]:
     - ถ้ามี non-phone type + "ใช้กับ/รองรับ" + phone brand → ลบ phone ออก
     """
     low = message.lower()
+    # ⚡ แก้คำพิมพ์ผิดเกี่ยวกับ charger ก่อน detect product type
+    # (เดิม typo fix มีเฉพาะใน _detect_charger_subtype ทำให้ "หัวชาจในรถ" ไม่ถูก detect เป็น car_charger)
+    _pt_typo_fixes = [
+        ("หัวชาจ", "หัวชาร์จ"), ("หัวชารจ", "หัวชาร์จ"),
+        ("หัวชาาร์จ", "หัวชาร์จ"), ("หัวชาร์จจ", "หัวชาร์จ"),
+        ("หัวชารต", "หัวชาร์ต"), ("หัวชาต", "หัวชาร์ต"),
+        ("สายชาจ", "สายชาร์จ"), ("สายชารจ", "สายชาร์จ"),
+        ("สายชาาร์จ", "สายชาร์จ"), ("สายชาร์จจ", "สายชาร์จ"),
+        ("สายชารต", "สายชาร์ต"), ("สายชาต", "สายชาร์ต"),
+        ("ชุดชาจ", "ชุดชาร์จ"), ("ชุดชารจ", "ชุดชาร์จ"),
+    ]
+    for wrong, right in _pt_typo_fixes:
+        low = low.replace(wrong, right)
     found: set[str] = set()
     for type_name, user_kws, _regex in PRODUCT_TYPES:
         if any(kw in low for kw in user_kws):
@@ -1424,6 +1437,10 @@ def _detect_charger_subtype(message: str) -> str | None:
         "สมาร์ท", "smart", "หูหนู", "เมาส์", "mouse", "คีย์บอร์ด",
         "ลำโพง", "speaker", "หัวหอย", "หัวใจ", "สายตา", "สายรัด",
         "สายคล้อง", "สายนาฬิกา", "สายเชือก", "สายสพาก", "หัวเลี้ยว",
+        # ⚡ BUG-10 (QA 2026-09-07) — "หัวฉีด/หัวพ่น" เป็นอะไหล่เครื่องฟอก/พ่นน้ำ ไม่ใช่หัวชาร์จ
+        # เคส QA: "มีอะไหล่หัวฉีดตัวพ่นน้ำไหมคะ" → เดิม "หัว" ลอยๆ โดนจับเป็น adapter → ดึงหัวชาร์จมาเป็น context
+        # → LLM แต่งคำอธิบายแคตตาล็อกร้าน ("ร้านขายหัวชาร์จเป็นหลัก")
+        "หัวฉีด", "หัวพ่น", "หัวข้อ",
     )
     _has_other_prod = any(kw in low for kw in _other_prod_kws)
     if not _has_other_prod:
@@ -1514,9 +1531,11 @@ def _filter_charger_subtype(docs: list[dict], subtype: str) -> list[dict]:
     desktop_kw = ("แท่นชาร์จ", "desktop charger", "desktop charge",
                   "charging station", "ชาร์จสเตชัน")
     # car_charger = หัวชาร์จในรถ (ใช้กับที่ชาร์จบุหรี่รถ)
+    # ⚡ ไม่มี "ในรถ" ลอยๆ เพราะ match "ใช้งานในรถยนต์" ของสายชาร์จทั่วไป (false positive)
+    # สินค้า car charger จริง match ด้วย "car charger"/"หัวชาร์จในรถ"/"ที่ชาร์จในรถ" อยู่แล้ว
     car_charger_kw = ("car charger", "หัวชาร์จในรถ", "หัวชาร์จรถ",
                       "ชาร์จในรถ", "ชาร์จรถ", "ที่ชาร์จในรถ", "ที่ชาร์จรถ",
-                      "cigarette lighter", "ชาร์จบุหรี่", "ในรถ")
+                      "cigarette lighter", "ชาร์จบุหรี่")
     # wireless = ชาร์จไร้สาย (magsafe/qi/magnetic)
     wireless_kw = ("ไร้สาย", "wireless charger", "wireless charge",
                    "qi charger", "magsafe", "แม็กเซฟ", "magnetic charger",
@@ -1766,7 +1785,8 @@ _PRODUCT_TYPE_CATEGORIES: dict[str, tuple[str, ...]] = {
     "air_filter": ("Home Appliances", "Home & Living"),
     "car_accessory": ("Automobiles", "Mobile & Gadgets"),
     # ── Power & Charging sub-types ──
-    "car_charger": ("Mobile & Gadgets", "Automobiles"),
+    "car_charger": ("Mobile & Gadgets", "Automobiles",
+                    "Spare Parts and Accessories for Vehicles"),
     "wireless_charger": ("Mobile & Gadgets",),
     "desktop_charger": ("Mobile & Gadgets", "Computers & Accessories"),
     "smart_socket": ("Home Appliances", "Home & Living", "Mobile & Gadgets"),
@@ -2429,6 +2449,7 @@ def fetch_products(
     skip_charger_subtype: bool = False,
     product_types_override: set[str] | None = None,
     charger_subtype_override: str | None = None,
+    filter_unavailable: bool = False,
 ) -> list[dict]:
     """กรองและดึงสินค้าที่เกี่ยวข้อง แล้วย่อเป็น product card ส่งให้ LLM.
 
@@ -2658,31 +2679,52 @@ def fetch_products(
             "model.price_info.current_price", "attribute_list.original_attribute_name",
         ))
 
-        cursor = collection.find(query, PRODUCT_PROJECTION)
-        if has_specific:
-            # ดึงเยอะกว่า limit*2 เพื่อให้หลังกรอง false positive ยังเหลือพอ
-            # (เช่น โทรศัพท์งบ 5000: 20 ตัวแรกเป็น accessories หมด โทรศัพท์จริงอยู่หลังจากนั้น)
-            # สำหรับ compatibility check ดึงเยอะขึ้นเพื่อให้ครอบคลุมทุกรุ่นในหมวด
-            _compat_limit = max(limit * 20, 500) if is_compat_check else max(limit * 5, 100)
-            cursor = cursor.limit(_compat_limit)
-        else:
-            # fallback: text search บน item_name + description
-            words = [w for w in re.split(r"\s+", message.strip()) if len(w) >= 2]
-            if words:
-                text_q = {
-                    "$or": [
-                        {"item_name": {"$regex": "|".join(re.escape(w) for w in words[:5]), "$options": "i"}},
-                        {"description": {"$regex": "|".join(re.escape(w) for w in words[:5]), "$options": "i"}},
-                    ],
-                }
-                # ⚠️ ถ้ามี shop_filter ต้องกรองเฉพาะร้านนั้น — ห้ามค้นข้ามร้าน
-                if shop_filter:
-                    text_q["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
-                cursor = collection.find(text_q, PRODUCT_PROJECTION).limit(limit * 2)
-            else:
-                cursor = cursor.limit(limit)
+        # ⚡ Phase 2Z+++++ — car_charger มี cat_name เฉพาะ (Spare Parts and Accessories for Vehicles)
+        # แต่ charger ทั่วไปอยู่ใน Mobile & Gadgets มี 130+ ตัว → กด car charger ออกจาก limit 100
+        # แก้: ถ้า car_charger อยู่ใน product_types ให้ query ด้วย cat_name ของ car_charger อย่างเดียวก่อน
+        # ถ้าได้ผล → ใช้ผลนั้น (ไม่ต้องรวมกับ charger ทั่วไป)
+        _car_charger_only = False
+        if "car_charger" in product_types and "cat_name" in query:
+            car_cats = _product_type_categories({"car_charger"})
+            charger_cats = _product_type_categories({"charger"})
+            # cat_name ที่เป็นของ car_charger เท่านั้น (ไม่อยู่ใน charger ทั่วไป)
+            car_only_cats = [c for c in car_cats if c not in charger_cats]
+            if car_only_cats:
+                car_query = dict(query)
+                car_query["cat_name"] = {"$in": car_only_cats}
+                _car_limit = max(limit * 5, 50)
+                _car_docs = list(collection.find(car_query, PRODUCT_PROJECTION).limit(_car_limit))
+                if _car_docs:
+                    docs = _car_docs
+                    _car_charger_only = True
+                    print(f"[CAR-CHARGER-ONLY] query cat_name={car_only_cats} → {len(docs)} docs (แยกจาก charger ทั่วไป)", file=sys.stderr)
 
-        docs = list(cursor)
+        if not _car_charger_only:
+            cursor = collection.find(query, PRODUCT_PROJECTION)
+            if has_specific:
+                # ดึงเยอะกว่า limit*2 เพื่อให้หลังกรอง false positive ยังเหลือพอ
+                # (เช่น โทรศัพท์งบ 5000: 20 ตัวแรกเป็น accessories หมด โทรศัพท์จริงอยู่หลังจากนั้น)
+                # สำหรับ compatibility check ดึงเยอะขึ้นเพื่อให้ครอบคลุมทุกรุ่นในหมวด
+                _compat_limit = max(limit * 20, 500) if is_compat_check else max(limit * 5, 100)
+                cursor = cursor.limit(_compat_limit)
+            else:
+                # fallback: text search บน item_name + description
+                words = [w for w in re.split(r"\s+", message.strip()) if len(w) >= 2]
+                if words:
+                    text_q = {
+                        "$or": [
+                            {"item_name": {"$regex": "|".join(re.escape(w) for w in words[:5]), "$options": "i"}},
+                            {"description": {"$regex": "|".join(re.escape(w) for w in words[:5]), "$options": "i"}},
+                        ],
+                    }
+                    # ⚠️ ถ้ามี shop_filter ต้องกรองเฉพาะร้านนั้น — ห้ามค้นข้ามร้าน
+                    if shop_filter:
+                        text_q["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
+                    cursor = collection.find(text_q, PRODUCT_PROJECTION).limit(limit * 2)
+                else:
+                    cursor = cursor.limit(limit)
+
+            docs = list(cursor)
 
     # กรอง false positive ใน Python (สำหรับ regex fallback path)
     # ถ้าใช้ vector search อยู่แล้ว กรองไปแล้วด้านบน ไม่ต้องทำซ้ำ
@@ -2904,6 +2946,26 @@ def fetch_products(
 
     cards = [to_product_card(d, desc_message or message) for d in docs]
 
+    # ⚡ 2026-09-12 — filter_unavailable: กรองสินค้าที่ sold_out หรือ status != NORMAL ออกจากการแนะนำขาย
+    #   ใช้เมื่อ intent=product_recommend (ลูกค้าอยากให้แนะนำ/ดูสินค้า → ต้องเป็นสินค้าที่ขายได้)
+    #   ไม่ใช้เมื่อ intent=product_spec/compatibility_check/warranty (ลูกค้าถามเฉพาะรุ่น อาจเป็นสินค้าที่ซื้อไปแล้ว)
+    #   fallback: ถ้ากรองแล้วว่าง → ปล่อยทั้งหมด + ฝัง context note บอก LLM ว่า "ไม่มีสินค้าพร้อมขาย ห้ามแนะนำขาย ให้บอกไม่มีสต็อก + ชวนทักแอดมิน"
+    if filter_unavailable and cards:
+        _available = [c for c in cards if c.get("status") == "NORMAL" and not c.get("sold_out")]
+        if _available:
+            cards = _available
+            print(f"[FILTER-UNAVAILABLE] กรอง sold_out/non-NORMAL ออก → เหลือ {len(cards)} ตัว", file=sys.stderr)
+        else:
+            # fallback: ไม่มีสินค้า NORMAL + stock > 0 เลย → ปล่อยทั้งหมดให้ LLM ตอบสเปคได้
+            # แต่ฝัง context note บอก LLM ว่าห้ามแนะนำขาย (เพราะสินค้าทุกตัว sold_out หรือ status != NORMAL)
+            print(f"[FILTER-UNAVAILABLE] fallback: ไม่มีสินค้า available เลย → ปล่อยทั้งหมด {len(cards)} ตัว + ฝัง note ห้ามแนะนำขาย", file=sys.stderr)
+            if cards:
+                cards[0]["_context_note"] = (
+                    "⚠️ สินค้าใน context ทุกตัวไม่พร้อมขาย (sold_out หรือ status != NORMAL) "
+                    "ห้ามแนะนำ/เสนอขายสินค้าเหล่านี้เด็ดขาด "
+                    "ให้บอกลูกค้าว่าไม่มีสินค้าพร้อมส่งตอนนี้ แล้วชวนทักแอดมินสอบถามสต็อกเพิ่มเติม"
+                )
+
     # จำกัดสุดท้าย (ถ้ายังไม่ถูกตัดจาก _rerank_by_promo_latest)
     # สำหรับ compatibility check ให้ส่งเยอะกว่า limit เพื่อให้ LLM เห็นทุกรุ่น
     _final_limit = max(limit * 3, 50) if is_compat_check else limit
@@ -2918,6 +2980,8 @@ def fetch_products(
             "speaker": "ลำโพง", "memory_card": "การ์ดหน่วยความจำ",
             "screen_protector": "ฟิล์มจอ", "fan": "พัดลม",
             "selfie_stick": "ไม้เซลฟี่", "mobile_wifi": "pocket wifi",
+            "car_charger": "หัวชาร์จในรถ", "wireless_charger": "แท่นชาร์จไร้สาย",
+            "desktop_charger": "แท่นชาร์จตั้งโต๊ะ", "smart_socket": "ปลั๊กไฟอัจฉริยะ",
         }
         asked = " หรือ ".join(type_labels.get(t, t) for t in product_types)
         cards[0]["_context_note"] = (

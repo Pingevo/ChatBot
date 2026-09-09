@@ -12,7 +12,7 @@
     "intent": "product_recommend|product_spec|compatibility_check|
                warranty_duration|warranty_claim|general_question|other",
     "product_type": "phone|charger|earphone|smartwatch|powerbank|case|speaker|other|null",
-    "charger_subtype": "cable|adapter|set|null",
+    "charger_subtype": "cable|adapter|set|car_charger|wireless|desktop|socket|null",
     "target_device": "iphone 4s|samsung s25 ultra|null",
     "needs_description": bool,
     "confidence": 0.0-1.0,
@@ -54,8 +54,12 @@ product_type ที่เป็นไปได้ (ถ้าเป็นคำ�
 
 charger_subtype (ถ้า product_type=charger):
 - "cable": สายชาร์จ
-- "adapter": หัวชาร์จ/adapter
+- "adapter": หัวชาร์จ/adapter (หัวชาร์จบ้าน/พกพา ทั่วไป)
 - "set": ชุดชาร์จ (หัว+สาย หรือ หัว+สาย+พาวเวอร์แบงค์)
+- "car_charger": หัวชาร์จในรถ/ที่ชาร์จในรถ (Car Charger)
+- "wireless": แท่นชาร์จไร้สาย/MagSafe/Qi
+- "desktop": แท่นชาร์จตั้งโต๊ะ/charging station
+- "socket": ปลั๊กไฟอัจฉริยะ/smart plug
 - null: ไม่ระบุ
 
 target_device: ถ้าลูกค้าระบุอุปกรณ์ที่จะใช้งานด้วย (เช่น "iphone 4s", "samsung s25 ultra", "macbook") หรือ null
@@ -82,6 +86,12 @@ confidence: ความมั่นใจ 0.0-1.0
 
 คำถาม: "หัวชาร์จ 65w รุ่นไหนดี"
 {"intent":"product_recommend","product_type":"charger","charger_subtype":"adapter","target_device":null,"needs_description":false,"confidence":0.95}
+
+คำถาม: "มีหัวชาร์จในรถไหม"
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"car_charger","target_device":null,"needs_description":false,"confidence":0.95}
+
+คำถาม: "มีแท่นชาร์จไร้สายไหม"
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"wireless","target_device":null,"needs_description":false,"confidence":0.95}
 
 ตอบเป็น JSON เท่านั้น ห้ามมีคำอธิบาย
 """
