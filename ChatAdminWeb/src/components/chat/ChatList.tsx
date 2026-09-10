@@ -5,7 +5,7 @@ import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import { Avatar } from "@/components/ui/Avatar";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Badge } from "@/components/ui/Badge";
-import { Search, ChevronDown, Check, X, ArrowDownUp, MessageSquare, Trash2 } from "lucide-react";
+import { Search, ChevronDown, Check, X, ArrowDownUp, MessageSquare, Trash2, RotateCcw } from "lucide-react";
 import type { Conversation, Platform, AdminUser } from "@/lib/types";
 import { formatDateLabel } from "@/components/shadow/DateBanner";
 import { AnnotationDot, type Annotation } from "@/components/ui/AnnotationDot";
@@ -35,6 +35,8 @@ interface Props {
   // ⚡ Phase 3B-5 — ปุ่มลบรายแชท (soft delete) — ถ้าส่งมาจะ render ในแต่ละ row
   //   ใช้ span role=button เพื่อกัน nested <button> (hydration error)
   onDeleteConversation?: (conversationId: string) => void;
+  // ⚡ trash tab — ปุ่มกู้คืนรายแชท (restore soft-deleted) — ถ้าส่งมาจะ render ในแต่ละ row
+  onRestoreConversation?: (conversationId: string) => void;
   // ⚡ Phase 1 pagination — server-side infinite scroll
   //   ถ้าส่งมา จะเรียก loadMore ตอน scroll ใกล้ล่างแทนการ slice ใน memory
   loadMore?: () => void;
@@ -127,6 +129,7 @@ export function ChatList({
   annotationsScope = "shadow_bot",
   onAnnotationsChange,
   onDeleteConversation,
+  onRestoreConversation,
   loadMore,
   hasMore = false,
   loadingMore = false,
@@ -576,6 +579,23 @@ export function ChatList({
                         title="ลบ (soft delete)"
                       >
                         <Trash2 size={11} />
+                      </span>
+                    )}
+                    {onRestoreConversation && (
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => { e.stopPropagation(); onRestoreConversation(c.id); }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.stopPropagation(); e.preventDefault();
+                            onRestoreConversation(c.id);
+                          }
+                        }}
+                        className="text-text-subtle hover:text-green-600 transition-colors cursor-pointer inline-flex shrink-0"
+                        title="กู้คืน"
+                      >
+                        <RotateCcw size={11} />
                       </span>
                     )}
                   </div>

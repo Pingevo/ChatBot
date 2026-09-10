@@ -12,7 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { serverConfig } from "@/backend/lib/config";
 import { requireAuth } from "@/backend/middleware/authorize";
-import { shouldUseChatV2 } from "@/backend/service/systemConfigService";
+import { shouldUseChatV2, shouldUseChatV3 } from "@/backend/service/systemConfigService";
 
 type Platform = "shopee" | "lazada" | "tiktok";
 
@@ -56,11 +56,17 @@ async function proxy(req: NextRequest, segments: string[]) {
   let body: BodyInit | undefined;
   if (method !== "GET" && method !== "HEAD") {
     const rawBody = await req.text();
-    // ⚡ chat_engine — ถ้าเป็น POST /chat ให้ inject use_v2 จาก SystemConfig
+    // ⚡ chat_engine — ถ้าเป็น POST /chat ให้ inject use_v2/use_v3 จาก SystemConfig
     if (method === "POST" && path === "chat") {
       try {
         const parsed = JSON.parse(rawBody);
-        if (parsed.use_v2 === undefined) {
+        // ⚡ chat_v3 — ส่ง use_v3 ถ้า config เลือก v3 (มี priority เหนือ v2)
+        if (parsed.use_v3 === undefined) {
+          const useV3 = await shouldUseChatV3();
+          if (useV3) parsed.use_v3 = true;
+        }
+        // ⚡ chat_v2 — ส่ง use_v2 ถ้า config เลือก v2 และไม่ได้เลือก v3
+        if (parsed.use_v2 === undefined && parsed.use_v3 !== true) {
           const useV2 = await shouldUseChatV2();
           if (useV2) parsed.use_v2 = true;
         }

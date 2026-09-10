@@ -355,7 +355,8 @@ def call_bot(message: str, history: list, shop_name: str | None,
              platform: str | None = None,
              images: list[str] | None = None,
              order_sn: str | None = None,
-             use_v2: bool | None = None) -> dict:
+             use_v2: bool | None = None,
+             use_v3: bool | None = None) -> dict:
     body = {'message': message, 'history': history, 'limit': 5}
     if shop_name:
         body['shop'] = shop_name
@@ -374,8 +375,11 @@ def call_bot(message: str, history: list, shop_name: str | None,
     # ⚡ Phase 1D — ส่ง images (เหมือน botCallService ใน Next.js)
     if images:
         body['images'] = images
-    # ⚡ chat_v2 — ส่ง use_v2=true เพื่อบังคับใช้ chat_v2 (ไม่กระทบ traffic จริง)
-    if use_v2 is not None:
+    # ⚡ chat_v3 — ส่ง use_v3=true เพื่อบังคับใช้ chatbotv3 (มี priority เหนือ v2)
+    if use_v3 is not None:
+        body['use_v3'] = use_v3
+    # ⚡ chat_v2 — ส่ง use_v2=true เพื่อบังคับใช้ chat_v2 (ไม่กระทบ traffic จริง) — ไม่ส่งถ้า v3
+    elif use_v2 is not None:
         body['use_v2'] = use_v2
     headers = {'Content-Type': 'application/json'}
     if INTERNAL_SECRET:
@@ -454,7 +458,8 @@ def fmt_ts(d) -> str:
 
 
 def replay_one(admin_db, prod_db, conv_id: str, verbose: bool = True,
-               use_v2: bool | None = None) -> dict:
+               use_v2: bool | None = None,
+               use_v3: bool | None = None) -> dict:
     msg_coll = admin_db[MSG_COLL]
     conv_coll = admin_db[CONV_COLL]
 
@@ -539,7 +544,7 @@ def replay_one(admin_db, prod_db, conv_id: str, verbose: bool = True,
         bot = call_bot(bot_msg, history, shop_name, shop_id, item_id,
                        conversation_id=conv_id, platform=platform,
                        images=msg_images, order_sn=msg_order_sn,
-                       use_v2=use_v2)
+                       use_v2=use_v2, use_v3=use_v3)
         bot_answer = bot.get('answer', '')
         bot_source = bot.get('source', '')
         bot_ws = bot.get('web_search_used', False)
@@ -570,8 +575,8 @@ def replay_one(admin_db, prod_db, conv_id: str, verbose: bool = True,
             'zaapi_text': zaapi_text, 'zaapi_role': zaapi_role, 'zaapi_source': zaapi_source,
             'bot_answer': bot_answer, 'bot_source': bot_source, 'bot_ws': bot_ws,
             'bot_handoff': bot_handoff, 'bot_error': bot.get('error'),
-            # ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน (legacy / v2)
-            'chat_engine': 'v2' if use_v2 else 'legacy',
+            # ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน (legacy / v2 / v3)
+            'chat_engine': 'v3' if use_v3 else ('v2' if use_v2 else 'legacy'),
             'bot_image_desc': bot_image_desc or None, # ⚡ A2 — vision description
             'status': 'bot_handoff' if bot_handoff else ('trigger_matched' if trigger else 'bot_answered'),
             # ⚡ user message rich media info (เพื่อให้หน้าเว็บแสดงว่าลูกค้าส่งอะไรมา)
@@ -1093,6 +1098,7 @@ def main():
     ap.add_argument('--save', default=None)
     ap.add_argument('--oldest', action='store_true', help='เรียงจากเก่าสุดก่อน (default: ใหม่สุดก่อน)')
     ap.add_argument('--v2', action='store_true', help='⚡ บังคับใช้ chat_v2 (ส่ง use_v2=true ให้ bot)')
+    ap.add_argument('--v3', action='store_true', help='⚡ บังคับใช้ chatbotv3 (ส่ง use_v3=true ให้ bot)')
     args = ap.parse_args()
 
     if not ADMIN_MONGO_URI:
@@ -1116,13 +1122,16 @@ def main():
     print(f'Bot: {BOT_URL}')
     print(f'Admin DB: {ADMIN_MONGO_DB} / {MSG_COLL}')
 
-    _use_v2 = True if args.v2 else None
-    if _use_v2:
+    _use_v3 = True if args.v3 else None
+    _use_v2 = None if _use_v3 else (True if args.v2 else None)
+    if _use_v3:
+        print('⚡ chatbotv3 mode: use_v3=true (บังคับใช้ chatbotv3)')
+    elif _use_v2:
         print('⚡ chat_v2 mode: use_v2=true (บังคับใช้ chat_v2)')
 
     if args.conv:
         results = [replay_one(admin_db, prod_db, args.conv, verbose=not args.quiet,
-                              use_v2=_use_v2)]
+                              use_v2=_use_v2, use_v3=_use_v3)]
         if args.save:
             _stream_save(args.save, results, args, status="done", total=1, current_idx=1)
     else:
@@ -1136,7 +1145,7 @@ def main():
         for idx, c in enumerate(convs):
             print(f'\n[{idx+1}/{total}] Replaying {c["conversation_id"]}...', file=sys.stderr)
             r = replay_one(admin_db, prod_db, c['conversation_id'], verbose=not args.quiet,
-                           use_v2=_use_v2)
+                           use_v2=_use_v2, use_v3=_use_v3)
             results.append(r)
             # ⚡ stream save ทีละแชท — ให้ frontend ดู real-time ได้
             if args.save:

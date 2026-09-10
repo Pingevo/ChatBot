@@ -205,7 +205,7 @@ ChatBotProductMS คือระบบ chatbot ปรึกษาสินค้
 ┌──────────────────────────────────────────────────────────────┐
 │ 5. Pass 1 LLM intent classification                         │
 │    intent_classifier.classify_intent                         │
-│    (conditional — should_run_pass1 เป็นเกท)                   │
+│    (Phase 6 — รันทุกข้อความ ไม่ gate ด้วย should_run_pass1)    │
 └──────┬───────────────────────────────────────────────────────┘
        ▼
 ┌──────────────────────────────────────────────────────────────┐
@@ -295,7 +295,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `shops` | 263 | `GET /shops` | `_db()`, `product_store.list_shops` |
 | `categories` | 272 | `GET /categories` | `_db()`, `product_store.list_categories` |
 | `brands` | 281 | `GET /brands` — paginated | `_db()`, `os`, `re`, `Counter` |
-| `chat` | 368 | **`POST /chat` — main orchestrator** — **2026-09-14 (DEVICE-SPEC-LOOKUP + FILTER-UNAVAILABLE + COMPAT-RETRIEVAL GUARD + HYBRID-SUBTYPE)**: (1) เปิด `filter_unavailable` สำหรับ intent=product_recommend + compatibility_check (ปิดเฉพาะ product_spec/warranty ที่ลูกค้าอาจถามสินค้าที่ซื้อไปแล้ว) — กันแนะนำสินค้า sold_out ใน compat case; (2) guard `_hybrid_anchor_card` ครอบ compat-retrieval override — ถ้ามี hybrid anchor ให้ข้าม override (anchor มี subtype จากสินค้าจริงแม่นกว่า intent classifier); (3) guard `_hybrid_anchor_card` ใน charger_subtype_override — ถ้ามี anchor ให้ใช้ subtype จาก anchor แทน intent; (4) device spec lookup — ถ้า intent=compatibility_check + มี target_device → เรียก `web_search.search_and_extract` ดึง spec + keywords แล้ว re-query DB หาสินค้าที่ compatible + merge เข้า products + inject spec ใน `_combined_extra` ก่อน LLM ตอบ — กัน LLM แนะนำ 45W ให้เครื่องที่ชาร์จ 90W | ทุก pipeline stage (ดู section 5) |
+| `chat` | 368 | **`POST /chat` — main orchestrator** — **2026-09-14 (DEVICE-SPEC-LOOKUP + FILTER-UNAVAILABLE + COMPAT-RETRIEVAL GUARD + HYBRID-SUBTYPE)**: (1) เปิด `filter_unavailable` สำหรับ intent=product_recommend + compatibility_check (ปิดเฉพาะ product_spec/warranty ที่ลูกค้าอาจถามสินค้าที่ซื้อไปแล้ว) — กันแนะนำสินค้า sold_out ใน compat case; (2) guard `_hybrid_anchor_card` ครอบ compat-retrieval override — ถ้ามี hybrid anchor ให้ข้าม override (anchor มี subtype จากสินค้าจริงแม่นกว่า intent classifier); (3) guard `_hybrid_anchor_card` ใน charger_subtype_override — ถ้ามี anchor ให้ใช้ subtype จาก anchor แทน intent; (4) device spec lookup — ถ้า intent=compatibility_check + มี target_device → เรียก `web_search.search_and_extract` ดึง spec + keywords แล้ว re-query DB หาสินค้าที่ compatible + merge เข้า products + inject spec ใน `_combined_extra` ก่อน LLM ตอบ — กัน LLM แนะนำ 45W ให้เครื่องที่ชาร์จ 90W — **2026-09-16 (Phase 3b DUAL-TIER)**: (5) re-query products หลัง fetch_products → sort ตาม wattage **ascending** (น้อย→มาก) เพื่อให้ baseline อยู่บนสุดและ upgrade อยู่ถัดไป — LLM เห็นตัวเลือกครบเรียงตาม spec; (6) เพิ่ม context note บอก dual-tier recommendation (สูงสุด 2 ตัวเลือก: baseline + upgrade) + connector type hard filter (ห้ามข้าม connector type) + protocol evidence requirement (ต้องยืนยันจาก description จริง) | ทุก pipeline stage (ดู section 5) |
 | `list_test_chat_sessions` | 5345 | `GET /test-chat/sessions` — กรองตาม admin_id (Phase 3) | `_admin_db()`, `Request.headers` |
 | `create_test_chat_session` | 5385 | `POST /test-chat/sessions` — เก็บ admin_id + admin_name (Phase 3) | `_admin_db()`, `_log_testchat_action`, `urllib.parse.unquote` |
 | `get_test_chat_session` | 5414 | `GET /test-chat/sessions/{id}` | `_admin_db()` |
@@ -317,6 +317,9 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `_build_brand_context` | 3896 | สร้าง context ของแบรนด์ | `os`, `re`, `Counter` |
 | `_merge_kb_mongo` | 3959 | รวม KB doc + Mongo product card | `_kb_doc_to_card`, `re` |
 | `_kb_doc_to_card` | 4060 | แปลง KB doc → product card | — |
+| `_recent_qa_pairs` | ~1030 | **Phase 8 (2026-09-17)** — จับคู่ user+model message เป็น QA pair (1 คู่ = 1 หน่วย) แล้วคืน `n` คู่ล่าสุด (default 10) เรียงเก่า→ใหม่ — ใช้แทน `history` ที่ส่งเข้า LLM context/follow-up detection — รับมือ edge cases: history ว่าง/None, 2 user ติดกัน (buffer flush), model เดี่ยวต้น history, user เดี่ยวท้าย history, เกิน n คู่ — ไม่ mutate history ต้นฉบับ | — |
+| `_LLM_CONTEXT_LIMIT` | ~1035 | **Phase 8 (2026-09-17)** — module constant = 30 — แยกจาก `req.limit` (frontend display limit) — ใช้สำหรับ RAG retrieval และ LLM context limit (ไม่ใช่ frontend display) — **Phase 8.1 (2026-09-18)**: กลายเป็น default fallback เท่านั้น — ค่าจริง resolve จาก `req.llm_context_limit` (per-request จาก admin config) ที่จุดเริ่มต้น `chat()` เป็น `_llm_ctx_limit` แล้วใช้แทน `_LLM_CONTEXT_LIMIT` ในทุกจุด retrieval/context (web-search re-query, KB/Mongo merge, fetch_limit, compatibility merge, Tier B cap, KB product cap) | — |
+| `_extract_max_wattage` | ~531 | **Phase 3b (2026-09-16)** — extract ค่า W สูงสุดจาก product card — ย้ายจาก nested function `_extract_max_watt` ใน superlative block มาเป็น module-level helper เพื่อให้ device-spec-lookup re-query block ใช้ sort ตาม wattage ได้ — logic: (1) spec field `output_power_w` (2) variants `output_power_w` (3) fallback extract จากชื่อ กรอง model number (เช่น CTC615W) ออกก่อน — ใช้ใน superlative block (sort desc) + device-spec-lookup block (sort asc) | `re` |
 
 #### 6.1.3 Nested helpers (ใน `chat()`)
 
@@ -346,7 +349,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | Schema | Line | หน้าที่ |
 |---|---|---|
 | `ChatMessage` | 101 | `{role, text}` history entry |
-| `ChatRequest` | 106 | body `/chat` (message, shop, item_id, order_sn, history, limit, handoff fields, simulate) |
+| `ChatRequest` | 106 | body `/chat` (message, shop, item_id, order_sn, history, limit, handoff fields, simulate, use_v2, **llm_context_limit** — Phase 8.1: per-request LLM context limit 10-50 จาก admin config) |
 | `ChatResponse` | 124 | response `/chat` (answer, products, source, usage, timing, web_search, handoff, routing_decision) |
 | `FeedbackRequest` | 170 | body `/feedback` |
 | `TestChatMessage`, `CreateSessionRequest`, `AddMessageRequest`, `UpdateSessionRequest` | 5320-5343 | test-chat schemas |
@@ -449,7 +452,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ชื่อ | Line | สรุปกฎสำคัญ |
 |---|---|---|
-| `SYSTEM_INSTRUCTION` | 19-320 | บุคลิกหญิงใช้ `ค่ะ/นะคะ`, ตอบจาก context เท่านั้น, แยก bubble `|||`, แนะนำ 2-3 ชิ้น, ห้ามบอกราคา, ร้าน isolation, **ห้ามแนะนำรุ่นอื่นเมื่อถาม spec รุ่นเดิม (เว้นแต่สัมพันธ์กับคำถาม)**, **ห้ามใส่ลิงก์ภายนอก**, **คำถามสั้น/กำกวม ให้ใช้ history ตีความ ห้ามตอบ "คำถามสั้นไป"**, **ตอบให้ละเอียด 2-3 ประโยค ไม่สั้นเกิน**, **คำถามเล่นๆ/นอกเรื่อง ตอบเป็นมิตรแล้วกลับสู่บริบทร้าน**, **ห้ามแนบลิงก์/รูปเมื่อลูกค้าถาม trust ไม่ได้ขอซื้อ** |
+| `SYSTEM_INSTRUCTION` | 19-320 | บุคลิกหญิงใช้ `ค่ะ/นะคะ`, ตอบจาก context เท่านั้น, แยก bubble `|||`, แนะนำ 2-3 ชิ้น, ห้ามบอกราคา, ร้าน isolation, **ห้ามแนะนำรุ่นอื่นเมื่อถาม spec รุ่นเดิม (เว้นแต่สัมพันธ์กับคำถาม)**, **ห้ามใส่ลิงก์ภายนอก**, **คำถามสั้น/กำกวม ให้ใช้ history ตีความ ห้ามตอบ "คำถามสั้นไป"**, **ตอบให้ละเอียด 2-3 ประโยค ไม่สั้นเกิน**, **คำถามเล่นๆ/นอกเรื่อง ตอบเป็นมิตรแล้วกลับสู่บริบทร้าน**, **ห้ามแนบลิงก์/รูปเมื่อลูกค้าถาม trust ไม่ได้ขอซื้อ** — **2026-09-16 (Phase 3b DUAL-TIER)**: เพิ่ม section dual-tier recommendation — เมื่อแนะนำสินค้า compat กับอุปกรณ์ที่ลูกค้าระบุ ให้เสนอสูงสุด 2 ตัวเลือก (baseline + upgrade) — กฎบังคับ: connector type ตรงเป๊ะ (hardware constraint), สายชาร์จ 2 หัว ต้องตรวจทั้งสองฝั่ง, wattage/protocol เป็นขั้นต่ำไม่ใช่ขั้นสูงสุด, ต้องยืนยัน protocol จาก description จริง, ถ้ามี compat แค่ 1 ตัว เสนอแค่ตัวนั้น, ห้ามเสนอสินค้าที่ไม่มีใน context, subtype ต้องคุมทิศทาง, นำเสนอ 2 ตัวเลือกให้อ่านเป็นธรรมชาติไม่ใช่ list แข็งๆ |
 | `KB_SYSTEM_INSTRUCTION` | 572-601 | บุคลิกเดียวกัน, ตอบจาก KB context, สั้นกระชับเรื่องรับประกัน |
 | `_SEGMENT_DELIMITER` | 334 | `"|||"` |
 
@@ -470,7 +473,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ฟังก์ชัน | Line | หน้าที่ |
 |---|---|---|
-| `_detect_charger_subtype` | 1357 | detect `cable`/`adapter`/`set`/`car_charger`/`wireless`/`desktop`/`socket` จากข้อความ (รวม shorthand `"หัว"`/`"สาย"`) — มี typo normalization `"หัวชาจ"`→`"หัวชาร์จ"` ฯลฯ — **2026-09-08 (BUG-10)**: `_other_prod_kws` เพิ่ม `"หัวฉีด"`, `"หัวพ่น"`, `"หัวข้อ"` — กัน "หัวฉีด" (อะไหล่เครื่องฟอก/พ่นน้ำ) โดน shorthand "หัว" จับเป็น adapter → ดึงหัวชาร์จมาเป็น context ผิดประเภท → LLM แต่งแคตตาล็อกร้าน |
+| `_detect_charger_subtype` | 1357 | detect `cable`/`adapter`/`set`/`car_charger`/`wireless`/`desktop`/`socket` จากข้อความ (รวม shorthand `"หัว"`/`"สาย"`) — มี typo normalization `"หัวชาจ"`→`"หัวชาร์จ"` ฯลฯ — **2026-09-08 (BUG-10)**: `_other_prod_kws` เพิ่ม `"หัวฉีด"`, `"หัวพ่น"`, `"หัวข้อ"` — กัน "หัวฉีด" (อะไหล่เครื่องฟอก/พ่นน้ำ) โดน shorthand "หัว" จับเป็น adapter → ดึงหัวชาร์จมาเป็น context ผิดประเภท → LLM แต่งแคตตาล็อกร้าน — **2026-09-19 (Phase 3c)**: เปลี่ยน shorthand `"หัว"`/`"สาย"` จาก substring match → token-based match (pythainlp newmm) + context check + blacklist fallback — กัน false positive ของคำผสม "หัวเตียง"/"สายรุ้ง" ฯลฯ (ระบบขยายไปหลายหมวด) — เพิ่ม `"สายไฟ"`, `"สายยาง"`, `"สายพาน"`, `"สายลม"`, `"สายฝน"` ใน blacklist (compound ที่ tokenizer รวมเป็น token เดียว) |
 | `_filter_charger_subtype` | 1477 | กรอง docs ให้ตรง subtype (พร้อมกฎ set/cable/adapter cross-inclusion) — อ่านทั้ง `item_name` และ `name` field — `car_charger_kw` ไม่มี `"ในรถ"` ลอยๆ (กัน false positive สายชาร์จ "ใช้งานในรถยนต์") |
 
 **`fetch_products` car_charger query split (Phase 2Z+++++, 2026-09-13):**
@@ -556,7 +559,12 @@ web_search.should_use_web_search(answer, intent, products, message)
 |---|---|---|---|
 | `classify_intent` | 132 | **Pass 1 LLM classifier** — ถาม Gemini ให้คืน JSON intent | `_client()` |
 
-**Output keys**: `intent`, `product_type`, `charger_subtype`, `target_device`, `needs_description`, `confidence`, `model`, `usage`
+**Output keys**: `intent`, `product_type`, `charger_subtype`, `target_device`, `needs_description`, `general_qtype`, `confidence`, `model`, `usage`
+
+**`general_qtype` values (Phase 6, 2026-09-16):**
+- ค่า: `warranty_policy`/`return_policy`/`shipping_policy`/`brands`/`categories`/`shops`/`tax_invoice`/`null`
+- เหตุผล: เดิม `general_qtype` มาจาก `knowledge_base.detect_general_question()` (keyword) ก่อน intent classification → ผิดได้ในกรณีกำกวม
+- ตอนนี้: intent classifier ระบุ `general_qtype` เมื่อ `intent=general_question` → `app.py` ใช้ค่าจาก intent เป็นหลัก (conf>=0.7), keyword เป็น fallback
 
 **`charger_subtype` values (Phase 2Z+++++, 2026-09-13):**
 - prompt กำหนดครบ: `cable`/`adapter`/`set`/`car_charger`/`wireless`/`desktop`/`socket`/`null`
@@ -570,11 +578,13 @@ web_search.should_use_web_search(answer, intent, products, message)
 - **Called by**: `llm.answer()` ก่อนเรียก `_build_context()`
 - **Side effects**: ถ้า `include_desc=True` → `_build_context` ใส่ `description_excerpt`, `weight`, `dimension` ใน context
 
-#### 6.4.2 Gate
+#### 6.4.2 Gate (Phase 6 — ยกเลิกการใช้เป็น gate)
 
 | ฟังก์ชัน | Line | หน้าที่ |
 |---|---|---|
 | `should_run_pass1` | 232 | ตัดสินใจว่าจะเรียก LLM หรือใช้ rule-based — return True เฉพาะ claim/compat/unknown-product-type/warranty-history |
+
+**Phase 6 (2026-09-16):** `should_run_pass1()` ไม่ถูกเรียกจาก `app.py` แล้ว — `classify_intent()` รันทุก message ที่ผ่าน deterministic checks (order_sn/tracking_no/human_request). Helper ยังคงอยู่ใน `intent_classifier.py` (ไม่ลบ) แต่ไม่ใช้เป็น gate.
 
 #### 6.4.3 Helpers
 
@@ -758,7 +768,8 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `detect_purchase_date_and_order` | 649 | extract purchase_date + order_id |
 | `detect_warranty_duration_question` | 671 | detect "รับประกันกี่ปี" |
 | `detect_tax_invoice_request` | 699 | detect ขอใบกำกับภาษี — ไม่รวม "เลขที่" เพราะเป็น false positive จากที่อยู่ |
-| `auto_check_warranty` | 717 | ⚡ Phase 1C — auto-check ระยะประกันจาก order_sn → ดึง order จาก MongoDB → คำนวณ is_in_warranty → สร้าง warranty_text ให้ LLM |
+| `auto_check_warranty` | 717 | ⚡ Phase 1C — auto-check ระยะประกันจาก order_sn → ดึง order จาก MongoDB → คำนวณ is_in_warranty → สร้าง warranty_text ให้ LLM (legacy — ใช้ create_time_raw) |
+| `check_warranty_status` | 742 | ⚡ Warranty-Delivery — คำนวณสถานะรับประกันจาก delivery_time_raw (วันที่ส่งมอบ) แทน create_time_raw — คืน in_warranty/days_remaining/delivery_date/expiry_date หรือ None ถ้ายังไม่ส่งมอบ |
 
 #### 6.8.2 Helpers
 
@@ -871,6 +882,8 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `get_order_anchors` | 430 | ⚡ Phase 3C — ดึง order anchors ทั้งหมด (เรียงใหม่→เก่า) |
 | `resolve_active_order_sn` | 450 | ⚡ Phase 3C — resolve order_sn ตามกฎ (order_sn ใน message → order เดิม → order generic → None) |
 | `is_order_question` | 490 | ⚡ Phase 3C — ตรวจว่าคำถามเกี่ยวกับ order หรือไม่ |
+| `get_anchor_history` | 560 | ⚡ Phase 7 — ดึง anchor products เรียงใหม่→เก่าตาม mentioned_at (สำหรับ comparison) |
+| `get_previous_anchor` | 590 | ⚡ Phase 7 — ดึง anchor อันดับ 2 (อันก่อนหน้า active) — รองรับ exclude_item_id |
 
 #### 6.9.3 Helpers
 
@@ -881,6 +894,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `_to_serializable` | 65 | แปลง float → int สำหรับ Mongo |
 | `_strip_card_for_storage` | 175 | ตัด product card เก็บแค่ fields จำเป็น (ประหยัดพื้นที่) |
 | `_compute_active` | 195 | คำนวณ active = anchor ล่าสุด (fallback: suggestion ล่าสุด) |
+| `_normalize_dt` | 260 | ⚡ Phase 7 — แปลง mentioned_at เป็น naive datetime สำหรับ sort (กัน TypeError offset-naive vs aware) |
 
 #### 6.9.4 Data structures
 
@@ -1024,6 +1038,7 @@ Mongo document schema:
   "ship_by_date": "17 ก.พ. 2567",          # วันที่ส่งกำหนด
   "pickup_done_time": "16 ก.พ. 2567",      # วันที่ขนส่งรับพัสดุ
   "delivery_time": "ไม่ระบุ",               # วันที่ส่งถึง (จาก update_time เมื่อ COMPLETED)
+  "delivery_time_raw": None,              # ⚡ Warranty-Delivery — unix ts ของวันที่ส่งถึง (None ถ้ายังไม่ส่งมอบ/ยกเลิก)
   "update_time": "18 ก.พ. 2567",           # วันที่อัปเดตล่าสุด
   "recipient_address": "****** คลองโยง อำเภอพุทธมณฑล จังหวัดนครปฐม 73170 · ชื่อ: ล******ง · เบอร์: ******31",
   "estimated_shipping_fee": 48.0,
@@ -1045,7 +1060,8 @@ Mongo document schema:
 #### 6.10.5 Called by
 
 - `app.py:chat()` — order lookup + tracking lookup + warranty auto-check
-- `warranty.py:auto_check_warranty()` — ดึง order เพื่อคำนวณระยะประกัน
+- `warranty.py:auto_check_warranty()` — ดึง order เพื่อคำนวณระยะประกัน (legacy — ใช้ create_time_raw)
+- `warranty.py:check_warranty_status()` — ⚡ Warranty-Delivery — ดึง delivery_time_raw เพื่อคำนวณระยะประกันจากวันที่ส่งมอบ
 - Next.js API `/api/admin/conversations/[id]/orders` — ดึง order history สำหรับ ticket panel
 
 #### 6.10.6 Side effects
@@ -1194,9 +1210,9 @@ Mongo document schema:
 chat()
 ├── persona.get_persona + persona.build_persona_instruction
 ├── _extract_item_id_tag → product_store.fetch_product_by_id
-├── knowledge_base.detect_general_question
-├── warranty.detect_tax_invoice_request
-├── intent_classifier.classify_intent (conditional)
+├── knowledge_base.detect_general_question (fallback — Phase 6)
+├── warranty.detect_tax_invoice_request (fallback — Phase 6)
+├── intent_classifier.classify_intent (Phase 6 — รันทุกข้อความ ไม่ gate)
 ├── warranty.parse_purchase_date / is_in_warranty / detect_claim_request / ...
 ├── knowledge_base.build_general_context → llm.answer_general
 ├── _detect_brand_question → _build_brand_context → llm.answer_general
@@ -1375,6 +1391,151 @@ fetch_products
 - ถ้า DB error → log + คืน None (ไป pipeline หลัก)
 - ถ้า handoff API error → log + ยังส่งคำตอบให้ลูกค้า
 - ถ้าไม่ใช่ warranty flow → คืน None → ไป pipeline หลัก
+
+---
+
+### 6.13 `chatbotv3/` — OpenRouter-first paradigm (2026-09-20)
+
+> **Feature flag**: `USE_CHAT_V3=1` หรือ `req.use_v3=True` → route `/chat` ไป `chatbotv3.engine.chat_v3(req)`
+> **Default**: ปิด (`USE_CHAT_V3=0`) → legacy/v2 ทำงานเหมือนเดิม
+> **Paradigm**: ไม่นั่งปั้น RAG context แบบ legacy แต่ส่ง raw (message + history + images + shop link) ให้ OpenRouter ตอบ → เอา list สินค้ามา match กับ ShpProducts
+
+#### 6.13.1 Purpose
+
+แชทบอท v3 สำหรับ Shopee — เปลี่ยน paradigm จากการสร้าง RAG context แบบ legacy มาเป็นการส่ง raw context (message + history + images + shop link + สินค้าในร้าน) ให้ OpenRouter ตอบ แล้วเอา list สินค้าที่ LLM อ้างถึงมา match กับ ShpProducts จริงในร้านนั้น เพื่อป้องกันการแนะนำสินค้าที่ไม่มีในร้าน
+
+#### 6.13.2 ไฟล์ในแพ็กเกจ
+
+| ไฟล์ | หน้าที่ |
+|---|---|
+| `__init__.py` | export `chat_v3` |
+| `or_client.py` | OpenRouter client (round-robin API keys, AI Usage Hub log, multimodal) |
+| `system_prompt.py` | SYSTEM_INSTRUCTION_V3 (base จาก llm.py + กฎ v3 ใหม่ + fallback) |
+| `shop_link.py` | สร้าง shop URL `https://shopee.co.th/{shopname_lower}?entryPoint=ShopBySearch&searchKeyword={shopname_lower}` |
+| `rich_parse.py` | parse rich tags ([สินค้า: id], [order: sn], [รูปภาพ], placeholder) |
+| `product_match.py` | match สินค้าจาก OpenRouter answer กับ ShpProducts (กรองเฉพาะร้าน) |
+| `emotion.py` | detect negative emotion (strong + moderate + word boundary) + human request |
+| `engine.py` | main flow: parse → safety checks (warranty/emotion/human) → LLM → product match → response |
+
+#### 6.13.3 Main function
+
+| ฟังก์ชัน | หน้าที่ |
+|---|---|
+| `chat_v3(req)` | main entry — รับ ChatRequest → คืน dict compatible กับ ChatResponse |
+| `or_client.call_or(model, system, user, history, images)` | เรียก OpenRouter + log AI Usage Hub |
+| `system_prompt.build_system_instruction(shop_name, shop_url, persona_extra)` | สร้าง system instruction สำหรับ v3 (รวม persona) |
+| `shop_link.build_shop_url(shop_name, platform)` | สร้าง shop URL จากชื่อร้าน |
+| `shop_link.build_shop_context_block(shop_name, platform)` | สร้าง context block สำหรับแปะใน user prompt |
+| `rich_parse.parse_rich_message(text)` | parse rich tags → dict (item_id, order_sn, has_image, etc.) |
+| `product_match.match_products(answer, shop_filter, db)` | match สินค้าจาก LLM answer กับ ShpProducts |
+| `product_match.get_product_by_id(item_id, shop_filter, db)` | ดึงสินค้า 1 ชิ้นจาก item_id |
+| `product_match.get_shop_products_summary(shop_filter, db, message)` | ดึงสินค้าทั้งหมดในร้าน (context เสริม) |
+| `emotion.detect_negative_emotion(message, history)` | ตรวจอารมณ์เสีย → handoff admin |
+| `emotion.detect_human_request(message)` | ตรวจลูกค้าขอคุยแอดมิน |
+| `_send_handoff_to_admin(conv_id, shop, platform, reason, claim, simulate)` | ส่ง handoff ไป ChatAdminWeb จริง (เหมือน legacy) |
+| `_get_persona_extra(shop_name, platform)` | ดึง persona instruction ของร้าน (lazy import persona) |
+| `_lookup_order_context(order_sn, shop)` | lookup order จริง + สร้าง context string (lazy import order_store) |
+| `_extract_image_desc_from_answer(answer, has_images)` | สกัด image_desc จากคำตอบ LLM (ถ้ามีรูป) |
+
+#### 6.13.4 Flow (chat_v3)
+
+1. รับ ChatRequest → extract message, shop, history, images, item_id, order_sn, conversation_id, simulate_assignment
+2. parse rich message (item_id, order_sn, image placeholder)
+3. deterministic safety checks (ตามลำดับ priority):
+   a. warranty claim (จริง) → handoff admin (เหมือน legacy) — **เรียก handoff API จริง**
+   b. emotion (อารมณ์เสีย) → handoff admin (ใหม่ v3) — **เรียก handoff API จริง**
+   c. human request → handoff admin — **เรียก handoff API จริง**
+4. ดึงสินค้าในร้าน (context เสริม) — ส่งเป็น list สั้นๆ ให้ LLM
+5. ดึง persona ของร้าน (ถ้ามี) + lookup order จริง (ถ้ามี order_sn)
+6. สร้าง system instruction (รวม persona) + user prompt (รวม shop context block + order context)
+7. เรียก OpenRouter (เลือก vision model ถ้ามี images)
+8. match สินค้าที่ LLM อ้างถึง กับ ShpProducts จริง (กรองเฉพาะร้าน)
+9. สกัด image_desc (ถ้ามีรูป)
+10. คืน response dict (compatible กับ ChatResponse — รวม answer_segments, image_desc)
+
+#### 6.13.5 Calls
+
+- `chat_v3` → `rich_parse.parse_rich_message()`, `warranty.detect_claim_request()`, `emotion.detect_negative_emotion()`, `emotion.detect_human_request()`, `product_match.get_shop_products_summary()`, `product_match.get_product_by_id()`, `_get_persona_extra()`, `_lookup_order_context()`, `system_prompt.build_system_instruction()`, `shop_link.build_shop_url()`, `shop_link.build_shop_context_block()`, `or_client.call_or()`, `product_match.match_products()`, `_extract_image_desc_from_answer()`, `_send_handoff_to_admin()`
+- `_send_handoff_to_admin` → `urllib.request.urlopen()` (POST `ADMIN_HANDOFF_URL`)
+- `_get_persona_extra` → `persona.get_persona()`, `persona.build_persona_instruction()` (lazy import)
+- `_lookup_order_context` → `order_store.lookup_order()`, `order_store.build_order_context()` (lazy import)
+- `or_client.call_or` → OpenRouter REST API (`/chat/completions`), AI Usage Hub log API
+- `product_match.match_products` → `product_store.to_product_card()`, MongoDB `ShpProducts.find_one()`
+- `product_match.get_shop_products_summary` → `product_store.fetch_products()`
+- `product_match.get_product_by_id` → `product_store.fetch_product_by_id()`
+- `rich_parse.parse_rich_message` → `order_store.extract_order_sn()`, `order_store.extract_tracking_number()`
+- `system_prompt.build_system_instruction` → `llm.SYSTEM_INSTRUCTION` (lazy import, fallback ถ้า import ไม่ได้)
+
+#### 6.13.6 Called by
+
+- `app.chat()` → `chatbotv3.chat_v3(req)` (เมื่อ `USE_CHAT_V3=1` หรือ `req.use_v3=True`)
+- `ChatAdminWeb botCallService.callBot()` → ส่ง `use_v3: true` เมื่อ `shouldUseChatV3()` คืน true
+
+#### 6.13.7 Side effects
+
+- HTTP call: OpenRouter `/chat/completions`
+- HTTP call: AI Usage Hub log (fire-and-forget)
+- HTTP call: `ADMIN_HANDOFF_URL` (POST handoff ไป ChatAdminWeb — เมื่อ detect warranty/emotion/human)
+- DB read: `ShpProducts.find()`, `ShpProducts.find_one()` (กรองเฉพาะร้าน)
+- DB read: `persona` collection (ดึง persona ของร้าน)
+- DB read: `order_store` collection (lookup order จริง)
+- Log: `[OR-V3]` (API key count, errors), `[HANDOFF-V3]` (handoff sent/failed), `[PERSONA-V3]`, `[ORDER-V3]`
+
+#### 6.13.8 Error/fallback
+
+- ถ้า OpenRouter fail → ตอบ "ขออภัยค่ะ ตอนนี้ไม่สามารถตอบคำถามได้ รบกวนลองใหม่อีกครั้งนะคะ"
+- ถ้า product match fail → คืนคำตอบ LLM โดยไม่มี products (ไม่ block)
+- ถ้า warranty/emotion module fail → log + ไป LLM path (ไม่ block)
+- ถ้า llm module import ไม่ได้ → ใช้ fallback system instruction
+- ถ้าไม่มี API key → `call_or` คืน error → ตอบ fallback
+
+#### 6.13.9 กฎใหม่ใน system instruction (v3)
+
+- ตอบจากฐานข้อมูลก่อน มีคำตอบห้ามส่งต่อ
+- ปัญหาการใช้งาน ต้องบอกวิธีตรวจสอบก่อน ถามซ้ำจึงส่งต่อ
+- ห้ามบอกว่าตรวจสอบระบบหรือคำสั่งซื้อแล้ว
+- ห้ามสรุปแทนทุกรุ่น
+- ห้ามเสนอหัวข้อที่ไม่ได้ถาม
+- ห้ามสัญญาแทนคน (เคลม/คืนเงิน/ส่วนลด ให้คนตัดสินใจ)
+- บทบาท: ผู้ช่วยร้านอุปกรณ์ไอที
+- ตอบภาษาไทยเสมอ ลงท้ายด้วยค่ะ ไม่ใช้ครับ
+- สุภาพ กระชับ ตรงประเด็น ไม่ทักทายยืดยาว ไม่ใช้ศัพท์เทคนิคเกินจำเป็น
+- shop link isolation: ตอบแค่สินค้าในลิงก์ร้านที่ส่งมาเท่านั้น
+
+#### 6.13.10 Emotion detection (ใหม่ v3)
+
+- Strong keywords (โกง, ควาย, กาก, ห่วย, โกรธ, ร้องเรียน, ฯลฯ) → handoff ทันที
+- Moderate keywords (อืด, ช้า, บัค, แย่, ฯลฯ) + negative context (มาก, จัง, เลย) → handoff
+- Moderate keywords ซ้ำ 2 ครั้งขึ้นไปใน history → handoff
+- Word boundary สำหรับคำสั้น (บ้า ≠ บ้าง, กาก ≠ กากมาก, ช้า ≠ ช้าง)
+- Human request (ขอคุยแอดมิน, staff, human, ฯลฯ) → handoff
+
+#### 6.13.11 Verification ที่ผ่าน
+
+- `py_compile` ทุกไฟล์ (8 ไฟล์ + app.py) — ผ่าน
+- smoke test import ทุก module — ผ่าน (lazy import ไม่ต้องลง google-genai/pymongo)
+- shop_link.build_shop_url — ผ่าน (KingGadgets, ThaiSuperPhone, empty)
+- rich_parse.parse_rich_message — ผ่าน (item tag, image placeholder, placeholder only)
+- emotion.detect_negative_emotion — ผ่าน (strong, moderate+context, normal, complaint history, word boundary)
+- emotion.detect_human_request — ผ่าน
+- product_match._extract_product_names_from_answer — ผ่าน
+- engine.chat_v3 (mock) — ผ่าน 6 tests: warranty handoff, emotion handoff, human request handoff, placeholder only, normal LLM call, บ่นเล่นๆ ไม่ handoff
+- engine.chat_v3 (mock, audit features) — ผ่าน 7 tests:
+  1. handoff API จริง (warranty claim) — ส่ง POST จริง, payload ถูกต้อง ✓
+  2. persona ของร้าน — ดึง persona ได้, ส่งเข้า system instruction ✓
+  3. image_desc — คืน "" ตาม design (v3 ส่งรูปเข้า LLM ตรง) ✓
+  4. answer_segments — แยก `|||` ได้ 3 segments ✓
+  5. order_sn lookup — lookup จริง, ส่ง context เข้า prompt ✓
+  6. handoff ไม่ส่ง API เมื่อไม่มี conversation_id ✓
+  7. simulate_assignment ส่งไป handoff API ✓
+- `npx tsc --noEmit` (ChatAdminWeb) — ผ่าน (type `"v3"` ใน chat_engine ทุกไฟล์)
+
+#### 6.13.12 ยังไม่ได้ทดสอบ
+
+- Live OpenRouter call (ต้องมี API key จริง)
+- Live MongoDB product match (ต้องเชื่อม DB จริง)
+- End-to-end ผ่าน `/chat` endpoint (ต้องรัน server)
+- Replay/shadow test เทียบกับ legacy
 
 ---
 

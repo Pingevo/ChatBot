@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Any
 
 
 # Pattern หลัก: ท้ายชื่อ เช่น "-2Y", "-15M", "- 1Y", " 1Y"
@@ -739,7 +739,152 @@ def detect_tax_invoice_request(message: str) -> bool:
     return False
 
 
+# ── มอก. (TISI standard) question detection ──────────────────────────────────
+
+# คำที่บ่งบอกว่าลูกค้าถามเรื่อง มอก. (TISI certification)
+_TISI_QUESTION_KWS = (
+    "มอก.", "มอก. ", "มอก ", "มอกไหม", "มอก ไหม",
+    "มาตรฐาน มอก", "มาตรฐานมอก", "มี มอก", "มีมอก",
+    "รับรอง มอก", "รับรองมอก", "ผ่าน มอก", "ผ่านมอก",
+    "tisi", "tis.", "tis ", "thai industrial standard",
+)
+
+# คำที่บ่งบอกว่าลูกค้าถาม "รุ่นไหนมีบ้าง" (ไม่เจาะจงรุ่น)
+_TISI_GENERAL_KWS = (
+    "รุ่นไหน", "รุ่นไหนมี", "รุ่นไหนบ้าง", "มีบ้าง", "มีไหมบ้าง",
+    "ตัวไหน", "สินค้าไหน", "อันไหน",
+)
+
+
+def detect_tisi_question(message: str) -> bool:
+    """ตรวจว่าลูกค้าถามเรื่อง มอก. (TISI standard) หรือไม่.
+
+    Returns:
+        True ถ้าลูกค้าถามเรื่อง มอก. เช่น:
+        - "รุ่นไหนมี มอก. บ้าง"
+        - "AC65B2 มี มอก. ไหม"
+        - "สินค้ามี มอก. ไหม"
+    """
+    if not message:
+        return False
+    msg_lower = message.lower().strip()
+    # ต้องมี มอก. keyword
+    if not any(kw in msg_lower for kw in _TISI_QUESTION_KWS):
+        return False
+    # กรอง false positive: "หมอก" (fog) ไม่ใช่ มอก.
+    # ถ้า message มีแค่ "หมอก" ไม่มี "มอก." → ไม่ใช่คำถาม มอก.
+    # แต่ถ้ามี "มอก." (มีจุด) → เป็นคำถาม มอก. แม้จะมี "หมอก" ด้วยก็ตาม
+    if "มอก." not in msg_lower and "tisi" not in msg_lower:
+        # มีแค่ "มอก" ไม่มีจุด → อาจเป็น "หมอก" → เช็คให้แน่ใจ
+        # ถ้ามี "มอก" ลอยๆ แต่ไม่มี "หมอก" → อาจเป็นคำถาม มอก.
+        if "มอก" in msg_lower and "หมอก" not in msg_lower:
+            return True
+        return False
+    return True
+
+
+def extract_tisi_model_keyword(message: str) -> str:
+    """สกัดชื่อรุ่นจากคำถาม มอก. ถ้าลูกค้าเจาะจงรุ่น.
+
+    เช่น "AC65B2 มี มอก. ไหม" → "AC65B2"
+    เช่น "รุ่นไหนมี มอก. บ้าง" → "" (ไม่เจาะจงรุ่น)
+
+    Returns:
+        ชื่อรุ่นที่สกัดได้ หรือ "" ถ้าไม่เจาะจงรุ่น
+    """
+    if not message:
+        return ""
+    msg = message.strip()
+    # ถ้าเป็นคำถามทั่วไป "รุ่นไหนมี มอก. บ้าง" → ไม่เจาะจงรุ่น
+    if any(kw in msg.lower() for kw in _TISI_GENERAL_KWS):
+        return ""
+    # ลบ มอก. keywords ออกเพื่อเหลือชื่อรุ่น
+    cleaned = msg
+    for kw in _TISI_QUESTION_KWS:
+        cleaned = re.sub(re.escape(kw), " ", cleaned, flags=re.IGNORECASE)
+    # ลบคำถามทั่วไป
+    cleaned = re.sub(
+        r"\s*(ไหม|มั้ย|บ้าง|ไหมคะ|ไหมครับ|คะ|ครับ|นะ|จ้ะ|มี|พึ่ง|พึ่งพา|ผ่าน|รับรอง|มาตรฐาน|สินค้า|รุ่น|ตัว|อัน|ไหม|มั้ย|ได้ไหม)\s*",
+        " ", cleaned, flags=re.IGNORECASE
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    # ถ้าเหลือคำที่ยาวพอ (≥3 ตัวอักษร) → น่าจะเป็นชื่อรุ่น
+    if len(cleaned) >= 3:
+        return cleaned
+    return ""
+
+
 # ---- Phase 1C — Warranty auto-check from order history -----------------------
+
+def check_warranty_status(
+    delivery_time_raw: Any,
+    warranty_months: int,
+) -> dict:
+    """คำนวณสถานะรับประกันจากวันที่ส่งมอบสินค้า (delivery date).
+
+    ⚡ Warranty-Delivery — ใช้ delivery_time_raw (วันที่ส่งถึง) แทน create_time_raw (วันที่สั่งซื้อ)
+    เพราะระยะประกันเริ่มนับจากวันที่ลูกค้าได้รับสินค้า ไม่ใช่วันที่สั่งซื้อ
+
+    Args:
+        delivery_time_raw: unix timestamp ของวันที่ส่งถึง (จาก order_store.delivery_time_raw)
+                           ถ้า None/0/empty → ถือว่ายังไม่ส่งมอบ → คืน indeterminate
+        warranty_months: ระยะเวลาประกัน (เดือน)
+
+    Returns:
+        dict:
+        - in_warranty: bool | None — None ถ้ายังไม่ส่งมอบ/ไม่สามารถคำนวณได้
+        - days_remaining: int | None — None ถ้า in_warranty is None
+        - delivery_date: datetime | None — None ถ้าไม่มี delivery time
+        - expiry_date: datetime | None — None ถ้าไม่มี delivery time
+        - text: str — ข้อความสรุปสถานะ
+    """
+    from datetime import datetime, timezone, timedelta
+
+    # ถ้าไม่มี delivery time → ยังไม่ส่งมอบ ไม่สามารถคำนวณระยะประกันได้
+    if not delivery_time_raw or delivery_time_raw == 0:
+        return {
+            "in_warranty": None,
+            "days_remaining": None,
+            "delivery_date": None,
+            "expiry_date": None,
+            "text": "ยังไม่สามารถคำนวณระยะประกันได้ (สินค้ายังไม่ส่งมอบถึงมือลูกค้า)",
+        }
+
+    # ถ้าไม่มี warranty_months → ไม่สามารถคำนวณได้
+    if not warranty_months or warranty_months <= 0:
+        return {
+            "in_warranty": None,
+            "days_remaining": None,
+            "delivery_date": None,
+            "expiry_date": None,
+            "text": "ไม่สามารถคำนวณระยะประกันได้ (ไม่ทราบระยะเวลาประกัน)",
+        }
+
+    try:
+        # unix ts → datetime (UTC+7) แล้ว strip tzinfo เพื่อเข้ากับ is_in_warranty
+        _delivery_dt = datetime.fromtimestamp(int(delivery_time_raw), tz=timezone.utc) + timedelta(hours=7)
+        delivery_naive = _delivery_dt.replace(tzinfo=None)
+
+        calc = is_in_warranty(delivery_naive, warranty_months)
+
+        return {
+            "in_warranty": calc["in_warranty"],
+            "days_remaining": calc["days_remaining"],
+            "delivery_date": delivery_naive,
+            "expiry_date": calc["expiry_date"],
+            "text": calc["text"],
+        }
+    except Exception as exc:
+        import sys
+        print(f"[WARRANTY-CHECK] error: {exc}", file=sys.stderr)
+        return {
+            "in_warranty": None,
+            "days_remaining": None,
+            "delivery_date": None,
+            "expiry_date": None,
+            "text": "ไม่สามารถคำนวณระยะประกันได้ (เกิดข้อผิดพลาด)",
+        }
+
 
 def auto_check_warranty(
     order_sn: str,

@@ -32,7 +32,7 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
-import { getSystemConfig, updateSystemConfig, shouldUseChatV2 } from "@/backend/service/systemConfigService";
+import { getSystemConfig, updateSystemConfig, shouldUseChatV2, shouldUseChatV3, getBotProductLimit } from "@/backend/service/systemConfigService";
 import { assignmentService } from "@/backend/service/assignmentService";
 import { handoffService } from "@/backend/service/handoffService";
 // ⚡ Phase 2J — test-assignment ใช้ test version (เก็บใน test_status_conversation ไม่ใช่ status_conversation จริง)
@@ -74,7 +74,7 @@ async function callBot(params: {
   handoff_to_admin?: boolean;
   handoff_reason?: string;
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
-  chat_engine?: "legacy" | "v2";
+  chat_engine?: "legacy" | "v2" | "v3";
 }> {
   const { platform, message, history, shopId, shopName, itemId, orderSn, images } = params;
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
@@ -83,7 +83,7 @@ async function callBot(params: {
     "Content-Type": "application/json",
     "X-Internal-Secret": serverConfig.chatbotInternalSecret,
   };
-  const body: Record<string, unknown> = { message, history, limit: 5 };
+  const body: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
   if (shopName) body.shop = shopName;
   else if (shopId) body.shop = shopId;
   // ⚡ ส่ง item_id ถ้าลูกค้าแชร์การ์ดสินค้ามาในแชท
@@ -93,8 +93,11 @@ async function callBot(params: {
   // ⚡ Phase 1A — ส่ง URL รูป/วิดีโอให้ bot ใช้ Gemini vision อ่าน
   if (images && images.length > 0) body.images = images;
   // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
-  const useV2 = await shouldUseChatV2();
-  if (useV2) body.use_v2 = true;
+  //    v3 มี priority เหนือ v2
+  const useV3 = await shouldUseChatV3();
+  const useV2 = !useV3 && await shouldUseChatV2();
+  if (useV3) body.use_v3 = true;
+  else if (useV2) body.use_v2 = true;
 
   // ⚡ 429 retry: รอ 60 วิ แล้วยิงใหม่ — สูงสุด 3 ครั้ง ถ้าเกินให้ throw
   const MAX_429_RETRIES = 3;
@@ -438,8 +441,8 @@ interface ReplayQa {
   bot_source?: string;
   bot_model?: string;
   bot_elapsed?: number;
-  // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน (legacy / v2)
-  chat_engine?: "legacy" | "v2";
+  // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน (legacy / v2 / v3)
+  chat_engine?: "legacy" | "v2" | "v3";
   // ⚡ bot products (item cards ที่บอทแนะนำ)
   bot_products?: { item_id: string; name: string; price?: number; image?: string; url?: string }[];
   // ⚡ pipeline info — intent/rag/llm2/search counts
@@ -656,13 +659,18 @@ export async function POST(req: NextRequest) {
 
       // ⚡ Phase 2J — เคลียร์ test_status_conversation ของ conversation นี้ก่อน replay
       //   กัน assigned_to เดิมจาก replay ครั้งก่อนติดมา
-      await testStatusConversationService.updateTestStatus(
-        conversation_id,
-        "test_assignment",
-        "bot",
-        undefined,
-        undefined
-      );
+      // ⚡ wrap ใน try/catch — ถ้า clear status พัง ไม่ควร block replay
+      try {
+        await testStatusConversationService.updateTestStatus(
+          conversation_id,
+          "test_assignment",
+          "bot",
+          undefined,
+          undefined
+        );
+      } catch (clearErr) {
+        console.error("[test-assignment] clearTestStatus failed:", clearErr instanceof Error ? clearErr.message : String(clearErr));
+      }
 
       // ⚡ mode: "overwrite" (default) = ทำใหม่ทับ, "resume" = ข้ามถ้ามี result ครบแล้ว
       const mode = (body.mode as "overwrite" | "resume") || "overwrite";
@@ -722,10 +730,16 @@ export async function POST(req: NextRequest) {
       const toName = conv?.to_name;
 
       // ⚡ Parse user messages rich media + batch lookup products (เหมือนฝั่งซ้าย)
-      const userParsed = messages.map((m) => ({
-        doc: m,
-        parsed: parseRawMessage(m.raw_payload, m.text),
-      }));
+      //   ⚡ wrap parseRawMessage ใน try/catch — ถ้า parse พัง (raw_payload ผิด schema)
+      //   ให้ fallback เป็น text เปล่าๆ ไม่ใช่ throw 500 ทั้ง replay
+      const userParsed = messages.map((m) => {
+        try {
+          return { doc: m, parsed: parseRawMessage(m.raw_payload, m.text) };
+        } catch (parseErr) {
+          console.error("[test-assignment] parseRawMessage failed for msg", m.message_id, parseErr);
+          return { doc: m, parsed: { message_type: "text" as const, text: m.text || "" } };
+        }
+      });
       const userItemIds = new Set<string>();
       for (const { parsed: p } of userParsed) {
         if (p?.product_ref?.item_id) userItemIds.add(p.product_ref.item_id);
@@ -794,14 +808,16 @@ export async function POST(req: NextRequest) {
 
       for (let i = 0; i < messages.length && !stopped; i++) {
         const msg = messages[i];
-        // ⚡ ใช้ toBotText แปลง rich media → tag ส่งบอท (เหมือน shadowbot/botworker)
-        //   เช่น [item] → [สินค้า: 12345], [order] → [order: ABC123]
-        //   ส่วน user_text ใน QA ยังเก็บ msg.text ดิบไว้สำหรับ display (MessageContent จัดการเอง)
-        const botText = toBotText(msg);
-        const userImages = toBotImages(msg);
         const userText = msg.text || "(empty)";
 
         try {
+          // ⚡ ใช้ toBotText แปลง rich media → tag ส่งบอท (เหมือน shadowbot/botworker)
+          //   เช่น [item] → [สินค้า: 12345], [order] → [order: ABC123]
+          //   ส่วน user_text ใน QA ยังเก็บ msg.text ดิบไว้สำหรับ display (MessageContent จัดการเอง)
+          //   ⚡ ย้ายเข้า try/catch — ถ้า parse พัง จะได้ catch ที่ message ไม่ใช่ทำ 500 ทั้ง replay
+          const botText = toBotText(msg);
+          const userImages = toBotImages(msg);
+
           // 1. check trigger — ใช้ botText (แปลง rich media เป็น tag แล้ว) เพื่อ match คำจริง
           const trigger = await triggerService.matchTrigger(botText, {
             shopId,
@@ -957,35 +973,46 @@ export async function POST(req: NextRequest) {
       }
 
       // ── บันทึกลง test_assignment collection ──
-      const saved = await testAssignmentService.saveReplayResult({
-        conversation_id,
-        shop_id: shopId,
-        platform,
-        shop_name: shopName,
-        to_name: toName,
-        qa: qa as never,
-        total_messages: messages.length,
-        processed_messages: qa.length,
-        final_status: finalStatus,
-        assigned_to: assignedTo,
-        stopped_at_handoff: stopped,
-        replayedBy: r.ctx.admin.admin_id,  // ⚡ Phase 3A — บันทึกใครกด replay
-      });
-
-      // ⚡ Phase 3A — audit log สำหรับ replay (KPI)
-      await logAdminEvent({
-        action_type: "test_assignment.replay",
-        actor: r.ctx.admin.admin_id,
-        conversation_id,
-        metadata: {
+      // ⚡ wrap ใน try/catch — ถ้า save พัง (MongoDB error) ยังคืนผล replay ให้ UI ได้
+      let saved: TestAssignmentDoc | null = null;
+      try {
+        saved = await testAssignmentService.saveReplayResult({
+          conversation_id,
           shop_id: shopId,
           platform,
+          shop_name: shopName,
+          to_name: toName,
+          qa: qa as never,
           total_messages: messages.length,
           processed_messages: qa.length,
           final_status: finalStatus,
+          assigned_to: assignedTo,
           stopped_at_handoff: stopped,
-        },
-      });
+          replayedBy: r.ctx.admin.admin_id,  // ⚡ Phase 3A — บันทึกใครกด replay
+        });
+      } catch (saveErr) {
+        console.error("[test-assignment] saveReplayResult failed:", saveErr instanceof Error ? saveErr.stack || saveErr.message : String(saveErr));
+      }
+
+      // ⚡ Phase 3A — audit log สำหรับ replay (KPI)
+      // ⚡ wrap ใน try/catch — ถ้า log พัง ไม่ควรทำให้ replay 500
+      try {
+        await logAdminEvent({
+          action_type: "test_assignment.replay",
+          actor: r.ctx.admin.admin_id,
+          conversation_id,
+          metadata: {
+            shop_id: shopId,
+            platform,
+            total_messages: messages.length,
+            processed_messages: qa.length,
+            final_status: finalStatus,
+            stopped_at_handoff: stopped,
+          },
+        });
+      } catch (logErr) {
+        console.error("[test-assignment] logAdminEvent failed:", logErr instanceof Error ? logErr.message : String(logErr));
+      }
 
       return json({
         ok: true,
@@ -1008,6 +1035,8 @@ export async function POST(req: NextRequest) {
 
     return error("unknown action: replay_conversation | rate_message | rate_conversation | toggle_worker | soft_delete | restore", 422);
   } catch (err) {
+    // ⚡ log full error + stack trace เพื่อ debug 500 ที่ไม่รู้สาเหตุ
+    console.error("[test-assignment] POST error:", err instanceof Error ? err.stack || err.message : String(err));
     return error(err instanceof Error ? err.message : "failed", 500);
   }
 }

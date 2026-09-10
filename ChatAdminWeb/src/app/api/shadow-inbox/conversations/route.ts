@@ -18,6 +18,7 @@ import type { ConversationDoc } from "@/backend/service/conversationService";
 // ⚡ Phase 2J — shadow-inbox อ่าน assigned_to/status จาก test_status_conversation (test)
 import { testStatusConversationService } from "@/backend/service/testStatusConversationService";
 import { shadowReplyService } from "@/backend/service/shadowReplyService";
+import { logAdminEvent } from "@/backend/service/adminLogService";
 
 /**
  * ดึง conversation_ids ที่มี shadow_replies จากการ generate ทั้งแชท
@@ -27,7 +28,7 @@ import { shadowReplyService } from "@/backend/service/shadowReplyService";
  * distinct — ใช้ index { conversation_id: 1, created_at: -1 }
  * แล้ว lookup conversations ที่ตรงกันเท่านั้น
  */
-async function listShadowConversations(adminId?: string): Promise<Conversation[]> {
+async function listShadowConversations(adminId?: string, deletedOnly?: boolean): Promise<Conversation[]> {
   const srColl = await getCollection<{ conversation_id: string; origin?: string; generated_by?: string }>(COLLECTIONS.shadowReplies);
   const convColl = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
 
@@ -35,11 +36,16 @@ async function listShadowConversations(adminId?: string): Promise<Conversation[]
   // กรอง record ที่ bot ตอบว่าง/ไม่ได้ตอบออก เพื่อกัน conversation ที่ bot ไม่เคยตอบโผล่ใน History
   // ⚡ Phase 3A — ถ้ามี adminId → กรองเฉพาะที่ admin คนนี้ Generate (visibility)
   // ⚡ Phase 3B-7 — กรอง shadow replies ที่ถูก soft delete ออก (กัน history โผล่ของที่ลบแล้ว)
+  // ⚡ trash tab — ถ้า deletedOnly=true → ดึงเฉพาะที่ถูก soft delete (สำหรับถังขยะ)
   const distinctFilter: Record<string, unknown> = {
     origin: "manual_conversation",
     bot_reply_text: { $nin: ["", null] },
-    deleted_at: { $exists: false },
   };
+  if (deletedOnly) {
+    distinctFilter.deleted_at = { $exists: true };
+  } else {
+    distinctFilter.deleted_at = { $exists: false };
+  }
   if (adminId) distinctFilter.generated_by = adminId;
   const convIds = await srColl.distinct("conversation_id", distinctFilter);
   if (convIds.length === 0) return [];
@@ -103,10 +109,13 @@ export async function GET(req: NextRequest) {
   const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
+  // ⚡ trash tab — ถ้า deleted=1 → ดึง conversations ที่มี shadow replies ที่ถูก soft delete
+  const deleted = new URL(req.url).searchParams.get("deleted") === "1";
+
   // ⚡ Phase 3A — visibility: admin ทั่วไปเห็นเฉพาะ conversation ที่ตัวเอง Generate ไว้
   // superadmin/dev เห็นทั้งหมด
   const isSuperadmin = r.ctx.admin.role === "superadmin" || r.ctx.admin.role === "dev";
-  const conversations = await listShadowConversations(isSuperadmin ? undefined : r.ctx.admin.admin_id);
+  const conversations = await listShadowConversations(isSuperadmin ? undefined : r.ctx.admin.admin_id, deleted);
   return json(conversations);
 }
 
@@ -126,4 +135,28 @@ export async function DELETE(req: NextRequest) {
     "delete_from_history"
   );
   return json({ ok: true, soft_deleted_count: result.softDeletedCount });
+}
+
+// ⚡ PUT /api/shadow-inbox/conversations?conversation_id=xxx&action=restore
+//   restore ทุก shadow replies ใน conversation นั้น (ใช้ใน trash tab — restore per conversation)
+export async function PUT(req: NextRequest) {
+  const r = await requireAuth(req);
+  if (!r.ok) return r.response;
+
+  const url = new URL(req.url);
+  const conversationId = url.searchParams.get("conversation_id");
+  const action = url.searchParams.get("action");
+  if (!conversationId) return error("conversation_id required", 422);
+  if (action !== "restore") return error("use action=restore to restore a conversation", 422);
+
+  const result = await shadowReplyService.restoreByConversation(conversationId);
+
+  await logAdminEvent({
+    action_type: "shadow_reply.restore_conversation",
+    actor: r.ctx.admin.admin_id,
+    conversation_id: conversationId,
+    metadata: { restored_count: result.restoredCount },
+  });
+
+  return json({ ok: true, restored_count: result.restoredCount });
 }

@@ -43,8 +43,10 @@ interface SystemConfig {
   shopee_bot_url: string;
   tiktok_bot_url: string;
   lazada_bot_url: string;
-  // ⚡ chat_engine — "legacy" (app.py) หรือ "v2" (chat_v2.py)
-  chat_engine: "legacy" | "v2";
+  // ⚡ chat_engine — "legacy" (app.py) หรือ "v2" (chat_v2.py) หรือ "v3" (chatbotv3)
+  chat_engine: "legacy" | "v2" | "v3";
+  // ⚡ Phase 8 — LLM context limit (จำนวนสินค้าสูงสุดที่ส่งเข้า LLM)
+  llm_context_limit: number;
   updated_by: string;
   updated_at: string;
 }
@@ -136,7 +138,9 @@ export default function ConfigPage() {
   // ⚡ Workflow engine settings ย้ายไป /admin-config แล้ว
   const [editingBotUrl, setEditingBotUrl] = useState<Platform | null>(null);
   const [botUrlDraft, setBotUrlDraft] = useState("");
-  const [chatEngineDraft, setChatEngineDraft] = useState<"legacy" | "v2">("legacy");
+  const [chatEngineDraft, setChatEngineDraft] = useState<"legacy" | "v2" | "v3">("legacy");
+  // ⚡ Phase 8 — LLM context limit (จำนวนสินค้าที่ส่งเข้า LLM)
+  const [llmContextLimit, setLlmContextLimit] = useState(30);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -148,6 +152,7 @@ export default function ConfigPage() {
       setConfig(configRes.data.config);
       setPollingInterval(configRes.data.config.polling_interval_ms || 1000);
       setChatEngineDraft(configRes.data.config.chat_engine || "legacy");
+      setLlmContextLimit(configRes.data.config.llm_context_limit || 30);
       setShops(shopsRes.data.rows || []);
     } catch (err) {
       console.error("load config failed", err);
@@ -289,6 +294,29 @@ export default function ConfigPage() {
       toast.success(`เปลี่ยน Chat Engine เป็น "${chatEngineDraft}" แล้ว`);
     } catch (err) {
       catchError(err, "บันทึก Chat Engine ไม่สำเร็จ");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ⚡ Phase 8 — LLM context limit (จำนวนสินค้าที่ส่งเข้า LLM)
+  async function handleSaveLlmContextLimit() {
+    if (!config) return;
+    const ok = await confirm.ask({
+      title: `บันทึก LLM Context Limit = ${llmContextLimit}?`,
+      message: `จำนวนสินค้าสูงสุดที่ส่งเป็น context ให้ LLM (แยกจาก frontend display) — ค่าที่สูงขึ้นทำให้ LLM เห็นสินค้ามากขึ้น แต่เพิ่ม token cost`,
+      confirmText: "บันทึก",
+    });
+    if (!ok) return;
+    setSaving(true);
+    try {
+      const r = await api().put<{ ok: boolean; config: SystemConfig }>("/config", {
+        llm_context_limit: llmContextLimit,
+      });
+      setConfig(r.data.config);
+      toast.success(`บันทึก LLM Context Limit = ${llmContextLimit} แล้ว`);
+    } catch (err) {
+      catchError(err, "บันทึก LLM Context Limit ไม่สำเร็จ");
     } finally {
       setSaving(false);
     }
@@ -442,12 +470,13 @@ export default function ConfigPage() {
             <div className="flex items-center gap-2">
               <select
                 value={chatEngineDraft}
-                onChange={(e) => setChatEngineDraft(e.target.value as "legacy" | "v2")}
+                onChange={(e) => setChatEngineDraft(e.target.value as "legacy" | "v2" | "v3")}
                 disabled={!editable || saving}
                 className="rounded-md bg-surface border border-border px-2 py-1 text-xs text-text"
               >
                 <option value="legacy">legacy — app.py chat() (default, ปลอดภัย)</option>
                 <option value="v2">v2 — chat_v2.py (pipeline ใหม่ 8 stages)</option>
+                <option value="v3">v3 — chatbotv3 (OpenRouter-first, LLM ตอบเอง + match สินค้าจริง)</option>
               </select>
               <Button size="sm" onClick={handleSaveChatEngine} disabled={saving || !editable || chatEngineDraft === config?.chat_engine}>
                 {saving ? <Loading size={12} /> : "บันทึก"}
@@ -457,6 +486,55 @@ export default function ConfigPage() {
               <div className="mt-2 text-[11px] text-amber-500 flex items-center gap-1">
                 <AlertCircle size={11} />
                 กำลังใช้ chat_v2 — ทุกการเรียกบอทจะผ่าน pipeline ใหม่
+              </div>
+            )}
+            {config?.chat_engine === "v3" && (
+              <div className="mt-2 text-[11px] text-blue-500 flex items-center gap-1">
+                <AlertCircle size={11} />
+                กำลังใช้ chatbotv3 — ส่ง context ดิบให้ OpenRouter, LLM ตอบเอง + match สินค้าจริงจาก ShpProducts
+              </div>
+            )}
+          </div>
+        </Card>
+
+        {/* ⚡ Phase 8 — LLM Context Limit (จำนวนสินค้าที่ส่งเข้า LLM) */}
+        <Card className="p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Cpu size={14} className="text-brand" />
+            <h2 className="text-sm font-semibold text-text">LLM Context Limit (สินค้าใน context)</h2>
+            <Badge tone="brand" className="ml-auto">
+              {config?.llm_context_limit ?? 30}
+            </Badge>
+          </div>
+          <div className="rounded-lg bg-surface-2 p-3">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-xs text-text-muted">
+                จำนวนสินค้าสูงสุดที่ส่งเป็น context ให้ LLM (แยกจาก frontend display) — ค่าสูงขึ้น = LLM เห็นสินค้ามากขึ้น แต่เพิ่ม token cost
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={10}
+                max={50}
+                step={5}
+                value={llmContextLimit}
+                onChange={(e) => setLlmContextLimit(parseInt(e.target.value) || 30)}
+                disabled={!editable}
+                className="w-24 rounded-md bg-surface border border-border px-2 py-1.5 text-sm text-text"
+              />
+              <span className="text-xs text-text-muted">ชิ้น (10-50)</span>
+              <Button
+                size="sm"
+                onClick={handleSaveLlmContextLimit}
+                disabled={saving || !editable || llmContextLimit === config?.llm_context_limit}
+              >
+                {saving ? <Loading size={12} /> : "บันทึก"}
+              </Button>
+            </div>
+            {config && (
+              <div className="text-[10px] text-text-subtle mt-2">
+                ค่าปัจจุบัน: {config.llm_context_limit ?? 30} ชิ้น · อัปเดตโดย {config.updated_by}
               </div>
             )}
           </div>

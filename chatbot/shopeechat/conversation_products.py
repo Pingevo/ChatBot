@@ -232,18 +232,30 @@ def _compute_active(products: list[dict]) -> str | int | None:
 
     ถ้าไม่มี anchor → ใช้ suggestion ล่าสุด (fallback)
     """
+    def _sort_key(p: dict) -> datetime:
+        return _normalize_dt(p.get("mentioned_at"))
+
     anchors = [p for p in products if p.get("is_anchor")]
     if anchors:
-        anchors.sort(key=lambda p: p.get("mentioned_at", datetime.min) if isinstance(p.get("mentioned_at"), datetime) else datetime.min, reverse=True)
+        anchors.sort(key=_sort_key, reverse=True)
         return _to_serializable(anchors[0].get("item_id"))
     # fallback: suggestion ล่าสุด
     if products:
-        sorted_p = sorted(products, key=lambda p: p.get("mentioned_at", datetime.min) if isinstance(p.get("mentioned_at"), datetime) else datetime.min, reverse=True)
+        sorted_p = sorted(products, key=_sort_key, reverse=True)
         return _to_serializable(sorted_p[0].get("item_id"))
     return None
 
 
 # ─── Query helpers ─────────────────────────────────────────
+
+def _normalize_dt(dt: Any) -> datetime:
+    """แปลง mentioned_at เป็น naive datetime สำหรับ sort (กัน TypeError offset-naive vs aware)."""
+    if not isinstance(dt, datetime):
+        return datetime.min
+    if dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
+    return dt
+
 
 def get_active_product(conversation_id: str) -> dict | None:
     """ดึง active product card ของแชท.
@@ -272,7 +284,7 @@ def get_suggestion_latest(conversation_id: str) -> dict | None:
     suggestions = [p for p in doc.get("products", []) if not p.get("is_anchor")]
     if not suggestions:
         return None
-    suggestions.sort(key=lambda p: p.get("mentioned_at", datetime.min) if isinstance(p.get("mentioned_at"), datetime) else datetime.min, reverse=True)
+    suggestions.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
     s = suggestions[0]
     return s.get("card") or {"item_id": s.get("item_id"), "name": s.get("name")}
 
@@ -543,3 +555,73 @@ def is_order_question(message: str) -> bool:
     if "order" in msg_lower or "ออเดอร์" in msg_lower or "คำสั่งซื้อ" in msg_lower:
         return True
     return False
+
+
+# ─── Anchor history (comparison support) ──────────────────
+# ⚡ Phase 7 — สำหรับคำถามเปรียบเทียบ "อันนี้กับอันก่อนต่างกันยังไง"
+#    ดึง anchor products จาก timeline เรียงตาม mentioned_at (ใหม่→เก่า)
+#    ไม่แก้ schema เดิม — ใช้ field is_anchor + mentioned_at ที่มีอยู่แล้ว
+
+
+def get_anchor_history(
+    conversation_id: str,
+    limit: int = 10,
+) -> list[dict]:
+    """ดึง anchor products ของแชท เรียงจากใหม่→เก่าตาม mentioned_at.
+
+    Args:
+        conversation_id: ID ของแชท
+        limit: จำนวนสูงสุดที่จะคืน (default 10)
+
+    Returns:
+        list ของ {item_id, name, source, mentioned_at, is_anchor, card}
+        เรียงจากใหม่→เก่า ถ้าไม่มี timeline หรือไม่มี anchor → คืน []
+    """
+    doc = load_timeline(conversation_id)
+    if not doc:
+        return []
+    products = doc.get("products", [])
+    anchors = [p for p in products if p.get("is_anchor")]
+    if not anchors:
+        return []
+    # sort ใหม่→เก่า ตาม mentioned_at
+    anchors.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
+    return anchors[:limit]
+
+
+def get_previous_anchor(
+    conversation_id: str,
+    exclude_item_id: str | int | None = None,
+) -> dict | None:
+    """ดึง anchor อันดับ 2 ล่าสุด (anchor ก่อนหน้า).
+
+    ใช้สำหรับคำถามเปรียบเทียบ "อันนี้กับอันก่อนต่างกันยังไง"
+    โดย "อันนี้" = anchor ล่าสุด (active) และ "อันก่อน" = anchor อันดับ 2
+
+    Args:
+        conversation_id: ID ของแชท
+        exclude_item_id: item_id ที่จะข้าม (ถ้าระบุ) — ปกติคือ active product
+                         ที่ลูกค้ากำลังถามถึง จะได้ไม่คืนตัวเดียวกัน
+
+    Returns:
+        product card (dict) ของ anchor อันดับ 2 หรือ None ถ้ามี anchor แค่ 1 ตัว
+        (หรือไม่มีเลย หรือมีแค่ตัวเดียวที่ตรง exclude_item_id)
+    """
+    anchors = get_anchor_history(conversation_id, limit=20)
+    if len(anchors) < 2:
+        return None
+    # กรอง exclude_item_id ออก (ถ้าระบุ)
+    if exclude_item_id is not None:
+        exclude_ser = _to_serializable(exclude_item_id)
+        anchors = [a for a in anchors if _to_serializable(a.get("item_id")) != exclude_ser]
+    if not anchors:
+        return None
+    if exclude_item_id is not None:
+        # มี exclude → คืน anchor ล่าสุดที่เหลือ (อันดับ 1 หลังกรอง = อันก่อนหน้าตัวที่ exclude)
+        prev = anchors[0]
+    else:
+        # ไม่มี exclude → คืน anchor อันดับ 2 (index 1 = อันก่อนหน้า active ล่าสุด)
+        if len(anchors) < 2:
+            return None
+        prev = anchors[1]
+    return prev.get("card") or {"item_id": prev.get("item_id"), "name": prev.get("name")}

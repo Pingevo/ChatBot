@@ -427,9 +427,43 @@ export default function LiveAssignmentPage() {
 
   const handleReopen = useCallback(async () => {
     if (!selectedId) return;
-    // reopen ผ่านการ close_chat ที่มี remaining messages → ระบบ reopen อัตโนมัติ
-    toast.info("Reopen อัตโนมัติเมื่อลูกค้าทักใหม่");
-  }, [selectedId]);
+    // ⚡ เรียก closeChat API — มันจะ close → เช็คข้อความเหลือ → reopen → ประมวลผลผ่านบอท
+    //   ใช้ตอนแชทถูก auto-close (bot ตอบโดยไม่ handoff) แล้วมีข้อความใหม่เข้ามา
+    setClosing(true);
+    try {
+      const r = await api().post<{
+        ok: boolean;
+        closed: boolean;
+        reopened: boolean;
+        new_qa?: LiveQaItem[];
+        final_status?: string;
+      }>("/live-assignment", {
+        action: "close_chat",
+        conversation_id: selectedId,
+        reason: "reopen เพื่อประมวลผลข้อความใหม่",
+      });
+      if (r.data.reopened) {
+        toast.success(`เปิดแชทใหม่ — ระบบประมวลผล ${r.data.new_qa?.length || 0} ข้อความใหม่`);
+      } else {
+        toast.info("ไม่มีข้อความใหม่ให้ประมวลผล");
+      }
+      await loadList();
+      // reload detail
+      if (selectedId) {
+        const dr = await api().get<{ replay: LiveAssignmentDoc; messages: ChatMessage[] }>(
+          `/live-assignment?conv_detail=1&conversation_id=${encodeURIComponent(selectedId)}`
+        );
+        if (dr.data.replay) {
+          setMessages(qaToMessages(dr.data.replay));
+        }
+      }
+    } catch (err) {
+      console.error("reopen failed", err);
+      toast.error("เปิดแชทใหม่ไม่สำเร็จ");
+    } finally {
+      setClosing(false);
+    }
+  }, [selectedId, loadList]);
 
   const handleTransfer = useCallback(async (newAdminId: string) => {
     if (!selectedId) return;
@@ -663,6 +697,7 @@ export default function LiveAssignmentPage() {
             onSuggestProduct={handleSuggestProduct}
             onTicketChange={handleTicketChange}
             sending={sending}
+            reopening={closing}
           />
         </div>
 

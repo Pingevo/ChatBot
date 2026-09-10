@@ -336,6 +336,7 @@ interface Props {
   onSuggestProduct?: () => void;
   onTicketChange: (patch: Partial<Conversation>) => void;
   sending: boolean;
+  reopening?: boolean;
 }
 
 export function TicketChatPanel({
@@ -349,6 +350,7 @@ export function TicketChatPanel({
   onSuggestProduct,
   onTicketChange,
   sending,
+  reopening,
 }: Props) {
   const [text, setText] = useState("");
   const [quickReplies, setQuickReplies] = useState<QuickReplyRow[]>([]);
@@ -492,8 +494,8 @@ export function TicketChatPanel({
           )}
           {conversation.status === "closed" ? (
             onReopen && (
-              <Button size="sm" variant="outline" onClick={onReopen} className="shrink-0">
-                <RotateCcw size={14} /> เปิดแชทใหม่
+              <Button size="sm" variant="outline" onClick={onReopen} disabled={reopening} className="shrink-0">
+                <RotateCcw size={14} /> {reopening ? "กำลังประมวลผล..." : "เปิดแชทใหม่"}
               </Button>
             )
           ) : (

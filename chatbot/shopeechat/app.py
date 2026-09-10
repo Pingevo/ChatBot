@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from typing import Any
 
 from dotenv import load_dotenv
@@ -142,6 +143,15 @@ class ChatRequest(BaseModel):
     # ⚡ per-request chat_v2 override — shadowbot/replay ส่ง use_v2=true เพื่อทดสอบ chat_v2
     #    โดยไม่กระทบ traffic จริง (ที่ยังใช้ legacy ตาม USE_LEGACY_CHAT env)
     use_v2: bool | None = Field(None, description="ถ้า true → บังคับใช้ chat_v2 แม้ USE_LEGACY_CHAT=1 (สำหรับ shadowbot/replay)")
+    # ⚡ chatbotv3 — OpenRouter-first paradigm (2026-09-20)
+    #   ส่ง raw context ให้ OpenRouter ตอบ → match สินค้ากับ ShpProducts
+    #   เปิดใช้ผ่าน env USE_CHAT_V3=1 หรือ per-request req.use_v3=True
+    #   ไม่กระทบ legacy/v2 (default ยังใช้ legacy/v2 ตาม USE_LEGACY_CHAT)
+    use_v3: bool | None = Field(None, description="ถ้า true → บังคับใช้ chatbotv3 (สำหรับ shadowbot/replay โดยไม่กระทบ traffic จริง)")
+    # ⚡ Phase 8 — LLM context limit (จำนวนสินค้าสูงสุดที่ส่งเข้า LLM เป็น context)
+    #    แยกจาก limit (frontend display) — ปรับได้จากหน้า config (default 30, range 10-50)
+    #    ถ้า None → ใช้ _LLM_CONTEXT_LIMIT (30) ตาม default
+    llm_context_limit: int | None = Field(None, ge=10, le=50, description="จำนวนสินค้าสูงสุดที่ส่งเป็น LLM context (แยกจาก frontend display limit)")
 
 
 class ChatResponse(BaseModel):
@@ -415,6 +425,12 @@ def brands(
 # tag ที่ Shopee/Zaapi แนบมาเมื่อลูกค้าแชร์การ์ดสินค้าในแชท เช่น "🛍️ [สินค้า: 43360743407]"
 _ITEM_TAG_RE = re.compile(r"\[(?:สินค้า|item|item_id|product)\s*[:：]\s*(\d+)\]", re.IGNORECASE)
 
+# ⚡ Phase 8 — LLM context limit (แยกจาก frontend display limit = req.limit)
+#   สินค้าที่ส่งเข้า llm.answer() เป็น context ใช้ limit นี้ (30) ไม่ใช่ req.limit (10)
+#   frontend display ยังใช้ req.limit ตามเดิม (products[:req.limit] ใน ChatResponse)
+#   เพิ่มจาก 10 → 30 เพื่อให้ LLM เห็นสินค้าเยอะพอที่จะเลือกแนะนำได้แม่นยำขึ้น
+_LLM_CONTEXT_LIMIT = 30
+
 
 def _extract_item_id_tag(text: str) -> str | None:
     """ดึง item_id จาก tag ที่แนบมาในข้อความ (เช่น '[สินค้า: 43360743407]')."""
@@ -422,8 +438,436 @@ def _extract_item_id_tag(text: str) -> str | None:
     return m.group(1) if m else None
 
 
+# ⚡ Charger Subtype Consolidation (2026-09-16) — unified product dedup
+#   รวม _kb_base_name/_kb_sell_score (KB merge path) กับ _base_name/_listing_sell_score
+#   (product_store path + _web_search_reanswer) เป็นฟังก์ชันเดียวระดับโมดูล
+#   ใช้ logic ของ _listing_sell_score (ครอบคลุมกว่า — มี price_score แยก)
+#   ลด code duplicate ~80 บรรทัด
+import re as _re_dedup_mod
+_DEDUP_STANDARDS = ("ccc / ce", "ce / ccc", "usb-c / usb-a", "usb a / usb c")
+
+
+def _dedupe_base_name(name: str) -> str:
+    """สกัดชื่อหลักของสินค้า เพื่อรวม listing ซ้ำของสินค้าตัวเดียวกัน.
+
+    หลักการ:
+    - ตัด prefix โปรโมชั่นที่ Shopee แปะไว้หน้าชื่อ (เช่น "[ลดเหลือ 5499]")
+    - ตัด suffix ระยะเวลาประกัน (-12M, -1Y, -2Y)
+    - ตัด "พอร์ตเดียวแรงสุด XXXw" และ "จ่ายไฟพอร์ตเดียว XXXw" ที่แทรกกลางชื่อ
+    - ตัดมาตรฐาน "CCC / CE", "CE / CCC", "USB-C / USB-A" ที่เป็นตัวคั่นมาตรฐาน
+    - **ไม่ตัด** ส่วนที่บอกว่าเป็น bundle (เช่น "/ with adapter", "/ A18T")
+      เพราะ bundle กับ standalone เป็นคนละสินค้า ต้องไม่รวมกัน
+    - กรองช่องว่างระหว่างคำซ้ำ
+    """
+    n = (name or "").strip().lower()
+    # ตัด prefix โปรโมชั่นที่ Shopee แปะไว้หน้าชื่อ
+    n = _re_dedup_mod.sub(r"^\[.*?\]\s*", "", n)
+    # ตัด " -12M", " -1Y", " -2Y", " -6M" ท้ายชื่อ
+    n = _re_dedup_mod.sub(r"\s*-\d+[my]\s*$", "", n)
+    # ตัด "พอร์ตเดียวแรงสุด XXXw" และ "จ่ายไฟพอร์ตเดียว XXXw" ที่แทรกกลางชื่อ
+    n = _re_dedup_mod.sub(r"(จ่ายไฟ)?พอร์ตเดียวแรงสุด\s*\d+w\s*", "", n)
+    # ตัด "พอร์ตเดียว XXXw" (ไม่มี "แรงสุด")
+    n = _re_dedup_mod.sub(r"(จ่ายไฟ)?พอร์ตเดียว\s*\d+w\s*", "", n)
+    # ตัดมาตรฐาน "CCC / CE", "CE / CCC", "USB-C / USB-A" ที่เป็นตัวคั่นมาตรฐาน
+    for s in _DEDUP_STANDARDS:
+        n = n.replace(s, " ")
+    # กรองช่องว่างระหว่างคำซ้ำ
+    n = _re_dedup_mod.sub(r"\s{2,}", " ", n).strip()
+    return n
+
+
+def _dedupe_sell_score(p: dict) -> tuple:
+    """คะแนนสำหรับเลือก listing ที่ดีที่สุดสำหรับขาย.
+
+    เกณฑ์ (เรียงจากสำคัญที่สุดไปน้อยที่สุด):
+    1. status=NORMAL (True > False)
+    2. ไม่ sold_out (True > False)
+    3. stock เยอะกว่า
+    4. มีโปร (True > False)
+    5. ราคาต่ำสุดถูกกว่า
+    """
+    status_normal = p.get("status") == "NORMAL"
+    not_sold_out = not p.get("sold_out", False)
+    stock = p.get("total_stock") or 0
+    has_promo = bool(p.get("price", {}).get("min") and p.get("price", {}).get("max")
+                     and p.get("price", {}).get("min") != p.get("price", {}).get("max"))
+    # ราคาต่ำสุด — ถูกกว่า = ดีกว่า (ใช้ค่าติดลบเพื่อให้ถูกกว่าได้ score สูงกว่า)
+    price_info = p.get("price") or {}
+    min_price = price_info.get("min") or 0
+    # ถ้าไม่มีราคา ให้ score ราคาเป็น 0 (ไม่ดีไม่แย่)
+    price_score = -min_price if min_price else 0
+    return (status_normal, not_sold_out, stock, has_promo, price_score)
+
+
+def _dedupe_products(products: list[dict], *, log_label: str = "DEDUP") -> list[dict]:
+    """Dedup สินค้าที่ชื่อเหมือนกันหรือใกล้เคียงกันมาก.
+
+    ใช้ _dedupe_base_name เพื่อรวม listing ซ้ำของสินค้าตัวเดียวกัน
+    (เช่น P23 ซ้ำ 3 ตัว ต่างกันแค่ suffix ระยะเวลาประกัน -12M / -1Y)
+    เมื่อเจอซ้ำ → เลือก listing ที่ดีที่สุดสำหรับขาย (NORMAL + stock + โปร + ราคาถูก)
+
+    Args:
+        products: list ของ product cards
+        log_label: label สำหรับ debug log (เช่น "DEDUP", "DEDUP-KB", "DEDUP-WS")
+
+    Returns:
+        list ของ product cards ที่ dedup แล้ว
+    """
+    _seen_names: dict[str, int] = {}  # base_name → index ใน _deduped
+    _deduped: list[dict] = []
+    for p in products:
+        pname = _dedupe_base_name(p.get("name") or "")
+        if not pname:
+            _deduped.append(p)
+            continue
+        if pname not in _seen_names:
+            _seen_names[pname] = len(_deduped)
+            _deduped.append(p)
+        else:
+            # เจอซ้ำ → เลือก listing ที่ดีที่สุดสำหรับขาย
+            _idx = _seen_names[pname]
+            _existing = _deduped[_idx]
+            _existing_score = _dedupe_sell_score(_existing)
+            _new_score = _dedupe_sell_score(p)
+            if _new_score > _existing_score:
+                _deduped[_idx] = p
+    if len(_deduped) < len(products):
+        print(f"[{log_label}] products: {len(products)} → {len(_deduped)} (removed {len(products) - len(_deduped)} duplicates)", file=sys.stderr)
+    return _deduped
+
+
+def _extract_max_wattage(p: dict) -> float:
+    """extract ค่า W สูงสุดจาก spec field ก่อน ถ้าไม่มีค่อยดึงจากชื่อ.
+
+    กรอง model number ออก เช่น CTC615W = สายชาร์จ 240W จริง (615 เป็น model number ไม่ใช่ wattage)
+
+    ⚡ Phase 3b — ย้ายจาก nested function ใน superlative block มาเป็น module-level helper
+        เพื่อให้ device-spec-lookup re-query block ใช้ sort ตาม wattage ได้
+    """
+    import re as _re_w
+    # 1. ลองจาก spec field ก่อน (output_power_w จาก CSV schema)
+    spec_w = p.get("output_power_w") or p.get("specs", {}).get("output_power_w")
+    if spec_w and isinstance(spec_w, (int, float)) and spec_w > 0:
+        return float(spec_w)
+    # 2. ลองจาก variants ที่มี output_power_w
+    variants = p.get("variants") or []
+    max_v = 0.0
+    for v in variants:
+        vw = v.get("output_power_w")
+        if vw and isinstance(vw, (int, float)) and vw > max_v:
+            max_v = float(vw)
+    if max_v > 0:
+        return max_v
+    # 3. fallback: extract จากชื่อสินค้า
+    name = p.get("name") or p.get("item_name") or ""
+    if not name:
+        return 0.0
+    low_name = name.lower()
+    # กรอง model number ออกก่อน: CTC615W, CMC610, AD653U, AC30S, ZA651, etc.
+    # pattern: ตัวอักษร 2-4 ตัว + ตัวเลข 2-4 ตัว + ตัวอักษร 0-2 ตัว + W
+    # แทนที่ด้วยช่องว่าง เพื่อไม่ให้ regex จับเป็น wattage
+    _model_pat = _re_w.compile(r"\b[a-z]{2,4}\d{2,4}[a-z]?\s*w\b")
+    clean_name = _model_pat.sub(" ", low_name)
+    # หาทุกค่าที่ลงท้ายด้วย W (เช่น 210W, 140W, 55W, 30W) ในชื่อที่กรองแล้ว
+    matches = _re_w.findall(r"(\d+(?:\.\d+)?)\s*w\b", clean_name)
+    if not matches:
+        return 0.0
+    return max(float(m) for m in matches)
+
+
+def _apply_product_tiers(
+    products: list[dict],
+    tier_a_ids: set[str],
+    limit: int,
+) -> list[dict]:
+    """⚡ Phase 3 — รวม products ด้วย tier logic ก่อนส่งเข้า LLM.
+
+    Tier A (exact match): สินค้าที่ match จาก MODEL-REGEX หรือเป็น anchor_card/hybrid_anchor_card
+        → ใส่เข้า context เสมอ ไม่ถูกตัดด้วย limit ไม่ว่า status จะเป็นอะไร
+    Tier B (แนะนำทั่วไป): สินค้าจาก vector/keyword search ทั่วไป
+        → เรียง normal+stock>0 ขึ้นก่อน แล้วตัด limit
+
+    รวม tier A+B แล้วเรียก _dedupe_products(...)
+    ห้ามมี item_id ซ้ำจาก tier A และ tier B
+
+    Args:
+        products: list ของ product cards ที่จะส่งให้ LLM
+        tier_a_ids: set ของ item_id ที่เป็น Tier A (exact match / anchor)
+        limit: จำนวนสูงสุดของ Tier B (ใช้ค่าเดิมจาก req.limit)
+
+    Returns:
+        list ของ product cards ที่ผ่าน tier merge + dedup แล้ว
+    """
+    if not products:
+        return products
+
+    # แยก Tier A และ Tier B
+    _tier_a: list[dict] = []
+    _tier_b: list[dict] = []
+    for p in products:
+        _iid = str(p.get("item_id") or "")
+        if _iid and _iid in tier_a_ids:
+            _tier_a.append(p)
+        else:
+            _tier_b.append(p)
+
+    # เรียง Tier B: normal+stock>0 ขึ้นก่อน แล้วตัด limit
+    _tier_b.sort(
+        key=lambda p: (
+            p.get("status") == "NORMAL",
+            not p.get("sold_out", False),
+            p.get("total_stock", 0) or 0,
+        ),
+        reverse=True,
+    )
+    _tier_b_limited = _tier_b[:limit]
+
+    # รวม Tier A + Tier B (Tier A ก่อน = สินค้าที่ลูกค้าถามถึงเป็นหลัก)
+    _merged = _tier_a + _tier_b_limited
+
+    # Dedup (อาจมีซ้ำจาก tier A และ tier B ถ้า item_id ตรง — แต่ set ช่วยกันแล้ว
+    # อย่างไรก็ตามอาจมี base_name ซ้ำจาก listing อื่น → ให้ _dedupe_products จัดการ)
+    _merged = _dedupe_products(_merged, log_label="TIER-MERGE")
+
+    if len(_merged) != len(products):
+        print(
+            f"[TIER-MERGE] products: {len(products)} → {len(_merged)} "
+            f"(tier_a={len(_tier_a)}, tier_b={len(_tier_b)}→{len(_tier_b_limited)}, limit={limit})",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[TIER-MERGE] products: {len(products)} (tier_a={len(_tier_a)}, tier_b={len(_tier_b)}, limit={limit})",
+            file=sys.stderr,
+        )
+    return _merged
+
+
+def _device_spec_lookup(
+    db,
+    req,
+    intent_result: dict,
+    history: list[dict] | None,
+    existing_products: list[dict],
+    retrieval_message: str,
+    anchor_card: dict | None,
+    hybrid_anchor_card: dict | None,
+    llm_ctx_limit: int,
+    resolve_subtype_fn=None,
+) -> tuple[str, list[dict]]:
+    """⚡ Extract device-spec-lookup logic เป็น helper — ใช้ได้ทั้ง KB path และ main path.
+
+    ทำ 2 อย่าง:
+    1. Web search ดึง spec ของ target_device (พอร์ตชาร์จ, ความเร็ว, โปรโตคอล) → คืน extra_context string
+    2. Re-query DB ด้วย keywords จาก web search → คืน list ของสินค้าที่ compat (sort by wattage asc)
+
+    Args:
+        db: MongoDB database handle
+        req: ChatRequest (มี message, shop, platform)
+        intent_result: ผลจาก intent classifier (มี target_device)
+        history: chat history (ส่งให้ web search)
+        existing_products: สินค้าที่มีอยู่แล้ว (เพื่อ dedup)
+        retrieval_message: คำค้นหลัก (ใช้ใน _resolve_charger_subtype)
+        anchor_card: anchor product card (สำหรับ subtype resolution)
+        hybrid_anchor_card: hybrid anchor card
+        llm_ctx_limit: LLM context limit (max products)
+
+    Returns:
+        (device_spec_extra, additional_products):
+        - device_spec_extra: string ที่จะใส่ใน extra_context ของ LLM
+        - additional_products: list ของสินค้าที่ re-query ได้ (dedup กับ existing_products แล้ว)
+    """
+    _device_spec_extra = ""
+    _additional_products: list[dict] = []
+
+    # resolve target_device จากหลายแหล่ง: intent_result → message regex
+    _resolved_target_device = intent_result.get("target_device") or ""
+    if not _resolved_target_device:
+        _msg_low_dev = (req.message or "").lower()
+        _device_patterns_fallback = [
+            r'(mi\s*17\s*ultra|xiaomi\s*17\s*ultra)',
+            r'(mi\s*17\b)',
+            r'(iphone\s*17\s*pro\s*max)',
+            r'(iphone\s*17\b)',
+            r'(s25\s*ultra|samsung\s*25\s*ultra)',
+            r'(s24\s*ultra|samsung\s*24\s*ultra)',
+            r'(iphone\s*16\b)',
+            r'(iphone\s*15\b)',
+            r'(oneplus\s*1[0-9])',
+            r'(macbook\s*air\s*m[0-9])',
+            r'(mac\s*air\s*m[0-9])',
+            r'(pixel\s*[0-9])',
+        ]
+        for _pat_dev in _device_patterns_fallback:
+            _m_dev = re.search(_pat_dev, _msg_low_dev)
+            if _m_dev:
+                _resolved_target_device = _m_dev.group(1).strip()
+                break
+
+    if not _resolved_target_device:
+        return "", []
+
+    from . import web_search as _ws
+    if not _ws.is_configured():
+        return "", []
+
+    _compat_device_name = _resolved_target_device
+    _device_search_query = f"{_compat_device_name} charging spec port watt protocol"
+    print(f"[DEVICE-SPEC-LOOKUP] target_device={_compat_device_name!r} → web search", file=sys.stderr)
+    try:
+        _device_ws_result = _ws.search_and_extract(
+            message=_device_search_query,
+            shop=req.shop,
+            platform=req.platform,
+            history=history,
+            reason="compat_device_spec_lookup",
+        )
+        if not _device_ws_result.get("error") and _device_ws_result.get("search_used"):
+            _device_search_info = _device_ws_result.get("search_info", "")
+            _device_keywords = _device_ws_result.get("keywords", [])
+            _device_product_type = _device_ws_result.get("product_type", "")
+            if _device_search_info:
+                # strip URLs ออกจาก search_info (กัน LLM เอาลิงก์ไปใส่คำตอบ)
+                import re as _re_dev
+                _device_info_clean = _re_dev.sub(
+                    r'\[([^\]]+)\]\([^)]+\)', r'', _device_search_info
+                )
+                _device_info_clean = _re_dev.sub(
+                    r'https?://[^\s\)\]]+', r'', _device_info_clean,
+                    flags=_re_dev.IGNORECASE
+                ).strip()
+                if len(_device_info_clean) >= 20:
+                    _device_spec_extra = (
+                        f"\n=== ข้อมูลสเปกอุปกรณ์ {_compat_device_name} (จาก Google Search) ===\n"
+                        f"{_device_info_clean}\n"
+                        f"ใช้ข้อมูลนี้เพื่อเลือกสินค้าที่รองรับอุปกรณ์รุ่นนี้จริง "
+                        f"(เช่น พอร์ตชาร์จ, ความเร็วชาร์จสูงสุด, โปรโตคอล) "
+                        f"และแนะนำสินค้าที่จ่ายไฟได้พอ/เท่ากับที่อุปกรณ์รองรับ\n"
+                        f"⚠️ สินค้าที่แนะนำต้องรองรับ spec ของอุปกรณ์เป้าหมายจริง "
+                        f"(พอร์ต/wattage/protocol) ไม่ใช่แค่มีชื่อแบรนด์เดียวกับอุปกรณ์เป้าหมาย "
+                        f"ถ้า description ของสินค้าไม่ได้ระบุ wattage/protocol ที่ตรงตามที่อุปกรณ์เป้าหมายต้องการ "
+                        f"ให้บอกลูกค้าตรงๆ ว่าอาจชาร์จได้ไม่เต็มสปีด ไม่ใช่ระบุว่า compat เฉยๆ\n"
+                        f"⚡ Phase 3b — dual-tier recommendation: ถ้าร้านมีสินค้าที่ connector type ตรงกับอุปกรณ์เป้าหมาย "
+                        f"หลายตัว ให้เสนอสูงสุด 2 ตัวเลือก: (1) ตัวที่ compat ตรงสเปคขั้นต่ำที่อุปกรณ์ต้องการ (baseline) "
+                        f"(2) ตัวที่ compat และมีสเปคสูงกว่า (wattage/current สูงกว่า) เป็นตัวเลือกอัปเกรด "
+                        f"ถ้ามีแค่ตัวเดียวที่ compat ให้เสนอแค่ตัวนั้น ห้ามแต่งว่ามีตัวสเปคสูงกว่าถ้าไม่มีจริงใน context\n"
+                        f"ห้ามข้าม connector type เด็ดขาด — สินค้าที่ connector ไม่ตรงกับอุปกรณ์เป้าหมาย "
+                        f"ห้ามเสนอแม้จะสเปคสูงแค่ไหน ไม่ว่าจะ frame เป็น baseline หรือ upgrade ก็ตาม"
+                    )
+                    print(f"[DEVICE-SPEC-LOOKUP] ได้ spec ของ {_compat_device_name}: {_device_info_clean[:120]!r}", file=sys.stderr)
+            # re-query DB ด้วย keywords จาก search หาสินค้าที่ compatible
+            if _device_keywords:
+                _device_search_q = " ".join(_device_keywords[:6])
+                if _device_product_type:
+                    _device_search_q = f"{_device_product_type} {_device_search_q}"
+                # ⚡ Phase 4 — ใช้ _resolve_charger_subtype() เพื่อคง subtype
+                _resolved_sub_for_device = None
+                if resolve_subtype_fn:
+                    _resolved_sub_for_device = resolve_subtype_fn(
+                        intent_result=intent_result,
+                        retrieval_message=retrieval_message,
+                        anchor_card=hybrid_anchor_card or anchor_card,
+                        msg=req.message,
+                    )
+                _device_sub_kw = {"adapter": "หัวชาร์จ", "cable": "สายชาร์จ",
+                                  "set": "ชุดชาร์จ", "car_charger": "หัวชาร์จในรถ",
+                                  "wireless": "แท่นชาร์จไร้สาย"}.get(_resolved_sub_for_device or "", "")
+                if _device_sub_kw:
+                    _device_search_q = f"{_device_sub_kw} {_device_search_q}"
+                    print(f"[DEVICE-SPEC-LOOKUP] subtype={_resolved_sub_for_device} → prefix({_device_sub_kw!r})", file=sys.stderr)
+                print(f"[DEVICE-SPEC-LOOKUP] re-query DB: {_device_search_q!r}", file=sys.stderr)
+                try:
+                    _device_products = product_store.fetch_products(
+                        db,
+                        message=_device_search_q,
+                        shop_filter=req.shop,
+                        limit=llm_ctx_limit,
+                        desc_message=req.message,
+                        filter_unavailable=False,
+                    )
+                    if _device_products:
+                        # ⚡ Phase 3b — sort by wattage ascending (baseline first, upgrade next)
+                        _device_products.sort(key=lambda p: _extract_max_wattage(p))
+                        print(f"[DEVICE-SPEC-LOOKUP] sort by wattage (asc)  top3: {[_extract_max_wattage(p) for p in _device_products[:3]]}", file=sys.stderr)
+                        # dedup กับ existing_products
+                        _existing_pids = {str(p.get("item_id") or "") for p in existing_products}
+                        for _dp in _device_products:
+                            _dpid = str(_dp.get("item_id") or "")
+                            if _dpid and _dpid not in _existing_pids:
+                                _additional_products.append(_dp)
+                                _existing_pids.add(_dpid)
+                        if _additional_products:
+                            print(f"[DEVICE-SPEC-LOOKUP] merge {len(_additional_products)} สินค้าจาก re-query (dedup กับ {len(existing_products)} existing)", file=sys.stderr)
+                except Exception as _e:
+                    print(f"[DEVICE-SPEC-LOOKUP] re-query error: {_e}", file=sys.stderr)
+    except Exception as _e:
+        print(f"[DEVICE-SPEC-LOOKUP] error: {_e}", file=sys.stderr)
+
+    return _device_spec_extra, _additional_products
+
+
+def _recent_qa_pairs(history: list[dict] | None, n: int = 10) -> list[dict]:
+    """⚡ Phase 8 — จับคู่ user+model message เป็น QA pairs แล้วคืน n คู่ล่าสุด.
+
+    ใช้แทน history[切片] ตอนส่งเข้า llm.answer() / follow-up detection
+    เพื่อให้ "10 คู่" หมายถึง 10 Q+A (20 messages) ไม่ใช่ 10 messages เดี่ยว
+
+    Args:
+        history: list ของ {"role":"user"|"model", "text":"...", ...}
+        n: จำนวน QA pairs สูงสุด (default 10)
+
+    Returns:
+        list ของ messages เรียงเก่า→ใหม่ (พร้อมส่งเข้า LLM contents ได้เลย)
+        ประกอบด้วย n คู่ล่าสุด (อย่างมาก 2n messages)
+
+    Edge cases:
+        - history ว่าง → []
+        - role ไม่ครบคู่ (เช่น 2 user ติดกันจาก buffer_flush)
+          → user ที่ไม่มี model ตามหลัง จะถูกคืนเป็นคู่เดี่ยว (user only)
+          เพื่อกัน context loss (ดีกว่าตัดทิ้ง)
+        - คู่สุดท้ายมี model แต่ไม่มี user ก่อนหน้า → คืน model เดี่ยว
+    """
+    if not history:
+        return []
+    # จับคู่: walk จากท้าย → ถ้าเจอ model หลัง user → คู่; ถ้า user ติดกัน → user เดี่ยว
+    _pairs: list[list[dict]] = []
+    _i = len(history) - 1
+    while _i >= 0:
+        _h = history[_i]
+        _role = _h.get("role", "user")
+        if _role == "model":
+            # หา user ก่อนหน้า
+            if _i - 1 >= 0 and history[_i - 1].get("role", "user") == "user":
+                _pairs.append([history[_i - 1], _h])
+                _i -= 2
+            else:
+                # model เดี่ยว (ไม่มี user ก่อนหน้า) → คืนเป็นคู่เดี่ยว
+                _pairs.append([_h])
+                _i -= 1
+        else:
+            # user เดี่ยว (ไม่มี model ตามหลัง หรือเป็นคู่สุดท้ายที่ยังไม่ตอบ)
+            _pairs.append([_h])
+            _i -= 1
+        if len(_pairs) >= n:
+            break
+    # เรียงกลับเป็นเก่า→ใหม่ แล้ว flatten
+    _pairs = list(reversed(_pairs))
+    _flat: list[dict] = []
+    for _pair in _pairs:
+        _flat.extend(_pair)
+    return _flat
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
+    # ⚡ chatbotv3 — OpenRouter-first paradigm (2026-09-20)
+    #   USE_CHAT_V3=1 หรือ req.use_v3=True → route ไป chatbotv3.engine.chat_v3
+    #   ไม่กระทบ legacy/v2 (default ยังใช้ legacy/v2 ตาม USE_LEGACY_CHAT)
+    if req.use_v3 or os.environ.get("USE_CHAT_V3", "0") == "1":
+        from . import chatbotv3
+        _resp = chatbotv3.chat_v3(req)
+        _resp["chat_engine"] = "v3"  # ⚡ บันทึกว่าใช้ chatbotv3
+        return ChatResponse(**_resp)
     # ⚡ chat_v2 — pipeline ใหม่ สลับด้วย env var หรือ per-request flag
     #   USE_LEGACY_CHAT=1 (default) → legacy chat()
     #   USE_LEGACY_CHAT=0          → chat_v2 ทั้งหมด
@@ -434,7 +878,6 @@ def chat(req: ChatRequest) -> ChatResponse:
         _resp["chat_engine"] = "v2"  # ⚡ บันทึกว่าใช้ chat_v2
         return ChatResponse(**_resp)
     import time as _time
-    import sys
     _total_start = _time.time()
     _timing_breakdown: dict[str, float] = {}  # pass1, retrieval, llm, total
     _steps: list[dict[str, Any]] = []  # per-step breakdown for log panel
@@ -446,6 +889,409 @@ def chat(req: ChatRequest) -> ChatResponse:
     #   → ตัวแปร unbound → 500 (พบตอน replay QA 12 แชท: nt_sumittra Q2 / aroranuch Q1,Q11 ฯลฯ)
     _intent_sub: str | None = None
     _is_conv_active = False
+
+    # ⚡ Phase 8 — resolve effective LLM context limit (per-request from admin config)
+    #   ถ้า req.llm_context_limit ส่งมา → ใช้ค่านั้น (range 10-50)
+    #   ถ้าไม่ส่ง → ใช้ _LLM_CONTEXT_LIMIT (30) ตาม default
+    _llm_ctx_limit = req.llm_context_limit or _LLM_CONTEXT_LIMIT
+
+    # ⚡ Charger Subtype Consolidation (2026-09-16) — resolve subtype ด้วย priority ชัดเจนจุดเดียว
+    #   แทนที่การเรียก _detect_charger_subtype กระจาย 22 จุดด้วย argument ต่างกัน
+    #   Priority: anchor > msg-strong > intent > msg > retrieval
+    #   กรณีพิเศษ: ลูกค้าถามไม่ระบุ subtype ชัด + มี anchor → ใช้ anchor subtype
+    #   เว้นแต่ msg จะพูดถึง subtype อื่นชัดเจน (strong keyword) → override
+    #   ⚠️ ใช้ closure: req, _hybrid_anchor_card (ประกาศที่ ~927)
+    #   ⚠️ ต้องประกาศก่อน KB branch (~2908) และ product_store branch (~4641)
+    #   Strong keyword = keyword ใน _CHARGER_SUBTYPES (ไม่ใช่ "หัว"/"สาย" ลอยๆ)
+    _STRONG_SUBTYPE_KWS: dict[str, tuple[str, ...]] = {
+        "adapter": ("หัวชาร์จ", "หัวชาร์ต", "adapter", "แอ็ดอปเตอร์", "gan",
+                    "qc 3", "qc3", "pd fast", "pd3"),
+        "cable": ("สายชาร์จ", "สายชาร์ต", "cable", "คาเบิล",
+                  "สาย usb", "สาย type", "สาย micro", "สาย lightning",
+                  "สาย c", "สาย pd", "lightning", "ไลนิ่ง", "ไลนิง"),
+    }
+
+    def _resolve_charger_subtype(
+        *,
+        intent_result: dict | None = None,
+        retrieval_message: str = "",
+        anchor_card: dict | None = None,
+        msg: str | None = None,
+    ) -> str | None:
+        """Resolve charger subtype ด้วย priority ชัดเจน.
+
+        Priority (ตามที่ตกลง):
+        1. anchor subtype (default) — ใช้เมื่อ msg ไม่ได้ระบุ subtype อื่นชัดเจน
+        2. msg strong keyword (override) — เฉพาะเมื่อ msg มี strong keyword ชัดเจน
+           ที่ต่างจาก anchor (เช่น anchor=cable แต่ msg พูด "หัวชาร์จ" → adapter)
+        3. intent subtype — เมื่อไม่มี anchor และ msg ไม่มี keyword ชัด
+        4. msg subtype (non-strong) — เมื่อไม่มี anchor และไม่มี intent
+        5. retrieval fallback — ใช้ retrieval_message แทน
+
+        ⚡ กรณีพิเศษ: ลูกค้าถามแบบไม่ระบุ subtype ชัดเจน (เช่น "อยากได้ของที่ใช้กับ...")
+        แต่ history มีการแชร์สินค้ามาก่อน → ใช้ subtype ของสินค้าที่แชร์เป็นค่าตั้งต้น
+        เว้นแต่ msg จะพูดถึง subtype อื่นชัดเจน (strong keyword)
+        """
+        _msg = msg or req.message or ""
+
+        # 1. ดึง anchor subtype (anchor_card parameter > _hybrid_anchor_card closure)
+        _anchor = anchor_card or _hybrid_anchor_card
+        _anchor_sub: str | None = None
+        if _anchor:
+            _anchor_sub = product_store._detect_charger_subtype(
+                _anchor.get("name") or _anchor.get("item_name") or ""
+            )
+
+        # 2. ดึง msg subtype
+        _msg_sub: str | None = product_store._detect_charger_subtype(_msg)
+
+        # 3. ถ้ามี anchor:
+        if _anchor_sub:
+            # ถ้า msg มี subtype ต่างจาก anchor → เช็คว่าเป็น strong keyword หรือไม่
+            if _msg_sub and _msg_sub != _anchor_sub:
+                _strong_kws = _STRONG_SUBTYPE_KWS.get(_msg_sub, ())
+                # แก้ typo สั้นๆ (เหมือน _detect_charger_subtype)
+                _low_check = _msg.lower()
+                for _wrong, _right in (
+                    ("หัวชาจ", "หัวชาร์จ"), ("หัวชารจ", "หัวชาร์จ"),
+                    ("หัวชาจะ", "หัวชาร์จ"),
+                    ("สายชาจ", "สายชาร์จ"), ("สายชารจ", "สายชาร์จ"),
+                ):
+                    _low_check = _low_check.replace(_wrong, _right)
+                if "หัวชาร" in _low_check and "หัวชาร์จ" not in _low_check:
+                    _low_check = _low_check.replace("หัวชาร", "หัวชาร์จ")
+                _has_strong = any(kw in _low_check for kw in _strong_kws)
+                if _has_strong:
+                    return _msg_sub  # override anchor ด้วย strong keyword
+            # ไม่มี strong keyword ต่างจาก anchor → ใช้ anchor
+            return _anchor_sub
+
+        # 4. ไม่มี anchor → intent
+        if intent_result and intent_result.get("product_type") == "charger":
+            _intent_sub_val = intent_result.get("charger_subtype")
+            if _intent_sub_val in ("adapter", "cable", "set", "car_charger",
+                                   "wireless", "desktop", "socket"):
+                return _intent_sub_val
+
+        # 5. ไม่มี anchor, ไม่มี intent → msg (แม้ไม่ใช่ strong keyword)
+        if _msg_sub:
+            return _msg_sub
+
+        # 6. Fallback → retrieval
+        if retrieval_message and retrieval_message != _msg:
+            _retr_sub = product_store._detect_charger_subtype(retrieval_message)
+            if _retr_sub:
+                return _retr_sub
+
+        return None
+
+    # ⚡ Legacy Fix (2026-09-15) — unified web search reanswer
+    #   รวม logic ของ KB+Mongo branch + product_store branch ที่ copy กันอยู่
+    #   ทั้ง 2 branch ใช้ฟังก์ชันนี้ร่วมกัน → ลด code duplicate + กัน behavior แตกต่างกัน
+    #   หลักการ: search_and_extract → re-query DB → merge → strip URL → LLM2 ตอบ
+    #   ห้าม: search_info ตอบลูกค้าโดยตรง, ห้าม external URL ในคำตอบ
+    #   ⚠️ ต้องประกาศก่อน KB branch (~2948) และ product_store branch (~5445)
+    #   ใช้ closure: db, product_store, knowledge_base, llm, _kb_doc_to_card,
+    #     _dedupe_products (ระดับโมดูล), _GEMINI_COST_PER_M
+    #   KB branch เรียกด้วย do_dedup_rerank=False (ไม่ต้อง dedup)
+    #   product_store branch เรียกด้วย do_dedup_rerank=True (dedup ด้วย _dedupe_products)
+    def _web_search_reanswer(
+        *,
+        search_message: str,
+        llm_message: str,
+        products_in: list[dict],
+        reason: str,
+        shop: str | None,
+        platform: str | None,
+        history_list: list[dict],
+        persona_extra: str,
+        intent_result: dict,
+        vision_context: str,
+        extra_context_prefix: str = "",
+        do_kb_lookup: bool = True,
+        do_model_code_regex: bool = True,
+        do_dedup_rerank: bool = True,
+        req_limit: int = 10,
+    ) -> dict:
+        """Web search → re-query DB → LLM2 re-answer.
+
+        Returns dict:
+          - answer: str (จาก LLM2, ไม่ใช่จาก search)
+          - usage: dict (LLM2 token usage)
+          - products: list[dict] (products ใหม่ที่ merge แล้ว)
+          - cost_usd: float (search cost)
+          - search_used: bool
+          - search_reason: str
+          - search_model: str
+          - search_elapsed: float
+          - steps: list[dict] (Search + RAG(search) + LLM2(search))
+          - error: str | None
+        """
+        import re as _re_wsr
+        from . import web_search as _ws_mod
+
+        _result: dict = {
+            "answer": "",
+            "usage": {"prompt": 0, "output": 0, "total": 0},
+            "products": products_in,
+            "cost_usd": 0.0,
+            "search_used": False,
+            "search_reason": reason,
+            "search_model": "",
+            "search_elapsed": 0.0,
+            "steps": [],
+            "error": None,
+        }
+
+        if not _ws_mod.is_configured():
+            return _result
+
+        try:
+            _ws_r = _ws_mod.search_and_extract(
+                message=search_message,
+                shop=shop,
+                platform=platform,
+                history=history_list,
+                reason=reason,
+            )
+        except Exception as _e:
+            print(f"[WEB-SEARCH-REANSWER] search_and_extract error: {_e}", file=sys.stderr)
+            _result["error"] = str(_e)
+            return _result
+
+        if _ws_r.get("error") or not _ws_r.get("search_used"):
+            print(f"[WEB-SEARCH-REANSWER] skipped (error: {_ws_r.get('error')})", file=sys.stderr)
+            _result["error"] = _ws_r.get("error")
+            return _result
+
+        _result["search_used"] = True
+        _result["search_model"] = _ws_r.get("model", "") or ""
+        _result["search_elapsed"] = _ws_r.get("elapsed", 0.0) or 0.0
+        _result["cost_usd"] = _ws_r.get("cost_usd", 0.0) or 0.0
+
+        _ws_keywords = _ws_r.get("keywords", []) or []
+        _ws_search_info = _ws_r.get("search_info", "") or ""
+        _ws_product_type = _ws_r.get("product_type", "") or ""
+        _ws_usage = _ws_r.get("usage", {}) or {}
+
+        print(f"[WEB-SEARCH-REANSWER] keywords={_ws_keywords[:5]}  product_type={_ws_product_type}", file=sys.stderr)
+
+        # ── Step 1: re-query DB ด้วย keywords ──
+        _new_products: list[dict] = []
+        _ws_kb_context = ""
+        if _ws_keywords:
+            _search_query = " ".join(_ws_keywords[:6])
+            if _ws_product_type:
+                _search_query = f"{_ws_product_type} {_search_query}"
+            try:
+                _new_products = product_store.fetch_products(
+                    db,
+                    message=_search_query,
+                    shop_filter=shop,
+                    limit=_llm_ctx_limit,
+                    desc_message=llm_message,
+                )
+                print(f"[WEB-SEARCH-REANSWER] DB re-query: {_search_query!r} → {len(_new_products)} products", file=sys.stderr)
+            except Exception as _e:
+                print(f"[WEB-SEARCH-REANSWER] DB re-query error: {_e}", file=sys.stderr)
+
+            # model code regex (PB/BA/LPB/WPB) — optional
+            if do_model_code_regex and _ws_search_info:
+                _model_codes = _re_wsr.findall(
+                    r'\b(PB\d{3}[A-Z]?|P\d{2}|BA\d{3}[A-Z]?|LPB\d{3}[A-Z]?|WPB\d{3}[A-Z]?)\b',
+                    _ws_search_info,
+                )
+                if _model_codes:
+                    _model_codes = list(dict.fromkeys(_model_codes))[:5]
+                    print(f"[WEB-SEARCH-REANSWER] model codes: {_model_codes}", file=sys.stderr)
+                    for _code in _model_codes:
+                        try:
+                            _code_products = product_store.fetch_products(
+                                db,
+                                message=_code,
+                                shop_filter=shop,
+                                limit=3,
+                                desc_message=llm_message,
+                            )
+                            _existing_ids = {p.get("item_id") or p.get("name") for p in _new_products}
+                            for _cp in _code_products:
+                                _pid = _cp.get("item_id") or _cp.get("name")
+                                if _pid not in _existing_ids:
+                                    _new_products.append(_cp)
+                                    _existing_ids.add(_pid)
+                        except Exception as _e:
+                            print(f"[WEB-SEARCH-REANSWER] model code query error ({_code}): {_e}", file=sys.stderr)
+
+            # KB lookup — optional
+            if do_kb_lookup:
+                try:
+                    _ws_kb_r = knowledge_base.lookup_kb(_search_query)
+                    if _ws_kb_r and _ws_kb_r.get("found"):
+                        _ws_kb_context = _ws_kb_r.get("context", "") or ""
+                        for _kd in _ws_kb_r.get("kb_docs", [])[:3]:
+                            _kb_card = _kb_doc_to_card(_kd)
+                            _kb_card["_kb_only"] = True
+                            _new_products.append(_kb_card)
+                        print(f"[WEB-SEARCH-REANSWER] KB re-query: {len(_ws_kb_r.get('kb_docs', []))} docs", file=sys.stderr)
+                except Exception as _e:
+                    print(f"[WEB-SEARCH-REANSWER] KB re-query error: {_e}", file=sys.stderr)
+
+        # ── Step 2: merge + dedup + rerank ──
+        _final_products = _new_products if _new_products else list(products_in)
+        if do_dedup_rerank and _final_products:
+            # ⚡ 2026-09-16 — ใช้ _dedupe_products ระดับโมดูล (แทน _base_name/_listing_sell_score จาก closure)
+            #   KB branch ต้องเรียกด้วย do_dedup_rerank=False เพราะยังไม่มี products ที่ต้อง dedup
+            _final_products = _dedupe_products(_final_products, log_label="DEDUP-WS")
+            # rerank: standalone > bundle
+            if len(_final_products) > req_limit:
+                _final_products.sort(
+                    key=lambda p: not product_store._is_bundle_product(p),
+                    reverse=True,
+                )
+
+        # ── Step 3: strip URL ออกจาก search_info ──
+        _ws_search_info_clean = _ws_search_info
+        if _ws_search_info_clean:
+            # markdown link [text](url) → ลบทั้งก้อน
+            _ws_search_info_clean = _re_wsr.sub(
+                r'\[([^\]]+)\]\([^)]+\)', r'', _ws_search_info_clean
+            )
+            # plain URL
+            _ws_search_info_clean = _re_wsr.sub(
+                r'https?://[^\s\)\]]+', r'', _ws_search_info_clean,
+                flags=_re_wsr.IGNORECASE,
+            )
+            # empty markdown link [text]() หรือ [text]( )
+            _ws_search_info_clean = _re_wsr.sub(
+                r'\[([^\]]*)\]\(\s*\)', r'', _ws_search_info_clean
+            )
+            # whitespace รวม
+            _ws_search_info_clean = _re_wsr.sub(r'\s{2,}', ' ', _ws_search_info_clean).strip()
+            # ถ้าสั้นเกินไป → ใช้ตัวเดิม (กันข้อมูลหายหมด)
+            if len(_ws_search_info_clean) < 20:
+                _ws_search_info_clean = _ws_search_info
+            if _ws_search_info_clean != _ws_search_info:
+                print(f"[WEB-SEARCH-REANSWER] stripped external URLs from search_info", file=sys.stderr)
+
+        # ── Step 4: สร้าง extra_context ──
+        _extra_context = ""
+        if _ws_search_info_clean and len(_ws_search_info_clean) >= 20:
+            _extra_parts = [
+                "=== ข้อมูลจาก Google Search (ข้อมูลประกอบเท่านั้น — ห้ามใช้เป็นแหล่งหลัก) ===",
+                "ห้ามนำข้อมูลนี้มาเป็นหัวข้อคำตอบหลัก, ห้ามแนะนำสินค้าที่ไม่อยู่ใน context,",
+                "ห้ามตอบเรื่องสินค้า/แบรนด์อื่นที่ไม่ใช่สินค้าใน context",
+                "ห้ามใส่ลิงก์ใดๆ ในคำตอบ นอกจาก short_link ของสินค้าใน context",
+                "---",
+                _ws_search_info_clean,
+            ]
+            if _ws_kb_context:
+                _extra_parts.append(f"=== ข้อมูลจาก Knowledge Base ===\n{_ws_kb_context}")
+            _extra_context = "\n".join(_extra_parts)
+            if vision_context:
+                _extra_context = (vision_context + "\n" + _extra_context).strip()
+            if extra_context_prefix:
+                _extra_context = (extra_context_prefix + "\n" + _extra_context).strip()
+
+        # ── Step 5: record Search step ──
+        _ws_t_in = _ws_usage.get("prompt", 0)
+        _ws_t_out = _ws_usage.get("output", 0)
+        _result["steps"].append({
+            "name": "Search",
+            "model": _result["search_model"] or "openrouter",
+            "tokens_in": _ws_t_in,
+            "tokens_out": _ws_t_out,
+            "time_s": round(_result["search_elapsed"], 2),
+            "cost_usd": round(_result["cost_usd"], 6),
+            "cost_thb": round(_result["cost_usd"] * 36, 4),
+            "input": {
+                "message": search_message[:200],
+                "reason": reason,
+                "intent": intent_result.get("intent"),
+            },
+            "output": {
+                "search_used": True,
+                "keywords": _ws_keywords[:8],
+                "product_type": _ws_product_type,
+                "search_info": _ws_search_info_clean[:500],
+            },
+        })
+
+        # ── Step 6: record RAG(search) step ──
+        _final_names = [p.get("name", "")[:60] for p in _final_products[:10]]
+        _result["steps"].append({
+            "name": "RAG(search)",
+            "model": "mongodb+kb",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "time_s": 0,
+            "cost_usd": 0,
+            "cost_thb": 0,
+            "input": {
+                "query": " ".join(_ws_keywords[:6]) if _ws_keywords else "",
+                "keywords": _ws_keywords[:8],
+                "shop": shop,
+            },
+            "output": {
+                "product_count": len(_final_products),
+                "products": _final_names,
+                "kb_used": bool(_ws_kb_context),
+            },
+        })
+
+        # ── Step 7: LLM2 re-answer (search_info = ข้อมูลประกอบ ไม่ใช่คำตอบหลัก) ──
+        if _final_products and _extra_context:
+            print(f"[WEB-SEARCH-REANSWER] LLM2 re-answer with {len(_final_products)} products + search context", file=sys.stderr)
+            try:
+                _ws_answer, _ws_llm_usage = llm.answer(
+                    message=llm_message,
+                    products=_final_products,
+                    shop_hint=shop,
+                    history=history_list,
+                    persona_extra=persona_extra,
+                    intent_result=intent_result,
+                    extra_context=_extra_context,
+                )
+            except RuntimeError as _e:
+                print(f"[WEB-SEARCH-REANSWER] LLM re-answer error: {_e}", file=sys.stderr)
+                _ws_answer = ""
+                _ws_llm_usage = {"prompt": 0, "output": 0, "total": 0}
+        else:
+            print(f"[WEB-SEARCH-REANSWER] no products or no search context → skip LLM2 re-answer", file=sys.stderr)
+            _ws_answer = ""
+            _ws_llm_usage = {"prompt": 0, "output": 0, "total": 0}
+
+        # ── Step 8: record LLM2(search) step ──
+        _llm2_t_in = _ws_llm_usage.get("prompt", 0)
+        _llm2_t_out = _ws_llm_usage.get("output", 0)
+        _llm2_cost = (_llm2_t_in * _GEMINI_COST_PER_M["prompt"] + _llm2_t_out * _GEMINI_COST_PER_M["output"]) / 1_000_000
+        _result["steps"].append({
+            "name": "LLM2(search)",
+            "model": os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+            "tokens_in": _llm2_t_in,
+            "tokens_out": _llm2_t_out,
+            "time_s": 0,
+            "cost_usd": round(_llm2_cost, 6),
+            "cost_thb": round(_llm2_cost * 36, 4),
+            "input": {
+                "message": llm_message[:200],
+                "product_count": len(_final_products),
+                "products": _final_names,
+                "intent": intent_result.get("intent"),
+                "history_count": len(history_list) if history_list else 0,
+                "search_info_used": bool(_ws_search_info_clean),
+                "kb_context_used": bool(_ws_kb_context),
+            },
+            "output": {
+                "answer": _ws_answer[:500] if _ws_answer else "",
+                "answer_full_length": len(_ws_answer) if _ws_answer else 0,
+            },
+        })
+
+        _result["answer"] = _ws_answer
+        _result["usage"] = _ws_llm_usage
+        _result["products"] = _final_products
+        return _result
+
     client, db = _db()
     try:
         history = [{"role": m.role, "text": m.text, "images": m.images, "image_desc": m.image_desc} for m in req.history]
@@ -601,6 +1447,8 @@ def chat(req: ChatRequest) -> ChatResponse:
         _tagged_item_id = req.item_id or _extract_item_id_tag(req.message)
         _is_from_history_anchor = False
         _hybrid_anchor_card = None  # ⚡ 2026-09-12 — anchor สำหรับ hybrid merge (compat+target_device)
+        # ⚡ 2026-09-16 — default anchor_card=None (กัน UnboundLocalError เมื่อไม่มี _tagged_item_id)
+        anchor_card = None
         if not _tagged_item_id and history:
             _current_model_kw = knowledge_base.extract_model_keywords(req.message)
             # ⚡ ถ้ามี model keyword ของสินค้าอื่น → new topic (เปลี่ยนรุ่น)
@@ -718,7 +1566,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                             message=_followup_q,
                             products=[anchor_card],
                             shop_hint=req.shop,
-                            history=history,
+                            history=_recent_qa_pairs(history, 10),
                             persona_extra=_persona_extra,
                             extra_context=_vision_context,
                         )
@@ -835,7 +1683,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         message=_tracking_clean,
                         context=_order_ctx,
                         qtype="order_status",
-                        history=history,
+                        history=_recent_qa_pairs(history, 10),
                         persona_extra=_persona_extra,
                     )
                 except RuntimeError as exc:
@@ -943,7 +1791,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         message=_order_clean,
                         context=_order_ctx,
                         qtype="order_status",
-                        history=history,
+                        history=_recent_qa_pairs(history, 10),
                         persona_extra=_persona_extra,
                     )
                 except RuntimeError as exc:
@@ -1012,101 +1860,137 @@ def chat(req: ChatRequest) -> ChatResponse:
                     image_desc=_image_desc_out,
                 )
 
-        # ===== ขั้นที่ 0: ตรวจคำถามทั่วไป (policy/brands/categories/shops) =====
-        # ถ้าลูกค้าถามคำถามทั่วไปที่ไม่เจาะรุ่น → ตอบจาก policy/meta โดยตรง
-        # แต่ถ้าเป็น warranty/return/shipping question และ history มีสินค้า → ถือว่าเป็น follow-up
-        # ให้ดึงสินค้าจาก history มาตอบแทน
+        # ===== ขั้นที่ 0: เตรียมตัวแปรก่อน intent classification =====
+        # ⚡ Phase 6 — general_qtype และ _is_claim_request ย้ายไปหลัง intent classification
+        #   (ใช้ intent_result เป็นหลัก, keyword เป็น fallback)
         _t0 = _time.time()
-        general_qtype = knowledge_base.detect_general_question(req.message)
-        # ตรวจ follow-up: ถ้าเป็น warranty/return/shipping question สั้นๆ และ history มีสินค้า
-        # แต่ถ้า message ปัจจุบันมี model keyword อยู่แล้ว (เช่น "lagenio k9 รับประกัน")
-        # ให้ถือว่าเป็นคำถามใหม่ ไม่ใช่ follow-up
         _current_has_model = bool(knowledge_base.extract_model_keywords(req.message))
-        # ตรวจ claim request — ถ้าเป็น claim request ไม่เข้า followup_policy
-        # เพราะ claim request ต้องเข้า warranty claim state machine ไม่ใช่ดึงสินค้า
         from . import warranty as _warranty_check_mod
-        _is_claim_request = _warranty_check_mod.detect_claim_request(req.message)
+        # general_qtype และ _is_claim_request จะถูก set หลัง intent classification (ด้านล่าง)
+        general_qtype: str | None = None
+        _is_claim_request = False
+        _is_tax_invoice = False
 
-        # ===== Phase 1C — Warranty auto-check from order_sn =====
-        # ⚡ ถ้าลูกค้าถามเคลม + มี order_sn ในข้อความ → เช็ควันซื้อจาก order → คำนวณระยะประกัน
-        #    ส่ง context ให้ LLM ตอบเงื่อนไข + ระยะเวลา ก่อนเข้า warranty_claim flow
+        # ===== Phase 1C — Warranty auto-check from order_sn (delivery-date based) =====
+        # ⚡ Warranty-Delivery — ใช้ delivery_time_raw (วันที่ส่งถึง) แทน create_time_raw (วันที่สั่งซื้อ)
+        #    ถ้ามี order_sn + เป็น claim request → lookup_order → check_warranty_status
+        #    ถ้ายังไม่ส่งมอบ/ยกเลิก → บอกลูกค้าว่ายังไม่เริ่มนับประกัน
+        #    ถ้า multi-item ที่ warranty ต่างกัน → ถามลูกค้าว่าถามเรื่องชิ้นไหน
+        #    ถ้าไม่มี order_sn / lookup ไม่พบ / ไม่มี delivery date → ใช้ manual purchase-date flow เดิม
         _warranty_auto_ctx = ""
         _warranty_auto_info: dict = {}
+        _warranty_auto_answer: str = ""  # deterministic answer (ถ้ามี → ตอบเลย ไม่เข้า LLM)
         if _is_claim_request_pre and _order_sn:
-            print(f"[WARRANTY-AUTO] ลูกค้าถามเคลม + order_sn={_order_sn} → auto-check", file=sys.stderr)
-            _auto_result = _warranty_check_mod.auto_check_warranty(_order_sn, shop_filter=req.shop)
-            if _auto_result:
-                _warranty_auto_ctx = _auto_result.get("warranty_text", "")
-                _warranty_auto_info = _auto_result
-                print(f"[WARRANTY-AUTO] in_warranty={_auto_result.get('in_warranty')} days_left={_auto_result.get('days_remaining')}", file=sys.stderr)
+            print(f"[WARRANTY-AUTO] ลูกค้าถามเคลม + order_sn={_order_sn} → auto-check (delivery-date)", file=sys.stderr)
+            try:
+                _auto_order = _order_store.lookup_order(_order_sn, shop_filter=req.shop)
+                if not _auto_order:
+                    print(f"[WARRANTY-AUTO] order not found → fallback to manual flow", file=sys.stderr)
+                else:
+                    _delivery_raw = _auto_order.get("delivery_time_raw")
+                    _auto_items = _auto_order.get("items", [])
+                    # ดึง warranty duration จากแต่ละ item — ใช้ product_store._warranty_info
+                    _item_warranties: list[tuple[str, int]] = []
+                    for _ai in _auto_items:
+                        _ai_name = (_ai.get("name") or "")[:80]
+                        # ดึง warranty จากชื่อสินค้าโดยตรง (เหมือน manual flow)
+                        _ai_wi = _warranty_check_mod.extract_warranty_from_name(_ai_name)
+                        _ai_dur = _ai_wi.get("months") if _ai_wi else None
+                        if _ai_dur and _ai_dur > 0:
+                            _item_warranties.append((_ai_name, int(_ai_dur)))
+                    # dedup warranty months เพื่อตรวจ ambiguity
+                    _unique_months = list({_m for _, _m in _item_warranties})
+                    if len(_unique_months) > 1:
+                        # multi-item ที่ warranty ต่างกัน → ถามลูกค้า ไม่เดา
+                        _item_list_text = "\n".join(
+                            f"• {_n} (รับประกัน {_m} เดือน)" for _n, _m in _item_warranties
+                        )
+                        _warranty_auto_answer = (
+                            f"คำสั่งซื้อ {_order_sn} มีหลายสินค้าที่มีระยะเวลารับประกันต่างกันค่ะ:\n"
+                            f"{_item_list_text}\n\n"
+                            f"รบกวนบอก{_bot_name} ด้วยค่ะว่าลูกค้าสอบถามเรื่องรับประกันของสินค้าชิ้นไหน?"
+                        )
+                        print(f"[WARRANTY-AUTO] multi-item ambiguity: {_item_warranties} → ask customer", file=sys.stderr)
+                    elif len(_unique_months) == 1:
+                        # ทุก item มี warranty เท่ากัน (หรือมีแค่ item เดียวที่มี warranty)
+                        _warranty_months_auto = _unique_months[0]
+                        _product_name_auto = _item_warranties[0][0] if _item_warranties else ""
+                        _warranty_status = _warranty_check_mod.check_warranty_status(_delivery_raw, _warranty_months_auto)
+                        _warranty_auto_info = {
+                            "order_sn": _order_sn,
+                            "delivery_time_raw": _delivery_raw,
+                            "warranty_months": _warranty_months_auto,
+                            "product_name": _product_name_auto,
+                            **_warranty_status,
+                        }
+                        if _warranty_status["in_warranty"] is None:
+                            # ยังไม่ส่งมอบ/ยกเลิก → บอกลูกค้า
+                            if not _delivery_raw:
+                                _warranty_auto_answer = (
+                                    f"ตรวจสอบคำสั่งซื้อ {_order_sn} แล้วค่ะ "
+                                    f"พบว่าสินค้ายังไม่ส่งมอบถึงมือลูกค้า "
+                                    f"(สถานะปัจจุบัน: {_auto_order.get('order_status','ไม่ระบุ')})\n\n"
+                                    f"ระยะเวลารับประกันจะเริ่มนับเมื่อลูกค้าได้รับสินค้าแล้วเท่านั้นค่ะ "
+                                    f"หากต้องการแจ้งเคลม/สอบถามเพิ่มเติม เดี๋ยว{_bot_name} ส่งต่อแอดมินดูแลให้นะคะ"
+                                )
+                                print(f"[WARRANTY-AUTO] not delivered yet (status={_auto_order.get('order_status_raw')}) → inform customer", file=sys.stderr)
+                            else:
+                                _warranty_auto_answer = (
+                                    f"ตรวจสอบคำสั่งซื้อ {_order_sn} แล้วค่ะ "
+                                    f"ไม่สามารถคำนวณระยะประกันได้ในขณะนี้ "
+                                    f"{_warranty_status.get('text','')}\n\n"
+                                    f"หากต้องการแจ้งเคลม/สอบถามเพิ่มเติม เดี๋ยว{_bot_name} ส่งต่อแอดมินดูแลให้นะคะ"
+                                )
+                                print(f"[WARRANTY-AUTO] indeterminate → inform customer", file=sys.stderr)
+                        elif _warranty_status["in_warranty"]:
+                            # อยู่ในช่วงประกัน
+                            _delivery_date_str = _warranty_status["delivery_date"].strftime("%d/%m/%Y") if _warranty_status.get("delivery_date") else ""
+                            _expiry_date_str = _warranty_status["expiry_date"].strftime("%d/%m/%Y") if _warranty_status.get("expiry_date") else ""
+                            _warranty_auto_answer = (
+                                f"ตรวจสอบข้อมูลเรียบร้อยแล้วค่ะ สินค้า {_product_name_auto} "
+                                f"ในคำสั่งซื้อ {_order_sn} "
+                                f"ที่ส่งมอบเมื่อวันที่ {_delivery_date_str} "
+                                f"ยังอยู่ในช่วงรับประกันนะคะ {_warranty_status['text']} "
+                                f"(วันที่ประกันหมด: {_expiry_date_str})\n\n"
+                                f"เพื่อดำเนินการเคลม/ซ่อมต่อ รบกวนแจ้งข้อมูลดังนี้ค่ะ:\n"
+                                f"• ชื่อ-นามสกุล\n"
+                                f"• เบอร์โทร\n\n"
+                                f"จากนั้นเดี๋ยว {_bot_name} จะส่งต่อให้แอดมินดำเนินการต่อให้นะคะ"
+                            )
+                            print(f"[WARRANTY-AUTO] in_warranty=True days_left={_warranty_status['days_remaining']}", file=sys.stderr)
+                        else:
+                            # หมดช่วงประกัน
+                            _delivery_date_str = _warranty_status["delivery_date"].strftime("%d/%m/%Y") if _warranty_status.get("delivery_date") else ""
+                            _expiry_date_str = _warranty_status["expiry_date"].strftime("%d/%m/%Y") if _warranty_status.get("expiry_date") else ""
+                            _warranty_auto_answer = (
+                                f"ตรวจสอบข้อมูลเรียบร้อยแล้วค่ะ สินค้า {_product_name_auto} "
+                                f"ในคำสั่งซื้อ {_order_sn} "
+                                f"ที่ส่งมอบเมื่อวันที่ {_delivery_date_str} "
+                                f"ไม่อยู่ในช่วงประกันแล้วนะคะ {_warranty_status['text']} "
+                                f"(วันที่ประกันหมด: {_expiry_date_str})\n\n"
+                                f"สนใจปรึกษาแอดมินก่อนไหมคะ"
+                            )
+                            print(f"[WARRANTY-AUTO] in_warranty=False days_left={_warranty_status['days_remaining']}", file=sys.stderr)
+                        # สร้าง context สำหรับ LLM (ถ้าไม่มี deterministic answer)
+                        _warranty_auto_ctx = _warranty_status.get("text", "")
+                    else:
+                        # ไม่มี item ที่ดึง warranty ได้ → fallback ไป manual flow
+                        print(f"[WARRANTY-AUTO] no warranty duration found in items → fallback to manual flow", file=sys.stderr)
+            except Exception as _warranty_auto_exc:
+                print(f"[WARRANTY-AUTO] error: {_warranty_auto_exc}", file=sys.stderr)
+                # error → fallback ไป manual flow (ไม่ crash)
 
-        # ===== Tax invoice → handoff แอดมินเลย (ก่อน general_qtype และ claim_request) =====
-        # ถ้าลูกค้าขอใบกำกับภาษี หรือส่งข้อมูลใบกำกับภาษี → ส่งแอดมินโดยตรง
-        # ไม่ต้องให้บอทตอบเอง เพราะใบกำกับภาษีต้องแอดมินดำเนินการ
-        # ตรวจก่อน claim_request เพราะ "เลขผู้เสียภาษี" มีคำว่า "เสีย" ที่ match claim request
-        _is_tax_invoice = _warranty_check_mod.detect_tax_invoice_request(req.message)
-        if _is_tax_invoice:
-            _tax_answer = (
-                f"ได้ค่ะ เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
-                f"เพื่อดำเนินการเรื่องใบกำกับภาษีให้นะคะ "
-                f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
-            )
-            _total_elapsed = _time.time() - _total_start
-            model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
-            # ส่งต่อแอดมิน (best-effort)
-            if req.conversation_id:
-                try:
-                    import urllib.request
-                    import urllib.error
-                    _handoff_url = os.environ.get(
-                        "ADMIN_HANDOFF_URL",
-                        "http://127.0.0.1:3000/api/admin/conversations/bot-handoff",
-                    )
-                    _handoff_payload = {
-                        "conversation_id": req.conversation_id,
-                        "shop_id": req.shop or "",
-                        "platform": req.platform or "shopee",
-                        "reason": "tax_invoice_request",
-                        "claim": {"topic": "ใบกำกับภาษี"},
-                    }
-                    _handoff_body = json.dumps(_handoff_payload).encode("utf-8")
-                    _handoff_req = urllib.request.Request(
-                        _handoff_url,
-                        data=_handoff_body,
-                        headers={
-                            "Content-Type": "application/json",
-                            "X-Internal-Secret": os.environ.get("CHATBOT_INTERNAL_SECRET", ""),
-                        },
-                        method="POST",
-                    )
-                    try:
-                        urllib.request.urlopen(_handoff_req, timeout=3)
-                        print("[TAX-HANDOFF] sent to admin", file=sys.stderr)
-                    except Exception as _he:
-                        print(f"[TAX-HANDOFF] handoff failed: {_he}", file=sys.stderr)
-                except Exception as _he:
-                    print(f"[TAX-HANDOFF] error: {_he}", file=sys.stderr)
-            print(f"[TIMING] TAX-HANDOFF: {_total_elapsed:.2f}s", file=sys.stderr)
-            return ChatResponse(
-                answer=_tax_answer,
-                answer_segments=llm.split_segments(_tax_answer),
-                products=[],
-                shop=req.shop,
-                model=model_name,
-                source="tax_invoice_handoff",
-                usage={},
-                elapsed=round(_total_elapsed, 2),
-                cost=0.0,
-                handoff_to_admin=True,
-                handoff_reason="tax_invoice_request",
-                timing=_timing_breakdown,
-                steps=_steps,
-                routing_decision=_routing(
-                    "handoff", "tax_invoice: ลูกค้าขอใบกำกับภาษี → ส่งแอดมิน",
-                    handoff_reason="tax_invoice_request",
-                ),
-                image_desc=_image_desc_out,
-            )
+        # ===== Phase 1C (legacy) — Warranty auto-check from create_time (เก็บไว้เป็น context fallback) =====
+        # ⚡ ถ้า delivery-date flow ด้านบนไม่ได้ผล ให้ใช้ auto_check_warranty เดิมเป็น context เสริม
+        if _is_claim_request_pre and _order_sn and not _warranty_auto_info and not _warranty_auto_answer:
+            try:
+                _auto_result = _warranty_check_mod.auto_check_warranty(_order_sn, shop_filter=req.shop)
+                if _auto_result:
+                    _warranty_auto_ctx = _auto_result.get("warranty_text", "")
+                    _warranty_auto_info = _auto_result
+                    print(f"[WARRANTY-AUTO-LEGACY] in_warranty={_auto_result.get('in_warranty')} days_left={_auto_result.get('days_remaining')}", file=sys.stderr)
+            except Exception:
+                pass
 
         # ===== BUG-3 fix — ลูกค้าขอคุยกับคน/แอดมิน → handoff ทันที ห้ามบอทตอบเอง =====
         # ก่อนหน้านี้: ลูกค้าถาม "Admin ไม่ทำงานกันหรอคะ เมื่อไหร่จะมีมนุษย์มาตอบ"
@@ -1185,9 +2069,17 @@ def chat(req: ChatRequest) -> ChatResponse:
                 image_desc=_image_desc_out,
             )
 
-        # ===== Pass 1: LLM Intent Classification (เฉพาะจุดอ่อน) =====
-        # เรียก LLM รอบแรกเพื่อจำแนก intent ก่อนเข้า flow หลัก
-        # ใช้เฉพาะเมื่อ hardcoded detection ไม่มั่นใจ (ประหยัดเวลาในกรณีชัดเจน)
+        # ===== Pass 1: LLM Intent Classification (รันทุกข้อความ) =====
+        # ⚡ Phase 6 — ยกเลิก should_run_pass1() gate
+        #   ก่อนหน้านี้: รันเฉพาะ "จุดอ่อน" ที่ hardcoded detection ไม่มั่นใจ
+        #   ปัญหา: hardcoded decision ตัดสินก่อน LLM → ผิดได้ในกรณีกำกวม
+        #   ตอนนี้: รัน intent classification ก่อนเสมอ (หลัง deterministic checks)
+        #   แล้วให้ keyword detection ใช้ intent_result เป็นหลัก, keyword เป็น fallback
+        #
+        #   Deterministic checks ที่ยังอยู่ก่อน intent (เพราะ 100% ชัด/regex):
+        #   1. order_sn regex (บรรทัด ~1345)
+        #   2. tracking_no regex (บรรทัด ~1384)
+        #   3. human_request keyword (บรรทัด ~1605 — ชัด 100%)
         from . import intent_classifier as _ic
         _intent_result: dict = {}
         _has_warranty_history = bool(history and any(
@@ -1198,61 +2090,97 @@ def chat(req: ChatRequest) -> ChatResponse:
         _pre_product_types = product_store._detect_product_types(req.message)
         if not _pre_product_types:
             _pre_product_types = product_store._detect_product_types_fuzzy(req.message)
-        if _ic.should_run_pass1(
-            message=req.message,
-            claim_detected=_is_claim_request,
-            product_types=_pre_product_types,
-            has_warranty_history=_has_warranty_history,
-        ):
-            _t_intent = _time.time()
+        # ⚡ Phase 6 — รัน intent classification เสมอ (ไม่ gate ด้วย should_run_pass1)
+        _t_intent = _time.time()
+        try:
             _intent_result = _ic.classify_intent(
                 message=req.message,
                 history=history,
                 shop=req.shop,
             )
-            _timing_breakdown["pass1"] = round(_time.time() - _t_intent, 3)
-            print(f"[TIMING] Pass1 intent: {_timing_breakdown['pass1']}s", file=sys.stderr)
-            # record step — Intent (gemini 3.1 flash lite: $0.25/M in, $0.50/M out)
-            _INTENT_COST = {"prompt": 0.25, "output": 0.50}
-            _intent_usage = _intent_result.get("usage", {})
-            _intent_t_in = _intent_usage.get("prompt", 0)
-            _intent_t_out = _intent_usage.get("output", 0)
-            _intent_cost = (_intent_t_in * _INTENT_COST["prompt"] + _intent_t_out * _INTENT_COST["output"]) / 1_000_000
-            _steps.append({
-                "name": "Intent",
-                "model": _intent_result.get("model", "gemini-3.1-flash-lite"),
-                "tokens_in": _intent_t_in,
-                "tokens_out": _intent_t_out,
-                "time_s": _timing_breakdown["pass1"],
-                "cost_usd": round(_intent_cost, 6),
-                "cost_thb": round(_intent_cost * 36, 4),
-                "input": {
-                    "message": req.message,
-                    "history_count": len(history) if history else 0,
-                    "shop": req.shop,
-                },
-                "output": {
-                    "intent": _intent_result.get("intent"),
-                    "confidence": _intent_result.get("confidence"),
-                    "product_type": _intent_result.get("product_type"),
-                    "charger_subtype": _intent_result.get("charger_subtype"),
-                    "target_device": _intent_result.get("target_device"),
-                    "needs_description": _intent_result.get("needs_description"),
-                },
-            })
-            # ใช้ intent ปรับ hardcoded detection:
-            # 1. ถ้า LLM บอกไม่ใช่ warranty_claim แต่ hardcoded บอกใช่ → ยกเลิก
-            #    ⚡ Phase 2B — ยกเว้น "repeated complaint" และ "strong complaint keyword":
-            #    - ถ้าลูกค้าแจ้งปัญหาซ้ำ 2+ ครั้งใน history → ห้าม override
-            #    - ถ้า message มี strong complaint keyword (ชาร์จไม่เข้า/ใช้ไม่ได้/ไม่ทำงาน/ฯลฯ) → ห้าม override
-            #    (ลูกค้ากำลังเล่าอาการจริง → ต้องเข้า claim flow ไม่ใช่ให้ LLM ตีความเป็น product question)
+        except Exception as _ie:
+            # ⚡ Phase 6 — classifier exception/timeout → fallback to keyword
+            print(f"[INTENT] classify_intent() threw: {_ie} → ใช้ keyword fallback", file=sys.stderr)
+            _intent_result = dict(_ic._DEFAULT_RESULT) if hasattr(_ic, "_DEFAULT_RESULT") else {
+                "intent": "other", "product_type": None, "charger_subtype": None,
+                "target_device": None, "needs_description": False,
+                "general_qtype": None, "confidence": 0.0,
+            }
+        _timing_breakdown["pass1"] = round(_time.time() - _t_intent, 3)
+        print(f"[TIMING] Pass1 intent: {_timing_breakdown['pass1']}s  intent={_intent_result.get('intent')} conf={_intent_result.get('confidence')}", file=sys.stderr)
+        # record step — Intent (gemini 3.1 flash lite: $0.25/M in, $0.50/M out)
+        _INTENT_COST = {"prompt": 0.25, "output": 0.50}
+        _intent_usage = _intent_result.get("usage", {})
+        _intent_t_in = _intent_usage.get("prompt", 0)
+        _intent_t_out = _intent_usage.get("output", 0)
+        _intent_cost = (_intent_t_in * _INTENT_COST["prompt"] + _intent_t_out * _INTENT_COST["output"]) / 1_000_000
+        _steps.append({
+            "name": "Intent",
+            "model": _intent_result.get("model", "gemini-3.1-flash-lite"),
+            "tokens_in": _intent_t_in,
+            "tokens_out": _intent_t_out,
+            "time_s": _timing_breakdown["pass1"],
+            "cost_usd": round(_intent_cost, 6),
+            "cost_thb": round(_intent_cost * 36, 4),
+            "input": {
+                "message": req.message,
+                "history_count": len(history) if history else 0,
+                "shop": req.shop,
+            },
+            "output": {
+                "intent": _intent_result.get("intent"),
+                "confidence": _intent_result.get("confidence"),
+                "product_type": _intent_result.get("product_type"),
+                "charger_subtype": _intent_result.get("charger_subtype"),
+                "target_device": _intent_result.get("target_device"),
+                "needs_description": _intent_result.get("needs_description"),
+                "general_qtype": _intent_result.get("general_qtype"),
+            },
+        })
+
+        # ===== Phase 6 — แก้ hardcoded detection ให้ใช้ intent_result เป็นหลัก =====
+        # Confidence threshold: ใช้ 0.7 (สอดคล้องกับ warranty override เดิม)
+        _INTENT_CONF_THRESHOLD = 0.7
+        _intent_conf = float(_intent_result.get("confidence") or 0)
+        _intent_name = _intent_result.get("intent")
+        _intent_gq = _intent_result.get("general_qtype")
+
+        # --- general_qtype: intent first, keyword fallback ---
+        #   intent=general_question + general_qtype เป็นหลัก
+        #   ถ้า intent ไม่ใช่ general_question หรือ confidence ต่ำ → ใช้ keyword
+        if _intent_name == "general_question" and _intent_conf >= _INTENT_CONF_THRESHOLD and _intent_gq:
+            general_qtype = _intent_gq
+            print(f"[INTENT] general_qtype from intent: {general_qtype} (conf={_intent_conf})", file=sys.stderr)
+        else:
+            # fallback: keyword detection (เดิม)
+            general_qtype = knowledge_base.detect_general_question(req.message)
+            if general_qtype and _intent_name == "general_question" and _intent_conf >= _INTENT_CONF_THRESHOLD:
+                # intent บอก general_question แต่ general_qtype ไม่ตรง keyword → เชื่อ intent (ถ้า intent ระบุ qtype)
+                if _intent_gq:
+                    print(f"[INTENT] general_qtype: keyword={general_qtype} → override to intent={_intent_gq}", file=sys.stderr)
+                    general_qtype = _intent_gq
+                else:
+                    print(f"[INTENT] general_qtype: keyword={general_qtype} (intent=general_question แต่ไม่ระบุ qtype)", file=sys.stderr)
+            elif general_qtype:
+                print(f"[INTENT] general_qtype: keyword={general_qtype} (intent={_intent_name} conf={_intent_conf} → fallback keyword)", file=sys.stderr)
+
+        # --- _is_claim_request: intent first, keyword fallback ---
+        #   intent=warranty_claim (conf >= 0.7) → claim_request=True
+        #   intent อื่น (conf >= 0.7) → claim_request=False
+        #   กรณีอื่น → ใช้ keyword detection (เดิม)
+        _kw_claim = _warranty_check_mod.detect_claim_request(req.message)
+        if _intent_name == "warranty_claim" and _intent_conf >= _INTENT_CONF_THRESHOLD:
+            _is_claim_request = True
+            print(f"[INTENT] _is_claim_request=True from intent (conf={_intent_conf})  keyword={_kw_claim}", file=sys.stderr)
+        elif _intent_name and _intent_name != "warranty_claim" and _intent_conf >= _INTENT_CONF_THRESHOLD:
+            # intent บอกไม่ใช่ warranty_claim แต่ keyword บอกใช่ → เชื่อ intent (ยกเว้น strong complaint)
             _strong_complaint_kws = (
                 "ชาร์จไม่เข้า", "ไม่ชาร์จ", "ชาร์จไม่ติด", "ชาร์จไม่ได้", "ใช้ไม่ได้",
                 "ไม่ทำงาน", "ไม่ติด", "ค้าง", "ไฟไม่เข้า", "ไม่เข้าเลย",
             )
             _has_strong_complaint = any(kw in req.message.lower() for kw in _strong_complaint_kws)
             _repeated_complaint = False
-            if history and _is_claim_request:
+            if history and _kw_claim:
                 _complaint_kws = (
                     "ชาร์จไม่เข้า", "ไม่ชาร์จ", "ชาร์จไม่ติด", "ใช้ไม่ได้", "ไม่ทำงาน",
                     "เสีย", "พัง", "เคลม", "ซ่อม", "ไม่ติด", "ค้าง",
@@ -1266,47 +2194,233 @@ def chat(req: ChatRequest) -> ChatResponse:
                     _repeated_complaint = True
                     print(f"[INTENT] repeated complaint ({_prev_complaints}x in history) → ห้าม LLM override claim_request=False", file=sys.stderr)
             _skip_llm_override = _repeated_complaint or _has_strong_complaint
-            if _is_claim_request and _intent_result.get("intent") != "warranty_claim":
-                if _intent_result.get("confidence", 0) >= 0.7 and not _skip_llm_override:
-                    print(f"[INTENT] override: claim_request=False (LLM says {_intent_result.get('intent')})", file=sys.stderr)
-                    _is_claim_request = False
-                elif _skip_llm_override:
-                    print(f"[INTENT] skip override (strong complaint kw={_has_strong_complaint} repeated={_repeated_complaint}) — keep claim_request=True even though LLM says {_intent_result.get('intent')}", file=sys.stderr)
-            # 2. ถ้า LLM บอกเป็น warranty_claim แต่ hardcoded ไม่บอก → เชื่อ LLM
-            #    แต่ถ้า context ก่อนหน้าเป็น product recommendation และ message ไม่มี warranty keywords
-            #    ให้ไม่เชื่อ LLM (ป้องกัน false positive เช่น "ทำไมเอา 3 a มาให้")
-            elif not _is_claim_request and _intent_result.get("intent") == "warranty_claim":
-                if _intent_result.get("confidence", 0) >= 0.7:
-                    # เช็คว่า message มี warranty keywords จริงไหม
-                    _warranty_kw_strong = ("เคลม", "เสีย", "ซ่อม", "พัง", "ไม่ทำงาน",
-                        "เปลี่ยนสินค้า", "คืนเงิน", "warranty", "claim", "broken")
-                    _has_warranty_kw = any(kw in req.message.lower() for kw in _warranty_kw_strong)
-                    # ⚡ เช็คว่าเป็นคำถาม policy ทั่วไปไหม (มี question marker แต่ไม่มี strong kw)
-                    # เช่น "จะหลุดประกันไหม" "รับประกันกี่ปี" → ไม่ใช่ claim request จริง
-                    _question_markers = ("ไหม", "มั้ย", "ไหมครับ", "ไหมคะ", "?", "ใช่ไหม",
-                                         "กี่ปี", "กี่วัน", "กี่เดือน", "ได้ไหม", "ได้ป่าว")
-                    _is_policy_question = (
-                        any(m in req.message.lower() for m in _question_markers)
-                        and not _has_warranty_kw
-                    )
-                    # เช็คว่า history ก่อนหน้าเป็น product recommendation ไหม
-                    _prev_is_product = bool(history and any(
-                        (m.get("role") if isinstance(m, dict) else m.role) == "user" and any(
-                            pkw in ((m.get("text") if isinstance(m, dict) else m.text) or "").lower() for pkw in
-                            ("สาย", "หัวชาร์จ", "ชาร์จ", "พาวเวอร์แบงค์", "แบตสำรอง",
-                             "รุ่น", "สเปค", "ราคา", "มีไหม", "แนะนำ")
-                        ) for m in history
-                    ))
-                    if _is_policy_question:
-                        print(f"[INTENT] skip warranty override: policy question (has ? marker, no strong kw)", file=sys.stderr)
-                    elif _has_warranty_kw or not _prev_is_product:
-                        print(f"[INTENT] override: claim_request=True (LLM says warranty_claim)", file=sys.stderr)
-                        _is_claim_request = True
-                    else:
-                        print(f"[INTENT] skip warranty override: no warranty kw + product context (LLM false positive)", file=sys.stderr)
+            if _kw_claim and not _skip_llm_override:
+                print(f"[INTENT] override: claim_request=False (keyword=True but LLM says {_intent_name})", file=sys.stderr)
+                _is_claim_request = False
+            elif _kw_claim and _skip_llm_override:
+                print(f"[INTENT] skip override (strong complaint kw={_has_strong_complaint} repeated={_repeated_complaint}) — keep claim_request=True", file=sys.stderr)
+                _is_claim_request = True
+            else:
+                # keyword ไม่บอก claim และ intent ก็ไม่ใช่ warranty_claim → False
+                _is_claim_request = False
         else:
-            # ไม่เรียก Pass 1 → ใช้ hardcoded detection ตามเดิม
-            print(f"[INTENT] skip Pass1 (clear case)", file=sys.stderr)
+            # confidence ต่ำ / intent=other / error → fallback keyword
+            _is_claim_request = _kw_claim
+            if _is_claim_request:
+                print(f"[INTENT] _is_claim_request=True from keyword fallback (intent={_intent_name} conf={_intent_conf})", file=sys.stderr)
+
+        # --- _is_tax_invoice: intent first, keyword fallback ---
+        #   intent=general_question + general_qtype=tax_invoice (conf >= 0.7) → tax_invoice=True
+        #   กรณีอื่น → ใช้ keyword detection (เดิม) เพราะ keyword จับ data submission ด้วย
+        #   (เช่น "เลขผู้เสียภาษี", "หจก." — intent อาจไม่จับ)
+        if _intent_name == "general_question" and _intent_gq == "tax_invoice" and _intent_conf >= _INTENT_CONF_THRESHOLD:
+            _is_tax_invoice = True
+            print(f"[INTENT] _is_tax_invoice=True from intent (conf={_intent_conf})", file=sys.stderr)
+        else:
+            _is_tax_invoice = _warranty_check_mod.detect_tax_invoice_request(req.message)
+            if _is_tax_invoice:
+                print(f"[INTENT] _is_tax_invoice=True from keyword fallback (intent={_intent_name} qtype={_intent_gq})", file=sys.stderr)
+
+        # ===== Tax invoice → handoff แอดมินเลย (หลัง intent classification) =====
+        # ถ้าลูกค้าขอใบกำกับภาษี หรือส่งข้อมูลใบกำกับภาษี → ส่งแอดมินโดยตรง
+        # ไม่ต้องให้บอทตอบเอง เพราะใบกำกับภาษีต้องแอดมินดำเนินการ
+        # ⚡ Phase 6 — ย้ายมาหลัง intent classification เพื่อให้ intent_result มีส่วนร่วม
+        #   แต่ keyword detection ยังจับ data submission (เลขผู้เสียภาษี/หจก.) ที่ intent อาจไม่จับ
+        if _is_tax_invoice:
+            _tax_answer = (
+                f"ได้ค่ะ เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
+                f"เพื่อดำเนินการเรื่องใบกำกับภาษีให้นะคะ "
+                f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+            )
+            _total_elapsed = _time.time() - _total_start
+            model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+            # ส่งต่อแอดมิน (best-effort)
+            if req.conversation_id:
+                try:
+                    import urllib.request
+                    import urllib.error
+                    _handoff_url = os.environ.get(
+                        "ADMIN_HANDOFF_URL",
+                        "http://127.0.0.1:3000/api/admin/conversations/bot-handoff",
+                    )
+                    _handoff_payload = {
+                        "conversation_id": req.conversation_id,
+                        "shop_id": req.shop or "",
+                        "platform": req.platform or "shopee",
+                        "reason": "tax_invoice_request",
+                        "claim": {"topic": "ใบกำกับภาษี"},
+                    }
+                    _handoff_body = json.dumps(_handoff_payload).encode("utf-8")
+                    _handoff_req = urllib.request.Request(
+                        _handoff_url,
+                        data=_handoff_body,
+                        headers={
+                            "Content-Type": "application/json",
+                            "X-Internal-Secret": os.environ.get("CHATBOT_INTERNAL_SECRET", ""),
+                        },
+                        method="POST",
+                    )
+                    try:
+                        urllib.request.urlopen(_handoff_req, timeout=3)
+                        print("[TAX-HANDOFF] sent to admin", file=sys.stderr)
+                    except Exception as _he:
+                        print(f"[TAX-HANDOFF] handoff failed: {_he}", file=sys.stderr)
+                except Exception as _he:
+                    print(f"[TAX-HANDOFF] error: {_he}", file=sys.stderr)
+            print(f"[TIMING] TAX-HANDOFF: {_total_elapsed:.2f}s", file=sys.stderr)
+            return ChatResponse(
+                answer=_tax_answer,
+                answer_segments=llm.split_segments(_tax_answer),
+                products=[],
+                shop=req.shop,
+                model=model_name,
+                source="tax_invoice_handoff",
+                usage={},
+                elapsed=round(_total_elapsed, 2),
+                cost=0.0,
+                handoff_to_admin=True,
+                handoff_reason="tax_invoice_request",
+                timing=_timing_breakdown,
+                steps=_steps,
+                routing_decision=_routing(
+                    "handoff", "tax_invoice: ลูกค้าขอใบกำกับภาษี → ส่งแอดมิน",
+                    handoff_reason="tax_invoice_request",
+                ),
+                image_desc=_image_desc_out,
+            )
+
+        # ===== มอก. (TISI standard) question handler =====
+        # ถ้าลูกค้าถามเรื่อง มอก. → ค้นสินค้าใน DB ที่มี มอก. ใน description
+        # - ถ้าเจอ → ตอบว่ามี รุ่นไหนบ้าง (หรือรุ่นที่เจาะจงถาม)
+        # - ถ้าไม่เจอ → ส่งเรื่องให้แอดมิน + handoff
+        if _warranty_check_mod.detect_tisi_question(req.message):
+            _tisi_model_kw = _warranty_check_mod.extract_tisi_model_keyword(req.message)
+            print(f"[TISI] มอก. question detected, model_keyword={_tisi_model_kw!r}", file=sys.stderr)
+            try:
+                _tisi_products = product_store.search_tisi_products(
+                    db,
+                    shop_filter=req.shop,
+                    model_keyword=_tisi_model_kw or None,
+                    limit=30,
+                )
+            except Exception as _te:
+                print(f"[TISI] search error: {_te}", file=sys.stderr)
+                _tisi_products = []
+
+            if _tisi_products:
+                # สร้างคำตอบ — แสดงรุ่นที่มี มอก.
+                _tisi_names = []
+                for p in _tisi_products:
+                    _name = p.get("name", "")
+                    # ตัด prefix ราคา/โค้ดออกจากชื่อ (เช่น "[ราคาพิเศษ 1990บ.] PowerConnex..." → "PowerConnex...")
+                    _clean_name = re.sub(r"^\[.*?\]\s*", "", _name).strip()
+                    _tisi_names.append(_clean_name)
+                if _tisi_model_kw:
+                    # ลูกค้าเจาะจงรุ่น → ตอบเฉพาะรุ่นนั้น
+                    if len(_tisi_names) == 1:
+                        _tisi_answer = (
+                            f"ค่ะ สินค้า{_tisi_names[0]} มี มอก. (มาตรฐานผลิตภัณฑ์อุตสาหกรรม) ค่ะ "
+                            f"สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ"
+                        )
+                    else:
+                        _tisi_list = "\n".join(f"• {n}" for n in _tisi_names)
+                        _tisi_answer = (
+                            f"ค่ะ สินค้าที่มี มอก. ในร้าน ได้แก่:\n{_tisi_list}\n\n"
+                            f"สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ"
+                        )
+                else:
+                    # ลูกค้าถามทั่วไป "รุ่นไหนมี มอก. บ้าง" → แสดงรุ่นทั้งหมด
+                    _tisi_list = "\n".join(f"• {n}" for n in _tisi_names)
+                    _tisi_answer = (
+                        f"ค่ะ สินค้าที่มี มอก. (มาตรฐานผลิตภัณฑ์อุตสาหกรรม) ในร้าน ได้แก่:\n"
+                        f"{_tisi_list}\n\n"
+                        f"สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ"
+                    )
+                _total_elapsed = _time.time() - _total_start
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+                print(f"[TISI] found {len(_tisi_products)} products with มอก.", file=sys.stderr)
+                return ChatResponse(
+                    answer=_tisi_answer,
+                    answer_segments=llm.split_segments(_tisi_answer),
+                    products=[],
+                    shop=req.shop,
+                    model=model_name,
+                    source="tisi_answer",
+                    usage={},
+                    elapsed=round(_total_elapsed, 2),
+                    cost=0.0,
+                    handoff_to_admin=False,
+                    timing=_timing_breakdown,
+                    steps=_steps,
+                    routing_decision=_routing(
+                        "tisi", f"มอก.: เจอ {len(_tisi_products)} สินค้า → ตอบ",
+                    ),
+                    image_desc=_image_desc_out,
+                )
+            else:
+                # ไม่พบสินค้าที่มี มอก. → ส่งเรื่องให้แอดมิน + handoff
+                _tisi_handoff_answer = (
+                    f"ขออภัยค่ะ {_bot_name} ไม่พบข้อมูล มอก. ของสินค้าในระบบ "
+                    f"เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
+                    f"เพื่อตรวจสอบข้อมูล มอก. ให้นะคะ "
+                    f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+                )
+                _total_elapsed = _time.time() - _total_start
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+                # ส่งต่อแอดมิน (best-effort)
+                if req.conversation_id:
+                    try:
+                        import urllib.request
+                        import urllib.error
+                        _handoff_url = os.environ.get(
+                            "ADMIN_HANDOFF_URL",
+                            "http://127.0.0.1:3000/api/admin/conversations/bot-handoff",
+                        )
+                        _handoff_payload = {
+                            "conversation_id": req.conversation_id,
+                            "shop_id": req.shop or "",
+                            "platform": req.platform or "shopee",
+                            "reason": "tisi_not_found",
+                            "claim": {"topic": "สอบถาม มอก. (TISI)"},
+                        }
+                        _handoff_body = json.dumps(_handoff_payload).encode("utf-8")
+                        _handoff_req = urllib.request.Request(
+                            _handoff_url,
+                            data=_handoff_body,
+                            headers={
+                                "Content-Type": "application/json",
+                                "X-Internal-Secret": os.environ.get("CHATBOT_INTERNAL_SECRET", ""),
+                            },
+                            method="POST",
+                        )
+                        try:
+                            urllib.request.urlopen(_handoff_req, timeout=3)
+                            print("[TISI-HANDOFF] sent to admin", file=sys.stderr)
+                        except Exception as _he:
+                            print(f"[TISI-HANDOFF] handoff failed: {_he}", file=sys.stderr)
+                    except Exception as _he:
+                        print(f"[TISI-HANDOFF] error: {_he}", file=sys.stderr)
+                print(f"[TISI] no products with มอก. found → handoff to admin", file=sys.stderr)
+                return ChatResponse(
+                    answer=_tisi_handoff_answer,
+                    answer_segments=llm.split_segments(_tisi_handoff_answer),
+                    products=[],
+                    shop=req.shop,
+                    model=model_name,
+                    source="tisi_handoff",
+                    usage={},
+                    elapsed=round(_total_elapsed, 2),
+                    cost=0.0,
+                    handoff_to_admin=True,
+                    handoff_reason="tisi_not_found",
+                    timing=_timing_breakdown,
+                    steps=_steps,
+                    routing_decision=_routing(
+                        "handoff", "มอก.: ไม่พบสินค้าที่มี มอก. → ส่งแอดมิน",
+                        handoff_reason="tisi_not_found",
+                    ),
+                    image_desc=_image_desc_out,
+                )
 
         _is_followup_policy = (
             general_qtype in ("warranty_policy", "return_policy")
@@ -1320,9 +2434,9 @@ def chat(req: ChatRequest) -> ChatResponse:
             # เพราะ user อาจพิมพ์ "โทสับงบ 2000" (ไม่มี model keyword)
             # แต่ model answer มักมีชื่อสินค้าจริง เช่น "Xiaomi Redmi 8A", "Lagenio K9"
             # ใช้ model answer ล่าสุดเป็นหลัก เพื่อหลีกเลี่ยงการเลือกรุ่นเก่าจาก history
-            _last_model_msgs = [h for h in history if h.get("role") == "model"][-2:]
+            _last_model_msgs = [h for h in _recent_qa_pairs(history, 10) if h.get("role") == "model"][-2:]
             _last_model_text = " ".join(h.get("text", "") for h in _last_model_msgs)
-            _all_history_text = " ".join(h.get("text", "") for h in history)
+            _all_history_text = " ".join(h.get("text", "") for h in _recent_qa_pairs(history, 10))
             # ใช้ model answer ล่าสุดเป็นหลัก ถ้าไม่มีค่อยใช้ history ทั้งหมด
             history_text = _last_model_text if _last_model_text.strip() else _all_history_text
             # หา pattern ที่เป็น "brand/word + model number" เช่น "Redmi 8A", "Xiaomi 12", "Lagenio K9"
@@ -1387,7 +2501,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             # ดึง model keywords จาก history ทั้งหมด (user + model)
             # ⚡ กรอง placeholder/tag ออกก่อน (เช่น [variation_card], [สินค้า: 123], [item])
             #   ไม่งั้น extract_model_keywords จะจับ "[variation_card]" เป็น model
-            _all_history_text2 = " ".join(h.get("text", "") for h in history)
+            _all_history_text2 = " ".join(h.get("text", "") for h in _recent_qa_pairs(history, 10))
             _all_history_text2 = _ITEM_TAG_RE.sub("", _all_history_text2)
             for _ph in ("[variation_card]", "[item]", "[itemid]", "[สินค้า]",
                         "[ตัวเลือกสินค้า]", "[bundle_message]", "[bundle_deal]",
@@ -1412,6 +2526,40 @@ def chat(req: ChatRequest) -> ChatResponse:
                 req._followup_original = _original_msg2
                 print(f"[FOLLOWUP-COMP] new message: {req.message!r}  desc={_original_msg2!r}", file=sys.stderr)
 
+        # ===== Anchor comparison follow-up (Phase 7) =====
+        # กรณี: ลูกค้าถาม "อันนี้กับอันก่อนต่างกันยังไง", "อันนี้กับอันก่อนหน้า"
+        # โดย "อันนี้" = anchor ล่าสุด (active) และ "อันก่อน" = anchor อันดับ 2
+        # ดึงจาก conversation_products timeline แทนการ extract model keyword จาก history
+        # (เพราะลูกค้าอ้างอิง anchor ไม่ใช่ชื่อรุ่น)
+        _anchor_compare_kws = (
+            "อันนี้กับอันก่อน", "อันนี้กับอันก่อนหน้า",
+            "อันนี้กับอันนั้น", "ตัวนี้กับตัวก่อน",
+            "ตัวนี้กับตัวก่อนหน้า", "ตัวนี้กับตัวนั้น",
+            "อันนี้กับอันเดิม", "ตัวนี้กับตัวเดิม",
+            "รุ่นนี้กับรุ่นก่อน", "รุ่นนี้กับรุ่นก่อนหน้า",
+            "อันนี้กับอันที่แล้ว", "ตัวนี้กับตัวที่แล้ว",
+        )
+        _is_anchor_compare = (
+            any(kw in (req.message or "").lower() for kw in _anchor_compare_kws)
+            and bool(req.conversation_id)
+        )
+        _anchor_compare_ctx: dict = {}  # {current: card, previous: card}
+        if _is_anchor_compare:
+            try:
+                from . import conversation_products as _cp_cmp
+                _cur_anchor = _cp_cmp.get_active_product(req.conversation_id)
+                _prev_anchor = _cp_cmp.get_previous_anchor(
+                    req.conversation_id,
+                    exclude_item_id=_cur_anchor.get("item_id") if _cur_anchor else None,
+                )
+                if _cur_anchor and _prev_anchor:
+                    _anchor_compare_ctx = {"current": _cur_anchor, "previous": _prev_anchor}
+                    print(f"[ANCHOR-COMP] current={_cur_anchor.get('name','')[:40]} previous={_prev_anchor.get('name','')[:40]}", file=sys.stderr)
+                else:
+                    print(f"[ANCHOR-COMP] ไม่มี anchor พอ (current={bool(_cur_anchor)} previous={bool(_prev_anchor)}) → ข้าม", file=sys.stderr)
+            except Exception as _e:
+                print(f"[ANCHOR-COMP] error: {_e}", file=sys.stderr)
+
         # ===== warranty date follow-up =====
         # กรณี: รอบก่อนบอทถาม "วันที่ซื้อ" + รอบนี้ลูกค้าบอกวันที่
         # → ดึงสินค้าจาก history + คำนวณช่วงประกัน + ตอบตรงๆ
@@ -1427,6 +2575,8 @@ def chat(req: ChatRequest) -> ChatResponse:
         _warranty_claim_answer: str = ""
         if history:
             from . import warranty as _warranty_mod
+            # ⚡ Phase 8 — state machine guard ใช้ last model message เท่านั้น (ไม่ใช่ _recent_qa_pairs)
+            #   เพราะต้องเช็คแค่ "model ตอบอะไรล่าสุด" ไม่ใช่บริบทยาว
             _last_model_msgs = [h for h in history if h.get("role") == "model"][-1:]
             _last_model_text = " ".join(h.get("text", "") for h in _last_model_msgs).lower()
             # ⚡ Guard: ถ้า last model message ไม่เกี่ยวกับ warranty เลย → ข้าม state machine
@@ -1439,6 +2589,9 @@ def chat(req: ChatRequest) -> ChatResponse:
                            "รอการติดต่อกลับ", "ส่งต่อให้แอดมิน", "แอดมินดูแล",
                            "นอกช่วงประกัน", "หมดช่วงประกัน")
             )
+            # ⚡ Phase 8 — review request extraction ใช้ history ทั้งหมด (ไม่ใช่ _recent_qa_pairs)
+            #   เพราะลูกค้าอาจให้ข้อมูลเคลมมาตั้งแต่หลายข้อความก่อนหน้า
+            #   ถ้าจำกัด 10 คู่ → อาจตัดข้อมูลสำคัญออก → extract_customer_info จะไม่เจอ
             _all_history_text = " ".join(h.get("text", "") for h in history)
 
             # ⚡ Phase 1F — Review request: ลูกค้าขอทวนข้อมูลที่ให้ไป
@@ -2063,7 +3216,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     # 1) "สินค้า <name> รับประกัน" → ดึง <name>
                     # 2) word + space + alphanumeric with digit (เช่น "Redmi 8A")
                     import re as _re3
-                    history_text = " ".join(h.get("text", "") for h in history)
+                    history_text = " ".join(h.get("text", "") for h in _recent_qa_pairs(history, 10))
                     _valid_models = []
                     # pattern 1: หา pattern ระหว่าง "สินค้า" และ "รับประกัน"/"ประกัน"
                     _m_name = _re3.search(
@@ -2266,6 +3419,28 @@ def chat(req: ChatRequest) -> ChatResponse:
                         image_desc=_image_desc_out,
                     )
 
+        # ===== Deterministic warranty answer จาก delivery-date auto-check =====
+        # ⚡ Warranty-Delivery — ถ้าเช็คจาก delivery date ได้ผลชัดเจน → ตอบเลย ไม่เข้า LLM
+        #    กรณี: ยังไม่ส่งมอบ / อยู่ในช่วงประกัน / หมดช่วงประกัน / multi-item ambiguity
+        if _warranty_auto_answer:
+            _total_elapsed = _time.time() - _total_start
+            print(f"[WARRANTY-AUTO] deterministic answer → return (delivery-date based)", file=sys.stderr)
+            return ChatResponse(
+                answer=_warranty_auto_answer,
+                products=[],
+                usage={},
+                elapsed=round(_total_elapsed, 2),
+                cost=0.0,
+                timing=_timing_breakdown,
+                steps=_steps,
+                routing_decision=_routing(
+                    "deterministic",
+                    "warranty_auto_check: delivery-date based → ตอบเลย",
+                    handoff_reason=None,
+                ),
+                image_desc=_image_desc_out,
+            )
+
         # ===== Claim request ที่ state machine ไม่ได้จัดการ (first message, ไม่มี history) =====
         # ถ้าเป็น claim request แต่ state machine ไม่ได้ตอบ (ไม่มี history) → ตอบเลย ห้ามแนะนำสินค้า
         # ⚡ handoff ทันที — บอทขอข้อมูลเบื้องต้นทิ้งไว้ แอดมินมาอ่านแชทต่อ
@@ -2385,7 +3560,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         message=req.message,
                         context=gen_context,
                         qtype=general_qtype,
-                        history=history,
+                        history=_recent_qa_pairs(history, 10),
                         shop_hint=_gen_shop_filter,
                         persona_extra=_persona_extra,
                     )
@@ -2427,7 +3602,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         message=req.message,
                         context=brand_result["context"],
                         qtype="brand_info",
-                        history=history,
+                        history=_recent_qa_pairs(history, 10),
                         shop_hint=req.shop if brand_result.get("meta", {}).get("shop_scoped") else None,
                         persona_extra=_persona_extra,
                     )
@@ -2581,7 +3756,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     }
                     # ถ้าเป็น charger ให้ใช้ subtype keyword ที่ตรงกับคำถามจริง
                     if "charger" in req_types:
-                        _req_sub = product_store._detect_charger_subtype(req.message)
+                        _req_sub = _resolve_charger_subtype(intent_result=_intent_result, retrieval_message=req.message)
                         if _req_sub == "adapter":
                             type_keywords_map["charger"] = "หัวชาร์จ adapter charger"
                         elif _req_sub == "cable":
@@ -2659,7 +3834,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         db,
                         message=mongo_query,
                         shop_filter=req.shop,
-                        limit=10,
+                        limit=_llm_ctx_limit,
                         desc_message=_desc_msg,
                     )
                 print(f"[TIMING] Mongo (KB merge): {_time.time()-_t1:.2f}s  query={mongo_query[:60]!r}  products={len(mongo_products)}", file=sys.stderr)
@@ -2671,7 +3846,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         db,
                         message=req.message,
                         shop_filter=req.shop,
-                        limit=10,
+                        limit=_llm_ctx_limit,
                         desc_message=_desc_msg,
                     )
                     print(f"[TIMING] Mongo (original query): {_time.time()-_t2:.2f}s  query={req.message[:60]!r}  products={len(extra_products)}", file=sys.stderr)
@@ -2757,7 +3932,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 # ── กรอง charger subtype สำหรับ KB merge path ด้วย ──
                 # (Direct regex search บายพาส fetch_products จึงต้องกรองที่นี่)
                 if "charger" in req_types:
-                    _req_sub = product_store._detect_charger_subtype(req.message)
+                    _req_sub = _resolve_charger_subtype(intent_result=_intent_result, retrieval_message=req.message)
                     if _req_sub:
                         # กรอง mongo_products (เป็น product cards แล้ว ใช้ "name" field)
                         _filtered_mp = []
@@ -2827,15 +4002,34 @@ def chat(req: ChatRequest) -> ChatResponse:
                     merged_context = llm._build_context(merged_products, shop_hint=req.shop,
                                                          include_description=True)
 
+                    # ⚡ device-spec-lookup ใน KB path — เดิม KB path return ก่อนถึง device-spec-lookup
+                    #   ใน main path → LLM เห็นแค่สินค้าจาก KB+Mongo ไม่เห็น high-wattage upgrade
+                    #   แก้: เรียก helper ก่อน LLM → merge high-wattage + inject spec context
+                    _kb_device_extra, _kb_device_products = _device_spec_lookup(
+                        db=db,
+                        req=req,
+                        intent_result=_intent_result,
+                        history=history,
+                        existing_products=merged_products,
+                        retrieval_message=req.message,  # KB path ไม่มี retrieval_message → ใช้ req.message
+                        anchor_card=anchor_card,
+                        hybrid_anchor_card=_hybrid_anchor_card,
+                        llm_ctx_limit=_llm_ctx_limit,
+                        resolve_subtype_fn=_resolve_charger_subtype,
+                    )
+                    if _kb_device_products:
+                        merged_products = merged_products + _kb_device_products
+                        print(f"[DEVICE-SPEC-LOOKUP-KB] merge {len(_kb_device_products)} สินค้าจาก re-query เข้า merged_products (now {len(merged_products)})", file=sys.stderr)
+
                     try:
                         answer, usage_info = llm.answer(
                             message=getattr(req, "_followup_original", None) or req.message,
                             products=merged_products,
                             shop_hint=req.shop,
-                            history=history,
+                            history=_recent_qa_pairs(history, 10),
                             persona_extra=_persona_extra,
                             intent_result=_intent_result,
-                            extra_context=(_vision_context + _hybrid_extra_ctx).strip(),
+                            extra_context=(_vision_context + _hybrid_extra_ctx + _kb_device_extra).strip(),
                         )
                     except RuntimeError as exc:
                         raise HTTPException(status_code=500, detail=str(exc))
@@ -2886,47 +4080,11 @@ def chat(req: ChatRequest) -> ChatResponse:
                     # ส่ง merged_products เป็น products (เพื่อให้ frontend แสดงได้)
                     products = [_kb_doc_to_card(d) if "_kb_only" in d else d for d in merged_products]
                     # dedup สินค้าที่ชื่อใกล้เคียงกัน (เช่น P01 ซ้ำหลาย listing ต่าง prefix โปร)
-                    import re as _re_kb_dedup
-                    def _kb_base_name(name):
-                        n = (name or "").strip().lower()
-                        n = _re_kb_dedup.sub(r"^\[.*?\]\s*", "", n)
-                        n = _re_kb_dedup.sub(r"\s*-\d+[my]\s*$", "", n)
-                        # ตัด "พอร์ตเดียวแรงสุด XXXw" และ "จ่ายไฟพอร์ตเดียว XXXw"
-                        n = _re_kb_dedup.sub(r"(จ่ายไฟ)?พอร์ตเดียวแรงสุด\s*\d+w\s*", "", n)
-                        # ตัด "พอร์ตเดียว XXXw" (ไม่มี "แรงสุด")
-                        n = _re_kb_dedup.sub(r"(จ่ายไฟ)?พอร์ตเดียว\s*\d+w\s*", "", n)
-                        for s in ("ccc / ce", "ce / ccc", "usb-c / usb-a", "usb a / usb c"):
-                            n = n.replace(s, " ")
-                        n = _re_kb_dedup.sub(r"\s{2,}", " ", n).strip()
-                        return n
-                    def _kb_sell_score(p):
-                        return (
-                            p.get("status") == "NORMAL",
-                            not p.get("sold_out", False),
-                            p.get("total_stock") or 0,
-                            bool(p.get("price", {}).get("min") and p.get("price", {}).get("max")
-                                 and p.get("price", {}).get("min") != p.get("price", {}).get("max")),
-                            -(p.get("price", {}).get("min") or 0),
-                        )
-                    _kb_seen = {}
-                    _kb_deduped = []
-                    for p in products:
-                        bn = _kb_base_name(p.get("name") or "")
-                        if not bn:
-                            _kb_deduped.append(p)
-                            continue
-                        if bn not in _kb_seen:
-                            _kb_seen[bn] = len(_kb_deduped)
-                            _kb_deduped.append(p)
-                        else:
-                            _idx = _kb_seen[bn]
-                            if _kb_sell_score(p) > _kb_sell_score(_kb_deduped[_idx]):
-                                _kb_deduped[_idx] = p
-                    if len(_kb_deduped) < len(products):
-                        print(f"[DEDUP-KB] products: {len(products)} → {len(_kb_deduped)} (removed {len(products) - len(_kb_deduped)} duplicates)", file=sys.stderr)
-                    products = _kb_deduped
-                    # จำกัด product cards ที่ส่งให้ frontend แค่ 10 ชิ้น
-                    products = products[:10] if len(products) > 10 else products
+                    # ⚡ 2026-09-16 — ใช้ _dedupe_products ระดับโมดูล (รวม _kb_base_name/_kb_sell_score)
+                    products = _dedupe_products(products, log_label="DEDUP-KB")
+                    # ⚡ Phase 8 — จำกัด product cards ที่ส่งเป็น LLM context (30 ชิ้น)
+                    #   frontend display ยังใช้ req.limit ใน ChatResponse (ด้านล่าง)
+                    products = products[:_llm_ctx_limit] if len(products) > _llm_ctx_limit else products
                     # ใส่ context note สำหรับสินค้า UNLIST/sold_out (เหมือน fetch_products path)
                     _kb_has_unlist = any(p.get("status") != "NORMAL" for p in products)
                     if _kb_has_unlist and products:
@@ -2946,83 +4104,56 @@ def chat(req: ChatRequest) -> ChatResponse:
                     _timing_breakdown["total"] = round(_time.time() - _total_start, 3)
 
                     # ── Web search fallback (ด่านสุดท้าย) ──
-                    from . import web_search as _ws
-                    if _ws.is_configured():
-                        _should_search, _search_reason = _ws.should_use_web_search(
+                    # ⚡ Legacy Fix — ใช้ _web_search_reanswer ร่วมกับ product_store branch
+                    #   search_and_extract → re-query DB → LLM2 ตอบ (search ไม่ตอบตรง)
+                    from . import web_search as _ws_kb_check
+                    _kb_ws_used = False
+                    _ws_r: dict = {"search_used": False, "search_model": ""}
+                    if _ws_kb_check.is_configured():
+                        _kb_should_search, _kb_search_reason = _ws_kb_check.should_use_web_search(
                             answer=answer,
                             intent_result=_intent_result,
                             products=products,
                             message=req.message,
                         )
-                        if _should_search:
-                            print(f"[WEB-SEARCH] triggered (kb+mongo): {_search_reason}", file=sys.stderr)
-                            _ws_result = _ws.search_and_answer(
-                                message=req.message,
+                        if _kb_should_search:
+                            print(f"[WEB-SEARCH] triggered (kb+mongo): {_kb_search_reason}", file=sys.stderr)
+                            _ws_r = _web_search_reanswer(
+                                search_message=req.message,
+                                llm_message=getattr(req, "_followup_original", None) or req.message,
+                                products_in=products,
+                                reason=_kb_search_reason,
                                 shop=req.shop,
                                 platform=req.platform,
-                                history=history,
-                                products=products,
+                                history_list=_recent_qa_pairs(history, 10),
                                 persona_extra=_persona_extra,
-                                reason=_search_reason,
+                                intent_result=_intent_result,
+                                vision_context=_vision_context,
+                                do_kb_lookup=False,  # KB branch ไม่ re-query KB (มี KB อยู่แล้ว)
+                                do_model_code_regex=False,  # KB branch ไม่ใช้ model code regex
+                                do_dedup_rerank=False,  # KB branch ไม่ dedup/rerank (ใช้ products เดิม)
+                                req_limit=req.limit,
                             )
-                            if _ws_result.get("answer") and not _ws_result.get("error"):
-                                _ws_answer = _ws_result["answer"]
-                                _ws_answer = _append_base_warranty(_ws_answer, getattr(req, "_followup_original", None) or req.message)
-                                _ws_usage = _ws_result.get("usage", {})
-                                _ws_cost = _ws_result.get("cost_usd", 0.0)
-                                _ws_elapsed = _ws_result.get("elapsed", 0.0)
-                                _total_ws = round(_time.time() - _total_start, 2)
+                            if _ws_r.get("search_used") and _ws_r.get("answer"):
+                                # merge steps จาก _web_search_reanswer เข้า _steps
+                                _steps.extend(_ws_r["steps"])
+                                answer = _ws_r["answer"]
+                                usage_info = _ws_r["usage"]
+                                products = _ws_r["products"]
+                                _ws_cost = _ws_r["cost_usd"]
+                                _ws_elapsed = _ws_r["search_elapsed"]
+                                _total_elapsed = _time.time() - _total_start
+                                model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+                                prompt_t = usage_info.get("prompt", 0)
+                                output_t = usage_info.get("output", 0)
+                                cost = (prompt_t * 0.30 + output_t * 2.50) / 1_000_000
                                 _timing_breakdown["web_search"] = _ws_elapsed
-                                _timing_breakdown["total"] = _total_ws
-                                # ⚡ 2026-09-14 — append Search step ใน _steps
-                                #   กันขาด step ใน session log (ก่อนหน้านี้ path แรกไม่ append
-                                #   ทำให้ log บอก web_search:used แต่ Steps ไม่แสดง Search)
-                                _ws_t_in = _ws_usage.get("prompt", 0)
-                                _ws_t_out = _ws_usage.get("output", 0)
-                                _steps.append({
-                                    "name": "Search",
-                                    "model": _ws_result.get("model", "openrouter"),
-                                    "tokens_in": _ws_t_in,
-                                    "tokens_out": _ws_t_out,
-                                    "time_s": _ws_elapsed,
-                                    "cost_usd": round(_ws_cost, 6),
-                                    "cost_thb": round(_ws_cost * 36, 4),
-                                    "input": {
-                                        "message": req.message,
-                                        "reason": _search_reason,
-                                        "intent": _intent_result.get("intent"),
-                                    },
-                                    "output": {
-                                        "search_used": True,
-                                        "keywords": _ws_result.get("keywords", [])[:8],
-                                        "product_type": _ws_result.get("product_type", ""),
-                                        "search_info": (_ws_result.get("search_info", "") or "")[:500],
-                                    },
-                                })
-                                # ⚡ บันทึก suggestion products ลง conversation_products timeline
-                                #    กัน case: kb+mongo+web_search ตอบแล้วไม่บันทึก → active product ว่าง
-                                #    → คำถามถัดไป (เช่น "ขอลิงค์กับรูป") ไม่มี active ใช้ → ดึงสินค้าอื่นมาแทน
-                                _record_suggestion_products(req, products[:req.limit])
-                                return ChatResponse(
-                                    answer=_ws_answer,
-                                    answer_segments=llm.split_segments(_ws_answer),
-                                    products=products[:req.limit],
-                                    shop=req.shop,
-                                    model=_ws_result.get("model", "openrouter"),
-                                    source="knowledge_base+mongo+web_search",
-                                    usage=_ws_usage,
-                                    elapsed=_total_ws,
-                                    cost=round(cost + _ws_cost, 6),
-                                    intent=_intent_result,
-                                    timing=_timing_breakdown,
-                                    web_search_used=True,
-                                    web_search_reason=_search_reason,
-                                    web_search_model=_ws_result.get("model"),
-                                    steps=_steps,
-                                    routing_decision=_routing("bot_reply", f"web_search: {_search_reason} → ค้นเพิ่มแล้วตอบ"),
-                                    image_desc=_image_desc_out,
-                                )
+                                _timing_breakdown["total"] = round(_total_elapsed, 2)
+                                _kb_ws_used = True
+                                print(f"[WEB-SEARCH] KB branch reanswer done  total={_total_elapsed:.2f}s  products={len(products)}", file=sys.stderr)
 
+                    # ⚡ Legacy Fix — source label สะท้อน web search ที่ใช้
+                    _kb_source = "knowledge_base+mongo+web_search" if _kb_ws_used else "knowledge_base+mongo"
                     # ⚡ บันทึก suggestion products ลง conversation_products timeline
                     #    กัน case: kb+mongo ตอบแล้วไม่บันทึก → active product ว่าง
                     #    → คำถามถัดไป (เช่น "ขอลิงค์กับรูป") ไม่มี active ใช้ → ดึงสินค้าอื่นมาแทน
@@ -3033,12 +4164,15 @@ def chat(req: ChatRequest) -> ChatResponse:
                         products=products[:req.limit],
                         shop=req.shop,
                         model=model_name,
-                        source="knowledge_base+mongo",
+                        source=_kb_source,
                         usage=usage_info,
                         elapsed=round(_total_elapsed, 2),
                         cost=round(cost, 6),
                         intent=_intent_result,
                         timing=_timing_breakdown,
+                        web_search_used=_kb_ws_used,
+                        web_search_reason=_kb_search_reason if _kb_ws_used else None,
+                        web_search_model=_ws_r.get("search_model") if _kb_ws_used else None,
                         steps=_steps,
                         routing_decision=_routing("bot_reply", "kb+mongo: พบใน knowledge base + product store → บอทตอบ"),
                         image_desc=_image_desc_out,
@@ -3277,6 +4411,19 @@ def chat(req: ChatRequest) -> ChatResponse:
                         _active_card = None
                     # (fall through ไปเช็ค _is_new_topic_cp ข้างล่าง)
                     if _active_card:
+                        # ⚡ Fix EC6 bug — กรอง model keyword ที่ตรงกับชื่อ active product ออก
+                        #   เช่น "Ec6" ตรงกับ "EC6 Panorama" → ไม่ใช่ new topic → ใช้ anchor ต่อ
+                        #   กรองเฉพาะ keyword ที่มีตัวเลข (model code pattern) เพื่อกัน brand name
+                        #   เช่น "IMILAB" ไม่มีตัวเลข → ไม่กรอง → อาจเป็นการถามรุ่นอื่นของแบรนด์เดียวกัน
+                        _kw_matched_anchor = False
+                        if _cur_model_kw:
+                            _active_name = (_active_card.get("name") or _active_card.get("item_name") or "").lower()
+                            if _active_name:
+                                _filtered_kw = [kw for kw in _cur_model_kw
+                                                if not (re.search(r"\d", kw) and kw.lower() in _active_name)]
+                                if len(_filtered_kw) < len(_cur_model_kw):
+                                    _kw_matched_anchor = True
+                                _cur_model_kw = _filtered_kw
                         _cur_msg_lower = (req.message or "").lower().strip()
                         _new_topic_kws_cp = ("สวัสดี", "หวัดดี", "hi", "hello", "แนะนำ",
                                              "มีอะไร", "มีไร",
@@ -3292,11 +4439,12 @@ def chat(req: ChatRequest) -> ChatResponse:
                         if not _is_new_topic_cp and not _cur_model_kw:
                             # ⚡ ถ้ามี compat + target_device → ไม่ใช้ active เป็น product เดียว
                             #   ให้ fall through ไป fetch_products + merge anchor ภายหลัง
+                            #   ⚡ แต่ถ้า keyword ตรง anchor → ลูกค้าถามเรื่องสินค้าเดิม ไม่ใช่ขอใหม่ → ใช้ anchor
                             _phone_brands_cp = ("iphone", "ipad", "samsung", "xiaomi", "redmi",
                                                "huawei", "honor", "oppo", "vivo", "realme",
                                                "poco", "oneplus", "pixel", "mi ", "note ", "ultra")
                             _has_target_cp = any(b in _cur_msg_lower for b in _phone_brands_cp)
-                            if _has_compat_cp and _has_target_cp:
+                            if _has_compat_cp and _has_target_cp and not _kw_matched_anchor:
                                 print(f"[CONV-ACTIVE] compat+target_device → ไม่ใช้ active เป็น product เดียว → fall through", file=sys.stderr)
                                 # ไม่ตั้ง _ref_regex_products → ไป fetch_products
                             else:
@@ -4227,27 +5375,17 @@ def chat(req: ChatRequest) -> ChatResponse:
         # ⚡ Phase 1F — ย้าย superlative/fetch logic ออกจาก else block
         #   เพื่อให้ทำงานแม้ _ref_regex_products ถูกยกเลิกใน if block ด้านบน
         if not _ref_regex_products:
-            _fetch_limit = req.limit
+            # ⚡ Phase 8 — base fetch limit ใช้ _LLM_CONTEXT_LIMIT (30) ไม่ใช่ req.limit
+            #   เพราะนี่คือ RAG retrieval ที่ส่งเข้า LLM context
+            _fetch_limit = _llm_ctx_limit
             _is_compat = _intent_result.get("intent") == "compatibility_check"
-            # ⚡ 2026-09-14 — กรอง sold_out/non-NORMAL ออกจากการแนะนำขาย
-            #   เปิด filter สำหรับ product_recommend + compatibility_check + compare/superlative
-            #   (ลูกค้าอยากให้แนะนำ/ดูสินค้า/เช็ค compat → ต้องเป็นสินค้าที่ขายได้ ตอนท้ายต้องแนะนำสินค้าอยู่แล้ว)
-            #   ปิด filter เฉพาะ product_spec/warranty (ลูกค้าถามเฉพาะรุ่น อาจเป็นสินค้าที่ซื้อไปแล้ว)
-            #   ⚡ ถ้า intent skip Pass1 (clear case) → _intent_result={} → ใช้ hardcoded heuristic:
-            #     ถ้ามี charger subtype และไม่ใช่ spec/warranty question → ถือว่าเป็น product_recommend
-            _intent_for_filter = _intent_result.get("intent")
-            if not _intent_for_filter:
-                # heuristic: ถ้าไม่ใช่ spec/warranty question → ถือว่าเป็น product_recommend
-                _is_spec_q = any(kw in _msg_lower_super for kw in ("สเปก", "รายละเอียด", "spec", "ราคา"))
-                _filter_unavailable = (
-                    not _is_spec_q
-                    and general_qtype is None
-                    and bool(_intent_sub or product_store._detect_charger_subtype(req.message))
-                )
-            else:
-                _filter_unavailable = _intent_for_filter in ("product_recommend", "compatibility_check")
+            # ⚡ Phase 3 — RAG ไม่กรอง status/stock ออกเลย (LLM prompt กรองตอนแนะนำขาย)
+            #   ก่อนหน้านี้: filter_unavailable=True กรอง sold_out/non-NORMAL ออกจาก RAG
+            #   ทำให้ลูกค้าถามสินค้าเก่าไม่ได้ + ตอบ "ไม่มีข้อมูล" ทั้งที่มีใน description
+            #   แก้: ดึงทุกสินค้า (normal + non-normal + sold_out) → LLM prompt กรองตอนแนะนำขาย
+            #   (LLM prompt มีกฎชัดเจน: แนะนำขายเฉพาะ status=NORMAL + stock>0)
             if _is_compat:
-                _fetch_limit = max(req.limit * 2, 20)
+                _fetch_limit = max(_llm_ctx_limit * 2, 40)
             # superlative question (สุด/ที่สุด/แรงสุด/ไวสุด/มากสุด) → ดึงสินค้าเยอะขึ้น
             # เพื่อให้ LLM เห็นทุกรุ่นแล้วเปรียบเทียบหาอันที่สุดจริง
             _is_superlative = any(kw in _msg_lower_super for kw in _superlative_kw)
@@ -4275,7 +5413,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     "adapter", "cable", "set", "car_charger", "wireless", "desktop", "socket",
                 )
             )
-            _skip_sub = _is_superlative and not product_store._detect_charger_subtype(retrieval_message) and not _intent_sub_early
+            _skip_sub = _is_superlative and not _resolve_charger_subtype(intent_result=_intent_result, retrieval_message=retrieval_message) and not _intent_sub_early
 
             # ── Charging spec question detection ──
             # ถ้าลูกค้าถาม "สินค้าX ใช้สายชาร์จอะไรได้บ้าง" / "X ชาร์จยังไง" / "X พอร์ตอะไร"
@@ -4324,38 +5462,23 @@ def chat(req: ChatRequest) -> ChatResponse:
                 )
             else:
                 # ⚡ ใช้ charger_subtype เป็น override เพื่อกัน retrieval_message ปนเปื้อน
-                # ลำดับความสำคัญ: intent.charger_subtype > _detect(req.message) > _detect(retrieval_message)
+                # ลำดับความสำคัญ (เดิม): intent.charger_subtype > _detect(req.message) > _detect(retrieval_message)
                 # - intent แม่นสุด (LLM อ่านประโยคเข้าใจ)
                 # - req.message = คำถามจริงของลูกค้า (ไม่ปนเปื้อนด้วยชื่อสินค้าจาก history)
                 # - retrieval_message ใช้เป็น last resort (อาจมี "สายชาร์จ" จาก reference logic)
                 # ⚡ 2026-09-14 — ถ้ามี _hybrid_anchor_card → ใช้ subtype จาก anchor แม่นกว่า intent
                 #   เพราะ anchor = สินค้าจริงที่ลูกค้าสนใจ (เช่น CTL301 = cable)
                 #   intent อาจจัดผิดเพราะ "อยากได้ของ" vague → sub=null/adapter → ทับ cable → ดึงหัวชาร์จแทน
-                if _hybrid_anchor_card:
-                    _anchor_sub_h = product_store._detect_charger_subtype(
-                        _hybrid_anchor_card.get("name") or _hybrid_anchor_card.get("item_name") or ""
-                    )
-                    if _anchor_sub_h:
-                        _intent_sub = _anchor_sub_h
-                        print(f"[HYBRID-SUBTYPE] ใช้ subtype จาก anchor: {_anchor_sub_h} (override intent)", file=sys.stderr)
-                elif (_intent_result
-                        and _intent_result.get("product_type") == "charger"
-                        and _intent_result.get("charger_subtype") in (
-                            "adapter", "cable", "set", "car_charger",
-                            "wireless", "desktop", "socket",
-                        )):
-                    _intent_sub = _intent_result.get("charger_subtype")
-                    if _intent_sub != product_store._detect_charger_subtype(retrieval_message):
-                        print(f"[INTENT-SUBTYPE-OVERRIDE] intent={_intent_sub} != detected from retrieval={retrieval_message!r} → ใช้ intent", file=sys.stderr)
-                else:
-                    # ⚡ intent ไม่ได้รัน → detect จาก req.message (คำถามจริง) แทน retrieval_message
-                    # เพราะ retrieval_message อาจถูกปนเปื้อนด้วยชื่อสายชาร์จจาก reference/carry logic
-                    # ทำให้ detect ได้ cable ทั้งที่ลูกค้าถามหัวชาร์จ
-                    _msg_sub = product_store._detect_charger_subtype(req.message)
-                    _retr_sub = product_store._detect_charger_subtype(retrieval_message)
-                    if _msg_sub and _msg_sub != _retr_sub:
-                        _intent_sub = _msg_sub
-                        print(f"[MSG-SUBTYPE-OVERRIDE] req.message sub={_msg_sub} != retrieval sub={_retr_sub} → ใช้ req.message (intent skipped)", file=sys.stderr)
+                # ⚡ 2026-09-16 — รวมเป็น _resolve_charger_subtype จุดเดียว
+                #   priority: anchor > msg-strong > intent > msg > retrieval
+                #   กรณีพิเศษ: ลูกค้าถามไม่ระบุ subtype ชัด + มี anchor → ใช้ anchor subtype
+                #   เว้นแต่ msg จะพูดถึง subtype อื่นชัดเจน (strong keyword) → override
+                _intent_sub = _resolve_charger_subtype(
+                    intent_result=_intent_result,
+                    retrieval_message=retrieval_message,
+                )
+                if _intent_sub:
+                    print(f"[RESOLVE-SUBTYPE] resolved={_intent_sub} (anchor={bool(_hybrid_anchor_card)}, intent={(_intent_result or {}).get('charger_subtype')})", file=sys.stderr)
                 # เติม subtype keyword นำหน้า retrieval เพื่อให้ MongoDB query/vector search เจอสินค้า subtype ที่ถาม
                 if _intent_sub:
                     _sub_kw = {"adapter": "หัวชาร์จ", "cable": "สายชาร์จ", "set": "ชุดชาร์จ",
@@ -4407,7 +5530,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         is_compat_check=_is_compat,
                         skip_charger_subtype=_skip_sub,
                         charger_subtype_override=_intent_sub,
-                        filter_unavailable=_filter_unavailable,
+                        # ⚡ Phase 3 — RAG ไม่กรอง status/stock (LLM prompt กรองตอนแนะนำขาย)
                     )
             # ⚡ ปิด block if not _ref_regex_products (ข้าม fetch ถ้ามี active product แล้ว)
         print(f"[TIMING] fetch_products: {_time.time()-_t1:.2f}s  (retrieval={retrieval_message!r})  products={len(products)}", file=sys.stderr)
@@ -4444,80 +5567,8 @@ def chat(req: ChatRequest) -> ChatResponse:
         # ทำหลัง fetch_products ก่อน merge/unlist logic
         # ใช้ "base name" = ตัด suffix warranty + ตัดส่วนหลัง "/" เพื่อรวมสินค้าเดียวกัน
         # เมื่อเจอซ้ำ → เลือก listing ที่ดีที่สุดสำหรับขาย (NORMAL + stock + โปร + ราคาถูก)
-        import re as _re_dedup
-        def _listing_sell_score(p: dict) -> tuple:
-            """คะแนนสำหรับเลือก listing ที่ดีที่สุดสำหรับขาย.
-            เกณฑ์ (เรียงจากสำคัญที่สุดไปน้อยที่สุด):
-            1. status=NORMAL (True > False)
-            2. ไม่ sold_out (True > False)
-            3. stock เยอะกว่า
-            4. มีโปร (True > False)
-            5. ราคาต่ำสุดถูกกว่า
-            """
-            status_normal = p.get("status") == "NORMAL"
-            not_sold_out = not p.get("sold_out", False)
-            stock = p.get("total_stock") or 0
-            has_promo = bool(p.get("price", {}).get("min") and p.get("price", {}).get("max")
-                             and p.get("price", {}).get("min") != p.get("price", {}).get("max"))
-            # ราคาต่ำสุด — ถูกกว่า = ดีกว่า (ใช้ค่าติดลบเพื่อให้ถูกกว่าได้ score สูงกว่า)
-            price_info = p.get("price") or {}
-            min_price = price_info.get("min") or 0
-            # ถ้าไม่มีราคา ให้ score ราคาเป็น 0 (ไม่ดีไม่แย่)
-            price_score = -min_price if min_price else 0
-            return (status_normal, not_sold_out, stock, has_promo, price_score)
-
-        def _base_name(name: str) -> str:
-            """สกัดชื่อหลักของสินค้า เพื่อรวม listing ซ้ำของสินค้าตัวเดียวกัน.
-
-            หลักการ:
-            - ตัด suffix ระยะเวลาประกัน (-12M, -1Y, -2Y)
-            - ตัด "พอร์ตเดียวแรงสุด XXXw" ที่แทรกกลางชื่อ (บาง listing เพิ่ม)
-            - ตัดมาตรฐาน "CCC / CE", "CE / CCC" ที่เป็นตัวคั่นมาตรฐาน
-            - **ไม่ตัด** ส่วนที่บอกว่าเป็น bundle (เช่น "/ with adapter", "/ A18T")
-              เพราะ bundle กับ standalone เป็นคนละสินค้า ต้องไม่รวมกัน
-            - กรองช่องว่างระหว่างคำซ้ำ
-            """
-            n = (name or "").strip().lower()
-            # ตัด prefix โปรโมชั่นที่ Shopee แปะไว้หน้าชื่อ
-            # เช่น "[ลดเหลือ 5499]", "[ราคาพิเศษ]", "[โค้ด XXX]"
-            n = _re_dedup.sub(r"^\[.*?\]\s*", "", n)
-            # ตัด " -12M", " -1Y", " -2Y", " -6M" ท้ายชื่อ
-            # (ใช้ [my] เพราะชื่อถูก lower แล้ว)
-            n = _re_dedup.sub(r"\s*-\d+[my]\s*$", "", n)
-            # ตัด "พอร์ตเดียวแรงสุด XXXw" และ "จ่ายไฟพอร์ตเดียว XXXw" ที่แทรกกลางชื่อ
-            n = _re_dedup.sub(r"(จ่ายไฟ)?พอร์ตเดียวแรงสุด\s*\d+w\s*", "", n)
-            # ตัด "พอร์ตเดียว XXXw" (ไม่มี "แรงสุด")
-            n = _re_dedup.sub(r"(จ่ายไฟ)?พอร์ตเดียว\s*\d+w\s*", "", n)
-            # ตัดมาตรฐาน "CCC / CE", "CE / CCC", "USB-C / USB-A" ที่เป็นตัวคั่นมาตรฐาน
-            # (ไม่ใช่ตัวบอก bundle) — แทนที่ด้วยช่องว่าง
-            _standards = ("ccc / ce", "ce / ccc", "usb-c / usb-a", "usb a / usb c")
-            for s in _standards:
-                n = n.replace(s, " ")
-            # กรองช่องว่างระหว่างคำซ้ำ
-            n = _re_dedup.sub(r"\s{2,}", " ", n).strip()
-            return n
-
-        _seen_names = {}  # base_name → index ใน _deduped
-        _deduped = []
-        for p in products:
-            pname = _base_name(p.get("name") or "")
-            if not pname:
-                _deduped.append(p)
-                continue
-            if pname not in _seen_names:
-                _seen_names[pname] = len(_deduped)
-                _deduped.append(p)
-            else:
-                # เจอซ้ำ → เลือก listing ที่ดีที่สุดสำหรับขาย
-                _idx = _seen_names[pname]
-                _existing = _deduped[_idx]
-                _existing_score = _listing_sell_score(_existing)
-                _new_score = _listing_sell_score(p)
-                if _new_score > _existing_score:
-                    _deduped[_idx] = p
-        if len(_deduped) < len(products):
-            print(f"[DEDUP] products: {len(products)} → {len(_deduped)} (removed {len(products) - len(_deduped)} duplicates)", file=sys.stderr)
-        products = _deduped
+        # ⚡ 2026-09-16 — ใช้ _dedupe_products ระดับโมดูล (รวม _base_name/_listing_sell_score)
+        products = _dedupe_products(products, log_label="DEDUP")
 
         # ── Superlative ranking: เรียงสินค้าตามค่าที่ลูกค้าถาม "สุด" ──
         # เช่น "ชาร์จไวสุด/แรงสุด" → extract ค่า W จากชื่อ/spec แล้ว sort จากมากไปน้อย
@@ -4530,38 +5581,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         _is_charger_compat = _is_compat_check and _intent_result.get("product_type") in ("charger", "powerbank")
         if (_is_superlative_q or _is_charger_compat) and len(products) > 1:
             import re as _re_super
-            def _extract_max_watt(p: dict) -> float:
-                """extract ค่า W สูงสุดจาก spec field ก่อน ถ้าไม่มีค่อยดึงจากชื่อ.
-                กรอง model number ออก เช่น CTC615W = สายชาร์จ 240W จริง (615 เป็น model number ไม่ใช่ wattage)
-                """
-                # 1. ลองจาก spec field ก่อน (output_power_w จาก CSV schema)
-                spec_w = p.get("output_power_w") or p.get("specs", {}).get("output_power_w")
-                if spec_w and isinstance(spec_w, (int, float)) and spec_w > 0:
-                    return float(spec_w)
-                # 2. ลองจาก variants ที่มี output_power_w
-                variants = p.get("variants") or []
-                max_v = 0.0
-                for v in variants:
-                    vw = v.get("output_power_w")
-                    if vw and isinstance(vw, (int, float)) and vw > max_v:
-                        max_v = float(vw)
-                if max_v > 0:
-                    return max_v
-                # 3. fallback: extract จากชื่อสินค้า
-                name = p.get("name") or p.get("item_name") or ""
-                if not name:
-                    return 0.0
-                low_name = name.lower()
-                # กรอง model number ออกก่อน: CTC615W, CMC610, AD653U, AC30S, ZA651, etc.
-                # pattern: ตัวอักษร 2-4 ตัว + ตัวเลข 2-4 ตัว + ตัวอักษร 0-2 ตัว + W
-                # แทนที่ด้วยช่องว่าง เพื่อไม่ให้ regex จับเป็น wattage
-                _model_pat = _re_super.compile(r"\b[a-z]{2,4}\d{2,4}[a-z]?\s*w\b")
-                clean_name = _model_pat.sub(" ", low_name)
-                # หาทุกค่าที่ลงท้ายด้วย W (เช่น 210W, 140W, 55W, 30W) ในชื่อที่กรองแล้ว
-                matches = _re_super.findall(r"(\d+(?:\.\d+)?)\s*w\b", clean_name)
-                if not matches:
-                    return 0.0
-                return max(float(m) for m in matches)
+            # ⚡ Phase 3b — _extract_max_watt ย้ายไปเป็น module-level helper `_extract_max_wattage`
             def _extract_max_mah(p: dict) -> float:
                 """extract ค่า mAh สูงสุดจาก spec field ก่อน ถ้าไม่มีค่อยดึงจากชื่อ."""
                 spec_mah = p.get("capacity_mah") or p.get("specs", {}).get("capacity_mah")
@@ -4599,19 +5619,21 @@ def chat(req: ChatRequest) -> ChatResponse:
             # ⚡ compatibility_check สำหรับ charger/cable → sort by wattage desc เสมอ
             # เพื่อให้สินค้าสเปคสูงสุด (เช่น 6A 240W) ขึ้น top ของ context
             if _is_charger_compat and not _is_watt_q:
-                products.sort(key=lambda p: _extract_max_watt(p), reverse=True)
-                print(f"[COMPAT-RANK] sort by wattage (desc)  top3: {[_extract_max_watt(p) for p in products[:3]]}", file=sys.stderr)
+                products.sort(key=lambda p: _extract_max_wattage(p), reverse=True)
+                print(f"[COMPAT-RANK] sort by wattage (desc)  top3: {[_extract_max_wattage(p) for p in products[:3]]}", file=sys.stderr)
             elif _is_watt_q:
-                products.sort(key=lambda p: _extract_max_watt(p), reverse=True)
-                print(f"[SUPERLATIVE-RANK] sort by wattage (desc)  top3: {[_extract_max_watt(p) for p in products[:3]]}", file=sys.stderr)
+                products.sort(key=lambda p: _extract_max_wattage(p), reverse=True)
+                print(f"[SUPERLATIVE-RANK] sort by wattage (desc)  top3: {[_extract_max_wattage(p) for p in products[:3]]}", file=sys.stderr)
             elif _is_cap_q:
                 products.sort(key=lambda p: _extract_max_mah(p), reverse=True)
                 print(f"[SUPERLATIVE-RANK] sort by capacity (desc)  top3: {[_extract_max_mah(p) for p in products[:3]]}", file=sys.stderr)
             elif _is_weight_q:
                 products.sort(key=lambda p: _extract_weight(p))
                 print(f"[SUPERLATIVE-RANK] sort by weight (asc)  top3: {[_extract_weight(p) for p in products[:3]]}", file=sys.stderr)
-            # จำกัดเหลือ req.limit หลัง sort (เพื่อประหยัด token)
-            products = products[:req.limit]
+            # ⚡ Phase 8 — จำกัดเหลือ LLM context limit หลัง sort (ไม่ใช่ req.limit)
+            #   เพราะ superlative ต้องการให้ LLM เห็นสินค้าเยอะพอเพื่อเปรียบเทียบ
+            #   frontend display ยังใช้ req.limit ใน ChatResponse
+            products = products[:_llm_ctx_limit]
             print(f"[SUPERLATIVE-RANK] products after sort+limit: {len(products)}", file=sys.stderr)
 
         # ⚡ ตัดสินค้าที่ตอบไปแล้วออกจาก context (เฉพาะกรณี "ขอรุ่นอื่นๆ")
@@ -4744,7 +5766,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     db,
                     message="charger charging adapter cable",
                     shop_filter=req.shop,
-                    limit=10,
+                    limit=_llm_ctx_limit,
                 )
                 # กรอง fallback ให้เหลือเฉพาะที่เกี่ยวข้อง:
                 # - ถ้าถาม adapter → เอา set + adapter (ไม่เอา cable เดี่ยว)
@@ -4815,7 +5837,16 @@ def chat(req: ChatRequest) -> ChatResponse:
         #   ยกเว้น: ลูกค้าส่งรูป (_vision_context) → ปล่อยไป LLM ตอบเรื่องรูปได้
         #   ยกเว้น: ไม่ใช่คำถามเรื่องสินค้าเลย (ทักทาย/ขอบคุณ — ไม่มี product type/model/ref/subtype)
         #           → ปล่อยไป LLM ตอบทั่วไปตามเดิม
-        if not _vision_context:
+        # ⚡ Legacy Fix — เพิ่มเงื่อนไข: ถ้า web search พร้อมทำงาน (ไม่ใช่ conv_active + is_configured)
+        #   ให้ข้าม guard ไป web search ก่อน แล้วค่อย handoff หลัง web search จบ
+        #   ก่อนหน้านี้: guard return ทันทีเมื่อ products=0 → web search ไม่ได้ทำงาน
+        #   ทำให้ลูกค้าได้ "ไม่พบข้อมูล" ทั้งที่ web search อาจหาสินค้าได้
+        from . import web_search as _ws_guard_check
+        _guard_ws_available = (
+            _ws_guard_check.is_configured()
+            and not _is_conv_active
+        )
+        if not _vision_context and not _guard_ws_available:
             try:
                 _guard_ref_models = ref_models
             except NameError:
@@ -4827,7 +5858,10 @@ def chat(req: ChatRequest) -> ChatResponse:
             _guard_ptypes = product_store._detect_product_types(retrieval_message or req.message)
             # ⚡ เช็ค charger subtype ด้วย — "มีสายไหม"/"มีหัวไหม" (shorthand) ถูกจับที่
             #   _detect_charger_subtype ไม่ใช่ _detect_product_types → ต้องนับเป็น intent
-            _guard_charger_sub = _intent_sub or product_store._detect_charger_subtype(retrieval_message or req.message)
+            # ⚡ 2026-09-16 — ใช้ _resolve_charger_subtype เป็น fallback (ยึด _intent_sub ก่อน)
+            _guard_charger_sub = _intent_sub or _resolve_charger_subtype(
+                intent_result=_intent_result, retrieval_message=retrieval_message or req.message or "",
+            )
             _guard_has_intent = bool(
                 _guard_ptypes or _guard_ref_models or _guard_charger_sub
                 or _guard_model_kw or _is_conv_active
@@ -4995,44 +6029,66 @@ def chat(req: ChatRequest) -> ChatResponse:
                         seen_names.add(pname)
                     merged.append(p)
                 # สำหรับ compatibility check ให้เก็บเยอะกว่า req.limit เพื่อให้ LLM เห็นทุกรุ่น
-                _merge_limit = max(req.limit * 4, 40) if _is_compat_check else req.limit
+                # ⚡ Phase 8 — _merge_limit ใช้ _LLM_CONTEXT_LIMIT (30) ไม่ใช่ req.limit
+                #   สำหรับ compatibility check ให้เก็บเยอะกว่าปกติเพื่อให้ LLM เห็นทุกรุ่น
+                _merge_limit = max(_llm_ctx_limit * 4, 80) if _is_compat_check else _llm_ctx_limit
                 products = merged[:_merge_limit]
 
-            # ใส่ context note ชัดๆ (ทุกกรณี ไม่ใช่แค่ตอนมี ptypes)
-            unlist_note = (
-                "สินค้าที่ status != NORMAL (UNLIST/SELLER_DELETE) เลิกขายแล้ว — "
-                "ห้ามเสนอขาย/แสดงราคา/แสดงลิงก์สั่งซื้อ "
-                "ถ้าลูกค้าถามเรื่องสเปค/รายละเอียดสินค้า: ให้ตอบสเปค/รายละเอียดของสินค้านั้นได้ตามปกติ "
-                "(ไม่ต้องบอกว่าเลิกขาย นอกจากลูกค้าถามว่ามีขายไหม) "
-                "ถ้าลูกค้าถามเรื่องรับประกัน/เคลม: ให้ตอบเงื่อนไขรับประกันของสินค้านั้น "
-                "+ ถามวันที่ซื้อ + คำนวณช่วงประกัน + ชวนทักแอดมิน "
-                "(ห้ามเสนอสินค้าอื่นแทน เพราะลูกค้าไม่ได้ถามเรื่องซื้อ) "
-                "ถ้าลูกค้าอยากซื้อ/ถามว่ามีขายไหม: ให้บอกว่ารุ่นนี้เลิกขายแล้ว "
-                "แล้วแนะนำเฉพาะสินค้า status=NORMAL เท่านั้น"
-            )
-            # ใส่ note สำหรับสินค้า sold_out/stock=0 ด้วย (แม้ status=NORMAL)
+        # ⚡ Phase 3d (2026-09-19) — _available_for_sale mark (ทุกกรณี นอก if has_unlist)
+        #   กฎ: ตอบคำถามสินค้าได้ทุก status แต่ห้ามแนะนำขาย/เสนอขาย/ส่งลิงก์สั่งซื้อ
+        #   กับสินค้าที่ shopee_stock<=0 หรือ status!=NORMAL หรือ sold_out=True
+        #   เคส LuckyHomeMart: สินค้า Leravan ทุกตัว status=NORMAL แต่ sold_out=True (stock=0)
+        #   → note เดิมฝังอยู่ใน if has_unlist block → ไม่ถูก inject → LLM แนะนำขายสินค้าหมดสต็อก
+        #   แก้: mark _available_for_sale ในทุก product (context note inject หลัง _apply_product_tiers)
+        _pending_context_note = ""
+        if products:
+            for _p in products:
+                _p["_available_for_sale"] = (
+                    _p.get("status") == "NORMAL"
+                    and not _p.get("sold_out", False)
+                    and (_p.get("total_stock", 0) or 0) > 0
+                )
+            _has_unlist = any(not _p.get("_available_for_sale") and _p.get("status") != "NORMAL" for _p in products)
             _has_sold_out = any(
-                p.get("sold_out", False) or (p.get("total_stock", 0) or 0) == 0
-                for p in products
+                not _p.get("_available_for_sale")
+                and _p.get("status") == "NORMAL"
+                and (_p.get("sold_out", False) or (_p.get("total_stock", 0) or 0) == 0)
+                for _p in products
             )
-            sold_out_note = (
-                "สินค้าที่ sold_out=True หรือ stock=0 (แม้ status=NORMAL) หมดสต็อกชั่วคราว — "
-                "ห้ามเสนอขาย/แสดงลิงก์สั่งซื้อ "
-                "ถ้าลูกค้าถามเรื่องสเปค/รายละเอียดสินค้า: ให้ตอบสเปค/รายละเอียดของสินค้านั้นได้ตามปกติ "
-                "(ไม่ต้องบอกว่าหมดสต็อก นอกจากลูกค้าถามว่ามีขายไหม/พร้อมส่งไหม) "
-                "ถ้าลูกค้าถามเรื่องรับประกัน/เคลม: ให้ตอบเงื่อนไขรับประกันของสินค้านั้น "
-                "(ห้ามเสนอสินค้าอื่นแทน เพราะลูกค้าไม่ได้ถามเรื่องซื้อ) "
-                "ถ้าลูกค้าอยากซื้อ/ถามว่ามีขายไหม/พร้อมส่งไหม: ให้บอกว่ารุ่นนี้หมดสต็อกชั่วคราว "
-                "แล้วแนะนำเฉพาะสินค้า status=NORMAL ที่มี stock และไม่ sold_out เท่านั้น"
-            ) if _has_sold_out else ""
-            if products:
-                _combined_note = unlist_note
-                if sold_out_note:
-                    _combined_note = _combined_note + " " + sold_out_note
-                if "_context_note" not in products[0]:
-                    products[0]["_context_note"] = _combined_note
-                else:
-                    products[0]["_context_note"] = products[0]["_context_note"] + " " + _combined_note
+            _avail_count = sum(1 for _p in products if _p.get("_available_for_sale"))
+            print(f"[AVAIL-FOR-SALE] total={len(products)} available={_avail_count} unlist={_has_unlist} sold_out={_has_sold_out}", file=sys.stderr)
+
+            _notes = []
+            if _has_unlist:
+                _notes.append(
+                    "สินค้าที่ status != NORMAL (UNLIST/SELLER_DELETE) เลิกขายแล้ว — "
+                    "ห้ามเสนอขาย/แสดงราคา/แสดงลิงก์สั่งซื้อ "
+                    "ถ้าลูกค้าถามเรื่องสเปค/รายละเอียดสินค้า: ให้ตอบสเปค/รายละเอียดของสินค้านั้นได้ตามปกติ "
+                    "(ไม่ต้องบอกว่าเลิกขาย นอกจากลูกค้าถามว่ามีขายไหม) "
+                    "ถ้าลูกค้าถามเรื่องรับประกัน/เคลม: ให้ตอบเงื่อนไขรับประกันของสินค้านั้น "
+                    "+ ถามวันที่ซื้อ + คำนวณช่วงประกัน + ชวนทักแอดมิน "
+                    "(ห้ามเสนอสินค้าอื่นแทน เพราะลูกค้าไม่ได้ถามเรื่องซื้อ) "
+                    "ถ้าลูกค้าอยากซื้อ/ถามว่ามีขายไหม: ให้บอกว่ารุ่นนี้เลิกขายแล้ว "
+                    "แล้วแนะนำเฉพาะสินค้า status=NORMAL เท่านั้น"
+                )
+            if _has_sold_out:
+                _notes.append(
+                    "สินค้าที่ sold_out=True หรือ stock=0 (แม้ status=NORMAL) หมดสต็อกชั่วคราว — "
+                    "ห้ามเสนอขาย/แสดงลิงก์สั่งซื้อ "
+                    "ถ้าลูกค้าถามเรื่องสเปค/รายละเอียดสินค้า: ให้ตอบสเปค/รายละเอียดของสินค้านั้นได้ตามปกติ "
+                    "(ไม่ต้องบอกว่าหมดสต็อก นอกจากลูกค้าถามว่ามีขายไหม/พร้อมส่งไหม) "
+                    "ถ้าลูกค้าถามเรื่องรับประกัน/เคลม: ให้ตอบเงื่อนไขรับประกันของสินค้านั้น "
+                    "(ห้ามเสนอสินค้าอื่นแทน เพราะลูกค้าไม่ได้ถามเรื่องซื้อ) "
+                    "ถ้าลูกค้าอยากซื้อ/ถามว่ามีขายไหม/พร้อมส่งไหม: ให้บอกว่ารุ่นนี้หมดสต็อกชั่วคราว "
+                    "แล้วแนะนำเฉพาะสินค้า status=NORMAL ที่มี stock และไม่ sold_out เท่านั้น"
+                )
+            # ⚡ Phase 3d — กฎหลัก: ห้ามแนะนำขายสินค้าที่ _available_for_sale=False
+            _notes.append(
+                "⚡ กฎสำคัญ: ห้ามแนะนำขาย/เสนอขาย/ส่งลิงก์สั่งซื้อ กับสินค้าที่ _available_for_sale=False "
+                "(สินค้าที่ shopee_stock<=0 หรือ status!=NORMAL หรือ sold_out=True) "
+                "แนะนำขาย/เสนอขาย/ส่งลิงก์สั่งซื้อ ได้เฉพาะสินค้าที่ _available_for_sale=True เท่านั้น"
+            )
+            _pending_context_note = " ".join(_notes)
 
         import time as _time
         _llm_start = _time.time()
@@ -5177,100 +6233,95 @@ def chat(req: ChatRequest) -> ChatResponse:
                 f"ถ้าสินค้าเดิมไม่รองรับอุปกรณ์รุ่นใหม่ ให้บอกตรงๆ แล้วแนะนำสินค้าอื่นที่รองรับแทน"
             )
             _combined_extra = (_combined_extra + _hybrid_note).strip()
-        # ⚡ 2026-09-14 — compat device spec lookup: ถ้า intent=compatibility_check + มี target_device
-        #   → web search ดึง spec ของ device (พอร์ตชาร์จ, ความเร็วชาร์จ, โปรโตคอล) มา inject ใน extra_context
-        #   เพื่อให้ LLM รู้ว่า device ชาร์จกี่ W แล้วแนะนำสินค้าที่เหมาะสม (ไม่แนะนำ 45W ให้เครื่องที่ชาร์จ 90W)
-        #   ใช้ search_and_extract (คืน search_info) ไม่ใช้ search_and_answer (ตอบลูกค้าโดยตรง)
-        _device_spec_extra = ""
-        if (
-            _intent_result.get("intent") == "compatibility_check"
-            and _intent_result.get("target_device")
-        ):
-            from . import web_search as _ws
-            if _ws.is_configured():
-                _compat_device_name = _intent_result.get("target_device", "")
-                _device_search_query = f"{_compat_device_name} charging spec port watt protocol"
-                print(f"[DEVICE-SPEC-LOOKUP] compat + target_device={_compat_device_name!r} → web search", file=sys.stderr)
-                try:
-                    _device_ws_result = _ws.search_and_extract(
-                        message=_device_search_query,
-                        shop=req.shop,
-                        platform=req.platform,
-                        history=history,
-                        reason="compat_device_spec_lookup",
-                    )
-                    if not _device_ws_result.get("error") and _device_ws_result.get("search_used"):
-                        _device_search_info = _device_ws_result.get("search_info", "")
-                        _device_keywords = _device_ws_result.get("keywords", [])
-                        _device_product_type = _device_ws_result.get("product_type", "")
-                        if _device_search_info:
-                            # strip URLs ออกจาก search_info (กัน LLM เอาลิงก์ไปใส่คำตอบ)
-                            import re as _re_dev
-                            _device_info_clean = _re_dev.sub(
-                                r'\[([^\]]+)\]\([^)]+\)', r'', _device_search_info
-                            )
-                            _device_info_clean = _re_dev.sub(
-                                r'https?://[^\s\)\]]+', r'', _device_info_clean,
-                                flags=_re_dev.IGNORECASE
-                            ).strip()
-                            if len(_device_info_clean) >= 20:
-                                _device_spec_extra = (
-                                    f"\n=== ข้อมูลสเปกอุปกรณ์ {_compat_device_name} (จาก Google Search) ===\n"
-                                    f"{_device_info_clean}\n"
-                                    f"ใช้ข้อมูลนี้เพื่อเลือกสินค้าที่รองรับอุปกรณ์รุ่นนี้จริง "
-                                    f"(เช่น พอร์ตชาร์จ, ความเร็วชาร์จสูงสุด, โปรโตคอล) "
-                                    f"และแนะนำสินค้าที่จ่ายไฟได้พอ/เท่ากับที่อุปกรณ์รองรับ"
-                                )
-                                print(f"[DEVICE-SPEC-LOOKUP] ได้ spec ของ {_compat_device_name}: {_device_info_clean[:120]!r}", file=sys.stderr)
-                        # re-query DB ด้วย keywords จาก search หาสินค้าที่ compatible
-                        # เพื่อให้ LLM มีสินค้าจริงที่รองรับ device มาแนะนำ ไม่ใช่แค่ตอบสเปค
-                        if _device_keywords:
-                            _device_search_q = " ".join(_device_keywords[:6])
-                            if _device_product_type:
-                                _device_search_q = f"{_device_product_type} {_device_search_q}"
-                            # ใส่ subtype จาก anchor ถ้ามี hybrid anchor
-                            if _hybrid_anchor_card:
-                                _anchor_sub_kw = {"adapter": "หัวชาร์จ", "cable": "สายชาร์จ",
-                                                  "set": "ชุดชาร์จ"}.get(
-                                    product_store._detect_charger_subtype(
-                                        _hybrid_anchor_card.get("name") or _hybrid_anchor_card.get("item_name") or ""
-                                    ), "")
-                                if _anchor_sub_kw:
-                                    _device_search_q = f"{_anchor_sub_kw} {_device_search_q}"
-                            print(f"[DEVICE-SPEC-LOOKUP] re-query DB: {_device_search_q!r}", file=sys.stderr)
-                            try:
-                                _device_products = product_store.fetch_products(
-                                    db,
-                                    message=_device_search_q,
-                                    shop_filter=req.shop,
-                                    limit=10,
-                                    desc_message=req.message,
-                                    filter_unavailable=True,
-                                )
-                                if _device_products:
-                                    # merge เข้า products (dedup โดย item_id)
-                                    _existing_pids = {str(p.get("item_id") or "") for p in products}
-                                    _added = 0
-                                    for _dp in _device_products:
-                                        _dpid = str(_dp.get("item_id") or "")
-                                        if _dpid and _dpid not in _existing_pids:
-                                            products.append(_dp)
-                                            _existing_pids.add(_dpid)
-                                            _added += 1
-                                    if _added:
-                                        print(f"[DEVICE-SPEC-LOOKUP] merge {_added} สินค้าจาก re-query เข้า products (now {len(products)})", file=sys.stderr)
-                            except Exception as _e:
-                                print(f"[DEVICE-SPEC-LOOKUP] re-query error: {_e}", file=sys.stderr)
-                except Exception as _e:
-                    print(f"[DEVICE-SPEC-LOOKUP] error: {_e}", file=sys.stderr)
+        # ⚡ Phase 7 — anchor comparison: ถ้าลูกค้าถาม "อันนี้กับอันก่อนต่างกันยังไง"
+        #   ใส่สินค้าทั้ง 2 ตัว (current + previous anchor) เข้า products + context note
+        #   ให้ LLM เปรียบเทียบได้โดยตรง ไม่ต้องพึ่ง model keyword extraction
+        if _anchor_compare_ctx and _anchor_compare_ctx.get("current") and _anchor_compare_ctx.get("previous"):
+            _cur_c = _anchor_compare_ctx["current"]
+            _prev_c = _anchor_compare_ctx["previous"]
+            _cur_id = str(_cur_c.get("item_id") or "")
+            _prev_id = str(_prev_c.get("item_id") or "")
+            _existing_ids_cmp = {str(p.get("item_id") or "") for p in products}
+            # ใส่ current ต้น list, previous ตามหลัง (ถ้ายังไม่มี)
+            _cmp_inserted = []
+            if _cur_id and _cur_id not in _existing_ids_cmp:
+                _cmp_inserted.append(_cur_c)
+            if _prev_id and _prev_id not in _existing_ids_cmp and _prev_id != _cur_id:
+                _cmp_inserted.append(_prev_c)
+            if _cmp_inserted:
+                products = _cmp_inserted + products
+                print(f"[ANCHOR-COMP-MERGE] เพิ่ม {len(_cmp_inserted)} anchor เข้า products (now {len(products)})", file=sys.stderr)
+            _cur_name_cmp = _cur_c.get("name") or _cur_c.get("item_name") or ""
+            _prev_name_cmp = _prev_c.get("name") or _prev_c.get("item_name") or ""
+            _cmp_note = (
+                f"\n⚠️ ลูกค้าถามเปรียบเทียบสินค้า 2 รุ่นที่เคยสนใจในแชทนี้:\n"
+                f"  - อันนี้ (ล่าสุด): {_cur_name_cmp}\n"
+                f"  - อันก่อนหน้า: {_prev_name_cmp}\n"
+                f"ให้เปรียบเทียบความแตกต่างของ 2 รุ่นนี้จากข้อมูลใน context "
+                f"(สเปค ราคา การรับประกัน ความเข้ากันได้ ฯลฯ) "
+                f"ถ้าข้อมูลไม่พอ บอกตรงๆ ว่าไม่มีข้อมูลบางส่วน"
+            )
+            _combined_extra = (_combined_extra + _cmp_note).strip()
+        # ⚡ device-spec-lookup — เรียก helper (แยก logic ออกเป็น function เพื่อใช้ใน KB path ด้วย)
+        #   ⚡ Phase 4 — trigger เมื่อ target_device ไม่ว่าง (ไม่ผูก intent)
+        #   ⚡ Phase 3b — dual-tier recommendation (baseline + upgrade) + sort by wattage asc
+        _device_spec_extra, _device_additional = _device_spec_lookup(
+            db=db,
+            req=req,
+            intent_result=_intent_result,
+            history=history,
+            existing_products=products,
+            retrieval_message=retrieval_message,
+            anchor_card=anchor_card,
+            hybrid_anchor_card=_hybrid_anchor_card,
+            llm_ctx_limit=_llm_ctx_limit,
+            resolve_subtype_fn=_resolve_charger_subtype,
+        )
+        if _device_additional:
+            products.extend(_device_additional)
         if _device_spec_extra:
             _combined_extra = (_combined_extra + _device_spec_extra).strip()
+        # ⚡ Phase 3 — Tier merge ก่อนส่งเข้า LLM
+        #   Tier A (exact match): MODEL-REGEX + anchor_card + hybrid_anchor_card → ใส่เสมอ ไม่ถูกตัดด้วย limit
+        #   Tier B (general): vector/keyword search → เรียง normal+stock>0 ก่อน แล้วตัด limit
+        #   รวม A+B เรียก _dedupe_products
+        _tier_a_ids: set[str] = set()
+        # เก็บ item_id จาก _ref_regex_products (MODEL-REGEX / FUZZY-MATCH / CARRY-FORWARD)
+        if _ref_regex_products:
+            for p in _ref_regex_products:
+                _iid = str(p.get("item_id") or "")
+                if _iid:
+                    _tier_a_ids.add(_iid)
+        # เก็บ item_id จาก anchor_card (tagged item)
+        if anchor_card:
+            _iid = str(anchor_card.get("item_id") or "")
+            if _iid:
+                _tier_a_ids.add(_iid)
+        # เก็บ item_id จาก _hybrid_anchor_card (compat+target_device hybrid)
+        if _hybrid_anchor_card:
+            _iid = str(_hybrid_anchor_card.get("item_id") or "")
+            if _iid:
+                _tier_a_ids.add(_iid)
+        # ⚡ Phase 8 — Tier B limit ใช้ _LLM_CONTEXT_LIMIT (30) ไม่ใช่ req.limit
+        #   เพราะนี่คือ LLM context limit (สินค้าที่ส่งเข้า llm.answer)
+        #   frontend display ยังใช้ req.limit ใน products_for_response (ด้านล่าง)
+        products = _apply_product_tiers(products, _tier_a_ids, _llm_ctx_limit)
+        # ⚡ Phase 3d — inject context_note หลัง _apply_product_tiers (เพราะ sort เปลี่ยนลำดับ)
+        #   ถ้า inject ก่อน tiers → context_note ไปอยู่ที่ product ตัวเดิม (index เดิม)
+        #   แต่ LLM เห็น products[0] หลัง sort → context_note ไม่อยู่ใน products[0] → LLM ไม่เห็น
+        #   แก้: inject หลัง tiers เพื่อให้ products[0] มี context_note
+        if products and _pending_context_note:
+            if "_context_note" not in products[0]:
+                products[0]["_context_note"] = _pending_context_note
+            else:
+                products[0]["_context_note"] = products[0]["_context_note"] + " " + _pending_context_note
+            print(f"[DEBUG-3D] injected context_note len={len(_pending_context_note)} products[0]_has_note=True", file=sys.stderr)
         try:
             answer, usage_info = llm.answer(
                 message=desc_message,
                 products=products,
                 shop_hint=req.shop,
-                history=history,
+                history=_recent_qa_pairs(history, 10),
                 persona_extra=_persona_extra,
                 intent_result=_intent_result,
                 extra_context=_combined_extra,
@@ -5346,8 +6397,8 @@ def chat(req: ChatRequest) -> ChatResponse:
         #   ไม่ trigger web_search เพราะ anchor คือสินค้าที่ลูกค้าสนใจแล้ว
         #   ถ้า LLM ตอบ "ไม่มี" น่าจะเป็น LLM ตอบผิด ไม่ใช่สินค้าไม่มีจริง
         #   การดึงสินค้าอื่นมาทับจะทำให้ context loss รุนแรงขึ้น
+        # ⚡ Legacy Fix (2026-09-15) — ใช้ _web_search_reanswer ร่วมกับ KB branch
         from . import web_search as _ws
-        _extra_context = ""
         if _ws.is_configured() and not _is_conv_active:
             _should_search, _search_reason = _ws.should_use_web_search(
                 answer=answer,
@@ -5357,8 +6408,6 @@ def chat(req: ChatRequest) -> ChatResponse:
             )
             if _should_search:
                 print(f"[WEB-SEARCH] triggered: {_search_reason}", file=sys.stderr)
-
-                # Step 1+2: OpenRouter + Google Search → extract keywords
                 # ⚠️ ถ้ามี reference (เช่น "รุ่นนี้" → IMILAB EC4) ให้ส่ง retrieval_message
                 # (ที่รวมชื่อสินค้าจาก history) ไปแทน req.message
                 # ไม่งั้น web_search จะตีความ "มีแบตไหม" เป็นคำถามทั่วไป แล้วไปค้น phone อื่นมาตอบ
@@ -5368,289 +6417,66 @@ def chat(req: ChatRequest) -> ChatResponse:
                     and len(retrieval_message) > len(req.message)
                 ) else req.message
                 print(f"[WEB-SEARCH] search query: {_ws_search_query!r}", file=sys.stderr)
-                _ws_result = _ws.search_and_extract(
-                    message=_ws_search_query,
+
+                _ws_r = _web_search_reanswer(
+                    search_message=_ws_search_query,
+                    llm_message=req.message,
+                    products_in=products,
+                    reason=_search_reason,
                     shop=req.shop,
                     platform=req.platform,
-                    history=history,
-                    reason=_search_reason,
+                    history_list=_recent_qa_pairs(history, 10),
+                    persona_extra=_persona_extra,
+                    intent_result=_intent_result,
+                    vision_context=_vision_context,
+                    do_kb_lookup=True,  # product_store branch re-query KB
+                    do_model_code_regex=True,  # product_store branch ใช้ model code regex
+                    do_dedup_rerank=True,  # product_store branch dedup + rerank
+                    req_limit=req.limit,
                 )
 
-                if not _ws_result.get("error") and _ws_result.get("search_used"):
-                    _ws_keywords = _ws_result.get("keywords", [])
-                    _ws_search_info = _ws_result.get("search_info", "")
-                    _ws_product_type = _ws_result.get("product_type", "")
-                    _ws_usage = _ws_result.get("usage", {})
-                    _ws_cost = _ws_result.get("cost_usd", 0.0)
-                    _ws_elapsed = _ws_result.get("elapsed", 0.0)
-
-                    print(f"[WEB-SEARCH] keywords={_ws_keywords[:5]}  product_type={_ws_product_type}", file=sys.stderr)
-
-                    # Step 3: query DB + KB ใหม่ด้วย keywords จาก web search
-                    _new_products: list[dict] = []
-                    _ws_kb_context = ""
-                    if _ws_keywords:
-                        _search_query = " ".join(_ws_keywords[:6])
-                        if _ws_product_type:
-                            _search_query = f"{_ws_product_type} {_search_query}"
-                        # query MongoDB ด้วย keywords
-                        try:
-                            _new_products = product_store.fetch_products(
-                                db,
-                                message=_search_query,
-                                shop_filter=req.shop,
-                                limit=10,
-                                desc_message=req.message,
-                            )
-                            print(f"[WEB-SEARCH] DB re-query: {_search_query!r}  → {len(_new_products)} products", file=sys.stderr)
-                        except Exception as e:
-                            print(f"[WEB-SEARCH] DB re-query error: {e}", file=sys.stderr)
-                        # เพิ่ม: ถ้า search_info มีรหัสรุ่น (เช่น PB100P, PB200P, P23) ให้ query แบบ exact ด้วย
-                        import re as _re_ws
-                        _model_codes = _re_ws.findall(r'\b(PB\d{3}[A-Z]?|P\d{2}|BA\d{3}[A-Z]?|LPB\d{3}[A-Z]?|WPB\d{3}[A-Z]?)\b', _ws_search_info)
-                        if _model_codes:
-                            _model_codes = list(dict.fromkeys(_model_codes))[:5]  # unique, limit 5
-                            print(f"[WEB-SEARCH] model codes from search_info: {_model_codes}", file=sys.stderr)
-                            for _code in _model_codes:
-                                try:
-                                    _code_products = product_store.fetch_products(
-                                        db,
-                                        message=_code,
-                                        shop_filter=req.shop,
-                                        limit=3,
-                                        desc_message=req.message,
-                                    )
-                                    # ไม่ซ้ำ
-                                    _existing_ids = {p.get("item_id") or p.get("name") for p in _new_products}
-                                    for _cp in _code_products:
-                                        _pid = _cp.get("item_id") or _cp.get("name")
-                                        if _pid not in _existing_ids:
-                                            _new_products.append(_cp)
-                                            _existing_ids.add(_pid)
-                                except Exception as e:
-                                    print(f"[WEB-SEARCH] model code query error ({_code}): {e}", file=sys.stderr)
-                            print(f"[WEB-SEARCH] after model code merge: {len(_new_products)} products", file=sys.stderr)
-                        # query KB
-                        try:
-                            _ws_kb_result = knowledge_base.lookup_kb(_search_query)
-                            if _ws_kb_result and _ws_kb_result.get("found"):
-                                _ws_kb_context = _ws_kb_result.get("context", "") or ""
-                                # รวม KB docs เข้ากับ products
-                                for kd in _ws_kb_result.get("kb_docs", [])[:3]:
-                                    _kb_card = _kb_doc_to_card(kd)
-                                    _kb_card["_kb_only"] = True
-                                    _new_products.append(_kb_card)
-                                print(f"[WEB-SEARCH] KB re-query: {len(_ws_kb_result.get('kb_docs', []))} docs", file=sys.stderr)
-                        except Exception as e:
-                            print(f"[WEB-SEARCH] KB re-query error: {e}", file=sys.stderr)
-
-                    # ถ้า query ใหม่ไม่เจอ → ใช้สินค้าเดิมจาก RAG
-                    _final_products = _new_products if _new_products else products
-                    # dedup สินค้าที่ชื่อใกล้เคียงกัน (เช่น P23 ซ้ำหลาย listing)
-                    _ws_seen = {}
-                    _ws_deduped = []
-                    for p in _final_products:
-                        _bn = _base_name(p.get("name") or "")
-                        if not _bn:
-                            _ws_deduped.append(p)
-                            continue
-                        if _bn not in _ws_seen:
-                            _ws_seen[_bn] = len(_ws_deduped)
-                            _ws_deduped.append(p)
-                        else:
-                            _idx = _ws_seen[_bn]
-                            if _listing_sell_score(p) > _listing_sell_score(_ws_deduped[_idx]):
-                                _ws_deduped[_idx] = p
-                    if len(_ws_deduped) < len(_final_products):
-                        print(f"[WEB-SEARCH] dedup: {len(_final_products)} → {len(_ws_deduped)}", file=sys.stderr)
-                    _final_products = _ws_deduped
-                    # rerank _final_products ตาม standalone priority (เดี่ยว > ชุด)
-                    # เพื่อให้ powerbank เดี่ยวอยู่ก่อนชุด/เคส
-                    if _final_products and len(_final_products) > req.limit:
-                        _final_products.sort(
-                            key=lambda p: not product_store._is_bundle_product(p),
-                            reverse=True,
-                        )
-
-                    # Step 4: LLM ปั้นประโยคจากสินค้า DB + KB + ข้อมูล search
-                    _llm2_start = _time.time()
-                    if _final_products and _ws_search_info:
-                        # ⚠️ strip URLs ออกจาก search_info ก่อนส่งให้ LLM
-                        # เพื่อกัน LLM เอาลิงก์จาก Google Search มาใส่ในคำตอบ
-                        # (ลิงก์ที่ใช้ได้มีแค่ short_link ของสินค้าใน context เท่านั้น)
-                        import re as _re_strip_urls
-                        # Step 1: ลบ markdown link [text](url) ออกทั้งก้อน (รวม text)
-                        _ws_search_info_clean = _re_strip_urls.sub(
-                            r'\[([^\]]+)\]\([^)]+\)', r'', _ws_search_info
-                        )
-                        # Step 2: ลบ plain URL ที่เหลือ (http(s)://...)
-                        _ws_search_info_clean = _re_strip_urls.sub(
-                            r'https?://[^\s\)\]]+', r'', _ws_search_info_clean,
-                            flags=_re_strip_urls.IGNORECASE
-                        )
-                        # Step 3: ลบ markdown link เปล่าที่เหลือ [text]() หรือ [text]( )
-                        _ws_search_info_clean = _re_strip_urls.sub(
-                            r'\[([^\]]*)\]\(\s*\)', r'', _ws_search_info_clean
-                        ).strip()
-                        # Step 4: กรอบ whitespace ที่เหลือหลายๆ อัน
-                        _ws_search_info_clean = _re_strip_urls.sub(
-                            r'\s{2,}', r' ', _ws_search_info_clean
-                        ).strip()
-                        # กรณีที่ strip แล้วสั้นเกินไป → ใช้ตัวเดิม (กันข้อมูลหายหมด)
-                        if len(_ws_search_info_clean) < 20:
-                            _ws_search_info_clean = _ws_search_info
-                        if _ws_search_info_clean != _ws_search_info:
-                            print(f"[WEB-SEARCH] stripped external URLs from search_info", file=sys.stderr)
-                        # รวม context ทั้งหมด: search info + KB
-                        # ⚠️ สำคัญ: search_info เป็นแค่ "ข้อมูลประกอบ" ไม่ใช่แหล่งข้อมูลหลัก
-                        # - ห้ามเอา search_info มาเป็นหัวข้อคำตอบหลัก (เช่น ห้ามตอบเรื่อง Vivo Y200
-                        #   ทั้งที่ลูกค้าถามเรื่อง IMILAB SC230)
-                        # - ห้ามแนะนำสินค้าที่ไม่อยู่ใน products list
-                        # - ใช้ search_info เฉพาะเพื่อเติม spec ที่ขาดใน product (เช่น ขนาดแบต, เวลาชาร์จ,
-                        #   ความเร็วโปรโตคอล) ของสินค้าที่อยู่ใน context เท่านั้น
-                        _extra_parts = [
-                            "=== ข้อมูลจาก Google Search (ข้อมูลประกอบเท่านั้น — ห้ามใช้เป็นแหล่งหลัก) ===",
-                            f"คำเตือน: ข้อมูลด้านล่างนี้เป็นข้อมูลเสริมจาก Google Search เพื่อช่วยเติม spec ที่อาจขาด",
-                            f"ของสินค้าใน context เท่านั้น — ห้ามนำมาเป็นหัวข้อคำตอบหลัก, ห้ามแนะนำสินค้าที่ไม่อยู่ใน context,",
-                            f"ห้ามตอบเรื่องสินค้า/แบรนด์อื่นที่ไม่ใช่สินค้าใน context",
-                            f"ถ้า search_info พูดถึงสินค้าที่ไม่ใช่สินค้าใน context → ห้ามใช้, ข้ามไป",
-                            f"ห้ามใส่ลิงก์ใดๆ ในคำตอบ นอกจาก short_link ของสินค้าใน context (ที่อยู่ใน products list)",
-                            f"ตัวอย่างที่ผิด: ลูกค้าถาม 'IMILAB SC230 มีแบตไหม' แล้ว search_info พูดเรื่อง Vivo Y200 → ห้ามตอบเรื่อง Vivo",
-                            f"ตัวอย่างที่ถูก: ลูกค้าถาม 'IMILAB EC4 แบตกี่ mAh' แล้ว search_info บอก EC4 มี 5200mAh → ใช้เติม spec ของ EC4 ได้",
-                            f"---",
-                            _ws_search_info_clean,
-                        ]
-                        if _ws_kb_context:
-                            _extra_parts.append(f"=== ข้อมูลจาก Knowledge Base ===\n{_ws_kb_context}")
-                        _extra_context = "\n".join(_extra_parts)
-                        if _vision_context:
-                            _extra_context = (_vision_context + "\n" + _extra_context).strip()
-                        try:
-                            _ws_answer, _ws_llm_usage = llm.answer(
-                                message=req.message,
-                                products=_final_products,
-                                shop_hint=req.shop,
-                                history=history,
-                                persona_extra=_persona_extra,
-                                intent_result=_intent_result,
-                                extra_context=_extra_context,
-                            )
-                        except RuntimeError as exc:
-                            print(f"[WEB-SEARCH] LLM re-answer error: {exc}", file=sys.stderr)
-                            _ws_answer = ""
-                            _ws_llm_usage = {"prompt": 0, "output": 0, "total": 0}
-                    else:
-                        _ws_answer = ""
-                        _ws_llm_usage = {"prompt": 0, "output": 0, "total": 0}
-                    _timing_breakdown["llm2"] = round(_time.time() - _llm2_start, 3)
-                    # record Search step (openrouter gemini 2.5 flash: $0.30/M in, $2.50/M out)
-                    _ws_t_in = _ws_usage.get("prompt", 0)
-                    _ws_t_out = _ws_usage.get("output", 0)
-                    _steps.append({
-                        "name": "Search",
-                        "model": _ws_result.get("model", "openrouter"),
-                        "tokens_in": _ws_t_in,
-                        "tokens_out": _ws_t_out,
-                        "time_s": _ws_elapsed,
-                        "cost_usd": round(_ws_cost, 6),
-                        "cost_thb": round(_ws_cost * 36, 4),
-                        "input": {
-                            "message": req.message,
-                            "reason": _search_reason,
-                            "intent": _intent_result.get("intent"),
-                        },
-                        "output": {
-                            "search_used": True,
-                            "keywords": _ws_keywords[:8],
-                            "product_type": _ws_product_type,
-                            "search_info": _ws_search_info[:500] if _ws_search_info else "",
-                        },
-                    })
-                    # record RAG (search) step — re-query DB ด้วย keywords จาก search
-                    _final_product_names = [p.get("name", "")[:60] for p in _final_products[:10]]
-                    _steps.append({
-                        "name": "RAG(search)",
-                        "model": "mongodb+kb",
-                        "tokens_in": 0,
-                        "tokens_out": 0,
-                        "time_s": 0,
-                        "cost_usd": 0,
-                        "cost_thb": 0,
-                        "input": {
-                            "query": " ".join(_ws_keywords[:6]) if _ws_keywords else "",
-                            "keywords": _ws_keywords[:8],
-                            "shop": req.shop,
-                        },
-                        "output": {
-                            "product_count": len(_final_products),
-                            "products": _final_product_names,
-                            "kb_used": bool(_ws_kb_context),
-                        },
-                    })
-                    # record LLM2 (search) step — ตัวตอบ รอบที่ 2
-                    _llm2_t_in = _ws_llm_usage.get("prompt", 0)
-                    _llm2_t_out = _ws_llm_usage.get("output", 0)
-                    _llm2_cost = (_llm2_t_in * _GEMINI_COST_PER_M["prompt"] + _llm2_t_out * _GEMINI_COST_PER_M["output"]) / 1_000_000
-                    _steps.append({
-                        "name": "LLM2(search)",
-                        "model": model_name,
-                        "tokens_in": _llm2_t_in,
-                        "tokens_out": _llm2_t_out,
-                        "time_s": _timing_breakdown["llm2"],
-                        "cost_usd": round(_llm2_cost, 6),
-                        "cost_thb": round(_llm2_cost * 36, 4),
-                        "input": {
-                            "message": req.message,
-                            "product_count": len(_final_products),
-                            "products": _final_product_names,
-                            "intent": _intent_result.get("intent"),
-                            "history_count": len(history) if history else 0,
-                            "search_info_used": bool(_ws_search_info),
-                            "kb_context_used": bool(_ws_kb_context),
-                            "extra_context_length": len(_extra_context) if "_extra_context" in dir() and _extra_context else 0,
-                        },
-                        "output": {
-                            "answer": _ws_answer[:500] if _ws_answer else "",
-                            "answer_full_length": len(_ws_answer) if _ws_answer else 0,
-                        },
-                    })
-
-                    if _ws_answer:
-                        _ws_answer = _append_base_warranty(_ws_answer, desc_message)
-                        _total_ws = round(_time.time() - _total_start, 2)
-                        _timing_breakdown["web_search"] = _ws_elapsed
-                        _timing_breakdown["total"] = _total_ws
-                        _combined_usage = {
-                            "prompt": usage_info.get("prompt", 0) + _ws_usage.get("prompt", 0) + _ws_llm_usage.get("prompt", 0),
-                            "output": usage_info.get("output", 0) + _ws_usage.get("output", 0) + _ws_llm_usage.get("output", 0),
-                            "total": usage_info.get("total", 0) + _ws_usage.get("total", 0) + _ws_llm_usage.get("total", 0),
-                        }
-                        print(f"[WEB-SEARCH] used web search answer  total={_total_ws}s  products={len(_final_products)}", file=sys.stderr)
-                        _final_response_products = _final_products[:req.limit]
-                        _record_suggestion_products(req, _final_response_products)
-                        return ChatResponse(
-                            answer=_ws_answer,
-                            answer_segments=llm.split_segments(_ws_answer),
-                            products=_final_response_products,
-                            shop=req.shop,
-                            model=_ws_result.get("model", "openrouter"),
-                            source="product_store+web_search",
-                            usage=_combined_usage,
-                            elapsed=_total_ws,
-                            cost=round(cost + _ws_cost, 6),
-                            intent=_intent_result,
-                            timing=_timing_breakdown,
-                            steps=_steps,
-                            web_search_used=True,
-                            web_search_reason=_search_reason,
-                            web_search_model=_ws_result.get("model"),
-                            routing_decision=_routing("bot_reply", f"product_store+web_search: {_search_reason} → ค้นเพิ่มแล้วตอบ"),
-                            image_desc=_image_desc_out,
-                        )
-                    else:
-                        print(f"[WEB-SEARCH] skipped (no answer from LLM re-answer)", file=sys.stderr)
+                if _ws_r.get("search_used") and _ws_r.get("answer"):
+                    # merge steps จาก _web_search_reanswer เข้า _steps
+                    _steps.extend(_ws_r["steps"])
+                    _ws_answer = _ws_r["answer"]
+                    _ws_llm_usage = _ws_r["usage"]
+                    _final_products = _ws_r["products"]
+                    _ws_cost = _ws_r["cost_usd"]
+                    _ws_elapsed = _ws_r["search_elapsed"]
+                    _ws_usage = {"prompt": 0, "output": 0, "total": 0}  # search usage อยู่ใน steps แล้ว
+                    _ws_answer = _append_base_warranty(_ws_answer, desc_message)
+                    _total_ws = round(_time.time() - _total_start, 2)
+                    _timing_breakdown["web_search"] = _ws_elapsed
+                    _timing_breakdown["total"] = _total_ws
+                    _combined_usage = {
+                        "prompt": usage_info.get("prompt", 0) + _ws_llm_usage.get("prompt", 0),
+                        "output": usage_info.get("output", 0) + _ws_llm_usage.get("output", 0),
+                        "total": usage_info.get("total", 0) + _ws_llm_usage.get("total", 0),
+                    }
+                    print(f"[WEB-SEARCH] used web search answer  total={_total_ws}s  products={len(_final_products)}", file=sys.stderr)
+                    _final_response_products = _final_products[:req.limit]
+                    _record_suggestion_products(req, _final_response_products)
+                    return ChatResponse(
+                        answer=_ws_answer,
+                        answer_segments=llm.split_segments(_ws_answer),
+                        products=_final_response_products,
+                        shop=req.shop,
+                        model=_ws_r.get("search_model") or "openrouter",
+                        source="product_store+web_search",
+                        usage=_combined_usage,
+                        elapsed=_total_ws,
+                        cost=round(cost + _ws_cost, 6),
+                        intent=_intent_result,
+                        timing=_timing_breakdown,
+                        steps=_steps,
+                        web_search_used=True,
+                        web_search_reason=_search_reason,
+                        web_search_model=_ws_r.get("search_model"),
+                        routing_decision=_routing("bot_reply", f"product_store+web_search: {_search_reason} → ค้นเพิ่มแล้วตอบ"),
+                        image_desc=_image_desc_out,
+                    )
                 else:
-                    print(f"[WEB-SEARCH] skipped (error: {_ws_result.get('error')})", file=sys.stderr)
+                    print(f"[WEB-SEARCH] skipped (no answer from LLM re-answer or search not used)", file=sys.stderr)
 
         _record_suggestion_products(req, products_for_response)
         return ChatResponse(
@@ -5679,25 +6505,57 @@ def _record_suggestion_products(req, products: list[dict]) -> None:
     เรียกก่อน return ChatResponse ทุกจุดที่ bot ตอบพร้อม products.
     บันทึกเฉพาะสินค้าที่มี item_id และ req.conversation_id มีค่า.
     สินค้าที่ bot แนะนำ = is_anchor=False (suggestion).
+
+    ⚡ Text-based anchor: ถ้าลูกค้าพิมพ์ชื่อรุ่น (model keyword) ที่ match กับสินค้าใน results
+    → บันทึกสินค้าตัวแรกที่ match เป็น anchor (is_anchor=True, source="user_text")
+    → ทำให้ active product เป็นสินค้าที่ลูกค้าพิมพ์ ไม่ใช่สินค้าสุดท้ายในลูป
+    กัน case: ลูกค้าพิมพ์ "ctl301" → RAG คืน [CTL301, CTC615W] → ถ้าไม่ anchor
+    → active = CTC615W (suggestion ล่าสุด) → follow-up ส่ง CTC615W ให้ LLM2 ผิด
     """
     if not req or not getattr(req, "conversation_id", None) or not products:
         return
     try:
         from . import conversation_products as _cp
+        from . import knowledge_base as _kb_anchor
+
+        # ⚡ Text-based anchor: สกัด model keywords จากข้อความลูกค้า
+        #   กรอง target device ออก (เช่น "iphone17" เป็นอุปกรณ์ ไม่ใช่สินค้าในร้าน)
+        _msg_model_kws = _kb_anchor.extract_model_keywords(req.message or "")
+        _msg_model_kws = [kw for kw in _msg_model_kws
+                         if not _kb_anchor.is_target_device_kw(kw)]
+
+        # หาสินค้าตัวแรกที่ชื่อมี model keyword ของลูกค้า → anchor
+        _anchor_item_id = None
+        if _msg_model_kws:
+            for p in products[:3]:
+                _name_lower = (p.get("name") or "").lower()
+                _p_item_id = p.get("item_id")
+                if not _p_item_id:
+                    continue
+                for kw in _msg_model_kws:
+                    if kw.lower() in _name_lower:
+                        _anchor_item_id = _p_item_id
+                        print(f"[TEXT-ANCHOR] ลูกค้าพิมพ์ '{kw}' ตรงกับสินค้า "
+                              f"'{(p.get('name') or '')[:40]}' → anchor", file=sys.stderr)
+                        break
+                if _anchor_item_id:
+                    break  # ใช้แค่ตัวแรกที่ match (สินค้าที่เกี่ยวข้องที่สุดจาก RAG)
+
         for p in products[:3]:  # จำกัด 3 ชิ้นแรก (ประหยัด DB write)
             item_id = p.get("item_id")
             name = p.get("name") or ""
             if not item_id:
                 continue
+            _is_text_anchor = (item_id == _anchor_item_id)
             _cp.add_product(
                 conversation_id=req.conversation_id,
                 platform=getattr(req, "platform", None),
                 shop=getattr(req, "shop", None),
                 item_id=item_id,
                 name=name,
-                source="bot_suggestion",
+                source="user_text" if _is_text_anchor else "bot_suggestion",
                 card=p,
-                is_anchor=False,
+                is_anchor=_is_text_anchor,
             )
     except Exception as _e:
         print(f"[CONV-PRODUCTS] error recording suggestions: {_e}", file=sys.stderr)

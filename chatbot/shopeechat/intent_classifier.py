@@ -15,6 +15,7 @@
     "charger_subtype": "cable|adapter|set|car_charger|wireless|desktop|socket|null",
     "target_device": "iphone 4s|samsung s25 ultra|null",
     "needs_description": bool,
+    "general_qtype": "warranty_policy|return_policy|shipping_policy|brands|categories|shops|tax_invoice|null",
     "confidence": 0.0-1.0,
   }
 """
@@ -62,36 +63,76 @@ charger_subtype (ถ้า product_type=charger):
 - "socket": ปลั๊กไฟอัจฉริยะ/smart plug
 - null: ไม่ระบุ
 
-target_device: ถ้าลูกค้าระบุอุปกรณ์ที่จะใช้งานด้วย (เช่น "iphone 4s", "samsung s25 ultra", "macbook") หรือ null
+target_device: ถ้าลูกค้าระบุอุปกรณ์ที่จะใช้งานด้วย (เช่น "iphone 4s", "samsung s25 ultra", "macbook", "xiaomi 17 ultra") หรือ null
+  ⚠️ สกัด target_device ทุกครั้งที่ลูกค้าระบุอุปกรณ์เป้าหมาย ไม่ว่า intent จะเป็นอะไร
+  (เช่น product_recommend + "อยากได้ของที่ใช้กับ xiaomi 17 ultra" → target_device="xiaomi 17 ultra")
+  ไม่ใช่เฉพาะ compatibility_check เท่านั้น
 
 needs_description: true ถ้าต้องดึง description สินค้ามาตอบ (เช่น compatibility_check, product_spec, warranty_duration) มิฉะนั้น false
+
+general_qtype: ถ้า intent=general_question ระบุประเภทคำถามทั่วไป (ถ้าไม่ใช่ general_question → null)
+- "warranty_policy": ถามนโยบาย/เงื่อนไขรับประกัน (เช่น "รับประกันกี่ปี", "มีประกันไหม", "เคลมยังไง")
+- "return_policy": ถามนโยบายรับคืน/เปลี่ยนสินค้า (เช่น "รับคืนไหม", "เปลี่ยนสินค้าได้ไหม")
+- "shipping_policy": ถามนโยบายจัดส่ง/เวลาส่ง (เช่น "ส่งกี่วัน", "เมื่อไหร่ได้ของ")
+- "brands": ถามแบรนด์ที่มี (เช่น "มีแบรนด์อะไรบ้าง", "มียี่ห้ออะไร")
+- "categories": ถามหมวดหมู่สินค้า (เช่น "ขายอะไรบ้าง", "มีหมวดหมู่อะไร")
+- "shops": ถามร้านในเครือ (เช่น "มีร้านอะไรบ้าง", "ร้านในเครือ")
+- "tax_invoice": ขอใบกำกับภาษี/ส่งข้อมูลใบกำกับภาษี (เช่น "ขอใบกำกับภาษี", "ออกใบกำภาษีได้ไหม")
+- null: ไม่ใช่คำถามทั่วไป
 
 confidence: ความมั่นใจ 0.0-1.0
 
 ตัวอย่าง:
 คำถาม: "สายชาร์จรุ่นไหนใช้กับ iphone 17 promax ได้บ้าง"
-{"intent":"compatibility_check","product_type":"charger","charger_subtype":"cable","target_device":"iphone 17 pro max","needs_description":true,"confidence":0.95}
+{"intent":"compatibility_check","product_type":"charger","charger_subtype":"cable","target_device":"iphone 17 pro max","needs_description":true,"general_qtype":null,"confidence":0.95}
 
 คำถาม: "มีสินค้าประเภทสายชาร์จไหม"
-{"intent":"product_recommend","product_type":"charger","charger_subtype":"cable","target_device":null,"needs_description":false,"confidence":0.95}
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"cable","target_device":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
 
 คำถาม: "cuktech ctc615w รับประกันกี่ปี"
-{"intent":"warranty_duration","product_type":"charger","charger_subtype":"cable","target_device":null,"needs_description":true,"confidence":0.95}
+{"intent":"warranty_duration","product_type":"charger","charger_subtype":"cable","target_device":null,"needs_description":true,"general_qtype":null,"confidence":0.95}
 
 คำถาม: "สินค้าเสีย อยากเคลม"
-{"intent":"warranty_claim","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"confidence":0.95}
+{"intent":"warranty_claim","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
 
 คำถาม: "มีสายชาร์จไหม" (history ล่าสุด: บอทตอบเรื่องรับประกัน)
-{"intent":"product_recommend","product_type":"charger","charger_subtype":"cable","target_device":null,"needs_description":false,"confidence":0.9}
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"cable","target_device":null,"needs_description":false,"general_qtype":null,"confidence":0.9}
 
 คำถาม: "หัวชาร์จ 65w รุ่นไหนดี"
-{"intent":"product_recommend","product_type":"charger","charger_subtype":"adapter","target_device":null,"needs_description":false,"confidence":0.95}
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"adapter","target_device":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
 
 คำถาม: "มีหัวชาร์จในรถไหม"
-{"intent":"product_recommend","product_type":"charger","charger_subtype":"car_charger","target_device":null,"needs_description":false,"confidence":0.95}
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"car_charger","target_device":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
 
 คำถาม: "มีแท่นชาร์จไร้สายไหม"
-{"intent":"product_recommend","product_type":"charger","charger_subtype":"wireless","target_device":null,"needs_description":false,"confidence":0.95}
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"wireless","target_device":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
+
+คำถาม: "อยากได้ของที่ใช้กับ xiaomi 17 ultra"
+{"intent":"product_recommend","product_type":"charger","charger_subtype":null,"target_device":"xiaomi 17 ultra","needs_description":true,"general_qtype":null,"confidence":0.9}
+
+คำถาม: "หัวชาร์จละ มีไหมใช้กับ mi 17 ultra"
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"adapter","target_device":"mi 17 ultra","needs_description":true,"general_qtype":null,"confidence":0.9}
+
+คำถาม: "พาวเวอร์แบงค์ใช้กับ oneplus 13 ได้ไหม"
+{"intent":"compatibility_check","product_type":"powerbank","charger_subtype":null,"target_device":"oneplus 13","needs_description":true,"general_qtype":null,"confidence":0.9}
+
+คำถาม: "ส่งกี่วัน"
+{"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"shipping_policy","confidence":0.95}
+
+คำถาม: "มีรับคืนไหม"
+{"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"return_policy","confidence":0.95}
+
+คำถาม: "รับประกันกี่ปี"
+{"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"warranty_policy","confidence":0.95}
+
+คำถาม: "มีแบรนด์อะไรบ้าง"
+{"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"brands","confidence":0.95}
+
+คำถาม: "ขายอะไรบ้าง"
+{"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"categories","confidence":0.95}
+
+คำถาม: "ขอใบกำกับภาษี"
+{"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"tax_invoice","confidence":0.95}
 
 ตอบเป็น JSON เท่านั้น ห้ามมีคำอธิบาย
 """
@@ -135,6 +176,7 @@ _DEFAULT_RESULT: dict[str, Any] = {
     "charger_subtype": None,
     "target_device": None,
     "needs_description": False,
+    "general_qtype": None,
     "confidence": 0.0,
 }
 

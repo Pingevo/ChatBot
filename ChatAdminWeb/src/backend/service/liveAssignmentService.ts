@@ -16,7 +16,7 @@ import { handoffService } from "./handoffService";
 import { triggerService } from "./triggerService";
 import { logAdminEvent } from "./adminLogService";
 import { serverConfig } from "../lib/config";
-import { shouldUseChatV2 } from "./systemConfigService";
+import { shouldUseChatV2, shouldUseChatV3, getBotProductLimit } from "./systemConfigService";
 import { parseRawMessage, toProductCard } from "./messageMediaParser";
 import { productService } from "./productService";
 import { toBotText, toBotImages } from "./messageService";
@@ -50,7 +50,7 @@ export interface LiveQaItem {
   bot_model?: string;
   bot_elapsed?: number;
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
-  chat_engine?: "legacy" | "v2";
+  chat_engine?: "legacy" | "v2" | "v3";
   bot_products?: { item_id: string; name: string; price?: number; image?: string; url?: string }[];
   bot_intent?: unknown;
   bot_retrieval_info?: unknown;
@@ -124,7 +124,7 @@ async function callBot(params: {
   handoff_to_admin?: boolean;
   handoff_reason?: string;
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
-  chat_engine?: "legacy" | "v2";
+  chat_engine?: "legacy" | "v2" | "v3";
 }> {
   const { platform, message, history, shopId, shopName, itemId, orderSn, images } = params;
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
@@ -133,7 +133,7 @@ async function callBot(params: {
     "Content-Type": "application/json",
     "X-Internal-Secret": serverConfig.chatbotInternalSecret,
   };
-  const body: Record<string, unknown> = { message, history, limit: 5 };
+  const body: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
   if (shopName) body.shop = shopName;
   else if (shopId) body.shop = shopId;
   if (itemId) body.item_id = itemId;
@@ -142,8 +142,11 @@ async function callBot(params: {
   // ⚡ Phase 1A — ส่ง URL รูป/วิดีโอให้ bot ใช้ Gemini vision อ่าน
   if (images && images.length > 0) body.images = images;
   // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
-  const useV2 = await shouldUseChatV2();
-  if (useV2) body.use_v2 = true;
+  //    v3 มี priority เหนือ v2
+  const useV3 = await shouldUseChatV3();
+  const useV2 = !useV3 && await shouldUseChatV2();
+  if (useV3) body.use_v3 = true;
+  else if (useV2) body.use_v2 = true;
 
   const MAX_429_RETRIES = 3;
   const RATE_LIMIT_WAIT_MS = 60_000;
@@ -167,8 +170,8 @@ async function callBot(params: {
         throw new Error(`bot ${resp.status}: ${txt.slice(0, 200)}`);
       }
       const data = await resp.json();
-      // ⚡ chat_engine — บันทึก engine ที่ใช้ (อ่านจาก config ตอนส่ง use_v2)
-      data.chat_engine = useV2 ? "v2" : "legacy";
+      // ⚡ chat_engine — บันทึก engine ที่ใช้ (อ่านจาก config ตอนส่ง use_v2/use_v3)
+      data.chat_engine = useV3 ? "v3" : useV2 ? "v2" : "legacy";
       return data;
     } catch (err) {
       lastErr = err instanceof Error ? err : new Error(String(err));
@@ -432,8 +435,23 @@ export async function closeChat(opts: {
   const processedCount = doc.processed_messages || 0;
   const remainingMsgs = allUserMsgs.slice(processedCount);
 
+  // ⚡ DEBUG — log key values to understand why remaining messages are not processed
+  console.log("[closeChat] DEBUG:", {
+    conversationId,
+    processedCount,
+    allUserMsgs: allUserMsgs.length,
+    remainingMsgs: remainingMsgs.length,
+    docProcessedMessages: doc.processed_messages,
+    docTotalMessages: doc.total_messages,
+    docFinalStatus: doc.final_status,
+    docQaLength: doc.qa?.length,
+    docMockStatus: doc.mock_status,
+    closeCount,
+  });
+
   if (remainingMsgs.length === 0) {
     // ไม่มีคำถามเหลือ → ปิดจบ
+    console.log("[closeChat] No remaining messages → closed");
     return { ok: true, closed: true, reopened: false, finalStatus: "closed" };
   }
 
@@ -461,6 +479,8 @@ export async function closeChat(opts: {
   let finalStatus = "closed";
   let assignedTo: string | null = null;
   let stopped = false;
+  // ⚡ track จำนวนข้อความที่ process จริงใน batch นี้ (กัน mark ข้ามข้อความหลัง handoff)
+  let processedInThisBatch = 0;
 
   // ดึงข้อมูล user parsed (เหมือน replay_conversation)
   const userParsedMap = new Map<string, {
@@ -536,11 +556,19 @@ export async function closeChat(opts: {
 
   for (let i = 0; i < remainingMsgs.length && !stopped; i++) {
     const msg = remainingMsgs[i];
+    processedInThisBatch = i + 1;
     // ⚡ ใช้ toBotText แปลง rich media → tag ส่งบอท (เหมือน shadowbot/botworker)
     const botText = toBotText(msg);
     const userImages = toBotImages(msg);
     const userText = msg.text || "(empty)";
     const qaIndex = processedCount + i;
+
+    console.log(`[closeChat] processing msg ${i + 1}/${remainingMsgs.length}`, {
+      messageId: msg.message_id,
+      userText: userText.slice(0, 80),
+      botText: botText.slice(0, 80),
+      qaIndex,
+    });
 
     try {
       // 1. check trigger — ใช้ botText (แปลง rich media เป็น tag แล้ว)
@@ -704,9 +732,19 @@ export async function closeChat(opts: {
   }
 
   // 5. บันทึกผลลัพธ์
-  const newProcessedCount = processedCount + remainingMsgs.length;
+  // ⚡ ใช้ processedInThisBatch แทน remainingMsgs.length — กัน mark ข้อความหลัง handoff ว่า processed ทั้งที่ไม่ได้ process
+  const newProcessedCount = processedCount + processedInThisBatch;
   const mockStatus: "open" | "closed" =
     finalStatus === "bot_answered" && !stopped ? "closed" : "open";
+
+  console.log("[closeChat] DEBUG result:", {
+    processedInThisBatch,
+    newProcessedCount,
+    finalStatus,
+    stopped,
+    mockStatus,
+    qaLength: qa.length,
+  });
 
   await coll.updateOne(filter, {
     $set: {
@@ -1044,6 +1082,15 @@ export async function batchReplay(opts: {
       }
 
       // บันทึก
+      console.log("[batchReplay] DEBUG:", {
+        convId,
+        messagesLength: messages.length,
+        qaLength: qa.length,
+        processedMessages: qa.length,
+        finalStatus,
+        stopped,
+        stoppedAtHandoff: stopped,
+      });
       await saveLiveAssignment({
         conversation_id: convId,
         shop_id: shopId,

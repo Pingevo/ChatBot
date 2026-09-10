@@ -24,6 +24,7 @@ import { shadowReplyService } from "../src/backend/service/shadowReplyService";
 import { listConversations } from "../src/backend/service/conversationService";
 import { listMessages } from "../src/backend/service/messageService";
 import { serverConfig } from "../src/backend/lib/config";
+import { getBotProductLimit } from "../src/backend/service/systemConfigService";
 import { assertPlatformApiDisabled } from "../src/backend/lib/safety";
 import type { Platform } from "../src/backend/lib/safety";
 
@@ -64,7 +65,7 @@ async function callOurBot(params: {
     "X-Internal-Secret": serverConfig.chatbotInternalSecret,
   };
 
-  const body: Record<string, unknown> = { message, history, limit: 5 };
+  const body: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
   if (shopName) body.shop = shopName;
   else if (shopId) body.shop = shopId;
 

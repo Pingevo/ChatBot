@@ -30,6 +30,8 @@ interface AdminConfig {
   workflow_run_timeout_ms: number;
   // ⚡ G2 — assignment: จ่ายงานให้แอดมินคนเดิม
   assignment_prefer_previous_admin: boolean;
+  // ⚡ Phase 8 — LLM context limit (จำนวนสินค้าที่ส่งเข้า LLM)
+  llm_context_limit: number;
   updated_by: string;
   updated_at: string;
 }
@@ -162,6 +164,8 @@ export default function AdminConfigPage() {
   const [workflowTimeout, setWorkflowTimeout] = useState(1800000);
   // ⚡ G2 — assignment: จ่ายงานให้แอดมินคนเดิม
   const [preferPreviousAdmin, setPreferPreviousAdmin] = useState(true);
+  // ⚡ Phase 8 — LLM context limit
+  const [llmContextLimit, setLlmContextLimit] = useState(30);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -180,6 +184,8 @@ export default function AdminConfigPage() {
       setWorkflowPriority(r.data.config.workflow_priority ?? "workflow_first");
       setWorkflowTimeout(r.data.config.workflow_run_timeout_ms ?? 1800000);
       setPreferPreviousAdmin(r.data.config.assignment_prefer_previous_admin ?? true);
+      // ⚡ Phase 8 — LLM context limit
+      setLlmContextLimit(r.data.config.llm_context_limit ?? 30);
     } catch (err) {
       catchError(err, "โหลดการตั้งค่าไม่สำเร็จ");
     } finally {
@@ -201,7 +207,8 @@ export default function AdminConfigPage() {
       concurrencyLimit !== (config.bot_concurrency_limit ?? 50) ||
       workflowPriority !== (config.workflow_priority ?? "workflow_first") ||
       workflowTimeout !== (config.workflow_run_timeout_ms ?? 1800000) ||
-      preferPreviousAdmin !== (config.assignment_prefer_previous_admin ?? true)
+      preferPreviousAdmin !== (config.assignment_prefer_previous_admin ?? true) ||
+      llmContextLimit !== (config.llm_context_limit ?? 30)
     : false;
 
   async function handleSave() {
@@ -226,6 +233,8 @@ export default function AdminConfigPage() {
         workflow_run_timeout_ms: workflowTimeout,
         // ⚡ G2 — assignment
         assignment_prefer_previous_admin: preferPreviousAdmin,
+        // ⚡ Phase 8 — LLM context limit
+        llm_context_limit: llmContextLimit,
       });
       setConfig(r.data.config);
       toast.success("บันทึกการตั้งค่าแล้ว");
@@ -578,6 +587,35 @@ export default function AdminConfigPage() {
                 ปิดถ้าอยากกระจายงานเท่ากัน (round-robin) ·
                 โหมด round-robin ตั้งค่าเพิ่มได้ที่หน้า Assignment Config
               </div>
+            </div>
+          </div>
+        </ConfigSection>
+
+        {/* ⚡ Phase 8 — LLM Context Limit */}
+        <ConfigSection
+          title="LLM Context Limit"
+          icon={<Sliders size={14} />}
+          description="จำนวนสินค้าสูงสุดที่ส่งเป็น context ให้ LLM (แยกจาก frontend display)"
+        >
+          <div className="space-y-4">
+            <div className="flex items-center gap-4">
+              <MinimalSlider
+                value={llmContextLimit}
+                min={10}
+                max={50}
+                step={5}
+                onChange={(v) => editable && setLlmContextLimit(v)}
+                disabled={!editable}
+                format={(v) => `${v} ชิ้น`}
+              />
+              <div className="text-sm font-mono text-text w-16 text-right">
+                {llmContextLimit}
+              </div>
+            </div>
+            <div className="text-[11px] text-text-muted">
+              ค่าสูงขึ้น = LLM เห็นสินค้ามากขึ้น (ครอบคลุมมากขึ้น) แต่เพิ่ม token cost ·
+              ค่าต่ำลง = ประหยัด token แต่อาจพลาดสินค้าที่เกี่ยวข้อง ·
+              แยกจากจำนวนการ์ดสินค้าที่แสดงในหน้าแชท (ใช้ค่าจาก request limit)
             </div>
           </div>
         </ConfigSection>

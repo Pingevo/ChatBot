@@ -316,14 +316,16 @@ def _clean_description(desc: str, message: str = "") -> str:
     # แมปคำถาม → sections ที่เกี่ยวข้อง
     warranty_kw = ("รับประกัน", "ประกัน", "เคลม", "warranty", "claim",
                    "ศูนย์", "ซ่อม", "เปลี่ยน", "รับคืน", "คืนสินค้า")
-    spec_kw = ("สเปก", "spec", "specification", "รายละเอียด", "detail",
+    spec_kw = ("สเปก", "สเปค", "spec", "specification", "รายละเอียด", "detail",
                "ข้อมูลสินค้า", "จอ", "กล้อง", "แบตเตอรี่", "cpu", "ram", "rom",
                "ความจุ", "หน่วยความจำ", "ระบบปฏิบัติการ", "เชื่อมต่อ", "เครือข่าย",
                "สี", "ขนาด", "น้ำหนัก", "อุปกรณ์ในกล่อง", "ในกล่อง", "box",
                "ข้อมูลตัวเครื่อง", "มัลติมีเดีย", "เซ็นเซอร์",
                "เปรียบเทียบ", " vs ", "เทียบ", "compare", "เทียบกับ",
                "ของแถม", "แถม", "gift", "free", "โปรโมชัน", "promotion",
-               "อุปกรณ์", "accessories", "ฟรี", "คู่มือ", "แท่นชาร์จ", "สายชาร์จ")
+               "อุปกรณ์", "accessories", "ฟรี", "คู่มือ", "แท่นชาร์จ", "สายชาร์จ",
+               # มอก. (TISI standard) — ลูกค้าถามเรื่อง มอก. ต้องเห็น description ที่มี มอก.
+               "มอก.", "มอก", "tisi", "มาตรฐาน",)
     shipping_kw = ("จัดส่ง", "ส่งสินค้า", "เวลาทำการ", "บริการแชท",
                    "shipping", "delivery", "เปิดทำการ", "ตัดรอบ")
 
@@ -349,6 +351,15 @@ def _clean_description(desc: str, message: str = "") -> str:
     )
     want_product = any(kw in msg_lower for kw in product_kw)
     if want_product:
+        want_spec = True
+
+    # ⚡ Model code detection — ถ้า message มี alphanumeric token (เช่น "ctl301", "biokoop")
+    #   ที่ดูเหมือนชื่อรุ่นสินค้า → ถือว่าเป็น want_spec=True
+    #   กัน case: ลูกค้าพิมพ์ "ctl301" → _clean_description กรอง desc ออก → LLM2 ไม่เห็น desc
+    #   → พ่น "ไม่มีรายละเอียดเพิ่มเติม" → trigger web search cascade พัง
+    _model_code_tokens = re.findall(r"[A-Za-z]+\d+[A-Za-z]*", msg_lower)
+    _model_code_tokens = [t for t in _model_code_tokens if len(t) >= 4]
+    if _model_code_tokens:
         want_spec = True
 
     # ถาม "รับประกันกี่ปี" → ข้อมูลอยู่ใน warranty field ของ product card อยู่แล้ว
@@ -476,6 +487,39 @@ def _clean_description(desc: str, message: str = "") -> str:
     return result[:3000]
 
 
+def _shopee_stock(model_doc: dict) -> int:
+    """⚡ คำนวณ Shopee stock จริงจาก model doc หรือ doc.
+
+    อ่านจาก stock_info_v2.summary_info.total_available_stock เป็นหลัก
+    (เป็นค่า stock รวมรุ่นย่อยที่ Shopee คำนวณให้ — ใช้ตอนแนะนำขายได้จริง)
+    fallback ไปยัง stock_info_v2.shopee_stock[].stock ถ้า summary_info ไม่มี
+
+    Args:
+        model_doc: dict ของ 1 model entry ใน doc["model"] หรือ doc เอง
+
+    Returns:
+        stock จาก summary_info.total_available_stock (0 ถ้า field ไม่มี)
+    """
+    try:
+        si = (model_doc or {}).get("stock_info_v2") or {}
+        # 1. ลอง summary_info.total_available_stock ก่อน (ค่าจริงจาก Shopee)
+        summary = si.get("summary_info") or {}
+        total_available = summary.get("total_available_stock", 0)
+        if total_available and isinstance(total_available, (int, float)):
+            return int(total_available)
+        # 2. fallback ไป shopee_stock[].stock (กรณี summary_info ไม่มี)
+        shopee_stock_list = si.get("shopee_stock") or []
+        if not shopee_stock_list or not isinstance(shopee_stock_list, list):
+            return 0
+        return sum(
+            (entry.get("stock", 0) or 0)
+            for entry in shopee_stock_list
+            if isinstance(entry, dict)
+        )
+    except Exception:
+        return 0
+
+
 def to_product_card(doc: dict, message: str = "") -> dict:
     """ย่อสินค้า 1 รายการเป็น 'card' ขนาดเล็กใช้เป็น context ส่ง LLM.
 
@@ -486,12 +530,17 @@ def to_product_card(doc: dict, message: str = "") -> dict:
     doc = _to_serializable(doc)
     brand = (doc.get("brand") or {}).get("original_brand_name", "")
     price = _price_range(doc)
-    # คำนวณ total stock จาก stock_info_v2 ของทุก model
+    # คำนวณ total stock จาก summary_info.total_available_stock ของทุก model
+    # ⚡ ใช้ summary_info.total_available_stock (ค่าจริงจาก Shopee) — ไม่ใช้ shopee_stock[].stock
+    #   ถ้ามี model → รวม stock ทุกรุ่นย่อย (รุ่นใดมี stock ก็ถือว่าสินค้ามี stock)
+    #   ถ้าไม่มี model → อ่านจาก doc.stock_info_v2.summary_info.total_available_stock
     total_stock = 0
-    for m in (doc.get("model") or []):
-        si = m.get("stock_info_v2") or {}
-        summary = si.get("summary_info") or {}
-        total_stock += summary.get("total_available_stock", 0) or 0
+    models = doc.get("model") or []
+    if models:
+        for m in models:
+            total_stock += _shopee_stock(m)
+    else:
+        total_stock = _shopee_stock(doc)
     return {
         "item_id": doc.get("item_id"),
         "name": doc.get("item_name"),
@@ -530,18 +579,19 @@ def to_product_card(doc: dict, message: str = "") -> dict:
 
 
 def _is_sold_out(doc: dict) -> bool:
-    """ตรวจว่าสินค้า sold out (stock=0 ทุก model) หรือไม่.
+    """ตรวจว่าสินค้า sold out (stock=0 ทุกรุ่นย่อย) หรือไม่.
 
     ใช้กรองสินค้าที่ item_status=NORMAL แต่ Shopee ขึ้น sold out แล้ว
-    (เพราะ stock_info_v2.summary_info.total_available_stock = 0)
+    ⚡ ตรวจจาก summary_info.total_available_stock — ถ้ารุ่นใดมี stock > 0 ถือว่ายังขายได้
     """
-    for m in (doc.get("model") or []):
-        si = m.get("stock_info_v2") or {}
-        summary = si.get("summary_info") or {}
-        if (summary.get("total_available_stock", 0) or 0) > 0:
-            return False
-    # ถ้าไม่มี model เลย หรือทุก model stock=0 → sold out
-    return bool(doc.get("model"))
+    models = doc.get("model") or []
+    if models:
+        for m in models:
+            if _shopee_stock(m) > 0:
+                return False
+        return True
+    # ไม่มี model → ตรวจจาก doc.stock_info_v2
+    return _shopee_stock(doc) <= 0
 
 
 def _extract_product_name_tokens(name: str) -> list[str]:
@@ -959,10 +1009,15 @@ PRODUCT_TYPES: tuple[tuple[str, tuple[str, ...], str], ...] = (
       "เครื่องดูด", "เครื่องกวาด"),
      r"(?:เครื่องดูดฝุ่น|ดูดฝุ่น|vacuum|robot\s*vacuum|หุ่นยนต์กวาด|เครื่องดูด|เครื่องกวาด)"),
     # เครื่องนวด/หมอนนวด
+    # ⚡ 2026-09-22 — เพิ่ม "รองหลัง", "พนักพิงหลัง", "เบาะพิงหลัง" เพื่อจับ "เบาะรองหลัง" (back-support cushion)
+    #   สินค้า Leravan LBB003/LBB001/LB-YK002 อยู่ใน cat_name=Home & Living (อยู่ใน _PRODUCT_TYPE_CATEGORIES ของ massager)
+    #   "รองหลัง" เป็น substring ของทั้ง "เบาะรองหลัง" และ "เบารองหลัง" (พิมพ์ผิด) → จับได้ทั้งคู่
     ("massager",
      ("เครื่องนวด", "นวด", "massage", "หมอนนวด", "หมอนรองคอ", "เครื่องนวดคอ",
-      "เข็มขัดนวด", "แผ่นนวด"),
-     r"(?:เครื่องนวด|หมอนนวด|หมอนรองคอ|เครื่องนวดคอ|เข็มขัดนวด|แผ่นนวด|massage)"),
+      "เข็มขัดนวด", "แผ่นนวด",
+      "รองหลัง", "พนักพิงหลัง", "เบาะพิงหลัง"),
+     r"(?:เครื่องนวด|หมอนนวด|หมอนรองคอ|เครื่องนวดคอ|เข็มขัดนวด|แผ่นนวด|massage"
+     r"|รองหลัง|พนักพิงหลัง|เบาะพิงหลัง)"),
     # ลำโพงซาวด์บาร์
     ("soundbar",
      ("ซาวด์บาร์", "soundbar", "sound bar", "ลำโพงซาวด์บาร์"),
@@ -1266,6 +1321,39 @@ PRODUCT_TYPES: tuple[tuple[str, tuple[str, ...], str], ...] = (
       "ที่โกนหนวดพกพา", "ปัตตาเลี่ยนพกพา"),
      r"(?:mini\s*razor|เครื่องโกนหนวดพกพา|winben\s*mini|"
      r"ที่โกนหนวดพกพา|ปัตตาเลี่ยนพกพา)"),
+    # ⚡ 2026-09-22 — voucher / คูปองของขวัญ / บัตรสมาชิก (cat_name=Tickets, Vouchers & Services)
+    #   สินค้าส่วนใหญ่เป็น iQIYI VIP E-voucher ของร้าน Yaber
+    #   "คูปอง" มี false positive ("ทักแชทรับคูปอง" ในสินค้าอื่น) แต่ cat_name filter กรองออก
+    ("voucher",
+     ("voucher", "e-voucher", "คูปองของขวัญ", "บัตรสมาชิก",
+      "iQIYI", "iqiyi", "แพ็คเกจ", "package voucher"),
+     r"(?:e-voucher|voucher|คูปองของขวัญ|บัตรสมาชิก|"
+     r"iQIYI|iqiyi|แพ็คเกจ|package\s*voucher)"),
+    # ⚡ 2026-09-22 — หม้อหุงข้าว / rice cooker (cat_name=Home Appliances, 17 ชิ้นใน DB)
+    ("rice_cooker",
+     ("หม้อหุงข้าว", "เครื่องหุงข้าว", "rice cooker",
+      "หม้อหุงข้าวไร้สาย", "หม้อหุงข้าวอัจฉริยะ"),
+     r"(?:หม้อหุงข้าว|เครื่องหุงข้าว|rice\s*cooker)"),
+    # ⚡ 2026-09-22 — เครื่องตัดผม / hair clipper (cat_name=Beauty/Health, 34 ชิ้นใน DB)
+    ("hair_clipper",
+     ("เครื่องตัดผม", "hair clipper", "ตัดผม", "เครื่องตัดผมช่าง",
+      "ปัตตาเลี่ยนตัดผม", "electric hair clipper"),
+     r"(?:เครื่องตัดผม|hair\s*clipper|ตัดผม|ปัตตาเลี่ยนตัดผม)"),
+    # ⚡ 2026-09-22 — ทีวีบ็อกซ์ / TV box (cat_name=Home Appliances, 11 ชิ้นใน DB)
+    ("tv_box",
+     ("ทีวีบ็อกซ์", "tv box", "android box", "กล่องแอนดรอยด์",
+      "mi box", "xiaomi box", "กล่องทีวี"),
+     r"(?:ทีวีบ็อกซ์|tv\s*box|android\s*box|mi\s*box|xiaomi\s*box|กล่องแอนดรอยด์|กล่องทีวี)"),
+    # ⚡ 2026-09-22 — เครื่องปั่น / blender (cat_name=Home Appliances, 29 ชิ้นใน DB)
+    ("blender",
+     ("เครื่องปั่น", "blender", "ปั่นผลไม้", "เครื่องปั่นผลไม้",
+      "เครื่องปั่นน้ำผลไม้", "เครื่องปั่นสมูทตี้"),
+     r"(?:เครื่องปั่น|blender|ปั่นผลไม้|เครื่องปั่นผลไม้|เครื่องปั่นน้ำผลไม้)"),
+    # ⚡ 2026-09-22 — ปากกาสไตลัส / stylus (cat_name=Mobile & Gadgets, 7 ชิ้นใน DB)
+    ("stylus",
+     ("ปากกาสไตลัส", "stylus", "smart pen", "ปากกาไอแพด",
+      "stylus pen", "pencil stylus", "ปากกาแท็บเล็ต"),
+     r"(?:ปากกาสไตลัส|stylus|smart\s*pen|ปากกาไอแพด|stylus\s*pen|pencil\s*stylus|ปากกาแท็บเล็ต)"),
 )
 
 
@@ -1312,6 +1400,12 @@ def _detect_product_types(message: str) -> set[str]:
         if any(kw in low for kw in _compat_kws):
             # phone เป็นแค่ compatibility target ไม่ใช่สินค้าที่ลูกค้าต้องการ
             found.discard("phone")
+
+    # ── voucher false positive: "ทักแชทรับคูปอง" เป็นวลีโปรโมชั่น ไม่ใช่คำถามเรื่อง voucher ──
+    # เช่น "ทักแชทรับคูปอง" → ลบ voucher (เป็นวลีโปรโมชั่น ไม่ใช่คำถามสินค้า)
+    # แต่ "มีคูปองของขวัญไหม" → เก็บ voucher (เป็นคำถามจริง)
+    if "voucher" in found and "ทักแชท" in low and "ของขวัญ" not in low:
+        found.discard("voucher")
 
     # ── Charger model prefix/wattage detection ──
     # ถ้า message มี charger model prefix (CTC, CTL, ATC, CMC, AD, ZA, HA, AL)
@@ -1441,19 +1535,73 @@ def _detect_charger_subtype(message: str) -> str | None:
         # เคส QA: "มีอะไหล่หัวฉีดตัวพ่นน้ำไหมคะ" → เดิม "หัว" ลอยๆ โดนจับเป็น adapter → ดึงหัวชาร์จมาเป็น context
         # → LLM แต่งคำอธิบายแคตตาล็อกร้าน ("ร้านขายหัวชาร์จเป็นหลัก")
         "หัวฉีด", "หัวพ่น", "หัวข้อ",
+        # ⚡ Phase 3c (2026-09-19) — compound ที่ tokenizer รวมเป็น token เดียว
+        #   ต้องเพิ่มใน blacklist เพราะ token matching ไม่ช่วย (token เดียว = "สาย" ไม่ใช่ standalone)
+        "สายไฟ", "สายยาง", "สายพาน", "สายลม", "สายฝน",
     )
     _has_other_prod = any(kw in low for kw in _other_prod_kws)
     if not _has_other_prod:
         # "หัว" ลอยๆ → adapter (เช่น "มีหัวไหม", "ขอหัว", "หัว 140w")
-        # ใช้ "หัว" in low แทน regex \b เพราะ \b ไม่ทำงานกับภาษาไทย
-        # false positive กันด้วย _other_prod_kws (หัวใจ/หัวหอย/หัวนาฬิกา/ฯลฯ)
-        if not _has_adapter and "หัว" in low:
-            _has_adapter = True
         # "สาย" ลอยๆ → cable (เช่น "มีสายไหม", "ขอสาย", "สาย 1.5 เมตร")
         # guard: ต้องไม่ใช่ "ไร้สาย" (wireless) — เพราะ "ไร้สาย" = wireless charger
-        # false positive กันด้วย _other_prod_kws (สายตา/สายนาฬิกา/สายคล้อง/ฯลฯ)
-        if not _has_cable and "สาย" in low and "ไร้สาย" not in low and "ไร้ สาย" not in low:
-            _has_cable = True
+        #
+        # ⚡ Phase 3c (2026-09-19) — เปลี่ยนจาก substring match เป็น token-based match
+        #   กัน false positive ของคำผสม "หัวเตียง"/"สายรุ้ง" ฯลฯ
+        #   แต่ pythainlp newmm ตัดบางคำเป็น ['หัว', 'เตียง'] (ไม่ใช่ token เดียว)
+        #   ดังนั้นต้องเช็ค context ด้วย: "หัว" ตามด้วยคำที่ไม่ใช่ charger → ไม่ใช่ shorthand
+        #   และต้องมี substring fallback สำหรับ "มีหัวไหม" (tokenizer รวมเป็น "มีหัว")
+        if _FUZZY_AVAILABLE:
+            _tokens = word_tokenize(low, engine="newmm")
+            _token_set = set(_tokens)
+            # ── "หัว" shorthand ──
+            if not _has_adapter and "หัว" in _token_set:
+                # "หัว" เป็น standalone token — เช็ค context: คำถัดไป
+                _hua_idx = _tokens.index("หัว")
+                _next = _tokens[_hua_idx + 1] if _hua_idx + 1 < len(_tokens) else ""
+                # ยอมรับถ้า: token สุดท้าย, ตามด้วยช่องว่าง, หรือตามด้วยคำที่เกี่ยวกับ charger
+                _charger_ctx = ("ชาร์จ", "ชาร์ต", "w", "แวตต์", "gan", "pd", "qc")
+                if (_hua_idx == len(_tokens) - 1
+                        or _next.isspace()
+                        or any(c in _next.lower() for c in _charger_ctx)):
+                    _has_adapter = True
+            elif not _has_adapter and "หัว" in low:
+                # "หัว" ไม่เป็น standalone token — ฝังอยู่ใน token ที่ tokenizer รวม
+                # (เช่น "มีหัว" → ['มีหัว', 'ไหม'])
+                # ยอมรับถ้ามี token ที่ลงท้ายด้วย "หัว" (เช่น "มีหัว") → shorthand
+                # ไม่ยอมรับถ้ามี token ที่ขึ้นต้นด้วย "หัว" (เช่น "หัวปลี") → compound word
+                if any(t.endswith("หัว") and t != "หัว" for t in _token_set):
+                    _has_adapter = True
+            # ── "สาย" shorthand ──
+            if not _has_cable and "สาย" in _token_set and "ไร้สาย" not in low:
+                # "สาย" เป็น standalone token — เช็ค context
+                _sai_idx = _tokens.index("สาย")
+                _next = _tokens[_sai_idx + 1] if _sai_idx + 1 < len(_tokens) else ""
+                _charger_ctx_s = ("ชาร์จ", "ชาร์ต", "c", "usb", "type", "lightning",
+                                  "micro", "pd", "เมตร", "m", "1.5", "2")
+                if (_sai_idx == len(_tokens) - 1
+                        or _next.isspace()
+                        or any(c in _next.lower() for c in _charger_ctx_s)):
+                    _has_cable = True
+            elif not _has_cable and "สาย" in low and "ไร้สาย" not in low and "ไร้ สาย" not in low:
+                # "สาย" ไม่เป็น standalone token — ฝังอยู่ใน token ที่ tokenizer รวม
+                # (เช่น "สายไหม" → ['มี', 'สายไหม'])
+                # ยอมรับถ้ามี token ที่ขึ้นต้นด้วย "สาย" และส่วนที่เหลือสั้น (≤3 ตัวอักษร)
+                # เช่น "สายไหม" (เหลือ 3 ตัว) → shorthand + คำถาม
+                # ไม่ยอมรับถ้าเป็น compound word ที่ tokenizer รวมเป็น token เดียว
+                # เช่น "สายไฟ" → ['สายไฟ'] → "สาย" ไม่ใช่ standalone token
+                # แต่ "สายไฟ" ก็ไม่ได้ขึ้นต้นด้วย "สาย" + ส่วนสั้น เพราะมันเป็น token เดียว
+                # ดังนั้นต้องเช็ค: มี token ที่ขึ้นต้นด้วย "สาย" และไม่ใช่ compound ที่รู้จัก
+                _sai_tokens = [t for t in _token_set
+                               if t.startswith("สาย") and t != "สาย" and t != "ไร้สาย"]
+                # ยอมรับถ้าส่วนที่เหลือหลัง "สาย" สั้น (≤3 ตัวอักษรไทย) → คำถาม/ประธาน
+                if any(len(t) - 3 <= 3 for t in _sai_tokens):
+                    _has_cable = True
+        else:
+            # fallback เมื่อไม่มี pythainlp — ใช้ substring เดิม + blacklist เป็น safety net
+            if not _has_adapter and "หัว" in low:
+                _has_adapter = True
+            if not _has_cable and "สาย" in low and "ไร้สาย" not in low and "ไร้ สาย" not in low:
+                _has_cable = True
     # ── Compatibility constraint: "ใช้กับสาย c to c", "ใช้สาย c to c" ──
     # ถ้า message มี "ใช้กับสาย" หรือ "ใช้สาย" + cable keyword แต่ไม่มี adapter keyword
     # → ลูกค้าถามว่าหัวชาร์จที่ใช้กับสายนี้ได้ไหม (constraint) ไม่ใช่ขอซื้อสาย
@@ -1755,6 +1903,11 @@ def _detect_product_types_fuzzy(message: str) -> set[str]:
         if score >= best_score - 3 and clen >= best_clen - 2:
             result.add(t)
 
+    # ── voucher false positive: "ทักแชทรับคูปอง" เป็นวลีโปรโมชั่น ไม่ใช่คำถามเรื่อง voucher ──
+    # (fuzzy match "คูปอง" กับ "คูปองของขวัญ" ได้ score สูง แต่เป็นวลีโปรโมชั่น)
+    if "voucher" in result and "ทักแชท" in message.lower() and "ของขวัญ" not in message.lower():
+        result.discard("voucher")
+
     return result
 
 
@@ -1829,6 +1982,14 @@ _PRODUCT_TYPE_CATEGORIES: dict[str, tuple[str, ...]] = {
     "car_seat": ("Automobiles", "Mom & Baby"),
     "makeup_mirror": ("Beauty",),
     "mini_razor": ("Beauty",),
+    # ⚡ 2026-09-22 — voucher / คูปองของขวัญ / บัตรสมาชิก (iQIYI VIP E-voucher)
+    "voucher": ("Tickets, Vouchers & Services",),
+    # ⚡ 2026-09-22 — 5 PRODUCT_TYPES ใหม่ (audit ปลอดภัย)
+    "rice_cooker": ("Home Appliances",),
+    "hair_clipper": ("Beauty", "Health"),
+    "tv_box": ("Home Appliances",),
+    "blender": ("Home Appliances",),
+    "stylus": ("Mobile & Gadgets", "Computers & Accessories"),
 }
 
 
@@ -3044,3 +3205,100 @@ def list_shops(db) -> list[str]:
 def list_categories(db) -> list[str]:
     coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
     return sorted(c for c in db[coll_name].distinct("cat_name") if c)
+
+
+# ── มอก. (TISI) certification search ──────────────────────────────────────────
+
+# Pattern สำหรับตรวจ "มอก." (TISI standard) ใน description
+# ต้องมีจุดตามหลัง "มอก" และไม่ใช่ "หมอก." หรือ "เสมอก."
+_TISI_PATTERN = re.compile(r"(?<![หเ])มอก\.")
+
+
+def _has_tisi(text: str) -> bool:
+    """ตรวจว่าข้อความมี 'มอก.' (TISI standard) หรือไม่ (กรอง false positive เช่น หมอก/เสมอกัน)."""
+    if not text:
+        return False
+    return bool(_TISI_PATTERN.search(text))
+
+
+def _extract_tisi_context(text: str, window: int = 80) -> str:
+    """ดึงข้อความรอบ 'มอก.' เพื่อสร้าง context สั้นๆ ส่งให้ LLM/answer."""
+    if not text:
+        return ""
+    m = _TISI_PATTERN.search(text)
+    if not m:
+        return ""
+    start = max(0, m.start() - window)
+    end = min(len(text), m.end() + window)
+    snippet = text[start:end].strip()
+    # ทำความสะอาด: ตัดบรรทัดว่างติดๆ
+    snippet = re.sub(r"\n{3,}", "\n\n", snippet)
+    return snippet
+
+
+def search_tisi_products(
+    db,
+    shop_filter: str | None = None,
+    model_keyword: str | None = None,
+    limit: int = 30,
+) -> list[dict]:
+    """ค้นสินค้าที่มี 'มอก.' (TISI standard) ใน description.
+
+    Args:
+        db: MongoDB database
+        shop_filter: กรองเฉพาะร้านที่ระบุ (optional)
+        model_keyword: ถ้าระบุ → กรองเฉพาะสินค้าที่ชื่อมี keyword นี้ (เช่น "AC65B2")
+        limit: จำนวนสินค้าสูงสุด
+
+    Returns:
+        list[dict] แต่ละ dict มี:
+        - item_id, name, brand, shop, status, tisi_context (ข้อความรอบ มอก.)
+        ถ้าไม่พบ → คืน list ว่าง
+    """
+    coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+    collection = db[coll_name]
+
+    # Query: description มี "มอก." — ใช้ regex ที่ไม่ match หมอก/เสมอก
+    # MongoDB PCRE ไม่รองรับ lookbehind บน UTF-8 ทุก version → ดึงกว้างแล้วกรองใน Python
+    query: dict[str, Any] = {
+        "description": {"$regex": r"มอก\.", "$options": "i"},
+    }
+    if shop_filter:
+        query["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
+    if model_keyword:
+        # กรองเฉพาะสินค้าที่ชื่อมี model keyword
+        query["item_name"] = {"$regex": re.escape(model_keyword), "$options": "i"}
+
+    # ดึงเฉพาะฟิลด์ที่จำเป็น (ไม่ต้องดึง description เต็ม — ดึงแค่บางส่วน)
+    tisi_projection = {
+        "_id": 0,
+        "item_id": 1,
+        "item_name": 1,
+        "item_status": 1,
+        "brand.original_brand_name": 1,
+        "shopname": 1,
+        "description": 1,
+    }
+
+    cursor = collection.find(query, tisi_projection).limit(limit * 3)  # ดึงเผื่อกรอง false positive
+    docs = list(cursor)
+
+    # กรอง false positive ใน Python (หมอก/เสมอกัน ไม่ใช่ มอก.)
+    results: list[dict] = []
+    for doc in docs:
+        desc = doc.get("description") or ""
+        if not _has_tisi(desc):
+            continue
+        brand = (doc.get("brand") or {}).get("original_brand_name", "")
+        results.append({
+            "item_id": doc.get("item_id"),
+            "name": doc.get("item_name", ""),
+            "brand": brand,
+            "shop": doc.get("shopname", ""),
+            "status": doc.get("item_status", ""),
+            "tisi_context": _extract_tisi_context(desc),
+        })
+        if len(results) >= limit:
+            break
+
+    return results

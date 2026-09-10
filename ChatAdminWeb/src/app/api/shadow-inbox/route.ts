@@ -16,7 +16,7 @@ import { json, error, readJson } from "@/backend/lib/http";
 import { shadowReplyService } from "@/backend/service/shadowReplyService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { serverConfig } from "@/backend/lib/config";
-import { shouldUseChatV2 } from "@/backend/service/systemConfigService";
+import { shouldUseChatV2, shouldUseChatV3, getBotProductLimit } from "@/backend/service/systemConfigService";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import type { Platform } from "@/backend/lib/safety";
 
@@ -33,6 +33,7 @@ async function callOurBot(params: {
   shopName?: string;
   images?: string[];
   use_v2?: boolean;
+  use_v3?: boolean;
 }): Promise<{
   answer: string;
   source?: string;
@@ -43,7 +44,7 @@ async function callOurBot(params: {
   products?: unknown[];
   image_desc?: string;
 }> {
-  const { platform, message, history, shopId, shopName, images, use_v2 } = params;
+  const { platform, message, history, shopId, shopName, images, use_v2, use_v3 } = params;
   // ใช้ platform-specific bot URL (shopee/tiktok/lazada แยกกัน)
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
@@ -55,13 +56,15 @@ async function callOurBot(params: {
 
   // ⚠️ Python bot รับ field "shop" (ชื่อร้าน) ไม่ใช่ "shop_id" (ตัวเลข)
   // ถ้ามี shopName ใช้เป็นหลัก ถ้าไม่มี fallback เป็น shopId
-  const body: Record<string, unknown> = { message, history, limit: 5 };
+  const body: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
   if (shopName) body.shop = shopName;
   else if (shopId) body.shop = shopId;
   // ⚡ A2 — ส่ง current-turn images ให้ bot (ถ้ามี)
   if (images && images.length > 0) body.images = images;
-  // ⚡ chat_v2 — ส่ง use_v2 เพื่อบังคับใช้ chat_v2 (replay test)
-  if (use_v2) body.use_v2 = true;
+  // ⚡ chat_v3 — ส่ง use_v3 เพื่อบังคับใช้ chatbotv3 (มี priority เหนือ v2)
+  if (use_v3) body.use_v3 = true;
+  // ⚡ chat_v2 — ส่ง use_v2 เพื่อบังคับใช้ chat_v2 (replay test) — ไม่ส่งถ้า v3
+  else if (use_v2) body.use_v2 = true;
 
   const resp = await fetch(url, {
     method: "POST",
@@ -163,6 +166,8 @@ export async function POST(req: NextRequest) {
     platform?: string;
     // ⚡ chat_v2 — บังคับใช้ chat_v2 (สำหรับ replay test)
     use_v2?: boolean;
+    // ⚡ chat_v3 — บังคับใช้ chatbotv3 (สำหรับ replay test)
+    use_v3?: boolean;
   }>(req);
 
   if (!body) return error("body required", 422);
@@ -243,11 +248,16 @@ export async function POST(req: NextRequest) {
   const inboundMessageId = body.inbound_message_id != null ? String(body.inbound_message_id) : undefined;
 
   // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
-  //    ถ้า body ส่ง use_v2 มา explicit → override config
+  //    ถ้า body ส่ง use_v2/use_v3 มา explicit → override config
+  //    v3 มี priority เหนือ v2
   const configUseV2 = await shouldUseChatV2();
-  const useV2 = body.use_v2 === true || (body.use_v2 === undefined && configUseV2);
-  const chatEngine = useV2 ? "v2" : "legacy";
-  const botCaller = useV2
+  const configUseV3 = await shouldUseChatV3();
+  const useV3 = body.use_v3 === true || (body.use_v3 === undefined && configUseV3);
+  const useV2 = !useV3 && (body.use_v2 === true || (body.use_v2 === undefined && configUseV2));
+  const chatEngine = useV3 ? "v3" : useV2 ? "v2" : "legacy";
+  const botCaller = useV3
+    ? (p: Parameters<typeof callOurBot>[0]) => callOurBot({ ...p, use_v3: true })
+    : useV2
     ? (p: Parameters<typeof callOurBot>[0]) => callOurBot({ ...p, use_v2: true })
     : callOurBot;
 

@@ -378,6 +378,7 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
         - ship_by_date: str (วันที่ส่งกำหนด ภาษาไทย)
         - pickup_done_time: str (วันที่ขนส่งรับพัสดุ ภาษาไทย)
         - delivery_time: str (วันที่ส่งถึง ภาษาไทย — จาก update_time เมื่อ COMPLETED)
+        - delivery_time_raw: int|None (unix ts ของวันที่ส่งถึง — None ถ้ายังไม่ส่งมอบ/ยกเลิก)
         - update_time: str (วันที่อัปเดตล่าสุด ภาษาไทย)
         - recipient_address: str (ที่อยู่ลูกค้า ปกปิด sensitive)
         - total_amount: float
@@ -472,8 +473,10 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
 
         # วันที่ส่งถึง — ใช้ update_time เมื่อ order_status=COMPLETED หรือ logistics=DELIVERY_DONE
         _delivery_time = "ไม่ระบุ"
+        _delivery_time_raw: Any = None
         if order_status_raw == "COMPLETED" or logistics_status_raw == "LOGISTICS_DELIVERY_DONE":
             _delivery_time = _format_unix_ts(_update_time)
+            _delivery_time_raw = _update_time
 
         return {
             "order_sn": doc.get("order_sn") or order_sn,
@@ -494,6 +497,7 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
             "ship_by_date": _format_unix_ts(_ship_by_date),
             "pickup_done_time": _format_unix_ts(_pickup_done_time),
             "delivery_time": _delivery_time,
+            "delivery_time_raw": _delivery_time_raw,  # ⚡ Warranty-Delivery — unix ts สำหรับ warranty calc (None ถ้ายังไม่ส่งมอบ)
             "update_time": _format_unix_ts(_update_time),
             "recipient_address": _format_address(_recipient_address) if isinstance(_recipient_address, dict) else "",
             "estimated_shipping_fee": float(_estimated_shipping_fee) if _estimated_shipping_fee else 0.0,

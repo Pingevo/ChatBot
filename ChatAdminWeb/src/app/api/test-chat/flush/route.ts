@@ -13,7 +13,7 @@ import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { serverConfig } from "@/backend/lib/config";
-import { shouldUseChatV2 } from "@/backend/service/systemConfigService";
+import { shouldUseChatV2, shouldUseChatV3, getBotProductLimit } from "@/backend/service/systemConfigService";
 import type { Platform } from "@/backend/service/systemConfigService";
 
 export async function POST(req: NextRequest) {
@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
   const shop = body.shop ? String(body.shop) : "";
   const platform: Platform = (String(body.platform || "shopee") as Platform);
   const history = body.history || [];
-  const limit = body.limit || 10;
+  const limit = body.limit || (await getBotProductLimit());
 
   // 1. ดึง messages จาก buffer_messages
   const coll = await getCollection(COLLECTIONS.bufferMessages);
@@ -85,9 +85,11 @@ export async function POST(req: NextRequest) {
     const origin = new URL(req.url).origin;
     payload.images = allImages.map((u) => (u.startsWith("http") ? u : `${origin}${u}`));
   }
-  // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
-  const useV2 = await shouldUseChatV2();
-  if (useV2) payload.use_v2 = true;
+  // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม) — v3 มี priority เหนือ v2
+  const useV3 = await shouldUseChatV3();
+  const useV2 = !useV3 && await shouldUseChatV2();
+  if (useV3) payload.use_v3 = true;
+  else if (useV2) payload.use_v2 = true;
 
   try {
     const resp = await fetch(url, {

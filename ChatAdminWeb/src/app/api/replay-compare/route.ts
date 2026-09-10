@@ -15,7 +15,7 @@ export const maxDuration = 300;
 import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error } from "@/backend/lib/http";
-import { shouldUseChatV2 } from "@/backend/service/systemConfigService";
+import { shouldUseChatV2, shouldUseChatV3 } from "@/backend/service/systemConfigService";
 import { readFile, writeFile, readdir, stat } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
@@ -117,6 +117,7 @@ async function runReplayScript(params: {
   shop?: string;
   conv?: string;
   useV2?: boolean;
+  useV3?: boolean;
 }): Promise<{ pid: number; logPath: string; savePath: string; alreadyRunning: boolean }> {
   const limit = params.limit ?? 50;
   const oldest = params.oldest ?? true;
@@ -156,8 +157,10 @@ async function runReplayScript(params: {
   if (params.conv) {
     args.push("--conv", params.conv);
   }
-  // ⚡ chat_engine — ส่ง --v2 flag ถ้า config เลือก "v2" หรือ caller บังคับ
-  if (params.useV2) {
+  // ⚡ chat_engine — ส่ง --v2/--v3 flag ถ้า config เลือก หรือ caller บังคับ (v3 มี priority เหนือ v2)
+  if (params.useV3) {
+    args.push("--v3");
+  } else if (params.useV2) {
     args.push("--v2");
   }
 
@@ -223,13 +226,15 @@ export async function POST(req: NextRequest) {
   try { body = await req.json(); } catch { /* empty */ }
 
   if (body.action === "run") {
-    // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
-    const configUseV2 = await shouldUseChatV2();
+    // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม) — v3 มี priority เหนือ v2
+    const configUseV3 = await shouldUseChatV3();
+    const configUseV2 = !configUseV3 && await shouldUseChatV2();
     const result = await runReplayScript({
       limit: body.limit,
       oldest: body.oldest,
       shop: body.shop,
       useV2: configUseV2,
+      useV3: configUseV3,
     });
     if (result.alreadyRunning) {
       return json({
@@ -245,12 +250,14 @@ export async function POST(req: NextRequest) {
     if (!body.conversation_id || typeof body.conversation_id !== "string") {
       return error("conversation_id is required for run_conv", 422);
     }
-    // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
-    const configUseV2 = await shouldUseChatV2();
+    // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม) — v3 มี priority เหนือ v2
+    const configUseV3 = await shouldUseChatV3();
+    const configUseV2 = !configUseV3 && await shouldUseChatV2();
     const result = await runReplayScript({
       conv: String(body.conversation_id),
       shop: body.shop,
       useV2: configUseV2,
+      useV3: configUseV3,
     });
     if (result.alreadyRunning) {
       return json({

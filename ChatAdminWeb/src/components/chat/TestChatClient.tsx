@@ -35,6 +35,7 @@ import { RateBox } from "@/components/shadow/RateBox";
 import { imageViewer } from "@/components/ui/ImageViewer";
 import { quickReplyService, type QuickReplyRow } from "@/lib/services";
 import { DateBanner, dayKey } from "@/components/shadow/DateBanner";
+import { api } from "@/lib/apiClient";
 
 interface Product {
   item_id?: string;
@@ -364,6 +365,17 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   // ⚡ Phase 2E — quick replies (floating chips above text box)
   const [quickReplies, setQuickReplies] = useState<QuickReplyRow[]>([]);
   const [limit, setLimit] = useState(10);
+  // ⚡ ดึง llm_context_limit จาก config เป็น default (แทน hardcode 10)
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await api().get<{ config: { llm_context_limit?: number } }>("/config");
+        if (res.data?.config?.llm_context_limit) {
+          setLimit(res.data.config.llm_context_limit);
+        }
+      } catch { /* ignore — ใช้ default 10 */ }
+    })();
+  }, []);
   const [sending, setSending] = useState(false);
   // ⚡ handoff state — หลังส่งต่อแอดมิน บอทจะไม่ตอบจนกว่าจะกด "ปิดแชท"
   const [handedOff, setHandedOff] = useState(false);
@@ -2487,7 +2499,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                                 <span className="text-text-muted">{s.model}</span>
                               </div>
                               <div className="text-text-muted mt-0.5">
-                                tokens: in={s.tokens_in} out={s.tokens_out} · {s.time_s}s · ${s.cost_usd.toFixed(6)} (฿{s.cost_thb})
+                                tokens: in={s.tokens_in ?? 0} out={s.tokens_out ?? 0} · {s.time_s ?? 0}s · ${(s.cost_usd ?? 0).toFixed(6)} (฿{s.cost_thb ?? 0})
                               </div>
                               {/* Input — collapsible */}
                               {s.input && Object.keys(s.input).length > 0 && (

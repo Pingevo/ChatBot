@@ -69,8 +69,14 @@ export interface SystemConfigDoc extends Document {
   // === Chat Engine — เลือก logic ตอบของบอท ===
   // "legacy" = app.py chat() (default, ปลอดภัย)
   // "v2"     = chat_v2.py (pipeline ใหม่ 8 stages)
+  // "v3"     = chatbotv3/ (OpenRouter-first, LLM ตอบเอง + match สินค้าจริง)
   // มีผลทุกหน้า: shadowbot, botworker, test-assignment, live-assignment, replay-compare, testchat
-  chat_engine: 'legacy' | 'v2';
+  chat_engine: 'legacy' | 'v2' | 'v3';
+
+  // ⚡ Phase 8 — LLM context limit (จำนวนสินค้าสูงสุดที่ส่งเข้า LLM เป็น context)
+  // แยกจาก frontend display limit (req.limit) — ค่านี้ควบคุมว่า LLM เห็นสินค้ากี่ชิ้น
+  // default 30, range 10-50 (ปรับได้จากหน้า config)
+  llm_context_limit: number;
 
   updated_by: string;
   updated_at: Date;
@@ -104,7 +110,9 @@ function getSafeDefaults(): Partial<SystemConfigDoc> {
     tiktok_bot_url: process.env.CHATBOT_BASE_URL_TIKTOK || 'http://127.0.0.1:8011',
     lazada_bot_url: process.env.CHATBOT_BASE_URL_LAZADA || 'http://127.0.0.1:8012',
     // ⚡ chat_engine — default "legacy" (ปลอดภัย), เปลี่ยนได้จากหน้า config
-    chat_engine: (process.env.CHAT_ENGINE as 'legacy' | 'v2') || 'legacy',
+    chat_engine: (process.env.CHAT_ENGINE as 'legacy' | 'v2' | 'v3') || 'legacy',
+    // ⚡ Phase 8 — LLM context limit (default 30, range 10-50)
+    llm_context_limit: Number(process.env.LLM_CONTEXT_LIMIT || 30),
   };
 }
 
@@ -158,6 +166,9 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
 
     // ⚡ chat_engine — "legacy" (default) หรือ "v2"
     chat_engine: dbConfig.chat_engine ?? safeDefaults.chat_engine ?? 'legacy',
+
+    // ⚡ Phase 8 — LLM context limit (default 30, range 10-50)
+    llm_context_limit: dbConfig.llm_context_limit ?? safeDefaults.llm_context_limit ?? 30,
 
     updated_by: dbConfig.updated_by || 'system',
     updated_at: dbConfig.updated_at || new Date(),
@@ -214,6 +225,8 @@ export async function getSystemConfig(forceRefresh = false): Promise<SystemConfi
         lazada_bot_url: safeDefaults.lazada_bot_url ?? 'http://127.0.0.1:8012',
         // ⚡ chat_engine — default "legacy"
         chat_engine: safeDefaults.chat_engine ?? 'legacy',
+        // ⚡ Phase 8 — LLM context limit (default 30)
+        llm_context_limit: safeDefaults.llm_context_limit ?? 30,
         updated_by: 'initial_setup',
         updated_at: new Date(),
       };
@@ -258,6 +271,8 @@ export async function updateSystemConfig(
     'tiktok_bot_url',
     'lazada_bot_url',
     'chat_engine',
+    // ⚡ Phase 8 — LLM context limit (admin-configurable)
+    'llm_context_limit',
   ];
 
   const sanitized: Record<string, unknown> = { updated_by: updatedBy, updated_at: new Date() };
@@ -284,10 +299,34 @@ export async function updateSystemConfig(
  * ใช้ตัดสินใจว่าจะส่ง use_v2=true ให้ bot หรือไม่
  * "legacy" → false (default, ปลอดภัย)
  * "v2"     → true (ใช้ chat_v2 pipeline)
+ * "v3"     → false (ใช้ chatbotv3 — ส่ง use_v3 แทน)
  */
 export async function shouldUseChatV2(): Promise<boolean> {
   const config = await getSystemConfig();
   return config.chat_engine === 'v2';
+}
+
+/**
+ * ⚡ shouldUseChatV3 — อ่าน chat_engine จาก SystemConfig
+ * ใช้ตัดสินใจว่าจะส่ง use_v3=true ให้ bot หรือไม่
+ * "legacy" → false (default, ปลอดภัย)
+ * "v2"     → false (ใช้ chat_v2 — ส่ง use_v2 แทน)
+ * "v3"     → true (ใช้ chatbotv3 pipeline)
+ */
+export async function shouldUseChatV3(): Promise<boolean> {
+  const config = await getSystemConfig();
+  return config.chat_engine === 'v3';
+}
+
+/**
+ * ⚡ getBotProductLimit — อ่าน llm_context_limit จาก SystemConfig
+ * ใช้แทนค่า hardcode 5 หรือ 10 ในทุกหน้าที่เรียก bot
+ * (shadow-inbox, test-assignment, live-assignment, test-chat, generate-all-shadow)
+ * default 30, range 10-50 — ปรับได้จากหน้า config
+ */
+export async function getBotProductLimit(): Promise<number> {
+  const config = await getSystemConfig();
+  return config.llm_context_limit ?? 30;
 }
 
 /**
@@ -403,6 +442,8 @@ export const ADMIN_CONFIGURABLE_KEYS = [
   'workflow_run_timeout_ms',
   // ⚡ G2 — assignment: จ่ายงานให้แอดมินคนเดิมที่เคยตอบ หรือ round-robin
   'assignment_prefer_previous_admin',
+  // ⚡ Phase 8 — LLM context limit (จำนวนสินค้าที่ส่งเข้า LLM)
+  'llm_context_limit',
 ] as const;
 
 export type AdminConfigKey = (typeof ADMIN_CONFIGURABLE_KEYS)[number];

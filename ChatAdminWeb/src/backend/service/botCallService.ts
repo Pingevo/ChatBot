@@ -4,7 +4,7 @@
 // ถ้าทั้งคู่ import กันตรงๆ จะเกิด circular dependency → แยก callBot เป็น module ตรงกลาง
 import { serverConfig } from "../lib/config";
 import type { Platform } from "./systemConfigService";
-import { shouldUseChatV2 } from "./systemConfigService";
+import { shouldUseChatV2, shouldUseChatV3, getBotProductLimit } from "./systemConfigService";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 
 export interface BotCallParams {
@@ -33,8 +33,8 @@ export interface BotCallResponse {
   // ⚡ Phase 1A multimodal — description ที่สกัดจากรูปใน turn นี้
   //    caller เก็บไว้ใน message doc เพื่อส่งกลับใน history ของ turn ถัดไป
   image_desc?: string;
-  // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน (legacy / v2)
-  chat_engine?: "legacy" | "v2";
+  // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน (legacy / v2 / v3)
+  chat_engine?: "legacy" | "v2" | "v3";
 }
 
 /**
@@ -74,6 +74,15 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
   const ticketState = await resolveTicketState(params.conversationId, params.simulate);
   // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
   const useV2 = await shouldUseChatV2();
+  const useV3 = await shouldUseChatV3();
+  // ⚡ Phase 8 — อ่าน llm_context_limit จาก SystemConfig (หน้า config ควบคุม)
+  const { getSystemConfig } = await import("./systemConfigService");
+  const sysConfig = await getSystemConfig();
+  const llmContextLimit = sysConfig.llm_context_limit ?? 30;
+  // ⚡ ใช้ค่าเดียวกับ llm_context_limit เป็น limit (frontend display) ด้วย
+  //   ก่อนหน้านี้ไม่ได้ส่ง limit → bot default 10 → shadow inbox เห็นแค่ 10 สินค้า
+  //   ตอนนี้ส่ง limit = llm_context_limit → shadow inbox เห็นสินค้าเท่ากับที่ LLM เห็น
+  const productLimit = await getBotProductLimit();
   const resp = await fetch(url, {
     method: "POST",
     headers: {
@@ -86,6 +95,8 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       // ถ้าไม่มี shopName ใช้ shopId เป็น fallback (อาจไม่กรองร้านได้)
       shop: params.shopName || params.shopId,
       history: params.history,
+      // ⚡ ส่ง limit (frontend display) จาก config — ใช้ค่าเดียวกับ llm_context_limit
+      limit: productLimit,
       // ⚡ Phase 1A multimodal — ส่ง URL รูปให้ bot ใช้ Gemini vision อ่าน
       ...(params.images && params.images.length > 0 ? { images: params.images } : {}),
       // ⚡ Phase 2A — ส่ง ticket_state ให้บอทใช้ตัดสินใจ post-handoff
@@ -93,8 +104,11 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       // ⚡ Phase 2A — ส่ง conversation_id + simulate ให้บอท (สำหรับ handoff API)
       ...(params.conversationId ? { conversation_id: params.conversationId } : {}),
       ...(params.simulate ? { simulate_assignment: true } : {}),
-      // ⚡ chat_engine — ส่ง use_v2=true ถ้า config เลือก "v2"
-      ...(useV2 ? { use_v2: true } : {}),
+      // ⚡ chat_engine — ส่ง use_v2/use_v3 ตามที่ config เลือก (v3 มี priority เหนือ v2)
+      ...(useV3 ? { use_v3: true } : {}),
+      ...(useV2 && !useV3 ? { use_v2: true } : {}),
+      // ⚡ Phase 8 — ส่ง llm_context_limit ให้บอท (จำนวนสินค้าใน LLM context)
+      llm_context_limit: llmContextLimit,
     }),
   });
   if (!resp.ok) throw new Error(`bot call failed: ${resp.status}`);
@@ -108,6 +122,6 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
     cost: typeof data.cost === "number" ? data.cost : undefined,
     products: data.products,
     image_desc: typeof data.image_desc === "string" ? data.image_desc : undefined,
-    chat_engine: useV2 ? "v2" : "legacy",
+    chat_engine: useV3 ? "v3" : useV2 ? "v2" : "legacy",
   };
 }

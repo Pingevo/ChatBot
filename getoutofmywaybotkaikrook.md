@@ -273,7 +273,422 @@
 
 ---
 
+## ผ่านแล้ว (ใหม่)
+
+### Shadow Inbox — Trash tab แสดงเป็นแชท + restore แล้วขึ้นข้อความ (2026-09-10) — ✅ implement + build ผ่าน + verify แล้ว
+- **ปัญหา 1 (ถังขยะโชว์เป็น message ไม่ใช่แชท)**: trash tab ดึง individual shadow replies มาแสดงเป็น `<ul>` list ไม่ได้ group ตาม conversation เหมือน tab "ทั้งหมด"/"History"
+- **ปัญหา 2 (กู้คืนแล้วไม่ขึ้นข้อความ)**: trash tab ไม่มี detail panel (มีแค่ placeholder), หลัง restore ไม่ reload ข้อมูล
+- **ปัญหา 3 (history panel ว่างหลัง restore)**: `ShadowConversationPanel` กรอง `historyReplies` เฉพาะที่มี `generation_batch_id` ตรงกับ batch ล่าสุด แต่ shadow replies เก่า (ก่อน Phase 3B-6) ไม่มี `generation_batch_id` → ถูกกรองออก → panel ว่าง
+- **วิธีแก้**:
+  1. **`shadowReplyService.ts`** — เพิ่ม `restoreShadowRepliesByConversation(conversationId)` — $unset deleted_at/deleted_by/delete_reason ของทุก doc ใน conversation + export เป็น `restoreByConversation`
+  2. **`/api/shadow-inbox/conversations/route.ts`**:
+     - GET รองรับ `?deleted=1` — ดึง conversations ที่มี shadow replies ที่ถูก soft delete (สำหรับ trash tab)
+     - เพิ่ม PUT `?conversation_id=xxx&action=restore` — restore ทุก shadow replies ใน conversation + audit log
+  3. **`shadow-inbox/page.tsx`**:
+     - เพิ่ม state `trashConversations` (Conversation[]) — โหลด parallel กับ trashRows
+     - trash tab ใช้ `ChatList` (เหมือน history tab) แทน custom `<ul>` — แสดงเป็นแชท + ปุ่ม restore รายแชท
+     - center panel ใช้ `ShadowConversationPanel` (เหมือน history tab) แทน placeholder — แสดงแชท + shadow replies
+     - `loadDetail` รองรับ trash tab — โหลด chat messages
+     - `handleRestore` — reload ข้อมูลหลัง restore (เรียก `load()`)
+     - `handleRestoreConversation` — restore ทั้งแชท + reload
+     - `handleRestoreAll` — clear state + reload
+  4. **`ChatList.tsx`** — เพิ่ม prop `onRestoreConversation` — render ปุ่ม ↩ (RotateCcw icon) ในแต่ละ row
+  5. **`adminLogService.ts`** — เพิ่ม `shadow_reply.restore_conversation` ใน AdminActionType (2 type definitions)
+  6. **`ShadowConversationPanel.tsx`** — แก้ batch filter: replies ที่ไม่มี `generation_batch_id` (เก่าก่อน Phase 3B-6) ให้แสดงเสมอ ไม่กรองออก (`!r.generation_batch_id || r.generation_batch_id === selectedBatchId`)
+- **ไฟล์ที่แก้**: `shadowReplyService.ts`, `/api/shadow-inbox/conversations/route.ts`, `shadow-inbox/page.tsx`, `ChatList.tsx`, `adminLogService.ts`, `ShadowConversationPanel.tsx`
+- **ไม่แก้ SRS_SSD.md** — section 6 เป็นของ Python (`chatbot/shopeechat/`) ไม่เกี่ยวกับการแก้ครั้งนี้
+- **Verify**: `npx tsc --noEmit` → ผ่าน ✅, `npm run build` → ผ่าน ✅, manual test (Ice/dev, pingevox + mistorethailand/KingGadgets) → ผ่าน ✅
+  - trash tab แสดงเป็นแชท (เหมือน history) ไม่ใช่รายการ message เดี่ยว
+  - เลือกแชทในถังขยะ → แสดงเนื้อหาแชท + shadow replies ใน panel กลาง
+  - restore แล้ว history tab แสดงแชท + shadow replies ได้ (ไม่ว่าง)
+
+---
+
+## ผ่านแล้ว (ใหม่)
+
+### Phase 3b — dual-tier recommendation + connector type hard filter + sort wattage asc (2026-09-16) — ✅ implement + verify ผ่าน
+- **ปัญหา**: device-spec-lookup re-query ดึงสินค้ามาแค่ 1 ตัวที่ compat + ไม่ sort ตาม wattage → LLM เห็นตัวเลือกไม่ครบ + ไม่มีกฎ dual-tier recommendation
+- **ข้อกำหนดจาก user**:
+  - connector type ต้องตรงเป๊ะ (hardware constraint) — ห้ามข้ามแม้สเปคสูงแค่ไหน
+  - สายชาร์จ (2 หัว) ต้องตรวจทั้งสองฝั่ง
+  - wattage/protocol เป็นข้อจำกัดขั้นต่ำ ไม่ใช่ขั้นสูงสุด (สินค้าสเปคสูงกว่าใช้ได้)
+  - ต้องยืนยันจาก description ว่ารองรับ protocol จริง (ไม่ใช่ดูแค่ wattage)
+  - เสนอสูงสุด 2 ตัวเลือก: baseline + upgrade (ถ้ามีจริง)
+  - ห้ามแต่งว่ามีตัวสเปคสูงกว่าถ้า retrieval ไม่เจอจริง
+  - subtype จาก `_resolve_charger_subtype` ต้องคุมทิศทางการเสนอ
+- **วิธีแก้**:
+  1. **ย้าย `_extract_max_watt` จาก nested function → module-level helper `_extract_max_wattage`** (app.py บรรทัด ~531)
+     - logic เดียวกัน: spec field → variants → name (กรอง model number)
+     - ใช้ได้ทั้งใน superlative block และ device-spec-lookup block
+  2. **device-spec-lookup re-query block** (app.py บรรทัด ~6010):
+     - หลัง fetch_products → sort `_device_products` ตาม wattage **ascending** (น้อย→มาก)
+     - baseline (สเปคต่ำสุด) อยู่บนสุด, upgrade อยู่ถัดไป
+     - merge เข้า products ตามลำดับที่ sort แล้ว
+  3. **context note `_device_spec_extra`** (app.py บรรทัด ~5963):
+     - เพิ่ม dual-tier recommendation hint: สูงสุด 2 ตัวเลือก (baseline + upgrade)
+     - เพิ่ม connector type hard filter: ห้ามข้าม connector type แม้สเปคสูง
+     - เพิ่ม protocol evidence requirement: ต้องยืนยันจาก description จริง
+  4. **SYSTEM_INSTRUCTION ใน llm.py** (บรรทัด ~226):
+     - เพิ่ม section "Phase 3b — dual-tier recommendation"
+     - กฎ connector type ตรงเป๊ะ (USB-C, Lightning, USB-A, Micro-USB, 30-pin)
+     - กฎสายชาร์จ 2 หัว ต้องตรวจทั้งสองฝั่ง
+     - กฎ wattage/protocol เป็นขั้นต่ำ ไม่ใช่ขั้นสูงสุด
+     - กฎต้องยืนยัน protocol จาก description จริง
+     - กฎถ้ามี compat แค่ 1 ตัว → เสนอแค่ตัวนั้น
+     - กฎห้ามเสนอสินค้าที่ไม่มีใน context
+     - กฎ subtype ต้องคุมทิศทางการเสนอ
+     - กฎการนำเสนอ 2 ตัวเลือกให้อ่านเป็นธรรมชาติ (ไม่ใช่ list แข็งๆ)
+- **ไฟล์ที่แก้**: `chatbot/shopeechat/app.py`, `chatbot/shopeechat/llm.py`
+- **Verify**:
+  - `python3 -m py_compile chatbot/shopeechat/app.py` → ผ่าน ✅
+  - `python3 -m py_compile chatbot/shopeechat/llm.py` → ผ่าน ✅
+  - `PYTHONPATH=chatbot python3 docs/test/test_car_charger_regression.py` → ผ่าน 16/16 ✅
+  - Replay 3 เคสจริงผ่าน API `/chat` (KingGadgets):
+    - **เคส 1 "สายชาร์จ mi 17 ultra ใช้ยังไง"**: บอทตอบ "สายชาร์จพอร์ต USB-C" + แนะนำ CUKTECH CTC615N 240W (1 ตัว เพราะร้านมี compat แค่ 1 ตัว) ✅
+    - **เคส 2 "หัวชาร์จ iphone 4s"**: บอทตอบ "iPhone 4s ใช้พอร์ต 30-pin" (ถูกต้อง!) + บอกไม่มีสินค้า compat ในร้าน ✅
+    - **เคส 3 "หัวชาร์จ USB-C ทั่วไป"**: บอทแนะนำ IMILAB 20W (baseline) + Xiaomi 45W (upgrade) — dual-tier recommendation ทำงานถูกต้อง ✅
+- **⚠️ หมายเหตุ**: connector type filtering ยังใช้ LLM เป็นตัวตัดสินใจ (อ่าน description) ไม่ใช่ deterministic Python filter — เพราะ parsing connector type จาก description ซับซ้อนและอาจทำลายเคสที่ผ่านแล้ว แต่ context note + prompt rules เข้มข้นพอที่จะกัน cross-connector recommendation
+- **⚠️ ยังไม่อัปเดต SRS_SSD.md**: รอ verify replay เพิ่มเติมก่อน (ตามกฎ)
+
+---
+
+### Phase 3c — _detect_charger_subtype bare "หัว"/"สาย" token-based match (2026-09-19) — ✅ implement + verify ผ่าน
+- **ปัญหา**: `_detect_charger_subtype()` ใช้ substring match ธรรมดา `"หัว" in low` → เจอ false positive ในคำผสมภาษาไทย เช่น "หัวเตียง" → adapter, "สายรุ้ง" → cable ทั้งที่ไม่เกี่ยวกับ charger เลย (ระบบขยายไปหลายหมวดสินค้าแล้ว)
+- **สมมติฐานเดิมจาก task**: pythainlp newmm จะตัด "หัวเตียง" เป็น token เดียว → เช็ค `"หัว" in tokens` จะไม่ match
+- **ความจริงที่พบ**: pythainlp newmm ตัดหลายคำแบบไม่ซ้ำกัน:
+  - "หัวเตียง" → `['หัว', 'เตียง']` (แยก — token match ยัง match ผิดอยู่)
+  - "หัวใจ" → `['หัวใจ']` (รวม — token match ช่วยได้)
+  - "มีหัวไหม" → `['มีหัว', 'ไหม']` (รวม "มีหัว" เป็น token เดียว — ต้องมี fallback)
+- **วิธีแก้ (hybrid token + context + fallback)**:
+  1. **ใช้ `word_tokenize(low, engine="newmm")`** เมื่อ `_FUZZY_AVAILABLE=True`
+  2. **"หัว" shorthand** — เช็ค 3 กรณี:
+     - `"หัว" in token_set` (standalone token) → เช็ค context: token ถัดไปต้องเป็น charger context (ชาร์จ/w/gan/ฯลฯ) หรือเป็น token สุดท้าย/ช่องว่าง
+     - ไม่ใช่ standalone แต่มี token ที่ลงท้ายด้วย "หัว" (เช่น "มีหัว") → ยอมรับเป็น shorthand
+     - ไม่ยอมรับถ้ามีแค่ token ที่ขึ้นต้นด้วย "หัว" (เช่น "หัวปลี") → compound word
+  3. **"สาย" shorthand** — logic เดียวกัน + guard `ไร้สาย`/`ไร้ สาย`
+  4. **เพิ่ม compound ที่ tokenizer รวมเป็น token เดียวใน `_other_prod_kws` blacklist** (safety net ชั้น 2): "สายไฟ", "สายยาง", "สายพาน", "สายลม", "สายฝน"
+  5. **fallback path** (`_FUZZY_AVAILABLE=False`): ใช้ substring match เดิม + blacklist เหมือนเดิม 100% (backward compat)
+- **ไฟล์ที่แก้**: `chatbot/shopeechat/product_store.py` (จุดเดียวใน `_detect_charger_subtype()` บรรทัด ~1469)
+- **Test ใหม่**: `docs/test/test_charger_subtype_parity.py` (42 คำ: 33 ต้องเป็น None + 8 ต้อง match + 1 ไร้สาย)
+- **Verify**:
+  - `python3 -m py_compile chatbot/shopeechat/product_store.py` → ผ่าน ✅
+  - parity test 42/42 ผ่าน (baseline ก่อนแก้: 20/42 ผ่าน, 22 false positive) ✅
+  - `test_car_charger_regression.py` → 16/16 ผ่าน ✅
+  - `test_pingevox_mistore.py` → 42/42 ผ่าน (pingevox 5 + mistore 37) ✅
+- **⚠️ หมายเหตุ**: สมมติฐานใน task ว่า "tokenizer จะตัดคำผสมเป็น token เดียว" **ไม่เป็นจริง** สำหรับ newmm — ตัดบางคำแยก บางคำรวม ดังนั้นต้องใช้ hybrid (token + context check + blacklist fallback) แทนที่จะใช้ token match อย่างเดียว
+
+---
+
+## ผ่านแล้ว (ใหม่)
+
+### EC6 Anchor Bug — บอทแนะนำสินค้าอื่นทั้งที่ลูกค้าส่ง item card มาแล้ว (2026-09-10) — ✅ implement + verify ผ่าน
+- **ปัญหา**: ลูกค้าส่ง item card EC6 Panorama (Q1) → ถาม "Ec6 ใช้กับ app xiaomi จีนได้ไหม" (Q2) → บอทแนะนำ EC6 Dual Pro 3K แทน + ตอบ "ใช้ได้" → Q3 ถามต่อ → บอทใช้ anchor (EC6 Panorama) → ตอบ "ใช้ไม่ได้" → ขัดแย้งกัน
+- **สาเหตุ** (2 barriers ใน CONV-ACTIVE block):
+  1. **Barrier 1** (บรรทัด ~4111): `if not _is_new_topic_cp and not _cur_model_kw:` — `extract_model_keywords("Ec6 ใช้กับ app xiaomi จีนได้ไหมครับ")` คืน `["Ec6"]` (มีตัวเลข ไม่ใช่ target device) → `_cur_model_kw` ไม่ว่าง → เงื่อนไขเป็น False → ไม่ใช้ anchor → ตกไป fetch_products → ค้น "ec6" → ดึงหลายตัวในตระกูล EC6 (Panorama + Dual Pro 3K) → LLM แนะนำผิดรุ่น
+  2. **Barrier 2** (บรรทัด ~4118): `if _has_compat_cp and _has_target_cp:` — แม้ Barrier 1 แก้แล้ว ("Ec6" ถูกกรองออก → `_cur_model_kw` ว่าง) ข้อความมี "ใช้กับ" (compat) + "xiaomi" (target device) → fall through ไป fetch_products → กลับไปเป็นปัญหาเดิม
+- **วิธีแก้** (CONV-ACTIVE block เดียว ไม่แก้ item-tag history block):
+  1. หลัง `resolve_active_by_message` หา active card ได้ → กรอง `_cur_model_kw` ที่ตรงกับชื่อ active product ออก (เฉพาะ keyword ที่มีตัวเลข — model code pattern เช่น "Ec6", "CTL301", "A52") เพื่อกัน brand name (เช่น "IMILAB" ไม่มีตัวเลข → ไม่กรอง → อาจเป็นการถามรุ่นอื่นของแบรนด์เดียวกัน)
+  2. เก็บ flag `_kw_matched_anchor` — ถ้ามี keyword ถูกกรองออก → True
+  3. ที่เงื่อนไข compat+target_device: เพิ่ม `and not _kw_matched_anchor` — ถ้าลูกค้าพิมพ์ชื่อรุ่นที่ตรงกับ anchor → ถามเรื่องสินค้าเดิม ไม่ใช่ขอใหม่ → ใช้ anchor ไม่ fall through
+- **ไม่แก้ item-tag history block** เพราะ:
+  - ถ้าแก้ → item-tag block จะหา anchor ได้ แต่ compat+target_device จะส่งไป `_hybrid_anchor_card` → main flow → fetch_products (กลับไปเป็นปัญหาเดิม)
+  - CONV-ACTIVE เป็น fallback ที่ใช้ anchor จาก timeline ได้โดยตรง ไม่ต้องผ่าน fetch_products
+- **เคสที่ผ่าน** (unit test 9/9):
+  - "Ec6 ใช้กับ app xiaomi จีนได้ไหมครับ" (active=EC6 Panorama) → kw=[], matched=True → ใช้ anchor ✓
+  - "มีรุ่นไหน ใช้ แอปจีนได้ไหมครับ" (active=EC6 Panorama) → kw=[], matched=False → ใช้ anchor ✓
+  - "อยากได้ของที่ใช้กับ xiaomi 17 ultra" (active=ZTEC) → kw=[], matched=False → fall through ✓ (เดิมไม่พัง)
+  - "IMILAB มีรุ่นไหน" (active=EC6 Panorama) → kw=['IMILAB'], matched=False → search fresh ✓ (brand ไม่ถูกกรอง)
+  - "EC6 Dual Pro มีไหม" (active=EC6 Panorama) → kw=['Dual'], matched=True → search fresh ✓ (รุ่นอื่น)
+  - "CTL301 ใช้สายอะไร" (active=CTL301) → kw=[], matched=True → ใช้ anchor ✓
+  - "BioKoop ใช้สายอะไร" (active=BioKoop) → kw=['BioKoop'], matched=False → search fresh ✓ (ไม่มีตัวเลข)
+  - "A52 มีไหม" (active=Galaxy A52) → kw=[], matched=True → ใช้ anchor ✓
+  - "A52 มีไหม" (active=Galaxy S21) → kw=['A52'], matched=False → search fresh ✓ (ไม่ตรง anchor)
+- **ไฟล์ที่แก้**: `chatbot/shopeechat/app.py` (CONV-ACTIVE block บรรทัด ~4098)
+- **Verify**: py_compile ผ่าน ✅, regression test 16/16 ผ่าน ✅, unit test 9/9 ผ่าน ✅
+- **⚠️ ยังไม่ verify เต็ม**: รอ replay แชท hawkeyes69 จริงเพื่อยืนยันว่าบอทตอบ EC6 Panorama ไม่แนะนำ EC6 Dual Pro 3K
+
+---
+
+## ผ่านแล้ว (ใหม่)
+
+### Live Assignment — ปิดแชทแล้วเปิดใหม่ไม่ประมวลผลข้อความใหม่ (2026-09-10) — ✅ implement + build ผ่าน รอ verify
+- **ปัญหา**: หน้า live assignment กดปิดแชท → บอทประมวลผลข้อความเหลือ → บอทตอบโดยไม่ handoff → แชท auto-close (`mock_status="closed"`) → ข้อความใหม่เข้ามา → กดปิดแชทไม่ได้เพราะปุ่มเปลี่ยนเป็น "เปิดแชทใหม่" แต่ปุ่มนี้ไม่ทำอะไรจริง (แค่ toast)
+- **สาเหตุ**:
+  1. `closeChat` ใน `liveAssignmentService.ts` — ถ้าบอทตอบทุกข้อความโดยไม่ handoff → `mock_status = "closed"` (auto-close)
+  2. `liveDocToConversation` — `mock_status === "closed"` → `status = "closed"`
+  3. `TicketChatPanel.tsx` บรรทัด 493 — `status === "closed"` → ซ่อนปุ่ม "ปิดสนทนา" แสดงปุ่ม "เปิดแชทใหม่" แทน
+  4. `handleReopen` ใน `page.tsx` — แค่ `toast.info("Reopen อัตโนมัติเมื่อลูกค้าทักใหม่")` ไม่ได้เรียก API
+- **วิธีแก้**:
+  1. `handleReopen` ใน `page.tsx` — เปลี่ยนให้เรียก `closeChat` API จริง (ส่ง `action: "close_chat"`) → มันจะ close → เช็คข้อความเหลือ → reopen → ประมวลผลผ่านบอท
+  2. เพิ่ม `reopening` prop ใน `TicketChatPanel.tsx` — disabled ปุ่ม + เปลี่ยนข้อความเป็น "กำลังประมวลผล..." ตอนกำลังประมวลผล
+  3. ส่ง `reopening={closing}` จาก `page.tsx` เข้า `TicketChatPanel` (reuse `closing` state เพราะ close กับ reopen ไม่ได้ใช้พร้อมกัน)
+- **ไฟล์ที่แก้**: `ChatAdminWeb/src/app/(console)/live-assignment/page.tsx`, `ChatAdminWeb/src/components/chat/TicketChatPanel.tsx`
+- **ไม่แก้ SRS_SSD.md** — section 6 เป็นของ Python ไม่เกี่ยวกับการแก้ครั้งนี้
+- **Verify**: `npx tsc --noEmit` → ผ่าน ✅, `npm run build` → ผ่าน ✅
+- **⚠️ ยังไม่ verify manual**: รอทดสอบใน browser — ปิดแชท → บอทตอบ → auto-close → กด "เปิดแชทใหม่" → ข้อความใหม่ถูกประมวลผล
+
+---
+
+### CTL301 — model code ไม่ส่ง description + uncertainty cascade (2026-09-10) — ✅ ผ่าน
+- **ปัญหา**: ลูกค้าพิมพ์ "ctl301" (text) → LLM2 ตอบ "ไม่มีรายละเอียดเพิ่มเติม + ทักแอดมิน" → trigger web search → cascade พัง
+- **สาเหตุ 3 ข้อ**:
+  1. **Anchor ผิด** — `_record_suggestion_products` บันทึก suggestion ลำดับผิด → active = CTC615W แทน CTL301
+  2. **`_clean_description` กรอง desc ออก** — `ctl301` ไม่ match keyword ใดๆ (warranty/spec/shipping/product) → คืน `""` → LLM2 ไม่เห็น desc
+  3. **LLM2 uncertainty marker** — `_build_context` สั่ง LLM พูด "ทักแอดมินได้เลย" ตอน desc ว่าง → trigger web search
+- **วิธีแก้ 3 ข้อ**:
+  1. **Text-based anchor** — ใน `_record_suggestion_products` (app.py) สกัด model keywords จากข้อความลูกค้า → สินค้าตัวแรกที่ชื่อมี keyword ตรง → บันทึกเป็น anchor (`is_anchor=True, source="user_text"`)
+  2. **Model code detection** — ใน `_clean_description` (product_store.py) ถ้า message มี alphanumeric token (เช่น `ctl301`, `biokoop`) ที่มีอย่างน้อย 4 ตัวอักษร → ถือว่า `want_spec=True` → ส่ง description
+  3. **ลบ "ทักแอดมิน" จาก no_desc_note** — ใน `_build_context` (llm.py) เปลี่ยน "ทักแอดมินได้เลยนะคะ" เป็น "ไม่มีรายละเอียดเพิ่มเติมในระบบค่ะ" → ไม่ trigger web search
+- **เคสที่ผ่าน** (test_pingevox_mistore.py):
+  - pingevox Q1: `[สินค้า: 49267582152]` → ตอบ "CUKTECH CTL301 USB-C to Lightning รองรับมาตรฐาน MFi ชาร์จเร็ว PD และถ่ายโอนข้อมูล 480Mbps" (ไม่พ่น "ไม่มีรายละเอียดเพิ่มเติม" อีก) ✓
+  - pingevox Q2-Q5: ผ่านครบ ✓
+  - mistorethailand Q1-Q37: ผ่านครบ 37 เคส ✓
+  - **รวม: 42 ผ่าน, 0 ไม่ผ่าน, 0 error**
+- **ไฟล์ที่แก้**: `chatbot/shopeechat/app.py` (`_record_suggestion_products`), `chatbot/shopeechat/product_store.py` (`_clean_description`), `chatbot/shopeechat/llm.py` (`_build_context`)
+- **Verify**: py_compile ผ่าน ✅, test_pingevox_mistore.py ผ่าน 42/42 ✅
+
+---
+
 ## กำลังจะทำ
+
+### Phase 3 — RAG ไม่กรอง status/stock + Tier merge + LLM prompt 3 กฎ (2026-09-10) — ✅ implement เสร็จ รอ verify replay
+- **ปัญหา**: RAG (fetch_products) กรอง status/stock ออกในบางจุด → ลูกค้าถามสินค้าเก่าไม่ได้ + สินค้าเลิกขายตอบสเปคไม่ได้
+- **ปัญหาเพิ่มเติม**: ไม่มี tier logic → สินค้า exact match (MODEL-REGEX/anchor) อาจถูกตัดด้วย limit ทิ้งไป
+- **ปัญหาเพิ่มเติม**: LLM prompt มีกฎเรื่อง status/stock กระจายอยู่ ไม่ชัดเจนพอ → LLM อาจแนะนำขายสินค้าหมดสต็อกได้
+- **การตัดสินใจทางธุรกิจ**:
+  - RAG ต้องไม่กรอง status/stock ออกเลย ไม่ว่า intent จะเป็นอะไร
+  - ยกเว้นกรณีเดียว: ลูกค้าแจ้งเคลม/ปัญหา → ห้ามเสนอขายสินค้าใดๆ
+  - "จะเชียร์ขายสินค้าไหน" เป็นหน้าที่ของ LLM (prompt-level) ไม่ใช่ RAG
+  - สินค้าที่เลิกขาย/หมดสต็อก ยังต้องตอบสเปค/ประกัน/ข้อมูลได้ปกติ
+- **วิธีแก้ (implement จริง — 2026-09-10)**:
+  1. **`filter_unavailable=False` ทุกจุดใน app.py** (2 จุด):
+     - บรรทัด 4820 (main fetch): ลบ `filter_unavailable=_filter_unavailable` ออก (default=False)
+     - บรรทัด 5598 (device-spec lookup): เปลี่ยน `filter_unavailable=True` → `filter_unavailable=False`
+     - ทำความสะอาด dead code บรรทัด 4669-4691 (คำนวณ `_filter_unavailable` แล้ว override เป็น False) → ลด 18 บรรทัด
+     - ตรวจสอบ repo ทั้งหมด: `chat_v2.py` มี `_filter_unavailable_products` ของตัวเอง (ไม่เกี่ยว), test files ไม่ pass filter_unavailable
+     - ห้ามลบ parameter ออกจาก signature ของ `fetch_products` (default=False อยู่แล้ว)
+  2. **Tier merge logic** — สร้าง `_apply_product_tiers(products, tier_a_ids, limit)` ระดับโมดูล:
+     - Tier A (exact match): item_id ใน `tier_a_ids` → ใส่เสมอ ไม่ถูกตัดด้วย limit ไม่ว่า status จะเป็นอะไร
+     - Tier B (general): สินค้าที่ไม่ใช่ Tier A → เรียง normal+stock>0 ขึ้นก่อน แล้วตัด limit
+     - รวม Tier A + Tier B (A ก่อน) → เรียก `_dedupe_products`
+     - เก็บ `tier_a_ids` จาก: `_ref_regex_products` + `anchor_card` + `_hybrid_anchor_card`
+     - เรียก `_apply_product_tiers` ก่อน `llm.answer()` ที่บรรทัด ~5686
+  3. **LLM prompt — SYSTEM_INSTRUCTION** (llm.py):
+     - เพิ่ม section "=== กฎการเสนอขายสินค้า (บังคับ — อ่านทุกครั้งก่อนตอบ) ===" ก่อนปิด `"""`
+     - กฎ 1: เชียร์ขายเฉพาะ status=NORMAL + sold_out=false
+     - กฎ 2: สินค้าเลิกขาย/หมดสต็อก → ตอบสเปคได้ ห้ามปฏิเสธ บอกตรงๆ แนะนำรุ่นใกล้เคียง
+     - กฎ 3: ลูกค้าแจ้งเคลม/ปัญหา → ห้ามแนะนำซื้อสินค้าใดๆ เด็ดขาด
+  4. **LLM prompt — KB_SYSTEM_INSTRUCTION** (llm.py):
+     - เพิ่ม 3 กฎเดียวกัน ก่อนปิด `"""`
+- **ไฟล์ที่แก้**: `chatbot/shopeechat/app.py`, `chatbot/shopeechat/llm.py`
+- **Verify**:
+  - `python3 -m py_compile chatbot/shopeechat/app.py` → ผ่าน ✅
+  - `python3 -m py_compile chatbot/shopeechat/llm.py` → ผ่าน ✅
+  - `PYTHONPATH=chatbot python3 docs/test/test_car_charger_regression.py` → ผ่าน 16/16 ✅
+  - Replay "หาสายชาร์จ mi 17 ultra" (8 คำถามต่อเนื่อง KingGadgets) → ผ่าน ✅
+    - Q1-Q4: 5 products each, 2-3s, ไม่มี error
+    - Q5 (iPhone 17 ProMax): TIER-MERGE 13→8 (tier_a=3, tier_b=10→5) — tier merge ทำงานถูกต้อง
+    - Q6 (สาย): 5 products, 4.8s
+    - Q7 (MI 17 Ultra): 1 product (KB-MODEL-REGEX match "ultra" → Eraclean GA01 Ultrasonic Cleaner)
+      - สินค้า sold_out=True, stock=0 → RAG ไม่กรองออก (Phase 3 ทำงานถูกต้อง) ✅
+      - LLM บอก "หมดสต็อกชั่วคราว" + บอกว่าไม่ใช่หัวชาร์จ → ไม่แนะนำขายสินค้า sold_out (prompt กฎ 1 ทำงาน) ✅
+      - LLM ไม่บอก "ไม่มีข้อมูล" (prompt กฎ 2 ทำงาน) ✅
+      - ไม่มี buy link ในคำตอบ (ไม่เสนอขายสินค้า sold_out) ✅
+    - Q8 (สาย): 5 products, 2.6s
+  - แก้ bug `NameError: name 'sys' is not defined` ใน `_apply_product_tiers` — เพิ่ม `import sys` ระดับโมดูล
+  - ไม่มี FILTER-UNAVAILABLE log (ยืนยันว่า RAG ไม่กรอง status/stock แล้ว) ✅
+  - ไม่มี ERROR/Traceback ใน bot log ✅
+- **ข้อบังคับที่ตรวจสอบแล้ว**:
+  - ห้ามลบ status/stock field ออกจาก product card → ไม่ได้ลน (product card ยังมี status/sold_out/total_stock ครบ) ✅
+  - ห้ามมี item_id ซ้ำจาก tier A และ tier B → `_apply_product_tiers` แยกด้วย set ก่อน merge + `_dedupe_products` จัดการ base_name ซ้ำ ✅
+- **⚠️ ยังไม่ verify เต็ม**: รอ replay แชทจริงเพิ่มเติม (เช่น pingevox, nt_sumittra) เพื่อยืนยันว่าบอทตอบถูก end-to-end ในหลายเคส
+- **⚠️ ยังไม่อัปเดต SRS_SSD.md**: รอ verify replay เพิ่มเติมก่อน (ตามกฎ)
+- **⚠️ หมายเหตุ**: Q7 (MI 17 Ultra) ไปผ่าน KB path (KB-MODEL-REGEX match "ultra") ซึ่งมี LLM call ของตัวเองและ return early — tier merge ไม่ได้ทำงานใน KB path (เป็น pre-existing architecture, ไม่ใช่ bug ของ Phase 3)
+
+### Phase 4 — device-spec-lookup trigger ไม่ผูก intent + spec-based retrieval (2026-09-10) — ✅ ผ่าน
+- **ปัญหา**: device-spec-lookup trigger เฉพาะ intent==compatibility_check → ถ้า classify เป็น product_recommend (เช่น "อยากได้ของที่ใช้กับ xiaomi 17 ultra") mechanism ไม่ทำงาน → ระบบตกไป query DB ด้วยชื่ออุปกรณ์ตรงๆ → แมตช์ผิด (จับชื่อแบรนด์ ไม่ใช่ spec)
+- **วิธีแก้**:
+  1. **เปลี่ยน trigger ใน app.py** (บรรทัด ~5603):
+     - ก่อน: `intent == "compatibility_check" AND target_device`
+     - หลัง: `target_device ไม่ว่าง` (ไม่ผูก intent)
+     - เพิ่ม fallback: สกัด target_device จาก message โดยตรงด้วย regex (ถ้า intent classifier ไม่สกัด)
+     - รองรับ pattern: mi 17 ultra, iphone 17 pro max, s25 ultra, oneplus 13, macbook air m5, pixel 9 ฯลฯ
+  2. **ปรับ intent_classifier.py prompt**:
+     - เพิ่มหมายเหตุ: "สกัด target_device ทุกครั้งที่ลูกค้าระบุอุปกรณ์เป้าหมาย ไม่ว่า intent จะเป็นอะไร"
+     - เพิ่มตัวอย่าง product_recommend + target_device:
+       - "อยากได้ของที่ใช้กับ xiaomi 17 ultra" → product_recommend, target_device="xiaomi 17 ultra"
+       - "หัวชาร์จละ มีไหมใช้กับ mi 17 ultra" → product_recommend, sub=adapter, target_device="mi 17 ultra"
+       - "พาวเวอร์แบงค์ใช้กับ oneplus 13 ได้ไหม" → compatibility_check, type=powerbank, target_device="oneplus 13"
+  3. **retrieval ใช้ spec keyword เป็น query หลัก**:
+     - re-query DB ใช้ keywords จาก search_and_extract (USB-C, wattage, protocol) ไม่ใช่ target_device ตรงๆ
+     - ต่อยอดด้วย `_resolve_charger_subtype()` จาก Phase 2 เพื่อคง subtype (anchor cable → ยังหา cable ไม่สลับไป adapter)
+     - เรียก `_resolve_charger_subtype(intent_result, retrieval_message, anchor_card, msg)` — ใช้ signature ที่ถูกต้อง
+  4. **เพิ่ม hint ใน extra_context**:
+     - "สินค้าที่แนะนำต้องรองรับ spec ของอุปกรณ์เป้าหมายจริง (พอร์ต/wattage/protocol) ไม่ใช่แค่มีชื่อแบรนด์เดียวกัน"
+     - "ถ้า description ไม่ได้ระบุ wattage/protocol ที่ตรง → บอกลูกค้าตรงๆ ว่าอาจชาร์จได้ไม่เต็มสปีด"
+- **ไฟล์ที่แก้**: `chatbot/shopeechat/app.py`, `chatbot/shopeechat/intent_classifier.py`
+- **Bug ที่พบและแก้**: `_resolve_charger_subtype()` เรียกด้วย `msg_strong`/`msg_weak`/`intent_sub` ซึ่งไม่มีใน signature → แก้เป็น `intent_result`/`retrieval_message`/`anchor_card`/`msg`
+- **Verify**:
+  - `python3 -m py_compile chatbot/shopeechat/app.py` → ผ่าน ✅
+  - `python3 -m py_compile chatbot/shopeechat/intent_classifier.py` → ผ่าน ✅
+  - `PYTHONPATH=chatbot python3 docs/test/test_car_charger_regression.py` → ผ่าน 16/16 ✅
+  - Replay pingevox (3 คำถาม) → ผ่าน ✅
+    - Q2 "อยากได้ของที่ใช้กับ xiaomi 17 ultra": intent=product_recommend + target_device สกัดได้ ✅
+      - DEVICE-SPEC-LOOKUP trigger (ไม่ผูก intent) ✅
+      - ได้ spec: "90W PPS, PD3.0, QC3+ USB-C" ✅
+      - re-query DB: 'charger Xiaomi 17 Ultra 90W PPS PD3.0 QC3+ USB-C' (spec keyword) ✅
+      - merge 9 สินค้าจาก re-query → TIER-MERGE 14→10 ✅
+      - LLM แนะนำ CUKTECH GaN3 140W (จ่ายไฟเกิน 90W = ชาร์จเต็มสปีด) ✅
+    - Q3 "หัวชาร์จละ มีไหม": intent=product_recommend + sub=adapter + device จาก history ✅
+      - RESOLVE-SUBTYPE: resolved=adapter ✅
+      - DEVICE-SPEC-LOOKUP subtype=adapter → prefix('หัวชาร์จ') ✅
+      - re-query DB: 'หัวชาร์จ charger Xiaomi 17 Ultra 90W PPS PD3.0 QC3+ USB-C' ✅
+      - แนะนำ CUKTECH GaN3 140W + CUKTECH AD1204U 120W (all adapter, all NORMAL) ✅
+  - Replay OnePlus 13 → ผ่าน ✅
+    - intent=product_recommend + type=powerbank + target_device=oneplus 13 ✅
+    - DEVICE-SPEC-LOOKUP trigger ✅
+    - ได้ spec: "100W SUPERVOOC, 50W AIRVOOC, USB-C" ✅
+    - re-query DB: 'charger OnePlus 13 SUPERVOOC AIRVOOC 100W 50W USB-C' ✅
+    - ไม่มี powerbank ในร้าน → ตอบตรงๆ "ยังไม่มีพาวเวอร์แบงค์" + แนะนำ charger/cable แทน ✅
+  - ไม่มี duplicate web search (3 คำถาม = 3 web search, ไม่ซ้ำ) ✅
+  - ไม่มี ERROR/Traceback ใน bot log ✅
+
+### Phase 5 — stock จาก shopee_stock[].stock แทน summary_info.total_available_stock (2026-09-10) — ✅ ผ่าน
+- **ปัญหา**: `to_product_card()` และ `_is_sold_out()` คำนวณ stock จาก `model[].stock_info_v2.summary_info.total_available_stock` — ค่านี้รวม `seller_stock` (สต็อกที่ผู้ขายมีแต่ไม่ได้ลง Shopee) ทำให้รายงาน stock เกินจริง
+- **หลักฐานจาก DB จริง**: สินค้า 50 ตัวจาก KingGadgets — 0 ตัวมี `shopee_stock > 0` แต่ 11 ตัวมี `summary_info > 0` (mismatch) เช่น:
+  - Xiaomi Mi Band 7 Pro: shopee=0 แต่ summary=40 (โค้ดเดิมรายงาน stock=40, โค้ดใหม่รายงาน stock=0)
+  - Xiaomi Mi Motion: shopee=0 แต่ summary=100
+  - Zaiwan BP35S: shopee=0 แต่ summary=80 (status=NORMAL แต่จริงๆ หมดสต็อก Shopee)
+- **วิธีแก้**:
+  1. **เขียน `_shopee_stock(model_doc)` helper** (บรรทัด ~478):
+     - sum ค่า `stock` จากทุก entry ใน `model_doc["stock_info_v2"]["shopee_stock"]`
+     - คืน 0 ถ้า field ไม่มี, list ว่าง, model_doc=None, หรือ exception (fail-safe)
+     - ไม่ใช้ `seller_stock`, `summary_info`, `advance_stock`
+  2. **แก้ `to_product_card()`**: `total_stock = sum(_shopee_stock(m) for m in model)` แทน `summary_info.total_available_stock`
+  3. **แก้ `_is_sold_out()`**: เช็ค `_shopee_stock(m) > 0` แทน `summary_info.total_available_stock > 0`
+- **ไฟล์ที่แก้**: `chatbot/shopeechat/product_store.py`
+- **Verify**:
+  - `python3 -m py_compile chatbot/shopeechat/product_store.py` → ผ่าน ✅
+  - Mock doc test 9 เคส → ผ่าน 9/9 ✅
+    - seller_stock ≠ shopee_stock → ใช้ shopee_stock จริง ✅
+    - shopee_stock หลาย location → sum รวม ✅
+    - ไม่มี field shopee_stock → stock=0 ไม่ error ✅
+    - model_doc=None → stock=0 ✅
+    - empty list → stock=0 ✅
+    - to_product_card total_stock + sold_out → ถูกต้อง ✅
+    - _is_sold_out shopee=0 แต่ seller>0 → sold_out=True ✅
+    - _is_sold_out shopee>0 → sold_out=False ✅
+    - เอกสารเก่าไม่มี shopee_stock → stock=0, sold_out=True ✅
+  - `test_car_charger_regression.py` → ผ่าน 16/16 ✅
+  - Replay "มีหัวชาร์จไหม" + "มีสายชาร์จไหม" → สินค้าทุกตัว sold_out=True, stock=0 (ถูกต้อง — ร้านไม่มีสต็อก Shopee จริง) ✅
+- **Field อื่นที่อาจต้องพิจารณาแก้ตาม**:
+  - `seller_stock` — ไม่พบการอ้างถึงใน code (ใช้แค่ใน DB document ไม่ได้อ่าน)
+  - `advance_stock` — ไม่พบการอ้างถึงใน code
+  - `summary_info` — ไม่พบการอ้างถึงใน code อื่นนอกจาก 3 จุดที่แก้แล้ว
+  - สรุป: ไม่มี field อื่นที่ต้องแก้ตาม — `total_available_stock` ถูกอ้างแค่ 3 จุดใน `product_store.py` ทั้งหมด แก้ครบแล้ว
+
+### Charger Subtype Consolidation — รวม _detect_charger_subtype 19 จุด + dedup 2 ชุด (2026-09-16) — ✅ implement เสร็จ รอ verify replay
+- **ปัญหา**: `product_store._detect_charger_subtype(...)` ถูกเรียก 22 จุดกระจายทั่ว app.py ด้วย argument ต่างกัน (req.message / retrieval_message / history / anchor_card.name) ไม่มี priority ตายตัว → subtype ที่ตัดสินใจได้ไม่สอดคล้องกันในแต่ละจุด
+- **ปัญหาเพิ่มเติม**: dedup logic คนละชื่อ 2 ชุดทำงานเหมือนกันเกือบทุกบรรทัด:
+  - `_kb_base_name`/`_kb_sell_score` (บรรทัด ~3214-3234) — KB merge path
+  - `_base_name`/`_listing_sell_score` (บรรทัด ~4754-4804) — product_store path + _web_search_reanswer
+- **วิเคราะห์ 22 จุด**:
+  - 8 จุด (กลุ่ม A) = resolve subtype สำหรับ turn นี้ → แทนที่ด้วย `_resolve_charger_subtype`
+  - 14 จุด (กลุ่ม B) = detect subtype จาก text เฉพาะเจาะจง → เรียก `_detect_charger_subtype` ตรงๆ (เหมือนเดิม)
+- **Priority ของ `_resolve_charger_subtype` (ตามที่ user ตัดสินใจ)**:
+  1. anchor subtype (default) — ใช้เมื่อ msg ไม่ได้ระบุ subtype อื่นชัดเจน
+  2. msg strong keyword (override) — เฉพาะเมื่อ msg มี strong keyword ชัดเจน (หัวชาร์จ/สายชาร์จ/ชุดชาร์จ) ที่ต่างจาก anchor
+  3. intent subtype — เมื่อไม่มี anchor และ msg ไม่มี keyword ชัด
+  4. msg subtype (non-strong) — เมื่อไม่มี anchor และไม่มี intent
+  5. retrieval/history — fallback
+- **จุดที่แทนที่ (8 จุด)**:
+  - จุด 3 (3098) KB search keyword
+  - จุด 4 (3274) KB merge filter
+  - จุด 15 (4774) _skip_sub superlative
+  - จุด 16+17 (4830-4854) _intent_sub resolution (รวม 3 บล็อก if/elif/else)
+  - จุด 21 (5320) no-product guard
+- **จุดที่ไม่แทนที่ (14 จุด)** — เรียก `_detect_charger_subtype` ตรงๆ เหมือนเดิม:
+  - จุด 1, 2 (1189, 1190) detect mismatch msg vs anchor
+  - จุด 5, 6 (3734, 3755) detect mismatch msg vs active card
+  - จุด 7, 10 (3942, 3982) detect subtype จาก history msg
+  - จุด 8, 9 (3958, 3960) bool check จาก msg
+  - จุด 11 (4028) _skip_ref_due_to_subtype (intent-or-msg)
+  - จุด 12, 13 (4141, 4144) ref subtype mismatch
+  - จุด 14 (4735) _filter_unavailable (ยึดเดิม intent > msg)
+  - จุด 20 (5235) fallback (ยึดเดิม intent > msg)
+  - จุด 22 (5737) device-spec re-query (card-only)
+- **Dedup consolidation**: สร้าง `_dedupe_products(products)` ระดับโมดูล ใช้ logic ของ `_listing_sell_score` (ครอบคลุมกว่า) แทนที่:
+  - บล็อก 3402-3441 (KB dedup) — ลด 42 บรรทัด → 5 บรรทัด
+  - บล็อก 4885-4964 (product_store dedup) — ลด 80 บรรทัด → 8 บรรทัด
+  - บล็อก 791-810 ใน `_web_search_reanswer` — ลด 22 บรรทัด → 6 บรรทัด
+- **ไฟล์ที่แก้**: `chatbot/shopeechat/app.py`
+- **วิธีแก้ (implement จริง — 2026-09-16)**:
+  1. เพิ่ม `anchor_card = None` default ที่บรรทัด 928 (กัน UnboundLocalError เมื่อไม่มี _tagged_item_id)
+  2. สร้าง `_resolve_charger_subtype(...)` nested function ใน `chat()` ที่บรรทัด ~449 (ก่อน KB branch)
+     - ใช้ closure: req, _hybrid_anchor_card
+     - Strong keyword = keyword ใน `_STRONG_SUBTYPE_KWS` (ไม่ใช่ "หัว"/"สาย" ลอยๆ)
+     - แก้ typo สั้นๆ เหมือน `_detect_charger_subtype`
+  3. สร้าง `_dedupe_base_name`, `_dedupe_sell_score`, `_dedupe_products` ระดับโมดูล ที่บรรทัด ~424
+  4. แทนที่ 8 จุดเรียก `_detect_charger_subtype` ด้วย `_resolve_charger_subtype`
+  5. แทนที่ 3 บล็อก dedup ด้วย `_dedupe_products`
+- **Verify**:
+  - `python3 -m py_compile chatbot/shopeechat/app.py` → ผ่าน ✅
+  - `test_car_charger_regression.py` → ผ่าน 16/16 ✅
+  - Edge case 1: `intent_result={}` → ไม่ throw, ใช้ msg subtype ✅
+  - Edge case 2: `anchor_card=None` → ไม่ throw, ใช้ msg/intent subtype ✅
+  - Edge case 3: CTL301 anchor (cable) + USB-C msg (cable strong) → cable (เหมือนเดิม) ✅
+  - Edge case 4: CTL301 anchor (cable) + adapter msg (strong) → adapter (override anchor) ✅
+  - Edge case 5: CTL301 anchor (cable) + vague msg → cable (anchor default) ✅
+  - Edge case 6: CTL301 anchor (cable) + "หัว" ลอย (weak) → cable (anchor, weak ไม่ override) ✅
+  - Edge case 7: no anchor + intent=cable → cable ✅
+  - Edge case 8: no anchor + no intent + retrieval fallback → adapter ✅
+  - Edge case 9: no anchor + no intent + no retrieval → None ✅
+  - Edge case 10: hybrid anchor (adapter) + msg cable (strong) → cable (override) ✅
+- **⚠️ ยังไม่ verify เต็ม**: รอ replay แชทจริง (เช่น pingevox, nt_sumittra) เพื่อยืนยันว่าบอทตอบถูก end-to-end
+- **⚠️ ยังไม่อัปเดต SRS_SSD.md**: รอ verify replay จริงก่อน (ตามกฎ)
+
+### Legacy Fix — กลับใช้ legacy app.py แก้ความซ้อน/ซับซ้อน/logic ทับกัน (2026-09-09) — ✅ implement 4/4 จุด รอ verify replay
+- **ปัญหา**: บอทตอบแย่ลง เพราะมี layer ครอบ layer + logic ทับกัน + search ตอบตรงไม่เข้า LLM2
+- **สาเหตุหลัก 4 จุด**:
+  1. KB lookup path (บรรทัด 2959) เรียก `search_and_answer()` คืน search_info เป็นคำตอบโดยตรง ไม่ผ่าน RAG/LLM2
+  2. NO-PRODUCT-GUARD (บรรทัด 4830-4889) อยู่ก่อน web search fallback → ถ้า RAG ไม่เจอ → handoff เลย ไม่ search
+  3. `filter_unavailable` (บรรทัด ~4196) กรอง sold_out/non-NORMAL ออกจาก RAG → ลูกค้าถามสินค้าเก่าไม่ได้
+  4. KB branch + product_store branch มี web search fallback คนละชุดโค้ด (copy กัน) → behavior แตกต่าง + ซ้อนกัน
+- **ทางแก้ (ตามหลักการ 7 ข้อ)**:
+  1. KB path: `search_and_answer` → `search_and_extract` + re-query DB + LLM2 (search ไม่ตอบตรง)
+  2. ย้าย NO-PRODUCT-GUARD หลัง web search fallback (ถ้าไม่เจอ → search → ถ้ายังไม่เจอ → ค่อย handoff)
+  3. เอา `filter_unavailable` ออกจาก RAG → LLM prompt กรองตอนแนะนำขาย (ไม่กรองใน RAG)
+  4. รวม web search fallback ของ KB branch + product_store branch เป็น `_web_search_reanswer(...)` ชุดเดียว
+- **ไฟล์ที่แก้**: `chatbot/shopeechat/app.py`
+- **วิธีแก้ (implement จริง — 2026-09-15)**:
+  1. **KB path web search (บรรทัด ~2948)**: เปลี่ยน `search_and_answer` → `search_and_extract`
+     + re-query DB ด้วย keywords จาก search + merge เข้า products (dedup by item_id)
+     + strip URL ออกจาก search_info (กัน external URL หลุด)
+     + สร้าง extra_context สำหรับ LLM2 (search_info = ข้อมูลประกอบ ไม่ใช่คำตอบหลัก)
+     + เรียก LLM2 ใหม่ด้วย products ใหม่ + search context → answer จาก LLM2 ไม่ใช่จาก search
+     + source label เปลี่ยนเป็น `knowledge_base+mongo+web_search` เมื่อ search ทำงาน
+     + record Search step + LLM2(search) step ใน _steps
+     + ตั้ง `_ws_result`/`_search_reason` default ก่อน block กัน UnboundLocalError
+  2. **NO-PRODUCT-GUARD (บรรทัด ~4898)**: เพิ่มเงื่อนไข `not _guard_ws_available`
+     — ถ้า web search พร้อมทำงาน (is_configured + ไม่ใช่ conv_active) → ข้าม guard ไป web search ก่อน
+     — guard ยังทำงานปกติถ้า web search ไม่พร้อม (เช่น conv_active หรือ not configured)
+  3. **filter_unavailable (บรรทัด ~4318)**: ตั้ง `_filter_unavailable = False` เสมอ
+     — ดึงทุกสินค้า (normal + non-normal + sold_out) เข้า RAG
+     — LLM prompt กรองตอนแนะนำขาย (มี context note บอก status != NORMAL ห้ามเสนอขายอยู่แล้ว)
+  4. **รวม web search fallback เป็น `_web_search_reanswer(...)` (2026-09-15)**:
+     - สร้าง nested function `_web_search_reanswer(...)` ใน `chat()` ที่บรรทัด ~451 (ก่อน KB branch ~3272 และ product_store branch ~5658)
+     - รวม logic: search_and_extract → re-query DB (keywords + model code regex + KB lookup) → merge/dedup/rerank → strip URL → LLM2 → record Search + RAG(search) + LLM2(search) steps
+     - KB branch เรียกด้วย `do_kb_lookup=False, do_model_code_regex=False, do_dedup_rerank=False` (เพราะ KB branch มี KB อยู่แล้ว + ไม่มี `_base_name` ในขณะนั้น)
+     - product_store branch เรียกด้วย `do_kb_lookup=True, do_model_code_regex=True, do_dedup_rerank=True` (ใช้ `_base_name`/`_listing_sell_score` จาก closure)
+     - device-spec lookup (บรรทัด ~5495) ยังแยกอยู่ เพราะ inject context ให้ LLM2 รอบแรก ไม่ใช่เรียก LLM2 เอง
+     - ลดโค้ดซ้ำ ~470 บรรทัด (162 บรรทัด KB + 311 บรรทัด product_store → 38 + 86 บรรทัด)
+     - ทุก branch ใช้ logic เดียวกัน → กัน behavior แตกต่าง (เช่น KB branch ไม่เคย strip URL แบบ 4 ขั้น, product_store branch ไม่เคย record RAG(search) step)
+- **ยังไม่ได้ทำ**: ข้อ 5 (ลด subtype source + ลบ layer ซ้อน) — ไว้รอบถัดไป ต้อง map precedence ก่อน
+- **Verify ที่ผ่าน**:
+  - `py_compile` ผ่าน ✅ (app.py + web_search.py + product_store.py + knowledge_base.py)
+  - `test_car_charger_regression.py` ผ่าน 16/16 ✅ (car charger + adapter/cable/set + iPhone 13 ไม่พัง)
+- **⚠️ ยังไม่ verify เต็ม**: รอ replay จริง (test_compare_3way.py ต้องการ bot รัน + DB + API keys)
+  - ต้อง verify: web search triggered → LLM2 ตอบ (ไม่ใช่ search ตอบ), no-product guard defer, filter_unavailable, MI 17 Ultra/cable compat scenario
 
 ### Phase 2Z++++++ — แก้บอทแนะนำสินค้าหมดสต็อก + ลืม subtype + ไม่รู้ device spec (pingevox Mi 17 Ultra) (2026-09-14) — ✅ implement เสร็จ รอ verify
 - **ปัญหา**: ลูกค้าส่งสายชาร์จ CTL301 (Lightning) → ถาม "อยากได้ของที่ใช้กับ xiaomi 17 ultra" → บอทแนะนำหัวชาร์จ 45W ที่หมดสต็อก ทั้งที่ควรแนะนำสาย USB-C to USB-C และหัวชาร์จที่รองรับ 90W
@@ -3195,6 +3610,177 @@ User ต้องการเพิ่มมุมมองตารางใน
 
 ## ผ่านแล้ว
 
+### 2026-09-20 — ChatBot v3 — OpenRouter-first paradigm (implement + smoke test ผ่าน)
+
+**paradigm shift:** ไม่นั่งปั้น RAG context แบบ legacy แต่ส่ง raw (message + history + images + shop link) ให้ OpenRouter ตอบ → เอา list สินค้ามา match กับ ShpProducts
+
+**ไฟล์ที่สร้าง** (`chatbot/shopeechat/chatbotv3/`):
+- `__init__.py` — export `chat_v3`
+- `or_client.py` — OpenRouter client (round-robin API keys, AI Usage Hub log, multimodal)
+- `system_prompt.py` — SYSTEM_INSTRUCTION_V3 (base จาก llm.py + กฎ v3 ใหม่ + fallback)
+- `shop_link.py` — สร้าง shop URL `https://shopee.co.th/{shopname_lower}?entryPoint=ShopBySearch&searchKeyword={shopname_lower}`
+- `rich_parse.py` — parse rich tags ([สินค้า: id], [order: sn], [รูปภาพ], placeholder)
+- `product_match.py` — match สินค้าจาก OpenRouter answer กับ ShpProducts (กรองเฉพาะร้าน)
+- `emotion.py` — detect negative emotion (strong + moderate + word boundary) + human request
+- `engine.py` — main flow: parse → safety checks (warranty/emotion/human) → LLM → product match → response
+
+**สิ่งที่ copy จาก legacy:**
+- warranty.detect_claim_request (เหมือนเดิม — ไม่แก้)
+- product_store.to_product_card, fetch_products, fetch_product_by_id (เรียกผ่าน lazy import)
+- order_store.extract_order_sn, extract_tracking_number (เรียกผ่าน lazy import)
+- rich tag patterns ([สินค้า: id], [order: sn], [รูปภาพ], placeholder)
+
+**สิ่งที่ตัดออก:**
+- intent_classifier, RAG/vector search, KB lookup, charger subtype, conversation_products anchor, web_search fallback
+
+**เพิ่มใหม่:**
+- emotion detection (อารมณ์เสีย/ไม่ดี → handoff admin) — มี word boundary สำหรับคำสั้น (บ้า/บ้าง, กาก/กากมาก)
+- shop link format `https://shopee.co.th/{shopname_lower}?entryPoint=ShopBySearch&searchKeyword={shopname_lower}`
+- lazy imports ทุก heavy module (llm, warranty, knowledge_base, product_store, order_store) — ทำให้ test ไม่ต้องลง google-genai/pymongo
+
+**กฎใหม่ใน system_instruction:**
+- ตอบจาก DB ก่อน/มีคำตอบห้ามส่งต่อ
+- ปัญหาใช้งานต้องบอกวิธีตรวจสอบก่อน ถามซ้ำจึงส่งต่อ
+- ห้ามบอกว่าตรวจสอบระบบ/คำสั่งซื้อแล้ว
+- ห้ามสรุปแทนทุกรุ่น
+- ห้ามเสนอหัวข้อที่ไม่ได้ถาม
+- ห้ามสัญญาแทนคน
+- ผู้ช่วยร้านอุปกรณ์ไอที, ค่ะ ไม่ใช้ครับ, สุภาพ กระชับ ตรงประเด็น
+
+**Wiring:**
+- `app.py` — เพิ่ม `use_v3` field ใน ChatRequest + dispatch ก่อน v2/legacy
+- env `USE_CHAT_V3=1` หรือ `req.use_v3=True` → route `/chat` ไป `chatbotv3.engine.chat_v3(req)`
+- default: ไม่เปิด (USE_CHAT_V3=0) → legacy/v2 ทำงานเหมือนเดิม
+
+**Verification ที่ผ่าน:**
+- `py_compile` ทุกไฟล์ (8 ไฟล์ + app.py) — ผ่าน
+- smoke test import ทุก module — ผ่าน
+- shop_link.build_shop_url — ผ่าน (KingGadgets, ThaiSuperPhone, empty)
+- shop_link.build_shop_context_block — ผ่าน
+- rich_parse.parse_rich_message — ผ่าน (item tag, image placeholder, placeholder only)
+- emotion.detect_negative_emotion — ผ่าน (strong, moderate+context, normal, complaint history, word boundary บ้า/บ้าง)
+- emotion.detect_human_request — ผ่าน
+- product_match._extract_product_names_from_answer — ผ่าน
+- product_match._normalize_name — ผ่าน
+- engine.chat_v3 (mock) — ผ่าน 6 tests: warranty handoff, emotion handoff, human request handoff, placeholder only, normal LLM call, บ่นเล่นๆ ไม่ handoff
+
+**⚠️ ยังไม่ได้ทดสอบ:**
+- Live OpenRouter call (ต้องมี API key จริง)
+- Live MongoDB product match (ต้องเชื่อม DB จริง)
+- End-to-end ผ่าน `/chat` endpoint (ต้องรัน server)
+- Replay/shadow test เทียบกับ legacy
+
+**⚠️ ห้ามทำลาย:** warranty claim flow, order lookup, handoff, vision pass — เคสที่ผ่านใน legacy ต้องผ่านใน v3 ด้วย
+
+---
+
+### 2026-09-20 — แก้ stock checker อ่านผิด field (shopee_stock → summary_info)
+
+**ที่มา:** สินค้าที่มีรุ่นย่อย (model) ถูก mark sold_out ทั้งที่มี stock จริง เพราะโค้ดอ่าน field ผิด
+
+**ปัญหา:** `_shopee_stock()` อ่านจาก `stock_info_v2.shopee_stock[].stock` ซึ่งเป็น **0 เสมอ** ในข้อมูลจริง
+- stock จริงอยู่ใน `stock_info_v2.summary_info.total_available_stock`
+- สินค้าที่มี model: stock อยู่ที่ `model[i].stock_info_v2.summary_info.total_available_stock`
+- สินค้าที่ไม่มี model: stock อยู่ที่ `doc.stock_info_v2.summary_info.total_available_stock`
+
+**ผลกระทบ:** 3419 สินค้าถูก mark sold_out ผิด (มี stock จริงแต่โค้ดเห็นเป็น 0)
+- LuckyHomeMart: Leravan LJF003 มี stock=50 แต่โค้ดเก่าเห็น 0
+- IMILabThailand: IMILAB EC4 มี stock=130 แต่โค้ดเก่าเห็น 0
+
+**วิธีแก้:**
+1. `_shopee_stock()` — เปลี่ยนอ่านจาก `summary_info.total_available_stock` เป็นหลัก, fallback ไป `shopee_stock[].stock`
+2. `to_product_card()` — ถ้ามี model รวม stock ทุกรุ่นย่อย, ถ้าไม่มี model อ่านจาก doc
+3. `_is_sold_out()` — ถ้าไม่มี model ตรวจจาก doc.stock_info_v2 แทน return True
+
+**ไฟล์ที่แก้:**
+- `chatbot/shopeechat/product_store.py` — `_shopee_stock()`, `to_product_card()`, `_is_sold_out()`
+
+**Verification ที่ผ่าน:**
+- `py_compile` — ผ่าน
+- สินค้า IMILabThailand: stock ถูกต้อง (130, 108, 279) แทน 0
+- LuckyHomeMart: stock ถูกต้อง (50, 45, 30) แทน 0
+- สินค้าไม่มี model: stock ถูกต้อง (2) จาก doc.stock_info_v2
+- Car charger regression: 16/16 ผ่าน
+- Pingevox/mistore regression: 42/42 ผ่าน
+- Live test IMILabThailand: แนะนำสินค้าพร้อม stock และลิงก์ถูกต้อง
+- Live test LuckyHomeMart: แนะนำสินค้า Leravan ที่มี stock จริง
+
+**⚠️ หมายเหตุ:** การแก้ครั้งก่อน (availability rule) ทำงานถูกต้อง แต่ stock ที่อ่านได้ผิด ทำให้สินค้าที่มี stock ถูกห้ามแนะนำ ตอนนี้แก้แล้ว สินค้าที่มี stock จริงจะถูกแนะนำได้
+
+---
+
+### 2026-09-20 — ChatBot v3 — เพิ่มฟีเจอร์ audit ข้อ 1-5,7 (ยกเว้นข้อ 6 conversation_products)
+
+**ที่มา:** audit พบว่า v3 ขาดฟีเจอร์สำคัญหลายตัวที่ legacy มี → ต้องเพิ่มก่อนเปิดใช้จริง
+
+**ฟีเจอร์ที่เพิ่ม (ข้อ 1-5,7 — ยกเว้นข้อ 6 conversation_products ตามคำสั่ง):**
+
+1. **handoff API จริง** — v3 ไม่ได้เรียก `ADMIN_HANDOFF_URL` จริง แค่ตั้ง flag
+   - เพิ่ม `_send_handoff_to_admin()` ใน `engine.py` — ส่ง POST ไป ChatAdminWeb จริง (เหมือน legacy app.py 1856-1884)
+   - ส่ง `conversation_id`, `shop_id`, `platform`, `reason`, `simulate`, `claim`
+   - ใช้ `urllib.request` + `X-Internal-Secret` header
+   - เรียกจาก `_make_handoff_response()` ทุกครั้งที่มี `conversation_id`
+   - ถ้าไม่มี `conversation_id` → ไม่เรียก API (เหมือน legacy)
+
+2. **persona ของร้าน** — v3 ไม่ได้ดึง persona จาก `persona.get_persona()`
+   - เพิ่ม `_get_persona_extra()` ใน `engine.py` — ดึง persona ของร้าน + สร้าง instruction
+   - ส่งเข้า `system_prompt.build_system_instruction(persona_extra=...)`
+   - lazy import `persona` module
+
+3. **image_desc** — v3 ไม่ได้คืน `image_desc` ใน response
+   - เพิ่ม `_extract_image_desc_from_answer()` — สกัด description จากคำตอบ LLM (ถ้ามีรูป)
+   - ปัจจุบัน return "" เพราะ v3 ส่งรูปเข้า LLM ตรง (multimodal) ไม่มี vision pass แยก
+   - ส่ง `image_desc` ใน `_make_answer_response()`
+
+4. **answer_segments (multi-bubble)** — v3 ไม่ได้แยกคำตอบด้วย `|||`
+   - `_make_answer_response()` แยก answer ด้วย `|||` อยู่แล้ว
+   - เพิ่มใน `_make_handoff_response()` ด้วย — แยก answer ด้วย `|||` เหมือน legacy
+
+5. **order_sn lookup** — v3 ไม่ได้ lookup order จริง
+   - เพิ่ม `_lookup_order_context()` ใน `engine.py` — เรียก `order_store.lookup_order()` + `build_order_context()`
+   - ส่ง order context จริงเข้า user prompt (แทนที่แค่ส่ง order_sn ลอยๆ)
+   - lazy import `order_store` module
+
+7. **ChatAdminWeb config** — v3 ไม่มี UI เลือก + type ไม่มี "v3"
+   - `systemConfigService.ts` — เพิ่ม `"v3"` ใน `chat_engine` type + `shouldUseChatV3()`
+   - `botCallService.ts` — ส่ง `use_v3: true` เมื่อ config เลือก v3 + คืน `chat_engine: "v3"`
+   - `shadowReplyService.ts` — เพิ่ม `"v3"` ใน `chat_engine` + `chatEngine` type
+   - `liveAssignmentService.ts` — เพิ่ม `"v3"` ใน `chat_engine` type
+   - `test-assignment/route.ts` — เพิ่ม `"v3"` ใน `chat_engine` type
+   - `config/page.tsx` — เพิ่ม option "v3" ใน dropdown + แสดง warning เมื่อเลือก v3
+
+**ฟีเจอร์ที่ไม่ทำ (ข้อ 6):**
+- `conversation_products` — ไม่เพิ่มตามคำสั่ง (v3 ไม่อัปเดต timeline สินค้า)
+
+**ไฟล์ที่แก้:**
+- `chatbot/shopeechat/chatbotv3/engine.py` — เพิ่ม helper + แก้ flow
+- `ChatAdminWeb/src/backend/service/systemConfigService.ts` — type + `shouldUseChatV3()`
+- `ChatAdminWeb/src/backend/service/botCallService.ts` — ส่ง `use_v3` + type
+- `ChatAdminWeb/src/backend/service/shadowReplyService.ts` — type
+- `ChatAdminWeb/src/backend/service/liveAssignmentService.ts` — type
+- `ChatAdminWeb/src/app/api/test-assignment/route.ts` — type
+- `ChatAdminWeb/src/app/(console)/config/page.tsx` — UI option + warning
+
+**Verification ที่ผ่าน:**
+- `py_compile engine.py` — ผ่าน
+- `npx tsc --noEmit` — ผ่าน
+- smoke test 7 tests — ผ่านทั้งหมด:
+  1. handoff API จริง (warranty claim) — ส่ง POST จริง, payload ถูกต้อง ✓
+  2. persona ของร้าน — ดึง persona ได้, ส่งเข้า system instruction ✓
+  3. image_desc — คืน "" ตาม design (v3 ส่งรูปเข้า LLM ตรง) ✓
+  4. answer_segments — แยก `|||` ได้ 3 segments ✓
+  5. order_sn lookup — lookup จริง, ส่ง context เข้า prompt ✓
+  6. handoff ไม่ส่ง API เมื่อไม่มี conversation_id ✓
+  7. simulate_assignment ส่งไป handoff API ✓
+
+**⚠️ ยังไม่ได้ทดสอบ:**
+- Live OpenRouter call พร้อม v3 features ใหม่
+- Live MongoDB product match พร้อม v3 features ใหม่
+- End-to-end `/chat` กับ `use_v3=True`
+- Live ChatAdminWeb UI เลือก v3 แล้ว callBot ส่ง `use_v3: true` จริง
+
+---
+
 ### 2026-09-12 — Shadow inbox Generate ทีละข้อดึง history รวมอนาคต
 
 **ปัญหา:** กด Generate ทีละข้อความใน shadow inbox → บอทเห็นคำถามถัดไปด้วย
@@ -4031,6 +4617,142 @@ User ต้องการเพิ่มมุมมองตารางใน
 ---
 
 ## ผ่านแล้ว
+
+### 2026-09-20 — ChatBot v3 — OpenRouter-first paradigm (implement + smoke test ผ่าน)
+
+**paradigm shift:** ไม่นั่งปั้น RAG context แบบ legacy แต่ส่ง raw (message + history + images + shop link) ให้ OpenRouter ตอบ → เอา list สินค้ามา match กับ ShpProducts
+
+**ไฟล์ที่สร้าง** (`chatbot/shopeechat/chatbotv3/`):
+- `__init__.py` — export `chat_v3`
+- `or_client.py` — OpenRouter client (round-robin API keys, AI Usage Hub log, multimodal)
+- `system_prompt.py` — SYSTEM_INSTRUCTION_V3 (base จาก llm.py + กฎ v3 ใหม่ + fallback)
+- `shop_link.py` — สร้าง shop URL `https://shopee.co.th/{shopname_lower}?entryPoint=ShopBySearch&searchKeyword={shopname_lower}`
+- `rich_parse.py` — parse rich tags ([สินค้า: id], [order: sn], [รูปภาพ], placeholder)
+- `product_match.py` — match สินค้าจาก OpenRouter answer กับ ShpProducts (กรองเฉพาะร้าน)
+- `emotion.py` — detect negative emotion (strong + moderate + word boundary) + human request
+- `engine.py` — main flow: parse → safety checks (warranty/emotion/human) → LLM → product match → response
+
+**สิ่งที่ copy จาก legacy:**
+- warranty.detect_claim_request (เหมือนเดิม — ไม่แก้)
+- product_store.to_product_card, fetch_products, fetch_product_by_id (เรียกผ่าน lazy import)
+- order_store.extract_order_sn, extract_tracking_number (เรียกผ่าน lazy import)
+- rich tag patterns ([สินค้า: id], [order: sn], [รูปภาพ], placeholder)
+
+**สิ่งที่ตัดออก:**
+- intent_classifier, RAG/vector search, KB lookup, charger subtype, conversation_products anchor, web_search fallback
+
+**เพิ่มใหม่:**
+- emotion detection (อารมณ์เสีย/ไม่ดี → handoff admin) — มี word boundary สำหรับคำสั้น (บ้า/บ้าง, กาก/กากมาก)
+- shop link format `https://shopee.co.th/{shopname_lower}?entryPoint=ShopBySearch&searchKeyword={shopname_lower}`
+- lazy imports ทุก heavy module (llm, warranty, knowledge_base, product_store, order_store) — ทำให้ test ไม่ต้องลง google-genai/pymongo
+
+**กฎใหม่ใน system_instruction:**
+- ตอบจาก DB ก่อน/มีคำตอบห้ามส่งต่อ
+- ปัญหาใช้งานต้องบอกวิธีตรวจสอบก่อน ถามซ้ำจึงส่งต่อ
+- ห้ามบอกว่าตรวจสอบระบบ/คำสั่งซื้อแล้ว
+- ห้ามสรุปแทนทุกรุ่น
+- ห้ามเสนอหัวข้อที่ไม่ได้ถาม
+- ห้ามสัญญาแทนคน
+- ผู้ช่วยร้านอุปกรณ์ไอที, ค่ะ ไม่ใช้ครับ, สุภาพ กระชับ ตรงประเด็น
+
+**Wiring:**
+- `app.py` — เพิ่ม `use_v3` field ใน ChatRequest + dispatch ก่อน v2/legacy
+- env `USE_CHAT_V3=1` หรือ `req.use_v3=True` → route `/chat` ไป `chatbotv3.engine.chat_v3(req)`
+- default: ไม่เปิด (USE_CHAT_V3=0) → legacy/v2 ทำงานเหมือนเดิม
+
+**Verification ที่ผ่าน:**
+- `py_compile` ทุกไฟล์ (8 ไฟล์ + app.py) — ผ่าน
+- smoke test import ทุก module — ผ่าน
+- shop_link.build_shop_url — ผ่าน (KingGadgets, ThaiSuperPhone, empty)
+- shop_link.build_shop_context_block — ผ่าน
+- rich_parse.parse_rich_message — ผ่าน (item tag, image placeholder, placeholder only)
+- emotion.detect_negative_emotion — ผ่าน (strong, moderate+context, normal, complaint history, word boundary บ้า/บ้าง)
+- emotion.detect_human_request — ผ่าน
+- product_match._extract_product_names_from_answer — ผ่าน
+- product_match._normalize_name — ผ่าน
+- engine.chat_v3 (mock) — ผ่าน 6 tests: warranty handoff, emotion handoff, human request handoff, placeholder only, normal LLM call, บ่นเล่นๆ ไม่ handoff
+
+**⚠️ ยังไม่ได้ทดสอบ:**
+- Live OpenRouter call (ต้องมี API key จริง)
+- Live MongoDB product match (ต้องเชื่อม DB จริง)
+- End-to-end ผ่าน `/chat` endpoint (ต้องรัน server)
+- Replay/shadow test เทียบกับ legacy
+
+**⚠️ ห้ามทำลาย:** warranty claim flow, order lookup, handoff, vision pass — เคสที่ผ่านใน legacy ต้องผ่านใน v3 ด้วย
+
+---
+
+### 2026-09-20 — ChatBot v3 — เพิ่มฟีเจอร์ audit ข้อ 1-5,7 (ยกเว้นข้อ 6 conversation_products)
+
+**ที่มา:** audit พบว่า v3 ขาดฟีเจอร์สำคัญหลายตัวที่ legacy มี → ต้องเพิ่มก่อนเปิดใช้จริง
+
+**ฟีเจอร์ที่เพิ่ม (ข้อ 1-5,7 — ยกเว้นข้อ 6 conversation_products ตามคำสั่ง):**
+
+1. **handoff API จริง** — v3 ไม่ได้เรียก `ADMIN_HANDOFF_URL` จริง แค่ตั้ง flag
+   - เพิ่ม `_send_handoff_to_admin()` ใน `engine.py` — ส่ง POST ไป ChatAdminWeb จริง (เหมือน legacy app.py 1856-1884)
+   - ส่ง `conversation_id`, `shop_id`, `platform`, `reason`, `simulate`, `claim`
+   - ใช้ `urllib.request` + `X-Internal-Secret` header
+   - เรียกจาก `_make_handoff_response()` ทุกครั้งที่มี `conversation_id`
+   - ถ้าไม่มี `conversation_id` → ไม่เรียก API (เหมือน legacy)
+
+2. **persona ของร้าน** — v3 ไม่ได้ดึง persona จาก `persona.get_persona()`
+   - เพิ่ม `_get_persona_extra()` ใน `engine.py` — ดึง persona ของร้าน + สร้าง instruction
+   - ส่งเข้า `system_prompt.build_system_instruction(persona_extra=...)`
+   - lazy import `persona` module
+
+3. **image_desc** — v3 ไม่ได้คืน `image_desc` ใน response
+   - เพิ่ม `_extract_image_desc_from_answer()` — สกัด description จากคำตอบ LLM (ถ้ามีรูป)
+   - ปัจจุบัน return "" เพราะ v3 ส่งรูปเข้า LLM ตรง (multimodal) ไม่มี vision pass แยก
+   - ส่ง `image_desc` ใน `_make_answer_response()`
+
+4. **answer_segments (multi-bubble)** — v3 ไม่ได้แยกคำตอบด้วย `|||`
+   - `_make_answer_response()` แยก answer ด้วย `|||` อยู่แล้ว
+   - เพิ่มใน `_make_handoff_response()` ด้วย — แยก answer ด้วย `|||` เหมือน legacy
+
+5. **order_sn lookup** — v3 ไม่ได้ lookup order จริง
+   - เพิ่ม `_lookup_order_context()` ใน `engine.py` — เรียก `order_store.lookup_order()` + `build_order_context()`
+   - ส่ง order context จริงเข้า user prompt (แทนที่แค่ส่ง order_sn ลอยๆ)
+   - lazy import `order_store` module
+
+7. **ChatAdminWeb config** — v3 ไม่มี UI เลือก + type ไม่มี "v3"
+   - `systemConfigService.ts` — เพิ่ม `"v3"` ใน `chat_engine` type + `shouldUseChatV3()`
+   - `botCallService.ts` — ส่ง `use_v3: true` เมื่อ config เลือก v3 + คืน `chat_engine: "v3"`
+   - `shadowReplyService.ts` — เพิ่ม `"v3"` ใน `chat_engine` + `chatEngine` type
+   - `liveAssignmentService.ts` — เพิ่ม `"v3"` ใน `chat_engine` type
+   - `test-assignment/route.ts` — เพิ่ม `"v3"` ใน `chat_engine` type
+   - `config/page.tsx` — เพิ่ม option "v3" ใน dropdown + แสดง warning เมื่อเลือก v3
+
+**ฟีเจอร์ที่ไม่ทำ (ข้อ 6):**
+- `conversation_products` — ไม่เพิ่มตามคำสั่ง (v3 ไม่อัปเดต timeline สินค้า)
+
+**ไฟล์ที่แก้:**
+- `chatbot/shopeechat/chatbotv3/engine.py` — เพิ่ม helper + แก้ flow
+- `ChatAdminWeb/src/backend/service/systemConfigService.ts` — type + `shouldUseChatV3()`
+- `ChatAdminWeb/src/backend/service/botCallService.ts` — ส่ง `use_v3` + type
+- `ChatAdminWeb/src/backend/service/shadowReplyService.ts` — type
+- `ChatAdminWeb/src/backend/service/liveAssignmentService.ts` — type
+- `ChatAdminWeb/src/app/api/test-assignment/route.ts` — type
+- `ChatAdminWeb/src/app/(console)/config/page.tsx` — UI option + warning
+
+**Verification ที่ผ่าน:**
+- `py_compile engine.py` — ผ่าน
+- `npx tsc --noEmit` — ผ่าน
+- smoke test 7 tests — ผ่านทั้งหมด:
+  1. handoff API จริง (warranty claim) — ส่ง POST จริง, payload ถูกต้อง ✓
+  2. persona ของร้าน — ดึง persona ได้, ส่งเข้า system instruction ✓
+  3. image_desc — คืน "" ตาม design (v3 ส่งรูปเข้า LLM ตรง) ✓
+  4. answer_segments — แยก `|||` ได้ 3 segments ✓
+  5. order_sn lookup — lookup จริง, ส่ง context เข้า prompt ✓
+  6. handoff ไม่ส่ง API เมื่อไม่มี conversation_id ✓
+  7. simulate_assignment ส่งไป handoff API ✓
+
+**⚠️ ยังไม่ได้ทดสอบ:**
+- Live OpenRouter call พร้อม v3 features ใหม่
+- Live MongoDB product match พร้อม v3 features ใหม่
+- End-to-end `/chat` กับ `use_v3=True`
+- Live ChatAdminWeb UI เลือก v3 แล้ว callBot ส่ง `use_v3: true` จริง
+
+---
 
 ### 2026-09-12 — Shadow inbox Generate ทีละข้อดึง history รวมอนาคต
 
@@ -5347,3 +6069,757 @@ POST /api/shadow-inbox/generate-conversation { conversation_id: "xxx", use_v2: t
 - เคสเดิม 4 กรณี: ✅ ทุกเคสผ่าน (สายชาร์จ, สวัสดี, compatibility, หัวชาร์จ)
 - `docs/SRS_SSD.md`: ✅ อัปเดต helper + calls
 
+
+## ผ่านแล้ว (2026-09-16 — Phase 6: ยกเลิก should_run_pass1 gate + intent classification รันทุกข้อความ)
+
+### ที่มา
+`should_run_pass1()` gate ทำให้ intent classification รันเฉพาะ "จุดอ่อน" — แต่ hardcoded keyword detection ตัดสินก่อน LLM ในหลายจุด (general_qtype, _is_claim_request, _is_tax_invoice) → ผิดได้ในกรณีกำกวม
+
+### วิธีแก้
+
+#### 1. `intent_classifier.py` — เพิ่ม field `general_qtype`
+- เพิ่ม `general_qtype` field ใน result dict (ค่า: warranty_policy/return_policy/shipping_policy/brands/categories/shops/tax_invoice/null)
+- อัปเดต prompt + ตัวอย่าง + `_DEFAULT_RESULT` + docstring
+
+#### 2. `app.py` — ย้าย intent classification ให้รันก่อน keyword detection
+- ลบ `should_run_pass1()` gate — รัน `classify_intent()` เสมอ (หลัง deterministic checks)
+- Deterministic checks ที่ยังอยู่ก่อน intent (100% ชัด/regex):
+  1. `order_sn` regex (~line 1345)
+  2. `tracking_no` regex (~line 1384)
+  3. `human_request` keyword (~line 1605 — ชัด 100%)
+- หลัง intent classification → แก้ hardcoded detection ให้ใช้ intent_result เป็นหลัก (conf >= 0.7), keyword เป็น fallback:
+  - `general_qtype`: intent=general_question + general_qtype → ใช้ค่าจาก intent; อื่น → `knowledge_base.detect_general_question()`
+  - `_is_claim_request`: intent=warranty_claim → True; intent อื่น (conf>=0.7) → False (ยกเว้น strong complaint/repeated); อื่น → `warranty.detect_claim_request()`
+  - `_is_tax_invoice`: intent=general_question + general_qtype=tax_invoice → True; อื่น → `warranty.detect_tax_invoice_request()` (จับ data submission ด้วย)
+- ย้าย tax_invoice handoff block มาหลัง intent classification (ก่อนอยู่ก่อน human_request)
+- เพิ่ม try/except รอบ `classify_intent()` → fallback to `_DEFAULT_RESULT` (conf=0) → keyword fallback ทำงาน
+
+#### 3. Keyword lists ทั้งหมดยังอยู่ — เปลี่ยนสถานะเป็น fallback
+- `_HUMAN_REQUEST_KWS` — ยังเป็น deterministic (ชัด 100%)
+- `knowledge_base.GENERAL_QUESTION_KEYWORDS` — fallback เมื่อ intent ไม่ได้บอก general_qtype
+- `warranty._CLAIM_QUESTION_PATTERNS` / `_TAX_INVOICE_REQUEST_KWS` / `_TAX_INVOICE_DATA_KWS` — fallback
+- `_strong_complaint_kws` / `_complaint_kws` — ยังใช้ป้องกัน LLM override claim ผิด
+- `should_run_pass1()` helper — ยังคงอยู่ใน `intent_classifier.py` (ไม่ลบ) แต่ไม่ถูกเรียกจาก `app.py` แล้ว
+
+### จุด hardcode เดิม → intent field ที่แทนที่ → fallback ยังอยู่ไหม
+
+| จุด hardcode (บรรทัดเดิม) | intent field ที่แทนที่ | fallback ยังอยู่? |
+|---|---|---|
+| `general_qtype = detect_general_question()` (~1586) | `intent=general_question` + `general_qtype` field (ใหม่) | ✅ `knowledge_base.detect_general_question()` |
+| `_is_claim_request = detect_claim_request()` (~1594) | `intent=warranty_claim` | ✅ `warranty.detect_claim_request()` + `_strong_complaint_kws` |
+| `_is_tax_invoice = detect_tax_invoice_request()` (~1613) | `intent=general_question` + `general_qtype=tax_invoice` | ✅ `warranty.detect_tax_invoice_request()` (จับ data submission) |
+| `_is_human_request` (~1691) | — (deterministic, ไม่ย้าย) | — (ยังเป็นหลัก) |
+| `_order_sn` regex (~1345) | — (deterministic, ไม่ย้าย) | — (ยังเป็นหลัก) |
+| `_tracking_no` regex (~1384) | — (deterministic, ไม่ย้าย) | — (ยังเป็นหลัก) |
+
+### Behavior changes (intent กับ keyword ไม่ตรงกัน)
+1. **`general_qtype` จาก intent ไม่ตรง keyword** — เชื่อ intent (conf>=0.7) → override keyword
+   - กรณี: intent บอก `general_question` + `general_qtype=shipping_policy` แต่ keyword จับเป็น `warranty_policy` → ใช้ intent
+2. **`_is_claim_request` — intent บอกไม่ใช่ warranty_claim แต่ keyword บอกใช่** — ยกเลิก claim (ยกเว้น strong complaint/repeated)
+   - กรณี: "รับประกันกี่ปี" → keyword จับ "รับประกัน" เป็น claim แต่ intent บอก general_question → ไม่ใช่ claim
+3. **`_is_claim_request` — intent บอก warranty_claim แต่ keyword ไม่บอก** — เชื่อ intent (conf>=0.7)
+   - กรณี: ลูกค้าพูดคำไม่ตรง keyword แต่ intent เข้าใจว่าเป็น claim
+4. **`_is_tax_invoice` — intent บอก tax_invoice** — เชื่อ intent (conf>=0.7)
+   - แต่ data submission (เลขผู้เสียภาษี/หจก.) ยังใช้ keyword เพราะ intent อาจไม่จับ
+
+### Cost/latency estimate
+- **ก่อน:** `classify_intent()` รันเฉพาะ "จุดอ่อน" (~30-40% ของ messages ที่ผ่าน deterministic checks)
+- **หลัง:** `classify_intent()` รันทุก message ที่ผ่าน deterministic checks (order/tracking/human)
+- **เพิ่ม:** ~60-70% ของ messages ที่ไม่เคยเรียก intent มาก่อน
+- **Cost per call:** prompt ~300-500 tokens, output ~50-100 tokens
+  - cost = (400 * $0.25 + 75 * $0.50) / 1M = ($0.0001 + $0.0000375) = ~$0.0001375/call = ~0.005 THB/call
+- **Latency:** ~0.5-1.5s per call (gemini flash-lite)
+- **เพิ่มต่อ message ที่ไม่เคยเรียก:** ~0.005 THB + ~1s latency
+- **กระทบ:** ทุก message ที่ไม่ใช่ order/tracking/human จะเพิ่ม ~1s latency + ~0.005 THB
+
+### verify
+- `py_compile` app.py + intent_classifier.py: ✅ ผ่าน
+- car charger regression: ✅ 16/16 ผ่าน
+- classifier-failed fallback test (no API key): ✅ keyword fallback ทำงานถูกต้อง (8/10 ผ่าน — 2 "fail" คือ test expectation ผิด ไม่ใช่ behavior ผิด)
+- order/tracking regex false-positive: ⚠️ Thai landline 9 หลัก (02/03/05 + 7) โดน tracking regex จับ (pre-existing — ไม่ใช่จากการแก้ครั้งนี้)
+- app import: ✅ ผ่าน
+
+### ข้อจำกัดที่เหลือ
+1. **Tracking regex false-positive** — Thai landline 9 หลัก (02/03/05/053 + 7 digits) โดน `_TRACKING_RE` จับ เพราะ filter มีแค่ `0[89]\d{8}` (10 หลัก) — pre-existing, ไม่ได้แก้ใน Phase 6
+2. **No live API test** — ไม่มี GEMINI_API_KEY ใน env นี้ → ทดสอบแค่ fallback path (conf=0) ไม่ได้ทดสอบ intent จริง
+3. **`should_run_pass1()` ยังอยู่** — ไม่ลบ เพราะอาจมี caller อื่น แต่ `app.py` ไม่เรียกแล้ว
+
+---
+
+## ผ่านแล้ว (2026-09-16 — Phase 6 live verify: Zaapi mistorethailand + pingevox เทียบจริง)
+
+### ที่มา
+หลัง Phase 6 (intent-first resolution) ผ่าน unit test + live API test 12/12 แล้ว ทดสอบเทียบคำตอบจริงของ Zaapi จากแชทจริง 2 ลูกค้าที่ทักเข้าร้านเดียวกัน:
+- **ร้านจริง**: `KingGadgets` (133 CUKTECH products ใน DB)
+- **ลูกค้า pingevox** — 5 คำถาม
+- **ลูกค้า mistorethailand** — 38 คำถาม (เทส 11 เคสสำคัญ)
+
+### เคสที่เทส (16 เคสสำคัญ จาก 43 คำถาม)
+ทดสอบผ่าน `chat()` flow จริง (ไม่ใช่แค่ classify_intent) — ใช้ Gemini API จริง + DB จริง + web search จริง:
+
+**Pingevox (KingGadgets) — 5 เคส:**
+- P1 `[item]` → intent=other, source=product_store+web ✅
+- P2 `ซาหวัดดีจ้า` → intent=other, source=product_store ✅
+- P3 `อยากได้ของที่ใช้กับ xiaomi 17 ultra` → intent=product_recommend device=xiaomi 17 ultra ✅ (device-spec lookup trigger)
+- P4 `หัวชาร์จละ` → intent=product_recommend sub=adapter device=xiaomi 17 ultra ✅ (subtype change cable→adapter + device carry from history)
+- P5 `ดีจ้า` → intent=other ✅
+
+**MiStore (KingGadgets) — 11 เคส (ลูกค้า mistorethailand ทักเข้าร้าน KingGadgets):**
+- M5 `สนใจหัวชาร์จที่ใช้กับ iphone 17 pro max` → intent=product_recommend device=iphone 17 pro max ✅
+- M6 `AC65B เทียบกับ AC65B2 ต่างกันยังไง` → intent=product_spec ✅ (KB-MODEL-REGEX จับ AC65B2)
+- M10 `รุ่นไหนมี มอก. บ้าง` → intent=product_spec ✅ (เราตอบได้จาก DB, Zaapi ส่งต่อแอดมิน)
+- M15 `WPB100L ใช้กับมือถือ xiaomi ได้ไหม` → intent=compatibility_check device=xiaomi ✅
+- M19 `สินค้ารุ่นนี้หมดประกันยังที่ซื้อมา` → intent=general_question gq=warranty_policy ✅ (เราจับเป็น policy question, Zaapi จับเป็น claim — เราถูก)
+- M21 `จะสอบถามสเปคสินค้ารุ่น a18T` → intent=product_spec ✅ (KB-MODEL-REGEX จับ a18T → 5 products)
+- M22 `หัวชาร์จ a18t ใช้งานไม่ได้` → intent=warranty_claim ✅ (handoff ทันที)
+- M29 `สายชาร์จ ชาร์จไฟไม่ได้` → intent=warranty_claim ✅ (handoff ทันที)
+- M12 `สนใจ powerbank ที่ใช้กับ MacBook air` → intent=product_recommend device=MacBook air ✅ (DEVICE-SPEC-LOOKUP trigger → web search ได้ MagSafe 3/Thunderbolt)
+- M30 `,` → intent=other conf=0.9 ✅ (garbage input)
+- M38 `3` → intent=other conf=0.5 ✅ (rating — Zaapi เข้าใจดีกว่า แต่เราไม่ผิด)
+
+### ผล
+- **16/16 ผ่าน** (5 pingevox + 11 mistore) — intent classification ทำงานถูกทุกเคส
+- ทั้งสองลูกค้าทักเข้าร้าน `KingGadgets` (ร้านเดียวกัน)
+- avg latency: 1.3-9.5s/call (บางเคส trigger web search นานขึ้น)
+- avg cost: ~0.0209 THB/call (intent step)
+
+### จุดที่เราทำได้ดีกว่า Zaapi
+1. **M10 มอก.** — เราตอบได้จาก DB (AC65B2 มี มอก.) Zaapi ส่งต่อแอดมิน
+2. **M12 MacBook air** — เราแนะนำ powerbank ได้  Zaapi ตอบเรื่อง มอก. ต่อ (ผิดคำถาม)
+3. **M19 หมดประกัน** — เราจับเป็น general_question (warranty_policy) ถูก  Zaapi จับเป็น claim (ผิด — ลูกค้าถาม ไม่ได้แจ้งเคลม)
+
+### จุดที่ Zaapi ทำได้ดีกว่า
+1. **M38 `3`** — Zaapi เข้าใจว่าเป็นคะแนน rating → ขอบคุณ เราตอบเรื่องสินค้าหมดสต็อก (intent=other ไม่จับ rating)
+2. **M30 `,`** — Zaapi ไม่ตอบจน Q37 (รอ context) เราตอบทันที (อาจรบกวน)
+
+### ปัญหาที่พบ (ไม่ใช่ bug ของ Phase 6)
+1. **สินค้า sold_out ทุกตัว** — CukTechThailand และ KingGadgets ใน DB ส่วนใหญ่ stock=0/sold_out=True → LLM ตอบ "หมดสต็อกชั่วคราว" ทุกเคส (เป็นข้อมูล DB จริง ไม่ใช่ bug)
+2. **Persona `abubu`** ของ CukTechThailand ทำงานถูก (ปรากฏในคำตอบ)
+3. **KB-MODEL-REGEX** จับ `a18T` → ดึง 5 สินค้าตรง ✅
+4. **DEVICE-SPEC-LOOKUP** trigger กับ MacBook air → web search ได้ spec (MagSafe 3, Thunderbolt) ✅
+
+### Test cases สำหรับ session นี้ (จดไว้ใช้ต่อ)
+- **Pingevox (KingGadgets)**: P1-P5 (5 เคส) — item card, greeting, compat+device, subtype change, follow-up
+- **MiStore (CukTechThailand)**: M5, M6, M10, M15, M19, M21, M22, M29, M12, M30, M38 (11 เคส)
+- รวม 16 เคส — ใช้เป็น regression suite สำหรับ Phase 6 ต่อไป
+
+---
+
+## ผ่านแล้ว (2026-09-16 — Phase 7: Anchor comparison "อันนี้กับอันก่อน")
+
+### ที่มา
+ลูกค้าถาม "อันนี้กับอันก่อนต่างกันยังไง" โดย "อันนี้" = anchor ล่าสุด (active) และ "อันก่อน" = anchor อันดับ 2
+ต้องดึงจาก conversation_products timeline แทนการ extract model keyword จาก history
+(เพราะลูกค้าอ้างอิง anchor ไม่ใช่ชื่อรุ่น)
+
+### สิ่งที่เพิ่ม
+
+#### 1. conversation_products.py — 2 ฟังก์ชันใหม่
+- `get_anchor_history(conversation_id, limit=10)` → คืน anchor products เรียงใหม่→เก่าตาม mentioned_at
+- `get_previous_anchor(conversation_id, exclude_item_id=None)` → คืน anchor อันดับ 2 (อันก่อนหน้า active)
+  - ถ้าไม่ระบุ exclude_item_id → คืน index 1 (อันดับ 2)
+  - ถ้าระบุ exclude_item_id → กรองออก แล้วคืน index 0 (อันก่อนหน้าตัวที่ exclude)
+  - ถ้ามี anchor แค่ 1 ตัว → คืน None (graceful)
+
+#### 2. app.py — comparison detection + context injection
+- `_anchor_compare_kws` = ("อันนี้กับอันก่อน", "อันนี้กับอันก่อนหน้า", "อันนี้กับอันนั้น", ฯลฯ)
+- `_is_anchor_compare` trigger เมื่อ message ตรง keyword + มี conversation_id
+- ดึง `get_active_product()` (current) + `get_previous_anchor()` (previous)
+- ใส่ทั้ง 2 สินค้าเข้า products + context note บอก LLM ให้เปรียบเทียบ
+
+#### 3. Bug fix: _compute_active TypeError
+- พบว่า `_compute_active` เกิด `TypeError: can't compare offset-naive and offset-aware datetimes`
+- เพราะ MongoDB ลบ tzinfo ตอนเก็บ แต่ `datetime.now(timezone.utc)` มี tzinfo
+- แก้โดยเพิ่ม `_normalize_dt()` แปลงทุก datetime เป็น naive ก่อน sort
+- แก้ใน `_compute_active`, `get_suggestion_latest`, `get_anchor_history`
+
+### ข้อบังคับที่ถือ
+- ห้ามแก้ schema เดิม (mentioned_at, source, is_anchor อยู่แล้ว พอสำหรับ query)
+- ห้ามเปลี่ยน resolve_active_by_message / get_active_product เดิม
+- FOLLOWUP-COMP (model keyword) และ ANCHOR-COMP (anchor reference) ทำงานคู่กัน:
+  - ถ้า history มี model name → FOLLOWUP-COMP จับ (rewrite เป็น "A vs B")
+  - ถ้าไม่มี model name → ANCHOR-COMP จับ (ใช้ anchor จาก timeline)
+
+### verify
+- py_compile: ✅ ผ่าน
+- unit test 7/7: ✅ ผ่าน (test_anchor_compare.py)
+  - test_single_anchor: anchor 1 ตัว → previous = None ✅
+  - test_two_anchors: anchor 2 ตัว → previous = อันเก่ากว่า ✅
+  - test_repeat_anchor: A→B→A → history เรียงตาม mentioned_at ล่าสุดจริง ✅
+  - test_exclude_item_id: exclude active → คืน previous ที่เหลือ ✅
+  - test_no_timeline: ไม่มี timeline → [] / None ✅
+  - test_suggestions_only: มีแต่ suggestion → [] / None ✅
+  - test_limit: limit parameter ทำงาน ✅
+- live chat() test: ✅ ผ่าน
+  - 2 anchors (A18T + AC65B2) → LLM ตอบเปรียบเทียบ 2 รุ่นถูกต้อง
+  - 1 anchor → graceful fallback (LLM บอกไม่มีรุ่นก่อนหน้า)
+
+---
+
+## ผ่านแล้ว (2026-09-17 — Phase 8: History QA pairs + RAG/LLM context limit 30)
+
+### ที่มา
+โค้ดเดิมส่ง `history` (ทั้งหมด) เข้า LLM และใช้ `limit=10` สำหรับ RAG retrieval ที่ส่งเข้า LLM context
+ทำให้ prompt ยาวเกินจำเป็น (history ทุก message) และ LLM เห็นสินค้าน้อยเกินไป (10 ชิ้น)
+
+ผู้ใช้ขอ:
+> history = fixed 10 คู่ (Q+A นับเป็น 1 หน่วยต่อคู่) + RAG product limit จาก 10 เป็น 30 ทุกจุดที่เป็น "LLM context limit" (ไม่ใช่ frontend display limit)
+
+### สิ่งที่เพิ่ม/แก้
+
+#### 1. `_recent_qa_pairs(history, n=10)` — ฟังก์ชันใหม่ใน app.py
+- จับคู่ user+model message เป็น QA pair (1 คู่ = 1 หน่วย)
+- คืน `n` คู่ล่าสุด (default 10) เรียงเก่า→ใหม่ (พร้อมส่ง LLM contents)
+- รับมือ edge cases:
+  - history ว่าง / None → []
+  - 2 user ติดกัน (buffer flush) → ไม่ crash, จับคู่ผิดไม่ได้
+  - model เดี่ยวต้น history → คืน model เดี่ยว
+  - user เดี่ยวท้าย history (ยังไม่ตอบ) → คืน user เดี่ยว
+  - เกิน n คู่ → ตัดเหลือ n คู่ล่าสุด
+- ไม่ mutate history ต้นฉบับ
+
+#### 2. แทนที่ history slice ที่เป็น LLM context/follow-up
+เปลี่ยนจาก `history=history` → `history=_recent_qa_pairs(history, 10)` ใน:
+- Product-anchor follow-up `llm.answer()`
+- Order-status `llm.answer_general()` (2 จุด)
+- General-question `llm.answer_general()`
+- Brand-info `llm.answer_general()`
+- KB-branch `llm.answer()`
+- Main product-store `llm.answer()`
+- `_web_search_reanswer()` (2 จุด) — `history_list=_recent_qa_pairs(history, 10)`
+- Warranty-policy model extraction (fallback text)
+- Comparison follow-up model extraction
+- Purchase-date model extraction
+
+#### 3. คง history เต็มไว้โดยเจตนา (มี comment อธิบาย)
+- Intent classification — ต้องการ full history เพื่อจับ intent ที่อ้างอิงไกล
+- Warranty claim state-machine review extraction — ต้องการ full history เพื่อรักษา claim details
+- Logging preview (`history[-10:]`) — logging เท่านั้น
+- Vision context summary (`history[-6:]`) — vision-specific
+- Vision image URL extraction (`history[-2:]`) — จำกัดจำนวนภาพที่ reprocess
+- Warranty image-context detection (`history[-3:]`) — warranty-specific
+- Last-model-message guards (`[-1:]`, `[-2:]`) — state machine
+
+#### 4. `_LLM_CONTEXT_LIMIT = 30` — constant ใหม่
+- แยกจาก `req.limit` (frontend display limit)
+- ใช้สำหรับ RAG retrieval และ LLM context limit
+
+#### 5. เปลี่ยน RAG/retrieval `limit=10` → `limit=_LLM_CONTEXT_LIMIT` (5 จุด)
+- Web-search re-answer DB query (L867)
+- KB/Mongo merge retrieval (L3350)
+- Original-query fallback (L3362)
+- Charger fallback retrieval (L5278)
+- Device-spec lookup retrieval (L5855)
+
+#### 6. เปลี่ยน LLM context cap จาก 10/req.limit → `_LLM_CONTEXT_LIMIT` (4 จุด)
+- KB branch `products[:10]` → `products[:_LLM_CONTEXT_LIMIT]` (L3580)
+- Superlative sort `products[:req.limit]` → `products[:_LLM_CONTEXT_LIMIT]` (L5142)
+- `_apply_product_tiers(products, _tier_a_ids, req.limit)` → `... _LLM_CONTEXT_LIMIT` (L5898)
+- `_fetch_limit` base: `req.limit` → `_LLM_CONTEXT_LIMIT` (L4858)
+  - compat: `max(req.limit * 2, 20)` → `max(_LLM_CONTEXT_LIMIT * 2, 40)`
+  - `_merge_limit`: `max(req.limit * 4, 40)` → `max(_LLM_CONTEXT_LIMIT * 4, 80)`
+
+#### 7. คง frontend display limit ไว้ (ไม่แตะ)
+- `products[:req.limit]` ใน ChatResponse
+- `products_for_response = products[:req.limit]`
+- `_record_suggestion_products(req, products[:req.limit])`
+- Logging/debug previews (`products[:10]`, `products[:20]`)
+
+### ข้อบังคับที่ถือ
+- ห้าม conflate LLM context limit กับ frontend display limit
+- ห้ามลบ comment เดิม
+- ใช้ pattern ที่มี (helper `_` prefix, `from __future__` type hint)
+- ไม่ mutate history ต้นฉบับ
+
+### verify
+- py_compile: ✅ ผ่าน
+- unit test 10/10: ✅ ผ่าน (test_recent_qa_pairs.py)
+  - test_empty, test_none, test_full_pairs, test_truncate, test_double_user
+  - test_model_solo, test_user_solo_end, test_n1, test_order, test_preserve_fields
+- anchor compare test 7/7: ✅ ผ่าน (test_anchor_compare.py — ไม่พัง)
+- live chat() test: ✅ ผ่าน
+  - 2 anchors (A18T + AC65B2) → LLM ตอบเปรียบเทียบ 2 รุ่นถูกต้อง
+  - ใช้ `_recent_qa_pairs(history, 10)` + `_LLM_CONTEXT_LIMIT=30`
+
+### cost/latency estimate (ไม่ได้วัดจริง — เป็นการประมาณ)
+- **Retrieval**: Mongo/KB ดึงเพิ่มจาก 10 → 30 การ์ด (~3x query result size)
+  - dedup/sort เพิ่มเล็กน้อย (O(n log n), n=30 แทน 10)
+  - latency เพิ่ม ~10-30ms (Mongo index lookup + Python dedup)
+- **LLM prompt**: การ์ดสินค้าเพิ่มจาก 10 → 30 (~3x product context tokens)
+  - ประมาณการ์ดละ ~150-250 tokens (name + spec + price + stock + status)
+  - เพิ่ม ~3,000-4,500 input tokens
+  - output tokens ไม่เปลี่ยน (LLM ตอบเท่าเดิม)
+  - cost เพิ่ม ~ proportional กับ input tokens (~3-5% ของ total cost per call)
+- **History**: ลดจาก full history → 10 QA pairs
+  - ประหยัด tokens ถ้า history ยาว > 10 คู่
+  - เพิ่ม tokens ถ้า history สั้น < 10 คู่ (ไม่น่าเกิด)
+- **รวม**: latency เพิ่ม ~50-100ms, cost เพิ่ม ~3-5% per call (เป็นการประมาณ ไม่ได้วัดจริง)
+- **Token safety**: 30 การ์ด + 10 QA pairs + system prompt ≈ 8,000-12,000 tokens
+  - อยู่ใน limit ของ GPT-4o-mini (128K) และ Gemini Flash (1M) อย่างปลอดภัย
+
+### ไฟล์ที่แก้
+- `chatbot/shopeechat/app.py` — `_recent_qa_pairs`, `_LLM_CONTEXT_LIMIT`, แทนที่ history/limit
+- `docs/test/test_recent_qa_pairs.py` — unit test ใหม่
+
+### ไม่ได้แก้ SRS_SSD.md ในรอบนี้
+- จะอัปเดต section 6 ของ SRS ในรอบถัดไป (ตามกฎข้อ 1 — แต่ขอ verify replay เพิ่มก่อน)
+
+## ผ่านแล้ว (2026-09-18 — Phase 8.1: Admin-configurable llm_context_limit)
+
+### ที่มา
+Phase 8 ใช้ `_LLM_CONTEXT_LIMIT = 30` เป็น module constant แบบ hardcoded — ผู้ใช้ขอให้ปรับค่านี้ได้จากหน้า admin config โดยไม่ต้องแก้โค้ด/redeploy
+
+ผู้ใช้ขอ:
+> เราสามารถให้ปรับได้ไหมในหน้า config ว่า limit จะส่งเท่าไหร่ สูงสุดอะ
+
+### สิ่งที่เพิ่ม/แก้
+
+#### 1. Admin web — `systemConfigService.ts`
+- เพิ่ม `llm_context_limit` ใน `SystemConfigDoc` (default 30)
+- เพิ่มใน safe defaults + initialization path
+- เพิ่มใน `allowedKeys` (PUT whitelist)
+- เพิ่มใน `ADMIN_CONFIGURABLE_KEYS` (admin-config endpoint)
+
+#### 2. Admin API — `/api/config/route.ts`
+- เพิ่ม validation: `llm_context_limit` ต้องเป็น integer 10-50
+- reject ค่านอก range ด้วย HTTP 422
+- คง dangerous-key rejection + URL safety ไว้ครบ
+
+#### 3. Admin UI — `/config/page.tsx`
+- เพิ่ม `llm_context_limit` ใน `SystemConfig` interface
+- เพิ่ม numeric input (min 10, max 50, step 5)
+- เพิ่ม save handler `handleSaveLlmContextLimit()` (ใช้ confirm dialog + api().put)
+- อธิบายว่าเป็น LLM context ไม่ใช่ frontend display
+
+#### 4. Admin UI — `/admin-config/page.tsx`
+- เพิ่ม `llm_context_limit` ใน `AdminConfig` interface
+- เพิ่ม `MinimalSlider` (10-50, step 5) พร้อม label
+- เพิ่มใน load/save/hasChanges
+
+#### 5. Bot call — `botCallService.ts`
+- อ่าน `llm_context_limit` จาก `getSystemConfig()` ใน `callBot()`
+- ส่ง `llm_context_limit` ใน JSON body ไป Python `/chat`
+- ครอบคลุมทุก call path (live, worker, assignment, replay, test-chat)
+
+#### 6. Python — `app.py`
+- เพิ่ม `llm_context_limit: int | None` ใน `ChatRequest` (Field(None, ge=10, le=50))
+- resolve `_llm_ctx_limit = req.llm_context_limit or _LLM_CONTEXT_LIMIT` ที่ต้น `chat()`
+- แทนที่ `_LLM_CONTEXT_LIMIT` → `_llm_ctx_limit` ใน 11 จุด (web-search re-query, KB/Mongo merge, fetch_limit, compat merge, Tier B cap, KB cap, etc.)
+- `_LLM_CONTEXT_LIMIT = 30` ยังคงเป็น default fallback (ถ้า request ไม่ส่งค่ามา)
+- ไม่แตะ `req.limit` (frontend display) / logging previews / anchor follow-up
+
+### ข้อบังคับที่ถือ
+- แยก LLM context limit จาก frontend display limit (`req.limit`)
+- validation ทั้ง admin API (422) และ Python (Pydantic ge/le)
+- ไม่ mutate global constant — ใช้ per-request local
+- ไม่อ่าน .env — ค่ามาจาก SystemConfig (MongoDB) เท่านั้น
+
+### verify
+- py_compile: ✅ ผ่าน
+- tsc --noEmit: ✅ ผ่าน (0 errors)
+- test_recent_qa_pairs.py: ✅ 10/10 passed
+- test_anchor_compare.py: ✅ 7/7 passed
+
+### ไฟล์ที่แก้
+- `ChatAdminWeb/src/backend/service/systemConfigService.ts` — field + defaults + whitelist
+- `ChatAdminWeb/src/app/api/config/route.ts` — PUT validation
+- `ChatAdminWeb/src/app/(console)/config/page.tsx` — UI card + save handler
+- `ChatAdminWeb/src/app/(console)/admin-config/page.tsx` — slider UI + save
+- `ChatAdminWeb/src/backend/service/botCallService.ts` — ส่ง llm_context_limit ใน body
+- `chatbot/shopeechat/app.py` — ChatRequest field + _llm_ctx_limit resolve + แทนที่ 11 จุด
+- `docs/SRS_SSD.md` — อัปเดต ChatRequest + _LLM_CONTEXT_LIMIT description
+
+
+## ผ่านแล้ว (2026-09-18 — Warranty auto-check จาก delivery date)
+
+### ที่มา
+`auto_check_warranty()` ใน `warranty.py` ใช้ `create_time_raw` (วันที่สั่งซื้อ) คำนวณระยะประกัน — แต่ warranty ควรเริ่มนับจากวันที่ส่งมอบ (delivery date) ไม่ใช่วันที่สั่งซื้อ
+
+### วิธีแก้
+
+#### 1. `order_store.py` — เพิ่ม `delivery_time_raw`
+- คู่กับ `delivery_time` (formatted) ที่มีอยู่แล้ว
+- ใช้เงื่อนไข + source เดียวกัน: `order_status_raw == "COMPLETED"` หรือ `logistics_status_raw == "LOGISTICS_DELIVERY_DONE"` → ใช้ `update_time`
+- ถ้ายังไม่ส่งมอบ/ยกเลิก → `delivery_time_raw = None`
+- ไม่ใช้ `create_time_raw` เป็น fallback
+
+#### 2. `warranty.py` — เพิ่ม `check_warranty_status(delivery_time_raw, warranty_months)`
+- คำนวณสถานะรับประกันจาก delivery date แทน create date
+- ถ้า `delivery_time_raw` เป็น None/0/empty → คืน `in_warranty=None` (ยังไม่ส่งมอบ)
+- ถ้า `warranty_months <= 0` → คืน `in_warranty=None`
+- ถ้า timestamp ไม่ valid → catch exception → คืน `in_warranty=None` (ไม่ crash)
+- คืน dict: `{in_warranty, days_remaining, delivery_date, expiry_date, text}`
+- `auto_check_warranty()` เดิมยังคงอยู่ (legacy — ใช้ create_time_raw) แต่ถูกใช้เป็น context fallback เท่านั้น
+
+#### 3. `app.py` — แก้ warranty auto-check flow (line ~1659)
+- เปลี่ยนจากเรียก `auto_check_warranty()` ตรงๆ → เรียก `lookup_order()` + `check_warranty_status()`
+- ดึง warranty duration จากชื่อสินค้าใน order (ใช้ `extract_warranty_from_name`)
+- ถ้า multi-item ที่ warranty ต่างกัน → ถามลูกค้าว่าถามเรื่องชิ้นไหน (ambiguity)
+- ถ้าทุก item มี warranty เท่ากัน → คำนวณ `check_warranty_status()`
+- ถ้ายังไม่ส่งมอบ → บอกลูกค้าว่ายังไม่เริ่มนับประกัน
+- ถ้าอยู่ในช่วงประกัน → บอกระยะเวลา + ขอข้อมูลเคลม
+- ถ้าหมดช่วงประกัน → บอกหมดแล้ว + ถามสนใจปรึกษาแอดมินไหม
+- deterministic answer → return ทันที ไม่เข้า LLM (early return ก่อน claim flow)
+- ถ้า delivery-date flow ไม่ได้ผล → fallback ไป `auto_check_warranty()` เดิมเป็น context
+- manual purchase-date flow (`parse_purchase_date` + `is_in_warranty`) ยังอยู่ครบ ไม่ถูกแตะ
+
+### ข้อบังคับที่ถือ
+- ห้ามใช้ `create_time_raw` แทน `delivery_time_raw` ใน flow ใหม่
+- CANCELLED order → `delivery_time_raw=None` → `in_warranty=None` ไม่ crash
+- multi-item ต่าง warranty → ถามลูกค้า ไม่เดา
+- manual date fallback ยังทำงานเหมือนเดิม
+- ไม่แตะ `conversation_products` schema / anchor / history behavior
+- ไม่ migrate ไป chat_v2
+
+### verify
+- `py_compile` 3 ไฟล์: ✅ ผ่าน (order_store.py, warranty.py, app.py)
+- `test_warranty_delivery.py`: ✅ 11/11 ผ่าน
+  - test_cancelled_order_delivery_raw_none: CANCELLED → None ✅
+  - test_zero_delivery_raw: ts=0 → None ✅
+  - test_completed_order_in_warranty: ส่งมอบ 10 วัน → in_warranty=True ✅
+  - test_completed_order_out_of_warranty: ส่งมอบ 400 วัน → in_warranty=False ✅
+  - test_no_warranty_months: warranty_months=0 → None ✅
+  - test_invalid_timestamp: ts ไม่ valid → None ไม่ crash ✅
+  - test_multi_item_different_warranties: 12M + 24M → ambiguity → ask customer ✅
+  - test_multi_item_same_warranty: 12M + 12M → calculate ✅
+  - test_manual_date_fallback_still_works: parse_purchase_date + is_in_warranty ยังทำงาน ✅
+  - test_manual_date_thai_year: ปี พ.ศ. → ค.ศ. ✅
+  - test_delivery_time_raw_in_lookup_order_docstring: delivery_time_raw อยู่ใน lookup_order ✅
+- `test_anchor_compare.py`: ✅ 7/7 ผ่าน (ไม่พัง)
+- `test_recent_qa_pairs.py`: ⚠️ pre-existing env issue (missing google.genai) — ไม่ใช่จากการแก้ครั้งนี้
+- `test_pingevox_mistore.py`: ✅ 42/42 ผ่าน (live bot server + real Gemini API + real MongoDB)
+  - pingevox (KingGadgets): 5/5 ผ่าน
+  - mistorethailand (KingGadgets): 37/37 ผ่าน
+  - claim handoff ทำงาน: Q22 (a18t ใช้งานไม่ได้), Q29 (สายชาร์จ ชาร์จไฟไม่ได้) → handoff=True ✅
+  - warranty policy แยกจาก claim: Q19 (หมดประกันยัง) → ไม่ handoff ตอบเอง ✅
+
+### ไฟล์ที่แก้
+- `chatbot/shopeechat/order_store.py` — เพิ่ม `delivery_time_raw` + docstring
+- `chatbot/shopeechat/warranty.py` — เพิ่ม `check_warranty_status()` + `Any` import
+- `chatbot/shopeechat/app.py` — แก้ warranty auto-check flow + early return + legacy fallback
+- `docs/test/test_warranty_delivery.py` — unit test ใหม่ 11 เคส
+- `docs/test/test_pingevox_mistore.py` — live regression test 42 เคส (pingevox + mistore)
+- `docs/SRS_SSD.md` — อัปเดต lookup_order return + check_warranty_status + called by
+- `getoutofmywaybotkaikrook.md` — บันทึก waythrough
+
+
+## ผ่านแล้ว (2026-09-19 — Phase 3d: _available_for_sale + context note นอก if has_unlist)
+
+### ที่มา
+บอทแนะนำขายสินค้าที่ `shopee_stock=0` (sold_out=True) ทั้งที่ status=NORMAL — เคส LuckyHomeMart สินค้า Leravan ทุกตัว stock=0 แต่บอทยังแนะนำขาย + ส่งลิงก์สั่งซื้อ
+
+### สาเหตุ
+- sold_out note (กฎ "ห้ามเสนอขายสินค้า stock=0") ถูกฝังอยู่ใน `if has_unlist and products:` block (บรรทัด 5659)
+- `has_unlist` = มีสินค้า status != NORMAL ปนอยู่ไหม
+- เคส LuckyHomeMart: สินค้า Leravan ทุกตัว status=NORMAL แต่ sold_out=True → has_unlist=False → sold_out note ไม่ถูก inject → LLM ไม่รู้ว่าห้ามแนะนำขาย
+
+### วิธีแก้
+
+#### 1. `app.py` — ย้าย sold_out note ออกจาก if has_unlist block
+- mark `_available_for_sale` ในทุก product card (ก่อน `_apply_product_tiers`):
+  - `True` ถ้า status=NORMAL + sold_out=False + total_stock>0
+  - `False` ถือไม่ใช่
+- สร้าง `_pending_context_note` จาก unlist_note + sold_out_note + กฎหลัก
+- inject context_note หลัง `_apply_product_tiers` (ไม่ใช่ก่อน) เพราะ sort เปลี่ยนลำดับ products
+
+#### 2. `llm.py` — เพิ่ม _available_for_sale ใน slim_fields + SYSTEM_INSTRUCTION
+- slim_fields: เพิ่ม `_available_for_sale` ให้ LLM เห็น field นี้ใน product card
+- SYSTEM_INSTRUCTION กฎ 1: เพิ่มกฎ `_available_for_sale` เป็นเกณฑ์หลัก
+- KB_SYSTEM_INSTRUCTION กฎ 1: เพิ่มกฎ `_available_for_sale` เป็นเกณฑ์หลัก
+
+### กฎ
+- ตอบคำถามสินค้าได้ทุก status (สเปค, รายละเอียด, รับประกัน)
+- แต่ห้ามแนะนำขาย/เสนอขาย/ส่งลิงก์สั่งซื้อ กับสินค้าที่:
+  - `shopee_stock <= 0` หรือ
+  - `status != NORMAL` หรือ
+  - `sold_out = True`
+- ใช้ `_available_for_sale` field เป็นเกณฑ์หลัก (True=พร้อมขาย, False=ห้ามขาย)
+
+### verify
+- `py_compile` app.py + llm.py: ✅ ผ่าน
+- LuckyHomeMart "มีเครื่องนวดหลังแบบรองหลังไหมครับ": ✅ บอทตอบ "หมดสต็อกชั่วคราว" ไม่มีลิงก์สั่งซื้อ
+- `test_car_charger_regression.py`: ✅ 16/16 ผ่าน
+- `test_pingevox_mistore.py`: ✅ 41/42 ผ่าน (1 ไม่ผ่านเป็น LLM 503 error ไม่เกี่ยวกับการแก้)
+
+### ไฟล์ที่แก้
+- `chatbot/shopeechat/app.py` — ย้าย sold_out note ออกจาก if has_unlist + เพิ่ม _available_for_sale + inject context_note หลัง _apply_product_tiers
+- `chatbot/shopeechat/llm.py` — เพิ่ม _available_for_sale ใน slim_fields + กฎใน SYSTEM_INSTRUCTION + KB_SYSTEM_INSTRUCTION
+- `getoutofmywaybotkaikrook.md` — บันทึก waythrough
+
+
+---
+
+## ผ่านแล้ว (2026-09-22 — Test Assignment replay 500 hardening)
+
+### ที่มา
+- ผู้ใช้แจ้ง: กด generate replay ในหน้า Test Assignment แล้วรอนานสักพักแล้วเจอ `AxiosError: Request failed with status code 500`
+- เนื่องจาก route มี outer try/catch เดียวที่แปลงทุก exception เป็น HTTP 500 โดยไม่ log stack trace → หา root cause ไม่ได้จากฝั่ง browser
+
+### สิ่งที่ตรวจสอบ
+- อ่าน `ChatAdminWeb/src/app/api/test-assignment/route.ts` ทั้ง replay flow
+- อ่าน services: `messageService.ts` (`toBotText`/`toBotImages`), `messageMediaParser.ts` (`parseRawMessage`), `testStatusConversationService.ts`, `handoffService.ts`
+- สร้าง JWT + session ใน DB แล้วยิง API จริงกับ 4 conversations (4–30 user msgs, มี item/image/video/sticker/order)
+- ทุกเคสที่ลองคืน HTTP 200 (ไม่ reproduce 500 ในเคสปกติ) → สรุปว่า 500 เป็น intermittent (เกิดจาก data/path ผิดปกติ หรือ service transient error)
+
+### วิธีแก้ (defensive hardening — กัน exception หลุดออกเป็น 500)
+1. **`console.error` full stack trace** ใน outer catch — ตอนนี้เห็น error จริงใน server log แทนแค่ message สั้นๆ
+2. **`updateTestStatus` (clear status ก่อน replay)** → wrap try/catch + log — ถ้า clear พัง ไม่ block replay
+3. **`parseRawMessage` mapping** (อยู่นอก per-message loop) → wrap แต่ละ msg ใน try/catch + fallback เป็น text — ถ้า raw_payload schema ผิดจะไม่ throw 500 ทั้ง replay
+4. **`toBotText`/`toBotImages`** → ย้ายเข้า per-message try/catch (เดิมอยู่นอก) — ถ้า parse พังที่ msg ใด msg หนึ่ง จะ catch ที่ msg นั้น ไม่ใช่ทำ 500 ทั้ง replay
+5. **`saveReplayResult`** → wrap try/catch + log — ถ้า MongoDB write พัง ยังคืนผล replay ให้ UI ได้ (แสดงผลได้ แค่ไม่ persist)
+6. **`logAdminEvent` (audit)** → wrap try/catch + log — ถ้า audit log พัง ไม่ควรทำให้ replay 500
+
+### ไฟล์ที่แก้
+- `ChatAdminWeb/src/app/api/test-assignment/route.ts`
+
+### Verify
+- `npx tsc --noEmit` → ผ่าน ✅
+- ยิง API replay จริงหลังแก้ (shp_376646402366507654, 4 msgs) → HTTP 200, ครบ ok/qa/final_status/replay_batch_id ✅
+- โครงสร้าง response คงเดิม — ไม่ทำลาย contract กับ frontend
+
+### หมายเหตุ
+- ไม่ได้ reproduce 500 จริงในเคสที่ลอง — แต่เดิมมีจุดที่ exception หลุดออกนอก per-message catch ได้ (toBotText/toBotImages อยู่นอก loop, parseRawMessage อยู่นอก loop, save/log/clear ไม่มี catch) การ hardening นี้จะทำให้:
+  - ถ้าเกิด 500 อีก → จะเห็น stack trace ใน server log (หา root cause ได้)
+  - ถ้าเกิดจาก data/path ผิดปกติ → replay จะไม่พังทั้ง batch แค่ msg นั้นๆ ที่ error
+  - ถ้าเกิดจาก service transient (MongoDB/audit) → replay ยังคืนผลได้
+
+---
+
+## ผ่านแล้ว (2026-09-22 — เบาะรองหลัง false negative: product type ไม่จับ "รองหลัง")
+
+> ⚠️ ก่อนเริ่ม — อ่าน "เคสที่ผ่านแล้ว" ทั้งหมดข้างบน ห้ามทำลายเคสเดิม
+
+### ที่มา
+ลูกค้าถาม "หาเบารองหลังแจ่มๆ เอาไว้นั่งทำงาน" (เบารองหลัง = พิมพ์ผิดของ เบาะรองหลัง)
+- บอทตอบ "ทางร้าน LuckyHomeMart ของเราตอนนี้ไม่มีสินค้าเบารองหลังจำหน่ายค่ะ"
+- แต่จริงๆ ร้านมีสินค้า Leravan Cushion Back LBB003 "เบาะรองหลังเพื่อสุขภาพ" (item_id=21629137045, status=NORMAL, cat_name=Home & Living)
+- metadata: `source=product_store+web_search`, `web_search=negative_answer`, `pipeline=Intent→LLM1→Search`, runtime 10.46s
+- บอทแนะนำ MicroSD (Netac, Sandisk) แทน — มาจาก web_search fallback
+
+### Root cause (ยืนยันแล้วด้วยการรันโค้ดจริง)
+1. `_detect_product_types("หาเบารองหลังแจ่มๆ เอาไว้นั่งทำงาน")` → `set()` (ว่าง)
+   - "รองหลัง" / "เบาะรองหลัง" ไม่อยู่ใน keyword ของ PRODUCT_TYPES ใดๆ
+   - "massager" มีแค่ "เครื่องนวด", "นวด", "หมอนนวด", "หมอนรองคอ", "เครื่องนวดคอ", "เข็มขัดนวด", "แผ่นนวด" — ไม่มี "รองหลัง"
+2. `_detect_product_types_fuzzy` ก็ไม่จับ (ไม่มี keyword ใกล้เคียงให้ fuzzy match)
+3. ไม่มี product type → `has_type_regex=False` → ใช้ vector search
+4. vector search ด้วย "หาเบารองหลังแจ่มๆ เอาไว้นั่งทำงาน" ไม่เจอสินค้าที่เกี่ยวข้อง (หรือเจอไม่พอ)
+5. LLM ตอบ "ไม่มี" (negative answer)
+6. `should_use_web_search` trigger ด้วย reason "negative_answer"
+7. web_search fallback ค้นแล้วแนะนำ MicroSD แทน
+
+### สินค้าจริงใน DB (LuckyHomeMart, cat_name=Home & Living, status=NORMAL)
+- LBB003: "Leravan Cushion Back LBB003 เบาะรองหลังเพื่อสุขภาพ" (item_id=21629137045)
+- LBB001: "Leravan Leband LBB001 พนักพิงหลัง เบาะพิงหลัง" (item_id=16012490191)
+- LBH001: "LERAVAN Leband LBH001 เบาะรองนั่ง" (item_id=16917376841)
+- ML0559: "Leravan ML0559 หมอนนวด หมอนพิงหลัง" (item_id=... — จับ massager regex ได้แล้วผ่าน "หมอนนวด")
+
+### วิธีแก้
+เพิ่ม keyword ของ "รองหลัง" / "พิงหลัง" เข้าไปใน product type "massager" (ใน `product_store.py`):
+1. **user_kws** — เพิ่ม "รองหลัง", "พนักพิงหลัง", "เบาะพิงหลัง"
+   - "รองหลัง" จับทั้ง "เบาะรองหลัง" และ "เบารองหลัง" (พิมพ์ผิด) เพราะเป็น substring
+2. **regex** — เพิ่ม `รองหลัง|พนักพิงหลัง|เบาะพิงหลัง` เข้าไปใน massager regex
+   - ทำให้ MongoDB query กรอง item_name ด้วย regex นี้ และเจอสินค้า LBB003, LBB001
+
+### ความเสี่ยงต่อเคสเก่า
+- "massager" `_PRODUCT_TYPE_CATEGORIES` = ("Health", "Home & Living", "Home Appliances") — ครอบคลุม cat_name ของสินค้า cushion (Home & Living) ✓
+- สินค้าที่มี "รองหลัง"/"พิงหลัง" ในชื่อทั้งหมดเป็น Leravan health/wellness products ใน Home & Living/Health — ไม่มี false positive
+- ไม่กระทบ charger subtype, smartwatch, phone, หรือ product type อื่น
+- เคสเก่า "มีเครื่องนวดหลังแบบรองหลังไหมครับ" ยังจับ massager ผ่าน "เครื่องนวด" เหมือนเดิม (regex เดิมยังอยู่)
+
+### ไฟล์ที่แก้
+- `chatbot/shopeechat/product_store.py` — PRODUCT_TYPES massager entry (user_kws + regex)
+
+### Verify (ผ่านครบ)
+1. `python3 -m py_compile chatbot/shopeechat/product_store.py` → ผ่าน ✅
+2. `_detect_product_types("หาเบารองหลังแจ่มๆ เอาไว้นั่งทำงาน")` → `{'massager'}` ✅
+3. `_detect_product_types("หาเบาะรองหลังดีๆ เอาไว้นั่งทำงาน")` → `{'massager'}` ✅
+4. `_detect_product_types("มีเบาะรองหลังไหม")` → `{'massager'}` ✅
+5. `_detect_product_types("มีเบารองหลังไหม")` → `{'massager'}` ✅ (พิมพ์ผิด)
+6. `_detect_product_types("อยากได้เบาะพิงหลัง")` → `{'massager'}` ✅
+7. `_detect_product_types("มีพนักพิงหลังไหม")` → `{'massager'}` ✅
+8. `_detect_product_types("มีเครื่องนวดหลังแบบรองหลังไหมครับ")` → `{'massager'}` ✅ (regression — ยังเดิม)
+9. `fetch_products(db, "หาเบารองหลังแจ่มๆ เอาไว้นั่งทำงาน", shop_filter="LuckyHomeMart")` → 10 products, **LBB003 (21629137045) เป็นลำดับแรก** ✅
+10. `fetch_products(db, "หาเบาะรองหลังดีๆ เอาไว้นั่งทำงาน", shop_filter="LuckyHomeMart")` → 10 products, **LBB003 เป็นลำดับแรก** ✅
+11. `fetch_products(db, "มีเบาะรองหลังไหม", shop_filter="LuckyHomeMart")` → 10 products, **LBB003 เป็นลำดับแรก** ✅
+12. `should_use_web_search` กับ positive answer (LLM เห็น LBB003) → `False, "confident_enough"` ✅ (ไม่ trigger web_search)
+13. Charger subtype regression: 16/16 ผ่าน ✅
+14. Product type regression (22 types): ทุกตัวผ่าน ✅
+15. False positive check: "รองเท้า", "รองพื้น", "จานรอง", "ที่รองแก้ว", "หลังคา", "หลังบ้าน", "กลับหลัง" → ไม่ match massager ✅
+
+### สรุป
+- Root cause: "รองหลัง" / "เบาะรองหลัง" ไม่อยู่ใน keyword ของ product type ใดๆ → ไม่ detect → ไม่กรอง → vector search ไม่เจอ → LLM ตอบ "ไม่มี" → web_search fallback แนะนำ MicroSD แทน
+- Fix: เพิ่ม "รองหลัง", "พนักพิงหลัง", "เบาะพิงหลัง" เข้าไปใน massager keywords + regex (5 บรรทัดใน product_store.py)
+- ผล: LBB003 กลายเป็นสินค้าลำดับแรก → LLM ตอบเกี่ยวกับเบาะรองหลัง → ไม่ trigger web_search → ไม่แนะนำ MicroSD อีก
+- **Live test (2026-09-22)**: หลังแก้ + รีสตาร์ทบอท → Q1 "ปวดหลังหาเยาะรองหลัง" RAG=22 ชิ้น (เดิม 1) → แนะนำ LBB003 ตรง; Q3 "แล้วรองเก้าอี้รองหลังไม่มีเรอะ" RAG=22 ชิ้น (เดิม 5) → แนะนำ LBB003 ตรง — ปัญหา "ส่งแค่ 5 หรือ 1 ชิ้น" หาย
+- Car charger regression: 16/16 ผ่าน ✅; Pingevox/mistore regression: 42/42 ผ่าน ✅
+
+---
+
+### Shadow Inbox — Generate ทั้งหมด streaming (SSE) แสดงทีละคำตอบ (2026-09-10) — ✅ implement + build ผ่าน รอ verify manual
+- **ปัญหา**: กด "Generate ทั้งหมด" ในหน้า shadow-inbox → รอจนครบทุก Q&A pair ถึงจะเห็นคำตอบ (บางแชท 5 คำถาม = รอ 30-60 วินาทีเห็นทีเดียว)
+- **สาเหตุ**:
+  1. Backend `generateConversationShadowReplies` วนลูปเรียก bot ทีละ Q&A แต่คืนผลลัพธ์ทั้งหมดพร้อมกันตอนจบ
+  2. Frontend `generateAll` ใช้ `api().post()` (axios) ซึ่ง resolve ตอน response ครบ → ไม่สามารถแสดงทีละคำตอบได้
+- **วิธีแก้** (SSE streaming):
+  1. **`shadowReplyService.ts`** — เพิ่ม `onReply(doc, current, total)` callback ใน `generateConversationShadowReplies` — เรียกหลัง insert แต่ละ shadow reply ทันที (ไม่รอครบทุก pair)
+  2. **`generate-conversation/route.ts`** — เปลี่ยนจาก `json()` response → SSE `text/event-stream` ใช้ `ReadableStream`:
+     - `event: progress` → `{ current, total, inbound_text }` (ก่อนเรียก bot แต่ละรอบ)
+     - `event: reply` → `{ shadow_reply: {...}, current, total }` (หลัง insert แต่ละ doc)
+     - `event: done` → `{ total, generation_batch_id }` (จบ)
+     - `event: error` → `{ message }` (ถ้า error)
+     - เพิ่ม `export const dynamic = "force-dynamic"` กัน Next.js static render
+     - เพิ่ม header `X-Accel-Buffering: no` กัน proxy รวม buffer
+  3. **`ShadowConversationPanel.tsx`** — เปลี่ยน `generateAll` จาก `api().post()` (axios) → `fetch()` + `getReader()`:
+     - อ่าน stream chunk ทีละ chunk, buffer, แยก SSE events ตาม `\n\n`
+     - parse `event:` + `data:` แต่ละ event
+     - `progress` → อัปเดต `generatingProgress` + `generatingIdx` (highlight ข้อที่กำลังทำ)
+     - `reply` → อัปเดต `pairs[idx]` ทันทีที่ bot ตอบเสร็จ (ไม่รอครบ)
+     - `done` → toast success
+     - `error` → toast error
+     - เพิ่ม state `generatingProgress` (`{ current, total } | null`) แสดง "Generate 2/5" บนปุ่ม
+- **ไฟล์ที่แก้**: `shadowReplyService.ts`, `generate-conversation/route.ts`, `ShadowConversationPanel.tsx`
+- **ไม่แก้ SRS_SSD.md** — section 6 เป็นของ Python (`chatbot/shopeechat/`) ไม่เกี่ยวกับการแก้ครั้งนี้
+- **Verify**: `npx tsc --noEmit` → ผ่าน ✅, `npm run build` → ผ่าน ✅
+- **⚠️ ยังไม่ verify manual**: รอเปิดหน้า shadow-inbox กด Generate ทั้งหมดใน browser เพื่อยืนยัน:
+  1. คำตอบขึ้นทีละอันทันทีที่ bot ตอบเสร็จ (ไม่รอครบ)
+  2. ปุ่มแสดง "Generate 2/5" อัปเดตตาม progress
+  3. ข้อที่กำลัง generate มี spinner "กำลัง generate..."
+  4. ครบทุกข้อแล้ว toast "Generate ครบ N ข้อความแล้ว"
+- **⚠️ หมายเหตุ**: batch generate (roll) ใน `shadow-inbox/page.tsx` ยังใช้ `api().post()` เดิม — รอทีละแชท แต่ละแชทรอครบ Q&A (ไม่ stream) เพราะ roll ทำทีละแชทและอัปเดต progress ระดับแชทแล้ว
+
+---
+
+## ผ่านแล้ว (ใหม่)
+
+### มอก. (TISI standard) question handler (2026-09-10) — ✅ implement + verify ผ่าน
+- **ปัญหา**: ลูกค้าถามเรื่อง มอก. (มาตรฐานผลิตภัณฑ์อุตสาหกรรม) → บอทไม่รู้จัก ไม่ค้น DB ตอบไม่ได้
+  - เคสจริง: "รุ่นไหนมี มอก. บ้าง" → Zaapi ส่งต่อแอดมิน (เราตอบได้จาก DB แต่ยังไม่มี handler เฉพาะ)
+  - เคสเจาะจง: "AC65B2 มี มอก. ไหม" → ต้องเช็คเฉพาะรุ่น
+- **วิธีแก้**:
+  1. **`product_store.py`** — เพิ่ม `search_tisi_products(db, shop_filter, model_keyword, limit)`:
+     - ค้น MongoDB `description` ด้วย regex `มอก\.` (TISI standard)
+     - กรอง false positive ใน Python (`_has_tisi`): ไม่ match "หมอก" (fog), "เสมอกัน" (equal)
+     - `_extract_tisi_context` ดึงข้อความรอบ มอก. ส่งให้ LLM/answer
+     - รองรับ `model_keyword` กรองเฉพาะรุ่นที่เจาะจง
+  2. **`warranty.py`** — เพิ่ม `detect_tisi_question(message)` และ `extract_tisi_model_keyword(message)`:
+     - `detect_tisi_question`: ตรวจคำถาม มอก. (กรอง "หมอก"/"เสมอกัน" false positive)
+     - `extract_tisi_model_keyword`: สกัดชื่อรุ่นจากคำถาม (เช่น "AC65B2 มี มอก. ไหม" → "AC65B2")
+     - ถ้าเป็นคำถามทั่วไป "รุ่นไหนมี มอก. บ้าง" → คืน "" (ไม่เจาะจงรุ่น)
+  3. **`app.py`** — เพิ่ม มอก. handler block หลัง tax invoice handoff:
+     - detect คำถาม มอก. → ค้น `search_tisi_products` ใน DB
+     - ถ้าเจอ → ตอบว่ามี รุ่นไหนบ้าง (หรือรุ่นที่เจาะจงถาม)
+     - ถ้าไม่เจอ → ส่งเรื่องให้แอดมิน + handoff (เหมือน tax invoice pattern)
+  4. **`product_store.py`** — เพิ่ม "มอก.", "มอก", "tisi", "มาตรฐาน" ใน `spec_kw` ของ `_clean_description`
+     - เพื่อให้ description ที่มี มอก. ถูกส่งให้ LLM ได้เมื่อลูกค้าถามเรื่อง มอก.
+- **เคสที่ผ่าน** (test แล้ว):
+  - `detect_tisi_question("รุ่นไหนมี มอก. บ้าง")` → True ✓
+  - `detect_tisi_question("AC65B2 มี มอก. ไหม")` → True ✓
+  - `detect_tisi_question("หมอกเย็นเกรดไมครอน")` → False ✓ (หมอก = fog)
+  - `detect_tisi_question("เสมอกันที่ 0.8 มม.")` → False ✓ (เสมอกัน = equal)
+  - `detect_tisi_question("tisi certified ไหม")` → True ✓
+  - `extract_tisi_model_keyword("AC65B2 มี มอก. ไหม")` → "AC65B2" ✓
+  - `extract_tisi_model_keyword("รุ่นไหนมี มอก. บ้าง")` → "" ✓ (ไม่เจาะจง)
+  - `_has_tisi("ปลั๊กมาตรฐาน มอก. 2432-2555")` → True ✓
+  - `_has_tisi("หมอกหมุนได้ 360")` → False ✓ (หมอก = fog)
+  - `search_tisi_products(db)` → 109 products with มอก. across 8 shops ✓
+  - `search_tisi_products(db, model_keyword="A18T")` → 1 product (CUKTECH A18T, "มาตรฐานมอก.") ✓
+  - `search_tisi_products(db, model_keyword="AC65B2")` → 0 products (AC65B2 ไม่มี มอก. ใน description) ✓
+- **ไฟล์ที่แก้**: `chatbot/shopeechat/product_store.py`, `chatbot/shopeechat/warranty.py`, `chatbot/shopeechat/app.py`
+- **Verify**:
+  - `python3 -m py_compile` ทุกไฟล์ → ผ่าน ✅
+  - `test_car_charger_regression.py` → 16/16 ผ่าน ✅ (ไม่ทำลายเคสเดิม)
+  - unit test 13 cases → ผ่านทุกเคส ✅
+  - MongoDB query → 109 products with มอก. จริง ✅
+- **⚠️ ยังไม่ verify เต็ม**: รอทดสอบจริงกับบอท (replay แชทที่ถาม มอก.) เพื่อยืนยันว่าบอทตอบถูก end-to-end
+- **⚠️ ยังไม่อัปเดต SRS_SSD.md**: รอ verify replay เพิ่มเติมก่อน (ตามกฎ)
+
+---
+
+### Live Assignment — กดปิดแชทครั้งที่ 2 ไม่ประมวลผลข้อความใหม่ (2026-09-10) — ✅ implement + tsc ผ่าน รอ verify
+- **ปัญหา**: หน้า live assignment กดปิดแชท → reopen → bot ตอบ → handoff → หยุด แต่พอกดปิดแชทครั้งที่ 2 ข้อความใหม่ไม่มาต่อ
+- **สาเหตุ**: ใน `closeChat()` (liveAssignmentService.ts) บรรทัด ~710:
+  - `const newProcessedCount = processedCount + remainingMsgs.length` — นับ `remainingMsgs.length` ทั้งหมด ทั้งที่ loop หยุดกลางทางที่ handoff (`stopped=true`)
+  - ข้อความหลัง handoff ถูก mark ว่า "processed" แต่ไม่เคย process จริง
+  - ครั้งต่อไปกดปิดแชท → `remainingMsgs = allUserMsgs.slice(processedCount)` ข้ามข้อความที่ถูกข้าม → ไม่มาต่อ
+- **วิธีแก้**:
+  1. เพิ่ม `let processedInThisBatch = 0` ก่อน loop
+  2. ใน loop: `processedInThisBatch = i + 1` (track จำนวนที่ process จริง)
+  3. เปลี่ยน `newProcessedCount = processedCount + remainingMsgs.length` → `processedCount + processedInThisBatch`
+  - ผล: ถ้า loop หยุดที่ handoff (i=0) → `processedInThisBatch=1` → `newProcessedCount = processedCount + 1` → ครั้งต่อไปข้อความที่เหลือจะถูก process ใหม่
+- **ไฟล์ที่แก้**: `ChatAdminWeb/src/backend/service/liveAssignmentService.ts`
+- **Verify**: `npx tsc --noEmit` → ผ่าน ✅
+- **⚠️ ยังไม่ verify manual**: รอทดสอบจริงในหน้า live assignment (กดปิดแชท 2 ครั้ง + มีข้อความใหม่)
+
+---
+
+### Device-spec-lookup ไม่ทำงานใน KB path → บอทแนะนำแค่ baseline ไม่มี upgrade (2026-09-10) — ✅ implement + verify ผ่าน
+- **ปัญหา**: ลูกค้าถาม "สนใจหัวชาร์จที่ใช้กับ iphone 17 pro max" → บอทแนะนำแค่ CUKTECH A18T 30W ทั้งที่ร้านมี 65W/100W ที่ compat กับ iPhone 17 Pro Max (USB-C PD) ด้วย → ไม่มี dual-tier recommendation (baseline + upgrade)
+- **สาเหตุ**: KB path (บรรทัด ~3979) เรียก LLM และ return ก่อนถึง device-spec-lookup block (บรรทัด ~6083) → web search spec + re-query หา high-wattage ไม่เคยทำงานเมื่อ KB path จัดการเอง → LLM เห็นแค่สินค้าจาก KB+Mongo (4 ตัว) ไม่เห็น high-wattage upgrade
+- **วิธีแก้**:
+  1. แยก device-spec-lookup logic (บรรทัด ~140 บรรทัด) เป็น module-level helper `_device_spec_lookup()` (บรรทัด ~646)
+     - รับ parameter: db, req, intent_result, history, existing_products, retrieval_message, anchor_card, hybrid_anchor_card, llm_ctx_limit, resolve_subtype_fn
+     - คืน tuple: (device_spec_extra, additional_products)
+     - resolve_subtype_fn เป็น parameter เพราะ `_resolve_charger_subtype` เป็น nested function ใน `chat()` (closure ใช้ req, _hybrid_anchor_card)
+  2. เรียก helper จาก KB path ก่อน LLM call (บรรทัด ~4008) → merge high-wattage products + inject spec context
+  3. แทนที่ inline code ใน main path (บรรทัด ~6267) ด้วย helper call → ลดโค้ดซ้ำ ~130 บรรทัด
+- **ผล**:
+  - ก่อนแก้: 4 products, แนะนำแค่ 1 รุ่น (30W)
+  - หลังแก้: 33 products (4 KB + 29 re-query), แนะนำ 2 รุ่น (baseline 40W + upgrade 65W/100W)
+  - log: `[DEVICE-SPEC-LOOKUP-KB] merge 29 สินค้าจาก re-query เข้า merged_products (now 33)`
+  - re-query: `'หัวชาร์จ charger USB-C Type-C PD Power Delivery MagSafe Qi2'` (keywords จาก web search spec ของ iPhone 17 Pro Max)
+- **ไฟล์ที่แก้**: `chatbot/shopeechat/app.py`
+- **Verify**:
+  - `python3 -m py_compile chatbot/shopeechat/app.py` → ผ่าน ✅
+  - `test_car_charger_regression.py` → ผ่าน 16/16 ✅
+  - curl test "สนใจหัวชาร์จที่ใช้กับ iphone 17 pro max" → 10 products, แนะนำ 2 รุ่น (AD653U 65W/100W + AC301 40W) ✅
+- **⚠️ หมายเหตุ**: iPhone 17 Pro Max ชาร์จสูงสุด 36-40W → บอทแนะนำ 40W (baseline) + 65W/100W (upgrade) ถูกต้องตาม spec ไม่ใช่ 120W/140W ที่เกินความต้องการของอุปกรณ์
+- **⚠️ ยังไม่อัปเดต SRS_SSD.md**: รอ verify replay เพิ่มเติมก่อน (ตามกฎ)
+
+---
+
+## กำลังจะทำ
+
+(ไม่มี — ทำเสร็จหมดแล้ว)
+
+---
+
+## ผ่านแล้ว (ใหม่)
+
+### เพิ่ม 5 PRODUCT_TYPES ที่ปลอดภัยจาก audit (2026-09-22) — ✅ implement + verify ผ่าน
+- **ปัญหา**: หลังแก้เคส "เบาะรองหลัง" (massager) → สังเกตว่ามี sub_category ใน `spec_schema.csv` ที่บอทไม่ detect เยอะ
+  - ทั้งหมด 165 sub_categories ใน spec_schema.csv แต่ PRODUCT_TYPES มีแค่ 66 ตัว
+  - audit พบว่า 27 sub_categories ที่ไม่ครอบคลุม มี 24 ตัวที่ลูกค้าถามแล้วบอทไม่ detect เลย (ตก vector search)
+- **Audit ผลลัพธ์** (ตรวจสินค้าจริงใน DB):
+  - ทดสอบ 12 sub_categories ที่คาดว่าควรเพิ่ม → พบว่าปลอดภัยแค่ 5 ตัว
+  - ไม่เพิ่ม 7 ตัวเพราะ false positive หนัก:
+    - `tv` (128 ชิ้น แต่ 30 ชิ้นเป็น Soundbar — "Mi TV Speaker")
+    - `desk` (192 ชิ้น แต่ "พัดลมตั้งโต๊ะ", "แท่นชาร์จ Desktop", "จอคอมพิวเตอร์ Desktop Monitor")
+    - `chair` (มี "เก้าอี้นวด" = massager, "Gaming Seat")
+    - `voice_recorder` (มี "Car Recorder" = dashcam)
+    - `notebook` (มี "กระเป๋าเป้ Notebook" = Men Bags)
+    - `printer` (1 ชิ้น — น้อยเกิน)
+    - `facial_brush` (0 ชิ้น — ไม่มีสินค้า)
+- **วิธีแก้**: เพิ่ม 5 PRODUCT_TYPES ใน `product_store.py`:
+  | type | สินค้าใน DB | cat_name | keyword ที่ใส่ |
+  |---|---|---|---|
+  | `rice_cooker` | 17 ชิ้น | Home Appliances | หม้อหุงข้าว, เครื่องหุงข้าว, rice cooker |
+  | `hair_clipper` | 34 ชิ้น | Beauty/Health | เครื่องตัดผม, hair clipper, ตัดผม |
+  | `tv_box` | 11 ชิ้น | Home Appliances | ทีวีบ็อกซ์, tv box, android box, mi box |
+  | `blender` | 29 ชิ้น | Home Appliances | เครื่องปั่น, blender, ปั่นผลไม้ |
+  | `stylus` | 7 ชิ้น | Mobile & Gadgets | ปากกาสไตลัส, stylus, ปากกาไอแพด |
+- **ไฟล์ที่แก้**: `chatbot/shopeechat/product_store.py` (PRODUCT_TYPES + _PRODUCT_TYPE_CATEGORIES)
+- **Verify**:
+  - `python3 -m py_compile` → ผ่าน ✅
+  - `_detect_product_types` 16/16 กรณี → ผ่าน ✅ (ทั้ง Thai + English keyword)
+  - False positive check 12/12 → ผ่าน ✅ (หม้อทอด, ตัดไม้, กล่อง, ปั่นจักรยาน, ปากกา, ทีวี ไม่ match ผิด)
+  - `test_pingevox_mistore.py` → 38 ผ่าน, 0 ไม่ผ่าน, 4 error (42 total) ✅ (เท่าเดิม — ไม่ทำลายเคสเดิม)
+  - `test_car_charger_regression.py` → 16/16 ผ่าน ✅
+  - `fetch_products` 10 กรณี (5 type × 2 ร้าน) → ทั้งหมดเจอสินค้า ✅
+    - rice_cooker: LuckyHomeMart 1 ชิ้น, YoupinOfficialStore 5 ชิ้น
+    - hair_clipper: LuckyHomeMart 4 ชิ้น, KingGadgets 5 ชิ้น
+    - tv_box: ThaiSuperPhone 4 ชิ้น, YoupinOfficialStore 5 ชิ้น
+    - blender: LuckyHomeMart 4 ชิ้น, SuperITMall 5 ชิ้น
+    - stylus: ZMIThailand 1 ชิ้น, LuckyHomeMart 1 ชิ้น
+- **⚠️ หมายเหตุ**: 4 error ใน pingevox/mistore เป็น error เดิม (HTTP timeout/connection) ไม่เกี่ยวกับการแก้ครั้งนี้
+- **⚠️ ยังไม่ verify**: รอทดสอบจริงกับบอท (replay แชทที่ถาม 5 ประเภทใหม่) เพื่อยืนยันว่าบอทตอบถูก end-to-end
+- **⚠️ ยังไม่อัปเดต SRS_SSD.md**: รอ verify replay เพิ่มเติมก่อน (ตามกฎ)

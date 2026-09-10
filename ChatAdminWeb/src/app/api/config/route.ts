@@ -95,6 +95,13 @@ export async function PUT(req: NextRequest) {
       return error("workflow_run_timeout_ms must be between 60000 (1 min) and 86400000 (24 h)", 422);
     }
   }
+  // ⚡ Phase 8 — validate llm_context_limit (10-50)
+  if ("llm_context_limit" in body) {
+    const l = Number(body.llm_context_limit);
+    if (!Number.isFinite(l) || l < 10 || l > 50) {
+      return error("llm_context_limit must be between 10 and 50", 422);
+    }
+  }
 
   const updatedBy = r.ctx.admin.username || r.ctx.admin.email || 'admin';
   const updated = await systemConfigService.updateSystemConfig(body, updatedBy);

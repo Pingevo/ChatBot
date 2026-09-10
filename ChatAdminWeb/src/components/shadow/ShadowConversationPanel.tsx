@@ -184,6 +184,8 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
   const [pairs, setPairs] = useState<QAPair[]>([]);
   const [generating, setGenerating] = useState(false);
   const [generatingIdx, setGeneratingIdx] = useState<number | null>(null);
+  // ⚡ streaming — progress ของ generateAll (SSE) แสดง "2/5" และ highlight ข้อที่กำลังทำ
+  const [generatingProgress, setGeneratingProgress] = useState<{ current: number; total: number } | null>(null);
   const [copiedSide, setCopiedSide] = useState<"zaapi" | "bot" | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -262,8 +264,10 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
     if (Array.isArray(historyReplies)) {
       // ⚡ Phase 3B-6 — filter เฉพาะ replies ของ batch ที่เลือก (ถ้ามี)
       //   ถ้าไม่มี batch ที่เลือก (ยังโหลดไม่เสร็จ) → ใช้ทั้งหมด (fallback)
+      //   ⚡ fix restore — replies ที่ไม่มี generation_batch_id (สร้างก่อน Phase 3B-6)
+      //     ให้แสดงเสมอ ไม่กรองออก (กัน restore แล้ว panel ว่าง)
       const batchFiltered = selectedBatchId
-        ? historyReplies.filter((r) => r.generation_batch_id === selectedBatchId)
+        ? historyReplies.filter((r) => !r.generation_batch_id || r.generation_batch_id === selectedBatchId)
         : historyReplies;
       // ⚡ Phase 2W — group by inbound_message_id, sort by created_at desc (ล่าสุดก่อน)
       //   ถ้า Generate ซ้ำหลายครั้ง → มีหลาย shadow_replies ต่อ inbound_message_id เดียวกัน
@@ -449,6 +453,7 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
 
   // Generate ทุก Q&A pair — เรียก endpoint ใหม่ที่ generate ทั้ง conversation
   // โดยใช้คำตอบ bot เราเป็น history (ไม่ใช่ Zaapi)
+  // ⚡ Streaming (SSE) — แสดงทีละคำตอบที่เสร็จ ไม่ต้องรอครบทุก Q&A
   const generateAll = useCallback(async () => {
     if (!conversation || pairs.length === 0) return;
     const ok = await confirm.ask({
@@ -458,56 +463,101 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
     });
     if (!ok) return;
     setGenerating(true);
+    setGeneratingProgress({ current: 0, total: pairs.length });
     try {
-      const resp = await api().post<{
-        shadow_replies: Array<{
-          shadow_reply_id: string;
-          inbound_message_id: string;
-          bot_reply_text: string;
-          bot_source?: string;
-          bot_model?: string;
-          bot_elapsed_ms?: number;
-          bot_tokens?: { prompt: number; output: number; total: number };
-          bot_products?: ProductCard[];
-        }>;
-        total: number;
-      }>("/shadow-inbox/generate-conversation", {
-        conversation_id: conversation.id,
-      }, {
-        // ⚡ generate ทั้ง conversation อาจใช้เวลานาน (เรียก bot ทีละข้อความ)
-        // ตั้ง timeout 5 นาที กัน axios ตัดก่อน backend ทำเสร็จ
-        timeout: 300_000,
+      // ⚡ ใช้ fetch + ReadableStream reader แทน axios (axios รอครบก่อน resolve)
+      //    SSE: event: progress/reply/done/error
+      const resp = await fetch("/api/shadow-inbox/generate-conversation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ conversation_id: conversation.id }),
       });
+      if (!resp.ok || !resp.body) {
+        const txt = await resp.text().catch(() => "");
+        throw new Error(`Generate ไม่สำเร็จ (${resp.status}): ${txt.slice(0, 200)}`);
+      }
 
-      // map ผลลัพธ์กลับเข้า pairs (จับคู่ด้วย inbound_message_id)
-      const replyMap = new Map(resp.data.shadow_replies.map((sr) => [sr.inbound_message_id, sr]));
-      setPairs((prev) =>
-        prev.map((pair) => {
-          const sr = replyMap.get(pair.inbound.id);
-          if (!sr) return pair;
-          return {
-            ...pair,
-            botReply: {
-              text: sr.bot_reply_text,
-              source: sr.bot_source,
-              model: sr.bot_model,
-              elapsed: sr.bot_elapsed_ms,
-              tokens: sr.bot_tokens,
-              products: sr.bot_products,
-              shadow_reply_id: sr.shadow_reply_id,
-              rating: "unrated" as const,
-              routing_decision: (sr as any).bot_routing_decision,
-              handoff_to_admin: (sr as any).bot_handoff_to_admin,
-              handoff_reason: (sr as any).bot_handoff_reason,
-            },
-          };
-        })
-      );
-      toast.success(`Generate ครบ ${resp.data.total} ข้อความแล้ว`);
+      // ⚡ parse SSE stream — buffer chunks, แยก event ตาม \n\n
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      let doneCount = 0;
+      let total = pairs.length;
+
+      const handleEvent = (eventType: string, dataStr: string) => {
+        let data: Record<string, unknown>;
+        try { data = JSON.parse(dataStr); } catch { return; }
+        if (eventType === "progress") {
+          const current = Number(data.current) || 0;
+          total = Number(data.total) || total;
+          setGeneratingProgress({ current, total });
+          // ⚡ highlight ข้อที่กำลัง generate (index 0-based)
+          setGeneratingIdx(current - 1);
+        } else if (eventType === "reply") {
+          const sr = data.shadow_reply as Record<string, unknown> | undefined;
+          if (!sr) return;
+          const inboundId = String(sr.inbound_message_id || "");
+          setPairs((prev) =>
+            prev.map((pair) =>
+              pair.inbound.id === inboundId
+                ? {
+                    ...pair,
+                    botReply: {
+                      text: String(sr.bot_reply_text || ""),
+                      source: sr.bot_source as string | undefined,
+                      model: sr.bot_model as string | undefined,
+                      elapsed: sr.bot_elapsed_ms as number | undefined,
+                      tokens: sr.bot_tokens as { prompt: number; output: number; total: number } | undefined,
+                      products: sr.bot_products as ProductCard[] | undefined,
+                      shadow_reply_id: String(sr.shadow_reply_id || ""),
+                      rating: "unrated" as const,
+                      routing_decision: (sr as any).bot_routing_decision,
+                      handoff_to_admin: (sr as any).bot_handoff_to_admin,
+                      handoff_reason: (sr as any).bot_handoff_reason,
+                    },
+                  }
+                : pair
+            )
+          );
+          doneCount++;
+          setGeneratingProgress({ current: doneCount, total });
+        } else if (eventType === "done") {
+          const t = Number(data.total) || doneCount;
+          setGeneratingProgress({ current: t, total: t });
+          toast.success(`Generate ครบ ${t} ข้อความแล้ว`);
+        } else if (eventType === "error") {
+          const msg = (data.message as string) || "Generate ไม่สำเร็จ";
+          toast.error(msg);
+        }
+      };
+
+      // อ่าน stream จนกว่าจะจบ
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        // ⚡ แยก SSE events ตาม \n\n (บรรทัดว่างคั่น event)
+        let sep: number;
+        while ((sep = buf.indexOf("\n\n")) >= 0) {
+          const rawEvent = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          // parse event: <name> + data: <json>
+          let evType = "message";
+          let dataStr = "";
+          for (const line of rawEvent.split("\n")) {
+            if (line.startsWith("event:")) evType = line.slice(6).trim();
+            else if (line.startsWith("data:")) dataStr += line.slice(5).trim();
+          }
+          if (dataStr) handleEvent(evType, dataStr);
+        }
+      }
     } catch (err) {
       catchError(err, "Generate ทั้งหมดไม่สำเร็จ");
     } finally {
       setGenerating(false);
+      setGeneratingProgress(null);
+      setGeneratingIdx(null);
     }
   }, [conversation, pairs, confirm, catchError]);
 
@@ -682,7 +732,10 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
                 disabled={generating || pairs.length === 0}
                 onClick={generateAll}
               >
-                {generating ? <Loading size={12} /> : <Zap size={12} />} Generate ทั้งหมด
+                {generating ? <Loading size={12} /> : <Zap size={12} />}{" "}
+                {generating && generatingProgress
+                  ? `Generate ${generatingProgress.current}/${generatingProgress.total}`
+                  : "Generate ทั้งหมด"}
               </Button>
             )}
           </div>

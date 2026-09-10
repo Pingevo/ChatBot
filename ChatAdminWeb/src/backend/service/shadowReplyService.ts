@@ -71,9 +71,9 @@ export interface ShadowReplyDoc extends Document {
   bot_handoff_to_admin?: boolean;
   bot_handoff_reason?: string;
   bot_image_desc?: string;           // ⚡ A2 — vision description ของรูป current turn (cache กัน re-read)
-  // ⚡ chat_engine — บันทึกว่าคำตอบนี้มาจาก engine ไหน (legacy / v2)
-  //    ใช้ตอนเปรียบเทียบ — แยกคำตอบ legacy vs v2 ใน shadow inbox
-  chat_engine?: "legacy" | "v2";
+  // ⚡ chat_engine — บันทึกว่าคำตอบนี้มาจาก engine ไหน (legacy / v2 / v3)
+  //    ใช้ตอนเปรียบเทียบ — แยกคำตอบ legacy vs v2 vs v3 ใน shadow inbox
+  chat_engine?: "legacy" | "v2" | "v3";
   // ⚡ Phase 3B-6 — id กลุ่มรอบ generate (unique ต่อรอบ กด Generate ซ้ำแชทเดิมแยกกัน)
   //   format: gen_<convId>_<ts36>_<rand>
   //   ใช้ group + sort รอบใน UI, แยก annotation ตามรอบ
@@ -156,7 +156,7 @@ export async function generateShadowReply(opts: {
   inboundMessageId?: string;
   generatedBy?: string;  // ⚡ Phase 3A — admin_id ของคนกด Generate (KPI)
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
-  chatEngine?: "legacy" | "v2";
+  chatEngine?: "legacy" | "v2" | "v3";
   botCaller: (params: {
     platform: Platform;
     message: string;
@@ -356,7 +356,7 @@ export async function generateConversationShadowReplies(opts: {
   conversationId: string;
   generatedBy?: string;  // ⚡ Phase 3A — admin_id ของคนกด Generate (KPI)
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
-  chatEngine?: "legacy" | "v2";
+  chatEngine?: "legacy" | "v2" | "v3";
   botCaller: (params: {
     platform: Platform;
     message: string;
@@ -375,8 +375,10 @@ export async function generateConversationShadowReplies(opts: {
     image_desc?: string;
   }>;
   onProgress?: (current: number, total: number, pair: { inbound_text: string }) => void;
+  // ⚡ streaming — เรียกหลัง insert แต่ละ shadow reply (สำหรับ SSE: ส่งทีละคำตอบให้ UI แสดงทันที)
+  onReply?: (doc: ShadowReplyDoc, current: number, total: number) => void;
 }): Promise<ShadowReplyDoc[]> {
-  const { conversationId, botCaller, onProgress, generatedBy, chatEngine } = opts;
+  const { conversationId, botCaller, onProgress, onReply, generatedBy, chatEngine } = opts;
 
   // ⚡ Phase 3B-6 — สร้าง batch_id สำหรับรอบนี้ (tag ทุก Q&A pair ในรอบเดียวกัน)
   const batchId = genGenerationBatchId(conversationId);
@@ -478,6 +480,8 @@ export async function generateConversationShadowReplies(opts: {
     };
     await coll.insertOne(doc);
     results.push(doc);
+    // ⚡ streaming — ส่ง doc ที่เพิ่ง insert ให้ caller (SSE) ทันที ไม่ต้องรอครบทุก pair
+    onReply?.(doc, idx + 1, pairs.length);
 
     // ⚡ เพิ่ม Q&A นี้เข้า history สำหรับรอบถัดไป
     //    user question → role "user" (ใช้ botText เพื่อให้รอบถัดไป bot เห็น tag สินค้าถ้ามี)
@@ -709,6 +713,31 @@ export async function restoreShadowReply(shadowReplyId: string): Promise<boolean
 }
 
 /**
+ * ⚡ Restore ทุก shadow replies ใน conversation นั้น — ใช้ในหน้าถังขยะ (restore per conversation)
+ */
+export async function restoreShadowRepliesByConversation(
+  conversationId: string
+): Promise<{ restoredCount: number }> {
+  const coll = await getCollection<ShadowReplyDoc>(COLLECTIONS.shadowReplies);
+  const result = await coll.updateMany(
+    { conversation_id: conversationId, deleted_at: { $exists: true } },
+    {
+      $unset: { deleted_at: "", deleted_by: "", delete_reason: "" },
+      $set: { updated_at: new Date() },
+    }
+  );
+  if (result.modifiedCount > 0) {
+    await logAdminEvent({
+      action_type: "shadow_reply.restore_conversation",
+      actor: "system",
+      conversation_id: conversationId,
+      metadata: { count: result.modifiedCount },
+    });
+  }
+  return { restoredCount: result.modifiedCount };
+}
+
+/**
  * Restore ทั้งหมดที่ถูก soft delete — ใช้ในหน้าถังขยะ
  */
 export async function restoreAllShadowReplies(opts?: {
@@ -823,6 +852,7 @@ export const shadowReplyService = {
   delete: deleteShadowReply,
   deleteByConversation: deleteShadowRepliesByConversation,
   restore: restoreShadowReply,
+  restoreByConversation: restoreShadowRepliesByConversation,
   restoreAll: restoreAllShadowReplies,
   clearAll: clearAllShadowReplies,
   stats: getShadowReplyStats,
