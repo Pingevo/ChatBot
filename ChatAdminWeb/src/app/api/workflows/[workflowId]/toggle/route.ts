@@ -1,7 +1,7 @@
 // POST /api/workflows/[workflowId]/toggle — enable/disable workflow
 // body: { enabled: boolean }
 import { NextRequest } from "next/server";
-import { requireEditor } from "@/backend/middleware/authorize";
+import { requirePageEdit } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { workflowService } from "@/backend/service/workflowService";
 
@@ -9,7 +9,7 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ workflowId: string }> }
 ) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "workflow");
   if (!r.ok) return r.response;
   const { workflowId } = await params;
 

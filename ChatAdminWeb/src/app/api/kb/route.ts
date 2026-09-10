@@ -1,7 +1,7 @@
 // GET /api/kb — list knowledge base entries
 // POST /api/kb — create a general_faq entry
 import { NextRequest } from "next/server";
-import { requireAuth, requireEditor } from "@/backend/middleware/authorize";
+import { requireAuth, requirePageEdit } from "@/backend/middleware/authorize";
 import { json, error } from "@/backend/lib/http";
 import { knowledgeBaseService, type KbType } from "@/backend/service/knowledgeBaseService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
@@ -14,11 +14,12 @@ export async function GET(req: NextRequest) {
   const type = (url.searchParams.get("type") as KbType | null) ?? undefined;
   const search = url.searchParams.get("search") ?? undefined;
   const activeOnly = url.searchParams.get("active_only") === "1";
+  const platform = url.searchParams.get("platform") ?? undefined; // ⚡ G4
   const limit = parseInt(url.searchParams.get("limit") || "100", 10);
   const skip = parseInt(url.searchParams.get("skip") || "0", 10);
 
   const [rows, total] = await Promise.all([
-    knowledgeBaseService.listKbEntries({ type, search, activeOnly, limit, skip }),
+    knowledgeBaseService.listKbEntries({ type, search, activeOnly, platform, limit, skip }),
     knowledgeBaseService.countKbEntries(type),
   ]);
 
@@ -26,7 +27,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "kb");
   if (!r.ok) return r.response;
 
   let body: any;

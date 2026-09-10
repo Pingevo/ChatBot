@@ -5,7 +5,7 @@
 //    body: { platform, admin_id }
 // ⚠️ เฉพาะ role=admin เท่านั้นที่สามารถเข้าทีม platform ได้ — superadmin และ dev ไม่ถูกจ่ายแชท
 import { NextRequest } from "next/server";
-import { requireEditor } from "@/backend/middleware/authorize";
+import { requirePageAccess, requirePageEdit } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { assignmentService } from "@/backend/service/assignmentService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
@@ -15,7 +15,7 @@ import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 const VALID_PLATFORMS = ["shopee", "tiktok", "lazada"];
 
 export async function GET(req: NextRequest) {
-  const r = await requireEditor(req);
+  const r = await requirePageAccess(req, "team");
   if (!r.ok) return r.response;
 
   const url = new URL(req.url);
@@ -28,7 +28,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "team");
   if (!r.ok) return r.response;
 
   const body = await readJson<{ platform?: string; admin_id?: string }>(req);
@@ -55,7 +55,7 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "team");
   if (!r.ok) return r.response;
 
   const body = await readJson<{ platform?: string; admin_id?: string }>(req);

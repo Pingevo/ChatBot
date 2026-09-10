@@ -47,6 +47,9 @@ _SAME_PRODUCT_KWS = (
     "ตัวเดิม", "อันเดิม", "ของเดิม", "รุ่นเดิม", "แบบเดิม",
     "สินค้าเดิม", "อันที่ดู", "อันที่ถาม", "อันนั้น", "ตัวนั้น",
     "รุ่นนั้น", "แบบนั้น",
+    # ⚡ Phase 2Z+++ — เพิ่ม "อันนี้", "ตัวนี้", "รุ่นนี้" เพื่อให้ resolve_active_by_message
+    #    match ที่ข้อ 2 (anchor ล่าสุด) แทน default
+    "อันนี้", "ตัวนี้", "รุ่นนี้", "ชิ้นนี้", "สินค้านี้",
 )
 
 # คำที่ลูกค้าพูดแล้วหมายถึง "สินค้าที่ bot แนะนำ"
@@ -229,18 +232,30 @@ def _compute_active(products: list[dict]) -> str | int | None:
 
     ถ้าไม่มี anchor → ใช้ suggestion ล่าสุด (fallback)
     """
+    def _sort_key(p: dict) -> datetime:
+        return _normalize_dt(p.get("mentioned_at"))
+
     anchors = [p for p in products if p.get("is_anchor")]
     if anchors:
-        anchors.sort(key=lambda p: p.get("mentioned_at", datetime.min) if isinstance(p.get("mentioned_at"), datetime) else datetime.min, reverse=True)
+        anchors.sort(key=_sort_key, reverse=True)
         return _to_serializable(anchors[0].get("item_id"))
     # fallback: suggestion ล่าสุด
     if products:
-        sorted_p = sorted(products, key=lambda p: p.get("mentioned_at", datetime.min) if isinstance(p.get("mentioned_at"), datetime) else datetime.min, reverse=True)
+        sorted_p = sorted(products, key=_sort_key, reverse=True)
         return _to_serializable(sorted_p[0].get("item_id"))
     return None
 
 
 # ─── Query helpers ─────────────────────────────────────────
+
+def _normalize_dt(dt: Any) -> datetime:
+    """แปลง mentioned_at เป็น naive datetime สำหรับ sort (กัน TypeError offset-naive vs aware)."""
+    if not isinstance(dt, datetime):
+        return datetime.min
+    if dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
+    return dt
+
 
 def get_active_product(conversation_id: str) -> dict | None:
     """ดึง active product card ของแชท.
@@ -269,7 +284,7 @@ def get_suggestion_latest(conversation_id: str) -> dict | None:
     suggestions = [p for p in doc.get("products", []) if not p.get("is_anchor")]
     if not suggestions:
         return None
-    suggestions.sort(key=lambda p: p.get("mentioned_at", datetime.min) if isinstance(p.get("mentioned_at"), datetime) else datetime.min, reverse=True)
+    suggestions.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
     s = suggestions[0]
     return s.get("card") or {"item_id": s.get("item_id"), "name": s.get("name")}
 
@@ -333,3 +348,280 @@ def is_generic_question(message: str) -> bool:
     # ถ้ามี model keyword → ไม่ใช่ generic
     # (caller เช็คเอง ที่นี่เช็คแค่ keyword)
     return any(kw in msg_lower for kw in _GENERIC_Q_KWS)
+
+
+# ─── Order anchor (Phase 3C) ──────────────────────────────
+# เก็บ order_sn ที่ลูกค้าส่งเข้ามา (order card / พิมพ์เลข) เป็น anchor
+# ใช้สำหรับ follow-up: ลูกค้าถาม "order เดิม" / "คำสั่งซื้อเดิม" → ใช้ active order
+# เก็บใน doc เดียวกับ product timeline (field `order_anchors` + `active_order_sn`)
+
+# คำที่ลูกค้าพูดแล้วหมายถึง "order เดิม"
+_SAME_ORDER_KWS = (
+    "order เดิม", "ออเดอร์เดิม", "ออเดอร์เดิม",
+    "คำสั่งซื้อเดิม", "คำสั่งซื้อเดิม",
+    "order อันเดิม", "order ตัวเดิม",
+    "ออเดอร์อันเดิม", "ออเดอร์ตัวเดิม",
+    "คำสั่งซื้ออันเดิม", "คำสั่งซื้อตัวเดิม",
+    "order นั้น", "ออเดอร์นั้น", "คำสั่งซื้อนั้น",
+    "order นี้", "ออเดอร์นี้", "คำสั่งซื้อนี้",
+    "order ที่ถาม", "ออเดอร์ที่ถาม", "คำสั่งซื้อที่ถาม",
+)
+
+# คำถาม order generic — ถามเรื่อง order แต่ไม่ระบุเลข
+_ORDER_GENERIC_KWS = (
+    "สถานะ order", "สถานะออเดอร์", "สถานะคำสั่งซื้อ",
+    "order ถึงไหน", "ออเดอร์ถึงไหน", "คำสั่งซื้อถึงไหน",
+    "order ส่งถึง", "ออเดอร์ส่งถึง", "คำสั่งซื้อส่งถึง",
+    "order ส่งยัง", "ออเดอร์ส่งยัง", "คำสั่งซื้อส่งยัง",
+    "order ถึงยัง", "ออเดอร์ถึงยัง", "คำสั่งซื้อถึงยัง",
+    "order อยู่ไหน", "ออเดอร์อยู่ไหน", "คำสั่งซื้ออยู่ไหน",
+    "พัสดุถึง", "พัสดุส่ง", "พัสดุอยู่",
+    "จัดส่งยัง", "ส่งของยัง", "ส่งแล้วยัง",
+    "วันที่ส่ง", "วันที่ถึง", "วันที่ได้รับ",
+    "ขนส่งอะไร", "ขนส่งตัวไหน", "ใครจัดส่ง",
+    "ที่อยู่จัดส่ง", "ส่งที่ไหน", "ส่งไปไหน",
+)
+
+
+def add_order_anchor(
+    conversation_id: str,
+    platform: str | None,
+    shop: str | None,
+    order_sn: str,
+    order_info: dict | None = None,
+) -> dict | None:
+    """บันทึก order_sn เป็น anchor ใน conversation timeline.
+
+    Args:
+        conversation_id: ID ของแชท
+        platform: shopee/tiktok/lazada
+        shop: ชื่อร้าน
+        order_sn: เลขคำสั่งซื้อ
+        order_info: dict ข้อมูล order จาก lookup_order() (optional — เก็บ summary ไว้)
+
+    Returns:
+        timeline doc ที่อัปเดตแล้ว หรือ None ถ้า error
+    """
+    if not conversation_id or not order_sn:
+        return None
+    try:
+        doc = load_timeline(conversation_id) or {
+            "conversation_id": conversation_id,
+            "platform": platform,
+            "shop": shop,
+            "products": [],
+            "active_item_id": None,
+        }
+        order_anchors = doc.get("order_anchors", [])
+        now = datetime.now(timezone.utc)
+
+        # สร้าง summary จาก order_info (เก็บแค่ข้อมูลจำเป็น ไม่เก็บทั้ง dict)
+        _summary = {}
+        if order_info:
+            _summary = {
+                "order_status": order_info.get("order_status", ""),
+                "shipping_carrier": order_info.get("shipping_carrier", ""),
+                "total_amount": order_info.get("total_amount", 0),
+                "item_count": order_info.get("item_count", 0),
+                "create_time": order_info.get("create_time", ""),
+            }
+
+        # ถ้า order_sn นี้มีอยู่แล้ว → อัปเดต mentioned_at + summary
+        existing = None
+        for oa in order_anchors:
+            if oa.get("order_sn") == order_sn:
+                existing = oa
+                break
+        if existing:
+            existing["mentioned_at"] = now
+            if _summary:
+                existing["summary"] = _summary
+        else:
+            order_anchors.append({
+                "order_sn": order_sn,
+                "mentioned_at": now,
+                "summary": _summary,
+            })
+
+        # active_order_sn = order ล่าสุด (เสมอ — เพราะ order anchor ใหม่ = ลูกค้าส่งมาใหม่)
+        active_order_sn = order_sn
+
+        # บันทึก
+        _coll().update_one(
+            {"conversation_id": conversation_id},
+            {
+                "$set": {
+                    "conversation_id": conversation_id,
+                    "platform": platform,
+                    "shop": shop,
+                    "order_anchors": order_anchors,
+                    "active_order_sn": active_order_sn,
+                    "last_updated": now,
+                },
+            },
+            upsert=True,
+        )
+        doc["order_anchors"] = order_anchors
+        doc["active_order_sn"] = active_order_sn
+        return doc
+    except Exception:
+        return None
+
+
+def get_active_order_sn(conversation_id: str) -> str | None:
+    """ดึง active order_sn ของแชท (order ล่าสุดที่ลูกค้าส่งมา).
+
+    Returns:
+        order_sn หรือ None ถ้าไม่มี
+    """
+    doc = load_timeline(conversation_id)
+    if not doc:
+        return None
+    return doc.get("active_order_sn")
+
+
+def get_order_anchors(conversation_id: str) -> list[dict]:
+    """ดึง order anchors ทั้งหมดของแชท.
+
+    Returns:
+        list ของ {order_sn, mentioned_at, summary} เรียงจากใหม่→เก่า
+    """
+    doc = load_timeline(conversation_id)
+    if not doc:
+        return []
+    anchors = doc.get("order_anchors", [])
+    # sort ใหม่→เก่า
+    anchors_sorted = sorted(
+        anchors,
+        key=lambda a: a.get("mentioned_at", datetime.min) if isinstance(a.get("mentioned_at"), datetime) else datetime.min,
+        reverse=True,
+    )
+    return anchors_sorted
+
+
+def resolve_active_order_sn(
+    conversation_id: str,
+    message: str,
+    order_sn_in_message: str | None = None,
+) -> str | None:
+    """resolve active order_sn ตามกฎ:
+
+    1. ถ้า message มี order_sn อยู่แล้ว → ใช้ order_sn นั้น
+    2. ถ้า message พูด "order เดิม/คำสั่งซื้อเดิม" → active order (ล่าสุด)
+    3. ถ้า message เป็น order generic question ("สถานะ order", "order ถึงยัง") → active order
+    4. ถ้าไม่ตรงเงื่อนไขไหน → None (ไม่ใช่คำถามเรื่อง order)
+
+    Args:
+        conversation_id: ID ของแชท
+        message: คำถามลูกค้าปัจจุบัน
+        order_sn_in_message: order_sn ที่ extract ได้จาก message (optional)
+
+    Returns:
+        order_sn หรือ None
+    """
+    # 1. ถ้ามี order_sn ใน message → ใช้เลย
+    if order_sn_in_message:
+        return order_sn_in_message
+
+    msg_lower = (message or "").lower().strip()
+    if not msg_lower:
+        return None
+
+    # 2. "order เดิม/คำสั่งซื้อเดิม" → active order
+    if any(kw in msg_lower for kw in _SAME_ORDER_KWS):
+        return get_active_order_sn(conversation_id)
+
+    # 3. order generic question → active order
+    if any(kw in msg_lower for kw in _ORDER_GENERIC_KWS):
+        return get_active_order_sn(conversation_id)
+
+    # 4. ไม่ใช่คำถามเรื่อง order
+    return None
+
+
+def is_order_question(message: str) -> bool:
+    """ตรวจว่าคำถามเกี่ยวกับ order หรือไม่ (มี order keyword หรือ order generic question).
+
+    ใช้ตัดสินใจว่าควรลอง order anchor lookup หรือไม่.
+    """
+    msg_lower = (message or "").lower().strip()
+    if not msg_lower:
+        return False
+    if any(kw in msg_lower for kw in _SAME_ORDER_KWS):
+        return True
+    if any(kw in msg_lower for kw in _ORDER_GENERIC_KWS):
+        return True
+    # มีคำว่า order/ออเดอร์/คำสั่งซื้อ ในข้อความ
+    if "order" in msg_lower or "ออเดอร์" in msg_lower or "คำสั่งซื้อ" in msg_lower:
+        return True
+    return False
+
+
+# ─── Anchor history (comparison support) ──────────────────
+# ⚡ Phase 7 — สำหรับคำถามเปรียบเทียบ "อันนี้กับอันก่อนต่างกันยังไง"
+#    ดึง anchor products จาก timeline เรียงตาม mentioned_at (ใหม่→เก่า)
+#    ไม่แก้ schema เดิม — ใช้ field is_anchor + mentioned_at ที่มีอยู่แล้ว
+
+
+def get_anchor_history(
+    conversation_id: str,
+    limit: int = 10,
+) -> list[dict]:
+    """ดึง anchor products ของแชท เรียงจากใหม่→เก่าตาม mentioned_at.
+
+    Args:
+        conversation_id: ID ของแชท
+        limit: จำนวนสูงสุดที่จะคืน (default 10)
+
+    Returns:
+        list ของ {item_id, name, source, mentioned_at, is_anchor, card}
+        เรียงจากใหม่→เก่า ถ้าไม่มี timeline หรือไม่มี anchor → คืน []
+    """
+    doc = load_timeline(conversation_id)
+    if not doc:
+        return []
+    products = doc.get("products", [])
+    anchors = [p for p in products if p.get("is_anchor")]
+    if not anchors:
+        return []
+    # sort ใหม่→เก่า ตาม mentioned_at
+    anchors.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
+    return anchors[:limit]
+
+
+def get_previous_anchor(
+    conversation_id: str,
+    exclude_item_id: str | int | None = None,
+) -> dict | None:
+    """ดึง anchor อันดับ 2 ล่าสุด (anchor ก่อนหน้า).
+
+    ใช้สำหรับคำถามเปรียบเทียบ "อันนี้กับอันก่อนต่างกันยังไง"
+    โดย "อันนี้" = anchor ล่าสุด (active) และ "อันก่อน" = anchor อันดับ 2
+
+    Args:
+        conversation_id: ID ของแชท
+        exclude_item_id: item_id ที่จะข้าม (ถ้าระบุ) — ปกติคือ active product
+                         ที่ลูกค้ากำลังถามถึง จะได้ไม่คืนตัวเดียวกัน
+
+    Returns:
+        product card (dict) ของ anchor อันดับ 2 หรือ None ถ้ามี anchor แค่ 1 ตัว
+        (หรือไม่มีเลย หรือมีแค่ตัวเดียวที่ตรง exclude_item_id)
+    """
+    anchors = get_anchor_history(conversation_id, limit=20)
+    if len(anchors) < 2:
+        return None
+    # กรอง exclude_item_id ออก (ถ้าระบุ)
+    if exclude_item_id is not None:
+        exclude_ser = _to_serializable(exclude_item_id)
+        anchors = [a for a in anchors if _to_serializable(a.get("item_id")) != exclude_ser]
+    if not anchors:
+        return None
+    if exclude_item_id is not None:
+        # มี exclude → คืน anchor ล่าสุดที่เหลือ (อันดับ 1 หลังกรอง = อันก่อนหน้าตัวที่ exclude)
+        prev = anchors[0]
+    else:
+        # ไม่มี exclude → คืน anchor อันดับ 2 (index 1 = อันก่อนหน้า active ล่าสุด)
+        if len(anchors) < 2:
+            return None
+        prev = anchors[1]
+    return prev.get("card") or {"item_id": prev.get("item_id"), "name": prev.get("name")}

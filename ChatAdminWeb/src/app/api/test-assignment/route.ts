@@ -32,26 +32,32 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
-import { getSystemConfig, updateSystemConfig } from "@/backend/service/systemConfigService";
+import { getSystemConfig, updateSystemConfig, shouldUseChatV2, shouldUseChatV3, getBotProductLimit } from "@/backend/service/systemConfigService";
 import { assignmentService } from "@/backend/service/assignmentService";
 import { handoffService } from "@/backend/service/handoffService";
+// ⚡ Phase 2J — test-assignment ใช้ test version (เก็บใน test_status_conversation ไม่ใช่ status_conversation จริง)
+import { testStatusConversationService } from "@/backend/service/testStatusConversationService";
 import { triggerService } from "@/backend/service/triggerService";
 import { testAssignmentService } from "@/backend/service/testAssignmentService";
+import type { TestAssignmentDoc } from "@/backend/service/testAssignmentService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { parseRawMessage, toProductCard } from "@/backend/service/messageMediaParser";
 import { productService } from "@/backend/service/productService";
 import { serverConfig } from "@/backend/lib/config";
 import type { Platform } from "@/backend/lib/safety";
+import { toBotText, toBotImages } from "@/backend/service/messageService";
 
 // ─── Helpers ──────────────────────────────────────────────
 
 async function callBot(params: {
   platform: Platform;
   message: string;
-  history: { role: "user" | "model"; text: string }[];
+  history: { role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[];
   shopId: string;
   shopName?: string;
   itemId?: string;  // ⚡ item_id จากการ์ดสินค้าที่ลูกค้าแชร์
+  orderSn?: string;  // ⚡ Phase 3C — order_sn จากการ์ดคำสั่งซื้อที่ลูกค้าแชร์
+  images?: string[];  // ⚡ Phase 1A — URL รูป/วิดีโอที่ลูกค้าส่ง (ส่งให้ bot vision pass)
 }): Promise<{
   answer: string;
   source?: string;
@@ -67,19 +73,31 @@ async function callBot(params: {
   // ⚡ handoff fields จาก bot (tax_invoice, warranty claim, etc.)
   handoff_to_admin?: boolean;
   handoff_reason?: string;
+  // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
+  chat_engine?: "legacy" | "v2" | "v3";
 }> {
-  const { platform, message, history, shopId, shopName, itemId } = params;
+  const { platform, message, history, shopId, shopName, itemId, orderSn, images } = params;
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-Internal-Secret": serverConfig.chatbotInternalSecret,
   };
-  const body: Record<string, unknown> = { message, history, limit: 5 };
+  const body: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
   if (shopName) body.shop = shopName;
   else if (shopId) body.shop = shopId;
   // ⚡ ส่ง item_id ถ้าลูกค้าแชร์การ์ดสินค้ามาในแชท
   if (itemId) body.item_id = itemId;
+  // ⚡ Phase 3C — ส่ง order_sn ถ้าลูกค้าแชร์การ์ดคำสั่งซื้อมาในแชท
+  if (orderSn) body.order_sn = orderSn;
+  // ⚡ Phase 1A — ส่ง URL รูป/วิดีโอให้ bot ใช้ Gemini vision อ่าน
+  if (images && images.length > 0) body.images = images;
+  // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
+  //    v3 มี priority เหนือ v2
+  const useV3 = await shouldUseChatV3();
+  const useV2 = !useV3 && await shouldUseChatV2();
+  if (useV3) body.use_v3 = true;
+  else if (useV2) body.use_v2 = true;
 
   // ⚡ 429 retry: รอ 60 วิ แล้วยิงใหม่ — สูงสุด 3 ครั้ง ถ้าเกินให้ throw
   const MAX_429_RETRIES = 3;
@@ -121,6 +139,8 @@ async function callBot(params: {
         // ⚡ handoff fields
         handoff_to_admin: data.handoff_to_admin === true,
         handoff_reason: data.handoff_reason,
+        // ⚡ chat_engine — บันทึก engine ที่ใช้
+        chat_engine: useV2 ? "v2" : "legacy",
       };
     } catch (err) {
       // ถ้า error เป็น 429-related → retry
@@ -157,6 +177,8 @@ export async function GET(req: NextRequest) {
     if (convDetail) {
       const conversationId = url.searchParams.get("conversation_id");
       if (!conversationId) return error("conversation_id required", 422);
+      // ⚡ Phase 3B-7 — รองรับ replay_batch_id (ถ้าไม่ส่ง → คืนล่าสุด)
+      const replayBatchId = url.searchParams.get("replay_batch_id") || undefined;
 
       // ดึง messages เต็ม (ทั้ง in + out)
       const msgColl = await getCollection<{
@@ -171,7 +193,15 @@ export async function GET(req: NextRequest) {
         .toArray();
 
       // ดึง replay result + ratings
-      const replay = await testAssignmentService.getTestAssignment(conversationId);
+      // ⚡ Phase 3B-4 — ส่ง admin_id เพื่อกรอง doc ของ admin คนนี้
+      //   superadmin/dev ไม่ส่ง → ดึง doc ล่าสุด (ไม่กรอง)
+      // ⚡ Phase 3B-7 — ส่ง replay_batch_id ถ้ามี (กรองเฉพาะรอบ)
+      const isSuperadminDetail = r.ctx.admin.role === "superadmin" || r.ctx.admin.role === "dev";
+      const replay = await testAssignmentService.getTestAssignment(
+        conversationId,
+        isSuperadminDetail ? undefined : r.ctx.admin.admin_id,
+        replayBatchId
+      );
 
       // ดึง conversation info
       const convColl = await getCollection<{
@@ -246,9 +276,10 @@ export async function GET(req: NextRequest) {
     }
 
     // ── list conversations ──
+    // ⚡ Phase 3B-5 — "All" tab = แค่ chat list เหมือน inbox (ไม่กรอง replayed_by, ไม่ join replay status)
+    //   replay status อยู่ใน History tab เท่านั้น
     if (list) {
       const platform = (url.searchParams.get("platform") || undefined) as Platform | undefined;
-      // ⚡ ปลด cap 100 → รับสูงสุด 10000 (ให้ user ใส่เอง)
       const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "100", 10), 1), 10000);
       const order = url.searchParams.get("order") || "recent"; // recent | oldest
 
@@ -259,45 +290,96 @@ export async function GET(req: NextRequest) {
       }>(COLLECTIONS.conversations);
       const filter: Record<string, unknown> = {};
       if (platform) filter.platform = platform;
+
       const convs = await coll
         .find(filter)
         .sort({ last_message_timestamp: order === "oldest" ? 1 : -1 })
         .limit(limit)
         .toArray();
 
-      // ดึง replay results ทั้งหมดเพื่อ join
-      const convIds = convs.map((c) => c.conversation_id);
-      const replayColl = await getCollection<{
-        conversation_id: string; final_status: string; assigned_to?: string | null;
-        mock_status: string; conv_star_rating?: number; conv_rating?: string;
-      }>(COLLECTIONS.testAssignment);
-      const replays = await replayColl
-        .find({ conversation_id: { $in: convIds } })
-        .toArray();
-      const replayMap = new Map(replays.map((r) => [r.conversation_id, r]));
-
+      // ⚡ Phase 3B-5 — ไม่ join replay status แล้ว (All tab = แค่ chat list)
       return json({
-        rows: convs.map((c) => {
-          const replay = replayMap.get(c.conversation_id);
-          return {
-            id: c.conversation_id,
-            conversation_id: c.conversation_id,
-            shop_id: c.shop_id,
-            platform: c.platform,
-            status: c.status,
-            assigned_to: c.assigned_to,
-            to_name: c.to_name,
-            shop_name: c.shop_name,
-            last_message_timestamp: c.last_message_timestamp,
-            // replay info
-            replay_status: replay?.final_status,
-            replay_assigned_to: replay?.assigned_to,
-            mock_status: replay?.mock_status,
-            conv_star_rating: replay?.conv_star_rating,
-            conv_rating: replay?.conv_rating,
-          };
-        }),
+        rows: convs.map((c) => ({
+          id: c.conversation_id,
+          conversation_id: c.conversation_id,
+          shop_id: c.shop_id,
+          platform: c.platform,
+          status: c.status,
+          assigned_to: c.assigned_to,
+          to_name: c.to_name,
+          shop_name: c.shop_name,
+          last_message_timestamp: c.last_message_timestamp,
+        })),
         total: convs.length,
+      });
+    }
+
+    // ── ⚡ Phase 3B-7 — replay batches list (batch selector) ──
+    if (url.searchParams.get("batches") === "1") {
+      const conversationId = url.searchParams.get("conversation_id");
+      if (!conversationId) return error("conversation_id required", 422);
+      const isSuperadminB = r.ctx.admin.role === "superadmin" || r.ctx.admin.role === "dev";
+      const batches = await testAssignmentService.listReplayBatches({
+        conversationId,
+        replayedBy: isSuperadminB ? undefined : r.ctx.admin.admin_id,
+      });
+      return json({ batches });
+    }
+
+    // ── ⚡ Phase 3B-2 — history by admin ──
+    if (url.searchParams.get("history") === "1") {
+      const adminId = url.searchParams.get("admin_id") || r.ctx.admin.admin_id;
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "500", 10), 1), 1000);
+      const docs = await testAssignmentService.listHistoryByAdmin({ adminId, limit });
+      // ⚡ Phase 3B-7 — แชทหนึ่งอาจมีหลายรอบ → dedupe เก็บล่าสุดต่อ conversation_id
+      //   (docs เรียง replayed_at desc อยู่แล้ว → ใช้อันแรกที่เจอต่อ conversation_id)
+      const seen = new Set<string>();
+      const rows = [];
+      for (const d of docs) {
+        if (seen.has(d.conversation_id)) continue;
+        seen.add(d.conversation_id);
+        rows.push({
+          conversation_id: d.conversation_id,
+          shop_id: d.shop_id,
+          platform: d.platform,
+          shop_name: d.shop_name,
+          to_name: d.to_name,
+          final_status: d.final_status,
+          replayed_by: d.replayed_by,
+          replayed_at: d.replayed_at,
+          replay_batch_id: d.replay_batch_id,  // ⚡ Phase 3B-7
+          total_messages: d.total_messages,
+          processed_messages: d.processed_messages,
+          stopped_at_handoff: d.stopped_at_handoff,
+          conv_star_rating: d.conv_star_rating,
+          conv_rating: d.conv_rating,
+          conv_comment: d.conv_comment,
+        });
+      }
+      return json({ rows, total: rows.length });
+    }
+
+    // ── ⚡ Phase 3B-2 — deleted list ──
+    if (url.searchParams.get("deleted") === "1") {
+      const isSuperadmin = r.ctx.admin.role === "superadmin" || r.ctx.admin.role === "dev";
+      const adminId = isSuperadmin ? (url.searchParams.get("admin_id") || undefined) : r.ctx.admin.admin_id;
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "500", 10), 1), 1000);
+      const docs = await testAssignmentService.listDeleted({ adminId, limit });
+      return json({
+        rows: docs.map((d) => ({
+          conversation_id: d.conversation_id,
+          shop_id: d.shop_id,
+          platform: d.platform,
+          shop_name: d.shop_name,
+          to_name: d.to_name,
+          final_status: d.final_status,
+          replayed_by: d.replayed_by,
+          replayed_at: d.replayed_at,
+          deleted_at: d.deleted_at,
+          deleted_by: d.deleted_by,
+          delete_reason: d.delete_reason,
+        })),
+        total: docs.length,
       });
     }
 
@@ -359,6 +441,8 @@ interface ReplayQa {
   bot_source?: string;
   bot_model?: string;
   bot_elapsed?: number;
+  // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน (legacy / v2 / v3)
+  chat_engine?: "legacy" | "v2" | "v3";
   // ⚡ bot products (item cards ที่บอทแนะนำ)
   bot_products?: { item_id: string; name: string; price?: number; image?: string; url?: string }[];
   // ⚡ pipeline info — intent/rag/llm2/search counts
@@ -386,6 +470,141 @@ export async function POST(req: NextRequest) {
       return json({ ok: true, bot_worker_enabled: enabled });
     }
 
+    // ── ⚡ Phase 3B-2 — soft delete replay result ──
+    if (body.action === "soft_delete") {
+      const conversationId = String(body.conversation_id ?? "");
+      if (!conversationId) return error("conversation_id required", 422);
+      const ok = await testAssignmentService.softDelete({
+        conversationId,
+        deletedBy: r.ctx.admin.admin_id,
+        reason: body.reason ? String(body.reason) : undefined,
+        replayedBy: r.ctx.admin.admin_id,  // ⚡ Phase 3B-4 — กรอง doc ของ admin คนนี้
+        replayBatchId: body.replay_batch_id ? String(body.replay_batch_id) : undefined,  // ⚡ Phase 3B-7
+      });
+      if (!ok) return error("not found", 404);
+      await logAdminEvent({
+        action_type: "test_assignment.soft_delete",
+        actor: r.ctx.admin.admin_id,
+        conversation_id: conversationId,
+        metadata: { reason: body.reason || "" },
+      });
+      return json({ ok: true });
+    }
+
+    // ── ⚡ Phase 3B-2 — restore soft-deleted replay ──
+    if (body.action === "restore") {
+      const conversationId = String(body.conversation_id ?? "");
+      if (!conversationId) return error("conversation_id required", 422);
+      const ok = await testAssignmentService.restore(
+        conversationId,
+        r.ctx.admin.admin_id,
+        body.replay_batch_id ? String(body.replay_batch_id) : undefined  // ⚡ Phase 3B-7
+      );
+      if (!ok) return error("not found", 404);
+      await logAdminEvent({
+        action_type: "test_assignment.restore",
+        actor: r.ctx.admin.admin_id,
+        conversation_id: conversationId,
+      });
+      return json({ ok: true });
+    }
+
+    // ── ⚡ Phase 3B-2 — batch roll: คืนรายการ conversation_ids ที่จะ replay ──
+    //   frontend จะไล่เรียก replay_conversation ทีละอัน
+    //   params:
+    //     count: จำนวนแชทที่ต้องการ (default 10)
+    //     order: "recent" | "oldest" (default "recent")
+    //     mode: "overwrite" | "resume" (default "overwrite")
+    //       - overwrite = ทำใหม่ทับ
+    //       - resume = ข้ามแชทที่ตัวเองเคย replay แล้ว (bot_answered ไม่ handoff)
+    //     platform: กรองตาม platform (optional)
+    if (body.action === "batch_roll") {
+      const count = Math.min(Math.max(parseInt(String(body.count ?? "10"), 10) || 10, 1), 1000);
+      const order = (body.order as "recent" | "oldest") || "recent";
+      const mode = (body.mode as "overwrite" | "resume") || "overwrite";
+      const platformFilter = body.platform ? String(body.platform) : undefined;
+
+      const isSuperadmin = r.ctx.admin.role === "superadmin" || r.ctx.admin.role === "dev";
+      const adminId = r.ctx.admin.admin_id;
+
+      // ดึง conversations (เรียงตาม last_message_timestamp)
+      const convColl = await getCollection<{
+        conversation_id: string; shop_id: string; platform: string;
+        last_message_timestamp?: Date;
+      }>(COLLECTIONS.conversations);
+      const convFilter: Record<string, unknown> = {};
+      if (platformFilter) convFilter.platform = platformFilter;
+      const allConvs = await convColl
+        .find(convFilter)
+        .sort({ last_message_timestamp: order === "oldest" ? 1 : -1 })
+        .limit(count * 3) // ดึงเผื่อไว้ เพราะบางอันอาจถูก skip
+        .project({ conversation_id: 1 })
+        .toArray();
+
+      if (allConvs.length === 0) {
+        return json({ conversation_ids: [], total: 0, skipped: 0 });
+      }
+
+      // ถ้า mode = "resume" → กรองออกแชทที่ตัวเองเคย replay แล้ว (bot_answered ไม่ handoff)
+      let skipped = 0;
+      let conversationIds: string[] = [];
+
+      if (mode === "resume") {
+        const replayColl = await getCollection<{
+          conversation_id: string; replayed_by?: string;
+          final_status: string; stopped_at_handoff: boolean;
+        }>(COLLECTIONS.testAssignment);
+        // ดึง replay results ของ admin คนนี้ที่ complete แล้ว
+        const myReplays = await replayColl
+          .find({
+            replayed_by: adminId,
+            final_status: "bot_answered",
+            stopped_at_handoff: false,
+            deleted_at: { $exists: false },
+          })
+          .project({ conversation_id: 1 })
+          .toArray();
+        const myDoneConvIds = new Set(myReplays.map((x) => x.conversation_id));
+
+        for (const c of allConvs) {
+          if (conversationIds.length >= count) break;
+          if (myDoneConvIds.has(c.conversation_id)) {
+            skipped++;
+            continue;
+          }
+          conversationIds.push(c.conversation_id);
+        }
+      } else {
+        // overwrite mode → ไม่ skip
+        conversationIds = allConvs.slice(0, count).map((c) => c.conversation_id);
+      }
+
+      // ⚡ Phase 3A — visibility: admin ทั่วไปเห็นเฉพาะที่ตัวเอง replay ไว้ในหน้า list
+      //   แต่ใน batch roll mode "overwrite" → อนุญาตให้ replay แชทใหม่ได้ (เพราะจะสร้าง ownership ใหม่)
+      //   ใน mode "resume" → ข้ามเฉพาะของตัวเอง (ตามที่ user เลือก)
+
+      await logAdminEvent({
+        action_type: "test_assignment.batch_roll",
+        actor: adminId,
+        metadata: {
+          count: conversationIds.length,
+          order,
+          mode,
+          platform: platformFilter,
+          skipped,
+          is_superadmin: isSuperadmin,
+        },
+      });
+
+      return json({
+        conversation_ids: conversationIds,
+        total: conversationIds.length,
+        skipped,
+        order,
+        mode,
+      });
+    }
+
     // ── rate message ──
     if (body.action === "rate_message") {
       // 🔒 coerce เพื่อป้องกัน NoSQL injection
@@ -399,6 +618,8 @@ export async function POST(req: NextRequest) {
         rating: body.rating as "good" | "bad" | "unrated" | undefined,
         comment: body.comment as string | undefined,
         ratedBy: r.ctx.admin.admin_id,
+        replayedBy: r.ctx.admin.admin_id,  // ⚡ Phase 3B-4 — กรอง doc ของ admin คนนี้
+        replayBatchId: body.replay_batch_id ? String(body.replay_batch_id) : undefined,  // ⚡ Phase 3B-7
       });
       await logAdminEvent({
         action_type: "test_assignment.rate_message",
@@ -419,6 +640,8 @@ export async function POST(req: NextRequest) {
         rating: body.rating as "good" | "bad" | "unrated" | undefined,
         comment: body.comment as string | undefined,
         ratedBy: r.ctx.admin.admin_id,
+        replayedBy: r.ctx.admin.admin_id,  // ⚡ Phase 3B-4 — กรอง doc ของ admin คนนี้
+        replayBatchId: body.replay_batch_id ? String(body.replay_batch_id) : undefined,  // ⚡ Phase 3B-7
       });
       await logAdminEvent({
         action_type: "test_assignment.rate_conversation",
@@ -434,12 +657,28 @@ export async function POST(req: NextRequest) {
       const conversation_id = String(body.conversation_id ?? "");
       if (!conversation_id) return error("conversation_id required", 422);
 
+      // ⚡ Phase 2J — เคลียร์ test_status_conversation ของ conversation นี้ก่อน replay
+      //   กัน assigned_to เดิมจาก replay ครั้งก่อนติดมา
+      // ⚡ wrap ใน try/catch — ถ้า clear status พัง ไม่ควร block replay
+      try {
+        await testStatusConversationService.updateTestStatus(
+          conversation_id,
+          "test_assignment",
+          "bot",
+          undefined,
+          undefined
+        );
+      } catch (clearErr) {
+        console.error("[test-assignment] clearTestStatus failed:", clearErr instanceof Error ? clearErr.message : String(clearErr));
+      }
+
       // ⚡ mode: "overwrite" (default) = ทำใหม่ทับ, "resume" = ข้ามถ้ามี result ครบแล้ว
       const mode = (body.mode as "overwrite" | "resume") || "overwrite";
 
       // ⚡ resume mode: เช็คว่ามี replay result ครบแล้ว (bot_answered, ไม่ handoff) → ข้าม
+      // ⚡ Phase 3B-4 — เช็คเฉพาะ doc ของ admin คนนี้ (ไม่ใช่ของทุกคน)
       if (mode === "resume") {
-        const existing = await testAssignmentService.getTestAssignment(conversation_id);
+        const existing = await testAssignmentService.getTestAssignment(conversation_id, r.ctx.admin.admin_id);
         if (existing && existing.final_status === "bot_answered" && !existing.stopped_at_handoff) {
           return json({
             ok: true,
@@ -491,10 +730,16 @@ export async function POST(req: NextRequest) {
       const toName = conv?.to_name;
 
       // ⚡ Parse user messages rich media + batch lookup products (เหมือนฝั่งซ้าย)
-      const userParsed = messages.map((m) => ({
-        doc: m,
-        parsed: parseRawMessage(m.raw_payload, m.text),
-      }));
+      //   ⚡ wrap parseRawMessage ใน try/catch — ถ้า parse พัง (raw_payload ผิด schema)
+      //   ให้ fallback เป็น text เปล่าๆ ไม่ใช่ throw 500 ทั้ง replay
+      const userParsed = messages.map((m) => {
+        try {
+          return { doc: m, parsed: parseRawMessage(m.raw_payload, m.text) };
+        } catch (parseErr) {
+          console.error("[test-assignment] parseRawMessage failed for msg", m.message_id, parseErr);
+          return { doc: m, parsed: { message_type: "text" as const, text: m.text || "" } };
+        }
+      });
       const userItemIds = new Set<string>();
       for (const { parsed: p } of userParsed) {
         if (p?.product_ref?.item_id) userItemIds.add(p.product_ref.item_id);
@@ -559,22 +804,30 @@ export async function POST(req: NextRequest) {
       let assignedTo: string | null = null;
       let stopped = false;
 
-      const history: { role: "user" | "model"; text: string }[] = [];
+      const history: { role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[] = [];
 
       for (let i = 0; i < messages.length && !stopped; i++) {
         const msg = messages[i];
         const userText = msg.text || "(empty)";
 
         try {
-          // 1. check trigger
-          const trigger = await triggerService.matchTrigger(userText, {
+          // ⚡ ใช้ toBotText แปลง rich media → tag ส่งบอท (เหมือน shadowbot/botworker)
+          //   เช่น [item] → [สินค้า: 12345], [order] → [order: ABC123]
+          //   ส่วน user_text ใน QA ยังเก็บ msg.text ดิบไว้สำหรับ display (MessageContent จัดการเอง)
+          //   ⚡ ย้ายเข้า try/catch — ถ้า parse พัง จะได้ catch ที่ message ไม่ใช่ทำ 500 ทั้ง replay
+          const botText = toBotText(msg);
+          const userImages = toBotImages(msg);
+
+          // 1. check trigger — ใช้ botText (แปลง rich media เป็น tag แล้ว) เพื่อ match คำจริง
+          const trigger = await triggerService.matchTrigger(botText, {
             shopId,
             platform,
           });
 
           if (trigger && trigger.action === "handoff_admin") {
             // trigger → handoff (ใช้ handoffService: หา admin เดิมก่อน round-robin)
-            const handoff = await handoffService.handoffToAdmin({
+            const handoff = await handoffService.handoffToAdminTest({
+              source: "test_assignment",
               conversationId: conversation_id,
               shopId,
               platform,
@@ -604,18 +857,22 @@ export async function POST(req: NextRequest) {
           const userItemId = userParsedInfo?.user_products && Array.isArray(userParsedInfo.user_products) && userParsedInfo.user_products.length > 0
             ? String((userParsedInfo.user_products[0] as Record<string, unknown>).item_id || "")
             : undefined;
+          const userOrderSn = userParsedInfo?.user_order_sn || undefined;  // ⚡ Phase 3C
           const botResp = await callBot({
             platform,
-            message: userText,
+            message: botText,
             shopId,
             shopName,
             history,
             itemId: userItemId,
+            orderSn: userOrderSn,  // ⚡ Phase 3C
+            images: userImages.length > 0 ? userImages : undefined,  // ⚡ Phase 1A
           });
 
           if (!botResp.answer || botResp.answer.trim() === "") {
             // bot ตอบไม่ได้ → handoff
-            const handoff = await handoffService.handoffToAdmin({
+            const handoff = await handoffService.handoffToAdminTest({
+              source: "test_assignment",
               conversationId: conversation_id,
               shopId,
               platform,
@@ -639,14 +896,15 @@ export async function POST(req: NextRequest) {
             break;
           }
 
-          // bot ตอบได้ → สะสม history
-          history.push({ role: "user", text: userText });
+          // bot ตอบได้ → สะสม history (ใช้ botText + images เหมือนของจริง)
+          history.push({ role: "user", text: botText, ...(userImages.length > 0 ? { images: userImages } : {}) });
           history.push({ role: "model", text: botResp.answer });
 
           // ⚡ เช็ค handoff_to_admin จาก bot (tax_invoice, warranty claim, etc.)
           // ถ้า bot บอกให้ handoff → หยุด replay ที่นี่
           if (botResp.handoff_to_admin) {
-            const handoff = await handoffService.handoffToAdmin({
+            const handoff = await handoffService.handoffToAdminTest({
+              source: "test_assignment",
               conversationId: conversation_id,
               shopId,
               platform,
@@ -664,6 +922,7 @@ export async function POST(req: NextRequest) {
               bot_source: botResp.source,
               bot_model: botResp.model,
               bot_elapsed: botResp.elapsed,
+              chat_engine: botResp.chat_engine || "legacy",
               bot_products: (botResp.products as { item_id: string; name: string; price?: number; image?: string; url?: string }[]) || [],
               bot_intent: botResp.intent,
               bot_retrieval_info: botResp.retrieval_info,
@@ -690,6 +949,7 @@ export async function POST(req: NextRequest) {
             bot_source: botResp.source,
             bot_model: botResp.model,
             bot_elapsed: botResp.elapsed,
+            chat_engine: botResp.chat_engine || "legacy",
             bot_products: (botResp.products as { item_id: string; name: string; price?: number; image?: string; url?: string }[]) || [],
             bot_intent: botResp.intent,
             bot_retrieval_info: botResp.retrieval_info,
@@ -713,19 +973,46 @@ export async function POST(req: NextRequest) {
       }
 
       // ── บันทึกลง test_assignment collection ──
-      const saved = await testAssignmentService.saveReplayResult({
-        conversation_id,
-        shop_id: shopId,
-        platform,
-        shop_name: shopName,
-        to_name: toName,
-        qa: qa as never,
-        total_messages: messages.length,
-        processed_messages: qa.length,
-        final_status: finalStatus,
-        assigned_to: assignedTo,
-        stopped_at_handoff: stopped,
-      });
+      // ⚡ wrap ใน try/catch — ถ้า save พัง (MongoDB error) ยังคืนผล replay ให้ UI ได้
+      let saved: TestAssignmentDoc | null = null;
+      try {
+        saved = await testAssignmentService.saveReplayResult({
+          conversation_id,
+          shop_id: shopId,
+          platform,
+          shop_name: shopName,
+          to_name: toName,
+          qa: qa as never,
+          total_messages: messages.length,
+          processed_messages: qa.length,
+          final_status: finalStatus,
+          assigned_to: assignedTo,
+          stopped_at_handoff: stopped,
+          replayedBy: r.ctx.admin.admin_id,  // ⚡ Phase 3A — บันทึกใครกด replay
+        });
+      } catch (saveErr) {
+        console.error("[test-assignment] saveReplayResult failed:", saveErr instanceof Error ? saveErr.stack || saveErr.message : String(saveErr));
+      }
+
+      // ⚡ Phase 3A — audit log สำหรับ replay (KPI)
+      // ⚡ wrap ใน try/catch — ถ้า log พัง ไม่ควรทำให้ replay 500
+      try {
+        await logAdminEvent({
+          action_type: "test_assignment.replay",
+          actor: r.ctx.admin.admin_id,
+          conversation_id,
+          metadata: {
+            shop_id: shopId,
+            platform,
+            total_messages: messages.length,
+            processed_messages: qa.length,
+            final_status: finalStatus,
+            stopped_at_handoff: stopped,
+          },
+        });
+      } catch (logErr) {
+        console.error("[test-assignment] logAdminEvent failed:", logErr instanceof Error ? logErr.message : String(logErr));
+      }
 
       return json({
         ok: true,
@@ -741,11 +1028,15 @@ export async function POST(req: NextRequest) {
         stopped_at_handoff: stopped,
         mock_status: saved?.mock_status,
         saved_id: saved?._id?.toString(),
+        // ⚡ Phase 3B-7 — ส่ง replay_batch_id กลับไป UI
+        replay_batch_id: (saved as TestAssignmentDoc & { batchId?: string })?.batchId || saved?.replay_batch_id,
       });
     }
 
-    return error("unknown action: replay_conversation | rate_message | rate_conversation | toggle_worker", 422);
+    return error("unknown action: replay_conversation | rate_message | rate_conversation | toggle_worker | soft_delete | restore", 422);
   } catch (err) {
+    // ⚡ log full error + stack trace เพื่อ debug 500 ที่ไม่รู้สาเหตุ
+    console.error("[test-assignment] POST error:", err instanceof Error ? err.stack || err.message : String(err));
     return error(err instanceof Error ? err.message : "failed", 500);
   }
 }

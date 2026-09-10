@@ -12,7 +12,7 @@ import { Loading } from "@/components/ui/Loading";
 import {
   Bot, FlaskConical, Zap, User, ShieldCheck,
   CheckCircle2, XCircle, AlertTriangle,
-  Cpu, Clock, ArrowDown, History, Copy, Check,
+  Cpu, Clock, ArrowDown, History, Copy, Check, ChevronDown,
   Star, MessageCircle, Save,
 } from "lucide-react";
 import { api } from "@/lib/apiClient";
@@ -21,8 +21,19 @@ import { confirm } from "@/components/ui/ConfirmDialog";
 import { MessageContent } from "@/components/chat/MessageContent";
 import { RateBox } from "@/components/shadow/RateBox";
 import { DateBanner, dayKey, formatDateTimeLabel } from "@/components/shadow/DateBanner";
+import { AnnotationDot, type Annotation } from "@/components/ui/AnnotationDot";
 import type { Platform, ChatMessage, Conversation, ProductCard } from "@/lib/types";
 import { splitAnswerSegments } from "@/lib/answerSegments";
+
+// ⚡ Phase 3B-6 — generation batch metadata (จาก /api/shadow-inbox?batches=1)
+interface GenerationBatch {
+  generation_batch_id: string;
+  conversation_id: string;
+  created_at: string;
+  count: number;
+  generated_by?: string;
+  origin?: string;
+}
 
 // ── Q&A pair: ข้อความลูกค้า + คำตอบจาก Zaapi (จากประวัติจริง) ──
 interface QAPair {
@@ -37,6 +48,14 @@ interface QAPair {
     tokens?: { prompt: number; output: number; total: number };
     products?: ProductCard[];
     shadow_reply_id?: string;
+    // ⚡ Phase 2W — เวอร์ชั่นเก่าที่เคย generate (ถ้า Generate ซ้ำหลายครั้ง)
+    allVersions?: Array<{
+      shadow_reply_id: string;
+      bot_reply_text: string;
+      bot_source?: string;
+      bot_model?: string;
+      created_at?: string;
+    }>;
     routing_decision?: {
       path?: string;
       reason?: string;
@@ -72,6 +91,8 @@ interface Props {
     star_rating?: number;
     comment?: string;
     origin?: string;
+    created_at?: string;  // ⚡ Phase 2W — ใช้ sort หาล่าสุด
+    generation_batch_id?: string;  // ⚡ Phase 3B-6 — รอบ generate
   }>;
 }
 
@@ -110,13 +131,70 @@ function parseQAPairs(messages: ChatMessage[]): QAPair[] {
   return pairs;
 }
 
+// ⚡ Phase 2W — ปุ่มดูเวอร์ชั่นเก่าของ bot reply (ถ้า Generate ซ้ำหลายครั้ง)
+function OldVersionsButton({ versions }: {
+  versions: Array<{
+    shadow_reply_id: string;
+    bot_reply_text: string;
+    bot_source?: string;
+    bot_model?: string;
+    created_at?: string;
+  }>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="w-full mt-1">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="text-[9px] text-text-subtle hover:text-text-muted flex items-center gap-1 transition-colors"
+      >
+        <History size={9} />
+        {expanded ? "ซ่อน" : `ดูเวอร์ชั่นเก่า (${versions.length})`}
+      </button>
+      {expanded && (
+        <div className="mt-1 space-y-1.5">
+          {versions.map((v, i) => (
+            <div key={v.shadow_reply_id} className="rounded-lg bg-surface-2 border border-border px-2.5 py-1.5">
+              <div className="flex items-center gap-1.5 mb-1 text-[8px] text-text-subtle">
+                <span className="font-medium">v{versions.length - i}</span>
+                {v.bot_model && <span>· {v.bot_model}</span>}
+                {v.bot_source && <span>· {v.bot_source}</span>}
+                {v.created_at && (
+                  <span className="ml-auto">
+                    {new Date(v.created_at).toLocaleString("th-TH", {
+                      day: "2-digit", month: "2-digit",
+                      hour: "2-digit", minute: "2-digit",
+                    })}
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-text-muted whitespace-pre-wrap line-clamp-3">
+                {v.bot_reply_text}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ShadowConversationPanel({ conversation, messages, loadingMessages, historyReplies }: Props) {
   const { catchError } = useToastError();
   const [pairs, setPairs] = useState<QAPair[]>([]);
   const [generating, setGenerating] = useState(false);
   const [generatingIdx, setGeneratingIdx] = useState<number | null>(null);
+  // ⚡ streaming — progress ของ generateAll (SSE) แสดง "2/5" และ highlight ข้อที่กำลังทำ
+  const [generatingProgress, setGeneratingProgress] = useState<{ current: number; total: number } | null>(null);
   const [copiedSide, setCopiedSide] = useState<"zaapi" | "bot" | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // ⚡ Phase 3B-6 — generation batch selector (history tab only)
+  //   แต่ละ conversation อาจมีหลายรอบ generate → เลือกรอบเพื่อดู + mark annotation
+  const [batches, setBatches] = useState<GenerationBatch[]>([]);
+  const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
+  const [batchAnnotation, setBatchAnnotation] = useState<Annotation | null>(null);
+  const [showBatchDd, setShowBatchDd] = useState(false);
 
   // ⚡ Copy chat — แยกฝั่ง zaapi หรือ bot
   // side="zaapi" → ลูกค้า + Zaapi reply
@@ -184,12 +262,43 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
   useEffect(() => {
     const basePairs = parseQAPairs(messages);
     if (Array.isArray(historyReplies)) {
-      // tab History — merge + filter เฉพาะ pair ที่มี botReply (bot เราตอบแล้ว)
-      const replyMap = new Map(historyReplies.map((r) => [r.inbound_message_id, r]));
+      // ⚡ Phase 3B-6 — filter เฉพาะ replies ของ batch ที่เลือก (ถ้ามี)
+      //   ถ้าไม่มี batch ที่เลือก (ยังโหลดไม่เสร็จ) → ใช้ทั้งหมด (fallback)
+      //   ⚡ fix restore — replies ที่ไม่มี generation_batch_id (สร้างก่อน Phase 3B-6)
+      //     ให้แสดงเสมอ ไม่กรองออก (กัน restore แล้ว panel ว่าง)
+      const batchFiltered = selectedBatchId
+        ? historyReplies.filter((r) => !r.generation_batch_id || r.generation_batch_id === selectedBatchId)
+        : historyReplies;
+      // ⚡ Phase 2W — group by inbound_message_id, sort by created_at desc (ล่าสุดก่อน)
+      //   ถ้า Generate ซ้ำหลายครั้ง → มีหลาย shadow_replies ต่อ inbound_message_id เดียวกัน
+      //   เก็บล่าสุดเป็น botReply หลัก, ที่เหลือเก็บใน allVersions
+      const replyGroups = new Map<string, typeof historyReplies>();
+      for (const r of batchFiltered) {
+        const key = r.inbound_message_id || "";
+        if (!replyGroups.has(key)) replyGroups.set(key, []);
+        replyGroups.get(key)!.push(r);
+      }
+      // sort แต่ละกลุ่ม by created_at desc (ล่าสุดก่อน)
+      for (const arr of replyGroups.values()) {
+        arr.sort((a, b) => {
+          const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+          const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+          return tb - ta;
+        });
+      }
       const merged = basePairs
         .map((pair) => {
-          const sr = replyMap.get(pair.inbound.id);
-          if (!sr) return null; // bot เรายังไม่ได้ตอบ → ตัดออก
+          const group = replyGroups.get(pair.inbound.id);
+          if (!group || group.length === 0) return null; // bot เรายังไม่ได้ตอบ → ตัดออก
+          const sr = group[0]; // ล่าสุด
+          // ⚡ Phase 2W — เก็บเวอร์ชั่นเก่า (ถ้ามีมากกว่า 1)
+          const olderVersions = group.slice(1).map((r) => ({
+            shadow_reply_id: r.shadow_reply_id,
+            bot_reply_text: r.bot_reply_text,
+            bot_source: r.bot_source,
+            bot_model: r.bot_model,
+            created_at: r.created_at,
+          }));
           return {
             ...pair,
             botReply: {
@@ -206,6 +315,7 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
               routing_decision: (sr as any).bot_routing_decision,
               handoff_to_admin: (sr as any).bot_handoff_to_admin,
               handoff_reason: (sr as any).bot_handoff_reason,
+              allVersions: olderVersions.length > 0 ? olderVersions : undefined,
             },
           } as QAPair;
         })
@@ -215,7 +325,78 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
       // tab "ทั้งหมด" — แสดงทุก Q&A pair (สำหรับ generate)
       setPairs(basePairs);
     }
-  }, [messages, historyReplies]);
+  }, [messages, historyReplies, selectedBatchId]);
+
+  // ⚡ Phase 3B-6 — โหลด generation batches เมื่อเข้า history tab + conversation เปลี่ยน
+  //   และ default เลือกรอบล่าสุด (batches เรียงใหม่สุดก่อน → index 0)
+  //   ⚡ Phase 3B-6-fix — ถอด historyReplies ออกจาก deps (เป็น array ใหม่ทุก poll → reset ทุก 20s)
+  //     และถ้า selectedBatchId ยังอยู่ใน batches ใหม่ → ไม่ reset (กันเด้งกลับรอบใหม่สุด)
+  useEffect(() => {
+    if (!historyReplies || !conversation) {
+      setBatches([]);
+      setSelectedBatchId(null);
+      setBatchAnnotation(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api().get<{ batches: GenerationBatch[] }>(
+          "/shadow-inbox",
+          { params: { batches: "1", conversation_id: conversation.id } }
+        );
+        if (cancelled) return;
+        const bs = r.data?.batches || [];
+        setBatches(bs);
+        // ⚡ Phase 3B-6-fix — ถ้า selectedBatchId เดิมยังอยู่ใน batches ใหม่ → เก็บไว้ (ไม่ reset)
+        //   ถ้าไม่อยู่แล้ว (ถูกลบ) หรือยังไม่เคยเลือก → default รอบใหม่สุด (index 0)
+        setSelectedBatchId((prev) => {
+          if (prev && bs.some((b) => b.generation_batch_id === prev)) return prev;
+          return bs.length > 0 ? bs[0].generation_batch_id : null;
+        });
+      } catch {
+        if (!cancelled) {
+          setBatches([]);
+          setSelectedBatchId(null);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [conversation?.id, historyReplies?.length]);
+
+  // ⚡ Phase 3B-6 — โหลด annotation ของ conversation ทั้งหมด
+  //   แล้วเลือกอันที่ตรง batch ที่เลือก ถ้าไม่มี → ใช้อันล่าสุดของแชท (fallback)
+  const loadBatchAnnotation = useCallback(async () => {
+    if (!conversation) {
+      setBatchAnnotation(null);
+      return;
+    }
+    try {
+      const r = await api().get<{ annotations: Annotation[] }>("/chat-annotations", {
+        params: { scope: "shadow_bot", conversation_ids: conversation.id },
+      });
+      const anns = r.data?.annotations || [];
+      if (anns.length === 0) {
+        setBatchAnnotation(null);
+        return;
+      }
+      // หา annotation ของ batch ที่เลือก (ถ้ามี)
+      let found: Annotation | null = null;
+      if (selectedBatchId) {
+        found = anns.find((a) => a.generation_batch_id === selectedBatchId) || null;
+      }
+      // fallback: ใช้อันล่าสุดของแชท (API เรียง created_at desc อยู่แล้ว)
+      if (!found) found = anns[0];
+      setBatchAnnotation(found);
+    } catch {
+      setBatchAnnotation(null);
+    }
+  }, [conversation?.id, selectedBatchId]);
+
+  useEffect(() => {
+    if (conversation) loadBatchAnnotation();
+    else setBatchAnnotation(null);
+  }, [conversation?.id, selectedBatchId, loadBatchAnnotation]);
 
   // scroll ลงล่างสุดเมื่อโหลด conversation ใหม่
   const prevConvIdRef = useRef<string | null>(null);
@@ -272,6 +453,7 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
 
   // Generate ทุก Q&A pair — เรียก endpoint ใหม่ที่ generate ทั้ง conversation
   // โดยใช้คำตอบ bot เราเป็น history (ไม่ใช่ Zaapi)
+  // ⚡ Streaming (SSE) — แสดงทีละคำตอบที่เสร็จ ไม่ต้องรอครบทุก Q&A
   const generateAll = useCallback(async () => {
     if (!conversation || pairs.length === 0) return;
     const ok = await confirm.ask({
@@ -281,56 +463,101 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
     });
     if (!ok) return;
     setGenerating(true);
+    setGeneratingProgress({ current: 0, total: pairs.length });
     try {
-      const resp = await api().post<{
-        shadow_replies: Array<{
-          shadow_reply_id: string;
-          inbound_message_id: string;
-          bot_reply_text: string;
-          bot_source?: string;
-          bot_model?: string;
-          bot_elapsed_ms?: number;
-          bot_tokens?: { prompt: number; output: number; total: number };
-          bot_products?: ProductCard[];
-        }>;
-        total: number;
-      }>("/shadow-inbox/generate-conversation", {
-        conversation_id: conversation.id,
-      }, {
-        // ⚡ generate ทั้ง conversation อาจใช้เวลานาน (เรียก bot ทีละข้อความ)
-        // ตั้ง timeout 5 นาที กัน axios ตัดก่อน backend ทำเสร็จ
-        timeout: 300_000,
+      // ⚡ ใช้ fetch + ReadableStream reader แทน axios (axios รอครบก่อน resolve)
+      //    SSE: event: progress/reply/done/error
+      const resp = await fetch("/api/shadow-inbox/generate-conversation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ conversation_id: conversation.id }),
       });
+      if (!resp.ok || !resp.body) {
+        const txt = await resp.text().catch(() => "");
+        throw new Error(`Generate ไม่สำเร็จ (${resp.status}): ${txt.slice(0, 200)}`);
+      }
 
-      // map ผลลัพธ์กลับเข้า pairs (จับคู่ด้วย inbound_message_id)
-      const replyMap = new Map(resp.data.shadow_replies.map((sr) => [sr.inbound_message_id, sr]));
-      setPairs((prev) =>
-        prev.map((pair) => {
-          const sr = replyMap.get(pair.inbound.id);
-          if (!sr) return pair;
-          return {
-            ...pair,
-            botReply: {
-              text: sr.bot_reply_text,
-              source: sr.bot_source,
-              model: sr.bot_model,
-              elapsed: sr.bot_elapsed_ms,
-              tokens: sr.bot_tokens,
-              products: sr.bot_products,
-              shadow_reply_id: sr.shadow_reply_id,
-              rating: "unrated" as const,
-              routing_decision: (sr as any).bot_routing_decision,
-              handoff_to_admin: (sr as any).bot_handoff_to_admin,
-              handoff_reason: (sr as any).bot_handoff_reason,
-            },
-          };
-        })
-      );
-      toast.success(`Generate ครบ ${resp.data.total} ข้อความแล้ว`);
+      // ⚡ parse SSE stream — buffer chunks, แยก event ตาม \n\n
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      let doneCount = 0;
+      let total = pairs.length;
+
+      const handleEvent = (eventType: string, dataStr: string) => {
+        let data: Record<string, unknown>;
+        try { data = JSON.parse(dataStr); } catch { return; }
+        if (eventType === "progress") {
+          const current = Number(data.current) || 0;
+          total = Number(data.total) || total;
+          setGeneratingProgress({ current, total });
+          // ⚡ highlight ข้อที่กำลัง generate (index 0-based)
+          setGeneratingIdx(current - 1);
+        } else if (eventType === "reply") {
+          const sr = data.shadow_reply as Record<string, unknown> | undefined;
+          if (!sr) return;
+          const inboundId = String(sr.inbound_message_id || "");
+          setPairs((prev) =>
+            prev.map((pair) =>
+              pair.inbound.id === inboundId
+                ? {
+                    ...pair,
+                    botReply: {
+                      text: String(sr.bot_reply_text || ""),
+                      source: sr.bot_source as string | undefined,
+                      model: sr.bot_model as string | undefined,
+                      elapsed: sr.bot_elapsed_ms as number | undefined,
+                      tokens: sr.bot_tokens as { prompt: number; output: number; total: number } | undefined,
+                      products: sr.bot_products as ProductCard[] | undefined,
+                      shadow_reply_id: String(sr.shadow_reply_id || ""),
+                      rating: "unrated" as const,
+                      routing_decision: (sr as any).bot_routing_decision,
+                      handoff_to_admin: (sr as any).bot_handoff_to_admin,
+                      handoff_reason: (sr as any).bot_handoff_reason,
+                    },
+                  }
+                : pair
+            )
+          );
+          doneCount++;
+          setGeneratingProgress({ current: doneCount, total });
+        } else if (eventType === "done") {
+          const t = Number(data.total) || doneCount;
+          setGeneratingProgress({ current: t, total: t });
+          toast.success(`Generate ครบ ${t} ข้อความแล้ว`);
+        } else if (eventType === "error") {
+          const msg = (data.message as string) || "Generate ไม่สำเร็จ";
+          toast.error(msg);
+        }
+      };
+
+      // อ่าน stream จนกว่าจะจบ
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        // ⚡ แยก SSE events ตาม \n\n (บรรทัดว่างคั่น event)
+        let sep: number;
+        while ((sep = buf.indexOf("\n\n")) >= 0) {
+          const rawEvent = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          // parse event: <name> + data: <json>
+          let evType = "message";
+          let dataStr = "";
+          for (const line of rawEvent.split("\n")) {
+            if (line.startsWith("event:")) evType = line.slice(6).trim();
+            else if (line.startsWith("data:")) dataStr += line.slice(5).trim();
+          }
+          if (dataStr) handleEvent(evType, dataStr);
+        }
+      }
     } catch (err) {
       catchError(err, "Generate ทั้งหมดไม่สำเร็จ");
     } finally {
       setGenerating(false);
+      setGeneratingProgress(null);
+      setGeneratingIdx(null);
     }
   }, [conversation, pairs, confirm, catchError]);
 
@@ -436,16 +663,79 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
           </div>
           <div className="flex items-center gap-2">
             {historyReplies ? (
-              <Badge tone="pale">
-                <History size={11} className="mr-1" /> History
-              </Badge>
+              <>
+                {/* ⚡ Phase 3B-6 — Batch selector: เลือกรอบ generate ที่จะดู */}
+                {batches.length > 0 && (
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowBatchDd(!showBatchDd)}
+                      className="h-7 px-2 rounded-md border border-border bg-surface text-[11px] flex items-center gap-1 hover:bg-surface-2 transition-colors"
+                      title="เลือกรอบ generate"
+                    >
+                      <History size={11} className="text-text-muted" />
+                      <span className="truncate max-w-[120px]">
+                        {(() => {
+                          const idx = batches.findIndex((b) => b.generation_batch_id === selectedBatchId);
+                          if (idx < 0) return "เลือกรอบ";
+                          const roundNum = batches.length - idx; // ใหม่สุด = รอบล่าสุด
+                          return `รอบที่ ${roundNum}/${batches.length}`;
+                        })()}
+                      </span>
+                      <ChevronDown size={10} className="text-text-muted shrink-0" />
+                    </button>
+                    {showBatchDd && (
+                      <>
+                        <div className="fixed inset-0 z-20" onClick={() => setShowBatchDd(false)} />
+                        <div className="absolute top-full right-0 mt-1 w-56 bg-surface border border-border rounded-md shadow-lg z-40 py-0.5 max-h-64 overflow-y-auto">
+                          {batches.map((b, i) => {
+                            const roundNum = batches.length - i;
+                            const isSelected = b.generation_batch_id === selectedBatchId;
+                            return (
+                              <button
+                                key={b.generation_batch_id}
+                                onClick={() => { setSelectedBatchId(b.generation_batch_id); setShowBatchDd(false); }}
+                                className={`w-full text-left px-2 py-1.5 text-[11px] hover:bg-surface-2 flex items-center gap-1.5 ${isSelected ? "text-brand font-medium" : "text-text"}`}
+                              >
+                                {isSelected && <Check size={10} />}
+                                <span className="flex-1 truncate">
+                                  รอบที่ {roundNum} · {b.count} ข้อความ
+                                </span>
+                                <span className="text-[9px] text-text-subtle shrink-0">
+                                  {new Date(b.created_at).toLocaleString("th-TH", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+                {/* ⚡ Phase 3B-6 — AnnotationDot ผูกกับ batch ที่เลือก (ถ้ามี) */}
+                {conversation && (
+                  <AnnotationDot
+                    scope="shadow_bot"
+                    conversationId={conversation.id}
+                    annotation={batchAnnotation || undefined}
+                    onChange={loadBatchAnnotation}
+                    size={12}
+                    generationBatchId={selectedBatchId || undefined}
+                  />
+                )}
+                <Badge tone="pale">
+                  <History size={11} className="mr-1" /> History
+                </Badge>
+              </>
             ) : (
               <Button
                 size="sm"
                 disabled={generating || pairs.length === 0}
                 onClick={generateAll}
               >
-                {generating ? <Loading size={12} /> : <Zap size={12} />} Generate ทั้งหมด
+                {generating ? <Loading size={12} /> : <Zap size={12} />}{" "}
+                {generating && generatingProgress
+                  ? `Generate ${generatingProgress.current}/${generatingProgress.total}`
+                  : "Generate ทั้งหมด"}
               </Button>
             )}
           </div>
@@ -492,7 +782,7 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
                 const showDateBanner = !prevPair || dayKey(prevPair.inbound.timestamp) !== dayKey(pair.inbound.timestamp);
                 return (
                 <div key={idx} className="space-y-2">
-                  {showDateBanner && <DateBanner timestamp={pair.inbound.timestamp} compact />}
+                  {showDateBanner && <DateBanner timestamp={pair.inbound.timestamp} compact onlyToday />}
                   {idx > 0 && !showDateBanner && <div className="border-t border-border/50 pt-2" />}
                   {/* Customer message */}
                   <div className="flex gap-1.5">
@@ -587,7 +877,7 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
                 const showDateBanner = !prevPair || dayKey(prevPair.inbound.timestamp) !== dayKey(pair.inbound.timestamp);
                 return (
                   <div key={idx} className="space-y-2">
-                    {showDateBanner && <DateBanner timestamp={pair.inbound.timestamp} compact />}
+                    {showDateBanner && <DateBanner timestamp={pair.inbound.timestamp} compact onlyToday />}
                     {idx > 0 && !showDateBanner && <div className="border-t border-border/50 pt-2" />}
                     {/* Customer message (เดียวกัน) */}
                     <div className="flex gap-1.5">
@@ -622,6 +912,23 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
                           </div>
                         ) : pair.botReply ? (
                           <>
+                            {/* ⚡ Phase 3B-3 — handoff bubble — ถ้า bot บอกให้ handoff แสดง bubble เตือน */}
+                            {pair.botReply.handoff_to_admin && (
+                              <div className="bg-amber-50 border border-amber-300 rounded-lg rounded-tr-sm px-2.5 py-1.5 max-w-full">
+                                <div className="flex items-center gap-1 text-[11px] text-amber-700 font-medium">
+                                  <AlertTriangle size={11} className="shrink-0" />
+                                  ตรงนี้ต้องแอดมินแล้ว
+                                </div>
+                                {pair.botReply.handoff_reason && (
+                                  <div className="text-[10px] text-amber-600 mt-0.5">
+                                    เหตุผล: {pair.botReply.handoff_reason}
+                                  </div>
+                                )}
+                                <div className="text-[9px] text-amber-500 mt-0.5 italic">
+                                  (bot ทำต่อคำถามถัดไปเพื่อทดสอบ — ปกติจะส่งต่อแอดมินตรงนี้)
+                                </div>
+                              </div>
+                            )}
                             {(() => {
                               // ⚡ Multi-bubble — split ||| เป็นหลาย bubble (ถ้ามี)
                               const segs = splitAnswerSegments(pair.botReply.text);
@@ -692,6 +999,10 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
                                 onComment={(text) => handleComment(idx, text)}
                               />
                             </div>
+                            {/* ⚡ Phase 2W — ปุ่มดูเวอร์ชั่นเก่า (ถ้า Generate ซ้ำหลายครั้ง) */}
+                            {pair.botReply?.allVersions && pair.botReply.allVersions.length > 0 && (
+                              <OldVersionsButton versions={pair.botReply.allVersions} />
+                            )}
                           </>
                         ) : (
                           <div className="bg-surface-2 border border-dashed border-brand/30 rounded-lg rounded-tr-sm px-2.5 py-1.5">

@@ -79,9 +79,23 @@ export const serverConfig = {
     testAssignment: required("ADMIN_MONGO_COLLECTION_TEST_ASSIGNMENT", "test_assignment"),
     // ⚡ buffer_messages — message buffering (debounce) ก่อนเข้า processMessage
     bufferMessages: required("ADMIN_MONGO_COLLECTION_BUFFER_MESSAGES", "buffer_messages"),
+    // ⚡ Phase 1F — test chat uploads (image/video สำหรับทดสอบ bot vision)
+    testChatUploads: required("ADMIN_MONGO_COLLECTION_TEST_CHAT_UPLOADS", "test_chat_uploads"),
     // ⚡ workflow engine (แบบ Zaapi Flow Builder)
     workflows: required("ADMIN_MONGO_COLLECTION_WORKFLOWS", "workflows"),
     workflowRuns: required("ADMIN_MONGO_COLLECTION_WORKFLOW_RUNS", "workflow_runs"),
+    // ⚡ Phase 2J — แยก admin meta ออกจาก conversations ที่ถูก dump ทุก 2 วิ
+    //   เก็บ: assigned_to, status, closed_at, closed_by, close_count, assigned_at, assignment_mode_used
+    //   ไม่โดน dump ทับ เพราะอยู่ใน collection ของเราเอง
+    //   ใช้กับ /tickets (จริง) — test หน้าอื่นใช้ testStatusConversation
+    statusConversation: required("ADMIN_MONGO_COLLECTION_STATUS_CONVERSATION", "status_conversation"),
+    // ⚡ Phase 2J — test version ใช้กับ test-assignment, shadowbot, replay-compare, test-chat
+    testStatusConversation: required("ADMIN_MONGO_COLLECTION_TEST_STATUS_CONVERSATION", "test_status_conversation"),
+    // ⚡ Phase 1F — test chat sessions (Python bot เป็นคนเขียนหลัก แต่ Next.js อ่าน/เขียน assigned_to ด้วย)
+    //    ⚠️ ก่อนหน้านี้ hardcoded "test_chat_sessions" ใน bot-handoff route + botCallService — ตอนนี้ใช้ COLLECTIONS แทน
+    testChatSessions: required("ADMIN_MONGO_COLLECTION_TEST_CHAT_SESSIONS", "test_chat_sessions"),
+    // ⚡ Phase 3B-1 — chat annotations (markup dot + note สำหรับ test-assignment + shadow-bot)
+    chatAnnotations: required("ADMIN_MONGO_COLLECTION_CHAT_ANNOTATIONS", "chat_annotations"),
   },
   jwtSecret: requiredStrict("ADMIN_JWT_SECRET"),
   jwtAlgo: "HS256" as const,

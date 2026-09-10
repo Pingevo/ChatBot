@@ -2,6 +2,7 @@
 // customer_id, platform, conversations[], shops[], last_active_at, created_at
 // (พี่เขา mirror จาก sellcenter — field อาจไม่มี name/buyer_id)
 // name ของลูกค้าดึงจาก conversations_shp.to_name (join ตอน list)
+// ⚡ Phase 2K — แก้ปัญหาโหลดช้า: paginate ก่อน lookup (lookup แค่ 20 คน ไม่ใช่ทั้งหมด)
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { safeRegexSearch } from "../lib/regexEscape";
@@ -70,10 +71,10 @@ export async function getCustomer(platform: Platform, buyerId: string): Promise<
     ],
   });
   if (!raw) return null;
-  // ดึง name จาก conversations_shp.to_name
+  // ดึง name จาก conversations.to_name (⚡ ใช้ COLLECTIONS ไม่ใช่ hardcoded)
   let nameFromConv: string | undefined;
   try {
-    const convColl = await getCollection<{ to_name?: string; customer_id?: string }>("conversations_shp");
+    const convColl = await getCollection<{ to_name?: string; customer_id?: string }>(COLLECTIONS.conversations);
     const conv = await convColl.findOne({ customer_id: raw.customer_id, platform });
     nameFromConv = conv?.to_name;
   } catch { /* ignore */ }
@@ -82,7 +83,14 @@ export async function getCustomer(platform: Platform, buyerId: string): Promise<
 
 /**
  * List customers with search, platform filter, sorting and pagination.
- * ดึง name จาก conversations_shp.to_name ผ่าน $lookup
+ * ⚡ Phase 2K — แก้ปัญหาโหลดช้า: paginate ก่อน lookup (lookup แค่ 20 คน ไม่ใช่ทั้งหมด)
+ *
+ * กลยุทธ์:
+ *   - sort ตาม last_active_at / created_at → paginate ก่อน lookup (เร็วมาก)
+ *   - sort ตาม name → ต้อง lookup ก่อน sort (ช้า แต่จำเป็น)
+ *   - search ตาม name → ใช้ name จาก customers เอง (ถ้ามี) ไม่ต้อง lookup
+ *
+ * name ของลูกค้าดึงจาก conversations.to_name (batch $in หลัง paginate)
  */
 export async function listCustomers(opts: {
   platform?: Platform;
@@ -111,12 +119,54 @@ export async function listCustomers(opts: {
   const page = Math.max(1, opts.page || 1);
   const pageSize = Math.min(100, Math.max(1, opts.pageSize || 20));
 
-  // ใช้ aggregate + $lookup conversations_shp เพื่อดึง to_name เป็น name ลูกค้า
+  // ⚡ Phase 2K — แยก 2 case:
+  //   Case A: sort ตาม field ใน customers (last_active_at, created_at) → paginate ก่อน lookup
+  //   Case B: sort ตาม name → ต้อง lookup ก่อน sort (ช้ากว่า แต่จำเป็น)
+  if (sortBy !== "name") {
+    // ── Case A: paginate ก่อน lookup (เร็ว) ──
+    // total count (ไม่ต้อง lookup)
+    const total = await coll.countDocuments(filter);
+
+    // paginate ก่อน
+    const rawRows = await coll
+      .find(filter)
+      .sort({ [sortBy]: sortDir })
+      .skip((page - 1) * pageSize)
+      .limit(pageSize)
+      .toArray();
+
+    if (rawRows.length === 0) return { rows: [], total };
+
+    // batch lookup name จาก conversations (แค่ 20 คน)
+    const convColl = await getCollection<{ customer_id: string; platform: string; to_name?: string }>(
+      COLLECTIONS.conversations
+    );
+    const customerIds = rawRows.map((r) => r.customer_id).filter(Boolean);
+    const convs = await convColl
+      .find({ customer_id: { $in: customerIds } })
+      .project({ customer_id: 1, platform: 1, to_name: 1 })
+      .toArray();
+    const nameMap = new Map<string, string>();
+    for (const c of convs) {
+      if (c.to_name && !nameMap.has(`${c.customer_id}|${c.platform}`)) {
+        nameMap.set(`${c.customer_id}|${c.platform}`, c.to_name);
+      }
+    }
+
+    const rows = rawRows.map((r) => {
+      const nameFromConv = r.customer_id ? nameMap.get(`${r.customer_id}|${r.platform}`) : undefined;
+      return mapCustomer(r, nameFromConv);
+    });
+    return { rows, total };
+  }
+
+  // ── Case B: sort ตาม name → ต้อง lookup ก่อน sort (ช้ากว่า แต่จำเป็น) ──
+  // ⚡ ใช้ COLLECTIONS.conversations ไม่ใช่ hardcoded "conversations_shp"
   const pipeline: any[] = [
     { $match: filter },
     {
       $lookup: {
-        from: "conversations_shp",
+        from: COLLECTIONS.conversations,
         let: { cid: "$customer_id", plat: "$platform" },
         pipeline: [
           { $match: { $expr: { $and: [
@@ -139,11 +189,8 @@ export async function listCustomers(opts: {
       },
     },
     { $unset: "convs" },
+    { $sort: { customer_name: sortDir } },
   ];
-
-  // sort + paginate
-  const sortField = sortBy === "name" ? "customer_name" : sortBy;
-  pipeline.push({ $sort: { [sortField]: sortDir } });
 
   // total count (ก่อน paginate)
   const countPipeline = [...pipeline, { $count: "total" }];

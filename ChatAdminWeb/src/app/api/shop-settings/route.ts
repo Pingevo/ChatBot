@@ -48,6 +48,7 @@ export async function POST(req: NextRequest) {
     platforms?: string[];
     faq_liveagent_enabled?: boolean;
     faq_liveagent_action?: string;
+    post_handoff_exceptions?: string[];
     notes?: string;
   }>(req);
 
@@ -106,6 +107,7 @@ export async function POST(req: NextRequest) {
       platform: body.platform,
       faq_liveagent_enabled: body.faq_liveagent_enabled,
       faq_liveagent_action: body.faq_liveagent_action as FaqLiveagentAction | undefined,
+      post_handoff_exceptions: body.post_handoff_exceptions,
       notes: body.notes,
       updatedBy: r.ctx.admin.admin_id,
     });

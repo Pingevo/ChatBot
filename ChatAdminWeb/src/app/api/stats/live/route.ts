@@ -2,7 +2,7 @@
 // Phase 4: ใช้ aggregation สด แทน load-all
 // Query: range = daily (default) | monthly | yearly | all
 import { NextRequest } from "next/server";
-import { requireAuth } from "@/backend/middleware/authorize";
+import { requirePageAccess } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { auth } from "@/backend/service/authService";
@@ -24,7 +24,7 @@ function getBounds(range: string): { start: Date | null; end: Date | null } {
 }
 
 export async function GET(req: NextRequest) {
-  const r = await requireAuth(req);
+  const r = await requirePageAccess(req, "analytics");
   if (!r.ok) return r.response;
 
   const url = new URL(req.url);

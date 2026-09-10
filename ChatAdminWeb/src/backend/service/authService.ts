@@ -23,6 +23,7 @@ export interface AdminDoc extends Document {
   // Phase 7.9 — admin เปิด/ปิดสถานะรับแชทของตัวเอง (ลาหยุด, พัก)
   is_accepting_chats?: boolean;
   channels_access?: string[];
+  bubble_color?: string; // ⚡ สี bubble ของ admin คนนี้ (hex)
   failed_login_count?: number;
   locked_until?: Date | null;
   last_login_at?: Date | null;
@@ -44,6 +45,7 @@ export interface SafeAdmin {
   channels_access: string[];
   active: boolean;
   is_accepting_chats?: boolean;
+  bubble_color?: string; // ⚡ สี bubble ของ admin คนนี้ (hex)
   last_login_at: string | null;
   created_at: string;
 }
@@ -58,6 +60,7 @@ function safeAdmin(admin: AdminDoc): SafeAdmin {
     channels_access: admin.channels_access || [],
     active: admin.active ?? true,
     is_accepting_chats: admin.is_accepting_chats ?? true,
+    bubble_color: admin.bubble_color,
     last_login_at: admin.last_login_at ? admin.last_login_at.toISOString() : null,
     created_at: admin.created_at ? admin.created_at.toISOString() : "",
   };
@@ -121,6 +124,7 @@ export async function createAdmin(opts: {
     role: opts.role || "admin",
     ...(passwordHash ? { password_hash: passwordHash } : {}),
     active: true,
+    is_accepting_chats: true, // Phase 7.9 — default รับแชทตั้งแต่สร้าง (กัน field หายทำ query สับสน)
     channels_access: [],
     failed_login_count: 0,
     locked_until: null,
@@ -218,7 +222,7 @@ export async function toggleAdminActive(adminId: string, active: boolean): Promi
 
 export async function updateAdminProfile(
   adminId: string,
-  fields: { name?: string; username?: string; channels_access?: string[]; is_accepting_chats?: boolean }
+  fields: { name?: string; username?: string; channels_access?: string[]; is_accepting_chats?: boolean; bubble_color?: string }
 ): Promise<boolean> {
   const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
   const update: Record<string, unknown> = {};
@@ -226,6 +230,7 @@ export async function updateAdminProfile(
   if (fields.username !== undefined) update.username = fields.username;
   if (fields.channels_access !== undefined) update.channels_access = fields.channels_access;
   if (fields.is_accepting_chats !== undefined) update.is_accepting_chats = fields.is_accepting_chats;
+  if (fields.bubble_color !== undefined) update.bubble_color = fields.bubble_color;
   if (Object.keys(update).length === 0) return false;
   const result = await coll.updateOne({ admin_id: adminId }, { $set: update });
   if (result.modifiedCount > 0) {

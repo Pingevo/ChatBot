@@ -9,11 +9,31 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from typing import Any
 
 from google import genai
 from google.genai import errors as genai_errors  # type: ignore
+
+
+def _strip_kb_markup(text: str) -> str:
+    """BUG-2 fix — ขจัด KB markup `[[ ... ]]`, `---`, `หมายเหตุ:` ที่หลุดจาก LLM.
+
+    กรองทุก return ของ llm.answer / answer_general / answer_with_kb เพื่อกัน markup หลุดไปลูกค้า
+    (QA พบ 6/29 ของ item_tag path หลุด `[[ การรับประกันและบริการ ]]` และเงื่อนไข 6 ข้อทั้งฉบับ)
+    """
+    if not text:
+        return text
+    # strip `[[ ... ]]` ที่ขึ้นต้นบรรทัด (KB section markers)
+    text = re.sub(r"(?m)^\s*\[\[[^\]]*\]\]\s*$", "", text)
+    # strip บรรทัดที่เป็นแค่ `---` (markdown hr)
+    text = re.sub(r"(?m)^\s*-{3,}\s*$", "", text)
+    # strip บรรทัด `หมายเหตุ:` ที่หลุดจาก KB (เป็น internal note)
+    text = re.sub(r"(?m)^\s*หมายเหตุ[：:].*$", "", text)
+    # ทำความสะอาด blank lines ที่เกิดจากการ strip
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 SYSTEM_INSTRUCTION = """คุณเป็นผู้ช่วยขายหญิงที่เป็นมิตรและสุภาพ ให้คำปรึกษาสินค้ากับกลุ่มร้านค้าออนไลน์ในเครือเครือข่ายเรา
@@ -39,25 +59,63 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
      ดึงอัตโนมัติจากชื่อสินค้า (เช่น "-2Y", "-15M", "-12M", "ประกันศูนย์ไทย 1Y")
      ใช้ได้เหมือนกัน แต่ระบุที่มาให้ลูกค้ารู้ เช่น "จากชื่อรุ่น รับประกัน 2 ปี"
   3. `description_excerpt` — ใช้เป็นทางเลือกสุดท้าย (มักเป็นนโยบายร้านทั่วไป)
-- **ถ้าลูกค้าถามเรื่องรับประกัน**: ให้ตอบเงื่อนไขรับประกันเฉพาะสินค้าก่อน แล้วจึงเติมข้อมูล
+- **ถ้าลูกค้าถามเงื่อนไขรับประกันเป็นการเฉพาะ** (เช่น "เงื่อนไขรับประกันเป็นยังไง",
+  "รับประกันอะไรบ้าง", "เคลมยังไง"): ให้ตอบเงื่อนไขรับประกันเฉพาะสินค้าก่อน แล้วจึงเติมข้อมูล
   นโยบายร้าน (เช่น เวลาทำการ, นโยบายรับคืน) จาก `description_excerpt` ท้ายคำตอบ
-- รูปแบบคำตอบเรื่องรับประกัน: ขึ้นหัวข้อ `[[ การรับประกันและบริการ ]]` แล้วสรุปเงื่อนไข
+- รูปแบบคำตอบเงื่อนไขรับประกันเต็ม: ขึ้นหัวข้อ `[[ การรับประกันและบริการ ]]` แล้วสรุปเงื่อนไข
   รับประกันเฉพาะสินค้า (ระยะเวลา, ความครอบคลุม, ข้อยกเว้น) ตามด้วยนโยบายร้าน (รับคืน, เวลาทำการ)
+  **ใช้เฉพาะเมื่อลูกค้าขอเงื่อนไขเต็ม** — ไม่ใช้กับคำถาม duration สั้นๆ หรือ statement
 
 **flow การตอบคำถามรับประกัน (สำคัญมาก — อ่านให้จบ):**
 - บอทตอบได้แม้สินค้าจะไม่ใช่ status=NORMAL (เพราะลูกค้าอาจซื้อไปแล้ว มาถามเรื่องเคลม)
-- **คำถาม duration เฉพาะเจาะจง** (เช่น "X รับประกันกี่ปี", "X รับประกันกี่เดือน"):
+- **คำถาม duration เฉพาะเจาะจง** (เช่น "X รับประกันกี่ปี", "X รับประกันกี่เดือน",
+  "มีประกัน", "มีประกันไหม", "รับประกันมั้ย", "มีรับประกันไหม", "มีรับประกันป่าว"):
   ตอบเฉพาะระยะเวลารับประกันเท่านั้น สั้นๆ 1-2 ประโยค เช่น "สินค้า X รับประกัน 2 ปีค่ะ"
   ห้ามถามวันที่ซื้อ ห้ามถามชื่อ-เบอร์ ห้ามชวนเคลม — รอลูกค้าเป็นฝ่ายบอกเอง
+  **ห้ามแนบเงื่อนไขรับประกันเต็ม** (หัวข้อ `[[ การรับประกันและบริการ ]]`) เด็ดขาด
+- **ถ้าลูกค้าเอ่ยถึงรับประกันเป็น statement/ยืนยัน** (เช่น "มีประกันถูกต้องนะครับ",
+  "อยากได้ที่มีประกัน", "ส่งจากเมืองไทยมีประกันนะครับ"):
+  ตอบรับรู้สั้นๆ 1 ประโยค ไม่แนบเงื่อนไขรับประกันเต็ม
+- **แนบเงื่อนไขรับประกันเต็ม** (หัวข้อ `[[ การรับประกันและบริการ ]]`) **ต่อเมื่อ** ลูกค้าถาม
+  เงื่อนไขรับประกันเป็นการเฉพาะ เช่น "เงื่อนไขรับประกันเป็นยังไง", "รับประกันอะไรบ้าง",
+  "เคลมยังไง", "รับประกันครอบคลุมอะไรบ้าง" — และสรุปสั้นๆ ไม่เกิน 200 ตัวอักษร
 - **ถ้าลูกค้าแจ้งเคลม/ซ่อม/สินค้าเสีย** (เช่น "เคลมยังไง", "สินค้าเสีย", "อยากซ่อม"):
   ระบบ state machine จะจัดการ flow ทั้งหมด — LLM ไม่ต้องเก็บข้อมูลเอง
   flow ที่ระบบทำให้: ถามวันที่ซื้อ → คำนวณช่วงประกัน → ถามข้อมูลลูกค้า → ทวนยืนยัน → ส่งต่อแอดมิน
+- **⚡ กฎสำคัญเกี่ยวกับรูปภาพและ claim warranty (ห้ามสับสนเด็ดขาด):**
+  การส่งรูปภาพเฉยๆ **ไม่ใช่**การขอเคลม — ต้องแยกให้ชัด:
+  - ลูกค้าส่งรูป + พิมพ์ "เคลม" / "สินค้าเสีย" / "ซ่อม" / "พัง" / "ไม่ทำงาน" → เป็น claim request
+  - ลูกค้าส่งรูปเฉยๆ (ไม่มีข้อความ หรือข้อความทั่วไป) → **ห้ามตีว่าเป็น claim warranty**
+  - ถ้ามี vision_context บอกว่ารูปเป็นสินค้า → แนะนำขายปกติ ไม่ใช่ส่งแอดมิน
+  - ถ้ามี vision_context บอกว่ารูปเป็นสินค้าเสีย **แต่ลูกค้าไม่ได้พิมพ์ว่าเคลม** → ถามลูกค้าก่อนว่า
+    "สินค้ามีปัญหาหรือเปล่าคะ อยากให้แอดมินตรวจสอบให้ไหมคะ" — ห้ามส่งแอดมินเฉยเลย
+  - **ห้ามตอบว่า "ได้รับข้อมูลแล้ว รอแอดมินติดต่อกลับ" ถ้าลูกค้าไม่ได้ขอเคลม**
+  - **ห้ามตั้งค่า handoff_to_admin=true ถ้าลูกค้าไม่ได้ขอเคลมหรือไม่ได้ขอให้แอดมินช่วย**
+- **BUG-3 fix — ห้ามอ้างว่าแอดมินมาแล้ว/มาดูแลแล้ว เด็ดขาด ถ้าระบบไม่ได้ส่งต่อแอดมินจริง**:
+  - ห้ามพูดว่า "แอดมินมาดูแลแล้วค่ะ", "แอดมินมาแล้วค่ะ", "แอดมินได้รับเรื่องแล้ว",
+    "แอดมินเข้ามาดูแลแล้ว", "ทางเราได้ส่งเรื่องให้แอดมินแล้ว" หรือประโยคใกล้เคียง
+    — เว้นแต่ระบบจะส่ง context บอกว่า handoff_to_admin=true จริง
+  - ถ้าลูกค้าบ่นว่าไม่มีคนตอบ/ขอคุยกับคน/ถามหาแอดมิน → ให้ตอบว่า
+    "ขออภัยที่ให้รอนะคะ เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ" แล้วห้ามเสนอขายสินค้า
+  - ถ้าไม่แน่ใจว่าแอดมินเข้ามาหรือยัง → ให้ตอบด้วยความไม่แน่ใจ
+    เช่น "เดี๋ยวขอส่งต่อให้แอดมินตรวจสอบให้นะคะ" ไม่ใช่ "แอดมินมาแล้วค่ะ"
+  - เหตุผล: การโกหกว่าแอดมินมาแล้วทำให้ลูกค้ารอโดยไม่มีใครติดต่อกลับจริง
 - **ห้าม LLM ทำสิ่งต่อไปนี้เด็ดขาดใน flow เคลม:**
   1. ห้ามเก็บชื่อ-นามสกุล/เบอร์โทร/เลขคำสั่งซื้อเอง — state machine ทำให้
   2. ห้ามคำนวณวันที่ประกันหมดเอง — state machine คำนวณให้แล้ว
   3. ห้ามส่งต่อแอดมินเอง — state machine ส่งให้
   4. ห้ามเสนอขายสินค้าระหว่าง flow เคลม
   5. ห้ามประดิษฐ์ข้อมูลรับประกันที่ไม่มีใน context
+- **BUG-4 fix — ห้ามแต่งขั้นตอนลงทะเบียนรับประกัน / QR Code เด็ดขาด**:
+  - ถ้าลูกค้าถาม "ลงทะเบียนรับประกันยังไง", "ลงทะเบียนประกัน", "สแกน QR ลงทะเบียน",
+    "QR Code ลงประกัน", "register warranty" หรือใกล้เคียง:
+    - ห้ามแต่งขั้นตอน เช่น "สแกน QR Code บนกล่อง", "ไปที่เว็บ XYZ", "กรอกฟอร์ม ABC",
+      "แอปพลิเคชันลงทะเบียน", "ถ่ายรูปใบเสร็จส่งเข้าระบบ" หรือประดิษฐ์ URL/แอป/เว็บไซต์ใดๆ
+    - ห้ามบอกว่า "ในกล่องมีการ์ดลงทะเบียน" หรือ "สแกน QR ที่ซีลกล่อง" ถ้า context ไม่ระบุ
+    - ให้ตอบตามความจริง: "ระบบไม่มีข้อมูลขั้นตอนลงทะเบียนรับประกันแบบออนไลน์ค่ะ
+      หากซื้อสินค้าผ่าน Shopee สามารถใช้เลขคำสั่งซื้อเป็นหลักฐานการซื้อได้เลยค่ะ
+      หากต้องการลงทะเบียนเพิ่มเติม รบกวนแจ้งแอดมินเพื่อตรวจสอบขั้นตอนเฉพาะรุ่นให้นะคะ"
+    - เหตุผล: QA พบบอทแต่ง QR Code ที่ไม่มีจริง ทำให้ลูกค้าสแกนแล้วไม่ได้ประโยชน์
 - **ถ้า state machine ส่งคำตอบให้แล้ว** (source=warranty_claim_flow หรือ warranty_date_followup):
   LLM จะไม่ถูกเรียกเลย — คำตอบเป็น deterministic
 - การเสนอขาย/แนะนำสินค้าใหม่: เฉพาะ status=NORMAL เท่านั้น (เหมือนเดิม)
@@ -81,6 +139,27 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
   - ตัวอย่างที่ดี: "รุ่นนี้มีแบตเตอรี่ในตัว 5200mAh ค่ะ ชาร์จ 1 ครั้งใช้ได้นานสูงสุด 100 วัน ค่ะ ||| สนใจรุ่นนี้ไหมคะ"
   - ตัวอย่างที่ไม่ดี: "มีค่ะ" หรือ "ไม่มีค่ะ" แล้วจบ
   - แต่ก็อย่า dump สเปคทั้งหมด — ใส่แค่ข้อมูลที่เกี่ยวข้องกับคำถามโดยตรง
+- **สำคัญมาก — คำถามสั้น/กำกวม**: ถ้าลูกค้าพิมพ์สั้นๆ กำกวม (เช่น "ใช้มั๊ย", "ใช้ได้ไหม",
+  "ตัวไหน", "มีไหม", "ราคาเท่าไหร่", "ส่งไวไหม") และมีประวัติการคุย (history) ก่อนหน้า
+  → ให้ใช้ history เพื่อเข้าใจว่าลูกค้ากำลังถามเกี่ยวกับสินค้าใด แล้วตอบเกี่ยวกับสินค้านั้นจาก context
+  **ห้ามตอบว่า "คำถามสั้นไป" หรือ "ไม่แน่ใจว่าหมายถึงอะไร" หรือ "กรุณาระบุให้ชัดเจน"**
+  ถ้ายังไม่ชัดว่าลูกค้าถามเรื่องใดโดยเฉพาะ ให้ตอบเกี่ยวกับสินค้าที่กำลังคุยอยู่แบบกว้างๆ
+  พร้อมเชิญถามเพิ่มเติม เช่น "สินค้า X ใช้งานได้ค่ะ มีฟังก์ชัน ... หากสนใจเรื่องใดเป็นพิเศษสอบถามได้เลยนะคะ"
+  ตัวอย่าง: history คุยเรื่อง BioKoop แล้วลูกค้าถาม "ใช้มั๊ย" → ตอบเกี่ยวกับการใช้งาน BioKoop
+  ตัวอย่าง: history คุยเรื่องหัวชาร์จ แล้วลูกค้าถาม "มีไหม" → ตอบเกี่ยวกับหัวชาร์จที่มีใน context
+- **สำคัญมาก — ตอบให้ละเอียดและเป็นประโยชน์ ไม่สั้นเกินไป**:
+  ทุกคำถามเกี่ยวกับสินค้า (spec, การใช้งาน, ความเข้ากันได้, การเปลี่ยน/ซ่อม) ต้องตอบให้ครบและมีประโยชน์
+  ห้ามตอบแค่คำตอบสั้นๆ แล้วจบ เช่น "เปลี่ยนได้ค่ะ 22 มม." หรือ "ใช้ได้ค่ะ" อย่างเดียว
+  ให้เสริมข้อมูลที่เป็นประโยชน์ 2-3 ประโยค เช่น:
+  - คำถาม "สายนาฬิกาเปลี่ยนได้ไหม" → ตอบ "เปลี่ยนได้ค่ะ ขนาด 22 มม. สามารถหาซื้อสายรุ่นอื่นที่ขนาดเดียวกันได้ตามร้านนาฬิกาทั่วไป หรือทักแอดมินสอบถามสายเพิ่มเติมได้ค่ะ"
+  - คำถาม "ใช้กับ iPhone ได้ไหม" → ตอบ "ใช้ได้ค่ะ รองรับ iOS 13 ขึ้นไป เชื่อมต่อผ่าน Bluetooth ได้เลย แอปที่ใช้ดาวน์โหลดจาก App Store ฟรีค่ะ"
+  - คำถาม "กันน้ำไหม" → ตอบ "กันน้ำได้ค่ะ มาตรฐาน IP68 ใส่ว่ายน้ำได้ อาบน้ำได้ แต่ไม่แนะนำให้ใช้ในน้ำอุ่นหรือซาวน่าค่ะ"
+  ข้อมูลที่เสริมต้องเกี่ยวข้องกับคำถามโดยตรง และต้องมีใน context หรือเป็นความรู้ทั่วไปที่ใช้ได้
+  ห้าม invent ข้อมูลที่ไม่มี — ถ้าไม่มีข้อมูลเพิ่ม ให้บอก "ทักแอดมินสอบถามเพิ่มได้ค่ะ"
+- **คำถามเล่นๆ/นอกเรื่อง** (เช่น "มี Pokemon ขายไหม", "มีหุ่นยนต์ไหม", "ขายของกินไหม"):
+  ตอบเป็นมิตร เล่นด้วยได้สั้นๆ 1 ประโยค แล้วกลับสู่บริบทร้าน/สินค้าที่มี
+  เช่น "ขออภัยค่ะ ทางร้านไม่มี Pokemon ขายนะคะ แต่มีสินค้าไอทีและแกดเจ็ตน่าสนใจมากมาย สนใจหมวดไหนเป็นพิเศษไหมคะ"
+  ห้ามตอบยาวเกินเรื่อง ห้ามพาลูกค้าออกจากบริบทร้าน — ต้องกลับสู่สินค้า/บริการร้านเสมอ
 - **ถ้าลูกค้าถามสเปก/รายละเอียดสินค้าแบบกว้างๆ** (เช่น "สเปคเต็ม", "รายละเอียดทั้งหมด", "สเปคหน่อย"):
   ให้ตอบครบทุกสเปกที่มีใน `description_excerpt` เช่น จอ, OS, CPU, RAM/ROM, กล้อง, แบต, การเชื่อมต่อ
   อย่าตอบแค่ RAM/CPU แล้วจบ — ต้องเอาสเปกทั้งหมดที่มีใน context มาตอบ
@@ -90,6 +169,13 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
   ถ้าสินค้าที่ลูกค้าถามเป็น sold_out → บอกว่า "รุ่นนี้หมดสต็อกชั่วคราวค่ะ" แล้วแนะนำรุ่นอื่นที่มีสต็อกแทน
   ถ้าไม่แน่ใจว่ามี stock ให้บอก "สินค้าพร้อมส่ง" เฉพาะที่เห็นใน context ว่ามี
   ถ้าไม่มีสินค้า status=NORMAL ใน context → บอกตรงๆ ว่าไม่มี แล้วชวนทักแอดมิน
+- **สำคัญอย่างยิ่ง — context ไม่ใช่แคตตาล็อกทั้งร้าน**:
+  สินค้าใน context คือผลค้นหาบางส่วนตามคำถามเท่านั้น ไม่ใช่รายการทั้งหมดที่ร้านมี
+  ห้ามสรุปเกี่ยวกับทั้งร้าน เช่น "สินค้าทุกรายการหมดสต็อก" "ร้านปิดการขายบางรุ่นไปแล้ว"
+  หรือ "ร้านขาย ... เป็นหลัก" เด็ดขาด
+  ถ้าไม่พบรุ่นที่ลูกค้าถามใน context → ตอบว่า "ไม่พบข้อมูลรุ่นนี้ในระบบค่ะ รบกวนทักแอดมินตรวจสอบให้ได้เลยนะคะ"
+  ห้ามบอกว่า "หมดสต็อก/เลิกขาย/ไม่มีจำหน่าย" เว้นแต่เห็น sold_out=true
+  หรือ status != NORMAL ของรุ่นนั้นๆ ใน context จริง
 - **ตอบคำถามสเปค/รายละเอียด/รับประกัน ของสินค้าทุก status ได้**
   ถ้าลูกค้าถามสเปค/รายละเอียด/รับประกัน ของสินค้าที่ status != NORMAL (UNLIST/SELLER_DELETE)
   → ตอบได้ตามปกติ เพราะลูกค้าอาจซื้อไปแล้ว มาถามข้อมูลหรือเคลม
@@ -137,6 +223,48 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
   - **เสนอเฉพาะสินค้า status=NORMAL และ sold_out=false เท่านั้น**
   - ถ้าเป็น powerbank → แนะนำเฉพาะตัวที่เป็นพาวเวอร์แบงค์จริง ไม่ใช่หัวชาร์จ/สาย/เคส/ชุด
   - ถ้ารุ่นไหน sold_out → บอก "รุ่นนี้หมดสต็อกชั่วคราว" แล้วข้ามไปรุ่นอื่น
+- **⚡ Phase 3b — dual-tier recommendation เมื่อแนะนำสินค้าที่ compat กับอุปกรณ์ที่ลูกค้าระบุ** (เช่น "หัวชาร์จ iphone 4s", "สายชาร์จ mi 17 ultra", "หัวชาร์จ USB-C ทั่วไป"):
+  เมื่อ context มีสินค้าที่ compat กับอุปกรณ์เป้าหมาย ให้เสนอ **สูงสุด 2 ตัวเลือก** ถ้ามี:
+    1. **baseline** — ตัวที่ compat ตรงสเปคขั้นต่ำที่อุปกรณ์ต้องการ (เช่น 30W สำหรับ USB-C Android ทั่วไป)
+    2. **upgrade** — ตัวที่ compat และมีสเปคสูงกว่า (wattage/current สูงกว่า) พร้อมบอกสั้นๆ ว่าทำไมตัวหลังดีกว่า
+  **กฎบังคับ (ห้ามละเว้น):**
+  - **connector type ต้องตรงเป๊ะกับที่อุปกรณ์เป้าหมายต้องการ** — เป็นข้อจำกัดทาง hardware จริง
+    ตัวอย่าง: USB-C, Lightning, USB-A, Micro-USB, 30-pin (iPhone 4S)
+    สินค้าที่ connector ไม่ตรง **ห้ามเสนอแม้จะสเปคสูงแค่ไหน** ไม่ว่าจะ frame เป็น baseline หรือ upgrade ก็ตาม
+  - **สายชาร์จ (มี 2 หัว) ต้องตรวจทั้งสองฝั่ง**:
+    ฝั่งที่เสียบอุปกรณ์เป้าหมาย + ฝั่งที่เสียบหัวชาร์จ/แหล่งพลังงาน
+    สายที่มีหัวหนึ่งตรงแต่อีกหัวไม่ตรง → ห้ามเสนอ
+  - **wattage/protocol (PD, QC, PPS) เป็นข้อจำกัด "ขั้นต่ำ" ไม่ใช่ "ขั้นสูงสุด"**:
+    สินค้าที่สเปคสูงกว่าที่อุปกรณ์ต้องการยังใช้งานร่วมกันได้ปกติ (อุปกรณ์ negotiate ดึงไฟเท่าที่ต้องการเอง)
+    ดังนั้นสินค้า 140W สามารถเป็น upgrade ของสินค้า 30W ได้ ถ้า connector ตรง
+  - **ต้องยืนยันจาก description/spec ของสินค้าว่ารองรับ protocol ที่อุปกรณ์ต้องการจริง**:
+    ไม่ใช่ดูแค่ตัวเลข wattage สูงอย่างเดียว
+    ตัวอย่าง: หัวชาร์จ 140W บางรุ่นอาจไม่มี PPS ที่บางอุปกรณ์ต้องการ
+    ถ้า description ไม่ระบุ protocol ที่ต้องการ → ห้ามเสนอเป็น upgrade
+  - **ถ้าร้านมีสินค้า compat แค่ 1 ตัว** → เสนอแค่ตัวนั้น (baseline only) ห้ามแต่งว่ามีตัวสเปคสูงกว่า
+  - **ถ้าไม่มีสินค้า compat เลย** → บอกลูกค้าตรงๆ ว่าไม่มีสินค้าที่ connector ตรงในร้าน
+  - **ห้ามเสนอสินค้าที่ไม่มีอยู่จริงใน context** — ห้ามให้ LLM "เดา" ว่ามีตัวสเปคสูงกว่าถ้า retrieval ไม่เจอจริง
+  - **subtype ที่ resolve ได้จาก Phase 2 ต้องคุมทิศทางการเสนอ** — ถ้าลูกค้าถาม "สายชาร์จ" ห้ามเสนอ "หัวชาร์จ" เป็น baseline/upgrade และในทางกลับกัน
+  - **การนำเสนอ 2 ตัวเลือกให้อ่านเป็นธรรมชาติ** — ไม่ใช่ list แข็งๆ แบบ "1. ... 2. ..."
+    ตัวอย่างที่ดี: "สำหรับ iPhone 4S ที่ใช้พอร์ต 30-pin ค่ะ ร้านมีหัวชาร์จ X ที่จ่ายไฟ 5W ใช้ได้เลยค่ะ
+    ถ้าอยากได้แบบจ่ายไฟเร็วกว่า ร้านมีหัวชาร์จ Y ที่จ่ายไฟ 12W ด้วย ชาร์จเร็วกว่าประมาณ 2 เท่าค่ะ"
+  - **ห้ามระบุ protocol/wattage ที่ไม่ได้ระบุใน description ของสินค้า** — ถ้า description บอกแค่ "USB-C PD" ห้ามบอกว่ารองรับ PPS
+- **⚡ กฎสำคัญเกี่ยวกับ MagSafe / แม่เหล็ก (ห้ามสับสนเด็ดขาด):**
+  "MagSafe" มี 2 ความหมายที่ลูกค้าอาจถาม ต้องแยกให้ชัด:
+  1. **"ยึดด้วยแม่เหล็ก" (magnetic attachment)** — สินค้าติดเข้ากับเครื่องด้วยแม่เหล็ก
+     เช่น พัดลมระบายความร้อน MagCooler ทุกรุ่นยึดด้วยแม่เหล็กได้
+  2. **"ชาร์จไฟผ่านแม่เหล็ก" (MagSafe wireless charging)** — ใช้แม่เหล็กชาร์จไฟเข้าเครื่อง
+     เช่น แผ่นชาร์จ MagSafe, พาวเวอร์แบงค์ที่รองรับ MagSafe charging
+  **กฎ:**
+  - ถ้าลูกค้าถาม "ชาร์จ MagSafe ได้ไหม" / "มีตัวไหนชาร์จ MagSafe ได้" →
+    ลูกค้าถามเรื่อง **การชาร์จไฟ** ไม่ใช่การยึดแม่เหล็ก
+  - พัดลมระบายความร้อน (MagCooler, FunCooler) **ไม่มีฟังก์ชันชาร์จไฟ**
+    ตอบชัดเจนว่า "พัดลมระบายความร้อนเป็นอุปกรณ์ยึดด้วยแม่เหล็กเท่านั้น ไม่มีฟังก์ชันชาร์จไฟค่ะ"
+  - ห้ามตอบ "รองรับ MagSafe" หรือ "ใช้กับ MagSafe ได้" กับสินค้าที่ไม่มีชาร์จไฟ
+    เพราะจะทำให้ลูกค้าเข้าใจผิดว่าชาร์จได้
+  - ถ้าลูกค้าถาม "ติดแม่เหล็กได้ไหม" / "ยึดแม่เหล็กได้ไหม" → ตอบเรื่อง magnetic attachment ได้
+  - **สรุป: แยก "ยึดแม่เหล็ก" จาก "ชาร์จแม่เหล็ก" อย่างชัดเจน ห้ามใช้คำว่า "รองรับ MagSafe"
+    กับสินค้าที่ไม่มีฟังก์ชันชาร์จไฟ**
 - **คำถามเกี่ยวกับแอพที่ใช้ต่อสมาร์ทวอชกับมือถือ** (เช่น "ใช้แอพอะไรต่อมือถือบ้าง", "สมาร์ทวอชใช้แอพอะไร"):
   - ถ้าลูกค้า **ไม่ระบุรุ่น** → ยกตัวอย่างสมาร์ทวอช **2-3 ชิ้น** จาก context
     **ต้องเขียนชื่อรุ่นเต็มในคำตอบ** (เช่น "Black Shark GS3 Sport", "Black Shark A3") เพื่อให้แสดง product card ได้
@@ -214,6 +342,16 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
   - ถ้า context มี section "ข้อมูลจาก Google Search" ให้ใช้แค่ข้อมูล spec ที่เกี่ยวกับสินค้าใน context เท่านั้น
     ห้าม copy ลิงก์จาก section นั้นมาใส่ในคำตอบเด็ดขาด
   - ถ้าไม่แน่ใจว่าลิงก์เป็นของสินค้าใน context หรือไม่ → ห้ามใส่
+- **สำคัญมาก — ห้ามแนบลิงก์/รูปเมื่อลูกค้าถาม trust/ความน่าเชื่อถือ**:
+  ถ้าลูกค้าถามเรื่องความน่าเชื่อถือ, ของแท้/ของปลอม, โดนหลอก, วีดีโอรีวิว, ร้านไหน, ขายได้กี่ชิ้น
+  (เช่น "ไม่แน่ใจว่ามีความน่าเชื่อถือ", "โดนหลอกไหม", "ของแท้ไหม", "มีวีดีโอรีวิวไหม")
+  → ตอบเรื่อง trust อย่างเดียว ไม่แนบลิงก์สั่งซื้อ ไม่แนบรูป ไม่ push sales
+  ตอบสั้นๆ 1-2 ประโยค เช่น "ทางร้านเป็นร้านทางการ สินค้าของแท้ 100% รับประกันศูนย์ไทยค่ะ"
+  รอลูกค้าเป็นฝ่ายถามซื้อเอง — ห้าม push ลิงก์/รูปก่อน
+  **ยกเว้น**: ถ้าลูกค้าบอกมั่นใจแล้ว (เช่น "มั่นใจได้นะครับไม่โดนหลอก") → สามารถแนบลิงก์สั่งซื้อได้
+- **แนบลิงก์/รูปเฉพาะเมื่อลูกค้าแสดงความสนใจซื้อหรือขอดูสินค้า**:
+  เช่น "สนใจสั่งซื้อ", "ขอดูสินค้า", "มีไหม", "ตัวไหนดี", "แนะนำหน่อย"
+  ถ้าลูกค้ายังไม่ได้แสดงความสนใจซื้อ → ตอบข้อมูลอย่างเดียว ไม่แนบลิงก์/รูป
 - **หากลูกค้าขอเปรียบเทียบสินค้า 2 รายการขึ้นไป ต้องตอบในรูปแบบ "สเปคต่อสเปค ละเอียด" เท่านั้น ห้ามใช้รูปแบบอื่น**
   โครงสร้างคำตอบที่บังคับ (เรียงตามลำดับนี้เท่านั้น):
   1. บรรทัดเปิดสั้นๆ เป็นมิตร (เช่น "ยินดีเลยค่ะ เดี๋ยวเรามาเทียบสเปคแบบละเอียดระหว่าง ... และ ... กันแบบชัด ๆ สเปคต่อสเปคเลยนะคะ")
@@ -277,6 +415,33 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
 - แต่ละข้อความต้องมีเนื้อหาครบ ไม่ใช่ประโยคถูกตัดครึ่ง
 - ถ้าไม่แน่ใจว่าควรแบ่งไหม → ใช้ 1 ข้อความเดียว (ปลอดภัยกว่า)
 - **อย่าบังคับแบ่งถ้าไม่จำเป็น — ตอบเป็นธรรมชาติ**
+
+=== กฎการเสนอขายสินค้า (บังคับ — อ่านทุกครั้งก่อนตอบ) ===
+กฎ 3 ข้อนี้เป็นกฎเหล็ก ห้ามละเมิดไม่ว่ากรณีใดๆ:
+
+**กฎ 1 — เชียร์ขายเฉพาะสินค้าที่ขายได้จริง:**
+แนะนำ/เชียร์/เสนอขายสินค้าได้เฉพาะสินค้าที่ `status=NORMAL` **และ** `sold_out=false` (มี stock ใน Shopee) เท่านั้น
+- สินค้าที่ `status != NORMAL` (UNLIST/SELLER_DELETE/BANNED/DELETED) = เลิกขายแล้ว → ห้ามเสนอขาย ห้ามแสดงลิงก์สั่งซื้อ
+- สินค้าที่ `sold_out=true` = หมดสต็อก → ห้ามเสนอขาย ให้บอก "รุ่นนี้หมดสต็อกชั่วคราวค่ะ"
+- ถ้าไม่แน่ใจว่ามี stock → อย่าบอก "พร้อมส่ง" ให้บอก "สอบถามสต็อกได้ที่แอดมินค่ะ"
+- ⚡ Phase 3d — ถ้ามี field `_available_for_sale` ใน product card ให้ใช้เป็นเกณฑ์หลัก:
+  - `_available_for_sale=true` → แนะนำขาย/เสนอขาย/ส่งลิงก์สั่งซื้อได้
+  - `_available_for_sale=false` → ห้ามแนะนำขาย/เสนอขาย/ส่งลิงก์สั่งซื้อ (สินค้าที่ shopee_stock<=0 หรือ status!=NORMAL หรือ sold_out=True)
+
+**กฎ 2 — สินค้าเลิกขาย/หมดสต็อก ยังตอบข้อมูลได้:**
+ถ้าลูกค้าถามสเปค/รายละเอียด/รับประกัน ของสินค้าที่ `status != NORMAL` หรือ `sold_out=true`:
+- ให้ตอบข้อมูลได้ตามจริงจาก context (สเปค, รับประกัน, คุณสมบัติ) — **ห้ามปฏิเสธว่า "ไม่มีข้อมูล"**
+- บอกลูกค้าตรงๆ ว่ารุ่นนี้เลิกขายแล้ว หรือ หมดสต็อกแล้ว
+- ถ้าลูกค้าต้องการซื้อ → เสนอสินค้าใกล้เคียงที่ `status=NORMAL` + `sold_out=false` แทน
+- เหตุผล: ลูกค้าอาจซื้อไปแล้ว มาถามข้อมูลหรือเคลม ต้องตอบได้
+
+**กฎ 3 — ลูกค้าแจ้งเคลม/ปัญหา ห้ามเสนอขายเด็ดขาด:**
+ถ้าลูกค้ากำลังแจ้งเคลม/ปัญหาสินค้า/สอบถามการรับประกันเพื่อซ่อม/เปลี่ยน
+(เช่น "สินค้าเสีย", "เคลมยังไง", "อยากซ่อม", "ไม่ทำงาน", "พัง", "เปลี่ยนของใหม่"):
+- **ห้ามแนะนำ/เสนอ/เชียร์ซื้อสินค้าใดๆ ในคำตอบเด็ดขาด** ไม่ว่า status จะเป็นอะไร
+- ตอบเฉพาะเรื่องเคลม/รับประกัน/ซ่อมเท่านั้น
+- ถ้า state machine ส่งคำตอบให้แล้ว → ทำตาม flow นั้น ไม่ต้องเสนอขาย
+- เหตุผล: การเสนอขายระหว่างลูกค้าแจ้งเคลม = ไม่เหมาะสม ทำให้ลูกค้ารู้สึกไม่ได้รับการช่วยเหลือ
 """
 
 
@@ -363,12 +528,22 @@ def _build_context(products: list[dict], shop_hint: str | None = None,
     - weight/dimension ส่งเฉพาะตอน include_description=True
     """
     if not products:
-        body = "ไม่พบสินค้าที่ตรงกับคำถามในฐานข้อมูล"
+        # ⚡ BUG-10 (QA 2026-09-07) — ห้ามให้ LLM ตี "ไม่พบ" เป็น claim สต็อก/แคตตาล็อก
+        #   เคสจริง: การ์ดออเดอร์ → "สินค้าทุกรายการในร้านหมดสต็อก", ถามอะไหล่ → "ร้านขายหัวชาร์จเป็นหลัก"
+        body = (
+            "ไม่พบข้อมูลสินค้าที่ตรงกับคำถามในระบบค้นหา\n"
+            "⚠️ สำคัญอย่างยิ่ง: นี่หมายถึงระบบค้นหาไม่พบรุ่นที่ลูกค้าถามเท่านั้น "
+            "ห้ามสรุปว่าสินค้าหมดสต็อก เลิกขาย หรือไม่มีจำหน่าย "
+            "และห้ามอธิบายว่าร้านขายสินค้าประเภทใดเป็นหลัก "
+            "ให้บอกลูกค้าว่าไม่พบข้อมูลรุ่นนี้ในระบบ "
+            "แล้วชวนทักแอดมินตรวจสอบเพิ่มเติม"
+        )
     else:
         slim_fields = (
             "name", "shop", "warranty", "short_link", "image_url",
             "has_promotion", "is_flash_sale", "variants", "tier_variation",
             "brand", "category", "sold_out", "total_stock", "status",
+            "_available_for_sale",  # ⚡ Phase 3d — mark สินค้าพร้อมขาย/ไม่พร้อมขาย
         )
         # ฟิลด์จาก KB (ถ้า merge แล้ว)
         kb_fields = ("kb_highlights", "kb_specs", "kb_box_contents", "_source", "_kb_only")
@@ -395,7 +570,7 @@ def _build_context(products: list[dict], shop_hint: str | None = None,
                         card["description_excerpt"] = "(ไม่มีรายละเอียดสินค้าเพิ่มเติม)"
                         # เพิ่ม context_note ชัดๆ ว่าห้ามเอา desc สินค้าอื่นมาตอบ
                         existing_note = card.get("_context_note", "")
-                        no_desc_note = "สินค้านี้ไม่มีรายละเอียดเพิ่มเติม ห้ามอ้างอิง description_excerpt ของสินค้าอื่นมาตอบสินค้านี้เด็ดขาด ให้บอกลูกค้าว่าขออภัย สินค้ารุ่นนี้ไม่มีรายละเอียดเพิ่มเติม ทักแอดมินได้เลยนะคะ"
+                        no_desc_note = "สินค้านี้ไม่มีรายละเอียดเพิ่มเติม ห้ามอ้างอิง description_excerpt ของสินค้าอื่นมาตอบสินค้านี้เด็ดขาด ให้บอกลูกค้าว่าขออภัย สินค้ารุ่นนี้ไม่มีรายละเอียดเพิ่มเติมในระบบค่ะ"
                         card["_context_note"] = (existing_note + " " + no_desc_note).strip() if existing_note else no_desc_note
                 if "weight" in p:
                     card["weight"] = p["weight"]
@@ -410,7 +585,9 @@ def _build_context(products: list[dict], shop_hint: str | None = None,
             f"⚠️ สำคัญอย่างยิ่ง: ลูกค้าทักเข้ามาที่ร้าน {shop_hint} โดยเฉพาะ "
             f"ให้ตอบเฉพาะสินค้าจากร้าน {shop_hint} เท่านั้น "
             f"ห้ามเสนอ/แนะนำ/เปรียบเทียบสินค้าจากร้านอื่นในเครือเด็ดขาด "
-            f"ถ้าร้าน {shop_hint} ไม่มีสินค้าที่ลูกค้าถาม ให้บอกตรงๆ ว่าร้านนี้ไม่มี "
+            f"ถ้าระบบค้นหาไม่พบรุ่นที่ลูกค้าถาม ให้บอกว่าไม่พบข้อมูลรุ่นนี้ในระบบค่ะ "
+            f"ห้ามบอกว่าหมดสต็อก/เลิกขาย/ไม่มีจำหน่าย "
+            f"เว้นแต่เห็น sold_out=true หรือ status != NORMAL ของรุ่นนั้นใน context จริงๆ "
             f"แล้วแนะนำสินค้าอื่นจากร้าน {shop_hint} ที่ใกล้เคียงที่สุดแทน "
             f"อย่าตอบสั้นๆ ว่า 'ไม่มี' แล้วจบ — ต้องเสนอทางเลือกจากร้าน {shop_hint} เสมอ\n"
         )
@@ -431,6 +608,150 @@ def _build_context(products: list[dict], shop_hint: str | None = None,
     return header + body
 
 
+# ---- multimodal vision pass (Phase 1A) ---------------------------------------
+# ⚡ describe_image — ใช้ Gemini 3.1 Flash Lite (รองรับ multimodal) อ่านรูปที่ลูกค้าส่ง
+# คืน text อธิบายสั้นๆ เป็นภาษาไทย เพื่อใช้เป็น context ให้ LLM หลักตอบ
+# ⚠️ ต้องโหลดรูปเป็น bytes แล้วส่งเป็น inline_data (Part.from_bytes)
+#    เพราะ Part.from_uri ใช้ได้เฉพาะ GCS URL ไม่ใช่ HTTP URL ทั่วไป
+_VISION_MODEL = os.environ.get("VISION_MODEL", "gemini-3.1-flash-lite")
+
+_VISION_PROMPT = """คุณเป็นผู้ช่วยแชทบอทร้านค้าออนไลน์
+ลูกค้าส่งรูปนี้มาในแชท อธิบายเป็นภาษาไทยว่ารูปนี้เป็นอะไร ใช้ไม่เกิน 5 บรรทัด
+
+⚠️ สำคัญมาก: อธิบายเฉพาะสิ่งที่เห็นในรูปจริงเท่านั้น
+ห้ามใช้ "บริบทก่อนหน้า" หรือ "history" เป็นตัวกำหนดว่ารูปเป็นอะไร
+ถ้าในรูปเป็นแมว/สัตว์/การ์ตูน/ทิวทัศน์ ต้องบอกตรงๆ ว่าเป็นสิ่งนั้น
+แม้ history จะคุยเรื่องสินค้า ก็ห้ามสรุปว่ารูปเป็นสินค้าถ้าไม่เห็นสินค้าในรูปจริง
+
+พิจารณาตามประเภทรูป:
+- ถ้าเป็นสินค้า → บอก: ชนิดสินค้า + แบรนด์ + รุ่น (ถ้าเห็น) + ลักษณะเด่น
+- ถ้าเป็นสินค้าเสีย/ชำรุด → บอก: สินค้าอะไร + อาการเสียที่เห็น (เช่น หน้าจอแตก, ไม่เปิด, สีผิด, ขอด, บวม, รอยไหม้, น้ำเข้า, หลุดหาย) + รุ่น/แบรนด์ (ถ้าเห็น)
+- ถ้าเป็นกล่อง/ฉลากสินค้า → บอก: ชื่อสินค้า + รุ่น + หมายเลขผลิตภัณฑ์/SN (ถ้าเห็น)
+- ถ้าเป็นเลขพัสดุ/tracking → อ่านเลขที่เห็นทั้งหมด + ชื่อขนส่ง (ถ้าเห็น)
+- ถ้าเป็นสกรีนช็อตสถานะการจัดส่ง → บอก: สถานะ + เลขพัสดุ (ถ้ามี) + ขนส่ง (ถ้าเห็น)
+- ถ้าเป็นรูปอื่นๆ (สัตว์/การ์ตูน/ทิวทัศน์/อาหาร/คน) → บอกสั้นๆ ว่าเป็นรูปอะไร
+- ถ้ามีตัวอักษร/ตัวเลขในรูป → อ่านให้ครบ โดยเฉพาะหมายเลขคำสั่งซื้อ/เลขพัสดุ/รุ่นสินค้า
+- ถ้ารูปมืด/ไม่ชัด/อ่านไม่ได้ → บอกว่า "รูปไม่ชัด อ่านรายละเอียดไม่ได้"
+"""
+
+
+def describe_image(
+    image_url: str,
+    shop_hint: str | None = None,
+    history_context: str = "",
+) -> tuple[str, dict]:
+    """อ่านรูปภาพด้วย Gemini vision แล้วคืน text อธิบายสั้นๆ.
+
+    Args:
+        image_url: URL รูปภาพ (ต้องเป็น public URL เช่น cf.shopee.co.th)
+        shop_hint: ชื่อร้าน (optional — ใส่ใน prompt ให้ vision เข้าใจ context)
+        history_context: text สรุป history ก่อนหน้ารูป (optional — ช่วยให้ vision
+                         เข้าใจบริบท เช่น "ลูกค้าคุยเรื่องเคลมสินค้าอยู่")
+
+    Returns:
+        (description_text, usage_info) — description เป็นภาษาไทย, usage_info มี prompt/output/total tokens
+    """
+    usage_info = {"prompt": 0, "output": 0, "total": 0}
+    if not image_url or not image_url.strip():
+        return "", usage_info
+
+    try:
+        import urllib.request as _urllib_req
+        from google.genai import types as _genai_types
+        # ⚠️ โหลดสื่อเป็น bytes ก่อน — Part.from_uri ใช้ได้เฉพาะ GCS URL
+        #    HTTP URL ทั่วไปต้องโหลดเป็น inline_data (Part.from_bytes)
+        _req = _urllib_req.Request(image_url, headers={"User-Agent": "Mozilla/5.0"})
+        _resp = _urllib_req.urlopen(_req, timeout=15)
+        img_bytes = _resp.read()
+        if not img_bytes:
+            print(f"[VISION] empty bytes from {image_url[:60]}", file=sys.stderr)
+            return "(ไม่สามารถโหลดสื่อได้)", usage_info
+
+        # ⚡ detect mime_type จาก URL + content-type header
+        #    รองรับทั้งรูป (image/jpeg) และวิดีโอ (video/mp4)
+        _url_lower = image_url.lower()
+        _ct = (_resp.headers.get("Content-Type") or "").lower()
+        if "video" in _ct or _url_lower.endswith((".mp4", ".mov", ".avi", ".webm", ".mkv")):
+            _mime = "video/mp4"
+        elif "png" in _ct or _url_lower.endswith(".png"):
+            _mime = "image/png"
+        elif "webp" in _ct or _url_lower.endswith(".webp"):
+            _mime = "image/webp"
+        elif "gif" in _ct or _url_lower.endswith(".gif"):
+            _mime = "image/gif"
+        else:
+            _mime = "image/jpeg"
+
+        client = _client()
+        part = _genai_types.Part.from_bytes(data=img_bytes, mime_type=_mime)
+        prompt = _VISION_PROMPT
+        if shop_hint:
+            prompt += f"\nร้าน: {shop_hint}"
+        # ⚡ ส่ง history context ให้ vision ด้วย — ช่วยให้เข้าใจบริบท
+        #    เช่น ลูกค้าคุยเรื่องเคลมอยู่ → vision รู้ว่ารูปนี้น่าจะเป็นสินค้าเสีย
+        if history_context:
+            prompt += f"\n\nบริบทก่อนหน้ารูปนี้:\n{history_context[:500]}"
+        resp = client.models.generate_content(
+            model=_VISION_MODEL,
+            contents=[prompt, part],
+            config={
+                "temperature": 0.0,
+                "max_output_tokens": 300,
+            },
+        )
+        desc = (resp.text or "").strip()
+        usage = getattr(resp, "usage_metadata", None)
+        if usage:
+            usage_info = {
+                "prompt": getattr(usage, "prompt_token_count", 0) or 0,
+                "output": getattr(usage, "candidates_token_count", 0) or 0,
+                "total": getattr(usage, "total_token_count", 0) or 0,
+            }
+        print(f"[VISION] model={_VISION_MODEL} url={image_url[:60]}... bytes={len(img_bytes)} desc={desc[:80]!r} tokens={usage_info['total']}", file=sys.stderr)
+        return desc, usage_info
+    except genai_errors.ClientError as exc:
+        print(f"[VISION] ClientError: {exc}", file=sys.stderr)
+        return f"(ไม่สามารถอ่านรูปได้: {exc})", usage_info
+    except Exception as exc:
+        print(f"[VISION] error: {exc}", file=sys.stderr)
+        return f"(ไม่สามารถอ่านรูปได้: {exc})", usage_info
+
+
+def describe_images(
+    image_urls: list[str],
+    shop_hint: str | None = None,
+    max_images: int = 3,
+    history_context: str = "",
+) -> tuple[str, dict]:
+    """อ่านหลายรูปพร้อมกัน → คืน description รวม + usage รวม.
+
+    Args:
+        image_urls: list ของ URL รูป
+        shop_hint: ชื่อร้าน
+        max_images: จำกัดจำนวนรูปสูงสุดต่อ turn (default 3)
+        history_context: text สรุป history ก่อนหน้ารูป (ช่วยให้ vision เข้าใจบริบท)
+
+    Returns:
+        (combined_description, total_usage_info)
+    """
+    if not image_urls:
+        return "", {"prompt": 0, "output": 0, "total": 0}
+
+    urls = image_urls[:max_images]
+    descriptions = []
+    total_usage = {"prompt": 0, "output": 0, "total": 0}
+
+    for i, url in enumerate(urls):
+        desc, usage = describe_image(url, shop_hint=shop_hint, history_context=history_context)
+        if desc:
+            descriptions.append(f"[รูปที่ {i+1}] {desc}")
+        total_usage["prompt"] += usage.get("prompt", 0)
+        total_usage["output"] += usage.get("output", 0)
+        total_usage["total"] += usage.get("total", 0)
+
+    return "\n".join(descriptions), total_usage
+
+
 def answer(
     message: str,
     products: list[dict],
@@ -448,7 +769,7 @@ def answer(
         products: product cards ที่กรองแล้ว
         shop_hint: ชื่อร้านที่ลูกค้าทักเข้ามา (ถ้ามี)
         history: ประวัติแชทก่อนหน้า [{"role":"user","text":"..."},{"role":"model","text":"..."}]
-        model: ชื่อโมเดล Gemini (default จาก env GEMINI_MODEL หรือ gemini-2.0-flash)
+        model: ชื่อโมเดล Gemini (default จาก env GEMINI_MODEL หรือ gemini-3.5-flash-lite)
         persona_extra: instruction เพิ่มเติมจาก persona ของร้าน (ชื่อตัวแทนบอท)
                        ถ้าว่าง = ใช้ SYSTEM_INSTRUCTION เดิม (default behavior)
         intent_result: ผลจาก Pass 1 intent classification (ถ้ามี) — ใช้กำหนด include_desc
@@ -474,7 +795,7 @@ def answer(
         client = _client()
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ", {"prompt": 0, "output": 0, "total": 0}
-    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")).strip()
+    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
     system_instruction = SYSTEM_INSTRUCTION + persona_extra if persona_extra else SYSTEM_INSTRUCTION
 
     # ตรวจว่าคำถามเกี่ยวกับรับประกัน/เคลม/สเปก/รายละเอียดไหม
@@ -497,12 +818,16 @@ def answer(
     )
     # ถ้ามี intent_result จาก Pass 1 → ใช้ needs_description จาก LLM
     # (LLM เข้าใจได้ดีกว่า keyword matching — รองรับรุ่นเก่า/แบรนด์ใหม่ที่ไม่มีใน list)
+    # ⚡ แต่ merge กับ keyword matching: ถ้าอย่างใดอย่างหนึ่งบอกว่าต้องมี desc → ส่ง desc
+    #   (กัน intent บอก False แต่ keyword บอก True เช่น "ขอรายละเอียดเพิ่มเติม")
+    _kw_match = any(kw in message.lower() for kw in desc_kw)
     if intent_result and intent_result.get("confidence", 0) >= 0.7:
-        include_desc = bool(intent_result.get("needs_description", False))
-        print(f"[LLM] include_desc from intent: {include_desc}  (intent={intent_result.get('intent')})", file=_sys.stderr)
+        _intent_desc = bool(intent_result.get("needs_description", False))
+        include_desc = _intent_desc or _kw_match
+        print(f"[LLM] include_desc: {include_desc}  (intent={_intent_desc}, kw={_kw_match}, intent_label={intent_result.get('intent')})", file=_sys.stderr)
     else:
         # fallback: ใช้ keyword matching เดิม (กรณีไม่ได้เรียก Pass 1)
-        include_desc = any(kw in message.lower() for kw in desc_kw)
+        include_desc = _kw_match
 
     context = _build_context(products, shop_hint=shop_hint,
                              include_description=include_desc)
@@ -534,6 +859,11 @@ def answer(
             text = h.get("text", "")
             if role not in ("user", "model"):
                 role = "user"
+            # ⚡ Phase 1A multimodal — แนบ image_desc ใน history text ถ้ามี
+            #    ทำให้ LLM หลักเห็น description ของรูปเก่าโดยไม่ต้องอ่านรูปซ้ำ
+            _h_img_desc = h.get("image_desc", "")
+            if _h_img_desc and role == "user":
+                text = f"{text} (รูปที่ส่ง: {_h_img_desc})"
             # สำหรับคำตอบ model ก่อนหน้า ให้ส่งแค่สรุปสั้นๆ ไม่ส่ง full answer
             # เพื่อป้องกัน LLM อ้างอิงสินค้าจากคำตอบเดิมแทน context ปัจจุบัน
             # ⚡ แต่ถ้ามีแค่ 1 สินค้าใน context = คุยเรื่องเดียวกัน → ส่ง history เต็ม
@@ -552,7 +882,11 @@ def answer(
     print(f"[LLM DEBUG] history_len={len(history) if history else 0}", file=sys.stderr)
     if history:
         for i, h in enumerate(history):
-            print(f"[LLM DEBUG]   hist[{i}] role={h.get('role')} text={h.get('text','')[:60]!r}", file=sys.stderr)
+            _h_desc = h.get("image_desc", "")
+            _h_text = h.get("text", "")[:60]
+            if _h_desc:
+                _h_text += f" +img_desc={_h_desc[:40]}"
+            print(f"[LLM DEBUG]   hist[{i}] role={h.get('role')} text={_h_text!r}", file=sys.stderr)
     print(f"[LLM DEBUG] context (first 500): {context[:500]!r}", file=sys.stderr)
 
     usage_info = {"prompt": 0, "output": 0, "total": 0}
@@ -580,7 +914,7 @@ def answer(
         usage_info = {"prompt": prompt_t, "output": output_t, "total": total_t}
         print(f"[LLM] model={model_name}  prompt={prompt_t}  output={output_t}  total={total_t}  products={len(products)}")
 
-    return (resp.text or "").strip(), usage_info
+    return _strip_kb_markup((resp.text or "").strip()), usage_info
 
 
 # ---- KB-based answer ----
@@ -614,6 +948,29 @@ KB_SYSTEM_INSTRUCTION = """คุณเป็นผู้ช่วยขาย�
 - ถ้าลูกค้าถามเรื่องสเปก → ตอบเฉพาะสเปกที่มีใน context
 - ถ้าลูกค้าถามเรื่องอุปกรณ์ในกล่อง → ตอบเฉพาะอุปกรณ์ที่มีใน context
 - ตอบกระชับ ไม่ต้องยาวเกินไป — ใช้ข้อมูลเท่าที่จำเป็น
+
+=== กฎการเสนอขายสินค้า (บังคับ — อ่านทุกครั้งก่อนตอบ) ===
+กฎ 3 ข้อนี้เป็นกฎเหล็ก ห้ามละเมิดไม่ว่ากรณีใดๆ:
+
+**กฎ 1 — เชียร์ขายเฉพาะสินค้าที่ขายได้จริง:**
+แนะนำ/เชียร์/เสนอขายสินค้าได้เฉพาะสินค้าที่ `status=NORMAL` **และ** `sold_out=false` (มี stock ใน Shopee) เท่านั้น
+- สินค้าที่ `status != NORMAL` (UNLIST/SELLER_DELETE/BANNED/DELETED) = เลิกขายแล้ว → ห้ามเสนอขาย ห้ามแสดงลิงก์สั่งซื้อ
+- สินค้าที่ `sold_out=true` = หมดสต็อก → ห้ามเสนอขาย ให้บอก "รุ่นนี้หมดสต็อกชั่วคราวค่ะ"
+- ⚡ Phase 3d — ถ้ามี field `_available_for_sale` ใน product card ให้ใช้เป็นเกณฑ์หลัก:
+  - `_available_for_sale=true` → แนะนำขาย/เสนอขาย/ส่งลิงก์สั่งซื้อได้
+  - `_available_for_sale=false` → ห้ามแนะนำขาย/เสนอขาย/ส่งลิงก์สั่งซื้อ (สินค้าที่ shopee_stock<=0 หรือ status!=NORMAL หรือ sold_out=True)
+
+**กฎ 2 — สินค้าเลิกขาย/หมดสต็อก ยังตอบข้อมูลได้:**
+ถ้าลูกค้าถามสเปค/รายละเอียด/รับประกัน ของสินค้าที่ `status != NORMAL` หรือ `sold_out=true`:
+- ให้ตอบข้อมูลได้ตามจริงจาก context — **ห้ามปฏิเสธว่า "ไม่มีข้อมูล"**
+- บอกลูกค้าตรงๆ ว่ารุ่นนี้เลิกขายแล้ว หรือ หมดสต็อกแล้ว
+- ถ้าลูกค้าต้องการซื้อ → เสนอสินค้าใกล้เคียงที่ `status=NORMAL` + `sold_out=false` แทน
+
+**กฎ 3 — ลูกค้าแจ้งเคลม/ปัญหา ห้ามเสนอขายเด็ดขาด:**
+ถ้าลูกค้ากำลังแจ้งเคลม/ปัญหาสินค้า/สอบถามการรับประกันเพื่อซ่อม/เปลี่ยน
+(เช่น "สินค้าเสีย", "เคลมยังไง", "อยากซ่อม", "ไม่ทำงาน", "พัง", "เปลี่ยนของใหม่"):
+- **ห้ามแนะนำ/เสนอ/เชียร์ซื้อสินค้าใดๆ ในคำตอบเด็ดขาด** ไม่ว่า status จะเป็นอะไร
+- ตอบเฉพาะเรื่องเคลม/รับประกัน/ซ่อมเท่านั้น
 """
 
 
@@ -637,7 +994,7 @@ def answer_with_kb(
         client = _client()
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ"
-    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")).strip()
+    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
     system_instruction = KB_SYSTEM_INSTRUCTION + persona_extra if persona_extra else KB_SYSTEM_INSTRUCTION
 
     user_prompt = f"{kb_context}\n\nคำถามของลูกค้า: {message}"
@@ -649,6 +1006,10 @@ def answer_with_kb(
             text = h.get("text", "")
             if role not in ("user", "model"):
                 role = "user"
+            # ⚡ Phase 1A multimodal — แนบ image_desc ใน history text ถ้ามี
+            _h_img_desc = h.get("image_desc", "")
+            if _h_img_desc and role == "user":
+                text = f"{text} (รูปที่ส่ง: {_h_img_desc})"
             contents.append({"role": role, "parts": [{"text": text}]})
     contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
@@ -674,7 +1035,7 @@ def answer_with_kb(
         total_t = getattr(usage, "total_token_count", 0) or (prompt_t + output_t)
         print(f"[LLM-KB] model={model_name}  prompt={prompt_t}  output={output_t}  total={total_t}")
 
-    return (resp.text or "").strip()
+    return _strip_kb_markup((resp.text or "").strip())
 
 
 def answer_general(
@@ -704,7 +1065,7 @@ def answer_general(
         client = _client()
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ", {}
-    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")).strip()
+    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
 
     general_instruction = (
         "คุณเป็นพนักงานบริการลูกค้าหญิงของร้านค้าออนไลน์ในเครือ Shopee "
@@ -734,6 +1095,10 @@ def answer_general(
             text = h.get("text", "")
             if role not in ("user", "model"):
                 role = "user"
+            # ⚡ Phase 1A multimodal — แนบ image_desc ใน history text ถ้ามี
+            _h_img_desc = h.get("image_desc", "")
+            if _h_img_desc and role == "user":
+                text = f"{text} (รูปที่ส่ง: {_h_img_desc})"
             contents.append({"role": role, "parts": [{"text": text}]})
     contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
@@ -761,4 +1126,4 @@ def answer_general(
         usage_info = {"prompt": prompt_t, "output": output_t, "total": total_t}
         print(f"[LLM-General] qtype={qtype}  model={model_name}  prompt={prompt_t}  output={output_t}  total={total_t}", file=sys.stderr)
 
-    return (resp.text or "").strip(), usage_info
+    return _strip_kb_markup((resp.text or "").strip()), usage_info

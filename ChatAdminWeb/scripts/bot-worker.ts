@@ -21,7 +21,7 @@ import { getSystemConfig } from "../src/backend/service/systemConfigService";
 import { workflowEngine } from "../src/backend/service/workflowEngine";
 
 const DEFAULT_INTERVAL_MS = 1000;
-const BATCH_LIMIT = 20;
+// ⚡ Phase 2Q — ไม่ limit แล้ว — ดึงทั้งหมดที่เข้ามาใหม่ (buffer + concurrency limiter เป็นตัวคุม)
 
 let running = true;
 let shuttingDown = false;
@@ -42,7 +42,10 @@ process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
 async function main() {
+  // ⚡ Phase 2P — บันทึก timestamp ตอนเริ่ม → ประมวลผลเฉพาะข้อความที่เข้ามาหลังเปิด botworker
+  const startedAt = new Date();
   console.log("[bot-worker] starting...");
+  console.log(`[bot-worker] ⚡ Phase 2P — processing only messages after ${startedAt.toISOString()}`);
   console.log("[bot-worker] ⚡ FIRE-AND-FORGET: แต่ละข้อความยิงไปบอทแยกอิสระ ไม่รอคิว ไม่รอ batch");
   console.log("[bot-worker] ⚠️ READ-ONLY messages_shp → writes to shadow_replies + chat_processing");
   console.log("[bot-worker] ⚠️ No Shopee API calls. No real message delivery.");
@@ -71,7 +74,7 @@ async function main() {
         }
       } else {
         const interval = config.bot_worker_interval_ms || DEFAULT_INTERVAL_MS;
-        const result = await botWorkerService.pollNewMessages(BATCH_LIMIT);
+        const result = await botWorkerService.pollNewMessages(startedAt);
 
         if (result.processed > 0) {
           console.log(`[bot-worker] cycle ${cycle}: found=${result.found} fired=${result.processed} (fire-and-forget)`);

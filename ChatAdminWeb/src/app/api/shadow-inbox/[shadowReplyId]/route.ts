@@ -29,8 +29,9 @@ export async function GET(
   // enrich: ดึง raw_payload ของ inbound message เพื่อ parse media + ดึง chat history
   let inboundMessage: ChatMessage | undefined;
   let chatHistory: ChatMessage[] = [];
+  let conv: Awaited<ReturnType<typeof conversationService.getConversation>> = null;
   try {
-    const conv = await conversationService.getConversation(doc.conversation_id);
+    conv = await conversationService.getConversation(doc.conversation_id);
     if (conv) {
       const messages = await messageService.listMessages(doc.conversation_id, {
         platform: conv.platform,
@@ -51,11 +52,34 @@ export async function GET(
           } catch { /* ignore */ }
         }
       }
-      chatHistory = messages.map((d) => {
-        const parsed = parseRawMessage(d.raw_payload, d.text);
+      // ⚡ batch parse + batch lookup products สำหรับ history ทั้งหมด (เหมือน admin/conversations API)
+      const historyParsed = messages.map((d) => ({
+        doc: d,
+        parsed: parseRawMessage(d.raw_payload, d.text),
+      }));
+      const historyItemIds = new Set<string>();
+      for (const { parsed: p } of historyParsed) {
+        if (p.product_ref?.item_id) historyItemIds.add(p.product_ref.item_id);
+      }
+      const historyProductMap = new Map<string, ProductCard>();
+      if (historyItemIds.size > 0) {
+        try {
+          const productDocs = await productService.getProductsByIds({
+            platform: conv.platform,
+            itemIds: [...historyItemIds],
+          });
+          for (const p of productDocs) {
+            const card = toProductCard(p as Record<string, unknown>, conv.platform);
+            const id = String((p as Record<string, unknown>).item_id || (p as Record<string, unknown>).itemid || "");
+            if (id) historyProductMap.set(id, card);
+          }
+        } catch { /* ignore product lookup errors */ }
+      }
+      chatHistory = historyParsed.map(({ doc: d, parsed }) => {
         const products: ProductCard[] = [];
         if (parsed.product_ref?.item_id) {
-          // skip per-message product lookup for history (performance) — only do for inbound
+          const card = historyProductMap.get(parsed.product_ref.item_id);
+          if (card) products.push(card);
         }
         return {
           id: d.message_id,
@@ -68,6 +92,7 @@ export async function GET(
           order_sn: parsed.order_sn,
           notification_text: parsed.notification_text,
           table: parsed.table,
+          products: products.length > 0 ? products : undefined,
           admin_id: d.actor,
           admin_name: d.actor ? adminNameMap.get(d.actor) : undefined,
         };
@@ -122,6 +147,9 @@ export async function GET(
       inbound_message: inboundMessage,
       chat_history: chatHistory,
       bot_products: botProducts,
+      // ⚡ ส่ง customer info ไปแสดง avatar ใน ShadowReplyPanel
+      customer_name: conv?.to_name,
+      customer_avatar: conv?.customer_avatar,
     },
   });
 }

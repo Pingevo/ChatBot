@@ -4,11 +4,83 @@
 
 ## โครงสร้าง repo
 
+> แผนผังนี้คือแหล่งอ้างอิงหลักสำหรับหาไฟล์ — อ่านก่อนทำงานทุกครั้ง
+
+### ส่วนสำคัญของบอท (core — ห้ามย้าย/ห้ามแตะโดยไม่จำเป็น)
+
 - `chatbot/shopeechat/` — Python FastAPI chatbot (Shopee) — ใช้งานจริง
-- `chatbot/lazadachat/`, `chatbot/tiktokchat/` — placeholder (ยังไม่ implement)
-- `ChatAdminWeb/` — Next.js admin console (มี AGENTS.md ของตัวเอง)
-- `docs/` — เอกสารระบบ
-- `replay_compare.py` — script replay เปรียบเทียบ bot vs Zaapi
+  - `app.py` — ไฟล์หลัก ~4,300 บรรทัด (entry: `chat()`)
+  - `llm.py` — LLM client + answer logic
+  - `product_store.py` — ดึง/ค้นสินค้าจาก MongoDB
+  - `knowledge_base.py` — KB + RAG
+  - `intent_classifier.py` — จำแนก intent (HF model)
+  - `warranty.py` — logic รับประกัน/claim flow
+  - `order_store.py` — lookup คำสั่งซื้อ
+  - `conversation_products.py` — anchor/timeline สินค้าตาม conversation
+  - `web_search.py` — web search fallback (`search_and_extract`)
+  - `embedding.py` / `persona.py` — embedding helper / persona prompt
+  - `export_mongo.py` — export (ใช้ตอน build embeddings)
+  - `scripts/build_embeddings.py` — สร้าง `exports/product_embeddings.npz`
+  - `static/index.html` — health/info page
+- `chatbot/lazadachat/`, `chatbot/tiktokchat/` — placeholder (ยังไม่ implement — อย่าเพิ่มโค้ดจริง)
+- `ChatAdminWeb/` — Next.js admin console (มี `AGENTS.md` ของตัวเอง)
+
+### Script / เครื่องมือช่วย (ไม่ใช่ core บอท)
+
+- `docs/adminbase/script/import_adminbase.py` — import `docs/adminbase/*.xlsx` เข้า MongoDB
+- `chatbot/testscript/` — script test/shadow ของบอท (import `shopeechat` ผ่าน sys.path ชี้ parent)
+  - `backfill_ai_usage.py` — backfill ข้อมูล AI usage
+  - `shadow_openrouter.py` — shadow test เทียบ OpenRouter
+  - `test_openrouter_cost.py`, `test_openrouter_full_cost.py` — วัด cost
+- `chatbot/frontendScript/replay_compare.py` — script replay เปรียบเทียบ bot vs Zaapi (backend engine ของหน้า `/replay-compare` ใน ChatAdminWeb — spawn ผ่าน API route)
+- `ChatAdminWeb/scripts/` — script ช่วย admin (TS): `bot-worker.ts`, `sync-shops.ts`, `seed-superadmin.mjs`, `generate-all-shadow.ts`, `clear-shadow-replies.ts`, `rollout-workflow.ts`, `test-workflow-*.ts`
+
+### Test (สคริปต์ทดสอบ + ผลลัพธ์)
+
+- `docs/test/` — suite ทดสอบ: `testQA2.py`, `test_200.py`, `test_comprehensive.py`, `test_all_conditions.py`, `test_flow.py`, `test_car_charger_regression.py`, `run_daily_tests.py`, `run_fresh_tests.sh`, `check_progress.py`, `diag_car_charger.py`, `analyze_qa_replays.py`, `find_qa_conversations.py`
+  - `docs/test/logs/` — log การทดสอบ (gitignore)
+  - `docs/test/results/` — ผลลัพธ์ replay/JSON (`replay_*.json`, `openrouter_shadow_*.json`) (gitignore)
+
+### ผลลัพธ์ (results/output — ไม่ใช่โค้ด)
+
+- `exports/` — export ข้อมูลใหญ่ (`ShpProducts.export.json`, `product_embeddings.npz`) — Docker copy `product_embeddings.npz` เข้า image
+- `docs/adminbase/` — ไฟล์ต้นฉบับข้อมูลสินค้า (`*.xlsx`) + `script/import_adminbase.py`
+
+### Deploy (Docker)
+
+- `docker/Dockerfile.chatbot` — build image บอท (ใช้ร่วม 3 แพลตฟอร์ม)
+- `docker-compose.yml` — คุมทุก service (อยู่ที่ root เพื่อรัน `docker compose up` ได้เลย)
+- `docker/Caddyfile` — reverse proxy + auto SSL
+- `.dockerignore` — ไฟล์ที่ไม่ copy เข้า image (ต้องอยู่ที่ build context root = repo root)
+- `.env` / `.env.example` — env จริง (ห้ามอ่าน/ห้าม commit) / ตัวอย่าง
+- `ChatAdminWeb/Dockerfile` — build image Next.js admin
+- คำสั่ง: `docker compose up -d --build` / `docker compose logs -f` / `docker compose down`
+- Service: `chatbot-shopee:8010`, `chatadmin-web:3000`, `caddy:80/443`, MongoDB รันบน host (ไม่ containerize)
+
+### Doc (เอกสารระบบ)
+
+- `docs/SRS_SSD.md` — **ไฟล์อ้างอิงหลัก** (ต้องอัปเดตทุกครั้งที่แก้ฟังก์ชัน — กฎข้อ 1)
+- `docs/schema.md` — schema DB
+- `docs/function and process.md` — อธิบายฟังก์ชัน/กระบวนการ
+- `docs/DEPLOY.md` — คู่มือ deploy Docker + Caddy (canonical)
+- `README.md` — คู่มือ MongoDB exporter
+- `ChatAdminWeb/README.md`, `ChatAdminWeb/docs/DATA_SCHEMA.md`
+
+### Plan (แผนงาน)
+
+- `docs/plans/planner.md` — Plan: Message Buffering (Debounce) สำหรับ bot-worker
+- `docs/plans/workflow-planner.md` — Plan: Workflow Engine (แบบ Zaapi Flow Builder)
+- `docs/plans/implentplanworkflow.md` — Plan: Workflow Implement (multi-branch condition)
+
+### Rule (กฎสำหรับ AI agent)
+
+- `AGENTS.md` (root) — กฎหลักของ repo นี้ (บังคับอ่าน)
+- `ChatAdminWeb/AGENTS.md` — กฎเฉพาะ Next.js 16
+
+### Waythrough log (บังคับอ่านทุกครั้ง — กฎข้อ 8)
+
+- `getoutofmywaybotkaikrook.md` — บันทึกเส้นทาง/เคสที่ผ่าน/กำลังจะทำ/ปัญหาที่เหลือ
+- `มาแล้วจ้า.md` — ไฟล์ secret deploy (ห้ามอ่านซ้ำ — อนุญาตตอนสร้างครั้งเดียว)
 
 ## กฎการแก้ไขโค้ด
 
@@ -57,6 +129,7 @@
 ### 5. คำเตือนด้านความปลอดภัย
 
 - ห้ามอ่าน `.env` ทุกชนิด
+- ห้ามอ่าน `มาแล้วจ้า.md` (ไฟล์เก็บ secret จริงสำหรับ deploy — อนุญาตเฉพาะตอนสร้างครั้งเดียว ห้ามอ่านซ้ำ)
 - ห้าม commit secret/key
 - ห้ามแก้ security policy / branch protection
 - Product DB (`dbWallet`) เป็น read-only — ห้ามเขียน
@@ -80,5 +153,5 @@
 - เป็น waythrough log — บันทึกทำอะไร แก้อะไร เคสไหนผ่านแล้ว แก้ยังไง
 - **ห้ามทำลายเคสที่เคยผ่าน** — ดูใน "เคสที่ผ่านแล้ว" ก่อนแก้
 - ก่อนทำอะไรใหม่ → เขียนใน "กำลังจะทำ" ก่อน
-- แก้เสร็จ → เขียน "วิธีแก้" + ย้ายไป "ผ่านแล้ว" + อัปเดต "กำลังจะทำ"
+- แก้เสร็จ → เขียน "วิธีแก้" + ย้ายไป "ผ่านแล้ว" + อัปเดต "กำลังจะทำ"+"วันเวลาทีแก้"
 - มีกฎเหล็ก: ห้ามบอก "แก้เสร็จ" ถ้ายังไม่ verify, บันทึก baseline ก่อนแก้, ฯลฯ

@@ -1,10 +1,10 @@
 // GET  /api/workflows — list workflows (multi-platform/shop aware)
 // POST /api/workflows — create new workflow (Flow Builder)
 //
-// ⚡ Workflow engine (แบบ Zaapi Flow Builder) — อ้างอิง workflow-planner.md
+// ⚡ Workflow engine (แบบ Zaapi Flow Builder) — อ้างอิง docs/plans/workflow-planner.md
 // Graph validation อยู่ใน workflowService.validateWorkflowGraph (service ตรวจซ้ำอีกชั้น)
 import { NextRequest } from "next/server";
-import { requireAuth, requireEditor } from "@/backend/middleware/authorize";
+import { requireAuth, requirePageEdit } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { workflowService } from "@/backend/service/workflowService";
 import type { Platform } from "@/backend/service/conversationService";
@@ -28,7 +28,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "workflow");
   if (!r.ok) return r.response;
 
   const body = await readJson<{

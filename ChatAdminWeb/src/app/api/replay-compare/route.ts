@@ -15,20 +15,21 @@ export const maxDuration = 300;
 import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error } from "@/backend/lib/http";
+import { shouldUseChatV2, shouldUseChatV3 } from "@/backend/service/systemConfigService";
 import { readFile, writeFile, readdir, stat } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
 import { spawn } from "child_process";
 
 const REPO_ROOT = process.env.REPO_ROOT || "/Users/itdev4/Documents/GitHub/ChatBotProductMS";
-const DEFAULT_FILE = "/Users/itdev4/Documents/GitHub/ChatBotProductMS/testresult/replay2.json";
-const RESULTS_DIR = "/Users/itdev4/Documents/GitHub/ChatBotProductMS/testresult";
+const DEFAULT_FILE = "/Users/itdev4/Documents/GitHub/ChatBotProductMS/docs/test/results/replay2.json";
+const RESULTS_DIR = "/Users/itdev4/Documents/GitHub/ChatBotProductMS/docs/test/results";
 
 // ─── Helpers ──────────────────────────────────────────────
 
 async function listReplayFiles(): Promise<{ path: string; size: number; mtime: string }[]> {
   const results: { path: string; size: number; mtime: string }[] = [];
-  // ดูใน testresult/ ก่อน
+  // ดูใน docs/test/results/ ก่อน
   const dirs = [RESULTS_DIR, "/tmp"];
   for (const dir of dirs) {
     if (!existsSync(dir)) continue;
@@ -115,6 +116,8 @@ async function runReplayScript(params: {
   oldest?: boolean;
   shop?: string;
   conv?: string;
+  useV2?: boolean;
+  useV3?: boolean;
 }): Promise<{ pid: number; logPath: string; savePath: string; alreadyRunning: boolean }> {
   const limit = params.limit ?? 50;
   const oldest = params.oldest ?? true;
@@ -142,7 +145,7 @@ async function runReplayScript(params: {
   }
 
   const args = [
-    "replay_compare.py",
+    "chatbot/frontendScript/replay_compare.py",
     "--limit", String(limit),
     "--quiet",
     "--save", savePath,
@@ -153,6 +156,12 @@ async function runReplayScript(params: {
   }
   if (params.conv) {
     args.push("--conv", params.conv);
+  }
+  // ⚡ chat_engine — ส่ง --v2/--v3 flag ถ้า config เลือก หรือ caller บังคับ (v3 มี priority เหนือ v2)
+  if (params.useV3) {
+    args.push("--v3");
+  } else if (params.useV2) {
+    args.push("--v2");
   }
 
   const child = spawn(".venv/bin/python", args, {
@@ -217,10 +226,15 @@ export async function POST(req: NextRequest) {
   try { body = await req.json(); } catch { /* empty */ }
 
   if (body.action === "run") {
+    // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม) — v3 มี priority เหนือ v2
+    const configUseV3 = await shouldUseChatV3();
+    const configUseV2 = !configUseV3 && await shouldUseChatV2();
     const result = await runReplayScript({
       limit: body.limit,
       oldest: body.oldest,
       shop: body.shop,
+      useV2: configUseV2,
+      useV3: configUseV3,
     });
     if (result.alreadyRunning) {
       return json({
@@ -236,9 +250,14 @@ export async function POST(req: NextRequest) {
     if (!body.conversation_id || typeof body.conversation_id !== "string") {
       return error("conversation_id is required for run_conv", 422);
     }
+    // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม) — v3 มี priority เหนือ v2
+    const configUseV3 = await shouldUseChatV3();
+    const configUseV2 = !configUseV3 && await shouldUseChatV2();
     const result = await runReplayScript({
       conv: String(body.conversation_id),
       shop: body.shop,
+      useV2: configUseV2,
+      useV3: configUseV3,
     });
     if (result.alreadyRunning) {
       return json({

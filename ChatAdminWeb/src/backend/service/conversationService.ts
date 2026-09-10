@@ -12,6 +12,8 @@ import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { logAdminEvent } from "./adminLogService";
 import { closeHistoryService } from "./closeHistoryService";
 import { safeRegexSearch } from "../lib/regexEscape";
+// ⚡ Phase 2J — admin-owned fields เก็บใน conversation_admin_meta (ไม่โดน dump ทับ)
+import { statusConversationService } from "./statusConversationService";
 
 export type Platform = "shopee" | "tiktok" | "lazada";
 // "open" = แชทเปิดอยู่ (ใหม่หรือ reopen), "closed" = แอดมินปิดแล้ว
@@ -123,26 +125,59 @@ export async function listConversations(opts: {
   status?: ConversationStatus;
   search?: string;
   limit?: number;
+  cursor?: { ts: Date; id: string };       // ⚡ compound cursor — timestamp + conversation_id (tiebreaker)
+  conversationIds?: string[];              // ⚡ filter by conversation_id (for assigned_to)
+  excludeConversationIds?: string[];       // ⚡ exclude conversation_ids (for unassigned)
 } = {}): Promise<ConversationDoc[]> {
   const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
   const filter: Record<string, unknown> = {};
   if (opts.platform) filter.platform = opts.platform;
   if (opts.shopId) filter.shop_id = opts.shopId;
   if (opts.status) filter.status = opts.status;
+  // ⚡ compound cursor — กันข้ามแชทที่มี timestamp เดียวกัน
+  //   sort: { pinned:-1, last_message_timestamp:-1, conversation_id:-1 }
+  //   cursor filter: (ts < cursor.ts) OR (ts = cursor.ts AND conversation_id < cursor.id)
+  if (opts.cursor) {
+    filter.$or = [
+      { last_message_timestamp: { $lt: opts.cursor.ts } },
+      { last_message_timestamp: opts.cursor.ts, conversation_id: { $lt: opts.cursor.id } },
+    ];
+  }
+  // ⚡ assigned_to filter — กรองใน Mongo ไม่ใช่ใน JS (กัน paginate แล้วเหลือน้อยเกิน)
+  if (opts.conversationIds && opts.conversationIds.length > 0) {
+    filter.conversation_id = { $in: opts.conversationIds };
+  }
+  if (opts.excludeConversationIds && opts.excludeConversationIds.length > 0) {
+    const existing = filter.conversation_id as Record<string, unknown> | undefined;
+    filter.conversation_id = { ...(existing || {}), $nin: opts.excludeConversationIds };
+  }
   if (opts.search) {
     // 🔒 escape regex metacharacters ป้องกัน $regex injection / ReDoS
     const safeSearch = safeRegexSearch(opts.search);
     if (safeSearch) {
-      filter.$or = [
-        { to_name: { $regex: safeSearch, $options: "i" } },
-        { last_message_text: { $regex: safeSearch, $options: "i" } },
-        { shop_name: { $regex: safeSearch, $options: "i" } },
-      ];
+      // ถ้ามี cursor $or อยู่แล้ว → ต้องใช้ $and รวม search $or
+      if (filter.$or) {
+        filter.$and = [
+          { $or: filter.$or },
+          { $or: [
+            { to_name: { $regex: safeSearch, $options: "i" } },
+            { last_message_text: { $regex: safeSearch, $options: "i" } },
+            { shop_name: { $regex: safeSearch, $options: "i" } },
+          ]},
+        ];
+        delete filter.$or;
+      } else {
+        filter.$or = [
+          { to_name: { $regex: safeSearch, $options: "i" } },
+          { last_message_text: { $regex: safeSearch, $options: "i" } },
+          { shop_name: { $regex: safeSearch, $options: "i" } },
+        ];
+      }
     }
   }
   return coll
     .find(filter)
-    .sort({ pinned: -1, last_message_timestamp: -1 })
+    .sort({ pinned: -1, last_message_timestamp: -1, conversation_id: -1 })
     .limit(opts.limit || 200)
     .toArray();
 }
@@ -153,51 +188,27 @@ export async function updateConversationStatus(
   assignedTo?: string,
   actor?: string
 ): Promise<boolean> {
-  const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
-  const update: Record<string, unknown> = { status, updated_at: new Date() };
-  if (assignedTo !== undefined) update.assigned_to = assignedTo;
-  const result = await coll.updateOne({ conversation_id: conversationId }, { $set: update });
-  if (result.modifiedCount > 0 && actor) {
-    const actionMap: Record<ConversationStatus, "conversation.open" | "conversation.handoff" | "conversation.resolve" | "conversation.close" | "conversation.status_change"> = {
-      open: "conversation.open",
-      closed: "conversation.close",
-      bot: "conversation.status_change",
-      handoff: "conversation.handoff",
-      resolved: "conversation.resolve",
-      pending: "conversation.status_change",
-    };
-    await logAdminEvent({
-      action_type: actionMap[status],
-      actor,
-      conversation_id: conversationId,
-      metadata: { new_status: status, assigned_to: assignedTo },
-    });
-  }
-  return result.modifiedCount > 0;
+  // ⚡ Phase 2J — เขียน status/assigned_to ลง meta (ไม่ใช่ conversations ที่โดน dump ทับ)
+  return statusConversationService.updateStatus(conversationId, status, assignedTo, actor);
 }
 
-export async function setConversationTopic(conversationId: string, topic: string): Promise<boolean> {
-  const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
-  const result = await coll.updateOne(
-    { conversation_id: conversationId },
-    { $set: { topic, updated_at: new Date() } }
-  );
-  return result.modifiedCount > 0;
+// ⚡ Phase 2M — เพิ่ม actor parameter เพื่อเขียน log (ใครทำอะไร)
+export async function setConversationTopic(conversationId: string, topic: string, actor?: string): Promise<boolean> {
+  // ⚡ Phase 2J — topic เก็บใน meta
+  await statusConversationService.setTopic(conversationId, topic, actor);
+  return true;
 }
 
-export async function setConversationItemIds(conversationId: string, itemIds: string[]): Promise<boolean> {
-  const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
-  const result = await coll.updateOne(
-    { conversation_id: conversationId },
-    { $set: { item_ids: itemIds, updated_at: new Date() } }
-  );
-  return result.modifiedCount > 0;
+export async function setConversationItemIds(conversationId: string, itemIds: string[], actor?: string): Promise<boolean> {
+  // ⚡ Phase 2J — item_ids เก็บใน meta
+  await statusConversationService.setItemIds(conversationId, itemIds, actor);
+  return true;
 }
 
-export async function togglePinned(conversationId: string, pinned: boolean): Promise<boolean> {
-  const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
-  const result = await coll.updateOne({ conversation_id: conversationId }, { $set: { pinned } });
-  return result.modifiedCount > 0;
+export async function togglePinned(conversationId: string, pinned: boolean, actor?: string): Promise<boolean> {
+  // ⚡ Phase 2J — pinned เก็บใน meta
+  await statusConversationService.togglePinned(conversationId, pinned, actor);
+  return true;
 }
 
 /** Bump last_message preview + timestamp, and increment unread_count unless
@@ -248,86 +259,33 @@ export async function closeConversation(opts: {
   resolution: string;
   note?: string;
 }): Promise<boolean> {
+  // ⚡ Phase 2J — ดึง shop_id/customer_id จาก conversations (dump) แต่เขียน close ลง meta
   const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
   const conv = await coll.findOne({ conversation_id: opts.conversationId });
   if (!conv) return false;
 
-  const closeCount = (conv.close_count || 0) + 1;
-  const result = await coll.updateOne(
-    { conversation_id: opts.conversationId },
-    {
-      $set: {
-        status: "closed",
-        closed_at: new Date(),
-        closed_by: opts.closedBy,
-        close_count: closeCount,
-        updated_at: new Date(),
-      },
-    }
-  );
-
-  if (result.modifiedCount > 0) {
-    await closeHistoryService.recordClose({
-      conversationId: opts.conversationId,
-      shopId: conv.shop_id,
-      customerId: conv.customer_id,
-      closedBy: opts.closedBy,
-      reason: opts.reason,
-      category: opts.category,
-      resolution: opts.resolution,
-      note: opts.note,
-    });
-    await logAdminEvent({
-      action_type: "conversation.close",
-      actor: opts.closedBy,
-      metadata: {
-        conversation_id: opts.conversationId,
-        reason: opts.reason,
-        category: opts.category,
-        close_count: closeCount,
-      },
-    });
-  }
-
-  return result.modifiedCount > 0;
+  return statusConversationService.closeConversation({
+    conversationId: opts.conversationId,
+    closedBy: opts.closedBy,
+    reason: opts.reason,
+    category: opts.category,
+    resolution: opts.resolution,
+    note: opts.note,
+    shopId: conv.shop_id,
+    customerId: conv.customer_id,
+  });
 }
 
-/** เปิดแชทใหม่ — ใช้ตอนบอทส่งต่อแอดมิน หรือ แอดมินเปิด手动 */
+/** เปิดแชทใหม่ — ใช้ตอนบอทส่งต่อแอดมิน หรือ แอดมินเปิด手动
+ *  ⚡ Phase 2N — targetStatus: "handoff" (default) หรือ "bot" (บอท reopen ตอนลูกค้าทักกลับมา)
+ */
 export async function reopenConversation(opts: {
   conversationId: string;
   reopenedBy: string; // "bot" หรือ admin_id
   reopenReason?: string;
   assignedTo?: string; // ถ้ามีการ assign ใหม่
+  targetStatus?: "handoff" | "bot";
 }): Promise<boolean> {
-  const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
-  const update: Record<string, unknown> = {
-    status: "open",
-    closed_at: null,
-    updated_at: new Date(),
-  };
-  if (opts.assignedTo !== undefined) update.assigned_to = opts.assignedTo;
-
-  const result = await coll.updateOne(
-    { conversation_id: opts.conversationId },
-    { $set: update }
-  );
-
-  if (result.modifiedCount > 0) {
-    await closeHistoryService.recordReopen({
-      conversationId: opts.conversationId,
-      reopenedBy: opts.reopenedBy,
-      reopenReason: opts.reopenReason,
-    });
-    await logAdminEvent({
-      action_type: "conversation.open",
-      actor: opts.reopenedBy,
-      metadata: {
-        conversation_id: opts.conversationId,
-        reopen_reason: opts.reopenReason,
-        assigned_to: opts.assignedTo,
-      },
-    });
-  }
-
-  return result.modifiedCount > 0;
+  // ⚡ Phase 2J — reopen เขียนลง meta
+  return statusConversationService.reopenConversation(opts);
 }

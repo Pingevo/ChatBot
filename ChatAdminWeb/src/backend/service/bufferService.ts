@@ -34,6 +34,40 @@ export interface BufferConfig {
   bufferEnabled: boolean;
   bufferWindowMs: number;
   bufferMaxMessages: number;
+  // ⚡ Phase 1E — media-aware buffer: รอนานกว่า + รับได้มากกว่าเมื่อมีรูป/วิดีโอ
+  bufferWindowMediaMs?: number;   // default = bufferWindowMs * 2
+  bufferMaxMediaMessages?: number; // default = bufferMaxMessages * 2
+}
+
+// ─── Media detection (⚡ Phase 1E) ─────────────────────────
+// ตรวจว่า message เป็นรูป/วิดีโอไหม — ใช้ raw_payload structure เดียวกับ messageMediaParser
+// ไม่ import messageMediaParser เพื่อหลีกเลี่ยง circular dependency + ตรวจแบบง่ายๆ พอ
+
+function hasMedia(rawPayload: unknown): boolean {
+  if (!rawPayload || typeof rawPayload !== "object") return false;
+  const raw = rawPayload as Record<string, unknown>;
+  // ตรวจ message_type ที่ nested หรือ top-level
+  const nested = (raw.data as Record<string, unknown> | undefined)?.content as Record<string, unknown> | undefined;
+  const msgType = (nested?.message_type as string) || (raw.message_type as string) || (raw.msg_type as string) || "";
+  return msgType === "image" || msgType === "video" || msgType === "image_with_text";
+}
+
+// ดึง image URLs จาก raw_payload (เหมือน toBotImages แต่ inline เพื่อหลีกเลี่ยง circular dep)
+function extractMediaUrls(rawPayload: unknown): string[] {
+  if (!rawPayload || typeof rawPayload !== "object") return [];
+  const raw = rawPayload as Record<string, unknown>;
+  const nested = (raw.data as Record<string, unknown> | undefined)?.content as Record<string, unknown> | undefined;
+  const inner = (nested?.content as Record<string, unknown> | undefined) || (raw.content as Record<string, unknown> | undefined) || {};
+  const msgType = (nested?.message_type as string) || (raw.message_type as string) || (raw.msg_type as string) || "";
+  if (msgType === "image" || msgType === "image_with_text") {
+    const url = (inner.image_url as string) || (((inner.image_url_list as string[]) || [])[0]);
+    return url ? [url] : [];
+  }
+  if (msgType === "video") {
+    const url = (inner.video_url as string) || "";
+    return url ? [url] : [];
+  }
+  return [];
 }
 
 // ─── In-memory timer map (per conversation) ───────────────
@@ -101,6 +135,7 @@ type ProcessMessageFn = (msg: {
   platform: Platform;
   text: string;
   raw_payload?: unknown;
+  images?: string[];  // ⚡ Phase 1F — image URLs รวมจากทุก message ใน buffer
 }) => Promise<{ status: string; detail: string }>;
 
 type MarkProcessedFn = (doc: {
@@ -132,6 +167,16 @@ export async function flushBuffer(
   const combinedText = msgs.map((m) => m.text).join(" ");
   const firstMsg = msgs[0];
 
+  // ⚡ Phase 1E/1F — รวม images จากทุก message (ไม่ใช่แค่ firstMsg)
+  //    ลูกค้าส่ง 3 รูป + พิมพ์ → บอทต้องเห็นรูปทั้ง 3
+  const allImages: string[] = [];
+  for (const m of msgs) {
+    const urls = extractMediaUrls(m.raw_payload);
+    for (const u of urls) {
+      if (!allImages.includes(u)) allImages.push(u);
+    }
+  }
+
   try {
     // ประมวลผลเป็น 1 message
     const result = await processMessage({
@@ -140,7 +185,8 @@ export async function flushBuffer(
       shop_id: firstMsg.shop_id,
       platform: firstMsg.platform,
       text: combinedText, // ข้อความรวม
-      raw_payload: firstMsg.raw_payload, // ใช้ raw_payload ตัวแรก
+      raw_payload: firstMsg.raw_payload, // ใช้ raw_payload ตัวแรก (สำหรับ trigger matching)
+      images: allImages.length > 0 ? allImages : undefined, // ⚡ ส่ง images เป็น field แยก
     });
 
     // mark ข้อความที่เหลือว่า processed (รวมในคำตอบเดียว)
@@ -215,12 +261,20 @@ export async function bufferOrProcess(
   // ดึงจำนวนข้อความที่ buffer อยู่ใน conversation นี้
   const buffered = await getBufferedMessages(convId);
 
+  // ⚡ Phase 1E — ตรวจว่ามี media (รูป/วิดีโอ) ใน buffer ไหม
+  //    ถ้ามี → ใช้ window นานกว่า + max มากกว่า (ลูกค้ามักส่งหลายรูปติดกัน)
+  const hasAnyMedia = buffered.some((m) => hasMedia(m.raw_payload));
+  const mediaWindowMs = config.bufferWindowMediaMs ?? config.bufferWindowMs * 2;
+  const mediaMaxMessages = config.bufferMaxMediaMessages ?? config.bufferMaxMessages * 2;
+  const effectiveWindowMs = hasAnyMedia ? mediaWindowMs : config.bufferWindowMs;
+  const effectiveMaxMessages = hasAnyMedia ? mediaMaxMessages : config.bufferMaxMessages;
+
   // ถ้าครบ max → flush ทันที ไม่รอ
-  if (buffered.length >= config.bufferMaxMessages) {
+  if (buffered.length >= effectiveMaxMessages) {
     return flushBuffer(convId, processMessage, markProcessed);
   }
 
-  // รีเซ็ต timer (debounce)
+  // รีเซ็ต timer (debounce) — ใช้ window ตาม media
   clearTimer(convId);
   bufferTimers.set(
     convId,
@@ -228,12 +282,12 @@ export async function bufferOrProcess(
       flushBuffer(convId, processMessage, markProcessed).catch((err) =>
         console.error(`[buffer] timer flush error for ${convId}:`, err)
       );
-    }, config.bufferWindowMs)
+    }, effectiveWindowMs)
   );
 
   return {
     status: "buffered",
-    detail: `buffered (${buffered.length} msgs, waiting ${config.bufferWindowMs}ms)`,
+    detail: `buffered (${buffered.length} msgs, ${hasAnyMedia ? "media" : "text"} window ${effectiveWindowMs}ms)`,
   };
 }
 

@@ -2,13 +2,13 @@
 // PUT — update a KB entry (general_faq only for now)
 // DELETE — delete a KB entry
 import { NextRequest } from "next/server";
-import { requireEditor } from "@/backend/middleware/authorize";
+import { requirePageEdit } from "@/backend/middleware/authorize";
 import { json, error } from "@/backend/lib/http";
 import { knowledgeBaseService } from "@/backend/service/knowledgeBaseService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "kb");
   if (!r.ok) return r.response;
   const { id } = await params;
   let body: any;
@@ -44,7 +44,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
 }
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const r = await requireEditor(req);
+  const r = await requirePageEdit(req, "kb");
   if (!r.ok) return r.response;
   const { id } = await params;
   const ok = await knowledgeBaseService.deleteKbEntry(id, r.ctx.admin.admin_id);

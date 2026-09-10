@@ -1,13 +1,13 @@
 // GET /api/admin/logs — list admin activity logs (join username/name)
 // query: action_type, since, limit
-// จำกัด: superadmin / dev เท่านั้น (admin → 403)
+// จำกัด: dev เท่านั้น (admin/superadmin → 403)
 import { NextRequest } from "next/server";
-import { requireSuperadmin } from "@/backend/middleware/authorize";
+import { requirePageEdit } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { listAdminLogsExtended } from "@/backend/service/adminLogService";
 
 export async function GET(req: NextRequest) {
-  const r = await requireSuperadmin(req);
+  const r = await requirePageEdit(req, "log");
   if (!r.ok) return r.response;
 
   const url = new URL(req.url);

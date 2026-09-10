@@ -9,6 +9,10 @@
 # ดู log: docker compose logs -f
 # หยุด: docker compose down
 # rebuild: docker compose up -d --build
+#
+# ⚠️ lazada/tiktok เป็น placeholder (ยังไม่มี app.py) — เปิดด้วย --profile lazada/tiktok
+#    แต่ container จะ crash จนกว่าจะ implement app.py จริง
+#    ค่า default รันเฉพาะ: chatbot-shopee + chatadmin-web + bot-worker + caddy
 
 services:
   # ─────────────────────────────────────────────────────────────
@@ -18,12 +22,14 @@ services:
   chatbot-shopee:
     build:
       context: .
-      dockerfile: Dockerfile.chatbot
+      dockerfile: docker/Dockerfile.chatbot
     image: chatbot-shopee:latest
     container_name: chatbot-shopee
     restart: unless-stopped
     ports:
-      - "8010:8010"
+      # เก็บ port mapping ไว้เพื่อ debug จาก host (ปิดได้ถ้าไม่ต้องการ)
+      # traffic หลักเข้าผ่าน caddy (port 80/443)
+      - "127.0.0.1:8010:8010"
     env_file:
       - .env
     environment:
@@ -49,7 +55,7 @@ services:
   chatbot-lazada:
     build:
       context: .
-      dockerfile: Dockerfile.chatbot
+      dockerfile: docker/Dockerfile.chatbot
     image: chatbot-lazada:latest
     container_name: chatbot-lazada
     restart: unless-stopped
@@ -79,7 +85,7 @@ services:
   chatbot-tiktok:
     build:
       context: .
-      dockerfile: Dockerfile.chatbot
+      dockerfile: docker/Dockerfile.chatbot
     image: chatbot-tiktok:latest
     container_name: chatbot-tiktok
     restart: unless-stopped
@@ -103,7 +109,8 @@ services:
     profiles: ["tiktok"]  # ไม่รัน default — ใช้: docker compose --profile tiktok up -d
 
   # ─────────────────────────────────────────────────────────────
-  # ChatAdminWeb — Next.js (port 3000)
+  # ChatAdminWeb — Next.js (port 3000, internal only)
+  # เข้าจากภายนอกผ่าน caddy (port 80/443)
   # ─────────────────────────────────────────────────────────────
   chatadmin-web:
     build:
@@ -112,8 +119,8 @@ services:
     image: chatadmin-web:latest
     container_name: chatadmin-web
     restart: unless-stopped
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     env_file:
       - .env.web
     environment:
@@ -124,7 +131,8 @@ services:
       - CHATBOT_BASE_URL_LAZADA=http://chatbot-lazada:8011
       - CHATBOT_BASE_URL_TIKTOK=http://chatbot-tiktok:8012
     depends_on:
-      - chatbot-shopee
+      chatbot-shopee:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -155,15 +163,43 @@ services:
       - BOT_WORKER_ENABLED=true
       - BOT_WORKER_INTERVAL_MS=2000
     depends_on:
-      - chatbot-shopee
-      - chatadmin-web
+      chatbot-shopee:
+        condition: service_healthy
+      chatadmin-web:
+        condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
       - chatbot-net
 
+  # ─────────────────────────────────────────────────────────────
+  # Caddy — reverse proxy + auto SSL (Let's Encrypt)
+  # รับ traffic ภายนอกที่ port 80/443 → ส่งต่อให้ chatadmin-web / chatbot-shopee
+  # config ที่ docker/Caddyfile — แก้ domain ที่นั่น
+  # ─────────────────────────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - chatadmin-web
+    networks:
+      - chatbot-net
+
 volumes:
   hf_cache:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
     driver: local
 
 networks:

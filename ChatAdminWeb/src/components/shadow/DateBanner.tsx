@@ -53,15 +53,26 @@ interface DateBannerProps {
   timestamp: string | Date;
   /** compact = ขนาดเล็ก */
   compact?: boolean;
+  /** ถ้าเป็นวันที่ผ่านไปแล้ว (ไม่ใช่วันนี้) → ไม่โชว์ */
+  onlyToday?: boolean;
 }
 
-export function DateBanner({ timestamp, compact = false }: DateBannerProps) {
+export function DateBanner({ timestamp, compact = false, onlyToday = false }: DateBannerProps) {
   const label = formatDateLabel(timestamp);
   const sizeCls = compact ? "text-[9px] py-0.5 px-2" : "text-[10px] py-1 px-2.5";
+
+  // ⚡ ถ้า onlyToday และไม่ใช่วันนี้ → ไม่โชว์
+  if (onlyToday && label !== "วันนี้") return null;
+
   return (
+    // ⚡ sticky top-0 — เลื่อนตามแชท
+    //    w-fit + mx-auto → กว้างแค่พอดี pill (ไม่ทับ bubble ข้างๆ)
+    //    bg-bg → ทึบพอบัง pill เก่าที่เลื่อนผ่านไปแล้ว
     <div className="flex items-center justify-center my-2 sticky top-0 z-10">
-      <span className={`${sizeCls} bg-surface-2/90 backdrop-blur-sm text-text-muted rounded-full border border-border/60 shadow-sm font-medium`}>
-        {label}
+      <span className={`bg-bg px-3 py-0.5 rounded-full`}>
+        <span className={`${sizeCls} bg-surface-2 text-text-muted rounded-full border border-border shadow-sm font-medium whitespace-nowrap inline-block`}>
+          {label}
+        </span>
       </span>
     </div>
   );

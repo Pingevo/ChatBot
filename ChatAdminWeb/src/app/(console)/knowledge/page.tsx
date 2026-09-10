@@ -19,7 +19,7 @@ import {
   ArrowDownUp,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
-import { canEdit } from "@/lib/roles";
+import { canEditPage } from "@/lib/roles";
 import { kbService, type KbRow } from "@/lib/services";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
@@ -60,7 +60,7 @@ const emptyForm: FormState = {
 
 export default function KnowledgePage() {
   const { user } = useAuth();
-  const editable = canEdit(user);
+  const editable = canEditPage(user, "kb");
   const { catchError } = useToastError();
   const [rows, setRows] = useState<KbRow[]>([]);
   const [total, setTotal] = useState(0);

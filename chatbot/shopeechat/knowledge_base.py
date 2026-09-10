@@ -233,12 +233,68 @@ def detect_topic(message: str) -> str | None:
 # ---- model detection (จากข้อความลูกค้า) ----
 
 
+# ⚡ Phase 3 — target device keywords
+# แบรนด์/รุ่นอุปกรณ์ที่ลูกค้ามักถามว่า "ใช้กับ ... ได้ไหม" หรือ "... อันไหน"
+# ไม่ใช่ชื่อสินค้าในร้าน → ไม่ควรถูกจับเป็น model keyword
+# (เช่น "ไอโฟน 11โปรแม๊กอันไหนคับ" → "11โปรแม๊ก" เป็น target device ไม่ใช่ model สินค้า)
+_TARGET_DEVICE_KWS = {
+    # Apple
+    "iphone", "ไอโฟน", "ipad", "ไอแพด", "airpods", "apple", "แอปเปิล", "แอปเปิ้ล",
+    "โปรแม็ก", "โปรแม๊ก", "promax", "โปร", "pro", "mini", "มินิ", "พลัส", "plus",
+    "11", "12", "13", "14", "15", "16", "17",  # รุ่น iPhone เฉยๆ (ตัวเลขล้วน)
+    # Samsung
+    "samsung", "ซัมซุง", "galaxy", "กาแล็คซี่", "ultra", "อัลตร้า",
+    # Xiaomi
+    "xiaomi", "หมี่", "redmi", "poco",
+    # อื่นๆ
+    "huawei", "oppo", "vivo", "realme", "pixel", "oneplus",
+    "note", "edge", "fe", "se",
+}
+
+
+def is_target_device_kw(kw: str) -> bool:
+    """ตรวจว่า token นี้เป็นชื่ออุปกรณ์ (target device) ไม่ใช่ model สินค้าในร้าน.
+
+    ใช้ใน CONV-ACTIVE check เพื่อแยก "11โปรแม๊ก" (target device)
+    ออกจาก "AL870" (model สินค้าในร้าน) — กันไม่ให้ target device
+    ถูกจับเป็น model keyword แล้วข้าม CONV-ACTIVE.
+
+    Called by:
+    - app.py CONV-ACTIVE block (บรรทัด ~2892) — กรอง target device ออกจาก _cur_model_kw
+    - extract_model_keywords (ในไฟล์นี้) — กรอง target device ออกจาก candidates
+    """
+    low = kw.lower().strip()
+    if low in _TARGET_DEVICE_KWS:
+        return True
+    # รุ่น iPhone เฉยๆ เช่น "11โปรแม็ก", "15พลัส", "13มินิ", "14pro"
+    # ⚡ Phase 3 — ใช้ search แทน fullmatch เพื่อจับ token ที่มี target device อยู่ข้างใน
+    # เช่น "11โปรแม๊กอันไหนคับ" (token เดียวไม่มี space แยก) ก็ถือว่าเป็น target device
+    if re.search(r"\d+\s*(?:โปรแม็ก|โปรแม๊ก|promax|pro\b|mini|มินิ|พลัส|plus|อัลตร้า|ultra)", low):
+        return True
+    # "iphone" + ตัวเลข เช่น "iphone11", "iphone15promax", "ไอโฟน11โปรแม๊กอันไหนคับ"
+    if re.search(r"iphone\s*\d+", low):
+        return True
+    # ⚡ "ไอโฟน" (Thai) + ตัวเลข เช่น "ไอโฟน13", "ไอโฟน13คะ", "ไอโฟน15โปรแม็ก"
+    # (regex ด้านบนจับแค่ "iphone" ภาษาอังกฤษ ไม่จับ "ไอโฟน" ภาษาไทย)
+    if re.search(r"ไอโฟน\s*\d+", low):
+        return True
+    # ⚡ ตัวเลขรุ่น iPhone (11-17) + คำลงท้ายไทย เช่น "13คะ", "15ครับ", "17นะ"
+    # → ถือว่าเป็น target device (ลูกค้าพิมพ์เลขรุ่นติดกับคำสุภาพ/คำเสริม)
+    # แต่ไม่จับตัวอักษรอังกฤษ เพราะ "A13" อาจเป็น model สินค้า
+    if re.match(r"^1[1-7][\u0E00-\u0E7F]+$", low):
+        return True
+    return False
+
+
 def extract_model_keywords(message: str) -> list[str]:
     """สกัดคำที่น่าจะเป็นชื่อรุ่นจากข้อความ.
 
     ใช้ regex หา pattern ที่ดูเหมือนชื่อรุ่น:
     - มีตัวเลข + ตัวอักษร (เช่น Redmi 9, Note 11, A52)
     - มีคำที่เป็นแบรนด์/รุ่นที่รู้จัก
+
+    ⚡ Phase 3 — กรอง target device ออกจาก candidates
+    (เช่น "11โปรแม๊ก" เป็นชื่ออุปกรณ์ ไม่ใช่ model สินค้าในร้าน)
     """
     # ลบคำที่ไม่ใช่ชื่อรุ่น
     stop_words = {"งบ", "บาท", "ราคา", "มีไหม", "มีไหมครับ", "มีไหมคะ", "แนะนำ", "หา", "ดู", "ให้หน่อย",
@@ -252,7 +308,13 @@ def extract_model_keywords(message: str) -> list[str]:
                   "วิธี", "ตั้งค่า", "ติดตั้ง", "ใช้งาน", "เชื่อมต่อ", "การเชื่อมต่อ",
                   "รีวิว", "review", "รูป", "ภาพ", "วิดีโอ", "วิดิโอ", "video",
                   "สอบถาม", "ถาม", "อยาก", "สนใจ", "ขอ", "ขอดู", "ขอรายละเอียด",
-                  "กี่", "ชิ้น", "ตัว", "อัน", "ชุด", "พร้อม", "ส่ง", "เก็บ", "ดีลิเวอรี"}
+                  "กี่", "ชิ้น", "ตัว", "อัน", "ชุด", "พร้อม", "ส่ง", "เก็บ", "ดีลิเวอรี",
+                  # ⚡ version/region words — ไม่ใช่ชื่อรุ่น (กัน "Version" ดึง TP-Link "Global Version")
+                  "version", "global", "china", "จีน", "ไทย", "cn", "us", "eu",
+                  "korea", "เกาหลี", "ฮ่องกง", "hongkong", "hong", "kong",
+                  "international", "local", "origin", "original", "authentic",
+                  "ของ", "ของจริง", "แท้", "ลอก", "ของปลอม", "ปลอม", "รุ่น",
+                  "อยากได้ของ", "ของจีน", "ของไทย", "ของglobal"}
 
     # ถ้าข้อความมีคำว่างบ/บาท/ราคา → ตัดตัวเลขล้วนออก (เพราะน่าจะเป็นงบประมาณ ไม่ใช่ชื่อรุ่น)
     low_msg = message.lower()
@@ -273,6 +335,10 @@ def extract_model_keywords(message: str) -> list[str]:
         # ถ้ามีตัวเลขหรือตัวอักษรผสม → น่าจะเป็นรุ่น
         if re.search(r"[A-Za-z0-9]", t) and len(t) >= 2:
             candidates.append(t)
+
+    # ⚡ Phase 3 — กรอง target device ออกจาก candidates
+    # "11โปรแม๊ก" เป็นชื่ออุปกรณ์ ไม่ใช่ model สินค้าในร้าน
+    candidates = [c for c in candidates if not is_target_device_kw(c)]
 
     return candidates
 

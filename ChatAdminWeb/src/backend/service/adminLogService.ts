@@ -43,6 +43,7 @@ export type AdminActionType =
   | "config.shop_toggle"
   | "config.test_integration"
   | "admin_config.update"
+  | "admin.maintenance.clear_status"
   | "bot.buffer_flush"
   | "bot.buffer_recover"
   // ⚡ Workflow engine (แบบ Zaapi Flow Builder)
@@ -64,11 +65,14 @@ export type AdminActionType =
   | "workflow.wait_no_reply"
   | "shadow_reply.generate"
   | "shadow_reply.generate_conversation"
+  | "shadow_reply.batch_roll"
   | "shadow_reply.rate"
   | "shadow_reply.clear_all"
   | "shadow_reply.delete"
+  | "shadow_reply.delete_conversation"
   | "shadow_reply.restore"
   | "shadow_reply.restore_all"
+  | "shadow_reply.restore_conversation"
   | "assignment.platform_team_add"
   | "assignment.platform_team_remove"
   | "assignment.mode_change"
@@ -99,14 +103,32 @@ export type AdminActionType =
   // Shadow inbox — bot vs zaapi comparison (never sent to platform)
   | "shadow_reply.generate"
   | "shadow_reply.generate_conversation"
+  | "shadow_reply.batch_roll"
   | "shadow_reply.rate"
   | "shadow_reply.delete"
+  | "shadow_reply.delete_conversation"
   | "shadow_reply.clear_all"
   | "shadow_reply.restore"
   | "shadow_reply.restore_all"
+  | "shadow_reply.restore_conversation"
   | "test_chat.rate"
   | "test_assignment.rate_message"
   | "test_assignment.rate_conversation"
+  | "test_assignment.replay"
+  | "test_assignment.batch_roll"
+  | "test_assignment.soft_delete"
+  | "test_assignment.restore"
+  | "test_assignment.batch_roll"
+  | "test_assignment.soft_delete"
+  | "test_assignment.restore"
+  // Live assignment — จ่ายงานจริง + admin reply + close + reopen
+  | "live_assignment.batch_replay"
+  | "live_assignment.admin_reply"
+  | "live_assignment.close_chat"
+  | "live_assignment.reopen_process"
+  // Phase 3B-1 — chat annotations (markup dot + note)
+  | "chat_annotation.upsert"
+  | "chat_annotation.delete"
   // Phase 3 — per-shop bot persona management
   | "shop_persona.create"
   | "shop_persona.update"
@@ -118,7 +140,12 @@ export type AdminActionType =
   | "shop_settings.delete"
   // Chat accept/pause — admin เปิด/ปิดรับแชท
   | "chat_accept.start"
-  | "chat_accept.stop";
+  | "chat_accept.stop"
+  // ⚡ Phase 2M — conversation metadata changes (ใครทำอะไร)
+  | "conversation.set_topic"
+  | "conversation.set_item_ids"
+  | "conversation.pin"
+  | "conversation.unpin";
 
 export interface AdminLogDoc extends Document {
   admin_id: string;
@@ -267,7 +294,7 @@ export async function listAdminLogsExtended(opts: {
     { $limit: opts.limit || 200 },
     {
       $lookup: {
-        from: "admins",
+        from: COLLECTIONS.admins,
         localField: "admin_id",
         foreignField: "admin_id",
         as: "_admin",

@@ -5,10 +5,11 @@
 "use client";
 import { useState } from "react";
 import { Badge } from "@/components/ui/Badge";
+import { Avatar } from "@/components/ui/Avatar";
 import {
   MessageSquare, Bot, FlaskConical, Trash2,
   CheckCircle2, XCircle, AlertTriangle,
-  ShieldCheck, Zap, Clock, Cpu, User,
+  ShieldCheck, Zap, Clock, Cpu,
 } from "lucide-react";
 import type { Platform, ChatMessage, ProductCard } from "@/lib/types";
 import { MessageContent } from "@/components/chat/MessageContent";
@@ -48,6 +49,9 @@ export interface ShadowReplyDetail {
   updated_at: string;
   // enriched — ข้อความ inbound พร้อม media (จาก GET /api/shadow-inbox/:id)
   inbound_message?: ChatMessage;
+  // ⚡ customer info สำหรับแสดง avatar
+  customer_name?: string;
+  customer_avatar?: string;
 }
 
 interface Props {
@@ -140,9 +144,7 @@ export function ShadowReplyPanel({ reply, onRate, onStar, onComment, onDelete, r
             <DateBanner timestamp={reply.inbound_message?.timestamp || reply.created_at} />
             {/* Customer message */}
             <div className="flex gap-2">
-              <div className="w-7 h-7 rounded-full bg-surface-2 border border-border flex items-center justify-center shrink-0">
-                <User size={13} className="text-text-muted" />
-              </div>
+              <Avatar name={reply.customer_name || "User"} src={reply.customer_avatar} size={28} className="shrink-0" />
               <div className="flex-1 min-w-0">
                 <div className="text-[10px] text-text-subtle mb-0.5">ลูกค้า · {formatDateTimeLabel(reply.inbound_message?.timestamp || reply.created_at)}</div>
                 <div className="bg-surface border border-border rounded-lg rounded-tl-sm px-3 py-2">
@@ -197,9 +199,7 @@ export function ShadowReplyPanel({ reply, onRate, onStar, onComment, onDelete, r
             <DateBanner timestamp={reply.inbound_message?.timestamp || reply.created_at} />
             {/* Customer message (เดียวกัน) */}
             <div className="flex gap-2">
-              <div className="w-7 h-7 rounded-full bg-surface-2 border border-border flex items-center justify-center shrink-0">
-                <User size={13} className="text-text-muted" />
-              </div>
+              <Avatar name={reply.customer_name || "User"} src={reply.customer_avatar} size={28} className="shrink-0" />
               <div className="flex-1 min-w-0">
                 <div className="text-[10px] text-text-subtle mb-0.5">ลูกค้า · {formatDateTimeLabel(reply.inbound_message?.timestamp || reply.created_at)}</div>
                 <div className="bg-surface border border-border rounded-lg rounded-tl-sm px-3 py-2">

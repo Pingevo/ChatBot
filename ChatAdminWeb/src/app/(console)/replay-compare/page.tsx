@@ -1,13 +1,15 @@
 "use client";
 // Replay Compare — เปรียบเทียบ Bot เรา vs Zaapi/Admin จาก replay_compare.py
 // Layout 3 คอลัมน์: list | chat comparison | analysis summary
-import { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Loading } from "@/components/ui/Loading";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { MessageContent } from "@/components/chat/MessageContent";
+import { DateBanner, dayKey, formatDateLabel } from "@/components/shadow/DateBanner";
+import { imageViewer } from "@/components/ui/ImageViewer";
 import { splitAnswerSegments } from "@/lib/answerSegments";
 import { toast, useToastError } from "@/components/ui/Toast";
 import {
@@ -68,6 +70,7 @@ interface QaItem {
   status: string;
   // user message rich media
   user_message_type?: string;
+  user_media?: { type: string; url?: string; thumb_url?: string };
   user_parsed?: {
     message_type: string;
     text: string;
@@ -191,7 +194,10 @@ function timeAgo(iso?: string): string {
   if (m < 60) return `${m} นาที`;
   const h = Math.floor(m / 60);
   if (h < 24) return `${h} ชม.`;
-  return `${Math.floor(h / 24)} วัน`;
+  const d = Math.floor(h / 24);
+  // ⚡ เกิน 7 วัน → แสดงวันที่ ภายใน 7 วัน → แสดงจำนวนวัน
+  if (d > 7) return formatDateLabel(iso);
+  return `${d} วัน`;
 }
 
 function fmtSize(bytes: number): string {
@@ -994,29 +1000,36 @@ export default function ReplayComparePage() {
                   <div className="text-xs text-gray-400 mb-2">
                     {previewMessages.length} ข้อความ · ตรวจดูก่อน แล้วกด "รัน Replay Compare"
                   </div>
-                  {previewMessages.map((m, i) => (
-                    <div
-                      key={i}
-                      className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}
-                    >
+                  {previewMessages.map((m, i) => {
+                    // ⚡ Date separator — แทรก DateBanner เมื่อวันเปลี่ยน (เหมือน LINE)
+                    const dk = dayKey(m.timestamp);
+                    const showDate = i === 0 || dk !== dayKey(previewMessages[i - 1].timestamp);
+                    return (
+                    <React.Fragment key={i}>
+                      {showDate && <DateBanner timestamp={m.timestamp} compact onlyToday />}
                       <div
-                        className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
-                          m.role === "user"
-                            ? "bg-blue-100 text-gray-900"
-                            : "bg-green-600 text-white"
-                        }`}
+                        className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}
                       >
-                        <div className={`text-[10px] mb-0.5 ${m.role === "user" ? "text-gray-500" : "text-green-100"}`}>
-                          {m.role === "user" ? (
-                            <><User className="w-3 h-3 inline mr-1" />ลูกค้า</>
-                          ) : (
-                            <><Bot className="w-3 h-3 inline mr-1" />{m.admin_name || m.source || "บอท/แอดมิน"}</>
-                          )}
+                        <div
+                          className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
+                            m.role === "user"
+                              ? "bg-blue-100 text-gray-900"
+                              : "bg-green-600 text-white"
+                          }`}
+                        >
+                          <div className={`text-[10px] mb-0.5 ${m.role === "user" ? "text-gray-500" : "text-green-100"}`}>
+                            {m.role === "user" ? (
+                              <><User className="w-3 h-3 inline mr-1" />ลูกค้า</>
+                            ) : (
+                              <><Bot className="w-3 h-3 inline mr-1" />{m.admin_name || m.source || "บอท/แอดมิน"}</>
+                            )}
+                          </div>
+                          <MessageContent msg={m} variant={m.role === "user" ? "user" : "out"} />
                         </div>
-                        <MessageContent msg={m} variant={m.role === "user" ? "user" : "out"} />
                       </div>
-                    </div>
-                  ))}
+                    </React.Fragment>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1115,6 +1128,36 @@ export default function ReplayComparePage() {
                           )}
                         </div>
                         <div className="text-sm whitespace-pre-wrap">{selectedQa.user_text}</div>
+                        {/* ⚡ Phase 1F — แสดงรูป/วิดีโอจริงถ้ามี user_media */}
+                        {selectedQa.user_media?.url && (
+                          <div className="mt-2">
+                            {selectedQa.user_media.type === "video" ? (
+                              <div
+                                className="relative cursor-pointer rounded-lg overflow-hidden group inline-block"
+                                onClick={() => imageViewer.show(selectedQa.user_media!.url!, { type: "video", alt: "วิดีโอ" })}
+                              >
+                                <video
+                                  src={selectedQa.user_media.url}
+                                  poster={selectedQa.user_media.thumb_url}
+                                  className="rounded-lg max-w-[240px] max-h-[240px]"
+                                  preload="metadata"
+                                />
+                                <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                                  <span className="text-white text-xs bg-black/60 px-2 py-1 rounded">▶ กดดู</span>
+                                </div>
+                              </div>
+                            ) : (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={selectedQa.user_media.url}
+                                alt="รูปที่ลูกค้าส่ง"
+                                className="rounded-lg max-w-[240px] max-h-[240px] object-cover cursor-pointer hover:opacity-80 transition-opacity"
+                                loading="lazy"
+                                onClick={() => imageViewer.show(selectedQa.user_media!.url!, { type: "image", alt: "รูปที่ลูกค้าส่ง" })}
+                              />
+                            )}
+                          </div>
+                        )}
                         {/* ⚡ แสดง product card จริง (รูป/ชื่อ/ราคา) ถ้ามี user_products จาก replay_compare.py */}
                         {selectedQa.user_products && selectedQa.user_products.length > 0 && (
                           <div className="mt-2 space-y-2">

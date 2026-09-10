@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useCallback, Fragment } from "react";
+import { useState, useEffect, useCallback, Fragment, useMemo } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -9,13 +9,30 @@ import {
   Users, RefreshCw, Settings,
   MessageSquare, AlertCircle, Activity, Store, Globe,
   Clock, PauseCircle, PlayCircle, ChevronDown, ChevronRight,
+  Calendar, TrendingUp, CheckCircle, Inbox, Send,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
-import { canManage } from "@/lib/roles";
+import { canEditPage } from "@/lib/roles";
 import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
+import { UnifiedDateRangePicker, rangeToParams, type DateRangeValue } from "@/components/ui/UnifiedDateRangePicker";
 import type { Platform } from "@/lib/types";
+
+interface AgentShopDetail {
+  shop_id: string;
+  shopname: string;
+  platform: string;
+}
+
+interface AgentHistory {
+  assigned: number;
+  closed: number;
+  reopened: number;
+  handoff: number;
+  replied: number;
+  resolved: number;
+}
 
 interface AgentRow {
   admin_id: string;
@@ -24,8 +41,11 @@ interface AgentRow {
   role: "superadmin" | "admin" | "dev";
   active: boolean;
   is_active_agent: boolean;
-  workload: { open: number; bot: number; handoff: number; pending: number };
+  workload: { all: number; active: number; closed: number };
   assigned_shops: string[];
+  assigned_shops_detail?: AgentShopDetail[];
+  assigned_platforms?: string[];
+  history?: AgentHistory;
 }
 
 interface TeamResponse {
@@ -35,6 +55,7 @@ interface TeamResponse {
   active_agents: number;
   total_open_conversations: number;
   unassigned: number;
+  date_range?: { start: string | null; end: string | null; range: string };
 }
 
 type AssignmentMode = "equal_global" | "equal_per_shop" | "equal_per_platform";
@@ -93,7 +114,7 @@ type Tab = "overview" | "shop-team" | "platform-team";
 
 export default function TeamPage() {
   const { user } = useAuth();
-  const editable = canManage(user); // superadmin or dev only — admin is read-only
+  const editable = canEditPage(user, "team"); // superadmin or dev only — admin is read-only
   const { catchError } = useToastError();
   const [data, setData] = useState<TeamResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -120,17 +141,26 @@ export default function TeamPage() {
   const [chatStatus, setChatStatus] = useState<ChatStatusRow[]>([]);
   const [chatStatusLoading, setChatStatusLoading] = useState(false);
 
+  // ⚡ date range สำหรับ historical stats
+  const [dateRange, setDateRange] = useState<DateRangeValue>({
+    preset: "daily",
+    startDate: null,
+    endDate: null,
+  });
+
+  const dateParams = useMemo(() => rangeToParams(dateRange), [dateRange]);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await api().get<TeamResponse>("/team");
+      const r = await api().get<TeamResponse>("/team", { params: dateParams });
       setData(r.data);
     } catch {
       setData(null);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [dateParams]);
 
   const loadShopTeam = useCallback(async () => {
     setShopTeamLoading(true);
@@ -182,6 +212,13 @@ export default function TeamPage() {
     loadChatStatus();
   }, [load, loadChatStatus]);
 
+  // ⚡ โหลด shops/shopTeam/platformTeam ตอน mount เสมอ (แก้ expand bug ใน overview tab)
+  useEffect(() => {
+    loadShopTeam();
+    loadPlatformTeam();
+  }, [loadShopTeam, loadPlatformTeam]);
+
+  // ⚡ รีเฟรชข้อมูลตอนสลับ tab (เพื่อให้ tab shop-team/platform-team มีข้อมูลสด)
   useEffect(() => {
     if (tab === "shop-team") loadShopTeam();
     if (tab === "platform-team") loadPlatformTeam();
@@ -330,7 +367,7 @@ export default function TeamPage() {
 
   const sortedAgents = [...data.agents].sort((a, b) => {
     if (a.is_active_agent !== b.is_active_agent) return a.is_active_agent ? -1 : 1;
-    return b.workload.open - a.workload.open;
+    return b.workload.active - a.workload.active;
   });
 
   const selectedShop = shops.find((s) => s.shop_id === selectedShopId);
@@ -357,14 +394,17 @@ export default function TeamPage() {
               </p>
             </div>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => { load(); loadChatStatus(); }}
-            disabled={loading || chatStatusLoading}
-          >
-            <RefreshCw size={14} className={loading || chatStatusLoading ? "animate-spin" : ""} /> รีเฟรช
-          </Button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <UnifiedDateRangePicker value={dateRange} onChange={setDateRange} />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => { load(); loadChatStatus(); }}
+              disabled={loading || chatStatusLoading}
+            >
+              <RefreshCw size={14} className={loading || chatStatusLoading ? "animate-spin" : ""} /> รีเฟรช
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -492,10 +532,9 @@ export default function TeamPage() {
                       <th className="text-center px-4 py-2.5 font-medium text-text-muted text-xs">สถานะ</th>
                       <th className="text-center px-4 py-2.5 font-medium text-text-muted text-xs">รับแชท</th>
                       <th className="text-left px-4 py-2.5 font-medium text-text-muted text-xs">เวลาวันนี้</th>
-                      <th className="text-center px-4 py-2.5 font-medium text-text-muted text-xs">งานเปิด</th>
-                      <th className="text-center px-4 py-2.5 font-medium text-text-muted text-xs">Bot</th>
-                      <th className="text-center px-4 py-2.5 font-medium text-text-muted text-xs">Handoff</th>
-                      <th className="text-center px-4 py-2.5 font-medium text-text-muted text-xs">Pending</th>
+                      <th className="text-center px-4 py-2.5 font-medium text-text-muted text-xs">ทั้งหมด</th>
+                      <th className="text-center px-4 py-2.5 font-medium text-text-muted text-xs">เปิดอยู่</th>
+                      <th className="text-center px-4 py-2.5 font-medium text-text-muted text-xs">ปิดแล้ว</th>
                       <th className="text-left px-4 py-2.5 font-medium text-text-muted text-xs">ร้านที่ดูแล</th>
                     </tr>
                   </thead>
@@ -504,14 +543,20 @@ export default function TeamPage() {
                       const st = statusOf(a.admin_id);
                       const accepting = st?.current_state === "accepting";
                       const isExpanded = expandedAgent === a.admin_id;
-                      // ร้านที่ agent นี้ดูแล (จาก shopTeam)
-                      const agentShops = shops.filter((s) =>
-                        shopTeam.some((r) => r.shop_id === s.shop_id && r.admin_id === a.admin_id && r.is_active)
-                      );
-                      // แพลตฟอร์มที่ agent นี้ดูแล (จาก platformTeam)
-                      const agentPlatforms = platforms.filter((p) =>
-                        platformTeam.some((r) => r.platform === p.value && r.admin_id === a.admin_id && r.is_active)
-                      );
+                      // ⚡ ใช้ข้อมูลจาก API โดยตรง (assigned_shops_detail + assigned_platforms)
+                      //    fallback ไป shopTeam/platformTeam state ถ้า API ไม่ส่งมา
+                      const agentShops = a.assigned_shops_detail && a.assigned_shops_detail.length > 0
+                        ? a.assigned_shops_detail
+                        : shops.filter((s) =>
+                            shopTeam.some((r) => r.shop_id === s.shop_id && r.admin_id === a.admin_id && r.is_active)
+                          ).map((s) => ({ shop_id: s.shop_id, shopname: s.shopname, platform: s.platform }));
+                      const agentPlatformValues = a.assigned_platforms && a.assigned_platforms.length > 0
+                        ? a.assigned_platforms
+                        : platformTeam
+                            .filter((r) => r.admin_id === a.admin_id && r.is_active)
+                            .map((r) => r.platform);
+                      const agentPlatforms = platforms.filter((p) => agentPlatformValues.includes(p.value));
+                      const hist = a.history;
                       return (
                         <Fragment key={`${a.admin_id}-${i}`}>
                           <tr
@@ -567,14 +612,13 @@ export default function TeamPage() {
                               ) : <span className="text-[11px] text-text-subtle">—</span>}
                             </td>
                             <td className="px-4 py-3 text-center">
-                              <span className={`font-semibold ${a.workload.open > 0 ? "text-text" : "text-text-subtle"}`}>{a.workload.open}</span>
-                            </td>
-                            <td className="px-4 py-3 text-center text-text-muted">{a.workload.bot}</td>
-                            <td className="px-4 py-3 text-center">
-                              {a.workload.handoff > 0 ? <span className="text-vibrant-coral font-medium">{a.workload.handoff}</span> : <span className="text-text-subtle">0</span>}
+                              <span className={`font-semibold ${a.workload.all > 0 ? "text-text" : "text-text-subtle"}`}>{a.workload.all}</span>
                             </td>
                             <td className="px-4 py-3 text-center">
-                              {a.workload.pending > 0 ? <span className="text-yellow-500 font-medium">{a.workload.pending}</span> : <span className="text-text-subtle">0</span>}
+                              {a.workload.active > 0 ? <span className="text-vibrant-coral font-medium">{a.workload.active}</span> : <span className="text-text-subtle">0</span>}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              {a.workload.closed > 0 ? <span className="text-text-muted font-medium">{a.workload.closed}</span> : <span className="text-text-subtle">0</span>}
                             </td>
                             <td className="px-4 py-3">
                               {a.assigned_shops.length > 0 ? (
@@ -589,54 +633,78 @@ export default function TeamPage() {
                           </tr>
                           {isExpanded && (
                             <tr className="bg-surface-2/40">
-                              <td colSpan={10} className="px-4 py-4">
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 ml-6">
-                                  {/* ร้านที่ดูแล */}
-                                  <div>
-                                    <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-text-muted">
-                                      <Store size={12} /> ร้านที่ดูแล ({agentShops.length})
+                              <td colSpan={9} className="px-4 py-4">
+                                <div className="ml-6 space-y-4">
+                                  {/* ⚡ Historical stats ตาม date range */}
+                                  {hist && (
+                                    <div className="bg-surface rounded-lg border border-border p-3">
+                                      <div className="flex items-center gap-1.5 mb-2.5 text-xs font-medium text-text-muted">
+                                        <TrendingUp size={12} />
+                                        สถิติตามช่วงเวลาที่เลือก
+                                        <span className="text-text-subtle font-normal">
+                                          ({data?.date_range?.start ? new Date(data.date_range.start).toLocaleDateString("th-TH", { day: "2-digit", month: "short" }) : "—"}
+                                          {data?.date_range?.end ? ` - ${new Date(data.date_range.end).toLocaleDateString("th-TH", { day: "2-digit", month: "short" })}` : ""})
+                                        </span>
+                                      </div>
+                                      <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
+                                        <HistStat icon={Inbox} label="รับงาน" value={hist.assigned} tone="brand" />
+                                        <HistStat icon={Send} label="ตอบ" value={hist.replied} tone="neutral" />
+                                        <HistStat icon={MessageSquare} label="ส่งต่อ" value={hist.handoff} tone="coral" />
+                                        <HistStat icon={CheckCircle} label="ปิด" value={hist.closed} tone="neutral" />
+                                        <HistStat icon={Activity} label="เปิดใหม่" value={hist.reopened} tone="neutral" />
+                                        <HistStat icon={CheckCircle} label="resolve" value={hist.resolved} tone="brand" />
+                                      </div>
                                     </div>
-                                    {agentShops.length > 0 ? (
-                                      <div className="flex flex-wrap gap-1.5">
-                                        {agentShops.map((s, si) => {
-                                          const pf = platforms.find((p) => p.value === s.platform);
-                                          return (
+                                  )}
+
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    {/* ร้านที่ดูแล */}
+                                    <div>
+                                      <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-text-muted">
+                                        <Store size={12} /> ร้านที่ดูแล ({agentShops.length})
+                                      </div>
+                                      {agentShops.length > 0 ? (
+                                        <div className="flex flex-wrap gap-1.5">
+                                          {agentShops.map((s, si) => {
+                                            const pf = platforms.find((p) => p.value === s.platform);
+                                            return (
+                                              <span
+                                                key={`exp-shop-${a.admin_id}-${si}`}
+                                                className="inline-flex items-center gap-1.5 text-[11px] bg-surface border border-border rounded-full px-2 py-1"
+                                              >
+                                                <span className="w-1.5 h-1.5 rounded-full" style={{ background: pf?.color || "#888" }} />
+                                                <span className="text-text">{s.shopname}</span>
+                                                <span className="text-text-subtle capitalize">· {s.platform}</span>
+                                              </span>
+                                            );
+                                          })}
+                                        </div>
+                                      ) : (
+                                        <div className="text-[11px] text-text-subtle">ไม่ได้ดูแลร้านใด (ใช้โหมด Global)</div>
+                                      )}
+                                    </div>
+
+                                    {/* แพลตฟอร์มที่ดูแล */}
+                                    <div>
+                                      <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-text-muted">
+                                        <Globe size={12} /> แพลตฟอร์มที่ดูแล ({agentPlatforms.length})
+                                      </div>
+                                      {agentPlatforms.length > 0 ? (
+                                        <div className="flex flex-wrap gap-1.5">
+                                          {agentPlatforms.map((p) => (
                                             <span
-                                              key={`exp-shop-${a.admin_id}-${si}`}
+                                              key={`exp-pf-${a.admin_id}-${p.value}`}
                                               className="inline-flex items-center gap-1.5 text-[11px] bg-surface border border-border rounded-full px-2 py-1"
                                             >
-                                              <span className="w-1.5 h-1.5 rounded-full" style={{ background: pf?.color || "#888" }} />
-                                              <span className="text-text">{s.shopname}</span>
-                                              <span className="text-text-subtle capitalize">· {s.platform}</span>
+                                              <span className="w-1.5 h-1.5 rounded-full" style={{ background: p.color }} />
+                                              <span className="text-text">{p.label}</span>
                                             </span>
-                                          );
-                                        })}
-                                      </div>
-                                    ) : (
-                                      <div className="text-[11px] text-text-subtle">ไม่ได้ดูแลร้านใด (ใช้โหมด Global)</div>
-                                    )}
-                                  </div>
-
-                                  {/* แพลตฟอร์มที่ดูแล */}
-                                  <div>
-                                    <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-text-muted">
-                                      <Globe size={12} /> แพลตฟอร์มที่ดูแล ({agentPlatforms.length})
+                                          ))}
+                                        </div>
+                                      ) : (
+                                        <div className="text-[11px] text-text-subtle">ไม่ได้ดูแลแพลตฟอร์มใดโดยเฉพาะ</div>
+                                      )}
                                     </div>
-                                    {agentPlatforms.length > 0 ? (
-                                      <div className="flex flex-wrap gap-1.5">
-                                        {agentPlatforms.map((p) => (
-                                          <span
-                                            key={`exp-pf-${a.admin_id}-${p.value}`}
-                                            className="inline-flex items-center gap-1.5 text-[11px] bg-surface border border-border rounded-full px-2 py-1"
-                                          >
-                                            <span className="w-1.5 h-1.5 rounded-full" style={{ background: p.color }} />
-                                            <span className="text-text">{p.label}</span>
-                                          </span>
-                                        ))}
-                                      </div>
-                                    ) : (
-                                      <div className="text-[11px] text-text-subtle">ไม่ได้ดูแลแพลตฟอร์มใดโดยเฉพาะ</div>
-                                    )}
                                   </div>
                                 </div>
                               </td>
@@ -798,7 +866,7 @@ export default function TeamPage() {
                                   </Badge>
                                 </div>
                                 <div className="text-[11px] text-text-muted truncate">
-                                  @{a.username} · {a.workload.open} งานเปิด
+                                  @{a.username} · {a.workload.active} งานเปิด
                                   {a.assigned_shops.length > 0 && ` · ${a.assigned_shops.length} ร้าน`}
                                 </div>
                               </div>
@@ -998,6 +1066,28 @@ function SummaryCard({
       </div>
       {sub && <div className="text-[11px] text-text-subtle mt-0.5">{sub}</div>}
     </Card>
+  );
+}
+
+/** ⚡ HistStat — แสดง historical stat ตัวเลขเดียวใน expand panel */
+function HistStat({
+  icon: Icon,
+  label,
+  value,
+  tone = "neutral",
+}: {
+  icon: typeof Users;
+  label: string;
+  value: number;
+  tone?: "brand" | "coral" | "neutral";
+}) {
+  const toneClass = tone === "brand" ? "text-brand" : tone === "coral" ? "text-vibrant-coral" : "text-text";
+  return (
+    <div className="flex flex-col items-center text-center bg-surface-2/50 rounded-lg p-2">
+      <Icon size={12} className="text-text-muted mb-1" />
+      <span className={`text-sm font-bold ${toneClass}`}>{value}</span>
+      <span className="text-[10px] text-text-subtle">{label}</span>
+    </div>
   );
 }
 

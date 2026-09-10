@@ -21,6 +21,10 @@ export interface ShopSettingsDoc extends Document {
   // faq_liveagent behavior
   faq_liveagent_enabled: boolean; // เปิด/ปิด การตอบสนอง faq_liveagent
   faq_liveagent_action: FaqLiveagentAction; // "handoff" = ส่งแอดมิน, "bot_reply" = ให้บอทตอบ
+  // ⚡ Phase 2A — post-handoff exceptions: keywords/intents ที่บอทยังตอบได้หลัง handoff (ก่อนปิดแชท)
+  //    แอดมินตั้งได้ต่อร้าน เช่น ["ทวนข้อมูลเคลม", "ส่งลิงก์กรอกฟอร์ม", "เปลี่ยนเบอร์", "แก้ที่อยู่"]
+  //    ถ้า message match exception → บอทตอบปกติ ไม่ล็อค post-handoff
+  post_handoff_exceptions?: string[];
   notes?: string;
   created_at: Date;
   updated_at: Date;
@@ -38,6 +42,7 @@ function genId(): string {
 export const DEFAULT_SHOP_SETTINGS = {
   faq_liveagent_enabled: true,
   faq_liveagent_action: "handoff" as FaqLiveagentAction,
+  post_handoff_exceptions: [] as string[],
 };
 
 // listShopSettings — ดู settings ทั้งหมด
@@ -79,6 +84,7 @@ export async function upsertShopSettings(opts: {
   platform: PersonaPlatform;
   faq_liveagent_enabled?: boolean;
   faq_liveagent_action?: FaqLiveagentAction;
+  post_handoff_exceptions?: string[];
   notes?: string;
   updatedBy: string;
 }): Promise<ShopSettingsDoc> {
@@ -96,6 +102,8 @@ export async function upsertShopSettings(opts: {
     updates.faq_liveagent_enabled = opts.faq_liveagent_enabled;
   if (opts.faq_liveagent_action !== undefined)
     updates.faq_liveagent_action = opts.faq_liveagent_action;
+  if (opts.post_handoff_exceptions !== undefined)
+    updates.post_handoff_exceptions = opts.post_handoff_exceptions;
   if (opts.notes !== undefined) updates.notes = opts.notes;
   updates.updated_at = now;
   updates.updated_by = opts.updatedBy;
@@ -125,6 +133,7 @@ export async function upsertShopSettings(opts: {
     platform: opts.platform,
     faq_liveagent_enabled: opts.faq_liveagent_enabled ?? DEFAULT_SHOP_SETTINGS.faq_liveagent_enabled,
     faq_liveagent_action: opts.faq_liveagent_action ?? DEFAULT_SHOP_SETTINGS.faq_liveagent_action,
+    post_handoff_exceptions: opts.post_handoff_exceptions ?? DEFAULT_SHOP_SETTINGS.post_handoff_exceptions,
     notes: opts.notes,
     created_at: now,
     updated_at: now,

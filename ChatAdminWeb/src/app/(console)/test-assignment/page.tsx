@@ -3,7 +3,7 @@
 // ซ้าย: list + filter (search/platform/rating/status)
 // กลาง: chat full (user/zaapi/bot) + RateBox ใต้ bubble bot + conversation rating ใน panel per chat
 // ขวา: ShadowStatPanel-like stats
-import { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
@@ -11,6 +11,7 @@ import { Loading } from "@/components/ui/Loading";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { RateBox } from "@/components/shadow/RateBox";
 import { MessageContent } from "@/components/chat/MessageContent";
+import { DateBanner, dayKey, formatDateLabel } from "@/components/shadow/DateBanner";
 import { splitAnswerSegments } from "@/lib/answerSegments";
 import { toast, useToastError } from "@/components/ui/Toast";
 import {
@@ -18,12 +19,14 @@ import {
   CheckCircle, XCircle, AlertCircle, ChevronDown,
   Store, Bot, User, Star, Search, BarChart3,
   PlayCircle, PauseCircle, MessageSquare, Clock,
-  Copy, Check,
+  Copy, Check, History, Trash2, RotateCcw, List,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
 import { api } from "@/lib/apiClient";
 import { usePolling } from "@/lib/usePolling";
-import type { Platform } from "@/lib/types";
+import { useSharedConversations } from "@/lib/useSharedConversations";
+import { AnnotationDot, type Annotation } from "@/components/ui/AnnotationDot";
+import type { Platform, Conversation } from "@/lib/types";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -42,6 +45,26 @@ interface ConvRow {
   mock_status?: string;
   conv_star_rating?: number;
   conv_rating?: string;
+}
+
+// ⚡ Phase 3B-2 — history row (replay history by admin)
+interface HistoryRow {
+  conversation_id: string;
+  shop_id: string;
+  platform: string;
+  shop_name?: string;
+  to_name?: string;
+  final_status: string;
+  replayed_by?: string;
+  replayed_at?: string;
+  total_messages: number;
+  processed_messages: number;
+  stopped_at_handoff: boolean;
+  conv_star_rating?: number;
+  conv_rating?: string;
+  conv_comment?: string;
+  // ⚡ Phase 3B-7 — id กลุ่มรอบ replay (ล่าสุดของแชทนี้)
+  replay_batch_id?: string;
 }
 
 interface AgentInfo {
@@ -138,6 +161,8 @@ interface ReplayResult {
   conv_star_rating?: number;
   conv_rating?: "good" | "bad" | "unrated";
   conv_comment?: string;
+  // ⚡ Phase 3B-7 — id กลุ่มรอบ replay
+  replay_batch_id?: string;
 }
 
 interface ConvDetail {
@@ -147,6 +172,18 @@ interface ConvDetail {
   } | null;
   messages: ChatMessage[];
   replay: ReplayResult | null;
+}
+
+// ⚡ Phase 3B-7 — replay batch metadata (จาก /api/test-assignment?batches=1)
+interface ReplayBatchInfo {
+  replay_batch_id: string;
+  conversation_id: string;
+  created_at: string;
+  replayed_at?: string;
+  count: number;
+  final_status: string;
+  stopped_at_handoff: boolean;
+  replayed_by?: string;
 }
 
 interface Stats {
@@ -195,6 +232,8 @@ function timeAgo(iso?: string): string {
   const h = Math.floor(m / 60);
   if (h < 24) return `${h} ชม.`;
   const d = Math.floor(h / 24);
+  // ⚡ เกิน 7 วัน → แสดงวันที่ ภายใน 7 วัน → แสดงจำนวนวัน
+  if (d > 7) return formatDateLabel(iso);
   return `${d} วัน`;
 }
 
@@ -203,8 +242,7 @@ function timeAgo(iso?: string): string {
 export default function TestAssignmentPage() {
   const { catchError } = useToastError();
   const [replayOrder, setReplayOrder] = useState<"recent" | "oldest">("recent");
-  // ⚡ limit ใส่เองได้ (default 100) + replay mode resume/overwrite
-  const [limitInput, setLimitInput] = useState("100");
+  // ⚡ Phase 3B-5 — replay mode resume/overwrite (limit ใช้ 2000 เหมือน shadow-bot แล้ว)
   const [replayMode, setReplayMode] = useState<"overwrite" | "resume">("overwrite");
   const [convs, setConvs] = useState<ConvRow[]>([]);
   const [status, setStatus] = useState<StatusData | null>(null);
@@ -214,8 +252,31 @@ export default function TestAssignmentPage() {
   const [detail, setDetail] = useState<ConvDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [replaying, setReplaying] = useState(false);
+  // ⚡ search state — ย้ายขึ้นมาใช้กับ useSharedConversations (G-share)
+  const [search, setSearch] = useState("");
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number; handedOff: number; errors: number; skipped: number } | null>(null);
   const [copiedSide, setCopiedSide] = useState<"zaapi" | "bot" | null>(null);
+
+  // ⚡ Phase 3B-2 — tabs: all / roll / history
+  type Tab = "all" | "roll" | "history";
+  const [tab, setTab] = useState<Tab>("all");
+  // roll config
+  const [rollCount, setRollCount] = useState("10");
+  const [rollOrder, setRollOrder] = useState<"recent" | "oldest">("recent");
+  const [rollMode, setRollMode] = useState<"overwrite" | "resume">("overwrite");
+  const [rollPlatform, setRollPlatform] = useState<Platform | "all">("all");
+  const [rollProgress, setRollProgress] = useState<{ done: number; total: number; success: number; skipped: number; errors: number } | null>(null);
+  // history
+  const [historyRows, setHistoryRows] = useState<HistoryRow[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  // annotations (markup)
+  const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [annotationsMap, setAnnotationsMap] = useState<Map<string, Annotation>>(new Map());
+  // ⚡ Phase 3B-7 — replay batch selector (detail panel)
+  const [replayBatches, setReplayBatches] = useState<ReplayBatchInfo[]>([]);
+  const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
+  const [showBatchDd, setShowBatchDd] = useState(false);
+  const [batchAnnotation, setBatchAnnotation] = useState<Annotation | null>(null);
 
   // ⚡ Copy chat — แยกฝั่ง zaapi หรือ bot (เหมือน shadow-inbox)
   // side="zaapi" → ลูกค้า + Zaapi/Admin reply (จาก detail.messages)
@@ -302,21 +363,42 @@ export default function TestAssignmentPage() {
   }, [detail]);
 
   // ── Load list + status ──
+  // ⚡ G-share — แท็บ "All" ใช้ shared conversation store เหมือน tickets/shadow-inbox
+  //   (poll ครั้งเดียว แชร์กันหลายหน้า — ลดโหลด DB)
+  //   search เชื่อมกับ state "search" ที่ประกาศด้านล่าง (เพื่อให้ filter ทำงานร่วมกัน)
+  const { conversations: sharedConvs, totalCount: sharedTotalCount, loading: sharedLoading } = useSharedConversations({
+    assigned_to: "all",
+    q: search || undefined,
+    limit: 2000,
+  });
+
   const loadList = useCallback(async () => {
     try {
-      const lim = Math.max(1, Math.min(parseInt(limitInput, 10) || 100, 10000));
-      const [convRes, statusRes] = await Promise.all([
-        api().get<{ rows: ConvRow[]; total: number }>("/test-assignment", { params: { list: "1", limit: String(lim), order: replayOrder } }),
-        api().get<StatusData>("/test-assignment"),
-      ]);
-      setConvs(convRes.data.rows || []);
+      // โหลดเฉพาะ status (conversations มาจาก shared store แล้ว)
+      const statusRes = await api().get<StatusData>("/test-assignment");
       setStatus(statusRes.data);
     } catch (err) {
       catchError(err, "โหลดไม่สำเร็จ");
     } finally {
       setLoading(false);
     }
-  }, [catchError, replayOrder, limitInput]);
+  }, [catchError]);
+
+  // sync shared conversations → convs (แปลง Conversation → ConvRow)
+  useEffect(() => {
+    const rows: ConvRow[] = sharedConvs.map((c) => ({
+      id: c.id,
+      conversation_id: c.id,
+      shop_id: c.shop_id,
+      platform: c.platform,
+      status: c.status,
+      assigned_to: c.assigned_to || null,
+      to_name: c.customer_name,
+      shop_name: c.shop_name,
+      last_message_timestamp: c.last_timestamp,
+    }));
+    setConvs(rows);
+  }, [sharedConvs]);
 
   const loadStats = useCallback(async () => {
     try {
@@ -330,13 +412,29 @@ export default function TestAssignmentPage() {
   usePolling(loadStats, 10000);
 
   // ── Load detail ──
-  const loadDetail = useCallback(async (convId: string) => {
+  // ⚡ Phase 3B-7 — รองรับ replayBatchId (ถ้าส่ง → ดึงเฉพาะรอบนั้น ถ้าไม่ส่ง → ล่าสุด)
+  //   และโหลด replay batches list สำหรับ batch selector
+  const loadDetail = useCallback(async (convId: string, replayBatchId?: string) => {
     setSelectedId(convId);
     setDetailLoading(true);
     setDetail(null);
+    setSelectedBatchId(replayBatchId || null);
     try {
-      const r = await api().get<ConvDetail>("/test-assignment", { params: { conv_detail: "1", conversation_id: convId } });
+      const params: Record<string, string> = { conv_detail: "1", conversation_id: convId };
+      if (replayBatchId) params.replay_batch_id = replayBatchId;
+      const r = await api().get<ConvDetail>("/test-assignment", { params });
       setDetail(r.data);
+      // ⚡ Phase 3B-7 — โหลด batches list (สำหรับ selector) — ไม่ block detail
+      api().get<{ batches: ReplayBatchInfo[] }>("/test-assignment", { params: { batches: "1", conversation_id: convId } })
+        .then((br) => {
+          const bs = br.data?.batches || [];
+          setReplayBatches(bs);
+          // default = รอบใหม่สุด (index 0 — API เรียงใหม่สุดก่อน) หรือ batch ที่ส่งมา
+          if (replayBatchId) setSelectedBatchId(replayBatchId);
+          else if (bs.length > 0) setSelectedBatchId(bs[0].replay_batch_id);
+          else setSelectedBatchId(null);
+        })
+        .catch(() => { setReplayBatches([]); setSelectedBatchId(null); });
     } catch (err) {
       catchError(err, "โหลดแชทไม่สำเร็จ");
     } finally {
@@ -344,17 +442,53 @@ export default function TestAssignmentPage() {
     }
   }, [catchError]);
 
+  // ⚡ Phase 3B-7 — โหลด annotation ของ batch ที่เลือก (test_assignment scope)
+  const loadBatchAnnotation = useCallback(async () => {
+    if (!selectedId) { setBatchAnnotation(null); return; }
+    try {
+      const r = await api().get<{ annotations: Annotation[] }>("/chat-annotations", {
+        params: { scope: "test_assignment", conversation_ids: selectedId },
+      });
+      const anns = r.data?.annotations || [];
+      if (anns.length === 0) { setBatchAnnotation(null); return; }
+      // หา annotation ของ batch ที่เลือก (ถ้ามี) — fallback อันล่าสุด
+      let found: Annotation | null = null;
+      if (selectedBatchId) {
+        found = anns.find((a) => a.generation_batch_id === selectedBatchId) || null;
+      }
+      if (!found) found = anns[0];
+      setBatchAnnotation(found);
+    } catch {
+      setBatchAnnotation(null);
+    }
+  }, [selectedId, selectedBatchId]);
+
+  useEffect(() => {
+    if (selectedId) loadBatchAnnotation();
+    else setBatchAnnotation(null);
+  }, [selectedId, selectedBatchId, loadBatchAnnotation]);
+
+  // ⚡ Phase 3B-7 — เมื่อเลือก batch ใหม่ → reload detail ของ batch นั้น
+  const handleSelectBatch = useCallback((batchId: string) => {
+    setSelectedBatchId(batchId);
+    setShowBatchDd(false);
+    if (selectedId) loadDetail(selectedId, batchId);
+  }, [selectedId, loadDetail]);
+
   // ── Replay ──
+  // ⚡ Phase 3B-7 — หลัง replay สำเร็จ → reload detail ด้วย replay_batch_id ของรอบใหม่
   async function handleReplay(convId: string) {
     setReplaying(true);
     try {
-      const resp = await api().post("/test-assignment", { action: "replay_conversation", conversation_id: convId, mode: replayMode });
+      const resp = await api().post("/test-assignment", { action: "replay_conversation", conversation_id: convId, mode: replayMode }, { timeout: 300000 });
       if (resp.data?.skipped) {
         toast.info("ข้าม — มี result ครบแล้ว (resume mode)");
       } else {
         toast.success("Replay สำเร็จ");
       }
-      await loadDetail(convId);
+      // ⚡ Phase 3B-7 — ใช้ replay_batch_id ของรอบใหม่ (ถ้า API คืนมา)
+      const newBatchId = resp.data?.replay_batch_id;
+      await loadDetail(convId, newBatchId);
       await loadList();
       await loadStats();
     } catch (err) {
@@ -405,15 +539,37 @@ export default function TestAssignmentPage() {
   }
 
   // ── Rate message ──
+  // ⚡ Phase 3A-fix — ไม่เรียก loadDetail หลัง rate (กัน panel reload/กระพริบ)
+  //   อัปเดต detail.message_ratings ใน state โดยตรง แทนการโหลดใหม่ทั้งหมด
   async function handleRateMessage(messageId: string, field: "star" | "rating" | "comment", value: number | string) {
     if (!selectedId) return;
     const body: Record<string, unknown> = { action: "rate_message", conversation_id: selectedId, message_id: messageId };
     if (field === "star") body.star_rating = value;
     if (field === "rating") body.rating = value;
     if (field === "comment") body.comment = value;
+    // ⚡ Phase 3B-7 — ส่ง replay_batch_id เพื่อ rate รอบที่เลือก
+    if (selectedBatchId) body.replay_batch_id = selectedBatchId;
     try {
       await api().post("/test-assignment", body);
-      await loadDetail(selectedId);
+      // optimistic update — อัปเดต message_ratings ใน detail โดยไม่ reload
+      setDetail((prev) => {
+        if (!prev?.replay) return prev;
+        const prevRatings = prev.replay.message_ratings || {};
+        const existing = prevRatings[messageId] || {};
+        const updated: MessageRating = {
+          ...existing,
+          star_rating: field === "star" ? (value as number) : existing.star_rating,
+          rating: field === "rating" ? (value as "good" | "bad" | "unrated") : existing.rating,
+          comment: field === "comment" ? (value as string) : existing.comment,
+        };
+        return {
+          ...prev,
+          replay: {
+            ...prev.replay,
+            message_ratings: { ...prevRatings, [messageId]: updated },
+          },
+        };
+      });
       await loadStats();
     } catch (err) {
       catchError(err, "บันทึกคะแนนไม่สำเร็จ");
@@ -421,28 +577,185 @@ export default function TestAssignmentPage() {
   }
 
   // ── Rate conversation ──
+  // ⚡ Phase 3A-fix — ไม่เรียก loadDetail หลัง rate (กัน panel reload/กระพริบ)
   async function handleRateConversation(field: "star" | "rating" | "comment", value: number | string) {
     if (!selectedId) return;
     const body: Record<string, unknown> = { action: "rate_conversation", conversation_id: selectedId };
     if (field === "star") body.star_rating = value;
     if (field === "rating") body.rating = value;
     if (field === "comment") body.comment = value;
+    // ⚡ Phase 3B-7 — ส่ง replay_batch_id เพื่อ rate รอบที่เลือก
+    if (selectedBatchId) body.replay_batch_id = selectedBatchId;
     try {
       await api().post("/test-assignment", body);
-      await loadDetail(selectedId);
-      await loadList();
+      // optimistic update — อัปเดต conv rating ใน detail โดยไม่ reload
+      setDetail((prev) => {
+        if (!prev?.replay) return prev;
+        return {
+          ...prev,
+          replay: {
+            ...prev.replay,
+            conv_star_rating: field === "star" ? (value as number) : prev.replay.conv_star_rating,
+            conv_rating: field === "rating" ? (value as "good" | "bad" | "unrated") : prev.replay.conv_rating,
+            conv_comment: field === "comment" ? (value as string) : prev.replay.conv_comment,
+          },
+        };
+      });
       await loadStats();
     } catch (err) {
       catchError(err, "บันทึกคะแนนไม่สำเร็จ");
     }
   }
 
+  // ── ⚡ Phase 3B-2 — Roll (batch replay with skip logic) ──
+  async function handleRoll() {
+    const count = Math.max(1, Math.min(parseInt(rollCount, 10) || 10, 1000));
+    setRollProgress({ done: 0, total: count, success: 0, skipped: 0, errors: 0 });
+    setReplaying(true);
+    let success = 0;
+    let skipped = 0;
+    let errors = 0;
+    try {
+      // 1. ขอรายการ conversation_ids จาก batch_roll API
+      const rollResp = await api().post("/test-assignment", {
+        action: "batch_roll",
+        count,
+        order: rollOrder,
+        mode: rollMode,
+        platform: rollPlatform === "all" ? undefined : rollPlatform,
+      }, { timeout: 30000 });
+      const convIds: string[] = rollResp.data?.conversation_ids || [];
+      const totalSkipped = rollResp.data?.skipped || 0;
+      skipped = totalSkipped;
+
+      if (convIds.length === 0) {
+        toast.info("ไม่มีแชทที่ต้อง replay (อาจถูก skip หมด)");
+        setRollProgress(null);
+        return;
+      }
+
+      setRollProgress({ done: 0, total: convIds.length, success: 0, skipped, errors: 0 });
+
+      // 2. ไล่ replay ทีละอัน
+      for (let i = 0; i < convIds.length; i++) {
+        try {
+          const resp = await api().post("/test-assignment",
+            { action: "replay_conversation", conversation_id: convIds[i], mode: rollMode === "resume" ? "resume" : "overwrite" },
+            { timeout: 300000 }
+          );
+          if (resp.data?.skipped) {
+            skipped++;
+          } else {
+            success++;
+          }
+        } catch {
+          errors++;
+        }
+        setRollProgress({ done: i + 1, total: convIds.length, success, skipped, errors });
+        if (errors >= 3 && errors === i + 1) {
+          toast.error("หยุด — error 3 ครั้งแรก");
+          break;
+        }
+      }
+      toast.success(`Roll เสร็จ: ${success} สำเร็จ, ${skipped} ข้าม, ${errors} error`);
+      // ⚡ Phase 3B-5 — หลัง roll เสร็จ → สลับไป History tab + โหลด history ใหม่
+      await loadHistory();
+      await loadStats();
+      setTab("history");
+    } catch (err) {
+      catchError(err, "Roll ไม่สำเร็จ");
+    } finally {
+      setReplaying(false);
+      setRollProgress(null);
+    }
+  }
+
+  // ── ⚡ Phase 3B-2 — History (replay history by admin) ──
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const r = await api().get<{ rows: HistoryRow[]; total: number }>("/test-assignment", {
+        params: { history: "1", limit: "500" },
+      });
+      setHistoryRows(r.data.rows || []);
+    } catch (err) {
+      catchError(err, "โหลด history ไม่สำเร็จ");
+      setHistoryRows([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [catchError]);
+
+  // ── ⚡ Phase 3B-2 — Soft delete replay ──
+  async function handleSoftDelete(conversationId: string) {
+    if (!confirm(`ลบ replay result ของแชทนี้? (soft delete — กู้คืนได้)`)) return;
+    try {
+      await api().post("/test-assignment", { action: "soft_delete", conversation_id: conversationId });
+      toast.success("ลบแล้ว (soft delete)");
+      await loadList();
+      await loadStats();
+      if (tab === "history") await loadHistory();
+    } catch (err) {
+      catchError(err, "ลบไม่สำเร็จ");
+    }
+  }
+
+  // ── ⚡ Phase 3B-1 — Annotations (markup) — เฉพาะ tab history ──
+  // ⚡ Phase 3B-7 — แชทหนึ่งอาจมีหลาย annotation (ต่างรอบ) → เก็บอันล่าสุดต่อ conversation
+  //   และถ้ามี annotation ของ replay_batch_id ที่ตรงกับ historyRow → ใช้อันนั้น
+  const loadAnnotations = useCallback(async () => {
+    try {
+      const convIds = historyRows.map((c) => c.conversation_id).slice(0, 200);
+      if (convIds.length === 0) {
+        setAnnotations([]);
+        setAnnotationsMap(new Map());
+        return;
+      }
+      const r = await api().get<{ annotations: Annotation[] }>("/chat-annotations", {
+        params: { scope: "test_assignment", conversation_ids: convIds.join(",") },
+      });
+      const anns = r.data.annotations || [];
+      setAnnotations(anns);
+      // ⚡ Phase 3B-7 — สร้าง map โดย match batch_id ของ historyRow ถ้าเป็นไปได้
+      const historyBatchMap = new Map<string, string>();
+      for (const h of historyRows) {
+        if (h.replay_batch_id) historyBatchMap.set(h.conversation_id, h.replay_batch_id);
+      }
+      const map = new Map<string, Annotation>();
+      // API เรียง created_at desc อยู่แล้ว
+      for (const a of anns) {
+        if (map.has(a.conversation_id)) continue; // เก็บอันล่าสุดเป็น default
+        map.set(a.conversation_id, a);
+      }
+      // override: ถ้ามี annotation ที่ batch_id ตรงกับ historyRow → ใช้อันนั้น
+      for (const a of anns) {
+        const targetBatch = historyBatchMap.get(a.conversation_id);
+        if (targetBatch && a.generation_batch_id === targetBatch) {
+          map.set(a.conversation_id, a);
+        }
+      }
+      setAnnotationsMap(map);
+    } catch {
+      setAnnotations([]);
+      setAnnotationsMap(new Map());
+    }
+  }, [historyRows]);
+
+  useEffect(() => {
+    if (tab === "history") loadAnnotations();
+  }, [tab, loadAnnotations]);
+
+  // load history when tab switches
+  useEffect(() => {
+    if (tab === "history") loadHistory();
+  }, [tab, loadHistory]);
+
   const acceptingAgents = status?.agents.filter((a) => a.is_accepting_chats && a.active) || [];
   const replay = detail?.replay;
   const msgRatings = replay?.message_ratings || {};
 
   // ── Inbox filters ──
-  const [search, setSearch] = useState("");
+  // ⚡ search ย้ายขึ้นไปประกาศด้านบน (ใช้กับ useSharedConversations)
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [sortBy, setSortBy] = useState<SortOption>("recent");
@@ -451,6 +764,15 @@ export default function TestAssignmentPage() {
   const [showSortDd, setShowSortDd] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [statTab, setStatTab] = useState<"per_chat" | "all_history" | "replay">("per_chat");
+
+  // ⚡ Incremental rendering — โหลดทีละ 50 รายการ เพื่อลดการหน่วง (เหมือน ChatList ของ shadow-bot)
+  //    เมื่อ filter/sort เปลี่ยน → reset เป็น 50 รายการแรก
+  //    เมื่อ scroll ใกล้ล่าง → โหลดเพิ่ม 50 รายการ
+  const RENDER_BATCH = 50;
+  const [allRenderCount, setAllRenderCount] = useState(RENDER_BATCH);
+  const [historyRenderCount, setHistoryRenderCount] = useState(RENDER_BATCH);
+  const allListRef = useRef<HTMLDivElement>(null);
+  const historyListRef = useRef<HTMLUListElement>(null);
 
   const filteredConvs = useMemo(() => {
     let result = convs;
@@ -466,16 +788,7 @@ export default function TestAssignmentPage() {
     if (platformFilter !== "all") {
       result = result.filter((c) => c.platform === platformFilter);
     }
-    if (statusFilter !== "all") {
-      result = result.filter((c) => {
-        if (statusFilter === "bot") return c.replay_status === "bot_answered";
-        if (statusFilter === "admin") return c.replay_assigned_to != null;
-        if (statusFilter === "handoff") return c.replay_status === "handed_off" || c.replay_status === "no_agent";
-        if (statusFilter === "closed") return c.mock_status === "closed";
-        if (statusFilter === "error") return c.replay_status === "error";
-        return true;
-      });
-    }
+    // ⚡ Phase 3B-5 — เอา status filter ออกจาก All tab (ไม่มี replay status แล้ว)
     const sorted = [...result];
     if (sortBy === "recent") {
       sorted.sort((a, b) => new Date(b.last_message_timestamp || 0).getTime() - new Date(a.last_message_timestamp || 0).getTime());
@@ -486,6 +799,31 @@ export default function TestAssignmentPage() {
     }
     return sorted;
   }, [convs, search, platformFilter, statusFilter, sortBy]);
+
+  // ⚡ reset renderCount เมื่อ filter/sort เปลี่ยน (กัน scroll กระโดด)
+  const allFilterSig = `${search}|${platformFilter}|${statusFilter}|${sortBy}`;
+  const prevAllFilterSig = useRef(allFilterSig);
+  useEffect(() => {
+    if (prevAllFilterSig.current !== allFilterSig) {
+      prevAllFilterSig.current = allFilterSig;
+      setAllRenderCount(RENDER_BATCH);
+      if (allListRef.current) allListRef.current.scrollTop = 0;
+    }
+  }, [allFilterSig]);
+
+  const handleAllScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200 && allRenderCount < filteredConvs.length) {
+      setAllRenderCount((c) => Math.min(c + RENDER_BATCH, filteredConvs.length));
+    }
+  }, [allRenderCount, filteredConvs.length]);
+
+  const handleHistoryScroll = useCallback((e: React.UIEvent<HTMLUListElement>) => {
+    const el = e.currentTarget;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200 && historyRenderCount < historyRows.length) {
+      setHistoryRenderCount((c) => Math.min(c + RENDER_BATCH, historyRows.length));
+    }
+  }, [historyRenderCount, historyRows.length]);
 
   function StatusBadge({ c }: { c: ConvRow }) {
     if (c.mock_status === "closed") return <Badge tone="neutral">closed</Badge>;
@@ -505,9 +843,35 @@ export default function TestAssignmentPage() {
           <div className="flex items-center gap-2 mb-2">
             <FlaskConical size={16} className="text-brand" />
             <h1 className="text-sm font-bold text-text">ทดสอบจ่ายงาน</h1>
-            <Badge tone="brand" className="ml-auto">{filteredConvs.length}</Badge>
+            <Badge tone="brand" className="ml-auto">{tab === "all" ? (sharedTotalCount || filteredConvs.length) : tab === "history" ? historyRows.length : rollProgress ? rollProgress.done : ""}</Badge>
           </div>
 
+          {/* ⚡ Phase 3B-2 — Tabs: all / roll / history */}
+          <div className="flex items-center gap-1 mb-2 border-b border-border/50">
+            {([
+              { k: "all" as const, label: "แชททั้งหมด", icon: List },
+              { k: "roll" as const, label: "Roll", icon: Zap },
+              { k: "history" as const, label: "History", icon: History },
+            ]).map((t) => {
+              const Icon = t.icon;
+              return (
+                <button
+                  key={t.k}
+                  onClick={() => setTab(t.k)}
+                  className={`flex items-center gap-1 px-2 py-1.5 text-[10px] font-medium transition-colors border-b-2 ${
+                    tab === t.k
+                      ? "border-brand text-brand"
+                      : "border-transparent text-text-muted hover:text-text"
+                  }`}
+                >
+                  <Icon size={11} /> {t.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {tab === "all" && (
+          <>
           {/* Search */}
           <div className="relative mb-2">
             <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-subtle" />
@@ -539,31 +903,7 @@ export default function TestAssignmentPage() {
                 </div>
               )}
             </div>
-            {/* Status */}
-            <div className="relative">
-              <button onClick={() => { setShowStatusDd(!showStatusDd); setShowPlatformDd(false); setShowSortDd(false); }}
-                className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] bg-surface-2 text-text-muted hover:text-text">
-                {statusFilter === "all" ? "สถานะ" : statusFilter}
-                <ChevronDown size={10} />
-              </button>
-              {showStatusDd && (
-                <div className="absolute z-20 top-full mt-1 left-0 bg-surface border border-border rounded-md shadow-lg py-1 min-w-[100px]">
-                  {([
-                    { k: "all", l: "ทั้งหมด" },
-                    { k: "bot", l: "Bot ตอบ" },
-                    { k: "admin", l: "Admin" },
-                    { k: "handoff", l: "Handoff" },
-                    { k: "closed", l: "Closed" },
-                    { k: "error", l: "Error" },
-                  ] as const).map((s) => (
-                    <button key={s.k} onClick={() => { setStatusFilter(s.k); setShowStatusDd(false); }}
-                      className={`w-full text-left px-2.5 py-1 text-[11px] hover:bg-surface-2 ${statusFilter === s.k ? "text-brand font-medium" : "text-text"}`}>
-                      {s.l}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            {/* ⚡ Phase 3B-5 — เอา status filter ออก (All tab = แค่ chat list ไม่มี replay status) */}
             {/* Sort */}
             <div className="relative">
               <button onClick={() => { setShowSortDd(!showSortDd); setShowPlatformDd(false); setShowStatusDd(false); }}
@@ -587,74 +927,104 @@ export default function TestAssignmentPage() {
               )}
             </div>
           </div>
+        </>
+        )}
         </div>
 
-        {/* Batch replay button + order toggle + limit input + mode toggle */}
-        <div className="px-3 py-2 border-b border-border bg-surface-2/50 shrink-0 space-y-2">
-          {/* Row 1: limit input + order toggle */}
-          <div className="flex items-center gap-2 text-[10px]">
-            <span className="text-text-muted shrink-0">จำนวน:</span>
-            <input
-              type="number"
-              min={1}
-              max={10000}
-              value={limitInput}
-              onChange={(e) => setLimitInput(e.target.value)}
-              onBlur={() => { const n = Math.max(1, Math.min(parseInt(limitInput, 10) || 100, 10000)); setLimitInput(String(n)); loadList(); }}
-              onKeyDown={(e) => { if (e.key === "Enter") { (e.target as HTMLInputElement).blur(); } }}
-              className="w-16 px-1.5 py-0.5 rounded-md bg-surface border border-border text-text text-xs focus:outline-none focus:border-brand"
-              placeholder="100"
-            />
-            <span className="text-text-muted">|</span>
-            <span className="text-text-muted shrink-0">เรียง:</span>
-            <button onClick={() => { setReplayOrder("recent"); }}
-              className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
-                replayOrder === "recent" ? "bg-brand text-white" : "bg-surface text-text-muted hover:text-text"
-              }`}>
-              ใหม่สุด
-            </button>
-            <button onClick={() => { setReplayOrder("oldest"); }}
-              className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
-                replayOrder === "oldest" ? "bg-brand text-white" : "bg-surface text-text-muted hover:text-text"
-              }`}>
-              เก่าสุด
-            </button>
+        {tab === "roll" && (
+        <div className="px-3 py-3 border-b border-border bg-surface shrink-0 space-y-3">
+          {/* Roll config */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-[10px]">
+              <span className="text-text-muted shrink-0">จำนวนแชท:</span>
+              <input
+                type="number"
+                min={1}
+                max={1000}
+                value={rollCount}
+                onChange={(e) => setRollCount(e.target.value)}
+                className="w-20 px-1.5 py-0.5 rounded-md bg-surface-2 border border-border text-text text-xs focus:outline-none focus:border-brand"
+                placeholder="10"
+              />
+              <span className="text-text-muted">|</span>
+              <span className="text-text-muted shrink-0">เรียง:</span>
+              <button onClick={() => setRollOrder("recent")}
+                className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
+                  rollOrder === "recent" ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
+                }`}>
+                ใหม่สุด
+              </button>
+              <button onClick={() => setRollOrder("oldest")}
+                className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
+                  rollOrder === "oldest" ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
+                }`}>
+                เก่าสุด
+              </button>
+            </div>
+            <div className="flex items-center gap-1 text-[10px]">
+              <span className="text-text-muted shrink-0">โหมด:</span>
+              <button onClick={() => setRollMode("overwrite")}
+                className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
+                  rollMode === "overwrite" ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
+                }`}>
+                ทำใหม่ทับ
+              </button>
+              <button onClick={() => setRollMode("resume")}
+                className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
+                  rollMode === "resume" ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
+                }`}>
+                ข้ามที่ตัวเองทำแล้ว
+              </button>
+            </div>
+            <div className="flex items-center gap-1 text-[10px]">
+              <span className="text-text-muted shrink-0">แพลตฟอร์ม:</span>
+              {(["all", "shopee", "tiktok", "lazada"] as const).map((p) => (
+                <button key={p} onClick={() => setRollPlatform(p)}
+                  className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
+                    rollPlatform === p ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
+                  }`}>
+                  {p === "all" ? "ทั้งหมด" : p}
+                </button>
+              ))}
+            </div>
           </div>
-          {/* Row 2: mode toggle */}
-          <div className="flex items-center gap-1 text-[10px]">
-            <span className="text-text-muted shrink-0">โหมด:</span>
-            <button onClick={() => setReplayMode("overwrite")}
-              className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
-                replayMode === "overwrite" ? "bg-brand text-white" : "bg-surface text-text-muted hover:text-text"
-              }`}>
-              ทำใหม่ทับ
-            </button>
-            <button onClick={() => setReplayMode("resume")}
-              className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
-                replayMode === "resume" ? "bg-brand text-white" : "bg-surface text-text-muted hover:text-text"
-              }`}>
-              ทำต่อ (ข้ามที่ครบแล้ว)
-            </button>
-          </div>
-          {/* Replay button */}
-          <button onClick={handleBatchReplay} disabled={replaying || filteredConvs.length === 0}
+          <button onClick={handleRoll} disabled={replaying}
             className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-brand text-white text-xs font-medium hover:bg-brand-dark disabled:opacity-50 transition-colors">
             {replaying ? <Loading size={12} /> : <Zap size={12} />}
-            {batchProgress
-              ? `replay... ${batchProgress.done}/${batchProgress.total} (✓${batchProgress.handedOff} ⏭${batchProgress.skipped} ✗${batchProgress.errors})`
-              : `Replay ทั้งหมด (${filteredConvs.length})`}
+            {rollProgress
+              ? `Roll... ${rollProgress.done}/${rollProgress.total} (✓${rollProgress.success} ⏭${rollProgress.skipped} ✗${rollProgress.errors})`
+              : `Roll Replay (${rollCount} แชท)`}
           </button>
+          {rollProgress && (
+            <div className="w-full h-1.5 bg-surface-2 rounded-full overflow-hidden">
+              <div className="h-full bg-brand transition-all" style={{ width: `${(rollProgress.done / rollProgress.total) * 100}%` }} />
+            </div>
+          )}
         </div>
+        )}
 
-        {/* List */}
-        <div className="flex-1 overflow-y-auto">
-          {loading ? (
+        {tab === "history" && (
+        <div className="px-3 py-2 border-b border-border bg-surface-2/50 shrink-0">
+          <div className="flex items-center gap-2 text-[10px] text-text-muted">
+            <History size={11} />
+            <span>ประวัติ replay ของคุณ ({historyRows.length})</span>
+            <button onClick={loadHistory} className="ml-auto text-text-muted hover:text-text" title="รีเฟรช">
+              <RefreshCw size={11} />
+            </button>
+          </div>
+        </div>
+        )}
+
+        {/* List — tab "all" (เหมือน shadow-bot — แค่ chat list ไม่มี batch replay) */}
+        {tab === "all" && (
+        <div ref={allListRef} onScroll={handleAllScroll} className="flex-1 overflow-y-auto">
+          {loading || sharedLoading ? (
             <div className="flex justify-center py-8"><Loading size={24} /></div>
           ) : filteredConvs.length === 0 ? (
             <div className="py-8"><EmptyState icon={FlaskConical} title="ไม่มี conversation" /></div>
           ) : (
             <ul className="divide-y divide-border/50">
-              {filteredConvs.map((c, i) => (
+              {filteredConvs.slice(0, allRenderCount).map((c, i) => (
                 <li key={`${c.conversation_id}-${i}`}>
                   <button onClick={() => loadDetail(c.conversation_id)}
                     className={`w-full text-left px-3 py-2.5 transition-colors ${
@@ -665,24 +1035,109 @@ export default function TestAssignmentPage() {
                     <div className="flex items-center gap-2 mb-1">
                       <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: platformColors[c.platform] || "#888" }} />
                       <span className="text-xs font-medium text-text truncate flex-1">{c.to_name || c.conversation_id}</span>
-                      <StatusBadge c={c} />
                     </div>
                     <div className="text-[10px] text-text-muted truncate">
                       {c.shop_name || c.shop_id} · {timeAgo(c.last_message_timestamp)}
                     </div>
-                    {c.conv_star_rating != null && c.conv_star_rating > 0 && (
-                      <div className="flex items-center gap-0.5 mt-0.5">
-                        {[1,2,3,4,5].map((s) => (
-                          <Star key={s} size={8} className={c.conv_star_rating! >= s ? "text-yellow-400 fill-yellow-400" : "text-text-subtle"} />
-                        ))}
-                      </div>
-                    )}
                   </button>
                 </li>
               ))}
+              {allRenderCount < filteredConvs.length && (
+                <li className="text-center text-[9px] text-text-subtle py-2">
+                  แสดง {allRenderCount} จาก {filteredConvs.length} · scroll เพื่อโหลดเพิ่ม
+                </li>
+              )}
             </ul>
           )}
         </div>
+        )}
+
+        {/* List — tab "history" */}
+        {tab === "history" && (
+        <div className="flex-1 overflow-y-auto">
+          {historyLoading ? (
+            <div className="flex justify-center py-8"><Loading size={24} /></div>
+          ) : historyRows.length === 0 ? (
+            <div className="py-8"><EmptyState icon={History} title="ไม่มีประวัติ" description="คุณยังไม่ได้ replay แชทใด" /></div>
+          ) : (
+            <ul ref={historyListRef} onScroll={handleHistoryScroll} className="divide-y divide-border/50">
+              {historyRows.slice(0, historyRenderCount).map((h, i) => (
+                <li key={`${h.conversation_id}-${i}`}>
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => loadDetail(h.conversation_id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        loadDetail(h.conversation_id);
+                      }
+                    }}
+                    className={`w-full text-left px-3 py-2.5 transition-colors cursor-pointer ${
+                      selectedId === h.conversation_id
+                        ? "bg-brand/20 border-l-2 border-brand"
+                        : "hover:bg-surface-2"
+                    }`}>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: platformColors[h.platform] || "#888" }} />
+                      <span className="text-xs font-medium text-text truncate flex-1">{h.to_name || h.conversation_id}</span>
+                      <AnnotationDot
+                        scope="test_assignment"
+                        conversationId={h.conversation_id}
+                        annotation={annotationsMap.get(h.conversation_id)}
+                        onChange={loadAnnotations}
+                        size={10}
+                        // ⚡ Phase 3B-7 — ผูก annotation กับ replay_batch_id ของรอบล่าสุด
+                        generationBatchId={h.replay_batch_id}
+                      />
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => { e.stopPropagation(); handleSoftDelete(h.conversation_id); }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.stopPropagation(); e.preventDefault();
+                            handleSoftDelete(h.conversation_id);
+                          }
+                        }}
+                        className="text-text-subtle hover:text-rose-500 transition-colors cursor-pointer inline-flex"
+                        title="ลบ (soft delete)"
+                      >
+                        <Trash2 size={11} />
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-text-muted truncate">
+                      {h.shop_name || h.shop_id} · {h.replayed_at ? timeAgo(h.replayed_at) : "—"}
+                    </div>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <span className={`text-[9px] px-1 rounded ${
+                        h.final_status === "bot_answered" ? "bg-green-100 text-green-700" :
+                        h.final_status === "handed_off" ? "bg-orange-100 text-orange-700" :
+                        h.final_status === "error" ? "bg-red-100 text-red-700" :
+                        "bg-surface-2 text-text-muted"
+                      }`}>{h.final_status}</span>
+                      <span className="text-[9px] text-text-subtle">{h.processed_messages}/{h.total_messages} msg</span>
+                      {h.stopped_at_handoff && <span className="text-[9px] text-orange-500">handoff</span>}
+                    </div>
+                    {h.conv_star_rating != null && h.conv_star_rating > 0 && (
+                      <div className="flex items-center gap-0.5 mt-0.5">
+                        {[1,2,3,4,5].map((s) => (
+                          <Star key={s} size={8} className={h.conv_star_rating! >= s ? "text-yellow-400 fill-yellow-400" : "text-text-subtle"} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </li>
+              ))}
+              {historyRenderCount < historyRows.length && (
+                <li className="text-center text-[9px] text-text-subtle py-2">
+                  แสดง {historyRenderCount} จาก {historyRows.length} · scroll เพื่อโหลดเพิ่ม
+                </li>
+              )}
+            </ul>
+          )}
+        </div>
+        )}
       </div>
 
       {/* ── Panel กลาง: Chat (เหมือน ShadowReplyPanel + ChatList) ── */}
@@ -703,6 +1158,64 @@ export default function TestAssignmentPage() {
             {replay?.assigned_to && <Badge tone="brand">→ {replay.assigned_to}</Badge>}
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {/* ⚡ Phase 3B-7 — Replay batch selector */}
+            {selectedId && replayBatches.length > 0 && (
+              <div className="relative">
+                <button
+                  onClick={() => setShowBatchDd(!showBatchDd)}
+                  className="h-7 px-2 rounded-md border border-border bg-surface text-[11px] flex items-center gap-1 hover:bg-surface-2 transition-colors"
+                  title="เลือกรอบ replay"
+                >
+                  <History size={11} className="text-text-muted" />
+                  <span className="truncate max-w-[120px]">
+                    {(() => {
+                      const idx = replayBatches.findIndex((b) => b.replay_batch_id === selectedBatchId);
+                      if (idx < 0) return "เลือกรอบ";
+                      const roundNum = replayBatches.length - idx;
+                      return `รอบที่ ${roundNum}/${replayBatches.length}`;
+                    })()}
+                  </span>
+                  <ChevronDown size={10} className="text-text-muted shrink-0" />
+                </button>
+                {showBatchDd && (
+                  <>
+                    <div className="fixed inset-0 z-20" onClick={() => setShowBatchDd(false)} />
+                    <div className="absolute top-full right-0 mt-1 w-56 bg-surface border border-border rounded-md shadow-lg z-40 py-0.5 max-h-64 overflow-y-auto">
+                      {replayBatches.map((b, i) => {
+                        const roundNum = replayBatches.length - i;
+                        const isSelected = b.replay_batch_id === selectedBatchId;
+                        return (
+                          <button
+                            key={b.replay_batch_id}
+                            onClick={() => handleSelectBatch(b.replay_batch_id)}
+                            className={`w-full text-left px-2 py-1.5 text-[11px] hover:bg-surface-2 flex items-center gap-1.5 ${isSelected ? "text-brand font-medium" : "text-text"}`}
+                          >
+                            {isSelected && <Check size={10} />}
+                            <span className="flex-1 truncate">
+                              รอบที่ {roundNum} · {b.count} ข้อความ · {b.final_status}
+                            </span>
+                            <span className="text-[9px] text-text-subtle shrink-0">
+                              {new Date(b.created_at).toLocaleString("th-TH", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+            {/* ⚡ Phase 3B-7 — AnnotationDot ผูกกับ batch ที่เลือก */}
+            {selectedId && (
+              <AnnotationDot
+                scope="test_assignment"
+                conversationId={selectedId}
+                annotation={batchAnnotation || undefined}
+                onChange={loadBatchAnnotation}
+                size={12}
+                generationBatchId={selectedBatchId || undefined}
+              />
+            )}
             {selectedId && (
               <Button size="sm" variant="outline" onClick={() => handleReplay(selectedId)} disabled={replaying}>
                 {replaying ? <Loading size={12} /> : <RefreshCw size={12} />} Replay
@@ -805,19 +1318,27 @@ export default function TestAssignmentPage() {
                           // admin = พื้นเข้ม (variant=out, text-white)
                           // zaapi/bot อื่น = พื้นอ่อน (variant=user, text-text)
                           const isDarkBubble = isAdmin;
+                          // ⚡ Date separator — แทรก DateBanner เมื่อวันเปลี่ยน (เหมือน LINE)
+                          const mTs = m.timestamp;
+                          const dk = dayKey(mTs);
+                          const prevTs = i > 0 ? detail.messages[i - 1].timestamp : null;
+                          const showDate = i === 0 || (prevTs && dk !== dayKey(prevTs));
                           return (
-                            <div key={`${m.message_id}-${i}`} className={`flex ${isUser ? "justify-start" : "justify-end"}`}>
-                              <div className="max-w-[85%]">
-                                <div className="text-[9px] text-text-subtle mb-0.5 px-1 flex items-center gap-1">
-                                  {isUser ? <><User size={8} /> ลูกค้า</> : isAdmin ? <><Users size={8} /> Admin{m.admin_id ? ` · ${m.admin_id}` : ""}</> : isBot ? <><Bot size={8} /> Bot{m.source ? ` · ${m.source}` : ""}</> : "ร้าน"}
-                                </div>
-                                <div className={`rounded-lg px-3 py-2 text-sm ${
-                                  isUser ? "bg-surface border border-border" : isDarkBubble ? "bg-deep-space" : "bg-surface-2 border border-border"
-                                }`}>
-                                  <MessageContent msg={m as never} variant={isDarkBubble ? "out" : "user"} />
+                            <React.Fragment key={`${m.message_id}-${i}`}>
+                              {showDate && <DateBanner timestamp={mTs} compact onlyToday />}
+                              <div className={`flex ${isUser ? "justify-start" : "justify-end"}`}>
+                                <div className="max-w-[85%]">
+                                  <div className="text-[9px] text-text-subtle mb-0.5 px-1 flex items-center gap-1">
+                                    {isUser ? <><User size={8} /> ลูกค้า</> : isAdmin ? <><Users size={8} /> Admin{m.admin_id ? ` · ${m.admin_id}` : ""}</> : isBot ? <><Bot size={8} /> Bot{m.source ? ` · ${m.source}` : ""}</> : "ร้าน"}
+                                  </div>
+                                  <div className={`rounded-lg px-3 py-2 text-sm ${
+                                    isUser ? "bg-surface border border-border" : isDarkBubble ? "bg-deep-space" : "bg-surface-2 border border-border"
+                                  }`}>
+                                    <MessageContent msg={m as never} variant={isDarkBubble ? "out" : "user"} />
+                                  </div>
                                 </div>
                               </div>
-                            </div>
+                            </React.Fragment>
                           );
                         })
                       )}

@@ -19,6 +19,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 - `.env.production`
 - `.env.development`
 - ไฟล์ใดๆ ที่ขึ้นต้นด้วย `.env`
+- `มาแล้วจ้า.md` (ไฟล์เก็บ secret จริงสำหรับ deploy — อนุญาตเฉพาะตอนสร้างครั้งเดียว ห้ามอ่านซ้ำ)
 
 ห้ามใช้คำสั่ง `cat`, `read`, `grep`, `exec` หรือเครื่องมือใดๆ เพื่ออ่านไฟล์เหล่านี้
 

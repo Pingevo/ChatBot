@@ -1,6 +1,6 @@
 "use client";
-import { useState, useEffect, useCallback } from "react";
-import { ScrollText, RefreshCw, ChevronDown, X, ShieldAlert } from "lucide-react";
+import { useState, useEffect, useCallback, Fragment } from "react";
+import { ScrollText, RefreshCw, ChevronDown, X, ShieldAlert, List, Table2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { api } from "@/lib/apiClient";
@@ -9,17 +9,21 @@ import { usePolling } from "@/lib/usePolling";
 
 // Phase 7.10 — หน้า Logs แยกจาก config
 // แสดง audit trail ของทุก action ในระบบ พร้อม filter admin + action_type
+// ⚡ v2 — เพิ่ม tab สลับมุมมอง ลิสต์/ตาราง (ตารางแสดงทุก field จริงใน doc)
 
 interface AdminLogRow {
   admin_id: string;
   username?: string;
   name?: string;
   action_type: string;
+  ticket_id?: string;
+  meta?: Record<string, unknown>;
   conversation_id?: string;
   shop_id?: string;
   timestamp: string;
   metadata?: Record<string, unknown>;
   target_admin_id?: string;
+  actor?: string;
   ip?: string;
 }
 
@@ -39,12 +43,16 @@ const ACTION_CATEGORIES: { label: string; types: string[] }[] = [
   { label: "Knowledge", types: ["kb.create", "kb.update", "kb.delete", "kb.toggle", "kb.import_excel"] },
   { label: "Assignment", types: ["chat_assigned", "chat_reassigned", "assignment.mode_change", "assignment.shop_team_add", "assignment.shop_team_remove", "assignment.platform_team_add", "assignment.platform_team_remove", "agent.pause", "agent.resume", "agent_auto_paused"] },
   { label: "Conversation", types: ["admin.reply", "conversation.handoff", "conversation.resolve", "conversation.open", "conversation.close", "conversation.status_change", "ticket.create", "ticket.update", "ticket.delete"] },
-  { label: "Config", types: ["config.update", "config.shop_toggle", "config.test_integration"] },
-  { label: "Bot/Data", types: ["bot.reply", "bot.handoff_to_admin", "bot.process_started", "bot.process_completed", "bot.process_failed", "bot.guard_violation", "bot.idempotency_skip", "data_writer.message_received", "data_writer.conversation_upserted", "data_writer.duplicate_message", "platform_api.blocked"] },
+  { label: "Config", types: ["config.update", "config.shop_toggle", "config.test_integration", "admin_config.update", "admin.maintenance.clear_status"] },
+  { label: "Bot/Data", types: ["bot.reply", "bot.handoff_to_admin", "bot.process_started", "bot.process_completed", "bot.process_failed", "bot.guard_violation", "bot.idempotency_skip", "bot.buffer_flush", "bot.buffer_recover", "data_writer.message_received", "data_writer.conversation_upserted", "data_writer.duplicate_message", "platform_api.blocked"] },
   { label: "Quick reply", types: ["quick_reply.create", "quick_reply.update", "quick_reply.delete", "quick_reply.use"] },
   { label: "Persona", types: ["shop_persona.create", "shop_persona.update", "shop_persona.delete", "shop_persona.toggle"] },
   { label: "Shop settings", types: ["shop_settings.create", "shop_settings.update", "shop_settings.delete"] },
-  { label: "Shadow", types: ["shadow_reply.delete", "shadow_reply.clear_all", "shadow_reply.restore", "shadow_reply.restore_all", "shadow_reply.rate", "shadow_reply.generate_conversation"] },
+  { label: "Shadow", types: ["shadow_reply.delete", "shadow_reply.clear_all", "shadow_reply.restore", "shadow_reply.restore_all", "shadow_reply.rate", "shadow_reply.generate", "shadow_reply.generate_conversation"] },
+  { label: "Test", types: ["test_chat.rate", "test_assignment.rate_message", "test_assignment.rate_conversation", "test_assignment.replay"] },
+  { label: "Chat accept", types: ["chat_accept.start", "chat_accept.stop"] },
+  { label: "Conversation meta", types: ["conversation.set_topic", "conversation.set_item_ids", "conversation.pin", "conversation.unpin"] },
+  { label: "SLA", types: ["sla.alert", "sla.reassign"] },
 ];
 
 const ACTION_TONE: Record<string, "brand" | "coral" | "neutral" | "pale"> = {
@@ -88,6 +96,7 @@ export default function LogsPage() {
   const [admins, setAdmins] = useState<AdminOption[]>([]);
   const [filterAdmin, setFilterAdmin] = useState<string>("all");
   const [filterCategory, setFilterCategory] = useState<string>("all");
+  const [viewMode, setViewMode] = useState<"list" | "table">("list");
   const [filterActionType, setFilterActionType] = useState<string>("all");
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -198,9 +207,26 @@ export default function LogsPage() {
               </p>
             </div>
           </div>
-          <Button size="sm" variant="outline" onClick={loadLogs} disabled={loading}>
-            <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* ⚡ v2 — tab สลับมุมมอง ลิสต์/ตาราง */}
+            <div className="flex items-center rounded-lg border border-border bg-surface-2 p-0.5">
+              <button
+                onClick={() => setViewMode("list")}
+                className={`h-7 px-2.5 rounded-md text-xs flex items-center gap-1.5 transition-colors ${viewMode === "list" ? "bg-brand text-white" : "text-text-muted hover:text-text"}`}
+              >
+                <List size={12} /> ลิสต์
+              </button>
+              <button
+                onClick={() => setViewMode("table")}
+                className={`h-7 px-2.5 rounded-md text-xs flex items-center gap-1.5 transition-colors ${viewMode === "table" ? "bg-brand text-white" : "text-text-muted hover:text-text"}`}
+              >
+                <Table2 size={12} /> ตาราง
+              </button>
+            </div>
+            <Button size="sm" variant="outline" onClick={loadLogs} disabled={loading}>
+              <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
+            </Button>
+          </div>
         </div>
 
         {/* Filter bar */}
@@ -295,13 +321,14 @@ export default function LogsPage() {
         </div>
       </div>
 
-      {/* Log list */}
+      {/* Log content — สลับ list/table ตาม viewMode */}
       <div className="p-6">
         {filtered.length === 0 ? (
           <div className="text-center py-12 text-text-muted text-sm">
             {loading ? "กำลังโหลด..." : "ยังไม่มี log ตรงเงื่อนไข"}
           </div>
-        ) : (
+        ) : viewMode === "list" ? (
+          /* ── List view (เดิม) ── */
           <div className="space-y-1.5">
             {filtered.map((log, i) => {
               const key = `${log.admin_id}-${log.timestamp}-${i}`;
@@ -364,7 +391,146 @@ export default function LogsPage() {
               );
             })}
           </div>
+        ) : (
+          /* ── Table view (ใหม่ — แสดงทุก field จริงใน AdminLogDoc) ── */
+          <LogTableView logs={filtered} adminName={adminName} expandedId={expandedId} setExpandedId={setExpandedId} />
         )}
+      </div>
+    </div>
+  );
+}
+
+// ── Table view — แสดงทุก field จริงใน AdminLogDoc ──────────────────────────
+// คอลัมน์: timestamp · action_type · actor/admin_id · target_admin_id ·
+//          conversation_id · shop_id · ticket_id · ip · meta · metadata
+// คลิก row → expand ดู metadata/meta แบบเต็มด้านล่าง
+function LogTableView({
+  logs,
+  adminName,
+  expandedId,
+  setExpandedId,
+}: {
+  logs: AdminLogRow[];
+  adminName: (id: string) => string;
+  expandedId: string | null;
+  setExpandedId: (id: string | null) => void;
+}) {
+  const fmtTime = (ts: string) =>
+    new Date(ts).toLocaleString("th-TH", {
+      day: "2-digit", month: "2-digit", year: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+  const truncate = (s: string | undefined, n: number) =>
+    !s ? "—" : s.length > n ? s.slice(0, n) + "…" : s;
+  const metaCount = (m?: Record<string, unknown>) =>
+    !m ? 0 : Object.keys(m).length;
+
+  return (
+    <div className="rounded-lg border border-border bg-surface overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="bg-surface-2 text-text-muted sticky top-0">
+            <tr>
+              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">timestamp</th>
+              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">action_type</th>
+              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">actor / admin_id</th>
+              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">target_admin_id</th>
+              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">conversation_id</th>
+              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">shop_id</th>
+              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">ticket_id</th>
+              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">ip</th>
+              <th className="text-right font-medium px-3 py-2 whitespace-nowrap">meta</th>
+              <th className="text-right font-medium px-3 py-2 whitespace-nowrap">metadata</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {logs.map((log, i) => {
+              const key = `${log.admin_id}-${log.timestamp}-${i}`;
+              const expanded = expandedId === key;
+              const tone = ACTION_TONE[log.action_type] || "neutral";
+              const hasDetail = metaCount(log.metadata) > 0 || metaCount(log.meta) > 0;
+              return (
+                <Fragment key={key}>
+                  <tr
+                    onClick={() => hasDetail && setExpandedId(expanded ? null : key)}
+                    className={`align-top ${hasDetail ? "cursor-pointer hover:bg-surface-2/50" : "cursor-default"} transition-colors`}
+                  >
+                    <td className="px-3 py-2 whitespace-nowrap font-mono text-text-subtle">
+                      {fmtTime(log.timestamp)}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <Badge tone={tone}>{log.action_type}</Badge>
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <div className="text-text font-medium">{adminName(log.admin_id)}</div>
+                      {log.actor && log.actor !== log.admin_id && (
+                        <div className="text-text-subtle text-[10px]">actor: {log.actor}</div>
+                      )}
+                      <div className="text-text-subtle text-[10px] font-mono">{log.admin_id}</div>
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap text-text-muted">
+                      {log.target_admin_id ? (
+                        <>
+                          <div>{adminName(log.target_admin_id)}</div>
+                          <div className="text-text-subtle text-[10px] font-mono">{log.target_admin_id}</div>
+                        </>
+                      ) : "—"}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap font-mono text-text-muted">
+                      {truncate(log.conversation_id, 20)}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap font-mono text-text-muted">
+                      {truncate(log.shop_id, 16)}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap font-mono text-text-muted">
+                      {truncate(log.ticket_id, 16)}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap font-mono text-text-muted">
+                      {log.ip || "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right text-text-muted whitespace-nowrap">
+                      {metaCount(log.meta) > 0 ? `${metaCount(log.meta)} keys` : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap">
+                      {metaCount(log.metadata) > 0 ? (
+                        <span className="text-brand flex items-center justify-end gap-1">
+                          {metaCount(log.metadata)} keys
+                          {hasDetail && (
+                            <ChevronDown size={10} className={`text-text-muted transition-transform ${expanded ? "rotate-180" : ""}`} />
+                          )}
+                        </span>
+                      ) : "—"}
+                    </td>
+                  </tr>
+                  {expanded && hasDetail && (
+                    <tr key={`${key}-detail`} className="bg-surface-2/30">
+                      <td colSpan={10} className="px-3 py-2.5">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {metaCount(log.metadata) > 0 && (
+                            <div>
+                              <div className="text-text-muted mb-1 text-[11px]">metadata ({metaCount(log.metadata)} keys):</div>
+                              <pre className="text-[10px] text-text-muted bg-surface rounded p-2 overflow-x-auto font-mono border border-border">
+                                {JSON.stringify(log.metadata, null, 2)}
+                              </pre>
+                            </div>
+                          )}
+                          {metaCount(log.meta) > 0 && (
+                            <div>
+                              <div className="text-text-muted mb-1 text-[11px]">meta (legacy, {metaCount(log.meta)} keys):</div>
+                              <pre className="text-[10px] text-text-muted bg-surface rounded p-2 overflow-x-auto font-mono border border-border">
+                                {JSON.stringify(log.meta, null, 2)}
+                              </pre>
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );

@@ -45,6 +45,13 @@ async function safeCreateIndex(
 
 export async function ensureIndexes(): Promise<void> {
   const db = await getDb();
+  // ⚡ Phase 3B-6-fix — drop old chat_annotations unique index { scope: 1, conversation_id: 1 }
+  //   ที่ไม่รวม generation_batch_id ก่อนสร้าง partial index ใหม่ (ไม่งั้นชนกัน)
+  try {
+    await db.collection(COLLECTIONS.chatAnnotations).dropIndex("scope_1_conversation_id_1");
+  } catch {
+    // index อาจไม่มี (fresh install) → ไม่เป็นไร
+  }
   await Promise.all([
     safeCreateIndex(db, COLLECTIONS.admins, { email: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.admins, { username: 1 }, { unique: true, sparse: true }),
@@ -74,6 +81,15 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.messages, { reply_to_message_id: 1 }, { sparse: true }),
     safeCreateIndex(db, COLLECTIONS.messages, { data_received_at: -1 }, { sparse: true }),
     safeCreateIndex(db, COLLECTIONS.conversations, { platform: 1, status: 1, unread_count: 1 }),
+    // ⚡ botworker/admin list ที่ไม่ filter platform/shop_id — ต้อง sort ด้วย last_message_timestamp
+    //   โดยไม่มี compound index (leading fields = platform/shop_id) รองรับ → ต้องมี standalone index
+    safeCreateIndex(db, COLLECTIONS.conversations, { last_message_timestamp: -1 }),
+    safeCreateIndex(db, COLLECTIONS.conversations, { pinned: -1, last_message_timestamp: -1 }),
+    // ⚡ Phase 1 pagination — compound sort + cursor tiebreaker (กันข้ามแชทที่ timestamp เดียวกัน)
+    safeCreateIndex(db, COLLECTIONS.conversations, { pinned: -1, last_message_timestamp: -1, conversation_id: -1 }),
+    // ⚡ Phase 1 pagination — index สำหรับ pre-fetch assigned_to ids
+    safeCreateIndex(db, COLLECTIONS.statusConversation, { conversation_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.statusConversation, { assigned_to: 1 }, { sparse: true }),
     safeCreateIndex(db, COLLECTIONS.tickets, { ticket_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.tickets, { status: 1 }),
     safeCreateIndex(db, COLLECTIONS.tickets, { channel: 1 }),
@@ -131,9 +147,20 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.testChatRatings, { session_id: 1, msg_index: 1 }, { unique: true }),
     safeCreateIndex(db, COLLECTIONS.testChatRatings, { platform: 1, rated_at: -1 }),
     // ⚡ test_assignment — replay results + ratings
-    safeCreateIndex(db, COLLECTIONS.testAssignment, { conversation_id: 1 }, { unique: true, sparse: true }),
+    // ⚡ Phase 3B-4 — unique index เปลี่ยนจาก { conversation_id } → { conversation_id, replayed_by }
+    //   ทำให้แต่ละ admin มี doc ของตัวเอง (admin A และ admin B replay แชทเดียวกันได้)
+    safeCreateIndex(db, COLLECTIONS.testAssignment, { conversation_id: 1, replayed_by: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.testAssignment, { platform: 1, created_at: -1 }),
     safeCreateIndex(db, COLLECTIONS.testAssignment, { final_status: 1, created_at: -1 }),
+    safeCreateIndex(db, COLLECTIONS.testAssignment, { replayed_by: 1, replayed_at: -1 }),
+    // ⚡ Phase 3B-1 — chat_annotations (markup dot + note)
+    //   ⚡ Phase 3B-6/3B-7-fix — unique index รวม generation_batch_id เพื่อให้แยก annotation ตามรอบได้
+    //     แยกเป็น 2 partial index:
+    //     1. มี batch_id → unique ที่ (scope, conversation_id, generation_batch_id) — แยกตามรอบ
+    //     2. ไม่มี batch_id (legacy) → unique ที่ (scope, conversation_id) — 1 ต่อแชท
+    safeCreateIndex(db, COLLECTIONS.chatAnnotations, { scope: 1, conversation_id: 1, generation_batch_id: 1 }, { unique: true, partialFilterExpression: { generation_batch_id: { $exists: true } } }),
+    safeCreateIndex(db, COLLECTIONS.chatAnnotations, { scope: 1, conversation_id: 1 }, { unique: true, partialFilterExpression: { generation_batch_id: { $exists: false } } }),
+    safeCreateIndex(db, COLLECTIONS.chatAnnotations, { created_by: 1, created_at: -1 }),
     // ⚡ buffer_messages — message buffering (debounce) ก่อนเข้า processMessage
     safeCreateIndex(db, COLLECTIONS.bufferMessages, { message_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.bufferMessages, { conversation_id: 1, received_at: 1 }),
@@ -149,5 +176,12 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.workflowRuns, { workflow_id: 1, conversation_id: 1, status: 1 }),
     safeCreateIndex(db, COLLECTIONS.workflowRuns, { customer_id: 1, workflow_id: 1, status: 1 }),
     safeCreateIndex(db, COLLECTIONS.workflowRuns, { updated_at: -1 }),
+    // ⚡ Phase 2J — status_conversation (จริง — ใช้กับ /tickets)
+    safeCreateIndex(db, COLLECTIONS.statusConversation, { conversation_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.statusConversation, { assigned_to: 1 }),
+    safeCreateIndex(db, COLLECTIONS.statusConversation, { status: 1 }),
+    // ⚡ Phase 2J — test_status_conversation (ทดสอบ — ใช้กับ test-assignment, shadowbot, replay-compare, test-chat)
+    safeCreateIndex(db, COLLECTIONS.testStatusConversation, { conversation_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.testStatusConversation, { source: 1, conversation_id: 1 }),
   ]);
 }

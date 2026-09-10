@@ -1,0 +1,59 @@
+# Caddyfile — reverse proxy + auto SSL (Let's Encrypt)
+#
+# วิธีใช้:
+#   1. เลือกกรณี A (มีโดเมน) หรือกรณี B (ยังไม่มีโดเมน) ด้านล่าง
+#   2. แก้ค่าตามโดเมนจริง / IP ของ server
+#   3. reload: docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+#
+# ⚠️ ค่า default (กรณี B) รัน HTTP บน port 80 ไม่มี SSL
+#    พอมีโดเมนจริงแล้ว สลับไปกรณี A (Caddy ขอ cert อัตโนมัติ)
+
+# ═══════════════════════════════════════════════════════════════
+# กรณี A: มีโดเมนจริง (แนะนำ — SSL อัตโนมัติ)
+#   - ตั้ง DNS A record ให้ชี้มาที่ IP ของ server ก่อน
+#   - uncomment บล็อกด้านล่าง + แก้โดเมน
+#   - comment กรณี B ด้านล่าง
+# ═══════════════════════════════════════════════════════════════
+
+# admin.example.com {
+# 	encode zstd gzip
+# 	reverse_proxy chatadmin-web:3000 {
+# 		header_up X-Real-IP {remote_host}
+# 		header_up X-Forwarded-For {remote_host}
+# 		header_up X-Forwarded-Proto {scheme}
+# 	}
+# }
+#
+# # ถ้าไม่ต้องการ expose chatbot API ออก internet ให้ comment บล็อกนี้
+# bot.example.com {
+# 	encode zstd gzip
+# 	reverse_proxy chatbot-shopee:8010 {
+# 		header_up X-Real-IP {remote_host}
+# 		header_up X-Forwarded-For {remote_host}
+# 		header_up X-Forwarded-Proto {scheme}
+# 	}
+# }
+
+# ═══════════════════════════════════════════════════════════════
+# กรณี B: ยังไม่มีโดเมน (HTTP, ไม่ SSL — default)
+#   - เข้าผ่าน http://IP-ของ-server/ (admin)
+#   - เข้าผ่าน http://IP-ของ-server/bot/health (chatbot)
+#   - พอมีโดเมนแล้ว comment บล็อกนี้ + uncomment กรณี A
+# ═══════════════════════════════════════════════════════════════
+
+:80 {
+	encode zstd gzip
+
+	# admin web ที่ root
+	reverse_proxy chatadmin-web:3000 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# chatbot API ที่ /bot/* (strip prefix ก่อนส่งต่อ)
+	handle /bot/* {
+		uri strip_prefix /bot
+		reverse_proxy chatbot-shopee:8010
+	}
+}

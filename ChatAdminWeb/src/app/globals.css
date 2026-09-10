@@ -43,6 +43,20 @@ html, body {
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* ⚡ กัน overscroll/bounce — กันเห็นขอบนอกแอปเวลาเลื่อนสุดขอบ
+     ใช้ overscroll-behavior: none ที่ global + overflow hidden ที่ AppShell (h-screen overflow-hidden อยู่แล้ว)
+     หน้า login ใช้ min-h-screen จึงยัง scroll ได้ถ้าจอเล็ก */
+  overscroll-behavior: none;
+}
+
+/* ⚡ กัน body scroll — ปล่อยให้แค่ inner container scroll (AppShell มี h-screen overflow-hidden อยู่แล้ว)
+   หน้า login ใช้ min-h-screen + overflow-y-auto จึงยัง scroll ได้ */
+body {
+  overflow: hidden;
+}
+/* หน้าที่ไม่มี AppShell (login) — ยอมให้ scroll ได้ */
+body:has(.auth-gradient-bg) {
+  overflow-y: auto;
 }
 
 /* Scrollbar — minimal */

@@ -131,6 +131,29 @@ def should_use_web_search(
     if not is_configured():
         return False, "openrouter_not_configured"
 
+    # ⚡ BUG-11 fix — guard กัน web_search ในเคสที่ไม่จำเป็น (ประหยัดต้นทุน + เวลา)
+    # 1. ถ้ามี products อยู่แล้วและเป็น ordinary product query (ไม่ใช่ spec/compat/warranty)
+    #    → LLM มี context พอแล้ว ไม่ต้อง search ภายนอก
+    # 2. ถ้าเป็น greeting/thanks/short message → ไม่ search
+    _msg_lower = message.lower()
+    _has_products = products is not None and len(products) > 0
+    # ordinary product query = มีสินค้าใน context + ไม่ใช่ spec/compat/warranty/comparison question
+    _ordinary_product_kws = (
+        "ราคา", "ราคาเท่าไหร่", "กี่บาท", "ขอลิงค์", "ขอรูป", "ขอดู",
+        "สนใจ", "อยากได้", "จอง", "สั่ง", "ซื้อ", "มีไหม", "มีไหมคะ",
+    )
+    _is_ordinary_product_q = any(kw in _msg_lower for kw in _ordinary_product_kws)
+    # greeting/thanks = ข้อความสั้นๆ ที่ไม่ใช่คำถาม
+    _greeting_kws = (
+        "ขอบคุณ", "ขอบคุณค่ะ", "ขอบคุณครับ", "โอเค", " ok ", "รับทราบ",
+        "สวัสดี", "หวัดดี", "ดีค่ะ", "ดีครับ", "hi ", "hello",
+    )
+    _is_greeting = any(kw in _msg_lower for kw in _greeting_kws) and len(message.split()) <= 4
+    if _is_greeting:
+        return False, "greeting_or_thanks"
+    if _has_products and _is_ordinary_product_q:
+        return False, "ordinary_product_query_with_context"
+
     # ตรวจคำถามเรื่องรับประกัน/สเปค/comparison และมีสินค้าใน context
     # (ใช้สำหรับ skip web search เมื่อ context มีข้อมูลอยู่แล้ว)
     _msg_lower = message.lower()
@@ -376,7 +399,9 @@ def search_and_extract(
         "model": _get_openrouter_model(),
         "messages": messages,
         "temperature": 0.2,
-        "max_tokens": 1024,
+        # ⚡ BUG-11 fix — ลด max_tokens 1024 → 512 (พอสำหรับ extract keywords + short info)
+        #   QA เคยเจอ 24,986 tokens ในเคสที่ไม่จำเป็น — ลดลงช่วยประหยัดต้นทุน
+        "max_tokens": 512,
     }
 
     _req_start = time.time()
@@ -401,7 +426,8 @@ def search_and_extract(
             },
             method="POST",
         )
-        _resp = urllib.request.urlopen(_req, timeout=30)
+        # ⚡ BUG-11 fix — ลด timeout 30 → 20 (กันค้างนานเกินไปในเคสที่ไม่จำเป็น)
+        _resp = urllib.request.urlopen(_req, timeout=20)
         _resp_data = json.loads(_resp.read().decode("utf-8"))
         _http_status = _resp.getcode()
 
@@ -525,8 +551,22 @@ def search_and_answer(
             "elapsed": _result["elapsed"],
         }
     # ใช้ search_info เป็นคำตอบชั่วคราว (app.py ควรจัดการเอง)
+    # ⚡ 2026-09-14 — strip URL ออกจาก search_info ก่อนคืน
+    #   กัน LLM/search_info มีลิงก์เว็บนอกหลุดไปลูกค้า
+    #   (ลิงก์ที่ใช้ได้มีแค่ short_link ของสินค้าใน context เท่านั้น)
+    _answer = _result["search_info"]
+    if _answer:
+        import re as _re_strip
+        # Step 1: ลบ markdown link [text](url) ออกทั้งก้อน (รวม text)
+        _answer = _re_strip.sub(r'\[([^\]]+)\]\([^)]+\)', r'', _answer)
+        # Step 2: ลบ plain URL ที่เหลือ (http(s)://...)
+        _answer = _re_strip.sub(r'https?://[^\s\)\]]+', r'', _answer, flags=_re_strip.IGNORECASE)
+        # Step 3: ลบ markdown link เปล่าที่เหลือ [text]() หรือ [text]( )
+        _answer = _re_strip.sub(r'\[([^\]]*)\]\(\s*\)', r'', _answer).strip()
+        # Step 4: กรอบ whitespace ที่เหลือหลายๆ อัน
+        _answer = _re_strip.sub(r'\s{2,}', r' ', _answer).strip()
     return {
-        "answer": _result["search_info"],
+        "answer": _answer,
         "usage": _result["usage"],
         "cost_usd": _result["cost_usd"],
         "model": _result["model"],

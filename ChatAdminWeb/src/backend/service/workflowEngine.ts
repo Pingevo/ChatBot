@@ -1,5 +1,5 @@
 // Workflow Engine — รัน flow + resume + eval condition + ทำ action
-// (แบบ Zaapi Flow Builder — อ้างอิง workflow-planner.md)
+// (แบบ Zaapi Flow Builder — อ้างอิง docs/plans/workflow-planner.md)
 //
 // Pipeline ที่เสียบใน processMessage:
 //   ① Active Flow Resume (เสมอ ไม่สน priority)
@@ -18,7 +18,7 @@ import { workflowService, type WorkflowDoc, type WorkflowNode, isMultiBranchCond
 import { callBot } from "./botCallService";
 import { getConversation, closeConversation, type ProblemCategory } from "./conversationService";
 import { resolveTemplate, type TemplateVars } from "./templateService";
-import { getHistoryForBot } from "./messageService";
+import { getHistoryForBot, toBotImages } from "./messageService";
 import { handoffService } from "./handoffService";
 import { getCustomer } from "./customerService";
 import { logAdminEvent } from "./adminLogService";
@@ -884,12 +884,15 @@ async function performAction(
         maxMessages: 10,
       });
       const promptPrefix = typeof cfg.prompt === "string" && cfg.prompt.trim().length > 0 ? cfg.prompt.trim() + "\n" : "";
+      // ⚡ Phase 1A multimodal — ส่ง URL รูปให้ bot ด้วย (ถ้าลูกค้าส่งรูป)
+      const wfBotImages = toBotImages(msg);
       const botResp = await callBot({
         platform: msg.platform,
         message: promptPrefix + msg.text,
         shopId: msg.shop_id,
         shopName,
         history,
+        ...(wfBotImages.length > 0 ? { images: wfBotImages } : {}),
       });
       context.bot_answer = botResp.answer;
       context.bot_source = botResp.source;

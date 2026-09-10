@@ -78,8 +78,12 @@ export async function GET(
             create_time: 1,
             shopname: 1,
             shipping_carrier: 1,
+            total_amount: 1,
+            currency: 1,
+            buyer_username: 1,
+            payment_method: 1,
             item_list: { $slice: 10 },
-            package_list: { $slice: 1 },
+            package_list: 1,
           },
         }
       )
@@ -88,22 +92,54 @@ export async function GET(
       .toArray();
 
     const orders = docs.map((d) => {
-      const items = (d.item_list || []).map((i: Record<string, unknown>) => ({
-        name: (i.item_name as string) || (i.model_name as string) || "",
-        model_name: (i.model_name as string) || "",
-        quantity: Number(i.model_quantity_purchased) || 1,
-      }));
-      const pkg = (d.package_list || [])[0] as Record<string, unknown> | undefined;
+      const items = (d.item_list || []).map((i: Record<string, unknown>) => {
+        const imgInfo = i.image_info as Record<string, unknown> | undefined;
+        return {
+          name: (i.item_name as string) || (i.model_name as string) || "",
+          model_name: (i.model_name as string) || "",
+          quantity: Number(i.model_quantity_purchased) || 1,
+          price: Number(i.model_discounted_price ?? i.model_original_price ?? 0) || 0,
+          image_url: (imgInfo?.image_url as string) || "",
+          sku: (i.model_sku as string) || (i.item_sku as string) || "",
+          item_id: String(i.item_id ?? "").replace(/\.0$/, ""),
+          model_id: String(i.model_id ?? "").replace(/\.0$/, ""),
+        };
+      });
+      // ⚡ Phase 1C — ดึง tracking จากทุก package_list entry
+      const pkgs = (d.package_list || []) as Record<string, unknown>[];
+      const trackingNumbers: string[] = [];
+      let logisticsStatus = "";
+      let shippingCarrier = (d.shipping_carrier as string) || "";
+      for (const pkg of pkgs) {
+        const pStatus = (pkg.logistics_status as string) || "";
+        if (pStatus && !logisticsStatus) logisticsStatus = pStatus;
+        const pCarrier = (pkg.shipping_carrier as string) || "";
+        if (pCarrier && !shippingCarrier) shippingCarrier = pCarrier;
+        for (const tk of ["tracking_no", "tracking_number", "parcel_id", "waybill_id"]) {
+          const tn = (pkg[tk] as string) || "";
+          if (tn && String(tn).trim() && !trackingNumbers.includes(String(tn).trim())) {
+            trackingNumbers.push(String(tn).trim());
+          }
+        }
+      }
       return {
         order_sn: d.order_sn,
         order_status: ORDER_STATUS_TH[(d.order_status as string) || ""] || d.order_status || "—",
         order_status_raw: d.order_status || "",
+        logistics_status: logisticsStatus,
         create_time: formatCreateTime(d.create_time),
+        create_time_raw: d.create_time,
         shopname: d.shopname || "",
-        shipping_carrier: d.shipping_carrier || (pkg?.shipping_carrier as string) || "",
+        shipping_carrier: shippingCarrier || "ไม่ระบุ",
+        tracking_no: trackingNumbers[0] || "",
+        tracking_numbers: trackingNumbers,
         items,
         item_count: items.length,
         total_quantity: items.reduce((s: number, i: { quantity: number }) => s + i.quantity, 0),
+        total_amount: Number(d.total_amount) || 0,
+        currency: (d.currency as string) || "THB",
+        buyer_username: (d.buyer_username as string) || "",
+        payment_method: (d.payment_method as string) || "",
       };
     });
 

@@ -13,6 +13,7 @@ import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { serverConfig } from "@/backend/lib/config";
+import { shouldUseChatV2, shouldUseChatV3, getBotProductLimit } from "@/backend/service/systemConfigService";
 import type { Platform } from "@/backend/service/systemConfigService";
 
 export async function POST(req: NextRequest) {
@@ -35,7 +36,7 @@ export async function POST(req: NextRequest) {
   const shop = body.shop ? String(body.shop) : "";
   const platform: Platform = (String(body.platform || "shopee") as Platform);
   const history = body.history || [];
-  const limit = body.limit || 10;
+  const limit = body.limit || (await getBotProductLimit());
 
   // 1. ดึง messages จาก buffer_messages
   const coll = await getCollection(COLLECTIONS.bufferMessages);
@@ -51,6 +52,16 @@ export async function POST(req: NextRequest) {
   // 2. รวมเป็น 1 message — ใช้ space แทน \n เพื่อให้ RAG/LLM อ่านเป็นประโยคเดียว
   const combinedText = msgs.map((m) => m.text).join(" ");
   const messageIds = msgs.map((m) => m.message_id);
+
+  // ⚡ Phase 1F — รวม images จากทุก message (จาก raw_payload.images)
+  const allImages: string[] = [];
+  for (const m of msgs) {
+    const rp = m.raw_payload as Record<string, unknown> | undefined;
+    const imgs = Array.isArray(rp?.images) ? (rp!.images as string[]) : [];
+    for (const u of imgs) {
+      if (u && !allImages.includes(u)) allImages.push(u);
+    }
+  }
 
   // 3. ลบออกจาก buffer_messages
   await coll.deleteMany({ conversation_id: sessionId });
@@ -68,6 +79,17 @@ export async function POST(req: NextRequest) {
   // ส่ง conversation_id (ใช้ session_id) + simulate_assignment เหมือน test chat ปกติ
   payload.conversation_id = sessionId;
   payload.simulate_assignment = true;
+  // ⚡ Phase 1F — ส่ง images ให้ bot (URL สัมพันธ์ → แปลงเป็น absolute)
+  if (allImages.length > 0) {
+    // แปลง URL สัมพันธ์เป็น absolute (bot ดึง HTTP ได้)
+    const origin = new URL(req.url).origin;
+    payload.images = allImages.map((u) => (u.startsWith("http") ? u : `${origin}${u}`));
+  }
+  // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม) — v3 มี priority เหนือ v2
+  const useV3 = await shouldUseChatV3();
+  const useV2 = !useV3 && await shouldUseChatV2();
+  if (useV3) payload.use_v3 = true;
+  else if (useV2) payload.use_v2 = true;
 
   try {
     const resp = await fetch(url, {

@@ -5,6 +5,15 @@ import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error } from "@/backend/lib/http";
 import { conversationService } from "@/backend/service/conversationService";
 import { invalidateConversationsCache } from "@/app/api/admin/conversations/route";
+// ⚡ G-fix — invalidate botworker cache ด้วย
+async function invalidateBotworkerCache() {
+  try {
+    const mod = await import("@/app/api/botworker/conversations/route");
+    if (typeof (mod as unknown as { invalidateBotworkerCache?: () => void }).invalidateBotworkerCache === "function") {
+      (mod as unknown as { invalidateBotworkerCache: () => void }).invalidateBotworkerCache();
+    }
+  } catch { /* ignore */ }
+}
 
 export async function POST(
   req: NextRequest,
@@ -24,5 +33,6 @@ export async function POST(
   if (!ok) return error("conversation not found", 404);
 
   invalidateConversationsCache();
+  invalidateBotworkerCache();
   return json({ ok: true, status: "resolved" });
 }

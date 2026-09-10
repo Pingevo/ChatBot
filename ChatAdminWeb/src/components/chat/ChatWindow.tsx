@@ -1,13 +1,16 @@
 // ChatWindow — middle column: message bubbles + composer (Zaapi-style)
 "use client";
 import { useState, useRef, useEffect, FormEvent } from "react";
-import { Send, Bot, User, Headset, AlertCircle, Sparkles, Ticket, MoreHorizontal } from "lucide-react";
+import { Send, Bot, User, Headset, AlertCircle, Sparkles, Ticket, MoreHorizontal, Zap } from "lucide-react";
 import { Avatar } from "@/components/ui/Avatar";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import type { Conversation, ChatMessage, Topic } from "@/lib/types";
 import { MessageContent } from "./MessageContent";
+import { DateSeparatedList } from "./DateSeparator";
+import { adminBubbleColor, ZAAPI_COLOR, BOT_COLOR } from "@/lib/bubbleColors";
+import { useAuth } from "@/lib/authStore";
 
 interface Props {
   conversation: Conversation | null;
@@ -46,11 +49,20 @@ const topicTones: Record<Topic, "brand" | "coral" | "pale" | "neutral" | "red"> 
   handoff: "coral",
 };
 
-function MessageBubble({ msg }: { msg: ChatMessage }) {
+function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage; customerName?: string; customerAvatar?: string }) {
   const isUser = msg.role === "user";
-  const isAdmin = msg.role === "admin";
   const isBot = msg.role === "bot";
   const isSystem = msg.role === "system";
+  // ⚡ แยก admin จริง vs Zaapi (outbound ที่ไม่มี admin_id)
+  //    admin = role "admin" + มี admin_id → แดง
+  //    zaapi = role "admin" + ไม่มี admin_id → เขียวอ่อน
+  const isAdmin = msg.role === "admin" && !!msg.admin_id;
+  const isZaapi = msg.role === "admin" && !msg.admin_id;
+
+  // ⚡ ดึง admin_id + bubble_color ปัจจุบันจาก authStore — admin ปัจจุบัน → ใช้สีที่ตั้งใน profile
+  const myAdminId = useAuth((s) => s.user?.admin_id);
+  const myBubbleColor = useAuth((s) => s.user?.bubble_color);
+  const adminColor = adminBubbleColor(msg.admin_id, myAdminId, myBubbleColor);
 
   if (isSystem) {
     return (
@@ -62,23 +74,49 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
     );
   }
 
+  // ⚡ สี bubble: zaapi=#11302e/ขาว, bot=#0b2340 (sidebar navy)/ขาว, admin=#560C0E (แดงเข้ม)/ขาว
+  const bubbleCls = isUser
+    ? "bg-surface border border-border text-text rounded-tl-sm"
+    : isZaapi
+    ? "text-white rounded-tr-sm"
+    : isBot
+    ? "text-white rounded-tr-sm"
+    : isAdmin
+    ? "text-white rounded-tr-sm"
+    : "bg-deep-space text-white rounded-tr-sm";
+
+  const bubbleStyle = isZaapi
+    ? { backgroundColor: ZAAPI_COLOR }
+    : isBot
+    ? { backgroundColor: BOT_COLOR }
+    : isAdmin
+    ? { backgroundColor: adminColor }
+    : undefined;
+
+  const avatarBg = "";
+  const avatarStyle = isZaapi
+    ? { backgroundColor: ZAAPI_COLOR }
+    : isBot
+    ? { backgroundColor: BOT_COLOR }
+    : isAdmin
+    ? { backgroundColor: adminColor }
+    : undefined;
+
   return (
     <div className={`flex gap-2.5 ${isUser ? "justify-start" : "justify-end"} animate-fade-in`}>
-      {isUser && <Avatar name="User" size={32} className="mt-1 shrink-0" />}
+      {isUser && <Avatar name={customerName || "User"} src={customerAvatar} size={32} className="mt-1 shrink-0" />}
       <div className={`max-w-[70%] ${isUser ? "" : "flex flex-col items-end"}`}>
-        {/* แสดงชื่อ admin ถ้าเป็น admin message */}
+        {/* แสดงชื่อ admin ถ้าเป็น admin message จริง */}
         {isAdmin && msg.admin_name && (
           <div className="text-[10px] text-text-muted mb-0.5 pr-1">{msg.admin_name}</div>
         )}
-        <div
-          className={`rounded-2xl px-3.5 py-2 text-sm ${
-            isUser
-              ? "bg-surface border border-border text-text rounded-tl-sm"
-              : isAdmin
-              ? "bg-deep-space text-white rounded-tr-sm"
-              : "bg-brand text-white rounded-tr-sm"
-          }`}
-        >
+        {/* แสดง label ฝั่ง out */}
+        {!isUser && (
+          <div className="text-[10px] text-text-subtle mb-0.5 pr-1">
+            {isZaapi ? "Zaapi" : isBot ? "Bot" : isAdmin ? "Admin" : ""}
+          </div>
+        )}
+        <div className={`rounded-2xl px-3.5 py-2 text-sm ${bubbleCls}`} style={bubbleStyle}>
           <MessageContent msg={msg} variant={isUser ? "user" : "out"} />
         </div>
 
@@ -86,17 +124,14 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
         <div className={`flex items-center gap-1.5 mt-1 text-[10px] text-text-subtle`}>
           {isBot && <Bot size={10} />}
           {isAdmin && <Headset size={10} />}
+          {isZaapi && <Zap size={10} />}
           <span>{new Date(msg.timestamp).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })}</span>
           {msg.source && <span className="opacity-60">· {msg.source}</span>}
         </div>
       </div>
       {!isUser && !isSystem && (
-        <div
-          className={`mt-1 w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-            isAdmin ? "bg-deep-space" : "bg-brand"
-          }`}
-        >
-          {isAdmin ? <Headset size={16} className="text-white" /> : <Bot size={16} className="text-white" />}
+        <div className={`mt-1 w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${avatarBg}`} style={avatarStyle}>
+          {isZaapi ? <Zap size={16} className="text-white" /> : isBot ? <Bot size={16} className="text-white" /> : <Headset size={16} className="text-white" />}
         </div>
       )}
     </div>
@@ -119,12 +154,14 @@ export function ChatWindow({
   // track ว่า user อยู่ใกล้ล่างไหม — ถ้าไม่ใช่ (กำลังเลื่อนขึ้นอ่าน) จะไม่ auto-scroll
   const wasNearBottomRef = useRef(true);
 
-  useEffect(() => {
+  // ⚡ track scroll position จาก onScroll handler จริง (ไม่ใช่ effect หลัง re-render)
+  //    ปัญหาเดิม: effect track หลัง messages เปลี่ยน → scroll position ถูกรีเซ็ตกลับบนแล้ว → ตั้ง false ตลอด
+  function handleScroll() {
     const el = scrollRef.current;
     if (!el) return;
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     wasNearBottomRef.current = distFromBottom < 80;
-  }, [messages]);
+  }
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -206,11 +243,17 @@ export function ChatWindow({
       </div>
 
       {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
         {messages.length === 0 ? (
           <div className="text-center text-sm text-text-muted py-8">ยังไม่มีข้อความ</div>
         ) : (
-          messages.map((m) => <MessageBubble key={m.id} msg={m} />)
+          <DateSeparatedList
+            items={messages}
+            getKey={(m) => m.id}
+            getTimestamp={(m) => m.timestamp}
+            renderItem={(m) => <MessageBubble msg={m} customerName={conversation?.customer_name} customerAvatar={conversation?.customer_avatar} />}
+            onlyToday
+          />
         )}
       </div>
 

@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -54,6 +54,16 @@ export default function ContactsPage() {
   const [search, setSearch] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [sortBy, setSortBy] = useState<SortBy>("last_active_at");
+  // ⚡ G-fix — debounce search 300ms — พิมพ์แล้วค้นหาทันที ไม่ต้องกด Enter
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => {
+      setSearch(searchInput.trim());
+      setPage(1);
+    }, 300);
+    return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
+  }, [searchInput]);
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [page, setPage] = useState(1);
   const [pageSize] = useState(20);
@@ -89,10 +99,7 @@ export default function ContactsPage() {
     load();
   }, [load]);
 
-  function handleSearch() {
-    setSearch(searchInput.trim());
-    setPage(1);
-  }
+  // ⚡ G-fix — handleSearch ไม่ต้องแล้ว (debounce ทำให้)
 
   function handleSort(column: SortBy) {
     if (sortBy === column) {
@@ -159,16 +166,14 @@ export default function ContactsPage() {
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle" />
               <input
                 type="text"
-                placeholder="ค้นหาชื่อ / buyer_id..."
+                placeholder="ค้นหาชื่อลูกค้า... (พิมพ์แล้วค้นหาทันที)"
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-                className="w-56 h-9 pl-9 pr-3 rounded-lg border border-border bg-surface-2 text-text text-sm placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
+                className="w-64 h-9 pl-9 pr-3 rounded-lg border border-border bg-surface-2 text-text text-sm placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
               />
             </div>
-            <Button size="sm" variant="outline" onClick={handleSearch}>ค้นหา</Button>
             {search && (
-              <Button size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchInput(""); setPage(1); }}>
+              <Button size="sm" variant="ghost" onClick={() => { setSearchInput(""); }}>
                 ล้าง
               </Button>
             )}

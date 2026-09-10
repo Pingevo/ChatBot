@@ -20,8 +20,8 @@ import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { triggerService } from "./triggerService";
 import { assignmentService } from "./assignmentService";
 import { logAdminEvent } from "./adminLogService";
-import { listMessages, getHistoryForBot, toBotText } from "./messageService";
-import { getConversation, reopenConversation } from "./conversationService";
+import { listMessages, getHistoryForBot, getGroupedHistoryForBot, toBotText, toBotImages, type MessageDoc } from "./messageService";
+import { getConversation } from "./conversationService";
 import { handoffService } from "./handoffService";
 import { assertPlatformApiDisabled, type Platform } from "../lib/safety";
 import type { ShadowReplyDoc } from "./shadowReplyService";
@@ -122,10 +122,22 @@ async function storeBotReply(opts: {
     zaapi_reply_message_id: zaapiReply?.message_id,
     rating: "unrated",
     origin: "worker",  // สร้างจาก worker (auto pipeline)
+    mode: "standalone",  // ⚡ Phase 2R — โหมด standalone (botworker รันอัตโนมัติ)
     trigger_id: opts.triggerId,
+    chat_engine: opts.botResp.chat_engine || "legacy", // ⚡ บันทึก engine ที่ใช้
     created_at: now,
     updated_at: now,
   });
+
+  // ⚡ Phase 1A multimodal — เก็บ image_desc ที่ vision pass สกัดได้ ลงใน inbound message doc
+  //    ทำให้ turn ถัดไปส่ง image_desc ใน history → bot ไม่ต้องอ่านรูปซ้ำ
+  if (opts.botResp.image_desc) {
+    const msgColl = await getCollection<MessageDoc>(COLLECTIONS.messages);
+    await msgColl.updateOne(
+      { message_id: opts.messageId },
+      { $set: { image_desc: opts.botResp.image_desc } },
+    );
+  }
 
   return shadowReplyId;
 }
@@ -159,6 +171,8 @@ async function storeWorkflowDelivered(opts: {
       bot_source: d.source,
       rating: "unrated",
       origin: "workflow",  // สร้างจาก workflow engine (Flow Builder)
+      mode: "standalone",  // ⚡ Phase 2R — โหมด standalone (worker path)
+      chat_engine: "legacy", // ⚡ workflow ยังใช้ legacy path (ไม่ผ่าน callBot)
       created_at: now,
       updated_at: now,
     } as ShadowReplyDoc);
@@ -234,6 +248,9 @@ async function settleWorkflowResult(
 //   2. ถ้าไม่มี → หา admin คนสุดท้ายที่เคยตอบ (getLastReplyAdmin)
 //   3. ถ้าไม่มี → round-robin (autoAssignConversation)
 //   4. ถ้า conversation ปิดอยู่ → reopen ก่อน
+//
+// ⚡ Phase 2V — เขียนผลลัพธ์ลง test_status_conversation (source=botworker)
+//   ไม่ใช่ status_conversation เพื่อไม่ให้กระทบ /tickets
 async function pickAgent(
   shopId: string,
   platform: Platform,
@@ -246,7 +263,21 @@ async function pickAgent(
     shopId,
     platform,
     reason: reason || "bot-worker handoff",
+    source: "botworker",
   });
+  // ⚡ Phase 2V — mirror ผลลัพธ์ลง test_status_conversation (source=botworker)
+  //   เพื่อให้ /botworker UI เห็น status/assigned_to โดยไม่กระทบ /tickets
+  try {
+    const { testStatusConversationService } = await import("./testStatusConversationService");
+    await testStatusConversationService.updateTestStatus(
+      conversationId,
+      "botworker",
+      "handoff",
+      result.assignedTo || undefined
+    );
+  } catch {
+    // ignore — ไม่วิกฤตถ้า mirror ล้มเหลว
+  }
   return { agentId: result.assignedTo, mode };
 }
 
@@ -259,6 +290,7 @@ export async function processMessage(msg: {
   platform: Platform;
   text: string;
   raw_payload?: unknown;
+  images?: string[];  // ⚡ Phase 1F — image URLs รวมจาก buffer flush
 }): Promise<{ status: string; detail: string }> {
   // 1. ตรวจซ้ำ — ถ้าประมวลผลแล้ว ข้าม
   if (await isProcessed(msg.message_id)) {
@@ -269,22 +301,41 @@ export async function processMessage(msg: {
   assertPlatformApiDisabled(msg.platform, "send");
   assertPlatformApiDisabled(msg.platform, "read");
 
+  // ⚡ Phase 2Q — อัปเดต concurrency limit จาก config (admin ปรับได้ใน /admin-config)
+  try {
+    const sysConfig = await getSystemConfig();
+    currentConcurrencyLimit = sysConfig.bot_concurrency_limit || 50;
+  } catch {
+    // ถ้าอ่าน config ไม่ได้ → ใช้ค่าเดิม
+  }
+
   // ดึง shop_name จาก conversation — Python bot ต้องการชื่อร้าน (ไม่ใช่ shop_id ตัวเลข)
   // เพื่อกรองสินค้าเฉพาะร้านที่ลูกค้าทักเข้ามา
   const conv = await getConversation(msg.conversation_id);
   const shopName = conv?.shop_name || undefined;
 
   // ── Guard: จ่ายงานเฉพาะแอดมิน + ตรวจสถานะ conversation ──
-  // 1. ถ้ามี assigned_to และ status เปิดอยู่ (ไม่ใช่ closed/resolved) → ข้าม (ปล่อยให้แอดมินตอบ)
-  // 2. ถ้า status === closed/resolved → reopen + เคลียร์ assigned_to + ประมวลผลปกติ
-  // 3. ถ้าไม่มี assigned_to → ประมวลผลปกติ
+  // ⚡ Phase 2V — แยก collection ระหว่าง botworker กับ ticket
+  //   อ่าน: status_conversation (read-only — เช็ค admin จริงกำลังตอบไหม)
+  //   เขียน: test_status_conversation source="botworker" (handoff/reopen/status)
+  //   ทำให้ botworker ไม่กระทบ /tickets เลย
+  //
+  // 1. ถ้ามี assigned_to และ status เปิดอยู่ (handoff) → ข้าม (ปล่อยให้แอดมินตอบ)
+  // 2. ถ้า status === closed → reopen ใน test_status_conversation + ประมวลผลปกติ
+  // 3. ถ้าไม่มี assigned_to (status=bot) → ประมวลผลปกติ
   if (conv) {
-    const isClosed = conv.status === "closed" || conv.status === "resolved";
-    if (conv.assigned_to && !isClosed) {
+    const { statusConversationService } = await import("./statusConversationService");
+    const { testStatusConversationService } = await import("./testStatusConversationService");
+    // ⚡ Phase 2V — อ่านจาก status_conversation (จริง) เพื่อเช็ค admin จริง
+    const meta = await statusConversationService.getMeta(msg.conversation_id);
+    const effectiveStatus = meta?.status || "bot";
+    const effectiveAssignedTo = meta?.assigned_to || null;
+    const isClosed = effectiveStatus === "closed" || effectiveStatus === "resolved";
+    if (effectiveAssignedTo && !isClosed) {
       // ⚡ Workflow guard — admin รับแชทแล้ว → flow ที่รอ reply ต้อง cancel อัตโนมัติ (planner ข้อ 3)
       await workflowEngine.cancelActiveRuns(
         msg.conversation_id,
-        `admin ${conv.assigned_to} กำลังดูแชท — cancel flow ที่รอ reply`
+        `admin ${effectiveAssignedTo} กำลังดูแชท — cancel flow ที่รอ reply`
       );
       // แอดมินกำลังดูแชทอยู่ → ข้าม (ปล่อยให้แอดมินตอบ)
       await markProcessed({
@@ -294,20 +345,16 @@ export async function processMessage(msg: {
         platform: msg.platform,
         status: "no_action",
       });
-      return { status: "skip_assigned", detail: `conversation has assigned_to=${conv.assigned_to} (open) — skip` };
+      return { status: "skip_assigned", detail: `conversation has assigned_to=${effectiveAssignedTo} (handoff) — skip` };
     }
     if (isClosed) {
-      // conversation ปิดแล้ว → reopen + เคลียร์ assigned_to เพื่อให้ pipeline ทำงาน
-      await reopenConversation({
-        conversationId: msg.conversation_id,
-        reopenedBy: "bot-worker",
-        reopenReason: "ลูกค้าทักกลับมา — reopen เพื่อประมวลผล",
-      });
-      // เคลียร์ assigned_to เก่า
-      const convColl = await getCollection<{ assigned_to: string | null }>(COLLECTIONS.conversations);
-      await convColl.updateOne(
-        { conversation_id: msg.conversation_id },
-        { $set: { assigned_to: null } }
+      // ⚡ Phase 2V — reopen ใน test_status_conversation (source=botworker) ไม่ใช่ status_conversation
+      //   ไม่กระทบ /tickets — ticket จริงยังปิดอยู่
+      await testStatusConversationService.updateTestStatus(
+        msg.conversation_id,
+        "botworker",
+        "bot",
+        undefined  // clear assigned_to
       );
     }
   }
@@ -316,8 +363,11 @@ export async function processMessage(msg: {
   // ถ้าลูกค้าแชร์การ์ดสินค้า `text` จะเป็น placeholder "[item]" แต่ raw_payload มี item_id
   // แปลงเป็น tag "[สินค้า: <item_id>]" ที่ Python bot เข้าใจ ก่อนส่งให้ trigger/bot
   const botText = toBotText(msg);
+  // ⚡ Phase 1A multimodal — ดึง URL รูปจาก raw_payload ส่งให้ bot ใน field images
+  // ⚡ Phase 1F — ถ้ามี msg.images (จาก buffer flush รวมหลายรูป) ให้ใช้แทน toBotImages
+  const botImages = msg.images && msg.images.length > 0 ? msg.images : toBotImages(msg);
 
-  // ⚡ Workflow engine (แบบ Zaapi Flow Builder) — อ้างอิง workflow-planner.md
+  // ⚡ Workflow engine (แบบ Zaapi Flow Builder) — อ้างอิง docs/plans/workflow-planner.md
   // ① Active Flow Resume (เสมอ ไม่สน priority) — แชทนี้มี flow ที่กำลังรอ reply อยู่ไหม?
   //    มี → ส่งข้อความเข้า flow เดิม (resume) → จบ
   // ② Priority (workflow_first default) — workflow ก่อน trigger
@@ -414,18 +464,30 @@ export async function processMessage(msg: {
       }
 
       // trigger.action === "bot_answer" → เรียกบอท → เก็บใน shadow_replies
-      const history = await getHistoryForBot({
+      // ⚡ grouped history — รวม user messages ติดกันเป็น 1 turn + fallback Zaapi
+      const history = await getGroupedHistoryForBot({
         conversationId: msg.conversation_id,
         platform: msg.platform,
-        maxMessages: 10,
+        maxTurns: 10,
       });
-      const botResp = await callBot({
-        platform: msg.platform,
-        message: botText,
-        shopId: msg.shop_id,
-        shopName,
-        history,
-      });
+      // ⚡ Phase 2Q — acquire concurrency slot ก่อนยิงบอท
+      await acquireBotSlot();
+      let botResp;
+      try {
+        botResp = await callBot({
+          platform: msg.platform,
+          message: botText,
+          shopId: msg.shop_id,
+          shopName,
+          history,
+          ...(botImages.length > 0 ? { images: botImages } : {}),
+          // ⚡ Phase 2A — ส่ง conversationId (production path, simulate=false)
+          conversationId: msg.conversation_id,
+          simulate: false,
+        });
+      } finally {
+        releaseBotSlot();
+      }
       const shadowReplyId = await storeBotReply({
         messageId: msg.message_id,
         messageText: botText,
@@ -474,18 +536,30 @@ export async function processMessage(msg: {
     }
 
     // ── ไม่แมทช์ trigger → ส่งให้บอทตอบ → เก็บใน shadow_replies ──
-    const history = await getHistoryForBot({
+    // ⚡ grouped history — รวม user messages ติดกันเป็น 1 turn + fallback Zaapi
+    const history = await getGroupedHistoryForBot({
       conversationId: msg.conversation_id,
       platform: msg.platform,
-      maxMessages: 10,
+      maxTurns: 10,
     });
-    const botResp = await callBot({
-      platform: msg.platform,
-      message: botText,
-      shopId: msg.shop_id,
-      shopName,
-      history,
-    });
+    // ⚡ Phase 2Q — acquire concurrency slot ก่อนยิงบอท
+    await acquireBotSlot();
+    let botResp;
+    try {
+      botResp = await callBot({
+        platform: msg.platform,
+        message: botText,
+        shopId: msg.shop_id,
+        shopName,
+        history,
+        ...(botImages.length > 0 ? { images: botImages } : {}),
+        // ⚡ Phase 2A — ส่ง conversationId (production path, simulate=false)
+        conversationId: msg.conversation_id,
+        simulate: false,
+      });
+    } finally {
+      releaseBotSlot();
+    }
 
     if (!botResp.answer || botResp.answer.trim() === "") {
       // บอทตอบไม่ได้ → ส่งต่อแอดมิน
@@ -558,11 +632,39 @@ export async function processMessage(msg: {
 // FIRE-AND-FORGET: แต่ละข้อความยิงไปประมวลผลแยกอิสระ ไม่รอคิว ไม่รอ batch
 //   10 คำถามเข้าพร้อมกัน → ยิง 10 reqs ไปบอทพร้อมกัน → บอทตอบทีละคำตอบเสร็จก่อนก็ตอบก่อน
 //   ไม่ใช่นั่งรอคำถามแรกเสร็จถึงเริ่มคำถามสอง และไม่ใช่รอทั้ง 10 เสร็จถึงส่งคำตอบ
+//
+// ⚡ Phase 2Q — Concurrency limiter (semaphore pattern)
+//   ถ้า buffer เปิด → 500 ข้อความเข้ามา → buffer รวมเป็น 200 context → flush พร้อมกัน
+//   ถ้าไม่จำกัด → ยิงบอท 200 reqs พร้อมกัน → Python bot โอเวอร์โหลด
+//   ใช้ bot_concurrency_limit จาก config (admin ปรับได้ใน /admin-config, default 50)
+let activeBotCalls = 0;
+let currentConcurrencyLimit = 50;
+const botCallQueue: Array<() => void> = [];
+
+async function acquireBotSlot(): Promise<void> {
+  // ⚡ Phase 2Q — อ่าน limit จาก config ทุกครั้ง (admin อาจเปลี่ยนได้)
+  if (activeBotCalls < currentConcurrencyLimit) {
+    activeBotCalls++;
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    botCallQueue.push(() => {
+      activeBotCalls++;
+      resolve();
+    });
+  });
+}
+
+function releaseBotSlot(): void {
+  activeBotCalls--;
+  const next = botCallQueue.shift();
+  if (next) next();
+}
 
 // track in-flight promises (เก็บไว้สำหรับ graceful shutdown เท่านั้น — ไม่ await ในลูป)
 const inFlight = new Set<Promise<void>>();
 
-export async function pollNewMessages(limit = 20): Promise<{
+export async function pollNewMessages(since?: Date): Promise<{
   found: number;
   processed: number;
   results: { message_id: string; status: string; detail: string }[];
@@ -574,12 +676,17 @@ export async function pollNewMessages(limit = 20): Promise<{
   }>(COLLECTIONS.messages);
 
   // หาข้อความใหม่: role=user, direction=in, เรียงใหม่ล่าสุดก่อน
+  // ⚡ Phase 2P — ถ้ามี since → ประมวลผลเฉพาะข้อความที่เข้ามาหลัง since (กันประมวลผลข้อความเก่าตอนเปิดครั้งแรก)
+  // ⚡ Phase 2Q — ไม่ limit แล้ว — ดึงทั้งหมดที่เข้ามาใหม่ (buffer เป็นตัวคุมปริมาณจริง)
   // ดึง raw_payload มาด้วย — สำหรับ rich-media messages (item card, order card, ...)
   // ที่ text เป็น placeholder "[item]" ต้องใช้ raw_payload แปลงเป็น tag [สินค้า: <item_id>]
+  const query: Record<string, unknown> = { role: "user", direction: "in" };
+  if (since) {
+    query.created_timestamp = { $gt: since };
+  }
   const docs = await coll
-    .find({ role: "user", direction: "in" })
+    .find(query)
     .sort({ created_timestamp: -1 })
-    .limit(limit)
     .toArray();
 
   // ตัดที่ประมวลผลแล้วก่อน (อ่าน id ทั้งหมดครั้งเดียว — ลด round-trip)
@@ -596,6 +703,8 @@ export async function pollNewMessages(limit = 20): Promise<{
     bufferEnabled: sysConfig.bot_buffer_enabled,
     bufferWindowMs: sysConfig.bot_buffer_window_ms,
     bufferMaxMessages: sysConfig.bot_buffer_max_messages,
+    bufferWindowMediaMs: sysConfig.bot_buffer_window_media_ms,
+    bufferMaxMediaMessages: sysConfig.bot_buffer_max_media_messages,
   };
 
   const results: { message_id: string; status: string; detail: string }[] = [];
