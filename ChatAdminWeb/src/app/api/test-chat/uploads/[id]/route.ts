@@ -1,10 +1,16 @@
 // GET /api/test-chat/uploads/[id] — serve ไฟล์ที่อัปโหลดกลับ (สำหรับ bot ดึง URL)
 // ⚡ Phase 1F — bot ดึงรูปจาก URL นี้ผ่าน HTTP (Part.from_bytes หลัง download)
+// 🔒 H3: Added requireAuth — previously unauthenticated
 import { NextRequest, NextResponse } from "next/server";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { ObjectId } from "mongodb";
+import { requireAuth } from "@/backend/middleware/authorize";
 
-export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  // 🔒 H3: Require authentication before serving uploaded files
+  const r = await requireAuth(req);
+  if (!r.ok) return r.response;
+
   const { id } = await ctx.params;
   if (!id || !/^[a-f0-9]{24}$/i.test(id)) {
     return NextResponse.json({ error: "invalid id" }, { status: 400 });

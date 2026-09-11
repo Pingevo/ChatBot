@@ -43,7 +43,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return (
       <div className="h-screen flex flex-col items-center justify-center auth-gradient-bg gap-3">
         <Loading size={32} />
-        <p className="text-pale-sky/70 text-sm">กำลังโหลด...</p>
       </div>
     );
   }
@@ -68,6 +67,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             onClick={() => setMobileOpen(true)}
             className="w-9 h-9 rounded-md hover:bg-surface-2 flex items-center justify-center transition-colors"
             title="เมนู"
+            aria-label="เมนู"
           >
             <Menu size={20} className="text-text-muted" />
           </button>

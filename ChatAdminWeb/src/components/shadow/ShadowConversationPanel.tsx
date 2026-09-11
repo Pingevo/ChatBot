@@ -767,6 +767,7 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
                 onClick={() => copyChat("zaapi")}
                 disabled={pairs.length === 0}
                 title="คัดลอกแชทฝั่ง Zaapi"
+                aria-label="คัดลอกแชทฝั่ง Zaapi"
                 className="w-6 h-6 rounded-md flex items-center justify-center text-text-muted hover:text-text hover:bg-surface transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {copiedSide === "zaapi" ? <Check size={12} className="text-green-600" /> : <Copy size={12} />}
@@ -858,6 +859,7 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
                 onClick={() => copyChat("bot")}
                 disabled={pairs.length === 0}
                 title="คัดลอกแชทฝั่ง Bot เรา"
+                aria-label="คัดลอกแชทฝั่ง Bot เรา"
                 className="w-6 h-6 rounded-md flex items-center justify-center text-text-muted hover:text-text hover:bg-surface transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {copiedSide === "bot" ? <Check size={12} className="text-green-600" /> : <Copy size={12} />}
@@ -914,17 +916,17 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
                           <>
                             {/* ⚡ Phase 3B-3 — handoff bubble — ถ้า bot บอกให้ handoff แสดง bubble เตือน */}
                             {pair.botReply.handoff_to_admin && (
-                              <div className="bg-amber-50 border border-amber-300 rounded-lg rounded-tr-sm px-2.5 py-1.5 max-w-full">
-                                <div className="flex items-center gap-1 text-[11px] text-amber-700 font-medium">
+                              <div className="bg-warning-soft border border-warning/30 rounded-lg rounded-tr-sm px-2.5 py-1.5 max-w-full">
+                                <div className="flex items-center gap-1 text-[11px] text-warning-dark font-medium">
                                   <AlertTriangle size={11} className="shrink-0" />
                                   ตรงนี้ต้องแอดมินแล้ว
                                 </div>
                                 {pair.botReply.handoff_reason && (
-                                  <div className="text-[10px] text-amber-600 mt-0.5">
+                                  <div className="text-[10px] text-warning mt-0.5">
                                     เหตุผล: {pair.botReply.handoff_reason}
                                   </div>
                                 )}
-                                <div className="text-[9px] text-amber-500 mt-0.5 italic">
+                                <div className="text-[9px] text-warning mt-0.5 italic">
                                   (bot ทำต่อคำถามถัดไปเพื่อทดสอบ — ปกติจะส่งต่อแอดมินตรงนี้)
                                 </div>
                               </div>
@@ -967,7 +969,7 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
                                   {/* ── Routing decision ── */}
                                   {i === bubbles.length - 1 && pair.botReply!.routing_decision?.path && (
                                     <div className="mt-1 pt-0.5 border-t border-white/20 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[8px] leading-tight">
-                                      <span className={pair.botReply!.routing_decision.path === "handoff" ? "text-amber-300 font-medium" : "text-emerald-300 font-medium"}>
+                                      <span className={pair.botReply!.routing_decision.path === "handoff" ? "text-warning font-medium" : "text-success font-medium"}>
                                         {pair.botReply!.routing_decision.path === "handoff" ? "🔀 Handoff" : "🤖 Bot"}
                                       </span>
                                       {pair.botReply!.routing_decision.reason && (
@@ -981,7 +983,7 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
                                         <span className="text-sky-300">👤 {pair.botReply!.routing_decision.assigned_admin}</span>
                                       )}
                                       {pair.botReply!.handoff_to_admin && (
-                                        <span className="text-amber-300">📤 {pair.botReply!.handoff_reason || "handoff"}</span>
+                                        <span className="text-warning">📤 {pair.botReply!.handoff_reason || "handoff"}</span>
                                       )}
                                     </div>
                                   )}

@@ -57,6 +57,8 @@ export function Pagination({ page, totalPages, onChange, maxButtons = 7 }: Props
             key={p}
             onClick={() => onChange(p)}
             className={`${btnBase} ${p === page ? btnActive : btnIdle}`}
+            aria-current={p === page ? "page" : undefined}
+            aria-label={`หน้า ${p}${p === page ? " (หน้าปัจจุบัน)" : ""}`}
           >
             {p}
           </button>

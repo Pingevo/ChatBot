@@ -373,7 +373,9 @@ def search_and_extract(
     _brand_hint = ""
     if shop and "cuktech" in shop.lower():
         _brand_hint = "\nหมายเหตุ: ร้านนี้ขายแบรนด์ CUKTECH/ZMI (เครือ Xiaomi) กรุณาค้นหาสินค้าของแบรนด์นี้ด้วย"
-    user_prompt = f"คำถามของลูกค้า: {message}\n\nหมายเหตุ: ระบบไม่มั่นใจในคำตอบจากข้อมูลในระบบ ({reason})\nกรุณาใช้ Google Search หาข้อมูลแล้วตอบเป็น JSON{_brand_hint}"
+    # 🔒 H1: Limit message length to reduce prompt injection risk
+    _safe_message = str(message)[:2000] if message else ""
+    user_prompt = f"คำถามของลูกค้า: {_safe_message}\n\nหมายเหตุ: ระบบไม่มั่นใจในคำตอบจากข้อมูลในระบบ ({reason})\nกรุณาใช้ Google Search หาข้อมูลแล้วตอบเป็น JSON{_brand_hint}"
 
     # ── สร้าง messages (OpenAI format) ──
     messages = [{"role": "system", "content": "\n".join(system_parts)}]

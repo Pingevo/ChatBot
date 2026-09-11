@@ -15,6 +15,7 @@ import {
   ChevronRight,
   FileText,
 } from "lucide-react";
+import { useToastError } from "@/components/ui/Toast";
 
 interface TestResult {
   i: number;
@@ -57,6 +58,7 @@ type SortKey = "i" | "shop" | "cat" | "elapsed" | "products";
 type PageSize = 25 | 50 | 100 | 200;
 
 export default function TestResultsPage() {
+  const { catchError } = useToastError();
   const [results, setResults] = useState<TestResult[]>([]);
   const [pagination, setPagination] = useState<Pagination | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -83,8 +85,8 @@ export default function TestResultsPage() {
       .then((d) => {
         if (d.files) setFiles(d.files);
       })
-      .catch(() => {});
-  }, []);
+      .catch((e) => catchError(e, "โหลดรายการไฟล์ไม่สำเร็จ"));
+  }, [catchError]);
 
   // ── load data ──
   const load = async () => {
@@ -165,14 +167,14 @@ export default function TestResultsPage() {
   }, [results, search, catFilter, shopFilter, statusFilter, sortKey, sortDir]);
 
   const okColor = (ok: string) =>
-    ok === "✅" ? "text-emerald-400" : ok === "❌" ? "text-rose-400" : ok === "ERR" ? "text-amber-400" : "text-slate-400";
+    ok === "✅" ? "text-success" : ok === "❌" ? "text-error" : ok === "ERR" ? "text-warning" : "text-text-subtle";
   const okBg = (ok: string) =>
     ok === "✅"
-      ? "bg-emerald-500/10 border-emerald-500/30"
+      ? "bg-success/10 border-success/30"
       : ok === "❌"
-      ? "bg-rose-500/10 border-rose-500/30"
+      ? "bg-error/10 border-error/30"
       : ok === "ERR"
-      ? "bg-amber-500/10 border-amber-500/30"
+      ? "bg-warning/10 border-warning/30"
       : "bg-slate-500/10 border-slate-500/30";
 
   const toggleSort = (k: SortKey) => {
@@ -224,7 +226,7 @@ export default function TestResultsPage() {
         </div>
 
         {error && (
-          <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-300">
+          <div className="rounded-lg border border-error/30 bg-error/10 p-4 text-sm text-error">
             ⚠️ {error}
           </div>
         )}
@@ -236,11 +238,11 @@ export default function TestResultsPage() {
             {/* ── Summary cards ── */}
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
               <StatCard label="ทั้งหมด" value={stats.total} icon={<Package size={16} />} color="text-text" />
-              <StatCard label="ผ่าน" value={stats.pass} icon={<CheckCircle2 size={16} />} color="text-emerald-400" />
-              <StatCard label="ไม่ผ่าน" value={stats.fail} icon={<XCircle size={16} />} color="text-rose-400" />
-              <StatCard label="Error" value={stats.err} icon={<AlertTriangle size={16} />} color="text-amber-400" />
+              <StatCard label="ผ่าน" value={stats.pass} icon={<CheckCircle2 size={16} />} color="text-success" />
+              <StatCard label="ไม่ผ่าน" value={stats.fail} icon={<XCircle size={16} />} color="text-error" />
+              <StatCard label="Error" value={stats.err} icon={<AlertTriangle size={16} />} color="text-warning" />
               {stats.unknown != null && stats.unknown > 0 && (
-                <StatCard label="รอตรวจ" value={stats.unknown} icon={<AlertTriangle size={16} />} color="text-slate-400" />
+                <StatCard label="รอตรวจ" value={stats.unknown} icon={<AlertTriangle size={16} />} color="text-text-subtle" />
               )}
               <StatCard label="เวลาเฉลี่ย" value={`${stats.avg_time.toFixed(1)}s`} icon={<Clock size={16} />} color="text-sky-400" />
               <StatCard label="Web Search" value={stats.web_search_count} icon={<Globe size={16} />} color="text-violet-400" />
@@ -254,9 +256,9 @@ export default function TestResultsPage() {
                   <div key={cat} className="rounded-lg border border-white/5 bg-surface-2 p-2.5">
                     <div className="text-xs font-medium text-text-muted truncate">{cat}</div>
                     <div className="mt-1 flex items-baseline gap-1.5">
-                      <span className="text-lg font-bold text-emerald-400">{s.pass}</span>
-                      {s.fail > 0 && <span className="text-sm text-rose-400">/{s.fail}</span>}
-                      {s.err > 0 && <span className="text-sm text-amber-400">/{s.err}</span>}
+                      <span className="text-lg font-bold text-success">{s.pass}</span>
+                      {s.fail > 0 && <span className="text-sm text-error">/{s.fail}</span>}
+                      {s.err > 0 && <span className="text-sm text-warning">/{s.err}</span>}
                       <span className="text-xs text-text-muted">/{s.total}</span>
                     </div>
                   </div>
@@ -402,7 +404,7 @@ export default function TestResultsPage() {
                               {r.notes && (
                                 <div>
                                   <span className="text-xs text-text-muted">หมายเหตุ:</span>
-                                  <p className="text-amber-300 text-sm">{r.notes}</p>
+                                  <p className="text-warning text-sm">{r.notes}</p>
                                 </div>
                               )}
                               {r.check && (
@@ -439,12 +441,14 @@ export default function TestResultsPage() {
                     disabled={!pagination.has_prev}
                     className="rounded-lg bg-surface-2 px-2.5 py-1.5 text-sm text-text hover:bg-pale-sky-soft disabled:opacity-30"
                     title="หน้าแรก"
+                    aria-label="หน้าแรก"
                   >
                     «
                   </button>
                   <button
                     onClick={() => setPage(page - 1)}
                     disabled={!pagination.has_prev}
+                    title="หน้าก่อนหน้า" aria-label="หน้าก่อนหน้า"
                     className="rounded-lg bg-surface-2 px-2.5 py-1.5 text-text hover:bg-pale-sky-soft disabled:opacity-30"
                   >
                     <ChevronLeft size={14} />
@@ -478,6 +482,7 @@ export default function TestResultsPage() {
                   <button
                     onClick={() => setPage(page + 1)}
                     disabled={!pagination.has_next}
+                    title="หน้าถัดไป" aria-label="หน้าถัดไป"
                     className="rounded-lg bg-surface-2 px-2.5 py-1.5 text-text hover:bg-pale-sky-soft disabled:opacity-30"
                   >
                     <ChevronRight size={14} />
@@ -487,6 +492,7 @@ export default function TestResultsPage() {
                     disabled={!pagination.has_next}
                     className="rounded-lg bg-surface-2 px-2.5 py-1.5 text-sm text-text hover:bg-pale-sky-soft disabled:opacity-30"
                     title="หน้าสุดท้าย"
+                    aria-label="หน้าสุดท้าย"
                   >
                     »
                   </button>

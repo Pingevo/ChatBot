@@ -12,6 +12,8 @@ import { Loading } from "@/components/ui/Loading";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Input } from "@/components/ui/Input";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
+import { PageShell } from "@/components/ui/PageShell";
+import { FilterSelect } from "@/components/ui/FilterSelect";
 import {
   Settings2,
   Search,
@@ -133,8 +135,8 @@ export default function ShopSettingsPage() {
         }));
         setAllShops(shops);
       })
-      .catch(() => {});
-  }, []);
+      .catch((e) => catchError(e, "โหลดรายชื่อร้านไม่สำเร็จ"));
+  }, [catchError]);
 
   const filtered = rows
     .filter((r) => {
@@ -336,39 +338,83 @@ export default function ShopSettingsPage() {
   };
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="min-h-[calc(100vh-3.5rem)] bg-base">
-        {/* Header */}
-        <div className="px-6 py-5 border-b border-border bg-surface sticky top-0 z-10">
-          <div className="flex items-center gap-3">
-            <Settings2 size={22} className="text-brand" />
-            <div className="flex-1">
-              <h1 className="text-xl font-bold text-text">ตั้งค่าพฤติกรรมร้าน</h1>
-              <p className="text-sm text-text-muted mt-0.5">
-                ตั้งค่าการจัดการเมื่อเจอ message type พิเศษ (เช่น faq_liveagent) ของแต่ละร้าน
-              </p>
-            </div>
-            <Button
-              onClick={() => setShowLogPanel(!showLogPanel)}
-              variant="ghost"
-              size="sm"
-              title="ดู log"
-            >
-              <History size={14} className="mr-1" />
-              Log
-            </Button>
-            <Button
-              onClick={() => setShowModal(true)}
-              variant="primary"
-              size="sm"
-            >
-              <Plus size={14} className="mr-1" />
-              เพิ่มร้าน
-            </Button>
+    <PageShell
+      icon={Settings2}
+      title="ตั้งค่าพฤติกรรมร้าน"
+      helpHref="/help#shop-settings"
+      subtitle="ตั้งค่าการจัดการเมื่อเจอประเภทข้อความพิเศษ (เช่น faq_liveagent) ของแต่ละร้าน"
+      actions={
+        <>
+          <Button
+            onClick={() => setShowLogPanel(!showLogPanel)}
+            variant="ghost"
+            size="sm"
+            title="ดู log"
+          >
+            <History size={14} className="mr-1" />
+            Log
+          </Button>
+          <Button
+            onClick={() => setShowModal(true)}
+            variant="primary"
+            size="sm"
+          >
+            <Plus size={14} className="mr-1" />
+            เพิ่มร้าน
+          </Button>
+        </>
+      }
+      filterBarBelow
+      filterBar={
+        <div className="flex items-center gap-2 mt-4 flex-wrap">
+          <div className="relative w-full sm:w-72">
+            <Search
+              size={14}
+              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-subtle"
+            />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="ค้นหาร้าน..."
+              className="w-full h-8 pl-8 pr-3 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
+            />
           </div>
+          {/* platform dropdown */}
+          <FilterSelect
+            value={filterPlatform}
+            onChange={(v) => setFilterPlatform(v as PersonaPlatform | "all")}
+            options={[
+              { value: "all", label: "ทุกแพลตฟอร์ม" },
+              ...ALL_PLATFORMS.map((p) => ({ value: p.value, label: p.label })),
+            ]}
+          />
+          {/* sort by */}
+          <FilterSelect
+            value={sortBy}
+            onChange={(v) => setSortBy(v as typeof sortBy)}
+            labelPrefix="เรียง: "
+            options={[
+              { value: "shopname", label: "ชื่อร้าน" },
+              { value: "platform", label: "แพลตฟอร์ม" },
+              { value: "action", label: "action" },
+              { value: "updated", label: "แก้ล่าสุด" },
+            ]}
+          />
+          {/* sort dir */}
+          <button
+            onClick={() => setSortDir(sortDir === "asc" ? "desc" : "asc")}
+            className="h-8 w-8 rounded-lg border border-border bg-surface text-xs text-text hover:bg-surface-2 flex items-center justify-center"
+            title={sortDir === "asc" ? "น้อย→มาก" : "มาก→น้อย"}
+            aria-label={sortDir === "asc" ? "น้อย→มาก" : "มาก→น้อย"}
+          >
+            {sortDir === "asc" ? "↑" : "↓"}
+          </button>
+          <span className="text-xs text-text-subtle ml-auto">{filtered.length} ร้าน</span>
         </div>
-
-        <div className="p-6 space-y-4">
+      }
+      contentClassName="p-4 md:p-6 space-y-4"
+    >
+      <div>
           {/* ── Log panel (collapsible) ── */}
           {showLogPanel && (
             <div className="rounded-xl border border-border bg-surface p-4">
@@ -379,6 +425,7 @@ export default function ShopSettingsPage() {
                 </h3>
                 <button
                   onClick={() => setShowLogPanel(false)}
+                  title="ปิด" aria-label="ปิด"
                   className="text-text-muted hover:text-text"
                 >
                   <X size={16} />
@@ -435,53 +482,6 @@ export default function ShopSettingsPage() {
             </div>
           )}
 
-          {/* ── Search + filter (dropdown) + sort ── */}
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative flex-1 min-w-[200px]">
-              <Search
-                size={14}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted"
-              />
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="ค้นหาร้าน..."
-                className="pl-9"
-              />
-            </div>
-            {/* platform dropdown */}
-            <select
-              value={filterPlatform}
-              onChange={(e) => setFilterPlatform(e.target.value as PersonaPlatform | "all")}
-              className="rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
-            >
-              <option value="all">ทุกแพลตฟอร์ม</option>
-              {ALL_PLATFORMS.map((p) => (
-                <option key={p.value} value={p.value}>{p.label}</option>
-              ))}
-            </select>
-            {/* sort by */}
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
-              className="rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
-            >
-              <option value="shopname">เรียง: ชื่อร้าน</option>
-              <option value="platform">เรียง: แพลตฟอร์ม</option>
-              <option value="action">เรียง: action</option>
-              <option value="updated">เรียง: แก้ล่าสุด</option>
-            </select>
-            {/* sort dir */}
-            <button
-              onClick={() => setSortDir(sortDir === "asc" ? "desc" : "asc")}
-              className="rounded-lg bg-surface-2 px-3 py-2 text-sm text-text hover:bg-pale-sky-soft"
-              title={sortDir === "asc" ? "น้อย→มาก" : "มาก→น้อย"}
-            >
-              {sortDir === "asc" ? "↑" : "↓"}
-            </button>
-            <span className="text-sm text-text-muted">{filtered.length} ร้าน</span>
-          </div>
-
           {/* ── List ── */}
           {loading ? (
             <div className="flex justify-center py-12">
@@ -529,6 +529,7 @@ export default function ShopSettingsPage() {
                         row.faq_liveagent_enabled ? "bg-brand" : "bg-surface-2"
                       }`}
                       title={row.faq_liveagent_enabled ? "ปิดใช้งาน" : "เปิดใช้งาน"}
+                      aria-label={row.faq_liveagent_enabled ? "ปิดใช้งาน" : "เปิดใช้งาน"}
                     >
                       <div
                         className={`w-4 h-4 bg-white rounded-full transition-transform ${
@@ -540,8 +541,9 @@ export default function ShopSettingsPage() {
                     {/* Delete */}
                     <button
                       onClick={() => handleDelete(row)}
-                      className="text-text-muted hover:text-rose-400 shrink-0 p-1.5 rounded hover:bg-base"
+                      className="text-text-muted hover:text-error shrink-0 p-1.5 rounded hover:bg-base"
                       title="ลบ"
+                      aria-label="ลบ"
                     >
                       <Trash2 size={16} />
                     </button>
@@ -578,7 +580,7 @@ export default function ShopSettingsPage() {
                       </button>
                     </div>
                     {!row.faq_liveagent_enabled && (
-                      <span className="text-xs text-amber-400 ml-auto">
+                      <span className="text-xs text-warning ml-auto">
                         (ปิดอยู่ — บอทจะตอบต่อปกติ)
                       </span>
                     )}
@@ -587,7 +589,6 @@ export default function ShopSettingsPage() {
               ))}
             </div>
           )}
-        </div>
       </div>
 
       {/* ════════════════════════════════════════════════════════════════
@@ -599,17 +600,21 @@ export default function ShopSettingsPage() {
           onClick={closeModal}
         >
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="shop-settings-modal-title"
             className="bg-surface rounded-xl shadow-xl max-w-lg w-full max-h-[85vh] overflow-y-auto animate-fade-in"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Modal header */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <h3 className="text-sm font-semibold text-text flex items-center gap-2">
+              <h3 id="shop-settings-modal-title" className="text-sm font-semibold text-text flex items-center gap-2">
                 <Plus size={16} className="text-brand" />
                 เพิ่ม settings ร้านใหม่
               </h3>
               <button
                 onClick={closeModal}
+                title="ปิด" aria-label="ปิด"
                 className="text-text-muted hover:text-text"
               >
                 <X size={18} />
@@ -776,6 +781,7 @@ export default function ShopSettingsPage() {
                   <button
                     onClick={() => setNewEnabled(!newEnabled)}
                     title={newEnabled ? "ปิดใช้งาน" : "เปิดใช้งาน"}
+                    aria-label={newEnabled ? "ปิดใช้งาน" : "เปิดใช้งาน"}
                     className="p-1.5 rounded hover:bg-base text-text-subtle hover:text-text"
                   >
                     <Power size={14} />
@@ -804,6 +810,6 @@ export default function ShopSettingsPage() {
           </div>
         </div>
       )}
-    </div>
+    </PageShell>
   );
 }

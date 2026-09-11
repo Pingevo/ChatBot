@@ -4,6 +4,8 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Loading } from "@/components/ui/Loading";
+import { PageShell } from "@/components/ui/PageShell";
+import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import {
   Shield, ShieldAlert, ShieldCheck, RefreshCw,
   Database, Lock, Zap, Store, Clock, Power, AlertCircle,
@@ -118,9 +120,9 @@ const safeSwitches: { key: keyof SystemConfig; label: string; description: strin
 ];
 
 const platformColors: Record<Platform, string> = {
-  shopee: "text-orange-400",
-  tiktok: "text-pink-400",
-  lazada: "text-blue-400",
+  shopee: "text-platform-shopee",
+  tiktok: "text-platform-tiktok",
+  lazada: "text-platform-lazada",
 };
 
 export default function ConfigPage() {
@@ -334,28 +336,18 @@ export default function ConfigPage() {
   const shopsByPlatform = (p: Platform) => shops.filter((s) => s.platform === p);
 
   return (
-    <div className="h-full overflow-y-auto">
-      {/* Header — navbar เดิม (เหมือน shops/team) */}
-      <div className="px-6 py-5 border-b border-border bg-surface sticky top-0 z-10">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-brand/15 flex items-center justify-center">
-              <Shield size={20} className="text-brand" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-text">ตั้งค่าระบบ</h1>
-              <p className="text-xs text-text-muted">
-                3 platform (Shopee/TikTok/Lazada) · Bot services · สวิตช์อันตรายล็อค false ถาวร
-              </p>
-            </div>
-          </div>
-          <Button size="sm" variant="outline" onClick={load} disabled={loading}>
-            <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
-          </Button>
-        </div>
-      </div>
-
-      <div className="p-6 space-y-4">
+    <PageShell
+      icon={Shield}
+      title="ตั้งค่าระบบ"
+      helpHref="/help#config"
+      subtitle="3 แพลตฟอร์ม (Shopee/TikTok/Lazada) · บริการบอท · สวิตช์อันตรายปิดถาวร"
+      actions={
+        <Button size="sm" variant="outline" onClick={load} disabled={loading}>
+          <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
+        </Button>
+      }
+      contentClassName="p-6 space-y-4"
+    >
         {/* Read-only banner for admin role */}
         {!editable && (
           <div className="flex items-center gap-2 bg-surface-2 border border-border rounded-lg p-2.5 text-xs text-text-muted">
@@ -365,26 +357,26 @@ export default function ConfigPage() {
         )}
 
         {/* Iron Rules Banner */}
-        <div className="rounded-xl border border-blue-900/50 bg-[#0a1628] p-4">
+        <div className="rounded-xl border border-info-dark/50 bg-[#0a1628] p-4">
           <div className="flex items-center gap-2 mb-2.5">
-            <ShieldAlert size={16} className="text-blue-400" />
+            <ShieldAlert size={16} className="text-info-soft" />
             <span className="text-sm font-semibold text-white">กฎเหล็ก (Iron Rules) — รองรับ 3 platform</span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-xs">
             <div className="flex items-center gap-2 text-white">
-              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0" />
+              <span className="w-1.5 h-1.5 rounded-full bg-info-soft flex-shrink-0" />
               ห้ามยิง Shopee / TikTok / Lazada API ทุก endpoint
             </div>
             <div className="flex items-center gap-2 text-white">
-              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0" />
+              <span className="w-1.5 h-1.5 rounded-full bg-info-soft flex-shrink-0" />
               ห้ามส่ง/อ่านข้อความจริงจาก platform ใดๆ
             </div>
             <div className="flex items-center gap-2 text-white">
-              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0" />
+              <span className="w-1.5 h-1.5 rounded-full bg-info-soft flex-shrink-0" />
               แชทเข้าผ่าน data writer (พี่เขาเขียนลง MongoDB ของเรา)
             </div>
             <div className="flex items-center gap-2 text-white">
-              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0" />
+              <span className="w-1.5 h-1.5 rounded-full bg-info-soft flex-shrink-0" />
               bot แยก platform + conversation_id prefix (shp_/tt_/lz_)
             </div>
           </div>
@@ -483,13 +475,13 @@ export default function ConfigPage() {
               </Button>
             </div>
             {config?.chat_engine === "v2" && (
-              <div className="mt-2 text-[11px] text-amber-500 flex items-center gap-1">
+              <div className="mt-2 text-[11px] text-warning flex items-center gap-1">
                 <AlertCircle size={11} />
                 กำลังใช้ chat_v2 — ทุกการเรียกบอทจะผ่าน pipeline ใหม่
               </div>
             )}
             {config?.chat_engine === "v3" && (
-              <div className="mt-2 text-[11px] text-blue-500 flex items-center gap-1">
+              <div className="mt-2 text-[11px] text-info flex items-center gap-1">
                 <AlertCircle size={11} />
                 กำลังใช้ chatbotv3 — ส่ง context ดิบให้ OpenRouter, LLM ตอบเอง + match สินค้าจริงจาก ShpProducts
               </div>
@@ -579,7 +571,7 @@ export default function ConfigPage() {
             {/* Safe switches */}
             <Card className="p-4">
               <div className="flex items-center gap-2 mb-3">
-                <ShieldCheck size={14} className="text-green-400" />
+                <ShieldCheck size={14} className="text-success-soft" />
                 <h2 className="text-sm font-semibold text-text">สวิตช์ปลอดภัย</h2>
                 <Badge tone="brand" className="ml-auto">เปิด/ปิดได้</Badge>
               </div>
@@ -644,7 +636,7 @@ export default function ConfigPage() {
             {testResults?.dataActivity && (
               <Card className="p-4">
                 <div className="flex items-center gap-2 mb-3">
-                  <Activity size={14} className="text-green-400" />
+                  <Activity size={14} className="text-success-soft" />
                   <h2 className="text-sm font-semibold text-text">Data Activity</h2>
                 </div>
                 <TestRow label="การเข้าของ data writer" result={testResults.dataActivity} />
@@ -715,7 +707,7 @@ export default function ConfigPage() {
             <Card className="p-4">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
-                  <Zap size={14} className="text-yellow-400" />
+                  <Zap size={14} className="text-warning" />
                   <h2 className="text-sm font-semibold text-text">ทดสอบการเชื่อมต่อ</h2>
                 </div>
                 <Button size="sm" variant="outline" onClick={handleTestIntegration} disabled={testing}>
@@ -737,40 +729,13 @@ export default function ConfigPage() {
                 </div>
               )}
               <div className="text-[10px] text-text-subtle mt-2 flex items-center gap-1">
-                <ShieldCheck size={10} className="text-green-400" />
+                <ShieldCheck size={10} className="text-success-soft" />
                 ไม่ยิง API ไป platform ใดๆ — ตรวจเฉพาะ DB + health endpoint ของ bot
               </div>
             </Card>
           </div>
         </div>
-
-      </div>
-    </div>
-  );
-}
-
-function ToggleSwitch({ enabled, onChange, disabled }: { enabled: boolean; onChange: () => void; disabled?: boolean }) {
-  return (
-    <button
-      onClick={onChange}
-      disabled={disabled}
-      className={`relative rounded-full transition-colors flex-shrink-0 ${
-        enabled ? "bg-green-500" : "bg-surface-1"
-      } ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
-      style={{ width: "40px", height: "22px" }}
-      title={enabled ? "คลิกเพื่อปิด" : "คลิกเพื่อเปิด"}
-    >
-      <span
-        className="absolute rounded-full bg-white shadow-sm transition-transform"
-        style={{
-          width: "18px",
-          height: "18px",
-          top: "2px",
-          left: "2px",
-          transform: enabled ? "translateX(18px)" : "translateX(0)",
-        }}
-      />
-    </button>
+    </PageShell>
   );
 }
 
@@ -778,11 +743,11 @@ function TestRow({ label, result }: { label: string; result: { ok: boolean; mess
   return (
     <div className={`flex items-start gap-2 rounded-lg p-2.5 border ${
       result.ok
-        ? "bg-green-500/5 border-green-500/20"
-        : "bg-red-500/5 border-red-500/20"
+        ? "bg-success/5 border-success/20"
+        : "bg-error/5 border-error/20"
     }`}>
       <span className={`flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-xs ${
-        result.ok ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"
+        result.ok ? "bg-success/20 text-success-soft" : "bg-error/20 text-error-soft"
       }`}>
         {result.ok ? "✓" : "✗"}
       </span>

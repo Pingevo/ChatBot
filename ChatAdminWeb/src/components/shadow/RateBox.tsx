@@ -55,6 +55,7 @@ export function RateBox({
             onClick={() => onStar(starRating === s ? 0 : s)}
             className="transition-transform hover:scale-110"
             title={`${s} ดาว`}
+            aria-label={`${s} ดาว`}
           >
             <Star
               size={starSize}

@@ -18,12 +18,22 @@ from pymongo.errors import PyMongoError
 
 # fuzzy matching สำหรับจับคำพิมพ์ผิด (เช่น "โทสับ" → "โทรศัพท์")
 # ใช้ rapidfuzz + pythainlp word_tokenize
+# ⚡ แยก flag: _TOKENIZE_AVAILABLE ใช้สำหรับ word_tokenize (pythainlp เท่านั้น)
+#   _FUZZY_AVAILABLE ใช้สำหรับ fuzzy matching (rapidfuzz + pythainlp)
+#   ถ้า rapidfuzz ไม่ได้ติดตั้ง แต่ pythainlp ติดตั้ง → _TOKENIZE_AVAILABLE=True
+#   ทำให้ _detect_charger_subtype ยังใช้ token-based logic ได้
 try:
     from rapidfuzz import fuzz, process
     from pythainlp.tokenize import word_tokenize
     _FUZZY_AVAILABLE = True
+    _TOKENIZE_AVAILABLE = True
 except ImportError:
     _FUZZY_AVAILABLE = False
+    try:
+        from pythainlp.tokenize import word_tokenize
+        _TOKENIZE_AVAILABLE = True
+    except ImportError:
+        _TOKENIZE_AVAILABLE = False
 
 
 # ---- vector store (embeddings) ------------------------------------------------
@@ -53,7 +63,12 @@ def _load_vector_store() -> dict[str, Any] | None:
         return None
     try:
         import numpy as np
-        data = np.load(_EMBEDDINGS_PATH, allow_pickle=True)
+        # 🔒 M1: Try loading without pickle first (safe), fall back with warning
+        try:
+            data = np.load(_EMBEDDINGS_PATH, allow_pickle=False)
+        except Exception:
+            print("WARN: loading embeddings with allow_pickle=True (legacy format) — consider rebuilding with build_embeddings.py", file=sys.stderr)
+            data = np.load(_EMBEDDINGS_PATH, allow_pickle=True)
         _VECTOR_STORE = {
             "item_ids": data["item_ids"],
             "embeddings": data["embeddings"],  # shape (n, 1024) float32
@@ -127,9 +142,12 @@ def build_connection_string() -> str:
     use_tls = os.environ.get("MONGO_TLS", "false").strip().lower() == "true"
 
     if user and password:
-        creds = f"{user}:{password}@"
+        # 🔒 M4: URL-encode credentials to prevent URI breakage/leak
+        from urllib.parse import quote as _urlquote
+        creds = f"{_urlquote(user, safe='')}:{_urlquote(password, safe='')}@"
     elif user:
-        creds = f"{user}@"
+        from urllib.parse import quote as _urlquote
+        creds = f"{_urlquote(user, safe='')}@"
     else:
         creds = ""
 
@@ -1015,9 +1033,14 @@ PRODUCT_TYPES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("massager",
      ("เครื่องนวด", "นวด", "massage", "หมอนนวด", "หมอนรองคอ", "เครื่องนวดคอ",
       "เข็มขัดนวด", "แผ่นนวด",
-      "รองหลัง", "พนักพิงหลัง", "เบาะพิงหลัง"),
+      "รองหลัง", "พนักพิงหลัง", "เบาะพิงหลัง",
+      # ⚡ 2026-09-11 — เพิ่ม "เบาะรองนั่ง", "หมอนอัจฉริยะ", "เบาะเสริม" (DB ใช้คำเหล่านี้)
+      "เบาะรองนั่ง", "หมอนอัจฉริยะ", "เบาะเสริม", "เบาะรอง",
+      "พยุงหลัง", "เข็มขัดพยุงหลัง", "leband"),
      r"(?:เครื่องนวด|หมอนนวด|หมอนรองคอ|เครื่องนวดคอ|เข็มขัดนวด|แผ่นนวด|massage"
-     r"|รองหลัง|พนักพิงหลัง|เบาะพิงหลัง)"),
+     r"|รองหลัง|พนักพิงหลัง|เบาะพิงหลัง"
+     r"|เบาะรองนั่ง|หมอนอัจฉริยะ|เบาะเสริม|เบาะรอง"
+     r"|พยุงหลัง|เข็มขัดพยุงหลัง|leband)"),
     # ลำโพงซาวด์บาร์
     ("soundbar",
      ("ซาวด์บาร์", "soundbar", "sound bar", "ลำโพงซาวด์บาร์"),
@@ -1152,12 +1175,17 @@ PRODUCT_TYPES: tuple[tuple[str, tuple[str, ...], str], ...] = (
      r"(?:เครื่องดูดสิว|ที่ดูดสิว|blackhead\s*cleaner|"
      r"เครื่องดูดสิวเสี้ยน|ที่กดสิว|meishi)"),
     # แปรงฟันไฟฟ้า / electric toothbrush
+    # ⚡ 2026-09-11 — เพิ่ม "แปรงสีฟัน" (DB ใช้ "แปรงสีฟันไฟฟ้า" ไม่ใช่ "แปรงฟันไฟฟ้า")
     ("toothbrush",
      ("แปรงฟันไฟฟ้า", "แปรงฟันอัจฉริยะ", "electric toothbrush",
       "smart toothbrush", "ที่แขวนแปรงฟัน", "toothbrush holder",
-      "เครื่องแขวนแปรงฟัน", "dr meng toothbrush"),
-     r"(?:แปรงฟันไฟฟ้า|แปรงฟันอัจฉริยะ|electric\s*toothbrush|"
-     r"smart\s*toothbrush|toothbrush\s*holder|เครื่องแขวนแปรงฟัน|dr\s*meng)"),
+      "เครื่องแขวนแปรงฟัน", "dr meng toothbrush",
+      "แปรงสีฟัน", "แปรงสีฟันไฟฟ้า", "แปรงสีฟันอัจฉริยะ",
+      "sonic electric", "zhibai"),
+     r"(?:แปรงสีฟันไฟฟ้า|แปรงสีฟันอัจฉริยะ|แปรงสีฟัน|"
+     r"แปรงฟันไฟฟ้า|แปรงฟันอัจฉริยะ|electric\s*toothbrush|"
+     r"smart\s*toothbrush|toothbrush\s*holder|เครื่องแขวนแปรงฟัน|dr\s*meng|"
+     r"sonic\s*electric|zhibai)"),
     # เครื่องกรองน้ำ / water purifier
     ("water_purifier",
      ("เครื่องกรองน้ำ", "เครื่องกรองน้ำดื่ม", "water purifier",
@@ -1304,11 +1332,13 @@ PRODUCT_TYPES: tuple[tuple[str, tuple[str, ...], str], ...] = (
      r"(?:ems\s*massager|เครื่องกระตุ้นกล้ามเนื้อ|แผ่นกระตุ้นกล้ามเนื้อ|"
      r"แผ่นนวด\s*ems|leravan\s*ems|lejia\s*pulse|เครื่องนวด\s*ems)"),
     # ที่นั่งรถยนต์ / car seat
+    # ⚡ 2026-09-11 — เพิ่ม "คาร์ซีท" (DB ใช้ "คาร์ซีท" ไม่ใช่ "ที่นั่งรถยนต์")
     ("car_seat",
      ("ที่นั่งรถยนต์", "เบาะรถยนต์", "car seat", "เบาะนั่งรถ",
-      "ที่นั่งรถเด็ก", "baby car seat"),
+      "ที่นั่งรถเด็ก", "baby car seat", "คาร์ซีท", "qiaobeibi",
+      "isofix"),
      r"(?:car\s*seat|ที่นั่งรถยนต์|เบาะรถยนต์|เบาะนั่งรถ|"
-     r"ที่นั่งรถเด็ก|baby\s*car\s*seat)"),
+     r"ที่นั่งรถเด็ก|baby\s*car\s*seat|คาร์ซีท|qiaobeibi|isofix)"),
     # กระจกแต่งหน้า / makeup mirror
     ("makeup_mirror",
      ("กระจกแต่งหน้า", "กระจก led", "makeup mirror",
@@ -1324,11 +1354,13 @@ PRODUCT_TYPES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     # ⚡ 2026-09-22 — voucher / คูปองของขวัญ / บัตรสมาชิก (cat_name=Tickets, Vouchers & Services)
     #   สินค้าส่วนใหญ่เป็น iQIYI VIP E-voucher ของร้าน Yaber
     #   "คูปอง" มี false positive ("ทักแชทรับคูปอง" ในสินค้าอื่น) แต่ cat_name filter กรองออก
+    # ⚡ 2026-09-11 — เพิ่ม "อ้ายฉีอี้", "อ้าย" (ชื่อไทยของ iQIYI ใน DB)
     ("voucher",
      ("voucher", "e-voucher", "คูปองของขวัญ", "บัตรสมาชิก",
-      "iQIYI", "iqiyi", "แพ็คเกจ", "package voucher"),
+      "iQIYI", "iqiyi", "แพ็คเกจ", "package voucher",
+      "อ้ายฉีอี้", "อ้าย"),
      r"(?:e-voucher|voucher|คูปองของขวัญ|บัตรสมาชิก|"
-     r"iQIYI|iqiyi|แพ็คเกจ|package\s*voucher)"),
+     r"iQIYI|iqiyi|แพ็คเกจ|package\s*voucher|อ้ายฉีอี้|อ้าย)"),
     # ⚡ 2026-09-22 — หม้อหุงข้าว / rice cooker (cat_name=Home Appliances, 17 ชิ้นใน DB)
     ("rice_cooker",
      ("หม้อหุงข้าว", "เครื่องหุงข้าว", "rice cooker",
@@ -1354,6 +1386,176 @@ PRODUCT_TYPES: tuple[tuple[str, tuple[str, ...], str], ...] = (
      ("ปากกาสไตลัส", "stylus", "smart pen", "ปากกาไอแพด",
       "stylus pen", "pencil stylus", "ปากกาแท็บเล็ต"),
      r"(?:ปากกาสไตลัส|stylus|smart\s*pen|ปากกาไอแพด|stylus\s*pen|pencil\s*stylus|ปากกาแท็บเล็ต)"),
+    # ⚡ 2026-09-11 — audit ShpProducts: เพิ่ม type ใหม่เพื่อจับสินค้าใน collection ให้ครอบคลุม
+    # กระเป๋า / bag (Men Bags 12 + Women Bags 15 + Travel & Luggage bags)
+    ("bag",
+     ("กระเป๋า", "เป้", "backpack", "sling bag", "กระเป๋าเป้",
+      "กระเป๋าสะพาย", "กระเป๋าเดินทาง", "suitcase", "เป้สะพายหลัง",
+      "travel bag", "กระเป๋าใส่รองเท้า", "business backpack",
+      "mini backpack", "urban backpack"),
+     r"(?:กระเป๋า|backpack|sling\s*bag|suitcase|travel\s*bag|mini\s*backpack|urban\s*backpack)"),
+    # รองเท้า / shoes (Men Shoes 40 + Women Shoes 6)
+    ("shoes",
+     ("รองเท้า", "shoes", "sneakers", "รองเท้าวิ่ง", "basketball shoes",
+      "cushion shoes", "sport shoes", "เครื่องหุ้มรองเท้า",
+      "electric sticky shoe", "รองเท้าผ้าใบ"),
+     r"(?:รองเท้า|shoes|sneakers|electric\s*sticky\s*shoe|เครื่องหุ้มรองเท้า)"),
+    # อุปกรณ์เครื่องเขียน / stationery (19 ชิ้นใน DB)
+    ("stationery",
+     ("ซองพลาสติก", "ซองใบปะหน้า", "ปากกาลูกลื่น", "rollerball pen",
+      "ปากกา", "pen", "ซองกาว", "ซองใส่เอกสาร"),
+     r"(?:ซองพลาสติก|ซองใบปะหน้า|ปากกาลูกลื่น|rollerball\s*pen|ซองกาว|ซองใส่เอกสาร)"),
+    # จอยสติ๊ก / gamepad (Gaming & Consoles 11 ชิ้น)
+    ("gamepad",
+     ("จอยสติ๊ก", "จอย", "gamepad", "joystick", "gaming controller",
+      "จอยเกมมิ่ง", "คอนโซลเกม", "nubwo"),
+     r"(?:จอยสติ๊ก|จอย|gamepad|joystick|gaming\s*controller)"),
+    # มอเตอร์ไซค์ไฟฟ้า / electric bike (Motorcycles 6 ชิ้น)
+    ("electric_bike",
+     ("มอเตอร์ไซค์ไฟฟ้า", "มอเตอร์ไซค์", "electric bicycle", "e-bike",
+      "จักรยานไฟฟ้า", "himo"),
+     r"(?:มอเตอร์ไซค์ไฟฟ้า|มอเตอร์ไซค์|electric\s*bicycle|e-?bike|จักรยานไฟฟ้า|himo)"),
+    # สกู๊ตเตอร์ไฟฟ้า / electric scooter (Sports & Outdoors)
+    ("scooter",
+     ("สกู๊ตเตอร์ไฟฟ้า", "สกู๊ตเตอร์", "electric scooter", "e-scooter",
+      "mi electric scooter"),
+     r"(?:สกู๊ตเตอร์ไฟฟ้า|สกู๊ตเตอร์|electric\s*scooter|e-?scooter|mi\s*electric\s*scooter)"),
+    # เสื้อผ้า / clothing (Women Clothes 2 + Men Clothes 1)
+    ("clothing",
+     ("เสื้อยืด", "กางเกงยีนส์", "เสื้อ", "กางเกง", "clothing",
+      "เสื้อคอกลม", "unisex"),
+     r"(?:เสื้อยืด|กางเกงยีนส์|เสื้อคอกลม|clothing|เสื้อผ้า)"),
+    # แว่นกันแดด / sunglasses (Fashion Accessories)
+    ("sunglasses",
+     ("แว่นกันแดด", "sunglasses", "polarized sunglasses", "แว่นตากันแดด",
+      "แว่นตา"),
+     r"(?:แว่นกันแดด|sunglasses|polarized\s*sunglasses|แว่นตากันแดด)"),
+    # หมวก / cap (Fashion Accessories)
+    ("cap",
+     ("หมวก", "cap", "หมวกเบสบอล", "baseball cap", "หมวกปลูกผม",
+      "hair growth cap", "cosbeauty lllt"),
+     r"(?:หมวกเบสบอล|baseball\s*cap|หมวกปลูกผม|hair\s*growth\s*cap|cosbeauty\s*lllt)"),
+    # หน้ากากอนามัย / mask (Baby & Kids Fashion)
+    ("mask",
+     ("หน้ากากอนามัย", "หน้ากาก", "face mask", "airpop",
+      "หน้ากากเด็ก", "surgical mask"),
+     r"(?:หน้ากากอนามัย|หน้ากากเด็ก|airpop\s*kid|surgical\s*mask)"),
+    # กระเป๋าเดินทาง / luggage (Travel & Luggage)
+    ("luggage",
+     ("กระเป๋าเดินทาง", "travel luggage", "travel case", "suitcase",
+      "redmi travel", "กุญแจล็อคtsa"),
+     r"(?:กระเป๋าเดินทาง|travel\s*luggage|travel\s*case|suitcase|redmi\s*travel)"),
+    # เครื่องขัดเล็บไฟฟ้า / nail polisher (Beauty)
+    ("nail_polisher",
+     ("เครื่องขัดเล็บ", "nail polisher", "electric nail polisher",
+      "showsee nail"),
+     r"(?:เครื่องขัดเล็บ|nail\s*polisher|electric\s*nail\s*polisher)"),
+    # ชามข้าวสัตว์ / pet bowl (Pets)
+    ("pet_bowl",
+     ("ชามข้าวแมว", "ชามข้าวสุนัข", "pet bowl", "petkit bowl",
+      "ชามอาหารสัตว์", "ชามน้ำสัตว์"),
+     r"(?:ชามข้าวแมว|ชามข้าวสุนัข|pet\s*bowl|ชามอาหารสัตว์|ชามน้ำสัตว์)"),
+    # ที่นอนสัตว์ / pet bed (Pets)
+    ("pet_bed",
+     ("ที่นอนแมว", "ที่นอนหมา", "pet bed", "cooling bed",
+      "petkit cooling bed", "ที่นอนสัตว์"),
+     r"(?:ที่นอนแมว|ที่นอนหมา|pet\s*bed|cooling\s*bed|ที่นอนสัตว์)"),
+    # เครื่องดับกลิ่นสัตว์ / pet odor eliminator (Pets)
+    ("pet_odor_eliminator",
+     ("เครื่องดับกลิ่น", "odor eliminator", "เครื่องทำโอโซน",
+      "pando odor", "เครื่องดับกลิ่นอัตโนมัติ"),
+     r"(?:เครื่องดับกลิ่น|odor\s*eliminator|เครื่องทำโอโซน|pando\s*odor)"),
+    # โคมไฟแขวนจอ / monitor light (Computers & Accessories)
+    ("monitor_light",
+     ("โคมไฟแขวนจอ", "monitor light bar", "light bar", "โคมไฟโต๊ะคอม",
+      "computer monitor light", "led bar โคมไฟ"),
+     r"(?:โคมไฟแขวนจอ|monitor\s*light\s*bar|light\s*bar|โคมไฟโต๊ะคอม|computer\s*monitor\s*light)"),
+    # เครื่องกำจัดสิ่งสกปรกในช่องปาก / dental flusher (Home Appliances)
+    ("dental_flusher",
+     ("เครื่องกำจัดสิ่งสกปรกในช่องปาก", "dental flusher",
+      "portable dental flusher", "เครื่องพุน้ำฟัน", "water flosser",
+      "oral irrigator"),
+     r"(?:เครื่องกำจัดสิ่งสกปรกในช่องปาก|dental\s*flusher|water\s*flosser|oral\s*irrigator)"),
+    # ชุดเครื่องเสียง / home theater (Audio)
+    ("home_theater",
+     ("ชุดเครื่องเสียง", "โฮมเธียเตอร์", "home theater", "โฮมเธียเตอร์",
+      "ระบบเสียง 5.1", "dolby & dts"),
+     r"(?:ชุดเครื่องเสียง|โฮมเธียเตอร์|home\s*theater|โฮมเธียเตอร์|ระบบเสียง)"),
+    # เครื่องทำความสะอาดอัลตราโซนิก / ultrasonic cleaner (Fashion Accessories)
+    ("ultrasonic_cleaner",
+     ("เครื่องทำความสะอาดอัลตราโซนิก", "ultrasonic cleaner",
+      "eraclean", "เครื่องทำความสะอาดอัลตราซอนิก"),
+     r"(?:เครื่องทำความสะอาดอัลตราโซนิก|ultrasonic\s*cleaner|eraclean\s*ga)"),
+    # วีดีโอแคปเจอร์การ์ด / video capture card (Gaming & Consoles)
+    ("video_capture",
+     ("วีดีโอแคปเจอร์", "video capture", "capture card", "สตรีมเกมส์",
+      "hagibis uhc", "video capture card"),
+     r"(?:วีดีโอแคปเจอร์|video\s*capture|capture\s*card|สตรีมเกมส์|hagibis\s*uhc)"),
+    # อุปกรณ์ออกกำลังกาย / push-up support (Sports & Outdoors)
+    ("fitness_gear",
+     ("อุปกรณ์ออกกำลังกาย", "แท่นวิดพื้น", "push-up support",
+      "push up holder", "yunmai push", "อุปกรณ์วิดพื้น"),
+     r"(?:อุปกรณ์ออกกำลังกาย|แท่นวิดพื้น|push-?up\s*support|push\s*up\s*holder|yunmai\s*push)"),
+    # หลอดไฟติดไว้กลางคืน / nightlight (Sports & Outdoors — misclassified)
+    ("nightlight",
+     ("หลอดไฟติดไว้กลางคืน", "nightlight", "night light", "เซ็นเซอร์ตรวจจับแสง",
+      "realme nightlight", "หลอดไฟเซ็นเซอร์"),
+     r"(?:หลอดไฟติดไว้กลางคืน|nightlight|night\s*light|realme\s*nightlight)"),
+    # แคปซูลกาแฟ / coffee capsule (Food & Beverages)
+    ("coffee_capsule",
+     ("coffee capsule", "coffee capsules", "แคปซูลกาแฟ",
+      "scishare coffee"),
+     r"(?:coffee\s*capsule|แคปซูลกาแฟ|scishare\s*coffee)"),
+    # แปรงทำความสะอาดผิวหน้า / facial brush (Beauty)
+    ("facial_brush",
+     ("แปรงทำความสะอาดผิวหน้า", "facial cleansing", "facial device",
+      "inface ion", "แปรงซิลิโคนหน้า", "เครื่องทำความสะอาดหน้า"),
+     r"(?:แปรงทำความสะอาดผิวหน้า|facial\s*cleansing|facial\s*device|inface\s*ion|เครื่องทำความสะอาดหน้า)"),
+    # เครื่องหุ้มรองเท้า / shoe wrapping machine (Men/Women Shoes)
+    ("shoe_wrapping_machine",
+     ("เครื่องหุ้มรองเท้า", "electric sticky", "shoe wrapping",
+      "เครื่องหุ้มรองเท้าอัตโนมัติ", "ฟิล์มรองเท้า"),
+     r"(?:เครื่องหุ้มรองเท้า|electric\s*sticky|shoe\s*wrapping|ฟิล์มรองเท้า)"),
+    # สวิตช์ด็อก / switch dock (Gaming & Consoles)
+    ("dock",
+     ("switch dock", "สวิตช์ด็อก", "usb hub", "dock usb",
+      "hagibis swc", "nintendo switch dock"),
+     r"(?:switch\s*dock|สวิตช์ด็อก|usb\s*hub|hagibis\s*swc|nintendo\s*switch\s*dock)"),
+    # กรีนสกรีน / green screen (Cameras & Drones)
+    ("green_screen",
+     ("กรีนสกรีน", "green screen", "สตรีมมิ่ง", "greenscreen",
+      "elgato green screen"),
+     r"(?:กรีนสกรีน|green\s*screen|elgato\s*green\s*screen)"),
+    # โซล่าเซลล์ / solar panel (Home Appliances — for IMILAB EC4)
+    ("solar_panel",
+     ("แผงโซล่าเซลล์", "solar panel", "โซล่าเซลล์", "solar cell",
+      "imilab solar panel"),
+     r"(?:แผงโซล่าเซลล์|solar\s*panel|โซล่าเซลล์|solar\s*cell)"),
+    # เว็บแคม / webcam (Computers & Accessories)
+    ("webcam",
+     ("เว็บแคม", "webcam", "กล้องเว็บแคม", "web camera",
+      "imilab webcam"),
+     r"(?:เว็บแคม|webcam|web\s*camera|กล้องเว็บแคม)"),
+    # ขยายสัญญาณ wifi / wifi extender (Computers & Accessories)
+    ("wifi_extender",
+     ("ขยายสัญญาณเน็ต", "wifi amplifier", "wifi range extender",
+      "ตัวขยายสัญญาณ", "wifi extender", "เครื่องขยายสัญญาณ"),
+     r"(?:ขยายสัญญาณเน็ต|wifi\s*amplifier|wifi\s*range\s*extender|ตัวขยายสัญญาณ|wifi\s*extender)"),
+    # ถุงเก็บฝุ่น / dust bag accessory (Home Appliances — vacuum accessory)
+    ("dust_bag",
+     ("ถุงเก็บฝุ่น", "dust bag", "ถุงเก็บฝุ่น lydsto",
+      "อุปกรณ์เสริมถุงเก็บฝุ่น"),
+     r"(?:ถุงเก็บฝุ่น|dust\s*bag|อุปกรณ์เสริมถุงเก็บฝุ่น)"),
+    # เครื่องวัดลมยาง / TPMS (Automobiles)
+    ("tpms",
+     ("เครื่องวัดลมยาง", "tpms", "tire pressure", "วัดลมยาง",
+      "70mai tpms"),
+     r"(?:เครื่องวัดลมยาง|tpms|tire\s*pressure|วัดลมยาง|70mai\s*tpms)"),
+    # ส้วมแมวอัตโนมัติ / cat litter box (Pets)
+    ("cat_litter_box",
+     ("ส้วมแมว", "cat litter box", "ห้องน้ำแมว", "ถังขยะแมว",
+      "กะบะทรายแมว", "petree waste"),
+     r"(?:ส้วมแมว|cat\s*litter\s*box|ห้องน้ำแมว|ถังขยะแมว|กะบะทรายแมว|petree\s*waste)"),
 )
 
 
@@ -1550,7 +1752,7 @@ def _detect_charger_subtype(message: str) -> str | None:
         #   แต่ pythainlp newmm ตัดบางคำเป็น ['หัว', 'เตียง'] (ไม่ใช่ token เดียว)
         #   ดังนั้นต้องเช็ค context ด้วย: "หัว" ตามด้วยคำที่ไม่ใช่ charger → ไม่ใช่ shorthand
         #   และต้องมี substring fallback สำหรับ "มีหัวไหม" (tokenizer รวมเป็น "มีหัว")
-        if _FUZZY_AVAILABLE:
+        if _TOKENIZE_AVAILABLE:
             _tokens = word_tokenize(low, engine="newmm")
             _token_set = set(_tokens)
             # ── "หัว" shorthand ──
@@ -1990,6 +2192,40 @@ _PRODUCT_TYPE_CATEGORIES: dict[str, tuple[str, ...]] = {
     "tv_box": ("Home Appliances",),
     "blender": ("Home Appliances",),
     "stylus": ("Mobile & Gadgets", "Computers & Accessories"),
+    # ⚡ 2026-09-11 — audit ShpProducts: type ใหม่เพื่อครอบคลุมสินค้าใน collection
+    "bag": ("Men Bags", "Women Bags", "Travel & Luggage", "Fashion Accessories"),
+    "shoes": ("Men Shoes", "Women Shoes", "Baby & Kids Fashion"),
+    "stationery": ("Stationery",),
+    "gamepad": ("Gaming & Consoles",),
+    "electric_bike": ("Motorcycles",),
+    "scooter": ("Sports & Outdoors",),
+    "clothing": ("Men Clothes", "Women Clothes", "Baby & Kids Fashion"),
+    "sunglasses": ("Fashion Accessories",),
+    "cap": ("Fashion Accessories",),
+    "mask": ("Baby & Kids Fashion", "Health"),
+    "luggage": ("Travel & Luggage",),
+    "nail_polisher": ("Beauty",),
+    "pet_bowl": ("Pets",),
+    "pet_bed": ("Pets",),
+    "pet_odor_eliminator": ("Pets",),
+    "monitor_light": ("Computers & Accessories", "Home & Living"),
+    "dental_flusher": ("Home Appliances", "Health"),
+    "home_theater": ("Audio",),
+    "ultrasonic_cleaner": ("Fashion Accessories", "Home & Living"),
+    "video_capture": ("Gaming & Consoles", "Computers & Accessories"),
+    "fitness_gear": ("Sports & Outdoors",),
+    "nightlight": ("Home & Living", "Home Appliances"),
+    "coffee_capsule": ("Food & Beverages", "Home Appliances"),
+    "facial_brush": ("Beauty",),
+    "shoe_wrapping_machine": ("Men Shoes", "Women Shoes"),
+    "dock": ("Gaming & Consoles", "Computers & Accessories"),
+    "green_screen": ("Cameras & Drones", "Computers & Accessories"),
+    "solar_panel": ("Home Appliances", "Cameras & Drones"),
+    "webcam": ("Computers & Accessories", "Cameras & Drones"),
+    "wifi_extender": ("Computers & Accessories",),
+    "dust_bag": ("Home Appliances", "Home & Living"),
+    "tpms": ("Automobiles",),
+    "cat_litter_box": ("Pets",),
 }
 
 

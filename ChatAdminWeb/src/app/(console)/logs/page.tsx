@@ -1,11 +1,19 @@
 "use client";
-import { useState, useEffect, useCallback, Fragment } from "react";
-import { ScrollText, RefreshCw, ChevronDown, X, ShieldAlert, List, Table2 } from "lucide-react";
+import { useState, useEffect, useCallback, Fragment, useRef } from "react";
+import { ScrollText, RefreshCw, ChevronDown, X, ShieldAlert, List, Table2, FileText } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { FilterChips } from "@/components/ui/FilterChips";
+import { Loading } from "@/components/ui/Loading";
+import { PageShell } from "@/components/ui/PageShell";
 import { api } from "@/lib/apiClient";
 import { useAuth } from "@/lib/authStore";
 import { usePolling } from "@/lib/usePolling";
+import { useSearchShortcut, useEscToClear, useListboxNav } from "@/lib/useKeyboardShortcuts";
+import { toast, useToastError } from "@/components/ui/Toast";
+import { FilterPresets } from "@/components/ui/FilterPresets";
+import { ACTION_CATEGORIES, ACTION_TONE, actionTypeLabel } from "@/lib/actionTypes";
 
 // Phase 7.10 — หน้า Logs แยกจาก config
 // แสดง audit trail ของทุก action ในระบบ พร้อม filter admin + action_type
@@ -34,62 +42,10 @@ interface AdminOption {
   role: string;
 }
 
-// แบ่งหมวด action_type สำหรับ filter dropdown
-const ACTION_CATEGORIES: { label: string; types: string[] }[] = [
-  { label: "Auth", types: ["login", "logout"] },
-  { label: "User mgmt", types: ["user.create", "user.update", "user.delete", "user.toggle_active", "user.reset_password"] },
-  { label: "Trigger", types: ["trigger.create", "trigger.update", "trigger.delete", "trigger.toggle"] },
-  { label: "Workflow", types: ["workflow.create", "workflow.update", "workflow.delete", "workflow.restore", "workflow.toggle", "workflow.run_completed", "workflow.run_errored", "workflow.run_timeout", "workflow.run_cancelled", "workflow.assign_ticket", "workflow.add_label", "workflow.add_note", "workflow.send_http_blocked", "workflow.resume", "workflow.wait_retry", "workflow.wait_no_reply"] },
-  { label: "Knowledge", types: ["kb.create", "kb.update", "kb.delete", "kb.toggle", "kb.import_excel"] },
-  { label: "Assignment", types: ["chat_assigned", "chat_reassigned", "assignment.mode_change", "assignment.shop_team_add", "assignment.shop_team_remove", "assignment.platform_team_add", "assignment.platform_team_remove", "agent.pause", "agent.resume", "agent_auto_paused"] },
-  { label: "Conversation", types: ["admin.reply", "conversation.handoff", "conversation.resolve", "conversation.open", "conversation.close", "conversation.status_change", "ticket.create", "ticket.update", "ticket.delete"] },
-  { label: "Config", types: ["config.update", "config.shop_toggle", "config.test_integration", "admin_config.update", "admin.maintenance.clear_status"] },
-  { label: "Bot/Data", types: ["bot.reply", "bot.handoff_to_admin", "bot.process_started", "bot.process_completed", "bot.process_failed", "bot.guard_violation", "bot.idempotency_skip", "bot.buffer_flush", "bot.buffer_recover", "data_writer.message_received", "data_writer.conversation_upserted", "data_writer.duplicate_message", "platform_api.blocked"] },
-  { label: "Quick reply", types: ["quick_reply.create", "quick_reply.update", "quick_reply.delete", "quick_reply.use"] },
-  { label: "Persona", types: ["shop_persona.create", "shop_persona.update", "shop_persona.delete", "shop_persona.toggle"] },
-  { label: "Shop settings", types: ["shop_settings.create", "shop_settings.update", "shop_settings.delete"] },
-  { label: "Shadow", types: ["shadow_reply.delete", "shadow_reply.clear_all", "shadow_reply.restore", "shadow_reply.restore_all", "shadow_reply.rate", "shadow_reply.generate", "shadow_reply.generate_conversation"] },
-  { label: "Test", types: ["test_chat.rate", "test_assignment.rate_message", "test_assignment.rate_conversation", "test_assignment.replay"] },
-  { label: "Chat accept", types: ["chat_accept.start", "chat_accept.stop"] },
-  { label: "Conversation meta", types: ["conversation.set_topic", "conversation.set_item_ids", "conversation.pin", "conversation.unpin"] },
-  { label: "SLA", types: ["sla.alert", "sla.reassign"] },
-];
-
-const ACTION_TONE: Record<string, "brand" | "coral" | "neutral" | "pale"> = {
-  login: "brand",
-  logout: "neutral",
-  "admin.reply": "brand",
-  "conversation.handoff": "coral",
-  "conversation.resolve": "pale",
-  "conversation.close": "neutral",
-  chat_assigned: "brand",
-  chat_reassigned: "coral",
-  "bot.reply": "brand",
-  "bot.guard_violation": "coral",
-  "platform_api.blocked": "coral",
-  "user.delete": "coral",
-  "workflow.create": "brand",
-  "workflow.update": "brand",
-  "workflow.toggle": "pale",
-  "workflow.delete": "coral",
-  "workflow.restore": "brand",
-  "workflow.run_errored": "coral",
-  "workflow.run_timeout": "coral",
-  "workflow.run_cancelled": "coral",
-  "workflow.wait_no_reply": "coral",
-  "shop_persona.create": "brand",
-  "shop_persona.update": "brand",
-  "shop_persona.delete": "coral",
-  "shop_persona.toggle": "pale",
-  "shop_settings.create": "brand",
-  "shop_settings.update": "brand",
-  "shop_settings.delete": "coral",
-  "shadow_reply.delete": "coral",
-  "shadow_reply.restore": "brand",
-  "shadow_reply.clear_all": "coral",
-};
-
 export default function LogsPage() {
+  const searchRef = useRef<HTMLInputElement>(null);
+  useSearchShortcut(searchRef);
+  const handleSearchEsc = useEscToClear(() => setSearch(""));
   const { user } = useAuth();
   const [logs, setLogs] = useState<AdminLogRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -102,13 +58,46 @@ export default function LogsPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [showAdminDropdown, setShowAdminDropdown] = useState(false);
   const [showCatDropdown, setShowCatDropdown] = useState(false);
+  // Column visibility for table view (persisted in localStorage)
+  const [hiddenCols, setHiddenCols] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem("chatadmin:logs:hiddenCols");
+      return saved ? new Set(JSON.parse(saved)) : new Set();
+    } catch { return new Set(); }
+  });
+  const toggleCol = (col: string) => {
+    setHiddenCols((prev) => {
+      const next = new Set(prev);
+      if (next.has(col)) next.delete(col);
+      else next.add(col);
+      try { localStorage.setItem("chatadmin:logs:hiddenCols", JSON.stringify([...next])); } catch {}
+      return next;
+    });
+  };
+  const { catchError } = useToastError();
+
+  // arrow-key navigation for filter dropdowns
+  const adminNav = useListboxNav(admins.length + 2, (i) => {
+    if (i === 0) { setFilterAdmin("all"); setShowAdminDropdown(false); return; }
+    if (i === 1) { setFilterAdmin("system"); setShowAdminDropdown(false); return; }
+    const a = admins[i - 2];
+    if (a) { setFilterAdmin(a.admin_id); setShowAdminDropdown(false); }
+  }, () => setShowAdminDropdown(false));
+  const catNav = useListboxNav(ACTION_CATEGORIES.length + 1, (i) => {
+    if (i === 0) { setFilterCategory("all"); setFilterActionType("all"); setShowCatDropdown(false); return; }
+    const c = ACTION_CATEGORIES[i - 1];
+    if (c) { setFilterCategory(c.label); setFilterActionType("all"); setShowCatDropdown(false); }
+  }, () => setShowCatDropdown(false));
 
   // โหลด admins list (สำหรับ filter + แสดงชื่อ)
   useEffect(() => {
     if (user?.role === "admin") return;
     api().get<{ users: AdminOption[] }>("/users/list").then((r) => {
       setAdmins(r.data.users || []);
-    }).catch(() => setAdmins([]));
+    }).catch((e) => {
+      catchError(e, "โหลดรายชื่อแอดมินไม่สำเร็จ");
+      setAdmins([]);
+    });
   }, [user?.role]);
 
   const canViewLogs = user?.role === "superadmin" || user?.role === "dev";
@@ -123,6 +112,7 @@ export default function LogsPage() {
       setLogs(r.data.rows || []);
     } catch (err) {
       console.error("load logs failed", err);
+      toast.error("โหลดบันทึกระบบไม่สำเร็จ", 0, { label: "ลองใหม่", onClick: () => loadLogs() });
       setLogs([]);
     } finally {
       setLoading(false);
@@ -192,49 +182,45 @@ export default function LogsPage() {
   }
 
   return (
-    <div className="h-full overflow-y-auto">
-      {/* Header — navbar เดิม (เหมือน shops/team) */}
-      <div className="px-6 py-5 border-b border-border bg-surface sticky top-0 z-10">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-brand/15 flex items-center justify-center">
-              <ScrollText size={20} className="text-brand" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-text">บันทึกระบบ</h1>
-              <p className="text-xs text-text-muted">
-                audit trail · {filtered.length} รายการ · รีเฟรชทุก 5 วิ
-              </p>
-            </div>
+    <PageShell
+      icon={ScrollText}
+      title="บันทึกระบบ"
+      helpHref="/help#logs"
+      subtitle={<>audit trail · {filtered.length} รายการ · รีเฟรชทุก 5 วิ · <a href="/help#action-types" className="text-brand hover:text-brand-dark">ดูรหัส action_type ทั้งหมด →</a></>}
+      actions={
+        <>
+          {/* ⚡ v2 — tab สลับมุมมอง ลิสต์/ตาราง */}
+          <div className="flex items-center rounded-lg border border-border bg-surface-2 p-0.5" role="group" aria-label="มุมมอง">
+            <button
+              onClick={() => setViewMode("list")}
+              aria-pressed={viewMode === "list" ? "true" : "false"}
+              className={`h-7 px-2.5 rounded-md text-xs flex items-center gap-1.5 transition-colors ${viewMode === "list" ? "bg-brand text-white" : "text-text-muted hover:text-text"}`}
+            >
+              <List size={12} /> ลิสต์
+            </button>
+            <button
+              onClick={() => setViewMode("table")}
+              aria-pressed={viewMode === "table" ? "true" : "false"}
+              className={`h-7 px-2.5 rounded-md text-xs flex items-center gap-1.5 transition-colors ${viewMode === "table" ? "bg-brand text-white" : "text-text-muted hover:text-text"}`}
+            >
+              <Table2 size={12} /> ตาราง
+            </button>
           </div>
-          <div className="flex items-center gap-2">
-            {/* ⚡ v2 — tab สลับมุมมอง ลิสต์/ตาราง */}
-            <div className="flex items-center rounded-lg border border-border bg-surface-2 p-0.5">
-              <button
-                onClick={() => setViewMode("list")}
-                className={`h-7 px-2.5 rounded-md text-xs flex items-center gap-1.5 transition-colors ${viewMode === "list" ? "bg-brand text-white" : "text-text-muted hover:text-text"}`}
-              >
-                <List size={12} /> ลิสต์
-              </button>
-              <button
-                onClick={() => setViewMode("table")}
-                className={`h-7 px-2.5 rounded-md text-xs flex items-center gap-1.5 transition-colors ${viewMode === "table" ? "bg-brand text-white" : "text-text-muted hover:text-text"}`}
-              >
-                <Table2 size={12} /> ตาราง
-              </button>
-            </div>
-            <Button size="sm" variant="outline" onClick={loadLogs} disabled={loading}>
-              <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
-            </Button>
-          </div>
-        </div>
-
-        {/* Filter bar */}
-        <div className="flex items-center gap-2 mt-4 flex-wrap">
+          <Button size="sm" variant="outline" onClick={loadLogs} disabled={loading}>
+            <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
+          </Button>
+        </>
+      }
+      filterBar={
+        <>
+          {/* Filter bar */}
+          <div className="flex items-center gap-2 flex-wrap">
           {/* Filter admin (dropdown แบบเลือกแล้วแสดงชื่อ) */}
           <div className="relative">
             <button
               onClick={() => { setShowAdminDropdown(!showAdminDropdown); setShowCatDropdown(false); }}
+              aria-expanded={showAdminDropdown}
+              aria-haspopup="listbox"
               className="h-8 px-3 rounded-lg border border-border bg-surface-2 text-xs text-text flex items-center gap-1.5 hover:border-brand/40 transition-colors"
             >
               <span className="text-text-muted">admin:</span>
@@ -242,23 +228,26 @@ export default function LogsPage() {
               <ChevronDown size={12} className="text-text-muted" />
             </button>
             {showAdminDropdown && (
-              <div className="absolute top-full left-0 mt-1 min-w-[180px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1 max-h-72 overflow-y-auto">
+              <div ref={(el) => { if (showAdminDropdown && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามแอดมิน" aria-activedescendant={`admin-option-${adminNav.activeIndex}`} onKeyDown={(e) => { adminNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[180px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1 max-h-72 overflow-y-auto">
                 <button
+                  id="admin-option-0" role="option" aria-selected={filterAdmin === "all"}
                   onClick={() => { setFilterAdmin("all"); setShowAdminDropdown(false); }}
                   className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterAdmin === "all" ? "text-brand font-medium" : "text-text"}`}
                 >
                   ทุกแอดมิน
                 </button>
                 <button
+                  id="admin-option-1" role="option" aria-selected={filterAdmin === "system"}
                   onClick={() => { setFilterAdmin("system"); setShowAdminDropdown(false); }}
                   className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterAdmin === "system" ? "text-brand font-medium" : "text-text"}`}
                 >
                   system
                 </button>
                 <div className="border-t border-border my-1" />
-                {admins.map((a) => (
+                {admins.map((a, i) => (
                   <button
                     key={a.admin_id}
+                    id={`admin-option-${i + 2}`} role="option" aria-selected={filterAdmin === a.admin_id}
                     onClick={() => { setFilterAdmin(a.admin_id); setShowAdminDropdown(false); }}
                     className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterAdmin === a.admin_id ? "text-brand font-medium" : "text-text"}`}
                   >
@@ -273,6 +262,8 @@ export default function LogsPage() {
           <div className="relative">
             <button
               onClick={() => { setShowCatDropdown(!showCatDropdown); setShowAdminDropdown(false); }}
+              aria-expanded={showCatDropdown}
+              aria-haspopup="listbox"
               className="h-8 px-3 rounded-lg border border-border bg-surface-2 text-xs text-text flex items-center gap-1.5 hover:border-brand/40 transition-colors"
             >
               <span className="text-text-muted">หมวด:</span>
@@ -280,16 +271,18 @@ export default function LogsPage() {
               <ChevronDown size={12} className="text-text-muted" />
             </button>
             {showCatDropdown && (
-              <div className="absolute top-full left-0 mt-1 min-w-[160px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+              <div ref={(el) => { if (showCatDropdown && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามหมวด" aria-activedescendant={`cat-option-${catNav.activeIndex}`} onKeyDown={(e) => { catNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[160px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
                 <button
+                  id="cat-option-0" role="option" aria-selected={filterCategory === "all"}
                   onClick={() => { setFilterCategory("all"); setFilterActionType("all"); setShowCatDropdown(false); }}
                   className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterCategory === "all" ? "text-brand font-medium" : "text-text"}`}
                 >
                   ทุกหมวด
                 </button>
-                {ACTION_CATEGORIES.map((c) => (
+                {ACTION_CATEGORIES.map((c, i) => (
                   <button
                     key={c.label}
+                    id={`cat-option-${i + 1}`} role="option" aria-selected={filterCategory === c.label}
                     onClick={() => { setFilterCategory(c.label); setFilterActionType("all"); setShowCatDropdown(false); }}
                     className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterCategory === c.label ? "text-brand font-medium" : "text-text"}`}
                   >
@@ -301,12 +294,37 @@ export default function LogsPage() {
           </div>
 
           {/* Search */}
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="ค้นหา action / ชื่อ / conv id..."
-            className="h-8 px-3 rounded-lg border border-border bg-surface-2 text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-1 focus:ring-brand/40 w-56"
+          <div className="relative w-56">
+            <input
+              type="text"
+              ref={searchRef}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={handleSearchEsc}
+              placeholder="ค้นหาคำสั่งงาน / ชื่อ / รหัสแชท..."
+              className="w-full h-8 px-3 pr-8 rounded-lg border border-border bg-surface-2 text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-1 focus:ring-brand/40"
+            />
+            <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-subtle border border-border rounded px-1 py-0.5 pointer-events-none">/</kbd>
+          </div>
+
+          {/* Preset */}
+          <FilterPresets
+            pageKey="logs"
+            adminId={user?.admin_id || "anon"}
+            currentValues={{
+              filterAdmin,
+              filterCategory,
+              filterActionType,
+              search,
+              viewMode,
+            }}
+            onApply={(v) => {
+              setFilterAdmin(v.filterAdmin || "all");
+              setFilterCategory(v.filterCategory || "all");
+              setFilterActionType(v.filterActionType || "all");
+              setSearch(v.search || "");
+              setViewMode(v.viewMode || "list");
+            }}
           />
 
           {/* Clear filter */}
@@ -319,14 +337,31 @@ export default function LogsPage() {
             </button>
           )}
         </div>
-      </div>
 
+        {/* Active filter chips */}
+        {(filterAdmin !== "all" || filterCategory !== "all" || filterActionType !== "all" || search) && (
+          <div className="mt-2">
+            <FilterChips
+              chips={[
+                ...(search ? [{ key: "search", label: `ค้นหา: ${search}`, onRemove: () => setSearch("") }] : []),
+                ...(filterAdmin !== "all" ? [{ key: "admin", label: `แอดมิน: ${adminName(filterAdmin)}`, onRemove: () => setFilterAdmin("all") }] : []),
+                ...(filterCategory !== "all" ? [{ key: "category", label: `หมวด: ${filterCategory}`, onRemove: () => setFilterCategory("all") }] : []),
+                ...(filterActionType !== "all" ? [{ key: "actionType", label: `action: ${actionTypeLabel(filterActionType)}`, onRemove: () => setFilterActionType("all") }] : []),
+              ]}
+              onClearAll={() => { setFilterAdmin("all"); setFilterCategory("all"); setFilterActionType("all"); setSearch(""); }}
+            />
+          </div>
+        )}
+        </>
+      }
+      contentClassName="p-6"
+    >
       {/* Log content — สลับ list/table ตาม viewMode */}
       <div className="p-6">
-        {filtered.length === 0 ? (
-          <div className="text-center py-12 text-text-muted text-sm">
-            {loading ? "กำลังโหลด..." : "ยังไม่มี log ตรงเงื่อนไข"}
-          </div>
+        {loading ? (
+          <div className="flex items-center justify-center py-12"><Loading /></div>
+        ) : filtered.length === 0 ? (
+          <EmptyState icon={FileText} title="ยังไม่มี log ตรงเงื่อนไข" description="ลองเปลี่ยน filter หรือล้างการกรอง" />
         ) : viewMode === "list" ? (
           /* ── List view (เดิม) ── */
           <div className="space-y-1.5">
@@ -341,6 +376,7 @@ export default function LogsPage() {
                 >
                   <button
                     onClick={() => setExpandedId(expanded ? null : key)}
+                    aria-expanded={expanded === true}
                     className="w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-surface-2/50 transition-colors"
                   >
                     <code className="text-text-subtle flex-shrink-0 font-mono text-[11px] w-32">
@@ -348,11 +384,11 @@ export default function LogsPage() {
                         day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
                       })}
                     </code>
-                    <Badge tone={tone} className="flex-shrink-0">{log.action_type}</Badge>
+                    <Badge tone={tone} className="flex-shrink-0">{actionTypeLabel(log.action_type)}</Badge>
                     <span className="text-brand flex-shrink-0 text-xs font-medium">
                       {adminName(log.admin_id)}
                     </span>
-                    <span className="text-text-muted text-xs truncate flex-1">
+                    <span className="text-text-muted text-xs truncate flex-1" title={log.conversation_id || log.shop_id || ""}>
                       {log.conversation_id ? `conv: ${log.conversation_id.slice(0, 16)}` : ""}
                       {log.shop_id ? ` · shop: ${log.shop_id.slice(0, 12)}` : ""}
                       {log.target_admin_id ? ` → ${adminName(log.target_admin_id)}` : ""}
@@ -362,19 +398,19 @@ export default function LogsPage() {
                   {expanded && (
                     <div className="px-3 py-2.5 border-t border-border bg-surface-2/30 text-xs space-y-1.5">
                       <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-                        <div><span className="text-text-muted">admin_id:</span> <code className="font-mono text-text">{log.admin_id}</code></div>
-                        <div><span className="text-text-muted">action_type:</span> <code className="font-mono text-text">{log.action_type}</code></div>
+                        <div><span className="text-text-muted">ผู้กระทำ:</span> <code className="font-mono text-text">{adminName(log.admin_id)}</code></div>
+                        <div><span className="text-text-muted">การกระทำ:</span> <code className="font-mono text-text">{actionTypeLabel(log.action_type)}</code></div>
                         {log.target_admin_id && (
-                          <div><span className="text-text-muted">target:</span> <code className="font-mono text-text">{log.target_admin_id}</code></div>
+                          <div><span className="text-text-muted">เป้าหมาย:</span> <code className="font-mono text-text">{adminName(log.target_admin_id)}</code></div>
                         )}
                         {log.conversation_id && (
-                          <div><span className="text-text-muted">conversation:</span> <code className="font-mono text-text">{log.conversation_id}</code></div>
+                          <div><span className="text-text-muted">แชท:</span> <code className="font-mono text-text" title={log.conversation_id}>{log.conversation_id.slice(0, 16)}</code></div>
                         )}
                         {log.shop_id && (
-                          <div><span className="text-text-muted">shop:</span> <code className="font-mono text-text">{log.shop_id}</code></div>
+                          <div><span className="text-text-muted">ร้าน:</span> <code className="font-mono text-text" title={log.shop_id}>{log.shop_id.slice(0, 12)}</code></div>
                         )}
                         {log.ip && (
-                          <div><span className="text-text-muted">ip:</span> <code className="font-mono text-text">{log.ip}</code></div>
+                          <div><span className="text-text-muted">IP:</span> <code className="font-mono text-text">{log.ip}</code></div>
                         )}
                       </div>
                       {log.metadata && Object.keys(log.metadata).length > 0 && (
@@ -393,10 +429,10 @@ export default function LogsPage() {
           </div>
         ) : (
           /* ── Table view (ใหม่ — แสดงทุก field จริงใน AdminLogDoc) ── */
-          <LogTableView logs={filtered} adminName={adminName} expandedId={expandedId} setExpandedId={setExpandedId} />
+          <LogTableView logs={filtered} adminName={adminName} actionTypeLabel={actionTypeLabel} expandedId={expandedId} setExpandedId={setExpandedId} hiddenCols={hiddenCols} toggleCol={toggleCol} />
         )}
       </div>
-    </div>
+    </PageShell>
   );
 }
 
@@ -407,13 +443,19 @@ export default function LogsPage() {
 function LogTableView({
   logs,
   adminName,
+  actionTypeLabel,
   expandedId,
   setExpandedId,
+  hiddenCols,
+  toggleCol,
 }: {
   logs: AdminLogRow[];
   adminName: (id: string) => string;
+  actionTypeLabel: (t: string) => string;
   expandedId: string | null;
   setExpandedId: (id: string | null) => void;
+  hiddenCols: Set<string>;
+  toggleCol: (col: string) => void;
 }) {
   const fmtTime = (ts: string) =>
     new Date(ts).toLocaleString("th-TH", {
@@ -425,22 +467,57 @@ function LogTableView({
   const metaCount = (m?: Record<string, unknown>) =>
     !m ? 0 : Object.keys(m).length;
 
+  const cols = [
+    { key: "target", label: "เป้าหมาย", hideClass: "hidden lg:table-cell" },
+    { key: "conv", label: "แชท", hideClass: "hidden md:table-cell" },
+    { key: "shop", label: "ร้าน", hideClass: "hidden md:table-cell" },
+    { key: "ticket", label: "ทิกเก็ต", hideClass: "hidden lg:table-cell" },
+    { key: "ip", label: "หมายเลข IP", hideClass: "hidden xl:table-cell" },
+    { key: "meta", label: "บันทึกย่อ", hideClass: "hidden md:table-cell" },
+  ];
+
   return (
     <div className="rounded-lg border border-border bg-surface overflow-hidden">
+      {/* Column visibility toggle */}
+      <fieldset className="flex items-center gap-1 px-3 py-1.5 border-b border-border bg-surface-2/50 flex-wrap" role="group" aria-label="เลือกคอลัมน์ที่จะแสดง">
+        <span className="text-[10px] text-text-subtle">คอลัมน์:</span>
+        {cols.map((c) => (
+          <button
+            key={c.key}
+            onClick={() => toggleCol(c.key)}
+            aria-pressed={!hiddenCols.has(c.key)}
+            className={`text-[10px] px-2 py-0.5 rounded border transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-brand/40 ${
+              !hiddenCols.has(c.key)
+                ? "border-brand/30 bg-brand/10 text-brand"
+                : "border-border bg-surface text-text-subtle hover:text-text"
+            }`}
+          >
+            {c.label}
+          </button>
+        ))}
+        {hiddenCols.size > 0 && (
+          <button
+            onClick={() => cols.forEach((c) => hiddenCols.has(c.key) && toggleCol(c.key))}
+            className="text-[10px] px-1.5 py-0.5 text-text-subtle hover:text-brand ml-auto"
+          >
+            แสดงทั้งหมด
+          </button>
+        )}
+      </fieldset>
       <div className="overflow-x-auto">
-        <table className="w-full text-xs">
+        <table className="w-full text-xs min-w-[640px]">
           <thead className="bg-surface-2 text-text-muted sticky top-0">
             <tr>
-              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">timestamp</th>
-              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">action_type</th>
-              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">actor / admin_id</th>
-              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">target_admin_id</th>
-              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">conversation_id</th>
-              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">shop_id</th>
-              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">ticket_id</th>
-              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">ip</th>
-              <th className="text-right font-medium px-3 py-2 whitespace-nowrap">meta</th>
-              <th className="text-right font-medium px-3 py-2 whitespace-nowrap">metadata</th>
+              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">เวลา</th>
+              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">การกระทำ</th>
+              <th className="text-left font-medium px-3 py-2 whitespace-nowrap">ผู้กระทำ</th>
+              <th className={`text-left font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("target") ? "hidden" : "hidden lg:table-cell"}`}>เป้าหมาย</th>
+              <th className={`text-left font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("conv") ? "hidden" : "hidden md:table-cell"}`}>แชท</th>
+              <th className={`text-left font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("shop") ? "hidden" : "hidden md:table-cell"}`}>ร้าน</th>
+              <th className={`text-left font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("ticket") ? "hidden" : "hidden lg:table-cell"}`}>ทิกเก็ต</th>
+              <th className={`text-left font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("ip") ? "hidden" : "hidden xl:table-cell"}`}>หมายเลข IP</th>
+              <th className={`text-right font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("meta") ? "hidden" : "hidden md:table-cell"}`}>บันทึกย่อ</th>
+              <th className="text-right font-medium px-3 py-2 whitespace-nowrap">รายละเอียด</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
@@ -453,42 +530,54 @@ function LogTableView({
                 <Fragment key={key}>
                   <tr
                     onClick={() => hasDetail && setExpandedId(expanded ? null : key)}
+                    tabIndex={hasDetail ? 0 : undefined}
+                    role={hasDetail ? "button" : undefined}
+                    onKeyDown={hasDetail ? (e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setExpandedId(expanded ? null : key);
+                      }
+                    } : undefined}
                     className={`align-top ${hasDetail ? "cursor-pointer hover:bg-surface-2/50" : "cursor-default"} transition-colors`}
                   >
                     <td className="px-3 py-2 whitespace-nowrap font-mono text-text-subtle">
                       {fmtTime(log.timestamp)}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      <Badge tone={tone}>{log.action_type}</Badge>
+                      <Badge tone={tone}>{actionTypeLabel(log.action_type)}</Badge>
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      <div className="text-text font-medium">{adminName(log.admin_id)}</div>
+                      <div className="text-text font-medium" title={log.admin_id}>{adminName(log.admin_id)}</div>
                       {log.actor && log.actor !== log.admin_id && (
                         <div className="text-text-subtle text-[10px]">actor: {log.actor}</div>
                       )}
-                      <div className="text-text-subtle text-[10px] font-mono">{log.admin_id}</div>
                     </td>
-                    <td className="px-3 py-2 whitespace-nowrap text-text-muted">
+                    <td className={`px-3 py-2 whitespace-nowrap text-text-muted ${hiddenCols.has("target") ? "hidden" : "hidden lg:table-cell"}`}>
                       {log.target_admin_id ? (
-                        <>
+                        <span title={log.target_admin_id}>
                           <div>{adminName(log.target_admin_id)}</div>
-                          <div className="text-text-subtle text-[10px] font-mono">{log.target_admin_id}</div>
-                        </>
+                        </span>
                       ) : "—"}
                     </td>
-                    <td className="px-3 py-2 whitespace-nowrap font-mono text-text-muted">
-                      {truncate(log.conversation_id, 20)}
+                    <td className={`px-3 py-2 whitespace-nowrap font-mono text-text-muted ${hiddenCols.has("conv") ? "hidden" : "hidden md:table-cell"}`}>
+                      {log.conversation_id ? (
+                        <span title={log.conversation_id}>{truncate(log.conversation_id, 20)}</span>
+                      ) : "—"}
                     </td>
-                    <td className="px-3 py-2 whitespace-nowrap font-mono text-text-muted">
-                      {truncate(log.shop_id, 16)}
+                    <td className={`px-3 py-2 whitespace-nowrap font-mono text-text-muted ${hiddenCols.has("shop") ? "hidden" : "hidden md:table-cell"}`}>
+                      {log.shop_id ? (
+                        <span title={log.shop_id}>{truncate(log.shop_id, 16)}</span>
+                      ) : "—"}
                     </td>
-                    <td className="px-3 py-2 whitespace-nowrap font-mono text-text-muted">
-                      {truncate(log.ticket_id, 16)}
+                    <td className={`px-3 py-2 whitespace-nowrap font-mono text-text-muted ${hiddenCols.has("ticket") ? "hidden" : "hidden lg:table-cell"}`}>
+                      {log.ticket_id ? (
+                        <span title={log.ticket_id}>{truncate(log.ticket_id, 16)}</span>
+                      ) : "—"}
                     </td>
-                    <td className="px-3 py-2 whitespace-nowrap font-mono text-text-muted">
+                    <td className={`px-3 py-2 whitespace-nowrap font-mono text-text-muted ${hiddenCols.has("ip") ? "hidden" : "hidden xl:table-cell"}`}>
                       {log.ip || "—"}
                     </td>
-                    <td className="px-3 py-2 text-right text-text-muted whitespace-nowrap">
+                    <td className={`px-3 py-2 text-right text-text-muted whitespace-nowrap ${hiddenCols.has("meta") ? "hidden" : "hidden md:table-cell"}`}>
                       {metaCount(log.meta) > 0 ? `${metaCount(log.meta)} keys` : "—"}
                     </td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">

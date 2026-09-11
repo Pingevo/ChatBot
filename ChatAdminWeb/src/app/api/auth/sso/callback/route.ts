@@ -5,6 +5,7 @@
 //   3. หา admin ใน DB ของเราด้วย email หรือ system81_username
 //   4. ถ้าไม่มี → สร้างใหม่เป็น role=admin (auto-provision)
 //   5. สร้าง session + set cookie + log + redirect ไปหน้า dashboard
+// 🔒 L1: Token ใน query string เป็น SSO flow มาตรฐาน — เพิ่ม headers ป้องกัน referrer/cache leak
 import { NextResponse, type NextRequest } from "next/server";
 import { auth } from "@/backend/service/authService";
 import { setSessionCookie } from "@/backend/lib/cookies";
@@ -29,6 +30,17 @@ function clientIp(req: NextRequest): string {
   return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
 }
 
+// 🔒 L1: Add security headers to prevent token leakage via referrer/cache
+function _secureRedirect(url: URL, req: NextRequest): NextResponse {
+  const res = NextResponse.redirect(url);
+  // 🔒 L1: Prevent token from leaking via Referer header
+  res.headers.set("Referrer-Policy", "no-referrer");
+  // 🔒 L1: Prevent caching of the callback response
+  res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
+  res.headers.set("Pragma", "no-cache");
+  return res;
+}
+
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const token = searchParams.get("token");
@@ -38,6 +50,9 @@ export async function GET(req: NextRequest) {
   // ล้าง cookie sso_return_to
   const clearCookie = (res: NextResponse) => {
     res.cookies.delete("sso_return_to");
+    // 🔒 L1: Add security headers to all redirect responses
+    res.headers.set("Referrer-Policy", "no-referrer");
+    res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
     return res;
   };
 
@@ -87,7 +102,8 @@ export async function GET(req: NextRequest) {
       return clearCookie(res);
     }
 
-    // สร้าง admin ใหม่ — role=admin (default), ไม่มี password (ใช้ SSO)
+    // 🔒 L3: Auto-provision with admin role but inactive — needs superadmin approval
+    // Previously: created as active admin immediately (privilege escalation risk)
     const username = ssoUsername.includes("@") ? ssoUsername.split("@")[0] : ssoUsername;
     const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
     const randomPassword = Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -99,8 +115,15 @@ export async function GET(req: NextRequest) {
       role: "admin",
       createdBy: "sso_auto_provision",
     });
-    // ลบ password_hash ออก — ไม่จำเป็นเพราะ login ผ่าน SSO
+    // 🔒 L3: Mark as inactive — superadmin must manually activate
+    await coll.updateOne(
+      { admin_id: admin.admin_id },
+      { $set: { active: false, sso_pending_approval: true } }
+    );
+    // 🔒 L3: Also remove password_hash since login is via SSO only
     await coll.updateOne({ admin_id: admin.admin_id }, { $unset: { password_hash: "" } });
+    const res = NextResponse.redirect(new URL(`/login?error=pending_approval`, req.url));
+    return clearCookie(res);
   }
 
   if (!admin.active) {
@@ -134,5 +157,8 @@ export async function GET(req: NextRequest) {
   const res = NextResponse.redirect(new URL(target, REDIRECT_BASE));
   setSessionCookie(res, sessionToken);
   res.cookies.delete("sso_return_to");
+  // 🔒 L1: Prevent token leakage via referrer/cache
+  res.headers.set("Referrer-Policy", "no-referrer");
+  res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
   return res;
 }

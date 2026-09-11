@@ -103,7 +103,7 @@ export default function SettingsPage() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 disabled={!editable}
-                className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text focus:outline-none focus:ring-2 focus:ring-brand/30 disabled:opacity-60"
+                className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text focus:outline-none focus:ring-2 focus:ring-brand/40 disabled:opacity-60"
               />
             </div>
             <div>
@@ -159,7 +159,7 @@ export default function SettingsPage() {
                     if (/^#[0-9a-fA-F]{0,6}$/.test(v)) setBubbleColor(v);
                   }}
                   disabled={!editable}
-                  className="w-28 h-10 px-3 rounded-lg border border-border bg-surface-2 text-text font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand/30 disabled:opacity-60"
+                  className="w-28 h-10 px-3 rounded-lg border border-border bg-surface-2 text-text font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand/40 disabled:opacity-60"
                   placeholder="#560C0E"
                 />
                 {/* Preview bubble */}
@@ -204,7 +204,7 @@ export default function SettingsPage() {
         {/* Notifications */}
         <Card className="p-5">
           <div className="flex items-center gap-2 mb-4">
-            <Bell size={18} className="text-pale-sky" />
+            <Bell size={18} className="text-text-muted" />
             <h3 className="font-semibold text-text">การแจ้งเตือน</h3>
           </div>
           <div className="space-y-3">

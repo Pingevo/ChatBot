@@ -210,6 +210,7 @@ ChatBotProductMS คือระบบ chatbot ปรึกษาสินค้
        ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ 6. warranty/return/shipping follow-up + comparison follow-up │
+│    + anchor comparison follow-up + post-comparison follow-up │
 └──────┬───────────────────────────────────────────────────────┘
        ▼
 ┌──────────────────────────────────────────────────────────────┐
@@ -295,7 +296,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `shops` | 263 | `GET /shops` | `_db()`, `product_store.list_shops` |
 | `categories` | 272 | `GET /categories` | `_db()`, `product_store.list_categories` |
 | `brands` | 281 | `GET /brands` — paginated | `_db()`, `os`, `re`, `Counter` |
-| `chat` | 368 | **`POST /chat` — main orchestrator** — **2026-09-14 (DEVICE-SPEC-LOOKUP + FILTER-UNAVAILABLE + COMPAT-RETRIEVAL GUARD + HYBRID-SUBTYPE)**: (1) เปิด `filter_unavailable` สำหรับ intent=product_recommend + compatibility_check (ปิดเฉพาะ product_spec/warranty ที่ลูกค้าอาจถามสินค้าที่ซื้อไปแล้ว) — กันแนะนำสินค้า sold_out ใน compat case; (2) guard `_hybrid_anchor_card` ครอบ compat-retrieval override — ถ้ามี hybrid anchor ให้ข้าม override (anchor มี subtype จากสินค้าจริงแม่นกว่า intent classifier); (3) guard `_hybrid_anchor_card` ใน charger_subtype_override — ถ้ามี anchor ให้ใช้ subtype จาก anchor แทน intent; (4) device spec lookup — ถ้า intent=compatibility_check + มี target_device → เรียก `web_search.search_and_extract` ดึง spec + keywords แล้ว re-query DB หาสินค้าที่ compatible + merge เข้า products + inject spec ใน `_combined_extra` ก่อน LLM ตอบ — กัน LLM แนะนำ 45W ให้เครื่องที่ชาร์จ 90W — **2026-09-16 (Phase 3b DUAL-TIER)**: (5) re-query products หลัง fetch_products → sort ตาม wattage **ascending** (น้อย→มาก) เพื่อให้ baseline อยู่บนสุดและ upgrade อยู่ถัดไป — LLM เห็นตัวเลือกครบเรียงตาม spec; (6) เพิ่ม context note บอก dual-tier recommendation (สูงสุด 2 ตัวเลือก: baseline + upgrade) + connector type hard filter (ห้ามข้าม connector type) + protocol evidence requirement (ต้องยืนยันจาก description จริง) | ทุก pipeline stage (ดู section 5) |
+| `chat` | 368 | **`POST /chat` — main orchestrator** — **2026-09-14 (DEVICE-SPEC-LOOKUP + FILTER-UNAVAILABLE + COMPAT-RETRIEVAL GUARD + HYBRID-SUBTYPE)**: (1) เปิด `filter_unavailable` สำหรับ intent=product_recommend + compatibility_check (ปิดเฉพาะ product_spec/warranty ที่ลูกค้าอาจถามสินค้าที่ซื้อไปแล้ว) — กันแนะนำสินค้า sold_out ใน compat case; (2) guard `_hybrid_anchor_card` ครอบ compat-retrieval override — ถ้ามี hybrid anchor ให้ข้าม override (anchor มี subtype จากสินค้าจริงแม่นกว่า intent classifier); (3) guard `_hybrid_anchor_card` ใน charger_subtype_override — ถ้ามี anchor ให้ใช้ subtype จาก anchor แทน intent; (4) device spec lookup — ถ้า intent=compatibility_check + มี target_device → เรียก `web_search.search_and_extract` ดึง spec + keywords แล้ว re-query DB หาสินค้าที่ compatible + merge เข้า products + inject spec ใน `_combined_extra` ก่อน LLM ตอบ — กัน LLM แนะนำ 45W ให้เครื่องที่ชาร์จ 90W — **2026-09-16 (Phase 3b DUAL-TIER)**: (5) re-query products หลัง fetch_products → sort ตาม wattage **ascending** (น้อย→มาก) เพื่อให้ baseline อยู่บนสุดและ upgrade อยู่ถัดไป — LLM เห็นตัวเลือกครบเรียงตาม spec; (6) เพิ่ม context note บอก dual-tier recommendation (สูงสุด 2 ตัวเลือก: baseline + upgrade) + connector type hard filter (ห้ามข้าม connector type) + protocol evidence requirement (ต้องยืนยันจาก description จริง) — **2026-09-11 (ANCHOR-COMP-FOLLOWUP)**: (7) comparison follow-up ใช้ anchor history ก่อนดึง model keyword จาก history text — ถ้ามี 2+ anchor ใน timeline → set `_anchor_compare_ctx` (current + previous) และไม่ modify req.message (กัน `extract_model_keywords` ดึงชื่อแบรนด์/ซีรีส์แทนชื่อรุ่น + `[:3]` ตัดรุ่นสำคัญออก); (8) post-comparison follow-up — ถ้ารอบก่อนเป็น comparison + รอบนี้เป็น generic follow-up สั้นๆ → ใช้ both anchors ต่อ (กันบอทตอบแค่ active product ตัวเดียวหลัง comparison) — **2026-09-11 (PARTIAL-COMP)**: (9) partial comparison — ถ้ามี comparison keyword + model keyword + 1 anchor → set `_is_partial_comp` + `_anchor_compare_ctx={"current": anchor}` + ลด MODEL-REGEX minimum เป็น 4 ตัวอักษร (เพื่อดึง "swim") + merge anchor เข้า products พร้อม comparison note (กรณี "ตัวนี้กับ swim ต่างกันยังไง" หลังส่ง item card Run) | ทุก pipeline stage (ดู section 5) |
 | `list_test_chat_sessions` | 5345 | `GET /test-chat/sessions` — กรองตาม admin_id (Phase 3) | `_admin_db()`, `Request.headers` |
 | `create_test_chat_session` | 5385 | `POST /test-chat/sessions` — เก็บ admin_id + admin_name (Phase 3) | `_admin_db()`, `_log_testchat_action`, `urllib.parse.unquote` |
 | `get_test_chat_session` | 5414 | `GET /test-chat/sessions/{id}` | `_admin_db()` |
@@ -502,9 +503,9 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `build_query` | 1829 | สร้าง MongoDB filter (shop/brand/category/price/type/warranty) + feature-based search สำหรับ earphone (ANC/กันน้ำ/วิ่ง 2026-09-07) | `_detect_*`, `_product_type_*`, `warranty.strip_warranty_keywords` |
 | `_product_type_regex` | 1816 | join regex ของ detected types | — |
 | `_product_type_categories` | 1808 | ดึง candidate `cat_name` ของ types | — |
-| `_detect_product_types` | 1265 | exact keyword + regex detect product types — มี typo fix `"หัวชาจ"`→`"หัวชาร์จ"` ฯลฯ ก่อน detect (Phase 2Z+++++) | — |
-| `_detect_product_types_fuzzy` | 1631 | pythainlp + rapidfuzz typo-tolerant detect | — |
-| `_extract_price_range` | 694 | regex ช่วงราคา (`1000-3000`, `ไม่เกิน 2000`) | — |
+| `_detect_product_types` | 1562 | exact keyword + regex detect product types — มี typo fix `"หัวชาจ"`→`"หัวชาร์จ"` ฯลฯ ก่อน detect (Phase 2Z+++++) |
+| `_detect_product_types_fuzzy` | 2007 | pythainlp + rapidfuzz typo-tolerant detect |
+| `_extract_price_range` | 762 | regex ช่วงราคา (`1000-3000`, `ไม่เกิน 2000`) |
 | `_detect_shops` | 733 | detect known shop names | — |
 | `_detect_brands` | 754 | detect known brands | — |
 | `_detect_categories` | 804 | detect categories + aliases | — |
@@ -545,9 +546,9 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `KNOWN_SHOPS` | 721 | 32 ชื่อร้าน |
 | `KNOWN_BRANDS` | 745 | แบรนด์ที่รู้จัก |
 | `KNOWN_CATEGORIES` / `CATEGORY_ALIASES` | 764/771 | หมวดหมู่ + alias ไทย |
-| `PRODUCT_TYPES` | 829 | ~50 product types (name, user_kws, name_regex) |
-| `_CHARGER_SUBTYPES` | 1320 | cable/adapter/set/car_charger/wireless/desktop/socket keywords |
-| `_PRODUCT_TYPE_CATEGORIES` | 1736 | product type → candidate cat_name — `car_charger` เพิ่ม `Spare Parts and Accessories for Vehicles` (Phase 2Z+++++) |
+| `PRODUCT_TYPES` | 897 | ~80 product types (name, user_kws, name_regex) — **2026-09-11**: เพิ่ม 31 type ใหม่จาก audit ShpProducts (bag, shoes, stationery, gamepad, electric_bike, scooter, clothing, sunglasses, cap, mask, luggage, nail_polisher, pet_bowl, pet_bed, pet_odor_eliminator, monitor_light, dental_flusher, home_theater, ultrasonic_cleaner, video_capture, fitness_gear, nightlight, coffee_capsule, facial_brush, shoe_wrapping_machine, dock, green_screen, solar_panel, webcam, wifi_extender, dust_bag, tpms, cat_litter_box) + เพิ่ม keywords ใน toothbrush/car_seat/massager/voucher |
+| `_CHARGER_SUBTYPES` | 1636 | cable/adapter/set/car_charger/wireless/desktop/socket keywords |
+| `_PRODUCT_TYPE_CATEGORIES` | 2117 | product type → candidate cat_name — `car_charger` เพิ่ม `Spare Parts and Accessories for Vehicles` (Phase 2Z+++++) — **2026-09-11**: เพิ่ม mapping สำหรับ type ใหม่ 31 type |
 
 ---
 
@@ -882,8 +883,8 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `get_order_anchors` | 430 | ⚡ Phase 3C — ดึง order anchors ทั้งหมด (เรียงใหม่→เก่า) |
 | `resolve_active_order_sn` | 450 | ⚡ Phase 3C — resolve order_sn ตามกฎ (order_sn ใน message → order เดิม → order generic → None) |
 | `is_order_question` | 490 | ⚡ Phase 3C — ตรวจว่าคำถามเกี่ยวกับ order หรือไม่ |
-| `get_anchor_history` | 560 | ⚡ Phase 7 — ดึง anchor products เรียงใหม่→เก่าตาม mentioned_at (สำหรับ comparison) |
-| `get_previous_anchor` | 590 | ⚡ Phase 7 — ดึง anchor อันดับ 2 (อันก่อนหน้า active) — รองรับ exclude_item_id |
+| `get_anchor_history` | 560 | ⚡ Phase 7 — ดึง anchor products เรียงใหม่→เก่าตาม mentioned_at (สำหรับ comparison) — **2026-09-11**: ใช้ใน comparison follow-up + post-comparison follow-up ด้วย |
+| `get_previous_anchor` | 590 | ⚡ Phase 7 — ดึง anchor อันดับ 2 (อันก่อนหน้า active) — รองรับ exclude_item_id — **2026-09-11**: ใช้ใน comparison follow-up + post-comparison follow-up ด้วย |
 
 #### 6.9.3 Helpers
 

@@ -16,6 +16,8 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Input } from "@/components/ui/Input";
 import { Avatar } from "@/components/ui/Avatar";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
+import { PageShell } from "@/components/ui/PageShell";
+import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import {
   Bot, Plus, Pencil, Trash2, X, Search, Store, Globe, ChevronDown, Save,
 } from "lucide-react";
@@ -78,7 +80,10 @@ export default function PersonaPage() {
         }));
         setAllShops(shops);
       })
-      .catch(() => setAllShops([]));
+      .catch((e) => {
+        catchError(e, "โหลดรายชื่อร้านไม่สำเร็จ");
+        setAllShops([]);
+      });
   }, []);
 
   const load = useCallback(async () => {
@@ -191,73 +196,65 @@ export default function PersonaPage() {
   const platformLabel = (p: PersonaPlatform) => ALL_PLATFORMS.find((x) => x.value === p)?.label || p;
 
   return (
-    <div className="min-h-[calc(100vh-3.5rem)] bg-base">
-      {/* Header */}
-      <div className="border-b border-border bg-surface">
-        <div className="px-6 py-5 flex items-center justify-between gap-4 flex-wrap">
-          <div>
-            <h1 className="text-xl font-semibold text-text flex items-center gap-2">
-              <Bot size={20} className="text-brand" />
-              ตัวแทนร้าน (Persona)
-            </h1>
-            <p className="text-sm text-text-subtle mt-1">
-              ตั้งชื่อตัวแทนบอทของแต่ละร้าน — บุคลิกหลัก (ค่ะ/นะคะ) เหมือนกันทุกร้าน
-              <br />
-              ถ้าร้านยังไม่ได้ตั้ง persona บอทจะใช้ "ชื่อร้าน" แบบเดิม
-            </p>
-          </div>
-          <Button onClick={openCreate} disabled={availableShops.length === 0}>
-            <Plus size={16} className="mr-1" />
-            เพิ่ม persona
-          </Button>
-        </div>
+    <PageShell
+      icon={Bot}
+      title="ตัวแทนร้าน"
+      helpHref="/help#persona"
+      subtitle="ตั้งชื่อตัวแทนบอทของแต่ละร้าน — บุคลิกหลัก (ค่ะ/นะคะ) เหมือนกันทุกร้าน · ถ้าร้านยังไม่ได้ตั้ง persona บอทจะใช้ชื่อร้านแบบเดิม"
+      actions={
+        <Button onClick={openCreate} disabled={availableShops.length === 0} size="sm">
+          <Plus size={14} className="mr-1" />
+          เพิ่ม persona
+        </Button>
+      }
+      filterBarBelow
+      filterBar={
+        <>
+          <div className="flex items-center gap-2 mt-4 flex-wrap">
+            <div className="relative w-full sm:w-72">
+              <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-subtle" />
+              <input
+                type="text"
+                placeholder="ค้นหาด้วยชื่อร้านหรือชื่อตัวแทน..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full h-8 pl-8 pr-3 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
+              />
+            </div>
 
-        {/* Filter bar */}
-        <div className="px-6 pb-4 flex items-center gap-2 flex-wrap">
-          <div className="relative">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle" />
-            <input
-              type="text"
-              placeholder="ค้นหาด้วยชื่อร้านหรือชื่อตัวแทน..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="h-9 pl-9 pr-3 rounded-lg border border-border bg-surface text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30 w-72"
-            />
-          </div>
-
-          {/* Platform filter dropdown */}
-          <div className="relative">
-            <button
-              onClick={() => setShowPlatformDd(!showPlatformDd)}
-              className="h-9 px-3 rounded-lg border border-border bg-surface text-sm text-text flex items-center gap-2 hover:bg-base"
-            >
-              <Globe size={14} className="text-text-subtle" />
-              {filterPlatform === "all" ? "ทุกแพลตฟอร์ม" : platformLabel(filterPlatform)}
-              <ChevronDown size={14} className="text-text-subtle" />
-            </button>
-            {showPlatformDd && (
-              <div className="absolute top-full left-0 mt-1 z-10 w-44 rounded-lg border border-border bg-surface shadow-lg">
-                <button
-                  onClick={() => { setFilterPlatform("all"); setShowPlatformDd(false); }}
-                  className="w-full text-left px-3 py-2 text-sm hover:bg-base rounded-t-lg"
-                >ทุกแพลตฟอร์ม</button>
-                {ALL_PLATFORMS.map((p) => (
+            {/* Platform filter dropdown */}
+            <div className="relative">
+              <button
+                onClick={() => setShowPlatformDd(!showPlatformDd)}
+                className="h-8 px-2.5 rounded-lg border border-border bg-surface text-xs text-text flex items-center gap-1.5 hover:bg-base"
+              >
+                <Globe size={12} className="text-text-subtle" />
+                {filterPlatform === "all" ? "ทุกแพลตฟอร์ม" : platformLabel(filterPlatform)}
+                <ChevronDown size={12} className="text-text-subtle" />
+              </button>
+              {showPlatformDd && (
+                <div className="absolute top-full left-0 mt-1 z-10 w-44 rounded-lg border border-border bg-surface shadow-lg">
                   <button
-                    key={p.value}
-                    onClick={() => { setFilterPlatform(p.value); setShowPlatformDd(false); }}
-                    className="w-full text-left px-3 py-2 text-sm hover:bg-base"
-                  >{p.label}</button>
-                ))}
-              </div>
-            )}
+                    onClick={() => { setFilterPlatform("all"); setShowPlatformDd(false); }}
+                    className="w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 rounded-t-lg"
+                  >ทุกแพลตฟอร์ม</button>
+                  {ALL_PLATFORMS.map((p) => (
+                    <button
+                      key={p.value}
+                      onClick={() => { setFilterPlatform(p.value); setShowPlatformDd(false); }}
+                      className="w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2"
+                    >{p.label}</button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <span className="text-xs text-text-subtle ml-auto">{rows.length} ร้าน</span>
           </div>
-
-          <span className="text-xs text-text-subtle ml-auto">{rows.length} ร้าน</span>
-        </div>
-      </div>
-
+        </>
+      }
+    >
       {/* Content */}
-      <div className="px-6 py-6">
         {loading ? (
           <div className="flex flex-col items-center justify-center py-16 gap-3">
             <Loading size={32} />
@@ -278,7 +275,7 @@ export default function PersonaPage() {
             </div>
           </>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {rows.map((row) => (
               <div
                 key={row.persona_id}
@@ -312,22 +309,14 @@ export default function PersonaPage() {
                   </span>
                   <div className="flex items-center gap-2">
                     {/* toggle switch แบบ knowledge base */}
-                    <button
-                      onClick={() => handleToggle(row)}
-                      className={`w-10 h-5 rounded-full transition-colors ${
-                        row.enabled ? "bg-brand" : "bg-surface-2"
-                      }`}
-                      title={row.enabled ? "ปิดใช้งาน" : "เปิดใช้งาน"}
-                    >
-                      <div
-                        className={`w-4 h-4 bg-white rounded-full transition-transform ${
-                          row.enabled ? "translate-x-5" : "translate-x-0.5"
-                        }`}
-                      />
-                    </button>
+                    <ToggleSwitch
+                      enabled={row.enabled}
+                      onChange={() => handleToggle(row)}
+                    />
                     <button
                       onClick={() => openEdit(row)}
                       title="แก้ไข"
+                      aria-label="แก้ไข"
                       className="p-1.5 rounded hover:bg-base text-text-subtle hover:text-text"
                     >
                       <Pencil size={14} />
@@ -335,6 +324,7 @@ export default function PersonaPage() {
                     <button
                       onClick={() => handleDelete(row)}
                       title="ลบ"
+                      aria-label="ลบ"
                       className="p-1.5 rounded hover:bg-base text-vibrant-coral/70 hover:text-vibrant-coral"
                     >
                       <Trash2 size={14} />
@@ -345,7 +335,6 @@ export default function PersonaPage() {
             ))}
           </div>
         )}
-      </div>
 
       {/* Inline form modal */}
       {showForm && (
@@ -355,7 +344,7 @@ export default function PersonaPage() {
               <h2 className="font-semibold text-text">
                 {editing ? "แก้ไข persona" : "เพิ่ม persona"}
               </h2>
-              <button onClick={() => setShowForm(false)} className="p-1 rounded hover:bg-base text-text-subtle">
+              <button onClick={() => setShowForm(false)} title="ปิด" aria-label="ปิด" className="p-1 rounded hover:bg-base text-text-subtle">
                 <X size={18} />
               </button>
             </div>
@@ -453,6 +442,6 @@ export default function PersonaPage() {
           </div>
         </div>
       )}
-    </div>
+    </PageShell>
   );
 }

@@ -12,6 +12,7 @@ import { api } from "@/lib/apiClient";
 import { usePolling } from "@/lib/usePolling";
 import { useAuth } from "@/lib/authStore";
 import { useSharedConversations, invalidateSharedConversations } from "@/lib/useSharedConversations";
+import { useToastError } from "@/components/ui/Toast";
 import type { Conversation, ChatMessage, CloseHistoryRecord, ProblemCategory, AdminUser } from "@/lib/types";
 
 // Phase 7.4 — mock data ลบแล้ว โหลดจาก chatbot DB ผ่าน /api/admin/conversations
@@ -22,6 +23,7 @@ type ChatFilter = "me" | "all" | string;
 
 export default function TicketsPage() {
   const { user } = useAuth();
+  const { catchError } = useToastError();
   const me = user?.admin_id ?? "";
   const [chatFilter, setChatFilter] = useState<ChatFilter>("all");
   // ⚡ server-side search — ส่ง q ไป API ให้ค้นที่ DB ทั้งหมด (ไม่จำกัดแค่ 2000 ล่าสุด)
@@ -81,7 +83,10 @@ export default function TicketsPage() {
     if (user?.role === "admin") return; // admin role ไม่มีสิทธิ์ /users/list
     api().get<{ users: AdminUser[]; canEdit: boolean }>("/users/list").then((r) => {
       setAdmins(r.data.users || []);
-    }).catch(() => setAdmins([]));
+    }).catch((e) => {
+      catchError(e, "โหลดรายชื่อแอดมินไม่สำเร็จ");
+      setAdmins([]);
+    });
   }, [user?.role]);
 
   // ⚡ G-share — conversations มาจาก shared store แล้ว (poll ร่วมกับ shadow-inbox)
@@ -236,7 +241,7 @@ export default function TicketsPage() {
 
   const handleHandoff = useCallback(() => {
     if (!selectedId) return;
-    chatService.handoff(selectedId).catch(() => { });
+    chatService.handoff(selectedId).catch((e) => catchError(e, "ส่งต่อแชทให้แอดมินไม่สำเร็จ"));
     setConversations((prev) =>
       prev.map((c) => (c.id === selectedId ? { ...c, status: "handoff" } : c))
     );
@@ -386,6 +391,7 @@ export default function TicketsPage() {
           onClick={handleBack}
           className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
           title="กลับ"
+          aria-label="กลับ"
         >
           <ArrowLeft size={16} className="text-text" />
         </button>
@@ -395,6 +401,7 @@ export default function TicketsPage() {
             onClick={() => setMobileView("info")}
             className="md:hidden absolute top-3 right-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
             title="รายละเอียด"
+            aria-label="รายละเอียด"
           >
             <Info size={16} className="text-text" />
           </button>
@@ -425,6 +432,7 @@ export default function TicketsPage() {
                 onClick={() => setMobileView("chat")}
                 className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
                 title="กลับ"
+                aria-label="กลับ"
               >
                 <ArrowLeft size={16} className="text-text" />
               </button>
@@ -457,6 +465,7 @@ export default function TicketsPage() {
                   onClick={() => setRightCollapsed(true)}
                   className="px-2 text-text-muted hover:text-text transition-colors shrink-0"
                   title="ซ่อน panel"
+                  aria-label="ซ่อน panel"
                 >
                   <PanelRightClose size={16} />
                 </button>
@@ -531,6 +540,7 @@ export default function TicketsPage() {
               onClick={() => setRightCollapsed(false)}
               className="hidden md:flex absolute top-1/2 right-0 -translate-y-1/2 z-20 w-7 h-16 bg-surface border border-border rounded-l-lg items-center justify-center hover:bg-surface-2 transition-colors shadow-sm"
               title="แสดง panel"
+              aria-label="แสดง panel"
             >
               <PanelRightOpen size={16} className="text-text-muted" />
             </button>
@@ -551,12 +561,12 @@ export default function TicketsPage() {
       {/* Phase 7.9 — Conflict popup (ตอบทับแชทที่ assign ให้คนอื่น) */}
       {conflictPopup && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-surface rounded-xl border border-border p-5 max-w-md w-full shadow-xl">
+          <div role="dialog" aria-modal="true" aria-labelledby="ticket-assign-modal-title" className="bg-surface rounded-xl border border-border p-5 max-w-md w-full shadow-xl">
             <div className="flex items-center gap-2 mb-3">
-              <div className="w-8 h-8 rounded-full bg-yellow-500/15 flex items-center justify-center flex-shrink-0">
-                <Info size={16} className="text-yellow-400" />
+              <div className="w-8 h-8 rounded-full bg-warning/15 flex items-center justify-center flex-shrink-0">
+                <Info size={16} className="text-warning" />
               </div>
-              <h3 className="text-sm font-semibold text-text">แชทนี้ assign ให้แอดมินคนอื่น</h3>
+              <h3 id="ticket-assign-modal-title" className="text-sm font-semibold text-text">แชทนี้ assign ให้แอดมินคนอื่น</h3>
             </div>
             <p className="text-xs text-text-muted mb-4">
               แชทนี้ถูกมอบหมายให้ <code className="bg-surface-2 px-1.5 py-0.5 rounded font-mono text-text">{conflictPopup.assignedTo}</code> แล้ว
@@ -582,7 +592,7 @@ export default function TicketsPage() {
               <button
                 onClick={handleForceSend}
                 disabled={sending}
-                className="px-3 py-1.5 rounded-md text-xs bg-yellow-500/15 text-yellow-400 hover:bg-yellow-500/25 transition-colors disabled:opacity-50"
+                className="px-3 py-1.5 rounded-md text-xs bg-warning/15 text-warning hover:bg-warning/25 transition-colors disabled:opacity-50"
               >
                 {sending ? "..." : "ส่งทับ (force)"}
               </button>

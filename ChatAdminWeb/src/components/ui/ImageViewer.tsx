@@ -5,6 +5,7 @@
 import { create } from "zustand";
 import { useEffect, useState } from "react";
 import { X, ZoomIn, ZoomOut, Download, Maximize2, RotateCw } from "lucide-react";
+import { useFocusTrap } from "@/lib/useKeyboardShortcuts";
 
 interface ViewerState {
   open: boolean;
@@ -40,6 +41,7 @@ export const imageViewer = {
 
 export function ImageViewerOverlay() {
   const { open, url, type, alt, zoom, rotation, close, setZoom, setRotation } = useImageViewer();
+  const ref = useFocusTrap<HTMLDivElement>(open);
 
   // ESC to close
   useEffect(() => {
@@ -73,13 +75,13 @@ export function ImageViewerOverlay() {
       <div className="absolute top-4 right-4 flex items-center gap-2 z-10" onClick={(e) => e.stopPropagation()}>
         {type === "image" && (
           <>
-            <button onClick={() => setZoom(zoom + 0.5)} className="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors" title="ซูมเข้า (+)">
+            <button onClick={() => setZoom(zoom + 0.5)} className="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors" title="ซูมเข้า (+)" aria-label="ซูมเข้า">
               <ZoomIn size={18} />
             </button>
-            <button onClick={() => setZoom(zoom - 0.5)} className="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors" title="ซูมออก (-)">
+            <button onClick={() => setZoom(zoom - 0.5)} className="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors" title="ซูมออก (-)" aria-label="ซูมออก">
               <ZoomOut size={18} />
             </button>
-            <button onClick={() => setRotation((rotation + 90) % 360)} className="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors" title="หมุน (R)">
+            <button onClick={() => setRotation((rotation + 90) % 360)} className="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors" title="หมุน (R)" aria-label="หมุน">
               <RotateCw size={18} />
             </button>
           </>
@@ -91,10 +93,11 @@ export function ImageViewerOverlay() {
           rel="noopener noreferrer"
           className="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors"
           title="ดาวน์โหลด"
+          aria-label="ดาวน์โหลด"
         >
           <Download size={18} />
         </a>
-        <button onClick={close} className="w-9 h-9 rounded-lg bg-white/10 hover:bg-red-500/50 text-white flex items-center justify-center transition-colors" title="ปิด (ESC)">
+        <button onClick={close} className="w-9 h-9 rounded-lg bg-white/10 hover:bg-red-500/50 text-white flex items-center justify-center transition-colors" title="ปิด (ESC)" aria-label="ปิด">
           <X size={18} />
         </button>
       </div>
@@ -102,6 +105,11 @@ export function ImageViewerOverlay() {
       {/* Content */}
       <div
         className="max-w-[95vw] max-h-[95vh] overflow-auto"
+        role="dialog"
+        aria-modal="true"
+        aria-label="ดูรูป"
+        ref={ref}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         style={{ cursor: type === "image" ? "zoom-in" : "default" }}
       >

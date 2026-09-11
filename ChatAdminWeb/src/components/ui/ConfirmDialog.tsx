@@ -3,9 +3,11 @@
 //   const ok = await confirm.ask("ยืนยันการลบ?", "คุณแน่ใจหรือไม่ว่าต้องการลบรายการนี้?")
 //   if (ok) { ... }
 "use client";
+import { useEffect } from "react";
 import { create } from "zustand";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Info } from "lucide-react";
 import { Button } from "./Button";
+import { useFocusTrap } from "@/lib/useKeyboardShortcuts";
 
 interface ConfirmOptions {
   title: string;
@@ -45,9 +47,25 @@ export const confirm = {
 
 export function ConfirmDialog() {
   const { open, options, resolve } = useConfirmStore();
+  const ref = useFocusTrap<HTMLDivElement>(open);
+
+  // Escape to cancel + focus management
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        resolve(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, resolve]);
+
   if (!open || !options) return null;
 
   const isDanger = options.variant === "danger";
+  const Icon = isDanger ? AlertTriangle : Info;
 
   return (
     <div
@@ -55,6 +73,11 @@ export function ConfirmDialog() {
       onClick={() => resolve(false)}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-dialog-title"
+        ref={ref}
+        tabIndex={-1}
         className="bg-surface rounded-xl shadow-xl max-w-sm w-full p-5 animate-fade-in"
         onClick={(e) => e.stopPropagation()}
       >
@@ -64,10 +87,10 @@ export function ConfirmDialog() {
               isDanger ? "bg-vibrant-coral/15" : "bg-brand/15"
             }`}
           >
-            <AlertTriangle size={20} className={isDanger ? "text-vibrant-coral" : "text-brand"} />
+            <Icon size={20} className={isDanger ? "text-vibrant-coral" : "text-brand"} />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold text-text">{options.title}</h3>
+            <h3 id="confirm-dialog-title" className="text-sm font-semibold text-text">{options.title}</h3>
             {options.message && (
               <p className="text-xs text-text-muted mt-1 leading-relaxed">{options.message}</p>
             )}

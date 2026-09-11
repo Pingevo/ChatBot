@@ -71,9 +71,9 @@ const SCOPE_LABELS: Record<string, string> = {
 };
 
 const SCOPE_COLORS: Record<string, string> = {
-  test_assignment: "bg-blue-100 text-blue-700",
+  test_assignment: "bg-info/10 text-info-dark",
   shadow_bot: "bg-purple-100 text-purple-700",
-  test_chat: "bg-green-100 text-green-700",
+  test_chat: "bg-success/10 text-success-dark",
 };
 
 const SCOPE_DOT_COLORS: Record<string, string> = {
@@ -83,8 +83,8 @@ const SCOPE_DOT_COLORS: Record<string, string> = {
 };
 
 const RATING_COLORS: Record<string, string> = {
-  good: "bg-green-100 text-green-700",
-  bad: "bg-rose-100 text-rose-700",
+  good: "bg-success/10 text-success-dark",
+  bad: "bg-error-soft text-error-dark",
   unrated: "bg-gray-100 text-gray-500",
 };
 
@@ -152,7 +152,7 @@ export default function AdminChatResultPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const params: Record<string, string> = { limit: "2000" };
+      const params: Record<string, string> = { limit: "500" };
       if (adminFilter !== "all") params.admin_id = adminFilter;
       if (scopeFilter !== "all") params.scope = scopeFilter;
       const r = await api().get<{ conversations: ConversationItem[]; total: number }>("/admin-chat-result", { params });
@@ -437,10 +437,10 @@ export default function AdminChatResultPage() {
                         <span className="text-text-muted truncate">โดย {adminName(c.admin_id)}</span>
                         <span className="text-text-subtle">· {c.total} รายการ</span>
                         {c.rated > 0 && (
-                          <span className="text-green-600">✓{c.good} ✗{c.bad}</span>
+                          <span className="text-success">✓{c.good} ✗{c.bad}</span>
                         )}
                         {c.starCount > 0 && (
-                          <span className="text-yellow-600">★{(c.starSum / c.starCount).toFixed(1)}</span>
+                          <span className="text-warning">★{(c.starSum / c.starCount).toFixed(1)}</span>
                         )}
                         {c.commented > 0 && <span className="text-text-muted">💬{c.commented}</span>}
                       </div>
@@ -465,6 +465,7 @@ export default function AdminChatResultPage() {
           onClick={() => setMobileView("list")}
           className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
           title="กลับ"
+          aria-label="กลับ"
         >
           <ArrowLeft size={16} className="text-text" />
         </button>
@@ -599,7 +600,7 @@ export default function AdminChatResultPage() {
                                       <Star
                                         key={s}
                                         size={12}
-                                        className={d.star_rating! >= s ? "text-yellow-400 fill-yellow-400" : "text-text-subtle"}
+                                        className={d.star_rating! >= s ? "text-warning fill-warning" : "text-text-subtle"}
                                       />
                                     ))}
                                     <span className="text-xs text-text-muted ml-1">{d.star_rating}</span>

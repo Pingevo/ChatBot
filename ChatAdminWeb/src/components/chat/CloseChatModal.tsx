@@ -4,6 +4,7 @@ import { useState } from "react";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Loading } from "@/components/ui/Loading";
+import { useFocusTrap } from "@/lib/useKeyboardShortcuts";
 import type { Conversation, ProblemCategory } from "@/lib/types";
 
 const CATEGORIES: { value: ProblemCategory; label: string }[] = [
@@ -25,6 +26,7 @@ interface Props {
 }
 
 export function CloseChatModal({ conversation, onClose, onSubmit, loading }: Props) {
+  const ref = useFocusTrap<HTMLDivElement>(true);
   const [reason, setReason] = useState("");
   const [category, setCategory] = useState<ProblemCategory | "">("");
   const [resolution, setResolution] = useState("");
@@ -48,14 +50,19 @@ export function CloseChatModal({ conversation, onClose, onSubmit, loading }: Pro
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
       <div
         className="bg-surface rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="close-chat-modal-title"
+        ref={ref}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between p-5 border-b border-border sticky top-0 bg-surface z-10">
           <div>
-            <h2 className="text-base font-semibold text-text">ปิดแชท</h2>
+            <h2 id="close-chat-modal-title" className="text-base font-semibold text-text">ปิดแชท</h2>
             <p className="text-xs text-text-muted mt-0.5">{conversation.customer_name} — {conversation.shop_name}</p>
           </div>
-          <button onClick={onClose} className="text-text-muted hover:text-text">
+          <button onClick={onClose} title="ปิด" aria-label="ปิด" className="text-text-muted hover:text-text">
             <X size={18} />
           </button>
         </div>
@@ -71,7 +78,7 @@ export function CloseChatModal({ conversation, onClose, onSubmit, loading }: Pro
               onChange={(e) => setReason(e.target.value)}
               placeholder="เช่น แจ้งเลขพัสดุแล้ว ลูกค้าได้รับสินค้าแล้ว"
               rows={2}
-              className={`w-full rounded-lg border bg-surface px-3 py-2 text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30 ${
+              className={`w-full rounded-lg border bg-surface px-3 py-2 text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 ${
                 touched && !reason.trim() ? "border-vibrant-coral" : "border-border"
               }`}
             />
@@ -115,7 +122,7 @@ export function CloseChatModal({ conversation, onClose, onSubmit, loading }: Pro
               onChange={(e) => setResolution(e.target.value)}
               placeholder="เช่น ตรวจสอบกับทางขนส่งแล้ว พัสดุอยู่ระหว่างจัดส่ง"
               rows={3}
-              className={`w-full rounded-lg border bg-surface px-3 py-2 text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30 ${
+              className={`w-full rounded-lg border bg-surface px-3 py-2 text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 ${
                 touched && !resolution.trim() ? "border-vibrant-coral" : "border-border"
               }`}
             />
@@ -134,7 +141,7 @@ export function CloseChatModal({ conversation, onClose, onSubmit, loading }: Pro
               onChange={(e) => setNote(e.target.value)}
               placeholder="ข้อมูลเพิ่มเติมที่ต้องการบันทึก"
               rows={2}
-              className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
+              className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40"
             />
           </div>
 

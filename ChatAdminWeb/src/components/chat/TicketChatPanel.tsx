@@ -558,9 +558,9 @@ export function TicketChatPanel({
             }}
             placeholder="พิมพ์ข้อความตอบลูกค้า..."
             rows={1}
-            className="flex-1 resize-none min-h-[44px] max-h-[128px] rounded-xl border border-border bg-surface-2 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand overflow-hidden"
+            className="flex-1 resize-none min-h-[44px] max-h-[128px] rounded-xl border border-border bg-surface-2 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand overflow-hidden"
           />
-          <Button type="submit" size="icon" disabled={!text.trim() || sending}>
+          <Button type="submit" size="icon" aria-label="ส่งข้อความ" disabled={!text.trim() || sending}>
             <Send size={16} />
           </Button>
         </div>

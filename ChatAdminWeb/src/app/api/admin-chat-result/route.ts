@@ -86,7 +86,7 @@ export async function GET(req: NextRequest) {
         taFilter.replayed_at = dateFilter;
       }
 
-      const docs = await coll.find(taFilter).sort({ replayed_at: -1 }).limit(limit).toArray();
+      const docs = await coll.find(taFilter, { projection: convId ? {} : { "qa.user_text": 0, "qa.bot_reply": 0, "qa.bot_source": 0 } }).sort({ replayed_at: -1 }).limit(limit).toArray();
 
       for (const d of docs) {
         // ⚡ Phase 3B-6 — iterate ผ่าน qa[] ทั้งหมด (ไม่ใช่แค่ message_ratings)
@@ -182,7 +182,7 @@ export async function GET(req: NextRequest) {
         shFilter.created_at = dateFilter;
       }
 
-      const docs = await coll.find(shFilter).sort({ created_at: -1 }).limit(limit).toArray();
+      const docs = await coll.find(shFilter, { projection: convId ? {} : { inbound_text: 0, bot_reply_text: 0, bot_source: 0 } }).sort({ created_at: -1 }).limit(limit).toArray();
 
       // ⚡ ดึง shop_name + to_name จาก conversations collection (match ด้วย conversation_id)
       const convIds = [...new Set(docs.map((d) => d.conversation_id).filter(Boolean))] as string[];

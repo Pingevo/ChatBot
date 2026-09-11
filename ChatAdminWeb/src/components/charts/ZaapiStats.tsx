@@ -47,7 +47,7 @@ export function ConnectedChannelsHeader({
       <div className="flex items-center gap-3 flex-wrap">
         {live && (
           <div className="flex items-center gap-1.5 text-xs text-text-muted">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse-soft" />
+            <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" />
             สด
             {lastUpdatedSeconds !== undefined && <span>· อัปเดตล่าสุด {lastUpdatedSeconds} วินาทีที่แล้ว</span>}
           </div>
@@ -57,6 +57,7 @@ export function ConnectedChannelsHeader({
             onClick={onRefresh}
             className="w-8 h-8 rounded-lg hover:bg-surface-2 flex items-center justify-center text-text-muted transition-colors"
             title="รีเฟรช"
+            aria-label="รีเฟรช"
           >
             <RefreshCw size={14} />
           </button>
@@ -116,7 +117,7 @@ export function KpiCard({
       <div className="flex items-baseline gap-2 mb-1">
         <span className="text-xl font-bold text-text">{value}</span>
         {deltaPct !== undefined && (
-          <span className={`text-xs font-medium ${positive ? "text-emerald-600" : "text-vibrant-coral"}`}>
+          <span className={`text-xs font-medium ${positive ? "text-success" : "text-vibrant-coral"}`}>
             {positive ? "+" : ""}
             {deltaPct.toFixed(2)}%
           </span>

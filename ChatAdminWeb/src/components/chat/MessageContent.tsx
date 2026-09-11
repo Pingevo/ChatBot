@@ -93,8 +93,8 @@ export function MessageContent({ msg, variant }: Props) {
   if (msg.message_type === "faq_liveagent") {
     return (
       <div className="flex items-center gap-1.5 text-xs">
-        <Headset size={11} className="text-amber-400" />
-        <span className="text-amber-400/90">{msg.text || "โอนไปยังเจ้าหน้าที่"}</span>
+        <Headset size={11} className="text-warning" />
+        <span className="text-warning/90">{msg.text || "โอนไปยังเจ้าหน้าที่"}</span>
       </div>
     );
   }

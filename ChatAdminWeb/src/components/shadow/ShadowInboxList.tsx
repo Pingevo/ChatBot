@@ -198,6 +198,7 @@ export function ShadowInboxList({ rows, selectedId, onSelect, loading, total, he
               onClick={() => { setShowSortDd(!showSortDd); setShowPlatformDd(false); setShowRatingDd(false); }}
               className="w-7 h-7 rounded-md border border-border bg-surface flex items-center justify-center hover:bg-surface-2 transition-colors"
               title="เรียงลำดับ"
+              aria-label="เรียงลำดับ"
             >
               <ArrowDownUp size={12} className="text-text-muted" />
             </button>

@@ -800,7 +800,7 @@ export default function ShadowInboxPage() {
                 </span>
                 <button
                   onClick={handleRestoreAll}
-                  className="text-[10px] px-2 py-1 rounded-md bg-green-600 text-white hover:bg-green-700 font-medium"
+                  className="text-[10px] px-2 py-1 rounded-md bg-success text-white hover:bg-success-dark font-medium"
                 >
                   ↩ กู้คืนทั้งหมด
                 </button>
@@ -934,6 +934,7 @@ export default function ShadowInboxPage() {
           onClick={handleBack}
           className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
           title="กลับ"
+          aria-label="กลับ"
         >
           <ArrowLeft size={16} className="text-text" />
         </button>
@@ -942,6 +943,7 @@ export default function ShadowInboxPage() {
           onClick={() => setMobileView("stat")}
           className="md:hidden absolute top-3 right-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
           title="สถิติ"
+          aria-label="สถิติ"
         >
           <Info size={16} className="text-text" />
         </button>
@@ -998,6 +1000,7 @@ export default function ShadowInboxPage() {
             onClick={() => setMobileView("chat")}
             className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
             title="กลับ"
+            aria-label="กลับ"
           >
             <ArrowLeft size={16} className="text-text" />
           </button>
@@ -1007,6 +1010,7 @@ export default function ShadowInboxPage() {
             onClick={() => setRightCollapsed(true)}
             className="hidden md:flex absolute top-3 right-3 z-10 w-7 h-7 rounded-md text-text-muted hover:text-text hover:bg-surface-2 items-center justify-center transition-colors"
             title="ซ่อน panel"
+            aria-label="ซ่อน panel"
           >
             <PanelRightClose size={14} />
           </button>
@@ -1015,7 +1019,7 @@ export default function ShadowInboxPage() {
           <button
             onClick={handleClearAll}
             disabled={clearingAll}
-            className="hidden md:flex absolute top-3 right-12 z-10 h-7 px-2 rounded-md text-text-muted hover:text-red-600 hover:bg-red-50 items-center justify-center gap-1 transition-colors text-[10px] disabled:opacity-50"
+            className="hidden md:flex absolute top-3 right-12 z-10 h-7 px-2 rounded-md text-text-muted hover:text-error hover:bg-error/5 items-center justify-center gap-1 transition-colors text-[10px] disabled:opacity-50"
             title="ล้างข้อมูล shadow replies ทั้งหมด"
           >
             {clearingAll ? <Loading size={10} /> : <Trash2 size={11} />}
@@ -1028,6 +1032,7 @@ export default function ShadowInboxPage() {
               stats={stats}
               convStats={convStats}
               title="สถิติ"
+              aria-label="สถิติ"
             />
           </div>
         </div>
@@ -1039,6 +1044,7 @@ export default function ShadowInboxPage() {
           onClick={() => setRightCollapsed(false)}
           className="hidden md:flex absolute right-0 top-1/2 -translate-y-1/2 z-10 w-7 h-14 bg-surface border border-border rounded-l-lg items-center justify-center shadow-sm hover:bg-surface-2 transition-colors"
           title="แสดง panel"
+          aria-label="แสดง panel"
         >
           <PanelRightOpen size={14} className="text-text-muted" />
         </button>

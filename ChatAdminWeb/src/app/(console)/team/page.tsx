@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Loading } from "@/components/ui/Loading";
+import { PageShell } from "@/components/ui/PageShell";
 import {
   Users, RefreshCw, Settings,
   MessageSquare, AlertCircle, Activity, Store, Globe,
@@ -215,12 +216,9 @@ export default function TeamPage() {
     loadChatStatus();
   }, [load, loadChatStatus]);
 
-  // ⚡ โหลด shops/shopTeam/platformTeam ตอน mount เสมอ (แก้ expand bug ใน overview tab)
-  useEffect(() => {
-    loadShopTeam();
-    loadPlatformTeam();
-  }, [loadShopTeam, loadPlatformTeam]);
-
+  // ⚡ Lazy-load: โหลด shops/shopTeam/platformTeam เฉพาะตอนเปิด tab นั้นๆ (ไม่โหลดตอน mount)
+  //   - ก่อนหน้านี้โหลดทั้งหมดตอน mount ทำให้หน้าโหลดช้า
+  //   - overview tab ไม่ต้องใช้ shops/shopTeam/platformTeam (ข้อมูลมาจาก /team API แล้ว)
   // ⚡ รีเฟรชข้อมูลตอนสลับ tab (เพื่อให้ tab shop-team/platform-team มีข้อมูลสด)
   useEffect(() => {
     if (tab === "shop-team") loadShopTeam();
@@ -288,7 +286,11 @@ export default function TeamPage() {
     try {
       await api().delete("/assignment/shop-team", { data: { shop_id: selectedShopId, admin_id: adminId } });
       await loadShopTeam();
-      toast.success("นำ agent ออกจากทีมร้านแล้ว");
+      // 🔒 P4e: Undo — re-add agent to shop
+      toast.success("นำ agent ออกจากทีมร้านแล้ว", 6000, {
+        label: "กู้คืน",
+        onClick: () => handleAddAgentToShop(adminId),
+      });
     } catch (err) {
       catchError(err, "ลบ agent ไม่สำเร็จ");
     } finally {
@@ -321,7 +323,11 @@ export default function TeamPage() {
     try {
       await api().delete("/assignment/platform-team", { data: { platform: selectedPlatform, admin_id: adminId } });
       await loadPlatformTeam();
-      toast.success("นำ agent ออกจากทีมแพลตฟอร์มแล้ว");
+      // 🔒 P4e: Undo — re-add agent to platform
+      toast.success("นำ agent ออกจากทีมแพลตฟอร์มแล้ว", 6000, {
+        label: "กู้คืน",
+        onClick: () => handleAddAgentToPlatform(adminId),
+      });
     } catch (err) {
       catchError(err, "ลบ agent ไม่สำเร็จ");
     } finally {
@@ -382,41 +388,34 @@ export default function TeamPage() {
     .map((r) => r.admin_id);
 
   return (
-    <div className="h-full overflow-y-auto">
-      {/* Header */}
-      <div className="px-6 py-5 border-b border-border bg-surface sticky top-0 z-10">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-brand/15 flex items-center justify-center">
-              <Users size={20} className="text-brand" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-text">ทีม & การมอบหมาย</h1>
-              <p className="text-xs text-text-muted">
-                {data.active_agents} agent ทำงาน · {data.total_open_conversations} งานเปิดอยู่ · {data.unassigned} ยังไม่ได้มอบหมาย
-                {data.total_conversations != null && (
-                  <span className="text-text-subtle"> (รวม {data.total_conversations.toLocaleString()} แชท)</span>
-                )}
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <UnifiedDateRangePicker value={dateRange} onChange={setDateRange} />
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => { load(); loadChatStatus(); }}
-              disabled={loading || chatStatusLoading}
-            >
-              <RefreshCw size={14} className={loading || chatStatusLoading ? "animate-spin" : ""} /> รีเฟรช
-            </Button>
-          </div>
-        </div>
-      </div>
-
-      <div className="p-6 space-y-4">
-        {/* Read-only banner for admin role */}
-        {!editable && (
+    <PageShell
+      icon={Users}
+      title="ทีม & การมอบหมาย"
+      helpHref="/help#team"
+      subtitle={
+        <>
+          {data.active_agents} agent ทำงาน · {data.total_open_conversations} งานเปิดอยู่ · {data.unassigned} ยังไม่ได้มอบหมาย
+          {data.total_conversations != null && (
+            <span className="text-text-subtle"> (รวม {data.total_conversations.toLocaleString()} แชท)</span>
+          )}
+        </>
+      }
+      actions={
+        <>
+          <UnifiedDateRangePicker value={dateRange} onChange={setDateRange} />
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => { load(); loadChatStatus(); }}
+            disabled={loading || chatStatusLoading}
+          >
+            <RefreshCw size={14} className={loading || chatStatusLoading ? "animate-spin" : ""} /> รีเฟรช
+          </Button>
+        </>
+      }
+    >
+      {/* Read-only banner for admin role */}
+      {!editable && (
           <div className="flex items-center gap-2 bg-surface-2 border border-border rounded-lg p-2.5 text-xs text-text-muted">
             <AlertCircle size={14} className="text-text-subtle" />
             คุณเป็น Admin — ดูได้อย่างเดียว ต้องเป็น SuperAdmin หรือ Dev ถึงจะเปลี่ยนโหมด/จัดทีมได้
@@ -591,16 +590,16 @@ export default function TeamPage() {
                               <Badge tone={a.role === "superadmin" ? "brand" : a.role === "dev" ? "pale" : "neutral"}>{a.role}</Badge>
                             </td>
                             <td className="px-4 py-3 text-center">
-                              <span className={`inline-flex items-center gap-1 text-xs ${a.is_active_agent ? "text-green-400" : "text-text-subtle"}`}>
-                                <span className={`w-1.5 h-1.5 rounded-full ${a.is_active_agent ? "bg-green-400" : "bg-text-subtle"}`} />
+                              <span className={`inline-flex items-center gap-1 text-xs ${a.is_active_agent ? "text-success-soft" : "text-text-subtle"}`}>
+                                <span className={`w-1.5 h-1.5 rounded-full ${a.is_active_agent ? "bg-success-soft" : "bg-text-subtle"}`} />
                                 {a.is_active_agent ? "ออนไลน์" : "ปิด"}
                               </span>
                             </td>
                             <td className="px-4 py-3 text-center">
                               {st ? (
-                                <span className={`inline-flex items-center gap-1 text-xs ${accepting ? "text-green-400" : "text-yellow-500"}`}>
+                                <span className={`inline-flex items-center gap-1 text-xs ${accepting ? "text-success-soft" : "text-warning"}`}>
                                   {accepting ? <PlayCircle size={12} /> : <PauseCircle size={12} />}
-                                  <span className={`w-1.5 h-1.5 rounded-full ${accepting ? "bg-green-400" : "bg-yellow-500"}`} />
+                                  <span className={`w-1.5 h-1.5 rounded-full ${accepting ? "bg-success-soft" : "bg-warning"}`} />
                                   {accepting ? "รับ" : "พัก"}
                                 </span>
                               ) : <span className="text-[11px] text-text-subtle">—</span>}
@@ -609,12 +608,12 @@ export default function TeamPage() {
                               {st ? (
                                 <div className="text-[11px] leading-tight">
                                   <div className="text-text-muted">
-                                    <Clock size={10} className="inline mr-1 text-green-400" />
+                                    <Clock size={10} className="inline mr-1 text-success-soft" />
                                     {formatDuration(st.accepting_ms)}
                                     <span className="text-text-subtle"> รับ</span>
                                   </div>
                                   <div className="text-text-subtle mt-0.5">
-                                    <PauseCircle size={10} className="inline mr-1 text-yellow-500" />
+                                    <PauseCircle size={10} className="inline mr-1 text-warning" />
                                     {formatDuration(st.paused_ms)} พัก
                                   </div>
                                   <div className="text-text-subtle mt-0.5">
@@ -1030,8 +1029,7 @@ export default function TeamPage() {
             )}
           </div>
         )}
-      </div>
-    </div>
+    </PageShell>
   );
 }
 

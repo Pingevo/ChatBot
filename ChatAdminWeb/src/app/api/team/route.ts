@@ -2,11 +2,11 @@
 // ⚡ อ่าน workload จาก status_conversation (admin-owned — ไม่โดน dump ทับ)
 // ⚡ รวม shop_team + platform_team พร้อม shop names ใน response
 // ⚡ รองรับ start_date/end_date สำหรับ historical stats จาก admin_logs
+// ⚡ Optimized: ใช้ $lookup aggregation คำนวณ workload ใน DB แทนการโหลด 5000 docs เข้า memory
 import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { auth } from "@/backend/service/authService";
-import { conversationService } from "@/backend/service/conversationService";
 import { assignmentService } from "@/backend/service/assignmentService";
 import { shopService } from "@/backend/service/shopService";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
@@ -46,9 +46,43 @@ export async function GET(req: NextRequest) {
     histEnd.setHours(23, 59, 59, 999);
   }
 
-  const [admins, openConvos, mode, shopTeamRows, platformTeamRows, shops, statusMetas, histAgg, realCounts] = await Promise.all([
+  // ⚡ Optimized: คำนวณ workload จาก status_conversation โดยตรง (collection เล็ก — เก็บเฉพาะที่แอดมินแตะ)
+  //   - ไม่ต้อง $lookup join 142230 conversations (ช้า + กิน memory)
+  //   - status_conversation เป็น admin-owned (ไม่โดน dump ทับ) → source of truth สำหรับ assigned_to/status
+  //   - มี index ที่ assigned_to แล้ว → aggregation เร็ว
+  const workloadAggPromise = (async () => {
+    const coll = await getCollection<{
+      conversation_id: string;
+      assigned_to?: string | null;
+      status?: ConversationStatus;
+    }>(COLLECTIONS.statusConversation);
+    const agg = await coll.aggregate<{
+      _id: string;
+      all: number;
+      active: number;
+      closed: number;
+    }>([
+      {
+        $match: {
+          assigned_to: { $exists: true, $nin: [null, ""] },
+          status: { $ne: "bot" },
+        },
+      },
+      {
+        $group: {
+          _id: "$assigned_to",
+          all: { $sum: 1 },
+          active: { $sum: { $cond: [{ $ne: ["$status", "closed"] }, 1, 0] } },
+          closed: { $sum: { $cond: [{ $eq: ["$status", "closed"] }, 1, 0] } },
+        },
+      },
+    ]).toArray();
+    return new Map(agg.map((a) => [a._id, { all: a.all, active: a.active, closed: a.closed }]));
+  })();
+
+  const [admins, workloadMap, mode, shopTeamRows, platformTeamRows, shops, histAgg, realCounts] = await Promise.all([
     auth.listAdmins(),
-    conversationService.listConversations({ limit: 5000 }),
+    workloadAggPromise,
     assignmentService.getActiveAssignmentConfig(),
     (async () => {
       const coll = await getCollection(COLLECTIONS.shopTeamAssignments);
@@ -59,11 +93,6 @@ export async function GET(req: NextRequest) {
       return coll.find({ is_active: true }).toArray();
     })(),
     shopService.listShops(),
-    // ⚡ ดึง status_conversation ทั้งหมด (admin-owned — ไม่โดน dump ทับ)
-    (async () => {
-      const coll = await getCollection<{ conversation_id: string; assigned_to?: string | null; status?: ConversationStatus; closed_at?: Date | null; closed_by?: string }>(COLLECTIONS.statusConversation);
-      return coll.find({}).toArray();
-    })(),
     // ⚡ historical stats จาก admin_logs ตาม date range
     (async () => {
       const coll = await getCollection<{ admin_id?: string; actor?: string; target_admin_id?: string; action_type: string; timestamp: Date }>(COLLECTIONS.adminLogs);
@@ -118,37 +147,6 @@ export async function GET(req: NextRequest) {
       return { total, assigned, unassigned, unassignedHandoff, unassignedOpen };
     })(),
   ]);
-
-  // ⚡ สร้าง map: conversation_id → status_meta (จาก status_conversation — admin-owned)
-  const statusMap = new Map<string, { assigned_to?: string | null; status?: ConversationStatus; closed_at?: Date | null; closed_by?: string }>();
-  for (const m of statusMetas) {
-    statusMap.set(m.conversation_id, m);
-  }
-
-  // ⚡ นับ workload ต่อ admin จาก status_conversation (ไม่ใช่ conversations ที่โดน dump ทับ)
-  //    ใช้ status จาก status_conversation ถ้ามี ไม่งั่ว fallback ไป conversations
-  //    ⚡ workload ของแอดมิน = แชทที่ assigned ให้แอดมิน (ไม่นับ bot — bot แปลว่าบอทกำลังตอบ ไม่ใช่งานแอดมิน)
-  //       - all = ทุกแชทที่ assigned ให้แอดมิน (open + handoff + closed)
-  //       - active = open + handoff (รอตอบ หรือ ตอบแล้วยังไม่ปิด)
-  //       - closed = ปิดแล้ว
-  const workloadMap = new Map<string, { all: number; active: number; closed: number }>();
-  for (const c of openConvos) {
-    const meta = statusMap.get(c.conversation_id);
-    const assignedTo = meta?.assigned_to ?? c.assigned_to;
-    const status = meta?.status ?? c.status;
-    if (!assignedTo) continue;
-    // ⚡ status=bot แปลว่าบอทกำลังตอบ — assigned_to ควรเป็น null แต่กันไว้
-    if (status === "bot") continue;
-    const w = workloadMap.get(assignedTo) || { all: 0, active: 0, closed: 0 };
-    w.all += 1;
-    if (status === "closed") {
-      w.closed += 1;
-    } else {
-      // open, handoff, resolved, pending → ถือว่า active (รอตอบหรือตอบแล้วยังไม่ปิด)
-      w.active += 1;
-    }
-    workloadMap.set(assignedTo, w);
-  }
 
   // หา shop ที่ agent รับผิดชอบ (พร้อม shop names)
   const shopMap = new Map<string, { shop_id: string; shopname: string; platform: string }>();
