@@ -55,11 +55,16 @@ async def _require_internal_secret(request: Request, call_next):
     # Allow health, index, and static assets without secret
     if path in _PUBLIC_PATHS or path.startswith("/static"):
         return await call_next(request)
-    # If no secret is configured (dev), allow but warn
+    # If no secret is configured (dev), allow but warn loudly
+    # 🔒 Security: previously this silently allowed all requests when no secret
+    # was set. We still allow in dev for convenience, but log a prominent warning.
     if not _INTERNAL_SECRET:
+        print("[SECURITY WARNING] CHATBOT_INTERNAL_SECRET not set — all requests allowed (dev mode only!)", file=sys.stderr)
         return await call_next(request)
     provided = request.headers.get("X-Internal-Secret", "").strip()
-    if provided != _INTERNAL_SECRET:
+    # 🔒 Use constant-time compare to prevent timing side-channel (M2)
+    import hmac as _hmac
+    if not _hmac.compare_digest(provided, _INTERNAL_SECRET):
         return JSONResponse(
             status_code=401,
             content={"detail": "missing or invalid internal secret"},
@@ -280,6 +285,18 @@ def _get_post_handoff_exceptions(shop: str | None, platform: str | None) -> list
     except Exception as _e:
         print(f"[POST-HANDOFF-EXCEPTIONS] error: {_e}", file=sys.stderr)
         return []
+
+
+def _validate_object_id(oid: str) -> str:
+    """🔒 L4: Validate ObjectId format before passing to MongoDB — prevents 500 + info leak."""
+    from bson import ObjectId
+    if not oid or not isinstance(oid, str) or len(oid) != 24:
+        raise HTTPException(status_code=400, detail="invalid id format")
+    try:
+        ObjectId(oid)  # validate parseable
+        return oid
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid id format")
 
 
 def _log_testchat_action(action: str, request, session_id: str | None = None, **extra):
@@ -1656,6 +1673,190 @@ def chat(req: ChatRequest) -> ChatResponse:
                     _order_sn_from_anchor = True
                     print(f"[ORDER] ใช้ order anchor: order_sn={_order_sn} (from anchor, not message)", file=sys.stderr)
 
+        # ===== Return/refund request → handoff แอดมิน =====
+        # ถ้าลูกค้าขอคืนของ/ตีกลับ/คืนเงิน → ส่งแอดมิน (เคส sensitive ลูกค้าอารมณ์เสีย)
+        # ถ้ามี order_sn (จาก message หรือ anchor) → lookup order + save anchor + handoff
+        # ถ้าไม่มี order_sn → ถามเลขคำสั่งซื้อก่อน (ลูกค้าให้มา → handoff ในรอบถัดไป)
+        # ⚡ Follow-up: ถ้า bot เคยถามเลข order (return/refund context) + ลูกค้าส่งเลขมา → handoff
+        _RETURN_REFUND_KWS = (
+            # คืนของ/ตีกลับ
+            "ตีกลับ", "ตีของกลับ", "ตีของ", "คืนของ", "คืนสินค้า",
+            "ขอคืนของ", "ขอคืนสินค้า", "ขอตีกลับ", "ตีกลับเลย",
+            "ส่งกลับ", "ส่งคืน", "return to sender",
+            # คืนเงิน/ขอเงินคืน
+            "คืนเงิน", "ขอคืนเงิน", "ขอเงินคืน", "เงินคืน",
+            "คืนเงินให้", "ขอคืนเงินให้", "เอาเงินคืน", "ทวงเงินคืน",
+            "refund", "เงินคืนให้หน่อย", "ขอเงินคืนหน่อย",
+            # ไม่รับสินค้าแล้ว
+            "ไม่รับของแล้ว", "ไม่รับสินค้าแล้ว", "ไม่รับแล้ว",
+            "ไม่รับพัสดุแล้ว", "ไม่รับการจัดส่ง", "ไม่เอาของแล้ว",
+            "ไม่เอาสินค้าแล้ว", "ไม่ต้องการสินค้าแล้ว", "ไม่ต้องการของแล้ว",
+            "ปฏิเสธรับสินค้า", "ปฏิเสธรับของ", "ไม่รับพัสดุ",
+            # ไม่ทัน/เลยกำหนด
+            "ไม่ทันใช้", "ไม่ทันกำหนด", "ของไม่ทัน", "ไม่ทันเวลา",
+            # ยกเลิก/ไม่เอาแล้ว
+            "ไม่เอาแล้ว", "ยกเลิกออเดอร์", "ยกเลิกคำสั่งซื้อ",
+            "ยกเลิกสินค้า", "ยกเลิกการสั่งซื้อ", "ไม่สั่งแล้ว",
+        )
+        _msg_lower_rr = (req.message or "").lower()
+        _is_return_refund = any(kw in _msg_lower_rr for kw in _RETURN_REFUND_KWS)
+
+        # ⚡ Follow-up check: bot เคยถามเลข order ใน return/refund context + ลูกค้าส่งเลขมา
+        _is_rr_followup = False
+        if not _is_return_refund and _order_sn and history and not _in_claim_flow:
+            _last_model_msgs_rr = [h for h in history if h.get("role") == "model"][-1:]
+            _last_model_text_rr = " ".join(h.get("text", "") for h in _last_model_msgs_rr).lower()
+            if any(_rr_kw in _last_model_text_rr for _rr_kw in (
+                "คืนสินค้า", "คืนของ", "คืนเงิน", "ตีกลับ",
+                "ไม่รับสินค้า", "ไม่รับของ", "ไม่รับพัสดุ",
+                "ยกเลิก", "เงินคืน",
+            )) and "เลขคำสั่งซื้อ" in _last_model_text_rr:
+                _is_rr_followup = True
+                print(f"[RETURN-REFUND] follow-up: bot asked for order_sn + customer sent {_order_sn}", file=sys.stderr)
+
+        if (_is_return_refund or _is_rr_followup) and not _in_claim_flow:
+            print(f"[RETURN-REFUND] detected: is_return_refund={_is_return_refund} is_followup={_is_rr_followup} order_sn={_order_sn}", file=sys.stderr)
+            if _order_sn:
+                # มี order_sn → lookup order + save anchor + anchor items + handoff
+                _rr_order = _order_store.lookup_order(_order_sn, shop_filter=req.shop)
+                if _rr_order and req.conversation_id:
+                    try:
+                        from . import conversation_products as _cp_rr
+                        _cp_rr.add_order_anchor(
+                            conversation_id=req.conversation_id,
+                            platform=req.platform, shop=req.shop,
+                            order_sn=_order_sn, order_info=_rr_order,
+                        )
+                        # anchor order items as products (เหมือน order lookup block)
+                        from . import product_store as _ps_rr
+                        for _oi in _rr_order.get("items", []):
+                            _oi_item_id = str(_oi.get("item_id", "") or "").strip()
+                            _oi_name = _oi.get("name", "") or ""
+                            if not _oi_item_id or not _oi_name:
+                                continue
+                            _oi_card = None
+                            try:
+                                _oi_card = _ps_rr.fetch_product_by_id(
+                                    db, _oi_item_id, shop_filter=req.shop,
+                                    desc_message="รายละเอียดสินค้า",
+                                )
+                            except Exception:
+                                pass
+                            if not _oi_card:
+                                _oi_card = {
+                                    "item_id": _oi_item_id,
+                                    "name": _oi_name,
+                                    "price": _oi.get("price", 0),
+                                    "image_url": _oi.get("image_url", ""),
+                                }
+                            _cp_rr.add_product(
+                                conversation_id=req.conversation_id,
+                                platform=req.platform, shop=req.shop,
+                                item_id=_oi_item_id, name=_oi_name,
+                                source="user_order", card=_oi_card, is_anchor=True,
+                            )
+                        print(f"[RETURN-REFUND] anchored order items for order_sn={_order_sn}", file=sys.stderr)
+                    except Exception as _e:
+                        print(f"[RETURN-REFUND] error anchoring: {_e}", file=sys.stderr)
+                # handoff แอดมิน
+                _rr_answer = (
+                    f"เรื่องคืนสินค้า/คืนเงิน/ไม่รับสินค้า ทางร้านจะดำเนินการผ่านแอดมินนะคะ "
+                    f"เดี๋ยวส่งต่อแชทนี้ให้แอดมินดูแลให้ "
+                    f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+                )
+                _total_elapsed = _time.time() - _total_start
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+                if req.conversation_id:
+                    try:
+                        import urllib.request as _ur_rr
+                        import urllib.error as _ue_rr
+                        _handoff_url_rr = os.environ.get(
+                            "ADMIN_HANDOFF_URL",
+                            "http://127.0.0.1:3000/api/admin/conversations/bot-handoff",
+                        )
+                        _handoff_payload_rr = {
+                            "conversation_id": req.conversation_id,
+                            "shop_id": req.shop or "",
+                            "platform": req.platform or "shopee",
+                            "reason": "return_refund_request",
+                            "claim": {"topic": "คืนสินค้า/คืนเงิน", "order_sn": _order_sn},
+                        }
+                        _handoff_body_rr = json.dumps(_handoff_payload_rr).encode("utf-8")
+                        _handoff_req_rr = _ur_rr.Request(
+                            _handoff_url_rr, data=_handoff_body_rr,
+                            headers={
+                                "Content-Type": "application/json",
+                                "X-Internal-Secret": os.environ.get("CHATBOT_INTERNAL_SECRET", ""),
+                            },
+                            method="POST",
+                        )
+                        try:
+                            _ur_rr.urlopen(_handoff_req_rr, timeout=3)
+                            print("[RETURN-REFUND] handoff sent to admin", file=sys.stderr)
+                        except Exception as _he_rr:
+                            print(f"[RETURN-REFUND] handoff failed: {_he_rr}", file=sys.stderr)
+                    except Exception as _he_rr:
+                        print(f"[RETURN-REFUND] handoff error: {_he_rr}", file=sys.stderr)
+                _steps.append({
+                    "name": "return_refund_handoff",
+                    "model": model_name,
+                    "tokens_in": 0, "tokens_out": 0,
+                    "time_s": round(_total_elapsed, 2),
+                    "cost_usd": 0.0, "cost_thb": 0.0,
+                    "detail": f"order_sn={_order_sn} return_refund_handoff",
+                })
+                return ChatResponse(
+                    answer=_rr_answer,
+                    answer_segments=llm.split_segments(_rr_answer),
+                    products=[],
+                    shop=req.shop,
+                    model=model_name,
+                    source="return_refund_handoff",
+                    usage={"prompt": 0, "output": 0, "total": 0},
+                    elapsed=round(_total_elapsed, 2),
+                    cost=0.0,
+                    handoff_to_admin=True,
+                    handoff_reason="return_refund_request",
+                    steps=_steps,
+                    routing_decision=_routing(
+                        "handoff", f"return_refund: order_sn={_order_sn} → ส่งแอดมิน",
+                        handoff_reason="return_refund_request",
+                    ),
+                    image_desc=_image_desc_out,
+                )
+            else:
+                # ไม่มี order_sn → ถามเลขคำสั่งซื้อก่อน
+                _rr_ask_answer = (
+                    f"เรื่องคืนสินค้า/คืนเงิน/ไม่รับสินค้า รบกวนแจ้งเลขคำสั่งซื้อให้หน่อยนะคะ "
+                    f"เพื่อให้ทางร้านตรวจสอบและดำเนินการต่อให้ได้ค่ะ"
+                )
+                _total_elapsed = _time.time() - _total_start
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+                _steps.append({
+                    "name": "return_refund_ask_order",
+                    "model": model_name,
+                    "tokens_in": 0, "tokens_out": 0,
+                    "time_s": round(_total_elapsed, 2),
+                    "cost_usd": 0.0, "cost_thb": 0.0,
+                    "detail": "return_refund: no order_sn → ask customer",
+                })
+                return ChatResponse(
+                    answer=_rr_ask_answer,
+                    answer_segments=llm.split_segments(_rr_ask_answer),
+                    products=[],
+                    shop=req.shop,
+                    model=model_name,
+                    source="return_refund_ask_order",
+                    usage={"prompt": 0, "output": 0, "total": 0},
+                    elapsed=round(_total_elapsed, 2),
+                    cost=0.0,
+                    steps=_steps,
+                    routing_decision=_routing(
+                        "bot_reply", "return_refund: no order_sn → ถามเลขคำสั่งซื้อ",
+                    ),
+                    image_desc=_image_desc_out,
+                )
+
         # ===== Phase 1B — Tracking lookup =====
         # ⚡ ถ้าไม่มี order_sn แต่มี tracking number (ในข้อความหรือ vision desc) → lookup จาก tracking
         #    รองรับ: ลูกค้าส่งรูป tracking → vision อ่านได้เลข → lookup → ตอบสถานะ
@@ -1739,6 +1940,50 @@ def chat(req: ChatRequest) -> ChatResponse:
                         )
                     except Exception as _e:
                         print(f"[ORDER] บันทึก anchor ไม่สำเร็จ: {_e}", file=sys.stderr)
+                # ⚡ Anchor order items as products — จำสินค้าใน order ไว้ใน conversation timeline
+                #    เผื่อลูกค้าถามสเปคถามอะไรต่อ หรือเข้าเคสคืนเงิน/เคลม
+                if req.conversation_id:
+                    try:
+                        from . import conversation_products as _cp_items
+                        from . import product_store as _ps_items
+                        _anchored_count = 0
+                        for _oi in _order_info.get("items", []):
+                            _oi_item_id = str(_oi.get("item_id", "") or "").strip()
+                            _oi_name = _oi.get("name", "") or ""
+                            if not _oi_item_id or not _oi_name:
+                                continue
+                            # ลองดึง full product card จาก product DB
+                            _oi_card = None
+                            try:
+                                _oi_card = _ps_items.fetch_product_by_id(
+                                    db, _oi_item_id, shop_filter=req.shop,
+                                    desc_message="รายละเอียดสินค้า",
+                                )
+                            except Exception:
+                                pass
+                            # ถ้าดึงไม่ได้ → ใช้ minimal card จาก order info
+                            if not _oi_card:
+                                _oi_card = {
+                                    "item_id": _oi_item_id,
+                                    "name": _oi_name,
+                                    "price": _oi.get("price", 0),
+                                    "image_url": _oi.get("image_url", ""),
+                                }
+                            _cp_items.add_product(
+                                conversation_id=req.conversation_id,
+                                platform=req.platform,
+                                shop=req.shop,
+                                item_id=_oi_item_id,
+                                name=_oi_name,
+                                source="user_order",
+                                card=_oi_card,
+                                is_anchor=True,
+                            )
+                            _anchored_count += 1
+                        if _anchored_count:
+                            print(f"[ORDER-ANCHOR] anchored {_anchored_count} order items as products (order_sn={_order_sn})", file=sys.stderr)
+                    except Exception as _e:
+                        print(f"[ORDER-ANCHOR] error anchoring order items: {_e}", file=sys.stderr)
                 # สร้างคำถามที่ส่งให้ LLM — ตัด order_sn ออกจาก message
                 _order_msg = _order_store._ORDER_TAG_RE.sub("", req.message).strip() if _order_store._ORDER_TAG_RE.search(req.message) else req.message
                 # ถ้าลูกค้าส่งแค่เลข order ไม่มีคำถาม → ตั้งคำถามเอง
@@ -2486,10 +2731,16 @@ def chat(req: ChatRequest) -> ChatResponse:
                 req._followup_original = _original_msg
                 print(f"[FOLLOWUP] new message: {req.message!r}  desc={_original_msg!r}", file=sys.stderr)
 
+        # ⚡ ประกาศ _anchor_compare_ctx ก่อน comparison follow-up (ใช้ร่วมกับ anchor compare block)
+        _anchor_compare_ctx: dict = {}  # {current: card, previous: card}
+        _is_partial_comp = False  # ⚡ partial comparison: 1 anchor + model keyword (เช่น "ตัวนี้กับ swim ต่างกันยังไง")
+
         # ===== Comparison follow-up =====
         # กรณี: ลูกค้าถาม "ต่างกันยังไง", "เปรียบเทียบ", "เทียบ" โดยไม่มี model keyword
         # แต่มี model ใน history → ดึง model จาก history มาเปรียบเทียบ
-        _comparison_followup_kw = ("ต่างกัน", "ต่างยังไง", "ต่างไหม", "เปรียบเทียบ", "เทียบ", "เทียบกัน")
+        _comparison_followup_kw = ("ต่างกัน", "ต่างยังไง", "ต่างไหม", "เปรียบเทียบ", "เทียบ", "เทียบกัน",
+                                   "แนะนำตัวไหนดี", "ตัวไหนดีกว่า", "อันไหนดีกว่า", "ซื้อตัวไหนดี",
+                                   "เลือกตัวไหนดี", "ตัวไหนน่าซื้อ", "อันไหนน่าซื้อ")
         _is_comparison_followup = (
             any(kw in req.message.lower() for kw in _comparison_followup_kw)
             and history
@@ -2498,33 +2749,56 @@ def chat(req: ChatRequest) -> ChatResponse:
         )
         if _is_comparison_followup:
             print(f"[FOLLOWUP-COMP] triggered: msg={req.message!r}  history={len(history)}  has_model={_current_has_model}", file=sys.stderr)
-            # ดึง model keywords จาก history ทั้งหมด (user + model)
-            # ⚡ กรอง placeholder/tag ออกก่อน (เช่น [variation_card], [สินค้า: 123], [item])
-            #   ไม่งั้น extract_model_keywords จะจับ "[variation_card]" เป็น model
-            _all_history_text2 = " ".join(h.get("text", "") for h in _recent_qa_pairs(history, 10))
-            _all_history_text2 = _ITEM_TAG_RE.sub("", _all_history_text2)
-            for _ph in ("[variation_card]", "[item]", "[itemid]", "[สินค้า]",
-                        "[ตัวเลือกสินค้า]", "[bundle_message]", "[bundle_deal]",
-                        "[bundle]", "[order]", "[คำสั่งซื้อ]"):
-                _all_history_text2 = _all_history_text2.replace(_ph, "")
-            _history_models2 = knowledge_base.extract_model_keywords(_all_history_text2)
-            # กรอง "vs" ออก
-            _history_models2 = [m for m in _history_models2 if m.lower() != "vs"]
-            if len(_history_models2) >= 2:
-                # dedup
-                _seen2 = set()
-                _unique2 = []
-                for m in _history_models2:
-                    _ml2 = m.lower()
-                    if _ml2 not in _seen2:
-                        _seen2.add(_ml2)
-                        _unique2.append(m)
-                print(f"[FOLLOWUP-COMP] comparison follow-up detected, models={_unique2[:3]}", file=sys.stderr)
-                _original_msg2 = req.message
-                # สร้าง message: "K5 vs K9" เพื่อให้เข้า comparison path ใน KB lookup
-                req.message = " vs ".join(_unique2[:3])
-                req._followup_original = _original_msg2
-                print(f"[FOLLOWUP-COMP] new message: {req.message!r}  desc={_original_msg2!r}", file=sys.stderr)
+            # ⚡ ใช้ anchor history ก่อนดึง model keyword จาก history text
+            #   เพราะ extract_model_keywords ดึงชื่อแบรนด์/ซีรีส์ (iSUPER, SoundActiv) แทนชื่อรุ่น
+            #   และ [:3] ตัดทำให้รุ่นที่อยู่ด้านหลังหายไป (เช่น Swim หาย มีแค่ Run)
+            #   ถ้ามี 2+ anchor ใน timeline → ใช้ anchor ทั้งสองตัว ไม่ต้อง modify req.message
+            _anchor_comp_from_followup = False
+            if req.conversation_id:
+                try:
+                    from . import conversation_products as _cp_fc
+                    _fc_anchors = _cp_fc.get_anchor_history(req.conversation_id, limit=5)
+                    if len(_fc_anchors) >= 2:
+                        _fc_cur = _cp_fc.get_active_product(req.conversation_id)
+                        _fc_prev = _cp_fc.get_previous_anchor(
+                            req.conversation_id,
+                            exclude_item_id=_fc_cur.get("item_id") if _fc_cur else None,
+                        )
+                        if _fc_cur and _fc_prev:
+                            _anchor_compare_ctx = {"current": _fc_cur, "previous": _fc_prev}
+                            _anchor_comp_from_followup = True
+                            print(f"[FOLLOWUP-COMP] using anchor history: current={_fc_cur.get('name','')[:40]} previous={_fc_prev.get('name','')[:40]}", file=sys.stderr)
+                except Exception as _e:
+                    print(f"[FOLLOWUP-COMP] anchor history error: {_e}", file=sys.stderr)
+            if not _anchor_comp_from_followup:
+                # Fallback: ดึง model keywords จาก history text (เดิม)
+                # ดึง model keywords จาก history ทั้งหมด (user + model)
+                # ⚡ กรอง placeholder/tag ออกก่อน (เช่น [variation_card], [สินค้า: 123], [item])
+                #   ไม้งั้น extract_model_keywords จะจับ "[variation_card]" เป็น model
+                _all_history_text2 = " ".join(h.get("text", "") for h in _recent_qa_pairs(history, 10))
+                _all_history_text2 = _ITEM_TAG_RE.sub("", _all_history_text2)
+                for _ph in ("[variation_card]", "[item]", "[itemid]", "[สินค้า]",
+                            "[ตัวเลือกสินค้า]", "[bundle_message]", "[bundle_deal]",
+                            "[bundle]", "[order]", "[คำสั่งซื้อ]"):
+                    _all_history_text2 = _all_history_text2.replace(_ph, "")
+                _history_models2 = knowledge_base.extract_model_keywords(_all_history_text2)
+                # กรอง "vs" ออก
+                _history_models2 = [m for m in _history_models2 if m.lower() != "vs"]
+                if len(_history_models2) >= 2:
+                    # dedup
+                    _seen2 = set()
+                    _unique2 = []
+                    for m in _history_models2:
+                        _ml2 = m.lower()
+                        if _ml2 not in _seen2:
+                            _seen2.add(_ml2)
+                            _unique2.append(m)
+                    print(f"[FOLLOWUP-COMP] comparison follow-up detected, models={_unique2[:3]}", file=sys.stderr)
+                    _original_msg2 = req.message
+                    # สร้าง message: "K5 vs K9" เพื่อให้เข้า comparison path ใน KB lookup
+                    req.message = " vs ".join(_unique2[:3])
+                    req._followup_original = _original_msg2
+                    print(f"[FOLLOWUP-COMP] new message: {req.message!r}  desc={_original_msg2!r}", file=sys.stderr)
 
         # ===== Anchor comparison follow-up (Phase 7) =====
         # กรณี: ลูกค้าถาม "อันนี้กับอันก่อนต่างกันยังไง", "อันนี้กับอันก่อนหน้า"
@@ -2543,8 +2817,8 @@ def chat(req: ChatRequest) -> ChatResponse:
             any(kw in (req.message or "").lower() for kw in _anchor_compare_kws)
             and bool(req.conversation_id)
         )
-        _anchor_compare_ctx: dict = {}  # {current: card, previous: card}
-        if _is_anchor_compare:
+        # _anchor_compare_ctx ประกาศก่อนหน้า (ก่อน comparison follow-up) — ไม่ reset ถ้า set แล้ว
+        if _is_anchor_compare and not _anchor_compare_ctx:
             try:
                 from . import conversation_products as _cp_cmp
                 _cur_anchor = _cp_cmp.get_active_product(req.conversation_id)
@@ -2560,6 +2834,83 @@ def chat(req: ChatRequest) -> ChatResponse:
             except Exception as _e:
                 print(f"[ANCHOR-COMP] error: {_e}", file=sys.stderr)
 
+        # ===== Post-comparison follow-up (Phase 7+) =====
+        # กรณี: รอบก่อนลูกค้าถามเปรียบเทียบ ("ต่างกันยังไง", "เทียบ", ฯลฯ)
+        # รอบนี้ถาม follow-up สั้นๆ ไม่มี model keyword (เช่น "อยากทราบคุณภาพเสียงค่ะ")
+        # → ใช้ both anchors ต่อ (อย่าตัด context กลับเป็น active ตัวเดียว)
+        # เงื่อนไข: มี 2+ anchor, ไม่มี model keyword, ไม่ใช่ new topic, สั้น, รอบก่อนเป็น comparison
+        if (
+            not _anchor_compare_ctx  # ยังไม่ได้ set (ไม่ซ้ำกับ block ด้านบน)
+            and req.conversation_id
+            and not _current_has_model
+            and history
+        ):
+            try:
+                from . import conversation_products as _cp_pcf
+                _pcf_anchors = _cp_pcf.get_anchor_history(req.conversation_id, limit=5)
+                if len(_pcf_anchors) >= 2:
+                    # เช็คว่ารอบก่อน (last user msg ใน history) เป็น comparison question ไหม
+                    _pcf_recent_user = [h.get("text", "") for h in (history or []) if h.get("role") == "user"][-1:]
+                    _pcf_comp_kws = ("ต่างกัน", "ต่างยังไง", "ต่างไหม", "เปรียบเทียบ", "เทียบ", "เทียบกัน",
+                                     "กับตัว", "กับรุ่น", "กับอัน", "กับสอง")
+                    _pcf_was_comp = any(
+                        any(kw in m.lower() for kw in _pcf_comp_kws)
+                        for m in _pcf_recent_user
+                    )
+                    # เช็คว่า current message ไม่ใช่ new topic
+                    _pcf_msg_lower = (req.message or "").lower().strip()
+                    _pcf_new_topic = any(kw in _pcf_msg_lower for kw in
+                                         ("สวัสดี", "หวัดดี", "hi", "hello", "มีอะไร", "มีไร",
+                                          "สนใจ", "อยากได้", "หาสินค้า", "แนะนำ"))
+                    _pcf_short = len((req.message or "").split()) <= 8
+                    if _pcf_was_comp and not _pcf_new_topic and _pcf_short:
+                        _pcf_cur = _cp_pcf.get_active_product(req.conversation_id)
+                        _pcf_prev = _cp_pcf.get_previous_anchor(
+                            req.conversation_id,
+                            exclude_item_id=_pcf_cur.get("item_id") if _pcf_cur else None,
+                        )
+                        if _pcf_cur and _pcf_prev:
+                            _anchor_compare_ctx = {"current": _pcf_cur, "previous": _pcf_prev}
+                            print(f"[POST-COMP-FUP] prev was comparison → both anchors: current={_pcf_cur.get('name','')[:40]} previous={_pcf_prev.get('name','')[:40]}", file=sys.stderr)
+            except Exception as _e:
+                print(f"[POST-COMP-FUP] error: {_e}", file=sys.stderr)
+
+        # ===== Partial comparison (1 anchor + model keyword) =====
+        # กรณี: ลูกค้าส่ง item card Run แล้วถาม "ตัวนี้กับ swim ต่างกันยังไง"
+        # มี anchor แค่ 1 ตัว (Run) + model keyword "swim" ใน message
+        # → ใช้ anchor (Run) เป็น "current" + ปล่อยให้ fetch_products ค้น "swim" เป็น "other"
+        # → CONV-ACTIVE ใช้ anchor (Run) แม้ _cur_model_kw ไม่ว่าง
+        # → merge point เพิ่ม Run เข้า products + comparison note
+        if (
+            not _anchor_compare_ctx  # ยังไม่ได้ set (ไม่ซ้ำกับ block ด้านบน)
+            and any(kw in (req.message or "").lower() for kw in _comparison_followup_kw)
+            and _current_has_model  # มี model keyword (ต่างจาก full comparison ที่ต้องไม่มี)
+            and bool(req.conversation_id)
+        ):
+            try:
+                from . import conversation_products as _cp_part
+                _part_anchors = _cp_part.get_anchor_history(req.conversation_id, limit=5)
+                if len(_part_anchors) == 1:  # มี anchor แค่ 1 ตัว (ถ้า 2+ เป็น full comparison ด้านบน)
+                    _part_cur = _cp_part.get_active_product(req.conversation_id)
+                    if _part_cur and _part_cur.get("item_id"):
+                        # guard: ถ้า model keyword ตรงกับชื่อ anchor → ไม่ใช่ comparison (ถามตัวเดิม)
+                        _part_cur_name = (_part_cur.get("name") or "").lower()
+                        _part_model_kws = knowledge_base.extract_model_keywords(req.message)
+                        _part_model_kws = [k for k in _part_model_kws if not knowledge_base.is_target_device_kw(k)]
+                        _kw_is_anchor = any(
+                            kw.lower() in _part_cur_name
+                            for kw in _part_model_kws
+                            if re.search(r"\d", kw)  # model code pattern only
+                        )
+                        if not _kw_is_anchor:
+                            _anchor_compare_ctx = {"current": _part_cur}  # no "previous"
+                            _is_partial_comp = True
+                            print(f"[PARTIAL-COMP] current={_part_cur.get('name','')[:40]} model_kw={_part_model_kws}", file=sys.stderr)
+                        else:
+                            print(f"[PARTIAL-COMP] model kw ตรง anchor → ไม่ใช่ comparison (ถามตัวเดิม)", file=sys.stderr)
+            except Exception as _e:
+                print(f"[PARTIAL-COMP] error: {_e}", file=sys.stderr)
+
         # ===== warranty date follow-up =====
         # กรณี: รอบก่อนบอทถาม "วันที่ซื้อ" + รอบนี้ลูกค้าบอกวันที่
         # → ดึงสินค้าจาก history + คำนวณช่วงประกัน + ตอบตรงๆ
@@ -2573,7 +2924,9 @@ def chat(req: ChatRequest) -> ChatResponse:
         _warranty_claim_handoff = False  # ถ้า True → ส่งต่อแอดมิน
         _warranty_claim_ctx: dict = {}
         _warranty_claim_answer: str = ""
-        if history:
+        # ⚡ ถ้ามี _anchor_compare_ctx (comparison/partial-comparison/post-comparison) → ข้าม warranty state machine
+        #   กัน "คุณภาพเสียง" ถูก detect เป็น claim request ("เสียง" = พัง) ทั้งที่ลูกค้าถามเปรียบเทียบ
+        if history and not _anchor_compare_ctx:
             from . import warranty as _warranty_mod
             # ⚡ Phase 8 — state machine guard ใช้ last model message เท่านั้น (ไม่ใช่ _recent_qa_pairs)
             #   เพราะต้องเช็คแค่ "model ตอบอะไรล่าสุด" ไม่ใช่บริบทยาว
@@ -3998,6 +4351,48 @@ def chat(req: ChatRequest) -> ChatResponse:
                             f"ลูกค้าถามหาสินค้าที่ใช้กับอุปกรณ์รุ่นใหม่ "
                             f"ถ้าสินค้าเดิมไม่รองรับอุปกรณ์รุ่นใหม่ ให้บอกตรงๆ แล้วแนะนำสินค้าอื่นที่รองรับแทน"
                         )
+                    # ⚡ anchor comparison merge ใน KB path (เหมือน main path)
+                    if _anchor_compare_ctx and _anchor_compare_ctx.get("current") and _anchor_compare_ctx.get("previous"):
+                        _cur_kb = _anchor_compare_ctx["current"]
+                        _prev_kb = _anchor_compare_ctx["previous"]
+                        _cur_kb_id = str(_cur_kb.get("item_id") or "")
+                        _prev_kb_id = str(_prev_kb.get("item_id") or "")
+                        _existing_ids_kb_cmp = {str(p.get("item_id") or "") for p in merged_products}
+                        _kb_cmp_inserted = []
+                        if _cur_kb_id and _cur_kb_id not in _existing_ids_kb_cmp:
+                            _kb_cmp_inserted.append(_cur_kb)
+                        if _prev_kb_id and _prev_kb_id not in _existing_ids_kb_cmp and _prev_kb_id != _cur_kb_id:
+                            _kb_cmp_inserted.append(_prev_kb)
+                        if _kb_cmp_inserted:
+                            merged_products = _kb_cmp_inserted + merged_products
+                            print(f"[ANCHOR-COMP-MERGE-KB] เพิ่ม {len(_kb_cmp_inserted)} anchor เข้า merged_products (now {len(merged_products)})", file=sys.stderr)
+                        _cur_kb_name = _cur_kb.get("name") or _cur_kb.get("item_name") or ""
+                        _prev_kb_name = _prev_kb.get("name") or _prev_kb.get("item_name") or ""
+                        _kb_cmp_note = (
+                            f"\n⚠️ ลูกค้าถามเปรียบเทียบสินค้า 2 รุ่นที่เคยสนใจในแชทนี้:\n"
+                            f"  - อันนี้ (ล่าสุด): {_cur_kb_name}\n"
+                            f"  - อันก่อนหน้า: {_prev_kb_name}\n"
+                            f"ให้เปรียบเทียบความแตกต่างของ 2 รุ่นนี้จากข้อมูลใน context "
+                            f"(สเปค ราคา การรับประกัน ความเข้ากันได้ ฯลฯ) "
+                            f"ถ้าข้อมูลไม่พอ บอกตรงๆ ว่าไม่มีข้อมูลบางส่วน"
+                        )
+                        _hybrid_extra_ctx = (_hybrid_extra_ctx + _kb_cmp_note).strip()
+                    elif _is_partial_comp and _anchor_compare_ctx.get("current"):
+                        _cur_pc_kb = _anchor_compare_ctx["current"]
+                        _cur_pc_kb_id = str(_cur_pc_kb.get("item_id") or "")
+                        _existing_ids_pc_kb = {str(p.get("item_id") or "") for p in merged_products}
+                        if _cur_pc_kb_id and _cur_pc_kb_id not in _existing_ids_pc_kb:
+                            merged_products = [_cur_pc_kb] + merged_products
+                            print(f"[PARTIAL-COMP-MERGE-KB] เพิ่ม anchor current เข้า merged_products (now {len(merged_products)})", file=sys.stderr)
+                        _cur_pc_kb_name = _cur_pc_kb.get("name") or _cur_pc_kb.get("item_name") or ""
+                        _pc_kb_note = (
+                            f"\n⚠️ ลูกค้าถามเปรียบเทียบสินค้าที่สนใจ ({_cur_pc_kb_name}) "
+                            f"กับสินค้าอื่นที่ลูกค้าระบุในข้อความ "
+                            f"ให้เปรียบเทียบสินค้าแรก ({_cur_pc_kb_name}) กับสินค้าอื่นใน context "
+                            f"(สเปค ราคา การรับประกัน ความเข้ากันได้ ฯลฯ) "
+                            f"ถ้าข้อมูลไม่พอ บอกตรงๆ ว่าไม่มีข้อมูลบางส่วน"
+                        )
+                        _hybrid_extra_ctx = (_hybrid_extra_ctx + _pc_kb_note).strip()
                     # สร้าง context ใหม่ที่รวม KB + Mongo
                     merged_context = llm._build_context(merged_products, shop_hint=req.shop,
                                                          include_description=True)
@@ -4926,6 +5321,12 @@ def chat(req: ChatRequest) -> ChatResponse:
             # ยกเว้นถ้า message ปัจจุบันมี model keyword (เช่น "lagenio k9 รับประกัน") → เป็นคำถามใหม่
             # ยกเว้นถ้าเป็น superlative question (สุด/แรงสุด/ไวสุด/กว่านี้) → ต้องดึงสินค้าทุกรุ่นในหมวด ไม่ใช่แค่รุ่นเดิมจาก history
             _ref_handled = _is_ref_like and retrieval_message != req.message
+            # ⚡ Partial comparison: ถ้า _is_partial_comp → ไม่ถือว่า ref_handled
+            #   เพราะลูกค้าตั้งใจระบุ model อื่น (เช่น "swim") ต้องไป fetch สินค้านั้นด้วย
+            #   ถ้าถือว่า ref_handled → MODEL-REGEX จะถูกข้าม → ไม่เจอ Swim
+            if _ref_handled and _is_partial_comp:
+                _ref_handled = False
+                print(f"[REFERENCE] partial comparison → ไม่ถือ ref_handled (ต้อง fetch model อื่นด้วย)", file=sys.stderr)
             if not current_types and not is_other_model_question and not is_new_topic and not _ref_handled and not _current_has_model and not _phone_model_followup and not _is_superlative_q:
                 all_user_msgs = [
                     m.text for m in req.history
@@ -5185,7 +5586,9 @@ def chat(req: ChatRequest) -> ChatResponse:
             # ถ้าไม่มีคำอังกฤษ+ตัวเลข ลองหาคำอังกฤษยาวๆ ที่ไม่ใช่คำทั่วไป (เช่น "biokoop", "elite2")
             # ต้องมีอย่างน้อย 5 ตัวอักษร เพื่อกัน false positive
             if not _cur_model_kws:
-                _cur_alpha_kws = re.findall(r"[A-Za-z]{5,}", req.message)
+                # ⚡ Partial comparison: ลด minimum เป็น 4 ตัวอักษร (เช่น "swim", "run")
+                _min_alpha_chars = 4 if _is_partial_comp else 5
+                _cur_alpha_kws = re.findall(r"[A-Za-z]{%d,}" % _min_alpha_chars, req.message)
                 # กรองคำทั่วไปที่ไม่ใช่ชื่อสินค้า
                 _common_words = {"watch", "smart", "phone", "cable", "charger", "adapter",
                                  "power", "bank", "band", "type", "usb", "wireless",
@@ -6262,7 +6665,26 @@ def chat(req: ChatRequest) -> ChatResponse:
                 f"ถ้าข้อมูลไม่พอ บอกตรงๆ ว่าไม่มีข้อมูลบางส่วน"
             )
             _combined_extra = (_combined_extra + _cmp_note).strip()
-        # ⚡ device-spec-lookup — เรียก helper (แยก logic ออกเป็น function เพื่อใช้ใน KB path ด้วย)
+        # ⚡ Partial comparison (1 anchor + model keyword from message)
+        #   กรณี: ลูกค้าส่ง item card Run แล้วถาม "ตัวนี้กับ swim ต่างกันยังไง"
+        #   → current = Run (anchor), other = Swim (จาก fetch_products/MODEL-REGEX)
+        #   → ใส่ Run ต้น list + comparison note บอก LLM เปรียบเทียบ current กับสินค้าอื่นใน context
+        elif _is_partial_comp and _anchor_compare_ctx.get("current"):
+            _cur_pc = _anchor_compare_ctx["current"]
+            _cur_pc_id = str(_cur_pc.get("item_id") or "")
+            _existing_ids_pc = {str(p.get("item_id") or "") for p in products}
+            if _cur_pc_id and _cur_pc_id not in _existing_ids_pc:
+                products = [_cur_pc] + products
+                print(f"[PARTIAL-COMP-MERGE] เพิ่ม anchor current เข้า products (now {len(products)})", file=sys.stderr)
+            _cur_pc_name = _cur_pc.get("name") or _cur_pc.get("item_name") or ""
+            _pc_note = (
+                f"\n⚠️ ลูกค้าถามเปรียบเทียบสินค้าที่สนใจ ({_cur_pc_name}) "
+                f"กับสินค้าอื่นที่ลูกค้าระบุในข้อความ "
+                f"ให้เปรียบเทียบสินค้าแรก ({_cur_pc_name}) กับสินค้าอื่นใน context "
+                f"(สเปค ราคา การรับประกัน ความเข้ากันได้ ฯลฯ) "
+                f"ถ้าข้อมูลไม่พอ บอกตรงๆ ว่าไม่มีข้อมูลบางส่วน"
+            )
+            _combined_extra = (_combined_extra + _pc_note).strip()
         #   ⚡ Phase 4 — trigger เมื่อ target_device ไม่ว่าง (ไม่ผูก intent)
         #   ⚡ Phase 3b — dual-tier recommendation (baseline + upgrade) + sort by wattage asc
         _device_spec_extra, _device_additional = _device_spec_lookup(
@@ -6973,7 +7395,8 @@ def list_test_chat_sessions(request: Request, shop: str | None = None, limit: in
             })
         return {"sessions": sessions}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="internal server error")
 
 
 @app.post("/test-chat/sessions")
@@ -7004,11 +7427,13 @@ def create_test_chat_session(req: CreateSessionRequest, request: Request) -> dic
         _log_testchat_action("create_session", request, session_id, shop=req.shop, title=doc["title"])
         return {"id": session_id, "shop": req.shop, "title": doc["title"]}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="internal server error")
 
 
 @app.get("/test-chat/sessions/{session_id}")
 def get_test_chat_session(session_id: str) -> dict:
+    _validate_object_id(session_id)  # 🔒 L4
     """ดึง session พร้อม messages"""
     try:
         from bson import ObjectId
@@ -7027,11 +7452,13 @@ def get_test_chat_session(session_id: str) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="internal server error")
 
 
 @app.post("/test-chat/sessions/{session_id}/messages")
 def add_test_chat_message(session_id: str, req: AddMessageRequest, request: Request) -> dict:
+    _validate_object_id(session_id)  # 🔒 L4
     """เพิ่ม message ลง session"""
     try:
         from bson import ObjectId
@@ -7067,11 +7494,13 @@ def add_test_chat_message(session_id: str, req: AddMessageRequest, request: Requ
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="internal server error")
 
 
 @app.delete("/test-chat/sessions/{session_id}")
 def delete_test_chat_session(session_id: str, request: Request) -> dict:
+    _validate_object_id(session_id)  # 🔒 L4
     """ลบ session"""
     try:
         from bson import ObjectId
@@ -7091,11 +7520,13 @@ def delete_test_chat_session(session_id: str, request: Request) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="internal server error")
 
 
 @app.put("/test-chat/sessions/{session_id}")
 def update_test_chat_session(session_id: str, req: UpdateSessionRequest, request: Request) -> dict:
+    _validate_object_id(session_id)  # 🔒 L4
     """อัปเดต session (เช่น เปลี่ยนร้าน)"""
     try:
         from bson import ObjectId
@@ -7106,9 +7537,11 @@ def update_test_chat_session(session_id: str, req: UpdateSessionRequest, request
         old_title = (old_doc or {}).get("title", "")
         update_fields: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
         if req.shop is not None:
-            update_fields["shop"] = req.shop
+            # 🔒 L5: Limit shop field length to prevent abuse
+            update_fields["shop"] = str(req.shop)[:100]
         if req.title is not None:
-            update_fields["title"] = req.title
+            # 🔒 L5: Limit title field length to prevent abuse
+            update_fields["title"] = str(req.title)[:200]
         result = db[_TEST_CHAT_SESSIONS_COLL].update_one(
             {"_id": ObjectId(session_id)},
             {"$set": update_fields},
@@ -7124,7 +7557,8 @@ def update_test_chat_session(session_id: str, req: UpdateSessionRequest, request
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="internal server error")
 
 
 # ── Test chat session close/reopen — state-driven handoff reset ──
@@ -7133,6 +7567,7 @@ def update_test_chat_session(session_id: str, req: UpdateSessionRequest, request
 #    บอทเห็น ticket_state="closed" → ข้าม post-handoff lock → ตอบปกติ
 @app.post("/test-chat/sessions/{session_id}/close")
 def close_test_chat_session(session_id: str, request: Request) -> dict:
+    _validate_object_id(session_id)  # 🔒 L4
     """ปิดแชท — อัปเดต status เป็น 'closed' + closed_at + closed_by (simulate mode)
 
     หลังปิด → บอทจะตอบปกติ (ไม่ล็อค post-handoff) เพราะ botCallService ดึง status นี้ส่งให้บอท
@@ -7161,11 +7596,13 @@ def close_test_chat_session(session_id: str, request: Request) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="internal server error")
 
 
 @app.post("/test-chat/sessions/{session_id}/reopen")
 def reopen_test_chat_session(session_id: str, request: Request) -> dict:
+    _validate_object_id(session_id)  # 🔒 L4
     """เปิดแชทใหม่ — อัปเดต status เป็น 'open' + clear closed_at (simulate mode)
 
     ใช้ตอนแอดมินอยากให้บอทหยุดตอบอีกครั้งหลังปิดไปแล้ว
@@ -7191,7 +7628,8 @@ def reopen_test_chat_session(session_id: str, request: Request) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="internal server error")
 
 
 class RateMessageRequest(_BM):
@@ -7233,7 +7671,8 @@ def list_test_chat_logs(request: Request, limit: int = 100, action: str | None =
             logs.append(doc)
         return {"logs": logs, "count": len(logs)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="internal server error")
 
 
 @app.post("/feedback")

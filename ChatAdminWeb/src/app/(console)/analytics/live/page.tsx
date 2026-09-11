@@ -59,7 +59,7 @@ export default function LiveStatsPage() {
         <h2 className="text-lg font-bold text-text">ข้อมูลสด</h2>
         <div className="flex items-center gap-3">
           <UnifiedDateRangePicker value={dateRange} onChange={setDateRange} />
-          <a href="#" className="text-xs text-brand flex items-center gap-1 hover:underline">
+          <a href="/help" className="text-xs text-brand flex items-center gap-1 hover:underline">
             <Info size={13} /> แนะนำการใช้งาน
           </a>
         </div>
@@ -85,7 +85,7 @@ export default function LiveStatsPage() {
           </div>
           <div className="text-3xl font-bold text-text mb-2">{data.open_total}</div>
           <div className="flex items-center gap-3 text-xs">
-            <span className="text-emerald-600 font-medium">มอบหมายแล้ว {data.open_assigned}</span>
+            <span className="text-success font-medium">มอบหมายแล้ว {data.open_assigned}</span>
             <span className="text-text-muted">ยังไม่ได้มอบหมาย {data.open_unassigned}</span>
           </div>
         </div>
@@ -140,7 +140,7 @@ export default function LiveStatsPage() {
                 <span className="text-sm text-text w-32 truncate shrink-0">{w.name}</span>
                 <div className="flex-1 h-1.5 bg-surface-2 rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-emerald-500 rounded-full"
+                    className="h-full bg-success rounded-full"
                     style={{ width: `${(w.count / maxWorkload) * 100}%` }}
                   />
                 </div>

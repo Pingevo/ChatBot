@@ -300,7 +300,7 @@ function OrderHistorySection({ conversationId }: { conversationId: string }) {
                       <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
                         o.order_status_raw === "COMPLETED" ? "bg-green-100 text-green-700" :
                         o.order_status_raw === "CANCELLED" ? "bg-red-100 text-red-700" :
-                        o.order_status_raw === "SHIPPED" || o.order_status_raw === "TO_CONFIRM_RECEIVE" ? "bg-blue-100 text-blue-700" :
+                        o.order_status_raw === "SHIPPED" || o.order_status_raw === "TO_CONFIRM_RECEIVE" ? "bg-info/10 text-info-dark" :
                         "bg-surface text-text-muted"
                       }`}>
                         {o.order_status}

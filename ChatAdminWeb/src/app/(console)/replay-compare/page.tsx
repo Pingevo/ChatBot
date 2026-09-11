@@ -2,6 +2,7 @@
 // Replay Compare — เปรียบเทียบ Bot เรา vs Zaapi/Admin จาก replay_compare.py
 // Layout 3 คอลัมน์: list | chat comparison | analysis summary
 import React, { useState, useEffect, useCallback } from "react";
+import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
@@ -17,7 +18,7 @@ import {
   CheckCircle, XCircle, AlertCircle, BarChart3,
   ChevronRight, ChevronLeft, Copy, Check, FileText,
   Scale, ThumbsUp, ThumbsDown, Meh, AlertTriangle,
-  Inbox, ListFilter, History,
+  Inbox, ListFilter, History, HelpCircle,
 } from "lucide-react";
 import { api } from "@/lib/apiClient";
 import type { Conversation, Platform, ChatMessage } from "@/lib/types";
@@ -164,11 +165,11 @@ interface FileInfo {
 // ─── Helpers ──────────────────────────────────────────────
 
 const verdictIcon = {
-  bot_better: <ThumbsUp className="w-4 h-4 text-green-500" />,
-  zaapi_better: <ThumbsDown className="w-4 h-4 text-red-500" />,
-  both_good: <CheckCircle className="w-4 h-4 text-yellow-500" />,
-  both_bad: <XCircle className="w-4 h-4 text-gray-500" />,
-  judge_error: <AlertCircle className="w-4 h-4 text-orange-500" />,
+  bot_better: <ThumbsUp className="w-4 h-4 text-success-soft" />,
+  zaapi_better: <ThumbsDown className="w-4 h-4 text-error-soft" />,
+  both_good: <CheckCircle className="w-4 h-4 text-warning" />,
+  both_bad: <XCircle className="w-4 h-4 text-text-muted" />,
+  judge_error: <AlertCircle className="w-4 h-4 text-warning" />,
 };
 
 const verdictLabel = {
@@ -180,11 +181,11 @@ const verdictLabel = {
 };
 
 const verdictColor = {
-  bot_better: "bg-green-100 text-green-700 border-green-200",
-  zaapi_better: "bg-red-100 text-red-700 border-red-200",
-  both_good: "bg-yellow-100 text-yellow-700 border-yellow-200",
-  both_bad: "bg-gray-100 text-gray-700 border-gray-200",
-  judge_error: "bg-orange-100 text-orange-700 border-orange-200",
+  bot_better: "bg-success/10 text-success-dark border-success/20",
+  zaapi_better: "bg-error/10 text-error border-error/20",
+  both_good: "bg-warning/10 text-warning border-warning/20",
+  both_bad: "bg-surface-2 text-text-muted border-border",
+  judge_error: "bg-warning-soft text-warning border-warning",
 };
 
 function timeAgo(iso?: string): string {
@@ -601,119 +602,136 @@ export default function ReplayComparePage() {
   // ─── Render ──────────────────────────────────────────────
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b bg-white">
-        <div className="flex items-center gap-3">
-          <Scale className="w-5 h-5 text-blue-500" />
-          <h1 className="text-lg font-semibold">Replay Compare</h1>
-          {/* ⚡ 3 tabs: เลือกแชท (inbox) | History | ไฟล์ผล (files) */}
-          <div className="flex items-center gap-1 ml-2">
-            <button
-              onClick={() => setMode("inbox")}
-              className={`px-2.5 py-1 text-xs rounded font-medium transition ${
-                mode === "inbox" ? "bg-blue-100 text-blue-700" : "text-gray-500 hover:bg-gray-100"
-              }`}
-            >
-              <Inbox className="w-3.5 h-3.5 inline mr-1" />เลือกแชท
-            </button>
-            <button
-              onClick={() => setMode("history")}
-              className={`px-2.5 py-1 text-xs rounded font-medium transition ${
-                mode === "history" ? "bg-blue-100 text-blue-700" : "text-gray-500 hover:bg-gray-100"
-              }`}
-            >
-              <History className="w-3.5 h-3.5 inline mr-1" />History
-              {historyItems.length > 0 && (
-                <span className="ml-1 text-[10px] text-gray-400">({historyItems.length})</span>
-              )}
-            </button>
-            <button
-              onClick={() => setMode("files")}
-              className={`px-2.5 py-1 text-xs rounded font-medium transition ${
-                mode === "files" ? "bg-blue-100 text-blue-700" : "text-gray-500 hover:bg-gray-100"
-              }`}
-            >
-              <FileText className="w-3.5 h-3.5 inline mr-1" />ไฟล์ผล
-            </button>
-          </div>
-          {mode === "files" && (
-            <Badge tone="neutral">{convs.length} แชท</Badge>
-          )}
-          {mode === "inbox" && sharedInboxConvs.length > 0 && (
-            <Badge tone="neutral">{inboxTotalCount || sharedInboxConvs.length} แชท</Badge>
-          )}
-          {mode === "history" && historyItems.length > 0 && (
-            <Badge tone="neutral">{historyItems.length} แชท</Badge>
-          )}
-          {data?.generated_at && (
-            <span className="text-xs text-gray-500">
-              สร้างเมื่อ {timeAgo(data.generated_at)}
-            </span>
-          )}
-          {data?.status === "running" && data?.progress && (
-            <span className="text-xs text-blue-600 font-medium">
-              🔄 {data.progress.current}/{data.progress.total} แชท
-            </span>
-          )}
-          {data?.status === "done" && (
-            <span className="text-xs text-green-600 font-medium">✓ เสร็จ</span>
-          )}
-          {replayConvRunning && (
-            <span className="text-xs text-blue-600 font-medium animate-pulse">
-              🔄 กำลัง replay แชท...
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          {mode === "files" && (
-            <>
-              <input
-                type="number"
-                value={limitInput}
-                onChange={e => setLimitInput(e.target.value)}
-                className="w-20 px-2 py-1 text-sm border rounded"
-                placeholder="50"
-                min={1}
-                max={500}
-              />
-              <Button
-                size="sm"
-                variant="primary"
-                onClick={runReplay}
-                disabled={running}
+      {/* Header — 2 rows: title+tabs / status+actions */}
+      <div className="border-b border-border bg-surface">
+        {/* Row 1: title + tabs */}
+        <div className="flex items-center justify-between px-4 pt-3">
+          <div className="flex items-center gap-3">
+            <Scale className="w-5 h-5 text-info" />
+            <div className="flex items-center gap-1.5">
+              <h1 className="text-lg font-semibold">เปรียบเทียบรีเพลย์</h1>
+              <Link
+                href="/help#replay-compare"
+                className="text-text-subtle hover:text-brand transition-colors"
+                aria-label="วิธีใช้งานเปรียบเทียบรีเพลย์"
               >
-                {running ? (
-                  <><RefreshCw className="w-4 h-4 animate-spin" /> กำลังรัน...</>
-                ) : (
-                  <><PlayCircle className="w-4 h-4" /> Run {limitInput} oldest</>
+                <HelpCircle size={14} />
+              </Link>
+            </div>
+            {/* ⚡ 3 tabs: เลือกแชท (inbox) | History | ไฟล์ผล (files) */}
+            <div className="flex items-center gap-1 ml-2">
+              <button
+                onClick={() => setMode("inbox")}
+                className={`px-2.5 py-1 text-xs rounded font-medium transition ${
+                  mode === "inbox" ? "bg-info/10 text-info-dark" : "text-text-muted hover:bg-surface-2"
+                }`}
+              >
+                <Inbox className="w-3.5 h-3.5 inline mr-1" />เลือกแชท
+              </button>
+              <button
+                onClick={() => setMode("history")}
+                className={`px-2.5 py-1 text-xs rounded font-medium transition ${
+                  mode === "history" ? "bg-info/10 text-info-dark" : "text-text-muted hover:bg-surface-2"
+                }`}
+              >
+                <History className="w-3.5 h-3.5 inline mr-1" />ประวัติ
+                {historyItems.length > 0 && (
+                  <span className="ml-1 text-[10px] text-text-subtle">({historyItems.length})</span>
                 )}
-              </Button>
-            </>
-          )}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              if (mode === "history") { setHistoryLoaded(false); loadHistory(); }
-              else { loadData(selectedFile || undefined); loadFiles(); }
-            }}
-            disabled={mode === "files" ? loading : mode === "history" ? historyLoading : inboxLoading}
-          >
-            <RefreshCw className={`w-4 h-4 ${
-              mode === "files" ? (loading ? "animate-spin" : "") :
-              mode === "history" ? (historyLoading ? "animate-spin" : "") :
-              (inboxLoading ? "animate-spin" : "")
-            }`} />
-            Refresh
-          </Button>
+              </button>
+              <button
+                onClick={() => setMode("files")}
+                className={`px-2.5 py-1 text-xs rounded font-medium transition ${
+                  mode === "files" ? "bg-info/10 text-info-dark" : "text-text-muted hover:bg-surface-2"
+                }`}
+              >
+                <FileText className="w-3.5 h-3.5 inline mr-1" />ไฟล์ผล
+              </button>
+            </div>
+          </div>
+        </div>
+        {/* Row 2: status pills + actions */}
+        <div className="flex items-center justify-between px-4 pb-2 pt-1.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            {mode === "files" && (
+              <Badge tone="neutral">{convs.length} แชท</Badge>
+            )}
+            {mode === "inbox" && sharedInboxConvs.length > 0 && (
+              <Badge tone="neutral">{inboxTotalCount || sharedInboxConvs.length} แชท</Badge>
+            )}
+            {mode === "history" && historyItems.length > 0 && (
+              <Badge tone="neutral">{historyItems.length} แชท</Badge>
+            )}
+            {data?.generated_at && (
+              <span className="text-xs text-text-muted">
+                สร้างเมื่อ {timeAgo(data.generated_at)}
+              </span>
+            )}
+            {data?.status === "running" && data?.progress && (
+              <span className="text-xs text-info-dark font-medium">
+                🔄 {data.progress.current}/{data.progress.total} แชท
+              </span>
+            )}
+            {data?.status === "done" && (
+              <span className="text-xs text-success font-medium">✓ เสร็จ</span>
+            )}
+            {replayConvRunning && (
+              <span className="text-xs text-info-dark font-medium animate-pulse">
+                🔄 กำลัง replay แชท...
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {mode === "files" && (
+              <>
+                <input
+                  type="number"
+                  value={limitInput}
+                  onChange={e => setLimitInput(e.target.value)}
+                  className="w-20 px-2 py-1 text-sm border rounded"
+                  placeholder="50"
+                  min={1}
+                  max={500}
+                />
+                <Button
+                  size="sm"
+                  variant="primary"
+                  onClick={runReplay}
+                  disabled={running}
+                >
+                  {running ? (
+                    <><RefreshCw className="w-4 h-4 animate-spin" /> กำลังรัน...</>
+                  ) : (
+                    <><PlayCircle className="w-4 h-4" /> รัน {limitInput} แชทแรก</>
+                  )}
+                </Button>
+              </>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                if (mode === "history") { setHistoryLoaded(false); loadHistory(); }
+                else { loadData(selectedFile || undefined); loadFiles(); }
+              }}
+              disabled={mode === "files" ? loading : mode === "history" ? historyLoading : inboxLoading}
+            >
+              <RefreshCw className={`w-4 h-4 ${
+                mode === "files" ? (loading ? "animate-spin" : "") :
+                mode === "history" ? (historyLoading ? "animate-spin" : "") :
+                (inboxLoading ? "animate-spin" : "")
+              }`} />
+              รีเฟรช
+            </Button>
+          </div>
         </div>
       </div>
 
       {/* File selector */}
       {files.length > 0 && (
-        <div className="flex items-center gap-2 px-4 py-2 border-b bg-gray-50 text-xs">
-          <FileText className="w-3.5 h-3.5 text-gray-400" />
-          <span className="text-gray-500">ไฟล์:</span>
+        <div className="flex items-center gap-2 px-4 py-2 border-b bg-surface-2 text-xs">
+          <FileText className="w-3.5 h-3.5 text-text-subtle" />
+          <span className="text-text-muted">ไฟล์:</span>
           <select
             value={selectedFile}
             onChange={e => { setSelectedFile(e.target.value); loadData(e.target.value); }}
@@ -748,7 +766,7 @@ export default function ReplayComparePage() {
               {/* ⚡ Inbox picker — search + filter + list จาก /admin/conversations */}
               <div className="sticky top-0 z-10 bg-white border-b px-2 py-2 space-y-2">
                 <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2 top-2" />
+                  <Search className="w-3.5 h-3.5 text-text-subtle absolute left-2 top-2" />
                   <input
                     value={inboxSearch}
                     onChange={e => setInboxSearch(e.target.value)}
@@ -778,7 +796,7 @@ export default function ReplayComparePage() {
                     ))}
                   </select>
                 </div>
-                <div className="flex items-center justify-between text-[10px] text-gray-400">
+                <div className="flex items-center justify-between text-[10px] text-text-subtle">
                   <span>{filteredInbox.length}{inboxTotalCount ? ` จาก ${inboxTotalCount}` : ""}</span>
                   {inboxLoading && <RefreshCw className="w-3 h-3 animate-spin" />}
                 </div>
@@ -803,44 +821,44 @@ export default function ReplayComparePage() {
                       key={c.id}
                       onClick={() => loadPreview(c)}
                       disabled={replayConvRunning}
-                      className={`w-full text-left px-3 py-2 hover:bg-gray-50 transition disabled:opacity-50 ${
-                        isSelected ? "bg-blue-50 border-l-2 border-blue-500" : ""
+                      className={`w-full text-left px-3 py-2 hover:bg-surface-2 transition disabled:opacity-50 ${
+                        isSelected ? "bg-info/5 border-l-2 border-info" : ""
                       }`}
                     >
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-medium text-gray-800 truncate">
+                        <span className="text-xs font-medium text-text truncate">
                           {c.customer_name || c.id.slice(-8)}
                         </span>
-                        <span className="text-[10px] text-gray-400">
+                        <span className="text-[10px] text-text-subtle">
                           {c.last_timestamp ? timeAgo(c.last_timestamp) : ""}
                         </span>
                       </div>
                       <div className="flex items-center gap-1 mt-0.5">
-                        <Store className="w-3 h-3 text-gray-400" />
-                        <span className="text-xs text-gray-500 truncate">{c.shop_name || "?"}</span>
+                        <Store className="w-3 h-3 text-text-subtle" />
+                        <span className="text-xs text-text-muted truncate">{c.shop_name || "?"}</span>
                         {c.platform && (
-                          <span className="text-[10px] text-gray-400 ml-auto">{c.platform}</span>
+                          <span className="text-[10px] text-text-subtle ml-auto">{c.platform}</span>
                         )}
                       </div>
-                      <div className="text-[11px] text-gray-500 truncate mt-0.5">
+                      <div className="text-[11px] text-text-muted truncate mt-0.5">
                         {c.last_message || "(ไม่มีข้อความ)"}
                       </div>
                       {isSelected && replayConvRunning && (
-                        <div className="text-[10px] text-blue-600 mt-1 animate-pulse">กำลัง replay...</div>
+                        <div className="text-[10px] text-info-dark mt-1 animate-pulse">กำลัง replay...</div>
                       )}
                       {isSelected && !replayConvRunning && hasReplay && (
-                        <div className="text-[10px] text-green-600 mt-1">✓ มีผลแล้ว</div>
+                        <div className="text-[10px] text-success mt-1">✓ มีผลแล้ว</div>
                       )}
                     </button>
                   );
                 })}
                 {inboxLoadingMore && (
-                  <div className="p-2 text-center text-[10px] text-gray-400 flex items-center justify-center gap-1">
+                  <div className="p-2 text-center text-[10px] text-text-subtle flex items-center justify-center gap-1">
                     <RefreshCw className="w-3 h-3 animate-spin" /> กำลังโหลดเพิ่ม...
                   </div>
                 )}
                 {!inboxLoadingMore && !inboxHasMore && filteredInbox.length > 0 && (
-                  <div className="p-2 text-center text-[10px] text-gray-400">โหลดครบแล้ว</div>
+                  <div className="p-2 text-center text-[10px] text-text-subtle">โหลดครบแล้ว</div>
                 )}
               </div>
             </>
@@ -849,7 +867,7 @@ export default function ReplayComparePage() {
               {/* ⚡ History — แชทที่เคย replay ผ่าน inbox แล้ว */}
               <div className="sticky top-0 z-10 bg-white border-b px-2 py-2 space-y-2">
                 <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2 top-2" />
+                  <Search className="w-3.5 h-3.5 text-text-subtle absolute left-2 top-2" />
                   <input
                     value={historySearch}
                     onChange={e => setHistorySearch(e.target.value)}
@@ -857,7 +875,7 @@ export default function ReplayComparePage() {
                     className="w-full pl-7 pr-2 py-1.5 text-xs border rounded"
                   />
                 </div>
-                <div className="flex items-center justify-between text-[10px] text-gray-400">
+                <div className="flex items-center justify-between text-[10px] text-text-subtle">
                   <span>{filteredHistory.length} จาก {historyItems.length}</span>
                   {historyLoading && <RefreshCw className="w-3 h-3 animate-spin" />}
                 </div>
@@ -884,25 +902,25 @@ export default function ReplayComparePage() {
                         setSelectedInboxId(h.conv_id);
                         loadData(h.file_path);
                       }}
-                      className={`w-full text-left px-3 py-2 hover:bg-gray-50 transition ${
-                        isSelected ? "bg-blue-50 border-l-2 border-blue-500" : ""
+                      className={`w-full text-left px-3 py-2 hover:bg-surface-2 transition ${
+                        isSelected ? "bg-info/5 border-l-2 border-info" : ""
                       }`}
                     >
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-mono text-gray-700 truncate">
+                        <span className="text-xs font-mono text-text-muted truncate">
                           {h.conv_id?.slice(-12)}
                         </span>
-                        <span className="text-[10px] text-gray-400">
+                        <span className="text-[10px] text-text-subtle">
                           {h.generated_at ? timeAgo(h.generated_at) : ""}
                         </span>
                       </div>
                       <div className="flex items-center gap-1 mt-0.5">
-                        <Store className="w-3 h-3 text-gray-400" />
-                        <span className="text-xs text-gray-600 truncate">{h.shop_name || "?"}</span>
-                        <span className="text-[10px] text-gray-400 ml-auto">{h.qa_count}Q</span>
+                        <Store className="w-3 h-3 text-text-subtle" />
+                        <span className="text-xs text-text-muted truncate">{h.shop_name || "?"}</span>
+                        <span className="text-[10px] text-text-subtle ml-auto">{h.qa_count}Q</span>
                       </div>
                       {h.status === "running" && (
-                        <div className="text-[10px] text-blue-600 mt-0.5 animate-pulse">กำลังรัน...</div>
+                        <div className="text-[10px] text-info-dark mt-0.5 animate-pulse">กำลังรัน...</div>
                       )}
                     </button>
                   );
@@ -933,24 +951,24 @@ export default function ReplayComparePage() {
                     <button
                       key={c.conv_id}
                       onClick={() => { setSelectedConvIdx(idx); setSelectedQIdx(0); }}
-                      className={`w-full text-left px-3 py-2 hover:bg-gray-50 transition ${
-                        idx === selectedConvIdx ? "bg-blue-50 border-l-2 border-blue-500" : ""
+                      className={`w-full text-left px-3 py-2 hover:bg-surface-2 transition ${
+                        idx === selectedConvIdx ? "bg-info/5 border-l-2 border-info" : ""
                       }`}
                     >
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-mono text-gray-600 truncate">
+                        <span className="text-xs font-mono text-text-muted truncate">
                           {c.conv_id?.slice(0, 16)}
                         </span>
-                        <span className="text-xs text-gray-400">{c.qa?.length || 0}Q</span>
+                        <span className="text-xs text-text-subtle">{c.qa?.length || 0}Q</span>
                       </div>
                       <div className="flex items-center gap-1 mt-1">
-                        <Store className="w-3 h-3 text-gray-400" />
-                        <span className="text-xs text-gray-600 truncate">{c.shop_name || "?"}</span>
+                        <Store className="w-3 h-3 text-text-subtle" />
+                        <span className="text-xs text-text-muted truncate">{c.shop_name || "?"}</span>
                       </div>
                       {(botBetter > 0 || zaapiBetter > 0) && (
                         <div className="flex items-center gap-2 mt-1 text-xs">
-                          <span className="text-green-600">🟢{botBetter}</span>
-                          <span className="text-red-600">🔴{zaapiBetter}</span>
+                          <span className="text-success">🟢{botBetter}</span>
+                          <span className="text-error">🔴{zaapiBetter}</span>
                         </div>
                       )}
                     </button>
@@ -962,7 +980,7 @@ export default function ReplayComparePage() {
         </div>
 
         {/* Center: Chat comparison */}
-        <div className="flex-1 overflow-y-auto bg-gray-50">
+        <div className="flex-1 overflow-y-auto bg-surface-2">
           {/* ⚡ Preview panel — ก่อน replay แสดงข้อความต้นฉบับให้ดูก่อน */}
           {previewConv && !selectedConv && (
             <div className="p-4 space-y-3">
@@ -971,7 +989,7 @@ export default function ReplayComparePage() {
                   <h2 className="font-semibold text-sm">
                     {previewConv.shop_name} · {previewConv.id?.slice(-12)}
                   </h2>
-                  <span className="text-xs text-gray-500">
+                  <span className="text-xs text-text-muted">
                     {previewConv.customer_name || "ไม่ระบุชื่อ"} · {previewConv.platform || "?"}
                   </span>
                 </div>
@@ -994,7 +1012,7 @@ export default function ReplayComparePage() {
               )}
               {!previewLoading && previewMessages.length > 0 && (
                 <div className="bg-white rounded-lg border p-3 space-y-2 max-h-[60vh] overflow-y-auto">
-                  <div className="text-xs text-gray-400 mb-2">
+                  <div className="text-xs text-text-subtle mb-2">
                     {previewMessages.length} ข้อความ · ตรวจดูก่อน แล้วกด "รัน Replay Compare"
                   </div>
                   {previewMessages.map((m, i) => {
@@ -1010,11 +1028,11 @@ export default function ReplayComparePage() {
                         <div
                           className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
                             m.role === "user"
-                              ? "bg-blue-100 text-gray-900"
-                              : "bg-green-600 text-white"
+                              ? "bg-pale-sky/20 text-text"
+                              : "bg-success text-white"
                           }`}
                         >
-                          <div className={`text-[10px] mb-0.5 ${m.role === "user" ? "text-gray-500" : "text-green-100"}`}>
+                          <div className={`text-[10px] mb-0.5 ${m.role === "user" ? "text-text-muted" : "text-success-soft"}`}>
                             {m.role === "user" ? (
                               <><User className="w-3 h-3 inline mr-1" />ลูกค้า</>
                             ) : (
@@ -1046,7 +1064,7 @@ export default function ReplayComparePage() {
                   <h2 className="font-semibold text-sm">
                     {selectedConv.shop_name} · {selectedConv.conv_id?.slice(0, 20)}
                   </h2>
-                  <span className="text-xs text-gray-500">
+                  <span className="text-xs text-text-muted">
                     {selectedConv.qa?.length || 0} คำถาม
                     {selectedConv.handoff_stopped && " · หยุดที่ handoff"}
                   </span>
@@ -1070,10 +1088,11 @@ export default function ReplayComparePage() {
                     variant="ghost"
                     onClick={() => setSelectedQIdx(Math.max(0, selectedQIdx - 1))}
                     disabled={selectedQIdx === 0}
+                    title="คำถามก่อนหน้า" aria-label="คำถามก่อนหน้า"
                   >
                     <ChevronLeft className="w-4 h-4" />
                   </Button>
-                  <span className="text-xs text-gray-600">
+                  <span className="text-xs text-text-muted">
                     Q{selectedQIdx + 1}/{selectedConv.qa?.length || 0}
                   </span>
                   <Button
@@ -1081,6 +1100,7 @@ export default function ReplayComparePage() {
                     variant="ghost"
                     onClick={() => setSelectedQIdx(Math.min((selectedConv.qa?.length || 1) - 1, selectedQIdx + 1))}
                     disabled={selectedQIdx >= (selectedConv.qa?.length || 1) - 1}
+                    title="คำถามถัดไป" aria-label="คำถามถัดไป"
                   >
                     <ChevronRight className="w-4 h-4" />
                   </Button>
@@ -1091,12 +1111,12 @@ export default function ReplayComparePage() {
               {selectedQa && (
                 <div className="space-y-3">
                   {/* User question */}
-                  <Card className="p-3 bg-blue-50 border-blue-200">
+                  <Card className="p-3 bg-info/5 border-info/20">
                     <div className="flex items-start gap-2">
-                      <User className="w-4 h-4 text-blue-500 mt-0.5" />
+                      <User className="w-4 h-4 text-info mt-0.5" />
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-1">
-                          <span className="text-xs font-semibold text-blue-700">ลูกค้า</span>
+                          <span className="text-xs font-semibold text-info-dark">ลูกค้า</span>
                           {/* ⚡ แสดง message type badge — ใช้ field ตรง หรือ fallback ดึงจาก text */}
                           {(() => {
                             const mt = selectedQa.user_message_type || inferMessageType(selectedQa.user_text);
@@ -1159,7 +1179,7 @@ export default function ReplayComparePage() {
                         {selectedQa.user_products && selectedQa.user_products.length > 0 && (
                           <div className="mt-2 space-y-2">
                             {selectedQa.user_products.map((p, idx) => (
-                              <div key={idx} className="flex gap-2 bg-white border border-blue-200 rounded-lg p-2 max-w-xs">
+                              <div key={idx} className="flex gap-2 bg-white border border-info/20 rounded-lg p-2 max-w-xs">
                                 {p.image && (
                                   <img
                                     src={p.image}
@@ -1169,11 +1189,11 @@ export default function ReplayComparePage() {
                                   />
                                 )}
                                 <div className="flex-1 min-w-0">
-                                  <div className="text-xs font-medium text-gray-800 line-clamp-2">{p.name}</div>
+                                  <div className="text-xs font-medium text-text line-clamp-2">{p.name}</div>
                                   {p.price != null && (
-                                    <div className="text-xs text-orange-600 font-semibold mt-0.5">฿{p.price}</div>
+                                    <div className="text-xs text-warning font-semibold mt-0.5">฿{p.price}</div>
                                   )}
-                                  <div className="text-[10px] text-gray-400 mt-0.5">
+                                  <div className="text-[10px] text-text-subtle mt-0.5">
                                     item: {p.item_id}{p.shop ? ` · ${p.shop}` : ""}
                                   </div>
                                 </div>
@@ -1189,13 +1209,13 @@ export default function ReplayComparePage() {
                             return (
                               <>
                                 {itemId && !selectedQa.item_id && !selectedQa.user_products && (
-                                  <div className="mt-1 text-xs text-gray-500">📦 item_id: {itemId}</div>
+                                  <div className="mt-1 text-xs text-text-muted">📦 item_id: {itemId}</div>
                                 )}
                                 {orderSn && (
-                                  <div className="mt-1 text-xs text-gray-500">🛒 order: {orderSn}</div>
+                                  <div className="mt-1 text-xs text-text-muted">🛒 order: {orderSn}</div>
                                 )}
                                 {notif && (
-                                  <div className="mt-1 text-xs text-gray-500 italic">🔔 {notif}</div>
+                                  <div className="mt-1 text-xs text-text-muted italic">🔔 {notif}</div>
                                 )}
                               </>
                             );
@@ -1207,27 +1227,27 @@ export default function ReplayComparePage() {
                   {/* Zaapi answer */}
                   <Card className="p-3">
                     <div className="flex items-start gap-2">
-                      <div className="w-4 h-4 rounded-full bg-purple-500 mt-0.5 flex items-center justify-center">
+                      <div className="w-4 h-4 rounded-full bg-brand mt-0.5 flex items-center justify-center">
                         <span className="text-[8px] text-white font-bold">Z</span>
                       </div>
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-1">
-                          <span className="text-xs font-semibold text-purple-700">
+                          <span className="text-xs font-semibold text-brand">
                             Zaapi/Admin ({selectedQa.zaapi_role || "?"})
                           </span>
                           {selectedQa.zaapi_source && (
                             <Badge tone="neutral">{selectedQa.zaapi_source}</Badge>
                           )}
-                          <span className="text-xs text-gray-400">{selectedQa.zaapi_text?.length || 0}c</span>
+                          <span className="text-xs text-text-subtle">{selectedQa.zaapi_text?.length || 0}c</span>
                           <button
                             onClick={() => copyText(selectedQa.zaapi_text)}
-                            className="ml-auto text-gray-400 hover:text-gray-600"
+                            className="ml-auto text-text-subtle hover:text-text-muted"
                           >
                             {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                           </button>
                         </div>
                         <div className="text-sm whitespace-pre-wrap">
-                          {selectedQa.zaapi_text || <span className="text-gray-400 italic">(ไม่มีคำตอบ)</span>}
+                          {selectedQa.zaapi_text || <span className="text-text-subtle italic">(ไม่มีคำตอบ)</span>}
                         </div>
                       </div>
                     </div>
@@ -1236,10 +1256,10 @@ export default function ReplayComparePage() {
                   {/* Bot answer */}
                   <Card className="p-3">
                     <div className="flex items-start gap-2">
-                      <Bot className="w-4 h-4 text-green-500 mt-0.5" />
+                      <Bot className="w-4 h-4 text-success-soft mt-0.5" />
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-1">
-                          <span className="text-xs font-semibold text-green-700">Bot เรา</span>
+                          <span className="text-xs font-semibold text-success-dark">Bot เรา</span>
                           {selectedQa.bot_source && (
                             <Badge tone="neutral">{selectedQa.bot_source}</Badge>
                           )}
@@ -1252,24 +1272,24 @@ export default function ReplayComparePage() {
                           {selectedQa.bot_error && (
                             <Badge tone="red">error</Badge>
                           )}
-                          <span className="text-xs text-gray-400">{selectedQa.bot_answer?.length || 0}c</span>
+                          <span className="text-xs text-text-subtle">{selectedQa.bot_answer?.length || 0}c</span>
                           <button
                             onClick={() => copyText(selectedQa.bot_answer)}
-                            className="ml-auto text-gray-400 hover:text-gray-600"
+                            className="ml-auto text-text-subtle hover:text-text-muted"
                           >
                             {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                           </button>
                         </div>
                         {selectedQa.bot_error ? (
-                          <div className="text-sm text-red-600">{selectedQa.bot_error}</div>
+                          <div className="text-sm text-error">{selectedQa.bot_error}</div>
                         ) : (
                           <div className="text-sm whitespace-pre-wrap">
-                            {selectedQa.bot_answer || <span className="text-gray-400 italic">(ไม่มีคำตอบ)</span>}
+                            {selectedQa.bot_answer || <span className="text-text-subtle italic">(ไม่มีคำตอบ)</span>}
                           </div>
                         )}
                         {/* Products */}
                         {selectedQa.bot_product_names && selectedQa.bot_product_names.length > 0 && (
-                          <div className="mt-2 text-xs text-gray-500">
+                          <div className="mt-2 text-xs text-text-muted">
                             📦 {selectedQa.bot_products_count} สินค้า: {selectedQa.bot_product_names.slice(0, 3).join(", ")}
                           </div>
                         )}
@@ -1285,7 +1305,7 @@ export default function ReplayComparePage() {
                         <span className="font-semibold text-sm">
                           {verdictLabel[selectedJudgment.verdict] || selectedJudgment.verdict}
                         </span>
-                        <Scale className="w-4 h-4 ml-auto text-gray-400" />
+                        <Scale className="w-4 h-4 ml-auto text-text-subtle" />
                       </div>
                       <div className="text-sm mb-2">
                         <span className="font-semibold">เหตุผล: </span>
@@ -1293,7 +1313,7 @@ export default function ReplayComparePage() {
                       </div>
                       {selectedJudgment.bot_problems && selectedJudgment.bot_problems.length > 0 && (
                         <div className="mb-2">
-                          <div className="text-xs font-semibold text-red-600 mb-1">⚠️ ปัญหาของ Bot:</div>
+                          <div className="text-xs font-semibold text-error mb-1">⚠️ ปัญหาของ Bot:</div>
                           <ul className="text-sm space-y-1">
                             {selectedJudgment.bot_problems.map((p, i) => (
                               <li key={i} className="ml-4 list-disc">{p}</li>
@@ -1303,7 +1323,7 @@ export default function ReplayComparePage() {
                       )}
                       {selectedJudgment.bot_strengths && selectedJudgment.bot_strengths.length > 0 && (
                         <div className="mb-2">
-                          <div className="text-xs font-semibold text-green-600 mb-1">✅ จุดแข็งของ Bot:</div>
+                          <div className="text-xs font-semibold text-success mb-1">✅ จุดแข็งของ Bot:</div>
                           <ul className="text-sm space-y-1">
                             {selectedJudgment.bot_strengths.map((s, i) => (
                               <li key={i} className="ml-4 list-disc">{s}</li>
@@ -1313,7 +1333,7 @@ export default function ReplayComparePage() {
                       )}
                       {selectedJudgment.bot_fixes && selectedJudgment.bot_fixes.length > 0 && (
                         <div className="mb-2">
-                          <div className="text-xs font-semibold text-blue-600 mb-1">🔧 วิธีแก้:</div>
+                          <div className="text-xs font-semibold text-info-dark mb-1">🔧 วิธีแก้:</div>
                           <ul className="text-sm space-y-1">
                             {selectedJudgment.bot_fixes.map((f, i) => (
                               <li key={i} className="ml-4 list-disc">{f}</li>
@@ -1322,7 +1342,7 @@ export default function ReplayComparePage() {
                         </div>
                       )}
                       {selectedJudgment.side_effects && (
-                        <div className="text-xs text-gray-600 italic">
+                        <div className="text-xs text-text-muted italic">
                           💡 ผลกระทบ: {selectedJudgment.side_effects}
                         </div>
                       )}
@@ -1333,7 +1353,7 @@ export default function ReplayComparePage() {
                   <div>
                     <button
                       onClick={() => setShowDebug(!showDebug)}
-                      className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
+                      className="text-xs text-text-muted hover:text-text-muted flex items-center gap-1"
                     >
                       <BarChart3 className="w-3.5 h-3.5" />
                       {showDebug ? "ซ่อน" : "แสดง"} debug info (log/intent/retrieval)
@@ -1341,14 +1361,14 @@ export default function ReplayComparePage() {
                     {showDebug && (
                       <div className="mt-2 space-y-2">
                         {selectedQa.bot_log && (
-                          <pre className="text-xs bg-gray-900 text-green-400 p-2 rounded overflow-x-auto max-h-48">
+                          <pre className="text-xs bg-gray-900 text-success-soft p-2 rounded overflow-x-auto max-h-48">
                             {selectedQa.bot_log}
                           </pre>
                         )}
                         {!!selectedQa.bot_intent && typeof selectedQa.bot_intent === "object" && Object.keys(selectedQa.bot_intent as object).length > 0 && (
                           <div className="text-xs">
                             <span className="font-semibold">Intent: </span>
-                            <pre className="bg-gray-100 p-2 rounded mt-1">
+                            <pre className="bg-surface-2 p-2 rounded mt-1">
                               {JSON.stringify(selectedQa.bot_intent, null, 2) as string}
                             </pre>
                           </div>
@@ -1356,7 +1376,7 @@ export default function ReplayComparePage() {
                         {!!selectedQa.bot_retrieval_info && typeof selectedQa.bot_retrieval_info === "object" && Object.keys(selectedQa.bot_retrieval_info as object).length > 0 && (
                           <div className="text-xs">
                             <span className="font-semibold">Retrieval: </span>
-                            <pre className="bg-gray-100 p-2 rounded mt-1">
+                            <pre className="bg-surface-2 p-2 rounded mt-1">
                               {JSON.stringify(selectedQa.bot_retrieval_info, null, 2) as string}
                             </pre>
                           </div>
@@ -1364,7 +1384,7 @@ export default function ReplayComparePage() {
                         {!!selectedQa.bot_routing && (
                           <div className="text-xs">
                             <span className="font-semibold">Routing: </span>
-                            <pre className="bg-gray-100 p-2 rounded mt-1">
+                            <pre className="bg-surface-2 p-2 rounded mt-1">
                               {JSON.stringify(selectedQa.bot_routing, null, 2) as string}
                             </pre>
                           </div>
@@ -1390,27 +1410,27 @@ export default function ReplayComparePage() {
                 </h3>
                 <div className="space-y-1 text-xs">
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Conversations</span>
+                    <span className="text-text-muted">Conversations</span>
                     <span className="font-semibold">{analysis.total_conversations}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Q&A turns</span>
+                    <span className="text-text-muted">Q&A turns</span>
                     <span className="font-semibold">{analysis.total_qa}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Bot answered</span>
-                    <span className="font-semibold text-green-600">{analysis.bot_answered}</span>
+                    <span className="text-text-muted">Bot answered</span>
+                    <span className="font-semibold text-success">{analysis.bot_answered}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Bot errors</span>
-                    <span className="font-semibold text-red-600">{analysis.bot_errors}</span>
+                    <span className="text-text-muted">Bot errors</span>
+                    <span className="font-semibold text-error">{analysis.bot_errors}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Handoffs</span>
-                    <span className="font-semibold text-orange-600">{analysis.bot_handoffs}</span>
+                    <span className="text-text-muted">Handoffs</span>
+                    <span className="font-semibold text-warning">{analysis.bot_handoffs}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Web search</span>
+                    <span className="text-text-muted">Web search</span>
                     <span className="font-semibold">{analysis.web_search_used}</span>
                   </div>
                 </div>
@@ -1421,16 +1441,16 @@ export default function ReplayComparePage() {
                 <h3 className="text-sm font-semibold mb-2">เปรียบเทียบ</h3>
                 <div className="space-y-1 text-xs">
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Both answered</span>
+                    <span className="text-text-muted">Both answered</span>
                     <span className="font-semibold">{analysis.both_answered}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Bot only</span>
-                    <span className="font-semibold text-green-600">{analysis.bot_only}</span>
+                    <span className="text-text-muted">Bot only</span>
+                    <span className="font-semibold text-success">{analysis.bot_only}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Zaapi only</span>
-                    <span className="font-semibold text-red-600">{analysis.zaapi_only}</span>
+                    <span className="text-text-muted">Zaapi only</span>
+                    <span className="font-semibold text-error">{analysis.zaapi_only}</span>
                   </div>
                 </div>
               </div>
@@ -1440,19 +1460,19 @@ export default function ReplayComparePage() {
                 <h3 className="text-sm font-semibold mb-2">ความยาว</h3>
                 <div className="space-y-1 text-xs">
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Bot avg</span>
+                    <span className="text-text-muted">Bot avg</span>
                     <span className="font-semibold">{analysis.avg_bot_len}c</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Bot short (&lt;80)</span>
-                    <span className="text-orange-600">{analysis.bot_short}</span>
+                    <span className="text-text-muted">Bot short (&lt;80)</span>
+                    <span className="text-warning">{analysis.bot_short}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Bot long (&gt;1500)</span>
-                    <span className="text-orange-600">{analysis.bot_long}</span>
+                    <span className="text-text-muted">Bot long (&gt;1500)</span>
+                    <span className="text-warning">{analysis.bot_long}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Zaapi avg</span>
+                    <span className="text-text-muted">Zaapi avg</span>
                     <span className="font-semibold">{analysis.avg_zaapi_len}c</span>
                   </div>
                 </div>
@@ -1463,16 +1483,16 @@ export default function ReplayComparePage() {
                 <h3 className="text-sm font-semibold mb-2">ลิงก์</h3>
                 <div className="space-y-1 text-xs">
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Bot has link</span>
+                    <span className="text-text-muted">Bot has link</span>
                     <span className="font-semibold">{analysis.bot_has_link}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Bot no link</span>
-                    <span className="text-orange-600">{analysis.bot_no_link}</span>
+                    <span className="text-text-muted">Bot no link</span>
+                    <span className="text-warning">{analysis.bot_no_link}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600">External link</span>
-                    <span className="text-red-600">{analysis.bot_external_link}</span>
+                    <span className="text-text-muted">External link</span>
+                    <span className="text-error">{analysis.bot_external_link}</span>
                   </div>
                 </div>
               </div>
@@ -1484,7 +1504,7 @@ export default function ReplayComparePage() {
                   <div className="space-y-1 text-xs">
                     {Object.entries(analysis.sources).sort((a, b) => b[1] - a[1]).map(([src, n]) => (
                       <div key={src} className="flex justify-between">
-                        <span className="text-gray-600">{src}</span>
+                        <span className="text-text-muted">{src}</span>
                         <span className="font-semibold">{n}</span>
                       </div>
                     ))}
@@ -1506,7 +1526,7 @@ export default function ReplayComparePage() {
                         <div key={v} className="flex items-center justify-between">
                           <span className="flex items-center gap-1">
                             {verdictIcon[v]}
-                            <span className="text-gray-600">{verdictLabel[v]}</span>
+                            <span className="text-text-muted">{verdictLabel[v]}</span>
                           </span>
                           <span className="font-semibold">{n}</span>
                         </div>
@@ -1519,10 +1539,10 @@ export default function ReplayComparePage() {
               {/* Good */}
               {analysis.good && analysis.good.length > 0 && (
                 <div>
-                  <h3 className="text-sm font-semibold mb-2 text-green-700">✅ จุดดี</h3>
+                  <h3 className="text-sm font-semibold mb-2 text-success-dark">✅ จุดดี</h3>
                   <ul className="text-xs space-y-1">
                     {analysis.good.slice(0, 10).map((g, i) => (
-                      <li key={i} className="ml-3 list-disc text-gray-700">{g}</li>
+                      <li key={i} className="ml-3 list-disc text-text-muted">{g}</li>
                     ))}
                   </ul>
                 </div>
@@ -1531,15 +1551,15 @@ export default function ReplayComparePage() {
               {/* Issues */}
               {analysis.issues && analysis.issues.length > 0 && (
                 <div>
-                  <h3 className="text-sm font-semibold mb-2 text-red-700">
+                  <h3 className="text-sm font-semibold mb-2 text-error">
                     ⚠️ ปัญหา ({analysis.issues.length})
                   </h3>
                   <ul className="text-xs space-y-1 max-h-64 overflow-y-auto">
                     {analysis.issues.slice(0, 20).map((iss, i) => (
-                      <li key={i} className="ml-3 list-disc text-gray-700">{iss}</li>
+                      <li key={i} className="ml-3 list-disc text-text-muted">{iss}</li>
                     ))}
                     {analysis.issues.length > 20 && (
-                      <li className="text-gray-400 italic">... และอีก {analysis.issues.length - 20} ข้อ</li>
+                      <li className="text-text-subtle italic">... และอีก {analysis.issues.length - 20} ข้อ</li>
                     )}
                   </ul>
                 </div>

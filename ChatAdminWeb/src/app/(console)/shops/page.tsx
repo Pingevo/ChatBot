@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Loading } from "@/components/ui/Loading";
+import { PageShell } from "@/components/ui/PageShell";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Pagination } from "@/components/ui/Pagination";
 import { ShopDetailDrawer } from "@/components/shops/ShopDetailDrawer";
@@ -101,7 +102,9 @@ export default function ShopsPage() {
       setShops(r.data.rows);
       setTotal(r.data.total);
       setTotalPages(r.data.totalPages);
-    } catch {
+    } catch (err) {
+      console.error("load shops failed", err);
+      toast.error("โหลดร้านค้าไม่สำเร็จ", 0, { label: "ลองใหม่", onClick: () => load() });
       setShops([]);
       setTotal(0);
       setTotalPages(0);
@@ -136,29 +139,18 @@ export default function ShopsPage() {
   // ⚡ G3 — handleToggle ย้ายไปหน้า config แล้ว (เปิด/ปิดระบบแชทร้านค้า)
 
   return (
-    <div className="h-full overflow-y-auto">
-      {/* Header */}
-      <div className="px-6 py-5 border-b border-border bg-surface sticky top-0 z-10">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-brand/15 flex items-center justify-center">
-              <Store size={20} className="text-brand" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-text">ร้านค้า</h1>
-              <p className="text-xs text-text-muted">
-                ร้านในเครือทั้งหมด {total} ร้าน
-              </p>
-            </div>
-          </div>
-          <Button size="sm" variant="outline" onClick={load} disabled={loading}>
-            <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
-          </Button>
-        </div>
-      </div>
-
-      <div className="p-6 space-y-4">
-        {/* Filters */}
+    <PageShell
+      icon={Store}
+      title="ร้านค้า"
+      helpHref="/help#shops"
+      subtitle={`ร้านในเครือทั้งหมด ${total} ร้าน`}
+      actions={
+        <Button size="sm" variant="outline" onClick={load} disabled={loading}>
+          <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
+        </Button>
+      }
+    >
+      {/* Filters */}
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex gap-1.5">
             {platformFilters.map((f) => (
@@ -184,7 +176,7 @@ export default function ShopsPage() {
                 placeholder="ค้นหาร้าน... (พิมพ์แล้วค้นหาทันที)"
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
-                className="w-56 h-9 pl-9 pr-3 rounded-lg border border-border bg-surface-2 text-text text-sm placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
+                className="w-56 h-9 pl-9 pr-3 rounded-lg border border-border bg-surface-2 text-text text-sm placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40"
               />
             </div>
             {search && (
@@ -270,7 +262,7 @@ export default function ShopsPage() {
 
                   {/* ⚡ G3 — ย้าย toggle ไปหน้า config แล้ว ที่นี่แค่ badge */}
                   {s.enabled_for_chat === false && (
-                    <div className="text-[10px] text-yellow-400 mb-2">
+                    <div className="text-[10px] text-warning mb-2">
                       ⚠ ระบบแชทปิดอยู่ (เปิดได้ที่หน้า Config)
                     </div>
                   )}
@@ -294,10 +286,9 @@ export default function ShopsPage() {
             )}
           </>
         )}
-      </div>
 
       {/* ⚡ G4 — Shop detail drawer */}
       <ShopDetailDrawer shop={selectedShop} onClose={() => setSelectedShop(null)} />
-    </div>
+    </PageShell>
   );
 }

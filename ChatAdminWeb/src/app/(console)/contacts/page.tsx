@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Loading } from "@/components/ui/Loading";
+import { PageShell } from "@/components/ui/PageShell";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Pagination } from "@/components/ui/Pagination";
 import {
@@ -12,6 +13,7 @@ import {
   ArrowUpDown, ArrowUp, ArrowDown, MessageSquare,
 } from "lucide-react";
 import { api } from "@/lib/apiClient";
+import { toast, useToastError } from "@/components/ui/Toast";
 import type { Platform } from "@/lib/types";
 
 interface ContactRow {
@@ -48,6 +50,7 @@ const sortOptions: { value: SortBy; label: string }[] = [
 ];
 
 export default function ContactsPage() {
+  const { catchError } = useToastError();
   const [contacts, setContacts] = useState<ContactRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [platform, setPlatform] = useState<Platform | "all">("all");
@@ -86,7 +89,9 @@ export default function ContactsPage() {
       setContacts(r.data.rows);
       setTotal(r.data.total);
       setTotalPages(r.data.totalPages);
-    } catch {
+    } catch (err) {
+      console.error("load contacts failed", err);
+      toast.error("โหลดรายชื่อลูกค้าไม่สำเร็จ", 0, { label: "ลองใหม่", onClick: () => load() });
       setContacts([]);
       setTotal(0);
       setTotalPages(0);
@@ -119,29 +124,18 @@ export default function ContactsPage() {
   }
 
   return (
-    <div className="h-full overflow-y-auto">
-      {/* Header */}
-      <div className="px-6 py-5 border-b border-border bg-surface sticky top-0 z-10">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-brand/15 flex items-center justify-center">
-              <Users size={20} className="text-brand" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-text">รายชื่อลูกค้า</h1>
-              <p className="text-xs text-text-muted">
-                ผู้ติดต่อทั้งหมด {total} รายการ
-              </p>
-            </div>
-          </div>
-          <Button size="sm" variant="outline" onClick={load} disabled={loading}>
-            <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
-          </Button>
-        </div>
-      </div>
-
-      <div className="p-6 space-y-4">
-        {/* Filters */}
+    <PageShell
+      icon={Users}
+      title="รายชื่อลูกค้า"
+      helpHref="/help#contacts"
+      subtitle={`ผู้ติดต่อทั้งหมด ${total} รายการ`}
+      actions={
+        <Button size="sm" variant="outline" onClick={load} disabled={loading}>
+          <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
+        </Button>
+      }
+    >
+      {/* Filters */}
         <div className="flex flex-wrap items-center gap-2">
           {/* Platform filter */}
           <div className="flex gap-1.5">
@@ -169,7 +163,7 @@ export default function ContactsPage() {
                 placeholder="ค้นหาชื่อลูกค้า... (พิมพ์แล้วค้นหาทันที)"
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
-                className="w-64 h-9 pl-9 pr-3 rounded-lg border border-border bg-surface-2 text-text text-sm placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
+                className="w-64 h-9 pl-9 pr-3 rounded-lg border border-border bg-surface-2 text-text text-sm placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40"
               />
             </div>
             {search && (
@@ -270,7 +264,6 @@ export default function ContactsPage() {
             )}
           </>
         )}
-      </div>
-    </div>
+    </PageShell>
   );
 }

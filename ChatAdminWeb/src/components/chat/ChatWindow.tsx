@@ -217,6 +217,7 @@ export function ChatWindow({
             onClick={() => setShowActions((v) => !v)}
             className="w-8 h-8 rounded-md hover:bg-surface-2 flex items-center justify-center"
             title="การกระทำ"
+            aria-label="การกระทำ"
           >
             <MoreHorizontal size={16} className="text-text-muted" />
           </button>
@@ -271,9 +272,9 @@ export function ChatWindow({
             }}
             placeholder="พิมพ์ข้อความตอบลูกค้า..."
             rows={1}
-            className="flex-1 resize-none rounded-xl border border-border bg-surface-2 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand max-h-32"
+            className="flex-1 resize-none rounded-xl border border-border bg-surface-2 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand max-h-32"
           />
-          <Button type="submit" size="icon" disabled={!text.trim() || sending}>
+          <Button type="submit" size="icon" aria-label="ส่งข้อความ" disabled={!text.trim() || sending}>
             <Send size={16} />
           </Button>
         </div>

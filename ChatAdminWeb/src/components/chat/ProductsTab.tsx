@@ -171,7 +171,7 @@ export function ProductsTab({ conversation, onSendProduct }: Props) {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="ค้นหาสินค้า..."
-                className="w-full h-9 rounded-lg border border-border bg-surface pl-8 pr-3 text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
+                className="w-full h-9 rounded-lg border border-border bg-surface pl-8 pr-3 text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40"
               />
             </div>
             <div className="flex items-center gap-2 mt-2 text-xs text-text-muted">
@@ -232,6 +232,7 @@ export function ProductsTab({ conversation, onSendProduct }: Props) {
                         onClick={() => onSendProduct(p)}
                         className="w-8 h-8 rounded-lg bg-brand/10 text-brand hover:bg-brand hover:text-white flex items-center justify-center transition-colors shrink-0"
                         title="ส่งสินค้าเข้าแชท"
+                        aria-label="ส่งสินค้าเข้าแชท"
                       >
                         <Send size={14} />
                       </button>

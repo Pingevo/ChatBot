@@ -75,6 +75,7 @@ export function ShopDetailDrawer({ shop, onClose }: Props) {
             onClick={onClose}
             className="w-8 h-8 rounded-lg hover:bg-surface-2 flex items-center justify-center transition-colors"
             title="ปิด"
+            aria-label="ปิด"
           >
             <X size={18} className="text-text-muted" />
           </button>
@@ -295,13 +296,13 @@ function WorkflowsTab({ shop, search, editable, catchError }: {
                 </div>
                 {editable && (
                   <div className="flex items-center gap-1">
-                    <button onClick={() => startEdit(w)} className="p-1.5 rounded hover:bg-surface-3" title="แก้ไข">
+                    <button onClick={() => startEdit(w)} className="p-1.5 rounded hover:bg-surface-3" title="แก้ไข" aria-label="แก้ไข">
                       <Pencil size={14} className="text-text-muted" />
                     </button>
-                    <button onClick={() => handleToggle(w)} className="p-1.5 rounded hover:bg-surface-3" title={w.enabled ? "ปิด" : "เปิด"}>
+                    <button onClick={() => handleToggle(w)} className="p-1.5 rounded hover:bg-surface-3" title={w.enabled ? "ปิด" : "เปิด"} aria-label={w.enabled ? "ปิด" : "เปิด"}>
                       <Power size={14} className={w.enabled ? "text-green-400" : "text-text-subtle"} />
                     </button>
-                    <button onClick={() => handleDelete(w)} className="p-1.5 rounded hover:bg-surface-3" title="ลบ">
+                    <button onClick={() => handleDelete(w)} className="p-1.5 rounded hover:bg-surface-3" title="ลบ" aria-label="ลบ">
                       <Trash2 size={14} className="text-red-400" />
                     </button>
                   </div>
@@ -479,13 +480,13 @@ function TriggersTab({ shop, search, editable, catchError }: {
                 </div>
                 {editable && (
                   <div className="flex items-center gap-1">
-                    <button onClick={() => startEdit(t)} className="p-1.5 rounded hover:bg-surface-3" title="แก้ไข">
+                    <button onClick={() => startEdit(t)} className="p-1.5 rounded hover:bg-surface-3" title="แก้ไข" aria-label="แก้ไข">
                       <Pencil size={14} className="text-text-muted" />
                     </button>
-                    <button onClick={() => handleToggle(t)} className="p-1.5 rounded hover:bg-surface-3" title={t.enabled ? "ปิด" : "เปิด"}>
+                    <button onClick={() => handleToggle(t)} className="p-1.5 rounded hover:bg-surface-3" title={t.enabled ? "ปิด" : "เปิด"} aria-label={t.enabled ? "ปิด" : "เปิด"}>
                       <Power size={14} className={t.enabled ? "text-green-400" : "text-text-subtle"} />
                     </button>
-                    <button onClick={() => handleDelete(t)} className="p-1.5 rounded hover:bg-surface-3" title="ลบ">
+                    <button onClick={() => handleDelete(t)} className="p-1.5 rounded hover:bg-surface-3" title="ลบ" aria-label="ลบ">
                       <Trash2 size={14} className="text-red-400" />
                     </button>
                   </div>
@@ -640,13 +641,13 @@ function PersonaTab({ shop, search, editable, catchError }: {
                 </div>
                 {editable && (
                   <div className="flex items-center gap-1">
-                    <button onClick={() => startEdit(p)} className="p-1.5 rounded hover:bg-surface-3" title="แก้ไข">
+                    <button onClick={() => startEdit(p)} className="p-1.5 rounded hover:bg-surface-3" title="แก้ไข" aria-label="แก้ไข">
                       <Pencil size={14} className="text-text-muted" />
                     </button>
-                    <button onClick={() => handleToggle(p)} className="p-1.5 rounded hover:bg-surface-3" title={p.enabled ? "ปิด" : "เปิด"}>
+                    <button onClick={() => handleToggle(p)} className="p-1.5 rounded hover:bg-surface-3" title={p.enabled ? "ปิด" : "เปิด"} aria-label={p.enabled ? "ปิด" : "เปิด"}>
                       <Power size={14} className={p.enabled ? "text-green-400" : "text-text-subtle"} />
                     </button>
-                    <button onClick={() => handleDelete(p)} className="p-1.5 rounded hover:bg-surface-3" title="ลบ">
+                    <button onClick={() => handleDelete(p)} className="p-1.5 rounded hover:bg-surface-3" title="ลบ" aria-label="ลบ">
                       <Trash2 size={14} className="text-red-400" />
                     </button>
                   </div>
@@ -840,13 +841,13 @@ function KBTab({ shop, search, editable, catchError }: {
                 </div>
                 {editable && (
                   <div className="flex items-center gap-1">
-                    <button onClick={() => startEdit(k)} className="p-1.5 rounded hover:bg-surface-3" title="แก้ไข">
+                    <button onClick={() => startEdit(k)} className="p-1.5 rounded hover:bg-surface-3" title="แก้ไข" aria-label="แก้ไข">
                       <Pencil size={14} className="text-text-muted" />
                     </button>
-                    <button onClick={() => handleToggle(k)} className="p-1.5 rounded hover:bg-surface-3" title={k.active ? "ปิด" : "เปิด"}>
+                    <button onClick={() => handleToggle(k)} className="p-1.5 rounded hover:bg-surface-3" title={k.active ? "ปิด" : "เปิด"} aria-label={k.active ? "ปิด" : "เปิด"}>
                       <Power size={14} className={k.active ? "text-green-400" : "text-text-subtle"} />
                     </button>
-                    <button onClick={() => handleDelete(k)} className="p-1.5 rounded hover:bg-surface-3" title="ลบ">
+                    <button onClick={() => handleDelete(k)} className="p-1.5 rounded hover:bg-surface-3" title="ลบ" aria-label="ลบ">
                       <Trash2 size={14} className="text-red-400" />
                     </button>
                   </div>

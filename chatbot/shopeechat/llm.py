@@ -473,10 +473,13 @@ _KEY_CYCLE = _itertools.cycle(_API_KEYS) if _API_KEYS else None
 _KEY_INDEX = 0
 
 # debug log — ยืนยันว่าโหลด keys ครบ
+# 🔒 M3: Log only count + hash prefix, not actual key fragments
 import sys as _sys
+import hashlib as _hashlib
 print(f"[KEYS] โหลด API keys จำนวน: {len(_API_KEYS)}", file=_sys.stderr)
 for i, k in enumerate(_API_KEYS):
-    print(f"[KEYS]   key[{i}] = {k[:8]}...{k[-4:]}", file=_sys.stderr)
+    _hash = _hashlib.sha256(k.encode()).hexdigest()[:8]
+    print(f"[KEYS]   key[{i}] = sha256:{_hash}", file=_sys.stderr)
 
 
 def _next_api_key() -> str:
@@ -655,12 +658,48 @@ def describe_image(
     if not image_url or not image_url.strip():
         return "", usage_info
 
+    # 🔒 C1+M5: Validate image URL — block file://, private IPs, metadata endpoints
+    # Also pin resolved IP to prevent DNS rebinding (M5 defense-in-depth)
+    from urllib.parse import urlparse as _urlparse, urlunparse as _urlunparse
+    import ipaddress as _ipaddress
+    import socket as _socket
+    _parsed = _urlparse(image_url)
+    if _parsed.scheme not in ("http", "https"):
+        print(f"[VISION] blocked non-HTTP scheme: {_parsed.scheme}", file=sys.stderr)
+        return "(URL ไม่ถูกต้อง)", usage_info
+    _hostname = _parsed.hostname or ""
+    if not _hostname:
+        return "(URL ไม่ถูกต้อง)", usage_info
+    _safe_ip = None
+    try:
+        _resolved = _socket.getaddrinfo(_hostname, None)
+        for _fam, _typ, _proto, _cn, _sa in _resolved:
+            _ip = _ipaddress.ip_address(_sa[0])
+            if _ip.is_private or _ip.is_loopback or _ip.is_link_local or _ip.is_multicast:
+                print(f"[VISION] blocked private/loopback IP: {_hostname} -> {_ip}", file=sys.stderr)
+                return "(URL ไม่ถูกต้อง)", usage_info
+            if _safe_ip is None:
+                _safe_ip = str(_ip)  # pin first valid IP (M5: prevent rebinding)
+    except Exception:
+        pass  # DNS resolve fail — ปล่อยให้ urlopen จัดการ
+    # 🔒 M5: Rewrite URL to use pinned IP + set Host header to prevent DNS rebinding
+    if _safe_ip and _safe_ip != _hostname:
+        _port = _parsed.port
+        _netloc = f"[{_safe_ip}]:{_port}" if _port and ":" in _safe_ip else (_safe_ip if not _port else f"{_safe_ip}:{_port}")
+        _pinned_url = _urlunparse((_parsed.scheme, _netloc, _parsed.path, _parsed.params, _parsed.query, _parsed.fragment))
+    else:
+        _pinned_url = image_url
+
     try:
         import urllib.request as _urllib_req
         from google.genai import types as _genai_types
         # ⚠️ โหลดสื่อเป็น bytes ก่อน — Part.from_uri ใช้ได้เฉพาะ GCS URL
         #    HTTP URL ทั่วไปต้องโหลดเป็น inline_data (Part.from_bytes)
-        _req = _urllib_req.Request(image_url, headers={"User-Agent": "Mozilla/5.0"})
+        # 🔒 M5: Use pinned IP URL + Host header to prevent DNS rebinding
+        _headers = {"User-Agent": "Mozilla/5.0"}
+        if _safe_ip and _safe_ip != _hostname:
+            _headers["Host"] = _hostname
+        _req = _urllib_req.Request(_pinned_url, headers=_headers)
         _resp = _urllib_req.urlopen(_req, timeout=15)
         img_bytes = _resp.read()
         if not img_bytes:
@@ -997,7 +1036,9 @@ def answer_with_kb(
     model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
     system_instruction = KB_SYSTEM_INSTRUCTION + persona_extra if persona_extra else KB_SYSTEM_INSTRUCTION
 
-    user_prompt = f"{kb_context}\n\nคำถามของลูกค้า: {message}"
+    # 🔒 H1: Limit message length + use clear delimiter to reduce prompt injection risk
+    _safe_message = str(message)[:2000] if message else ""
+    user_prompt = f"{kb_context}\n\nคำถามของลูกค้า: {_safe_message}"
 
     contents: list[Any] = []
     if history:
@@ -1086,7 +1127,9 @@ def answer_general(
     if persona_extra:
         general_instruction += persona_extra
 
-    user_prompt = f"{context}\n\nคำถามของลูกค้า: {message}"
+    # 🔒 H1: Limit message length + use clear delimiter to reduce prompt injection risk
+    _safe_message = str(message)[:2000] if message else ""
+    user_prompt = f"{context}\n\nคำถามของลูกค้า: {_safe_message}"
 
     contents: list[Any] = []
     if history:

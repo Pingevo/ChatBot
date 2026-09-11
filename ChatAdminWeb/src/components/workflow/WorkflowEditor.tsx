@@ -289,7 +289,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
-        toast.error(`Save ไม่ผ่าน: ${d.detail || d.error || d.message || `HTTP ${r.status}`}`);
+        toast.error(`บันทึกไม่สำเร็จ: ${d.detail || d.error || d.message || `HTTP ${r.status}`}`);
         return;
       }
       toast.success(isNew ? "สร้าง workflow แล้ว" : "บันทึกแล้ว");
@@ -298,7 +298,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         router.push(`/workflows/${d.workflow.workflow_id}`);
       }
     } catch (err) {
-      toast.error(`Save error: ${(err as Error).message}`);
+      toast.error(`บันทึกผิดพลาด: ${(err as Error).message}`);
     } finally {
       setSaving(false);
     }
@@ -322,7 +322,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
       setSettings((s) => ({ ...s, enabled: !s.enabled }));
       toast.success(settings.enabled ? "ปิด workflow แล้ว" : "เปิด workflow แล้ว");
     } catch (err) {
-      toast.error(`Toggle error: ${(err as Error).message}`);
+      toast.error(`เปลี่ยนสถานะผิดพลาด: ${(err as Error).message}`);
     }
   }, [isNew, workflowId, settings.enabled]);
 
@@ -338,7 +338,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
       toast.success("ลบแล้ว (soft delete)");
       router.push("/workflows");
     } catch (err) {
-      toast.error(`Delete error: ${(err as Error).message}`);
+      toast.error(`ลบผิดพลาด: ${(err as Error).message}`);
     }
   }, [isNew, workflowId, router]);
 
@@ -363,8 +363,8 @@ function EditorInner({ workflowId }: { workflowId: string }) {
           onChange={(e) => { setSettings((s) => ({ ...s, status: e.target.value as FlowSettings["status"] })); setWfVersion((v) => v + 1); }}
           style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid var(--border, #333)", background: "transparent", color: "inherit" }}
         >
-          <option value="draft">Draft</option>
-          <option value="published">Published</option>
+          <option value="draft">ฉบับร่าง</option>
+          <option value="published">เผยแพร่</option>
         </select>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
           <input type="checkbox" checked={settings.enabled} onChange={toggleEnabled} />
@@ -383,13 +383,13 @@ function EditorInner({ workflowId }: { workflowId: string }) {
 
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         {/* ── Palette ซ้าย ── */}
-        <div style={{ width: 210, borderRight: "1px solid var(--border, #333)", padding: 14, overflowY: "auto", flexShrink: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 10, opacity: 0.7 }}>เพิ่ม Node</div>
+        <div style={{ width: 210, borderRight: "1px solid var(--border, #333)", padding: 16, overflowY: "auto", flexShrink: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 12, opacity: 0.7 }}>เพิ่ม Node</div>
           {PALETTE.map((group) => {
             const meta = NODE_TYPE_META[group.type];
             return (
-              <div key={group.type} style={{ marginBottom: 14 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: meta.color, marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}>
+              <div key={group.type} style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: meta.color, marginBottom: 8, display: "flex", alignItems: "center", gap: 5 }}>
                   {meta.icon} {meta.label}
                 </div>
                 {group.subtypes.map((sub) => (
@@ -398,7 +398,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
                     onClick={() => addNode(group.type, sub)}
                     style={{
                       display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left",
-                      padding: "7px 10px", marginBottom: 4, fontSize: 12,
+                      padding: "7px 10px", marginBottom: 6, fontSize: 12,
                       borderRadius: 8, border: `1px solid ${meta.border}`, background: meta.bg, color: "inherit", cursor: "pointer",
                     }}
                   >
@@ -433,7 +433,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         </div>
 
         {/* ── Panel ขวา: node config + flow settings ── */}
-        <div style={{ width: 300, borderLeft: "1px solid var(--border, #333)", padding: 14, overflowY: "auto", flexShrink: 0 }}>
+        <div style={{ width: 300, borderLeft: "1px solid var(--border, #333)", padding: 16, overflowY: "auto", flexShrink: 0 }}>
           {selectedNode ? (
             <NodeConfigPanel
               node={selectedNode}
@@ -471,16 +471,16 @@ function NodeConfigPanel({
     width: "100%", padding: "6px 10px", borderRadius: 8, border: "1px solid var(--border, #333)",
     background: "transparent", color: "inherit", fontSize: 13, boxSizing: "border-box",
   };
-  const labelStyle: React.CSSProperties = { fontSize: 11, fontWeight: 600, opacity: 0.7, marginBottom: 4, display: "block" };
+  const labelStyle: React.CSSProperties = { fontSize: 11, fontWeight: 600, color: "var(--color-text-muted, #64748b)", marginBottom: 4, display: "block" };
   const fieldGap: React.CSSProperties = { marginBottom: 12 };
 
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <div style={{ fontSize: 13, fontWeight: 700 }}>
-          แก้ Node
+          แก้โหนด
         </div>
-        <Button onClick={onDelete} variant="outline" style={{ color: "#ef4444", padding: "4px 10px", fontSize: 12 }}>ลบ node</Button>
+        <Button onClick={onDelete} variant="outline" style={{ color: "#ef4444", padding: "4px 10px", fontSize: 12 }}>ลบโหนด</Button>
       </div>
 
       <div style={fieldGap}>
@@ -494,7 +494,7 @@ function NodeConfigPanel({
 
       {subtype === "message_received" && (
         <div style={fieldGap}>
-          <label style={labelStyle}>Keywords (คั่นด้วย , ทักได้หลายคำ)</label>
+          <label style={labelStyle}>คำสำคัญ (คั่นด้วย , ทักได้หลายคำ)</label>
           <input
             style={inputStyle}
             value={Array.isArray(cfg.keywords) ? (cfg.keywords as string[]).join(", ") : ""}
@@ -598,7 +598,7 @@ function NodeConfigPanel({
 
       {subtype === "add_note" && (
         <div style={fieldGap}>
-          <label style={labelStyle}>Note</label>
+          <label style={labelStyle}>บันทึกย่อ</label>
           <textarea style={{ ...inputStyle, minHeight: 60 }} value={String(cfg.text || "")} onChange={(e) => onUpdateConfig("text", e.target.value)} />
         </div>
       )}
@@ -610,13 +610,13 @@ function NodeConfigPanel({
             <input style={inputStyle} value={String(cfg.url || "")} onChange={(e) => onUpdateConfig("url", e.target.value)} placeholder="https://…" />
           </div>
           <div style={fieldGap}>
-            <label style={labelStyle}>Method</label>
+            <label style={labelStyle}>วิธีส่ง</label>
             <select value={String(cfg.method || "POST")} onChange={(e) => onUpdateConfig("method", e.target.value)} style={inputStyle}>
               <option>POST</option><option>GET</option><option>PUT</option><option>PATCH</option><option>DELETE</option>
             </select>
           </div>
           <div style={fieldGap}>
-            <label style={labelStyle}>Body (JSON)</label>
+            <label style={labelStyle}>เนื้อหา (JSON)</label>
             <textarea style={{ ...inputStyle, minHeight: 60, fontFamily: "monospace" }} value={typeof cfg.body === "string" ? cfg.body : JSON.stringify(cfg.body ?? {})} onChange={(e) => { try { onUpdateConfig("body", JSON.parse(e.target.value)); } catch { /* พิมพ์ JSON ยังไม่ครบ — เก็บเป็น string ไว้ก่อน */ onUpdateConfig("body", e.target.value); } }} />
           </div>
         </>
@@ -853,7 +853,7 @@ function MessageContentConfigPanel({
       </button>
 
       <div style={fieldGap}>
-        <label style={labelStyle}>Fallback branch ID (ไม่ตรง keyword เลย)</label>
+        <label style={labelStyle}>กิ่งสำรอง (ไม่ตรงคำสำคัญเลย)</label>
         <input
           style={inputStyle}
           value={fallbackId}
@@ -1168,6 +1168,7 @@ function AddLabelConfigPanel({
                 onClick={() => toggleLabel(l)}
                 style={{ background: "none", border: "none", color: "#10b981", cursor: "pointer", padding: 0, fontSize: 12, lineHeight: 1 }}
                 title="ลบ"
+                aria-label={`ลบ label ${l}`}
               >
                 ×
               </button>
@@ -1443,13 +1444,13 @@ function FlowSettingsPanel({
     width: "100%", padding: "6px 10px", borderRadius: 8, border: "1px solid var(--border, #333)",
     background: "transparent", color: "inherit", fontSize: 13, boxSizing: "border-box",
   };
-  const labelStyle: React.CSSProperties = { fontSize: 11, fontWeight: 600, opacity: 0.7, marginBottom: 4, display: "block" };
+  const labelStyle: React.CSSProperties = { fontSize: 11, fontWeight: 600, color: "var(--color-text-muted, #64748b)", marginBottom: 4, display: "block" };
   const fieldGap: React.CSSProperties = { marginBottom: 12 };
 
   return (
     <div>
       <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>ตั้งค่า Workflow</div>
-      <div style={{ fontSize: 12, opacity: 0.6, marginBottom: 12, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 12, color: "var(--color-text-muted, #64748b)", marginBottom: 12, lineHeight: 1.5 }}>
         คลิก node บน canvas เพื่อแก้ config ของ node นั้น — panel นี้เป็นค่าของ flow ทั้งอัน
       </div>
 

@@ -6,6 +6,7 @@ import { useEffect, useState, useMemo, useCallback, Fragment } from "react";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Loading } from "@/components/ui/Loading";
+import { PageShell } from "@/components/ui/PageShell";
 import { UnifiedDateRangePicker, rangeToParams, type DateRangeValue } from "@/components/ui/UnifiedDateRangePicker";
 import { api } from "@/lib/apiClient";
 import { useAuth } from "@/lib/authStore";
@@ -182,34 +183,30 @@ export default function AdminKpiPage() {
   if (error && summary.length === 0) return <EmptyState icon={BarChart3} title="โหลดข้อมูลไม่สำเร็จ" description={error} />;
 
   return (
-    <div className="h-full overflow-y-auto">
-      {/* Header */}
-      <div className="px-6 py-5 border-b border-border bg-surface sticky top-0 z-10">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-brand/15 flex items-center justify-center">
-              <BarChart3 size={20} className="text-brand" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-text">KPI แอดมิน</h1>
-              <p className="text-xs text-text-muted">
-                สถิติการทดสอบบอทและรีวิวของแอดมินแต่ละคน
-                <span className="ml-2 text-text-subtle">· dev/superadmin เท่านั้น</span>
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <UnifiedDateRangePicker value={dateRange} onChange={setDateRange} />
-            <button
-              onClick={loadSummary}
-              className="p-2 rounded-md text-text-muted hover:bg-surface-subtle hover:text-text transition-colors"
-              title="รีเฟรช"
-            >
-              <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
-            </button>
-          </div>
-        </div>
-      </div>
+    <PageShell
+      icon={BarChart3}
+      title="KPI แอดมิน"
+      subtitle={
+        <>
+          สถิติการทดสอบบอทและรีวิวของแอดมินแต่ละคน
+          <span className="ml-2 text-text-subtle">· dev/superadmin เท่านั้น</span>
+        </>
+      }
+      actions={
+        <>
+          <UnifiedDateRangePicker value={dateRange} onChange={setDateRange} />
+          <button
+            onClick={loadSummary}
+            className="p-2 rounded-md text-text-muted hover:bg-surface-subtle hover:text-text transition-colors"
+            title="รีเฟรช"
+            aria-label="รีเฟรช"
+          >
+            <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+          </button>
+        </>
+      }
+      contentClassName=""
+    >
 
       {/* Summary cards */}
       <div className="px-6 py-4 grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -312,16 +309,16 @@ export default function AdminKpiPage() {
                           <td className="text-center px-2 py-2 text-text">{s.test_chat_messages_rated || "—"}</td>
                           <td className="text-center px-2 py-2">
                             {s.test_chat_avg_star > 0 ? (
-                              <span className="inline-flex items-center gap-0.5 text-amber-500">
+                              <span className="inline-flex items-center gap-0.5 text-warning">
                                 <Star size={12} className="fill-current" />
                                 {s.test_chat_avg_star}
                               </span>
                             ) : "—"}
                           </td>
                           <td className="text-center px-2 py-2 text-xs">
-                            <span className="text-emerald-600">{s.test_chat_good}</span>
+                            <span className="text-success">{s.test_chat_good}</span>
                             <span className="text-text-subtle">/</span>
-                            <span className="text-rose-600">{s.test_chat_bad}</span>
+                            <span className="text-error">{s.test_chat_bad}</span>
                           </td>
                           <td className="text-center px-2 py-2 text-text">{s.test_chat_commented || "—"}</td>
                           {/* ทดสอบจ่ายงาน */}
@@ -380,7 +377,7 @@ export default function AdminKpiPage() {
           )}
         </Card>
       </div>
-    </div>
+    </PageShell>
   );
 }
 
@@ -413,7 +410,7 @@ function DrilldownSessionsTable({ sessions }: { sessions: DrilldownSession[] }) 
               <td className="text-center px-2 py-2 text-text">{s.messages_rated}</td>
               <td className="text-center px-2 py-2">
                 {s.avg_star > 0 ? (
-                  <span className="inline-flex items-center gap-0.5 text-amber-500">
+                  <span className="inline-flex items-center gap-0.5 text-warning">
                     <Star size={12} className="fill-current" />
                     {s.avg_star}
                   </span>
@@ -457,7 +454,7 @@ function DrilldownReplaysTable({ replays }: { replays: DrilldownReplay[] }) {
               <td className="text-center px-2 py-2 text-text">{r.msg_rated}</td>
               <td className="text-center px-2 py-2">
                 {r.conv_star_rating != null ? (
-                  <span className="inline-flex items-center gap-0.5 text-amber-500">
+                  <span className="inline-flex items-center gap-0.5 text-warning">
                     <Star size={12} className="fill-current" />
                     {r.conv_star_rating}
                   </span>
@@ -465,8 +462,8 @@ function DrilldownReplaysTable({ replays }: { replays: DrilldownReplay[] }) {
               </td>
               <td className="px-2 py-2 text-xs">
                 <span className={`px-1.5 py-0.5 rounded ${
-                  r.final_status === "bot_answered" ? "bg-emerald-100 text-emerald-700" :
-                  r.final_status === "handed_off" ? "bg-amber-100 text-amber-700" :
+                  r.final_status === "bot_answered" ? "bg-success-soft text-success-dark" :
+                  r.final_status === "handed_off" ? "bg-warning-soft text-warning-dark" :
                   "bg-surface-subtle text-text-muted"
                 }`}>
                   {r.final_status}
@@ -515,15 +512,15 @@ function DrilldownShadowsTable({ shadows }: { shadows: DrilldownShadow[] }) {
               <td className="text-center px-2 py-2 text-xs">
                 {s.rating ? (
                   <span className={
-                    s.rating === "good" ? "text-emerald-600" :
-                    s.rating === "bad" ? "text-rose-600" :
+                    s.rating === "good" ? "text-success" :
+                    s.rating === "bad" ? "text-error" :
                     "text-text-subtle"
                   }>{s.rating === "good" ? "ดี" : s.rating === "bad" ? "ไม่ดี" : s.rating}</span>
                 ) : "—"}
               </td>
               <td className="text-center px-2 py-2">
                 {s.star_rating != null ? (
-                  <span className="inline-flex items-center gap-0.5 text-amber-500">
+                  <span className="inline-flex items-center gap-0.5 text-warning">
                     <Star size={12} className="fill-current" />
                     {s.star_rating}
                   </span>

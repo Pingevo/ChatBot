@@ -12,7 +12,7 @@ import { ChatLogTab } from "@/components/chat/ChatLogTab";
 import { ProductsTab } from "@/components/chat/ProductsTab";
 import { CloseChatModal } from "@/components/chat/CloseChatModal";
 import { Button } from "@/components/ui/Button";
-import { toast } from "@/components/ui/Toast";
+import { toast, useToastError } from "@/components/ui/Toast";
 import { api } from "@/lib/apiClient";
 import { useAuth } from "@/lib/authStore";
 import { usePolling } from "@/lib/usePolling";
@@ -197,6 +197,7 @@ export default function LiveAssignmentPage() {
   const [acceptingChats, setAcceptingChats] = useState<boolean>(user?.is_accepting_chats ?? true);
   const [togglingAccept, setTogglingAccept] = useState(false);
   const [conflictPopup, setConflictPopup] = useState<{ assignedTo: string; text: string } | null>(null);
+  const { catchError } = useToastError();
 
   // Batch controls
   const [batchCount, setBatchCount] = useState(500);
@@ -226,7 +227,10 @@ export default function LiveAssignmentPage() {
     if (user?.role === "admin") return;
     api().get<{ users: AdminUser[]; canEdit: boolean }>("/users/list").then((r) => {
       setAdmins(r.data.users || []);
-    }).catch(() => setAdmins([]));
+    }).catch((e) => {
+      catchError(e, "โหลดรายชื่อแอดมินไม่สำเร็จ");
+      setAdmins([]);
+    });
   }, [user?.role]);
 
   // ── Load list (head — 200 ล่าสุด) ──
@@ -607,14 +611,14 @@ export default function LiveAssignmentPage() {
           value={batchCount}
           onChange={(e) => setBatchCount(Math.min(Math.max(parseInt(e.target.value) || 1, 1), 1000))}
           disabled={batchRunning}
-          className="w-16 text-xs rounded-md border border-border bg-surface-2 px-2 py-1 focus:outline-none focus:ring-1 focus:ring-brand/30"
+          className="w-16 text-xs rounded-md border border-border bg-surface-2 px-2 py-1 focus:outline-none focus:ring-1 focus:ring-brand/40"
           placeholder="500"
         />
         <select
           value={batchPlatform}
           onChange={(e) => setBatchPlatform(e.target.value as "all" | Platform)}
           disabled={batchRunning}
-          className="text-xs rounded-md border border-border bg-surface-2 px-2 py-1 focus:outline-none focus:ring-1 focus:ring-brand/30"
+          className="text-xs rounded-md border border-border bg-surface-2 px-2 py-1 focus:outline-none focus:ring-1 focus:ring-brand/40"
         >
           <option value="all">ทุก platform</option>
           <option value="shopee">Shopee</option>
@@ -625,7 +629,7 @@ export default function LiveAssignmentPage() {
           value={batchMode}
           onChange={(e) => setBatchMode(e.target.value as "overwrite" | "resume")}
           disabled={batchRunning}
-          className="text-xs rounded-md border border-border bg-surface-2 px-2 py-1 focus:outline-none focus:ring-1 focus:ring-brand/30"
+          className="text-xs rounded-md border border-border bg-surface-2 px-2 py-1 focus:outline-none focus:ring-1 focus:ring-brand/40"
         >
           <option value="overwrite">ทำใหม่</option>
           <option value="resume">resume</option>
@@ -640,7 +644,7 @@ export default function LiveAssignmentPage() {
             <span className="text-brand">Bot: {batchProgress.botAnswered}</span>
             <span className="text-vibrant-coral">Handoff: {batchProgress.handedOff}</span>
             <span className="text-text-muted">Skip: {batchProgress.skipped}</span>
-            <span className="text-red-500">Err: {batchProgress.errors}</span>
+            <span className="text-error-soft">Err: {batchProgress.errors}</span>
           </div>
         )}
       </div>
@@ -674,6 +678,7 @@ export default function LiveAssignmentPage() {
             onClick={handleBack}
             className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
             title="กลับ"
+            aria-label="กลับ"
           >
             <ArrowLeft size={16} className="text-text" />
           </button>
@@ -682,6 +687,7 @@ export default function LiveAssignmentPage() {
               onClick={() => setMobileView("info")}
               className="md:hidden absolute top-3 right-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
               title="รายละเอียด"
+              aria-label="รายละเอียด"
             >
               <Info size={16} className="text-text" />
             </button>
@@ -712,6 +718,7 @@ export default function LiveAssignmentPage() {
                   onClick={() => setMobileView("chat")}
                   className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
                   title="กลับ"
+                  aria-label="กลับ"
                 >
                   <ArrowLeft size={16} className="text-text" />
                 </button>
@@ -740,6 +747,7 @@ export default function LiveAssignmentPage() {
                     onClick={() => setRightCollapsed(true)}
                     className="px-2 text-text-muted hover:text-text transition-colors shrink-0"
                     title="ซ่อน panel"
+                    aria-label="ซ่อน panel"
                   >
                     <PanelRightClose size={16} />
                   </button>
@@ -810,6 +818,7 @@ export default function LiveAssignmentPage() {
                 onClick={() => setRightCollapsed(false)}
                 className="hidden md:flex absolute top-1/2 right-0 -translate-y-1/2 z-20 w-7 h-16 bg-surface border border-border rounded-l-lg items-center justify-center hover:bg-surface-2 transition-colors shadow-sm"
                 title="แสดง panel"
+                aria-label="แสดง panel"
               >
                 <PanelRightOpen size={16} className="text-text-muted" />
               </button>
@@ -831,12 +840,12 @@ export default function LiveAssignmentPage() {
       {/* ── Conflict popup (เหมือน tickets) ── */}
       {conflictPopup && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-surface rounded-xl border border-border p-5 max-w-md w-full shadow-xl">
+          <div role="dialog" aria-modal="true" aria-labelledby="live-assign-modal-title" className="bg-surface rounded-xl border border-border p-5 max-w-md w-full shadow-xl">
             <div className="flex items-center gap-2 mb-3">
-              <div className="w-8 h-8 rounded-full bg-yellow-500/15 flex items-center justify-center flex-shrink-0">
-                <Info size={16} className="text-yellow-400" />
+              <div className="w-8 h-8 rounded-full bg-warning/15 flex items-center justify-center flex-shrink-0">
+                <Info size={16} className="text-warning" />
               </div>
-              <h3 className="text-sm font-semibold text-text">แชทนี้ assign ให้แอดมินคนอื่น</h3>
+              <h3 id="live-assign-modal-title" className="text-sm font-semibold text-text">แชทนี้ assign ให้แอดมินคนอื่น</h3>
             </div>
             <p className="text-xs text-text-muted mb-4">
               แชทนี้ถูก assign ให้ {conflictPopup.assignedTo} ต้องการตอบทับหรือไม่?

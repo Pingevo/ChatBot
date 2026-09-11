@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Loading } from "@/components/ui/Loading";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { PageShell } from "@/components/ui/PageShell";
 import { Power, Users, X } from "lucide-react";
 import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
@@ -86,27 +87,13 @@ export default function UsersPage() {
   const roleTone = (r: string) => r === "superadmin" ? "deep" : r === "dev" ? "brand" : "neutral";
 
   return (
-    <div className="h-full overflow-y-auto">
-      {/* Header — navbar แบบ shops/team */}
-      <div className="px-6 py-5 border-b border-border bg-surface sticky top-0 z-10">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-brand/15 flex items-center justify-center">
-              <Users size={20} className="text-brand" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-text">จัดการผู้ใช้</h1>
-              <p className="text-xs text-text-muted">
-                {canEditFlag ? "เปิด/ปิดสถานะผู้ใช้ — ผู้ใช้ใหม่เข้าผ่าน SSO อัตโนมัติ" : "ดูรายการผู้ใช้ (read-only)"}
-              </p>
-            </div>
-          </div>
-          {/* ปุ่ม "เชิญสมาชิก" ถูกซ่อนไว้ — ระบบใช้ SSO ขององค์กรแล้ว ไม่มีการเชิญทาง email */}
-        </div>
-      </div>
-
-      <div className="p-6 space-y-6">
-
+    <PageShell
+      icon={Users}
+      title="จัดการผู้ใช้"
+      helpHref="/help#users"
+      subtitle={canEditFlag ? "เปิด/ปิดสถานะผู้ใช้ — ผู้ใช้ใหม่เข้าผ่าน SSO อัตโนมัติ" : "ดูรายการผู้ใช้ (read-only)"}
+      contentClassName="p-6 space-y-6"
+    >
       {error && (
         <div className="text-sm text-vibrant-coral bg-vibrant-coral-soft rounded-lg px-3 py-2">{error}</div>
       )}
@@ -176,7 +163,6 @@ export default function UsersPage() {
           </table>
         </div>
       )}
-      </div>
-    </div>
+    </PageShell>
   );
 }

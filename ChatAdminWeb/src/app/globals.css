@@ -16,12 +16,36 @@
 
   /* Semantic tokens */
   --color-bg: #f5f6f8;
+  --color-base: #f5f6f8;
   --color-surface: #ffffff;
+  --color-surface-1: #f7f8fa;
   --color-surface-2: #f1f3f6;
+  --color-surface-3: #e8ebef;
   --color-border: #e3e6eb;
   --color-text: #101828;
   --color-text-muted: #64748b;
-  --color-text-subtle: #98a2b3;
+  --color-text-subtle: #667085;
+
+  /* Semantic / status tokens */
+  --color-success: #10b981;
+  --color-success-soft: #34d399;
+  --color-success-dark: #059669;
+  --color-error: #ef4444;
+  --color-error-soft: #f87171;
+  --color-info: #6366f1;
+  --color-info-soft: #60a5fa;
+  --color-info-dark: #4f46e5;
+  --color-warning: #fbbf24;
+  --color-warning-soft: #fef3c7;
+  --color-warning-dark: #d97706;
+  --color-purple: #a78bfa;
+  --color-orange: #f97316;
+  --color-muted: #6b7280;
+
+  /* Platform brand colors */
+  --color-platform-shopee: #ee4d2d;
+  --color-platform-tiktok: #fe2c55;
+  --color-platform-lazada: #0f146d;
 
   /* Font */
   --font-sans: var(--font-geist-sans), system-ui, -apple-system, sans-serif;

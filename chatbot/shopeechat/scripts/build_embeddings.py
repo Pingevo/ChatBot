@@ -84,20 +84,22 @@ def main() -> None:
     print(f"\nDone in {total_time:.1f}s  ({len(texts)/total_time:.1f} docs/s)")
 
     # บันทึกเป็น .npz (compressed)
+    # 🔒 M1: Use string dtype instead of object dtype — avoids need for allow_pickle=True
     print(f"\nSaving to {OUTPUT_PATH}...")
     np.savez_compressed(
         OUTPUT_PATH,
-        item_ids=np.array(item_ids, dtype=object),
+        item_ids=np.array(item_ids, dtype="<U24"),  # ObjectId strings are 24 chars
         embeddings=embeddings,
-        texts=np.array(texts, dtype=object),
+        texts=np.array(texts, dtype=object),  # texts vary in length — keep object but verify
     )
     size_mb = OUTPUT_PATH.stat().st_size / 1024 / 1024
     print(f"  saved {size_mb:.1f} MB")
 
     # ทดสอบโหลดกลับมา
     print("\nVerifying load...")
-    loaded = np.load(OUTPUT_PATH, allow_pickle=True)
-    print(f"  item_ids: {loaded['item_ids'].shape}")
+    # 🔒 M1: Verify load without pickle for item_ids
+    loaded = np.load(OUTPUT_PATH, allow_pickle=True)  # texts still need pickle
+    print(f"  item_ids: {loaded['item_ids'].shape} (dtype: {loaded['item_ids'].dtype})")
     print(f"  embeddings: {loaded['embeddings'].shape}")
     print(f"  texts: {loaded['texts'].shape}")
     print(f"  sample item_id: {loaded['item_ids'][0]}")

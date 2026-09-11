@@ -146,8 +146,8 @@ interface AdminInfo {
 }
 
 const RATING_COLORS: Record<string, string> = {
-  good: "bg-green-100 text-green-700",
-  bad: "bg-rose-100 text-rose-700",
+  good: "bg-success/10 text-success-dark",
+  bad: "bg-error-soft text-error-dark",
   unrated: "bg-gray-100 text-gray-500",
 };
 
@@ -322,8 +322,8 @@ export default function TestChatResultPage() {
         {/* Header */}
         <div className="px-3 py-3 border-b border-border bg-surface shrink-0">
           <div className="flex items-center gap-2 mb-2">
-            <div className="w-7 h-7 rounded-lg bg-green-500/15 flex items-center justify-center">
-              <MessageSquare size={14} className="text-green-600" />
+            <div className="w-7 h-7 rounded-lg bg-success/15 flex items-center justify-center">
+              <MessageSquare size={14} className="text-success" />
             </div>
             <div className="flex-1 min-w-0">
               <h1 className="text-sm font-bold text-text">Test Chat Result</h1>
@@ -390,7 +390,7 @@ export default function TestChatResultPage() {
                       }`}
                     >
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-green-500" />
+                        <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-success" />
                         <span className="text-xs font-medium text-text truncate flex-1">
                           {s.title || "ไม่มีชื่อ"}
                         </span>
@@ -405,12 +405,12 @@ export default function TestChatResultPage() {
                         {s.total_rated > 0 && (
                           <>
                             <span className="text-text-muted">· {s.total_rated} rated</span>
-                            <span className="text-green-600">✓{s.good}</span>
-                            <span className="text-rose-600">✗{s.bad}</span>
+                            <span className="text-success">✓{s.good}</span>
+                            <span className="text-error">✗{s.bad}</span>
                           </>
                         )}
                         {s.star_count > 0 && (
-                          <span className="text-yellow-600">★{(s.star_sum / s.star_count).toFixed(1)}</span>
+                          <span className="text-warning">★{(s.star_sum / s.star_count).toFixed(1)}</span>
                         )}
                         {s.commented > 0 && <span>💬{s.commented}</span>}
                       </div>
@@ -435,6 +435,7 @@ export default function TestChatResultPage() {
           onClick={() => setMobileView("list")}
           className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
           title="กลับ"
+          aria-label="กลับ"
         >
           <ArrowLeft size={16} className="text-text" />
         </button>
@@ -458,7 +459,7 @@ export default function TestChatResultPage() {
             {/* Header */}
             <div className="px-4 py-3 border-b border-border bg-surface shrink-0">
               <div className="flex items-center gap-2 mb-1">
-                <span className="text-[9px] px-1.5 py-0.5 rounded-full font-medium bg-green-100 text-green-700">
+                <span className="text-[9px] px-1.5 py-0.5 rounded-full font-medium bg-success/10 text-success-dark">
                   Test Chat
                 </span>
                 <span className="text-sm font-bold text-text truncate">
@@ -530,6 +531,7 @@ export default function TestChatResultPage() {
                                     onClick={() => setLightbox(img)}
                                     className="relative group rounded-lg overflow-hidden border border-border hover:border-brand transition-colors"
                                     title="กดเพื่อขยาย"
+                                    aria-label={`ขยายรูปที่ ${j + 2}`}
                                   >
                                     <img
                                       src={img}
@@ -597,7 +599,7 @@ export default function TestChatResultPage() {
                                       <Star
                                         key={s}
                                         size={12}
-                                        className={rating!.star_rating! >= s ? "text-yellow-400 fill-yellow-400" : "text-text-subtle"}
+                                        className={rating!.star_rating! >= s ? "text-warning fill-warning" : "text-text-subtle"}
                                       />
                                     ))}
                                     <span className="text-xs text-text-muted ml-1">{rating!.star_rating}</span>
@@ -639,6 +641,7 @@ export default function TestChatResultPage() {
               className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-white"
               onClick={() => setLightbox(null)}
               title="ปิด"
+              aria-label="ปิด"
             >
               <X size={20} />
             </button>

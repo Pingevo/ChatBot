@@ -159,6 +159,7 @@ export function AnnotationDot({ scope, conversationId, annotation, onChange, siz
             <span className="text-xs font-semibold text-text">Mark แชท</span>
             <button
               onClick={() => setOpen(false)}
+              title="ปิด" aria-label="ปิด"
               className="text-text-muted hover:text-text"
             >
               <X size={14} />
@@ -189,7 +190,7 @@ export function AnnotationDot({ scope, conversationId, annotation, onChange, siz
           <textarea
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            placeholder="เคสที่เจอ เช่น บอทตอบผิดรุ่น, วนลูป, handoff ผิดจังหวะ..."
+            placeholder="เคสที่เจอ เช่น บอทตอบผิดรุ่น, วนลูป, ส่งต่อแอดมินผิดจังหวะ..."
             rows={3}
             className="w-full text-xs text-text bg-surface border border-border rounded-md px-2 py-1.5 resize-y focus:outline-none focus:ring-1 focus:ring-brand mb-2"
             autoFocus
@@ -208,8 +209,9 @@ export function AnnotationDot({ scope, conversationId, annotation, onChange, siz
               <button
                 onClick={handleDelete}
                 disabled={saving}
-                className="inline-flex items-center justify-center gap-1 text-xs px-2 py-1.5 rounded-md border border-rose-300 text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+                className="inline-flex items-center justify-center gap-1 text-xs px-2 py-1.5 rounded-md border border-error/30 text-error hover:bg-error/5 disabled:opacity-50"
                 title="ลบ markup"
+                aria-label="ลบ markup"
               >
                 <Trash2 size={12} />
               </button>

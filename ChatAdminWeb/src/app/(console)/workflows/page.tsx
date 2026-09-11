@@ -8,16 +8,22 @@
 //
 // Features: search ชื่อ / sort (อัปเดตล่าสุด, ชื่อ, priority, จำนวน node) /
 //           filter (status, enabled, platform) / inline rename / toggle / กดแถวเข้า editor / ลบ (soft)
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Badge } from "@/components/ui/Badge";
+import { Loading } from "@/components/ui/Loading";
+import { PageShell } from "@/components/ui/PageShell";
+import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import { toast } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import {
-  GitBranch, Plus, Trash2, Pencil, RefreshCw, Search, Check, X,
+  GitBranch, Plus, Trash2, Pencil, RefreshCw, Search, Check, X, Info,
 } from "lucide-react";
+import { useSearchShortcut, useEscToClear } from "@/lib/useKeyboardShortcuts";
+import { FilterSelect } from "@/components/ui/FilterSelect";
+import { Tooltip } from "@/components/ui/Tooltip";
 
 interface WorkflowRow {
   workflow_id: string;
@@ -72,6 +78,9 @@ const sortLabels: Record<SortKey, string> = {
 };
 
 export default function WorkflowsPage() {
+  const searchRef = useRef<HTMLInputElement>(null);
+  useSearchShortcut(searchRef);
+  const handleSearchEsc = useEscToClear(() => setSearch(""));
   const router = useRouter();
   const [rows, setRows] = useState<WorkflowRow[]>([]);
   const [shops, setShops] = useState<ShopOption[]>([]);
@@ -237,6 +246,13 @@ export default function WorkflowsPage() {
   }, [rows, search, sortBy, fStatus, fEnabled, fPlatform, shopNameById]);
 
   const toggle = async (wf: WorkflowRow) => {
+    // 🔒 P2a: Confirm before toggling — affects live bot routing
+    const action = wf.enabled ? "ปิด" : "เปิด";
+    if (!(await confirm.ask({
+      title: `${action} workflow "${wf.name}"?`,
+      message: `การ${action}จะมีผลต่อการ routing ข้อความทันที`,
+      variant: wf.enabled ? "danger" : "primary",
+    }))) return;
     try {
       const r = await fetch(`/api/workflows/${wf.workflow_id}/toggle`, {
         method: "POST",
@@ -250,14 +266,14 @@ export default function WorkflowsPage() {
       toast.success(wf.enabled ? `ปิด "${wf.name}" แล้ว` : `เปิด "${wf.name}" แล้ว`);
       load();
     } catch (err) {
-      toast.error(`Toggle error: ${(err as Error).message}`);
+      toast.error(`เปลี่ยนสถานะผิดพลาด: ${(err as Error).message}`);
     }
   };
 
   const remove = async (wf: WorkflowRow) => {
     if (!(await confirm.ask({
       title: `ลบ workflow "${wf.name}"?`,
-      message: "การลบเป็น soft delete — เก็บประวัติไว้",
+      message: "การลบเป็น soft delete — เก็บประวัติไว้ สามารถกู้คืนได้",
       variant: "danger",
     }))) return;
     try {
@@ -266,10 +282,23 @@ export default function WorkflowsPage() {
         const d = await r.json().catch(() => ({}));
         throw new Error(d.detail || d.error || `HTTP ${r.status}`);
       }
-      toast.success("ลบแล้ว (soft delete)");
+      // 🔒 P4e: Undo action — restore the workflow
+      toast.success("ลบแล้ว (soft delete)", 6000, {
+        label: "กู้คืน",
+        onClick: async () => {
+          try {
+            const rr = await fetch(`/api/workflows/${wf.workflow_id}/restore`, { method: "POST" });
+            if (!rr.ok) throw new Error("restore failed");
+            toast.success("กู้คืน workflow แล้ว");
+            load();
+          } catch {
+            toast.error("กู้คืนไม่สำเร็จ");
+          }
+        },
+      });
       load();
     } catch (err) {
-      toast.error(`Delete error: ${(err as Error).message}`);
+      toast.error(`ลบผิดพลาด: ${(err as Error).message}`);
     }
   };
 
@@ -305,60 +334,90 @@ export default function WorkflowsPage() {
   };
 
   return (
-    <div className="px-6 py-6 max-w-6xl mx-auto">
-      {/* Header */}
-      <div className="flex items-center gap-3 mb-2">
-        <GitBranch size={22} className="text-brand" />
-        <h1 className="text-xl font-bold text-text">Workflows (Flow Builder)</h1>
-        <div className="flex-1" />
-        <Button variant="outline" onClick={load}>
-          <RefreshCw size={14} /> รีเฟรช
-        </Button>
-        <Button onClick={openCreate}>
-          <Plus size={14} /> สร้าง Workflow
-        </Button>
-      </div>
-      <p className="text-sm text-text-muted mb-4 leading-relaxed">
-        Flow หลายขั้นตอนแบบ Zaapi — แต่ละร้านมีได้หลาย flow (ไม่เลือกร้าน = ใช้ร่วมทุกร้าน) ·
-        ลำดับ workflow/trigger ตั้งได้ใน System Config
-      </p>
-
-      {/* ⚡ Toolbar: search + sort + filter */}
-      <div className="flex gap-2 mb-4 flex-wrap items-center">
-        <div className="relative flex-1 min-w-[200px] max-w-[320px]">
-          <Search size={14} className="absolute left-2.5 top-2.5 text-text-subtle" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="ค้นหาชื่อ flow หรือชื่อร้าน…"
-            className="w-full h-9 pl-8 pr-3 rounded-lg border border-border bg-surface-2 text-text text-sm placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
-          />
-        </div>
-        <select value={sortBy} onChange={(e) => setSortBy(e.target.value as SortKey)} className="h-9 px-2.5 rounded-lg border border-border bg-surface-2 text-text text-xs focus:outline-none focus:ring-2 focus:ring-brand/30">
-          {Object.entries(sortLabels).map(([k, v]) => <option key={k} value={k}>เรียง: {v}</option>)}
-        </select>
-        <select value={fStatus} onChange={(e) => setFStatus(e.target.value as typeof fStatus)} className="h-9 px-2.5 rounded-lg border border-border bg-surface-2 text-text text-xs focus:outline-none focus:ring-2 focus:ring-brand/30">
-          <option value="all">สถานะ: ทั้งหมด</option>
-          <option value="published">Published</option>
-          <option value="draft">Draft</option>
-        </select>
-        <select value={fEnabled} onChange={(e) => setFEnabled(e.target.value as typeof fEnabled)} className="h-9 px-2.5 rounded-lg border border-border bg-surface-2 text-text text-xs focus:outline-none focus:ring-2 focus:ring-brand/30">
-          <option value="all">ใช้งาน: ทั้งหมด</option>
-          <option value="on">เปิดใช้งาน</option>
-          <option value="off">ปิดอยู่</option>
-        </select>
-        <select value={fPlatform} onChange={(e) => setFPlatform(e.target.value as typeof fPlatform)} className="h-9 px-2.5 rounded-lg border border-border bg-surface-2 text-text text-xs focus:outline-none focus:ring-2 focus:ring-brand/30">
-          <option value="all">Platform: ทั้งหมด</option>
-          <option value="shopee">Shopee</option>
-          <option value="tiktok">TikTok</option>
-          <option value="lazada">Lazada</option>
-        </select>
-        <span className="text-xs text-text-subtle">{visible.length}/{rows.length} flow</span>
-      </div>
-
+    <PageShell
+      icon={GitBranch}
+      title="เวิร์กโฟลว์"
+      helpHref="/help#workflows"
+      subtitle="Flow หลายขั้นตอนแบบ Zaapi — แต่ละร้านมีได้หลาย flow (ไม่เลือกร้าน = ใช้ร่วมทุกร้าน) · ลำดับ workflow/trigger ตั้งได้ใน System Config"
+      actions={
+        <>
+          <Button size="sm" variant="outline" onClick={load}>
+            <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
+          </Button>
+          <Button size="sm" onClick={openCreate}>
+            <Plus size={14} /> สร้างเวิร์กโฟลว์
+          </Button>
+        </>
+      }
+      filterBarBelow
+      filterBar={
+        <>
+          {/* ⚡ Toolbar: search + sort + filter */}
+          <div className="flex items-center gap-2 mt-4 flex-wrap">
+            <div className="relative flex-1 min-w-[200px] max-w-md">
+              <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-subtle" />
+              <input
+                ref={searchRef}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={handleSearchEsc}
+                placeholder="ค้นหาชื่อ flow หรือชื่อร้าน…"
+                className="w-full h-8 pl-8 pr-8 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
+              />
+              <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-subtle border border-border rounded px-1 py-0.5 pointer-events-none">/</kbd>
+            </div>
+            <FilterSelect
+              value={sortBy}
+              onChange={(v) => setSortBy(v as SortKey)}
+              labelPrefix="เรียง: "
+              options={Object.entries(sortLabels).map(([k, v]) => ({ value: k, label: v }))}
+            />
+            <span className="inline-flex items-center gap-1">
+              <Tooltip text="สถานะเวิร์กโฟลว์ — เผยแพร่ = ใช้งานได้, ฉบับร่าง = ยังไม่เผยแพร่"><Info size={12} className="text-text-subtle" /></Tooltip>
+              <FilterSelect
+                value={fStatus}
+                onChange={(v) => setFStatus(v as typeof fStatus)}
+                labelPrefix="สถานะ: "
+                options={[
+                  { value: "all", label: "ทั้งหมด" },
+                  { value: "published", label: "เผยแพร่" },
+                  { value: "draft", label: "ฉบับร่าง" },
+                ]}
+              />
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <Tooltip text="เปิด/ปิดการทำงานของเวิร์กโฟลว์"><Info size={12} className="text-text-subtle" /></Tooltip>
+              <FilterSelect
+                value={fEnabled}
+                onChange={(v) => setFEnabled(v as typeof fEnabled)}
+                labelPrefix="ใช้งาน: "
+                options={[
+                  { value: "all", label: "ทั้งหมด" },
+                  { value: "on", label: "เปิดใช้งาน" },
+                  { value: "off", label: "ปิดอยู่" },
+                ]}
+              />
+            </span>
+            <FilterSelect
+              value={fPlatform}
+              onChange={(v) => setFPlatform(v as typeof fPlatform)}
+              labelPrefix="แพลตฟอร์ม: "
+              options={[
+                { value: "all", label: "ทั้งหมด" },
+                { value: "shopee", label: "Shopee" },
+                { value: "tiktok", label: "TikTok" },
+                { value: "lazada", label: "Lazada" },
+              ]}
+            />
+            <span className="text-xs text-text-subtle">{visible.length}/{rows.length} flow</span>
+          </div>
+        </>
+      }
+      contentClassName="p-4 md:p-6 space-y-4"
+    >
       {/* List */}
       {loading ? (
-        <div className="text-center py-12 text-text-muted text-sm">กำลังโหลด…</div>
+        <div className="flex items-center justify-center py-12"><Loading /></div>
       ) : rows.length === 0 ? (
         <div>
           <EmptyState
@@ -372,7 +431,7 @@ export default function WorkflowsPage() {
         </div>
       ) : visible.length === 0 ? (
         <div className="text-center py-12 text-text-muted text-sm">
-          ไม่เจอ flow ตามเงื่อนไขที่กรอง — ลองล้าง search/filter
+          ไม่เจอ flow ตามเงื่อนไขที่กรอง — ลองล้างการค้นหาและตัวกรอง
           <div className="mt-2.5">
             <Button variant="outline" onClick={() => { setSearch(""); setFStatus("all"); setFEnabled("all"); setFPlatform("all"); }}>
               ล้างตัวกรอง
@@ -380,7 +439,7 @@ export default function WorkflowsPage() {
           </div>
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-3">
           {visible.map((wf) => {
             const shopBadges = (wf.shop_ids || []).length === 0
               ? null
@@ -405,12 +464,12 @@ export default function WorkflowsPage() {
                             if (e.key === "Enter") commitRename();
                             if (e.key === "Escape") setRenamingId(null);
                           }}
-                          className="h-9 px-2.5 rounded-lg border border-border bg-surface-2 text-text text-sm font-semibold w-72 focus:outline-none focus:ring-2 focus:ring-brand/30"
+                          className="h-9 px-2.5 rounded-lg border border-border bg-surface-2 text-text text-sm font-semibold w-72 focus:outline-none focus:ring-2 focus:ring-brand/40"
                         />
                         <Button size="sm" onClick={commitRename} disabled={saving || !renameDraft.trim()}>
                           <Check size={13} /> บันทึก
                         </Button>
-                        <Button size="sm" variant="outline" onClick={() => setRenamingId(null)}>
+                        <Button size="sm" variant="outline" onClick={() => setRenamingId(null)} title="ยกเลิก" aria-label="ยกเลิก">
                           <X size={13} />
                         </Button>
                       </div>
@@ -418,12 +477,18 @@ export default function WorkflowsPage() {
                       <div className="flex items-center gap-2 mb-2 flex-wrap">
                         <span className="text-sm font-semibold text-text">{wf.name}</span>
                         <Badge tone={wf.status === "published" ? "brand" : "neutral"}>
-                          {wf.status === "published" ? "Published" : "Draft"}
+                          {wf.status === "published" ? "เผยแพร่" : "ฉบับร่าง"}
                         </Badge>
-                        {wf.priority !== 0 && <Badge tone="deep">P{wf.priority}</Badge>}
+                        {wf.priority !== 0 && (
+                          <span className="inline-flex items-center gap-0.5">
+                            <Badge tone="deep">P{wf.priority}</Badge>
+                            <Tooltip text="ลำดับความสำคัญ — ตัวเลขยิ่งสูงยิ่งจับคู่ก่อน"><Info size={12} className="text-text-subtle" /></Tooltip>
+                          </span>
+                        )}
                         <button
                           onClick={(e) => { e.stopPropagation(); startRename(wf); }}
                           title="เปลี่ยนชื่อ"
+                          aria-label="เปลี่ยนชื่อ"
                           className="w-6 h-6 rounded-md hover:bg-surface-2 flex items-center justify-center text-text-muted hover:text-text"
                         >
                           <Pencil size={12} />
@@ -448,17 +513,15 @@ export default function WorkflowsPage() {
                   {/* Actions */}
                   <div onClick={(e) => e.stopPropagation()} className="flex items-center gap-2 shrink-0">
                     {/* Toggle switch — เหมือน triggers page */}
-                    <button
-                      onClick={() => toggle(wf)}
-                      className={`w-10 h-5 rounded-full transition-colors ${wf.enabled ? "bg-brand" : "bg-surface-2"}`}
-                      title={wf.enabled ? "ปิดใช้งาน" : "เปิดใช้งาน"}
-                    >
-                      <div className={`w-4 h-4 bg-white rounded-full transition-transform ${wf.enabled ? "translate-x-5" : "translate-x-0.5"}`} />
-                    </button>
+                    <ToggleSwitch
+                      enabled={wf.enabled}
+                      onChange={() => toggle(wf)}
+                    />
                     <button
                       onClick={() => router.push(`/workflows/${wf.workflow_id}`)}
                       className="w-7 h-7 rounded-md hover:bg-surface-2 flex items-center justify-center"
                       title="แก้ไข"
+                      aria-label="แก้ไข"
                     >
                       <Pencil size={13} className="text-text-muted" />
                     </button>
@@ -466,6 +529,7 @@ export default function WorkflowsPage() {
                       onClick={() => remove(wf)}
                       className="w-7 h-7 rounded-md hover:bg-vibrant-coral-soft flex items-center justify-center"
                       title="ลบ"
+                      aria-label="ลบ"
                     >
                       <Trash2 size={13} className="text-text-muted hover:text-vibrant-coral" />
                     </button>
@@ -484,6 +548,9 @@ export default function WorkflowsPage() {
           onClick={() => !creating && setShowCreate(false)}
         >
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="workflow-create-modal-title"
             className="bg-surface rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
@@ -491,13 +558,14 @@ export default function WorkflowsPage() {
             <div className="flex items-center justify-between p-4 border-b border-border sticky top-0 bg-surface z-10">
               <div className="flex items-center gap-2">
                 <Plus size={18} className="text-brand" />
-                <h2 className="text-base font-semibold text-text">สร้าง Workflow ใหม่</h2>
+                <h2 id="workflow-create-modal-title" className="text-base font-semibold text-text">สร้าง Workflow ใหม่</h2>
               </div>
               <button
                 onClick={() => !creating && setShowCreate(false)}
                 disabled={creating}
                 className="w-8 h-8 rounded-md hover:bg-surface-2 flex items-center justify-center disabled:opacity-50"
                 title="ปิด"
+                aria-label="ปิด"
               >
                 <X size={16} className="text-text-muted" />
               </button>
@@ -516,7 +584,7 @@ export default function WorkflowsPage() {
                   onChange={(e) => setCName(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter" && cName.trim() && !creating) submitCreate(); }}
                   placeholder="เช่น ขายหัวชาร์จ / ทักแรก / สนใจสั่งซื้อ"
-                  className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
+                  className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40"
                 />
               </div>
 
@@ -530,7 +598,7 @@ export default function WorkflowsPage() {
                   onChange={(e) => setCDesc(e.target.value)}
                   placeholder="อธิบายสั้นๆ ว่า flow นี้ทำอะไร — แก้ไขภายหลังได้"
                   rows={3}
-                  className="w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
+                  className="w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40"
                 />
               </div>
 
@@ -595,7 +663,7 @@ export default function WorkflowsPage() {
               </div>
 
               {/* Footer */}
-              <div className="flex gap-2 pt-2 border-t border-border">
+              <div className="flex gap-2 pt-4 border-t border-border mt-2">
                 <Button variant="ghost" className="flex-1" onClick={() => setShowCreate(false)} disabled={creating}>
                   ยกเลิก
                 </Button>
@@ -607,6 +675,6 @@ export default function WorkflowsPage() {
           </div>
         </div>
       )}
-    </div>
+    </PageShell>
   );
 }

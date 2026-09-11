@@ -575,7 +575,7 @@ export function ChatList({
                             onDeleteConversation(c.id);
                           }
                         }}
-                        className="text-text-subtle hover:text-rose-500 transition-colors cursor-pointer inline-flex shrink-0"
+                        className="text-text-subtle hover:text-error transition-colors cursor-pointer inline-flex shrink-0"
                         title="ลบ (soft delete)"
                       >
                         <Trash2 size={11} />

@@ -450,7 +450,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         const d = await r.json();
         setSessions(d.sessions || []);
       }
-    } catch {}
+    } catch {
+      toast.error("โหลดรายการแชทไม่สำเร็จ");
+    }
   }
 
   async function createSession() {
@@ -473,7 +475,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         setTotals({ turns: 0, elapsed: 0, prompt: 0, output: 0, total: 0, cost: 0, wsTurns: 0, wsCost: 0, wsTokens: 0 });
         await loadSessions();
       }
-    } catch {}
+    } catch {
+      toast.error("ไม่สามารถสร้างแชทได้");
+    }
   }
 
   async function loadSession(id: string) {
@@ -521,7 +525,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">${userImages.map((url) =>
                 url.match(/\.(mp4|webm|mov)$/i)
                   ? `<div style="position:relative;width:80px;height:80px;border-radius:6px;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center"><span style="font-size:24px">🎬</span></div>`
-                  : `<img src="${escapeHtml(url)}" alt="" style="width:80px;height:80px;object-fit:cover;border-radius:6px" />`
+                  : `<img src="${escapeHtml(url)}" alt="รูปที่ส่ง" onerror="this.remove()" style="width:80px;height:80px;object-fit:cover;border-radius:6px" />`
               ).join("")}</div>`
             : "";
           loadedMsgs.push({ id: msgIdCounter++, role: "user", html: escapeHtml(m.text) + imageHtml, raw: m.text, sessionMsgIndex: msgIdx, timestamp: m.created_at || m.timestamp });
@@ -581,7 +585,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       setTotals(tot);
       // ⚡ โหลด ratings จาก Next.js admin mongo แล้ว merge เข้า messages
       loadSessionRatings(id);
-    } catch {}
+    } catch {
+      toast.error("โหลดแชทไม่สำเร็จ");
+    }
   }
 
   async function deleteSession(id: string) {
@@ -594,7 +600,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         historyRef.current = [];
       }
       await loadSessions();
-    } catch {}
+    } catch {
+      toast.error("ลบแชทไม่สำเร็จ");
+    }
   }
 
   async function saveMessageToSession(role: "user" | "model", text: string, stats?: MsgStats, images?: string[]) {
@@ -615,7 +623,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         m.role === "bot" && m.isGroupLast && !m.sessionMsgIndex ? { ...m, sessionMsgIndex: msgIndex } : m
       ));
       loadSessions(); // refresh sidebar
-    } catch {}
+    } catch {
+      toast.error("บันทึกข้อความไม่สำเร็จ");
+    }
   }
 
   // ── Rate a bot message (star + comment + rating) ──
@@ -664,7 +674,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         } : m
       ));
       loadAllStats();
-    } catch {}
+    } catch {
+      toast.error("บันทึกคะแนนไม่สำเร็จ");
+    }
   }
 
   // ── Load all-sessions stats (จาก Next.js) ──
@@ -672,7 +684,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     try {
       const r = await fetch(`/api/test-chat-ratings?mode=stats`);
       if (r.ok) setAllStats(await r.json());
-    } catch {}
+    } catch {
+      toast.error("โหลดสถิติไม่สำเร็จ");
+    }
   }
 
   // ── Load test chat action logs (จาก Python ผ่าน proxy) ──
@@ -704,7 +718,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         setActionLogs(d.logs || []);
       }
     } catch {
-      // ignore
+      toast.error("โหลด log ไม่สำเร็จ");
     } finally {
       setLogsLoading(false);
     }
@@ -737,7 +751,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
           },
         };
       }));
-    } catch {}
+    } catch {
+      toast.error("โหลดคะแนนไม่สำเร็จ");
+    }
   }
 
   // ⚡ อัปเดต shop ของ session ใน DB (เมื่อผู้ใช้เปลี่ยนร้านในแชทที่มีอยู่)
@@ -749,7 +765,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         body: JSON.stringify({ shop: newShop }),
       });
       loadSessions(); // refresh sidebar
-    } catch {}
+    } catch {
+      toast.error("อัปเดตร้านไม่สำเร็จ");
+    }
   }
 
   // ⚡ อัปเดต title ของ session ใน DB (แก้ชื่อแชท)
@@ -761,7 +779,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         body: JSON.stringify({ title: newTitle }),
       });
       loadSessions(); // refresh sidebar
-    } catch {}
+    } catch {
+      toast.error("อัปเดตชื่อแชทไม่สำเร็จ");
+    }
   }
 
   useEffect(() => {
@@ -800,7 +820,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ answer: answerText.slice(0, 500), rating }),
       }).catch(() => {});
-    } catch {}
+    } catch {
+      toast.error("ส่งฟีดแบ็กไม่สำเร็จ");
+    }
   }
 
   // ⚡ Phase 1F — image upload handler
@@ -852,7 +874,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">${images.map((img) =>
           img.type.startsWith("video/")
             ? `<div style="position:relative;width:80px;height:80px;border-radius:6px;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center"><span style="font-size:24px">🎬</span></div>`
-            : `<img src="${escapeHtml(img.url)}" alt="" style="width:80px;height:80px;object-fit:cover;border-radius:6px" />`
+            : `<img src="${escapeHtml(img.url)}" alt="รูปที่ส่ง" onerror="this.remove()" style="width:80px;height:80px;object-fit:cover;border-radius:6px" />`
         ).join("")}</div>`
       : "";
     const userMsg: Msg = {
@@ -902,7 +924,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         const bufMsg: Msg = {
           id: msgIdCounter++,
           role: "bot",
-          html: `<div style="color:#6366f1;font-size:13px">⏳ <span class="tc-spinner"></span>กำลัง buffer ข้อความ... (1 ข้อความ)</div>`,
+          html: `<div style="color:var(--color-info);font-size:13px">⏳ <span class="tc-spinner"></span>กำลัง buffer ข้อความ... (1 ข้อความ)</div>`,
           timestamp: new Date().toISOString(),
         };
         bufferSpinnerIdRef.current = bufMsg.id;
@@ -911,7 +933,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         const count = bufferedMessagesRef.current.length;
         setMessages((prev) => prev.map((m) => m.id === bufferSpinnerIdRef.current ? {
           ...m,
-          html: `<div style="color:#6366f1;font-size:13px">⏳ <span class="tc-spinner"></span>กำลัง buffer ข้อความ... (${count} ข้อความ)</div>`,
+          html: `<div style="color:var(--color-info);font-size:13px">⏳ <span class="tc-spinner"></span>กำลัง buffer ข้อความ... (${count} ข้อความ)</div>`,
         } : m));
       }
 
@@ -1020,7 +1042,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             const hj = await hr.json().catch(() => ({}));
             if (hj?.assigned_to_name) adminName = hj.assigned_to_name;
             if (hj?.assignment_reason) assignReason = hj.assignment_reason;
-          } catch {}
+          } catch (e) { console.error("[HANDOFF] admin fetch failed:", e); }
         }
         const handoffText = `🔀 ส่งต่อแอดมิน${adminName ? `: ${adminName}` : ""}\nเหตุผล: ${assignReason}`;
         setHandedOff(true);
@@ -1031,7 +1053,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         setMessages((prev) =>
           prev.map((m) => (m.id === spinnerMsg.id ? {
             ...m,
-            html: `<div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:8px 12px;color:#6366f1;font-size:13px">⚡ trigger: ${escapeHtml(triggerMatched!.name)} → 🔀 ส่งต่อแอดมิน${adminName ? `: <b>${escapeHtml(adminName)}</b>` : ""}<br><span style="font-size:11px;opacity:0.7">เหตุผล: ${escapeHtml(assignReason)}</span></div>`,
+            html: `<div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:8px 12px;color:var(--color-info);font-size:13px">⚡ trigger: ${escapeHtml(triggerMatched!.name)} → 🔀 ส่งต่อแอดมิน${adminName ? `: <b>${escapeHtml(adminName)}</b>` : ""}<br><span style="font-size:11px;opacity:0.7">เหตุผล: ${escapeHtml(assignReason)}</span></div>`,
             stats: {
               source: "trigger_handoff",
               handoff_to_admin: true,
@@ -1109,7 +1131,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       if (!r.ok) {
         const errText = `เกิดข้อผิดพลาด (${r.status}): ${j.detail || j.error || r.statusText || "ไม่ทราบสาเหตุ"}`;
         setMessages((prev) =>
-          prev.map((m) => (m.id === spinnerMsg.id ? { ...m, html: `<span style="color:#f87171">${escapeHtml(errText)}</span>` } : m))
+          prev.map((m) => (m.id === spinnerMsg.id ? { ...m, html: `<span style="color:var(--color-error-soft)">${escapeHtml(errText)}</span>` } : m))
         );
         return;
       }
@@ -1206,7 +1228,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     } catch {
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === spinnerMsg.id ? { ...m, html: '<span style="color:#f87171">เกิดข้อผิดพลาดในการเชื่อมต่อ server</span>' } : m
+          m.id === spinnerMsg.id ? { ...m, html: '<span style="color:var(--color-error-soft)">เกิดข้อผิดพลาดในการเชื่อมต่อ server</span>' } : m
         )
       );
     } finally {
@@ -1294,7 +1316,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             historyRef.current.push({ role: "model", text: `⚙️ workflow: ${ws.detail}` });
             setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
               ...m,
-              html: `<div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:8px 12px;color:#6366f1;font-size:13px">🔀 workflow: ${escapeHtml(ws.detail || "")}</div>`,
+              html: `<div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:8px 12px;color:var(--color-info);font-size:13px">🔀 workflow: ${escapeHtml(ws.detail || "")}</div>`,
               stats: { source: "workflow_action" } as MsgStats,
               isGroupLast: true,
             } : m));
@@ -1346,7 +1368,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
           // flow cancel + ทิ้งข้อความ → แสดง hint แล้วจบ (ลูกค้าต้องพิมพ์ใหม่)
           setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
             ...m,
-            html: `<div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:8px 12px;color:#ef4444;font-size:13px">⛔ workflow: condition ไม่ผ่าน (exit_drop) — รบกวนพิมพ์ใหม่อีกครั้งนะคะ</div>`,
+            html: `<div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:8px 12px;color:var(--color-error);font-size:13px">⛔ workflow: condition ไม่ผ่าน (exit_drop) — รบกวนพิมพ์ใหม่อีกครั้งนะคะ</div>`,
             isGroupLast: true,
           } : m));
           toast.info(`⛔ workflow exit_drop: ${ws.detail}`);
@@ -1407,7 +1429,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             const hj = await hr.json().catch(() => ({}));
             if (hj?.assigned_to_name) adminName = hj.assigned_to_name;
             if (hj?.assignment_reason) assignReason = hj.assignment_reason;
-          } catch {}
+          } catch (e) { console.error("[HANDOFF] admin fetch failed:", e); }
         }
         const handoffText = `🔀 ส่งต่อแอดมิน${adminName ? `: ${adminName}` : ""}\nเหตุผล: ${assignReason}`;
         setHandedOff(true);
@@ -1421,7 +1443,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         saveMessageToSession("model", handoffText);
         setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
           ...m,
-          html: `<div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:8px 12px;color:#6366f1;font-size:13px">⚡ trigger: ${escapeHtml(triggerMatched!.name)} → 🔀 ส่งต่อแอดมิน${adminName ? `: <b>${escapeHtml(adminName)}</b>` : ""}<br><span style="font-size:11px;opacity:0.7">เหตุผล: ${escapeHtml(assignReason)}</span><br><span style="font-size:11px;opacity:0.5">รวมจาก ${msgs.length} ข้อความ</span></div>`,
+          html: `<div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:8px 12px;color:var(--color-info);font-size:13px">⚡ trigger: ${escapeHtml(triggerMatched!.name)} → 🔀 ส่งต่อแอดมิน${adminName ? `: <b>${escapeHtml(adminName)}</b>` : ""}<br><span style="font-size:11px;opacity:0.7">เหตุผล: ${escapeHtml(assignReason)}</span><br><span style="font-size:11px;opacity:0.5">รวมจาก ${msgs.length} ข้อความ</span></div>`,
           stats: {
             source: "trigger_handoff",
             handoff_to_admin: true,
@@ -1507,7 +1529,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       if (fj.status === "bot_error") {
         const errText = `เกิดข้อผิดพลาด: ${fj.error || "ไม่ทราบสาเหตุ"}`;
         setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
-          ...m, html: `<span style="color:#f87171">${escapeHtml(errText)}</span>`,
+          ...m, html: `<span style="color:var(--color-error-soft)">${escapeHtml(errText)}</span>`,
         } : m));
         bufferSpinnerIdRef.current = null;
         setIsBuffering(false);
@@ -1618,7 +1640,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       saveMessageToSession("model", answerText, stats);
     } catch {
       setMessages((prev) => prev.map((m) =>
-        m.id === spinnerId ? { ...m, html: '<span style="color:#f87171">เกิดข้อผิดพลาดในการเชื่อมต่อ server</span>' } : m
+        m.id === spinnerId ? { ...m, html: '<span style="color:var(--color-error-soft)">เกิดข้อผิดพลาดในการเชื่อมต่อ server</span>' } : m
       ));
     } finally {
       bufferSpinnerIdRef.current = null;
@@ -1752,8 +1774,8 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         .tc-msg .copy-btn {
           position: absolute; top: 6px; right: 6px;
           padding: 3px 8px; border-radius: 6px;
-          border: 1px solid var(--border, #e2e8f0); background: var(--surface-2, #f1f5f9);
-          color: var(--muted, #64748b); font-size: 11px; cursor: pointer;
+          border: 1px solid var(--color-border, #e3e6eb); background: var(--color-surface-2, #f1f3f6);
+          color: var(--color-text-muted, #64748b); font-size: 11px; cursor: pointer;
           opacity: 0.5; transition: opacity .15s;
         }
         .tc-msg.bot:hover .copy-btn { opacity: 1; }
@@ -1764,56 +1786,55 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         .tc-msg.bot:hover .feedback-btns { opacity: 1; }
         .tc-msg .feedback-btns button {
           padding: 3px 7px; border-radius: 6px;
-          border: 1px solid var(--border, #e2e8f0); background: var(--surface-2, #f1f5f9);
-          color: var(--muted, #64748b); font-size: 13px; cursor: pointer; line-height: 1;
+          border: 1px solid var(--color-border, #e3e6eb); background: var(--color-surface-2, #f1f3f6);
+          color: var(--color-text-muted, #64748b); font-size: 13px; cursor: pointer; line-height: 1;
         }
         .tc-msg .stats {
-          margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--border, #e2e8f0);
-          font-size: 11px; color: var(--muted, #64748b); display: flex; flex-wrap: wrap; gap: 4px 10px;
+          margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--color-border, #e3e6eb);
+          font-size: 11px; color: var(--color-text-muted, #64748b); display: flex; flex-wrap: wrap; gap: 4px 10px;
           font-variant-numeric: tabular-nums;
         }
         .tc-msg .stats .pill {
-          padding: 1px 6px; border-radius: 6px; background: var(--surface-2, #f1f5f9);
-          border: 1px solid var(--border, #e2e8f0); white-space: nowrap;
+          padding: 1px 6px; border-radius: 6px; background: var(--color-surface-2, #f1f3f6);
+          border: 1px solid var(--color-border, #e3e6eb); white-space: nowrap;
         }
-        .tc-msg .stats .pill.cost { color: #34d399; border-color: rgba(52,211,153,0.3); background: rgba(52,211,153,0.06); }
+        .tc-msg .stats .pill.cost { color: var(--color-success-soft); border-color: rgba(52,211,153,0.3); background: rgba(52,211,153,0.06); }
         .tc-msg .stats .pill.time { color: var(--brand, #087e8b); border-color: rgba(8,126,139,0.3); background: rgba(8,126,139,0.06); }
-        .tc-msg .stats .pill.model { color: var(--muted, #64748b); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
-        .tc-msg .stats .pill.intent { color: #a78bfa; border-color: rgba(167,139,250,0.3); background: rgba(167,139,250,0.06); }
-        .tc-msg .stats .pill.timing { color: #fbbf24; border-color: rgba(251,191,36,0.3); background: rgba(251,191,36,0.06); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
-        .tc-msg .stats .pill.device { color: #60a5fa; border-color: rgba(96,165,250,0.3); background: rgba(96,165,250,0.06); }
-        .tc-msg .stats .pill.websearch { color: #10b981; border-color: rgba(16,185,129,0.4); background: rgba(16,185,129,0.08); font-weight: 600; }
-        .tc-msg .stats .pill.websearch-reason { color: #f97316; border-color: rgba(249,115,22,0.3); background: rgba(249,115,22,0.06); font-size: 10px; }
-        .tc-msg .stats .pill.muted { color: #6b7280; border-color: rgba(107,114,128,0.2); background: rgba(107,114,128,0.04); opacity: 0.6; }
-        .tc-msg .stats .pill.step-detail { font-size: 10px; padding: 2px 6px; background: rgba(99,102,241,0.08); border-color: rgba(99,102,241,0.2); color: #4f46e5; }
+        .tc-msg .stats .pill.model { color: var(--color-text-muted, #64748b); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+        .tc-msg .stats .pill.intent { color: var(--color-purple); border-color: rgba(167,139,250,0.3); background: rgba(167,139,250,0.06); }
+        .tc-msg .stats .pill.timing { color: var(--color-warning); border-color: rgba(251,191,36,0.3); background: rgba(251,191,36,0.06); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+        .tc-msg .stats .pill.device { color: var(--color-info-soft); border-color: rgba(96,165,250,0.3); background: rgba(96,165,250,0.06); }
+        .tc-msg .stats .pill.websearch { color: var(--color-success); border-color: rgba(16,185,129,0.4); background: rgba(16,185,129,0.08); font-weight: 600; }
+        .tc-msg .stats .pill.websearch-reason { color: var(--color-orange); border-color: rgba(249,115,22,0.3); background: rgba(249,115,22,0.06); font-size: 10px; }
+        .tc-msg .stats .pill.muted { color: var(--color-muted); border-color: rgba(107,114,128,0.2); background: rgba(107,114,128,0.04); opacity: 0.6; }
+        .tc-msg .stats .pill.step-detail { font-size: 10px; padding: 2px 6px; background: rgba(99,102,241,0.08); border-color: rgba(99,102,241,0.2); color: var(--color-info-dark); }
         .tc-msg.bot.web-search-bubble {
           background: linear-gradient(135deg, rgba(16,185,129,0.08), rgba(52,211,153,0.04)) !important;
           border-color: rgba(16,185,129,0.35) !important;
-          border-left: 3px solid #10b981 !important;
         }
         .tc-msg .web-search-badge {
           display: inline-flex; align-items: center; gap: 4px;
           padding: 2px 8px; border-radius: 6px; margin-bottom: 6px;
-          background: rgba(16,185,129,0.12); color: #059669;
+          background: rgba(16,185,129,0.12); color: var(--color-success-dark);
           font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
         }
         .tc-msg .stats .debug-row { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
-        .tc-msg .stats .debug-label { font-size: 9px; color: var(--muted, #64748b); text-transform: uppercase; letter-spacing: 0.05em; margin-right: 2px; }
-        .tc-msg img { max-width: 100%; max-height: 220px; object-fit: contain; border-radius: 10px; margin: 8px 0 4px; background: var(--surface-2, #f1f5f9); display: block; }
-        .tc-msg .img-caption { font-size: 11px; color: var(--muted, #64748b); margin-bottom: 8px; }
-        .tc-msg .table-wrap { overflow-x: auto; max-width: 100%; margin: 10px 0 14px; border: 1px solid var(--border, #e2e8f0); border-radius: 10px; -webkit-overflow-scrolling: touch; }
-        .tc-msg table { width: 100%; max-width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; background: var(--surface-2, #f1f5f9); table-layout: fixed; }
-        .tc-msg table thead th { background: var(--surface-2, #f1f5f9); color: var(--text, #0f172a); font-weight: 600; text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border, #e2e8f0); word-break: break-word; overflow: hidden; text-overflow: ellipsis; }
-        .tc-msg table tbody td { padding: 7px 10px; border-bottom: 1px solid var(--border, #e2e8f0); vertical-align: top; word-break: break-word; overflow: hidden; text-overflow: ellipsis; }
+        .tc-msg .stats .debug-label { font-size: 9px; color: var(--color-text-muted, #64748b); text-transform: uppercase; letter-spacing: 0.05em; margin-right: 2px; }
+        .tc-msg img { max-width: 100%; max-height: 220px; object-fit: contain; border-radius: 10px; margin: 8px 0 4px; background: var(--color-surface-2, #f1f3f6); display: block; }
+        .tc-msg .img-caption { font-size: 11px; color: var(--color-text-muted, #64748b); margin-bottom: 8px; }
+        .tc-msg .table-wrap { overflow-x: auto; max-width: 100%; margin: 10px 0 14px; border: 1px solid var(--color-border, #e3e6eb); border-radius: 10px; -webkit-overflow-scrolling: touch; }
+        .tc-msg table { width: 100%; max-width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; background: var(--color-surface-2, #f1f3f6); table-layout: fixed; }
+        .tc-msg table thead th { background: var(--color-surface-2, #f1f3f6); color: var(--color-text, #101828); font-weight: 600; text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--color-border, #e3e6eb); word-break: break-word; overflow: hidden; text-overflow: ellipsis; }
+        .tc-msg table tbody td { padding: 7px 10px; border-bottom: 1px solid var(--color-border, #e3e6eb); vertical-align: top; word-break: break-word; overflow: hidden; text-overflow: ellipsis; }
         .tc-msg table tbody tr:last-child td { border-bottom: 0; }
         .tc-msg table tbody tr:nth-child(even) td { background: rgba(0,0,0,0.02); }
-        .tc-msg table .price { color: #34d399; font-weight: 600; }
-        .tc-msg table .warranty { color: #fbbf24; }
+        .tc-msg table .price { color: var(--color-success-soft); font-weight: 600; }
+        .tc-msg table .warranty { color: var(--color-warning); }
         .tc-msg ul, .tc-msg ol { margin: 6px 0 6px 18px; padding: 0; }
         .tc-msg li { margin: 2px 0; }
         .tc-msg p { margin: 4px 0; }
         .tc-spinner {
-          width: 14px; height: 14px; border: 2px solid var(--muted, #64748b);
+          width: 14px; height: 14px; border: 2px solid var(--color-text-muted, #64748b);
           border-top-color: var(--brand, #087e8b); border-radius: 50%;
           animation: tc-spin 0.8s linear infinite; display: inline-block; vertical-align: middle; margin-right: 6px;
         }
@@ -1921,6 +1942,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                   onClick={() => setSortDir((d) => d === "desc" ? "asc" : "desc")}
                   className="h-7 w-7 flex items-center justify-center rounded-md border border-border bg-surface-2 hover:bg-surface text-text-muted"
                   title={sortDir === "desc" ? "มาก→น้อย" : "น้อย→มาก"}
+                  aria-label={sortDir === "desc" ? "มาก→น้อย" : "น้อย→มาก"}
                 >
                   <ArrowUpDown size={11} />
                 </button>
@@ -2000,7 +2022,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                       ) : (
                         <div className="text-xs font-medium text-text truncate">
                           {s.source === "script_test" && (
-                            <span className="inline-block mr-1 px-1 py-0.5 text-[9px] rounded bg-amber-100 text-amber-700 border border-amber-300 align-middle">🧪 Script</span>
+                            <span className="inline-block mr-1 px-1 py-0.5 text-[9px] rounded bg-warning-soft text-warning-dark border border-warning/30 align-middle">🧪 Script</span>
                           )}
                           {s.title || "ไม่มีชื่อ"}
                         </div>
@@ -2021,6 +2043,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                         }}
                         className="text-text-muted hover:text-brand p-1"
                         title="แก้ชื่อ"
+                        aria-label="แก้ชื่อ"
                       >
                         <Pencil size={11} />
                       </button>
@@ -2028,6 +2051,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                         onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
                         className="text-text-muted hover:text-red-500 p-1"
                         title="ลบ"
+                        aria-label="ลบ"
                       >
                         <Trash2 size={12} />
                       </button>
@@ -2187,12 +2211,14 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                       <div className="feedback-btns">
                         <button
                           title="ตอบดี"
+                          aria-label="ตอบดี"
                           onClick={() => sendFeedback(m.raw!, "up")}
                         >
                           <ThumbsUp size={12} />
                         </button>
                         <button
                           title="ตอบไม่ดี"
+                          aria-label="ตอบไม่ดี"
                           onClick={() => sendFeedback(m.raw!, "down")}
                         >
                           <ThumbsDown size={12} />
@@ -2215,14 +2241,14 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                     <span
                       dangerouslySetInnerHTML={{ __html: m.html }}
                       onClick={(e) => {
-                        // ⚡ Phase 1F — กดที่ <img> แล้วเปิด imageViewer
+                        // ⚡ Phase 1F — กดที่รูปแล้วเปิด imageViewer
                         const target = e.target as HTMLElement;
                         if (target.tagName === "IMG") {
                           const src = (target as HTMLImageElement).src;
                           if (src) imageViewer.show(src, { type: "image", alt: "รูปที่ส่ง" });
                         }
                       }}
-                      style={{ cursor: m.html.includes("<img") ? "pointer" : undefined }}
+                      style={{ cursor: m.html.includes("img") ? "pointer" : undefined }}
                     />
                   )}
                 </div>
@@ -2235,8 +2261,8 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             <div className="flex flex-col gap-2 p-3 border-t border-border bg-surface shrink-0">
               {/* ⚡ Handoff banner + ปุ่มปิดแชท */}
               {handedOff && (
-                <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30">
-                  <div className="flex items-center gap-2 text-xs text-amber-600 min-w-0">
+                <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-warning/10 border border-warning/30">
+                  <div className="flex items-center gap-2 text-xs text-warning min-w-0">
                     <span className="shrink-0">🔀</span>
                     <span className="truncate">
                       ส่งต่อแอดมินแล้ว{assignedAdminName ? `: ${assignedAdminName}` : ""} — บอทจะไม่ตอบจนกว่าจะปิดแชท
@@ -2308,13 +2334,14 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                 onKeyDown={handleKeyDown}
                 placeholder={handedOff ? "แชทถูกส่งต่อแอดมิน — กดปุ่มปิดแชทก่อน" : "พิมพ์คำถามที่นี่... (Enter ส่ง · Shift+Enter ขึ้นบรรทัด)"}
                 disabled={sending || handedOff}
-                className="flex-1 resize-none min-h-[56px] max-h-[120px] px-3 py-2.5 rounded-xl border border-border bg-surface-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30 disabled:opacity-60 overflow-hidden"
+                className="flex-1 resize-none min-h-[56px] max-h-[120px] px-3 py-2.5 rounded-xl border border-border bg-surface-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40 disabled:opacity-60 overflow-hidden"
               />
               {/* ⚡ Phase 1F — upload button */}
               <Button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={sending || handedOff || uploading}
                 title="แนบรูป/วิดีโอ"
+                aria-label="แนบรูป/วิดีโอ"
                 className="self-end"
               >
                 {uploading ? <Loading size={16} /> : <Paperclip size={16} />}
@@ -2335,12 +2362,13 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                         </div>
                       ) : (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img src={img.url} alt="" className="w-16 h-16 object-cover rounded-lg border border-border" />
+                        <img src={img.url} alt="รูปที่ส่ง" onError={(e) => e.currentTarget.remove()} className="w-16 h-16 object-cover rounded-lg border border-border" />
                       )}
                       <button
                         onClick={() => removePendingImage(idx)}
                         className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
                         title="ลบ"
+                        aria-label="ลบรูปนี้"
                       >
                         <X size={12} />
                       </button>
@@ -2401,7 +2429,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                       ทั้งหมด
                     </button>
                   </div>
-                  <button onClick={() => setLogPanelOpen(false)} className="text-text-muted hover:text-text p-1">
+                  <button onClick={() => setLogPanelOpen(false)} title="ปิด log" aria-label="ปิด log" className="text-text-muted hover:text-text p-1">
                     <X size={14} />
                   </button>
                 </div>
@@ -2541,6 +2569,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             {sidebarOpen && (
               <button
                 onClick={() => setSidebarOpen(false)}
+                title="ปิด sidebar" aria-label="ปิด sidebar"
                 className="lg:hidden absolute top-3 right-3 w-7 h-7 rounded-md hover:bg-surface-2 flex items-center justify-center"
               >
                 <X size={16} className="text-text-muted" />
@@ -2658,6 +2687,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                           onClick={() => setTotals({ turns: 0, elapsed: 0, prompt: 0, output: 0, total: 0, cost: 0, wsTurns: 0, wsCost: 0, wsTokens: 0 })}
                           className="text-text-muted hover:text-text"
                           title="รีเซ็ต"
+                          aria-label="รีเซ็ต"
                         >
                           <RotateCcw size={11} />
                         </button>
@@ -2682,20 +2712,20 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                       </div>
                       <div>
                         <div className="text-[10px] text-text-muted">ต้นทุน USD</div>
-                        <div className="text-sm font-semibold text-emerald-500 tabular-nums">{fmtCost(totals.cost)}</div>
+                        <div className="text-sm font-semibold text-success tabular-nums">{fmtCost(totals.cost)}</div>
                       </div>
                       <div>
                         <div className="text-[10px] text-text-muted">ต้นทุน THB</div>
-                        <div className="text-sm font-semibold text-emerald-500 tabular-nums">{fmtTHB(totals.cost)}</div>
+                        <div className="text-sm font-semibold text-success tabular-nums">{fmtTHB(totals.cost)}</div>
                       </div>
                     </div>
                     {totals.wsTurns > 0 && (
                       <div className="mt-2 pt-2 border-t border-border/60">
-                        <div className="text-[10px] uppercase tracking-wide text-emerald-600 font-semibold mb-1">🔍 Web Search</div>
+                        <div className="text-[10px] uppercase tracking-wide text-success font-semibold mb-1">🔍 Web Search</div>
                         <div className="grid grid-cols-3 gap-2 text-xs">
                           <div>
                             <div className="text-[10px] text-text-muted">ครั้ง</div>
-                            <div className="text-sm font-semibold text-emerald-600">{totals.wsTurns}</div>
+                            <div className="text-sm font-semibold text-success">{totals.wsTurns}</div>
                           </div>
                           <div>
                             <div className="text-[10px] text-text-muted">Tokens</div>
@@ -2703,7 +2733,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                           </div>
                           <div>
                             <div className="text-[10px] text-text-muted">ค่าใช้จ่าย</div>
-                            <div className="text-sm font-semibold text-emerald-600">{fmtCost(totals.wsCost)}</div>
+                            <div className="text-sm font-semibold text-success">{fmtCost(totals.wsCost)}</div>
                           </div>
                         </div>
                       </div>
@@ -2783,11 +2813,11 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                         </div>
                         <div>
                           <div className="text-[10px] text-text-muted">Web Search</div>
-                          <div className="text-sm font-semibold text-emerald-500">{allStats.web_search_calls}</div>
+                          <div className="text-sm font-semibold text-success">{allStats.web_search_calls}</div>
                         </div>
                         <div>
                           <div className="text-[10px] text-text-muted">Handoff</div>
-                          <div className="text-sm font-semibold text-amber-500">{allStats.handoff_count}</div>
+                          <div className="text-sm font-semibold text-warning">{allStats.handoff_count}</div>
                         </div>
                       </div>
                     </div>
@@ -2812,15 +2842,15 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                         </div>
                         <div>
                           <div className="text-[10px] text-text-muted">ราคารวม USD</div>
-                          <div className="text-sm font-semibold text-emerald-500">${"$"}{allStats.total_cost_usd.toFixed(4)}</div>
+                          <div className="text-sm font-semibold text-success">${"$"}{allStats.total_cost_usd.toFixed(4)}</div>
                         </div>
                         <div>
                           <div className="text-[10px] text-text-muted">ราคารวม THB</div>
-                          <div className="text-sm font-semibold text-emerald-500">฿{(allStats.total_cost_usd * 36).toFixed(2)}</div>
+                          <div className="text-sm font-semibold text-success">฿{(allStats.total_cost_usd * 36).toFixed(2)}</div>
                         </div>
                         <div>
                           <div className="text-[10px] text-text-muted">เฉลี่ย/ข้อ USD</div>
-                          <div className="text-sm font-semibold text-emerald-500">${"$"}{allStats.avg_cost_usd.toFixed(6)}</div>
+                          <div className="text-sm font-semibold text-success">${"$"}{allStats.avg_cost_usd.toFixed(6)}</div>
                         </div>
                       </div>
                     </div>
@@ -2928,7 +2958,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                     updateSessionShop(currentSessionId, newShop);
                   }
                 }}
-                className="w-full h-9 px-2.5 rounded-lg border border-border bg-surface-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30"
+                className="w-full h-9 px-2.5 rounded-lg border border-border bg-surface-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40"
               >
                 <option value="">— ทุกร้าน —</option>
                 {shops.map((s) => (
@@ -2944,7 +2974,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                 max={50}
                 value={limit}
                 onChange={(e) => setLimit(Math.max(1, Math.min(50, Number(e.target.value) || 10)))}
-                className="w-full h-9 px-2.5 rounded-lg border border-border bg-surface-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30"
+                className="w-full h-9 px-2.5 rounded-lg border border-border bg-surface-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40"
               />
             </div>
 
@@ -2963,14 +2993,14 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                     <div className="flex flex-wrap gap-x-3 gap-y-1 text-text-muted">
                       <span>🏷️ {escapeHtml(p.brand || "—")}</span>
                       <span>🏪 {escapeHtml(p.shop || "—")}</span>
-                      <span className="text-emerald-500">{formatPrice(p.price)}</span>
+                      <span className="text-success">{formatPrice(p.price)}</span>
                       {warrantyText(p.warranty) && (
-                        <span className="text-amber-500">🛡️ {escapeHtml(warrantyText(p.warranty))}</span>
+                        <span className="text-warning">🛡️ {escapeHtml(warrantyText(p.warranty))}</span>
                       )}
                     </div>
                     {p.image_url && (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={p.image_url} alt="" className="w-full max-h-28 object-contain mt-2 rounded bg-surface" onError={(e) => e.currentTarget.remove()} />
+                      <img src={p.image_url} alt={p.name || "รูปสินค้า"} className="w-full max-h-28 object-contain mt-2 rounded bg-surface" onError={(e) => e.currentTarget.remove()} />
                     )}
                     {p.short_link && (
                       <a href={p.short_link} target="_blank" rel="noopener noreferrer" className="block mt-1.5 text-brand hover:underline truncate">

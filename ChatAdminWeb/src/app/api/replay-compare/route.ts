@@ -18,12 +18,20 @@ import { json, error } from "@/backend/lib/http";
 import { shouldUseChatV2, shouldUseChatV3 } from "@/backend/service/systemConfigService";
 import { readFile, writeFile, readdir, stat } from "fs/promises";
 import { existsSync } from "fs";
-import { join } from "path";
+import { join, resolve, basename } from "path";
 import { spawn } from "child_process";
 
 const REPO_ROOT = process.env.REPO_ROOT || "/Users/itdev4/Documents/GitHub/ChatBotProductMS";
 const DEFAULT_FILE = "/Users/itdev4/Documents/GitHub/ChatBotProductMS/docs/test/results/replay2.json";
 const RESULTS_DIR = "/Users/itdev4/Documents/GitHub/ChatBotProductMS/docs/test/results";
+
+// 🔒 C3: Allowed directories for replay file reads
+const ALLOWED_DIRS = [RESULTS_DIR, "/tmp"];
+
+function _isPathAllowed(filePath: string): boolean {
+  const resolved = resolve(filePath);
+  return ALLOWED_DIRS.some((dir) => resolved.startsWith(dir + "/") || resolved === dir);
+}
 
 // ─── Helpers ──────────────────────────────────────────────
 
@@ -129,10 +137,14 @@ async function runReplayScript(params: {
 
   // ⚡ เช็คก่อนว่ามี replay_compare.py รันอยู่ไหม — ถ้ามี ไม่สั่งรันซ้อน
   // (ยกเว้นถ้าเป็น single conv และ process เดิมรัน batch — กรณีนี้อนุญาตให้รันซ้อนได้ เพราะใช้ resource น้อย)
-  const { execSync } = await import("child_process");
+  // 🔒 L6: Use async execFile instead of execSync to avoid blocking event loop
+  const { execFile } = await import("child_process");
+  const { promisify } = await import("util");
+  const execFileAsync = promisify(execFile);
   if (!params.conv) {
     try {
-      const out = execSync("pgrep -f 'replay_compare.py'", { encoding: "utf-8" }).trim();
+      const { stdout } = await execFileAsync("pgrep", ["-f", "replay_compare.py"]);
+      const out = stdout.trim();
       if (out) {
         const pids = out.split("\n").filter(Boolean);
         if (pids.length > 0) {
@@ -201,10 +213,14 @@ export async function GET(req: NextRequest) {
   }
 
   const filePath = file || DEFAULT_FILE;
+  // 🔒 C3: Block path traversal — only allow reads from ALLOWED_DIRS
+  if (!_isPathAllowed(filePath)) {
+    return json({ error: "access_denied", message: "ไฟล์ไม่ได้อยู่ใน directory ที่อนุญาต" }, 403);
+  }
   if (!existsSync(filePath)) {
     return json({
       error: "file_not_found",
-      path: filePath,
+      // 🔒 L2: Don't expose full filesystem path
       message: "ยังไม่มีไฟล์ผล replay — กดปุ่ม Run ก่อน",
     }, 404);
   }
@@ -214,7 +230,8 @@ export async function GET(req: NextRequest) {
     const data = JSON.parse(content);
     return json(data);
   } catch (e) {
-    return error(`failed to read/parse: ${e}`, 500);
+    // 🔒 L2: Don't expose raw error (may contain filesystem path)
+    return error("failed to read/parse replay file", 500);
   }
 }
 
@@ -270,9 +287,13 @@ export async function POST(req: NextRequest) {
 
   if (body.action === "status") {
     // ⚡ เช็คสถานะ script ที่รันอยู่
-    const { execSync } = await import("child_process");
+    // 🔒 L6: Use async execFile instead of execSync to avoid blocking event loop
+    const { execFile: _execFile } = await import("child_process");
+    const { promisify: _promisify } = await import("util");
+    const _execFileAsync = _promisify(_execFile);
     try {
-      const out = execSync("pgrep -f 'replay_compare.py'", { encoding: "utf-8" }).trim();
+      const { stdout } = await _execFileAsync("pgrep", ["-f", "replay_compare.py"]);
+      const out = stdout.trim();
       const pids = out.split("\n").filter(Boolean);
       return json({ running: pids.length > 0, pids });
     } catch {

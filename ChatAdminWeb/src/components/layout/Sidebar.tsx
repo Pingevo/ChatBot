@@ -40,6 +40,9 @@ import {
   ClipboardCheck,
   Gauge,
   FileSearch,
+  Search,
+  X,
+  HelpCircle,
   type LucideIcon,
 } from "lucide-react";
 
@@ -87,7 +90,7 @@ const navGroups: NavGroup[] = [
     label: "กระบวนการ",
     items: [
       { href: "/triggers", label: "ทริกเกอร์", icon: Zap, page: "trigger" },
-      { href: "/workflows", label: "Workflows", icon: GitBranch, page: "workflow" },
+      { href: "/workflows", label: "เวิร์กโฟลว์", icon: GitBranch, page: "workflow" },
       { href: "/quick-replies", label: "คำตอบเร็ว", icon: Reply, page: "quickreply" },
       { href: "/knowledge", label: "ฐานความรู้", icon: BookOpen, page: "kb" },
       { href: "/persona", label: "ตัวแทนร้าน", icon: Sparkles, page: "persona" },
@@ -96,6 +99,7 @@ const navGroups: NavGroup[] = [
   },
   {
     label: "การทดสอบบอท",
+    collapsible: true,
     items: [
       {
         href: "/test-chat/shopee",
@@ -108,15 +112,15 @@ const navGroups: NavGroup[] = [
           { href: "/test-chat/lazada", label: "Lazada" },
         ],
       },
-      { href: "/shadow-inbox", label: "Shadow Inbox", icon: Ghost, page: "shadow-inbox" },
-      { href: "/botworker", label: "Bot Worker", icon: Wrench, badge: "auto", page: "botworker" },
+      { href: "/shadow-inbox", label: "กล่องเงา (Shadow Inbox)", icon: Ghost, page: "shadow-inbox" },
+      { href: "/botworker", label: "เครื่องบอท (Bot Worker)", icon: Wrench, badge: "auto", page: "botworker" },
       { href: "/test-assignment", label: "ทดสอบจ่ายงาน", icon: TestTube2, page: "test-assignment" },
-      { href: "/live-assignment", label: "Live Assignment", icon: Headset, page: "live-assignment" },
-      { href: "/replay-compare", label: "Replay Compare", icon: Scale, page: "replay-compare" },
-      { href: "/test-results", label: "Test Results", icon: ClipboardCheck, page: "test-result" },
-      { href: "/admin-review-kpi", label: "Admin Review KPI", icon: Gauge, page: "admin-review-kpi" },
-      { href: "/admin-chat-result", label: "Admin Chat Result", icon: FileSearch, page: "admin-chat-result" },
-      { href: "/test-chat-result", label: "Test Chat Result", icon: FileSearch, page: "test-chat-result" },
+      { href: "/live-assignment", label: "จ่ายงานสด (Live)", icon: Headset, page: "live-assignment" },
+      { href: "/replay-compare", label: "เปรียบเทียบรีเพลย์", icon: Scale, page: "replay-compare" },
+      { href: "/test-results", label: "ผลการทดสอบ", icon: ClipboardCheck, page: "test-result" },
+      { href: "/admin-review-kpi", label: "KPI รีวิวแอดมิน", icon: Gauge, page: "admin-review-kpi" },
+      { href: "/admin-chat-result", label: "ผลแชทแอดมิน", icon: FileSearch, page: "admin-chat-result" },
+      { href: "/test-chat-result", label: "ผลทดสอบแชท", icon: FileSearch, page: "test-chat-result" },
     ],
   },
   {
@@ -186,6 +190,7 @@ function SubMenu({
         href={item.href}
         onClick={onMobileClose}
         title={item.label}
+        aria-label={item.label}
         className={`flex items-center justify-center rounded-md text-sm transition-colors px-2 py-2 ${
           childActive
             ? "bg-brand/15 text-white"
@@ -201,6 +206,8 @@ function SubMenu({
     <div>
       <button
         onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}
+        aria-controls={`submenu-${item.href.replace(/\//g, "-")}`}
         className={`flex items-center gap-3 rounded-md text-sm transition-colors w-full px-3 py-2 ${
           childActive
             ? "bg-brand/10 text-white font-medium"
@@ -221,7 +228,7 @@ function SubMenu({
         )}
       </button>
       {expanded && (
-        <div className="mt-0.5 ml-[26px] space-y-0.5 border-l border-white/10 pl-2">
+        <div id={`submenu-${item.href.replace(/\//g, "-")}`} className="mt-0.5 ml-[26px] space-y-0.5 border-l border-white/10 pl-2">
           {item.children!.map((child) => {
             const cActive = pathname === child.href;
             return (
@@ -261,6 +268,7 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout } = useAuth();
+  const [navSearch, setNavSearch] = useState("");
 
   // Keyboard shortcut: cmd+b / ctrl+b
   useEffect(() => {
@@ -302,6 +310,22 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
       }),
     }))
     .filter((g) => g.items.length > 0);
+
+  // When searching, filter items by label and force-expand all collapsible groups
+  const isSearching = navSearch.trim().length > 0;
+  const searchLower = navSearch.trim().toLowerCase();
+  const visibleGroups = isSearching
+    ? filteredGroups
+        .map((g) => ({
+          ...g,
+          items: g.items.filter((item) => {
+            const matchSelf = item.label.toLowerCase().includes(searchLower);
+            const matchChildren = item.children?.some((c) => c.label.toLowerCase().includes(searchLower));
+            return matchSelf || matchChildren;
+          }),
+        }))
+        .filter((g) => g.items.length > 0)
+    : filteredGroups;
 
   // Collapsible group state — track which collapsible groups are expanded
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -388,8 +412,31 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
 
         {/* ---- SidebarContent ---- */}
         <div className="flex-1 overflow-y-auto py-2 px-2 space-y-4 sidebar-scroll">
-          {filteredGroups.map((group) => {
-            const isExpanded = expandedGroups.has(group.label);
+          {/* Nav search — ช่วยกรองเมนูใน sidebar ที่มี 20+ items */}
+          {!collapsed && (
+            <div className="relative mb-2">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-pale-sky/50" />
+              <input
+                type="text"
+                value={navSearch}
+                onChange={(e) => setNavSearch(e.target.value)}
+                placeholder="ค้นหาเมนู..."
+                aria-label="ค้นหาเมนู"
+                className="w-full h-8 pl-8 pr-7 rounded-md bg-white/5 text-xs text-white placeholder:text-pale-sky/40 border border-white/10 focus:outline-none focus:border-white/30 focus:ring-1 focus:ring-white/20"
+              />
+              {navSearch && (
+                <button
+                  onClick={() => setNavSearch("")}
+                  aria-label="ล้างการค้นหา"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-pale-sky/50 hover:text-white"
+                >
+                  <X size={13} />
+                </button>
+              )}
+            </div>
+          )}
+          {visibleGroups.map((group) => {
+            const isExpanded = isSearching || expandedGroups.has(group.label);
             const GroupIcon = group.icon;
 
             // Check if any item in this group is active (for styling)
@@ -408,6 +455,8 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
                 {!collapsed && group.collapsible && (
                   <button
                     onClick={() => toggleGroup(group.label)}
+                    aria-expanded={isExpanded}
+                    aria-controls={`group-${group.label.replace(/\s/g, "-")}`}
                     className={`flex items-center gap-3 w-full px-3 py-2 text-sm font-medium rounded-md transition-colors ${
                       groupChildActive
                         ? "text-white"
@@ -434,7 +483,7 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
 
                 {/* SidebarMenu — hidden if collapsible group is collapsed */}
                 {(!group.collapsible || isExpanded || collapsed) && (
-                  <div className="space-y-0.5">
+                  <div id={group.collapsible ? `group-${group.label.replace(/\s/g, "-")}` : undefined} className="space-y-0.5">
                     {group.items.map((item) => {
                       const active =
                         pathname === item.href || pathname.startsWith(item.href + "/");
@@ -460,6 +509,8 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
                           prefetch
                           onClick={onMobileClose}
                           title={collapsed ? item.label : undefined}
+                          aria-label={collapsed ? item.label : undefined}
+                          aria-current={active ? "page" : undefined}
                           className={`
                             flex items-center gap-3 rounded-md text-sm transition-colors relative
                             ${collapsed ? "justify-center px-2 py-2" : "px-3 py-2"}
@@ -500,38 +551,54 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
 
         {/* ---- SidebarFooter ---- */}
         {user && (
-          <div className="border-t border-white/10 p-2 shrink-0">
-            <div
-              className={`flex items-center gap-2.5 rounded-md p-2 hover:bg-white/5 transition-colors cursor-pointer ${
+          <div className="border-t border-white/10 p-2 shrink-0 space-y-1">
+            {/* Help button */}
+            <Link
+              href="/help"
+              onClick={onMobileClose}
+              title={collapsed ? "คู่มือการใช้งาน" : undefined}
+              aria-label={collapsed ? "คู่มือการใช้งาน" : undefined}
+              className={`flex items-center gap-2.5 rounded-md p-2 hover:bg-white/5 transition-colors ${
                 collapsed ? "justify-center" : ""
               }`}
-              onClick={() => {
-                onMobileClose();
-                router.push("/settings");
-              }}
-              title="ไปที่โปรไฟล์"
             >
-              <div className="w-8 h-8 rounded-full bg-brand flex items-center justify-center text-xs font-bold text-white shrink-0">
-                {initials(user.name || user.username)}
-              </div>
+              <HelpCircle size={18} className="text-pale-sky/70 shrink-0" />
               {!collapsed && (
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium text-white truncate">
-                    {user.name || user.username}
-                  </div>
-                  <span className="inline-block mt-0.5 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-brand/80 text-white">
-                    {roleLabel[user.role] || user.role}
-                  </span>
-                </div>
+                <span className="text-sm text-pale-sky/70">คู่มือการใช้งาน</span>
               )}
+            </Link>
+            {/* 🔒 P3: Changed from div onClick → Link for keyboard accessibility */}
+            <div className={`flex items-center gap-2.5 rounded-md p-2 hover:bg-white/5 transition-colors ${collapsed ? "justify-center" : ""}`}>
+              <Link
+                href="/settings"
+                onClick={() => onMobileClose()}
+                className="flex items-center gap-2.5 flex-1 min-w-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 rounded"
+                title="ไปที่โปรไฟล์"
+                aria-label={`โปรไฟล์: ${user.name || user.username}`}
+              >
+                <div className="w-8 h-8 rounded-full bg-brand flex items-center justify-center text-xs font-bold text-white shrink-0">
+                  {initials(user.name || user.username)}
+                </div>
+                {!collapsed && (
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium text-white truncate">
+                      {user.name || user.username}
+                    </div>
+                    <span className="inline-block mt-0.5 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-brand/80 text-white">
+                      {roleLabel[user.role] || user.role}
+                    </span>
+                  </div>
+                )}
+              </Link>
               {!collapsed && (
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
                     handleLogout();
                   }}
-                  className="w-7 h-7 rounded-md flex items-center justify-center text-pale-sky/50 hover:bg-white/10 hover:text-white transition-colors shrink-0"
+                  className="w-7 h-7 rounded-md flex items-center justify-center text-pale-sky/50 hover:bg-white/10 hover:text-white transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
                   title="ออกจากระบบ"
+                  aria-label="ออกจากระบบ"
                 >
                   <LogOut size={14} />
                 </button>

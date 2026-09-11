@@ -18,6 +18,32 @@ import time
 import urllib.request
 import urllib.error
 from typing import Any
+from urllib.parse import urlparse as _urlparse
+import ipaddress as _ipaddress
+import socket as _socket
+
+
+# ---- C1: Image URL validator (SSRF/LFI defense) -----------------------------
+
+def _is_safe_image_url(url: str) -> bool:
+    """🔒 C1+M5: Validate image URL — block file://, private IPs, metadata endpoints.
+    Also checks resolved IP to prevent DNS rebinding."""
+    try:
+        parsed = _urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        hostname = parsed.hostname or ""
+        if not hostname:
+            return False
+        # Resolve and check IP (M5: also catches DNS rebinding to private IPs)
+        resolved = _socket.getaddrinfo(hostname, None)
+        for _fam, _typ, _proto, _cn, sa in resolved:
+            ip = _ipaddress.ip_address(sa[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast:
+                return False
+        return True
+    except Exception:
+        return False
 
 
 # ---- Config -----------------------------------------------------------------
@@ -59,10 +85,13 @@ _API_KEYS: list[str] = _load_api_keys()
 _KEY_CYCLE = _itertools.cycle(_API_KEYS) if _API_KEYS else None
 _KEY_INDEX = 0
 
-# debug log — ยืนยันว่าโหลด keys ครบ (ปิด log ค่าจริง เพื่อความปลอดภัย)
+# debug log — ยืนยันว่าโหลด keys ครบ
+# 🔒 M3: Log only count + hash prefix, not actual key fragments
+import hashlib as _hashlib
 print(f"[OR-V3] โหลด OpenRouter API keys จำนวน: {len(_API_KEYS)}", file=sys.stderr)
 for i, k in enumerate(_API_KEYS):
-    print(f"[OR-V3]   key[{i}] = {k[:8]}...{k[-4:]}", file=sys.stderr)
+    _hash = _hashlib.sha256(k.encode()).hexdigest()[:8]
+    print(f"[OR-V3]   key[{i}] = sha256:{_hash}", file=sys.stderr)
 
 
 def _next_api_key() -> str:
@@ -147,17 +176,23 @@ def call_or(
             messages.append({"role": role, "content": h.get("text", "")})
 
     # user message — รองรับ multimodal (ส่ง image_url ใน content)
+    # 🔒 H1: Limit user message length to reduce prompt injection risk
+    _safe_user = str(user)[:2000] if user else ""
     if images:
-        content: list[dict[str, Any]] = [{"type": "text", "text": user}]
+        content: list[dict[str, Any]] = [{"type": "text", "text": _safe_user}]
         for img_url in images[:3]:  # จำกัด 3 รูป/turn เหมือน legacy
             if img_url and img_url.strip():
+                # 🔒 C1: Validate URL — block file://, private IPs, metadata endpoints
+                if not _is_safe_image_url(img_url):
+                    print(f"[OR-V3] blocked unsafe image URL: {img_url[:60]}", file=sys.stderr)
+                    continue
                 content.append({
                     "type": "image_url",
                     "image_url": {"url": img_url},
                 })
         messages.append({"role": "user", "content": content})
     else:
-        messages.append({"role": "user", "content": user})
+        messages.append({"role": "user", "content": _safe_user})
 
     payload = {
         "model": model,

@@ -1,16 +1,24 @@
 "use client";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Zap, Plus, X, Pencil, Trash2, RefreshCw, Check, ChevronDown, Search, ArrowDownUp } from "lucide-react";
+import { FilterChips } from "@/components/ui/FilterChips";
+import { FormField } from "@/components/ui/FormField";
+import { Loading } from "@/components/ui/Loading";
+import { PageShell } from "@/components/ui/PageShell";
+import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
+import { Zap, Plus, X, Pencil, Trash2, RefreshCw, Check, ChevronDown, Search, ArrowDownUp, Info } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
 import { canEditPage } from "@/lib/roles";
 import { triggerService } from "@/lib/services";
+import { useSearchShortcut, useEscToClear, useListboxNav, useFocusTrap } from "@/lib/useKeyboardShortcuts";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import type { TriggerRule, Topic, Platform } from "@/lib/types";
 import { api } from "@/lib/apiClient";
+import { Tooltip } from "@/components/ui/Tooltip";
+import { FilterPresets } from "@/components/ui/FilterPresets";
 
 interface ShopOption {
   shop_id: string;
@@ -100,7 +108,7 @@ function MultiSelect<T extends string>({
         type="button"
         disabled={disabled}
         onClick={() => setOpen(!open)}
-        className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text flex items-center justify-between gap-2 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-brand/30"
+        className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text flex items-center justify-between gap-2 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-brand/40"
       >
         <span className="text-sm truncate">
           <span className="text-text-subtle">{label}: </span>
@@ -144,6 +152,9 @@ function MultiSelect<T extends string>({
 }
 
 export default function TriggersPage() {
+  const searchRef = useRef<HTMLInputElement>(null);
+  useSearchShortcut(searchRef);
+  const handleSearchEsc = useEscToClear(() => setSearch(""));
   const { user } = useAuth();
   const editable = canEditPage(user, "trigger");
   const { catchError } = useToastError();
@@ -151,6 +162,7 @@ export default function TriggersPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const formModalRef = useFocusTrap<HTMLDivElement>(showForm);
   const [editing, setEditing] = useState<TriggerRule | null>(null);
   const [form, setForm] = useState<FormData>(emptyForm);
   const [keywordInput, setKeywordInput] = useState("");
@@ -170,6 +182,34 @@ export default function TriggersPage() {
   const [showCreatedDd, setShowCreatedDd] = useState(false);
   const [showUpdatedDd, setShowUpdatedDd] = useState(false);
   const [admins, setAdmins] = useState<{ admin_id: string; name?: string; username?: string }[]>([]);
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const formSnapshot = useRef("");
+
+  // arrow-key navigation for filter dropdowns
+  const platformNav = useListboxNav(3, (i) => {
+    const p = (["shopee", "tiktok", "lazada"] as Platform[])[i];
+    const sel = filterPlatforms.includes(p);
+    setFilterPlatforms(sel ? filterPlatforms.filter((x) => x !== p) : [...filterPlatforms, p]);
+  }, () => setShowPlatformDd(false));
+  const enabledNav = useListboxNav(3, (i) => {
+    const v = (["all", "enabled", "disabled"] as const)[i];
+    setFilterEnabled(v); setShowEnabledDd(false);
+  }, () => setShowEnabledDd(false));
+  const sortNav = useListboxNav(5, (i) => {
+    const v = (["recent", "oldest", "recent_edit", "oldest_edit", "name"] as const)[i];
+    setSortBy(v); setShowSortDd(false);
+  }, () => setShowSortDd(false));
+  const createdNav = useListboxNav(admins.length + 1, (i) => {
+    if (i === 0) { setFilterCreatedBy("all"); setShowCreatedDd(false); return; }
+    const a = admins[i - 1];
+    if (a) { setFilterCreatedBy(a.admin_id); setShowCreatedDd(false); }
+  }, () => setShowCreatedDd(false));
+  const updatedNav = useListboxNav(admins.length + 1, (i) => {
+    if (i === 0) { setFilterUpdatedBy("all"); setShowUpdatedDd(false); return; }
+    const a = admins[i - 1];
+    if (a) { setFilterUpdatedBy(a.admin_id); setShowUpdatedDd(false); }
+  }, () => setShowUpdatedDd(false));
 
   // โหลด shops list (สำหรับ multi-select ในฟอร์ม)
   // ⚡ dedupe by shop_id — /api/shops ส่งกลับ shop เดียวหลายบรรทัด (หนึ่งบรรทัดต่อ platform)
@@ -189,11 +229,33 @@ export default function TriggersPage() {
         }
         setAllShops(Array.from(map.values()));
       })
-      .catch(() => setAllShops([]));
+      .catch((e) => {
+        catchError(e, "โหลดรายชื่อร้านไม่สำเร็จ");
+        setAllShops([]);
+      });
     api().get<{ users: { admin_id: string; name?: string; username?: string }[] }>("/users/list")
       .then((r) => setAdmins(r.data.users || []))
-      .catch(() => setAdmins([]));
+      .catch((e) => {
+        catchError(e, "โหลดรายชื่อแอดมินไม่สำเร็จ");
+        setAdmins([]);
+      });
   }, []);
+
+  const closeForm = async () => {
+    if (saving) return;
+    const current = JSON.stringify({ name: form.name, keywords: form.keywords, topic: form.topic, action: form.action, bot_template: form.bot_template, platforms: form.platforms, shop_ids: form.shop_ids, enabled: form.enabled });
+    const isDirty = current !== formSnapshot.current;
+    if (!isDirty) { setEditing(null); setShowForm(false); return; }
+    const ok = await confirm.ask({
+      title: "ปิดฟอร์มโดยไม่บันทึก?",
+      message: "การเปลี่ยนแปลงที่ยังไม่บันทึกจะหายไป",
+      confirmText: "ปิด",
+      variant: "primary",
+    });
+    if (!ok) return;
+    setEditing(null);
+    setShowForm(false);
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -213,6 +275,7 @@ export default function TriggersPage() {
       }) as TriggerRule[]);
     } catch (err) {
       console.error("load triggers failed", err);
+      toast.error("โหลดทริกเกอร์ไม่สำเร็จ", 0, { label: "ลองใหม่", onClick: () => load() });
       setTriggers([]);
     } finally {
       setLoading(false);
@@ -223,11 +286,53 @@ export default function TriggersPage() {
     load();
   }, [load]);
 
+  const toggleSelect = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === filteredTriggers.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(filteredTriggers.map(t => t.id)));
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    const ok = await confirm.ask({
+      title: `ลบ ${selectedIds.size} ทริกเกอร์?`,
+      message: "การลบเป็นถาวร — ไม่สามารถกู้คืนได้",
+      confirmText: "ลบ",
+      variant: "danger",
+    });
+    if (!ok) return;
+    setSaving(true);
+    try {
+      const ids = Array.from(selectedIds);
+      await Promise.all(ids.map(id => triggerService.delete(id)));
+      setSelectedIds(new Set());
+      await load();
+      toast.success(`ลบ ${ids.length} ทริกเกอร์แล้ว`);
+    } catch (err) {
+      catchError(err, "ลบหลายรายการไม่สำเร็จ");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   function openCreate() {
     setEditing(null);
     setForm(emptyForm);
     setKeywordInput("");
+    setTouched({});
     setShowForm(true);
+    formSnapshot.current = JSON.stringify({ name: "", keywords: [], topic: "general", action: "bot_answer", bot_template: "", platforms: [], shop_ids: [], enabled: true });
   }
 
   function openEdit(t: TriggerRule) {
@@ -244,7 +349,9 @@ export default function TriggersPage() {
       enabled: t.enabled,
     });
     setKeywordInput("");
+    setTouched({});
     setShowForm(true);
+    formSnapshot.current = JSON.stringify({ name: t.name || "", keywords: t.keywords, topic: t.topic, action: t.action, bot_template: t.bot_template || "", platforms: t.platforms || [], shop_ids: t.shop_ids || [], enabled: t.enabled });
   }
 
   function addKeyword() {
@@ -261,7 +368,12 @@ export default function TriggersPage() {
   }
 
   async function handleSave() {
-    if (!form.name.trim() || form.keywords.length === 0) return;
+    const firstError = !form.name.trim() ? "trigger-form-name" : form.keywords.length === 0 ? "trigger-form-keywords" : null;
+    if (firstError) {
+      setTouched({ name: true, keywords: true });
+      document.getElementById(firstError)?.focus();
+      return;
+    }
     setSaving(true);
     try {
       if (editing) {
@@ -310,7 +422,7 @@ export default function TriggersPage() {
     try {
       await triggerService.delete(id);
       await load();
-      toast.success("ลบทริกเกอร์แล้ว");
+      toast.success(`ลบ "${t?.name || id}" แล้ว`);
     } catch (err) {
       catchError(err, "ลบทริกเกอร์ไม่สำเร็จ");
     }
@@ -318,12 +430,6 @@ export default function TriggersPage() {
 
   async function toggleEnabled(t: TriggerRule) {
     const newState = !t.enabled;
-    const ok = await confirm.ask({
-      title: newState ? "เปิดใช้งานทริกเกอร์?" : "ปิดใช้งานทริกเกอร์?",
-      message: `"${t.name}" — ${newState ? "จะเริ่มตอบคีย์เวิร์ดที่ตรงเงื่อนไข" : "จะหยุดตอบคีย์เวิร์ด"}`,
-      confirmText: newState ? "เปิดใช้งาน" : "ปิดใช้งาน",
-    });
-    if (!ok) return;
     try {
       await triggerService.toggle(t.id, newState);
       await load();
@@ -386,6 +492,13 @@ export default function TriggersPage() {
     ? allShops
     : allShops.filter((s) => filterPlatforms.includes(s.platform));
 
+  const shopNav = useListboxNav(filterShopOptions.length, (i) => {
+    const s = filterShopOptions[i];
+    if (!s) return;
+    const sel = filterShopIds.includes(s.shop_id);
+    setFilterShopIds(sel ? filterShopIds.filter((x) => x !== s.shop_id) : [...filterShopIds, s.shop_id]);
+  }, () => setShowShopDd(false));
+
   const activeFilterCount =
     (filterPlatforms.length > 0 ? 1 : 0) +
     (filterShopIds.length > 0 ? 1 : 0) +
@@ -403,55 +516,58 @@ export default function TriggersPage() {
   }
 
   return (
-    <div className="h-full overflow-y-auto">
-      {/* Header — navbar เดิม (เหมือน shops/team) */}
-      <div className="px-6 py-5 border-b border-border bg-surface sticky top-0 z-10">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-brand/15 flex items-center justify-center">
-              <Zap size={20} className="text-brand" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-text">ทริกเกอร์</h1>
-              <p className="text-xs text-text-muted">
-                {editable ? "ตั้งค่าคีย์เวิร์ดที่บอทจะส่งต่อแอดมิน" : "ดูคีย์เวิร์ดที่บอทจะส่งต่อแอดมิน"} · {filteredTriggers.length}/{triggers.length} ตัว
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button size="sm" variant="outline" onClick={load} disabled={loading}>
-              <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
+    // Header — navbar เดิม (เหมือน shops/team)
+    <PageShell
+      icon={Zap}
+      title="ทริกเกอร์"
+      helpHref="/help#triggers"
+      subtitle={
+        <>
+          {editable ? "ตั้งค่าคีย์เวิร์ดที่บอทจะส่งต่อแอดมิน" : "ดูคีย์เวิร์ดที่บอทจะส่งต่อแอดมิน"} · {filteredTriggers.length}/{triggers.length} ตัว
+        </>
+      }
+      actions={
+        <>
+          <Button size="sm" variant="outline" onClick={load} disabled={loading}>
+            <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
+          </Button>
+          {editable && (
+            <Button size="sm" onClick={openCreate}>
+              <Plus size={14} /> เพิ่มทริกเกอร์
             </Button>
-            {editable && (
-              <Button size="sm" onClick={openCreate}>
-                <Plus size={14} /> เพิ่มทริกเกอร์
-              </Button>
-            )}
-          </div>
-        </div>
-
+          )}
+        </>
+      }
+      filterBarBelow
+      filterBar={
+        <>
         {/* Filter bar — search + platform + shop + enabled + sort */}
         <div className="flex items-center gap-2 mt-4 flex-wrap">
           <div className="relative flex-1 min-w-[200px] max-w-md">
             <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-subtle" />
             <input
               type="text"
+              ref={searchRef}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={handleSearchEsc}
               placeholder="ค้นหา ชื่อ / คีย์เวิร์ด..."
-              className="w-full h-8 pl-8 pr-3 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
+              className="w-full h-8 pl-8 pr-8 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
             />
+            <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-subtle border border-border rounded px-1 py-0.5 pointer-events-none">/</kbd>
           </div>
 
           {/* Platform filter (multi) */}
           <div className="relative">
             <button
               onClick={() => { setShowPlatformDd(!showPlatformDd); setShowShopDd(false); setShowEnabledDd(false); setShowSortDd(false); }}
+              aria-expanded={showPlatformDd}
+              aria-haspopup="listbox"
               style={{ minWidth: "110px" }}
               className={`h-8 px-2.5 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterPlatforms.length > 0 ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
             >
               <span className="text-text-subtle shrink-0">แพลตฟอร์ม:</span>
-              <span className="font-medium truncate" style={{ minWidth: "40px", maxWidth: "60px" }}>
+              <span className="font-medium truncate" style={{ minWidth: "40px", maxWidth: "120px" }}>
                 {filterPlatforms.length === 0 ? "ทั้งหมด" : filterPlatforms.length === 1 ? filterPlatforms[0] : `${filterPlatforms.length} เลือก`}
               </span>
               <ChevronDown size={11} className="text-text-muted shrink-0" />
@@ -459,11 +575,11 @@ export default function TriggersPage() {
             {showPlatformDd && (
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowPlatformDd(false)} />
-                <div className="absolute top-full left-0 mt-1 min-w-[140px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
-                  {(["shopee", "tiktok", "lazada"] as Platform[]).map((p) => {
+                <div ref={(el) => { if (showPlatformDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามแพลตฟอร์ม" aria-activedescendant={`platform-option-${platformNav.activeIndex}`} onKeyDown={(e) => { platformNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[140px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+                  {(["shopee", "tiktok", "lazada"] as Platform[]).map((p, i) => {
                     const sel = filterPlatforms.includes(p);
                     return (
-                      <button key={p} onClick={() => setFilterPlatforms(sel ? filterPlatforms.filter((x) => x !== p) : [...filterPlatforms, p])}
+                      <button key={p} id={`platform-option-${i}`} role="option" aria-selected={sel} onClick={() => setFilterPlatforms(sel ? filterPlatforms.filter((x) => x !== p) : [...filterPlatforms, p])}
                         className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${sel ? "text-brand font-medium" : "text-text"}`}>
                         <Check size={11} className={sel ? "" : "opacity-0"} />
                         <span className="capitalize">{p}</span>
@@ -479,24 +595,28 @@ export default function TriggersPage() {
           <div className="relative">
             <button
               onClick={() => { setShowShopDd(!showShopDd); setShowPlatformDd(false); setShowEnabledDd(false); setShowSortDd(false); }}
+              aria-expanded={showShopDd}
+              aria-haspopup="listbox"
               disabled={filterShopOptions.length === 0}
               style={{ minWidth: "90px" }}
               className={`h-8 px-2.5 text-xs rounded-lg border flex items-center gap-1.5 transition-colors disabled:opacity-40 ${filterShopIds.length > 0 ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
             >
               <span className="text-text-subtle shrink-0">ร้าน:</span>
-              <span className="font-medium truncate" style={{ minWidth: "30px", maxWidth: "50px" }}>
-                {filterShopIds.length === 0 ? "ทั้งหมด" : `${filterShopIds.length} ร้าน`}
+              <span className="font-medium truncate" style={{ minWidth: "30px", maxWidth: "120px" }}>
+                {filterShopIds.length === 0 ? "ทั้งหมด" : filterShopIds.length <= 2
+                  ? filterShopIds.map(id => allShops.find(s => s.shop_id === id)?.shopname || id).join(", ")
+                  : `${filterShopIds.length} ร้าน`}
               </span>
               <ChevronDown size={11} className="text-text-muted shrink-0" />
             </button>
             {showShopDd && (
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowShopDd(false)} />
-                <div className="absolute top-full left-0 mt-1 min-w-[180px] max-h-60 overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
-                  {filterShopOptions.map((s) => {
+                <div ref={(el) => { if (showShopDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามร้าน" aria-activedescendant={`shop-option-${shopNav.activeIndex}`} onKeyDown={(e) => { shopNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[180px] max-h-60 overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+                  {filterShopOptions.map((s, i) => {
                     const sel = filterShopIds.includes(s.shop_id);
                     return (
-                      <button key={s.shop_id} onClick={() => setFilterShopIds(sel ? filterShopIds.filter((x) => x !== s.shop_id) : [...filterShopIds, s.shop_id])}
+                      <button key={s.shop_id} id={`shop-option-${i}`} role="option" aria-selected={sel} onClick={() => setFilterShopIds(sel ? filterShopIds.filter((x) => x !== s.shop_id) : [...filterShopIds, s.shop_id])}
                         className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${sel ? "text-brand font-medium" : "text-text"}`}>
                         <Check size={11} className={sel ? "" : "opacity-0"} />
                         <span className="truncate">{s.shopname}</span>
@@ -512,6 +632,8 @@ export default function TriggersPage() {
           <div className="relative">
             <button
               onClick={() => { setShowEnabledDd(!showEnabledDd); setShowPlatformDd(false); setShowShopDd(false); setShowSortDd(false); }}
+              aria-expanded={showEnabledDd}
+              aria-haspopup="listbox"
               style={{ minWidth: "90px" }}
               className={`h-8 px-2.5 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterEnabled !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
             >
@@ -524,13 +646,13 @@ export default function TriggersPage() {
             {showEnabledDd && (
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowEnabledDd(false)} />
-                <div className="absolute top-full left-0 mt-1 min-w-[100px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+                <div ref={(el) => { if (showEnabledDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามสถานะ" aria-activedescendant={`enabled-option-${enabledNav.activeIndex}`} onKeyDown={(e) => { enabledNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[100px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
                   {([
                     { v: "all", l: "ทั้งหมด" },
                     { v: "enabled", l: "เปิดใช้" },
                     { v: "disabled", l: "ปิดใช้" },
-                  ] as const).map((s) => (
-                    <button key={s.v} onClick={() => { setFilterEnabled(s.v); setShowEnabledDd(false); }}
+                  ] as const).map((s, i) => (
+                    <button key={s.v} id={`enabled-option-${i}`} role="option" aria-selected={filterEnabled === s.v} onClick={() => { setFilterEnabled(s.v); setShowEnabledDd(false); }}
                       className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterEnabled === s.v ? "text-brand font-medium" : "text-text"}`}>
                       <Check size={11} className={filterEnabled === s.v ? "" : "opacity-0"} />
                       {s.l}
@@ -545,6 +667,8 @@ export default function TriggersPage() {
           <div className="relative">
             <button
               onClick={() => { setShowSortDd(!showSortDd); setShowPlatformDd(false); setShowShopDd(false); setShowEnabledDd(false); }}
+              aria-expanded={showSortDd}
+              aria-haspopup="listbox"
               style={{ minWidth: "90px" }}
               className="h-8 px-2.5 text-xs rounded-lg border border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky flex items-center gap-1.5 transition-colors"
             >
@@ -556,15 +680,15 @@ export default function TriggersPage() {
             {showSortDd && (
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowSortDd(false)} />
-                <div className="absolute top-full right-0 mt-1 min-w-[120px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+                <div ref={(el) => { if (showSortDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="เรียงลำดับ" aria-activedescendant={`sort-option-${sortNav.activeIndex}`} onKeyDown={(e) => { sortNav.onKeyDown(e); }} className="absolute top-full right-0 mt-1 min-w-[120px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
                   {([
                     { v: "recent", l: "สร้างใหม่สุด" },
                     { v: "oldest", l: "สร้างเก่าสุด" },
                     { v: "recent_edit", l: "แก้ไขใหม่สุด" },
                     { v: "oldest_edit", l: "แก้ไขเก่าสุด" },
                     { v: "name", l: "ชื่อ A-Z" },
-                  ] as const).map((s) => (
-                    <button key={s.v} onClick={() => { setSortBy(s.v); setShowSortDd(false); }}
+                  ] as const).map((s, i) => (
+                    <button key={s.v} id={`sort-option-${i}`} role="option" aria-selected={sortBy === s.v} onClick={() => { setSortBy(s.v); setShowSortDd(false); }}
                       className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${sortBy === s.v ? "text-brand font-medium" : "text-text"}`}>
                       <Check size={11} className={sortBy === s.v ? "" : "opacity-0"} />
                       {s.l}
@@ -579,6 +703,8 @@ export default function TriggersPage() {
           <div className="relative">
             <button
               onClick={() => { setShowCreatedDd(!showCreatedDd); setShowPlatformDd(false); setShowShopDd(false); setShowEnabledDd(false); setShowSortDd(false); setShowUpdatedDd(false); }}
+              aria-expanded={showCreatedDd}
+              aria-haspopup="listbox"
               style={{ minWidth: "100px" }}
               className={`h-8 px-2.5 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterCreatedBy !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
             >
@@ -591,13 +717,13 @@ export default function TriggersPage() {
             {showCreatedDd && (
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowCreatedDd(false)} />
-                <div className="absolute top-full left-0 mt-1 min-w-[140px] max-h-60 overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
-                  <button onClick={() => { setFilterCreatedBy("all"); setShowCreatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterCreatedBy === "all" ? "text-brand font-medium" : "text-text"}`}>
+                <div ref={(el) => { if (showCreatedDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามผู้สร้าง" aria-activedescendant={`created-option-${createdNav.activeIndex}`} onKeyDown={(e) => { createdNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[140px] max-h-60 overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+                  <button id="created-option-0" role="option" aria-selected={filterCreatedBy === "all"} onClick={() => { setFilterCreatedBy("all"); setShowCreatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterCreatedBy === "all" ? "text-brand font-medium" : "text-text"}`}>
                     <Check size={11} className={filterCreatedBy === "all" ? "" : "opacity-0"} /> ทั้งหมด
                   </button>
                   <div className="border-t border-border my-1" />
-                  {admins.map((a) => (
-                    <button key={a.admin_id} onClick={() => { setFilterCreatedBy(a.admin_id); setShowCreatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterCreatedBy === a.admin_id ? "text-brand font-medium" : "text-text"}`}>
+                  {admins.map((a, i) => (
+                    <button key={a.admin_id} id={`created-option-${i + 1}`} role="option" aria-selected={filterCreatedBy === a.admin_id} onClick={() => { setFilterCreatedBy(a.admin_id); setShowCreatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterCreatedBy === a.admin_id ? "text-brand font-medium" : "text-text"}`}>
                       <Check size={11} className={filterCreatedBy === a.admin_id ? "" : "opacity-0"} /> {a.name || a.username}
                     </button>
                   ))}
@@ -610,6 +736,8 @@ export default function TriggersPage() {
           <div className="relative">
             <button
               onClick={() => { setShowUpdatedDd(!showUpdatedDd); setShowPlatformDd(false); setShowShopDd(false); setShowEnabledDd(false); setShowSortDd(false); setShowCreatedDd(false); }}
+              aria-expanded={showUpdatedDd}
+              aria-haspopup="listbox"
               style={{ minWidth: "100px" }}
               className={`h-8 px-2.5 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterUpdatedBy !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
             >
@@ -622,13 +750,13 @@ export default function TriggersPage() {
             {showUpdatedDd && (
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowUpdatedDd(false)} />
-                <div className="absolute top-full left-0 mt-1 min-w-[140px] max-h-60 overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
-                  <button onClick={() => { setFilterUpdatedBy("all"); setShowUpdatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterUpdatedBy === "all" ? "text-brand font-medium" : "text-text"}`}>
+                <div ref={(el) => { if (showUpdatedDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามผู้แก้ไข" aria-activedescendant={`updated-option-${updatedNav.activeIndex}`} onKeyDown={(e) => { updatedNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[140px] max-h-60 overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+                  <button id="updated-option-0" role="option" aria-selected={filterUpdatedBy === "all"} onClick={() => { setFilterUpdatedBy("all"); setShowUpdatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterUpdatedBy === "all" ? "text-brand font-medium" : "text-text"}`}>
                     <Check size={11} className={filterUpdatedBy === "all" ? "" : "opacity-0"} /> ทั้งหมด
                   </button>
                   <div className="border-t border-border my-1" />
-                  {admins.map((a) => (
-                    <button key={a.admin_id} onClick={() => { setFilterUpdatedBy(a.admin_id); setShowUpdatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterUpdatedBy === a.admin_id ? "text-brand font-medium" : "text-text"}`}>
+                  {admins.map((a, i) => (
+                    <button key={a.admin_id} id={`updated-option-${i + 1}`} role="option" aria-selected={filterUpdatedBy === a.admin_id} onClick={() => { setFilterUpdatedBy(a.admin_id); setShowUpdatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterUpdatedBy === a.admin_id ? "text-brand font-medium" : "text-text"}`}>
                       <Check size={11} className={filterUpdatedBy === a.admin_id ? "" : "opacity-0"} /> {a.name || a.username}
                     </button>
                   ))}
@@ -637,6 +765,30 @@ export default function TriggersPage() {
             )}
           </div>
 
+          {/* Preset */}
+          <FilterPresets
+            pageKey="triggers"
+            adminId={user?.admin_id || "anon"}
+            currentValues={{
+              search,
+              filterPlatforms,
+              filterShopIds,
+              filterEnabled,
+              sortBy,
+              filterCreatedBy,
+              filterUpdatedBy,
+            }}
+            onApply={(v) => {
+              setSearch(v.search || "");
+              setFilterPlatforms(v.filterPlatforms || []);
+              setFilterShopIds(v.filterShopIds || []);
+              setFilterEnabled(v.filterEnabled || "all");
+              setSortBy(v.sortBy || "recent");
+              setFilterCreatedBy(v.filterCreatedBy || "all");
+              setFilterUpdatedBy(v.filterUpdatedBy || "all");
+            }}
+          />
+
           {/* Clear */}
           {(activeFilterCount > 0 || search) && (
             <button onClick={clearFilters} className="h-8 px-2 text-xs text-text-muted hover:text-vibrant-coral hover:bg-surface-2 rounded-lg flex items-center gap-1 transition-colors">
@@ -644,11 +796,29 @@ export default function TriggersPage() {
             </button>
           )}
         </div>
-      </div>
 
-      <div className="p-6">
+        {/* Active filter chips */}
+        {(activeFilterCount > 0 || search) && (
+          <div className="mt-2">
+            <FilterChips
+              chips={[
+                ...(search ? [{ key: "search", label: `ค้นหา: ${search}`, onRemove: () => setSearch("") }] : []),
+                ...(filterPlatforms.length > 0 ? [{ key: "platforms", label: `แพลตฟอร์ม: ${filterPlatforms.join(", ")}`, onRemove: () => setFilterPlatforms([]) }] : []),
+                ...(filterShopIds.length > 0 ? [{ key: "shops", label: `ร้าน: ${filterShopIds.length <= 3 ? filterShopIds.map(id => allShops.find(s => s.shop_id === id)?.shopname || id).join(", ") : `${filterShopIds.length} ร้าน`}`, onRemove: () => setFilterShopIds([]) }] : []),
+                ...(filterEnabled !== "all" ? [{ key: "enabled", label: `สถานะ: ${filterEnabled === "enabled" ? "เปิดใช้" : "ปิดใช้"}`, onRemove: () => setFilterEnabled("all") }] : []),
+                ...(filterCreatedBy !== "all" ? [{ key: "createdBy", label: `สร้างโดย: ${admins.find(a => a.admin_id === filterCreatedBy)?.name || filterCreatedBy}`, onRemove: () => setFilterCreatedBy("all") }] : []),
+                ...(filterUpdatedBy !== "all" ? [{ key: "updatedBy", label: `แก้โดย: ${admins.find(a => a.admin_id === filterUpdatedBy)?.name || filterUpdatedBy}`, onRemove: () => setFilterUpdatedBy("all") }] : []),
+              ]}
+              onClearAll={clearFilters}
+            />
+          </div>
+        )}
+        </>
+      }
+      contentClassName="p-6"
+    >
         {loading ? (
-          <div className="text-center py-12 text-text-muted text-sm">กำลังโหลด...</div>
+          <div className="flex items-center justify-center py-12"><Loading /></div>
         ) : triggers.length === 0 ? (
           <EmptyState
             icon={Zap}
@@ -658,14 +828,53 @@ export default function TriggersPage() {
         ) : filteredTriggers.length === 0 ? (
           <div className="text-center py-12 text-text-muted text-sm">ไม่พบทริกเกอร์ตรงเงื่อนไข</div>
         ) : (
+          <>
+          {selectedIds.size > 0 && (
+            <div className="flex items-center gap-2 px-4 py-2 bg-warning-soft border-b border-warning/30 rounded-xl mb-2">
+              <span className="text-xs text-warning-dark font-medium">เลือกแล้ว {selectedIds.size} รายการ</span>
+              <button
+                onClick={handleBulkDelete}
+                disabled={saving}
+                className="text-xs px-2 py-1 rounded-md border border-error/30 text-error hover:bg-error/5 disabled:opacity-50 transition-colors"
+              >
+                ลบที่เลือก
+              </button>
+              <button
+                onClick={() => setSelectedIds(new Set())}
+                className="text-xs px-2 py-1 rounded-md text-text-muted hover:bg-surface-2 transition-colors"
+              >
+                ยกเลิกเลือก
+              </button>
+            </div>
+          )}
           <div className="space-y-2">
+            {filteredTriggers.length > 0 && (
+              <div className="flex items-center gap-2 px-4 py-1">
+                <input
+                  type="checkbox"
+                  checked={selectedIds.size === filteredTriggers.length && filteredTriggers.length > 0}
+                  onChange={toggleSelectAll}
+                  className="w-4 h-4 rounded border-border accent-brand"
+                  aria-label="เลือกทั้งหมดในหน้านี้"
+                />
+                <span className="text-xs text-text-muted">เลือกทั้งหมดในหน้านี้</span>
+              </div>
+            )}
             {filteredTriggers.map((t) => (
               <div
                 key={t.id}
                 className="bg-surface rounded-xl border border-border p-4 hover:border-pale-sky transition-colors"
               >
                 <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 min-w-0">
+                  <div className="flex items-start gap-3 flex-1 min-w-0">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(t.id)}
+                      onChange={() => toggleSelect(t.id)}
+                      className="w-4 h-4 rounded border-border accent-brand mt-1 shrink-0"
+                      aria-label={`เลือก ${t.name}`}
+                    />
+                    <div className="flex-1 min-w-0">
                     {/* Title row */}
                     <div className="flex items-center gap-2 mb-2 flex-wrap">
                       <span className="text-sm font-semibold text-text">
@@ -689,7 +898,7 @@ export default function TriggersPage() {
                         <Badge tone="neutral">ทุกร้าน</Badge>
                       ) : (t.shop_ids || []).length <= 2 ? (
                         (t.shop_ids || []).map((s) => (
-                          <Badge key={s} tone="neutral">{s.slice(0, 12)}</Badge>
+                          <Badge key={s} tone="neutral">{allShops.find(shop => shop.shop_id === s)?.shopname || s}</Badge>
                         ))
                       ) : (
                         <Badge tone="neutral">{(t.shop_ids || []).length} ร้าน</Badge>
@@ -720,26 +929,19 @@ export default function TriggersPage() {
                       </div>
                     )}
                   </div>
+                  </div>
 
                   {editable && (
                     <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        onClick={() => toggleEnabled(t)}
-                        className={`w-10 h-5 rounded-full transition-colors ${
-                          t.enabled ? "bg-brand" : "bg-surface-2"
-                        }`}
-                        title={t.enabled ? "ปิด" : "เปิด"}
-                      >
-                        <div
-                          className={`w-4 h-4 bg-white rounded-full transition-transform ${
-                            t.enabled ? "translate-x-5" : "translate-x-0.5"
-                          }`}
-                        />
-                      </button>
+                      <ToggleSwitch
+                        enabled={t.enabled}
+                        onChange={() => toggleEnabled(t)}
+                      />
                       <button
                         onClick={() => openEdit(t)}
                         className="w-7 h-7 rounded-md hover:bg-surface-2 flex items-center justify-center"
                         title="แก้ไข"
+                        aria-label="แก้ไข"
                       >
                         <Pencil size={13} className="text-text-muted" />
                       </button>
@@ -747,6 +949,7 @@ export default function TriggersPage() {
                         onClick={() => handleDelete(t.id)}
                         className="w-7 h-7 rounded-md hover:bg-vibrant-coral-soft flex items-center justify-center"
                         title="ลบ"
+                        aria-label="ลบ"
                       >
                         <Trash2 size={13} className="text-text-muted" />
                       </button>
@@ -756,52 +959,67 @@ export default function TriggersPage() {
               </div>
             ))}
           </div>
+          </>
         )}
-      </div>
 
       {/* Trigger Form Modal */}
       {showForm && (
         <div
           className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
-          onClick={() => !saving && setShowForm(false)}
+          onClick={() => closeForm()}
         >
           <div
             className="bg-surface rounded-2xl shadow-xl w-full max-w-lg max-h-[85vh] overflow-y-auto"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="trigger-form-modal-title"
+            ref={formModalRef}
+            tabIndex={-1}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between p-4 border-b border-border sticky top-0 bg-surface">
-              <h2 className="text-base font-semibold text-text">
+              <h2 id="trigger-form-modal-title" className="text-base font-semibold text-text">
                 {editing ? "แก้ไขทริกเกอร์" : "เพิ่มทริกเกอร์"}
               </h2>
               <button
-                onClick={() => setShowForm(false)}
+                onClick={() => closeForm()}
                 disabled={saving}
+                title="ปิด" aria-label="ปิด"
                 className="w-8 h-8 rounded-md hover:bg-surface-2 flex items-center justify-center disabled:opacity-50"
               >
                 <X size={16} className="text-text-muted" />
               </button>
             </div>
+            <form onSubmit={(e) => { e.preventDefault(); handleSave(); }}>
             <div className="p-4 space-y-4">
               {/* Name */}
-              <div>
-                <label className="block text-sm font-medium text-text mb-1.5">ชื่อทริกเกอร์</label>
+              <FormField
+                id="trigger-form-name"
+                label="ชื่อทริกเกอร์"
+                error={touched.name && !form.name.trim() ? "กรุณาตั้งชื่อทริกเกอร์" : undefined}
+              >
                 <input
                   type="text"
                   value={form.name}
                   onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  onBlur={() => setTouched({ ...touched, name: true })}
                   placeholder="เช่น เคลมสินค้า"
-                  className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
+                  className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40"
                 />
-              </div>
+              </FormField>
 
               {/* Keywords */}
               <div>
-                <label className="block text-sm font-medium text-text mb-1.5">คีย์เวิร์ด *</label>
+                <label htmlFor="trigger-form-keywords" className="block text-sm font-medium text-text mb-1.5">คีย์เวิร์ด *</label>
                 <div className="flex gap-2 mb-2">
                   <input
+                    id="trigger-form-keywords"
                     type="text"
                     value={keywordInput}
                     onChange={(e) => setKeywordInput(e.target.value)}
+                    onBlur={() => setTouched({ ...touched, keywords: true })}
+                    aria-invalid={touched.keywords && form.keywords.length === 0 ? "true" : "false"}
+                    aria-describedby={touched.keywords && form.keywords.length === 0 ? "trigger-form-keywords-error" : undefined}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
                         e.preventDefault();
@@ -809,7 +1027,7 @@ export default function TriggersPage() {
                       }
                     }}
                     placeholder="พิมพ์แล้วกด Enter"
-                    className="flex-1 h-10 px-3 rounded-lg border border-border bg-surface-2 text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
+                    className="flex-1 h-10 px-3 rounded-lg border border-border bg-surface-2 text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40"
                   />
                   <Button variant="outline" size="md" onClick={addKeyword} className="shrink-0">
                     เพิ่ม
@@ -823,18 +1041,21 @@ export default function TriggersPage() {
                         className="inline-flex items-center gap-1 text-xs bg-brand-soft text-brand rounded-md px-2 py-1 font-mono"
                       >
                         {k}
-                        <button onClick={() => removeKeyword(k)} className="hover:text-vibrant-coral">
+                        <button onClick={() => removeKeyword(k)} title="นำคีย์เวิร์ดออก" aria-label="นำคีย์เวิร์ดออก" className="hover:text-vibrant-coral">
                           <X size={11} />
                         </button>
                       </span>
                     ))}
                   </div>
                 )}
+                {touched.keywords && form.keywords.length === 0 && (
+                  <p id="trigger-form-keywords-error" className="mt-1 text-xs text-error">กรุณาเพิ่มคำสำคัญอย่างน้อย 1 คำ</p>
+                )}
               </div>
 
               {/* Platforms (multi-select) */}
               <div>
-                <label className="block text-sm font-medium text-text mb-1.5">แพลตฟอร์ม</label>
+                <label htmlFor="trigger-form-platforms" className="block text-sm font-medium text-text mb-1.5">แพลตฟอร์ม</label>
                 <MultiSelect<Platform>
                   label="แพลตฟอร์ม"
                   allLabel="ทุกแพลตฟอร์ม"
@@ -853,7 +1074,7 @@ export default function TriggersPage() {
 
               {/* Shops (multi-select — กรองตาม platform ที่เลือก) */}
               <div>
-                <label className="block text-sm font-medium text-text mb-1.5">ร้านค้า</label>
+                <label htmlFor="trigger-form-shops" className="block text-sm font-medium text-text mb-1.5">ร้านค้า</label>
                 <MultiSelect<string>
                   label="ร้านค้า"
                   allLabel="ทุกร้าน"
@@ -868,7 +1089,10 @@ export default function TriggersPage() {
 
               {/* Action */}
               <div>
-                <label className="block text-sm font-medium text-text mb-1.5">การตอบ</label>
+                <label className="block text-sm font-medium text-text mb-1.5">
+                  การตอบ
+                  <Tooltip text="ประเภทการตอบ — bot_answer = บอทตอบอัตโนมัติ, handoff = ส่งต่อแอดมิน"><Info size={12} className="text-text-subtle ml-1 inline" /></Tooltip>
+                </label>
                 <div className="flex gap-2">
                   <button
                     type="button"
@@ -898,24 +1122,29 @@ export default function TriggersPage() {
               {/* Bot template (เฉพาะ action = bot_answer) */}
               {form.action === "bot_answer" && (
                 <div>
-                  <label className="block text-sm font-medium text-text mb-1.5">คำตอบบอท</label>
+                  <label htmlFor="trigger-form-bot-template" className="block text-sm font-medium text-text mb-1.5">คำตอบบอท</label>
                   <textarea
+                    id="trigger-form-bot-template"
                     value={form.bot_template}
                     onChange={(e) => setForm({ ...form, bot_template: e.target.value })}
                     placeholder="เช่น กรุณาแนบวิดีโอและเลขคำสั่งซื้อ แอดมินจะรับเรื่องค่ะ"
                     rows={3}
-                    className="w-full px-3 py-2 rounded-lg border border-border bg-surface-2 text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/30 resize-none"
+                    className="w-full px-3 py-2 rounded-lg border border-border bg-surface-2 text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 resize-none"
                   />
                 </div>
               )}
 
               {/* Topic */}
               <div>
-                <label className="block text-sm font-medium text-text mb-1.5">หัวข้อ</label>
+                <label htmlFor="trigger-form-topic" className="block text-sm font-medium text-text mb-1.5">
+                  หัวข้อ
+                  <Tooltip text="หมวดหมู่ของทริกเกอร์ — ใช้จัดกลุ่มคำสำคัญ"><Info size={12} className="text-text-subtle ml-1 inline" /></Tooltip>
+                </label>
                 <select
+                  id="trigger-form-topic"
                   value={form.topic}
                   onChange={(e) => setForm({ ...form, topic: e.target.value as Topic })}
-                  className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text focus:outline-none focus:ring-2 focus:ring-brand/30"
+                  className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text focus:outline-none focus:ring-2 focus:ring-brand/40"
                 >
                   {Object.entries(topicLabels).map(([k, v]) => (
                     <option key={k} value={k}>{v}</option>
@@ -924,8 +1153,9 @@ export default function TriggersPage() {
               </div>
 
               {/* Enabled */}
-              <label className="flex items-center gap-2 cursor-pointer">
+              <label htmlFor="trigger-form-enabled" className="flex items-center gap-2 cursor-pointer">
                 <input
+                  id="trigger-form-enabled"
                   type="checkbox"
                   checked={form.enabled}
                   onChange={(e) => setForm({ ...form, enabled: e.target.checked })}
@@ -936,16 +1166,17 @@ export default function TriggersPage() {
             </div>
 
             <div className="p-4 border-t border-border flex items-center justify-end gap-2">
-              <Button variant="outline" onClick={() => setShowForm(false)} disabled={saving}>
+              <Button variant="outline" onClick={() => closeForm()} disabled={saving}>
                 ยกเลิก
               </Button>
-              <Button onClick={handleSave} disabled={saving || !form.name.trim() || form.keywords.length === 0}>
+              <Button type="submit" disabled={saving || !form.name.trim() || form.keywords.length === 0}>
                 {saving ? "กำลังบันทึก..." : "บันทึก"}
               </Button>
             </div>
+            </form>
           </div>
         </div>
       )}
-    </div>
+    </PageShell>
   );
 }

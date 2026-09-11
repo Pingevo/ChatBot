@@ -2,6 +2,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { PageShell } from "@/components/ui/PageShell";
 import { MessageSquare, Bot, Headset, Clock, LayoutDashboard } from "lucide-react";
 import { statsService } from "@/lib/services";
 import { TrendLineChart, WeeklyBarChart, ComboBarLineChart, SmartChart } from "@/components/charts/StatsCharts";
@@ -65,28 +66,19 @@ export default function DashboardPage() {
     : "0";
 
   return (
-    <div className="h-full overflow-y-auto">
-      {/* Header — navbar แบบ shops/team */}
-      <div className="px-6 py-5 border-b border-border bg-surface sticky top-0 z-10">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-brand/15 flex items-center justify-center">
-              <LayoutDashboard size={20} className="text-brand" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-text">แดชบอร์ด</h1>
-              <p className="text-xs text-text-muted">
-                ภาพรวมการทำงานของระบบทั้งหมด
-                {!stats.has_real_data && <span className="text-text-subtle"> · ยังไม่มีข้อมูลจริง</span>}
-              </p>
-            </div>
-          </div>
-          <UnifiedDateRangePicker value={dateRange} onChange={setDateRange} />
-        </div>
-      </div>
-
-      <div className="p-4 md:p-6">
-
+    <PageShell
+      icon={LayoutDashboard}
+      title="แดชบอร์ด"
+      helpHref="/help#dashboard"
+      subtitle={
+        <>
+          ภาพรวมการทำงานของระบบทั้งหมด
+          {!stats.has_real_data && <span className="text-text-subtle"> · ยังไม่มีข้อมูลจริง</span>}
+        </>
+      }
+      actions={<UnifiedDateRangePicker value={dateRange} onChange={setDateRange} />}
+      contentClassName="p-4 md:p-6"
+    >
       {/* Overlay skeleton เมื่อกำลังโหลดข้อมูลใหม่ แต่ยังเก็บ layout เดิมไว้ */}
       <div className={loading ? "opacity-50 pointer-events-none transition-opacity" : "transition-opacity"}>
         {/* KPI cards — 5 การ์์หลัก */}
@@ -214,7 +206,6 @@ export default function DashboardPage() {
           </div>
         </Card>
       </div>
-      </div>
-    </div>
+    </PageShell>
   );
 }

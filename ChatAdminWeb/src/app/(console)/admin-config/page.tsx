@@ -4,6 +4,8 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Loading } from "@/components/ui/Loading";
+import { PageShell } from "@/components/ui/PageShell";
+import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import {
   RefreshCw, Sliders, Clock, MessageCircle, Save,
   Check, AlertCircle, Info, GitBranch, Image as ImageIcon, Film,
@@ -85,31 +87,7 @@ function MinimalSlider({ value, min, max, step, onChange, disabled, format }: Sl
 }
 
 // ─── Toggle Switch ────────────────────────────────────────
-
-function ToggleSwitch({ enabled, onChange, disabled }: { enabled: boolean; onChange: () => void; disabled?: boolean }) {
-  return (
-    <button
-      onClick={onChange}
-      disabled={disabled}
-      className={`relative rounded-full transition-colors flex-shrink-0 ${
-        enabled ? "bg-green-500" : "bg-surface-1"
-      } ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
-      style={{ width: "40px", height: "22px" }}
-      title={enabled ? "คลิกเพื่อปิด" : "คลิกเพื่อเปิด"}
-    >
-      <span
-        className="absolute rounded-full bg-white shadow-sm transition-transform"
-        style={{
-          width: "18px",
-          height: "18px",
-          top: "2px",
-          left: "2px",
-          transform: enabled ? "translateX(18px)" : "translateX(0)",
-        }}
-      />
-    </button>
-  );
-}
+// 🔒 P1b: Now using shared ToggleSwitch from @/components/ui/ToggleSwitch
 
 // ─── Section wrapper (สำหรับขยายในอนาคต) ──────────────────
 
@@ -246,6 +224,15 @@ export default function AdminConfigPage() {
   }
 
   async function handleQuickToggle(key: "bot_buffer_enabled" | "workflow_enabled", value: boolean) {
+    // 🔒 P2a: Confirm before toggling high-impact settings
+    const label = key === "workflow_enabled" ? "Workflow Engine" : "Buffering";
+    const action = value ? "เปิด" : "ปิด";
+    const ok = await confirm.ask({
+      title: `${action}${label} ใช่ไหม?`,
+      message: `การ${action}จะมีผลต่อการทำงานของบอททันที`,
+      variant: value ? "primary" : "danger",
+    });
+    if (!ok) return;
     // Toggle แบบกดแล้วบันทึกทันที (ไม่ต้องกดปุ่มบันทึก)
     setSaving(true);
     try {
@@ -255,7 +242,6 @@ export default function AdminConfigPage() {
       setConfig(r.data.config);
       setBufferEnabled(r.data.config.bot_buffer_enabled);
       setWorkflowEnabled(r.data.config.workflow_enabled ?? false);
-      const label = key === "workflow_enabled" ? "Workflow Engine" : "Buffering";
       toast.success(`${value ? "เปิด" : "ปิด"} ${label} แล้ว`);
     } catch (err) {
       catchError(err, "บันทึกไม่สำเร็จ");
@@ -275,35 +261,25 @@ export default function AdminConfigPage() {
   }
 
   return (
-    <div className="h-full overflow-y-auto">
-      {/* Header */}
-      <div className="px-6 py-5 border-b border-border bg-surface sticky top-0 z-10">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-brand/15 flex items-center justify-center">
-              <Sliders size={20} className="text-brand" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-text">ตั้งค่าแอดมิน</h1>
-              <p className="text-xs text-text-muted">
-                การตั้งค่าที่แอดมินปรับได้ · ส่วนตั้งค่าระบบเป็นสิทธิ์ Dev/SuperAdmin
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button size="sm" variant="outline" onClick={load} disabled={loading}>
-              <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
+    <PageShell
+      icon={Sliders}
+      title="ตั้งค่าแอดมิน"
+      helpHref="/help#admin-config"
+      subtitle="การตั้งค่าที่แอดมินปรับได้ · ส่วนตั้งค่าระบบเป็นสิทธิ์ Dev/SuperAdmin"
+      actions={
+        <>
+          <Button size="sm" variant="outline" onClick={load} disabled={loading}>
+            <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
+          </Button>
+          {hasChanges && (
+            <Button size="sm" onClick={handleSave} disabled={saving || !editable}>
+              {saving ? <Loading size={14} /> : <Save size={14} />} บันทึก
             </Button>
-            {hasChanges && (
-              <Button size="sm" onClick={handleSave} disabled={saving || !editable}>
-                {saving ? <Loading size={14} /> : <Save size={14} />} บันทึก
-              </Button>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="p-6 max-w-2xl space-y-4">
+          )}
+        </>
+      }
+      contentClassName="p-6 max-w-2xl space-y-4"
+    >
         {/* Read-only banner */}
         {!editable && (
           <div className="flex items-center gap-2 bg-surface-2 border border-border rounded-lg p-2.5 text-xs text-text-muted">
@@ -430,10 +406,10 @@ export default function AdminConfigPage() {
           </div>
 
           {/* Info box */}
-          <div className="flex items-start gap-2 rounded-lg bg-blue-500/5 border border-blue-500/15 p-3">
-            <Info size={14} className="text-blue-400 flex-shrink-0 mt-0.5" />
+          <div className="flex items-start gap-2 rounded-lg bg-info/5 border border-info/15 p-3">
+            <Info size={14} className="text-info-soft flex-shrink-0 mt-0.5" />
             <div className="text-[11px] text-text-muted leading-relaxed">
-              <span className="text-blue-400 font-medium">ตัวอย่าง:</span> ลูกค้าพิมพ์ &quot;สนใจหัวชาร์จ&quot; → &quot;มี 220W ไหม&quot; → &quot;ส่งรูปได้ไหม&quot; รัวๆ
+              <span className="text-info-soft font-medium">ตัวอย่าง:</span> ลูกค้าพิมพ์ &quot;สนใจหัวชาร์จ&quot; → &quot;มี 220W ไหม&quot; → &quot;ส่งรูปได้ไหม&quot; รัวๆ
               ระบบจะรวมเป็น 1 คำถาม ส่งบอท 1 ครั้ง ตอบ 1 คำตอบ
             </div>
           </div>
@@ -469,10 +445,10 @@ export default function AdminConfigPage() {
             </div>
           </div>
 
-          <div className="flex items-start gap-2 rounded-lg bg-blue-500/5 border border-blue-500/15 p-3">
-            <Info size={14} className="text-blue-400 flex-shrink-0 mt-0.5" />
+          <div className="flex items-start gap-2 rounded-lg bg-info/5 border border-info/15 p-3">
+            <Info size={14} className="text-info-soft flex-shrink-0 mt-0.5" />
             <div className="text-[11px] text-text-muted leading-relaxed">
-              <span className="text-blue-400 font-medium">ตัวอย่าง:</span> 500 ข้อความเข้ามา → buffer รวมเป็น 200 context
+              <span className="text-info-soft font-medium">ตัวอย่าง:</span> 500 ข้อความเข้ามา → buffer รวมเป็น 200 context
               → ถ้าตั้ง 50 → ยิงบอท 50 ขนานกัน → เสร็จ → ยิง 50 ถัดไป → ใช้เวลา ~4 รอบ
             </div>
           </div>
@@ -513,7 +489,7 @@ export default function AdminConfigPage() {
               value={workflowPriority}
               onChange={(e) => setWorkflowPriority(e.target.value)}
               disabled={!editable || !workflowEnabled}
-              className="w-full h-9 px-3 rounded-lg border border-border bg-surface text-text text-sm focus:outline-none focus:ring-2 focus:ring-brand/30"
+              className="w-full h-9 px-3 rounded-lg border border-border bg-surface text-text text-sm focus:outline-none focus:ring-2 focus:ring-brand/40"
             >
               <option value="workflow_first">Workflow ก่อน → ถ้าไม่ match ไป trigger</option>
               <option value="trigger_first">Trigger ก่อน → ถ้าไม่ match ไป workflow</option>
@@ -546,10 +522,10 @@ export default function AdminConfigPage() {
           </div>
 
           {/* Info box */}
-          <div className="flex items-start gap-2 rounded-lg bg-blue-500/5 border border-blue-500/15 p-3">
-            <Info size={14} className="text-blue-400 flex-shrink-0 mt-0.5" />
+          <div className="flex items-start gap-2 rounded-lg bg-info/5 border border-info/15 p-3">
+            <Info size={14} className="text-info-soft flex-shrink-0 mt-0.5" />
             <div className="text-[11px] text-text-muted leading-relaxed">
-              <span className="text-blue-400 font-medium">วิธีใช้:</span> สร้าง workflow ในหน้า Workflows →
+              <span className="text-info-soft font-medium">วิธีใช้:</span> สร้าง workflow ในหน้า Workflows →
               กำหนด trigger + flow → เปิดใช้งานที่นี่เพื่อให้ engine ทำงาน ·
               ปิดได้ทุกเมื่อ — ข้อความจะกลับไป trigger/bot ตามปกติ
             </div>
@@ -580,10 +556,10 @@ export default function AdminConfigPage() {
             </div>
 
             {/* Info box */}
-            <div className="flex items-start gap-2 rounded-lg bg-blue-500/5 border border-blue-500/15 p-3">
-              <Info size={14} className="text-blue-400 flex-shrink-0 mt-0.5" />
+            <div className="flex items-start gap-2 rounded-lg bg-info/5 border border-info/15 p-3">
+              <Info size={14} className="text-info-soft flex-shrink-0 mt-0.5" />
               <div className="text-[11px] text-text-muted leading-relaxed">
-                <span className="text-blue-400 font-medium">วิธีใช้:</span> เปิดไว้ถ้าอยากให้ลูกค้าได้คุยกับแอดมินคนเดิมตลอด ·
+                <span className="text-info-soft font-medium">วิธีใช้:</span> เปิดไว้ถ้าอยากให้ลูกค้าได้คุยกับแอดมินคนเดิมตลอด ·
                 ปิดถ้าอยากกระจายงานเท่ากัน (round-robin) ·
                 โหมด round-robin ตั้งค่าเพิ่มได้ที่หน้า Assignment Config
               </div>
@@ -624,7 +600,7 @@ export default function AdminConfigPage() {
         {hasChanges && (
           <div className="sticky bottom-0 -mx-6 px-6 py-3 bg-surface border-t border-border flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs text-text-muted">
-              <AlertCircle size={14} className="text-yellow-400" />
+              <AlertCircle size={14} className="text-warning" />
               มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก
             </div>
             <div className="flex items-center gap-2">
@@ -641,7 +617,7 @@ export default function AdminConfigPage() {
         {/* Last updated */}
         {config && (
           <div className="flex items-center gap-1.5 text-[10px] text-text-subtle pt-2">
-            <Check size={10} className="text-green-400" />
+            <Check size={10} className="text-success-soft" />
             อัปเดตล่าสุดโดย {config.updated_by} · {new Date(config.updated_at).toLocaleString("th-TH")}
           </div>
         )}
@@ -652,7 +628,6 @@ export default function AdminConfigPage() {
             การตั้งค่าเพิ่มเติมจะเพิ่มที่นี่ในอนาคต (Routing, ฯลฯ)
           </span>
         </div>
-      </div>
-    </div>
+    </PageShell>
   );
 }

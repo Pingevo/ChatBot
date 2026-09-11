@@ -109,6 +109,7 @@ export function ShadowReplyPanel({ reply, onRate, onStar, onComment, onDelete, r
               onClick={() => onDelete(reply.shadow_reply_id)}
               className="w-7 h-7 rounded-md flex items-center justify-center text-text-subtle hover:bg-red-50 hover:text-red-600 transition-colors"
               title="ลบ"
+              aria-label="ลบ"
             >
               <Trash2 size={14} />
             </button>

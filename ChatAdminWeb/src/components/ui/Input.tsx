@@ -12,7 +12,7 @@ export const Input = forwardRef<HTMLInputElement, Props>(
       {label && <span className="block text-sm font-medium text-text mb-1.5">{label}</span>}
       <input
         ref={ref}
-        className={`w-full h-10 px-3 rounded-lg border bg-surface text-text placeholder:text-text-subtle transition-colors focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand ${
+        className={`w-full h-10 px-3 rounded-lg border bg-surface text-text placeholder:text-text-subtle transition-colors focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand ${
           error ? "border-vibrant-coral" : "border-border"
         } ${className}`}
         {...props}

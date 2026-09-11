@@ -17,6 +17,7 @@ import { ProductsTab } from "@/components/chat/ProductsTab";
 import { CloseChatModal } from "@/components/chat/CloseChatModal";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { useToastError } from "@/components/ui/Toast";
 import { Avatar } from "@/components/ui/Avatar";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { MessageContent } from "@/components/chat/MessageContent";
@@ -59,6 +60,7 @@ interface UnifiedMessage {
 
 export default function BotWorkerPage() {
   const { user } = useAuth();
+  const { catchError } = useToastError();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [totalCount, setTotalCount] = useState<number>(0);
   // ⚡ pagination — head (200 newest, poll 3s) + tail (load more on scroll)
@@ -91,7 +93,10 @@ export default function BotWorkerPage() {
     if (user?.role === "admin") return;
     api().get<{ users: AdminUser[]; canEdit: boolean }>("/users/list").then((r) => {
       setAdmins(r.data.users || []);
-    }).catch(() => setAdmins([]));
+    }).catch((e) => {
+      catchError(e, "โหลดรายชื่อแอดมินไม่สำเร็จ");
+      setAdmins([]);
+    });
   }, [user?.role]);
 
   // โหลด conversations (head — 200 ล่าสุด, poll 3 วิ)
@@ -297,7 +302,7 @@ export default function BotWorkerPage() {
 
   const handleHandoff = useCallback(() => {
     if (!selectedId) return;
-    chatService.handoff(selectedId).catch(() => { });
+    chatService.handoff(selectedId).catch((e) => catchError(e, "ส่งต่อแชทให้แอดมินไม่สำเร็จ"));
     setConversations((prev) =>
       prev.map((c) => (c.id === selectedId ? { ...c, status: "handoff" } : c))
     );
@@ -363,6 +368,7 @@ export default function BotWorkerPage() {
           onClick={handleBack}
           className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
           title="กลับ"
+          aria-label="กลับ"
         >
           <ArrowLeft size={16} className="text-text" />
         </button>
@@ -372,6 +378,7 @@ export default function BotWorkerPage() {
             onClick={() => setMobileView("info")}
             className="md:hidden absolute top-3 right-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
             title="รายละเอียด"
+            aria-label="รายละเอียด"
           >
             <Info size={16} className="text-text" />
           </button>
@@ -399,6 +406,7 @@ export default function BotWorkerPage() {
                 onClick={() => setMobileView("chat")}
                 className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
                 title="กลับ"
+                aria-label="กลับ"
               >
                 <ArrowLeft size={16} className="text-text" />
               </button>
@@ -427,6 +435,7 @@ export default function BotWorkerPage() {
                   onClick={() => setRightCollapsed(true)}
                   className="px-2 text-text-muted hover:text-text transition-colors shrink-0"
                   title="ซ่อน panel"
+                  aria-label="ซ่อน panel"
                 >
                   <PanelRightClose size={16} />
                 </button>
@@ -462,6 +471,7 @@ export default function BotWorkerPage() {
               onClick={() => setRightCollapsed(false)}
               className="hidden md:flex absolute right-0 top-1/2 -translate-y-1/2 z-10 w-6 h-12 bg-surface border border-border rounded-l-lg items-center justify-center hover:bg-surface-2 transition-colors"
               title="แสดง panel"
+              aria-label="แสดง panel"
             >
               <PanelRightOpen size={16} className="text-text-muted" />
             </button>
@@ -621,10 +631,10 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
             })}
 
             {/* Safety notice */}
-            <div className="flex items-start gap-2 rounded-lg bg-green-500/5 border border-green-500/15 p-3 mt-4">
-              <AlertCircle size={14} className="text-green-400 flex-shrink-0 mt-0.5" />
+            <div className="flex items-start gap-2 rounded-lg bg-success/5 border border-success/15 p-3 mt-4">
+              <AlertCircle size={14} className="text-success-soft flex-shrink-0 mt-0.5" />
               <div className="text-[11px] text-text-muted leading-relaxed">
-                <span className="text-green-400 font-medium">ปลอดภัย:</span> คำตอบ bot (ฟ้า) เก็บใน shadow_replies
+                <span className="text-success-soft font-medium">ปลอดภัย:</span> คำตอบ bot (ฟ้า) เก็บใน shadow_replies
                 ไม่ส่งถึงลูกค้า ไม่ยิง Shopee API — zaapi (เขียว) คือข้อความจริงที่ sellcenter dump มา
               </div>
             </div>

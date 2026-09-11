@@ -1008,7 +1008,7 @@ export default function TestAssignmentPage() {
           <div className="flex items-center gap-2 text-[10px] text-text-muted">
             <History size={11} />
             <span>ประวัติ replay ของคุณ ({historyRows.length})</span>
-            <button onClick={loadHistory} className="ml-auto text-text-muted hover:text-text" title="รีเฟรช">
+            <button onClick={loadHistory} className="ml-auto text-text-muted hover:text-text" title="รีเฟรช" aria-label="รีเฟรช">
               <RefreshCw size={11} />
             </button>
           </div>
@@ -1100,8 +1100,9 @@ export default function TestAssignmentPage() {
                             handleSoftDelete(h.conversation_id);
                           }
                         }}
-                        className="text-text-subtle hover:text-rose-500 transition-colors cursor-pointer inline-flex"
+                        className="text-text-subtle hover:text-error transition-colors cursor-pointer inline-flex focus:outline-none focus-visible:ring-2 focus-visible:ring-error rounded"
                         title="ลบ (soft delete)"
+                        aria-label="ลบ (soft delete)"
                       >
                         <Trash2 size={11} />
                       </span>
@@ -1111,18 +1112,18 @@ export default function TestAssignmentPage() {
                     </div>
                     <div className="flex items-center gap-1.5 mt-0.5">
                       <span className={`text-[9px] px-1 rounded ${
-                        h.final_status === "bot_answered" ? "bg-green-100 text-green-700" :
-                        h.final_status === "handed_off" ? "bg-orange-100 text-orange-700" :
-                        h.final_status === "error" ? "bg-red-100 text-red-700" :
+                        h.final_status === "bot_answered" ? "bg-success/10 text-success-dark" :
+                        h.final_status === "handed_off" ? "bg-warning-soft text-warning-dark" :
+                        h.final_status === "error" ? "bg-error/10 text-error" :
                         "bg-surface-2 text-text-muted"
                       }`}>{h.final_status}</span>
                       <span className="text-[9px] text-text-subtle">{h.processed_messages}/{h.total_messages} msg</span>
-                      {h.stopped_at_handoff && <span className="text-[9px] text-orange-500">handoff</span>}
+                      {h.stopped_at_handoff && <span className="text-[9px] text-warning">handoff</span>}
                     </div>
                     {h.conv_star_rating != null && h.conv_star_rating > 0 && (
                       <div className="flex items-center gap-0.5 mt-0.5">
                         {[1,2,3,4,5].map((s) => (
-                          <Star key={s} size={8} className={h.conv_star_rating! >= s ? "text-yellow-400 fill-yellow-400" : "text-text-subtle"} />
+                          <Star key={s} size={8} className={h.conv_star_rating! >= s ? "text-warning fill-warning" : "text-text-subtle"} />
                         ))}
                       </div>
                     )}
@@ -1269,7 +1270,7 @@ export default function TestAssignmentPage() {
                     </Card>
                     <Card className="p-2 text-center">
                       <div className="text-[10px] text-text-muted">สถานะ</div>
-                      <div className="text-sm font-bold">{replay.mock_status === "closed" ? "closed" : "open"}</div>
+                      <div className="text-sm font-bold">{replay.mock_status === "closed" ? "ปิด" : "เปิด"}</div>
                     </Card>
                     <Card className="p-2 text-center">
                       <div className="text-[10px] text-text-muted">ดาวทั้งแชท</div>
@@ -1301,9 +1302,10 @@ export default function TestAssignmentPage() {
                           onClick={() => copyChat("zaapi")}
                           disabled={detail.messages.length === 0}
                           title="คัดลอกแชทฝั่ง Zaapi / Admin"
+                          aria-label="คัดลอกแชทฝั่ง Zaapi / Admin"
                           className="w-7 h-7 rounded-md flex items-center justify-center text-text-muted hover:text-text hover:bg-surface transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                         >
-                          {copiedSide === "zaapi" ? <Check size={14} className="text-green-600" /> : <Copy size={14} />}
+                          {copiedSide === "zaapi" ? <Check size={14} className="text-success" /> : <Copy size={14} />}
                         </button>
                       </div>
                     </div>
@@ -1362,9 +1364,10 @@ export default function TestAssignmentPage() {
                           onClick={() => copyChat("bot")}
                           disabled={!replay || replay.qa.length === 0}
                           title="คัดลอกแชทฝั่ง Bot เรา"
+                          aria-label="คัดลอกแชทฝั่ง Bot เรา"
                           className="w-7 h-7 rounded-md flex items-center justify-center text-text-muted hover:text-text hover:bg-surface transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                         >
-                          {copiedSide === "bot" ? <Check size={14} className="text-green-600" /> : <Copy size={14} />}
+                          {copiedSide === "bot" ? <Check size={14} className="text-success" /> : <Copy size={14} />}
                         </button>
                       </div>
                     </div>
@@ -1479,12 +1482,12 @@ export default function TestAssignmentPage() {
                                       <div className="text-[11px] text-text-muted mt-0.5">{qa.detail}</div>
                                     </div>
                                   ) : qa.status === "no_agent" ? (
-                                    <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg px-3 py-2 text-sm">
-                                      <div className="font-medium text-yellow-600">ไม่มี agent ว่าง</div>
+                                    <div className="bg-warning/10 border border-warning/30 rounded-lg px-3 py-2 text-sm">
+                                      <div className="font-medium text-warning">ไม่มี agent ว่าง</div>
                                       <div className="text-[11px] text-text-muted mt-0.5">{qa.detail}</div>
                                     </div>
                                   ) : qa.status === "error" ? (
-                                    <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-sm text-red-500">{qa.detail}</div>
+                                    <div className="bg-error/10 border border-error/30 rounded-lg px-3 py-2 text-sm text-error-soft">{qa.detail}</div>
                                   ) : null}
                                 </div>
                               </div>
@@ -1567,7 +1570,7 @@ export default function TestAssignmentPage() {
                             </div>
                           )}
                           {replay.stopped_at_handoff && (
-                            <div className="text-[10px] text-coral mt-1">หยุดที่ handoff</div>
+                            <div className="text-[10px] text-vibrant-coral mt-1">หยุดที่ handoff</div>
                           )}
                         </div>
                       </Card>
@@ -1581,8 +1584,8 @@ export default function TestAssignmentPage() {
                             <span className="text-text font-bold">{replay.qa.length}</span>
                           </div>
                           <div className="flex items-center justify-between">
-                            <span className="flex items-center gap-1 text-green-500"><Bot size={10} /> บอทตอบ</span>
-                            <span className="text-green-500 font-bold">{replay.qa.filter(q => q.status === "bot_answered" || q.status === "trigger_matched").length}</span>
+                            <span className="flex items-center gap-1 text-success-soft"><Bot size={10} /> บอทตอบ</span>
+                            <span className="text-success-soft font-bold">{replay.qa.filter(q => q.status === "bot_answered" || q.status === "trigger_matched").length}</span>
                           </div>
                           <div className="flex items-center justify-between">
                             <span className="flex items-center gap-1 text-brand"><Users size={10} /> ส่งต่อแอดมิน (ข้าม)</span>
@@ -1642,7 +1645,7 @@ export default function TestAssignmentPage() {
                   <div className="flex items-center justify-between">
                     <span className="text-text-muted">Bot Worker</span>
                     {status?.config.bot_worker_enabled ? (
-                      <span className="flex items-center gap-1 text-green-500"><CheckCircle size={12} /> เปิด</span>
+                      <span className="flex items-center gap-1 text-success-soft"><CheckCircle size={12} /> เปิด</span>
                     ) : (
                       <span className="flex items-center gap-1 text-text-subtle"><XCircle size={12} /> ปิด</span>
                     )}
@@ -1672,8 +1675,8 @@ export default function TestAssignmentPage() {
                       <span className="text-text font-bold">{stats.total}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="flex items-center gap-1 text-green-500"><Bot size={10} /> บอทตอบ</span>
-                      <span className="text-green-500 font-bold">{stats.bot_answered}</span>
+                      <span className="flex items-center gap-1 text-success-soft"><Bot size={10} /> บอทตอบ</span>
+                      <span className="text-success-soft font-bold">{stats.bot_answered}</span>
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="flex items-center gap-1 text-brand"><Users size={10} /> Handoff</span>
@@ -1684,8 +1687,8 @@ export default function TestAssignmentPage() {
                       <span className="font-bold">{stats.no_agent}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="flex items-center gap-1 text-red-500"><AlertCircle size={10} /> Error</span>
-                      <span className="text-red-500 font-bold">{stats.error}</span>
+                      <span className="flex items-center gap-1 text-error-soft"><AlertCircle size={10} /> Error</span>
+                      <span className="text-error-soft font-bold">{stats.error}</span>
                     </div>
                     <div className="border-t border-border/50 pt-1.5 mt-1.5 space-y-1">
                       <div className="flex items-center justify-between">
@@ -1711,8 +1714,8 @@ export default function TestAssignmentPage() {
                       <span className="text-text font-bold">{stats.total_messages ?? "—"}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="flex items-center gap-1 text-green-500"><Bot size={10} /> บอทตอบ</span>
-                      <span className="text-green-500 font-bold">{stats.total_bot_replies ?? "—"}</span>
+                      <span className="flex items-center gap-1 text-success-soft"><Bot size={10} /> บอทตอบ</span>
+                      <span className="text-success-soft font-bold">{stats.total_bot_replies ?? "—"}</span>
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="flex items-center gap-1 text-brand"><Users size={10} /> ส่งต่อแอดมิน (ข้าม)</span>
@@ -1768,16 +1771,16 @@ export default function TestAssignmentPage() {
                   <div className="space-y-1.5 text-xs">
                     <div className="flex items-center gap-1">
                       {[1,2,3,4,5].map((s) => (
-                        <Star key={s} size={10} className={stats.conv_avg_star >= s ? "text-yellow-400 fill-yellow-400" : "text-text-subtle"} />
+                        <Star key={s} size={10} className={stats.conv_avg_star >= s ? "text-warning fill-warning" : "text-text-subtle"} />
                       ))}
                       <span className="text-text font-bold ml-1">{stats.conv_avg_star || "—"}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-green-600">Good</span>
+                      <span className="text-success">Good</span>
                       <span className="font-bold">{stats.conv_good}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-red-600">Bad</span>
+                      <span className="text-error">Bad</span>
                       <span className="font-bold">{stats.conv_bad}</span>
                     </div>
                     <div className="flex items-center justify-between">
@@ -1795,16 +1798,16 @@ export default function TestAssignmentPage() {
                   <div className="space-y-1.5 text-xs">
                     <div className="flex items-center gap-1">
                       {[1,2,3,4,5].map((s) => (
-                        <Star key={s} size={10} className={stats.msg_avg_star >= s ? "text-yellow-400 fill-yellow-400" : "text-text-subtle"} />
+                        <Star key={s} size={10} className={stats.msg_avg_star >= s ? "text-warning fill-warning" : "text-text-subtle"} />
                       ))}
                       <span className="text-text font-bold ml-1">{stats.msg_avg_star || "—"}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-green-600">Good</span>
+                      <span className="text-success">Good</span>
                       <span className="font-bold">{stats.msg_good}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-red-600">Bad</span>
+                      <span className="text-error">Bad</span>
                       <span className="font-bold">{stats.msg_bad}</span>
                     </div>
                     <div className="flex items-center justify-between">
@@ -1828,7 +1831,7 @@ export default function TestAssignmentPage() {
                           </div>
                           <span className="text-text truncate flex-1">{a.name || a.username}</span>
                           {a.is_accepting_chats ? (
-                            <PlayCircle size={10} className="text-green-500 shrink-0" />
+                            <PlayCircle size={10} className="text-success-soft shrink-0" />
                           ) : (
                             <PauseCircle size={10} className="text-text-subtle shrink-0" />
                           )}
@@ -1852,8 +1855,8 @@ export default function TestAssignmentPage() {
                           <span className="text-text font-bold">{stats.total}</span>
                         </div>
                         <div className="flex items-center justify-between">
-                          <span className="flex items-center gap-1 text-green-500"><Bot size={10} /> บอทตอบ</span>
-                          <span className="text-green-500 font-bold">{stats.bot_answered}</span>
+                          <span className="flex items-center gap-1 text-success-soft"><Bot size={10} /> บอทตอบ</span>
+                          <span className="text-success-soft font-bold">{stats.bot_answered}</span>
                         </div>
                         <div className="flex items-center justify-between">
                           <span className="flex items-center gap-1 text-brand"><Users size={10} /> Handoff</span>
@@ -1864,8 +1867,8 @@ export default function TestAssignmentPage() {
                           <span className="font-bold">{stats.no_agent}</span>
                         </div>
                         <div className="flex items-center justify-between">
-                          <span className="flex items-center gap-1 text-red-500"><AlertCircle size={10} /> Error</span>
-                          <span className="text-red-500 font-bold">{stats.error}</span>
+                          <span className="flex items-center gap-1 text-error-soft"><AlertCircle size={10} /> Error</span>
+                          <span className="text-error-soft font-bold">{stats.error}</span>
                         </div>
                         <div className="border-t border-border/50 pt-1.5 mt-1.5 space-y-1">
                           <div className="flex items-center justify-between">
@@ -1888,7 +1891,7 @@ export default function TestAssignmentPage() {
                       <div className="flex items-center justify-between">
                         <span className="text-text-muted">Bot Worker</span>
                         {status?.config.bot_worker_enabled ? (
-                          <span className="flex items-center gap-1 text-green-500"><CheckCircle size={12} /> เปิด</span>
+                          <span className="flex items-center gap-1 text-success-soft"><CheckCircle size={12} /> เปิด</span>
                         ) : (
                           <span className="flex items-center gap-1 text-text-subtle"><XCircle size={12} /> ปิด</span>
                         )}
@@ -1917,7 +1920,7 @@ export default function TestAssignmentPage() {
                           </div>
                           <span className="text-text truncate flex-1">{a.name || a.username}</span>
                           {a.is_accepting_chats ? (
-                            <PlayCircle size={10} className="text-green-500 shrink-0" />
+                            <PlayCircle size={10} className="text-success-soft shrink-0" />
                           ) : (
                             <PauseCircle size={10} className="text-text-subtle shrink-0" />
                           )}
