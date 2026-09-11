@@ -99,6 +99,15 @@ export default function ShadowInboxPage() {
   const [historyReplies, setHistoryReplies] = useState<ShadowReplyListItem[]>([]);
   // ⚡ history conversations — ดึงเฉพาะที่มี shadow_replies (endpoint เฉพาะ) แทนโหลดทั้งหมด
   const [historyConversations, setHistoryConversations] = useState<Conversation[]>([]);
+  // ⚡ pagination state — history + trash (เหมือน ticket inbox)
+  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
+  const [historyTotalCount, setHistoryTotalCount] = useState(0);
+  const [trashCursor, setTrashCursor] = useState<string | null>(null);
+  const [trashHasMore, setTrashHasMore] = useState(false);
+  const [trashLoadingMore, setTrashLoadingMore] = useState(false);
+  const [trashTotalCount, setTrashTotalCount] = useState(0);
 
   // ⚡ tab "ทั้งหมด" — ใช้ ChatList เหมือน ticket inbox
   // ⚡ G-share — ใช้ shared conversation store (แชร์กับ tickets)
@@ -120,6 +129,11 @@ export default function ShadowInboxPage() {
   }, [sharedConvs, sharedTotalCount, originFilter]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [loadingChatMessages, setLoadingChatMessages] = useState(false);
+  // ⚡ per-conversation shadow replies — ดึงเฉพาะแชทที่เลือก (แก้ปัญหา limit:500 ไม่ครบ)
+  //   historyReplies โหลดแค่ 500 ล่าสุด → แชทเก่าไม่มี bot reply ใน panel
+  //   ตอนเลือกแชท → ดึง shadow replies ของแชทนั้นโดยตรง (ไม่จำกัด limit)
+  const [selectedConvReplies, setSelectedConvReplies] = useState<ShadowReplyListItem[]>([]);
+  const [loadingConvReplies, setLoadingConvReplies] = useState(false);
 
   // Generate dialog
   const [showGenDd, setShowGenDd] = useState(false);
@@ -137,50 +151,34 @@ export default function ShadowInboxPage() {
         //   (sync ทำใน useEffect ด้านบน)
         return;
       } else if (originFilter === "history") {
-        // "History" = ดึง conversations ที่ถูก generate ทั้งแชท (origin=manual_conversation)
-        // + ดึง shadow_replies origin=manual_conversation เพื่อ map เข้า panel
-        // แยก fetch แบบ parallel เพื่อความเร็ว
-        // ⚡ cache-buster timestamp กัน browser/Next.js cache ข้อมูลเก่า
+        // ⚡ History — paginated: โหลด 200 ล่าสุดก่อน, scroll เพื่อโหลดเพิ่ม
+        //   ไม่โหลด shadow replies ทั้งหมดแล้ว — ดึงเฉพาะแชทที่เลือก (loadDetail)
         const _bust = Date.now();
-        const [convR, repliesR] = await Promise.all([
-          api().get<Conversation[]>("/shadow-inbox/conversations", {
-            timeout: 30000,
-            headers: { "Cache-Control": "no-cache, no-store, must-revalidate", "X-Bust": String(_bust) },
-            params: { _t: _bust },
-          }),
-          api().get<{ rows: ShadowReplyListItem[] }>("/shadow-inbox", {
-            params: { limit: "500", origin: "manual_conversation", _t: _bust },
-            timeout: 30000,
-            headers: { "Cache-Control": "no-cache, no-store, must-revalidate", "X-Bust": String(_bust) },
-          }),
-        ]);
+        const convR = await api().get<{ rows: Conversation[]; nextCursor: string | null; totalCount: number }>("/shadow-inbox/conversations", {
+          timeout: 15000,
+          headers: { "Cache-Control": "no-cache, no-store, must-revalidate", "X-Bust": String(_bust) },
+          params: { pageSize: "200", _t: _bust },
+        });
         const _hSeen = new Set<string>();
-        const _hConv = Array.isArray(convR.data) ? convR.data : [];
-        setHistoryConversations(_hConv.filter((c) => { if (_hSeen.has(c.id)) return false; _hSeen.add(c.id); return true; }));
-        // filter เฉพาะ rows ที่ bot_reply_text ไม่ว่าง — กัน conversation ที่ bot ไม่ได้ตอบโผล่ใน panel
-        const allRows = repliesR.data.rows || [];
-        setHistoryReplies(allRows.filter((r) => r.bot_reply_text && r.bot_reply_text.trim().length > 0));
+        const _hConv = (convR.data.rows || []).filter((c) => { if (_hSeen.has(c.id)) return false; _hSeen.add(c.id); return true; });
+        setHistoryConversations(_hConv);
+        setHistoryCursor(convR.data.nextCursor);
+        setHistoryHasMore(!!convR.data.nextCursor);
+        setHistoryTotalCount(convR.data.totalCount || 0);
       } else if (originFilter === "trash") {
-        // "ถังขยะ" = ดึง conversations ที่มี shadow replies ที่ถูก soft delete + ดึง shadow replies ที่ถูก soft delete
-        // ⚡ แสดงเป็นแชทเหมือน history tab (ไม่ใช่รายการ message เดี่ยว)
+        // ⚡ Trash — paginated เหมือน history
         const _bust = Date.now();
-        const [convR, repliesR] = await Promise.all([
-          api().get<Conversation[]>("/shadow-inbox/conversations", {
-            timeout: 30000,
-            headers: { "Cache-Control": "no-cache, no-store, must-revalidate", "X-Bust": String(_bust) },
-            params: { deleted: "1", _t: _bust },
-          }),
-          api().get<{ rows: ShadowReplyListItem[] }>("/shadow-inbox", {
-            params: { limit: "500", deleted: "1", _t: _bust },
-            timeout: 30000,
-            headers: { "Cache-Control": "no-cache, no-store, must-revalidate", "X-Bust": String(_bust) },
-          }),
-        ]);
+        const convR = await api().get<{ rows: Conversation[]; nextCursor: string | null; totalCount: number }>("/shadow-inbox/conversations", {
+          timeout: 15000,
+          headers: { "Cache-Control": "no-cache, no-store, must-revalidate", "X-Bust": String(_bust) },
+          params: { deleted: "1", pageSize: "200", _t: _bust },
+        });
         const _tSeen = new Set<string>();
-        const _tConv = Array.isArray(convR.data) ? convR.data : [];
-        setTrashConversations(_tConv.filter((c) => { if (_tSeen.has(c.id)) return false; _tSeen.add(c.id); return true; }));
-        const allRows = repliesR.data.rows || [];
-        setTrashRows(allRows.filter((r) => r.bot_reply_text && r.bot_reply_text.trim().length > 0));
+        const _tConv = (convR.data.rows || []).filter((c) => { if (_tSeen.has(c.id)) return false; _tSeen.add(c.id); return true; });
+        setTrashConversations(_tConv);
+        setTrashCursor(convR.data.nextCursor);
+        setTrashHasMore(!!convR.data.nextCursor);
+        setTrashTotalCount(convR.data.totalCount || 0);
       } else if (originFilter === "roll") {
         // ⚡ Phase 3B-3 — "roll" tab = config panel (ไม่โหลด list)
         return;
@@ -203,6 +201,50 @@ export default function ShadowInboxPage() {
       setLoading(false);
     }
   }, [catchError, originFilter]);
+
+  // ⚡ loadMore — History tab (paginated, เหมือน ticket inbox)
+  const loadMoreHistory = useCallback(async () => {
+    if (!historyCursor || historyLoadingMore) return;
+    setHistoryLoadingMore(true);
+    try {
+      const _bust = Date.now();
+      const r = await api().get<{ rows: Conversation[]; nextCursor: string | null; totalCount: number }>("/shadow-inbox/conversations", {
+        timeout: 15000,
+        params: { cursor: historyCursor, pageSize: "200", _t: _bust },
+      });
+      const _seen = new Set(historyConversations.map((c) => c.id));
+      const _new = (r.data.rows || []).filter((c) => { if (_seen.has(c.id)) return false; _seen.add(c.id); return true; });
+      setHistoryConversations((prev) => [...prev, ..._new]);
+      setHistoryCursor(r.data.nextCursor);
+      setHistoryHasMore(!!r.data.nextCursor);
+    } catch (err) {
+      catchError(err, "โหลดเพิ่มไม่สำเร็จ");
+    } finally {
+      setHistoryLoadingMore(false);
+    }
+  }, [historyCursor, historyLoadingMore, historyConversations, catchError]);
+
+  // ⚡ loadMore — Trash tab (paginated)
+  const loadMoreTrash = useCallback(async () => {
+    if (!trashCursor || trashLoadingMore) return;
+    setTrashLoadingMore(true);
+    try {
+      const _bust = Date.now();
+      const r = await api().get<{ rows: Conversation[]; nextCursor: string | null; totalCount: number }>("/shadow-inbox/conversations", {
+        timeout: 15000,
+        params: { deleted: "1", cursor: trashCursor, pageSize: "200", _t: _bust },
+      });
+      const _seen = new Set(trashConversations.map((c) => c.id));
+      const _new = (r.data.rows || []).filter((c) => { if (_seen.has(c.id)) return false; _seen.add(c.id); return true; });
+      setTrashConversations((prev) => [...prev, ..._new]);
+      setTrashCursor(r.data.nextCursor);
+      setTrashHasMore(!!r.data.nextCursor);
+    } catch (err) {
+      catchError(err, "โหลดเพิ่มไม่สำเร็จ");
+    } finally {
+      setTrashLoadingMore(false);
+    }
+  }, [trashCursor, trashLoadingMore, trashConversations, catchError]);
 
   const loadStats = useCallback(async () => {
     try {
@@ -235,12 +277,34 @@ export default function ShadowInboxPage() {
     if (originFilter === "all" || originFilter === "history" || originFilter === "trash") {
       // tab "ทั้งหมด", "History", และ "ถังขยะ" — โหลด chat messages เหมือน ticket inbox
       setLoadingChatMessages(true);
+      // ⚡ โหลด shadow replies เฉพาะแชทนี้ด้วย (แก้ปัญหา historyReplies limit:500 ไม่ครบ)
+      //   history/trash → ดึงเฉพาะแชทนี้ ไม่จำกัด limit
+      //   all → ไม่ดึง (tab "ทั้งหมด" ไม่ต้องการ shadow replies ใน panel)
+      const fetchShadowReplies = originFilter === "history" || originFilter === "trash";
+      const shadowParams: Record<string, string> = { limit: "500" };
+      if (originFilter === "history") shadowParams.origin = "manual_conversation";
+      if (originFilter === "trash") shadowParams.deleted = "1";
       try {
-        const msgs = await chatService.messages(id);
+        const [msgs, shadowR] = await Promise.all([
+          chatService.messages(id),
+          fetchShadowReplies
+            ? api().get<{ rows: ShadowReplyListItem[] }>("/shadow-inbox", {
+                params: { ...shadowParams, conversation_id: id },
+                timeout: 30000,
+              })
+            : Promise.resolve(null),
+        ]);
         setChatMessages(msgs);
+        if (shadowR) {
+          const rows = shadowR.data.rows || [];
+          setSelectedConvReplies(rows.filter((r) => r.bot_reply_text && r.bot_reply_text.trim().length > 0));
+        } else {
+          setSelectedConvReplies([]);
+        }
       } catch (err) {
         catchError(err, "โหลดข้อความไม่สำเร็จ");
         setChatMessages([]);
+        setSelectedConvReplies([]);
       } finally {
         setLoadingChatMessages(false);
       }
@@ -324,8 +388,11 @@ export default function ShadowInboxPage() {
   }, [originFilter, canView, loadShadowAnnotations]);
 
   // Polling — ลด rate เพื่อลด timeout/กระพริบ
-  // ⚡ tab History โหลดหนัก → poll ช้ากว่า tab อื่น (20s vs 10s)
-  usePolling(load, originFilter === "history" ? 20000 : 10000, { enabled: canView });
+  // ⚡ tab History/Trash เป็นข้อมูลอดีต ไม่ต้อง poll real-time
+  //   polling จะทับ historyConversations ด้วย page 1 → แชทที่ scroll โหลดเพิ่มหาย → กระพริบ
+  //   ปิด polling ตอนอยู่ History/Trash (โหลดครั้งเดียวตอนเข้า tab)
+  const _pollEnabled = canView && originFilter !== "history" && originFilter !== "trash";
+  usePolling(load, 10000, { enabled: _pollEnabled });
   usePolling(loadStats, 30000, { enabled: canView });
 
   const handleSelect = useCallback((id: string) => {
@@ -710,12 +777,12 @@ export default function ShadowInboxPage() {
             onSelect={handleSelect}
             admins={[]}
             onChatFilterChange={() => {}}
-            totalCount={originFilter === "all" ? chatTotalCount : undefined}
+            totalCount={originFilter === "all" ? chatTotalCount : originFilter === "history" ? historyTotalCount : undefined}
             onSearchChange={originFilter === "all" ? setSearchQuery : undefined}
-            loading={sharedLoading}
-            loadMore={originFilter === "all" ? sharedLoadMore : undefined}
-            hasMore={originFilter === "all" ? sharedHasMore : false}
-            loadingMore={originFilter === "all" ? sharedLoadingMore : false}
+            loading={originFilter === "all" ? sharedLoading : loading}
+            loadMore={originFilter === "all" ? sharedLoadMore : originFilter === "history" ? loadMoreHistory : undefined}
+            hasMore={originFilter === "all" ? sharedHasMore : originFilter === "history" ? historyHasMore : false}
+            loadingMore={originFilter === "all" ? sharedLoadingMore : originFilter === "history" ? historyLoadingMore : false}
             // ⚡ Phase 3B-6 — คืน annotation dot ใน conversation list (โชว์อันล่าสุดต่อแชท)
             //   mark รอบละเฉพาะทำใน ShadowConversationPanel (ต่อ batch selector) แทน
             annotationsMap={originFilter === "history" ? shadowAnnotationsMap : undefined}
@@ -746,6 +813,9 @@ export default function ShadowInboxPage() {
               admins={[]}
               onChatFilterChange={() => {}}
               loading={loading}
+              loadMore={loadMoreTrash}
+              hasMore={trashHasMore}
+              loadingMore={trashLoadingMore}
               onRestoreConversation={handleRestoreConversation}
             />
           </div>
@@ -889,10 +959,8 @@ export default function ShadowInboxPage() {
             messages={chatMessages}
             loadingMessages={loadingChatMessages}
             historyReplies={
-              originFilter === "history"
-                ? historyReplies.filter((r) => r.conversation_id === selectedId)
-                : originFilter === "trash"
-                ? trashRows.filter((r) => r.conversation_id === selectedId)
+              originFilter === "history" || originFilter === "trash"
+                ? selectedConvReplies
                 : undefined
             }
           />

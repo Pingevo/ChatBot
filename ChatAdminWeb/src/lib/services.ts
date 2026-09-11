@@ -260,7 +260,7 @@ export interface AdminActivityStats {
 
 export const statsService = {
   dashboard: (params?: { range?: string; start_date?: string; end_date?: string }) =>
-    api().get<DashboardStats & { has_real_data: boolean }>("/stats/dashboard", { params }).then((r) => r.data),
+    api().get<DashboardStats & { has_real_data: boolean }>("/stats/dashboard", { params, timeout: 60000 }).then((r) => r.data),
   live: (params?: { range?: string; start_date?: string; end_date?: string }) =>
     api().get<LiveStats>("/stats/live", { params }).then((r) => r.data),
   performance: (params?: { range?: string; start_date?: string; end_date?: string }) =>

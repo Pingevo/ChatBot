@@ -449,9 +449,139 @@
 
 ---
 
-## กำลังจะทำ
+### Replay-compare inbox ค้างเพราะ limit:10000 (2026-09-10) — ✅ ผ่าน
+- **ปัญหา**: หน้า replay-compare tab "เลือกแชท" โหลดนานมาก/ค้าง เพราะ `loadInbox` ยิง `/admin/conversations?limit=10000` timeout 45s ทีเดียว ทั้งที่ ticket inbox / shadow inbox ใช้ `useSharedConversations` (pagination 50 + load more on scroll) อยู่แล้ว
+- **สาเหตุ**: replay-compare ไม่ได้ใช้ shared store เหมือนหน้าอื่น → โหลดทั้งหมดทีเดียว → ค้าง
+- **วิธีแก้**:
+  1. ลบ `loadInbox` (limit:10000) + state `inboxConvs`/`inboxLoaded` ออก
+  2. ใช้ `useSharedConversations({ assigned_to: "all", q: inboxSearch, pageSize: 50 })` แทน — เหมือน ticket inbox / shadow inbox
+  3. server-side search ผ่าน `q` (debounce 300ms ในตัว) แทน client filter
+  4. infinite scroll — onScroll ที่ parent container เรียก `inboxLoadMore()` ตอน scroll ใกล้ล่าง
+  5. แสดง `inboxTotalCount` แทน `inboxConvs.length` ใน header
+- **ผล**: โหลด 50 ล่าสุดก่อน (~1s) → scroll โหลดเพิ่มทีละ 50 → ไม่ค้าง
+- **ไฟล์ที่แก้**: `ChatAdminWeb/src/app/(console)/replay-compare/page.tsx`
+- **Verify**: `npx tsc --noEmit` ผ่าน ✅, `npm run build` ผ่าน ✅
 
-### Phase 3 — RAG ไม่กรอง status/stock + Tier merge + LLM prompt 3 กฎ (2026-09-10) — ✅ implement เสร็จ รอ verify replay
+---
+
+### /team ตัวเลข unassigned ไม่จริง (2026-09-10) — ✅ ผ่าน
+- **ปัญหา**: หน้า /team แสดง "4,995 ยังไม่ได้มอบหมาย" ทั้งที่ DB จริงมี 142,308 แชท — เพราะ API ดึงแค่ `limit: 5000` ล่าสุดแล้ว filter ใน memory
+- **สาเหตุ**: `conversationService.listConversations({ limit: 5000 })` ดึง 5,000 ล่าสุด → filter `!assigned && status !== closed/resolved` ใน memory → ได้ 4,995 (เกือบทั้งหมดของ 5,000)
+- **ข้อมูลจริงจาก DB**:
+  - ทั้งหมด: 142,308 แชท
+  - มี assigned_to: 15 แชท
+  - ไม่มี assigned_to + ไม่ใช่ closed/resolved: 142,293 แชท
+  - แยกย่อย: handoff 14, open 136,148, None 6,146
+- **วิธีแก้**:
+  1. API `/api/team` — เพิ่ม DB aggregation count ที่ `COLLECTIONS.conversations` ตรงๆ (ไม่ผ่าน limit 5000)
+     - `total` = countDocuments({})
+     - `assigned` = countDocuments({ assigned_to: { $type: 2 } }) — มี assigned_to เป็น string
+     - `unassigned` = ไม่มี assigned_to + status ไม่ใช่ closed/resolved
+     - `unassigned_handoff` = ไม่มี assigned_to + status=handoff (รอแอดมินรับจริง)
+     - `unassigned_open` = ไม่มี assigned_to + status=open (บอทตอบอยู่/ยังไม่มีคนตอบ)
+  2. Response เพิ่ม `total_conversations`, `unassigned_handoff`, `unassigned_open`
+  3. UI — แสดงตัวเลขจริง + แยกย่อยใน banner + SummaryCard
+- **ไฟล์ที่แก้**: `ChatAdminWeb/src/app/api/team/route.ts`, `ChatAdminWeb/src/app/(console)/team/page.tsx`
+- **Verify**: `npx tsc --noEmit` ผ่าน ✅, `npm run build` ผ่าน ✅
+
+---
+
+### /dashboard ช้า + นับแชทผิด (2026-09-10) — ✅ ผ่าน
+- **ปัญหา**:
+  1. หน้า /dashboard โหลดช้ามาก (30s+) ตอนเลือก รายเดือน/รายปี/ทั้งหมด
+  2. นับแชทผิด — ลูกค้าทักแชทเดิมวันนี้ ไม่นับว่า "วันนี้" เพราะใช้ `created_at` (วันที่เริ่มแชทครั้งแรก)
+- **สาเหตุ**:
+  1. API dashboard ใช้ `dateFilter("created_at")` ใน 11 queries แต่ `conversations_shp` ไม่มี index บน `created_at` → collection scan 142,310 docs ทุก query
+  2. `created_at` = วันที่เริ่มแชทครั้งแรก → ลูกค้าทักแชทเดิมวันนี้ไม่นับว่า "วันนี้"
+- **วิธีแก้**:
+  1. เปลี่ยน `dateFilter("created_at")` → `dateFilter("last_message_timestamp")` ทุก query ใน dashboard API
+  2. เปลี่ยน daily trend aggregations ใช้ `$last_message_timestamp` แทน `$created_at`
+  3. `last_message_timestamp` มี index อยู่แล้ว (`last_message_timestamp_-1`) → ใช้ index scan แทน collection scan
+  4. ความหมายเปลี่ยน: "แชทที่มี activity ในช่วงเวลานั้น" แทน "แชทที่เริ่มในช่วงเวลานั้น"
+- **ผลที่คาดการณ์**:
+  - ความเร็ว: จาก ~30s → <1s (index scan แทน collection scan)
+  - ความหมาย: ลูกค้าทักแชทเดิมวันนี้ นับว่า "วันนี้" ✓
+- **ไฟล์ที่แก้**: `ChatAdminWeb/src/app/api/stats/dashboard/route.ts`
+- **Verify**: `npx tsc --noEmit` ผ่าน ✅, `npm run build` ผ่าน ✅
+
+---
+
+### /dashboard error + โหลดหนัก (2026-09-10) — ✅ ผ่าน
+- **ปัญหา**: หน้า dashboard error/โหลดหนัก ตอนเลือก รายเดือน/รายปี/ทั้งหมด
+- **สาเหตุเพิ่มเติม** (นอกจาก created_at ไม่มี index):
+  1. `computeResponseStats` โหลด messages ทั้ง 1.1M docs เข้า memory ตอน range=all → OOM/error
+  2. ไม่มี cache → user refresh รัวๆ หรือสลับ tab ไปกลับ → โหลดซ้ำทุกครั้ง
+  3. client ไม่ได้ตั้ง timeout → รอจน error
+- **วิธีแก้**:
+  1. จำกัด `computeResponseStats` เป็น 30 วันล่าสุดเสมอ แม้ range=all → ลด messages ที่โหลดจาก 1.1M → ~50K
+  2. เพิ่ม in-process cache TTL 60s → กันโหลดซ้ำในช่วงเวลาเดียวกัน (เก็บแค่ 20 key ล่าสุด)
+  3. client timeout 60s → กันค้างนานเกินไป
+- **ไฟล์ที่แก้**: `ChatAdminWeb/src/app/api/stats/dashboard/route.ts`, `ChatAdminWeb/src/lib/services.ts`
+- **Verify**: `npx tsc --noEmit` ผ่าน ✅, `npm run build` ผ่าน ✅
+
+---
+
+### Shadow Inbox History — panel กลางไม่โชว์ bot reply (2026-09-11) — ✅ ผ่าน
+- **ปัญหา**: tab History เห็นแชทใน list ซ้าย แต่กดแล้ว panel กลางไม่โชว์คำตอบ bot (คอลัมน์ขวาว่าง)
+- **สาเหตุ**:
+  1. tab History โหลด shadow replies แค่ `limit: 500` (เรียงใหม่สุดก่อน) แต่ใน DB มี 5,488 รายการ
+  2. conversation list โหลดจาก `distinct("conversation_id")` — เห็นแชททั้งหมดที่เคย generate
+  3. ตอนกดแชท → กรอง `historyReplies.filter((r) => r.conversation_id === selectedId)` ใน 500 ที่โหลดมา
+  4. ถ้าแชทที่เลือกไม่อยู่ใน 500 ล่าสุด → panel กลางว่าง (ไม่มี bot reply)
+  5. สคริปต์ generate ส่วนใหญ่ไม่มี `generated_by` (4,920 จาก 5,488 = NULL) — แต่ dev เห็นหมดอยู่แล้ว ปัญหาไม่ใช่ visibility
+- **วิธีแก้**:
+  1. เพิ่ม state `selectedConvReplies` — เก็บ shadow replies เฉพาะแชทที่เลือก
+  2. แก้ `loadDetail` — ตอนเลือกแชทใน History/Trash → ดึง shadow replies ของแชทนั้นโดยตรง (`conversation_id: id`) ไม่จำกัด limit
+  3. ส่ง `selectedConvReplies` ไป `ShadowConversationPanel` แทน `historyReplies.filter(...)`
+  4. โหลด chat messages + shadow replies พร้อมกัน (Promise.all) → ไม่ช้าลง
+- **ผล**: แชททุกแชทใน History จะโชว์ bot reply ใน panel กลาง แม้ไม่อยู่ใน 500 ล่าสุด
+- **ไฟล์ที่แก้**: `ChatAdminWeb/src/app/(console)/shadow-inbox/page.tsx`
+- **Verify**: `npx tsc --noEmit` ผ่าน ✅, `npm run build` ผ่าน ✅
+
+---
+
+### Shadow Inbox History — timeout 30s โหลดทั้งหมดทีเดียว (2026-09-11) — ✅ ผ่าน
+- **ปัญหา**: tab History/Trash โหลด conversations ทั้งหมดทีเดียว (distinct + $in ทุก conversation_id) → timeout 30s
+- **สาเหตุ**:
+  1. `/api/shadow-inbox/conversations` ใช้ `distinct("conversation_id")` → ได้ conversation_ids ทั้งหมด → `$in` lookup ทุก conversation พร้อมกัน
+  2. มี 5,488 shadow replies → distinct ออกมาเป็นพัน conversation_ids → `$in` lookup ช้า → timeout
+  3. โหลด shadow replies 500 รายการพร้อม conversations ด้วย → หนักขึ้น
+- **วิธีแก้**:
+  1. API `/api/shadow-inbox/conversations` — เปลี่ยนจาก `distinct + $in` เป็น pagination แบบ cursor:
+     - aggregation pipeline: `$match → $group by conversation_id → $sort by max(created_at) desc → cursor filter → $limit`
+     - pageSize 200 (default) + cursor (ISO date string ของ shadow reply ล่าสุดใน page)
+     - คืน `{ rows, nextCursor, totalCount }`
+  2. หน้า shadow-inbox — เพิ่ม pagination state (cursor, hasMore, loadingMore, totalCount) สำหรับ History + Trash
+  3. `load()` — โหลดแค่ page 1 (200 แชท) แทนทั้งหมด
+  4. `loadMoreHistory()` / `loadMoreTrash()` — โหลด page ถัดไปตอน scroll
+  5. ChatList — ส่ง `loadMore`, `hasMore`, `loadingMore`, `totalCount` ให้ (เหมือน ticket inbox)
+  6. ลบการโหลด `historyReplies` และ `trashRows` จาก `load()` (ใช้ `selectedConvReplies` แทน — ดึงเฉพาะแชทที่เลือก)
+- **ผล**: โหลด 200 แชทล่าสุดก่อน (~1s) → scroll โหลดเพิ่มทีละ 200 → ไม่ timeout
+- **ไฟล์ที่แก้**: `ChatAdminWeb/src/app/api/shadow-inbox/conversations/route.ts`, `ChatAdminWeb/src/app/(console)/shadow-inbox/page.tsx`
+- **Verify**: `npx tsc --noEmit` ผ่าน ✅, `npm run build` ผ่าน ✅
+
+---
+
+### Shadow Inbox History — กระพริบ/แชทหายเมื่อ poll (2026-09-11) — ✅ ผ่าน
+- **ปัญหา**: กดแชทใน History แล้วกระพริบ แชทหาย ต้องกดใหม่ แล้วก็หายอีก
+- **สาเหตุ**: polling ทุก 20s เรียก `load()` → `setHistoryConversations(page1)` ทับรายการทั้งหมด
+  - ถ้า scroll โหลดเพิ่มแล้ว (page 2+) → polling ลบ page 2+ ทิ้ง → แชทที่เลือกหาย → panel ว่าง → กระพริบ
+- **วิธีแก้**: ปิด polling ตอนอยู่ History/Trash (เป็นข้อมูลอดีต ไม่ต้อง real-time)
+  - `usePolling(load, ..., { enabled: originFilter !== "history" && originFilter !== "trash" })`
+  - โหลดครั้งเดียวตอนเข้า tab ผ่าน `useEffect` (เดิมทำงานอยู่แล้ว)
+- **ไฟล์ที่แก้**: `ChatAdminWeb/src/app/(console)/shadow-inbox/page.tsx`
+- **Verify**: `npx tsc --noEmit` ผ่าน ✅, `npm run build` ผ่าน ✅
+
+---
+- **ปัญหา**: panel กลางโชว์การ์ดสินค้า 30 ใบต่อคำตอบ bot เพราะส่ง `bot_products` ทั้งหมด (RAG context) เข้า `MessageContent`
+- **สาเหตุ**: bot ส่ง context สินค้า 30 รายการ (llm_context_limit=30) มาเป็น `products` ใน response → panel โชว์ทั้งหมด ทั้งที่ bot แนะนำจริงแค่ 1-3 รายการในคำตอบ
+- **วิธีแก้**: ฝั่ง Bot ของเรา — ส่ง `products: undefined` เข้า `MessageContent` (โชว์แค่คำตอบ text ไม่โชว์การ์ดสินค้า)
+  - ฝั่ง Zaapi ยังโชว์ products ปกติ (เป็นการ์ดจริงที่ Zaapi ส่ง)
+  - `bot_products` ยังเก็บใน DB ครบ (ไม่ได้ลบข้อมูล — แค่ไม่โชว์ใน panel)
+- **ไฟล์ที่แก้**: `ChatAdminWeb/src/components/shadow/ShadowConversationPanel.tsx`
+- **Verify**: `npx tsc --noEmit` ผ่าน ✅, `npm run build` ผ่าน ✅
+
+---
 - **ปัญหา**: RAG (fetch_products) กรอง status/stock ออกในบางจุด → ลูกค้าถามสินค้าเก่าไม่ได้ + สินค้าเลิกขายตอบสเปคไม่ได้
 - **ปัญหาเพิ่มเติม**: ไม่มี tier logic → สินค้า exact match (MODEL-REGEX/anchor) อาจถูกตัดด้วย limit ทิ้งไป
 - **ปัญหาเพิ่มเติม**: LLM prompt มีกฎเรื่อง status/stock กระจายอยู่ ไม่ชัดเจนพอ → LLM อาจแนะนำขายสินค้าหมดสต็อกได้

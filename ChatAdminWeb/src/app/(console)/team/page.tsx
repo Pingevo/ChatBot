@@ -55,6 +55,9 @@ interface TeamResponse {
   active_agents: number;
   total_open_conversations: number;
   unassigned: number;
+  unassigned_handoff?: number;
+  unassigned_open?: number;
+  total_conversations?: number;
   date_range?: { start: string | null; end: string | null; range: string };
 }
 
@@ -391,6 +394,9 @@ export default function TeamPage() {
               <h1 className="text-lg font-bold text-text">ทีม & การมอบหมาย</h1>
               <p className="text-xs text-text-muted">
                 {data.active_agents} agent ทำงาน · {data.total_open_conversations} งานเปิดอยู่ · {data.unassigned} ยังไม่ได้มอบหมาย
+                {data.total_conversations != null && (
+                  <span className="text-text-subtle"> (รวม {data.total_conversations.toLocaleString()} แชท)</span>
+                )}
               </p>
             </div>
           </div>
@@ -438,6 +444,12 @@ export default function TeamPage() {
                     มี {data.unassigned.toLocaleString()} การสนทนาที่ยังไม่ได้มอบหมาย
                   </div>
                   <div className="text-xs text-white/80 mt-0.5">
+                    {(data.unassigned_handoff ?? 0) > 0 && (
+                      <span className="font-semibold text-white">รอแอดมินรับ {data.unassigned_handoff?.toLocaleString()} · </span>
+                    )}
+                    {(data.unassigned_open ?? 0) > 0 && (
+                      <span>บอทตอบอยู่/ยังไม่มีคนตอบ {data.unassigned_open?.toLocaleString()} · </span>
+                    )}
                     ระบบจะมอบหมายอัตโนมัติตามโหมด {modeLabels[data.mode]} หรือมอบหมายเองได้จากหน้าแชท
                   </div>
                 </div>
@@ -457,7 +469,7 @@ export default function TeamPage() {
                 icon={MessageSquare}
                 label="งานเปิดอยู่"
                 value={data.total_open_conversations}
-                sub={`${data.unassigned} ยังไม่ได้มอบหมาย`}
+                sub={`${data.unassigned.toLocaleString()} ยังไม่ได้มอบหมาย${(data.unassigned_handoff ?? 0) > 0 ? ` (${data.unassigned_handoff} รอรับ)` : ""}`}
                 tone={data.unassigned > 0 ? "coral" : "brand"}
               />
               <SummaryCard

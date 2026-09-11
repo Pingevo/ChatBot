@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/apiClient";
 import type { Conversation, Platform, ChatMessage } from "@/lib/types";
+import { useSharedConversations } from "@/lib/useSharedConversations";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -233,11 +234,23 @@ export default function ReplayComparePage() {
     setSelectedConvIdx(0);
     setSelectedQIdx(0);
   }, []);
-  const [inboxConvs, setInboxConvs] = useState<Conversation[]>([]);
-  const [inboxLoading, setInboxLoading] = useState(false);
+  // ⚡ G-share — ใช้ shared conversation store (เหมือน ticket inbox / shadow inbox)
+  //   pagination: 50 newest + load more on scroll → ไม่ค้างเหมือน limit:10000 เดิม
   const [inboxSearch, setInboxSearch] = useState("");
   const [inboxPlatform, setInboxPlatform] = useState<"all" | Platform>("all");
   const [inboxShop, setInboxShop] = useState<string>("");
+  const {
+    conversations: sharedInboxConvs,
+    totalCount: inboxTotalCount,
+    loading: inboxLoading,
+    loadMore: inboxLoadMore,
+    hasMore: inboxHasMore,
+    loadingMore: inboxLoadingMore,
+  } = useSharedConversations({
+    assigned_to: "all",
+    q: inboxSearch || undefined,
+    pageSize: 50,
+  });
   const [selectedInboxId, setSelectedInboxId] = useState<string | null>(null);
   const [replayConvRunning, setReplayConvRunning] = useState(false);
   // ⚡ preview messages ก่อนเรียก replay
@@ -246,7 +259,6 @@ export default function ReplayComparePage() {
   const [previewLoading, setPreviewLoading] = useState(false);
   // shops ที่มีใน inbox (extract จาก conversations ที่โหลดมา)
   const [inboxShops, setInboxShops] = useState<string[]>([]);
-  const [inboxLoaded, setInboxLoaded] = useState(false);
 
   // ⚡ History — แชทที่เคย replay ผ่าน inbox แล้ว (ดึงจากไฟล์ replay_conv_*.json)
   // เก็บเป็น list ของ { conv_id, shop_name, file_path, generated_at, qa_count, status }
@@ -303,34 +315,11 @@ export default function ReplayComparePage() {
     }
   }, [loadData, loadFiles, mode]);
 
-  // ⚡ โหลด inbox conversations จาก /admin/conversations
-  const loadInbox = useCallback(async () => {
-    setInboxLoading(true);
-    try {
-      const r = await api().get<{ rows: Conversation[] } | Conversation[]>("/admin/conversations", {
-        params: { assigned_to: "all", limit: 10000, include_count: "true" },
-        timeout: 45000,
-      });
-      const data = Array.isArray(r.data) ? r.data : ((r.data as { rows?: Conversation[] }).rows || []);
-      setInboxConvs(data);
-      // extract shops ไม่ซ้ำ
-      const shops = Array.from(new Set(data.map(c => c.shop_name).filter(Boolean))) as string[];
-      setInboxShops(shops.sort());
-    } catch (err) {
-      catchError(err, "โหลด inbox ไม่สำเร็จ");
-      setInboxConvs([]);
-    } finally {
-      setInboxLoading(false);
-      setInboxLoaded(true);
-    }
-  }, [catchError]);
-
-  // ⚡ โหลด inbox ตอนเข้าหน้า (mode inbox = default) — ใช้ inboxLoaded กันวนลูป
+  // ⚡ shops สำหรับ filter — extract จาก shared conversations (เหมือน ticket inbox)
   useEffect(() => {
-    if (mode === "inbox" && !inboxLoaded && !inboxLoading) {
-      loadInbox();
-    }
-  }, [mode, inboxLoaded, inboxLoading, loadInbox]);
+    const shops = Array.from(new Set(sharedInboxConvs.map(c => c.shop_name).filter(Boolean))) as string[];
+    setInboxShops(shops.sort());
+  }, [sharedInboxConvs]);
 
   // ⚡ เคลียร์ center panel ตอนเข้าหน้า (mount) — กันของเก่าค้าง
   useEffect(() => {
@@ -531,19 +520,10 @@ export default function ReplayComparePage() {
   const selectedQa = selectedConv?.qa?.[selectedQIdx];
   const analysis = data?.analysis;
 
-  // ⚡ Filter inbox conversations ตาม search + platform + shop
-  const filteredInbox = (inboxConvs as Conversation[]).filter(c => {
+  // ⚡ Filter inbox conversations ตาม platform + shop (search ส่งไป server แล้วผ่าน useSharedConversations)
+  const filteredInbox = (sharedInboxConvs as Conversation[]).filter(c => {
     if (inboxPlatform !== "all" && c.platform !== inboxPlatform) return false;
     if (inboxShop && c.shop_name !== inboxShop) return false;
-    if (inboxSearch) {
-      const q = inboxSearch.toLowerCase();
-      const match =
-        (c.customer_name || "").toLowerCase().includes(q) ||
-        (c.last_message || "").toLowerCase().includes(q) ||
-        (c.id || "").toLowerCase().includes(q) ||
-        (c.shop_name || "").toLowerCase().includes(q);
-      if (!match) return false;
-    }
     return true;
   });
 
@@ -659,8 +639,8 @@ export default function ReplayComparePage() {
           {mode === "files" && (
             <Badge tone="neutral">{convs.length} แชท</Badge>
           )}
-          {mode === "inbox" && inboxConvs.length > 0 && (
-            <Badge tone="neutral">{inboxConvs.length} แชท</Badge>
+          {mode === "inbox" && sharedInboxConvs.length > 0 && (
+            <Badge tone="neutral">{inboxTotalCount || sharedInboxConvs.length} แชท</Badge>
           )}
           {mode === "history" && historyItems.length > 0 && (
             <Badge tone="neutral">{historyItems.length} แชท</Badge>
@@ -714,8 +694,7 @@ export default function ReplayComparePage() {
             size="sm"
             variant="outline"
             onClick={() => {
-              if (mode === "inbox") { setInboxLoaded(false); loadInbox(); }
-              else if (mode === "history") { setHistoryLoaded(false); loadHistory(); }
+              if (mode === "history") { setHistoryLoaded(false); loadHistory(); }
               else { loadData(selectedFile || undefined); loadFiles(); }
             }}
             disabled={mode === "files" ? loading : mode === "history" ? historyLoading : inboxLoading}
@@ -753,7 +732,17 @@ export default function ReplayComparePage() {
       {/* Main 3-column layout */}
       <div className="flex flex-1 overflow-hidden">
         {/* Left: Conversation list — inbox หรือ files แล้วแต่ mode */}
-        <div className="w-72 border-r overflow-y-auto bg-white flex flex-col">
+        <div
+          className="w-72 border-r overflow-y-auto bg-white flex flex-col"
+          onScroll={mode === "inbox" ? (e) => {
+            const el = e.currentTarget;
+            if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200) {
+              if (inboxHasMore && !inboxLoadingMore && inboxLoadMore) {
+                inboxLoadMore();
+              }
+            }
+          } : undefined}
+        >
           {mode === "inbox" ? (
             <>
               {/* ⚡ Inbox picker — search + filter + list จาก /admin/conversations */}
@@ -790,12 +779,12 @@ export default function ReplayComparePage() {
                   </select>
                 </div>
                 <div className="flex items-center justify-between text-[10px] text-gray-400">
-                  <span>{filteredInbox.length} จาก {inboxConvs.length}</span>
+                  <span>{filteredInbox.length}{inboxTotalCount ? ` จาก ${inboxTotalCount}` : ""}</span>
                   {inboxLoading && <RefreshCw className="w-3 h-3 animate-spin" />}
                 </div>
               </div>
 
-              {inboxLoading && inboxConvs.length === 0 && (
+              {inboxLoading && filteredInbox.length === 0 && (
                 <div className="p-4"><Loading /></div>
               )}
               {!inboxLoading && filteredInbox.length === 0 && (
@@ -845,6 +834,14 @@ export default function ReplayComparePage() {
                     </button>
                   );
                 })}
+                {inboxLoadingMore && (
+                  <div className="p-2 text-center text-[10px] text-gray-400 flex items-center justify-center gap-1">
+                    <RefreshCw className="w-3 h-3 animate-spin" /> กำลังโหลดเพิ่ม...
+                  </div>
+                )}
+                {!inboxLoadingMore && !inboxHasMore && filteredInbox.length > 0 && (
+                  <div className="p-2 text-center text-[10px] text-gray-400">โหลดครบแล้ว</div>
+                )}
               </div>
             </>
           ) : mode === "history" ? (
