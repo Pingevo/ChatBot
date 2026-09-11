@@ -942,8 +942,8 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
                                       role: "bot",
                                       text: seg,
                                       timestamp: pair.inbound.timestamp,
-                                      // products แสดงที่ segment สุดท้ายเท่านั้น (กันซ้ำ)
-                                      products: i === bubbles.length - 1 ? pair.botReply!.products : undefined,
+                                      // ⚡ ไม่ส่ง products — แสดงแค่คำตอบ bot ไม่โชว์การ์ดสินค้าทั้ง 30 (context)
+                                      products: undefined,
                                     }}
                                     variant="out"
                                   />

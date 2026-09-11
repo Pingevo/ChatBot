@@ -10,7 +10,7 @@ import { conversationService } from "@/backend/service/conversationService";
 import { assignmentService } from "@/backend/service/assignmentService";
 import { shopService } from "@/backend/service/shopService";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
-import type { ConversationStatus } from "@/backend/service/conversationService";
+import type { ConversationStatus, ConversationDoc } from "@/backend/service/conversationService";
 
 export async function GET(req: NextRequest) {
   const r = await requireAuth(req);
@@ -46,7 +46,7 @@ export async function GET(req: NextRequest) {
     histEnd.setHours(23, 59, 59, 999);
   }
 
-  const [admins, openConvos, mode, shopTeamRows, platformTeamRows, shops, statusMetas, histAgg] = await Promise.all([
+  const [admins, openConvos, mode, shopTeamRows, platformTeamRows, shops, statusMetas, histAgg, realCounts] = await Promise.all([
     auth.listAdmins(),
     conversationService.listConversations({ limit: 5000 }),
     assignmentService.getActiveAssignmentConfig(),
@@ -98,6 +98,24 @@ export async function GET(req: NextRequest) {
         },
       ]).toArray();
       return new Map(agg.map((a) => [a._id || "", a]));
+    })(),
+    // ⚡ real counts จาก DB aggregation (ไม่จำกัด limit 5000)
+    //   - total = ทั้งหมดใน conversations_shp
+    //   - assigned = มี assigned_to ที่ไม่ใช่ null
+    //   - unassigned = ไม่มี assigned_to + ไม่ใช่ closed/resolved
+    //   - unassigned_handoff = ไม่มี assigned_to + status=handoff (รอแอดมินรับจริง)
+    //   - unassigned_open = ไม่มี assigned_to + status=open (บอทตอบอยู่หรือยังไม่มีคนตอบ)
+    (async () => {
+      const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
+      const notAssigned = { $or: [{ assigned_to: { $type: 10 } }, { assigned_to: { $exists: false } }] } as Record<string, unknown>;
+      const [total, assigned, unassigned, unassignedHandoff, unassignedOpen] = await Promise.all([
+        coll.countDocuments({}),
+        coll.countDocuments({ assigned_to: { $type: 2 } }),
+        coll.countDocuments({ ...notAssigned, status: { $nin: ["resolved", "closed"] } }),
+        coll.countDocuments({ ...notAssigned, status: "handoff" }),
+        coll.countDocuments({ ...notAssigned, status: "open" }),
+      ]);
+      return { total, assigned, unassigned, unassignedHandoff, unassignedOpen };
     })(),
   ]);
 
@@ -186,16 +204,13 @@ export async function GET(req: NextRequest) {
     total_agents: agents.length,
     active_agents: agents.filter((a) => a.is_active_agent).length,
     assignable_agents: agents.filter((a) => a.assignable).length,
-    total_open_conversations: openConvos.filter((c) => {
-      const meta = statusMap.get(c.conversation_id);
-      return meta?.assigned_to ?? c.assigned_to;
-    }).length,
-    unassigned: openConvos.filter((c) => {
-      const meta = statusMap.get(c.conversation_id);
-      const assigned = meta?.assigned_to ?? c.assigned_to;
-      const status = meta?.status ?? c.status;
-      return !assigned && status !== "resolved" && status !== "closed";
-    }).length,
+    // ⚡ ใช้ real counts จาก DB aggregation (ไม่จำกัด limit 5000)
+    total_open_conversations: realCounts.assigned,
+    unassigned: realCounts.unassigned,
+    // ⚡ แยกย่อย: handoff (รอแอดมินรับจริง) vs open (บอทตอบอยู่/ยังไม่มีคนตอบ)
+    unassigned_handoff: realCounts.unassignedHandoff,
+    unassigned_open: realCounts.unassignedOpen,
+    total_conversations: realCounts.total,
     // ⚡ date range info
     date_range: {
       start: histStart?.toISOString() || null,
