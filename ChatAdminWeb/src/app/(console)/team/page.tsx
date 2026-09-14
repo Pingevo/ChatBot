@@ -6,11 +6,12 @@ import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Loading } from "@/components/ui/Loading";
 import { PageShell } from "@/components/ui/PageShell";
+import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import {
   Users, RefreshCw, Settings,
   MessageSquare, AlertCircle, Activity, Store, Globe,
-  Clock, PauseCircle, PlayCircle, ChevronDown, ChevronRight,
-  Calendar, TrendingUp, CheckCircle, Inbox, Send,
+  Clock, PauseCircle, PlayCircle, ChevronDown,
+  TrendingUp, CheckCircle, Inbox, Send, Check, LayoutGrid,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
 import { canEditPage } from "@/lib/roles";
@@ -115,6 +116,10 @@ const platforms: { value: Platform; label: string; color: string }[] = [
 ];
 
 type Tab = "overview" | "shop-team" | "platform-team";
+type TeamFilter = "all" | "in" | "out";
+
+const roleTone = (role: string): "brand" | "pale" | "neutral" =>
+  role === "superadmin" ? "brand" : role === "dev" ? "pale" : "neutral";
 
 export default function TeamPage() {
   const { user } = useAuth();
@@ -124,8 +129,10 @@ export default function TeamPage() {
   const [loading, setLoading] = useState(true);
   const [savingMode, setSavingMode] = useState(false);
   const [tab, setTab] = useState<Tab>("overview");
-  const [shopFilter, setShopFilter] = useState<"all" | "in" | "out">("all");
+  const [shopFilter, setShopFilter] = useState<TeamFilter>("all");
+  const [platformFilter, setPlatformFilter] = useState<TeamFilter>("all");
   const [shopPlatformFilter, setShopPlatformFilter] = useState<"all" | Platform>("all");
+  const [overviewPlatformFilter, setOverviewPlatformFilter] = useState<"all" | Platform>("all");
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
 
   // shop-team state
@@ -298,10 +305,11 @@ export default function TeamPage() {
     }
   }
 
-  async function handleAddAgentToPlatform(adminId: string) {
+  // ⚡ รับ platform เป็น parameter — ก่อนหน้านี้ matrix เรียกด้วย selectedPlatform ตลอด (bug: ทุกช่องเขียนลง shopee)
+  async function handleAddAgentToPlatform(adminId: string, platform: Platform) {
     setPlatformAgentAdding(adminId);
     try {
-      await api().post("/assignment/platform-team", { platform: selectedPlatform, admin_id: adminId });
+      await api().post("/assignment/platform-team", { platform, admin_id: adminId });
       await loadPlatformTeam();
       toast.success("เพิ่ม agent เข้าทีมแพลตฟอร์มแล้ว");
     } catch (err) {
@@ -311,7 +319,7 @@ export default function TeamPage() {
     }
   }
 
-  async function handleRemoveAgentFromPlatform(adminId: string) {
+  async function handleRemoveAgentFromPlatform(adminId: string, platform: Platform) {
     const ok = await confirm.ask({
       title: "นำ agent ออกจากทีมแพลตฟอร์ม?",
       message: "agent จะไม่รับงานจากแพลตฟอร์มนี้อีก",
@@ -321,12 +329,12 @@ export default function TeamPage() {
     if (!ok) return;
     setPlatformAgentAdding(adminId);
     try {
-      await api().delete("/assignment/platform-team", { data: { platform: selectedPlatform, admin_id: adminId } });
+      await api().delete("/assignment/platform-team", { data: { platform, admin_id: adminId } });
       await loadPlatformTeam();
       // 🔒 P4e: Undo — re-add agent to platform
       toast.success("นำ agent ออกจากทีมแพลตฟอร์มแล้ว", 6000, {
         label: "กู้คืน",
-        onClick: () => handleAddAgentToPlatform(adminId),
+        onClick: () => handleAddAgentToPlatform(adminId, platform),
       });
     } catch (err) {
       catchError(err, "ลบ agent ไม่สำเร็จ");
@@ -338,6 +346,29 @@ export default function TeamPage() {
   // Phase 8 — helpers สำหรับแสดง chat accept status
   const statusOf = (adminId: string): ChatStatusRow | undefined =>
     chatStatus.find((s) => s.admin_id === adminId);
+
+  // ⚡ ร้านที่ agent ดูแล — ใช้ข้อมูลจาก API โดยตรง (assigned_shops_detail)
+  //    fallback ไป shopTeam state ถ้า API ไม่ส่งมา
+  const agentShopsOf = (a: AgentRow): AgentShopDetail[] =>
+    a.assigned_shops_detail && a.assigned_shops_detail.length > 0
+      ? a.assigned_shops_detail
+      : shops
+          .filter((s) =>
+            shopTeam.some((r) => r.shop_id === s.shop_id && r.admin_id === a.admin_id && r.is_active)
+          )
+          .map((s) => ({ shop_id: s.shop_id, shopname: s.shopname, platform: s.platform }));
+
+  // ⚡ แพลตฟอร์มที่ agent ดูแล — assigned_platforms ก่อน, fallback platformTeam state
+  const agentPlatformValuesOf = (a: AgentRow): string[] =>
+    a.assigned_platforms && a.assigned_platforms.length > 0
+      ? a.assigned_platforms
+      : platformTeam
+          .filter((r) => r.admin_id === a.admin_id && r.is_active)
+          .map((r) => r.platform);
+
+  // agent ครอบคลุม platform นี้ไหม (ดูแล platform team หรือมีร้านบน platform นั้น)
+  const agentCoversPlatform = (a: AgentRow, p: Platform): boolean =>
+    agentPlatformValuesOf(a).includes(p) || agentShopsOf(a).some((s) => s.platform === p);
 
   function formatDuration(ms: number): string {
     if (ms <= 0) return "0 นาที";
@@ -379,6 +410,14 @@ export default function TeamPage() {
     return b.workload.active - a.workload.active;
   });
 
+  // ⚡ overview: กรอง agent ตามแพลตฟอร์มที่เลือก (ครอบคลุม = อยู่ทีมแพลตฟอร์ม หรือมีร้านบนแพลตฟอร์มนั้น)
+  const visibleAgents = overviewPlatformFilter === "all"
+    ? sortedAgents
+    : sortedAgents.filter((a) => agentCoversPlatform(a, overviewPlatformFilter));
+
+  const platformAgentCount = (p: Platform) =>
+    sortedAgents.filter((a) => agentCoversPlatform(a, p)).length;
+
   const selectedShop = shops.find((s) => s.shop_id === selectedShopId);
   const shopTeamAgentIds = shopTeam
     .filter((r) => r.shop_id === selectedShopId && r.is_active)
@@ -416,428 +455,486 @@ export default function TeamPage() {
     >
       {/* Read-only banner for admin role */}
       {!editable && (
-          <div className="flex items-center gap-2 bg-surface-2 border border-border rounded-lg p-2.5 text-xs text-text-muted">
-            <AlertCircle size={14} className="text-text-subtle" />
-            คุณเป็น Admin — ดูได้อย่างเดียว ต้องเป็น SuperAdmin หรือ Dev ถึงจะเปลี่ยนโหมด/จัดทีมได้
-          </div>
-        )}
-
-        {/* Tabs */}
-        <div className="flex gap-1.5 border-b border-border">
-          <TabButton active={tab === "overview"} onClick={() => setTab("overview")} icon={Activity} label="ภาพรวม" />
-          <TabButton active={tab === "shop-team"} onClick={() => setTab("shop-team")} icon={Store} label="จัดทีมร้าน" />
-          <TabButton active={tab === "platform-team"} onClick={() => setTab("platform-team")} icon={Globe} label="จัดทีมแพลตฟอร์ม" />
+        <div className="flex items-center gap-2 bg-surface-2 border border-border rounded-lg p-2.5 text-xs text-text-muted">
+          <AlertCircle size={14} className="text-text-subtle" />
+          คุณเป็น Admin — ดูได้อย่างเดียว ต้องเป็น SuperAdmin หรือ Dev ถึงจะเปลี่ยนโหมด/จัดทีมได้
         </div>
+      )}
 
-        {/* === Tab: Overview === */}
-        {tab === "overview" && (
-          <>
-            {/* ⚠️ Unassigned banner — ด้านบน, แดงเลือดหมู (brand) */}
-            {data.unassigned > 0 && (
-              <div className="flex items-center gap-3 bg-brand border border-brand-dark rounded-xl p-4 shadow-md">
-                <div className="w-10 h-10 rounded-full bg-white/15 flex items-center justify-center shrink-0">
-                  <AlertCircle size={22} className="text-white" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-bold text-white">
-                    มี {data.unassigned.toLocaleString()} การสนทนาที่ยังไม่ได้มอบหมาย
-                  </div>
-                  <div className="text-xs text-white/80 mt-0.5">
-                    {(data.unassigned_handoff ?? 0) > 0 && (
-                      <span className="font-semibold text-white">รอแอดมินรับ {data.unassigned_handoff?.toLocaleString()} · </span>
-                    )}
-                    {(data.unassigned_open ?? 0) > 0 && (
-                      <span>บอทตอบอยู่/ยังไม่มีคนตอบ {data.unassigned_open?.toLocaleString()} · </span>
-                    )}
-                    ระบบจะมอบหมายอัตโนมัติตามโหมด {modeLabels[data.mode]} หรือมอบหมายเองได้จากหน้าแชท
-                  </div>
-                </div>
-                <button
-                  onClick={() => setTab("shop-team")}
-                  className="hidden md:flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-white text-brand hover:bg-pale-sky-soft transition-colors shrink-0"
-                >
-                  <Store size={12} /> จัดทีม
-                </button>
+      {/* Tabs — segmented control */}
+      <div role="tablist" aria-label="มุมมองทีม" className="grid grid-cols-3 gap-1 rounded-xl border border-border bg-surface-2/70 p-1">
+        <TabButton active={tab === "overview"} onClick={() => setTab("overview")} icon={Activity} label="ภาพรวม" desc="สถานะ & งานค้าง" />
+        <TabButton active={tab === "shop-team"} onClick={() => setTab("shop-team")} icon={Store} label="จัดทีมร้าน" desc="แยกตามร้าน" />
+        <TabButton active={tab === "platform-team"} onClick={() => setTab("platform-team")} icon={Globe} label="จัดทีมแพลตฟอร์ม" desc="แยกตามแพลตฟอร์ม" />
+      </div>
+
+      {/* === Tab: Overview === */}
+      {tab === "overview" && (
+        <>
+          {/* ⚠️ Unassigned banner — ด้านบน, แดงเลือดหมู (brand) */}
+          {data.unassigned > 0 && (
+            <div className="flex items-center gap-3 bg-brand border border-brand-dark rounded-xl p-3.5 sm:p-4 shadow-md">
+              <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-white/15 flex items-center justify-center shrink-0">
+                <AlertCircle size={20} className="text-white" />
               </div>
-            )}
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-bold text-white">
+                  มี {data.unassigned.toLocaleString()} การสนทนาที่ยังไม่ได้มอบหมาย
+                </div>
+                <div className="text-xs text-white/80 mt-0.5">
+                  {(data.unassigned_handoff ?? 0) > 0 && (
+                    <span className="font-semibold text-white">รอแอดมินรับ {data.unassigned_handoff?.toLocaleString()} · </span>
+                  )}
+                  {(data.unassigned_open ?? 0) > 0 && (
+                    <span>บอทตอบอยู่/ยังไม่มีคนตอบ {data.unassigned_open?.toLocaleString()} · </span>
+                  )}
+                  ระบบจะมอบหมายอัตโนมัติตามโหมด {modeLabels[data.mode]} หรือมอบหมายเองได้จากหน้าแชท
+                </div>
+              </div>
+              <button
+                onClick={() => setTab("shop-team")}
+                className="flex items-center gap-1.5 text-xs font-semibold px-2.5 sm:px-3 py-1.5 rounded-lg bg-white text-brand hover:bg-pale-sky-soft transition-colors shrink-0"
+              >
+                <Store size={12} /> จัดทีม
+              </button>
+            </div>
+          )}
 
-            {/* Summary cards */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <SummaryCard icon={Users} label="Agent ทั้งหมด" value={data.total_agents} sub={`${data.active_agents} ทำงาน`} />
-              <SummaryCard
-                icon={MessageSquare}
-                label="งานเปิดอยู่"
-                value={data.total_open_conversations}
-                sub={`${data.unassigned.toLocaleString()} ยังไม่ได้มอบหมาย${(data.unassigned_handoff ?? 0) > 0 ? ` (${data.unassigned_handoff} รอรับ)` : ""}`}
-                tone={data.unassigned > 0 ? "coral" : "brand"}
-              />
-              <SummaryCard
-                icon={PlayCircle}
-                label="กำลังรับแชท"
-                value={acceptingCount}
-                sub={`${pausedCount} คนพัก`}
-                tone="brand"
-              />
-              <SummaryCard
-                icon={Clock}
-                label="เวลารับแชทวันนี้"
-                valueText={formatDuration(totalAcceptingMs)}
-                sub={`พัก ${formatDuration(totalPausedMs)}`}
-              />
+          {/* Summary cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3">
+            <SummaryCard icon={Users} label="Agent ทั้งหมด" value={data.total_agents} sub={`${data.active_agents} ทำงาน`} />
+            <SummaryCard
+              icon={MessageSquare}
+              label="งานเปิดอยู่"
+              value={data.total_open_conversations}
+              sub={`${data.unassigned.toLocaleString()} ยังไม่ได้มอบหมาย${(data.unassigned_handoff ?? 0) > 0 ? ` (${data.unassigned_handoff} รอรับ)` : ""}`}
+              tone={data.unassigned > 0 ? "coral" : "brand"}
+            />
+            <SummaryCard
+              icon={PlayCircle}
+              label="กำลังรับแชท"
+              value={acceptingCount}
+              sub={`${pausedCount} คนพัก`}
+              tone="brand"
+            />
+            <SummaryCard
+              icon={Clock}
+              label="เวลารับแชทวันนี้"
+              valueText={formatDuration(totalAcceptingMs)}
+              sub={`พัก ${formatDuration(totalPausedMs)}`}
+            />
+          </div>
+
+          {/* Assignment mode config */}
+          {editable && (
+            <Card className="p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Settings size={14} className="text-text-muted" />
+                <h2 className="text-sm font-semibold text-text">โหมดการมอบหมายงาน (Round-Robin)</h2>
+              </div>
+              <p className="text-xs text-text-muted mb-3">
+                เลือกวิธีแบ่งงาน — แล้วไปที่แท็บ "จัดทีมร้าน" หรือ "จัดทีมแพลตฟอร์ม" เพื่อกำหนด agent
+              </p>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-2">
+                {(Object.keys(modeLabels) as AssignmentMode[]).map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => handleModeChange(mode)}
+                    disabled={savingMode}
+                    className={`text-left p-3 rounded-lg border transition-colors ${
+                      data.mode === mode
+                        ? "border-brand bg-brand/10"
+                        : "border-border bg-surface-2 hover:bg-pale-sky-soft"
+                    } ${savingMode ? "opacity-50" : ""}`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm font-medium text-text">{modeLabels[mode]}</span>
+                      {data.mode === mode && <span className="w-2 h-2 rounded-full bg-brand" />}
+                    </div>
+                    <div className="text-[11px] text-text-muted">{modeDescriptions[mode]}</div>
+                    {(mode === "equal_per_shop" || mode === "equal_per_platform") && (
+                      <div className="text-[10px] text-brand mt-1.5">
+                        → ไปจัดทีมที่แท็บ{mode === "equal_per_shop" ? "ร้าน" : "แพลตฟอร์ม"}
+                      </div>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </Card>
+          )}
+
+          {/* Agent list — card list บน mobile/tablet, table บน lg+ */}
+          <Card className="overflow-hidden">
+            <div className="px-3 sm:px-4 py-3 border-b border-border flex flex-wrap items-center gap-x-2 gap-y-2">
+              <Users size={14} className="text-text-muted" />
+              <h2 className="text-sm font-semibold text-text">รายชื่อ Agent</h2>
+              <Badge tone="brand">{visibleAgents.length} คน</Badge>
+              <span className="text-[11px] text-text-subtle hidden md:inline">กดเพื่อดูร้าน/แพลตฟอร์มที่ดูแล</span>
+              {/* ⚡ filter ตามแพลตฟอร์มที่ agent ครอบคลุม */}
+              <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto sm:ml-auto pb-0.5 sm:pb-0">
+                <FilterChip
+                  active={overviewPlatformFilter === "all"}
+                  onClick={() => setOverviewPlatformFilter("all")}
+                  label="ทั้งหมด"
+                  count={sortedAgents.length}
+                />
+                {platforms.map((p) => (
+                  <FilterChip
+                    key={p.value}
+                    active={overviewPlatformFilter === p.value}
+                    onClick={() => setOverviewPlatformFilter(p.value)}
+                    label={p.label}
+                    count={platformAgentCount(p.value)}
+                    platform={p.value}
+                  />
+                ))}
+              </div>
             </div>
 
-            {/* Assignment mode config */}
-            {editable && (
-              <Card className="p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <Settings size={14} className="text-text-muted" />
-                  <h2 className="text-sm font-semibold text-text">โหมดการมอบหมายงาน (Round-Robin)</h2>
-                </div>
-                <p className="text-xs text-text-muted mb-3">
-                  เลือกวิธีแบ่งงาน — แล้วไปที่แท็บ "จัดทีมร้าน" หรือ "จัดทีมแพลตฟอร์ม" เพื่อกำหนด agent
-                </p>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                  {(Object.keys(modeLabels) as AssignmentMode[]).map((mode) => (
-                    <button
-                      key={mode}
-                      onClick={() => handleModeChange(mode)}
-                      disabled={savingMode}
-                      className={`text-left p-3 rounded-lg border transition-colors ${
-                        data.mode === mode
-                          ? "border-brand bg-brand/10"
-                          : "border-border bg-surface-2 hover:bg-pale-sky-soft"
-                      } ${savingMode ? "opacity-50" : ""}`}
-                    >
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-sm font-medium text-text">{modeLabels[mode]}</span>
-                        {data.mode === mode && <span className="w-2 h-2 rounded-full bg-brand" />}
-                      </div>
-                      <div className="text-[11px] text-text-muted">{modeDescriptions[mode]}</div>
-                      {(mode === "equal_per_shop" || mode === "equal_per_platform") && (
-                        <div className="text-[10px] text-brand mt-1.5">
-                          → ไปจัดทีมที่แท็บ{mode === "equal_per_shop" ? "ร้าน" : "แพลตฟอร์ม"}
-                        </div>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              </Card>
-            )}
-
-            {/* Agent table */}
-            <Card className="overflow-hidden">
-              <div className="px-4 py-3 border-b border-border flex items-center gap-2">
-                <Users size={14} className="text-text-muted" />
-                <h2 className="text-sm font-semibold text-text">รายชื่อ Agent</h2>
-                <span className="text-[11px] text-text-subtle ml-1">กดชื่อเพื่อดูร้าน/แพลตฟอร์มที่ดูแล</span>
-                <Badge tone="brand" className="ml-auto">{sortedAgents.length} คน</Badge>
-              </div>
-              {sortedAgents.length === 0 ? (
-                <div className="p-8"><EmptyState icon={Users} title="ไม่มี agent" description="ยังไม่มีผู้ใช้ในระบบ" /></div>
-              ) : (
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-border bg-surface-2/50">
-                      <th className="text-left px-4 py-2.5 font-medium text-text-muted text-xs">Agent</th>
-                      <th className="text-left px-4 py-2.5 font-medium text-text-muted text-xs">บทบาท</th>
-                      <th className="text-center px-4 py-2.5 font-medium text-text-muted text-xs">สถานะ</th>
-                      <th className="text-center px-4 py-2.5 font-medium text-text-muted text-xs">รับแชท</th>
-                      <th className="text-left px-4 py-2.5 font-medium text-text-muted text-xs">เวลาวันนี้</th>
-                      <th className="text-center px-4 py-2.5 font-medium text-text-muted text-xs">ทั้งหมด</th>
-                      <th className="text-center px-4 py-2.5 font-medium text-text-muted text-xs">เปิดอยู่</th>
-                      <th className="text-center px-4 py-2.5 font-medium text-text-muted text-xs">ปิดแล้ว</th>
-                      <th className="text-left px-4 py-2.5 font-medium text-text-muted text-xs">ร้านที่ดูแล</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sortedAgents.map((a, i) => {
-                      const st = statusOf(a.admin_id);
-                      const accepting = st?.current_state === "accepting";
-                      const isExpanded = expandedAgent === a.admin_id;
-                      // ⚡ ใช้ข้อมูลจาก API โดยตรง (assigned_shops_detail + assigned_platforms)
-                      //    fallback ไป shopTeam/platformTeam state ถ้า API ไม่ส่งมา
-                      const agentShops = a.assigned_shops_detail && a.assigned_shops_detail.length > 0
-                        ? a.assigned_shops_detail
-                        : shops.filter((s) =>
-                            shopTeam.some((r) => r.shop_id === s.shop_id && r.admin_id === a.admin_id && r.is_active)
-                          ).map((s) => ({ shop_id: s.shop_id, shopname: s.shopname, platform: s.platform }));
-                      const agentPlatformValues = a.assigned_platforms && a.assigned_platforms.length > 0
-                        ? a.assigned_platforms
-                        : platformTeam
-                            .filter((r) => r.admin_id === a.admin_id && r.is_active)
-                            .map((r) => r.platform);
-                      const agentPlatforms = platforms.filter((p) => agentPlatformValues.includes(p.value));
-                      const hist = a.history;
-                      return (
-                        <Fragment key={`${a.admin_id}-${i}`}>
-                          <tr
-                            className={`border-b border-border/50 hover:bg-surface-2/30 transition-colors cursor-pointer ${i % 2 === 0 ? "" : "bg-surface-2/20"} ${isExpanded ? "bg-brand/5" : ""}`}
-                            onClick={() => setExpandedAgent(isExpanded ? null : a.admin_id)}
-                          >
-                            <td className="px-4 py-3">
-                              <div className="flex items-center gap-2.5">
-                                {isExpanded ? <ChevronDown size={14} className="text-text-muted shrink-0" /> : <ChevronRight size={14} className="text-text-muted shrink-0" />}
-                                <div className="w-8 h-8 rounded-full bg-brand/15 flex items-center justify-center text-xs font-medium text-brand flex-shrink-0">
-                                  {a.name?.charAt(0).toUpperCase() || a.username?.charAt(0).toUpperCase() || "?"}
-                                </div>
-                                <div className="min-w-0">
-                                  <div className="font-medium text-text truncate">{a.name || a.username}</div>
-                                  <div className="text-[11px] text-text-muted truncate">@{a.username}</div>
-                                </div>
+            {visibleAgents.length === 0 ? (
+              <EmptyState
+                icon={Users}
+                title="ไม่มี agent"
+                description={overviewPlatformFilter === "all" ? "ยังไม่มีผู้ใช้ในระบบ" : "ไม่มี agent ที่ครอบคลุมแพลตฟอร์มนี้"}
+              />
+            ) : (
+              <>
+                {/* Mobile / tablet — card list (<lg) */}
+                <div className="lg:hidden divide-y divide-border/60">
+                  {visibleAgents.map((a, i) => {
+                    const st = statusOf(a.admin_id);
+                    const isExpanded = expandedAgent === a.admin_id;
+                    const agentShops = agentShopsOf(a);
+                    const agentPlatforms = platforms.filter((p) => agentPlatformValuesOf(a).includes(p.value));
+                    return (
+                      <div key={`agent-card-${a.admin_id}-${i}`} className={isExpanded ? "bg-brand/5" : ""}>
+                        <button
+                          onClick={() => setExpandedAgent(isExpanded ? null : a.admin_id)}
+                          className="w-full text-left px-4 py-3.5 space-y-2.5 hover:bg-surface-2/30 transition-colors"
+                        >
+                          <div className="flex items-center gap-3">
+                            <AgentAvatar name={a.name || a.username} online={a.is_active_agent} size={36} />
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-sm font-semibold text-text truncate">{a.name || a.username}</span>
+                                <Badge tone={roleTone(a.role)}>{a.role}</Badge>
                               </div>
-                            </td>
-                            <td className="px-4 py-3">
-                              <Badge tone={a.role === "superadmin" ? "brand" : a.role === "dev" ? "pale" : "neutral"}>{a.role}</Badge>
-                            </td>
-                            <td className="px-4 py-3 text-center">
-                              <span className={`inline-flex items-center gap-1 text-xs ${a.is_active_agent ? "text-success-soft" : "text-text-subtle"}`}>
-                                <span className={`w-1.5 h-1.5 rounded-full ${a.is_active_agent ? "bg-success-soft" : "bg-text-subtle"}`} />
-                                {a.is_active_agent ? "ออนไลน์" : "ปิด"}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3 text-center">
-                              {st ? (
-                                <span className={`inline-flex items-center gap-1 text-xs ${accepting ? "text-success-soft" : "text-warning"}`}>
-                                  {accepting ? <PlayCircle size={12} /> : <PauseCircle size={12} />}
-                                  <span className={`w-1.5 h-1.5 rounded-full ${accepting ? "bg-success-soft" : "bg-warning"}`} />
-                                  {accepting ? "รับ" : "พัก"}
+                              <div className="text-[11px] text-text-muted truncate flex items-center gap-1.5 mt-0.5">
+                                <span className={`inline-flex items-center gap-1 ${a.is_active_agent ? "text-success" : "text-text-subtle"}`}>
+                                  <span className={`w-1.5 h-1.5 rounded-full ${a.is_active_agent ? "bg-success" : "bg-surface-4"}`} />
+                                  {a.is_active_agent ? "ออนไลน์" : "ปิด"}
                                 </span>
-                              ) : <span className="text-[11px] text-text-subtle">—</span>}
-                            </td>
-                            <td className="px-4 py-3">
-                              {st ? (
-                                <div className="text-[11px] leading-tight">
-                                  <div className="text-text-muted">
-                                    <Clock size={10} className="inline mr-1 text-success-soft" />
-                                    {formatDuration(st.accepting_ms)}
-                                    <span className="text-text-subtle"> รับ</span>
-                                  </div>
-                                  <div className="text-text-subtle mt-0.5">
-                                    <PauseCircle size={10} className="inline mr-1 text-warning" />
-                                    {formatDuration(st.paused_ms)} พัก
-                                  </div>
-                                  <div className="text-text-subtle mt-0.5">
-                                    ต่อเนื่อง: {formatSince(st.current_since)}
-                                  </div>
-                                </div>
-                              ) : <span className="text-[11px] text-text-subtle">—</span>}
-                            </td>
-                            <td className="px-4 py-3 text-center">
-                              <span className={`font-semibold ${a.workload.all > 0 ? "text-text" : "text-text-subtle"}`}>{a.workload.all}</span>
-                            </td>
-                            <td className="px-4 py-3 text-center">
-                              {a.workload.active > 0 ? <span className="text-vibrant-coral font-medium">{a.workload.active}</span> : <span className="text-text-subtle">0</span>}
-                            </td>
-                            <td className="px-4 py-3 text-center">
-                              {a.workload.closed > 0 ? <span className="text-text-muted font-medium">{a.workload.closed}</span> : <span className="text-text-subtle">0</span>}
-                            </td>
-                            <td className="px-4 py-3">
-                              {a.assigned_shops.length > 0 ? (
-                                <div className="flex flex-wrap gap-1">
-                                  {a.assigned_shops.slice(0, 3).map((s, si) => (
-                                    <code key={`${a.admin_id}-${si}-${s}`} className="text-[10px] text-text-muted bg-surface-2 px-1.5 py-0.5 rounded">{s}</code>
-                                  ))}
-                                  {a.assigned_shops.length > 3 && <span className="text-[10px] text-text-subtle">+{a.assigned_shops.length - 3}</span>}
-                                </div>
-                              ) : <span className="text-[11px] text-text-subtle">—</span>}
-                            </td>
-                          </tr>
-                          {isExpanded && (
-                            <tr className="bg-surface-2/40">
-                              <td colSpan={9} className="px-4 py-4">
-                                <div className="ml-6 space-y-4">
-                                  {/* ⚡ Historical stats ตาม date range */}
-                                  {hist && (
-                                    <div className="bg-surface rounded-lg border border-border p-3">
-                                      <div className="flex items-center gap-1.5 mb-2.5 text-xs font-medium text-text-muted">
-                                        <TrendingUp size={12} />
-                                        สถิติตามช่วงเวลาที่เลือก
-                                        <span className="text-text-subtle font-normal">
-                                          ({data?.date_range?.start ? new Date(data.date_range.start).toLocaleDateString("th-TH", { day: "2-digit", month: "short" }) : "—"}
-                                          {data?.date_range?.end ? ` - ${new Date(data.date_range.end).toLocaleDateString("th-TH", { day: "2-digit", month: "short" })}` : ""})
-                                        </span>
-                                      </div>
-                                      <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
-                                        <HistStat icon={Inbox} label="รับงาน" value={hist.assigned} tone="brand" />
-                                        <HistStat icon={Send} label="ตอบ" value={hist.replied} tone="neutral" />
-                                        <HistStat icon={MessageSquare} label="ส่งต่อ" value={hist.handoff} tone="coral" />
-                                        <HistStat icon={CheckCircle} label="ปิด" value={hist.closed} tone="neutral" />
-                                        <HistStat icon={Activity} label="เปิดใหม่" value={hist.reopened} tone="neutral" />
-                                        <HistStat icon={CheckCircle} label="resolve" value={hist.resolved} tone="brand" />
-                                      </div>
-                                    </div>
-                                  )}
+                                <span className="text-text-subtle">@{a.username}</span>
+                              </div>
+                            </div>
+                            <StatusPill st={st} />
+                            <ChevronDown size={14} className={`text-text-subtle shrink-0 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+                          </div>
 
-                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    {/* ร้านที่ดูแล */}
-                                    <div>
-                                      <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-text-muted">
-                                        <Store size={12} /> ร้านที่ดูแล ({agentShops.length})
-                                      </div>
-                                      {agentShops.length > 0 ? (
-                                        <div className="flex flex-wrap gap-1.5">
-                                          {agentShops.map((s, si) => {
-                                            const pf = platforms.find((p) => p.value === s.platform);
-                                            return (
-                                              <span
-                                                key={`exp-shop-${a.admin_id}-${si}`}
-                                                className="inline-flex items-center gap-1.5 text-[11px] bg-surface border border-border rounded-full px-2 py-1"
-                                              >
-                                                <span className="w-1.5 h-1.5 rounded-full" style={{ background: pf?.color || "#888" }} />
-                                                <span className="text-text">{s.shopname}</span>
-                                                <span className="text-text-subtle capitalize">· {s.platform}</span>
-                                              </span>
-                                            );
-                                          })}
-                                        </div>
-                                      ) : (
-                                        <div className="text-[11px] text-text-subtle">ไม่ได้ดูแลร้านใด (ใช้โหมด Global)</div>
-                                      )}
-                                    </div>
+                          <div className="grid grid-cols-3 gap-1.5">
+                            <MiniStat label="เปิดอยู่" value={a.workload.active} highlight={a.workload.active > 0} />
+                            <MiniStat label="ทั้งหมด" value={a.workload.all} />
+                            <MiniStat label="ปิดแล้ว" value={a.workload.closed} />
+                          </div>
 
-                                    {/* แพลตฟอร์มที่ดูแล */}
-                                    <div>
-                                      <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-text-muted">
-                                        <Globe size={12} /> แพลตฟอร์มที่ดูแล ({agentPlatforms.length})
-                                      </div>
-                                      {agentPlatforms.length > 0 ? (
-                                        <div className="flex flex-wrap gap-1.5">
-                                          {agentPlatforms.map((p) => (
-                                            <span
-                                              key={`exp-pf-${a.admin_id}-${p.value}`}
-                                              className="inline-flex items-center gap-1.5 text-[11px] bg-surface border border-border rounded-full px-2 py-1"
-                                            >
-                                              <span className="w-1.5 h-1.5 rounded-full" style={{ background: p.color }} />
-                                              <span className="text-text">{p.label}</span>
-                                            </span>
-                                          ))}
-                                        </div>
-                                      ) : (
-                                        <div className="text-[11px] text-text-subtle">ไม่ได้ดูแลแพลตฟอร์มใดโดยเฉพาะ</div>
-                                      )}
+                          <div className="flex items-center justify-between gap-2 text-[11px]">
+                            {st ? (
+                              <span className="flex items-center gap-2.5 text-text-muted min-w-0">
+                                <span className="inline-flex items-center gap-1 whitespace-nowrap">
+                                  <Clock size={10} className="text-success" />
+                                  {formatDuration(st.accepting_ms)} รับ
+                                </span>
+                                <span className="inline-flex items-center gap-1 whitespace-nowrap">
+                                  <PauseCircle size={10} className="text-warning" />
+                                  {formatDuration(st.paused_ms)} พัก
+                                </span>
+                              </span>
+                            ) : (
+                              <span className="text-text-subtle">ไม่มีข้อมูลวันนี้</span>
+                            )}
+                            <CoverageDots agentShops={agentShops} agentPlatforms={agentPlatforms} />
+                          </div>
+                        </button>
+                        {isExpanded && (
+                          <div className="px-4 pb-4 animate-fade-in">
+                            <AgentExpandedContent
+                              hist={a.history}
+                              agentShops={agentShops}
+                              agentPlatforms={agentPlatforms}
+                              dateRange={data.date_range}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Desktop — table (lg+) */}
+                <div className="hidden lg:block overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-surface-2/50 text-[10px] uppercase tracking-wide text-text-subtle">
+                        <th rowSpan={2} className="text-left px-4 py-2 font-semibold align-bottom">Agent</th>
+                        <th rowSpan={2} className="text-left px-4 py-2 font-semibold align-bottom">สถานะ</th>
+                        <th rowSpan={2} className="text-left px-4 py-2 font-semibold align-bottom">เวลาวันนี้</th>
+                        <th colSpan={3} className="px-4 py-1.5 text-center font-semibold border-b border-border-subtle">งานที่มอบหมาย</th>
+                        <th rowSpan={2} className="text-left px-4 py-2 font-semibold align-bottom">ร้าน & แพลตฟอร์ม</th>
+                      </tr>
+                      <tr className="bg-surface-2/50 border-b border-border text-[10px] uppercase tracking-wide text-text-subtle">
+                        <th className="px-3 py-1.5 text-center font-medium">เปิดอยู่</th>
+                        <th className="px-3 py-1.5 text-center font-medium">ทั้งหมด</th>
+                        <th className="px-3 py-1.5 text-center font-medium">ปิดแล้ว</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleAgents.map((a, i) => {
+                        const st = statusOf(a.admin_id);
+                        const isExpanded = expandedAgent === a.admin_id;
+                        const agentShops = agentShopsOf(a);
+                        const agentPlatforms = platforms.filter((p) => agentPlatformValuesOf(a).includes(p.value));
+                        return (
+                          <Fragment key={`${a.admin_id}-${i}`}>
+                            <tr
+                              className={`border-b border-border/50 hover:bg-surface-2/30 transition-colors cursor-pointer ${i % 2 === 0 ? "" : "bg-surface-2/20"} ${isExpanded ? "bg-brand/5" : ""}`}
+                              onClick={() => setExpandedAgent(isExpanded ? null : a.admin_id)}
+                            >
+                              {/* Agent */}
+                              <td className="px-4 py-3">
+                                <div className="flex items-center gap-2.5">
+                                  <AgentAvatar name={a.name || a.username} online={a.is_active_agent} size={34} />
+                                  <div className="min-w-0">
+                                    <div className="font-medium text-text truncate">{a.name || a.username}</div>
+                                    <div className="text-[11px] text-text-muted truncate flex items-center gap-1.5">
+                                      <span>@{a.username}</span>
+                                      <Badge tone={roleTone(a.role)}>{a.role}</Badge>
                                     </div>
                                   </div>
                                 </div>
                               </td>
+                              {/* สถานะ — ออนไลน์ + รับแชท รวมคอลัมน์เดียว */}
+                              <td className="px-4 py-3">
+                                <div className="flex flex-col items-start gap-1">
+                                  <span className={`inline-flex items-center gap-1.5 text-xs ${a.is_active_agent ? "text-success" : "text-text-subtle"}`}>
+                                    <span className={`w-1.5 h-1.5 rounded-full ${a.is_active_agent ? "bg-success" : "bg-surface-4"}`} />
+                                    {a.is_active_agent ? "ออนไลน์" : "ปิด"}
+                                  </span>
+                                  <StatusPill st={st} />
+                                </div>
+                              </td>
+                              {/* เวลาวันนี้ */}
+                              <td className="px-4 py-3">
+                                {st ? (
+                                  <div className="text-[11px] leading-tight">
+                                    <div className="text-text-muted">
+                                      <Clock size={10} className="inline mr-1 text-success" />
+                                      {formatDuration(st.accepting_ms)}
+                                      <span className="text-text-subtle"> รับ</span>
+                                    </div>
+                                    <div className="text-text-subtle mt-0.5">
+                                      <PauseCircle size={10} className="inline mr-1 text-warning" />
+                                      {formatDuration(st.paused_ms)} พัก
+                                    </div>
+                                    <div className="text-text-subtle mt-0.5">
+                                      ต่อเนื่อง: {formatSince(st.current_since)}
+                                    </div>
+                                  </div>
+                                ) : <span className="text-[11px] text-text-subtle">—</span>}
+                              </td>
+                              {/* งาน — เปิดอยู่ / ทั้งหมด / ปิดแล้ว */}
+                              <td className="px-3 py-3 text-center">
+                                {a.workload.active > 0
+                                  ? <span className="text-vibrant-coral font-semibold">{a.workload.active}</span>
+                                  : <span className="text-text-subtle">0</span>}
+                              </td>
+                              <td className="px-3 py-3 text-center">
+                                <span className={`font-semibold ${a.workload.all > 0 ? "text-text" : "text-text-subtle"}`}>{a.workload.all}</span>
+                              </td>
+                              <td className="px-3 py-3 text-center">
+                                {a.workload.closed > 0
+                                  ? <span className="text-text-muted font-medium">{a.workload.closed}</span>
+                                  : <span className="text-text-subtle">0</span>}
+                              </td>
+                              {/* ร้าน & แพลตฟอร์ม */}
+                              <td className="px-4 py-3">
+                                <div className="flex flex-wrap items-center gap-1 max-w-[240px]">
+                                  {agentPlatforms.map((p) => (
+                                    <span key={p.value} className="w-2 h-2 rounded-full shrink-0" style={{ background: p.color }} title={p.label} />
+                                  ))}
+                                  {agentShops.slice(0, 2).map((s, si) => (
+                                    <span key={`shop-${a.admin_id}-${si}`} className="text-[10px] text-text-muted bg-surface-2 px-1.5 py-0.5 rounded max-w-[120px] truncate">{s.shopname}</span>
+                                  ))}
+                                  {agentShops.length > 2 && <span className="text-[10px] text-text-subtle">+{agentShops.length - 2}</span>}
+                                  {agentShops.length === 0 && agentPlatforms.length === 0 && (
+                                    <span className="text-[11px] text-text-subtle">ทั่วระบบ</span>
+                                  )}
+                                </div>
+                              </td>
                             </tr>
-                          )}
-                        </Fragment>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              )}
-            </Card>
+                            {isExpanded && (
+                              <tr className="bg-surface-2/40">
+                                <td colSpan={7} className="px-4 py-4">
+                                  <div className="ml-6 animate-fade-in">
+                                    <AgentExpandedContent
+                                      hist={a.history}
+                                      agentShops={agentShops}
+                                      agentPlatforms={agentPlatforms}
+                                      dateRange={data.date_range}
+                                    />
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </Card>
+        </>
+      )}
 
-          </>
-        )}
-
-        {/* === Tab: Shop Team === */}
-        {tab === "shop-team" && (
-          <div className="space-y-4">
-            {/* Header */}
-            <div className="flex items-center gap-2">
-              <Store size={16} className="text-text-muted" />
-              <h2 className="text-sm font-semibold text-text">จัดทีมร้าน — ใครตอบร้านไหน</h2>
-              <span className="text-xs text-text-muted ml-2">ใช้กับโหมด "ตามร้าน"</span>
+      {/* === Tab: Shop Team === */}
+      {tab === "shop-team" && (
+        <div className="space-y-4">
+          {/* Header */}
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0">
+              <Store size={15} className="text-brand" />
             </div>
+            <div className="min-w-0">
+              <h2 className="text-sm font-semibold text-text">จัดทีมร้าน — ใครตอบร้านไหน</h2>
+              <p className="text-[11px] text-text-muted">ใช้กับโหมด "ตามร้าน" · เลือกร้านแล้วเปิด/ปิด agent</p>
+            </div>
+          </div>
 
-            {shopTeamLoading ? (
-              <div className="flex justify-center py-8"><Loading size={24} /></div>
-            ) : shops.length === 0 ? (
-              <EmptyState icon={Store} title="ไม่มีร้านค้า" description="ยังไม่มีร้านในระบบ" />
-            ) : (
-              <>
-                {/* Filter bar: platform tabs + shop dropdown */}
-                <Card className="p-3">
-                  <div className="flex flex-col md:flex-row md:items-center gap-3">
-                    {/* Platform filter */}
-                    <div className="flex items-center gap-2 shrink-0">
-                      <span className="text-xs text-text-muted whitespace-nowrap">แพลตฟอร์ม:</span>
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => setShopPlatformFilter("all")}
-                          className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
-                            shopPlatformFilter === "all"
-                              ? "bg-brand text-white"
-                              : "bg-surface-2 text-text-muted hover:text-text"
-                          }`}
-                        >
-                          ทั้งหมด
-                        </button>
-                        {platforms.map((p) => {
-                          const count = shops.filter((s) => s.platform === p.value).length;
+          {shopTeamLoading ? (
+            <div className="flex justify-center py-8"><Loading size={24} /></div>
+          ) : shops.length === 0 ? (
+            <EmptyState icon={Store} title="ไม่มีร้านค้า" description="ยังไม่มีร้านในระบบ" />
+          ) : (
+            <>
+              <div className="grid grid-cols-1 lg:grid-cols-[300px_minmax(0,1fr)] gap-4 items-start">
+                {/* คอลัมน์ซ้าย — platform filter + ตัวเลือกร้าน */}
+                <div className="space-y-3 min-w-0">
+                  {/* Platform filter chips */}
+                  <div className="flex lg:flex-wrap items-center gap-1.5 overflow-x-auto pb-0.5">
+                    <FilterChip
+                      active={shopPlatformFilter === "all"}
+                      onClick={() => setShopPlatformFilter("all")}
+                      label="ทั้งหมด"
+                      count={shops.length}
+                    />
+                    {platforms.map((p) => (
+                      <FilterChip
+                        key={p.value}
+                        active={shopPlatformFilter === p.value}
+                        onClick={() => setShopPlatformFilter(p.value)}
+                        label={p.label}
+                        count={shops.filter((s) => s.platform === p.value).length}
+                        platform={p.value}
+                      />
+                    ))}
+                  </div>
+
+                  {/* Mobile/tablet — shop dropdown */}
+                  <Card className="p-3 lg:hidden">
+                    <label className="text-[11px] font-medium text-text-muted">ร้าน</label>
+                    <div className="relative mt-1.5">
+                      <select
+                        value={selectedShopId}
+                        onChange={(e) => setSelectedShopId(e.target.value)}
+                        className="w-full appearance-none bg-surface-2 border border-border rounded-lg px-3 py-2 pr-9 text-sm text-text focus:outline-none focus:border-brand cursor-pointer"
+                      >
+                        {filteredShops.map((s, si) => {
+                          const count = shopTeam.filter((r) => r.shop_id === s.shop_id && r.is_active).length;
                           return (
-                            <button
-                              key={p.value}
-                          onClick={() => setShopPlatformFilter(p.value)}
-                              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
-                                shopPlatformFilter === p.value
-                                  ? "bg-brand text-white"
-                                  : "bg-surface-2 text-text-muted hover:text-text"
-                              }`}
-                            >
-                              <span className="w-1.5 h-1.5 rounded-full" style={{ background: p.color }} />
-                              {p.label}
-                              <span className="opacity-60">({count})</span>
-                            </button>
+                            <option key={`${s.shop_id}-${si}`} value={s.shop_id}>
+                              {s.shopname} ({s.platform}) — {count} agent
+                            </option>
                           );
                         })}
-                      </div>
+                      </select>
+                      <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" />
                     </div>
+                  </Card>
 
-                    {/* Shop dropdown */}
-                    <div className="flex items-center gap-2 flex-1 min-w-0">
-                      <span className="text-xs text-text-muted whitespace-nowrap shrink-0">ร้าน:</span>
-                      <div className="relative flex-1 min-w-0">
-                        <select
-                          value={selectedShopId}
-                          onChange={(e) => setSelectedShopId(e.target.value)}
-                          className="w-full appearance-none bg-surface-2 border border-border rounded-lg px-3 py-2 pr-9 text-sm text-text focus:outline-none focus:border-brand cursor-pointer"
-                        >
-                          {filteredShops.map((s, si) => {
-                            const count = shopTeam.filter((r) => r.shop_id === s.shop_id && r.is_active).length;
-                            return (
-                              <option key={`${s.shop_id}-${si}`} value={s.shop_id}>
-                                {s.shopname} ({s.platform}) — {count} agent
-                              </option>
-                            );
-                          })}
-                        </select>
-                        <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" />
-                      </div>
-                      {selectedShop && (
-                        <Badge tone="brand" className="shrink-0">
-                          {shopTeamAgentIds.length} agent
-                        </Badge>
+                  {/* Desktop — รายการร้าน grouped by platform */}
+                  <Card className="hidden lg:block overflow-hidden">
+                    <div className="px-3 py-2.5 border-b border-border bg-surface-2/50 flex items-center justify-between">
+                      <span className="text-xs font-semibold text-text">ร้านค้า</span>
+                      <span className="text-[11px] text-text-subtle">{filteredShops.length} ร้าน</span>
+                    </div>
+                    <div className="max-h-[520px] overflow-y-auto">
+                      {filteredShops.length === 0 && (
+                        <div className="py-8 text-center text-xs text-text-subtle">ไม่มีร้านในแพลตฟอร์มนี้</div>
                       )}
+                      {platforms
+                        .filter((p) => shopPlatformFilter === "all" || p.value === shopPlatformFilter)
+                        .map((p) => {
+                          const group = filteredShops.filter((s) => s.platform === p.value);
+                          if (group.length === 0) return null;
+                          return (
+                            <div key={p.value}>
+                              <div className="sticky top-0 z-[1] px-3 py-1.5 bg-surface-2/90 backdrop-blur text-[10px] font-semibold uppercase tracking-wide text-text-subtle flex items-center gap-1.5 border-y border-border-subtle">
+                                <PlatformIcon platform={p.value} size={12} />
+                                {p.label} · {group.length}
+                              </div>
+                              {group.map((s, si) => {
+                                const count = shopTeam.filter((r) => r.shop_id === s.shop_id && r.is_active).length;
+                                const selected = s.shop_id === selectedShopId;
+                                return (
+                                  <button
+                                    key={`${s.shop_id}-${si}`}
+                                    onClick={() => setSelectedShopId(s.shop_id)}
+                                    className={`w-full flex items-center gap-2 px-3 py-2.5 text-left border-l-2 transition-colors ${
+                                      selected
+                                        ? "border-brand bg-brand/5"
+                                        : "border-transparent hover:bg-surface-2/40"
+                                    }`}
+                                  >
+                                    <span className={`flex-1 min-w-0 text-sm truncate ${selected ? "font-semibold text-text" : "text-text-muted"}`}>
+                                      {s.shopname}
+                                    </span>
+                                    <Badge tone={count > 0 ? "brand" : "neutral"}>{count}</Badge>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
                     </div>
-                  </div>
-                </Card>
+                  </Card>
+                </div>
 
-                {/* Agent list with toggle switches */}
+                {/* คอลัมน์ขวา — agent list ของร้านที่เลือก */}
                 {selectedShopId ? (
                   <Card className="overflow-hidden">
+                    {/* Selected shop summary */}
+                    <div className="px-4 py-3 border-b border-border flex items-center gap-2.5">
+                      {selectedShop && <PlatformIcon platform={selectedShop.platform} size={22} />}
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-semibold text-text truncate">{selectedShop?.shopname || "ร้านที่เลือก"}</div>
+                        <div className="text-[11px] text-text-muted capitalize">{selectedShop?.platform}</div>
+                      </div>
+                      <Badge tone="brand" className="shrink-0">{shopTeamAgentIds.length} agent</Badge>
+                    </div>
+
                     {/* Filter sub-tabs */}
-                    <div className="flex items-center gap-1 px-3 py-2 border-b border-border bg-surface-2/50">
-                      {([
-                        { key: "all", label: "ทั้งหมด" },
-                        { key: "in", label: `ในทีม (${shopTeamAgentIds.length})` },
-                        { key: "out", label: `ยังไม่เพิ่ม (${sortedAgents.length - shopTeamAgentIds.length})` },
-                      ] as const).map((f) => (
-                        <button
-                          key={f.key}
-                          onClick={() => setShopFilter(f.key)}
-                          className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
-                            shopFilter === f.key
-                              ? "bg-brand text-white"
-                              : "text-text-muted hover:text-text hover:bg-surface"
-                          }`}
-                        >
-                          {f.label}
-                        </button>
-                      ))}
-                      <div className="ml-auto text-[10px] text-text-subtle">
+                    <div className="flex items-center gap-1 px-3 py-2 border-b border-border bg-surface-2/50 overflow-x-auto">
+                      <SubFilterTabs
+                        value={shopFilter}
+                        onChange={setShopFilter}
+                        counts={{
+                          all: sortedAgents.length,
+                          in: shopTeamAgentIds.length,
+                          out: sortedAgents.length - shopTeamAgentIds.length,
+                        }}
+                      />
+                      <div className="ml-auto text-[10px] text-text-subtle whitespace-nowrap pl-2">
                         กดสวิตช์เพื่อเพิ่ม/นำออก
                       </div>
                     </div>
@@ -855,41 +952,14 @@ export default function TeamPage() {
                           const isInTeam = shopTeamAgentIds.includes(a.admin_id);
                           const busy = shopAgentAdding === a.admin_id;
                           return (
-                            <div
+                            <AgentToggleRow
                               key={`shop-${a.admin_id}-${i}`}
-                              className={`flex items-center gap-3 px-4 py-2.5 transition-colors ${
-                                isInTeam ? "bg-brand/5" : "hover:bg-surface-2/30"
-                              }`}
-                            >
-                              {/* Avatar */}
-                              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium flex-shrink-0 ${
-                                isInTeam ? "bg-brand/20 text-brand" : "bg-surface-2 text-text-muted"
-                              }`}>
-                                {a.name?.charAt(0).toUpperCase() || a.username?.charAt(0).toUpperCase() || "?"}
-                              </div>
-
-                              {/* Name + meta */}
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-sm font-medium text-text truncate">{a.name || a.username}</span>
-                                  <Badge tone={a.role === "superadmin" ? "brand" : a.role === "dev" ? "pale" : "neutral"}>
-                                    {a.role}
-                                  </Badge>
-                                </div>
-                                <div className="text-[11px] text-text-muted truncate">
-                                  @{a.username} · {a.workload.active} งานเปิด
-                                  {a.assigned_shops.length > 0 && ` · ${a.assigned_shops.length} ร้าน`}
-                                </div>
-                              </div>
-
-                              {/* Toggle switch */}
-                              <ToggleSwitch
-                                checked={isInTeam}
-                                disabled={!editable || busy}
-                                onChange={() => isInTeam ? handleRemoveAgentFromShop(a.admin_id) : handleAddAgentToShop(a.admin_id)}
-                                loading={busy}
-                              />
-                            </div>
+                              agent={a}
+                              isInTeam={isInTeam}
+                              busy={busy}
+                              disabled={!editable}
+                              onToggle={() => isInTeam ? handleRemoveAgentFromShop(a.admin_id) : handleAddAgentToShop(a.admin_id)}
+                            />
                           );
                         })}
                       {sortedAgents.filter((a) => {
@@ -905,147 +975,481 @@ export default function TeamPage() {
                     </div>
                   </Card>
                 ) : (
-                  <div className="text-xs text-text-muted bg-surface-2 rounded-lg p-3">
-                    เลือกร้านก่อน
-                  </div>
+                  <Card className="p-2">
+                    <EmptyState icon={Store} title="เลือกร้านก่อน" description="เลือกร้านจากรายการด้านซ้าย" />
+                  </Card>
                 )}
+              </div>
 
-                {!editable && (
-                  <div className="flex items-center gap-2 text-[11px] text-text-subtle bg-surface-2 rounded-lg px-3 py-2">
-                    <AlertCircle size={12} /> คุณเป็น Admin — ดูได้อย่างเดียว
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        )}
-
-        {/* === Tab: Platform Team — Matrix view === */}
-        {tab === "platform-team" && (
-          <div className="space-y-4">
-            {/* Header */}
-            <div className="flex items-center gap-2">
-              <Globe size={16} className="text-text-muted" />
-              <h2 className="text-sm font-semibold text-text">จัดทีมแพลตฟอร์ม — ใครตอบแพลตฟอร์มไหน</h2>
-              <span className="text-xs text-text-muted ml-2">ใช้กับโหมด "ตามแพลตฟอร์ม"</span>
-            </div>
-
-            {platformTeamLoading ? (
-              <div className="flex justify-center py-8"><Loading size={24} /></div>
-            ) : (
-              <>
-                {/* Summary: agent count per platform */}
-                <div className="grid grid-cols-3 gap-3">
-                  {platforms.map((p) => {
-                    const count = platformTeam.filter((r) => r.platform === p.value && r.is_active).length;
-                    return (
-                      <div
-                        key={p.value}
-                        className="flex items-center gap-2.5 rounded-lg border border-border bg-surface-2 px-3 py-2.5"
-                      >
-                        <span className="w-3 h-3 rounded-full shrink-0" style={{ background: p.color }} />
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-medium text-text">{p.label}</div>
-                          <div className="text-[11px] text-text-muted">{count} agent</div>
-                        </div>
-                      </div>
-                    );
-                  })}
+              {!editable && (
+                <div className="flex items-center gap-2 text-[11px] text-text-subtle bg-surface-2 rounded-lg px-3 py-2">
+                  <AlertCircle size={12} /> คุณเป็น Admin — ดูได้อย่างเดียว
                 </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
-                {/* Matrix table: agents × platforms */}
-                <Card className="overflow-hidden">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="border-b border-border bg-surface-2/50">
-                          <th className="text-left px-4 py-3 font-medium text-text-muted text-xs sticky left-0 bg-surface-2/95 backdrop-blur">
-                            Agent
-                          </th>
-                          {platforms.map((p) => (
-                            <th key={p.value} className="px-4 py-3 text-center">
-                              <div className="flex items-center justify-center gap-1.5">
-                                <span className="w-2 h-2 rounded-full" style={{ background: p.color }} />
-                                <span className="text-xs font-medium text-text">{p.label}</span>
-                              </div>
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {sortedAgents.map((a, i) => {
-                          const pf = platforms.find((pp) => pp.value === a.assigned_shops[0] as Platform);
-                          return (
-                            <tr
-                              key={`pf-matrix-${a.admin_id}-${i}`}
-                              className={`border-b border-border/50 hover:bg-surface-2/20 transition-colors ${i % 2 === 0 ? "" : "bg-surface-2/10"}`}
-                            >
-                              <td className="px-4 py-3 sticky left-0 bg-inherit">
-                                <div className="flex items-center gap-2.5">
-                                  <div className="w-7 h-7 rounded-full bg-brand/15 flex items-center justify-center text-[10px] font-medium text-brand flex-shrink-0">
-                                    {a.name?.charAt(0).toUpperCase() || "?"}
-                                  </div>
-                                  <div className="min-w-0">
-                                    <div className="text-sm font-medium text-text truncate">{a.name || a.username}</div>
-                                    <div className="text-[10px] text-text-muted truncate">
-                                      @{a.username} · {a.role}
-                                    </div>
-                                  </div>
-                                </div>
-                              </td>
-                              {platforms.map((p) => {
-                                const isInTeam = platformTeam.some(
-                                  (r) => r.platform === p.value && r.admin_id === a.admin_id && r.is_active
-                                );
-                                const busy = platformAgentAdding === a.admin_id;
-                                return (
-                                  <td key={p.value} className="px-4 py-3 text-center">
-                                    <ToggleSwitch
-                                      checked={isInTeam}
-                                      disabled={!editable || busy}
-                                      onChange={() => isInTeam ? handleRemoveAgentFromPlatform(a.admin_id) : handleAddAgentToPlatform(a.admin_id)}
-                                      loading={busy}
-                                    />
-                                  </td>
-                                );
-                              })}
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                  {sortedAgents.length === 0 && (
-                    <div className="py-8"><EmptyState icon={Users} title="ไม่มี agent" /></div>
-                  )}
-                </Card>
-
-                {!editable && (
-                  <div className="flex items-center gap-2 text-[11px] text-text-subtle bg-surface-2 rounded-lg px-3 py-2">
-                    <AlertCircle size={12} /> คุณเป็น Admin — ดูได้อย่างเดียว
-                  </div>
-                )}
-              </>
-            )}
+      {/* === Tab: Platform Team === */}
+      {tab === "platform-team" && (
+        <div className="space-y-4">
+          {/* Header */}
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0">
+              <Globe size={15} className="text-brand" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-sm font-semibold text-text">จัดทีมแพลตฟอร์ม — ใครตอบแพลตฟอร์มไหน</h2>
+              <p className="text-[11px] text-text-muted">ใช้กับโหมด "ตามแพลตฟอร์ม" · เลือกแพลตฟอร์มแล้วเปิด/ปิด agent</p>
+            </div>
           </div>
-        )}
+
+          {platformTeamLoading ? (
+            <div className="flex justify-center py-8"><Loading size={24} /></div>
+          ) : (
+            <>
+              {/* Platform selector cards — กดเพื่อเลือกแพลตฟอร์ม */}
+              <div className="grid grid-cols-3 gap-2 sm:gap-3">
+                {platforms.map((p) => {
+                  const count = platformTeam.filter((r) => r.platform === p.value && r.is_active).length;
+                  const selected = selectedPlatform === p.value;
+                  return (
+                    <button
+                      key={p.value}
+                      onClick={() => setSelectedPlatform(p.value)}
+                      aria-pressed={selected}
+                      className={`relative flex flex-col items-center gap-1.5 sm:gap-2 rounded-xl border p-3 sm:p-4 transition-all ${
+                        selected
+                          ? "border-brand bg-brand/5 shadow-[var(--shadow-sm)]"
+                          : "border-border bg-surface hover:border-border-strong hover:bg-surface-1"
+                      }`}
+                    >
+                      <PlatformIcon platform={p.value} size={26} />
+                      <div>
+                        <div className="text-sm font-semibold text-text">{p.label}</div>
+                        <div className="text-[11px] text-text-muted">{count} agent</div>
+                      </div>
+                      {selected && (
+                        <span className="absolute top-2 right-2 w-4 h-4 rounded-full bg-brand text-white flex items-center justify-center">
+                          <Check size={10} />
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Desktop — matrix view: agents × platforms (lg+) */}
+              <Card className="hidden lg:block overflow-hidden">
+                <div className="px-4 py-3 border-b border-border flex items-center gap-2">
+                  <LayoutGrid size={14} className="text-text-muted" />
+                  <h3 className="text-sm font-semibold text-text">เมทริกซ์ทีม — agent × แพลตฟอร์ม</h3>
+                  <span className="text-[10px] text-text-subtle ml-auto">กดสวิตช์เพื่อเพิ่ม/นำออก</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border bg-surface-2/50">
+                        <th className="text-left px-4 py-3 font-medium text-text-muted text-xs sticky left-0 bg-surface-2/95 backdrop-blur">
+                          Agent
+                        </th>
+                        {platforms.map((p) => (
+                          <th key={p.value} className={`px-4 py-3 text-center ${selectedPlatform === p.value ? "bg-brand/5" : ""}`}>
+                            <div className="flex items-center justify-center gap-1.5">
+                              <PlatformIcon platform={p.value} size={16} />
+                              <span className="text-xs font-medium text-text">{p.label}</span>
+                            </div>
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedAgents.map((a, i) => (
+                        <tr
+                          key={`pf-matrix-${a.admin_id}-${i}`}
+                          className={`border-b border-border/50 hover:bg-surface-2/20 transition-colors ${i % 2 === 0 ? "" : "bg-surface-2/10"}`}
+                        >
+                          <td className="px-4 py-3 sticky left-0 bg-inherit">
+                            <div className="flex items-center gap-2.5">
+                              <AgentAvatar name={a.name || a.username} online={a.is_active_agent} size={28} />
+                              <div className="min-w-0">
+                                <div className="text-sm font-medium text-text truncate">{a.name || a.username}</div>
+                                <div className="text-[10px] text-text-muted truncate">
+                                  @{a.username} · {a.role}
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                          {platforms.map((p) => {
+                            const isInTeam = platformTeam.some(
+                              (r) => r.platform === p.value && r.admin_id === a.admin_id && r.is_active
+                            );
+                            const busy = platformAgentAdding === a.admin_id;
+                            return (
+                              <td key={p.value} className={`px-4 py-3 text-center ${selectedPlatform === p.value ? "bg-brand/5" : ""}`}>
+                                <ToggleSwitch
+                                  checked={isInTeam}
+                                  disabled={!editable || busy}
+                                  onChange={() => isInTeam
+                                    ? handleRemoveAgentFromPlatform(a.admin_id, p.value)
+                                    : handleAddAgentToPlatform(a.admin_id, p.value)}
+                                  loading={busy}
+                                  label={isInTeam
+                                    ? `เอา ${a.name || a.username} ออกจากทีม ${p.label}`
+                                    : `เพิ่ม ${a.name || a.username} เข้าทีม ${p.label}`}
+                                />
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {sortedAgents.length === 0 && (
+                  <EmptyState icon={Users} title="ไม่มี agent" />
+                )}
+              </Card>
+
+              {/* Mobile/tablet — agent list ของแพลตฟอร์มที่เลือก (<lg) */}
+              <Card className="lg:hidden overflow-hidden">
+                <div className="flex items-center gap-1 px-3 py-2 border-b border-border bg-surface-2/50 overflow-x-auto">
+                  <SubFilterTabs
+                    value={platformFilter}
+                    onChange={setPlatformFilter}
+                    counts={{
+                      all: sortedAgents.length,
+                      in: platformTeamAgentIds.length,
+                      out: sortedAgents.length - platformTeamAgentIds.length,
+                    }}
+                  />
+                  <div className="ml-auto text-[10px] text-text-subtle whitespace-nowrap pl-2">
+                    กดสวิตช์เพื่อเพิ่ม/นำออก
+                  </div>
+                </div>
+                <div className="divide-y divide-border/50">
+                  {sortedAgents
+                    .filter((a) => {
+                      const isIn = platformTeamAgentIds.includes(a.admin_id);
+                      if (platformFilter === "in") return isIn;
+                      if (platformFilter === "out") return !isIn;
+                      return true;
+                    })
+                    .map((a, i) => {
+                      const isInTeam = platformTeamAgentIds.includes(a.admin_id);
+                      const busy = platformAgentAdding === a.admin_id;
+                      return (
+                        <AgentToggleRow
+                          key={`pf-${a.admin_id}-${i}`}
+                          agent={a}
+                          isInTeam={isInTeam}
+                          busy={busy}
+                          disabled={!editable}
+                          onToggle={() => isInTeam
+                            ? handleRemoveAgentFromPlatform(a.admin_id, selectedPlatform)
+                            : handleAddAgentToPlatform(a.admin_id, selectedPlatform)}
+                        />
+                      );
+                    })}
+                  {sortedAgents.filter((a) => {
+                    const isIn = platformTeamAgentIds.includes(a.admin_id);
+                    if (platformFilter === "in") return isIn;
+                    if (platformFilter === "out") return !isIn;
+                    return true;
+                  }).length === 0 && (
+                    <div className="py-8 text-center text-xs text-text-subtle">
+                      {platformFilter === "in" ? "ยังไม่มี agent ในทีมนี้" : "เพิ่ม agent ครบแล้ว"}
+                    </div>
+                  )}
+                </div>
+              </Card>
+
+              {!editable && (
+                <div className="flex items-center gap-2 text-[11px] text-text-subtle bg-surface-2 rounded-lg px-3 py-2">
+                  <AlertCircle size={12} /> คุณเป็น Admin — ดูได้อย่างเดียว
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
     </PageShell>
   );
 }
 
-function TabButton({ active, onClick, icon: Icon, label }: { active: boolean; onClick: () => void; icon: typeof Users; label: string }) {
+/* ---------- shared bits ---------- */
+
+function TabButton({ active, onClick, icon: Icon, label, desc }: { active: boolean; onClick: () => void; icon: typeof Users; label: string; desc?: string }) {
+  return (
+    <button
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className={`flex flex-col items-center justify-center gap-0.5 rounded-lg px-2 py-2 transition-all ${
+        active
+          ? "bg-surface text-brand shadow-[var(--shadow-sm)]"
+          : "text-text-muted hover:text-text hover:bg-surface/60"
+      }`}
+    >
+      <span className="flex items-center gap-1.5 text-xs sm:text-sm font-semibold whitespace-nowrap">
+        <Icon size={14} className={active ? "text-brand" : "text-text-subtle"} />
+        {label}
+      </span>
+      {desc && <span className="hidden lg:block text-[10px] font-normal text-text-subtle">{desc}</span>}
+    </button>
+  );
+}
+
+/** FilterChip — ปุ่ม pill สำหรับ filter แพลตฟอร์ม/ทั้งหมด */
+function FilterChip({
+  active,
+  onClick,
+  label,
+  count,
+  platform,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  count?: number;
+  platform?: Platform;
+}) {
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+      aria-pressed={active}
+      className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[11px] font-medium whitespace-nowrap border transition-colors shrink-0 ${
         active
-          ? "border-brand text-brand"
-          : "border-transparent text-text-muted hover:text-text"
+          ? "bg-brand text-white border-brand"
+          : "bg-surface text-text-muted border-border hover:border-border-strong hover:text-text"
       }`}
     >
-      <Icon size={14} />
+      {platform && <PlatformIcon platform={platform} size={12} />}
       {label}
+      {count !== undefined && (
+        <span className={active ? "opacity-75" : "text-text-subtle"}>{count}</span>
+      )}
     </button>
+  );
+}
+
+/** AgentAvatar — avatar + status dot (online/offline) */
+function AgentAvatar({ name, online, size = 32 }: { name: string; online?: boolean; size?: number }) {
+  return (
+    <div className="relative shrink-0" style={{ width: size, height: size }}>
+      <div
+        className="w-full h-full rounded-full bg-brand/10 text-brand flex items-center justify-center font-semibold"
+        style={{ fontSize: size * 0.38 }}
+      >
+        {name?.charAt(0).toUpperCase() || "?"}
+      </div>
+      {online !== undefined && (
+        <span
+          className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-surface ${online ? "bg-success" : "bg-surface-4"}`}
+        />
+      )}
+    </div>
+  );
+}
+
+/** StatusPill — สถานะรับแชท (accepting/paused) */
+function StatusPill({ st }: { st?: ChatStatusRow }) {
+  if (!st) return <span className="text-[11px] text-text-subtle">—</span>;
+  const accepting = st.current_state === "accepting";
+  return (
+    <Badge tone={accepting ? "success" : "warning"} className="shrink-0">
+      {accepting ? <PlayCircle size={11} /> : <PauseCircle size={11} />}
+      {accepting ? "รับแชท" : "พัก"}
+    </Badge>
+  );
+}
+
+/** MiniStat — ตัวเลขงานตัวเดียวใน card list บน mobile */
+function MiniStat({ label, value, highlight = false }: { label: string; value: number; highlight?: boolean }) {
+  return (
+    <div className="rounded-lg bg-surface-2/60 px-2 py-1.5 text-center">
+      <div className={`text-sm font-bold ${highlight ? "text-vibrant-coral" : "text-text"}`}>{value}</div>
+      <div className="text-[10px] text-text-subtle">{label}</div>
+    </div>
+  );
+}
+
+/** CoverageDots — สรุป platform dots + จำนวนร้านที่ agent ดูแล (แบบย่อ) */
+function CoverageDots({ agentShops, agentPlatforms }: { agentShops: AgentShopDetail[]; agentPlatforms: { value: Platform; label: string; color: string }[] }) {
+  if (agentShops.length === 0 && agentPlatforms.length === 0) {
+    return <span className="text-text-subtle whitespace-nowrap">ทั่วระบบ</span>;
+  }
+  return (
+    <span className="inline-flex items-center gap-1 shrink-0">
+      {agentPlatforms.map((p) => (
+        <span key={p.value} className="w-2 h-2 rounded-full" style={{ background: p.color }} title={p.label} />
+      ))}
+      {agentShops.length > 0 && <span className="text-text-subtle">{agentShops.length} ร้าน</span>}
+    </span>
+  );
+}
+
+/** AgentExpandedContent — รายละเอียดตอนขยาย (ใช้ร่วมกันทั้ง card list และ table row) */
+function AgentExpandedContent({
+  hist,
+  agentShops,
+  agentPlatforms,
+  dateRange,
+}: {
+  hist?: AgentHistory;
+  agentShops: AgentShopDetail[];
+  agentPlatforms: { value: Platform; label: string; color: string }[];
+  dateRange?: TeamResponse["date_range"];
+}) {
+  return (
+    <div className="space-y-4">
+      {/* ⚡ Historical stats ตาม date range */}
+      {hist && (
+        <div className="bg-surface rounded-lg border border-border p-3">
+          <div className="flex items-center gap-1.5 mb-2.5 text-xs font-medium text-text-muted">
+            <TrendingUp size={12} />
+            สถิติตามช่วงเวลาที่เลือก
+            <span className="text-text-subtle font-normal">
+              ({dateRange?.start ? new Date(dateRange.start).toLocaleDateString("th-TH", { day: "2-digit", month: "short" }) : "—"}
+              {dateRange?.end ? ` - ${new Date(dateRange.end).toLocaleDateString("th-TH", { day: "2-digit", month: "short" })}` : ""})
+            </span>
+          </div>
+          <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
+            <HistStat icon={Inbox} label="รับงาน" value={hist.assigned} tone="brand" />
+            <HistStat icon={Send} label="ตอบ" value={hist.replied} tone="neutral" />
+            <HistStat icon={MessageSquare} label="ส่งต่อ" value={hist.handoff} tone="coral" />
+            <HistStat icon={CheckCircle} label="ปิด" value={hist.closed} tone="neutral" />
+            <HistStat icon={Activity} label="เปิดใหม่" value={hist.reopened} tone="neutral" />
+            <HistStat icon={CheckCircle} label="resolve" value={hist.resolved} tone="brand" />
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* ร้านที่ดูแล */}
+        <div>
+          <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-text-muted">
+            <Store size={12} /> ร้านที่ดูแล ({agentShops.length})
+          </div>
+          {agentShops.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {agentShops.map((s, si) => {
+                const pf = platforms.find((p) => p.value === s.platform);
+                return (
+                  <span
+                    key={`exp-shop-${si}`}
+                    className="inline-flex items-center gap-1.5 text-[11px] bg-surface border border-border rounded-full px-2 py-1"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full" style={{ background: pf?.color || "#888" }} />
+                    <span className="text-text">{s.shopname}</span>
+                    <span className="text-text-subtle capitalize">· {s.platform}</span>
+                  </span>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-[11px] text-text-subtle">ไม่ได้ดูแลร้านใด (ใช้โหมด Global)</div>
+          )}
+        </div>
+
+        {/* แพลตฟอร์มที่ดูแล */}
+        <div>
+          <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-text-muted">
+            <Globe size={12} /> แพลตฟอร์มที่ดูแล ({agentPlatforms.length})
+          </div>
+          {agentPlatforms.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {agentPlatforms.map((p) => (
+                <span
+                  key={`exp-pf-${p.value}`}
+                  className="inline-flex items-center gap-1.5 text-[11px] bg-surface border border-border rounded-full px-2 py-1"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full" style={{ background: p.color }} />
+                  <span className="text-text">{p.label}</span>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div className="text-[11px] text-text-subtle">ไม่ได้ดูแลแพลตฟอร์มใดโดยเฉพาะ</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** AgentToggleRow — แถว agent + toggle switch (ใช้ใน shop-team และ platform-team list) */
+function AgentToggleRow({
+  agent: a,
+  isInTeam,
+  busy,
+  disabled,
+  onToggle,
+}: {
+  agent: AgentRow;
+  isInTeam: boolean;
+  busy: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className={`flex items-center gap-3 px-4 py-2.5 transition-colors ${isInTeam ? "bg-brand/5" : "hover:bg-surface-2/30"}`}>
+      <AgentAvatar name={a.name || a.username} online={a.is_active_agent} size={32} />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-text truncate">{a.name || a.username}</span>
+          <Badge tone={roleTone(a.role)}>{a.role}</Badge>
+        </div>
+        <div className="text-[11px] text-text-muted truncate">
+          @{a.username} · {a.workload.active} งานเปิด
+          {a.assigned_shops.length > 0 && ` · ${a.assigned_shops.length} ร้าน`}
+        </div>
+      </div>
+      <ToggleSwitch
+        checked={isInTeam}
+        disabled={disabled || busy}
+        onChange={onToggle}
+        loading={busy}
+        label={isInTeam
+          ? `เอา ${a.name || a.username} ออกจากทีม`
+          : `เพิ่ม ${a.name || a.username} เข้าทีม`}
+      />
+    </div>
+  );
+}
+
+/** SubFilterTabs — chips ทั้งหมด/ในทีม/ยังไม่เพิ่ม */
+function SubFilterTabs({
+  value,
+  onChange,
+  counts,
+}: {
+  value: TeamFilter;
+  onChange: (v: TeamFilter) => void;
+  counts: { all: number; in: number; out: number };
+}) {
+  const opts: { key: TeamFilter; label: string }[] = [
+    { key: "all", label: `ทั้งหมด (${counts.all})` },
+    { key: "in", label: `ในทีม (${counts.in})` },
+    { key: "out", label: `ยังไม่เพิ่ม (${counts.out})` },
+  ];
+  return (
+    <div className="flex items-center gap-1">
+      {opts.map((f) => (
+        <button
+          key={f.key}
+          onClick={() => onChange(f.key)}
+          className={`px-2.5 py-1 rounded-full text-[11px] font-medium whitespace-nowrap transition-colors ${
+            value === f.key
+              ? "bg-brand text-white"
+              : "text-text-muted hover:text-text hover:bg-surface"
+          }`}
+        >
+          {f.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -1065,16 +1469,23 @@ function SummaryCard({
   tone?: "brand" | "coral" | "neutral";
 }) {
   const toneClass = tone === "brand" ? "text-brand" : tone === "coral" ? "text-vibrant-coral" : "text-text";
+  const iconTone = tone === "brand"
+    ? "bg-brand/10 text-brand"
+    : tone === "coral"
+      ? "bg-vibrant-coral-soft text-vibrant-coral"
+      : "bg-surface-2 text-text-muted";
   return (
-    <Card className="p-3">
-      <div className="flex items-center gap-2 mb-1.5">
-        <Icon size={14} className="text-text-muted" />
-        <span className="text-xs text-text-muted">{label}</span>
+    <Card className="p-3 sm:p-3.5">
+      <div className="flex items-center gap-2 mb-2">
+        <span className={`w-6 h-6 rounded-md flex items-center justify-center shrink-0 ${iconTone}`}>
+          <Icon size={13} />
+        </span>
+        <span className="text-[11px] sm:text-xs text-text-muted truncate">{label}</span>
       </div>
-      <div className={`text-lg font-bold ${toneClass}`}>
+      <div className={`text-lg sm:text-xl font-bold ${toneClass}`}>
         {valueText !== undefined ? valueText : value ?? 0}
       </div>
-      {sub && <div className="text-[11px] text-text-subtle mt-0.5">{sub}</div>}
+      {sub && <div className="text-[10px] sm:text-[11px] text-text-subtle mt-0.5 truncate" title={sub}>{sub}</div>}
     </Card>
   );
 }
@@ -1107,17 +1518,21 @@ function ToggleSwitch({
   disabled,
   loading,
   onChange,
+  label,
 }: {
   checked: boolean;
   disabled?: boolean;
   loading?: boolean;
   onChange: () => void;
+  label: string;
 }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={label}
+      title={label}
       disabled={disabled || loading}
       onClick={onChange}
       className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${

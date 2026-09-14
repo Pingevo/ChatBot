@@ -144,7 +144,7 @@ function qaToMessages(doc: LiveAssignmentDoc): ChatMessage[] {
       table: qa.user_table as never,
       bundle: qa.user_bundle as never,
     });
-    // bot reply
+    // bot reply — ⚡ โชว์แค่ข้อความที่บอทตอบ ไม่ render item cards (bot_products = context ให้ llm2)
     if (qa.bot_reply) {
       msgs.push({
         id: `b_${qa.message_id}`,
@@ -152,7 +152,6 @@ function qaToMessages(doc: LiveAssignmentDoc): ChatMessage[] {
         text: qa.bot_reply,
         timestamp: new Date().toISOString(),
         source: qa.bot_source,
-        products: qa.bot_products as never,
       });
     }
     // admin reply
@@ -603,48 +602,71 @@ export default function LiveAssignmentPage() {
   return (
     <div className="h-full flex flex-col">
       {/* ── Batch controls bar (ด้านบนสุด — เหนือ panel 3 คอลัมน์) ── */}
-      <div className="shrink-0 px-3 py-2 border-b border-border bg-surface flex items-center gap-2 flex-wrap">
-        <Zap size={14} className="text-brand shrink-0" />
-        <span className="text-xs font-semibold text-text shrink-0">จ่ายงาน:</span>
-        <input
-          type="number"
-          value={batchCount}
-          onChange={(e) => setBatchCount(Math.min(Math.max(parseInt(e.target.value) || 1, 1), 1000))}
-          disabled={batchRunning}
-          className="w-16 text-xs rounded-md border border-border bg-surface-2 px-2 py-1 focus:outline-none focus:ring-1 focus:ring-brand/40"
-          placeholder="500"
-        />
-        <select
-          value={batchPlatform}
-          onChange={(e) => setBatchPlatform(e.target.value as "all" | Platform)}
-          disabled={batchRunning}
-          className="text-xs rounded-md border border-border bg-surface-2 px-2 py-1 focus:outline-none focus:ring-1 focus:ring-brand/40"
-        >
-          <option value="all">ทุก platform</option>
-          <option value="shopee">Shopee</option>
-          <option value="tiktok">TikTok</option>
-          <option value="lazada">Lazada</option>
-        </select>
-        <select
-          value={batchMode}
-          onChange={(e) => setBatchMode(e.target.value as "overwrite" | "resume")}
-          disabled={batchRunning}
-          className="text-xs rounded-md border border-border bg-surface-2 px-2 py-1 focus:outline-none focus:ring-1 focus:ring-brand/40"
-        >
-          <option value="overwrite">ทำใหม่</option>
-          <option value="resume">resume</option>
-        </select>
-        <Button size="sm" onClick={handleBatchReplay} disabled={batchRunning}>
-          <Zap size={14} />
-          {batchRunning ? `กำลังรัน... (${batchProgress?.done || 0}/${batchProgress?.total || 0})` : `จ่ายงาน ${batchCount} chat`}
-        </Button>
+      <div className="shrink-0 px-4 py-3 border-b border-border bg-surface">
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Label + icon */}
+          <div className="flex items-center gap-2 shrink-0">
+            <div className="w-7 h-7 rounded-lg bg-brand/10 flex items-center justify-center">
+              <Zap size={14} className="text-brand" />
+            </div>
+            <span className="text-sm font-semibold text-text">จ่ายงานสด</span>
+          </div>
+          {/* Divider */}
+          <div className="hidden sm:block w-px h-6 bg-border" />
+          {/* Controls group */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="flex items-center gap-1.5 text-xs text-text-muted">
+              <span>จำนวน</span>
+              <input
+                type="number"
+                value={batchCount}
+                onChange={(e) => setBatchCount(Math.min(Math.max(parseInt(e.target.value) || 1, 1), 1000))}
+                disabled={batchRunning}
+                className="w-20 h-8 text-xs rounded-lg border border-border bg-surface-2 px-2 focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand/40 text-text"
+                placeholder="500"
+              />
+            </label>
+            <select
+              value={batchPlatform}
+              onChange={(e) => setBatchPlatform(e.target.value as "all" | Platform)}
+              disabled={batchRunning}
+              className="h-8 text-xs rounded-lg border border-border bg-surface-2 px-2 focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand/40 text-text"
+            >
+              <option value="all">ทุก platform</option>
+              <option value="shopee">Shopee</option>
+              <option value="tiktok">TikTok</option>
+              <option value="lazada">Lazada</option>
+            </select>
+            <select
+              value={batchMode}
+              onChange={(e) => setBatchMode(e.target.value as "overwrite" | "resume")}
+              disabled={batchRunning}
+              className="h-8 text-xs rounded-lg border border-border bg-surface-2 px-2 focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand/40 text-text"
+            >
+              <option value="overwrite">ทำใหม่</option>
+              <option value="resume">resume</option>
+            </select>
+            <Button size="sm" onClick={handleBatchReplay} disabled={batchRunning}>
+              <Zap size={14} />
+              {batchRunning ? `กำลังรัน...` : `จ่ายงาน ${batchCount} chat`}
+            </Button>
+          </div>
+        </div>
+        {/* Progress bar — แยกบรรทัด ไม่รวมกับ controls */}
         {batchProgress && (
-          <div className="flex items-center gap-3 text-[11px] text-text-muted">
-            <span>{Math.round((batchProgress.done / Math.max(batchProgress.total, 1)) * 100)}%</span>
-            <span className="text-brand">Bot: {batchProgress.botAnswered}</span>
+          <div className="mt-2 flex items-center gap-3 text-[11px] text-text-muted flex-wrap">
+            <span className="font-medium">{Math.round((batchProgress.done / Math.max(batchProgress.total, 1)) * 100)}%</span>
+            <span className="text-text-muted">({batchProgress.done}/{batchProgress.total})</span>
+            <div className="flex-1 min-w-[100px] h-1.5 rounded-full bg-surface-3 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-brand transition-all duration-300"
+                style={{ width: `${(batchProgress.done / Math.max(batchProgress.total, 1)) * 100}%` }}
+              />
+            </div>
+            <span className="text-success">Bot: {batchProgress.botAnswered}</span>
             <span className="text-vibrant-coral">Handoff: {batchProgress.handedOff}</span>
             <span className="text-text-muted">Skip: {batchProgress.skipped}</span>
-            <span className="text-error-soft">Err: {batchProgress.errors}</span>
+            <span className="text-error">Err: {batchProgress.errors}</span>
           </div>
         )}
       </div>
@@ -652,7 +674,7 @@ export default function LiveAssignmentPage() {
       {/* ── 3-column layout (เหมือน tickets) ── */}
       <div className="flex-1 flex min-h-0">
         {/* ── Panel ซ้าย: ChatList ── */}
-        <div className={`${mobileView === "list" ? "flex" : "hidden"} md:flex h-full flex-col w-full md:w-80 shrink-0 border-r border-border`}>
+        <div className={`${mobileView === "list" ? "flex" : "hidden"} lg:flex h-full flex-col w-full lg:w-80 shrink-0 border-r border-border`}>
           <ChatList
             conversations={conversations}
             selectedId={selectedId}
@@ -673,10 +695,10 @@ export default function LiveAssignmentPage() {
         </div>
 
         {/* ── Panel กลาง: TicketChatPanel ── */}
-        <div className={`${mobileView === "chat" ? "flex" : "hidden"} md:flex flex-1 h-full min-w-0 relative`}>
+        <div className={`${mobileView === "chat" ? "flex" : "hidden"} lg:flex flex-1 h-full min-w-0 relative`}>
           <button
             onClick={handleBack}
-            className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+            className="lg:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
             title="กลับ"
             aria-label="กลับ"
           >
@@ -685,7 +707,7 @@ export default function LiveAssignmentPage() {
           {selected && (
             <button
               onClick={() => setMobileView("info")}
-              className="md:hidden absolute top-3 right-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+              className="lg:hidden absolute top-3 right-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
               title="รายละเอียด"
               aria-label="รายละเอียด"
             >
@@ -711,12 +733,12 @@ export default function LiveAssignmentPage() {
         {selected && (
           <>
             <div
-              className={`${mobileView === "info" ? "flex" : "hidden"} ${rightCollapsed ? "md:hidden" : "md:flex"} h-full transition-[width] duration-200 ease-in-out`}
+              className={`${mobileView === "info" ? "flex" : "hidden"} ${rightCollapsed ? "lg:hidden" : "lg:flex"} h-full w-full lg:w-auto transition-[width] duration-200 ease-in-out`}
             >
-              <div className="relative h-full flex flex-col w-[340px] border-l border-border bg-surface">
+              <div className="relative h-full flex flex-col w-full lg:w-[340px] border-l border-border bg-surface">
                 <button
                   onClick={() => setMobileView("chat")}
-                  className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+                  className="lg:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
                   title="กลับ"
                   aria-label="กลับ"
                 >
@@ -816,7 +838,7 @@ export default function LiveAssignmentPage() {
             {rightCollapsed && (
               <button
                 onClick={() => setRightCollapsed(false)}
-                className="hidden md:flex absolute top-1/2 right-0 -translate-y-1/2 z-20 w-7 h-16 bg-surface border border-border rounded-l-lg items-center justify-center hover:bg-surface-2 transition-colors shadow-sm"
+                className="hidden lg:flex absolute top-1/2 right-0 -translate-y-1/2 z-20 w-7 h-16 bg-surface border border-border rounded-l-lg items-center justify-center hover:bg-surface-2 transition-colors shadow-sm"
                 title="แสดง panel"
                 aria-label="แสดง panel"
               >

@@ -64,8 +64,11 @@ export function ToastContainer() {
   return (
     // 🔒 P2a: aria-live region for screen reader announcements
     // role="alert" on error toasts, aria-live="polite" on the container for others
+    // ⚡ <lg (phone/tablet): toast ขึ้นกลางจอ (HUD style) — lg+: stack มุมขวาบนตามเดิม
     <div
-      className="fixed top-4 right-4 z-[100] flex flex-col gap-2 max-w-sm pointer-events-none"
+      className="fixed z-[100] flex flex-col gap-2 pointer-events-none
+        max-lg:inset-x-0 max-lg:top-1/2 max-lg:-translate-y-1/2 max-lg:items-center max-lg:px-4
+        lg:top-4 lg:right-4 lg:max-w-sm lg:w-full"
       aria-live="polite"
       aria-atomic="false"
     >
@@ -76,14 +79,16 @@ export function ToastContainer() {
           <div
             key={t.id}
             role={t.type === "error" || t.type === "warning" ? "alert" : "status"}
-            className={`pointer-events-auto flex items-start gap-2.5 ${c.bg} ${c.border} ${c.text} border rounded-lg shadow-lg px-4 py-3 animate-slide-in`}
+            className={`pointer-events-auto flex items-center gap-3 bg-surface ${c.border} border rounded-xl shadow-xl px-4 py-3 max-lg:w-full max-lg:max-w-xs lg:animate-slide-in max-lg:animate-toast-pop`}
           >
-            <Icon size={18} className="shrink-0 mt-0.5" />
-            <div className="flex-1 text-sm leading-snug">{t.message}</div>
+            <div className={`w-8 h-8 rounded-full ${c.bg} flex items-center justify-center shrink-0`}>
+              <Icon size={16} className={c.text} />
+            </div>
+            <div className="flex-1 min-w-0 text-sm leading-snug text-text">{t.message}</div>
             {t.action && (
               <button
                 onClick={() => { t.action?.onClick(); remove(t.id); }}
-                className="shrink-0 text-xs font-semibold underline hover:no-underline transition-all"
+                className={`shrink-0 text-xs font-semibold px-2.5 py-1.5 rounded-lg ${c.bg} ${c.text} hover:opacity-80 transition-opacity`}
               >
                 {t.action.label}
               </button>
@@ -91,7 +96,7 @@ export function ToastContainer() {
             <button
               onClick={() => remove(t.id)}
               title="ปิด" aria-label="ปิด"
-              className="shrink-0 opacity-60 hover:opacity-100 transition-opacity"
+              className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-text-subtle hover:text-text hover:bg-surface-2 transition-colors"
             >
               <X size={14} />
             </button>

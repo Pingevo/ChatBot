@@ -55,6 +55,9 @@ async function callOurBot(params: {
   usage?: { prompt: number; output: number; total: number };
   cost?: number;
   products?: unknown[];
+  handoff_to_admin?: boolean;
+  handoff_reason?: string;
+  routing_decision?: unknown;
 }> {
   const { platform, message, history, shopId, shopName } = params;
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
@@ -104,6 +107,9 @@ async function callOurBot(params: {
         usage: data.usage,
         cost: typeof data.cost === "number" ? data.cost : undefined,
         products: data.products,
+        handoff_to_admin: data.handoff_to_admin === true, // ⚡ BUG-B — ส่งต่อให้ shadowReplyService เก็บ
+        handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
+        routing_decision: data.routing_decision,
       };
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));

@@ -19,6 +19,9 @@ const PUBLIC_API = [
   // ⚡ Phase 1F — test chat uploads (รูปที่อัปโหลด) — public เพื่อให้ <img> ดึงได้
   //    ปลอดภัยเพราะใช้ ObjectId สุ่ม 24 hex chars (ไม่สามารถเดาได้)
   "/api/test-chat/uploads",
+  // ⚡ BUG-M fix — bot-handoff ใช้ internal secret auth (X-Internal-Secret) ไม่ใช่ admin JWT
+  //    ถ้าไม่ใส่ตรงนี้ middleware จะตีก 401 ก่อนถึง route handler
+  "/api/admin/conversations/bot-handoff",
 ];
 
 function isPublic(pathname: string): boolean {

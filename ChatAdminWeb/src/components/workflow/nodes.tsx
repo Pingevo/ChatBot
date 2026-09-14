@@ -14,7 +14,7 @@ export const NODE_TYPE_META: Record<
   trigger: { label: "Trigger", color: "#d97706", bg: "#ffffff", border: "#e5e7eb", icon: <Zap size={13} /> },
   condition: { label: "Condition", color: "#7c3aed", bg: "#ffffff", border: "#e5e7eb", icon: <GitBranch size={13} /> },
   action: { label: "Action", color: "#059669", bg: "#ffffff", border: "#e5e7eb", icon: <Play size={13} /> },
-  wait: { label: "Wait", color: "#4f46e5", bg: "#ffffff", border: "#e5e7eb", icon: <Clock size={13} /> },
+  wait: { label: "Wait", color: "#8b1e28", bg: "#ffffff", border: "#e5e7eb", icon: <Clock size={13} /> },
 };
 
 export const SUBTYPE_META: Record<string, { label: string; icon: React.ReactNode }> = {

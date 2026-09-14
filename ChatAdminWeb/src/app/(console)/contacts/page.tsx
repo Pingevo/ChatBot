@@ -154,16 +154,16 @@ export default function ContactsPage() {
             ))}
           </div>
 
-          {/* Search */}
-          <div className="flex items-center gap-1.5 ml-auto">
-            <div className="relative">
+          {/* Search — full row */}
+          <div className="flex items-center gap-1.5 w-full">
+            <div className="relative flex-1">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle" />
               <input
                 type="text"
                 placeholder="ค้นหาชื่อลูกค้า... (พิมพ์แล้วค้นหาทันที)"
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
-                className="w-64 h-9 pl-9 pr-3 rounded-lg border border-border bg-surface-2 text-text text-sm placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40"
+                className="w-full h-9 pl-9 pr-3 rounded-lg border border-border bg-surface-2 text-text text-sm placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40"
               />
             </div>
             {search && (
@@ -175,13 +175,13 @@ export default function ContactsPage() {
         </div>
 
         {/* Sort options */}
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-text-muted">เรียงตาม:</span>
+        <div className="flex items-center gap-2 text-xs overflow-x-auto pb-1">
+          <span className="text-text-muted shrink-0">เรียงตาม:</span>
           {sortOptions.map((opt) => (
             <button
               key={opt.value}
               onClick={() => handleSort(opt.value)}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-colors ${
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-colors whitespace-nowrap ${
                 sortBy === opt.value
                   ? "bg-brand/15 text-brand"
                   : "bg-surface-2 text-text-muted hover:bg-pale-sky-soft"
@@ -206,7 +206,30 @@ export default function ContactsPage() {
           />
         ) : (
           <>
-            <Card className="overflow-hidden">
+            {/* <lg — card list (มือถือ/tablet) */}
+            <div className="space-y-2 lg:hidden">
+              {contacts.map((c) => (
+                <Card key={`m-${c.platform}-${c.buyer_id}`} className="p-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-full bg-brand/15 flex items-center justify-center text-xs font-medium text-brand shrink-0">
+                      {c.name?.charAt(0).toUpperCase() || "?"}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="font-medium text-text text-sm truncate">{c.name || "(ไม่มีชื่อ)"}</div>
+                      <code className="text-[10px] text-text-subtle">{c.buyer_id}</code>
+                    </div>
+                    <PlatformIcon platform={c.platform} size={20} />
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-text-muted">
+                    <span>ใช้งานล่าสุด: {c.last_active_at ? new Date(c.last_active_at).toLocaleString("th-TH") : "-"}</span>
+                    <span>สมัครเมื่อ: {c.created_at ? new Date(c.created_at).toLocaleDateString("th-TH") : "-"}</span>
+                  </div>
+                </Card>
+              ))}
+            </div>
+
+            {/* lg+ — table */}
+            <Card className="hidden lg:block overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border bg-surface-2/50">

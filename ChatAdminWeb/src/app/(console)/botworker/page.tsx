@@ -366,7 +366,7 @@ export default function BotWorkerPage() {
         {/* Mobile back button */}
         <button
           onClick={handleBack}
-          className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+          className="md:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
           title="กลับ"
           aria-label="กลับ"
         >
@@ -376,7 +376,7 @@ export default function BotWorkerPage() {
         {selected && (
           <button
             onClick={() => setMobileView("info")}
-            className="md:hidden absolute top-3 right-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+            className="md:hidden absolute top-3 right-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
             title="รายละเอียด"
             aria-label="รายละเอียด"
           >
@@ -399,12 +399,12 @@ export default function BotWorkerPage() {
       {selected && (
         <>
           <div
-            className={`${mobileView === "info" ? "flex" : "hidden"} ${rightCollapsed ? "md:hidden" : "md:flex"} h-full transition-[width] duration-200 ease-in-out`}
+            className={`${mobileView === "info" ? "flex" : "hidden"} ${rightCollapsed ? "md:hidden" : "md:flex"} h-full w-full md:w-auto transition-[width] duration-200 ease-in-out`}
           >
-            <div className="relative h-full flex flex-col w-[340px] border-l border-border bg-surface">
+            <div className="relative h-full flex flex-col w-full md:w-[340px] border-l border-border bg-surface">
               <button
                 onClick={() => setMobileView("chat")}
-                className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+                className="md:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
                 title="กลับ"
                 aria-label="กลับ"
               >

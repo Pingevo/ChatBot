@@ -47,10 +47,21 @@ async function callOurBot(params: {
   usage?: { prompt: number; output: number; total: number };
   cost?: number;
   products?: unknown[];
+  handoff_to_admin?: boolean;
+  handoff_reason?: string;
+  routing_decision?: unknown;
 }> {
   const { platform, message, history, shopId, shopName, use_v2, use_v3 } = params;
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
+
+  // ⚡ BUG-G guard — fail fast สำหรับ platform ที่ไม่มี bot deploy (เหมือน route.ts)
+  if (platform !== "shopee") {
+    throw new Error(
+      `bot สำหรับ platform "${platform}" ยังไม่ได้ deploy (URL=${upstream}) — ` +
+      `shadow-inbox รองรับเฉพาะ shopee ในขณะนี้`
+    );
+  }
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -94,6 +105,9 @@ async function callOurBot(params: {
     usage: data.usage,
     cost: typeof data.cost === "number" ? data.cost : undefined,
     products: data.products,
+    handoff_to_admin: data.handoff_to_admin === true, // ⚡ BUG-B — ส่งต่อให้ shadowReplyService เก็บ
+    handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
+    routing_decision: data.routing_decision,
   };
 }
 

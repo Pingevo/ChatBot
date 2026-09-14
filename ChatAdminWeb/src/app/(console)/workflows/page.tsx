@@ -184,6 +184,19 @@ export default function WorkflowsPage() {
     }
   };
 
+  // ESC to close create modal (ไม่ปิดขณะกำลังสร้าง)
+  useEffect(() => {
+    if (!showCreate) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (!creating) setShowCreate(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showCreate, creating]);
+
   const shopNameById = useMemo(() => {
     const m = new Map<string, string>();
     for (const s of shops) m.set(s.shop_id, s.shopname);
@@ -448,8 +461,18 @@ export default function WorkflowsPage() {
             return (
               <div
                 key={wf.workflow_id}
+                role="button"
+                tabIndex={0}
                 onClick={() => renamingId !== wf.workflow_id && router.push(`/workflows/${wf.workflow_id}`)}
-                className={`bg-surface rounded-xl border border-border p-4 hover:border-pale-sky transition-colors cursor-pointer ${wf.enabled ? "" : "opacity-60"}`}
+                onKeyDown={(e) => {
+                  // กด Enter/Space ที่ตัวการ์ด = เข้า editor (ข้ามถ้าโฟกัสอยู่ที่ปุ่ม/input ลูก)
+                  if (e.target !== e.currentTarget) return;
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    if (renamingId !== wf.workflow_id) router.push(`/workflows/${wf.workflow_id}`);
+                  }
+                }}
+                className={`bg-surface rounded-xl border border-border p-4 hover:border-pale-sky transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${wf.enabled ? "" : "opacity-60"}`}
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex-1 min-w-0">
@@ -519,7 +542,7 @@ export default function WorkflowsPage() {
                     />
                     <button
                       onClick={() => router.push(`/workflows/${wf.workflow_id}`)}
-                      className="w-7 h-7 rounded-md hover:bg-surface-2 flex items-center justify-center"
+                      className="w-9 h-9 rounded-md hover:bg-surface-2 flex items-center justify-center"
                       title="แก้ไข"
                       aria-label="แก้ไข"
                     >
@@ -527,7 +550,7 @@ export default function WorkflowsPage() {
                     </button>
                     <button
                       onClick={() => remove(wf)}
-                      className="w-7 h-7 rounded-md hover:bg-vibrant-coral-soft flex items-center justify-center"
+                      className="w-9 h-9 rounded-md hover:bg-vibrant-coral-soft flex items-center justify-center"
                       title="ลบ"
                       aria-label="ลบ"
                     >

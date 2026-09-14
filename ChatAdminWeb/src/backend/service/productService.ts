@@ -144,12 +144,22 @@ export async function getProductsByIds(opts: {
     allVariants.push(...itemIdVariants(id));
   }
 
+  // ⚡ projection — ดึงเฉพาะ field ที่ toProductCard ใช้ (item_id/name/price/image/url/shop)
+  //   ตัด field ใหญ่ๆ ใน product doc (description/specs/embedding) — caller ทุกตัวใช้แค่ card fields
   const docs = await coll
     .find({
       $or: [
         { itemid: { $in: allVariants } },
         { item_id: { $in: allVariants } },
       ],
+    })
+    .project({
+      item_id: 1, itemid: 1,
+      name: 1, item_name: 1, product_name: 1, title: 1,
+      images: 1, image: 1, image_url: 1,
+      short_link: 1, url: 1, product_link: 1,
+      price: 1, new_check_price: 1, gen_price: 1,
+      shopid: 1, shop_id: 1, shopname: 1, shop_name: 1,
     })
     .toArray();
 

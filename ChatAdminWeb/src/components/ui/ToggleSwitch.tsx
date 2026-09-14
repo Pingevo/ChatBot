@@ -41,9 +41,9 @@ export function ToggleSwitch({
       role="switch"
       aria-checked={enabled}
       aria-label={ariaLabel || (enabled ? "ปิดใช้งาน" : "เปิดใช้งาน")}
-      className={`relative rounded-full transition-colors flex-shrink-0 ${
-        enabled ? "bg-success" : "bg-surface-1"
-      } ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-1`}
+      className={`relative rounded-full transition-colors duration-200 flex-shrink-0 ${
+        enabled ? "bg-accent" : "bg-surface-3"
+      } ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-offset-1`}
       style={{ width: s.width, height: s.height }}
       title={enabled ? "คลิกเพื่อปิด" : "คลิกเพื่อเปิด"}
     >

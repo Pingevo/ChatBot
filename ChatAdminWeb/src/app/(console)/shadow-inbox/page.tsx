@@ -734,7 +734,7 @@ export default function ShadowInboxPage() {
   return (
     <div className="h-full flex overflow-hidden">
       {/* ── Panel ซ้าย: Shadow Inbox List ── */}
-      <div className={`${mobileView === "list" ? "flex" : "hidden"} md:flex h-full flex-col w-full md:w-72 min-w-0 shrink-0 border-r border-border overflow-hidden relative`}>
+      <div className={`${mobileView === "list" ? "flex" : "hidden"} lg:flex h-full flex-col w-full lg:w-72 min-w-0 shrink-0 border-r border-border overflow-hidden relative`}>
         {/* Origin filter tabs — ทั้งหมด / Message / History / ถังขยะ */}
         <div className="grid grid-cols-4 gap-0 border-b border-border bg-surface-2 shrink-0">
           {([
@@ -928,25 +928,43 @@ export default function ShadowInboxPage() {
       </div>
 
       {/* ── Panel กลาง ── */}
-      <div className={`${mobileView === "chat" ? "flex" : "hidden"} md:flex flex-1 h-full min-w-0 relative overflow-hidden`}>
-        {/* Mobile back button */}
-        <button
-          onClick={handleBack}
-          className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
-          title="กลับ"
-          aria-label="กลับ"
-        >
-          <ArrowLeft size={16} className="text-text" />
-        </button>
-        {/* Mobile stat button */}
-        <button
-          onClick={() => setMobileView("stat")}
-          className="md:hidden absolute top-3 right-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
-          title="สถิติ"
-          aria-label="สถิติ"
-        >
-          <Info size={16} className="text-text" />
-        </button>
+      <div className={`${mobileView === "chat" ? "flex" : "hidden"} lg:flex flex-1 h-full min-w-0 relative overflow-hidden lg:pt-0 pt-10`}>
+        {/* Mobile/Tablet header bar — back + customer + stats */}
+        <div className="lg:hidden absolute top-0 inset-x-0 z-10 flex items-center justify-between px-2 py-2 bg-surface/95 backdrop-blur border-b border-border">
+          <button
+            onClick={handleBack}
+            className="w-9 h-9 rounded-lg flex items-center justify-center text-text-muted hover:text-text transition-colors"
+            title="กลับ"
+            aria-label="กลับ"
+          >
+            <ArrowLeft size={18} />
+          </button>
+          <div className="flex items-center gap-1.5 min-w-0 flex-1 justify-center">
+            {selectedId && (() => {
+              const conv = (originFilter === "history"
+                ? historyConversations.find((c) => c.id === selectedId)
+                : originFilter === "trash"
+                ? trashConversations.find((c) => c.id === selectedId)
+                : chatConversations.find((c) => c.id === selectedId));
+              return conv ? (
+                <>
+                  <span className="w-5 h-5 rounded-md bg-brand/10 flex items-center justify-center shrink-0">
+                    <span className="text-[10px] font-bold text-brand">{conv.platform?.[0]?.toUpperCase()}</span>
+                  </span>
+                  <span className="text-xs font-semibold text-text truncate">{conv.customer_name || "(ไม่มีชื่อ)"}</span>
+                </>
+              ) : null;
+            })()}
+          </div>
+          <button
+            onClick={() => setMobileView("stat")}
+            className="w-9 h-9 rounded-lg flex items-center justify-center text-text-muted hover:text-text transition-colors"
+            title="สถิติ"
+            aria-label="สถิติ"
+          >
+            <Info size={16} />
+          </button>
+        </div>
 
         {originFilter === "all" || originFilter === "history" || originFilter === "trash" ? (
           /* ⚡ tab "ทั้งหมด", "History", และ "ถังขยะ" — แสดงทั้งแชทแบบ 2 คอลัมน์ (user/zaapi + user/bot เรา) */
@@ -994,11 +1012,11 @@ export default function ShadowInboxPage() {
 
       {/* ── Panel ขวา: Stats ── */}
       <div className={`${mobileView === "stat" ? "flex" : "hidden"} ${rightCollapsed ? "md:hidden" : "md:flex"} h-full shrink-0 overflow-hidden`}>
-        <div className="relative h-full flex flex-col w-full md:w-[300px] min-w-0 border-l border-border bg-surface overflow-hidden">
+        <div className="relative h-full flex flex-col w-full lg:w-[300px] min-w-0 border-l border-border bg-surface overflow-hidden">
           {/* Mobile back button */}
           <button
             onClick={() => setMobileView("chat")}
-            className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+            className="md:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
             title="กลับ"
             aria-label="กลับ"
           >
@@ -1008,7 +1026,7 @@ export default function ShadowInboxPage() {
           {/* Collapse button (desktop) */}
           <button
             onClick={() => setRightCollapsed(true)}
-            className="hidden md:flex absolute top-3 right-3 z-10 w-7 h-7 rounded-md text-text-muted hover:text-text hover:bg-surface-2 items-center justify-center transition-colors"
+            className="hidden lg:flex absolute top-3 right-3 z-10 w-7 h-7 rounded-md text-text-muted hover:text-text hover:bg-surface-2 items-center justify-center transition-colors"
             title="ซ่อน panel"
             aria-label="ซ่อน panel"
           >
@@ -1019,7 +1037,7 @@ export default function ShadowInboxPage() {
           <button
             onClick={handleClearAll}
             disabled={clearingAll}
-            className="hidden md:flex absolute top-3 right-12 z-10 h-7 px-2 rounded-md text-text-muted hover:text-error hover:bg-error/5 items-center justify-center gap-1 transition-colors text-[10px] disabled:opacity-50"
+            className="hidden lg:flex absolute top-3 right-12 z-10 h-7 px-2 rounded-md text-text-muted hover:text-error hover:bg-error/5 items-center justify-center gap-1 transition-colors text-[10px] disabled:opacity-50"
             title="ล้างข้อมูล shadow replies ทั้งหมด"
           >
             {clearingAll ? <Loading size={10} /> : <Trash2 size={11} />}
@@ -1042,7 +1060,7 @@ export default function ShadowInboxPage() {
       {rightCollapsed && (
         <button
           onClick={() => setRightCollapsed(false)}
-          className="hidden md:flex absolute right-0 top-1/2 -translate-y-1/2 z-10 w-7 h-14 bg-surface border border-border rounded-l-lg items-center justify-center shadow-sm hover:bg-surface-2 transition-colors"
+          className="hidden lg:flex absolute right-0 top-1/2 -translate-y-1/2 z-10 w-7 h-14 bg-surface border border-border rounded-l-lg items-center justify-center shadow-sm hover:bg-surface-2 transition-colors"
           title="แสดง panel"
           aria-label="แสดง panel"
         >

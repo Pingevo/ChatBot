@@ -184,6 +184,7 @@ export default function TriggersPage() {
   const [admins, setAdmins] = useState<{ admin_id: string; name?: string; username?: string }[]>([]);
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const formSnapshot = useRef("");
 
   // arrow-key navigation for filter dropdowns
@@ -256,6 +257,19 @@ export default function TriggersPage() {
     setEditing(null);
     setShowForm(false);
   };
+
+  // ESC to close form modal (closeForm มี dirty-check + saving guard อยู่แล้ว)
+  useEffect(() => {
+    if (!showForm) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeForm();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showForm, closeForm]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -591,6 +605,18 @@ export default function TriggersPage() {
             )}
           </div>
 
+          {/* Toggle ตัวกรองเพิ่มเติม — แสดงเฉพาะจอ <lg */}
+          <button
+            onClick={() => setFiltersOpen(!filtersOpen)}
+            aria-expanded={filtersOpen}
+            className="lg:hidden h-8 px-2.5 text-xs rounded-lg border border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky flex items-center gap-1.5 transition-colors"
+          >
+            ตัวกรองเพิ่มเติม
+            <ChevronDown size={11} className={`text-text-muted shrink-0 transition-transform ${filtersOpen ? "rotate-180" : ""}`} />
+          </button>
+
+          {/* ตัวกรองที่เหลือ — <lg ซ่อนไว้หลังปุ่ม toggle, lg+ แสดงตลอด */}
+          <div className={`${filtersOpen ? "flex" : "hidden"} lg:flex flex-wrap items-center gap-2`}>
           {/* Shop filter (multi) */}
           <div className="relative">
             <button
@@ -795,6 +821,7 @@ export default function TriggersPage() {
               <X size={11} /> ล้าง
             </button>
           )}
+          </div>
         </div>
 
         {/* Active filter chips */}
@@ -939,7 +966,7 @@ export default function TriggersPage() {
                       />
                       <button
                         onClick={() => openEdit(t)}
-                        className="w-7 h-7 rounded-md hover:bg-surface-2 flex items-center justify-center"
+                        className="w-9 h-9 rounded-md hover:bg-surface-2 flex items-center justify-center"
                         title="แก้ไข"
                         aria-label="แก้ไข"
                       >
@@ -947,7 +974,7 @@ export default function TriggersPage() {
                       </button>
                       <button
                         onClick={() => handleDelete(t.id)}
-                        className="w-7 h-7 rounded-md hover:bg-vibrant-coral-soft flex items-center justify-center"
+                        className="w-9 h-9 rounded-md hover:bg-vibrant-coral-soft flex items-center justify-center"
                         title="ลบ"
                         aria-label="ลบ"
                       >

@@ -57,11 +57,13 @@ export async function GET(req: NextRequest) {
   if (from) dateFilter.$gte = new Date(from);
   if (to) dateFilter.$lte = new Date(to);
 
-  const items: ResultItem[] = [];
-
   try {
-    // ── 1. Test Assignment: message ratings + conversation ratings ──
-    if (!scope || scope === "test_assignment") {
+    // ⚡ fire 3 collection queries พร้อมกัน (Promise.all) — แต่ละตัว return items ของตัวเอง
+    //   กัน timeout: test_assignment doc embed qa[] ใหญ่มาก → list mode ดึงแค่ message_id
+
+    const loadTestAssignment = async (): Promise<ResultItem[]> => {
+      if (scope && scope !== "test_assignment") return [];
+      const out: ResultItem[] = [];
       const coll = await getCollection<{
         conversation_id: string; replayed_by?: string; platform?: string; shop_name?: string;
         to_name?: string;
@@ -86,7 +88,16 @@ export async function GET(req: NextRequest) {
         taFilter.replayed_at = dateFilter;
       }
 
-      const docs = await coll.find(taFilter, { projection: convId ? {} : { "qa.user_text": 0, "qa.bot_reply": 0, "qa.bot_source": 0 } }).sort({ replayed_at: -1 }).limit(limit).toArray();
+      // ⚡ list mode (ไม่มี convId): inclusion projection — เอาเฉพาะ qa.message_id
+      //   (เดิม exclude แค่ 3 fields → qa[] ยังลาก media/products/etc. มาด้วยทำให้ช้า)
+      const docs = convId
+        ? await coll.find(taFilter).sort({ replayed_at: -1 }).limit(limit).toArray()
+        : await coll.find(taFilter).project({
+            "qa.message_id": 1, conversation_id: 1, replayed_by: 1, replayed_at: 1, created_at: 1,
+            platform: 1, shop_name: 1, to_name: 1, message_ratings: 1,
+            conv_star_rating: 1, conv_rating: 1, conv_comment: 1, conv_rated_by: 1, conv_rated_at: 1,
+            replay_batch_id: 1,
+          }).sort({ replayed_at: -1 }).limit(limit).toArray();
 
       for (const d of docs) {
         // ⚡ Phase 3B-6 — iterate ผ่าน qa[] ทั้งหมด (ไม่ใช่แค่ message_ratings)
@@ -99,7 +110,7 @@ export async function GET(req: NextRequest) {
             // แต่ถ้ายังไม่ได้ rate → เช็คด้วย replayed_by
             if (adminId && mr && mr.rated_by !== adminId) continue;
             if (adminId && !mr && d.replayed_by !== adminId) continue;
-            items.push({
+            out.push({
               scope: "test_assignment",
               admin_id: mr?.rated_by || d.replayed_by || "",
               conversation_id: d.conversation_id,
@@ -120,9 +131,10 @@ export async function GET(req: NextRequest) {
           }
         } else if (d.message_ratings) {
           // fallback: ถ้าไม่มี qa[] แต่มี message_ratings → ใช้แบบเดิม
-          for (const [msgId, mr] of Object.entries(d.message_ratings)) {
+          type MsgRating = { star_rating?: number; rating?: string; comment?: string; rated_by?: string; rated_at?: Date };
+          for (const [msgId, mr] of Object.entries(d.message_ratings as Record<string, MsgRating>)) {
             if (adminId && mr.rated_by !== adminId) continue;
-            items.push({
+            out.push({
               scope: "test_assignment",
               admin_id: mr.rated_by || d.replayed_by || "",
               conversation_id: d.conversation_id,
@@ -139,7 +151,7 @@ export async function GET(req: NextRequest) {
           }
         }
         if (d.conv_rated_by && (!adminId || d.conv_rated_by === adminId)) {
-          items.push({
+          out.push({
             scope: "test_assignment",
             admin_id: d.conv_rated_by,
             conversation_id: d.conversation_id,
@@ -154,10 +166,13 @@ export async function GET(req: NextRequest) {
           });
         }
       }
-    }
+      return out;
+    };
 
     // ── 2. Shadow Bot: shadow_replies ratings ──
-    if (!scope || scope === "shadow_bot") {
+    const loadShadowBot = async (): Promise<ResultItem[]> => {
+      if (scope && scope !== "shadow_bot") return [];
+      const out: ResultItem[] = [];
       const coll = await getCollection<{
         shadow_reply_id: string; conversation_id: string; generated_by?: string;
         platform?: string; shop_id?: string; inbound_text?: string; bot_reply_text?: string;
@@ -182,7 +197,14 @@ export async function GET(req: NextRequest) {
         shFilter.created_at = dateFilter;
       }
 
-      const docs = await coll.find(shFilter, { projection: convId ? {} : { inbound_text: 0, bot_reply_text: 0, bot_source: 0 } }).sort({ created_at: -1 }).limit(limit).toArray();
+      // ⚡ list mode: inclusion projection (detail ต้องการ text ครบ)
+      const docs = convId
+        ? await coll.find(shFilter).sort({ created_at: -1 }).limit(limit).toArray()
+        : await coll.find(shFilter).project({
+            shadow_reply_id: 1, conversation_id: 1, generated_by: 1, rated_by: 1, rated_at: 1,
+            platform: 1, shop_id: 1, origin: 1, created_at: 1, rating: 1, star_rating: 1, comment: 1,
+            generation_batch_id: 1,
+          }).sort({ created_at: -1 }).limit(limit).toArray();
 
       // ⚡ ดึง shop_name + to_name จาก conversations collection (match ด้วย conversation_id)
       const convIds = [...new Set(docs.map((d) => d.conversation_id).filter(Boolean))] as string[];
@@ -197,7 +219,7 @@ export async function GET(req: NextRequest) {
 
       for (const d of docs) {
         const convInfo = convInfoMap.get(d.conversation_id);
-        items.push({
+        out.push({
           scope: "shadow_bot",
           admin_id: d.rated_by || d.generated_by || "",
           conversation_id: d.conversation_id,
@@ -216,10 +238,13 @@ export async function GET(req: NextRequest) {
           batch_id: d.generation_batch_id,  // ⚡ Phase 3B-8
         });
       }
-    }
+      return out;
+    };
 
     // ── 3. Test Chat: test_chat_ratings ──
-    if (!scope || scope === "test_chat") {
+    const loadTestChat = async (): Promise<ResultItem[]> => {
+      if (scope && scope !== "test_chat") return [];
+      const out: ResultItem[] = [];
       const coll = await getCollection<{
         session_id: string; platform?: string; msg_index: number;
         user_message?: string; bot_answer?: string; bot_source?: string;
@@ -232,10 +257,16 @@ export async function GET(req: NextRequest) {
       if (adminId) tcFilter.rated_by = adminId;
       if (from || to) tcFilter.rated_at = dateFilter;
 
-      const docs = await coll.find(tcFilter).sort({ rated_at: -1 }).limit(limit).toArray();
+      // ⚡ list mode: ตัด user_message/bot_answer ออก (detail ต้องการ)
+      const docs = convId
+        ? await coll.find(tcFilter).sort({ rated_at: -1 }).limit(limit).toArray()
+        : await coll.find(tcFilter).project({
+            session_id: 1, platform: 1, msg_index: 1, rated_by: 1, rated_at: 1,
+            star_rating: 1, rating: 1, comment: 1,
+          }).sort({ rated_at: -1 }).limit(limit).toArray();
 
       for (const d of docs) {
-        items.push({
+        out.push({
           scope: "test_chat",
           admin_id: d.rated_by || "",
           conversation_id: d.session_id,
@@ -250,7 +281,15 @@ export async function GET(req: NextRequest) {
           platform: d.platform,
         });
       }
-    }
+      return out;
+    };
+
+    const [taItems, shItems, tcItems] = await Promise.all([
+      loadTestAssignment(),
+      loadShadowBot(),
+      loadTestChat(),
+    ]);
+    const items = [...taItems, ...shItems, ...tcItems];
 
     // ── sort by rated_at desc (fallback created_at) ──
     items.sort((a, b) => {

@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/Button";
 import { toast } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import { nodeTypes, toXYFlowType, NODE_TYPE_META, SUBTYPE_META, type FlowNodeType } from "./nodes";
+import { Plus, Settings2, X, Save, Trash2, ArrowLeft } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -153,8 +154,8 @@ function EditorInner({ workflowId }: { workflowId: string }) {
           //   ถ้าไม่มี branch → "out" (edge ปกติ)
           sourceHandle: e.branch || "out",
           // ให้ false branch เห็นเป็นสีแดง / true เขียว (legacy)
-          ...(e.branch === "false" ? { style: { stroke: "#cbd5e1" }, label: "false" } :
-              e.branch === "true" ? { style: { stroke: "#94a3b8" }, label: "true" } : {}),
+          ...(e.branch === "false" ? { style: { stroke: "var(--color-surface-4)" }, label: "false" } :
+              e.branch === "true" ? { style: { stroke: "var(--color-text-subtle)" }, label: "true" } : {}),
           markerEnd: { type: MarkerType.ArrowClosed },
         })));
         nodeCounterRef.current = wf.nodes.length;
@@ -205,9 +206,9 @@ function EditorInner({ workflowId }: { workflowId: string }) {
             markerEnd: { type: MarkerType.ArrowClosed },
             // ให้ edge จาก condition handle true/false มีสีอ่อน + label
             ...(params.sourceHandle === "false"
-              ? { style: { stroke: "#cbd5e1" }, label: "false" }
+              ? { style: { stroke: "var(--color-surface-4)" }, label: "false" }
               : params.sourceHandle === "true"
-                ? { style: { stroke: "#94a3b8" }, label: "true" }
+                ? { style: { stroke: "var(--color-text-subtle)" }, label: "true" }
                 : {}),
           },
           eds
@@ -342,79 +343,203 @@ function EditorInner({ workflowId }: { workflowId: string }) {
     }
   }, [isNew, workflowId, router]);
 
+  const [paletteOpen, setPaletteOpen] = useState(true);
+  const [settingsPanelOpen, setSettingsPanelOpen] = useState(false);
+
+  const dirty = wfVersion !== 0;
+
+  // ⚡ กันออกจากหน้าโดยไม่บันทึก — 2 ชั้น:
+  //   1) beforeunload = ปิดแท็บ/refresh (browser chrome — แก้ UI ไม่ได้ เป็นของ browser)
+  //   2) click interceptor = nav ภายในแอป (sidebar link, ปุ่มต่างๆ) → ConfirmDialog ของระบบ
+  useEffect(() => {
+    if (!dirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    const onClick = (e: MouseEvent) => {
+      const anchor = (e.target as HTMLElement).closest?.("a[href]");
+      if (!anchor) return;
+      const href = (anchor as HTMLAnchorElement).getAttribute("href") || "";
+      // เฉพาะ internal link ที่ออกจากหน้านี้จริงๆ
+      if (!href.startsWith("/") || href === window.location.pathname) return;
+      if ((anchor as HTMLElement).hasAttribute("data-unsaved-bypass")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      void confirm.ask({
+        title: "ยังไม่ได้บันทึก",
+        message: "มีการแก้ไข workflow ที่ยังไม่ได้บันทึก — ออกจากหน้านี้โดยไม่บันทึก?",
+        confirmText: "ออกโดยไม่บันทึก",
+        cancelText: "อยู่ต่อ",
+        variant: "danger",
+      }).then((ok) => {
+        if (ok) {
+          setWfVersion(0);
+          router.push(href);
+        }
+      });
+    };
+    document.addEventListener("click", onClick, true);
+    return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      document.removeEventListener("click", onClick, true);
+    };
+  }, [dirty, router]);
+
+  // ปุ่ม "กลับ" — เช็ค dirty ก่อนออก (ไม่ผ่าน anchor interceptor เพราะเป็น button onClick)
+  const goBack = useCallback(async () => {
+    if (dirty) {
+      const ok = await confirm.ask({
+        title: "ยังไม่ได้บันทึก",
+        message: "มีการแก้ไข workflow ที่ยังไม่ได้บันทึก — ออกจากหน้านี้โดยไม่บันทึก?",
+        confirmText: "ออกโดยไม่บันทึก",
+        cancelText: "อยู่ต่อ",
+        variant: "danger",
+      });
+      if (!ok) return;
+    }
+    router.push("/workflows");
+  }, [dirty, router]);
+
   if (!loaded) {
     return <div style={{ padding: 40, textAlign: "center", opacity: 0.6 }}>กำลังโหลด workflow…</div>;
   }
 
-  const dirty = wfVersion !== 0;
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: 0 }}>
-      {/* ── Top bar: ชื่อ + ปุ่ม ── */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 20px", borderBottom: "1px solid var(--border, #333)", flexWrap: "wrap" }}>
+    <div className="flex flex-col h-full min-h-0">
+      {/* ── Top bar — ชื่อ + status + toggle เปิดใช้งาน (บรรทัดเดียว) ── */}
+      <div className="flex items-center gap-2 px-3 lg:px-5 py-2.5 border-b border-border bg-surface shrink-0">
         <input
           value={settings.name}
           onChange={(e) => { setSettings((s) => ({ ...s, name: e.target.value })); setWfVersion((v) => v + 1); }}
-          placeholder="ชื่อ workflow (เช่น ขายหัวชาร์จ)"
-          style={{ fontWeight: 600, fontSize: 15, padding: "6px 12px", borderRadius: 8, border: "1px solid var(--border, #333)", background: "transparent", color: "inherit", minWidth: 260 }}
+          placeholder="ชื่อ workflow"
+          className="flex-1 min-w-0 font-semibold text-sm px-3 py-2 rounded-lg border border-border bg-surface text-text focus:outline-none focus:ring-2 focus:ring-brand/30"
         />
         <select
           value={settings.status}
           onChange={(e) => { setSettings((s) => ({ ...s, status: e.target.value as FlowSettings["status"] })); setWfVersion((v) => v + 1); }}
-          style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid var(--border, #333)", background: "transparent", color: "inherit" }}
+          className={`shrink-0 text-xs font-medium px-2 py-2 rounded-lg border focus:outline-none ${settings.status === "published"
+            ? "border-success/40 bg-success/10 text-success"
+            : "border-warning/40 bg-warning/10 text-warning"}`}
         >
           <option value="draft">ฉบับร่าง</option>
           <option value="published">เผยแพร่</option>
         </select>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
-          <input type="checkbox" checked={settings.enabled} onChange={toggleEnabled} />
-          เปิดใช้งาน
-        </label>
-        <div style={{ flex: 1 }} />
-        {dirty && <span style={{ fontSize: 12, color: "#f59e0b" }}>● มีการแก้ไขยังไม่ได้บันทึก</span>}
-        <Button onClick={save} disabled={saving || !settings.name.trim()}>
-          {saving ? "กำลังบันทึก…" : "บันทึก"}
-        </Button>
-        {!isNew && (
-          <Button onClick={remove} variant="outline" style={{ color: "#ef4444" }}>ลบ</Button>
-        )}
-        <Button onClick={() => router.push("/workflows")} variant="outline">กลับ</Button>
+        {/* switch เปิด/ปิดใช้งาน — ทั้ง pill กดได้ */}
+        <button
+          role="switch"
+          aria-checked={settings.enabled}
+          onClick={toggleEnabled}
+          title={settings.enabled ? "เปิดใช้งานอยู่ — กดเพื่อปิด" : "ปิดใช้งานอยู่ — กดเพื่อเปิด"}
+          className="shrink-0 inline-flex items-center gap-1.5"
+        >
+          <span className={`relative w-9 h-5 rounded-full transition-colors ${settings.enabled ? "bg-success" : "bg-surface-2 border border-border"}`}>
+            <span className={`absolute top-[3px] w-3.5 h-3.5 rounded-full bg-white shadow transition-all ${settings.enabled ? "left-[19px]" : "left-[3px]"}`} />
+          </span>
+          <span className={`text-[11px] font-medium hidden sm:inline ${settings.enabled ? "text-success" : "text-text-muted"}`}>
+            {settings.enabled ? "เปิด" : "ปิด"}
+          </span>
+        </button>
       </div>
 
-      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
-        {/* ── Palette ซ้าย ── */}
-        <div style={{ width: 210, borderRight: "1px solid var(--border, #333)", padding: 16, overflowY: "auto", flexShrink: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 12, opacity: 0.7 }}>เพิ่ม Node</div>
-          {PALETTE.map((group) => {
-            const meta = NODE_TYPE_META[group.type];
-            return (
-              <div key={group.type} style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: meta.color, marginBottom: 8, display: "flex", alignItems: "center", gap: 5 }}>
-                  {meta.icon} {meta.label}
-                </div>
-                {group.subtypes.map((sub) => (
-                  <button
-                    key={sub}
-                    onClick={() => addNode(group.type, sub)}
-                    style={{
-                      display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left",
-                      padding: "7px 10px", marginBottom: 6, fontSize: 12,
-                      borderRadius: 8, border: `1px solid ${meta.border}`, background: meta.bg, color: "inherit", cursor: "pointer",
-                    }}
-                  >
-                    {SUBTYPE_META[sub]?.icon} {SUBTYPE_META[sub]?.label || sub}
-                  </button>
-                ))}
+      {/* ── Toolbar — Node/Settings (ซ้าย) + Save/Delete/Back (ขวา, icon) ── */}
+      <div className="flex items-center gap-1.5 px-3 lg:px-5 py-2 border-b border-border bg-surface-2 shrink-0">
+        <button
+          onClick={() => setPaletteOpen(!paletteOpen)}
+          className={`inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border transition-colors ${paletteOpen ? "bg-brand text-white border-brand" : "bg-surface text-text-muted border-border hover:text-text"}`}
+          title="เพิ่ม Node"
+        >
+          <Plus size={14} />
+          <span>Node</span>
+        </button>
+        <button
+          onClick={() => setSettingsPanelOpen(!settingsPanelOpen)}
+          className={`inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border transition-colors ${settingsPanelOpen ? "bg-brand text-white border-brand" : "bg-surface text-text-muted border-border hover:text-text"}`}
+          title="ตั้งค่า Workflow"
+        >
+          <Settings2 size={14} />
+          <span>Settings</span>
+        </button>
+        <div className="flex-1" />
+        {dirty ? (
+          <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-full bg-warning/10 text-warning whitespace-nowrap" title="มีการแก้ไขยังไม่ได้บันทึก">
+            ● ยังไม่บันทึก
+          </span>
+        ) : !isNew ? (
+          <span className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-full bg-success/10 text-success whitespace-nowrap" title="บันทึกล่าสุดแล้ว">
+            ✓ บันทึกแล้ว
+          </span>
+        ) : null}
+        <button
+          onClick={save}
+          disabled={saving || !settings.name.trim()}
+          title="บันทึก workflow"
+          className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-semibold rounded-lg bg-brand text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+        >
+          <Save size={14} />
+          <span className="hidden sm:inline">{saving ? "กำลังบันทึก…" : "บันทึก"}</span>
+        </button>
+        {!isNew && (
+          <button
+            onClick={remove}
+            title="ลบ workflow"
+            className="inline-flex items-center justify-center w-9 h-9 lg:w-auto lg:h-auto lg:px-2.5 lg:py-1.5 rounded-lg border border-border text-error hover:bg-error/10 transition-colors"
+          >
+            <Trash2 size={14} />
+          </button>
+        )}
+        <button
+          onClick={goBack}
+          title="กลับไปหน้ารายการ"
+          className="inline-flex items-center justify-center w-9 h-9 lg:w-auto lg:h-auto lg:px-2.5 lg:py-1.5 rounded-lg border border-border text-text-muted hover:text-text hover:bg-surface transition-colors"
+        >
+          <ArrowLeft size={14} />
+        </button>
+        <span className="text-[10px] text-text-subtle hidden xl:inline ml-1">
+          ลาก node • เชื่อม edge จากจุดล่าง node • condition มี true/false
+        </span>
+      </div>
+
+      <div className="flex flex-1 min-h-0 relative">
+        {/* ── Palette — collapsible overlay on mobile, sidebar on desktop ── */}
+        {paletteOpen && (
+          <>
+            <div className="lg:hidden fixed inset-0 bg-black/40 z-30" onClick={() => setPaletteOpen(false)} />
+            <div className={`
+              w-56 border-r border-border bg-surface p-3 overflow-y-auto shrink-0
+              lg:relative lg:static
+              fixed inset-y-0 left-0 z-40 shadow-xl lg:shadow-none
+            `}>
+              <div className="flex items-center justify-between mb-3">
+                <div className="text-xs font-bold text-text">เพิ่ม Node</div>
+                <button onClick={() => setPaletteOpen(false)} className="lg:hidden w-9 h-9 rounded-lg hover:bg-surface-2 flex items-center justify-center" aria-label="ปิดเมนู Node" title="ปิด">
+                  <X size={16} className="text-text-muted" />
+                </button>
               </div>
-            );
-          })}
-          <div style={{ fontSize: 11, opacity: 0.5, marginTop: 8, lineHeight: 1.5 }}>
-            ลาก node ได้ • ลากจากจุดล่าง node ไปเชื่อม node ถัดไป • condition มีทางออก true (เขียว) / false (แดง)
-          </div>
-        </div>
+              {PALETTE.map((group) => {
+                const meta = NODE_TYPE_META[group.type];
+                return (
+                  <div key={group.type} className="mb-3">
+                    <div className="text-[10px] font-bold mb-1.5" style={{ color: meta.color }}>
+                      {meta.icon} {meta.label}
+                    </div>
+                    {group.subtypes.map((sub) => (
+                      <button
+                        key={sub}
+                        onClick={() => { addNode(group.type, sub); if (window.innerWidth < 1024) setPaletteOpen(false); }}
+                        className="w-full text-left px-2 py-1.5 mb-1 text-xs rounded-md border hover:bg-surface-2 transition-colors flex items-center gap-1.5"
+                        style={{ borderColor: meta.border, backgroundColor: meta.bg }}
+                      >
+                        {SUBTYPE_META[sub]?.icon} {SUBTYPE_META[sub]?.label || sub}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
 
         {/* ── Canvas กลาง ── */}
-        <div style={{ flex: 1, minWidth: 0, position: "relative" }}>
+        <div className="flex-1 min-w-0 relative">
           <ReactFlow
             nodes={nodes}
             edges={edges}
@@ -422,7 +547,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
             onNodesChange={(c: NodeChange<Node<WFNodeData>>[]) => { onNodesChange(c); setWfVersion((v) => (c.some((x) => x.type === "position" || x.type === "remove") ? v + 1 : v)); }}
             onEdgesChange={(c: EdgeChange<Edge>[]) => { onEdgesChange(c); if (c.some((x) => x.type === "remove")) setWfVersion((v) => v + 1); }}
             onConnect={(c) => { onConnect(c); setWfVersion((v) => v + 1); }}
-            onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+            onNodeClick={(_, node) => { setSelectedNodeId(node.id); if (window.innerWidth < 1024) setSettingsPanelOpen(true); }}
             onPaneClick={() => setSelectedNodeId(null)}
             fitView
           >
@@ -432,20 +557,35 @@ function EditorInner({ workflowId }: { workflowId: string }) {
           </ReactFlow>
         </div>
 
-        {/* ── Panel ขวา: node config + flow settings ── */}
-        <div style={{ width: 300, borderLeft: "1px solid var(--border, #333)", padding: 16, overflowY: "auto", flexShrink: 0 }}>
-          {selectedNode ? (
-            <NodeConfigPanel
-              node={selectedNode}
-              allNodes={nodes}
-              onUpdateConfig={updateSelectedConfig}
-              onUpdateSubtype={updateSelectedSubtype}
-              onDelete={deleteSelected}
-            />
-          ) : (
-            <FlowSettingsPanel settings={settings} setSettings={(s) => { setSettings(s); setWfVersion((v) => v + 1); }} shops={shops} />
-          )}
-        </div>
+        {/* ── Panel ขวา: node config + flow settings — collapsible ── */}
+        {(settingsPanelOpen || selectedNode) && (
+          <>
+            <div className="lg:hidden fixed inset-0 bg-black/40 z-30" onClick={() => { setSettingsPanelOpen(false); setSelectedNodeId(null); }} />
+            <div className={`
+              w-72 border-l border-border bg-surface p-3 overflow-y-auto shrink-0
+              lg:relative lg:static
+              fixed inset-y-0 right-0 z-40 shadow-xl lg:shadow-none
+            `}>
+              <div className="flex items-center justify-between mb-3 lg:hidden">
+                <div className="text-xs font-bold text-text">ตั้งค่า</div>
+                <button onClick={() => { setSettingsPanelOpen(false); setSelectedNodeId(null); }} className="w-9 h-9 rounded-lg hover:bg-surface-2 flex items-center justify-center" aria-label="ปิดแผงตั้งค่า" title="ปิด">
+                  <X size={16} className="text-text-muted" />
+                </button>
+              </div>
+              {selectedNode ? (
+                <NodeConfigPanel
+                  node={selectedNode}
+                  allNodes={nodes}
+                  onUpdateConfig={updateSelectedConfig}
+                  onUpdateSubtype={updateSelectedSubtype}
+                  onDelete={deleteSelected}
+                />
+              ) : (
+                <FlowSettingsPanel settings={settings} setSettings={(s) => { setSettings(s); setWfVersion((v) => v + 1); }} shops={shops} />
+              )}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -468,10 +608,10 @@ function NodeConfigPanel({
   const subtypesOfSameType = PALETTE.find((p) => p.type === type)?.subtypes || [];
 
   const inputStyle: React.CSSProperties = {
-    width: "100%", padding: "6px 10px", borderRadius: 8, border: "1px solid var(--border, #333)",
+    width: "100%", padding: "6px 10px", borderRadius: 8, border: "1px solid var(--color-border)",
     background: "transparent", color: "inherit", fontSize: 13, boxSizing: "border-box",
   };
-  const labelStyle: React.CSSProperties = { fontSize: 11, fontWeight: 600, color: "var(--color-text-muted, #64748b)", marginBottom: 4, display: "block" };
+  const labelStyle: React.CSSProperties = { fontSize: 11, fontWeight: 600, color: "var(--color-text-muted)", marginBottom: 4, display: "block" };
   const fieldGap: React.CSSProperties = { marginBottom: 12 };
 
   return (
@@ -480,7 +620,7 @@ function NodeConfigPanel({
         <div style={{ fontSize: 13, fontWeight: 700 }}>
           แก้โหนด
         </div>
-        <Button onClick={onDelete} variant="outline" style={{ color: "#ef4444", padding: "4px 10px", fontSize: 12 }}>ลบโหนด</Button>
+        <Button onClick={onDelete} variant="outline" style={{ color: "var(--color-error)", padding: "4px 10px", fontSize: 12 }}>ลบโหนด</Button>
       </div>
 
       <div style={fieldGap}>
@@ -718,12 +858,12 @@ function MessageContentConfigPanel({
     // ── Legacy binary UI + ปุ่มอัปเกรด ──
     return (
       <>
-        <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid #8b5cf6", borderRadius: 8, background: "rgba(139,92,246,0.08)", fontSize: 11.5, lineHeight: 1.5 }}>
+        <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--color-purple)", borderRadius: 8, background: "color-mix(in srgb, var(--color-purple) 8%, transparent)", fontSize: 11.5, lineHeight: 1.5 }}>
           ⚡ โหมด legacy (true/false 2 ทาง) — กดอัปเกรดเป็น multi-branch เพื่อแยกกิ่งได้มากกว่า 2 ทาง
           <div style={{ marginTop: 6 }}>
             <button
               onClick={upgradeToMultiBranch}
-              style={{ padding: "4px 10px", fontSize: 11, borderRadius: 6, border: "1px solid #8b5cf6", background: "#8b5cf6", color: "#fff", cursor: "pointer" }}
+              style={{ padding: "4px 10px", fontSize: 11, borderRadius: 6, border: "1px solid var(--color-purple)", background: "var(--color-purple)", color: "#fff", cursor: "pointer" }}
             >
               อัปเกรดเป็น multi-branch →
             </button>
@@ -775,12 +915,12 @@ function MessageContentConfigPanel({
 
   return (
     <>
-      <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--border, #333)", borderRadius: 8, fontSize: 11, opacity: 0.7, lineHeight: 1.5 }}>
+      <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--color-border)", borderRadius: 8, fontSize: 11, opacity: 0.7, lineHeight: 1.5 }}>
         multi-branch: ไล่เช็คทีละ branch ตามลำดับ → ใช้ branch แรกที่ match · ไม่ตรงเลย → fallback
         <div style={{ marginTop: 4 }}>
           <button
             onClick={downgradeToLegacy}
-            style={{ padding: "2px 8px", fontSize: 10, borderRadius: 6, border: "1px solid var(--border, #333)", background: "transparent", color: "inherit", cursor: "pointer" }}
+            style={{ padding: "2px 8px", fontSize: 10, borderRadius: 6, border: "1px solid var(--color-border)", background: "transparent", color: "inherit", cursor: "pointer" }}
           >
             ← กลับไป legacy
           </button>
@@ -801,12 +941,12 @@ function MessageContentConfigPanel({
 
       {/* list ของ branches */}
       {branches.map((b, idx) => (
-        <div key={idx} style={{ ...fieldGap, padding: "10px", border: "1px solid var(--border, #333)", borderRadius: 8, background: "rgba(139,92,246,0.04)" }}>
+        <div key={idx} style={{ ...fieldGap, padding: "10px", border: "1px solid var(--color-border)", borderRadius: 8, background: "color-mix(in srgb, var(--color-purple) 4%, transparent)" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <span style={{ fontSize: 11, fontWeight: 600, color: "#8b5cf6" }}>Branch {b.branch_id}</span>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "var(--color-purple)" }}>Branch {b.branch_id}</span>
             <button
               onClick={() => removeBranch(idx)}
-              style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", padding: 2, fontSize: 11 }}
+              style={{ background: "none", border: "none", color: "var(--color-error)", cursor: "pointer", padding: 2, fontSize: 11 }}
               title="ลบ branch"
             >
               ✕ ลบ
@@ -847,7 +987,7 @@ function MessageContentConfigPanel({
 
       <button
         onClick={addBranch}
-        style={{ ...fieldGap, width: "100%", padding: "8px", fontSize: 12, borderRadius: 8, border: "1px dashed #8b5cf6", background: "transparent", color: "#8b5cf6", cursor: "pointer" }}
+        style={{ ...fieldGap, width: "100%", padding: "8px", fontSize: 12, borderRadius: 8, border: "1px dashed var(--color-purple)", background: "transparent", color: "var(--color-purple)", cursor: "pointer" }}
       >
         + เพิ่ม keyword (branch)
       </button>
@@ -904,12 +1044,12 @@ function WaitForReplyConfigPanel({
     // ── Legacy UI + ปุ่มอัปเกรด ──
     return (
       <>
-        <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid #6366f1", borderRadius: 8, background: "rgba(99,102,241,0.08)", fontSize: 11.5, lineHeight: 1.5 }}>
+        <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--color-brand)", borderRadius: 8, background: "color-mix(in srgb, var(--color-brand) 8%, transparent)", fontSize: 11.5, lineHeight: 1.5 }}>
           ⚡ โหมด legacy (รอ reply เดียว + global timeout) — กดอัปเกรดเป็น Phase 2 เพื่อ retry + 3 branch (success/retry_exceeded/no_reply)
           <div style={{ marginTop: 6 }}>
             <button
               onClick={upgradeToPhase2}
-              style={{ padding: "4px 10px", fontSize: 11, borderRadius: 6, border: "1px solid #6366f1", background: "#6366f1", color: "#fff", cursor: "pointer" }}
+              style={{ padding: "4px 10px", fontSize: 11, borderRadius: 6, border: "1px solid var(--color-brand)", background: "var(--color-brand)", color: "#fff", cursor: "pointer" }}
             >
               อัปเกรดเป็น Phase 2 →
             </button>
@@ -943,12 +1083,12 @@ function WaitForReplyConfigPanel({
 
   return (
     <>
-      <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--border, #333)", borderRadius: 8, fontSize: 11, opacity: 0.7, lineHeight: 1.5 }}>
+      <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--color-border)", borderRadius: 8, fontSize: 11, opacity: 0.7, lineHeight: 1.5 }}>
         Phase 2: validate คำตอบ → success / ไม่ผ่าน retry / ครบ retry → retry_exceeded / ไม่ตอบเกิน timeout → no_reply
         <div style={{ marginTop: 4 }}>
           <button
             onClick={downgradeToLegacy}
-            style={{ padding: "2px 8px", fontSize: 10, borderRadius: 6, border: "1px solid var(--border, #333)", background: "transparent", color: "inherit", cursor: "pointer" }}
+            style={{ padding: "2px 8px", fontSize: 10, borderRadius: 6, border: "1px solid var(--color-border)", background: "transparent", color: "inherit", cursor: "pointer" }}
           >
             ← กลับไป legacy
           </button>
@@ -1099,12 +1239,12 @@ function AddLabelConfigPanel({
     // ── Legacy UI + ปุ่มอัปเกรด ──
     return (
       <>
-        <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid #10b981", borderRadius: 8, background: "rgba(16,185,129,0.08)", fontSize: 11.5, lineHeight: 1.5 }}>
+        <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--color-success)", borderRadius: 8, background: "color-mix(in srgb, var(--color-success) 8%, transparent)", fontSize: 11.5, lineHeight: 1.5 }}>
           ⚡ โหมด legacy (label เดียว) — กดอัปเกรดเป็น TagPicker เพื่อเลือกหลาย label แบบ chip
           <div style={{ marginTop: 6 }}>
             <button
               onClick={upgradeToPhase3}
-              style={{ padding: "4px 10px", fontSize: 11, borderRadius: 6, border: "1px solid #10b981", background: "#10b981", color: "#fff", cursor: "pointer" }}
+              style={{ padding: "4px 10px", fontSize: 11, borderRadius: 6, border: "1px solid var(--color-success)", background: "var(--color-success)", color: "#fff", cursor: "pointer" }}
             >
               อัปเกรดเป็น TagPicker →
             </button>
@@ -1142,12 +1282,12 @@ function AddLabelConfigPanel({
 
   return (
     <>
-      <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--border, #333)", borderRadius: 8, fontSize: 11, opacity: 0.7, lineHeight: 1.5 }}>
+      <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--color-border)", borderRadius: 8, fontSize: 11, opacity: 0.7, lineHeight: 1.5 }}>
         Phase 3 TagPicker — เลือกหลาย label แบบ chip · ดึง label list จาก /api/labels
         <div style={{ marginTop: 4 }}>
           <button
             onClick={downgradeToLegacy}
-            style={{ padding: "2px 8px", fontSize: 10, borderRadius: 6, border: "1px solid var(--border, #333)", background: "transparent", color: "inherit", cursor: "pointer" }}
+            style={{ padding: "2px 8px", fontSize: 10, borderRadius: 6, border: "1px solid var(--color-border)", background: "transparent", color: "inherit", cursor: "pointer" }}
           >
             ← กลับไป legacy
           </button>
@@ -1161,12 +1301,12 @@ function AddLabelConfigPanel({
             <span key={l} style={{
               display: "inline-flex", alignItems: "center", gap: 4,
               fontSize: 11, padding: "3px 8px", borderRadius: 12,
-              background: "rgba(16,185,129,0.15)", color: "#10b981", border: "1px solid rgba(16,185,129,0.3)",
+              background: "color-mix(in srgb, var(--color-success) 15%, transparent)", color: "var(--color-success)", border: "1px solid color-mix(in srgb, var(--color-success) 30%, transparent)",
             }}>
               {l}
               <button
                 onClick={() => toggleLabel(l)}
-                style={{ background: "none", border: "none", color: "#10b981", cursor: "pointer", padding: 0, fontSize: 12, lineHeight: 1 }}
+                style={{ background: "none", border: "none", color: "var(--color-success)", cursor: "pointer", padding: 0, fontSize: 12, lineHeight: 1 }}
                 title="ลบ"
                 aria-label={`ลบ label ${l}`}
               >
@@ -1183,7 +1323,7 @@ function AddLabelConfigPanel({
           {loadingLabels ? "กำลังโหลด label list…" : fetchError ? `โหลดไม่ได้ (${fetchError}) — พิมพ์เพิ่มได้` : "เลือก label ที่มีอยู่"}
         </label>
         {!loadingLabels && availableLabels.length > 0 && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 4, maxHeight: 120, overflowY: "auto", padding: 4, border: "1px solid var(--border, #333)", borderRadius: 6 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4, maxHeight: 120, overflowY: "auto", padding: 4, border: "1px solid var(--color-border)", borderRadius: 6 }}>
             {availableLabels.map((l) => {
               const selected = selectedIds.includes(l);
               return (
@@ -1192,9 +1332,9 @@ function AddLabelConfigPanel({
                   onClick={() => toggleLabel(l)}
                   style={{
                     fontSize: 11, padding: "3px 8px", borderRadius: 12, cursor: "pointer",
-                    background: selected ? "rgba(16,185,129,0.2)" : "transparent",
-                    color: selected ? "#10b981" : "var(--text-dim, #888)",
-                    border: selected ? "1px solid rgba(16,185,129,0.4)" : "1px solid var(--border, #333)",
+                    background: selected ? "color-mix(in srgb, var(--color-success) 20%, transparent)" : "transparent",
+                    color: selected ? "var(--color-success)" : "var(--color-text-muted)",
+                    border: selected ? "1px solid color-mix(in srgb, var(--color-success) 40%, transparent)" : "1px solid var(--color-border)",
                   }}
                 >
                   {l}
@@ -1226,7 +1366,7 @@ function AddLabelConfigPanel({
           />
           <button
             onClick={addCustomLabel}
-            style={{ padding: "0 12px", fontSize: 12, borderRadius: 6, border: "1px solid #10b981", background: "transparent", color: "#10b981", cursor: "pointer" }}
+            style={{ padding: "0 12px", fontSize: 12, borderRadius: 6, border: "1px solid var(--color-success)", background: "transparent", color: "var(--color-success)", cursor: "pointer" }}
           >
             + เพิ่ม
           </button>
@@ -1358,7 +1498,7 @@ function SendMessageConfigPanel({
         <label style={labelStyle}>
           ข้อความ
           <span style={{ fontSize: 10, opacity: 0.5, marginLeft: 6 }}>
-            (พิมพ์ <code style={{ background: "rgba(99,102,241,0.15)", padding: "0 4px", borderRadius: 3 }}>{"{{"}</code> เพื่อแทรกตัวแปร)
+            (พิมพ์ <code style={{ background: "color-mix(in srgb, var(--color-brand) 15%, transparent)", padding: "0 4px", borderRadius: 3 }}>{"{{"}</code> เพื่อแทรกตัวแปร)
           </span>
         </label>
         <div style={{ position: "relative" }}>
@@ -1374,7 +1514,7 @@ function SendMessageConfigPanel({
           {showAutocomplete && filteredVars.length > 0 && (
             <div style={{
               position: "absolute", zIndex: 100, top: "100%", left: 0, right: 0,
-              background: "var(--bg, #1e1e1e)", border: "1px solid var(--border, #333)",
+              background: "var(--color-surface)", border: "1px solid var(--color-border)",
               borderRadius: 6, boxShadow: "0 4px 12px rgba(0,0,0,0.3)", maxHeight: 160, overflowY: "auto",
             }}>
               {filteredVars.map((v) => (
@@ -1390,7 +1530,7 @@ function SendMessageConfigPanel({
                     fontSize: 12, fontFamily: "inherit",
                   }}
                 >
-                  <span style={{ color: "#6366f1", fontWeight: 600 }}>{"{{"}{v.name}{"}}"}</span>
+                  <span style={{ color: "var(--color-brand)", fontWeight: 600 }}>{"{{"}{v.name}{"}}"}</span>
                   <span style={{ opacity: 0.6, marginLeft: 8 }}>{v.description}</span>
                 </button>
               ))}
@@ -1401,7 +1541,7 @@ function SendMessageConfigPanel({
 
       {/* preview ข้อความที่ resolve แล้ว */}
       {hasVariables && (
-        <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--border, #333)", borderRadius: 6, background: "rgba(99,102,241,0.04)" }}>
+        <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--color-border)", borderRadius: 6, background: "color-mix(in srgb, var(--color-brand) 4%, transparent)" }}>
           <div style={{ fontSize: 10, opacity: 0.5, marginBottom: 4 }}>Preview (ตัวอย่างค่าจริง):</div>
           <div style={{ fontSize: 12, whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
             {previewText || <span style={{ opacity: 0.4 }}>(ว่าง — ตัวแปรไม่มีค่า)</span>}
@@ -1418,8 +1558,8 @@ function SendMessageConfigPanel({
             onClick={() => insertVariable(v.name)}
             style={{
               fontSize: 10, padding: "2px 6px", borderRadius: 4, cursor: "pointer",
-              background: "rgba(99,102,241,0.1)", color: "#6366f1",
-              border: "1px solid rgba(99,102,241,0.3)", fontFamily: "inherit",
+              background: "color-mix(in srgb, var(--color-brand) 10%, transparent)", color: "var(--color-brand)",
+              border: "1px solid color-mix(in srgb, var(--color-brand) 30%, transparent)", fontFamily: "inherit",
             }}
             title={v.description}
           >
@@ -1441,16 +1581,16 @@ function FlowSettingsPanel({
   shops: ShopOption[];
 }) {
   const inputStyle: React.CSSProperties = {
-    width: "100%", padding: "6px 10px", borderRadius: 8, border: "1px solid var(--border, #333)",
+    width: "100%", padding: "6px 10px", borderRadius: 8, border: "1px solid var(--color-border)",
     background: "transparent", color: "inherit", fontSize: 13, boxSizing: "border-box",
   };
-  const labelStyle: React.CSSProperties = { fontSize: 11, fontWeight: 600, color: "var(--color-text-muted, #64748b)", marginBottom: 4, display: "block" };
+  const labelStyle: React.CSSProperties = { fontSize: 11, fontWeight: 600, color: "var(--color-text-muted)", marginBottom: 4, display: "block" };
   const fieldGap: React.CSSProperties = { marginBottom: 12 };
 
   return (
     <div>
       <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>ตั้งค่า Workflow</div>
-      <div style={{ fontSize: 12, color: "var(--color-text-muted, #64748b)", marginBottom: 12, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 12, color: "var(--color-text-muted)", marginBottom: 12, lineHeight: 1.5 }}>
         คลิก node บน canvas เพื่อแก้ config ของ node นั้น — panel นี้เป็นค่าของ flow ทั้งอัน
       </div>
 
@@ -1469,7 +1609,7 @@ function FlowSettingsPanel({
         {shops.length === 0 ? (
           <div style={{ fontSize: 11.5, opacity: 0.5 }}>โหลดร้านไม่ได้ — พิมพ์ shop_id คั่นด้วย , แทน</div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 5, maxHeight: 160, overflowY: "auto", padding: "8px 10px", border: "1px solid var(--border, #333)", borderRadius: 8 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5, maxHeight: 160, overflowY: "auto", padding: "8px 10px", border: "1px solid var(--color-border)", borderRadius: 8 }}>
             {shops.map((s) => (
               <label key={s.shop_id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer" }}>
                 <input

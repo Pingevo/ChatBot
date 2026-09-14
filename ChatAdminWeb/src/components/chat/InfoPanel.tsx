@@ -182,7 +182,7 @@ export function InfoPanel({ conversation, messages, onSuggestProduct, onCreateTi
           <div className="space-y-1.5 max-h-48 overflow-y-auto">
             {messages.map((m) => (
               <div key={m.id} className="text-[11px] border-l-2 pl-2 py-0.5" style={{
-                borderColor: m.role === "user" ? "#bfd7ea" : m.role === "bot" ? "#8b1e28" : "#0b3954"
+                borderColor: m.role === "user" ? "#d4c4a8" : m.role === "bot" ? "#8b1e28" : "#0b3954"
               }}>
                 <span className="text-text-subtle">
                   {new Date(m.timestamp).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })}

@@ -17,7 +17,7 @@ export default function AnalyticsLayout({ children }: { children: React.ReactNod
       <div className="px-4 md:px-6 pt-6 pb-0 border-b border-border bg-surface sticky top-0 z-10">
         <h1 className="text-xl font-bold text-text mb-1">สถิติ</h1>
         <p className="text-sm text-text-muted mb-4">วิเคราะห์ประสิทธิภาพการตอบแชท</p>
-        <div className="flex gap-1 overflow-x-auto">
+        <div className="flex gap-0.5 lg:gap-1 flex-wrap">
           {tabs.map((t) => {
             const active = pathname === t.href || pathname.startsWith(t.href + "/");
             const Icon = t.icon;
@@ -25,13 +25,13 @@ export default function AnalyticsLayout({ children }: { children: React.ReactNod
               <Link
                 key={t.href}
                 href={t.href}
-                className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${
+                className={`flex items-center gap-1 lg:gap-1.5 px-2.5 lg:px-4 py-2 lg:py-2.5 text-xs lg:text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${
                   active
                     ? "border-brand text-brand"
                     : "border-transparent text-text-muted hover:text-text"
                 }`}
               >
-                <Icon size={15} />
+                <Icon size={13} />
                 {t.label}
               </Link>
             );

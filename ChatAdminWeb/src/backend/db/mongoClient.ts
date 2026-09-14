@@ -153,6 +153,12 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.testAssignment, { platform: 1, created_at: -1 }),
     safeCreateIndex(db, COLLECTIONS.testAssignment, { final_status: 1, created_at: -1 }),
     safeCreateIndex(db, COLLECTIONS.testAssignment, { replayed_by: 1, replayed_at: -1 }),
+    // ⚡ KPI/admin-chat-result summary queries — standalone sort keys (compound ที่ lead ด้วย
+    //   field อื่นใช้ sort ไม่ได้ เวลา query ไม่ filter field นั้น)
+    safeCreateIndex(db, COLLECTIONS.testAssignment, { updated_at: -1 }),
+    safeCreateIndex(db, COLLECTIONS.testAssignment, { replayed_at: -1 }),
+    safeCreateIndex(db, COLLECTIONS.testChatRatings, { rated_at: -1 }),
+    safeCreateIndex(db, COLLECTIONS.shadowReplies, { created_at: -1 }),
     // ⚡ Phase 3B-1 — chat_annotations (markup dot + note)
     //   ⚡ Phase 3B-6/3B-7-fix — unique index รวม generation_batch_id เพื่อให้แยก annotation ตามรอบได้
     //     แยกเป็น 2 partial index:

@@ -179,8 +179,16 @@ export default function AdminKpiPage() {
     );
   }, [summary]);
 
-  if (loading && summary.length === 0) return <Loading />;
-  if (error && summary.length === 0) return <EmptyState icon={BarChart3} title="โหลดข้อมูลไม่สำเร็จ" description={error} />;
+  if (loading && summary.length === 0) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <Loading size={32} />
+      </div>
+    );
+  }
+  if (error && summary.length === 0) {
+    return <EmptyState icon={BarChart3} title="โหลดข้อมูลไม่สำเร็จ" description={error} />;
+  }
 
   return (
     <PageShell

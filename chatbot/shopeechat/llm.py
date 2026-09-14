@@ -18,14 +18,23 @@ from google.genai import errors as genai_errors  # type: ignore
 
 
 def _strip_kb_markup(text: str) -> str:
-    """BUG-2 fix — ขจัด KB markup `[[ ... ]]`, `---`, `หมายเหตุ:` ที่หลุดจาก LLM.
+    """BUG-2 / BUG-J fix — ขจัด KB markup `[[ ... ]]`, `---`, `หมายเหตุ:` ที่หลุดจาก LLM.
 
     กรองทุก return ของ llm.answer / answer_general / answer_with_kb เพื่อกัน markup หลุดไปลูกค้า
     (QA พบ 6/29 ของ item_tag path หลุด `[[ การรับประกันและบริการ ]]` และเงื่อนไข 6 ข้อทั้งฉบับ)
+
+    BUG-J: เดิมจับแค่ full-line `[[ ... ]]` (บรรทัดที่มีแค่ markup อย่างเดียว)
+    ตอนนี้จับ inline `[[ ... ]]` ด้วย โดย:
+    - แปลง `[[ หัวข้อ ]]` → `**หัวข้อ**` (เก็บเนื้อหาสำคัญ เช่น หัวข้อรับประกัน)
+    - แต่ถ้า `[[ ... ]]` อยู่ใน `![[...]]` (markdown image alt) → ไม่แตะ (กันทำลายรูป — BUG-C)
     """
     if not text:
         return text
-    # strip `[[ ... ]]` ที่ขึ้นต้นบรรทัด (KB section markers)
+    # ⚡ BUG-J — แปลง inline `[[ ... ]]` → `**...**` แต่ไม่แตะ `![[...]]` (image alt)
+    #   ใช้ negative lookbehind กัน `!` นำหน้า (markdown image syntax)
+    #   strip whitespace ใน captured group กัน `[[ หัวข้อ ]]` → `** หัวข้อ **` (มี space รอบ)
+    text = re.sub(r"(?<!\!)\[\[\s*([^\[\]]+?)\s*\]\]", lambda m: f"**{m.group(1).strip()}**", text)
+    # strip `[[ ... ]]` ที่ขึ้นต้นบรรทัด (KB section markers) — เผื่อกรณีมีแค่ markup
     text = re.sub(r"(?m)^\s*\[\[[^\]]*\]\]\s*$", "", text)
     # strip บรรทัดที่เป็นแค่ `---` (markdown hr)
     text = re.sub(r"(?m)^\s*-{3,}\s*$", "", text)
@@ -33,7 +42,107 @@ def _strip_kb_markup(text: str) -> str:
     text = re.sub(r"(?m)^\s*หมายเหตุ[：:].*$", "", text)
     # ทำความสะอาด blank lines ที่เกิดจากการ strip
     text = re.sub(r"\n{3,}", "\n\n", text)
+    # ⚡ BUG-L fix — แทนคำลงท้ายผู้ชายด้วยผู้หญิง (persona หญิง)
+    #   เปลี่ยน "ครับ/คับ/ครับผม" → "ค่ะ" กัน LLM ลอกจาก description สินค้า
+    #   ใช้ word boundary-ish (ตามด้วย space/newline/punctuation/end) กัน match ในคำอื่น
+    text = re.sub(r"ครับผม(?=\s|$|[.,!?])", "ค่ะ", text)
+    text = re.sub(r"ครับ(?=\s|$|[.,!?])", "ค่ะ", text)
+    text = re.sub(r"คับ(?=\s|$|[.,!?])", "ค่ะ", text)
+    # ⚡ BUG-C fix — แก้ markdown image alt ที่มี `[` ข้างใน (เช่น `![[ลดเหลือ 3,599] Xiaomi Redmi 9](url)`)
+    #   ให้เหลือแค่ชื่อสินค้าสั้น `![Xiaomi Redmi 9](url)` — กัน frontend regex ตัดไม่ขาด
+    #   จับ pattern `![[...] Name](url)` → `![Name](url)` (Name คือส่วนหลัง `]` แรก)
+    text = re.sub(
+        r"!\[\[([^\]]*)\]\s*([^\]]*?)\]\((https?://[^\s)]+)\)",
+        lambda m: f"![{m.group(2).strip() or m.group(1).strip()}]({m.group(3)})",
+        text,
+    )
+    # ⚡ BUG-M fix — post-check: กัน LLM อ้างเท็จว่า "แอดมินมาแล้ว/รับเรื่องแล้ว/เคลมให้แล้ว"
+    #   LLM อาจละเมิด prompt rule (BUG-3 fix) แม้มีกฎห้าม → ต้องมี deterministic post-check
+    #   จับเฉพาา LLM output (ฟังก์ชันนี้เรียกเฉพาะที่ llm.answer/answer_general/answer_with_kb)
+    #   ไม่กระทบ deterministic warranty flow (ที่ตอบโดยตรงจาก app.py ไม่ผ่านฟังก์ชันนี้)
+    _false_admin_patterns = [
+        (r"แอดมินมาดูแลแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
+        (r"แอดมินเข้ามาดูแลแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
+        (r"แอดมินมาแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
+        (r"แอดมินได้รับเรื่องแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
+        (r"ทางเราได้ส่งเรื่องให้แอดมินแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
+        (r"ทางร้านรับเรื่องประสานงานตรวจสอบและดูแลเรื่องการส่งเคลมสินค้าให้เรียบร้อยแล้ว",
+         "เดี๋ยวส่งต่อให้แอดมินดูแลเรื่องนี้ให้นะคะ"),
+        (r"รับเรื่องประสานงานตรวจสอบและดูแลเรื่องการส่งเคลมสินค้าให้เรียบร้อยแล้ว",
+         "เดี๋ยวส่งต่อให้แอดมินดูแลเรื่องนี้ให้นะคะ"),
+        (r"เคลมสินค้าให้เรียบร้อยแล้ว", "เดี๋ยวส่งต่อให้แอดมินดูแลเรื่องนี้ให้นะคะ"),
+    ]
+    for _pattern, _replacement in _false_admin_patterns:
+        if re.search(_pattern, text):
+            text = re.sub(_pattern, _replacement, text)
+            print(f"[BUG-M] post-check: แทนคำอ้างเท็จ '{_pattern}' → '{_replacement}'", file=sys.stderr)
     return text.strip()
+
+
+# ---- BUG-P fix — language detection ----
+# ตรวจภาษาของข้อความลูกค้า เพื่อตอบในภาษาที่เหมาะสม
+#   ไทย → ตอบไทย (behavior เดิม)
+#   อังกฤษ → ตอบอังกฤษ
+#   จีน/ไต้หวัน/ญี่ปุ่น/อื่นๆ → ตอบอังกฤษ (กันบอทตอบไทยให้ลูกค้าที่ไม่ได้คุยไทย)
+
+
+def _detect_lang(text: str) -> str:
+    """ตรวจภาษาของ text → 'th', 'en', 'zh', 'ja', 'other'.
+
+    ใช้ Unicode range heuristic:
+    - Thai: U+0E00–U+0E7F
+    - Japanese kana: U+3040–U+30FF (Hiragana + Katakana)
+    - CJK: U+4E00–U+9FFF (Chinese/Japanese kanji)
+    - Latin: U+0041–U+024F (English + extended Latin)
+    """
+    if not text or not text.strip():
+        return "th"  # default ไทย ถ้าไม่มีข้อความ
+    _has_thai = False
+    _has_kana = False
+    _has_cjk = False
+    _has_latin = False
+    for ch in text:
+        cp = ord(ch)
+        if 0x0E00 <= cp <= 0x0E7F:
+            _has_thai = True
+        elif 0x3040 <= cp <= 0x30FF:
+            _has_kana = True
+        elif 0x4E00 <= cp <= 0x9FFF:
+            _has_cjk = True
+        elif 0x0041 <= cp <= 0x024F:
+            _has_latin = True
+    # Japanese: มี kana (hiragana/katakana) เสมอ
+    if _has_kana:
+        return "ja"
+    # Thai: มีตัวอักษรไทย
+    if _has_thai:
+        return "th"
+    # Chinese/Taiwanese: มี CJK แต่ไม่มี kana และไม่มี Thai
+    if _has_cjk:
+        return "zh"
+    # English: มี Latin แต่ไม่มี Thai/CJK/kana
+    if _has_latin:
+        return "en"
+    return "other"
+
+
+def _lang_instruction(lang: str) -> str:
+    """สร้าง instruction เพิ่มเติมสำหรับภาษาที่ตอบ ตามนโยบาย BUG-P.
+
+    - th → "" (ใช้ SYSTEM_INSTRUCTION เดิม ที่เป็นไทยอยู่แล้ว)
+    - en → ตอบอังกฤษ + ไม่ใช้คำลงท้ายไทย
+    - zh/ja/other → ตอบอังกฤษ + ไม่ใช้คำลงท้ายไทย
+    """
+    if lang == "th":
+        return ""
+    # en, zh, ja, other → ตอบอังกฤษ
+    return (
+        "\n\n**BUG-P fix — Language: Answer in English.**\n"
+        "- Do NOT use Thai particles (ค่ะ, นะคะ, คะ) — use English instead.\n"
+        "- Be friendly and polite in English.\n"
+        "- The Thai persona rules above apply only when answering in Thai.\n"
+        "- If the customer writes in Chinese/Japanese, answer in English (not Chinese/Japanese)."
+    )
 
 
 SYSTEM_INSTRUCTION = """คุณเป็นผู้ช่วยขายหญิงที่เป็นมิตรและสุภาพ ให้คำปรึกษาสินค้ากับกลุ่มร้านค้าออนไลน์ในเครือเครือข่ายเรา
@@ -100,6 +209,14 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
   - ถ้าไม่แน่ใจว่าแอดมินเข้ามาหรือยัง → ให้ตอบด้วยความไม่แน่ใจ
     เช่น "เดี๋ยวขอส่งต่อให้แอดมินตรวจสอบให้นะคะ" ไม่ใช่ "แอดมินมาแล้วค่ะ"
   - เหตุผล: การโกหกว่าแอดมินมาแล้วทำให้ลูกค้ารอโดยไม่มีใครติดต่อกลับจริง
+- **OBS-3 fix — ห้ามอ้างว่า "ตรวจสอบสถานะคำสั่งซื้อ/พัสดุให้แล้ว" ถ้า context ไม่มีข้อมูล order จริง**:
+  - ห้ามพูดว่า "ตรวจสอบสถานะคำสั่งซื้อให้แล้ว", "ตรวจสอบพัสดุให้แล้ว",
+    "ติดตามพัสดุให้แล้ว" หรือประโยคใกล้เคียง — เว้นแต่ context จะมีข้อมูล order จริง
+    (เช่น order_sn, order_status, tracking_number จากระบบ lookup)
+  - ถ้าเห็นเลข tracking/order ในรูป (vision_context) แต่ context ไม่มีข้อมูล order
+    → ให้บอกลูกค้าว่า "รบกวนแจ้งเลขคำสั่งซื้อเพื่อตรวจสอบสถานะให้นะคะ"
+    ไม่ใช่อ้างว่าตรวจสอบให้แล้ว
+  - เหตุผล: การอ้างว่าตรวจสอบแล้วโดยไม่ได้ query จริงทำให้ลูกค้าเชื่อข้อมูลที่ไม่ถูกต้อง
 - **ห้าม LLM ทำสิ่งต่อไปนี้เด็ดขาดใน flow เคลม:**
   1. ห้ามเก็บชื่อ-นามสกุล/เบอร์โทร/เลขคำสั่งซื้อเอง — state machine ทำให้
   2. ห้ามคำนวณวันที่ประกันหมดเอง — state machine คำนวณให้แล้ว
@@ -167,7 +284,10 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
   ห้ามเสนอขายสินค้าที่ status != NORMAL (UNLIST/SELLER_DELETE/BANNED/DELETED) — สินค้าเหล่านี้เลิกขายแล้ว
   **ห้ามเสนอขายสินค้าที่ `sold_out=true`** — สินค้าเหล่านี้หมดสต็อกแล้ว (Shopee ขึ้น SOLD OUT)
   ถ้าสินค้าที่ลูกค้าถามเป็น sold_out → บอกว่า "รุ่นนี้หมดสต็อกชั่วคราวค่ะ" แล้วแนะนำรุ่นอื่นที่มีสต็อกแทน
-  ถ้าไม่แน่ใจว่ามี stock ให้บอก "สินค้าพร้อมส่ง" เฉพาะที่เห็นใน context ว่ามี
+  ⚡ BUG-K fix — ใช้ `_available_for_sale` เป็นเกณฑ์หลักในการบอก "พร้อมส่ง/มีสต็อก":
+    `_available_for_sale=true` (status=NORMAL AND total_stock>0) → บอก "สินค้าพร้อมส่ง" ได้
+    `_available_for_sale=false` แม้ total_stock>0 (เช่น UNLIST) → ห้ามบอก "พร้อมส่ง/มีสต็อก" ให้บอก "รุ่นนี้เลิกขายแล้วค่ะ"
+  ถ้าไม่แน่ใจว่ามี stock → อย่าบอก "พร้อมส่ง" ให้บอก "สอบถามสต็อกได้ที่แอดมินค่ะ"
   ถ้าไม่มีสินค้า status=NORMAL ใน context → บอกตรงๆ ว่าไม่มี แล้วชวนทักแอดมิน
 - **สำคัญอย่างยิ่ง — context ไม่ใช่แคตตาล็อกทั้งร้าน**:
   สินค้าใน context คือผลค้นหาบางส่วนตามคำถามเท่านั้น ไม่ใช่รายการทั้งหมดที่ร้านมี
@@ -549,7 +669,7 @@ def _build_context(products: list[dict], shop_hint: str | None = None,
             "_available_for_sale",  # ⚡ Phase 3d — mark สินค้าพร้อมขาย/ไม่พร้อมขาย
         )
         # ฟิลด์จาก KB (ถ้า merge แล้ว)
-        kb_fields = ("kb_highlights", "kb_specs", "kb_box_contents", "_source", "_kb_only")
+        kb_fields = ("kb_highlights", "kb_specs", "kb_box_contents", "kb_description", "_source", "_kb_only")
         slim = []
         for p in products:
             card = {k: p[k] for k in slim_fields if k in p}
@@ -569,6 +689,10 @@ def _build_context(products: list[dict], shop_hint: str | None = None,
                     desc = p["description_excerpt"]
                     if desc and desc.strip():
                         card["description_excerpt"] = desc
+                    elif "raw_description" in p and p["raw_description"]:
+                        # ⚡ BUG-O fix — fallback ใช้ raw_description ถ้า excerpt ว่าง
+                        #   กรณี keyword ไม่ match แต่ข้อมูลจริงมีใน description
+                        card["description_excerpt"] = p["raw_description"][:3000]
                     else:
                         card["description_excerpt"] = "(ไม่มีรายละเอียดสินค้าเพิ่มเติม)"
                         # เพิ่ม context_note ชัดๆ ว่าห้ามเอา desc สินค้าอื่นมาตอบ
@@ -835,7 +959,10 @@ def answer(
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ", {"prompt": 0, "output": 0, "total": 0}
     model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
-    system_instruction = SYSTEM_INSTRUCTION + persona_extra if persona_extra else SYSTEM_INSTRUCTION
+    # BUG-P fix — ตรวจภาษาลูกค้า → ตอบในภาษาที่เหมาะสม
+    _lang = _detect_lang(_msg_for_llm)
+    _lang_inst = _lang_instruction(_lang)
+    system_instruction = (SYSTEM_INSTRUCTION + persona_extra + _lang_inst) if persona_extra else (SYSTEM_INSTRUCTION + _lang_inst)
 
     # ตรวจว่าคำถามเกี่ยวกับรับประกัน/เคลม/สเปก/รายละเอียดไหม
     # ถ้าใช่ส่ง description ให้ LLM ด้วย
@@ -854,6 +981,10 @@ def answer(
         "กันน้ำ", "waterproof", "water resistant", "atm", "ip68",
         "หน้าจอ", "screen", "display", "ความละเอียด",
         "sensor", "เซ็นเซอร์", "heart rate", "วัดหัวใจ", "spo2", "ออกซิเจน",
+        # ⚡ BUG-O fix — เพิ่ม keyword ที่ QA พบว่าไม่ match (ทำให้ description ไม่ถึง LLM)
+        "ai", "gpt", "shark gpt", "ecg", "สื่อสาร", "ฟังก์ชัน",
+        "smart assistant", "ผู้ช่วย", "chatbot", "voice", "เสียง",
+        "nfc", "gps", "wifi", "5g", "4g",
     )
     # ถ้ามี intent_result จาก Pass 1 → ใช้ needs_description จาก LLM
     # (LLM เข้าใจได้ดีกว่า keyword matching — รองรับรุ่นเก่า/แบรนด์ใหม่ที่ไม่มีใน list)
@@ -974,6 +1105,11 @@ KB_SYSTEM_INSTRUCTION = """คุณเป็นผู้ช่วยขาย�
 - อ้างอิงเฉพาะข้อมูลใน context ที่ให้มาในรอบนี้เท่านั้น ห้าม invent ข้อมูลที่ไม่มี
 - ถ้า context ไม่พอตอบ ให้บอกตรงๆ ว่าขอแนะนำให้ทักแอดมินร้าน
 - **ห้ามบอกราคาสินค้าทุกกรณี** ถ้าลูกค้าถามราคา ให้บอกว่าสอบถามราคาได้ที่แอดมิน
+- ⚡ BUG-N fix — ห้ามสัญญาเวลาในการติดต่อกลับ (เช่น "จะติดต่อกลับในวันถัดไป", "ภายใน 1 ชม.")
+  ระบบไม่สามารถรับประกันเวลาตอบของแอดมินได้ ถ้าลูกค้าถามเวลา ให้บอก "ส่งต่อให้แอดมินตรวจสอบให้เร็วที่สุดค่ะ"
+- ห้าม copy bullet/ข้อความดิบจาก context มาตอบตรงๆ ต้องสรุปเป็นภาษาตัวเอง
+- ⚡ OBS-3 fix — ห้ามอ้างว่า "ตรวจสอบสถานะคำสั่งซื้อ/พัสดุให้แล้ว" ถ้า context ไม่มีข้อมูล order จริง
+  ถ้าเห็นเลข tracking/order ในรูป แต่ context ไม่มีข้อมูล order → บอกลูกค้าว่า "รบกวนแจ้งเลขคำสั่งซื้อเพื่อตรวจสอบสถานะให้นะคะ"
 
 กฎสำคัญสำหรับการตอบจาก Knowledge Base:
 - ถ้าลูกค้าถามแค่ชื่อรุ่น (ไม่ระบุ topic) → ตอบ ชื่อสินค้า + รายละเอียดสั้นๆ + จุดเด่น
@@ -1034,7 +1170,10 @@ def answer_with_kb(
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ"
     model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
-    system_instruction = KB_SYSTEM_INSTRUCTION + persona_extra if persona_extra else KB_SYSTEM_INSTRUCTION
+    # BUG-P fix — ตรวจภาษาลูกค้า → ตอบในภาษาที่เหมาะสม
+    _lang = _detect_lang(message)
+    _lang_inst = _lang_instruction(_lang)
+    system_instruction = (KB_SYSTEM_INSTRUCTION + persona_extra + _lang_inst) if persona_extra else (KB_SYSTEM_INSTRUCTION + _lang_inst)
 
     # 🔒 H1: Limit message length + use clear delimiter to reduce prompt injection risk
     _safe_message = str(message)[:2000] if message else ""
@@ -1115,7 +1254,17 @@ def answer_general(
         "ตอบจากข้อมูลใน context ที่ให้เท่านั้น ห้ามแต่งเรื่อง "
         "ถ้า context ไม่พอตอบ ให้บอกลูกค้าว่าทักแอดมินได้เลยนะคะ "
         "ตอบเป็นข้อๆ ให้อ่านง่าย ไม่ต้องยาวเกินไป "
-        "ห้ามใช้คำสร้อยฟุ่มเฟือยที่ไม่มีข้อมูลจริง"
+        "ห้ามใช้คำสร้อยฟุ่มเฟือยที่ไม่มีข้อมูลจริง "
+        # ⚡ BUG-N fix — ห้ามสัญญาเวลาที่ระบบไม่สามารถรับประกันได้
+        #   ห้าม copy bullet ดิบจาก context ตรงๆ ต้องสรุปเป็นภาษาตัวเอง
+        "ห้ามสัญญาเวลาในการติดต่อกลับ (เช่น 'จะติดต่อกลับในวันถัดไป', 'ภายใน 1 ชม.') "
+        "เพราะระบบไม่สามารถรับประกันเวลาตอบของแอดมินได้ "
+        "ถ้าลูกค้าถามเรื่องเวลาตอบ ให้บอก 'ส่งต่อให้แอดมินตรวจสอบให้เร็วที่สุดค่ะ' "
+        "ห้าม copy bullet/ข้อความดิบจาก context มาตอบตรงๆ ต้องสรุปเป็นภาษาตัวเอง"
+        # ⚡ OBS-3 fix — ห้ามอ้างว่าตรวจสอบสถานะคำสั่งซื้อ/พัสดุให้แล้ว ถ้าไม่ได้ query จริง
+        "ห้ามอ้างว่า 'ตรวจสอบสถานะคำสั่งซื้อให้แล้ว' หรือ 'ตรวจสอบพัสดุให้แล้ว' "
+        "ถ้า context ไม่มีข้อมูล order จริง ถ้าเห็นเลข tracking ในรูป แต่ไม่มีข้อมูล order "
+        "ให้บอกลูกค้าว่า 'รบกวนแจ้งเลขคำสั่งซื้อเพื่อตรวจสอบสถานะให้นะคะ'"
     )
     if shop_hint and qtype in ("categories", "brands", "brand_info"):
         general_instruction += (
@@ -1126,6 +1275,9 @@ def answer_general(
         )
     if persona_extra:
         general_instruction += persona_extra
+    # BUG-P fix — ตรวจภาษาลูกค้า → ตอบในภาษาที่เหมาะสม
+    _lang = _detect_lang(message)
+    general_instruction += _lang_instruction(_lang)
 
     # 🔒 H1: Limit message length + use clear delimiter to reduce prompt injection risk
     _safe_message = str(message)[:2000] if message else ""

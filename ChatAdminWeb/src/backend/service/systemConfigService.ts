@@ -107,8 +107,10 @@ function getSafeDefaults(): Partial<SystemConfigDoc> {
     // ⚡ G2 — default true = จ่ายงานให้แอดมินคนเดิม (behavior เดิม)
     assignment_prefer_previous_admin: process.env.ASSIGNMENT_PREFER_PREVIOUS_ADMIN !== 'false',
     shopee_bot_url: process.env.CHATBOT_BASE_URL_SHOPEE || 'http://127.0.0.1:8010',
-    tiktok_bot_url: process.env.CHATBOT_BASE_URL_TIKTOK || 'http://127.0.0.1:8011',
-    lazada_bot_url: process.env.CHATBOT_BASE_URL_LAZADA || 'http://127.0.0.1:8012',
+    // ⚡ BUG-G fix — สลับ port ให้ตรงกับ config.ts / docker-compose.yml
+    //   tiktok → 8012, lazada → 8011 (ไม่ใช่ tiktok=8011, lazada=8012 แบบเดิม)
+    tiktok_bot_url: process.env.CHATBOT_BASE_URL_TIKTOK || 'http://127.0.0.1:8012',
+    lazada_bot_url: process.env.CHATBOT_BASE_URL_LAZADA || 'http://127.0.0.1:8011',
     // ⚡ chat_engine — default "legacy" (ปลอดภัย), เปลี่ยนได้จากหน้า config
     chat_engine: (process.env.CHAT_ENGINE as 'legacy' | 'v2' | 'v3') || 'legacy',
     // ⚡ Phase 8 — LLM context limit (default 30, range 10-50)
@@ -161,8 +163,9 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
 
     // Bot URLs — จาก DB หรือ env
     shopee_bot_url: dbConfig.shopee_bot_url ?? safeDefaults.shopee_bot_url ?? 'http://127.0.0.1:8010',
-    tiktok_bot_url: dbConfig.tiktok_bot_url ?? safeDefaults.tiktok_bot_url ?? 'http://127.0.0.1:8011',
-    lazada_bot_url: dbConfig.lazada_bot_url ?? safeDefaults.lazada_bot_url ?? 'http://127.0.0.1:8012',
+    // ⚡ BUG-G fix — สลับ port ให้ตรงกับ config.ts (tiktok=8012, lazada=8011)
+    tiktok_bot_url: dbConfig.tiktok_bot_url ?? safeDefaults.tiktok_bot_url ?? 'http://127.0.0.1:8012',
+    lazada_bot_url: dbConfig.lazada_bot_url ?? safeDefaults.lazada_bot_url ?? 'http://127.0.0.1:8011',
 
     // ⚡ chat_engine — "legacy" (default) หรือ "v2"
     chat_engine: dbConfig.chat_engine ?? safeDefaults.chat_engine ?? 'legacy',
@@ -221,8 +224,9 @@ export async function getSystemConfig(forceRefresh = false): Promise<SystemConfi
         // ⚡ G2 — default true = จ่ายงานให้แอดมินคนเดิม
         assignment_prefer_previous_admin: safeDefaults.assignment_prefer_previous_admin ?? true,
         shopee_bot_url: safeDefaults.shopee_bot_url ?? 'http://127.0.0.1:8010',
-        tiktok_bot_url: safeDefaults.tiktok_bot_url ?? 'http://127.0.0.1:8011',
-        lazada_bot_url: safeDefaults.lazada_bot_url ?? 'http://127.0.0.1:8012',
+        // ⚡ BUG-G fix — สลับ port ให้ตรงกับ config.ts (tiktok=8012, lazada=8011)
+        tiktok_bot_url: safeDefaults.tiktok_bot_url ?? 'http://127.0.0.1:8012',
+        lazada_bot_url: safeDefaults.lazada_bot_url ?? 'http://127.0.0.1:8011',
         // ⚡ chat_engine — default "legacy"
         chat_engine: safeDefaults.chat_engine ?? 'legacy',
         // ⚡ Phase 8 — LLM context limit (default 30)

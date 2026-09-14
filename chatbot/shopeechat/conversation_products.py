@@ -625,3 +625,90 @@ def get_previous_anchor(
             return None
         prev = anchors[1]
     return prev.get("card") or {"item_id": prev.get("item_id"), "name": prev.get("name")}
+
+
+# ─── BUG-D fix — Warranty claim state persistence ───────────
+# เก็บข้อมูลเคลมที่ลูกค้าให้มาข้าม turn เพื่อกันบอทขอข้อมูลซ้ำ
+# Storage: field `claim_state` ใน conversation_products document (เดียวกับ timeline)
+
+
+def load_claim_state(conversation_id: str) -> dict | None:
+    """โหลด claim state ของแชท.
+
+    Returns:
+        dict ที่มี fields: customer_name, customer_phone, customer_order_id,
+        purchase_date, has_image, has_video, started_at, updated_at
+        หรือ None ถ้าไม่มี
+    """
+    if not conversation_id:
+        return None
+    try:
+        doc = _coll().find_one({"conversation_id": conversation_id})
+        if not doc:
+            return None
+        return doc.get("claim_state")
+    except Exception:
+        return None
+
+
+def update_claim_state(
+    conversation_id: str,
+    platform: str | None = None,
+    shop: str | None = None,
+    fields: dict | None = None,
+) -> dict | None:
+    """อัปเดต claim state — merge fields ใหม่เข้าไปใน state เดิม.
+
+    Args:
+        conversation_id: ID ของแชท
+        platform: platform (shopee/lazada/tiktok)
+        shop: ชื่อร้าน
+        fields: fields ใหม่ที่จะ merge เช่น {"customer_name": "John", "has_image": True}
+
+    Returns:
+        claim_state หลังอัปเดต หรือ None ถ้า error
+    """
+    if not conversation_id:
+        return None
+    fields = fields or {}
+    try:
+        from datetime import datetime, timezone
+        _now = datetime.now(timezone.utc).isoformat()
+        # โหลด state เดิม
+        existing = load_claim_state(conversation_id) or {}
+        # merge fields ใหม่ (ไม่เขียนทับด้วย None/empty)
+        merged = dict(existing)
+        for k, v in fields.items():
+            if v is not None and v != "":
+                merged[k] = v
+        merged["updated_at"] = _now
+        if "started_at" not in merged:
+            merged["started_at"] = _now
+        # upsert ลง conversation_products
+        _coll().update_one(
+            {"conversation_id": conversation_id},
+            {
+                "$set": {
+                    "claim_state": merged,
+                    "platform": platform or "",
+                    "shop": shop or "",
+                },
+            },
+            upsert=True,
+        )
+        return merged
+    except Exception:
+        return None
+
+
+def clear_claim_state(conversation_id: str) -> None:
+    """ล้าง claim state หลัง handoff (แอดมินรับงานแล้ว)."""
+    if not conversation_id:
+        return
+    try:
+        _coll().update_one(
+            {"conversation_id": conversation_id},
+            {"$unset": {"claim_state": ""}},
+        )
+    except Exception:
+        pass

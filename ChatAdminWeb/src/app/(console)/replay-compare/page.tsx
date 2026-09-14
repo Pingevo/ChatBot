@@ -162,6 +162,9 @@ interface FileInfo {
   mtime: string;
 }
 
+// ⚡ Mobile/Tablet (<lg) — single-panel navigation: list | chat | stat
+type MobileView = "list" | "chat" | "stat";
+
 // ─── Helpers ──────────────────────────────────────────────
 
 const verdictIcon = {
@@ -223,6 +226,9 @@ export default function ReplayComparePage() {
   const [copied, setCopied] = useState(false);
   const [limitInput, setLimitInput] = useState("50");
 
+  // ⚡ mobile/tablet (<lg) — แสดงทีละ panel: list → chat → stat (เดสก์ท็อป lg+ แสดง 3 คอลัมน์)
+  const [mobileView, setMobileView] = useState<MobileView>("list");
+
   // ⚡ 3 tabs: inbox (เลือกแชทใหม่) | history (แชทที่เคย replay แล้ว) | files (ไฟล์ batch)
   const [mode, setModeState] = useState<"inbox" | "history" | "files">("inbox");
   // ⚡ wrapper: เคลียร์ center panel ทุกครั้งที่สลับ tab
@@ -234,6 +240,7 @@ export default function ReplayComparePage() {
     setSelectedInboxId(null);
     setSelectedConvIdx(0);
     setSelectedQIdx(0);
+    setMobileView("list"); // ⚡ mobile — สลับ tab แล้วกลับไปที่ list
   }, []);
   // ⚡ G-share — ใช้ shared conversation store (เหมือน ticket inbox / shadow inbox)
   //   pagination: 50 newest + load more on scroll → ไม่ค้างเหมือน limit:10000 เดิม
@@ -546,6 +553,28 @@ export default function ReplayComparePage() {
         && j.q_i === selectedQa?.i
   );
 
+  // ⚡ mobile/tablet header — ชื่อ + platform ของแชทที่กำลังดู (preview หรือผล replay)
+  const mobileHeaderConv: { name: string; platform?: Platform } | null = previewConv
+    ? {
+        name: previewConv.customer_name || previewConv.shop_name || previewConv.id?.slice(-12) || "แชท",
+        platform: previewConv.platform,
+      }
+    : selectedConv
+      ? (() => {
+          // ⚡ replay conv ไม่มี platform — หาจาก inbox/history ที่ conv_id ตรงกัน
+          const matched = (sharedInboxConvs as Conversation[]).find(
+            c => c.id === selectedConv.conv_id || c.id?.slice(0, 16) === selectedConv.conv_id
+          );
+          const hist = historyItems.find(
+            h => h.conv_id === selectedConv.conv_id || h.conv_id?.slice(0, 16) === selectedConv.conv_id
+          );
+          return {
+            name: matched?.customer_name || hist?.customer_name || selectedConv.shop_name || selectedConv.conv_id?.slice(-12) || "แชท",
+            platform: matched?.platform,
+          };
+        })()
+      : null;
+
   // ⚡ กอปทั้งแชท — ทุกข้อความ + รีวิว LLM judge
   const copyEntireChat = useCallback(async () => {
     if (!selectedConv || !analysis) return;
@@ -605,8 +634,8 @@ export default function ReplayComparePage() {
       {/* Header — 2 rows: title+tabs / status+actions */}
       <div className="border-b border-border bg-surface">
         {/* Row 1: title + tabs */}
-        <div className="flex items-center justify-between px-4 pt-3">
-          <div className="flex items-center gap-3">
+        <div className="flex items-center justify-between px-4 pt-3 overflow-x-auto">
+          <div className="flex items-center gap-3 shrink-0">
             <Scale className="w-5 h-5 text-info" />
             <div className="flex items-center gap-1.5">
               <h1 className="text-lg font-semibold">เปรียบเทียบรีเพลย์</h1>
@@ -651,7 +680,7 @@ export default function ReplayComparePage() {
           </div>
         </div>
         {/* Row 2: status pills + actions */}
-        <div className="flex items-center justify-between px-4 pb-2 pt-1.5">
+        <div className="flex items-center justify-between flex-wrap gap-2 px-4 pb-2 pt-1.5">
           <div className="flex items-center gap-2 flex-wrap">
             {mode === "files" && (
               <Badge tone="neutral">{convs.length} แชท</Badge>
@@ -735,7 +764,7 @@ export default function ReplayComparePage() {
           <select
             value={selectedFile}
             onChange={e => { setSelectedFile(e.target.value); loadData(e.target.value); }}
-            className="px-2 py-1 border rounded text-xs"
+            className="px-2 py-1 border rounded text-xs min-w-0 flex-1 lg:flex-none"
           >
             <option value="">ล่าสุด (default)</option>
             {files.map(f => (
@@ -751,7 +780,7 @@ export default function ReplayComparePage() {
       <div className="flex flex-1 overflow-hidden">
         {/* Left: Conversation list — inbox หรือ files แล้วแต่ mode */}
         <div
-          className="w-72 border-r overflow-y-auto bg-white flex flex-col"
+          className={`${mobileView === "list" ? "flex" : "hidden"} lg:flex w-full lg:w-72 shrink-0 border-r overflow-y-auto bg-white flex-col`}
           onScroll={mode === "inbox" ? (e) => {
             const el = e.currentTarget;
             if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200) {
@@ -819,7 +848,7 @@ export default function ReplayComparePage() {
                   return (
                     <button
                       key={c.id}
-                      onClick={() => loadPreview(c)}
+                      onClick={() => { loadPreview(c); setMobileView("chat"); }}
                       disabled={replayConvRunning}
                       className={`w-full text-left px-3 py-2 hover:bg-surface-2 transition disabled:opacity-50 ${
                         isSelected ? "bg-info/5 border-l-2 border-info" : ""
@@ -901,6 +930,7 @@ export default function ReplayComparePage() {
                         // ⚡ โหลดไฟล์ replay ของแชทนี้ขึ้นมาแสดง
                         setSelectedInboxId(h.conv_id);
                         loadData(h.file_path);
+                        setMobileView("chat");
                       }}
                       className={`w-full text-left px-3 py-2 hover:bg-surface-2 transition ${
                         isSelected ? "bg-info/5 border-l-2 border-info" : ""
@@ -950,7 +980,7 @@ export default function ReplayComparePage() {
                   return (
                     <button
                       key={c.conv_id}
-                      onClick={() => { setSelectedConvIdx(idx); setSelectedQIdx(0); }}
+                      onClick={() => { setSelectedConvIdx(idx); setSelectedQIdx(0); setMobileView("chat"); }}
                       className={`w-full text-left px-3 py-2 hover:bg-surface-2 transition ${
                         idx === selectedConvIdx ? "bg-info/5 border-l-2 border-info" : ""
                       }`}
@@ -980,11 +1010,48 @@ export default function ReplayComparePage() {
         </div>
 
         {/* Center: Chat comparison */}
-        <div className="flex-1 overflow-y-auto bg-surface-2">
+        <div className={`${mobileView === "chat" ? "block" : "hidden"} lg:block flex-1 min-w-0 overflow-y-auto bg-surface-2`}>
+          {/* ⚡ Mobile/Tablet (<lg) header — back "<" + ชื่อแชท/platform + ปุ่มสถิติ */}
+          <div className="lg:hidden sticky top-0 z-10 flex items-center justify-between gap-1 px-2 py-2 bg-surface/95 backdrop-blur border-b border-border">
+            <button
+              onClick={() => setMobileView("list")}
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-text-muted hover:text-text transition-colors shrink-0"
+              title="กลับ"
+              aria-label="กลับ"
+            >
+              <ChevronLeft size={18} />
+            </button>
+            <div className="flex items-center gap-1.5 min-w-0 flex-1 justify-center">
+              {mobileHeaderConv ? (
+                <>
+                  <span className="w-5 h-5 rounded-md bg-brand/10 flex items-center justify-center shrink-0">
+                    {mobileHeaderConv.platform ? (
+                      <span className="text-[10px] font-bold text-brand">
+                        {mobileHeaderConv.platform[0]?.toUpperCase()}
+                      </span>
+                    ) : (
+                      <Store className="w-3 h-3 text-brand" />
+                    )}
+                  </span>
+                  <span className="text-xs font-semibold text-text truncate">{mobileHeaderConv.name}</span>
+                </>
+              ) : (
+                <span className="text-xs text-text-muted">เปรียบเทียบรีเพลย์</span>
+              )}
+            </div>
+            <button
+              onClick={() => setMobileView("stat")}
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-text-muted hover:text-text transition-colors shrink-0"
+              title="สถิติ"
+              aria-label="สถิติ"
+            >
+              <BarChart3 size={16} />
+            </button>
+          </div>
           {/* ⚡ Preview panel — ก่อน replay แสดงข้อความต้นฉบับให้ดูก่อน */}
           {previewConv && !selectedConv && (
             <div className="p-4 space-y-3">
-              <div className="flex items-center justify-between bg-white rounded-lg border p-3">
+              <div className="flex items-center justify-between flex-wrap gap-2 bg-white rounded-lg border p-3">
                 <div>
                   <h2 className="font-semibold text-sm">
                     {previewConv.shop_name} · {previewConv.id?.slice(-12)}
@@ -1059,7 +1126,7 @@ export default function ReplayComparePage() {
           {selectedConv && (
             <div className="p-4 space-y-4">
               {/* Conv header */}
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between flex-wrap gap-2">
                 <div>
                   <h2 className="font-semibold text-sm">
                     {selectedConv.shop_name} · {selectedConv.conv_id?.slice(0, 20)}
@@ -1242,6 +1309,8 @@ export default function ReplayComparePage() {
                           <button
                             onClick={() => copyText(selectedQa.zaapi_text)}
                             className="ml-auto text-text-subtle hover:text-text-muted"
+                            title="คัดลอกคำตอบ Zaapi/Admin"
+                            aria-label="คัดลอกคำตอบ Zaapi/Admin"
                           >
                             {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                           </button>
@@ -1276,6 +1345,8 @@ export default function ReplayComparePage() {
                           <button
                             onClick={() => copyText(selectedQa.bot_answer)}
                             className="ml-auto text-text-subtle hover:text-text-muted"
+                            title="คัดลอกคำตอบ Bot เรา"
+                            aria-label="คัดลอกคำตอบ Bot เรา"
                           >
                             {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                           </button>
@@ -1399,7 +1470,20 @@ export default function ReplayComparePage() {
         </div>
 
         {/* Right: Analysis summary */}
-        <div className="w-80 border-l overflow-y-auto bg-white p-4 space-y-4">
+        <div className={`${mobileView === "stat" ? "flex" : "hidden"} lg:flex flex-col w-full lg:w-80 shrink-0 border-l bg-white`}>
+          {/* ⚡ Mobile/Tablet (<lg) header — back ไปที่หน้าเปรียบเทียบ */}
+          <div className="lg:hidden flex items-center gap-1 px-2 py-2.5 border-b border-border shrink-0">
+            <button
+              onClick={() => setMobileView("chat")}
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-text-muted hover:text-text transition-colors"
+              title="กลับ"
+              aria-label="กลับ"
+            >
+              <ChevronLeft size={18} />
+            </button>
+            <span className="text-xs font-semibold text-text">สถิติและวิเคราะห์</span>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {!analysis && <EmptyState icon={BarChart3} title="ยังไม่มี analysis" />}
           {analysis && (
             <>
@@ -1566,6 +1650,7 @@ export default function ReplayComparePage() {
               )}
             </>
           )}
+          </div>
         </div>
       </div>
     </div>

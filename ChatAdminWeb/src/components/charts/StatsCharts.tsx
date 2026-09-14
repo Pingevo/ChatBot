@@ -17,8 +17,8 @@ import { DebouncedResponsiveContainer as ResponsiveContainer } from "./Debounced
 
 const BRAND = "#8b1e28";
 const NAVY = "#0b2340";
-const GREY_BLUE = "#7c93ad";
-const PALETTE = [BRAND, NAVY, GREY_BLUE, "#c8912b", "#4a7a5a", "#5b6b8c"];
+const GREY_BLUE = "#5a6b80";
+const PALETTE = ["#8b1e28", "#b3253a", "#16a34a", "#d97706", "#7c3aed", "#0ea5e9"];
 
 export function TrendLineChart({
   data,
@@ -40,7 +40,7 @@ export function TrendLineChart({
         <YAxis tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
         <Tooltip
           formatter={(value) => [`${value ?? 0}${unit}`, ""]}
-          contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }}
+          contentStyle={{ borderRadius: 10, border: "1px solid #e9edf2", fontSize: 12, boxShadow: "0 4px 12px -2px rgba(0,0,0,0.06)", padding: "6px 10px" }}
         />
         <Line
           type="monotone"
@@ -78,7 +78,7 @@ export function WeeklyBarChart({
         <YAxis tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
         <Tooltip
           formatter={(value) => [`${value ?? 0}${unit}`, ""]}
-          contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }}
+          contentStyle={{ borderRadius: 10, border: "1px solid #e9edf2", fontSize: 12, boxShadow: "0 4px 12px -2px rgba(0,0,0,0.06)", padding: "6px 10px" }}
         />
         <Bar dataKey={dataKey} fill={color} radius={[6, 6, 0, 0]} />
       </BarChart>
@@ -111,7 +111,7 @@ export function ComboBarLineChart({
         <YAxis tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
         <Tooltip
           formatter={(value) => [`${value ?? 0}${unit}`, ""]}
-          contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }}
+          contentStyle={{ borderRadius: 10, border: "1px solid #e9edf2", fontSize: 12, boxShadow: "0 4px 12px -2px rgba(0,0,0,0.06)", padding: "6px 10px" }}
         />
         <Bar
           dataKey={barKey}
@@ -164,7 +164,7 @@ export function SmartChart({
           <YAxis tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
           <Tooltip
             formatter={(value) => [`${value ?? 0}${unit}`, ""]}
-            contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }}
+            contentStyle={{ borderRadius: 10, border: "1px solid #e9edf2", fontSize: 12, boxShadow: "0 4px 12px -2px rgba(0,0,0,0.06)", padding: "6px 10px" }}
           />
           <Bar
             dataKey={dataKey}
@@ -186,7 +186,7 @@ export function SmartChart({
         <YAxis tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
         <Tooltip
           formatter={(value) => [`${value ?? 0}${unit}`, ""]}
-          contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }}
+          contentStyle={{ borderRadius: 10, border: "1px solid #e9edf2", fontSize: 12, boxShadow: "0 4px 12px -2px rgba(0,0,0,0.06)", padding: "6px 10px" }}
         />
         <Line
           type="monotone"
@@ -226,7 +226,7 @@ export function TopicDonutChart({
               <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
             ))}
           </Pie>
-          <Tooltip contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }} />
+          <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid #e9edf2", fontSize: 12, boxShadow: "0 4px 12px -2px rgba(0,0,0,0.06)", padding: "6px 10px" }} />
         </PieChart>
       </ResponsiveContainer>
       <div className="space-y-1.5 flex-1 min-w-0">
