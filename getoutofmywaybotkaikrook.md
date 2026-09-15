@@ -7854,3 +7854,23 @@ Phase 8 ใช้ `_LLM_CONTEXT_LIMIT = 30` เป็น module constant แบ�
 5. Responsive hidden columns อาจ conflict กับ user toggle บน mobile
 6. Technical identifiers (product_spec, metadata, meta) ยังปรากฏใน UI copy
 7. ไม่มี undo/soft-delete สำหรับ destructive actions
+
+### แก้ — /admin-config + /config UI/UX (2026-09-14)
+
+- **ลบ LLM Context Limit card ซ้ำใน /config** — ตั้งค่าเดียวกันมี 2 ที่ → เก็บ slider version ใน /admin-config เป็น single source (pattern เดียวกับ Workflow Engine ที่ย้ายไป); ลบ handler/state orphan ด้วย (interface field คงไว้ — API ยังส่ง)
+- **/config 2-col → masonry:** `grid lg:grid-cols-2` + 2 stack divs → `columns-1 lg:columns-2` + `break-inside-avoid mb-4` บน Card ทุกใบ — card สูงไม่เท่ากันกระจายสมดุลอัตโนมัติ ไม่ฝั่งสั้นฝั่งยาวอีก
+- **/admin-config:** `max-w-2xl` คอลัมน์เดียว → `max-w-6xl` + `columns-1 lg:columns-2` masonry บน lg+ (laptop/PC ได้ 2 คอลัมน์ มือถือยัง stack); ConfigSection Card ใส่ break-inside-avoid+mb-4; sticky save bar + meta อยู่นอก columns เต็มความกว้าง
+- **verify:** tsc 0 errors, build ✓
+
+### แก้ — /config card ฝั่งขวายาวเกิน + /admin-config ไม่เต็มหน้า (2026-09-14)
+
+- **/config:** card "ร้านที่เปิดใช้งาน" ร้านเยอะ → คอลัมน์ขวายาวสุดล่าง — ใส่ `max-h-[520px] flex flex-col` บน card + `overflow-y-auto min-h-0 flex-1` บน shop list (header/description pin อยู่บน scroll เฉพาะรายการ)
+- **/admin-config:** ตัด `max-w-6xl` → full width + masonry `lg:columns-2 2xl:columns-3` — เต็มจอ PC/monitor ใหญ่; แก้ sticky save bar `-mx-4 lg:-mx-6` ให้ตรง padding
+- **verify:** tsc 0 errors, build ✓
+
+### แก้ — LLM Context Limit slider ดูเหมือนปุ่มขาว (2026-09-14)
+
+- **ปัญหา:** section ใช้ MinimalSlider ล่อนเดี่ยว ไม่มี wrapper/label/min-max → จุดขาวดูเหมือนปุ่ม + กดแทร็กแล้วค่ากระโดด (30→10) ทำให้งง; มีตัวเลขซ้ำ 2 จุด
+- **แก้:** จัด pattern เดียวกับ section อื่น — `bg-surface-2` wrapper + icon + title "ส่งสินค้าเข้า LLM สูงสุด X ชิ้น" + description + min/max labels "10 (ประหยัด) / 50 (ครอบคลุม)" — ลบตัวเลข font-mono ซ้ำ
+- **MinimalSlider polish:** track 3px→4px (bg-surface-3), dot 14→16px + border-brand — เห็นชัดว่าลากได้ กระทบ slider ทุกตัวในหน้าให้ดีขึ้นพร้อมกัน
+- **verify:** tsc 0 errors, build ✓

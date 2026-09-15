@@ -195,6 +195,7 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [batchAnnotation, setBatchAnnotation] = useState<Annotation | null>(null);
   const [showBatchDd, setShowBatchDd] = useState(false);
+  const [mobileCompareTab, setMobileCompareTab] = useState<"zaapi" | "bot">("bot");
 
   // ⚡ Copy chat — แยกฝั่ง zaapi หรือ bot
   // side="zaapi" → ลูกค้า + Zaapi reply
@@ -747,11 +748,33 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
         </div>
       </div>
 
-      {/* Side-by-side comparison — 2 ส่วน แต่ละคอลัมน์ scroll เอง */}
-      {/* ⚡ ใช้ basis-0 + flex-1 เพื่อให้ 2 คอลัมน์มีขนาดเท่ากัน ไม่ขยายตามเนื้อหา */}
-      <div ref={scrollRef} className="flex-1 flex min-h-0 overflow-hidden">
+      {/* Side-by-side comparison — 2 ส่วน แต่ละคอลัมน์ scroll เอง
+          Desktop (xl+): side-by-side
+          Mobile/Tablet (<xl): tab switch + single column */}
+      {/* Mobile/Tablet tab switcher */}
+      <div className="lg:hidden flex shrink-0 border-b border-border bg-surface">
+        <button
+          onClick={() => setMobileCompareTab("zaapi")}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors ${
+            mobileCompareTab === "zaapi" ? "text-text border-b-2 border-brand" : "text-text-muted"
+          }`}
+        >
+          <Bot size={12} /> Zaapi / sellcenter
+        </button>
+        <button
+          onClick={() => setMobileCompareTab("bot")}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors ${
+            mobileCompareTab === "bot" ? "text-text border-b-2 border-brand" : "text-text-muted"
+          }`}
+        >
+          <FlaskConical size={12} /> Bot ของเรา
+        </button>
+      </div>
+      {/* Container — relative เพื่อให้ tab สลับกันด้วย absolute positioning
+          ทั้งสองฝั่ง render ครบเสมอ ไม่ใช้ display:none */}
+      <div ref={scrollRef} className="flex-1 flex min-h-0 overflow-hidden relative">
         {/* ── ฝั่งซ้าย: Zaapi / sellcenter (จากประวัติจริง) ── */}
-        <div className="flex-1 basis-0 flex flex-col border-r border-border min-w-0 overflow-hidden">
+        <div className={`flex-1 basis-0 flex flex-col border-r border-border min-w-0 overflow-hidden lg:flex ${mobileCompareTab === "zaapi" ? "flex absolute inset-0 lg:relative" : "hidden lg:flex"}`}>
           <div className="px-3 py-2 border-b border-border bg-surface-2 shrink-0">
             <div className="flex items-center justify-between gap-1.5">
               <div className="flex items-center gap-1.5">
@@ -843,7 +866,7 @@ export function ShadowConversationPanel({ conversation, messages, loadingMessage
         </div>
 
         {/* ── ฝั่งขวา: Bot ของเรา ── */}
-        <div className="flex-1 basis-0 flex flex-col min-w-0 overflow-hidden">
+        <div className={`flex-1 basis-0 flex flex-col min-w-0 overflow-hidden lg:flex ${mobileCompareTab === "bot" ? "flex absolute inset-0 lg:relative" : "hidden lg:flex"}`}>
           <div className="px-3 py-2 border-b border-border bg-brand/5 shrink-0">
             <div className="flex items-center justify-between gap-1.5">
               <div className="flex items-center gap-1.5">

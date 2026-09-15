@@ -1,51 +1,101 @@
 @import "tailwindcss";
 
 @theme {
-  /* Brand palette — ITSRC: maroon (primary), navy (sidebar/headings),
-     grey-blue (secondary), white/grey (surfaces). */
-  --color-deep-space: #0b2340ff;
-  --color-deep-space-soft: #0b2340e6;
-  --color-brand: #8b1e28ff;
-  --color-brand-soft: #8b1e2820;
-  --color-brand-dark: #6b161eff;
-  --color-pale-sky: #bfd7eaff;
-  --color-pale-sky-soft: #bfd7ea40;
-  --color-vibrant-coral: #ff5a5fff;
-  --color-vibrant-coral-soft: #ff5a5f26;
-  --color-flag-red: #c81d25ff;
+  /* ===================================================================
+     ITSRC Panel — Clean White + Navy/Maroon
+     Base: Pure white (clean, bright)
+     Primary accent: Maroon (brand)
+     Secondary accent: Navy (deep space)
+     =================================================================== */
 
-  /* Semantic tokens */
-  --color-bg: #f5f6f8;
-  --color-base: #f5f6f8;
+  /* Accent — Maroon */
+  --color-accent: #8b1e28;
+  --color-accent-dark: #6b1620;
+  --color-accent-light: #b3253a;
+  --color-accent-soft: #fce8ea;
+  --color-accent-softer: #fdf4f5;
+
+  /* Navy — secondary */
+  --color-navy: #0b2340;
+  --color-navy-soft: #e8edf3;
+  --color-navy-light: #1a3a5c;
+
+  /* Sidebar — navy (dark, premium) */
+  --color-sidebar: #0b2340;
+  --color-sidebar-2: #14305a;
+  --color-sidebar-text: #ffffff;
+  --color-sidebar-text-muted: #8ba3c4;
+  --color-sidebar-active: #1a3a5c;
+
+  /* Neutral ramp — clean white/gray */
+  --color-bg: #ffffff;
+  --color-base: #ffffff;
   --color-surface: #ffffff;
-  --color-surface-1: #f7f8fa;
-  --color-surface-2: #f1f3f6;
-  --color-surface-3: #e8ebef;
-  --color-border: #e3e6eb;
-  --color-text: #101828;
-  --color-text-muted: #64748b;
-  --color-text-subtle: #667085;
+  --color-surface-1: #fafbfc;
+  --color-surface-2: #f4f6f8;
+  --color-surface-3: #e9edf2;
+  --color-surface-4: #d6dde5;
 
-  /* Semantic / status tokens */
-  --color-success: #10b981;
-  --color-success-soft: #34d399;
-  --color-success-dark: #059669;
-  --color-error: #ef4444;
-  --color-error-soft: #f87171;
-  --color-info: #6366f1;
-  --color-info-soft: #60a5fa;
-  --color-info-dark: #4f46e5;
-  --color-warning: #fbbf24;
-  --color-warning-soft: #fef3c7;
-  --color-warning-dark: #d97706;
-  --color-purple: #a78bfa;
-  --color-orange: #f97316;
-  --color-muted: #6b7280;
+  /* Borders — clean gray */
+  --color-border: #e9edf2;
+  --color-border-strong: #d6dde5;
+  --color-border-subtle: #f4f6f8;
+
+  /* Text — clean dark */
+  --color-text: #0b2340;
+  --color-text-muted: #5a6b80;
+  /* ⚡ #8b9bb0 เดิม = 2.8:1 บนขาว (fail WCAG AA) → #64748b = 4.76:1 */
+  --color-text-subtle: #64748b;
+
+  /* Semantic / status */
+  --color-success: #16a34a;
+  --color-success-soft: #f0fdf4;
+  --color-success-dark: #15803d;
+  --color-error: #dc2626;
+  --color-error-soft: #fef2f2;
+  --color-info: #0b2340;
+  --color-info-soft: #e8edf3;
+  --color-info-dark: #08203a;
+  --color-warning: #d97706;
+  --color-warning-soft: #fffbeb;
+  --color-warning-dark: #b45309;
+  --color-purple: #7c3aed;
+  --color-orange: #ea580c;
+  --color-muted: #5a6b80;
+
+  /* Legacy brand aliases */
+  --color-brand: #8b1e28;
+  --color-brand-soft: #fce8ea;
+  --color-brand-dark: #6b1620;
+  --color-brand-light: #b3253a;
+  --color-deep-space: #0b2340;
+  --color-deep-space-soft: #0b2340e6;
+  --color-deep-space-2: #14305a;
+  --color-pale-sky: #8ba3c4;
+  --color-pale-sky-soft: #8ba3c440;
+  --color-vibrant-coral: #dc2626;
+  --color-vibrant-coral-soft: #fef2f2;
+  --color-flag-red: #dc2626;
 
   /* Platform brand colors */
   --color-platform-shopee: #ee4d2d;
   --color-platform-tiktok: #fe2c55;
   --color-platform-lazada: #0f146d;
+
+  /* Shadow scale — clean, crisp */
+  --shadow-xs: 0 1px 2px 0 rgba(11, 35, 64, 0.04);
+  --shadow-sm: 0 1px 3px 0 rgba(11, 35, 64, 0.05), 0 1px 2px -1px rgba(11, 35, 64, 0.03);
+  --shadow-md: 0 4px 8px -2px rgba(11, 35, 64, 0.07), 0 2px 4px -2px rgba(11, 35, 64, 0.04);
+  --shadow-lg: 0 12px 20px -4px rgba(11, 35, 64, 0.09), 0 4px 8px -4px rgba(11, 35, 64, 0.05);
+  --shadow-xl: 0 24px 32px -6px rgba(11, 35, 64, 0.12), 0 8px 16px -6px rgba(11, 35, 64, 0.06);
+  --shadow-accent: 0 4px 14px -2px rgba(139, 30, 40, 0.30);
+
+  /* Radius scale */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
 
   /* Font */
   --font-sans: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
@@ -53,8 +103,8 @@
 }
 
 :root {
-  --background: #f5f6f8;
-  --foreground: #101828;
+  --background: #ffffff;
+  --foreground: #0b2340;
 }
 
 * {
@@ -62,32 +112,34 @@
 }
 
 html, body {
-  background: var(--color-bg);
+  background: #ffffff;
   color: var(--color-text);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  /* ⚡ กัน overscroll/bounce — กันเห็นขอบนอกแอปเวลาเลื่อนสุดขอบ
-     ใช้ overscroll-behavior: none ที่ global + overflow hidden ที่ AppShell (h-screen overflow-hidden อยู่แล้ว)
-     หน้า login ใช้ min-h-screen จึงยัง scroll ได้ถ้าจอเล็ก */
   overscroll-behavior: none;
+  letter-spacing: -0.011em;
+  text-rendering: optimizeLegibility;
 }
 
-/* ⚡ กัน body scroll — ปล่อยให้แค่ inner container scroll (AppShell มี h-screen overflow-hidden อยู่แล้ว)
-   หน้า login ใช้ min-h-screen + overflow-y-auto จึงยัง scroll ได้ */
 body {
   overflow: hidden;
 }
-/* หน้าที่ไม่มี AppShell (login) — ยอมให้ scroll ได้ */
 body:has(.auth-gradient-bg) {
   overflow-y: auto;
 }
 
-/* Scrollbar — minimal */
-::-webkit-scrollbar { width: 8px; height: 8px; }
+/* Text selection — maroon tint */
+::selection {
+  background: rgba(139, 30, 40, 0.12);
+  color: #0b2340;
+}
+
+/* Scrollbar — clean */
+::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+::-webkit-scrollbar-thumb { background: #d6dde5; border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: #8b9bb0; }
 
 /* Animation keyframes */
 @keyframes fadeIn {
@@ -100,17 +152,53 @@ body:has(.auth-gradient-bg) {
 }
 @keyframes pulse-soft {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
+  50% { opacity: 0.4; }
 }
-.animate-fade-in { animation: fadeIn 0.2s ease-out; }
-.animate-slide-in { animation: slideIn 0.2s ease-out; }
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+.animate-fade-in { animation: fadeIn 0.18s ease-out; }
+.animate-slide-in { animation: slideIn 0.18s ease-out; }
 .animate-pulse-soft { animation: pulse-soft 2s ease-in-out infinite; }
+.animate-slide-up { animation: slideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1); }
 
-/* Glass effect for topbar */
+/* Toast pop — scale-in สำหรับ mobile/tablet (toast ขึ้นกลางจอ) */
+@keyframes toastPop {
+  from { opacity: 0; transform: scale(0.92) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+.animate-toast-pop { animation: toastPop 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
+
+/* Reduced motion — เก็บ feedback ด้วย fade (opacity) ตัด movement/loop ออก
+   ไม่ kill ทุกอย่างเป็น 0ms เพราะ user ยังต้องเห็นว่า state เปลี่ยน */
+@keyframes fadeOnly {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in,
+  .animate-slide-in,
+  .animate-slide-up,
+  .animate-toast-pop {
+    animation: fadeOnly 0.15s ease-out;
+  }
+  .animate-pulse-soft { animation: none; }
+  *, *::before, *::after {
+    transition-duration: 60ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Safe area padding for iOS notch / home indicator */
+.safe-area-pb { padding-bottom: env(safe-area-inset-bottom, 0px); }
+.safe-area-pt { padding-top: env(safe-area-inset-top, 0px); }
+
+/* Glass effect */
 .glass {
-  background: rgba(255, 255, 255, 0.85);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
 }
 
 /* Platform badge gradients */
@@ -118,25 +206,26 @@ body:has(.auth-gradient-bg) {
 .platform-tiktok { background: linear-gradient(135deg, #000000, #25f4ee); }
 .platform-lazada { background: linear-gradient(135deg, #0f146d, #f57224); }
 
-/* Auth pages background — navy to maroon diagonal gradient (ITSRC brand) */
+/* Auth pages background — clean white with subtle navy/maroon tint */
 .auth-gradient-bg {
-  background: linear-gradient(135deg, #0b2340 0%, #3a1620 55%, #6b161e 100%);
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(11, 35, 64, 0.05), transparent),
+    radial-gradient(ellipse 60% 50% at 50% 120%, rgba(139, 30, 40, 0.04), transparent),
+    #ffffff;
 }
 
-/* Sidebar — thin scrollbar (shadcn style) */
+/* Sidebar scrollbar — dark theme */
 .sidebar-scroll::-webkit-scrollbar { width: 4px; }
 .sidebar-scroll::-webkit-scrollbar-track { background: transparent; }
-.sidebar-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
-.sidebar-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+.sidebar-scroll::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.10); border-radius: 4px; }
+.sidebar-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.18); }
 
-/* react-day-picker — dark theme tweaks for calendar in dropdown */
+/* react-day-picker */
 .rdp { --rdp-accent-color: #8b1e28; }
 .rdp-vhidden { display: none; }
-
-/* ⚡ Range highlight — ช่วงวันที่ที่เลือก */
 .rdp .rdp-day_range_middle {
-  background-color: rgba(139, 30, 40, 0.25);
-  color: #fff;
+  background-color: rgba(139, 30, 40, 0.15);
+  color: #0b2340;
   border-radius: 0;
 }
 .rdp .rdp-day_range_start {
@@ -149,11 +238,13 @@ body:has(.auth-gradient-bg) {
   color: #fff;
   border-radius: 0 50% 50% 0;
 }
-.rdp .rdp-day_range_start.rdp-day_range_end {
-  border-radius: 50%;
-}
+.rdp .rdp-day_range_start.rdp-day_range_end { border-radius: 50%; }
 .rdp .rdp-day_selected {
   background-color: #8b1e28;
   color: #fff;
 }
 
+/* Card shadows */
+.shadow-card { box-shadow: var(--shadow-sm); }
+.shadow-card-md { box-shadow: var(--shadow-md); }
+.shadow-card-lg { box-shadow: var(--shadow-lg); }

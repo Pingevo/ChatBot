@@ -364,7 +364,7 @@ export default function TicketsPage() {
   return (
     <div className="h-full flex">
       {/* ── Panel ซ้าย: Conversation list (รวม title + filter + accept ใน ChatList) ── */}
-      <div className={`${mobileView === "list" ? "flex" : "hidden"} md:flex h-full flex-col w-full md:w-80 shrink-0 border-r border-border`}>
+      <div className={`${mobileView === "list" ? "flex" : "hidden"} lg:flex h-full flex-col w-full lg:w-80 shrink-0 border-r border-border`}>
         <ChatList
           conversations={conversations}
           selectedId={selectedId}
@@ -385,11 +385,11 @@ export default function TicketsPage() {
       </div>
 
       {/* ── Panel กลาง: Ticket fields + Chat ── */}
-      <div className={`${mobileView === "chat" ? "flex" : "hidden"} md:flex flex-1 h-full min-w-0 relative`}>
+      <div className={`${mobileView === "chat" ? "flex" : "hidden"} lg:flex flex-1 h-full min-w-0 relative`}>
         {/* Mobile back button */}
         <button
           onClick={handleBack}
-          className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+          className="lg:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
           title="กลับ"
           aria-label="กลับ"
         >
@@ -399,7 +399,7 @@ export default function TicketsPage() {
         {selected && (
           <button
             onClick={() => setMobileView("info")}
-            className="md:hidden absolute top-3 right-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+            className="lg:hidden absolute top-3 right-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
             title="รายละเอียด"
             aria-label="รายละเอียด"
           >
@@ -425,12 +425,12 @@ export default function TicketsPage() {
         <>
           {/* Panel เมื่อ expanded */}
           <div
-            className={`${mobileView === "info" ? "flex" : "hidden"} ${rightCollapsed ? "md:hidden" : "md:flex"} h-full transition-[width] duration-200 ease-in-out`}
+            className={`${mobileView === "info" ? "flex" : "hidden"} ${rightCollapsed ? "lg:hidden" : "lg:flex"} h-full w-full lg:w-auto transition-[width] duration-200 ease-in-out`}
           >
-            <div className="relative h-full flex flex-col w-[340px] border-l border-border bg-surface">
+            <div className="relative h-full flex flex-col w-full lg:w-[340px] border-l border-border bg-surface">
               <button
                 onClick={() => setMobileView("chat")}
-                className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+                className="lg:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
                 title="กลับ"
                 aria-label="กลับ"
               >
@@ -538,7 +538,7 @@ export default function TicketsPage() {
           {rightCollapsed && (
             <button
               onClick={() => setRightCollapsed(false)}
-              className="hidden md:flex absolute top-1/2 right-0 -translate-y-1/2 z-20 w-7 h-16 bg-surface border border-border rounded-l-lg items-center justify-center hover:bg-surface-2 transition-colors shadow-sm"
+              className="hidden lg:flex absolute top-1/2 right-0 -translate-y-1/2 z-20 w-7 h-16 bg-surface border border-border rounded-l-lg items-center justify-center hover:bg-surface-2 transition-colors shadow-sm"
               title="แสดง panel"
               aria-label="แสดง panel"
             >

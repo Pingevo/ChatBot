@@ -190,7 +190,7 @@ export function UnifiedDateRangePicker({ value, onChange, className = "" }: Prop
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-1.5 z-50 bg-surface rounded-xl shadow-xl border border-border w-[380px] overflow-hidden">
+        <div className="absolute right-0 top-full mt-1.5 z-50 bg-surface rounded-xl shadow-xl border border-border w-[380px] max-w-[calc(100vw-2rem)] overflow-hidden">
           {/* Preset buttons row */}
           <div className="grid grid-cols-5 gap-1 p-3 border-b border-border bg-surface-2/50">
             {PRESETS.map((p) => (

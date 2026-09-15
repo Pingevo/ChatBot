@@ -56,10 +56,10 @@ function MinimalSlider({ value, min, max, step, onChange, disabled, format }: Sl
     <div className={`flex items-center gap-3 ${disabled ? "opacity-50" : ""}`}>
       <div className="relative flex-1 h-6 flex items-center">
         {/* Track background */}
-        <div className="absolute left-0 right-0 h-[3px] rounded-full bg-surface-1" />
+        <div className="absolute left-0 right-0 h-1 rounded-full bg-surface-3" />
         {/* Track fill */}
         <div
-          className="absolute left-0 h-[3px] rounded-full bg-brand/60 transition-all"
+          className="absolute left-0 h-1 rounded-full bg-brand/60 transition-all"
           style={{ width: `${percent}%` }}
         />
         {/* Native input (transparent, on top) */}
@@ -75,8 +75,8 @@ function MinimalSlider({ value, min, max, step, onChange, disabled, format }: Sl
         />
         {/* Dot (visual) */}
         <div
-          className="absolute w-3.5 h-3.5 rounded-full bg-white shadow-md border border-border transition-all pointer-events-none"
-          style={{ left: `calc(${percent}% - 7px)` }}
+          className="absolute w-4 h-4 rounded-full bg-white shadow-md border-2 border-brand/50 transition-all pointer-events-none"
+          style={{ left: `calc(${percent}% - 8px)` }}
         />
       </div>
       <span className="text-sm font-medium text-text tabular-nums min-w-[60px] text-right">
@@ -102,7 +102,8 @@ interface SectionProps {
 
 function ConfigSection({ icon, title, description, badge, children, disabled }: SectionProps) {
   return (
-    <Card className={`p-5 transition-opacity ${disabled ? "opacity-60" : ""}`}>
+    // ⚡ break-inside-avoid + mb-4 — ใช้ใน columns masonry ให้ card ไม่ถูกตัดกลาง + เว้นช่องล่าง
+    <Card className={`p-5 transition-opacity break-inside-avoid mb-4 ${disabled ? "opacity-60" : ""}`}>
       <div className="flex items-center gap-2.5 mb-1">
         <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center text-brand">
           {icon}
@@ -278,7 +279,7 @@ export default function AdminConfigPage() {
           )}
         </>
       }
-      contentClassName="p-6 max-w-2xl space-y-4"
+      contentClassName="p-4 lg:p-6 space-y-4"
     >
         {/* Read-only banner */}
         {!editable && (
@@ -288,6 +289,8 @@ export default function AdminConfigPage() {
           </div>
         )}
 
+        {/* ⚡ masonry — card สูงไม่เท่ากัน CSS columns กระจายสมดุลเอง (2 cols lg+, 3 cols 2xl+) */}
+        <div className="columns-1 lg:columns-2 2xl:columns-3 gap-4">
         {/* ─── Section: Bot Message Buffering ─── */}
         <ConfigSection
           icon={<MessageCircle size={16} />}
@@ -573,32 +576,37 @@ export default function AdminConfigPage() {
           icon={<Sliders size={14} />}
           description="จำนวนสินค้าสูงสุดที่ส่งเป็น context ให้ LLM (แยกจาก frontend display)"
         >
-          <div className="space-y-4">
-            <div className="flex items-center gap-4">
-              <MinimalSlider
-                value={llmContextLimit}
-                min={10}
-                max={50}
-                step={5}
-                onChange={(v) => editable && setLlmContextLimit(v)}
-                disabled={!editable}
-                format={(v) => `${v} ชิ้น`}
-              />
-              <div className="text-sm font-mono text-text w-16 text-right">
-                {llmContextLimit}
-              </div>
+          {/* slider — pattern เดียวกับ section อื่น (wrapper + label + min/max) */}
+          <div className="py-3 px-3 rounded-lg bg-surface-2 space-y-2">
+            <div className="flex items-center gap-2">
+              <Sliders size={13} className="text-text-muted" />
+              <span className="text-sm font-medium text-text">ส่งสินค้าเข้า LLM สูงสุด X ชิ้น</span>
             </div>
-            <div className="text-[11px] text-text-muted">
+            <p className="text-[11px] text-text-muted">
               ค่าสูงขึ้น = LLM เห็นสินค้ามากขึ้น (ครอบคลุมมากขึ้น) แต่เพิ่ม token cost ·
               ค่าต่ำลง = ประหยัด token แต่อาจพลาดสินค้าที่เกี่ยวข้อง ·
               แยกจากจำนวนการ์ดสินค้าที่แสดงในหน้าแชท (ใช้ค่าจาก request limit)
+            </p>
+            <MinimalSlider
+              value={llmContextLimit}
+              min={10}
+              max={50}
+              step={5}
+              onChange={(v) => editable && setLlmContextLimit(v)}
+              disabled={!editable}
+              format={(v) => `${v} ชิ้น`}
+            />
+            <div className="flex justify-between text-[10px] text-text-subtle">
+              <span>10 (ประหยัด)</span>
+              <span>50 (ครอบคลุม)</span>
             </div>
           </div>
         </ConfigSection>
+        </div>
 
         {/* ─── Save bar (sticky bottom) ─── */}
         {hasChanges && (
-          <div className="sticky bottom-0 -mx-6 px-6 py-3 bg-surface border-t border-border flex items-center justify-between">
+          <div className="sticky bottom-0 -mx-4 px-4 lg:-mx-6 lg:px-6 py-3 bg-surface border-t border-border flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs text-text-muted">
               <AlertCircle size={14} className="text-warning" />
               มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก

@@ -191,10 +191,10 @@ function SubMenu({
         onClick={onMobileClose}
         title={item.label}
         aria-label={item.label}
-        className={`flex items-center justify-center rounded-md text-sm transition-colors px-2 py-2 ${
+        className={`flex items-center justify-center rounded-lg text-sm transition-colors px-2 py-2 ${
           childActive
-            ? "bg-brand/15 text-white"
-            : "text-pale-sky/70 hover:bg-white/5 hover:text-white"
+            ? "bg-accent/20 text-sidebar-text"
+            : "text-sidebar-text-muted hover:bg-white/5 hover:text-sidebar-text"
         }`}
       >
         <Icon size={18} className="shrink-0" />
@@ -208,10 +208,10 @@ function SubMenu({
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
         aria-controls={`submenu-${item.href.replace(/\//g, "-")}`}
-        className={`flex items-center gap-3 rounded-md text-sm transition-colors w-full px-3 py-2 ${
+        className={`flex items-center gap-3 rounded-lg text-sm transition-colors w-full px-3 py-2 ${
           childActive
-            ? "bg-brand/10 text-white font-medium"
-            : "text-pale-sky/70 hover:bg-white/5 hover:text-white"
+            ? "bg-accent/15 text-sidebar-text font-medium"
+            : "text-sidebar-text-muted hover:bg-white/5 hover:text-sidebar-text"
         }`}
       >
         <Icon size={18} className="shrink-0" />
@@ -222,9 +222,9 @@ function SubMenu({
           </span>
         )}
         {expanded ? (
-          <ChevronDown size={14} className="shrink-0 text-pale-sky/50" />
+          <ChevronDown size={14} className="shrink-0 text-sidebar-text-muted" />
         ) : (
-          <ChevronRight size={14} className="shrink-0 text-pale-sky/50" />
+          <ChevronRight size={14} className="shrink-0 text-sidebar-text-muted" />
         )}
       </button>
       {expanded && (
@@ -236,10 +236,10 @@ function SubMenu({
                 key={child.href}
                 href={child.href}
                 onClick={onMobileClose}
-                className={`flex items-center gap-2 rounded-md text-sm transition-colors px-3 py-1.5 ${
+                className={`flex items-center gap-2 rounded-lg text-sm transition-colors px-3 py-1.5 ${
                   cActive
-                    ? "text-white font-medium"
-                    : "text-pale-sky/60 hover:text-white"
+                    ? "text-sidebar-text font-medium"
+                    : "text-sidebar-text-muted hover:text-sidebar-text"
                 }`}
               >
                 <span className="w-1 h-1 rounded-full bg-current opacity-50" />
@@ -363,35 +363,29 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
 
   return (
     <>
-      {/* Mobile overlay */}
-      {mobileOpen && (
-        <div
-          className="fixed inset-0 z-30 bg-black/50 md:hidden"
-          onClick={onMobileClose}
-        />
-      )}
+      {/* Mobile overlay — ไม่ใช้แล้ว (มือถือใช้ MobileNav bottom bar) */}
 
       <aside
         data-state={collapsed ? "collapsed" : "expanded"}
         className={`
           ${collapsed ? "w-[60px]" : "w-64"}
-          ${mobileOpen ? "translate-x-0" : "-translate-x-full"}
-          md:translate-x-0
+          hidden lg:flex
           fixed z-50 h-full
-          bg-deep-space text-white flex flex-col
+          bg-sidebar text-sidebar-text flex-col
           transition-[width,transform] duration-200 ease-in-out
           border-r border-white/10
+          shadow-[4px_0_24px_-8px_rgba(0,0,0,0.20)]
         `}
       >
         {/* ---- SidebarHeader ---- */}
-        <div className="h-14 flex items-center gap-2 px-3 shrink-0 border-b border-white/10">
-          <div className="w-8 h-8 rounded-md bg-brand flex items-center justify-center font-bold text-white text-sm shrink-0">
+        <div className="h-14 flex items-center gap-2.5 px-3 shrink-0 border-b border-white/10">
+          <div className="w-8 h-8 rounded-lg bg-accent flex items-center justify-center font-bold text-white text-sm shrink-0 shadow-sm">
             IT
           </div>
           {!collapsed && (
             <div className="overflow-hidden flex-1">
-              <div className="font-bold text-sm leading-tight whitespace-nowrap tracking-wide">
-                ITSRC PANEL
+              <div className="font-bold text-sm leading-tight whitespace-nowrap tracking-tight text-sidebar-text">
+                ITSRC Panel
               </div>
             </div>
           )}
@@ -403,7 +397,7 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
             ขนาดเล็ก (w-6 h-6) แต่ชัด (border + bg + text) */}
         <button
           onClick={() => onCollapsedChange(!collapsed)}
-          className="absolute top-4 -right-3 z-50 w-6 h-6 rounded-full bg-deep-space border border-white/25 text-white hover:bg-white/20 hover:border-white/40 flex items-center justify-center transition-colors shadow"
+          className="absolute top-4 -right-3 z-50 w-6 h-6 rounded-full bg-sidebar border border-white/15 text-sidebar-text-muted hover:bg-sidebar-2 hover:text-sidebar-text flex items-center justify-center transition-all shadow-sm"
           title={collapsed ? "ขยายเมนู (Ctrl+B)" : "ย่อเมนู (Ctrl+B)"}
           aria-label={collapsed ? "ขยายเมนู" : "ย่อเมนู"}
         >
@@ -415,20 +409,20 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
           {/* Nav search — ช่วยกรองเมนูใน sidebar ที่มี 20+ items */}
           {!collapsed && (
             <div className="relative mb-2">
-              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-pale-sky/50" />
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-sidebar-text-muted" />
               <input
                 type="text"
                 value={navSearch}
                 onChange={(e) => setNavSearch(e.target.value)}
                 placeholder="ค้นหาเมนู..."
                 aria-label="ค้นหาเมนู"
-                className="w-full h-8 pl-8 pr-7 rounded-md bg-white/5 text-xs text-white placeholder:text-pale-sky/40 border border-white/10 focus:outline-none focus:border-white/30 focus:ring-1 focus:ring-white/20"
+                className="w-full h-8 pl-8 pr-7 rounded-lg bg-white/5 text-xs text-sidebar-text placeholder:text-sidebar-text-muted border border-white/10 focus:outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/30 transition-colors"
               />
               {navSearch && (
                 <button
                   onClick={() => setNavSearch("")}
                   aria-label="ล้างการค้นหา"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-pale-sky/50 hover:text-white"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-sidebar-text-muted hover:text-sidebar-text"
                 >
                   <X size={13} />
                 </button>
@@ -457,23 +451,23 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
                     onClick={() => toggleGroup(group.label)}
                     aria-expanded={isExpanded}
                     aria-controls={`group-${group.label.replace(/\s/g, "-")}`}
-                    className={`flex items-center gap-3 w-full px-3 py-2 text-sm font-medium rounded-md transition-colors ${
+                    className={`flex items-center gap-3 w-full px-3 py-2 text-sm font-medium rounded-lg transition-colors ${
                       groupChildActive
-                        ? "text-white"
-                        : "text-pale-sky/70 hover:bg-white/5 hover:text-white"
+                        ? "text-sidebar-text"
+                        : "text-sidebar-text-muted hover:bg-white/5 hover:text-sidebar-text"
                     }`}
                   >
                     {GroupIcon && <GroupIcon size={18} className="shrink-0" />}
                     <span className="flex-1 text-left whitespace-nowrap">{group.label}</span>
                     {isExpanded ? (
-                      <ChevronDown size={14} className="shrink-0 text-pale-sky/50" />
+                      <ChevronDown size={14} className="shrink-0 text-sidebar-text-muted" />
                     ) : (
-                      <ChevronRight size={14} className="shrink-0 text-pale-sky/50" />
+                      <ChevronRight size={14} className="shrink-0 text-sidebar-text-muted" />
                     )}
                   </button>
                 )}
                 {!collapsed && !group.collapsible && (
-                  <div className="px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-pale-sky/40">
+                  <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-sidebar-text-muted">
                     {group.label}
                   </div>
                 )}
@@ -512,32 +506,32 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
                           aria-label={collapsed ? item.label : undefined}
                           aria-current={active ? "page" : undefined}
                           className={`
-                            flex items-center gap-3 rounded-md text-sm transition-colors relative
+                            flex items-center gap-3 rounded-lg text-sm transition-colors relative
                             ${collapsed ? "justify-center px-2 py-2" : "px-3 py-2"}
                             ${active
-                              ? "bg-brand/15 text-white font-medium"
-                              : "text-pale-sky/70 hover:bg-white/5 hover:text-white"
+                              ? "bg-accent/20 text-sidebar-text font-medium"
+                              : "text-sidebar-text-muted hover:bg-white/5 hover:text-sidebar-text"
                             }
                           `}
                         >
                           {/* Active indicator bar (shadcn style) */}
                           {active && (
-                            <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 rounded-r-full bg-brand" />
+                            <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 rounded-r-full bg-accent-light" />
                           )}
                           <Icon size={18} className="shrink-0" />
                           {!collapsed && (
                             <span className="flex-1 whitespace-nowrap">{item.label}</span>
                           )}
                           {!collapsed && item.badgeTag && (
-                            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-white/10 text-pale-sky/70 shrink-0">
+                            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-white/10 text-sidebar-text-muted shrink-0">
                               {item.badgeTag}
                             </span>
                           )}
                           {!collapsed && item.badge === "live" && (
-                            <span className="w-2 h-2 rounded-full bg-vibrant-coral animate-pulse-soft shrink-0" />
+                            <span className="w-2 h-2 rounded-full bg-error animate-pulse-soft shrink-0" />
                           )}
                           {collapsed && item.badge === "live" && (
-                            <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-vibrant-coral animate-pulse-soft" />
+                            <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-error animate-pulse-soft" />
                           )}
                         </Link>
                       );
@@ -558,33 +552,33 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
               onClick={onMobileClose}
               title={collapsed ? "คู่มือการใช้งาน" : undefined}
               aria-label={collapsed ? "คู่มือการใช้งาน" : undefined}
-              className={`flex items-center gap-2.5 rounded-md p-2 hover:bg-white/5 transition-colors ${
+              className={`flex items-center gap-2.5 rounded-lg p-2 hover:bg-white/5 transition-colors ${
                 collapsed ? "justify-center" : ""
               }`}
             >
-              <HelpCircle size={18} className="text-pale-sky/70 shrink-0" />
+              <HelpCircle size={18} className="text-sidebar-text-muted shrink-0" />
               {!collapsed && (
-                <span className="text-sm text-pale-sky/70">คู่มือการใช้งาน</span>
+                <span className="text-sm text-sidebar-text-muted">คู่มือการใช้งาน</span>
               )}
             </Link>
             {/* 🔒 P3: Changed from div onClick → Link for keyboard accessibility */}
-            <div className={`flex items-center gap-2.5 rounded-md p-2 hover:bg-white/5 transition-colors ${collapsed ? "justify-center" : ""}`}>
+            <div className={`flex items-center gap-2.5 rounded-lg p-2 hover:bg-white/5 transition-colors ${collapsed ? "justify-center" : ""}`}>
               <Link
                 href="/settings"
                 onClick={() => onMobileClose()}
-                className="flex items-center gap-2.5 flex-1 min-w-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 rounded"
+                className="flex items-center gap-2.5 flex-1 min-w-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30 rounded"
                 title="ไปที่โปรไฟล์"
                 aria-label={`โปรไฟล์: ${user.name || user.username}`}
               >
-                <div className="w-8 h-8 rounded-full bg-brand flex items-center justify-center text-xs font-bold text-white shrink-0">
+                <div className="w-8 h-8 rounded-full bg-accent flex items-center justify-center text-xs font-bold text-white shrink-0">
                   {initials(user.name || user.username)}
                 </div>
                 {!collapsed && (
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-white truncate">
+                    <div className="text-sm font-medium text-sidebar-text truncate">
                       {user.name || user.username}
                     </div>
-                    <span className="inline-block mt-0.5 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-brand/80 text-white">
+                    <span className="inline-block mt-0.5 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-accent/80 text-white">
                       {roleLabel[user.role] || user.role}
                     </span>
                   </div>
@@ -596,7 +590,7 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
                     e.stopPropagation();
                     handleLogout();
                   }}
-                  className="w-7 h-7 rounded-md flex items-center justify-center text-pale-sky/50 hover:bg-white/10 hover:text-white transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
+                  className="w-7 h-7 rounded-lg flex items-center justify-center text-sidebar-text-muted hover:bg-white/10 hover:text-sidebar-text transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
                   title="ออกจากระบบ"
                   aria-label="ออกจากระบบ"
                 >

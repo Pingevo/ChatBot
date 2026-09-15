@@ -157,6 +157,7 @@ export function ChatList({
   const [showSortDropdown, setShowSortDropdown] = useState(false);
   const [showChatStatusDropdown, setShowChatStatusDropdown] = useState(false);
   const [showMsgStatusDropdown, setShowMsgStatusDropdown] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
 
   // ดึงรายชื่อร้านทั้งหมดจาก conversations (กรองตาม platform ที่เลือก)
   const availableShops = useMemo(() => {
@@ -318,7 +319,7 @@ export function ChatList({
 
   return (
     <div className="w-full bg-surface flex flex-col h-full">
-      {/* Header — รวม title + search + filter + accept เป็นชั้นเดียว */}
+      {/* Header — title + search + collapsible filters */}
       <div className="p-2.5 border-b border-border space-y-2">
         {/* Row 1: title + count + accept toggle */}
         <div className="flex items-center justify-between gap-2">
@@ -334,20 +335,40 @@ export function ChatList({
               </button>
             )}
           </div>
-          {onToggleAccepting && (
+          <div className="flex items-center gap-1.5 shrink-0">
+            {onToggleAccepting && (
+              <button
+                onClick={onToggleAccepting}
+                disabled={togglingAccept}
+                className={`flex items-center gap-1 h-6 px-2 rounded text-[11px] font-medium shrink-0 ${acceptingChats
+                    ? "bg-green-500/10 text-green-600 hover:bg-green-500/20"
+                    : "bg-yellow-500/10 text-yellow-600 hover:bg-yellow-500/20"
+                  } ${togglingAccept ? "opacity-50 cursor-not-allowed" : ""}`}
+                title={acceptingChats ? "คลิกเพื่อหยุดรับแชท" : "คลิกเพื่อรับแชท"}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${acceptingChats ? "bg-green-500" : "bg-yellow-500"}`} />
+                {acceptingChats ? "รับแชท" : "พัก"}
+              </button>
+            )}
+            {/* Filter toggle button — พับ/กางตัวกรอง */}
             <button
-              onClick={onToggleAccepting}
-              disabled={togglingAccept}
-              className={`flex items-center gap-1 h-6 px-2 rounded text-[11px] font-medium shrink-0 ${acceptingChats
-                  ? "bg-green-500/10 text-green-600 hover:bg-green-500/20"
-                  : "bg-yellow-500/10 text-yellow-600 hover:bg-yellow-500/20"
-                } ${togglingAccept ? "opacity-50 cursor-not-allowed" : ""}`}
-              title={acceptingChats ? "คลิกเพื่อหยุดรับแชท" : "คลิกเพื่อรับแชท"}
+              onClick={() => setShowFilters(!showFilters)}
+              className={`flex items-center gap-1 h-6 px-2 rounded text-[11px] font-medium transition-colors ${
+                showFilters || activeFilterCount > 0
+                  ? "bg-brand/10 text-brand"
+                  : "bg-surface-2 text-text-muted hover:text-text"
+              }`}
+              title={showFilters ? "ซ่อนตัวกรอง" : "แสดงตัวกรอง"}
             >
-              <span className={`w-1.5 h-1.5 rounded-full ${acceptingChats ? "bg-green-500" : "bg-yellow-500"}`} />
-              {acceptingChats ? "รับแชท" : "พัก"}
+              <ArrowDownUp size={11} />
+              ตัวกรอง
+              {activeFilterCount > 0 && (
+                <span className="ml-0.5 px-1 rounded-full bg-brand text-white text-[9px] leading-none">
+                  {activeFilterCount}
+                </span>
+              )}
             </button>
-          )}
+          </div>
         </div>
 
         {/* Search */}
@@ -362,8 +383,9 @@ export function ChatList({
           />
         </div>
 
-        {/* Filter row — dropdowns (admin + platform + status + shop + sort) */}
-        <div className="flex items-center gap-1.5 flex-wrap">
+        {/* Filter row — collapsible (พับได้) */}
+        {showFilters && (
+        <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-border-subtle">
           {/* Admin filter (ผู้รับ) — single-select แต่ใช้ pattern เดียวกับ Dropdown */}
           {onChatFilterChange && (
             <div className="relative">
@@ -514,6 +536,7 @@ export function ChatList({
             ))}
           </Dropdown>
         </div>
+        )}
       </div>
 
       {/* List */}

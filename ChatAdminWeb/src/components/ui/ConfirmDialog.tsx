@@ -78,16 +78,16 @@ export function ConfirmDialog() {
         aria-labelledby="confirm-dialog-title"
         ref={ref}
         tabIndex={-1}
-        className="bg-surface rounded-xl shadow-xl max-w-sm w-full p-5 animate-fade-in"
+        className="bg-surface rounded-2xl shadow-2xl max-w-sm w-full p-5 animate-toast-pop"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start gap-3">
           <div
             className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
-              isDanger ? "bg-vibrant-coral/15" : "bg-brand/15"
+              isDanger ? "bg-error/10" : "bg-brand/10"
             }`}
           >
-            <Icon size={20} className={isDanger ? "text-vibrant-coral" : "text-brand"} />
+            <Icon size={20} className={isDanger ? "text-error" : "text-brand"} />
           </div>
           <div className="flex-1 min-w-0">
             <h3 id="confirm-dialog-title" className="text-sm font-semibold text-text">{options.title}</h3>

@@ -10,10 +10,11 @@ import { UnifiedDateRangePicker, rangeToParams, type DateRangeValue } from "@/co
 import { DashboardSkeleton } from "@/components/ui/StatsSkeleton";
 import type { DashboardStats } from "@/lib/types";
 
+// ⚡ สี platform — ตรงกับ --color-platform-* ใน globals.css
 const platformColors: Record<string, string> = {
   shopee: "#ee4d2d",
-  tiktok: "#111827",
-  lazada: "#1a2e8c",
+  tiktok: "#fe2c55",
+  lazada: "#0f146d",
 };
 
 // ⚡ แปลงวินาที → "X ชม Y นาที Z วิ" หรือ "Y นาที Z วิ" หรือ "Z วิ"
@@ -81,75 +82,89 @@ export default function DashboardPage() {
     >
       {/* Overlay skeleton เมื่อกำลังโหลดข้อมูลใหม่ แต่ยังเก็บ layout เดิมไว้ */}
       <div className={loading ? "opacity-50 pointer-events-none transition-opacity" : "transition-opacity"}>
-        {/* KPI cards — 5 การ์์หลัก */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
-          <Card className="p-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-text-muted">แชททั้งหมด</span>
-              <MessageSquare size={16} className="text-deep-space" />
+        {/* KPI cards — 5 การ์ดหลัก */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 md:gap-4 mb-6">
+          <Card className="p-4 hover:shadow-[var(--shadow-md)] transition-shadow">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-medium text-text-muted">แชททั้งหมด</span>
+              <div className="w-8 h-8 rounded-lg bg-surface-2 flex items-center justify-center">
+                <MessageSquare size={15} className="text-text-muted" />
+              </div>
             </div>
-            <div className="text-2xl font-bold text-text">{stats.total_conversations.toLocaleString()}</div>
-            <div className="text-[10px] text-text-subtle mt-1">conversation ทั้งหมดในช่วงเวลา</div>
+            <div className="text-2xl font-bold text-text tabular-nums tracking-tight">{stats.total_conversations.toLocaleString()}</div>
+            <div className="text-[11px] text-text-subtle mt-1">conversation ทั้งหมดในช่วงเวลา</div>
           </Card>
-          <Card className="p-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-text-muted">บอทตอบ</span>
-              <Bot size={16} className="text-brand" />
+          <Card className="p-4 hover:shadow-[var(--shadow-md)] transition-shadow">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-medium text-text-muted">บอทตอบ</span>
+              <div className="w-8 h-8 rounded-lg bg-accent-soft flex items-center justify-center">
+                <Bot size={15} className="text-accent" />
+              </div>
             </div>
-            <div className="text-2xl font-bold text-brand">{(stats.bot_answered ?? 0).toLocaleString()}</div>
-            <div className="text-[10px] text-text-subtle mt-1">บอทกำลังตอบ ยังไม่ส่งแอดมิน</div>
+            <div className="text-2xl font-bold text-accent tabular-nums tracking-tight">{(stats.bot_answered ?? 0).toLocaleString()}</div>
+            <div className="text-[11px] text-text-subtle mt-1">บอทกำลังตอบ ยังไม่ส่งแอดมิน</div>
           </Card>
-          <Card className="p-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-text-muted">กำลังตอบอยู่</span>
-              <span className="w-2 h-2 rounded-full bg-vibrant-coral animate-pulse-soft" />
+          <Card className="p-4 hover:shadow-[var(--shadow-md)] transition-shadow">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-medium text-text-muted">กำลังตอบอยู่</span>
+              <div className="w-8 h-8 rounded-lg bg-warning-soft flex items-center justify-center">
+                <span className="w-2 h-2 rounded-full bg-warning animate-pulse-soft" />
+              </div>
             </div>
-            <div className="text-2xl font-bold text-text">{(stats.with_admin ?? stats.active_now ?? 0).toLocaleString()}</div>
-            <div className="text-[10px] text-text-subtle mt-1">ส่งแอดมินแล้ว รอตอบ</div>
+            <div className="text-2xl font-bold text-text tabular-nums tracking-tight">{(stats.with_admin ?? stats.active_now ?? 0).toLocaleString()}</div>
+            <div className="text-[11px] text-text-subtle mt-1">ส่งแอดมินแล้ว รอตอบ</div>
           </Card>
-          <Card className="p-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-text-muted">ปิดแล้ว</span>
-              <Headset size={16} className="text-vibrant-coral" />
+          <Card className="p-4 hover:shadow-[var(--shadow-md)] transition-shadow">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-medium text-text-muted">ปิดแล้ว</span>
+              <div className="w-8 h-8 rounded-lg bg-success-soft flex items-center justify-center">
+                <Headset size={15} className="text-success" />
+              </div>
             </div>
-            <div className="text-2xl font-bold text-vibrant-coral">{(stats.closed ?? 0).toLocaleString()}</div>
-            <div className="text-[10px] text-text-subtle mt-1">แอดมินปิดแชทแล้ว</div>
+            <div className="text-2xl font-bold text-success tabular-nums tracking-tight">{(stats.closed ?? 0).toLocaleString()}</div>
+            <div className="text-[11px] text-text-subtle mt-1">แอดมินปิดแชทแล้ว</div>
           </Card>
-          <Card className="p-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-text-muted">เวลาตอบเฉลี่ย</span>
-              <Clock size={16} className="text-text-muted" />
+          <Card className="p-4 hover:shadow-[var(--shadow-md)] transition-shadow">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-medium text-text-muted">เวลาตอบเฉลี่ย</span>
+              <div className="w-8 h-8 rounded-lg bg-surface-2 flex items-center justify-center">
+                <Clock size={15} className="text-text-muted" />
+              </div>
             </div>
-            <div className="text-2xl font-bold text-text">
+            <div className="text-2xl font-bold text-text tabular-nums tracking-tight">
               {stats.avg_response_time > 0 ? formatDuration(stats.avg_response_time) : "—"}
             </div>
-            <div className="text-[10px] text-text-subtle mt-1">เฉลี่ย ลูกค้าถาม → ตอบ ต่อ message</div>
+            <div className="text-[11px] text-text-subtle mt-1">เฉลี่ย ลูกค้าถาม → ตอบ ต่อ message</div>
           </Card>
         </div>
 
         {/* ⚡ Message stats — ข้อความเข้า/ออก */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
-          <Card className="p-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-text-muted">ข้อความเข้า (ลูกค้าส่ง)</span>
-              <MessageSquare size={16} className="text-deep-space" />
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4 mb-6">
+          <Card className="p-4 hover:shadow-[var(--shadow-md)] transition-shadow">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-medium text-text-muted">ข้อความเข้า (ลูกค้าส่ง)</span>
+              <div className="w-8 h-8 rounded-lg bg-surface-2 flex items-center justify-center">
+                <MessageSquare size={15} className="text-text-muted" />
+              </div>
             </div>
-            <div className="text-2xl font-bold text-text">{(stats.messages_received ?? 0).toLocaleString()}</div>
-            <div className="text-[10px] text-text-subtle mt-1">message ที่ลูกค้าส่งเข้ามาในช่วงเวลานี้</div>
+            <div className="text-2xl font-bold text-text tabular-nums tracking-tight">{(stats.messages_received ?? 0).toLocaleString()}</div>
+            <div className="text-[11px] text-text-subtle mt-1">message ที่ลูกค้าส่งเข้ามาในช่วงเวลานี้</div>
           </Card>
-          <Card className="p-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-text-muted">ข้อความตอบกลับ (บอท/แอดมิน)</span>
-              <Bot size={16} className="text-brand" />
+          <Card className="p-4 hover:shadow-[var(--shadow-md)] transition-shadow">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-medium text-text-muted">ข้อความตอบกลับ (บอท/แอดมิน)</span>
+              <div className="w-8 h-8 rounded-lg bg-accent-soft flex items-center justify-center">
+                <Bot size={15} className="text-accent" />
+              </div>
             </div>
-            <div className="text-2xl font-bold text-brand">{(stats.messages_sent ?? 0).toLocaleString()}</div>
-            <div className="text-[10px] text-text-subtle mt-1">message ที่บอท/แอดมินตอบกลับในช่วงเวลานี้</div>
+            <div className="text-2xl font-bold text-accent tabular-nums tracking-tight">{(stats.messages_sent ?? 0).toLocaleString()}</div>
+            <div className="text-[11px] text-text-subtle mt-1">message ที่บอท/แอดมินตอบกลับในช่วงเวลานี้</div>
           </Card>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 md:gap-4 mb-6">
           <Card className="p-4">
-            <h3 className="font-semibold text-text mb-2">
+            <h3 className="font-semibold text-text mb-3 tracking-tight">
               {dateRange.preset === "daily" ? "แชทรายวัน" :
                dateRange.preset === "weekly" ? "แชทรายสัปดาห์ (7 วัน)" :
                dateRange.preset === "monthly" ? "แชทรายเดือน" :
@@ -160,7 +175,7 @@ export default function DashboardPage() {
           </Card>
 
           <Card className="p-4">
-            <h3 className="font-semibold text-text mb-4">แยกตามแพลตฟอร์ม</h3>
+            <h3 className="font-semibold text-text mb-4 tracking-tight">แยกตามแพลตฟอร์ม</h3>
             <div className="space-y-3">
               {stats.platform_breakdown.length === 0 ? (
                 <p className="text-sm text-text-subtle">ยังไม่มีข้อมูล</p>
@@ -169,13 +184,13 @@ export default function DashboardPage() {
                   const pct = stats.total_conversations ? (p.count / stats.total_conversations) * 100 : 0;
                   return (
                     <div key={p.platform}>
-                      <div className="flex justify-between text-sm mb-1">
-                        <span className="capitalize text-text">{p.platform}</span>
-                        <span className="text-text-muted">{p.count}</span>
+                      <div className="flex justify-between text-sm mb-1.5">
+                        <span className="capitalize text-text font-medium">{p.platform}</span>
+                        <span className="text-text-muted tabular-nums">{p.count}</span>
                       </div>
                       <div className="h-2 bg-surface-2 rounded-full overflow-hidden">
                         <div
-                          className="h-full rounded-full"
+                          className="h-full rounded-full transition-all duration-500"
                           style={{ width: `${pct}%`, background: platformColors[p.platform] || "#8b1e28" }}
                         />
                       </div>
@@ -188,7 +203,7 @@ export default function DashboardPage() {
         </div>
 
         <Card className="p-4">
-          <h3 className="font-semibold text-text mb-4">แยกตามหัวข้อ</h3>
+          <h3 className="font-semibold text-text mb-4 tracking-tight">แยกตามหัวข้อ</h3>
           <div className="flex flex-wrap gap-2">
             {stats.topic_breakdown.length === 0 ? (
               <p className="text-sm text-text-subtle">ยังไม่มีข้อมูล</p>
@@ -196,10 +211,10 @@ export default function DashboardPage() {
               stats.topic_breakdown.map((t) => (
                 <span
                   key={t.topic}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-2 text-sm text-text"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-1 border border-border text-sm text-text hover:border-accent/30 hover:bg-accent-soft/50 transition-colors"
                 >
                   <span className="capitalize">{t.topic.replace(/_/g, " ")}</span>
-                  <span className="font-semibold text-brand">{t.count}</span>
+                  <span className="font-semibold text-accent tabular-nums">{t.count}</span>
                 </span>
               ))
             )}

@@ -40,30 +40,32 @@ function LoginContent() {
   }
 
   return (
-    <div className="h-screen flex flex-col items-center justify-center auth-gradient-bg px-4">
-      <div className="w-full max-w-sm bg-surface rounded-2xl shadow-xl p-8 space-y-6">
-        <div className="text-center space-y-2">
-          <div className="w-14 h-14 rounded-xl bg-brand flex items-center justify-center font-bold text-white text-xl mx-auto">
+    <div className="min-h-screen flex flex-col items-center justify-center auth-gradient-bg px-4 py-8">
+      <div className="w-full max-w-sm bg-surface rounded-2xl shadow-[var(--shadow-xl)] p-8 space-y-6 ring-1 ring-black/5">
+        <div className="text-center space-y-3">
+          <div className="w-16 h-16 rounded-2xl bg-accent flex items-center justify-center font-bold text-white text-2xl mx-auto shadow-lg shadow-accent/30">
             IT
           </div>
-          <h1 className="text-xl font-bold text-text">ITSRC PANEL</h1>
-          <p className="text-sm text-text-muted">ระบบบริหารแชทและทีมซัพพอร์ต</p>
+          <div>
+            <h1 className="text-xl font-bold text-text tracking-tight">ITSRC Panel</h1>
+            <p className="text-sm text-text-muted mt-1">ระบบบริหารแชทและทีมซัพพอร์ต</p>
+          </div>
         </div>
 
         {errorMsg && (
-          <div className="bg-vibrant-coral-soft text-vibrant-coral text-sm rounded-lg px-3 py-2 text-center">
+          <div className="bg-error-soft text-error text-sm rounded-lg px-3 py-2.5 text-center border border-error/20">
             {errorMsg}
           </div>
         )}
 
         <a
           href="/api/auth/sso/login"
-          className="w-full h-11 rounded-lg bg-brand text-white font-medium flex items-center justify-center hover:bg-brand-dark transition-colors"
+          className="w-full h-11 rounded-lg bg-brand text-white font-medium flex items-center justify-center hover:bg-brand-dark transition-all duration-150 shadow-sm hover:shadow-[var(--shadow-brand)]"
         >
           เข้าสู่ระบบด้วย SSO
         </a>
 
-        <p className="text-xs text-text-subtle text-center">
+        <p className="text-xs text-text-subtle text-center leading-relaxed">
           ระบบใช้ Single Sign-On ขององค์กร — กรุณาติดต่อผู้ดูแลระบบหากไม่สามารถเข้าได้
         </p>
       </div>

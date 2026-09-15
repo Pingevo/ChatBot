@@ -43,11 +43,25 @@ async function callOurBot(params: {
   cost?: number;
   products?: unknown[];
   image_desc?: string;
+  handoff_to_admin?: boolean;
+  handoff_reason?: string;
+  routing_decision?: unknown;
 }> {
   const { platform, message, history, shopId, shopName, images, use_v2, use_v3 } = params;
   // ใช้ platform-specific bot URL (shopee/tiktok/lazada แยกกัน)
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
+
+  // ⚡ BUG-G guard — fail fast สำหรับ platform ที่ไม่มี bot deploy
+  //   tiktok/lazada bot ยังเป็น placeholder (chatbot/tiktokchat/, chatbot/lazadachat/)
+  //   docker-compose ใช้ profiles จึงไม่ start ตาม default → fetch จะ timeout 50s
+  //   คืน error ที่อ่านรู้เรื่องแทน เพื่อกันเสียเวลา + สับสน
+  if (platform !== "shopee") {
+    throw new Error(
+      `bot สำหรับ platform "${platform}" ยังไม่ได้ deploy (URL=${upstream}) — ` +
+      `shadow-inbox รองรับเฉพาะ shopee ในขณะนี้`
+    );
+  }
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -87,6 +101,9 @@ async function callOurBot(params: {
     cost: typeof data.cost === "number" ? data.cost : undefined,
     products: data.products,
     image_desc: data.image_desc, // ⚡ A2 — คืน image_desc ให้ caller cache
+    handoff_to_admin: data.handoff_to_admin === true, // ⚡ BUG-B — ส่งต่อให้ shadowReplyService เก็บ
+    handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
+    routing_decision: data.routing_decision,
   };
 }
 

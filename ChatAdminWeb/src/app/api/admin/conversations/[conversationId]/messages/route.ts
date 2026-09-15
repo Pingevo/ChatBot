@@ -45,17 +45,17 @@ export async function GET(
 
   // ℹ️ Shared inbox model — admin ทุกคนอ่าน messages ได้
 
-  // ดึง total count สำหรับแสดงใน UI
+  // ⚡ ดึง total + messages พร้อมกัน (independent) — ลด sequential round-trip
   const msgColl = await getCollection(COLLECTIONS.messages);
-  const total = await msgColl.countDocuments({ conversation_id: conversationId });
-
-  // ดึง messages ตาม cursor
-  const docs = await messageService.listMessagesPaginated(conversationId, {
-    platform: conv.platform,
-    limit,
-    before: before ? new Date(before) : undefined,
-    after: after ? new Date(after) : undefined,
-  });
+  const [total, docs] = await Promise.all([
+    msgColl.countDocuments({ conversation_id: conversationId }),
+    messageService.listMessagesPaginated(conversationId, {
+      platform: conv.platform,
+      limit,
+      before: before ? new Date(before) : undefined,
+      after: after ? new Date(after) : undefined,
+    }),
+  ]);
 
   // 1. parse raw_payload → media/product_ref ทุก message
   const parsed = docs.map((d) => ({
@@ -104,37 +104,46 @@ export async function GET(
   }
 
   // 3. batch lookup products จาก dbWallet (read-only)
-  const productMap = new Map<string, ProductCard>();
-  if (itemIdsToLookup.size > 0) {
-    try {
-      const products = await productService.getProductsByIds({
-        platform: conv.platform,
-        itemIds: [...itemIdsToLookup],
-      });
-      for (const p of products) {
-        const card = toProductCard(p as Record<string, unknown>, conv.platform);
-        const id = String(p.item_id || p.itemid || "");
-        if (id) productMap.set(id, card);
+  // 3.5 batch lookup admin names — ⚡ parallel ทั้งคู่ (independent) + admin lookups ทำพร้อมกันไม่ทีละคน
+  const [productMap, adminNameMap] = await Promise.all([
+    (async () => {
+      const map = new Map<string, ProductCard>();
+      if (itemIdsToLookup.size > 0) {
+        try {
+          const products = await productService.getProductsByIds({
+            platform: conv.platform,
+            itemIds: [...itemIdsToLookup],
+          });
+          for (const p of products) {
+            const card = toProductCard(p as Record<string, unknown>, conv.platform);
+            const id = String(p.item_id || p.itemid || "");
+            if (id) map.set(id, card);
+          }
+        } catch (err) {
+          console.warn("[messages] product lookup failed:", err instanceof Error ? err.message : err);
+        }
       }
-    } catch (err) {
-      console.warn("[messages] product lookup failed:", err instanceof Error ? err.message : err);
-    }
-  }
-
-  // 3.5 batch lookup admin names
-  const adminIds = new Set<string>();
-  for (const { doc } of parsed) {
-    if (doc.actor && doc.role === "admin") adminIds.add(doc.actor);
-  }
-  const adminNameMap = new Map<string, string>();
-  if (adminIds.size > 0) {
-    for (const aid of adminIds) {
-      try {
-        const a = await auth.getAdminById(aid);
-        if (a) adminNameMap.set(aid, a.name || a.username || aid);
-      } catch { /* ignore */ }
-    }
-  }
+      return map;
+    })(),
+    (async () => {
+      const adminIds = new Set<string>();
+      for (const { doc } of parsed) {
+        if (doc.actor && doc.role === "admin") adminIds.add(doc.actor);
+      }
+      const map = new Map<string, string>();
+      if (adminIds.size > 0) {
+        await Promise.all(
+          [...adminIds].map(async (aid) => {
+            try {
+              const a = await auth.getAdminById(aid);
+              if (a) map.set(aid, a.name || a.username || aid);
+            } catch { /* ignore */ }
+          })
+        );
+      }
+      return map;
+    })(),
+  ]);
 
   // 4. derive replied status — ใช้ out timestamps จาก docs ใน page นี้
   //    (ถ้ามี out message หลังจาก user message = ตอบแล้ว)

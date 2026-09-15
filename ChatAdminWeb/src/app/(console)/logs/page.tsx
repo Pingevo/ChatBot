@@ -294,7 +294,7 @@ export default function LogsPage() {
           </div>
 
           {/* Search */}
-          <div className="relative w-56">
+          <div className="relative w-full sm:w-56">
             <input
               type="text"
               ref={searchRef}
@@ -354,16 +354,18 @@ export default function LogsPage() {
         )}
         </>
       }
-      contentClassName="p-6"
+      contentClassName="p-4 sm:p-6"
     >
       {/* Log content — สลับ list/table ตาม viewMode */}
-      <div className="p-6">
+      <div>
         {loading ? (
           <div className="flex items-center justify-center py-12"><Loading /></div>
         ) : filtered.length === 0 ? (
           <EmptyState icon={FileText} title="ยังไม่มี log ตรงเงื่อนไข" description="ลองเปลี่ยน filter หรือล้างการกรอง" />
-        ) : viewMode === "list" ? (
-          /* ── List view (เดิม) ── */
+        ) : (
+          <>
+          {/* ── List view — บนจอ <lg ใช้เสมอ (แม้เลือกโหมดตาราง เพราะตารางกว้าง) ── */}
+          <div className={viewMode === "table" ? "lg:hidden" : ""}>
           <div className="space-y-1.5">
             {filtered.map((log, i) => {
               const key = `${log.admin_id}-${log.timestamp}-${i}`;
@@ -377,27 +379,35 @@ export default function LogsPage() {
                   <button
                     onClick={() => setExpandedId(expanded ? null : key)}
                     aria-expanded={expanded === true}
-                    className="w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-surface-2/50 transition-colors"
+                    className="w-full px-3 py-2.5 text-left hover:bg-surface-2/50 transition-colors"
                   >
-                    <code className="text-text-subtle flex-shrink-0 font-mono text-[11px] w-32">
-                      {new Date(log.timestamp).toLocaleString("th-TH", {
-                        day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
-                      })}
-                    </code>
-                    <Badge tone={tone} className="flex-shrink-0">{actionTypeLabel(log.action_type)}</Badge>
-                    <span className="text-brand flex-shrink-0 text-xs font-medium">
-                      {adminName(log.admin_id)}
-                    </span>
-                    <span className="text-text-muted text-xs truncate flex-1" title={log.conversation_id || log.shop_id || ""}>
-                      {log.conversation_id ? `conv: ${log.conversation_id.slice(0, 16)}` : ""}
-                      {log.shop_id ? ` · shop: ${log.shop_id.slice(0, 12)}` : ""}
-                      {log.target_admin_id ? ` → ${adminName(log.target_admin_id)}` : ""}
-                    </span>
-                    <ChevronDown size={12} className={`text-text-muted flex-shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`} />
+                    {/* แถวบน: action + ผู้กระทำ + เวลา + chevron */}
+                    <div className="flex items-center gap-2 sm:gap-3">
+                      <Badge tone={tone} className="flex-shrink-0">{actionTypeLabel(log.action_type)}</Badge>
+                      <span className="text-brand text-xs font-medium truncate min-w-0">
+                        {adminName(log.admin_id)}
+                      </span>
+                      <span className="ml-auto flex items-center gap-1.5 flex-shrink-0">
+                        <code className="text-text-subtle font-mono text-[11px] whitespace-nowrap">
+                          {new Date(log.timestamp).toLocaleString("th-TH", {
+                            day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+                          })}
+                        </code>
+                        <ChevronDown size={12} className={`text-text-muted transition-transform ${expanded ? "rotate-180" : ""}`} />
+                      </span>
+                    </div>
+                    {/* แถวล่าง: context (แชท/ร้าน/เป้าหมาย) — แสดงเฉพาะเมื่อมีข้อมูล */}
+                    {(log.conversation_id || log.shop_id || log.target_admin_id) && (
+                      <div className="mt-1 text-text-muted text-xs truncate" title={log.conversation_id || log.shop_id || ""}>
+                        {log.conversation_id ? `conv: ${log.conversation_id.slice(0, 16)}` : ""}
+                        {log.shop_id ? ` · shop: ${log.shop_id.slice(0, 12)}` : ""}
+                        {log.target_admin_id ? ` → ${adminName(log.target_admin_id)}` : ""}
+                      </div>
+                    )}
                   </button>
                   {expanded && (
                     <div className="px-3 py-2.5 border-t border-border bg-surface-2/30 text-xs space-y-1.5">
-                      <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1">
                         <div><span className="text-text-muted">ผู้กระทำ:</span> <code className="font-mono text-text">{adminName(log.admin_id)}</code></div>
                         <div><span className="text-text-muted">การกระทำ:</span> <code className="font-mono text-text">{actionTypeLabel(log.action_type)}</code></div>
                         {log.target_admin_id && (
@@ -427,9 +437,14 @@ export default function LogsPage() {
               );
             })}
           </div>
-        ) : (
-          /* ── Table view (ใหม่ — แสดงทุก field จริงใน AdminLogDoc) ── */
-          <LogTableView logs={filtered} adminName={adminName} actionTypeLabel={actionTypeLabel} expandedId={expandedId} setExpandedId={setExpandedId} hiddenCols={hiddenCols} toggleCol={toggleCol} />
+          </div>
+          {/* ── Table view — เฉพาะ lg+ (แสดงทุก field จริงใน AdminLogDoc) ── */}
+          {viewMode === "table" && (
+            <div className="hidden lg:block">
+              <LogTableView logs={filtered} adminName={adminName} actionTypeLabel={actionTypeLabel} expandedId={expandedId} setExpandedId={setExpandedId} hiddenCols={hiddenCols} toggleCol={toggleCol} />
+            </div>
+          )}
+          </>
         )}
       </div>
     </PageShell>
@@ -469,11 +484,11 @@ function LogTableView({
 
   const cols = [
     { key: "target", label: "เป้าหมาย", hideClass: "hidden lg:table-cell" },
-    { key: "conv", label: "แชท", hideClass: "hidden md:table-cell" },
-    { key: "shop", label: "ร้าน", hideClass: "hidden md:table-cell" },
+    { key: "conv", label: "แชท", hideClass: "hidden lg:table-cell" },
+    { key: "shop", label: "ร้าน", hideClass: "hidden lg:table-cell" },
     { key: "ticket", label: "ทิกเก็ต", hideClass: "hidden lg:table-cell" },
-    { key: "ip", label: "หมายเลข IP", hideClass: "hidden xl:table-cell" },
-    { key: "meta", label: "บันทึกย่อ", hideClass: "hidden md:table-cell" },
+    { key: "ip", label: "หมายเลข IP", hideClass: "hidden lg:table-cell" },
+    { key: "meta", label: "บันทึกย่อ", hideClass: "hidden lg:table-cell" },
   ];
 
   return (
@@ -512,11 +527,11 @@ function LogTableView({
               <th className="text-left font-medium px-3 py-2 whitespace-nowrap">การกระทำ</th>
               <th className="text-left font-medium px-3 py-2 whitespace-nowrap">ผู้กระทำ</th>
               <th className={`text-left font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("target") ? "hidden" : "hidden lg:table-cell"}`}>เป้าหมาย</th>
-              <th className={`text-left font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("conv") ? "hidden" : "hidden md:table-cell"}`}>แชท</th>
-              <th className={`text-left font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("shop") ? "hidden" : "hidden md:table-cell"}`}>ร้าน</th>
+              <th className={`text-left font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("conv") ? "hidden" : "hidden lg:table-cell"}`}>แชท</th>
+              <th className={`text-left font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("shop") ? "hidden" : "hidden lg:table-cell"}`}>ร้าน</th>
               <th className={`text-left font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("ticket") ? "hidden" : "hidden lg:table-cell"}`}>ทิกเก็ต</th>
-              <th className={`text-left font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("ip") ? "hidden" : "hidden xl:table-cell"}`}>หมายเลข IP</th>
-              <th className={`text-right font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("meta") ? "hidden" : "hidden md:table-cell"}`}>บันทึกย่อ</th>
+              <th className={`text-left font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("ip") ? "hidden" : "hidden lg:table-cell"}`}>หมายเลข IP</th>
+              <th className={`text-right font-medium px-3 py-2 whitespace-nowrap ${hiddenCols.has("meta") ? "hidden" : "hidden lg:table-cell"}`}>บันทึกย่อ</th>
               <th className="text-right font-medium px-3 py-2 whitespace-nowrap">รายละเอียด</th>
             </tr>
           </thead>
@@ -559,12 +574,12 @@ function LogTableView({
                         </span>
                       ) : "—"}
                     </td>
-                    <td className={`px-3 py-2 whitespace-nowrap font-mono text-text-muted ${hiddenCols.has("conv") ? "hidden" : "hidden md:table-cell"}`}>
+                    <td className={`px-3 py-2 whitespace-nowrap font-mono text-text-muted ${hiddenCols.has("conv") ? "hidden" : "hidden lg:table-cell"}`}>
                       {log.conversation_id ? (
                         <span title={log.conversation_id}>{truncate(log.conversation_id, 20)}</span>
                       ) : "—"}
                     </td>
-                    <td className={`px-3 py-2 whitespace-nowrap font-mono text-text-muted ${hiddenCols.has("shop") ? "hidden" : "hidden md:table-cell"}`}>
+                    <td className={`px-3 py-2 whitespace-nowrap font-mono text-text-muted ${hiddenCols.has("shop") ? "hidden" : "hidden lg:table-cell"}`}>
                       {log.shop_id ? (
                         <span title={log.shop_id}>{truncate(log.shop_id, 16)}</span>
                       ) : "—"}
@@ -574,10 +589,10 @@ function LogTableView({
                         <span title={log.ticket_id}>{truncate(log.ticket_id, 16)}</span>
                       ) : "—"}
                     </td>
-                    <td className={`px-3 py-2 whitespace-nowrap font-mono text-text-muted ${hiddenCols.has("ip") ? "hidden" : "hidden xl:table-cell"}`}>
+                    <td className={`px-3 py-2 whitespace-nowrap font-mono text-text-muted ${hiddenCols.has("ip") ? "hidden" : "hidden lg:table-cell"}`}>
                       {log.ip || "—"}
                     </td>
-                    <td className={`px-3 py-2 text-right text-text-muted whitespace-nowrap ${hiddenCols.has("meta") ? "hidden" : "hidden md:table-cell"}`}>
+                    <td className={`px-3 py-2 text-right text-text-muted whitespace-nowrap ${hiddenCols.has("meta") ? "hidden" : "hidden lg:table-cell"}`}>
                       {metaCount(log.meta) > 0 ? `${metaCount(log.meta)} keys` : "—"}
                     </td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">
@@ -594,7 +609,7 @@ function LogTableView({
                   {expanded && hasDetail && (
                     <tr key={`${key}-detail`} className="bg-surface-2/30">
                       <td colSpan={10} className="px-3 py-2.5">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
                           {metaCount(log.metadata) > 0 && (
                             <div>
                               <div className="text-text-muted mb-1 text-[11px]">metadata ({metaCount(log.metadata)} keys):</div>

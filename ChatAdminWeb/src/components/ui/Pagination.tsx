@@ -1,21 +1,17 @@
-// Pagination — แสดงเลขหน้าแบบ list สวยๆ (ไม่ใช่ input กรอกตัวเลข)
-//   • แสดงหน้าปัจจุบัน + หน้าใกล้ๆ + ellipsis (...) ถ้าหน้าเยอะ
-//   • ปุ่ม ก่อนหน้า / ถัดไป
-//   • ใช้ได้กับทุกหน้าที่มี pagination
+// Pagination — responsive page navigation
 "use client";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
 interface Props {
-  page: number;          // หน้าปัจจุบัน (1-based)
+  page: number;
   totalPages: number;
   onChange: (page: number) => void;
-  maxButtons?: number;   // จำนวนปุ่มเลขสูงสุดที่แสดง (default 7)
+  maxButtons?: number;
 }
 
 export function Pagination({ page, totalPages, onChange, maxButtons = 7 }: Props) {
   if (totalPages <= 1) return null;
 
-  // คำนวณเลขหน้าที่จะแสดง (พร้อม ellipsis)
   const pages: (number | "...")[] = [];
   if (totalPages <= maxButtons) {
     for (let i = 1; i <= totalPages; i++) pages.push(i);
@@ -34,10 +30,10 @@ export function Pagination({ page, totalPages, onChange, maxButtons = 7 }: Props
     }
   }
 
-  const btnBase = "min-w-[28px] h-8 px-2 rounded-lg text-xs font-medium transition-colors flex items-center justify-center";
-  const btnActive = "bg-brand text-white";
-  const btnIdle = "bg-surface-2 text-text-muted hover:bg-pale-sky-soft hover:text-text";
-  const btnDisabled = "bg-surface-2 text-text-subtle opacity-40 cursor-not-allowed";
+  const btnBase = "min-w-[32px] h-8 px-2 rounded-lg text-xs font-medium transition-all flex items-center justify-center";
+  const btnActive = "bg-accent text-white shadow-sm";
+  const btnIdle = "bg-surface text-text-muted hover:bg-surface-2 hover:text-text border border-border";
+  const btnDisabled = "bg-surface-1 text-text-subtle opacity-40 cursor-not-allowed border border-border";
 
   return (
     <div className="flex items-center justify-center gap-1.5 py-3">

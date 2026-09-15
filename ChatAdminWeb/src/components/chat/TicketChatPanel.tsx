@@ -198,7 +198,7 @@ function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage
   return (
     <div className={`flex gap-2.5 ${isUser ? "justify-start" : "justify-end"} animate-fade-in`}>
       {isUser && <Avatar name={customerName || "User"} src={customerAvatar} size={32} className="mt-1 shrink-0" />}
-      <div className={`max-w-[70%] ${isUser ? "" : "flex flex-col items-end gap-1"}`}>
+      <div className={`max-w-[70%] min-w-0 ${isUser ? "" : "flex flex-col items-end gap-1"}`}>
         {/* แสดงชื่อ admin ถ้าเป็น admin message จริง */}
         {isAdmin && msg.admin_name && (
           <div className="text-[10px] text-text-muted mb-0.5 pr-1">{msg.admin_name}</div>

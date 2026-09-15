@@ -1,10 +1,12 @@
 "use client";
 import React, { useState, useRef, useEffect, FormEvent } from "react";
+import Link from "next/link";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Button } from "@/components/ui/Button";
 import { Loading } from "@/components/ui/Loading";
 import { Badge } from "@/components/ui/Badge";
 import { toast } from "@/components/ui/Toast";
+import { confirm } from "@/components/ui/ConfirmDialog";
 import {
   Send,
   Copy,
@@ -28,6 +30,7 @@ import {
   Paperclip,
   Film,
   History,
+  Clock,
 } from "lucide-react";
 import type { Platform } from "@/lib/types";
 import { splitAnswerSegments } from "@/lib/answerSegments";
@@ -350,6 +353,35 @@ const platformMeta: Record<Platform, { label: string; accent: string; accentSoft
   },
 };
 
+// ⚡ Platform switcher — มือถือ/tablet เข้าถึง lazada/tiktok ไม่ได้เพราะอยู่ใน sidebar submenu
+//   แสดงเฉพาะ <lg (desktop ใช้ sidebar submenu อยู่แล้ว)
+function PlatformSwitcher({ platform }: { platform: Platform }) {
+  const platforms: Platform[] = ["shopee", "tiktok", "lazada"];
+  return (
+    <div className="lg:hidden flex items-center gap-1 px-4 py-1.5 border-b border-border bg-surface-2 shrink-0">
+      {platforms.map((p) => {
+        const m = platformMeta[p];
+        const active = p === platform;
+        return (
+          <Link
+            key={p}
+            href={`/test-chat/${p}`}
+            aria-current={active ? "page" : undefined}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              active
+                ? "bg-surface text-text shadow-sm border border-border"
+                : "text-text-muted hover:text-text"
+            }`}
+          >
+            <PlatformIcon platform={p} size={12} />
+            {m.label}
+          </Link>
+        );
+      })}
+    </div>
+  );
+}
+
 export function TestChatClient({ platform }: { platform: Platform }) {
   const meta = platformMeta[platform];
   const [messages, setMessages] = useState<Msg[]>([
@@ -386,6 +418,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   const [sessionStatus, setSessionStatus] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [logPanelOpen, setLogPanelOpen] = useState(false);
+  const [sessionListOpen, setSessionListOpen] = useState(false);
   const [logViewMode, setLogViewMode] = useState<"grouped" | "all">("grouped");
   const [lastProducts, setLastProducts] = useState<Product[]>([]);
   const [totals, setTotals] = useState<{ turns: number; elapsed: number; prompt: number; output: number; total: number; cost: number; wsTurns: number; wsCost: number; wsTokens: number }>({
@@ -445,7 +478,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   async function loadSessions() {
     try {
       // ⚡ โหลดทุกร้านเสมอ — filter ทำใน frontend เพื่อให้เห็น history ทั้งหมด
-      const r = await fetch(`/api/chatbot/shopee/test-chat/sessions?limit=200`);
+      const r = await fetch(`/api/chatbot/${platform}/test-chat/sessions?limit=200`);
       if (r.ok) {
         const d = await r.json();
         setSessions(d.sessions || []);
@@ -458,7 +491,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   async function createSession() {
     // ⚡ อนุญาตให้สร้าง session โดยไม่ต้องเลือกร้าน — เลือกทีหลังได้
     try {
-      const r = await fetch("/api/chatbot/shopee/test-chat/sessions", {
+      const r = await fetch(`/api/chatbot/${platform}/test-chat/sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ shop: shop || "" }),
@@ -482,7 +515,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
 
   async function loadSession(id: string) {
     try {
-      const r = await fetch(`/api/chatbot/shopee/test-chat/sessions/${id}`);
+      const r = await fetch(`/api/chatbot/${platform}/test-chat/sessions/${id}`);
       if (!r.ok) return;
       const d = await r.json();
       setCurrentSessionId(id);
@@ -591,9 +624,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   }
 
   async function deleteSession(id: string) {
-    if (!confirm("ลบแชทนี้?")) return;
+    if (!(await confirm.ask({ title: "ลบแชทนี้?", message: "ลบประวัติแชททดสอบถาวร", variant: "danger", confirmText: "ลบ" }))) return;
     try {
-      await fetch(`/api/chatbot/shopee/test-chat/sessions/${id}`, { method: "DELETE" });
+      await fetch(`/api/chatbot/${platform}/test-chat/sessions/${id}`, { method: "DELETE" });
       if (currentSessionId === id) {
         setCurrentSessionId(null);
         setMessages([{ id: msgIdCounter++, role: "sys", html: `พิมพ์คำถามด้านล่างเพื่อทดสอบบอท${meta.label}` }]);
@@ -610,7 +643,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     try {
       // คำนวณ index ของ message ใหม่ใน array (ก่อน push)
       const msgIndex = messages.filter(m => m.role !== "sys").length;
-      await fetch(`/api/chatbot/shopee/test-chat/sessions/${currentSessionId}/messages`, {
+      await fetch(`/api/chatbot/${platform}/test-chat/sessions/${currentSessionId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -711,7 +744,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     setLogsLoading(true);
     try {
       const scope = logsScope === "all" ? "all" : "";
-      const url = `/api/chatbot/shopee/test-chat/logs?limit=200${scope ? `&admin_id=${scope}` : ""}`;
+      const url = `/api/chatbot/${platform}/test-chat/logs?limit=200${scope ? `&admin_id=${scope}` : ""}`;
       const r = await fetch(url);
       if (r.ok) {
         const d = await r.json();
@@ -759,7 +792,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   // ⚡ อัปเดต shop ของ session ใน DB (เมื่อผู้ใช้เปลี่ยนร้านในแชทที่มีอยู่)
   async function updateSessionShop(sessionId: string, newShop: string) {
     try {
-      await fetch(`/api/chatbot/shopee/test-chat/sessions/${sessionId}`, {
+      await fetch(`/api/chatbot/${platform}/test-chat/sessions/${sessionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ shop: newShop }),
@@ -773,7 +806,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   // ⚡ อัปเดต title ของ session ใน DB (แก้ชื่อแชท)
   async function updateSessionTitle(sessionId: string, newTitle: string) {
     try {
-      await fetch(`/api/chatbot/shopee/test-chat/sessions/${sessionId}`, {
+      await fetch(`/api/chatbot/${platform}/test-chat/sessions/${sessionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: newTitle }),
@@ -802,7 +835,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   // ⚡ Phase 2E — โหลด quick replies เมื่อ shop เปลี่ยน (กรองตาม platform + shop + enabled)
   useEffect(() => {
     if (!shop) { setQuickReplies([]); return; }
-    quickReplyService.list({ platform: "shopee", shop_id: shop, enabled_only: "1" })
+    quickReplyService.list({ platform, shop_id: shop, enabled_only: "1" })
       .then((rows) => setQuickReplies(rows))
       .catch(() => setQuickReplies([]));
   }, [shop]);
@@ -946,7 +979,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             session_id: currentSessionId,
             message,
             shop,
-            platform: "shopee",
+            platform,
             images: images.map((i) => i.url),  // ⚡ Phase 1F — ส่ง image URLs
           }),
         });
@@ -1009,7 +1042,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         const tr = await fetch("/api/triggers/match", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message, shop_id: shop, platform: "shopee" }),
+          body: JSON.stringify({ message, shop_id: shop, platform }),
         });
         const tj = await tr.json().catch(() => ({}));
         console.log("[TRIGGER-CHECK] response:", tr.status, tj);
@@ -1034,7 +1067,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
               body: JSON.stringify({
                 conversation_id: currentSessionId,
                 shop_id: shop,
-                platform: "shopee",
+                platform,
                 reason: triggerMatched.name,
                 simulate: true,
               }),
@@ -1291,7 +1324,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             session_id: currentSessionId,
             message: combinedText,
             shop,
-            platform: "shopee",
+            platform,
             history: priorHistory,
             phase,
           }),
@@ -1398,7 +1431,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         const tr = await fetch("/api/triggers/match", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: combinedText, shop_id: shop, platform: "shopee" }),
+          body: JSON.stringify({ message: combinedText, shop_id: shop, platform }),
         });
         const tj = await tr.json().catch(() => ({}));
         if (tj?.matched && tj?.trigger) {
@@ -1421,7 +1454,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
               body: JSON.stringify({
                 conversation_id: currentSessionId,
                 shop_id: shop,
-                platform: "shopee",
+                platform,
                 reason: triggerMatched.name,
                 simulate: true,
               }),
@@ -1510,7 +1543,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         body: JSON.stringify({
           session_id: currentSessionId,
           shop,
-          platform: "shopee",
+          platform,
           history: priorHistory,
           limit,
         }),
@@ -1747,6 +1780,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             </div>
           </div>
         </div>
+        <PlatformSwitcher platform={platform} />
 
         <div className="flex-1 flex items-center justify-center p-6">
           <div className="text-center max-w-sm">
@@ -1839,52 +1873,73 @@ export function TestChatClient({ platform }: { platform: Platform }) {
           animation: tc-spin 0.8s linear infinite; display: inline-block; vertical-align: middle; margin-right: 6px;
         }
         @keyframes tc-spin { to { transform: rotate(360deg); } }
-        @media (max-width: 768px) {
+        @media (max-width: 1279px) {
           .tc-msg .feedback-btns { opacity: 1; }
-          .tc-msg .copy-btn { opacity: 1; }
+          .tc-msg .copy-btn { display: none; }
         }
       `}</style>
 
       <div className="h-full min-h-0 flex flex-col bg-surface">
         {/* Header — platform themed */}
-        <div className="flex items-center justify-between px-4 md:px-6 py-3 border-b border-border bg-surface shrink-0">
+        <div className="flex items-center justify-between px-4 lg:px-6 py-2.5 border-b border-border bg-surface shrink-0">
           <div className="flex items-center gap-3 min-w-0">
-            <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${meta.gradient} flex items-center justify-center shrink-0 shadow-sm`}>
-              <PlatformIcon platform={platform} size={20} />
+            <div className={`w-9 h-9 lg:w-10 xl:h-10 rounded-xl bg-gradient-to-br ${meta.gradient} flex items-center justify-center shrink-0 shadow-sm`}>
+              <PlatformIcon platform={platform} size={18} />
             </div>
             <div className="min-w-0">
-              <h1 className="text-base font-semibold text-text truncate">ทดสอบบอท — {meta.label}</h1>
-              <div className="text-xs text-text-muted flex items-center gap-1.5">
+              <h1 className="text-sm xl:text-base font-semibold text-text truncate">ทดสอบบอท — {meta.label}</h1>
+              <div className="text-[11px] xl:text-xs text-text-muted flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-brand inline-block" />
                 Gemini + MongoDB · เชื่อมต่อแล้ว
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          {/* Action buttons — icon group */}
+          <div className="flex items-center gap-1.5">
+            {/* History button — mobile/tablet เท่านั้น */}
+            <button
+              onClick={() => setSessionListOpen(true)}
+              className="lg:hidden inline-flex items-center justify-center w-8 h-8 text-xs rounded-lg border border-border bg-surface-2 text-text-muted hover:text-text hover:bg-surface-3 transition-colors"
+              title="ประวัติแชท"
+              aria-label="ประวัติแชท"
+            >
+              <Clock size={14} />
+            </button>
             {messages.length > 0 && (
               <button
                 onClick={copyAllChat}
-                className="inline-flex items-center gap-1.5 px-3 h-8 text-xs rounded-lg border border-border bg-surface-2 text-text-muted hover:text-text hover:bg-surface-3 transition-colors"
+                className="inline-flex items-center justify-center w-8 h-8 lg:w-auto lg:px-3 text-xs rounded-lg border border-border bg-surface-2 text-text-muted hover:text-text hover:bg-surface-3 transition-colors"
                 title="คัดลอกแชททั้งหมด พร้อม stats"
+                aria-label="คัดลอกแชททั้งหมด"
               >
-                <Copy size={14} /> {copyAllLabel}
+                <Copy size={14} />
+                <span className="hidden lg:inline ml-1.5">{copyAllLabel}</span>
               </button>
             )}
             <button
               onClick={() => setLogPanelOpen((v) => !v)}
-              className={`inline-flex items-center gap-1.5 px-3 h-8 text-xs rounded-lg border border-border ${logPanelOpen ? "bg-brand/10 text-brand border-brand/30" : "bg-surface-2 text-text-muted"}`}
+              className={`inline-flex items-center justify-center w-8 h-8 lg:w-auto lg:px-3 text-xs rounded-lg border transition-colors ${
+                logPanelOpen
+                  ? "bg-brand/10 text-brand border-brand/30"
+                  : "bg-surface-2 text-text-muted border-border hover:text-text hover:bg-surface-3"
+              }`}
               title="เปิด/ปิด log panel"
+              aria-label="เปิด/ปิด log panel"
             >
-              <Terminal size={14} /> Log
+              <Terminal size={14} />
+              <span className="hidden lg:inline ml-1.5">Log</span>
             </button>
             <button
               onClick={() => setSidebarOpen(true)}
-              className="lg:hidden inline-flex items-center gap-1.5 px-3 h-8 text-xs rounded-lg border border-border bg-surface-2 text-text-muted"
+              className="lg:hidden inline-flex items-center justify-center w-8 h-8 text-xs rounded-lg border border-border bg-surface-2 text-text-muted hover:text-text hover:bg-surface-3 transition-colors"
+              title="ตั้งค่า"
+              aria-label="ตั้งค่า"
             >
-              <Settings2 size={14} /> ตั้งค่า
+              <Settings2 size={14} />
             </button>
           </div>
         </div>
+        <PlatformSwitcher platform={platform} />
 
         {/* Main layout — 3 panel: history | chat | log */}
         <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
@@ -1986,8 +2041,16 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                 return sorted.map((s) => (
                   <div
                     key={s.id}
+                    role="button"
+                    tabIndex={0}
                     onClick={() => loadSession(s.id)}
-                    className={`group flex items-center justify-between px-3 py-2 cursor-pointer border-b border-border/50 hover:bg-surface-2 ${currentSessionId === s.id ? "bg-brand/5 border-l-2 border-l-brand" : ""}`}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        loadSession(s.id);
+                      }
+                    }}
+                    className={`group flex items-center justify-between px-3 py-2 cursor-pointer border-b border-border/50 hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${currentSessionId === s.id ? "bg-brand/5 border-l-2 border-l-brand" : ""}`}
                   >
                     <div className="min-w-0 flex-1">
                       {editingSessionId === s.id ? (
@@ -2275,7 +2338,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                       // ⚡ Phase 2A — เรียก API ปิดแชท (state-driven) ไม่ใช่แค่ client toggle
                       if (currentSessionId) {
                         try {
-                          await fetch(`/api/chatbot/shopee/test-chat/sessions/${currentSessionId}/close`, {
+                          await fetch(`/api/chatbot/${platform}/test-chat/sessions/${currentSessionId}/close`, {
                             method: "POST",
                           });
                         } catch (e) {
@@ -2366,7 +2429,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                       )}
                       <button
                         onClick={() => removePendingImage(idx)}
-                        className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                        className="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-full bg-red-500 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
                         title="ลบ"
                         aria-label="ลบรูปนี้"
                       >
@@ -2379,13 +2442,22 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             </div>
           </section>
 
-          {/* ── Log Panel — แสดง detail แต่ละ process ── */}
+          {/* ── Log Panel — แสดง detail แต่ละ process ──
+              Desktop (xl+): sidebar ขวา
+              Mobile/Tablet (<xl): overlay จากขวา */}
           {logPanelOpen && (
-            <aside className="hidden lg:flex w-96 shrink-0 flex-col border-l border-border bg-surface overflow-y-auto">
-              <div className="flex items-center justify-between px-3 py-2.5 border-b border-border sticky top-0 bg-surface z-10">
-                <span className="text-xs font-semibold text-text-muted">Log / Process Detail</span>
-                <div className="flex items-center gap-1">
-                  {/* Copy all logs button */}
+            <>
+              {/* Mobile/Tablet backdrop */}
+              <div className="lg:hidden fixed inset-0 bg-black/50 z-40" onClick={() => setLogPanelOpen(false)} />
+              <aside className={`
+                flex flex-col border-l border-border bg-surface overflow-y-auto
+                lg:w-96 lg:static
+                fixed inset-y-0 right-0 z-50 w-80 max-w-[85vw] shadow-xl lg:shadow-none
+              `}>
+                <div className="flex items-center justify-between px-3 py-2.5 border-b border-border sticky top-0 bg-surface z-10">
+                  <span className="text-xs font-semibold text-text-muted">Log / Process Detail</span>
+                  <div className="flex items-center gap-1">
+                    {/* Copy all logs button */}
                   <button
                     onClick={() => {
                       const botMsgs = messages.filter((m) => m.role === "bot" && m.stats);
@@ -2486,8 +2558,16 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                   return logEntries.map(({ msg: m, bubbleCount, groupIdx }) => (
                     <div
                       key={m.id}
-                      className={`rounded-lg border p-2.5 cursor-pointer hover:border-brand/40 ${selectedLogMsg?.id === m.id ? "border-brand bg-brand/5" : "border-border bg-surface-2"}`}
+                      role="button"
+                      tabIndex={0}
+                      className={`rounded-lg border p-2.5 cursor-pointer hover:border-brand/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${selectedLogMsg?.id === m.id ? "border-brand bg-brand/5" : "border-border bg-surface-2"}`}
                       onClick={() => setSelectedLogMsg(selectedLogMsg?.id === m.id ? null : m)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setSelectedLogMsg(selectedLogMsg?.id === m.id ? null : m);
+                        }
+                      }}
                     >
                       <div className="text-xs font-medium mb-1 truncate">
                         {m.raw?.slice(0, 60) || "(bot)"}
@@ -2556,11 +2636,12 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                 })()}
               </div>
             </aside>
+            </>
           )}
 
           {/* Sidebar — settings + products context */}
           <aside
-            className={`bg-surface overflow-y-auto p-4 shrink-0 lg:w-80 lg:min-h-0 ${
+            className={`bg-surface overflow-y-auto p-4 shrink-0 lg:w-80 ${
               sidebarOpen
                 ? "fixed inset-y-0 right-0 z-50 w-80 max-w-[85vw] shadow-xl lg:static lg:shadow-none"
                 : "hidden lg:block"
@@ -3014,8 +3095,58 @@ export function TestChatClient({ platform }: { platform: Platform }) {
           </aside>
         </div>
 
-        {/* Mobile backdrop */}
+        {/* Mobile backdrop — settings sidebar */}
         {sidebarOpen && <div className="lg:hidden fixed inset-0 bg-black/40 z-40" onClick={() => setSidebarOpen(false)} />}
+
+        {/* Session list drawer — mobile/tablet */}
+        {sessionListOpen && (
+          <>
+            <div className="lg:hidden fixed inset-0 bg-black/40 z-40" onClick={() => setSessionListOpen(false)} />
+            <div className="lg:hidden fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] bg-surface shadow-xl flex flex-col overflow-hidden animate-slide-in">
+              <div className="flex items-center justify-between px-3 py-2.5 border-b border-border shrink-0">
+                <span className="text-xs font-semibold text-text-muted">ประวัติแชท</span>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => { createSession(); setSessionListOpen(false); }}
+                    className="inline-flex items-center gap-1 px-2 h-7 text-xs rounded-lg bg-brand text-white hover:bg-brand/90"
+                    title="สร้างแชทใหม่"
+                  >
+                    <Plus size={12} /> ใหม่
+                  </button>
+                  <button
+                    onClick={() => setSessionListOpen(false)}
+                    title="ปิด" aria-label="ปิด"
+                    className="w-7 h-7 rounded-md hover:bg-surface-2 flex items-center justify-center"
+                  >
+                    <X size={16} className="text-text-muted" />
+                  </button>
+                </div>
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                {/* Session list items — render same as sidebar */}
+                {sessions.length === 0 ? (
+                  <div className="text-center text-xs text-text-muted py-8">ไม่มีแชททดสอบ</div>
+                ) : (
+                  sessions.map((s) => (
+                    <button
+                      key={s.id}
+                      onClick={() => { loadSession(s.id); setSessionListOpen(false); }}
+                      className={`w-full text-left px-3 py-2.5 border-b border-border/50 hover:bg-surface-2 transition-colors ${
+                        s.id === currentSessionId ? "bg-brand/5 border-l-2 border-l-brand" : ""
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-medium text-text truncate">{s.title || "แชททดสอบ"}</span>
+                        <span className="text-[10px] text-text-subtle shrink-0">{s.updated_at ? new Date(s.updated_at).toLocaleDateString("th-TH", { month: "short", day: "numeric" }) : ""}</span>
+                      </div>
+                      <div className="text-[10px] text-text-muted mt-0.5 truncate">{s.shop || "—"}</div>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </>
   );

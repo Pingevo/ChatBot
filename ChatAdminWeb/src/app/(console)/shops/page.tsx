@@ -150,7 +150,26 @@ export default function ShopsPage() {
         </Button>
       }
     >
-      {/* Filters */}
+      {/* Search — full row */}
+        <div className="flex items-center gap-1.5">
+          <div className="relative flex-1">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle" />
+            <input
+              type="text"
+              placeholder="ค้นหาร้าน... (พิมพ์แล้วค้นหาทันที)"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              className="w-full h-9 pl-9 pr-3 rounded-lg border border-border bg-surface-2 text-text text-sm placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40"
+            />
+          </div>
+          {search && (
+            <Button size="sm" variant="ghost" onClick={() => { setSearchInput(""); }}>
+              ล้าง
+            </Button>
+          )}
+        </div>
+
+        {/* Filters */}
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex gap-1.5">
             {platformFilters.map((f) => (
@@ -167,34 +186,16 @@ export default function ShopsPage() {
               </button>
             ))}
           </div>
-
-          <div className="flex items-center gap-1.5 ml-auto">
-            <div className="relative">
-              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle" />
-              <input
-                type="text"
-                placeholder="ค้นหาร้าน... (พิมพ์แล้วค้นหาทันที)"
-                value={searchInput}
-                onChange={(e) => setSearchInput(e.target.value)}
-                className="w-56 h-9 pl-9 pr-3 rounded-lg border border-border bg-surface-2 text-text text-sm placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40"
-              />
-            </div>
-            {search && (
-              <Button size="sm" variant="ghost" onClick={() => { setSearchInput(""); }}>
-                ล้าง
-              </Button>
-            )}
-          </div>
         </div>
 
         {/* Sort options */}
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-text-muted">เรียงตาม:</span>
+        <div className="flex items-center gap-2 text-xs overflow-x-auto pb-1">
+          <span className="text-text-muted shrink-0">เรียงตาม:</span>
           {sortOptions.map((opt) => (
             <button
               key={opt.value}
               onClick={() => handleSort(opt.value)}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-colors ${
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-colors whitespace-nowrap ${
                 sortBy === opt.value
                   ? "bg-brand/15 text-brand"
                   : "bg-surface-2 text-text-muted hover:bg-pale-sky-soft"

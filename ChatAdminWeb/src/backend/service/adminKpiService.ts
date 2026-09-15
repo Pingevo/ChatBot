@@ -149,22 +149,94 @@ export async function getAdminKpiSummary(
     return r;
   }
 
-  // ── 1. test_chat_ratings ──
-  const tcrColl = await getCollection<{
-    session_id: string;
-    msg_index: number;
-    rated_by: string;
-    rated_at: Date;
-    star_rating?: number;
-    rating?: string;
-    comment?: string;
-  }>(COLLECTIONS.testChatRatings);
-  const tcrFilter: Record<string, unknown> = {};
-  if (adminId) tcrFilter.rated_by = adminId;
-  const tcrDate = dateFilter("rated_at", range);
-  if (tcrDate) Object.assign(tcrFilter, tcrDate);
-  const tcrDocs = await tcrColl.find(tcrFilter).sort({ rated_at: -1 }).limit(10000).toArray();
+  // ⚡ fire 3 queries พร้อมกัน (Promise.all) + projection ดึงเฉพาะ field ที่ใช้
+  //   — กัน timeout 30s: test_assignment doc embed ทั้ง conversation+qa ใหญ่มาก
+  //   และ query ทีละอัน sequential เสียเวลา 3 เท่า
+  const tcrDocsP = (async () => {
+    const coll = await getCollection<{
+      session_id: string;
+      msg_index: number;
+      rated_by: string;
+      rated_at: Date;
+      star_rating?: number;
+      rating?: string;
+      comment?: string;
+    }>(COLLECTIONS.testChatRatings);
+    const filter: Record<string, unknown> = {};
+    if (adminId) filter.rated_by = adminId;
+    const d = dateFilter("rated_at", range);
+    if (d) Object.assign(filter, d);
+    return coll
+      .find(filter)
+      .project({ session_id: 1, rated_by: 1, rated_at: 1, star_rating: 1, rating: 1, comment: 1 })
+      .sort({ rated_at: -1 })
+      .limit(10000)
+      .toArray();
+  })();
 
+  const taDocsP = (async () => {
+    const coll = await getCollection<{
+      conversation_id: string;
+      replayed_by?: string;
+      replayed_at?: Date;
+      conv_rated_by?: string;
+      conv_rated_at?: Date;
+      conv_star_rating?: number;
+      conv_rating?: string;
+      conv_comment?: string;
+      message_ratings?: Record<string, { rated_by?: string; rated_at?: Date; star_rating?: number; rating?: string; comment?: string }>;
+      created_at: Date;
+      updated_at: Date;
+    }>(COLLECTIONS.testAssignment);
+    // กรองตาม updated_at (replay ล่าสุด) — ถ้ามี range
+    // ⚠️ ห้าม push rated_by/replayed_by ลง filter — doc เดียวมีหลาย actor field จะนับขาด
+    const filter: Record<string, unknown> = {};
+    const d = dateFilter("updated_at", range);
+    if (d) Object.assign(filter, d);
+    return coll
+      .find(filter)
+      .project({ replayed_by: 1, replayed_at: 1, conv_rated_by: 1, conv_rated_at: 1, conv_comment: 1, message_ratings: 1, updated_at: 1 })
+      .sort({ updated_at: -1 })
+      .limit(10000)
+      .toArray();
+  })();
+
+  const srDocsP = (async () => {
+    const coll = await getCollection<{
+      shadow_reply_id: string;
+      conversation_id: string;
+      shop_id: string;
+      platform: string;
+      origin?: string;
+      generated_by?: string;
+      created_at: Date;
+      rating?: string;
+      rated_by?: string;
+      rated_at?: Date;
+      star_rating?: number;
+      star_rated_by?: string;
+      star_rated_at?: Date;
+      comment?: string;
+      comment_by?: string;
+      comment_at?: Date;
+    }>(COLLECTIONS.shadowReplies);
+    const filter: Record<string, unknown> = {
+      origin: { $in: ["manual", "manual_conversation"] },  // ไม่นับ worker
+      deleted_at: { $exists: false },
+    };
+    const d = dateFilter("created_at", range);
+    if (d) Object.assign(filter, d);
+    return coll
+      .find(filter)
+      .project({ generated_by: 1, rated_by: 1, rated_at: 1, star_rated_by: 1, star_rated_at: 1, comment_by: 1, comment_at: 1, origin: 1, created_at: 1 })
+      .sort({ created_at: -1 })
+      .limit(10000)
+      .toArray();
+  })();
+
+  const [tcrDocs, taDocs, srDocs] = await Promise.all([tcrDocsP, taDocsP, srDocsP]);
+
+  // ── 1. test_chat_ratings ──
   const tcrSessions = new Set<string>();
   let tcrStarSum = 0;
   for (const d of tcrDocs) {
@@ -212,25 +284,6 @@ export async function getAdminKpiSummary(
   }
 
   // ── 2. test_assignment ──
-  const taColl = await getCollection<{
-    conversation_id: string;
-    replayed_by?: string;
-    replayed_at?: Date;
-    conv_rated_by?: string;
-    conv_rated_at?: Date;
-    conv_star_rating?: number;
-    conv_rating?: string;
-    conv_comment?: string;
-    message_ratings?: Record<string, { rated_by?: string; rated_at?: Date; star_rating?: number; rating?: string; comment?: string }>;
-    created_at: Date;
-    updated_at: Date;
-  }>(COLLECTIONS.testAssignment);
-  const taFilter: Record<string, unknown> = {};
-  // กรองตาม updated_at (replay ล่าสุด) — ถ้ามี range
-  const taDate = dateFilter("updated_at", range);
-  if (taDate) Object.assign(taFilter, taDate);
-  const taDocs = await taColl.find(taFilter).sort({ updated_at: -1 }).limit(10000).toArray();
-
   for (const d of taDocs) {
     // replay count
     if (d.replayed_by && d.replayed_at) {
@@ -251,7 +304,8 @@ export async function getAdminKpiSummary(
     }
     // per-message ratings
     if (d.message_ratings) {
-      for (const mr of Object.values(d.message_ratings)) {
+      type MsgRating = { rated_by?: string; rated_at?: Date; star_rating?: number; rating?: string; comment?: string };
+      for (const mr of Object.values(d.message_ratings as Record<string, MsgRating>)) {
         if (!mr.rated_by || !mr.rated_at) continue;
         const inRange = (!range.from || mr.rated_at >= range.from) && (!range.to || mr.rated_at <= range.to);
         if (!inRange) continue;
@@ -264,32 +318,6 @@ export async function getAdminKpiSummary(
   }
 
   // ── 3. shadow_replies (manual เท่านั้น) ──
-  const srColl = await getCollection<{
-    shadow_reply_id: string;
-    conversation_id: string;
-    shop_id: string;
-    platform: string;
-    origin?: string;
-    generated_by?: string;
-    created_at: Date;
-    rating?: string;
-    rated_by?: string;
-    rated_at?: Date;
-    star_rating?: number;
-    star_rated_by?: string;
-    star_rated_at?: Date;
-    comment?: string;
-    comment_by?: string;
-    comment_at?: Date;
-  }>(COLLECTIONS.shadowReplies);
-  const srFilter: Record<string, unknown> = {
-    origin: { $in: ["manual", "manual_conversation"] },  // ไม่นับ worker
-    deleted_at: { $exists: false },
-  };
-  const srDate = dateFilter("created_at", range);
-  if (srDate) Object.assign(srFilter, srDate);
-  const srDocs = await srColl.find(srFilter).sort({ created_at: -1 }).limit(10000).toArray();
-
   for (const d of srDocs) {
     // generate count
     if (d.generated_by) {
@@ -354,7 +382,12 @@ export async function getTestChatSessionsByAdmin(
   const filter: Record<string, unknown> = { rated_by: adminId };
   const date = dateFilter("rated_at", range);
   if (date) Object.assign(filter, date);
-  const docs = await coll.find(filter).sort({ rated_at: -1 }).limit(5000).toArray();
+  const docs = await coll
+    .find(filter)
+    .project({ session_id: 1, platform: 1, shop: 1, rated_by: 1, rated_at: 1, star_rating: 1, rating: 1, comment: 1 })
+    .sort({ rated_at: -1 })
+    .limit(5000)
+    .toArray();
 
   // group by session_id
   const map = new Map<string, AdminKpiDrilldownSession>();
@@ -417,7 +450,13 @@ export async function getTestAssignmentReplaysByAdmin(
   const filter: Record<string, unknown> = { replayed_by: adminId };
   const date = dateFilter("replayed_at", range);
   if (date) Object.assign(filter, date);
-  const docs = await coll.find(filter).sort({ replayed_at: -1 }).limit(1000).toArray();
+  // ⚡ projection — ตัด qa array ออก (doc ใหญ่มาก กัน timeout)
+  const docs = await coll
+    .find(filter)
+    .project({ conversation_id: 1, shop_name: 1, platform: 1, total_messages: 1, processed_messages: 1, final_status: 1, replayed_at: 1, updated_at: 1, conv_star_rating: 1, conv_rating: 1, conv_comment: 1, message_ratings: 1 })
+    .sort({ replayed_at: -1 })
+    .limit(1000)
+    .toArray();
 
   return docs.map((d) => ({
     conversation_id: d.conversation_id,
@@ -458,7 +497,13 @@ export async function getShadowRepliesByAdmin(
   };
   const date = dateFilter("created_at", range);
   if (date) Object.assign(filter, date);
-  const docs = await coll.find(filter).sort({ created_at: -1 }).limit(1000).toArray();
+  // ⚡ projection — ตัด reply body/context ออก (doc ใหญ่)
+  const docs = await coll
+    .find(filter)
+    .project({ shadow_reply_id: 1, conversation_id: 1, shop_id: 1, platform: 1, origin: 1, generated_by: 1, created_at: 1, bot_source: 1, rating: 1, star_rating: 1, comment: 1 })
+    .sort({ created_at: -1 })
+    .limit(1000)
+    .toArray();
 
   return docs.map((d) => ({
     shadow_reply_id: d.shadow_reply_id,

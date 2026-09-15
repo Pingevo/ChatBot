@@ -200,6 +200,19 @@ export default function TestChatResultPage() {
     return () => window.removeEventListener("test-chat-result-lightbox", onLightbox as EventListener);
   }, []);
 
+  // ESC to close lightbox
+  useEffect(() => {
+    if (!lightbox) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setLightbox(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [lightbox]);
+
   const loadAdmins = useCallback(async () => {
     try {
       const r = await api().get<{ users: AdminInfo[] }>("/users/list");

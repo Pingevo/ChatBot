@@ -53,6 +53,7 @@ def _load_vector_store() -> dict[str, Any] | None:
     - item_ids: numpy array ของ item_id (str)
     - embeddings: numpy array shape (n, 1024) normalize แล้ว
     - texts: numpy array ของ text ที่ embed
+    - shops: numpy array ของ shopname (str) — ⚡ BUG-H fix สำหรับกรอง shop ก่อน similarity
 
     ถ้าไฟล์ไม่มี หรือ numpy ไม่ได้ติดตั้ง คืน None.
     """
@@ -64,16 +65,26 @@ def _load_vector_store() -> dict[str, Any] | None:
     try:
         import numpy as np
         # 🔒 M1: Try loading without pickle first (safe), fall back with warning
+        # ⚡ BUG-H fix — ถ้า access data["texts"] ล้มเหลว (object array) ให้ re-load ด้วย pickle
+        #   ก่อนหน้านี้: np.load(allow_pickle=False) โหลด header ได้ แต่ access ล้มเหลวที่ data["texts"]
+        #   → except ด้านนอกจับได้ → return None → vector search ใช้ไม่ได้
+        #   ตอนนี้: ถ้า access ล้มเหลว ให้ re-load ด้วย allow_pickle=True แล้วใช้ต่อ
         try:
             data = np.load(_EMBEDDINGS_PATH, allow_pickle=False)
+            _ = data["texts"]  # ทดสอบ access จริง (lazy load)
         except Exception:
             print("WARN: loading embeddings with allow_pickle=True (legacy format) — consider rebuilding with build_embeddings.py", file=sys.stderr)
             data = np.load(_EMBEDDINGS_PATH, allow_pickle=True)
+        # ⚡ BUG-H fix — โหลด shops ด้วย (ถ้ามี — backward compat กับ .npz เก่าที่ไม่มี shops)
+        _shops = data["shops"] if "shops" in data.files else None
         _VECTOR_STORE = {
             "item_ids": data["item_ids"],
             "embeddings": data["embeddings"],  # shape (n, 1024) float32
             "texts": data["texts"],
+            "shops": _shops,  # None ถ้า .npz เก่า (ยังไม่ re-build)
         }
+        if _shops is None:
+            print("WARN: .npz ไม่มี field 'shops' — กรุณา re-build embeddings (python scripts/build_embeddings.py)", file=sys.stderr)
         return _VECTOR_STORE
     except Exception as exc:
         print(f"WARN: cannot load vector store: {exc}")
@@ -84,6 +95,7 @@ def vector_search(
     query: str,
     top_k: int = 30,
     item_status: str | None = "NORMAL",
+    shop_filter: str | None = None,
 ) -> list[str]:
     """ค้นสินค้าที่ใกล้เคียงกับ query ด้วย cosine similarity.
 
@@ -94,6 +106,9 @@ def vector_search(
         query: คำถามลูกค้า
         top_k: จำนวนสินค้าที่จะคืน
         item_status: (deprecated, กรองใน fetch_products แทน)
+        shop_filter: ⚡ BUG-H fix — กรองเฉพาะร้านนี้ก่อนคำนวณ similarity
+            ถ้าระบุ จะกรอง embeddings เฉพาะสินค้าที่ shopname ตรงก่อน dot product
+            กันปัญหาสินค้าร้านอื่น semantic ใกล้กว่าแซงสินค้าร้านที่ถาม
 
     คืน list ของ (item_id_str, similarity_score) เรียงจาก score สูงไปต่ำ.
     """
@@ -103,20 +118,36 @@ def vector_search(
 
     try:
         import numpy as np
-        from chatbot.shopeechat.embedding import embed_query
+        from .embedding import embed_query
     except ImportError:
         return []
 
     # embed คำถาม
     q_vec = embed_query(query)  # shape (1024,)
 
-    # คำนวณ cosine similarity (dot product เพราะ normalize แล้ว)
+    # ⚡ BUG-H fix — กรอง shop ก่อน similarity (ถ้ามี shop_filter และ .npz มี field shops)
+    #   ก่อนหน้านี้: dot product ทุกสินค้าทุกร้าน → top_k อาจเต็มไปด้วยสินค้าร้านอื่น
+    #   → สินค้าร้านที่ถามไม่ติด top_k → LLM ไม่เห็น → แต่ง "ทุกรุ่นเลิกจำหน่าย"
+    #   ตอนนี้: กรองเฉพาะสินค้าร้านที่ถามก่อน → dot product → top_k ได้สินค้าร้านนั้นแน่นอน
+    _shops = vs.get("shops")
+    if shop_filter and _shops is not None:
+        # กรองเฉพาะสินค้าที่ shopname ตรง (case-insensitive)
+        _shop_mask = np.char.lower(_shops.astype(str)) == shop_filter.lower()
+        _n_match = int(_shop_mask.sum())
+        if _n_match == 0:
+            # ร้านนี้ไม่มีใน embeddings เลย → คืน empty (fetch_products จะ fallback ไป regex)
+            return []
+        # กรอง embeddings + item_ids เฉพาะร้านนี้
+        _emb_filtered = vs["embeddings"][_shop_mask]
+        _ids_filtered = vs["item_ids"][_shop_mask]
+        sims = _emb_filtered @ q_vec  # shape (n_match,)
+        top_idx = np.argsort(sims)[::-1][:top_k]
+        result = [(str(_ids_filtered[i]), float(sims[i])) for i in top_idx]
+        return result
+
+    # fallback: ไม่มี shop_filter หรือ .npz เก่าไม่มี shops → ค้นทุกร้านเหมือนเดิม
     sims = vs["embeddings"] @ q_vec  # shape (n,)
-
-    # เรียงลำดับ
     top_idx = np.argsort(sims)[::-1][:top_k]
-
-    # คืน list ของ (item_id, similarity_score) เพื่อให้ fetch_products ใช้ re-rank ได้
     result = [(str(vs["item_ids"][i]), float(sims[i])) for i in top_idx]
     return result
 
@@ -343,7 +374,11 @@ def _clean_description(desc: str, message: str = "") -> str:
                "ของแถม", "แถม", "gift", "free", "โปรโมชัน", "promotion",
                "อุปกรณ์", "accessories", "ฟรี", "คู่มือ", "แท่นชาร์จ", "สายชาร์จ",
                # มอก. (TISI standard) — ลูกค้าถามเรื่อง มอก. ต้องเห็น description ที่มี มอก.
-               "มอก.", "มอก", "tisi", "มาตรฐาน",)
+               "มอก.", "มอก", "tisi", "มาตรฐาน",
+               # ⚡ BUG-O fix — เพิ่ม keyword ที่ QA พบว่าไม่ match (ทำให้ description ไม่ถึง LLM)
+               "ai", "gpt", "shark gpt", "ecg", "สื่อสาร", "ฟังก์ชัน",
+               "smart assistant", "ผู้ช่วย", "chatbot", "voice", "เสียง",
+               "nfc", "bluetooth", "gps", "wifi", "5g", "4g",)
     shipping_kw = ("จัดส่ง", "ส่งสินค้า", "เวลาทำการ", "บริการแชท",
                    "shipping", "delivery", "เปิดทำการ", "ตัดรอบ")
 
@@ -575,12 +610,20 @@ def to_product_card(doc: dict, message: str = "") -> dict:
         "dimension": doc.get("dimension"),
         "total_stock": total_stock,
         "sold_out": total_stock == 0,
+        # ⚡ BUG-K fix — _available_for_sale เป็นเกณฑ์เดียวที่ LLM ควรใช้ตัดสินใจ "พร้อมส่ง/มีสต็อก"
+        #   = status=NORMAL AND total_stock>0 (UNLIST/SELLER_DELETE/BANNED/DELETED → false แม้มี stock)
+        #   เดิม computed ทีหลังใน app.py Phase 3d ทำให้ card ดู "มีของ" ทั้งที่ UNLIST
+        "_available_for_sale": doc.get("item_status") == "NORMAL" and total_stock > 0,
         # ข้อมูลโปรโมชั่น (ใช้ตอน re-rank และให้ LLM บอกลูกค้าได้)
         "has_promotion": _has_active_promotion(doc),
         "is_flash_sale": bool(doc.get("is_flash_sale")),
         # description กรองตามคำถาม — เก็บเฉพาะส่วนที่เกี่ยวข้อง (สเปก/รับประกัน/จัดส่ง)
         # จำกัด 3000 ตัวอักษร ประหยัด token
         "description_excerpt": _clean_description(doc.get("description") or "", message),
+        # ⚡ BUG-O fix — เก็บ raw description (truncate 4000) เป็น fallback
+        #   กรณี _clean_description คืน "" เพราะ keyword ไม่ match แต่ข้อมูลจริงมีใน description
+        #   LLM จะได้เห็นข้อมูลแม้ตอน keyword ไม่ตรง (เช่น "มี AI ไหม", "รองรับ ECG")
+        "raw_description": (doc.get("description") or "")[:4000],
         "variants": [
             {
                 "name": m.get("model_name"),
@@ -2974,7 +3017,10 @@ def fetch_products(
         if vs is not None:
             try:
                 # ดึงเยอะกว่า limit เพื่อให้มีตัวเลือกพอสำหรับ re-rank
-                top_results = vector_search(message, top_k=max(limit * 4, 30))
+                # ⚡ BUG-H fix — ส่ง shop_filter ไป vector_search ให้กรอง shop ก่อน similarity
+                #   ก่อนหน้านี้: vector_search ค้นทุกร้าน → top_k เต็มไปด้วยสินค้าร้านอื่น
+                #   → สินค้าร้านที่ถามไม่ติด top_k → LLM ไม่เห็น → แต่ง "ทุกรุ่นเลิกจำหน่าย"
+                top_results = vector_search(message, top_k=max(limit * 4, 30), shop_filter=shop_filter)
                 if top_results:
                     # top_results เป็น list ของ (item_id_str, similarity_score)
                     # สร้าง dict สำหรับเก็บ similarity score ของแต่ละ item_id

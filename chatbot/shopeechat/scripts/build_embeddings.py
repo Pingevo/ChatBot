@@ -57,6 +57,8 @@ def main() -> None:
     print("\nBuilding text for embedding...")
     texts = [build_doc_text(d) for d in docs]
     item_ids = [str(d["item_id"]) for d in docs]
+    # ⚡ BUG-H fix — เก็บ shopname ลง .npz ด้วย เพื่อให้ vector_search กรอง shop ก่อน similarity
+    shops = [str(d.get("shopname") or "") for d in docs]
 
     # แสดงตัวอย่าง
     print("\nSample texts:")
@@ -91,6 +93,7 @@ def main() -> None:
         item_ids=np.array(item_ids, dtype="<U24"),  # ObjectId strings are 24 chars
         embeddings=embeddings,
         texts=np.array(texts, dtype=object),  # texts vary in length — keep object but verify
+        shops=np.array(shops, dtype="<U64"),  # ⚡ BUG-H fix — shopname สำหรับกรอง shop ก่อน similarity
     )
     size_mb = OUTPUT_PATH.stat().st_size / 1024 / 1024
     print(f"  saved {size_mb:.1f} MB")
@@ -102,7 +105,9 @@ def main() -> None:
     print(f"  item_ids: {loaded['item_ids'].shape} (dtype: {loaded['item_ids'].dtype})")
     print(f"  embeddings: {loaded['embeddings'].shape}")
     print(f"  texts: {loaded['texts'].shape}")
+    print(f"  shops: {loaded['shops'].shape} (dtype: {loaded['shops'].dtype})")  # ⚡ BUG-H fix
     print(f"  sample item_id: {loaded['item_ids'][0]}")
+    print(f"  sample shop: {loaded['shops'][0]}")  # ⚡ BUG-H fix
     print(f"  sample text: {str(loaded['texts'][0])[:80]}")
 
     print("\nAll done!")

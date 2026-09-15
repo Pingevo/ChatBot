@@ -463,7 +463,7 @@ export default function AdminChatResultPage() {
         {/* Mobile back button */}
         <button
           onClick={() => setMobileView("list")}
-          className="md:hidden absolute top-3 left-3 z-10 w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+          className="md:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
           title="กลับ"
           aria-label="กลับ"
         >

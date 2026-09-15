@@ -292,6 +292,19 @@ export default function ShopSettingsPage() {
     setShopSearch("");
   };
 
+  // ESC to close modal (เหมือนกด backdrop)
+  useEffect(() => {
+    if (!showModal) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeModal();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showModal, closeModal]);
+
   // ── toggle platform in form ──
   const togglePlatform = (p: PersonaPlatform) => {
     setSelectedPlatforms((prev) =>

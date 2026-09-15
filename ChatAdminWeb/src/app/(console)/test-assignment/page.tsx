@@ -14,18 +14,21 @@ import { MessageContent } from "@/components/chat/MessageContent";
 import { DateBanner, dayKey, formatDateLabel } from "@/components/shadow/DateBanner";
 import { splitAnswerSegments } from "@/lib/answerSegments";
 import { toast, useToastError } from "@/components/ui/Toast";
+import { confirm } from "@/components/ui/ConfirmDialog";
 import {
   FlaskConical, RefreshCw, Zap, Users, Activity,
   CheckCircle, XCircle, AlertCircle, ChevronDown,
   Store, Bot, User, Star, Search, BarChart3,
   PlayCircle, PauseCircle, MessageSquare, Clock,
   Copy, Check, History, Trash2, RotateCcw, List,
+  ArrowLeft, ArrowDownUp,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
 import { api } from "@/lib/apiClient";
 import { usePolling } from "@/lib/usePolling";
 import { useSharedConversations } from "@/lib/useSharedConversations";
 import { AnnotationDot, type Annotation } from "@/components/ui/AnnotationDot";
+import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import type { Platform, Conversation } from "@/lib/types";
 
 // ─── Types ────────────────────────────────────────────────
@@ -222,6 +225,8 @@ const modeLabels: Record<string, string> = { equal_global: "Global", equal_per_s
 type StatusFilter = "all" | "bot" | "admin" | "handoff" | "closed" | "error";
 type PlatformFilter = "all" | Platform;
 type SortOption = "recent" | "oldest" | "platform";
+// ⚡ Mobile/Tablet — single-panel navigation (เหมือน tickets/shadow-inbox)
+type MobileView = "list" | "chat" | "stat";
 
 function timeAgo(iso?: string): string {
   if (!iso) return "—";
@@ -277,6 +282,9 @@ export default function TestAssignmentPage() {
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [showBatchDd, setShowBatchDd] = useState(false);
   const [batchAnnotation, setBatchAnnotation] = useState<Annotation | null>(null);
+  const [mobileCompareTab, setMobileCompareTab] = useState<"zaapi" | "bot">("bot");
+  // ⚡ Mobile/Tablet — single-panel nav: list → chat → stat (เหมือน tickets/shadow-inbox)
+  const [mobileView, setMobileView] = useState<MobileView>("list");
 
   // ⚡ Copy chat — แยกฝั่ง zaapi หรือ bot (เหมือน shadow-inbox)
   // side="zaapi" → ลูกค้า + Zaapi/Admin reply (จาก detail.messages)
@@ -416,6 +424,7 @@ export default function TestAssignmentPage() {
   //   และโหลด replay batches list สำหรับ batch selector
   const loadDetail = useCallback(async (convId: string, replayBatchId?: string) => {
     setSelectedId(convId);
+    setMobileView("chat"); // ⚡ mobile/tablet — เปิด panel แชทเมื่อเลือก conversation
     setDetailLoading(true);
     setDetail(null);
     setSelectedBatchId(replayBatchId || null);
@@ -474,6 +483,11 @@ export default function TestAssignmentPage() {
     setShowBatchDd(false);
     if (selectedId) loadDetail(selectedId, batchId);
   }, [selectedId, loadDetail]);
+
+  // ⚡ Mobile/Tablet — กลับไป panel list (single-panel nav)
+  const handleBack = useCallback(() => {
+    setMobileView("list");
+  }, []);
 
   // ── Replay ──
   // ⚡ Phase 3B-7 — หลัง replay สำเร็จ → reload detail ด้วย replay_batch_id ของรอบใหม่
@@ -688,7 +702,12 @@ export default function TestAssignmentPage() {
 
   // ── ⚡ Phase 3B-2 — Soft delete replay ──
   async function handleSoftDelete(conversationId: string) {
-    if (!confirm(`ลบ replay result ของแชทนี้? (soft delete — กู้คืนได้)`)) return;
+    if (!(await confirm.ask({
+      title: "ลบ replay result ของแชทนี้?",
+      message: "soft delete — กู้คืนได้",
+      variant: "danger",
+      confirmText: "ลบ",
+    }))) return;
     try {
       await api().post("/test-assignment", { action: "soft_delete", conversation_id: conversationId });
       toast.success("ลบแล้ว (soft delete)");
@@ -764,6 +783,14 @@ export default function TestAssignmentPage() {
   const [showSortDd, setShowSortDd] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [statTab, setStatTab] = useState<"per_chat" | "all_history" | "replay">("per_chat");
+  // ⚡ collapsible filter section (เหมือน ChatList) — พับ/กางตัวกรอง
+  const [showFilters, setShowFilters] = useState(false);
+  const activeFilterCount = (platformFilter !== "all" ? 1 : 0) + (sortBy !== "recent" ? 1 : 0);
+  const clearFilters = useCallback(() => {
+    setPlatformFilter("all");
+    setSortBy("recent");
+    setSearch("");
+  }, []);
 
   // ⚡ Incremental rendering — โหลดทีละ 50 รายการ เพื่อลดการหน่วง (เหมือน ChatList ของ shadow-bot)
   //    เมื่อ filter/sort เปลี่ยน → reset เป็น 50 รายการแรก
@@ -836,14 +863,41 @@ export default function TestAssignmentPage() {
 
   return (
     <div className="h-full flex overflow-hidden">
-      {/* ── Panel ซ้าย: Inbox list (เหมือน ShadowInboxList) ── */}
-      <div className="h-full flex flex-col w-80 min-w-0 shrink-0 border-r border-border overflow-hidden">
+      {/* ── Panel ซ้าย: Inbox list ── */}
+      <div className={`${mobileView === "list" ? "flex" : "hidden"} lg:flex h-full flex-col w-full lg:w-80 min-w-0 shrink-0 border-r border-border overflow-hidden`}>
         {/* Header */}
         <div className="px-3 py-3 border-b border-border bg-surface shrink-0">
           <div className="flex items-center gap-2 mb-2">
             <FlaskConical size={16} className="text-brand" />
             <h1 className="text-sm font-bold text-text">ทดสอบจ่ายงาน</h1>
             <Badge tone="brand" className="ml-auto">{tab === "all" ? (sharedTotalCount || filteredConvs.length) : tab === "history" ? historyRows.length : rollProgress ? rollProgress.done : ""}</Badge>
+            {tab === "all" && (
+              <>
+                {activeFilterCount > 0 && (
+                  <button onClick={clearFilters} className="text-[10px] text-text-muted hover:text-vibrant-coral transition-colors shrink-0">
+                    ล้าง ({activeFilterCount})
+                  </button>
+                )}
+                {/* Filter toggle button — พับ/กางตัวกรอง (เหมือน ChatList) */}
+                <button
+                  onClick={() => setShowFilters(!showFilters)}
+                  className={`flex items-center gap-1 h-6 px-2 rounded text-[11px] font-medium transition-colors shrink-0 ${
+                    showFilters || activeFilterCount > 0
+                      ? "bg-brand/10 text-brand"
+                      : "bg-surface-2 text-text-muted hover:text-text"
+                  }`}
+                  title={showFilters ? "ซ่อนตัวกรอง" : "แสดงตัวกรอง"}
+                >
+                  <ArrowDownUp size={11} />
+                  ตัวกรอง
+                  {activeFilterCount > 0 && (
+                    <span className="ml-0.5 px-1 rounded-full bg-brand text-white text-[9px] leading-none">
+                      {activeFilterCount}
+                    </span>
+                  )}
+                </button>
+              </>
+            )}
           </div>
 
           {/* ⚡ Phase 3B-2 — Tabs: all / roll / history */}
@@ -883,8 +937,9 @@ export default function TestAssignmentPage() {
             />
           </div>
 
-          {/* Filters */}
-          <div className="flex items-center gap-1 flex-wrap">
+          {/* Filters — collapsible (เหมือน ChatList) */}
+          {showFilters && (
+          <div className="flex items-center gap-1 flex-wrap pt-1 border-t border-border/50">
             {/* Platform */}
             <div className="relative">
               <button onClick={() => { setShowPlatformDd(!showPlatformDd); setShowStatusDd(false); setShowSortDd(false); }}
@@ -927,6 +982,7 @@ export default function TestAssignmentPage() {
               )}
             </div>
           </div>
+          )}
         </>
         )}
         </div>
@@ -1141,12 +1197,38 @@ export default function TestAssignmentPage() {
         )}
       </div>
 
-      {/* ── Panel กลาง: Chat (เหมือน ShadowReplyPanel + ChatList) ── */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Header — min-h ให้ตรง panel ขวา */}
-        <div className="px-4 py-3 min-h-[60px] flex items-center justify-between border-b border-border bg-surface shrink-0">
+      {/* ── Panel กลาง: Chat ── */}
+      <div className={`${mobileView === "chat" ? "flex" : "hidden"} lg:flex flex-1 flex-col min-w-0 overflow-hidden relative`}>
+        {/* Mobile back button */}
+        <button
+          onClick={handleBack}
+          className="lg:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+          title="กลับ"
+          aria-label="กลับ"
+        >
+          <ArrowLeft size={16} className="text-text" />
+        </button>
+        {/* Mobile stat button */}
+        {selectedId && (
+          <button
+            onClick={() => setMobileView("stat")}
+            className="lg:hidden absolute top-3 right-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+            title="สถิติ"
+            aria-label="สถิติ"
+          >
+            <BarChart3 size={16} className="text-text" />
+          </button>
+        )}
+        {/* Header — min-h ให้ตรง panel ขวา (pl-12/pr-12 บน mobile/tablet กันชน floating back/stat buttons) */}
+        <div className="pl-12 pr-12 lg:px-4 py-3 min-h-[60px] flex items-center justify-between border-b border-border bg-surface shrink-0">
           <div className="flex items-center gap-2 min-w-0">
-            <FlaskConical size={16} className="text-brand shrink-0" />
+            {/* Mobile/Tablet — platform icon หน้าชื่อลูกค้า */}
+            {detail?.conversation && (
+              <span className="lg:hidden shrink-0 flex items-center">
+                <PlatformIcon platform={detail.conversation.platform as Platform} size={18} />
+              </span>
+            )}
+            <FlaskConical size={16} className="text-brand shrink-0 hidden lg:block" />
             <h2 className="text-sm font-semibold text-text truncate">
               {detail?.conversation ? `${detail.conversation.to_name || detail.conversation.conversation_id}` : "เลือก conversation"}
             </h2>
@@ -1222,7 +1304,7 @@ export default function TestAssignmentPage() {
                 {replaying ? <Loading size={12} /> : <RefreshCw size={12} />} Replay
               </Button>
             )}
-            <button onClick={() => setRightCollapsed(!rightCollapsed)} className="p-1.5 rounded-md hover:bg-surface-2 text-text-muted">
+            <button onClick={() => setRightCollapsed(!rightCollapsed)} className="hidden lg:block p-1.5 rounded-md hover:bg-surface-2 text-text-muted" title={rightCollapsed ? "แสดง panel สถิติ" : "ซ่อน panel สถิติ"} aria-label={rightCollapsed ? "แสดง panel สถิติ" : "ซ่อน panel สถิติ"}>
               {rightCollapsed ? <ChevronDown size={14} className="rotate-90" /> : <ChevronDown size={14} className="-rotate-90" />}
             </button>
           </div>
@@ -1284,9 +1366,25 @@ export default function TestAssignmentPage() {
 
               {/* ── Side-by-side: ซ้าย=user/zaapi (แชทจริง) | ขวา=user/bot (replay) ── เต็มจอ */}
               {(detail.messages.length > 0 || (replay && replay.qa.length > 0)) && (
-                <div className="flex-1 flex min-h-0 overflow-hidden">
+                <>
+                {/* Mobile/Tablet tab switcher */}
+                <div className="lg:hidden flex shrink-0 border-b border-border bg-surface">
+                  <button
+                    onClick={() => setMobileCompareTab("zaapi")}
+                    className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors ${mobileCompareTab === "zaapi" ? "text-text border-b-2 border-brand" : "text-text-muted"}`}
+                  >
+                    <Bot size={12} /> Zaapi / Admin
+                  </button>
+                  <button
+                    onClick={() => setMobileCompareTab("bot")}
+                    className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors ${mobileCompareTab === "bot" ? "text-text border-b-2 border-brand" : "text-text-muted"}`}
+                  >
+                    <FlaskConical size={12} /> Bot ของเรา
+                  </button>
+                </div>
+                <div className="flex-1 flex min-h-0 overflow-hidden relative">
                   {/* ── ฝั่งซ้าย: Zaapi / admin / user (แชทจริง DB) ── */}
-                  <div className="flex-1 flex flex-col border-r border-border min-w-0">
+                  <div className={`flex-1 flex flex-col border-r border-border min-w-0 lg:flex ${mobileCompareTab === "zaapi" ? "flex absolute inset-0 lg:relative" : "hidden lg:flex"}`}>
                     <div className="px-3 py-2 border-b border-border bg-surface-2 shrink-0">
                       <div className="flex items-center justify-between gap-1.5">
                         <div className="flex items-center gap-1.5">
@@ -1303,7 +1401,7 @@ export default function TestAssignmentPage() {
                           disabled={detail.messages.length === 0}
                           title="คัดลอกแชทฝั่ง Zaapi / Admin"
                           aria-label="คัดลอกแชทฝั่ง Zaapi / Admin"
-                          className="w-7 h-7 rounded-md flex items-center justify-center text-text-muted hover:text-text hover:bg-surface transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          className="w-9 h-9 rounded-md flex items-center justify-center text-text-muted hover:text-text hover:bg-surface transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           {copiedSide === "zaapi" ? <Check size={14} className="text-success" /> : <Copy size={14} />}
                         </button>
@@ -1348,7 +1446,7 @@ export default function TestAssignmentPage() {
                   </div>
 
                   {/* ── ฝั่งขวา: Bot ของเรา (replay) ── */}
-                  <div className="flex-1 flex flex-col min-w-0">
+                  <div className={`flex-1 flex flex-col min-w-0 lg:flex ${mobileCompareTab === "bot" ? "flex absolute inset-0 lg:relative" : "hidden lg:flex"}`}>
                     <div className="px-3 py-2 border-b border-border bg-brand/5 shrink-0">
                       <div className="flex items-center justify-between gap-1.5">
                         <div className="flex items-center gap-1.5">
@@ -1365,7 +1463,7 @@ export default function TestAssignmentPage() {
                           disabled={!replay || replay.qa.length === 0}
                           title="คัดลอกแชทฝั่ง Bot เรา"
                           aria-label="คัดลอกแชทฝั่ง Bot เรา"
-                          className="w-7 h-7 rounded-md flex items-center justify-center text-text-muted hover:text-text hover:bg-surface transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          className="w-9 h-9 rounded-md flex items-center justify-center text-text-muted hover:text-text hover:bg-surface transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           {copiedSide === "bot" ? <Check size={14} className="text-success" /> : <Copy size={14} />}
                         </button>
@@ -1458,8 +1556,6 @@ export default function TestAssignmentPage() {
                                                 role: "model",
                                                 text: seg,
                                                 timestamp: "",
-                                                // ⚡ ส่ง products ให้ segment สุดท้าย เพื่อ render item cards
-                                                products: (i === segments.length - 1 && qa.bot_products?.length ? qa.bot_products : undefined) as never,
                                               } as never}
                                               variant="out"
                                             />
@@ -1498,18 +1594,27 @@ export default function TestAssignmentPage() {
                     </div>
                   </div>
                 </div>
+                </>
               )}
             </div>
           )}
         </div>
       </div>
 
-      {/* ── Panel ขวา: Stats (เหมือน ShadowStatPanel — tab: Per Chat / All History / Replay) ── */}
-      {!rightCollapsed && (
-        <div className="hidden md:flex h-full shrink-0 overflow-hidden w-72 border-l border-border">
-          <div className="h-full flex flex-col w-full overflow-hidden">
+      {/* ── Panel ขวา: Stats ── */}
+      <div className={`${mobileView === "stat" ? "flex" : "hidden"} ${rightCollapsed ? "lg:hidden" : "lg:flex"} h-full shrink-0 overflow-hidden w-full lg:w-72 border-l border-border`}>
+        <div className="h-full flex flex-col w-full overflow-hidden">
             {/* Tab menu — min-h + flex items-center ให้ตรง panel กลาง */}
             <div className="px-4 py-3 min-h-[60px] flex items-center border-b border-border bg-surface shrink-0">
+              {/* Mobile/Tablet back button — กลับไป panel แชท */}
+              <button
+                onClick={() => setMobileView("chat")}
+                className="lg:hidden -ml-2 mr-2 w-9 h-9 rounded-lg flex items-center justify-center text-text-muted hover:text-text hover:bg-surface-2 transition-colors shrink-0"
+                title="กลับ"
+                aria-label="กลับ"
+              >
+                <ArrowLeft size={16} />
+              </button>
               <div className="flex items-center gap-1">
                 {([
                   { k: "per_chat", l: "Per Chat" },
@@ -1931,9 +2036,8 @@ export default function TestAssignmentPage() {
                 </>
               )}
             </div>
-          </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }

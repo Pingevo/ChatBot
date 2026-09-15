@@ -190,23 +190,23 @@ export default function TestResultsPage() {
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className="min-h-[calc(100vh-3.5rem)] bg-base px-6 py-5 space-y-6">
+      <div className="min-h-[calc(100vh-3.5rem)] bg-base px-3 lg:px-6 py-4 lg:py-5 space-y-4 lg:space-y-6">
         {/* ── Header ── */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-bold text-text">Test Results</h1>
-            <p className="text-sm text-text-muted mt-1">
+            <h1 className="text-xl lg:text-2xl font-bold text-text">Test Results</h1>
+            <p className="text-xs lg:text-sm text-text-muted mt-0.5">
               ผลเทสบอท {stats?.total || 0} ข้อ — จาก {selectedFile}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             {/* file selector */}
-            <div className="relative">
+            <div className="relative flex-1 sm:flex-none min-w-0">
               <FileText size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
               <select
                 value={selectedFile}
                 onChange={(e) => changeFile(e.target.value)}
-                className="rounded-lg bg-surface-2 pl-8 pr-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
+                className="w-full rounded-lg bg-surface-2 pl-8 pr-2 py-2 text-xs lg:text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
               >
                 {files.length === 0 && <option value={selectedFile}>{selectedFile}</option>}
                 {files.map((f) => (
@@ -217,10 +217,10 @@ export default function TestResultsPage() {
             <button
               onClick={load}
               disabled={loading}
-              className="flex items-center gap-2 rounded-lg bg-surface-2 px-3 py-2 text-sm text-text hover:bg-pale-sky-soft disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-lg bg-surface-2 px-3 py-2 text-xs lg:text-sm text-text hover:bg-pale-sky-soft disabled:opacity-50 shrink-0"
             >
               <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
-              รีโหลด
+              <span className="hidden sm:inline">รีโหลด</span>
             </button>
           </div>
         </div>
@@ -249,11 +249,11 @@ export default function TestResultsPage() {
             </div>
 
             {/* ── Category breakdown ── */}
-            <div className="rounded-xl border border-white/5 bg-surface-1 p-4">
+            <div className="rounded-xl border border-border bg-surface-1 p-4">
               <h2 className="text-sm font-semibold text-text mb-3">สถิติตามหมวด</h2>
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
                 {Object.entries(stats.cat_map).map(([cat, s]) => (
-                  <div key={cat} className="rounded-lg border border-white/5 bg-surface-2 p-2.5">
+                  <div key={cat} className="rounded-lg border border-border bg-surface-2 p-2.5">
                     <div className="text-xs font-medium text-text-muted truncate">{cat}</div>
                     <div className="mt-1 flex items-baseline gap-1.5">
                       <span className="text-lg font-bold text-success">{s.pass}</span>
@@ -280,7 +280,7 @@ export default function TestResultsPage() {
               <select
                 value={catFilter}
                 onChange={(e) => setCatFilter(e.target.value)}
-                className="rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
+                className="w-full sm:w-auto rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
               >
                 <option value="all">ทุกหมวด</option>
                 {cats.map((c) => <option key={c} value={c}>{c}</option>)}
@@ -288,7 +288,7 @@ export default function TestResultsPage() {
               <select
                 value={shopFilter}
                 onChange={(e) => setShopFilter(e.target.value)}
-                className="rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
+                className="w-full sm:w-auto rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
               >
                 <option value="all">ทุกร้าน</option>
                 {shops.map((s) => <option key={s} value={s}>{s}</option>)}
@@ -296,7 +296,7 @@ export default function TestResultsPage() {
               <select
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value)}
-                className="rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
+                className="w-full sm:w-auto rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
               >
                 <option value="all">ทุกสถานะ</option>
                 <option value="pass">✅ ผ่าน</option>
@@ -308,7 +308,7 @@ export default function TestResultsPage() {
               <select
                 value={pageSize}
                 onChange={(e) => changePageSize(Number(e.target.value) as PageSize)}
-                className="rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
+                className="w-full sm:w-auto rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
               >
                 <option value={25}>25/หน้า</option>
                 <option value={50}>50/หน้า</option>
@@ -318,11 +318,66 @@ export default function TestResultsPage() {
               <span className="text-sm text-text-muted">{filtered.length} ข้อ (ในหน้า)</span>
             </div>
 
-            {/* ── Table ── */}
-            <div className="overflow-x-auto rounded-xl border border-white/5 bg-surface-1">
+            {/* ── Results — card list on mobile/tablet, table on desktop (lg+) ── */}
+            {/* <lg — card list (แตะการ์ดเพื่อขยายรายละเอียด) */}
+            <div className="space-y-2 lg:hidden">
+              {filtered.map((r) => {
+                const isOpen = expanded === r.i;
+                return (
+                  <div
+                    key={`m-${selectedFile}-${r.i}-${page}`}
+                    className={`rounded-xl border ${okBg(r.ok)}`}
+                  >
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      aria-expanded={isOpen}
+                      className="p-3 cursor-pointer select-none"
+                      onClick={() => setExpanded(isOpen ? null : r.i)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") setExpanded(isOpen ? null : r.i);
+                      }}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-mono text-text-muted">#{r.i}</span>
+                        <span className="flex-1 min-w-0 truncate text-sm font-medium text-text">{r.shop}</span>
+                        <span className={`text-base leading-none ${okColor(r.ok)}`}>{r.ok}</span>
+                      </div>
+                      <p className="mt-1.5 text-sm text-text line-clamp-2 break-words">{r.msg}</p>
+                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-muted">
+                        <span className="rounded bg-surface-2 px-1.5 py-0.5">{r.cat}</span>
+                        {r.web_search === "Y" && (
+                          <span className="inline-flex items-center gap-1 text-violet-400">
+                            <Globe size={11} /> WS
+                          </span>
+                        )}
+                        <span>สินค้า {r.products}</span>
+                        <span>{r.elapsed.toFixed(1)}s</span>
+                        <span className="ml-auto inline-flex items-center gap-0.5 text-text-subtle">
+                          {isOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                        </span>
+                      </div>
+                    </div>
+                    {isOpen && (
+                      <div className="border-t border-border px-3 py-3">
+                        <ResultDetail r={r} />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {filtered.length === 0 && (
+                <div className="rounded-xl border border-border bg-surface-1 p-8 text-center text-sm text-text-muted">
+                  ไม่มีข้อมูลในหน้านี้
+                </div>
+              )}
+            </div>
+
+            {/* lg+ — full table */}
+            <div className="hidden lg:block overflow-x-auto rounded-xl border border-border bg-surface-1">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-white/5 text-text-muted">
+                  <tr className="border-b border-border text-text-muted">
                     {[
                       { k: "i" as SortKey, label: "#" },
                       { k: "shop" as SortKey, label: "ร้าน" },
@@ -360,13 +415,13 @@ export default function TestResultsPage() {
                   {filtered.map((r) => (
                     <Fragment key={`${selectedFile}-${r.i}-${page}`}>
                       <tr
-                        className={`border-b border-white/5 cursor-pointer hover:bg-white/5 ${okBg(r.ok)}`}
+                        className={`border-b border-border cursor-pointer hover:bg-surface-2 ${okBg(r.ok)}`}
                         onClick={() => setExpanded(expanded === r.i ? null : r.i)}
                       >
                         <td className="px-3 py-2 text-text-muted">{r.i}</td>
                         <td className="px-3 py-2 text-text truncate max-w-[160px]">{r.shop}</td>
                         <td className="px-3 py-2">
-                          <span className="rounded bg-white/5 px-1.5 py-0.5 text-xs text-text-muted">{r.cat}</span>
+                          <span className="rounded bg-surface-2 px-1.5 py-0.5 text-xs text-text-muted">{r.cat}</span>
                         </td>
                         <td className="px-3 py-2 text-text max-w-[280px] truncate">{r.msg}</td>
                         <td className="px-3 py-2 text-text-muted text-xs max-w-[180px] truncate">{r.source}</td>
@@ -378,48 +433,9 @@ export default function TestResultsPage() {
                         <td className={`px-3 py-2 text-center text-base ${okColor(r.ok)}`}>{r.ok}</td>
                       </tr>
                       {expanded === r.i && (
-                        <tr className="border-b border-white/5 bg-surface-2">
+                        <tr className="border-b border-border bg-surface-2">
                           <td colSpan={9} className="px-4 py-3">
-                            <div className="space-y-2">
-                              {r.test_id && (
-                                <div>
-                                  <span className="text-xs text-text-muted">test_id:</span>
-                                  <code className="text-xs text-text">{r.test_id}</code>
-                                </div>
-                              )}
-                              <div>
-                                <span className="text-xs text-text-muted">คำถามเต็ม:</span>
-                                <p className="text-text">{r.msg}</p>
-                              </div>
-                              {r.expected && (
-                                <div>
-                                  <span className="text-xs text-text-muted">คำตอบที่คาดหวัง:</span>
-                                  <p className="text-text-muted italic">{r.expected}</p>
-                                </div>
-                              )}
-                              <div>
-                                <span className="text-xs text-text-muted">คำตอบ:</span>
-                                <p className="text-text whitespace-pre-wrap">{r.answer}</p>
-                              </div>
-                              {r.notes && (
-                                <div>
-                                  <span className="text-xs text-text-muted">หมายเหตุ:</span>
-                                  <p className="text-warning text-sm">{r.notes}</p>
-                                </div>
-                              )}
-                              {r.check && (
-                                <div>
-                                  <span className="text-xs text-text-muted">check:</span>
-                                  <code className="text-xs text-sky-300">{r.check}</code>
-                                </div>
-                              )}
-                              <div className="flex gap-4 text-xs text-text-muted">
-                                <span>source: {r.source}</span>
-                                <span>web_search: {r.web_search}</span>
-                                <span>products: {r.products}</span>
-                                <span>elapsed: {r.elapsed.toFixed(2)}s</span>
-                              </div>
-                            </div>
+                            <ResultDetail r={r} />
                           </td>
                         </tr>
                       )}
@@ -431,11 +447,11 @@ export default function TestResultsPage() {
 
             {/* ── Pagination ── */}
             {pagination && pagination.total_pages > 1 && (
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-sm text-text-muted">
                   หน้า {pagination.page} / {pagination.total_pages} — ทั้งหมด {pagination.total} ข้อ
                 </span>
-                <div className="flex items-center gap-1">
+                <div className="flex flex-wrap items-center gap-1">
                   <button
                     onClick={() => setPage(1)}
                     disabled={!pagination.has_prev}
@@ -518,12 +534,58 @@ function StatCard({
   color: string;
 }) {
   return (
-    <div className="rounded-xl border border-white/5 bg-surface-1 p-3">
+    <div className="rounded-xl border border-border bg-surface-1 p-3">
       <div className={`flex items-center gap-1.5 text-xs ${color}`}>
         {icon}
         <span className="text-text-muted">{label}</span>
       </div>
       <div className={`mt-1 text-2xl font-bold ${color}`}>{value}</div>
+    </div>
+  );
+}
+
+// รายละเอียดขยาย — ใช้ร่วมกันทั้ง card list (mobile) และ expanded row (desktop table)
+function ResultDetail({ r }: { r: TestResult }) {
+  return (
+    <div className="space-y-2">
+      {r.test_id && (
+        <div>
+          <span className="text-xs text-text-muted">test_id:</span>
+          <code className="text-xs text-text break-all">{r.test_id}</code>
+        </div>
+      )}
+      <div>
+        <span className="text-xs text-text-muted">คำถามเต็ม:</span>
+        <p className="text-text break-words">{r.msg}</p>
+      </div>
+      {r.expected && (
+        <div>
+          <span className="text-xs text-text-muted">คำตอบที่คาดหวัง:</span>
+          <p className="text-text-muted italic break-words">{r.expected}</p>
+        </div>
+      )}
+      <div>
+        <span className="text-xs text-text-muted">คำตอบ:</span>
+        <p className="text-text whitespace-pre-wrap break-words">{r.answer}</p>
+      </div>
+      {r.notes && (
+        <div>
+          <span className="text-xs text-text-muted">หมายเหตุ:</span>
+          <p className="text-warning text-sm break-words">{r.notes}</p>
+        </div>
+      )}
+      {r.check && (
+        <div>
+          <span className="text-xs text-text-muted">check:</span>
+          <code className="text-xs text-sky-300 break-all">{r.check}</code>
+        </div>
+      )}
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-text-muted">
+        <span className="break-all">source: {r.source}</span>
+        <span>web_search: {r.web_search}</span>
+        <span>products: {r.products}</span>
+        <span>elapsed: {r.elapsed.toFixed(2)}s</span>
+      </div>
     </div>
   );
 }

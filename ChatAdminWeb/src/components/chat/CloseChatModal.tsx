@@ -1,6 +1,6 @@
 "use client";
 // CloseChatModal — modal สำหรับปิดแชท บังคับกรอก reason/category/resolution/note
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Loading } from "@/components/ui/Loading";
@@ -34,6 +34,18 @@ export function CloseChatModal({ conversation, onClose, onSubmit, loading }: Pro
   const [touched, setTouched] = useState(false);
 
   const canSubmit = reason.trim() && category && resolution.trim();
+
+  // ESC to close (ไม่ปิดขณะกำลัง submit)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (!loading) onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [loading, onClose]);
 
   function handleSubmit() {
     setTouched(true);

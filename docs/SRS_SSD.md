@@ -885,6 +885,9 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `is_order_question` | 490 | ⚡ Phase 3C — ตรวจว่าคำถามเกี่ยวกับ order หรือไม่ |
 | `get_anchor_history` | 560 | ⚡ Phase 7 — ดึง anchor products เรียงใหม่→เก่าตาม mentioned_at (สำหรับ comparison) — **2026-09-11**: ใช้ใน comparison follow-up + post-comparison follow-up ด้วย |
 | `get_previous_anchor` | 590 | ⚡ Phase 7 — ดึง anchor อันดับ 2 (อันก่อนหน้า active) — รองรับ exclude_item_id — **2026-09-11**: ใช้ใน comparison follow-up + post-comparison follow-up ด้วย |
+| `load_claim_state` | 633 | ⚡ BUG-D fix (2026-09-11) — โหลด warranty claim state ที่เก็บไว้ข้าม turn (fields: customer_name, customer_phone, customer_order_id, purchase_date, has_image, has_video, started_at, updated_at) — กันบอทขอข้อมูลเคลมซ้ำ |
+| `update_claim_state` | 657 | ⚡ BUG-D fix (2026-09-11) — merge fields ใหม่เข้า claim_state เดิม (ไม่เขียนทับด้วย None/empty) + upsert ลง conversation_products doc — เรียกจาก app.py State 3 (info collected) + State 7 (post-handoff info received) |
+| `clear_claim_state` | 700 | ⚡ BUG-D fix (2026-09-11) — unset claim_state หลัง handoff จริง (แอดมินรับงานแล้ว) — เรียกจาก app.py ก่อน return ChatResponse เมื่อ _warranty_claim_handoff=True |
 
 #### 6.9.3 Helpers
 

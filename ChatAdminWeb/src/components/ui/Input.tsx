@@ -12,12 +12,12 @@ export const Input = forwardRef<HTMLInputElement, Props>(
       {label && <span className="block text-sm font-medium text-text mb-1.5">{label}</span>}
       <input
         ref={ref}
-        className={`w-full h-10 px-3 rounded-lg border bg-surface text-text placeholder:text-text-subtle transition-colors focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand ${
-          error ? "border-vibrant-coral" : "border-border"
+        className={`w-full h-10 px-3 rounded-lg border bg-surface text-text placeholder:text-text-subtle transition-all focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent hover:border-border-strong ${
+          error ? "border-error" : "border-border"
         } ${className}`}
         {...props}
       />
-      {error && <span className="block text-xs text-vibrant-coral mt-1">{error}</span>}
+      {error && <span className="block text-xs text-error mt-1">{error}</span>}
     </label>
   )
 );

@@ -1340,7 +1340,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         # ⚡ BUG-9 fix — ดึง bot_name จาก persona ของร้าน (ถ้าไม่มี persona → ใช้ "เรา")
         #   ใช้ใน warranty flow ที่เป็น deterministic f-string (ไม่ผ่าน LLM)
         #   ก่อนหน้านี้ hardcode "abubu" → หลุดข้ามร้าน (Kospet/อีกร้าน ก็ได้ abubu)
-        _bot_name = ((_persona_doc or {}).get("bot_name") or "เรา").strip() or "เรา"
+        _bot_name = ((_persona_doc or {}).get("bot_name") or "ทางร้าน").strip() or "ทางร้าน"
 
         # ===== Phase 2 (ลบแล้ว) — เคยใช้ random variation pool แต่ทำให้คำตอบงง/ไม่เป็นธรรมชาติ =====
         # ตอนนี้ใช้แค่ persona_extra (ถ้ามี) + SYSTEM_INSTRUCTION อย่างเดียว
@@ -2249,9 +2249,28 @@ def chat(req: ChatRequest) -> ChatResponse:
             "เมื่อไหร่จะมีมนุษย์", "อยากคุยกับคน", "อยากคุยกับแอดมิน",
             "ให้คนตอบ", "ให้แอดมินตอบ", "ติดต่อแอดมิน", "ติดต่อคน",
             "พูดกับคน", "พูดกับแอดมิน", "ส่งต่อแอดมิน", "ส่งต่อคน",
+            # BUG-M fix — เพิ่มคำที่ลูกค้าไทยใช้จริงแต่หลุด (จาก QA 2026-09-11)
+            "กรุณาตอบกลับ", "ตอบหน่อย", "มีใครอยู่ไหม", "ยังอยู่ไหม",
+            "แอดดด", "ทำไมไม่ตอบ", "หายไปไหน", "แอดมินยังไม่ตอบ",
+            "คนยังไม่ตอบ", "รอแอดมิน", "รอคน", "แอดมินยังไม่มา",
+            "ทำไมไม่มีคน", "ทำไมไม่มีแอดมิน", "ขอเบอร์แอดมิน",
+            "ติดต่อกลับด่วน", "ติดต่อกลับหน่อย", "กลับหน่อย",
         )
         _msg_low = (req.message or "").lower().replace("ำ", "ัม")
         _is_human_request = any(kw in _msg_low for kw in _HUMAN_REQUEST_KWS)
+        # BUG-M fix — "แอด" คำเรียกแอดมินที่สั้นและใช้บ่อยที่สุด แต่ต้องกัน false positive
+        #   ("แอดเพื่อน", "แอดไลน์", "แอดเดรส") → ใช้เฉพาะข้อความสั้นที่ไม่มีคำต่อท้าย
+        if not _is_human_request:
+            _msg_stripped = _msg_low.strip()
+            if (
+                len(_msg_stripped) <= 15
+                and "แอด" in _msg_stripped
+                and not any(w in _msg_stripped for w in (
+                    "แอดเพื่อน", "แอดไลน์", "แอดเดรส", "แอดเคาท์",
+                    "แอดมิชั่น", "แอดปโน", "แอดมิน",  # แอดมิน already covered above
+                ))
+            ):
+                _is_human_request = True
         if _is_human_request:
             _human_answer = (
                 f"ขออภัยที่ให้รอนะคะ เดี๋ยวส่งต่อแชทนี้ให้แอดมินดูแลให้นะคะ "
@@ -2924,6 +2943,14 @@ def chat(req: ChatRequest) -> ChatResponse:
         _warranty_claim_handoff = False  # ถ้า True → ส่งต่อแอดมิน
         _warranty_claim_ctx: dict = {}
         _warranty_claim_answer: str = ""
+        # ⚡ BUG-D fix — โหลด claim state ที่เก็บไว้ข้าม turn (กันขอข้อมูลซ้ำ)
+        _claim_state: dict = {}
+        if req.conversation_id:
+            try:
+                from . import conversation_products as _cp_claim
+                _claim_state = _cp_claim.load_claim_state(req.conversation_id) or {}
+            except Exception:
+                pass
         # ⚡ ถ้ามี _anchor_compare_ctx (comparison/partial-comparison/post-comparison) → ข้าม warranty state machine
         #   กัน "คุณภาพเสียง" ถูก detect เป็น claim request ("เสียง" = พัง) ทั้งที่ลูกค้าถามเปรียบเทียบ
         if history and not _anchor_compare_ctx:
@@ -3321,6 +3348,56 @@ def chat(req: ChatRequest) -> ChatResponse:
                         "claim_topic": "เคลม/ซ่อม/ประกันสินค้า",
                     }
                     print(f"[WARRANTY-CLAIM] post-handoff info received: date={_has_date} order={_has_order} name={_has_name} phone={_has_phone} image={_has_image}", file=sys.stderr)
+                    # ⚡ BUG-D fix — save claim state ข้าม turn
+                    if req.conversation_id:
+                        try:
+                            from . import conversation_products as _cp_save
+                            _cp_save.update_claim_state(req.conversation_id, req.platform, req.shop, {
+                                "customer_name": _info.get("name") if _has_name else None,
+                                "customer_phone": _info.get("phone") if _has_phone else None,
+                                "customer_order_id": _info.get("order_id") if _has_order else None,
+                                "has_image": True if _has_image else None,
+                                "has_video": None,
+                            })
+                        except Exception:
+                            pass
+
+                # ⚡ BUG-D fix — fallback: บอทขอข้อมูลเคลมแล้ว แต่ลูกค้าพิมพ์อย่างอื่น
+                #   (เช่น "น้องใส่ไม่ได้", "ทำไงได้บ้างคะ", "ซื้อมาให้ลูกค่ะ")
+                #   → acknowledge + redirect แทนวนลูปขอข้อมูลเดิม
+                elif _bot_asked_claim_info and not _bot_reviewed_info:
+                    _model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+                    # สรุปข้อมูลที่มีอยู่แล้วจาก claim_state (ถ้ามี)
+                    _existing_lines = []
+                    if _claim_state.get("customer_name"):
+                        _existing_lines.append(f"• ชื่อ-นามสกุล: {_claim_state['customer_name']}")
+                    if _claim_state.get("customer_phone"):
+                        _existing_lines.append(f"• เบอร์โทร: {_claim_state['customer_phone']}")
+                    if _claim_state.get("customer_order_id"):
+                        _existing_lines.append(f"• เลขที่คำสั่งซื้อ: {_claim_state['customer_order_id']}")
+                    if _claim_state.get("has_image"):
+                        _existing_lines.append("• รูป/วิดีโอแสดงอาการ: ส่งมาแล้ว")
+                    # สร้างข้อความ acknowledge + redirect
+                    if _existing_lines:
+                        _existing_text = "\n".join(_existing_lines)
+                        _warranty_claim_answer = (
+                            f"รับทราบค่ะ ข้อมูลที่ได้รับแล้ว:\n"
+                            f"{_existing_text}\n\n"
+                            f"รบกวนแจ้งข้อมูลที่เหลือเพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
+                            f"• วันที่ซื้อสินค้า\n• เลขที่คำสั่งซื้อ\n• รูปหรือวิดีโอแสดงอาการ\n\n"
+                            f"หากไม่สามารถให้ข้อมูลบางอย่างได้ "
+                            f"เดี๋ยวส่งต่อให้แอดมินดูแลและติดต่อกลับให้นะคะ"
+                        )
+                    else:
+                        _warranty_claim_answer = (
+                            f"รับทราบค่ะ หากไม่สามารถให้ข้อมูลเคลมได้ครบ "
+                            f"เดี๋ยวส่งต่อแชทนี้ให้แอดมินดูแลให้นะคะ "
+                            f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งค่ะ"
+                        )
+                    # handoff เพราะลูกค้าไม่สามารถให้ข้อมูลได้ครบ → แอดมินต้องดูแล
+                    _warranty_claim_handoff = True
+                    _warranty_claim_ctx = {"handoff_reason": "claim_info_incomplete"}
+                    print(f"[WARRANTY-CLAIM] BUG-D fallback: ลูกค้าพิมพ์ไม่ใช่ข้อมูลเคลม → acknowledge + handoff", file=sys.stderr)
 
             # ── State: awaiting_customer_info → ลูกค้าให้ข้อมูล → ทวน + ถามยืนยัน ──
             # ต้องเป็น info request จริง (ไม่ใช่วันที่) และลูกค้าให้ข้อมูลจริง
@@ -3373,6 +3450,17 @@ def chat(req: ChatRequest) -> ChatResponse:
                         "claim_topic": "เคลม/ซ่อม/ประกันสินค้า",
                     }
                     print(f"[WARRANTY-CLAIM] info collected: {_info}", file=sys.stderr)
+                    # ⚡ BUG-D fix — save claim state ข้าม turn
+                    if req.conversation_id:
+                        try:
+                            from . import conversation_products as _cp_save2
+                            _cp_save2.update_claim_state(req.conversation_id, req.platform, req.shop, {
+                                "customer_name": _info.get("name") if _has_valid_name else None,
+                                "customer_phone": _info.get("phone") if _has_valid_phone else None,
+                                "customer_order_id": _info.get("order_id") if _has_valid_order else None,
+                            })
+                        except Exception:
+                            pass
 
             # ── State: awaiting_confirmation → ลูกค้ายืนยันหรือแก้ข้อมูล ──
             elif _bot_reviewed_info:
@@ -3524,6 +3612,14 @@ def chat(req: ChatRequest) -> ChatResponse:
                             f"ดำเนินการเรื่อง{_reason_thai}ต่อนะคะ "
                             f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
                         )
+
+                # ⚡ BUG-D fix — clear claim state เมื่อ handoff แล้ว
+                if _warranty_claim_handoff and req.conversation_id:
+                    try:
+                        from . import conversation_products as _cp_clear
+                        _cp_clear.clear_claim_state(req.conversation_id)
+                    except Exception:
+                        pass
 
                 return ChatResponse(
                     answer=_warranty_claim_answer,
@@ -6984,7 +7080,7 @@ def _record_suggestion_products(req, products: list[dict]) -> None:
 
 
 def _strip_kb_markup(text: str) -> str:
-    """BUG-2 fix — ขจัด KB markup `[[ ... ]]` และเครื่องหมาย markdown ที่หลุดจาก LLM ก่อนส่งลูกค้า.
+    """BUG-2 / BUG-J fix — ขจัด KB markup `[[ ... ]]` และเครื่องหมาย markdown ที่หลุดจาก LLM ก่อนส่งลูกค้า.
 
     กรอง:
     - `[[ หัวข้อ ]]` (KB section markers เช่น `[[ การรับประกันและบริการ ]]`)
@@ -6994,11 +7090,16 @@ def _strip_kb_markup(text: str) -> str:
 
     ไม่กรอง:
     - `**ตัวหนา**` (markdown bold — ฝั่ง sender ต้อง strip เอง ไม่ใช่ที่นี่)
-    - เนื้อหาปกติที่มี `[[` ในบริบทอื่น (เช่น code snippet) — แต่เนื่องจากบอทไม่ generate code
-      การ strip `[[ ... ]]` ที่ขึ้นต้นบรรทัดจึงปลอดภัย
+    - `![[...]]` (markdown image alt — กันทำลายรูป — BUG-C)
+
+    BUG-J: เดิมจับแค่ full-line `[[ ... ]]` ตอนนี้จับ inline ด้วย
+    โดยแปลง `[[ หัวข้อ ]]` → `**หัวข้อ**` (เก็บเนื้อหาสำคัญ) แต่ถ้าเป็น `![[...]]` จะไม่แตะ
     """
     if not text:
         return text
+    # ⚡ BUG-J — แปลง inline `[[ ... ]]` → `**...**` แต่ไม่แตะ `![[...]]` (image alt)
+    #   strip whitespace ใน captured group กัน `[[ หัวข้อ ]]` → `** หัวข้อ **` (มี space รอบ)
+    text = re.sub(r"(?<!\!)\[\[\s*([^\[\]]+?)\s*\]\]", lambda m: f"**{m.group(1).strip()}**", text)
     # strip `[[ ... ]]` ที่ขึ้นต้นบรรทัด (KB section markers)
     text = re.sub(r"(?m)^\s*\[\[[^\]]*\]\]\s*$", "", text)
     # strip บรรทัดที่เป็นแค่ `---` (markdown hr) ที่ต้น/ท้าย
@@ -7007,6 +7108,35 @@ def _strip_kb_markup(text: str) -> str:
     text = re.sub(r"(?m)^\s*หมายเหตุ[：:].*$", "", text)
     # ทำความสะอาด blank lines ที่เกิดจากการ strip (มี > 2 บรรทัดว่างติด → 2)
     text = re.sub(r"\n{3,}", "\n\n", text)
+    # ⚡ BUG-L fix — แทนคำลงท้ายผู้ชายด้วยผู้หญิง (persona หญิง)
+    #   เปลี่ยน "ครับ/คับ/ครับผม" → "ค่ะ" กัน LLM ลอกจาก description สินค้า
+    text = re.sub(r"ครับผม(?=\s|$|[.,!?])", "ค่ะ", text)
+    text = re.sub(r"ครับ(?=\s|$|[.,!?])", "ค่ะ", text)
+    text = re.sub(r"คับ(?=\s|$|[.,!?])", "ค่ะ", text)
+    # ⚡ BUG-C fix — แก้ markdown image alt ที่มี `[` ข้างใน
+    #   `![[ลดเหลือ 3,599] Xiaomi Redmi 9](url)` → `![Xiaomi Redmi 9](url)`
+    text = re.sub(
+        r"!\[\[([^\]]*)\]\s*([^\]]*?)\]\((https?://[^\s)]+)\)",
+        lambda m: f"![{m.group(2).strip() or m.group(1).strip()}]({m.group(3)})",
+        text,
+    )
+    # ⚡ BUG-M fix — post-check: กัน LLM อ้างเท็จว่า "แอดมินมาแล้ว/รับเรื่องแล้ว/เคลมให้แล้ว"
+    _false_admin_patterns = [
+        (r"แอดมินมาดูแลแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
+        (r"แอดมินเข้ามาดูแลแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
+        (r"แอดมินมาแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
+        (r"แอดมินได้รับเรื่องแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
+        (r"ทางเราได้ส่งเรื่องให้แอดมินแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
+        (r"ทางร้านรับเรื่องประสานงานตรวจสอบและดูแลเรื่องการส่งเคลมสินค้าให้เรียบร้อยแล้ว",
+         "เดี๋ยวส่งต่อให้แอดมินดูแลเรื่องนี้ให้นะคะ"),
+        (r"รับเรื่องประสานงานตรวจสอบและดูแลเรื่องการส่งเคลมสินค้าให้เรียบร้อยแล้ว",
+         "เดี๋ยวส่งต่อให้แอดมินดูแลเรื่องนี้ให้นะคะ"),
+        (r"เคลมสินค้าให้เรียบร้อยแล้ว", "เดี๋ยวส่งต่อให้แอดมินดูแลเรื่องนี้ให้นะคะ"),
+    ]
+    for _pattern, _replacement in _false_admin_patterns:
+        if re.search(_pattern, text):
+            text = re.sub(_pattern, _replacement, text)
+            print(f"[BUG-M] post-check (app): แทนคำอ้างเท็จ '{_pattern}' → '{_replacement}'", file=sys.stderr)
     return text.strip()
 
 
@@ -7235,6 +7365,9 @@ def _merge_kb_mongo(kb_docs: list[dict], mongo_products: list[dict]) -> list[dic
             # เติม box_contents จาก KB
             if best_kb.get("box_contents"):
                 card["kb_box_contents"] = best_kb["box_contents"]
+            # ⚡ BUG-O fix — เติม description จาก KB (เดิมทิ้งไป ทำให้ข้อมูลไม่ถึง LLM)
+            if best_kb.get("description"):
+                card["kb_description"] = best_kb["description"][:4000]
             card["_source"] = "kb+mongo"
         else:
             card["_source"] = "mongo"
