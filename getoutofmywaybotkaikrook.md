@@ -7874,3 +7874,136 @@ Phase 8 ใช้ `_LLM_CONTEXT_LIMIT = 30` เป็น module constant แบ�
 - **แก้:** จัด pattern เดียวกับ section อื่น — `bg-surface-2` wrapper + icon + title "ส่งสินค้าเข้า LLM สูงสุด X ชิ้น" + description + min/max labels "10 (ประหยัด) / 50 (ครอบคลุม)" — ลบตัวเลข font-mono ซ้ำ
 - **MinimalSlider polish:** track 3px→4px (bg-surface-3), dot 14→16px + border-brand — เห็นชัดว่าลากได้ กระทบ slider ทุกตัวในหน้าให้ดีขึ้นพร้อมกัน
 - **verify:** tsc 0 errors, build ✓
+
+### แก้ — Link follow-up + LLM prompt ส่งลิงค์/รูป (2026-09-16)
+
+- **ปัญหา (BUG-H):**
+  - Q1: "อยากได้หัวชาร์จ ไอโฟน13พร้อมสายชาร์จ รุ่นไหนคะ" → บอทแนะนำ ZA353 + AD1003T ฯลฯ แต่ไม่ส่งลิงค์/รูป (prompt ห้ามไว้)
+  - Q3: "ขอลิงค์สินค้า" → บอท RAG ใหม่ ดึง ZA453 ผิดรุ่น แทนที่จะส่งลิงค์ของสินค้าที่แนะนำไปก่อนหน้า
+- **Root cause 2 ชั้น:**
+  1. **LLM prompt** (llm.py:472-474) สั่ง "แนบลิงก์/รูปเฉพาะเมื่อลูกค้าแสดงความสนใจซื้อ" → Q1 ที่ถามหารุ่น ไม่ถูกตีความว่าสนใจซื้อ → ไม่ส่งลิงค์/รูป
+  2. **"ขอลิงค์" ไม่เข้า follow-up detection** — `_GENERIC_Q_KWS` ใน `conversation_products.py` ไม่มี "ลิงค์"/"link" → ไม่ใช้ active/suggestion product → ไป RAG ใหม่ → ดึงผิดรุ่น
+- **วิธีแก้ (4 จุด):**
+  1. **llm.py** — แก้ prompt ให้ส่งลิงค์+รูปเสมอเมื่อแนะนำสินค้า ยกเว้นเคส: warranty/claim flow, ลูกค้าอารมณ์เสีย, สินค้ามีปัญหา, ใบกำกับภาษี, ส่งคืน/ไม่รับ/ขอเงินคืน/ยกเลิกออเดอร์, ส่งแอดมิน (handoff)
+  2. **conversation_products.py** — เพิ่ม "ลิงค์/ลิงก์/ลิ้งค์/link/ขอลิงค์/ช่องทางซื้อ/สั่งซื้อ/ขอซื้อ/ส่งลิงค์/url/เว็บสินค้า" ใน `_GENERIC_Q_KWS`
+  3. **conversation_products.py** — เพิ่ม `get_recent_suggestions()` และ `get_anchor_and_suggestions()` สำหรับดึง anchor+suggestion ล่าสุดหลายตัว (dedup by item_id)
+  4. **app.py** — เพิ่ม LINK-FOLLOWUP block ก่อน CONV-ACTIVE block: ถ้าลูกค้าขอลิงค์/ช่องทางซื้อ และมีสินค้าก่อนหน้าใน timeline → ใช้สินค้าเหล่านั้น (สูงสุด 5 ตัว) แทน RAG ใหม่; ตั้ง `_is_conv_active=True` ให้ CONV-ACTIVE ข้าม; เพิ่ม `_context_note` เฉพาะ link-followup ที่สั่ง LLM ส่งลิงค์+รูปของสินค้า status=NORMAL ทุกตัวใน context
+  5. **conversation_products.py** — เพิ่ม `status` และ `_available_for_sale` ใน `_strip_card_for_storage` (เดิมไม่เก็บ → LLM ไม่รู้ status)
+  6. **app.py** — เพิ่มจำนวน suggestion ที่บันทึกจาก 3 → 5 ใน `_record_suggestion_products`
+- **เคสที่ตรวจ:**
+  - Q1 "อยากได้หัวชาร์จ ไอโฟน13พร้อมสายชาร์จ รุ่นไหนคะ" → บอทส่งลิงค์+รูปทันที ✅
+  - Q3 "ขอลิงค์สินค้า" → บอทส่งลิงค์+รูปของ 5 สินค้าที่แนะนำไปก่อนหน้า (status=NORMAL ทั้งหมด) ✅ ไม่ดึงสินค้าอื่นมาตอบ
+- **verify:** py_compile OK, live test Q1+Q3 ผ่าน
+- **ข้อจำกัด:** ถ้า timeline ว่าง (ไม่เคยแนะนำสินค้า) → LINK-FOLLOWUP จะ fall through ไป RAG ปกติ (เป็น fallback ที่ถูกต้อง)
+
+### แก้ — Vision ไม่อ่านรูป (SSRF block + ไม่ detect image URL ใน text) (2026-09-16)
+
+- **ปัญหา:**
+  1. TestChat ส่ง local URL (`http://localhost:3000/api/test-chat/uploads/...`) → บอท block เพราะ SSRF protection บล็อก loopback IP
+  2. ลูกค้าพิมพ์ Shopee image URL ตรงๆ (`https://img.sp.mms.shopee.sg/...`) → URL อยู่ใน text message ไม่ใช่ `req.images` → บอทไม่ detect ว่าเป็นรูป → ไม่ส่ง vision
+  3. HTTPS IP pinning (M5 protection) ทำลาย SSL cert — rewrite URL ใช้ IP แทน hostname ทำให้ cert verify fail
+- **Root cause:**
+  - `llm.py:807` — SSRF block บล็อก loopback/private IP ทุกกรณี ไม่มี env flag ปิด
+  - `app.py:1390` — ไม่มี logic ดึง image URL จาก text message ส่ง vision
+  - `llm.py:822` — IP pinning rewrite URL สำหรับ HTTPS ทำให้ SSL cert verify fail
+- **วิธีแก้ (3 จุด):**
+  1. **llm.py** — เพิ่ม env `BOT_VISION_ALLOW_LOOPBACK=1` สำหรับ dev mode (อนุญาต loopback/private IP) — ไม่กระทบ production เพราะ default ปิด
+  2. **app.py** — เพิ่ม Shopee image URL detection ใน text message: regex match `img.sp.mms.shopee.*`, `cf.shopee.*`, `down-*.sp.mms.shopee.*` → ดึง URL ส่ง `_urls_to_read` ให้ vision
+  3. **llm.py** — HTTPS ไม่ pin IP (SSL cert validation ป้องกัน DNS rebinding ได้อยู่แล้ว) — pin IP เฉพาะ HTTP
+- **เคสที่ตรวจ:**
+  - Shopee URL ใน text (`https://img.sp.mms.shopee.sg/...`) → บอทอ่านรูปได้ รู้ว่าเป็น Xiaomi Mi Air Purifier 2C ✅
+  - TestChat local URL + `BOT_VISION_ALLOW_LOOPBACK=1` → บอทอ่านรูปได้ ✅
+- **verify:** py_compile OK, live test ผ่าน
+- **ข้อจำกัด:** ใน production ต้องไม่ตั้ง `BOT_VISION_ALLOW_LOOPBACK=1` (เปิดช่อง SSRF) — ใช้เฉพาะ dev/TestChat
+
+### แก้ — Dual-tier recommendation แนะนำแค่ 1 ตัว ทั้งที่มีหลายตัว compat (2026-09-16)
+
+- **ปัญหา:** ลูกค้าถาม "ขอหัวพร้อมสาย ใช้กับ iphone 18 promax" → context มี 19 สินค้า compat แต่บอทแนะนำแค่ AC301+CTC615W (1 ตัว) ทั้งที่มี Ready to go, AD1003T ฯลฯ เป็น upgrade ได้
+- **Root cause 2 ชั้น:**
+  1. **llm.py prompt (Phase 3b)** — ใช้คำว่า "สูงสุด 2 ตัวเลือก" (ceiling) → LLM ตีความว่า 1 ตัวก็ได้
+  2. **app.py `_device_spec_lookup` context note** — ใช้คำว่า "ให้เสนอสูงสุด 2 ตัวเลือก" (ceiling) เหมือนกัน
+- **วิธีแก้ (2 จุด):**
+  1. **llm.py:346** — เปลี่ยนเป็น "กฎเหล็ก: ถ้ามี 2 ตัวขึ้นไป compat → ต้องแนะนำอย่างน้อย 2 ตัว ห้ามแค่ 1"
+  2. **app.py:757** — เปลี่ยน context note ใน `_device_spec_lookup` ให้สอดคล้องกับ prompt (เน้น "ต้องแนะนำอย่างน้อย 2 ตัว")
+- **เคสที่ตรวจ:**
+  - "ขอหัวพร้อมสาย ใช้กับ iphone 18 promax" → บอทแนะนำ baseline (AC301+CTC615W 30W) + upgrade (Ready to go Standard Set) พร้อมลิงค์+รูป ✅
+- **verify:** py_compile OK, live test ผ่าน
+
+### แก้ — CODE-level compat filter กรองสินค้า connector ไม่ตรงออก (2026-09-16)
+
+- **ปัญหา:** ลูกค้าถาม "หัวชาร์จใช้กับ iPhone 17" → บอทส่งสินค้าทุกตัวเข้า LLM (รวม Lightning cable ที่ไม่รองรับ iPhone 17 USB-C) → LLM อาจแนะนำผิด + เสีย context สินค้าที่ไม่ compat
+- **Root cause:** ไม่มี CODE-level filter กรองสินค้าที่ connector ไม่ตรงกับอุปกรณ์ — ทุกตัวถูกส่งเข้า LLM แล้วให้ LLM ตัดสินใจเอง
+- **วิธีแก้ (3 จุด):**
+  1. **intent_classifier.py** — เพิ่ม `device_connector` (usb-c/lightning/micro-usb) + `device_min_watt` ใน prompt + default + log + max_output_tokens 200→250 — ให้ intent LLM คืน spec ของอุปกรณ์มาด้วยเลย (ไม่ต้อง hardcode หรือ parse web search แยก)
+  2. **app.py** — เพิ่ม `_KNOWN_DEVICE_SPECS` (fallback), `_extract_product_connectors`, `_resolve_device_spec`, `_filter_compat_products` — กรองสินค้าที่ connector ไม่ตรงออกก่อนส่ง LLM, sort by wattage ascending (baseline ก่อน upgrade ทีหลัง)
+  3. **app.py main flow** — เรียก `_filter_compat_products` หลัง `_device_spec_lookup` merge, ก่อน `_apply_product_tiers` — ส่ง `intent_connector` + `intent_min_watt` จาก intent_result เป็นหลัก, web search + hardcoded เป็น fallback
+- **Device spec priority:**
+  1. `intent_connector` (จาก intent classifier LLM — หลัก)
+  2. web search text (จาก `_device_spec_lookup` — fallback)
+  3. `_KNOWN_DEVICE_SPECS` (hardcoded — last resort)
+- **Fallback strategy (safe — ไม่ over-filter):**
+  - ดึง device spec ไม่ได้ → คืนทั้งหมด
+  - สินค้าดึง connector ไม่ได้ → ambiguous → เก็บไว้
+  - กรองเหลือ < 2 ตัว → รวม ambiguous กลับ
+  - กรองว่าง → คืนทั้งหมด
+- **เคสที่คาดว่าจะผ่าน:**
+  - "หัวชาร์จใช้กับ iPhone 17" → กรอง Lightning ออก → เหลือ USB-C 30W/65W/100W/140W → sort ascending → LLM เห็น baseline (30W) + upgrade (100W+) ✅
+  - "สายชาร์จใช้กับ iPhone 13" → กรอง USB-C-only ออก → เหลือ C-to-Lightning + A-to-Lightning ✅
+- **verify:** py_compile OK (app.py + intent_classifier.py)
+- **ข้อจำกัด:** `_KNOWN_DEVICE_SPECS` เป็น fallback สำหรับอุปกรณ์ที่ intent LLM ไม่รู้ + web search ไม่ได้ผล — ถ้าอุปกรณ์ใหม่มาก อาจต้องเพิ่มในตาราง
+
+### แก้ — "ขอที่อยู่ส่งกลบ/ส่งเคลม" ไม่ handoff แอดมิน (2026-09-16)
+
+- **ปัญหา (mistorethailand):**
+  - Q3 "ขอที่อยู่ส่งกลบ" → bot ถามเลขคำสั่งซื้อ (ไม่ handoff) — พิมพ์ "ส่งกลบ" ไม่มี ่ → ไม่ match "ส่งกลบ" ใน `_RETURN_REFUND_KWS`
+  - Q4 "ต้องการที่อยู่ด่วน" → bot ตอบนโยบายรับคืน (ไม่ handoff) — ไม่มี return/refund keyword เลย
+  - ทั้งสองเคส ลูกค้าต้องการที่อยู่เพื่อส่งสินค้ากลับ/ส่งเคลม ซึ่ง bot ไม่มีที่อยู่จริงของร้าน → ควร handoff แอดมินเลย
+- **Root cause:**
+  1. `_RETURN_REFUND_KWS` ไม่มี "ขอที่อยู่" / "ที่อยู่ส่งกลบ" / "ที่อยู่ด่วน" — ไม่ match
+  2. ถ้า match แล้วไม่มี order_sn → เข้า else branch ที่ถามเลขคำสั่งซื้อ (ไม่ใช่สิ่งที่ลูกค้าต้องการ)
+- **วิธีแก้ (app.py 1 จุด):**
+  - เพิ่ม `_ADDRESS_REQUEST_KWS` block ก่อน `_RETURN_REFUND_KWS` block:
+    - keywords: "ขอที่อยู่", "ที่อยู่ร้าน", "ที่อยู่ส่งกลับ", "ที่อยู่ส่งกลบ", "ที่อยู่ส่งเคลม", "ที่อยู่ส่งคืน", "ที่อยู่ด่วน", "ต้องการที่อยู่", "ขอสถานที่ส่ง", "ส่งไปที่ไหน", "จะส่งไปที่ไหน", "ที่อยู่สำหรับส่งกลับ", "ที่อยู่สำหรับส่งเคลม", "address ส่งกลับ", "return address", "claim address"
+    - ถ้า match → handoff แอดมินทันที (ไม่ถามเลขคำสั่งซื้อ)
+    - คำตอบ: "เรื่องที่อยู่ร้าน/ที่อยู่ส่งสินค้ากลับ/ส่งเคลม รบกวนส่งต่อแชทนี้ให้แอดมินดูแลให้นะคะ..."
+    - reason: "address_request"
+- **เคสที่ตรวจ:**
+  - "ขอที่อยู่ส่งกลบ" → handoff ✅
+  - "ต้องการที่อยู่ด่วน" → handoff ✅
+  - "ขอที่อยู่ร้านหน่อยค่ะ จะไปหน้าร้าน" → handoff ✅
+  - "ขอที่อยู่จัดส่งด้วยค่ะ" → handoff ✅ (ในบริบท Shopee ลูกค้าใส่ที่อยู่ในระบบแล้ว ถ้าถามอาจมีปัญหาเรื่องที่อยู่ → ส่งแอดมินถูก)
+- **verify:** py_compile OK, live test ผ่าน 4 เคส
+
+### แก้ — "p23 มีขายไหม" หาไม่เจอทั้งที่มีใน DB (2026-09-16)
+
+- **ปัญหา (KingGadgets):**
+  - ลูกค้าถาม "p23 มีขายไหม" → บอทตอบ "ไม่มี" ทั้งที่ DB มี CUKTECH P23 Powerbank 4 ตัว status=NORMAL
+  - RAG ดึง 30 ตัว แต่ P23 ไม่อยู่ใน list (vector search ไม่ match "p23" เพราะ query สั้น)
+- **Root cause:**
+  - `app.py:4595` — `_kb_model_kws = [w for w in _kb_model_kws if len(w) >= 4]`
+  - "p23" มีความยาว 3 ตัวอักษร → น้อยกว่า 4 → ถูกกรองออกจาก MODEL-REGEX
+  - MODEL-REGEX ไม่ทำงาน → ใช้ vector search แทน → ไม่ match P23
+- **วิธีแก้ (app.py 1 จุด):**
+  - เปลี่ยน filter จาก `len(w) >= 4` เป็น `len(w) >= 3 and re.search(r"\d", w)`
+  - รับ model code สั้น (>=3 ตัว) ที่มีตัวอักษร + ตัวเลข (เช่น p23, k9, x7)
+- **เคสที่ตรวจ:**
+  - "p23 มีขายไหม" → บอทหา P23 เจอ + ตอบถูกต้อง + แนบลิงค์+รูป ✅
+- **verify:** py_compile OK, live test ผ่าน
+
+## กำลังจะทำ
+
+### แก้ — Warranty follow-up "รุ่นไหนประกันยังไงบ้าง" หยิบรุ่นเก่ามาตอบ + anchor poisoning (2026-09-16)
+
+- **เคสจริง (conv thwtchtpyn, shop CukTechThailand):**
+  - Q2/Q3: บอทแนะนำ CTC615S (สายชาร์จ) → Q4: "Mi 17 ultra ใช้พาวเวอร์แบงค์ไหนรองรับบ้าง" → แนะนำ PB150P+PB100P
+  - Q5: "รุ่นไหนประกันยังไงบ้าง" → บอทตอบประกัน CTC615S (สายชาร์จเก่า) แทนที่จะเทียบ PB150P/PB100P
+  - Q6-Q18: บอทเชียร์ขาย CTC615S ทุกคำตอบ (แม้แค่ส่งสติกเกอร์) เพราะ CTC615S กลายเป็น anchor ถาวร
+- **Root cause (verify ด้วย live replay + timeline inspection แล้ว):**
+  1. `app.py:~2780` `_is_followup_policy` — `_last_model_msgs[-2:]` join ตามเวลา (เก่าก่อน) → `valid_models[0]` = CTC615S (รุ่นเก่าจาก Q3) ไม่ใช่รุ่นล่าสุด
+  2. `req.message` ถูก rewrite เป็น "CUKTECH CTC615S รับประกัน CUKTECH PB150P รับประกัน ..." → CONV-ACTIVE `resolve_active_by_message` match kw ตัวแรก → คืน CTC615S ตัวเดียว
+  3. `_record_suggestion_products` extract model kw จาก rewritten message → mark CTC615S เป็น anchor (source=user_text) → poison timeline ทุกรอบถัดไป
+  4. (รอง) Q4 "Mi" kw match "Mi" (Mi HyperCharge) ในชื่อ PB150S → false anchor — substring match อนุญาต kw สั้นเกิน/ไม่มีตัวเลข
+- **แผนแก้ (app.py 2 จุด):**
+  1. `_is_followup_policy` block: reverse `_last_model_msgs` (ล่าสุดก่อน) + resolve ทุกรุ่นใน `_unique_models[:3]` เป็น product cards (match timeline ก่อน → fallback DB regex ignore status) → set `_ref_regex_products` + `_is_conv_active=True` (pattern เดียวกับ LINK-FOLLOWUP)
+  2. `_record_suggestion_products`: extract anchor kw จาก `req._followup_original` (ข้อความจริงของลูกค้า) ไม่ใช่ rewritten message + กัน kw สั้นไร้ตัวเลข (len>=3 หรือมี digit เท่านั้น)
+- **verify ที่จะทำ:** replay conv thwtchtpyn → Q5 ต้องตอบ warranty ของ powerbank ไม่ใช่สายชาร์จ; py_compile; รัน test_katess_live.py กัน regression

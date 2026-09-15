@@ -59,7 +59,14 @@ function extractMediaUrls(rawPayload: unknown): string[] {
   const nested = (raw.data as Record<string, unknown> | undefined)?.content as Record<string, unknown> | undefined;
   const inner = (nested?.content as Record<string, unknown> | undefined) || (raw.content as Record<string, unknown> | undefined) || {};
   const msgType = (nested?.message_type as string) || (raw.message_type as string) || (raw.msg_type as string) || "";
-  if (msgType === "image" || msgType === "image_with_text") {
+  if (msgType === "image") {
+    // ⚡ Shopee chat image schema: content.url (ไม่ใช่ image_url)
+    //    เหมือน messageMediaParser.ts case "image" ที่ใช้ c.url
+    const url = (inner.url as string) || (inner.image_url as string) || (((inner.image_url_list as string[]) || [])[0]);
+    return url ? [url] : [];
+  }
+  if (msgType === "image_with_text") {
+    // image_with_text ใช้ image_url (ต่างจาก image ธรรมดา)
     const url = (inner.image_url as string) || (((inner.image_url_list as string[]) || [])[0]);
     return url ? [url] : [];
   }

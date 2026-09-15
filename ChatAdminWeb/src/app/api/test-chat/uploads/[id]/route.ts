@@ -1,15 +1,23 @@
 // GET /api/test-chat/uploads/[id] — serve ไฟล์ที่อัปโหลดกลับ (สำหรับ bot ดึง URL)
 // ⚡ Phase 1F — bot ดึงรูปจาก URL นี้ผ่าน HTTP (Part.from_bytes หลัง download)
 // 🔒 H3: Added requireAuth — previously unauthenticated
+// ⚡ FIX: อนุญาต X-Internal-Secret สำหรับ Python bot เรียกตรง (ไม่มี cookie)
+//    ไม่งั้น bot ได้ 401 ตอนโหลดรูปจาก TestChat → Vision อ่านไม่ได้
 import { NextRequest, NextResponse } from "next/server";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { ObjectId } from "mongodb";
 import { requireAuth } from "@/backend/middleware/authorize";
+import { serverConfig } from "@/backend/lib/config";
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
-  // 🔒 H3: Require authentication before serving uploaded files
-  const r = await requireAuth(req);
-  if (!r.ok) return r.response;
+  // ⚡ FIX — ถ้ามี X-Internal-Secret ที่ตรง → ข้าม auth (bot เรียกตรง)
+  const internalSecret = req.headers.get("x-internal-secret");
+  const isBotCall = internalSecret && internalSecret === serverConfig.chatbotInternalSecret;
+  if (!isBotCall) {
+    // 🔒 H3: Require authentication before serving uploaded files (browser request)
+    const r = await requireAuth(req);
+    if (!r.ok) return r.response;
+  }
 
   const { id } = await ctx.params;
   if (!id || !/^[a-f0-9]{24}$/i.test(id)) {

@@ -68,6 +68,22 @@ target_device: ถ้าลูกค้าระบุอุปกรณ์ท�
   (เช่น product_recommend + "อยากได้ของที่ใช้กับ xiaomi 17 ultra" → target_device="xiaomi 17 ultra")
   ไม่ใช่เฉพาะ compatibility_check เท่านั้น
 
+device_connector: ถ้า target_device ไม่เป็น null ให้ระบุพอร์ตชาร์จของอุปกรณ์นั้น หรือ null ถ้าไม่ทราบ
+  ค่าที่เป็นไปได้: "usb-c", "lightning", "micro-usb", null
+  - iPhone 15 ขึ้นไป → "usb-c"
+  - iPhone 12-14 → "lightning"
+  - Samsung/Xiaomi/OPPO/Vivo/Realme ส่วนใหญ่ → "usb-c"
+  - iPad Pro/Air (2018+) → "usb-c"
+  - MacBook → "usb-c"
+  - โทรศัพท์เก่ากว่า iPhone 12 → "lightning"
+
+device_min_watt: ถ้า target_device ไม่เป็น null ให้ระบุค่า W ขั้นต่ำที่อุปกรณ์รองรับชาร์จเต็มสปีด หรือ null ถ้าไม่ทราบ
+  - iPhone 12-17 → 20-27
+  - Samsung S series Ultra → 45
+  - Xiaomi 17 Ultra → 90
+  - MacBook Air → 70
+  - MacBook Pro 14 → 96, MacBook Pro 16 → 140
+
 needs_description: true ถ้าต้องดึง description สินค้ามาตอบ (เช่น compatibility_check, product_spec, warranty_duration) มิฉะนั้น false
 
 general_qtype: ถ้า intent=general_question ระบุประเภทคำถามทั่วไป (ถ้าไม่ใช่ general_question → null)
@@ -84,37 +100,40 @@ confidence: ความมั่นใจ 0.0-1.0
 
 ตัวอย่าง:
 คำถาม: "สายชาร์จรุ่นไหนใช้กับ iphone 17 promax ได้บ้าง"
-{"intent":"compatibility_check","product_type":"charger","charger_subtype":"cable","target_device":"iphone 17 pro max","needs_description":true,"general_qtype":null,"confidence":0.95}
+{"intent":"compatibility_check","product_type":"charger","charger_subtype":"cable","target_device":"iphone 17 pro max","device_connector":"usb-c","device_min_watt":27,"needs_description":true,"general_qtype":null,"confidence":0.95}
 
 คำถาม: "มีสินค้าประเภทสายชาร์จไหม"
-{"intent":"product_recommend","product_type":"charger","charger_subtype":"cable","target_device":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"cable","target_device":null,"device_connector":null,"device_min_watt":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
 
 คำถาม: "cuktech ctc615w รับประกันกี่ปี"
-{"intent":"warranty_duration","product_type":"charger","charger_subtype":"cable","target_device":null,"needs_description":true,"general_qtype":null,"confidence":0.95}
+{"intent":"warranty_duration","product_type":"charger","charger_subtype":"cable","target_device":null,"device_connector":null,"device_min_watt":null,"needs_description":true,"general_qtype":null,"confidence":0.95}
 
 คำถาม: "สินค้าเสีย อยากเคลม"
-{"intent":"warranty_claim","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
+{"intent":"warranty_claim","product_type":null,"charger_subtype":null,"target_device":null,"device_connector":null,"device_min_watt":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
 
 คำถาม: "มีสายชาร์จไหม" (history ล่าสุด: บอทตอบเรื่องรับประกัน)
-{"intent":"product_recommend","product_type":"charger","charger_subtype":"cable","target_device":null,"needs_description":false,"general_qtype":null,"confidence":0.9}
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"cable","target_device":null,"device_connector":null,"device_min_watt":null,"needs_description":false,"general_qtype":null,"confidence":0.9}
 
 คำถาม: "หัวชาร์จ 65w รุ่นไหนดี"
-{"intent":"product_recommend","product_type":"charger","charger_subtype":"adapter","target_device":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"adapter","target_device":null,"device_connector":null,"device_min_watt":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
 
 คำถาม: "มีหัวชาร์จในรถไหม"
-{"intent":"product_recommend","product_type":"charger","charger_subtype":"car_charger","target_device":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"car_charger","target_device":null,"device_connector":null,"device_min_watt":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
 
 คำถาม: "มีแท่นชาร์จไร้สายไหม"
-{"intent":"product_recommend","product_type":"charger","charger_subtype":"wireless","target_device":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"wireless","target_device":null,"device_connector":null,"device_min_watt":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
 
 คำถาม: "อยากได้ของที่ใช้กับ xiaomi 17 ultra"
-{"intent":"product_recommend","product_type":"charger","charger_subtype":null,"target_device":"xiaomi 17 ultra","needs_description":true,"general_qtype":null,"confidence":0.9}
+{"intent":"product_recommend","product_type":"charger","charger_subtype":null,"target_device":"xiaomi 17 ultra","device_connector":"usb-c","device_min_watt":90,"needs_description":true,"general_qtype":null,"confidence":0.9}
 
 คำถาม: "หัวชาร์จละ มีไหมใช้กับ mi 17 ultra"
-{"intent":"product_recommend","product_type":"charger","charger_subtype":"adapter","target_device":"mi 17 ultra","needs_description":true,"general_qtype":null,"confidence":0.9}
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"adapter","target_device":"mi 17 ultra","device_connector":"usb-c","device_min_watt":90,"needs_description":true,"general_qtype":null,"confidence":0.9}
 
 คำถาม: "พาวเวอร์แบงค์ใช้กับ oneplus 13 ได้ไหม"
-{"intent":"compatibility_check","product_type":"powerbank","charger_subtype":null,"target_device":"oneplus 13","needs_description":true,"general_qtype":null,"confidence":0.9}
+{"intent":"compatibility_check","product_type":"powerbank","charger_subtype":null,"target_device":"oneplus 13","device_connector":"usb-c","device_min_watt":80,"needs_description":true,"general_qtype":null,"confidence":0.9}
+
+คำถาม: "สายชาร์จใช้กับ iphone 13 ได้ไหม"
+{"intent":"compatibility_check","product_type":"charger","charger_subtype":"cable","target_device":"iphone 13","device_connector":"lightning","device_min_watt":20,"needs_description":true,"general_qtype":null,"confidence":0.9}
 
 คำถาม: "ส่งกี่วัน"
 {"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"shipping_policy","confidence":0.95}
@@ -175,6 +194,8 @@ _DEFAULT_RESULT: dict[str, Any] = {
     "product_type": None,
     "charger_subtype": None,
     "target_device": None,
+    "device_connector": None,
+    "device_min_watt": None,
     "needs_description": False,
     "general_qtype": None,
     "confidence": 0.0,
@@ -230,7 +251,7 @@ def classify_intent(
             config={
                 "system_instruction": _INTENT_PROMPT,
                 "temperature": 0.0,
-                "max_output_tokens": 200,
+                "max_output_tokens": 250,
                 "response_mime_type": "application/json",
             },
         )
@@ -267,6 +288,7 @@ def classify_intent(
 
         print(f"[INTENT] intent={result['intent']}  type={result.get('product_type')}  "
               f"sub={result.get('charger_subtype')}  device={result.get('target_device')}  "
+              f"conn={result.get('device_connector')}  watt={result.get('device_min_watt')}  "
               f"desc={result.get('needs_description')}  conf={result.get('confidence')}",
               file=sys.stderr)
         return result

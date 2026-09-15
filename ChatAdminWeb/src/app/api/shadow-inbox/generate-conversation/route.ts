@@ -37,8 +37,10 @@ async function callOurBot(params: {
   history: { role: "user" | "model"; text: string }[];
   shopId: string;
   shopName?: string;
+  conversationId?: string;  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
   use_v2?: boolean;
   use_v3?: boolean;
+  images?: string[];  // ⚡ ส่ง URL รูปให้ bot ใช้ Gemini vision อ่าน
 }): Promise<{
   answer: string;
   source?: string;
@@ -47,11 +49,12 @@ async function callOurBot(params: {
   usage?: { prompt: number; output: number; total: number };
   cost?: number;
   products?: unknown[];
+  image_desc?: string;  // ⚡ A2 — vision description ของรูป current turn (cache กัน re-read)
   handoff_to_admin?: boolean;
   handoff_reason?: string;
   routing_decision?: unknown;
 }> {
-  const { platform, message, history, shopId, shopName, use_v2, use_v3 } = params;
+  const { platform, message, history, shopId, shopName, conversationId, use_v2, use_v3, images } = params;
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
 
@@ -71,6 +74,10 @@ async function callOurBot(params: {
   const body: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
   if (shopName) body.shop = shopName;
   else if (shopId) body.shop = shopId;
+  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
+  if (conversationId) body.conversation_id = conversationId;
+  // ⚡ ส่ง current-turn images ให้ bot (ถ้ามี) — ใช้ Gemini vision อ่านรูป
+  if (images && images.length > 0) body.images = images;
   // ⚡ chat_v3 — ส่ง use_v3 เพื่อบังคับใช้ chatbotv3 (มี priority เหนือ v2)
   if (use_v3) body.use_v3 = true;
   // ⚡ chat_v2 — ส่ง use_v2 เพื่อบังคับใช้ chat_v2 (replay test) — ไม่ส่งถ้า v3
@@ -105,6 +112,7 @@ async function callOurBot(params: {
     usage: data.usage,
     cost: typeof data.cost === "number" ? data.cost : undefined,
     products: data.products,
+    image_desc: typeof data.image_desc === "string" ? data.image_desc : undefined,
     handoff_to_admin: data.handoff_to_admin === true, // ⚡ BUG-B — ส่งต่อให้ shadowReplyService เก็บ
     handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
     routing_decision: data.routing_decision,

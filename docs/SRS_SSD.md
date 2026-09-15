@@ -320,7 +320,12 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `_kb_doc_to_card` | 4060 | แปลง KB doc → product card | — |
 | `_recent_qa_pairs` | ~1030 | **Phase 8 (2026-09-17)** — จับคู่ user+model message เป็น QA pair (1 คู่ = 1 หน่วย) แล้วคืน `n` คู่ล่าสุด (default 10) เรียงเก่า→ใหม่ — ใช้แทน `history` ที่ส่งเข้า LLM context/follow-up detection — รับมือ edge cases: history ว่าง/None, 2 user ติดกัน (buffer flush), model เดี่ยวต้น history, user เดี่ยวท้าย history, เกิน n คู่ — ไม่ mutate history ต้นฉบับ | — |
 | `_LLM_CONTEXT_LIMIT` | ~1035 | **Phase 8 (2026-09-17)** — module constant = 30 — แยกจาก `req.limit` (frontend display limit) — ใช้สำหรับ RAG retrieval และ LLM context limit (ไม่ใช่ frontend display) — **Phase 8.1 (2026-09-18)**: กลายเป็น default fallback เท่านั้น — ค่าจริง resolve จาก `req.llm_context_limit` (per-request จาก admin config) ที่จุดเริ่มต้น `chat()` เป็น `_llm_ctx_limit` แล้วใช้แทน `_LLM_CONTEXT_LIMIT` ในทุกจุด retrieval/context (web-search re-query, KB/Mongo merge, fetch_limit, compatibility merge, Tier B cap, KB product cap) | — |
-| `_extract_max_wattage` | ~531 | **Phase 3b (2026-09-16)** — extract ค่า W สูงสุดจาก product card — ย้ายจาก nested function `_extract_max_watt` ใน superlative block มาเป็น module-level helper เพื่อให้ device-spec-lookup re-query block ใช้ sort ตาม wattage ได้ — logic: (1) spec field `output_power_w` (2) variants `output_power_w` (3) fallback extract จากชื่อ กรอง model number (เช่น CTC615W) ออกก่อน — ใช้ใน superlative block (sort desc) + device-spec-lookup block (sort asc) | `re` |
+| `_extract_max_wattage` | ~531 | **Phase 3b (2026-09-16)** — extract ค่า W สูงสุดจาก product card — ย้ายจาก nested function `_extract_max_watt` ใน superlative block มาเป็น module-level helper เพื่อให้ device-spec-lookup re-query block ใช้ sort ตาม wattage ได้ — logic: (1) spec field `output_power_w` (2) variants `output_power_w` (3) fallback extract จากชื่อ กรอง model number (เช่น CTC615W) ออกก่อน — ใช้ใน superlative block (sort desc) + device-spec-lookup block (sort asc) + `_filter_compat_products` (sort asc) | `re` |
+| `_KNOWN_DEVICE_SPECS` | ~594 | **(2026-09-16)** — module constant dict — known device charging specs (connector + min_watt) สำหรับอุปกรณ์ที่ intent LLM อาจไม่รู้ + web search ไม่ได้ผล — last-resort fallback สำหรับ `_resolve_device_spec` | — |
+| `_extract_product_connectors` | ~640 | **(2026-09-16)** — สกัด connector types จากชื่อ+description ของสินค้า — คืน set ของ `usb-c`/`lightning`/`micro-usb`/`usb-a` — ถ้าดึงไม่ได้ → set() ว่าง (ambiguous) | — |
+| `_resolve_device_spec` | ~658 | **(2026-09-16)** — resolve device charging spec — priority: (1) parse web search text (2) `_KNOWN_DEVICE_SPECS` fallback — คืน `{connector, min_watt}` หรือ None | `re` |
+| `_filter_compat_products` | ~696 | **(2026-09-16)** — CODE-level compat filter — กรองสินค้าที่ connector ไม่ตรงกับอุปกรณ์ออกก่อนส่ง LLM — priority: `intent_connector` → web search → hardcoded — sort by wattage ascending (baseline ก่อน, upgrade ทีหลัง) — fallback: ดึงไม่ได้→คืนทั้งหมด, กรองเหลือ<2→รวม ambiguous, กรองว่าง→คืนทั้งหมด | `_resolve_device_spec`, `_extract_product_connectors`, `_extract_max_wattage` |
+| `_ADDRESS_REQUEST_KWS` + address-request block | ~1970 | **(2026-09-16)** — detect "ขอที่อยู่ส่งกลบ/ส่งเคลม/ที่อยู่ร้าน/ที่อยู่ด่วน" → handoff แอดมินทันที (ไม่ถามเลขคำสั่งซื้อ) — bot ไม่มีที่อยู่จริงของร้าน → ส่งแอดมินเลย — reason: `address_request` — แยกจาก `_RETURN_REFUND_KWS` เพราะลูกค้าแค่ขอที่อยู่ ไม่ได้บอกเลขคำสั่งซื้อ | `urllib.request.urlopen` (handoff API) |
 
 #### 6.1.3 Nested helpers (ใน `chat()`)
 
@@ -560,7 +565,13 @@ web_search.should_use_web_search(answer, intent, products, message)
 |---|---|---|---|
 | `classify_intent` | 132 | **Pass 1 LLM classifier** — ถาม Gemini ให้คืน JSON intent | `_client()` |
 
-**Output keys**: `intent`, `product_type`, `charger_subtype`, `target_device`, `needs_description`, `general_qtype`, `confidence`, `model`, `usage`
+**Output keys**: `intent`, `product_type`, `charger_subtype`, `target_device`, `device_connector`, `device_min_watt`, `needs_description`, `general_qtype`, `confidence`, `model`, `usage`
+
+**`device_connector` + `device_min_watt` (2026-09-16):**
+- `device_connector`: พอร์ตชาร์จของอุปกรณ์เป้าหมาย — `usb-c`/`lightning`/`micro-usb`/`null`
+- `device_min_watt`: ค่า W ขั้นต่ำที่อุปกรณ์รองรับชาร์จเต็มสปีด — number หรือ `null`
+- เหตุผล: ให้ intent LLM คืน spec ของอุปกรณ์มาด้วย → `_filter_compat_products` ใช้กรองสินค้าที่ connector ไม่ตรงออกก่อนส่ง LLM
+- ใช้เมื่อ `target_device` ไม่เป็น null — ถ้าไม่รู้ spec ให้คืน null (fallback ใช้ web search + hardcoded)
 
 **`general_qtype` values (Phase 6, 2026-09-16):**
 - ค่า: `warranty_policy`/`return_policy`/`shipping_policy`/`brands`/`categories`/`shops`/`tax_invoice`/`null`
