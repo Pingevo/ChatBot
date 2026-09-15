@@ -45,12 +45,23 @@ async function safeCreateIndex(
 
 export async function ensureIndexes(): Promise<void> {
   const db = await getDb();
-  // ⚡ Phase 3B-6-fix — drop old chat_annotations unique index { scope: 1, conversation_id: 1 }
-  //   ที่ไม่รวม generation_batch_id ก่อนสร้าง partial index ใหม่ (ไม่งั้นชนกัน)
-  try {
-    await db.collection(COLLECTIONS.chatAnnotations).dropIndex("scope_1_conversation_id_1");
-  } catch {
-    // index อาจไม่มี (fresh install) → ไม่เป็นไร
+  // ⚡ Phase 3B-6-fix / 5.0-compat — drop old chat_annotations indexes ก่อนสร้างตัวใหม่
+  //   เดิมใช้ 2 partial index (มี batch_id / ไม่มี batch_id) แต่ MongoDB 5.0 ไม่รองรับ
+  //   `$exists: false` ใน partialFilterExpression → index ตัว legacy สร้างไม่ได้ (code 67)
+  //   ปัจจุบันใช้ unique index ธรรมดาตัวเดียวบน { scope, conversation_id, generation_batch_id }
+  //   → MongoDB index doc ที่ไม่มี field เป็น null → unique บังคับ 1 ต่อ (scope, conversation_id)
+  //   สำหรับ legacy docs อัตโนมัติ (ไม่ต้องพึ่ง $exists: false)
+  //   ต้อง drop ทั้ง 2 ตัวเก่าก่อน ไม่งั้น safeCreateIndex เจอ code 85 (IndexOptionsConflict)
+  //   แล้วเงียบ ๆ ไม่สร้างตัวใหม่
+  for (const name of [
+    "scope_1_conversation_id_1",
+    "scope_1_conversation_id_1_generation_batch_id_1",
+  ]) {
+    try {
+      await db.collection(COLLECTIONS.chatAnnotations).dropIndex(name);
+    } catch {
+      // index อาจไม่มี (fresh install) → ไม่เป็นไร
+    }
   }
   await Promise.all([
     safeCreateIndex(db, COLLECTIONS.admins, { email: 1 }, { unique: true, sparse: true }),
@@ -161,11 +172,13 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.shadowReplies, { created_at: -1 }),
     // ⚡ Phase 3B-1 — chat_annotations (markup dot + note)
     //   ⚡ Phase 3B-6/3B-7-fix — unique index รวม generation_batch_id เพื่อให้แยก annotation ตามรอบได้
-    //     แยกเป็น 2 partial index:
-    //     1. มี batch_id → unique ที่ (scope, conversation_id, generation_batch_id) — แยกตามรอบ
-    //     2. ไม่มี batch_id (legacy) → unique ที่ (scope, conversation_id) — 1 ต่อแชท
-    safeCreateIndex(db, COLLECTIONS.chatAnnotations, { scope: 1, conversation_id: 1, generation_batch_id: 1 }, { unique: true, partialFilterExpression: { generation_batch_id: { $exists: true } } }),
-    safeCreateIndex(db, COLLECTIONS.chatAnnotations, { scope: 1, conversation_id: 1 }, { unique: true, partialFilterExpression: { generation_batch_id: { $exists: false } } }),
+    //   ⚡ 5.0-compat — เดิมแยกเป็น 2 partial index (มี batch_id / ไม่มี batch_id) แต่ MongoDB 5.0
+    //     ไม่รองรับ `$exists: false` ใน partialFilterExpression → ยุบเป็น unique index ธรรมดาตัวเดียว
+    //     บน { scope, conversation_id, generation_batch_id } — MongoDB index doc ที่ไม่มี field
+    //     เป็น null → unique บังคับ 1 ต่อ (scope, conversation_id) สำหรับ legacy docs อัตโนมัติ
+    //     (semantic เดิมครบทั้ง 2 ข้อ: แยกตามรอบเมื่อมี batch_id / 1 ต่อแชทเมื่อไม่มี)
+    //     ⚠️ convention: "ไม่มี batch = omit field" (ไม่ใช่ explicit null) — คงไว้ใน chatAnnotationService
+    safeCreateIndex(db, COLLECTIONS.chatAnnotations, { scope: 1, conversation_id: 1, generation_batch_id: 1 }, { unique: true }),
     safeCreateIndex(db, COLLECTIONS.chatAnnotations, { created_by: 1, created_at: -1 }),
     // ⚡ buffer_messages — message buffering (debounce) ก่อนเข้า processMessage
     safeCreateIndex(db, COLLECTIONS.bufferMessages, { message_id: 1 }, { unique: true, sparse: true }),
