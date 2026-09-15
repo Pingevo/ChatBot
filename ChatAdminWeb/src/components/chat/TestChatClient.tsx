@@ -981,6 +981,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             shop,
             platform,
             images: images.map((i) => i.url),  // ⚡ Phase 1F — ส่ง image URLs
+            media_types: images.map((i) => i.type),  // ⚡ content types สำหรับ detect video (upload URL ไม่มี extension)
           }),
         });
         const bj = await br.json().catch(() => ({}));

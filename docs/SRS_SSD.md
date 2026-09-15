@@ -436,8 +436,8 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `answer` | 434 | ตอบคำถามสินค้าจาก product context | `_client()`, `_build_context()` |
 | `answer_with_kb` | 604 | ตอบจาก KB context (ไม่มี product_store) | `_client()` |
 | `answer_general` | 664 | ตอบคำถามทั่วไป (policy/brands/categories) | `_client()` |
-| `describe_image` | 476 | **Phase 1A** vision pass — อ่านรูป 1 รูปด้วย `gemini-3.1-flash-lite` (โหลด bytes → `Part.from_bytes`) → คืน (text, usage). **2026-09-12**: `_VISION_PROMPT` เพิ่ม guard กัน hallucination — อธิบายเฉพาะที่เห็นในรูปจริง ห้ามให้ `history_context` ไปกำหนดประเภทของรูป (เช่น คุยเรื่องพาวเวอร์แบงค์แล้วรูปแมวกลายเป็นพาวเวอร์แบงค์) | `_client()`, `urllib.request`, `types.Part.from_bytes()` |
-| `describe_images` | 516 | **Phase 1A** vision pass — อ่านหลายรูป (max 3) → คืน (combined_text, total_usage) | `describe_image()` |
+| `describe_image` | 476 | **Phase 1A** vision pass — อ่านรูป/วิดีโอ 1 ไฟล์ด้วย `gemini-3.1-flash-lite` (โหลด bytes → `Part.from_bytes`) → คืน (text, usage). **2026-09-12**: `_VISION_PROMPT` เพิ่ม guard กัน hallucination. **2026-09-15**: timeout 180s สำหรับ video URL (extension .mp4/.mov/.avi/.webm/.mkv) + test-chat upload URL (ไม่มี extension → ให้ 180s ไว้ก่อน); MIME detect จาก HTTP `Content-Type` + URL suffix → `video/mp4` → `Part.from_bytes`; เพิ่ม video-specific prompt section (motion/sequence/audio/fault demo) เมื่อ `_mime.startswith("video/")` | `_client()`, `urllib.request`, `types.Part.from_bytes()` |
+| `describe_images` | 516 | **Phase 1A** vision pass — อ่านหลายไฟล์ (max 3/5) → คืน (combined_text, total_usage). **2026-09-15**: label เปลี่ยนจาก `[รูปที่ N]` → `[วิดีโอที่ N]` / `[รูปที่ N]` ตาม URL suffix | `describe_image()` |
 
 #### 6.2.2 API key management
 
