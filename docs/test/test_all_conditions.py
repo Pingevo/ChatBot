@@ -3,18 +3,20 @@
 """
 import requests
 import json
+import os
 import time
 import sys
 
 BASE = "http://127.0.0.1:8010/chat"
 SHOP = "CukTechThailand"
+_HEADERS = {"X-Internal-Secret": os.environ.get("CHATBOT_INTERNAL_SECRET", "")}
 
 def chat(message, history=None, shop=SHOP):
     payload = {"message": message, "shop": shop, "limit": 5}
     if history:
         payload["history"] = history
     t0 = time.time()
-    r = requests.post(BASE, json=payload, timeout=60)
+    r = requests.post(BASE, json=payload, headers=_HEADERS, timeout=60)
     elapsed = time.time() - t0
     d = r.json()
     return d, elapsed

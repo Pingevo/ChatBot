@@ -7992,6 +7992,51 @@ Phase 8 ใช้ `_LLM_CONTEXT_LIMIT = 30` เป็น module constant แบ�
 
 ## กำลังจะทำ
 
+### Config — ทำให้ ponytail skill ติดถาวรทุก session ใน repo นี้ (เฉพาะ user คนนี้) (2026-09-15) — ✅ เสร็จ
+
+- **เป้าหมาย**: เปิด ponytail (level: full) อัตโนมัติทุก session โดยไม่ต้องสั่งเอง
+- **วิธี**: สร้าง `AGENTS.local.md` (personal rule, ไม่ commit) สั่งให้ invoke skill `ponytail` ตอนเริ่ม session + เพิ่ม `AGENTS.local.md` ใน `.gitignore`
+- **เหตุผลที่เลือก AGENTS.local.md**: user เลือก scope "repo นี้ เฉพาะเรา" → ไม่กระทบทีม; skill ponytail อยู่ใน `.devin/skills/` (untracked) อยู่แล้ว
+- **ไม่แก้ SRS_SSD.md** — ไม่ใช่โค้ดใน `chatbot/shopeechat/`
+- **Verify**: `git check-ignore -v AGENTS.local.md` → ถูก ignore โดย .gitignore:46 ✅, ไม่ขึ้นใน git status ✅
+
+### 🔨 Refactor app.py + reorg shopeechat/ — อนุมัติแล้ว กำลังทำ (2026-09-15)
+
+- **คำขอ:** user อนุมัติทำ refactor — จัดระเบียบไฟล์ใน `chatbot/shopeechat/` ก่อน แล้วตัด/ย้ายตาม audit
+- **Reorg (ทำแล้ว):** `export_mongo.py` → `scripts/` (standalone script, cwd-relative `--out`/`EXPORT_DIR` คุม output อยู่แล้ว) + อัปเดต README/AGENTS refs
+- **ตัดสินใจ: ไม่แยกโฟลเดอร์ core** — flat layout load-bearing 3 ทาง: `from shopeechat import X` (testscript+docs/test ~10 ไฟล์), `import product_store` flat (testQA2.py sys.path→shopeechat/), `chatbot.shopeechat.app:app` (Dockerfile+build_embeddings)
+- **⚠️ correction:** `chat_models.py` ไม่ใช่ dead — `chat_v2.py:280` import จริง (KEEP BY DESIGN ตาม L8022); รายการ dead code ที่ verify คือตาม L8023
+- **Batch 1 (mechanical — findings L8006-8016 verify แล้ว):** redundant imports, hoist model_name/_qa10/_new_topic_kws, _context_note shrink, _kw_claim, dead placeholders, hasattr×4, _send_handoff แทน 8 inline urllib, dict→ChatResponse ×2
+- **Batch 2 (dead code — verify แล้ว):** `_has_warranty_history` (L2702), `_warranty_calc_note` (L3291), `_pre_product_types` (L2707) + repo-wide dead fns ตาม L8023
+- **Batch 3 (extraction):** test_chat_api.py (ใหม่), device_compat.py (ใหม่), handoffs.py (ใหม่), warranty SM→warranty_flow.py, auto-check→warranty.py, _web_search_reanswer→web_search.py, _dedupe_*→product_store.py, brand helpers→knowledge_base.py — move ล้วน ไม่แก้ logic, ctx dict pattern เหมือน handle_warranty_flow
+- **Verify ต่อ batch:** py_compile ทุกไฟล์ที่แตะ + grep call sites + replay เคสเก่า (ต้องผ่านเหมือนเดิมทุกเคส)
+
+### ⏸️ Ponytail review app.py — findings รออนุมัติ ยังไม่ได้แก้โค้ด (2026-09-15)
+
+- **คำขอ:** ponytail-review `chatbot/shopeechat/app.py` → เจอ `net: -500 lines possible` → user เลือก **หยุดก่อน แค่ review** (ไม่แตะโค้ด)
+- **▶️ 2026-09-15 (ภายหลัง): user อนุมัติแล้ว — กำลัง apply ตาม entry ข้างบน**
+- **Findings ที่ verify แล้ว พร้อม apply เมื่ออนุมัติ (เชิงกล ไม่เปลี่ยน semantics):**
+  1. ลบ redundant local imports: `import sys` (L78), `import os` (L387, L7648), `import os as _os` (L4667), `import time as _time` ซ้ำ (L6999), `import re as _re_*` 12 จุด (L463 `_re_dedup_mod`, L564 `_re_w`, L642 `_re_conn`, L704 `_re_dev_spec`, L982 `_re_dev`, L1282 `_re_wsr`, L3061 `_re2`, L4020 `_re3`, L5591 `_re_ref`, L6489 `_re_super`, L7736 `_re`) + L4498 `import re as _re` dead (ไม่มี usage) — alias map ครบทุก usage แล้ว
+  2. Hoist `model_name` = `os.environ.get("GEMINI_MODEL","gemini-3.5-flash-lite")` 1 จุด แทน 24 assignments + 3 inline uses (rename `_model_name` → `model_name`)
+  3. Hoist `_qa10 = _recent_qa_pairs(history, 10)` แทน call ซ้ำ 14 จุด — ⚠️ ต้องเช็ค `history` (สร้าง L1549) ไม่ mutate ก่อนจุดใช้แรก (L2240) ก่อน apply
+  4. Hoist `_new_topic_kws` tuple (ซ้ำเหมือนกันเป๊ะ L1730/L6157)
+  5. Shrink `_context_note` append if/else 5 จุด (L4948, L6236, L6260, L6275, L7254) → `products[0]["_context_note"] = f"{products[0].get('_context_note','')} {note}".strip()`
+  6. `_kw_claim` คำนวณครั้งเดียว (L1921 `_warranty_pre_check` / L2788 `_warranty_check_mod` = module เดียวกัน 2 alias; L3884 คนละ flow เก็บไว้)
+  7. ลบ `_is_conv_active_init` placeholder (L5265 ไม่เคยอ่าน), print ADDRESS-REQUEST ซ้ำ (L1984/L2003 เก็บอันเดียว), `_is_superlative` ซ้ำ `_is_superlative_q` (L6297)
+  8. Simplify `hasattr(m,'role')`/`hasattr(m,'text')` บน req.history ×4 (L4444, L4489, L5186, L5509 — pydantic รับประกัน ChatMessage)
+  9. Extend `_send_handoff` (L7809 — chat_v2/chatbotv3 เรียกอยู่แล้ว) +`claim`/`simulate`/return dict → แทน 8 inline urllib blocks: fire-and-forget L2013-2041, L2122-2152, L2635-2666, L2855-2886, L2988-3019, L4170-4201; อ่าน response L3909-3949, L4271-4308
+  10. dict returns L6450/L6807 → `ChatResponse` (key `platform`/`intent_confidence` ไม่มีใน model ถูก drop อยู่แล้ว → output เดิม)
+- **ข้ามโดยตั้งใจ (เสี่ยงเปลี่ยน behavior):** merge `_charging_spec_kws` 3 เวอร์ชัน (เนื้อหาต่างกัน), device tables ×3, brand/stop sets ×2, `_respond()` helper, phase extraction ของ chat() (6,325 บรรทัด)
+- **วิธี apply ที่ปลอดภัย (เมื่ออนุมัติ):** แบ่ง batch imports→hoists→misc→handoff, py_compile+grep verify ทุก batch, ให้ดู git diff ทีละชุด
+
+### ℹ️ Ponytail repo-audit (2026-09-15) — report-only, ยังไม่แก้โค้ด
+
+- **⚠️ KEEP BY DESIGN:** `chat_v2.py` + `chat_models.py` + `warranty_flow.py` + `chatbotv3/` (~4,200 บรรทัด) — user ยืนยันเก็บไว้พัฒนาต่อ (legacy คือ engine ที่ใช้จริง) → **อย่า flag/ลบ อีก**
+- **Dead code verified (zero callers ทั้ง repo):** `web_search.search_and_answer` (53 บรรทัด, deprecated), `product_store._score_card` (41), `_is_sold_out` (14), `order_store.lookup_orders_by_buyer` (36), `_format_unix_ts_with_time` (23), `conversation_products.get_recent_suggestions` (25), `is_generic_question` (11) ≈ 203 บรรทัด
+- **requirements.txt dead deps ×4:** resend, PyJWT, bcrypt, email-validator — ไม่มี import ใน Python tree (bcryptjs ใน Next.js คนละ package; ไม่มี EmailStr)
+- **docker-compose:** service chatbot-lazada/tiktok ชี้ APP_MODULE ที่ไม่มีอยู่จริง (~60 บรรทัด) — ลบจนกว่า implement
+- **soft:** docs/test 22 scripts — run_daily_tests เรียกแค่ testQA2.py; test_openrouter_cost vs test_openrouter_full_cost ซ้อนกัน
+
 ### แก้ — Warranty follow-up "รุ่นไหนประกันยังไงบ้าง" หยิบรุ่นเก่ามาตอบ + anchor poisoning (2026-09-16)
 
 - **เคสจริง (conv thwtchtpyn, shop CukTechThailand):**
@@ -8056,3 +8101,122 @@ Phase 8 ใช้ `_LLM_CONTEXT_LIMIT = 30` เป็น module constant แบ�
 - **Verify:** py_compile ผ่าน ✅, `npx tsc --noEmit` ผ่าน ✅
 - **⚠️ ยังไม่ verify end-to-end จริง:** รอทดสอบส่งวิดีโอจริงผ่าน test chat + ส่งวิดีโอ Shopee จริงผ่าน bot worker เพื่อยืนยัน Gemini อ่านวิดีโอได้
 - **สถาปัตยกรรม:** `images` field (string[]) ยังคงเป็น media URL array สำหรับทั้ง image และ video — ไม่เปลี่ยนเป็น `media` field ตามที่ไม่ได้รับการร้องขอ
+
+---
+
+## Audit (ไม่ได้แก้โค้ด)
+
+### Ponytail audit — repo-wide over-engineering scan (2026-09-15) — ✅ report only, applies nothing
+
+- **คำขอ:** ponytail-audit ทั้ง repo + ประเมิน plan-3411cb7710a70c07.md (retrieval redesign) ว่าแก้ปัญหาหรือเพิ่ม complexity
+- **Findings หลัก (ยังไม่ได้แก้ — รอตัดสินใจ):**
+  - 3 chat engines ขนานกัน (app.chat legacy 8,239 + chat_v2 1,491 + chatbotv3 ~1,783 + warranty_flow 822 เฉพาะ v2) หลัง flag `USE_LEGACY_CHAT`/`USE_CHAT_V3`/`chat_engine` — cut ที่ใหญ่สุดถ้าเลือกตัวชนะ
+  - dead code ที่เช็คแล้วไม่มี caller: `chat_models.py`, `web_search.search_and_answer`, `product_store._score_card`, `product_store._is_sold_out`
+  - dead Python deps ใน requirements.txt: `resend`, `PyJWT`, `bcrypt`, `email-validator` (auth อยู่ฝั่ง Next: jose+bcryptjs)
+  - docker-compose services สำหรับ lazada/tiktok ที่ app ยังไม่มี (comment ตัวเองบอก container จะ crash)
+  - test harness ซ้ำซ้อน: `test/` vs `docs/test/` + `test_openrouter_cost.py` ถูกแทนด้วย `test_openrouter_full_cost.py` + `ChatAdminWeb/scripts/test-workflow-*.ts`
+- **Plan verdict:** แผน retrieval ใหม่ (union regex∪vector + anchor-always + bypass 8 heuristic blocks) เป็นทิศทาง "เอาพฤติกรรมผิดออก" ไม่ใช่ guard ซ้อน guard → แก้ปัญหาจริง; ข้อเสนอเพิ่ม: ควรมี phase ลบ legacy path หลัง eval ผ่าน + ตัด enum `reranked` ออกจนกว่า Phase C จะมีจริง
+- **ไฟล์ที่แก้:** ไม่มี (รายงานอย่างเดียว) — อัปเดตไฟล์นี้ตามกฎข้อ 8
+
+### Ponytail review เฉพาะ app.py legacy (2026-09-15 ต่อเนื่อง) — ✅ report only
+
+- **คำขอ:** รีวิว legacy `app.py` (8,239 บรรทัด) — ซับซ้อนเกินไหม ลด/รวมฟังก์ชันตรงไหนได้บ้าง (ไม่สนใจ v2/v3)
+- **Findings (ยังไม่แก้):**
+  - `chat()` ยาว ~6,325 บรรทัด, 26 return points, flag ข้าม block กัน (UnboundLocalError guard ที่ L1137-1143 คืออาการ)
+  - warranty state machine ซ้ำกับ `warranty_flow.py` — inline ~850 บรรทัด (L3293-4143) vs module ที่ port ไปแล้ว (มี Phase 2Z+/2B ครบ) → legacy เรียก `handle_warranty_flow()` เองได้
+  - handoff HTTP call copy-paste 7 จุด (~30 บรรทัด/จุด) ทั้งที่ `_send_handoff` (L7809) มีอยู่แต่ legacy ไม่เคยเรียก
+  - `return ChatResponse(...)` 26 จุด tail เหมือนกัน → รวมเป็น `_respond()`
+  - comparison quartet L3110-3292 — 4 detector ผลิต `_anchor_compare_ctx` เหมือนกัน → รวมเป็น resolver เดียว
+  - tax invoice 2 block เกือบเหมือนกัน (L2841-2908 + L4143-4222)
+  - Phase 1C warranty auto-check 2 ตัว (delivery + legacy create_time fallback)
+  - Test Chat Sessions API ~370 บรรทัด (L7872-8239) ไม่เกี่ยวกับ chat() → ย้าย router ของตัวเอง
+  - nested `_resolve_charger_subtype` + `_web_search_reanswer` ประกาศทุก request → ยกขึ้น module level
+  - carry/ref heuristic stack ~L5027-5800 (retrieval rewrite, LINK-FOLLOWUP, CONV-ACTIVE, charger carry, fuzzy guard, ref-like) — เป้าหมายเดียวกับ plan staged_filter
+- **ไฟล์ที่แก้:** ไม่มี — รายงานอย่างเดียว
+
+### Refactor legacy app.py — extraction + dedup (2026-09-16) — ✅ verified
+
+- **คำขอ:** "app.py ฟังก์ชั่นไหนไม่จำเป็นลดจำนวนได้... อันไหนแยกเป็นไฟล์อื่นๆ ได้" → audit → "เอา ทำเลยพี่"
+- **ผลลัพธ์:** `app.py` 8,239 → **4,807 บรรทัด** (−3,432)
+- **ไฟล์ใหม่:**
+  - `test_chat_api.py` (408) — test-chat sessions CRUD 9 routes + `_validate_object_id`/`_log_testchat_action` (APIRouter, include ใน app.py)
+  - `device_compat.py` (519) — `_extract_max_wattage`, `_KNOWN_DEVICE_SPECS`, `_extract_product_connectors`, `_resolve_device_spec`, `_filter_compat_products`, `_apply_product_tiers`, `_device_spec_lookup`
+- **ย้ายเข้าไฟล์เดิม:**
+  - `warranty_flow.py` += `handle_warranty_flow_legacy(req, ctx, history, db)` — claim SM ~950 บรรทัด verbatim (returns dict→ChatResponse wrap); ctx ส่ง 15 vars จาก chat scope
+  - `warranty.py` += `auto_check_delivery_warranty(order_sn, shop, bot_name)` — 2-phase (delivery-date + legacy create_time fallback) → (answer, info, ctx)
+  - `web_search.py` += `reanswer(...)` — เดิม nested `_web_search_reanswer` ใน chat() (~295 บรรทัด); เพิ่ม params `db`, `llm_ctx_limit`
+  - `knowledge_base.py` += `_detect_brand_question`, `_build_brand_context`, `_kb_doc_to_card`
+  - `product_store.py` += `_dedupe_products`, `_dedupe_base_name`, `_dedupe_sell_score`, `_DEDUP_STANDARDS`
+  - `llm.py` += `_GEMINI_COST_PER_M` + `_gemini_cost(p_in, p_out)` — แทน inline cost ×9 จุด
+- **Dead code ลบทิ้ง (verify 0 call sites แล้ว):**
+  - app.py: `_has_warranty_history`, `_warranty_calc_note`, `_pre_product_types`, `_strip_kb_markup` (ซ้ำ llm.py — alias ใช้ `llm._strip_kb_markup`), `_admin_db` (ซ้ำ conversation_products)
+  - `product_store.py`: `_score_card`, `_is_sold_out`, `_STOPWORDS`
+  - `web_search.py`: `search_and_answer` (deprecated)
+  - `order_store.py`: `lookup_orders_by_buyer`, `_format_unix_ts_with_time`
+  - `conversation_products.py`: `get_recent_suggestions`, `is_generic_question`
+- **Dedupe:** inline urllib handoff 8 จุด → `_send_handoff` (ขยาย sig รับ `claim`/`simulate`/`timeout`/`log_tag` + คืน response); `_qa10` hoist 13 จุด→1; `model_name` hoist 27 จุด→1; `_add_context_note` helper แทน if/else 4 บรรทัด ×5; raw dict returns ×2 → `ChatResponse`; `dir()` hack ใน superlative → var ปกติ
+- **Reorg:** `export_mongo.py` → `scripts/` + อัปเดต README/AGENTS
+- **Compat alias (v2 เรียกผ่าน `_app_module`):** `_detect_brand_question`, `_build_brand_context` ชี้ไป knowledge_base
+- **⚠️ correction (2026-09-16 ทดสอบจริง):** `_model_name` ไม่ใช่ latent bug — ต้นฉบับ assign `_model_name = os.environ.get("GEMINI_MODEL", ...)` ไว้ 3 จุด แต่ **ตอน extract บรรทัด assign หลุด** → post-handoff path 500 จริง (replay suite จับได้: "," หลัง handoff → NameError) → แก้แล้วด้วย `_model_name = model_name` (จาก ctx — ค่าเดียวกัน)
+- **Verify:**
+  - `python3 -m py_compile` ทุกไฟล์ที่แก้ ✅
+  - import `shopeechat.app` + `chat_v2` + `warranty_flow` ผ่าน (venv .venv) ✅
+  - FastAPI openapi paths มี /test-chat/* ครบ 9 routes (include_router lazy-mount) ✅
+  - smoke test จริง `chat(ChatRequest)`: "สวัสดี" → product_store answer ปกติ ✅; "สินค้าเสียอยากเคลมค่ะ" → `warranty_claim_first_message` + `handoff_to_admin=True` ✅
+
+### Refactor ต่อ — order_flow.py + handoffs.py (2026-09-16) — ✅ verified
+
+- **ผลลัพธ์:** `app.py` 5,471 → **4,807 บรรทัด** (−664)
+- **ไฟล์ใหม่:**
+  - `order_flow.py` (537) — `early_order_flow(req, ctx, history, db)` ย้าย verbatim order lookup + return/refund+address handoff + tracking lookup (~500 บรรทัด); เขียนกลับ `ctx["order_sn"]`/`ctx["is_claim_request_pre"]` ให้ warranty auto-check ใช้ต่อ
+  - `handoffs.py` (260) — `detect_human_request(req, ctx)` (pre-intent, BUG-3) + `post_intent_handoffs(req, ctx, db)` (tax invoice + TISI)
+- **Bug ที่จับได้จาก smoke test (แก้แล้ว):**
+  - `web_search.py` ขาด `import re` — `reanswer()` ใช้ `re` แต่ import ไม่ได้ตามมาตอนย้าย → NameError หลัง LLM ตอบ → เพิ่ม import
+  - `order_flow.py` ขาด `from fastapi import HTTPException` — block มี `raise HTTPException(500)` อยู่ → เพิ่ม
+  - `app.py` หลุด lazy imports `warranty` + `warranty_flow` — เดิม import อยู่ใน order block ที่ย้าย แต่ code หลัง block ใช้ต่อ → re-add ก่อน call site
+- **Verify:**
+  - `py_compile` ทุกไฟล์ ✅ + import ทุกโมดูลใหม่ ✅
+  - smoke `chat()` 6 paths: order_sn ปลอม → `order_lookup` not-found answer ✅, "ขอที่อยู่ส่งคืน" → `address_request_handoff` ✅, "ขอคุยกับแอดมิน" → `human_request_handoff` ✅, "ขอใบกำกับภาษี" → `tax_invoice_handoff` (ผ่าน intent conf=1.0) ✅, claim first-message ✅, claim w/ history → `warranty_claim_flow` + handoff ✅, "มีพาวเวอร์แบงค์ไหม" → `product_store` ✅
+- **ยังไม่ได้ทำ:** `_respond()`/`_record_step()` (ตรวจแล้ว rounding ต่างกันจริงต่อ site — helper จะเปลี่ยน output precision จึงข้าม), comparison follow-up quartet + KB merge + product path (~2,900 บรรทัด core ที่ผูกกับ chat() state — เสี่ยงสูง คุ้มน้อย), replay suite เต็มจาก docs/test/
+
+### Replay test pingevox + mistorethailand หลัง refactor (2026-09-16) — ✅ 41/42
+
+- **รัน:** `docs/test/test_pingevox_mistore.py` ยิง server จริง `127.0.0.1:8010` (42 เคส, history สะสม)
+- **ผล:** pingevox 5/5 ✅ | mistore 36/37 — Q29 "สอบถาม สายชาร์จ ชาร์จไฟไม่ได้" หลัง claim flow เดิม → SM เก็บข้อมูลต่อ handoff=False (logic เดิม — handoff ไปแล้ว turn ก่อนหน้า ไม่ใช่ regression)
+- **Regression ที่ replay จับได้ (แก้แล้ว):**
+  - `warranty_flow.py` — `_model_name` 3 assignment หลุดตอน extract → post-handoff 500 → `_model_name = model_name`
+  - `device_compat.py` — `_extract_max_wattage` ใช้ `_re_w` (alias `import re as _re_w` หลุดตอน dedupe local imports) → `_re_w.`→`re.` 2 จุด — compat-follow-up path ("หัวชาร์จละ" ฯลฯ) 500 ก่อนแก้
+- **ระหว่างทดสอบ:** Gemini 429 RESOURCE_EXHAUSTED (quota หมดจากรันซ้ำ) — error/fail ที่เหลือในรอบกลางเป็น quota ไม่ใช่โค้ด; static sweep หา undefined names ทุกไฟล์ที่แตะ → clean แล้ว
+
+### Replay test katess_live หลัง refactor (2026-09-16) — ✅ 5/5
+
+- **รัน:** `test/test_katess_live.py` ยิง server จริง `127.0.0.1:8010` — เคส Run vs Swim comparison
+- **ผล:** Q1 item-card anchor (Run) ✅, Q2 anchor comparison "รุ่นนี้กับตัว swim" → Run+Swim ครบ context ✅, Q3 item-card Swim ✅, Q4 comparison follow-up "คุณภาพเสียงต่างกันไหม" ✅, Q5 post-comparison follow-up ✅
+- **ความหมาย:** comparison quartet + anchor/carry-forward (โซนที่ยังอยู่ใน app.py และผูกกับ chat() state หนักสุด) ทำงานถูกหลัง refactor
+
+### Unit tests test/ หลัง refactor (2026-09-16) — ✅ 24/24
+
+- **รัน:** `pytest test/test_anchor_comparison_followup.py test/test_qa_batch_20260911.py`
+- **ผล:** anchor comparison 6/6 (anchor history, post-comparison, partial comparison) + qa_batch 18/18 (lang detect, `_strip_kb_markup` — verify dedupe ไปใช้ `llm.py` copy เดียว, claim state helpers)
+
+### เทสโมดูลที่ย้าย (2026-09-16) — ✅ 13/13 live
+
+- **ไฟล์ใหม่:** `test/test_extracted_modules_live.py` — ยิง server จริง `127.0.0.1:8010`, shop=KingGadgets
+- **order_flow.py:** order found (`220725DCDR7DBN`) ✅ / not-found ✅ / order anchor follow-up "order ถึงยัง" ✅ / return-refund ask→follow-up handoff ✅ / address request handoff ✅
+- **handoffs.py:** human request ✅ / tax invoice ✅ / มอก. → tisi_answer (เจอ Powerconnex รางไฟ) ✅
+- **device_compat.py:** "หัวชาร์จใช้กับ iphone 17 pro max" → compat products ✅ / "หัวชาร์จละ" follow-up ✅ / "ราคาเท่าไหร่" ✅ (เส้นทางที่เคยพัง `_re_w`)
+- **พบ (ไม่ใช่ regression):** `lookup_by_tracking` ค้นเฉพาะ `package_list.*` แต่ Shopee เก็บ `tracking_no` ไว้ top-level → tracking path miss เสมอกับ data shape ปัจจุบัน → bot ตอบขอเลข order (shipping_policy) — behavior เดิมก่อน refactor, order_store.py ไม่ได้แตะ
+
+### รัน docs/test suite หลัง refactor (2026-09-16)
+
+**Unit (ไม่ยิง server):**
+- `test_recent_qa_pairs.py` + `test_warranty_delivery.py` — pytest 21 ผ่าน
+- `test_car_charger_regression.py` — 16/16 (ต้อง `PYTHONPATH=chatbot` — sys.path ในไฟล์ชี้ `docs/chatbot` ผิดอยู่เดิม pre-existing)
+- `test_new_product_types.py` — 66/66 (sys.path เดียวกัน)
+- `test_charger_subtype_parity.py` — 42/42
+
+**Live (ยิง server :8010):**
+- `test_flow.py` — 7/8 กลุ่มผ่าน; Q8 "สายถัก iphone 17 promax" คาด `product_store+web_search` แต่ได้ `product_store` (retrieval เจอชุด CTC615W+CTL301 → ไม่ trigger web search — nondeterministic ไม่ใช่ regression)
+- `test_all_conditions.py` — **54/54** (ครอบทุก source: product/kb/general/claim SM/compat/handoff/web_search; เคส 8.4 โดน 429 quota กลางรันแต่เช็ค loose ผ่าน)
+
+**แก้ test 2 ไฟล์:** test_flow.py + test_all_conditions.py เก่ากว่า secret middleware — เพิ่ม `X-Internal-Secret` header จาก env (pattern เดียวกับ test_katess_live.py)

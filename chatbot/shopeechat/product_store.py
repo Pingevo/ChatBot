@@ -640,22 +640,6 @@ def to_product_card(doc: dict, message: str = "") -> dict:
     }
 
 
-def _is_sold_out(doc: dict) -> bool:
-    """ตรวจว่าสินค้า sold out (stock=0 ทุกรุ่นย่อย) หรือไม่.
-
-    ใช้กรองสินค้าที่ item_status=NORMAL แต่ Shopee ขึ้น sold out แล้ว
-    ⚡ ตรวจจาก summary_info.total_available_stock — ถ้ารุ่นใดมี stock > 0 ถือว่ายังขายได้
-    """
-    models = doc.get("model") or []
-    if models:
-        for m in models:
-            if _shopee_stock(m) > 0:
-                return False
-        return True
-    # ไม่มี model → ตรวจจาก doc.stock_info_v2
-    return _shopee_stock(doc) <= 0
-
-
 def _extract_product_name_tokens(name: str) -> list[str]:
     """สกัด alphanumeric tokens จากชื่อสินค้า เพื่อใช้เปรียบเทียบ fuzzy.
 
@@ -2452,58 +2436,6 @@ def build_query(
 
 # ---- main fetch ---------------------------------------------------------------
 
-# คำที่ไม่ควรนับเป็น signal ตอน score (เป็น stopword ทั่วไปในคำถามไทย/อังกฤษ)
-_STOPWORDS: frozenset[str] = frozenset({
-    "มี", "ไหม", "ไหน", "อะไร", "บ้าง", "ได้", "ไป", "และ", "หรือ", "อยาก",
-    "ได้", "ให้", "หน่อย", "ช่วย", "แนะ", "นำ", "หา", "ดี", "กว่า", "ที่",
-    "is", "the", "a", "an", "of", "for", "and", "or", "to", "what", "which",
-    "have", "has", "any", "some", "good", "best", "recommend",
-})
-
-
-def _score_card(card: dict, message: str, product_types: set[str]) -> float:
-    """ให้คะแนนความเกี่ยวข้องของ product card กับคำถามลูกค้า.
-
-    ใช้ re-rank หลัง Mongo คืน candidates เพื่อให้สินค้าที่ตรงที่สุดขึ้นมาก่อน
-    (Mongo $regex กรองหยาบ แต่ natural order ไม่ได้เรียงตาม relevance).
-
-    น้ำหนัก:
-    - ตรง product type regex บน item_name: +5 (สำคัญที่สุด)
-    - ตร brand ที่ลูกค้าเอ่ย:               +3
-    - ตร token ระหว่าง message ↔ item_name: +1 ต่อ token
-    - ตร shop ที่ลูกค้าเอ่ย:                +2
-    """
-    name = (card.get("name") or "").lower()
-    brand = (card.get("brand") or "").lower()
-    shop = (card.get("shop") or "").lower()
-    msg = message.lower()
-
-    score = 0.0
-
-    # 1) product type regex match บน item_name (boost สูงสุด)
-    for type_name in product_types:
-        for tn, _kws, regex in PRODUCT_TYPES:
-            if tn == type_name and re.search(regex, name):
-                score += 5.0
-                break
-
-    # 2) brand match
-    if brand and len(brand) >= 2 and brand in msg:
-        score += 3.0
-
-    # 3) shop match (เผื่อลูกค้าพิมพ์ชื่อร้านในข้อความ)
-    if shop and len(shop) >= 3 and re.sub(r"\s+", "", shop) in re.sub(r"\s+", "", msg):
-        score += 2.0
-
-    # 4) token overlap ระหว่าง message กับ item_name (ตัด stopword ออก)
-    msg_tokens = {t for t in re.findall(r"\w+", msg) if len(t) >= 2 and t not in _STOPWORDS}
-    name_tokens = set(re.findall(r"\w+", name))
-    overlap = msg_tokens & name_tokens
-    score += len(overlap) * 1.0
-
-    return score
-
-
 # ---- re-rank by promo + latest -----------------------------------------------
 #
 # หลังจากกรองสินค้าที่เกี่ยวข้องด้วย similarity/regex แล้ว อาจมีสินค้าหลายสิบรายการ
@@ -3586,3 +3518,102 @@ def search_tisi_products(
             break
 
     return results
+
+
+# ---- product dedup (ย้ายจาก app.py — ใช้ร่วมกันทุก path) ----
+
+# ⚡ Charger Subtype Consolidation (2026-09-16) — unified product dedup
+#   รวม _kb_base_name/_kb_sell_score (KB merge path) กับ _base_name/_listing_sell_score
+#   (product_store path + _web_search_reanswer) เป็นฟังก์ชันเดียวระดับโมดูล
+#   ใช้ logic ของ _listing_sell_score (ครอบคลุมกว่า — มี price_score แยก)
+#   ลด code duplicate ~80 บรรทัด
+_DEDUP_STANDARDS = ("ccc / ce", "ce / ccc", "usb-c / usb-a", "usb a / usb c")
+
+
+def _dedupe_base_name(name: str) -> str:
+    """สกัดชื่อหลักของสินค้า เพื่อรวม listing ซ้ำของสินค้าตัวเดียวกัน.
+
+    หลักการ:
+    - ตัด prefix โปรโมชั่นที่ Shopee แปะไว้หน้าชื่อ (เช่น "[ลดเหลือ 5499]")
+    - ตัด suffix ระยะเวลาประกัน (-12M, -1Y, -2Y)
+    - ตัด "พอร์ตเดียวแรงสุด XXXw" และ "จ่ายไฟพอร์ตเดียว XXXw" ที่แทรกกลางชื่อ
+    - ตัดมาตรฐาน "CCC / CE", "CE / CCC", "USB-C / USB-A" ที่เป็นตัวคั่นมาตรฐาน
+    - **ไม่ตัด** ส่วนที่บอกว่าเป็น bundle (เช่น "/ with adapter", "/ A18T")
+      เพราะ bundle กับ standalone เป็นคนละสินค้า ต้องไม่รวมกัน
+    - กรองช่องว่างระหว่างคำซ้ำ
+    """
+    n = (name or "").strip().lower()
+    # ตัด prefix โปรโมชั่นที่ Shopee แปะไว้หน้าชื่อ
+    n = re.sub(r"^\[.*?\]\s*", "", n)
+    # ตัด " -12M", " -1Y", " -2Y", " -6M" ท้ายชื่อ
+    n = re.sub(r"\s*-\d+[my]\s*$", "", n)
+    # ตัด "พอร์ตเดียวแรงสุด XXXw" และ "จ่ายไฟพอร์ตเดียว XXXw" ที่แทรกกลางชื่อ
+    n = re.sub(r"(จ่ายไฟ)?พอร์ตเดียวแรงสุด\s*\d+w\s*", "", n)
+    # ตัด "พอร์ตเดียว XXXw" (ไม่มี "แรงสุด")
+    n = re.sub(r"(จ่ายไฟ)?พอร์ตเดียว\s*\d+w\s*", "", n)
+    # ตัดมาตรฐาน "CCC / CE", "CE / CCC", "USB-C / USB-A" ที่เป็นตัวคั่นมาตรฐาน
+    for s in _DEDUP_STANDARDS:
+        n = n.replace(s, " ")
+    # กรองช่องว่างระหว่างคำซ้ำ
+    n = re.sub(r"\s{2,}", " ", n).strip()
+    return n
+
+
+def _dedupe_sell_score(p: dict) -> tuple:
+    """คะแนนสำหรับเลือก listing ที่ดีที่สุดสำหรับขาย.
+
+    เกณฑ์ (เรียงจากสำคัญที่สุดไปน้อยที่สุด):
+    1. status=NORMAL (True > False)
+    2. ไม่ sold_out (True > False)
+    3. stock เยอะกว่า
+    4. มีโปร (True > False)
+    5. ราคาต่ำสุดถูกกว่า
+    """
+    status_normal = p.get("status") == "NORMAL"
+    not_sold_out = not p.get("sold_out", False)
+    stock = p.get("total_stock") or 0
+    has_promo = bool(p.get("price", {}).get("min") and p.get("price", {}).get("max")
+                     and p.get("price", {}).get("min") != p.get("price", {}).get("max"))
+    # ราคาต่ำสุด — ถูกกว่า = ดีกว่า (ใช้ค่าติดลบเพื่อให้ถูกกว่าได้ score สูงกว่า)
+    price_info = p.get("price") or {}
+    min_price = price_info.get("min") or 0
+    # ถ้าไม่มีราคา ให้ score ราคาเป็น 0 (ไม่ดีไม่แย่)
+    price_score = -min_price if min_price else 0
+    return (status_normal, not_sold_out, stock, has_promo, price_score)
+
+
+def _dedupe_products(products: list[dict], *, log_label: str = "DEDUP") -> list[dict]:
+    """Dedup สินค้าที่ชื่อเหมือนกันหรือใกล้เคียงกันมาก.
+
+    ใช้ _dedupe_base_name เพื่อรวม listing ซ้ำของสินค้าตัวเดียวกัน
+    (เช่น P23 ซ้ำ 3 ตัว ต่างกันแค่ suffix ระยะเวลาประกัน -12M / -1Y)
+    เมื่อเจอซ้ำ → เลือก listing ที่ดีที่สุดสำหรับขาย (NORMAL + stock + โปร + ราคาถูก)
+
+    Args:
+        products: list ของ product cards
+        log_label: label สำหรับ debug log (เช่น "DEDUP", "DEDUP-KB", "DEDUP-WS")
+
+    Returns:
+        list ของ product cards ที่ dedup แล้ว
+    """
+    _seen_names: dict[str, int] = {}  # base_name → index ใน _deduped
+    _deduped: list[dict] = []
+    for p in products:
+        pname = _dedupe_base_name(p.get("name") or "")
+        if not pname:
+            _deduped.append(p)
+            continue
+        if pname not in _seen_names:
+            _seen_names[pname] = len(_deduped)
+            _deduped.append(p)
+        else:
+            # เจอซ้ำ → เลือก listing ที่ดีที่สุดสำหรับขาย
+            _idx = _seen_names[pname]
+            _existing = _deduped[_idx]
+            _existing_score = _dedupe_sell_score(_existing)
+            _new_score = _dedupe_sell_score(p)
+            if _new_score > _existing_score:
+                _deduped[_idx] = p
+    if len(_deduped) < len(products):
+        print(f"[{log_label}] products: {len(products)} → {len(_deduped)} (removed {len(products) - len(_deduped)} duplicates)", file=sys.stderr)
+    return _deduped

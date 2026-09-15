@@ -16,6 +16,15 @@ from typing import Any
 from google import genai
 from google.genai import errors as genai_errors  # type: ignore
 
+# ราคา gemini-3.5-flash-lite ต่อ 1M tokens (USD) — ใช้คำนวณ cost ทุก LLM call
+_GEMINI_COST_PER_M = {"prompt": 0.30, "output": 2.50}
+
+
+def _gemini_cost(prompt_tokens: int, output_tokens: int) -> float:
+    """คำนวณต้นทุน USD จาก token usage ของ Gemini call."""
+    return (prompt_tokens * _GEMINI_COST_PER_M["prompt"]
+            + output_tokens * _GEMINI_COST_PER_M["output"]) / 1_000_000
+
 
 def _strip_kb_markup(text: str) -> str:
     """BUG-2 / BUG-J fix — ขจัด KB markup `[[ ... ]]`, `---`, `หมายเหตุ:` ที่หลุดจาก LLM.

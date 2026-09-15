@@ -296,33 +296,6 @@ def get_suggestion_latest(conversation_id: str) -> dict | None:
     return s.get("card") or {"item_id": s.get("item_id"), "name": s.get("name")}
 
 
-def get_recent_suggestions(conversation_id: str, limit: int = 5) -> list[dict]:
-    """ดึง suggestion products ล่าสุดหลายตัว (สำหรับ follow-up ขอลิงค์).
-
-    Returns:
-        list ของ product cards (dict) เรียงจากล่าสุด→เก่า สูงสุด `limit` ตัว
-    """
-    doc = load_timeline(conversation_id)
-    if not doc:
-        return []
-    suggestions = [p for p in doc.get("products", []) if not p.get("is_anchor")]
-    if not suggestions:
-        return []
-    suggestions.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
-    out = []
-    seen_ids = set()
-    for s in suggestions[:limit * 2]:  # ดึงเผื่อ dedup
-        iid = _to_serializable(s.get("item_id"))
-        if iid in seen_ids:
-            continue
-        seen_ids.add(iid)
-        card = s.get("card") or {"item_id": s.get("item_id"), "name": s.get("name")}
-        out.append(card)
-        if len(out) >= limit:
-            break
-    return out
-
-
 def get_anchor_and_suggestions(conversation_id: str, limit: int = 5) -> list[dict]:
     """ดึง anchor ล่าสุด + suggestion ล่าสุด รวมกัน (dedup) สำหรับ follow-up ขอลิงค์.
 
@@ -409,19 +382,6 @@ def resolve_active_by_message(
 
     # 4 & 5. default → active product
     return get_active_product(conversation_id)
-
-
-def is_generic_question(message: str) -> bool:
-    """ตรวจว่าคำถามเป็น generic (ไม่ระบุสินค้า) หรือไม่.
-
-    ใช้ตัดสินใจว่าควรใช้ active product หรือควร RAG ใหม่.
-    """
-    msg_lower = (message or "").lower().strip()
-    if not msg_lower:
-        return False
-    # ถ้ามี model keyword → ไม่ใช่ generic
-    # (caller เช็คเอง ที่นี่เช็คแค่ keyword)
-    return any(kw in msg_lower for kw in _GENERIC_Q_KWS)
 
 
 # ─── Order anchor (Phase 3C) ──────────────────────────────

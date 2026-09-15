@@ -41,3 +41,6 @@ exports/
 # Test logs + results (เก็บในเครื่องเท่านั้น ไม่ commit)
 docs/test/logs/
 docs/test/results/
+
+# Personal agent rules (local only)
+AGENTS.local.md

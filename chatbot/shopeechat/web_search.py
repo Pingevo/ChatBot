@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -527,56 +528,303 @@ def search_and_extract(
     }
 
 
-def search_and_answer(
-    message: str,
-    shop: str | None = None,
-    platform: str | None = None,
-    history: list[dict] | None = None,
-    products: list[dict] | None = None,
-    persona_extra: str = "",
-    reason: str = "",
-) -> dict[str, Any]:
-    """Wrapper เดิม (backward compat) — ใช้ search_and_extract แล้วตอบเลย.
 
-    ไม่แนะนำให้ใช้ — app.py ควรเรียก search_and_extract แล้ว query DB เอง.
+# ---- web search → re-answer (ย้ายจาก nested fn ใน app.py chat()) ----
+
+def reanswer(
+    *,
+    db,
+    llm_ctx_limit: int,
+    search_message: str,
+    llm_message: str,
+    products_in: list[dict],
+    reason: str,
+    shop: str | None,
+    platform: str | None,
+    history_list: list[dict],
+    persona_extra: str,
+    intent_result: dict,
+    vision_context: str,
+    extra_context_prefix: str = "",
+    do_kb_lookup: bool = True,
+    do_model_code_regex: bool = True,
+    do_dedup_rerank: bool = True,
+    req_limit: int = 10,
+) -> dict:
+    """Web search → re-query DB → LLM2 re-answer.
+
+    Returns dict:
+      - answer: str (จาก LLM2, ไม่ใช่จาก search)
+      - usage: dict (LLM2 token usage)
+      - products: list[dict] (products ใหม่ที่ merge แล้ว)
+      - cost_usd: float (search cost)
+      - search_used: bool
+      - search_reason: str
+      - search_model: str
+      - search_elapsed: float
+      - steps: list[dict] (Search + RAG(search) + LLM2(search))
+      - error: str | None
     """
-    _result = search_and_extract(message, shop, platform, history, reason)
-    if _result["error"]:
-        return {
-            "answer": "",
-            "usage": _result["usage"],
-            "cost_usd": _result["cost_usd"],
-            "model": _result["model"],
-            "search_used": False,
-            "reason": reason,
-            "error": _result["error"],
-            "elapsed": _result["elapsed"],
-        }
-    # ใช้ search_info เป็นคำตอบชั่วคราว (app.py ควรจัดการเอง)
-    # ⚡ 2026-09-14 — strip URL ออกจาก search_info ก่อนคืน
-    #   กัน LLM/search_info มีลิงก์เว็บนอกหลุดไปลูกค้า
-    #   (ลิงก์ที่ใช้ได้มีแค่ short_link ของสินค้าใน context เท่านั้น)
-    _answer = _result["search_info"]
-    if _answer:
-        import re as _re_strip
-        # Step 1: ลบ markdown link [text](url) ออกทั้งก้อน (รวม text)
-        _answer = _re_strip.sub(r'\[([^\]]+)\]\([^)]+\)', r'', _answer)
-        # Step 2: ลบ plain URL ที่เหลือ (http(s)://...)
-        _answer = _re_strip.sub(r'https?://[^\s\)\]]+', r'', _answer, flags=_re_strip.IGNORECASE)
-        # Step 3: ลบ markdown link เปล่าที่เหลือ [text]() หรือ [text]( )
-        _answer = _re_strip.sub(r'\[([^\]]*)\]\(\s*\)', r'', _answer).strip()
-        # Step 4: กรอบ whitespace ที่เหลือหลายๆ อัน
-        _answer = _re_strip.sub(r'\s{2,}', r' ', _answer).strip()
-    return {
-        "answer": _answer,
-        "usage": _result["usage"],
-        "cost_usd": _result["cost_usd"],
-        "model": _result["model"],
-        "search_used": True,
-        "reason": reason,
+    from . import knowledge_base, product_store, llm
+
+    _result: dict = {
+        "answer": "",
+        "usage": {"prompt": 0, "output": 0, "total": 0},
+        "products": products_in,
+        "cost_usd": 0.0,
+        "search_used": False,
+        "search_reason": reason,
+        "search_model": "",
+        "search_elapsed": 0.0,
+        "steps": [],
         "error": None,
-        "elapsed": _result["elapsed"],
-        "keywords": _result["keywords"],
-        "product_type": _result["product_type"],
-        "search_info": _result["search_info"],
     }
+
+    if not is_configured():
+        return _result
+
+    try:
+        _ws_r = search_and_extract(
+            message=search_message,
+            shop=shop,
+            platform=platform,
+            history=history_list,
+            reason=reason,
+        )
+    except Exception as _e:
+        print(f"[WEB-SEARCH-REANSWER] search_and_extract error: {_e}", file=sys.stderr)
+        _result["error"] = str(_e)
+        return _result
+
+    if _ws_r.get("error") or not _ws_r.get("search_used"):
+        print(f"[WEB-SEARCH-REANSWER] skipped (error: {_ws_r.get('error')})", file=sys.stderr)
+        _result["error"] = _ws_r.get("error")
+        return _result
+
+    _result["search_used"] = True
+    _result["search_model"] = _ws_r.get("model", "") or ""
+    _result["search_elapsed"] = _ws_r.get("elapsed", 0.0) or 0.0
+    _result["cost_usd"] = _ws_r.get("cost_usd", 0.0) or 0.0
+
+    _ws_keywords = _ws_r.get("keywords", []) or []
+    _ws_search_info = _ws_r.get("search_info", "") or ""
+    _ws_product_type = _ws_r.get("product_type", "") or ""
+    _ws_usage = _ws_r.get("usage", {}) or {}
+
+    print(f"[WEB-SEARCH-REANSWER] keywords={_ws_keywords[:5]}  product_type={_ws_product_type}", file=sys.stderr)
+
+    # ── Step 1: re-query DB ด้วย keywords ──
+    _new_products: list[dict] = []
+    _ws_kb_context = ""
+    if _ws_keywords:
+        _search_query = " ".join(_ws_keywords[:6])
+        if _ws_product_type:
+            _search_query = f"{_ws_product_type} {_search_query}"
+        try:
+            _new_products = product_store.fetch_products(
+                db,
+                message=_search_query,
+                shop_filter=shop,
+                limit=llm_ctx_limit,
+                desc_message=llm_message,
+            )
+            print(f"[WEB-SEARCH-REANSWER] DB re-query: {_search_query!r} → {len(_new_products)} products", file=sys.stderr)
+        except Exception as _e:
+            print(f"[WEB-SEARCH-REANSWER] DB re-query error: {_e}", file=sys.stderr)
+
+        # model code regex (PB/BA/LPB/WPB) — optional
+        if do_model_code_regex and _ws_search_info:
+            _model_codes = re.findall(
+                r'\b(PB\d{3}[A-Z]?|P\d{2}|BA\d{3}[A-Z]?|LPB\d{3}[A-Z]?|WPB\d{3}[A-Z]?)\b',
+                _ws_search_info,
+            )
+            if _model_codes:
+                _model_codes = list(dict.fromkeys(_model_codes))[:5]
+                print(f"[WEB-SEARCH-REANSWER] model codes: {_model_codes}", file=sys.stderr)
+                for _code in _model_codes:
+                    try:
+                        _code_products = product_store.fetch_products(
+                            db,
+                            message=_code,
+                            shop_filter=shop,
+                            limit=3,
+                            desc_message=llm_message,
+                        )
+                        _existing_ids = {p.get("item_id") or p.get("name") for p in _new_products}
+                        for _cp in _code_products:
+                            _pid = _cp.get("item_id") or _cp.get("name")
+                            if _pid not in _existing_ids:
+                                _new_products.append(_cp)
+                                _existing_ids.add(_pid)
+                    except Exception as _e:
+                        print(f"[WEB-SEARCH-REANSWER] model code query error ({_code}): {_e}", file=sys.stderr)
+
+        # KB lookup — optional
+        if do_kb_lookup:
+            try:
+                _ws_kb_r = knowledge_base.lookup_kb(_search_query)
+                if _ws_kb_r and _ws_kb_r.get("found"):
+                    _ws_kb_context = _ws_kb_r.get("context", "") or ""
+                    for _kd in _ws_kb_r.get("kb_docs", [])[:3]:
+                        _kb_card = knowledge_base._kb_doc_to_card(_kd)
+                        _kb_card["_kb_only"] = True
+                        _new_products.append(_kb_card)
+                    print(f"[WEB-SEARCH-REANSWER] KB re-query: {len(_ws_kb_r.get('kb_docs', []))} docs", file=sys.stderr)
+            except Exception as _e:
+                print(f"[WEB-SEARCH-REANSWER] KB re-query error: {_e}", file=sys.stderr)
+
+    # ── Step 2: merge + dedup + rerank ──
+    _final_products = _new_products if _new_products else list(products_in)
+    if do_dedup_rerank and _final_products:
+        # ⚡ 2026-09-16 — ใช้ _dedupe_products ระดับโมดูล (แทน _base_name/_listing_sell_score จาก closure)
+        #   KB branch ต้องเรียกด้วย do_dedup_rerank=False เพราะยังไม่มี products ที่ต้อง dedup
+        _final_products = product_store._dedupe_products(_final_products, log_label="DEDUP-WS")
+        # rerank: standalone > bundle
+        if len(_final_products) > req_limit:
+            _final_products.sort(
+                key=lambda p: not product_store._is_bundle_product(p),
+                reverse=True,
+            )
+
+    # ── Step 3: strip URL ออกจาก search_info ──
+    _ws_search_info_clean = _ws_search_info
+    if _ws_search_info_clean:
+        # markdown link [text](url) → ลบทั้งก้อน
+        _ws_search_info_clean = re.sub(
+            r'\[([^\]]+)\]\([^)]+\)', r'', _ws_search_info_clean
+        )
+        # plain URL
+        _ws_search_info_clean = re.sub(
+            r'https?://[^\s\)\]]+', r'', _ws_search_info_clean,
+            flags=re.IGNORECASE,
+        )
+        # empty markdown link [text]() หรือ [text]( )
+        _ws_search_info_clean = re.sub(
+            r'\[([^\]]*)\]\(\s*\)', r'', _ws_search_info_clean
+        )
+        # whitespace รวม
+        _ws_search_info_clean = re.sub(r'\s{2,}', ' ', _ws_search_info_clean).strip()
+        # ถ้าสั้นเกินไป → ใช้ตัวเดิม (กันข้อมูลหายหมด)
+        if len(_ws_search_info_clean) < 20:
+            _ws_search_info_clean = _ws_search_info
+        if _ws_search_info_clean != _ws_search_info:
+            print(f"[WEB-SEARCH-REANSWER] stripped external URLs from search_info", file=sys.stderr)
+
+    # ── Step 4: สร้าง extra_context ──
+    _extra_context = ""
+    if _ws_search_info_clean and len(_ws_search_info_clean) >= 20:
+        _extra_parts = [
+            "=== ข้อมูลจาก Google Search (ข้อมูลประกอบเท่านั้น — ห้ามใช้เป็นแหล่งหลัก) ===",
+            "ห้ามนำข้อมูลนี้มาเป็นหัวข้อคำตอบหลัก, ห้ามแนะนำสินค้าที่ไม่อยู่ใน context,",
+            "ห้ามตอบเรื่องสินค้า/แบรนด์อื่นที่ไม่ใช่สินค้าใน context",
+            "ห้ามใส่ลิงก์ใดๆ ในคำตอบ นอกจาก short_link ของสินค้าใน context",
+            "---",
+            _ws_search_info_clean,
+        ]
+        if _ws_kb_context:
+            _extra_parts.append(f"=== ข้อมูลจาก Knowledge Base ===\n{_ws_kb_context}")
+        _extra_context = "\n".join(_extra_parts)
+        if vision_context:
+            _extra_context = (vision_context + "\n" + _extra_context).strip()
+        if extra_context_prefix:
+            _extra_context = (extra_context_prefix + "\n" + _extra_context).strip()
+
+    # ── Step 5: record Search step ──
+    _ws_t_in = _ws_usage.get("prompt", 0)
+    _ws_t_out = _ws_usage.get("output", 0)
+    _result["steps"].append({
+        "name": "Search",
+        "model": _result["search_model"] or "openrouter",
+        "tokens_in": _ws_t_in,
+        "tokens_out": _ws_t_out,
+        "time_s": round(_result["search_elapsed"], 2),
+        "cost_usd": round(_result["cost_usd"], 6),
+        "cost_thb": round(_result["cost_usd"] * 36, 4),
+        "input": {
+            "message": search_message[:200],
+            "reason": reason,
+            "intent": intent_result.get("intent"),
+        },
+        "output": {
+            "search_used": True,
+            "keywords": _ws_keywords[:8],
+            "product_type": _ws_product_type,
+            "search_info": _ws_search_info_clean[:500],
+        },
+    })
+
+    # ── Step 6: record RAG(search) step ──
+    _final_names = [p.get("name", "")[:60] for p in _final_products[:10]]
+    _result["steps"].append({
+        "name": "RAG(search)",
+        "model": "mongodb+kb",
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "time_s": 0,
+        "cost_usd": 0,
+        "cost_thb": 0,
+        "input": {
+            "query": " ".join(_ws_keywords[:6]) if _ws_keywords else "",
+            "keywords": _ws_keywords[:8],
+            "shop": shop,
+        },
+        "output": {
+            "product_count": len(_final_products),
+            "products": _final_names,
+            "kb_used": bool(_ws_kb_context),
+        },
+    })
+
+    # ── Step 7: LLM2 re-answer (search_info = ข้อมูลประกอบ ไม่ใช่คำตอบหลัก) ──
+    if _final_products and _extra_context:
+        print(f"[WEB-SEARCH-REANSWER] LLM2 re-answer with {len(_final_products)} products + search context", file=sys.stderr)
+        try:
+            _ws_answer, _ws_llm_usage = llm.answer(
+                message=llm_message,
+                products=_final_products,
+                shop_hint=shop,
+                history=history_list,
+                persona_extra=persona_extra,
+                intent_result=intent_result,
+                extra_context=_extra_context,
+            )
+        except RuntimeError as _e:
+            print(f"[WEB-SEARCH-REANSWER] LLM re-answer error: {_e}", file=sys.stderr)
+            _ws_answer = ""
+            _ws_llm_usage = {"prompt": 0, "output": 0, "total": 0}
+    else:
+        print(f"[WEB-SEARCH-REANSWER] no products or no search context → skip LLM2 re-answer", file=sys.stderr)
+        _ws_answer = ""
+        _ws_llm_usage = {"prompt": 0, "output": 0, "total": 0}
+
+    # ── Step 8: record LLM2(search) step ──
+    _llm2_t_in = _ws_llm_usage.get("prompt", 0)
+    _llm2_t_out = _ws_llm_usage.get("output", 0)
+    _llm2_cost = llm._gemini_cost(_llm2_t_in, _llm2_t_out)
+    _result["steps"].append({
+        "name": "LLM2(search)",
+        "model": os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+        "tokens_in": _llm2_t_in,
+        "tokens_out": _llm2_t_out,
+        "time_s": 0,
+        "cost_usd": round(_llm2_cost, 6),
+        "cost_thb": round(_llm2_cost * 36, 4),
+        "input": {
+            "message": llm_message[:200],
+            "product_count": len(_final_products),
+            "products": _final_names,
+            "intent": intent_result.get("intent"),
+            "history_count": len(history_list) if history_list else 0,
+            "search_info_used": bool(_ws_search_info_clean),
+            "kb_context_used": bool(_ws_kb_context),
+        },
+        "output": {
+            "answer": _ws_answer[:500] if _ws_answer else "",
+            "answer_full_length": len(_ws_answer) if _ws_answer else 0,
+        },
+    })
+
+    _result["answer"] = _ws_answer
+    _result["usage"] = _ws_llm_usage
+    _result["products"] = _final_products
+    return _result

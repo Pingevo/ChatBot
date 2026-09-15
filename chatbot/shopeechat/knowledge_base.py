@@ -866,3 +866,115 @@ def lookup_kb(message: str) -> dict[str, Any] | None:
         "general_faq": general_faq,
         "context": context,
     }
+
+
+# ---- brand question helpers (ย้ายจาก app.py) ----
+
+def _detect_brand_question(message: str) -> str | None:
+    """ตรวจว่าลูกค้าถามเกี่ยวกับแบรนด์เฉพาะหรือไม่ (เช่น "Xiaomi ขายอะไรบ้าง").
+
+    คืนชื่อแบรนด์ หรือ None.
+    """
+    import re
+    low = message.lower().strip()
+    # ต้องมีคำว่า "ขายอะไร" หรือ "มีอะไร" หรือ "สินค้าอะไร" ฯลฯ
+    brand_indicators = [
+        "ขายอะไร", "มีอะไร", "สินค้าอะไร", "มีสินค้าอะไร",
+        "ผลิตภัณฑ์อะไร", "ทำอะไร", "มีกี่รุ่น", "มีอะไรบ้าง",
+    ]
+    if not any(ind in low for ind in brand_indicators):
+        return None
+
+    # แบรนด์ที่รู้จัก (เช็คจากชื่อที่พบบ่อย)
+    known_brands = [
+        "xiaomi", "redmi", "poco", "imilab", "black shark", "blackshark",
+        "cuktech", "ztec", "ztec", "isuper", "deerma", "leravan",
+        "mili", "kospet", "lydsto", "eloop", "yaber", "1more",
+        "kieslect", "zmi", "lagenio", "70mai", "viomi", "qcy",
+        "ticwatch", "pioneer", "hoco", "adata", "apacer", "asus",
+        "bear", "freetie", "binnifa", "godung", "ice",
+    ]
+    for brand in known_brands:
+        if brand in low:
+            return brand
+    return None
+
+
+def _build_brand_context(db, brand: str, shop_filter: str | None = None) -> dict[str, Any] | None:
+    """สร้าง context สำหรับ brand-specific question (เช่น Xiaomi ขายอะไรบ้าง).
+
+    Args:
+        shop_filter: ถ้าระบุ (ลูกค้าทักมาจากร้านนี้) จำกัดเฉพาะสินค้าแบรนด์นี้ในร้านนั้น
+    """
+    from collections import Counter
+
+    coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+    coll = db[coll_name]
+
+    # ดึงสินค้าของแบรนด์นี้ (จำกัดร้าน ถ้ามี shop_filter)
+    brand_lower = brand.lower()
+    query: dict[str, Any] = {"item_status": "NORMAL"}
+    if shop_filter:
+        query["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
+    docs = list(coll.find(
+        query,
+        {"brand": 1, "cat_name": 1, "item_name": 1}
+    ).limit(10000))
+
+    brand_cats: dict[str, set[str]] = {}
+    brand_products: list[str] = []
+    product_count = 0
+    for d in docs:
+        b = d.get("brand", "")
+        if isinstance(b, dict):
+            bname = (b.get("original_brand_name", "") or "").lower()
+        else:
+            bname = str(b).lower() if b else ""
+        if brand_lower not in bname:
+            continue
+        product_count += 1
+        c = d.get("cat_name", "")
+        if c:
+            brand_cats.setdefault(str(c), set())
+        name = d.get("item_name", "")
+        if name and len(brand_products) < 10:
+            brand_products.append(str(name)[:60])
+
+    if product_count == 0:
+        return None
+
+    cats = sorted(brand_cats.keys())
+    scope_label = f"ร้าน {shop_filter}" if shop_filter else f"แบรนด์ {brand}"
+    parts = [
+        f"=== สินค้าของแบรนด์ {brand} ใน{scope_label} ({product_count} สินค้า) ===",
+        f"หมวดหมู่ที่มี: {', '.join(cats)}",
+        f"\nตัวอย่างสินค้า:",
+    ]
+    for name in brand_products:
+        parts.append(f"- {name}")
+
+    context = "\n".join(parts)
+    return {
+        "qtype": "brand_info",
+        "context": context,
+        "meta": {"product_count": product_count, "categories": cats, "shop_scoped": bool(shop_filter)},
+    }
+
+
+def _kb_doc_to_card(doc: dict) -> dict:
+    """แปลง KB doc → product card format (สำหรับ frontend)."""
+    return {
+        "name": f"{doc.get('brand', '')} {doc.get('model', '')}".strip(),
+        "brand": doc.get("brand", ""),
+        "model": doc.get("model", ""),
+        "category": doc.get("category", ""),
+        "category_id": doc.get("category_id", ""),
+        "highlights": doc.get("highlights", ""),
+        "description": doc.get("description", ""),
+        "warranty_period": doc.get("warranty_period", ""),
+        "warranty_note": doc.get("warranty_note", ""),
+        "box_contents": doc.get("box_contents", ""),
+        "specs": doc.get("specs", {}),
+        "source": "knowledge_base",
+        "source_file": doc.get("source_file", ""),
+    }

@@ -283,6 +283,20 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 > รูปแบบ: `function_name` (line) — หน้าที่ — เรียกอะไรบ้าง
 
+> **⚡ Refactor 2026-09-16:** `app.py` 8,239 → 4,807 บรรทัด — ย้ายออกไป:
+> - `test_chat_api.py` — test-chat sessions CRUD (9 routes) + `_validate_object_id` + `_log_testchat_action`
+> - `device_compat.py` — `_extract_max_wattage`, `_KNOWN_DEVICE_SPECS`, `_extract_product_connectors`, `_resolve_device_spec`, `_filter_compat_products`, `_apply_product_tiers`, `_device_spec_lookup`
+> - `order_flow.py` — `early_order_flow(req, ctx, history, db)` (order lookup + return/refund + tracking; dict→`ChatResponse` ที่ call site; เขียนกลับ `ctx["order_sn"]`/`ctx["is_claim_request_pre"]` ให้ warranty auto-check)
+> - `handoffs.py` — `detect_human_request(req, ctx)` (pre-intent) + `post_intent_handoffs(req, ctx, db)` (tax invoice + TISI)
+> - `warranty_flow.py` — `handle_warranty_flow_legacy(req, ctx, history, db)` (legacy claim SM; dict→`ChatResponse` ที่ call site)
+> - `warranty.py` — `auto_check_delivery_warranty(order_sn, shop, bot_name)` → `(answer, info, ctx)`
+> - `web_search.py` — `reanswer(...)` (เดิม nested `_web_search_reanswer`)
+> - `knowledge_base.py` — `_detect_brand_question`, `_build_brand_context`, `_kb_doc_to_card` (app.py มี alias ให้ chat_v2)
+> - `product_store.py` — `_dedupe_products`, `_dedupe_base_name`, `_dedupe_sell_score`, `_DEDUP_STANDARDS`
+> - `llm.py` — `_GEMINI_COST_PER_M` + `_gemini_cost(p_in, p_out)`
+> - ลบ dead code: `_score_card`, `_is_sold_out`, `_STOPWORDS` (product_store), `search_and_answer` (web_search), `lookup_orders_by_buyer`, `_format_unix_ts_with_time` (order_store), `get_recent_suggestions`, `is_generic_question` (conversation_products), `_strip_kb_markup`/`_admin_db`/`_has_warranty_history`/`_warranty_calc_note`/`_pre_product_types` (app.py — ใช้ `llm._strip_kb_markup`/`conversation_products._admin_db` แทน)
+> - line numbers ในตารางด้านล่างอ้างอิงก่อน refactor — ใช้ชื่อฟังก์ชันเป็นหลัก
+
 ### 6.1 `app.py` — FastAPI + chat orchestrator
 
 #### 6.1.1 FastAPI routes (main entry points)
@@ -1365,7 +1379,8 @@ fetch_products
 
 | ฟังก์ชัน | หน้าที่ |
 |---|---|
-| `handle_warranty_flow(req, ctx, history, db)` | จัดการ warranty state machine ทั้ง 10 states |
+| `handle_warranty_flow(req, ctx, history, db)` | จัดการ warranty state machine ทั้ง 10 states (v2) |
+| `handle_warranty_flow_legacy(req, ctx, history, db)` | **2026-09-16** — legacy claim SM ที่ย้าย verbatim จาก `app.py chat()` — คืน `dict` kwargs สำหรับ `ChatResponse(**d)` หรือ `None`; ctx ส่ง `anchor_compare_ctx, bot_name, image_desc_out, is_claim_request, is_followup_policy, is_tax_invoice, qa10, steps, timing_breakdown, total_start, t0, warranty_auto_answer, warranty_auto_ctx, intent_result, model_name` — ⚠️ preserve latent bug: `_model_name` ใน warranty_review/post_handoff return ไม่เคยถูก assign (NameError ถ้าถึงจุดนั้น — เหมือนเดิม) |
 | `_handle_review_request()` | State 1: ลูกค้าขอทวนข้อมูล |
 | `_build_post_handoff_response()` | State 2: post-handoff lock |
 | `_build_warranty_claim_response()` | สร้าง response + handoff API call |
@@ -1394,6 +1409,7 @@ fetch_products
 #### 6.12.5 Called by
 
 - `chat_v2._check_warranty_state_machine()` → `warranty_flow.handle_warranty_flow()`
+- `app.chat()` (legacy) → `warranty_flow.handle_warranty_flow_legacy()` — **2026-09-16**
 
 #### 6.12.6 Side effects
 
@@ -1551,6 +1567,95 @@ fetch_products
 - Live MongoDB product match (ต้องเชื่อม DB จริง)
 - End-to-end ผ่าน `/chat` endpoint (ต้องรัน server)
 - Replay/shadow test เทียบกับ legacy
+
+### 6.14 `test_chat_api.py` — Test Chat Sessions API (ย้ายจาก app.py 2026-09-16)
+
+> **Source**: ย้าย verbatim จาก `app.py` ท้ายไฟล์ (~370 บรรทัด)
+> **Wire-up**: `app.py` → `app.include_router(test_chat_api.router)`
+
+#### 6.14.1 Purpose
+
+CRUD สำหรับ test-chat sessions เก็บลง `test_chat_sessions` (admin DB) + audit log `test_chat_logs`
+
+#### 6.14.2 Routes
+
+| Route | Method | ฟังก์ชัน | หน้าที่ |
+|---|---|---|---|
+| `/test-chat/sessions` | GET | `list_test_chat_sessions` | list sessions กรอง admin_id (Phase 3) + legacy/script_test |
+| `/test-chat/sessions` | POST | `create_test_chat_session` | สร้าง session + เก็บ admin_id/admin_name |
+| `/test-chat/sessions/{id}` | GET | `get_test_chat_session` | ดึง session + messages |
+| `/test-chat/sessions/{id}/messages` | POST | `add_test_chat_message` | เพิ่ม message + auto-title |
+| `/test-chat/sessions/{id}` | DELETE | `delete_test_chat_session` | ลบ session |
+| `/test-chat/sessions/{id}` | PUT | `update_test_chat_session` | อัปเดต shop/title |
+| `/test-chat/sessions/{id}/close` | POST | `close_test_chat_session` | status=closed → บอทตอบต่อได้ |
+| `/test-chat/sessions/{id}/reopen` | POST | `reopen_test_chat_session` | status=open |
+| `/test-chat/logs` | GET | `list_test_chat_logs` | ดู audit log กรอง admin_id |
+
+#### 6.14.3 Helpers + schemas
+
+- `_validate_object_id(oid)` — validate 24-hex ObjectId → 400 ถ้าไม่ผ่าน
+- `_log_testchat_action(action, request, session_id, **extra)` — insert `test_chat_logs` (swallow error)
+- Schemas: `TestChatMessage`, `CreateSessionRequest`, `AddMessageRequest`, `UpdateSessionRequest`, `RateMessageRequest`
+
+#### 6.14.4 Calls / Called by / Side effects
+
+- **Calls**: `conversation_products._admin_db()`, `bson.ObjectId`, `urllib.parse.unquote`
+- **Called by**: Next.js test-chat UI ผ่าน `/chat` BFF proxy
+- **Side effects**: MongoDB read/write `test_chat_sessions` + `test_chat_logs` (admin DB เท่านั้น)
+- **Env**: `ADMIN_MONGO_COLLECTION_TEST_CHAT_SESSIONS` (default `test_chat_sessions`)
+
+### 6.15 `device_compat.py` — Device compatibility helpers (ย้ายจาก app.py 2026-09-16)
+
+> **Source**: ย้าย verbatim จาก `app.py` module-level block (~500 บรรทัด)
+
+#### 6.15.1 Purpose
+
+กรอง/จัดอันดับสินค้าตาม device compatibility (connector + wattage) ก่อนส่ง LLM
+
+#### 6.15.2 Functions
+
+| ฟังก์ชัน | หน้าที่ | เรียก |
+|---|---|---|
+| `_extract_max_wattage(p)` | extract ค่า W สูงสุดจาก spec/variants/ชื่อ (กรอง model number) | `re` |
+| `_extract_product_connectors(p)` | สกัด connector types จากชื่อ+desc → set | `re` |
+| `_resolve_device_spec(name, ws_extra)` | resolve spec ของอุปกรณ์ — web search → `_KNOWN_DEVICE_SPECS` | `re` |
+| `_filter_compat_products(...)` | กรองตาม connector (ไม่กรอง wattage) + sort wattage asc | ฟังก์ชันข้างบน |
+| `_apply_product_tiers(products, tier_a_ids, limit)` | รวม tier A (exact/anchor) + tier B → `product_store._dedupe_products` | `product_store` |
+| `_device_spec_lookup(db, req, ...)` | web-search spec + re-query DB หา compat products | `product_store`, `web_search` (lazy) |
+| `_KNOWN_DEVICE_SPECS` | dict spec hardcoded (last resort) | — |
+
+#### 6.15.3 Called by
+
+- `app.chat()` — `_device_spec_lookup` ×2, `_filter_compat_products`, `_apply_product_tiers`, `_extract_max_wattage` (superlative/compat sort)
+
+### 6.16 `order_flow.py` — Order/tracking/return-refund early flow (ย้ายจาก app.py 2026-09-16)
+
+#### 6.16.1 Purpose
+
+Early-return blocks ก่อน intent classification: order lookup, return/refund + address handoff, tracking lookup
+
+#### 6.16.2 Functions
+
+| ฟังก์ชัน | หน้าที่ | Input | Output |
+|---|---|---|---|
+| `early_order_flow(req, ctx, history, db)` | จับ order_sn (message/req.field/anchor) → lookup → ตอบ/handoff; return/refund+address handoff; tracking lookup จากข้อความ/vision | ctx: `qa10, steps, total_start, persona_extra, vision_context, image_desc_out, model_name` | `dict` kwargs สำหรับ `ChatResponse(**d)` หรือ `None`; เขียนกลับ `ctx["order_sn"]`, `ctx["is_claim_request_pre"]` |
+
+- **Calls**: `order_store.*` (extract_order_sn, lookup_order, build_order_context, extract_tracking_number, lookup_by_tracking, `_ORDER_TAG_RE`), `warranty.detect_claim_request`, `conversation_products.*` (is_order_question, resolve_active_order_sn, add_order_anchor, add_product — lazy), `product_store.fetch_product_by_id` (lazy), `llm.answer_general`/`_gemini_cost`/`split_segments`, `app._send_handoff`, `app._routing` (ผ่าน `from . import app` lazy)
+- **Called by**: `app.chat()` — หลัง item-card anchor block ก่อน intent classification
+- **Side effects**: MongoDB read (order), `add_order_anchor`/`add_product` writes (conversation_products), `_send_handoff` HTTP POST
+- **Error**: `RuntimeError` จาก LLM → `raise HTTPException(500)`
+
+### 6.17 `handoffs.py` — Early handoff detection (ย้ายจาก app.py 2026-09-16)
+
+#### 6.17.1 Functions
+
+| ฟังก์ชัน | หน้าที่ | Input | Output |
+|---|---|---|---|
+| `detect_human_request(req, ctx)` | BUG-3 fix — ลูกค้าขอคุยกับคน/แอดมิน (keyword + "แอด" short-msg guard) → handoff ทันที | ctx: `steps, timing_breakdown, total_start, image_desc_out, model_name` | `dict`/`None` |
+| `post_intent_handoffs(req, ctx, db)` | tax invoice (`is_tax_invoice` จาก intent/keyword) + มอก. TISI (`warranty.detect_tisi_question` → `product_store.search_tisi_products` → ตอบหรือ handoff) | ctx: `is_tax_invoice, bot_name, steps, timing_breakdown, total_start, image_desc_out, model_name` | `dict`/`None` |
+
+- **Called by**: `app.chat()` — `detect_human_request` ก่อน intent classification; `post_intent_handoffs` หลัง Phase 6 keyword fallback
+- **Calls**: `llm.split_segments`, `product_store.search_tisi_products`, `warranty.detect_tisi_question`/`extract_tisi_model_keyword`, `app._send_handoff`, `app._routing`
 
 ---
 
