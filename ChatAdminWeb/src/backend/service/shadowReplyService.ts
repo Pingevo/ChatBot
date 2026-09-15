@@ -164,6 +164,7 @@ export async function generateShadowReply(opts: {
     shopId: string;
     shopName?: string;
     images?: string[];
+    conversationId?: string;  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
   }) => Promise<{
     answer: string;
     source?: string;
@@ -272,6 +273,7 @@ export async function generateShadowReply(opts: {
     history,
     shopId: conv.shop_id,
     shopName: conv.shop_name,
+    conversationId,  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
     ...(botImages.length > 0 ? { images: botImages } : {}),
   });
 
@@ -319,6 +321,18 @@ export async function generateShadowReply(opts: {
     updated_at: now,
   };
   await coll.insertOne(doc);
+
+  // ⚡ Phase 1A multimodal — เก็บ image_desc ที่ vision pass สกัดได้ ลงใน inbound message doc
+  //    ทำให้ turn ถัดไป getHistoryForBot ส่ง image_desc ใน history → bot ไม่ต้องอ่านรูปซ้ำ
+  //    (เหมือน botWorkerService บรรทัด 132-139 ที่ทำกับ bot-worker replies จริง)
+  if (botResp.image_desc) {
+    const msgColl = await getCollection<{ image_desc?: string }>(COLLECTIONS.messages);
+    await msgColl.updateOne(
+      { message_id: inboundMsg.message_id },
+      { $set: { image_desc: botResp.image_desc } },
+    );
+  }
+
   await logAdminEvent({
     action_type: "shadow_reply.generate",
     actor: "system",
@@ -364,6 +378,7 @@ export async function generateConversationShadowReplies(opts: {
     shopId: string;
     shopName?: string;
     images?: string[];
+    conversationId?: string;  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
   }) => Promise<{
     answer: string;
     source?: string;
@@ -421,8 +436,9 @@ export async function generateConversationShadowReplies(opts: {
 
   // ⚡ history สะสม — เริ่มว่าง, เพิ่มทีละ Q&A (user question + bot reply เรา)
   // จำกัดไม่ให้เกิน 20 ข้อความ (10 คู่ล่าสุด) เพื่อกัน LLM context เยอะเกินไป
+  // ⚡ ส่ง images + image_desc ต่อให้รอบถัดไป — bot ไม่ต้องอ่านรูปซ้ำ + จำ context รูปได้
   const MAX_HISTORY = 20;
-  const accumulatedHistory: { role: "user" | "model"; text: string }[] = [];
+  const accumulatedHistory: { role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[] = [];
   const results: ShadowReplyDoc[] = [];
   const coll = await getCollection<ShadowReplyDoc>(COLLECTIONS.shadowReplies);
 
@@ -443,6 +459,7 @@ export async function generateConversationShadowReplies(opts: {
       history: [...trimmedHistory], // copy เพื่อกัน mutation
       shopId: conv.shop_id,
       shopName: conv.shop_name,
+      conversationId,  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
       ...(botImages.length > 0 ? { images: botImages } : {}),
     });
 
@@ -480,13 +497,30 @@ export async function generateConversationShadowReplies(opts: {
     };
     await coll.insertOne(doc);
     results.push(doc);
+
+    // ⚡ Phase 1A multimodal — เก็บ image_desc ลง inbound message doc
+    //    ทำให้ turn ถัดไป getHistoryForBot ส่ง image_desc ใน history → bot ไม่ต้องอ่านรูปซ้ำ
+    if (botResp.image_desc) {
+      const msgColl = await getCollection<{ image_desc?: string }>(COLLECTIONS.messages);
+      await msgColl.updateOne(
+        { message_id: pair.inboundMsg.message_id },
+        { $set: { image_desc: botResp.image_desc } },
+      );
+    }
+
     // ⚡ streaming — ส่ง doc ที่เพิ่ง insert ให้ caller (SSE) ทันที ไม่ต้องรอครบทุก pair
     onReply?.(doc, idx + 1, pairs.length);
 
     // ⚡ เพิ่ม Q&A นี้เข้า history สำหรับรอบถัดไป
     //    user question → role "user" (ใช้ botText เพื่อให้รอบถัดไป bot เห็น tag สินค้าถ้ามี)
     //    bot reply เรา → role "model" (ไม่ใช่ Zaapi reply)
-    accumulatedHistory.push({ role: "user", text: botText });
+    //    ⚡ ส่ง images + image_desc ต่อ → bot รอบถัดไปเห็นรูป + รู้ว่ารูปคืออะไร (ไม่ต้องอ่านซ้ำ)
+    accumulatedHistory.push({
+      role: "user",
+      text: botText,
+      ...(botImages.length > 0 ? { images: botImages } : {}),
+      ...(botResp.image_desc ? { image_desc: botResp.image_desc } : {}),
+    });
     accumulatedHistory.push({ role: "model", text: botResp.answer });
   }
 

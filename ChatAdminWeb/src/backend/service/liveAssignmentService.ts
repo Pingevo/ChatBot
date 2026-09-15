@@ -123,6 +123,7 @@ async function callBot(params: {
   web_search_reason?: string;
   handoff_to_admin?: boolean;
   handoff_reason?: string;
+  image_desc?: string;  // ⚡ vision description ของรูป current turn (cache กัน re-read)
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
   chat_engine?: "legacy" | "v2" | "v3";
 }> {
@@ -651,8 +652,14 @@ export async function closeChat(opts: {
         break;
       }
 
-      // bot ตอบได้ → สะสม history (ใช้ botText + images เหมือนของจริง)
-      history.push({ role: "user", text: botText, ...(userImages.length > 0 ? { images: userImages } : {}) });
+      // bot ตอบได้ → สะสม history (ใช้ botText + images + image_desc เหมือนของจริง)
+      //    ⚡ ส่ง image_desc ต่อ → bot รอบถัดไปไม่ต้องอ่านรูปซ้ำ (ประหยัด token + latency)
+      history.push({
+        role: "user",
+        text: botText,
+        ...(userImages.length > 0 ? { images: userImages } : {}),
+        ...(botResp.image_desc ? { image_desc: botResp.image_desc } : {}),
+      });
       history.push({ role: "model", text: botResp.answer });
 
       if (botResp.handoff_to_admin) {
@@ -1008,7 +1015,12 @@ export async function batchReplay(opts: {
             break;
           }
 
-          history.push({ role: "user", text: botText, ...(userImages.length > 0 ? { images: userImages } : {}) });
+          history.push({
+            role: "user",
+            text: botText,
+            ...(userImages.length > 0 ? { images: userImages } : {}),
+            ...(botResp.image_desc ? { image_desc: botResp.image_desc } : {}),
+          });
           history.push({ role: "model", text: botResp.answer });
 
           if (botResp.handoff_to_admin) {

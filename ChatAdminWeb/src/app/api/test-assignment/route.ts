@@ -73,6 +73,7 @@ async function callBot(params: {
   // ⚡ handoff fields จาก bot (tax_invoice, warranty claim, etc.)
   handoff_to_admin?: boolean;
   handoff_reason?: string;
+  image_desc?: string;  // ⚡ vision description ของรูป current turn (cache กัน re-read)
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
   chat_engine?: "legacy" | "v2" | "v3";
 }> {
@@ -139,6 +140,7 @@ async function callBot(params: {
         // ⚡ handoff fields
         handoff_to_admin: data.handoff_to_admin === true,
         handoff_reason: data.handoff_reason,
+        image_desc: typeof data.image_desc === "string" ? data.image_desc : undefined,
         // ⚡ chat_engine — บันทึก engine ที่ใช้
         chat_engine: useV2 ? "v2" : "legacy",
       };
@@ -896,8 +898,14 @@ export async function POST(req: NextRequest) {
             break;
           }
 
-          // bot ตอบได้ → สะสม history (ใช้ botText + images เหมือนของจริง)
-          history.push({ role: "user", text: botText, ...(userImages.length > 0 ? { images: userImages } : {}) });
+          // bot ตอบได้ → สะสม history (ใช้ botText + images + image_desc เหมือนของจริง)
+          //    ⚡ ส่ง image_desc ต่อ → bot รอบถัดไปไม่ต้องอ่านรูปซ้ำ (ประหยัด token + latency)
+          history.push({
+            role: "user",
+            text: botText,
+            ...(userImages.length > 0 ? { images: userImages } : {}),
+            ...(botResp.image_desc ? { image_desc: botResp.image_desc } : {}),
+          });
           history.push({ role: "model", text: botResp.answer });
 
           // ⚡ เช็ค handoff_to_admin จาก bot (tax_invoice, warranty claim, etc.)

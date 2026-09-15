@@ -610,10 +610,11 @@ def to_product_card(doc: dict, message: str = "") -> dict:
         "dimension": doc.get("dimension"),
         "total_stock": total_stock,
         "sold_out": total_stock == 0,
-        # ⚡ BUG-K fix — _available_for_sale เป็นเกณฑ์เดียวที่ LLM ควรใช้ตัดสินใจ "พร้อมส่ง/มีสต็อก"
-        #   = status=NORMAL AND total_stock>0 (UNLIST/SELLER_DELETE/BANNED/DELETED → false แม้มี stock)
-        #   เดิม computed ทีหลังใน app.py Phase 3d ทำให้ card ดู "มีของ" ทั้งที่ UNLIST
-        "_available_for_sale": doc.get("item_status") == "NORMAL" and total_stock > 0,
+        # ⚡ BUG-H fix — _available_for_sale ใช้ item_status=NORMAL เป็นเกณฑ์เดียว
+        #   NORMAL = ยังขาย (แม้ stock=0 = หมดสต็อกชั่วคราว ไม่ใช่เลิกจำหน่าย)
+        #   UNLIST/SELLER_DELETE/BANNED/DELETED = เลิกจำหน่ายจริง
+        #   stock=0 แยกด้วย sold_out field (บอทบอก "หมดสต็อกชั่วคราว" ไม่ใช่ "เลิกจำหน่าย")
+        "_available_for_sale": doc.get("item_status") == "NORMAL",
         # ข้อมูลโปรโมชั่น (ใช้ตอน re-rank และให้ LLM บอกลูกค้าได้)
         "has_promotion": _has_active_promotion(doc),
         "is_flash_sale": bool(doc.get("is_flash_sale")),
@@ -3148,7 +3149,7 @@ def fetch_products(
                 # ดึงเยอะกว่า limit*2 เพื่อให้หลังกรอง false positive ยังเหลือพอ
                 # (เช่น โทรศัพท์งบ 5000: 20 ตัวแรกเป็น accessories หมด โทรศัพท์จริงอยู่หลังจากนั้น)
                 # สำหรับ compatibility check ดึงเยอะขึ้นเพื่อให้ครอบคลุมทุกรุ่นในหมวด
-                _compat_limit = max(limit * 20, 500) if is_compat_check else max(limit * 5, 100)
+                _compat_limit = max(limit * 20, 500) if is_compat_check else max(limit * 5, 500)
                 cursor = cursor.limit(_compat_limit)
             else:
                 # fallback: text search บน item_name + description
@@ -3389,22 +3390,23 @@ def fetch_products(
 
     cards = [to_product_card(d, desc_message or message) for d in docs]
 
-    # ⚡ 2026-09-12 — filter_unavailable: กรองสินค้าที่ sold_out หรือ status != NORMAL ออกจากการแนะนำขาย
+    # ⚡ 2026-09-12 — filter_unavailable: กรองสินค้าที่ status != NORMAL ออกจากการแนะนำขาย
+    #   ⚡ BUG-H fix — ไม่กรอง sold_out แล้ว เพราะ NORMAL + stock=0 = หมดสต็อกชั่วคราว (ยังขายได้)
     #   ใช้เมื่อ intent=product_recommend (ลูกค้าอยากให้แนะนำ/ดูสินค้า → ต้องเป็นสินค้าที่ขายได้)
     #   ไม่ใช้เมื่อ intent=product_spec/compatibility_check/warranty (ลูกค้าถามเฉพาะรุ่น อาจเป็นสินค้าที่ซื้อไปแล้ว)
     #   fallback: ถ้ากรองแล้วว่าง → ปล่อยทั้งหมด + ฝัง context note บอก LLM ว่า "ไม่มีสินค้าพร้อมขาย ห้ามแนะนำขาย ให้บอกไม่มีสต็อก + ชวนทักแอดมิน"
     if filter_unavailable and cards:
-        _available = [c for c in cards if c.get("status") == "NORMAL" and not c.get("sold_out")]
+        _available = [c for c in cards if c.get("status") == "NORMAL"]
         if _available:
             cards = _available
-            print(f"[FILTER-UNAVAILABLE] กรอง sold_out/non-NORMAL ออก → เหลือ {len(cards)} ตัว", file=sys.stderr)
+            print(f"[FILTER-UNAVAILABLE] กรอง non-NORMAL ออก → เหลือ {len(cards)} ตัว", file=sys.stderr)
         else:
-            # fallback: ไม่มีสินค้า NORMAL + stock > 0 เลย → ปล่อยทั้งหมดให้ LLM ตอบสเปคได้
-            # แต่ฝัง context note บอก LLM ว่าห้ามแนะนำขาย (เพราะสินค้าทุกตัว sold_out หรือ status != NORMAL)
-            print(f"[FILTER-UNAVAILABLE] fallback: ไม่มีสินค้า available เลย → ปล่อยทั้งหมด {len(cards)} ตัว + ฝัง note ห้ามแนะนำขาย", file=sys.stderr)
+            # fallback: ไม่มีสินค้า NORMAL เลย → ปล่อยทั้งหมดให้ LLM ตอบสเปคได้
+            # แต่ฝัง context note บอก LLM ว่าห้ามแนะนำขาย (เพราะสินค้าทุกตัว status != NORMAL)
+            print(f"[FILTER-UNAVAILABLE] fallback: ไม่มีสินค้า NORMAL เลย → ปล่อยทั้งหมด {len(cards)} ตัว + ฝัง note ห้ามแนะนำขาย", file=sys.stderr)
             if cards:
                 cards[0]["_context_note"] = (
-                    "⚠️ สินค้าใน context ทุกตัวไม่พร้อมขาย (sold_out หรือ status != NORMAL) "
+                    "⚠️ สินค้าใน context ทุกตัวไม่พร้อมขาย (status != NORMAL) "
                     "ห้ามแนะนำ/เสนอขายสินค้าเหล่านี้เด็ดขาด "
                     "ให้บอกลูกค้าว่าไม่มีสินค้าพร้อมส่งตอนนี้ แล้วชวนทักแอดมินสอบถามสต็อกเพิ่มเติม"
                 )

@@ -592,6 +592,240 @@ def _extract_max_wattage(p: dict) -> float:
     return max(float(m) for m in matches)
 
 
+# ⚡ Known device charging specs — ใช้สำหรับ _filter_compat_products (CODE-level compat filter)
+#    ถ้า device ไม่อยู่ในตาราง → fallback ใช้ web search text จาก _device_spec_lookup
+#    connector: พอร์ตชาร์จของอุปกรณ์ (usb-c / lightning / micro-usb)
+#    min_watt: ค่า W ขั้นต่ำที่อุปกรณ์รองรับชาร์จเต็มสปีด (ใช้เป็นข้อมูลเท่านั้น ไม่ใช้กรอง)
+_KNOWN_DEVICE_SPECS: dict[str, dict] = {
+    "iphone 17 pro max": {"connector": "usb-c", "min_watt": 27},
+    "iphone 17 pro":     {"connector": "usb-c", "min_watt": 27},
+    "iphone 17":         {"connector": "usb-c", "min_watt": 27},
+    "iphone 16 pro max": {"connector": "usb-c", "min_watt": 27},
+    "iphone 16 pro":     {"connector": "usb-c", "min_watt": 27},
+    "iphone 16":         {"connector": "usb-c", "min_watt": 27},
+    "iphone 15 pro max": {"connector": "usb-c", "min_watt": 27},
+    "iphone 15 pro":     {"connector": "usb-c", "min_watt": 27},
+    "iphone 15":         {"connector": "usb-c", "min_watt": 27},
+    "iphone 14":         {"connector": "lightning", "min_watt": 20},
+    "iphone 13":         {"connector": "lightning", "min_watt": 20},
+    "iphone 12":         {"connector": "lightning", "min_watt": 20},
+    "s25 ultra":         {"connector": "usb-c", "min_watt": 45},
+    "s24 ultra":         {"connector": "usb-c", "min_watt": 45},
+    "s23 ultra":         {"connector": "usb-c", "min_watt": 45},
+    "mi 17 ultra":       {"connector": "usb-c", "min_watt": 90},
+    "mi 17":             {"connector": "usb-c", "min_watt": 90},
+    "macbook air m4":    {"connector": "usb-c", "min_watt": 70},
+    "macbook air m3":    {"connector": "usb-c", "min_watt": 70},
+    "macbook air m2":    {"connector": "usb-c", "min_watt": 70},
+    "macbook pro 14":    {"connector": "usb-c", "min_watt": 96},
+    "macbook pro 16":    {"connector": "usb-c", "min_watt": 140},
+    "ipad pro":          {"connector": "usb-c", "min_watt": 30},
+    "ipad air":          {"connector": "usb-c", "min_watt": 30},
+}
+
+
+def _extract_product_connectors(p: dict) -> set[str]:
+    """⚡ สกัด DEVICE-SIDE connector types จากชื่อ+description ของสินค้า.
+
+    สำหรับสายชาร์จ: ดึง connector ฝั่งอุปกรณ์ (ปลาย "to Y" ใน "X to Y")
+      - "C to Lightning" → device-side = lightning (ไม่ใช่ usb-c)
+      - "C to C" → device-side = usb-c
+      - "A to Lightning" → device-side = lightning
+      - "A to C" → device-side = usb-c
+    สำหรับหัวชาร์จ/พาวเวอร์แบงค์: ดึงพอร์ต output (USB-C, USB-A)
+    สำหรับชุดชาร์จ: ดึงจากสายที่อยู่ในเซต
+
+    Returns:
+        set ของ connector types ที่ DEVICE-SIDE: 'usb-c', 'lightning', 'micro-usb', 'usb-a'
+        ถ้าดึงไม่ได้ → set() ว่าง (caller ถือว่า ambiguous → เก็บไว้ ไม่กรองออก)
+    """
+    import re as _re_conn
+    name = (p.get("name") or p.get("item_name") or "").lower()
+    desc = (p.get("description") or "").lower()
+    text = f"{name} {desc}"
+    connectors: set[str] = set()
+
+    # ── Cable patterns: "X to Y" → Y คือ device-side connector ──
+    # C to Lightning / USB-C to Lightning / Type-C to Lightning
+    if _re_conn.search(r'(?:usb-c|type-c|type c|usb c|c)\s*to\s*lightning', text):
+        connectors.add("lightning")
+    # A to Lightning / USB-A to Lightning
+    if _re_conn.search(r'(?:usb-a|usb a|a)\s*to\s*lightning', text):
+        connectors.add("lightning")
+    # C to C / USB-C to USB-C / Type-C to Type-C / C-to-C
+    if _re_conn.search(r'(?:usb-c|type-c|type c|usb c|c)\s*to\s*(?:usb-c|type-c|type c|usb c|c)\b', text):
+        connectors.add("usb-c")
+    # A to C / USB-A to USB-C / USB-A to Type-C
+    if _re_conn.search(r'(?:usb-a|usb a|a)\s*to\s*(?:usb-c|type-c|type c|usb c|c)\b', text):
+        connectors.add("usb-c")
+    # Micro USB to ... (มีไม่บ่อย)
+    if _re_conn.search(r'to\s*micro', text):
+        connectors.add("micro-usb")
+
+    # ── ถ้าเจอ cable pattern แล้ว → ใช้ cable pattern เป็นหลัก (ไม่เช็ค adapter) ──
+    # ── ถ้าไม่เจอ cable pattern → ลอง adapter/set pattern ──
+    if not connectors:
+        # Adapter: พอร์ต output (USB-C, USB-A)
+        if any(kw in text for kw in (
+            "usb-c", "type-c", "type c", "usb c", "usbc",
+            "pd ", "power delivery", "gan",
+        )):
+            connectors.add("usb-c")
+        if any(kw in text for kw in ("usb-a", "usb a ", "usba", "a to c", "a to lightning")):
+            connectors.add("usb-a")
+
+    # ── Lightning ลอยๆ (เช่น "Type C, Lightning" หรือ "lightning cable" ไม่มี "to") ──
+    #    เช็คนอก if not connectors เพราะ set อาจมีทั้ง USB-C และ Lightning
+    if any(kw in text for kw in ("lightning", "ไลนิ่ง", "ไลนิง")):
+        connectors.add("lightning")
+
+    # Micro USB
+    if any(kw in text for kw in ("micro usb", "micro-usb", "microusb")):
+        connectors.add("micro-usb")
+
+    return connectors
+
+
+def _resolve_device_spec(device_name: str, web_search_extra: str = "") -> dict | None:
+    """⚡ resolve device charging spec จาก web search ก่อน, hardcoded เป็น fallback.
+
+    Args:
+        device_name: ชื่ออุปกรณ์เป้าหมาย (เช่น "iPhone 17 Pro Max", "Mi 17 Ultra")
+        web_search_extra: text จาก _device_spec_lookup (มี spec จาก Google Search)
+
+    Returns:
+        {connector: str, min_watt: float} หรือ None ถ้าดึงไม่ได้
+    """
+    if not device_name:
+        return None
+    low = device_name.lower().strip()
+    # 1. parse จาก web search text ก่อน (หลัก — _device_spec_lookup หามาให้แล้ว)
+    if web_search_extra:
+        import re as _re_dev_spec
+        ws_lower = web_search_extra.lower()
+        spec: dict = {}
+        if any(kw in ws_lower for kw in ("usb-c", "type-c", "type c", "usb c", "usbc")):
+            spec["connector"] = "usb-c"
+        elif any(kw in ws_lower for kw in ("lightning", "ไลนิ่ง", "ไลนิง")):
+            spec["connector"] = "lightning"
+        elif any(kw in ws_lower for kw in ("micro usb", "micro-usb")):
+            spec["connector"] = "micro-usb"
+        watt_matches = _re_dev_spec.findall(r"(\d+)\s*w(?:att)?\b", ws_lower)
+        if watt_matches:
+            spec["min_watt"] = max(float(w) for w in watt_matches)
+        if "connector" in spec:
+            print(f"[DEVICE-SPEC] parsed from web search: {spec}", file=sys.stderr)
+            return spec
+    # 2. fallback: known specs (longest key first — กัน "iphone 17" match ทับ "iphone 17 pro max")
+    for key in sorted(_KNOWN_DEVICE_SPECS.keys(), key=len, reverse=True):
+        if key in low:
+            print(f"[DEVICE-SPEC] fallback to known spec: {key!r} → {_KNOWN_DEVICE_SPECS[key]}", file=sys.stderr)
+            return _KNOWN_DEVICE_SPECS[key]
+    return None
+
+
+def _filter_compat_products(
+    products: list[dict],
+    device_name: str,
+    web_search_extra: str = "",
+    intent_connector: str | None = None,
+    intent_min_watt: float | None = None,
+) -> list[dict]:
+    """⚡ CODE-level compat filter — กรองสินค้าที่ compatible กับอุปกรณ์จริง.
+
+    กรองตาม connector type เท่านั้น (ไม่กรองตาม wattage — เก็บทุก wattage
+    เพื่อให้ LLM เห็นทั้ง baseline และ upgrade)
+
+    หลังกรอง → sort by wattage ascending (baseline ก่อน, upgrade ทีหลัง)
+
+    Device spec priority:
+    1. intent_connector (จาก intent classifier LLM — หลัก)
+    2. web search text (จาก _device_spec_lookup — fallback)
+    3. _KNOWN_DEVICE_SPECS (hardcoded — last resort)
+
+    Fallback strategy (safe — ไม่ over-filter):
+    - ถ้าดึง device spec ไม่ได้ → คืนทั้งหมด
+    - ถ้าสินค้าดึง connector ไม่ได้ → ambiguous → เก็บไว้
+    - ถ้ากรองแล้วเหลือ < 2 ตัว → รวม ambiguous กลับ
+    - ถ้ากรองแล้วว่าง → คืนทั้งหมด
+
+    Args:
+        products: list ของ product cards
+        device_name: ชื่ออุปกรณ์เป้าหมาย (จาก intent_result.target_device)
+        web_search_extra: text จาก _device_spec_lookup (fallback สำหรับ device spec)
+        intent_connector: connector จาก intent classifier (usb-c / lightning / micro-usb)
+        intent_min_watt: min watt จาก intent classifier (ใช้เป็นข้อมูลเท่านั้น ไม่ใช้กรอง)
+
+    Returns:
+        list ของสินค้าที่ผ่าน compat filter, sort by wattage ascending
+    """
+    if not products or not device_name:
+        return products
+
+    # resolve device connector: intent ก่อน → web search → hardcoded
+    device_connector = ""
+    device_min_watt: float | None = None
+
+    if intent_connector:
+        device_connector = intent_connector
+        device_min_watt = intent_min_watt
+        print(f"[COMPAT-FILTER] device={device_name!r} connector={device_connector!r} "
+              f"min_watt={device_min_watt} (source=intent) products={len(products)}", file=sys.stderr)
+    else:
+        device_spec = _resolve_device_spec(device_name, web_search_extra)
+        if not device_spec:
+            return products
+        device_connector = device_spec.get("connector", "")
+        device_min_watt = device_spec.get("min_watt")
+        print(f"[COMPAT-FILTER] device={device_name!r} connector={device_connector!r} "
+              f"min_watt={device_min_watt} (source=fallback) products={len(products)}", file=sys.stderr)
+
+    if not device_connector:
+        return products
+
+    compat: list[dict] = []
+    ambiguous: list[dict] = []
+    dropped = 0
+
+    for p in products:
+        connectors = _extract_product_connectors(p)
+        if not connectors:
+            # ดึง connector ไม่ได้ → ambiguous → เก็บไว้ (ไม่ over-filter)
+            ambiguous.append(p)
+        elif device_connector in connectors:
+            # connector ตรง → compatible
+            compat.append(p)
+        elif "usb-a" in connectors and device_connector == "usb-c":
+            # USB-A adapter อาจใช้กับ USB-C device ได้ (ผ่าน A-to-C cable) → ambiguous
+            ambiguous.append(p)
+        else:
+            # connector ไม่ตรง → กรองออก
+            dropped += 1
+            _pname = (p.get("name") or p.get("item_name") or "")[:60]
+            print(f"[COMPAT-FILTER] DROP {_pname!r} connectors={connectors} "
+                  f"(device={device_connector!r})", file=sys.stderr)
+
+    # ถ้ากรองเหลือน้อย → รวม ambiguous กลับ (กัน over-filter)
+    if len(compat) < 2 and ambiguous:
+        print(f"[COMPAT-FILTER] กรองเหลือ {len(compat)} → รวม {len(ambiguous)} ambiguous กลับ", file=sys.stderr)
+        compat.extend(ambiguous)
+        ambiguous = []
+
+    # ถ้ากรองแล้วว่าง → คืนทั้งหมด (fallback ปลอดภัย)
+    if not compat:
+        print(f"[COMPAT-FILTER] กรองแล้วว่าง → คืนทั้งหมด {len(products)} ตัว", file=sys.stderr)
+        return products
+
+    # sort by wattage ascending (baseline ก่อน, upgrade ทีหลัง)
+    compat.sort(key=lambda p: _extract_max_wattage(p))
+
+    print(f"[COMPAT-FILTER] ผ่าน {len(compat)} จาก {len(products)} ตัว "
+          f"(dropped={dropped}, ambiguous={len(ambiguous)}) "
+          f"top3 wattage: {[_extract_max_wattage(p) for p in compat[:3]]}W", file=sys.stderr)
+
+    return compat
+
+
 def _apply_product_tiers(
     products: list[dict],
     tier_a_ids: set[str],
@@ -764,10 +998,11 @@ def _device_spec_lookup(
                         f"(พอร์ต/wattage/protocol) ไม่ใช่แค่มีชื่อแบรนด์เดียวกับอุปกรณ์เป้าหมาย "
                         f"ถ้า description ของสินค้าไม่ได้ระบุ wattage/protocol ที่ตรงตามที่อุปกรณ์เป้าหมายต้องการ "
                         f"ให้บอกลูกค้าตรงๆ ว่าอาจชาร์จได้ไม่เต็มสปีด ไม่ใช่ระบุว่า compat เฉยๆ\n"
-                        f"⚡ Phase 3b — dual-tier recommendation: ถ้าร้านมีสินค้าที่ connector type ตรงกับอุปกรณ์เป้าหมาย "
-                        f"หลายตัว ให้เสนอสูงสุด 2 ตัวเลือก: (1) ตัวที่ compat ตรงสเปคขั้นต่ำที่อุปกรณ์ต้องการ (baseline) "
-                        f"(2) ตัวที่ compat และมีสเปคสูงกว่า (wattage/current สูงกว่า) เป็นตัวเลือกอัปเกรด "
-                        f"ถ้ามีแค่ตัวเดียวที่ compat ให้เสนอแค่ตัวนั้น ห้ามแต่งว่ามีตัวสเปคสูงกว่าถ้าไม่มีจริงใน context\n"
+                        f"⚡ Phase 3b — dual-tier recommendation: ⚠️ กฎเหล็ก: ถ้าร้านมีสินค้าที่ connector type ตรงกับอุปกรณ์เป้าหมาย "
+                        f"2 ตัวขึ้นไป → ต้องแนะนำอย่างน้อย 2 ตัว ห้ามแนะนำแค่ 1 ตัวเด็ดขาด: "
+                        f"(1) baseline — ตัวที่ compat ตรงสเปคขั้นต่ำที่อุปกรณ์ต้องการ "
+                        f"(2) upgrade — ตัวที่ compat และมีสเปคสูงกว่า (wattage/current สูงกว่า) เป็นตัวเลือกอัปเกรด "
+                        f"ถ้ามีแค่ตัวเดียวที่ compat จริงๆ ให้เสนอแค่ตัวนั้น ห้ามแต่งว่ามีตัวสเปคสูงกว่าถ้าไม่มีจริงใน context\n"
                         f"ห้ามข้าม connector type เด็ดขาด — สินค้าที่ connector ไม่ตรงกับอุปกรณ์เป้าหมาย "
                         f"ห้ามเสนอแม้จะสเปคสูงแค่ไหน ไม่ว่าจะ frame เป็น baseline หรือ upgrade ก็ตาม"
                     )
@@ -1389,6 +1624,26 @@ def chat(req: ChatRequest) -> ChatResponse:
 
         # 3) รูปจาก turn ปัจจุบัน → ต้องอ่านใหม่เสมอ
         _urls_to_read.extend(req.images or [])
+        # ⚡ detect Shopee image URLs ใน text message — ลูกค้าอาจพิมพ์ URL รูปตรงๆ
+        #   เช่น "https://img.sp.mms.shopee.sg/..." หรือ "https://cf.shopee.co.th/file/..."
+        #   ถ้าไม่ detect → URL ไปเป็น text ธรรมดา → บอทไม่อ่านรูป
+        if req.message and not (req.images or []):
+            _shopee_img_pattern = re.compile(
+                r'https?://(?:img\.sp\.mms\.shopee\.(?:sg|th|vn|my|ph|id)'
+                r'|cf\.shopee\.(?:co\.th|sg|vn|my|ph|id|com)'
+                r'|down-(?:sg|th|vn)\.sp\.mms\.shopee\.(?:sg|th|vn))'
+                r'/[^\s<>"\']+',
+                re.IGNORECASE,
+            )
+            _text_img_urls = _shopee_img_pattern.findall(req.message)
+            if _text_img_urls:
+                # dedup + limit
+                _seen_urls = set(_urls_to_read)
+                for _u in _text_img_urls[:5]:
+                    if _u not in _seen_urls:
+                        _urls_to_read.append(_u)
+                        _seen_urls.add(_u)
+                print(f"[VISION-TEXT-URL] พบ image URL ใน text: {len(_text_img_urls)} รูป → ส่ง vision", file=sys.stderr)
         print(f"[VISION-DBG] req.images={req.images} history_imgs={[h.get('images') for h in (history or [])[-2:]]} urls_to_read={_urls_to_read}", file=sys.stderr)
 
         if _urls_to_read:
@@ -1507,7 +1762,21 @@ def chat(req: ChatRequest) -> ChatResponse:
             # ข้อความปัจจุบันไม่มี tag และว่างเปล่า (ไม่ควรเกิด แต่กันไว้)
             _clean_message = req.message
         if _tagged_item_id:
-            print(f"[ITEM-TAG] พบ item_id={_tagged_item_id} ในข้อความ", file=sys.stderr)
+            # ⚡ FIX — ถ้าลูกค้าส่งรูปภาพ (ไม่ใช่การ์ดสินค้า) และ anchor มาจาก history
+            #   ให้ข้าม item_tag shortcut ไป main flow (Intent → RAG → LLM2)
+            #   เพราะรูปอาจเป็นสินค้า/รุ่นอื่น ต้องใช้ vision desc ค้นสินค้าผ่าน RAG
+            #   ไม่ใช่ตอบจาก anchor product เดิม (ซึ่งอาจไม่ใช่สินค้าในรูป)
+            _cur_is_image_placeholder = bool(re.search(
+                r"\[(?:รูปภาพ|image|วิดีโอ|video)\]",
+                req.message or "",
+                re.IGNORECASE,
+            )) or bool(req.images)
+            if _is_from_history_anchor and _cur_is_image_placeholder:
+                print(f"[ITEM-TAG] ลูกค้าส่งรูป + anchor จาก history → ข้าม shortcut ไป main flow (ใช้ vision + RAG)", file=sys.stderr)
+                _tagged_item_id = None
+                anchor_card = None
+            else:
+                print(f"[ITEM-TAG] พบ item_id={_tagged_item_id} ในข้อความ", file=sys.stderr)
             # ใช้ desc_message ที่มี keyword "รายละเอียด" เพื่อให้ _clean_description ส่ง spec section
             _desc_msg = _clean_message or "รายละเอียดสินค้า"
             anchor_card = product_store.fetch_product_by_id(
@@ -1700,6 +1969,20 @@ def chat(req: ChatRequest) -> ChatResponse:
         )
         _msg_lower_rr = (req.message or "").lower()
         _is_return_refund = any(kw in _msg_lower_rr for kw in _RETURN_REFUND_KWS)
+        # ⚡ ขอที่อยู่ส่งกลับ/ส่งเคลม/ที่อยู่ร้าน → handoff แอดมินทันที (bot ไม่มีที่อยู่จริงของร้าน)
+        #    เคสจริง: "ขอที่อยู่ส่งกลบ" / "ต้องการที่อยู่ด่วน" / "ขอที่อยู่ส่งเคลม"
+        #    ลูกค้าต้องการที่อยู่เพื่อส่งสินค้ากลับ/ส่งเคลม → bot ไม่มีข้อมูลนี้ → ส่งแอดมินเลย
+        #    ไม่ต้องถามเลขคำสั่งซื้อก่อน เพราะลูกค้าแค่ขอที่อยู่
+        _ADDRESS_REQUEST_KWS = (
+            "ขอที่อยู่", "ที่อยู่ร้าน", "ที่อยู่ส่งกลับ", "ที่อยู่ส่งกลบ",
+            "ที่อยู่ส่งเคลม", "ที่อยู่ส่งคืน", "ที่อยู่ด่วน",
+            "ต้องการที่อยู่", "ขอสถานที่ส่ง", "ส่งไปที่ไหน", "จะส่งไปที่ไหน",
+            "ที่อยู่สำหรับส่งกลับ", "ที่อยู่สำหรับส่งเคลม",
+            "address ส่งกลับ", "return address", "claim address",
+        )
+        _is_address_request = any(kw in _msg_lower_rr for kw in _ADDRESS_REQUEST_KWS)
+        if _is_address_request:
+            print(f"[ADDRESS-REQUEST] detected: msg={_msg_lower_rr!r} → handoff admin (no order_sn needed)", file=sys.stderr)
 
         # ⚡ Follow-up check: bot เคยถามเลข order ใน return/refund context + ลูกค้าส่งเลขมา
         _is_rr_followup = False
@@ -1713,6 +1996,76 @@ def chat(req: ChatRequest) -> ChatResponse:
             )) and "เลขคำสั่งซื้อ" in _last_model_text_rr:
                 _is_rr_followup = True
                 print(f"[RETURN-REFUND] follow-up: bot asked for order_sn + customer sent {_order_sn}", file=sys.stderr)
+
+        if _is_address_request and not _in_claim_flow:
+            # ⚡ ขอที่อยู่ส่งกลับ/ส่งเคลม → handoff แอดมินทันที (ไม่ต้องถามเลขคำสั่งซื้อ)
+            #    bot ไม่มีที่อยู่จริงของร้าน → ส่งแอดมินเลย
+            print(f"[ADDRESS-REQUEST] handoff admin immediately (no order_sn needed)", file=sys.stderr)
+            _addr_answer = (
+                f"เรื่องที่อยู่ร้าน/ที่อยู่ส่งสินค้ากลับ/ส่งเคลม รบกวนส่งต่อแชทนี้ให้แอดมินดูแลให้นะคะ "
+                f"เดี๋ยวแอดมินจะแจ้งที่อยู่ที่ถูกต้องและดำเนินการต่อให้ "
+                f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งค่ะ"
+            )
+            _total_elapsed = _time.time() - _total_start
+            model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+            # handoff แอดมิน
+            if req.conversation_id:
+                try:
+                    import urllib.request as _ur_addr
+                    _handoff_url_addr = os.environ.get(
+                        "ADMIN_HANDOFF_URL",
+                        "http://127.0.0.1:3000/api/admin/conversations/bot-handoff",
+                    )
+                    _handoff_payload_addr = {
+                        "conversation_id": req.conversation_id,
+                        "shop_id": req.shop or "",
+                        "platform": req.platform or "shopee",
+                        "reason": "address_request",
+                        "claim": {"topic": "ขอที่อยู่ส่งกลับ/ส่งเคลม"},
+                    }
+                    _handoff_body_addr = json.dumps(_handoff_payload_addr).encode("utf-8")
+                    _handoff_req_addr = _ur_addr.Request(
+                        _handoff_url_addr, data=_handoff_body_addr,
+                        headers={
+                            "Content-Type": "application/json",
+                            "X-Internal-Secret": os.environ.get("CHATBOT_INTERNAL_SECRET", ""),
+                        },
+                        method="POST",
+                    )
+                    try:
+                        _ur_addr.urlopen(_handoff_req_addr, timeout=3)
+                        print("[ADDRESS-REQUEST] handoff sent to admin", file=sys.stderr)
+                    except Exception as _he_addr:
+                        print(f"[ADDRESS-REQUEST] handoff failed: {_he_addr}", file=sys.stderr)
+                except Exception as _he_addr:
+                    print(f"[ADDRESS-REQUEST] handoff error: {_he_addr}", file=sys.stderr)
+            _steps.append({
+                "name": "address_request_handoff",
+                "model": model_name,
+                "tokens_in": 0, "tokens_out": 0,
+                "time_s": round(_total_elapsed, 2),
+                "cost_usd": 0.0, "cost_thb": 0.0,
+                "detail": "address_request: handoff admin (no order_sn needed)",
+            })
+            return ChatResponse(
+                answer=_addr_answer,
+                answer_segments=llm.split_segments(_addr_answer),
+                products=[],
+                shop=req.shop,
+                model=model_name,
+                source="address_request_handoff",
+                usage={"prompt": 0, "output": 0, "total": 0},
+                elapsed=round(_total_elapsed, 2),
+                cost=0.0,
+                handoff_to_admin=True,
+                handoff_reason="address_request",
+                steps=_steps,
+                routing_decision=_routing(
+                    "handoff", "address_request: ขอที่อยู่ส่งกลับ/ส่งเคลม → ส่งแอดมิน",
+                    handoff_reason="address_request",
+                ),
+                image_desc=_image_desc_out,
+            )
 
         if (_is_return_refund or _is_rr_followup) and not _in_claim_flow:
             print(f"[RETURN-REFUND] detected: is_return_refund={_is_return_refund} is_followup={_is_rr_followup} order_sn={_order_sn}", file=sys.stderr)
@@ -4239,7 +4592,9 @@ def chat(req: ChatRequest) -> ChatResponse:
                 # ให้ดึงด้วย Mongo regex ก่อน vector search (แม่นยำกว่าสำหรับชื่อสินค้าเฉพาะ)
                 _kb_regex_products: list[dict] = []
                 _kb_model_kws = re.findall(r"[A-Za-z]+\d+[A-Za-z]*", req.message)
-                _kb_model_kws = [w for w in _kb_model_kws if len(w) >= 4]
+                # ⚡ รับ model code สั้น (>=3 ตัว) ที่มีตัวอักษร + ตัวเลข (เช่น p23, k9, x7)
+                #    เดิมกรอง len>=4 ทำให้ "p23" หาย → ไม่ match P23 Powerbank
+                _kb_model_kws = [w for w in _kb_model_kws if len(w) >= 3 and re.search(r"\d", w)]
                 if not _kb_model_kws:
                     _kb_alpha_kws = re.findall(r"[A-Za-z]{5,}", req.message)
                     _kb_common = {"watch", "smart", "phone", "cable", "charger", "adapter",
@@ -4859,19 +5214,61 @@ def chat(req: ChatRequest) -> ChatResponse:
                     retrieval_message = f"{' '.join(_constraint_kws)} {retrieval_message}"
                     print(f"[CONSTRAINT-CARRY] retrieval_message={retrieval_message!r}", file=sys.stderr)
 
+        # ⚡ LINK-FOLLOWUP — ลูกค้าขอลิงค์/ช่องทางซื้อ → ดึง anchor+suggestion ล่าสุดมาตอบ
+        #   กัน case: Q1 บอทแนะนำ ZA353 → Q3 "ขอลิงค์สินค้า" → RAG ใหม่ → ดึง ZA453 ผิดรุ่น
+        #   แก้: ถ้าลูกค้าขอลิงค์/ช่องทางซื้อ และมีสินค้าก่อนหน้าใน timeline → ใช้สินค้านั้น
+        #   ⚡ ต้องทำก่อน CONV-ACTIVE เพราะ CONV-ACTIVE ดึง active product แค่ 1 ตัว
+        #      และตั้ง _is_conv_active=True → LINK-FOLLOWUP จะไม่ทำงาน
+        _is_link_followup = False
+        _link_followup_kws = (
+            "ลิงค์", "ลิงก์", "ลิ้งค์", "ลิ้งก์", "link", "ขอลิงค์", "ขอลิงก์",
+            "ขอลิ้งค์", "ขอลิ้งก์", "ขอ link", "ขอ url", "url",
+            "ช่องทางซื้อ", "สั่งซื้อ", "ขอสั่ง", "ขอซื้อ", "สั่งได้เลย",
+            "ส่งลิงค์", "ส่งลิงก์", "ส่ง link", "ขอเว็บ", "เว็บสินค้า",
+        )
+        _is_link_followup = (
+            req.conversation_id
+            and any(kw in (req.message or "").lower() for kw in _link_followup_kws)
+            and not any(kw in (req.message or "").lower() for kw in (
+                # ห้าม trigger ในเคส warranty/refund/cancel
+                "เคลม", "รับประกัน", "ประกัน", "คืนเงิน", "ขอเงินคืน",
+                "ยกเลิก", "ส่งคืน", "ไม่รับ", "ใบกำกับ", "ใบเสร็จ",
+            ))
+        )
+        if _is_link_followup:
+            try:
+                from . import conversation_products as _cp_link
+                _link_products = _cp_link.get_anchor_and_suggestions(req.conversation_id, limit=5)
+                if _link_products:
+                    # กรองเฉพาะที่มี short_link หรือ image_url (มีประโยชน์ให้ LLM ส่งได้)
+                    _link_products = [
+                        p for p in _link_products
+                        if p.get("short_link") or p.get("image_url")
+                    ]
+                if _link_products:
+                    _ref_regex_products = _link_products
+                    _is_conv_active = True
+                    print(f"[LINK-FOLLOWUP] ใช้สินค้าก่อนหน้า: {len(_link_products)} ตัว  names={[p.get('name','')[:30] for p in _link_products[:3]]}", file=sys.stderr)
+                else:
+                    print(f"[LINK-FOLLOWUP] ไม่มีสินค้าก่อนหน้าใน timeline → fall through", file=sys.stderr)
+            except Exception as _e:
+                print(f"[LINK-FOLLOWUP] error: {_e}", file=sys.stderr)
+
         # ⚡ CONV-ACTIVE: ดึง active product จาก conversation_products timeline ก่อน history-words
         # ต้องทำก่อน history block เพราะ history-words อาจดึงสินค้าอื่นในร้านมาทับ anchor
         # เช่น "kieslect" ใน history → ดึง Ks, Lora 2, KR Pro ทั้งที่ active = BioKoop
         # ⚡ Phase 2Z+++ — อนุญาตให้ CONV-ACTIVE ทำงานแม้ _ref_handled=True
         #    กัน case: ลูกค้าส่ง [item] → bot ตอบ → ลูกค้าถาม "อันนี้..." (ref_handled)
         #    → CONV-ACTIVE ไม่ทำงาน → ดึงสินค้าอื่น → ตอบผิด
-        _is_conv_active = False
+        # ⚡ ถ้า LINK-FOLLOWUP ตั้ง _is_conv_active=True แล้ว → ข้าม CONV-ACTIVE
+        if not _is_conv_active:
+            _is_conv_active_init = False  # placeholder
         _cur_charger_sub = product_store._detect_charger_subtype(req.message)
-        print(f"[CONV-ACTIVE-DBG] conversation_id={req.conversation_id!r} charger_sub={_cur_charger_sub!r} ref_handled={_ref_handled}", file=sys.stderr)
+        print(f"[CONV-ACTIVE-DBG] conversation_id={req.conversation_id!r} charger_sub={_cur_charger_sub!r} ref_handled={_ref_handled} link_followup={_is_link_followup}", file=sys.stderr)
         # ⚡ Phase 3 — ยกเลิกเงื่อนไข `not _cur_charger_sub` เพราะ "สายแท้" ถูก detect เป็น cable
         #   ทำให้ CONV-ACTIVE ไม่ทำงานทั้งที่ลูกค้าถามต่อเรื่องสายชาร์จเดิม
         #   แต่เช็คเพิ่ม: ถ้า _cur_charger_sub มีค่าและต่างจาก subtype ของ active_card → เปลี่ยนหมวด ไป fetch ใหม่
-        if req.conversation_id:
+        if req.conversation_id and not _is_conv_active:
             try:
                 from . import conversation_products as _cp
                 _cur_model_kw = knowledge_base.extract_model_keywords(req.message)
@@ -5840,13 +6237,23 @@ def chat(req: ChatRequest) -> ChatResponse:
             # ⚡ ถ้าใช้ active product จาก conversation_products timeline
             # บอก LLM ชัดๆ ว่าสินค้านี้คือสินค้าที่ลูกค้าสนใจ ห้ามสลับไปสินค้าอื่น
             if _is_conv_active and products:
-                _conv_note = (
-                    "⚠️ สินค้าใน context คือสินค้าที่ลูกค้าส่งมา/สนใจในแชทนี้ "
-                    "ลูกค้ากำลังถามเกี่ยวกับสินค้านี้ต่อเนื่อง "
-                    "ห้ามสลับไปแนะนำสินค้าอื่นที่ไม่ใช่สินค้าใน context "
-                    "ถ้า bot เคยแนะนำสินค้าอื่นใน history ให้ถือว่าเป็นคำแนะนำ "
-                    "ไม่ใช่สินค้าที่ลูกค้าสนใจ — ให้ตอบเกี่ยวกับสินค้าใน context เท่านั้น"
-                )
+                # ⚡ LINK-FOLLOWUP — ลูกค้าขอลิงค์/ช่องทางซื้อ → ส่งลิงค์+รูปของทุกสินค้าใน context
+                if _is_link_followup and len(products) > 1:
+                    _conv_note = (
+                        "⚠️ ลูกค้าขอลิงค์/ช่องทางซื้อของสินค้าที่ bot แนะนำไปก่อนหน้า "
+                        "สินค้าใน context คือสินค้าที่ bot แนะนำล่าสุด — "
+                        "ให้ส่งลิงค์สั่งซื้อ (short_link) และรูปภาพ (image_url) ของสินค้า status=NORMAL ทุกตัวใน context "
+                        "ห้ามตอบแค่ 1 ตัว ห้ามเลือกเองแค่บางตัว "
+                        "ห้ามดึงสินค้าอื่นที่ไม่อยู่ใน context มาตอบ"
+                    )
+                else:
+                    _conv_note = (
+                        "⚠️ สินค้าใน context คือสินค้าที่ลูกค้าส่งมา/สนใจในแชทนี้ "
+                        "ลูกค้ากำลังถามเกี่ยวกับสินค้านี้ต่อเนื่อง "
+                        "ห้ามสลับไปแนะนำสินค้าอื่นที่ไม่ใช่สินค้าใน context "
+                        "ถ้า bot เคยแนะนำสินค้าอื่นใน history ให้ถือว่าเป็นคำแนะนำ "
+                        "ไม่ใช่สินค้าที่ลูกค้าสนใจ — ให้ตอบเกี่ยวกับสินค้าใน context เท่านั้น"
+                    )
                 if "_context_note" not in products[0]:
                     products[0]["_context_note"] = _conv_note
                 else:
@@ -6799,6 +7206,18 @@ def chat(req: ChatRequest) -> ChatResponse:
             products.extend(_device_additional)
         if _device_spec_extra:
             _combined_extra = (_combined_extra + _device_spec_extra).strip()
+        # ⚡ CODE-level compat filter — กรองสินค้าที่ connector ไม่ตรงกับอุปกรณ์ออก
+        #    ก่อน tier merge เพื่อให้ LLM เห็นเฉพาะสินค้าที่ compat จริง
+        #    ถ้ากรองแล้วว่าง/เหลือน้อย → fallback คืนทั้งหมด (ปลอดภัย ไม่ over-filter)
+        _compat_target_device = _intent_result.get("target_device") or ""
+        if _compat_target_device and products:
+            products = _filter_compat_products(
+                products=products,
+                device_name=_compat_target_device,
+                web_search_extra=_device_spec_extra,
+                intent_connector=_intent_result.get("device_connector"),
+                intent_min_watt=_intent_result.get("device_min_watt"),
+            )
         # ⚡ Phase 3 — Tier merge ก่อนส่งเข้า LLM
         #   Tier A (exact match): MODEL-REGEX + anchor_card + hybrid_anchor_card → ใส่เสมอ ไม่ถูกตัดด้วย limit
         #   Tier B (general): vector/keyword search → เรียง normal+stock>0 ก่อน แล้วตัด limit
@@ -7059,7 +7478,7 @@ def _record_suggestion_products(req, products: list[dict]) -> None:
                 if _anchor_item_id:
                     break  # ใช้แค่ตัวแรกที่ match (สินค้าที่เกี่ยวข้องที่สุดจาก RAG)
 
-        for p in products[:3]:  # จำกัด 3 ชิ้นแรก (ประหยัด DB write)
+        for p in products[:5]:  # จำกัด 5 ชิ้นแรก (เพิ่มจาก 3 เพื่อให้ link-followup มีสินค้าเพียงพอ)
             item_id = p.get("item_id")
             name = p.get("name") or ""
             if not item_id:

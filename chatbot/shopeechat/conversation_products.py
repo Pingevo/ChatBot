@@ -72,6 +72,11 @@ _GENERIC_Q_KWS = (
     "เสีย", "พัง", "ไม่ทำงาน", "ปัญหา",
     "ดีไหม", "ดีไหมครับ", "ดีป่าว", "แนะนำ",
     "ส่งฟรี", "ฟรี", "ส่วนลด", "โปร", "โปรโมชั่น",
+    # ⚡ link follow-up — ลูกค้าขอลิงค์/ช่องทางซื้อ → ใช้สินค้าก่อนหน้า
+    "ลิงค์", "ลิงก์", "ลิ้งค์", "ลิ้งก์", "link", "ขอลิงค์", "ขอลิงก์",
+    "ขอลิ้งค์", "ขอลิ้งก์", "ขอ link", "ขอ url", "url",
+    "ช่องทางซื้อ", "สั่งซื้อ", "ขอสั่ง", "ขอซื้อ", "สั่งได้เลย",
+    "ส่งลิงค์", "ส่งลิงก์", "ส่ง link", "ขอเว็บ", "เว็บสินค้า",
 )
 
 
@@ -217,8 +222,10 @@ def _strip_card_for_storage(card: dict) -> dict:
         "warranty": card.get("warranty"),
         "short_link": card.get("short_link"),
         "image_url": card.get("image_url"),
+        "status": card.get("status"),
         "total_stock": card.get("total_stock"),
         "sold_out": card.get("sold_out"),
+        "_available_for_sale": card.get("_available_for_sale"),
         "has_promotion": card.get("has_promotion"),
         "is_flash_sale": card.get("is_flash_sale"),
         "description_excerpt": (card.get("description_excerpt") or "")[:2000],
@@ -287,6 +294,73 @@ def get_suggestion_latest(conversation_id: str) -> dict | None:
     suggestions.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
     s = suggestions[0]
     return s.get("card") or {"item_id": s.get("item_id"), "name": s.get("name")}
+
+
+def get_recent_suggestions(conversation_id: str, limit: int = 5) -> list[dict]:
+    """ดึง suggestion products ล่าสุดหลายตัว (สำหรับ follow-up ขอลิงค์).
+
+    Returns:
+        list ของ product cards (dict) เรียงจากล่าสุด→เก่า สูงสุด `limit` ตัว
+    """
+    doc = load_timeline(conversation_id)
+    if not doc:
+        return []
+    suggestions = [p for p in doc.get("products", []) if not p.get("is_anchor")]
+    if not suggestions:
+        return []
+    suggestions.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
+    out = []
+    seen_ids = set()
+    for s in suggestions[:limit * 2]:  # ดึงเผื่อ dedup
+        iid = _to_serializable(s.get("item_id"))
+        if iid in seen_ids:
+            continue
+        seen_ids.add(iid)
+        card = s.get("card") or {"item_id": s.get("item_id"), "name": s.get("name")}
+        out.append(card)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def get_anchor_and_suggestions(conversation_id: str, limit: int = 5) -> list[dict]:
+    """ดึง anchor ล่าสุด + suggestion ล่าสุด รวมกัน (dedup) สำหรับ follow-up ขอลิงค์.
+
+    Returns:
+        list ของ product cards — anchor ก่อน แล้วตามด้วย suggestions (dedup by item_id)
+    """
+    doc = load_timeline(conversation_id)
+    if not doc:
+        return []
+    products = doc.get("products", []) or []
+    if not products:
+        return []
+    # แยก anchor / suggestion
+    anchors = [p for p in products if p.get("is_anchor")]
+    suggestions = [p for p in products if not p.get("is_anchor")]
+    anchors.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
+    suggestions.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
+    out = []
+    seen_ids = set()
+    # anchor ก่อน (ล่าสุดก่อน)
+    for p in anchors:
+        iid = _to_serializable(p.get("item_id"))
+        if iid in seen_ids:
+            continue
+        seen_ids.add(iid)
+        card = p.get("card") or {"item_id": p.get("item_id"), "name": p.get("name")}
+        out.append(card)
+    # แล้ว suggestions (ล่าสุดก่อน)
+    for p in suggestions:
+        iid = _to_serializable(p.get("item_id"))
+        if iid in seen_ids:
+            continue
+        seen_ids.add(iid)
+        card = p.get("card") or {"item_id": p.get("item_id"), "name": p.get("name")}
+        out.append(card)
+        if len(out) >= limit:
+            break
+    return out[:limit]
 
 
 def resolve_active_by_message(

@@ -32,6 +32,7 @@ async function callOurBot(params: {
   shopId: string;
   shopName?: string;
   images?: string[];
+  conversationId?: string;  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
   use_v2?: boolean;
   use_v3?: boolean;
 }): Promise<{
@@ -47,7 +48,7 @@ async function callOurBot(params: {
   handoff_reason?: string;
   routing_decision?: unknown;
 }> {
-  const { platform, message, history, shopId, shopName, images, use_v2, use_v3 } = params;
+  const { platform, message, history, shopId, shopName, images, conversationId, use_v2, use_v3 } = params;
   // ใช้ platform-specific bot URL (shopee/tiktok/lazada แยกกัน)
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
@@ -75,6 +76,8 @@ async function callOurBot(params: {
   else if (shopId) body.shop = shopId;
   // ⚡ A2 — ส่ง current-turn images ให้ bot (ถ้ามี)
   if (images && images.length > 0) body.images = images;
+  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
+  if (conversationId) body.conversation_id = conversationId;
   // ⚡ chat_v3 — ส่ง use_v3 เพื่อบังคับใช้ chatbotv3 (มี priority เหนือ v2)
   if (use_v3) body.use_v3 = true;
   // ⚡ chat_v2 — ส่ง use_v2 เพื่อบังคับใช้ chat_v2 (replay test) — ไม่ส่งถ้า v3

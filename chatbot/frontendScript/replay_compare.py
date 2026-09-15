@@ -151,7 +151,10 @@ def parse_raw_message(raw_payload, fallback_text: str) -> dict:
 
     if msg_type == 'image':
         c = inner
-        img_url = c.get('image_url') or ''
+        # ⚡ Shopee chat image schema: content.url (ไม่ใช่ image_url)
+        #    ตัวอย่าง: raw_payload.data.content.content.url = "https://img.sp.mms.shopee.sg/..."
+        #    บางกรณี (image_with_text) ใช้ image_url หรือ image_url_list → รองรับทั้งคู่
+        img_url = c.get('url') or c.get('image_url') or ''
         if not img_url:
             img_list = c.get('image_url_list') or []
             if isinstance(img_list, list) and img_list:

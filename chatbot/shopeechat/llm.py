@@ -344,9 +344,13 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
   - ถ้าเป็น powerbank → แนะนำเฉพาะตัวที่เป็นพาวเวอร์แบงค์จริง ไม่ใช่หัวชาร์จ/สาย/เคส/ชุด
   - ถ้ารุ่นไหน sold_out → บอก "รุ่นนี้หมดสต็อกชั่วคราว" แล้วข้ามไปรุ่นอื่น
 - **⚡ Phase 3b — dual-tier recommendation เมื่อแนะนำสินค้าที่ compat กับอุปกรณ์ที่ลูกค้าระบุ** (เช่น "หัวชาร์จ iphone 4s", "สายชาร์จ mi 17 ultra", "หัวชาร์จ USB-C ทั่วไป"):
-  เมื่อ context มีสินค้าที่ compat กับอุปกรณ์เป้าหมาย ให้เสนอ **สูงสุด 2 ตัวเลือก** ถ้ามี:
-    1. **baseline** — ตัวที่ compat ตรงสเปคขั้นต่ำที่อุปกรณ์ต้องการ (เช่น 30W สำหรับ USB-C Android ทั่วไป)
-    2. **upgrade** — ตัวที่ compat และมีสเปคสูงกว่า (wattage/current สูงกว่า) พร้อมบอกสั้นๆ ว่าทำไมตัวหลังดีกว่า
+  ⚠️ **กฎเหล็ก: ถ้า context มีสินค้า compat กับอุปกรณ์เป้าหมาย 2 ตัวขึ้นไป → ต้องแนะนำอย่างน้อย 2 ตัว (baseline + upgrade) ห้ามแนะนำแค่ 1 ตัวเด็ดขาด**
+  ขั้นตอน:
+    1. สแกน context ทุกตัว → filter เฉพาะที่ connector ตรงกับอุปกรณ์เป้าหมาย
+    2. ถ้าเหลือ 2 ตัวขึ้นไป → ต้องเสนอ 2 ตัว:
+       - **baseline** — ตัวที่ compat ตรงสเปคขั้นต่ำที่อุปกรณ์ต้องการ (เช่น 30W สำหรับ USB-C Android ทั่วไป)
+       - **upgrade** — ตัวที่ compat และมีสเปคสูงกว่า (wattage/current สูงกว่า) พร้อมบอกสั้นๆ ว่าทำไมตัวหลังดีกว่า
+    3. ถ้าเหลือแค่ 1 ตัวจริงๆ → เสนอแค่ตัวนั้น
   **กฎบังคับ (ห้ามละเว้น):**
   - **connector type ต้องตรงเป๊ะกับที่อุปกรณ์เป้าหมายต้องการ** — เป็นข้อจำกัดทาง hardware จริง
     ตัวอย่าง: USB-C, Lightning, USB-A, Micro-USB, 30-pin (iPhone 4S)
@@ -361,7 +365,8 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
     ไม่ใช่ดูแค่ตัวเลข wattage สูงอย่างเดียว
     ตัวอย่าง: หัวชาร์จ 140W บางรุ่นอาจไม่มี PPS ที่บางอุปกรณ์ต้องการ
     ถ้า description ไม่ระบุ protocol ที่ต้องการ → ห้ามเสนอเป็น upgrade
-  - **ถ้าร้านมีสินค้า compat แค่ 1 ตัว** → เสนอแค่ตัวนั้น (baseline only) ห้ามแต่งว่ามีตัวสเปคสูงกว่า
+  - **ถ้าร้านมีสินค้า compat แค่ 1 ตัวจริงๆ** (ตรวจสอบ context ทุกตัวแล้วไม่มีตัวอื่นที่ connector ตรง) → เสนอแค่ตัวนั้น (baseline only) ห้ามแต่งว่ามีตัวสเปคสูงกว่า
+  - **ถ้ามี 2 ตัวขึ้นไปที่ compat ได้ → ห้ามแนะนำแค่ 1 ตัว** ต้องเสนอ baseline + upgrade (กฎเหล็กจากด้านบน)
   - **ถ้าไม่มีสินค้า compat เลย** → บอกลูกค้าตรงๆ ว่าไม่มีสินค้าที่ connector ตรงในร้าน
   - **ห้ามเสนอสินค้าที่ไม่มีอยู่จริงใน context** — ห้ามให้ LLM "เดา" ว่ามีตัวสเปคสูงกว่าถ้า retrieval ไม่เจอจริง
   - **subtype ที่ resolve ได้จาก Phase 2 ต้องคุมทิศทางการเสนอ** — ถ้าลูกค้าถาม "สายชาร์จ" ห้ามเสนอ "หัวชาร์จ" เป็น baseline/upgrade และในทางกลับกัน
@@ -469,9 +474,14 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
   ตอบสั้นๆ 1-2 ประโยค เช่น "ทางร้านเป็นร้านทางการ สินค้าของแท้ 100% รับประกันศูนย์ไทยค่ะ"
   รอลูกค้าเป็นฝ่ายถามซื้อเอง — ห้าม push ลิงก์/รูปก่อน
   **ยกเว้น**: ถ้าลูกค้าบอกมั่นใจแล้ว (เช่น "มั่นใจได้นะครับไม่โดนหลอก") → สามารถแนบลิงก์สั่งซื้อได้
-- **แนบลิงก์/รูปเฉพาะเมื่อลูกค้าแสดงความสนใจซื้อหรือขอดูสินค้า**:
-  เช่น "สนใจสั่งซื้อ", "ขอดูสินค้า", "มีไหม", "ตัวไหนดี", "แนะนำหน่อย"
-  ถ้าลูกค้ายังไม่ได้แสดงความสนใจซื้อ → ตอบข้อมูลอย่างเดียว ไม่แนบลิงก์/รูป
+- **แนบลิงก์/รูปเสมอเมื่อแนะนำ/เสนอสินค้า** ยกเว้นเคสต่อไปนี้เท่านั้น:
+  - ลูกค้าอยู่ใน warranty/claim flow (เคลม, รับประกัน, ส่งซ่อม)
+  - ลูกค้าอารมณ์เสีย/ร้องเรียน/ไม่พอใจ
+  - สินค้ามีปัญหา/ชำรุด/พัง
+  - ใบกำกับภาษี/ขอใบเสร็จ
+  - ส่งคืน/ไม่รับสินค้า/ขอเงินคืน/ยกเลิกออเดอร์
+  - เคสที่ต้องส่งแอดมิน (handoff) — ห้ามแนะนำสินค้าในเคสเหล่านี้
+  เคสอื่นๆ ที่ไม่ใช่ข้อยกเว้นข้างต้น → แนะนำสินค้าตามปกติ พร้อมแนบลิงก์+รูป
 - **หากลูกค้าขอเปรียบเทียบสินค้า 2 รายการขึ้นไป ต้องตอบในรูปแบบ "สเปคต่อสเปค ละเอียด" เท่านั้น ห้ามใช้รูปแบบอื่น**
   โครงสร้างคำตอบที่บังคับ (เรียงตามลำดับนี้เท่านั้น):
   1. บรรทัดเปิดสั้นๆ เป็นมิตร (เช่น "ยินดีเลยค่ะ เดี๋ยวเรามาเทียบสเปคแบบละเอียดระหว่าง ... และ ... กันแบบชัด ๆ สเปคต่อสเปคเลยนะคะ")
@@ -795,11 +805,18 @@ def describe_image(
     if not _hostname:
         return "(URL ไม่ถูกต้อง)", usage_info
     _safe_ip = None
+    _allow_loopback = os.environ.get("BOT_VISION_ALLOW_LOOPBACK", "").strip() in ("1", "true", "yes")
     try:
         _resolved = _socket.getaddrinfo(_hostname, None)
         for _fam, _typ, _proto, _cn, _sa in _resolved:
             _ip = _ipaddress.ip_address(_sa[0])
             if _ip.is_private or _ip.is_loopback or _ip.is_link_local or _ip.is_multicast:
+                # ⚡ dev mode — อนุญาต loopback/private สำหรับ TestChat local upload
+                if _allow_loopback and (_ip.is_loopback or _ip.is_private):
+                    print(f"[VISION] dev mode: allow loopback/private IP: {_hostname} -> {_ip}", file=sys.stderr)
+                    if _safe_ip is None:
+                        _safe_ip = str(_ip)
+                    continue
                 print(f"[VISION] blocked private/loopback IP: {_hostname} -> {_ip}", file=sys.stderr)
                 return "(URL ไม่ถูกต้อง)", usage_info
             if _safe_ip is None:
@@ -807,7 +824,9 @@ def describe_image(
     except Exception:
         pass  # DNS resolve fail — ปล่อยให้ urlopen จัดการ
     # 🔒 M5: Rewrite URL to use pinned IP + set Host header to prevent DNS rebinding
-    if _safe_ip and _safe_ip != _hostname:
+    # ⚡ สำหรับ HTTPS — ห้าม pin IP เพราะ SSL cert ผูกกับ hostname (จะทำให้ cert verify fail)
+    #    SSL cert validation ป้องกัน DNS rebinding ได้อยู่แล้วสำหรับ HTTPS
+    if _safe_ip and _safe_ip != _hostname and _parsed.scheme == "http":
         _port = _parsed.port
         _netloc = f"[{_safe_ip}]:{_port}" if _port and ":" in _safe_ip else (_safe_ip if not _port else f"{_safe_ip}:{_port}")
         _pinned_url = _urlunparse((_parsed.scheme, _netloc, _parsed.path, _parsed.params, _parsed.query, _parsed.fragment))
@@ -823,6 +842,13 @@ def describe_image(
         _headers = {"User-Agent": "Mozilla/5.0"}
         if _safe_ip and _safe_ip != _hostname:
             _headers["Host"] = _hostname
+        # ⚡ FIX — ส่ง X-Internal-Secret สำหรับ localhost/TestChat uploads
+        #    Next.js route ตรวจ auth cookie ทับ middleware ที่ปล่อย public
+        #    ถ้าไม่ส่ง secret → ได้ 401 Unauthorized → Vision อ่านรูปไม่ได้
+        #    🔒 เช็ค hostname แบบแม่นยำ ไม่ใช่ substring match (กัน secret leak ผ่าน URL ปลอม)
+        _internal_secret = os.environ.get("CHATBOT_INTERNAL_SECRET", "")
+        if _internal_secret and _hostname in ("localhost", "127.0.0.1"):
+            _headers["X-Internal-Secret"] = _internal_secret
         _req = _urllib_req.Request(_pinned_url, headers=_headers)
         _resp = _urllib_req.urlopen(_req, timeout=15)
         img_bytes = _resp.read()
