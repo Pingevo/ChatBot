@@ -8008,6 +8008,26 @@ Phase 8 ใช้ `_LLM_CONTEXT_LIMIT = 30` เป็น module constant แบ�
   2. `_record_suggestion_products`: extract anchor kw จาก `req._followup_original` (ข้อความจริงของลูกค้า) ไม่ใช่ rewritten message + กัน kw สั้นไร้ตัวเลข (len>=3 หรือมี digit เท่านั้น)
 - **verify ที่จะทำ:** replay conv thwtchtpyn → Q5 ต้องตอบ warranty ของ powerbank ไม่ใช่สายชาร์จ; py_compile; รัน test_katess_live.py กัน regression
 
+### แก้ — ensureIndexes fail ตอน start: partial index `$exists: false` ไม่ได้บน MongoDB 5.0 (2026-09-15) — ✅ implement + tsc ผ่าน รอ verify deploy
+
+- **ปัญหา:** `chatadmin-web` start ทุกครั้ง → log error `ensureIndexes failed: MongoServerError ... unsupported expression in partial index: $not ... code: 67`
+- **สาเหตุ:** `mongoClient.ts:168` สร้าง partial index `{ scope: 1, conversation_id: 1 }` กับ `partialFilterExpression: { generation_batch_id: { $exists: false } }` — MongoDB 5.0.32 ไม่รองรับ `$exists: false` ใน partial index (แปลงเป็น `$not` แล้วปฏิเสธ, code 67 CannotCreateIndex)
+- **ผลกระทบก่อนแก้:** index เก่า `scope_1_conversation_id_1` ถูก drop (บรรทัด 51) แต่ตัวใหม่สร้างไม่ได้ → legacy annotation (ไม่มี batch_id) ไม่มี unique constraint; ปัจจุบัน DB มี legacy docs = 0 → ไม่มีข้อมูลเสีย แต่ log error ทุกครั้ง
+- **วิธีแก้ (mongoClient.ts 2 จุด):**
+  1. **pre-step (บรรทัด 48-65):** เปลี่ยนจาก drop แค่ `scope_1_conversation_id_1` → drop ทั้ง 2 old index (`scope_1_conversation_id_1` + `scope_1_conversation_id_1_generation_batch_id_1`) ใน for-loop — ไม่งั้น safeCreateIndex เจอ code 85 (IndexOptionsConflict) กับ partial index เดิมที่มี key ซ้อน แล้วเงียบ ๆ ไม่สร้างตัวใหม่
+  2. **ใน Promise.all (บรรทัด 181):** แทนที่ 2 partial index (เดิมบรรทัด 167-168) ด้วย unique index ธรรมดาตัวเดียวบน `{ scope: 1, conversation_id: 1, generation_batch_id: 1 }` — MongoDB index doc ที่ไม่มี field เป็น null → unique บังคับ 1 ต่อ (scope, conversation_id) สำหรับ legacy docs อัตโนมัติ (semantic เดิมครบทั้ง 2 ข้อ: แยกตามรอบเมื่อมี batch_id / 1 ต่อแชทเมื่อไม่มี) โดยไม่ต้องพึ่ง `$exists: false`
+- **ไม่ต้องแก้:** `chatAnnotationService.ts` — upsert filter `$exists: false` (บรรทัด 122) เป็น query ไม่ใช่ index spec ใช้ได้ตามเดิม; convention "ไม่มี batch = omit field" (บรรทัด 148) คงไว้
+- **ไฟล์ที่แก้:** `ChatAdminWeb/src/backend/db/mongoClient.ts`
+- **ไม่แก้ SRS_SSD.md** — section 6 เป็นของ Python (`chatbot/shopeechat/`) ไม่เกี่ยว
+- **Verify:** `npx tsc --noEmit` → ผ่าน ✅ (exit 0); `npm run build` → ผ่าน ✅; in-memory MongoDB test (`scripts/test-ensure-indexes-5.0.mjs`) → ผ่านครบ 4/4 ✅:
+  - Test 1 (reproduce bug): OLD spec `$exists: false` partial index → FAIL code=67 CannotCreateIndex (bug reproduced) ✅
+  - Test 2 (verify fix): NEW spec plain unique index → PASS ✅
+  - Test 3 (legacy unique): 2nd legacy doc (no batch_id) same (scope, conv_id) → blocked code=11000 (unique enforced อัตโนมัติ) ✅
+  - Test 4 (multi-batch): ต่าง batch_id แชทเดียวกัน → insert ได้ทั้งคู่ ✅
+  - index หลัง fix: `scope_1_conversation_id_1_generation_batch_id_1` unique=true partial=null (ไม่มี partialFilterExpression) ✅
+- **⚠️ ยังไม่ verify deploy:** รอ rebuild จริง + ตรวจ log ว่าไม่มี `ensureIndexes failed`
+- **วันเวลาที่แก้:** 2026-09-15
+
 ---
 
 ## ผ่านแล้ว (ใหม่)
