@@ -8007,3 +8007,32 @@ Phase 8 ใช้ `_LLM_CONTEXT_LIMIT = 30` เป็น module constant แบ�
   1. `_is_followup_policy` block: reverse `_last_model_msgs` (ล่าสุดก่อน) + resolve ทุกรุ่นใน `_unique_models[:3]` เป็น product cards (match timeline ก่อน → fallback DB regex ignore status) → set `_ref_regex_products` + `_is_conv_active=True` (pattern เดียวกับ LINK-FOLLOWUP)
   2. `_record_suggestion_products`: extract anchor kw จาก `req._followup_original` (ข้อความจริงของลูกค้า) ไม่ใช่ rewritten message + กัน kw สั้นไร้ตัวเลข (len>=3 หรือมี digit เท่านั้น)
 - **verify ที่จะทำ:** replay conv thwtchtpyn → Q5 ต้องตอบ warranty ของ powerbank ไม่ใช่สายชาร์จ; py_compile; รัน test_katess_live.py กัน regression
+
+---
+
+## ผ่านแล้ว (ใหม่)
+
+### Video understanding + media transport ตรวจครบ 6 paths (2026-09-15) — ✅ implement + verify ผ่าน
+
+- **คำขอ:** "timeout 180s แล้วก็เชค shadowbot botworker testchat/shoppee live assignment test assignment replay compare หน่อยครับ ว่าส่งวิดีโอได้ถูกต้องตาม format ที่ต้องการหรือยัง รับวิดีโอส่งวิดีโอถูกต้องหรือยังครับ"
+- **ผลตรวจ 6 paths (subagent ตรวจครบ):**
+  - **Shadowbot** ✅ — `messageMediaParser` extract `inner.video_url` → `media.type=video` → `toBotImages` คืน `[video_url]` → `shadowReplyService` ส่ง `images` → `/chat` ส่ง `body.images` ครบ; placeholder `[วิดีโอ]` ส่งถูก; `message_type=video` ไม่ถูกบังคับเป็น `image`
+  - **Bot Worker** ⚠️→✅ — path หลักผ่าน แต่ **workflow `let_ai_respond` ทิ้ง video URL** เพราะ `EngineMessage` ไม่มี `raw_payload`/`images` → `toBotImages(engineMsg)` คืน `[]` → แก้โดยเพิ่ม `images?: string[]` ใน `EngineMessage` + ส่ง `botImages` จาก `botWorkerService` + `let_ai_respond` ใช้ `msg.images` ก่อน fallback `toBotImages(msg)`
+  - **Test Chat/Shopee** ⚠️→✅ — proxy ส่ง `images` ผ่านเดิม แต่ **upload URL `/api/test-chat/uploads/<id>` ไม่มี extension** → `hasVideo` heuristic ไม่จับ → วิดีโอถูก tag `message_type=image` + placeholder `[รูปภาพ]` → แก้โดย client ส่ง `media_types` (content types) มาด้วย + buffer route เช็ค `ct.startsWith("video/")` ก่อน fallback URL heuristic
+  - **Live Assignment** ✅ — `toBotImages(msg)` → `callBot({images})` → `body.images` ครบ; ไม่ทิ้ง/ไม่แทน thumb
+  - **Test Assignment** ✅ — `toBotImages(msg)` → `callBot({images})` → `body.images` ครบ; ไม่ทิ้ง/ไม่แทน thumb
+  - **Replay Compare** ✅ — `parse_raw_message` จับ `msg_type=='video'` → `media={type:video,url:video_url}` → `build_bot_message` ส่ง `images=[url]` → `call_bot` ส่ง `body.images` ครบ; ใช้ path เดียวกับ image
+- **Python `describe_image` (llm.py):**
+  - timeout 180s สำหรับ video URL (extension .mp4/.mov/.avi/.webm/.mkv) + test-chat upload URL (ไม่มี extension → ให้ 180s ไว้ก่อน)
+  - MIME detect จาก HTTP `Content-Type` + URL suffix → `video/mp4` → `Part.from_bytes`
+  - เพิ่ม video-specific prompt section (motion/sequence/audio/fault demo) เมื่อ `_mime.startswith("video/")`
+  - `describe_images` label เปลี่ยนจาก `[รูปที่ N]` → `[วิดีโอที่ N]` / `[รูปที่ N]` ตาม URL suffix
+- **ไฟล์ที่แก้:**
+  - `chatbot/shopeechat/llm.py` — timeout 180s + video prompt + label วิดีโอ/รูป
+  - `ChatAdminWeb/src/backend/service/workflowEngine.ts` — `EngineMessage.images?` + `let_ai_respond` ใช้ `msg.images`
+  - `ChatAdminWeb/src/backend/service/botWorkerService.ts` — `engineMsg` ส่ง `images: botImages`
+  - `ChatAdminWeb/src/app/api/test-chat/buffer/route.ts` — รับ `media_types` + `hasVideoMedia` เช็ค content_type ก่อน URL heuristic
+  - `ChatAdminWeb/src/components/chat/TestChatClient.tsx` — ส่ง `media_types: images.map(i => i.type)` ไป buffer
+- **Verify:** py_compile ผ่าน ✅, `npx tsc --noEmit` ผ่าน ✅
+- **⚠️ ยังไม่ verify end-to-end จริง:** รอทดสอบส่งวิดีโอจริงผ่าน test chat + ส่งวิดีโอ Shopee จริงผ่าน bot worker เพื่อยืนยัน Gemini อ่านวิดีโอได้
+- **สถาปัตยกรรม:** `images` field (string[]) ยังคงเป็น media URL array สำหรับทั้ง image และ video — ไม่เปลี่ยนเป็น `media` field ตามที่ไม่ได้รับการร้องขอ

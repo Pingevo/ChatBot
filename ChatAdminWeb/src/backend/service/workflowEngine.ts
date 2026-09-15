@@ -65,6 +65,10 @@ export interface EngineMessage {
   customer_id?: string;
   // history สำหรับ let_ai_respond — ถ้าไม่ส่งมา engine ดึงเองจาก messages (worker path)
   history?: { role: "user" | "model"; text: string }[];
+  // ⚡ Phase 1A multimodal — media URLs (image/video) ของ turn ปัจจุบัน
+  //    EngineMessage ไม่มี raw_payload → toBotImages(msg) คืน [] เสมอ
+  //    ให้ worker ส่ง botImages มาตรงๆ แทน เพื่อกันทิ้ง video URL ใน let_ai_respond
+  images?: string[];
 }
 
 export interface DeliveredMessage {
@@ -884,8 +888,9 @@ async function performAction(
         maxMessages: 10,
       });
       const promptPrefix = typeof cfg.prompt === "string" && cfg.prompt.trim().length > 0 ? cfg.prompt.trim() + "\n" : "";
-      // ⚡ Phase 1A multimodal — ส่ง URL รูปให้ bot ด้วย (ถ้าลูกค้าส่งรูป)
-      const wfBotImages = toBotImages(msg);
+      // ⚡ Phase 1A multimodal — ส่ง URL รูป/วิดีโอให้ bot ด้วย (ถ้าลูกค้าส่งมา)
+      //    ใช้ msg.images ที่ worker ส่งมาตรงๆ (EngineMessage ไม่มี raw_payload → toBotImages ใช้ไม่ได้)
+      const wfBotImages = msg.images && msg.images.length > 0 ? msg.images : toBotImages(msg);
       const botResp = await callBot({
         platform: msg.platform,
         message: promptPrefix + msg.text,

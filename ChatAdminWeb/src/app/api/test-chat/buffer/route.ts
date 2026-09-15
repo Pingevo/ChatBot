@@ -21,6 +21,7 @@ export async function POST(req: NextRequest) {
     shop?: string;
     platform?: string;
     images?: string[];  // ⚡ Phase 1F — image/video URLs สำหรับ bot vision
+    media_types?: string[];  // ⚡ content types ตรงกับ images[] — ใช้ detect video เพราะ upload URL ไม่มี extension
   }>(req);
 
   if (!body?.session_id) return error("session_id is required", 422);
@@ -33,11 +34,19 @@ export async function POST(req: NextRequest) {
   const shop = body.shop ? String(body.shop) : "";
   const platform: Platform = (String(body.platform || "shopee") as Platform);
   const images = Array.isArray(body.images) ? body.images.filter(Boolean) : [];
+  const mediaTypes = Array.isArray(body.media_types) ? body.media_types : [];
+
+  // ⚡ detect video — เช็ค content_type จาก client ก่อน (upload URL ไม่มี extension)
+  //    fallback เป็น URL heuristic สำหรับ Shopee video URL จริง
+  const hasVideoMedia = images.some((u, i) => {
+    const ct = (mediaTypes[i] || "").toLowerCase();
+    if (ct.startsWith("video/")) return true;
+    return u.includes("video") || u.endsWith(".mp4") || u.endsWith(".webm");
+  });
 
   // ⚡ Phase 1F — ถ้ามีแค่รูปไม่มีข้อความ → ใส่ placeholder เหมือนลูกค้าจริง
   if (!message.trim() && images.length > 0) {
-    const hasVideo = images.some((u) => u.includes("video") || u.endsWith(".mp4") || u.endsWith(".webm"));
-    message = hasVideo ? "[วิดีโอ]" : "[รูปภาพ]";
+    message = hasVideoMedia ? "[วิดีโอ]" : "[รูปภาพ]";
   }
 
   // อ่าน buffer config จาก system config
@@ -63,7 +72,8 @@ export async function POST(req: NextRequest) {
   const rawPayload: Record<string, unknown> = { source: "test_chat", session_id: sessionId };
   if (images.length > 0) {
     rawPayload.images = images;
-    rawPayload.message_type = "image";
+    // ⚡ ตั้ง message_type ให้ถูกต้อง — video หรือ image (ใช้ hasVideoMedia ที่เช็ค content_type แล้ว)
+    rawPayload.message_type = hasVideoMedia ? "video" : "image";
   }
   await coll.insertOne({
     message_id: messageId,

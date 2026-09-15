@@ -383,6 +383,9 @@ export async function processMessage(msg: {
     platform: msg.platform,
     text: botText,
     customer_id: conv?.customer_id,
+    // ⚡ ส่ง media URLs (image/video) เข้า engine ด้วย — EngineMessage ไม่มี raw_payload
+    //    ทำให้ toBotImages(engineMsg) ใน let_ai_respond คืน [] → ทิ้ง video URL
+    ...(botImages.length > 0 ? { images: botImages } : {}),
   };
 
   if (wfConfig.workflow_enabled) {

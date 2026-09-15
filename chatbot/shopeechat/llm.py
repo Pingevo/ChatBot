@@ -850,7 +850,13 @@ def describe_image(
         if _internal_secret and _hostname in ("localhost", "127.0.0.1"):
             _headers["X-Internal-Secret"] = _internal_secret
         _req = _urllib_req.Request(_pinned_url, headers=_headers)
-        _resp = _urllib_req.urlopen(_req, timeout=15)
+        # ⚡ timeout 180s สำหรับ video (ไฟล์ใหญ่ โหลดนาน) — รูปภาพใช้ 15s พอ
+        #    test-chat upload URL ไม่มี extension → ให้ 180s ไว้ก่อน (อาจเป็นวิดีโอ)
+        _url_lower = image_url.lower()
+        _is_video_url = _url_lower.endswith((".mp4", ".mov", ".avi", ".webm", ".mkv"))
+        _is_upload_url = "/api/test-chat/uploads/" in _url_lower
+        _download_timeout = 180 if (_is_video_url or _is_upload_url) else 15
+        _resp = _urllib_req.urlopen(_req, timeout=_download_timeout)
         img_bytes = _resp.read()
         if not img_bytes:
             print(f"[VISION] empty bytes from {image_url[:60]}", file=sys.stderr)
@@ -874,6 +880,14 @@ def describe_image(
         client = _client()
         part = _genai_types.Part.from_bytes(data=img_bytes, mime_type=_mime)
         prompt = _VISION_PROMPT
+        # ⚡ วิดีโอ — เพิ่ม instruction เฉพาะวิดีโอ (motion/sequence/audio)
+        if _mime.startswith("video/"):
+            prompt += (
+                "\n\n📹 ไฟล์นี้เป็นวิดีโอ — อธิบาย:"
+                "\n- สินค้า/วัตถุที่เห็น + การเคลื่อนไหวหรือเหตุการณ์ที่เกิดขึ้น"
+                "\n- อาการเสีย/ปัญหาที่สาธิตในวิดีโอ (เช่น จอกะพริบ ไม่ชาร์จ เปิดไม่ติด)"
+                "\n- เสียง/ข้อความในวิดีโอที่เกี่ยวข้อง (ถ้ามี)"
+            )
         if shop_hint:
             prompt += f"\nร้าน: {shop_hint}"
         # ⚡ ส่ง history context ให้ vision ด้วย — ช่วยให้เข้าใจบริบท
@@ -933,7 +947,10 @@ def describe_images(
     for i, url in enumerate(urls):
         desc, usage = describe_image(url, shop_hint=shop_hint, history_context=history_context)
         if desc:
-            descriptions.append(f"[รูปที่ {i+1}] {desc}")
+            # ⚡ ใช้คำว่า "สื่อ" แทน "รูป" เพราะอาจเป็นวิดีโอ
+            _is_vid = url.lower().endswith((".mp4", ".mov", ".avi", ".webm", ".mkv"))
+            _label = "วิดีโอ" if _is_vid else "รูป"
+            descriptions.append(f"[{_label}ที่ {i+1}] {desc}")
         total_usage["prompt"] += usage.get("prompt", 0)
         total_usage["output"] += usage.get("output", 0)
         total_usage["total"] += usage.get("total", 0)
