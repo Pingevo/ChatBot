@@ -543,7 +543,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ฟังก์ชัน | Line | หน้าที่ |
 |---|---|---|
-| `to_product_card` | 479 | Mongo doc → compact card สำหรับ LLM |
+| `to_product_card` | 576 | Mongo doc → compact card สำหรับ LLM — **2026-09-21 (Task 6)**: `variants[]` เพิ่ม `model_id`, `stock` (per-variant ผ่าน `_shopee_stock`), `model_status` — ตอบสต็อกระดับรุ่นได้ (เช่น EC4 เฉพาะกล้องหมด แต่ +Smart Hub มี) |
 | `_to_serializable` | 168 | ObjectId/datetime → string (recursive) |
 | `_warranty_info` | 215 | extract warranty จาก `attribute_list` / name |
 | `_price_range` | 279 | min/max price จาก `model[].price_info` |
@@ -898,7 +898,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 |---|---|---|
 | `load_timeline` | 80 | โหลด product timeline ของแชทจาก Mongo |
 | `save_timeline` | 95 | บันทึก product timeline (upsert โดย conversation_id) |
-| `add_product` | 130 | เพิ่มสินค้าเข้า timeline + คำนวณ active ใหม่ |
+| `add_product` | 148 | เพิ่มสินค้าเข้า timeline + คำนวณ active ใหม่ — **2026-09-21 (Task 6)**: เพิ่ม params `model_id`, `model_name` — anchor ระดับรุ่นย่อย (order item ส่ง model_id มา); dedupe ด้วย (item_id, model_id) — model_id ว่างฝั่งใดฝั่งหนึ่งถือ entry เดียวกัน (backward compat) |
 | `get_active_product` | 195 | ดึง active product card (anchor ล่าสุด) |
 | `get_suggestion_latest` | 210 | ดึง suggestion product ล่าสุด (bot แนะนำ) |
 | `resolve_active_by_message` | 230 | resolve active product ตามกฎ priority (ชื่อรุ่น → ตัวเดิม → อันที่แนะนำ → default) |

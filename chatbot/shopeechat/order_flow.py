@@ -208,6 +208,7 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
                             platform=req.platform, shop=req.shop,
                             item_id=_oi_item_id, name=_oi_name,
                             source="user_order", card=_oi_card, is_anchor=True,
+                            model_id=_oi.get("model_id"), model_name=_oi.get("model_name"),
                         )
                     print(f"[RETURN-REFUND] anchored order items for order_sn={_order_sn}", file=sys.stderr)
                 except Exception as _e:
@@ -405,6 +406,8 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
                             source="user_order",
                             card=_oi_card,
                             is_anchor=True,
+                            model_id=_oi.get("model_id"),
+                            model_name=_oi.get("model_name"),
                         )
                         _anchored_count += 1
                     if _anchored_count:

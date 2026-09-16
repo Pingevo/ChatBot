@@ -629,6 +629,11 @@ def to_product_card(doc: dict, message: str = "") -> dict:
             {
                 "name": m.get("model_name"),
                 "tier_index": m.get("tier_index"),
+                # ⚡ Task 6 — per-variation fields สำหรับ unit-level answers
+                #   (stock/price ต่างกันต่อรุ่น เช่น EC4 เฉพาะกล้องหมดแต่ชุดสุดคุ้มมี)
+                "model_id": m.get("model_id"),
+                "stock": _shopee_stock(m),
+                "model_status": m.get("model_status"),
                 "price": (m.get("price_info") or [{}])[0].get("current_price") if m.get("price_info") else None,
             }
             for m in (doc.get("model") or [])[:20]
