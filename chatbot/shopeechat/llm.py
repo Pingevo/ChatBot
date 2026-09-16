@@ -687,8 +687,9 @@ def _build_context(products: list[dict], shop_hint: str | None = None,
             "brand", "category", "sold_out", "total_stock", "status",
             "_available_for_sale",  # ⚡ Phase 3d — mark สินค้าพร้อมขาย/ไม่พร้อมขาย
         )
-        # ฟิลด์จาก KB (ถ้า merge แล้ว)
-        kb_fields = ("kb_highlights", "kb_specs", "kb_box_contents", "kb_description", "_source", "_kb_only")
+        # ฟิลด์จาก KB (ถ้า merge แล้ว) + unit flags/specs (⚡ Task 9)
+        kb_fields = ("kb_highlights", "kb_specs", "kb_box_contents", "kb_description", "_source", "_kb_only",
+                     "canonical_specs", "sellable", "oos_in_name", "has_description", "has_warranty_info")
         slim = []
         for p in products:
             card = {k: p[k] for k in slim_fields if k in p}

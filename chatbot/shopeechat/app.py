@@ -27,6 +27,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(_REPO_ROOT / ".env")
 
 from . import llm, product_store, knowledge_base, persona, conversation_products, test_chat_api, device_compat
+from .responses import _routing, _send_handoff
 
 app = FastAPI(
     title="ChatBotProductMS",
@@ -210,6 +211,17 @@ class ChatResponse(BaseModel):
         description="routing decision: {path, reason, trigger_matched, shop_settings_action, assigned_admin}",
     )
 
+    # ⚡ Task 9 — output guard: flag คำตอบที่ยืนยันเคลม/คืนเงิน/จัดส่งโดยไม่มี handoff
+    #   จุดเดียวครอบทุก return path; log เท่านั้น ไม่แก้คำตอบ (observability ก่อน)
+    def model_post_init(self, __context) -> None:
+        try:
+            from . import guards as _guards
+            _v = _guards.check_output(self.answer, handoff_sent=self.handoff_to_admin)
+            if _v:
+                print(f"[GUARD] violations={_v} answer={self.answer[:120]!r}", file=sys.stderr)
+        except Exception:
+            pass
+
 
 class FeedbackRequest(BaseModel):
     answer: str = Field(..., description="คำตอบที่ลูกค้าให้ feedback (สูงสุด 500 ตัวอักษร)")
@@ -217,28 +229,6 @@ class FeedbackRequest(BaseModel):
 
 
 # ---- helpers ------------------------------------------------------------------
-
-def _routing(
-    path: str,
-    reason: str,
-    *,
-    trigger_matched: str | None = None,
-    shop_settings_action: str | None = None,
-    assigned_admin: str | None = None,
-    assigned_admin_name: str | None = None,
-    handoff_reason: str | None = None,
-) -> dict:
-    """สร้าง routing_decision dict สำหรับ observability"""
-    return {
-        "path": path,
-        "reason": reason,
-        "trigger_matched": trigger_matched,
-        "shop_settings_action": shop_settings_action,
-        "assigned_admin": assigned_admin,
-        "assigned_admin_name": assigned_admin_name,
-        "handoff_reason": handoff_reason,
-    }
-
 
 def _db():
     """เปิด client + เลือก db ใหม่ทุกครั้ง (stateless สำหรับ API แบบง่าย).
@@ -4729,70 +4719,6 @@ def _merge_kb_mongo(kb_docs: list[dict], mongo_products: list[dict]) -> list[dic
         merged.append(card)
 
     return merged
-
-
-def _send_handoff(req, ctx: dict | None = None, *, reason: str, claim_topic: str = "",
-                  claim: dict | None = None, simulate: bool = False,
-                  timeout: float = 3.0, log_tag: str = "HANDOFF") -> dict:
-    """ส่ง handoff ไปแอดมิน (best-effort) — ใช้ร่วม legacy chat() + chat_v2.
-
-    Args:
-        req: ChatRequest (มี conversation_id, shop, platform, simulate_assignment)
-        ctx: context dict จาก chat_v2 (ไม่ใช้ในฟังก์ชันนี้ แต่รับไว้เพื่อ signature consistency)
-        reason: เหตุผล handoff (เช่น 'tax_invoice_request', 'human_request')
-        claim_topic: หัวข้อ claim — shortcut ของ claim={"topic": claim_topic}
-        claim: dict claim เต็ม (override claim_topic)
-        simulate: ใส่ key "simulate" ใน payload (ค่าจาก req.simulate_assignment)
-        timeout: urllib timeout (วินาที)
-        log_tag: prefix ของ log line
-    Returns:
-        parsed response dict จาก admin API หรือ {} ถ้าไม่ได้ส่ง/ส่งไม่สำเร็จ
-    """
-    if not req.conversation_id:
-        return {}
-    if claim is None:
-        claim = {"topic": claim_topic} if claim_topic else {}
-    try:
-        import urllib.request
-        import urllib.error
-        _handoff_url = os.environ.get(
-            "ADMIN_HANDOFF_URL",
-            "http://127.0.0.1:3000/api/admin/conversations/bot-handoff",
-        )
-        _payload = {
-            "conversation_id": req.conversation_id,
-            "shop_id": req.shop or "",
-            "platform": req.platform or "shopee",
-            "reason": reason,
-            "claim": claim,
-        }
-        if simulate:
-            _payload["simulate"] = req.simulate_assignment
-        _body = json.dumps(_payload).encode("utf-8")
-        _handoff_req = urllib.request.Request(
-            _handoff_url,
-            data=_body,
-            headers={
-                "Content-Type": "application/json",
-                "X-Internal-Secret": os.environ.get("CHATBOT_INTERNAL_SECRET", ""),
-            },
-            method="POST",
-        )
-        try:
-            _resp = urllib.request.urlopen(_handoff_req, timeout=timeout)
-            try:
-                _result = json.loads(_resp.read().decode("utf-8"))
-            except Exception:
-                _result = {}
-            print(f"[{log_tag}] handoff sent: reason={reason}", file=sys.stderr)
-            return _result
-        except urllib.error.HTTPError as _he:
-            print(f"[{log_tag}] handoff HTTP error: {_he.code} {_he.reason}", file=sys.stderr)
-        except Exception as _he:
-            print(f"[{log_tag}] handoff failed: {_he}", file=sys.stderr)
-    except Exception as _e:
-        print(f"[{log_tag}] handoff setup error: {_e}", file=sys.stderr)
-    return {}
 
 
 @app.post("/feedback")

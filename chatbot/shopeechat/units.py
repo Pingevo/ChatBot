@@ -223,6 +223,7 @@ def to_unit_card(unit: dict, route=None) -> dict:
         "cable_subtype": unit.get("cable_subtype"),
         "camera_subtype": unit.get("camera_subtype"),
         "model_codes": unit.get("model_codes"),
+        "canonical_specs": unit.get("canonical_specs"),
         "oos_in_name": unit.get("oos_in_name"),
         "has_warranty_info": unit.get("has_warranty_info"),
         "has_description": unit.get("has_description"),
@@ -232,9 +233,34 @@ def to_unit_card(unit: dict, route=None) -> dict:
     }
 
 
+def attach_kb_specs(unit_docs: list[dict]) -> list[dict]:
+    """spec inheritance — unit ที่ desc ว่าง ยืม canonical_specs จาก kb_products
+    ผ่าน model_codes (แก้ "บอกไม่มีข้อมูลทั้งที่ KB มี") — additive, docs เดิม."""
+    need = [u for u in unit_docs
+            if not u.get("has_description") and u.get("model_codes")]
+    if not need:
+        return unit_docs
+    codes = sorted({c for u in need for c in u["model_codes"]})
+    try:
+        kb = _units_coll().database["kb_products"]
+        spec_of: dict[str, dict] = {}
+        for doc in kb.find({"model_codes": {"$in": codes}},
+                           {"model_codes": 1, "canonical_specs": 1}):
+            for c in doc.get("model_codes") or []:
+                spec_of.setdefault(c, doc.get("canonical_specs") or {})
+        for u in need:
+            specs = next((spec_of[c] for c in u["model_codes"] if spec_of.get(c)), None)
+            if specs:
+                u["canonical_specs"] = specs
+    except Exception as exc:
+        print(f"[UNITS] kb spec inherit error: {exc}", file=sys.stderr)
+    return unit_docs
+
+
 def fetch_unit_cards(message: str, **kwargs) -> list[dict]:
-    """fetch_units + to_unit_card — entry point ที่ fetch_products เรียก."""
+    """fetch_units + attach_kb_specs + to_unit_card — entry point ที่ fetch_products เรียก."""
     route = kwargs.pop("route", None)
     from . import route_context as _rc
     route = route or _rc.resolve_route(message)
-    return [to_unit_card(u, route) for u in fetch_units(message, route=route, **kwargs)]
+    us = attach_kb_specs(fetch_units(message, route=route, **kwargs))
+    return [to_unit_card(u, route) for u in us]

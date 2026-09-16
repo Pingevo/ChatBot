@@ -1655,7 +1655,51 @@ Early-return blocks ก่อน intent classification: order lookup, return/ref
 | `post_intent_handoffs(req, ctx, db)` | tax invoice (`is_tax_invoice` จาก intent/keyword) + มอก. TISI (`warranty.detect_tisi_question` → `product_store.search_tisi_products` → ตอบหรือ handoff) | ctx: `is_tax_invoice, bot_name, steps, timing_breakdown, total_start, image_desc_out, model_name` | `dict`/`None` |
 
 - **Called by**: `app.chat()` — `detect_human_request` ก่อน intent classification; `post_intent_handoffs` หลัง Phase 6 keyword fallback
-- **Calls**: `llm.split_segments`, `product_store.search_tisi_products`, `warranty.detect_tisi_question`/`extract_tisi_model_keyword`, `app._send_handoff`, `app._routing`
+- **Calls**: `llm.split_segments`, `product_store.search_tisi_products`, `warranty.detect_tisi_question`/`extract_tisi_model_keyword`, `responses._send_handoff`, `responses._routing` (⚡ ย้ายจาก app.py ไป responses.py 2026-09-16 — app.py re-import กลับ)
+
+### 6.18 `units.py` — Unit-level fetch path (flag-gated `USE_UNIT_INDEX`, 2026-09-16)
+
+#### 6.18.1 Functions
+
+| ฟังก์ชัน | หน้าที่ | Input | Output |
+|---|---|---|---|
+| `fetch_units(message, *, shop, limit, sellable_only, product_types, charger_subtype, route)` | ดึง units: exact model_code(+qualifier scoring) → field filter → vector บน unit_embeddings (mask shop+sellable จาก Mongo) → merge+rank | message: str; route: Route จาก `route_context.resolve_route` | `list[unit doc + _score + _matched_by]` (ว่าง = fallback legacy) |
+| `attach_kb_specs(unit_docs)` | spec inheritance — unit desc ว่างยืม `canonical_specs` จาก `kb_products` ผ่าน `model_codes` | list[unit doc] | docs เดิม (เติม `canonical_specs` ให้ตัวที่ match) |
+| `to_unit_card(unit, route)` | unit doc → card shape เดียวกับ `to_product_card` + unit extras (kind/components/subtype/flags) | unit: dict; route: Route\|None | `dict` card |
+| `pick_desc_sections(unit, route)` | เลือก desc section ตาม `route.needs_spec/needs_warranty` cap 3000 chars | unit: dict | `str` |
+| `fetch_unit_cards(message, **kwargs)` | fetch_units + attach_kb_specs + to_unit_card — entry point | เหมือน fetch_units | `list[card]` |
+
+- **Called by**: `product_store.fetch_products` — hook หลัง `USE_UNIT_INDEX` flag (`1`=ทุก query, `charger`=เฉพาะ route charger-family); ว่าง/error → legacy path
+- **Calls**: `route_context.resolve_route`, `embedding.embed_query`, Mongo `sellable_units`/`kb_products` (admin DB)
+
+### 6.19 `guards.py` — Output guard + card flags (2026-09-16)
+
+| ฟังก์ชัน | หน้าที่ | Input | Output |
+|---|---|---|---|
+| `build_flags(card)` | รวม `sellable/has_warranty_info/has_description/oos_in_name` เป็น dict | card: dict | `dict` flags |
+| `check_output(answer, *, handoff_sent)` | regex จับยืนยันเคลม/คืนเงิน/จัดส่งโดยไม่มี handoff | answer: str; handoff_sent: bool | `list[str]` violation labels (ว่าง=ผ่าน) |
+
+- **Called by**: `ChatResponse.model_post_init` (app.py) — log `[GUARD] violations=...` ทุก response (observability, ไม่แก้คำตอบ)
+
+### 6.20 `responses.py` — Response helpers (ย้ายจาก app.py 2026-09-16)
+
+| ฟังก์ชัน | หน้าที่ | Input | Output |
+|---|---|---|---|
+| `_routing(path, reason, ...)` | routing_decision dict สำหรับ observability | path/reason + optional fields | `dict` |
+| `_send_handoff(req, ctx, *, reason, claim_topic, claim, simulate, timeout, log_tag)` | POST handoff ไป `ADMIN_HANDOFF_URL` (best-effort) | req: ChatRequest; claim: dict | `dict` response หรือ `{}` |
+
+- **Called by**: `app.chat()`/`chat_v2`/`handoffs.py` ผ่าน `from .responses import _routing, _send_handoff` (app.py re-import — call sites เดิม)
+- **Side effects**: `_send_handoff` — HTTP POST + stderr log
+
+### 6.21 `route_context.py` — Route resolver เดียว (2026-09-16)
+
+| ฟังก์ชัน | หน้าที่ | Input | Output |
+|---|---|---|---|
+| `resolve_route(message, intent_result=None)` | normalize (typo_dict) → product_types + charger_subtype + model_codes + needs_* flags ครั้งเดียว | message: str | `Route` dataclass |
+| `normalize_message(message)` | แก้ typo latin (≥4 chars) + Thai (≥3 chars, threshold 90) จาก `exports/typo_dict.json` | message: str | `str` |
+
+- **Called by**: `units.fetch_units`, `product_store` flag gate (`USE_UNIT_INDEX=charger`)
+- **Calls**: `product_store._detect_product_types`/`_detect_charger_subtype` (reuse เดิม)
 
 ---
 

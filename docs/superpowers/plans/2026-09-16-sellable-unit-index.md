@@ -266,8 +266,8 @@ CASES = [
 **Interfaces:**
 - Produces: unit card มี `sellable`,`has_warranty_info`,`has_description`,`oos_in_name` flags; desc เฉพาะ top-K(≤5) × เฉพาะ section ตาม `route.needs_desc`; `canonical_specs` inject เป็น facts (รวม spec inheritance: unit ที่ desc ว่างยืมจาก kb_products ผ่าน model_codes — แก้ "บอกไม่มีข้อมูลทั้งที่ KB มี"); output guard regex (ยืนยันเคลม/คืนเงิน/จัดส่ง โดยไม่มี handoff → flag)
 
-- [ ] **Step 1-3:** implement + test ว่า spec question ใช้ canonical_specs ไม่ใช่เดา; token ต่อ request ลดลง (เทียบ log [LLM] เดิม)
-- [ ] **Step 4:** SRS + waythrough; commit
+- [x] **Step 1-3:** implement ✅ — `guards.py` (build_flags/check_output), `responses.py` (ย้าย _routing+_send_handoff, app.py −88 บรรทัด), `attach_kb_specs` spec inheritance, `ChatResponse.model_post_init` output guard จุดเดียวครอบทุก return path, `_build_context` ส่ง canonical_specs+unit flags
+- [x] **Step 4:** SRS + waythrough; commit — test_guards ALL PASS + regression 16/16 (เว้น token-compare จริงไว้ทำตอนเปิด flag)
 
 ---
 

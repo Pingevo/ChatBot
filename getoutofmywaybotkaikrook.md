@@ -8273,3 +8273,16 @@ Phase 8 ใช้ `_LLM_CONTEXT_LIMIT = 30` เป็น module constant แบ�
 - verify: "สายชาร์จ AL870"→unit, "มีหัวชาร์จในรถไหม"→unit, "มีหูฟัง"→legacy
 - regression ภายใต้ flag: `test_car_charger_regression` 16/16 + `test_charger_subtype_parity` 42/42
 - commits: 3cc6dde (classifier), 913e8a3 (units runtime)
+
+### กำลังจะทำ (2026-09-16 ~14:00)
+
+Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ตาม route, canonical_specs inject, output guard (เคลม/คืนเงิน/จัดส่งโดยไม่ handoff); `responses.py` ย้าย helper จาก app.py ถ้าไม่ติด nested function
+
+### Task 9 เสร็จ — guards + responses + spec inheritance (2026-09-16)
+
+- `responses.py`: ย้าย `_routing`+`_send_handoff` จาก app.py (module-level self-contained) — app.py re-import, net **−88 บรรทัด**
+- `guards.py`: `build_flags` + `check_output` (regex ยืนยันเคลม/คืนเงิน/จัดส่งโดยไม่ handoff)
+- จุดเช็คเดียว: `ChatResponse.model_post_init` — ครอบทุก return path log-only
+- `units.attach_kb_specs`: unit desc ว่างยืม canonical_specs จาก kb_products ผ่าน model_codes — verified AD653C/AD653T ได้ specs จริง (sellable ทั้งหมดมี desc อยู่แล้ว → เฉพาะ non-sellable ที่ inherit)
+- `_build_context`: ส่ง canonical_specs + unit flags เข้า context
+- test_guards ALL PASS; regression car_charger 16/16
