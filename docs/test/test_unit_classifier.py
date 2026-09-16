@@ -78,6 +78,22 @@ def main() -> int:
     assert r["product_type"] == "powerbank", f"powerbank type, got {r['product_type']}"
     print("PASS product_type")
 
+    # --- compat phrase ไม่ใช่ product_type (listing สำหรับ iPhone ≠ phone) ---
+    r = classify_unit("CUKTECH HA716T / A18T / AL870 / CL315P หัวชาร์จ / สายชาร์จ สำหรับ iPhone",
+                      "สายชาร์จ AL870 (MFI)", "X")
+    assert r["product_type"] == "cable", f"compat-phrase: cable expected, got {r['product_type']}"
+    # --- "สายชาร์จ" ล้วน = cable ---
+    r = classify_unit("ZMI AL870 สายชาร์จ Type-C to Lightning รองรับชาร์จไว iPhone",
+                      "AL870 - สีขาว", "X")
+    assert r["product_type"] == "cable", f"cable-only listing: got {r['product_type']}"
+    # --- หัว+สาย listing → unit ยังเป็น charger (ไม่ใช่ phone จาก compat phrase) ---
+    r = classify_unit("CUKTECH HA716T / A18T / AL870 หัวชาร์จ / สายชาร์จ",
+                      "A18T + AL870 (MFI)", "X")
+    assert r["product_type"] == "charger", \
+        f"expected charger not phone, got {r['product_type']} {r['kind']}"
+    # (code+code ที่ match listing ทั้งคู่ → variant: combo ต้องรู้ type ของ code — limitation)
+    print("PASS compat-phrase/cable-only guard")
+
     print(f"\n{'='*40}\n{'FAIL' if fails else 'ALL PASS'} ({len(CASES)-len(fails)}/{len(CASES)} cases)")
     return 1 if fails else 0
 

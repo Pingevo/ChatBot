@@ -88,9 +88,20 @@ _TYPE_RES = tuple(
 )
 
 
+_COMPAT_RE = re.compile(
+    r"(?:สำหรับ|รองรับ|ใช้(?:งาน)?กับ|เหมาะกับ|for)\s*[a-z0-9ก-๙.+_\- ]{0,30}", re.IGNORECASE)
+_CABLE_ONLY_RE = re.compile(r"สายชาร์จ|สายชาร์ต|\bcable\b", re.IGNORECASE)
+
+
 def _detect_type(text: str) -> str | None:
     """product_type แรกที่ regex match — ตามลำดับ PRODUCT_TYPES (priority เดิม)."""
     low = text.lower()
+    # compat phrase ไม่ใช่ประเภทสินค้า — "สายชาร์จ สำหรับ iPhone" คือ cable ไม่ใช่ phone
+    low = _COMPAT_RE.sub(" ", low)
+    # "สายชาร์จ" ล้วน (ไม่มี "หัวชาร์จ") = cable — กัน charger pattern กลืน "ชาร์จ"
+    # ถ้ามีทั้งหัว+สาย → ปล่อย table ตัดสิน (listing ชาร์จแถมสาย)
+    if _CABLE_ONLY_RE.search(low) and "หัวชาร์จ" not in low and "หัวชาร์ต" not in low:
+        return "cable"
     for name, rx in _TYPE_RES:
         if rx.search(low):
             return name
@@ -155,10 +166,11 @@ def _companion_comp(item_type: str | None) -> str:
 
 
 def _parse_components(model_name: str, item_type: str | None,
-                      listing_codes: set[str]) -> tuple[list[str], bool]:
+                      listing_codes: set[str], item_name: str = "") -> tuple[list[str], bool]:
     """คืน (components, explicit_standalone) — main comp อยู่ index 0 เสมอ."""
     main = _TYPE_TO_MAIN_COMP.get(item_type) or item_type
     low = (model_name or "").lower()
+    item_low = (item_name or "").lower()
     explicit = False
 
     # "เฉพาะX" / "X เดียว" — unit คือชิ้นเดียวที่ระบุ → standalone
@@ -170,28 +182,46 @@ def _parse_components(model_name: str, item_type: str | None,
         comp = _seg_component(re.search(r"(หัว|สาย|ตัว|เครื่อง)\s*เดียว", low).group(1), item_type)
         return [comp or main or "accessory"], True
 
-    comps: list[str] = [main or item_type] if (main or item_type) else []
+    comps: list[str] = []
+    saw_main = False
     # แยก segments ด้วย + / กับ / และ
     for seg in re.split(r"\+|กับ|และ", model_name or ""):
         seg = seg.strip()
-        if not seg or _is_color_or_version(seg):
+        if not seg:
+            continue
+        if _is_color_or_version(seg):
+            saw_main = True  # สี/เวอร์ชันอธิบายตัวสินค้าหลัก (อุปกรณ์ลอยๆ ไม่มีสี variant)
             continue
         if re.search(r"พร้อม", seg):
             rest = re.sub(r".*พร้อม\s*", "", seg)
             comp = _seg_component(rest or seg, item_type)
+            saw_main = True  # "X พร้อม Y" → X คือตัวสินค้าหลักเสมอ
         else:
             comp = _seg_component(seg, item_type)
         if comp:
             if comp not in comps:
                 comps.append(comp)
             continue
-        # segment เป็น code: match listing → main comp อยู่แล้ว; code อื่น → companion
+        # segment เป็น code-only: match listing → หลักฐานตัวสินค้าหลัก; code อื่น → companion
+        # (code ที่อยู่ใน segment เดียวกับ part word — เช่น "สายชาร์จ AL870" —
+        #  คือ code ของ component นั้น ไม่ใช่หลักฐาน main product)
+        # เช็ค listing match ก่อน _seg_is_code — code สั้นอย่าง EC4 (เลขตัวเดียว)
+        # ไม่ผ่าน _seg_is_code แต่ match listing ได้;
+        # segment ที่อยู่ใน item_name ตรงๆ (EC4 ไม่อยู่ใน listing_codes เพราะเลขตัวเดียว)
+        # ก็เป็นหลักฐานตัวสินค้าหลักเช่นกัน
+        if _code_matches_listing(seg, listing_codes) or (
+                len(seg) >= 2 and any(c.isalpha() for c in seg) and seg.lower() in item_low):
+            saw_main = True
+            continue
         if _seg_is_code(seg):
-            if _code_matches_listing(seg, listing_codes):
-                continue
             comp = _companion_comp(item_type)
             if comp not in comps:
                 comps.append(comp)
+    # main comp ใส่ index 0 เฉพาะเมื่อมีหลักฐานตัวสินค้าหลัก หรือไม่เจอ comp ไหนเลย
+    if main and (saw_main or not comps) and main not in comps:
+        comps.insert(0, main)
+    if not comps and (main or item_type):
+        comps = [main or item_type]  # type ไม่รู้จัก (เฟอร์นิเจอร์) → main=item_type เอง
     return comps, explicit
 
 
@@ -251,7 +281,8 @@ def classify_unit(item_name: str, model_name: str = "", model_sku: str = "",
     listing_codes = set(_extract_codes(item_name or ""))
     model_codes = _extract_codes(model_sku or "") + _extract_codes(model_name or "")
 
-    comps, explicit = _parse_components(model_name or "", item_type, listing_codes)
+    comps, explicit = _parse_components(model_name or "", item_type, listing_codes,
+                                        item_name=item_name)
     if not comps and item_type:
         comps = [_TYPE_TO_MAIN_COMP.get(item_type) or item_type]
 
