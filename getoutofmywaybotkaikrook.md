@@ -8252,3 +8252,24 @@ Phase 8 ใช้ `_LLM_CONTEXT_LIMIT = 30` เป็น module constant แบ�
 - `test_all_conditions.py` — **54/54** (ครอบทุก source: product/kb/general/claim SM/compat/handoff/web_search; เคส 8.4 โดน 429 quota กลางรันแต่เช็ค loose ผ่าน)
 
 **แก้ test 2 ไฟล์:** test_flow.py + test_all_conditions.py เก่ากว่า secret middleware — เพิ่ม `X-Internal-Secret` header จาก env (pattern เดียวกับ test_katess_live.py)
+
+### Unit-index runtime path (2026-09-16) — ✅ ALL PASS
+
+**เคสที่เคย fail / วิธีแก้:**
+- `HA835 พร้อมสาย` เลือกผิด unit → qualifier scoring (model_name token ที่อยู่ใน message ได้ bonus)
+- `สายชาร์จ AL870` เป็น phone combo → สาเหตุ 3 ชั้น: (1) compat phrase "สำหรับ iPhone" กลืนเป็น phone — strip ก่อน detect type; (2) main comp ถูก prepend เสมอ — ใส่เฉพาะเมื่อมีหลักฐาน (พร้อม/code-only segment/color/segment อยู่ใน item_name); (3) "พร้อมสายชาร์จ" ถูก cable rule กิน — skip เมื่อมี "พร้อมสาย"
+- `กล้องวงจรปิดแนะนำหน่อย` + sellable_only → 0 hits: top-50 vector เป็น deleted/unlisted หมด → `_sellable_mask` ที่ vector level (ดึง Mongo ไม่อบ npz — sellability เปลี่ยนได้)
+
+**ผ่านแล้ว:**
+- `test_unit_classifier.py` 10/10, `test_units.py` 5/5 (code match, qualifier, per-unit stock, sellable filter, vector, card shape)
+- `test_sellable_units.py`, `test_kb_import.py`, `test_route_context.py`, `test_unit_card_fields.py` ผ่านครบ
+- Mongo `chatbot.sellable_units` = 26,970 units (classifier ล่าสุด)
+
+**กำลังจะทำ:** image batch รันอยู่ (~1,725/5,741, ETA ~3 ชม., 0 error, ~$1.08) — ต่อด้วย Task 9 feature-flag wire ใน fetch_products + charger regression
+
+### Task 8 เสร็จ — staged flag + regression (2026-09-16)
+
+- `USE_UNIT_INDEX=charger` = staged rollout: unit path เฉพาะ route charger-family (subtype หรือ type ∈ cable/charger/car_charger/wireless/desktop/socket); query อื่น (เช่น หูฟัง) ยัง legacy
+- verify: "สายชาร์จ AL870"→unit, "มีหัวชาร์จในรถไหม"→unit, "มีหูฟัง"→legacy
+- regression ภายใต้ flag: `test_car_charger_regression` 16/16 + `test_charger_subtype_parity` 42/42
+- commits: 3cc6dde (classifier), 913e8a3 (units runtime)

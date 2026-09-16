@@ -2855,9 +2855,20 @@ def fetch_products(
     coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
     collection = db[coll_name]
 
-    # ⚡ Task 8 — unit-level index path (flag-gated: USE_UNIT_INDEX=1)
+    # ⚡ Task 8 — unit-level index path (flag-gated)
+    #   USE_UNIT_INDEX=1 → ทุก query; =charger → เฉพาะ route ที่เป็น charger-family
     #   คืน unit cards ระดับรุ่นย่อยแทน listing cards; ว่าง/error → legacy path เดิม
-    if os.environ.get("USE_UNIT_INDEX", "").strip().lower() in ("1", "true", "yes"):
+    _uif = os.environ.get("USE_UNIT_INDEX", "").strip().lower()
+    if _uif == "charger":
+        try:
+            from . import route_context as _rc, units as _units
+            _rt = _rc.resolve_route(message)
+            _chg_types = set().union(*_units._SUBTYPE_TO_TYPES.values())
+            if not (_rt.charger_subtype or _rt.product_types & _chg_types):
+                _uif = ""
+        except Exception:
+            _uif = ""
+    if _uif in ("1", "true", "yes", "charger"):
         try:
             from . import units as _units
             _ucards = _units.fetch_unit_cards(

@@ -249,10 +249,10 @@ CASES = [
 - Consumes: `sellable_units` collection (admin DB), `route` fields
 - Produces: unit cards — behavior เดิมเป็น fallback เมื่อ flag ปิด/index ว่าง
 
-- [ ] **Step 1:** `USE_UNIT_INDEX` env flag (default off) — path ใหม่: exact model_code → field filter (type/components/sellable/shop/price) → vector บน search_text → merge+rank
-- [ ] **Step 2:** เปิด flag เฉพาะ charger path ก่อน → run regression เต็ม
-- [ ] **Step 3: เคสใหม่ที่ต้องผ่าน** — "EC4 เฉพาะกล้องมีไหม"→หมด, "HA835 พร้อมสาย"→unit combo, "สาย AL870"→เจอสายใน listing หัวชาร์จ, "มีกล้องแนะนำไหม"→เฉพาะ sellable
-- [ ] **Step 4:** commit; **เก็บ flag ไว้ — ลบ path เดิม task 10 เท่านั้น**
+- [x] **Step 1:** `USE_UNIT_INDEX` env flag (default off) — path ใหม่: exact model_code → field filter (type/components/sellable/shop/price) → vector บน search_text → merge+rank ✅ (units.py + fetch_products hook)
+- [x] **Step 2:** เปิด flag เฉพาะ charger path ก่อน → run regression เต็ม ✅ `USE_UNIT_INDEX=charger` → car_charger 16/16 + subtype parity 42/42
+- [x] **Step 3: เคสใหม่ที่ต้องผ่าน** — ✅ test_units.py 5/5: "HA835 พร้อมสาย"→combo set, "สายชาร์จ AL870"→cable standalone, EC4 per-variant stock, "กล้องวงจรปิด"→เฉพาะ sellable (vector-level sellable mask)
+- [x] **Step 4:** commit 913e8a3; **เก็บ flag ไว้ — ลบ path เดิม task 10 เท่านั้น** (flag ยัง off by default)
 
 ---
 
