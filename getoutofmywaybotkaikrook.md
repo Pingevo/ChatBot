@@ -8073,6 +8073,24 @@ Phase 8 ใช้ `_LLM_CONTEXT_LIMIT = 30` เป็น module constant แบ�
 - **⚠️ ยังไม่ verify deploy:** รอ rebuild จริง + ตรวจ log ว่าไม่มี `ensureIndexes failed`
 - **วันเวลาที่แก้:** 2026-09-15
 
+### 🔨 image_texts pipeline — extract spec จาก description images (sellable first) (2026-09-21)
+
+- **ทำอะไร:** สร้าง `chatbot/shopeechat/scripts/build_image_texts.py` — ยิง Gemini vision (`gemini-3.5-flash-lite`, loop keys แบบ `llm._client()`) extract structured text {kind, text} จากรูปใน `description_info` เฉพาะ **sellable units** (item_status=NORMAL + stock>0) → append `exports/image_texts.jsonl` (resume ได้)
+- **ทำไม:** spec/variant info อยู่ในรูปเท่านั้น (4,426 docs มี image blocks; listing CUKTECH item_id=24166340609 มี spec 9 รุ่นย่อยในรูป) — bot อ่านไม่ได้เลยตอนนี้
+- **ข้อกำหนด:** rate รวมทุก key ≤80/min, ≤4,000/day → checkpoint+resume; **ทุก call → `_log_ai_usage`** (reuse `web_search._log_ai_usage` + local `exports/image_texts_usage.jsonl` กัน hub-timeout หาย); ห้ามแตะ app.py; `max_output_tokens=4000` + เช็ค finish_reason=MAX_TOKENS
+- **ตัวเลขวัดจริง:** รูปธรรมดา ~฿0.02, spec sheet หนัก ~฿0.14-0.17; sellable unique image_id = 5,925 (template >20 listings = 45); estimate รวม ~฿150-400
+- **แผนเต็ม:** `docs/superpowers/plans/2026-09-16-sellable-unit-index.md` (Task 3 — ทำก่อน Task 1-2 ตามคำสั่ง user)
+- **⚠️ bug ที่เจอ + แก้:** (1) `genai.Client` สร้างใหม่ทุก call → "client has been closed" (SDK share httpx transport โดน GC ปิด) → cache client ต่อ key `_next_client()` rotation เหมือนเดิม (2) `price_info` เป็น list ไม่ใช่ dict
+- **progress:** batch กำลังรัน (pid background) — output `exports/image_texts.jsonl`, usage log `exports/image_texts_usage.jsonl`, run log `exports/image_texts_run.log`; resume = รัน command เดิมซ้ำ (skip status==ok)
+
+### 🔨 Task 1-2: unit_classifier + sellable_units index (2026-09-21) — ✅ PASS + GATE ผ่าน
+
+- **สร้าง:** `chatbot/shopeechat/scripts/unit_classifier.py` (classify_unit → components/kind/type/subtypes/model_codes/oos_in_name/confidence — reuse `product_store.PRODUCT_TYPES`/`_CHARGER_SUBTYPES` ไม่เขียนตารางใหม่), `chatbot/shopeechat/scripts/build_sellable_units.py` (→ `exports/sellable_units.jsonl` 26,970 units พร้อม desc_sections/image_ids/search_text)
+- **ผลวัดจริง:** units=26,970 (ตรง census), sellable=4,969 (ตรง), **classified sellable=4,679 = 94.2% ≥ gate 90%**; confidence all-units: high 24,500 / medium 54 / low 2,416 (low = type นอก taxonomy เช่น เฟอร์นิเจอร์ — ตั้งใจไม่เดา)
+- **desc_sections keys จริง:** intro/highlights/specs/warranty/notes/other — markers `[[ X ]]`, `*** X ***`, `===banner===`, "เงื่อนไขการรับประกันสินค้า" บรรทัดลอย; warranty units=2,084, units with image_ids=12,120
+- **design decision:** main_comp fallback = item_type เอง (vacuum unit → comps=["vacuum"]); "สาย"→cable (charging) / strap (smartwatch); companion code ที่ resolve ไม่ได้ → cable (charging family) / accessory
+- **tests:** `docs/test/test_unit_classifier.py` 10/10 PASS, `docs/test/test_sellable_units.py` ALL PASS (units/unique/sellable flag/HA835-AL870-EC4 spot checks/sections/images)
+
 ---
 
 ## ผ่านแล้ว (ใหม่)
