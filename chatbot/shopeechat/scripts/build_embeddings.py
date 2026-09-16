@@ -1,11 +1,13 @@
 """Script embed สินค้าทั้งหมดจาก export JSON เป็น vector แล้วเก็บลงไฟล์.
 
 วิธีใช้:
-    .venv/bin/python scripts/build_embeddings.py
+    .venv/bin/python scripts/build_embeddings.py            # listing-level (เดิม)
+    .venv/bin/python scripts/build_embeddings.py --units    # unit-level จาก sellable_units.jsonl
 
 ผลลัพธ์:
     exports/product_embeddings.npz  — numpy archive เก็บ (ids, embeddings, texts)
     ใช้สำหรับ similarity search ใน product_store.py
+    exports/unit_embeddings.npz (--units) — เพิ่ม unit_ids/model_ids ต่อ row
 
 หลังจากนี้ถ้าต้องการ sync ลง MongoDB field `embedding` ก็ทำได้ทีหลัง
 แต่ตอนนี้เก็บในไฟล์ก่อนเพื่อความเร็วในการทดสอบ.
@@ -13,6 +15,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -32,33 +35,53 @@ from chatbot.shopeechat.embedding import (
 )
 
 EXPORT_PATH = ROOT / "exports" / "ShpProducts.export.json"
+UNITS_PATH = ROOT / "exports" / "sellable_units.jsonl"
 OUTPUT_PATH = ROOT / "exports" / "product_embeddings.npz"
+UNITS_OUTPUT_PATH = ROOT / "exports" / "unit_embeddings.npz"
 BATCH_SIZE = 64
 
 
 def main() -> None:
-    print(f"Loading products from {EXPORT_PATH}...")
-    t0 = time.time()
-    with open(EXPORT_PATH, encoding="utf-8") as f:
-        data = json.load(f)
-    print(f"  loaded {len(data)} docs in {time.time()-t0:.1f}s")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--units", action="store_true",
+                    help="embed unit.search_text จาก sellable_units.jsonl → unit_embeddings.npz")
+    args = ap.parse_args()
 
-    # กรองเฉพาะสินค้าที่มี item_name และมี item_id
-    docs = []
-    for d in data:
-        if not d.get("item_name"):
-            continue
-        if not d.get("item_id"):
-            continue
-        docs.append(d)
-    print(f"  {len(docs)} docs with item_name + item_id")
+    if args.units:
+        print(f"Loading units from {UNITS_PATH}...")
+        units = [json.loads(l) for l in open(UNITS_PATH, encoding="utf-8")]
+        print(f"  {len(units)} units")
+        texts = [u["search_text"] for u in units]
+        item_ids = [str(u["item_id"]) for u in units]
+        unit_ids = [str(u["unit_id"]) for u in units]
+        model_ids = [str(u.get("model_id") or "") for u in units]
+        shops = [str(u.get("shop") or "") for u in units]
+        output_path = UNITS_OUTPUT_PATH
+    else:
+        print(f"Loading products from {EXPORT_PATH}...")
+        t0 = time.time()
+        with open(EXPORT_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        print(f"  loaded {len(data)} docs in {time.time()-t0:.1f}s")
 
-    # สร้าง text สำหรับ embed
-    print("\nBuilding text for embedding...")
-    texts = [build_doc_text(d) for d in docs]
-    item_ids = [str(d["item_id"]) for d in docs]
-    # ⚡ BUG-H fix — เก็บ shopname ลง .npz ด้วย เพื่อให้ vector_search กรอง shop ก่อน similarity
-    shops = [str(d.get("shopname") or "") for d in docs]
+        # กรองเฉพาะสินค้าที่มี item_name และมี item_id
+        docs = []
+        for d in data:
+            if not d.get("item_name"):
+                continue
+            if not d.get("item_id"):
+                continue
+            docs.append(d)
+        print(f"  {len(docs)} docs with item_name + item_id")
+
+        # สร้าง text สำหรับ embed
+        print("\nBuilding text for embedding...")
+        texts = [build_doc_text(d) for d in docs]
+        item_ids = [str(d["item_id"]) for d in docs]
+        # ⚡ BUG-H fix — เก็บ shopname ลง .npz ด้วย เพื่อให้ vector_search กรอง shop ก่อน similarity
+        shops = [str(d.get("shopname") or "") for d in docs]
+        unit_ids = model_ids = None
+        output_path = OUTPUT_PATH
 
     # แสดงตัวอย่าง
     print("\nSample texts:")
@@ -87,21 +110,24 @@ def main() -> None:
 
     # บันทึกเป็น .npz (compressed)
     # 🔒 M1: Use string dtype instead of object dtype — avoids need for allow_pickle=True
-    print(f"\nSaving to {OUTPUT_PATH}...")
-    np.savez_compressed(
-        OUTPUT_PATH,
+    print(f"\nSaving to {output_path}...")
+    npz_kwargs = dict(
         item_ids=np.array(item_ids, dtype="<U24"),  # ObjectId strings are 24 chars
         embeddings=embeddings,
         texts=np.array(texts, dtype=object),  # texts vary in length — keep object but verify
         shops=np.array(shops, dtype="<U64"),  # ⚡ BUG-H fix — shopname สำหรับกรอง shop ก่อน similarity
     )
-    size_mb = OUTPUT_PATH.stat().st_size / 1024 / 1024
+    if unit_ids is not None:
+        npz_kwargs["unit_ids"] = np.array(unit_ids, dtype="<U96")
+        npz_kwargs["model_ids"] = np.array(model_ids, dtype="<U64")
+    np.savez_compressed(output_path, **npz_kwargs)
+    size_mb = output_path.stat().st_size / 1024 / 1024
     print(f"  saved {size_mb:.1f} MB")
 
     # ทดสอบโหลดกลับมา
     print("\nVerifying load...")
     # 🔒 M1: Verify load without pickle for item_ids
-    loaded = np.load(OUTPUT_PATH, allow_pickle=True)  # texts still need pickle
+    loaded = np.load(output_path, allow_pickle=True)  # texts still need pickle
     print(f"  item_ids: {loaded['item_ids'].shape} (dtype: {loaded['item_ids'].dtype})")
     print(f"  embeddings: {loaded['embeddings'].shape}")
     print(f"  texts: {loaded['texts'].shape}")
@@ -109,6 +135,9 @@ def main() -> None:
     print(f"  sample item_id: {loaded['item_ids'][0]}")
     print(f"  sample shop: {loaded['shops'][0]}")  # ⚡ BUG-H fix
     print(f"  sample text: {str(loaded['texts'][0])[:80]}")
+    if unit_ids is not None:
+        print(f"  unit_ids: {loaded['unit_ids'].shape}")
+        print(f"  sample unit_id: {loaded['unit_ids'][0]}")
 
     print("\nAll done!")
 

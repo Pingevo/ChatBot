@@ -175,10 +175,10 @@ CASES = [
 - Produces: `kb_products` {kb_id, brand, model, model_codes, category, canonical_specs{}, specs_raw{}, item_ids[], version}, `kb_qa` {qa_id, kb_id, q, a, topic}, `kb_raw` (list of {col,val} — แก้ bug column ซ้ำเขียนทับ)
 - Consumed by: `knowledge_base.py` (phase C), Task 1 KB-link
 
-- [ ] **Step 1: test** — assert: row ที่มี column ซ้ำไม่เสียข้อมูล; canonical_specs มี key มาตรฐาน; Q&A แยก doc
-- [ ] **Step 2: implement** — `raw` เป็น list-of-pairs; canonical map เฉพาะ category ที่มีจริง (charger/powerbank/cable/camera/watch ก่อน — ไม่ต้องครบทุกหมวด); extract Q&A จาก cell ที่มี "คำถาม:"/`Q&A`; link `item_ids` ผ่าน model_codes เทียบ units
-- [ ] **Step 3: `--dry-run` บน 57 ไฟล์ → รายงาน coverage → ค่อย import จริง**
-- [ ] **Step 4:** commit
+- [x] **Step 1: test** — `docs/test/test_kb_import.py` ALL PASS: dup Q&A columns → 2 qa docs, canonical_specs ถูก, dup spec cols ไม่หาย, code→item map 1,362 codes
+- [x] **Step 2: implement** — `parse_row` → (kb_products, [kb_qa], kb_raw); raw=list-of-pairs (แก้ dup-column bug จริง 4 ไฟล์); Q&A positional pairing (Cuktech ZTEC มี 2 pairs/row); canonical map ~45 keys; item_ids ผ่าน model_codes
+- [x] **Step 3: dry-run + import จริง** — kb_products=1,011 (canonical 511, linked items 539), kb_qa=393 (linked 239), kb_raw=1,040 — เขียน admin DB แล้ว
+- [x] **Step 4:** commit
 
 ---
 

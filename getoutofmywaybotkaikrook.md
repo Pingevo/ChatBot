@@ -8091,6 +8091,20 @@ Phase 8 ใช้ `_LLM_CONTEXT_LIMIT = 30` เป็น module constant แบ�
 - **design decision:** main_comp fallback = item_type เอง (vacuum unit → comps=["vacuum"]); "สาย"→cable (charging) / strap (smartwatch); companion code ที่ resolve ไม่ได้ → cable (charging family) / accessory
 - **tests:** `docs/test/test_unit_classifier.py` 10/10 PASS, `docs/test/test_sellable_units.py` ALL PASS (units/unique/sellable flag/HA835-AL870-EC4 spot checks/sections/images)
 
+### 🔨 Task 4: KB re-import → kb_products/kb_qa/kb_raw (2026-09-21) — ✅ PASS + import จริงแล้ว
+
+- **แก้:** `docs/adminbase/script/import_adminbase.py` — `parse_row(header,row,...)` → (kb_products|None, [kb_qa], kb_raw); **สร้าง:** `spec_key_map.py` (canonical map ~45 keys: capacity_mah/input_spec/screen_size/...)
+- **bug จริงที่แก้:** duplicate columns ใน 4 ไฟล์ (Cuktech ZTEC มี คำถาม/คำตอบ ×2 ต่อ row, Xiaomi กล้อง มี ฟีเจอร์เด่น/อุปกรณ์ในกล่อง ×2) — เดิม dict overwrite ทำข้อมูลหาย → ตอนนี้ raw=list-of-pairs + specs_raw disambiguate `col (2)` + Q&A positional pairing
+- **ผล import จริง (admin DB `chatbot`):** kb_products=1,011 (canonical_specs 511, model_codes 558, item_ids linked 539), kb_qa=393 (linked 239 — รวม general_faq จาก txt), kb_raw=1,040 (audit trail ทุกแถวที่มีข้อมูล)
+- **design:** `code_item_map` จาก sellable_units.jsonl → item_ids link ผ่าน model_codes; txt → kb_qa type=general_faq; row ที่มีแต่ Q&A ไม่สร้าง product doc
+- **test:** `docs/test/test_kb_import.py` ALL PASS
+- **หมายเหตุ:** knowledge_base collection เดิมยังอยู่ — reader migration (knowledge_base.py อ่าน kb_products/kb_qa) เป็น Task 9
+
+### 🔨 Task 5: typo_dict + unit_embeddings (2026-09-21) — 🔄 embeddings กำลังรัน
+
+- **สร้าง:** `build_typo_dict.py` → `exports/typo_dict.json` {brands 221, model_codes 2,119, product_words 4,012, thai_terms 5,603} — bug ที่แก้: code 3 ตัว (EC4,P23) หลุดเพราะเช็ค code อยู่ใต้ filter len≥4
+- **แก้:** `build_embeddings.py` เพิ่ม `--units` → embed unit.search_text 26,970 units → `exports/unit_embeddings.npz` (item_ids+unit_ids+model_ids+shops+texts) — กำลังรัน ~23/s
+
 ---
 
 ## ผ่านแล้ว (ใหม่)
