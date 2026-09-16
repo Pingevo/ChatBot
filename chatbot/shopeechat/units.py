@@ -200,7 +200,8 @@ def to_unit_card(unit: dict, route=None) -> dict:
         "_available_for_sale": unit.get("item_status") == "NORMAL",
         "has_promotion": False,
         "is_flash_sale": False,
-        "description_excerpt": pick_desc_sections(unit, route),
+        "description_excerpt": pick_desc_sections(unit, route) or (unit.get("image_text") or "")[:3000],
+        "image_text": unit.get("image_text"),
         "raw_description": "\n\n".join(
             v for v in (unit.get("desc_sections") or {}).values() if v)[:4000],
         "variants": [{
@@ -257,10 +258,33 @@ def attach_kb_specs(unit_docs: list[dict]) -> list[dict]:
     return unit_docs
 
 
+def attach_image_texts(unit_docs: list[dict]) -> list[dict]:
+    """join image_texts (OCR รูป spec/desc) เข้า unit ผ่าน image_ids — additive.
+
+    image_text = text ของรูป kind=spec|product (banner เป็น marketing ไม่เอา)
+    ใช้เป็น fallback เมื่อ desc ว่าง + เสริม spec ที่มีแต่ในรูป
+    """
+    iids = sorted({i for u in unit_docs for i in (u.get("image_ids") or [])})
+    if not iids:
+        return unit_docs
+    try:
+        coll = _units_coll().database["image_texts"]
+        text_of = {d["image_id"]: d.get("text") for d in coll.find(
+            {"image_id": {"$in": iids}, "kind": {"$in": ["spec", "product"]}},
+            {"image_id": 1, "text": 1})}
+        for u in unit_docs:
+            parts = [text_of[i] for i in (u.get("image_ids") or []) if text_of.get(i)]
+            if parts:
+                u["image_text"] = "\n".join(dict.fromkeys(parts))[:2500]
+    except Exception as exc:
+        print(f"[UNITS] image_text join error: {exc}", file=sys.stderr)
+    return unit_docs
+
+
 def fetch_unit_cards(message: str, **kwargs) -> list[dict]:
-    """fetch_units + attach_kb_specs + to_unit_card — entry point ที่ fetch_products เรียก."""
+    """fetch_units + attach_kb_specs + attach_image_texts + to_unit_card — entry point ที่ fetch_products เรียก."""
     route = kwargs.pop("route", None)
     from . import route_context as _rc
     route = route or _rc.resolve_route(message)
-    us = attach_kb_specs(fetch_units(message, route=route, **kwargs))
+    us = attach_image_texts(attach_kb_specs(fetch_units(message, route=route, **kwargs)))
     return [to_unit_card(u, route) for u in us]

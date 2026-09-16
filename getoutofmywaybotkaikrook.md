@@ -8286,3 +8286,10 @@ Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ต�
 - `units.attach_kb_specs`: unit desc ว่างยืม canonical_specs จาก kb_products ผ่าน model_codes — verified AD653C/AD653T ได้ specs จริง (sellable ทั้งหมดมี desc อยู่แล้ว → เฉพาะ non-sellable ที่ inherit)
 - `_build_context`: ส่ง canonical_specs + unit flags เข้า context
 - test_guards ALL PASS; regression car_charger 16/16
+
+### image_texts → Mongo + unit join (2026-09-16)
+
+- `import_image_texts.py`: jsonl → `image_texts` collection (key=image_id, เฉพาะ status=ok, idempotent — rerun ได้เรื่อยๆ)
+- batch ปัจจุบัน: 2,715 unique ok (spec 2,160 / product 202 / banner 352)
+- `units.attach_image_texts`: join ผ่าน image_ids เฉพาะ kind=spec|product → field `image_text` (≤2500 chars); `description_excerpt` fallback ไปที่ image_text เมื่อ desc ว่าง
+- verify: 20/20 sellable units ที่มี image_ids ได้ image_text จริง (EC4 ได้ "2.5K & 4MP โหมดกลางคืน" จากรูป)

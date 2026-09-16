@@ -1665,6 +1665,7 @@ Early-return blocks ก่อน intent classification: order lookup, return/ref
 |---|---|---|---|
 | `fetch_units(message, *, shop, limit, sellable_only, product_types, charger_subtype, route)` | ดึง units: exact model_code(+qualifier scoring) → field filter → vector บน unit_embeddings (mask shop+sellable จาก Mongo) → merge+rank | message: str; route: Route จาก `route_context.resolve_route` | `list[unit doc + _score + _matched_by]` (ว่าง = fallback legacy) |
 | `attach_kb_specs(unit_docs)` | spec inheritance — unit desc ว่างยืม `canonical_specs` จาก `kb_products` ผ่าน `model_codes` | list[unit doc] | docs เดิม (เติม `canonical_specs` ให้ตัวที่ match) |
+| `attach_image_texts(unit_docs)` | join `image_texts` (OCR รูป spec/desc) เข้า unit ผ่าน `image_ids` — เฉพาะ kind=spec\|product | list[unit doc] | docs เดิม (เติม `image_text` ≤2500 chars) |
 | `to_unit_card(unit, route)` | unit doc → card shape เดียวกับ `to_product_card` + unit extras (kind/components/subtype/flags) | unit: dict; route: Route\|None | `dict` card |
 | `pick_desc_sections(unit, route)` | เลือก desc section ตาม `route.needs_spec/needs_warranty` cap 3000 chars | unit: dict | `str` |
 | `fetch_unit_cards(message, **kwargs)` | fetch_units + attach_kb_specs + to_unit_card — entry point | เหมือน fetch_units | `list[card]` |
