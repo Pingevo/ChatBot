@@ -8293,3 +8293,11 @@ Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ต�
 - batch ปัจจุบัน: 2,715 unique ok (spec 2,160 / product 202 / banner 352)
 - `units.attach_image_texts`: join ผ่าน image_ids เฉพาะ kind=spec|product → field `image_text` (≤2500 chars); `description_excerpt` fallback ไปที่ image_text เมื่อ desc ว่าง
 - verify: 20/20 sellable units ที่มี image_ids ได้ image_text จริง (EC4 ได้ "2.5K & 4MP โหมดกลางคืน" จากรูป)
+
+### Live test 8015 flag=charger (2026-09-16) — ✅ PASS หลังแก้ 2 bug
+
+**bug ที่ live test จับได้ (unit test ไม่เห็น):**
+- `unit_classifier.py` absolute import `chatbot.shopeechat.*` → server context ไม่มี package `chatbot` → gate except กลืนเงียบ (unit path ไม่ engage เลย) → relative-first fallback + gate print error
+- `to_unit_card` price เป็น float → `_dedupe_sell_score` คาด `{min,max}` → 500 → แก้ price_range shape
+
+**ผล:** unit path engage จริง (hits=30), code-match HA835 ตอบ "หมดสต็อก" ตรง truth, non-charger ยัง legacy, 0 traceback

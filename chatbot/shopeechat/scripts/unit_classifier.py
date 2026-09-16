@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import re
 
-from chatbot.shopeechat.product_store import PRODUCT_TYPES, _CHARGER_SUBTYPES
+try:
+    from ..product_store import PRODUCT_TYPES, _CHARGER_SUBTYPES
+except ImportError:  # รัน standalone ด้วย repo root บน sys.path
+    from chatbot.shopeechat.product_store import PRODUCT_TYPES, _CHARGER_SUBTYPES
 
 # ---- ตารางเดียวต้นไฟล์ — ย้ายไป config/DB ทีหลังได้ ----
 

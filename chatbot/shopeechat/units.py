@@ -180,6 +180,9 @@ def to_unit_card(unit: dict, route=None) -> dict:
     brand = unit.get("brand") or {}
     brand_name = brand.get("original_brand_name", "") if isinstance(brand, dict) else str(brand)
     stock = unit.get("stock") or 0
+    price = unit.get("price")
+    # shape เดียวกับ _price_range ของ product card — downstream อ่าน price.get("min"/"max")
+    price_range = {"min": int(price), "max": int(price), "currency": "THB"} if price else {}
     return {
         # shape เดียวกับ product card
         "item_id": unit.get("item_id"),
@@ -189,7 +192,7 @@ def to_unit_card(unit: dict, route=None) -> dict:
         "shop": unit.get("shop"),
         "status": unit.get("item_status"),
         "condition": None,
-        "price": unit.get("price"),
+        "price": price_range,
         "warranty": None,  # warranty text อยู่ใน desc_sections → description_excerpt
         "short_link": None,
         "image_url": None,

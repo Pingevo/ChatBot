@@ -2866,7 +2866,8 @@ def fetch_products(
             _chg_types = set().union(*_units._SUBTYPE_TO_TYPES.values())
             if not (_rt.charger_subtype or _rt.product_types & _chg_types):
                 _uif = ""
-        except Exception:
+        except Exception as _ge:
+            print(f"[UNITS] charger gate error → legacy: {_ge}", file=sys.stderr)
             _uif = ""
     if _uif in ("1", "true", "yes", "charger"):
         try:
