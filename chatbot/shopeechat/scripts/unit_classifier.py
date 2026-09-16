@@ -98,9 +98,10 @@ def _detect_type(text: str) -> str | None:
     low = text.lower()
     # compat phrase ไม่ใช่ประเภทสินค้า — "สายชาร์จ สำหรับ iPhone" คือ cable ไม่ใช่ phone
     low = _COMPAT_RE.sub(" ", low)
-    # "สายชาร์จ" ล้วน (ไม่มี "หัวชาร์จ") = cable — กัน charger pattern กลืน "ชาร์จ"
-    # ถ้ามีทั้งหัว+สาย → ปล่อย table ตัดสิน (listing ชาร์จแถมสาย)
-    if _CABLE_ONLY_RE.search(low) and "หัวชาร์จ" not in low and "หัวชาร์ต" not in low:
+    # "สายชาร์จ" ล้วน = cable — กัน charger pattern กลืน "ชาร์จ"
+    # แต่ "พร้อมสายชาร์จ"/"หัวชาร์จ" = ชาร์จแถมสาย → ปล่อย table ตัดสิน
+    if (_CABLE_ONLY_RE.search(low) and "หัวชาร์จ" not in low
+            and "หัวชาร์ต" not in low and not re.search(r"พร้อม\s*สาย", low)):
         return "cable"
     for name, rx in _TYPE_RES:
         if rx.search(low):

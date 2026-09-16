@@ -2855,6 +2855,24 @@ def fetch_products(
     coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
     collection = db[coll_name]
 
+    # ⚡ Task 8 — unit-level index path (flag-gated: USE_UNIT_INDEX=1)
+    #   คืน unit cards ระดับรุ่นย่อยแทน listing cards; ว่าง/error → legacy path เดิม
+    if os.environ.get("USE_UNIT_INDEX", "").strip().lower() in ("1", "true", "yes"):
+        try:
+            from . import units as _units
+            _ucards = _units.fetch_unit_cards(
+                message,
+                shop=shop_filter,
+                limit=limit,
+                sellable_only=filter_unavailable,
+                product_types=product_types_override,
+                charger_subtype=charger_subtype_override,
+            )
+            if _ucards:
+                return _ucards
+        except Exception as _ue:
+            print(f"[UNITS] unit path error → legacy: {_ue}", file=sys.stderr)
+
     # ตรวจ product type: ลอง exact match ก่อน ถ้าไม่เจอให้ลอง fuzzy (ทนคำพิมพ์ผิด)
     # ถ้า caller ส่ง product_types_override มา → ใช้ค่านั้นแทน (เช่น charging spec question)
     if product_types_override is not None:
