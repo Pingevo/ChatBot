@@ -17,16 +17,28 @@ export interface KeyEntry {
 }
 
 export type KeyPool = "gemini" | "openrouter";
+export type KeySource = "env" | "db" | "single";
+export type Provider = "gemini" | "openrouter";
 
 export const KEY_POOL_FIELD: Record<KeyPool, "keys" | "openrouter_keys"> = {
   gemini: "keys",
   openrouter: "openrouter_keys",
+};
+export const KEY_POOL_ENV: Record<KeyPool, string> = {
+  gemini: "GEMINI_API_KEY_1..n / GEMINI_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
 };
 
 export interface LlmConfigDoc {
   config_key: string;
   keys: (string | KeyEntry)[];            // gemini pool — string = legacy shape
   openrouter_keys?: (string | KeyEntry)[]; // openrouter pool (web_search fallback)
+  /** แหล่ง key ต่อ pool: env = .env เท่านั้น · db = list ในเอกสารนี้ · single = single_keys[pool] */
+  key_source?: Partial<Record<KeyPool, KeySource>>;
+  /** key เดี่ยวเก็บบน mongo (plaintext — bot ต้องใช้จริง) ใช้เมื่อ source="single" */
+  single_keys?: Partial<Record<KeyPool, string>>;
+  /** provider ต่อ role — "openrouter" = route ผ่าน OpenRouter ด้วย model เดิม (google/...) */
+  providers?: Partial<Record<ModelRole, Provider>>;
   models: Partial<Record<ModelRole, string>>;
   updated_by?: string;
   updated_at?: Date;
@@ -74,7 +86,11 @@ export async function getLlmConfig(): Promise<LlmConfigDoc> {
 export async function getLlmConfigMasked(): Promise<{
   keys: MaskedKey[];
   openrouter_keys: MaskedKey[];
+  key_source: Record<KeyPool, KeySource>;
+  single_keys: Record<KeyPool, { sha256: string; tail: string } | null>;
+  providers: Partial<Record<ModelRole, Provider>>;
   models: Partial<Record<ModelRole, string>>;
+  model_roles: string[]; // registry + role เพิ่มเติมที่มีใน doc (future role ขึ้นอัตโนมัติ)
   updated_by?: string;
   updated_at?: Date;
 }> {
@@ -87,10 +103,27 @@ export async function getLlmConfigMasked(): Promise<{
       name: k.name,
       enabled: k.enabled,
     }));
+  const maskSingle = (v: string | undefined) =>
+    v && v.trim() ? { sha256: sha8(v.trim()), tail: v.trim().slice(-4) } : null;
+  const roles = [...new Set([
+    ...MODEL_ROLES,
+    ...Object.keys(doc.models ?? {}),
+    ...Object.keys(doc.providers ?? {}),
+  ])];
   return {
     keys: maskList(doc.keys, "GEMINI_API_KEY"),
     openrouter_keys: maskList(doc.openrouter_keys, "OPENROUTER_API_KEY"),
+    key_source: {
+      gemini: doc.key_source?.gemini ?? "db",
+      openrouter: doc.key_source?.openrouter ?? "db",
+    },
+    single_keys: {
+      gemini: maskSingle(doc.single_keys?.gemini),
+      openrouter: maskSingle(doc.single_keys?.openrouter),
+    },
+    providers: doc.providers ?? {},
     models: doc.models ?? {},
+    model_roles: roles,
     updated_by: doc.updated_by,
     updated_at: doc.updated_at,
   };
@@ -111,6 +144,10 @@ export async function updateLlmConfig(
     remove_sha256?: string[];
     set_enabled?: { sha256: string; enabled: boolean }[];
     rename?: { sha256: string; name: string }[];
+    set_source?: { pool: KeyPool; source: KeySource };
+    set_single?: { pool: KeyPool; value: string };
+    providers?: Partial<Record<string, Provider>>;
+    set_all_providers?: Provider;
     models?: Partial<Record<ModelRole, string>>;
   },
   updatedBy: string
@@ -154,13 +191,133 @@ export async function updateLlmConfig(
     $set[poolField] = keys;
   }
 
+  // ---- key source (env | db | single) ----
+  if (updates.set_source !== undefined) {
+    const { pool, source } = updates.set_source;
+    if (KEY_POOL_FIELD[pool] && ["env", "db", "single"].includes(source)) {
+      $set[`key_source.${pool}`] = source;
+    }
+  }
+
+  // ---- single key (plaintext on mongo — mask ตอน GET) ----
+  if (updates.set_single !== undefined) {
+    const { pool, value } = updates.set_single;
+    if (KEY_POOL_FIELD[pool] && typeof value === "string") {
+      const v = value.trim();
+      $set[`single_keys.${pool}`] = v || null;
+    }
+  }
+
+  // ---- providers per role ----
+  if (updates.set_all_providers !== undefined) {
+    if (["gemini", "openrouter"].includes(updates.set_all_providers)) {
+      for (const role of MODEL_ROLES) {
+        if (role === "openrouter_search") continue; // role นี้เป็น openrouter อยู่แล้ว
+        $set[`providers.${role}`] = updates.set_all_providers;
+      }
+    }
+  }
+  if (updates.providers !== undefined) {
+    for (const [role, p] of Object.entries(updates.providers)) {
+      if (role === "openrouter_search") continue;
+      if (p === "gemini" || p === "openrouter") $set[`providers.${role}`] = p;
+      else if (!p) $set[`providers.${role}`] = "gemini"; // null/"" = กลับ default
+    }
+  }
+
   if (updates.models !== undefined) {
     const models: Partial<Record<ModelRole, string>> = { ...(doc.models ?? {}) };
-    for (const role of MODEL_ROLES) {
-      const m = updates.models[role];
-      if (typeof m === "string") models[role] = m.trim();
+    // รับ role ที่รู้จัก + role ใหม่ที่ client ส่งมา (future roles ขึ้นอัตโนมัติ)
+    for (const [role, mRaw] of Object.entries(updates.models)) {
+      if (typeof mRaw !== "string") continue;
+      let m = mRaw.trim();
+      // openrouter_search ต้องลงท้าย :online เสมอ (OpenRouter web-search plugin)
+      if (role === "openrouter_search" && m && !m.endsWith(":online")) m += ":online";
+      models[role as ModelRole] = m;
     }
     $set.models = models;
   }
   await coll.updateOne({ config_key: CONFIG_KEY }, { $set }, { upsert: true });
+}
+
+/* ------------------------------------------------------------------ */
+/* Live model lists — ดึงจาก provider API จริง, cache 10 นาที          */
+/* ------------------------------------------------------------------ */
+
+const GEMINI_MODELS_FALLBACK = [
+  "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.5-pro",
+  "gemini-3.1-flash-lite", "gemini-3.1-flash", "gemini-3.1-pro",
+  "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash",
+];
+const OPENROUTER_MODELS_FALLBACK = [
+  "google/gemini-3.5-flash-lite", "google/gemini-3.1-flash-lite",
+  "google/gemini-2.5-flash", "google/gemini-2.0-flash-001",
+  "openai/gpt-4o-mini", "openai/gpt-4o", "anthropic/claude-haiku-4.5",
+  "anthropic/claude-sonnet-4.5",
+];
+
+let _modelsCache: { gemini: string[]; openrouter: string[]; live: boolean; ts: number } | null = null;
+const _MODELS_TTL = 10 * 60_000;
+
+/** หา key สำหรับเรียก provider list API — doc first (enabled) → env ของ web process */
+async function _anyKey(pool: KeyPool, envNames: string[]): Promise<string> {
+  try {
+    const doc = await getLlmConfig();
+    const k = normKeys(doc[KEY_POOL_FIELD[pool]]).find((x) => x.enabled)?.value;
+    if (k) return k;
+  } catch { /* fallthrough */ }
+  for (const n of envNames) {
+    const v = process.env[n]?.trim();
+    if (v) return v;
+  }
+  return "";
+}
+
+export async function getAvailableModels(): Promise<{
+  gemini: string[]; openrouter: string[]; live: boolean;
+}> {
+  if (_modelsCache && Date.now() - _modelsCache.ts < _MODELS_TTL) {
+    const { ts, ...rest } = _modelsCache;
+    return rest;
+  }
+  let gemini = GEMINI_MODELS_FALLBACK;
+  let openrouter = OPENROUTER_MODELS_FALLBACK;
+  let live = false;
+
+  // Gemini — list models ที่ generateContent ได้ (ต้องมี key)
+  try {
+    const key = await _anyKey("gemini", [
+      "GEMINI_API_KEY", ...Array.from({ length: 9 }, (_, i) => `GEMINI_API_KEY_${i + 1}`),
+    ]);
+    if (key) {
+      const r = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${key}`,
+        { signal: AbortSignal.timeout(8000) }
+      );
+      if (r.ok) {
+        const data = await r.json();
+        const ids = (data.models ?? [])
+          .filter((m: { supportedGenerationMethods?: string[] }) =>
+            m.supportedGenerationMethods?.includes("generateContent"))
+          .map((m: { name: string }) => m.name.replace(/^models\//, ""))
+          .filter((id: string) => id.startsWith("gemini"));
+        if (ids.length) { gemini = ids; live = true; }
+      }
+    }
+  } catch { /* fallback */ }
+
+  // OpenRouter — public catalog
+  try {
+    const r = await fetch("https://openrouter.ai/api/v1/models", {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (r.ok) {
+      const data = await r.json();
+      const ids = (data.data ?? []).map((m: { id: string }) => m.id).filter(Boolean);
+      if (ids.length) { openrouter = ids; live = true; }
+    }
+  } catch { /* fallback */ }
+
+  _modelsCache = { gemini, openrouter, live, ts: Date.now() };
+  return { gemini, openrouter, live };
 }

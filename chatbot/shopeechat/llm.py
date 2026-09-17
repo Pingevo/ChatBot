@@ -653,8 +653,25 @@ def get_key_pool(field: str) -> list[str]:
 
 
 def _active_keys() -> list[str]:
-    """key pool ปัจจุบัน — config.keys ถ้ามี (UI จัดการ) ไม่มี → env keys"""
+    """key pool ปัจจุบันตาม key_source.gemini: env=env เท่านั้น / single=single_keys.gemini / db=list (default)
+    db ว่างหรือ single ไม่ได้ตั้ง → env fallback"""
+    cfg = get_llm_config()
+    src = (cfg.get("key_source") or {}).get("gemini", "db")
+    if src == "env":
+        return _API_KEYS
+    if src == "single":
+        v = str((cfg.get("single_keys") or {}).get("gemini") or "").strip()
+        return [v] if v else _API_KEYS
     return get_key_pool("keys") or _API_KEYS
+
+
+def get_provider(role: str) -> str:
+    """provider ของ role — config.providers[role] ("gemini"|"openrouter") default "gemini"
+    openrouter_search เป็น openrouter เสมอ (ไม่มี toggle)"""
+    if role == "openrouter_search":
+        return "openrouter"
+    p = (get_llm_config().get("providers") or {}).get(role)
+    return p if p in ("gemini", "openrouter") else "gemini"
 
 
 _MODEL_ROLE_ENV = {
@@ -795,8 +812,93 @@ def _record_tokens(model: str, resp) -> None:
         _q_tok.setdefault(model, _deque()).append((_time.time(), n))
 
 
-def _generate(model: str, contents, config: dict, est_tokens: int | None = None):
-    """generate_content ผ่าน quota manager: pace RPM/TPM → call → 429 → fallback model 1 ครั้ง."""
+def _or_messages(contents, config: dict) -> list[dict]:
+    """แปลง gemini-style contents → OpenAI messages สำหรับ OpenRouter
+    รองรับ: str / [{role, parts:[{text}]}] / genai Part (inline_data → image_url data URI)"""
+    import base64 as _b64
+    msgs: list[dict] = []
+    sys_i = config.get("system_instruction")
+    if sys_i:
+        msgs.append({"role": "system", "content": str(sys_i)})
+    items = contents if isinstance(contents, (list, tuple)) else [contents]
+    for c in items:
+        if isinstance(c, str):
+            msgs.append({"role": "user", "content": c})
+        elif isinstance(c, dict):
+            role = "assistant" if c.get("role") == "model" else c.get("role", "user")
+            texts = [p.get("text", "") for p in (c.get("parts") or [])
+                     if isinstance(p, dict) and p.get("text")]
+            msgs.append({"role": role, "content": "\n".join(texts)})
+        else:
+            inline = getattr(c, "inline_data", None)
+            if inline is not None:
+                data = inline.data
+                if not isinstance(data, str):
+                    data = _b64.b64encode(data).decode()
+                url = f"data:{inline.mime_type};base64,{data}"
+                msgs.append({"role": "user",
+                             "content": [{"type": "image_url", "image_url": {"url": url}}]})
+            elif getattr(c, "text", None):
+                msgs.append({"role": "user", "content": c.text})
+    return msgs
+
+
+def _openrouter_generate(model: str, contents, config: dict):
+    """เรียก OpenRouter /chat/completions แทน Gemini — model gemini-style map เป็น google/{id}
+    คืน shim: .text + .usage_metadata (prompt/candidates/total_token_count)"""
+    import urllib.request as _ureq
+    from types import SimpleNamespace as _NS
+    from . import web_search as _ws
+
+    or_model = model if "/" in model else f"google/{model}"
+    body: dict = {
+        "model": or_model,
+        "messages": _or_messages(contents, config),
+    }
+    if config.get("temperature") is not None:
+        body["temperature"] = config["temperature"]
+    if config.get("max_output_tokens"):
+        body["max_tokens"] = config["max_output_tokens"]
+    if config.get("response_mime_type") == "application/json":
+        body["response_format"] = {"type": "json_object"}
+
+    key = _ws._get_openrouter_key()
+    if not key:
+        raise RuntimeError("ไม่มี OpenRouter key (pool/env ว่าง)")
+    req = _ureq.Request(
+        f"{_ws._get_openrouter_base().rstrip('/')}/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {key}",
+        },
+        method="POST",
+    )
+    with _ureq.urlopen(req, timeout=60) as r:
+        data = json.loads(r.read().decode("utf-8"))
+    text = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+    u = data.get("usage") or {}
+    usage = _NS(
+        prompt_token_count=u.get("prompt_tokens", 0) or 0,
+        candidates_token_count=u.get("completion_tokens", 0) or 0,
+        total_token_count=u.get("total_tokens", 0) or 0,
+    )
+    print(f"[LLM] provider=openrouter model={or_model} total={usage.total_token_count}",
+          file=_sys.stderr)
+    return _NS(text=text, usage_metadata=usage)
+
+
+def _generate(model: str, contents, config: dict, est_tokens: int | None = None,
+              role: str | None = None):
+    """generate_content ผ่าน quota manager: pace RPM/TPM → call → 429 → fallback model 1 ครั้ง.
+    role + providers[role]=="openrouter" → route ผ่าน OpenRouter (model เดิม map google/{id})
+    openrouter พัง → fallback gemini path เดิมอัตโนมัติ"""
+    if role and get_provider(role) == "openrouter":
+        try:
+            return _openrouter_generate(model, contents, config)
+        except Exception as exc:
+            print(f"[PROVIDER] openrouter call failed ({exc}) → fallback gemini {model}",
+                  file=_sys.stderr)
     if est_tokens is None:
         try:
             _parts = contents if isinstance(contents, (list, tuple)) else [contents]
@@ -1095,6 +1197,7 @@ def describe_image(
             [prompt, part],
             {"temperature": 0.0, "max_output_tokens": 300},
             est_tokens=len(prompt) // 4 + 2000,   # รูป ~258-1290 tok — เผื่อไว้
+            role="vision",
         )
         desc = (resp.text or "").strip()
         usage = getattr(resp, "usage_metadata", None)
@@ -1306,6 +1409,7 @@ def answer(
                 "temperature": 0.3,
                 "max_output_tokens": 4096,
             },
+            role="chat",
         )
     except genai_errors.ClientError as exc:
         return f"ขออภัย ระบบ LLM ติดขัด ลองใหม่อีกครั้ง ({exc})", usage_info
@@ -1439,6 +1543,7 @@ def answer_with_kb(
                 "temperature": 0.3,
                 "max_output_tokens": 2048,
             },
+            role="chat",
         )
     except genai_errors.ClientError as exc:
         return f"ขออภัย ระบบ LLM ติดขัด ลองใหม่อีกครั้ง ({exc})"
@@ -1543,6 +1648,7 @@ def answer_general(
                 "temperature": 0.3,
                 "max_output_tokens": 2048,
             },
+            role="chat",
         )
     except genai_errors.ClientError as exc:
         return f"ขออภัย ระบบ LLM ติดขัด ลองใหม่อีกครั้ง ({exc})", {}

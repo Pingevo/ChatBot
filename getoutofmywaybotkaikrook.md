@@ -8544,3 +8544,24 @@ Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ต�
 - `/users` page — cell role เป็น ModalSelect เมื่อ actor assign ได้ (filter dev ออกถ้า actor=superadmin; target=dev ล็อกถ้า actor ไม่ใช่ dev) + confirm ก่อน PATCH + อัปเดต info banner
 
 **verify จริง:** tsc ผ่าน; logic canAssignRole ตรวจตา (trivial 3-branch); หน้า compile ได้
+
+---
+
+## 2026-09-17 (ต่อ) — /llm v3: key source env|db|single + per-role provider gemini↔openrouter + live model list
+
+**ทำไม:** user ขอ 8 ข้อ — model list ไม่ครบ, สลับ env↔mongo ทันที, โหมด key เดียว GEMINI_API_KEY บน mongo, websearch ต้อง :online, เตรียมสลับทั้งระบบไป OpenRouter, layout เล็กลง, role ใหม่ขึ้น auto, provider toggle แยกต่อ role
+
+**doc shape เพิ่ม:** `key_source:{gemini,openrouter}` ∈ env|db|single · `single_keys:{...}` (plaintext, mask ตอน GET) · `providers:{role}` ∈ gemini|openrouter · `model_roles` = MODEL_ROLES ∪ keys(models) ∪ keys(providers) → role ใหม่ขึ้น auto
+
+**service ops ใหม่:** set_source / set_single / providers / set_all_providers · models รับ role อะไรก็ได้ + openrouter_search auto-append ":online" · `getAvailableModels()` ดึง live: Gemini `v1beta/models` (filter generateContent) + OpenRouter `/api/v1/models` — cache 10 นาที, fallback static list
+
+**bot:**
+- `_active_keys` ตาม key_source.gemini (env/single/db) — db ว่าง→env เหมือนเดิม
+- `web_search._get_openrouter_key` — env/single/pool ตาม key_source.openrouter
+- `get_provider(role)` — openrouter_search เป็น openrouter เสมอ
+- `_generate(..., role=)` — provider=openrouter → `_openrouter_generate`: map model `google/{id}`, `_or_messages` แปลง str/dict-parts/Part(inline_data→data URI), system_instruction→system msg, json mime→response_format; **OR พัง → fallback gemini อัตโนมัติ**; คืน shim .text/.usage_metadata
+- call sites 5 จุด + role param (chat×3, vision, intent)
+
+**UI (/llm เขียนใหม่ compact):** strip บนสุด = master provider toggle (all→OR/all→Gemini); pools 2 cards `lg:grid-cols-2` พร้อม segmented source [.env|MongoDB|key เดียว] — db→list เดิม, env→info, single→masked row + set form; models card แถวเล็ก `sm:grid-cols-[160px_72px_1fr]` = role + G/OR toggle + SearchableSelect (live list, search role แสดง `{id}:online`); ทุก mutation confirm→save ทันที
+
+**verify จริง:** tsc ผ่าน, py_compile ×3 ผ่าน, stub test: db pool กรอง disabled ✅ env source ✅ single source ✅ provider map ✅ _or_messages 3 shapes ✅ (str/dict/Part→data URI)

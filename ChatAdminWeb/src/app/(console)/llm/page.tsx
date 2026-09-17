@@ -1,8 +1,9 @@
 "use client";
 // หน้า /llm — runtime LLM config (dev-only)
-// - key pool: list + toggle on/off + rename + add/remove — shape {name,value,enabled}
-// - models: searchable dropdown ต่อ role — เปลี่ยนแล้ว confirm ก่อนบันทึก (ไม่มีปุ่ม save)
-// - bot อ่าน config ทุก ~10s — ทุก mutation มีผลอัตโนมัติ
+// - key pools ×2 (Gemini/OpenRouter): source env|db|single + list toggle/rename/add/remove
+// - providers ต่อ role: gemini ↔ openrouter สลับได้ทีละ role หรือทั้งหมด (bot fallback gemini ถ้า OR พัง)
+// - models: searchable dropdown (live list จาก provider API) — openrouter_search บังคับ :online
+// - ไม่มีปุ่ม save — ทุก mutation confirm popup แล้วบันทึกทันที (bot อ่าน config ทุก ~10s)
 import { useState, useEffect, useCallback, useRef, useLayoutEffect } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -13,7 +14,7 @@ import { PageShell } from "@/components/ui/PageShell";
 import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import {
   KeyRound, Cpu, Plus, Trash2, RefreshCw, Eye, MessageSquare,
-  ScanSearch, Globe, ShieldAlert, Search, Check, ChevronDown, X, Pencil,
+  ScanSearch, Globe, ShieldAlert, Search, Check, ChevronDown, X, Pencil, Sparkles,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
 import { canEditPage } from "@/lib/roles";
@@ -29,57 +30,58 @@ interface MaskedKey {
   enabled: boolean;
 }
 
-type ModelRole = "chat" | "vision" | "intent" | "openrouter_search";
-
 type KeyPool = "gemini" | "openrouter";
+type KeySource = "env" | "db" | "single";
+type Provider = "gemini" | "openrouter";
 
 interface LlmConfigResponse {
   ok: boolean;
   keys: MaskedKey[];
   openrouter_keys: MaskedKey[];
-  models: Partial<Record<ModelRole, string>>;
-  model_roles: ModelRole[];
+  key_source: Record<KeyPool, KeySource>;
+  single_keys: Record<KeyPool, { sha256: string; tail: string } | null>;
+  providers: Partial<Record<string, Provider>>;
+  models: Partial<Record<string, string>>;
+  model_roles: string[];
   updated_by?: string;
   updated_at?: string;
 }
 
-const ROLE_META: Record<ModelRole, { label: string; desc: string; icon: typeof Cpu; placeholder: string }> = {
+interface ModelsResponse {
+  ok: boolean;
+  gemini: string[];
+  openrouter: string[];
+  live: boolean;
+}
+
+const ROLE_META: Record<string, { label: string; desc: string; icon: typeof Cpu; placeholder: string }> = {
   chat: {
     label: "Chat",
-    desc: "ตอบแชทลูกค้า (answer / answer_with_kb / answer_general)",
+    desc: "ตอบแชทลูกค้า",
     icon: MessageSquare,
     placeholder: "gemini-3.5-flash-lite",
   },
   vision: {
     label: "Vision",
-    desc: "อ่านรูป/วิดีโอที่ลูกค้าส่ง",
+    desc: "อ่านรูป/วิดีโอลูกค้า",
     icon: Eye,
     placeholder: "gemini-3.1-flash-lite",
   },
   intent: {
     label: "Intent",
-    desc: "จำแนกเจตนาข้อความก่อน route",
+    desc: "จำแนกเจตนาก่อน route",
     icon: ScanSearch,
     placeholder: "gemini-3.1-flash-lite",
   },
   openrouter_search: {
-    label: "Web Search (OpenRouter)",
-    desc: "สกัดคำตอบจากเว็บเมื่อสินค้า/KB ไม่พอ",
+    label: "Web Search",
+    desc: "OpenRouter · ต้องลงท้าย :online",
     icon: Globe,
     placeholder: "google/gemini-2.5-flash:online",
   },
 };
-
-const GEMINI_MODELS = [
-  "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.5-pro",
-  "gemini-3.1-flash-lite", "gemini-3.1-flash", "gemini-3.1-pro",
-  "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash",
-];
-const OPENROUTER_MODELS = [
-  "google/gemini-3.5-flash-lite", "google/gemini-3.1-flash-lite",
-  "google/gemini-2.5-flash:online", "google/gemini-2.5-flash",
-  "google/gemini-2.0-flash-001", "openai/gpt-4o-mini", "anthropic/claude-haiku-4.5",
-];
+const roleMeta = (r: string) =>
+  ROLE_META[r] ?? { label: r, desc: "role เพิ่มเติมจาก config", icon: Sparkles, placeholder: "" };
 
 /* ------------------------------------------------------------------ */
 /* SearchableSelect — combobox พิมพ์ค้นหาได้ + ใส่ค่าเองได้              */
@@ -143,10 +145,10 @@ function SearchableSelect({
         type="button"
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-left font-mono text-sm text-text transition-colors hover:border-accent/50 disabled:opacity-50"
+        className="flex w-full items-center justify-between gap-2 rounded-md border border-border bg-surface px-2.5 py-1.5 text-left font-mono text-[13px] text-text transition-colors hover:border-accent/50 disabled:opacity-50"
       >
         <span className="truncate">{value || <span className="text-text-subtle">{placeholder}</span>}</span>
-        <ChevronDown size={14} className={`shrink-0 text-text-muted transition-transform ${open ? "rotate-180" : ""}`} />
+        <ChevronDown size={13} className={`shrink-0 text-text-muted transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       {open && (
         <div ref={menuRef} style={menuStyle}
@@ -171,7 +173,7 @@ function SearchableSelect({
             <OptionRow
               active={!value}
               label={placeholder}
-              sub="ค่า default จาก env"
+              sub="env default"
               onClick={() => { onPick(""); setOpen(false); }}
             />
             {filtered.map((o) => (
@@ -179,7 +181,7 @@ function SearchableSelect({
                 onClick={() => { onPick(o.value); setOpen(false); }} />
             ))}
             {custom && (
-              <OptionRow label={`ใช้ "${custom}"`} sub="custom — ไม่มีใน list" accent
+              <OptionRow label={`ใช้ "${custom}"`} sub="custom" accent
                 onClick={() => { onPick(custom); setOpen(false); }} />
             )}
             {!filtered.length && !custom && (
@@ -198,9 +200,9 @@ function OptionRow({ label, sub, active, accent, onClick }: {
 }) {
   return (
     <button type="button" onClick={onClick}
-      className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-surface-2">
+      className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-surface-2">
       <span className="w-4 shrink-0">{active && <Check size={14} className="text-accent" />}</span>
-      <span className={`min-w-0 flex-1 truncate font-mono text-sm ${accent ? "text-accent" : "text-text"}`}>{label}</span>
+      <span className={`min-w-0 flex-1 truncate font-mono text-[13px] ${accent ? "text-accent" : "text-text"}`}>{label}</span>
       {sub && <span className="shrink-0 text-[11px] text-text-subtle">{sub}</span>}
     </button>
   );
@@ -216,9 +218,14 @@ export default function LlmConfigPage() {
   const [loading, setLoading] = useState(true);
   const [keys, setKeys] = useState<MaskedKey[]>([]);
   const [orKeys, setOrKeys] = useState<MaskedKey[]>([]);
-  const [models, setModels] = useState<Partial<Record<ModelRole, string>>>({});
+  const [keySource, setKeySource] = useState<Record<KeyPool, KeySource>>({ gemini: "db", openrouter: "db" });
+  const [singleKeys, setSingleKeys] = useState<LlmConfigResponse["single_keys"]>({ gemini: null, openrouter: null });
+  const [providers, setProviders] = useState<Partial<Record<string, Provider>>>({});
+  const [models, setModels] = useState<Partial<Record<string, string>>>({});
+  const [roles, setRoles] = useState<string[]>([]);
   const [meta, setMeta] = useState<{ updated_by?: string; updated_at?: string }>({});
   const [saving, setSaving] = useState(false);
+  const [avail, setAvail] = useState<ModelsResponse>({ ok: false, gemini: [], openrouter: [], live: false });
 
   const allowed = canEditPage(user, "llm");
 
@@ -228,7 +235,11 @@ export default function LlmConfigPage() {
       const r = await api().get<LlmConfigResponse>("/llm-config");
       setKeys(r.data.keys ?? []);
       setOrKeys(r.data.openrouter_keys ?? []);
+      setKeySource(r.data.key_source ?? { gemini: "db", openrouter: "db" });
+      setSingleKeys(r.data.single_keys ?? { gemini: null, openrouter: null });
+      setProviders(r.data.providers ?? {});
       setModels(r.data.models ?? {});
+      setRoles(r.data.model_roles ?? Object.keys(ROLE_META));
       setMeta({ updated_by: r.data.updated_by, updated_at: r.data.updated_at });
     } catch (e) {
       catchError(e, "โหลด config ไม่สำเร็จ");
@@ -237,7 +248,14 @@ export default function LlmConfigPage() {
     }
   }, [catchError]);
 
-  useEffect(() => { if (allowed) load(); }, [allowed, load]);
+  const loadModels = useCallback(async () => {
+    try {
+      const r = await api().get<ModelsResponse>("/llm-config/models");
+      setAvail(r.data);
+    } catch { /* dropdown จะใช้ custom input ได้อยู่ */ }
+  }, []);
+
+  useEffect(() => { if (allowed) { load(); loadModels(); } }, [allowed, load, loadModels]);
 
   async function mutate(body: Record<string, unknown>, okMsg: string) {
     setSaving(true);
@@ -250,20 +268,50 @@ export default function LlmConfigPage() {
 
   /* ---- models ---- */
 
-  async function pickModel(role: ModelRole, value: string) {
+  async function pickModel(role: string, value: string) {
     const cur = models[role] ?? "";
     if (value === cur) return;
-    const label = ROLE_META[role].label;
+    const label = roleMeta(role).label;
     const ok = await confirm.ask({
       title: `เปลี่ยน model — ${label}`,
       message: value
-        ? `${cur || `(default: ${ROLE_META[role].placeholder})`} → ${value}\nมีผลใน ~10 วินาที`
-        : `กลับไปใช้ default จาก env (${ROLE_META[role].placeholder})`,
+        ? `${cur || `(default: ${roleMeta(role).placeholder})`} → ${value}\nมีผลใน ~10 วินาที`
+        : `กลับไปใช้ default จาก env (${roleMeta(role).placeholder})`,
       confirmText: "เปลี่ยน",
     });
     if (!ok) return;
     await mutate({ models: { [role]: value } },
       value ? `${label} → ${value}` : `${label} กลับเป็น env default`);
+  }
+
+  async function pickProvider(role: string, p: Provider) {
+    const cur = providers[role] ?? "gemini";
+    if (p === cur) return;
+    const ok = await confirm.ask({
+      title: `สลับ provider — ${roleMeta(role).label}`,
+      message: p === "openrouter"
+        ? `role นี้จะ call ผ่าน OpenRouter (model เดิม map เป็น google/…) — OpenRouter พัง → fallback Gemini อัตโนมัติ`
+        : "role นี้จะกลับไป call Gemini โดยตรง",
+      confirmText: "สลับ",
+      variant: p === "openrouter" ? "primary" : "primary",
+    });
+    if (!ok) return;
+    await mutate({ providers: { [role]: p } },
+      `${roleMeta(role).label} → ${p === "openrouter" ? "OpenRouter" : "Gemini"}`);
+  }
+
+  async function setAllProviders(p: Provider) {
+    const ok = await confirm.ask({
+      title: p === "openrouter" ? "สลับทุก role ไป OpenRouter?" : "สลับทุก role กลับ Gemini?",
+      message: p === "openrouter"
+        ? "chat / vision / intent ทั้งหมดจะ call ผ่าน OpenRouter ด้วย model เดิม — พัง → fallback Gemini ต่อ role"
+        : "ทุก role กลับไป call Gemini โดยตรง",
+      confirmText: "สลับทั้งหมด",
+      variant: p === "openrouter" ? "danger" : "primary",
+    });
+    if (!ok) return;
+    await mutate({ set_all_providers: p },
+      p === "openrouter" ? "ทุก role → OpenRouter" : "ทุก role → Gemini");
   }
 
   if (!allowed) {
@@ -277,10 +325,14 @@ export default function LlmConfigPage() {
     );
   }
 
+  const allOpenRouter = ["chat", "vision", "intent"].every(
+    (r) => (providers[r] ?? "gemini") === "openrouter"
+  );
+
   return (
     <PageShell
       title="LLM & API Keys"
-      subtitle="ปรับ model และจัดการ Gemini key pool แบบสด — bot อ่าน config ทุก ~10 วินาที ไม่ต้อง restart"
+      subtitle="สลับ provider/key/model สด — bot อ่าน config ทุก ~10 วินาที"
       actions={
         <Button variant="secondary" size="sm" onClick={load} disabled={loading}>
           <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
@@ -290,59 +342,115 @@ export default function LlmConfigPage() {
       {loading ? (
         <div className="flex justify-center py-16"><Loading size={28} /></div>
       ) : (
-        <div className="grid gap-4">
-          <KeyPoolCard
-            title="Gemini key pool"
-            icon={KeyRound}
-            pool="gemini"
-            prefix="GEMINI_API_KEY"
-            keys={keys}
-            saving={saving}
-            mutate={mutate}
-            envHint="GEMINI_API_KEY_*"
-            desc="bot หมุนใช้เฉพาะ key ที่เปิดอยู่ทุก request"
-            keyPlaceholder="วาง Gemini API key (AIza...)"
-          />
-
-          <KeyPoolCard
-            title="OpenRouter key pool"
-            icon={Globe}
-            pool="openrouter"
-            prefix="OPENROUTER_API_KEY"
-            keys={orKeys}
-            saving={saving}
-            mutate={mutate}
-            envHint="OPENROUTER_API_KEY"
-            desc="ใช้กับ web search fallback เมื่อสินค้า/KB ไม่พอ — หมุน round-robin เหมือนกัน"
-            keyPlaceholder="วาง OpenRouter API key (sk-or-...)"
-          />
-
-          {/* ---- Models ---- */}
-          <Card className="p-4 sm:p-5">
-            <div className="mb-1 flex items-center gap-2">
-              <Cpu size={16} className="text-accent" />
-              <h2 className="font-semibold text-text">Models ต่อ role</h2>
+        <div className="grid gap-3">
+          {/* ---- master provider strip ---- */}
+          <Card className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+            <div className="flex items-center gap-2 text-sm">
+              <Cpu size={15} className="text-accent" />
+              <span className="font-medium text-text">Provider หลัก</span>
+              <span className="text-xs text-text-muted">call LLM ผ่าน Gemini โดยตรง หรือผ่าน OpenRouter (model เดิม)</span>
             </div>
-            <p className="mb-4 text-xs text-text-muted">
-              เลือกจาก list หรือพิมพ์ชื่อเอง · ว่าง = env default · 429 ที่ model หลัก fallback ข้าม 3.5↔3.1 อัตโนมัติ
+            <div className="flex items-center gap-2">
+              <Badge tone={allOpenRouter ? "warning" : "success"}>
+                {allOpenRouter ? "OpenRouter ทั้งหมด" : "Gemini"}
+              </Badge>
+              <ToggleSwitch
+                enabled={allOpenRouter}
+                onChange={() => setAllProviders(allOpenRouter ? "gemini" : "openrouter")}
+                disabled={saving}
+                ariaLabel="สลับ provider ทั้งหมด"
+              />
+            </div>
+          </Card>
+
+          {/* ---- key pools — 2 cols บน lg ---- */}
+          <div className="grid gap-3 lg:grid-cols-2">
+            <KeyPoolCard
+              title="Gemini keys"
+              icon={KeyRound}
+              pool="gemini"
+              prefix="GEMINI_API_KEY"
+              keys={keys}
+              source={keySource.gemini}
+              single={singleKeys.gemini}
+              saving={saving}
+              mutate={mutate}
+              envHint="GEMINI_API_KEY_*"
+              keyPlaceholder="AIza..."
+            />
+            <KeyPoolCard
+              title="OpenRouter keys"
+              icon={Globe}
+              pool="openrouter"
+              prefix="OPENROUTER_API_KEY"
+              keys={orKeys}
+              source={keySource.openrouter}
+              single={singleKeys.openrouter}
+              saving={saving}
+              mutate={mutate}
+              envHint="OPENROUTER_API_KEY"
+              keyPlaceholder="sk-or-..."
+            />
+          </div>
+
+          {/* ---- models + provider per role ---- */}
+          <Card className="p-4">
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Cpu size={15} className="text-accent" />
+                <h2 className="text-sm font-semibold text-text">Models ต่อ role</h2>
+              </div>
+              {avail.live === false && avail.gemini.length > 0 && (
+                <span className="text-[11px] text-text-subtle">list แบบ fallback (provider API ไม่ตอบ)</span>
+              )}
+            </div>
+            <p className="mb-3 text-[11px] text-text-muted">
+              G = Gemini โดยตรง · OR = ผ่าน OpenRouter (model เดิม, พัง→fallback Gemini) · ว่าง = env default
             </p>
 
-            <div className="grid gap-3">
-              {(Object.keys(ROLE_META) as ModelRole[]).map((role) => {
-                const m = ROLE_META[role];
+            <div className="grid gap-2">
+              {roles.map((role) => {
+                const m = roleMeta(role);
                 const Icon = m.icon;
-                const opts = (role === "openrouter_search" ? OPENROUTER_MODELS : GEMINI_MODELS)
-                  .map((v) => ({ value: v, label: v }));
                 const cur = models[role] ?? "";
+                const isSearch = role === "openrouter_search";
+                const provider = providers[role] ?? "gemini";
+                const opts = isSearch
+                  ? avail.openrouter.map((v) => ({ value: `${v}:online`, label: `${v}:online` }))
+                  : (provider === "openrouter" ? avail.openrouter : avail.gemini)
+                      .map((v) => ({ value: v, label: v }));
                 return (
                   <div key={role}
-                    className="grid gap-2 rounded-lg border border-border px-3.5 py-3 sm:grid-cols-[200px_1fr] sm:items-center sm:gap-3">
-                    <div className="flex items-center gap-2.5">
-                      <Icon size={16} className="shrink-0 text-text-muted" />
+                    className="grid items-center gap-2 rounded-md border border-border px-3 py-2 sm:grid-cols-[160px_72px_1fr]">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Icon size={14} className="shrink-0 text-text-muted" />
                       <div className="min-w-0">
-                        <div className="text-sm font-medium text-text">{m.label}</div>
-                        <div className="text-[11px] leading-tight text-text-subtle">{m.desc}</div>
+                        <div className="truncate text-[13px] font-medium text-text">{m.label}</div>
+                        <div className="truncate text-[10px] text-text-subtle">{m.desc}</div>
                       </div>
+                    </div>
+                    <div>
+                      {isSearch ? (
+                        <span className="text-[10px] font-mono text-text-subtle">OR only</span>
+                      ) : (
+                        <div className="inline-flex overflow-hidden rounded-md border border-border text-[10px] font-semibold">
+                          {(["gemini", "openrouter"] as Provider[]).map((p) => (
+                            <button
+                              key={p}
+                              type="button"
+                              disabled={saving}
+                              onClick={() => pickProvider(role, p)}
+                              className={`px-2 py-1 transition-colors ${
+                                provider === p
+                                  ? "bg-accent text-white"
+                                  : "bg-surface text-text-muted hover:bg-surface-2"
+                              }`}
+                            >
+                              {p === "gemini" ? "G" : "OR"}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     <SearchableSelect
                       value={cur}
@@ -369,21 +477,28 @@ export default function LlmConfigPage() {
 }
 
 /* ------------------------------------------------------------------ */
-/* KeyPoolCard — list จัดการ key 1 pool (gemini | openrouter)           */
+/* KeyPoolCard — source env|db|single + list จัดการ key 1 pool          */
 /* ------------------------------------------------------------------ */
 
+const SOURCE_LABEL: Record<KeySource, string> = {
+  env: ".env",
+  db: "MongoDB",
+  single: "key เดียว",
+};
+
 function KeyPoolCard({
-  title, icon: Icon, pool, prefix, keys, saving, mutate, envHint, desc, keyPlaceholder,
+  title, icon: Icon, pool, prefix, keys, source, single, saving, mutate, envHint, keyPlaceholder,
 }: {
   title: string;
   icon: typeof KeyRound;
   pool: KeyPool;
   prefix: string;
   keys: MaskedKey[];
+  source: KeySource;
+  single: { sha256: string; tail: string } | null;
   saving: boolean;
   mutate: (body: Record<string, unknown>, okMsg: string) => Promise<void>;
   envHint: string;
-  desc: string;
   keyPlaceholder: string;
 }) {
   const [adding, setAdding] = useState(false);
@@ -391,8 +506,25 @@ function KeyPoolCard({
   const [newName, setNewName] = useState("");
   const [editingSha, setEditingSha] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  const [singleDraft, setSingleDraft] = useState("");
+  const [editingSingle, setEditingSingle] = useState(false);
 
   const activeCount = keys.filter((k) => k.enabled).length;
+
+  async function changeSource(s: KeySource) {
+    if (s === source) return;
+    const ok = await confirm.ask({
+      title: `เปลี่ยนแหล่ง ${title} → ${SOURCE_LABEL[s]}?`,
+      message:
+        s === "env" ? `bot จะใช้ ${envHint} จาก .env เท่านั้น (list ใน DB ถูกข้าม)`
+        : s === "db" ? "bot จะหมุนใช้ key ที่เปิดอยู่ใน list นี้"
+        : `bot จะใช้ key เดียวที่ตั้งไว้บน MongoDB (${prefix})`,
+      confirmText: "เปลี่ยน",
+      variant: s === "env" ? "primary" : "primary",
+    });
+    if (!ok) return;
+    await mutate({ set_source: { pool, source: s } }, `${title} → ${SOURCE_LABEL[s]}`);
+  }
 
   async function addKey() {
     const v = newKey.trim();
@@ -408,13 +540,11 @@ function KeyPoolCard({
     const toEnabled = !k.enabled;
     const enabledAfter = keys.filter((x) => x.enabled && x.sha256 !== k.sha256).length;
     const warn = !toEnabled && enabledAfter === 0
-      ? ` ⚠️ นี่คือ key ที่เปิดอยู่ตัวสุดท้าย — ปิดแล้ว bot จะ fallback ไปใช้ ${envHint} จาก .env`
+      ? ` ⚠️ key เปิดอยู่ตัวสุดท้าย — ปิดแล้ว bot จะ fallback ไป ${envHint}`
       : "";
     const ok = await confirm.ask({
       title: toEnabled ? `เปิดใช้ ${k.name}?` : `ปิดใช้ ${k.name}?`,
-      message: toEnabled
-        ? "key นี้จะถูกหยิบเข้า rotation ใน ~10 วินาที"
-        : `bot จะหยุดใช้ key นี้ใน ~10 วินาที${warn}`,
+      message: `bot จะ${toEnabled ? "หยิบ key นี้เข้า rotation" : "หยุดใช้ key นี้"}ใน ~10 วินาที${warn}`,
       confirmText: toEnabled ? "เปิดใช้" : "ปิดใช้",
       variant: toEnabled ? "primary" : "danger",
     });
@@ -426,7 +556,7 @@ function KeyPoolCard({
   async function removeKey(k: MaskedKey) {
     const ok = await confirm.ask({
       title: `ลบ ${k.name}?`,
-      message: `sha256:${k.sha256} (••••${k.tail}) — ลบออกจาก pool ถาวร bot จะหยุดใช้ใน ~10 วินาที`,
+      message: `sha256:${k.sha256} (••••${k.tail}) — ลบออกจาก pool ถาวร`,
       confirmText: "ลบ",
       variant: "danger",
     });
@@ -441,107 +571,176 @@ function KeyPoolCard({
     await mutate({ pool, rename: [{ sha256: k.sha256, name }] }, `เปลี่ยนชื่อเป็น ${name} แล้ว`);
   }
 
+  async function saveSingle() {
+    const v = singleDraft.trim();
+    if (v.length <= 10) { toast.error("key สั้นเกินไป"); return; }
+    const ok = await confirm.ask({
+      title: `ตั้ง ${prefix} บน MongoDB?`,
+      message: `source "key เดียว" จะใช้ key นี้ — เก็บ plaintext ใน DB`,
+      confirmText: "บันทึก",
+    });
+    if (!ok) return;
+    await mutate({ set_single: { pool, value: v } }, `บันทึก ${prefix} แล้ว`);
+    setSingleDraft(""); setEditingSingle(false);
+  }
+
   return (
-    <Card className="p-4 sm:p-5">
-      <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <Icon size={16} className="text-accent" />
-          <h2 className="font-semibold text-text">{title}</h2>
-          <Badge tone={keys.length ? "success" : "neutral"}>
-            {keys.length ? `${activeCount}/${keys.length} เปิดใช้` : "env fallback"}
-          </Badge>
+    <Card className="p-4">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <Icon size={15} className="shrink-0 text-accent" />
+          <h2 className="truncate text-sm font-semibold text-text">{title}</h2>
+          {source === "db" && (
+            <Badge tone={keys.length ? "success" : "neutral"}>
+              {keys.length ? `${activeCount}/${keys.length} เปิด` : "ว่าง"}
+            </Badge>
+          )}
         </div>
-        <Button variant="secondary" size="sm" onClick={() => {
-          setAdding((a) => !a);
-          setNewName(`${prefix}_${keys.length + 1}`);
-        }}>
-          <Plus size={14} /> เพิ่ม key
-        </Button>
-      </div>
-      <p className="mb-4 text-xs text-text-muted">
-        {desc} · list ว่าง/ปิดหมด = fallback ไป <code>{envHint}</code> ใน .env
-      </p>
-
-      {adding && (
-        <div className="mb-4 grid gap-2 rounded-lg border border-accent/40 bg-accent-soft/40 p-3 sm:grid-cols-[180px_1fr_auto]">
-          <Input
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            placeholder="ชื่อ key"
-            className="font-mono text-sm"
-          />
-          <Input
-            value={newKey}
-            onChange={(e) => setNewKey(e.target.value)}
-            placeholder={keyPlaceholder}
-            type="password"
-            autoComplete="off"
-            className="font-mono text-sm"
-          />
-          <div className="flex gap-2">
-            <Button size="sm" onClick={addKey} disabled={saving || !newKey.trim()}>เพิ่ม</Button>
-            <Button size="sm" variant="ghost" onClick={() => setAdding(false)}>ยกเลิก</Button>
-          </div>
-        </div>
-      )}
-
-      {keys.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-text-muted">
-          ยังไม่มี key ใน DB — bot ใช้ {envHint} จาก .env อยู่
-        </div>
-      ) : (
-        <ul className="divide-y divide-border">
-          {keys.map((k) => (
-            <li key={k.sha256} className={`py-2.5 transition-opacity ${k.enabled ? "" : "opacity-50"}`}>
-              <div className="flex items-center gap-2 sm:gap-3">
-                <ToggleSwitch
-                  enabled={k.enabled}
-                  onChange={() => toggleKey(k)}
-                  disabled={saving}
-                  size="sm"
-                  ariaLabel={k.enabled ? `ปิดใช้ ${k.name}` : `เปิดใช้ ${k.name}`}
-                />
-                <div className="min-w-0 flex-1">
-                  {editingSha === k.sha256 ? (
-                    <input
-                      autoFocus
-                      value={editName}
-                      onChange={(e) => setEditName(e.target.value)}
-                      onBlur={() => saveRename(k)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") saveRename(k);
-                        if (e.key === "Escape") setEditingSha(null);
-                      }}
-                      className="w-full max-w-xs rounded-md border border-accent bg-surface px-2 py-0.5 font-mono text-sm text-text outline-none"
-                    />
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => { setEditingSha(k.sha256); setEditName(k.name); }}
-                      className="group flex max-w-full items-center gap-1.5 text-left"
-                      title="คลิกเพื่อแก้ชื่อ"
-                    >
-                      <span className="truncate font-mono text-sm font-medium text-text">{k.name}</span>
-                      <Pencil size={11} className="shrink-0 text-text-subtle opacity-0 transition-opacity group-hover:opacity-100" />
-                    </button>
-                  )}
-                  <code className="block truncate text-[11px] text-text-subtle">
-                    sha256:{k.sha256} · ••••{k.tail}
-                  </code>
-                </div>
-                <Button variant="ghost" size="icon" onClick={() => removeKey(k)} disabled={saving} aria-label={`ลบ ${k.name}`}>
-                  <Trash2 size={15} className="text-error" />
-                </Button>
-              </div>
-            </li>
+        {/* source segmented: env | MongoDB | key เดียว */}
+        <div className="inline-flex overflow-hidden rounded-md border border-border text-[10px] font-semibold">
+          {(["env", "db", "single"] as KeySource[]).map((s) => (
+            <button
+              key={s}
+              type="button"
+              disabled={saving}
+              onClick={() => changeSource(s)}
+              className={`px-2 py-1 transition-colors ${
+                source === s ? "bg-accent text-white" : "bg-surface text-text-muted hover:bg-surface-2"
+              }`}
+            >
+              {SOURCE_LABEL[s]}
+            </button>
           ))}
-        </ul>
+        </div>
+      </div>
+
+      {source === "env" && (
+        <div className="rounded-md border border-dashed border-border px-3 py-4 text-center text-xs text-text-muted">
+          ใช้ <code>{envHint}</code> จาก .env — list ใน DB ถูกข้าม
+        </div>
       )}
 
-      <p className="mt-3 flex items-start gap-1.5 text-[11px] leading-relaxed text-warning-dark">
-        <ShieldAlert size={13} className="mt-0.5 shrink-0" />
-        keys ถูกเก็บใน MongoDB แบบ plaintext (bot ต้องใช้จริง) — หน้านี้แสดงแค่ hash + 4 ตัวท้าย และจำกัดเฉพาะ dev
-      </p>
+      {source === "single" && (
+        <div className="rounded-md border border-border px-3 py-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <code className="text-[13px] font-mono font-medium text-text">{prefix}</code>
+              <code className="block truncate text-[11px] text-text-subtle">
+                {single ? `sha256:${single.sha256} · ••••${single.tail}` : "ยังไม่ได้ตั้ง key"}
+              </code>
+            </div>
+            <Button variant="secondary" size="sm" onClick={() => { setEditingSingle((e) => !e); setSingleDraft(""); }}>
+              {editingSingle ? "ยกเลิก" : single ? "เปลี่ยน key" : "ตั้ง key"}
+            </Button>
+          </div>
+          {editingSingle && (
+            <div className="mt-2 flex gap-2">
+              <Input
+                value={singleDraft}
+                onChange={(e) => setSingleDraft(e.target.value)}
+                placeholder={keyPlaceholder}
+                type="password"
+                autoComplete="off"
+                className="flex-1 font-mono text-sm"
+              />
+              <Button size="sm" onClick={saveSingle} disabled={saving || !singleDraft.trim()}>บันทึก</Button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {source === "db" && (
+        <>
+          {adding && (
+            <div className="mb-3 grid gap-2 rounded-md border border-accent/40 bg-accent-soft/40 p-2.5 sm:grid-cols-[150px_1fr_auto]">
+              <Input
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder="ชื่อ key"
+                className="font-mono text-[13px]"
+              />
+              <Input
+                value={newKey}
+                onChange={(e) => setNewKey(e.target.value)}
+                placeholder={keyPlaceholder}
+                type="password"
+                autoComplete="off"
+                className="font-mono text-[13px]"
+              />
+              <div className="flex gap-1.5">
+                <Button size="sm" onClick={addKey} disabled={saving || !newKey.trim()}>เพิ่ม</Button>
+                <Button size="sm" variant="ghost" onClick={() => setAdding(false)}>ยกเลิก</Button>
+              </div>
+            </div>
+          )}
+
+          {keys.length === 0 ? (
+            <div className="rounded-md border border-dashed border-border px-3 py-4 text-center text-xs text-text-muted">
+              ยังไม่มี key — fallback ไป {envHint} ใน .env
+            </div>
+          ) : (
+            <ul className="divide-y divide-border">
+              {keys.map((k) => (
+                <li key={k.sha256} className={`py-2 transition-opacity ${k.enabled ? "" : "opacity-50"}`}>
+                  <div className="flex items-center gap-2">
+                    <ToggleSwitch
+                      enabled={k.enabled}
+                      onChange={() => toggleKey(k)}
+                      disabled={saving}
+                      size="sm"
+                      ariaLabel={k.enabled ? `ปิดใช้ ${k.name}` : `เปิดใช้ ${k.name}`}
+                    />
+                    <div className="min-w-0 flex-1">
+                      {editingSha === k.sha256 ? (
+                        <input
+                          autoFocus
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                          onBlur={() => saveRename(k)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") saveRename(k);
+                            if (e.key === "Escape") setEditingSha(null);
+                          }}
+                          className="w-full max-w-[200px] rounded border border-accent bg-surface px-1.5 py-0.5 font-mono text-[13px] text-text outline-none"
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => { setEditingSha(k.sha256); setEditName(k.name); }}
+                          className="group flex max-w-full items-center gap-1.5 text-left"
+                          title="คลิกเพื่อแก้ชื่อ"
+                        >
+                          <span className="truncate font-mono text-[13px] font-medium text-text">{k.name}</span>
+                          <Pencil size={10} className="shrink-0 text-text-subtle opacity-0 transition-opacity group-hover:opacity-100" />
+                        </button>
+                      )}
+                      <code className="block truncate text-[10px] text-text-subtle">
+                        sha256:{k.sha256} · ••••{k.tail}
+                      </code>
+                    </div>
+                    <Button variant="ghost" size="icon" onClick={() => removeKey(k)} disabled={saving} aria-label={`ลบ ${k.name}`}>
+                      <Trash2 size={14} className="text-error" />
+                    </Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="mt-3 flex items-center justify-between gap-2">
+            <p className="flex items-start gap-1 text-[10px] leading-relaxed text-warning-dark">
+              <ShieldAlert size={11} className="mt-0.5 shrink-0" />
+              เก็บ plaintext ใน MongoDB — แสดงแค่ hash+ท้าย
+            </p>
+            <Button variant="secondary" size="sm" onClick={() => {
+              setAdding((a) => !a);
+              setNewName(`${prefix}_${keys.length + 1}`);
+            }}>
+              <Plus size={13} /> เพิ่ม key
+            </Button>
+          </div>
+        </>
+      )}
     </Card>
   );
 }

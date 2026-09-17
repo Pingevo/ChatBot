@@ -223,6 +223,7 @@ def classify_intent(
                 "max_output_tokens": 250,
                 "response_mime_type": "application/json",
             },
+            role="intent",
         )
         raw = (response.text or "").strip()
         if not raw:

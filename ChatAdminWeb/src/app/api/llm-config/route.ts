@@ -23,6 +23,10 @@ export async function PUT(req: NextRequest) {
     remove_sha256?: string[];
     set_enabled?: { sha256: string; enabled: boolean }[];
     rename?: { sha256: string; name: string }[];
+    set_source?: { pool: "gemini" | "openrouter"; source: "env" | "db" | "single" };
+    set_single?: { pool: "gemini" | "openrouter"; value: string };
+    providers?: Record<string, "gemini" | "openrouter">;
+    set_all_providers?: "gemini" | "openrouter";
     models?: Record<string, string>;
   };
   try {
@@ -38,6 +42,10 @@ export async function PUT(req: NextRequest) {
         remove_sha256: body.remove_sha256,
         set_enabled: body.set_enabled,
         rename: body.rename,
+        set_source: body.set_source,
+        set_single: body.set_single,
+        providers: body.providers,
+        set_all_providers: body.set_all_providers,
         models: body.models,
       },
       r.ctx.admin.username || r.ctx.admin.email || "dev"

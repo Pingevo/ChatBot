@@ -32,16 +32,25 @@ _OR_KEY_INDEX = 0
 
 
 def _get_openrouter_key() -> str:
-    """OpenRouter key — pool จาก llm_config.openrouter_keys (UI /llm จัดการ) หมุน round-robin
-    ไม่มี/DB ล่ม → env OPENROUTER_API_KEY เหมือนเดิม"""
+    """OpenRouter key ตาม key_source.openrouter: env=env เท่านั้น / single=single_keys.openrouter
+    db=list หมุน round-robin (default) — ว่าง/DB ล่ม → env OPENROUTER_API_KEY เหมือนเดิม"""
     global _OR_KEY_INDEX
     try:
         from . import llm as _llm
-        pool = _llm.get_key_pool("openrouter_keys")
-        if pool:
-            k = pool[_OR_KEY_INDEX % len(pool)]
-            _OR_KEY_INDEX = (_OR_KEY_INDEX + 1) % len(pool)
-            return k
+        cfg = _llm.get_llm_config()
+        src = (cfg.get("key_source") or {}).get("openrouter", "db")
+        if src == "env":
+            return os.environ.get("OPENROUTER_API_KEY", "").strip()
+        if src == "single":
+            v = str((cfg.get("single_keys") or {}).get("openrouter") or "").strip()
+            if v:
+                return v
+        else:
+            pool = _llm.get_key_pool("openrouter_keys")
+            if pool:
+                k = pool[_OR_KEY_INDEX % len(pool)]
+                _OR_KEY_INDEX = (_OR_KEY_INDEX + 1) % len(pool)
+                return k
     except Exception:
         pass
     return os.environ.get("OPENROUTER_API_KEY", "").strip()
