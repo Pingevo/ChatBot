@@ -8,6 +8,7 @@ import { Loading } from "@/components/ui/Loading";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { PageShell } from "@/components/ui/PageShell";
 import { Power, Users } from "lucide-react";
+import { ModalSelect } from "@/components/ui/ModalSelect";
 import { Avatar } from "@/components/ui/Avatar";
 import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
@@ -28,6 +29,7 @@ interface UserRow {
 export default function UsersPage() {
   const { user } = useAuth();
   const [users, setUsers] = useState<UserRow[]>([]);
+  const [roleOptions, setRoleOptions] = useState<{ key: string; label: string }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [canEditFlag, setCanEditFlag] = useState(false);
@@ -37,8 +39,9 @@ export default function UsersPage() {
     setLoading(true);
     setError(null);
     try {
-      const r = await api().get<{ users: UserRow[]; canEdit: boolean }>("/users/list");
+      const r = await api().get<{ users: UserRow[]; roles: { key: string; label: string }[]; canEdit: boolean }>("/users/list");
       setUsers(r.data.users);
+      setRoleOptions(r.data.roles ?? []);
       setCanEditFlag(r.data.canEdit);
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "โหลดรายการไม่สำเร็จ";
@@ -72,6 +75,51 @@ export default function UsersPage() {
     }
   }
 
+  // assign role — dev:ทุก role / superadmin:ทุก role ยกเว้น dev / อื่นๆ:ไม่ได้ (server enforce อีกชั้น)
+  const myRole = user?.role ?? "";
+  const assignable = myRole === "dev"
+    ? roleOptions
+    : myRole === "superadmin"
+      ? roleOptions.filter((r) => r.key !== "dev")
+      : [];
+
+  function roleCell(u: UserRow) {
+    const canAssignThis =
+      assignable.length > 0 &&
+      u.admin_id !== user?.admin_id &&
+      !(u.role === "dev" && myRole !== "dev"); // non-dev ห้ามแตะ user ที่เป็น dev
+    if (!canAssignThis) {
+      return <Badge tone={roleTone(u.role)}>{u.role}</Badge>;
+    }
+    return (
+      <ModalSelect
+        value={u.role}
+        options={assignable.map((r) => ({ value: r.key, label: r.label !== r.key ? `${r.label} (${r.key})` : r.key }))}
+        onChange={(v) => handleAssignRole(u, v)}
+        fullWidth={false}
+        className="min-w-[130px]"
+      />
+    );
+  }
+
+  async function handleAssignRole(u: UserRow, newRole: string) {
+    if (newRole === u.role) return;
+    const ok = await confirm.ask({
+      title: "เปลี่ยน role?",
+      message: `"${u.name || u.username}" : ${u.role} → ${newRole} — สิทธิ์ทุกหน้าจะเปลี่ยนตาม matrix ทันที`,
+      confirmText: "เปลี่ยน role",
+      variant: newRole === "dev" || u.role === "dev" ? "danger" : "primary",
+    });
+    if (!ok) return;
+    try {
+      await api().patch(`/users/${u.admin_id}`, { role: newRole });
+      await loadUsers();
+      toast.success(`เปลี่ยน "${u.name || u.username}" เป็น ${newRole} แล้ว`);
+    } catch (e: unknown) {
+      catchError(e, "เปลี่ยน role ไม่สำเร็จ");
+    }
+  }
+
   // Access control
   if (!canAccessPage(user, "user")) {
     return (
@@ -102,7 +150,7 @@ export default function UsersPage() {
       {/* Info banner */}
       <div className="bg-pale-sky-soft rounded-lg px-4 py-3 text-sm text-text-muted">
         ผู้ใช้ใหม่ login ผ่าน SSO แล้วจะถูกสร้างเป็น <Badge tone="neutral">admin</Badge> อัตโนมัติ
-        — หากต้องการเปลี่ยน role เป็น superadmin หรือ dev ให้แก้ใน collection <code className="text-brand">admins</code> โดยตรง
+        — dev assign ได้ทุก role · superadmin assign ได้ทุก role ยกเว้น dev · role อื่น assign ไม่ได้
       </div>
 
       {/* User list — card บนจอ <lg, ตารางบนจอ lg+ */}
@@ -134,7 +182,7 @@ export default function UsersPage() {
                   </div>
                   <div className="flex items-center gap-2">
                     <dt className="w-28 flex-shrink-0 text-text-muted">บทบาท</dt>
-                    <dd><Badge tone={roleTone(u.role)}>{u.role}</Badge></dd>
+                    <dd>{roleCell(u)}</dd>
                   </div>
                   <div className="flex gap-2">
                     <dt className="w-28 flex-shrink-0 text-text-muted">เข้าระบบล่าสุด</dt>
@@ -187,7 +235,7 @@ export default function UsersPage() {
                         <div className="text-xs text-text-subtle">@{u.username}</div>
                       </td>
                       <td className="px-4 py-3 text-text-muted">{u.email}</td>
-                      <td className="px-4 py-3"><Badge tone={roleTone(u.role)}>{u.role}</Badge></td>
+                      <td className="px-4 py-3">{roleCell(u)}</td>
                       <td className="px-4 py-3">
                         {u.active ? <Badge tone="brand">ใช้งาน</Badge> : <Badge tone="red">ปิดใช้งาน</Badge>}
                       </td>

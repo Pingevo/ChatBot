@@ -140,6 +140,18 @@ export async function requireDev(req: NextRequest): Promise<
  *   - nobody can edit superadmin or dev via the user management UI
  *   - nobody can edit themselves via this path (use settings)
  */
+/**
+ * Role assignment rules:
+ *   dev        → assign ได้ทุก role
+ *   superadmin → assign ได้ทุก role ยกเว้น "dev"
+ *   role อื่น  → ไม่มีสิทธิ์ assign เลย
+ */
+export function canAssignRole(actorRole: string, newRole: string): boolean {
+  if (actorRole === "dev") return true;
+  if (actorRole === "superadmin") return newRole !== "dev";
+  return false;
+}
+
 export function canEditTarget(actor: AdminDoc, target: AdminDoc): boolean {
   if (actor.role !== "superadmin" && actor.role !== "dev") return false;
   if (target.role !== "admin") return false;

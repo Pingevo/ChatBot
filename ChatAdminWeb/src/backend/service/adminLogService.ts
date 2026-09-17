@@ -21,6 +21,7 @@ export type AdminActionType =
   | "user.update"
   | "user.delete"
   | "user.toggle_active"
+  | "user.assign_role"
   | "user.reset_password"
   | "ticket.create"
   | "ticket.update"

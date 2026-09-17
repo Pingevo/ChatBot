@@ -222,10 +222,11 @@ export async function toggleAdminActive(adminId: string, active: boolean): Promi
 
 export async function updateAdminProfile(
   adminId: string,
-  fields: { name?: string; username?: string; channels_access?: string[]; is_accepting_chats?: boolean; bubble_color?: string }
+  fields: { name?: string; username?: string; channels_access?: string[]; is_accepting_chats?: boolean; bubble_color?: string; role?: string }
 ): Promise<boolean> {
   const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
   const update: Record<string, unknown> = {};
+  if (fields.role !== undefined) update.role = fields.role;
   if (fields.name !== undefined) update.name = fields.name;
   if (fields.username !== undefined) update.username = fields.username;
   if (fields.channels_access !== undefined) update.channels_access = fields.channels_access;

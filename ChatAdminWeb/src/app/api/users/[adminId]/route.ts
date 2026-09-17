@@ -1,10 +1,12 @@
-// PATCH /api/users/[adminId] — superadmin/dev updates an admin's profile (name, username, active)
+// PATCH /api/users/[adminId] — superadmin/dev updates an admin's profile (name, username, active, role)
 // DELETE /api/users/[adminId] — soft delete (superadmin/dev only, admin target only)
-// ⚠️ ไม่มีการเปลี่ยน role ผ่าน API แล้ว — แก้ role ใน collection ตรงๆ
+// ⚠️ role assign rules (canAssignRole): dev→ทุก role, superadmin→ทุก role ยกเว้น dev, อื่นๆ→ห้าม
+//    + ห้ามเปลี่ยน role ตัวเอง + เฉพาะ dev เปลี่ยน role ของ user ที่เป็น dev อยู่
 // ⚠️ active toggle ทำได้เฉพาะ admin role เท่านั้น (ป้องกัน superadmin lockout superadmin คนอื่น)
 import { NextRequest } from "next/server";
 import { auth } from "@/backend/service/authService";
-import { requireSuperadmin, canEditTarget } from "@/backend/middleware/authorize";
+import { requireSuperadmin, canEditTarget, canAssignRole } from "@/backend/middleware/authorize";
+import { getRolePermissions } from "@/backend/service/rolePermissionService";
 import { json, error, readJson } from "@/backend/lib/http";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 
@@ -54,6 +56,35 @@ export async function PATCH(
       target_admin_id: adminId,
       metadata: { changes: updates },
     });
+  }
+
+  // Role assignment — dev:ทุก role / superadmin:ทุก role ยกเว้น dev / อื่นๆ:ห้าม (requireSuperadmin กันอยู่แล้ว)
+  if (body.role !== undefined) {
+    const newRole = String(body.role).trim();
+    if (r.ctx.admin.admin_id === adminId)
+      return error("cannot change your own role", 403);
+    if (target.role === "dev" && r.ctx.admin.role !== "dev")
+      return error("only dev can change a dev user's role", 403);
+    if (!canAssignRole(r.ctx.admin.role, newRole))
+      return error(`role '${r.ctx.admin.role}' cannot assign '${newRole}'`, 403);
+    // ต้องเป็น role ที่มีจริงใน role_permissions
+    try {
+      const rp = await getRolePermissions();
+      if (!rp.roles.some((x) => x.key === newRole))
+        return error(`unknown role '${newRole}'`, 400);
+    } catch {
+      return error("cannot verify role list", 500);
+    }
+    if (newRole !== target.role) {
+      const okUpd = await auth.updateAdminProfile(adminId, { role: newRole });
+      if (!okUpd) return error("failed to update role", 500);
+      await logAdminEvent({
+        action_type: "user.assign_role",
+        actor: r.ctx.admin.admin_id,
+        target_admin_id: adminId,
+        metadata: { from: target.role, to: newRole },
+      });
+    }
   }
 
   // Active toggle — 🔒 ใช้ canEditTarget เพื่อป้องกัน superadmin lockout superadmin/dev คนอื่น

@@ -8527,3 +8527,20 @@ Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ต�
 - `/llm` — `KeyPoolCard` component ใช้ซ้ำ 2 card (Gemini + OpenRouter)
 
 **verify จริง:** tsc + py_compile ผ่าน, /llm compile ได้
+
+---
+
+## 2026-09-17 (ต่อ) — assign role ผ่าน /users + กฎสิทธิ์ (dev→ทุก role / superadmin→ยกเว้น dev / อื่น→ห้าม)
+
+**ทำไม:** เดิม role เปลี่ยนได้แค่แก้ collection ตรงๆ — user ขอ UI assign พร้อมกฎชัด
+
+**กฎ (canAssignRole ใน authorize.ts):** dev→ทุก role | superadmin→ทุก role ยกเว้น dev | role อื่น→403 (requireSuperadmin กันตั้งแต่ทางเข้า) + ห้ามเปลี่ยน role ตัวเอง + เฉพาะ dev เปลี่ยน role ของ user ที่เป็น dev อยู่ + validate role ต้องมีใน role_permissions.roles (custom role จาก /roles ใช้ได้เลย)
+
+**ไฟล์:**
+- `authorize.ts` — `canAssignRole(actorRole,newRole)` export
+- `authService.updateAdminProfile` — รับ `role`
+- `users/[adminId]` PATCH — block `body.role` แยกจาก canEditTarget (role change ≠ profile edit) + `user.assign_role` action_type ใหม่ใน adminLogService
+- `users/list` — คืน `roles` list สำหรับ dropdown
+- `/users` page — cell role เป็น ModalSelect เมื่อ actor assign ได้ (filter dev ออกถ้า actor=superadmin; target=dev ล็อกถ้า actor ไม่ใช่ dev) + confirm ก่อน PATCH + อัปเดต info banner
+
+**verify จริง:** tsc ผ่าน; logic canAssignRole ตรวจตา (trivial 3-branch); หน้า compile ได้
