@@ -244,11 +244,11 @@ def classify_intent(
     model_name = os.environ.get("INTENT_MODEL", "gemini-3.1-flash-lite")
 
     try:
-        client = _client()
-        response = client.models.generate_content(
-            model=model_name,
-            contents=user_prompt,
-            config={
+        from . import llm as _llm   # lazy — ใช้ quota manager ร่วมกัน (RPM/TPM/RPD + model fallback)
+        response = _llm._generate(
+            model_name,
+            user_prompt,
+            {
                 "system_instruction": _INTENT_PROMPT,
                 "temperature": 0.0,
                 "max_output_tokens": 250,

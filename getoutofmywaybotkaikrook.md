@@ -8436,3 +8436,21 @@ Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ต�
 **เคสที่รู้ว่ายัง:** fuzzy ไม่มี shop → prefix typo ยังหลุดได้ (ไม่มี fallback scope) — เป็น design เดิม; live compare :8010/:8015 ค้างรอ quota 15:00
 
 **Rollback:** ไม่มี flag เฉพาะ — ถ้าพัง revert commit; unit path ยังอยู่หลัง `USE_UNIT_INDEX` เหมือนเดิม
+
+---
+
+## 2026-09-17 (ต่อ) — single-key quota manager (llm.py + intent_classifier.py)
+
+**ทำไม:** เปลี่ยนจาก 9 keys round-robin → `GEMINI_API_KEY` key เดียว — ต้องบริหาร rate เอง (3.5-lite/3.1-lite: 500 req/day + 15 RPM + 250k TPM ต่อ model)
+
+**ทำแล้ว:**
+- `_acquire(model, est)` — sliding window 60s แยกต่อ model: RPM เต็ม → sleep จนหลุด; est tokens (chars/4 + max_output) เกิน TPM → รอ; daily counter persist `exports/.gemini_quota.json` (atomic os.replace); primary RPD เต็ม → auto ใช้ fallback model แทน; ทั้งคู่เต็ม → raise 429
+- `_generate(model, contents, config, est)` — wrapper เดียวครอบทุก call: acquire → call → record tokens จริงจาก usage_metadata → **429 → retry ครั้งเดียวด้วย model คู่ fallback** (3.5↔3.1 เป็น quota pool แยกกัน = capacity x2)
+- แพตช์ 5 call sites: describe_images / answer / answer_with_kb / answer_general + intent_classifier (lazy import llm — ไม่มี cycle)
+- env override: `GEMINI_RPM`/`GEMINI_TPM`/`GEMINI_RPD`
+
+**bug ที่เจอระหว่างทำ:** `_client().models.generate_content` (temporary ref) → GC ปิด shared httpx → "client has been closed" — ต้อง `client = _client()` เก็บ ref (เหมือนโค้ดเดิมทุก site)
+
+**verify จริง:** unit checks acquire/RPD/fallback ผ่าน; live call → `[QUOTA] 3.5 429 → fallback 3.1` ยิงจริง (3.1 ก็หมด → raise ต่อถูกต้อง); counter persist ทำงาน
+
+**ยังต้องทำ (user):** ตั้ง `GEMINI_API_KEY` (key เดียว) ใน .env + ลบ `_1.._9` + restart bot — process ที่รันอยู่ยังโค้ดเก่า (9 keys)

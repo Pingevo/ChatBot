@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any
 
 from google import genai
@@ -636,6 +637,124 @@ def _client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
+# ---- single-key quota manager -------------------------------------------------
+# key เดียว → ต้องบริหาร rate เอง: 15 RPM / 250k TPM / 500 RPD (ต่อ model)
+# 3.5-lite กับ 3.1-lite เป็น quota pool คนละอัน → 429 แล้ว fallback ข้าม model ได้
+_QUOTA_RPM = int(os.environ.get("GEMINI_RPM", "14"))        # เผื่อ 1 จาก 15
+_QUOTA_TPM = int(os.environ.get("GEMINI_TPM", "240000"))    # เผื่อ ~4% จาก 250k
+_QUOTA_RPD = int(os.environ.get("GEMINI_RPD", "480"))       # เผื่อ 20 จาก 500
+# model fallback map — pool แยกกัน
+_MODEL_FALLBACK = {
+    "gemini-3.5-flash-lite": "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite": "gemini-3.5-flash-lite",
+}
+_QUOTA_FILE = Path(__file__).resolve().parent.parent.parent / "exports" / ".gemini_quota.json"
+
+import threading as _threading
+import time as _time
+import datetime as _dt
+from collections import deque as _deque
+
+_q_lock = _threading.Lock()
+_q_req: dict[str, _deque] = {}          # model → deque[ts]  (60s window)
+_q_tok: dict[str, _deque] = {}          # model → deque[(ts, tokens)]
+_q_day: dict[str, dict[str, int]] = {}  # {date: {model: request_count}}
+
+
+def _load_quota_day() -> None:
+    try:
+        import json
+        if _QUOTA_FILE.exists():
+            _q_day.update(json.loads(_QUOTA_FILE.read_text()))
+    except Exception:
+        pass
+
+
+def _save_quota_day() -> None:
+    try:
+        import json
+        tmp = _QUOTA_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_q_day))
+        os.replace(tmp, _QUOTA_FILE)
+    except Exception:
+        pass
+
+
+_load_quota_day()
+
+
+def _day_used(model: str) -> int:
+    return _q_day.get(_dt.date.today().isoformat(), {}).get(model, 0)
+
+
+def _acquire(model: str, est_tokens: int) -> str:
+    """รอจนกว่าจะยิงได้ (RPM/TPM window) + นับ daily — คืน model ที่จะใช้จริง
+    (primary RPD เต็ม → สลับ fallback model ทันที)"""
+    while True:
+        with _q_lock:
+            now = _time.time()
+            today = _dt.date.today().isoformat()
+            day = _q_day.setdefault(today, {})
+            for m in (model, _MODEL_FALLBACK.get(model)):
+                if m and day.get(m, 0) < _QUOTA_RPD:
+                    model = m
+                    break
+            else:
+                raise genai_errors.ClientError(429, {"error": {"message": "daily quota exhausted (local counter)"}})
+
+            req = _q_req.setdefault(model, _deque())
+            tok = _q_tok.setdefault(model, _deque())
+            while req and now - req[0] > 60:
+                req.popleft()
+            while tok and now - tok[0][0] > 60:
+                tok.popleft()
+            tok_used = sum(n for _, n in tok)
+            if len(req) < _QUOTA_RPM and tok_used + est_tokens <= _QUOTA_TPM:
+                req.append(now)
+                day[model] = day.get(model, 0) + 1
+                _save_quota_day()
+                return model
+            # รอจน window ตัวเก่าสุดหลุด
+            wait = 60 - (now - req[0]) + 0.05 if len(req) >= _QUOTA_RPM else 2.0
+        _time.sleep(max(wait, 0.1))
+
+
+def _record_tokens(model: str, resp) -> None:
+    usage = getattr(resp, "usage_metadata", None)
+    if not usage:
+        return
+    n = (getattr(usage, "prompt_token_count", 0) or 0) + (getattr(usage, "candidates_token_count", 0) or 0)
+    with _q_lock:
+        _q_tok.setdefault(model, _deque()).append((_time.time(), n))
+
+
+def _generate(model: str, contents, config: dict, est_tokens: int | None = None):
+    """generate_content ผ่าน quota manager: pace RPM/TPM → call → 429 → fallback model 1 ครั้ง."""
+    if est_tokens is None:
+        try:
+            _parts = contents if isinstance(contents, (list, tuple)) else [contents]
+            est_tokens = sum(len(str(c)) for c in _parts) // 4 + int(config.get("max_output_tokens", 0) or 0)
+        except Exception:
+            est_tokens = 2000
+    m = _acquire(model, est_tokens)
+    try:
+        client = _client()   # ต้องเก็บ reference — GC client กลาง call จะปิด shared httpx
+        resp = client.models.generate_content(model=m, contents=contents, config=config)
+        _record_tokens(m, resp)
+        return resp
+    except genai_errors.ClientError as exc:
+        fb = _MODEL_FALLBACK.get(m)
+        is_429 = getattr(exc, "code", None) == 429 or "429" in str(exc)
+        if not (is_429 and fb):
+            raise
+        print(f"[QUOTA] {m} 429 → fallback {fb}", file=_sys.stderr)
+        m2 = _acquire(fb, est_tokens)
+        client = _client()
+        resp = client.models.generate_content(model=m2, contents=contents, config=config)
+        _record_tokens(m2, resp)
+        return resp
+
+
 # ---- multi-bubble segment splitter (Phase 1) --------------------------------
 # LLM แยกคำตอบด้วย delimiter ||| — helper นี้แยกเป็น list[str] ที่สะอาด
 _SEGMENT_DELIMITER = "|||"
@@ -904,13 +1023,11 @@ def describe_image(
         #    เช่น ลูกค้าคุยเรื่องเคลมอยู่ → vision รู้ว่ารูปนี้น่าจะเป็นสินค้าเสีย
         if history_context:
             prompt += f"\n\nบริบทก่อนหน้ารูปนี้:\n{history_context[:500]}"
-        resp = client.models.generate_content(
-            model=_VISION_MODEL,
-            contents=[prompt, part],
-            config={
-                "temperature": 0.0,
-                "max_output_tokens": 300,
-            },
+        resp = _generate(
+            _VISION_MODEL,
+            [prompt, part],
+            {"temperature": 0.0, "max_output_tokens": 300},
+            est_tokens=len(prompt) // 4 + 2000,   # รูป ~258-1290 tok — เผื่อไว้
         )
         desc = (resp.text or "").strip()
         usage = getattr(resp, "usage_metadata", None)
@@ -1114,10 +1231,10 @@ def answer(
 
     usage_info = {"prompt": 0, "output": 0, "total": 0}
     try:
-        resp = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config={
+        resp = _generate(
+            model_name,
+            contents,
+            {
                 "system_instruction": system_instruction,
                 "temperature": 0.3,
                 "max_output_tokens": 4096,
@@ -1247,10 +1364,10 @@ def answer_with_kb(
     contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
     try:
-        resp = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config={
+        resp = _generate(
+            model_name,
+            contents,
+            {
                 "system_instruction": system_instruction,
                 "temperature": 0.3,
                 "max_output_tokens": 2048,
@@ -1351,10 +1468,10 @@ def answer_general(
     contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
     try:
-        resp = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config={
+        resp = _generate(
+            model_name,
+            contents,
+            {
                 "system_instruction": general_instruction,
                 "temperature": 0.3,
                 "max_output_tokens": 2048,
