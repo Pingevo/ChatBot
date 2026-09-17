@@ -30,13 +30,16 @@ def main() -> int:
 
     # ── per-unit stock (EC4 mixed) + sellable_only ──
     # sellable tier ดัน variant ที่มี stock ขึ้นก่อน → OOS variant อาจหลุด top-8
-    # → ขยาย limit เพื่อยังเห็น (per-unit stock ยังแยกรุ่นถูกต้อง)
+    # → ขยาย limit เพื่อยังเห็น; assert แบบ data-agnostic — stock จริงเปลี่ยน
+    #   ตาม restock/rebuild ณ เวลารัน แต่ non-sellable unit ต้องไม่ปนใน
+    #   sellable_only เสมอ (invariant ที่ invariant กับค่า stock จริง)
     us = units.fetch_units("IMILAB EC4 กล้อง", shop=None, limit=30)
     ec4 = [u for u in us if "เฉพาะกล้อง" in (u.get("model_name") or "")]
-    assert ec4 and any(u["stock"] == 0 for u in ec4), [(u.get("model_name"), u.get("stock")) for u in us]
+    assert ec4, [(u.get("model_name"), u.get("stock")) for u in us]
     us_s = units.fetch_units("IMILAB EC4 กล้อง", sellable_only=True)
     assert all(u["sellable"] for u in us_s), [(u.get("model_name"), u.get("sellable")) for u in us_s]
-    assert not any("เฉพาะกล้อง" in (u.get("model_name") or "") for u in us_s), "OOS unit ไม่ควรอยู่ใน sellable_only"
+    dead_ids = {u["unit_id"] for u in ec4 if not u.get("sellable")}
+    assert not any(u["unit_id"] in dead_ids for u in us_s), "non-sellable unit ไม่ควรอยู่ใน sellable_only"
     print("PASS per-unit stock + sellable_only filter")
 
     # ── vector search (ไม่มี code ใน msg) ──
