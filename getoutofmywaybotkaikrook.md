@@ -8565,3 +8565,19 @@ Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ต�
 **UI (/llm เขียนใหม่ compact):** strip บนสุด = master provider toggle (all→OR/all→Gemini); pools 2 cards `lg:grid-cols-2` พร้อม segmented source [.env|MongoDB|key เดียว] — db→list เดิม, env→info, single→masked row + set form; models card แถวเล็ก `sm:grid-cols-[160px_72px_1fr]` = role + G/OR toggle + SearchableSelect (live list, search role แสดง `{id}:online`); ทุก mutation confirm→save ทันที
 
 **verify จริง:** tsc ผ่าน, py_compile ×3 ผ่าน, stub test: db pool กรอง disabled ✅ env source ✅ single source ✅ provider map ✅ _or_messages 3 shapes ✅ (str/dict/Part→data URI)
+
+---
+
+## 2026-09-17 (ต่อ) — llm_config keys: AES-256-GCM encryption at rest
+
+**ทำไม:** user ขอให้ key ที่เก็บใน MongoDB ถูกเข้ารหัส (ไม่ใช่ plaintext) แต่ bot ถอดกลับใช้จริงได้
+
+**format:** `enc:v1:<iv_hex>:<tag_hex>:<ct_hex>` — AES-256-GCM, IV 12B random, tag 16B — master key = env `LLM_MASTER_KEY` (64-hex ตรงๆ หรือ passphrase → sha256) — **ต้องตั้งทั้ง ChatAdminWeb และ bot**
+
+**web (`llmConfigService.ts`):** `_masterKey/encSecret/decSecret` — add_keys/set_single encrypt ก่อน $set; ops (remove/toggle/rename/dup-check) + mask fingerprint (sha256/tail) ทำบน **decrypted** value เสมอ (คู่ bot startup log); migrate-on-write — ทุกครั้งที่เขียน array ใหม่ plaintext เก่าถูก re-encrypt อัตโนมัติ; ถอดไม่ได้ → mask เป็น `enc-only`/`????`
+
+**bot (`llm.py`):** `_dec_secret` ถอดใน `get_key_pool` (ทั้ง 2 pool) + `_active_keys` single branch + `web_search._get_openrouter_key` single branch — plaintext ผ่านตรง (backward compat), ถอดไม่ได้ → '' (ข้าม key, warn log)
+
+**verify จริง:** cross-language round-trip — Node encrypt → Python decrypt คืนค่าจริง ✅, plaintext passthrough ✅, tsc ✅, py_compile ✅
+
+**deploy:** ต้อง set `LLM_MASTER_KEY` ใน env ทั้ง 2 service ก่อน — ไม่ตั้ง = plaintext เหมือนเดิม (ไม่พัง)

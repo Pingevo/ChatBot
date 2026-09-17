@@ -42,7 +42,7 @@ def _get_openrouter_key() -> str:
         if src == "env":
             return os.environ.get("OPENROUTER_API_KEY", "").strip()
         if src == "single":
-            v = str((cfg.get("single_keys") or {}).get("openrouter") or "").strip()
+            v = _llm._dec_secret(str((cfg.get("single_keys") or {}).get("openrouter") or "").strip())
             if v:
                 return v
         else:

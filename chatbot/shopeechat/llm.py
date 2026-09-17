@@ -638,17 +638,55 @@ def get_llm_config() -> dict:
     return _llm_cfg_cache
 
 
+# ---- key at-rest decryption (AES-256-GCM "enc:v1:iv:tag:ct" hex — encrypt โดย ChatAdminWeb) ----
+# LLM_MASTER_KEY: 64-hex หรือ passphrase ใดๆ (sha256 → 32 bytes) — ต้องตั้งทั้ง web และ bot
+_ENC_PREFIX = "enc:v1:"
+
+
+def _master_key() -> bytes | None:
+    raw = os.environ.get("LLM_MASTER_KEY", "").strip()
+    if not raw:
+        return None
+    if len(raw) == 64:
+        try:
+            return bytes.fromhex(raw)
+        except ValueError:
+            pass
+    import hashlib
+    return hashlib.sha256(raw.encode()).digest()
+
+
+def _dec_secret(v: str) -> str:
+    """enc:v1:... → plaintext; plaintext เดิมคืนตรงๆ; ถอดไม่ได้ (no key/bad data) → '' """
+    if not v.startswith(_ENC_PREFIX):
+        return v
+    key = _master_key()
+    if key is None:
+        print("WARN: llm_config key ถูกเข้ารหัสแต่ไม่มี LLM_MASTER_KEY ใน env", file=sys.stderr)
+        return ""
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        iv, tag, ct = (bytes.fromhex(h) for h in v[len(_ENC_PREFIX):].split(":"))
+        return AESGCM(key).decrypt(iv, ct + tag, None).decode()
+    except Exception as exc:
+        print(f"WARN: decrypt llm_config key ไม่สำเร็จ: {exc}", file=sys.stderr)
+        return ""
+
+
 def get_key_pool(field: str) -> list[str]:
     """อ่าน key pool จาก llm_config[field] — web_search ใช้กับ "openrouter_keys"
-    รองรับ 2 shape: string เดิม และ {name, value, enabled} — enabled=false ไม่หมุน"""
+    รองรับ 2 shape: string เดิม และ {name, value, enabled} — enabled=false ไม่หมุน
+    value อาจเป็น enc:v1:... (AES-256-GCM) → ถอดก่อนใช้"""
     keys: list[str] = []
     for k in (get_llm_config().get(field) or []):
-        if isinstance(k, str) and k.strip():
-            keys.append(k.strip())
+        if isinstance(k, str):
+            v = _dec_secret(k.strip())
         elif isinstance(k, dict) and k.get("enabled", True):
-            v = str(k.get("value") or "").strip()
-            if v:
-                keys.append(v)
+            v = _dec_secret(str(k.get("value") or "").strip())
+        else:
+            continue
+        if v:
+            keys.append(v)
     return keys
 
 
@@ -660,7 +698,7 @@ def _active_keys() -> list[str]:
     if src == "env":
         return _API_KEYS
     if src == "single":
-        v = str((cfg.get("single_keys") or {}).get("gemini") or "").strip()
+        v = _dec_secret(str((cfg.get("single_keys") or {}).get("gemini") or "").strip())
         return [v] if v else _API_KEYS
     return get_key_pool("keys") or _API_KEYS
 

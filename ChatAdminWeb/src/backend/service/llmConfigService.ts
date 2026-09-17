@@ -1,8 +1,10 @@
 // LLM runtime config — key pool + models ที่ Python bot อ่านเอง (TTL ~10s)
 // เก็บใน system_configs doc { config_key: "llm_config" }
-// ⚠️ keys เก็บ plaintext ใน DB (bot ต้องใช้จริง) — GET คืน masked เท่านั้น
+// keys เข้ารหัส AES-256-GCM ก่อนลง DB (format enc:v1:iv:tag:ct hex) — master key จาก env
+// LLM_MASTER_KEY (64-hex หรือ passphrase→sha256) — bot ถอดด้วย key เดียวกัน
+// ไม่มี master key → เก็บ plaintext เหมือนเดิม (backward compat)
 // key entry: {name, value, enabled} — enabled=false = อยู่ใน list แต่ bot ไม่หยิบไปหมุน
-import { createHash } from "crypto";
+import { createHash, createCipheriv, createDecipheriv, randomBytes } from "crypto";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 
 const CONFIG_KEY = "llm_config";
@@ -55,6 +57,43 @@ export interface MaskedKey {
 const sha8 = (v: string) =>
   createHash("sha256").update(v).digest("hex").slice(0, 8);
 
+/* ---- AES-256-GCM at-rest encryption (enc:v1:iv:tag:ct hex) ---- */
+
+const _ENC_PREFIX = "enc:v1:";
+
+function _masterKey(): Buffer | null {
+  const raw = (process.env.LLM_MASTER_KEY || "").trim();
+  if (!raw) return null;
+  return /^[0-9a-fA-F]{64}$/.test(raw)
+    ? Buffer.from(raw, "hex")
+    : createHash("sha256").update(raw).digest();
+}
+
+/** encrypt → enc:v1:... — ไม่มี master key → คืน plaintext เดิม */
+function encSecret(v: string): string {
+  const key = _masterKey();
+  if (!key) return v;
+  const iv = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", key, iv);
+  const ct = Buffer.concat([c.update(v, "utf8"), c.final()]);
+  return `${_ENC_PREFIX}${iv.toString("hex")}:${c.getAuthTag().toString("hex")}:${ct.toString("hex")}`;
+}
+
+/** decrypt enc:v1:... → plaintext — plaintext เดิมคืนตรงๆ, ถอดไม่ได้ (no key/bad data) → "" */
+function decSecret(v: string): string {
+  if (!v.startsWith(_ENC_PREFIX)) return v;
+  const key = _masterKey();
+  if (!key) return "";
+  try {
+    const [iv, tag, ct] = v.slice(_ENC_PREFIX.length).split(":").map((h) => Buffer.from(h, "hex"));
+    const d = createDecipheriv("aes-256-gcm", key, iv);
+    d.setAuthTag(tag);
+    return Buffer.concat([d.update(ct), d.final()]).toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
 /** legacy string keys → KeyEntry (name อัตโนมัติ {PREFIX}_n, enabled) */
 export function normKeys(
   keys: (string | KeyEntry)[] | undefined,
@@ -96,15 +135,20 @@ export async function getLlmConfigMasked(): Promise<{
 }> {
   const doc = await getLlmConfig();
   const maskList = (list: (string | KeyEntry)[] | undefined, prefix: string): MaskedKey[] =>
-    normKeys(list, prefix).map((k, i) => ({
-      index: i + 1,
-      sha256: sha8(k.value),
-      tail: k.value.slice(-4),
-      name: k.name,
-      enabled: k.enabled,
-    }));
-  const maskSingle = (v: string | undefined) =>
-    v && v.trim() ? { sha256: sha8(v.trim()), tail: v.trim().slice(-4) } : null;
+    normKeys(list, prefix).map((k, i) => {
+      const plain = decSecret(k.value); // fingerprint คำนวณจาก key จริงเสมอ (คู่ bot log)
+      return {
+        index: i + 1,
+        sha256: plain ? sha8(plain) : "enc-only",
+        tail: plain ? plain.slice(-4) : "????",
+        name: k.name,
+        enabled: k.enabled,
+      };
+    });
+  const maskSingle = (v: string | undefined) => {
+    const p = v?.trim() ? decSecret(v.trim()) : "";
+    return p ? { sha256: sha8(p), tail: p.slice(-4) } : null;
+  };
   const roles = [...new Set([
     ...MODEL_ROLES,
     ...Object.keys(doc.models ?? {}),
@@ -165,7 +209,10 @@ export async function updateLlmConfig(
     updates.add_keys !== undefined || updates.remove_sha256 !== undefined ||
     updates.set_enabled !== undefined || updates.rename !== undefined;
   if (touchesKeys) {
-    let keys = normKeys(doc[poolField], namePrefix);
+    // ทำงานบน plaintext เสมอ — เขียนกลับด้วย encSecret (migrate plaintext เก่าเป็น enc อัตโนมัติ)
+    let keys = normKeys(doc[poolField], namePrefix).map((k) => ({
+      ...k, value: decSecret(k.value),
+    })).filter((k) => k.value);
     const removeSet = new Set(updates.remove_sha256 ?? []);
     if (removeSet.size) keys = keys.filter((k) => !removeSet.has(sha8(k.value)));
 
@@ -188,7 +235,7 @@ export async function updateLlmConfig(
         `${namePrefix}_${keys.length + 1}`;
       keys.push({ name: name.slice(0, 60), value, enabled: true });
     }
-    $set[poolField] = keys;
+    $set[poolField] = keys.map((k) => ({ ...k, value: encSecret(k.value) }));
   }
 
   // ---- key source (env | db | single) ----
@@ -199,12 +246,12 @@ export async function updateLlmConfig(
     }
   }
 
-  // ---- single key (plaintext on mongo — mask ตอน GET) ----
+  // ---- single key (encrypt ก่อนลง DB — mask ตอน GET) ----
   if (updates.set_single !== undefined) {
     const { pool, value } = updates.set_single;
     if (KEY_POOL_FIELD[pool] && typeof value === "string") {
       const v = value.trim();
-      $set[`single_keys.${pool}`] = v || null;
+      $set[`single_keys.${pool}`] = v ? encSecret(v) : null;
     }
   }
 
@@ -263,7 +310,7 @@ const _MODELS_TTL = 10 * 60_000;
 async function _anyKey(pool: KeyPool, envNames: string[]): Promise<string> {
   try {
     const doc = await getLlmConfig();
-    const k = normKeys(doc[KEY_POOL_FIELD[pool]]).find((x) => x.enabled)?.value;
+    const k = decSecret(normKeys(doc[KEY_POOL_FIELD[pool]]).find((x) => x.enabled)?.value ?? "");
     if (k) return k;
   } catch { /* fallthrough */ }
   for (const n of envNames) {
