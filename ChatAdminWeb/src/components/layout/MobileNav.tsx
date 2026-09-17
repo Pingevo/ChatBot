@@ -23,6 +23,7 @@ import {
   Wrench,
   ScrollText,
   Shield,
+  KeyRound,
   Sliders,
   ContactIcon,
   TestTube2,
@@ -34,6 +35,7 @@ import {
   Settings2,
   HelpCircle,
   X,
+  UserCog,
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
@@ -77,6 +79,8 @@ const secondaryItems: NavItem[] = [
   { href: "/users", label: "จัดการผู้ใช้", icon: Users, page: "user" },
   { href: "/admin-config", label: "ตั้งค่าแอดมิน", icon: Sliders, page: "admin-config" },
   { href: "/config", label: "ตั้งค่าระบบ", icon: Shield, page: "config" },
+  { href: "/llm", label: "LLM & API Keys", icon: KeyRound, page: "llm" },
+  { href: "/roles", label: "สิทธิ์การใช้งาน", icon: UserCog, page: "role-admin" },
   { href: "/logs", label: "บันทึกระบบ", icon: ScrollText, page: "log" },
   // footer items — ไม่มี role gate (เหมือน Sidebar footer)
   { href: "/help", label: "คู่มือ", icon: HelpCircle },

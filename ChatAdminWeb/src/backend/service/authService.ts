@@ -17,7 +17,7 @@ export interface AdminDoc extends Document {
   email: string;
   username: string;
   name: string;
-  role: "superadmin" | "admin" | "dev";
+  role: string; // builtin: superadmin|admin|dev — เพิ่ม role ใหม่ได้ผ่าน /roles
   password_hash?: string;  // SSO-only — ไม่จำเป็นแล้ว แต่เก็บไว้สำหรับ admin เก่า
   active: boolean;
   // Phase 7.9 — admin เปิด/ปิดสถานะรับแชทของตัวเอง (ลาหยุด, พัก)
@@ -41,7 +41,7 @@ export interface SafeAdmin {
   email: string;
   username: string;
   name: string;
-  role: "superadmin" | "admin" | "dev";
+  role: string;
   channels_access: string[];
   active: boolean;
   is_accepting_chats?: boolean;
@@ -111,7 +111,7 @@ export async function createAdmin(opts: {
   username: string;
   password?: string;  // SSO-only — ไม่จำเป็น แต่ SSO callback ยังส่ง random password มา (จะ unset ทีหลัง)
   name?: string;
-  role?: "superadmin" | "admin" | "dev";
+  role?: string; // builtin: superadmin|admin|dev — custom roles เพิ่มผ่าน /roles
   createdBy?: string;
 }): Promise<AdminDoc> {
   const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
@@ -222,10 +222,11 @@ export async function toggleAdminActive(adminId: string, active: boolean): Promi
 
 export async function updateAdminProfile(
   adminId: string,
-  fields: { name?: string; username?: string; channels_access?: string[]; is_accepting_chats?: boolean; bubble_color?: string }
+  fields: { name?: string; username?: string; channels_access?: string[]; is_accepting_chats?: boolean; bubble_color?: string; role?: string }
 ): Promise<boolean> {
   const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
   const update: Record<string, unknown> = {};
+  if (fields.role !== undefined) update.role = fields.role;
   if (fields.name !== undefined) update.name = fields.name;
   if (fields.username !== undefined) update.username = fields.username;
   if (fields.channels_access !== undefined) update.channels_access = fields.channels_access;

@@ -154,8 +154,13 @@ def add_product(
     source: str,  # "user_item_card" | "user_variation_card" | "user_order" | "bot_suggestion"
     card: dict | None = None,
     is_anchor: bool = False,
+    model_id: str | int | None = None,
+    model_name: str | None = None,
 ) -> dict | None:
     """เพิ่มสินค้าเข้า timeline + คำนวณ active ใหม่.
+
+    model_id/model_name (⚡ Task 6): variation ที่ลูกค้าหมายถึง (เช่น จาก order item)
+    — anchor ระดับรุ่นย่อย ไม่ใช่แค่ระดับ listing
 
     Returns:
         timeline doc ที่อัปเดตแล้ว หรือ None ถ้า error
@@ -172,11 +177,16 @@ def add_product(
         }
         products = doc.get("products", [])
         item_id_ser = _to_serializable(item_id)
+        model_id_ser = _to_serializable(model_id) if model_id is not None else None
 
         # ถ้าสินค้านี้มีอยู่แล้ว → อัปเดต mentioned_at + card (ไม่เพิ่มซ้ำ)
+        # match ด้วย item_id + model_id (model_id ว่างฝั่งใดฝั่งหนึ่งถือว่าตัวเดียวกัน)
         existing = None
         for p in products:
-            if _to_serializable(p.get("item_id")) == item_id_ser:
+            if _to_serializable(p.get("item_id")) != item_id_ser:
+                continue
+            p_mid = p.get("model_id")
+            if model_id_ser is None or p_mid is None or _to_serializable(p_mid) == model_id_ser:
                 existing = p
                 break
         now = datetime.now(timezone.utc)
@@ -185,12 +195,18 @@ def add_product(
             existing["source"] = source  # อัปเดต source ล่าสุด
             if card:
                 existing["card"] = _strip_card_for_storage(card)
+            if model_id_ser is not None:
+                existing["model_id"] = model_id_ser
+            if model_name:
+                existing["model_name"] = model_name
             # ถ้าเป็น anchor ครั้งนี้ → อัปเดต is_anchor
             if is_anchor:
                 existing["is_anchor"] = True
         else:
             products.append({
                 "item_id": item_id_ser,
+                "model_id": model_id_ser,
+                "model_name": model_name,
                 "name": name,
                 "source": source,
                 "mentioned_at": now,
@@ -296,33 +312,6 @@ def get_suggestion_latest(conversation_id: str) -> dict | None:
     return s.get("card") or {"item_id": s.get("item_id"), "name": s.get("name")}
 
 
-def get_recent_suggestions(conversation_id: str, limit: int = 5) -> list[dict]:
-    """ดึง suggestion products ล่าสุดหลายตัว (สำหรับ follow-up ขอลิงค์).
-
-    Returns:
-        list ของ product cards (dict) เรียงจากล่าสุด→เก่า สูงสุด `limit` ตัว
-    """
-    doc = load_timeline(conversation_id)
-    if not doc:
-        return []
-    suggestions = [p for p in doc.get("products", []) if not p.get("is_anchor")]
-    if not suggestions:
-        return []
-    suggestions.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
-    out = []
-    seen_ids = set()
-    for s in suggestions[:limit * 2]:  # ดึงเผื่อ dedup
-        iid = _to_serializable(s.get("item_id"))
-        if iid in seen_ids:
-            continue
-        seen_ids.add(iid)
-        card = s.get("card") or {"item_id": s.get("item_id"), "name": s.get("name")}
-        out.append(card)
-        if len(out) >= limit:
-            break
-    return out
-
-
 def get_anchor_and_suggestions(conversation_id: str, limit: int = 5) -> list[dict]:
     """ดึง anchor ล่าสุด + suggestion ล่าสุด รวมกัน (dedup) สำหรับ follow-up ขอลิงค์.
 
@@ -409,19 +398,6 @@ def resolve_active_by_message(
 
     # 4 & 5. default → active product
     return get_active_product(conversation_id)
-
-
-def is_generic_question(message: str) -> bool:
-    """ตรวจว่าคำถามเป็น generic (ไม่ระบุสินค้า) หรือไม่.
-
-    ใช้ตัดสินใจว่าควรใช้ active product หรือควร RAG ใหม่.
-    """
-    msg_lower = (message or "").lower().strip()
-    if not msg_lower:
-        return False
-    # ถ้ามี model keyword → ไม่ใช่ generic
-    # (caller เช็คเอง ที่นี่เช็คแค่ keyword)
-    return any(kw in msg_lower for kw in _GENERIC_Q_KWS)
 
 
 # ─── Order anchor (Phase 3C) ──────────────────────────────

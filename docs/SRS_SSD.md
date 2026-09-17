@@ -112,7 +112,9 @@ ChatBotProductMS คือระบบ chatbot ปรึกษาสินค้
 | `admins`, `auth_tokens`, `sessions` | ผู้ใช้และ auth |
 | `conversations_shp`, `messages_shp`, `customers_shp` | แชทที่ mirror จาก Shopee |
 | `shops` | ร้านค้า |
-| `knowledge_base` | KB: `product_spec` + `general_faq` |
+| `knowledge_base` | KB legacy: `product_spec` + `general_faq` (fallback) |
+| `kb_products` | KB product_spec ใหม่ — runtime ใช้อันนี้ (specs อยู่ใน `canonical_specs`/`specs_raw`) |
+| `kb_qa` | KB QA ใหม่ — `general_faq` + troubleshooting `qa` (คำตอบอยู่ใน field `a`) |
 | `triggers` | keyword-based rules (bot_answer / handoff_admin) |
 | `shop_personas` | ชื่อบอทต่อร้าน |
 | `shop_settings` | ตั้งค่าร้าน (เช่น faq_liveagent_action) |
@@ -283,6 +285,20 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 > รูปแบบ: `function_name` (line) — หน้าที่ — เรียกอะไรบ้าง
 
+> **⚡ Refactor 2026-09-16:** `app.py` 8,239 → 4,807 บรรทัด — ย้ายออกไป:
+> - `test_chat_api.py` — test-chat sessions CRUD (9 routes) + `_validate_object_id` + `_log_testchat_action`
+> - `device_compat.py` — `_extract_max_wattage`, `_KNOWN_DEVICE_SPECS`, `_extract_product_connectors`, `_resolve_device_spec`, `_filter_compat_products`, `_apply_product_tiers`, `_device_spec_lookup`
+> - `order_flow.py` — `early_order_flow(req, ctx, history, db)` (order lookup + return/refund + tracking; dict→`ChatResponse` ที่ call site; เขียนกลับ `ctx["order_sn"]`/`ctx["is_claim_request_pre"]` ให้ warranty auto-check)
+> - `handoffs.py` — `detect_human_request(req, ctx)` (pre-intent) + `post_intent_handoffs(req, ctx, db)` (tax invoice + TISI)
+> - `warranty_flow.py` — `handle_warranty_flow_legacy(req, ctx, history, db)` (legacy claim SM; dict→`ChatResponse` ที่ call site)
+> - `warranty.py` — `auto_check_delivery_warranty(order_sn, shop, bot_name)` → `(answer, info, ctx)`
+> - `web_search.py` — `reanswer(...)` (เดิม nested `_web_search_reanswer`)
+> - `knowledge_base.py` — `_detect_brand_question`, `_build_brand_context`, `_kb_doc_to_card` (app.py มี alias ให้ chat_v2)
+> - `product_store.py` — `_dedupe_products`, `_dedupe_base_name`, `_dedupe_sell_score`, `_DEDUP_STANDARDS`
+> - `llm.py` — `_GEMINI_COST_PER_M` + `_gemini_cost(p_in, p_out)`
+> - ลบ dead code: `_score_card`, `_is_sold_out`, `_STOPWORDS` (product_store), `search_and_answer` (web_search), `lookup_orders_by_buyer`, `_format_unix_ts_with_time` (order_store), `get_recent_suggestions`, `is_generic_question` (conversation_products), `_strip_kb_markup`/`_admin_db`/`_has_warranty_history`/`_warranty_calc_note`/`_pre_product_types` (app.py — ใช้ `llm._strip_kb_markup`/`conversation_products._admin_db` แทน)
+> - line numbers ในตารางด้านล่างอ้างอิงก่อน refactor — ใช้ชื่อฟังก์ชันเป็นหลัก
+
 ### 6.1 `app.py` — FastAPI + chat orchestrator
 
 #### 6.1.1 FastAPI routes (main entry points)
@@ -443,9 +459,18 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ฟังก์ชัน | Line | หน้าที่ |
 |---|---|---|
-| `_load_api_keys` | 290 | โหลด `GEMINI_API_KEY_1..9` + `GEMINI_API_KEY` |
-| `_next_api_key` | 317 | หมุนวน round-robin |
-| `_client` | 327 | สร้าง `genai.Client` |
+| `_load_api_keys` | 594 | โหลด `GEMINI_API_KEY_1..9` + `GEMINI_API_KEY` (env baseline) |
+| `get_llm_config` | ~620 | **2026-09-17 runtime config** — อ่าน `system_configs` doc `{config_key:"llm_config"}` (admin DB) TTL 10s + `max_time_ms` 1500 + fail-stale — UI `/llm` (dev) แก้ → มีผลโดยไม่ต้อง restart |
+| `_master_key` / `_dec_secret` | ~641 | **2026-09-17 encryption-at-rest** — AES-256-GCM ถอด `enc:v1:iv:tag:ct` (hex) ด้วย `LLM_MASTER_KEY` env (64-hex หรือ passphrase→sha256); plaintext ผ่านตรง (backward compat), ถอดไม่ได้ → `""` (skip key) — encrypt ฝั่งเขียนอยู่ที่ ChatAdminWeb `llmConfigService` |
+| `get_key_pool(field)` | ~678 | อ่าน key pool จาก `llm_config[field]` — 2 shape (string legacy / `{name,value,enabled}`), `enabled=false` ไม่หมุน, `_dec_secret` ทุก value; web_search ใช้กับ `openrouter_keys` |
+| `_active_keys` | ~694 | key pool ตาม `key_source.gemini`: `env`=env เท่านั้น / `single`=`single_keys.gemini` (ถอด enc ก่อน) / `db`=pool list (default) — ว่าง/ถอดไม่ได้ → env fallback |
+| `get_provider(role)` | ~703 | provider ต่อ role จาก `providers[role]` (`gemini`\|`openrouter`, default gemini) — `openrouter_search` บังคับ openrouter เสมอ |
+| `get_model(role)` | ~668 | model ต่อ role `chat/vision/intent/openrouter_search`: `llm_config.models[role]` → env → default |
+| `_next_api_key` | ~674 | round-robin บน `_active_keys()` (dynamic — เพิ่ม/ลบ key สดได้) |
+| `_client` | ~683 | สร้าง `genai.Client` จาก `_next_api_key()` |
+| `_acquire(model, est_tokens)` | ~690 | **2026-09-17 quota manager (single-key)** — pace ตาม RPM (`GEMINI_RPM`=14) + TPM (`GEMINI_TPM`=240k) sliding window 60s + daily counter (`GEMINI_RPD`=480) persist `exports/.gemini_quota.json` (atomic); primary model RPD เต็ม → auto สลับ `_MODEL_FALLBACK`; ทั้งคู่เต็ม → raise ClientError(429) |
+| `_generate(model, contents, config, est_tokens)` | ~733 | generate_content wrapper — `_acquire` → call (เก็บ client ref กัน GC ปิด httpx) → `_record_tokens` จาก usage_metadata; **429 → retry 1 ครั้งด้วย fallback model** (3.5↔3.1 quota pool แยกกัน) |
+| `_record_tokens(model, resp)` | ~722 | บันทึก usage_metadata เข้า TPM window |
 
 #### 6.2.3 Prompt building + helpers
 
@@ -472,7 +497,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 |---|---|---|---|
 | `fetch_products` | 2385 | **central retrieval** — สร้าง query + filter + rerank + card — **2026-09-12 (FILTER-UNAVAILABLE)**: เพิ่ม param `filter_unavailable: bool = False` — เมื่อ True กรองสินค้า `status != NORMAL` หรือ `sold_out=True` ออกจาก cards; fallback ถ้ากรองแล้วว่าง → ปล่อยทั้งหมด + ฝัง `_context_note` ห้ามแนะนำขาย | `_detect_*`, `build_query`, `vector_search`, `_filter_*`, `_rerank_*`, `to_product_card` |
 | `fetch_product_by_id` | 2880 | ดึงสินค้าเดียวโดย `item_id` | `to_product_card` |
-| `fuzzy_match_products` | 559 | rapidfuzz fallback สำหรับพิมพ์ผิด | `_extract_product_name_tokens`, `to_product_card` |
+| `fuzzy_match_products` | 559 | rapidfuzz fallback สำหรับพิมพ์ผิด — **2026-09-17**: ตัด `item_status:NORMAL` filter (ตอบสินค้า unlisted/deleted ได้ กันขายอยู่ที่ card), prefix-3 miss/score ไม่ผ่าน → rescan ทั้งร้าน (≤2000 docs), brand tokens จาก `_known_brands()` ใช้กรอง fetch แต่ยังนับ score (avg per-token) — ทุก token โดนกรองหมด → ใช้ token เดิม | `_extract_product_name_tokens`, `to_product_card`, `knowledge_base._known_brands` (lazy) |
 | `vector_search` | 68 | cosine similarity กับ embedding NPZ | `_load_vector_store`, `embedding.embed_query` |
 
 #### 6.3.2 Charger subtype
@@ -529,14 +554,14 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ฟังก์ชัน | Line | หน้าที่ |
 |---|---|---|
-| `to_product_card` | 479 | Mongo doc → compact card สำหรับ LLM |
+| `to_product_card` | 576 | Mongo doc → compact card สำหรับ LLM — **2026-09-21 (Task 6)**: `variants[]` เพิ่ม `model_id`, `stock` (per-variant ผ่าน `_shopee_stock`), `model_status` — ตอบสต็อกระดับรุ่นได้ (เช่น EC4 เฉพาะกล้องหมด แต่ +Smart Hub มี) |
 | `_to_serializable` | 168 | ObjectId/datetime → string (recursive) |
 | `_warranty_info` | 215 | extract warranty จาก `attribute_list` / name |
 | `_price_range` | 279 | min/max price จาก `model[].price_info` |
 | `_first_image_url` | 292 | first image URL |
 | `_clean_description` | 299 | slice `description` เป็น section + cap 3000 chars |
 | `_is_sold_out` | 532 | check stock == 0 (*ไม่ถูกเรียกในไฟล์*) |
-| `_load_vector_store` | 39 | lazy load `.npz` embedding |
+| `_load_vector_store` | 49 | lazy load `.npz` embedding + **auto-reload เมื่อ mtime เปลี่ยน** (stat ก่อน load = self-healing; ไฟล์หาย/fail → cache เก่า) |
 | `get_client` | 148 | cached MongoClient + ping health |
 | `build_connection_string` | 111 | build URI จาก `MONGO_*` env |
 | `list_shops` | 2919 | distinct `shopname` |
@@ -630,10 +655,17 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ฟังก์ชัน | Line | หน้าที่ | เรียก |
 |---|---|---|---|
-| `lookup_kb` | 751 | **main entry** — detect topic + search + build context | `detect_topic`, `search_kb_by_model`, `get_general_faq`, `format_kb_context` |
-| `search_kb_by_model` | 274 | search KB (single + comparison) | `extract_model_keywords`, `_search_kb_single` |
-| `_search_kb_single` | 340 | score + fetch full docs | `extract_model_keywords`, `_kb_coll` |
-| `get_general_faq` | 429 | ดึง `general_faq` doc by topic | `_kb_coll` |
+| `lookup_kb` | 852 | **main entry** — detect topic + search + build context | `detect_topic`, `search_kb_by_model`, `get_general_faq`, `format_kb_context` |
+| `search_kb_by_model` | — | search KB (single + comparison) | `extract_model_keywords`, `_search_kb_single` |
+| `_search_kb_single` | — | score + fetch full docs — **2026-09-16 repoint → `kb_products`** (specs ใช้ `canonical_specs`/`specs_raw` — ไม่มี field `specs`) | `extract_model_keywords`, `_kb_products_coll` |
+| `get_general_faq` | 525 | ดึง `general_faq` doc by topic — **repoint → `kb_qa`** (normalize `a`→`answer`; fallback legacy `knowledge_base`) | `_kb_qa_coll`, `_kb_coll` |
+| `search_qa` | 1037 | semantic QA search บน `kb_qa` + `qa_embeddings.npz` — hybrid sim+model_codes/item_id boost; cross-model guard (doc ผูกรุ่นอื่น exclude, derive scope จาก `topic` ด้วย) + brand scope (generic doc แบรนด์อื่นข้าม) | `embedding.embed_query`, `_qa_index` |
+| `qa_context` | 1107 | entry — คืน block "=== คำแนะนำจากฐานความรู้ (QA) ===" เมื่อ claim หรือ trigger kw; resolve codes จาก route + active card, brand จาก units/msg | `route_context.resolve_route`, `conversation_products.get_active_product`, `search_qa` |
+| `qa_troubleshoot_tips` | — | คืน list คำแนะนำ `a` สำหรับ troubleshoot-first claim flow — gate: level∈{model,item,brand} + _qa_sim≥0.5 + len(a)≥30 | `search_qa`, `route_context`, `conversation_products` |
+| `_known_brands` | 1019 | set แบรนด์ที่รู้จัก = `_KNOWN_BRAND_SET` baseline ∪ `distinct(brand)` จาก `kb_products` + `sellable_units.brand.original_brand_name` — แบรนด์ใหม่เข้าร้านได้ scope protection โดยไม่แก้โค้ด; **TTL 5 นาที** (refresh fail → ของเก่า), cold-start DB ล่ม → baseline (fail-open); ใช้ใน `search_qa` (topic scope) + `qa_context`/`qa_troubleshoot_tips` (detect แบรนด์จาก msg) | `_kb_products_coll`, `units._units_coll`, `_norm_brand` |
+| `_qa_docs` | 1058 | kb_qa docs ทั้งหมด — **TTL cache 5 นาที** (`_qa_lock` กัน refresh ซ้อน — chat() รัน threadpool); refresh fail → stale cache; สำเร็จ → `_qa_embed_missing` ทันที | `_kb_qa_coll`, `_qa_embed_missing` |
+| `_qa_embed_missing` | — | embed kb_qa doc ที่ยังไม่มี vector (key ด้วย `_id` — append เท่านั้น ไม่ realign) → QA ใหม่ searchable ทันทีโดยไม่ rebuild npz; fail → log เฉยๆ (doc ยังเจอด้วย substring) | `embedding.embed_texts`, `_qa_vectors` |
+| `_norm_brand` | — | normalize ค่า brand จาก DB — ตัดวงเล็บ `(ไทย)`/lower/กรอง `_BRAND_JUNK`+สั้น<3 (`'CukTech (ชุกเทค)'`→`'cuktech'`; `'nobrand'`/`'tws'`/`'meet'`→`''`) | — |
 
 #### 6.5.2 Model keyword + topic
 
@@ -691,7 +723,9 @@ web_search.should_use_web_search(answer, intent, products, message)
 |---|---|---|
 | `_load_env` | 27 | load `.env` |
 | `_build_admin_client` | 92 | cached MongoClient for admin DB |
-| `_kb_coll` | 118 | return `knowledge_base` collection |
+| `_kb_coll` | 118 | return `knowledge_base` collection (legacy fallback) |
+| `_kb_products_coll` / `_kb_qa_coll` | — | collections `kb_products` / `kb_qa` (repoint 2026-09-16) |
+| `_qa_index` | — | lazy-load `exports/qa_embeddings.npz` (392 vecs, สร้างด้วย `build_embeddings --qa`) |
 
 #### 6.5.5 Module constants
 
@@ -884,7 +918,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 |---|---|---|
 | `load_timeline` | 80 | โหลด product timeline ของแชทจาก Mongo |
 | `save_timeline` | 95 | บันทึก product timeline (upsert โดย conversation_id) |
-| `add_product` | 130 | เพิ่มสินค้าเข้า timeline + คำนวณ active ใหม่ |
+| `add_product` | 148 | เพิ่มสินค้าเข้า timeline + คำนวณ active ใหม่ — **2026-09-21 (Task 6)**: เพิ่ม params `model_id`, `model_name` — anchor ระดับรุ่นย่อย (order item ส่ง model_id มา); dedupe ด้วย (item_id, model_id) — model_id ว่างฝั่งใดฝั่งหนึ่งถือ entry เดียวกัน (backward compat) |
 | `get_active_product` | 195 | ดึง active product card (anchor ล่าสุด) |
 | `get_suggestion_latest` | 210 | ดึง suggestion product ล่าสุด (bot แนะนำ) |
 | `resolve_active_by_message` | 230 | resolve active product ตามกฎ priority (ชื่อรุ่น → ตัวเดิม → อันที่แนะนำ → default) |
@@ -1126,6 +1160,13 @@ Mongo document schema:
 | `OPENROUTER_SEARCH_MODEL` | default `google/gemini-2.5-flash:online` |
 | `AI_USAGE_HUB_URL` / `AI_USAGE_HUB_TOKEN` | AI Usage Hub |
 
+### 7.5 ChatAdminWeb — runtime config docs (`system_configs`)
+
+| config_key | หน้าที่ |
+|---|---|
+| `llm_config` | `{keys:[], models:{chat,vision,intent,openrouter_search}}` — แก้ผ่าน `/llm` (dev), bot อ่าน TTL 10s, ไม่มี doc → env fallback |
+| `role_permissions` | `{roles:[{key,label,builtin}], permissions:{page:{role:"none|read|edit"}}}` — แก้ผ่าน `/roles` (dev, hardcode), server cache 30s; page registry = `lib/pages.ts` `PAGES`; ไม่มี doc → `DEFAULT_PERMISSIONS` (ค่าเดิม) |
+
 ---
 
 ## 8. สถานะปัจจุบัน
@@ -1365,7 +1406,8 @@ fetch_products
 
 | ฟังก์ชัน | หน้าที่ |
 |---|---|
-| `handle_warranty_flow(req, ctx, history, db)` | จัดการ warranty state machine ทั้ง 10 states |
+| `handle_warranty_flow(req, ctx, history, db)` | จัดการ warranty state machine ทั้ง 10 states (v2) |
+| `handle_warranty_flow_legacy(req, ctx, history, db)` | **2026-09-16** — legacy claim SM ที่ย้าย verbatim จาก `app.py chat()` — คืน `dict` kwargs สำหรับ `ChatResponse(**d)` หรือ `None`; ctx ส่ง `anchor_compare_ctx, bot_name, image_desc_out, is_claim_request, is_followup_policy, is_tax_invoice, qa10, steps, timing_breakdown, total_start, t0, warranty_auto_answer, warranty_auto_ctx, intent_result, model_name` — ⚠️ preserve latent bug: `_model_name` ใน warranty_review/post_handoff return ไม่เคยถูก assign (NameError ถ้าถึงจุดนั้น — เหมือนเดิม) |
 | `_handle_review_request()` | State 1: ลูกค้าขอทวนข้อมูล |
 | `_build_post_handoff_response()` | State 2: post-handoff lock |
 | `_build_warranty_claim_response()` | สร้าง response + handoff API call |
@@ -1394,6 +1436,7 @@ fetch_products
 #### 6.12.5 Called by
 
 - `chat_v2._check_warranty_state_machine()` → `warranty_flow.handle_warranty_flow()`
+- `app.chat()` (legacy) → `warranty_flow.handle_warranty_flow_legacy()` — **2026-09-16**
 
 #### 6.12.6 Side effects
 
@@ -1551,6 +1594,142 @@ fetch_products
 - Live MongoDB product match (ต้องเชื่อม DB จริง)
 - End-to-end ผ่าน `/chat` endpoint (ต้องรัน server)
 - Replay/shadow test เทียบกับ legacy
+
+### 6.14 `test_chat_api.py` — Test Chat Sessions API (ย้ายจาก app.py 2026-09-16)
+
+> **Source**: ย้าย verbatim จาก `app.py` ท้ายไฟล์ (~370 บรรทัด)
+> **Wire-up**: `app.py` → `app.include_router(test_chat_api.router)`
+
+#### 6.14.1 Purpose
+
+CRUD สำหรับ test-chat sessions เก็บลง `test_chat_sessions` (admin DB) + audit log `test_chat_logs`
+
+#### 6.14.2 Routes
+
+| Route | Method | ฟังก์ชัน | หน้าที่ |
+|---|---|---|---|
+| `/test-chat/sessions` | GET | `list_test_chat_sessions` | list sessions กรอง admin_id (Phase 3) + legacy/script_test |
+| `/test-chat/sessions` | POST | `create_test_chat_session` | สร้าง session + เก็บ admin_id/admin_name |
+| `/test-chat/sessions/{id}` | GET | `get_test_chat_session` | ดึง session + messages |
+| `/test-chat/sessions/{id}/messages` | POST | `add_test_chat_message` | เพิ่ม message + auto-title |
+| `/test-chat/sessions/{id}` | DELETE | `delete_test_chat_session` | ลบ session |
+| `/test-chat/sessions/{id}` | PUT | `update_test_chat_session` | อัปเดต shop/title |
+| `/test-chat/sessions/{id}/close` | POST | `close_test_chat_session` | status=closed → บอทตอบต่อได้ |
+| `/test-chat/sessions/{id}/reopen` | POST | `reopen_test_chat_session` | status=open |
+| `/test-chat/logs` | GET | `list_test_chat_logs` | ดู audit log กรอง admin_id |
+
+#### 6.14.3 Helpers + schemas
+
+- `_validate_object_id(oid)` — validate 24-hex ObjectId → 400 ถ้าไม่ผ่าน
+- `_log_testchat_action(action, request, session_id, **extra)` — insert `test_chat_logs` (swallow error)
+- Schemas: `TestChatMessage`, `CreateSessionRequest`, `AddMessageRequest`, `UpdateSessionRequest`, `RateMessageRequest`
+
+#### 6.14.4 Calls / Called by / Side effects
+
+- **Calls**: `conversation_products._admin_db()`, `bson.ObjectId`, `urllib.parse.unquote`
+- **Called by**: Next.js test-chat UI ผ่าน `/chat` BFF proxy
+- **Side effects**: MongoDB read/write `test_chat_sessions` + `test_chat_logs` (admin DB เท่านั้น)
+- **Env**: `ADMIN_MONGO_COLLECTION_TEST_CHAT_SESSIONS` (default `test_chat_sessions`)
+
+### 6.15 `device_compat.py` — Device compatibility helpers (ย้ายจาก app.py 2026-09-16)
+
+> **Source**: ย้าย verbatim จาก `app.py` module-level block (~500 บรรทัด)
+
+#### 6.15.1 Purpose
+
+กรอง/จัดอันดับสินค้าตาม device compatibility (connector + wattage) ก่อนส่ง LLM
+
+#### 6.15.2 Functions
+
+| ฟังก์ชัน | หน้าที่ | เรียก |
+|---|---|---|
+| `_extract_max_wattage(p)` | extract ค่า W สูงสุดจาก spec/variants/ชื่อ (กรอง model number) | `re` |
+| `_extract_product_connectors(p)` | สกัด connector types จากชื่อ+desc → set | `re` |
+| `_resolve_device_spec(name, ws_extra)` | resolve spec ของอุปกรณ์ — web search → `_KNOWN_DEVICE_SPECS` | `re` |
+| `_filter_compat_products(...)` | กรองตาม connector (ไม่กรอง wattage) + sort wattage asc | ฟังก์ชันข้างบน |
+| `_apply_product_tiers(products, tier_a_ids, limit)` | รวม tier A (exact/anchor) + tier B → `product_store._dedupe_products` | `product_store` |
+| `_device_spec_lookup(db, req, ...)` | web-search spec + re-query DB หา compat products | `product_store`, `web_search` (lazy) |
+| `_KNOWN_DEVICE_SPECS` | dict spec hardcoded (last resort) | — |
+
+#### 6.15.3 Called by
+
+- `app.chat()` — `_device_spec_lookup` ×2, `_filter_compat_products`, `_apply_product_tiers`, `_extract_max_wattage` (superlative/compat sort)
+
+### 6.16 `order_flow.py` — Order/tracking/return-refund early flow (ย้ายจาก app.py 2026-09-16)
+
+#### 6.16.1 Purpose
+
+Early-return blocks ก่อน intent classification: order lookup, return/refund + address handoff, tracking lookup
+
+#### 6.16.2 Functions
+
+| ฟังก์ชัน | หน้าที่ | Input | Output |
+|---|---|---|---|
+| `early_order_flow(req, ctx, history, db)` | จับ order_sn (message/req.field/anchor) → lookup → ตอบ/handoff; return/refund+address handoff; tracking lookup จากข้อความ/vision | ctx: `qa10, steps, total_start, persona_extra, vision_context, image_desc_out, model_name` | `dict` kwargs สำหรับ `ChatResponse(**d)` หรือ `None`; เขียนกลับ `ctx["order_sn"]`, `ctx["is_claim_request_pre"]` |
+
+- **Calls**: `order_store.*` (extract_order_sn, lookup_order, build_order_context, extract_tracking_number, lookup_by_tracking, `_ORDER_TAG_RE`), `warranty.detect_claim_request`, `conversation_products.*` (is_order_question, resolve_active_order_sn, add_order_anchor, add_product — lazy), `product_store.fetch_product_by_id` (lazy), `llm.answer_general`/`_gemini_cost`/`split_segments`, `app._send_handoff`, `app._routing` (ผ่าน `from . import app` lazy)
+- **Called by**: `app.chat()` — หลัง item-card anchor block ก่อน intent classification
+- **Side effects**: MongoDB read (order), `add_order_anchor`/`add_product` writes (conversation_products), `_send_handoff` HTTP POST
+- **Error**: `RuntimeError` จาก LLM → `raise HTTPException(500)`
+
+### 6.17 `handoffs.py` — Early handoff detection (ย้ายจาก app.py 2026-09-16)
+
+#### 6.17.1 Functions
+
+| ฟังก์ชัน | หน้าที่ | Input | Output |
+|---|---|---|---|
+| `detect_human_request(req, ctx)` | BUG-3 fix — ลูกค้าขอคุยกับคน/แอดมิน (keyword + "แอด" short-msg guard) → handoff ทันที | ctx: `steps, timing_breakdown, total_start, image_desc_out, model_name` | `dict`/`None` |
+| `post_intent_handoffs(req, ctx, db)` | tax invoice (`is_tax_invoice` จาก intent/keyword) + มอก. TISI (`warranty.detect_tisi_question` → `product_store.search_tisi_products` → ตอบหรือ handoff) | ctx: `is_tax_invoice, bot_name, steps, timing_breakdown, total_start, image_desc_out, model_name` | `dict`/`None` |
+
+- **Called by**: `app.chat()` — `detect_human_request` ก่อน intent classification; `post_intent_handoffs` หลัง Phase 6 keyword fallback
+- **Calls**: `llm.split_segments`, `product_store.search_tisi_products`, `warranty.detect_tisi_question`/`extract_tisi_model_keyword`, `responses._send_handoff`, `responses._routing` (⚡ ย้ายจาก app.py ไป responses.py 2026-09-16 — app.py re-import กลับ)
+
+### 6.18 `units.py` — Unit-level fetch path (flag-gated `USE_UNIT_INDEX`, 2026-09-16)
+
+#### 6.18.1 Functions
+
+| ฟังก์ชัน | หน้าที่ | Input | Output |
+|---|---|---|---|
+| `fetch_units(message, *, shop, limit, sellable_only, product_types, charger_subtype, route)` | ดึง units: exact model_code(+qualifier scoring) → field filter → vector บน unit_embeddings (mask shop+sellable จาก Mongo) → merge+rank | message: str; route: Route จาก `route_context.resolve_route` | `list[unit doc + _score + _matched_by]` (ว่าง = fallback legacy) |
+| `attach_kb_specs(unit_docs)` | spec inheritance — unit desc ว่างยืม `canonical_specs` จาก `kb_products` ผ่าน `model_codes` | list[unit doc] | docs เดิม (เติม `canonical_specs` ให้ตัวที่ match) |
+| `attach_image_texts(unit_docs)` | join `image_texts` (OCR รูป) เข้า unit ผ่าน `image_ids` — spec\|product→`image_text`; **banner ที่มีคำประกัน→`warranty_text`** (per-listing เงื่อนไขประกัน, ≤1500 chars) | list[unit doc] | docs เดิม (เติม `image_text`/`warranty_text`) |
+| `_unit_warranty(unit)` | ระยะประกันจาก `item_name` ด้วย `warranty.extract_warranty_from_name` (แก้ regression warranty=None ใน unit path) | unit: dict | `dict{duration,duration_months,duration_source}\|None` |
+| `to_unit_card(unit, route)` | unit doc → card shape เดียวกับ `to_product_card` + unit extras; `warranty` จาก `_unit_warranty`; `warranty_text` append ท้าย `description_excerpt`; **`image_url` จาก `image_ids[0]` (Shopee CDN)**; `condition`/`short_link`/`weight`/`dimension`/`has_promotion`/`is_flash_sale` จาก `_listing` (join) | unit: dict; route: Route\|None | `dict` card |
+| `pick_desc_sections(unit, route)` | เลือก desc section ตาม `route.needs_spec/needs_warranty` cap 3000 chars | unit: dict | `str` |
+| `attach_listing_fields(unit_docs)` | batch join `ShpProducts` ด้วย `item_id` (int ทั้งสองฝั่ง) — เติม `_listing` {condition, weight, dimension, short_link, promotion, is_flash_sale, image}; runtime join เพราะ promo เปลี่ยนบ่อย (build-time copy จะ stale) | list[unit doc] | docs เดิม (เติม `_listing`) |
+| `fetch_unit_cards(message, **kwargs)` | fetch_units + attach_kb_specs + attach_image_texts + **attach_listing_fields** + to_unit_card — entry point | เหมือน fetch_units | `list[card]` |
+
+- **Called by**: `product_store.fetch_products` — hook หลัง `USE_UNIT_INDEX` flag (`1`=ทุก query, `charger`=เฉพาะ route charger-family); ว่าง/error → legacy path
+- **Calls**: `route_context.resolve_route`, `embedding.embed_query`, `product_store._has_active_promotion` (lazy), Mongo `sellable_units`/`kb_products`/`ShpProducts` (admin DB)
+
+### 6.19 `guards.py` — Output guard + card flags (2026-09-16)
+
+| ฟังก์ชัน | หน้าที่ | Input | Output |
+|---|---|---|---|
+| `build_flags(card)` | รวม `sellable/has_warranty_info/has_description/oos_in_name` เป็น dict | card: dict | `dict` flags |
+| `check_output(answer, *, handoff_sent)` | regex จับยืนยันเคลม/คืนเงิน/จัดส่งโดยไม่มี handoff | answer: str; handoff_sent: bool | `list[str]` violation labels (ว่าง=ผ่าน) |
+
+- **Called by**: `ChatResponse.model_post_init` (app.py) — log `[GUARD] violations=...` ทุก response (observability, ไม่แก้คำตอบ)
+
+### 6.20 `responses.py` — Response helpers (ย้ายจาก app.py 2026-09-16)
+
+| ฟังก์ชัน | หน้าที่ | Input | Output |
+|---|---|---|---|
+| `_routing(path, reason, ...)` | routing_decision dict สำหรับ observability | path/reason + optional fields | `dict` |
+| `_send_handoff(req, ctx, *, reason, claim_topic, claim, simulate, timeout, log_tag)` | POST handoff ไป `ADMIN_HANDOFF_URL` (best-effort) | req: ChatRequest; claim: dict | `dict` response หรือ `{}` |
+
+- **Called by**: `app.chat()`/`chat_v2`/`handoffs.py` ผ่าน `from .responses import _routing, _send_handoff` (app.py re-import — call sites เดิม)
+- **Side effects**: `_send_handoff` — HTTP POST + stderr log
+
+### 6.21 `route_context.py` — Route resolver เดียว (2026-09-16)
+
+| ฟังก์ชัน | หน้าที่ | Input | Output |
+|---|---|---|---|
+| `resolve_route(message, intent_result=None)` | normalize (typo_dict) → product_types + charger_subtype + model_codes + needs_* flags ครั้งเดียว | message: str | `Route` dataclass |
+| `normalize_message(message)` | แก้ typo latin (≥4 chars) + Thai (≥3 chars, threshold 90) จาก `exports/typo_dict.json` | message: str | `str` |
+
+- **Called by**: `units.fetch_units`, `product_store` flag gate (`USE_UNIT_INDEX=charger`)
+- **Calls**: `product_store._detect_product_types`/`_detect_charger_subtype` (reuse เดิม)
 
 ---
 

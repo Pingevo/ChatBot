@@ -36,10 +36,10 @@ cp .env.example .env
 
 ```bash
 # ใช้ค่าจาก .env ทั้งหมด
-python export_mongo.py
+python chatbot/shopeechat/scripts/export_mongo.py
 
 # ระบุ collection + format ที่ command line (override .env)
-python export_mongo.py --collection products --format csv --limit 100
+python chatbot/shopeechat/scripts/export_mongo.py --collection products --format csv --limit 100
 ```
 
 ไฟล์จะถูกเขียนไปที่ `exports/<collection>.export.json` (หรือ `.csv`)

@@ -566,3 +566,18 @@ docker run --rm -v chatbotproductms_caddy_data:/data -v $(pwd):/backup alpine \
 docker run --rm -v chatbotproductms_caddy_data:/data -v $(pwd):/backup alpine \
   tar xzf /backup/caddy_data_backup.tar.gz -C /data
 ```
+
+## Data refresh (cron)
+
+bot อ่าน Mongo สด + auto-reload `.npz` เมื่อไฟล์เปลี่ยน (mtime) → rebuild ข้อมูลได้โดยไม่ต้อง restart
+
+```cron
+# ทุกคืน 03:00 — export → units → embeddings → image OCR (incremental)
+0 3 * * *  /path/to/repo/chatbot/shopeechat/scripts/refresh_data.sh
+```
+
+- lock กันรันซ้อน (`exports/.refresh.lock.d`) — cron วันถัดไปข้ามถ้ารอบก่อนยังไม่จบ
+- log: `exports/refresh_YYYYMMDD.log`
+- export fail → abort ทั้งหมด (ไม่ build บนข้อมูลผิด); ขั้นอื่น fail → log แล้วไปต่อ
+- image OCR เป็น incremental (resume จาก `image_texts.jsonl`) — คืนที่ไม่มีรูปใหม่จบในไม่กี่วินาที ไม่เสียค่า Gemini ซ้ำ
+- `kb_qa`/`kb_products` ไม่ต้องรอ cron — สดเองผ่าน TTL cache 5 นาที + lazy-embed

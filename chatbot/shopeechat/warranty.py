@@ -984,3 +984,136 @@ def auto_check_warranty(
         print(f"[WARRANTY-AUTO] error: {exc}", file=sys.stderr)
         return None
 
+
+
+def auto_check_delivery_warranty(order_sn: str, shop_filter: str | None, bot_name: str) -> tuple[str, dict, str]:
+    """Warranty auto-check จาก order_sn — ย้ายจาก app.py chat() (refactor).
+
+    Phase 1 (delivery-date): lookup_order → check_warranty_status
+      - multi-item warranty ต่างกัน → คืน answer ถามลูกค้าว่าชิ้นไหน
+      - ยังไม่ส่งมอบ → บอกยังไม่เริ่มนับประกัน
+      - อยู่/ไม่อยู่ในประกัน → คืน deterministic answer + info + ctx
+    Phase 2 (legacy fallback): auto_check_warranty (create_time) เป็น context เสริม
+      ถ้า phase 1 ไม่ได้ผล
+
+    Returns: (answer, info, ctx) — answer="" ถ้าไม่มี deterministic answer
+    """
+    import sys
+    from . import order_store as _order_store
+
+    answer = ""
+    info: dict = {}
+    ctx = ""
+
+    print(f"[WARRANTY-AUTO] ลูกค้าถามเคลม + order_sn={order_sn} → auto-check (delivery-date)", file=sys.stderr)
+    try:
+        _auto_order = _order_store.lookup_order(order_sn, shop_filter=shop_filter)
+        if not _auto_order:
+            print(f"[WARRANTY-AUTO] order not found → fallback to manual flow", file=sys.stderr)
+        else:
+            _delivery_raw = _auto_order.get("delivery_time_raw")
+            _auto_items = _auto_order.get("items", [])
+            # ดึง warranty duration จากแต่ละ item — ใช้ product_store._warranty_info
+            _item_warranties: list[tuple[str, int]] = []
+            for _ai in _auto_items:
+                _ai_name = (_ai.get("name") or "")[:80]
+                # ดึง warranty จากชื่อสินค้าโดยตรง (เหมือน manual flow)
+                _ai_wi = extract_warranty_from_name(_ai_name)
+                _ai_dur = _ai_wi.get("months") if _ai_wi else None
+                if _ai_dur and _ai_dur > 0:
+                    _item_warranties.append((_ai_name, int(_ai_dur)))
+            # dedup warranty months เพื่อตรวจ ambiguity
+            _unique_months = list({_m for _, _m in _item_warranties})
+            if len(_unique_months) > 1:
+                # multi-item ที่ warranty ต่างกัน → ถามลูกค้า ไม่เดา
+                _item_list_text = "\n".join(
+                    f"• {_n} (รับประกัน {_m} เดือน)" for _n, _m in _item_warranties
+                )
+                answer = (
+                    f"คำสั่งซื้อ {order_sn} มีหลายสินค้าที่มีระยะเวลารับประกันต่างกันค่ะ:\n"
+                    f"{_item_list_text}\n\n"
+                    f"รบกวนบอก{bot_name} ด้วยค่ะว่าลูกค้าสอบถามเรื่องรับประกันของสินค้าชิ้นไหน?"
+                )
+                print(f"[WARRANTY-AUTO] multi-item ambiguity: {_item_warranties} → ask customer", file=sys.stderr)
+            elif len(_unique_months) == 1:
+                # ทุก item มี warranty เท่ากัน (หรือมีแค่ item เดียวที่มี warranty)
+                _warranty_months_auto = _unique_months[0]
+                _product_name_auto = _item_warranties[0][0] if _item_warranties else ""
+                _warranty_status = check_warranty_status(_delivery_raw, _warranty_months_auto)
+                info = {
+                    "order_sn": order_sn,
+                    "delivery_time_raw": _delivery_raw,
+                    "warranty_months": _warranty_months_auto,
+                    "product_name": _product_name_auto,
+                    **_warranty_status,
+                }
+                if _warranty_status["in_warranty"] is None:
+                    # ยังไม่ส่งมอบ/ยกเลิก → บอกลูกค้า
+                    if not _delivery_raw:
+                        answer = (
+                            f"ตรวจสอบคำสั่งซื้อ {order_sn} แล้วค่ะ "
+                            f"พบว่าสินค้ายังไม่ส่งมอบถึงมือลูกค้า "
+                            f"(สถานะปัจจุบัน: {_auto_order.get('order_status','ไม่ระบุ')})\n\n"
+                            f"ระยะเวลารับประกันจะเริ่มนับเมื่อลูกค้าได้รับสินค้าแล้วเท่านั้นค่ะ "
+                            f"หากต้องการแจ้งเคลม/สอบถามเพิ่มเติม เดี๋ยว{bot_name} ส่งต่อแอดมินดูแลให้นะคะ"
+                        )
+                        print(f"[WARRANTY-AUTO] not delivered yet (status={_auto_order.get('order_status_raw')}) → inform customer", file=sys.stderr)
+                    else:
+                        answer = (
+                            f"ตรวจสอบคำสั่งซื้อ {order_sn} แล้วค่ะ "
+                            f"ไม่สามารถคำนวณระยะประกันได้ในขณะนี้ "
+                            f"{_warranty_status.get('text','')}\n\n"
+                            f"หากต้องการแจ้งเคลม/สอบถามเพิ่มเติม เดี๋ยว{bot_name} ส่งต่อแอดมินดูแลให้นะคะ"
+                        )
+                        print(f"[WARRANTY-AUTO] indeterminate → inform customer", file=sys.stderr)
+                elif _warranty_status["in_warranty"]:
+                    # อยู่ในช่วงประกัน
+                    _delivery_date_str = _warranty_status["delivery_date"].strftime("%d/%m/%Y") if _warranty_status.get("delivery_date") else ""
+                    _expiry_date_str = _warranty_status["expiry_date"].strftime("%d/%m/%Y") if _warranty_status.get("expiry_date") else ""
+                    answer = (
+                        f"ตรวจสอบข้อมูลเรียบร้อยแล้วค่ะ สินค้า {_product_name_auto} "
+                        f"ในคำสั่งซื้อ {order_sn} "
+                        f"ที่ส่งมอบเมื่อวันที่ {_delivery_date_str} "
+                        f"ยังอยู่ในช่วงรับประกันนะคะ {_warranty_status['text']} "
+                        f"(วันที่ประกันหมด: {_expiry_date_str})\n\n"
+                        f"เพื่อดำเนินการเคลม/ซ่อมต่อ รบกวนแจ้งข้อมูลดังนี้ค่ะ:\n"
+                        f"• ชื่อ-นามสกุล\n"
+                        f"• เบอร์โทร\n\n"
+                        f"จากนั้นเดี๋ยว {bot_name} จะส่งต่อให้แอดมินดำเนินการต่อให้นะคะ"
+                    )
+                    print(f"[WARRANTY-AUTO] in_warranty=True days_left={_warranty_status['days_remaining']}", file=sys.stderr)
+                else:
+                    # หมดช่วงประกัน
+                    _delivery_date_str = _warranty_status["delivery_date"].strftime("%d/%m/%Y") if _warranty_status.get("delivery_date") else ""
+                    _expiry_date_str = _warranty_status["expiry_date"].strftime("%d/%m/%Y") if _warranty_status.get("expiry_date") else ""
+                    answer = (
+                        f"ตรวจสอบข้อมูลเรียบร้อยแล้วค่ะ สินค้า {_product_name_auto} "
+                        f"ในคำสั่งซื้อ {order_sn} "
+                        f"ที่ส่งมอบเมื่อวันที่ {_delivery_date_str} "
+                        f"ไม่อยู่ในช่วงประกันแล้วนะคะ {_warranty_status['text']} "
+                        f"(วันที่ประกันหมด: {_expiry_date_str})\n\n"
+                        f"สนใจปรึกษาแอดมินก่อนไหมคะ"
+                    )
+                    print(f"[WARRANTY-AUTO] in_warranty=False days_left={_warranty_status['days_remaining']}", file=sys.stderr)
+                # สร้าง context สำหรับ LLM (ถ้าไม่มี deterministic answer)
+                ctx = _warranty_status.get("text", "")
+            else:
+                # ไม่มี item ที่ดึง warranty ได้ → fallback ไป manual flow
+                print(f"[WARRANTY-AUTO] no warranty duration found in items → fallback to manual flow", file=sys.stderr)
+    except Exception as _warranty_auto_exc:
+        print(f"[WARRANTY-AUTO] error: {_warranty_auto_exc}", file=sys.stderr)
+        # error → fallback ไป manual flow (ไม่ crash)
+
+    # ===== Phase 1C (legacy) — Warranty auto-check from create_time (เก็บไว้เป็น context fallback) =====
+    # ⚡ ถ้า delivery-date flow ด้านบนไม่ได้ผล ให้ใช้ auto_check_warranty เดิมเป็น context เสริม
+    if not info and not answer:
+        try:
+            _auto_result = auto_check_warranty(order_sn, shop_filter=shop_filter)
+            if _auto_result:
+                ctx = _auto_result.get("warranty_text", "")
+                info = _auto_result
+                print(f"[WARRANTY-AUTO-LEGACY] in_warranty={_auto_result.get('in_warranty')} days_left={_auto_result.get('days_remaining')}", file=sys.stderr)
+        except Exception:
+            pass
+
+    return answer, info, ctx

@@ -284,31 +284,6 @@ def _format_unix_ts(ts: Any) -> str:
         return str(ts)
 
 
-def _format_unix_ts_with_time(ts: Any) -> str:
-    """แปล unix timestamp เป็นวันที่+เวลาภาษาไทย (เช่น '15 ก.พ. 2567 14:30')."""
-    if not ts or ts == 0:
-        return "ไม่ระบุ"
-    if isinstance(ts, str):
-        try:
-            dt = datetime.fromisoformat(ts)
-            from datetime import timedelta
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            dt_th = dt.astimezone(timezone(timedelta(hours=7)))
-            months = _THAI_MONTHS
-            return f"{dt_th.day} {months[dt_th.month]} {dt_th.year + 543} {dt_th.hour:02d}:{dt_th.minute:02d}"
-        except Exception:
-            return str(ts)
-    try:
-        dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
-        from datetime import timedelta
-        dt_th = dt + timedelta(hours=7)
-        months = _THAI_MONTHS
-        return f"{dt_th.day} {months[dt_th.month]} {dt_th.year + 543} {dt_th.hour:02d}:{dt_th.minute:02d}"
-    except Exception:
-        return str(ts)
-
-
 # เดือนไทย — ใช้ร่วมกันทุก format function
 _THAI_MONTHS = [
     "", "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
@@ -520,44 +495,6 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
     except Exception as e:
         print(f"[ORDER_STORE] error: {e}", file=sys.stderr)
         return None
-
-
-def lookup_orders_by_buyer(
-    buyer_username: str,
-    shop_filter: str | None = None,
-    limit: int = 20,
-) -> list[dict[str, Any]]:
-    """ดึง order history ของลูกค้าจาก buyer_username (MongoDB only).
-
-    ⚡ Phase 1C — สำหรับ ticket panel ด้านขวา แสดงประวัติการสั่งซื้อ
-
-    Args:
-        buyer_username: ชื่อผู้ซื้อ (Shopee buyer_username)
-        shop_filter: ชื่อร้าน (optional)
-        limit: จำนวนสูงสุด (default 20)
-
-    Returns:
-        list ของ order dict (เหมือน lookup_order) เรียงจากใหม่→เก่า
-    """
-    try:
-        coll = _get_order_collection()
-        query: dict[str, Any] = {"buyer_username": buyer_username}
-        if shop_filter:
-            query["shopname"] = shop_filter
-        cursor = coll.find(query).sort("create_time", -1).limit(limit)
-        results = []
-        for doc in cursor:
-            # reuse lookup_order เพื่อ parse เดียวกัน (DRY)
-            order = lookup_order(doc.get("order_sn") or "", shop_filter=shop_filter)
-            if order:
-                results.append(order)
-        return results
-    except PyMongoError as e:
-        print(f"[ORDER_STORE] lookup_orders_by_buyer MongoDB error: {e}", file=sys.stderr)
-        return []
-    except Exception as e:
-        print(f"[ORDER_STORE] lookup_orders_by_buyer error: {e}", file=sys.stderr)
-        return []
 
 
 def build_order_context(order: dict[str, Any]) -> str:

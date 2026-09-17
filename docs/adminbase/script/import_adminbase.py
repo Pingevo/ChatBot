@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -30,11 +31,19 @@ from pymongo import MongoClient
 # ---- config ----
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.insert(0, str(ROOT))          # chatbot.shopeechat.*
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # spec_key_map
 load_dotenv(ROOT / ".env")
+
+import spec_key_map  # noqa: E402
 
 ADMIN_DB_NAME = os.environ.get("ADMIN_MONGO_DB", "chatbot_admin").strip()
 KB_COLLECTION = os.environ.get("ADMIN_MONGO_COLLECTION_KB", "knowledge_base").strip()
+KB_PRODUCTS_COLL = os.environ.get("ADMIN_MONGO_COLLECTION_KB_PRODUCTS", "kb_products").strip()
+KB_QA_COLL = os.environ.get("ADMIN_MONGO_COLLECTION_KB_QA", "kb_qa").strip()
+KB_RAW_COLL = os.environ.get("ADMIN_MONGO_COLLECTION_KB_RAW", "kb_raw").strip()
 ADMINBASE_DIR = Path(__file__).resolve().parent.parent
+UNITS_JSONL = ROOT / "exports" / "sellable_units.jsonl"
 
 # ---- field mapping ----
 # ชื่อ column ใน Excel → field ใน schema knowledge_base
@@ -193,107 +202,166 @@ def _is_spec_file(filename: str, sheet_name: str) -> bool:
     return "spec" in low
 
 
-def _parse_excel_row(
+def build_code_item_map() -> dict[str, list[str]]:
+    """โหลด sellable_units.jsonl → {model_code_lower: [item_id,...]} สำหรับ link kb→catalog."""
+    code_map: dict[str, list[str]] = {}
+    if not UNITS_JSONL.exists():
+        return code_map
+    for line in open(UNITS_JSONL, encoding="utf-8"):
+        u = json.loads(line)
+        iid = str(u.get("item_id") or "")
+        for c in u.get("model_codes") or []:
+            code_map.setdefault(str(c).lower(), [])
+            if iid and iid not in code_map[str(c).lower()]:
+                code_map[str(c).lower()].append(iid)
+    return code_map
+
+
+def _extract_model_codes(text: str) -> list[str]:
+    """สกัดรหัสรุ่นจากชื่อ model — reuse ตัวเดียวกับ unit_classifier."""
+    try:
+        from chatbot.shopeechat.scripts.unit_classifier import _extract_codes
+        return _extract_codes(text or "")
+    except Exception:
+        return []
+
+
+def parse_row(
     header: list[str],
     row: tuple,
     source_file: str,
     source_row: int,
     source_sheet: str,
-) -> dict | None:
-    """แปลง row จาก Excel → document ตาม schema knowledge_base.
+    code_item_map: dict[str, list[str]] | None = None,
+) -> tuple[dict | None, list[dict], dict]:
+    """แปลง row → (kb_products doc|None, [kb_qa docs], kb_raw doc).
 
-    คืน None ถ้า row ว่างทั้งหมด.
+    - raw เป็น list-of-pairs [{col,val}] — ไม่ทิ้ง column ซ้ำ (แก้ bug dict overwrite)
+    - Q&A: pair column คำถาม/คำตอบ ตามตำแหน่ง (ไฟล์อย่าง Cuktech ZTEC มี 2 pairs/row)
+    - specs: canonical_specs (map ผ่าน spec_key_map) + specs_raw (ที่เหลือทั้งหมด)
+    - product doc = None เมื่อ row มีแต่ Q&A ไม่มี product identity
     """
-    # สร้าง raw dict (เก็บทุก column ตามชื่อเดิม)
-    raw: dict[str, str] = {}
+    # ── raw pairs (เก็บทุกคอลัมน์ตามลำดับ ไม่ซ้ำทับ) ──
+    pairs: list[dict[str, str]] = []
     for i, col_name in enumerate(header):
         if not col_name:
             continue
         val = row[i] if i < len(row) else None
         cell_str = _cell_to_str(val)
         if cell_str:
-            raw[col_name] = cell_str
+            pairs.append({"col": col_name, "val": cell_str})
+    raw_doc = {
+        "source_file": source_file,
+        "source_sheet": source_sheet,
+        "source_row": source_row,
+        "pairs": pairs,
+    }
+    if not pairs:
+        return None, [], raw_doc
 
-    if not raw:
-        return None  # row ว่าง
+    # ── Q&A positional pairing: col 'question' จับคู่ 'answer' ถัดไปที่ยังไม่ถูกใช้ ──
+    q_pos: list[int] = []       # index ใน pairs ที่เป็น question
+    used_a: set[int] = set()
+    qa_pairs: list[tuple[int, int | None]] = []  # (q_idx, a_idx|None)
+    mapped_fields: dict[int, str] = {}           # pair idx → schema field
+    for i, p in enumerate(pairs):
+        f = REVERSE_MAP.get(p["col"].strip().lower())
+        mapped_fields[i] = f or ""
+        if f == "question":
+            q_pos.append(i)
+        elif f == "answer":
+            qi = q_pos.pop(0) if q_pos else None
+            qa_pairs.append((qi, i))
+            used_a.add(i)
+    for qi in q_pos:  # question ที่ไม่มี answer ตามหลัง
+        qa_pairs.append((qi, None))
 
-    # แปลง raw → common fields
+    qa_docs: list[dict] = []
+    for n, (qi, ai) in enumerate(qa_pairs):
+        q = pairs[qi]["val"] if qi is not None else ""
+        a = pairs[ai]["val"] if ai is not None else ""
+        if not (q or a):
+            continue
+        qa_docs.append({
+            "type": "qa",
+            "kb_ref": f"{source_file}:{source_sheet}:{source_row}",
+            "q": q, "a": a,
+            "topic": "",
+            "model_codes": [],
+            "item_ids": [],
+            "source_file": source_file, "source_sheet": source_sheet,
+            "source_row": source_row, "qa_idx": n,
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+            "updated_by": "system_import", "version": 1, "active": True,
+        })
+
+    # ── common fields (first occurrence ชนะ) + specs ──
     doc: dict = {
         "type": "product_spec",
-        "brand": "",
-        "model": "",
-        "category": "",
-        "category_id": "",
-        "highlights": "",
-        "description": "",
-        "box_contents": "",
-        "warranty_period": "",
-        "warranty_note": "",
-        "notes": "",
-        "weight": "",
-        "dimensions": "",
-        "specs": {},
-        "extra_fields": {},
-        "original_raw": raw,
-        "source_file": source_file,
-        "source_row": source_row,
+        "brand": "", "model": "", "category": "", "category_id": "",
+        "model_codes": [], "item_ids": [],
+        "highlights": "", "description": "", "box_contents": "",
+        "warranty_period": "", "warranty_note": "", "notes": "",
+        "weight": "", "dimensions": "",
+        "canonical_specs": {}, "specs_raw": {}, "extra_fields": {},
+        "source_file": source_file, "source_row": source_row,
         "source_sheet": source_sheet,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
-        "updated_by": "system_import",
-        "version": 1,
-        "active": True,
+        "updated_by": "system_import", "version": 1, "active": True,
     }
-
-    # map common fields
-    used_raw_keys: set[str] = set()
-    for raw_key, raw_val in raw.items():
-        schema_field = REVERSE_MAP.get(raw_key.strip().lower())
-        if schema_field and schema_field in doc:
-            # field ที่เป็น string ใน doc
-            if isinstance(doc[schema_field], str):
-                doc[schema_field] = raw_val
-            used_raw_keys.add(raw_key)
-
-    # field ที่เหลือ → specs หรือ extra_fields
-    # ถ้าเป็น field ที่ดูเหมือนสเปก (มีค่าสั้นๆ) → specs
-    # ถ้าเป็น field ที่ดูเหมือนคำอธิบาย (ยาว) → extra_fields
-    for raw_key, raw_val in raw.items():
-        if raw_key in used_raw_keys:
+    used: set[int] = set(used_a)
+    for qi, ai in qa_pairs:
+        if qi is not None:
+            used.add(qi)
+    col_count: dict[str, int] = {}
+    for i, p in enumerate(pairs):
+        if i in used:
             continue
-        # ถ้าค่ายาวเกิน 200 ตัวอักษร → extra_fields (เป็นคำอธิบาย)
-        # ถ้าสั้น → specs
-        if len(raw_val) > 200:
-            doc["extra_fields"][raw_key] = raw_val
+        col, val = p["col"], p["val"]
+        cnt = col_count.get(col, 0)
+        col_count[col] = cnt + 1
+        key = col if cnt == 0 else f"{col} ({cnt + 1})"
+        f = mapped_fields[i]
+        if f and f in doc and isinstance(doc.get(f), str) and not doc[f]:
+            doc[f] = val
+            continue
+        canon = spec_key_map.canonical_of(col)
+        if canon and canon not in doc["canonical_specs"]:
+            doc["canonical_specs"][canon] = val
+        elif len(val) > 200:
+            doc["extra_fields"][key] = val
         else:
-            doc["specs"][raw_key] = raw_val
+            doc["specs_raw"][key] = val
 
-    # detect category_id
     doc["category_id"] = _detect_category_id(
-        doc.get("category", ""), doc.get("brand", ""), doc.get("model", "")
-    )
+        doc.get("category", ""), doc.get("brand", ""), doc.get("model", ""))
+    doc["model_codes"] = _extract_model_codes(doc.get("model", ""))
+    if code_item_map:
+        seen: list[str] = []
+        for c in doc["model_codes"]:
+            for iid in code_item_map.get(c.lower(), []):
+                if iid not in seen:
+                    seen.append(iid)
+        doc["item_ids"] = seen
+    for qa in qa_docs:
+        qa["topic"] = f"{doc['brand']} {doc['model']}".strip()
+        qa["model_codes"] = doc["model_codes"]
+        qa["item_ids"] = doc["item_ids"]
 
-    # ถ้าเป็นไฟล์ Q&A → เปลี่ยน type
-    if _is_qa_file(source_file):
-        doc["type"] = "qa"
-        if doc.get("question") or doc.get("answer"):
-            doc["question"] = doc.get("question", "")
-            doc["answer"] = doc.get("answer", "")
-
-    # ถ้าเป็นไฟล์เปรียบเทียบ → เปลี่ยน type
     if _is_comparison_file(source_file):
         doc["type"] = "comparison"
-
-    # ถ้าเป็น spec file → type = product_spec (default อยู่แล้ว)
-    # แต่เก็บ flag ว่าเป็น spec
     if _is_spec_file(source_file, source_sheet):
         doc["is_spec_sheet"] = True
 
-    return doc
+    # row ที่มีแต่ Q&A ไม่มีข้อมูลสินค้าเลย → ไม่สร้าง product doc
+    has_identity = doc["brand"] or doc["model"] or doc["canonical_specs"] or doc["specs_raw"]
+    return (doc if has_identity else None), qa_docs, raw_doc
 
 
 def _parse_txt_file(filepath: Path) -> list[dict]:
-    """อ่านไฟล์ .txt (เงื่อนไขรับประกันทั่วไป) → document type=general_faq."""
+    """อ่านไฟล์ .txt (เงื่อนไขรับประกันทั่วไป) → kb_qa doc type=general_faq."""
     content = filepath.read_text(encoding="utf-8", errors="replace").strip()
     if not content:
         return []
@@ -302,13 +370,14 @@ def _parse_txt_file(filepath: Path) -> list[dict]:
         "type": "general_faq",
         "topic": "รับประกัน",
         "question_patterns": ["รับประกัน", "เคลม", "warranty", "garantee", "guarantee"],
-        "answer": content,
+        "q": "เงื่อนไขการรับประกันสินค้า",
+        "a": content,
         "applies_to_brands": [],
         "applies_to_categories": [],
         "source_file": filepath.name,
         "source_row": 1,
         "source_sheet": "",
-        "original_raw": {"content": content},
+        "qa_idx": 0,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
         "updated_by": "system_import",
@@ -377,7 +446,7 @@ def main() -> int:
 
     print(f"=== Import adminbase → MongoDB ===")
     print(f"  DB: {ADMIN_DB_NAME}")
-    print(f"  Collection: {KB_COLLECTION}")
+    print(f"  Collections: {KB_PRODUCTS_COLL}, {KB_QA_COLL}, {KB_RAW_COLL}")
     print(f"  Source: {ADMINBASE_DIR}")
     print(f"  Excel files: {len(xlsx_files)}")
     print(f"  TXT files: {len(txt_files)}")
@@ -386,8 +455,12 @@ def main() -> int:
         print(f"  Reset: YES (will delete existing data)")
     print()
 
-    # อ่าน + แปลงทุกไฟล์
-    all_docs: list[dict] = []
+    # อ่าน + แปลงทุกไฟล์ → 3 stores: products / qas / raws
+    code_item_map = build_code_item_map()
+    print(f"  model_code→item map: {len(code_item_map)} codes (จาก sellable_units.jsonl)\n")
+    all_products: list[dict] = []
+    all_qas: list[dict] = []
+    all_raws: list[dict] = []
     errors: list[str] = []
     file_stats: list[tuple[str, int, int]] = []  # (filename, rows_read, docs_produced)
 
@@ -406,16 +479,20 @@ def main() -> int:
                 ]
                 for row_idx, row in enumerate(rows[1:], start=2):
                     file_rows += 1
-                    doc = _parse_excel_row(
+                    product, qas, raw = parse_row(
                         header=header,
                         row=row,
                         source_file=f.name,
                         source_row=row_idx,
                         source_sheet=sheet_name,
+                        code_item_map=code_item_map,
                     )
-                    if doc:
-                        all_docs.append(doc)
+                    if raw["pairs"]:
+                        all_raws.append(raw)
+                    if product:
+                        all_products.append(product)
                         file_docs += 1
+                    all_qas.extend(qas)
             wb.close()
             file_stats.append((f.name, file_rows, file_docs))
         except Exception as exc:
@@ -425,7 +502,7 @@ def main() -> int:
     for f in txt_files:
         try:
             docs = _parse_txt_file(f)
-            all_docs.extend(docs)
+            all_qas.extend(docs)
             file_stats.append((f.name, 0, len(docs)))
         except Exception as exc:
             errors.append(f"{f.name}: {exc}")
@@ -440,7 +517,8 @@ def main() -> int:
         print(f"{fname[:48]:<50s} {rows:5d} {docs:5d}")
         total_rows += rows
     print("-" * 65)
-    print(f"{'TOTAL':<50s} {total_rows:5d} {len(all_docs):5d}")
+    print(f"{'TOTAL':<50s} {total_rows:5d} {len(all_products):5d}")
+    print(f"  kb_qa docs: {len(all_qas)}   kb_raw docs: {len(all_raws)}")
     print()
 
     if errors:
@@ -451,17 +529,17 @@ def main() -> int:
 
     # สรุป type distribution
     type_counts: dict[str, int] = {}
-    for d in all_docs:
+    for d in all_products:
         t = d.get("type", "unknown")
         type_counts[t] = type_counts.get(t, 0) + 1
-    print("=== Type distribution ===")
+    print("=== Type distribution (kb_products) ===")
     for t, c in sorted(type_counts.items()):
         print(f"  {t}: {c}")
     print()
 
     # สรุป category distribution
     cat_counts: dict[str, int] = {}
-    for d in all_docs:
+    for d in all_products:
         if d.get("type") == "product_spec":
             cat = d.get("category_id", "other")
             cat_counts[cat] = cat_counts.get(cat, 0) + 1
@@ -470,57 +548,64 @@ def main() -> int:
         print(f"  {cat}: {c}")
     print()
 
-    # ตรวจว่าไม่หล่นข้อมูล — ทุก doc ต้องมี original_raw ที่ไม่ว่าง
-    empty_raw = sum(1 for d in all_docs if not d.get("original_raw"))
-    print(f"=== Data integrity ===")
-    print(f"  Documents with empty original_raw: {empty_raw} (should be 0)")
+    # coverage รายงาน: canonical specs + item_ids link
+    n_canon = sum(1 for d in all_products if d.get("canonical_specs"))
+    n_linked = sum(1 for d in all_products if d.get("item_ids"))
+    n_codes = sum(1 for d in all_products if d.get("model_codes"))
+    print("=== Coverage ===")
+    print(f"  products with canonical_specs: {n_canon}/{len(all_products)}")
+    print(f"  products with model_codes:     {n_codes}/{len(all_products)}")
+    print(f"  products linked to item_ids:   {n_linked}/{len(all_products)}")
+    print(f"  kb_qa linked to item_ids:      {sum(1 for d in all_qas if d.get('item_ids'))}/{len(all_qas)}")
     print()
 
     if args.dry_run:
         print("=== Dry run — not writing to DB ===")
-        # แสดงตัวอย่าง 1 doc
-        if all_docs:
-            import json
-
-            sample = all_docs[0].copy()
-            # ตัดทอนให้ดูง่าย
-            for k in ["original_raw", "extra_fields", "specs"]:
+        if all_products:
+            sample = next((d for d in all_products if d.get("canonical_specs")), all_products[0]).copy()
+            for k in ["extra_fields", "specs_raw"]:
                 if sample.get(k):
                     s = str(sample[k])
                     sample[k] = s[:200] + "..." if len(s) > 200 else s
             sample["created_at"] = str(sample["created_at"])
             sample["updated_at"] = str(sample["updated_at"])
-            print(f"  Sample doc (first):")
-            print(json.dumps(sample, ensure_ascii=False, indent=2))
+            print("  Sample kb_products doc:")
+            print(json.dumps(sample, ensure_ascii=False, indent=2, default=str))
+        if all_qas:
+            s = all_qas[0].copy()
+            s["created_at"] = str(s["created_at"]); s["updated_at"] = str(s["updated_at"])
+            print("  Sample kb_qa doc:")
+            print(json.dumps(s, ensure_ascii=False, indent=2, default=str))
         return 0
 
-    # เขียนลง DB
+    # เขียนลง DB — 3 collections
     print("=== Writing to MongoDB ===")
     client = _get_admin_db()
     db = client[ADMIN_DB_NAME]
-    coll = db[KB_COLLECTION]
+    coll_p = db[KB_PRODUCTS_COLL]
+    coll_q = db[KB_QA_COLL]
+    coll_r = db[KB_RAW_COLL]
 
     if args.reset:
-        deleted = coll.delete_many({})
-        print(f"  Reset: deleted {deleted.deleted_count} existing documents")
+        for coll in (coll_p, coll_q, coll_r):
+            deleted = coll.delete_many({})
+            print(f"  Reset {coll.name}: deleted {deleted.deleted_count}")
 
-    # upsert — match ด้วย source_file + source_row
-    inserted = 0
-    updated = 0
-    for doc in all_docs:
-        filter_q = {
-            "source_file": doc["source_file"],
-            "source_row": doc["source_row"],
-        }
-        result = coll.replace_one(filter_q, doc, upsert=True)
-        if result.upserted_id:
-            inserted += 1
-        else:
-            updated += 1
+    def _upsert(coll, docs, key_fields):
+        ins = upd = 0
+        for doc in docs:
+            fq = {k: doc[k] for k in key_fields}
+            r = coll.replace_one(fq, doc, upsert=True)
+            ins += 1 if r.upserted_id else 0
+            upd += 0 if r.upserted_id else 1
+        return ins, upd
 
-    print(f"  Inserted: {inserted}")
-    print(f"  Updated:  {updated}")
-    print(f"  Total in collection now: {coll.count_documents({})}")
+    i, u = _upsert(coll_r, all_raws, ["source_file", "source_sheet", "source_row"])
+    print(f"  {KB_RAW_COLL}:     inserted={i} updated={u} total={coll_r.count_documents({})}")
+    i, u = _upsert(coll_p, all_products, ["source_file", "source_sheet", "source_row"])
+    print(f"  {KB_PRODUCTS_COLL}: inserted={i} updated={u} total={coll_p.count_documents({})}")
+    i, u = _upsert(coll_q, all_qas, ["source_file", "source_sheet", "source_row", "qa_idx"])
+    print(f"  {KB_QA_COLL}:      inserted={i} updated={u} total={coll_q.count_documents({})}")
     client.close()
 
     print()

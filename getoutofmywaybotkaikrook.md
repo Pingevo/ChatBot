@@ -7992,6 +7992,51 @@ Phase 8 ใช้ `_LLM_CONTEXT_LIMIT = 30` เป็น module constant แบ�
 
 ## กำลังจะทำ
 
+### Config — ทำให้ ponytail skill ติดถาวรทุก session ใน repo นี้ (เฉพาะ user คนนี้) (2026-09-15) — ✅ เสร็จ
+
+- **เป้าหมาย**: เปิด ponytail (level: full) อัตโนมัติทุก session โดยไม่ต้องสั่งเอง
+- **วิธี**: สร้าง `AGENTS.local.md` (personal rule, ไม่ commit) สั่งให้ invoke skill `ponytail` ตอนเริ่ม session + เพิ่ม `AGENTS.local.md` ใน `.gitignore`
+- **เหตุผลที่เลือก AGENTS.local.md**: user เลือก scope "repo นี้ เฉพาะเรา" → ไม่กระทบทีม; skill ponytail อยู่ใน `.devin/skills/` (untracked) อยู่แล้ว
+- **ไม่แก้ SRS_SSD.md** — ไม่ใช่โค้ดใน `chatbot/shopeechat/`
+- **Verify**: `git check-ignore -v AGENTS.local.md` → ถูก ignore โดย .gitignore:46 ✅, ไม่ขึ้นใน git status ✅
+
+### 🔨 Refactor app.py + reorg shopeechat/ — อนุมัติแล้ว กำลังทำ (2026-09-15)
+
+- **คำขอ:** user อนุมัติทำ refactor — จัดระเบียบไฟล์ใน `chatbot/shopeechat/` ก่อน แล้วตัด/ย้ายตาม audit
+- **Reorg (ทำแล้ว):** `export_mongo.py` → `scripts/` (standalone script, cwd-relative `--out`/`EXPORT_DIR` คุม output อยู่แล้ว) + อัปเดต README/AGENTS refs
+- **ตัดสินใจ: ไม่แยกโฟลเดอร์ core** — flat layout load-bearing 3 ทาง: `from shopeechat import X` (testscript+docs/test ~10 ไฟล์), `import product_store` flat (testQA2.py sys.path→shopeechat/), `chatbot.shopeechat.app:app` (Dockerfile+build_embeddings)
+- **⚠️ correction:** `chat_models.py` ไม่ใช่ dead — `chat_v2.py:280` import จริง (KEEP BY DESIGN ตาม L8022); รายการ dead code ที่ verify คือตาม L8023
+- **Batch 1 (mechanical — findings L8006-8016 verify แล้ว):** redundant imports, hoist model_name/_qa10/_new_topic_kws, _context_note shrink, _kw_claim, dead placeholders, hasattr×4, _send_handoff แทน 8 inline urllib, dict→ChatResponse ×2
+- **Batch 2 (dead code — verify แล้ว):** `_has_warranty_history` (L2702), `_warranty_calc_note` (L3291), `_pre_product_types` (L2707) + repo-wide dead fns ตาม L8023
+- **Batch 3 (extraction):** test_chat_api.py (ใหม่), device_compat.py (ใหม่), handoffs.py (ใหม่), warranty SM→warranty_flow.py, auto-check→warranty.py, _web_search_reanswer→web_search.py, _dedupe_*→product_store.py, brand helpers→knowledge_base.py — move ล้วน ไม่แก้ logic, ctx dict pattern เหมือน handle_warranty_flow
+- **Verify ต่อ batch:** py_compile ทุกไฟล์ที่แตะ + grep call sites + replay เคสเก่า (ต้องผ่านเหมือนเดิมทุกเคส)
+
+### ⏸️ Ponytail review app.py — findings รออนุมัติ ยังไม่ได้แก้โค้ด (2026-09-15)
+
+- **คำขอ:** ponytail-review `chatbot/shopeechat/app.py` → เจอ `net: -500 lines possible` → user เลือก **หยุดก่อน แค่ review** (ไม่แตะโค้ด)
+- **▶️ 2026-09-15 (ภายหลัง): user อนุมัติแล้ว — กำลัง apply ตาม entry ข้างบน**
+- **Findings ที่ verify แล้ว พร้อม apply เมื่ออนุมัติ (เชิงกล ไม่เปลี่ยน semantics):**
+  1. ลบ redundant local imports: `import sys` (L78), `import os` (L387, L7648), `import os as _os` (L4667), `import time as _time` ซ้ำ (L6999), `import re as _re_*` 12 จุด (L463 `_re_dedup_mod`, L564 `_re_w`, L642 `_re_conn`, L704 `_re_dev_spec`, L982 `_re_dev`, L1282 `_re_wsr`, L3061 `_re2`, L4020 `_re3`, L5591 `_re_ref`, L6489 `_re_super`, L7736 `_re`) + L4498 `import re as _re` dead (ไม่มี usage) — alias map ครบทุก usage แล้ว
+  2. Hoist `model_name` = `os.environ.get("GEMINI_MODEL","gemini-3.5-flash-lite")` 1 จุด แทน 24 assignments + 3 inline uses (rename `_model_name` → `model_name`)
+  3. Hoist `_qa10 = _recent_qa_pairs(history, 10)` แทน call ซ้ำ 14 จุด — ⚠️ ต้องเช็ค `history` (สร้าง L1549) ไม่ mutate ก่อนจุดใช้แรก (L2240) ก่อน apply
+  4. Hoist `_new_topic_kws` tuple (ซ้ำเหมือนกันเป๊ะ L1730/L6157)
+  5. Shrink `_context_note` append if/else 5 จุด (L4948, L6236, L6260, L6275, L7254) → `products[0]["_context_note"] = f"{products[0].get('_context_note','')} {note}".strip()`
+  6. `_kw_claim` คำนวณครั้งเดียว (L1921 `_warranty_pre_check` / L2788 `_warranty_check_mod` = module เดียวกัน 2 alias; L3884 คนละ flow เก็บไว้)
+  7. ลบ `_is_conv_active_init` placeholder (L5265 ไม่เคยอ่าน), print ADDRESS-REQUEST ซ้ำ (L1984/L2003 เก็บอันเดียว), `_is_superlative` ซ้ำ `_is_superlative_q` (L6297)
+  8. Simplify `hasattr(m,'role')`/`hasattr(m,'text')` บน req.history ×4 (L4444, L4489, L5186, L5509 — pydantic รับประกัน ChatMessage)
+  9. Extend `_send_handoff` (L7809 — chat_v2/chatbotv3 เรียกอยู่แล้ว) +`claim`/`simulate`/return dict → แทน 8 inline urllib blocks: fire-and-forget L2013-2041, L2122-2152, L2635-2666, L2855-2886, L2988-3019, L4170-4201; อ่าน response L3909-3949, L4271-4308
+  10. dict returns L6450/L6807 → `ChatResponse` (key `platform`/`intent_confidence` ไม่มีใน model ถูก drop อยู่แล้ว → output เดิม)
+- **ข้ามโดยตั้งใจ (เสี่ยงเปลี่ยน behavior):** merge `_charging_spec_kws` 3 เวอร์ชัน (เนื้อหาต่างกัน), device tables ×3, brand/stop sets ×2, `_respond()` helper, phase extraction ของ chat() (6,325 บรรทัด)
+- **วิธี apply ที่ปลอดภัย (เมื่ออนุมัติ):** แบ่ง batch imports→hoists→misc→handoff, py_compile+grep verify ทุก batch, ให้ดู git diff ทีละชุด
+
+### ℹ️ Ponytail repo-audit (2026-09-15) — report-only, ยังไม่แก้โค้ด
+
+- **⚠️ KEEP BY DESIGN:** `chat_v2.py` + `chat_models.py` + `warranty_flow.py` + `chatbotv3/` (~4,200 บรรทัด) — user ยืนยันเก็บไว้พัฒนาต่อ (legacy คือ engine ที่ใช้จริง) → **อย่า flag/ลบ อีก**
+- **Dead code verified (zero callers ทั้ง repo):** `web_search.search_and_answer` (53 บรรทัด, deprecated), `product_store._score_card` (41), `_is_sold_out` (14), `order_store.lookup_orders_by_buyer` (36), `_format_unix_ts_with_time` (23), `conversation_products.get_recent_suggestions` (25), `is_generic_question` (11) ≈ 203 บรรทัด
+- **requirements.txt dead deps ×4:** resend, PyJWT, bcrypt, email-validator — ไม่มี import ใน Python tree (bcryptjs ใน Next.js คนละ package; ไม่มี EmailStr)
+- **docker-compose:** service chatbot-lazada/tiktok ชี้ APP_MODULE ที่ไม่มีอยู่จริง (~60 บรรทัด) — ลบจนกว่า implement
+- **soft:** docs/test 22 scripts — run_daily_tests เรียกแค่ testQA2.py; test_openrouter_cost vs test_openrouter_full_cost ซ้อนกัน
+
 ### แก้ — Warranty follow-up "รุ่นไหนประกันยังไงบ้าง" หยิบรุ่นเก่ามาตอบ + anchor poisoning (2026-09-16)
 
 - **เคสจริง (conv thwtchtpyn, shop CukTechThailand):**
@@ -8028,6 +8073,38 @@ Phase 8 ใช้ `_LLM_CONTEXT_LIMIT = 30` เป็น module constant แบ�
 - **⚠️ ยังไม่ verify deploy:** รอ rebuild จริง + ตรวจ log ว่าไม่มี `ensureIndexes failed`
 - **วันเวลาที่แก้:** 2026-09-15
 
+### 🔨 image_texts pipeline — extract spec จาก description images (sellable first) (2026-09-21)
+
+- **ทำอะไร:** สร้าง `chatbot/shopeechat/scripts/build_image_texts.py` — ยิง Gemini vision (`gemini-3.5-flash-lite`, loop keys แบบ `llm._client()`) extract structured text {kind, text} จากรูปใน `description_info` เฉพาะ **sellable units** (item_status=NORMAL + stock>0) → append `exports/image_texts.jsonl` (resume ได้)
+- **ทำไม:** spec/variant info อยู่ในรูปเท่านั้น (4,426 docs มี image blocks; listing CUKTECH item_id=24166340609 มี spec 9 รุ่นย่อยในรูป) — bot อ่านไม่ได้เลยตอนนี้
+- **ข้อกำหนด:** rate รวมทุก key ≤80/min, ≤4,000/day → checkpoint+resume; **ทุก call → `_log_ai_usage`** (reuse `web_search._log_ai_usage` + local `exports/image_texts_usage.jsonl` กัน hub-timeout หาย); ห้ามแตะ app.py; `max_output_tokens=4000` + เช็ค finish_reason=MAX_TOKENS
+- **ตัวเลขวัดจริง:** รูปธรรมดา ~฿0.02, spec sheet หนัก ~฿0.14-0.17; sellable unique image_id = 5,925 (template >20 listings = 45); estimate รวม ~฿150-400
+- **แผนเต็ม:** `docs/superpowers/plans/2026-09-16-sellable-unit-index.md` (Task 3 — ทำก่อน Task 1-2 ตามคำสั่ง user)
+- **⚠️ bug ที่เจอ + แก้:** (1) `genai.Client` สร้างใหม่ทุก call → "client has been closed" (SDK share httpx transport โดน GC ปิด) → cache client ต่อ key `_next_client()` rotation เหมือนเดิม (2) `price_info` เป็น list ไม่ใช่ dict
+- **progress:** batch กำลังรัน (pid background) — output `exports/image_texts.jsonl`, usage log `exports/image_texts_usage.jsonl`, run log `exports/image_texts_run.log`; resume = รัน command เดิมซ้ำ (skip status==ok)
+
+### 🔨 Task 1-2: unit_classifier + sellable_units index (2026-09-21) — ✅ PASS + GATE ผ่าน
+
+- **สร้าง:** `chatbot/shopeechat/scripts/unit_classifier.py` (classify_unit → components/kind/type/subtypes/model_codes/oos_in_name/confidence — reuse `product_store.PRODUCT_TYPES`/`_CHARGER_SUBTYPES` ไม่เขียนตารางใหม่), `chatbot/shopeechat/scripts/build_sellable_units.py` (→ `exports/sellable_units.jsonl` 26,970 units พร้อม desc_sections/image_ids/search_text)
+- **ผลวัดจริง:** units=26,970 (ตรง census), sellable=4,969 (ตรง), **classified sellable=4,679 = 94.2% ≥ gate 90%**; confidence all-units: high 24,500 / medium 54 / low 2,416 (low = type นอก taxonomy เช่น เฟอร์นิเจอร์ — ตั้งใจไม่เดา)
+- **desc_sections keys จริง:** intro/highlights/specs/warranty/notes/other — markers `[[ X ]]`, `*** X ***`, `===banner===`, "เงื่อนไขการรับประกันสินค้า" บรรทัดลอย; warranty units=2,084, units with image_ids=12,120
+- **design decision:** main_comp fallback = item_type เอง (vacuum unit → comps=["vacuum"]); "สาย"→cable (charging) / strap (smartwatch); companion code ที่ resolve ไม่ได้ → cable (charging family) / accessory
+- **tests:** `docs/test/test_unit_classifier.py` 10/10 PASS, `docs/test/test_sellable_units.py` ALL PASS (units/unique/sellable flag/HA835-AL870-EC4 spot checks/sections/images)
+
+### 🔨 Task 4: KB re-import → kb_products/kb_qa/kb_raw (2026-09-21) — ✅ PASS + import จริงแล้ว
+
+- **แก้:** `docs/adminbase/script/import_adminbase.py` — `parse_row(header,row,...)` → (kb_products|None, [kb_qa], kb_raw); **สร้าง:** `spec_key_map.py` (canonical map ~45 keys: capacity_mah/input_spec/screen_size/...)
+- **bug จริงที่แก้:** duplicate columns ใน 4 ไฟล์ (Cuktech ZTEC มี คำถาม/คำตอบ ×2 ต่อ row, Xiaomi กล้อง มี ฟีเจอร์เด่น/อุปกรณ์ในกล่อง ×2) — เดิม dict overwrite ทำข้อมูลหาย → ตอนนี้ raw=list-of-pairs + specs_raw disambiguate `col (2)` + Q&A positional pairing
+- **ผล import จริง (admin DB `chatbot`):** kb_products=1,011 (canonical_specs 511, model_codes 558, item_ids linked 539), kb_qa=393 (linked 239 — รวม general_faq จาก txt), kb_raw=1,040 (audit trail ทุกแถวที่มีข้อมูล)
+- **design:** `code_item_map` จาก sellable_units.jsonl → item_ids link ผ่าน model_codes; txt → kb_qa type=general_faq; row ที่มีแต่ Q&A ไม่สร้าง product doc
+- **test:** `docs/test/test_kb_import.py` ALL PASS
+- **หมายเหตุ:** knowledge_base collection เดิมยังอยู่ — reader migration (knowledge_base.py อ่าน kb_products/kb_qa) เป็น Task 9
+
+### 🔨 Task 5: typo_dict + unit_embeddings (2026-09-21) — 🔄 embeddings กำลังรัน
+
+- **สร้าง:** `build_typo_dict.py` → `exports/typo_dict.json` {brands 221, model_codes 2,119, product_words 4,012, thai_terms 5,603} — bug ที่แก้: code 3 ตัว (EC4,P23) หลุดเพราะเช็ค code อยู่ใต้ filter len≥4
+- **แก้:** `build_embeddings.py` เพิ่ม `--units` → embed unit.search_text 26,970 units → `exports/unit_embeddings.npz` (item_ids+unit_ids+model_ids+shops+texts) — กำลังรัน ~23/s
+
 ---
 
 ## ผ่านแล้ว (ใหม่)
@@ -8056,3 +8133,451 @@ Phase 8 ใช้ `_LLM_CONTEXT_LIMIT = 30` เป็น module constant แบ�
 - **Verify:** py_compile ผ่าน ✅, `npx tsc --noEmit` ผ่าน ✅
 - **⚠️ ยังไม่ verify end-to-end จริง:** รอทดสอบส่งวิดีโอจริงผ่าน test chat + ส่งวิดีโอ Shopee จริงผ่าน bot worker เพื่อยืนยัน Gemini อ่านวิดีโอได้
 - **สถาปัตยกรรม:** `images` field (string[]) ยังคงเป็น media URL array สำหรับทั้ง image และ video — ไม่เปลี่ยนเป็น `media` field ตามที่ไม่ได้รับการร้องขอ
+
+---
+
+## Audit (ไม่ได้แก้โค้ด)
+
+### Ponytail audit — repo-wide over-engineering scan (2026-09-15) — ✅ report only, applies nothing
+
+- **คำขอ:** ponytail-audit ทั้ง repo + ประเมิน plan-3411cb7710a70c07.md (retrieval redesign) ว่าแก้ปัญหาหรือเพิ่ม complexity
+- **Findings หลัก (ยังไม่ได้แก้ — รอตัดสินใจ):**
+  - 3 chat engines ขนานกัน (app.chat legacy 8,239 + chat_v2 1,491 + chatbotv3 ~1,783 + warranty_flow 822 เฉพาะ v2) หลัง flag `USE_LEGACY_CHAT`/`USE_CHAT_V3`/`chat_engine` — cut ที่ใหญ่สุดถ้าเลือกตัวชนะ
+  - dead code ที่เช็คแล้วไม่มี caller: `chat_models.py`, `web_search.search_and_answer`, `product_store._score_card`, `product_store._is_sold_out`
+  - dead Python deps ใน requirements.txt: `resend`, `PyJWT`, `bcrypt`, `email-validator` (auth อยู่ฝั่ง Next: jose+bcryptjs)
+  - docker-compose services สำหรับ lazada/tiktok ที่ app ยังไม่มี (comment ตัวเองบอก container จะ crash)
+  - test harness ซ้ำซ้อน: `test/` vs `docs/test/` + `test_openrouter_cost.py` ถูกแทนด้วย `test_openrouter_full_cost.py` + `ChatAdminWeb/scripts/test-workflow-*.ts`
+- **Plan verdict:** แผน retrieval ใหม่ (union regex∪vector + anchor-always + bypass 8 heuristic blocks) เป็นทิศทาง "เอาพฤติกรรมผิดออก" ไม่ใช่ guard ซ้อน guard → แก้ปัญหาจริง; ข้อเสนอเพิ่ม: ควรมี phase ลบ legacy path หลัง eval ผ่าน + ตัด enum `reranked` ออกจนกว่า Phase C จะมีจริง
+- **ไฟล์ที่แก้:** ไม่มี (รายงานอย่างเดียว) — อัปเดตไฟล์นี้ตามกฎข้อ 8
+
+### Ponytail review เฉพาะ app.py legacy (2026-09-15 ต่อเนื่อง) — ✅ report only
+
+- **คำขอ:** รีวิว legacy `app.py` (8,239 บรรทัด) — ซับซ้อนเกินไหม ลด/รวมฟังก์ชันตรงไหนได้บ้าง (ไม่สนใจ v2/v3)
+- **Findings (ยังไม่แก้):**
+  - `chat()` ยาว ~6,325 บรรทัด, 26 return points, flag ข้าม block กัน (UnboundLocalError guard ที่ L1137-1143 คืออาการ)
+  - warranty state machine ซ้ำกับ `warranty_flow.py` — inline ~850 บรรทัด (L3293-4143) vs module ที่ port ไปแล้ว (มี Phase 2Z+/2B ครบ) → legacy เรียก `handle_warranty_flow()` เองได้
+  - handoff HTTP call copy-paste 7 จุด (~30 บรรทัด/จุด) ทั้งที่ `_send_handoff` (L7809) มีอยู่แต่ legacy ไม่เคยเรียก
+  - `return ChatResponse(...)` 26 จุด tail เหมือนกัน → รวมเป็น `_respond()`
+  - comparison quartet L3110-3292 — 4 detector ผลิต `_anchor_compare_ctx` เหมือนกัน → รวมเป็น resolver เดียว
+  - tax invoice 2 block เกือบเหมือนกัน (L2841-2908 + L4143-4222)
+  - Phase 1C warranty auto-check 2 ตัว (delivery + legacy create_time fallback)
+  - Test Chat Sessions API ~370 บรรทัด (L7872-8239) ไม่เกี่ยวกับ chat() → ย้าย router ของตัวเอง
+  - nested `_resolve_charger_subtype` + `_web_search_reanswer` ประกาศทุก request → ยกขึ้น module level
+  - carry/ref heuristic stack ~L5027-5800 (retrieval rewrite, LINK-FOLLOWUP, CONV-ACTIVE, charger carry, fuzzy guard, ref-like) — เป้าหมายเดียวกับ plan staged_filter
+- **ไฟล์ที่แก้:** ไม่มี — รายงานอย่างเดียว
+
+### Refactor legacy app.py — extraction + dedup (2026-09-16) — ✅ verified
+
+- **คำขอ:** "app.py ฟังก์ชั่นไหนไม่จำเป็นลดจำนวนได้... อันไหนแยกเป็นไฟล์อื่นๆ ได้" → audit → "เอา ทำเลยพี่"
+- **ผลลัพธ์:** `app.py` 8,239 → **4,807 บรรทัด** (−3,432)
+- **ไฟล์ใหม่:**
+  - `test_chat_api.py` (408) — test-chat sessions CRUD 9 routes + `_validate_object_id`/`_log_testchat_action` (APIRouter, include ใน app.py)
+  - `device_compat.py` (519) — `_extract_max_wattage`, `_KNOWN_DEVICE_SPECS`, `_extract_product_connectors`, `_resolve_device_spec`, `_filter_compat_products`, `_apply_product_tiers`, `_device_spec_lookup`
+- **ย้ายเข้าไฟล์เดิม:**
+  - `warranty_flow.py` += `handle_warranty_flow_legacy(req, ctx, history, db)` — claim SM ~950 บรรทัด verbatim (returns dict→ChatResponse wrap); ctx ส่ง 15 vars จาก chat scope
+  - `warranty.py` += `auto_check_delivery_warranty(order_sn, shop, bot_name)` — 2-phase (delivery-date + legacy create_time fallback) → (answer, info, ctx)
+  - `web_search.py` += `reanswer(...)` — เดิม nested `_web_search_reanswer` ใน chat() (~295 บรรทัด); เพิ่ม params `db`, `llm_ctx_limit`
+  - `knowledge_base.py` += `_detect_brand_question`, `_build_brand_context`, `_kb_doc_to_card`
+  - `product_store.py` += `_dedupe_products`, `_dedupe_base_name`, `_dedupe_sell_score`, `_DEDUP_STANDARDS`
+  - `llm.py` += `_GEMINI_COST_PER_M` + `_gemini_cost(p_in, p_out)` — แทน inline cost ×9 จุด
+- **Dead code ลบทิ้ง (verify 0 call sites แล้ว):**
+  - app.py: `_has_warranty_history`, `_warranty_calc_note`, `_pre_product_types`, `_strip_kb_markup` (ซ้ำ llm.py — alias ใช้ `llm._strip_kb_markup`), `_admin_db` (ซ้ำ conversation_products)
+  - `product_store.py`: `_score_card`, `_is_sold_out`, `_STOPWORDS`
+  - `web_search.py`: `search_and_answer` (deprecated)
+  - `order_store.py`: `lookup_orders_by_buyer`, `_format_unix_ts_with_time`
+  - `conversation_products.py`: `get_recent_suggestions`, `is_generic_question`
+- **Dedupe:** inline urllib handoff 8 จุด → `_send_handoff` (ขยาย sig รับ `claim`/`simulate`/`timeout`/`log_tag` + คืน response); `_qa10` hoist 13 จุด→1; `model_name` hoist 27 จุด→1; `_add_context_note` helper แทน if/else 4 บรรทัด ×5; raw dict returns ×2 → `ChatResponse`; `dir()` hack ใน superlative → var ปกติ
+- **Reorg:** `export_mongo.py` → `scripts/` + อัปเดต README/AGENTS
+- **Compat alias (v2 เรียกผ่าน `_app_module`):** `_detect_brand_question`, `_build_brand_context` ชี้ไป knowledge_base
+- **⚠️ correction (2026-09-16 ทดสอบจริง):** `_model_name` ไม่ใช่ latent bug — ต้นฉบับ assign `_model_name = os.environ.get("GEMINI_MODEL", ...)` ไว้ 3 จุด แต่ **ตอน extract บรรทัด assign หลุด** → post-handoff path 500 จริง (replay suite จับได้: "," หลัง handoff → NameError) → แก้แล้วด้วย `_model_name = model_name` (จาก ctx — ค่าเดียวกัน)
+- **Verify:**
+  - `python3 -m py_compile` ทุกไฟล์ที่แก้ ✅
+  - import `shopeechat.app` + `chat_v2` + `warranty_flow` ผ่าน (venv .venv) ✅
+  - FastAPI openapi paths มี /test-chat/* ครบ 9 routes (include_router lazy-mount) ✅
+  - smoke test จริง `chat(ChatRequest)`: "สวัสดี" → product_store answer ปกติ ✅; "สินค้าเสียอยากเคลมค่ะ" → `warranty_claim_first_message` + `handoff_to_admin=True` ✅
+
+### Refactor ต่อ — order_flow.py + handoffs.py (2026-09-16) — ✅ verified
+
+- **ผลลัพธ์:** `app.py` 5,471 → **4,807 บรรทัด** (−664)
+- **ไฟล์ใหม่:**
+  - `order_flow.py` (537) — `early_order_flow(req, ctx, history, db)` ย้าย verbatim order lookup + return/refund+address handoff + tracking lookup (~500 บรรทัด); เขียนกลับ `ctx["order_sn"]`/`ctx["is_claim_request_pre"]` ให้ warranty auto-check ใช้ต่อ
+  - `handoffs.py` (260) — `detect_human_request(req, ctx)` (pre-intent, BUG-3) + `post_intent_handoffs(req, ctx, db)` (tax invoice + TISI)
+- **Bug ที่จับได้จาก smoke test (แก้แล้ว):**
+  - `web_search.py` ขาด `import re` — `reanswer()` ใช้ `re` แต่ import ไม่ได้ตามมาตอนย้าย → NameError หลัง LLM ตอบ → เพิ่ม import
+  - `order_flow.py` ขาด `from fastapi import HTTPException` — block มี `raise HTTPException(500)` อยู่ → เพิ่ม
+  - `app.py` หลุด lazy imports `warranty` + `warranty_flow` — เดิม import อยู่ใน order block ที่ย้าย แต่ code หลัง block ใช้ต่อ → re-add ก่อน call site
+- **Verify:**
+  - `py_compile` ทุกไฟล์ ✅ + import ทุกโมดูลใหม่ ✅
+  - smoke `chat()` 6 paths: order_sn ปลอม → `order_lookup` not-found answer ✅, "ขอที่อยู่ส่งคืน" → `address_request_handoff` ✅, "ขอคุยกับแอดมิน" → `human_request_handoff` ✅, "ขอใบกำกับภาษี" → `tax_invoice_handoff` (ผ่าน intent conf=1.0) ✅, claim first-message ✅, claim w/ history → `warranty_claim_flow` + handoff ✅, "มีพาวเวอร์แบงค์ไหม" → `product_store` ✅
+- **ยังไม่ได้ทำ:** `_respond()`/`_record_step()` (ตรวจแล้ว rounding ต่างกันจริงต่อ site — helper จะเปลี่ยน output precision จึงข้าม), comparison follow-up quartet + KB merge + product path (~2,900 บรรทัด core ที่ผูกกับ chat() state — เสี่ยงสูง คุ้มน้อย), replay suite เต็มจาก docs/test/
+
+### Replay test pingevox + mistorethailand หลัง refactor (2026-09-16) — ✅ 41/42
+
+- **รัน:** `docs/test/test_pingevox_mistore.py` ยิง server จริง `127.0.0.1:8010` (42 เคส, history สะสม)
+- **ผล:** pingevox 5/5 ✅ | mistore 36/37 — Q29 "สอบถาม สายชาร์จ ชาร์จไฟไม่ได้" หลัง claim flow เดิม → SM เก็บข้อมูลต่อ handoff=False (logic เดิม — handoff ไปแล้ว turn ก่อนหน้า ไม่ใช่ regression)
+- **Regression ที่ replay จับได้ (แก้แล้ว):**
+  - `warranty_flow.py` — `_model_name` 3 assignment หลุดตอน extract → post-handoff 500 → `_model_name = model_name`
+  - `device_compat.py` — `_extract_max_wattage` ใช้ `_re_w` (alias `import re as _re_w` หลุดตอน dedupe local imports) → `_re_w.`→`re.` 2 จุด — compat-follow-up path ("หัวชาร์จละ" ฯลฯ) 500 ก่อนแก้
+- **ระหว่างทดสอบ:** Gemini 429 RESOURCE_EXHAUSTED (quota หมดจากรันซ้ำ) — error/fail ที่เหลือในรอบกลางเป็น quota ไม่ใช่โค้ด; static sweep หา undefined names ทุกไฟล์ที่แตะ → clean แล้ว
+
+### Replay test katess_live หลัง refactor (2026-09-16) — ✅ 5/5
+
+- **รัน:** `test/test_katess_live.py` ยิง server จริง `127.0.0.1:8010` — เคส Run vs Swim comparison
+- **ผล:** Q1 item-card anchor (Run) ✅, Q2 anchor comparison "รุ่นนี้กับตัว swim" → Run+Swim ครบ context ✅, Q3 item-card Swim ✅, Q4 comparison follow-up "คุณภาพเสียงต่างกันไหม" ✅, Q5 post-comparison follow-up ✅
+- **ความหมาย:** comparison quartet + anchor/carry-forward (โซนที่ยังอยู่ใน app.py และผูกกับ chat() state หนักสุด) ทำงานถูกหลัง refactor
+
+### Unit tests test/ หลัง refactor (2026-09-16) — ✅ 24/24
+
+- **รัน:** `pytest test/test_anchor_comparison_followup.py test/test_qa_batch_20260911.py`
+- **ผล:** anchor comparison 6/6 (anchor history, post-comparison, partial comparison) + qa_batch 18/18 (lang detect, `_strip_kb_markup` — verify dedupe ไปใช้ `llm.py` copy เดียว, claim state helpers)
+
+### เทสโมดูลที่ย้าย (2026-09-16) — ✅ 13/13 live
+
+- **ไฟล์ใหม่:** `test/test_extracted_modules_live.py` — ยิง server จริง `127.0.0.1:8010`, shop=KingGadgets
+- **order_flow.py:** order found (`220725DCDR7DBN`) ✅ / not-found ✅ / order anchor follow-up "order ถึงยัง" ✅ / return-refund ask→follow-up handoff ✅ / address request handoff ✅
+- **handoffs.py:** human request ✅ / tax invoice ✅ / มอก. → tisi_answer (เจอ Powerconnex รางไฟ) ✅
+- **device_compat.py:** "หัวชาร์จใช้กับ iphone 17 pro max" → compat products ✅ / "หัวชาร์จละ" follow-up ✅ / "ราคาเท่าไหร่" ✅ (เส้นทางที่เคยพัง `_re_w`)
+- **พบ (ไม่ใช่ regression):** `lookup_by_tracking` ค้นเฉพาะ `package_list.*` แต่ Shopee เก็บ `tracking_no` ไว้ top-level → tracking path miss เสมอกับ data shape ปัจจุบัน → bot ตอบขอเลข order (shipping_policy) — behavior เดิมก่อน refactor, order_store.py ไม่ได้แตะ
+
+### รัน docs/test suite หลัง refactor (2026-09-16)
+
+**Unit (ไม่ยิง server):**
+- `test_recent_qa_pairs.py` + `test_warranty_delivery.py` — pytest 21 ผ่าน
+- `test_car_charger_regression.py` — 16/16 (ต้อง `PYTHONPATH=chatbot` — sys.path ในไฟล์ชี้ `docs/chatbot` ผิดอยู่เดิม pre-existing)
+- `test_new_product_types.py` — 66/66 (sys.path เดียวกัน)
+- `test_charger_subtype_parity.py` — 42/42
+
+**Live (ยิง server :8010):**
+- `test_flow.py` — 7/8 กลุ่มผ่าน; Q8 "สายถัก iphone 17 promax" คาด `product_store+web_search` แต่ได้ `product_store` (retrieval เจอชุด CTC615W+CTL301 → ไม่ trigger web search — nondeterministic ไม่ใช่ regression)
+- `test_all_conditions.py` — **54/54** (ครอบทุก source: product/kb/general/claim SM/compat/handoff/web_search; เคส 8.4 โดน 429 quota กลางรันแต่เช็ค loose ผ่าน)
+
+**แก้ test 2 ไฟล์:** test_flow.py + test_all_conditions.py เก่ากว่า secret middleware — เพิ่ม `X-Internal-Secret` header จาก env (pattern เดียวกับ test_katess_live.py)
+
+### Unit-index runtime path (2026-09-16) — ✅ ALL PASS
+
+**เคสที่เคย fail / วิธีแก้:**
+- `HA835 พร้อมสาย` เลือกผิด unit → qualifier scoring (model_name token ที่อยู่ใน message ได้ bonus)
+- `สายชาร์จ AL870` เป็น phone combo → สาเหตุ 3 ชั้น: (1) compat phrase "สำหรับ iPhone" กลืนเป็น phone — strip ก่อน detect type; (2) main comp ถูก prepend เสมอ — ใส่เฉพาะเมื่อมีหลักฐาน (พร้อม/code-only segment/color/segment อยู่ใน item_name); (3) "พร้อมสายชาร์จ" ถูก cable rule กิน — skip เมื่อมี "พร้อมสาย"
+- `กล้องวงจรปิดแนะนำหน่อย` + sellable_only → 0 hits: top-50 vector เป็น deleted/unlisted หมด → `_sellable_mask` ที่ vector level (ดึง Mongo ไม่อบ npz — sellability เปลี่ยนได้)
+
+**ผ่านแล้ว:**
+- `test_unit_classifier.py` 10/10, `test_units.py` 5/5 (code match, qualifier, per-unit stock, sellable filter, vector, card shape)
+- `test_sellable_units.py`, `test_kb_import.py`, `test_route_context.py`, `test_unit_card_fields.py` ผ่านครบ
+- Mongo `chatbot.sellable_units` = 26,970 units (classifier ล่าสุด)
+
+**กำลังจะทำ:** image batch รันอยู่ (~1,725/5,741, ETA ~3 ชม., 0 error, ~$1.08) — ต่อด้วย Task 9 feature-flag wire ใน fetch_products + charger regression
+
+### Task 8 เสร็จ — staged flag + regression (2026-09-16)
+
+- `USE_UNIT_INDEX=charger` = staged rollout: unit path เฉพาะ route charger-family (subtype หรือ type ∈ cable/charger/car_charger/wireless/desktop/socket); query อื่น (เช่น หูฟัง) ยัง legacy
+- verify: "สายชาร์จ AL870"→unit, "มีหัวชาร์จในรถไหม"→unit, "มีหูฟัง"→legacy
+- regression ภายใต้ flag: `test_car_charger_regression` 16/16 + `test_charger_subtype_parity` 42/42
+- commits: 3cc6dde (classifier), 913e8a3 (units runtime)
+
+### กำลังจะทำ (2026-09-16 ~14:00)
+
+Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ตาม route, canonical_specs inject, output guard (เคลม/คืนเงิน/จัดส่งโดยไม่ handoff); `responses.py` ย้าย helper จาก app.py ถ้าไม่ติด nested function
+
+### Task 9 เสร็จ — guards + responses + spec inheritance (2026-09-16)
+
+- `responses.py`: ย้าย `_routing`+`_send_handoff` จาก app.py (module-level self-contained) — app.py re-import, net **−88 บรรทัด**
+- `guards.py`: `build_flags` + `check_output` (regex ยืนยันเคลม/คืนเงิน/จัดส่งโดยไม่ handoff)
+- จุดเช็คเดียว: `ChatResponse.model_post_init` — ครอบทุก return path log-only
+- `units.attach_kb_specs`: unit desc ว่างยืม canonical_specs จาก kb_products ผ่าน model_codes — verified AD653C/AD653T ได้ specs จริง (sellable ทั้งหมดมี desc อยู่แล้ว → เฉพาะ non-sellable ที่ inherit)
+- `_build_context`: ส่ง canonical_specs + unit flags เข้า context
+- test_guards ALL PASS; regression car_charger 16/16
+
+### image_texts → Mongo + unit join (2026-09-16)
+
+- `import_image_texts.py`: jsonl → `image_texts` collection (key=image_id, เฉพาะ status=ok, idempotent — rerun ได้เรื่อยๆ)
+- batch ปัจจุบัน: 2,715 unique ok (spec 2,160 / product 202 / banner 352)
+- `units.attach_image_texts`: join ผ่าน image_ids เฉพาะ kind=spec|product → field `image_text` (≤2500 chars); `description_excerpt` fallback ไปที่ image_text เมื่อ desc ว่าง
+- verify: 20/20 sellable units ที่มี image_ids ได้ image_text จริง (EC4 ได้ "2.5K & 4MP โหมดกลางคืน" จากรูป)
+
+### Live test 8015 flag=charger (2026-09-16) — ✅ PASS หลังแก้ 2 bug
+
+**bug ที่ live test จับได้ (unit test ไม่เห็น):**
+- `unit_classifier.py` absolute import `chatbot.shopeechat.*` → server context ไม่มี package `chatbot` → gate except กลืนเงียบ (unit path ไม่ engage เลย) → relative-first fallback + gate print error
+- `to_unit_card` price เป็น float → `_dedupe_sell_score` คาด `{min,max}` → 500 → แก้ price_range shape
+
+**ผล:** unit path engage จริง (hits=30), code-match HA835 ตอบ "หมดสต็อก" ตรง truth, non-charger ยัง legacy, 0 traceback
+
+### prod :8010 พัง 500 ทุก /chat — root cause + fix (2026-09-16 ~15:00)
+
+**อาการ:** /chat → 500 ทุก call แม้แต่ greeting; /root + /feedback → 200
+
+**root cause:** process เก่า (pid 73442, start เมื่อวาน ไม่มี --reload) stdout/stderr ชี้ไป pipe ที่ปลายอ่านตายแล้ว (parent shell ออก) → `print(..., file=sys.stderr)` ใน chat() → BrokenPipeError → 500. /feedback รอดเพราะ print ไป stdout ซึ่ง block-buffered (เขียนลง memory ไม่ syscall) — stderr unbuffered → พังทันที. **ไม่เกี่ยวกับโค้ดใหม่** — environment เสื่อม
+
+**วิธีแก้:** kill 73442 → start ใหม่ด้วย `USE_UNIT_INDEX=charger nohup uvicorn ... > exports/uvicorn_8010.log 2>&1` — redirect ไฟล์จริงแบบ image batch → จบปัญหาถาวร + มี traceback ดูได้คราวหน้า
+
+**verify หลัง restart (shop จริง — 'cuktech' ไม่ใช่ shopname จริง ต้อง 'CukTechThailand'/'ZMIThailand'):**
+- greeting/car-charger/HA835 → 200 ทั้งหมด; [UNITS] hits=30 (11 code-match)
+- HA835+ZMIThailand → "หมดสต็อก/ปิดการขาย" ตรง unit truth (sellable=0 ทุก shop)
+- หมอนรองหลัง+ZMIThailand → ตอบตรงว่าร้านไม่มี ไม่หลอก
+- order_sn fake → "ไม่พบคำสั่งซื้อ" ถูกต้อง
+- image batch (pid 96547) ไม่กระทบ — process แยก, log ไฟล์จริง, เดินหน้าต่อ
+
+**บทเรียน:** test payload ต้องใช้ shopname จริงจาก ShpProducts (`shopname` field: CukTechThailand, ZMIThailand, Ztec, ThaiSuperPhone, ...) — 'cuktech' lowercase ไม่ match → "ไม่พบข้อมูล" ถูกต้องตามระบบ
+
+---
+
+## กำลังจะทำ (2026-09-16 ~17:00): KB QA wiring + warranty per-product — ✅ เสร็จ
+
+**ปัญหา:** runtime อ่าน collection `knowledge_base` เก่า (qa=1 doc) ทั้งที่ `kb_qa` มี troubleshooting 392 docs แต่ไม่มีใคร query → "นาฬิกาแบตลดไวครับ" ไม่ hit KB เลย
+
+**Baseline (8015, shop=KieslectThailand):** → `source=warranty_claim_first_message` ขอข้อมูลเคลม+handoff ทันที ไม่มีคำแนะนำเบื้องต้น — claim path เป็น deterministic ไม่ผ่าน LLM (warranty_flow.py ~1754)
+
+**แผน:** `docs/superpowers/plans/2026-09-16-kb-qa-wiring.md` — ทำครบทุก task
+
+**ทำแล้ว:**
+- repoint: `_search_kb_single`→`kb_products` (specs อ่าน `canonical_specs`/`specs_raw`), `get_general_faq`→`kb_qa` (normalize `a`→`answer`, fallback legacy 982 chars OK)
+- `build_embeddings --qa` → `exports/qa_embeddings.npz` (392 vecs, 1.4MB)
+- `search_qa` + `qa_context` ใน knowledge_base.py: sim + model_codes/item_id boost; **cross-model guard** (doc ผูกรุ่นอื่น exclude — รวม derive scope จาก `topic` เช่น "CUKTECH KLC-5497" ที่ model_codes ว่าง); **brand scope** (generic doc แบรนด์อื่นข้าม — fix multi-word brand ด้วย startswith)
+- wire: `app.py` _combined_extra += qa_context (ก่อน llm.answer, 8 บรรทัด); `warranty_flow` claim-first prepend tips
+- `units._unit_warranty` + `to_unit_card.warranty` = extract_warranty_from_name (แก้ regression warranty=None)
+- `attach_image_texts`: banner ที่มี ประกัน/เคลม/warranty → `warranty_text` (≤1500, per-listing) append ท้าย description_excerpt
+
+**bug ที่ live test จับ (unit test ไม่เห็น):**
+- claim tips ดึง `a` ดิบ → คำตอบสั้น "ทำไม่ได้" + tip ไม่เกี่ยว ("ตรวจสอบราคาหน้าร้าน") หลุดเข้าข้อความขอข้อมูลเคลม → gate 3 ชั้น: level∈{model,item,brand} + `_qa_sim`≥0.5 (raw sim ก่อน boost — กันคำถามไม่เกี่ยวกับอาการ) + len(a)≥30
+- brand scope first-token "black" ไม่เท่า "black shark" → ใช้ topic.startswith(brand) แทน
+- เพิ่ม level "brand" (topic brand == แบรนด์ที่คุยอยู่) — troubleshooting QA ส่วนใหญ่ brand-scoped ไม่ใช่ model-scoped
+
+**troubleshoot-first flow (ตามที่ user ต้องการ — แนะนำวิธีแก้ก่อน เคลมทีหลัง):**
+- claim request + tips ผ่าน gate → ตอบวิธีแก้เท่านั้น `source=warranty_troubleshoot` ไม่ handoff ไม่ขอข้อมูล; save `claim_state.stage="ts_suggested"`
+- ลูกค้าตอบ "ไม่หาย/ไม่ได้/เหมือนเดิม/ลองแล้ว" (หรือ claim ใหม่) → claim info + handoff (state machine ดักจาก claim_state หรือ marker "ลองทำตามนี้ก่อน" ใน last model msg)
+- ลูกค้าตอบ "หายแล้ว/ได้แล้ว" → ปิดเคสสุภาพ stage=resolved ไม่ handoff
+- bare claim ไม่มี context → claim info ตรงเหมือนเดิม (ไม่มี product จะแนะนำอะไรก็เสี่ยง)
+
+**verify troubleshoot-first (8015):**
+- "Kieslect นาฬิกาแบตเสื่อม เคลมได้ไหมครับ" → tips จริง (ปิด AOD ประหยัดแบต 30-50%) handoff=False
+- "ลองแล้วไม่หายครับ" (history มี marker) → claim info + handoff=True
+- "สินค้าเสียครับอยากเคลม" → claim info สะอาด ไม่มี tips มั่ว
+
+**verify:**
+- `test_qa_kb.py` 26/26: repoint, canonical_specs ctx, general_faq, model match, cross-model guard, brand scope, warranty parse +/−, unit card warranty, banner join, missing-banner fallback
+- smoke 8015: "นาฬิกาแบตลดไวครับ" → ตอบวิธีแก้เบื้องต้นจริง (เดิมขอเคลมทันที); "LPB200NL ใช้กับ S26 ได้ไหม" → ตอบ compat ถูกจาก spec; "IMILAB EC5 ประกันกี่ปี" → "2 ปี" จาก KB; "KS3 หน้าจอดำครับ เคลมได้ไหม" → claim msg สะอาด ไม่มี tips มั่ว
+
+**Rollback:** USE_QA_KB=0 ปิด QA / collection เก่าไม่แตะ / warranty parse เป็น additive (None → ช่องว่างเหมือนเดิม)
+
+---
+
+## 2026-09-16 (ต่อ) — `_KNOWN_BRAND_SET` → auto-derive จาก DB
+
+**ทำแล้ว:**
+- เพิ่ม `_known_brands()` ใน knowledge_base.py — `_KNOWN_BRAND_SET` baseline ∪ `distinct("brand")` จาก `kb_products` + `sellable_units.brand.original_brand_name`; cache ครั้งเดียว; DB ล่ม → baseline (fail-open)
+- เพิ่ม `_norm_brand()` — ตัดวงเล็บ `(ไทย)`/lower/กรอง `_BRAND_JUNK`+สั้น<3 — DB สกปรกจริง: `'Kieslect '` trailing space, `'cuktech (ชุกเทค)'`, `'nobrand'`, `'tws(ทีดับบลิวเอส)'`, `'meet(มีท)'`
+- แทน 3 จุดที่ใช้ `_KNOWN_BRAND_SET` (search_qa topic scope, qa_context, qa_troubleshoot_tips)
+
+**ผล:** 182 แบรนด์ (hardcode 33 + DB เพิ่ม 149 — amazfit, baseus, dji, dreame, huawei...) — แบรนด์ใหม่เข้าร้านได้ scope protection ทันที
+
+**ข้อจำกัดที่ยอมรับ:** `_BRAND_JUNK` ยังเป็น denylist manual — junk ใหม่ใน DB อาจหลุดได้ แต่ผลกระทบแค่ over-scope (ขาด context) ไม่ใช่ตอบผิด
+
+**verify:** test_qa_kb 28/28; must-have brands assert ผ่าน; compile OK
+
+---
+
+## 2026-09-16 (ต่อ) — kb_qa near-real-time (TTL + lazy-embed)
+
+**ทำไม:** admin เพิ่ม/แก้ kb_qa แล้วอยากเห็นผลโดยไม่ต้อง restart หรือรอ rebuild npz
+
+**ทำแล้ว:**
+- `_qa_docs` — TTL cache 5 นาที + `threading.Lock` (chat() เป็น sync def → threadpool จริง ต้องกัน refresh ซ้อน) + refresh fail → ใช้ของเก่า (ไม่ assign ทับ)
+- `_qa_embed_missing` — doc ใหม่ที่ไม่มี vector → `embed_texts` (local ฟรี) append เข้า vec cache; key `_id` → ไม่มี realignment; fail → log เฉยๆ doc ยังหาเจอด้วย substring
+- `_known_brands` — TTL 5 นาที pattern เดียวกัน; cold-start DB ล่ม → baseline set
+
+**วิเคราะห์ความเสี่ยงก่อนทำ (verify ในโค้ดจริง):**
+- vectors key ด้วย `_id` string → doc ใหม่ default sim=0.0 — append ปลอดภัย ไม่มีทางสลับแถว
+- doc ถูกลบ → vector เก่าค้างแต่ไม่ถูกอ่าน (ไม่มี doc) — ปลอดภัย
+- worst case npz หาย → embed ~400 docs ครั้งเดียว ~2-5s ใน request — ยอมรับได้
+- Mongo สะดุดตอน refresh → stale cache ทำงานต่อ ไม่พัง
+
+**verify:**
+- docs 392 → fake doc ใหม่ → lazy-embed ได้ vector ทันที sim 0.819 กับ query ใกล้เคียง
+- brands 182 + TTL ts set; test_qa_kb 28/28; compile OK
+
+**ผล:** kb_qa เปลี่ยน → สดภายใน 5 นาที ไม่ต้อง restart; npz ยังเป็น base cold-start + rebuild ราตรี (canonical)
+
+---
+
+## 2026-09-16 (ต่อ) — npz auto-reload (mtime) ทั้ง 3 loaders — ไม่ต้อง restart อีกต่อไป
+
+**ทำแล้ว:**
+- `build_embeddings.py` — เขียน `.tmp.npz` + `os.replace` (atomic — reader เห็นไฟล์เก่า/ใหม่เต็มก้อนเสมอ) ทั้ง products + units npz
+- `product_store._load_vector_store` / `units._unit_vectors` / `knowledge_base._qa_vectors` — stat mtime ทุก call (~0.001ms), เปลี่ยน → reload ใหม่เอง
+- กัน edge cases: stat ก่อน load (build replace ระหว่าง load → self-healing รอบหน้า), fail/ไฟล์หาย → ใช้ cache เก่า, QA reload npz → `_qa_embed_missing` re-embed doc ที่เคย lazy-embed
+
+**verify จริง:** touch npz → 3 loaders reload ทันที (qa 392 / units 26970 / products 11503); mtime เดิม → cache hit; test_qa_kb 28/28 + test_units ผ่าน
+
+**ผล:** pipeline รันเสร็จ → bot เห็นข้อมูลใหม่ใน request ถัดไป — restart/reload endpoint ไม่จำเป็นแล้ว; cron เหลือแค่ trigger build
+
+---
+
+## 2026-09-16 (ต่อ) — refresh_data.sh (nightly pipeline trigger)
+
+**ทำแล้ว:** `chatbot/shopeechat/scripts/refresh_data.sh` — export → product emb → build+import units → unit emb → qa emb → image OCR (incremental) → import image_texts; lock ด้วย `mkdir` (macOS ไม่มี flock); export fail → abort; อื่น fail → log แล้วต่อ; **ไม่มี restart** — npz mtime reload + Mongo สดเอาเอง; cron `0 3 * * *`; เพิ่มส่วน "Data refresh" ใน DEPLOY.md
+
+**verify:** bash -n ผ่าน; lock acquire/release/double-run-block ผ่าน
+
+---
+
+## 2026-09-17 — unit card fields + fuzzy_match_products fix
+
+**ทำแล้ว:**
+
+- `units.attach_listing_fields()` (ใหม่) — batch join `ShpProducts` ด้วย `item_id` (int ทั้งสองฝั่ง — ห้าม str(), เจอ type mismatch ตอนเทส) เติม `_listing` {condition, weight, dimension, short_link, promotion, is_flash_sale, image} — runtime join เพราะ promo เปลี่ยนบ่อย (build-time copy จะ stale ≤24h)
+- `to_unit_card` — `image_url` จาก `image_ids[0]` (cf.shopee.co.th CDN เดียวกับ `_first_image_url`), `condition`/`short_link`/`weight`/`dimension`/`has_promotion`(`_has_active_promotion`)/`is_flash_sale` จาก `_listing` — แก้ regression ที่ unit path ส่งลิงก์+รูป+โปรไม่ได้เลย
+- `fuzzy_match_products` 3 fix:
+  - ตัด `item_status:NORMAL` ทั้ง 2 query — ตอบสินค้า BANNED/UNLIST ได้ (กันขายอยู่ที่ `card._available_for_sale` + prompt เหมือนเดิม)
+  - prefix-3 gate พลาด (typo ต้น token เช่น "wach"→"watch") หรือ score ไม่ผ่าน → rescan ทั้งร้าน ≤2000 docs (เดิม fire เฉพาะ candidates ว่าง + limit 50 = ครอบ 2% ของร้าน 2108)
+  - `_common` ∪ `_known_brands()` (182 แบรนด์จาก DB); brand ใช้กรอง fetch แต่**ยังนับ score**; ทุก token โดนกรอง → fallback ใช้ token เดิม; scoring เปลี่ยน max→**avg per-token** กัน brand match 100 ชนะคนเดียว
+
+**verify จริง:** ShowSee A1-W (BANNED) เจอ + `sale:False` ✅ / "khoxsee"(prefix typo) เจอ ✅ / "redmi wach 6"@Youpin 2108 docs → Redmi Watch 6/5 อันดับ 1 (เดิม Merach/Merach speaker มาก่อน) ✅ / biokooooooooop ✅ / QA 28/28 + car charger 16/16 ผ่าน / fallback rescan ~5.4s (fire เฉพาะตอน primary พลาด)
+
+**เคสที่รู้ว่ายัง:** fuzzy ไม่มี shop → prefix typo ยังหลุดได้ (ไม่มี fallback scope) — เป็น design เดิม; live compare :8010/:8015 ค้างรอ quota 15:00
+
+**Rollback:** ไม่มี flag เฉพาะ — ถ้าพัง revert commit; unit path ยังอยู่หลัง `USE_UNIT_INDEX` เหมือนเดิม
+
+---
+
+## 2026-09-17 (ต่อ) — single-key quota manager (llm.py + intent_classifier.py)
+
+**ทำไม:** เปลี่ยนจาก 9 keys round-robin → `GEMINI_API_KEY` key เดียว — ต้องบริหาร rate เอง (3.5-lite/3.1-lite: 500 req/day + 15 RPM + 250k TPM ต่อ model)
+
+**ทำแล้ว:**
+- `_acquire(model, est)` — sliding window 60s แยกต่อ model: RPM เต็ม → sleep จนหลุด; est tokens (chars/4 + max_output) เกิน TPM → รอ; daily counter persist `exports/.gemini_quota.json` (atomic os.replace); primary RPD เต็ม → auto ใช้ fallback model แทน; ทั้งคู่เต็ม → raise 429
+- `_generate(model, contents, config, est)` — wrapper เดียวครอบทุก call: acquire → call → record tokens จริงจาก usage_metadata → **429 → retry ครั้งเดียวด้วย model คู่ fallback** (3.5↔3.1 เป็น quota pool แยกกัน = capacity x2)
+- แพตช์ 5 call sites: describe_images / answer / answer_with_kb / answer_general + intent_classifier (lazy import llm — ไม่มี cycle)
+- env override: `GEMINI_RPM`/`GEMINI_TPM`/`GEMINI_RPD`
+
+**bug ที่เจอระหว่างทำ:** `_client().models.generate_content` (temporary ref) → GC ปิด shared httpx → "client has been closed" — ต้อง `client = _client()` เก็บ ref (เหมือนโค้ดเดิมทุก site)
+
+**verify จริง:** unit checks acquire/RPD/fallback ผ่าน; live call → `[QUOTA] 3.5 429 → fallback 3.1` ยิงจริง (3.1 ก็หมด → raise ต่อถูกต้อง); counter persist ทำงาน
+
+**ยังต้องทำ (user):** ตั้ง `GEMINI_API_KEY` (key เดียว) ใน .env + ลบ `_1.._9` + restart bot — process ที่รันอยู่ยังโค้ดเก่า (9 keys)
+
+---
+
+## 2026-09-17 (ต่อ) — runtime LLM config: key pool + per-role models ผ่าน Mongo + หน้า /llm (dev-only)
+
+**ทำไม:** อยากเพิ่ม/ลบ key + เปลี่ยน model ได้ทันทีโดยไม่ restart — โค้ดเดิมอ่าน env ครั้งเดียวตอน startup
+
+**ดีไซน์:** `system_configs` doc `{config_key:"llm_config", keys:[], models:{chat,vision,intent,openrouter_search}}` — ChatAdminWeb เขียน, bot อ่าน TTL 10s — ไม่มี doc/DB ล่ม → env fallback เหมือนเดิม 100%
+
+**bot (llm.py):** `get_llm_config` (TTL 10s + max_time_ms 1500 + fail-stale) / `_active_keys` / `get_model(role)`; `_next_api_key` เปลี่ยน cycle→index-modulo บน active pool (rotation เดิม); quota limits scale ตาม pool size ณ ตอนใช้; call sites ทั้ง 4 role ผ่าน get_model; intent_classifier ลบ key loader ตัวเอง → delegate llm ทั้งหมด; web_search openrouter model → get_model("openrouter_search")
+
+**web (ChatAdminWeb):** page key `"llm"` dev-only (roles.ts + authorize.ts mirror); `llmConfigService` — GET คืน masked (sha256:8 + tail4, key จริงไม่ออก API), PUT ops-based (add_keys/remove_sha256/models merge); route `/api/llm-config` requirePageEdit("llm"); หน้า `/llm` (key pool manager + model roles card); nav เพิ่มใน Sidebar+MobileNav
+
+**verify จริง:** ใส่ doc ทดสอบ → active keys=2 test keys, rotation หมุน, model override ทำงาน, role ที่ไม่ได้ตั้ง fallback env; ลบ doc → กลับ env 9 keys; tsc ผ่าน; py_compile ผ่าน; เจอ bug: collection name `systemConfigs` vs `system_configs` (แก้แล้ว)
+
+**⚠️ รู้ตัว:** keys เก็บ plaintext ใน Mongo (bot ต้องใช้จริง) — จำกัดผ่าน dev-only page + mask on GET
+
+---
+
+## 2026-09-17 (ต่อ) — dynamic role & permission management (/roles, dev-only)
+
+**ทำไม:** role/สิทธิ์เดิม hardcode ซ้ำ 2 ที่ (roles.ts + authorize.ts) + union ตายตัว 3 role — user ต้องการเพิ่ม/ลบ role + กำหนด none/read/edit ต่อหน้าเอง และหน้าใหม่ต้องขึ้นอัตโนมัติ
+
+**ดีไซน์:** page registry ตัวเดียว `lib/pages.ts` (PAGES 27 หน้า + DEFAULT_PERMISSIONS + resolveAccess) → matrix เก็บ `system_configs.role_permissions` {roles[], permissions{page:{role:lvl}}} — server cache 30s, client โหลดหลัง login ผ่าน `loadPermissions()`, ทุกอย่าง fallback DEFAULT เมื่อ DB ไม่มี/ล่ม = พฤติกรรมเดิม 100%
+
+**ไฟล์:**
+- `lib/pages.ts` (ใหม่) — registry + DEFAULT_PERMISSIONS + `resolveAccess()` (dev→edit เสมอ, role-admin ไม่ใช่ dev→none, page/role ไม่รู้จัก→none)
+- `rolePermissionService.ts` (ใหม่) — getRolePermissions (seed อัตโนมัติ), updateRolePermissions (validate key slug/unique/กันลบ builtin 3 ตัว + dev, levels whitelist)
+- `authorize.ts` — ลบ PAGE_PERMISSIONS ซ้ำ, `roleCanAccess/roleCanEdit` เป็น async อ่าน DB (TTL 30s, fail→cache/default), PageKey/Role → string
+- `roles.ts` — ลบ PAGE_PERMISSIONS ซ้ำ, matrix โหลดจาก `/api/permissions` (DEFAULT เป็น fallback), `canManageRoles()` hardcode dev
+- `api/permissions/route.ts` — GET requireAuth (client ต้องใช้ gate nav), PUT requirePageEdit("role-admin") = dev-only ผ่าน resolveAccess
+- `authStore.fetchMe` → loadPermissions() หลัง login
+- `/roles` page (ใหม่) — matrix grid กลุ่มตาม PAGES.group + add/remove role (builtin/dev ลบไม่ได้)
+- Sidebar/MobileNav + users/list route await roleCanEdit
+- `Role`/`AdminUser.role`/`SafeAdmin.role`/`createAdmin.role` → string (custom role เก็บใน admins ได้)
+
+**กันล็อกตัวเอง:** `/roles` ไม่อยู่ใน PAGES — resolveAccess บังคับ role-admin=dev-only ในโค้ดเสมอ (matrix เขียนทับไม่ได้); dev ได้ edit ทุกหน้าเสมอ
+
+**verify จริง:** tsc --noEmit ผ่าน; GET/PUT /api/permissions ไม่มี session → 401; tsx test resolveAccess: dev→edit ทุกหน้า, admin llm→none, ticket→edit, custom role→none, role-admin non-dev→none, unknown page→dev only — ตรง matrix เดิมทุกจุด
+
+**ยังไม่ทำ (ตามแพลน):** UI assign role ให้ user (ทำใน collection admins ต่อไป); SSO login flow ที่ map email→role ถ้ามี
+
+---
+
+## 2026-09-17 (ต่อ) — /llm UI redesign: searchable model dropdown + key pool list พร้อม toggle
+
+**ทำไม:** user ขอ — model เป็น dropdown ค้นหาได้แทน free-text, key pool เป็น list สวยๆ มี toggle เปิด/ปิด, ไม่มีปุ่มบันทึก (ทุกการเปลี่ยน → confirm popup แล้ว save ทันที), add key เด้งใน list ตั้งชื่อ auto `GEMINI_API_KEY_n` แก้ชื่อได้, responsive มือถือ/tablet/PC
+
+**shape ใหม่:** `keys: [{name, value, enabled}]` — เก่า string[] ยังอ่านได้ (normKeys normalize + bot `_active_keys` รองรับทั้งสอง, `enabled=false` ไม่เข้า rotation)
+
+**ไฟล์:**
+- `llmConfigService.ts` — KeyEntry + normKeys; ops เพิ่ม: `set_enabled`, `rename` (อ้าง sha256); add_keys รับ `{name?,value}` auto-name `GEMINI_API_KEY_{n+1}`, กัน value ซ้ำ
+- `llm.py _active_keys` — iterate รองรับ dict + filter enabled
+- route `/api/llm-config` — body รับ ops ใหม่
+- `/llm/page.tsx` เขียนใหม่: `SearchableSelect` (fixed-pos dropdown + search + custom value + Enter pick) ต่อ 4 model roles → confirm.ask ก่อน PUT; key list = ToggleSwitch + ชื่อคลิกแก้ inline (Enter/blur save) + hash+tail + ลบ; add-key inline form auto-name; toggle ปิดตัวสุดท้ายเตือน fallback env; responsive `sm:` grid
+
+**verify จริง:** tsc ผ่าน, py_compile ผ่าน, /llm compile (307→login), /api/llm-config 401 unauth
+
+---
+
+## 2026-09-17 (ต่อ) — /llm เพิ่ม OpenRouter key pool (แยกจาก Gemini)
+
+**ทำไม:** OpenRouter ใช้ `OPENROUTER_API_KEY` แยก — เดิมหน้า /llm จัดการแต่ Gemini pool
+
+**ดีไซน์:** field `openrouter_keys` แยกใน doc เดิม (shape เดียวกัน `{name,value,enabled}`) — PUT ops รับ `pool: "gemini"|"openrouter"` (default gemini); auto-name `OPENROUTER_API_KEY_n`
+
+**ไฟล์:**
+- `llm.py` — `get_key_pool(field)` generic (รองรับ string+dict shape) — `_active_keys` + web_search ใช้ร่วม
+- `web_search._get_openrouter_key` — หมุน round-robin บน pool จาก config → env fallback เดิม
+- `llmConfigService` — `KeyPool` type + `KEY_POOL_FIELD` map + maskList/ops รับ pool
+- `/llm` — `KeyPoolCard` component ใช้ซ้ำ 2 card (Gemini + OpenRouter)
+
+**verify จริง:** tsc + py_compile ผ่าน, /llm compile ได้
+
+---
+
+## 2026-09-17 (ต่อ) — assign role ผ่าน /users + กฎสิทธิ์ (dev→ทุก role / superadmin→ยกเว้น dev / อื่น→ห้าม)
+
+**ทำไม:** เดิม role เปลี่ยนได้แค่แก้ collection ตรงๆ — user ขอ UI assign พร้อมกฎชัด
+
+**กฎ (canAssignRole ใน authorize.ts):** dev→ทุก role | superadmin→ทุก role ยกเว้น dev | role อื่น→403 (requireSuperadmin กันตั้งแต่ทางเข้า) + ห้ามเปลี่ยน role ตัวเอง + เฉพาะ dev เปลี่ยน role ของ user ที่เป็น dev อยู่ + validate role ต้องมีใน role_permissions.roles (custom role จาก /roles ใช้ได้เลย)
+
+**ไฟล์:**
+- `authorize.ts` — `canAssignRole(actorRole,newRole)` export
+- `authService.updateAdminProfile` — รับ `role`
+- `users/[adminId]` PATCH — block `body.role` แยกจาก canEditTarget (role change ≠ profile edit) + `user.assign_role` action_type ใหม่ใน adminLogService
+- `users/list` — คืน `roles` list สำหรับ dropdown
+- `/users` page — cell role เป็น ModalSelect เมื่อ actor assign ได้ (filter dev ออกถ้า actor=superadmin; target=dev ล็อกถ้า actor ไม่ใช่ dev) + confirm ก่อน PATCH + อัปเดต info banner
+
+**verify จริง:** tsc ผ่าน; logic canAssignRole ตรวจตา (trivial 3-branch); หน้า compile ได้
+
+---
+
+## 2026-09-17 (ต่อ) — /llm v3: key source env|db|single + per-role provider gemini↔openrouter + live model list
+
+**ทำไม:** user ขอ 8 ข้อ — model list ไม่ครบ, สลับ env↔mongo ทันที, โหมด key เดียว GEMINI_API_KEY บน mongo, websearch ต้อง :online, เตรียมสลับทั้งระบบไป OpenRouter, layout เล็กลง, role ใหม่ขึ้น auto, provider toggle แยกต่อ role
+
+**doc shape เพิ่ม:** `key_source:{gemini,openrouter}` ∈ env|db|single · `single_keys:{...}` (plaintext, mask ตอน GET) · `providers:{role}` ∈ gemini|openrouter · `model_roles` = MODEL_ROLES ∪ keys(models) ∪ keys(providers) → role ใหม่ขึ้น auto
+
+**service ops ใหม่:** set_source / set_single / providers / set_all_providers · models รับ role อะไรก็ได้ + openrouter_search auto-append ":online" · `getAvailableModels()` ดึง live: Gemini `v1beta/models` (filter generateContent) + OpenRouter `/api/v1/models` — cache 10 นาที, fallback static list
+
+**bot:**
+- `_active_keys` ตาม key_source.gemini (env/single/db) — db ว่าง→env เหมือนเดิม
+- `web_search._get_openrouter_key` — env/single/pool ตาม key_source.openrouter
+- `get_provider(role)` — openrouter_search เป็น openrouter เสมอ
+- `_generate(..., role=)` — provider=openrouter → `_openrouter_generate`: map model `google/{id}`, `_or_messages` แปลง str/dict-parts/Part(inline_data→data URI), system_instruction→system msg, json mime→response_format; **OR พัง → fallback gemini อัตโนมัติ**; คืน shim .text/.usage_metadata
+- call sites 5 จุด + role param (chat×3, vision, intent)
+
+**UI (/llm เขียนใหม่ compact):** strip บนสุด = master provider toggle (all→OR/all→Gemini); pools 2 cards `lg:grid-cols-2` พร้อม segmented source [.env|MongoDB|key เดียว] — db→list เดิม, env→info, single→masked row + set form; models card แถวเล็ก `sm:grid-cols-[160px_72px_1fr]` = role + G/OR toggle + SearchableSelect (live list, search role แสดง `{id}:online`); ทุก mutation confirm→save ทันที
+
+**verify จริง:** tsc ผ่าน, py_compile ×3 ผ่าน, stub test: db pool กรอง disabled ✅ env source ✅ single source ✅ provider map ✅ _or_messages 3 shapes ✅ (str/dict/Part→data URI)
+
+---
+
+## 2026-09-17 (ต่อ) — llm_config keys: AES-256-GCM encryption at rest
+
+**ทำไม:** user ขอให้ key ที่เก็บใน MongoDB ถูกเข้ารหัส (ไม่ใช่ plaintext) แต่ bot ถอดกลับใช้จริงได้
+
+**format:** `enc:v1:<iv_hex>:<tag_hex>:<ct_hex>` — AES-256-GCM, IV 12B random, tag 16B — master key = env `LLM_MASTER_KEY` (64-hex ตรงๆ หรือ passphrase → sha256) — **ต้องตั้งทั้ง ChatAdminWeb และ bot**
+
+**web (`llmConfigService.ts`):** `_masterKey/encSecret/decSecret` — add_keys/set_single encrypt ก่อน $set; ops (remove/toggle/rename/dup-check) + mask fingerprint (sha256/tail) ทำบน **decrypted** value เสมอ (คู่ bot startup log); migrate-on-write — ทุกครั้งที่เขียน array ใหม่ plaintext เก่าถูก re-encrypt อัตโนมัติ; ถอดไม่ได้ → mask เป็น `enc-only`/`????`
+
+**bot (`llm.py`):** `_dec_secret` ถอดใน `get_key_pool` (ทั้ง 2 pool) + `_active_keys` single branch + `web_search._get_openrouter_key` single branch — plaintext ผ่านตรง (backward compat), ถอดไม่ได้ → '' (ข้าม key, warn log)
+
+**verify จริง:** cross-language round-trip — Node encrypt → Python decrypt คืนค่าจริง ✅, plaintext passthrough ✅, tsc ✅, py_compile ✅
+
+**deploy:** ต้อง set `LLM_MASTER_KEY` ใน env ทั้ง 2 service ก่อน — ไม่ตั้ง = plaintext เหมือนเดิม (ไม่พัง)

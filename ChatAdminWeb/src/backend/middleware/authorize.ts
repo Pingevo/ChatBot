@@ -5,55 +5,17 @@ import { auth } from "../service/authService";
 import { getCookieFromRequest } from "../lib/cookies";
 import type { AdminDoc } from "../service/authService";
 
-export type Role = "superadmin" | "admin" | "dev";
+// Role เป็น string — เพิ่ม/ลบ role ได้ผ่านหน้า /roles (matrix ใน system_configs.role_permissions)
+export type Role = string;
 
-export type AccessLevel = "none" | "read" | "edit";
+export type { AccessLevel } from "@/lib/pages";
+import { resolveAccess, type AccessLevel as _AL } from "@/lib/pages";
+import { getRolePermissions } from "../service/rolePermissionService";
 
-/** Page keys — mirror of lib/roles.ts PageKey (server-side copy). */
-export type PageKey =
-  | "dashboard" | "analytics" | "ticket"
-  | "trigger" | "workflow" | "quickreply" | "kb" | "persona" | "shop-setting"
-  | "testchat" | "shadow-inbox" | "botworker" | "test-assignment"
-  | "live-assignment"
-  | "replay-compare" | "test-result" | "admin-review-kpi" | "admin-chat-result"
-  | "test-chat-result"
-  | "shop" | "customer" | "team" | "user"
-  | "admin-config" | "config" | "log";
-
-/**
- * Per-page, per-role permission map (server-side copy — must stay in sync with lib/roles.ts).
- * admin:       edit on operational, read on management/process, none on analytics/config
- * superadmin:  edit on most, read on bot-testing tools, none on log/config
- * dev:         edit on everything
- */
-const PAGE_PERMISSIONS: Record<PageKey, Record<Role, AccessLevel>> = {
-  dashboard:          { admin: "none", superadmin: "edit", dev: "edit" },
-  analytics:          { admin: "none", superadmin: "edit", dev: "edit" },
-  ticket:             { admin: "edit", superadmin: "edit", dev: "edit" },
-  trigger:            { admin: "read", superadmin: "edit", dev: "edit" },
-  workflow:           { admin: "read", superadmin: "edit", dev: "edit" },
-  quickreply:         { admin: "edit", superadmin: "edit", dev: "edit" },
-  kb:                 { admin: "read", superadmin: "edit", dev: "edit" },
-  persona:            { admin: "read", superadmin: "edit", dev: "edit" },
-  "shop-setting":     { admin: "read", superadmin: "edit", dev: "edit" },
-  testchat:           { admin: "edit", superadmin: "edit", dev: "edit" },
-  "shadow-inbox":     { admin: "edit", superadmin: "edit", dev: "edit" },
-  botworker:          { admin: "read", superadmin: "read", dev: "edit" },
-  "test-assignment":  { admin: "edit", superadmin: "edit", dev: "edit" },
-  "live-assignment":  { admin: "edit", superadmin: "edit", dev: "edit" },
-  "replay-compare":   { admin: "read", superadmin: "read", dev: "edit" },
-  "test-result":      { admin: "read", superadmin: "read", dev: "edit" },
-  "admin-review-kpi": { admin: "none", superadmin: "edit", dev: "edit" },
-  "admin-chat-result": { admin: "none", superadmin: "none", dev: "edit" },
-  "test-chat-result":  { admin: "none", superadmin: "none", dev: "edit" },
-  shop:               { admin: "read", superadmin: "edit", dev: "edit" },
-  customer:           { admin: "read", superadmin: "edit", dev: "edit" },
-  team:               { admin: "read", superadmin: "edit", dev: "edit" },
-  user:               { admin: "none", superadmin: "edit", dev: "edit" },
-  "admin-config":     { admin: "read", superadmin: "edit", dev: "edit" },
-  config:             { admin: "none", superadmin: "none", dev: "edit" },
-  log:                { admin: "none", superadmin: "none", dev: "edit" },
-};
+// Page keys — source of truth คือ PAGES registry ใน lib/pages.ts
+// (matrix เดิมที่เคย hardcode ตรงนี้ย้ายไป DEFAULT_PERMISSIONS ใน lib/pages.ts แล้ว
+//  ใช้เป็น seed/fallback เมื่อยังไม่มี doc role_permissions ใน system_configs)
+export type PageKey = string;
 
 // ⚡ G1 — extract client IP จาก request (สำหรับ audit log)
 function clientIp(req: NextRequest): string | undefined {
@@ -71,7 +33,8 @@ export interface AuthContext {
 }
 
 // Legacy hierarchy (still used by requireEditor/requireSuperadmin)
-const ROLE_LEVEL: Record<Role, number> = {
+// role ใหม่ที่เพิ่มผ่าน /roles ไม่มีใน map นี้ → hasRole = false (deny ปลอดภัย)
+const ROLE_LEVEL: Record<string, number> = {
   superadmin: 3,
   dev: 3,
   admin: 2,
@@ -177,6 +140,18 @@ export async function requireDev(req: NextRequest): Promise<
  *   - nobody can edit superadmin or dev via the user management UI
  *   - nobody can edit themselves via this path (use settings)
  */
+/**
+ * Role assignment rules:
+ *   dev        → assign ได้ทุก role
+ *   superadmin → assign ได้ทุก role ยกเว้น "dev"
+ *   role อื่น  → ไม่มีสิทธิ์ assign เลย
+ */
+export function canAssignRole(actorRole: string, newRole: string): boolean {
+  if (actorRole === "dev") return true;
+  if (actorRole === "superadmin") return newRole !== "dev";
+  return false;
+}
+
 export function canEditTarget(actor: AdminDoc, target: AdminDoc): boolean {
   if (actor.role !== "superadmin" && actor.role !== "dev") return false;
   if (target.role !== "admin") return false;
@@ -205,14 +180,34 @@ export function canAccessConversation(
 /* Page-based guards (new permission system)                          */
 /* ------------------------------------------------------------------ */
 
+// ---- dynamic permission matrix (DB) ----
+// cache 30s — แก้ใน /roles แล้วมีผลเกือบทันที โดยไม่ต้อง redeploy
+let _permCache: { matrix: Record<string, Record<string, _AL>>; ts: number } | null = null;
+const _PERM_TTL = 30_000;
+
+async function _permMatrix(): Promise<Record<string, Record<string, _AL>>> {
+  const now = Date.now();
+  if (_permCache && now - _permCache.ts < _PERM_TTL) return _permCache.matrix;
+  try {
+    const doc = await getRolePermissions();
+    _permCache = { matrix: doc.permissions, ts: now };
+  } catch {
+    // DB ล่ม → ใช้ cache เดิม หรือ matrix ว่าง (resolveAccess จะ deny ยกเว้น dev)
+    if (!_permCache) _permCache = { matrix: {}, ts: now };
+  }
+  return _permCache.matrix;
+}
+
 /** Check if a role can access a page (read or edit). */
-export function roleCanAccess(role: Role, page: PageKey): boolean {
-  return PAGE_PERMISSIONS[page][role] !== "none";
+export async function roleCanAccess(role: Role, page: PageKey): Promise<boolean> {
+  const m = await _permMatrix();
+  return resolveAccess(m, page, role) !== "none";
 }
 
 /** Check if a role can edit on a page. */
-export function roleCanEdit(role: Role, page: PageKey): boolean {
-  return PAGE_PERMISSIONS[page][role] === "edit";
+export async function roleCanEdit(role: Role, page: PageKey): Promise<boolean> {
+  const m = await _permMatrix();
+  return resolveAccess(m, page, role) === "edit";
 }
 
 /**
@@ -225,7 +220,7 @@ export async function requirePageAccess(req: NextRequest, page: PageKey): Promis
 > {
   const r = await requireAuth(req);
   if (!r.ok) return r;
-  if (!roleCanAccess(r.ctx.admin.role, page)) {
+  if (!(await roleCanAccess(r.ctx.admin.role, page))) {
     return {
       ok: false,
       response: NextResponse.json({ detail: `forbidden — no access to ${page}` }, { status: 403 }),
@@ -244,7 +239,7 @@ export async function requirePageEdit(req: NextRequest, page: PageKey): Promise<
 > {
   const r = await requireAuth(req);
   if (!r.ok) return r;
-  if (!roleCanEdit(r.ctx.admin.role, page)) {
+  if (!(await roleCanEdit(r.ctx.admin.role, page))) {
     return {
       ok: false,
       response: NextResponse.json({ detail: `forbidden — edit access required for ${page}` }, { status: 403 }),

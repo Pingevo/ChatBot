@@ -2,6 +2,7 @@
 """ทดสอบ flow ทั้งระบบ — อ่านคำตอบเต็ม วิเคราะห์ flow ที่เข้า"""
 import requests
 import json
+import os
 import time
 import sys
 
@@ -9,6 +10,7 @@ BASE = "http://127.0.0.1:8010"
 SHOP = "CukTechThailand"
 LIMIT = 10
 TIMEOUT = 120
+_HEADERS = {"X-Internal-Secret": os.environ.get("CHATBOT_INTERNAL_SECRET", "")}
 
 
 def send(message, history=None):
@@ -16,7 +18,7 @@ def send(message, history=None):
     payload = {"message": message, "shop": SHOP, "limit": LIMIT}
     if history:
         payload["history"] = history
-    r = requests.post(f"{BASE}/chat", json=payload, timeout=TIMEOUT)
+    r = requests.post(f"{BASE}/chat", json=payload, headers=_HEADERS, timeout=TIMEOUT)
     return r.json()
 
 

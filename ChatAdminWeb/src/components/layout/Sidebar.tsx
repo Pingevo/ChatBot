@@ -19,6 +19,7 @@ import {
   Store,
   Users,
   Bot,
+  KeyRound,
   Shield,
   ContactIcon,
   Headset,
@@ -43,6 +44,7 @@ import {
   Search,
   X,
   HelpCircle,
+  UserCog,
   type LucideIcon,
 } from "lucide-react";
 
@@ -62,7 +64,7 @@ interface NavItem {
   badge?: string;
   badgeTag?: string;
   page?: PageKey;          // maps to permission system — if set, filtered by canAccessPage
-  roles?: ("superadmin" | "admin" | "dev")[]; // legacy — used if page is not set
+  roles?: string[]; // legacy — used if page is not set
   children?: NavChild[];
 }
 
@@ -137,6 +139,8 @@ const navGroups: NavGroup[] = [
     items: [
       { href: "/admin-config", label: "ตั้งค่าแอดมิน", icon: Sliders, page: "admin-config" },
       { href: "/config", label: "ตั้งค่าระบบ", icon: Shield, page: "config" },
+      { href: "/llm", label: "LLM & API Keys", icon: KeyRound, page: "llm" },
+      { href: "/roles", label: "สิทธิ์การใช้งาน", icon: UserCog, page: "role-admin" },
       { href: "/logs", label: "บันทึกระบบ", icon: ScrollText, page: "log" },
     ],
   },

@@ -19,7 +19,7 @@
   - `conversation_products.py` — anchor/timeline สินค้าตาม conversation
   - `web_search.py` — web search fallback (`search_and_extract`)
   - `embedding.py` / `persona.py` — embedding helper / persona prompt
-  - `export_mongo.py` — export (ใช้ตอน build embeddings)
+  - `scripts/export_mongo.py` — export (ใช้ตอน build embeddings)
   - `scripts/build_embeddings.py` — สร้าง `exports/product_embeddings.npz`
   - `static/index.html` — health/info page
 - `chatbot/lazadachat/`, `chatbot/tiktokchat/` — placeholder (ยังไม่ implement — อย่าเพิ่มโค้ดจริง)

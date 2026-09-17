@@ -11,10 +11,20 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any
 
 from google import genai
 from google.genai import errors as genai_errors  # type: ignore
+
+# ราคา gemini-3.5-flash-lite ต่อ 1M tokens (USD) — ใช้คำนวณ cost ทุก LLM call
+_GEMINI_COST_PER_M = {"prompt": 0.30, "output": 2.50}
+
+
+def _gemini_cost(prompt_tokens: int, output_tokens: int) -> float:
+    """คำนวณต้นทุน USD จาก token usage ของ Gemini call."""
+    return (prompt_tokens * _GEMINI_COST_PER_M["prompt"]
+            + output_tokens * _GEMINI_COST_PER_M["output"]) / 1_000_000
 
 
 def _strip_kb_markup(text: str) -> str:
@@ -598,9 +608,125 @@ def _load_api_keys() -> list[str]:
     return keys
 
 
-_API_KEYS: list[str] = _load_api_keys()
+_API_KEYS: list[str] = _load_api_keys()   # env keys — fallback เมื่อ DB ไม่มี llm_config
 _KEY_CYCLE = _itertools.cycle(_API_KEYS) if _API_KEYS else None
 _KEY_INDEX = 0
+
+# ---- runtime LLM config (Mongo systemConfigs.llm_config) -----------------------
+# UI /llm (dev-only) เขียน doc นี้ → bot หยิบไปใช้ใน ≤10s ไม่ต้อง restart
+# ไม่มี doc / DB ล่ม → fallback env keys+models เหมือนเดิมทุกอย่าง
+_LLM_CFG_TTL = 10.0
+_llm_cfg_cache: dict | None = None
+_llm_cfg_ts = 0.0
+
+
+def get_llm_config() -> dict:
+    """อ่าน llm_config doc จาก admin DB — TTL 10s, fail → คืน cache เดิม/{}"""
+    global _llm_cfg_cache, _llm_cfg_ts
+    now = _time.time()
+    if _llm_cfg_cache is not None and now - _llm_cfg_ts < _LLM_CFG_TTL:
+        return _llm_cfg_cache
+    try:
+        from . import knowledge_base as _kb   # lazy — กัน import หนักตอน module load
+        doc = _kb._admin_db()["system_configs"].find_one(
+            {"config_key": "llm_config"}, max_time_ms=1500) or {}
+        _llm_cfg_cache = doc
+    except Exception:
+        if _llm_cfg_cache is None:
+            _llm_cfg_cache = {}
+    _llm_cfg_ts = now
+    return _llm_cfg_cache
+
+
+# ---- key at-rest decryption (AES-256-GCM "enc:v1:iv:tag:ct" hex — encrypt โดย ChatAdminWeb) ----
+# LLM_MASTER_KEY: 64-hex หรือ passphrase ใดๆ (sha256 → 32 bytes) — ต้องตั้งทั้ง web และ bot
+_ENC_PREFIX = "enc:v1:"
+
+
+def _master_key() -> bytes | None:
+    raw = os.environ.get("LLM_MASTER_KEY", "").strip()
+    if not raw:
+        return None
+    if len(raw) == 64:
+        try:
+            return bytes.fromhex(raw)
+        except ValueError:
+            pass
+    import hashlib
+    return hashlib.sha256(raw.encode()).digest()
+
+
+def _dec_secret(v: str) -> str:
+    """enc:v1:... → plaintext; plaintext เดิมคืนตรงๆ; ถอดไม่ได้ (no key/bad data) → '' """
+    if not v.startswith(_ENC_PREFIX):
+        return v
+    key = _master_key()
+    if key is None:
+        print("WARN: llm_config key ถูกเข้ารหัสแต่ไม่มี LLM_MASTER_KEY ใน env", file=sys.stderr)
+        return ""
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        iv, tag, ct = (bytes.fromhex(h) for h in v[len(_ENC_PREFIX):].split(":"))
+        return AESGCM(key).decrypt(iv, ct + tag, None).decode()
+    except Exception as exc:
+        print(f"WARN: decrypt llm_config key ไม่สำเร็จ: {exc}", file=sys.stderr)
+        return ""
+
+
+def get_key_pool(field: str) -> list[str]:
+    """อ่าน key pool จาก llm_config[field] — web_search ใช้กับ "openrouter_keys"
+    รองรับ 2 shape: string เดิม และ {name, value, enabled} — enabled=false ไม่หมุน
+    value อาจเป็น enc:v1:... (AES-256-GCM) → ถอดก่อนใช้"""
+    keys: list[str] = []
+    for k in (get_llm_config().get(field) or []):
+        if isinstance(k, str):
+            v = _dec_secret(k.strip())
+        elif isinstance(k, dict) and k.get("enabled", True):
+            v = _dec_secret(str(k.get("value") or "").strip())
+        else:
+            continue
+        if v:
+            keys.append(v)
+    return keys
+
+
+def _active_keys() -> list[str]:
+    """key pool ปัจจุบันตาม key_source.gemini: env=env เท่านั้น / single=single_keys.gemini / db=list (default)
+    db ว่างหรือ single ไม่ได้ตั้ง → env fallback"""
+    cfg = get_llm_config()
+    src = (cfg.get("key_source") or {}).get("gemini", "db")
+    if src == "env":
+        return _API_KEYS
+    if src == "single":
+        v = _dec_secret(str((cfg.get("single_keys") or {}).get("gemini") or "").strip())
+        return [v] if v else _API_KEYS
+    return get_key_pool("keys") or _API_KEYS
+
+
+def get_provider(role: str) -> str:
+    """provider ของ role — config.providers[role] ("gemini"|"openrouter") default "gemini"
+    openrouter_search เป็น openrouter เสมอ (ไม่มี toggle)"""
+    if role == "openrouter_search":
+        return "openrouter"
+    p = (get_llm_config().get("providers") or {}).get(role)
+    return p if p in ("gemini", "openrouter") else "gemini"
+
+
+_MODEL_ROLE_ENV = {
+    "chat": ("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+    "vision": ("VISION_MODEL", "gemini-3.1-flash-lite"),
+    "intent": ("INTENT_MODEL", "gemini-3.1-flash-lite"),
+    "openrouter_search": ("OPENROUTER_SEARCH_MODEL", "google/gemini-2.5-flash:online"),
+}
+
+
+def get_model(role: str) -> str:
+    """model ของ role — config.models[role] ก่อน ไม่มี → env → default"""
+    m = (get_llm_config().get("models") or {}).get(role)
+    if isinstance(m, str) and m.strip():
+        return m.strip()
+    env_name, default = _MODEL_ROLE_ENV[role]
+    return os.environ.get(env_name, default).strip()
 
 # debug log — ยืนยันว่าโหลด keys ครบ
 # 🔒 M3: Log only count + hash prefix, not actual key fragments
@@ -613,18 +739,227 @@ for i, k in enumerate(_API_KEYS):
 
 
 def _next_api_key() -> str:
-    """หา key ถัดไปแบบ round-robin."""
+    """หา key ถัดไปแบบ round-robin บน active pool (config DB ก่อน → env fallback)."""
     global _KEY_INDEX
-    if not _API_KEYS:
-        raise RuntimeError("ไม่พบ GEMINI_API_KEY หรือ GEMINI_API_KEY_1..9 ใน .env")
-    key = next(_KEY_CYCLE)
-    _KEY_INDEX = (_KEY_INDEX + 1) % len(_API_KEYS)
+    keys = _active_keys()
+    if not keys:
+        raise RuntimeError("ไม่พบ GEMINI_API_KEY หรือ GEMINI_API_KEY_1..9 หรือ llm_config.keys")
+    key = keys[_KEY_INDEX % len(keys)]
+    _KEY_INDEX = (_KEY_INDEX + 1) % len(keys)
     return key
 
 
 def _client() -> genai.Client:
     api_key = _next_api_key()
     return genai.Client(api_key=api_key)
+
+
+# ---- single-key quota manager -------------------------------------------------
+# key เดียว → ต้องบริหาร rate เอง: 15 RPM / 250k TPM / 500 RPD (ต่อ model)
+# 3.5-lite กับ 3.1-lite เป็น quota pool คนละอัน → 429 แล้ว fallback ข้าม model ได้
+_QUOTA_RPM = int(os.environ.get("GEMINI_RPM", "14"))        # เผื่อ 1 จาก 15 — ต่อ key
+_QUOTA_TPM = int(os.environ.get("GEMINI_TPM", "240000"))    # เผื่อ ~4% จาก 250k — ต่อ key
+_QUOTA_RPD = int(os.environ.get("GEMINI_RPD", "480"))       # เผื่อ 20 จาก 500 — ต่อ key
+# limits เป็นต่อ key → scale ตาม active pool ณ ตอนใช้ (key เปลี่ยนสดได้)
+# model fallback map — pool แยกกัน
+_MODEL_FALLBACK = {
+    "gemini-3.5-flash-lite": "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite": "gemini-3.5-flash-lite",
+}
+_QUOTA_FILE = Path(__file__).resolve().parent.parent.parent / "exports" / ".gemini_quota.json"
+
+import threading as _threading
+import time as _time
+import datetime as _dt
+from collections import deque as _deque
+
+_q_lock = _threading.Lock()
+_q_req: dict[str, _deque] = {}          # model → deque[ts]  (60s window)
+_q_tok: dict[str, _deque] = {}          # model → deque[(ts, tokens)]
+_q_day: dict[str, dict[str, int]] = {}  # {date: {model: request_count}}
+
+
+def _load_quota_day() -> None:
+    try:
+        import json
+        if _QUOTA_FILE.exists():
+            _q_day.update(json.loads(_QUOTA_FILE.read_text()))
+    except Exception:
+        pass
+
+
+def _save_quota_day() -> None:
+    try:
+        import json
+        tmp = _QUOTA_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_q_day))
+        os.replace(tmp, _QUOTA_FILE)
+    except Exception:
+        pass
+
+
+_load_quota_day()
+
+
+def _day_used(model: str) -> int:
+    return _q_day.get(_dt.date.today().isoformat(), {}).get(model, 0)
+
+
+def _acquire(model: str, est_tokens: int) -> str:
+    """รอจนกว่าจะยิงได้ (RPM/TPM window) + นับ daily — คืน model ที่จะใช้จริง
+    (primary RPD เต็ม → สลับ fallback model ทันที)"""
+    while True:
+        with _q_lock:
+            now = _time.time()
+            today = _dt.date.today().isoformat()
+            day = _q_day.setdefault(today, {})
+            n_keys = max(len(_active_keys()), 1)
+            rpd = _QUOTA_RPD * n_keys
+            rpm = _QUOTA_RPM * n_keys
+            tpm = _QUOTA_TPM * n_keys
+            for m in (model, _MODEL_FALLBACK.get(model)):
+                if m and day.get(m, 0) < rpd:
+                    model = m
+                    break
+            else:
+                raise genai_errors.ClientError(429, {"error": {"message": "daily quota exhausted (local counter)"}})
+
+            req = _q_req.setdefault(model, _deque())
+            tok = _q_tok.setdefault(model, _deque())
+            while req and now - req[0] > 60:
+                req.popleft()
+            while tok and now - tok[0][0] > 60:
+                tok.popleft()
+            tok_used = sum(n for _, n in tok)
+            if len(req) < rpm and tok_used + est_tokens <= tpm:
+                req.append(now)
+                day[model] = day.get(model, 0) + 1
+                _save_quota_day()
+                return model
+            # รอจน window ตัวเก่าสุดหลุด
+            wait = 60 - (now - req[0]) + 0.05 if len(req) >= rpm else 2.0
+        _time.sleep(max(wait, 0.1))
+
+
+def _record_tokens(model: str, resp) -> None:
+    usage = getattr(resp, "usage_metadata", None)
+    if not usage:
+        return
+    n = (getattr(usage, "prompt_token_count", 0) or 0) + (getattr(usage, "candidates_token_count", 0) or 0)
+    with _q_lock:
+        _q_tok.setdefault(model, _deque()).append((_time.time(), n))
+
+
+def _or_messages(contents, config: dict) -> list[dict]:
+    """แปลง gemini-style contents → OpenAI messages สำหรับ OpenRouter
+    รองรับ: str / [{role, parts:[{text}]}] / genai Part (inline_data → image_url data URI)"""
+    import base64 as _b64
+    msgs: list[dict] = []
+    sys_i = config.get("system_instruction")
+    if sys_i:
+        msgs.append({"role": "system", "content": str(sys_i)})
+    items = contents if isinstance(contents, (list, tuple)) else [contents]
+    for c in items:
+        if isinstance(c, str):
+            msgs.append({"role": "user", "content": c})
+        elif isinstance(c, dict):
+            role = "assistant" if c.get("role") == "model" else c.get("role", "user")
+            texts = [p.get("text", "") for p in (c.get("parts") or [])
+                     if isinstance(p, dict) and p.get("text")]
+            msgs.append({"role": role, "content": "\n".join(texts)})
+        else:
+            inline = getattr(c, "inline_data", None)
+            if inline is not None:
+                data = inline.data
+                if not isinstance(data, str):
+                    data = _b64.b64encode(data).decode()
+                url = f"data:{inline.mime_type};base64,{data}"
+                msgs.append({"role": "user",
+                             "content": [{"type": "image_url", "image_url": {"url": url}}]})
+            elif getattr(c, "text", None):
+                msgs.append({"role": "user", "content": c.text})
+    return msgs
+
+
+def _openrouter_generate(model: str, contents, config: dict):
+    """เรียก OpenRouter /chat/completions แทน Gemini — model gemini-style map เป็น google/{id}
+    คืน shim: .text + .usage_metadata (prompt/candidates/total_token_count)"""
+    import urllib.request as _ureq
+    from types import SimpleNamespace as _NS
+    from . import web_search as _ws
+
+    or_model = model if "/" in model else f"google/{model}"
+    body: dict = {
+        "model": or_model,
+        "messages": _or_messages(contents, config),
+    }
+    if config.get("temperature") is not None:
+        body["temperature"] = config["temperature"]
+    if config.get("max_output_tokens"):
+        body["max_tokens"] = config["max_output_tokens"]
+    if config.get("response_mime_type") == "application/json":
+        body["response_format"] = {"type": "json_object"}
+
+    key = _ws._get_openrouter_key()
+    if not key:
+        raise RuntimeError("ไม่มี OpenRouter key (pool/env ว่าง)")
+    req = _ureq.Request(
+        f"{_ws._get_openrouter_base().rstrip('/')}/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {key}",
+        },
+        method="POST",
+    )
+    with _ureq.urlopen(req, timeout=60) as r:
+        data = json.loads(r.read().decode("utf-8"))
+    text = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+    u = data.get("usage") or {}
+    usage = _NS(
+        prompt_token_count=u.get("prompt_tokens", 0) or 0,
+        candidates_token_count=u.get("completion_tokens", 0) or 0,
+        total_token_count=u.get("total_tokens", 0) or 0,
+    )
+    print(f"[LLM] provider=openrouter model={or_model} total={usage.total_token_count}",
+          file=_sys.stderr)
+    return _NS(text=text, usage_metadata=usage)
+
+
+def _generate(model: str, contents, config: dict, est_tokens: int | None = None,
+              role: str | None = None):
+    """generate_content ผ่าน quota manager: pace RPM/TPM → call → 429 → fallback model 1 ครั้ง.
+    role + providers[role]=="openrouter" → route ผ่าน OpenRouter (model เดิม map google/{id})
+    openrouter พัง → fallback gemini path เดิมอัตโนมัติ"""
+    if role and get_provider(role) == "openrouter":
+        try:
+            return _openrouter_generate(model, contents, config)
+        except Exception as exc:
+            print(f"[PROVIDER] openrouter call failed ({exc}) → fallback gemini {model}",
+                  file=_sys.stderr)
+    if est_tokens is None:
+        try:
+            _parts = contents if isinstance(contents, (list, tuple)) else [contents]
+            est_tokens = sum(len(str(c)) for c in _parts) // 4 + int(config.get("max_output_tokens", 0) or 0)
+        except Exception:
+            est_tokens = 2000
+    m = _acquire(model, est_tokens)
+    try:
+        client = _client()   # ต้องเก็บ reference — GC client กลาง call จะปิด shared httpx
+        resp = client.models.generate_content(model=m, contents=contents, config=config)
+        _record_tokens(m, resp)
+        return resp
+    except genai_errors.ClientError as exc:
+        fb = _MODEL_FALLBACK.get(m)
+        is_429 = getattr(exc, "code", None) == 429 or "429" in str(exc)
+        if not (is_429 and fb):
+            raise
+        print(f"[QUOTA] {m} 429 → fallback {fb}", file=_sys.stderr)
+        m2 = _acquire(fb, est_tokens)
+        client = _client()
+        resp = client.models.generate_content(model=m2, contents=contents, config=config)
+        _record_tokens(m2, resp)
+        return resp
 
 
 # ---- multi-bubble segment splitter (Phase 1) --------------------------------
@@ -678,8 +1013,9 @@ def _build_context(products: list[dict], shop_hint: str | None = None,
             "brand", "category", "sold_out", "total_stock", "status",
             "_available_for_sale",  # ⚡ Phase 3d — mark สินค้าพร้อมขาย/ไม่พร้อมขาย
         )
-        # ฟิลด์จาก KB (ถ้า merge แล้ว)
-        kb_fields = ("kb_highlights", "kb_specs", "kb_box_contents", "kb_description", "_source", "_kb_only")
+        # ฟิลด์จาก KB (ถ้า merge แล้ว) + unit flags/specs (⚡ Task 9)
+        kb_fields = ("kb_highlights", "kb_specs", "kb_box_contents", "kb_description", "_source", "_kb_only",
+                     "canonical_specs", "sellable", "oos_in_name", "has_description", "has_warranty_info")
         slim = []
         for p in products:
             card = {k: p[k] for k in slim_fields if k in p}
@@ -750,7 +1086,7 @@ def _build_context(products: list[dict], shop_hint: str | None = None,
 # คืน text อธิบายสั้นๆ เป็นภาษาไทย เพื่อใช้เป็น context ให้ LLM หลักตอบ
 # ⚠️ ต้องโหลดรูปเป็น bytes แล้วส่งเป็น inline_data (Part.from_bytes)
 #    เพราะ Part.from_uri ใช้ได้เฉพาะ GCS URL ไม่ใช่ HTTP URL ทั่วไป
-_VISION_MODEL = os.environ.get("VISION_MODEL", "gemini-3.1-flash-lite")
+# model vision → get_model("vision") (llm_config DB → env VISION_MODEL → default)
 
 _VISION_PROMPT = """คุณเป็นผู้ช่วยแชทบอทร้านค้าออนไลน์
 ลูกค้าส่งรูปนี้มาในแชท อธิบายเป็นภาษาไทยว่ารูปนี้เป็นอะไร ใช้ไม่เกิน 5 บรรทัด
@@ -894,13 +1230,12 @@ def describe_image(
         #    เช่น ลูกค้าคุยเรื่องเคลมอยู่ → vision รู้ว่ารูปนี้น่าจะเป็นสินค้าเสีย
         if history_context:
             prompt += f"\n\nบริบทก่อนหน้ารูปนี้:\n{history_context[:500]}"
-        resp = client.models.generate_content(
-            model=_VISION_MODEL,
-            contents=[prompt, part],
-            config={
-                "temperature": 0.0,
-                "max_output_tokens": 300,
-            },
+        resp = _generate(
+            get_model("vision"),
+            [prompt, part],
+            {"temperature": 0.0, "max_output_tokens": 300},
+            est_tokens=len(prompt) // 4 + 2000,   # รูป ~258-1290 tok — เผื่อไว้
+            role="vision",
         )
         desc = (resp.text or "").strip()
         usage = getattr(resp, "usage_metadata", None)
@@ -910,7 +1245,7 @@ def describe_image(
                 "output": getattr(usage, "candidates_token_count", 0) or 0,
                 "total": getattr(usage, "total_token_count", 0) or 0,
             }
-        print(f"[VISION] model={_VISION_MODEL} url={image_url[:60]}... bytes={len(img_bytes)} desc={desc[:80]!r} tokens={usage_info['total']}", file=sys.stderr)
+        print(f"[VISION] model={get_model('vision')} url={image_url[:60]}... bytes={len(img_bytes)} desc={desc[:80]!r} tokens={usage_info['total']}", file=sys.stderr)
         return desc, usage_info
     except genai_errors.ClientError as exc:
         print(f"[VISION] ClientError: {exc}", file=sys.stderr)
@@ -1001,7 +1336,7 @@ def answer(
         client = _client()
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ", {"prompt": 0, "output": 0, "total": 0}
-    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
+    model_name = (model or get_model("chat")).strip()
     # BUG-P fix — ตรวจภาษาลูกค้า → ตอบในภาษาที่เหมาะสม
     _lang = _detect_lang(_msg_for_llm)
     _lang_inst = _lang_instruction(_lang)
@@ -1104,14 +1439,15 @@ def answer(
 
     usage_info = {"prompt": 0, "output": 0, "total": 0}
     try:
-        resp = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config={
+        resp = _generate(
+            model_name,
+            contents,
+            {
                 "system_instruction": system_instruction,
                 "temperature": 0.3,
                 "max_output_tokens": 4096,
             },
+            role="chat",
         )
     except genai_errors.ClientError as exc:
         return f"ขออภัย ระบบ LLM ติดขัด ลองใหม่อีกครั้ง ({exc})", usage_info
@@ -1212,7 +1548,7 @@ def answer_with_kb(
         client = _client()
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ"
-    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
+    model_name = (model or get_model("chat")).strip()
     # BUG-P fix — ตรวจภาษาลูกค้า → ตอบในภาษาที่เหมาะสม
     _lang = _detect_lang(message)
     _lang_inst = _lang_instruction(_lang)
@@ -1237,14 +1573,15 @@ def answer_with_kb(
     contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
     try:
-        resp = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config={
+        resp = _generate(
+            model_name,
+            contents,
+            {
                 "system_instruction": system_instruction,
                 "temperature": 0.3,
                 "max_output_tokens": 2048,
             },
+            role="chat",
         )
     except genai_errors.ClientError as exc:
         return f"ขออภัย ระบบ LLM ติดขัด ลองใหม่อีกครั้ง ({exc})"
@@ -1288,7 +1625,7 @@ def answer_general(
         client = _client()
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ", {}
-    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
+    model_name = (model or get_model("chat")).strip()
 
     general_instruction = (
         "คุณเป็นพนักงานบริการลูกค้าหญิงของร้านค้าออนไลน์ในเครือ Shopee "
@@ -1341,14 +1678,15 @@ def answer_general(
     contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
     try:
-        resp = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config={
+        resp = _generate(
+            model_name,
+            contents,
+            {
                 "system_instruction": general_instruction,
                 "temperature": 0.3,
                 "max_output_tokens": 2048,
             },
+            role="chat",
         )
     except genai_errors.ClientError as exc:
         return f"ขออภัย ระบบ LLM ติดขัด ลองใหม่อีกครั้ง ({exc})", {}

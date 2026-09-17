@@ -43,25 +43,29 @@ except ImportError:
 # โหลด lazy ครั้งเดียวตอนใช้งาน แล้ว cache ไว้ตลอด session
 
 _VECTOR_STORE: dict[str, Any] | None = None
+_VECTOR_MTIME: float = -1.0   # mtime ของ npz ที่โหลดไว้ — ไฟล์เปลี่ยน → auto-reload
 _EMBEDDINGS_PATH = Path(__file__).resolve().parent.parent.parent / "exports" / "product_embeddings.npz"
 
 
 def _load_vector_store() -> dict[str, Any] | None:
-    """โหลด product embeddings จาก .npz (lazy singleton).
+    """โหลด product embeddings จาก .npz — auto-reload เมื่อไฟล์เปลี่ยน (mtime).
+
+    stat ก่อน load เสมอ: ถ้า build replace ไฟล์ระหว่าง load → mtime ที่เก็บเก่ากว่าจริง
+    → request ถัดไป reload อีกครั้ง (self-healing). ไฟล์หาย/load fail → ใช้ cache เก่าต่อ.
 
     คืน dict ที่มี:
     - item_ids: numpy array ของ item_id (str)
     - embeddings: numpy array shape (n, 1024) normalize แล้ว
     - texts: numpy array ของ text ที่ embed
     - shops: numpy array ของ shopname (str) — ⚡ BUG-H fix สำหรับกรอง shop ก่อน similarity
-
-    ถ้าไฟล์ไม่มี หรือ numpy ไม่ได้ติดตั้ง คืน None.
     """
-    global _VECTOR_STORE
-    if _VECTOR_STORE is not None:
+    global _VECTOR_STORE, _VECTOR_MTIME
+    try:
+        mtime = _EMBEDDINGS_PATH.stat().st_mtime
+    except OSError:
+        return _VECTOR_STORE  # ไฟล์ไม่มี — เก่า→None (เหมือนเดิม), มี cache→ใช้ต่อ
+    if _VECTOR_STORE is not None and mtime == _VECTOR_MTIME:
         return _VECTOR_STORE
-    if not _EMBEDDINGS_PATH.exists():
-        return None
     try:
         import numpy as np
         # 🔒 M1: Try loading without pickle first (safe), fall back with warning
@@ -83,12 +87,13 @@ def _load_vector_store() -> dict[str, Any] | None:
             "texts": data["texts"],
             "shops": _shops,  # None ถ้า .npz เก่า (ยังไม่ re-build)
         }
+        _VECTOR_MTIME = mtime
         if _shops is None:
             print("WARN: .npz ไม่มี field 'shops' — กรุณา re-build embeddings (python scripts/build_embeddings.py)", file=sys.stderr)
         return _VECTOR_STORE
     except Exception as exc:
         print(f"WARN: cannot load vector store: {exc}")
-        return None
+        return _VECTOR_STORE
 
 
 def vector_search(
@@ -629,6 +634,11 @@ def to_product_card(doc: dict, message: str = "") -> dict:
             {
                 "name": m.get("model_name"),
                 "tier_index": m.get("tier_index"),
+                # ⚡ Task 6 — per-variation fields สำหรับ unit-level answers
+                #   (stock/price ต่างกันต่อรุ่น เช่น EC4 เฉพาะกล้องหมดแต่ชุดสุดคุ้มมี)
+                "model_id": m.get("model_id"),
+                "stock": _shopee_stock(m),
+                "model_status": m.get("model_status"),
                 "price": (m.get("price_info") or [{}])[0].get("current_price") if m.get("price_info") else None,
             }
             for m in (doc.get("model") or [])[:20]
@@ -638,22 +648,6 @@ def to_product_card(doc: dict, message: str = "") -> dict:
             for tv in (doc.get("tier_variation") or [])
         ],
     }
-
-
-def _is_sold_out(doc: dict) -> bool:
-    """ตรวจว่าสินค้า sold out (stock=0 ทุกรุ่นย่อย) หรือไม่.
-
-    ใช้กรองสินค้าที่ item_status=NORMAL แต่ Shopee ขึ้น sold out แล้ว
-    ⚡ ตรวจจาก summary_info.total_available_stock — ถ้ารุ่นใดมี stock > 0 ถือว่ายังขายได้
-    """
-    models = doc.get("model") or []
-    if models:
-        for m in models:
-            if _shopee_stock(m) > 0:
-                return False
-        return True
-    # ไม่มี model → ตรวจจาก doc.stock_info_v2
-    return _shopee_stock(doc) <= 0
 
 
 def _extract_product_name_tokens(name: str) -> list[str]:
@@ -710,8 +704,16 @@ def fuzzy_match_products(
                "anker", "baseus", "ugreen", "cuktech", "zmi", "mibro",
                "imilab", "qcy", "jbl", "sony", "oraimo", "70mai",
                "nillkin", "ks", "elite", "actor"}
-    msg_tokens = [t.lower() for t in msg_tokens if len(t) >= 4 and t.lower() not in _common]
-    if not msg_tokens:
+    try:
+        from . import knowledge_base as _kb
+        _common |= _kb._known_brands()   # แบรนด์ทั้ง 182 จาก DB — ไม่ต้อง maintain list แยก
+    except Exception:
+        pass
+    base_tokens = [t.lower() for t in msg_tokens if len(t) >= 4]
+    # fetch_tokens = ตัวหา candidates (ไม่เอา brand/cำทั่วไป — match กว้างเกิน)
+    # score ใช้ base_tokens ทั้งหมด รวม brand — brand match ช่วย rank สินค้าให้ถูกแบรนด์
+    fetch_tokens = [t for t in base_tokens if t not in _common] or base_tokens
+    if not fetch_tokens:
         return []
 
     coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
@@ -720,13 +722,11 @@ def fuzzy_match_products(
     # ดึง candidate products จาก DB — ใช้ regex contains (ไม่ใช่ ^) เพราะชื่อสินค้า
     # มักขึ้นต้นด้วย brand เช่น "KIESLECT BioKoop" ไม่ใช่ "BioKoop"
     # ใช้ prefix 3 ตัวแรกของ token เพื่อลดจำนวน docs ที่ต้อง score
+    # ⚠️ ไม่ filter item_status — ตอบสินค้า unlisted/deleted ได้ (กันขายอยู่ที่ card.status + prompt)
     candidates: list[dict] = []
-    for token in msg_tokens[:3]:  # เอาแค่ 3 tokens แรก
+    for token in fetch_tokens[:3]:  # เอาแค่ 3 tokens แรก
         prefix = token[:3]
-        q = {
-            "item_status": "NORMAL",
-            "item_name": {"$regex": re.escape(prefix), "$options": "i"},
-        }
+        q = {"item_name": {"$regex": re.escape(prefix), "$options": "i"}}
         if shop:
             q["shopname"] = {"$regex": f"^{re.escape(shop)}$", "$options": "i"}
         docs = list(coll.find(q, PRODUCT_PROJECTION).limit(30))
@@ -734,37 +734,45 @@ def fuzzy_match_products(
             if d.get("item_id") and not any(c.get("item_id") == d.get("item_id") for c in candidates):
                 candidates.append(d)
 
-    # ถ้า prefix regex ไม่เจอ ลองดึงสินค้าทั้งหมดของร้าน (limit 50)
-    if not candidates and shop:
-        q = {
-            "item_status": "NORMAL",
-            "shopname": {"$regex": f"^{re.escape(shop)}$", "$options": "i"},
-        }
-        candidates = list(coll.find(q, PRODUCT_PROJECTION).limit(50))
+    # คำนวณ fuzzy score ระหว่าง msg_tokens กับ product name tokens
+    def _score(cands: list[dict]) -> list[tuple[int, dict]]:
+        out: list[tuple[int, dict]] = []
+        for doc in cands:
+            name = doc.get("item_name") or ""
+            name_tokens = _extract_product_name_tokens(name)
+            if not name_tokens:
+                continue
+            # avg ของ best-score ต่อ token — brand match เดี่ยวๆ ไม่ชนะ
+            # (เช่น "redmi wach" → Redmi Watch ได้ (100+75)/2=87 ชนะ Redmi 10C (100+30)/2=65)
+            per_token = []
+            for mt in base_tokens:
+                best = 0
+                for nt in name_tokens:
+                    # ใช้ partial_ratio เพราะพิมพ์ผิดอาจมีตัวซ้ำ/ขาด
+                    # เช่น biokooooooooop vs biokoop → partial_ratio จะดีกว่า ratio
+                    s = fuzz.partial_ratio(mt, nt)
+                    if s > best:
+                        best = s
+                per_token.append(best)
+            avg = sum(per_token) / len(per_token)
+            if avg >= score_threshold:
+                out.append((avg, doc))
+        out.sort(key=lambda x: -x[0])
+        return out
 
-    if not candidates:
+    scored = _score(candidates)
+
+    # prefix-3 gate พลาดเมื่อ typo อยู่ต้น token (เช่น "wach"→"watch", "khoxsee"→"showsee")
+    # หรือ candidates ที่เจอ score ไม่ผ่าน → rescan ทั้งร้าน
+    # ponytail: cap 2000 — ร้านใหญ่สุดตอนนี้ ~2100 docs; ร้านใหญ่กว่านั้นในอนาคตค่อยทำ index จริง
+    if not scored and shop:
+        q = {"shopname": {"$regex": f"^{re.escape(shop)}$", "$options": "i"}}
+        candidates = list(coll.find(q, PRODUCT_PROJECTION).limit(2000))
+        scored = _score(candidates)
+
+    if not scored:
         return []
 
-    # คำนวณ fuzzy score ระหว่าง msg_tokens กับ product name tokens
-    scored: list[tuple[int, dict]] = []
-    for doc in candidates:
-        name = doc.get("item_name") or ""
-        name_tokens = _extract_product_name_tokens(name)
-        if not name_tokens:
-            continue
-        best_score = 0
-        for mt in msg_tokens:
-            for nt in name_tokens:
-                # ใช้ partial_ratio เพราะพิมพ์ผิดอาจมีตัวซ้ำ/ขาด
-                # เช่น biokooooooooop vs biokoop → partial_ratio จะดีกว่า ratio
-                score = fuzz.partial_ratio(mt, nt)
-                if score > best_score:
-                    best_score = score
-        if best_score >= score_threshold:
-            scored.append((best_score, doc))
-
-    # เรียงตาม score สูงสุด แล้วแปลงเป็น product cards
-    scored.sort(key=lambda x: -x[0])
     result = []
     for _, doc in scored[:limit]:
         result.append(to_product_card(doc, message))
@@ -2452,58 +2460,6 @@ def build_query(
 
 # ---- main fetch ---------------------------------------------------------------
 
-# คำที่ไม่ควรนับเป็น signal ตอน score (เป็น stopword ทั่วไปในคำถามไทย/อังกฤษ)
-_STOPWORDS: frozenset[str] = frozenset({
-    "มี", "ไหม", "ไหน", "อะไร", "บ้าง", "ได้", "ไป", "และ", "หรือ", "อยาก",
-    "ได้", "ให้", "หน่อย", "ช่วย", "แนะ", "นำ", "หา", "ดี", "กว่า", "ที่",
-    "is", "the", "a", "an", "of", "for", "and", "or", "to", "what", "which",
-    "have", "has", "any", "some", "good", "best", "recommend",
-})
-
-
-def _score_card(card: dict, message: str, product_types: set[str]) -> float:
-    """ให้คะแนนความเกี่ยวข้องของ product card กับคำถามลูกค้า.
-
-    ใช้ re-rank หลัง Mongo คืน candidates เพื่อให้สินค้าที่ตรงที่สุดขึ้นมาก่อน
-    (Mongo $regex กรองหยาบ แต่ natural order ไม่ได้เรียงตาม relevance).
-
-    น้ำหนัก:
-    - ตรง product type regex บน item_name: +5 (สำคัญที่สุด)
-    - ตร brand ที่ลูกค้าเอ่ย:               +3
-    - ตร token ระหว่าง message ↔ item_name: +1 ต่อ token
-    - ตร shop ที่ลูกค้าเอ่ย:                +2
-    """
-    name = (card.get("name") or "").lower()
-    brand = (card.get("brand") or "").lower()
-    shop = (card.get("shop") or "").lower()
-    msg = message.lower()
-
-    score = 0.0
-
-    # 1) product type regex match บน item_name (boost สูงสุด)
-    for type_name in product_types:
-        for tn, _kws, regex in PRODUCT_TYPES:
-            if tn == type_name and re.search(regex, name):
-                score += 5.0
-                break
-
-    # 2) brand match
-    if brand and len(brand) >= 2 and brand in msg:
-        score += 3.0
-
-    # 3) shop match (เผื่อลูกค้าพิมพ์ชื่อร้านในข้อความ)
-    if shop and len(shop) >= 3 and re.sub(r"\s+", "", shop) in re.sub(r"\s+", "", msg):
-        score += 2.0
-
-    # 4) token overlap ระหว่าง message กับ item_name (ตัด stopword ออก)
-    msg_tokens = {t for t in re.findall(r"\w+", msg) if len(t) >= 2 and t not in _STOPWORDS}
-    name_tokens = set(re.findall(r"\w+", name))
-    overlap = msg_tokens & name_tokens
-    score += len(overlap) * 1.0
-
-    return score
-
-
 # ---- re-rank by promo + latest -----------------------------------------------
 #
 # หลังจากกรองสินค้าที่เกี่ยวข้องด้วย similarity/regex แล้ว อาจมีสินค้าหลายสิบรายการ
@@ -2917,6 +2873,36 @@ def fetch_products(
     """
     coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
     collection = db[coll_name]
+
+    # ⚡ Task 8 — unit-level index path (flag-gated)
+    #   USE_UNIT_INDEX=1 → ทุก query; =charger → เฉพาะ route ที่เป็น charger-family
+    #   คืน unit cards ระดับรุ่นย่อยแทน listing cards; ว่าง/error → legacy path เดิม
+    _uif = os.environ.get("USE_UNIT_INDEX", "").strip().lower()
+    if _uif == "charger":
+        try:
+            from . import route_context as _rc, units as _units
+            _rt = _rc.resolve_route(message)
+            _chg_types = set().union(*_units._SUBTYPE_TO_TYPES.values())
+            if not (_rt.charger_subtype or _rt.product_types & _chg_types):
+                _uif = ""
+        except Exception as _ge:
+            print(f"[UNITS] charger gate error → legacy: {_ge}", file=sys.stderr)
+            _uif = ""
+    if _uif in ("1", "true", "yes", "charger"):
+        try:
+            from . import units as _units
+            _ucards = _units.fetch_unit_cards(
+                message,
+                shop=shop_filter,
+                limit=limit,
+                sellable_only=filter_unavailable,
+                product_types=product_types_override,
+                charger_subtype=charger_subtype_override,
+            )
+            if _ucards:
+                return _ucards
+        except Exception as _ue:
+            print(f"[UNITS] unit path error → legacy: {_ue}", file=sys.stderr)
 
     # ตรวจ product type: ลอง exact match ก่อน ถ้าไม่เจอให้ลอง fuzzy (ทนคำพิมพ์ผิด)
     # ถ้า caller ส่ง product_types_override มา → ใช้ค่านั้นแทน (เช่น charging spec question)
@@ -3586,3 +3572,102 @@ def search_tisi_products(
             break
 
     return results
+
+
+# ---- product dedup (ย้ายจาก app.py — ใช้ร่วมกันทุก path) ----
+
+# ⚡ Charger Subtype Consolidation (2026-09-16) — unified product dedup
+#   รวม _kb_base_name/_kb_sell_score (KB merge path) กับ _base_name/_listing_sell_score
+#   (product_store path + _web_search_reanswer) เป็นฟังก์ชันเดียวระดับโมดูล
+#   ใช้ logic ของ _listing_sell_score (ครอบคลุมกว่า — มี price_score แยก)
+#   ลด code duplicate ~80 บรรทัด
+_DEDUP_STANDARDS = ("ccc / ce", "ce / ccc", "usb-c / usb-a", "usb a / usb c")
+
+
+def _dedupe_base_name(name: str) -> str:
+    """สกัดชื่อหลักของสินค้า เพื่อรวม listing ซ้ำของสินค้าตัวเดียวกัน.
+
+    หลักการ:
+    - ตัด prefix โปรโมชั่นที่ Shopee แปะไว้หน้าชื่อ (เช่น "[ลดเหลือ 5499]")
+    - ตัด suffix ระยะเวลาประกัน (-12M, -1Y, -2Y)
+    - ตัด "พอร์ตเดียวแรงสุด XXXw" และ "จ่ายไฟพอร์ตเดียว XXXw" ที่แทรกกลางชื่อ
+    - ตัดมาตรฐาน "CCC / CE", "CE / CCC", "USB-C / USB-A" ที่เป็นตัวคั่นมาตรฐาน
+    - **ไม่ตัด** ส่วนที่บอกว่าเป็น bundle (เช่น "/ with adapter", "/ A18T")
+      เพราะ bundle กับ standalone เป็นคนละสินค้า ต้องไม่รวมกัน
+    - กรองช่องว่างระหว่างคำซ้ำ
+    """
+    n = (name or "").strip().lower()
+    # ตัด prefix โปรโมชั่นที่ Shopee แปะไว้หน้าชื่อ
+    n = re.sub(r"^\[.*?\]\s*", "", n)
+    # ตัด " -12M", " -1Y", " -2Y", " -6M" ท้ายชื่อ
+    n = re.sub(r"\s*-\d+[my]\s*$", "", n)
+    # ตัด "พอร์ตเดียวแรงสุด XXXw" และ "จ่ายไฟพอร์ตเดียว XXXw" ที่แทรกกลางชื่อ
+    n = re.sub(r"(จ่ายไฟ)?พอร์ตเดียวแรงสุด\s*\d+w\s*", "", n)
+    # ตัด "พอร์ตเดียว XXXw" (ไม่มี "แรงสุด")
+    n = re.sub(r"(จ่ายไฟ)?พอร์ตเดียว\s*\d+w\s*", "", n)
+    # ตัดมาตรฐาน "CCC / CE", "CE / CCC", "USB-C / USB-A" ที่เป็นตัวคั่นมาตรฐาน
+    for s in _DEDUP_STANDARDS:
+        n = n.replace(s, " ")
+    # กรองช่องว่างระหว่างคำซ้ำ
+    n = re.sub(r"\s{2,}", " ", n).strip()
+    return n
+
+
+def _dedupe_sell_score(p: dict) -> tuple:
+    """คะแนนสำหรับเลือก listing ที่ดีที่สุดสำหรับขาย.
+
+    เกณฑ์ (เรียงจากสำคัญที่สุดไปน้อยที่สุด):
+    1. status=NORMAL (True > False)
+    2. ไม่ sold_out (True > False)
+    3. stock เยอะกว่า
+    4. มีโปร (True > False)
+    5. ราคาต่ำสุดถูกกว่า
+    """
+    status_normal = p.get("status") == "NORMAL"
+    not_sold_out = not p.get("sold_out", False)
+    stock = p.get("total_stock") or 0
+    has_promo = bool(p.get("price", {}).get("min") and p.get("price", {}).get("max")
+                     and p.get("price", {}).get("min") != p.get("price", {}).get("max"))
+    # ราคาต่ำสุด — ถูกกว่า = ดีกว่า (ใช้ค่าติดลบเพื่อให้ถูกกว่าได้ score สูงกว่า)
+    price_info = p.get("price") or {}
+    min_price = price_info.get("min") or 0
+    # ถ้าไม่มีราคา ให้ score ราคาเป็น 0 (ไม่ดีไม่แย่)
+    price_score = -min_price if min_price else 0
+    return (status_normal, not_sold_out, stock, has_promo, price_score)
+
+
+def _dedupe_products(products: list[dict], *, log_label: str = "DEDUP") -> list[dict]:
+    """Dedup สินค้าที่ชื่อเหมือนกันหรือใกล้เคียงกันมาก.
+
+    ใช้ _dedupe_base_name เพื่อรวม listing ซ้ำของสินค้าตัวเดียวกัน
+    (เช่น P23 ซ้ำ 3 ตัว ต่างกันแค่ suffix ระยะเวลาประกัน -12M / -1Y)
+    เมื่อเจอซ้ำ → เลือก listing ที่ดีที่สุดสำหรับขาย (NORMAL + stock + โปร + ราคาถูก)
+
+    Args:
+        products: list ของ product cards
+        log_label: label สำหรับ debug log (เช่น "DEDUP", "DEDUP-KB", "DEDUP-WS")
+
+    Returns:
+        list ของ product cards ที่ dedup แล้ว
+    """
+    _seen_names: dict[str, int] = {}  # base_name → index ใน _deduped
+    _deduped: list[dict] = []
+    for p in products:
+        pname = _dedupe_base_name(p.get("name") or "")
+        if not pname:
+            _deduped.append(p)
+            continue
+        if pname not in _seen_names:
+            _seen_names[pname] = len(_deduped)
+            _deduped.append(p)
+        else:
+            # เจอซ้ำ → เลือก listing ที่ดีที่สุดสำหรับขาย
+            _idx = _seen_names[pname]
+            _existing = _deduped[_idx]
+            _existing_score = _dedupe_sell_score(_existing)
+            _new_score = _dedupe_sell_score(p)
+            if _new_score > _existing_score:
+                _deduped[_idx] = p
+    if len(_deduped) < len(products):
+        print(f"[{log_label}] products: {len(products)} → {len(_deduped)} (removed {len(products) - len(_deduped)} duplicates)", file=sys.stderr)
+    return _deduped
