@@ -112,7 +112,9 @@ ChatBotProductMS คือระบบ chatbot ปรึกษาสินค้
 | `admins`, `auth_tokens`, `sessions` | ผู้ใช้และ auth |
 | `conversations_shp`, `messages_shp`, `customers_shp` | แชทที่ mirror จาก Shopee |
 | `shops` | ร้านค้า |
-| `knowledge_base` | KB: `product_spec` + `general_faq` |
+| `knowledge_base` | KB legacy: `product_spec` + `general_faq` (fallback) |
+| `kb_products` | KB product_spec ใหม่ — runtime ใช้อันนี้ (specs อยู่ใน `canonical_specs`/`specs_raw`) |
+| `kb_qa` | KB QA ใหม่ — `general_faq` + troubleshooting `qa` (คำตอบอยู่ใน field `a`) |
 | `triggers` | keyword-based rules (bot_answer / handoff_admin) |
 | `shop_personas` | ชื่อบอทต่อร้าน |
 | `shop_settings` | ตั้งค่าร้าน (เช่น faq_liveagent_action) |
@@ -550,7 +552,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `_first_image_url` | 292 | first image URL |
 | `_clean_description` | 299 | slice `description` เป็น section + cap 3000 chars |
 | `_is_sold_out` | 532 | check stock == 0 (*ไม่ถูกเรียกในไฟล์*) |
-| `_load_vector_store` | 39 | lazy load `.npz` embedding |
+| `_load_vector_store` | 49 | lazy load `.npz` embedding + **auto-reload เมื่อ mtime เปลี่ยน** (stat ก่อน load = self-healing; ไฟล์หาย/fail → cache เก่า) |
 | `get_client` | 148 | cached MongoClient + ping health |
 | `build_connection_string` | 111 | build URI จาก `MONGO_*` env |
 | `list_shops` | 2919 | distinct `shopname` |
@@ -644,10 +646,17 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ฟังก์ชัน | Line | หน้าที่ | เรียก |
 |---|---|---|---|
-| `lookup_kb` | 751 | **main entry** — detect topic + search + build context | `detect_topic`, `search_kb_by_model`, `get_general_faq`, `format_kb_context` |
-| `search_kb_by_model` | 274 | search KB (single + comparison) | `extract_model_keywords`, `_search_kb_single` |
-| `_search_kb_single` | 340 | score + fetch full docs | `extract_model_keywords`, `_kb_coll` |
-| `get_general_faq` | 429 | ดึง `general_faq` doc by topic | `_kb_coll` |
+| `lookup_kb` | 852 | **main entry** — detect topic + search + build context | `detect_topic`, `search_kb_by_model`, `get_general_faq`, `format_kb_context` |
+| `search_kb_by_model` | — | search KB (single + comparison) | `extract_model_keywords`, `_search_kb_single` |
+| `_search_kb_single` | — | score + fetch full docs — **2026-09-16 repoint → `kb_products`** (specs ใช้ `canonical_specs`/`specs_raw` — ไม่มี field `specs`) | `extract_model_keywords`, `_kb_products_coll` |
+| `get_general_faq` | 525 | ดึง `general_faq` doc by topic — **repoint → `kb_qa`** (normalize `a`→`answer`; fallback legacy `knowledge_base`) | `_kb_qa_coll`, `_kb_coll` |
+| `search_qa` | 1037 | semantic QA search บน `kb_qa` + `qa_embeddings.npz` — hybrid sim+model_codes/item_id boost; cross-model guard (doc ผูกรุ่นอื่น exclude, derive scope จาก `topic` ด้วย) + brand scope (generic doc แบรนด์อื่นข้าม) | `embedding.embed_query`, `_qa_index` |
+| `qa_context` | 1107 | entry — คืน block "=== คำแนะนำจากฐานความรู้ (QA) ===" เมื่อ claim หรือ trigger kw; resolve codes จาก route + active card, brand จาก units/msg | `route_context.resolve_route`, `conversation_products.get_active_product`, `search_qa` |
+| `qa_troubleshoot_tips` | — | คืน list คำแนะนำ `a` สำหรับ troubleshoot-first claim flow — gate: level∈{model,item,brand} + _qa_sim≥0.5 + len(a)≥30 | `search_qa`, `route_context`, `conversation_products` |
+| `_known_brands` | 1019 | set แบรนด์ที่รู้จัก = `_KNOWN_BRAND_SET` baseline ∪ `distinct(brand)` จาก `kb_products` + `sellable_units.brand.original_brand_name` — แบรนด์ใหม่เข้าร้านได้ scope protection โดยไม่แก้โค้ด; **TTL 5 นาที** (refresh fail → ของเก่า), cold-start DB ล่ม → baseline (fail-open); ใช้ใน `search_qa` (topic scope) + `qa_context`/`qa_troubleshoot_tips` (detect แบรนด์จาก msg) | `_kb_products_coll`, `units._units_coll`, `_norm_brand` |
+| `_qa_docs` | 1058 | kb_qa docs ทั้งหมด — **TTL cache 5 นาที** (`_qa_lock` กัน refresh ซ้อน — chat() รัน threadpool); refresh fail → stale cache; สำเร็จ → `_qa_embed_missing` ทันที | `_kb_qa_coll`, `_qa_embed_missing` |
+| `_qa_embed_missing` | — | embed kb_qa doc ที่ยังไม่มี vector (key ด้วย `_id` — append เท่านั้น ไม่ realign) → QA ใหม่ searchable ทันทีโดยไม่ rebuild npz; fail → log เฉยๆ (doc ยังเจอด้วย substring) | `embedding.embed_texts`, `_qa_vectors` |
+| `_norm_brand` | — | normalize ค่า brand จาก DB — ตัดวงเล็บ `(ไทย)`/lower/กรอง `_BRAND_JUNK`+สั้น<3 (`'CukTech (ชุกเทค)'`→`'cuktech'`; `'nobrand'`/`'tws'`/`'meet'`→`''`) | — |
 
 #### 6.5.2 Model keyword + topic
 
@@ -705,7 +714,9 @@ web_search.should_use_web_search(answer, intent, products, message)
 |---|---|---|
 | `_load_env` | 27 | load `.env` |
 | `_build_admin_client` | 92 | cached MongoClient for admin DB |
-| `_kb_coll` | 118 | return `knowledge_base` collection |
+| `_kb_coll` | 118 | return `knowledge_base` collection (legacy fallback) |
+| `_kb_products_coll` / `_kb_qa_coll` | — | collections `kb_products` / `kb_qa` (repoint 2026-09-16) |
+| `_qa_index` | — | lazy-load `exports/qa_embeddings.npz` (392 vecs, สร้างด้วย `build_embeddings --qa`) |
 
 #### 6.5.5 Module constants
 
@@ -1665,8 +1676,9 @@ Early-return blocks ก่อน intent classification: order lookup, return/ref
 |---|---|---|---|
 | `fetch_units(message, *, shop, limit, sellable_only, product_types, charger_subtype, route)` | ดึง units: exact model_code(+qualifier scoring) → field filter → vector บน unit_embeddings (mask shop+sellable จาก Mongo) → merge+rank | message: str; route: Route จาก `route_context.resolve_route` | `list[unit doc + _score + _matched_by]` (ว่าง = fallback legacy) |
 | `attach_kb_specs(unit_docs)` | spec inheritance — unit desc ว่างยืม `canonical_specs` จาก `kb_products` ผ่าน `model_codes` | list[unit doc] | docs เดิม (เติม `canonical_specs` ให้ตัวที่ match) |
-| `attach_image_texts(unit_docs)` | join `image_texts` (OCR รูป spec/desc) เข้า unit ผ่าน `image_ids` — เฉพาะ kind=spec\|product | list[unit doc] | docs เดิม (เติม `image_text` ≤2500 chars) |
-| `to_unit_card(unit, route)` | unit doc → card shape เดียวกับ `to_product_card` + unit extras (kind/components/subtype/flags) | unit: dict; route: Route\|None | `dict` card |
+| `attach_image_texts(unit_docs)` | join `image_texts` (OCR รูป) เข้า unit ผ่าน `image_ids` — spec\|product→`image_text`; **banner ที่มีคำประกัน→`warranty_text`** (per-listing เงื่อนไขประกัน, ≤1500 chars) | list[unit doc] | docs เดิม (เติม `image_text`/`warranty_text`) |
+| `_unit_warranty(unit)` | ระยะประกันจาก `item_name` ด้วย `warranty.extract_warranty_from_name` (แก้ regression warranty=None ใน unit path) | unit: dict | `dict{duration,duration_months,duration_source}\|None` |
+| `to_unit_card(unit, route)` | unit doc → card shape เดียวกับ `to_product_card` + unit extras; `warranty` field จาก `_unit_warranty`, `warranty_text` append ท้าย `description_excerpt` | unit: dict; route: Route\|None | `dict` card |
 | `pick_desc_sections(unit, route)` | เลือก desc section ตาม `route.needs_spec/needs_warranty` cap 3000 chars | unit: dict | `str` |
 | `fetch_unit_cards(message, **kwargs)` | fetch_units + attach_kb_specs + to_unit_card — entry point | เหมือน fetch_units | `list[card]` |
 

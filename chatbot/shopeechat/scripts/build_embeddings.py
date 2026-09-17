@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -45,7 +46,34 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--units", action="store_true",
                     help="embed unit.search_text จาก sellable_units.jsonl → unit_embeddings.npz")
+    ap.add_argument("--qa", action="store_true",
+                    help="embed kb_qa 'topic | q' จาก admin Mongo → qa_embeddings.npz")
     args = ap.parse_args()
+
+    if args.qa:
+        # QA embeddings — อ่าน kb_qa จาก Mongo ตรงๆ (แค่ ~392 docs ไม่ต้องผ่าน export)
+        from chatbot.shopeechat import knowledge_base as _kb
+        docs = list(_kb._kb_qa_coll().find(
+            {"type": "qa", "active": {"$ne": False}},
+            {"q": 1, "topic": 1}))
+        print(f"{len(docs)} QA docs")
+        texts = [f"{d.get('topic') or ''} | {d.get('q') or ''}".strip(" |") for d in docs]
+        print("Sample:", texts[:2])
+        print(f"Embedding {len(texts)} QA (batch={BATCH_SIZE})...")
+        t0 = time.time()
+        embeddings = np.zeros((len(texts), EMBEDDING_DIM), dtype=np.float32)
+        for start in range(0, len(texts), BATCH_SIZE):
+            embeddings[start:start + BATCH_SIZE] = embed_texts(
+                texts[start:start + BATCH_SIZE], batch_size=BATCH_SIZE)
+        print(f"done in {time.time()-t0:.1f}s")
+        out = ROOT / "exports" / "qa_embeddings.npz"
+        np.savez_compressed(
+            out,
+            qa_ids=np.array([str(d["_id"]) for d in docs], dtype="<U24"),
+            topics=np.array([d.get("topic") or "" for d in docs], dtype="<U64"),
+            embeddings=embeddings)
+        print(f"saved {out} ({out.stat().st_size/1024:.0f} KB)")
+        return
 
     if args.units:
         print(f"Loading units from {UNITS_PATH}...")
@@ -120,7 +148,11 @@ def main() -> None:
     if unit_ids is not None:
         npz_kwargs["unit_ids"] = np.array(unit_ids, dtype="<U96")
         npz_kwargs["model_ids"] = np.array(model_ids, dtype="<U64")
-    np.savez_compressed(output_path, **npz_kwargs)
+    # atomic write — bot อาจ lazy-load npz ขณะ build อยู่; เขียน tmp แล้ว replace
+    # (os.replace เป็น atomic บน POSIX → reader เห็นไฟล์เก่าหรือใหม่เต็มก้อนเสมอ)
+    tmp_path = output_path.with_suffix(".tmp.npz")
+    np.savez_compressed(tmp_path, **npz_kwargs)
+    os.replace(tmp_path, output_path)
     size_mb = output_path.stat().st_size / 1024 / 1024
     print(f"  saved {size_mb:.1f} MB")
 

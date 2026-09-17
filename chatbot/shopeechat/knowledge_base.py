@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import os
 import re
+import sys
+import threading
+import time
 from datetime import datetime
 from typing import Any
 
@@ -116,11 +119,28 @@ def _build_admin_client() -> MongoClient:
     return _cached_admin_client
 
 
-def _kb_coll():
-    """คืน collection knowledge_base จาก DB admin."""
+def _admin_db():
     db_name = os.environ.get("ADMIN_MONGO_DB", "chatbot_admin").strip()
+    return _build_admin_client()[db_name]
+
+
+def _kb_coll():
+    """legacy knowledge_base — เก็บไว้เป็น fallback (rollback) ระหว่าง migration ไป kb_*."""
     coll_name = os.environ.get("ADMIN_MONGO_COLLECTION_KB", "knowledge_base").strip()
-    return _build_admin_client()[db_name][coll_name]
+    return _admin_db()[coll_name]
+
+
+def _kb_products_coll():
+    """kb_products — product_spec/comparison จาก adminbase import (schema เดียวกับ
+    legacy ยกเว้น specs → canonical_specs/specs_raw — alias ที่ _search_kb_single)."""
+    coll = os.environ.get("ADMIN_MONGO_COLLECTION_KB_PRODUCTS", "kb_products").strip()
+    return _admin_db()[coll]
+
+
+def _kb_qa_coll():
+    """kb_qa — type=qa (troubleshooting 392 docs) + general_faq."""
+    coll = os.environ.get("ADMIN_MONGO_COLLECTION_KB_QA", "kb_qa").strip()
+    return _admin_db()[coll]
 
 
 # ---- topic detection ----
@@ -418,7 +438,7 @@ def _search_kb_single(message: str, limit: int = 5) -> list[dict[str, Any]]:
     if not keywords:
         return []
 
-    coll = _kb_coll()
+    coll = _kb_products_coll()
 
     # ดึงแค่ brand+model ก่อน (เร็ว ~0.5s) เพื่อหา doc ที่ match
     # แล้วค่อยดึงฟิลด์เต็มเฉพาะที่ match (ไม่ดึง description/specs ทั้งหมด ~8s)
@@ -490,21 +510,29 @@ def _search_kb_single(message: str, limit: int = 5) -> list[dict[str, Any]]:
              "highlights": 1, "description": 1, "box_contents": 1,
              "warranty_period": 1, "warranty_note": 1, "notes": 1,
              "weight": 1, "dimensions": 1, "specs": 1, "extra_fields": 1,
+             "canonical_specs": 1, "specs_raw": 1,
              "source_file": 1, "source_row": 1},
         )
     )
-    # ใส่ score กลับ
+    # ใส่ score กลับ + alias specs (kb_products ใช้ canonical_specs/specs_raw ไม่มี specs)
     score_map = {oid: sc for oid, sc in matched_ids}
     for doc in results:
+        if not doc.get("specs"):
+            doc["specs"] = doc.get("canonical_specs") or doc.get("specs_raw") or {}
         doc["_match_score"] = score_map.get(doc["_id"], 0)
     results.sort(key=lambda x: x.get("_match_score", 0), reverse=True)
     return results
 
 
 def get_general_faq(topic: str = "รับประกัน") -> dict[str, Any] | None:
-    """ดึง general_faq ตาม topic (เช่น เงื่อนไขรับประกันทั่วไป)."""
-    coll = _kb_coll()
-    return coll.find_one({"type": "general_faq", "topic": topic, "active": {"$ne": False}})
+    """ดึง general_faq ตาม topic — kb_qa ก่อน, legacy knowledge_base fallback.
+
+    kb_qa เก็บคำตอบใน field `a` — normalize เป็น `answer` ให้ caller เดิม."""
+    q = {"type": "general_faq", "topic": topic, "active": {"$ne": False}}
+    doc = _kb_qa_coll().find_one(q) or _kb_coll().find_one(q)
+    if doc and not doc.get("answer"):
+        doc["answer"] = doc.get("a") or ""
+    return doc
 
 
 def _extract_policy_from_descriptions(mongo_coll, policy_type: str, limit: int = 200) -> str:
@@ -959,6 +987,339 @@ def _build_brand_context(db, brand: str, shop_filter: str | None = None) -> dict
         "context": context,
         "meta": {"product_count": product_count, "categories": cats, "shop_scoped": bool(shop_filter)},
     }
+
+
+# ---- QA retrieval (kb_qa — troubleshooting/how-to) ----
+
+_QA_VEC_PATH = Path(__file__).resolve().parent.parent.parent / "exports" / "qa_embeddings.npz"
+_qa_docs_cache: list[dict] | None = None
+_qa_vec_cache: dict | None = None
+
+_QA_MIN_SCORE = 0.45   # cosine floor — tune จาก test จริง
+# baseline แบรนด์ที่รู้จัก — _known_brands() union กับ DB distinct ตอน runtime
+_KNOWN_BRAND_SET = {
+    "xiaomi", "redmi", "poco", "imilab", "blackshark", "black shark",
+    "cuktech", "ztec", "isuper", "deerma", "leravan", "mili", "kospet",
+    "lydsto", "eloop", "yaber", "1more", "kieslect", "zmi", "lagenio",
+    "70mai", "viomi", "qcy", "ticwatch", "pioneer", "hoco", "adata",
+    "apacer", "asus", "bear", "freetie", "binnifa", "godung",
+}
+_brand_cache: set[str] | None = None
+# ค่า brand ใน DB ที่ไม่ใช่แบรนด์จริง / คำทั่วไปที่จะ false-detect ในข้อความลูกค้า
+_BRAND_JUNK = {
+    "nobrand", "tws", "tws true wireless", "tripod", "vr toys", "free fire",
+    "mist fan", "meet", "dream", "alpha", "aj", "kw", "fil", "ega", "pro-a",
+    "pet kiss", "smart swab", "ktv plus", "air pop", "bass apostle",
+    "boils dragon", "happy life", "truehearted", "real me", "doco",
+    "kingsmith walkingpad", "walkingpad", "ultimate ears", "xiaomi youpin",
+    "zmi cuktech", "proda remax", "power connex", "powerconnex",
+    "jordan & judy", "alien secret", "qiaobeibi", "hongshuangxi",
+    "huafajihe", "oemdiy", "microhoo", "iqiyi",
+}
+
+
+def _norm_brand(raw) -> str:
+    """'CukTech (ชุกเทค)' → 'cuktech' — ตัดวงเล็บ/space/lower; คืน '' ถ้า junk/สั้นเกิน."""
+    s = re.sub(r"[(\[].*?[)\]]", "", str(raw or "")).strip().lower()
+    return s if len(s) >= 3 and s not in _BRAND_JUNK else ""
+
+
+_brand_ts: float = 0.0
+
+
+def _known_brands() -> set[str]:
+    """แบรนด์ที่รู้จัก = _KNOWN_BRAND_SET ∪ distinct(brand) จาก kb_products+sellable_units.
+
+    แบรนด์ใหม่เข้าร้านได้ scope protection โดยไม่ต้องแก้ list — TTL 5 นาที (refresh
+    fail → ใช้ของเก่า), DB ล่มตั้งแต่แรก → baseline (fail-open เหมือนเดิม).
+    """
+    global _brand_cache, _brand_ts
+    if _brand_cache is not None and time.time() - _brand_ts < _QA_DOCS_TTL:
+        return _brand_cache
+    brands = set(_KNOWN_BRAND_SET)
+    try:
+        from . import units as _u
+        raw = list(_kb_products_coll().distinct("brand"))
+        raw += list(_u._units_coll().distinct("brand.original_brand_name"))
+        brands |= {b for b in (_norm_brand(x) for x in raw) if b}
+        _brand_cache = brands          # assign เฉพาะตอน distinct สำเร็จ
+        _brand_ts = time.time()
+    except Exception:
+        if _brand_cache is None:       # cold start + DB ล่ม → baseline
+            _brand_cache = brands
+            _brand_ts = time.time()
+    return _brand_cache
+
+
+# recall gate เท่านั้น — precision อยู่ที่ scoring (substring/sim/anchor)
+_QA_TRIGGER_KWS = (
+    "วิธี", "ตั้งค่า", "ติดตั้ง", "รีเซ็ต", "reset", "ใช้งาน", "เชื่อมต่อ",
+    "ชาร์จไม่", "ไม่ชาร์จ", "ไม่ทำงาน", "ใช้ไม่ได้", "ไม่ติด", "ค้าง",
+    "เสีย", "พัง", "เสียงไม่", "จอไม่", "เปิดไม่", "ปิดเอง", "ดับ",
+    "หมดเร็ว", "ลดไว", "ลดเร็ว", "ไม่ขึ้น", "ไม่ได้",
+)
+
+
+_QA_DOCS_TTL = 300.0   # วินาที — kb_qa สดภายใน 5 นาทีโดยไม่ต้อง restart
+_qa_docs_ts: float = 0.0
+_qa_lock = threading.Lock()   # chat() เป็น sync def → รันใน threadpool — กัน refresh ซ้อน
+
+
+def _qa_docs() -> list[dict]:
+    """kb_qa docs ทั้งหมด — TTL cache 5 นาที; refresh fail → ใช้ของเก่าต่อ (ไม่พัง)."""
+    global _qa_docs_cache, _qa_docs_ts
+    if _qa_docs_cache is not None and time.time() - _qa_docs_ts < _QA_DOCS_TTL:
+        return _qa_docs_cache
+    with _qa_lock:
+        if _qa_docs_cache is not None and time.time() - _qa_docs_ts < _QA_DOCS_TTL:
+            return _qa_docs_cache
+        try:
+            docs = list(_kb_qa_coll().find(
+                {"type": "qa", "active": {"$ne": False}},
+                {"q": 1, "a": 1, "topic": 1, "model_codes": 1, "item_ids": 1}))
+        except Exception:
+            return _qa_docs_cache or []
+        _qa_docs_cache = docs
+        _qa_docs_ts = time.time()
+        _qa_embed_missing(docs)   # doc ใหม่ embed เพิ่มทันที (local — ฟรี)
+        return docs
+
+
+_qa_vec_mtime: float = -1.0   # mtime ของ npz ที่โหลดไว้ — ไฟล์เปลี่ยน → auto-reload
+
+
+def _qa_vectors() -> dict | None:
+    """lazy load qa_embeddings.npz → {ids, emb} — auto-reload เมื่อไฟล์เปลี่ยน (mtime).
+
+    stat ก่อน load เสมอ (build replace ระหว่าง load → reload ซ้ำรอบหน้า).
+    หลัง reload npz ใหม่ → re-embed doc ที่เคย lazy-embed ไว้ (ยังไม่อยู่ใน npz).
+    ไฟล์หาย/load fail → ใช้ cache เก่าต่อ (substring fallback เหมือนเดิม).
+    """
+    global _qa_vec_cache, _qa_vec_mtime
+    try:
+        mtime = _QA_VEC_PATH.stat().st_mtime
+    except OSError:
+        return _qa_vec_cache or None
+    if _qa_vec_cache is not None and mtime == _qa_vec_mtime:
+        return _qa_vec_cache or None
+    try:
+        import numpy as np
+        z = np.load(_QA_VEC_PATH, allow_pickle=True)
+        _qa_vec_cache = {"ids": z["qa_ids"], "emb": z["embeddings"]}
+        _qa_vec_mtime = mtime
+        if _qa_docs_cache:
+            _qa_embed_missing(_qa_docs_cache)  # doc ที่ lazy-embed ไว้ → embed ซ้ำบน npz ใหม่
+    except Exception:
+        if _qa_vec_cache is None:
+            _qa_vec_cache = {}
+        _qa_vec_mtime = mtime
+    return _qa_vec_cache or None
+
+
+def _qa_embed_missing(docs: list[dict]) -> None:
+    """embed doc ที่ยังไม่มีใน vec cache แล้ว append — ทำให้ kb_qa ใหม่ searchable ทันที
+    โดยไม่ต้อง rebuild npz (npz ยังเป็น base ตอน cold start / rebuild ราตรี)."""
+    global _qa_vec_cache
+    try:
+        import numpy as np
+        from . import embedding as _emb
+        qv = _qa_vectors() or {"ids": np.array([], dtype=object), "emb": np.zeros((0, 1024))}
+        have = {str(i) for i in qv["ids"]}
+        missing = [d for d in docs if str(d["_id"]) not in have]
+        if not missing:
+            return
+        texts = [f"{d.get('topic') or ''} | {d.get('q') or ''}".strip(" |") for d in missing]
+        new_emb = _emb.embed_texts(texts)          # normalized — space เดียวกับ npz
+        new_ids = np.array([str(d["_id"]) for d in missing], dtype=object)
+        _qa_vec_cache = {
+            "ids": np.concatenate([np.asarray(qv["ids"], dtype=object), new_ids]),
+            "emb": np.vstack([qv["emb"], new_emb]),
+        }
+    except Exception as exc:
+        print(f"[QA] lazy-embed error: {exc}", file=sys.stderr)
+
+
+def search_qa(message: str, *, model_codes: set[str] | None = None,
+              anchor_item_id: str | None = None,
+              known_brand: str | None = None, limit: int = 3) -> list[dict]:
+    """ค้น kb_qa — hybrid: embedding sim + substring + model/item anchor boost.
+
+    Model rules (กันคำแนะนำข้ามรุ่น):
+    - doc ที่มี model_codes แต่ไม่ intersect known_codes → exclude เมื่อรู้รุ่น
+    - doc ไม่มี model_codes → topic-level ใช้ได้ทุกรุ่น (level='generic')
+
+    คืน docs + _qa_score + _qa_level ('model'|'item'|'generic').
+    """
+    docs = _qa_docs()
+    if not docs:
+        return []
+
+    sim_of: dict[str, float] = {}
+    qv = _qa_vectors()
+    if qv is not None:
+        try:
+            from . import embedding as _emb
+            q = _emb.embed_query(message)
+            sims = qv["emb"] @ q
+            sim_of = {str(qv["ids"][i]): float(sims[i]) for i in range(len(sims))}
+        except Exception as exc:
+            print(f"[QA] embed error: {exc}", file=sys.stderr)
+
+    known = {str(c).upper() for c in (model_codes or set())}
+    msg_low = message.lower()
+    out: list[dict] = []
+    for d in docs:
+        did = str(d["_id"])
+        raw_sim = sim_of.get(did, 0.0)
+        score = raw_sim
+        dcodes = {str(c).upper() for c in (d.get("model_codes") or [])}
+        # fallback: model_codes ว่างแต่ topic มีรหัสรุ่น ("CUKTECH KLC-5497")
+        # → ถือเป็น model-scoped ด้วย ไม่งั้นหลุด cross-model guard
+        if not dcodes:
+            topic = d.get("topic") or ""
+            dcodes = {t.upper() for t in re.findall(r"[A-Za-z]+[-_]?[A-Za-z0-9]*\d[A-Za-z0-9]*", topic)}
+        diids = {str(i) for i in (d.get("item_ids") or [])}
+
+        # substring bonus — q ปรากฏตรงๆ ใน message (เช่น phrase เดียวกันเป๊ะ)
+        qtext = (d.get("q") or "").strip()
+        if qtext and len(qtext) >= 8 and qtext.lower() in msg_low:
+            score += 0.4
+
+        level = "generic"
+        if known and dcodes:
+            if dcodes & known:
+                score += 0.5
+                level = "model"
+            else:
+                continue  # คำแนะนำผูกรุ่นอื่น — ห้ามใช้ กันข้ามรุ่น
+        elif known_brand:
+            # generic doc แต่ topic เป็นแบรนด์อื่น → ข้าม (คำแนะนำแบรนด์อื่นไม่ใช่ generic จริง)
+            topic_low = (d.get("topic") or "").lower()
+            topic_brand = next((b for b in _known_brands() if topic_low.startswith(b)), None)
+            if topic_brand and topic_brand != known_brand.lower():
+                continue
+            if topic_brand:
+                # topic brand ตรงกับแบรนด์ที่คุยอยู่ → คำแนะนำเฉพาะแบรนด์ (เช่น Kieslect แบตหมดเร็ว)
+                level = "brand"
+                score += 0.2
+        if anchor_item_id and str(anchor_item_id) in diids:
+            score += 0.4
+            level = "item"
+
+        if score >= _QA_MIN_SCORE:
+            d["_qa_score"] = score
+            d["_qa_sim"] = raw_sim
+            d["_qa_level"] = level
+            out.append(d)
+    out.sort(key=lambda x: -x["_qa_score"])
+    return out[:limit]
+
+
+def qa_context(message: str, *, conversation_id=None, claim: bool = False) -> str:
+    """context block '=== คำแนะนำจากฐานความรู้ (QA) ===' หรือ '' — entry ที่ app.py เรียก.
+
+    ทำงานเฉพาะเมื่อ claim=True หรือ message มี trigger kw (ปัญหา/how-to)
+    model anchor: codes จาก route + active card ใน conversation timeline
+    """
+    if os.environ.get("USE_QA_KB", "1").strip() == "0":
+        return ""
+    low = message.lower()
+    if not claim and not any(k in low for k in _QA_TRIGGER_KWS):
+        return ""
+    try:
+        from . import route_context as _rc
+        codes = set(_rc.resolve_route(message).model_codes)
+    except Exception:
+        codes = set()
+    anchor_iid = None
+    if conversation_id:
+        try:
+            from . import conversation_products as _cp
+            card = _cp.get_active_product(conversation_id)
+            if card:
+                anchor_iid = card.get("item_id")
+                for c in (card.get("model_codes") or []):
+                    codes.add(str(c).upper())
+        except Exception:
+            pass
+    # หา brand ของสินค้าที่กำลังคุย (สำหรับ scope generic QA ให้ตรงแบรนด์)
+    known_brand = None
+    if codes:
+        try:
+            from . import units as _units_mod
+            doc = _units_mod._units_coll().find_one(
+                {"model_codes": {"$in": list(codes)}}, {"brand": 1})
+            b = (doc or {}).get("brand")
+            known_brand = (b.get("original_brand_name") if isinstance(b, dict) else str(b or "")) or None
+        except Exception:
+            pass
+    if not known_brand:
+        known_brand = next((b for b in _known_brands() if b in low), None)
+    hits = search_qa(message, model_codes=codes, anchor_item_id=anchor_iid,
+                     known_brand=known_brand)
+    if not hits:
+        return ""
+    print(f"[QA] hits={len(hits)} levels={[h['_qa_level'] for h in hits]} "
+          f"top={hits[0].get('q','')[:40]!r}", file=sys.stderr)
+    lines = ["=== คำแนะนำจากฐานความรู้ (QA) ==="]
+    for h in hits:
+        tag = {"model": f"เฉพาะรุ่น {','.join(h.get('model_codes') or [])}",
+               "item": "เฉพาะสินค้าที่ลูกค้าสนใจ",
+               "brand": f"เฉพาะแบรนด์ {(h.get('topic') or '').split()[0]}",
+               "generic": "คำแนะนำทั่วไป (ไม่เจาะรุ่น)"}[h["_qa_level"]]
+        lines.append(f"[{tag}] ถาม: {h.get('q')}\nตอบ: {h.get('a')}")
+    return "\n\n".join(lines)
+
+
+def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
+                         min_sim: float = 0.5, min_answer_len: int = 30,
+                         limit: int = 2) -> list[str]:
+    """คืน list คำแนะนำแก้ปัญหาเบื้องต้น (field `a`) สำหรับ troubleshoot-first claim flow.
+
+    Gate 3 ชั้น (กัน tips ไม่เกี่ยว):
+    - level ∈ {model, item, brand} — ต้องรู้รุ่น/สินค้า/แบรนด์ที่คุยอยู่
+      (claim เฉยๆ ไม่มี context → ไม่แนะนำ)
+    - _qa_sim ≥ min_sim — คำถามใน KB ต้องเกี่ยวกับอาการจริง (กัน "ชาร์จไม่เข้า" ได้ tip เรื่องกลับจอ)
+    - len(a) ≥ min_answer_len — คำตอบต้องมีสาระ (กัน a="ทำไม่ได้" หลุด)
+    """
+    if os.environ.get("USE_QA_KB", "1").strip() == "0":
+        return []
+    try:
+        from . import route_context as _rc
+        codes = set(_rc.resolve_route(message).model_codes)
+    except Exception:
+        codes = set()
+    anchor_iid = item_id
+    if conversation_id:
+        try:
+            from . import conversation_products as _cp
+            card = _cp.get_active_product(conversation_id)
+            if card:
+                anchor_iid = anchor_iid or card.get("item_id")
+                for c in (card.get("model_codes") or []):
+                    codes.add(str(c).upper())
+        except Exception:
+            pass
+    # brand ของ context — เหมือน qa_context (units → คำใน message)
+    known_brand = None
+    if codes:
+        try:
+            from . import units as _units_mod
+            doc = _units_mod._units_coll().find_one(
+                {"model_codes": {"$in": list(codes)}}, {"brand": 1})
+            b = (doc or {}).get("brand")
+            known_brand = (b.get("original_brand_name") if isinstance(b, dict) else str(b or "")) or None
+        except Exception:
+            pass
+    if not known_brand:
+        low = message.lower()
+        known_brand = next((b for b in _known_brands() if b in low), None)
+    hits = search_qa(message, model_codes=codes, anchor_item_id=anchor_iid,
+                     known_brand=known_brand)
+    return [(h.get("a") or "").strip() for h in hits
+            if h.get("_qa_level") in ("model", "item", "brand")
+            and h.get("_qa_sim", 0.0) >= min_sim
+            and len((h.get("a") or "").strip()) >= min_answer_len][:limit]
 
 
 def _kb_doc_to_card(doc: dict) -> dict:

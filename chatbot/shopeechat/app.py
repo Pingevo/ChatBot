@@ -4272,6 +4272,11 @@ def chat(req: ChatRequest) -> ChatResponse:
             products.extend(_device_additional)
         if _device_spec_extra:
             _combined_extra = (_combined_extra + _device_spec_extra).strip()
+        # ⚡ QA-KB — คำแนะนำจาก kb_qa (trigger kw เท่านั้น; model/brand scoped ใน search_qa)
+        _qa_ctx = knowledge_base.qa_context(
+            req.message, conversation_id=req.conversation_id)
+        if _qa_ctx:
+            _combined_extra = (_combined_extra + "\n\n" + _qa_ctx).strip()
         # ⚡ CODE-level compat filter — กรองสินค้าที่ connector ไม่ตรงกับอุปกรณ์ออก
         #    ก่อน tier merge เพื่อให้ LLM เห็นเฉพาะสินค้าที่ compat จริง
         #    ถ้ากรองแล้วว่าง/เหลือน้อย → fallback คืนทั้งหมด (ปลอดภัย ไม่ over-filter)

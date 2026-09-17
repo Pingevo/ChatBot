@@ -8301,3 +8301,119 @@ Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ต�
 - `to_unit_card` price เป็น float → `_dedupe_sell_score` คาด `{min,max}` → 500 → แก้ price_range shape
 
 **ผล:** unit path engage จริง (hits=30), code-match HA835 ตอบ "หมดสต็อก" ตรง truth, non-charger ยัง legacy, 0 traceback
+
+### prod :8010 พัง 500 ทุก /chat — root cause + fix (2026-09-16 ~15:00)
+
+**อาการ:** /chat → 500 ทุก call แม้แต่ greeting; /root + /feedback → 200
+
+**root cause:** process เก่า (pid 73442, start เมื่อวาน ไม่มี --reload) stdout/stderr ชี้ไป pipe ที่ปลายอ่านตายแล้ว (parent shell ออก) → `print(..., file=sys.stderr)` ใน chat() → BrokenPipeError → 500. /feedback รอดเพราะ print ไป stdout ซึ่ง block-buffered (เขียนลง memory ไม่ syscall) — stderr unbuffered → พังทันที. **ไม่เกี่ยวกับโค้ดใหม่** — environment เสื่อม
+
+**วิธีแก้:** kill 73442 → start ใหม่ด้วย `USE_UNIT_INDEX=charger nohup uvicorn ... > exports/uvicorn_8010.log 2>&1` — redirect ไฟล์จริงแบบ image batch → จบปัญหาถาวร + มี traceback ดูได้คราวหน้า
+
+**verify หลัง restart (shop จริง — 'cuktech' ไม่ใช่ shopname จริง ต้อง 'CukTechThailand'/'ZMIThailand'):**
+- greeting/car-charger/HA835 → 200 ทั้งหมด; [UNITS] hits=30 (11 code-match)
+- HA835+ZMIThailand → "หมดสต็อก/ปิดการขาย" ตรง unit truth (sellable=0 ทุก shop)
+- หมอนรองหลัง+ZMIThailand → ตอบตรงว่าร้านไม่มี ไม่หลอก
+- order_sn fake → "ไม่พบคำสั่งซื้อ" ถูกต้อง
+- image batch (pid 96547) ไม่กระทบ — process แยก, log ไฟล์จริง, เดินหน้าต่อ
+
+**บทเรียน:** test payload ต้องใช้ shopname จริงจาก ShpProducts (`shopname` field: CukTechThailand, ZMIThailand, Ztec, ThaiSuperPhone, ...) — 'cuktech' lowercase ไม่ match → "ไม่พบข้อมูล" ถูกต้องตามระบบ
+
+---
+
+## กำลังจะทำ (2026-09-16 ~17:00): KB QA wiring + warranty per-product — ✅ เสร็จ
+
+**ปัญหา:** runtime อ่าน collection `knowledge_base` เก่า (qa=1 doc) ทั้งที่ `kb_qa` มี troubleshooting 392 docs แต่ไม่มีใคร query → "นาฬิกาแบตลดไวครับ" ไม่ hit KB เลย
+
+**Baseline (8015, shop=KieslectThailand):** → `source=warranty_claim_first_message` ขอข้อมูลเคลม+handoff ทันที ไม่มีคำแนะนำเบื้องต้น — claim path เป็น deterministic ไม่ผ่าน LLM (warranty_flow.py ~1754)
+
+**แผน:** `docs/superpowers/plans/2026-09-16-kb-qa-wiring.md` — ทำครบทุก task
+
+**ทำแล้ว:**
+- repoint: `_search_kb_single`→`kb_products` (specs อ่าน `canonical_specs`/`specs_raw`), `get_general_faq`→`kb_qa` (normalize `a`→`answer`, fallback legacy 982 chars OK)
+- `build_embeddings --qa` → `exports/qa_embeddings.npz` (392 vecs, 1.4MB)
+- `search_qa` + `qa_context` ใน knowledge_base.py: sim + model_codes/item_id boost; **cross-model guard** (doc ผูกรุ่นอื่น exclude — รวม derive scope จาก `topic` เช่น "CUKTECH KLC-5497" ที่ model_codes ว่าง); **brand scope** (generic doc แบรนด์อื่นข้าม — fix multi-word brand ด้วย startswith)
+- wire: `app.py` _combined_extra += qa_context (ก่อน llm.answer, 8 บรรทัด); `warranty_flow` claim-first prepend tips
+- `units._unit_warranty` + `to_unit_card.warranty` = extract_warranty_from_name (แก้ regression warranty=None)
+- `attach_image_texts`: banner ที่มี ประกัน/เคลม/warranty → `warranty_text` (≤1500, per-listing) append ท้าย description_excerpt
+
+**bug ที่ live test จับ (unit test ไม่เห็น):**
+- claim tips ดึง `a` ดิบ → คำตอบสั้น "ทำไม่ได้" + tip ไม่เกี่ยว ("ตรวจสอบราคาหน้าร้าน") หลุดเข้าข้อความขอข้อมูลเคลม → gate 3 ชั้น: level∈{model,item,brand} + `_qa_sim`≥0.5 (raw sim ก่อน boost — กันคำถามไม่เกี่ยวกับอาการ) + len(a)≥30
+- brand scope first-token "black" ไม่เท่า "black shark" → ใช้ topic.startswith(brand) แทน
+- เพิ่ม level "brand" (topic brand == แบรนด์ที่คุยอยู่) — troubleshooting QA ส่วนใหญ่ brand-scoped ไม่ใช่ model-scoped
+
+**troubleshoot-first flow (ตามที่ user ต้องการ — แนะนำวิธีแก้ก่อน เคลมทีหลัง):**
+- claim request + tips ผ่าน gate → ตอบวิธีแก้เท่านั้น `source=warranty_troubleshoot` ไม่ handoff ไม่ขอข้อมูล; save `claim_state.stage="ts_suggested"`
+- ลูกค้าตอบ "ไม่หาย/ไม่ได้/เหมือนเดิม/ลองแล้ว" (หรือ claim ใหม่) → claim info + handoff (state machine ดักจาก claim_state หรือ marker "ลองทำตามนี้ก่อน" ใน last model msg)
+- ลูกค้าตอบ "หายแล้ว/ได้แล้ว" → ปิดเคสสุภาพ stage=resolved ไม่ handoff
+- bare claim ไม่มี context → claim info ตรงเหมือนเดิม (ไม่มี product จะแนะนำอะไรก็เสี่ยง)
+
+**verify troubleshoot-first (8015):**
+- "Kieslect นาฬิกาแบตเสื่อม เคลมได้ไหมครับ" → tips จริง (ปิด AOD ประหยัดแบต 30-50%) handoff=False
+- "ลองแล้วไม่หายครับ" (history มี marker) → claim info + handoff=True
+- "สินค้าเสียครับอยากเคลม" → claim info สะอาด ไม่มี tips มั่ว
+
+**verify:**
+- `test_qa_kb.py` 26/26: repoint, canonical_specs ctx, general_faq, model match, cross-model guard, brand scope, warranty parse +/−, unit card warranty, banner join, missing-banner fallback
+- smoke 8015: "นาฬิกาแบตลดไวครับ" → ตอบวิธีแก้เบื้องต้นจริง (เดิมขอเคลมทันที); "LPB200NL ใช้กับ S26 ได้ไหม" → ตอบ compat ถูกจาก spec; "IMILAB EC5 ประกันกี่ปี" → "2 ปี" จาก KB; "KS3 หน้าจอดำครับ เคลมได้ไหม" → claim msg สะอาด ไม่มี tips มั่ว
+
+**Rollback:** USE_QA_KB=0 ปิด QA / collection เก่าไม่แตะ / warranty parse เป็น additive (None → ช่องว่างเหมือนเดิม)
+
+---
+
+## 2026-09-16 (ต่อ) — `_KNOWN_BRAND_SET` → auto-derive จาก DB
+
+**ทำแล้ว:**
+- เพิ่ม `_known_brands()` ใน knowledge_base.py — `_KNOWN_BRAND_SET` baseline ∪ `distinct("brand")` จาก `kb_products` + `sellable_units.brand.original_brand_name`; cache ครั้งเดียว; DB ล่ม → baseline (fail-open)
+- เพิ่ม `_norm_brand()` — ตัดวงเล็บ `(ไทย)`/lower/กรอง `_BRAND_JUNK`+สั้น<3 — DB สกปรกจริง: `'Kieslect '` trailing space, `'cuktech (ชุกเทค)'`, `'nobrand'`, `'tws(ทีดับบลิวเอส)'`, `'meet(มีท)'`
+- แทน 3 จุดที่ใช้ `_KNOWN_BRAND_SET` (search_qa topic scope, qa_context, qa_troubleshoot_tips)
+
+**ผล:** 182 แบรนด์ (hardcode 33 + DB เพิ่ม 149 — amazfit, baseus, dji, dreame, huawei...) — แบรนด์ใหม่เข้าร้านได้ scope protection ทันที
+
+**ข้อจำกัดที่ยอมรับ:** `_BRAND_JUNK` ยังเป็น denylist manual — junk ใหม่ใน DB อาจหลุดได้ แต่ผลกระทบแค่ over-scope (ขาด context) ไม่ใช่ตอบผิด
+
+**verify:** test_qa_kb 28/28; must-have brands assert ผ่าน; compile OK
+
+---
+
+## 2026-09-16 (ต่อ) — kb_qa near-real-time (TTL + lazy-embed)
+
+**ทำไม:** admin เพิ่ม/แก้ kb_qa แล้วอยากเห็นผลโดยไม่ต้อง restart หรือรอ rebuild npz
+
+**ทำแล้ว:**
+- `_qa_docs` — TTL cache 5 นาที + `threading.Lock` (chat() เป็น sync def → threadpool จริง ต้องกัน refresh ซ้อน) + refresh fail → ใช้ของเก่า (ไม่ assign ทับ)
+- `_qa_embed_missing` — doc ใหม่ที่ไม่มี vector → `embed_texts` (local ฟรี) append เข้า vec cache; key `_id` → ไม่มี realignment; fail → log เฉยๆ doc ยังหาเจอด้วย substring
+- `_known_brands` — TTL 5 นาที pattern เดียวกัน; cold-start DB ล่ม → baseline set
+
+**วิเคราะห์ความเสี่ยงก่อนทำ (verify ในโค้ดจริง):**
+- vectors key ด้วย `_id` string → doc ใหม่ default sim=0.0 — append ปลอดภัย ไม่มีทางสลับแถว
+- doc ถูกลบ → vector เก่าค้างแต่ไม่ถูกอ่าน (ไม่มี doc) — ปลอดภัย
+- worst case npz หาย → embed ~400 docs ครั้งเดียว ~2-5s ใน request — ยอมรับได้
+- Mongo สะดุดตอน refresh → stale cache ทำงานต่อ ไม่พัง
+
+**verify:**
+- docs 392 → fake doc ใหม่ → lazy-embed ได้ vector ทันที sim 0.819 กับ query ใกล้เคียง
+- brands 182 + TTL ts set; test_qa_kb 28/28; compile OK
+
+**ผล:** kb_qa เปลี่ยน → สดภายใน 5 นาที ไม่ต้อง restart; npz ยังเป็น base cold-start + rebuild ราตรี (canonical)
+
+---
+
+## 2026-09-16 (ต่อ) — npz auto-reload (mtime) ทั้ง 3 loaders — ไม่ต้อง restart อีกต่อไป
+
+**ทำแล้ว:**
+- `build_embeddings.py` — เขียน `.tmp.npz` + `os.replace` (atomic — reader เห็นไฟล์เก่า/ใหม่เต็มก้อนเสมอ) ทั้ง products + units npz
+- `product_store._load_vector_store` / `units._unit_vectors` / `knowledge_base._qa_vectors` — stat mtime ทุก call (~0.001ms), เปลี่ยน → reload ใหม่เอง
+- กัน edge cases: stat ก่อน load (build replace ระหว่าง load → self-healing รอบหน้า), fail/ไฟล์หาย → ใช้ cache เก่า, QA reload npz → `_qa_embed_missing` re-embed doc ที่เคย lazy-embed
+
+**verify จริง:** touch npz → 3 loaders reload ทันที (qa 392 / units 26970 / products 11503); mtime เดิม → cache hit; test_qa_kb 28/28 + test_units ผ่าน
+
+**ผล:** pipeline รันเสร็จ → bot เห็นข้อมูลใหม่ใน request ถัดไป — restart/reload endpoint ไม่จำเป็นแล้ว; cron เหลือแค่ trigger build
+
+---
+
+## 2026-09-16 (ต่อ) — refresh_data.sh (nightly pipeline trigger)
+
+**ทำแล้ว:** `chatbot/shopeechat/scripts/refresh_data.sh` — export → product emb → build+import units → unit emb → qa emb → image OCR (incremental) → import image_texts; lock ด้วย `mkdir` (macOS ไม่มี flock); export fail → abort; อื่น fail → log แล้วต่อ; **ไม่มี restart** — npz mtime reload + Mongo สดเอาเอง; cron `0 3 * * *`; เพิ่มส่วน "Data refresh" ใน DEPLOY.md
+
+**verify:** bash -n ผ่าน; lock acquire/release/double-run-block ผ่าน

@@ -33,6 +33,7 @@ _SUBTYPE_TO_TYPES = {
 
 _units_coll_cached: Any = None
 _unit_vec: dict | None = None
+_unit_vec_mtime: float = -1.0   # mtime ของ npz ที่โหลดไว้ — ไฟล์เปลี่ยน → auto-reload
 
 
 def _units_coll():
@@ -46,15 +47,27 @@ def _units_coll():
 
 
 def _unit_vectors() -> dict | None:
-    """lazy load unit_embeddings.npz → {unit_ids, emb, shops}."""
-    global _unit_vec
-    if _unit_vec is None:
-        try:
-            z = np.load(_UNIT_VEC_PATH, allow_pickle=True)
-            _unit_vec = {"unit_ids": z["unit_ids"], "emb": z["embeddings"],
-                         "shops": z["shops"]}
-        except Exception:
+    """lazy load unit_embeddings.npz → {unit_ids, emb, shops}.
+
+    Auto-reload เมื่อไฟล์เปลี่ยน (stat ก่อน load — build replace ระหว่าง load
+    → mtime เก่ากว่าจริง → request ถัดไป reload ซ้ำ self-healing).
+    ไฟล์หาย/load fail → ใช้ cache เก่าต่อ.
+    """
+    global _unit_vec, _unit_vec_mtime
+    try:
+        mtime = _UNIT_VEC_PATH.stat().st_mtime
+    except OSError:
+        return _unit_vec or None
+    if _unit_vec is not None and mtime == _unit_vec_mtime:
+        return _unit_vec or None
+    try:
+        z = np.load(_UNIT_VEC_PATH, allow_pickle=True)
+        _unit_vec = {"unit_ids": z["unit_ids"], "emb": z["embeddings"],
+                     "shops": z["shops"]}
+    except Exception:
+        if _unit_vec is None:
             _unit_vec = {}
+    _unit_vec_mtime = mtime
     return _unit_vec or None
 
 
@@ -193,7 +206,7 @@ def to_unit_card(unit: dict, route=None) -> dict:
         "status": unit.get("item_status"),
         "condition": None,
         "price": price_range,
-        "warranty": None,  # warranty text อยู่ใน desc_sections → description_excerpt
+        "warranty": _unit_warranty(unit),  # ระยะประกันจากชื่อ (shape เดียวกับ _warranty_info)
         "short_link": None,
         "image_url": None,
         "weight": None,
@@ -203,8 +216,13 @@ def to_unit_card(unit: dict, route=None) -> dict:
         "_available_for_sale": unit.get("item_status") == "NORMAL",
         "has_promotion": False,
         "is_flash_sale": False,
-        "description_excerpt": pick_desc_sections(unit, route) or (unit.get("image_text") or "")[:3000],
+        "description_excerpt": (
+            (pick_desc_sections(unit, route) or (unit.get("image_text") or "")[:3000])
+            + (f"\n\nเงื่อนไขการรับประกัน (จากรูปสินค้า): {unit['warranty_text']}"
+               if unit.get("warranty_text") else "")
+        ),
         "image_text": unit.get("image_text"),
+        "warranty_text": unit.get("warranty_text"),
         "raw_description": "\n\n".join(
             v for v in (unit.get("desc_sections") or {}).values() if v)[:4000],
         "variants": [{
@@ -261,24 +279,55 @@ def attach_kb_specs(unit_docs: list[dict]) -> list[dict]:
     return unit_docs
 
 
+def _unit_warranty(unit: dict) -> dict | None:
+    """ระยะประกันจาก item_name (1Y/2Y/-6M/ประกันศูนย์ไทย) — ใช้ parser เดียวกับ legacy path."""
+    try:
+        from . import warranty as _w
+        w = _w.extract_warranty_from_name(unit.get("item_name") or "")
+    except Exception:
+        return None
+    if not w:
+        return None
+    return {"duration": w["text"], "duration_months": str(w["months"]),
+            "duration_source": "item_name"}
+
+
+_WARRANTY_IMG_KWS = ("ประกัน", "รับประกัน", "เคลม", "warranty", "สินค้ามีปัญหา")
+
+
 def attach_image_texts(unit_docs: list[dict]) -> list[dict]:
     """join image_texts (OCR รูป spec/desc) เข้า unit ผ่าน image_ids — additive.
 
-    image_text = text ของรูป kind=spec|product (banner เป็น marketing ไม่เอา)
-    ใช้เป็น fallback เมื่อ desc ว่าง + เสริม spec ที่มีแต่ในรูป
+    image_text = text ของรูป kind=spec|product
+    warranty_text = text ของรูป kind=banner ที่มีคำเกี่ยวกับประกัน
+    (เงื่อนไขประกันเป็น per-listing — ร้านเดียวกันอาจให้ต่างกันตามสินค้า)
     """
     iids = sorted({i for u in unit_docs for i in (u.get("image_ids") or [])})
     if not iids:
         return unit_docs
     try:
         coll = _units_coll().database["image_texts"]
-        text_of = {d["image_id"]: d.get("text") for d in coll.find(
-            {"image_id": {"$in": iids}, "kind": {"$in": ["spec", "product"]}},
-            {"image_id": 1, "text": 1})}
+        text_of: dict[str, str] = {}
+        warranty_of: dict[str, str] = {}
+        for d in coll.find(
+                {"image_id": {"$in": iids},
+                 "kind": {"$in": ["spec", "product", "banner"]}},
+                {"image_id": 1, "text": 1, "kind": 1}):
+            t = d.get("text") or ""
+            if not t:
+                continue
+            if d.get("kind") == "banner":
+                if any(k in t for k in _WARRANTY_IMG_KWS):
+                    warranty_of[d["image_id"]] = t
+            else:
+                text_of[d["image_id"]] = t
         for u in unit_docs:
             parts = [text_of[i] for i in (u.get("image_ids") or []) if text_of.get(i)]
             if parts:
                 u["image_text"] = "\n".join(dict.fromkeys(parts))[:2500]
+            wparts = [warranty_of[i] for i in (u.get("image_ids") or []) if warranty_of.get(i)]
+            if wparts:
+                u["warranty_text"] = "\n".join(dict.fromkeys(wparts))[:1500]
     except Exception as exc:
         print(f"[UNITS] image_text join error: {exc}", file=sys.stderr)
     return unit_docs

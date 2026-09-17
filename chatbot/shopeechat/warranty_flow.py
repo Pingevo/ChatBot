@@ -894,6 +894,47 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
         #   ถ้าจำกัด 10 คู่ → อาจตัดข้อมูลสำคัญออก → extract_customer_info จะไม่เจอ
         _all_history_text = " ".join(h.get("text", "") for h in history)
 
+        # ⚡ Troubleshoot-first follow-up — รอบก่อนบอทแนะนำวิธีแก้ (stage=ts_suggested
+        #   หรือ last model msg มี marker) → ลูกค้ารายงานผล
+        _ts_suggested = (
+            _claim_state.get("stage") == "ts_suggested"
+            or "ลองทำตามนี้ก่อน" in _last_model_text
+        )
+        if _ts_suggested and not _warranty_claim_answer:
+            _ts_low = req.message.lower()
+            _ts_success = any(k in _ts_low for k in (
+                "หายแล้ว", "ได้แล้ว", "เรียบร้อย", "ใช้ได้แล้ว", "หายไปแล้ว",
+                "โอเคแล้ว", "ok แล้ว", "เวิร์คแล้ว", "work แล้ว"))
+            _ts_failed = any(k in _ts_low for k in (
+                "ไม่หาย", "ไม่ได้", "เหมือนเดิม", "ยังเป็น", "ไม่เวิร์ค",
+                "ไม่work", "ไม่สำเร็จ", "ลองแล้ว", "ทำแล้ว", "ไม่เปลี่ยน",
+                "ไม่ดีขึ้น"))
+            if _ts_success:
+                _warranty_claim_answer = (
+                    f"ดีใจด้วยนะคะที่แก้ไขได้ ถ้ามีปัญหาอีกแจ้ง{_bot_name}ได้ตลอดเลยค่ะ")
+                if req.conversation_id:
+                    try:
+                        from . import conversation_products as _cp_ts2
+                        _cp_ts2.update_claim_state(
+                            req.conversation_id, req.platform, req.shop,
+                            {"stage": "resolved"})
+                    except Exception:
+                        pass
+                print("[TS-FOLLOWUP] ลูกค้าแจ้งแก้ไขได้ → ปิดเคส ไม่ handoff", file=sys.stderr)
+            elif _ts_failed or _is_claim_request:
+                _warranty_claim_answer = (
+                    f"รับทราบค่ะ งั้นเดี๋ยว{_bot_name}ช่วยดำเนินการเรื่องเคลม/รับประกันให้นะคะ\n"
+                    f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
+                    f"• วันที่ซื้อสินค้า\n"
+                    f"• เลขที่คำสั่งซื้อ\n"
+                    f"• รูปหรือวิดีโอแสดงอาการ/ความเสียหาย\n\n"
+                    f"เงื่อนไขการรับประกันเบื้องต้น: สินค้าต้องอยู่ในช่วงรับประกัน "
+                    f"และไม่ใช่ความเสียหายจากการใช้งานผิดวิธี น้ำเข้า หรือตกกระแทก "
+                    f"(ขึ้นกับเงื่อนไขเฉพาะรุ่น) หากข้อมูลครบ {_bot_name} จะตรวจสอบและประสานงานต่อให้ค่ะ")
+                _warranty_claim_handoff = True
+                _warranty_claim_ctx = {"handoff_reason": "warranty_claim"}
+                print("[TS-FOLLOWUP] วิธีแก้ไม่ได้ผล → claim info + handoff", file=sys.stderr)
+
         # ⚡ Phase 1F — Review request: ลูกค้าขอทวนข้อมูลที่ให้ไป
         #   ต้องเช็คก่อน State 3/6 เพราะ "ทวนข้อมูลที่ผมให้ไปหน่อย" อาจถูก extract_customer_info
         #   ตีความเป็นชื่อได้ → ตกเข้า State 6 ผิด
@@ -1763,6 +1804,50 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             f"และไม่ใช่ความเสียหายจากการใช้งานผิดวิธี น้ำเข้า หรือตกกระแทก "
             f"(ขึ้นกับเงื่อนไขเฉพาะรุ่น) หากข้อมูลครบ {_bot_name} จะตรวจสอบและประสานงานต่อให้ค่ะ"
         )
+        # ⚡ QA-KB troubleshoot-first — ถ้ามีวิธีแก้เบื้องต้นที่ตรงรุ่น/สินค้า
+        #    → แนะนำก่อน ยังไม่ขอข้อมูลเคลม/ไม่ handoff
+        #    ลูกค้าตอบ "ไม่หาย/ไม่ได้" → state machine (ts_suggested) เข้า claim info
+        try:
+            from . import knowledge_base as _kbmod
+            _tips = _kbmod.qa_troubleshoot_tips(
+                req.message, conversation_id=req.conversation_id,
+                item_id=req.item_id)
+            if _tips:
+                _ts_lines = "\n".join(f"• {t}" for t in _tips)
+                _ts_answer = (
+                    f"เบื้องต้นลองทำตามนี้ก่อนนะคะ:\n{_ts_lines}\n\n"
+                    f"ถ้าลองแล้วยังไม่หาย แจ้ง{_bot_name}ได้เลยค่ะ "
+                    f"เดี๋ยวช่วยตรวจสอบเรื่องเคลม/รับประกันให้นะคะ")
+                if req.conversation_id:
+                    try:
+                        from . import conversation_products as _cp_ts
+                        _cp_ts.update_claim_state(
+                            req.conversation_id, req.platform, req.shop,
+                            {"stage": "ts_suggested"})
+                    except Exception:
+                        pass
+                print("[QA-KB] troubleshoot-first: แนะนำวิธีแก้ ยังไม่ handoff", file=sys.stderr)
+                _total_elapsed = _time.time() - _total_start
+                return dict(
+                    answer=_ts_answer,
+                    answer_segments=llm.split_segments(_ts_answer),
+                    products=[],
+                    shop=req.shop,
+                    model=model_name,
+                    source="warranty_troubleshoot",
+                    usage={},
+                    elapsed=round(_total_elapsed, 2),
+                    cost=0.0,
+                    timing=_timing_breakdown,
+                    steps=_steps,
+                    routing_decision=_app_module._routing(
+                        "bot_reply",
+                        "warranty_claim: troubleshoot-first (QA tips) — ยังไม่ handoff",
+                    ),
+                    image_desc=_image_desc_out,
+                )
+        except Exception as _qa_exc:
+            print(f"[QA-KB] troubleshoot-first error: {_qa_exc}", file=sys.stderr)
         # ⚡ Phase 1C — ถ้ามี warranty auto-check context (เช็คจาก order_sn แล้ว) → แนบ
         if _warranty_auto_ctx:
             _claim_first_answer = f"{_warranty_auto_ctx}\n\n{_claim_first_answer}"

@@ -244,14 +244,18 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0, help="จำกัดจำนวนรูป (0=ไม่จำกัด)")
     ap.add_argument("--max-calls", type=int, default=4000, help="เพดาน call ต่อ run (quota/day รวมทุก key)")
+    ap.add_argument("--shard", type=str, default="", help="K/N — รันเฉพาะ slice ที่ K (0-based) จาก N shards (parallel workers)")
     args = ap.parse_args()
 
     work = _collect_worklist(EXPORT_PATH)
     done = _load_done(OUTPUT_PATH)
     todo = [w for w in work if w["image_id"] not in done]
+    if args.shard:
+        k, n = (int(x) for x in args.shard.split("/"))
+        todo = todo[k::n]
     if args.limit:
         todo = todo[: args.limit]
-    print(f"done={len(done)} todo={len(todo)} max_calls={args.max_calls}")
+    print(f"done={len(done)} todo={len(todo)} max_calls={args.max_calls} shard={args.shard or '-'}")
 
     n_ok = n_err = 0
     cost_sum = 0.0

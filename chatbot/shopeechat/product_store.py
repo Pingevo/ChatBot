@@ -43,25 +43,29 @@ except ImportError:
 # โหลด lazy ครั้งเดียวตอนใช้งาน แล้ว cache ไว้ตลอด session
 
 _VECTOR_STORE: dict[str, Any] | None = None
+_VECTOR_MTIME: float = -1.0   # mtime ของ npz ที่โหลดไว้ — ไฟล์เปลี่ยน → auto-reload
 _EMBEDDINGS_PATH = Path(__file__).resolve().parent.parent.parent / "exports" / "product_embeddings.npz"
 
 
 def _load_vector_store() -> dict[str, Any] | None:
-    """โหลด product embeddings จาก .npz (lazy singleton).
+    """โหลด product embeddings จาก .npz — auto-reload เมื่อไฟล์เปลี่ยน (mtime).
+
+    stat ก่อน load เสมอ: ถ้า build replace ไฟล์ระหว่าง load → mtime ที่เก็บเก่ากว่าจริง
+    → request ถัดไป reload อีกครั้ง (self-healing). ไฟล์หาย/load fail → ใช้ cache เก่าต่อ.
 
     คืน dict ที่มี:
     - item_ids: numpy array ของ item_id (str)
     - embeddings: numpy array shape (n, 1024) normalize แล้ว
     - texts: numpy array ของ text ที่ embed
     - shops: numpy array ของ shopname (str) — ⚡ BUG-H fix สำหรับกรอง shop ก่อน similarity
-
-    ถ้าไฟล์ไม่มี หรือ numpy ไม่ได้ติดตั้ง คืน None.
     """
-    global _VECTOR_STORE
-    if _VECTOR_STORE is not None:
+    global _VECTOR_STORE, _VECTOR_MTIME
+    try:
+        mtime = _EMBEDDINGS_PATH.stat().st_mtime
+    except OSError:
+        return _VECTOR_STORE  # ไฟล์ไม่มี — เก่า→None (เหมือนเดิม), มี cache→ใช้ต่อ
+    if _VECTOR_STORE is not None and mtime == _VECTOR_MTIME:
         return _VECTOR_STORE
-    if not _EMBEDDINGS_PATH.exists():
-        return None
     try:
         import numpy as np
         # 🔒 M1: Try loading without pickle first (safe), fall back with warning
@@ -83,12 +87,13 @@ def _load_vector_store() -> dict[str, Any] | None:
             "texts": data["texts"],
             "shops": _shops,  # None ถ้า .npz เก่า (ยังไม่ re-build)
         }
+        _VECTOR_MTIME = mtime
         if _shops is None:
             print("WARN: .npz ไม่มี field 'shops' — กรุณา re-build embeddings (python scripts/build_embeddings.py)", file=sys.stderr)
         return _VECTOR_STORE
     except Exception as exc:
         print(f"WARN: cannot load vector store: {exc}")
-        return None
+        return _VECTOR_STORE
 
 
 def vector_search(
