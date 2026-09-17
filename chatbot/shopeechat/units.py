@@ -190,12 +190,15 @@ def pick_desc_sections(unit: dict, route=None) -> str:
 
 def to_unit_card(unit: dict, route=None) -> dict:
     """unit doc → card shape เดียวกับ to_product_card (downstream ไม่ต้องแก้)."""
+    from . import product_store as _ps   # lazy — กัน circular (product_store ก็ lazy-import units)
     brand = unit.get("brand") or {}
     brand_name = brand.get("original_brand_name", "") if isinstance(brand, dict) else str(brand)
     stock = unit.get("stock") or 0
     price = unit.get("price")
     # shape เดียวกับ _price_range ของ product card — downstream อ่าน price.get("min"/"max")
     price_range = {"min": int(price), "max": int(price), "currency": "THB"} if price else {}
+    lst = unit.get("_listing") or {}   # attach_listing_fields join มา (อาจไม่มี)
+    img_ids = unit.get("image_ids") or (lst.get("image") or {}).get("image_id_list") or []
     return {
         # shape เดียวกับ product card
         "item_id": unit.get("item_id"),
@@ -204,18 +207,18 @@ def to_unit_card(unit: dict, route=None) -> dict:
         "category": unit.get("cat_name"),
         "shop": unit.get("shop"),
         "status": unit.get("item_status"),
-        "condition": None,
+        "condition": lst.get("condition"),
         "price": price_range,
         "warranty": _unit_warranty(unit),  # ระยะประกันจากชื่อ (shape เดียวกับ _warranty_info)
-        "short_link": None,
-        "image_url": None,
-        "weight": None,
-        "dimension": None,
+        "short_link": lst.get("short_link"),
+        "image_url": f"https://cf.shopee.co.th/file/{img_ids[0]}" if img_ids else "",
+        "weight": lst.get("weight"),
+        "dimension": lst.get("dimension"),
         "total_stock": stock,
         "sold_out": stock == 0,
         "_available_for_sale": unit.get("item_status") == "NORMAL",
-        "has_promotion": False,
-        "is_flash_sale": False,
+        "has_promotion": _ps._has_active_promotion(lst) if lst else False,
+        "is_flash_sale": bool(lst.get("is_flash_sale")),
         "description_excerpt": (
             (pick_desc_sections(unit, route) or (unit.get("image_text") or "")[:3000])
             + (f"\n\nเงื่อนไขการรับประกัน (จากรูปสินค้า): {unit['warranty_text']}"
@@ -333,10 +336,40 @@ def attach_image_texts(unit_docs: list[dict]) -> list[dict]:
     return unit_docs
 
 
+def attach_listing_fields(unit_docs: list[dict]) -> list[dict]:
+    """join ShpProducts ด้วย item_id — เติม listing-level fields ที่ unit ไม่มี.
+
+    ใช้ runtime join (ไม่ใช่ copy ตอน build) เพราะ promotion/flash_sale เปลี่ยนบ่อย —
+    build-time copy จะ stale จน rebuild รอบหน้า. 1 query batch ต่อ request.
+    """
+    iids = {u.get("item_id") for u in unit_docs if u.get("item_id") is not None}
+    if not iids:
+        return unit_docs
+    try:
+        from . import product_store as _ps
+        db_name = os.environ.get("MONGO_DB", "").strip()
+        coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+        by_id: dict = {}
+        for d in _ps.get_client()[db_name][coll_name].find(
+                {"item_id": {"$in": list(iids)}},   # item_id เป็น int ทั้งสองฝั่ง — ห้าม str()
+                {"item_id": 1, "condition": 1, "weight": 1, "dimension": 1,
+                 "short_link": 1, "promotion": 1, "has_promotion": 1,
+                 "is_flash_sale": 1, "image": 1}):
+            by_id[d["item_id"]] = d
+        for u in unit_docs:
+            d = by_id.get(u.get("item_id"))
+            if d:
+                u["_listing"] = d
+    except Exception as exc:
+        print(f"[UNITS] listing join error: {exc}", file=sys.stderr)
+    return unit_docs
+
+
 def fetch_unit_cards(message: str, **kwargs) -> list[dict]:
-    """fetch_units + attach_kb_specs + attach_image_texts + to_unit_card — entry point ที่ fetch_products เรียก."""
+    """fetch_units + attach_kb_specs + attach_image_texts + attach_listing_fields + to_unit_card."""
     route = kwargs.pop("route", None)
     from . import route_context as _rc
     route = route or _rc.resolve_route(message)
-    us = attach_image_texts(attach_kb_specs(fetch_units(message, route=route, **kwargs)))
+    us = attach_listing_fields(attach_image_texts(attach_kb_specs(
+        fetch_units(message, route=route, **kwargs))))
     return [to_unit_card(u, route) for u in us]

@@ -488,7 +488,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 |---|---|---|---|
 | `fetch_products` | 2385 | **central retrieval** — สร้าง query + filter + rerank + card — **2026-09-12 (FILTER-UNAVAILABLE)**: เพิ่ม param `filter_unavailable: bool = False` — เมื่อ True กรองสินค้า `status != NORMAL` หรือ `sold_out=True` ออกจาก cards; fallback ถ้ากรองแล้วว่าง → ปล่อยทั้งหมด + ฝัง `_context_note` ห้ามแนะนำขาย | `_detect_*`, `build_query`, `vector_search`, `_filter_*`, `_rerank_*`, `to_product_card` |
 | `fetch_product_by_id` | 2880 | ดึงสินค้าเดียวโดย `item_id` | `to_product_card` |
-| `fuzzy_match_products` | 559 | rapidfuzz fallback สำหรับพิมพ์ผิด | `_extract_product_name_tokens`, `to_product_card` |
+| `fuzzy_match_products` | 559 | rapidfuzz fallback สำหรับพิมพ์ผิด — **2026-09-17**: ตัด `item_status:NORMAL` filter (ตอบสินค้า unlisted/deleted ได้ กันขายอยู่ที่ card), prefix-3 miss/score ไม่ผ่าน → rescan ทั้งร้าน (≤2000 docs), brand tokens จาก `_known_brands()` ใช้กรอง fetch แต่ยังนับ score (avg per-token) — ทุก token โดนกรองหมด → ใช้ token เดิม | `_extract_product_name_tokens`, `to_product_card`, `knowledge_base._known_brands` (lazy) |
 | `vector_search` | 68 | cosine similarity กับ embedding NPZ | `_load_vector_store`, `embedding.embed_query` |
 
 #### 6.3.2 Charger subtype
@@ -1678,12 +1678,13 @@ Early-return blocks ก่อน intent classification: order lookup, return/ref
 | `attach_kb_specs(unit_docs)` | spec inheritance — unit desc ว่างยืม `canonical_specs` จาก `kb_products` ผ่าน `model_codes` | list[unit doc] | docs เดิม (เติม `canonical_specs` ให้ตัวที่ match) |
 | `attach_image_texts(unit_docs)` | join `image_texts` (OCR รูป) เข้า unit ผ่าน `image_ids` — spec\|product→`image_text`; **banner ที่มีคำประกัน→`warranty_text`** (per-listing เงื่อนไขประกัน, ≤1500 chars) | list[unit doc] | docs เดิม (เติม `image_text`/`warranty_text`) |
 | `_unit_warranty(unit)` | ระยะประกันจาก `item_name` ด้วย `warranty.extract_warranty_from_name` (แก้ regression warranty=None ใน unit path) | unit: dict | `dict{duration,duration_months,duration_source}\|None` |
-| `to_unit_card(unit, route)` | unit doc → card shape เดียวกับ `to_product_card` + unit extras; `warranty` field จาก `_unit_warranty`, `warranty_text` append ท้าย `description_excerpt` | unit: dict; route: Route\|None | `dict` card |
+| `to_unit_card(unit, route)` | unit doc → card shape เดียวกับ `to_product_card` + unit extras; `warranty` จาก `_unit_warranty`; `warranty_text` append ท้าย `description_excerpt`; **`image_url` จาก `image_ids[0]` (Shopee CDN)**; `condition`/`short_link`/`weight`/`dimension`/`has_promotion`/`is_flash_sale` จาก `_listing` (join) | unit: dict; route: Route\|None | `dict` card |
 | `pick_desc_sections(unit, route)` | เลือก desc section ตาม `route.needs_spec/needs_warranty` cap 3000 chars | unit: dict | `str` |
-| `fetch_unit_cards(message, **kwargs)` | fetch_units + attach_kb_specs + to_unit_card — entry point | เหมือน fetch_units | `list[card]` |
+| `attach_listing_fields(unit_docs)` | batch join `ShpProducts` ด้วย `item_id` (int ทั้งสองฝั่ง) — เติม `_listing` {condition, weight, dimension, short_link, promotion, is_flash_sale, image}; runtime join เพราะ promo เปลี่ยนบ่อย (build-time copy จะ stale) | list[unit doc] | docs เดิม (เติม `_listing`) |
+| `fetch_unit_cards(message, **kwargs)` | fetch_units + attach_kb_specs + attach_image_texts + **attach_listing_fields** + to_unit_card — entry point | เหมือน fetch_units | `list[card]` |
 
 - **Called by**: `product_store.fetch_products` — hook หลัง `USE_UNIT_INDEX` flag (`1`=ทุก query, `charger`=เฉพาะ route charger-family); ว่าง/error → legacy path
-- **Calls**: `route_context.resolve_route`, `embedding.embed_query`, Mongo `sellable_units`/`kb_products` (admin DB)
+- **Calls**: `route_context.resolve_route`, `embedding.embed_query`, `product_store._has_active_promotion` (lazy), Mongo `sellable_units`/`kb_products`/`ShpProducts` (admin DB)
 
 ### 6.19 `guards.py` — Output guard + card flags (2026-09-16)
 

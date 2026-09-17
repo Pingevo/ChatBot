@@ -8417,3 +8417,22 @@ Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ต�
 **ทำแล้ว:** `chatbot/shopeechat/scripts/refresh_data.sh` — export → product emb → build+import units → unit emb → qa emb → image OCR (incremental) → import image_texts; lock ด้วย `mkdir` (macOS ไม่มี flock); export fail → abort; อื่น fail → log แล้วต่อ; **ไม่มี restart** — npz mtime reload + Mongo สดเอาเอง; cron `0 3 * * *`; เพิ่มส่วน "Data refresh" ใน DEPLOY.md
 
 **verify:** bash -n ผ่าน; lock acquire/release/double-run-block ผ่าน
+
+---
+
+## 2026-09-17 — unit card fields + fuzzy_match_products fix
+
+**ทำแล้ว:**
+
+- `units.attach_listing_fields()` (ใหม่) — batch join `ShpProducts` ด้วย `item_id` (int ทั้งสองฝั่ง — ห้าม str(), เจอ type mismatch ตอนเทส) เติม `_listing` {condition, weight, dimension, short_link, promotion, is_flash_sale, image} — runtime join เพราะ promo เปลี่ยนบ่อย (build-time copy จะ stale ≤24h)
+- `to_unit_card` — `image_url` จาก `image_ids[0]` (cf.shopee.co.th CDN เดียวกับ `_first_image_url`), `condition`/`short_link`/`weight`/`dimension`/`has_promotion`(`_has_active_promotion`)/`is_flash_sale` จาก `_listing` — แก้ regression ที่ unit path ส่งลิงก์+รูป+โปรไม่ได้เลย
+- `fuzzy_match_products` 3 fix:
+  - ตัด `item_status:NORMAL` ทั้ง 2 query — ตอบสินค้า BANNED/UNLIST ได้ (กันขายอยู่ที่ `card._available_for_sale` + prompt เหมือนเดิม)
+  - prefix-3 gate พลาด (typo ต้น token เช่น "wach"→"watch") หรือ score ไม่ผ่าน → rescan ทั้งร้าน ≤2000 docs (เดิม fire เฉพาะ candidates ว่าง + limit 50 = ครอบ 2% ของร้าน 2108)
+  - `_common` ∪ `_known_brands()` (182 แบรนด์จาก DB); brand ใช้กรอง fetch แต่**ยังนับ score**; ทุก token โดนกรอง → fallback ใช้ token เดิม; scoring เปลี่ยน max→**avg per-token** กัน brand match 100 ชนะคนเดียว
+
+**verify จริง:** ShowSee A1-W (BANNED) เจอ + `sale:False` ✅ / "khoxsee"(prefix typo) เจอ ✅ / "redmi wach 6"@Youpin 2108 docs → Redmi Watch 6/5 อันดับ 1 (เดิม Merach/Merach speaker มาก่อน) ✅ / biokooooooooop ✅ / QA 28/28 + car charger 16/16 ผ่าน / fallback rescan ~5.4s (fire เฉพาะตอน primary พลาด)
+
+**เคสที่รู้ว่ายัง:** fuzzy ไม่มี shop → prefix typo ยังหลุดได้ (ไม่มี fallback scope) — เป็น design เดิม; live compare :8010/:8015 ค้างรอ quota 15:00
+
+**Rollback:** ไม่มี flag เฉพาะ — ถ้าพัง revert commit; unit path ยังอยู่หลัง `USE_UNIT_INDEX` เหมือนเดิม

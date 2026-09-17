@@ -704,8 +704,16 @@ def fuzzy_match_products(
                "anker", "baseus", "ugreen", "cuktech", "zmi", "mibro",
                "imilab", "qcy", "jbl", "sony", "oraimo", "70mai",
                "nillkin", "ks", "elite", "actor"}
-    msg_tokens = [t.lower() for t in msg_tokens if len(t) >= 4 and t.lower() not in _common]
-    if not msg_tokens:
+    try:
+        from . import knowledge_base as _kb
+        _common |= _kb._known_brands()   # แบรนด์ทั้ง 182 จาก DB — ไม่ต้อง maintain list แยก
+    except Exception:
+        pass
+    base_tokens = [t.lower() for t in msg_tokens if len(t) >= 4]
+    # fetch_tokens = ตัวหา candidates (ไม่เอา brand/cำทั่วไป — match กว้างเกิน)
+    # score ใช้ base_tokens ทั้งหมด รวม brand — brand match ช่วย rank สินค้าให้ถูกแบรนด์
+    fetch_tokens = [t for t in base_tokens if t not in _common] or base_tokens
+    if not fetch_tokens:
         return []
 
     coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
@@ -714,13 +722,11 @@ def fuzzy_match_products(
     # ดึง candidate products จาก DB — ใช้ regex contains (ไม่ใช่ ^) เพราะชื่อสินค้า
     # มักขึ้นต้นด้วย brand เช่น "KIESLECT BioKoop" ไม่ใช่ "BioKoop"
     # ใช้ prefix 3 ตัวแรกของ token เพื่อลดจำนวน docs ที่ต้อง score
+    # ⚠️ ไม่ filter item_status — ตอบสินค้า unlisted/deleted ได้ (กันขายอยู่ที่ card.status + prompt)
     candidates: list[dict] = []
-    for token in msg_tokens[:3]:  # เอาแค่ 3 tokens แรก
+    for token in fetch_tokens[:3]:  # เอาแค่ 3 tokens แรก
         prefix = token[:3]
-        q = {
-            "item_status": "NORMAL",
-            "item_name": {"$regex": re.escape(prefix), "$options": "i"},
-        }
+        q = {"item_name": {"$regex": re.escape(prefix), "$options": "i"}}
         if shop:
             q["shopname"] = {"$regex": f"^{re.escape(shop)}$", "$options": "i"}
         docs = list(coll.find(q, PRODUCT_PROJECTION).limit(30))
@@ -728,37 +734,45 @@ def fuzzy_match_products(
             if d.get("item_id") and not any(c.get("item_id") == d.get("item_id") for c in candidates):
                 candidates.append(d)
 
-    # ถ้า prefix regex ไม่เจอ ลองดึงสินค้าทั้งหมดของร้าน (limit 50)
-    if not candidates and shop:
-        q = {
-            "item_status": "NORMAL",
-            "shopname": {"$regex": f"^{re.escape(shop)}$", "$options": "i"},
-        }
-        candidates = list(coll.find(q, PRODUCT_PROJECTION).limit(50))
+    # คำนวณ fuzzy score ระหว่าง msg_tokens กับ product name tokens
+    def _score(cands: list[dict]) -> list[tuple[int, dict]]:
+        out: list[tuple[int, dict]] = []
+        for doc in cands:
+            name = doc.get("item_name") or ""
+            name_tokens = _extract_product_name_tokens(name)
+            if not name_tokens:
+                continue
+            # avg ของ best-score ต่อ token — brand match เดี่ยวๆ ไม่ชนะ
+            # (เช่น "redmi wach" → Redmi Watch ได้ (100+75)/2=87 ชนะ Redmi 10C (100+30)/2=65)
+            per_token = []
+            for mt in base_tokens:
+                best = 0
+                for nt in name_tokens:
+                    # ใช้ partial_ratio เพราะพิมพ์ผิดอาจมีตัวซ้ำ/ขาด
+                    # เช่น biokooooooooop vs biokoop → partial_ratio จะดีกว่า ratio
+                    s = fuzz.partial_ratio(mt, nt)
+                    if s > best:
+                        best = s
+                per_token.append(best)
+            avg = sum(per_token) / len(per_token)
+            if avg >= score_threshold:
+                out.append((avg, doc))
+        out.sort(key=lambda x: -x[0])
+        return out
 
-    if not candidates:
+    scored = _score(candidates)
+
+    # prefix-3 gate พลาดเมื่อ typo อยู่ต้น token (เช่น "wach"→"watch", "khoxsee"→"showsee")
+    # หรือ candidates ที่เจอ score ไม่ผ่าน → rescan ทั้งร้าน
+    # ponytail: cap 2000 — ร้านใหญ่สุดตอนนี้ ~2100 docs; ร้านใหญ่กว่านั้นในอนาคตค่อยทำ index จริง
+    if not scored and shop:
+        q = {"shopname": {"$regex": f"^{re.escape(shop)}$", "$options": "i"}}
+        candidates = list(coll.find(q, PRODUCT_PROJECTION).limit(2000))
+        scored = _score(candidates)
+
+    if not scored:
         return []
 
-    # คำนวณ fuzzy score ระหว่าง msg_tokens กับ product name tokens
-    scored: list[tuple[int, dict]] = []
-    for doc in candidates:
-        name = doc.get("item_name") or ""
-        name_tokens = _extract_product_name_tokens(name)
-        if not name_tokens:
-            continue
-        best_score = 0
-        for mt in msg_tokens:
-            for nt in name_tokens:
-                # ใช้ partial_ratio เพราะพิมพ์ผิดอาจมีตัวซ้ำ/ขาด
-                # เช่น biokooooooooop vs biokoop → partial_ratio จะดีกว่า ratio
-                score = fuzz.partial_ratio(mt, nt)
-                if score > best_score:
-                    best_score = score
-        if best_score >= score_threshold:
-            scored.append((best_score, doc))
-
-    # เรียงตาม score สูงสุด แล้วแปลงเป็น product cards
-    scored.sort(key=lambda x: -x[0])
     result = []
     for _, doc in scored[:limit]:
         result.append(to_product_card(doc, message))
