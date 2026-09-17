@@ -638,18 +638,23 @@ def get_llm_config() -> dict:
     return _llm_cfg_cache
 
 
-def _active_keys() -> list[str]:
-    """key pool ปัจจุบัน — config.keys ถ้ามี (UI จัดการ) ไม่มี → env keys
+def get_key_pool(field: str) -> list[str]:
+    """อ่าน key pool จาก llm_config[field] — web_search ใช้กับ "openrouter_keys"
     รองรับ 2 shape: string เดิม และ {name, value, enabled} — enabled=false ไม่หมุน"""
     keys: list[str] = []
-    for k in (get_llm_config().get("keys") or []):
+    for k in (get_llm_config().get(field) or []):
         if isinstance(k, str) and k.strip():
             keys.append(k.strip())
         elif isinstance(k, dict) and k.get("enabled", True):
             v = str(k.get("value") or "").strip()
             if v:
                 keys.append(v)
-    return keys or _API_KEYS
+    return keys
+
+
+def _active_keys() -> list[str]:
+    """key pool ปัจจุบัน — config.keys ถ้ามี (UI จัดการ) ไม่มี → env keys"""
+    return get_key_pool("keys") or _API_KEYS
 
 
 _MODEL_ROLE_ENV = {

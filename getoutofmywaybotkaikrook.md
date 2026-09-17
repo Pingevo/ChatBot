@@ -8511,3 +8511,19 @@ Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ต�
 - `/llm/page.tsx` เขียนใหม่: `SearchableSelect` (fixed-pos dropdown + search + custom value + Enter pick) ต่อ 4 model roles → confirm.ask ก่อน PUT; key list = ToggleSwitch + ชื่อคลิกแก้ inline (Enter/blur save) + hash+tail + ลบ; add-key inline form auto-name; toggle ปิดตัวสุดท้ายเตือน fallback env; responsive `sm:` grid
 
 **verify จริง:** tsc ผ่าน, py_compile ผ่าน, /llm compile (307→login), /api/llm-config 401 unauth
+
+---
+
+## 2026-09-17 (ต่อ) — /llm เพิ่ม OpenRouter key pool (แยกจาก Gemini)
+
+**ทำไม:** OpenRouter ใช้ `OPENROUTER_API_KEY` แยก — เดิมหน้า /llm จัดการแต่ Gemini pool
+
+**ดีไซน์:** field `openrouter_keys` แยกใน doc เดิม (shape เดียวกัน `{name,value,enabled}`) — PUT ops รับ `pool: "gemini"|"openrouter"` (default gemini); auto-name `OPENROUTER_API_KEY_n`
+
+**ไฟล์:**
+- `llm.py` — `get_key_pool(field)` generic (รองรับ string+dict shape) — `_active_keys` + web_search ใช้ร่วม
+- `web_search._get_openrouter_key` — หมุน round-robin บน pool จาก config → env fallback เดิม
+- `llmConfigService` — `KeyPool` type + `KEY_POOL_FIELD` map + maskList/ops รับ pool
+- `/llm` — `KeyPoolCard` component ใช้ซ้ำ 2 card (Gemini + OpenRouter)
+
+**verify จริง:** tsc + py_compile ผ่าน, /llm compile ได้

@@ -28,7 +28,22 @@ from typing import Any
 # ── Config ──────────────────────────────────────────────────────────────────
 # อ่าน env ทุกครั้ง (lazy) เพราะ load_dotenv อาจโหลดหลัง import
 
+_OR_KEY_INDEX = 0
+
+
 def _get_openrouter_key() -> str:
+    """OpenRouter key — pool จาก llm_config.openrouter_keys (UI /llm จัดการ) หมุน round-robin
+    ไม่มี/DB ล่ม → env OPENROUTER_API_KEY เหมือนเดิม"""
+    global _OR_KEY_INDEX
+    try:
+        from . import llm as _llm
+        pool = _llm.get_key_pool("openrouter_keys")
+        if pool:
+            k = pool[_OR_KEY_INDEX % len(pool)]
+            _OR_KEY_INDEX = (_OR_KEY_INDEX + 1) % len(pool)
+            return k
+    except Exception:
+        pass
     return os.environ.get("OPENROUTER_API_KEY", "").strip()
 
 def _get_openrouter_base() -> str:

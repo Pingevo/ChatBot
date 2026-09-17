@@ -31,9 +31,12 @@ interface MaskedKey {
 
 type ModelRole = "chat" | "vision" | "intent" | "openrouter_search";
 
+type KeyPool = "gemini" | "openrouter";
+
 interface LlmConfigResponse {
   ok: boolean;
   keys: MaskedKey[];
+  openrouter_keys: MaskedKey[];
   models: Partial<Record<ModelRole, string>>;
   model_roles: ModelRole[];
   updated_by?: string;
@@ -212,17 +215,10 @@ export default function LlmConfigPage() {
   const { catchError } = useToastError();
   const [loading, setLoading] = useState(true);
   const [keys, setKeys] = useState<MaskedKey[]>([]);
+  const [orKeys, setOrKeys] = useState<MaskedKey[]>([]);
   const [models, setModels] = useState<Partial<Record<ModelRole, string>>>({});
   const [meta, setMeta] = useState<{ updated_by?: string; updated_at?: string }>({});
   const [saving, setSaving] = useState(false);
-
-  // add-key inline form
-  const [adding, setAdding] = useState(false);
-  const [newKey, setNewKey] = useState("");
-  const [newName, setNewName] = useState("");
-  // rename inline
-  const [editingSha, setEditingSha] = useState<string | null>(null);
-  const [editName, setEditName] = useState("");
 
   const allowed = canEditPage(user, "llm");
 
@@ -231,6 +227,7 @@ export default function LlmConfigPage() {
     try {
       const r = await api().get<LlmConfigResponse>("/llm-config");
       setKeys(r.data.keys ?? []);
+      setOrKeys(r.data.openrouter_keys ?? []);
       setModels(r.data.models ?? {});
       setMeta({ updated_by: r.data.updated_by, updated_at: r.data.updated_at });
     } catch (e) {
@@ -249,53 +246,6 @@ export default function LlmConfigPage() {
       toast.success(okMsg);
       await load();
     } catch (e) { catchError(e, "บันทึกไม่สำเร็จ"); } finally { setSaving(false); }
-  }
-
-  /* ---- keys ---- */
-
-  async function addKey() {
-    const v = newKey.trim();
-    if (v.length <= 10) { toast.error("key สั้นเกินไป"); return; }
-    await mutate({ add_keys: [{ name: newName.trim() || undefined, value: v }] },
-      "เพิ่ม key แล้ว — bot จะหยิบไปใช้ใน ~10 วินาที");
-    setNewKey(""); setNewName(""); setAdding(false);
-  }
-
-  async function toggleKey(k: MaskedKey) {
-    const toEnabled = !k.enabled;
-    const enabledAfter = keys.filter((x) => x.enabled && x.sha256 !== k.sha256).length;
-    const warn = !toEnabled && enabledAfter === 0
-      ? " ⚠️ นี่คือ key ที่เปิดอยู่ตัวสุดท้าย — ปิดแล้ว bot จะ fallback ไปใช้ keys จาก .env"
-      : "";
-    const ok = await confirm.ask({
-      title: toEnabled ? `เปิดใช้ ${k.name}?` : `ปิดใช้ ${k.name}?`,
-      message: toEnabled
-        ? "key นี้จะถูกหยิบเข้า rotation ใน ~10 วินาที"
-        : `bot จะหยุดใช้ key นี้ใน ~10 วินาที${warn}`,
-      confirmText: toEnabled ? "เปิดใช้" : "ปิดใช้",
-      variant: toEnabled ? "primary" : "danger",
-    });
-    if (!ok) return;
-    await mutate({ set_enabled: [{ sha256: k.sha256, enabled: toEnabled }] },
-      toEnabled ? `เปิดใช้ ${k.name} แล้ว` : `ปิดใช้ ${k.name} แล้ว`);
-  }
-
-  async function removeKey(k: MaskedKey) {
-    const ok = await confirm.ask({
-      title: `ลบ ${k.name}?`,
-      message: `sha256:${k.sha256} (••••${k.tail}) — ลบออกจาก pool ถาวร bot จะหยุดใช้ใน ~10 วินาที`,
-      confirmText: "ลบ",
-      variant: "danger",
-    });
-    if (!ok) return;
-    await mutate({ remove_sha256: [k.sha256] }, `ลบ ${k.name} แล้ว`);
-  }
-
-  async function saveRename(k: MaskedKey) {
-    const name = editName.trim();
-    setEditingSha(null);
-    if (!name || name === k.name) return;
-    await mutate({ rename: [{ sha256: k.sha256, name }] }, `เปลี่ยนชื่อเป็น ${name} แล้ว`);
   }
 
   /* ---- models ---- */
@@ -327,8 +277,6 @@ export default function LlmConfigPage() {
     );
   }
 
-  const activeCount = keys.filter((k) => k.enabled).length;
-
   return (
     <PageShell
       title="LLM & API Keys"
@@ -343,108 +291,31 @@ export default function LlmConfigPage() {
         <div className="flex justify-center py-16"><Loading size={28} /></div>
       ) : (
         <div className="grid gap-4">
-          {/* ---- Key pool ---- */}
-          <Card className="p-4 sm:p-5">
-            <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <KeyRound size={16} className="text-accent" />
-                <h2 className="font-semibold text-text">Gemini key pool</h2>
-                <Badge tone={keys.length ? "success" : "neutral"}>
-                  {keys.length ? `${activeCount}/${keys.length} เปิดใช้` : "env fallback"}
-                </Badge>
-              </div>
-              <Button variant="secondary" size="sm" onClick={() => {
-                setAdding((a) => !a);
-                setNewName(`GEMINI_API_KEY_${keys.length + 1}`);
-              }}>
-                <Plus size={14} /> เพิ่ม key
-              </Button>
-            </div>
-            <p className="mb-4 text-xs text-text-muted">
-              bot หมุนใช้เฉพาะ key ที่เปิดอยู่ทุก request · list ว่าง/ปิดหมด = fallback ไป <code>GEMINI_API_KEY_*</code> ใน .env
-            </p>
+          <KeyPoolCard
+            title="Gemini key pool"
+            icon={KeyRound}
+            pool="gemini"
+            prefix="GEMINI_API_KEY"
+            keys={keys}
+            saving={saving}
+            mutate={mutate}
+            envHint="GEMINI_API_KEY_*"
+            desc="bot หมุนใช้เฉพาะ key ที่เปิดอยู่ทุก request"
+            keyPlaceholder="วาง Gemini API key (AIza...)"
+          />
 
-            {adding && (
-              <div className="mb-4 grid gap-2 rounded-lg border border-accent/40 bg-accent-soft/40 p-3 sm:grid-cols-[180px_1fr_auto]">
-                <Input
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  placeholder="ชื่อ key"
-                  className="font-mono text-sm"
-                />
-                <Input
-                  value={newKey}
-                  onChange={(e) => setNewKey(e.target.value)}
-                  placeholder="วาง Gemini API key (AIza...)"
-                  type="password"
-                  autoComplete="off"
-                  className="font-mono text-sm"
-                />
-                <div className="flex gap-2">
-                  <Button size="sm" onClick={addKey} disabled={saving || !newKey.trim()}>เพิ่ม</Button>
-                  <Button size="sm" variant="ghost" onClick={() => setAdding(false)}>ยกเลิก</Button>
-                </div>
-              </div>
-            )}
-
-            {keys.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-text-muted">
-                ยังไม่มี key ใน DB — bot ใช้ keys จาก .env อยู่
-              </div>
-            ) : (
-              <ul className="divide-y divide-border">
-                {keys.map((k) => (
-                  <li key={k.sha256} className={`py-2.5 transition-opacity ${k.enabled ? "" : "opacity-50"}`}>
-                    <div className="flex items-center gap-2 sm:gap-3">
-                      <ToggleSwitch
-                        enabled={k.enabled}
-                        onChange={() => toggleKey(k)}
-                        disabled={saving}
-                        size="sm"
-                        ariaLabel={k.enabled ? `ปิดใช้ ${k.name}` : `เปิดใช้ ${k.name}`}
-                      />
-                      <div className="min-w-0 flex-1">
-                        {editingSha === k.sha256 ? (
-                          <input
-                            autoFocus
-                            value={editName}
-                            onChange={(e) => setEditName(e.target.value)}
-                            onBlur={() => saveRename(k)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") saveRename(k);
-                              if (e.key === "Escape") setEditingSha(null);
-                            }}
-                            className="w-full max-w-xs rounded-md border border-accent bg-surface px-2 py-0.5 font-mono text-sm text-text outline-none"
-                          />
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => { setEditingSha(k.sha256); setEditName(k.name); }}
-                            className="group flex max-w-full items-center gap-1.5 text-left"
-                            title="คลิกเพื่อแก้ชื่อ"
-                          >
-                            <span className="truncate font-mono text-sm font-medium text-text">{k.name}</span>
-                            <Pencil size={11} className="shrink-0 text-text-subtle opacity-0 transition-opacity group-hover:opacity-100" />
-                          </button>
-                        )}
-                        <code className="block truncate text-[11px] text-text-subtle">
-                          sha256:{k.sha256} · ••••{k.tail}
-                        </code>
-                      </div>
-                      <Button variant="ghost" size="icon" onClick={() => removeKey(k)} disabled={saving} aria-label={`ลบ ${k.name}`}>
-                        <Trash2 size={15} className="text-error" />
-                      </Button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-
-            <p className="mt-3 flex items-start gap-1.5 text-[11px] leading-relaxed text-warning-dark">
-              <ShieldAlert size={13} className="mt-0.5 shrink-0" />
-              keys ถูกเก็บใน MongoDB แบบ plaintext (bot ต้องใช้จริง) — หน้านี้แสดงแค่ hash + 4 ตัวท้าย และจำกัดเฉพาะ dev
-            </p>
-          </Card>
+          <KeyPoolCard
+            title="OpenRouter key pool"
+            icon={Globe}
+            pool="openrouter"
+            prefix="OPENROUTER_API_KEY"
+            keys={orKeys}
+            saving={saving}
+            mutate={mutate}
+            envHint="OPENROUTER_API_KEY"
+            desc="ใช้กับ web search fallback เมื่อสินค้า/KB ไม่พอ — หมุน round-robin เหมือนกัน"
+            keyPlaceholder="วาง OpenRouter API key (sk-or-...)"
+          />
 
           {/* ---- Models ---- */}
           <Card className="p-4 sm:p-5">
@@ -494,5 +365,183 @@ export default function LlmConfigPage() {
         </div>
       )}
     </PageShell>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* KeyPoolCard — list จัดการ key 1 pool (gemini | openrouter)           */
+/* ------------------------------------------------------------------ */
+
+function KeyPoolCard({
+  title, icon: Icon, pool, prefix, keys, saving, mutate, envHint, desc, keyPlaceholder,
+}: {
+  title: string;
+  icon: typeof KeyRound;
+  pool: KeyPool;
+  prefix: string;
+  keys: MaskedKey[];
+  saving: boolean;
+  mutate: (body: Record<string, unknown>, okMsg: string) => Promise<void>;
+  envHint: string;
+  desc: string;
+  keyPlaceholder: string;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [newKey, setNewKey] = useState("");
+  const [newName, setNewName] = useState("");
+  const [editingSha, setEditingSha] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+
+  const activeCount = keys.filter((k) => k.enabled).length;
+
+  async function addKey() {
+    const v = newKey.trim();
+    if (v.length <= 10) { toast.error("key สั้นเกินไป"); return; }
+    await mutate(
+      { pool, add_keys: [{ name: newName.trim() || undefined, value: v }] },
+      "เพิ่ม key แล้ว — bot จะหยิบไปใช้ใน ~10 วินาที"
+    );
+    setNewKey(""); setNewName(""); setAdding(false);
+  }
+
+  async function toggleKey(k: MaskedKey) {
+    const toEnabled = !k.enabled;
+    const enabledAfter = keys.filter((x) => x.enabled && x.sha256 !== k.sha256).length;
+    const warn = !toEnabled && enabledAfter === 0
+      ? ` ⚠️ นี่คือ key ที่เปิดอยู่ตัวสุดท้าย — ปิดแล้ว bot จะ fallback ไปใช้ ${envHint} จาก .env`
+      : "";
+    const ok = await confirm.ask({
+      title: toEnabled ? `เปิดใช้ ${k.name}?` : `ปิดใช้ ${k.name}?`,
+      message: toEnabled
+        ? "key นี้จะถูกหยิบเข้า rotation ใน ~10 วินาที"
+        : `bot จะหยุดใช้ key นี้ใน ~10 วินาที${warn}`,
+      confirmText: toEnabled ? "เปิดใช้" : "ปิดใช้",
+      variant: toEnabled ? "primary" : "danger",
+    });
+    if (!ok) return;
+    await mutate({ pool, set_enabled: [{ sha256: k.sha256, enabled: toEnabled }] },
+      toEnabled ? `เปิดใช้ ${k.name} แล้ว` : `ปิดใช้ ${k.name} แล้ว`);
+  }
+
+  async function removeKey(k: MaskedKey) {
+    const ok = await confirm.ask({
+      title: `ลบ ${k.name}?`,
+      message: `sha256:${k.sha256} (••••${k.tail}) — ลบออกจาก pool ถาวร bot จะหยุดใช้ใน ~10 วินาที`,
+      confirmText: "ลบ",
+      variant: "danger",
+    });
+    if (!ok) return;
+    await mutate({ pool, remove_sha256: [k.sha256] }, `ลบ ${k.name} แล้ว`);
+  }
+
+  async function saveRename(k: MaskedKey) {
+    const name = editName.trim();
+    setEditingSha(null);
+    if (!name || name === k.name) return;
+    await mutate({ pool, rename: [{ sha256: k.sha256, name }] }, `เปลี่ยนชื่อเป็น ${name} แล้ว`);
+  }
+
+  return (
+    <Card className="p-4 sm:p-5">
+      <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Icon size={16} className="text-accent" />
+          <h2 className="font-semibold text-text">{title}</h2>
+          <Badge tone={keys.length ? "success" : "neutral"}>
+            {keys.length ? `${activeCount}/${keys.length} เปิดใช้` : "env fallback"}
+          </Badge>
+        </div>
+        <Button variant="secondary" size="sm" onClick={() => {
+          setAdding((a) => !a);
+          setNewName(`${prefix}_${keys.length + 1}`);
+        }}>
+          <Plus size={14} /> เพิ่ม key
+        </Button>
+      </div>
+      <p className="mb-4 text-xs text-text-muted">
+        {desc} · list ว่าง/ปิดหมด = fallback ไป <code>{envHint}</code> ใน .env
+      </p>
+
+      {adding && (
+        <div className="mb-4 grid gap-2 rounded-lg border border-accent/40 bg-accent-soft/40 p-3 sm:grid-cols-[180px_1fr_auto]">
+          <Input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            placeholder="ชื่อ key"
+            className="font-mono text-sm"
+          />
+          <Input
+            value={newKey}
+            onChange={(e) => setNewKey(e.target.value)}
+            placeholder={keyPlaceholder}
+            type="password"
+            autoComplete="off"
+            className="font-mono text-sm"
+          />
+          <div className="flex gap-2">
+            <Button size="sm" onClick={addKey} disabled={saving || !newKey.trim()}>เพิ่ม</Button>
+            <Button size="sm" variant="ghost" onClick={() => setAdding(false)}>ยกเลิก</Button>
+          </div>
+        </div>
+      )}
+
+      {keys.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-text-muted">
+          ยังไม่มี key ใน DB — bot ใช้ {envHint} จาก .env อยู่
+        </div>
+      ) : (
+        <ul className="divide-y divide-border">
+          {keys.map((k) => (
+            <li key={k.sha256} className={`py-2.5 transition-opacity ${k.enabled ? "" : "opacity-50"}`}>
+              <div className="flex items-center gap-2 sm:gap-3">
+                <ToggleSwitch
+                  enabled={k.enabled}
+                  onChange={() => toggleKey(k)}
+                  disabled={saving}
+                  size="sm"
+                  ariaLabel={k.enabled ? `ปิดใช้ ${k.name}` : `เปิดใช้ ${k.name}`}
+                />
+                <div className="min-w-0 flex-1">
+                  {editingSha === k.sha256 ? (
+                    <input
+                      autoFocus
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      onBlur={() => saveRename(k)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") saveRename(k);
+                        if (e.key === "Escape") setEditingSha(null);
+                      }}
+                      className="w-full max-w-xs rounded-md border border-accent bg-surface px-2 py-0.5 font-mono text-sm text-text outline-none"
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => { setEditingSha(k.sha256); setEditName(k.name); }}
+                      className="group flex max-w-full items-center gap-1.5 text-left"
+                      title="คลิกเพื่อแก้ชื่อ"
+                    >
+                      <span className="truncate font-mono text-sm font-medium text-text">{k.name}</span>
+                      <Pencil size={11} className="shrink-0 text-text-subtle opacity-0 transition-opacity group-hover:opacity-100" />
+                    </button>
+                  )}
+                  <code className="block truncate text-[11px] text-text-subtle">
+                    sha256:{k.sha256} · ••••{k.tail}
+                  </code>
+                </div>
+                <Button variant="ghost" size="icon" onClick={() => removeKey(k)} disabled={saving} aria-label={`ลบ ${k.name}`}>
+                  <Trash2 size={15} className="text-error" />
+                </Button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <p className="mt-3 flex items-start gap-1.5 text-[11px] leading-relaxed text-warning-dark">
+        <ShieldAlert size={13} className="mt-0.5 shrink-0" />
+        keys ถูกเก็บใน MongoDB แบบ plaintext (bot ต้องใช้จริง) — หน้านี้แสดงแค่ hash + 4 ตัวท้าย และจำกัดเฉพาะ dev
+      </p>
+    </Card>
   );
 }

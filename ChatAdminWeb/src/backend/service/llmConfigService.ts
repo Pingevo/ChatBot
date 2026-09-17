@@ -16,9 +16,17 @@ export interface KeyEntry {
   enabled: boolean;
 }
 
+export type KeyPool = "gemini" | "openrouter";
+
+export const KEY_POOL_FIELD: Record<KeyPool, "keys" | "openrouter_keys"> = {
+  gemini: "keys",
+  openrouter: "openrouter_keys",
+};
+
 export interface LlmConfigDoc {
   config_key: string;
-  keys: (string | KeyEntry)[]; // string = legacy shape → normalize เป็น enabled entry
+  keys: (string | KeyEntry)[];            // gemini pool — string = legacy shape
+  openrouter_keys?: (string | KeyEntry)[]; // openrouter pool (web_search fallback)
   models: Partial<Record<ModelRole, string>>;
   updated_by?: string;
   updated_at?: Date;
@@ -35,16 +43,19 @@ export interface MaskedKey {
 const sha8 = (v: string) =>
   createHash("sha256").update(v).digest("hex").slice(0, 8);
 
-/** legacy string keys → KeyEntry (name อัตโนมัติ GEMINI_API_KEY_n, enabled) */
-export function normKeys(keys: (string | KeyEntry)[] | undefined): KeyEntry[] {
+/** legacy string keys → KeyEntry (name อัตโนมัติ {PREFIX}_n, enabled) */
+export function normKeys(
+  keys: (string | KeyEntry)[] | undefined,
+  prefix = "GEMINI_API_KEY"
+): KeyEntry[] {
   return (keys ?? []).flatMap((k, i) => {
     if (typeof k === "string") {
       const v = k.trim();
-      return v ? [{ name: `GEMINI_API_KEY_${i + 1}`, value: v, enabled: true }] : [];
+      return v ? [{ name: `${prefix}_${i + 1}`, value: v, enabled: true }] : [];
     }
     if (k && typeof k === "object" && typeof k.value === "string" && k.value.trim()) {
       return [{
-        name: String(k.name || `GEMINI_API_KEY_${i + 1}`).slice(0, 60),
+        name: String(k.name || `${prefix}_${i + 1}`).slice(0, 60),
         value: k.value.trim(),
         enabled: k.enabled !== false,
       }];
@@ -62,19 +73,23 @@ export async function getLlmConfig(): Promise<LlmConfigDoc> {
 /** GET — masked keys เท่านั้น (ไม่ส่ง key จริงออก API) */
 export async function getLlmConfigMasked(): Promise<{
   keys: MaskedKey[];
+  openrouter_keys: MaskedKey[];
   models: Partial<Record<ModelRole, string>>;
   updated_by?: string;
   updated_at?: Date;
 }> {
   const doc = await getLlmConfig();
-  return {
-    keys: normKeys(doc.keys).map((k, i) => ({
+  const maskList = (list: (string | KeyEntry)[] | undefined, prefix: string): MaskedKey[] =>
+    normKeys(list, prefix).map((k, i) => ({
       index: i + 1,
       sha256: sha8(k.value),
       tail: k.value.slice(-4),
       name: k.name,
       enabled: k.enabled,
-    })),
+    }));
+  return {
+    keys: maskList(doc.keys, "GEMINI_API_KEY"),
+    openrouter_keys: maskList(doc.openrouter_keys, "OPENROUTER_API_KEY"),
     models: doc.models ?? {},
     updated_by: doc.updated_by,
     updated_at: doc.updated_at,
@@ -91,6 +106,7 @@ export async function getLlmConfigMasked(): Promise<{
  */
 export async function updateLlmConfig(
   updates: {
+    pool?: KeyPool; // "gemini" (default) | "openrouter"
     add_keys?: (string | { name?: string; value?: string })[];
     remove_sha256?: string[];
     set_enabled?: { sha256: string; enabled: boolean }[];
@@ -106,11 +122,13 @@ export async function updateLlmConfig(
     updated_at: new Date(),
   };
 
+  const poolField = KEY_POOL_FIELD[updates.pool ?? "gemini"];
+  const namePrefix = updates.pool === "openrouter" ? "OPENROUTER_API_KEY" : "GEMINI_API_KEY";
   const touchesKeys =
     updates.add_keys !== undefined || updates.remove_sha256 !== undefined ||
     updates.set_enabled !== undefined || updates.rename !== undefined;
   if (touchesKeys) {
-    let keys = normKeys(doc.keys);
+    let keys = normKeys(doc[poolField], namePrefix);
     const removeSet = new Set(updates.remove_sha256 ?? []);
     if (removeSet.size) keys = keys.filter((k) => !removeSet.has(sha8(k.value)));
 
@@ -130,10 +148,10 @@ export async function updateLlmConfig(
       if (keys.some((k) => k.value === value)) continue; // กัน key ซ้ำ
       const name =
         (typeof raw === "object" ? String(raw?.name ?? "").trim() : "") ||
-        `GEMINI_API_KEY_${keys.length + 1}`;
+        `${namePrefix}_${keys.length + 1}`;
       keys.push({ name: name.slice(0, 60), value, enabled: true });
     }
-    $set.keys = keys;
+    $set[poolField] = keys;
   }
 
   if (updates.models !== undefined) {

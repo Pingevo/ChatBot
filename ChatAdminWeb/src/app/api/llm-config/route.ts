@@ -18,6 +18,7 @@ export async function PUT(req: NextRequest) {
   const r = await requirePageEdit(req, "llm"); // dev only
   if (!r.ok) return r.response;
   let body: {
+    pool?: "gemini" | "openrouter";
     add_keys?: (string | { name?: string; value?: string })[];
     remove_sha256?: string[];
     set_enabled?: { sha256: string; enabled: boolean }[];
@@ -32,6 +33,7 @@ export async function PUT(req: NextRequest) {
   try {
     await updateLlmConfig(
       {
+        pool: body.pool,
         add_keys: body.add_keys,
         remove_sha256: body.remove_sha256,
         set_enabled: body.set_enabled,
