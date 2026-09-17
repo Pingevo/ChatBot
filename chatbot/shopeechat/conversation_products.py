@@ -320,7 +320,8 @@ def get_latest_suggestion_batch(conversation_id: str) -> list[dict]:
     ถ้า entry ท้ายเป็น anchor (ลูกค้าส่ง item card มาหลังสุด) → คืน []
 
     Returns:
-        list ของ cards (ใหม่→เก่า) หรือ [] ถ้า batch ล่าสุดมี <2 ตัว
+        list ของ cards (ใหม่→เก่า) หรือ [] ถ้าไม่มี suggestion ท้ายลิสต์
+        (caller ตัดสินใจเองว่าต้องการกี่ตัว — batch ตัวเดียวอาจ pair กับ anchor ล่าสุด)
     """
     doc = load_timeline(conversation_id)
     if not doc:
@@ -330,8 +331,6 @@ def get_latest_suggestion_batch(conversation_id: str) -> list[dict]:
         if p.get("is_anchor"):
             break
         batch.append(p)
-    if len(batch) < 2:
-        return []
     return [p.get("card") or {"item_id": p.get("item_id"), "name": p.get("name")}
             for p in batch]
 

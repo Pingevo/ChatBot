@@ -29,6 +29,14 @@
 - **key config จริง (verify แล้ว):** `key_source.gemini="db"` + pool `keys` 9 ตัว enabled → บอทใช้ 9 keys round-robin ไม่ใช่ key เดียว; `single_keys.gemini` มีเก็บ (enc:v1) แต่ไม่ active
 - **ขั้นต่อไป:** รอจบ → `import_image_texts.py` เข้า Mongo `image_texts` collection → เช็ค count เพิ่ม
 
+### 📋 กำลังจะทำ — cert standards search ผ่าน image_texts (plan เขียนแล้ว รออนุมัติ)
+
+- **เรื่อง:** ตอนนี้ `search_tisi_products` ค้น มอก. ใน `description` text เท่านั้น — สินค้าที่บอก มอก./CE/CCC/GB แค่ในรูป description หลุดหมด (ใน jsonl มีแล้ว: มอก. 112 รูป, GB 227, CCC 19, CE 14)
+- **plan:** `docs/plans/cert-standards-search.md` — 5 tasks: (1) import_image_texts เติม `item_ids` จาก export field_list (2) `detect_cert_question` ใน warranty.py superset ของ TISI (3) `search_cert_products` ค้น desc+image_texts merge (4) wire handoffs.py (5) SRS + live verify
+- **regression guard:** `detect_tisi_question`/`search_tisi_products` คงเป็น wrapper; เคส หมอก/เสมอกัน FP เดิมต้องยังผ่าน
+- **dependency:** image path จะมีข้อมูลก็ต่อเมื่อ import รันด้วยโค้ดใหม่ (item_ids) — รอ batch จบก่อน import
+- **สถานะ:** รอ user อนุมัติ plan ก่อน implement
+
 ### Restart :8010 + :8015 ด้วยโค้ดใหม่ (2026-09-17 ~17:2x)
 
 - **ทำไม:** replay-compare ยิง `127.0.0.1:8010` — process เก่า start 12:19 ก่อน commit `015a9c3` (sellable ranking + suggestion compare, 16:57) → replay ได้โค้ดเก่า
@@ -140,3 +148,20 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **แก้:** `SYSTEM_INSTRUCTION` llm.py — เดิม "แนะนำ 2-3 ชิ้น" แบบ soft → เป็นกฎเหล็ก "ขอแนะนำทั่วไป → ต้องเสนอ ≥2 รุ่น sellable" (pattern เดียวกับ compat dual-tier rule ที่มีอยู่) — ยกเว้น: เจาะจงรุ่น/item card/ถาม spec-สต็อก-ราคา-ประกัน หรือ context มีตัวเดียวจริง (ห้ามแต่งรุ่นมั่ว)
 - **verify E2E:** `หูฟังบลูทูธแนะนำหน่อย` → เสนอ 2 รุ่น ✅ · `พาวเวอร์แบงค์มีอะไรน่าสนใจบ้าง` → ≥2 ✅ · `HA835 มีไหม` → ยังตอบเจาะจง + เสนอทางเลือก 1 ตัว (ไม่บังคับ 2 เพราะถามรุ่นเดียว) ✅
 - **หมายเหตุ:** นี่คือ prompt-level rule (LLM อาจไม่ตาม 100% — แต่เป็น mechanism เดียวกับที่ codebase ใช้กฎทั้งหมด) ไม่มี hardcode ผูกสินค้า/type
+
+### ✅ 2026-09-17 (ต่อ) — FIX จริง: compare follow-up ตอบ anchor เก่า (ITEM-TAG shortcut ครอบ)
+
+- **อาการ (แชทจริง babyspeed, shadow):** ส่งการ์ด Case → bot แนะนำหูฟัง → "อันไหนดีกว่า/ใหม่กว่า" กลับตอบ "มีแค่ Case รุ่นเดียว" ทั้งที่ timeline มี suggestions อยู่
+- **root cause จริง (ลึกกว่า suggestion batch):** item tag `[สินค้า: xxx]` ค้างใน `req.history` ตลอด → ทุก follow-up ถูก history-scan re-pin `_tagged_item_id` → เข้า **ITEM-TAG shortcut** ตอบจาก `products=[anchor_card]` + return ทันที — **ไม่เคยถึง FOLLOWUP-COMP/suggestion batch เลย** (repro ก่อนหน้าหลุดเพราะใส่ "[item]" placeholder ไม่มี item_id)
+- **แก้ (structural, ไม่ hardcode):**
+  1. `_COMPARISON_FOLLOWUP_KW`/`_SUPERLATIVE_KW` hoist เป็น module const (แชร์ 3 จุด)
+  2. ITEM-TAG else-branch: compare/superlative kw + timeline ≥2 สินค้า (`get_anchor_and_suggestions`) → **fall through ไป main flow** (ไม่ตอบจากการ์ดเดี่ยว)
+  3. FOLLOWUP-COMP trigger รวม `_SUPERLATIVE_KW` ("ใหม่สุด/ถูกสุด" ก็ต้องมีชุดเทียบ)
+  4. `get_latest_suggestion_batch` คืน batch ทุกขนาด — callsite เติม anchor ล่าสุดเป็นคู่เทียบเมื่อ batch=1 (สินค้าที่คุยอยู่ 2 ชิ้นล่าสุด)
+- **verify E2E (history format จริง `[สินค้า: xxx]`):**
+  - Case → แนะนำหูฟัง → Q3 compare → `ITEM-TAG bypass → suggestion batch (EO008+Case) → merge → เทียบจริง` ✅
+  - Q4 superlative "ใหม่สุด" → suggestion batch → ตอบจากของที่คุยอยู่ ไม่ใช่ Case ✅
+  - regression: ถาม spec anchor ("รับประกันกี่ปี") → shortcut เดิมตอบเดี่ยว ✅ · compare แต่ timeline มีแค่ anchor → "มีรุ่นเดียว" ถูกต้อง ✅
+- **tests:** test_anchor_compare 7/7 · test_guards pass · test_recent_qa_pairs 10/10 · test_compare_3way (exp path) 17 ข้อปกติ
+
+**เสริม (regression guard หลัง user review):** `_SUPERLATIVE_KW` มี "สุด"/"ชาร์จเร็ว" ที่ match กว้าง — เคส "ตัวนี้ชาร์จเร็วไหม" (ถาม anchor เดี่ยว) จะหลุด bypass ผิด → เพิ่ม `_SINGLE_ITEM_REF_KW` (ตัวนี้/รุ่นนี้/อันนี้/ชิ้นนี้/สินค้านี้/เรือนนี้) block ทั้ง bypass และ FOLLOWUP-COMP — verify: "ตัวนี้ชาร์จเร็วไหม" ตอบ Case เดี่ยวถูก ✅, repro หลัก Q3/Q4 ยังผ่าน ✅

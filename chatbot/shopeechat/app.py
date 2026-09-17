@@ -406,6 +406,22 @@ def _extract_item_id_tag(text: str) -> str | None:
 _NEW_TOPIC_KWS = ("สวัสดี", "หวัดดี", "hi", "hello", "แนะนำ", "มีอะไร", "มีไร",
                   "สนใจ", "อยากได้", "หาสินค้า", "ดูสินค้า")
 
+# คำถาม "ชุดสินค้า" — เปรียบเทียบ/superlative อ้างหลายชิ้น ไม่ใช่ anchor เดี่ยว
+#   ใช้ร่วมกัน: ITEM-TAG shortcut bypass (~895) + FOLLOWUP-COMP trigger (~1244)
+_COMPARISON_FOLLOWUP_KW = ("ต่างกัน", "ต่างยังไง", "ต่างไหม", "เปรียบเทียบ", "เทียบ", "เทียบกัน",
+                           "แนะนำตัวไหนดี", "ตัวไหนดีกว่า", "อันไหนดีกว่า", "ซื้อตัวไหนดี",
+                           "เลือกตัวไหนดี", "ตัวไหนน่าซื้อ", "อันไหนน่าซื้อ",
+                           # คำเปรียบเทียบโดยนัย — "อันไหนใหม่กว่า/ถูกกว่า/ล่าสุด"
+                           "ใหม่กว่า", "ถูกกว่า", "ล่าสุด")
+_SUPERLATIVE_KW = ("สุด", "ที่สุด", "แรงสุด", "ไวสุด", "เร็วสุด", "มากสุด", "น้อยสุด",
+                   "แรงที่สุด", "ไวที่สุด", "เร็วที่สุด", "มากที่สุด", "น้อยที่สุด",
+                   "เบาสุด", "จุมากสุด", "คุ้มสุด", "คุ้มที่สุด",
+                   "กว่านี้", "เร็วกว่า", "แรงกว่า", "ไวกว่า", "ดีกว่า", "มากกว่า",
+                   "ไวๆ", "เร็วๆ", "แรงๆ", "ชาร์จไว", "ชาร์จเร็ว")
+# คำอ้าง "ชิ้นเดียว" (deictic) — ถ้ามี = ถามเกี่ยวกับ anchor ไม่ใช่เทียบชุด
+#   กัน false positive ของ _SUPERLATIVE_KW เช่น "ตัวนี้ชาร์จเร็วไหม" (ไม่ใช่ set question)
+_SINGLE_ITEM_REF_KW = ("ตัวนี้", "รุ่นนี้", "อันนี้", "ชิ้นนี้", "สินค้านี้", "เรือนนี้")
+
 
 def _add_context_note(products: list, note: str) -> None:
     """append note ลง products[0]['_context_note'] (คั่นด้วย space ถ้ามีอยู่แล้ว)."""
@@ -884,6 +900,21 @@ def chat(req: ChatRequest) -> ChatResponse:
                     _cur_sub_anchor == "adapter" and _anchor_sub == "cable"
                     and not _has_strong_adapter_anchor
                 )
+                # ⚡ คำถาม "ชุดสินค้า" (compare/superlative) + timeline มี ≥2 ชิ้น
+                #   → ไม่ใช่คำถามเกี่ยวกับ anchor เดี่ยว → ไม่ควรตอบจากการ์ดเดี่ยว
+                #   ยกเว้น: มีคำอ้างชิ้นเดียว ("ตัวนี้/รุ่นนี้") = ถาม anchor จริงๆ
+                _is_set_q_multi = False
+                _msg_l_set = (req.message or "").lower()
+                if (req.conversation_id
+                        and not any(kw in _msg_l_set for kw in _SINGLE_ITEM_REF_KW)
+                        and any(kw in _msg_l_set
+                                for kw in _COMPARISON_FOLLOWUP_KW + _SUPERLATIVE_KW)):
+                    try:
+                        from . import conversation_products as _cp_multi
+                        _is_set_q_multi = len(_cp_multi.get_anchor_and_suggestions(
+                            req.conversation_id, limit=2)) >= 2
+                    except Exception:
+                        _is_set_q_multi = False
                 if _cur_sub_anchor and _cur_sub_anchor != _anchor_sub and not _is_loose_head:
                     print(f"[ITEM-TAG] subtype mismatch: msg={_cur_sub_anchor} anchor={_anchor_sub} → fall through to fetch_products", file=sys.stderr)
                     # ไม่ return — ปล่อยไป main flow (fetch_products จะกรอง subtype ที่ถูกต้อง)
@@ -892,6 +923,11 @@ def chat(req: ChatRequest) -> ChatResponse:
                     # ⚡ เก็บ anchor ไว้ merge ภายหลังหลัง fetch_products
                     _hybrid_anchor_card = anchor_card
                     # ไม่ return — ปล่อยไป main flow (fetch_products + merge anchor ภายหลัง)
+                elif _is_set_q_multi:
+                    # ⚡ คำถามเปรียบเทียบ/superlative อ้าง "ชุดสินค้า" ไม่ใช่ anchor เดี่ยว —
+                    #   เช่น ส่งการ์ด A → bot แนะนำ B → "อันไหนใหม่กว่า" ต้องเทียบ A/B
+                    #   ปล่อยไป main flow ให้ FOLLOWUP-COMP/CONV-ACTIVE จัดการ context
+                    print(f"[ITEM-TAG] compare/superlative + ≥2 products in timeline → fall through to main flow", file=sys.stderr)
                 else:
                     # ถ้าลูกค้าไม่ได้พิมพ์คำถามเพิ่ม (ส่งแค่การ์ดสินค้ามาเฉย ๆ)
                     # ให้ตั้งคำถามแทน โดยบอกชัดว่าลูกค้าระบุสินค้านี้แล้ว (ผ่านการแชร์การ์ดสินค้า)
@@ -1241,15 +1277,12 @@ def chat(req: ChatRequest) -> ChatResponse:
         # ===== Comparison follow-up =====
         # กรณี: ลูกค้าถาม "ต่างกันยังไง", "เปรียบเทียบ", "เทียบ" โดยไม่มี model keyword
         # แต่มี model ใน history → ดึง model จาก history มาเปรียบเทียบ
-        _comparison_followup_kw = ("ต่างกัน", "ต่างยังไง", "ต่างไหม", "เปรียบเทียบ", "เทียบ", "เทียบกัน",
-                                   "แนะนำตัวไหนดี", "ตัวไหนดีกว่า", "อันไหนดีกว่า", "ซื้อตัวไหนดี",
-                                   "เลือกตัวไหนดี", "ตัวไหนน่าซื้อ", "อันไหนน่าซื้อ",
-                                   # คำเปรียบเทียบโดยนัย — "อันไหนใหม่กว่า/ถูกกว่า/ล่าสุด"
-                                   "ใหม่กว่า", "ถูกกว่า", "ล่าสุด")
         _is_comparison_followup = (
-            any(kw in req.message.lower() for kw in _comparison_followup_kw)
+            any(kw in req.message.lower()
+                for kw in _COMPARISON_FOLLOWUP_KW + _SUPERLATIVE_KW)
             and history
             and not _current_has_model  # message ปัจจุบันไม่มี model keyword
+            and not any(kw in req.message.lower() for kw in _SINGLE_ITEM_REF_KW)  # "ตัวนี้ใหม่สุดไหม" = ถามชิ้นเดียว
             and len(req.message.split()) <= 4  # คำถามสั้นๆ
         )
         if _is_comparison_followup:
@@ -1282,6 +1315,16 @@ def chat(req: ChatRequest) -> ChatResponse:
                 try:
                     from . import conversation_products as _cp_sug
                     _sug_batch = _cp_sug.get_latest_suggestion_batch(req.conversation_id)
+                    if 0 < len(_sug_batch) < 2:
+                        # ⚡ batch ตัวเดียว → เติม anchor ล่าสุดเป็นคู่เทียบ
+                        #   (สินค้าที่คุยกันอยู่ 2 ชิ้นล่าสุด — เช่น ส่งการ์ด Case แล้ว bot แนะนำ Run ตัวเดียว)
+                        for _a in _cp_sug.get_anchor_history(req.conversation_id, limit=3):
+                            _a_card = _a.get("card") or {
+                                "item_id": _a.get("item_id"), "name": _a.get("name")}
+                            if all(str(c.get("item_id")) != str(_a_card.get("item_id"))
+                                   for c in _sug_batch):
+                                _sug_batch.append(_a_card)
+                                break
                     if len(_sug_batch) >= 2:
                         _anchor_compare_ctx = {"current": _sug_batch[0],
                                                "previous": _sug_batch[1]}
@@ -1404,7 +1447,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         # → merge point เพิ่ม Run เข้า products + comparison note
         if (
             not _anchor_compare_ctx  # ยังไม่ได้ set (ไม่ซ้ำกับ block ด้านบน)
-            and any(kw in (req.message or "").lower() for kw in _comparison_followup_kw)
+            and any(kw in (req.message or "").lower() for kw in _COMPARISON_FOLLOWUP_KW)
             and _current_has_model  # มี model keyword (ต่างจาก full comparison ที่ต้องไม่มี)
             and bool(req.conversation_id)
         ):
@@ -1625,12 +1668,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         _t0 = _time.time()
         # superlative keywords (define ก่อนใช้ใน follow-up skip logic และ fetch_limit logic)
         _msg_lower_super = (req.message or "").lower()
-        _superlative_kw = ("สุด", "ที่สุด", "แรงสุด", "ไวสุด", "เร็วสุด", "มากสุด", "น้อยสุด",
-                           "แรงที่สุด", "ไวที่สุด", "เร็วที่สุด", "มากที่สุด", "น้อยที่สุด",
-                           "เบาสุด", "จุมากสุด", "คุ้มสุด", "คุ้มที่สุด",
-                           "กว่านี้", "เร็วกว่า", "แรงกว่า", "ไวกว่า", "ดีกว่า", "มากกว่า",
-                           "ไวๆ", "เร็วๆ", "แรงๆ", "ชาร์จไว", "ชาร์จเร็ว")
-        _is_superlative_q = any(kw in _msg_lower_super for kw in _superlative_kw)
+        _is_superlative_q = any(kw in _msg_lower_super for kw in _SUPERLATIVE_KW)
         if _wattage_followup_skip_kb or _compat_followup_skip_kb or _ref_indicator_skip_kb:
             kb_result = None
             _skip_reason = (
