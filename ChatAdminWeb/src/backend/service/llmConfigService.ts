@@ -1,6 +1,7 @@
 // LLM runtime config — key pool + models ที่ Python bot อ่านเอง (TTL ~10s)
 // เก็บใน system_configs doc { config_key: "llm_config" }
 // ⚠️ keys เก็บ plaintext ใน DB (bot ต้องใช้จริง) — GET คืน masked เท่านั้น
+// key entry: {name, value, enabled} — enabled=false = อยู่ใน list แต่ bot ไม่หยิบไปหมุน
 import { createHash } from "crypto";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 
@@ -9,9 +10,15 @@ const CONFIG_KEY = "llm_config";
 export const MODEL_ROLES = ["chat", "vision", "intent", "openrouter_search"] as const;
 export type ModelRole = (typeof MODEL_ROLES)[number];
 
+export interface KeyEntry {
+  name: string;
+  value: string;
+  enabled: boolean;
+}
+
 export interface LlmConfigDoc {
   config_key: string;
-  keys: string[];
+  keys: (string | KeyEntry)[]; // string = legacy shape → normalize เป็น enabled entry
   models: Partial<Record<ModelRole, string>>;
   updated_by?: string;
   updated_at?: Date;
@@ -21,14 +28,29 @@ export interface MaskedKey {
   index: number;
   sha256: string; // 8 hex — คู่กับ startup log ของ bot ([KEYS] key[i] = sha256:...)
   tail: string;   // 4 ตัวท้าย — ให้ dev ระบุได้ว่า key ไหน
+  name: string;
+  enabled: boolean;
 }
 
-function mask(k: string, index: number): MaskedKey {
-  return {
-    index,
-    sha256: createHash("sha256").update(k).digest("hex").slice(0, 8),
-    tail: k.slice(-4),
-  };
+const sha8 = (v: string) =>
+  createHash("sha256").update(v).digest("hex").slice(0, 8);
+
+/** legacy string keys → KeyEntry (name อัตโนมัติ GEMINI_API_KEY_n, enabled) */
+export function normKeys(keys: (string | KeyEntry)[] | undefined): KeyEntry[] {
+  return (keys ?? []).flatMap((k, i) => {
+    if (typeof k === "string") {
+      const v = k.trim();
+      return v ? [{ name: `GEMINI_API_KEY_${i + 1}`, value: v, enabled: true }] : [];
+    }
+    if (k && typeof k === "object" && typeof k.value === "string" && k.value.trim()) {
+      return [{
+        name: String(k.name || `GEMINI_API_KEY_${i + 1}`).slice(0, 60),
+        value: k.value.trim(),
+        enabled: k.enabled !== false,
+      }];
+    }
+    return [];
+  });
 }
 
 export async function getLlmConfig(): Promise<LlmConfigDoc> {
@@ -46,7 +68,13 @@ export async function getLlmConfigMasked(): Promise<{
 }> {
   const doc = await getLlmConfig();
   return {
-    keys: doc.keys.map(mask),
+    keys: normKeys(doc.keys).map((k, i) => ({
+      index: i + 1,
+      sha256: sha8(k.value),
+      tail: k.value.slice(-4),
+      name: k.name,
+      enabled: k.enabled,
+    })),
     models: doc.models ?? {},
     updated_by: doc.updated_by,
     updated_at: doc.updated_at,
@@ -54,14 +82,19 @@ export async function getLlmConfigMasked(): Promise<{
 }
 
 /**
- * PUT — ops-based: add_keys / remove_sha256 / models (merge per role)
- * key จริงไม่เคยออก API — ลบด้วย sha256 prefix
- * models: เฉพาะ role ที่รู้จัก, string ไม่ว่าง
+ * PUT — ops-based (key จริงไม่เคยออก API — อ้างด้วย sha256 prefix):
+ *   add_keys:     (string | {name?, value})[]
+ *   remove_sha256: string[]
+ *   set_enabled:  {sha256, enabled}[]
+ *   rename:       {sha256, name}[]
+ *   models:       merge per role (string ว่าง = ลบ override → env fallback)
  */
 export async function updateLlmConfig(
   updates: {
-    add_keys?: string[];
+    add_keys?: (string | { name?: string; value?: string })[];
     remove_sha256?: string[];
+    set_enabled?: { sha256: string; enabled: boolean }[];
+    rename?: { sha256: string; name: string }[];
     models?: Partial<Record<ModelRole, string>>;
   },
   updatedBy: string
@@ -72,22 +105,42 @@ export async function updateLlmConfig(
     updated_by: updatedBy,
     updated_at: new Date(),
   };
-  if (updates.add_keys !== undefined || updates.remove_sha256 !== undefined) {
+
+  const touchesKeys =
+    updates.add_keys !== undefined || updates.remove_sha256 !== undefined ||
+    updates.set_enabled !== undefined || updates.rename !== undefined;
+  if (touchesKeys) {
+    let keys = normKeys(doc.keys);
     const removeSet = new Set(updates.remove_sha256 ?? []);
-    let keys = doc.keys.filter(
-      (k) => !removeSet.has(createHash("sha256").update(k).digest("hex").slice(0, 8))
-    );
-    const added = (updates.add_keys ?? [])
-      .filter((k): k is string => typeof k === "string" && k.trim().length > 10)
-      .map((k) => k.trim());
-    keys = [...new Set([...keys, ...added])];
+    if (removeSet.size) keys = keys.filter((k) => !removeSet.has(sha8(k.value)));
+
+    for (const op of updates.set_enabled ?? []) {
+      const k = keys.find((k) => sha8(k.value) === op.sha256);
+      if (k) k.enabled = op.enabled === true;
+    }
+    for (const op of updates.rename ?? []) {
+      const k = keys.find((k) => sha8(k.value) === op.sha256);
+      if (k && typeof op.name === "string" && op.name.trim())
+        k.name = op.name.trim().slice(0, 60);
+    }
+
+    for (const raw of updates.add_keys ?? []) {
+      const value = typeof raw === "string" ? raw.trim() : String(raw?.value ?? "").trim();
+      if (value.length <= 10) continue;
+      if (keys.some((k) => k.value === value)) continue; // กัน key ซ้ำ
+      const name =
+        (typeof raw === "object" ? String(raw?.name ?? "").trim() : "") ||
+        `GEMINI_API_KEY_${keys.length + 1}`;
+      keys.push({ name: name.slice(0, 60), value, enabled: true });
+    }
     $set.keys = keys;
   }
+
   if (updates.models !== undefined) {
     const models: Partial<Record<ModelRole, string>> = { ...(doc.models ?? {}) };
     for (const role of MODEL_ROLES) {
       const m = updates.models[role];
-      if (typeof m === "string") models[role] = m.trim(); // ว่าง = ลบ override → env fallback
+      if (typeof m === "string") models[role] = m.trim();
     }
     $set.models = models;
   }

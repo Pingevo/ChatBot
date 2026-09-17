@@ -639,9 +639,16 @@ def get_llm_config() -> dict:
 
 
 def _active_keys() -> list[str]:
-    """key pool ปัจจุบัน — config.keys ถ้ามี (UI จัดการ) ไม่มี → env keys"""
-    keys = [k.strip() for k in (get_llm_config().get("keys") or [])
-            if isinstance(k, str) and k.strip()]
+    """key pool ปัจจุบัน — config.keys ถ้ามี (UI จัดการ) ไม่มี → env keys
+    รองรับ 2 shape: string เดิม และ {name, value, enabled} — enabled=false ไม่หมุน"""
+    keys: list[str] = []
+    for k in (get_llm_config().get("keys") or []):
+        if isinstance(k, str) and k.strip():
+            keys.append(k.strip())
+        elif isinstance(k, dict) and k.get("enabled", True):
+            v = str(k.get("value") or "").strip()
+            if v:
+                keys.append(v)
     return keys or _API_KEYS
 
 

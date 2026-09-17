@@ -17,7 +17,13 @@ export async function GET(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   const r = await requirePageEdit(req, "llm"); // dev only
   if (!r.ok) return r.response;
-  let body: { add_keys?: string[]; remove_sha256?: string[]; models?: Record<string, string> };
+  let body: {
+    add_keys?: (string | { name?: string; value?: string })[];
+    remove_sha256?: string[];
+    set_enabled?: { sha256: string; enabled: boolean }[];
+    rename?: { sha256: string; name: string }[];
+    models?: Record<string, string>;
+  };
   try {
     body = await req.json();
   } catch {
@@ -25,7 +31,13 @@ export async function PUT(req: NextRequest) {
   }
   try {
     await updateLlmConfig(
-      { add_keys: body.add_keys, remove_sha256: body.remove_sha256, models: body.models },
+      {
+        add_keys: body.add_keys,
+        remove_sha256: body.remove_sha256,
+        set_enabled: body.set_enabled,
+        rename: body.rename,
+        models: body.models,
+      },
       r.ctx.admin.username || r.ctx.admin.email || "dev"
     );
     return NextResponse.json({ ok: true });

@@ -8495,3 +8495,19 @@ Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ต�
 **verify จริง:** tsc --noEmit ผ่าน; GET/PUT /api/permissions ไม่มี session → 401; tsx test resolveAccess: dev→edit ทุกหน้า, admin llm→none, ticket→edit, custom role→none, role-admin non-dev→none, unknown page→dev only — ตรง matrix เดิมทุกจุด
 
 **ยังไม่ทำ (ตามแพลน):** UI assign role ให้ user (ทำใน collection admins ต่อไป); SSO login flow ที่ map email→role ถ้ามี
+
+---
+
+## 2026-09-17 (ต่อ) — /llm UI redesign: searchable model dropdown + key pool list พร้อม toggle
+
+**ทำไม:** user ขอ — model เป็น dropdown ค้นหาได้แทน free-text, key pool เป็น list สวยๆ มี toggle เปิด/ปิด, ไม่มีปุ่มบันทึก (ทุกการเปลี่ยน → confirm popup แล้ว save ทันที), add key เด้งใน list ตั้งชื่อ auto `GEMINI_API_KEY_n` แก้ชื่อได้, responsive มือถือ/tablet/PC
+
+**shape ใหม่:** `keys: [{name, value, enabled}]` — เก่า string[] ยังอ่านได้ (normKeys normalize + bot `_active_keys` รองรับทั้งสอง, `enabled=false` ไม่เข้า rotation)
+
+**ไฟล์:**
+- `llmConfigService.ts` — KeyEntry + normKeys; ops เพิ่ม: `set_enabled`, `rename` (อ้าง sha256); add_keys รับ `{name?,value}` auto-name `GEMINI_API_KEY_{n+1}`, กัน value ซ้ำ
+- `llm.py _active_keys` — iterate รองรับ dict + filter enabled
+- route `/api/llm-config` — body รับ ops ใหม่
+- `/llm/page.tsx` เขียนใหม่: `SearchableSelect` (fixed-pos dropdown + search + custom value + Enter pick) ต่อ 4 model roles → confirm.ask ก่อน PUT; key list = ToggleSwitch + ชื่อคลิกแก้ inline (Enter/blur save) + hash+tail + ลบ; add-key inline form auto-name; toggle ปิดตัวสุดท้ายเตือน fallback env; responsive `sm:` grid
+
+**verify จริง:** tsc ผ่าน, py_compile ผ่าน, /llm compile (307→login), /api/llm-config 401 unauth
