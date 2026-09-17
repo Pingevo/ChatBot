@@ -18,7 +18,7 @@ export type PageKey =
   | "replay-compare" | "test-result" | "admin-review-kpi" | "admin-chat-result"
   | "test-chat-result"
   | "shop" | "customer" | "team" | "user"
-  | "admin-config" | "config" | "log";
+  | "admin-config" | "config" | "llm" | "log";
 
 /**
  * Per-page, per-role permission map (server-side copy — must stay in sync with lib/roles.ts).
@@ -52,6 +52,7 @@ const PAGE_PERMISSIONS: Record<PageKey, Record<Role, AccessLevel>> = {
   user:               { admin: "none", superadmin: "edit", dev: "edit" },
   "admin-config":     { admin: "read", superadmin: "edit", dev: "edit" },
   config:             { admin: "none", superadmin: "none", dev: "edit" },
+  llm:                { admin: "none", superadmin: "none", dev: "edit" },
   log:                { admin: "none", superadmin: "none", dev: "edit" },
 };
 

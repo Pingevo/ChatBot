@@ -21,13 +21,10 @@
 """
 from __future__ import annotations
 
-import itertools as _itertools
 import json
 import os
 import sys
 from typing import Any
-
-from google import genai
 
 
 _INTENT_PROMPT = """คุณเป็นระบบจำแนกความต้องการของลูกค้า (intent classifier) สำหรับแชทบอทร้านขายของออนไลน์
@@ -157,36 +154,8 @@ confidence: ความมั่นใจ 0.0-1.0
 """
 
 
-def _load_api_keys() -> list[str]:
-    """โหลด API keys จาก environment (ใช้ shared keys กับ llm.py)."""
-    keys: list[str] = []
-    for i in range(1, 10):
-        k = os.environ.get(f"GEMINI_API_KEY_{i}", "").strip()
-        if k:
-            keys.append(k)
-    k = os.environ.get("GEMINI_API_KEY", "").strip()
-    if k and k not in keys:
-        keys.append(k)
-    return keys
-
-
-_API_KEYS: list[str] = _load_api_keys()
-_KEY_CYCLE = _itertools.cycle(_API_KEYS) if _API_KEYS else None
-_KEY_INDEX = 0
-
-
-def _next_api_key() -> str:
-    global _KEY_INDEX
-    if not _API_KEYS:
-        raise RuntimeError("ไม่พบ GEMINI_API_KEY สำหรับ intent classifier")
-    key = next(_KEY_CYCLE)
-    _KEY_INDEX = (_KEY_INDEX + 1) % len(_API_KEYS)
-    return key
-
-
-def _client() -> genai.Client:
-    return genai.Client(api_key=_next_api_key())
-
+# API key rotation + model ใช้ของ llm.py ร่วมกัน (llm_config DB → env fallback)
+# — call site ใช้ llm._generate ซึ่งจัดการ client/key/quota เอง
 
 # default เมื่อ LLM ไม่พร้อมหรือ error
 _DEFAULT_RESULT: dict[str, Any] = {
@@ -241,10 +210,10 @@ def classify_intent(
     user_parts.append(f"คำถามลูกค้า: \"{message}\"")
     user_prompt = "\n\n".join(user_parts)
 
-    model_name = os.environ.get("INTENT_MODEL", "gemini-3.1-flash-lite")
+    from . import llm as _llm   # lazy — key pool/model/quota ร่วมกับ llm.py (llm_config DB → env)
+    model_name = _llm.get_model("intent")
 
     try:
-        from . import llm as _llm   # lazy — ใช้ quota manager ร่วมกัน (RPM/TPM/RPD + model fallback)
         response = _llm._generate(
             model_name,
             user_prompt,

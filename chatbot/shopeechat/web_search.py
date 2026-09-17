@@ -35,7 +35,11 @@ def _get_openrouter_base() -> str:
     return os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
 
 def _get_openrouter_model() -> str:
-    return os.environ.get("OPENROUTER_SEARCH_MODEL", "google/gemini-2.5-flash:online").strip()
+    try:
+        from . import llm as _llm   # llm_config DB → env fallback
+        return _llm.get_model("openrouter_search")
+    except Exception:
+        return os.environ.get("OPENROUTER_SEARCH_MODEL", "google/gemini-2.5-flash:online").strip()
 
 def _get_ai_usage_hub_url() -> str:
     return os.environ.get("AI_USAGE_HUB_URL", "").strip()

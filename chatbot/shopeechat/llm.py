@@ -608,9 +608,58 @@ def _load_api_keys() -> list[str]:
     return keys
 
 
-_API_KEYS: list[str] = _load_api_keys()
+_API_KEYS: list[str] = _load_api_keys()   # env keys — fallback เมื่อ DB ไม่มี llm_config
 _KEY_CYCLE = _itertools.cycle(_API_KEYS) if _API_KEYS else None
 _KEY_INDEX = 0
+
+# ---- runtime LLM config (Mongo systemConfigs.llm_config) -----------------------
+# UI /llm (dev-only) เขียน doc นี้ → bot หยิบไปใช้ใน ≤10s ไม่ต้อง restart
+# ไม่มี doc / DB ล่ม → fallback env keys+models เหมือนเดิมทุกอย่าง
+_LLM_CFG_TTL = 10.0
+_llm_cfg_cache: dict | None = None
+_llm_cfg_ts = 0.0
+
+
+def get_llm_config() -> dict:
+    """อ่าน llm_config doc จาก admin DB — TTL 10s, fail → คืน cache เดิม/{}"""
+    global _llm_cfg_cache, _llm_cfg_ts
+    now = _time.time()
+    if _llm_cfg_cache is not None and now - _llm_cfg_ts < _LLM_CFG_TTL:
+        return _llm_cfg_cache
+    try:
+        from . import knowledge_base as _kb   # lazy — กัน import หนักตอน module load
+        doc = _kb._admin_db()["system_configs"].find_one(
+            {"config_key": "llm_config"}, max_time_ms=1500) or {}
+        _llm_cfg_cache = doc
+    except Exception:
+        if _llm_cfg_cache is None:
+            _llm_cfg_cache = {}
+    _llm_cfg_ts = now
+    return _llm_cfg_cache
+
+
+def _active_keys() -> list[str]:
+    """key pool ปัจจุบัน — config.keys ถ้ามี (UI จัดการ) ไม่มี → env keys"""
+    keys = [k.strip() for k in (get_llm_config().get("keys") or [])
+            if isinstance(k, str) and k.strip()]
+    return keys or _API_KEYS
+
+
+_MODEL_ROLE_ENV = {
+    "chat": ("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+    "vision": ("VISION_MODEL", "gemini-3.1-flash-lite"),
+    "intent": ("INTENT_MODEL", "gemini-3.1-flash-lite"),
+    "openrouter_search": ("OPENROUTER_SEARCH_MODEL", "google/gemini-2.5-flash:online"),
+}
+
+
+def get_model(role: str) -> str:
+    """model ของ role — config.models[role] ก่อน ไม่มี → env → default"""
+    m = (get_llm_config().get("models") or {}).get(role)
+    if isinstance(m, str) and m.strip():
+        return m.strip()
+    env_name, default = _MODEL_ROLE_ENV[role]
+    return os.environ.get(env_name, default).strip()
 
 # debug log — ยืนยันว่าโหลด keys ครบ
 # 🔒 M3: Log only count + hash prefix, not actual key fragments
@@ -623,12 +672,13 @@ for i, k in enumerate(_API_KEYS):
 
 
 def _next_api_key() -> str:
-    """หา key ถัดไปแบบ round-robin."""
+    """หา key ถัดไปแบบ round-robin บน active pool (config DB ก่อน → env fallback)."""
     global _KEY_INDEX
-    if not _API_KEYS:
-        raise RuntimeError("ไม่พบ GEMINI_API_KEY หรือ GEMINI_API_KEY_1..9 ใน .env")
-    key = next(_KEY_CYCLE)
-    _KEY_INDEX = (_KEY_INDEX + 1) % len(_API_KEYS)
+    keys = _active_keys()
+    if not keys:
+        raise RuntimeError("ไม่พบ GEMINI_API_KEY หรือ GEMINI_API_KEY_1..9 หรือ llm_config.keys")
+    key = keys[_KEY_INDEX % len(keys)]
+    _KEY_INDEX = (_KEY_INDEX + 1) % len(keys)
     return key
 
 
@@ -640,9 +690,10 @@ def _client() -> genai.Client:
 # ---- single-key quota manager -------------------------------------------------
 # key เดียว → ต้องบริหาร rate เอง: 15 RPM / 250k TPM / 500 RPD (ต่อ model)
 # 3.5-lite กับ 3.1-lite เป็น quota pool คนละอัน → 429 แล้ว fallback ข้าม model ได้
-_QUOTA_RPM = int(os.environ.get("GEMINI_RPM", "14"))        # เผื่อ 1 จาก 15
-_QUOTA_TPM = int(os.environ.get("GEMINI_TPM", "240000"))    # เผื่อ ~4% จาก 250k
-_QUOTA_RPD = int(os.environ.get("GEMINI_RPD", "480"))       # เผื่อ 20 จาก 500
+_QUOTA_RPM = int(os.environ.get("GEMINI_RPM", "14"))        # เผื่อ 1 จาก 15 — ต่อ key
+_QUOTA_TPM = int(os.environ.get("GEMINI_TPM", "240000"))    # เผื่อ ~4% จาก 250k — ต่อ key
+_QUOTA_RPD = int(os.environ.get("GEMINI_RPD", "480"))       # เผื่อ 20 จาก 500 — ต่อ key
+# limits เป็นต่อ key → scale ตาม active pool ณ ตอนใช้ (key เปลี่ยนสดได้)
 # model fallback map — pool แยกกัน
 _MODEL_FALLBACK = {
     "gemini-3.5-flash-lite": "gemini-3.1-flash-lite",
@@ -695,8 +746,12 @@ def _acquire(model: str, est_tokens: int) -> str:
             now = _time.time()
             today = _dt.date.today().isoformat()
             day = _q_day.setdefault(today, {})
+            n_keys = max(len(_active_keys()), 1)
+            rpd = _QUOTA_RPD * n_keys
+            rpm = _QUOTA_RPM * n_keys
+            tpm = _QUOTA_TPM * n_keys
             for m in (model, _MODEL_FALLBACK.get(model)):
-                if m and day.get(m, 0) < _QUOTA_RPD:
+                if m and day.get(m, 0) < rpd:
                     model = m
                     break
             else:
@@ -709,13 +764,13 @@ def _acquire(model: str, est_tokens: int) -> str:
             while tok and now - tok[0][0] > 60:
                 tok.popleft()
             tok_used = sum(n for _, n in tok)
-            if len(req) < _QUOTA_RPM and tok_used + est_tokens <= _QUOTA_TPM:
+            if len(req) < rpm and tok_used + est_tokens <= tpm:
                 req.append(now)
                 day[model] = day.get(model, 0) + 1
                 _save_quota_day()
                 return model
             # รอจน window ตัวเก่าสุดหลุด
-            wait = 60 - (now - req[0]) + 0.05 if len(req) >= _QUOTA_RPM else 2.0
+            wait = 60 - (now - req[0]) + 0.05 if len(req) >= rpm else 2.0
         _time.sleep(max(wait, 0.1))
 
 
@@ -879,7 +934,7 @@ def _build_context(products: list[dict], shop_hint: str | None = None,
 # คืน text อธิบายสั้นๆ เป็นภาษาไทย เพื่อใช้เป็น context ให้ LLM หลักตอบ
 # ⚠️ ต้องโหลดรูปเป็น bytes แล้วส่งเป็น inline_data (Part.from_bytes)
 #    เพราะ Part.from_uri ใช้ได้เฉพาะ GCS URL ไม่ใช่ HTTP URL ทั่วไป
-_VISION_MODEL = os.environ.get("VISION_MODEL", "gemini-3.1-flash-lite")
+# model vision → get_model("vision") (llm_config DB → env VISION_MODEL → default)
 
 _VISION_PROMPT = """คุณเป็นผู้ช่วยแชทบอทร้านค้าออนไลน์
 ลูกค้าส่งรูปนี้มาในแชท อธิบายเป็นภาษาไทยว่ารูปนี้เป็นอะไร ใช้ไม่เกิน 5 บรรทัด
@@ -1024,7 +1079,7 @@ def describe_image(
         if history_context:
             prompt += f"\n\nบริบทก่อนหน้ารูปนี้:\n{history_context[:500]}"
         resp = _generate(
-            _VISION_MODEL,
+            get_model("vision"),
             [prompt, part],
             {"temperature": 0.0, "max_output_tokens": 300},
             est_tokens=len(prompt) // 4 + 2000,   # รูป ~258-1290 tok — เผื่อไว้
@@ -1037,7 +1092,7 @@ def describe_image(
                 "output": getattr(usage, "candidates_token_count", 0) or 0,
                 "total": getattr(usage, "total_token_count", 0) or 0,
             }
-        print(f"[VISION] model={_VISION_MODEL} url={image_url[:60]}... bytes={len(img_bytes)} desc={desc[:80]!r} tokens={usage_info['total']}", file=sys.stderr)
+        print(f"[VISION] model={get_model('vision')} url={image_url[:60]}... bytes={len(img_bytes)} desc={desc[:80]!r} tokens={usage_info['total']}", file=sys.stderr)
         return desc, usage_info
     except genai_errors.ClientError as exc:
         print(f"[VISION] ClientError: {exc}", file=sys.stderr)
@@ -1128,7 +1183,7 @@ def answer(
         client = _client()
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ", {"prompt": 0, "output": 0, "total": 0}
-    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
+    model_name = (model or get_model("chat")).strip()
     # BUG-P fix — ตรวจภาษาลูกค้า → ตอบในภาษาที่เหมาะสม
     _lang = _detect_lang(_msg_for_llm)
     _lang_inst = _lang_instruction(_lang)
@@ -1339,7 +1394,7 @@ def answer_with_kb(
         client = _client()
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ"
-    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
+    model_name = (model or get_model("chat")).strip()
     # BUG-P fix — ตรวจภาษาลูกค้า → ตอบในภาษาที่เหมาะสม
     _lang = _detect_lang(message)
     _lang_inst = _lang_instruction(_lang)
@@ -1415,7 +1470,7 @@ def answer_general(
         client = _client()
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ", {}
-    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")).strip()
+    model_name = (model or get_model("chat")).strip()
 
     general_instruction = (
         "คุณเป็นพนักงานบริการลูกค้าหญิงของร้านค้าออนไลน์ในเครือ Shopee "

@@ -8454,3 +8454,19 @@ Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ต�
 **verify จริง:** unit checks acquire/RPD/fallback ผ่าน; live call → `[QUOTA] 3.5 429 → fallback 3.1` ยิงจริง (3.1 ก็หมด → raise ต่อถูกต้อง); counter persist ทำงาน
 
 **ยังต้องทำ (user):** ตั้ง `GEMINI_API_KEY` (key เดียว) ใน .env + ลบ `_1.._9` + restart bot — process ที่รันอยู่ยังโค้ดเก่า (9 keys)
+
+---
+
+## 2026-09-17 (ต่อ) — runtime LLM config: key pool + per-role models ผ่าน Mongo + หน้า /llm (dev-only)
+
+**ทำไม:** อยากเพิ่ม/ลบ key + เปลี่ยน model ได้ทันทีโดยไม่ restart — โค้ดเดิมอ่าน env ครั้งเดียวตอน startup
+
+**ดีไซน์:** `system_configs` doc `{config_key:"llm_config", keys:[], models:{chat,vision,intent,openrouter_search}}` — ChatAdminWeb เขียน, bot อ่าน TTL 10s — ไม่มี doc/DB ล่ม → env fallback เหมือนเดิม 100%
+
+**bot (llm.py):** `get_llm_config` (TTL 10s + max_time_ms 1500 + fail-stale) / `_active_keys` / `get_model(role)`; `_next_api_key` เปลี่ยน cycle→index-modulo บน active pool (rotation เดิม); quota limits scale ตาม pool size ณ ตอนใช้; call sites ทั้ง 4 role ผ่าน get_model; intent_classifier ลบ key loader ตัวเอง → delegate llm ทั้งหมด; web_search openrouter model → get_model("openrouter_search")
+
+**web (ChatAdminWeb):** page key `"llm"` dev-only (roles.ts + authorize.ts mirror); `llmConfigService` — GET คืน masked (sha256:8 + tail4, key จริงไม่ออก API), PUT ops-based (add_keys/remove_sha256/models merge); route `/api/llm-config` requirePageEdit("llm"); หน้า `/llm` (key pool manager + model roles card); nav เพิ่มใน Sidebar+MobileNav
+
+**verify จริง:** ใส่ doc ทดสอบ → active keys=2 test keys, rotation หมุน, model override ทำงาน, role ที่ไม่ได้ตั้ง fallback env; ลบ doc → กลับ env 9 keys; tsc ผ่าน; py_compile ผ่าน; เจอ bug: collection name `systemConfigs` vs `system_configs` (แก้แล้ว)
+
+**⚠️ รู้ตัว:** keys เก็บ plaintext ใน Mongo (bot ต้องใช้จริง) — จำกัดผ่าน dev-only page + mask on GET

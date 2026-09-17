@@ -19,6 +19,7 @@ import {
   Store,
   Users,
   Bot,
+  KeyRound,
   Shield,
   ContactIcon,
   Headset,
@@ -137,6 +138,7 @@ const navGroups: NavGroup[] = [
     items: [
       { href: "/admin-config", label: "ตั้งค่าแอดมิน", icon: Sliders, page: "admin-config" },
       { href: "/config", label: "ตั้งค่าระบบ", icon: Shield, page: "config" },
+      { href: "/llm", label: "LLM & API Keys", icon: KeyRound, page: "llm" },
       { href: "/logs", label: "บันทึกระบบ", icon: ScrollText, page: "log" },
     ],
   },

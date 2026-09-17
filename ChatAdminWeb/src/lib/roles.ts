@@ -54,6 +54,7 @@ export type PageKey =
   // config
   | "admin-config"
   | "config"
+  | "llm"
   | "log";
 
 /**
@@ -93,6 +94,7 @@ const PAGE_PERMISSIONS: Record<PageKey, Record<Role, AccessLevel>> = {
   // ---- config ----
   "admin-config":     { admin: "read", superadmin: "edit", dev: "edit" },
   config:             { admin: "none", superadmin: "none", dev: "edit" },
+  llm:                { admin: "none", superadmin: "none", dev: "edit" },
   log:                { admin: "none", superadmin: "none", dev: "edit" },
 };
 

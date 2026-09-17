@@ -459,9 +459,12 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 | ฟังก์ชัน | Line | หน้าที่ |
 |---|---|---|
-| `_load_api_keys` | 290 | โหลด `GEMINI_API_KEY_1..9` + `GEMINI_API_KEY` |
-| `_next_api_key` | 317 | หมุนวน round-robin |
-| `_client` | 327 | สร้าง `genai.Client` |
+| `_load_api_keys` | 594 | โหลด `GEMINI_API_KEY_1..9` + `GEMINI_API_KEY` (env baseline) |
+| `get_llm_config` | ~620 | **2026-09-17 runtime config** — อ่าน `system_configs` doc `{config_key:"llm_config"}` (admin DB) TTL 10s + `max_time_ms` 1500 + fail-stale — UI `/llm` (dev) แก้ → มีผลโดยไม่ต้อง restart |
+| `_active_keys` | ~656 | key pool ปัจจุบัน: `llm_config.keys` ถ้ามี → env keys fallback |
+| `get_model(role)` | ~668 | model ต่อ role `chat/vision/intent/openrouter_search`: `llm_config.models[role]` → env → default |
+| `_next_api_key` | ~674 | round-robin บน `_active_keys()` (dynamic — เพิ่ม/ลบ key สดได้) |
+| `_client` | ~683 | สร้าง `genai.Client` จาก `_next_api_key()` |
 | `_acquire(model, est_tokens)` | ~690 | **2026-09-17 quota manager (single-key)** — pace ตาม RPM (`GEMINI_RPM`=14) + TPM (`GEMINI_TPM`=240k) sliding window 60s + daily counter (`GEMINI_RPD`=480) persist `exports/.gemini_quota.json` (atomic); primary model RPD เต็ม → auto สลับ `_MODEL_FALLBACK`; ทั้งคู่เต็ม → raise ClientError(429) |
 | `_generate(model, contents, config, est_tokens)` | ~733 | generate_content wrapper — `_acquire` → call (เก็บ client ref กัน GC ปิด httpx) → `_record_tokens` จาก usage_metadata; **429 → retry 1 ครั้งด้วย fallback model** (3.5↔3.1 quota pool แยกกัน) |
 | `_record_tokens(model, resp)` | ~722 | บันทึก usage_metadata เข้า TPM window |
