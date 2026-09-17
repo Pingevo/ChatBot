@@ -7,6 +7,7 @@
 import { create } from "zustand";
 import { AdminUser } from "./types";
 import { authService } from "./authService";
+import { loadPermissions } from "./roles";
 
 interface AuthState {
   user: AdminUser | null;
@@ -29,6 +30,8 @@ export const useAuth = create<AuthState>((set) => ({
     try {
       const data = await authService.me();
       set({ user: data.admin, initialized: true });
+      // โหลด permission matrix ล่าสุด (fail → ใช้ DEFAULT ใน roles.ts)
+      loadPermissions().catch(() => {});
     } catch {
       set({ user: null, initialized: true });
     }

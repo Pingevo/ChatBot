@@ -142,7 +142,7 @@ export interface AdminUser {
   email: string;
   username: string;
   name: string;
-  role: "superadmin" | "admin" | "dev";
+  role: string; // builtin: superadmin|admin|dev — เพิ่ม role ใหม่ได้ผ่าน /roles
   channels_access?: string[];
   active?: boolean;
   is_accepting_chats?: boolean; // Phase 7.9 — เปิด/ปิดรับแชท

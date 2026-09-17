@@ -1157,6 +1157,13 @@ Mongo document schema:
 | `OPENROUTER_SEARCH_MODEL` | default `google/gemini-2.5-flash:online` |
 | `AI_USAGE_HUB_URL` / `AI_USAGE_HUB_TOKEN` | AI Usage Hub |
 
+### 7.5 ChatAdminWeb — runtime config docs (`system_configs`)
+
+| config_key | หน้าที่ |
+|---|---|
+| `llm_config` | `{keys:[], models:{chat,vision,intent,openrouter_search}}` — แก้ผ่าน `/llm` (dev), bot อ่าน TTL 10s, ไม่มี doc → env fallback |
+| `role_permissions` | `{roles:[{key,label,builtin}], permissions:{page:{role:"none|read|edit"}}}` — แก้ผ่าน `/roles` (dev, hardcode), server cache 30s; page registry = `lib/pages.ts` `PAGES`; ไม่มี doc → `DEFAULT_PERMISSIONS` (ค่าเดิม) |
+
 ---
 
 ## 8. สถานะปัจจุบัน

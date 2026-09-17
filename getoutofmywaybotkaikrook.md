@@ -8470,3 +8470,28 @@ Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ต�
 **verify จริง:** ใส่ doc ทดสอบ → active keys=2 test keys, rotation หมุน, model override ทำงาน, role ที่ไม่ได้ตั้ง fallback env; ลบ doc → กลับ env 9 keys; tsc ผ่าน; py_compile ผ่าน; เจอ bug: collection name `systemConfigs` vs `system_configs` (แก้แล้ว)
 
 **⚠️ รู้ตัว:** keys เก็บ plaintext ใน Mongo (bot ต้องใช้จริง) — จำกัดผ่าน dev-only page + mask on GET
+
+---
+
+## 2026-09-17 (ต่อ) — dynamic role & permission management (/roles, dev-only)
+
+**ทำไม:** role/สิทธิ์เดิม hardcode ซ้ำ 2 ที่ (roles.ts + authorize.ts) + union ตายตัว 3 role — user ต้องการเพิ่ม/ลบ role + กำหนด none/read/edit ต่อหน้าเอง และหน้าใหม่ต้องขึ้นอัตโนมัติ
+
+**ดีไซน์:** page registry ตัวเดียว `lib/pages.ts` (PAGES 27 หน้า + DEFAULT_PERMISSIONS + resolveAccess) → matrix เก็บ `system_configs.role_permissions` {roles[], permissions{page:{role:lvl}}} — server cache 30s, client โหลดหลัง login ผ่าน `loadPermissions()`, ทุกอย่าง fallback DEFAULT เมื่อ DB ไม่มี/ล่ม = พฤติกรรมเดิม 100%
+
+**ไฟล์:**
+- `lib/pages.ts` (ใหม่) — registry + DEFAULT_PERMISSIONS + `resolveAccess()` (dev→edit เสมอ, role-admin ไม่ใช่ dev→none, page/role ไม่รู้จัก→none)
+- `rolePermissionService.ts` (ใหม่) — getRolePermissions (seed อัตโนมัติ), updateRolePermissions (validate key slug/unique/กันลบ builtin 3 ตัว + dev, levels whitelist)
+- `authorize.ts` — ลบ PAGE_PERMISSIONS ซ้ำ, `roleCanAccess/roleCanEdit` เป็น async อ่าน DB (TTL 30s, fail→cache/default), PageKey/Role → string
+- `roles.ts` — ลบ PAGE_PERMISSIONS ซ้ำ, matrix โหลดจาก `/api/permissions` (DEFAULT เป็น fallback), `canManageRoles()` hardcode dev
+- `api/permissions/route.ts` — GET requireAuth (client ต้องใช้ gate nav), PUT requirePageEdit("role-admin") = dev-only ผ่าน resolveAccess
+- `authStore.fetchMe` → loadPermissions() หลัง login
+- `/roles` page (ใหม่) — matrix grid กลุ่มตาม PAGES.group + add/remove role (builtin/dev ลบไม่ได้)
+- Sidebar/MobileNav + users/list route await roleCanEdit
+- `Role`/`AdminUser.role`/`SafeAdmin.role`/`createAdmin.role` → string (custom role เก็บใน admins ได้)
+
+**กันล็อกตัวเอง:** `/roles` ไม่อยู่ใน PAGES — resolveAccess บังคับ role-admin=dev-only ในโค้ดเสมอ (matrix เขียนทับไม่ได้); dev ได้ edit ทุกหน้าเสมอ
+
+**verify จริง:** tsc --noEmit ผ่าน; GET/PUT /api/permissions ไม่มี session → 401; tsx test resolveAccess: dev→edit ทุกหน้า, admin llm→none, ticket→edit, custom role→none, role-admin non-dev→none, unknown page→dev only — ตรง matrix เดิมทุกจุด
+
+**ยังไม่ทำ (ตามแพลน):** UI assign role ให้ user (ทำใน collection admins ต่อไป); SSO login flow ที่ map email→role ถ้ามี

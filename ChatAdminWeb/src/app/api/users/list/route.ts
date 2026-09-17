@@ -9,5 +9,5 @@ export async function GET(req: NextRequest) {
   if (!r.ok) return r.response;
   const users = await auth.listAdmins();
   // superadmin และ dev มีสิทธิ์เท่ากัน — แก้ไขได้ทั้งคู่
-  return json({ users, canEdit: roleCanEdit(r.ctx.admin.role, "user") });
+  return json({ users, canEdit: await roleCanEdit(r.ctx.admin.role, "user") });
 }
