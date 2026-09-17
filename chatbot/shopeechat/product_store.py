@@ -578,6 +578,22 @@ def _shopee_stock(model_doc: dict) -> int:
         return 0
 
 
+def _doc_sellable(doc: dict) -> bool:
+    """doc ขายได้จริงตอนนี้ไหม — item_status NORMAL + stock>0.
+
+    logic เดียวกับ total_stock ใน to_product_card (มี model → รุ่นใดมี stock
+    ก็ถือว่ามี; ไม่มี model → doc-level stock_info_v2)
+    ใช้เป็น availability tier แรกของ _rerank_by_promo_latest —
+    ของตายยังอยู่ใน context (ตอบ "เคยมีไหม" ได้) แต่ไม่ชนะของที่ขายได้
+    """
+    if (doc or {}).get("item_status") != "NORMAL":
+        return False
+    models = doc.get("model") or []
+    if models:
+        return any(_shopee_stock(m) > 0 for m in models)
+    return _shopee_stock(doc) > 0
+
+
 def to_product_card(doc: dict, message: str = "") -> dict:
     """ย่อสินค้า 1 รายการเป็น 'card' ขนาดเล็กใช้เป็น context ส่ง LLM.
 
@@ -615,11 +631,11 @@ def to_product_card(doc: dict, message: str = "") -> dict:
         "dimension": doc.get("dimension"),
         "total_stock": total_stock,
         "sold_out": total_stock == 0,
-        # ⚡ BUG-H fix — _available_for_sale ใช้ item_status=NORMAL เป็นเกณฑ์เดียว
-        #   NORMAL = ยังขาย (แม้ stock=0 = หมดสต็อกชั่วคราว ไม่ใช่เลิกจำหน่าย)
-        #   UNLIST/SELLER_DELETE/BANNED/DELETED = เลิกจำหน่ายจริง
-        #   stock=0 แยกด้วย sold_out field (บอทบอก "หมดสต็อกชั่วคราว" ไม่ใช่ "เลิกจำหน่าย")
-        "_available_for_sale": doc.get("item_status") == "NORMAL",
+        # ⚡ BUG-H fix (revised) — _available_for_sale = ขายได้จริงตอนนี้
+        #   NORMAL + stock>0 — sold_out field แยกบอก "หมดสต็อกชั่วคราว" ต่างจากเลิกจำหน่าย
+        #   (app.py recompute ใช้สูตรเดียวกัน — card ต้องถูกตั้งแต่ source
+        #   เพราะ item_tag/KB-merge/web-search/timeline-restore ไม่ผ่าน recompute)
+        "_available_for_sale": doc.get("item_status") == "NORMAL" and total_stock > 0,
         # ข้อมูลโปรโมชั่น (ใช้ตอน re-rank และให้ LLM บอกลูกค้าได้)
         "has_promotion": _has_active_promotion(doc),
         "is_flash_sale": bool(doc.get("is_flash_sale")),
@@ -2544,7 +2560,7 @@ def _rerank_by_promo_latest(
     similarity_scores: dict[str, float] | None = None,
     limit: int = 20,
 ) -> list[dict]:
-    """เรียงสินค้าตาม: standalone > มีโปร > ใหม่ล่าสุด > similarity สูง.
+    """เรียงสินค้าตาม: ขายได้จริง > standalone > มีโปร > ใหม่ล่าสุด > similarity สูง.
 
     Args:
         docs: list ของ product documents จาก Mongo
@@ -2558,14 +2574,18 @@ def _rerank_by_promo_latest(
         return []
 
     def sort_key(d: dict) -> tuple:
+        # ⚡ availability tier แรกสุด — ของตาย (UNLIST/SELLER_DELETE/stock=0)
+        #   มี promo หนัก + recency สูง (ร้านลบ listing ที่เพิ่งสร้าง) จึงชนะเสมอ
+        #   ถ้าไม่มี tier นี้ — ของตายยังอยู่ใน context (ตอบประวัติได้) แต่ไม่ลอยขึ้น top
+        sellable = _doc_sellable(d)
         # standalone (ไม่ใช่ชุด) ขึ้นก่อน เพื่อให้สินค้าเดี่ยวไม่ถูกชุดแซง
         is_standalone = not _is_bundle_product(d)
         has_promo = _has_active_promotion(d)
         recency = _get_recency_score(d)
         iid = str(d.get("item_id", ""))
         sim = (similarity_scores or {}).get(iid, 0.0)
-        # เรียงจากมากไปน้อย: (is_standalone, has_promo, recency, sim)
-        return (is_standalone, has_promo, recency, sim)
+        # เรียงจากมากไปน้อย: (sellable, is_standalone, has_promo, recency, sim)
+        return (sellable, is_standalone, has_promo, recency, sim)
 
     ranked = sorted(docs, key=sort_key, reverse=True)
     return ranked[:limit]
@@ -2878,6 +2898,12 @@ def fetch_products(
     #   USE_UNIT_INDEX=1 → ทุก query; =charger → เฉพาะ route ที่เป็น charger-family
     #   คืน unit cards ระดับรุ่นย่อยแทน listing cards; ว่าง/error → legacy path เดิม
     _uif = os.environ.get("USE_UNIT_INDEX", "").strip().lower()
+    # ⚡ compat/device-compat → ข้าม unit path ทั้งหมด
+    #   unit pool เล็ก (vector top-50) ตัด legacy compat sweep (max(limit*20,500))
+    #   + supplement + compat rerank → ของที่ spec สูงพอไม่เคยเข้า context เลย
+    #   legacy machinery ครอบ compat อยู่แล้ว — ไม่ต้องสร้างเทียบใน unit path
+    if is_compat_check:
+        _uif = ""
     if _uif == "charger":
         try:
             from . import route_context as _rc, units as _units
@@ -3324,7 +3350,11 @@ def fetch_products(
                 # bonus ถ้ามีคำที่ยาว (เช่น "redmi", "8a")
                 score += sum(len(w) for w in msg_words if w in name) / 10
                 return score
-            docs.sort(key=_name_match_score, reverse=True)
+            # ⚡ sellable tier ก่อน name-match — query compat มีชื่อ device
+            #   ("xiaomi") ซึ่งไป match สินค้าตายแบรนด์เดียวกันได้ ของตายอยู่ใน
+            #   context ได้แต่ต้องไม่ลอยขึ้นก่อนของขายได้ (exact-match block
+            #   ด้านล่างยังยกของที่ชื่อตรงทุกคำขึ้น top เหมือนเดิม)
+            docs.sort(key=lambda d: (_doc_sellable(d), _name_match_score(d)), reverse=True)
             # สำหรับ compatibility check ให้ดึงเยอะกว่า limit เพื่อให้ LLM เห็นทุกรุ่น
             _sort_limit = max(limit * 3, 50) if is_compat_check else limit
             docs = docs[:_sort_limit]

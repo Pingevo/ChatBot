@@ -1243,7 +1243,9 @@ def chat(req: ChatRequest) -> ChatResponse:
         # แต่มี model ใน history → ดึง model จาก history มาเปรียบเทียบ
         _comparison_followup_kw = ("ต่างกัน", "ต่างยังไง", "ต่างไหม", "เปรียบเทียบ", "เทียบ", "เทียบกัน",
                                    "แนะนำตัวไหนดี", "ตัวไหนดีกว่า", "อันไหนดีกว่า", "ซื้อตัวไหนดี",
-                                   "เลือกตัวไหนดี", "ตัวไหนน่าซื้อ", "อันไหนน่าซื้อ")
+                                   "เลือกตัวไหนดี", "ตัวไหนน่าซื้อ", "อันไหนน่าซื้อ",
+                                   # คำเปรียบเทียบโดยนัย — "อันไหนใหม่กว่า/ถูกกว่า/ล่าสุด"
+                                   "ใหม่กว่า", "ถูกกว่า", "ล่าสุด")
         _is_comparison_followup = (
             any(kw in req.message.lower() for kw in _comparison_followup_kw)
             and history
@@ -1273,6 +1275,22 @@ def chat(req: ChatRequest) -> ChatResponse:
                             print(f"[FOLLOWUP-COMP] using anchor history: current={_fc_cur.get('name','')[:40]} previous={_fc_prev.get('name','')[:40]}", file=sys.stderr)
                 except Exception as _e:
                     print(f"[FOLLOWUP-COMP] anchor history error: {_e}", file=sys.stderr)
+            if not _anchor_comp_from_followup and req.conversation_id:
+                # ⚡ ลูกค้าอาจเปรียบเทียบ "ของที่ bot เพิ่งแนะนำ" ไม่ใช่ anchor —
+                #   เช่น กด Case → bot แนะนำ Run+Free → "อันไหนดีกว่า" = Run vs Free
+                #   (anchor <2 จึงมาถึงจุดนี้; trailing suggestion batch = เทิร์นเดียวกัน)
+                try:
+                    from . import conversation_products as _cp_sug
+                    _sug_batch = _cp_sug.get_latest_suggestion_batch(req.conversation_id)
+                    if len(_sug_batch) >= 2:
+                        _anchor_compare_ctx = {"current": _sug_batch[0],
+                                               "previous": _sug_batch[1]}
+                        _anchor_comp_from_followup = True
+                        print(f"[FOLLOWUP-COMP] using suggestion batch: "
+                              f"current={_sug_batch[0].get('name','')[:40]} "
+                              f"previous={_sug_batch[1].get('name','')[:40]}", file=sys.stderr)
+                except Exception as _e:
+                    print(f"[FOLLOWUP-COMP] suggestion batch error: {_e}", file=sys.stderr)
             if not _anchor_comp_from_followup:
                 # Fallback: ดึง model keywords จาก history text (เดิม)
                 # ดึง model keywords จาก history ทั้งหมด (user + model)
@@ -2427,6 +2445,11 @@ def chat(req: ChatRequest) -> ChatResponse:
                             if _has_compat_cp and _has_target_cp and not _kw_matched_anchor:
                                 print(f"[CONV-ACTIVE] compat+target_device → ไม่ใช้ active เป็น product เดียว → fall through", file=sys.stderr)
                                 # ไม่ตั้ง _ref_regex_products → ไป fetch_products
+                            elif _anchor_compare_ctx or _is_superlative_q:
+                                # ⚡ compare/superlative ต้องการ pool ≥2 ใบ — pin active เดี่ยว
+                                #   ทำ fetch block ข้างล่าง unreachable (superlative boost ตาย)
+                                #   merge ที่ ANCHOR-COMP-MERGE จะใส่คู่เปรียบเทียบเข้า products เอง
+                                print(f"[CONV-ACTIVE] compare/superlative ctx → ไม่ pin active เดี่ยว → fetch ปกติ", file=sys.stderr)
                             else:
                                 _ref_regex_products = [_active_card]
                                 _is_conv_active = True
@@ -3510,7 +3533,10 @@ def chat(req: ChatRequest) -> ChatResponse:
                         shop_filter=req.shop,
                         limit=_fetch_limit,
                         desc_message=desc_message,
-                        is_compat_check=_is_compat,
+                        # ⚡ device-compat ("ของที่ใช้กับ X") classify เป็น
+                        #   product_recommend+target_device ไม่ใช่ compatibility_check —
+                        #   แต่เป็น compat เชิง semantic ต้องได้ pool กว้าง + ข้าม unit index
+                        is_compat_check=_is_compat or bool((_intent_result or {}).get("target_device")),
                         skip_charger_subtype=_skip_sub,
                         charger_subtype_override=_intent_sub,
                         # ⚡ Phase 3 — RAG ไม่กรอง status/stock (LLM prompt กรองตอนแนะนำขาย)
@@ -3907,7 +3933,8 @@ def chat(req: ChatRequest) -> ChatResponse:
         # ⚡ ข้ามสำหรับ comparison question — ต้องส่งทุกรุ่นที่ลูกค้าถามเข้า LLM
         #   (ถ้ากรองเฉพาะที่มีทุก model word จะเหลือแค่ชุด/แถม ไม่ใช่สินค้าเดี่ยว)
         _is_comparison_followup = any(kw in req.message.lower() for kw in (
-            "ต่างกัน", "ต่างไหม", "เปรียบเทียบ", "vs", "ดีกว่า", "สูงกว่า", "แรงกว่า"
+            "ต่างกัน", "ต่างไหม", "เปรียบเทียบ", "vs", "ดีกว่า", "สูงกว่า", "แรงกว่า",
+            "ใหม่กว่า", "ถูกกว่า", "ล่าสุด"
         ))
         if retrieval_message != req.message and products and not _is_app_question and not _is_superlative_q and not _is_comparison_followup:
             # หา model words จาก retrieval_message

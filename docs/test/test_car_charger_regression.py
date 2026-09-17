@@ -22,7 +22,7 @@ from __future__ import annotations
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "chatbot"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "chatbot"))
 from shopeechat import knowledge_base  # noqa: E402
 knowledge_base._load_env()
 from shopeechat import product_store  # noqa: E402

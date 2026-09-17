@@ -169,7 +169,12 @@ def fetch_units(
             d["_score"], d["_matched_by"] = score_of.get(d["unit_id"], 0.0), "vector"
             hits.setdefault(d["unit_id"], d)
 
-    ranked = sorted(hits.values(), key=lambda u: -u["_score"])[:limit]
+    # availability tier: code-hit ชนะเสมอ ("HA835 มีไหม" ต้องเห็น HA835 แม้ตาย)
+    # → sellable (build-time snapshot; live re-sort อยู่ใน fetch_unit_cards หลัง join) → score
+    ranked = sorted(hits.values(),
+                    key=lambda u: (u["_matched_by"] == "code",
+                                   bool(u.get("sellable")), u["_score"]),
+                    reverse=True)[:limit]
     print(f"[UNITS] msg={message[:40]!r} codes={codes} hits={len(ranked)} "
           f"({sum(1 for u in ranked if u['_matched_by']=='code')} code)", file=sys.stderr)
     return ranked
@@ -188,16 +193,54 @@ def pick_desc_sections(unit: dict, route=None) -> str:
     return "\n\n".join(parts)[:3000]
 
 
+def _live_availability(unit: dict) -> tuple[str, int, str]:
+    """คืน (item_status, stock, model_status) สดจาก _listing (attach_listing_fields join).
+
+    - ไม่มี _listing → snapshot build-time เดิมของ unit
+    - unit มี model_id → เฉพาะ model นั้นใน lst["model"]
+      (ไม่เจอ = variant ถูกลบออกจาก listing → stock 0)
+    - solo unit (model_id=None) → doc-level stock_info_v2
+    """
+    from . import product_store as _ps   # lazy — กัน circular
+    lst = unit.get("_listing")
+    if not lst:
+        return (unit.get("item_status") or "", int(unit.get("stock") or 0),
+                unit.get("model_status") or "")
+    status = lst.get("item_status") or unit.get("item_status") or ""
+    mid = unit.get("model_id")
+    if mid is None:
+        return status, _ps._shopee_stock(lst), unit.get("model_status") or ""
+    m = next((m for m in (lst.get("model") or []) if m.get("model_id") == mid), None)
+    if m is None:
+        return status, 0, ""
+    return status, _ps._shopee_stock(m), m.get("model_status") or ""
+
+
+def _live_sellable(unit: dict) -> bool:
+    """unit ขายได้จริงตอนนี้ — semantics เดียวกับ build (NORMAL + stock>0) แต่อ่านค่าสด.
+
+    ใช้ re-sort หลัง attach_listing_fields — ของที่ตายหลัง build จะถูกดีดออกจาก top
+    ยังไม่ join (_listing ไม่มี) → ใช้ sellable build-time เดิม
+    """
+    if "_listing" not in unit:
+        return bool(unit.get("sellable"))
+    status, stock, _mstatus = _live_availability(unit)
+    return status == "NORMAL" and stock > 0
+
+
 def to_unit_card(unit: dict, route=None) -> dict:
     """unit doc → card shape เดียวกับ to_product_card (downstream ไม่ต้องแก้)."""
     from . import product_store as _ps   # lazy — กัน circular (product_store ก็ lazy-import units)
     brand = unit.get("brand") or {}
     brand_name = brand.get("original_brand_name", "") if isinstance(brand, dict) else str(brand)
-    stock = unit.get("stock") or 0
+    lst = unit.get("_listing") or {}   # attach_listing_fields join มา (อาจไม่มี)
+    # ⚡ status/stock/model_status อ่านสดจาก _listing — unit snapshot เป็น build-time
+    #   ของที่ร้านลบ/หมดหลัง build ต้องเห็นตาย (ทุก field ต้องสด — app.py recompute
+    #   _available_for_sale จาก status/total_stock/sold_out จะทับถ้า field stale)
+    status, stock, model_status = _live_availability(unit)
     price = unit.get("price")
     # shape เดียวกับ _price_range ของ product card — downstream อ่าน price.get("min"/"max")
     price_range = {"min": int(price), "max": int(price), "currency": "THB"} if price else {}
-    lst = unit.get("_listing") or {}   # attach_listing_fields join มา (อาจไม่มี)
     img_ids = unit.get("image_ids") or (lst.get("image") or {}).get("image_id_list") or []
     return {
         # shape เดียวกับ product card
@@ -206,7 +249,7 @@ def to_unit_card(unit: dict, route=None) -> dict:
         "brand": brand_name,
         "category": unit.get("cat_name"),
         "shop": unit.get("shop"),
-        "status": unit.get("item_status"),
+        "status": status,
         "condition": lst.get("condition"),
         "price": price_range,
         "warranty": _unit_warranty(unit),  # ระยะประกันจากชื่อ (shape เดียวกับ _warranty_info)
@@ -216,7 +259,7 @@ def to_unit_card(unit: dict, route=None) -> dict:
         "dimension": lst.get("dimension"),
         "total_stock": stock,
         "sold_out": stock == 0,
-        "_available_for_sale": unit.get("item_status") == "NORMAL",
+        "_available_for_sale": status == "NORMAL" and stock > 0,
         "has_promotion": _ps._has_active_promotion(lst) if lst else False,
         "is_flash_sale": bool(lst.get("is_flash_sale")),
         "description_excerpt": (
@@ -231,7 +274,7 @@ def to_unit_card(unit: dict, route=None) -> dict:
         "variants": [{
             "name": unit.get("model_name"), "model_id": unit.get("model_id"),
             "stock": stock, "price": unit.get("price"),
-            "model_status": unit.get("model_status"),
+            "model_status": model_status,
         }],
         "tier_variation": [],
         # unit-level extras (shape เดิม + ข้อมูลรุ่นย่อย)
@@ -239,8 +282,8 @@ def to_unit_card(unit: dict, route=None) -> dict:
         "model_id": unit.get("model_id"),
         "model_name": unit.get("model_name"),
         "model_sku": unit.get("model_sku"),
-        "model_status": unit.get("model_status"),
-        "sellable": unit.get("sellable"),
+        "model_status": model_status,
+        "sellable": status == "NORMAL" and stock > 0,
         "kind": unit.get("kind"),
         "components": unit.get("components"),
         "product_type": unit.get("product_type"),
@@ -354,7 +397,11 @@ def attach_listing_fields(unit_docs: list[dict]) -> list[dict]:
                 {"item_id": {"$in": list(iids)}},   # item_id เป็น int ทั้งสองฝั่ง — ห้าม str()
                 {"item_id": 1, "condition": 1, "weight": 1, "dimension": 1,
                  "short_link": 1, "promotion": 1, "has_promotion": 1,
-                 "is_flash_sale": 1, "image": 1}):
+                 "is_flash_sale": 1, "image": 1,
+                 # live availability — status/stock เปลี่ยนบ่อยกว่า build cycle
+                 "item_status": 1, "stock_info_v2": 1,
+                 "model.model_id": 1, "model.model_status": 1,
+                 "model.stock_info_v2": 1}):
             by_id[d["item_id"]] = d
         for u in unit_docs:
             d = by_id.get(u.get("item_id"))
@@ -370,6 +417,22 @@ def fetch_unit_cards(message: str, **kwargs) -> list[dict]:
     route = kwargs.pop("route", None)
     from . import route_context as _rc
     route = route or _rc.resolve_route(message)
+    limit = int(kwargs.pop("limit", 8))
+    # ⚡ overfetch 2× เพราะ sellable บน unit doc เป็น build-time snapshot —
+    #   re-sort ด้วย live status หลัง join (ของที่ตายหลัง build ถูกดีดออกจาก top)
+    #   แล้วค่อยตัด limit — code-hit ยังชนะเสมอ
     us = attach_listing_fields(attach_image_texts(attach_kb_specs(
-        fetch_units(message, route=route, **kwargs))))
-    return [to_unit_card(u, route) for u in us]
+        fetch_units(message, route=route, limit=limit * 2, **kwargs))))
+    us.sort(key=lambda u: (u.get("_matched_by") == "code",
+                           _live_sellable(u), u.get("_score") or 0.0),
+            reverse=True)
+    top = us[:limit]
+    # ⚡ unit index เป็น snapshot — ถ้า catalog เปลี่ยนหลัง build (ร้านลบ/restock)
+    #   pool อาจตายหมดทั้งที่ live catalog มีของขาย → คืน [] ให้ caller ตก legacy
+    #   (legacy sweep อ่าน status/stock สด + pool กว้างกว่า)
+    #   ยกเว้น code-hit — "HA835 มีไหม" ต้องเห็น HA835 แม้ตาย (ตอบ "หมด/เลิกขาย" ได้)
+    if top and not any(u.get("_matched_by") == "code" for u in top) \
+            and not any(_live_sellable(u) for u in top):
+        print("[UNITS] pool all-dead post-join → legacy fallback", file=sys.stderr)
+        return []
+    return [to_unit_card(u, route) for u in top]

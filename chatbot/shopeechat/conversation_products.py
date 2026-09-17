@@ -312,6 +312,30 @@ def get_suggestion_latest(conversation_id: str) -> dict | None:
     return s.get("card") or {"item_id": s.get("item_id"), "name": s.get("name")}
 
 
+def get_latest_suggestion_batch(conversation_id: str) -> list[dict]:
+    """ดึง suggestion batch ล่าสุด — สินค้าที่ bot แนะนำใน response เดิียวกัน.
+
+    bot บันทึก suggestions ทีละชุดต่อเทิร์น (_record_suggestion_products append ต่อท้าย)
+    → batch ล่าสุด = trailing run ของ non-anchor entries ท้าย products list
+    ถ้า entry ท้ายเป็น anchor (ลูกค้าส่ง item card มาหลังสุด) → คืน []
+
+    Returns:
+        list ของ cards (ใหม่→เก่า) หรือ [] ถ้า batch ล่าสุดมี <2 ตัว
+    """
+    doc = load_timeline(conversation_id)
+    if not doc:
+        return []
+    batch: list[dict] = []
+    for p in reversed(doc.get("products") or []):
+        if p.get("is_anchor"):
+            break
+        batch.append(p)
+    if len(batch) < 2:
+        return []
+    return [p.get("card") or {"item_id": p.get("item_id"), "name": p.get("name")}
+            for p in batch]
+
+
 def get_anchor_and_suggestions(conversation_id: str, limit: int = 5) -> list[dict]:
     """ดึง anchor ล่าสุด + suggestion ล่าสุด รวมกัน (dedup) สำหรับ follow-up ขอลิงค์.
 
