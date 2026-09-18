@@ -287,7 +287,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 > **⚡ Refactor 2026-09-16:** `app.py` 8,239 → 4,807 บรรทัด — ย้ายออกไป:
 > - `test_chat_api.py` — test-chat sessions CRUD (9 routes) + `_validate_object_id` + `_log_testchat_action`
-> - `device_compat.py` — `_extract_max_wattage`, `_KNOWN_DEVICE_SPECS`, `_extract_product_connectors`, `_resolve_device_spec`, `_filter_compat_products`, `_apply_product_tiers`, `_device_spec_lookup`
+> - `device_compat.py` — `_extract_max_wattage`, `_wattage_asc_key`, `_KNOWN_DEVICE_SPECS`, `_extract_product_connectors`, `_resolve_device_spec`, `_filter_compat_products`, `_apply_product_tiers`, `_device_spec_lookup`
 > - `order_flow.py` — `early_order_flow(req, ctx, history, db)` (order lookup + return/refund + tracking; dict→`ChatResponse` ที่ call site; เขียนกลับ `ctx["order_sn"]`/`ctx["is_claim_request_pre"]` ให้ warranty auto-check)
 > - `handoffs.py` — `detect_human_request(req, ctx)` (pre-intent) + `post_intent_handoffs(req, ctx, db)` (tax invoice + TISI)
 > - `warranty_flow.py` — `handle_warranty_flow_legacy(req, ctx, history, db)` (legacy claim SM; dict→`ChatResponse` ที่ call site)
@@ -340,7 +340,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `_KNOWN_DEVICE_SPECS` | ~594 | **(2026-09-16)** — module constant dict — known device charging specs (connector + min_watt) สำหรับอุปกรณ์ที่ intent LLM อาจไม่รู้ + web search ไม่ได้ผล — last-resort fallback สำหรับ `_resolve_device_spec` | — |
 | `_extract_product_connectors` | ~640 | **(2026-09-16)** — สกัด connector types จากชื่อ+description ของสินค้า — คืน set ของ `usb-c`/`lightning`/`micro-usb`/`usb-a` — ถ้าดึงไม่ได้ → set() ว่าง (ambiguous) | — |
 | `_resolve_device_spec` | ~658 | **(2026-09-16)** — resolve device charging spec — priority: (1) parse web search text (2) `_KNOWN_DEVICE_SPECS` fallback — คืน `{connector, min_watt}` หรือ None | `re` |
-| `_filter_compat_products` | ~696 | **(2026-09-16)** — CODE-level compat filter — กรองสินค้าที่ connector ไม่ตรงกับอุปกรณ์ออกก่อนส่ง LLM — priority: `intent_connector` → web search → hardcoded — sort by wattage ascending (baseline ก่อน, upgrade ทีหลัง) — fallback: ดึงไม่ได้→คืนทั้งหมด, กรองเหลือ<2→รวม ambiguous, กรองว่าง→คืนทั้งหมด | `_resolve_device_spec`, `_extract_product_connectors`, `_extract_max_wattage` |
+| `_filter_compat_products` | ~696 | **(2026-09-16)** — CODE-level compat filter — กรองสินค้าที่ connector ไม่ตรงกับอุปกรณ์ออกก่อนส่ง LLM — priority: `intent_connector` → web search → hardcoded — sort by wattage ascending แบบ adequate-first (`_wattage_asc_key` + `device_min_watt`: ของที่ watt ≥ spec เครื่องขึ้นก่อน) — fallback: ดึงไม่ได้→คืนทั้งหมด, กรองเหลือ<2→รวม ambiguous, กรองว่าง→คืนทั้งหมด | `_resolve_device_spec`, `_extract_product_connectors`, `_extract_max_wattage`, `_wattage_asc_key` |
 | `_ADDRESS_REQUEST_KWS` + address-request block | ~1970 | **(2026-09-16)** — detect "ขอที่อยู่ส่งกลบ/ส่งเคลม/ที่อยู่ร้าน/ที่อยู่ด่วน" → handoff แอดมินทันที (ไม่ถามเลขคำสั่งซื้อ) — bot ไม่มีที่อยู่จริงของร้าน → ส่งแอดมินเลย — reason: `address_request` — แยกจาก `_RETURN_REFUND_KWS` เพราะลูกค้าแค่ขอที่อยู่ ไม่ได้บอกเลขคำสั่งซื้อ | `urllib.request.urlopen` (handoff API) |
 
 #### 6.1.3 Nested helpers (ใน `chat()`)
@@ -1656,11 +1656,12 @@ CRUD สำหรับ test-chat sessions เก็บลง `test_chat_session
 | ฟังก์ชัน | หน้าที่ | เรียก |
 |---|---|---|
 | `_extract_max_wattage(p)` | extract ค่า W สูงสุดจาก spec/variants/ชื่อ (กรอง model number) | `re` |
+| `_wattage_asc_key(p, min_watt)` | sort key เรียง wattage asc แบบ adequate-first — ของที่ watt ≥ `min_watt` ขึ้นก่อน, ไม่รู้ min_watt → asc ล้วน | `_extract_max_wattage` |
 | `_extract_product_connectors(p)` | สกัด connector types จากชื่อ+desc → set | `re` |
 | `_resolve_device_spec(name, ws_extra)` | resolve spec ของอุปกรณ์ — web search → `_KNOWN_DEVICE_SPECS` | `re` |
-| `_filter_compat_products(...)` | กรองตาม connector (ไม่กรอง wattage) + sort wattage asc | ฟังก์ชันข้างบน |
+| `_filter_compat_products(...)` | กรองตาม connector (ไม่กรอง wattage) + sort wattage asc แบบ adequate-first (`_wattage_asc_key` + `device_min_watt`) | ฟังก์ชันข้างบน |
 | `_apply_product_tiers(products, tier_a_ids, limit)` | รวม tier A (exact/anchor) + tier B → `product_store._dedupe_products` | `product_store` |
-| `_device_spec_lookup(db, req, ...)` | web-search spec + re-query DB หา compat products | `product_store`, `web_search` (lazy) |
+| `_device_spec_lookup(db, req, ...)` | web-search spec + re-query DB หา compat products — resolve `device_min_watt` (intent → `_resolve_device_spec`) เติม watt threshold ใน spec extra + sort re-query ด้วย `_wattage_asc_key` | `product_store`, `web_search` (lazy) |
 | `_KNOWN_DEVICE_SPECS` | dict spec hardcoded (last resort) | — |
 
 #### 6.15.3 Called by

@@ -56,6 +56,21 @@ def _extract_max_wattage(p: dict) -> float:
     return max(float(m) for m in matches)
 
 
+def _wattage_asc_key(p: dict, min_watt: float | None = None) -> tuple:
+    """sort key สำหรับเรียง wattage ascending แบบ "adequate first".
+
+    ถ้ารู้ min_watt (spec ของอุปกรณ์เป้าหมาย): สินค้าที่จ่ายไฟพอ spec (watt ≥ min_watt)
+    ขึ้นก่อนเรียง asc — ตำแหน่ง "baseline" ของ dual-tier จึงเป็นสินค้าที่ spec ผ่านจริง
+    ไม่ใช่ตัว watt ต่ำสุดใน pool (เช่น สาย 60W สำหรับเครื่อง 90W)
+
+    ถ้าไม่รู้ min_watt → asc ล้วน (พฤติกรรมเดิม)
+    """
+    w = _extract_max_wattage(p)
+    if min_watt and min_watt > 0:
+        return (0 if w >= min_watt else 1, w)
+    return (0, w)
+
+
 # ⚡ Known device charging specs — ใช้สำหรับ _filter_compat_products (CODE-level compat filter)
 #    ถ้า device ไม่อยู่ในตาราง → fallback ใช้ web search text จาก _device_spec_lookup
 #    connector: พอร์ตชาร์จของอุปกรณ์ (usb-c / lightning / micro-usb)
@@ -278,8 +293,9 @@ def _filter_compat_products(
         print(f"[COMPAT-FILTER] กรองแล้วว่าง → คืนทั้งหมด {len(products)} ตัว", file=sys.stderr)
         return products
 
-    # sort by wattage ascending (baseline ก่อน, upgrade ทีหลัง)
-    compat.sort(key=lambda p: _extract_max_wattage(p))
+    # sort by wattage ascending — ของที่จ่ายไฟพอ spec เครื่อง (≥min_watt) ขึ้นก่อน
+    # (baseline ก่อน, upgrade ทีหลัง; ของต่ำกว่า spec ไปท้าย)
+    compat.sort(key=lambda p: _wattage_asc_key(p, device_min_watt))
 
     print(f"[COMPAT-FILTER] ผ่าน {len(compat)} จาก {len(products)} ตัว "
           f"(dropped={dropped}, ambiguous={len(ambiguous)}) "
@@ -468,6 +484,18 @@ def _device_spec_lookup(
                         f"ห้ามเสนอแม้จะสเปคสูงแค่ไหน ไม่ว่าจะ frame เป็น baseline หรือ upgrade ก็ตาม"
                     )
                     print(f"[DEVICE-SPEC-LOOKUP] ได้ spec ของ {_compat_device_name}: {_device_info_clean[:120]!r}", file=sys.stderr)
+            # ⚡ resolve min_watt ของอุปกรณ์ — intent ก่อน → fallback web text/known specs
+            #   ใช้ทั้งเติม threshold ชัดใน spec extra และจัดลำดับ re-query products
+            _dev_min_watt = intent_result.get("device_min_watt")
+            if not _dev_min_watt:
+                _dev_spec = _resolve_device_spec(_compat_device_name, _device_spec_extra)
+                _dev_min_watt = (_dev_spec or {}).get("min_watt")
+            if _dev_min_watt and _device_spec_extra:
+                _device_spec_extra += (
+                    f"\n⚠️ อุปกรณ์รุ่นนี้รองรับชาร์จเร็วสูงสุดประมาณ {int(_dev_min_watt)}W "
+                    f"→ สินค้าที่แนะนำเป็นตัวหลัก (baseline/upgrade) ต้องรองรับอย่างน้อย {int(_dev_min_watt)}W "
+                    f"ถ้าเสนอสินค้าที่ watt ต่ำกว่านี้ ต้องบอกลูกค้าชัดเจนว่าชาร์จได้ไม่เต็มสปีด"
+                )
             # re-query DB ด้วย keywords จาก search หาสินค้าที่ compatible
             if _device_keywords:
                 _device_search_q = " ".join(_device_keywords[:6])
@@ -499,9 +527,10 @@ def _device_spec_lookup(
                         filter_unavailable=False,
                     )
                     if _device_products:
-                        # ⚡ Phase 3b — sort by wattage ascending (baseline first, upgrade next)
-                        _device_products.sort(key=lambda p: _extract_max_wattage(p))
-                        print(f"[DEVICE-SPEC-LOOKUP] sort by wattage (asc)  top3: {[_extract_max_wattage(p) for p in _device_products[:3]]}", file=sys.stderr)
+                        # ⚡ sort by wattage ascending แบบ adequate-first:
+                        #   ของที่ watt ≥ min_watt ของอุปกรณ์ขึ้นก่อน (baseline ที่ spec ผ่านจริง)
+                        _device_products.sort(key=lambda p: _wattage_asc_key(p, _dev_min_watt))
+                        print(f"[DEVICE-SPEC-LOOKUP] sort by wattage (asc, min_watt={_dev_min_watt})  top3: {[_extract_max_wattage(p) for p in _device_products[:3]]}", file=sys.stderr)
                         # dedup กับ existing_products
                         _existing_pids = {str(p.get("item_id") or "") for p in existing_products}
                         for _dp in _device_products:

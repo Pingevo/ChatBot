@@ -20,24 +20,7 @@
 
 ## กำลังทำ (active)
 
-### 🔨 image_texts batch — nonsellable เหลือ ~3,100 รูป กำลังรัน 8 shards (2026-09-17)
-
-- **state:** sellable ครบ 5,925 แล้ว; nonsellable todo 3,665 → รันอยู่ ~393/shard × 8
-- **รัน:** `build_image_texts_nonsellable.py --shard K/8` × 8 procs — K คู่=gemini-3.5-flash-lite, คี่=gemini-3.1-flash-lite (quota pool แยกกัน), `IMGTXT_MIN_INTERVAL=1.8` (~133/min/model < 135 = 9 keys × 15 RPM), `IMGTXT_SKIP_HUB=1` (hub timeout 5s/call ทำช้า — usage ยังเขียน `exports/image_texts_usage.jsonl` local, backfill ทีหลังได้)
-- **แก้ script:** `build_image_texts.py` — `MIN_INTERVAL` อ่าน env `IMGTXT_MIN_INTERVAL` (default 0.78 เดิม); `web_search._log_ai_usage` skip ได้ด้วย `IMGTXT_SKIP_HUB`
-- **logs:** `exports/image_texts_run_8_{0..7}.log`; output `exports/image_texts.jsonl`
-- **key config จริง (verify แล้ว):** `key_source.gemini="db"` + pool `keys` 9 ตัว enabled → บอทใช้ 9 keys round-robin ไม่ใช่ key เดียว; `single_keys.gemini` มีเก็บ (enc:v1) แต่ไม่ active
-- **ขั้นต่อไป:** รอจบ → `import_image_texts.py` เข้า Mongo `image_texts` collection → เช็ค count เพิ่ม
-
-### 📋 กำลังจะทำ — cert standards search ผ่าน image_texts (plan เขียนแล้ว รออนุมัติ)
-
-- **เรื่อง:** ตอนนี้ `search_tisi_products` ค้น มอก. ใน `description` text เท่านั้น — สินค้าที่บอก มอก./CE/CCC/GB แค่ในรูป description หลุดหมด (ใน jsonl มีแล้ว: มอก. 112 รูป, GB 227, CCC 19, CE 14)
-- **plan:** `docs/plans/cert-standards-search.md` — 5 tasks: (1) import_image_texts เติม `item_ids` จาก export field_list (2) `detect_cert_question` ใน warranty.py superset ของ TISI (3) `search_cert_products` ค้น desc+image_texts merge (4) wire handoffs.py (5) SRS + live verify
-- **regression guard:** `detect_tisi_question`/`search_tisi_products` คงเป็น wrapper; เคส หมอก/เสมอกัน FP เดิมต้องยังผ่าน
-- **dependency:** image path จะมีข้อมูลก็ต่อเมื่อ import รันด้วยโค้ดใหม่ (item_ids) — รอ batch จบก่อน import
-- **สถานะ:** รอ user อนุมัติ plan ก่อน implement
-
-### Restart :8010 + :8015 ด้วยโค้ดใหม่ (2026-09-17 ~17:2x)
+### Restart :8010 + :8015 ด้วยโค้ดใหม่ (2026-09-17 ~17:2x + restart ซ้ำตอน cert done)
 
 - **ทำไม:** replay-compare ยิง `127.0.0.1:8010` — process เก่า start 12:19 ก่อน commit `015a9c3` (sellable ranking + suggestion compare, 16:57) → replay ได้โค้ดเก่า
 - **ทำ:** kill 65815/65818 → relaunch `USE_UNIT_INDEX=charger nohup uvicorn` log เข้า `exports/uvicorn_{8010,8015}.log` — ทั้งคู่ health 200
@@ -108,6 +91,39 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 ---
 
 ## ผ่านแล้ว (file 2)
+
+### ✅ 2026-09-17 — pingevox Q3: แนะนำสาย 60W ให้เครื่อง 90W → adequate-first wattage sort
+
+- **อาการ (แชทจริง pingevox, shadow):** "อยากได้ของที่ใช้กับ xiaomi 17 ultra" → ตอบ CTC315P 60W ทั้งที่ context มีสาย 100W/140W/240W ครบ
+- **root cause (verify ด้วย repro):** `_device_spec_lookup` re-query sort **wattage asc ล้วน** → สาย 60W อยู่ต้น context, 100W+ อยู่ตำแหน่ง 14-19 → LLM position bias หยิบ 60W เป็น "baseline" ทั้งที่ spec เครื่องต้องการ 90W — `min_watt` resolve ได้ (web text "90W" / `_KNOWN_DEVICE_SPECS`) แต่ใช้แค่ connector filter ไม่เคยใช้จัดลำดับ
+- **แก้ (structural, ไม่ hardcode ผูกสินค้า):**
+  1. เพิ่ม `_wattage_asc_key(p, min_watt)` ใน `device_compat.py` — ของที่ watt ≥ min_watt (จ่ายไฟพอ spec เครื่อง) ขึ้นก่อนเรียง asc, ของต่ำกว่าไปท้าย, ไม่รู้ min_watt → asc เดิม
+  2. `_filter_compat_products` sort เปลี่ยนมาใช้ key นี้ (`device_min_watt` resolve อยู่แล้ว)
+  3. `_device_spec_lookup` resolve `_dev_min_watt` (intent → `_resolve_device_spec`) ครั้งเดียว ใช้ทั้ง (a) เติม threshold ชัดใน spec extra: "อุปกรณ์รองรับสูงสุด ~90W → ตัวหลักต้อง ≥90W" (b) sort re-query
+- **verify E2E (history format จริง `[สินค้า: xxx]`):**
+  - Q3 → context: สาย 100W ขึ้น [2-3], CTC315P ถูกดันท้าย → ANS แนะนำ **CMC615 240W / C2C615 140W** ✅ (2 รอบหลัง fix)
+  - Q4 "หัวชาร์จละ" → AD1203P 120W / AD1003T 100W ✅ ไม่กระทบ
+  - regression iPhone 17 (min_watt=27): สาย 60W ยังเป็น baseline ได้ถูกต้อง ✅ + COMPAT-FILTER main path ใช้ key ใหม่ ✅
+  - unit check `_wattage_asc_key`: None→asc ล้วน / 90→[100,240,0,60] / 27→[60,100,240,0] ✅
+- **tests:** test_charger_subtype_parity 42/42 · test_anchor_compare · test_guards · test_car_charger_regression 16/16 ผ่าน — test_pingevox_mistore ยิง HTTP 401 (infra ไม่เกี่ยว)
+- **หมายเหตุ:** ยังเป็น prompt+ordering level — LLM อาจพลาดเป็นบางรอบ แต่ context ตอนนี้เอื้อม baseline ที่ spec ผ่านจริงเสมอ; ⚠️ KB path ไม่มี `_filter_compat_products` (connector filter รันเฉพาะ main path) — gap เดิมที่ยังไม่แตะ
+- **SRS_SSD.md** อัปเดต 6.15.2 (เพิ่ม `_wattage_asc_key` + ปรับ `_filter_compat_products`/`_device_spec_lookup`)
+
+### ✅ 2026-09-17 — image_texts batch จบ + import Mongo + cert standards search (plan: `docs/plans/cert-standards-search.md`)
+
+**image_texts pipeline สมบูรณ์:**
+- batch 8 shards จบครบ err=0 — unique ok **14,005 รูป**, err-only ค้าง 0 (97 error เก่า retry ผ่านหมด); cost รอบนี้ ~$2
+- `import_image_texts.py` เพิ่ม `_image_item_ids()` — map `image_id → item_ids` จาก export field_list (logic เดียวกับ `_collect_worklist`) + index `item_ids` → upsert **14,005 docs ทุกตัวมี item_ids** (11,290 new / 2,715 updated); kinds: spec 11,543 / banner 1,355 / product 1,068 / raw 21 / variant_map 18
+
+**cert standards search (มอก./CE/CCC/FCC/RoHS/GB):**
+- **ก่อน:** `search_tisi_products` ค้น `description` เท่านั้น → 86 listings ที่บอก มอก. เฉพาะในรูปหลุดหมด (union จริง ~213 listings vs เดิมเห็น ~127)
+- **แก้:** `warranty.detect_cert_question` (superset TISI — boundary regex กัน FP: CE ใน "service", GB ใน "128GB", หมอก/เสมอกัน); `extract_tisi_model_keyword` ตัด cert kw + stopword ไทยเพิ่ม (ที่/ร้าน/อะไร — fix bug ที่เจอตอน live: "มีสินค้าที่ผ่าน CE ไหม" → kw='ที่' ฆ่าผลหมด); `product_store.search_cert_products` merge desc+image_texts (`via`=desc/image/both, sellable-first, model_kw→ไม่กรอง status); `handoffs.py` cert block label dynamic + `cert_not_found`
+- **compat:** `detect_tisi_question`/`search_tisi_products` เป็น wrapper/cงเดิม
+- **verify:** `docs/test/test_cert_standards.py` **31/31** + test_new_product_types 66/66 + py_compile ครบ; **live chat() จริง:** "รุ่นไหนมี มอก. บ้าง"→cert_answer 30 รายการ ✅, "มีสินค้าที่ผ่าน CE ไหม"→CE จริง ✅, "A18T มี มอก. ไหม"→เฉพาะ A18T ✅, "สินค้าผ่านมาตรฐานอะไรบ้าง"→all certs ✅, "หมอกเย็น"→ไม่เข้า cert path ✅; restart :8010/:8015 health 200
+- **SRS_SSD.md** อัปเดต: 6.3.1/6.3.6/6.3.7 (search_cert_products + helpers + constants), 6.8.1 (detect_cert_question + tisi fns), 6.17.1 (post_intent_handoffs)
+- **replay จริง `shp_152520384227573579`** (CukTechThailand, 10 turns, LLM จริง): Q1/Q2/Q5 cert ตอบถูก ✅; fix เพิ่ม `ทุกรุ่น/ทุกตัว/ทุกอัน/ทุกชิ้น/ทุกสินค้า/ทั้งหมด` ใน `_TISI_GENERAL_KWS` (เดิม "ทุกรุ่นมี มอก ไหม" → kw หลุด → handoff ผิด); **จุดเหลือ:** Q3 "1" บอทตอบอังกฤษ (LLM language slip), Q4 "ทุกรุ่น" ไม่มี cert kw → หลุด cert path (ถ้าจะให้ follow-up สั้นต่อ cert context ต้องเพิ่ม logic แยก), cert_answer list ชื่อเต็มยาว 3k chars (อาจ trim/กรองหมวด)
+- **test chat KingGadgets (2026-09-18):** "หาพาวแบง มีมอก มีไหม" → handoff ผิด — root cause `extract_tisi_model_keyword` คืนคำไทยล้วน ("หาพาวแบง") เป็น model → name filter ฆ่าผลหมด ทั้งที่ KingGadgets มีของจริง (tisi 1/ccc 2/ce 6); **fix:** model kw ต้องมี token alnum ≥3 ตัว (รหัสรุ่น AC65B2/A18T) — คำไทยล้วน → "" = คำถามทั่วไป; เลือก token ที่มีตัวเลขก่อน; test 36/36 + live verify: ได้ PowerConnex PCX-P (มอก.) / 3 items (tisi+ccc union) ✅
+- **หมายเหตุ:** รูป cert อยู่ใน image scope เดิมอยู่แล้ว (มอก. 119 รูป/GB 227/CCC 19/CE 14) — ไม่ต้อง extract เพิ่ม; งานนี้คือทำให้ runtime ใช้ข้อมูลนั้นได้
 
 ### ✅ 2026-09-17 — sellable-first ranking + live stock join + compat gate + suggestion compare (commit `015a9c3`, `80f1da1`)
 
