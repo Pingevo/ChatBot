@@ -71,6 +71,55 @@ def _wattage_asc_key(p: dict, min_watt: float | None = None) -> tuple:
     return (0, w)
 
 
+# ⚡ generic device-token extraction — ไม่ hardcode ชื่อรุ่น (แทน list เดิมที่ต้องอัปเดตทุกรุ่นใหม่)
+#   Pattern A: "letters+digits" glued หรือ spaced + variant suffix
+#     (iphone 17 pro max / mi 17 ultra / s25 / oneplus 13 / m3 / pixel 9)
+#   Pattern B: "brand + category-word + digits"
+#     (apple watch 9 / galaxy buds 3 / mi band 9 / redmi note 14 / xiaomi pad 7)
+_DEVICE_TOKEN_RE = re.compile(
+    r"\b(?:"
+    r"[a-z]+\s*\d{1,3}[a-z]?"
+    r"(?:\s+(?:ultra|pro\s*max|pro|max|plus|air|mini|lite|se|fe|fold|flip|note|gt|edge))?"
+    r"|[a-z]{2,}\s+(?:watch|phone|pad|tab|buds|band|pods|note)\s*\d{1,3}[a-z]?"
+    r")\b"
+)
+
+# head token ที่ match "letters+digits" แต่ไม่ใช่ device — protocol/connector/unit/product-noun
+_NON_DEVICE_TOKENS = frozenset({
+    "usb", "pd", "qc", "pps", "ufcs", "gan", "mfi", "type", "qi", "qi2",
+    "magsafe", "nfc", "hdmi", "wifi", "bt", "ble", "lte",
+    "w", "v", "a", "c", "g", "e", "k", "mah", "wh", "kw", "gb", "tb", "mb",
+    "ghz", "hz", "mm", "cm", "kg",
+    "set", "lot", "gen", "ver", "version", "rev", "mk", "no", "pcs", "pc",
+    "pack", "box", "series", "part", "ep", "vol", "level", "stage",
+    "watch", "phone", "pad", "tab", "buds", "band", "pods", "note",
+    "cable", "charger", "adapter", "case", "cover",
+})
+
+
+def _extract_device_token(msg: str) -> str | None:
+    """⚡ ดึง target_device จากข้อความแบบ generic — ไม่ hardcode ชื่อรุ่น.
+
+    จับ token รูป "letters+digits(+variant word)" — ครอบทุกรุ่นปัจจุบัน+อนาคต
+    (iphone 18 / galaxy s27 / pixel 10 / apple watch 9 / redmi note 14 …)
+    โดยไม่ต้องอัปเดต list เมื่อมี device ใหม่
+
+    กรอง false positive 2 ชั้น:
+    - head อยู่ใน _NON_DEVICE_TOKENS (pd3 / usb4 / qi2 / gen 2 / set 3 / note 14 ลอยๆ)
+    - รูป letters+digits+letters glued ทั้งก้อน (CTC615W / AD653U) = product code ไม่ใช่ device
+    """
+    low = (msg or "").lower()
+    for _m in _DEVICE_TOKEN_RE.finditer(low):
+        cand = _m.group(0).strip()
+        head_m = re.match(r"[a-z]+", cand)
+        if head_m and head_m.group(0) in _NON_DEVICE_TOKENS:
+            continue
+        if re.fullmatch(r"[a-z]+\d+[a-z]+", cand):
+            continue
+        return cand
+    return None
+
+
 # ⚡ Known device charging specs — ใช้สำหรับ _filter_compat_products (CODE-level compat filter)
 #    ถ้า device ไม่อยู่ในตาราง → fallback ใช้ web search text จาก _device_spec_lookup
 #    connector: พอร์ตชาร์จของอุปกรณ์ (usb-c / lightning / micro-usb)
@@ -409,29 +458,11 @@ def _device_spec_lookup(
     _device_spec_extra = ""
     _additional_products: list[dict] = []
 
-    # resolve target_device จากหลายแหล่ง: intent_result → message regex
+    # resolve target_device จากหลายแหล่ง: intent_result → generic device-token regex
+    # (ไม่ hardcode ชื่อรุ่น — ครอบทุก device ปัจจุบัน+อนาคต)
     _resolved_target_device = intent_result.get("target_device") or ""
     if not _resolved_target_device:
-        _msg_low_dev = (req.message or "").lower()
-        _device_patterns_fallback = [
-            r'(mi\s*17\s*ultra|xiaomi\s*17\s*ultra)',
-            r'(mi\s*17\b)',
-            r'(iphone\s*17\s*pro\s*max)',
-            r'(iphone\s*17\b)',
-            r'(s25\s*ultra|samsung\s*25\s*ultra)',
-            r'(s24\s*ultra|samsung\s*24\s*ultra)',
-            r'(iphone\s*16\b)',
-            r'(iphone\s*15\b)',
-            r'(oneplus\s*1[0-9])',
-            r'(macbook\s*air\s*m[0-9])',
-            r'(mac\s*air\s*m[0-9])',
-            r'(pixel\s*[0-9])',
-        ]
-        for _pat_dev in _device_patterns_fallback:
-            _m_dev = re.search(_pat_dev, _msg_low_dev)
-            if _m_dev:
-                _resolved_target_device = _m_dev.group(1).strip()
-                break
+        _resolved_target_device = _extract_device_token(req.message) or ""
 
     if not _resolved_target_device:
         return "", []

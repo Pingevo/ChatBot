@@ -2312,20 +2312,10 @@ def chat(req: ChatRequest) -> ChatResponse:
                 if mat in low:
                     constraints["material"] = mat
                     break
-            # device: mi 17 ultra, xiaomi 17 ultra, mi17 ultra, mi 17, iphone 17, s25 ultra
-            _device_patterns = [
-                (r'(mi\s*17\s*ultra|xiaomi\s*17\s*ultra)', "mi 17 ultra"),
-                (r'(mi\s*17\b)', "mi 17"),
-                (r'(iphone\s*17)', "iphone 17"),
-                (r'(s25\s*ultra|samsung\s*25\s*ultra)', "s25 ultra"),
-                (r'(s24\s*ultra|samsung\s*24\s*ultra)', "s24 ultra"),
-                (r'(iphone\s*16)', "iphone 16"),
-                (r'(iphone\s*15)', "iphone 15"),
-            ]
-            for pat, label in _device_patterns:
-                if re.search(pat, low):
-                    constraints["device"] = label
-                    break
+            # device: generic token extractor — ไม่ hardcode ชื่อรุ่น (ครอบทุก device ปัจจุบัน+อนาคต)
+            _dev_tok = device_compat._extract_device_token(low)
+            if _dev_tok:
+                constraints["device"] = _dev_tok
             return constraints
 
         if req.history:

@@ -92,6 +92,18 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 
 ## ผ่านแล้ว (file 2)
 
+### ✅ 2026-09-18 — generic device-token extractor แทน list ชื่อรุ่น hardcode
+
+- **ทำไม:** user ชี้ "พึ่ง hardcode เกินไป" — spec lookup มี web-search เป็น primary อยู่แล้ว แต่ trigger list เป็นรุ่นเจาะจง 2 จุด: `_device_patterns_fallback` (device_compat) + device list ใน `_extract_charger_constraints` (app.py) → รุ่นใหม่ที่ intent พลาด = ไม่ search spec
+- **แก้:** เพิ่ม `device_compat._extract_device_token(msg)` — `_DEVICE_TOKEN_RE` pattern A "letters+digits(+ultra/pro/max/edge/note...)" + pattern B "brand+category+digits" (apple watch 9 / galaxy buds 3 / redmi note 14); กรอง 2 ชั้น: `_NON_DEVICE_TOKENS` stoplist (pd/usb/qc/gen/set/watch-lone...) + product-code shape (letters+digits+letters glued = CTC615W/AD653U)
+- **ใช้แทน:** `_device_spec_lookup` fallback + `_extract_charger_constraints` device — list รุ่นเจาะจงถูกลบทั้งคู่
+- **`_KNOWN_DEVICE_SPECS` คงไว้:** emergency fallback เท่านั้น (fire เมื่อ intent ไม่ให้ connector AND web search พลาดพร้อมกัน — ปกติไม่ถึง)
+- **verify:**
+  - unit 24 cases: ดึงได้ iphone 17 pro max / s26 ultra / pixel 10 pro / honor magic 7 / huawei mate 70 / apple watch 9 / redmi note 14 (รุ่นที่ list เก่าไม่มีทั้งหมด) ; กรอง ctc615w / ad653u / pd3.0 / usb 3.0 / gen 2 / set 3 / gan 65w หมด
+  - **fallback path จริง (intent_result={}):** "s26 ultra" (list เก่าไม่มี) → resolve → web search "Samsung Galaxy S26 Ultra USB-C 60W" → min_watt=60 → re-query sort adequate-first [65,140,140] ✅ — นี่คือ flow ที่ user ขอ: เจอ device → search spec → ไม่พึ่ง hardcode
+  - E2E pingevox regression: Q3 → C2C615 140W ✅, Q4 → AD1203P 120W ✅
+- **SRS_SSD.md** อัปเดต 6.15.2 (เพิ่ม `_extract_device_token` + ปรับ `_device_spec_lookup`)
+
 ### ✅ 2026-09-17 — pingevox Q3: แนะนำสาย 60W ให้เครื่อง 90W → adequate-first wattage sort
 
 - **อาการ (แชทจริง pingevox, shadow):** "อยากได้ของที่ใช้กับ xiaomi 17 ultra" → ตอบ CTC315P 60W ทั้งที่ context มีสาย 100W/140W/240W ครบ
@@ -123,6 +135,7 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **SRS_SSD.md** อัปเดต: 6.3.1/6.3.6/6.3.7 (search_cert_products + helpers + constants), 6.8.1 (detect_cert_question + tisi fns), 6.17.1 (post_intent_handoffs)
 - **replay จริง `shp_152520384227573579`** (CukTechThailand, 10 turns, LLM จริง): Q1/Q2/Q5 cert ตอบถูก ✅; fix เพิ่ม `ทุกรุ่น/ทุกตัว/ทุกอัน/ทุกชิ้น/ทุกสินค้า/ทั้งหมด` ใน `_TISI_GENERAL_KWS` (เดิม "ทุกรุ่นมี มอก ไหม" → kw หลุด → handoff ผิด); **จุดเหลือ:** Q3 "1" บอทตอบอังกฤษ (LLM language slip), Q4 "ทุกรุ่น" ไม่มี cert kw → หลุด cert path (ถ้าจะให้ follow-up สั้นต่อ cert context ต้องเพิ่ม logic แยก), cert_answer list ชื่อเต็มยาว 3k chars (อาจ trim/กรองหมวด)
 - **test chat KingGadgets (2026-09-18):** "หาพาวแบง มีมอก มีไหม" → handoff ผิด — root cause `extract_tisi_model_keyword` คืนคำไทยล้วน ("หาพาวแบง") เป็น model → name filter ฆ่าผลหมด ทั้งที่ KingGadgets มีของจริง (tisi 1/ccc 2/ce 6); **fix:** model kw ต้องมี token alnum ≥3 ตัว (รหัสรุ่น AC65B2/A18T) — คำไทยล้วน → "" = คำถามทั่วไป; เลือก token ที่มีตัวเลขก่อน; test 36/36 + live verify: ได้ PowerConnex PCX-P (มอก.) / 3 items (tisi+ccc union) ✅
+- **category-aware cert search (2026-09-18):** user ชี้ "PowerConnex ไม่ใช่ powerbank" — generic cert search ไม่กรองหมวด → **fix:** (1) เพิ่ม kw `"พาวแบง"` bare ใน PRODUCT_TYPES powerbank (เดิม detect ไม่ได้เพราะ kw ต้องมี ค์/ก์); (2) `search_cert_products` เพิ่ม `type_filter` + `_name_matches_types` กรอง item_name ด้วย PRODUCT_TYPES regex ทั้ง desc+image path; (3) handoffs ส่ง `_detect_product_types(msg)` เฉพาะตอนไม่มี model_kw — filter แล้วว่าง → re-search ไม่กรองหมวด → ตอบ "สำหรับ{หมวด} ยังไม่พบข้อมูล {cert} แต่สินค้าอื่นที่มีได้แก่..." แทน handoff; **verify:** test 42/42 + live KingGadgets: "พาวแบง+มอก" → 0→fallback ตอบตรงๆ (ไม่เรียก PowerConnex ว่า powerbank) / "พาวเวอร์แบงค์+ccc" → เฉพาะ Aura LPB200NC (Himo/PowerConnex หลุด) ✅; restart :8010
 - **หมายเหตุ:** รูป cert อยู่ใน image scope เดิมอยู่แล้ว (มอก. 119 รูป/GB 227/CCC 19/CE 14) — ไม่ต้อง extract เพิ่ม; งานนี้คือทำให้ runtime ใช้ข้อมูลนั้นได้
 
 ### ✅ 2026-09-17 — sellable-first ranking + live stock join + compat gate + suggestion compare (commit `015a9c3`, `80f1da1`)

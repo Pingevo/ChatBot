@@ -287,7 +287,7 @@ web_search.should_use_web_search(answer, intent, products, message)
 
 > **⚡ Refactor 2026-09-16:** `app.py` 8,239 → 4,807 บรรทัด — ย้ายออกไป:
 > - `test_chat_api.py` — test-chat sessions CRUD (9 routes) + `_validate_object_id` + `_log_testchat_action`
-> - `device_compat.py` — `_extract_max_wattage`, `_wattage_asc_key`, `_KNOWN_DEVICE_SPECS`, `_extract_product_connectors`, `_resolve_device_spec`, `_filter_compat_products`, `_apply_product_tiers`, `_device_spec_lookup`
+> - `device_compat.py` — `_extract_max_wattage`, `_wattage_asc_key`, `_extract_device_token`, `_KNOWN_DEVICE_SPECS`, `_extract_product_connectors`, `_resolve_device_spec`, `_filter_compat_products`, `_apply_product_tiers`, `_device_spec_lookup`
 > - `order_flow.py` — `early_order_flow(req, ctx, history, db)` (order lookup + return/refund + tracking; dict→`ChatResponse` ที่ call site; เขียนกลับ `ctx["order_sn"]`/`ctx["is_claim_request_pre"]` ให้ warranty auto-check)
 > - `handoffs.py` — `detect_human_request(req, ctx)` (pre-intent) + `post_intent_handoffs(req, ctx, db)` (tax invoice + TISI)
 > - `warranty_flow.py` — `handle_warranty_flow_legacy(req, ctx, history, db)` (legacy claim SM; dict→`ChatResponse` ที่ call site)
@@ -499,8 +499,9 @@ web_search.should_use_web_search(answer, intent, products, message)
 | `fetch_product_by_id` | 2880 | ดึงสินค้าเดียวโดย `item_id` | `to_product_card` |
 | `fuzzy_match_products` | 559 | rapidfuzz fallback สำหรับพิมพ์ผิด — **2026-09-17**: ตัด `item_status:NORMAL` filter (ตอบสินค้า unlisted/deleted ได้ กันขายอยู่ที่ card), prefix-3 miss/score ไม่ผ่าน → rescan ทั้งร้าน (≤2000 docs), brand tokens จาก `_known_brands()` ใช้กรอง fetch แต่ยังนับ score (avg per-token) — ทุก token โดนกรองหมด → ใช้ token เดิม | `_extract_product_name_tokens`, `to_product_card`, `knowledge_base._known_brands` (lazy) |
 | `vector_search` | 68 | cosine similarity กับ embedding NPZ | `_load_vector_store`, `embedding.embed_query` |
-| `search_cert_products` | ~3545 | **2026-09-17** — ค้นสินค้าที่มี cert (tisi/ce/ccc/fcc/rohs/gb) จาก 2 แหล่ง: `description` regex + `image_texts` (admin DB) ผ่าน `item_ids` → merge dedupe by item_id (`via`=desc/image/both) — model_keyword ระบุ → ไม่กรอง status; ไม่ระบุ → เฉพาะ NORMAL; sort sellable ก่อน | `_has_cert`, `_extract_match_context`, `_admin_image_texts_coll` (lazy `knowledge_base._admin_db`) |
-| `search_tisi_products` | ~3700 | wrapper `search_cert_products(db, ("tisi",), ...)` + alias `tisi_context` (compat) | `search_cert_products` |
+| `search_cert_products` | ~3545 | **2026-09-17** — ค้นสินค้าที่มี cert (tisi/ce/ccc/fcc/rohs/gb) จาก 2 แหล่ง: `description` regex + `image_texts` (admin DB) ผ่าน `item_ids` → merge dedupe by item_id (`via`=desc/image/both) — model_keyword ระบุ → ไม่กรอง status; ไม่ระบุ → เฉพาะ NORMAL; sort sellable ก่อน — **2026-09-18**: เพิ่ม param `type_filter: set[str]` กรอง `item_name` ด้วย PRODUCT_TYPES regex (`_name_matches_types`) ทั้ง 2 path — กันเคส "พาวแบง มี มอก." ตอบ surge module ผิดหมวด | `_has_cert`, `_extract_match_context`, `_admin_image_texts_coll` (lazy `knowledge_base._admin_db`), `_name_matches_types` |
+| `_name_matches_types` | ~3590 | **2026-09-18** — item_name match product_type ใดใน `type_filter` หรือไม่ (regex เดียวกับ `PRODUCT_TYPES`) — helper ของ `search_cert_products` | `PRODUCT_TYPES` |
+| `search_tisi_products` | ~3700 | wrapper `search_cert_products(db, ("tisi",), ...)` + alias `tisi_context` (compat) — **2026-09-18**: pass-through `type_filter` | `search_cert_products` |
 
 #### 6.3.2 Charger subtype
 
@@ -1657,11 +1658,12 @@ CRUD สำหรับ test-chat sessions เก็บลง `test_chat_session
 |---|---|---|
 | `_extract_max_wattage(p)` | extract ค่า W สูงสุดจาก spec/variants/ชื่อ (กรอง model number) | `re` |
 | `_wattage_asc_key(p, min_watt)` | sort key เรียง wattage asc แบบ adequate-first — ของที่ watt ≥ `min_watt` ขึ้นก่อน, ไม่รู้ min_watt → asc ล้วน | `_extract_max_wattage` |
+| `_extract_device_token(msg)` | ดึง target_device แบบ generic — pattern "letters+digits(+variant word)" ครอบทุกรุ่น, กรอง `_NON_DEVICE_TOKENS` + product-code (CTC615W) | `_DEVICE_TOKEN_RE`, `_NON_DEVICE_TOKENS` |
 | `_extract_product_connectors(p)` | สกัด connector types จากชื่อ+desc → set | `re` |
 | `_resolve_device_spec(name, ws_extra)` | resolve spec ของอุปกรณ์ — web search → `_KNOWN_DEVICE_SPECS` | `re` |
 | `_filter_compat_products(...)` | กรองตาม connector (ไม่กรอง wattage) + sort wattage asc แบบ adequate-first (`_wattage_asc_key` + `device_min_watt`) | ฟังก์ชันข้างบน |
 | `_apply_product_tiers(products, tier_a_ids, limit)` | รวม tier A (exact/anchor) + tier B → `product_store._dedupe_products` | `product_store` |
-| `_device_spec_lookup(db, req, ...)` | web-search spec + re-query DB หา compat products — resolve `device_min_watt` (intent → `_resolve_device_spec`) เติม watt threshold ใน spec extra + sort re-query ด้วย `_wattage_asc_key` | `product_store`, `web_search` (lazy) |
+| `_device_spec_lookup(db, req, ...)` | web-search spec + re-query DB หา compat products — target_device จาก intent → `_extract_device_token` fallback (generic, ไม่ hardcode รุ่น); resolve `device_min_watt` (intent → `_resolve_device_spec`) เติม watt threshold ใน spec extra + sort re-query ด้วย `_wattage_asc_key` | `product_store`, `web_search` (lazy), `_extract_device_token` |
 | `_KNOWN_DEVICE_SPECS` | dict spec hardcoded (last resort) | — |
 
 #### 6.15.3 Called by
@@ -1692,7 +1694,7 @@ Early-return blocks ก่อน intent classification: order lookup, return/ref
 | ฟังก์ชัน | หน้าที่ | Input | Output |
 |---|---|---|---|
 | `detect_human_request(req, ctx)` | BUG-3 fix — ลูกค้าขอคุยกับคน/แอดมิน (keyword + "แอด" short-msg guard) → handoff ทันที | ctx: `steps, timing_breakdown, total_start, image_desc_out, model_name` | `dict`/`None` |
-| `post_intent_handoffs(req, ctx, db)` | tax invoice (`is_tax_invoice` จาก intent/keyword) + cert standards (`warranty.detect_cert_question` → `product_store.search_cert_products` ค้น desc+image_texts → ตอบหรือ handoff) — **2026-09-17**: ขยายจาก มอก. เดี่ยว → tisi/ce/ccc/fcc/rohs/gb + image_texts source | ctx: `is_tax_invoice, bot_name, steps, timing_breakdown, total_start, image_desc_out, model_name` | `dict`/`None` |
+| `post_intent_handoffs(req, ctx, db)` | tax invoice (`is_tax_invoice` จาก intent/keyword) + cert standards (`warranty.detect_cert_question` → `product_store.search_cert_products` ค้น desc+image_texts → ตอบหรือ handoff) — **2026-09-17**: ขยายจาก มอก. เดี่ยว → tisi/ce/ccc/fcc/rohs/gb + image_texts source — **2026-09-18**: `_detect_product_types(message)` → `type_filter` (เฉพาะคำถามทั่วไป ไม่มี model_keyword) กรองหมวดสินค้า; filter แล้วว่าง → re-search ไม่จำกัดหมวด → ตอบ "ไม่พบในหมวดที่ถาม แต่มีสินค้าอื่น" แทน handoff | ctx: `is_tax_invoice, bot_name, steps, timing_breakdown, total_start, image_desc_out, model_name` | `dict`/`None` |
 
 - **Called by**: `app.chat()` — `detect_human_request` ก่อน intent classification; `post_intent_handoffs` หลัง Phase 6 keyword fallback
 - **Calls**: `llm.split_segments`, `product_store.search_cert_products` (`search_tisi_products` wrapper), `warranty.detect_cert_question`/`extract_tisi_model_keyword`, `responses._send_handoff`, `responses._routing` (⚡ ย้ายจาก app.py ไป responses.py 2026-09-16 — app.py re-import กลับ)
