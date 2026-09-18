@@ -97,9 +97,98 @@ for _name, _spec in _DEVICE_SPECS.items():
             _SPEC_INDEX[_a_norm] = _name
 _SPEC_TERMS_BY_LEN = sorted(_SPEC_INDEX, key=len, reverse=True)
 
+# head-word ของ canonical key → brand (ใช้ brand-guard กัน "14 pro" ของ iPhone ทับ "mi 14 pro")
+_SPEC_HEAD_BRAND = {
+    "iphone": "apple", "ipad": "apple", "macbook": "apple", "apple": "apple", "airpods": "apple",
+    "galaxy": "samsung",
+    "xiaomi": "xiaomi", "redmi": "xiaomi", "poco": "xiaomi",
+    "huawei": "huawei", "honor": "honor",
+    "oppo": "oppo", "oneplus": "oneplus",
+    "realme": "realme",
+    "vivo": "vivo", "iqoo": "vivo",
+    "pixel": "google", "nexus": "google",
+    "nothing": "nothing", "cmf": "nothing",
+    "xperia": "sony", "sony": "sony",
+    "rog": "asus", "zenfone": "asus", "asus": "asus",
+    "motorola": "motorola", "moto": "motorola", "razr": "motorola",
+    "infinix": "infinix", "tecno": "tecno", "itel": "itel",
+    "nokia": "nokia", "lumia": "nokia",
+    "zte": "zte", "nubia": "zte", "meizu": "meizu", "lenovo": "lenovo", "legion": "lenovo",
+    "lg": "lg", "htc": "htc", "blackberry": "blackberry",
+    "steam": "valve", "nintendo": "nintendo", "ps": "sony", "surface": "microsoft",
+}
+
+# brand hint จากข้อความ — (regex, brand); ถ้า detect ได้ brand เดียวพอดี → filter candidates
+_DEVICE_BRAND_HINTS: tuple = tuple(
+    (re.compile(pat), brand) for pat, brand in (
+        (r"iphone|ipad|macbook|airpods|apple|iwatch|ไอโฟน|ไอแพด|แมค", "apple"),
+        (r"samsung|galaxy|ซัมซุง|ซัมซัง", "samsung"),
+        (r"xiaomi|redmi|poco|เสียวหมี่|ชาวมี|\bmi\b", "xiaomi"),
+        (r"huawei|mate|pura|nova|หัวเว่ย", "huawei"),
+        (r"honor|ออนเนอร์", "honor"),
+        (r"oppo|reno|ออปโป้", "oppo"),
+        (r"oneplus|one plus|วันพลัส", "oneplus"),
+        (r"realme|narzo|เรียลมี", "realme"),
+        (r"vivo|iqoo|วีโว่", "vivo"),
+        (r"pixel|nexus|พิกเซล", "google"),
+        (r"nothing|cmf", "nothing"),
+        (r"sony|xperia|โซนี่", "sony"),
+        (r"asus|rog|zenfone|เอซุส", "asus"),
+        (r"motorola|moto|razr|โมโต", "motorola"),
+        (r"infinix", "infinix"),
+        (r"tecno|camon|pova|spark|phantom", "tecno"),
+        (r"itel", "itel"),
+        (r"nokia|lumia|โนเกีย", "nokia"),
+        (r"zte|nubia|red magic", "zte"),
+        (r"meizu", "meizu"),
+        (r"lenovo|legion", "lenovo"),
+        (r"\blg\b", "lg"),
+        (r"htc", "htc"),
+        (r"nintendo|switch", "nintendo"),
+        (r"steam", "valve"),
+        (r"surface", "microsoft"),
+    )
+)
+
+
+def _spec_brand(canon: str) -> str:
+    """brand ของ canonical entry — จาก head-word ของ key"""
+    return _SPEC_HEAD_BRAND.get((canon or "").split(" ", 1)[0], "")
+
+
+def _device_brand_hint(low: str) -> str:
+    """brand ที่ detect จาก input — คืน brand เดียวเฉพาะเมื่อเจอ brand เดียวพอดี (หลาย/ไม่มี → '')"""
+    brands = {brand for pat, brand in _DEVICE_BRAND_HINTS if pat.search(low)}
+    return brands.pop() if len(brands) == 1 else ""
+
+
+def _ascii_alnum(ch: str) -> bool:
+    return ch.isascii() and ch.isalnum()
+
+
+def _term_boundary_match(term: str, low: str) -> bool:
+    """term อยู่ใน low แบบ token boundary — ต้น/ท้ายไม่ติด ascii alnum
+    (กัน 'a56' ฝังใน 'cta56' / 'iphone 5' ฝังใน 'iphone 5s';
+    ตัวอักษรไทยนับเป็น boundary เพราะไม่ใช่ ascii → 'ใช้กับiphone17' ยัง match)"""
+    i = low.find(term)
+    while i >= 0:
+        left_ok = i == 0 or not _ascii_alnum(low[i - 1])
+        j = i + len(term)
+        right_ok = j == len(low) or not _ascii_alnum(low[j])
+        if left_ok and right_ok:
+            return True
+        i = low.find(term, i + 1)
+    return False
+
 
 def _lookup_spec_db(device_name: str) -> dict | None:
-    """⚡ ค้น spec จาก DEVICE_SPECS — exact → alias → substring longest-match.
+    """⚡ ค้น spec จาก DEVICE_SPECS — exact → boundary substring longest-match + brand guard.
+
+    - exact: input == term (canonical/alias) → ใช้เลย
+    - substring: term ต้อง match แบบ token boundary (กัน 'a56' ใน 'cta56')
+    - brand guard: input มี brand เดียวชัด (เช่น 'mi', 'xiaomi', 'vivo') →
+      รับเฉพาะ entry ที่ brand ตรง — ไม่ตรงหมด → None → web fallback
+      (กัน '14 pro' ของ iPhone ทับ 'mi 14 pro' ของ Xiaomi)
 
     Returns: {"device": canonical, "min_watt"(=wired_w), "connector", "wired_w",
               "wireless_w", "protocols", "year"} หรือ None ถ้าไม่มีใน DB
@@ -109,11 +198,18 @@ def _lookup_spec_db(device_name: str) -> dict | None:
         return None
     canon = _SPEC_INDEX.get(low)
     if not canon:
-        # substring — term ยาวสุดก่อน (กัน "iphone 17" ทับ "iphone 17 pro max")
-        for _term in _SPEC_TERMS_BY_LEN:
-            if _term in low:
-                canon = _SPEC_INDEX[_term]
+        hint = _device_brand_hint(low)
+        cands = sorted(
+            ((_term, _c) for _term, _c in _SPEC_INDEX.items()
+             if _term in low and _term_boundary_match(_term, low)),
+            key=lambda t: len(t[0]), reverse=True,
+        )
+        for _term, _c in cands:
+            if not hint or _spec_brand(_c) == hint:
+                canon = _c
                 break
+            print(f"[DEVICE-SPEC] brand-guard: drop {_term!r}→{_c!r} "
+                  f"(brand={_spec_brand(_c)!r} != hint={hint!r})", file=sys.stderr)
     if not canon:
         return None
     return {"device": canon, "min_watt": _DEVICE_SPECS[canon].get("wired_w"),

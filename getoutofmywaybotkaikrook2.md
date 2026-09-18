@@ -20,6 +20,13 @@
 
 ## กำลังทำ (active)
 
+### Stock DB cert collection — แหล่ง มอก./CE/CCC structured (2026-09-18) — 🔍 inspect
+
+- **ทำไม:** user มี collection สินค้าอีกตัว (stock DB) ที่เก็บ cert flag เป็น field โดยตรง: `tis_id` (เลข มอก), `is_tis`, `tis_license_id` (เลขใบอนุญาต), `is_ccc`, `is_ce` — ถ้า join กับ ShpProducts ได้ จะตอบคำถาม cert จาก structured data แทน OCR รูป (แม่นกว่า + ไม่เสีย quota)
+- **env:** `STOCK_URI` / `STOCK_DB` (เพิ่มใน `.env` แล้ว)
+- **วิธี:** เขียน `scripts/inspect_stock_certs.py` (read-only) — list collections + sample schema + นับ cert flags + หา join key กับ ShpProducts (item_id / model / sku) → ตัดสินใจทีหลังว่าเอาไปใช้ยังไง (cert search / unit card / product card)
+- **ยังไม่รู้:** ชื่อ collection จริง, join key, coverage (กี่ % ของสินค้าใน ShpProducts มีใน stock DB)
+
 ### Variant image + OCR รูปนอก description (2026-09-18) — ✅ implement เสร็จ รอ deploy steps
 
 - **ทำไม:** user เจอในแชท thitirat.rac — unit card "สายชาร์จ CTC315P ขาว" (item 6359177007) โชว์รูป `th-11134208-81ztg-mne4rdze5wxse2` = รูปแรกใน desc field_list (banner) แทนรูปสายจริง `th-11134207-7rash-m8zynhw4wjrd0a` — เพราะ `to_unit_card` ใช้ `unit.image_ids[0]` (desc เท่านั้น) ไม่เคยอ่าน `tier_variation.option_list[].image`
@@ -112,6 +119,21 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 ---
 
 ## ผ่านแล้ว (file 2)
+
+### ✅ 2026-09-18 — spec-db substring collision → word-boundary match + brand guard
+
+- **เจอจาก audit ของ user:** user ถาม "มั่นใจแค่ไหนว่าจะไม่พัง" → verify สดพบ collision จริงใน index 656 terms:
+  - `mi 14 pro` → **iPhone 14 Pro (lightning 23W)** (จริง: usb-c 120W) — alias "14 pro" อยู่ใน "mi 14 pro" และยาวกว่า "mi 14"(5)
+  - `mi 11 pro` → **iPhone 11 Pro** — alias "11 pro" เหมือนกัน
+  - `ใช้กับ cta56` → **Galaxy A56** — term "a56" ฝังใน product code "cta56"
+  - `vivo s25` → **Galaxy S25** — brand ผิด
+  - ผลกระทบจริง: connector filter ใช้ spec ผิด → ทิ้งสาย usb-c ทั้งหมดให้ลูกค้าที่ถาม Mi 14 Pro
+- **แก้ 2 ชั้นใน `_lookup_spec_db`:**
+  1. `_term_boundary_match` — term ต้อง match แบบ token boundary (ต้น/ท้ายไม่ติด ascii-alnum) → "a56" ใน "cta56" ไม่ match, "iphone 5" ใน "5s" ไม่ match; ตัวอักษรไทย=boundary → "ใช้กับiphone17" ยัง match
+  2. `_device_brand_hint` + `_spec_brand` — detect brand จาก input (mi/xiaomi/vivo/samsung/ฯลฯ ~20 brands + ไทย); ถ้าเจอ brand เดียวพอดี → รับเฉพาะ entry brand ตรง, ไม่ตรงหมด → None → web fallback; หลาย brand/ไม่มี → longest-match เดิม
+- **verify 42/42:** bug cases ทั้ง 5 แก้ถูก (mi 14 pro→xiaomi 14, cta56→None, vivo s25→None→web fallback) + regression เดิมทั้งหมดไม่พัง — brand-guard drop log พิมพ์เพื่อ debug ได้
+- **SRS_SSD.md** อัปเดต `_lookup_spec_db` ทั้ง 2 ตาราง
+- **บริบท:** user สั่งพัก expansion "ทุกแบรนด์ 20 ปี" (เสี่ยงเขียนข้อมูลผิดจากความจำ ~400 รุ่น) — fix นี้ปิดช่อง collision ของ DB ปัจจุบัน ~140 รุ่น; ยังเหลือความเสี่ยง "fact ผิดใน entry" ซึ่งจำกัดด้วยการคุม entries ให้เฉพาะที่ verify ได้
 
 ### ✅ 2026-09-18 — DEVICE_SPECS catalog แทน _KNOWN_DEVICE_SPECS (สเปค hardcode ผิด → structured data)
 
