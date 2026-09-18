@@ -20,6 +20,27 @@
 
 ## กำลังทำ (active)
 
+### Variant image + OCR รูปนอก description (2026-09-18) — ✅ implement เสร็จ รอ deploy steps
+
+- **ทำไม:** user เจอในแชท thitirat.rac — unit card "สายชาร์จ CTC315P ขาว" (item 6359177007) โชว์รูป `th-11134208-81ztg-mne4rdze5wxse2` = รูปแรกใน desc field_list (banner) แทนรูปสายจริง `th-11134207-7rash-m8zynhw4wjrd0a` — เพราะ `to_unit_card` ใช้ `unit.image_ids[0]` (desc เท่านั้น) ไม่เคยอ่าน `tier_variation.option_list[].image`
+- **และ:** image_texts OCR เฉพาะรูปใน desc field_list — รูป มอก./cert ที่อยู่ใน gallery (`image_id_list`) / variant option image ไม่ถูก OCR → cert search พลาด (~12,794 รูปใหม่ใน sellable docs)
+- **วิธีแก้ (ทำแล้ว):**
+  1. `units._variant_image_id()` — match `model_name` กับ `tier_variation[].option_list[].option` (normalize isalnum+lower; exact หรือ option≥4chars ⊂ name สำหรับ 2-tier) → คืน `option.image.image_id`
+  2. `to_unit_card` — `image_url` ลำดับใหม่: **variant > cover (`image_id_list[0]`) > desc (`image_ids[0]`)** (เดิม desc เท่านั้น); `attach_listing_fields` เพิ่ม `tier_variation` ใน projection → runtime ทำงานเลยไม่ต้อง rebuild
+  3. `build_image_texts._doc_images()` — image_id→url จาก 3 แหล่ง (desc field_list + gallery + variant options, dedupe desc นำหน้า) — ใช้ร่วมกันใน `_collect_worklist`, `_collect_nonsellable`, `import_image_texts._image_item_ids`
+  4. `build_sellable_units._field_list_parts` — `unit.image_ids` ต่อท้ายด้วย gallery+variant ids → `attach_image_texts` join เห็น OCR รูปนอก desc
+- **Verify:**
+  - py_compile ครบ 5 ไฟล์ ✅
+  - unit check ข้อมูลจริง item 6359177007: "สายชาร์จ CTC315P ขาว" → `th-11134207-7rash-m8zynhw4wjrd0a` (รูปสายจริง) ✅, "A18T + CTC315P สีขาว" → variant img ถูก ✅, no-match/empty/empty-listing → `""` ✅, `_doc_images` 33 รูป desc-first + cover+variant ครบ ✅
+  - test_cert_standards 46/46 ✅, test_car_charger_regression 16/16 ✅
+- **SRS_SSD.md** อัปเดต 6.18.1 (เพิ่ม `_variant_image_id` + ปรับ `to_unit_card`/`attach_listing_fields`/`attach_image_texts`)
+- **⚠️ ขั้นตอน deploy ที่เหลือ (ก่อนเห็นผลจริง):**
+  1. variant image ใน card — restart :8010/:8015 (runtime change อยู่แล้ว)
+  2. OCR รูปใหม่ ~12,794 รูป (sellable) + nonsellable — รัน `build_image_texts.py` (+ `build_image_texts_nonsellable.py`) — resume append ลง `exports/image_texts.jsonl` (~$2-3)
+  3. `import_image_texts.py` re-run → `item_ids` map ครบ 3 แหล่ง → cert search เห็นรูป gallery/variant
+  4. rebuild `sellable_units` (อยู่ใน P0) → `unit.image_ids` ครบ → `attach_image_texts` join เห็น OCR รูป gallery/variant
+- **⚠️ ยังไม่ verify e2e:** รอ deploy steps ข้างบน + replay แชท thitirat.rac เช็ครูป variant จริง
+
 ### Restart :8010 + :8015 ด้วยโค้ดใหม่ (2026-09-17 ~17:2x + restart ซ้ำตอน cert done)
 
 - **ทำไม:** replay-compare ยิง `127.0.0.1:8010` — process เก่า start 12:19 ก่อน commit `015a9c3` (sellable ranking + suggestion compare, 16:57) → replay ได้โค้ดเก่า
@@ -92,6 +113,23 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 
 ## ผ่านแล้ว (file 2)
 
+### ✅ 2026-09-18 — DEVICE_SPECS catalog แทน _KNOWN_DEVICE_SPECS (สเปค hardcode ผิด → structured data)
+
+- **ทำไม:** user ชี้ "spec hardcode บางทีผิด" ขอให้ไปดึง spec จากเว็บ (เสนอ GSMArena) — verify จริงเจอว่า `_KNOWN_DEVICE_SPECS` ผิด: iPhone 17 ใส่ 27W ทั้งที่จริงต้อง 40W+ adapter (PD3.2 AVS); ตารางมีแค่ ~25 รุ่น ขาด iPhone ≤14/iPad/MacBook เก่า/แบรนด์อื่นเกือบทั้งหมด
+- **GSMArena direct ไม่ได้:** ติด anti-bot check — ใช้ `web_search.search_and_extract` spot-verify แทน (ดึง spec รุ่นใหม่ได้จริง: iPhone 17 Pro Max 40W, S26 Ultra 60W PPS, Pixel 10 Pro XL 45W PPS)
+- **แก้:**
+  1. **ไฟล์ใหม่ `device_specs_data.py`** — `DEVICE_SPECS` dict ~140 devices: `{connector, wired_w, wireless_w, protocols[], year, aliases[]}` — ครอบ iPhone ทุกรุ่น (5→17 Pro Max, lightning+usb-c eras), iPad/MacBook, Samsung S/Z/A/Tab 5 ปี, Xiaomi/Redmi/Poco, Huawei/Honor, Oppo/OnePlus/Realme, Vivo/iQOO, Pixel, Nothing, Sony, Asus, Motorola, Infinix/Tecno, game handhelds — แทน `_KNOWN_DEVICE_SPECS` (ลบทิ้งแล้ว — DB ครอบทุก entry เดิม)
+  2. **`_lookup_spec_db(name)`** — flat index `term→canonical` (656 terms จาก keys+aliases), match: exact → alias → substring longest (กัน "iphone 17" ทับ "iphone 17 pro max")
+  3. **`_resolve_device_spec`** — priority ใหม่: **spec DB → web parse** (เดิม web → hardcode table); structured data ไม่ต้องเดาจาก text
+  4. **`_filter_compat_products`** — priority ใหม่: **`_resolve_device_spec` (DB→web) → intent** (เดิม intent ก่อน — intent wattage เป็น LLM guess ผิดได้ เช่น iPhone 17)
+  5. **`_device_spec_lookup`** — `_dev_min_watt` resolve: **DB → intent → resolve**; เติม catalog line ลง spec extra: "📋 สเปคจาก catalog: connector=usb-c, ชาร์จมีสายสูงสุด 90W, ไร้สาย 50W, protocols: hypercharge, pd, pps, qc" → LLM เห็น protocol ชัด (เดิมได้แต่ watt จาก web text)
+- **verify:**
+  - unit `_lookup_spec_db` **32/32**: exact/alias/substring ครบ (mi 17 ultra→xiaomi, s25 ultra→galaxy, "ใช้กับ iphone 17 pro max"→substring) + negatives (ctc615w/ad653u/ipad/macbook/galaxy/brand เดี่ยว/x999 → None หมด)
+  - **E2E in-process 7 เคส**: pingevox Q2→สาย 240W/100W (เดิม 60W ผิด) Q3→"ชาร์จเร็วสูงสุด 90W" + หัวชาร์จ 100W/120W; **s25 ultra** (เดิมไม่มีใน list เลย)→"45W USB-C"+สาย 60W; **pixel 10 pro xl**→"45W PPS" cite protocol จาก catalog; **iphone 14**→"Lightning 20W" สาย Lightning (เดิมตารางมีแค่ 12-17); **macbook air m3**→240W
+  - stderr: `[DEVICE-SPEC] spec-db hit` + `source=spec-db` ทุกเคส — web search ยังทำงานคู่ขนานหา spec extra/keywords (ไม่ขัดกัน)
+- **SRS_SSD.md** อัปเดต 6.15.2 + refactor note (เพิ่ม `_SPEC_INDEX`/`_lookup_spec_db`/`DEVICE_SPECS`, ปรับ `_resolve_device_spec`/`_filter_compat_products`/`_device_spec_lookup`, ลบ `_KNOWN_DEVICE_SPECS` rows)
+- **หมายเหตุ:** ค่า wired_w = marketing spec (GSMArena-equivalent + spot-verify) — ยังเป็น curated table แต่ structured + provenance ชัด + อัปเดตจุดเดียว; device ใหม่ที่ไม่มีใน DB → fallback web parse เหมือนเดิม (ไม่มี hardcode gate)
+
 ### ✅ 2026-09-18 — generic device-token extractor แทน list ชื่อรุ่น hardcode
 
 - **ทำไม:** user ชี้ "พึ่ง hardcode เกินไป" — spec lookup มี web-search เป็น primary อยู่แล้ว แต่ trigger list เป็นรุ่นเจาะจง 2 จุด: `_device_patterns_fallback` (device_compat) + device list ใน `_extract_charger_constraints` (app.py) → รุ่นใหม่ที่ intent พลาด = ไม่ search spec
@@ -136,6 +174,7 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **replay จริง `shp_152520384227573579`** (CukTechThailand, 10 turns, LLM จริง): Q1/Q2/Q5 cert ตอบถูก ✅; fix เพิ่ม `ทุกรุ่น/ทุกตัว/ทุกอัน/ทุกชิ้น/ทุกสินค้า/ทั้งหมด` ใน `_TISI_GENERAL_KWS` (เดิม "ทุกรุ่นมี มอก ไหม" → kw หลุด → handoff ผิด); **จุดเหลือ:** Q3 "1" บอทตอบอังกฤษ (LLM language slip), Q4 "ทุกรุ่น" ไม่มี cert kw → หลุด cert path (ถ้าจะให้ follow-up สั้นต่อ cert context ต้องเพิ่ม logic แยก), cert_answer list ชื่อเต็มยาว 3k chars (อาจ trim/กรองหมวด)
 - **test chat KingGadgets (2026-09-18):** "หาพาวแบง มีมอก มีไหม" → handoff ผิด — root cause `extract_tisi_model_keyword` คืนคำไทยล้วน ("หาพาวแบง") เป็น model → name filter ฆ่าผลหมด ทั้งที่ KingGadgets มีของจริง (tisi 1/ccc 2/ce 6); **fix:** model kw ต้องมี token alnum ≥3 ตัว (รหัสรุ่น AC65B2/A18T) — คำไทยล้วน → "" = คำถามทั่วไป; เลือก token ที่มีตัวเลขก่อน; test 36/36 + live verify: ได้ PowerConnex PCX-P (มอก.) / 3 items (tisi+ccc union) ✅
 - **category-aware cert search (2026-09-18):** user ชี้ "PowerConnex ไม่ใช่ powerbank" — generic cert search ไม่กรองหมวด → **fix:** (1) เพิ่ม kw `"พาวแบง"` bare ใน PRODUCT_TYPES powerbank (เดิม detect ไม่ได้เพราะ kw ต้องมี ค์/ก์); (2) `search_cert_products` เพิ่ม `type_filter` + `_name_matches_types` กรอง item_name ด้วย PRODUCT_TYPES regex ทั้ง desc+image path; (3) handoffs ส่ง `_detect_product_types(msg)` เฉพาะตอนไม่มี model_kw — filter แล้วว่าง → re-search ไม่กรองหมวด → ตอบ "สำหรับ{หมวด} ยังไม่พบข้อมูล {cert} แต่สินค้าอื่นที่มีได้แก่..." แทน handoff; **verify:** test 42/42 + live KingGadgets: "พาวแบง+มอก" → 0→fallback ตอบตรงๆ (ไม่เรียก PowerConnex ว่า powerbank) / "พาวเวอร์แบงค์+ccc" → เฉพาะ Aura LPB200NC (Himo/PowerConnex หลุด) ✅; restart :8010
+- **tisi regex FP "เสมอกัน" (2026-09-18):** นับ มอก. ต่อร้านเจอ KingGadgets 13 รายการ — user สงสัย → inspect เจอ 2 FP: BINNIFA "เสมอกันที่ 0.8 มม." + Amazfit "อยู่เสมอการแจ้งเตือน" — root cause: "เสมอกัน" เก็บเป็น `[เ][ส][ม][อ][ก]` (เ เป็นสระของ ส ไม่ใช่ของ ม) → lookbehind `[หเ]` เห็น ส ไม่ block; **fix:** เพิ่ม ส → `(?<![หสเ])มอก` ใน `_CERT_SEARCH_RES` + `_TISI_PATTERN` (product_store) + `_CERT_QUESTION_RES` (warranty) + เพิ่ม guard `"เสมอก"` ใน `detect_tisi_question` เดิม; **verify:** test 46/46 + recount: union 449→429, KingGadgets 13→11 (11 จริง = รางปลั๊กมอก.2432-2555 ส่วนมาก SELLER_DELETE เหลือขายแค่ PCX-P), Leravan/Binnifa/QKZ/LuckyHomeMart หลุดออกหมด (เป็น FP ทั้งร้าน) ✅; restart :8010
 - **หมายเหตุ:** รูป cert อยู่ใน image scope เดิมอยู่แล้ว (มอก. 119 รูป/GB 227/CCC 19/CE 14) — ไม่ต้อง extract เพิ่ม; งานนี้คือทำให้ runtime ใช้ข้อมูลนั้นได้
 
 ### ✅ 2026-09-17 — sellable-first ranking + live stock join + compat gate + suggestion compare (commit `015a9c3`, `80f1da1`)

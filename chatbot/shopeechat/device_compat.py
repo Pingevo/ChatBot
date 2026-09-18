@@ -2,7 +2,7 @@
 
 ครอบคลุม:
 - _extract_max_wattage / _extract_product_connectors — สกัด spec จาก product card
-- _KNOWN_DEVICE_SPECS / _resolve_device_spec — spec ของอุปกรณ์ปลายทาง
+- _lookup_spec_db / _resolve_device_spec — spec ของอุปกรณ์ปลายทาง (data อยู่ device_specs_data.py)
 - _filter_compat_products — กรองสินค้าตาม connector compatibility
 - _apply_product_tiers — รวม tier A (exact/anchor) + tier B (general) ก่อนส่ง LLM
 - _device_spec_lookup — web-search spec + re-query DB หาสินค้าที่ compat
@@ -84,6 +84,42 @@ _DEVICE_TOKEN_RE = re.compile(
     r")\b"
 )
 
+# ⚡ spec DB — curated data (device_specs_data.py) แทน _KNOWN_DEVICE_SPECS เดิม
+#   flat index: normalized term (canonical name + aliases) → canonical key
+from .device_specs_data import DEVICE_SPECS as _DEVICE_SPECS
+
+_SPEC_INDEX: dict[str, str] = {}
+for _name, _spec in _DEVICE_SPECS.items():
+    _SPEC_INDEX[_name] = _name
+    for _a in _spec.get("aliases", ()):
+        _a_norm = (_a or "").strip().lower()
+        if _a_norm:
+            _SPEC_INDEX[_a_norm] = _name
+_SPEC_TERMS_BY_LEN = sorted(_SPEC_INDEX, key=len, reverse=True)
+
+
+def _lookup_spec_db(device_name: str) -> dict | None:
+    """⚡ ค้น spec จาก DEVICE_SPECS — exact → alias → substring longest-match.
+
+    Returns: {"device": canonical, "min_watt"(=wired_w), "connector", "wired_w",
+              "wireless_w", "protocols", "year"} หรือ None ถ้าไม่มีใน DB
+    """
+    low = (device_name or "").lower().strip()
+    if not low:
+        return None
+    canon = _SPEC_INDEX.get(low)
+    if not canon:
+        # substring — term ยาวสุดก่อน (กัน "iphone 17" ทับ "iphone 17 pro max")
+        for _term in _SPEC_TERMS_BY_LEN:
+            if _term in low:
+                canon = _SPEC_INDEX[_term]
+                break
+    if not canon:
+        return None
+    return {"device": canon, "min_watt": _DEVICE_SPECS[canon].get("wired_w"),
+            **_DEVICE_SPECS[canon]}
+
+
 # head token ที่ match "letters+digits" แต่ไม่ใช่ device — protocol/connector/unit/product-noun
 _NON_DEVICE_TOKENS = frozenset({
     "usb", "pd", "qc", "pps", "ufcs", "gan", "mfi", "type", "qi", "qi2",
@@ -118,38 +154,6 @@ def _extract_device_token(msg: str) -> str | None:
             continue
         return cand
     return None
-
-
-# ⚡ Known device charging specs — ใช้สำหรับ _filter_compat_products (CODE-level compat filter)
-#    ถ้า device ไม่อยู่ในตาราง → fallback ใช้ web search text จาก _device_spec_lookup
-#    connector: พอร์ตชาร์จของอุปกรณ์ (usb-c / lightning / micro-usb)
-#    min_watt: ค่า W ขั้นต่ำที่อุปกรณ์รองรับชาร์จเต็มสปีด (ใช้เป็นข้อมูลเท่านั้น ไม่ใช้กรอง)
-_KNOWN_DEVICE_SPECS: dict[str, dict] = {
-    "iphone 17 pro max": {"connector": "usb-c", "min_watt": 27},
-    "iphone 17 pro":     {"connector": "usb-c", "min_watt": 27},
-    "iphone 17":         {"connector": "usb-c", "min_watt": 27},
-    "iphone 16 pro max": {"connector": "usb-c", "min_watt": 27},
-    "iphone 16 pro":     {"connector": "usb-c", "min_watt": 27},
-    "iphone 16":         {"connector": "usb-c", "min_watt": 27},
-    "iphone 15 pro max": {"connector": "usb-c", "min_watt": 27},
-    "iphone 15 pro":     {"connector": "usb-c", "min_watt": 27},
-    "iphone 15":         {"connector": "usb-c", "min_watt": 27},
-    "iphone 14":         {"connector": "lightning", "min_watt": 20},
-    "iphone 13":         {"connector": "lightning", "min_watt": 20},
-    "iphone 12":         {"connector": "lightning", "min_watt": 20},
-    "s25 ultra":         {"connector": "usb-c", "min_watt": 45},
-    "s24 ultra":         {"connector": "usb-c", "min_watt": 45},
-    "s23 ultra":         {"connector": "usb-c", "min_watt": 45},
-    "mi 17 ultra":       {"connector": "usb-c", "min_watt": 90},
-    "mi 17":             {"connector": "usb-c", "min_watt": 90},
-    "macbook air m4":    {"connector": "usb-c", "min_watt": 70},
-    "macbook air m3":    {"connector": "usb-c", "min_watt": 70},
-    "macbook air m2":    {"connector": "usb-c", "min_watt": 70},
-    "macbook pro 14":    {"connector": "usb-c", "min_watt": 96},
-    "macbook pro 16":    {"connector": "usb-c", "min_watt": 140},
-    "ipad pro":          {"connector": "usb-c", "min_watt": 30},
-    "ipad air":          {"connector": "usb-c", "min_watt": 30},
-}
 
 
 def _extract_product_connectors(p: dict) -> set[str]:
@@ -214,19 +218,25 @@ def _extract_product_connectors(p: dict) -> set[str]:
 
 
 def _resolve_device_spec(device_name: str, web_search_extra: str = "") -> dict | None:
-    """⚡ resolve device charging spec จาก web search ก่อน, hardcoded เป็น fallback.
+    """⚡ resolve device charging spec — spec DB (curated) ก่อน → web search text parse.
 
     Args:
         device_name: ชื่ออุปกรณ์เป้าหมาย (เช่น "iPhone 17 Pro Max", "Mi 17 Ultra")
         web_search_extra: text จาก _device_spec_lookup (มี spec จาก Google Search)
 
     Returns:
-        {connector: str, min_watt: float} หรือ None ถ้าดึงไม่ได้
+        {connector: str, min_watt: float, ...} หรือ None ถ้าดึงไม่ได้
     """
     if not device_name:
         return None
     low = device_name.lower().strip()
-    # 1. parse จาก web search text ก่อน (หลัก — _device_spec_lookup หามาให้แล้ว)
+    # 1. spec DB (curated — หลัก; ข้อมูล structured ไม่ต้องเดาจาก text)
+    _db_spec = _lookup_spec_db(low)
+    if _db_spec:
+        print(f"[DEVICE-SPEC] spec-db hit: {_db_spec['device']!r} → "
+              f"connector={_db_spec['connector']} min_watt={_db_spec['min_watt']}", file=sys.stderr)
+        return _db_spec
+    # 2. parse จาก web search text (fallback — สำหรับ device ที่ไม่มีใน DB)
     if web_search_extra:
         ws_lower = web_search_extra.lower()
         spec: dict = {}
@@ -242,11 +252,6 @@ def _resolve_device_spec(device_name: str, web_search_extra: str = "") -> dict |
         if "connector" in spec:
             print(f"[DEVICE-SPEC] parsed from web search: {spec}", file=sys.stderr)
             return spec
-    # 2. fallback: known specs (longest key first — กัน "iphone 17" match ทับ "iphone 17 pro max")
-    for key in sorted(_KNOWN_DEVICE_SPECS.keys(), key=len, reverse=True):
-        if key in low:
-            print(f"[DEVICE-SPEC] fallback to known spec: {key!r} → {_KNOWN_DEVICE_SPECS[key]}", file=sys.stderr)
-            return _KNOWN_DEVICE_SPECS[key]
     return None
 
 
@@ -265,9 +270,9 @@ def _filter_compat_products(
     หลังกรอง → sort by wattage ascending (baseline ก่อน, upgrade ทีหลัง)
 
     Device spec priority:
-    1. intent_connector (จาก intent classifier LLM — หลัก)
-    2. web search text (จาก _device_spec_lookup — fallback)
-    3. _KNOWN_DEVICE_SPECS (hardcoded — last resort)
+    1. DEVICE_SPECS db (curated — device_specs_data.py — หลัก)
+    2. web search text parse (จาก _device_spec_lookup — fallback)
+    3. intent_connector (จาก intent classifier LLM — last resort)
 
     Fallback strategy (safe — ไม่ over-filter):
     - ถ้าดึง device spec ไม่ได้ → คืนทั้งหมด
@@ -288,23 +293,24 @@ def _filter_compat_products(
     if not products or not device_name:
         return products
 
-    # resolve device connector: intent ก่อน → web search → hardcoded
+    # resolve device connector: spec DB/web parse ก่อน → intent (LLM guess) last
     device_connector = ""
     device_min_watt: float | None = None
 
-    if intent_connector:
+    device_spec = _resolve_device_spec(device_name, web_search_extra)
+    if device_spec:
+        device_connector = device_spec.get("connector", "")
+        device_min_watt = device_spec.get("min_watt")
+        _src = "spec-db" if _lookup_spec_db(device_name) else "web-parse"
+        print(f"[COMPAT-FILTER] device={device_name!r} connector={device_connector!r} "
+              f"min_watt={device_min_watt} (source={_src}) products={len(products)}", file=sys.stderr)
+    elif intent_connector:
         device_connector = intent_connector
         device_min_watt = intent_min_watt
         print(f"[COMPAT-FILTER] device={device_name!r} connector={device_connector!r} "
               f"min_watt={device_min_watt} (source=intent) products={len(products)}", file=sys.stderr)
     else:
-        device_spec = _resolve_device_spec(device_name, web_search_extra)
-        if not device_spec:
-            return products
-        device_connector = device_spec.get("connector", "")
-        device_min_watt = device_spec.get("min_watt")
-        print(f"[COMPAT-FILTER] device={device_name!r} connector={device_connector!r} "
-              f"min_watt={device_min_watt} (source=fallback) products={len(products)}", file=sys.stderr)
+        return products
 
     if not device_connector:
         return products
@@ -515,12 +521,23 @@ def _device_spec_lookup(
                         f"ห้ามเสนอแม้จะสเปคสูงแค่ไหน ไม่ว่าจะ frame เป็น baseline หรือ upgrade ก็ตาม"
                     )
                     print(f"[DEVICE-SPEC-LOOKUP] ได้ spec ของ {_compat_device_name}: {_device_info_clean[:120]!r}", file=sys.stderr)
-            # ⚡ resolve min_watt ของอุปกรณ์ — intent ก่อน → fallback web text/known specs
+            # ⚡ resolve min_watt ของอุปกรณ์ — spec DB (curated) ก่อน → intent → web parse
             #   ใช้ทั้งเติม threshold ชัดใน spec extra และจัดลำดับ re-query products
-            _dev_min_watt = intent_result.get("device_min_watt")
+            _db_spec = _lookup_spec_db(_compat_device_name)
+            _dev_min_watt = (_db_spec or {}).get("min_watt") or intent_result.get("device_min_watt")
             if not _dev_min_watt:
                 _dev_spec = _resolve_device_spec(_compat_device_name, _device_spec_extra)
                 _dev_min_watt = (_dev_spec or {}).get("min_watt")
+            if _db_spec:
+                # เติมสเปค structured จาก catalog ลง spec extra (protocols/wireless — ไม่ต้องเดาจาก web text)
+                _proto_txt = ", ".join(_db_spec.get("protocols") or []) or "-"
+                _wl_txt = f", ชาร์จไร้สาย {_db_spec['wireless_w']}W" if _db_spec.get("wireless_w") else ""
+                _device_spec_extra += (
+                    f"\n📋 สเปคจาก catalog (ข้อมูล structured — อ้างอิงหลัก): "
+                    f"{_db_spec['device']} → connector={_db_spec.get('connector')}, "
+                    f"ชาร์จมีสายสูงสุด {_db_spec.get('wired_w')}W{_wl_txt}, "
+                    f"protocols: {_proto_txt}"
+                )
             if _dev_min_watt and _device_spec_extra:
                 _device_spec_extra += (
                     f"\n⚠️ อุปกรณ์รุ่นนี้รองรับชาร์จเร็วสูงสุดประมาณ {int(_dev_min_watt)}W "
