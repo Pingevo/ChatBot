@@ -108,7 +108,12 @@ def _iter_export_docs(path: Path):
 
 
 def _field_list_parts(doc: dict) -> tuple[str, list[str]]:
-    """คืน (รวม text blocks, image_ids ตามลำดับ) จาก description_info.field_list."""
+    """คืน (รวม text blocks, image_ids ตามลำดับ) จาก description_info.field_list.
+
+    image_ids ต่อท้ายด้วย gallery (image_id_list) + variant (option_list) ids —
+    attach_image_texts join เห็น OCR text ของรูปนอก desc ด้วย (มอก./cert badge
+    มักอยู่ในรูป gallery) — desc ids ยังนำหน้าเหมือนเดิม
+    """
     fl = ((doc.get("description_info") or {}).get("extended_description") or {}).get("field_list") or []
     texts, image_ids = [], []
     for f in fl:
@@ -122,6 +127,17 @@ def _field_list_parts(doc: dict) -> tuple[str, list[str]]:
             t = (f.get("text") or "").strip()
             if t:
                 texts.append(t)
+    seen = set(image_ids)
+    for iid in (doc.get("image") or {}).get("image_id_list") or []:
+        if iid and iid not in seen:
+            image_ids.append(iid)
+            seen.add(iid)
+    for tv in (doc.get("tier_variation") or []):
+        for o in (tv.get("option_list") or []):
+            iid = (o.get("image") or {}).get("image_id")
+            if iid and iid not in seen:
+                image_ids.append(iid)
+                seen.add(iid)
     return "\n".join(texts), image_ids
 
 

@@ -47,6 +47,7 @@ async function callOurBot(params: {
   history: { role: "user" | "model"; text: string }[];
   shopId: string;
   shopName?: string;
+  conversationId?: string;  // ⚡ Shadow isolation — ส่งเป็น "shadow:<id>" ไม่แตะ timeline แชทจริง
 }): Promise<{
   answer: string;
   source?: string;
@@ -59,7 +60,7 @@ async function callOurBot(params: {
   handoff_reason?: string;
   routing_decision?: unknown;
 }> {
-  const { platform, message, history, shopId, shopName } = params;
+  const { platform, message, history, shopId, shopName, conversationId } = params;
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
 
@@ -71,6 +72,12 @@ async function callOurBot(params: {
   const body: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
   if (shopName) body.shop = shopName;
   else if (shopId) body.shop = shopId;
+  // ⚡ Shadow isolation — namespace conversation_id ด้วย "shadow:" เพื่อให้ bot
+  //   ใช้ timeline/anchor/claim state ได้เต็มรูปแบบ แต่เขียนลง doc แยกจากแชทจริง
+  if (conversationId) body.conversation_id = `shadow:${conversationId}`;
+  // ⚡ simulate_assignment → ถ้า replay trigger handoff จะเขียน test_status_conversation
+  //   ไม่แตะ conversations/status_conversation ของแชทจริง
+  body.simulate_assignment = true;
 
   // ⚡ retry สำหรับ 429 — รอ 5, 10, 20, 40 วินาที (รวม 4 ครั้ง)
   const retryDelays = [5_000, 10_000, 20_000, 40_000];

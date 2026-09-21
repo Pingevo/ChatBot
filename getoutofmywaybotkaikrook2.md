@@ -20,12 +20,99 @@
 
 ## กำลังทำ (active)
 
-### Stock DB cert collection — แหล่ง มอก./CE/CCC structured (2026-09-18) — 🔍 inspect
+### test-assignment history + live-assignment inbox โหลดช้า/หน่วง (2026-09-18) — ✅ fixed + verified
 
-- **ทำไม:** user มี collection สินค้าอีกตัว (stock DB) ที่เก็บ cert flag เป็น field โดยตรง: `tis_id` (เลข มอก), `is_tis`, `tis_license_id` (เลขใบอนุญาต), `is_ccc`, `is_ce` — ถ้า join กับ ShpProducts ได้ จะตอบคำถาม cert จาก structured data แทน OCR รูป (แม่นกว่า + ไม่เสีย quota)
-- **env:** `STOCK_URI` / `STOCK_DB` (เพิ่มใน `.env` แล้ว)
-- **วิธี:** เขียน `scripts/inspect_stock_certs.py` (read-only) — list collections + sample schema + นับ cert flags + หา join key กับ ShpProducts (item_id / model / sku) → ตัดสินใจทีหลังว่าเอาไปใช้ยังไง (cert search / unit card / product card)
-- **ยังไม่รู้:** ชื่อ collection จริง, join key, coverage (กี่ % ของสินค้าใน ShpProducts มีใน stock DB)
+- **อาการ:** user รายงาน history หน้า test-assignment โหลดช้า + live-assignment inbox หน่วง
+- **root cause (วัดจริงใน DB):** `test_assignment` docs อ้วน — avg 60KB max 1.1MB เพราะ `qa` array เก็บ transcript เต็มต่อ doc — list/stats endpoints `find()` **ไม่มี projection** → ลาก transcript เต็มทุก doc → 68 docs ≈ 4MB / ~0.8-1.5s บน remote mongo → live-assignment **poll ทุก 5 วิ** → หน่วงตลอด
+- **วิธีแก้ (projection 4 จุด — pattern เดียวกับ listReplayBatches/adminKpiService ที่มีอยู่):**
+  - `listLiveAssignments` → `{ qa: { $slice: -1 } }` — list ใช้แค่ `qa[last]` ทำ last-message preview (page.tsx:106); conv_detail ยังดึงเต็มผ่าน `getLiveAssignment` (ไม่แตะ)
+  - `listHistoryByAdmin` → `{ qa: 0, message_ratings: 0 }` — route map เฉพาะ summary fields
+  - `listDeleted` → `{ qa: 0, message_ratings: 0 }` — เหมือนกัน
+  - `getLiveAssignmentStats` → `{ final_status: 1, mock_status: 1 }` (เดิมลาก 5000 doc เต็มมานับ 2 field)
+  - `getTestAssignmentStats` → projection summary + `qa.{status,bot_source,bot_intent,bot_web_search_used}` subfields (นับ pipeline stats ได้ครบ ตัด bot_reply/products/retrieval_info ออก)
+- **verify จริง (DB ตรง):** list full 68 docs/824ms/3959KB → $slice:-1 = 68 docs/**151ms/450KB** (~9x เล็กลง 5x เร็ว); history 62 docs/**30ms/33KB** (~120x เล็กลง); last qa item ยังมี keys ครบ → preview ไม่พัง; `npx tsc --noEmit` ✅
+- **ผลกระทบเคสอื่น:** conv_detail/qaToMessages ใช้ getLiveAssignment (full doc) ไม่แตะ; cursor pagination ใช้ updated_at+conversation_id ยังอยู่ใน projection; `listTestAssignments` ไม่มี caller → ไม่แตะ
+
+### Shadow gen เขียนทับ state ของแชทจริง (timeline + ticket/handoff) (2026-09-18) — ✅ fixed + verified
+
+- **อาการ:** user กด generate shadowbot → คำตอบแยกใน `shadow_replies` ถูก แต่ bot ได้ `conversation_id` จริง → `/chat` เขียน state ลงของจริงทุกอย่าง
+- **audit write surface ที่ reachable จาก /chat (เสร็จแล้ว — ยืนยันจากโค้ด):**
+  1. `conversation_products` (doc key = conversation_id จริง): `add_product` (anchor+bot_suggestion — app.py:897/4662, `_record_suggestion_products` ×3), `add_order_anchor` (order_flow:179/362, chat_v2:507), `add_item_anchor` (chat_v2:779), `update_claim_state`/`clear_claim_state` (warranty_flow ×5) → **เขียนทุก product turn** (พิมพ์เข็ม: last_updated doc ตรงเวลา shadow batch)
+  2. **`conversations` + `status_conversation` + assign admin + admin_events** — `_send_handoff` (responses.py:35) POST `/api/admin/conversations/bot-handoff` payload `simulate: req.simulate_assignment` → shadow ไม่ได้ส่ง → `simulate:false` → **handoff จริงบนแชทจริง** (worst: replay เคส warranty/order → แชทลูกค้าจริงถูก flip เป็น handoff + assign admin จริง + bot อาจเงียบกับลูกค้าจริง)
+  3. Python ไม่มี write อื่นนอกจากนี้ (grep ครบทั้ง package — 4 update_one อยู่ใน conversation_products ทั้งหมด)
+- **จุดส่ง:** `callOurBot` ซ้ำ 3 ที่ (shadow-inbox/route.ts, generate-conversation/route.ts, scripts/generate-all-shadow.ts) ส่ง `conversation_id` จริง ไม่ส่ง simulate/ticket_state
+- **วิธีแก้ (zero Python change — namespace + simulate):**
+  - `callOurBot` ×3 (shadow-inbox/route.ts, generate-conversation/route.ts, generate-all-shadow.ts — script เพิ่ม param `conversationId` ให้ด้วย เดิมไม่ส่งเลย): ส่ง `conversation_id: "shadow:" + convId` + `simulate_assignment: true`
+  - `replay_compare.py:call_bot` — bug class เดียวกัน (replay ผ่าน /chat ด้วย conv id จริง) → namespace เหมือนกัน
+  - ผล: write ทุกจุดใน conversation_products/claim/order ลง key `shadow:` แยกขาด + multi-turn state ใน batch ทำงานปกติ; handoff → `handoffToAdminTest` → `test_status_conversation` แทน conversations จริง + answer ยังได้ชื่อ admin
+- **verify จริง:**
+  - `npx tsc --noEmit` ✅
+  - E2E `generate-all-shadow.ts --limit=1` (conv shp_271339438995668811, 2Q): doc `conversation_products` key `shadow:shp_2713...` ถูกสร้าง (6 products) — real conv **ไม่มี doc ถูกสร้าง/แตะ** ✅, shadow_replies 2 docs ปกติ ✅
+  - Direct /chat claim message ด้วย `shadow:` id → `handoff:true` fired → ไม่มี write ลง conversations/status_conversation จริง ✅ (log bot: handoff POST 404 เพราะ ADMIN_HANDOFF_URL env ของ server :8020 ชี้ผิด — pre-existing ไม่เกี่ยว fix)
+  - Direct POST bot-handoff `simulate:true` + `shadow:` id → `ok:true simulate:true` → test path เท่านั้น, real collections ไม่แตะ ✅
+- **ผลข้างเคียงที่รับแล้ว:** shadow ไม่เห็น timeline เก่าของแชทจริง (by design — replay สร้าง state เอง); doc `shadow:` สะสมใน conversation_products (cleanup ใน clear-shadow-replies ได้ภายหลัง); round-robin cursor ขยับตอน simulate handoff (เหมือน test-chat)
+
+### 400 API_KEY_INVALID หลัง add 10 keys ใหม่ (2026-09-18) — 🔍 diagnose แล้ว รอ user action
+
+- **error:** "ขออภัย ระบบ LLM ติดขัด (400 INVALID_ARGUMENT ...)" — full body ใน log = `API_KEY_INVALID` "API key not valid"
+- **เกิดเพราะ:** Gemini ปฏิเสธตัว key เอง (ไม่ใช่ quota/model/request) — pool db ตอนนี้ ~19 keys (9 เก่า + 10 ใหม่), fail rate ~50% (21 err / 43 calls) ≈ 10/19 → **key ที่เพิ่ง add เข้ามา invalid เกือบทั้งหมด/ทั้งหมด** (พิมพ์ผิด / revoke / เอา key คนละ provider มาใส่ pool Gemini)
+- **ทำไม log เห็นแต่ [INTENT]:** chat path กลืน ClientError เป็นข้อความขอโทษตอบลูกค้า ไม่ print stderr — intent_classifier เป็นตัวเดียวที่ log error
+- **วิธีแก้ (ฝั่ง user):** ปิด toggle 10 keys ใหม่ในหน้า /llm → หายใน ~10s ไม่ต้อง restart; แล้ว validate ทีละตัว `curl "https://generativelanguage.googleapis.com/v1beta/models?key=<KEY>"` ก่อน add กลับ
+- **gap ที่เจอ:** ไม่มี per-request key log (หา key ตายจาก log ไม่ได้ ต้องไล่ sha256 จาก UI) + ไม่มี auto-skip bad key (key ตายค้าง rotation จนกว่าจะปิดมือ)
+
+### /llm key list: scroll 10 แถว + toolbar ค้นหา/sort/filter + ปุ่มเพิ่ม key ขึ้นบน (2026-09-18) — ✅ implement + tsc ผ่าน รอ user เช็คหน้าจริง
+
+- **ทำไม:** user ขอ — list key ยาวเกิน ให้โชว์ ~10 แถวแล้ว scroll, ปุ่ม "เพิ่ม key" ไว้ล่างสุดหาไม่เจอ → ย้ายขึ้นบน, อยาก sort/filter/search ตามชื่อ
+- **ผลกระทบ:** `KeyPoolCard` (page.tsx) branch `source==="db"` เท่านั้น — component แชร์ 2 pools (Gemini+OpenRouter) ได้ทั้งคู่อัตโนมัติ; display-only บน `keys` array ที่โหลดแล้ว (mutation ยังอ้าง sha256 → sort/reorder ไม่พัง toggle/rename/delete); ไม่แตะ API/backend
+- **วิธีแก้:** state `keyQuery`/`sortDesc`/`statusFilter` (all|on|off) → `visibleKeys` derive (filter name icase + status + localeCompare); toolbar บนสุดของ db section = search input (ไอคอน Search) + sort toggle (ArrowDownAZ/ArrowUpZA) + FilterSelect สถานะ + ปุ่ม "เพิ่ม key" (ย้ายจากล่าง); `<ul>` ใส่ `max-h-[512px]` (~10 แถว) + `overflow-y-auto`; แถบล่างเหลือ warning เดิม; empty จาก filter → "ไม่พบ key ตามเงื่อนไข"
+- **verify:** `npx tsc --noEmit` ผ่าน — รอ user เช็คหน้าจริง
+
+### compat re-query ดึงผิดหมวด + fallback เดาหมวดเอง (2026-09-18) — ✅ implement+verify เสร็จ รอ code review
+
+- **error:** `หูฟัง sony ใช้กับ iphone 15` → ตอบ "ไม่มีหูฟัง" + เดา "มีสมาร์ทโฟน Xiaomi" — ทั้งที่ร้าน KingGadgets มีหูฟัง **54 ตัว NORMAL** ขายอยู่
+- **เกิดเพราะ (audit พบ 4 ชั้น — ลึกกว่า plan เดิม):**
+  1. `_filter_compat_products`: ambiguous merge-back เฉพาะ `compat<2` — หูฟัง 50 ตัว (no connector) ถูกลบเงียบๆ เพราะชาร์จ usb-c ≥2 ปน
+  2. `_device_spec_lookup` re-query ใช้ charging web keywords เสมอ + prompt "≥27W/dual-tier" ทุก compat query
+  3. **ชั้นที่ 3 (เจอตอน E2E):** `web_search.reanswer` re-query `f"{en_type_token} {web_keywords}"` → "earphone หูฟัง Sony iPhone..." → detect ear+phone+iPhone → **ดึงโทรศัพท์ 30 ตัวทับ context ดี**; `_final_products` replace ทั้งก้อน (ไม่ใช่ union)
+  4. type token อังกฤษ ("earphone") เอง detect ผิดเพี้ยน (ear**phone**→phone) และไม่ match ชื่อสินค้าไทย
+- **แก้ด้วย:**
+  1. `_compat_mode` (device_compat.py) — candidates = detect(msg) ∪ intent → priority charging>model_fit>self_compat; skip=phone/voucher, unknown=ไม่มี type
+  2. `_filter_compat_products` +`compat_mode`/`asked_type` — charging/unknown=เดิมเป๊ะ; model_fit/skip=คืนทั้งหมด; self_compat=drop เฉพาะ plug ผิด ambiguous เก็บคงลำดับ
+  3. `_device_spec_lookup` — non-charging re-query ด้วย `product_store._type_query_word` (canonical Thai kw) + `product_types_override` hard-scope + prompt ไม่พูด wattage + ไม่ต้อง web; charging path ไม่แตะ
+  4. `web_search.reanswer` — type token → Thai kw + `product_types_override` + `_final_products` เปลี่ยน replace→union (ของเดิมไม่หาย)
+  5. `product_store.shop_capability_line` — per-shop NORMAL type counts (cached) → inject "หมวดที่ร้านมีจริง" เมื่อของถามไม่อยู่ context
+- **verify:** test_compat_mode_filter 36/36 ✅ · car_charger_regression 16/16 ✅ · E2E `หูฟัง sony+iphone 15` → "ใช้ร่วมกันได้" + หูฟังจริง 8 ตัว (Xiaomi Buds 3 top) ✅ · E2E `สายชาร์จ+iphone 15` → เดิมเป๊ะ (CTC315P USB-C ถูกแนะนำ) ✅
+- **ผลกระทบข้าม:** charging/unknown path โค้ดเดิมทุกบรรทัด; web_search.reanswer ใช้ Thai kw+override ทุก type (positive-neutral); union ทำ context ใหญ่ขึ้น (dedup จัดการ); file sizes: app.py 4797(+4) device_compat 822 product_store 4097 web_search 874 — ทุกไฟล์ต่ำกว่าเพดาน
+- **รอ:** code review ก่อนสรุปสุดท้าย
+
+### test_200 selected 100 เคส (2026-09-18) — general/mixed/compat/ambiguous/followup
+
+- **ผิวเผิน:** 98 pass / 0 fail / 2 err — แต่ต้องแยก: **26 เคสเป็นคำตอบ "ระบบ LLM ติดขัด"** (masked เป็น pass เพราะมี products)
+- **ที่ดีขึ้นจริง (verify แล้ว):**
+  - #143 `เอาขึ้นเครื่องไปจีน` → product_store+web_search (เดิม misroute shipping_policy) — **guard travel ทำงาน**
+  - #199 `มีสินค้า smart home ไหม` re-run → product flow ตอบ honest (เดิม ❌ generic dump) — **guard categories ทำงาน**
+  - compat non-charging ทำงานถูก: #113 TWS+iPhone / #114 QCY+Samsung / #115 IMILab+Android — ตระกูลเดียวกับเคสหูฟังที่เคยพัง → ตอบถูก+ของจริง
+  - charging compat ปกติ: #101/104/105/108/110/118/119/120 ถูกทั้งหมด ไม่มี regression
+  - ambiguous/followup ดี: #124 P01 40000mAh / #136 clarify / #146/151 BA651 grounded
+- **bug ที่เจอ (จดไว้รอ review):**
+  - 🔴 **API_KEY_INVALID** — Gemini key ใน rotation pool ใช้ไม่ได้ → 26/100 คำตอบเป็น error text (ops/config ไม่ใช่โค้ด — เช็ก key pool)
+  - 🔴 **MongoClient-after-close race** — `/health` `/shops` `/categories` `/brands` + chat_v2.py:1489 เรียก `client.close()` บน shared cached client (get_client singleton) → request ที่กำลังใช้พังกลางทาง = HTTP 500 ×2 (knowledge_base.py:690 build_general_context) — pre-existing, prod เจอบ่อยเพราะ health check รันตลอด; แก้: ลบ close() บน shared client
+  - 🟠 **#132 `อันไหนเสียงดีสุด` → warranty_claim_first_message** — substring "เสีย" ใน "เสียง" trigger claim kw → superlative misroute — ต้อง word-boundary guard บน claim keywords
+  - 🟠 **#109 BUG-A confirmed** — `พาวเวอร์แบงค์ชาร์จ MacBook` → p=1 ตอบหัวชาร์จ AC65B2 (ยังไม่แก้ ตามแพลน P1)
+- **ไม่พบ regression จาก compat work** — charging/general routing ปกติทั้งหมด
+- ผลเก็บที่ `docs/test/results/test_200_selected100.json`
+
+### E2E batch 12 เคสหลังแก้ (2026-09-18) — เจอ bug เพิ่ม 1 + polish 1
+
+- **เคสที่ผ่าน:** speaker+s24 (Kieslect), smartwatch+iphone16, car_charger+s25u (CC903P PD3.0/PPS 90W ถูก), warranty claim (ZMI), powerbank≤1000฿, compare CTC615W/CTC610, superlative (Lagenio K9), lightning cable availability, shipping policy (iSuper), projector browse (Yaber T2/L2)
+- **BUG-A (pre-existing, charging path — ยังไม่แก้ รอ review):** `พาวเวอร์แบงค์ใช้กับ macbook air` (CukTech) → intent type=powerbank แต่ web extractor คืน `product_type="charger"` → re-query `charger MacBook Air MagSafe 3 USB-C 70W` → ดึง GaN chargers แทน powerbanks → **ตอบ "ไม่มี powerbank" ผิด** (ร้านมี WPB100/PB060/PB100P)
+  - เกิดเพราะ: `_device_spec_lookup` charging path เชื่อ `_device_product_type` จาก web extractor ทับ type ที่ลูกค้าถามจริง — bug ตระกูลเดียวกับ earphone case
+  - แผนเสนอ: ส่ง `product_types_override={_asked_type}` เข้า charging re-query เมื่อ asked_type valid — scope ตาม type จริงแต่คง web keywords (charger→เดิม, powerbank/car/wireless→ถูกหมวด)
+  - ผลกระทบที่ต้องเช็กตอน review: subtype prefix (adapter/cable/set) ทำงานร่วมกับ override ไหม; เคส cable ใน taxonomy เป็น charger อยู่แล้ว
+- **BUG-B (โค้ดใหม่ — แก้แล้ว):** `ฟิล์มจอ iphone 16` → detect={screen_protector}+intent=case → tiebreak alphabetical เลือก case → re-query ดึงเคสแทนฟิล์ม
+  - แก้: mode เดียวกันให้ `hit∩detected` ชนะ intent (literal แม่นกว่า context guess) — test 36/36 ผ่าน E2E ตอบเจาะจงฟิล์มถูก
+- **observation:** web search JSON parse fail → retry ซ้ำ (double cost ~$0.02/เคส) — pre-existing ไม่เกี่ยว fix นี้
+- **observation:** c1 products=smartwatches แต่ answer พูดถึงหูฟัง — Kieslect ไม่มีทั้งคู่ (honest ว่าอาจหมด) ยอมรับได้
 
 ### Variant image + OCR รูปนอก description (2026-09-18) — ✅ implement เสร็จ รอ deploy steps
 
@@ -54,6 +141,37 @@
 - **ทำ:** kill 65815/65818 → relaunch `USE_UNIT_INDEX=charger nohup uvicorn` log เข้า `exports/uvicorn_{8010,8015}.log` — ทั้งคู่ health 200
 - **เคสที่น่าจะเปลี่ยน:** "ตัวไหนออกใหม่สุด" เดิม CONV-ACTIVE pin Case เดี่ยว → ตอบผิดเป็นของ Case
 - **⚠️ gap ที่รู้ว่ายัง:** card ไม่มี field วันที่ (`create_time`) → LLM ตอบ "รุ่นไหนใหม่กว่า" ไม่ได้แม้ context ถูก — เสนอ `listed_date` ใน `to_product_card`/`to_unit_card` รอ user ตัดสินใจ
+
+### 🔄 กำลังทำ — Rebuild unit index สด + regression กว้าง 300Q/50conv ยิง LLM จริง (2026-09-18)
+
+- **งาน (user สั่ง):**
+  1. rebuild sellable_units จาก live DB (export สด → build → import → unit_embeddings + typo_dict ใหม่) — `--source mongo` ยังไม่ implement ใช้ export→build เดิม
+  2. regression วงกว้างทุก type/ทุกหัวข้อ (ไม่ใช่แค่ charger): compat, ซ้ำซ้อน, เคลม, จัดส่ง, รับประกัน, เครื่องเปิดไม่ติด/เสีย, แจ้งปัญหา, มอก, order/tracking, brand, superlative, compare, model code, typo, shorthand
+  3. ยิง LLM จริงเท่านั้น (ไม่ใช่ query-level test) — ดูเนื้อหา+บริบทคำตอบ+เส้นทางที่ตอบ (units vs legacy vs KB vs deterministic) ตรงแพลนไหม
+  4. **จด error + root cause ไว้ ไม่แก้**
+  5. quota: 300 คำถามเดี่ยว + 50 conversations จริง (messages_shp)
+  6. เก็บผลเต็มทุก Q&A → ไฟล์ (+ ถ้าได้เข้า admin-chat-result)
+- **วิธี:** runner ใหม่ `docs/test/unit_index_regression.py` ยิง `POST /chat` (instance แยก :8020 ด้วย USE_UNIT_INDEX=1) + reuse `replay_compare` สำหรับ 50 convs จริง; per-turn เก็บ full response (answer/products/unit_id/source/intent/routing/steps/usage/bot_log) + flag `unit_path`(cards มี unit_id)/`unit_attempted`(log [UNITS] แต่ fallback)
+- **corpus:** `docs/test/build_unit_reg_corpus.py` → `docs/test/unit_reg_corpus.jsonl` = **300 ข้อ / 17 topics** ผูก shop+model_codes จริงจาก index สด: compat_charging30 compat_other15 warranty26 claim20 shipping15 device_issue15 problem_report10 tisi12 order10 brand10 superlative18 compare15 browse39 model_code20 shorthand15 typo10 price10 general10
+- **progress:**
+  - export live ✅ ShpProducts 11,692 docs
+  - build units ✅ 27,807 units (sellable 5,489 · classified 5,158 = 94% pass gate) — log `exports/rebuild_units_2026-09-18.log`
+  - import ✅ `sellable_units` = 27,843 docs (sellable 5,490) · unit_embeddings.npz 106MB สด · typo_dict.json สด
+  - bot :8020 `USE_UNIT_INDEX=1` (log `/tmp/chatbot_unit_8020.log`)
+- **ผลเทส (เซฟแล้ว):**
+  - **300Q ✅ ครบ** — `docs/test/results/unit_reg_questions_2026-09-18.jsonl` — answered 300/300 (quota error ช่วงแรกถูก retry จนหมด) · unit_path=118 · fallback_dead_pool=15 · web=15 · handoff=42
+  - **50 convs — หยุดกลางทางตามสั่ง user** — `docs/test/results/unit_reg_convs_2026-09-18.jsonl` = 33 convs / 347 qa turns (quota error 111 turns เกิดระหว่างรัน — เป็น infra ไม่ใช่ logic)
+  - push เข้า `test_assignment` แล้ว (replayed_by=`unit_reg_2026-09-18` → ดูที่ /admin-chat-result)
+  - backup run1 ที่ error: `unit_reg_questions_2026-09-18.run1_err.jsonl`
+- **⚠️ ระวัง:** API_KEY_INVALID/429 ใน pool (entry บน) — error จะถูกจดเป็น error ไม่แก้ตามคำสั่ง
+- **observations เบื้องต้น (จดไว้ ยังไม่แก้):**
+  - `device_issue`/`problem_report` ถูก route เข้า warranty claim form + handoff เกือบหมด (เช่น "หูฟังเชื่อมต่อบลูทูธไม่ได้" → claim form) — troubleshooting ไม่ได้ไป QA tips
+  - `มีสาขาหน้าร้านไหมครับ` → `tax_invoice_handoff` (คำว่า "สาขา" ชน tax-invoice detect) — misroute
+  - `เช็คออเดอร์หน่อย` → เข้า product_store+unit path แทน order flow (คำตอบยังถูก — ขอเลขออเดอร์)
+  - `มีของแบรนด์ zmi ไหม` (ร้าน TicWatch) → "ทักแอดมิน" แทนที่จะตอบไม่มี
+  - pool all-dead → legacy fallback ทำงานถูก (browse IMILab camera: 441 units แต่ sellable 51 → top-50 vector ตายหมด)
+  - unit path ใช้ได้กับ shorthand/superlative/price/model_code ดี (shorthand 15/15, superlative 18/18)
+- **ค้าง:** conv replay เหลือ 17 convs (34-50) · วิเคราะห์เนื้อหาเชิงลึกต่อข้อ · รายงานสรุป root-cause · bot :8020 ยังรันอยู่ (โค้ดเก่าก่อน user แก้ spec ladder)
 
 ---
 
@@ -119,6 +237,78 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 ---
 
 ## ผ่านแล้ว (file 2)
+
+### ✅ 2026-09-18 — stale timeline card: shadow gen โชว์รูป desc banner หลัง fix variant image
+
+- **error:** user กด generate shadowbot (conv thitirat.rac `shp_458397959795636281`) หลัง deploy variant-image fix → card ยังโชว์ `th-11134208-81ztg-mne4rdze5wxse2` (desc banner)
+- **เกิดเพราะ:** card ใน `bot_products` มี key set = `_strip_card_for_storage` shape พอดี (ไม่มี unit extras/condition/raw_description) + name เป็น item_name เวอร์ชันเก่า → มาจาก **`conversation_products` timeline restore** (CONV-ACTIVE → `resolve_active_by_message` → stored card ตรงๆ) ไม่ใช่ build สด — timeline เขียนด้วยโค้ดเก่า (batch 09:11 local ก่อน units.py fix 09:49) แล้ว `_record_suggestion_products` re-record card เดิมทุก turn → stale self-perpetuate ไม่มี TTL
+- **พิสูจน์:** fresh `to_unit_card` บน unit เดียวกัน → รูป variant ถูก `th-11134207-7rash-...` ✅ = โค้ดใหม่ปกติ ปัญหาอยู่ที่ snapshot เก็บไว้
+- **แก้ด้วย:** `conversation_products.py` — `_rebuild_card` (unit-level → sellable_units lookup + attach_kb_specs/attach_image_texts + `_listing=doc` → `to_unit_card`; อื่น → `to_product_card`) + `_materialize_card` (cache 30s/(item,model) → rebuild → fallback stored) — patch getters ทั้ง 5 (`get_active_product`/`get_suggestion_latest`/`get_latest_suggestion_batch`/`get_anchor_and_suggestions`/`resolve_active_by_message`) → restore ทุกจุดได้ card สด (image/name/price/stock/status ทั้งหมด — user สั่ง refresh หมด)
+- **ผลกระทบข้าม:** follow-up turns ทุกแชทได้ข้อมูลสด (รวม stock/status ที่เคย stale — ดีขึ้น); doc หาย → fallback stored; ต้นทุน +1-2 mongo find/restore (cache 30s กันซ้ำใน request); write path ไม่เปลี่ยน; card สดถูก re-record → timeline self-heal
+- **Verify:** test_timeline_card_refresh 8/8 (ใหม่ — unit→variant img, listing→cover, doc หาย→fallback, no-card→minimal) · cert 66/66 · car_charger 16/16 · guards 27/27 · qa_context 4/4 · **E2E จริง** restart :8010 → /chat conv เดิม "ตัวนี้มีสีอะไรบ้างคะ" → `image_url=th-11134207-7rash-m8zynhw4wjrd0a` (รูปสาย CTC315P ขาวจริง) ✅
+
+### ✅ 2026-09-18 — แก้ 3 ปัญหาจาก test_200 (P0 crash + 2 misroute)
+
+- **แพลน:** `docs/plans/test200-fixes-plan.md`
+- **P0 qa_context IndexError → HTTP 500 (#132):** dict literal `tag={...}[level]` evaluate f-string `topic.split()[0]` **ทุก key ก่อนเลือก** → hit ใดๆ topic='' (32/393 docs) crash ไม่ว่า level — แก้ `_topic0 = next(iter(split()), "")` 1 จุด @ `knowledge_base.py:1266`
+- **P1 shipping misroute (#143 "ขึ้นเครื่องไปจีน"):** **regression จาก Phase 6 intent-first** — เดิม `general_qtype` มาจาก keyword เท่านั้น ("ขึ้นเครื่อง" ไม่ match → ผ่านไป compat-followup L~1680 ตอบถูก) → Phase 6 ให้ LLM ตั้ง qtype → `shipping_policy` early return L~1540 ก่อน fix เก่าทำงาน — แก้ `_general_qtype_bypass` @ `app.py:440`: shipping_policy + `_TRAVEL_KWS` (ไม่มี `_SHIP_VERB_KWS` — "ส่งไปจีน"=จัดส่งจริง) → None → product flow
+- **P2 categories misroute (#199 "มี smart home ไหม"):** intent→categories → generic dump ทั้งที่ smart home = cross-type cluster (95 items/17 types) — guard เดียวกัน: categories + `_CAT_NOUN_RE` noun เจาะจง (ไม่อยู่ใน `_CAT_GENERIC_NOUNS`) → product flow ค้น "Smart" ในชื่อสินค้าจริง
+- **ผลกระทบข้าม:** shipping จริง ("ส่งกี่วัน"/"ค่าส่ง"/"ส่งต่างประเทศ") คงเดิม — verb precedence; categories จริง ("ขายอะไรบ้าง") คงเดิม — generic noun set; type อื่นไม่โดน (guard เฉพาะ 2 qtype)
+- **Verify:** test_qa_context_guard 4/4 · test_general_qtype_guards 27/27 · cert 66/66 · car_charger 16/16 · **E2E 5/5**: #143→product_store ตอบถูกบริบท, powerbank ขึ้นเครื่อง→ตอบกฎ 100Wh, "ส่งกี่วัน"→shipping คงเดิม, #199→kb+mongo 10 products จริง, "มีสินค้าอะไรบ้าง"→categories คงเดิม
+- **test ใหม่:** `docs/test/test_qa_context_guard.py`, `docs/test/test_general_qtype_guards.py`
+
+### ✅ 2026-09-18 — language policy: ตอบไทยเสมอ เว้นแต่ลูกค้าขอภาษาอื่น → อังกฤษ
+
+- **error:** เดิม `_detect_lang` mirror ภาษาลูกค้า — ข้อความอังกฤษ/จีนล้วน → ตอบอังกฤษ, ตัวเลข/รหัสล้วน ("1"/"ctc615w") → `other` → ตอบอังกฤษให้ลูกค้าไทย (เคสจริงใน replay Q3)
+- **เกิดเพราะ:** detect จาก script ของข้อความ ไม่ใช่จากเจตนา — ข้อความสั้น/รหัสสินค้าหลุดเป็น non-Thai
+- **แก้ด้วย:** ลบ `_detect_lang`; `_lang_instruction(message)` ใหม่เช็ค `_LANG_REQUEST_RE` — explicit request เท่านั้นถึงคืน block "Answer in English" (ไม่ใช่ภาษาที่ขอ เพราะคุมคุณภาพไม่ได้), อื่นๆ → `""` ตอบไทย; regex ครอบ TH (verb+ภาษา+ชื่อภาษา) / EN (verb+ชื่อภาษา, "in X please", "X please") / CJK / bahasa / อาหรับ / รัสเซีย — ไม่รวม thai/ไทย; แก้ prompt "ตอบเป็นภาษาเดียวกับลูกค้า" → "ตอบภาษาไทยเสมอ" 2 จุด (SYSTEM_INSTRUCTION + KB_SYSTEM_INSTRUCTION) ไม่งั้น LLM mirror อยู่ดี
+- **ผลกระทบข้าม:** pure-English/CJK message ที่ไม่ได้ขอภาษา → ตอบไทย (ตั้งใจตาม spec); ตัวเลข/รหัสล้วน → ไทย (ดีขึ้น); FP guard — "app ภาษาจีนใช้ได้ไหม"/"english manual"/"speak thai" ไม่ trigger; callsite 3 จุด (answer/answer_with_kb/answer_general) ใช้ signature ใหม่
+- **verify:** test_qa_batch_20260911 เขียน LANG section ใหม่ **17/17** + edge 8 เคสเพิ่มผ่าน + py_compile
+- **SRS_SSD.md** อัปเดต 6.2.3 (เพิ่ม `_lang_instruction`/`_LANG_REQUEST_RE`, ลบ `_detect_lang`) + 6.2.4
+- **จุดเหลือ:** request ที่เขียนด้วยภาษาแปลกที่ไม่มีใน regex (เช่นฝรั่งเศสบอกตอบเยอรมัน) → ตอบไทยตาม default — เจอจริงค่อยเติมชื่อภาษา
+- **deploy:** restart :8010/:8015 แล้ว (kill PID เก่า → relaunch `USE_UNIT_INDEX=charger nohup uvicorn` log `exports/uvicorn_{8010,8015}.log`) — health 200 ทั้งคู่
+
+### ✅ 2026-09-18 — test_200 full run (220 ข้อ LLM จริง) + จดปัญหาที่เจอ
+
+- **ผลรวม 220 ข้อ: 217 ✅ / 2 ❌ / 1 ERR** (run แบ่ง 4 segment เพราะ test client โดนฆ่าซ้ำตอน bot restart — `lsof -ti:8010 | xargs kill` ฆ่า client ที่ connection ค้างด้วย)
+- **cert flow live 8/8 ✅** (manual — test_200 ไม่มี cert): type filter ถูกทุกหมวด, model keyword เจอ UNLIST, generic เช็ค 6 certs, FCC ไม่มี→handoff
+- **ปัญหาที่เจอ (จดไว้หาจุดแก้รอบหน้า):**
+  1. **#132 HTTP 500 — `qa_context` crash**: `knowledge_base.py:1268` `(h.get('topic') or '').split()[0]` → IndexError เมื่อ brand-level QA hit มี topic ว่าง — **kb_qa มี 32 docs topic=''** (general_faq entries) → ทุกแชทที่ QA search คืน doc เหล่านี้ที่ level=brand จะ 500 เหมือนกัน (pre-existing bug ไม่เกี่ยว cert/compat)
+  2. **#143 "เอาขึ้นเครื่องไปจีนด้วยได้อ่ะ"** (followup context หัวชาร์จ 67W) → route ไป `general:shipping_policy` ตอบ "ทักแอดมิน" 0 products — คำถามกฎการบินถูก misroute/punt แทนตอบในบริบทสินค้า (หัวชาร์จขึ้นเครื่องได้อยู่แล้ว กฎ Wh ใช้กับ powerbank)
+  3. **#199 "มีสินค้า smart home ไหม" (YoupinOfficialStore)** → 0 products + ตอบ generic categories ทั้งที่ร้านมี smart/home NORMAL **98 ตัว** — "smart home" ไม่มีใน taxonomy → หลุด retrieval ไปคำตอบกว้าง
+  4. minor: #166 ตอบอังกฤษ (ถามอังกฤษล้วน — พอรับได้); #133 ThaiSuperPhone "งบ 2000" → แนะนำเสื้อยืด (ร้านขายเสื้อจริงแต่คำตอบดูแปลกในร้านมือถือ)
+- **ข้อสังเกต infra:** test_200 แก้ให้อ่าน `CHATBOT_INTERNAL_SECRET` จาก env (เดิม hardcode dev-secret → 401 ทั้งชุด); resume script `/tmp/resume_test200.py` (argv=offset) ใช้ซ้ำได้
+- **cert regression หลัง fixes:** test_cert_standards 66/66, car_charger 16/16 ยังผ่าน
+
+### ✅ 2026-09-18 — cert merge 4 แหล่ง (stock DB + variant names + desc + OCR) + เลข มอก. ในคำตอบ
+
+- **ทำไม:** user มี stock DB (`itStock.Products`) เก็บ cert flag structured: `is_tis`/`tis_id`/`tis_license_id`/`is_ccc`/`is_ce` — coverage เดิม (desc+OCR) พลาด 173 items; variant names มี token `CN.V (CCC)`/`GB.V (CE)` อีก 616 items ที่ไม่เคยถูกดู
+- **แผน:** `docs/plans/cert-merge-plan.md` — เลือก runtime merge (ไม่ใช่ cert_map collection) เพราะ stock เปลี่ยนบ่อย + ไม่ต้องมี pipeline
+- **วิธีแก้ (ทำแล้ว):**
+  1. `product_store._stock_products_coll()` — lazy `itStock.Products` (env `STOCK_URI`/`STOCK_DB`) degrade→None เหมือน `_admin_image_texts_coll`
+  2. `_VARIANT_CERT_RES`/`_VARIANT_MONGO_TERMS`/`_variant_cert_hit()` — version→cert inference: `CN.V`→ccc, `GB.V`/`Global`→**ce** (GB.V = GloBal version ไม่ใช่ GB standard — verify จาก `(GB Ver.)` item 4842405819), `EU`→ce, `US.V`→fcc; explicit `(CCC)`/`(CE)`/`มอก`; `GB/T`→gb เท่านั้น (กัน "128 GB" FP)
+  3. `search_cert_products` +param `stock_db` — path 3 stock flags→`shopee_ship_box.item_id`→product docs (`via="stock"`, `cert_ids`={tis_id,tis_license_id}) + path 4 variant regex (`via="variant"`); multi-source→`via="both"`
+  4. `handoffs.py` — เจาะรุ่น 1 ผลมี `cert_ids.tis_id` → คำตอบใส่ "เลข มอก. 2879-2560 ใบอนุญาต น 30516-48/2879"
+- **verify:**
+  - test_cert_standards **66/66** (เดิม 46 + ใหม่ 20: variant tokens 12 เคส + stock/variant paths 8 เคส — 'False' string ไม่นับ, both merge, cert_context มีชื่อ option)
+  - real Mongo: ccc=111 items (both 80/variant 17/stock-only), ce=85 (variant 62), tisi=200+ (stock 82+18 both) — เลข มอก. จริงโผล่ใน cert_context
+  - QB817 (UNLIST) ถามเจาะรุ่นเจอ `via="both"` ถูก — คำถามทั่วไปกรอง NORMAL ตามเดิม
+  - test_car_charger_regression 16/16, py_compile ครบ
+  - **post-check (user ขอ):** version tokens กระจาย: ccc=136 items (charger 99/powerbank 98/purifier 9/fan 7), ce=141 (charger 76/powerbank 70/purifier 21/camera 14) — กองหมวด CCC catalog ตามคาด, camera เล็ก edge → hedge ด้วย cert_context
+- **SRS_SSD.md** อัปเดต: `_stock_products_coll`, `_variant_cert_hit`, `_STOCK_CERT_FLAGS`, `_VER_RE`/`_VARIANT_CERT_RES`/`_VARIANT_MONGO_TERMS`, `search_cert_products` (4 paths+stock_db+cert_ids), `post_intent_handoffs`
+- **impact check ข้าม type (user ขอ — verify ซ้ำบนข้อมูลจริง):**
+  - caller เดียวใน prod = `handoffs.post_intent_handoffs` (cert flow) — `search_tisi_products` เป็น compat wrapper ไม่มี caller → blast radius แค่คำถาม cert
+  - variant hits ทุก cert: ce=170 items, ccc=178 — eyeball option names ทั้งหมดเป็น version token จริง (GB.V/CN.V/CN Ver./Global V./(CE)/(CCC)) — camera/purifier/fan/monitor/TV stick = Xiaomi GB/CN version จริง ไม่ใช่ FP; tisi/fcc/rohs/gb = 0 hits
+  - type_filter ครอบ path 3/4 เหมือน path 1/2 — stock/variant item หมวด A ไม่รั่วตอนถามหมวด B (leaked=0); model_keyword ยังเจอ UNLIST (QB817 via=both)
+  - timing ~0.7-2.3s/คำถาม (desc regex scan เป็นหลัก) — variant scan เพิ่ม ~0.3s
+- **fix ตาม impact check (4 จุดเล็ก):**
+  1. `_stock_products_coll` cache `_cached_stock_client` (เดิม new MongoClient/คำถาม)
+  2. `handoffs` แสดงเลข มอก. เฉพาะเมื่อถาม tisi (`"tisi" in _certs`) — คำถาม CE/CCC ไม่แปะเลข มอก.
+  3. path 3 ข้าม query เมื่อ certs ไม่มี stock flag (fcc/rohs/gb) — fcc query 1.0→0.5s
+  4. stock `cert_context` = "stock: {cert} · เลข มอก. x" (สะท้อน cert ที่ hit จริง)
+- **verify หลัง fix:** test_cert_standards 66/66, car_charger 16/16, real smoke ce/ccc/tisi/fcc ปกติ
+- **⚠️ deploy:** `STOCK_URI`/`STOCK_DB` ต้องอยู่ใน env ของ bot host (docker-compose .env) — ไม่มี → path 3 ข้ามเงียบๆ (degrade)
+- **phase 2 (บันทึกไว้):** negative evidence `is_tis='False'` ตอบ "ไม่มี" เจาะรุ่น; cert on unit card (`model_id` join 99% พร้อมแล้ว)
 
 ### ✅ 2026-09-18 — spec-db substring collision → word-boundary match + brand guard
 
@@ -255,3 +445,55 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **tests:** test_anchor_compare 7/7 · test_guards pass · test_recent_qa_pairs 10/10 · test_compare_3way (exp path) 17 ข้อปกติ
 
 **เสริม (regression guard หลัง user review):** `_SUPERLATIVE_KW` มี "สุด"/"ชาร์จเร็ว" ที่ match กว้าง — เคส "ตัวนี้ชาร์จเร็วไหม" (ถาม anchor เดี่ยว) จะหลุด bypass ผิด → เพิ่ม `_SINGLE_ITEM_REF_KW` (ตัวนี้/รุ่นนี้/อันนี้/ชิ้นนี้/สินค้านี้/เรือนนี้) block ทั้ง bypass และ FOLLOWUP-COMP — verify: "ตัวนี้ชาร์จเร็วไหม" ตอบ Case เดี่ยวถูก ✅, repro หลัก Q3/Q4 ยังผ่าน ✅
+
+### 📊 2026-09-17 (ต่อ) — test_200 selected-100 rerun รอบ 3 (หลัง user แก้ API key)
+
+- **ผิวเผิน:** 100 pass / 0 fail / 0 err — ไม่มี HTTP 500 (race ไม่ trigger — ยัง latent ในโค้ด: `client.close()` บน shared cached client ยังอยู่ app.py:282/300/309/385 + chat_v2.py:1489)
+- **LLM errors เหลือ 9/100** — เปลี่ยนจาก `400 API_KEY_INVALID` → `429 RESOURCE_EXHAUSTED` (key ใช้ได้แล้ว แต่ชน quota — เคส #123,#124,#152-160 กระจุกท้ายรัน = rate limit)
+- **BUG-A #109 ยืนยันยังพัง:** "พาวเวอร์แบงค์ชาร์จ MacBook ได้ไหม" → ตอบ "ยังไม่มีพาวเวอร์แบงค์วางจำหน่าย" ทั้งที่ DB มี **25+ รุ่น** (PB200P 150W / P23 210W / QB826G 210W — ชาร์จ MacBook ได้จริง) — root cause เดิม: charging re-query เชื่อ web extractor "charger" → pool เต็มหัวชาร์จ — P1 (`product_types_override`) ยังไม่ implement
+- **ค้นพบเพิ่ม:** CukTechThailand ทั้ง 136 docs `product_type=None` (untyped 100%) — แต่ override ใช้ regex บน `item_name` ไม่ใช่ field → P1 design ยังใช้ได้
+- **#132 `เสียงดีสุด` ถูก route:** เพราะ intent LLM ทำงาน — แต่ "เสีย" substring ใน `_CLAIM_REQUEST_INDICATORS` ยังอยู่ = **latent** แสดงตัวเฉพาะตอน intent fail (Run1 เห็นแล้ว)
+- **#45/#46 QCY "ไม่มีหูฟัง" = ถูกจริง:** catalog QCYThailand 23 ชิ้น `UNLIST` ทั้งหมด — grounded ✅ (compat #113/#114 ตอบ "รองรับ" เป็นความจริงทางเทคนิค — gray area จดไว้)
+- **#136 เจอ path ใหม่:** `superlative_no_match_clarify` — "เอาที่ดีที่สุด" ไม่มี type → ถาม clarify กลับ ✅ (น่าจะจาก parallel session)
+- **สรุป:** คุณภาพคำตอบจริงดีขึ้นมากเมื่อ LLM ทำงาน — bug ที่เหลือ = BUG-A (P1 พร้อม) + mongo close race (latent) + "เสีย" boundary (latent) + 429 quota (ops)
+
+### ✅ 2026-09-17 (ต่อ) — BUG-A fixed: charging re-query scope ตาม type ที่ถามจริง
+
+- **อาการ:** "พาวเวอร์แบงค์ชาร์จ MacBook ได้ไหม" (CukTechThailand, #109) → ตอบ "ยังไม่มีพาวเวอร์แบงค์" ทั้งที่ DB มี 25+ รุ่น (PB200P 150W / P23 210W / QB826G 210W)
+- **root cause:** `_device_spec_lookup` charging re-query สร้าง query จาก `_device_product_type` ที่ **web extractor เดา** ("charger" ทับทุกเคส) → fetch ดึงหัวชาร์จเต็ม pool → LLM สรุป "ไม่มี" จาก context ที่ผิดหมวด
+- **แก้ (~25 บรรทัด ไม่มี hardcode สินค้า):**
+  - `_CHARGER_FORMS` = {car_charger, wireless_charger, desktop_charger, dock} — เส้นแบ่ง class (degrade-safe)
+  - `_charging_scope(msg, asked_type)` = `detect(msg)` ∩ `_CHARGING_TYPES` — 'charger' drop เมื่อมี form เจาะจง (substring artifact ของ "หัวชาร์จ/แท่นชาร์จ") แต่เก็บเมื่อคู่กับ non-form; detect ว่าง → fallback `{asked_type}`; ไม่มี → None
+  - re-query ส่ง `product_types_override=_chg_scope` — override ใช้ regex บน `item_name` → ทำงานกับร้าน untyped 100% ได้ (verified CukTech 136 docs type=None)
+- **verify:** scope matrix 8/8 · test_compat_mode_filter **45/45** · car_charger_regression **16/16** · general_qtype_guards 27 · qa_context_guard 4/4
+- **E2E:** #109 → "ชาร์จได้ — CUKTECH AURA PB100S 30W" (powerbank จริง) ✅ · สายชาร์จ iPhone15 → CTC315P เดิมเป๊ะ ✅ · หัวชาร์จในรถ → **CC903P Car Charger จริง** (OBS-2 ดีขึ้นด้วย — subtype scope แม่นกว่า) ✅
+- **ผลกระทบเคสอื่น:** generic charger → {charger} เดิมเป๊ะ · multi-type เก็บครบ · unknown mode ไม่ส่ง override · type ใหม่ใน taxonomy ไม่ต้องแตะโค้ด
+- **จดไว้:** PB100S 30W ต่ำกว่า spec MacBook (~70W) — คำตอบบอก 30W ตรงๆ grounded แต่ adequate-first sort อาจควรเลือกรุ่น watt สูงกว่า (ไม่ใช่ wrong-answer — เดี๋ยวดูว่า spec-db มี MacBook Air ไหม)
+
+### ✅ 2026-10-02 — Spec source ladder (P3): web search = ด่านสุดท้าย + ฆ่า prose watt parse
+
+- **อาการ:** ทุก compat query ยิง web search ~6K tok/call (~$0.01) แม้ device อยู่ใน spec-db — web ถูกเรียกตั้งแต่แรกก่อนเช็ก db เลย; + prose `max(\d+W)` ดูด "สายชาร์จ 240W" มาเป็น spec ของเครื่องเป้าหมาย; + re-query พึ่ง web keywords → web fail = pool ว่าง → ตอบผิดหมวด (หัวชาร์จ 65W แทนพาวเวอร์แบงค์)
+- **root cause:** ลำดับ source ผิด (จ่ายก่อนฟรี) + เชื่อเลขลอยใน prose + re-query ผูกกับ web keywords
+- **แก้ (generic ทุก type/subtype — ไม่มี hardcode keyword):**
+  1. `_device_spec_lookup` charging/unknown → source ladder: spec-db → re-query derive เอง (`{subtype_kw} {type_word} {device} {conn_synonyms}` + `_charging_scope`) → catalog evidence `_device_mentioned` (สินค้าระบุชื่อ device ตรง = declared compat) → **web เฉพาะเมื่อไม่มีหลักฐาน** → web keywords re-query เพิ่ม → intent min_watt สำรอง
+  2. `_CONN_QUERY_KW` — connector→query synonyms (vocab map เดียวกับ `_extract_product_connectors`)
+  3. `_device_mentioned` — boundary match + no-space variant ("iPhone18" = "iphone 18") บน name/description
+  4. `_resolve_device_spec` — **ลบ prose watt parse**: เชื่อเฉพาะ connector vocab; watt ต้องมาจาก structured (spec-db/web-structured/intent) เท่านั้น
+  5. min_watt chain consistent: spec-db → web-structured → intent (lookup+filter ตรงกัน)
+- **verify:** test_compat_mode_filter **70/70** (เพิ่ม section 10 — spec-db hit→ไม่ web, catalog hit→ไม่ web, ทุกชั้นพลาด→web, intent-only→web, prose→connector only) · car_charger 16/16 · guards 27+4+7+10 ผ่าน
+- **E2E จริง:** "พาวเวอร์แบงค์ชาร์จ MacBook ได้ไหม" → spec-db hit macbook(70W) → re-query scope={powerbank} merge 64 → sort ≥70W ก่อน → **ตอบ PB200P 150W + PB250 210W** (ก่อนหน้า: หัวชาร์จ 65W) — **0 web call** · สายชาร์จ iphone15 → CTC315P ✅ · เคส/หูฟัง เดิมเป๊ะ
+- **ผลกระทบเคสอื่น:** model_fit/self_compat/skip path ไม่แตะ · non-compat intents ไม่แตะ · web search ยังทำงานเป็น fallback เมื่อ device แปลก/ไม่มีหลักฐาน · prose connector parse ยังอยู่ (ตัว load-bearing ของ filter)
+- **จดไว้:** unit-index compat re-query ใช้ `is_compat_check=True` เดิม (ข้าม unit path) — ถ้าอนาคตอยากให้ compat ใช้ units ต้องทำ field-filter sweep แทน vector-only (limit ไม่ใช่ตัวจำกัด — similarity ต่างหาก)
+
+### ✅ 2026-10-02 (ต่อ) — spec-db expansion ~10 ปี + outer web-search gate
+
+- **งาน:** เพิ่ม `DEVICE_SPECS` ครอบคลุมย้อนหลัง ~2016-2026 ทุกแบรนด์ (มือถือ/แท็บเล็ต/หูฟัง/ล็อปท็อป/แก็ดเจ็ต) — user สั่ง: "เก็บเป็นชุดข้อมูลได้ถ้าสเปคเดียวกัน"
+- **ทำ:**
+  - `device_specs_data.py`: 249 → **516 entries** — เพิ่ม Samsung Note8-20/S7-S10/A-J-M/Tab เก่า, AirPods ทุก gen, iPad lightning era, Galaxy Buds, Sony WF/WH, Redmi Buds, FreeBuds, Enco, JBL, Bose, Beats, Marshall, Mi 8-10, Redmi Note 7-11, Poco F/X/M, Oppo F/Reno เก่า, Realme, OnePlus 5-9/Nord, Vivo V/Y, Huawei P/Mate/Nova, Honor, Pixel 1-5a, Xperia, Zenfone/ROG, Motorola edge/g/razr, MatePad/Lenovo Tab/Oppo Pad, **Windows laptops** (Dell XPS/Inspiron, HP Spectre/Envy/Pavilion/Elitebook/Omen, ThinkPad/Yoga/IdeaPad/Legion, Zenbook/Vivobook/TUF/ROG, Acer Swift/Aspire/Nitro, MSI, Surface), wearables (Huawei/Amazfit/Garmin/Fitbit/Xiaomi watch), GoPro/Kindle/JBL speaker/Switch Lite + **generic entries** (iphone/ipad/notebook — query ลอยไม่มีรุ่น)
+  - shared spec templates `_T_*` (25 templates) — รุ่นที่ spec เหมือนกัน `{**_T_x, year, aliases}` แก้จุดเดียวทั้งชุด
+  - `device_compat.py`: `_SPEC_HEAD_BRAND` + `_DEVICE_BRAND_HINTS` เพิ่ม brand ใหม่ (sony/asus/moto/infinix/tecno/itel/nokia/zte/meizu/lenovo/lg/htc/nintendo/valve/microsoft ฯลฯ)
+- **เจอระหว่างทำ (fix เพิ่ม):** `should_use_web_search` rule `compatibility_check_device_specific` ยิง web เสมอเมื่อข้อความมี "แบรนด์+เลขรุ่น" — แม้ spec-db grounded แล้ว (redmi note 9 จ่าย 5,784 tok/$0.009 ฟรีๆ) → เพิ่ม gate: `target_device` อยู่ใน spec-db → ข้าม `device_specific`+`short_answer` trigger (negative/no_products ยังทำงาน) — lazy import `_lookup_spec_db` ไม่ cycle
+- **verify:** test_compat_mode_filter **144/144** (เพิ่ม section 11: มือถือเก่า/connector micro-usb-lightning/หูฟัง/แท็บเล็ต/laptop/gadget/shared-template/brand-guard/generic/outer-gate) · car_charger 16/16 · guards 27+4+7+10 ผ่าน
+- **E2E:** `redmi note 9` → spec-db hit (usb-c 18W) + **0 web call** (ก่อน: จ่าย $0.009/ครั้ง) · `macbook` → PB200P/PB250 เดิมเป๊ะ 0 web · `ชาร์จ notebook ได้ไหม` → generic notebook 65W → แนะนำ GaN 65-100W ✅
+- **ผลกระทบเคสอื่น:** lookup logic ไม่แตะ (data เท่านั้น) · brand guard กัน alias ข้ามแบรนด์ (oppo a73→None, xiaomi x9→None) · dupe keys 6 ตัวถูกลบ (spec ซ้ำของเดิม) · alias ไทย 4 สะกด
+- **จดไว้:** ไฟล์ `test_compat_mode_filter.py` ถูก IDE/watcher revert 2 รอบระหว่างทำ — ต้องเขียนแบบ atomic ผ่าน shell · server 8020 (unit-index) ยังรันโค้ดเก่า

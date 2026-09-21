@@ -44,3 +44,6 @@ docs/test/results/
 
 # Personal agent rules (local only)
 AGENTS.local.md
+
+# Deploy secrets file (ห้าม commit — กฎ AGENTS.md)
+มาแล้วจ้า.md

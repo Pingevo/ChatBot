@@ -74,8 +74,12 @@ async function callOurBot(params: {
   const body: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
   if (shopName) body.shop = shopName;
   else if (shopId) body.shop = shopId;
-  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
-  if (conversationId) body.conversation_id = conversationId;
+  // ⚡ Shadow isolation — namespace conversation_id ด้วย "shadow:" เพื่อให้ bot
+  //   ใช้ timeline/anchor/claim state ได้เต็มรูปแบบ แต่เขียนลง doc แยกจากแชทจริง
+  if (conversationId) body.conversation_id = `shadow:${conversationId}`;
+  // ⚡ simulate_assignment → ถ้า replay trigger handoff จะเขียน test_status_conversation
+  //   ไม่แตะ conversations/status_conversation ของแชทจริง (bot ยังได้ชื่อ admin มาใส่คำตอบ)
+  body.simulate_assignment = true;
   // ⚡ ส่ง current-turn images ให้ bot (ถ้ามี) — ใช้ Gemini vision อ่านรูป
   if (images && images.length > 0) body.images = images;
   // ⚡ chat_v3 — ส่ง use_v3 เพื่อบังคับใช้ chatbotv3 (มี priority เหนือ v2)

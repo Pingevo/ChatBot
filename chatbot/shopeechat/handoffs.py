@@ -154,28 +154,54 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
             image_desc=_image_desc_out,
         )
 
-    # ===== มอก. (TISI standard) question handler =====
-    # ถ้าลูกค้าถามเรื่อง มอก. → ค้นสินค้าใน DB ที่มี มอก. ใน description
+    # ===== cert standards question handler (มอก./CE/CCC/FCC/RoHS/GB) =====
+    # ถ้าลูกค้าถามเรื่องมาตรฐาน → ค้นสินค้าใน DB (description + image_texts)
     # - ถ้าเจอ → ตอบว่ามี รุ่นไหนบ้าง (หรือรุ่นที่เจาะจงถาม)
     # - ถ้าไม่เจอ → ส่งเรื่องให้แอดมิน + handoff
-    if warranty.detect_tisi_question(req.message):
+    _certs = warranty.detect_cert_question(req.message)
+    if _certs:
+        _cert_label = "/".join({"tisi": "มอก."}.get(c, c.upper()) for c in _certs)
         _tisi_model_kw = warranty.extract_tisi_model_keyword(req.message)
-        print(f"[TISI] มอก. question detected, model_keyword={_tisi_model_kw!r}", file=sys.stderr)
+        # หมวดสินค้าที่ลูกค้าระบุ (เช่น "พาวแบง มี มอก ไหม" → {"powerbank"})
+        # ใช้กรองผล cert search — กันเคสตอบ surge module/จักรยาน สำหรับคำถาม powerbank
+        # ใช้เฉพาะคำถามทั่วไป (ไม่มี model_keyword — เจาะจงรุ่นอยู่แล้วไม่ต้องกรองหมวด)
+        _cert_types = product_store._detect_product_types(req.message) if not _tisi_model_kw else set()
+        print(f"[CERT] cert question detected certs={_certs}, model_keyword={_tisi_model_kw!r}, types={_cert_types}", file=sys.stderr)
+        _cert_fallback_products = []
         try:
-            _tisi_products = product_store.search_tisi_products(
+            _tisi_products = product_store.search_cert_products(
                 db,
+                _certs,
                 shop_filter=req.shop,
                 model_keyword=_tisi_model_kw or None,
                 limit=30,
+                type_filter=_cert_types or None,
             )
+            if not _tisi_products and _cert_types:
+                # ไม่เจอในหมวดที่ถาม → ค้นไม่จำกัดหมวด เพื่อตอบ "ไม่พบในหมวดนี้ แต่มีอันอื่น"
+                _cert_fallback_products = product_store.search_cert_products(
+                    db,
+                    _certs,
+                    shop_filter=req.shop,
+                    model_keyword=None,
+                    limit=30,
+                )
         except Exception as _te:
             print(f"[TISI] search error: {_te}", file=sys.stderr)
             _tisi_products = []
 
-        if _tisi_products:
-            # สร้างคำตอบ — แสดงรุ่นที่มี มอก.
+        _TYPE_TH = {
+            "powerbank": "พาวเวอร์แบงค์", "charger": "อุปกรณ์ชาร์จ",
+            "phone": "โทรศัพท์", "earphone": "หูฟัง", "smartwatch": "สมาร์ทวอช",
+            "smartband": "สมาร์ทแบนด์", "case": "เคส", "camera": "กล้อง",
+            "speaker": "ลำโพง", "tablet": "แท็บเล็ต", "memory_card": "เมมโมรี่การ์ด",
+        }
+        _type_th = "/".join(_TYPE_TH.get(t, t) for t in sorted(_cert_types))
+
+        if _tisi_products or _cert_fallback_products:
+            # สร้างคำตอบ — แสดงรุ่นที่มี cert ที่ถาม
             _tisi_names = []
-            for p in _tisi_products:
+            for p in (_tisi_products or _cert_fallback_products):
                 _name = p.get("name", "")
                 # ตัด prefix ราคา/โค้ดออกจากชื่อ (เช่น "[ราคาพิเศษ 1990บ.] PowerConnex..." → "PowerConnex...")
                 _clean_name = re.sub(r"^\[.*?\]\s*", "", _name).strip()
@@ -183,34 +209,54 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
             if _tisi_model_kw:
                 # ลูกค้าเจาะจงรุ่น → ตอบเฉพาะรุ่นนั้น
                 if len(_tisi_names) == 1:
+                    # stock DB มีเลข มอก./ใบอนุญาตจริง → แสดงเฉพาะตอนถาม มอก.
+                    # (cert_ids เป็น metadata รวม — คำถาม CE/CCC ไม่แปะเลข มอก. กันสับสน)
+                    _cids = (_tisi_products[0].get("cert_ids") or {}) if _tisi_products else {}
+                    _cids_txt = ""
+                    if _cids.get("tis_id") and "tisi" in _certs:
+                        _cids_txt = f" (เลข มอก. {_cids['tis_id']}"
+                        if _cids.get("tis_license_id"):
+                            _cids_txt += f" ใบอนุญาต {_cids['tis_license_id']}"
+                        _cids_txt += ")"
                     _tisi_answer = (
-                        f"ค่ะ สินค้า{_tisi_names[0]} มี มอก. (มาตรฐานผลิตภัณฑ์อุตสาหกรรม) ค่ะ "
+                        f"ค่ะ สินค้า{_tisi_names[0]} มี {_cert_label}{_cids_txt} ค่ะ "
                         f"สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ"
                     )
                 else:
                     _tisi_list = "\n".join(f"• {n}" for n in _tisi_names)
                     _tisi_answer = (
-                        f"ค่ะ สินค้าที่มี มอก. ในร้าน ได้แก่:\n{_tisi_list}\n\n"
+                        f"ค่ะ สินค้าที่มี {_cert_label} ในร้าน ได้แก่:\n{_tisi_list}\n\n"
                         f"สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ"
                     )
-            else:
-                # ลูกค้าถามทั่วไป "รุ่นไหนมี มอก. บ้าง" → แสดงรุ่นทั้งหมด
+            elif not _tisi_products and _cert_fallback_products:
+                # ไม่เจอในหมวดที่ถาม → ตอบตรงๆ + เสนอสินค้าหมวดอื่นที่มี cert
                 _tisi_list = "\n".join(f"• {n}" for n in _tisi_names)
                 _tisi_answer = (
-                    f"ค่ะ สินค้าที่มี มอก. (มาตรฐานผลิตภัณฑ์อุตสาหกรรม) ในร้าน ได้แก่:\n"
+                    f"ค่ะ สำหรับ{_type_th} ยังไม่พบข้อมูล {_cert_label} ในระบบค่ะ "
+                    f"แต่สินค้าอื่นที่มี {_cert_label} ได้แก่:\n"
+                    f"{_tisi_list}\n\n"
+                    f"สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ"
+                )
+            else:
+                # ลูกค้าถามทั่วไป "รุ่นไหนมี X บ้าง" → แสดงรุ่นทั้งหมด
+                _tisi_list = "\n".join(f"• {n}" for n in _tisi_names)
+                _tisi_answer = (
+                    f"ค่ะ สินค้าที่มี {_cert_label} ในร้าน ได้แก่:\n"
                     f"{_tisi_list}\n\n"
                     f"สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ"
                 )
             _total_elapsed = _time.time() - _total_start
 
-            print(f"[TISI] found {len(_tisi_products)} products with มอก.", file=sys.stderr)
+            _cert_n = len(_tisi_products) if _tisi_products else len(_cert_fallback_products)
+            print(f"[CERT] found {_cert_n} products with {_cert_label}"
+                  f"{' (fallback: นอกหมวดที่ถาม)' if not _tisi_products else ''}", file=sys.stderr)
             return dict(
                 answer=_tisi_answer,
                 answer_segments=llm.split_segments(_tisi_answer),
                 products=[],
                 shop=req.shop,
                 model=model_name,
-                source="tisi_answer",
+                source="cert_answer",
                 usage={},
                 elapsed=round(_total_elapsed, 2),
                 cost=0.0,
@@ -218,42 +264,42 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
                 timing=_timing_breakdown,
                 steps=_steps,
                 routing_decision=_app_module._routing(
-                    "tisi", f"มอก.: เจอ {len(_tisi_products)} สินค้า → ตอบ",
+                    "cert", f"{_cert_label}: เจอ {_cert_n} สินค้า → ตอบ",
                 ),
                 image_desc=_image_desc_out,
             )
         else:
-            # ไม่พบสินค้าที่มี มอก. → ส่งเรื่องให้แอดมิน + handoff
+            # ไม่พบสินค้าที่มี cert ที่ถาม → ส่งเรื่องให้แอดมิน + handoff
             _tisi_handoff_answer = (
-                f"ขออภัยค่ะ {_bot_name} ไม่พบข้อมูล มอก. ของสินค้าในระบบ "
+                f"ขออภัยค่ะ {_bot_name} ไม่พบข้อมูล {_cert_label} ของสินค้าในระบบ "
                 f"เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
-                f"เพื่อตรวจสอบข้อมูล มอก. ให้นะคะ "
+                f"เพื่อตรวจสอบข้อมูล {_cert_label} ให้นะคะ "
                 f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
             )
             _total_elapsed = _time.time() - _total_start
 
             # ส่งต่อแอดมิน (best-effort)
             if req.conversation_id:
-                _app_module._send_handoff(req, None, reason="tisi_not_found",
-                              claim={"topic": "สอบถาม มอก. (TISI)"}, log_tag="TISI-HANDOFF")
-            print(f"[TISI] no products with มอก. found → handoff to admin", file=sys.stderr)
+                _app_module._send_handoff(req, None, reason="cert_not_found",
+                              claim={"topic": f"สอบถาม {_cert_label}"}, log_tag="CERT-HANDOFF")
+            print(f"[CERT] no products with {_cert_label} found → handoff to admin", file=sys.stderr)
             return dict(
                 answer=_tisi_handoff_answer,
                 answer_segments=llm.split_segments(_tisi_handoff_answer),
                 products=[],
                 shop=req.shop,
                 model=model_name,
-                source="tisi_handoff",
+                source="cert_handoff",
                 usage={},
                 elapsed=round(_total_elapsed, 2),
                 cost=0.0,
                 handoff_to_admin=True,
-                handoff_reason="tisi_not_found",
+                handoff_reason="cert_not_found",
                 timing=_timing_breakdown,
                 steps=_steps,
                 routing_decision=_app_module._routing(
-                    "handoff", "มอก.: ไม่พบสินค้าที่มี มอก. → ส่งแอดมิน",
-                    handoff_reason="tisi_not_found",
+                    "handoff", f"{_cert_label}: ไม่พบสินค้าที่มี {_cert_label} → ส่งแอดมิน",
+                    handoff_reason="cert_not_found",
                 ),
                 image_desc=_image_desc_out,
             )

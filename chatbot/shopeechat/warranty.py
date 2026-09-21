@@ -753,6 +753,7 @@ _TISI_QUESTION_KWS = (
 _TISI_GENERAL_KWS = (
     "รุ่นไหน", "รุ่นไหนมี", "รุ่นไหนบ้าง", "มีบ้าง", "มีไหมบ้าง",
     "ตัวไหน", "สินค้าไหน", "อันไหน",
+    "ทุกรุ่น", "ทุกตัว", "ทุกอัน", "ทุกชิ้น", "ทุกสินค้า", "ทั้งหมด",
 )
 
 
@@ -777,14 +778,14 @@ def detect_tisi_question(message: str) -> bool:
     if "มอก." not in msg_lower and "tisi" not in msg_lower:
         # มีแค่ "มอก" ไม่มีจุด → อาจเป็น "หมอก" → เช็คให้แน่ใจ
         # ถ้ามี "มอก" ลอยๆ แต่ไม่มี "หมอก" → อาจเป็นคำถาม มอก.
-        if "มอก" in msg_lower and "หมอก" not in msg_lower:
+        if "มอก" in msg_lower and "หมอก" not in msg_lower and "เสมอก" not in msg_lower:
             return True
         return False
     return True
 
 
 def extract_tisi_model_keyword(message: str) -> str:
-    """สกัดชื่อรุ่นจากคำถาม มอก. ถ้าลูกค้าเจาะจงรุ่น.
+    """สกัดชื่อรุ่นจากคำถาม มอก./มาตรฐาน ถ้าลูกค้าเจาะจงรุ่น.
 
     เช่น "AC65B2 มี มอก. ไหม" → "AC65B2"
     เช่น "รุ่นไหนมี มอก. บ้าง" → "" (ไม่เจาะจงรุ่น)
@@ -802,16 +803,62 @@ def extract_tisi_model_keyword(message: str) -> str:
     cleaned = msg
     for kw in _TISI_QUESTION_KWS:
         cleaned = re.sub(re.escape(kw), " ", cleaned, flags=re.IGNORECASE)
+    # ลบ cert keywords อื่น (CE/CCC/FCC/RoHS/GB) ด้วย
+    for _k, _pat in _CERT_QUESTION_RES:
+        cleaned = _pat.sub(" ", cleaned)
     # ลบคำถามทั่วไป
     cleaned = re.sub(
-        r"\s*(ไหม|มั้ย|บ้าง|ไหมคะ|ไหมครับ|คะ|ครับ|นะ|จ้ะ|มี|พึ่ง|พึ่งพา|ผ่าน|รับรอง|มาตรฐาน|สินค้า|รุ่น|ตัว|อัน|ไหม|มั้ย|ได้ไหม)\s*",
+        r"\s*(ไหม|มั้ย|บ้าง|ไหมคะ|ไหมครับ|คะ|ครับ|นะ|จ้ะ|มี|พึ่ง|พึ่งพา|ผ่าน|รับรอง|มาตรฐาน|สินค้า|รุ่น|ตัว|อัน|ไหม|มั้ย|ได้ไหม|ที่|ของ|ใน|กับ|ด้วย|และ|หรือ|เป็น|ร้าน|ร้านนี้|อะไร|ยังไง)\s*",
         " ", cleaned, flags=re.IGNORECASE
     )
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    # ถ้าเหลือคำที่ยาวพอ (≥3 ตัวอักษร) → น่าจะเป็นชื่อรุ่น
-    if len(cleaned) >= 3:
-        return cleaned
-    return ""
+    # model keyword ต้องมีรหัสรุ่น (alnum ≥3 ตัว เช่น AC65B2, A18T)
+    # คำไทยล้วน (พาวแบง/หัวชาร์จ/รองรับ) ไม่ใช่ชื่อรุ่น → คืน "" = คำถามทั่วไป
+    tokens = [t for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9.\-/]*", cleaned) if len(t) >= 3]
+    if not tokens:
+        return ""
+    # เลือก token ที่มีตัวเลขก่อน (รหัสรุ่นจริง เช่น A18T) — ไม่มี → token ยาวสุด (brand)
+    with_digit = [t for t in tokens if re.search(r"\d", t)]
+    return with_digit[0] if with_digit else max(tokens, key=len)
+
+
+# ── cert standards question detection (superset ของ TISI) ────────────────────
+# จับ cert ที่ลูกค้าถาม: มอก./TISI, CE, CCC, FCC, RoHS, GB (GB/T, GB.V)
+# regex ใช้ boundary กัน false positive: "ce" ใน service/price, "gb" ใน 128GB
+_CERT_QUESTION_RES: tuple[tuple[str, "re.Pattern"], ...] = (
+    # เสมอกัน/เสมอการ เก็บเป็น [เ][ส][ม][อ][ก] → ตัวก่อน มอก คือ ส → block ด้วย ส
+    ("tisi", re.compile(r"(?<![หสเ])มอก|(?<![a-z])tisi(?![a-z])", re.IGNORECASE)),
+    ("ce",   re.compile(r"(?<![a-z])ce(?![a-z])", re.IGNORECASE)),
+    ("ccc",  re.compile(r"(?<![a-z])ccc(?![a-z])", re.IGNORECASE)),
+    ("fcc",  re.compile(r"(?<![a-z])fcc(?![a-z])", re.IGNORECASE)),
+    ("rohs", re.compile(r"rohs", re.IGNORECASE)),
+    ("gb",   re.compile(r"(?<![a-z0-9])gb[/.\s]|(?<![a-z0-9])gb$", re.IGNORECASE)),
+)
+
+# คำถาม "ผ่านมาตรฐานอะไร" แบบไม่เจาะจง cert → เช็คทุก cert
+_GENERIC_STANDARDS_KWS = (
+    "ผ่านมาตรฐาน", "ได้มาตรฐาน", "มีมาตรฐาน", "มาตรฐานอะไร", "มาตรฐานไหม",
+)
+
+
+def detect_cert_question(message: str) -> tuple[str, ...]:
+    """คืน tuple ของ cert keys ที่ลูกค้าถาม (เช่น ("tisi",), ("ce", "ccc")).
+
+    "ผ่านมาตรฐานอะไรบ้าง" (generic) → คืนทุก cert.
+    Superset ของ detect_tisi_question — เคส มอก. เดิมทุกเคสยังได้ "tisi".
+    Empty tuple = ไม่ใช่คำถาม cert.
+    """
+    if not message:
+        return ()
+    msg = message.strip()
+    hits = tuple(k for k, pat in _CERT_QUESTION_RES if pat.search(msg))
+    if not hits and any(kw in msg for kw in _GENERIC_STANDARDS_KWS):
+        return tuple(k for k, _ in _CERT_QUESTION_RES)
+    # กรอง false positive "มอก" ลอยๆ (หมอก/เสมอกัน) — logic เดียวกับ detect_tisi_question
+    if hits == ("tisi",) and "มอก." not in msg and "tisi" not in msg.lower():
+        if "มอก" not in msg or "หมอก" in msg or "เสมอก" in msg:
+            return ()
+    return hits
 
 
 # ---- Phase 1C — Warranty auto-check from order history -----------------------

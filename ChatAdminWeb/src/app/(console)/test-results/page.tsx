@@ -142,9 +142,9 @@ export default function TestResultsPage() {
       const s = search.toLowerCase();
       f = f.filter(
         (r) =>
-          r.msg.toLowerCase().includes(s) ||
-          r.answer.toLowerCase().includes(s) ||
-          r.source.toLowerCase().includes(s)
+          (r.msg || "").toLowerCase().includes(s) ||
+          (r.answer || "").toLowerCase().includes(s) ||
+          (r.source || "").toLowerCase().includes(s)
       );
     }
     if (catFilter !== "all") f = f.filter((r) => r.cat === catFilter);

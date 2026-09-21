@@ -466,7 +466,7 @@ export default function TriggersPage() {
       if (search) {
         const q = search.toLowerCase();
         const inName = (t.name || "").toLowerCase().includes(q);
-        const inKeywords = t.keywords.some((k) => k.toLowerCase().includes(q));
+        const inKeywords = (t.keywords || []).some((k) => typeof k === "string" && k.toLowerCase().includes(q));
         if (!inName && !inKeywords) return false;
       }
       // platform filter

@@ -144,7 +144,7 @@ export default function ShopSettingsPage() {
       if (search) {
         const s = search.toLowerCase();
         if (
-          !r.shopname.toLowerCase().includes(s) &&
+          !(r.shopname || "").toLowerCase().includes(s) &&
           !(r.notes || "").toLowerCase().includes(s)
         )
           return false;
@@ -175,7 +175,7 @@ export default function ShopSettingsPage() {
     )
     .filter((s) => {
       if (!shopSearch) return true;
-      return s.shopname.toLowerCase().includes(shopSearch.toLowerCase());
+      return (s.shopname || "").toLowerCase().includes(shopSearch.toLowerCase());
     });
 
   const platformLabel = (p: PersonaPlatform) =>

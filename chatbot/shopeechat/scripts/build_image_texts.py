@@ -40,7 +40,7 @@ EXPORT_PATH = ROOT / "exports" / "ShpProducts.export.json"
 OUTPUT_PATH = ROOT / "exports" / "image_texts.jsonl"
 USAGE_LOG_PATH = ROOT / "exports" / "image_texts_usage.jsonl"
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
-MIN_INTERVAL = 0.78          # ~77 calls/min รวมทุก key (limit 80)
+MIN_INTERVAL = float(os.environ.get("IMGTXT_MIN_INTERVAL", "0.78"))  # ~77/min หลาย key; key เดียว (15 RPM/model) ใช้ ~4.1
 CALL_TIMEOUT = 120
 MAX_ATTEMPTS = 3
 TEMPLATE_MIN_USED_BY = 20    # image_id ที่โผล่ใน >20 listings = template ร้าน
@@ -77,6 +77,34 @@ def _doc_stock(d: dict) -> int:
     )
 
 
+def _doc_images(d: dict) -> dict[str, str]:
+    """image_id → url จาก 3 แหล่งของ listing (dedupe — source แรกที่เจอชนะ).
+
+    1. desc `field_list` — รูปใน description (spec/cert/banner)
+    2. `image.image_id_list` — gallery/รูปปก (มอก./cert badge มักอยู่รูปแรกๆ ไม่ใช่ใน desc)
+    3. `tier_variation[].option_list[].image` — รูป variant
+    """
+    ids: dict[str, str] = {}
+    fl = ((d.get("description_info") or {}).get("extended_description") or {}).get("field_list") or []
+    for f in fl:
+        if isinstance(f, dict) and f.get("field_type") == "image" and isinstance(f.get("image_info"), dict):
+            iid = f["image_info"].get("image_id")
+            if iid:
+                ids[iid] = f["image_info"].get("image_url") or f"https://cf.shopee.co.th/file/{iid}"
+    img = d.get("image") or {}
+    urls = img.get("image_url_list") or []
+    for i, iid in enumerate(img.get("image_id_list") or []):
+        if iid:
+            ids.setdefault(iid, urls[i] if i < len(urls) else f"https://cf.shopee.co.th/file/{iid}")
+    for tv in (d.get("tier_variation") or []):
+        for o in (tv.get("option_list") or []):
+            oi = o.get("image") or {}
+            iid = oi.get("image_id")
+            if iid:
+                ids.setdefault(iid, oi.get("image_url") or f"https://cf.shopee.co.th/file/{iid}")
+    return ids
+
+
 def _collect_worklist(path: Path) -> list[dict]:
     """คืน list ของ {image_id, image_url, used_by, is_template} เฉพาะรูปใน sellable docs."""
     used_by: collections.Counter = collections.Counter()
@@ -84,13 +112,7 @@ def _collect_worklist(path: Path) -> list[dict]:
     n_docs = n_sellable = 0
     for d in _iter_export_docs(path):
         n_docs += 1
-        fl = ((d.get("description_info") or {}).get("extended_description") or {}).get("field_list") or []
-        ids: dict[str, str] = {}
-        for f in fl:
-            if isinstance(f, dict) and f.get("field_type") == "image" and isinstance(f.get("image_info"), dict):
-                iid, url = f["image_info"].get("image_id"), f["image_info"].get("image_url")
-                if iid and url:
-                    ids[iid] = url
+        ids = _doc_images(d)
         for iid in ids:
             used_by[iid] += 1
         if d.get("item_status") == "NORMAL" and _doc_stock(d) > 0:
@@ -236,7 +258,8 @@ def _extract_one(item: dict) -> dict:
             uf.write(json.dumps(usage_entry, ensure_ascii=False) + "\n")
     except Exception:
         pass
-    web_search._log_ai_usage(usage_entry)
+    if not os.environ.get("IMGTXT_SKIP_HUB"):  # hub ล่ม=timeout 5s/call — skip ได้ (usage อยู่ local log, backfill ทีหลัง)
+        web_search._log_ai_usage(usage_entry)
     return entry
 
 

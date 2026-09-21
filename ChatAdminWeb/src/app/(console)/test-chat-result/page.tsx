@@ -275,10 +275,10 @@ export default function TestChatResultPage() {
     if (!search) return sessions;
     const q = search.toLowerCase();
     return sessions.filter((s) =>
-      s.title.toLowerCase().includes(q) ||
-      s.shop.toLowerCase().includes(q) ||
-      s.session_id.toLowerCase().includes(q) ||
-      adminName(s.admin_id).toLowerCase().includes(q)
+      (s.title || "").toLowerCase().includes(q) ||
+      (s.shop || "").toLowerCase().includes(q) ||
+      (s.session_id || "").toLowerCase().includes(q) ||
+      adminName(s.admin_id || "").toLowerCase().includes(q)
     );
   }, [sessions, search, adminMap]);
 

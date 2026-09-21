@@ -228,6 +228,28 @@ def _live_sellable(unit: dict) -> bool:
     return status == "NORMAL" and stock > 0
 
 
+def _variant_image_id(lst: dict, model_name: str) -> str:
+    """image_id ของ variant จาก tier_variation.option_list — match option กับ model_name.
+
+    listing รวมหลายรุ่น (หัวชาร์จ+สายชาร์จใน listing เดียว) — รูปปก/รูป desc ไม่ตรง
+    variant; Shopee เก็บรูปแยกต่อ option ไว้ ใช้ตรงนั้น. คืน "" ถ้า match ไม่ได้
+    (containment match เฉพาะ option ≥4 chars กัน option สั้นอย่าง "ขาว" match ผิด variant)
+    """
+    def _n(s: str) -> str:
+        return "".join(c for c in (s or "").lower() if c.isalnum())
+    name = _n(model_name)
+    if not name:
+        return ""
+    for tv in (lst.get("tier_variation") or []):
+        for o in (tv.get("option_list") or []):
+            opt = _n(o.get("option") or "")
+            if opt and (opt == name or (len(opt) >= 4 and opt in name)):
+                iid = (o.get("image") or {}).get("image_id")
+                if iid:
+                    return iid
+    return ""
+
+
 def to_unit_card(unit: dict, route=None) -> dict:
     """unit doc → card shape เดียวกับ to_product_card (downstream ไม่ต้องแก้)."""
     from . import product_store as _ps   # lazy — กัน circular (product_store ก็ lazy-import units)
@@ -241,7 +263,13 @@ def to_unit_card(unit: dict, route=None) -> dict:
     price = unit.get("price")
     # shape เดียวกับ _price_range ของ product card — downstream อ่าน price.get("min"/"max")
     price_range = {"min": int(price), "max": int(price), "currency": "THB"} if price else {}
-    img_ids = unit.get("image_ids") or (lst.get("image") or {}).get("image_id_list") or []
+    # ⚡ รูปแสดงผล: variant image (tier_variation option) > รูปปก listing > รูปแรกใน desc
+    #   unit.image_ids = รูปใน description (ไว้ join OCR text) — รูปแรกมักเป็น banner
+    #   ไม่ใช่รูปสินค้า/variant ที่ลูกค้ากำลังดู
+    _vid = _variant_image_id(lst, unit.get("model_name") or "")
+    img_ids = ([_vid] if _vid else
+               (lst.get("image") or {}).get("image_id_list") or
+               unit.get("image_ids") or [])
     return {
         # shape เดียวกับ product card
         "item_id": unit.get("item_id"),
@@ -397,7 +425,7 @@ def attach_listing_fields(unit_docs: list[dict]) -> list[dict]:
                 {"item_id": {"$in": list(iids)}},   # item_id เป็น int ทั้งสองฝั่ง — ห้าม str()
                 {"item_id": 1, "condition": 1, "weight": 1, "dimension": 1,
                  "short_link": 1, "promotion": 1, "has_promotion": 1,
-                 "is_flash_sale": 1, "image": 1,
+                 "is_flash_sale": 1, "image": 1, "tier_variation": 1,
                  # live availability — status/stock เปลี่ยนบ่อยกว่า build cycle
                  "item_status": 1, "stock_info_v2": 1,
                  "model.model_id": 1, "model.model_status": 1,

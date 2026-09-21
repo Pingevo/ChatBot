@@ -232,7 +232,7 @@ export default function WorkflowsPage() {
     const q = search.trim().toLowerCase();
     if (q) {
       list = list.filter((wf) => {
-        const inName = wf.name.toLowerCase().includes(q);
+        const inName = (wf.name || "").toLowerCase().includes(q);
         const inShops = (wf.shop_ids || []).some((id) => (shopNameById.get(id) || id).toLowerCase().includes(q));
         return inName || inShops;
       });

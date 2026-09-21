@@ -4,7 +4,8 @@
 รัน: cd chatbot && PYTHONPATH=. python3 ../test/test_qa_batch_20260911.py
 
 ทดสอบ:
-- BUG-P: _detect_lang + _lang_instruction (ไทย/อังกฤษ/จีน/ไต้หวัน/ญี่ปุ่น)
+- Language policy (2026-09-18, แทน BUG-P): _lang_instruction — ตอบไทยเสมอ
+  เว้นแต่ลูกค้าขอภาษาอื่น → ตอบอังกฤษ (detect เฉพาะ explicit request)
 - BUG-M: _strip_kb_markup post-check กันอ้างเท็จ "แอดมินมาแล้ว"
 - OBS-3: prompt rule อยู่ใน SYSTEM_INSTRUCTION / KB_SYSTEM_INSTRUCTION / general_instruction
 - BUG-D: conversation_products.load/update/clear_claim_state
@@ -36,51 +37,59 @@ def _ok(name: str, cond: bool, detail: str = ""):
         print(f"  ❌ {name} FAILED {detail}")
 
 
-# ─── BUG-P: language detection ─────────────────────────────
+# ─── Language policy: ไทยเสมอ เว้นแต่ขอภาษาอื่น → อังกฤษ ───
 
-def test_detect_lang_thai():
-    assert llm._detect_lang("สวัสดีค่ะ มีสายชาร์จไหม") == "th"
-    assert llm._detect_lang("รับประกันกี่ปีคะ") == "th"
-    assert llm._detect_lang("Mi 17 ultra ใช้พาวเวอร์แบงค์ไหน") == "th"  # มีไทย → ไทย
-
-
-def test_detect_lang_english():
-    assert llm._detect_lang("Hello, do you have a charger?") == "en"
-    assert llm._detect_lang("What is the warranty period?") == "en"
-    assert llm._detect_lang("iPhone 15 Pro Max") == "en"
+def test_lang_no_request_thai():
+    # ข้อความไทยปกติ → ตอบไทย (instruction ว่าง)
+    for msg in ("สวัสดีค่ะ มีสายชาร์จไหม", "รับประกันกี่ปีคะ",
+                "Mi 17 ultra ใช้พาวเวอร์แบงค์ไหน"):
+        assert llm._lang_instruction(msg) == "", f"expected Thai, got: {msg!r}"
 
 
-def test_detect_lang_chinese():
-    assert llm._detect_lang("你好，有充电器吗") == "zh"
-    assert llm._detect_lang("請問有保固嗎") == "zh"  # Taiwanese traditional
+def test_lang_no_request_other_scripts():
+    # ลูกค้าพิมพ์ภาษาอื่นแต่ไม่ได้ขอภาษา → ตอบไทยเสมอ (policy ใหม่)
+    for msg in ("Hello, do you have a charger?", "你好，有充电器吗",
+                "こんにちは", "iPhone 15 Pro Max", "1", ""):
+        assert llm._lang_instruction(msg) == "", f"expected Thai, got: {msg!r}"
 
 
-def test_detect_lang_japanese():
-    assert llm._detect_lang("こんにちは") == "ja"
-    assert llm._detect_lang("充電器はありますか") == "ja"
+def test_lang_request_thai_phrasing():
+    # ขอภาษาอื่นภาษาไทย → ตอบอังกฤษ
+    for msg in ("ตอบเป็นภาษาจีนได้ไหม", "พูดภาษาอังกฤษได้ไหมคะ",
+                "ช่วยตอบภาษามาเลย์หน่อย", "คุยภาษาอาหรับได้ไหม",
+                "ขอภาษาไต้หวันหน่อยค่ะ"):
+        inst = llm._lang_instruction(msg)
+        assert "English" in inst, f"expected English, got: {msg!r}"
 
 
-def test_detect_lang_empty():
-    assert llm._detect_lang("") == "th"  # default
-    assert llm._detect_lang("   ") == "th"
+def test_lang_request_english_phrasing():
+    for msg in ("please reply in chinese", "can you speak english",
+                "answer in malay please", "in arabic please",
+                "english please", "translate to japanese"):
+        inst = llm._lang_instruction(msg)
+        assert "English" in inst, f"expected English, got: {msg!r}"
 
 
-def test_lang_instruction_thai():
-    inst = llm._lang_instruction("th")
-    assert inst == "", f"Thai should have empty instruction, got: {inst!r}"
+def test_lang_request_other_scripts():
+    # ขอในภาษานั้นๆ → ตอบอังกฤษ
+    for msg in ("請用中文回答", "用英文回覆", "dalam bahasa melayu",
+                "هل تتكلم العربية", "ответьте на русском"):
+        inst = llm._lang_instruction(msg)
+        assert "English" in inst, f"expected English, got: {msg!r}"
 
 
-def test_lang_instruction_english():
-    inst = llm._lang_instruction("en")
-    assert "English" in inst
-    assert "ค่ะ" in inst  # ห้ามใช้คำลงท้ายไทย
+def test_lang_product_question_no_trigger():
+    # คำถามสินค้าที่มีชื่อภาษาปน — ไม่ใช่ language request → ตอบไทย
+    for msg in ("app ภาษาจีนใช้ได้ไหม", "รองรับภาษาอังกฤษไหมคะ",
+                "เมนูเป็นภาษาอังกฤษหรือเปล่า", "มี english manual ไหม",
+                "ใช้กับ app xiaomi จีนได้ไหม"):
+        assert llm._lang_instruction(msg) == "", f"expected Thai, got: {msg!r}"
 
 
-def test_lang_instruction_chinese_japanese():
-    for lang in ("zh", "ja", "other"):
-        inst = llm._lang_instruction(lang)
-        assert "English" in inst
-        assert "Chinese/Japanese" in inst or "Chinese" in inst
+def test_lang_request_thai_not_triggered():
+    # ขอตอบไทย/พูดไทย → default ไทยอยู่แล้ว ไม่สลับอังกฤษ
+    for msg in ("ตอบภาษาไทยนะ", "speak thai please", "answer in thai"):
+        assert llm._lang_instruction(msg) == "", f"expected Thai, got: {msg!r}"
 
 
 # ─── BUG-M: false admin claim post-check ────────────────────
@@ -150,14 +159,13 @@ def test_claim_state_clear_no_error():
 # ─── Run ───────────────────────────────────────────────────
 
 _TESTS = [
-    ("BUG-P detect_lang thai", test_detect_lang_thai),
-    ("BUG-P detect_lang english", test_detect_lang_english),
-    ("BUG-P detect_lang chinese", test_detect_lang_chinese),
-    ("BUG-P detect_lang japanese", test_detect_lang_japanese),
-    ("BUG-P detect_lang empty", test_detect_lang_empty),
-    ("BUG-P lang_instruction thai", test_lang_instruction_thai),
-    ("BUG-P lang_instruction english", test_lang_instruction_english),
-    ("BUG-P lang_instruction zh/ja/other", test_lang_instruction_chinese_japanese),
+    ("LANG no-request thai", test_lang_no_request_thai),
+    ("LANG no-request other scripts", test_lang_no_request_other_scripts),
+    ("LANG request thai phrasing", test_lang_request_thai_phrasing),
+    ("LANG request english phrasing", test_lang_request_english_phrasing),
+    ("LANG request other scripts", test_lang_request_other_scripts),
+    ("LANG product question no trigger", test_lang_product_question_no_trigger),
+    ("LANG request thai not triggered", test_lang_request_thai_not_triggered),
     ("BUG-M strip false admin claim", test_strip_kb_markup_replaces_false_admin_claims),
     ("BUG-M strip admin arrived", test_strip_kb_markup_replaces_admin_arrived),
     ("BUG-M strip claim completed", test_strip_kb_markup_replaces_claim_completed),

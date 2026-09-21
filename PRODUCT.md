@@ -69,7 +69,7 @@ A neighboring product like Zaapi could not truthfully claim: seamless human+bot 
 - `docs/function and process.md` — function/process documentation
 - `docs/DEPLOY.md` — Docker + Caddy deploy guide
 - `ChatAdminWeb/docs/DATA_SCHEMA.md` — chat data schema from sellcenter
-- `getoutofmywaybotkaikrook.md` — waythrough log (mandatory reading before any work)
+- `getoutofmywaybotkaikrook.md` — waythrough log history (read-only, frozen) — `getoutofmywaybotkaikrook2.md` — active waythrough log (mandatory reading before any work; write here)
 - `exports/product_embeddings.npz` — product embeddings for RAG
 - No customer testimonials, case studies, or press — do not fabricate
 

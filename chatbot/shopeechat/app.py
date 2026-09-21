@@ -422,6 +422,44 @@ _SUPERLATIVE_KW = ("สุด", "ที่สุด", "แรงสุด", "ไ
 #   กัน false positive ของ _SUPERLATIVE_KW เช่น "ตัวนี้ชาร์จเร็วไหม" (ไม่ใช่ set question)
 _SINGLE_ITEM_REF_KW = ("ตัวนี้", "รุ่นนี้", "อันนี้", "ชิ้นนี้", "สินค้านี้", "เรือนนี้")
 
+# --- general_qtype bypass guards (2026-09-18 — test_200 #143/#199) ---
+# intent classifier อาจส่ง general_qtype ผิดบริบท → early return ตอบ policy/categories
+# ก่อนถึง product flow — guard เช็ค message จริงก่อนปล่อยเข้า general route
+# คำเดินทาง/เครื่องบิน — คำถามกฎการเดินทางของสินค้า ไม่ใช่เรื่องจัดส่ง
+_TRAVEL_KWS = ("ขึ้นเครื่อง", "เครื่องบิน", "นำขึ้น", "ติดตัวขึ้น",
+               "ไปจีน", "ต่างประเทศ", "สนามบิน", "ตม.", "ผ่านสแกน")
+# shipping verbs — ถ้ามีคำเหล่านี้ปนถือเป็นคำถามจัดส่งจริง ("ส่งไปจีนได้ไหม")
+_SHIP_VERB_KWS = ("ส่ง", "จัดส่ง", "ขนส่ง", "ship", "deliver", "ค่าส่ง", "cod")
+# noun กว้าง = ถามหมวดรวมจริง (ไม่ใช่สินค้าเจาะจง) สำหรับ categories guard
+_CAT_GENERIC_NOUNS = {"สินค้าอะไร", "อะไร", "อะไรบ้าง", "ทั้งหมด", "ทุกอย่าง",
+                      "หมวดหมู่", "หมวดหมู่อะไร", "หมวดอะไร", "ประเภท", "ประเภทอะไร",
+                      "ของ", "ของขาย", "สินค้าขาย", "ของในร้าน", "สินค้าในร้าน",
+                      "สินค้าทั้งหมด", "ของทั้งหมด", "สินค้า", "อะไรดี", "แบบไหน"}
+_CAT_NOUN_RE = re.compile(r"(?:มี|ขาย)\s*(.{2,40}?)\s*(?:ไหม|มั้ย|ป่าว|บ้าง)(?:\s|$|[!?])")
+
+
+def _general_qtype_bypass(qtype: str | None, message: str) -> str | None:
+    """คืน qtype เดิม หรือ None ถ้า message ควรไป product flow แทน general route.
+
+    - shipping_policy + travel kw (ไม่มี shipping verb) → คำถามกฎเดินทางสินค้า → product flow
+      (เช่น "เอาขึ้นเครื่องไปจีนด้วยได้อ่ะ", "พาวเวอร์แบงค์ขึ้นเครื่องได้ไหม")
+    - categories + noun เจาะจงที่ taxonomy ไม่ครอบ → product search จริง
+      (เช่น "มีสินค้า smart home ไหม" — generic "ขายอะไรบ้าง" ไม่โดน)
+    """
+    if not qtype:
+        return qtype
+    low = (message or "").lower()
+    if qtype == "shipping_policy":
+        if any(k in low for k in _TRAVEL_KWS) and not any(k in low for k in _SHIP_VERB_KWS):
+            return None
+    elif qtype == "categories":
+        m = _CAT_NOUN_RE.search(low)
+        if m:
+            noun = m.group(1).strip()
+            if noun and noun not in _CAT_GENERIC_NOUNS:
+                return None
+    return qtype
+
 
 def _add_context_note(products: list, note: str) -> None:
     """append note ลง products[0]['_context_note'] (คั่นด้วย space ถ้ามีอยู่แล้ว)."""
@@ -1497,6 +1535,13 @@ def chat(req: ChatRequest) -> ChatResponse:
             return ChatResponse(**_wfr)
 
         if general_qtype:
+            # guard: intent อาจส่ง general_qtype ผิดบริบท (travel question → shipping,
+            # noun เจาะจง → categories) — คืน None ให้หล่นไป product flow
+            _gq_before = general_qtype
+            general_qtype = _general_qtype_bypass(general_qtype, req.message)
+            if _gq_before and not general_qtype:
+                print(f"[INTENT] general_qtype {_gq_before} → bypass to product flow", file=sys.stderr)
+        if general_qtype:
             # ถ้าเป็น warranty_policy/return_policy แต่ message มี model keyword (เช่น "P01 รับประกันกี่ปี")
             # หรือมี item_id (ลูกค้าคลิกสินค้ามา) ให้ skip general flow ไป product flow แทน
             # เพราะลูกค้าถามรับประกันของสินค้าเฉพาะรุ่น ต้องดึงสินค้า (รวม UNLIST/sold_out) มาให้ LLM ตอบ
@@ -2003,7 +2048,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     # ⚡ device-spec-lookup ใน KB path — เดิม KB path return ก่อนถึง device-spec-lookup
                     #   ใน main path → LLM เห็นแค่สินค้าจาก KB+Mongo ไม่เห็น high-wattage upgrade
                     #   แก้: เรียก helper ก่อน LLM → merge high-wattage + inject spec context
-                    _kb_device_extra, _kb_device_products = device_compat._device_spec_lookup(
+                    _kb_device_extra, _kb_device_products, _kb_device_specs = device_compat._device_spec_lookup(
                         db=db,
                         req=req,
                         intent_result=_intent_result,
@@ -4311,7 +4356,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             _combined_extra = (_combined_extra + _pc_note).strip()
         #   ⚡ Phase 4 — trigger เมื่อ target_device ไม่ว่าง (ไม่ผูก intent)
         #   ⚡ Phase 3b — dual-tier recommendation (baseline + upgrade) + sort by wattage asc
-        _device_spec_extra, _device_additional = device_compat._device_spec_lookup(
+        _device_spec_extra, _device_additional, _device_specs = device_compat._device_spec_lookup(
             db=db,
             req=req,
             intent_result=_intent_result,
@@ -4337,12 +4382,17 @@ def chat(req: ChatRequest) -> ChatResponse:
         #    ถ้ากรองแล้วว่าง/เหลือน้อย → fallback คืนทั้งหมด (ปลอดภัย ไม่ over-filter)
         _compat_target_device = _intent_result.get("target_device") or ""
         if _compat_target_device and products:
+            _compat_md, _asked_type = device_compat._compat_mode(
+                _intent_result.get("product_type"), req.message)
             products = device_compat._filter_compat_products(
                 products=products,
                 device_name=_compat_target_device,
                 web_search_extra=_device_spec_extra,
                 intent_connector=_intent_result.get("device_connector"),
                 intent_min_watt=_intent_result.get("device_min_watt"),
+                compat_mode=_compat_md,
+                asked_type=_asked_type,
+                web_specs=_device_specs,
             )
         # ⚡ Phase 3 — Tier merge ก่อนส่งเข้า LLM
         #   Tier A (exact match): MODEL-REGEX + anchor_card + hybrid_anchor_card → ใส่เสมอ ไม่ถูกตัดด้วย limit

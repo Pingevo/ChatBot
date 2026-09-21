@@ -645,9 +645,9 @@ export default function ShadowInboxPage() {
     if (!convSearch) return true;
     const q = convSearch.toLowerCase();
     return (
-      c.id.toLowerCase().includes(q) ||
-      c.shop_name.toLowerCase().includes(q) ||
-      c.customer_name.toLowerCase().includes(q) ||
+      (c.id || "").toLowerCase().includes(q) ||
+      (c.shop_name || "").toLowerCase().includes(q) ||
+      (c.customer_name || "").toLowerCase().includes(q) ||
       (c.last_message || "").toLowerCase().includes(q)
     );
   });

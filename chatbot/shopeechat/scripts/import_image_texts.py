@@ -18,6 +18,23 @@ sys.path.insert(0, str(ROOT))
 from chatbot.shopeechat import knowledge_base  # noqa: E402
 
 
+def _image_item_ids() -> dict[str, list[int]]:
+    """map image_id → item_ids จาก export — logic เดียวกับ _collect_worklist
+    (3 แหล่ง: desc field_list + gallery + variant options)."""
+    from chatbot.shopeechat.scripts.build_image_texts import _iter_export_docs, _doc_images
+    export = ROOT / "exports" / "ShpProducts.export.json"
+    m: dict[str, set[int]] = {}
+    for d in _iter_export_docs(export):
+        iid_set = set(_doc_images(d))
+        try:
+            item_id = int(d.get("item_id"))
+        except (TypeError, ValueError):
+            continue
+        for iid in iid_set:
+            m.setdefault(iid, set()).add(item_id)
+    return {k: sorted(v) for k, v in m.items()}
+
+
 def main() -> None:
     knowledge_base._load_env()
     import os
@@ -25,6 +42,9 @@ def main() -> None:
     db = knowledge_base._build_admin_client()[os.environ.get("ADMIN_MONGO_DB", "chatbot_admin")]
     coll = db["image_texts"]
     coll.create_index("image_id", unique=True)
+    coll.create_index("item_ids")
+    iid_items = _image_item_ids()
+    print(f"item_ids map: {len(iid_items)} images")
 
     best: dict[str, dict] = {}
     for line in (ROOT / "exports" / "image_texts.jsonl").open():
@@ -40,6 +60,7 @@ def main() -> None:
         UpdateOne({"image_id": iid}, {"$set": {
             "image_id": iid,
             "image_url": e.get("image_url"),
+            "item_ids": iid_items.get(iid, []),
             "kind": e.get("kind"),
             "text": e.get("text"),
             "truncated": e.get("truncated"),

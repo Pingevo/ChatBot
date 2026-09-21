@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 import time
 import sys
 import urllib.request
@@ -13,8 +14,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 RESULT_FILE = ROOT / "docs" / "test" / "results" / "test_200_results.json"
 
+# โหลด .env ผ่าน knowledge_base (ไม่อ่านไฟล์เอง) — ใช้ secret จริงจาก env
+sys.path.insert(0, str(ROOT / "chatbot"))
+try:
+    from shopeechat import knowledge_base  # noqa: F401 — _load_env() ตอน import
+except Exception:
+    pass
+
 BASE = "http://127.0.0.1:8010"
-SECRET = "dev-secret"
+SECRET = os.environ.get("CHATBOT_INTERNAL_SECRET", "dev-secret")
 
 # ── ร้านทั้งหมด (33 ร้าน) ──
 SHOPS = [
