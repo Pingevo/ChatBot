@@ -251,11 +251,21 @@ def enforce(resp, req):
                     # re-scan จนสะอาด (≤4 รอบ) — answer อาจมี claim เดียวกันหลาย clause
                     #   เช่น "เช็คสต็อกแล้วนะคะ พร้อมส่งค่ะ" ต้องแทนทั้งคู่
                     for _ in range(4):
-                        _m = _rx.search(resp.answer)
+                        # หา match ที่ไม่อยู่ใน replacement ของเราเอง
+                        #   (repl เช่น "...โปรโมชั่น..." match claim_rx ตัวเอง — ห้ามลบ)
+                        _ridx = resp.answer.find(_repl)
+                        _rend = _ridx + len(_repl) if _ridx != -1 else -1
+                        _m = next(
+                            (c for c in _rx.finditer(resp.answer)
+                             if not (_ridx <= c.start() < _rend)),
+                            None,
+                        )
                         if not _m or _claim_grounded(resp, _pos_rx, _gflags, _mode):
                             break
                         # แทนทั้ง clause ที่ครอบ claim — กันเศษข้อความ claim เดิมค้าง
-                        _new = _replace_clause(resp.answer, _m.start(), _m.end(), _repl)
+                        #   (ถ้า replacement มีอยู่แล้ว → claim ซ้ำ ให้ลบ clause ทิ้งแทน)
+                        _r = "" if _ridx != -1 else _repl
+                        _new = _replace_clause(resp.answer, _m.start(), _m.end(), _r)
                         # กัน particle ซ้ำติดกัน ("นะคะค่ะ" / "ค่ะคะ")
                         _new = re.sub(r"(?:นะคะ|ค่ะ|คะ)\s*(?:นะคะ|ค่ะ|คะ)", "นะคะ", _new)
                         if _new == resp.answer:
