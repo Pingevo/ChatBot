@@ -1655,7 +1655,10 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     elapsed=round(_total_elapsed, 2),
                     cost=round(cost, 6),
                     steps=_steps,
-                    routing_decision=_routing("bot_reply", f"general_qtype: {general_qtype} — ไม่โดน trigger/shop_settings → บอทตอบ"),
+                    routing_decision={**_routing("bot_reply", f"general_qtype: {general_qtype} — ไม่โดน trigger/shop_settings → บอทตอบ"),
+                                      # ⚡ NEW-3 residual — แนบ KB context ให้ guards.enforce
+                                      #   verify claim (เปลี่ยนได้/โปร/สต็อก) เทียบ KB จริงได้
+                                      "grounding_text": gen_context[:2000]},
                     image_desc=_image_desc_out,
                 )
 
@@ -1696,7 +1699,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     elapsed=round(_total_elapsed, 2),
                     cost=round(cost, 6),
                     steps=_steps,
-                    routing_decision=_routing("bot_reply", f"brand_question: {brand_q} — บอทตอบจากข้อมูลแบรนด์"),
+                    routing_decision={**_routing("bot_reply", f"brand_question: {brand_q} — บอทตอบจากข้อมูลแบรนด์"),
+                                      "grounding_text": brand_result["context"][:2000]},
                     image_desc=_image_desc_out,
                 )
 
