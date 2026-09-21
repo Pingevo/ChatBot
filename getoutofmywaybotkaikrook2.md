@@ -705,3 +705,12 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **fix:** ลบ `client.close()` ทั้ง 5 จุด (try/finally ที่มีแค่เพื่อ close ถูกยุบ+dedent) · เพิ่ม `@app.on_event("shutdown")` `_shutdown_db_clients()` ปิดทั้ง product + admin singletons ตอน process จบเท่านั้น · แก้ docstring `_db()`/`get_client()` เตือนห้าม close
 - **verify:** live :8030 — /health ×3 + /shops(auth) ×2 คั่นกลาง /chat → ทุก request 200, "Cannot use MongoClient after close" = 0 · py_compile ครบ
 - **ผลกระทบเคสอื่น:** export_mongo.py (script แยก client เอง) ไม่แตะ · chat_v2 `_build_context` ยังคืน client เดิมใน tuple (ไม่มีใคร close แล้ว) · connection อยู่จน process shutdown — พฤติกรรมที่ถูกของ singleton
+
+### ✅ 2026-09-21 — DX: SIM sessions ตอบว่าง (Black Shark Pad 7 warranty + อีก 3) = issue #17 บน prod
+
+- **อาการที่ user รายงาน:** session `SIM warranty · Black Shark Pad 7` + แชทอื่นในหน้า /test-chat/shopee ตอบเปล่า/ไม่ตอบ
+- **สแกน DB:** 47 sessions ล่าสุด → `empty_model=3` (Pad 7 warranty, FunCooler 5 spec, GS3 compat) + `user_last=1` (CUKTECH PB200P compat ไม่มี model msg) — ทั้ง 4 เป็น session `SIM ·` จาก sim run เดียวกัน (11:45–12:04 local, admin=sim) ไม่ใช่แชทจริง
+- **หลักฐาน boundary:** model msg ว่างมี `stats` เป็น null ทั้งหมด (source/intent/usage/cost/timing.total) + `sim_checks:["EMPTY"]` → request ระดับ HTTP ล้ม (non-200/non-JSON) ไม่ใช่ 200-answer-ว่าง · `conversation_products` มี docs `sim:20260921-1145-448d:*` → request ถึง bot แล้วตายกลางทาง · `sim:` IDs ไม่อยู่ใน log บอท local เลย → sim ยิงไป **prod bot**
+- **root cause:** issue #17 (fixed `c411b1d` 13:42 วันนี้ — หลัง sim run 11:45) — prod image เก่ายังมี `/health` `client.close()` (docker HEALTHCHECK ทุก 30 วิ) ปิด shared MongoClient กลาง `/chat` ที่ถือ db → `Cannot use MongoClient after close` → HTTP 500 สุ่ม ~10-15% (3-4/20 = เท่าที่วัด 9/hr บน prod)
+- **เช็กแล้วว่าไม่ใช่สาเหตุ:** `flush/route.ts` `data.answer||""` (ทำงานเฉพาะ 200) · `TestChatClient` bot_error → แสดง error แดงถูก (user จริงเห็น error ไม่ใช่เงียบ) · direct repro :8010 ทั้ง 3 เคสตอบปกติ (warranty 1213 chars, spec KB+mongo, compat product_store) — retrieval/LLM ไม่พัง
+- **สถานะ:** ไม่ต้องแก้โค้ดเพิ่ม — root cause แก้แล้วใน `c411b1d` · **action = redeploy prod** ให้ image มี fix แล้วลบ/รัน sim sessions ใหม่ยืนยัน
