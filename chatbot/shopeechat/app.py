@@ -104,6 +104,21 @@ def _warmup():
         print(f"[WARMUP] admin MongoDB failed: {e}", file=sys.stderr)
 
 
+@app.on_event("shutdown")
+def _shutdown_db_clients():
+    """ปิด shared MongoClient singletons ตอน process shutdown เท่านั้น.
+
+    ⚠️ ห้าม close() client เหล่านี้ใน request handler — client ถูกแชร์ทั้งโปรเซส
+    (issue #17: /health ปิด client กลาง request → /chat 500 'Cannot use
+    MongoClient after close').
+    """
+    for getter in (product_store.get_client, knowledge_base._build_admin_client):
+        try:
+            getter().close()
+        except Exception:
+            pass
+
+
 # ---- schemas ------------------------------------------------------------------
 
 class ChatMessage(BaseModel):
@@ -231,9 +246,11 @@ class FeedbackRequest(BaseModel):
 # ---- helpers ------------------------------------------------------------------
 
 def _db():
-    """เปิด client + เลือก db ใหม่ทุกครั้ง (stateless สำหรับ API แบบง่าย).
+    """คืน (client, db) — client เป็น **shared singleton** จาก get_client().
 
-    หากต้องการ reuse connection ข้าม request ใช้ app.state หรือ dependency injection.
+    ⚠️ ห้ามเรียก client.close() บนตัวนี้ — request อื่นที่ถือ db อยู่จะพัง
+    (InvalidOperation: Cannot use MongoClient after close). singleton ปิด
+    ตอน process shutdown เท่านั้น (ดู shutdown handler).
     """
     client = product_store.get_client()
     db_name = os.environ.get("MONGO_DB", "").strip()
@@ -279,7 +296,6 @@ def health() -> dict[str, Any]:
         client, db = _db()
         shops = product_store.list_shops(db)
         cats = product_store.list_categories(db)
-        client.close()
         return {"ok": True, "shops": len(shops), "categories": len(cats)}
     except SystemExit as exc:
         return {"ok": False, "error": str(exc)}
@@ -294,19 +310,13 @@ def index() -> HTMLResponse:
 @app.get("/shops")
 def shops() -> dict[str, Any]:
     client, db = _db()
-    try:
-        return {"shops": product_store.list_shops(db)}
-    finally:
-        client.close()
+    return {"shops": product_store.list_shops(db)}
 
 
 @app.get("/categories")
 def categories() -> dict[str, Any]:
     client, db = _db()
-    try:
-        return {"categories": product_store.list_categories(db)}
-    finally:
-        client.close()
+    return {"categories": product_store.list_categories(db)}
 
 
 @app.get("/brands")
@@ -334,55 +344,52 @@ def brands(
     from collections import Counter
 
     client, db = _db()
-    try:
-        coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
-        coll = db[coll_name]
+    coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+    coll = db[coll_name]
 
-        brand_counts = Counter()
-        brand_cats: dict[str, set[str]] = {}
-        for d in coll.find({"item_status": "NORMAL"}, {"brand": 1, "cat_name": 1}).limit(10000):
-            b = d.get("brand", "")
-            if isinstance(b, dict):
-                bname = (b.get("original_brand_name", "") or "").strip()
-            else:
-                bname = str(b).strip() if b else ""
-            c = d.get("cat_name", "")
-            if bname:
-                brand_counts[bname] += 1
-                if c:
-                    brand_cats.setdefault(bname, set()).add(str(c))
+    brand_counts = Counter()
+    brand_cats: dict[str, set[str]] = {}
+    for d in coll.find({"item_status": "NORMAL"}, {"brand": 1, "cat_name": 1}).limit(10000):
+        b = d.get("brand", "")
+        if isinstance(b, dict):
+            bname = (b.get("original_brand_name", "") or "").strip()
+        else:
+            bname = str(b).strip() if b else ""
+        c = d.get("cat_name", "")
+        if bname:
+            brand_counts[bname] += 1
+            if c:
+                brand_cats.setdefault(bname, set()).add(str(c))
 
-        # สร้าง list
-        all_brands = [
-            {
-                "name": bname,
-                "count": count,
-                "categories": sorted(brand_cats.get(bname, set())),
-            }
-            for bname, count in brand_counts.most_common()
-        ]
-
-        # filter by search
-        if search:
-            search_low = search.lower().strip()
-            all_brands = [b for b in all_brands if search_low in b["name"].lower()]
-
-        total = len(all_brands)
-        total_pages = max(1, (total + per_page - 1) // per_page)
-        page = max(1, min(page, total_pages))
-        start = (page - 1) * per_page
-        end = start + per_page
-        page_brands = all_brands[start:end]
-
-        return {
-            "brands": page_brands,
-            "total": total,
-            "page": page,
-            "per_page": per_page,
-            "total_pages": total_pages,
+    # สร้าง list
+    all_brands = [
+        {
+            "name": bname,
+            "count": count,
+            "categories": sorted(brand_cats.get(bname, set())),
         }
-    finally:
-        client.close()
+        for bname, count in brand_counts.most_common()
+    ]
+
+    # filter by search
+    if search:
+        search_low = search.lower().strip()
+        all_brands = [b for b in all_brands if search_low in b["name"].lower()]
+
+    total = len(all_brands)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_brands = all_brands[start:end]
+
+    return {
+        "brands": page_brands,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+    }
 
 
 # tag ที่ Shopee/Zaapi แนบมาเมื่อลูกค้าแชร์การ์ดสินค้าในแชท เช่น "🛍️ [สินค้า: 43360743407]"

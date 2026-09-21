@@ -346,9 +346,10 @@ listing path:
 | `ChatRequest` | pydantic: request | ดู §5.0 | — | — | chat() | schema + defaults | — |
 | `ChatResponse` | pydantic: response | ดู §5.0 | — | guards.check_output | chat() | `model_post_init` → observe-only guard log | log stderr |
 | `FeedbackRequest` | pydantic: feedback | answer, rating | — | — | feedback() | schema | — |
-| `_db` | product DB handle | — | (client, db) | product_store.get_client | routes, _chat_impl, chat_v2._build_context | cached client → `db[MONGO_DB]` | — |
+| `_db` | product DB handle | — | (client, db) | product_store.get_client | routes, _chat_impl, chat_v2._build_context | **shared singleton — ห้าม close() ใน handler** (issue #17) | — |
+| `_shutdown_db_clients` | `app.on_event("shutdown")` | — | — | get_client().close, _build_admin_client().close | FastAPI shutdown | ปิด singleton ตอน process จบเท่านั้น | — |
 | `_get_post_handoff_exceptions` | shops ยกเว้น post-handoff silence | shop, platform | list[str] | admin DB `shop_settings` | warranty post-handoff path | อ่าน config ต่อร้าน | DB read; error→[] |
-| `health` | `GET /health` | — | dict | _db, product_store counts | HTTP | ping + counts | error→dict fail |
+| `health` | `GET /health` | — | dict | _db, product_store counts | HTTP | ping + counts; **ไม่ close client** | error→dict fail |
 | `index` | `GET /` | — | HTMLResponse | static/index.html | HTTP | serve info page | — |
 | `shops` | `GET /shops` | — | list | _db, product_store.list_shops | HTTP | distinct shopname | — |
 | `categories` | `GET /categories` | — | list | _db, product_store.list_categories | HTTP | distinct cat | — |

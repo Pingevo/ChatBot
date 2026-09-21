@@ -286,6 +286,13 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 
 ## ผ่านแล้ว (file 2)
 
+### ✅ 2026-09-21 — Add commit-approval rule + retrieval plan anti-bloat notes
+
+- **ทำไม:** user ต้องการกฎชัดเจนว่า agent ห้าม commit เองตอนจบ phase และต้องลดโอกาสที่ legacy retrieval plan จะทำให้ `app.py`/pipeline บวม
+- **วิธีแก้:** `AGENTS.md` เพิ่มกฎ comment/docstring สั้น และเพิ่มข้อ 10 "กฎการ commit" ว่าต้องสรุป diff/test/ไฟล์ที่เปลี่ยนแล้วถาม user ก่อน commit ทุกครั้ง; `docs/plans/2026-09-21-legacy-retrieval-redesign-plan.md` เพิ่ม no-commit-without-approval, anti-bloat, comment constraints; `docs/plans/2026-09-21-legacy-retrieval-redesign.md` เพิ่ม Code Size And Comment Policy
+- **verify:** `rg` พบกฎ commit/comment ในไฟล์เป้าหมายครบ; `git status --short` ยืนยันเป็น working tree เท่านั้น ยังไม่ได้ commit
+- **ผลกระทบ:** doc-only; ไม่แตะ runtime code และไม่ต้องอัปเดต `docs/SRS_SSD.md`
+
 ### ✅ 2026-09-21 — rewrite docs/schema.md ตามโครงสร้างจริง (doc-only, ไม่แตะโค้ด)
 
 - **งาน (user สั่ง):** อ่าน schema.md เดิม → เขียนอัปเดตว่าโครงสร้างตอนนี้เป็นยังไง ใครใช้ collection ไหนบ้าง
@@ -657,3 +664,11 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **verify:** unit 15/15 (PB100 ✓ / LPB100 ✗ / PB1000 ✗ / PB100S ✗ / PB 100 ✓ / EC 4↔EC4 ✓ / ไทยติดกัน ✓) · live :8030 — "PB100 มีไหม"→cards PB100 จริง+anchor ถูก, "รุ่นนี้"→CONV-ACTIVE reuse anchor ตอบตาม listing เดิม, "LPB100"→LPB100 listings · Mongo regex ทดสอบตรง: คืนเฉพาะ listing ที่มี PB100 standalone · regression guards ✓ qtype 27/27 parity 42/42 car_charger 16/16
 - **ผลกระทบเคสอื่น:** query "LPB100" เดิมอาจ match PB100-only listing → ตอนนี้ได้ LPB100 จริง; pure-alpha/pure-digit tokens ไม่เปลี่ยน; typo-fuzzy prefix (biokoopp→biokoop) คงเดิมใน non-digit branch
 - **เหลือ:** Plan A KB data gaps (รอตัดสินใจ) · BUG-I token bloat
+
+### ✅ 2026-09-22 — Issue #17 (critical): /health ปิด shared MongoClient → /chat 500 สุ่มทุก 30 วิ
+
+- **error:** `InvalidOperation: Cannot use MongoClient after close` → `POST /chat` 500 สุ่ม — production วัด 9 ครั้ง/ชม., 10% ของแชททดสอบล้ม
+- **root cause:** `_db()` คืน singleton client จาก `get_client()` แต่ 5 จุดเรียก `client.close()` — /health (docker healthcheck ทุก 30 วิ = ตัวหลัก), /shops, /categories, /brands, `chat_v2()` finally — ปิด client กลาง request อื่นที่ถือ `db` อยู่ · docstring `_db()` โกหกว่า "stateless เปิดใหม่ทุกครั้ง" → บักกลับมารอบ 2
+- **fix:** ลบ `client.close()` ทั้ง 5 จุด (try/finally ที่มีแค่เพื่อ close ถูกยุบ+dedent) · เพิ่ม `@app.on_event("shutdown")` `_shutdown_db_clients()` ปิดทั้ง product + admin singletons ตอน process จบเท่านั้น · แก้ docstring `_db()`/`get_client()` เตือนห้าม close
+- **verify:** live :8030 — /health ×3 + /shops(auth) ×2 คั่นกลาง /chat → ทุก request 200, "Cannot use MongoClient after close" = 0 · py_compile ครบ
+- **ผลกระทบเคสอื่น:** export_mongo.py (script แยก client เอง) ไม่แตะ · chat_v2 `_build_context` ยังคืน client เดิมใน tuple (ไม่มีใคร close แล้ว) · connection อยู่จน process shutdown — พฤติกรรมที่ถูกของ singleton

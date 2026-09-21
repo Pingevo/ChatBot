@@ -200,6 +200,9 @@ def build_connection_string() -> str:
 _cached_client: MongoClient | None = None
 
 def get_client() -> MongoClient:
+    """คืน shared MongoClient singleton — ⚠️ ห้าม close() บนตัวนี้ใน request handler
+    (ทุก request ใช้ร่วมกัน; close ทำให้ request อื่นพัง — issue #17).
+    ปิดเฉพาะตอน process shutdown (app.py shutdown handler)."""
     global _cached_client
     if _cached_client is not None:
         try:
