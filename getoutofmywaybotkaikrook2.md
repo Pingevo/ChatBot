@@ -607,3 +607,12 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **T14 (NEW-9 bot_elapsed_ms):** เจอ bug จริง = **unit mismatch** — `/chat` คืน `elapsed` เป็นวินาที แต่เขียนลง `bot_elapsed_ms` ดิบๆ (shadowReplyService ×2, botWorkerService, test-assignment ×2) → 4.2s แสดง "4.2ms" → ดูเหมือน 0/พัง; `bot_tokens` เก็บ usage ครบอยู่แล้ว (BUG-I ok) — **รออนุญาตแก้ (×1000 ที่ write sites หรือแปลงตอน display)**
 - **T15 (price prohibition):** prompt มีครบ (llm.py:198-200/504-506/535/546/1518 "ห้ามบอกราคาทุกกรณี") → leak ถ้ามี = LLM non-compliance ไม่ใช่ missing prompt — ไม่ต้องแก้
 - **T16:** เพิ่ม `misinterpret_monitor` 4 เคสเข้า corpus generator (ย่อ=สรุปสั้น / ปิด AOD) — corpus regen 304 ข้อ
+
+### ✅ 2026-09-21 — NEW-9 fix: bot_elapsed unit mismatch (seconds→ms)
+
+- **error:** `bot_elapsed_ms`/`bot_elapsed` แสดง "4.2ms" ทั้งที่จริง 4.2 วินาที — ดูเหมือน elapsed=0/พัง
+- **root cause:** `/chat` คืน `elapsed` เป็น**วินาที** แต่ write sites เก็บดิบลง field ที่ชื่อ/แสดงเป็น **ms**
+- **fix:** `Math.round(elapsed * 1000)` (คง `undefined` เมื่อไม่มี elapsed — ไม่เขียน 0 ซ้ำอาการเดิม) ที่ 9 sites / 4 ไฟล์: `shadowReplyService.ts` ×2, `botWorkerService.ts`, `liveAssignmentService.ts` ×4, `test-assignment/route.ts` ×2
+- **ไม่แตะ:** bot python (`elapsed` วินาทีถูกตาม schema) + display logic (อ่านเป็น ms ถูกแล้ว)
+- **doc เก่าใน DB** ยังเป็นวินาที (โชว์เล็กผิดหน่วย) — ไม่ได้ backfill (test/shadow data; ถ้าต้องการให้บอก)
+- **verify:** `npx tsc --noEmit` clean · grep ไม่เหลือ write site ดิบ

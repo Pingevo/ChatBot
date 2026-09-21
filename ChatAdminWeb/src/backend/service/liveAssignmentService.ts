@@ -687,7 +687,7 @@ export async function closeChat(opts: {
           bot_reply: botResp.answer,
           bot_source: botResp.source,
           bot_model: botResp.model,
-          bot_elapsed: botResp.elapsed,
+          bot_elapsed: botResp.elapsed != null ? Math.round(botResp.elapsed * 1000) : undefined,  // วินาที → ms (UI แสดงเป็น ms)
           chat_engine: botResp.chat_engine || "legacy",
           bot_products: (botResp.products as { item_id: string; name: string; price?: number; image?: string; url?: string }[]) || [],
           bot_intent: botResp.intent,
@@ -716,7 +716,7 @@ export async function closeChat(opts: {
         bot_reply: botResp.answer,
         bot_source: botResp.source,
         bot_model: botResp.model,
-        bot_elapsed: botResp.elapsed,
+        bot_elapsed: botResp.elapsed != null ? Math.round(botResp.elapsed * 1000) : undefined,  // วินาที → ms (UI แสดงเป็น ms)
         chat_engine: botResp.chat_engine || "legacy",
         bot_products: (botResp.products as { item_id: string; name: string; price?: number; image?: string; url?: string }[]) || [],
         bot_intent: botResp.intent,
@@ -1048,7 +1048,7 @@ export async function batchReplay(opts: {
               bot_reply: botResp.answer,
               bot_source: botResp.source,
               bot_model: botResp.model,
-              bot_elapsed: botResp.elapsed,
+              bot_elapsed: botResp.elapsed != null ? Math.round(botResp.elapsed * 1000) : undefined,  // วินาที → ms (UI แสดงเป็น ms)
               chat_engine: botResp.chat_engine || "legacy",
               bot_products: (botResp.products as { item_id: string; name: string; price?: number; image?: string; url?: string }[]) || [],
               bot_intent: botResp.intent,
@@ -1075,7 +1075,7 @@ export async function batchReplay(opts: {
             bot_reply: botResp.answer,
             bot_source: botResp.source,
             bot_model: botResp.model,
-            bot_elapsed: botResp.elapsed,
+            bot_elapsed: botResp.elapsed != null ? Math.round(botResp.elapsed * 1000) : undefined,  // วินาที → ms (UI แสดงเป็น ms)
             chat_engine: botResp.chat_engine || "legacy",
             bot_products: (botResp.products as { item_id: string; name: string; price?: number; image?: string; url?: string }[]) || [],
             bot_intent: botResp.intent,

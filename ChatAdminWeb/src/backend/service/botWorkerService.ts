@@ -113,7 +113,7 @@ async function storeBotReply(opts: {
     bot_reply_text: opts.botResp.answer,
     bot_source: opts.botResp.source,
     bot_model: opts.botResp.model,
-    bot_elapsed_ms: opts.botResp.elapsed,
+    bot_elapsed_ms: opts.botResp.elapsed != null ? Math.round(opts.botResp.elapsed * 1000) : undefined,  // bot คืนเป็นวินาที → ms
     bot_tokens: opts.botResp.usage,
     bot_cost_usd: opts.botResp.cost,
     bot_cost_thb: opts.botResp.cost ? opts.botResp.cost * 36 : undefined,

@@ -301,7 +301,7 @@ export async function generateShadowReply(opts: {
     bot_reply_text: botResp.answer,
     bot_source: botResp.source,
     bot_model: botResp.model,
-    bot_elapsed_ms: botResp.elapsed,
+    bot_elapsed_ms: botResp.elapsed != null ? Math.round(botResp.elapsed * 1000) : undefined,  // bot คืนเป็นวินาที → เก็บเป็น ms ให้ตรงชื่อ field
     bot_tokens: botResp.usage,
     bot_cost_usd: botResp.cost,
     bot_cost_thb: botResp.cost ? botResp.cost * 36 : undefined,  // USD × 36 = THB (ประมาณ)
@@ -475,7 +475,7 @@ export async function generateConversationShadowReplies(opts: {
       bot_reply_text: botResp.answer,
       bot_source: botResp.source,
       bot_model: botResp.model,
-      bot_elapsed_ms: botResp.elapsed,
+      bot_elapsed_ms: botResp.elapsed != null ? Math.round(botResp.elapsed * 1000) : undefined,  // bot คืนเป็นวินาที → ms
       bot_tokens: botResp.usage,
       bot_cost_usd: botResp.cost,
       bot_cost_thb: botResp.cost ? botResp.cost * 36 : undefined,
