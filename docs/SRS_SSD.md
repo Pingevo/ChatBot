@@ -378,7 +378,7 @@ listing path:
 |---|---|---|---|---|---|---|---|
 | `_gemini_cost` | cost USD | prompt_tokens, output_tokens | float | `_GEMINI_COST_PER_M` | _record_tokens, callers | rate/1M | — |
 | `_error_reply` | ข้อความ error สุภาพ | exc, where | str | — | answer paths | mask exception เป็นข้อความกลาง | — |
-| `_strip_kb_markup` | ลบ markup KB | text | str | regex | KB paths | strip `[[ ]]`, `*** ***`; markdown table แถว `| a | b |` → `• a: b · c: d` (Shopee render ตารางไม่ได้); collapse space กลางประโยค ("ทางร้าน จะ"→"ทางร้านจะ") | — |
+| `_strip_kb_markup` | ลบ markup KB | text | str | regex | KB paths | strip `[[ ]]`, `*** ***`; markdown table แถว `| a | b |` → `• a: b · c: d` (Shopee render ตารางไม่ได้); collapse space กลางประโยค ("ทางร้าน จะ"→"ทางร้านจะ"); normalize run ของ pipe ≥2 (`||`/`||||`) → ` ||| ` (issue #19 — กัน LLM พิมพ์ตัวคั่น bubble ผิด) | — |
 | `_lang_instruction` | กฎภาษา | message | str | — | answer builders | ไทยเสมอ เว้นขอภาษาอื่น→อังกฤษ | — |
 | `_load_api_keys` | โหลด keys | env | list[str] | os.environ | module init | `GEMINI_API_KEY_1..9` + single | — |
 | `get_llm_config` | runtime config | — | dict | admin mongo `system_configs` (`llm_config` doc) | getters ทั้งหมด | TTL 10s + `max_time_ms` 1500 + fail-stale | DB read; miss→env fallback |

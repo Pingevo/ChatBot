@@ -116,6 +116,9 @@ def _strip_kb_markup(text: str) -> str:
     )
     # ⚡ BUG-M — post-check คำอ้างเท็จ "แอดมินมาแล้ว/รับเรื่องแล้ว" ย้ายไป guards.enforce
     #   (ชั้น boundary ที่ escalate จริง ไม่ใช่แค่แก้ข้อความ — RC-A)
+    # ⚡ issue #19 — normalize bubble delimiter: LLM พิมพ์ `||`/`||||` แทน `|||` เป็นครั้งคราว
+    #   → split_segments พลาด การ์ดติดฟองข้อความ; บังคับ run ของ pipe ≥2 → ` ||| `
+    text = re.sub(r"\s*\|{2,}\s*", " ||| ", text)
     return text.strip()
 
 
