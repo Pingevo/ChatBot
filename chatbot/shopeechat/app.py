@@ -765,6 +765,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 print(f"[VISION-TEXT-URL] พบ image URL ใน text: {len(_text_img_urls)} รูป → ส่ง vision", file=sys.stderr)
         print(f"[VISION-DBG] req.images={req.images} history_imgs={[h.get('images') for h in (history or [])[-2:]]} urls_to_read={_urls_to_read}", file=sys.stderr)
 
+        _new_desc = ""
         if _urls_to_read:
             try:
                 from . import llm as _llm_vision
@@ -801,6 +802,20 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             _image_desc_out = _new_desc if _urls_to_read and _new_desc else ""
             if not _urls_to_read:
                 print(f"[VISION-PASS] ใช้ image_desc จาก history ({len(_vision_desc_parts)} desc) → {_all_desc[:80]!r}", file=sys.stderr)
+
+        # ⚡ NEW-10 — ลูกค้าส่งรูปมาแต่ vision อ่านไม่ได้ (error/desc ว่าง)
+        #   → inject failure note เข้า context ไม่งั้น LLM เดาว่าไม่มีรูป
+        #   หรือแต่งว่าเห็นรูป (QA: รูปจอเขียว แต่ตอบ "หน้าจอสวยคมชัด")
+        #   (append หลัง merge — history desc เก่าถ้ามี ยังอยู่ครบ)
+        if _urls_to_read and not _new_desc:
+            _vision_context += (
+                "=== รูปที่อ่านไม่สำเร็จ ===\n"
+                f"ลูกค้าส่งรูปมาใหม่ {len(_urls_to_read)} รูป แต่ระบบอ่านรูปไม่ได้ในรอบนี้\n"
+                "⚠️ สำคัญ: ห้ามเดาหรือแต่งว่าเห็นเนื้อหาในรูปเหล่านี้เด็ดขาด — "
+                "ให้ตอบรับว่าได้รับรูปแล้วแต่อ่านรูปไม่ได้ชั่วคราว "
+                "ขอให้ลูกค้าส่งรูปใหม่อีกครั้ง หรือพิมพ์อธิบายเป็นข้อความแทนได้เลย\n"
+            )
+            print(f"[VISION-PASS] FAIL: {len(_urls_to_read)} รูป อ่านไม่ได้ → inject failure context", file=sys.stderr)
 
         # ⚡ record vision step (input/output ครบ)
         _vision_model = os.environ.get("GEMINI_VISION_MODEL", "gemini-3.1-flash-lite")
