@@ -449,6 +449,11 @@ def _search_kb_single(message: str, limit: int = 5) -> list[dict[str, Any]]:
         )
     )
 
+    # ⚡ bounded model match — "PB100" ต้องไม่ match KB doc model="LPB100"
+    #   (substring เดิมทำ model-scoped KB ข้ามรุ่นได้) — lazy import กัน circular
+    #   helper ครอบเคส non-code ด้วย (nospace substring ⊇ เช็คเดิม 2 แบบ)
+    from . import product_store as _ps
+
     keywords_lower = [k.lower() for k in keywords]
     # สร้าง version ที่ลบ whitespace ออก (สำหรับ match แบบไม่สนใจวรรค)
     keywords_nospace = [re.sub(r"\s+", "", k) for k in keywords_lower]
@@ -458,30 +463,26 @@ def _search_kb_single(message: str, limit: int = 5) -> list[dict[str, Any]]:
         model_str = (doc.get("model") or "").lower().strip()
         brand_str = (doc.get("brand") or "").lower().strip()
         combined = f"{brand_str} {model_str}"
-        combined_nospace = re.sub(r"\s+", "", combined)
         model_nospace = re.sub(r"\s+", "", model_str)
 
-        # ทุก keyword ต้องอยู่ใน combined (brand + model)
-        # เช็คทั้งแบบมีวรรคและไม่มีวรรค
+        # ทุก keyword ต้องอยู่ใน combined (brand + model) — bounded
         all_in_combined = all(
-            kl in combined or kn in combined_nospace
-            for kl, kn in zip(keywords_lower, keywords_nospace)
+            _ps._model_token_in_name(combined, k) for k in keywords
         )
         if not all_in_combined:
             continue
 
-        # อย่างน้อย 1 keyword ต้องอยู่ใน model (ไม่ใช่แค่ brand)
+        # อย่างน้อย 1 keyword ต้องอยู่ใน model (ไม่ใช่แค่ brand) — bounded
         any_in_model = any(
-            kl in model_str or kn in model_nospace
-            for kl, kn in zip(keywords_lower, keywords_nospace)
+            _ps._model_token_in_name(model_str, k) for k in keywords
         )
         if not any_in_model:
             continue
 
         # scoring: keyword ที่อยู่ใน model ได้คะแนนสูงกว่า brand
         score = 0
-        for kl, kn in zip(keywords_lower, keywords_nospace):
-            if kl in model_str or kn in model_nospace:
+        for kl, k in zip(keywords_lower, keywords):
+            if _ps._model_token_in_name(model_str, k):
                 score += 2
             elif kl in brand_str:
                 score += 1

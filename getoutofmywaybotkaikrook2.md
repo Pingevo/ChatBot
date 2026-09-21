@@ -20,6 +20,12 @@
 
 ## กำลังทำ (active)
 
+### 🔄 กำลังทำ — Legacy Shopee retrieval redesign master plan (2026-09-21)
+
+- **งาน:** ออกแบบและเขียนแผนงานใหม่สำหรับ legacy Shopee chatbot เท่านั้น — ลด hardcode, รวม unit+legacy เป็น candidate pipeline เดียว, ทำ retrieval profile/ranker กลาง, ต่อจาก Plan 1 rev 1.2 โดยไม่แก้โค้ด runtime ตอนนี้
+- **ขอบเขต:** อ่านภาพรวม shopeechat + Plan 1 + retrieval-hybrid-rerank plan แล้วสร้างเอกสาร design/implementation plan ใน `docs/plans/`; ยังไม่แตะ product code
+- **เงื่อนไข:** ห้ามสนใจ v2/v3 · ห้ามอ่าน `.env` · ห้าม revert uncommitted changes เดิม · ต้องเสนอเป็น staged plan ที่เริ่มจาก measurement/gold gate ก่อน runtime refactor
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)
@@ -635,3 +641,19 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **verify:** py_compile ครบ · unit probe 19/19 (stock/model/polarity/general-grounding/negation/history-grounded) · live :8030 — anger→customer_frustration, คำถามไม่หลุด, รูป 404 → "ภาพเปิดดูไม่ได้ ส่งใหม่", shipping → ตอบรายละเอียดจริง · regression: guards ✓ qtype 27/27 parity 42/42 car_charger 16/16
 - **ผลกระทบเคสอื่น:** anger ชนะ claim path (ตั้งใจ — ลูกค้าโกรธได้คนทันที) · stock_claim แตะเฉพาะ answer ที่ claim stock ชัด (negation ผ่าน) · model_claim ไม่แตะ token ที่อยู่ใน context · rules re-scan ≤4 รอบกัน multi-clause claim · general: ที่ไม่มี grounding_text ยัง skip เหมือนเดิม
 - **ยังเหลือ (ต้องทำต่อถ้าจะเอา):** BUG-I token bloat (measurement มีแล้ว แต่ยังไม่มี cap/trim) · KB data gaps (มอก.ต่อร้าน/ชื่อแอพ/ศูนย์ — เป็น data ไม่ใช่โค้ด) · anchor swap PB100→LPB100 ระดับ retrieval (model_claim กันเฉพาะชื่อที่ไม่อยู่ใน context)
+
+### ✅ 2026-09-22 — Plan B: anchor/retrieval swap (PB100→LPB100) — bounded model matching
+
+- **error:** ลูกค้าถาม "PB100" → cards/anchor/ตอบ เป็น "PB100P"/"LPB100" (รุ่นใกล้) — QA NEW-6 residual
+- **root cause (3 ชั้นซ้อน):**
+  1. substring match `token in name` — "pb100" ⊂ "lpb100"/"pb100p" → exact-match/diversity bucket/TEXT-ANCHOR/anchor resolve ผิดรุ่น
+  2. Mongo regex `alpha.?rest` (เช่น `PB.?100`) unbounded ทั้งสองปลาย + `re.escape(token)` ดิบใน Direct-regex — match PB100P/LPB100 แล้ว `insert(0)` ดันขึ้นหน้า list
+  3. `_extract_model_tokens` คืน [] เมื่อ query มีรุ่นเดียว → vector path ข้ามทั้ง regex-augmentation และ diversity → listing ที่มี "PB100" จริงไม่เคยเข้า candidate set (top_k ตัดทิ้ง)
+- **fix:** helper เดียว `product_store._model_token_in_name(name, token)` + `_model_token_regex_str(token)` — token ที่มี letter+digit (model code) match แบบ bounded `(?<![A-Za-z0-9])T\s*O\s*K\s*E\s*N(?![A-Za-z0-9])` (space-insensitive "EC 4"↔"EC4", กัน prefix/suffix); token alpha-ล้วน/digit-ล้วน คง substring เดิม (brand/device names)
+  - ใช้ร่วมกัน: `product_store` (exact-match promotion, `_doc_matches_model`/diversity, vector augment+promotion), `conversation_products.resolve_active_by_message`, `knowledge_base._search_kb_single` (KB model scope), `app.py` ×5 (KB-MODEL-REGEX, MODEL-REGEX, Direct-regex, image-anchor regex, TEXT-ANCHOR, part-flow, kb_missing, comp-ref filter)
+  - `_extract_model_tokens` refactor → `_raw_model_tokens` (ทุก token) + wrapper เดิม (≥2 gate สำหรับ diversity)
+  - vector path: augment ด้วย raw tokens (รุ่นเดียวก็ดึง doc ที่ชื่อมี token จริงเข้า candidate) + promote bounded-exact หน้า list
+  - TEXT-ANCHOR scan ขยาย [:3]→[:5] (bounded match ทำให้ listing จริงที่อันดับ 4 ยัง anchor ได้)
+- **verify:** unit 15/15 (PB100 ✓ / LPB100 ✗ / PB1000 ✗ / PB100S ✗ / PB 100 ✓ / EC 4↔EC4 ✓ / ไทยติดกัน ✓) · live :8030 — "PB100 มีไหม"→cards PB100 จริง+anchor ถูก, "รุ่นนี้"→CONV-ACTIVE reuse anchor ตอบตาม listing เดิม, "LPB100"→LPB100 listings · Mongo regex ทดสอบตรง: คืนเฉพาะ listing ที่มี PB100 standalone · regression guards ✓ qtype 27/27 parity 42/42 car_charger 16/16
+- **ผลกระทบเคสอื่น:** query "LPB100" เดิมอาจ match PB100-only listing → ตอนนี้ได้ LPB100 จริง; pure-alpha/pure-digit tokens ไม่เปลี่ยน; typo-fuzzy prefix (biokoopp→biokoop) คงเดิมใน non-digit branch
+- **เหลือ:** Plan A KB data gaps (รอตัดสินใจ) · BUG-I token bloat

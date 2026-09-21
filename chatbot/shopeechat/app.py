@@ -1048,11 +1048,10 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     _ikw_l = _ikw.lower()
                     if len(_ikw_l) < 4:
                         continue
-                    _ialpha = re.match(r"[A-Za-z]+", _ikw_l)
-                    _irest = _ikw_l[len(_ialpha.group(0)):] if _ialpha else ""
+                    # bounded model code — "PB100" จาก image desc ไม่ match "PB100P"/"LPB100"
                     _ipat = (
-                        re.escape(_ialpha.group(0)) + r".?" + re.escape(_irest)
-                        if _ialpha and _irest
+                        product_store._model_token_regex_str(_ikw_l)
+                        if re.search(r"\d", _ikw_l)
                         else re.escape(_ikw_l[:6])
                     )
                     _ifilter = {
@@ -1580,7 +1579,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         _part_model_kws = knowledge_base.extract_model_keywords(req.message)
                         _part_model_kws = [k for k in _part_model_kws if not knowledge_base.is_target_device_kw(k)]
                         _kw_is_anchor = any(
-                            kw.lower() in _part_cur_name
+                            product_store._model_token_in_name(_part_cur_name, kw)
                             for kw in _part_model_kws
                             if re.search(r"\d", kw)  # model code pattern only
                         )
@@ -1856,11 +1855,14 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 # ถ้า KB เจอแบรนด์แต่ไม่ตรงรุ่น (เช่น ถาม "ks3" แต่ KB มีแค่ Elite2/Actor)
                 # ต้องค้น Mongo ด้วยคำถามเดิมด้วย เพื่อหาสินค้าที่มีใน Mongo แต่ไม่มีใน KB
                 user_model_tokens = knowledge_base.extract_model_keywords(req.message)
-                kb_model_text = " ".join(kb_models).lower()
                 kb_missing_model = False
                 if user_model_tokens:
                     # ถ้ามี model token ที่ไม่อยู่ใน KB docs เลย → KB ไม่มีรุ่นนี้
-                    missing = [t for t in user_model_tokens if t.lower() not in kb_model_text]
+                    #   (bounded match per model name — "PB100"≄"LPB100"; เช็คทีละชื่อ
+                    #   ไม่ใช่ joined text เพราะ nospace จะกลืน boundary ระหว่างรุ่น)
+                    missing = [t for t in user_model_tokens
+                               if not any(product_store._model_token_in_name(m, t)
+                                          for m in kb_models)]
                     if missing:
                         kb_missing_model = True
                         print(f"[KB] model tokens ไม่มีใน KB: {missing}  → ค้น Mongo เพิ่มด้วยคำถามเดิม", file=sys.stderr)
@@ -1891,10 +1893,10 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     _kb_kw_clean = re.sub(r"(.)\1{2,}$", r"\1", _kb_kw.lower())
                     if _kb_kw_clean != _kb_kw.lower():
                         _kb_kw = _kb_kw_clean
-                    _kb_alpha = re.match(r"[A-Za-z]+", _kb_kw).group(0)
-                    _kb_rest = _kb_kw[len(_kb_alpha):]
-                    if _kb_rest:
-                        _kb_pattern = re.escape(_kb_alpha) + r".?" + re.escape(_kb_rest)
+                    if re.search(r"\d", _kb_kw):
+                        # bounded model code — "PB100" ไม่ match "PB100P"/"LPB100"
+                        # (root cause anchor swap: pattern เดิม 'PB.?100' ไม่กัน suffix)
+                        _kb_pattern = product_store._model_token_regex_str(_kb_kw)
                     else:
                         _kb_prefix = _kb_kw[:6] if len(_kb_kw) >= 6 else _kb_kw
                         _kb_pattern = re.escape(_kb_prefix)
@@ -1992,9 +1994,9 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         # fallback: ใช้ model_short ทั้งหมด ถ้าไม่มี token ที่ผ่านเงื่อนไข
                         model_tokens = [model_short] if model_short and len(model_short) >= 3 else []
                     for token in model_tokens[:2]:
-                        # ค้นใน Mongo ด้วย regex ตรงใน item_name (word boundary)
+                        # ค้นใน Mongo ด้วย bounded regex — "PB100" ไม่ match "PB100P"/"LPB100"
                         # ⚠️ ถ้ามี shop_filter ต้องกรองเฉพาะร้านนั้น — ห้ามค้นข้ามร้าน
-                        direct_q = {"item_status": "NORMAL", "item_name": {"$regex": re.escape(token), "$options": "i"}}
+                        direct_q = {"item_status": "NORMAL", "item_name": {"$regex": product_store._model_token_regex_str(token), "$options": "i"}}
                         if req.shop:
                             direct_q["shopname"] = {"$regex": f"^{re.escape(req.shop)}$", "$options": "i"}
                         direct_docs = list(_mongo_coll.find(
@@ -2575,7 +2577,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                             _active_name = (_active_card.get("name") or _active_card.get("item_name") or "").lower()
                             if _active_name:
                                 _filtered_kw = [kw for kw in _cur_model_kw
-                                                if not (re.search(r"\d", kw) and kw.lower() in _active_name)]
+                                                if not (re.search(r"\d", kw)
+                                                        and product_store._model_token_in_name(_active_name, kw))]
                                 if len(_filtered_kw) < len(_cur_model_kw):
                                     _kw_matched_anchor = True
                                 _cur_model_kw = _filtered_kw
@@ -3323,8 +3326,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                                 # ข้ามสินค้าที่มี keyword บอกว่าเป็นชุด/แถม/หัวชาร์จ
                                 _skip_kws = ("แถมฟรี", "หัวชาร์จ", "ชุดชาร์จ", "เซ็ต", "set", "combo",
                                              "adapter", "gan", "หัวชาร์ต", "พาวเวอร์แบงค์", "powerbank")
-                                # ต้องมี model token อยู่ในชื่อ และไม่ใช่ชุด/แถม
-                                if _ref_kw in _name_lower and not any(kw in _name_lower for kw in _skip_kws):
+                                # ต้องมี model token อยู่ในชื่อ (bounded) และไม่ใช่ชุด/แถม
+                                if product_store._model_token_in_name(_name, _ref_kw) and not any(kw in _name_lower for kw in _skip_kws):
                                     _ref_docs_filtered.append(d)
                             _ref_docs = _ref_docs_filtered if _ref_docs_filtered else _ref_docs
                         for d in _ref_docs[:5]:
@@ -3372,10 +3375,9 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 # สร้าง regex pattern:
                 # - ถ้ามีตัวเลข (เช่น "Watch6") → "Watch.?6" (ยอมรับ space ระหว่างคำและตัวเลข)
                 # - ถ้าเป็นคำอังกฤษล้วน (เช่น "biokoop") → "biokoop" (case-insensitive)
-                _alpha_part = re.match(r"[A-Za-z]+", _cur_kw).group(0)
-                _rest_part = _cur_kw[len(_alpha_part):]
-                if _rest_part:  # มีตัวเลขต่อท้าย
-                    _cur_kw_pattern = re.escape(_alpha_part) + r".?" + re.escape(_rest_part)
+                if re.search(r"\d", _cur_kw):
+                    # bounded model code — "PB100" ไม่ match "PB100P"/"LPB100"
+                    _cur_kw_pattern = product_store._model_token_regex_str(_cur_kw)
                 else:  # คำอังกฤษล้วน — ใช้ prefix 6 ตัวแรกเพื่อจัดการคำผิด
                     _prefix = _cur_kw[:6] if len(_cur_kw) >= 6 else _cur_kw
                     _cur_kw_pattern = re.escape(_prefix)
@@ -4146,9 +4148,9 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         if kb_comp and kb_comp.get("found"):
                             for kd in kb_comp.get("kb_docs", []):
                                 model = (kd.get("model") or "").lower()
-                                # เช็คว่า model ตรงกับ missing token ไหม
+                                # เช็คว่า model ตรงกับ missing token ไหม (bounded)
                                 for mt in missing_tokens:
-                                    if mt.lower() in model and mt.lower() not in seen_tokens:
+                                    if product_store._model_token_in_name(model, mt) and mt.lower() not in seen_tokens:
                                         card = knowledge_base._kb_doc_to_card(kd)
                                         card["_kb_only"] = True
                                         card["_source"] = "kb"
@@ -4731,18 +4733,21 @@ def _record_suggestion_products(req, products: list[dict]) -> None:
                          if not _kb_anchor.is_target_device_kw(kw)]
 
         # หาสินค้าตัวแรกที่ชื่อมี model keyword ของลูกค้า → anchor
+        #   scan 5 ตัวแรก (ตรงกับ record loop) — bounded match ทำให้ listing จริง
+        #   ที่ไม่ได้อยู่อันดับแรก (เช่น "PB100 / PB100S / LPB100" อันดับ 4) ยัง anchor ได้
         _anchor_item_id = None
         if _msg_model_kws:
-            for p in products[:3]:
-                _name_lower = (p.get("name") or "").lower()
+            for p in products[:5]:
+                _p_name = p.get("name") or ""
                 _p_item_id = p.get("item_id")
                 if not _p_item_id:
                     continue
                 for kw in _msg_model_kws:
-                    if kw.lower() in _name_lower:
+                    # bounded match — "PB100" ต้องไม่ไป anchor "PB100S"/"LPB100"
+                    if product_store._model_token_in_name(_p_name, kw):
                         _anchor_item_id = _p_item_id
                         print(f"[TEXT-ANCHOR] ลูกค้าพิมพ์ '{kw}' ตรงกับสินค้า "
-                              f"'{(p.get('name') or '')[:40]}' → anchor", file=sys.stderr)
+                              f"'{_p_name[:40]}' → anchor", file=sys.stderr)
                         break
                 if _anchor_item_id:
                     break  # ใช้แค่ตัวแรกที่ match (สินค้าที่เกี่ยวข้องที่สุดจาก RAG)

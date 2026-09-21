@@ -439,8 +439,11 @@ listing path:
 | `_get_recency_score` | recency | doc | float | date fields | _rerank_by_promo_latest | — | — |
 | `_is_bundle_product` | bundle detect | doc | bool | kw/fields | ranking | — | — |
 | `_rerank_by_promo_latest` | promo+recency sort | docs | docs | above | fetch_products | — | — |
-| `_extract_model_tokens` | model codes | message | list[str] | regex | fetch, rerank | alnum ≥4 | — |
-| `_doc_matches_model` | doc↔token match | doc, model_token | bool | boundary match | fetch_products | — | — |
+| `_extract_model_tokens` | model codes | message | list[str] | _raw_model_tokens + collapse | fetch, rerank | ≥2 tokens only | — |
+| `_raw_model_tokens` | model codes (all) | message | list[str] | regex | _extract_model_tokens, vector augment/promote | ทุก token รวมรุ่นเดียว | — |
+| `_model_token_regex_str` | bounded pattern | token | str (PCRE) | escape + \s* + lookaround | _model_token_in_name, app.py regex paths | space-insensitive + alnum boundary | — |
+| `_model_token_in_name` | bounded match | name, token | bool | _model_token_regex_str / nospace substr | fetch_products, conversation_products, app.py, knowledge_base | code→bounded; pure alpha/digit→substring เดิม | — |
+| `_doc_matches_model` | doc↔token match | doc, model_token | bool | _model_token_in_name | fetch_products | — | — |
 | `_rerank_with_diversity` | spread results | docs | docs | — | fetch_products | กระจาย shop/brand | — |
 | `_filter_false_positives` | กรองตัวหลอก | docs, types | docs | type regexes | fetch_products | python-side verify หลัง mongo | — |
 | `fetch_products` | **main retrieval** | db, message, shop_filter, limit, desc_message, is_compat_check, skip_charger_subtype, product_types_override, charger_subtype_override, filter_unavailable | list[card] | units.fetch_unit_cards (flag), vector_search, build_query, _filter_*, _rerank_*, _dedupe_products, to_product_card | _chat_impl, chat_v2, product_match | §5.2 fetch path — compat bypass unit pool; empty/error→fallback | mongo reads; error→[] |
