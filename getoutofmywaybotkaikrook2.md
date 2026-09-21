@@ -20,6 +20,8 @@
 
 ## กำลังทำ (active)
 
+### ✅ GitHub issue #19: LLM พิมพ์ `||` แทน `|||` → การ์ดสินค้าติดในฟองข้อความ (2026-09-21) — fixed + verified → ย้ายไป "ผ่านแล้ว"
+
 ### 🔄 กำลังทำ — Legacy Shopee retrieval redesign master plan (2026-09-21)
 
 - **งาน:** ออกแบบและเขียนแผนงานใหม่สำหรับ legacy Shopee chatbot เท่านั้น — ลด hardcode, รวม unit+legacy เป็น candidate pipeline เดียว, ทำ retrieval profile/ranker กลาง, ต่อจาก Plan 1 rev 1.2 โดยไม่แก้โค้ด runtime ตอนนี้
@@ -285,6 +287,15 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 ---
 
 ## ผ่านแล้ว (file 2)
+
+### ✅ 2026-09-21 — issue #19: `||` แทน `|||` → การ์ดติดฟองข้อความ
+
+- **error:** LLM พิมพ์ตัวคั่น `||` (2 ขีด) แทน `|||` → `split_segments` พลาด → markdown การ์ดสินค้าหลุดในฟองข้อความ (1/40 sim chats)
+- **เกิดเพราะ:** กติกา `|||` มีแค่ใน prompt ไม่มี post-processing บังคับ
+- **แก้ด้วย:** `llm._strip_kb_markup` (llm.py ท้ายฟังก์ชัน ก่อน return) +`re.sub(r"\s*\|{2,}\s*", " ||| ", text)` — funnel เดียวครอบทุก LLM answer (answer/answer_general/answer_with_kb, web_search.reanswer→llm.answer, `_append_base_warranty`) ทั้ง 3 engines; จับ `||`/`||||`+ ด้วย (กว้างกว่าที่ issue เสนอ — `||||` เดิม split แล้วเหลือ `|` ติดหัว segment)
+- **verify:** py_compile ✅ · assert 7 เคส (`||`→split ถูก, `|||` unchanged, `||||`→clean, no-pipe ไม่แตะ, table→bullet ปกติ, pipe เดี่ยวไม่แตะ, `||` มี space รอบ) ✅ · test_qa_batch_20260911 13/17 — 4 fail = BUG-M stale tests pre-existing บน HEAD เหมือนกัน (false-admin replacement ย้ายไป guards.enforce ตั้งแต่ T4) ไม่ใช่ regression · SRS_SSD §6.2 อัปเดตแล้ว
+- **ผลกระทบเคสอื่น:** deterministic answers (handoffs/warranty/order_flow) ไม่ผ่านฟังก์ชันนี้ ไม่เปลี่ยน; frontend split `|||`+trim ใช้ ` ||| ` ได้ปกติ; table converter รันก่อน ไม่ชน
+- **หมายเหตุ:** `docs/issue-bot-segment-separator-2026-09-21.md` + `docs/test/sim_customer.py`/`sim_report.py` (check `MK_bad_separator`) ที่ issue อ้าง ไม่มีใน repo นี้
 
 ### ✅ 2026-09-21 — Add commit-approval rule + retrieval plan anti-bloat notes
 
@@ -634,7 +645,7 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **root cause:** `/chat` คืน `elapsed` เป็น**วินาที** แต่ write sites เก็บดิบลง field ที่ชื่อ/แสดงเป็น **ms**
 - **fix:** `Math.round(elapsed * 1000)` (คง `undefined` เมื่อไม่มี elapsed — ไม่เขียน 0 ซ้ำอาการเดิม) ที่ 9 sites / 4 ไฟล์: `shadowReplyService.ts` ×2, `botWorkerService.ts`, `liveAssignmentService.ts` ×4, `test-assignment/route.ts` ×2
 - **ไม่แตะ:** bot python (`elapsed` วินาทีถูกตาม schema) + display logic (อ่านเป็น ms ถูกแล้ว)
-- **doc เก่าใน DB** ยังเป็นวินาที (โชว์เล็กผิดหน่วย) — ไม่ได้ backfill (test/shadow data; ถ้าต้องการให้บอก)
+- **doc เก่าใน DB** ยังเป็นวินาที (โชว์เล็กผิดหน่วย) — **user ตัดสินใจไม่ backfill** (ปล่อยให้ข้อมูลใหม่ไหลทับ; 2026-09-21)
 - **verify:** `npx tsc --noEmit` clean · grep ไม่เหลือ write site ดิบ
 
 ### ✅ 2026-09-22 — Residual-bugs batch (QA notes 2026-09-15 leftovers): frustration + rewrite-tier ext + vision-fail + answer_general
