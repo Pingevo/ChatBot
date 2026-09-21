@@ -22,11 +22,13 @@
 
 ### ✅ GitHub issue #19: LLM พิมพ์ `||` แทน `|||` → การ์ดสินค้าติดในฟองข้อความ (2026-09-21) — fixed + verified → ย้ายไป "ผ่านแล้ว"
 
-### 🔄 กำลังทำ — Legacy Shopee retrieval redesign master plan (2026-09-21)
+### ✅ Legacy Shopee retrieval redesign master plan (2026-09-21) — plan เสร็จ + self-review ผ่าน
 
-- **งาน:** ออกแบบและเขียนแผนงานใหม่สำหรับ legacy Shopee chatbot เท่านั้น — ลด hardcode, รวม unit+legacy เป็น candidate pipeline เดียว, ทำ retrieval profile/ranker กลาง, ต่อจาก Plan 1 rev 1.2 โดยไม่แก้โค้ด runtime ตอนนี้
-- **ขอบเขต:** อ่านภาพรวม shopeechat + Plan 1 + retrieval-hybrid-rerank plan แล้วสร้างเอกสาร design/implementation plan ใน `docs/plans/`; ยังไม่แตะ product code
-- **เงื่อนไข:** ห้ามสนใจ v2/v3 · ห้ามอ่าน `.env` · ห้าม revert uncommitted changes เดิม · ต้องเสนอเป็น staged plan ที่เริ่มจาก measurement/gold gate ก่อน runtime refactor
+- **งาน:** ออกแบบ implementation plan สำหรับ legacy Shopee chatbot เท่านั้น — ลด hardcode, รวม unit+legacy เป็น candidate pipeline เดียว, ทำ retrieval profile/ranker กลาง, ต่อจาก Plan 1 rev 1.2 โดยยังไม่แก้ runtime code
+- **เพิ่มรอบนี้:** กำหนด `RetrievalProfile` owner เดียวที่ `route_context` (intent เป็น proposal ไม่ใช่ final owner), precedence จาก current message→anchor→intent→bounded history, ส่ง profile object เดียวให้ทุก legacy product retrieval/re-query, และเพิ่ม Mi 17 Ultra false no-product/out-of-stock gate
+- **ขอบเขต:** แผน 14 tasks เริ่ม measurement/gold gate → profile/availability/evidence/selection → compat negative-proof → cleanup/replay; ไม่แตะ v2/v3 หรือ product code
+- **ไฟล์:** `docs/plans/2026-09-21-legacy-shopee-evidence-retrieval-implementation-plan.md`
+- **verify:** 2,121 lines หลัง ponytail review · ตัด field/key/report ที่ไม่มี consumer · ใช้ dedupe key เดียว · ระบุ gold drafter/private-metadata boundary ครบ · placeholder/duplicate-owner scan clean · `git diff --check` ผ่าน
 
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
@@ -287,6 +289,21 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 ---
 
 ## ผ่านแล้ว (file 2)
+
+### ✅ 2026-09-21 — Legacy Shopee evidence-first retrieval implementation plan
+
+- **ทำไม:** user ขอ implementation plan จาก audit โค้ดจริง + Mongo collections จริง เพื่อแก้ root cause ของการคัดสินค้า, ลด hardcode/hardlogic, ลด `app.py` bloat, และแยกเจ้าของ logic ให้ debug ง่ายขึ้น
+- **วิธี:** ใช้ `brainstorming` + `writing-plans`; รวมผล audit data/callsite หลักใน legacy Shopee; plan แบบ evidence-first เริ่ม measurement/gold gate → availability owner → `RetrievalProfile` owner เดียว → evidence coverage observe-only → retrieval_policy → gated compat/sensitive/web cleanup → replay gate; intent เป็น proposal, `route_context` reconcile current message+anchor+intent+bounded history; ทุก legacy product source ได้ profile object เดียว
+- **เคสเพิ่ม:** Mi 17 Ultra follow-up ต้อง carry family/subtype จาก history โดยไม่กลายเป็น phone search; negative stock/compat แยก proof (`sellable_candidate_count`, `compatible_candidate_count`, `compatibility_unknown_count`) ห้ามตอบไม่มี/หมดเมื่อยังมี compatible sellable candidate
+- **ไฟล์:** `docs/plans/2026-09-21-legacy-shopee-evidence-retrieval-implementation-plan.md`
+- **verify:** ponytail review รอบสองแล้ว; ตัด `history_terms`/private keys/report fields ที่ไม่มี consumer, รวม dedupe key, ระบุ gold drafter และ response-boundary stripping; placeholder/duplicate-owner scan ผ่าน; `wc -l` = 2,121; `git diff --check` ผ่าน; ยังไม่แตะ runtime code
+
+### ✅ 2026-09-21 — Legacy retrieval redesign rev 2 current-flow audit + no-regression plan
+
+- **ทำไม:** user ขอให้เขียนแผนใหม่จากโค้ดปัจจุบัน ไม่ให้ทำคำตอบเดิมพัง ไม่ให้โค้ดบวม และต้องลด hardcode/hardlogic ที่ root cause
+- **วิธี:** อ่านกฎใหม่ + ใช้สกิล brainstorming/writing-plans/ponytail → audit flow จริงจาก `app.py`, `product_store.py`, `units.py`, `device_compat.py`, `route_context.py`, `conversation_products.py` → เขียนแผน rev 2 ที่ยอมรับว่า unit path เสียบอยู่ใน `product_store.fetch_products()` แล้ว และวางทางลด owner ซ้ำทีละ phase
+- **ไฟล์:** `docs/plans/2026-09-21-legacy-retrieval-redesign-rev2-current-flow.md`
+- **verify:** `rg` placeholder scan ไม่พบ `TBD/TODO/implement later/fill in/placeholder`; `wc -l` = 759; `git diff --check` ผ่าน; ไม่แตะ runtime code
 
 ### ✅ 2026-09-21 — ปรับกฎ commit/branch/PR (AGENTS.md ข้อ 10)
 
