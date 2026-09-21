@@ -83,9 +83,12 @@ export async function GET(req: NextRequest) {
       });
 
       // ⚡ hasMore + cursor สำหรับ pagination
+      //   fallback created_at — บาง writer (เช่น push_unit_reg_to_admin) ไม่ใส่ updated_at
       const hasMore = docs.length === limit;
-      const nextCursor = docs.length > 0
-        ? `${docs[docs.length - 1].updated_at.toISOString()}|${docs[docs.length - 1].conversation_id}`
+      const lastDoc = docs[docs.length - 1];
+      const lastTs = lastDoc?.updated_at ?? lastDoc?.created_at;
+      const nextCursor = lastTs
+        ? `${lastTs.toISOString()}|${lastDoc.conversation_id}`
         : null;
 
       if (includeCount) {

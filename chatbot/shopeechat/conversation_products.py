@@ -461,13 +461,13 @@ def resolve_active_by_message(
     products = doc.get("products", [])
     msg_lower = (message or "").lower().strip()
 
-    # 1. ถ้ามี model keyword → หาสินค้าที่ match ชื่อ
+    # 1. ถ้ามี model keyword → หาสินค้าที่ match ชื่อ (bounded — "PB100"≄"LPB100")
     if model_keywords:
+        from . import product_store as _ps
         for kw in model_keywords:
-            kw_lower = kw.lower()
             for p in products:
-                name = (p.get("name") or "").lower()
-                if kw_lower in name:
+                name = p.get("name") or ""
+                if _ps._model_token_in_name(name, kw):
                     return _materialize_card(p, message=message)
 
     # 2. "ตัวเดิม/อันเดิม" → anchor ล่าสุด

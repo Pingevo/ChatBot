@@ -200,6 +200,9 @@ def build_connection_string() -> str:
 _cached_client: MongoClient | None = None
 
 def get_client() -> MongoClient:
+    """คืน shared MongoClient singleton — ⚠️ ห้าม close() บนตัวนี้ใน request handler
+    (ทุก request ใช้ร่วมกัน; close ทำให้ request อื่นพัง — issue #17).
+    ปิดเฉพาะตอน process shutdown (app.py shutdown handler)."""
     global _cached_client
     if _cached_client is not None:
         try:
@@ -350,6 +353,23 @@ def _first_image_url(doc: dict) -> str:
     return f"https://cf.shopee.co.th/file/{ids[0]}"
 
 
+# ⚡ T8 — keyword ที่บอกว่า "ข้อความพูดถึงสินค้า" (hoist จาก _clean_description
+#   เพื่อให้ app.py ใช้ gate การ attach product cards ได้ — single source)
+_PRODUCT_MENTION_KWS = (
+    "สายชาร์จ", "หัวชาร์จ", "ชุดชาร์จ", "แท่นชาร์จ", "พาวเวอร์แบงค์", "แบตเตอรี่สำรอง",
+    "หูฟัง", "earbuds", "tws", "สมาร์ทวอช", "smartwatch", "นาฬิกา",
+    "โทรศัพท์", "phone", "สมาร์ทโฟน", "เคส", "ฟิล์ม", "ลำโพง",
+    "cable", "charger", "adapter", "powerbank", "power bank",
+    "iphone", "samsung", "xiaomi", "huawei", "oppo", "vivo", "realme",
+    "cuktech", "anker", "baseus", "ugreen", "romoss",
+    "65w", "100w", "120w", "240w", "w ", "pd", "qc",
+    "usb-c", "type-c", "usb a", "lightning", "micro usb",
+    "ใช้กับ", "รองรับ", "สำหรับ", "compatible",
+    # app/compatibility questions — ต้องเห็น description เพื่อบอกชื่อแอพ
+    "แอพ", "แอป", "app", "ต่อมือถือ", "เชื่อมต่อมือถือ",
+)
+
+
 def _clean_description(desc: str, message: str = "") -> str:
     """กรอง description ของ Shopee ตามคำถาม — เอาเฉพาะส่วนที่เกี่ยวข้อง.
 
@@ -394,19 +414,7 @@ def _clean_description(desc: str, message: str = "") -> str:
     # ถ้าเป็นคำถามเกี่ยวกับสินค้า (มี product keyword ใดๆ) → ส่ง spec เสมอ
     # เพราะลูกค้าถาม "สายชาร์จ 65w" หรือ "หัวชาร์จ 100w" ก็ต้องเห็นสเปก
     # จะได้ตอบได้ว่าสินค้าไหนรองรับ 65w/100w บ้าง
-    product_kw = (
-        "สายชาร์จ", "หัวชาร์จ", "ชุดชาร์จ", "แท่นชาร์จ", "พาวเวอร์แบงค์", "แบตเตอรี่สำรอง",
-        "หูฟัง", "earbuds", "tws", "สมาร์ทวอช", "smartwatch", "นาฬิกา",
-        "โทรศัพท์", "phone", "สมาร์ทโฟน", "เคส", "ฟิล์ม", "ลำโพง",
-        "cable", "charger", "adapter", "powerbank", "power bank",
-        "iphone", "samsung", "xiaomi", "huawei", "oppo", "vivo", "realme",
-        "cuktech", "anker", "baseus", "ugreen", "romoss",
-        "65w", "100w", "120w", "240w", "w ", "pd", "qc",
-        "usb-c", "type-c", "usb a", "lightning", "micro usb",
-        "ใช้กับ", "รองรับ", "สำหรับ", "compatible",
-        # app/compatibility questions — ต้องเห็น description เพื่อบอกชื่อแอพ
-        "แอพ", "แอป", "app", "ต่อมือถือ", "เชื่อมต่อมือถือ",
-    )
+    product_kw = _PRODUCT_MENTION_KWS
     want_product = any(kw in msg_lower for kw in product_kw)
     if want_product:
         want_spec = True
@@ -2617,14 +2625,11 @@ _MODEL_TOKEN_RE = re.compile(
 )
 
 
-def _extract_model_tokens(message: str) -> list[str]:
-    """ดึง model tokens จากคำถาม เช่น ['EC4', 'EC5', 'EC6'].
+def _raw_model_tokens(message: str) -> list[str]:
+    """ดึง model tokens ดิบจากข้อความ (uppercase, dedup, ไม่ collapse/ไม่กรองจำนวน).
 
-    ใช้สำหรับ diversity re-ranking ตอนเปรียบเทียบหลายรุ่น.
-    คืน list ของ model token (uppercase) ที่พบ ถ้าไม่พบหรือเจอแค่ 1 อัน คืน [].
-
-    ถ้าเจอหลายรุ่นที่เป็นรุ่นย่อยของ base เดียวกัน (เช่น EC6 Pro, EC6 Dual)
-    จะ collapse เป็น base token (EC6) เพื่อให้ diversity ทำงานที่ระดับรุ่นหลัก.
+    ใช้เมื่อต้องการ token ทุกตัวที่เจอ รวมถึงรุ่นเดียว
+    (เช่น exact-match promotion ใน vector path).
     """
     matches = _MODEL_TOKEN_RE.findall(message)
     raw_tokens = []
@@ -2645,6 +2650,19 @@ def _extract_model_tokens(message: str) -> list[str]:
         if clean and clean not in seen:
             seen.add(clean)
             raw_tokens.append(clean)
+    return raw_tokens
+
+
+def _extract_model_tokens(message: str) -> list[str]:
+    """ดึง model tokens จากคำถาม เช่น ['EC4', 'EC5', 'EC6'].
+
+    ใช้สำหรับ diversity re-ranking ตอนเปรียบเทียบหลายรุ่น.
+    คืน list ของ model token (uppercase) ที่พบ ถ้าไม่พบหรือเจอแค่ 1 อัน คืน [].
+
+    ถ้าเจอหลายรุ่นที่เป็นรุ่นย่อยของ base เดียวกัน (เช่น EC6 Pro, EC6 Dual)
+    จะ collapse เป็น base token (EC6) เพื่อให้ diversity ทำงานที่ระดับรุ่นหลัก.
+    """
+    raw_tokens = _raw_model_tokens(message)
 
     # collapse รุ่นย่อยเป็น base token เฉพาะเมื่อมีหลายรุ่นที่ base ซ้ำกัน
     # เช่น EC6PRO, EC6DUAL → EC6 (เพราะเป็นรุ่นย่อยของ EC6)
@@ -2687,14 +2705,44 @@ def _extract_model_tokens(message: str) -> list[str]:
     return []
 
 
+def _model_token_regex_str(token: str) -> str:
+    """regex pattern (PCRE) สำหรับ bounded model match — space-insensitive
+    ("EC 4"↔"EC4") + กัน prefix/suffix alnum ("PB100"≄"LPB100"/"PB1000").
+    ใช้ร่วมกันทั้ง Python re และ MongoDB $regex (PCRE รองรับ lookaround)."""
+    tok = re.sub(r"\s+", "", token)
+    return (r"(?<![A-Za-z0-9])" + r"\s*".join(re.escape(c) for c in tok)
+            + r"(?![A-Za-z0-9])")
+
+
+def _model_token_in_name(name: str, token: str) -> bool:
+    """model token อยู่ในชื่อสินค้าไหม — space-insensitive + ASCII boundary.
+
+    token ที่มีทั้ง letter+digit (model codes เช่น PB100/EC4/WPB100P) ต้อง
+    match แบบ bounded — กัน "PB100"⊂"LPB100", "EC4"⊂"EC40" (root cause
+    anchor swap ใน QA). token ตัวอักษรล้วน/ตัวเลขล้วน → substring เดิม
+    (รักษา "mi"⊂"xiaomi", "15"⊂"15pro"). ตัวไทยติดกันไม่กัน boundary
+    ("พาวเวอร์แบงค์PB100" ยัง match — คนละชุดปัญหากับ LPB100).
+    """
+    if not name or not token:
+        return False
+    tok = re.sub(r"\s+", "", token).upper()
+    if not tok:
+        return False
+    has_alpha = any(c.isascii() and c.isalpha() for c in tok)
+    has_digit = any(c.isdigit() for c in tok)
+    if not (has_alpha and has_digit):
+        return tok in re.sub(r"\s+", "", name).upper()
+    # boundary match บน name เดิม (space เก็บไว้เป็น boundary จริง)
+    # token อนุญาต space คั่นระหว่างตัวอักษรเอง ("EC 4" ↔ "EC4")
+    rx = re.compile(_model_token_regex_str(tok), re.IGNORECASE)
+    return bool(rx.search(name))
+
+
 def _doc_matches_model(doc: dict, model_token: str) -> bool:
-    """เช็คว่าสินค้าตรงกับ model token หรือไม่ (case-insensitive)."""
-    name = (doc.get("item_name") or "").upper()
-    # ลบ space ในชื่อสินค้า เพื่อเทียบแบบไม่สน space
-    # เช่น "EC 4" ในชื่อ vs "EC4" ใน token
-    name_nospace = re.sub(r"\s+", "", name)
-    token_nospace = re.sub(r"\s+", "", model_token.upper())
-    return token_nospace in name_nospace
+    """เช็คว่าสินค้าตรงกับ model token หรือไม่ (case-insensitive, bounded)."""
+    name = doc.get("item_name") or ""
+    # boundary-aware: "PB100" ไม่ match "LPB100" / "PB1000" อีกต่อไป
+    return _model_token_in_name(name, model_token)
 
 
 def _rerank_with_diversity(
@@ -3061,18 +3109,19 @@ def fetch_products(
                     # ถ้ามี model tokens (เปรียบเทียบหลายรุ่น) ให้เสริมด้วย MongoDB query
                     # โดยตรง เพื่อรับประกันว่าแต่ละรุ่นมีสินค้าพอ
                     # (vector search อาจไม่ครอบคลุมทุกรุ่น เพราะกรอง top_k ก่อนกรอง NORMAL)
-                    model_tokens = _extract_model_tokens(message)
-                    if model_tokens:
+                    # ⚡ ใช้ _raw_model_tokens (ไม่ใช่ _extract_model_tokens ที่กรอง ≥2)
+                    #   — query รุ่นเดียว ("PB100 มีไหม") ก็ต้องเสริม doc ที่ชื่อมี token จริง
+                    #   เพราะ vector top_k อาจตัด listing ที่ถามทิ้ง (ดัน PB100P ขึ้นแทน)
+                    aug_tokens = _raw_model_tokens(message)
+                    if aug_tokens:
                         # ดึงสินค้าแต่ละรุ่นจาก MongoDB โดยตรง (NORMAL, จำกัด 5 ต่อรุ่น)
                         existing_ids = {str(d.get("item_id")) for d in docs}
-                        for token in model_tokens:
-                            # สร้าง regex สำหรับรุ่นนี้ (เช่น EC4, EC5, EC6)
-                            # ใช้ word boundary เพื่อกัน match ผิด (เช่น EC4 ไม่ควร match EC40)
-                            token_regex = re.compile(
-                                r"\b" + re.escape(token) + r"\b", re.IGNORECASE
-                            )
+                        for token in aug_tokens:
+                            # bounded regex เดียวกับ _model_token_in_name —
+                            # "PB100" ไม่ match "LPB100"/"PB1000" แต่ match "PB 100"
                             model_filter = {
-                                "item_name": {"$regex": token_regex.pattern, "$options": "i"},
+                                "item_name": {"$regex": _model_token_regex_str(token),
+                                              "$options": "i"},
                             }
                             # ดึงสินค้าทุก status — LLM จะแนะนำเฉพาะ NORMAL เอง
                             if shop_filter:
@@ -3113,6 +3162,21 @@ def fetch_products(
                         docs = _rerank_by_promo_latest(
                             docs, similarity_scores=sim_scores, limit=limit
                         )
+
+                    # ⚡ bounded exact-match promotion (vector path) — ลูกค้าพิมพ์รหัสรุ่น
+                    #   ตรงๆ (รุ่นเดียว → diversity ไม่ทำงาน) ให้ doc ที่ชื่อมี token จริง
+                    #   ขึ้นก่อน กัน vector rank ดันรุ่นใกล้ (PB100P/LPB100) แซง PB100
+                    _raw_toks = _raw_model_tokens(message)
+                    if _raw_toks and docs:
+                        _exact_ids = {
+                            str(d.get("item_id", ""))
+                            for d in docs
+                            if any(_model_token_in_name(d.get("item_name") or "", t)
+                                   for t in _raw_toks)
+                        }
+                        if _exact_ids:
+                            docs = ([d for d in docs if str(d.get("item_id", "")) in _exact_ids]
+                                    + [d for d in docs if str(d.get("item_id", "")) not in _exact_ids])
 
                     # ── กรอง charger subtype สำหรับ vector search path ด้วย ──
                     # ยกเว้น superlative question ที่ต้องเปรียบเทียบทุกประเภท
@@ -3291,9 +3355,9 @@ def fetch_products(
         rest_docs: list[dict] = []
         if model_words:
             for d in docs:
-                name = (d.get("item_name") or "").lower()
-                # exact match = ทุก model word อยู่ในชื่อ
-                if all(w in name for w in model_words):
+                name = d.get("item_name") or ""
+                # exact match = ทุก model word อยู่ในชื่อ (bounded — "PB100"≄"LPB100")
+                if all(_model_token_in_name(name, w) for w in model_words):
                     exact_matches.append(d)
                 else:
                     rest_docs.append(d)
@@ -3368,9 +3432,9 @@ def fetch_products(
         model_words = [w for w in msg_words if any(c.isdigit() for c in w) or len(w) >= 4]
         if model_words:
             def _exact_match_score(d):
-                name = (d.get("item_name") or "").lower()
+                name = d.get("item_name") or ""
                 # สินค้าที่มีทุก model word ในชื่อ = exact match ให้ score สูง
-                matched = sum(1 for w in model_words if w in name)
+                matched = sum(1 for w in model_words if _model_token_in_name(name, w))
                 if matched == len(model_words):
                     return 100 + matched
                 return matched

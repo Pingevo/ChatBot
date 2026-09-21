@@ -104,6 +104,21 @@ def _warmup():
         print(f"[WARMUP] admin MongoDB failed: {e}", file=sys.stderr)
 
 
+@app.on_event("shutdown")
+def _shutdown_db_clients():
+    """ปิด shared MongoClient singletons ตอน process shutdown เท่านั้น.
+
+    ⚠️ ห้าม close() client เหล่านี้ใน request handler — client ถูกแชร์ทั้งโปรเซส
+    (issue #17: /health ปิด client กลาง request → /chat 500 'Cannot use
+    MongoClient after close').
+    """
+    for getter in (product_store.get_client, knowledge_base._build_admin_client):
+        try:
+            getter().close()
+        except Exception:
+            pass
+
+
 # ---- schemas ------------------------------------------------------------------
 
 class ChatMessage(BaseModel):
@@ -231,9 +246,11 @@ class FeedbackRequest(BaseModel):
 # ---- helpers ------------------------------------------------------------------
 
 def _db():
-    """เปิด client + เลือก db ใหม่ทุกครั้ง (stateless สำหรับ API แบบง่าย).
+    """คืน (client, db) — client เป็น **shared singleton** จาก get_client().
 
-    หากต้องการ reuse connection ข้าม request ใช้ app.state หรือ dependency injection.
+    ⚠️ ห้ามเรียก client.close() บนตัวนี้ — request อื่นที่ถือ db อยู่จะพัง
+    (InvalidOperation: Cannot use MongoClient after close). singleton ปิด
+    ตอน process shutdown เท่านั้น (ดู shutdown handler).
     """
     client = product_store.get_client()
     db_name = os.environ.get("MONGO_DB", "").strip()
@@ -279,7 +296,6 @@ def health() -> dict[str, Any]:
         client, db = _db()
         shops = product_store.list_shops(db)
         cats = product_store.list_categories(db)
-        client.close()
         return {"ok": True, "shops": len(shops), "categories": len(cats)}
     except SystemExit as exc:
         return {"ok": False, "error": str(exc)}
@@ -294,19 +310,13 @@ def index() -> HTMLResponse:
 @app.get("/shops")
 def shops() -> dict[str, Any]:
     client, db = _db()
-    try:
-        return {"shops": product_store.list_shops(db)}
-    finally:
-        client.close()
+    return {"shops": product_store.list_shops(db)}
 
 
 @app.get("/categories")
 def categories() -> dict[str, Any]:
     client, db = _db()
-    try:
-        return {"categories": product_store.list_categories(db)}
-    finally:
-        client.close()
+    return {"categories": product_store.list_categories(db)}
 
 
 @app.get("/brands")
@@ -334,55 +344,52 @@ def brands(
     from collections import Counter
 
     client, db = _db()
-    try:
-        coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
-        coll = db[coll_name]
+    coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+    coll = db[coll_name]
 
-        brand_counts = Counter()
-        brand_cats: dict[str, set[str]] = {}
-        for d in coll.find({"item_status": "NORMAL"}, {"brand": 1, "cat_name": 1}).limit(10000):
-            b = d.get("brand", "")
-            if isinstance(b, dict):
-                bname = (b.get("original_brand_name", "") or "").strip()
-            else:
-                bname = str(b).strip() if b else ""
-            c = d.get("cat_name", "")
-            if bname:
-                brand_counts[bname] += 1
-                if c:
-                    brand_cats.setdefault(bname, set()).add(str(c))
+    brand_counts = Counter()
+    brand_cats: dict[str, set[str]] = {}
+    for d in coll.find({"item_status": "NORMAL"}, {"brand": 1, "cat_name": 1}).limit(10000):
+        b = d.get("brand", "")
+        if isinstance(b, dict):
+            bname = (b.get("original_brand_name", "") or "").strip()
+        else:
+            bname = str(b).strip() if b else ""
+        c = d.get("cat_name", "")
+        if bname:
+            brand_counts[bname] += 1
+            if c:
+                brand_cats.setdefault(bname, set()).add(str(c))
 
-        # สร้าง list
-        all_brands = [
-            {
-                "name": bname,
-                "count": count,
-                "categories": sorted(brand_cats.get(bname, set())),
-            }
-            for bname, count in brand_counts.most_common()
-        ]
-
-        # filter by search
-        if search:
-            search_low = search.lower().strip()
-            all_brands = [b for b in all_brands if search_low in b["name"].lower()]
-
-        total = len(all_brands)
-        total_pages = max(1, (total + per_page - 1) // per_page)
-        page = max(1, min(page, total_pages))
-        start = (page - 1) * per_page
-        end = start + per_page
-        page_brands = all_brands[start:end]
-
-        return {
-            "brands": page_brands,
-            "total": total,
-            "page": page,
-            "per_page": per_page,
-            "total_pages": total_pages,
+    # สร้าง list
+    all_brands = [
+        {
+            "name": bname,
+            "count": count,
+            "categories": sorted(brand_cats.get(bname, set())),
         }
-    finally:
-        client.close()
+        for bname, count in brand_counts.most_common()
+    ]
+
+    # filter by search
+    if search:
+        search_low = search.lower().strip()
+        all_brands = [b for b in all_brands if search_low in b["name"].lower()]
+
+    total = len(all_brands)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_brands = all_brands[start:end]
+
+    return {
+        "brands": page_brands,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+    }
 
 
 # tag ที่ Shopee/Zaapi แนบมาเมื่อลูกค้าแชร์การ์ดสินค้าในแชท เช่น "🛍️ [สินค้า: 43360743407]"
@@ -525,6 +532,14 @@ def _recent_qa_pairs(history: list[dict] | None, n: int = 10) -> list[dict]:
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
+    # ⚡ RC-A — output policy boundary จุดเดียว: enforce หลัง engine คืนคำตอบ
+    #   ครอบทุก engine (legacy/v2/v3) + ทุก return path — กันคำตอบอ้างสิ่งที่ไม่ได้ทำจริง
+    resp = _chat_impl(req)
+    from . import guards as _guards
+    return _guards.enforce(resp, req)
+
+
+def _chat_impl(req: ChatRequest) -> ChatResponse:
     # ⚡ chatbotv3 — OpenRouter-first paradigm (2026-09-20)
     #   USE_CHAT_V3=1 หรือ req.use_v3=True → route ไป chatbotv3.engine.chat_v3
     #   ไม่กระทบ legacy/v2 (default ยังใช้ legacy/v2 ตาม USE_LEGACY_CHAT)
@@ -757,6 +772,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 print(f"[VISION-TEXT-URL] พบ image URL ใน text: {len(_text_img_urls)} รูป → ส่ง vision", file=sys.stderr)
         print(f"[VISION-DBG] req.images={req.images} history_imgs={[h.get('images') for h in (history or [])[-2:]]} urls_to_read={_urls_to_read}", file=sys.stderr)
 
+        _new_desc = ""
         if _urls_to_read:
             try:
                 from . import llm as _llm_vision
@@ -793,6 +809,20 @@ def chat(req: ChatRequest) -> ChatResponse:
             _image_desc_out = _new_desc if _urls_to_read and _new_desc else ""
             if not _urls_to_read:
                 print(f"[VISION-PASS] ใช้ image_desc จาก history ({len(_vision_desc_parts)} desc) → {_all_desc[:80]!r}", file=sys.stderr)
+
+        # ⚡ NEW-10 — ลูกค้าส่งรูปมาแต่ vision อ่านไม่ได้ (error/desc ว่าง)
+        #   → inject failure note เข้า context ไม่งั้น LLM เดาว่าไม่มีรูป
+        #   หรือแต่งว่าเห็นรูป (QA: รูปจอเขียว แต่ตอบ "หน้าจอสวยคมชัด")
+        #   (append หลัง merge — history desc เก่าถ้ามี ยังอยู่ครบ)
+        if _urls_to_read and not _new_desc:
+            _vision_context += (
+                "=== รูปที่อ่านไม่สำเร็จ ===\n"
+                f"ลูกค้าส่งรูปมาใหม่ {len(_urls_to_read)} รูป แต่ระบบอ่านรูปไม่ได้ในรอบนี้\n"
+                "⚠️ สำคัญ: ห้ามเดาหรือแต่งว่าเห็นเนื้อหาในรูปเหล่านี้เด็ดขาด — "
+                "ให้ตอบรับว่าได้รับรูปแล้วแต่อ่านรูปไม่ได้ชั่วคราว "
+                "ขอให้ลูกค้าส่งรูปใหม่อีกครั้ง หรือพิมพ์อธิบายเป็นข้อความแทนได้เลย\n"
+            )
+            print(f"[VISION-PASS] FAIL: {len(_urls_to_read)} รูป อ่านไม่ได้ → inject failure context", file=sys.stderr)
 
         # ⚡ record vision step (input/output ครบ)
         _vision_model = os.environ.get("GEMINI_VISION_MODEL", "gemini-3.1-flash-lite")
@@ -1010,6 +1040,62 @@ def chat(req: ChatRequest) -> ChatResponse:
             # ถ้าไม่เจอสินค้า (ถูกลบ/item_id ผิด) ให้ตกไปใช้ flow ปกติต่อด้วยข้อความที่ตัด tag แล้ว
             if _clean_message:
                 req.message = _clean_message
+        # ⚡ T9 — image_desc → model keywords → match สินค้าร้าน → hybrid anchor (NEW-6)
+        #   เดิม: vision อ่านรูปได้แต่ไม่เคยผูกกับสินค้าในร้าน (ค้นด้วย desc ดิบ fuzzy พลาด)
+        #   guard: ข้อความไม่มี product ref ชัด (ไม่มี model kw / ไม่มี tag / ไม่มี anchor อยู่แล้ว)
+        #          + match ได้สินค้าตัวเดียวเท่านั้น (desc กำกวม match หลายตัว → ไม่ผูก ปล่อย flow ปกติ)
+        if (
+            _image_desc_out and not _tagged_item_id and not anchor_card
+            and not _hybrid_anchor_card
+            and not knowledge_base.extract_model_keywords(req.message or "")
+        ):
+            try:
+                _img_match: dict[str, dict] = {}
+                for _ikw in knowledge_base.extract_model_keywords(_image_desc_out):
+                    _ikw_l = _ikw.lower()
+                    if len(_ikw_l) < 4:
+                        continue
+                    # bounded model code — "PB100" จาก image desc ไม่ match "PB100P"/"LPB100"
+                    _ipat = (
+                        product_store._model_token_regex_str(_ikw_l)
+                        if re.search(r"\d", _ikw_l)
+                        else re.escape(_ikw_l[:6])
+                    )
+                    _ifilter = {
+                        "item_status": "NORMAL",
+                        "item_name": {"$regex": _ipat, "$options": "i"},
+                    }
+                    if req.shop:
+                        _ifilter["shopname"] = {"$regex": f"^{re.escape(req.shop)}$", "$options": "i"}
+                    for _d in db[
+                        os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+                    ].find(_ifilter, product_store.PRODUCT_PROJECTION).limit(5):
+                        _iid = str(_d.get("item_id") or _d.get("_id") or "")
+                        if _iid:
+                            _img_match[_iid] = _d
+                if len(_img_match) == 1:
+                    _img_iid, _img_doc = next(iter(_img_match.items()))
+                    _img_card = product_store.to_product_card(_img_doc, req.message)
+                    _hybrid_anchor_card = _img_card
+                    if req.conversation_id:
+                        try:
+                            conversation_products.add_product(
+                                conversation_id=req.conversation_id,
+                                platform=req.platform,
+                                shop=req.shop,
+                                item_id=_img_iid,
+                                name=_img_card.get("name", ""),
+                                source="image_desc_anchor",
+                                card=_img_card,
+                                is_anchor=True,
+                            )
+                        except Exception as _e:
+                            print(f"[IMG-ANCHOR] add_product error: {_e}", file=sys.stderr)
+                    print(f"[IMG-ANCHOR] image_desc → '{_img_iid}' ({_img_card.get('name', '')[:60]!r}) → hybrid anchor", file=sys.stderr)
+                elif len(_img_match) > 1:
+                    print(f"[IMG-ANCHOR] match {len(_img_match)} ตัว → ไม่ผูก anchor (desc กำกวม)", file=sys.stderr)
+            except Exception as _e:
+                print(f"[IMG-ANCHOR] error: {_e}", file=sys.stderr)
         # ⚡ 2026-09-12 — hybrid anchor+fetch: เพิ่ม anchor product type ใน message
         #   ถ้าเป็น compat+target_device case → เพิ่ม product type ของ anchor ใน req.message
         #   เพื่อให้ fetch_products ดึงสินค้าประเภทเดียวกับ anchor (เช่น charger/cable)
@@ -1500,7 +1586,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         _part_model_kws = knowledge_base.extract_model_keywords(req.message)
                         _part_model_kws = [k for k in _part_model_kws if not knowledge_base.is_target_device_kw(k)]
                         _kw_is_anchor = any(
-                            kw.lower() in _part_cur_name
+                            product_store._model_token_in_name(_part_cur_name, kw)
                             for kw in _part_model_kws
                             if re.search(r"\d", kw)  # model code pattern only
                         )
@@ -1590,7 +1676,10 @@ def chat(req: ChatRequest) -> ChatResponse:
                     elapsed=round(_total_elapsed, 2),
                     cost=round(cost, 6),
                     steps=_steps,
-                    routing_decision=_routing("bot_reply", f"general_qtype: {general_qtype} — ไม่โดน trigger/shop_settings → บอทตอบ"),
+                    routing_decision={**_routing("bot_reply", f"general_qtype: {general_qtype} — ไม่โดน trigger/shop_settings → บอทตอบ"),
+                                      # ⚡ NEW-3 residual — แนบ KB context ให้ guards.enforce
+                                      #   verify claim (เปลี่ยนได้/โปร/สต็อก) เทียบ KB จริงได้
+                                      "grounding_text": gen_context[:2000]},
                     image_desc=_image_desc_out,
                 )
 
@@ -1631,7 +1720,8 @@ def chat(req: ChatRequest) -> ChatResponse:
                     elapsed=round(_total_elapsed, 2),
                     cost=round(cost, 6),
                     steps=_steps,
-                    routing_decision=_routing("bot_reply", f"brand_question: {brand_q} — บอทตอบจากข้อมูลแบรนด์"),
+                    routing_decision={**_routing("bot_reply", f"brand_question: {brand_q} — บอทตอบจากข้อมูลแบรนด์"),
+                                      "grounding_text": brand_result["context"][:2000]},
                     image_desc=_image_desc_out,
                 )
 
@@ -1772,11 +1862,14 @@ def chat(req: ChatRequest) -> ChatResponse:
                 # ถ้า KB เจอแบรนด์แต่ไม่ตรงรุ่น (เช่น ถาม "ks3" แต่ KB มีแค่ Elite2/Actor)
                 # ต้องค้น Mongo ด้วยคำถามเดิมด้วย เพื่อหาสินค้าที่มีใน Mongo แต่ไม่มีใน KB
                 user_model_tokens = knowledge_base.extract_model_keywords(req.message)
-                kb_model_text = " ".join(kb_models).lower()
                 kb_missing_model = False
                 if user_model_tokens:
                     # ถ้ามี model token ที่ไม่อยู่ใน KB docs เลย → KB ไม่มีรุ่นนี้
-                    missing = [t for t in user_model_tokens if t.lower() not in kb_model_text]
+                    #   (bounded match per model name — "PB100"≄"LPB100"; เช็คทีละชื่อ
+                    #   ไม่ใช่ joined text เพราะ nospace จะกลืน boundary ระหว่างรุ่น)
+                    missing = [t for t in user_model_tokens
+                               if not any(product_store._model_token_in_name(m, t)
+                                          for m in kb_models)]
                     if missing:
                         kb_missing_model = True
                         print(f"[KB] model tokens ไม่มีใน KB: {missing}  → ค้น Mongo เพิ่มด้วยคำถามเดิม", file=sys.stderr)
@@ -1807,10 +1900,10 @@ def chat(req: ChatRequest) -> ChatResponse:
                     _kb_kw_clean = re.sub(r"(.)\1{2,}$", r"\1", _kb_kw.lower())
                     if _kb_kw_clean != _kb_kw.lower():
                         _kb_kw = _kb_kw_clean
-                    _kb_alpha = re.match(r"[A-Za-z]+", _kb_kw).group(0)
-                    _kb_rest = _kb_kw[len(_kb_alpha):]
-                    if _kb_rest:
-                        _kb_pattern = re.escape(_kb_alpha) + r".?" + re.escape(_kb_rest)
+                    if re.search(r"\d", _kb_kw):
+                        # bounded model code — "PB100" ไม่ match "PB100P"/"LPB100"
+                        # (root cause anchor swap: pattern เดิม 'PB.?100' ไม่กัน suffix)
+                        _kb_pattern = product_store._model_token_regex_str(_kb_kw)
                     else:
                         _kb_prefix = _kb_kw[:6] if len(_kb_kw) >= 6 else _kb_kw
                         _kb_pattern = re.escape(_kb_prefix)
@@ -1908,9 +2001,9 @@ def chat(req: ChatRequest) -> ChatResponse:
                         # fallback: ใช้ model_short ทั้งหมด ถ้าไม่มี token ที่ผ่านเงื่อนไข
                         model_tokens = [model_short] if model_short and len(model_short) >= 3 else []
                     for token in model_tokens[:2]:
-                        # ค้นใน Mongo ด้วย regex ตรงใน item_name (word boundary)
+                        # ค้นใน Mongo ด้วย bounded regex — "PB100" ไม่ match "PB100P"/"LPB100"
                         # ⚠️ ถ้ามี shop_filter ต้องกรองเฉพาะร้านนั้น — ห้ามค้นข้ามร้าน
-                        direct_q = {"item_status": "NORMAL", "item_name": {"$regex": re.escape(token), "$options": "i"}}
+                        direct_q = {"item_status": "NORMAL", "item_name": {"$regex": product_store._model_token_regex_str(token), "$options": "i"}}
                         if req.shop:
                             direct_q["shopname"] = {"$regex": f"^{re.escape(req.shop)}$", "$options": "i"}
                         direct_docs = list(_mongo_coll.find(
@@ -2491,7 +2584,8 @@ def chat(req: ChatRequest) -> ChatResponse:
                             _active_name = (_active_card.get("name") or _active_card.get("item_name") or "").lower()
                             if _active_name:
                                 _filtered_kw = [kw for kw in _cur_model_kw
-                                                if not (re.search(r"\d", kw) and kw.lower() in _active_name)]
+                                                if not (re.search(r"\d", kw)
+                                                        and product_store._model_token_in_name(_active_name, kw))]
                                 if len(_filtered_kw) < len(_cur_model_kw):
                                     _kw_matched_anchor = True
                                 _cur_model_kw = _filtered_kw
@@ -3239,8 +3333,8 @@ def chat(req: ChatRequest) -> ChatResponse:
                                 # ข้ามสินค้าที่มี keyword บอกว่าเป็นชุด/แถม/หัวชาร์จ
                                 _skip_kws = ("แถมฟรี", "หัวชาร์จ", "ชุดชาร์จ", "เซ็ต", "set", "combo",
                                              "adapter", "gan", "หัวชาร์ต", "พาวเวอร์แบงค์", "powerbank")
-                                # ต้องมี model token อยู่ในชื่อ และไม่ใช่ชุด/แถม
-                                if _ref_kw in _name_lower and not any(kw in _name_lower for kw in _skip_kws):
+                                # ต้องมี model token อยู่ในชื่อ (bounded) และไม่ใช่ชุด/แถม
+                                if product_store._model_token_in_name(_name, _ref_kw) and not any(kw in _name_lower for kw in _skip_kws):
                                     _ref_docs_filtered.append(d)
                             _ref_docs = _ref_docs_filtered if _ref_docs_filtered else _ref_docs
                         for d in _ref_docs[:5]:
@@ -3288,10 +3382,9 @@ def chat(req: ChatRequest) -> ChatResponse:
                 # สร้าง regex pattern:
                 # - ถ้ามีตัวเลข (เช่น "Watch6") → "Watch.?6" (ยอมรับ space ระหว่างคำและตัวเลข)
                 # - ถ้าเป็นคำอังกฤษล้วน (เช่น "biokoop") → "biokoop" (case-insensitive)
-                _alpha_part = re.match(r"[A-Za-z]+", _cur_kw).group(0)
-                _rest_part = _cur_kw[len(_alpha_part):]
-                if _rest_part:  # มีตัวเลขต่อท้าย
-                    _cur_kw_pattern = re.escape(_alpha_part) + r".?" + re.escape(_rest_part)
+                if re.search(r"\d", _cur_kw):
+                    # bounded model code — "PB100" ไม่ match "PB100P"/"LPB100"
+                    _cur_kw_pattern = product_store._model_token_regex_str(_cur_kw)
                 else:  # คำอังกฤษล้วน — ใช้ prefix 6 ตัวแรกเพื่อจัดการคำผิด
                     _prefix = _cur_kw[:6] if len(_cur_kw) >= 6 else _cur_kw
                     _cur_kw_pattern = re.escape(_prefix)
@@ -4062,9 +4155,9 @@ def chat(req: ChatRequest) -> ChatResponse:
                         if kb_comp and kb_comp.get("found"):
                             for kd in kb_comp.get("kb_docs", []):
                                 model = (kd.get("model") or "").lower()
-                                # เช็คว่า model ตรงกับ missing token ไหม
+                                # เช็คว่า model ตรงกับ missing token ไหม (bounded)
                                 for mt in missing_tokens:
-                                    if mt.lower() in model and mt.lower() not in seen_tokens:
+                                    if product_store._model_token_in_name(model, mt) and mt.lower() not in seen_tokens:
                                         card = knowledge_base._kb_doc_to_card(kd)
                                         card["_kb_only"] = True
                                         card["_source"] = "kb"
@@ -4498,7 +4591,17 @@ def chat(req: ChatRequest) -> ChatResponse:
         # frontend จะโชว์ว่าคำตอบนี้ใช้สินค้าอะไรตัดสินใจบ้าง
         # LLM จะเลือกแนะนำไม่เกิน 3 รายการจาก context เอง (ตาม prompt)
         _intent_name = _intent_result.get("intent", "")
-        products_for_response = products[:req.limit]
+        # ⚡ T8 — suppress product cards เมื่อ intent ไม่ใช่ขายของและข้อความไม่พูดถึงสินค้า
+        #   (NEW-7: greeting/complaint/claim โดนแปะการ์ดมั่วจาก fuzzy retrieval)
+        #   กัน suppress ผิด: ข้อความมี product kw → เก็บการ์ดไว้ (แชท complaint ที่ถามสินค้า)
+        _NON_SALES_INTENTS = ("warranty_claim", "general_question", "other")
+        _msg_mentions_product = any(
+            kw in (req.message or "").lower()
+            for kw in product_store._PRODUCT_MENTION_KWS)
+        _suppress_cards = _intent_name in _NON_SALES_INTENTS and not _msg_mentions_product
+        if _suppress_cards and products:
+            print(f"[T8] suppress {len(products)} product cards (intent={_intent_name!r}, no product kw)", file=sys.stderr)
+        products_for_response = [] if _suppress_cards else products[:req.limit]
         _timing_breakdown["total"] = round(_time.time() - _total_start, 3)
 
         # ── Web search fallback (ด่านสุดท้าย) ──
@@ -4566,7 +4669,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         "total": usage_info.get("total", 0) + _ws_llm_usage.get("total", 0),
                     }
                     print(f"[WEB-SEARCH] used web search answer  total={_total_ws}s  products={len(_final_products)}", file=sys.stderr)
-                    _final_response_products = _final_products[:req.limit]
+                    _final_response_products = [] if _suppress_cards else _final_products[:req.limit]
                     _record_suggestion_products(req, _final_response_products)
                     return ChatResponse(
                         answer=_ws_answer,
@@ -4637,18 +4740,21 @@ def _record_suggestion_products(req, products: list[dict]) -> None:
                          if not _kb_anchor.is_target_device_kw(kw)]
 
         # หาสินค้าตัวแรกที่ชื่อมี model keyword ของลูกค้า → anchor
+        #   scan 5 ตัวแรก (ตรงกับ record loop) — bounded match ทำให้ listing จริง
+        #   ที่ไม่ได้อยู่อันดับแรก (เช่น "PB100 / PB100S / LPB100" อันดับ 4) ยัง anchor ได้
         _anchor_item_id = None
         if _msg_model_kws:
-            for p in products[:3]:
-                _name_lower = (p.get("name") or "").lower()
+            for p in products[:5]:
+                _p_name = p.get("name") or ""
                 _p_item_id = p.get("item_id")
                 if not _p_item_id:
                     continue
                 for kw in _msg_model_kws:
-                    if kw.lower() in _name_lower:
+                    # bounded match — "PB100" ต้องไม่ไป anchor "PB100S"/"LPB100"
+                    if product_store._model_token_in_name(_p_name, kw):
                         _anchor_item_id = _p_item_id
                         print(f"[TEXT-ANCHOR] ลูกค้าพิมพ์ '{kw}' ตรงกับสินค้า "
-                              f"'{(p.get('name') or '')[:40]}' → anchor", file=sys.stderr)
+                              f"'{_p_name[:40]}' → anchor", file=sys.stderr)
                         break
                 if _anchor_item_id:
                     break  # ใช้แค่ตัวแรกที่ match (สินค้าที่เกี่ยวข้องที่สุดจาก RAG)

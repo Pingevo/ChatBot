@@ -342,6 +342,14 @@ for m in ("คืนสินค้าได้ไหมครับ", "เป�
           "ติดต่อร้านช่องทางไหนได้บ้าง", "มีสาขาหน้าร้านไหมครับ"):
     add("general_policy", m, rng.choice(list(by_shop.keys()) or [None]))
 
+# ─── 19. misinterpretation monitor (QA NEW misc — ไม่มี deterministic fix) ──
+#   เคสที่เคยตอบผิดความหมาย ไว้จับตาใน replay รอบถัดไป ไม่ใช่ pass/fail gate
+#   - "ย่อหน่อย" = ขอสรุปสั้น (เคยตอบเรื่องสี) — follow-up ของคำตอบยาว
+#   - "ปิดยังไง" = ปิด AOD (always-on display) ของ smartwatch (เคยสอนปิดเครื่อง)
+for m in ("ย่อหน่อยครับ", "สรุปสั้นๆ ให้หน่อย",
+          "จอ always on ปิดยังไงครับ", "aod ปิดยังไง"):
+    add("misinterpret_monitor", m)
+
 # ─── write ──────────────────────────────────────────────────
 with OUT.open("w", encoding="utf-8") as f:
     for q in Q:

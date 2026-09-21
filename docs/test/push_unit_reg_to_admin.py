@@ -59,6 +59,7 @@ def push_questions(coll, recs: list[dict], tag: str) -> int:
             "final_status": "error" if n_err else "bot_answered",
             "replayed_at": datetime.now(timezone.utc),
             "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
             "replay_batch_id": f"unit_reg_{tag}",
             "extra": {
                 "kind": "unit_index_regression_questions",
@@ -92,6 +93,7 @@ def push_conversations(coll, recs: list[dict], tag: str) -> int:
             "final_status": r.get("final_status") or "bot_answered",
             "replayed_at": datetime.now(timezone.utc),
             "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
             "replay_batch_id": f"unit_reg_{tag}",
             "extra": {
                 "kind": "unit_index_regression_conversation",

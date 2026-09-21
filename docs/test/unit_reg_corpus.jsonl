@@ -298,3 +298,7 @@
 {"id": "q298", "topic": "general_policy", "shop": "XiaoVVThailand", "message": "ร้านเปิดกี่โมงครับ"}
 {"id": "q299", "topic": "general_policy", "shop": "QCYThailand", "message": "ติดต่อร้านช่องทางไหนได้บ้าง"}
 {"id": "q300", "topic": "general_policy", "shop": "LydstoThailand", "message": "มีสาขาหน้าร้านไหมครับ"}
+{"id": "q301", "topic": "misinterpret_monitor", "shop": null, "message": "ย่อหน่อยครับ"}
+{"id": "q302", "topic": "misinterpret_monitor", "shop": null, "message": "สรุปสั้นๆ ให้หน่อย"}
+{"id": "q303", "topic": "misinterpret_monitor", "shop": null, "message": "จอ always on ปิดยังไงครับ"}
+{"id": "q304", "topic": "misinterpret_monitor", "shop": null, "message": "aod ปิดยังไง"}

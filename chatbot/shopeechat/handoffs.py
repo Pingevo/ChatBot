@@ -32,13 +32,14 @@ def detect_human_request(req, ctx: dict) -> dict | None:
     #   → บอทตอบ "แอดมินมาดูแลแล้วค่ะ" (เท็จ) + handoff_to_admin=null (ไม่ escalate)
     # ตอนนี้: detect คำขอคุยกับคน → ส่งต่อแอดมินจริง + ตอบว่า "เดี๋ยวส่งต่อให้แอดมินนะคะ"
     _HUMAN_REQUEST_KWS = (
-        "ขอคุยกับคน", "ขอคุยกับแอดมิน", "ขอแอดมิน", "ขอคน", "มีคนตอบไหม",
+        "ขอคุยกับคน", "ขอคุยกับแอดมิน", "ขอแอดมิน", "มีคนตอบไหม",
         "มีคนไหม", "มีมนุษย์ไหม", "มนุษย์ตอบ", "มนุษย์มาตอบ", "คนตอบหน่อย",
         "admin มา", "admin ตอบ", "แอดมินมา", "แอดมินตอบ", "แอดมินไม่ทำงาน",
         "ไม่มีคนตอบ", "ไม่มีแอดมิน", "เมื่อไหร่จะมีคน", "เมื่อไหร่จะมีแอดมิน",
         "เมื่อไหร่จะมีมนุษย์", "อยากคุยกับคน", "อยากคุยกับแอดมิน",
-        "ให้คนตอบ", "ให้แอดมินตอบ", "ติดต่อแอดมิน", "ติดต่อคน",
-        "พูดกับคน", "พูดกับแอดมิน", "ส่งต่อแอดมิน", "ส่งต่อคน",
+        "ให้คนตอบ", "ให้แอดมินตอบ", "ติดต่อแอดมิน",
+        "พูดกับแอดมิน", "ส่งต่อแอดมิน",
+        # ⚡ "ขอคน"/"ติดต่อคน"/"พูดกับคน"/"ส่งต่อคน" ย้ายไป composition (มี guard กัน "คนละ"/"คนขับ")
         # BUG-M fix — เพิ่มคำที่ลูกค้าไทยใช้จริงแต่หลุด (จาก QA 2026-09-11)
         "กรุณาตอบกลับ", "ตอบหน่อย", "มีใครอยู่ไหม", "ยังอยู่ไหม",
         "แอดดด", "ทำไมไม่ตอบ", "หายไปไหน", "แอดมินยังไม่ตอบ",
@@ -48,6 +49,29 @@ def detect_human_request(req, ctx: dict) -> dict | None:
     )
     _msg_low = (req.message or "").lower().replace("ำ", "ัม")
     _is_human_request = any(kw in _msg_low for kw in _HUMAN_REQUEST_KWS)
+    # ⚡ BUG-M phase 2 — composition: (verb + target) ครอบ phrasing ใหม่โดยไม่ต้องเพิ่มทีละเคส
+    #   เคส QA ที่หลุด: "ติดต่อเจ้าหน้าที่" / "แชทกับเจ้าหน้าที่" / "ติดต่อร้านค้า"
+    #   gap [กับหาด่วน]{0,6} รองรับ "ขอคุยกับแอดมิน" / "โทรหาเจ้าหน้าที่" / "แชทกับพนักงาน"
+    _HUMAN_VERB_RE = (
+        r"(?:ติดต่อ|โทรหา|โทร|คุยกับ|คุย|แชทกับ|แชท|พูดคุยกับ|พูดคุย|พูดกับ|พูด"
+        r"|ขอคุย|ขอพูด|ขอแชท|ขอ|ส่งต่อ|ให้|อยากคุย|อยากพูด|อยากแชท|อยาก)"
+    )
+    #   target "คน" ต้องกัน "คนละ"/"คนขับ"/"คนส่ง" (คำทั่วไป ไม่ใช่ขอคุยกับคน)
+    _HUMAN_TARGET_RE = r"(?:เจ้าหน้าที่|พนักงาน|ทีมงาน|แอดมิน|admin|มนุษย์|human|agent|staff|คนจริง|ตัวคน|คน(?!ละ|ขับ|ส่ง|รับ))"
+    if not _is_human_request and re.search(
+        _HUMAN_VERB_RE + r"[กับหาด่วน]{0,6}\s*" + _HUMAN_TARGET_RE, _msg_low
+    ):
+        _is_human_request = True
+    # "ร้าน" เป็น target เฉพาะ contact-verbs — "คุยเรื่องร้าน" ไม่ใช่ขอคุยกับคน
+    if not _is_human_request and re.search(r"(?:ติดต่อ|โทรหา|โทร|ขอเบอร์)\S{0,6}ร้าน", _msg_low):
+        _is_human_request = True
+    # English — "talk to human" / "speak to agent" / "contact staff" / "real person"
+    if not _is_human_request and re.search(
+        r"(?:talk|speak|chat|call|contact|connect)\W{0,5}(?:to\W{0,5})?(?:a\W{0,5})?"
+        r"(?:human|agent|staff|admin|person|someone|real)",
+        _msg_low,
+    ):
+        _is_human_request = True
     # BUG-M fix — "แอด" คำเรียกแอดมินที่สั้นและใช้บ่อยที่สุด แต่ต้องกัน false positive
     #   ("แอดเพื่อน", "แอดไลน์", "แอดเดรส") → ใช้เฉพาะข้อความสั้นที่ไม่มีคำต่อท้าย
     if not _is_human_request:
@@ -61,18 +85,54 @@ def detect_human_request(req, ctx: dict) -> dict | None:
             ))
         ):
             _is_human_request = True
-    if _is_human_request:
+    # ⚡ BUG-M part D — ลูกค้าโกรธ/ผิดหวัง → escalate ให้คนจริง
+    #   เคส QA: "เห้ยช้าว่ะ จำไม่ได้เว้ย" / "ผิดหวังมากกกกกค่ะ" / "หัวร้อนแล้วนะ"
+    #   composition ไม่ใช่ flat kw:
+    #   - strong marker เดี่ยวพอ ("ผิดหวัง", "หัวร้อน", "ตีของกลับ")
+    #   - mild marker ต้องมากับคำหยาบ/คำเน้นบ่น ("ช้ามากว่ะ", "นานมากกก") —
+    #     กัน "ส่งช้าไหม" (คำถาม) หลุดเป็น anger
+    _is_angry = False
+    _STRONG_ANGER = (
+        "เห้ย", "เฮ้ย", "หัวร้อน", "โกรธ", "โมโห", "ผิดหวัง", "เซ็ง",
+        "รำคาญ", "ห่วย", "กาก", "แย่มาก", "แย่จริง", "แย่จัง", "แย่สุด",
+        "แย่ที่สุด", "ไม่ไหวแล้ว", "ตีของกลับ", "ไม่เอาแล้ว",
+        "เลวร้าย", "แย่เอามาก", "worst",
+    )
+    _MILD_ANGER = (
+        "ช้ามาก", "ช้าจัง", "ช้าเกิน", "ช้าสุด", "นานมาก", "นานเกิน",
+        "รอนาน", "ไม่ตอบเลย", "ตอบช้า", "เงียบหาย", "ไม่มีคนตอบ",
+        "ไม่มีใครตอบ", "ไม่มีการตอบ", "ช้าว่ะ", "ช้าเว้ย",
+    )
+    if any(kw in _msg_low for kw in _STRONG_ANGER):
+        _is_angry = True
+    elif any(kw in _msg_low for kw in _MILD_ANGER):
+        _is_angry = True
+    # question-guard — ถามจริง ("ช้ามากไหม" / "รอนานไหมคะ") ไม่ใช่บ่น → ไม่ escalate
+    #   (ใช้เฉพาะ mild marker; strong marker เช่น "ผิดหวังไหม" แทบไม่มีในการใช้จริง)
+    if _is_angry and not any(kw in _msg_low for kw in _STRONG_ANGER):
+        if re.search(
+            r"(ไหม|มั้ย|หรอ|เหรอ|รึเปล่า|หรือเปล่า|ป่าว|บ้าง|แค่ไหน|เท่าไหร่|เท่าไหน|กี่วัน|กี่ชั่วโมง|เมื่อไหร่|เมื่อไหน|ตอนไหน|รึ)[คะค่ะครับ\s\?]*$",
+            _msg_low,
+        ):
+            _is_angry = False
+
+    if _is_human_request or _is_angry:
+        _reason = "human_request" if _is_human_request else "customer_frustration"
+        _topic = "ลูกค้าขอคุยกับแอดมิน" if _is_human_request else "ลูกค้าไม่พอใจ/โกรธ"
         _human_answer = (
             f"ขออภัยที่ให้รอนะคะ เดี๋ยวส่งต่อแชทนี้ให้แอดมินดูแลให้นะคะ "
             f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+            if _is_human_request else
+            f"ขออภัยที่ทำให้ไม่พอใจนะคะ เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
+            f"ดูแลให้โดยเร็วนะคะ รบกวนรอการติดต่อกลับอีกครั้งนะคะ"
         )
         _total_elapsed = _time.time() - _total_start
 
         # ส่งต่อแอดมิน (best-effort) — เหมือน tax invoice handoff
         if req.conversation_id:
-            _app_module._send_handoff(req, None, reason="human_request",
-                          claim={"topic": "ลูกค้าขอคุยกับแอดมิน"}, log_tag="HUMAN-HANDOFF")
-        print(f"[TIMING] HUMAN-HANDOFF: {_total_elapsed:.2f}s", file=sys.stderr)
+            _app_module._send_handoff(req, None, reason=_reason,
+                          claim={"topic": _topic}, log_tag="HUMAN-HANDOFF")
+        print(f"[TIMING] HUMAN-HANDOFF({_reason}): {_total_elapsed:.2f}s", file=sys.stderr)
         return dict(
             answer=_human_answer,
             answer_segments=llm.split_segments(_human_answer),
@@ -84,12 +144,12 @@ def detect_human_request(req, ctx: dict) -> dict | None:
             elapsed=round(_total_elapsed, 2),
             cost=0.0,
             handoff_to_admin=True,
-            handoff_reason="human_request",
+            handoff_reason=_reason,
             timing=_timing_breakdown,
             steps=_steps,
             routing_decision=_app_module._routing(
-                "handoff", "human_request: ลูกค้าขอคุยกับคน → ส่งแอดมิน",
-                handoff_reason="human_request",
+                "handoff", f"{_reason}: {_topic} → ส่งแอดมิน",
+                handoff_reason=_reason,
             ),
             image_desc=_image_desc_out,
         )

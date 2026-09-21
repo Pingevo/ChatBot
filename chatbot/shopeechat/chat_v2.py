@@ -1443,49 +1443,43 @@ def chat_v2(req) -> dict:
     """
     # Stage 1: context
     ctx, history, client, db = _build_context(req)
-    try:
-        # Stage 2: deterministic fast paths
-        _resp = _check_deterministic(req, ctx, history, db)
-        if _resp:
-            return _resp
+    # Stage 2: deterministic fast paths
+    _resp = _check_deterministic(req, ctx, history, db)
+    if _resp:
+        return _resp
 
-        # Stage 3: intent
-        _intent = _classify_intent(req, ctx, history)
+    # Stage 3: intent
+    _intent = _classify_intent(req, ctx, history)
 
-        # Stage 4: anchor
-        _anchor = _detect_anchor(req, ctx, history, db)
+    # Stage 4: anchor
+    _anchor = _detect_anchor(req, ctx, history, db)
 
-        # Stage 5: retrieve (RAG)
-        _products = _retrieve_products(req, ctx, history, _intent, _anchor, db)
+    # Stage 5: retrieve (RAG)
+    _products = _retrieve_products(req, ctx, history, _intent, _anchor, db)
 
-        # Stage 6: search if needed
-        _products, _extra_ctx, _search_meta = _search_if_needed(
-            req, ctx, history, _intent, _products, db
-        )
+    # Stage 6: search if needed
+    _products, _extra_ctx, _search_meta = _search_if_needed(
+        req, ctx, history, _intent, _products, db
+    )
 
-        # Stage 7: no product guard (หลัง search)
-        _resp = _no_product_guard(req, ctx, _intent, _products, _search_meta["used"])
-        if _resp:
-            return _resp
+    # Stage 7: no product guard (หลัง search)
+    _resp = _no_product_guard(req, ctx, _intent, _products, _search_meta["used"])
+    if _resp:
+        return _resp
 
-        # Stage 8: LLM2 answer
-        _answer, _usage, _cost, _model = _build_answer(
-            req, ctx, history, _intent, _anchor, _products, _extra_ctx
-        )
-        return _make_response(
-            _answer, _products[:ctx["limit"]], ctx,
-            source="product_store",
-            usage=_usage,
-            web_search_used=_search_meta["used"],
-            web_search_reason=_search_meta["reason"] if _search_meta["used"] else "",
-            routing=_app_module._routing(
-                "bot_reply",
-                f"product_store: {len(_products)} products" +
-                (f" + search({_search_meta['reason']})" if _search_meta["used"] else ""),
-            ),
-        )
-    finally:
-        try:
-            client.close()
-        except Exception:
-            pass
+    # Stage 8: LLM2 answer
+    _answer, _usage, _cost, _model = _build_answer(
+        req, ctx, history, _intent, _anchor, _products, _extra_ctx
+    )
+    return _make_response(
+        _answer, _products[:ctx["limit"]], ctx,
+        source="product_store",
+        usage=_usage,
+        web_search_used=_search_meta["used"],
+        web_search_reason=_search_meta["reason"] if _search_meta["used"] else "",
+        routing=_app_module._routing(
+            "bot_reply",
+            f"product_store: {len(_products)} products" +
+            (f" + search({_search_meta['reason']})" if _search_meta["used"] else ""),
+        ),
+    )
