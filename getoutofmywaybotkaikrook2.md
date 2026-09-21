@@ -288,6 +288,11 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 
 ## ผ่านแล้ว (file 2)
 
+### ✅ 2026-09-21 — ปรับกฎ commit/branch/PR (AGENTS.md ข้อ 10)
+
+- **ทำไม:** user ต้องการ workflow "ทำ local → commit หลายครั้งบน branch → PR ครั้งเดียว" + กฎเลือก branch: งานใหม่ทิศเดียวกับ branch เดิม → commit ต่อ; คนละทิศ → สร้าง branch ใหม่
+- **แก้:** AGENTS.md ข้อ 10 ขยายจาก "กฎการ commit" เป็น "commit / branch / PR" — ทำงานบน branch เสมอ, commit หลายครั้งได้หลังงานถูกอนุมัติ (ไม่ต้องถามทุก commit), push=สำรองไม่ใช่ PR, PR ครั้งเดียวตอนเสร็จ, ยังต้องถามก่อน commit ครั้งแรกของงาน + ก่อนเปิด PR
+
 ### ✅ 2026-09-21 — issue #19: `||` แทน `|||` → การ์ดติดฟองข้อความ
 
 - **error:** LLM พิมพ์ตัวคั่น `||` (2 ขีด) แทน `|||` → `split_segments` พลาด → markdown การ์ดสินค้าหลุดในฟองข้อความ (1/40 sim chats)
