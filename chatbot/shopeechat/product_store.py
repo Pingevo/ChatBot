@@ -350,6 +350,23 @@ def _first_image_url(doc: dict) -> str:
     return f"https://cf.shopee.co.th/file/{ids[0]}"
 
 
+# ⚡ T8 — keyword ที่บอกว่า "ข้อความพูดถึงสินค้า" (hoist จาก _clean_description
+#   เพื่อให้ app.py ใช้ gate การ attach product cards ได้ — single source)
+_PRODUCT_MENTION_KWS = (
+    "สายชาร์จ", "หัวชาร์จ", "ชุดชาร์จ", "แท่นชาร์จ", "พาวเวอร์แบงค์", "แบตเตอรี่สำรอง",
+    "หูฟัง", "earbuds", "tws", "สมาร์ทวอช", "smartwatch", "นาฬิกา",
+    "โทรศัพท์", "phone", "สมาร์ทโฟน", "เคส", "ฟิล์ม", "ลำโพง",
+    "cable", "charger", "adapter", "powerbank", "power bank",
+    "iphone", "samsung", "xiaomi", "huawei", "oppo", "vivo", "realme",
+    "cuktech", "anker", "baseus", "ugreen", "romoss",
+    "65w", "100w", "120w", "240w", "w ", "pd", "qc",
+    "usb-c", "type-c", "usb a", "lightning", "micro usb",
+    "ใช้กับ", "รองรับ", "สำหรับ", "compatible",
+    # app/compatibility questions — ต้องเห็น description เพื่อบอกชื่อแอพ
+    "แอพ", "แอป", "app", "ต่อมือถือ", "เชื่อมต่อมือถือ",
+)
+
+
 def _clean_description(desc: str, message: str = "") -> str:
     """กรอง description ของ Shopee ตามคำถาม — เอาเฉพาะส่วนที่เกี่ยวข้อง.
 
@@ -394,19 +411,7 @@ def _clean_description(desc: str, message: str = "") -> str:
     # ถ้าเป็นคำถามเกี่ยวกับสินค้า (มี product keyword ใดๆ) → ส่ง spec เสมอ
     # เพราะลูกค้าถาม "สายชาร์จ 65w" หรือ "หัวชาร์จ 100w" ก็ต้องเห็นสเปก
     # จะได้ตอบได้ว่าสินค้าไหนรองรับ 65w/100w บ้าง
-    product_kw = (
-        "สายชาร์จ", "หัวชาร์จ", "ชุดชาร์จ", "แท่นชาร์จ", "พาวเวอร์แบงค์", "แบตเตอรี่สำรอง",
-        "หูฟัง", "earbuds", "tws", "สมาร์ทวอช", "smartwatch", "นาฬิกา",
-        "โทรศัพท์", "phone", "สมาร์ทโฟน", "เคส", "ฟิล์ม", "ลำโพง",
-        "cable", "charger", "adapter", "powerbank", "power bank",
-        "iphone", "samsung", "xiaomi", "huawei", "oppo", "vivo", "realme",
-        "cuktech", "anker", "baseus", "ugreen", "romoss",
-        "65w", "100w", "120w", "240w", "w ", "pd", "qc",
-        "usb-c", "type-c", "usb a", "lightning", "micro usb",
-        "ใช้กับ", "รองรับ", "สำหรับ", "compatible",
-        # app/compatibility questions — ต้องเห็น description เพื่อบอกชื่อแอพ
-        "แอพ", "แอป", "app", "ต่อมือถือ", "เชื่อมต่อมือถือ",
-    )
+    product_kw = _PRODUCT_MENTION_KWS
     want_product = any(kw in msg_lower for kw in product_kw)
     if want_product:
         want_spec = True

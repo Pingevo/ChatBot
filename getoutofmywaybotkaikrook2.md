@@ -20,6 +20,40 @@
 
 ## กำลังทำ (active)
 
+### ✅ Audit + rewrite docs/schema.md ตามโครงสร้างปัจจุบัน (2026-09-21) — เสร็จ + verified → ย้ายไป "ผ่านแล้ว"
+
+### ✅ เขียน SRS_SSD.md ใหม่ทั้งหมด (2026-10-02) — เสร็จ + verified
+
+- **ทำไม:** SRS เดิมลงวันที่ 2026-09-02 ขาดงาน ~1 เดือน — section 6 ครอบแค่ ~10 modules ขาด 13 โมดูล (device_compat/device_specs_data/order_flow/handoffs/warranty_flow/units/guards/responses/route_context/chat_models/test_chat_api/chat_v2/chatbotv3/scripts), line numbers ตายหมด, pipeline §5 ไม่ตรงโค้ด
+- **ตัดสินใจกับ user:** section 6 = มาตรฐาน 8 ช่อง (Purpose/Input/Output/Calls/Called by/How it works/Side effects/Error-fallback) · เอา line numbers ออก (ใช้ชื่อฟังก์ชัน) · ขอบเขตครบ: shopeechat ทุกไฟล์ + chat_v2/chatbotv3 + scripts + ChatAdminWeb
+- **วิธี:** audit ฟังก์ชันจากโค้ดจริงทุกไฟล์ (~280 signatures, ไม่เชื่อ SRS เดิม) → เขียนทับ `docs/SRS_SSD.md` ทั้งไฟล์ (815 บรรทัด) → verify ชื่อฟังก์ชันทุกตัวกับ `def/class` จริง (script กรอง — เหลือแต่ env/collection/field names + callee ที่ตั้งใจ flag)
+- **ครอบ:** §1 ภาพรวม 3 engines · §2 arch + connections · §3 DB 4 กลุ่ม (admin/dbWallet/order/stock + local files) · §4 external services · §5 pipeline จริง (legacy 21 ขั้น + v2 8 stages + v3 flow + guard boundary) · §6 function inventory 26 หมวด (app/llm/product_store/intent/kb/web_search/persona/warranty/warranty_flow/conv_products/order_store/order_flow/handoffs/device_compat/device_specs/units/embedding/route_context/responses/guards/chat_models/test_chat_api/chat_v2/chatbotv3/scripts/ChatAdminWeb) · §7 env ครบ · §8 status · §9 plans · §10 known issues 15 ข้อ · appendix call graph
+- **เจอ bug ใหม่ระหว่าง audit (จดใน §10 #1):** `chat_v2` เรียก callee ที่ไม่มี 3 จุด — (a) `knowledge_base.get_general_context` ไม่มี (ของจริง `build_general_context`) → AttributeError ลอย = **500 ทุก general question ใน v2** · (b) `_cp.add_item_anchor` (c) `_cp.get_timeline` ไม่มีใน conversation_products → try/except กลืน = anchor persistence + follow-up retrieval no-op เงียบ
+- **กระทบ:** doc เดิมถูกเขียนทับทั้งไฟล์; ไม่แตะโค้ด — bug ที่เจอจดไว้ใน §10 + §9.2 (งาน chat_v2 callee fix)
+- **✅ ขยายเสร็จ (2026-10-02):** user ว่าสั้นเกิน → เขียนใหม่เป็นมาตรฐาน SRS/SSD เต็ม (1,135 บรรทัด): (1) §6 แตก 1 row/ฟังก์ชันจริง ~280 rows ไม่รวมกลุ่ม — 26 หมวดครบทุก module (2) เติม ChatRequest/Response field tables, warranty SM State 0-7 table, PRODUCT_TYPES ~105 ตัว + charger subtypes 7 ตัว, cert 4 แหล่ง, dedupe scorecard, intent labels ครบ, fetch_products internal flow (3) §5 เพิ่มตาราง trigger/branch ของ deterministic paths + engine routing (4) ไม่เอา changelog/line numbers กลับ (5) re-verify ชื่อฟังก์ชันเทียบ `def/class` — ผ่าน เหลือแต่ env/collection/field names + 3 callee ที่ตั้งใจ flag
+
+### Audit สถานะ issue จาก QA docs 2026-09-15 (2026-09-21) — 📋 จดสถานะแล้ว รอวิเคราะห์/แพลนกับ user
+
+- **ต้นทาง:** `~/Downloads/issue-chat-annotations-partial-index-2026-09-15.md` + `shadow-inbox-bot-qa-notes-2026-09-15.md`
+- **✅ แก้แล้ว:** (1) partial index chat_annotations → unique index เดียว {scope,conv_id,gen_batch_id} ตามที่เสนอเป๊ะ (mongoClient.ts:48-65,181) (2) NEW-4 ภาษา → policy ใหม่ default ไทยเสมอ ไม่ detect จากข้อความ (llm.py:92-154)
+- **🟡 แก้บางส่วน:** NEW-1 (NER primary แล้ว + reject ชื่อมีตัวเลข แต่ fallback regex `ค[่้๊๋ั]?ะ*` ลบ "ค"/"ชื่อ" ทิ้งยังอยู่ warranty.py:629-638) · BUG-M (เพิ่ม KW หลายคำ + post-check fixed patterns llm.py:73-88 แต่ยังขาด "ติดต่อเจ้าหน้าที่/แชทกับเจ้าหน้าที่/ติดต่อร้านค้า" และ post-check ไม่ escalate จริง) · NEW-2 (warranty_flow State 7 รับรูปเป็น evidence + _received_items แล้ว แต่คำถามใน claim ยังถูกกลืน by design State 6) · NEW-8 (cert search มี type_filter แล้ว handoffs.py:168-188) · BUG-H/K/O (sellable-first ranking + shop_capability_line แล้ว แต่ยังไม่ verify ซ้ำ)
+- **❌ ยังไม่แก้:** BUG-Q (error path ยังแนบ `{exc}` ดิบถึงลูกค้า llm.py:1455/1588/1692 + quota เป็นเรื่อง ops) · NEW-3 (ไม่มี post-check นโยบาย เปลี่ยนได้/คืนได้/ฟรี/โปร/แถม — guards.check_output มีแต่ log observe-only app.py:216-223) · NEW-6 (anchor ไม่ใช้ image_desc) · NEW-7 (ไม่มี suppression การ์ดสินค้าตาม intent) · NEW-9 (elapsed plumbing ดูถูกแล้วทั้ง 2 ฝั่ง แต่ต้อง re-measure batch ใหม่) · NEW-10 (vision 503 = quota เดียวกับ BUG-Q) · BUG-I (ไม่มี cap prompt tokens) · markdown table (ไม่มีตัวแปลง) · "ทางร้าน จะ" space เกินยังอยู่ (warranty_flow.py:383)
+- **guard ที่มีอยู่:** `no_product_found_handoff` มีที่ app.py:3980 + chat_v2.py:1313 (QA เจอว่าไม่เคย fire — ต้องเช็คเงื่อนไข arm)
+- **แพลนแก้ root-cause เขียนแล้ว:** `docs/plans/2026-09-21-qa-remaining-bugs-plan.md` — จัดกลุ่มเป็น 5 root cause (RC-A trust boundary, RC-B claim slots, RC-C keyword whack-a-mole, RC-D error leak, RC-E measurement) + 16 tasks · self-review 5 รอบแล้ว
+- **กำลังทำ (2026-09-21):** Phase 0 ✅ (T1-T4 เสร็จ+เทสผ่าน) · Phase 1 ✅ (T5 claim-state fill-once + T6 order-problem routing — เสร็จ+เทสผ่าน) · ถัดไป Phase 2 ตามแพลน `docs/plans/2026-09-21-qa-remaining-bugs-plan.md` — เงื่อนไข: เทสก่อนข้ามเฟส + ห้ามกระทบเคสผ่าน
+- **decisions จาก user (2026-09-21):** (1) quota — ตัดออกจาก scope user จัดการเอง (NEW-10 vision 503 ตัดไปด้วย) (2) post-handoff = บอทเงียบจน ticket closed + ลูกค้าทักซ้ำ — verify แล้วว่ามีครบอยู่แล้ว: worker `botWorkerService.ts:334` skip เมื่อ assigned_to+!closed (เงียบจริง ไม่เรียกบอท) + bot layer `warranty_flow.py:148-199` lock ด้วย ticket_state เป็น fallback → **ไม่ต้องเปลี่ยน State 6** — NEW-2 fallthrough ใช้เฉพาะ waiting state ก่อน handoff (State 7) (3) fulfillment problem (ส่งผิด/ของขาด/ของแถมไม่ครบ) → ส่งแอดมิน — reuse return/refund path ใน order_flow.py:75-286 เดิม (detect→order_sn→handoff) ไม่สร้าง flow ใหม่; detection แบบ composition (received-verb+problem) + guard freebie-question ด้วย ไหม/เหรอ — รายละเอียดใน plan T6
+
+### live-assignment 500 error (2026-09-21) — ✅ fixed + verified (data layer)
+
+- **อาการ:** หน้า /live-assignment console AxiosError 500 — poll `GET /api/live-assignment?list=1` ตายทุกครั้ง
+- **root cause (reproduce แล้วด้วย script):** `push_unit_reg_to_admin.py` insert docs เข้า `test_assignment` โดยใส่ `created_at`/`replayed_at` แต่**ไม่ใส่ `updated_at`** (51 docs, replayed_by=`unit_reg_2026-09-18`) → sort `updated_at:-1` ดัน doc ไม่มี field ไปท้าย → route.ts `docs[last].updated_at.toISOString()` throw TypeError → catch → 500
+- **วิธีแก้:**
+  1. `push_unit_reg_to_admin.py` — เพิ่ม `"updated_at"` ในทั้ง 2 doc builders (push_questions + push_conversations) — root cause
+  2. backfill `updateMany({updated_at:{$exists:false}}, [{$set:{updated_at:"$created_at"}}])` → 51 docs แก้แล้ว
+  3. `live-assignment/route.ts` — cursor fallback `updated_at ?? created_at` (กัน writer อื่นลืม field)
+- **verify:** probe script เดิม → cursor คำนวณได้ `2026-09-07T09:29:27Z|shp_458...` · bad docs = 0 · `tsc --noEmit` ผ่าน · `py_compile` ผ่าน · endpoint ตอบ 401 (auth ปกติ — dev server hot-reload แล้ว)
+- **ผลกระทบเคสอื่น:** admin-chat-result sort `replayed_at` (มีอยู่) ปลอดภัย · test-assignment ไม่แตะ `updated_at` · frontend `liveDocToConversation` มี `|| created_at` อยู่แล้ว · conv_detail ไม่ใช้ `updated_at`
+
 ### test-assignment history + live-assignment inbox โหลดช้า/หน่วง (2026-09-18) — ✅ fixed + verified
 
 - **อาการ:** user รายงาน history หน้า test-assignment โหลดช้า + live-assignment inbox หน่วง
@@ -160,8 +194,9 @@
   - bot :8020 `USE_UNIT_INDEX=1` (log `/tmp/chatbot_unit_8020.log`)
 - **ผลเทส (เซฟแล้ว):**
   - **300Q ✅ ครบ** — `docs/test/results/unit_reg_questions_2026-09-18.jsonl` — answered 300/300 (quota error ช่วงแรกถูก retry จนหมด) · unit_path=118 · fallback_dead_pool=15 · web=15 · handoff=42
-  - **50 convs — หยุดกลางทางตามสั่ง user** — `docs/test/results/unit_reg_convs_2026-09-18.jsonl` = 33 convs / 347 qa turns (quota error 111 turns เกิดระหว่างรัน — เป็น infra ไม่ใช่ logic)
+  - **50 convs ✅ ครบ (resume จาก 34)** — `docs/test/results/unit_reg_convs_2026-09-18.jsonl` = 50 convs / **579 qa turns** — answered 326 · quota error 253 (44% — pool หมดช่วงบ่าย เป็น infra ไม่ใช่ logic) · unit_path=60 · dead_pool fb=6
   - push เข้า `test_assignment` แล้ว (replayed_by=`unit_reg_2026-09-18` → ดูที่ /admin-chat-result)
+  - conv shops: IMILab 128 / BlackShark 119 / ZMI 96 / CukTech 91 / Kospet 75 qa turns
   - backup run1 ที่ error: `unit_reg_questions_2026-09-18.run1_err.jsonl`
 - **⚠️ ระวัง:** API_KEY_INVALID/429 ใน pool (entry บน) — error จะถูกจดเป็น error ไม่แก้ตามคำสั่ง
 - **observations เบื้องต้น (จดไว้ ยังไม่แก้):**
@@ -237,6 +272,29 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 ---
 
 ## ผ่านแล้ว (file 2)
+
+### ✅ 2026-09-21 — rewrite docs/schema.md ตามโครงสร้างจริง (doc-only, ไม่แตะโค้ด)
+
+- **งาน (user สั่ง):** อ่าน schema.md เดิม → เขียนอัปเดตว่าโครงสร้างตอนนี้เป็นยังไง ใครใช้ collection ไหนบ้าง
+- **เจอว่าเดิมล้าสมัย:** เขียนไว้ตอน 34 collections แต่ `config.ts` ตอนนี้ 36 keys + ขาด collections ที่เพิ่มหลัง KB re-import (kb_products/kb_qa/kb_raw), sellable_units, image_texts, stock DB `itStock.Products`, llm key pool ใน system_configs
+- **สิ่งที่แก้ใน schema.md:**
+  - §1.2: 34→36 keys + note ว่าทุกชื่อ override ด้วย `ADMIN_MONGO_COLLECTION_*` (production ใช้ `*_shp`)
+  - §1.3: DB connections 3→4 (เพิ่ม stock DB `STOCK_URI`/`STOCK_DB`) + เพิ่ม §1.4 ตาราง 7 collections ที่ Python เป็นเจ้าของ (อยู่นอก COLLECTIONS)
+  - `knowledge_base` (§2.3): ระบุเป็น legacy fallback สำหรับ Python — runtime หลักย้ายไป kb_qa/kb_products (`_kb_coll` เหลือ caller เดียวใน get_general_faq); admin UI `/knowledge` ยัง CRUD เต็ม
+  - `conversations` (§2.6): เพิ่ม field `labels` (อ่านโดย /labels + workflowEngine) + ชื่อ deployed `conversations_shp`
+  - `shops` (§2.8): เพิ่ม writer `sync-shops.ts` (aggregate จาก conversations_shp)
+  - `system_configs` (§2.19): แก้จาก single-doc → multi-doc config store 3 docs (`main_config`/`llm_config`/`role_permissions`) — เดิมเขียน PK ผิดเป็น "default" (จริงคือ `main_config`); llm_config อ่านโดย Python `llm.py` (TTL 10s) + `web_search.py`
+  - `test_chat_sessions` (§2.26): ref ย้าย app.py→test_chat_api.py + เพิ่ม fields `source`/`script_test` + writer `shadow_openrouter.py`
+  - `test_assignment` (§2.28): เพิ่ม reader liveAssignmentService/adminKpiService + writer `push_unit_reg_to_admin.py`
+  - §3.2 ShpProducts: ขยาย consumers (units/knowledge_base/app.py/chat_v2/chatbotv3/replay_compare + Next.js 2 services) + env ฝั่ง Next.js คือ `SHP_PRODUCTS_COLLECTION`
+  - เพิ่ม §3.5 stock DB `itStock.Products` (cert search path เท่านั้น, collection name hardcoded `Products`)
+  - §4 ShpOrders: เพิ่ม Next.js `/admin/conversations/[id]/orders` route (buyer_user_id lookup), ฟิลด์ครบ Phase 3C, ลบ `lookup_orders_by_buyer` (ไม่มีจริงในโค้ด)
+  - §5 ขยาย 2→7 collections: conversation_products (+order_anchors/active_order_sn/claim_state), test_chat_logs (ref ใหม่), image_texts, sellable_units (schema เต็ม + sellable อ่านสด), kb_products, kb_qa, kb_raw (audit trail ไม่มี reader)
+  - เพิ่ม §7 local files (npz/jsonl pipeline) — แก้จุดที่เดา: ไม่มี build_unit_embeddings.py (จริงคือ `build_embeddings.py --units`/`--qa`), `device_specs_data` เป็น module ไม่ใช่ json
+  - §8 access matrix แยกตาม owner: 8.1 Next.js COLLECTIONS / 8.2 Python-owned / 8.3 external read-only / 8.4 unused
+  - renumber §2.13 ซ้ำ (quick_replies+close_history) → §2.13-2.32 เรียงถูก
+- **Verify:** เช็คชื่อ collection ทุกตัวกับ `config.ts` (36 keys), `mongoClient.ts` ensureIndexes, per-service `COLLECTIONS.*` grep (34 services), direct collection ใน API routes, Python modules (units/knowledge_base/test_chat_api/conversation_products/llm/app), import/build scripts, doc shapes จาก source (parse_row, _build_unit, import_image_texts, test_chat_api)
+- **หมายเหตุ drift ที่ยังค้าง (ไม่ได้แก้ — นอก scope):** `docs/SRS_SSD.md` §3.1 เขียนชื่อผิดว่า `knowledge_base_products`/`knowledge_base_qa` (จริงคือ `kb_products`/`kb_qa`)
 
 ### ✅ 2026-09-18 — stale timeline card: shadow gen โชว์รูป desc banner หลัง fix variant image
 
@@ -497,3 +555,55 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **E2E:** `redmi note 9` → spec-db hit (usb-c 18W) + **0 web call** (ก่อน: จ่าย $0.009/ครั้ง) · `macbook` → PB200P/PB250 เดิมเป๊ะ 0 web · `ชาร์จ notebook ได้ไหม` → generic notebook 65W → แนะนำ GaN 65-100W ✅
 - **ผลกระทบเคสอื่น:** lookup logic ไม่แตะ (data เท่านั้น) · brand guard กัน alias ข้ามแบรนด์ (oppo a73→None, xiaomi x9→None) · dupe keys 6 ตัวถูกลบ (spec ซ้ำของเดิม) · alias ไทย 4 สะกด
 - **จดไว้:** ไฟล์ `test_compat_mode_filter.py` ถูก IDE/watcher revert 2 รอบระหว่างทำ — ต้องเขียนแบบ atomic ผ่าน shell · server 8020 (unit-index) ยังรันโค้ดเก่า
+
+### ✅ 2026-09-21 — Phase 0 (QA remaining-bugs plan): T1-T4 output boundary + extraction + human-request
+
+แพลน: `docs/plans/2026-09-21-qa-remaining-bugs-plan.md` (review 5 รอบ) — RC-A ไม่มี trust boundary LLM→ลูกค้า / RC-B claim state / RC-C keyword whack-a-mole / RC-D error ดิบหลุด / RC-E วัดไม่ได้
+
+- **T1 (BUG-Q error ดิบถึงลูกค้า):** llm.py มี 6 จุดคืน `f"...({exc})"` แนบ exception → เพิ่ม `LLM_ERROR_REPLY` + `_error_reply()` — ลูกค้าได้ข้อความสุภาพเดียวกัน, exception log ฝั่ง server
+- **T2 (NEW-1 ชื่อขยะ + order_sn):**
+  - root cause: `_THAI_NAME_FALLBACK_RE` ใน `extract_customer_info` เชื่อ text ที่ clean แล้วเป็นชื่อคน → "ขอบคุณ"/ชื่อสินค้ากลายเป็นชื่อ → **ลบทิ้ง** เหลือ NER + EN-name pattern; เพิ่ม reject เมื่อชื่อ EN ติด model/ตัวเลข ("Pro Max" จาก "iPhone 15 Pro Max" ไม่ใช่ชื่อ)
+  - `_PHONE_PATTERN` ใช้ `\b` → normalize ลบ space แล้วเบอร์ติดตัวไทยไม่ match → เบอร์หลุดเป็น order_id → แก้ boundary ให้กัน digit adjacency แทน
+  - mask เบอร์ก่อน scan order_id ทั้ง `extract_customer_info`/`detect_purchase_date_and_order`; order_id ถึง 19 หลัก
+  - `order_store.extract_order_sn` เพิ่ม fallback เลขล้วน 15-19 หลัก (`_ORDER_SN_RE` บังคับมีตัวอักษร → Shopee sn ตัวเลขล้วนไม่ถูกจับ)
+- **T3 (BUG-M human-request):** flat keywords จับ "ติดต่อเจ้าหน้าที่/แชทกับเจ้าหน้าที่/ติดต่อร้านค้า" ไม่ได้ → เพิ่ม composition verb+target regex (คน guarded `(?!ละ|ขับ|ส่ง|รับ)`) + ร้าน-rule (contact verbs เท่านั้น) + English — **แก้ FP เดิมด้วย:** ลบ flat "ขอคน/ติดต่อคน/พูดกับคน/ส่งต่อคน" ที่ match substring ("ขอคนละครึ่ง"/"พูดกับคนขับ" เคยโดน handoff ผิด)
+- **T4 (RC-A trust boundary):** `chat()` → `_chat_impl` + thin wrapper เรียก `guards.enforce` (ครอบ legacy/v2/v3 — funnel /chat จุดเดียว); rules-as-data `_ESCALATE_RULES`: answer อ้าง "แอดมินรับเรื่องแล้ว/เคลมเรียบร้อย" แต่ `handoff_to_admin=False` → **`_send_handoff` จริง** + แทนข้อความ + set flag (เดิม `_false_admin_patterns` ใน llm แก้แค่คำ ไม่ส่งจริง → ลบออกจาก `_strip_kb_markup`); `answer == LLM_ERROR_REPLY` → escalate; fail-open
+- **verify:** py_compile ทุกไฟล์ · test_guards pass · car_charger 16/16 · qtype_guards 27/27 · subtype_parity 42/42 · probe บน :8030 — human-request ใหม่ handoff ถูก / "คนละครึ่ง"/"คนขับ"/"แอดเพื่อน" ไม่หลุด · extract: ชื่อไทย/EN/เบอร์/order 19 หลัก ถูก, "ขอบคุณ"/"Pro Max" ไม่กลายเป็นชื่อ · enforce: false-admin claim → handoff_to_admin=True + ข้อความถูกแทน
+- **ผลกระทบเคสอื่น:** NER path เดิมไม่แตะ (ชื่อจริงยังจับได้) · flat kw ที่เหลือครบคำเดิม · enforce ไม่แตะ resp ที่ handoff แล้ว · v2/v3 ผ่าน wrapper อัตโนมัติ · skip: rewrite-rule (นโยบายไม่มี grounding) = T7 Phase 2 ตามแพลน
+
+### ✅ 2026-09-21 — Phase 1 (QA plan): T5 claim-state fill-once + T6 order-problem routing
+
+- **T5 (RC-B claim ถามซ้ำ/กลืนคำถาม):**
+  - root cause หลัก: legacy `warranty_flow.py` เคลียร์ `claim_state` ทุกครั้งที่ handoff แต่ State-7 receipt ก็ handoff → save→clear ใน turn เดียวกัน → fill-once พัง; v2 (`handle_warranty_flow`) ไม่ load/save claim_state เลย; `purchase_date` ไม่เคยถูก save
+  - helpers ใหม่ (warranty_flow.py:34-124, ใช้ร่วม 2 engines): `_is_question_msg` (question markers กัน swallow), `_merge_claim_slots` (ข้อความปัจจุบัน ∪ persisted — ค่าปัจจุบันชนะ), `_claim_collecting` (persisted marker: stage=collecting หรือมี slot → info resume ได้แม้ last model msg ไม่ใช่ claim prompt), `_update/_clear_claim_state` wrapper, `_maybe_clear_claim_state` (clear เฉพาะ terminal reasons + ข้ามเมื่อ answer ยัง "รบกวนแจ้งข้อมูล"/"ได้รับข้อมูล" — กัน ask-info prompt ที่ใช้ reason in_warranty ลบ state)
+  - legacy: State-7 gate ขยายด้วย `_claim_collecting` + merge+persist (incl. purchase_date) + BUG-D fallback มี question-fallthrough (คำถามล้วน+ไม่ใช่ claim request → ปล่อย pipeline ปกติตอบ) + ticket closed → clear state; v2: load claim_state + merge ทุก collection branch + persist + mark stage=collecting ตอนเริ่มขอข้อมูล
+  - **เจอ regression ตอน probe (แก้แล้ว):** ลูกค้าแทรกคำถามกลาง flow แล้วส่งเลข order ต่อ → `early_order_flow` ดักเป็น order_lookup (เช็ค `_in_claim_flow` จาก last model msg อย่างเดียว) → เพิ่ม check persisted `claim_state` ผ่าน `_claim_collecting` ใน order_flow.py:64-74 → resume ทำงาน + bare order ปกติยัง order_lookup
+- **T6 (ส่งผิด/ของขาด/ของแถมขาด → แอดมิน ไม่ใช่เคลม):**
+  - root cause: `_RETURN_REFUND_KWS` มีแค่คำกลุ่มคืนของ/คืนเงิน → fulfillment complaints หลุดลง LLM intent → โดนจัด warranty_claim เข้าฟอร์มเคลมผิดประเภท
+  - แก้: ขยาย class "ปัญหาออเดอร์ที่ต้องส่งแอดมิน" ใน `early_order_flow` — `_ORDER_PROBLEM_*` composition (context×fault) + direct phrases + hypothetical guard ("ถ้า/สมมติ/ในกรณี/หาก" ข้าม) + topic classifier; reuse path เดิมเป๊ะ: มี order_sn → anchor+handoff `reason=order_problem`+topic / ไม่มี → ถามเลข → follow-up (marker "สินค้าที่ได้รับ/ปัญหาการจัดส่ง/ของแถม/ของไม่ครบ" ใน `_is_rr_followup` + `_rr_followup_order_problem` แยก kind)
+  - priority: match ทั้งคู่ → return/refund ชนะ (behavior เดิม); `not _in_claim_flow` guard ทั้งตอน detect + follow-up (ไม่ดึงคนออกจากเคลม)
+  - fault list ไม่มี "เสีย/พัง/ใช้ไม่ได้" — defect ยังไป warranty เหมือนเดิม
+- **verify:** py_compile · probe :8030 — "ส่งของผิด/ของแถมไม่ครบ/แกะกล่องของขาด/ยังไม่ได้รับของ" → `order_problem_ask_order` · +order_sn → `order_problem_handoff` reason=order_problem+topic · follow-up order-problem→order_problem / return-refund→return_refund (kind ถูก) · "ส่งผิด ขอคืนเงิน" → return_refund ชนะ · negatives: "มีของแถมไหม"→product_store, "สินค้าเสีย"→warranty_claim, "เปลี่ยนได้ไหม"/"ถ้าส่งผิดทำยังไง"→return_policy (ไม่ handoff) · T5 live: fill-once merge เลข order จาก turn ก่อนใน review, question fallthrough → warranty_policy จริง, resume หลังคำถาม → claim รับ order_sn+persist, claim_state ใน DB ถูก · regression: guards ✓ qtype 27/27 parity 42/42 car_charger 16/16
+- **ผลกระทบเคสอื่น:** bare order_sn ไม่มี claim → order_lookup เหมือนเดิม · return/refund path ไม่เปลี่ยน (เพิ่ม flag เฉยๆ) · warranty defect flow ไม่แตะ · tracking/anchor path เหมือนเดิม (ข้ามเฉพาะเมื่อ claim_state collecting)
+
+### ✅ 2026-09-21 — Phase 2 (QA plan): T7-T11 output grounding + card suppress + image anchor + cleanup
+
+- **T7 (RC-A tier-2 — claim ไม่มี grounding ใน context):**
+  - root cause: guard เดิม escalate ได้เฉพาะ "อ้างว่าแอดมินทำแล้ว" — แต่ LLM แต่ง "มีของแถม/คืนเงินได้" โดยไม่มีหลักฐานใน product context ผ่านไปถึงลูกค้าได้
+  - แก้ (guards.py): `_REWRITE_RULES` rules-as-data — promo claim (มีของแถม/แถมฟรี/ลดเหลือ/ส่งฟรี/โปร ฯลฯ) + return claim (เปลี่ยนได้/คืนเงินได้/รับคืน); `_claim_grounded` เช็ค grounding จาก `resp.products` จริง (description_excerpt/raw_description kw + has_promotion/is_flash_sale flags — คือ context ที่ส่งให้ LLM จริง ไม่ต้อง plumb เพิ่ม); `_REWRITE_SKIP_PREFIXES` ข้าม source ที่ context เป็น policy/order อยู่แล้ว (general:/order_/warranty/return_refund/human_request ฯลฯ); lookbehind กัน negation ("ไม่มีของแถม" ผ่าน)
+  - **เจอ defect ตอน live probe (แก้แล้ว):** แทนที่เฉพาะ span ที่ match → เศษ claim ค้าง ("...TA3005U ที่มี[REPLACED]แถม Adaptor") → `_replace_clause` หา clause boundary (`\n`/`|||`/`.!? `/particle ไทย+space) แล้ว swap ทั้ง clause + collapse particle ซ้ำ
+- **T8 (NEW-7 การ์ดมั่ว):** intent ∈ {warranty_claim, general_question, other} + ข้อความไม่มี `_PRODUCT_MENTION_KWS` → `products_for_response=[]` (ทั้ง path ปกติ + web-search branch); hoist `product_kw` → `product_store._PRODUCT_MENTION_KWS` เป็น single source (ใช้ร่วม `_clean_description` + gate)
+- **T9 (NEW-6 รูปไม่ผูกสินค้า):** `image_desc` → `extract_model_keywords` → item_name regex → **match ตัวเดียวเท่านั้น** → set `_hybrid_anchor_card` (desc กำกวม match ≥2 → ปล่อย flow ปกติ); อยู่หลัง item-tag block ก่อน retrieval → anchor เข้า narrowing/compare ปกติ
+- **T10 (cosmetic):** `_strip_kb_markup` — markdown table `| a | b |` → `• a: b · c: d` (Shopee render ตารางไม่ได้) + collapse "ทางร้าน จะ"→"ทางร้านจะ"
+- **T11 (NEW-8 dump list ดิบ):** `answer_general` — brands/categories ถ้าคำถาม specific ให้ตอบจาก context ก่อน ห้าม echo list ดิบ (เคส "CUKTECH คือ ZMI เดิมไหม" เคยได้ brand list ทั้งก้อน)
+- **verify:** py_compile ทุกไฟล์ · unit probe 8+7 เคส (ungrounded→rewrite clause สะอาด / grounded flag+desc→ผ่าน / negation→ผ่าน / general source→ข้าม / escalate ชนะ rewrite) · live :8030 — greeting/sticker/thanks/complaint → cards=0, product-q → cards=10, "มีของแถมไหม" → ตอบสะอาดหลัง fix clause, "CUKTECH คือ ZMI เดิมไหม" → ตอบเฉพาะเจาะจงไม่ dump, T6/T5 path เดิมไม่หลุด · regression: guards ✓ qtype 27/27 parity 42/42 car_charger 16/16
+- **ผลกระทบเคสอื่น:** rewrite tier แตะเฉพาะ answer ที่ claim โปร/เปลี่ยนคืน ungrounded เท่านั้น · card suppress มี product-kw escape hatch (complaint ที่ถามสินค้ายังได้การ์ด) · image anchor ต้อง match ตัวเดียว+ไม่มี ref อื่น → ไม่ทับ anchor เดิม · T9 live-verify จำกัด (ต้องส่งรูปจริง) — logic มี guard ครบ
+- **เหลือ:** Phase 3 (T12-T16 — replay เคสเดิม / audit no_product_found_handoff / shadow batch / price prohibition / corpus) เป็นงาน verify/measure ไม่ใช่ code fix
+
+### ✅ 2026-09-21 — Phase 3 (QA plan): T12-T16 verify/measure — audit เสร็จ เจอ bug จริง 1 ตัว
+
+- **T12 (replay BUG-H/K/O):** "Luxury Black" / "ROSY" / "BINNIFA" / "Pad 7" → ตอบ "ไม่มี/ไม่พบ" ถูก shop-scope ครบทุกเคส + เสนอของใกล้เคียงจากร้านจริง — ไม่มี cross-shop fabrication เดิม
+- **T13 (audit no_product_found_handoff ไม่เคย fire):** root cause 2 ชั้น — (1) arm1 `not products` แทบเป็นไปไม่ได้ เพราะ vector path `argsort(sims)[:top_k]` **ไม่มี similarity floor** คืน nearest เสมอ; (2) arm2 ถูก `_is_conv_active` ∈ `_guard_has_intent` ปิดเงียบ — แชทที่มี anchor อยู่แล้ว arm2 ตายเสมอ; fire ได้เฉพาะ fresh conv + ของแปลกไม่ติด kw + "มี...ไหม" · สังเกต: guard return ก่อน web-search (fire แล้วไม่ลอง web) — เป็น design เดิม ไม่แตะ
+- **T14 (NEW-9 bot_elapsed_ms):** เจอ bug จริง = **unit mismatch** — `/chat` คืน `elapsed` เป็นวินาที แต่เขียนลง `bot_elapsed_ms` ดิบๆ (shadowReplyService ×2, botWorkerService, test-assignment ×2) → 4.2s แสดง "4.2ms" → ดูเหมือน 0/พัง; `bot_tokens` เก็บ usage ครบอยู่แล้ว (BUG-I ok) — **รออนุญาตแก้ (×1000 ที่ write sites หรือแปลงตอน display)**
+- **T15 (price prohibition):** prompt มีครบ (llm.py:198-200/504-506/535/546/1518 "ห้ามบอกราคาทุกกรณี") → leak ถ้ามี = LLM non-compliance ไม่ใช่ missing prompt — ไม่ต้องแก้
+- **T16:** เพิ่ม `misinterpret_monitor` 4 เคสเข้า corpus generator (ย่อ=สรุปสั้น / ปิด AOD) — corpus regen 304 ข้อ

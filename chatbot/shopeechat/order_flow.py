@@ -60,6 +60,17 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
             and any(kw in _last_model_text_check for kw in ("รูป", "วิดีโอ", "photo", "video", "แสดงอาการ", "ความเสียหาย"))):
             _in_claim_flow = True
             print(f"[ORDER] ข้าม order_lookup เพราะอยู่ใน claim flow", file=sys.stderr)
+    # ⚡ T5 — persisted claim_state: กำลังเก็บข้อมูลเคลมอยู่ → order_sn นี้เป็นของ claim flow
+    #   (ครอบเคสลูกค้าแทรกคำถามกลาง flow แล้วส่งเลขต่อ — last model msg ไม่ใช่ claim prompt แล้ว)
+    if _order_sn and not _in_claim_flow and req.conversation_id:
+        try:
+            from . import conversation_products as _cp_claim
+            from .warranty_flow import _claim_collecting
+            if _claim_collecting(_cp_claim.load_claim_state(req.conversation_id)):
+                _in_claim_flow = True
+                print(f"[ORDER] ข้าม order_lookup เพราะ claim_state กำลังเก็บข้อมูล", file=sys.stderr)
+        except Exception:
+            pass
 
     # ⚡ Phase 3C — ถ้าไม่มี order_sn ในข้อความ แต่เป็น order question → ใช้ active order anchor
     #    ตัวอย่าง: ลูกค้าส่ง order card รอบแรก → รอบสองถาม "order ถึงยัง" → ใช้ anchor
@@ -112,18 +123,78 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
     )
     _is_address_request = any(kw in _msg_lower_rr for kw in _ADDRESS_REQUEST_KWS)
 
-    # ⚡ Follow-up check: bot เคยถามเลข order ใน return/refund context + ลูกค้าส่งเลขมา
+    # ⚡ T6 — Fulfillment problem: ส่งผิด/ของไม่ครบ/ของแถมขาด/ไม่ตรงที่สั่ง/ของหาย
+    #   class เดียวกับ return/refund — ปัญหาออเดอร์ที่บอทแก้เองไม่ได้ → เก็บ order_sn → handoff
+    #   detection แบบ composition (ไม่ hardcode รายเคส): context×fault
+    #   - context = บริบท "ของที่ได้รับ/ออเดอร์/กล่อง/ของแถม" → ต้องมีก่อน (กัน "ผิด" ลอยๆ)
+    #   - fault = ผิด/ไม่ครบ/ขาด/หาย/ไม่ตรง/ไม่ได้รับ/เกิน
+    #   + direct phrases ที่ complete ในตัวเอง ("ส่งผิด", "ของไม่ครบ" ฯลฯ)
+    #   ⚠️ ไม่ใส่ "เสีย/พัง/ใช้ไม่ได้" ใน fault — defect ยังไป warranty claim เหมือนเดิม
+    _ORDER_PROBLEM_PHRASES = (
+        "ส่งผิด", "ของผิด", "ผิดรุ่น", "ผิดสี", "ผิดไซส์", "ผิดขนาด", "ผิดรายการ",
+        "ไม่ตรงปก", "ไม่ตรงที่สั่ง", "ไม่ตรงกับที่สั่ง", "ไม่ตรงออเดอร์", "ไม่ตรงตามที่สั่ง",
+        "ของไม่ครบ", "ของขาด", "ส่งขาด", "ส่งเกิน", "ของเกิน",
+        "ของแถมไม่ครบ", "ของแถมขาด", "ไม่มีของแถม", "ของแถมหาย",
+        "ของหาย", "ของในกล่องไม่ครบ", "ในกล่องไม่ครบ",
+    )
+    _ORDER_PROBLEM_CTX = (
+        "ได้รับ", "รับของ", "ส่งมา", "ส่งของ", "จัดส่ง", "แกะกล่อง", "ในกล่อง",
+        "กล่อง", "พัสดุ", "ของแถม", "ของที่สั่ง", "สินค้าที่สั่ง", "ออเดอร์",
+        "คำสั่งซื้อ", "สินค้า", "ของมา", "ของถึง", "ได้ของ", "ของที่ได้", "รายการ",
+    )
+    _ORDER_PROBLEM_FAULT = (
+        "ผิด", "ไม่ครบ", "ขาด", "ไม่ตรง", "หาย", "ไม่ได้รับ", "ไม่ได้ของ", "เกิน",
+    )
+    # hypothetical/policy question → ไม่ใช่ complaint จริง ("ถ้าส่งผิดทำยังไง")
+    _ORDER_PROBLEM_HYPOTHETICAL = ("ถ้า", "สมมติ", "ในกรณี", "กรณีที่", "หาก")
+    _is_order_problem = False
+    _order_problem_topic = ""
+    if not _in_claim_flow and not any(h in _msg_lower_rr for h in _ORDER_PROBLEM_HYPOTHETICAL):
+        _op_phrase_hit = next(
+            (p for p in _ORDER_PROBLEM_PHRASES if p in _msg_lower_rr), None)
+        _op_ctx_hit = any(c in _msg_lower_rr for c in _ORDER_PROBLEM_CTX)
+        _op_fault_hit = next(
+            (f for f in _ORDER_PROBLEM_FAULT if f in _msg_lower_rr), None)
+        if _op_phrase_hit or (_op_ctx_hit and _op_fault_hit):
+            _is_order_problem = True
+            _fault = _op_phrase_hit or _op_fault_hit
+            if "ของแถม" in _msg_lower_rr:
+                _order_problem_topic = "ของแถม/ของในกล่องไม่ครบ"
+            elif _fault in ("ผิด", "ส่งผิด", "ของผิด", "ผิดรุ่น", "ผิดสี",
+                            "ผิดไซส์", "ผิดขนาด", "ผิดรายการ"):
+                _order_problem_topic = "ส่งสินค้าผิด/ไม่ตรงที่สั่ง"
+            elif "ไม่ตรง" in _fault:
+                _order_problem_topic = "สินค้าไม่ตรงที่สั่ง"
+            elif _fault in ("หาย", "ของหาย", "ของแถมหาย"):
+                _order_problem_topic = "ของหายในพัสดุ"
+            elif _fault in ("ไม่ได้รับ", "ไม่ได้ของ"):
+                _order_problem_topic = "ยังไม่ได้รับสินค้า"
+            elif "เกิน" in _fault:
+                _order_problem_topic = "จำนวนสินค้าเกิน"
+            else:
+                _order_problem_topic = "สินค้า/ของไม่ครบ"
+            print(f"[ORDER-PROBLEM] detected: fault={_fault!r} topic={_order_problem_topic!r}",
+                  file=sys.stderr)
+
+    # ⚡ Follow-up check: bot เคยถามเลข order ใน return/refund/order-problem context
+    #    + ลูกค้าส่งเลขมา → handoff
     _is_rr_followup = False
-    if not _is_return_refund and _order_sn and history and not _in_claim_flow:
+    _rr_followup_order_problem = False  # ⚡ T6 — follow-up จาก order-problem ask (ไม่ใช่ return/refund)
+    if not _is_return_refund and not _is_order_problem and _order_sn and history and not _in_claim_flow:
         _last_model_msgs_rr = [h for h in history if h.get("role") == "model"][-1:]
         _last_model_text_rr = " ".join(h.get("text", "") for h in _last_model_msgs_rr).lower()
         if any(_rr_kw in _last_model_text_rr for _rr_kw in (
             "คืนสินค้า", "คืนของ", "คืนเงิน", "ตีกลับ",
             "ไม่รับสินค้า", "ไม่รับของ", "ไม่รับพัสดุ",
             "ยกเลิก", "เงินคืน",
+            # ⚡ T6 — marker ของ order-problem ask prompt (ลูกค้าส่งเลข order รอบถัดไป)
+            "สินค้าที่ได้รับ", "ปัญหาการจัดส่ง", "ของแถม", "ของไม่ครบ",
         )) and "เลขคำสั่งซื้อ" in _last_model_text_rr:
             _is_rr_followup = True
-            print(f"[RETURN-REFUND] follow-up: bot asked for order_sn + customer sent {_order_sn}", file=sys.stderr)
+            _rr_followup_order_problem = any(
+                _op_kw in _last_model_text_rr for _op_kw in (
+                    "สินค้าที่ได้รับ", "ปัญหาการจัดส่ง", "ของแถม", "ของไม่ครบ"))
+            print(f"[RETURN-REFUND] follow-up: bot asked for order_sn + customer sent {_order_sn} (order_problem={_rr_followup_order_problem})", file=sys.stderr)
 
     if _is_address_request and not _in_claim_flow:
         # ⚡ ขอที่อยู่ส่งกลับ/ส่งเคลม → handoff แอดมินทันที (ไม่ต้องถามเลขคำสั่งซื้อ)
@@ -168,8 +239,15 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
             image_desc=_image_desc_out,
         )
 
-    if (_is_return_refund or _is_rr_followup) and not _in_claim_flow:
-        print(f"[RETURN-REFUND] detected: is_return_refund={_is_return_refund} is_followup={_is_rr_followup} order_sn={_order_sn}", file=sys.stderr)
+    if (_is_return_refund or _is_rr_followup or _is_order_problem) and not _in_claim_flow:
+        # ⚡ T6 — order_problem (ส่งผิด/ของขาด/ของแถมขาด) ใช้ path เดียวกับ return/refund
+        #   แต่ reason/answer ต่างกัน; ถ้า message match ทั้งคู่ (เช่น "ส่งผิด ขอคืนเงิน")
+        #   → return/refund semantics ชนะ (behavior เดิม)
+        #   follow-up turn จาก order-problem ask ก็เป็น order_problem (ไม่ใช่ return/refund)
+        _is_op_only = (_is_order_problem or _rr_followup_order_problem) and not _is_return_refund
+        if _is_op_only and not _order_problem_topic:
+            _order_problem_topic = "ปัญหาสินค้าที่ได้รับ"
+        print(f"[RETURN-REFUND] detected: is_return_refund={_is_return_refund} is_followup={_is_rr_followup} order_problem={_is_order_problem} order_sn={_order_sn}", file=sys.stderr)
         if _order_sn:
             # มี order_sn → lookup order + save anchor + anchor items + handoff
             _rr_order = _order_store.lookup_order(_order_sn, shop_filter=req.shop)
@@ -214,24 +292,37 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
                 except Exception as _e:
                     print(f"[RETURN-REFUND] error anchoring: {_e}", file=sys.stderr)
             # handoff แอดมิน
-            _rr_answer = (
-                f"เรื่องคืนสินค้า/คืนเงิน/ไม่รับสินค้า ทางร้านจะดำเนินการผ่านแอดมินนะคะ "
-                f"เดี๋ยวส่งต่อแชทนี้ให้แอดมินดูแลให้ "
-                f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
-            )
+            if _is_op_only:
+                _rr_answer = (
+                    f"ขออภัยด้วยนะคะที่เกิดปัญหากับสินค้าที่ได้รับ ({_order_problem_topic}) "
+                    f"เดี๋ยวส่งต่อแชทนี้ให้แอดมินตรวจสอบและดำเนินการให้นะคะ "
+                    f"หากมีรูปถ่ายของที่ได้รับ ส่งมาเพิ่มเติมได้เลยค่ะ "
+                    f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+                )
+                _rr_reason = "order_problem"
+                _rr_claim = {"topic": _order_problem_topic, "order_sn": _order_sn}
+                _rr_source = "order_problem_handoff"
+            else:
+                _rr_answer = (
+                    f"เรื่องคืนสินค้า/คืนเงิน/ไม่รับสินค้า ทางร้านจะดำเนินการผ่านแอดมินนะคะ "
+                    f"เดี๋ยวส่งต่อแชทนี้ให้แอดมินดูแลให้ "
+                    f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+                )
+                _rr_reason = "return_refund_request"
+                _rr_claim = {"topic": "คืนสินค้า/คืนเงิน", "order_sn": _order_sn}
+                _rr_source = "return_refund_handoff"
             _total_elapsed = _time.time() - _total_start
 
             if req.conversation_id:
-                _app_module._send_handoff(req, None, reason="return_refund_request",
-                              claim={"topic": "คืนสินค้า/คืนเงิน", "order_sn": _order_sn},
-                              log_tag="RETURN-REFUND")
+                _app_module._send_handoff(req, None, reason=_rr_reason,
+                              claim=_rr_claim, log_tag=_rr_source.upper())
             _steps.append({
-                "name": "return_refund_handoff",
+                "name": _rr_source,
                 "model": model_name,
                 "tokens_in": 0, "tokens_out": 0,
                 "time_s": round(_total_elapsed, 2),
                 "cost_usd": 0.0, "cost_thb": 0.0,
-                "detail": f"order_sn={_order_sn} return_refund_handoff",
+                "detail": f"order_sn={_order_sn} {_rr_source}",
             })
             return dict(
                 answer=_rr_answer,
@@ -239,34 +330,47 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
                 products=[],
                 shop=req.shop,
                 model=model_name,
-                source="return_refund_handoff",
+                source=_rr_source,
                 usage={"prompt": 0, "output": 0, "total": 0},
                 elapsed=round(_total_elapsed, 2),
                 cost=0.0,
                 handoff_to_admin=True,
-                handoff_reason="return_refund_request",
+                handoff_reason=_rr_reason,
                 steps=_steps,
                 routing_decision=_app_module._routing(
-                    "handoff", f"return_refund: order_sn={_order_sn} → ส่งแอดมิน",
-                    handoff_reason="return_refund_request",
+                    "handoff", f"{_rr_reason}: order_sn={_order_sn} → ส่งแอดมิน",
+                    handoff_reason=_rr_reason,
                 ),
                 image_desc=_image_desc_out,
             )
         else:
             # ไม่มี order_sn → ถามเลขคำสั่งซื้อก่อน
-            _rr_ask_answer = (
-                f"เรื่องคืนสินค้า/คืนเงิน/ไม่รับสินค้า รบกวนแจ้งเลขคำสั่งซื้อให้หน่อยนะคะ "
-                f"เพื่อให้ทางร้านตรวจสอบและดำเนินการต่อให้ได้ค่ะ"
-            )
+            # ⚡ T6 — order_problem ask ต้องมี "เลขคำสั่งซื้อ" + marker ("สินค้าที่ได้รับ")
+            #   เพื่อให้ _is_rr_followup จับ turn ถัดไปได้
+            if _is_op_only:
+                _rr_ask_answer = (
+                    f"ขออภัยด้วยนะคะ เรื่องปัญหาการจัดส่ง/สินค้าที่ได้รับ "
+                    f"รบกวนแจ้งเลขคำสั่งซื้อให้หน่อยนะคะ "
+                    f"เพื่อให้ทางร้านตรวจสอบและดำเนินการต่อให้ได้ค่ะ"
+                )
+                _rr_ask_source = "order_problem_ask_order"
+                _rr_ask_detail = f"order_problem: {_order_problem_topic} no order_sn → ask customer"
+            else:
+                _rr_ask_answer = (
+                    f"เรื่องคืนสินค้า/คืนเงิน/ไม่รับสินค้า รบกวนแจ้งเลขคำสั่งซื้อให้หน่อยนะคะ "
+                    f"เพื่อให้ทางร้านตรวจสอบและดำเนินการต่อให้ได้ค่ะ"
+                )
+                _rr_ask_source = "return_refund_ask_order"
+                _rr_ask_detail = "return_refund: no order_sn → ask customer"
             _total_elapsed = _time.time() - _total_start
 
             _steps.append({
-                "name": "return_refund_ask_order",
+                "name": _rr_ask_source,
                 "model": model_name,
                 "tokens_in": 0, "tokens_out": 0,
                 "time_s": round(_total_elapsed, 2),
                 "cost_usd": 0.0, "cost_thb": 0.0,
-                "detail": "return_refund: no order_sn → ask customer",
+                "detail": _rr_ask_detail,
             })
             return dict(
                 answer=_rr_ask_answer,
@@ -274,13 +378,13 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
                 products=[],
                 shop=req.shop,
                 model=model_name,
-                source="return_refund_ask_order",
+                source=_rr_ask_source,
                 usage={"prompt": 0, "output": 0, "total": 0},
                 elapsed=round(_total_elapsed, 2),
                 cost=0.0,
                 steps=_steps,
                 routing_decision=_app_module._routing(
-                    "bot_reply", "return_refund: no order_sn → ถามเลขคำสั่งซื้อ",
+                    "bot_reply", f"{_rr_ask_source}: no order_sn → ถามเลขคำสั่งซื้อ",
                 ),
                 image_desc=_image_desc_out,
             )

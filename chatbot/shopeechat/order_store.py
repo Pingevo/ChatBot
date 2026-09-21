@@ -102,6 +102,11 @@ def extract_order_sn(message: str) -> str | None:
     m = _ORDER_SN_RE.search(message)
     if m:
         return m.group(1).strip()
+    # ⚡ NEW-1 fix — Shopee order_sn ตัวเลขล้วน (เช่น 3256063691605504616 ยาว 19 หลัก)
+    #   pattern บนบังคับมีตัวอักษร → เลขล้วนหลุด; floor 15 หลัก กันชนเบอร์โทร (9-10)/บัตรปชช. (13)
+    m = re.search(r"\b\d{15,19}\b", message)
+    if m:
+        return m.group(0)
     return None
 
 

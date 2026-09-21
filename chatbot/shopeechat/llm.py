@@ -27,6 +27,22 @@ def _gemini_cost(prompt_tokens: int, output_tokens: int) -> float:
             + output_tokens * _GEMINI_COST_PER_M["output"]) / 1_000_000
 
 
+# ⚡ BUG-Q fix — ข้อความตอบลูกค้าเมื่อ LLM call พัง (คงที่ เพื่อให้ boundary เช็คได้)
+#   ก่อนหน้านี้แนบ exception ดิบ (429 JSON / RESOURCE_EXHAUSTED) ให้ลูกค้าอ่าน
+LLM_ERROR_REPLY = "ขออภัยค่ะ ระบบขัดข้องชั่วคราว เดี๋ยวขอส่งต่อให้แอดมินตรวจสอบให้นะคะ"
+
+
+def _error_reply(exc: Exception, where: str = "") -> str:
+    """Log exception เต็มๆ ลง stderr แล้วคืนข้อความสะอาดสำหรับลูกค้า.
+
+    ใช้แทน `f"...({exc})"` ใน except block ของฟังก์ชัน answer* —
+    ลูกค้าไม่ควรเห็น error ดิบของระบบ; guards.enforce จะ escalate
+    LLM_ERROR_REPLY → handoff ให้แอดมินอัตโนมัติ
+    """
+    print(f"[LLM-ERROR] {where}: {type(exc).__name__}: {exc}", file=sys.stderr)
+    return LLM_ERROR_REPLY
+
+
 def _strip_kb_markup(text: str) -> str:
     """BUG-2 / BUG-J fix — ขจัด KB markup `[[ ... ]]`, `---`, `หมายเหตุ:` ที่หลุดจาก LLM.
 
@@ -50,8 +66,40 @@ def _strip_kb_markup(text: str) -> str:
     text = re.sub(r"(?m)^\s*-{3,}\s*$", "", text)
     # strip บรรทัด `หมายเหตุ:` ที่หลุดจาก KB (เป็น internal note)
     text = re.sub(r"(?m)^\s*หมายเหตุ[：:].*$", "", text)
+    # ⚡ T10 — markdown table → bullet list (แชท Shopee render ตารางไม่ได้)
+    #   บรรทัด `| a | b |` → `• a: b · c: d` (ใช้ header เป็น label เมื่อมี separator row)
+    #   ไม่มี header → `• a · b · c`
+    _lines = text.split("\n")
+    _out_lines = []
+    _li = 0
+    while _li < len(_lines):
+        if re.match(r"^\s*\|.*\|\s*$", _lines[_li]):
+            _rows = []
+            while _li < len(_lines) and re.match(r"^\s*\|.*\|\s*$", _lines[_li]):
+                _rows.append([c.strip() for c in _lines[_li].strip().strip("|").split("|")])
+                _li += 1
+            _sep_idx = next(
+                (j for j, r_ in enumerate(_rows)
+                 if all(re.fullmatch(r":?-{3,}:?", c) for c in r_ if c)),
+                None)
+            _hdr = _rows[0] if _sep_idx == 1 else None
+            for _rn, _cells in enumerate(_rows):
+                if _rn == _sep_idx or (_hdr is not None and _rn == 0):
+                    continue
+                if _hdr is not None:
+                    _out_lines.append("• " + " · ".join(
+                        f"{_hdr[j]}: {c}" if j < len(_hdr) and _hdr[j] else c
+                        for j, c in enumerate(_cells) if c))
+                else:
+                    _out_lines.append("• " + " · ".join(c for c in _cells if c))
+            continue
+        _out_lines.append(_lines[_li])
+        _li += 1
+    text = "\n".join(_out_lines)
     # ทำความสะอาด blank lines ที่เกิดจากการ strip
     text = re.sub(r"\n{3,}", "\n\n", text)
+    # ⚡ T10 — ลบ space เกินหลัง "ทางร้าน/ทางเรา" ("ทางร้าน จะ" → "ทางร้านจะ")
+    text = re.sub(r"(ทางร้าน|ทางเรา)\s+(จะ|ได้|ขอ)", r"\1\2", text)
     # ⚡ BUG-L fix — แทนคำลงท้ายผู้ชายด้วยผู้หญิง (persona หญิง)
     #   เปลี่ยน "ครับ/คับ/ครับผม" → "ค่ะ" กัน LLM ลอกจาก description สินค้า
     #   ใช้ word boundary-ish (ตามด้วย space/newline/punctuation/end) กัน match ในคำอื่น
@@ -66,26 +114,8 @@ def _strip_kb_markup(text: str) -> str:
         lambda m: f"![{m.group(2).strip() or m.group(1).strip()}]({m.group(3)})",
         text,
     )
-    # ⚡ BUG-M fix — post-check: กัน LLM อ้างเท็จว่า "แอดมินมาแล้ว/รับเรื่องแล้ว/เคลมให้แล้ว"
-    #   LLM อาจละเมิด prompt rule (BUG-3 fix) แม้มีกฎห้าม → ต้องมี deterministic post-check
-    #   จับเฉพาา LLM output (ฟังก์ชันนี้เรียกเฉพาะที่ llm.answer/answer_general/answer_with_kb)
-    #   ไม่กระทบ deterministic warranty flow (ที่ตอบโดยตรงจาก app.py ไม่ผ่านฟังก์ชันนี้)
-    _false_admin_patterns = [
-        (r"แอดมินมาดูแลแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
-        (r"แอดมินเข้ามาดูแลแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
-        (r"แอดมินมาแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
-        (r"แอดมินได้รับเรื่องแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
-        (r"ทางเราได้ส่งเรื่องให้แอดมินแล้ว[ค่ะคะ]?", "เดี๋ยวส่งต่อให้แอดมินดูแลให้นะคะ"),
-        (r"ทางร้านรับเรื่องประสานงานตรวจสอบและดูแลเรื่องการส่งเคลมสินค้าให้เรียบร้อยแล้ว",
-         "เดี๋ยวส่งต่อให้แอดมินดูแลเรื่องนี้ให้นะคะ"),
-        (r"รับเรื่องประสานงานตรวจสอบและดูแลเรื่องการส่งเคลมสินค้าให้เรียบร้อยแล้ว",
-         "เดี๋ยวส่งต่อให้แอดมินดูแลเรื่องนี้ให้นะคะ"),
-        (r"เคลมสินค้าให้เรียบร้อยแล้ว", "เดี๋ยวส่งต่อให้แอดมินดูแลเรื่องนี้ให้นะคะ"),
-    ]
-    for _pattern, _replacement in _false_admin_patterns:
-        if re.search(_pattern, text):
-            text = re.sub(_pattern, _replacement, text)
-            print(f"[BUG-M] post-check: แทนคำอ้างเท็จ '{_pattern}' → '{_replacement}'", file=sys.stderr)
+    # ⚡ BUG-M — post-check คำอ้างเท็จ "แอดมินมาแล้ว/รับเรื่องแล้ว" ย้ายไป guards.enforce
+    #   (ชั้น boundary ที่ escalate จริง ไม่ใช่แค่แก้ข้อความ — RC-A)
     return text.strip()
 
 
@@ -1452,9 +1482,9 @@ def answer(
             role="chat",
         )
     except genai_errors.ClientError as exc:
-        return f"ขออภัย ระบบ LLM ติดขัด ลองใหม่อีกครั้ง ({exc})", usage_info
+        return _error_reply(exc, "answer"), usage_info
     except Exception as exc:
-        return f"ขออภัย เกิดข้อผิดพลาดในการเรียก LLM ({exc})", usage_info
+        return _error_reply(exc, "answer"), usage_info
 
     # log token usage (ถ้ามี) เพื่อคำนวณต้นทุน
     usage = getattr(resp, "usage_metadata", None)
@@ -1585,9 +1615,9 @@ def answer_with_kb(
             role="chat",
         )
     except genai_errors.ClientError as exc:
-        return f"ขออภัย ระบบ LLM ติดขัด ลองใหม่อีกครั้ง ({exc})"
+        return _error_reply(exc, "answer_with_kb")
     except Exception as exc:
-        return f"ขออภัย เกิดข้อผิดพลาดในการเรียก LLM ({exc})"
+        return _error_reply(exc, "answer_with_kb")
 
     usage = getattr(resp, "usage_metadata", None)
     if usage:
@@ -1654,6 +1684,16 @@ def answer_general(
             "ห้ามพูดถึงสินค้าหรือหมวดหมู่ของร้านอื่นในเครือเด็ดขาด "
             "ให้แนะนำสินค้าเด่นของร้านนี้สัก 2-3 ชิ้นก่อน แล้วค่อยสรุปว่าร้านนี้ขายหมวดหมู่อะไรบ้าง"
         )
+    # ⚡ T11 (NEW-8) — brands/categories: คำถามเจาะจง ห้าม dump list ดิบจาก context
+    #   เคส QA: "CUKTECH คือ ZMI เดิมไหม" → ตอบ list แบรนด์ทั้งเครือ ("Pets","Tickets")
+    if qtype in ("brands", "categories"):
+        general_instruction += (
+            " ถ้าคำถามของลูกค้าไม่ได้ขอ 'รายการทั้งหมด' โดยตรง "
+            "(เช่น ถามว่ามีแบรนด์/หมวด X ไหม หรือถามเรื่องเฉพาะของแบรนด์ใดแบรนด์หนึ่ง) "
+            "ให้ตอบเฉพาะสิ่งที่ลูกค้าถามจาก context เท่านั้น "
+            "ห้าม list แบรนด์/หมวดทั้งหมดออกมา "
+            "ถ้า context ตอบคำถามเจาะจงไม่ได้ ให้บอกตามจริงแล้วแนะนำทักแอดมิน"
+        )
     if persona_extra:
         general_instruction += persona_extra
     # Language policy — default ตอบไทยเสมอ; ขอภาษาอื่น → ตอบอังกฤษ
@@ -1689,9 +1729,9 @@ def answer_general(
             role="chat",
         )
     except genai_errors.ClientError as exc:
-        return f"ขออภัย ระบบ LLM ติดขัด ลองใหม่อีกครั้ง ({exc})", {}
+        return _error_reply(exc, "answer_general"), {}
     except Exception as exc:
-        return f"ขออภัย เกิดข้อผิดพลาดในการเรียก LLM ({exc})", {}
+        return _error_reply(exc, "answer_general"), {}
 
     usage = getattr(resp, "usage_metadata", None)
     usage_info: dict = {}

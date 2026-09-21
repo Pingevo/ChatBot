@@ -525,6 +525,14 @@ def _recent_qa_pairs(history: list[dict] | None, n: int = 10) -> list[dict]:
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
+    # ⚡ RC-A — output policy boundary จุดเดียว: enforce หลัง engine คืนคำตอบ
+    #   ครอบทุก engine (legacy/v2/v3) + ทุก return path — กันคำตอบอ้างสิ่งที่ไม่ได้ทำจริง
+    resp = _chat_impl(req)
+    from . import guards as _guards
+    return _guards.enforce(resp, req)
+
+
+def _chat_impl(req: ChatRequest) -> ChatResponse:
     # ⚡ chatbotv3 — OpenRouter-first paradigm (2026-09-20)
     #   USE_CHAT_V3=1 หรือ req.use_v3=True → route ไป chatbotv3.engine.chat_v3
     #   ไม่กระทบ legacy/v2 (default ยังใช้ legacy/v2 ตาม USE_LEGACY_CHAT)
@@ -1010,6 +1018,63 @@ def chat(req: ChatRequest) -> ChatResponse:
             # ถ้าไม่เจอสินค้า (ถูกลบ/item_id ผิด) ให้ตกไปใช้ flow ปกติต่อด้วยข้อความที่ตัด tag แล้ว
             if _clean_message:
                 req.message = _clean_message
+        # ⚡ T9 — image_desc → model keywords → match สินค้าร้าน → hybrid anchor (NEW-6)
+        #   เดิม: vision อ่านรูปได้แต่ไม่เคยผูกกับสินค้าในร้าน (ค้นด้วย desc ดิบ fuzzy พลาด)
+        #   guard: ข้อความไม่มี product ref ชัด (ไม่มี model kw / ไม่มี tag / ไม่มี anchor อยู่แล้ว)
+        #          + match ได้สินค้าตัวเดียวเท่านั้น (desc กำกวม match หลายตัว → ไม่ผูก ปล่อย flow ปกติ)
+        if (
+            _image_desc_out and not _tagged_item_id and not anchor_card
+            and not _hybrid_anchor_card
+            and not knowledge_base.extract_model_keywords(req.message or "")
+        ):
+            try:
+                _img_match: dict[str, dict] = {}
+                for _ikw in knowledge_base.extract_model_keywords(_image_desc_out):
+                    _ikw_l = _ikw.lower()
+                    if len(_ikw_l) < 4:
+                        continue
+                    _ialpha = re.match(r"[A-Za-z]+", _ikw_l)
+                    _irest = _ikw_l[len(_ialpha.group(0)):] if _ialpha else ""
+                    _ipat = (
+                        re.escape(_ialpha.group(0)) + r".?" + re.escape(_irest)
+                        if _ialpha and _irest
+                        else re.escape(_ikw_l[:6])
+                    )
+                    _ifilter = {
+                        "item_status": "NORMAL",
+                        "item_name": {"$regex": _ipat, "$options": "i"},
+                    }
+                    if req.shop:
+                        _ifilter["shopname"] = {"$regex": f"^{re.escape(req.shop)}$", "$options": "i"}
+                    for _d in db[
+                        os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+                    ].find(_ifilter, product_store.PRODUCT_PROJECTION).limit(5):
+                        _iid = str(_d.get("item_id") or _d.get("_id") or "")
+                        if _iid:
+                            _img_match[_iid] = _d
+                if len(_img_match) == 1:
+                    _img_iid, _img_doc = next(iter(_img_match.items()))
+                    _img_card = product_store.to_product_card(_img_doc, req.message)
+                    _hybrid_anchor_card = _img_card
+                    if req.conversation_id:
+                        try:
+                            conversation_products.add_product(
+                                conversation_id=req.conversation_id,
+                                platform=req.platform,
+                                shop=req.shop,
+                                item_id=_img_iid,
+                                name=_img_card.get("name", ""),
+                                source="image_desc_anchor",
+                                card=_img_card,
+                                is_anchor=True,
+                            )
+                        except Exception as _e:
+                            print(f"[IMG-ANCHOR] add_product error: {_e}", file=sys.stderr)
+                    print(f"[IMG-ANCHOR] image_desc → '{_img_iid}' ({_img_card.get('name', '')[:60]!r}) → hybrid anchor", file=sys.stderr)
+                elif len(_img_match) > 1:
+                    print(f"[IMG-ANCHOR] match {len(_img_match)} ตัว → ไม่ผูก anchor (desc กำกวม)", file=sys.stderr)
+            except Exception as _e:
+                print(f"[IMG-ANCHOR] error: {_e}", file=sys.stderr)
         # ⚡ 2026-09-12 — hybrid anchor+fetch: เพิ่ม anchor product type ใน message
         #   ถ้าเป็น compat+target_device case → เพิ่ม product type ของ anchor ใน req.message
         #   เพื่อให้ fetch_products ดึงสินค้าประเภทเดียวกับ anchor (เช่น charger/cable)
@@ -4498,7 +4563,17 @@ def chat(req: ChatRequest) -> ChatResponse:
         # frontend จะโชว์ว่าคำตอบนี้ใช้สินค้าอะไรตัดสินใจบ้าง
         # LLM จะเลือกแนะนำไม่เกิน 3 รายการจาก context เอง (ตาม prompt)
         _intent_name = _intent_result.get("intent", "")
-        products_for_response = products[:req.limit]
+        # ⚡ T8 — suppress product cards เมื่อ intent ไม่ใช่ขายของและข้อความไม่พูดถึงสินค้า
+        #   (NEW-7: greeting/complaint/claim โดนแปะการ์ดมั่วจาก fuzzy retrieval)
+        #   กัน suppress ผิด: ข้อความมี product kw → เก็บการ์ดไว้ (แชท complaint ที่ถามสินค้า)
+        _NON_SALES_INTENTS = ("warranty_claim", "general_question", "other")
+        _msg_mentions_product = any(
+            kw in (req.message or "").lower()
+            for kw in product_store._PRODUCT_MENTION_KWS)
+        _suppress_cards = _intent_name in _NON_SALES_INTENTS and not _msg_mentions_product
+        if _suppress_cards and products:
+            print(f"[T8] suppress {len(products)} product cards (intent={_intent_name!r}, no product kw)", file=sys.stderr)
+        products_for_response = [] if _suppress_cards else products[:req.limit]
         _timing_breakdown["total"] = round(_time.time() - _total_start, 3)
 
         # ── Web search fallback (ด่านสุดท้าย) ──
@@ -4566,7 +4641,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                         "total": usage_info.get("total", 0) + _ws_llm_usage.get("total", 0),
                     }
                     print(f"[WEB-SEARCH] used web search answer  total={_total_ws}s  products={len(_final_products)}", file=sys.stderr)
-                    _final_response_products = _final_products[:req.limit]
+                    _final_response_products = [] if _suppress_cards else _final_products[:req.limit]
                     _record_suggestion_products(req, _final_response_products)
                     return ChatResponse(
                         answer=_ws_answer,

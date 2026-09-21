@@ -24,7 +24,7 @@ def iter_qa(recs: list[dict]):
     for r in recs:
         if "qa" in r:
             for q in r["qa"]:
-                yield "conv:" + (r.get("_meta") or {}).get("shop", "?"), {
+                yield "conv:" + ((r.get("_meta") or {}).get("shop") or "?"), {
                     "answer": q.get("bot_answer", ""),
                     "source": q.get("bot_source"),
                     "error": q.get("bot_error"),

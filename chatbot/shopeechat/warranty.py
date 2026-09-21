@@ -501,11 +501,25 @@ def detect_confirmation(message: str) -> bool:
 
 
 # Pattern สำหรับดึงข้อมูลจากข้อความลูกค้า
-_PHONE_PATTERN = re.compile(r"\b0\d{8,9}\b")
-# เลขคำสั่งซื้อ Shopee มัก 9-16 หลัก อาจมี suffix เช่น "123456789shp"
-_ORDER_ID_PATTERN = re.compile(r"\b\d{9,16}(?:[a-zA-Z]{1,5})?\b")
+# ⚡ NEW-1 fix — ใช้ (?<!\d)...(?!\d) แทน \b: normalized text ตัด space แล้วเบอร์ติด
+#   กับตัวไทย ("ใจดี0812345678") ทำ \b พัง → เบอร์หลุดไปเป็น order_id
+_PHONE_PATTERN = re.compile(r"(?<!\d)0\d{8,9}(?!\d)")
+# เลขคำสั่งซื้อ Shopee มัก 9-19 หลัก (order_sn ตัวเลขล้วนยาวถึง 19) อาจมี suffix เช่น "123456789shp"
+_ORDER_ID_PATTERN = re.compile(r"\b\d{9,19}(?:[a-zA-Z]{1,5})?\b")
 # ⚡ Shopee mixed alphanumeric order ID เช่น "2508088B5T4W1D" (มีตัวอักษรผสม)
 _ORDER_ID_MIXED_PATTERN = re.compile(r"\b\d{6,}[A-Za-z][A-Za-z0-9]{1,12}\b")
+
+
+def _mask_digits(msg: str, digits: str) -> str:
+    """ลบตัวเลขชุด `digits` ออกจากข้อความ — จับได้แม้ลูกค้าคั่นด้วย space/dash.
+
+    ใช้กันเบอร์โทรถูกกลืนเป็น order_id (NEW-1): mask เบอร์ก่อน scan order
+    เสมอ ไม่ว่าเบอร์จะเขียน "0877887888" / "087-788-7888" / "087 788 7888"
+    """
+    if not digits:
+        return msg
+    pat = re.compile(r"[\s\-]*".join(re.escape(d) for d in digits))
+    return pat.sub(" ", msg, count=1)
 
 # โหลด NER (lazy load — โหลดครั้งแรกที่เรียกใช้)
 _NER_INSTANCE = None
@@ -560,7 +574,12 @@ def _extract_name_ner(message: str) -> str:
     if len(name) > 40:
         return ""
     # 3) ถ้าชื่อมีคำว่า "มัน"/"ต้อง"/"มี"/"ทำ"/"บ้าง" → ไม่ใช่ชื่อ คืน ""
-    _non_name_words = ("มัน", "ต้อง", "มี", "ทำ", "บ้าง", "หรือ", "ยัง", "อยาก")
+    #    NEW-1: เพิ่มคำกริยา/คำถาม (NER อาจจับประโยคคำถามมาเป็นชื่อ)
+    _non_name_words = (
+        "มัน", "ต้อง", "มี", "ทำ", "บ้าง", "หรือ", "ยัง", "อยาก",
+        "ไหม", "มั้ย", "ครับ", "ค่ะ", "แล้ว", "ได้", "ไม่", "ที่ไหน",
+        "อะไร", "กี่", "เท่าไหร่",
+    )
     if any(w in name for w in _non_name_words):
         return ""
     # 4) กรอง: ชื่อต้องมีอย่างน้อย 2 ตัวอักษร และไม่ใช่แค่ตัวเลข
@@ -593,9 +612,11 @@ def extract_customer_info(message: str) -> dict:
     _msg_for_phone = re.sub(r"[\s\-]", "", msg)
     phone_match = _PHONE_PATTERN.search(_msg_for_phone)
     phone = phone_match.group(0) if phone_match else ""
-    # ดึงเลขคำสั่งซื้อ (เลข 9-16 หลัก ที่ไม่ใช่เบอร์โทร)
+    # ดึงเลขคำสั่งซื้อ (เลข 9-19 หลัก ที่ไม่ใช่เบอร์โทร) — mask เบอร์ออกก่อน scan
+    # (เดิมเช็ค candidate != phone พลาดเพราะ normalize คนละแบบกับข้อความที่ scan)
+    _msg_for_order = _mask_digits(msg, phone)
     order_id = ""
-    for m in _ORDER_ID_PATTERN.finditer(msg.replace("-", "")):
+    for m in _ORDER_ID_PATTERN.finditer(_msg_for_order.replace("-", "")):
         candidate = m.group(0)
         if candidate != phone and len(candidate) >= 10:
             order_id = candidate
@@ -615,57 +636,15 @@ def extract_customer_info(message: str) -> dict:
     if not name:
         en_match = _ENGLISH_NAME_PATTERN.search(msg)
         if en_match:
-            name = en_match.group(1).strip()
+            # ⚡ NEW-1 fix — reject ถ้าติดกับโมเดล/ตัวเลข ("iPhone 15 Pro Max" → "Pro Max")
+            _prev_tokens = msg[:en_match.start()].split()
+            _prev_has_digit = bool(_prev_tokens) and bool(re.search(r"\d", _prev_tokens[-1]))
+            if not _prev_has_digit:
+                name = en_match.group(1).strip()
 
-    # ── Fallback: regex แบบเดิม (กรณี NER ไม่ทำงาน/ไม่จับ) ──
-    if not name:
-        cleaned = msg
-        if phone:
-            cleaned = cleaned.replace(phone, "")
-        if order_id:
-            cleaned = cleaned.replace(order_id, "")
-        # ลบคำเชื่อมต่อทั่วไป และคำที่ไม่ใช่ชื่อ
-        cleaned = re.sub(
-            r"\s*(ชื่อ|name|เบอร์|phone|tel|เลขที่คำสั่งซื้อ|order|คำสั่งซื้อ|เลขคำสั่งซื้อ|หัวข้อ|topic|เรื่อง|:|ประกัน|เคลม|ซ่อม|เสีย|พัง|claim|warranty|แจ้ง|รบกวน|สินค้า|อาการ|ปัญหา)\s*",
-            " ", cleaned, flags=re.IGNORECASE
-        )
-        # ลบคำอุทาน/คำสุภาพ (จับกว้าง รวมพิมพ์ผิด/พิมพ์ยาว)
-        cleaned = re.sub(
-            r"\s*[้่๊๋ั]?คร[่้๊๋ัิ]?[บ]+\s*|"
-            r"\s*[้่๊๋ั]?คร[่้๊๋ั]?า[ยบ]+\s*|"
-            r"\s*[้่๊๋ั]?ค[ั่้๊๋]?[บ]+\s*|"
-            r"\s*[้่๊๋ั]?ค[่้๊๋]?า[บ]+\s*|"
-            r"\s*[้่๊๋ั]?ค[่้๊๋ั]?ะ*\s*|"
-            r"\s*น[่้๊๋ัะ]?ะ+\s*คร[่้๊๋ัิ]?[บ]+\s*|"
-            r"\s*น[่้๊๋ัะ]?ะ+\s*ค[่้๊๋ั]?ะ*\s*|"
-            r"\s*น[่้๊๋ัะ]?ะ+\s*|"
-            r"\s*จ[่้๊๋ัะ]?ะ+\s*|"
-            r"\s*[้่๊๋ั]?คร[่้๊๋ัิ]?(?!\S)\s*",
-            " ", cleaned
-        )
-        # ลบคำพูดทั่วไป
-        _noise_phrases = [
-            "ผมชื่อแค่", "ชื่อแค่", "ผมชื่อ", "ชื่อผม", "ฉันชื่อ", "ชื่อฉัน",
-            "ก็ข้างบนไง", "ข้างบนไง", "แต้งไปแล้ว", "แต้ง", "ข้างบน",
-            "บอกไปแล้ว", "บอกไป", "แจ้งไปแล้ว", "แจ้งไป", "ส่งไปแล้ว",
-            "ไง", "อะ", "ครัย",
-            "ผม", "ฉัน", "แค่", "คือ", "อ่ะ", "เอ่อ",
-        ]
-        for phrase in _noise_phrases:
-            cleaned = cleaned.replace(phrase, " ")
-        # ลบวันที่ออกจากชื่อ
-        cleaned = re.sub(r"\b\d{1,4}[/\-.]\d{1,2}[/\-.]\d{2,4}\b", " ", cleaned)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        # ถ้า cleaned ยาวเกิน 40 ตัวอักษร หรือมีคำที่ไม่ใช่ชื่อ → ไม่ใช่ชื่อ
-        _non_name_words = ("มัน", "ต้อง", "มี", "ทำ", "บ้าง", "หรือ", "ยัง", "อยาก", "กลิ่น", "ไหม้")
-        if (
-            len(cleaned) >= 2
-            and not cleaned.isdigit()
-            and len(cleaned) <= 40
-            and not any(w in cleaned for w in _non_name_words)
-        ):
-            name = cleaned
-
+    # ⚡ NEW-1 fix — ลบ regex fallback แบบเดิมทิ้ง: เดิมลบ "ชื่อ"/คำสุภาพออกจากข้อความ
+    #   แล้วเอาที่เหลือเป็นชื่อ → ทำลายคำ ("เชื่อม"→"เ ม") และเก็บขยะเป็นชื่อ
+    #   ตอนนี้: NER → English-name pattern → จบ — ขาดชื่อดีกว่าเก็บขยะ
     return {"name": name, "phone": phone, "order_id": order_id}
 
 
@@ -682,6 +661,9 @@ def detect_purchase_date_and_order(message: str) -> dict:
     # ดึงเลขคำสั่งซื้อ — เป็นเลขล้วน 10-16 หลัก (ไม่ใช่วันที่)
     # ตัดวันที่ออกก่อน เพื่อกัน pattern ไปจับตัวเลขในวันที่
     msg_cleaned = re.sub(r"\b\d{1,4}[/\-.]\d{1,2}[/\-.]\d{2,4}\b", "", message)
+    # ⚡ NEW-1 fix — mask เบอร์โทรออกก่อน scan order (เดิมไม่มี → เบอร์ 10 หลักกลายเป็น order_id)
+    _phone_m = _PHONE_PATTERN.search(re.sub(r"[\s\-]", "", msg_cleaned))
+    msg_cleaned = _mask_digits(msg_cleaned, _phone_m.group(0) if _phone_m else "")
     msg_cleaned = msg_cleaned.replace("-", "")
     for m in _ORDER_ID_PATTERN.finditer(msg_cleaned):
         candidate = m.group(0)

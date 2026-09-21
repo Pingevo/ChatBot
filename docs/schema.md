@@ -9,11 +9,12 @@
 
 1. [ภาพรวม Collections](#1-ภาพรวม-collections)
 2. [Admin DB Collections (รายละเอียด)](#2-admin-db-collections-รายละเอียด)
-3. [Product DB Collections (dbWallet — read-only)](#3-product-db-collections-dbwallet--read-only)
+3. [Product DB Collections (dbWallet — read-only)](#3-product-db-collections-dbwallet--read-only) (รวม §3.5 Stock DB `itStock.Products`)
 4. [Order DB Collections](#4-order-db-collections)
-5. [Python-only Collections](#5-python-only-collections)
+5. [Collections ที่ Python เป็นเจ้าของ (admin DB)](#5-collections-ที่-python-เป็นเจ้าของ-admin-db)
 6. [Collection ที่ประกาศแต่ยังไม่ใช้](#6-collection-ที่ประกาศแต่ยังไม่ใช้)
-7. [Access Matrix รวม](#7-access-matrix-รวม)
+7. [Local files (ไม่ใช่ Mongo)](#7-local-files-ไม่ใช่-mongo)
+8. [Access Matrix รวม](#8-access-matrix-รวม)
 
 ---
 
@@ -23,9 +24,12 @@
 
 **ไฟล์:**
 - `ChatAdminWeb/src/backend/db/mongoClient.ts` บรรทัด 26 — `export const COLLECTIONS = serverConfig.collections;`
-- `ChatAdminWeb/src/backend/lib/config.ts` บรรทัด 37-96 — map env → collection name
+- `ChatAdminWeb/src/backend/lib/config.ts` บรรทัด 41-99 — map env → collection name (36 keys)
 
-### 1.2 รายการทั้งหมด (34 collections)
+⚠️ **ทุกชื่อ override ด้วย env `ADMIN_MONGO_COLLECTION_*`** — default ในตารางคือชื่อ fallback
+เช่น production ใช้ `conversations_shp` / `messages_shp` / `customers_shp` (sellcenter dump ลงชื่อ `_shp`)
+
+### 1.2 รายการใน `COLLECTIONS` (36 keys — ทั้งหมดอยู่ใน admin DB)
 
 | key | default name | DB | ใช้ทำอะไร |
 |-----|-------------|-----|----------|
@@ -66,13 +70,29 @@
 | `testStatusConversation` | `test_status_conversation` | admin | test version ของ status |
 | `testChatSessions` | `test_chat_sessions` | admin | test chat session (Python เขียนหลัก) |
 
-### 1.3 DB connections
+### 1.3 DB connections (4 DBs)
 
-| DB | env | ใครเขียน |
-|----|-----|---------|
-| admin DB | `ADMIN_MONGO_*` | Next.js + Python (อ่าน KB/persona/shop_settings/test_chat) |
-| product DB (dbWallet) | `MONGO_*` | Python (read-only) + Next.js (read-only via `dbWalletClient.ts`) |
-| order DB | `ORDER_URI_MONGO`, `ORDER_DB`, `ORDER_COLLECTION` | Python (read-only) |
+| DB | env | เขียนโดย | อ่านโดย |
+|----|-----|---------|---------|
+| admin DB (`chatbot_admin`) | `ADMIN_MONGO_URI` หรือ `ADMIN_MONGO_HOST/USERNAME/PASSWORD/AUTH_SOURCE/TLS` + `ADMIN_MONGO_DB` | Next.js (หลัก) + Python (`conversation_products`, `test_chat_*`, import scripts) + sellcenter dump (conversations/messages/customers) | Next.js ทุก service + Python bot runtime |
+| product DB (`dbWallet`) | `MONGO_URI`, `MONGO_DB`, `MONGO_COLLECTION` | ภายนอก (Shopee sync) | Python `product_store`/`units`/`knowledge_base`/`app.py`/`chat_v2`/`chatbotv3` + Next.js `dbWalletClient.ts` (ReadOnlyCollection บล็อกทุก write) |
+| order DB (default `dbWallet`) | `ORDER_URI_MONGO`, `ORDER_DB`, `ORDER_COLLECTION` | ภายนอก | Python `order_store.py` + Next.js `/admin/conversations/[id]/orders` route |
+| stock DB (`itStock`) | `STOCK_URI`, `STOCK_DB` | ภายนอก | Python `product_store.py` (cert flags — cert search path เท่านั้น) |
+
+### 1.4 Collections ใน admin DB ที่อยู่นอก `COLLECTIONS` (Python-owned)
+
+`COLLECTIONS` ครอบคลุมเฉพาะ collection ที่ Next.js ใช้ — Python bot เขียน/อ่าน
+collection เพิ่มอีก 7 ตัวใน admin DB เดียวกัน (รายละเอียด §5):
+
+| collection | env override | เขียนโดย | อ่านโดย |
+|------------|--------------|---------|---------|
+| `conversation_products` | — (hardcoded) | `conversation_products.py` | bot runtime (`app.py`, `chat_v2`, `warranty_flow`, `order_flow`) |
+| `test_chat_logs` | — (hardcoded) | `test_chat_api.py` | `GET /test-chat/logs` (Python) |
+| `image_texts` | — (hardcoded) | `scripts/import_image_texts.py` | `product_store.py` (OCR cert search), `units.py` |
+| `sellable_units` | `ADMIN_MONGO_COLLECTION_UNITS` | `scripts/import_sellable_units.py` | `units.py` (unit index runtime) |
+| `kb_products` | `ADMIN_MONGO_COLLECTION_KB_PRODUCTS` | `docs/adminbase/script/import_adminbase.py` | `knowledge_base.py`, `units.py` |
+| `kb_qa` | `ADMIN_MONGO_COLLECTION_KB_QA` | `import_adminbase.py` | `knowledge_base.py`, `build_embeddings.py` |
+| `kb_raw` | `ADMIN_MONGO_COLLECTION_KB_RAW` | `import_adminbase.py` | — (audit trail — ยังไม่มี reader) |
 
 ---
 
@@ -208,7 +228,10 @@
 **หมายเหตุ:**
 - `platform: "all"` หรือ missing = ใช้ได้ทุกแพลตฟอร์ม
 - ใช้ `_id` เป็น key หลัก (ไม่ใช่ `kb_id`)
-- Python อ่านแบบ read-only เพื่อตอบลูกค้า
+- ⚠️ **สถานะปัจจุบัน:** collection นี้ยังเป็น admin-managed KB (หน้า `/knowledge` CRUD เต็ม)
+  แต่สำหรับ Python runtime กลายเป็น **legacy fallback** แล้ว — บอทอ่าน `kb_qa`/`kb_products`
+  ก่อน (§5.5/§5.6) และ fallback มา `knowledge_base` เฉพาะตอน `kb_qa` ไม่เจอ
+  (`knowledge_base.py` `_kb_coll()` — เหลือ caller เดียวใน `get_general_faq`)
 
 ---
 
@@ -291,6 +314,7 @@
 | `unread_count` | number | |
 | `last_message_text` | string | preview |
 | `last_message_timestamp` | Date | |
+| `labels` | string[]? | tag บนแชท — อ่านโดย `/labels` (distinct) + workflowEngine (label condition); ไม่มี label master collection |
 | `assigned_to` | string? | ⚠️ โดน dump ทับ — ใช้ status_conversation |
 | `created_at` | Date | |
 | `updated_at` | Date | |
@@ -301,10 +325,12 @@
 **⚠️ สำคัญ:** `assigned_to`, `closed_at`, `closed_by`, `close_count` โดน sellcenter dump ทับทุก 2 วินาที
 → ใช้ `status_conversation` เป็น source of truth สำหรับ admin-owned meta
 
+ชื่อจริงใน production: `conversations_shp` (env `ADMIN_MONGO_COLLECTION_CONVERSATIONS`)
+
 **Access:**
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
-| Read | conversationService, หลาย route | `/admin/conversations`, `/botworker/conversations`, `/shadow-inbox/conversations`, `/test-assignment` |
+| Read | conversationService, หลาย route, Python `replay_compare.py`, `docs/test/find_qa_conversations.py` | `/admin/conversations`, `/botworker/conversations`, `/shadow-inbox/conversations`, `/test-assignment` |
 | Write (create) | createConversation, findOrCreateConversation | `bot-handoff`, data writer ภายนอก |
 | Update (internal) | touchLastMessage, resetUnread | messageService.addMessage |
 | Update (close/reopen) | closeConversation, reopenConversation → delegate ไป statusConversationService | `/conversations/[id]/close`, `/conversations/[id]/reopen` |
@@ -376,7 +402,7 @@
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
 | Read | shopService | `/shops`, `/shops/[id]`, `/config`, `/dashboard`, `/workflows`, `/triggers`, `/quick-replies`, `/team` |
-| Write (upsert) | shopService.upsertShop | data writer / sync |
+| Write (upsert) | shopService.upsertShop + `scripts/sync-shops.ts` (aggregate จาก `conversations_shp`) | data writer / sync / script |
 | Update | setShopConnected, touchShopSync, toggleShopChatSync | `/shops/[id]`, `/config/shop/[shopId]` |
 | Delete | ไม่มี | |
 
@@ -578,7 +604,7 @@
 
 ---
 
-### 2.13 `close_history`
+### 2.14 `close_history`
 
 **Schema:** `CloseHistoryDoc` ใน `closeHistoryService.ts` บรรทัด 12-30
 
@@ -614,7 +640,7 @@
 
 ---
 
-### 2.14 `chat_accept_sessions`
+### 2.15 `chat_accept_sessions`
 
 **Schema:** `ChatAcceptSessionDoc` ใน `chatAcceptService.ts` บรรทัด 17-25
 
@@ -641,7 +667,7 @@
 
 ---
 
-### 2.15 `chat_processing`
+### 2.16 `chat_processing`
 
 **Schema:** `ChatProcessingDoc` ใน `botWorkerService.ts` บรรทัด 37-50
 
@@ -672,7 +698,7 @@
 
 ---
 
-### 2.16 `shop_personas`
+### 2.17 `shop_personas`
 
 **Schema:** `ShopPersonaDoc` ใน `personaService.ts` บรรทัด 18-32
 
@@ -704,7 +730,7 @@
 
 ---
 
-### 2.17 `shop_settings`
+### 2.18 `shop_settings`
 
 **Schema:** `ShopSettingsDoc` ใน `shopSettingsService.ts` บรรทัด 17-35
 
@@ -736,14 +762,19 @@
 
 ---
 
-### 2.18 `system_configs`
+### 2.19 `system_configs`
 
-**Schema:** `SystemConfigDoc` ใน `systemConfigService.ts` บรรทัด 23-71
+**Multi-doc config store** — 1 doc ต่อ `config_key` (unique index). ตอนนี้มี 3 docs:
 
-**Fields:**
+| `config_key` | schema | เขียนโดย | อ่านโดย |
+|--------------|--------|---------|---------|
+| `main_config` | `SystemConfigDoc` (systemConfigService.ts บรรทัด 23-71) | systemConfigService (`/config`, `/admin-config`) | systemConfigService, bot worker, buffer service |
+| `llm_config` | `LlmConfigDoc` (llmConfigService.ts — key pool AES-GCM + per-role models/providers) | llmConfigService (`/llm`) | **Python `llm.py` `get_llm_config()`** (TTL 10s, env `GEMINI_API_KEY*` fallback), `web_search.py` (`openrouter_keys`) |
+| `role_permissions` | `RolePermissionsDoc` (rolePermissionService.ts — seed จาก DEFAULT_PERMISSIONS, cache 30s) | rolePermissionService (`/roles`) | rolePermissionService |
+
+**Fields ของ doc `main_config`:**
 | Field | Type | หมายเหตุ |
 |-------|------|---------|
-| `config_key` | string | PK (default "default") |
 | `shopee_live_read` | boolean | ⚠️ อันตราย — hard-coded false |
 | `shopee_live_send` | boolean | ⚠️ อันตราย |
 | `shopee_live_mark_read` | boolean | ⚠️ อันตราย |
@@ -775,14 +806,14 @@
 **Access:**
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
-| Read | getSystemConfig (cache 5s), getAdminConfig | `/config`, `/admin-config`, bot worker, buffer service |
-| Write | updateSystemConfig (internal), updateAdminConfig | `/admin-config` PUT, `/config` PUT |
+| Read | getSystemConfig (cache 5s), getAdminConfig, rolePermissionService, Python `llm.py`/`web_search.py` | `/config`, `/admin-config`, `/roles`, `/llm`, bot worker, buffer service, Python `/chat` |
+| Write | updateSystemConfig (internal), updateAdminConfig, updateRolePermissions, llmConfigService | `/admin-config` PUT, `/config` PUT, `/roles` PUT, `/llm` PUT |
 
-**หน้าที่เข้าถึง:** `/config` (superadmin), `/admin-config` (editor)
+**หน้าที่เข้าถึง:** `/config` (superadmin), `/admin-config` (editor), `/roles`, `/llm`, Python bot (อ่าน `llm_config`)
 
 ---
 
-### 2.19 `assignment_configs`
+### 2.20 `assignment_configs`
 
 **Schema:** `AssignmentConfigDoc` ใน `assignmentService.ts` บรรทัด 14-19
 
@@ -804,7 +835,7 @@
 
 ---
 
-### 2.20 `assignment_cursors`
+### 2.21 `assignment_cursors`
 
 **Schema:** `AssignmentCursorDoc` ใน `assignmentService.ts` บรรทัด 21-25
 
@@ -819,7 +850,7 @@
 
 ---
 
-### 2.21 `shop_team_assignments`
+### 2.22 `shop_team_assignments`
 
 **Schema:** `ShopTeamAssignmentDoc` ใน `assignmentService.ts` บรรทัด 27-33
 
@@ -839,7 +870,7 @@
 
 ---
 
-### 2.22 `platform_team_assignments`
+### 2.23 `platform_team_assignments`
 
 **Schema:** `PlatformTeamAssignmentDoc` ใน `assignmentService.ts` บรรทัด 35-40
 
@@ -858,7 +889,7 @@
 
 ---
 
-### 2.23 `status_conversation`
+### 2.24 `status_conversation`
 
 **Schema:** `StatusConversationDoc` ใน `statusConversationService.ts` บรรทัด 19-36
 
@@ -891,7 +922,7 @@
 
 ---
 
-### 2.24 `test_status_conversation`
+### 2.25 `test_status_conversation`
 
 **Schema:** `TestStatusConversationDoc` ใน `testStatusConversationService.ts` บรรทัด 18-37
 
@@ -926,9 +957,10 @@
 
 ---
 
-### 2.25 `test_chat_sessions`
+### 2.26 `test_chat_sessions`
 
-**Schema:** ไม่มี TypeScript interface แยก — shape ใน Python `app.py` บรรทัด 5385-5401
+**Schema:** ไม่มี TypeScript interface แยก — shape ใน Python `test_chat_api.py`
+(ย้ายออกจาก `app.py` ตอน refactor 2026-09-15 — env override `ADMIN_MONGO_COLLECTION_TEST_CHAT_SESSIONS`)
 
 **Fields:**
 | Field | Type | หมายเหตุ |
@@ -946,14 +978,16 @@
 | `bot_handoff_at` | Date? | (Next.js bot-handoff) |
 | `admin_id` | string | ⚡ Phase 3 — เจ้าของ session (ดึงจาก header X-Admin-Id ตอน create) |
 | `admin_name` | string | ⚡ Phase 3 — ชื่อเจ้าของ (ดึงจาก header X-Admin-Name ตอน create) |
+| `source` | string? | `"script_test"` = session จาก shadow script (`shadow_openrouter.py`) |
+| `script_test` | boolean? | marker สำหรับ badge ใน list (ทุกคนเห็น ไม่กรอง admin_id) |
 
 **Access:**
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
-| Read | Python `app.py`, Next.js `bot-handoff` route | `/test-chat/sessions` (Python, กรองตาม admin_id), `/admin/conversations/bot-handoff` (Next.js) |
-| Write (create) | Python `app.py` | `POST /test-chat/sessions` (เก็บ admin_id + admin_name) |
-| Update | Python `app.py` (messages, status), Next.js (bot_claim_info, bot_handoff_at) | `POST /test-chat/sessions/{id}/messages`, `PUT /test-chat/sessions/{id}`, `POST .../close`, `POST .../reopen`, `/admin/conversations/bot-handoff` |
-| Delete | Python `app.py` | `DELETE /test-chat/sessions/{id}` |
+| Read | Python `test_chat_api.py`, Next.js `bot-handoff`/`test-chat-result`/`admin-chat-result` routes | `/test-chat/sessions` (Python, กรองตาม admin_id + เห็น script_test ทุกคน), `/admin/conversations/bot-handoff` (Next.js) |
+| Write (create) | Python `test_chat_api.py`, `chatbot/testscript/shadow_openrouter.py` (source=script_test) | `POST /test-chat/sessions`, shadow script |
+| Update | Python `test_chat_api.py` (messages, status), `shadow_openrouter.py` (script sessions), Next.js (bot_claim_info, bot_handoff_at) | `POST /test-chat/sessions/{id}/messages`, `PUT /test-chat/sessions/{id}`, `POST .../close`, `POST .../reopen`, `/admin/conversations/bot-handoff` |
+| Delete | Python `test_chat_api.py`, Next.js maintenance | `DELETE /test-chat/sessions/{id}`, `/admin/maintenance/soft-delete-all` |
 
 **หน้าที่เข้าถึง:** `/test-chat/*`
 
@@ -963,7 +997,7 @@
 
 ---
 
-### 2.26 `test_chat_ratings`
+### 2.27 `test_chat_ratings`
 
 **Schema:** `TestChatRatingDoc` ใน `testChatRatingService.ts` บรรทัด 37-62
 
@@ -992,7 +1026,7 @@
 
 ---
 
-### 2.27 `test_assignment`
+### 2.28 `test_assignment`
 
 **Schema:** `TestAssignmentDoc` ใน `testAssignmentService.ts` บรรทัด 80-104
 
@@ -1028,11 +1062,11 @@
 | `updated_at` | Date | |
 
 **Access:**
-| Read | getTestAssignment, listTestAssignments, listHistoryByAdmin, listReplayBatches, stats | `/test-assignment` |
-| Write/Update | saveReplayResult (insertOne), rateMessage, rateConversation | `/test-assignment` POST |
+| Read | getTestAssignment, listTestAssignments, listHistoryByAdmin, listReplayBatches, stats, liveAssignmentService, adminKpiService | `/test-assignment`, `/live-assignment`, `/admin-chat-result`, `/stats` |
+| Write/Update | saveReplayResult (insertOne), rateMessage, rateConversation, `docs/test/push_unit_reg_to_admin.py` (unit regression results, `replayed_by=unit_reg_*`) | `/test-assignment` POST, script |
 | Soft delete | softDelete, restore | `/test-assignment` POST |
 
-**หน้าที่เข้าถึง:** `/test-assignment`, `/replay-compare`
+**หน้าที่เข้าถึง:** `/test-assignment`, `/replay-compare`, `/live-assignment`, `/admin-chat-result`
 
 **หมายเหตุ:**
 - ⚡ Phase 3B-7 — `saveReplayResult` ใช้ `insertOne` (สร้าง doc ใหม่ทุกรอบ) + tag `replay_batch_id`
@@ -1042,7 +1076,7 @@
 
 ---
 
-### 2.28 `buffer_messages`
+### 2.29 `buffer_messages`
 
 **Schema:** `BufferMessageDoc` ใน `bufferService.ts` บรรทัด 23-31
 
@@ -1067,7 +1101,7 @@
 
 ---
 
-### 2.29 `test_chat_uploads`
+### 2.30 `test_chat_uploads`
 
 **Schema:** shape ใน `test-chat/upload/route.ts` บรรทัด 53-61
 
@@ -1090,7 +1124,7 @@
 
 ---
 
-### 2.30 `workflows`
+### 2.31 `workflows`
 
 **Schema:** `WorkflowDoc` ใน `workflowService.ts` บรรทัด 108-145
 
@@ -1131,7 +1165,7 @@
 
 ---
 
-### 2.31 `workflow_runs`
+### 2.32 `workflow_runs`
 
 **Schema:** `WorkflowRunDoc` ใน `workflowEngine.ts` บรรทัด 29-57
 
@@ -1176,14 +1210,20 @@
 
 ### 3.2 `ShpProducts` (Shopee products)
 
-**env:** `MONGO_COLLECTION` (default `ShpProducts`)
+**env:** `MONGO_COLLECTION` (default `ShpProducts`) — Next.js ใช้ `SHP_PRODUCTS_COLLECTION` แทน (systemConfigService)
 
 **ใช้ที่:**
-- Python `product_store.py` — ค้นสินค้า, vector search, fetch by id
-- Next.js `productService.ts` — listProducts, getProduct, getProductsByIds
+- Python `product_store.py` — ค้นสินค้า, vector search, fetch by id, cert search, stock (`_shopee_stock`)
+- Python `units.py` — `attach_listing_fields` (ดึง field listing เติม unit card)
+- Python `knowledge_base.py` — `_extract_policy_from_descriptions` (นโยบายจาก description) + product match
+- Python `app.py` — direct reads (`db[MONGO_COLLECTION]`) หลายจุด
+- Python `chat_v2.py`, `chatbotv3/product_match.py` — product retrieval/matching
+- Python `frontendScript/replay_compare.py` + `docs/test/*` — replay/test scripts
+- Next.js `productService.ts` — listProducts, getProduct, getProductsByIds (ReadOnlyCollection)
+- Next.js `systemConfigService.ts` — product stats ใน `/config`
 
 **Fields ที่ใช้ (ไม่ใช่ schema เต็ม — เป็น product DB ภายนอก):**
-- `item_id`, `item_status`, `brand`, `cat_name`, `shop`, `name`, `price`, `image_url`, `description`, `variants`, `tier_variation`, `total_stock`, `sold_out`, `has_promotion`, `is_flash_sale`, `warranty`, `short_link`
+- `item_id`, `item_status`, `brand`, `cat_name`, `shopname`/`shop`, `item_name`/`name`, `price`, `price_info`, `image_url`, `images`, `description`, `field_list`, `model`[] (`model_id`, `model_name`, `model_sku`, `model_status`, `shopee_ship_box`), `variants`, `tier_variation`, `total_stock`, `sold_out`, `has_promotion`, `is_flash_sale`, `warranty`, `short_link`
 
 **⚠️ Read-only — ห้ามเขียน** (Next.js บล็อกด้วย ReadOnlyCollection, Python ไม่มี write path)
 
@@ -1205,56 +1245,60 @@
 
 ---
 
+### 3.5 Stock DB — `itStock.Products` (read-only)
+
+**env:** `STOCK_URI` (connection string), `STOCK_DB` (default `itStock`) — collection name hardcoded `Products`
+
+**ไฟล์:** `chatbot/shopeechat/product_store.py` บรรทัด 3584+ (`_stock_products_coll`)
+
+**ใช้ที่:** cert search path เท่านั้น (`search_cert_products` — TISI/มอก./CE/CCC/FCC/RoHS/GB)
+- join ผ่าน `shopee_ship_box.{item_id,model_id}` ของ `ShpProducts`
+- เก็บ cert flags + ข้อมูล stock ต่อ variant
+
+**⚠️ Read-only — ใช้ lazy connect, fail → cert source นี้ถูกข้าม**
+
+---
+
 ## 4. Order DB Collections
 
 ### 4.1 Connection
 
-**ไฟล์:** `chatbot/shopeechat/order_store.py`
+**ไฟล์:**
+- Python: `chatbot/shopeechat/order_store.py` — lazy singleton client
+- Next.js: `src/app/api/admin/conversations/[conversationId]/orders/route.ts` — lazy client ของตัวเอง
 
 **env:** `ORDER_URI_MONGO`, `ORDER_DB` (default `dbWallet`), `ORDER_COLLECTION` (default `ShpOrders`)
 
 ### 4.2 `ShpOrders`
 
-**ใช้ที่:** Python `order_store.py` (read-only)
+**ใช้ที่:**
+- Python `order_store.py` (read-only) — ตอบลูกค้าใน `/chat` + warranty flow
+- Next.js `orders/route.ts` (read-only) — order panel ในหน้า conversation (lookup ด้วย `buyer_user_id` ← `conversation.customer_id`)
 
 **Fields ที่ใช้:**
-- `order_sn`, `order_status`, `logistics_status`, `shipping_carrier`, `create_time`, `item_list`, `buyer_id`, `shop`
+- `order_sn`, `order_status`, `buyer_user_id`, `buyer_username`, `shopname`
+- `item_list[]` (`item_name`, `model_name`, `model_sku`, `item_sku`, `model_quantity_purchased`, `model_discounted_price`, `model_original_price`, `image_info.image_url`, `item_id`, `model_id`)
+- `package_list[]` (`logistics_status`, `shipping_carrier`, `tracking_no`, `tracking_number`, `parcel_id`, `waybill_id`)
+- `create_time`, `pay_time`, `ship_by_date`, `pickup_done_time`, `update_time`
+- `recipient_address` (name/phone ถูก Shopee mask อยู่แล้ว), `total_amount`, `currency`, `estimated_shipping_fee`, `actual_shipping_fee`, `payment_method`, `cod`, `days_to_ship`, `cancel_by`, `cancel_reason`, `buyer_cancel_reason`
 
-**ฟังก์ชัน:**
-- `lookup_order(order_sn, shop_filter)`
-- `lookup_by_tracking(tracking_no, shop_filter)`
-- `lookup_orders_by_buyer(buyer_id, ...)`
-- `build_order_context(order)` — สร้าง context สำหรับ LLM
+**ฟังก์ชัน Python:**
+- `extract_order_sn(message)` / `extract_tracking_number(message)` — ดึงเลขจากข้อความ/OCR
+- `lookup_order(order_sn, shop_filter)` / `lookup_by_tracking(tracking_no, shop_filter)`
+- `build_order_context(order)` — สร้าง context string สำหรับ LLM
 
-**⚠️ Read-only**
-
----
-
-## 5. Python-only Collections
-
-### 5.1 `test_chat_logs`
-
-**ไฟล์:** `chatbot/shopeechat/app.py` บรรทัด 262-284, 5585-5603
-
-**Fields:**
-| Field | Type | หมายเหตุ |
-|-------|------|---------|
-| `action` | string | create/send/close/reopen/delete/... |
-| `session_id` | string? | ref test_chat_sessions |
-| `admin_id` | string | จาก header X-Admin-Id |
-| `admin_name` | string | จาก header X-Admin-Name |
-| `timestamp` | Date | |
-| `**extra` | object | ข้อมูลเพิ่มเติม |
-
-**Access:** Python เขียน (`_log_testchat_action`) + อ่าน (`GET /test-chat/logs`)
-
-**หน้าที่เข้าถึง:** ไม่มี UI ตรง — Python log only
+**⚠️ Read-only** — ไม่มี write path ทั้ง Python และ Next.js
 
 ---
 
-### 5.2 `conversation_products`
+## 5. Collections ที่ Python เป็นเจ้าของ (admin DB)
 
-**ไฟล์:** `chatbot/shopeechat/conversation_products.py`
+อยู่ใน admin DB เดียวกัน แต่ **ไม่มีใน `COLLECTIONS`** — Next.js ไม่แตะ (ยกเว้น test_chat_sessions
+ที่อยู่ใน COLLECTIONS เพราะ Next.js อ่าน/เขียน bot_claim_info ด้วย — ดู §2.26)
+
+### 5.1 `conversation_products`
+
+**ไฟล์:** `chatbot/shopeechat/conversation_products.py` — collection name hardcoded
 
 **Fields:**
 | Field | Type | หมายเหตุ |
@@ -1264,25 +1308,177 @@
 | `shop` | string? | |
 | `products` | array | list ของ {item_id, name, source, mentioned_at, is_anchor, card} |
 | `active_item_id` | string \| int? | anchor ล่าสุด |
+| `order_anchors` | array? | list ของ order ที่ลูกค้าส่งมา {order_sn, mentioned_at, ...} |
+| `active_order_sn` | string? | order ล่าสุด (อัปเดตทุกครั้งที่มี order anchor ใหม่) |
+| `claim_state` | object? | warranty claim state — {customer_name, customer_phone, customer_order_id, ...} merge-fill โดย `warranty_flow` |
 | `last_updated` | Date | |
 
-**product entry:**
-| Field | Type | หมายเหตุ |
-|-------|------|---------|
-| `item_id` | string \| int | |
-| `name` | string | |
-| `source` | string | user_item_card/user_variation_card/user_order/bot_suggestion |
-| `mentioned_at` | Date | |
-| `is_anchor` | boolean | anchor (ลูกค้าส่งมา) vs suggestion (bot แนะนำ) |
-| `card` | object? | product card (subset) |
+**product entry:** `{item_id, name, source: user_item_card|user_variation_card|user_order|bot_suggestion, mentioned_at, is_anchor, card?}`
 
 **Access:**
-| Read | load_timeline, get_active_product, get_suggestion_latest, resolve_active_by_message | Python `/chat` |
-| Write/Update | save_timeline, add_product | Python `/chat` |
+| การกระทำ | โดยใคร | ผ่านไหน |
+|---------|-------|--------|
+| Read | load_timeline, get_active_product, get_suggestion_latest, resolve_active_by_message, get_active_order_sn, get_order_anchors, load_claim_state | Python `/chat` (app.py, chat_v2, warranty_flow, order_flow) |
+| Write/Update | save_timeline, add_product, add_order_anchor, update_claim_state, clear_claim_state | Python `/chat` |
 
 **หน้าที่เข้าถึง:** ไม่มี UI ตรง — Python bot ใช้ภายใน
 
-**หมายเหตุ:** ทำให้ follow-up ไม่ลืมสินค้าเก่า — active = anchor ล่าสุด
+**หมายเหตุ:** ทำให้ follow-up ไม่ลืมสินค้า/order เก่า — active = anchor ล่าสุด
+
+---
+
+### 5.2 `test_chat_logs`
+
+**ไฟล์:** `chatbot/shopeechat/test_chat_api.py` (`_log_testchat_action`) — collection name hardcoded
+
+**Fields:**
+| Field | Type | หมายเหตุ |
+|-------|------|---------|
+| `action` | string | create_session/send/close/reopen/delete/... |
+| `session_id` | string? | ref test_chat_sessions |
+| `admin_id` | string | จาก header X-Admin-Id |
+| `admin_name` | string | จาก header X-Admin-Name |
+| `timestamp` | Date | |
+| `**extra` | object | ข้อมูลเพิ่มเติม (shop, title, ...) |
+
+**Access:** Python เขียน + อ่าน (`GET /test-chat/logs`) — fail เงียบ (logging ต้องไม่ทำ request fail)
+
+**หน้าที่เข้าถึง:** ไม่มี UI ตรง — Python log only
+
+---
+
+### 5.3 `image_texts`
+
+**ไฟล์:** `chatbot/shopeechat/scripts/import_image_texts.py` (เขียน) — collection name hardcoded
+
+**ใช้ทำอะไร:** OCR text จากรูปใน description/variant ของสินค้า (Gemini vision offline batch) — ใช้ตอน cert search + unit card
+
+**Fields:**
+| Field | Type | หมายเหตุ |
+|-------|------|---------|
+| `image_id` | string | PK (unique index) — dedupe key |
+| `image_url` | string | |
+| `item_ids` | int[] | items ที่ใช้รูปนี้ (desc + gallery + variant options) |
+| `kind` | string | desc_field / gallery / variant |
+| `text` | string | OCR result |
+| `truncated` | boolean? | |
+| `model` | string? | vision model ที่ใช้ |
+| `ts` | number | timestamp (เก็บเฉพาะ status=ok ล่าสุด) |
+
+**Access:**
+| เขียน | `import_image_texts.py` — upsert จาก `exports/image_texts.jsonl` |
+| อ่าน | `product_store.py` (cert search OCR source), `units.py` `attach_image_texts` |
+
+---
+
+### 5.4 `sellable_units`
+
+**ไฟล์:** `chatbot/shopeechat/units.py` (อ่าน), `scripts/build_sellable_units.py` + `import_sellable_units.py` (เขียน)
+
+**env:** `ADMIN_MONGO_COLLECTION_UNITS` (default `sellable_units`)
+
+**ใช้ทำอะไร:** unit-level product index (item_id × model_id) — flag-gated `USE_UNIT_INDEX`
+listing หนึ่งมีหลายรุ่นย่อย ค้นระดับรุ่นย่อยที่ขายจริง — exact model_code → field filter →
+vector (`exports/unit_embeddings.npz`) → merge+rank; ว่าง → fallback legacy listing path
+
+**Fields:**
+| Field | Type | หมายเหตุ |
+|-------|------|---------|
+| `unit_id` | string | PK (unique) — `{item_id}:{model_id\|solo\|m<idx>}` |
+| `item_id` / `model_id` | int | ref ShpProducts |
+| `display_name`, `item_name`, `model_name`, `model_sku` | string | |
+| `kind`, `product_type` | string | classifier output |
+| `charger_subtype`, `cable_subtype`, `camera_subtype` | string? | subtype |
+| `components` | string[] | |
+| `model_codes` | string[] | index — exact code lookup |
+| `confidence` | string | high/medium/low |
+| `price`, `stock` | number | snapshot ตอน build |
+| `item_status`, `model_status` | string | |
+| `shop`, `brand`, `cat_name` | string | |
+| `sellable` | boolean | `item_status=="NORMAL" and stock>0` — ⚠️ อ่านสดจาก Mongo ทุกครั้ง (`_sellable_mask`) ไม่ใช้ค่าใน npz |
+| `answerable`, `oos_in_name`, `has_description`, `has_warranty_info` | boolean | |
+| `desc_sections` | object | parsed description sections |
+| `image_ids` | string[] | ref `image_texts` |
+| `search_text` | string | text ที่ embed ลง unit_embeddings.npz |
+
+**Indexes (สร้างโดย import script):** `unit_id`(unique), `model_codes`, `item_id`, `sellable`, `shop`, `product_type`
+
+**Access:**
+| เขียน | `import_sellable_units.py` — replace_one upsert จาก `exports/sellable_units.jsonl` |
+| อ่าน | `units.py` — runtime search; join `kb_products` (`attach_kb_specs`), `image_texts` (`attach_image_texts`), `ShpProducts` (`attach_listing_fields`) |
+
+---
+
+### 5.5 `kb_products`
+
+**ไฟล์:** `docs/adminbase/script/import_adminbase.py` (เขียน), `knowledge_base.py` `_kb_products_coll()` (อ่าน)
+
+**env:** `ADMIN_MONGO_COLLECTION_KB_PRODUCTS` (default `kb_products`)
+
+**ใช้ทำอะไร:** KB product_spec + comparison จาก adminbase Excel import — แยกจาก `knowledge_base` (admin UI)
+ตั้งแต่ KB re-import 2026-09-21
+
+**Fields:**
+| Field | Type | หมายเหตุ |
+|-------|------|---------|
+| `type` | string | `product_spec` / `comparison` (จากชื่อไฟล์) |
+| `brand`, `model`, `category`, `category_id` | string | identity |
+| `model_codes` | string[] | extract จาก model — exact code lookup |
+| `item_ids` | string[] | link ไป ShpProducts ผ่าน model_codes |
+| `highlights`, `description`, `box_contents` | string | |
+| `warranty_period`, `warranty_note`, `notes`, `weight`, `dimensions` | string | |
+| `canonical_specs` | object | spec map ผ่าน `spec_key_map` (~45 canonical keys: capacity_mah/input_spec/screen_size/...) |
+| `specs_raw` | object | spec ที่ไม่มี canonical map (column ซ้ำเก็บ `name (2)`, `name (3)`) |
+| `extra_fields` | object | ค่ายาว >200 ตัวอักษร |
+| `is_spec_sheet` | boolean? | flag จากชื่อไฟล์/sheet |
+| `source_file`, `source_sheet`, `source_row` | | upsert key |
+| `active`, `version`, `created_at`, `updated_at`, `updated_by` | | `updated_by=system_import` |
+
+**Access:**
+| เขียน | `import_adminbase.py` — upsert by (source_file, source_sheet, source_row); `--reset`/`--dry-run` |
+| อ่าน | `knowledge_base.py` (spec/comparison/brand list), `units.py` `attach_kb_specs` |
+
+**หมายเหตุ:** runtime normalize `canonical_specs`/`specs_raw` → `specs` ใน `_search_kb_single` (schema alias)
+
+---
+
+### 5.6 `kb_qa`
+
+**ไฟล์:** `import_adminbase.py` (เขียน), `knowledge_base.py` `_kb_qa_coll()` (อ่าน)
+
+**env:** `ADMIN_MONGO_COLLECTION_KB_QA` (default `kb_qa`)
+
+**ใช้ทำอะไร:** QA pairs (troubleshooting จาก Excel) + `general_faq` (จากไฟล์ .txt เงื่อนไขรับประกัน)
+
+**Fields:**
+| Field | Type | หมายเหตุ |
+|-------|------|---------|
+| `type` | string | `qa` / `general_faq` |
+| `q`, `a` | string | question/answer — caller normalize `a` → `answer` |
+| `kb_ref` | string? | `{source_file}:{source_sheet}:{source_row}` ชี้กลับ kb_products |
+| `topic` | string | `{brand} {model}` หรือ "รับประกัน" (general_faq) |
+| `model_codes`, `item_ids` | array | inherit จาก product doc ของ row เดียวกัน |
+| `question_patterns`, `applies_to_brands`, `applies_to_categories` | string[]? | เฉพาะ general_faq |
+| `source_file`, `source_sheet`, `source_row`, `qa_idx` | | upsert key (4 fields) |
+| `active`, `version`, `created_at`, `updated_at`, `updated_by` | | |
+
+**Access:**
+| เขียน | `import_adminbase.py` |
+| อ่าน | `knowledge_base.py` (`get_general_faq` → fallback `knowledge_base`; QA lookup), `build_embeddings.py` (embed QA) |
+
+---
+
+### 5.7 `kb_raw`
+
+**ไฟล์:** `import_adminbase.py` (เขียน)
+
+**env:** `ADMIN_MONGO_COLLECTION_KB_RAW` (default `kb_raw`)
+
+**ใช้ทำอะไร:** audit trail — raw source data ทุกแถวที่มีข้อมูล (ไม่ทิ้ง column ซ้ำ)
+- `pairs`: list-of-pairs `[{col, val}]` ตามลำดับ column จริง
+- `source_file`, `source_sheet`, `source_row` — upsert key
+
+**Access:** เขียนอย่างเดียว — ยังไม่มี runtime reader (ใช้ trace/audit ย้อนหลัง)
 
 ---
 
@@ -1299,46 +1495,87 @@
 
 ---
 
-## 7. Access Matrix รวม
+## 7. Local files (ไม่ใช่ Mongo)
+
+ส่วนหนึ่งของ data pipeline เป็นไฟล์ local ใน `exports/` (Docker copy เข้า image)
+
+| ไฟล์ | สร้างโดย | ใช้โดย |
+|------|---------|--------|
+| `exports/ShpProducts.export.json` | `scripts/export_mongo.py` (dump จาก dbWallet) | build scripts ทั้งหมด (offline snapshot) |
+| `exports/product_embeddings.npz` | `scripts/build_embeddings.py` (default mode — products จาก export) | `product_store.py` vector search (mtime auto-reload) |
+| `exports/unit_embeddings.npz` | `scripts/build_embeddings.py --units` (embed `search_text` จาก `sellable_units.jsonl`) | `units.py` vector search (mtime auto-reload) |
+| `exports/qa_embeddings.npz` | `scripts/build_embeddings.py --qa` (embed `topic \| q` จาก `kb_qa` ใน admin DB) | `knowledge_base.py` `search_qa`/`_qa_vectors` (flag `USE_QA_KB`, mtime auto-reload) |
+| `exports/sellable_units.jsonl` | `scripts/build_sellable_units.py` (จาก export + `_shopee_stock`) | `import_sellable_units.py` → Mongo |
+| `exports/image_texts.jsonl` | `scripts/build_image_texts.py` (Gemini vision batch) | `import_image_texts.py` → Mongo |
+| `exports/typo_dict.json` | `scripts/build_typo_dict.py` (คำจริงจาก catalog) | `route_context.py` `normalize_message` |
+| `device_specs_data.py` | curated module (ไม่ใช่ไฟล์ data — เป็น dict `DEVICE_SPECS` ในโค้ด) | `device_compat.py` (compatibility engine) |
+
+---
+
+## 8. Access Matrix รวม
+
+### 8.1 Admin DB (Next.js ผ่าน `COLLECTIONS`)
 
 | Collection | Read หลัก | Write หลัก | Update หลัก | Delete | หน้าที่เข้าถึง |
 |------------|----------|-----------|------------|--------|---------------|
-| `admins` | authService | authService (SSO) | authService | authService (soft) | users, team, tickets, botworker, ... |
+| `admins` | authService | authService (SSO), `seed-superadmin.mjs` | authService | authService (soft) | users, team, tickets, botworker, ... |
 | `sessions` | authService | authService | authService | (revoke) | ทุกหน้า (middleware) |
-| `knowledge_base` | knowledgeBaseService, Python | knowledgeBaseService | knowledgeBaseService | knowledgeBaseService (soft) | knowledge, shops, Python bot |
+| `knowledge_base` | knowledgeBaseService, Python (fallback) | knowledgeBaseService | knowledgeBaseService | knowledgeBaseService (soft) | knowledge, shops, Python bot (legacy fallback) |
 | `tickets` | ticketService | ticketService | ticketService | ticketService (soft) | stats/dashboard |
-| `admin_logs` | adminLogService | ทุก service | — | — | logs, analytics |
-| `conversations` | conversationService | conversationService, data writer | conversationService, statusConversationService | — | tickets, botworker, shadow-inbox, ... |
-| `messages` | messageService | messageService, data writer | (image_desc cache) | — | tickets, botworker, shadow-inbox |
-| `shops` | shopService | shopService (data writer) | shopService | — | shops, config, workflows, triggers, ... |
+| `admin_logs` | adminLogService | ทุก service (audit), `cleanup-test-artifacts.ts` (read) | — | — | logs, analytics |
+| `conversations` | conversationService, หลาย route, workflowEngine, Python `replay_compare.py` | conversationService, sellcenter dump | conversationService, statusConversationService, `/labels` | — | tickets, botworker, shadow-inbox, ... |
+| `messages` | messageService, bot worker, liveAssignmentService, Python `replay_compare.py` | messageService, sellcenter dump | botWorkerService (image_desc cache) | — | tickets, botworker, shadow-inbox |
+| `shops` | shopService | shopService, `sync-shops.ts`, data writer | shopService | — | shops, config, workflows, triggers, ... |
 | `customers` | customerService | customerService (data writer) | customerService | — | contacts |
-| `triggers` | triggerService | triggerService | triggerService | triggerService (soft) | triggers, shops, bot worker |
-| `shadow_replies` | shadowReplyService | shadowReplyService, bot worker | shadowReplyService | shadowReplyService (soft) | shadow-inbox, botworker, replay-compare |
+| `triggers` | triggerService, Python `replay_compare.py` | triggerService | triggerService | triggerService (soft) | triggers, shops, bot worker |
+| `shadow_replies` | shadowReplyService, adminKpiService, messageService | shadowReplyService, bot worker | shadowReplyService | shadowReplyService (soft), `clear-shadow-replies.ts` | shadow-inbox, botworker, replay-compare |
 | `chat_annotations` | chatAnnotationService | chatAnnotationService | chatAnnotationService | chatAnnotationService (soft) | shadow-inbox, test-assignment |
 | `quick_replies` | quickReplyService | quickReplyService | quickReplyService | quickReplyService (soft) | quick-replies, test-chat |
 | `close_history` | closeHistoryService | closeHistoryService | closeHistoryService | — | tickets, botworker |
 | `chat_accept_sessions` | chatAcceptService | chatAcceptService | chatAcceptService | — | team, tickets, analytics |
-| `chat_processing` | botWorkerService | botWorkerService | — | — | (internal) |
-| `shop_personas` | personaService, Python | personaService | personaService | personaService (soft) | persona, shops, Python bot |
-| `shop_settings` | shopSettingsService, Python | shopSettingsService | shopSettingsService | shopSettingsService (soft) | shop-settings, Python bot |
-| `system_configs` | systemConfigService | systemConfigService | systemConfigService | — | config, admin-config |
+| `chat_processing` | botWorkerService | botWorkerService | — | — | (internal — idempotency) |
+| `shop_personas` | personaService, Python `persona.py` | personaService | personaService | personaService (soft) | persona, shops, Python bot |
+| `shop_settings` | shopSettingsService, Python `app.py` | shopSettingsService | shopSettingsService | shopSettingsService (soft) | shop-settings, Python bot |
+| `system_configs` | systemConfigService, rolePermissionService, llmConfigService, Python `llm.py`/`web_search.py` | systemConfigService, rolePermissionService, llmConfigService | เหมือน write | — | config, admin-config, roles, llm, Python bot |
 | `assignment_configs` | assignmentService | assignmentService | assignmentService | — | team, bot worker |
 | `assignment_cursors` | assignmentService | assignmentService | assignmentService | — | (internal) |
 | `shop_team_assignments` | assignmentService | assignmentService | assignmentService | assignmentService | team |
 | `platform_team_assignments` | assignmentService | assignmentService | assignmentService | assignmentService | team |
-| `status_conversation` | statusConversationService | statusConversationService | statusConversationService | — | tickets (จริง), mutation routes |
-| `test_status_conversation` | testStatusConversationService | testStatusConversationService | testStatusConversationService | clearTestSource | botworker, shadow-inbox, test-assignment |
-| `test_chat_sessions` | Python, Next.js | Python | Python, Next.js | Python | test-chat |
-| `test_chat_ratings` | testChatRatingService | testChatRatingService (upsert) | testChatRatingService | — | test-chat |
-| `test_assignment` | testAssignmentService | testAssignmentService | testAssignmentService | — | test-assignment, replay-compare |
+| `status_conversation` | statusConversationService | statusConversationService | statusConversationService | `/admin/maintenance/clear-status` | tickets (จริง), mutation routes |
+| `test_status_conversation` | testStatusConversationService, bot-handoff route | testStatusConversationService | testStatusConversationService | clearTestSource | botworker, shadow-inbox, test-assignment |
+| `test_chat_sessions` | Python `test_chat_api.py`, Next.js routes | Python `test_chat_api.py`, `shadow_openrouter.py` | Python, Next.js (bot_claim_info) | Python, `/admin/maintenance/soft-delete-all` | test-chat |
+| `test_chat_ratings` | testChatRatingService, adminKpiService | testChatRatingService (upsert) | testChatRatingService | `/admin/maintenance/soft-delete-all` | test-chat, admin-chat-result |
+| `test_assignment` | testAssignmentService, liveAssignmentService, adminKpiService | testAssignmentService, `push_unit_reg_to_admin.py` | testAssignmentService | softDelete/restore | test-assignment, replay-compare, live-assignment, admin-chat-result |
 | `buffer_messages` | bufferService | bufferService | — | bufferService | (internal), test-chat |
 | `test_chat_uploads` | route | route (upload) | — | — | test-chat |
-| `workflows` | workflowService | workflowService | workflowService | workflowService (soft/restore) | workflows, shops, bot worker |
+| `workflows` | workflowService, `cleanup-test-artifacts.ts` | workflowService | workflowService | workflowService (soft/restore) | workflows, shops, bot worker |
 | `workflow_runs` | workflowEngine | workflowEngine | workflowEngine | — | (internal) |
-| `conversation_products` | Python | Python | Python | — | (Python internal) |
-| `test_chat_logs` | Python | Python | — | — | (Python internal) |
-| `ShpProducts` | productService, Python | — (read-only) | — | — | (internal), messages enrichment |
-| `ShpOrders` | Python | — (read-only) | — | — | (Python internal) |
+
+### 8.2 Admin DB (Python-owned — ไม่อยู่ใน `COLLECTIONS`)
+
+| Collection | Read | Write | หมายเหตุ |
+|------------|------|-------|---------|
+| `conversation_products` | Python bot runtime | Python bot runtime | product/order timeline + claim_state |
+| `test_chat_logs` | Python `/test-chat/logs` | Python `test_chat_api.py` | audit log test chat |
+| `image_texts` | `product_store.py`, `units.py` | `import_image_texts.py` | OCR จากรูปสินค้า |
+| `sellable_units` | `units.py` | `import_sellable_units.py` | unit index (flag `USE_UNIT_INDEX`) |
+| `kb_products` | `knowledge_base.py`, `units.py` | `import_adminbase.py` | KB product spec/comparison |
+| `kb_qa` | `knowledge_base.py`, `build_embeddings.py` | `import_adminbase.py` | KB QA + general_faq |
+| `kb_raw` | — | `import_adminbase.py` | audit trail (ไม่มี reader) |
+
+### 8.3 External DBs (read-only — ห้ามเขียน)
+
+| Collection | DB/env | Read โดย |
+|------------|--------|----------|
+| `ShpProducts` | `MONGO_*` (dbWallet) | Python `product_store`/`units`/`knowledge_base`/`app.py`/`chat_v2`/`chatbotv3`, Next.js `productService`+`systemConfigService` (ReadOnlyCollection), test/replay scripts |
+| `TiksProduct` | `TIKTOK_PRODUCTS_COLLECTION` (dbWallet) | Next.js `productService` |
+| `OpenLazadaProducts` | `LAZADA_PRODUCTS_COLLECTION` (dbWallet) | Next.js `productService` |
+| `ShpOrders` | `ORDER_*` | Python `order_store.py`, Next.js `/admin/conversations/[id]/orders` |
+| `itStock.Products` | `STOCK_URI`/`STOCK_DB` | Python `product_store.py` (cert search) |
+
+### 8.4 Declared-but-unused (ยังไม่มี service/route ใช้)
+
+`auth_tokens`, `guardrails`, `pushevents`, `requestlogs` — มีใน `COLLECTIONS` + สร้าง index แต่ไม่มี caller
 
 ---
 
@@ -1346,13 +1583,25 @@
 
 | ไฟล์ | หน้าที่ |
 |------|---------|
-| `ChatAdminWeb/src/backend/lib/config.ts` | Collection names + env config |
-| `ChatAdminWeb/src/backend/db/mongoClient.ts` | MongoDB connection + COLLECTIONS |
+| `ChatAdminWeb/src/backend/lib/config.ts` | Collection names + env config (36 keys) |
+| `ChatAdminWeb/src/backend/db/mongoClient.ts` | MongoDB connection + COLLECTIONS + ensureIndexes |
 | `ChatAdminWeb/src/backend/db/dbWalletClient.ts` | Read-only product DB (ReadOnlyCollection) |
-| `ChatAdminWeb/src/backend/service/*.ts` | 31 services (แต่ละ service มี interface ของ doc) |
-| `chatbot/shopeechat/product_store.py` | Product DB (read-only) |
+| `ChatAdminWeb/src/backend/service/*.ts` | 34 services (แต่ละ service มี interface ของ doc) |
+| `ChatAdminWeb/src/app/api/admin/conversations/[conversationId]/orders/route.ts` | Order DB read (Next.js) |
+| `ChatAdminWeb/scripts/bot-worker.ts` | poll messages → buffer → trigger/workflow → bot → shadow_replies |
+| `ChatAdminWeb/scripts/sync-shops.ts` | aggregate `conversations_shp` → upsert `shops` |
+| `chatbot/shopeechat/product_store.py` | Product DB (read-only) + stock DB `itStock.Products` (cert) |
+| `chatbot/shopeechat/units.py` | `sellable_units` unit index + `unit_embeddings.npz` |
 | `chatbot/shopeechat/order_store.py` | Order DB (read-only) |
-| `chatbot/shopeechat/knowledge_base.py` | KB (admin DB, read-only) |
-| `chatbot/shopeechat/persona.py` | Persona (admin DB, read-only) |
-| `chatbot/shopeechat/conversation_products.py` | Conversation products (admin DB, read/write) |
-| `chatbot/shopeechat/app.py` | test_chat_sessions, test_chat_logs (admin DB, CRUD) |
+| `chatbot/shopeechat/knowledge_base.py` | `kb_products`/`kb_qa` + legacy `knowledge_base` fallback + admin client builder |
+| `chatbot/shopeechat/persona.py` | `shop_personas` (admin DB, read-only) |
+| `chatbot/shopeechat/llm.py` | `system_configs.llm_config` (admin DB, read-only, TTL 10s) |
+| `chatbot/shopeechat/conversation_products.py` | `conversation_products` (admin DB, read/write) |
+| `chatbot/shopeechat/test_chat_api.py` | `test_chat_sessions` + `test_chat_logs` (admin DB, CRUD) |
+| `chatbot/shopeechat/app.py` | `/chat` entry — อ่าน `shop_settings`, `ShpProducts`, `conversation_products` |
+| `chatbot/shopeechat/scripts/import_*.py` | import `image_texts`/`sellable_units` เข้า admin DB |
+| `chatbot/shopeechat/scripts/build_*.py` | build exports (`sellable_units.jsonl`, `image_texts.jsonl`, `*_embeddings.npz`) |
+| `docs/adminbase/script/import_adminbase.py` | import `kb_products`/`kb_qa`/`kb_raw` จาก `docs/adminbase/*.xlsx` |
+| `chatbot/frontendScript/replay_compare.py` | replay engine — อ่าน `conversations_shp`/`messages_shp`/`triggers`/`ShpProducts` |
+| `chatbot/testscript/shadow_openrouter.py` | shadow test — เขียน `test_chat_sessions` (source=script_test) |
+| `docs/test/push_unit_reg_to_admin.py` | เขียน `test_assignment` (unit regression) |

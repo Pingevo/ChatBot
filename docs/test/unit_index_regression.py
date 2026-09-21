@@ -200,7 +200,7 @@ def run_questions(corpus_path: str, bot_url: str, out_path: str,
 
 
 def run_conversations(n_conv: int, bot_url: str, out_path: str,
-                      delay: float) -> None:
+                      delay: float, skip_existing: bool = False) -> None:
     """Replay N conversations จริง — reuse replay_compare (เก็บ debug ครบอยู่แล้ว)."""
     import replay_compare as rc
     from pymongo import MongoClient
@@ -220,10 +220,20 @@ def run_conversations(n_conv: int, bot_url: str, out_path: str,
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
+    done_ids: set[str] = set()
+    if skip_existing and out.exists():
+        for line in out.open(encoding="utf-8"):
+            try:
+                done_ids.add(json.loads(line)["conv_id"])
+            except Exception:
+                pass
+        print(f"resume: skip {len(done_ids)} done convs")
     t0 = time.time()
-    with out.open("w", encoding="utf-8") as f:
+    with out.open("a", encoding="utf-8") as f:
         for i, c in enumerate(convs):
             cid = c["conversation_id"]
+            if cid in done_ids:
+                continue
             try:
                 r = rc.replay_one(admin_db, prod_db, cid, verbose=False)
             except Exception as e:
@@ -262,7 +272,8 @@ def main() -> None:
         run_questions(args.questions, args.bot, args.out,
                       args.skip_existing, args.limit, args.delay)
     elif args.conversations:
-        run_conversations(args.conversations, args.bot, args.out, args.delay)
+        run_conversations(args.conversations, args.bot, args.out, args.delay,
+                          args.skip_existing)
     else:
         sys.exit("ระบุ --questions หรือ --conversations")
 
