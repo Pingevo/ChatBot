@@ -123,7 +123,7 @@ ROWS = [
          {"item_id": 1, "product_type": "charger", "catalog_status": "out_of_stock", "_available_for_sale": False},
          {"item_id": 2, "product_type": "cable", "catalog_status": "unlisted", "_available_for_sale": False},
      ]},
-    # rec b: 2 listing ต่างกัน → unique 2/2 = 1.0, live 2/2
+    # rec b: คำตอบที่ถูกคือ "ไม่มี" แต่ pool มีของผิดประเภทหลุดมา → unique 2/2, live 2/2
     {"id": "b", "topic": "compat_charging", "shop": "S1", "unit_path": False,
      "unit_attempted": "fallback_dead_pool",
      "answer": "ขออภัยค่ะ ทางร้านไม่มีสินค้าประเภทนี้จำหน่ายนะคะ",
@@ -133,6 +133,16 @@ ROWS = [
          {"item_id": 4, "product_type": "powerbank", "catalog_status": "active",
           "_available_for_sale": True},
      ]},
+    # rec c: compat จริง — top-1 65W ≥ 60 → adequacy ผ่าน; unique 2/2, live 2/2
+    {"id": "c", "topic": "compat_charging", "shop": "S1", "unit_path": True,
+     "unit_attempted": "attempted",
+     "answer": "แนะนำรุ่นนี้เลยค่ะ",
+     "products": [
+         {"item_id": 5, "product_type": "powerbank", "output_power_w": 65,
+          "catalog_status": "active", "_available_for_sale": True},
+         {"item_id": 6, "product_type": "powerbank", "catalog_status": "active",
+          "_available_for_sale": True},
+     ]},
 ]
 
 GOLD = [
@@ -140,25 +150,29 @@ GOLD = [
      "expected_product_type": "charger", "expected_answer_mode": "recommend",
      "expected_catalog_status": "active",
      "acceptable_item_ids": [1], "must_not_item_ids": [2]},
-    {"id": "b", "shop": "S1", "message": "พาวเวอร์แบงค์ชาร์จโน้ตบุ๊คได้ไหม",
+    {"id": "b", "shop": "S1", "message": "มีสายชาร์จไหม",
+     "intent": "compatibility", "expected_product_type": "cable",
+     "expected_answer_mode": "no_such_type"},
+    {"id": "c", "shop": "S1", "message": "พาวเวอร์แบงค์ชาร์จโน้ตบุ๊คได้ไหม",
      "intent": "compatibility", "expected_product_type": "powerbank",
-     "expected_answer_mode": "no_such_type", "min_output_power_w": 60},
+     "expected_answer_mode": "recommend", "expected_catalog_status": "active",
+     "min_output_power_w": 60},
 ]
 
 
 def main() -> int:
     with tempfile.TemporaryDirectory() as d:
         recs = ev.load_results(_write(Path(d), ROWS))
-    assert len(recs) == 2, recs
+    assert len(recs) == 3, recs
 
     m = ev.pool_metrics(recs)
-    assert m["n"] == 2 and m["n_with_products"] == 2, m
-    assert abs(m["listing_diversity"] - 0.7) < 1e-9, m       # (0.4 + 1.0)/2
-    assert abs(m["dup_pool_rate"] - 0.5) < 1e-9, m           # a มี listing ซ้ำ >= 3
-    assert abs(m["live_ratio_top5"] - 0.7) < 1e-9, m         # (2/5 + 2/2)/2
-    assert abs(m["unit_share"] - 0.5) < 1e-9, m
-    assert abs(m["fallback_rate"] - 0.5) < 1e-9, m
-    assert abs(m["avg_pool"] - 3.5) < 1e-9, m
+    assert m["n"] == 3 and m["n_with_products"] == 3, m
+    assert abs(m["listing_diversity"] - 0.8) < 1e-9, m       # (0.4 + 1.0 + 1.0)/3
+    assert abs(m["dup_pool_rate"] - 1/3) < 1e-9, m           # เฉพาะ a มี listing ซ้ำ >= 3
+    assert abs(m["live_ratio_top5"] - 0.8) < 1e-9, m         # (2/5 + 2/2 + 2/2)/3
+    assert abs(m["unit_share"] - 2/3) < 1e-9, m
+    assert abs(m["fallback_rate"] - 1/3) < 1e-9, m
+    assert abs(m["avg_pool"] - 3.0) < 1e-9, m                # (5 + 2 + 2)/3
     print("PASS pool_metrics")
 
     assert ev.classify_answer_mode("ขออภัยค่ะ ทางร้านไม่มีสินค้าประเภทนี้จำหน่ายนะคะ") == "no_such_type"
@@ -169,14 +183,15 @@ def main() -> int:
     print("PASS classify_answer_mode")
 
     g = ev.gold_metrics(recs, GOLD)
-    assert g["n_gold"] == 2, g
-    # type_purity: a = 4/5 (นับ), b ถูกข้ามเพราะ expected_answer_mode = no_such_type
-    assert abs(g["type_purity"] - 0.8) < 1e-9, g
+    assert g["n_gold"] == 3, g
+    # type_purity: a = 4/5, c = 2/2 (b ถูกข้ามเพราะ expected_answer_mode = no_such_type)
+    assert abs(g["type_purity"] - 0.9) < 1e-9, g
     assert abs(g["acceptable_hit_rate"] - 1.0) < 1e-9, g      # a เจอ item 1
     assert abs(g["must_not_violation_rate"] - 1.0) < 1e-9, g  # a มี item 2 ที่ห้าม
-    assert abs(g["status_accuracy"] - 1.0) < 1e-9, g          # a: acceptable ตัวแรก = active
-    assert abs(g["adequacy_at_1"] - 1.0) < 1e-9, g            # b: top-1 65W >= 60
-    assert abs(g["answer_mode_accuracy"] - 1.0) < 1e-9, g     # a=recommend, b=no_such_type
+    assert abs(g["status_accuracy"] - 1.0) < 1e-9, g          # a: item1=active, c: top-1=active
+    # adequacy: b ถูกข้าม (no_such_type — ของที่หลุดมาไม่ใช่คำตอบ), c: top-1 65W >= 60
+    assert abs(g["adequacy_at_1"] - 1.0) < 1e-9, g
+    assert abs(g["answer_mode_accuracy"] - 1.0) < 1e-9, g     # a/c=recommend, b=no_such_type
     print("PASS gold_metrics")
 
     print("\nALL PASS")
@@ -221,6 +236,8 @@ metric ที่ต้องมี gold (ความจริงมาจาก
   must_not_violation_rate  เคสที่มีสินค้าต้องห้ามหลุดเข้า pool (ยิ่งต่ำยิ่งดี)
   status_accuracy          catalog_status ของสินค้าที่ match ตรงกับที่คาด
   adequacy_at_1            เคส compat ที่อันดับ 1 จ่ายไฟถึงเกณฑ์ (อ่านจาก field เท่านั้น)
+                           — ข้ามเคสที่ expected_answer_mode ∈ {no_such_type, no_info}
+                           เพราะคำตอบที่ถูกคือ "ไม่มี" แม้ pool จะมีของผิดหลุดมา
   answer_mode_accuracy     ⚠️ heuristic ระดับข้อความ — ดู classify_answer_mode
 """
 from __future__ import annotations
@@ -368,8 +385,10 @@ def gold_metrics(recs: list[dict], gold: list[dict]) -> dict:
             status_total += 1
             status_hits += 1 if matched.get("catalog_status") == want_status else 0
 
+        # adequacy นับเฉพาะเคสที่คำตอบถูกคือ "มีสินค้า" — เคส no_such_type/no_info
+        # ที่มีของหลุดใน pool ไม่ใช่ความผิดของ top-1 (validate_gold กันไม่ให้ใส่ min_w คู่กันอยู่แล้ว)
         min_w = g.get("min_output_power_w")
-        if min_w:
+        if min_w and mode_expected not in _NO_PRODUCT_MODES:
             adeq.append(1.0 if ps and _max_watt(ps[0]) >= float(min_w) else 0.0)
 
         if mode_expected:
@@ -510,12 +529,16 @@ git commit -m "test: offline retrieval metrics (pool + gold + per-intent) with b
          "expected_answer_mode": "bogus_mode"},
         {"id": "w", "shop": "S", "message": "m", "intent": "compatibility",
          "min_output_power_w": -5},
+        {"id": "v", "shop": "S", "message": "m", "intent": "compatibility",
+         "expected_answer_mode": "no_such_type", "min_output_power_w": 60},
     ])
     assert any("intent" in e for e in errs), errs
     assert any("ขาด id" in e for e in errs), errs
     assert any("ซ้ำ" in e for e in errs), errs
     assert any("expected_answer_mode" in e for e in errs), errs
     assert any("min_output_power_w" in e for e in errs), errs
+    # เคส v: "ไม่มีสินค้า" แต่ใส่เกณฑ์วัตต์ = gold ขัดกันเอง (จะทำ adequacy วัดผิด)
+    assert any("min_output_power_w" in e and "ขัดกันเอง" in e for e in errs), errs
     print("PASS validate_gold")
 ```
 
@@ -566,8 +589,11 @@ def validate_gold(gold: list[dict]) -> list[str]:
         w = g.get("min_output_power_w")
         if w is not None and not (isinstance(w, (int, float)) and w > 0):
             errs.append(f"[{tag}] min_output_power_w ต้องเป็นตัวเลข > 0")
-        if mode in _NO_PRODUCT_MODES and g.get("acceptable_item_ids"):
-            errs.append(f"[{tag}] mode={mode} แต่ระบุ acceptable_item_ids (ขัดกันเอง)")
+        if mode in _NO_PRODUCT_MODES:
+            if g.get("acceptable_item_ids"):
+                errs.append(f"[{tag}] mode={mode} แต่ระบุ acceptable_item_ids (ขัดกันเอง)")
+            if w is not None:
+                errs.append(f"[{tag}] mode={mode} แต่ระบุ min_output_power_w (ขัดกันเอง)")
     return errs
 ```
 
@@ -946,16 +972,41 @@ if __name__ == "__main__":
 และแทน `"_available_for_sale": status == "NORMAL" and stock > 0,` → `"_available_for_sale": live_sellable,`
 และแทน `"sellable": status == "NORMAL" and stock > 0,` → `"sellable": live_sellable,`
 
-**4e.** `app.py` — แทนสูตรที่สาม (บรรทัด 4189-4193) ด้วยการเรียก resolver
-(ส่ง `0` เมื่อ `sold_out=True` เพื่อให้ผลเท่าสูตรเดิมทุกกรณี — ไม่ใช่ behavior ใหม่):
+**4e.** `app.py` — แทนสูตรที่สาม (บรรทัด 4189-4193) ด้วยการเรียก resolver บน **raw fields**
+— ห้ามส่ง `stock=0` เพราะ `sold_out=True`: flag อาจ stale บน card ที่ restore จาก timeline
+(`conversation_products.py:244`) ทั้งที่ `status`/`total_stock` ยังเป็นของใหม่
+→ raw ชนะเสมอ, flag ที่ขัดกันกลายเป็น warning ไม่ใช่ตัวตัดสิน:
 
 ```python
                 _p["catalog_status"], _p["_available_for_sale"] = \
                     product_store.resolve_availability(
-                        _p.get("status"),
-                        0 if _p.get("sold_out", False) else (_p.get("total_stock", 0) or 0))
+                        _p.get("status"), _p.get("total_stock", 0) or 0)
 ```
-> ห้ามแตะบรรทัด 4194-4234 (`_has_unlist` / `_notes` / prompt rule) — Plan 1 ไม่เปลี่ยน policy
+
+แล้วต่อจาก loop เดิม (ก่อน `_has_unlist`) เพิ่มการนับ conflict — ต่อยอด print
+`[AVAIL-FOR-SALE]` ที่มีอยู่บรรทัด 4202 ไม่สร้างช่อง log ใหม่:
+
+```python
+            _sold_out_conflict = [
+                _p.get("item_id") for _p in products
+                if _p.get("sold_out") and _p["_available_for_sale"]
+            ]
+```
+
+และเพิ่ม `sold_out_conflict={len(_sold_out_conflict)}` ต่อท้าย f-string เดิม +
+บรรทัดเตือนเมื่อเกิดจริง:
+
+```python
+            if _sold_out_conflict:
+                print(f"[AVAIL-FOR-SALE] sold_out flag ขัดกับ status+stock "
+                      f"(flag stale): {_sold_out_conflict[:5]}", file=sys.stderr)
+```
+
+> parity note: ผล `_available_for_sale` เท่าสูตรเดิมทุก card ที่สร้างสด เพราะ `sold_out`
+> derive จาก `stock==0` ตอนสร้าง (`product_store.py:638`, `units.py:289`) — ต่างได้เฉพาะ
+> card ที่ restore จาก timeline ซึ่งเป็นเจตนา (raw ชนะ flag ที่ stale)
+> ห้ามแตะบรรทัด 4194-4234 (`_has_unlist` / `_has_sold_out` / `_notes` / prompt rule)
+> — Plan 1 ไม่เปลี่ยน policy; `_has_sold_out` ยังอ่าน `sold_out` ดิบตามเดิม
 
 - [ ] **Step 5: รันเทสให้ผ่าน + เทสเดิมต้องไม่พัง**
 

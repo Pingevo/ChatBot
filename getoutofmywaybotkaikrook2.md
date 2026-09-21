@@ -20,6 +20,13 @@
 
 ## กำลังทำ (active)
 
+### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
+
+- **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)
+- **ขอบเขต:** T1 evaluator+baseline (offline ไม่แตะ prod) → T2 gold set ≥40 เคส + `validate_gold` → **หยุดรอ human review ที่ T2 Step 6** → T3 `resolve_availability` → T4 wire ทุก callsite รวม `app.py:4189-4193` → T5 `_cap_per_listing` → T6 replay gate
+- **เงื่อนไข:** TDD ทุก task · ห้ามแตะ prompt block `app.py:4194-4234` · `sellable` snapshot ใน retrieval = known limitation ไม่แก้ใน Plan 1 · gold set ต้องผ่าน human review ก่อนเริ่ม T3
+- **baseline ที่จะเทียบ:** `docs/test/results/unit_reg_questions_2026-09-18.jsonl` (300Q)
+
 ### ✅ Audit + rewrite docs/schema.md ตามโครงสร้างปัจจุบัน (2026-09-21) — เสร็จ + verified → ย้ายไป "ผ่านแล้ว"
 
 ### ✅ เขียน SRS_SSD.md ใหม่ทั้งหมด (2026-10-02) — เสร็จ + verified
@@ -616,3 +623,15 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **ไม่แตะ:** bot python (`elapsed` วินาทีถูกตาม schema) + display logic (อ่านเป็น ms ถูกแล้ว)
 - **doc เก่าใน DB** ยังเป็นวินาที (โชว์เล็กผิดหน่วย) — ไม่ได้ backfill (test/shadow data; ถ้าต้องการให้บอก)
 - **verify:** `npx tsc --noEmit` clean · grep ไม่เหลือ write site ดิบ
+
+### ✅ 2026-09-22 — Residual-bugs batch (QA notes 2026-09-15 leftovers): frustration + rewrite-tier ext + vision-fail + answer_general
+
+- **BUG-M part D (ลูกค้าโกรธไม่ escalate):** `handoffs.detect_human_request` เพิ่ม anger detection — strong markers (ผิดหวัง/หัวร้อน/โกรธ/โมโห/เซ็ง/ห่วย/กาก/แย่มาก/ตีของกลับ/ไม่ไหวแล้ว) fire เดี่ยว; mild complaints (ช้ามาก/รอนาน/ไม่มีใครตอบ/เงียบหาย/ตอบช้า) มี question-guard (ไหม/มั้ย/แค่ไหน/เท่าไหร่/กี่วัน/เมื่อไหร่/ป่าว/บ้าง) → "ส่งช้าไหม"/"รอนานแค่ไหน" ไม่หลุด; handoff `reason=customer_frustration` + ข้อความขอโทษ; verify: unit 21/21 + live :8030
+- **BUG-K (claim พร้อมส่งทั้งที่หมด):** `_REWRITE_RULES` เพิ่ม `stock_claim` (พร้อมส่ง/เช็คสต็อก/มีสต็อก/เหลืออยู่/in stock) — mode "stock": grounded เฉพาะเมื่อมี card `_available_for_sale` (หรือ grounding_text ยืนยัน); ไม่มี → rewrite "ขอแอดมินตรวจสอบสต็อก"
+- **NEW-3 residual (general: ขัด KB):** เดิม skip `general:*` ทั้งหมด → LLM ขัด KB ตัวเองผ่าน (Youpin "เปลี่ยนได้" ทั้งที่ KB ห้าม) — ตอนนี้ app.py แนบ `routing_decision["grounding_text"]=context[:2000]` ที่ general/brand paths → enforce verify claim เทียบ KB จริง; grounding polarity-aware (`_pos_grounded`: pos pattern ที่ไม่มี ไม่/ห้าม/หมด ใน 20 chars ก่อนหน้า — "ไม่รับคืน" ไม่ ground "เปลี่ยนได้" อีก)
+- **NEW-6 residual (แต่งชื่อรุ่น):** `model_claim` — token `[A-Z]{2,}\d{2,}[A-Z]*` ใน answer ที่ไม่อยู่ใน `_context_pool` (cards+grounding_text+message+history+image_desc) เลย → rewrite; boundary ASCII lookaround (ทำงานในไทยติดกัน "รุ่นWPB100P"); stoplist spec (IP66/PD65W/USB30/WiFi6); token ที่ลูกค้าถามเอง/history เคยพูด = grounded ผ่าน
+- **NEW-10 (vision fail):** `app.py` vision pass — `_urls_to_read` ไม่ว่างแต่ `_new_desc` ว่าง/error → inject failure note เข้า `_vision_context` ("อ่านรูปไม่ได้ ห้ามเดา ขอส่งใหม่/พิมพ์อธิบาย") — ก่อนหน้า LLM ตอบเหมือนไม่มีรูปหรือแต่งเนื้อหา; `_new_desc` init ก่อน try (กัน NameError เมื่อ describe_images raise)
+- **NEW-8 residual:** `answer_general` instruction "ตอบเฉพาะที่ถามจาก context/ห้าม dump list/ห้าม bare ทักแอดมิน" ขยายจาก brands/categories → ทุก qtype
+- **verify:** py_compile ครบ · unit probe 19/19 (stock/model/polarity/general-grounding/negation/history-grounded) · live :8030 — anger→customer_frustration, คำถามไม่หลุด, รูป 404 → "ภาพเปิดดูไม่ได้ ส่งใหม่", shipping → ตอบรายละเอียดจริง · regression: guards ✓ qtype 27/27 parity 42/42 car_charger 16/16
+- **ผลกระทบเคสอื่น:** anger ชนะ claim path (ตั้งใจ — ลูกค้าโกรธได้คนทันที) · stock_claim แตะเฉพาะ answer ที่ claim stock ชัด (negation ผ่าน) · model_claim ไม่แตะ token ที่อยู่ใน context · rules re-scan ≤4 รอบกัน multi-clause claim · general: ที่ไม่มี grounding_text ยัง skip เหมือนเดิม
+- **ยังเหลือ (ต้องทำต่อถ้าจะเอา):** BUG-I token bloat (measurement มีแล้ว แต่ยังไม่มี cap/trim) · KB data gaps (มอก.ต่อร้าน/ชื่อแอพ/ศูนย์ — เป็น data ไม่ใช่โค้ด) · anchor swap PB100→LPB100 ระดับ retrieval (model_claim กันเฉพาะชื่อที่ไม่อยู่ใน context)

@@ -310,7 +310,12 @@ listing path:
 
 ด่านสุดท้ายของทุก engine ที่ `chat()`: `build_flags(resp, req)` (ลิงก์ภายนอก/คำตอบหลุด policy/ยืนยันเคลมโดยไม่ handoff) → `check_output` → `_escalate` (handoff เมื่อจำเป็น) — แยกจาก `ChatResponse.model_post_init` ที่ observe-only log
 
-**Rewrite tier (T7):** ถ้าไม่ escalate — claim โปรโมชั่น/เปลี่ยนคืนที่ **ungrounded** (ไม่มีหลักฐานใน `resp.products` desc/flags) → `_replace_clause` แทนทั้ง clause ด้วยข้อความขอแอดมินตรวจสอบ; ข้าม source ที่ context เป็น policy/order data อยู่แล้ว (`_REWRITE_SKIP_PREFIXES`); กัน negation ด้วย lookbehind ("ไม่มีของแถม" ไม่ใช่ claim)
+**Rewrite tier (T7+):** ถ้าไม่ escalate — claim ที่ **ungrounded** (ไม่มีหลักฐานใน `resp.products` desc/flags หรือ `routing_decision.grounding_text`) → `_replace_clause` แทนทั้ง clause ด้วยข้อความขอแอดมินตรวจสอบ; ข้าม source ที่ context เป็น policy/order data อยู่แล้ว (`_REWRITE_SKIP_PREFIXES`) — ยกเว้น `general:*` ที่แนบ `grounding_text` (KB context) มาให้ verify ได้; กัน negation ด้วย lookbehind + polarity window ("ไม่รับคืน" ไม่ ground "เปลี่ยนได้"); rules re-scan จนสะอาด (≤4 รอบ)
+
+- `promo_claim` — ของแถม/โปร/ลด/ส่งฟรี/`แถม<noun>` ที่ context ไม่มีหลักฐานบวก
+- `return_claim` — "เปลี่ยนได้/คืนได้" เมื่อ context ไม่อนุญาต (รวม KB ที่ห้ามชัด)
+- `stock_claim` (BUG-K) — "พร้อมส่ง/เช็คสต็อกแล้ว/มีของ" เมื่อไม่มี card `_available_for_sale`
+- `model_claim` (NEW-6 residual) — model token `UPPERCASE≥2+digits≥2` ที่ไม่อยู่ใน context pool เลย = LLM แต่งรุ่น; boundary ASCII lookaround (ทำงานใน text ไทยติดกัน); stoplist spec tokens (IP66/PD65W/WiFi6)
 
 ### 5.6 PRODUCT_TYPES taxonomy + charger subtypes
 
@@ -398,7 +403,7 @@ listing path:
 | `describe_images` | vision หลายไฟล์ | urls, shop_hint, max_images, history_context | (text, usage) | describe_image | _run_vision (v2), _chat_impl | loop ≤max, label `[รูป/วิดีโอที่ N]` | — |
 | `answer` | **ตอบหลักจาก products** | message, products, shop_hint, history, persona_extra, intent_result, extra_context | (answer, usage) | _build_context, _lang_instruction, _generate | _chat_impl, chat_v2._build_answer | SYSTEM_INSTRUCTION + ctx + hints → LLM | RuntimeError→caller raise 500 |
 | `answer_with_kb` | ตอบจาก KB | message, kb_context, history, persona_extra | (answer, usage) | _generate, `KB_SYSTEM_INSTRUCTION` | KB path | RAG over KB | — |
-| `answer_general` | ตอบ policy/brand/order | message, context, qtype, history, persona_extra, shop_hint | (answer, usage) | _generate | order/general/brand paths | qtype-specific prompt — brands/categories: ตอบคำถามเฉพาะจาก context ก่อน ห้าม dump list ดิบเมื่อคำถาม specific (NEW-8) | RuntimeError→caller 500 |
+| `answer_general` | ตอบ policy/brand/order | message, context, qtype, history, persona_extra, shop_hint | (answer, usage) | _generate | order/general/brand paths | qtype-specific prompt — ทุก qtype: ตอบคำถามเฉพาะจาก context ก่อน ห้าม dump list ดิบ/ห้ามตอบ bare "ทักแอดมิน" เมื่อ context ตอบได้ (NEW-8) | RuntimeError→caller 500 |
 
 ### 6.3 `product_store.py` — retrieval/ranking/cards/certs/dedupe
 
@@ -633,7 +638,7 @@ listing path:
 
 | ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
 |---|---|---|---|---|---|---|---|
-| `detect_human_request` | pre-intent human req | req, ctx | resp/None | kw tables, responses._send_handoff | _chat_impl | "ขอคุยกับคน/แอดมิน/คนตอบ" → handoff `human_request` | handoff POST |
+| `detect_human_request` | pre-intent human req + frustration | req, ctx | resp/None | kw tables, anger composition, responses._send_handoff | _chat_impl | "ขอคุยกับคน/แอดมิน/คนตอบ" → `human_request`; strong anger (ผิดหวัง/หัวร้อน/โกรธ/ตีของกลับ) หรือ mild complaint (ช้ามาก/รอนาน/ไม่มีใครตอบ) ที่ไม่ใช่คำถาม → `customer_frustration` | handoff POST |
 | `post_intent_handoffs` | tax invoice + cert | req, ctx, db | resp/None | warranty.detect_tax_invoice_request/detect_cert_question, product_store.search_cert_products | _chat_impl | tax→handoff `tax_invoice_request`; cert→cert cards answer | handoff POST; mongo read |
 
 ### 6.14 `device_compat.py` — compatibility engine
@@ -719,7 +724,11 @@ listing path:
 | `check_output` | evaluate flags | answer/resp, handoff_sent | violations list | build_flags | ChatResponse.model_post_init (observe), enforce | log + คืน violations | log stderr |
 | `enforce` | **final boundary** | resp, req | resp | build_flags, check_output, _escalate, _claim_grounded, _replace_clause | app.chat() ทุก engine | escalate rules (`_ESCALATE_RULES`) → rewrite tier (`_REWRITE_RULES`): claim โปร/เปลี่ยนคืนที่ ungrounded → แทน clause ด้วยข้อความขอแอดมินตรวจสอบ | อาจ handoff |
 | `_escalate` | handoff on violation | resp, req | resp | responses._send_handoff | enforce | — | POST |
-| `_claim_grounded` | claim มีหลักฐานใน cards | resp, kws, flags | bool | — | enforce | scan `description_excerpt`/`raw_description`/promo flags ของ `resp.products` | — |
+| `_claim_grounded` | claim มีหลักฐานใน context | resp, pos_rx, flags, mode | bool | `_pos_grounded`, `_card_available`, `_grounding_text` | enforce | mode "text": `_pos_grounded` (negation-aware) บน card desc + `grounding_text`; mode "stock": มี card `_available_for_sale` | — |
+| `_pos_grounded` | polarity-aware match | text, pos_rx | bool | `_NEGATION_RE` | `_claim_grounded` | match pos_rx ที่ไม่มี ไม่/ห้าม/หมด ใน 20 chars ก่อนหน้า | — |
+| `_card_available` | card ขายได้จริง | card dict | bool | — | `_claim_grounded` | `_available_for_sale` หรือ fallback `status==NORMAL && !sold_out` | — |
+| `_grounding_text` | KB context ของ general: | resp | str | — | `_claim_grounded`, `_context_pool` | อ่าน `routing_decision["grounding_text"]` (app.py แนบ gen_context[:2000]) | — |
+| `_context_pool` | pool ข้อความที่ LLM เห็น | resp, req | str | `_grounding_text` | enforce | cards name/desc + grounding_text + req.message + history text/image_desc → lower | — |
 | `_replace_clause` | แทน claim ทั้ง clause | text, start, end, repl | str | `_CLAUSE_BOUNDARY` | enforce | หา boundary (newline/`|||`/`.!?`/particle ไทย+space) รอบ span → swap ทั้ง clause กันเศษค้าง | — |
 
 ### 6.21 `chat_models.py` — structured context dataclasses
