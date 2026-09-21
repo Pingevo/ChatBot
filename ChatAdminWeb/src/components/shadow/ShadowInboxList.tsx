@@ -83,10 +83,10 @@ export function ShadowInboxList({ rows, selectedId, onSelect, loading, total, he
     if (search) {
       const q = search.toLowerCase();
       result = result.filter((r) =>
-        r.inbound_text.toLowerCase().includes(q) ||
-        r.bot_reply_text.toLowerCase().includes(q) ||
+        (r.inbound_text || "").toLowerCase().includes(q) ||
+        (r.bot_reply_text || "").toLowerCase().includes(q) ||
         (r.zaapi_reply_text || "").toLowerCase().includes(q) ||
-        r.conversation_id.toLowerCase().includes(q)
+        (r.conversation_id || "").toLowerCase().includes(q)
       );
     }
     if (platformFilter !== "all") {

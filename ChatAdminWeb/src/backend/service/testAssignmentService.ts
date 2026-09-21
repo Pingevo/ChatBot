@@ -339,7 +339,19 @@ export async function getTestAssignmentStats(): Promise<{
   web_search_count: number;
 }> {
   const coll = await getCollection<TestAssignmentDoc>(COLLECTIONS.testAssignment);
-  const docs = await coll.find({}).sort({ created_at: -1 }).limit(5000).toArray();
+  // ⚡ projection — stats ใช้แค่ summary + qa subfields (status/source/intent/web_search)
+  //   ตัด bot_reply/user_text/products/retrieval_info ออก กันลาก doc 60KB-1MB × 5000
+  const docs = await coll
+    .find({}, {
+      projection: {
+        final_status: 1, mock_status: 1,
+        conv_star_rating: 1, conv_rating: 1, message_ratings: 1,
+        "qa.status": 1, "qa.bot_source": 1, "qa.bot_intent": 1, "qa.bot_web_search_used": 1,
+      },
+    })
+    .sort({ created_at: -1 })
+    .limit(5000)
+    .toArray();
   const total = docs.length;
   let botAnswered = 0, handedOff = 0, noAgent = 0, errorCount = 0;
   let open = 0, closed = 0;
@@ -519,7 +531,12 @@ export async function listDeleted(opts?: {
   const filter: Record<string, unknown> = { deleted_at: { $exists: true } };
   if (opts?.adminId) filter.deleted_by = opts.adminId;
   const limit = opts?.limit || 500;
-  return coll.find(filter).sort({ deleted_at: -1 }).limit(limit).toArray();
+  // ⚡ projection — deleted list ใช้แค่ summary fields ตัด qa transcript ออก
+  return coll
+    .find(filter, { projection: { qa: 0, message_ratings: 0 } })
+    .sort({ deleted_at: -1 })
+    .limit(limit)
+    .toArray();
 }
 
 /** ดึงประวัติ replay ของ admin คนหนึ่ง (history tab)
@@ -536,7 +553,13 @@ export async function listHistoryByAdmin(opts: {
     deleted_at: { $exists: false },
   };
   const limit = opts?.limit || 500;
-  return coll.find(filter).sort({ replayed_at: -1 }).limit(limit).toArray();
+  // ⚡ projection — history route map เฉพาะ summary fields ตัด qa transcript ออก
+  //   (เคยลาก doc เต็ม 60KB-1MB × 500 → history tab โหลดช้า)
+  return coll
+    .find(filter, { projection: { qa: 0, message_ratings: 0 } })
+    .sort({ replayed_at: -1 })
+    .limit(limit)
+    .toArray();
 }
 
 /**

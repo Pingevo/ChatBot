@@ -102,9 +102,9 @@ export default function LogsPage() {
 
   const canViewLogs = user?.role === "superadmin" || user?.role === "dev";
 
-  const loadLogs = useCallback(async () => {
+  const loadLogs = useCallback(async (silent = false) => {
     if (!canViewLogs) { setLogs([]); setLoading(false); return; }
-    setLoading(true);
+    if (!silent) setLoading(true);
     try {
       const params: Record<string, string | number> = { limit: 200 };
       if (filterActionType !== "all") params.action_type = filterActionType;
@@ -123,8 +123,9 @@ export default function LogsPage() {
     loadLogs();
   }, [loadLogs]);
 
-  // poll 5 วิ (เฉพาะ superadmin/dev)
-  usePolling(canViewLogs ? loadLogs : async () => {}, canViewLogs ? 5000 : 0);
+  // poll 5 วิ (เฉพาะ superadmin/dev) — silent: ไม่แตะ loading ไม่งั้น list ถูกแทนด้วย
+  // spinner ทุก 5 วิ → DOM หาย → scroll เด้งกลับบน + กระพริบ
+  usePolling(canViewLogs ? () => loadLogs(true) : async () => {}, canViewLogs ? 5000 : 0);
 
   // ชื่อ admin สำหรับแสดง
   const adminName = (id: string): string => {
@@ -142,8 +143,8 @@ export default function LogsPage() {
     }
     if (search) {
       const q = search.toLowerCase();
-      const name = adminName(log.admin_id).toLowerCase();
-      if (!log.action_type.toLowerCase().includes(q) &&
+      const name = (adminName(log.admin_id || "") || "").toLowerCase();
+      if (!(log.action_type || "").toLowerCase().includes(q) &&
           !name.includes(q) &&
           !(log.conversation_id || "").toLowerCase().includes(q) &&
           !(log.shop_id || "").toLowerCase().includes(q)) return false;
@@ -206,7 +207,7 @@ export default function LogsPage() {
               <Table2 size={12} /> ตาราง
             </button>
           </div>
-          <Button size="sm" variant="outline" onClick={loadLogs} disabled={loading}>
+          <Button size="sm" variant="outline" onClick={() => loadLogs()} disabled={loading}>
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
           </Button>
         </>

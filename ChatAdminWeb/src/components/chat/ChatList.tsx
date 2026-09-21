@@ -212,9 +212,9 @@ export function ChatList({
       const q = search.toLowerCase();
       result = result.filter(
         (c) =>
-          c.customer_name.toLowerCase().includes(q) ||
-          c.last_message.toLowerCase().includes(q) ||
-          c.shop_name.toLowerCase().includes(q)
+          (c.customer_name || "").toLowerCase().includes(q) ||
+          (c.last_message || "").toLowerCase().includes(q) ||
+          (c.shop_name || "").toLowerCase().includes(q)
       );
     }
 

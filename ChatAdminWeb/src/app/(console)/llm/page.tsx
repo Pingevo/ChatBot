@@ -8,6 +8,7 @@ import { useState, useEffect, useCallback, useRef, useLayoutEffect } from "react
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { FilterSelect } from "@/components/ui/FilterSelect";
 import { Input } from "@/components/ui/Input";
 import { Loading } from "@/components/ui/Loading";
 import { PageShell } from "@/components/ui/PageShell";
@@ -15,6 +16,7 @@ import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import {
   KeyRound, Cpu, Plus, Trash2, RefreshCw, Eye, MessageSquare,
   ScanSearch, Globe, ShieldAlert, Search, Check, ChevronDown, X, Pencil, Sparkles,
+  ArrowDownAZ, ArrowUpZA,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
 import { canEditPage } from "@/lib/roles";
@@ -508,8 +510,15 @@ function KeyPoolCard({
   const [editName, setEditName] = useState("");
   const [singleDraft, setSingleDraft] = useState("");
   const [editingSingle, setEditingSingle] = useState(false);
+  const [keyQuery, setKeyQuery] = useState("");
+  const [sortDesc, setSortDesc] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<"all" | "on" | "off">("all");
 
   const activeCount = keys.filter((k) => k.enabled).length;
+  const visibleKeys = keys
+    .filter((k) => !keyQuery.trim() || k.name.toLowerCase().includes(keyQuery.trim().toLowerCase()))
+    .filter((k) => statusFilter === "all" || k.enabled === (statusFilter === "on"))
+    .sort((a, b) => (sortDesc ? -1 : 1) * a.name.localeCompare(b.name));
 
   async function changeSource(s: KeySource) {
     if (s === source) return;
@@ -651,6 +660,42 @@ function KeyPoolCard({
 
       {source === "db" && (
         <>
+          {/* toolbar: search + sort + filter + add */}
+          <div className="mb-2 flex flex-wrap items-center gap-1.5">
+            <div className="relative min-w-[130px] flex-1">
+              <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
+              <Input
+                value={keyQuery}
+                onChange={(e) => setKeyQuery(e.target.value)}
+                placeholder="ค้นหาชื่อ key..."
+                className="pl-7 font-mono text-[13px]"
+              />
+            </div>
+            <Button
+              variant="secondary" size="icon"
+              onClick={() => setSortDesc((d) => !d)}
+              title={sortDesc ? "เรียง Z→A — คลิกสลับ" : "เรียง A→Z — คลิกสลับ"}
+              aria-label="สลับการเรียงตามชื่อ"
+            >
+              {sortDesc ? <ArrowUpZA size={14} /> : <ArrowDownAZ size={14} />}
+            </Button>
+            <FilterSelect
+              value={statusFilter}
+              onChange={(v) => setStatusFilter(v as "all" | "on" | "off")}
+              options={[
+                { value: "all", label: "ทั้งหมด" },
+                { value: "on", label: "เปิด" },
+                { value: "off", label: "ปิด" },
+              ]}
+            />
+            <Button variant="secondary" size="sm" onClick={() => {
+              setAdding((a) => !a);
+              setNewName(`${prefix}_${keys.length + 1}`);
+            }}>
+              <Plus size={13} /> เพิ่ม key
+            </Button>
+          </div>
+
           {adding && (
             <div className="mb-3 grid gap-2 rounded-md border border-accent/40 bg-accent-soft/40 p-2.5 sm:grid-cols-[150px_1fr_auto]">
               <Input
@@ -678,9 +723,13 @@ function KeyPoolCard({
             <div className="rounded-md border border-dashed border-border px-3 py-4 text-center text-xs text-text-muted">
               ยังไม่มี key — fallback ไป {envHint} ใน .env
             </div>
+          ) : visibleKeys.length === 0 ? (
+            <div className="rounded-md border border-dashed border-border px-3 py-4 text-center text-xs text-text-muted">
+              ไม่พบ key ตามเงื่อนไข
+            </div>
           ) : (
-            <ul className="divide-y divide-border">
-              {keys.map((k) => (
+            <ul className="max-h-[512px] divide-y divide-border overflow-y-auto">
+              {visibleKeys.map((k) => (
                 <li key={k.sha256} className={`py-2 transition-opacity ${k.enabled ? "" : "opacity-50"}`}>
                   <div className="flex items-center gap-2">
                     <ToggleSwitch
@@ -727,18 +776,10 @@ function KeyPoolCard({
             </ul>
           )}
 
-          <div className="mt-3 flex items-center justify-between gap-2">
-            <p className="flex items-start gap-1 text-[10px] leading-relaxed text-warning-dark">
-              <ShieldAlert size={11} className="mt-0.5 shrink-0" />
-              เก็บ plaintext ใน MongoDB — แสดงแค่ hash+ท้าย
-            </p>
-            <Button variant="secondary" size="sm" onClick={() => {
-              setAdding((a) => !a);
-              setNewName(`${prefix}_${keys.length + 1}`);
-            }}>
-              <Plus size={13} /> เพิ่ม key
-            </Button>
-          </div>
+          <p className="mt-3 flex items-start gap-1 text-[10px] leading-relaxed text-warning-dark">
+            <ShieldAlert size={11} className="mt-0.5 shrink-0" />
+            เก็บ plaintext ใน MongoDB — แสดงแค่ hash+ท้าย
+          </p>
         </>
       )}
     </Card>

@@ -285,7 +285,13 @@ export async function listLiveAssignments(opts?: {
     ];
   }
   const limit = opts?.limit || 500;
-  return coll.find(filter).sort({ updated_at: -1, conversation_id: -1 }).limit(limit).toArray();
+  // ⚡ projection — $slice:-1 เอาเฉพาะ qa ตัวสุดท้าย (list ใช้แค่ last-message preview)
+  //   doc เต็ม avg ~60KB max ~1MB — ดึงเต็มทำ list+poll ทุก 5s หน่วง
+  return coll
+    .find(filter, { projection: { qa: { $slice: -1 } } })
+    .sort({ updated_at: -1, conversation_id: -1 })
+    .limit(limit)
+    .toArray();
 }
 
 // ─── Admin reply ──────────────────────────────────────────────────────────────
@@ -1149,7 +1155,12 @@ export async function getLiveAssignmentStats(opts?: {
   const coll = await getCollection<LiveAssignmentDoc>(COLLECTIONS.testAssignment);
   const filter: Record<string, unknown> = { deleted_at: { $exists: false } };
   if (opts?.replayedBy) filter.replayed_by = opts.replayedBy;
-  const docs = await coll.find(filter).sort({ updated_at: -1 }).limit(5000).toArray();
+  // ⚡ projection — stats นับแค่ final_status/mock_status ไม่ต้องลาก qa transcript
+  const docs = await coll
+    .find(filter, { projection: { final_status: 1, mock_status: 1 } })
+    .sort({ updated_at: -1 })
+    .limit(5000)
+    .toArray();
 
   let botAnswered = 0, handedOff = 0, adminReplied = 0, closed = 0, open = 0, errorCount = 0;
   for (const d of docs) {

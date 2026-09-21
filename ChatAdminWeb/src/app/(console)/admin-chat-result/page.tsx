@@ -237,10 +237,10 @@ export default function AdminChatResultPage() {
     if (!search) return conversations;
     const q = search.toLowerCase();
     return conversations.filter((c) =>
-      c.conversation_id.toLowerCase().includes(q) ||
+      (c.conversation_id || "").toLowerCase().includes(q) ||
       (c.shop_name || "").toLowerCase().includes(q) ||
       (c.to_name || "").toLowerCase().includes(q) ||
-      (adminName(c.admin_id)).toLowerCase().includes(q)
+      adminName(c.admin_id || "").toLowerCase().includes(q)
     );
   }, [conversations, search, adminMap]);
 

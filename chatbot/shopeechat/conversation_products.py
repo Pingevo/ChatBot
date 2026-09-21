@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -269,6 +270,67 @@ def _compute_active(products: list[dict]) -> str | int | None:
     return None
 
 
+# ─── Live card refresh ────────────────────────────────────
+# card ที่เก็บใน timeline เป็น snapshot ตอน build — image_url/name/stock/price
+# ค้างตามโค้ด+ข้อมูลตอนนั้น (เช่น desc banner จาก to_unit_card เก่า) และไม่มี TTL
+# → restore ทุกครั้ง rebuild จาก DB สด; doc หาย/query พัง → คืน stored card เดิม
+
+_LIVE_CARD_TTL = 30.0  # ponytail: cache 30s ต่อ (item_id, model_name) — กัน rebuild ซ้ำหลายครั้งใน request เดียว
+_LIVE_CARD_CACHE: dict = {}
+
+
+def _rebuild_card(p: dict, message: str = "") -> dict | None:
+    """สร้าง card ใหม่จาก live data — unit card ถ้า entry ระดับรุ่นย่อย, listing card ถ้าไม่ใช่.
+
+    unit detection: entry.model_name (user anchors ระบุรุ่นย่อย) หรือ stored card
+    ที่มี variants ตัวเดียว (to_unit_card เก็บ model_name ไว้ใน variants[0].name)
+    """
+    item_id = _to_serializable(p.get("item_id"))
+    if item_id is None:
+        return None
+    from . import product_store as _ps
+    db_name = os.environ.get("MONGO_DB", "").strip()
+    coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+    doc = _ps.get_client()[db_name][coll_name].find_one({"item_id": item_id})
+    if not doc:
+        return None
+    card = p.get("card") or {}
+    vlist = card.get("variants") or []
+    model_name = p.get("model_name") or (
+        vlist[0].get("name") if len(vlist) == 1 else None)
+    if model_name:
+        try:
+            from . import units as _units
+            u = _units._units_coll().find_one(
+                {"item_id": item_id, "model_name": model_name})
+            if u:
+                # helper chain เดียวกับ fetch_unit_cards — unit card สดครบทุก field
+                u = _units.attach_image_texts(_units.attach_kb_specs([u]))[0]
+                u["_listing"] = doc
+                return _units.to_unit_card(u)
+        except Exception:
+            pass
+    return _ps.to_product_card(doc, message)
+
+
+def _materialize_card(p: dict, message: str = "") -> dict:
+    """คืน card ของ timeline entry — rebuild สดจาก DB ถ้าทำได้, fallback = stored card."""
+    stored = p.get("card") or {"item_id": p.get("item_id"), "name": p.get("name")}
+    try:
+        key = (str(_to_serializable(p.get("item_id"))),
+               str(p.get("model_name") or ""))
+        hit = _LIVE_CARD_CACHE.get(key)
+        if hit and (time.monotonic() - hit[0]) < _LIVE_CARD_TTL:
+            return hit[1]
+        fresh = _rebuild_card(p, message=message)
+        if fresh:
+            _LIVE_CARD_CACHE[key] = (time.monotonic(), fresh)
+            return fresh
+    except Exception:
+        pass
+    return stored
+
+
 # ─── Query helpers ─────────────────────────────────────────
 
 def _normalize_dt(dt: Any) -> datetime:
@@ -295,7 +357,7 @@ def get_active_product(conversation_id: str) -> dict | None:
     active_id_ser = _to_serializable(active_id)
     for p in doc.get("products", []):
         if _to_serializable(p.get("item_id")) == active_id_ser:
-            return p.get("card") or {"item_id": p.get("item_id"), "name": p.get("name")}
+            return _materialize_card(p)
     return None
 
 
@@ -309,7 +371,29 @@ def get_suggestion_latest(conversation_id: str) -> dict | None:
         return None
     suggestions.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
     s = suggestions[0]
-    return s.get("card") or {"item_id": s.get("item_id"), "name": s.get("name")}
+    return _materialize_card(s)
+
+
+def get_latest_suggestion_batch(conversation_id: str) -> list[dict]:
+    """ดึง suggestion batch ล่าสุด — สินค้าที่ bot แนะนำใน response เดิียวกัน.
+
+    bot บันทึก suggestions ทีละชุดต่อเทิร์น (_record_suggestion_products append ต่อท้าย)
+    → batch ล่าสุด = trailing run ของ non-anchor entries ท้าย products list
+    ถ้า entry ท้ายเป็น anchor (ลูกค้าส่ง item card มาหลังสุด) → คืน []
+
+    Returns:
+        list ของ cards (ใหม่→เก่า) หรือ [] ถ้าไม่มี suggestion ท้ายลิสต์
+        (caller ตัดสินใจเองว่าต้องการกี่ตัว — batch ตัวเดียวอาจ pair กับ anchor ล่าสุด)
+    """
+    doc = load_timeline(conversation_id)
+    if not doc:
+        return []
+    batch: list[dict] = []
+    for p in reversed(doc.get("products") or []):
+        if p.get("is_anchor"):
+            break
+        batch.append(p)
+    return [_materialize_card(p) for p in batch]
 
 
 def get_anchor_and_suggestions(conversation_id: str, limit: int = 5) -> list[dict]:
@@ -337,16 +421,14 @@ def get_anchor_and_suggestions(conversation_id: str, limit: int = 5) -> list[dic
         if iid in seen_ids:
             continue
         seen_ids.add(iid)
-        card = p.get("card") or {"item_id": p.get("item_id"), "name": p.get("name")}
-        out.append(card)
+        out.append(_materialize_card(p))
     # แล้ว suggestions (ล่าสุดก่อน)
     for p in suggestions:
         iid = _to_serializable(p.get("item_id"))
         if iid in seen_ids:
             continue
         seen_ids.add(iid)
-        card = p.get("card") or {"item_id": p.get("item_id"), "name": p.get("name")}
-        out.append(card)
+        out.append(_materialize_card(p))
         if len(out) >= limit:
             break
     return out[:limit]
@@ -386,7 +468,7 @@ def resolve_active_by_message(
             for p in products:
                 name = (p.get("name") or "").lower()
                 if kw_lower in name:
-                    return p.get("card") or {"item_id": p.get("item_id"), "name": p.get("name")}
+                    return _materialize_card(p, message=message)
 
     # 2. "ตัวเดิม/อันเดิม" → anchor ล่าสุด
     if any(kw in msg_lower for kw in _SAME_PRODUCT_KWS):

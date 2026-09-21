@@ -1263,9 +1263,10 @@ def qa_context(message: str, *, conversation_id=None, claim: bool = False) -> st
           f"top={hits[0].get('q','')[:40]!r}", file=sys.stderr)
     lines = ["=== คำแนะนำจากฐานความรู้ (QA) ==="]
     for h in hits:
+        _topic0 = next(iter((h.get("topic") or "").split()), "")
         tag = {"model": f"เฉพาะรุ่น {','.join(h.get('model_codes') or [])}",
                "item": "เฉพาะสินค้าที่ลูกค้าสนใจ",
-               "brand": f"เฉพาะแบรนด์ {(h.get('topic') or '').split()[0]}",
+               "brand": f"เฉพาะแบรนด์ {_topic0}",
                "generic": "คำแนะนำทั่วไป (ไม่เจาะรุ่น)"}[h["_qa_level"]]
         lines.append(f"[{tag}] ถาม: {h.get('q')}\nตอบ: {h.get('a')}")
     return "\n\n".join(lines)

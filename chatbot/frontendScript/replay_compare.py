@@ -370,9 +370,13 @@ def call_bot(message: str, history: list, shop_name: str | None,
     # ⚡ Phase 3C — ส่ง order_sn ให้ bot (เหมือน item_id)
     if order_sn:
         body['order_sn'] = order_sn
-    # ⚡ ส่ง conversation_id + platform เพื่อให้ bot ใช้ conversation_products timeline
+    # ⚡ Shadow isolation — namespace conversation_id ด้วย "shadow:" เพื่อให้ bot
+    #   ใช้ timeline/anchor/claim state ได้เต็มรูปแบบ แต่เขียนลง doc แยกจากแชทจริง
     if conversation_id:
-        body['conversation_id'] = conversation_id
+        body['conversation_id'] = f"shadow:{conversation_id}"
+    # ⚡ simulate_assignment → ถ้า replay trigger handoff จะเขียน test_status_conversation
+    #   ไม่แตะ conversations/status_conversation ของแชทจริง
+    body['simulate_assignment'] = True
     if platform:
         body['platform'] = platform
     # ⚡ Phase 1D — ส่ง images (เหมือน botCallService ใน Next.js)

@@ -89,69 +89,69 @@ def _strip_kb_markup(text: str) -> str:
     return text.strip()
 
 
-# ---- BUG-P fix — language detection ----
-# ตรวจภาษาของข้อความลูกค้า เพื่อตอบในภาษาที่เหมาะสม
-#   ไทย → ตอบไทย (behavior เดิม)
-#   อังกฤษ → ตอบอังกฤษ
-#   จีน/ไต้หวัน/ญี่ปุ่น/อื่นๆ → ตอบอังกฤษ (กันบอทตอบไทยให้ลูกค้าที่ไม่ได้คุยไทย)
+# ---- Language policy (2026-09-18 — แทน BUG-P language detection เดิม) ----
+# Default: ตอบภาษาไทยเสมอ ไม่ว่าลูกค้าจะพิมพ์ภาษาอะไร (ไม่ detect ภาษาข้อความอีกต่อไป)
+# ยกเว้นเดียว: ลูกค้า 'ขอ' ให้ตอบภาษาอื่น (จีน/ไต้หวัน/มาเลย์/อาหรับ/อังกฤษ ฯลฯ)
+#   → ตอบอังกฤษแทน ไม่ตอบภาษาที่ขอจริง เพราะคุมคุณภาพภาษานั้นๆ ไม่ได้
+#
+# หมายเหตุ: detect เฉพาะ explicit request — คำถามสินค้าที่มีชื่อภาษาปน
+#   (เช่น "app ภาษาจีนใช้ได้ไหม", "มี english manual ไหม") ต้องไม่ trigger
+
+_EN_LANG_NAMES = (
+    "english", "chinese", "mandarin", "cantonese", "taiwanese", "malay",
+    "malaysian", "bahasa", "indonesian", "arabic", "japanese", "korean",
+    "vietnamese", "french", "german", "spanish", "russian", "hindi",
+    "italian", "burmese", "khmer", "lao", "tagalog", "filipino",
+    "portuguese",
+)
+# ไม่รวม "ไทย"/"thai" — ขอตอบไทยคือ default อยู่แล้ว ไม่ต้องสลับเป็นอังกฤษ
+_TH_LANG_NAMES = (
+    "อังกฤษ", "จีน", "ไต้หวัน", "กวางตุ้ง", "มาเลย์", "มลายู", "มาเลเซีย",
+    "อาหรับ", "อารบิก", "ญี่ปุ่น", "เกาหลี", "เวียดนาม", "อินโดนีเซีย",
+    "อินโด", "ฝรั่งเศส", "เยอรมัน", "สเปน", "รัสเซีย", "ฮินดี", "อิตาลี",
+    "พม่า", "เขมร", "ลาว", "ฟิลิปปินส์", "โปรตุเกส",
+)
+
+_LANG_REQUEST_RE = re.compile(
+    # อังกฤษ: verb สื่อสาร + คำคั่น ≤4 คำ + ชื่อภาษา
+    #   "speak english" / "reply to me in chinese" / "can you answer in malay"
+    r"\b(?:speak|answer|reply|respond|write|talk|chat|translate)\b"
+    r"(?:\s+\w+){0,4}?\s+(?:" + "|".join(_EN_LANG_NAMES) + r")\b"
+    # "in <lang> please/language" · "<lang> please" — ต้องมี please/language กำกับ
+    #   กัน FP "manual in english version" (ไม่มี please ตามหลัง)
+    r"|\bin\s+(?:" + "|".join(_EN_LANG_NAMES) + r")\s+(?:please|pls|plz|language|lang)\b"
+    r"|\b(?:" + "|".join(_EN_LANG_NAMES) + r")\s+(?:please|pls|plz)\b"
+    # ไทย: verb สื่อสาร + "ภาษา" + ชื่อภาษา — "ตอบเป็นภาษาจีน", "พูดภาษาอังกฤษได้ไหม"
+    #   บังคับมี "ภาษา" กำกับ — กัน FP คำถามสินค้า "app ภาษาจีน" (ไม่มี verb นำหน้า)
+    r"|(?:ตอบ|พูด|เขียน|คุย|ขอ|สื่อสาร|แชท)[^\s]{0,10}ภาษา\s*(?:"
+    + "|".join(_TH_LANG_NAMES) + ")"
+    # CJK: 用/請/以 + ≤4 ตัว + 文/語 — "請用中文", "用英文回答" · 文/語 + 回覆/回答 — "中文回覆"
+    r"|(?:用|使用|請|请|以).{0,4}(?:文|語|语)|(?:文|語|语).{0,4}(?:回覆|回复|回答)"
+    # Malay/Indo: bahasa + ชื่อภาษา — "dalam bahasa melayu", "guna bahasa inggeris"
+    r"|\bbahasa\s+(?:melayu|inggeris|inggris|cina|arab|jepun|jepang|korea|vietnam|indonesia)\b"
+    # Arabic: ชื่อภาษาในสคริปต์อาหรับ — "هل تتكلم العربية"
+    r"|(?:العربية|العربيه|الإنجليزية|الانجليزية|الصينية|الصينيه|الماليزية|اليابانية|الكورية|الفيتنامية|الإندونيسية)"
+    # Russian: "на русском" / "на английском" ฯลฯ
+    r"|\bна\s+(?:русском|английском|китайском|японском|арабском)\b",
+    re.IGNORECASE,
+)
 
 
-def _detect_lang(text: str) -> str:
-    """ตรวจภาษาของ text → 'th', 'en', 'zh', 'ja', 'other'.
+def _lang_instruction(message: str) -> str:
+    """คืน system-prompt suffix ตามนโยบายภาษา (2026-09-18).
 
-    ใช้ Unicode range heuristic:
-    - Thai: U+0E00–U+0E7F
-    - Japanese kana: U+3040–U+30FF (Hiragana + Katakana)
-    - CJK: U+4E00–U+9FFF (Chinese/Japanese kanji)
-    - Latin: U+0041–U+024F (English + extended Latin)
+    - ข้อความปกติ (ไม่ได้ขอภาษา) → "" — ตอบไทยตาม SYSTEM_INSTRUCTION เดิม
+    - ลูกค้าขอให้ตอบภาษาอื่น → block สั่งตอบอังกฤษ (ไม่ใช่ภาษาที่ขอ)
     """
-    if not text or not text.strip():
-        return "th"  # default ไทย ถ้าไม่มีข้อความ
-    _has_thai = False
-    _has_kana = False
-    _has_cjk = False
-    _has_latin = False
-    for ch in text:
-        cp = ord(ch)
-        if 0x0E00 <= cp <= 0x0E7F:
-            _has_thai = True
-        elif 0x3040 <= cp <= 0x30FF:
-            _has_kana = True
-        elif 0x4E00 <= cp <= 0x9FFF:
-            _has_cjk = True
-        elif 0x0041 <= cp <= 0x024F:
-            _has_latin = True
-    # Japanese: มี kana (hiragana/katakana) เสมอ
-    if _has_kana:
-        return "ja"
-    # Thai: มีตัวอักษรไทย
-    if _has_thai:
-        return "th"
-    # Chinese/Taiwanese: มี CJK แต่ไม่มี kana และไม่มี Thai
-    if _has_cjk:
-        return "zh"
-    # English: มี Latin แต่ไม่มี Thai/CJK/kana
-    if _has_latin:
-        return "en"
-    return "other"
-
-
-def _lang_instruction(lang: str) -> str:
-    """สร้าง instruction เพิ่มเติมสำหรับภาษาที่ตอบ ตามนโยบาย BUG-P.
-
-    - th → "" (ใช้ SYSTEM_INSTRUCTION เดิม ที่เป็นไทยอยู่แล้ว)
-    - en → ตอบอังกฤษ + ไม่ใช้คำลงท้ายไทย
-    - zh/ja/other → ตอบอังกฤษ + ไม่ใช้คำลงท้ายไทย
-    """
-    if lang == "th":
+    if not message or not _LANG_REQUEST_RE.search(message):
         return ""
-    # en, zh, ja, other → ตอบอังกฤษ
     return (
-        "\n\n**BUG-P fix — Language: Answer in English.**\n"
+        "\n\n**Language: Answer in English.**\n"
+        "- The customer asked you to answer in another language — reply in English "
+        "instead (not the requested language).\n"
         "- Do NOT use Thai particles (ค่ะ, นะคะ, คะ) — use English instead.\n"
         "- Be friendly and polite in English.\n"
-        "- The Thai persona rules above apply only when answering in Thai.\n"
-        "- If the customer writes in Chinese/Japanese, answer in English (not Chinese/Japanese)."
+        "- The Thai persona rules above apply only when answering in Thai."
     )
 
 
@@ -248,7 +248,7 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
 - การเสนอขาย/แนะนำสินค้าใหม่: เฉพาะ status=NORMAL เท่านั้น (เหมือนเดิม)
 
 กฎการตอบ:
-- ตอบเป็นภาษาเดียวกับลูกค้า (ส่วนใหญ่คือภาษาไทย) สุภาพ เป็นมิตร กระชับ
+- ตอบเป็นภาษาไทยเสมอ (แม้ลูกค้าจะพิมพ์ภาษาอื่น — เว้นแต่มี Language instruction ต่อท้าย prompt นี้) สุภาพ เป็นมิตร กระชับ
 - **สำคัญมาก — คำถามเฉพาะเจาะจง ต้องตอบสั้นที่เจาะจงก่อน**:
   ถ้าลูกค้าถามแค่บางจุด (เช่น "elite3 ขนาดหน้าจอเท่าไหร่", "Mi Note 10 Lite ราคาเท่าไหร่",
   "Redmi Note 13 แบตกี่ mAh") → ข้อความแรกตอบเฉพาะที่ถาม สั้นๆ กระชับ 1-2 ประโยค
@@ -420,8 +420,11 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
   ดูจากชื่อสินค้าและ variants ใน context เพื่อแยกประเภท
 - **สำคัญ**: context ที่ให้ในรอบปัจจุบันคือข้อมูลสินค้าล่าสุดเท่านั้น อย่าอ้างอิงสินค้าจากคำตอบก่อนหน้า
   ถ้า context รอบนี้มีสินค้ารุ่นที่ลูกค้าถาม ให้ตอบจาก context รอบนี้เท่านั้น ไม่ว่าคำตอบก่อนหน้าจะเคยพูดถึงสินค้าอะไรก็ตาม
-- **จำนวนสินค้าที่แนะนำ**: context อาจมีสินค้าหลายชิ้น แต่ให้แนะนำลูกค้าแค่ **2-3 ชิ้นที่เกี่ยวข้องที่สุด** เท่านั้น
-  เลือกสินค้าที่ตรงกับคำถามมากที่สุด อย่าแนะนำทุกชิ้นใน context
+- **จำนวนสินค้าที่แนะนำ — กฎเหล็ก ≥2**: เมื่อลูกค้าขอคำแนะนำ/ขอสินค้าทั่วไป (เช่น "แนะนำหูฟังหน่อย", "มีพาวเวอร์แบงค์ไหม", "หัวชาร์จละ")
+  → **ต้องเสนออย่างน้อย 2 รุ่น** ที่ตรงที่สุดและขายได้ (status=NORMAL + sold_out=false) — ห้ามแนะนำแค่รุ่นเดียว
+  เพื่อให้ลูกค้ามีทางเลือกเปรียบเทียบ เลือก 2-3 ชิ้นที่เกี่ยวข้องที่สุด อย่าแนะนำทุกชิ้นใน context
+  **ยกเว้น** — ตอบรุ่นเดียวเป็นหลักได้เมื่อ: ลูกค้าเจาะจงรุ่น/ส่ง item card มา/ถาม spec·สต็อก·ราคา·ประกันของรุ่นใดรุ่นหนึ่ง
+  หรือใน context มีสินค้าที่ตรงจริงแค่รุ่นเดียว (ห้ามแต่งรุ่นที่สองที่ไม่มีใน context)
   ยกเว้นกรณีลูกค้าขอเปรียบเทียบสินค้าหลายรุ่นโดยเฉพาะ หรือถาม "มีอะไรบ้าง" ถึงจะแสดงได้มากกว่า 3 ชิ้น
 - **สำคัญมาก — ตอบ spec ของรุ่นที่ถามเป็นหลัก แนะนำรุ่นอื่นเฉพาะที่สัมพันธ์กับคำถาม**:
   เมื่อลูกค้าถาม spec/ความสามารถ/คุณสมบัติ ของ "รุ่นที่กำลังคุยอยู่" (เช่น "wifi 5G ไหม", "มีแบตในตัวไหม",
@@ -1337,9 +1340,8 @@ def answer(
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ", {"prompt": 0, "output": 0, "total": 0}
     model_name = (model or get_model("chat")).strip()
-    # BUG-P fix — ตรวจภาษาลูกค้า → ตอบในภาษาที่เหมาะสม
-    _lang = _detect_lang(_msg_for_llm)
-    _lang_inst = _lang_instruction(_lang)
+    # Language policy — default ตอบไทยเสมอ; ขอภาษาอื่น → ตอบอังกฤษ
+    _lang_inst = _lang_instruction(_msg_for_llm)
     system_instruction = (SYSTEM_INSTRUCTION + persona_extra + _lang_inst) if persona_extra else (SYSTEM_INSTRUCTION + _lang_inst)
 
     # ตรวจว่าคำถามเกี่ยวกับรับประกัน/เคลม/สเปก/รายละเอียดไหม
@@ -1480,7 +1482,7 @@ KB_SYSTEM_INSTRUCTION = """คุณเป็นผู้ช่วยขาย�
 2. อธิบายเรื่องการเคลมและการรับประกันตามข้อมูลใน context
 
 กฎการตอบ:
-- ตอบเป็นภาษาเดียวกับลูกค้า (ส่วนใหญ่คือภาษาไทย) สุภาพ เป็นมิตร กระชับ
+- ตอบเป็นภาษาไทยเสมอ (แม้ลูกค้าจะพิมพ์ภาษาอื่น — เว้นแต่มี Language instruction ต่อท้าย prompt นี้) สุภาพ เป็นมิตร กระชับ
 - อ้างอิงเฉพาะข้อมูลใน context ที่ให้มาในรอบนี้เท่านั้น ห้าม invent ข้อมูลที่ไม่มี
 - ถ้า context ไม่พอตอบ ให้บอกตรงๆ ว่าขอแนะนำให้ทักแอดมินร้าน
 - **ห้ามบอกราคาสินค้าทุกกรณี** ถ้าลูกค้าถามราคา ให้บอกว่าสอบถามราคาได้ที่แอดมิน
@@ -1549,9 +1551,8 @@ def answer_with_kb(
     except RuntimeError as exc:
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ"
     model_name = (model or get_model("chat")).strip()
-    # BUG-P fix — ตรวจภาษาลูกค้า → ตอบในภาษาที่เหมาะสม
-    _lang = _detect_lang(message)
-    _lang_inst = _lang_instruction(_lang)
+    # Language policy — default ตอบไทยเสมอ; ขอภาษาอื่น → ตอบอังกฤษ
+    _lang_inst = _lang_instruction(message)
     system_instruction = (KB_SYSTEM_INSTRUCTION + persona_extra + _lang_inst) if persona_extra else (KB_SYSTEM_INSTRUCTION + _lang_inst)
 
     # 🔒 H1: Limit message length + use clear delimiter to reduce prompt injection risk
@@ -1655,9 +1656,8 @@ def answer_general(
         )
     if persona_extra:
         general_instruction += persona_extra
-    # BUG-P fix — ตรวจภาษาลูกค้า → ตอบในภาษาที่เหมาะสม
-    _lang = _detect_lang(message)
-    general_instruction += _lang_instruction(_lang)
+    # Language policy — default ตอบไทยเสมอ; ขอภาษาอื่น → ตอบอังกฤษ
+    general_instruction += _lang_instruction(message)
 
     # 🔒 H1: Limit message length + use clear delimiter to reduce prompt injection risk
     _safe_message = str(message)[:2000] if message else ""

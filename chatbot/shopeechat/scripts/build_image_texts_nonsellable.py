@@ -40,13 +40,7 @@ def _collect_nonsellable(path: Path) -> list[dict]:
     n_docs = n_sellable = 0
     for d in B._iter_export_docs(path):
         n_docs += 1
-        fl = ((d.get("description_info") or {}).get("extended_description") or {}).get("field_list") or []
-        ids: dict[str, str] = {}
-        for f in fl:
-            if isinstance(f, dict) and f.get("field_type") == "image" and isinstance(f.get("image_info"), dict):
-                iid, url = f["image_info"].get("image_id"), f["image_info"].get("image_url")
-                if iid and url:
-                    ids[iid] = url
+        ids = B._doc_images(d)
         for iid in ids:
             used_by[iid] += 1
         if d.get("item_status") == "NORMAL" and B._doc_stock(d) > 0:

@@ -99,6 +99,98 @@ def is_configured() -> bool:
     return bool(_get_openrouter_key())
 
 
+# connector vocab ที่ downstream resolver ใช้ (ตรงกับ _resolve_device_spec)
+_DEVICE_CONNECTORS = ("usb-c", "lightning", "micro-usb")
+
+
+def _salvage_json_value(text: str, key: str):
+    """ดึง value ของ key ออกจาก JSON ที่ถูกตัดกลางคัน (LLM เกิน max_tokens)
+
+    balanced-brace scan — field ก่อนจุดตัดยังใช้ได้แม้ท้าย JSON พัง:
+    - string → closing quote แรกที่ไม่ escaped
+    - array/object → นับ depth จนปิดครบ (ข้าม string)
+    - literal → token ถัดไป
+    คืน parsed value หรือ None (ถ้า field นั้นถูกตัด/ไม่มี)
+    """
+    m = re.search(rf'"{re.escape(key)}"\s*:\s*', text or "")
+    if not m:
+        return None
+    s = text[m.end():]
+    if s.startswith('"'):
+        for i in range(1, len(s)):
+            if s[i] == '"' and s[i - 1] != '\\':
+                try:
+                    return json.loads(s[:i + 1])
+                except Exception:
+                    return s[1:i]
+        return None
+    if s[:1] in ("[", "{"):
+        depth, in_str, esc = 0, False, False
+        for i, ch in enumerate(s):
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == '\\':
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch in "[{":
+                depth += 1
+            elif ch in "]}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(s[:i + 1])
+                    except Exception:
+                        return None
+        return None
+    m2 = re.match(r'[\w.]+', s)
+    if m2:
+        try:
+            return json.loads(m2.group(0))
+        except Exception:
+            return m2.group(0)
+    return None
+
+
+def _clean_device_specs(raw) -> list[dict]:
+    """Normalize device_specs จาก LLM JSON → [{device, connector, max_watt, protocols}]
+
+    tolerant parse — LLM อาจส่ง "140W" (string), ตัวเลข, null, หรือ field หาย:
+    - connector: lowercase + whitelist vocab เดียวกับ resolver (ค่าอื่น → None)
+    - max_watt: number หรือ string ที่มีตัวเลข → float; อื่นๆ → None
+    - protocols: list[str] lowercase
+    - entry ที่ไม่มี field ใช้งานได้เลย → ตัดทิ้ง
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for e in raw[:10]:
+        if not isinstance(e, dict):
+            continue
+        device = str(e.get("device") or "").lower().strip()
+        conn = str(e.get("connector") or "").lower().strip()
+        conn = conn if conn in _DEVICE_CONNECTORS else None
+        watt = e.get("max_watt")
+        if isinstance(watt, (int, float)) and watt > 0:
+            watt = float(watt)
+        elif isinstance(watt, str):
+            m = re.search(r"\d+(?:\.\d+)?", watt)
+            watt = float(m.group(0)) if m else None
+        else:
+            watt = None
+        protos = [str(p).lower().strip() for p in (e.get("protocols") or [])
+                  if str(p).strip()][:6]
+        if not (conn or watt or protos):
+            continue
+        out.append({"device": device, "connector": conn,
+                    "max_watt": watt, "protocols": protos})
+    return out
+
+
 # ── Uncertainty detection ───────────────────────────────────────────────────
 
 # คำที่บ่งบอกว่า LLM ไม่มั่นใจในคำตอบ
@@ -284,10 +376,17 @@ def should_use_web_search(
             r"\s*\w*\s*\d+\s*(pro|max|ultra|lite|plus|mini|air|note|s|t|pro\s*max)?",
             message.lower(),
         )
-        if _device_pattern:
+        # spec-db มี spec grounded อยู่แล้ว → compat ladder เติม spec+re-query
+        # ให้ context ครบแล้ว ไม่ต้องจ่าย web search ซ้ำ (~6K tokens/call)
+        # ใช้ gate trigger ที่อาศัย "ข้อมูลเครื่องยังไม่พอ" (specific/short)
+        # — ยังให้ negative_answer/no_products trigger ทำงานปกติ
+        from .device_compat import _lookup_spec_db as _lsd
+        _td = (intent_result.get("target_device") or "").strip()
+        _device_grounded = bool(_td and _lsd(_td))
+        if _device_pattern and not _device_grounded:
             return True, "compatibility_check_device_specific"
         # ถ้าคำตอบสั้นๆ (LLM ไม่มั่นใจ) → search
-        if len(answer) < 80:
+        if len(answer) < 80 and not _device_grounded:
             return True, "compatibility_check_short_answer"
 
     # 4. คำถามมี spec/protocol keywords → search เฉพาะเมื่อจำเป็น
@@ -337,6 +436,7 @@ def search_and_extract(
             search_info: str,       # ข้อมูลทั่วไปจาก Google Search
             keywords: list[str],    # keyword สำหรับ query DB (เช่น ["USB-C", "Type-C", "PD"])
             product_type: str,      # ประเภทสินค้าที่ควรค้น (เช่น "charger", "cable")
+            device_specs: list[dict],  # spec ของอุปกรณ์เป้าหมาย [{device, connector, max_watt, protocols}]
             usage: {prompt, output, total},
             cost_usd: float,
             model: str,
@@ -351,6 +451,7 @@ def search_and_extract(
             "search_info": "",
             "keywords": [],
             "product_type": "",
+            "device_specs": [],
             "usage": {"prompt": 0, "output": 0, "total": 0},
             "cost_usd": 0.0,
             "model": _get_openrouter_model(),
@@ -383,18 +484,29 @@ def search_and_extract(
         "   - ใส่รหัสรุ่นที่ค้นพบด้วย เช่น PB100P, PB200P, P23, BA652U",
         "   - ถ้าค้นเจอว่าแบรนด์ไหนรองรับ ให้ใส่ชื่อแบรนด์ด้วย เช่น CUKTECH, ZMI",
         "4. ระบุ product_type ที่ควรค้น (charger/earphone/smartwatch/phone/powerbank/other)",
+        "5. สกัด spec ของอุปกรณ์เป้าหมายที่ลูกค้าถามถึง → device_specs (list)",
+        "   - อุปกรณ์เป้าหมาย = เครื่องที่จะชาร์จ/เชื่อมต่อ (เช่น iphone 17, macbook, galaxy s25)",
+        "     ไม่ใช่สินค้า/อุปกรณ์เสริมที่ร้านขาย (สายชาร์จ/หัวชาร์จ/พาวเวอร์แบงค์)",
+        "   - ตอบเฉพาะข้อมูลที่พบใน search results เท่านั้น ห้ามเดาจากความจำ",
+        "     (spec ของอุปกรณ์เสริม เช่น 'สายรองรับ 240W' ห้ามใส่เป็น spec ของอุปกรณ์เป้าหมาย)",
+        "   - ไม่พบข้อมูล/ไม่มีอุปกรณ์เป้าหมาย → device_specs: []",
+        "   - ถ้าชื่ออุปกรณ์กำกวมมีหลายรุ่นย่อย (เช่น 'macbook' ลอย) → ใส่ทีละ entry ต่อรุ่น",
+        "   - connector: 'usb-c' | 'lightning' | 'micro-usb' | null",
+        "   - max_watt: กำลังชาร์จมีสายสูงสุดที่ตัวเครื่องรองรับ (ตัวเลขล้วน เช่น 140 ไม่ใช่ '140W'; ไม่ทราบ → null)",
+        "   - protocols: โปรโตคอลชาร์จ เช่น [\"USB PD\", \"PPS\"] (ไม่ทราบ → [])",
         "",
         "ตอบเป็น JSON เท่านั้น รูปแบบ:",
-        '{"search_info": "ข้อมูลสรุป", "keywords": ["keyword1", "keyword2"], "product_type": "charger"}',
+        '{"search_info": "ข้อมูลสรุป", "keywords": ["keyword1", "keyword2"], "product_type": "charger", "device_specs": [{"device": "ชื่อรุ่น", "connector": "usb-c", "max_watt": 45, "protocols": ["USB PD"]}]}',
         "",
         "ตัวอย่าง:",
         'คำถาม: "สายถัก iphone 17 promax มีไหม"',
-        '{"search_info": "iPhone 17 Pro Max ใช้พอร์ต USB-C รองรับ USB-C to USB-C และ PD 3.0", "keywords": ["USB-C", "Type-C", "USB C to C", "สายถัก", "ไนลอน", "braided"], "product_type": "charger"}',
+        '{"search_info": "iPhone 17 Pro Max ใช้พอร์ต USB-C รองรับ USB-C to USB-C และ PD 3.0", "keywords": ["USB-C", "Type-C", "USB C to C", "สายถัก", "ไนลอน", "braided"], "product_type": "charger", "device_specs": [{"device": "iphone 17 pro max", "connector": "usb-c", "max_watt": 40, "protocols": ["USB PD"]}]}',
         "",
         'คำถาม: "พาวเวอร์แบงค์ที่รองรับชาร์จเร็ว xiaomi mi 17 ultra มีไหม"',
-        '{"search_info": "Xiaomi 17 Ultra รองรับ MiPPS/HyperCharge 90W Max ต้องใช้พาวเวอร์แบงค์ที่รองรับ PPS 5A+ รุ่นที่รองรับ: CUKTECH PB100P (120W), PB200P (120W), P23 (140W), BA652U (90W)", "keywords": ["พาวเวอร์แบงค์", "แบตสำรอง", "powerbank", "PB100P", "PB200P", "P23", "BA652U", "PB200U", "PB150S"], "product_type": "powerbank"}',
+        '{"search_info": "Xiaomi 17 Ultra รองรับ MiPPS/HyperCharge 90W Max ต้องใช้พาวเวอร์แบงค์ที่รองรับ PPS 5A+ รุ่นที่รองรับ: CUKTECH PB100P (120W), PB200P (120W), P23 (140W), BA652U (90W)", "keywords": ["พาวเวอร์แบงค์", "แบตสำรอง", "powerbank", "PB100P", "PB200P", "P23", "BA652U", "PB200U", "PB150S"], "product_type": "powerbank", "device_specs": [{"device": "xiaomi 17 ultra", "connector": "usb-c", "max_watt": 90, "protocols": ["MiPPS", "HyperCharge", "PPS"]}]}',
         "",
         "ห้ามตอบเป็นข้อความธรรมดา ตอบ JSON เท่านั้น",
+        "ตอบ JSON compact บรรทัดเดียว ห้าม pretty print ห้ามใส่ markdown code block",
     ]
 
     # ── สร้าง user prompt ──
@@ -432,7 +544,9 @@ def search_and_extract(
         "temperature": 0.2,
         # ⚡ BUG-11 fix — ลด max_tokens 1024 → 512 (พอสำหรับ extract keywords + short info)
         #   QA เคยเจอ 24,986 tokens ในเคสที่ไม่จำเป็น — ลดลงช่วยประหยัดต้นทุน
-        "max_tokens": 512,
+        # ⚡ P2 — 512 → 768: field device_specs ทำ JSON ยาวขึ้น; 512 ตัด JSON กลางคัน
+        #   → parse fail → keywords=[] → re-query ไม่ทำงาน (เจอจริงใน log)
+        "max_tokens": 768,
     }
 
     _req_start = time.time()
@@ -520,6 +634,7 @@ def search_and_extract(
     _search_info = ""
     _keywords: list[str] = []
     _product_type = ""
+    _device_specs: list[dict] = []
     if _status == "success" and _answer:
         try:
             # ลอง parse JSON จากคำตอบ (อาจมี ```json ครอบ)
@@ -530,10 +645,21 @@ def search_and_extract(
             _search_info = _parsed.get("search_info", "")
             _keywords = _parsed.get("keywords", []) or []
             _product_type = _parsed.get("product_type", "")
+            _device_specs = _clean_device_specs(_parsed.get("device_specs"))
         except (json.JSONDecodeError, IndexError) as e:
-            # ถ้า parse ไม่ได้ ใช้คำตอบเป็น search_info เลย
-            _search_info = _answer[:500]
-            print(f"[WEB-SEARCH] JSON parse failed: {e}", file=sys.stderr)
+            # JSON พัง (เช่น โดนตัดกลางคันจาก max_tokens) → salvage field ที่สมบูรณ์
+            # — keywords/search_info อยู่ต้น schema มักรอด; device_specs ท้ายสุดอาจหาย
+            _si = _salvage_json_value(_clean, "search_info")
+            _kw = _salvage_json_value(_clean, "keywords")
+            _pt = _salvage_json_value(_clean, "product_type")
+            _ds = _salvage_json_value(_clean, "device_specs")
+            _search_info = _si if isinstance(_si, str) and _si else _answer[:500]
+            _keywords = _kw if isinstance(_kw, list) else []
+            _product_type = _pt if isinstance(_pt, str) else ""
+            _device_specs = _clean_device_specs(_ds)
+            print(f"[WEB-SEARCH] JSON parse failed "
+                  f"(salvaged: kw={len(_keywords)} type={_product_type!r} "
+                  f"specs={len(_device_specs)} info={bool(_si)}): {e}", file=sys.stderr)
 
     _total_elapsed = time.time() - _t0
     print(
@@ -546,6 +672,7 @@ def search_and_extract(
         "search_info": _search_info,
         "keywords": _keywords,
         "product_type": _product_type,
+        "device_specs": _device_specs,
         "usage": _usage,
         "cost_usd": _cost_usd,
         "model": _get_openrouter_model(),
@@ -647,7 +774,14 @@ def reanswer(
     if _ws_keywords:
         _search_query = " ".join(_ws_keywords[:6])
         if _ws_product_type:
-            _search_query = f"{_ws_product_type} {_search_query}"
+            # ⚡ canonical Thai kw (PRODUCT_TYPES[0]) — token อังกฤษ detect ผิดเพี้ยน
+            # ("earphone" → ear+phone → ดึงโทรศัพท์แทนหูฟัง) และไม่ match ชื่อไทย
+            _search_query = f"{product_store._type_query_word(_ws_product_type)} {_search_query}"
+        # ⚡ hard-scope ด้วย type ที่ถามจริง — keywords จาก web มี device/brand
+        # ปน ("iPhone" → detect phone → ดึงโทรศัพท์ทับหูฟัง) override กันเผลอ
+        _pto = ({_ws_product_type}
+                if _ws_product_type and product_store._product_type_regex({_ws_product_type})
+                else None)
         try:
             _new_products = product_store.fetch_products(
                 db,
@@ -655,6 +789,7 @@ def reanswer(
                 shop_filter=shop,
                 limit=llm_ctx_limit,
                 desc_message=llm_message,
+                product_types_override=_pto,
             )
             print(f"[WEB-SEARCH-REANSWER] DB re-query: {_search_query!r} → {len(_new_products)} products", file=sys.stderr)
         except Exception as _e:
@@ -702,7 +837,15 @@ def reanswer(
                 print(f"[WEB-SEARCH-REANSWER] KB re-query error: {_e}", file=sys.stderr)
 
     # ── Step 2: merge + dedup + rerank ──
-    _final_products = _new_products if _new_products else list(products_in)
+    # ⚡ union: re-query ใหม่ก่อน + ของเดิมที่ไม่ซ้ำ — เดิม replace ทั้งก้อน
+    # ทำให้ re-query พลาดหมวด (เช่น ดึงโทรศัพท์แทนหูฟัง) แล้ว context ดีๆ หายหมด
+    if _new_products:
+        _seen_ids = {str(p.get("item_id") or p.get("name") or "") for p in _new_products}
+        _final_products = _new_products + [
+            p for p in (products_in or [])
+            if str(p.get("item_id") or p.get("name") or "") not in _seen_ids]
+    else:
+        _final_products = list(products_in or [])
     if do_dedup_rerank and _final_products:
         # ⚡ 2026-09-16 — ใช้ _dedupe_products ระดับโมดูล (แทน _base_name/_listing_sell_score จาก closure)
         #   KB branch ต้องเรียกด้วย do_dedup_rerank=False เพราะยังไม่มี products ที่ต้อง dedup

@@ -1,5 +1,9 @@
-# getoutofmywaybotkaikrook.md — Waythrough Log
+# getoutofmywaybotkaikrook.md — Waythrough Log (HISTORY — อ่านอย่างเดียว)
 
+> ⚠️ **ไฟล์นี้ freeze แล้ว (2026-09-17)** — เป็น history เคสเก่าที่ผ่าน อ่านได้ทุกครั้งแต่**ห้ามเขียนเพิ่ม**
+> งานใหม่/กำลังจะทำ/ผ่านแล้วใหม่ → เขียนใน `getoutofmywaybotkaikrook2.md` เท่านั้น
+> รายการ "รอทำ/รอ verify" ทั้งหมดย้ายไป file 2 แล้ว
+>
 > ไฟล์นี้คือบันทึกเส้นทางที่เราผ่านมา — ทำอะไร แก้อะไร เคสไหนผ่านแล้ว แก้ยังไง
 > **ก่อนทำอะไรใหม่ → อ่านไฟล์นี้ก่อนทุกครั้ง**
 > ห้ามทำให้เคสที่เคยผ่านกลับมาพัง
@@ -8581,3 +8585,40 @@ Task 9 — context shaping v2 + `guards.py`: unit card flags, desc section ต�
 **verify จริง:** cross-language round-trip — Node encrypt → Python decrypt คืนค่าจริง ✅, plaintext passthrough ✅, tsc ✅, py_compile ✅
 
 **deploy:** ต้อง set `LLM_MASTER_KEY` ใน env ทั้ง 2 service ก่อน — ไม่ตั้ง = plaintext เหมือนเดิม (ไม่พัง)
+
+---
+
+## 2026-09-17 (กำลังจะทำ) — context เต็มของตาย + compat pool หด + compare ไม่เห็น suggestions
+
+**ทำไม:** shadow replay เจอ (1) "หัวชาร์จละ" คืน 12/12 ใบของตายทั้งที่ร้านมีขายได้ 113 ใบ (2) compat xiaomi 17 ultra (90W) ได้แต่ 45-67W (3) "อันไหนดีกว่า" ไม่เห็น Run/Free ที่เพิ่งแนะนำ
+
+**plan:** `docs/plans/plan_dead-context_sellable-ranking_2026-09-17.md` — review แล้วโดย reviewer agent (3 critical fixes ใส่ plan แล้ว: F4 ต้อง gate ด้วย is_compat_check+target_device ไม่ใช่ route flag, F3 ต้องเขียน live ลง status/total_stock/sold_out/variants ทั้งหมดเพราะ app.py:4024 recompute ทับ, F5a ต้องใช้ load_timeline raw entries)
+
+**scope:** legacy app.py path เท่านั้น (v2/v3 ไม่แตะ) — app.py แก้น้อยที่สุดเท่าที่จำเป็น (F5 เท่านั้น)
+
+**ลำดับ:** F1 (avail flag ที่ card build) → F2a (sellable tier ใน _rerank_by_promo_latest) → F2b (unit sort + live re-sort หลัง join) → F3 (live status/stock join) → F4 (compat gate) → probe verify → F5 (compare suggestions)
+
+## 2026-09-17 (ผ่านแล้ว) — sellable-first ranking + live stock join + compat gate + suggestion compare
+
+**root cause:** (1) `_available_for_sale` เช็กแค่ NORMAL ไม่เช็ก stock → NORMAL+stock=0 ได้ avail=True; (2) sort keys ไม่มี sellable tier — dead listings มี promo+recency สูงสุดเสมอจึงลอยขึ้น top; (3) unit index `sellable` เป็น build-time snapshot (KingGadgets charger เหลือ sellable 6/275 ทั้งที่ live มี 113 ใบ — index เก่ากว่า restock) + join ไม่ดึง item_status/stock สด; (4) `is_compat_check` gate เฉพาะ intent — device-compat ที่ classify เป็น product_recommend+target_device หลุดเข้า unit path (pool เล็ก ตัด compat sweep); (5) compare/superlative เห็นแค่ anchors — suggestions ที่เพิ่งแนะนำไม่อยู่ใน context + CONV-ACTIVE pin เดี่ยวทำ fetch unreachable
+
+**แก้ (legacy app.py path เท่านั้น — v2/v3 ไม่แตะ):**
+- `product_store.py`: `_doc_sellable` helper (NORMAL && stock>0, model[]→รุ่นใดมีก็นับ — logic เดียวกับ total_stock); `_available_for_sale` ที่ to_product_card ใช้ stock>0 ด้วย; `_rerank_by_promo_latest` + `_name_match_score` sort เพิ่ม `_doc_sellable` tier แรก (ของตายอยู่ context ได้ ไม่ชนะของขายได้); unit gate `if is_compat_check: skip unit path` (caller ส่ง is_compat_check หรือ target_device)
+- `units.py`: fetch_units sort `(code-hit, sellable, -_score)` — code-hit ชนะเสมอ (ถามของตายตอบได้); `attach_listing_fields` เพิ่ม item_status/stock_info_v2/model.model_id+model_status+stock_info_v2; `_live_availability`/`_live_sellable` (per-model match ด้วย model_id, solo unit→doc-level stock_info_v2, ไม่เจอ model→stock 0); to_unit_card เขียน live ลง status/total_stock/sold_out/_available_for_sale/variants[].stock/model_status/sellable (กัน app.py:4024 recompute ทับ); fetch_unit_cards overfetch limit*2 → live re-sort หลัง join → [:limit] → **pool all-dead ไม่มี code-hit → คืน [] ตก legacy** (unit index stale กว่า live catalog)
+- `app.py` (minimal): `is_compat_check=_is_compat or bool(_intent_result.get("target_device"))` ที่ fetch_products call; CONV-ACTIVE ไม่ pin เดี่ยวเมื่อมี `_anchor_compare_ctx` หรือ `_is_superlative_q`; `_comparison_followup_kw` เพิ่ม "ใหม่กว่า/ถูกกว่า/ล่าสุด"; suggestion-batch merge เข้า products เมื่อ anchors<2
+- `conversation_products.py`: `get_latest_suggestion_batch` — trailing run ของ non-anchor entries ท้าย list → cards ใหม่→เก่า (≥2 เท่านั้น, tail=anchor→[])
+
+**verify จริง (quota-free):** "หัวชาร์จละ" UIF=off 12/12 sellable ✅; UIF=on pool ตายหมด→fallback legacy 12/12 ✅; compat xiaomi 17 ultra 48/50 sellable — top AD1204U 120W/AD1003T 100W/AD653 90W ✅ (เดิมได้แค่ 45-67W); "HA835 มีไหม" code-hit คุ้ม HA835 top-2 flag dead ถูก ✅; "พาวเวอร์แบงค์" 12/12 sellable ✅; suggestion-batch logic 5/5 cases ✅ (anchor+2sug/tail-anchor/single-sug/multi-batch/empty)
+
+**regression:** test_units ✅ (ปรับ assert OOS-variant ใช้ limit ใหญ่ขึ้น — sellable-first ดัน OOS หลุด top-8 โดยเจตนา), test_sellable_units ✅, test_unit_card_fields ✅, test_unit_classifier 10/10 ✅, test_route_context ✅, test_charger_subtype_parity 42/42 ✅, test_car_charger_regression 16/16 ✅, test_anchor_compare 7/7 ✅, test_guards ✅, test_recent_qa_pairs 10/10 ✅, test_warranty_delivery 11/11 ✅, test_new_product_types 66/66 ✅ (แก้ sys.path `docs/chatbot`→`chatbot` 2 ไฟล์ — stale เดิม)
+
+**ยังไม่ทำ (YAGNI/แยกงาน):** hard filter status (ทำลายตอบของลบได้ — เก็บไว้ tier แทน), neural reranker (bge-reranker-v2-m3 — option F6 ถ้า relevance ในกลุ่ม sellable ยังแย่), charger kw → data-driven subtype (migration ใหญ่แยก), unit index rebuild (deploy step — cron/manual)
+
+## 2026-09-17 (กำลังรัน) — image_texts resume: nonsellable เหลือ 3,665 → 8 parallel shards
+
+- **state ก่อนรัน:** done=10,339 unique ok; sellable เหลือ 1 รูป (รันเก็บตกแล้ว → sellable ครบ 5,925); nonsellable เหลือ 3,665
+- **เช็ค key config จริง:** `key_source.gemini="db"` + pool `keys` 9 ตัว enabled → บอทใช้ 9 keys round-robin (ไม่ใช่ key เดียว); `single_keys.gemini` มีเก็บแต่ไม่ active; batch script หมุน `llm._API_KEYS` (env 9 keys) เหมือนเดิม
+- **แก้:** `build_image_texts.py` — `MIN_INTERVAL` อ่าน env `IMGTXT_MIN_INTERVAL` (default 0.78 เดิม)
+- **รัน:** 8 procs `--shard K/8` สลับ model (K คู่=3.5-lite, คี่=3.1-lite — quota pool แยกกัน), `IMGTXT_MIN_INTERVAL=1.8` → ~133/min/model ใต้ 135/min (9×15 RPM); logs `exports/image_texts_run_8_{0..7}.log`
+- **verify เริ่มต้น:** 8 procs alive, 0 err, ETA ~30m
+- **ขั้นต่อไป:** รอจบ → `import_image_texts.py` เข้า Mongo → เช็ค `image_texts` count เพิ่ม

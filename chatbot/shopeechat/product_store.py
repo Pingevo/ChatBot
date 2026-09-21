@@ -578,6 +578,22 @@ def _shopee_stock(model_doc: dict) -> int:
         return 0
 
 
+def _doc_sellable(doc: dict) -> bool:
+    """doc ขายได้จริงตอนนี้ไหม — item_status NORMAL + stock>0.
+
+    logic เดียวกับ total_stock ใน to_product_card (มี model → รุ่นใดมี stock
+    ก็ถือว่ามี; ไม่มี model → doc-level stock_info_v2)
+    ใช้เป็น availability tier แรกของ _rerank_by_promo_latest —
+    ของตายยังอยู่ใน context (ตอบ "เคยมีไหม" ได้) แต่ไม่ชนะของที่ขายได้
+    """
+    if (doc or {}).get("item_status") != "NORMAL":
+        return False
+    models = doc.get("model") or []
+    if models:
+        return any(_shopee_stock(m) > 0 for m in models)
+    return _shopee_stock(doc) > 0
+
+
 def to_product_card(doc: dict, message: str = "") -> dict:
     """ย่อสินค้า 1 รายการเป็น 'card' ขนาดเล็กใช้เป็น context ส่ง LLM.
 
@@ -615,11 +631,11 @@ def to_product_card(doc: dict, message: str = "") -> dict:
         "dimension": doc.get("dimension"),
         "total_stock": total_stock,
         "sold_out": total_stock == 0,
-        # ⚡ BUG-H fix — _available_for_sale ใช้ item_status=NORMAL เป็นเกณฑ์เดียว
-        #   NORMAL = ยังขาย (แม้ stock=0 = หมดสต็อกชั่วคราว ไม่ใช่เลิกจำหน่าย)
-        #   UNLIST/SELLER_DELETE/BANNED/DELETED = เลิกจำหน่ายจริง
-        #   stock=0 แยกด้วย sold_out field (บอทบอก "หมดสต็อกชั่วคราว" ไม่ใช่ "เลิกจำหน่าย")
-        "_available_for_sale": doc.get("item_status") == "NORMAL",
+        # ⚡ BUG-H fix (revised) — _available_for_sale = ขายได้จริงตอนนี้
+        #   NORMAL + stock>0 — sold_out field แยกบอก "หมดสต็อกชั่วคราว" ต่างจากเลิกจำหน่าย
+        #   (app.py recompute ใช้สูตรเดียวกัน — card ต้องถูกตั้งแต่ source
+        #   เพราะ item_tag/KB-merge/web-search/timeline-restore ไม่ผ่าน recompute)
+        "_available_for_sale": doc.get("item_status") == "NORMAL" and total_stock > 0,
         # ข้อมูลโปรโมชั่น (ใช้ตอน re-rank และให้ LLM บอกลูกค้าได้)
         "has_promotion": _has_active_promotion(doc),
         "is_flash_sale": bool(doc.get("is_flash_sale")),
@@ -989,14 +1005,14 @@ PRODUCT_TYPES: tuple[tuple[str, tuple[str, ...], str], ...] = (
      ("แบตสำรอง", "พาวเวอร์แบงก์", "พาวเวอร์แบงค์", "พาวเวอร์แบ็งค์",
       "พาวเวอร์ แบงก์", "พาวเวอร์ แบงค์",
       "พาวเวอร์แบง", "พาวเวอร์แบงก", "พาวเวอร์แบงค",
-      "พาวแบงก์", "พาวแบงค์",
+      "พาวแบงก์", "พาวแบงค์", "พาวแบง",
       "พอร์เวอร์แบงค์", "พอร์เวอร์แบงก์",
       "powerbank", "power bank", "แบตเตอรี่สำรอง"),
      r"(?:แบตสำรอง|แบตเตอรี่สำรอง|"
      r"พาวเวอร์แบ็งค์|พาวเวอร์แบงค์|พาวเวอร์แบงก์|"
      r"พาวเวอร์\s*แบงค์|พาวเวอร์\s*แบงก์|"
      r"พาวเวอร์แบง(?:ค์|ก์|ค|ก)?|"
-     r"พาวแบงค์|พาวแบงก์|"
+     r"พาวแบง(?:ค์|ก์|ค|ก)?|"
      r"พอร์เวอร์แบงค์|พอร์เวอร์แบงก์|"
      r"power\s*bank|powerbank|\bpb\b\s*\d)"),
     # หัวชาร์จ/สายชาร์จ/adapter/ชุดชาร์จ
@@ -2544,7 +2560,7 @@ def _rerank_by_promo_latest(
     similarity_scores: dict[str, float] | None = None,
     limit: int = 20,
 ) -> list[dict]:
-    """เรียงสินค้าตาม: standalone > มีโปร > ใหม่ล่าสุด > similarity สูง.
+    """เรียงสินค้าตาม: ขายได้จริง > standalone > มีโปร > ใหม่ล่าสุด > similarity สูง.
 
     Args:
         docs: list ของ product documents จาก Mongo
@@ -2558,14 +2574,18 @@ def _rerank_by_promo_latest(
         return []
 
     def sort_key(d: dict) -> tuple:
+        # ⚡ availability tier แรกสุด — ของตาย (UNLIST/SELLER_DELETE/stock=0)
+        #   มี promo หนัก + recency สูง (ร้านลบ listing ที่เพิ่งสร้าง) จึงชนะเสมอ
+        #   ถ้าไม่มี tier นี้ — ของตายยังอยู่ใน context (ตอบประวัติได้) แต่ไม่ลอยขึ้น top
+        sellable = _doc_sellable(d)
         # standalone (ไม่ใช่ชุด) ขึ้นก่อน เพื่อให้สินค้าเดี่ยวไม่ถูกชุดแซง
         is_standalone = not _is_bundle_product(d)
         has_promo = _has_active_promotion(d)
         recency = _get_recency_score(d)
         iid = str(d.get("item_id", ""))
         sim = (similarity_scores or {}).get(iid, 0.0)
-        # เรียงจากมากไปน้อย: (is_standalone, has_promo, recency, sim)
-        return (is_standalone, has_promo, recency, sim)
+        # เรียงจากมากไปน้อย: (sellable, is_standalone, has_promo, recency, sim)
+        return (sellable, is_standalone, has_promo, recency, sim)
 
     ranked = sorted(docs, key=sort_key, reverse=True)
     return ranked[:limit]
@@ -2878,6 +2898,12 @@ def fetch_products(
     #   USE_UNIT_INDEX=1 → ทุก query; =charger → เฉพาะ route ที่เป็น charger-family
     #   คืน unit cards ระดับรุ่นย่อยแทน listing cards; ว่าง/error → legacy path เดิม
     _uif = os.environ.get("USE_UNIT_INDEX", "").strip().lower()
+    # ⚡ compat/device-compat → ข้าม unit path ทั้งหมด
+    #   unit pool เล็ก (vector top-50) ตัด legacy compat sweep (max(limit*20,500))
+    #   + supplement + compat rerank → ของที่ spec สูงพอไม่เคยเข้า context เลย
+    #   legacy machinery ครอบ compat อยู่แล้ว — ไม่ต้องสร้างเทียบใน unit path
+    if is_compat_check:
+        _uif = ""
     if _uif == "charger":
         try:
             from . import route_context as _rc, units as _units
@@ -3324,7 +3350,11 @@ def fetch_products(
                 # bonus ถ้ามีคำที่ยาว (เช่น "redmi", "8a")
                 score += sum(len(w) for w in msg_words if w in name) / 10
                 return score
-            docs.sort(key=_name_match_score, reverse=True)
+            # ⚡ sellable tier ก่อน name-match — query compat มีชื่อ device
+            #   ("xiaomi") ซึ่งไป match สินค้าตายแบรนด์เดียวกันได้ ของตายอยู่ใน
+            #   context ได้แต่ต้องไม่ลอยขึ้นก่อนของขายได้ (exact-match block
+            #   ด้านล่างยังยกของที่ชื่อตรงทุกคำขึ้น top เหมือนเดิม)
+            docs.sort(key=lambda d: (_doc_sellable(d), _name_match_score(d)), reverse=True)
             # สำหรับ compatibility check ให้ดึงเยอะกว่า limit เพื่อให้ LLM เห็นทุกรุ่น
             _sort_limit = max(limit * 3, 50) if is_compat_check else limit
             docs = docs[:_sort_limit]
@@ -3481,7 +3511,9 @@ def list_categories(db) -> list[str]:
 
 # Pattern สำหรับตรวจ "มอก." (TISI standard) ใน description
 # ต้องมีจุดตามหลัง "มอก" และไม่ใช่ "หมอก." หรือ "เสมอก."
-_TISI_PATTERN = re.compile(r"(?<![หเ])มอก\.")
+# lookbehind มี ส ด้วย — "เสมอกัน" เก็บเป็น [เ][ส][ม][อ][ก] (เ เป็นสระของ ส)
+# ตัวก่อน "มอก" คือ ส ไม่ใช่ เ → block ด้วย ส
+_TISI_PATTERN = re.compile(r"(?<![หสเ])มอก\.")
 
 
 def _has_tisi(text: str) -> bool:
@@ -3491,11 +3523,11 @@ def _has_tisi(text: str) -> bool:
     return bool(_TISI_PATTERN.search(text))
 
 
-def _extract_tisi_context(text: str, window: int = 80) -> str:
-    """ดึงข้อความรอบ 'มอก.' เพื่อสร้าง context สั้นๆ ส่งให้ LLM/answer."""
+def _extract_match_context(text: str, pattern: "re.Pattern", window: int = 80) -> str:
+    """ดึงข้อความรอบ match แรกของ pattern — context สั้นๆ ส่งให้ LLM/answer."""
     if not text:
         return ""
-    m = _TISI_PATTERN.search(text)
+    m = pattern.search(text)
     if not m:
         return ""
     start = max(0, m.start() - window)
@@ -3506,41 +3538,170 @@ def _extract_tisi_context(text: str, window: int = 80) -> str:
     return snippet
 
 
-def search_tisi_products(
+def _extract_tisi_context(text: str, window: int = 80) -> str:
+    """ดึงข้อความรอบ 'มอก.' เพื่อสร้าง context สั้นๆ ส่งให้ LLM/answer."""
+    return _extract_match_context(text, _TISI_PATTERN, window)
+
+
+# ── cert standards search (superset ของ TISI) ────────────────────────────────
+# verify ใน Python หลัง mongo prefilter — boundary กัน FP (CE ใน SERVICE, GB ใน 128GB)
+_CERT_SEARCH_RES: dict[str, "re.Pattern"] = {
+    # เสมอกัน/เสมอการ เก็บเป็น [เ][ส][ม][อ][ก] → ตัวก่อน มอก คือ ส → block ด้วย ส
+    "tisi": re.compile(r"(?<![หสเ])มอก|(?<![a-zA-Z])tisi(?![a-zA-Z])", re.IGNORECASE),
+    "ce":   re.compile(r"(?<![A-Za-z])CE(?![A-Za-z])"),
+    "ccc":  re.compile(r"(?<![A-Za-z])CCC(?![A-Za-z])"),
+    "fcc":  re.compile(r"(?<![A-Za-z])FCC(?![A-Za-z])"),
+    "rohs": re.compile(r"rohs", re.IGNORECASE),
+    "gb":   re.compile(r"(?<![A-Za-z0-9])GB(?=[\s/.\-]|$)"),
+}
+# broad mongo prefilter ต่อ cert (MongoDB PCRE lookbehind ไม่ชัวร์ → ดึงกว้างแล้วกรอง Python)
+_CERT_MONGO_TERMS: dict[str, str] = {
+    "tisi": r"มอก|[Tt][Ii][Ss][Ii]",
+    "ce":   r"CE",
+    "ccc":  r"CCC",
+    "fcc":  r"FCC",
+    "rohs": r"[Rr][Oo][Hh][Ss]",
+    "gb":   r"GB[\s/.\-]|GB$",
+}
+
+
+def _has_cert(text: str, certs: tuple[str, ...]) -> str | None:
+    """คืน cert key แรกที่ verify ผ่าน (หลัง mongo prefilter) — ไม่ match → None."""
+    if not text:
+        return None
+    for c in certs:
+        pat = _CERT_SEARCH_RES.get(c)
+        if pat and pat.search(text):
+            return c
+    return None
+
+
+# ── stock DB cert source (itStock.Products — STOCK_URI/STOCK_DB) ─────────────
+# flag เป็น sparse: True=มี, 'False' string=ไม่มี(negative), ไม่มี field=ไม่รู้
+# join: shopee_ship_box.{item_id,model_id} → ShpProducts (item_id float ได้ → int())
+_STOCK_CERT_FLAGS: dict[str, tuple[str, ...]] = {
+    "tisi": ("is_tis", "tis_id"),   # tis_id มีค่า = มี มอก. แม้ is_tis ไม่ได้ตั้ง
+    "ccc":  ("is_ccc",),
+    "ce":   ("is_ce",),
+}
+
+
+_cached_stock_client = None
+
+
+def _stock_products_coll():
+    """collection Products ของ stock DB — lazy; fail/ไม่มี env → None (degrade)."""
+    global _cached_stock_client
+    try:
+        from pymongo import MongoClient
+        uri = os.environ.get("STOCK_URI")
+        dbname = os.environ.get("STOCK_DB")
+        if not uri or not dbname:
+            return None
+        if _cached_stock_client is None:
+            _cached_stock_client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+        return _cached_stock_client[dbname]["Products"]
+    except Exception as exc:
+        print(f"[CERT] stock db unavailable: {exc}", file=sys.stderr)
+        return None
+
+
+# variant option names มี cert token ฝัง: "QB817ฟ้า CN.V (CCC)", "P23 เทา GB.V (CE)"
+# version tokens: CN.V→ccc, GB.V/Global→ce, EU→ce, US.V→fcc (inference — hedge ด้วย cert_context)
+# GB.V = GloBal version ไม่ใช่ GB standard! GB/T จริง match เฉพาะ "gb" cert
+_VER_RE = r"[\s.]*V(?:ER)?\.?"   # V / V. / Ver / Ver.
+_VARIANT_CERT_RES: dict[str, "re.Pattern"] = {
+    "tisi": _CERT_SEARCH_RES["tisi"],
+    "ce":   re.compile(r"(?<![A-Za-z0-9])(?:CE|GB" + _VER_RE + r"|GLOBAL" + _VER_RE +
+                      r"|EU" + _VER_RE + r"|EU)(?![A-Za-z0-9])", re.IGNORECASE),
+    "ccc":  re.compile(r"(?<![A-Za-z0-9])(?:CCC|CN" + _VER_RE + r")(?![A-Za-z0-9])", re.IGNORECASE),
+    "fcc":  re.compile(r"(?<![A-Za-z0-9])(?:FCC|US" + _VER_RE + r")(?![A-Za-z0-9])", re.IGNORECASE),
+    "gb":   re.compile(r"(?<![A-Za-z0-9])GB[\s./-]*T(?![A-Za-z0-9])"),  # GB/T เท่านั้น — "GB.V"/"128 GB" ไม่ชน
+}
+_VARIANT_MONGO_TERMS: dict[str, str] = {
+    "tisi": r"มอก|[Tt][Ii][Ss][Ii]",
+    "ce":   r"CE|GB[\s.]*V|GLOBAL|EU",
+    "ccc":  r"CCC|CN[\s.]*V",
+    "fcc":  r"FCC|US[\s.]*V",
+    "gb":   r"GB[\s/.\-]|GB$",
+}
+
+
+def _variant_cert_hit(option_name: str, certs: tuple[str, ...]) -> str | None:
+    """cert key แรกที่ match variant option name (verify หลัง mongo prefilter)."""
+    if not option_name:
+        return None
+    for c in certs:
+        pat = _VARIANT_CERT_RES.get(c)
+        if pat and pat.search(option_name):
+            return c
+    return None
+
+
+def _admin_image_texts_coll():
+    """collection image_texts จาก admin DB — lazy; fail → None (degrade เป็น desc-only)."""
+    try:
+        from . import knowledge_base as _kb
+        return _kb._admin_db()["image_texts"]
+    except Exception as exc:
+        print(f"[CERT] admin db unavailable: {exc}", file=sys.stderr)
+        return None
+
+
+def _doc_stock_total(doc: dict) -> int:
+    return ((doc.get("stock_info_v2") or {}).get("summary_info") or {}).get("total_available_stock", 0) or 0
+
+
+def _name_matches_types(name: str, type_filter: set[str]) -> bool:
+    """item_name match product_type ใดใน type_filter หรือไม่ (regex เดียวกับ _detect_product_types)."""
+    low = (name or "").lower()
+    for type_name, _kws, rx in PRODUCT_TYPES:
+        if type_name in type_filter and rx and re.search(rx, low):
+            return True
+    return False
+
+
+def search_cert_products(
     db,
+    certs: tuple[str, ...],
     shop_filter: str | None = None,
     model_keyword: str | None = None,
     limit: int = 30,
+    admin_db=None,
+    type_filter: set[str] | None = None,
+    stock_db=None,
 ) -> list[dict]:
-    """ค้นสินค้าที่มี 'มอก.' (TISI standard) ใน description.
+    """ค้นสินค้าที่มี cert ที่ถาม — 4 แหล่ง: description text + image_texts (admin DB)
+    + stock DB cert flags + variant option names.
 
     Args:
-        db: MongoDB database
+        db: MongoDB database (product DB — read-only)
+        certs: cert keys จาก warranty.detect_cert_question เช่น ("tisi",), ("ce","ccc")
         shop_filter: กรองเฉพาะร้านที่ระบุ (optional)
-        model_keyword: ถ้าระบุ → กรองเฉพาะสินค้าที่ชื่อมี keyword นี้ (เช่น "AC65B2")
+        model_keyword: ถ้าระบุ → กรองเฉพาะสินค้าที่ชื่อมี keyword (เช่น "AC65B2")
+            และไม่กรอง status (ตอบได้ว่ารุ่นนั้นมี/ไม่มี แม้ของหมด)
         limit: จำนวนสินค้าสูงสุด
+        admin_db: admin DB handle (ทดสอบ inject ได้) — None → lazy _admin_image_texts_coll()
+        type_filter: product_type ที่ลูกค้าระบุ (เช่น {"powerbank"} จาก
+            _detect_product_types) — กรองเฉพาะ item_name ที่ match type นั้น
+            (กันเคส "พาวแบง มี มอก." ได้ surge module ที่มี มอก. มาตอบผิดหมวด)
+        stock_db: stock DB handle (itStock — ทดสอบ inject ได้) — None → lazy _stock_products_coll()
 
     Returns:
-        list[dict] แต่ละ dict มี:
-        - item_id, name, brand, shop, status, tisi_context (ข้อความรอบ มอก.)
-        ถ้าไม่พบ → คืน list ว่าง
+        list[dict]: item_id, name, brand, shop, status, via
+        ("desc"|"image"|"stock"|"variant"|"both"), cert, cert_context,
+        cert_ids ({tis_id, tis_license_id} เมื่อ stock มี) — dedupe ด้วย item_id,
+        sort sellable (NORMAL+stock>0) ก่อน
+        ถ้า model_keyword ไม่ระบุ (คำถาม "รุ่นไหนมีบ้าง") → เฉพาะ item_status==NORMAL
     """
     coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
     collection = db[coll_name]
 
-    # Query: description มี "มอก." — ใช้ regex ที่ไม่ match หมอก/เสมอก
-    # MongoDB PCRE ไม่รองรับ lookbehind บน UTF-8 ทุก version → ดึงกว้างแล้วกรองใน Python
-    query: dict[str, Any] = {
-        "description": {"$regex": r"มอก\.", "$options": "i"},
-    }
-    if shop_filter:
-        query["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
-    if model_keyword:
-        # กรองเฉพาะสินค้าที่ชื่อมี model keyword
-        query["item_name"] = {"$regex": re.escape(model_keyword), "$options": "i"}
+    mongo_union = "|".join(_CERT_MONGO_TERMS[c] for c in certs if c in _CERT_MONGO_TERMS)
+    if not mongo_union:
+        return []
 
-    # ดึงเฉพาะฟิลด์ที่จำเป็น (ไม่ต้องดึง description เต็ม — ดึงแค่บางส่วน)
-    tisi_projection = {
+    proj = {
         "_id": 0,
         "item_id": 1,
         "item_name": 1,
@@ -3548,29 +3709,224 @@ def search_tisi_products(
         "brand.original_brand_name": 1,
         "shopname": 1,
         "description": 1,
+        "stock_info_v2.summary_info.total_available_stock": 1,
     }
 
-    cursor = collection.find(query, tisi_projection).limit(limit * 3)  # ดึงเผื่อกรอง false positive
-    docs = list(cursor)
+    def _filters(q: dict) -> dict:
+        if shop_filter:
+            q["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
+        if model_keyword:
+            q["item_name"] = {"$regex": re.escape(model_keyword), "$options": "i"}
+        return q
 
-    # กรอง false positive ใน Python (หมอก/เสมอกัน ไม่ใช่ มอก.)
-    results: list[dict] = []
-    for doc in docs:
-        desc = doc.get("description") or ""
-        if not _has_tisi(desc):
-            continue
-        brand = (doc.get("brand") or {}).get("original_brand_name", "")
-        results.append({
+    def _norm_iid(raw) -> int | None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _to_result(doc: dict, via: str, ctx_text: str, certs_found: str | None,
+                   cert_ids: dict | None = None) -> dict:
+        return {
             "item_id": doc.get("item_id"),
             "name": doc.get("item_name", ""),
-            "brand": brand,
+            "brand": (doc.get("brand") or {}).get("original_brand_name", ""),
             "shop": doc.get("shopname", ""),
             "status": doc.get("item_status", ""),
-            "tisi_context": _extract_tisi_context(desc),
-        })
-        if len(results) >= limit:
-            break
+            "stock": _doc_stock_total(doc),
+            "via": via,
+            "cert": certs_found,
+            "cert_context": ctx_text,
+            "cert_ids": cert_ids,
+        }
 
+    found: dict[int, dict] = {}
+
+    # --- path 1: description text ---
+    try:
+        for doc in collection.find(
+                _filters({"description": {"$regex": mongo_union, "$options": "i"}}),
+                proj).limit(limit * 3):
+            desc = doc.get("description") or ""
+            cert_hit = _has_cert(desc, certs)
+            if not cert_hit:
+                continue
+            if type_filter and not _name_matches_types(doc.get("item_name", ""), type_filter):
+                continue
+            key = _norm_iid(doc.get("item_id"))
+            if key is None or key in found:
+                continue
+            found[key] = _to_result(
+                doc, "desc", _extract_match_context(desc, _CERT_SEARCH_RES[cert_hit]), cert_hit)
+            if len(found) >= limit:
+                break
+    except Exception as exc:
+        print(f"[CERT] desc search error: {exc}", file=sys.stderr)
+
+    # --- path 2: image_texts (admin DB) → item_ids → product docs ---
+    coll_it = admin_db["image_texts"] if admin_db is not None else _admin_image_texts_coll()
+    if coll_it is not None:
+        try:
+            # image_id → (text, item_ids); broad regex + verify ใน Python
+            img_items: dict[int, str] = {}
+            for d in coll_it.find(
+                    {"text": {"$regex": mongo_union}},
+                    {"image_id": 1, "text": 1, "item_ids": 1}).limit(300):
+                t = d.get("text") or ""
+                if not _has_cert(t, certs):
+                    continue
+                for raw in d.get("item_ids") or []:
+                    k = _norm_iid(raw)
+                    if k is not None:
+                        img_items.setdefault(k, t)
+            # mark เจอทั้ง 2 แหล่ง
+            for k in img_items:
+                if k in found:
+                    found[k]["via"] = "both"
+            # fetch product docs ของ item ที่เจอจากรูปอย่างเดียว
+            new_ids = [k for k in img_items if k not in found]
+            if new_ids:
+                q = _filters({"item_id": {"$in": new_ids[:limit * 3]}})
+                for doc in collection.find(q, proj):
+                    key = _norm_iid(doc.get("item_id"))
+                    if key is None or key in found:
+                        continue
+                    if type_filter and not _name_matches_types(doc.get("item_name", ""), type_filter):
+                        continue
+                    t = img_items.get(key, "")
+                    cert_hit = _has_cert(t, certs)
+                    found[key] = _to_result(
+                        doc, "image",
+                        _extract_match_context(t, _CERT_SEARCH_RES[cert_hit]) if cert_hit else "",
+                        cert_hit)
+        except Exception as exc:
+            print(f"[CERT] image_texts search error: {exc}", file=sys.stderr)
+
+    # --- path 3: stock DB cert flags (itStock.Products → shopee_ship_box.item_id) ---
+    # ข้ามถ้า cert ที่ถามไม่มี flag ใน stock (fcc/rohs/gb) — ไม่ต้อง query เปล่า
+    coll_st = (stock_db["Products"] if stock_db is not None else _stock_products_coll()) \
+        if any(_STOCK_CERT_FLAGS.get(c) for c in certs) else None
+    if coll_st is not None:
+        try:
+            st_items: dict[int, dict] = {}
+            for d in coll_st.find(
+                    {"$or": [{"is_tis": True}, {"is_ccc": True}, {"is_ce": True},
+                             {"tis_id": {"$exists": True, "$nin": [None, ""]}}],
+                     "shopee_ship_box.item_id": {"$exists": True}},
+                    {"is_tis": 1, "tis_id": 1, "tis_license_id": 1,
+                     "is_ccc": 1, "is_ce": 1, "shopee_ship_box.item_id": 1}).limit(2000):
+                hit = None
+                for c in certs:
+                    flags = _STOCK_CERT_FLAGS.get(c)
+                    if flags and any(d.get(f) is True or (f == "tis_id" and d.get(f))
+                                     for f in flags):
+                        hit = c
+                        break
+                if not hit:
+                    continue
+                iid = _norm_iid((d.get("shopee_ship_box") or {}).get("item_id"))
+                if iid is None:
+                    continue
+                e = st_items.setdefault(iid, {"cert": hit, "tis_id": None, "tis_license_id": None})
+                e["tis_id"] = d.get("tis_id") or e["tis_id"]
+                e["tis_license_id"] = d.get("tis_license_id") or e["tis_license_id"]
+            for iid, e in st_items.items():
+                if iid in found:
+                    found[iid]["via"] = "both"
+                    found[iid]["cert_ids"] = {
+                        k: e[k] for k in ("tis_id", "tis_license_id") if e[k]} or None
+            new_ids = [iid for iid in st_items if iid not in found]
+            if new_ids:
+                for doc in collection.find(_filters({"item_id": {"$in": new_ids[:limit * 3]}}), proj):
+                    key = _norm_iid(doc.get("item_id"))
+                    if key is None or key in found:
+                        continue
+                    if type_filter and not _name_matches_types(doc.get("item_name", ""), type_filter):
+                        continue
+                    e = st_items[key]
+                    ctx = "stock: " + e["cert"]
+                    if e["tis_id"]:
+                        ctx += " · เลข มอก. " + str(e["tis_id"])
+                        if e["tis_license_id"]:
+                            ctx += f" · ใบอนุญาต {e['tis_license_id']}"
+                    found[key] = _to_result(
+                        doc, "stock", ctx, e["cert"],
+                        cert_ids={k: e[k] for k in ("tis_id", "tis_license_id") if e[k]} or None)
+        except Exception as exc:
+            print(f"[CERT] stock search error: {exc}", file=sys.stderr)
+
+    # --- path 4: variant option names (tier_variation.option_list.option + model.model_name) ---
+    variant_union = "|".join(_VARIANT_MONGO_TERMS[c] for c in certs if c in _VARIANT_MONGO_TERMS)
+    if variant_union:
+        try:
+            vproj = dict(proj)
+            vproj["tier_variation.option_list.option"] = 1
+            vproj["model.model_name"] = 1
+            for doc in collection.find(
+                    _filters({"$or": [
+                        {"tier_variation.option_list.option": {"$regex": variant_union, "$options": "i"}},
+                        {"model.model_name": {"$regex": variant_union, "$options": "i"}},
+                    ]}), vproj).limit(limit * 3):
+                names: list[str] = []
+                cert_hit = None
+                for tv in doc.get("tier_variation") or []:
+                    for o in tv.get("option_list") or []:
+                        nm = o.get("option") or ""
+                        h = _variant_cert_hit(nm, certs)
+                        if h:
+                            cert_hit = cert_hit or h
+                            names.append(nm)
+                for m in doc.get("model") or []:
+                    nm = m.get("model_name") or ""
+                    h = _variant_cert_hit(nm, certs)
+                    if h:
+                        cert_hit = cert_hit or h
+                        names.append(nm)
+                if not cert_hit:
+                    continue
+                if type_filter and not _name_matches_types(doc.get("item_name", ""), type_filter):
+                    continue
+                key = _norm_iid(doc.get("item_id"))
+                if key is None:
+                    continue
+                if key in found:
+                    found[key]["via"] = "both"
+                    continue
+                found[key] = _to_result(
+                    doc, "variant", "ตัวเลือก: " + ", ".join(names[:3]), cert_hit)
+                if len(found) >= limit:
+                    break
+        except Exception as exc:
+            print(f"[CERT] variant search error: {exc}", file=sys.stderr)
+
+    results = list(found.values())
+    if not model_keyword:
+        # คำถามทั่วไป "รุ่นไหนมีบ้าง" → เฉพาะของที่ยังขาย (sellable-first)
+        results = [r for r in results if r["status"] == "NORMAL"]
+    # sellable ขึ้นก่อน แล้วตามชื่อ
+    results.sort(key=lambda r: (r["status"] != "NORMAL" or r["stock"] <= 0, r["name"]))
+    return results[:limit]
+
+
+def search_tisi_products(
+    db,
+    shop_filter: str | None = None,
+    model_keyword: str | None = None,
+    limit: int = 30,
+    admin_db=None,
+    type_filter: set[str] | None = None,
+) -> list[dict]:
+    """ค้นสินค้าที่มี 'มอก.' (TISI standard) — wrapper ของ search_cert_products.
+
+    Returns:
+        list[dict] เหมือน search_cert_products + tisi_context alias
+    """
+    results = search_cert_products(
+        db, ("tisi",), shop_filter=shop_filter,
+        model_keyword=model_keyword, limit=limit, admin_db=admin_db,
+        type_filter=type_filter)
+    for r in results:
+        r["tisi_context"] = r.get("cert_context", "")
     return results
 
 
@@ -3671,3 +4027,71 @@ def _dedupe_products(products: list[dict], *, log_label: str = "DEDUP") -> list[
     if len(_deduped) < len(products):
         print(f"[{log_label}] products: {len(products)} → {len(_deduped)} (removed {len(products) - len(_deduped)} duplicates)", file=sys.stderr)
     return _deduped
+
+
+# ── shop capability (catalog-grounded fallback) ──────────────────────────
+_SHOP_TYPE_CACHE: dict[str, dict[str, int]] = {}
+
+
+def _type_query_word(type_name: str) -> str:
+    """⚡ คืน canonical keyword ของ type (Thai term แรกใน PRODUCT_TYPES).
+
+    ใช้เป็น re-query word แทน type token ดิบ — token อังกฤษ ("earphone")
+    detect ผิดเพี้ยน (ear**phone** → phone) และไม่ match ชื่อสินค้าไทย
+    """
+    for tn, kws, _rx in PRODUCT_TYPES:
+        if tn == type_name and kws:
+            return kws[0]
+    return type_name
+
+
+
+def _shop_type_counts(db, shop: str | None) -> dict[str, int]:
+    """⚡ นับ product_type ของสินค้า NORMAL ต่อร้าน — cache ต่อ process.
+
+    ใช้ _detect_product_types บน item_name (taxonomy เดียวกับ retrieval)
+    เพื่อให้รู้ว่าร้านนี้ขายหมวดอะไรจริง — ไม่ hardcode list หมวด
+    """
+    key = (shop or "").strip().lower()
+    if key in _SHOP_TYPE_CACHE:
+        return _SHOP_TYPE_CACHE[key]
+    coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+    q: dict = {"item_status": "NORMAL"}
+    if shop:
+        q["shopname"] = {"$regex": f"^{re.escape(shop)}$", "$options": "i"}
+    counts: dict[str, int] = {}
+    try:
+        for doc in db[coll_name].find(q, {"item_name": 1}):
+            for t in _detect_product_types(doc.get("item_name") or ""):
+                counts[t] = counts.get(t, 0) + 1
+    except Exception as _e:
+        print(f"[SHOP-CAPABILITY] count error: {_e}", file=sys.stderr)
+    _SHOP_TYPE_CACHE[key] = counts
+    return counts
+
+
+def shop_capability_line(
+    db,
+    shop: str | None,
+    asked_type: str | None,
+    have_types: set[str] | None = None,
+) -> str:
+    """⚡ บรรทัดบอกหมวดที่ร้านขายจริง (จาก catalog NORMAL) — inject เมื่อของที่
+    ลูกค้าถามไม่อยู่ใน context → LLM เสนอเฉพาะหมวดจริง ไม่เดาหมวดเอง.
+
+    คืน "" เมื่อไม่จำเป็น: ไม่มี asked_type / ของที่ถามอยู่ใน context แล้ว /
+    นับ catalog ไม่ได้
+    """
+    if not asked_type or (have_types and asked_type in have_types):
+        return ""
+    counts = _shop_type_counts(db, shop)
+    if not counts:
+        return ""
+    top = [t for t in sorted(counts, key=counts.get, reverse=True)
+           if t not in ("phone", "voucher")][:12]
+    cats = ", ".join(top)
+    if asked_type in counts:
+        return (f"\n📦 ร้านนี้มีสินค้าหมวด {asked_type} ใน catalog "
+                f"แต่ไม่พบในผลค้นหาชุดนี้ — หมวดที่ร้านมีจริง: {cats}")
+    return (f"\n📦 ร้านนี้ไม่มีสินค้าหมวด {asked_type} — หมวดที่ร้านมีจริง: {cats} "
+            f"(แนะนำเฉพาะหมวดเหล่านี้ ห้ามเดาหมวดอื่น)")
