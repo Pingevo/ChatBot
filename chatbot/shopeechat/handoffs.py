@@ -85,18 +85,54 @@ def detect_human_request(req, ctx: dict) -> dict | None:
             ))
         ):
             _is_human_request = True
-    if _is_human_request:
+    # ⚡ BUG-M part D — ลูกค้าโกรธ/ผิดหวัง → escalate ให้คนจริง
+    #   เคส QA: "เห้ยช้าว่ะ จำไม่ได้เว้ย" / "ผิดหวังมากกกกกค่ะ" / "หัวร้อนแล้วนะ"
+    #   composition ไม่ใช่ flat kw:
+    #   - strong marker เดี่ยวพอ ("ผิดหวัง", "หัวร้อน", "ตีของกลับ")
+    #   - mild marker ต้องมากับคำหยาบ/คำเน้นบ่น ("ช้ามากว่ะ", "นานมากกก") —
+    #     กัน "ส่งช้าไหม" (คำถาม) หลุดเป็น anger
+    _is_angry = False
+    _STRONG_ANGER = (
+        "เห้ย", "เฮ้ย", "หัวร้อน", "โกรธ", "โมโห", "ผิดหวัง", "เซ็ง",
+        "รำคาญ", "ห่วย", "กาก", "แย่มาก", "แย่จริง", "แย่จัง", "แย่สุด",
+        "แย่ที่สุด", "ไม่ไหวแล้ว", "ตีของกลับ", "ไม่เอาแล้ว",
+        "เลวร้าย", "แย่เอามาก", "worst",
+    )
+    _MILD_ANGER = (
+        "ช้ามาก", "ช้าจัง", "ช้าเกิน", "ช้าสุด", "นานมาก", "นานเกิน",
+        "รอนาน", "ไม่ตอบเลย", "ตอบช้า", "เงียบหาย", "ไม่มีคนตอบ",
+        "ไม่มีใครตอบ", "ไม่มีการตอบ", "ช้าว่ะ", "ช้าเว้ย",
+    )
+    if any(kw in _msg_low for kw in _STRONG_ANGER):
+        _is_angry = True
+    elif any(kw in _msg_low for kw in _MILD_ANGER):
+        _is_angry = True
+    # question-guard — ถามจริง ("ช้ามากไหม" / "รอนานไหมคะ") ไม่ใช่บ่น → ไม่ escalate
+    #   (ใช้เฉพาะ mild marker; strong marker เช่น "ผิดหวังไหม" แทบไม่มีในการใช้จริง)
+    if _is_angry and not any(kw in _msg_low for kw in _STRONG_ANGER):
+        if re.search(
+            r"(ไหม|มั้ย|หรอ|เหรอ|รึเปล่า|หรือเปล่า|ป่าว|บ้าง|แค่ไหน|เท่าไหร่|เท่าไหน|กี่วัน|กี่ชั่วโมง|เมื่อไหร่|เมื่อไหน|ตอนไหน|รึ)[คะค่ะครับ\s\?]*$",
+            _msg_low,
+        ):
+            _is_angry = False
+
+    if _is_human_request or _is_angry:
+        _reason = "human_request" if _is_human_request else "customer_frustration"
+        _topic = "ลูกค้าขอคุยกับแอดมิน" if _is_human_request else "ลูกค้าไม่พอใจ/โกรธ"
         _human_answer = (
             f"ขออภัยที่ให้รอนะคะ เดี๋ยวส่งต่อแชทนี้ให้แอดมินดูแลให้นะคะ "
             f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+            if _is_human_request else
+            f"ขออภัยที่ทำให้ไม่พอใจนะคะ เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
+            f"ดูแลให้โดยเร็วนะคะ รบกวนรอการติดต่อกลับอีกครั้งนะคะ"
         )
         _total_elapsed = _time.time() - _total_start
 
         # ส่งต่อแอดมิน (best-effort) — เหมือน tax invoice handoff
         if req.conversation_id:
-            _app_module._send_handoff(req, None, reason="human_request",
-                          claim={"topic": "ลูกค้าขอคุยกับแอดมิน"}, log_tag="HUMAN-HANDOFF")
-        print(f"[TIMING] HUMAN-HANDOFF: {_total_elapsed:.2f}s", file=sys.stderr)
+            _app_module._send_handoff(req, None, reason=_reason,
+                          claim={"topic": _topic}, log_tag="HUMAN-HANDOFF")
+        print(f"[TIMING] HUMAN-HANDOFF({_reason}): {_total_elapsed:.2f}s", file=sys.stderr)
         return dict(
             answer=_human_answer,
             answer_segments=llm.split_segments(_human_answer),
@@ -108,12 +144,12 @@ def detect_human_request(req, ctx: dict) -> dict | None:
             elapsed=round(_total_elapsed, 2),
             cost=0.0,
             handoff_to_admin=True,
-            handoff_reason="human_request",
+            handoff_reason=_reason,
             timing=_timing_breakdown,
             steps=_steps,
             routing_decision=_app_module._routing(
-                "handoff", "human_request: ลูกค้าขอคุยกับคน → ส่งแอดมิน",
-                handoff_reason="human_request",
+                "handoff", f"{_reason}: {_topic} → ส่งแอดมิน",
+                handoff_reason=_reason,
             ),
             image_desc=_image_desc_out,
         )
