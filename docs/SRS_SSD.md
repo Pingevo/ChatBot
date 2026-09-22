@@ -106,7 +106,7 @@
 | ทิศทาง | วิธี | รายละเอียด |
 |---|---|---|
 | ChatAdminWeb → bot | `POST {CHATBOT_BASE_URL_*}/chat` | header `X-Internal-Secret`; payload มี `conversation_id`, `simulate_assignment`, `ticket_state`, `use_v2`/`use_v3`, `llm_context_limit` |
-| bot → ChatAdminWeb | `POST {ADMIN_HANDOFF_URL}` (default `…/api/admin/conversations/bot-handoff`) | `simulate=true` → `test_status_conversation`; `false` → `conversations` จริง + assign admin |
+| bot → ChatAdminWeb | `POST {ADMIN_HANDOFF_URL}` (default `…/api/admin/conversations/bot-handoff`) | `simulate=true` → `test_status_conversation`; `test_source="botworker"` → test store sandbox; `false` → `conversations` จริง + assign admin |
 | bot → AI Usage Hub | `POST {AI_USAGE_HUB_URL}/internal/ai-usage/logs` | fire-and-forget ทุก LLM call (ไม่ block คำตอบ) |
 | bot → OpenRouter | `POST {OPENROUTER_BASE_URL}/chat/completions` | web_search + chatbotv3; key rotation 1-9 |
 | bot → Gemini | `google.genai` SDK | intent/answer/vision; key rotation + quota tracking (RPD/RPM/TPM) |
@@ -131,7 +131,9 @@ sellcenter dump แชท Shopee ลง `conversations_shp`/`messages_shp` (เ�
 | `conversations` | แชทหลัก (ถูก sellcenter dump ทับบาง field) | sellcenter + Next.js |
 | `messages` | message log (raw_payload ของ Shopee) | sellcenter |
 | `status_conversation` | admin-owned state (assigned_to/status/closed_at/close_count) — กัน dump ทับ | Next.js |
-| `test_status_conversation` | เวอร์ชัน test ของ status | Next.js (`simulate` path) |
+| `test_status_conversation` | เวอร์ชัน test ของ status — unique key `(source, conversation_id)` ทำให้ conv เดียวกันมี doc แยกต่อ sandbox source (`botworker`/`test_chat`/`shadowbot`/`replay_compare`/`test_assignment`) + `labels`/`close_history`/`pending_assignment`/`bot_claim_info` | Next.js (`simulate`/`test_source` path) |
+| `botworker_messages` | admin reply ใน parallel sandbox `/botworker` (role=admin, actor, bubble_color) — ไม่เขียน messages_shp ไม่ส่ง platform | Next.js botworker routes |
+| `botworker_events` | event log ของ sandbox (accept/transfer/handoff/close/reopen/send/bot_reply/workflow/backlog_commit) — แยกจาก admin_logs | Next.js |
 | `shadow_replies` | คำตอบบอทที่ generate (ไม่ส่งจริง — IRON RULE) | Next.js botWorker |
 | `chat_processing` | idempotency ของ bot worker (message_id) | Next.js |
 | `buffer_messages` | debounce buffer | Next.js bufferService |
@@ -929,15 +931,17 @@ listing path:
 | `botWorkerService` | pipeline poll `messages_shp` → `isProcessed` (chat_processing) → trigger (`bot_answer`+`bot_template` → ตอบ template ทันทีไม่เรียกบอท, เหมือน test-chat) → workflowEngine → callBot → `storeBotReply` (shadow_replies) → `markProcessed`; handoff → assignment |
 | `botCallService` | `callBot` → POST `{chatbotBaseUrls[platform]}/chat` — `resolveTicketState` (simulate→test_chat_sessions, จริง→conversations), `shouldUseChatV2/V3`, `llm_context_limit` จาก systemConfig |
 | `bufferService` | debounce รวมข้อความ X วิ → 1 bot call (`buffer_messages`) |
-| `workflowEngine` / `workflowService` / `templateService` | visual flow builder (แบบ Zaapi): nodes/edges CRUD, resume paused runs, eval conditions, actions (`let_ai_respond`→callBot), `{{var}}` interpolation (pure) |
+| `workflowEngine` / `workflowService` / `templateService` | visual flow builder (แบบ Zaapi): nodes/edges CRUD, resume paused runs, eval conditions, actions (`let_ai_respond`→callBot), `{{var}}` interpolation (pure); `EngineMessage.testSource` → node side-effects (assign_ticket/add_label/close_ticket/add_note) + conditions (conversation_status/assignee) อ่าน/เขียน test store แทนของจริง, run persist `test_source` |
 | `triggerService` | keyword rules → `bot_answer`/`handoff_admin` (`triggers`) |
-| `handoffService` | รับ bot-handoff: reopen ถ้า closed → assign admin (คืน admin เดิมก่อนเสมอ) |
+| `handoffService` | รับ bot-handoff: reopen ถ้า closed → assign admin (คืน admin เดิมก่อนเสมอ) · `handoffToAdminTest` เขียน test store + `assignedStatus` param + `pending_assignment` marker เมื่อ pool ว่าง (ทั้ง real/test) |
+| `backlogService` | pending-assignment distributor — `listPending`/`buildPlan` (round_robin_selected/least_loaded_selected/manual_quota, ไม่เขียน DB)/`commitPlan` (re-check pending atomic + idem_key)/`validateAdminPool` |
+| `botworkerEventService` | `botworker_events` CRUD — event log แยกของ sandbox (ไม่เขียน admin_logs) |
 | `assignmentService` | round-robin: equal_global / equal_per_shop / weighted (`assignment_configs`/`assignment_cursors`/`shop_team_assignments`/`platform_team_assignments`) |
 | `statusConversationService` / `testStatusConversationService` | admin-owned state แยกจาก dump (จริง/`status_conversation`, test/`test_status_conversation`) |
 | `shadowReplyService` | `shadow_replies` CRUD — IRON RULE ห้ามส่งจริง/ห้าม platform API |
 | `liveAssignmentService` / `testAssignmentService` / `testChatRatingService` / `chatAnnotationService` | live+test assignment (transcript `qa[]`), ratings, dot+note annotations |
 | `adminKpiService` | KPI aggregate 3 ระบบ (test-chat, test-assignment, shadow-inbox) |
-| `conversationService` / `messageService` / `messageMediaParser` | per-conv storage, `getHistoryForBot`/`getGroupedHistoryForBot`/`toBotText`/`toBotImages` — pair bot reply ด้วย `indexBotRepliesByInbound` (ตัด suffix `__wf<N>` ของ workflow delivered, รวมหลาย bubble เป็น reply เดียว, orphan check เทียบ base id), parse `raw_payload` (item/variation_card/order/sticker/image/video) |
+| `conversationService` / `messageService` / `messageMediaParser` | per-conv storage, `getHistoryForBot`/`getGroupedHistoryForBot`/`toBotText`/`toBotImages` — pair bot reply ด้วย `indexBotRepliesByInbound` (ตัด suffix `__wf<N>` ของ workflow delivered, รวมหลาย bubble เป็น reply เดียว, orphan check เทียบ base id), parse `raw_payload` (item/variation_card/order/sticker/image/video); `getGroupedHistoryForBot` filter `origin∈[worker,workflow]`+`mode=standalone` และ `includeSandboxAdmin` merge `botworker_messages` เข้า model turns (priority: worker reply → admin sandbox → zaapi fallback) |
 | `knowledgeBaseService` / `personaService` / `shopSettingsService` / `shopService` / `productService` / `customerService` | CRUD KB/persona/shop-settings/shops; products จาก `dbWallet` read-only; customers join `conversations_shp.to_name` |
 | `authService` | SSO login/session/logout/admin CRUD (JWT `cc_session`, HS256) |
 | `rolePermissionService` | role×page matrix (`system_configs` doc `role_permissions`, seed `DEFAULT_PERMISSIONS`, cache 30s) |
@@ -946,7 +950,7 @@ listing path:
 | `ticketService` / `quickReplyService` / `closeHistoryService` / `chatAcceptService` / `adminLogService` | tickets, canned replies, close/reopen history (sequence), accept/pause sessions, audit log |
 | `lib/*` | `jwt`, `urlSafety`, `safety` (platform API disabled asserts), `rateLimit`, `sanitizeFields`, `config` (env→collections map), `pages` (PAGES registry) |
 
-**API routes (~70, `src/app/api/`):** conversations CRUD + `send`/`assign`/`handoff`/`resolve`/`messages`/`orders` + `bot-handoff` (รับจาก Python) · `shadow-inbox` (+generate-conversation) · `test-chat` (buffer/flush/upload/workflow-step) · `test-assignment` / `live-assignment` / `test-results` / `admin-chat-result` / `admin-review-kpi` · `chat-annotations` · `kb` (+upload/template/toggle) · `triggers` (+match/toggle) · `workflows` (+restore/toggle) · `llm-config` (+models) · `persona` · `shops`/`shop-settings`/`products` · `stats/*` (dashboard/admin-activity/live/performance) · `team`/`users`/`profile`/`permissions` · `auth/sso` · `quick-replies`/`labels`/`contacts` · `replay-compare` (spawn `replay_compare.py`) · `admin/maintenance` · `botworker/*` (internal) · `chatbot/[...path]` proxy
+**API routes (~75, `src/app/api/`):** conversations CRUD + `send`/`assign`/`handoff`/`resolve`/`messages`/`orders` + `bot-handoff` (รับจาก Python — รองรับ `test_source` branch) · `shadow-inbox` (+generate-conversation) · `test-chat` (buffer/flush/upload/workflow-step) · `test-assignment` / `live-assignment` / `test-results` / `admin-chat-result` / `admin-review-kpi` · `chat-annotations` · `kb` (+upload/template/toggle) · `triggers` (+match/toggle) · `workflows` (+restore/toggle) · `llm-config` (+models) · `persona` · `shops`/`shop-settings`/`products` · `stats/*` (dashboard/admin-activity/live/performance) · `team`/`users`/`profile`/`permissions` · `auth/sso` · `quick-replies`/`labels`/`contacts` · `replay-compare` (spawn `replay_compare.py`) · `admin/maintenance` · `botworker/*` (internal) · `botworker/conversations/:id/{accept,transfer,handoff,close,reopen,send,close-history,events,messages}` (sandbox — เขียน test store/botworker_messages เท่านั้น) · `assignment/backlog` (+preview/commit — superadmin/dev) · `assignment/reassign` (validate target active+role+accepting) · `chatbot/[...path]` proxy
 
 ### 6.27 `retrieval_policy.py` — evidence card contract (observe-only, Task 3)
 
@@ -975,6 +979,7 @@ listing path:
 | `BOT_VISION_ALLOW_LOOPBACK` | — | อนุญาต loopback image URL (test-chat upload) |
 | `req.ticket_state` | — | `open|closed|handoff|resolved|pending` — คุม post-handoff silence |
 | `req.simulate_assignment` | False | handoff→`test_status_conversation` แทน conversations จริง |
+| `req.test_source` | None | `"botworker"` → handoff/ticket_state ผูกกับ test store source=botworker (parallel sandbox) |
 | `req.llm_context_limit` | 30 (10-50) | จำนวนสินค้าสูงสุดใน LLM ctx (หน้า config ตั้ง) |
 
 ### 7.2 LLM (Gemini)

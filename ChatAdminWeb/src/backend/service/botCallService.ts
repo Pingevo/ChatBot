@@ -20,6 +20,10 @@ export interface BotCallParams {
   //    ถ้ามี → ดึง status จาก DB แล้วส่ง ticket_state ให้บอท
   conversationId?: string;
   simulate?: boolean;
+  // ⚡ botworker parallel — ระบุ test source ("botworker" ฯลฯ)
+  //    → ticket_state อ่านจาก test_status_conversation(source)
+  //    → Python _send_handoff ส่ง test_source กลับ → bot-handoff route เขียน test store
+  testSource?: string;
 }
 
 export interface BotCallResponse {
@@ -39,16 +43,24 @@ export interface BotCallResponse {
 
 /**
  * ⚡ Phase 2A — ดึง ticket state จาก DB
- *   simulate=true → ดึงจาก test_chat_sessions (mock)
- *   simulate=false → ดึงจาก conversations (จริง)
+ *   testSource → test_status_conversation(source) — botworker parallel sandbox
+ *   simulate=true (ไม่มี testSource) → test_chat_sessions (test-chat mock)
+ *   simulate=false → conversations (จริง — เฉพาะเส้นทางจริงเท่านั้น)
  *   คืน "open" | "closed" | "handoff" | "resolved" | "pending" | null
  */
 async function resolveTicketState(
   conversationId: string | undefined,
-  simulate: boolean | undefined
+  simulate: boolean | undefined,
+  testSource: string | undefined
 ): Promise<string | null> {
   if (!conversationId) return null;
   try {
+    if (testSource) {
+      // ⚡ parallel sandbox — อ่านจาก test_status_conversation เท่านั้น
+      const coll = await getCollection<{ conversation_id: string; source: string; status?: string }>(COLLECTIONS.testStatusConversation);
+      const doc = await coll.findOne({ conversation_id: conversationId, source: testSource });
+      return doc?.status || null;
+    }
     if (simulate) {
       // test chat — ดึงจาก test_chat_sessions
       const { ObjectId } = await import("mongodb");
@@ -70,8 +82,8 @@ async function resolveTicketState(
 export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
   const baseUrl = serverConfig.chatbotBaseUrls[params.platform] || serverConfig.chatbotBaseUrls.shopee;
   const url = baseUrl.replace(/\/$/, "") + "/chat";
-  // ⚡ Phase 2A — ดึง ticket_state จาก DB
-  const ticketState = await resolveTicketState(params.conversationId, params.simulate);
+  // ⚡ Phase 2A — ดึง ticket_state จาก DB (testSource → test store)
+  const ticketState = await resolveTicketState(params.conversationId, params.simulate, params.testSource);
   // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
   const useV2 = await shouldUseChatV2();
   const useV3 = await shouldUseChatV3();
@@ -103,7 +115,9 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       ...(ticketState ? { ticket_state: ticketState } : {}),
       // ⚡ Phase 2A — ส่ง conversation_id + simulate ให้บอท (สำหรับ handoff API)
       ...(params.conversationId ? { conversation_id: params.conversationId } : {}),
-      ...(params.simulate ? { simulate_assignment: true } : {}),
+      // ⚡ testSource → simulate_assignment=true เสมอ (กัน Python เขียน assign จริง) + test_source เพื่อ route เข้า test store
+      ...(params.simulate || params.testSource ? { simulate_assignment: true } : {}),
+      ...(params.testSource ? { test_source: params.testSource } : {}),
       // ⚡ chat_engine — ส่ง use_v2/use_v3 ตามที่ config เลือก (v3 มี priority เหนือ v2)
       ...(useV3 ? { use_v3: true } : {}),
       ...(useV2 && !useV3 ? { use_v2: true } : {}),

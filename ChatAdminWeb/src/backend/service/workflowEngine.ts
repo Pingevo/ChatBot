@@ -18,10 +18,13 @@ import { workflowService, type WorkflowDoc, type WorkflowNode, isMultiBranchCond
 import { callBot } from "./botCallService";
 import { getConversation, closeConversation, type ProblemCategory } from "./conversationService";
 import { resolveTemplate, type TemplateVars } from "./templateService";
-import { getHistoryForBot, toBotImages } from "./messageService";
+import { getHistoryForBot, getGroupedHistoryForBot, toBotImages } from "./messageService";
 import { handoffService } from "./handoffService";
 import { getCustomer } from "./customerService";
 import { logAdminEvent } from "./adminLogService";
+// ⚡ botworker parallel — test store + sandbox event log (ใช้เมื่อ msg.testSource มี)
+import { testStatusConversationService, type TestSource } from "./testStatusConversationService";
+import { logBotworkerEvent } from "./botworkerEventService";
 import { isSafeFetchUrl } from "../lib/urlSafety";
 
 // ─── Types ────────────────────────────────────────────────
@@ -47,6 +50,10 @@ export interface WorkflowRunDoc extends Document {
   // ตัวแปรสะสมระหว่าง node (เช่น bot_answer, customer_reply, _jumps)
   context: Record<string, unknown>;
 
+  // ⚡ botworker parallel — sandbox source ที่ run นี้ถูกสร้าง (persist ไว้กับ run
+  //   เพื่อให้ timeout checker/resume ยังเขียน test store ไม่ใช่ของจริง)
+  test_source?: string;
+
   // ผลลัพธ์สุดท้าย
   outcome?: "actioned" | "no_match" | "condition_false" | "error" | "timeout" | "cancelled_by_admin" | "retry_exceeded" | "no_reply";
 
@@ -69,6 +76,9 @@ export interface EngineMessage {
   //    EngineMessage ไม่มี raw_payload → toBotImages(msg) คืน [] เสมอ
   //    ให้ worker ส่ง botImages มาตรงๆ แทน เพื่อกันทิ้ง video URL ใน let_ai_respond
   images?: string[];
+  // ⚡ botworker parallel — ถ้ามี → node side-effects/conditions เขียน+อ่าน test_status_conversation[testSource]
+  //    แทน status_conversation/conversations จริง (worker ส่ง "botworker" เสมอ)
+  testSource?: string;
 }
 
 export interface DeliveredMessage {
@@ -255,6 +265,7 @@ async function createRun(workflow: WorkflowDoc, msg: EngineMessage): Promise<Wor
     status: "running",
     current_node_id: "",
     context: {},
+    ...(msg.testSource ? { test_source: msg.testSource } : {}),
     started_at: now,
     updated_at: now,
   };
@@ -770,9 +781,16 @@ async function evalLegacyCondition(
     }
 
     case "conversation_status": {
+      const wantStatus = String(node.config.status || "open");
+      if (msg.testSource) {
+        // ⚡ botworker parallel — อ่านสถานะจาก test store ไม่ใช่ conversations จริง
+        const meta = await testStatusConversationService.getTestStatus(msg.conversation_id, msg.testSource as TestSource);
+        const st = meta?.status || "bot";
+        const isOpen = st !== "closed" && st !== "resolved";
+        return wantStatus === "open" ? isOpen : !isOpen;
+      }
       const conv = await getConversation(msg.conversation_id);
       if (!conv) return false;
-      const wantStatus = String(node.config.status || "open");
       const isOpen = conv.status !== "closed" && conv.status !== "resolved";
       return wantStatus === "open" ? isOpen : !isOpen;
     }
@@ -796,9 +814,15 @@ async function evalLegacyCondition(
     }
 
     case "assignee": {
+      const wantAdmin = node.config.admin_id ? String(node.config.admin_id) : null;
+      if (msg.testSource) {
+        // ⚡ botworker parallel — อ่าน assigned_to จาก test store
+        const meta = await testStatusConversationService.getTestStatus(msg.conversation_id, msg.testSource as TestSource);
+        if (wantAdmin) return meta?.assigned_to === wantAdmin;
+        return !!meta?.assigned_to;
+      }
       const conv = await getConversation(msg.conversation_id);
       if (!conv) return false;
-      const wantAdmin = node.config.admin_id ? String(node.config.admin_id) : null;
       if (wantAdmin) return conv.assigned_to === wantAdmin;
       return !!conv.assigned_to;
     }
@@ -882,11 +906,19 @@ async function performAction(
       // ⚡ planner หลักการ: หลัง let_ai_respond → fixed follow-up ทำได้ทันทีเพราะ bot_answer อยู่ใน context
       const conv = await getConversation(msg.conversation_id);
       const shopName = conv?.shop_name || undefined;
-      const history = msg.history || await getHistoryForBot({
-        conversationId: msg.conversation_id,
-        platform: msg.platform,
-        maxMessages: 10,
-      });
+      const history = msg.history || (msg.testSource === "botworker"
+        // ⚡ botworker parallel — ใช้ grouped history เดียวกับ worker (merge botworker_messages)
+        ? await getGroupedHistoryForBot({
+            conversationId: msg.conversation_id,
+            platform: msg.platform,
+            maxTurns: 10,
+            includeSandboxAdmin: true,
+          })
+        : await getHistoryForBot({
+            conversationId: msg.conversation_id,
+            platform: msg.platform,
+            maxMessages: 10,
+          }));
       const promptPrefix = typeof cfg.prompt === "string" && cfg.prompt.trim().length > 0 ? cfg.prompt.trim() + "\n" : "";
       // ⚡ Phase 1A multimodal — ส่ง URL รูป/วิดีโอให้ bot ด้วย (ถ้าลูกค้าส่งมา)
       //    ใช้ msg.images ที่ worker ส่งมาตรงๆ (EngineMessage ไม่มี raw_payload → toBotImages ใช้ไม่ได้)
@@ -898,6 +930,8 @@ async function performAction(
         shopName,
         history,
         ...(wfBotImages.length > 0 ? { images: wfBotImages } : {}),
+        // ⚡ botworker parallel — handoff จากบอทต้องเขียน test store ไม่ใช่ของจริง
+        ...(msg.testSource ? { conversationId: msg.conversation_id, simulate: true, testSource: msg.testSource } : {}),
       });
       context.bot_answer = botResp.answer;
       context.bot_source = botResp.source;
@@ -913,6 +947,46 @@ async function performAction(
       // จ่ายงาน — ระบุ admin_id → assign ตรง / ไม่ระบุ → handoffService (คนเดิม → round-robin)
       const reason = String(cfg.reason || `workflow ${workflow.name}`);
       const wantAdmin = cfg.admin_id ? String(cfg.admin_id) : null;
+
+      // ⚡ botworker parallel — เขียน test_status_conversation[testSource] เท่านั้น
+      if (msg.testSource) {
+        const src = msg.testSource as TestSource;
+        if (wantAdmin) {
+          const meta = await testStatusConversationService.getTestStatus(msg.conversation_id, src);
+          const ok = await testStatusConversationService.manualTestAssign(
+            msg.conversation_id, src, wantAdmin, meta?.assigned_to,
+            src === "botworker" ? "open" : "handoff"
+          );
+          if (!ok) {
+            return { handoff: { agentId: meta?.assigned_to || null, reason: `${reason} (conflict — already assigned)` } };
+          }
+        } else {
+          const result = await handoffService.handoffToAdminTest({
+            conversationId: msg.conversation_id,
+            shopId: msg.shop_id,
+            platform: msg.platform,
+            reason,
+            source: src,
+            assignedStatus: src === "botworker" ? "open" : "handoff",
+          });
+          if (src === "botworker") {
+            await logBotworkerEvent({
+              conversation_id: msg.conversation_id, type: "workflow", actor: "workflow-engine",
+              shop_id: msg.shop_id, platform: msg.platform,
+              metadata: { action: "assign_ticket", run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: result.assignedTo, mode: "auto" },
+            });
+          }
+          return { handoff: { agentId: result.assignedTo, reason } };
+        }
+        if (src === "botworker") {
+          await logBotworkerEvent({
+            conversation_id: msg.conversation_id, type: "workflow", actor: "workflow-engine",
+            shop_id: msg.shop_id, platform: msg.platform,
+            metadata: { action: "assign_ticket", run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: wantAdmin, direct: true },
+          });
+        }
+        return { handoff: { agentId: wantAdmin, reason } };
+      }
 
       if (wantAdmin) {
         // assign ตรงแบบ (เหมือน Zaapi ที่เลือกคนได้)
@@ -948,7 +1022,6 @@ async function performAction(
 
     case "add_label": {
       // ⚡ Phase 3: รองรับทั้ง legacy { label: string } และ { label_ids: string[] }
-      const coll = await getCollection<{ labels?: string[] }>(COLLECTIONS.conversations);
       const labelsToAdd: string[] = [];
 
       if (isPhase3AddLabelConfig(cfg)) {
@@ -964,6 +1037,19 @@ async function performAction(
       }
 
       if (labelsToAdd.length > 0) {
+        if (msg.testSource) {
+          // ⚡ botworker parallel — labels ลง test doc ไม่ใช่ conversations จริง
+          await testStatusConversationService.addTestLabels(msg.conversation_id, msg.testSource as TestSource, labelsToAdd);
+          if (msg.testSource === "botworker") {
+            await logBotworkerEvent({
+              conversation_id: msg.conversation_id, type: "workflow", actor: "workflow-engine",
+              shop_id: msg.shop_id, platform: msg.platform,
+              metadata: { action: "add_label", run_id: run.run_id, workflow_id: workflow.workflow_id, labels: labelsToAdd },
+            });
+          }
+          return {};
+        }
+        const coll = await getCollection<{ labels?: string[] }>(COLLECTIONS.conversations);
         // $addToSet แต่ละ label — ใช้ $each ทีเดียว (atomic)
         await coll.updateOne(
           { conversation_id: msg.conversation_id },
@@ -980,6 +1066,27 @@ async function performAction(
     }
 
     case "close_ticket": {
+      if (msg.testSource) {
+        // ⚡ botworker parallel — ปิดใน test store + close_history ของ test doc
+        const src = msg.testSource as TestSource;
+        await testStatusConversationService.closeTestConversation(msg.conversation_id, src, "workflow-engine");
+        await testStatusConversationService.pushTestCloseHistory(msg.conversation_id, src, {
+          closed_at: new Date(),
+          closed_by: "workflow-engine",
+          reason: String(cfg.reason || `workflow ${workflow.name}`),
+          category: String(cfg.category || "other"),
+          resolution: String(cfg.resolution || "workflow auto-close"),
+          note: cfg.note ? String(cfg.note) : undefined,
+        });
+        if (src === "botworker") {
+          await logBotworkerEvent({
+            conversation_id: msg.conversation_id, type: "workflow", actor: "workflow-engine",
+            shop_id: msg.shop_id, platform: msg.platform,
+            metadata: { action: "close_ticket", run_id: run.run_id, workflow_id: workflow.workflow_id, reason: cfg.reason },
+          });
+        }
+        return { stop: true };
+      }
       // ปิดแชท — ใช้ conversationService.closeConversation (มี close_history + audit ในตัว)
       const closed = await closeConversation({
         conversationId: msg.conversation_id,
@@ -997,6 +1104,15 @@ async function performAction(
       // เพิ่ม note — เก็บใน admin_logs (audit trail)
       const text = String(cfg.text || "");
       if (text) {
+        if (msg.testSource === "botworker") {
+          // ⚡ botworker parallel — note เป็น event ใน botworker_events ไม่ใช่ admin_logs
+          await logBotworkerEvent({
+            conversation_id: msg.conversation_id, type: "workflow", actor: "workflow-engine",
+            shop_id: msg.shop_id, platform: msg.platform,
+            metadata: { action: "add_note", run_id: run.run_id, workflow_id: workflow.workflow_id, note: text },
+          });
+          return {};
+        }
         await logAdminEvent({
           action_type: "workflow.add_note",
           actor: "workflow-engine",
@@ -1150,6 +1266,8 @@ async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc): P
       platform: run.platform,
       customer_id: run.customer_id,
       text: "",
+      // ⚡ propagate sandbox source — run ของ botworker ต้องเขียน test store เท่านั้น
+      ...(run.test_source ? { testSource: run.test_source } : {}),
     };
     await walkGraph(workflow, { ...run, context: { ...run.context, customer_reply: "" } }, dummyMsg, noReplyNext[0]);
   } else {

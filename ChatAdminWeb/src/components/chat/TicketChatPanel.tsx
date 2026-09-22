@@ -242,6 +242,7 @@ interface AdminRow {
   username: string;
   role: string;
   active: boolean;
+  is_accepting_chats?: boolean; // ⚡ eligibility — พักรับแชทไม่ให้โยน
 }
 
 function TransferDropdown({
@@ -260,8 +261,10 @@ function TransferDropdown({
     try {
       const r = await fetch("/api/users/list");
       const data = await r.json();
-      // กรองเฉพาะ role=admin และ active
-      const list = (data.users || []).filter((u: AdminRow) => u.role === "admin" && u.active);
+      // กรองเฉพาะ role=admin + active + เปิดรับแชทอยู่ (พักรับแชทไม่แสดง)
+      const list = (data.users || []).filter(
+        (u: AdminRow) => u.role === "admin" && u.active && u.is_accepting_chats !== false
+      );
       setAdmins(list);
     } catch {
       // ignore
@@ -314,7 +317,7 @@ function TransferDropdown({
               </button>
             ))}
             {admins.length === 0 && !loading && (
-              <div className="px-3 py-3 text-xs text-text-muted text-center">ไม่มีแอดมิน</div>
+              <div className="px-3 py-3 text-xs text-text-muted text-center">ไม่มีแอดมินที่เปิดรับแชท</div>
             )}
           </div>
         </>

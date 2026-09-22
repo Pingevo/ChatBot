@@ -45,6 +45,7 @@ import {
   X,
   HelpCircle,
   UserCog,
+  Inbox,
   type LucideIcon,
 } from "lucide-react";
 
@@ -123,6 +124,7 @@ const navGroups: NavGroup[] = [
       { href: "/admin-review-kpi", label: "KPI รีวิวแอดมิน", icon: Gauge, page: "admin-review-kpi" },
       { href: "/admin-chat-result", label: "ผลแชทแอดมิน", icon: FileSearch, page: "admin-chat-result" },
       { href: "/test-chat-result", label: "ผลทดสอบแชท", icon: FileSearch, page: "test-chat-result" },
+      { href: "/backlog", label: "งานค้างรอจ่าย", icon: Inbox, page: "backlog" },
     ],
   },
   {

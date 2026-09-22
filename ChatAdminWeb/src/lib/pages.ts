@@ -35,6 +35,7 @@ export const PAGES: PageDef[] = [
   { key: "admin-review-kpi", label: "KPI รีวิวแอดมิน", group: "การทดสอบบอท" },
   { key: "admin-chat-result", label: "ผลแชทแอดมิน", group: "การทดสอบบอท" },
   { key: "test-chat-result", label: "ผลทดสอบแชท", group: "การทดสอบบอท" },
+  { key: "backlog", label: "งานค้างรอจ่าย", group: "การทดสอบบอท" },
   // management
   { key: "shop", label: "ร้านค้า", group: "จัดการ" },
   { key: "customer", label: "รายชื่อลูกค้า", group: "จัดการ" },
@@ -75,6 +76,7 @@ export const DEFAULT_PERMISSIONS: Record<string, Record<string, AccessLevel>> = 
   "admin-review-kpi": { admin: "none", superadmin: "edit", dev: "edit" },
   "admin-chat-result": { admin: "none", superadmin: "none", dev: "edit" },
   "test-chat-result": { admin: "none", superadmin: "none", dev: "edit" },
+  backlog:            { admin: "none", superadmin: "edit", dev: "edit" },
   shop:               { admin: "read", superadmin: "edit", dev: "edit" },
   customer:           { admin: "read", superadmin: "edit", dev: "edit" },
   team:               { admin: "read", superadmin: "edit", dev: "edit" },
