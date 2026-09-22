@@ -20,19 +20,15 @@
 
 ## กำลังทำ (active)
 
-### ✅ หัวข้อ "ทดสอบบอท" มองไม่เห็น → เปลี่ยนเป็นสี maroon (2026-09-22) — แก้แล้ว
+### ✅ หัวข้อ "ทดสอบบอท" มองไม่เห็นบน laptop (2026-09-22) — fixed root cause + verified
 
-- **อาการ:** h1 "ทดสอบบอท — {label}" หน้า testchat มองไม่เห็น
-- **วิธีแก้:** `text-text` → `text-brand` (#8b1e28 = maroon ของระบบ) ที่ h1 ทั้ง 2 จุดใน `TestChatClient.tsx` (line ~1776 state unavailable + ~1891 header จริง)
-- **ผลกระทบ:** UI เท่านั้น ไม่แตะ logic
-- **verify:** `text-brand` มีอยู่แล้ว 222 จุดใน codebase (map `--color-brand`) — utility resolve แน่นอน
+- **error:** h1 "ทดสอบบอท — {label}" หน้า testchat มองไม่เห็น **เฉพาะจอ ≥1280px (xl)** — จอเล็กเห็นปกติ
+- **เกิดเพราะ:** `--color-base: #ffffff` ใน `@theme` (globals.css) ชนกับ utility `text-base` (font-size) ของ Tailwind → `.text-base` ถูก gen เป็น **color ขาว** แทน font-size (font-size หายไปเลย) → `xl:text-base` บน h1 ทำตัวขาวบนพื้นขาวตอน ≥1280px; `.text-text`/`.text-brand` แพ้เพราะ rule ใน media query มาทีหลังใน cascade
+- **แก้ด้วย:** ลบ `--color-base` ออกจาก @theme (ซ้ำ `--color-bg`/`--color-surface` ขาวเหมือนกัน) + `bg-base`→`bg-surface` 11 จุด (shop-settings/persona/test-results — สีขาวเดียวกัน หน้าตาไม่เปลี่ยน) + h1 คง `text-brand` (#8b1e28 maroon ตามที่ user ขอ)
+- **verify:** compiled CSS จาก dev server — `.text-base`/`.xl:text-base` กลับเป็น `font-size: var(--text-base)` แล้ว ไม่มี color ขาว; reproduce ด้วย Playwright+CSS จริงพิสูจน์ก่อนแก้ว่า h1 = rgb(255,255,255) ที่ 1440px
+- **ผลกระทบเคสอื่น (แก้ latent bug ด้วย):** ทุก `sm:/xl:text-base` เคยเป็นตัวขาวที่ breakpoint นั้น (เช่น `text-sm sm:text-base` ขาวตั้งแต่ 640px) · `text-base` ~20 จุดได้ font-size 1rem กลับมา (render เดิม 16px เท่ากัน → หน้าตาไม่เปลี่ยน) · `bg-base`→`bg-surface` สีเดียวกัน
 
-### 🔄 ShadowStatPanel "All History" ใช้งานไม่ได้ (2026-09-22) — root cause พบแล้ว รออนุญาตแก้
-
-- **อาการ:** panel สถิติขวา tab "All History" ในหน้า /shadow-inbox โชว์ "ยังไม่มีสถิติ" ตลอด
-- **root cause (วัดจริง):** `getShadowReplyStats` (shadowReplyService.ts:836) ทำ `find({deleted_at:{$exists:false}}).toArray()` **ไม่มี projection/limit** → ลาก 4,980 docs = **50.9MB / 140.8s** (probe วัดจริง) — axios timeout 30s → `loadStats` catch → `setStats(null)` → โชว์ "ยังไม่มีสถิติ"; doc อ้วนเพราะ `bot_products` (สูงสุด 354KB/doc)
-- **วิธีแก้ (เสนอ):** projection เฉพาะ field ที่ stats ใช้ (`rating, star_rating, comment, bot_cost_usd, bot_elapsed_ms, bot_tokens.total`) → probe เดียวกัน = **265ms** (~530x เร็วขึ้น) — pattern เดียวกับ fix test-assignment/live-assignment เดิม
-- **ผลกระทบ:** จุดเดียว `shadowReplyService.ts` · caller เดียว route.ts:129 ครอบทั้ง All History + Per Chat · Per Chat (filter conv) เร็วอยู่แล้วได้ประโยชน์ด้วย
+### ✅ ShadowStatPanel "All History" ใช้งานไม่ได้ (2026-09-22) — fixed + verified → ย้ายไป "ผ่านแล้ว"
 
 ### 🔄 botworker history ขาด workflow replies (2026-09-22) — รออนุญาตแก้
 
@@ -405,6 +401,15 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 ---
 
 ## ผ่านแล้ว (file 2)
+
+### ✅ 2026-09-22 — ShadowStatPanel "All History" โชว์ "ยังไม่มีสถิติ" ตลอด
+
+- **error:** panel สถิติขวา tab "All History" ใน /shadow-inbox โหลดไม่เคยสำเร็จ — frontend catch → `setStats(null)` → โชว์ "ยังไม่มีสถิติ"
+- **เกิดเพราะ:** `getShadowReplyStats` (shadowReplyService.ts) ทำ `find({deleted_at:{$exists:false}}).toArray()` ไม่มี projection/limit → ลาก 4,980 docs = 50.9MB / **140.8s** (doc อ้วนเพราะ `bot_products` สูงสุด 354KB/doc) — axios timeout 30s → request ตาย
+- **แก้ด้วย:** `.project()` เฉพาะ field ที่ stats ใช้ (`rating, star_rating, comment, bot_cost_usd, bot_elapsed_ms, bot_tokens.total`) — pattern เดียวกับ fix test-assignment/live-assignment
+- **verify:** `getShadowReplyStats({})` จริงผ่าน tsx = **333ms** (เดิม ~141s) ค่าถูก (total=4980, win_rate=100%, cost=$21.17, tokens=64.3M) · `tsc --noEmit` ผ่าน · commit `83509de`
+- **ผลกระทบเคสอื่น:** caller เดียว route.ts `?stats=1` ครอบทั้ง All History + Per Chat (conv filter) — Per Chat เร็วขึ้นด้วย; output shape ไม่เปลี่ยน
+- **probe script:** `ChatAdminWeb/scripts/probe-shadow-stats.ts` (committed — ใช้วัดซ้ำได้)
 
 ### ✅ 2026-09-21 — Legacy Shopee evidence-first retrieval implementation plan
 

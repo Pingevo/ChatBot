@@ -190,7 +190,7 @@ export default function TestResultsPage() {
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className="min-h-[calc(100vh-3.5rem)] bg-base px-3 lg:px-6 py-4 lg:py-5 space-y-4 lg:space-y-6">
+      <div className="min-h-[calc(100vh-3.5rem)] bg-surface px-3 lg:px-6 py-4 lg:py-5 space-y-4 lg:space-y-6">
         {/* ── Header ── */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
