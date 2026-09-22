@@ -714,6 +714,15 @@ listing path:
 | `_load_typo_dict` | โหลด typo map | — | dict | json `exports/typo_dict.json` | normalize_message | cache | file read; miss→{} |
 | `normalize_message` | แก้คำผิด | message | str | _load_typo_dict | resolve_route | vocab replace | — |
 | `resolve_route` | entry | req | RouteContext | normalize_message | _chat_impl | — | — |
+| `RetrievalProfile` | request-facts contract (frozen) | — | obj | — | build_retrieval_profile | platform/shop/message/intent/product_types(frozenset)/subtype/model_codes/variant_terms/target_device/availability_mode/compat_mode/anchor_item_ids/fact_sources | immutable |
+| `build_retrieval_profile` | owner กลางของ request facts (Task 4A, observe-only) | message, history, intent_result, shop, platform, anchor_cards | RetrievalProfile | `_detect_product_types`/`_detect_charger_subtype` (product_store, lazy), `_extract_device_token`/`_CHARGING_TYPES` (device_compat, lazy), `_extract_codes` (unit_classifier) + helpers ด้านล่าง | (ยังไม่ wire — Task 4B จะเรียกใน app.py) | reconcile ต่อ field: shop/platform=arg เท่านั้น; types current→anchor→intent≥0.7→history; subtype strong→anchor→intent→history→weak; codes current→anchor→history; device current→intent→history(compat) | none; lazy imports กัน cycle |
+| `_bounded_history_facts` | user msgs ใหม่สุด ≤4 → type/subtype/device/codes | history | dict | lazy detectors (เหมือน build) | build_retrieval_profile | newest-first, role=user เท่านั้น, ไม่ concat เป็น query | — |
+| `_variant_terms` | ดึง สี/ความจุ/ไซส์ จาก message | message | tuple[str] | `_VARIANT_RES` | build_retrieval_profile | regex phrases | — |
+| `_resolved_intent` | normalize intent + deterministic overrides | message, intent_result, model_codes, anchor_cards | str | `_INTENT_MAP`, compare/superlative/order kws, `_detect_product_types` (lazy) | build_retrieval_profile | compare(≥2 anchors+kw) → exact_model(codes+soft) → superlative(kw+family, ไม่ใช่ single-ref) → history(order kw/anchor) → mapped intent | — |
+| `_availability_mode` | intent→availability mapping | intent, model_codes, message | str | `_STOCK_ONLY_KW` | build_retrieval_profile | history→exact_history; spec/warranty/claim/compare/exact_model→answerable_all; stock-words→sellable_only; else sellable_first | — |
+| `_compat_mode` | type/subtype/device→compat mapping | product_types, subtype, target_device | str | `_CHARGING_TYPES` (device_compat, lazy), `_BLUETOOTH_FAMILY` | build_retrieval_profile | no device→none; charging→connector_required (wireless→power_required); bluetooth family→bluetooth_general; else none | — |
+| `_subtype_explicit` | subtype เป็น strong keyword จริงไหม | low, subtype | bool | `_CHARGER_SUBTYPES` (product_store, lazy) | build_retrieval_profile | kw ของ subtype นั้นอยู่ใน msg (ไม่นับ shorthand หัว/สาย ลอยๆ) | — |
+| `_id_str` | id→str normalize | value | str | — | build_retrieval_profile | float เป็น int → int-str | — |
 
 ### 6.19 `responses.py` — response helpers
 

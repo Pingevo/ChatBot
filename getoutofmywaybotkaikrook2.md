@@ -86,6 +86,21 @@
 - **behavior change:** ไม่มี — ไฟล์ใหม่เท่านั้น ไม่ wire app.py (observe-only ตาม plan; Task 8 wire strip ที่ response boundary)
 - **impact:** ไฟล์ใหม่เท่านั้น — zero behavior change by construction; SRS เพิ่ม §6.27
 
+### ✅ Master plan Task 4A: RetrievalProfile owner กลางของ request facts (2026-09-22) — implement + verified รออนุมัติ commit
+
+- **งาน:** เพิ่ม `@dataclass(frozen=True) RetrievalProfile` + `build_retrieval_profile()` ใน `route_context.py` — โจทย์กลางก่อนดึงสินค้า (contract-only, **ยังไม่ wire app.py/flow**)
+- **ทำไม:** ตอนนี้ facts (type/subtype/device/model/shop) ถูก re-derive ซ้ำหลายจุดจาก message/intent/history คนละวิธี → Mi17 bug: "ที่ใช้กับ mi 17 ultra" หลังถามสายชาร์จ ถูกสกัดเป็น phone แทน charger+cable — ถ้า profile ผิดตั้งแต่ต้น rank ดีแค่ไหนก็ดึงของผิด
+- **spec (user):** precedence ต่อ field — shop/platform=arg เท่านั้น · product_types: current→anchor→intent(≥0.7)→bounded history · subtype: strong current→anchor→intent(≥0.7)→history→weak current · model_codes: current→anchor→history(follow-up) · target_device: current→intent→history(compat follow-up เท่านั้น) · availability/compat_mode: deterministic mapping เท่านั้น · history อ่าน user ใหม่สุด ≤4, ไม่ concatenate · intent = proposal ไม่ใช่ truth
+- **reuse:** `_detect_product_types`/`_detect_charger_subtype`/`_extract_device_token`/`_extract_codes` ผ่าน lazy import — ห้าม copy regex table · move `_COMPARISON_FOLLOWUP_KW`/`_SUPERLATIVE_KW`/`_SINGLE_ITEM_REF_KW` จาก app.py มา route_context (app.py alias กลับ — ไม่เปลี่ยน flow, plan กำหนดให้ owner คือ route_context, Task 9 ลบ consumers ที่เหลือ)
+- **ห้าม (4A):** ย้าย app.py flow ก่อน KB · pass profile เข้า product_store/units/KB/device_compat/web_search · เปลี่ยน ranking/retrieval/selection · hardcode Mi17 case-by-case · แตะ v2/v3
+- **TDD:** `docs/test/test_retrieval_profile.py` ก่อน — RED ยืนยัน AttributeError → GREEN 15/15
+- **implement (แล้ว):** `route_context.py` — `RetrievalProfile` (frozen) + `build_retrieval_profile` + helpers `_bounded_history_facts`/`_variant_terms`/`_resolved_intent`/`_availability_mode`/`_compat_mode`/`_subtype_explicit`/`_id_str` + `_INTENT_MAP`; model-code token ≠ device (เช่น HA835 → code ไม่ใช่ target_device); subtype ⇒ charger family merge
+- **app.py:** เพิ่ม `route_context as _rc` ใน import + alias constants 3 ตัวกลับ — **ไม่มี flow/logic เปลี่ยน** (tuple เดิมทุกประการ)
+- **verify:** profile **15/15** · suite รวม (evidence+availability+gold) **80/80** · py_compile 5 ไฟล์ OK · `git diff --check` OK · app import OK · script regressions: route_context ALL PASS / car_charger 16/16 / subtype parity 42/42 / guards / unit_card_fields ผ่าน
+- **verify กับ MongoDB จริง:** `docs/test/test_retrieval_profile_db.py` (load_dotenv→get_client) **17/17** — KingGadgets มี cable sellable จริง 56 รายการ (พิสูจน์ "ไม่มีสินค้า" เป็น false ตั้งแต่ profile) · real anchor cards → compare + float item_id → int-str ถูก · real model code (W01) → answerable_all + ไม่ถูกนับเป็น device
+- **behavior change:** ไม่มี — `build_retrieval_profile` ไม่ถูกเรียกจาก runtime path ใด (Task 4B ค่อย wire); constants alias ค่าเดิม
+- **ไม่แตะ:** v2/v3 · fetch_products signature · units/device_compat/web_search/knowledge_base · ranking/selection/prompt · ไม่มี hardcode Mi17 case-by-case
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)

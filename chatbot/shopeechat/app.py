@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(_REPO_ROOT / ".env")
 
-from . import llm, product_store, knowledge_base, persona, conversation_products, test_chat_api, device_compat
+from . import llm, product_store, knowledge_base, persona, conversation_products, test_chat_api, device_compat, route_context as _rc
 from .responses import _routing, _send_handoff
 
 app = FastAPI(
@@ -415,19 +415,13 @@ _NEW_TOPIC_KWS = ("สวัสดี", "หวัดดี", "hi", "hello", "�
 
 # คำถาม "ชุดสินค้า" — เปรียบเทียบ/superlative อ้างหลายชิ้น ไม่ใช่ anchor เดี่ยว
 #   ใช้ร่วมกัน: ITEM-TAG shortcut bypass (~895) + FOLLOWUP-COMP trigger (~1244)
-_COMPARISON_FOLLOWUP_KW = ("ต่างกัน", "ต่างยังไง", "ต่างไหม", "เปรียบเทียบ", "เทียบ", "เทียบกัน",
-                           "แนะนำตัวไหนดี", "ตัวไหนดีกว่า", "อันไหนดีกว่า", "ซื้อตัวไหนดี",
-                           "เลือกตัวไหนดี", "ตัวไหนน่าซื้อ", "อันไหนน่าซื้อ",
-                           # คำเปรียบเทียบโดยนัย — "อันไหนใหม่กว่า/ถูกกว่า/ล่าสุด"
-                           "ใหม่กว่า", "ถูกกว่า", "ล่าสุด")
-_SUPERLATIVE_KW = ("สุด", "ที่สุด", "แรงสุด", "ไวสุด", "เร็วสุด", "มากสุด", "น้อยสุด",
-                   "แรงที่สุด", "ไวที่สุด", "เร็วที่สุด", "มากที่สุด", "น้อยที่สุด",
-                   "เบาสุด", "จุมากสุด", "คุ้มสุด", "คุ้มที่สุด",
-                   "กว่านี้", "เร็วกว่า", "แรงกว่า", "ไวกว่า", "ดีกว่า", "มากกว่า",
-                   "ไวๆ", "เร็วๆ", "แรงๆ", "ชาร์จไว", "ชาร์จเร็ว")
+# ⚡ generic question-shape constants ย้ายไป route_context.py (Task 4A — owner เดียว
+#    ของ route facts; alias ไว้เพื่อไม่เปลี่ยน usage sites/flow ในไฟล์นี้)
+_COMPARISON_FOLLOWUP_KW = _rc._COMPARISON_FOLLOWUP_KW
+_SUPERLATIVE_KW = _rc._SUPERLATIVE_KW
 # คำอ้าง "ชิ้นเดียว" (deictic) — ถ้ามี = ถามเกี่ยวกับ anchor ไม่ใช่เทียบชุด
 #   กัน false positive ของ _SUPERLATIVE_KW เช่น "ตัวนี้ชาร์จเร็วไหม" (ไม่ใช่ set question)
-_SINGLE_ITEM_REF_KW = ("ตัวนี้", "รุ่นนี้", "อันนี้", "ชิ้นนี้", "สินค้านี้", "เรือนนี้")
+_SINGLE_ITEM_REF_KW = _rc._SINGLE_ITEM_REF_KW
 
 # --- general_qtype bypass guards (2026-09-18 — test_200 #143/#199) ---
 # intent classifier อาจส่ง general_qtype ผิดบริบท → early return ตอบ policy/categories
