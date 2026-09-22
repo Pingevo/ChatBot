@@ -833,7 +833,12 @@ export async function getShadowReplyStats(opts: {
   if (opts.shopId) filter.shop_id = opts.shopId;
   if (opts.conversationId) filter.conversation_id = opts.conversationId;
 
-  const docs = await coll.find(filter).toArray();
+  // ⚡ projection — ดึงเฉพาะ field ที่ stats ใช้ (doc เต็มมี bot_products ~350KB/doc;
+  //   find ทั้ง collection ~5K docs = 50MB/140s เกิน axios timeout 30s → All History พัง)
+  const docs = await coll
+    .find(filter)
+    .project({ rating: 1, star_rating: 1, comment: 1, bot_cost_usd: 1, bot_elapsed_ms: 1, "bot_tokens.total": 1 })
+    .toArray();
   const total = docs.length;
   const rated = docs.filter((d) => d.rating && d.rating !== "unrated").length;
   const good = docs.filter((d) => d.rating === "good").length;
