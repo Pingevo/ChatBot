@@ -156,6 +156,9 @@ class ChatRequest(BaseModel):
     platform: str | None = Field(None, description="platform ของแชท (shopee/tiktok/lazada) — สำหรับ handoff")
     # ⚡ simulate mode — จำลองการจ่ายงานโดยไม่กระทบ conversations จริง (ใช้ใน test chat)
     simulate_assignment: bool = Field(False, description="ถ้า true → handoff จะเก็บลง test_chat_sessions ไม่ใช่ conversations")
+    # ⚡ botworker parallel — ระบุ test source (เช่น "botworker")
+    #    ส่งคู่กับ simulate_assignment → handoff เขียน test_status_conversation[source] แทนของจริง
+    test_source: str | None = Field(None, description="test sandbox source (botworker/test_chat/...) — handoff เขียน test_status_conversation")
     # ⚡ Phase 2A — state-driven handoff: สถานะ ticket จาก DB (open|closed|handoff|...)
     #    ถ้า "closed" → บอทตอบปกติ (ข้าม post-handoff lock)
     #    ถ้า "handoff"/"open" + มี handoff marker → ล็อค (ยกเว้น exceptions ใน KB)
@@ -1855,7 +1858,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             )
             print(f"[TIMING] KB lookup SKIPPED ({_skip_reason} follow-up)", file=sys.stderr)
         else:
-            kb_result = knowledge_base.lookup_kb(kb_query)
+            kb_result = knowledge_base.lookup_kb(kb_query, retrieval_profile=_retrieval_profile)
             print(f"[TIMING] KB lookup: {_time.time()-_t0:.2f}s  query={kb_query[:60]!r}", file=sys.stderr)
         if kb_result and kb_result.get("found"):
             kb_context = kb_result.get("context", "")
@@ -1973,6 +1976,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         shop_filter=req.shop,
                         limit=_llm_ctx_limit,
                         desc_message=_desc_msg,
+                        retrieval_profile=_retrieval_profile,
                     )
                 print(f"[TIMING] Mongo (KB merge): {_time.time()-_t1:.2f}s  query={mongo_query[:60]!r}  products={len(mongo_products)}", file=sys.stderr)
 
@@ -1985,6 +1989,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         shop_filter=req.shop,
                         limit=_llm_ctx_limit,
                         desc_message=_desc_msg,
+                        retrieval_profile=_retrieval_profile,
                     )
                     print(f"[TIMING] Mongo (original query): {_time.time()-_t2:.2f}s  query={req.message[:60]!r}  products={len(extra_products)}", file=sys.stderr)
                     # ต่อท้าย products ที่ไม่ซ้ำ
@@ -2194,6 +2199,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         hybrid_anchor_card=_hybrid_anchor_card,
                         llm_ctx_limit=_llm_ctx_limit,
                         resolve_subtype_fn=_resolve_charger_subtype,
+                        retrieval_profile=_retrieval_profile,
                     )
                     if _kb_device_products:
                         merged_products = merged_products + _kb_device_products
@@ -2310,6 +2316,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                                 do_model_code_regex=False,  # KB branch ไม่ใช้ model code regex
                                 do_dedup_rerank=False,  # KB branch ไม่ dedup/rerank (ใช้ products เดิม)
                                 req_limit=req.limit,
+                                retrieval_profile=_retrieval_profile,
                             )
                             if _ws_r.get("search_used") and _ws_r.get("answer"):
                                 # merge steps จาก _web_search_reanswer เข้า _steps
@@ -3667,6 +3674,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     is_compat_check=False,
                     skip_charger_subtype=True,
                     product_types_override=set(),
+                    retrieval_profile=_retrieval_profile,
                 )
             else:
                 # ⚡ ใช้ charger_subtype เป็น override เพื่อกัน retrieval_message ปนเปื้อน
@@ -3718,6 +3726,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                                 shop_filter=req.shop,
                                 limit=5,
                                 desc_message=desc_message,
+                                retrieval_profile=_retrieval_profile,
                             )
                             for _p in _sub:
                                 _iid = str(_p.get("item_id") or _p.get("id") or "")
@@ -3742,6 +3751,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         skip_charger_subtype=_skip_sub,
                         charger_subtype_override=_intent_sub,
                         # ⚡ Phase 3 — RAG ไม่กรอง status/stock (LLM prompt กรองตอนแนะนำขาย)
+                        retrieval_profile=_retrieval_profile,
                     )
             # ⚡ ปิด block if not _ref_regex_products (ข้าม fetch ถ้ามี active product แล้ว)
         print(f"[TIMING] fetch_products: {_time.time()-_t1:.2f}s  (retrieval={retrieval_message!r})  products={len(products)}", file=sys.stderr)
@@ -3975,6 +3985,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     message="charger charging adapter cable",
                     shop_filter=req.shop,
                     limit=_llm_ctx_limit,
+                    retrieval_profile=_retrieval_profile,
                 )
                 # กรอง fallback ให้เหลือเฉพาะที่เกี่ยวข้อง:
                 # - ถ้าถาม adapter → เอา set + adapter (ไม่เอา cable เดี่ยว)
@@ -4023,6 +4034,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     message="สินค้า แนะนำ มาใหม่ โปรด",  # คำค้นกว้างๆ เพื่อดึงสินค้าทั่วไปของร้าน
                     shop_filter=req.shop,
                     limit=5,
+                    retrieval_profile=_retrieval_profile,
                 )
                 if alt_products:
                     products = alt_products
@@ -4187,7 +4199,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     missing_tokens = [t for t in model_tokens if t.lower() not in seen_tokens]
                     if missing_tokens:
                         _t_kb = _time.time()
-                        kb_comp = knowledge_base.lookup_kb(" ".join(missing_tokens))
+                        kb_comp = knowledge_base.lookup_kb(" ".join(missing_tokens),
+                                                           retrieval_profile=_retrieval_profile)
                         if kb_comp and kb_comp.get("found"):
                             for kd in kb_comp.get("kb_docs", []):
                                 model = (kd.get("model") or "").lower()
@@ -4217,6 +4230,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     message=alt_msg,
                     shop_filter=req.shop,
                     limit=5,
+                    retrieval_profile=_retrieval_profile,
                 )
                 # แยกกลุ่ม: UNLIST (ตอบ warranty) + NORMAL (แนะนำทางเลือก)
                 unlist_products = [p for p in products if p.get("status") != "NORMAL"]
@@ -4494,6 +4508,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             hybrid_anchor_card=_hybrid_anchor_card,
             llm_ctx_limit=_llm_ctx_limit,
             resolve_subtype_fn=_resolve_charger_subtype,
+            retrieval_profile=_retrieval_profile,
         )
         if _device_additional:
             products.extend(_device_additional)
@@ -4501,7 +4516,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             _combined_extra = (_combined_extra + _device_spec_extra).strip()
         # ⚡ QA-KB — คำแนะนำจาก kb_qa (trigger kw เท่านั้น; model/brand scoped ใน search_qa)
         _qa_ctx = knowledge_base.qa_context(
-            req.message, conversation_id=req.conversation_id)
+            req.message, conversation_id=req.conversation_id,
+            retrieval_profile=_retrieval_profile)
         if _qa_ctx:
             _combined_extra = (_combined_extra + "\n\n" + _qa_ctx).strip()
         # ⚡ CODE-level compat filter — กรองสินค้าที่ connector ไม่ตรงกับอุปกรณ์ออก
@@ -4682,6 +4698,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     do_model_code_regex=True,  # product_store branch ใช้ model code regex
                     do_dedup_rerank=True,  # product_store branch dedup + rerank
                     req_limit=req.limit,
+                    retrieval_profile=_retrieval_profile,
                 )
 
                 if _ws_r.get("search_used") and _ws_r.get("answer"):

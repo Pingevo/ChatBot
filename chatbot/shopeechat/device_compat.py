@@ -14,8 +14,12 @@ from __future__ import annotations
 
 import re
 import sys
+from typing import TYPE_CHECKING
 
 from . import product_store
+
+if TYPE_CHECKING:
+    from .route_context import RetrievalProfile
 
 
 def _extract_max_wattage(p: dict) -> float:
@@ -737,6 +741,7 @@ def _device_spec_lookup(
     hybrid_anchor_card: dict | None,
     llm_ctx_limit: int,
     resolve_subtype_fn=None,
+    retrieval_profile: RetrievalProfile | None = None,
 ) -> tuple[str, list[dict], list[dict]]:
     """⚡ Extract device-spec-lookup logic เป็น helper — ใช้ได้ทั้ง KB path และ main path.
 
@@ -815,6 +820,7 @@ def _device_spec_lookup(
                 filter_unavailable=False,
                 product_types_override=_pto,
                 is_compat_check=True,  # re-query ของ compat — ข้าม unit index เหมือน main path
+                retrieval_profile=retrieval_profile,
             )
             _existing_pids = {str(p.get("item_id") or "") for p in existing_products}
             for _dp in _rq_products or []:
@@ -887,6 +893,7 @@ def _device_spec_lookup(
             # ⚡ compat re-query ต้องข้าม unit index (pool เล็ก →
             #   ของ spec สูงไม่เข้า context) + sweep กว้างเหมือน main path
             is_compat_check=True,
+            retrieval_profile=retrieval_profile,
         )
         for _dp in _rq1 or []:
             _dpid = str(_dp.get("item_id") or "")
@@ -953,7 +960,8 @@ def _device_spec_lookup(
                             limit=llm_ctx_limit, desc_message=req.message,
                             filter_unavailable=False,
                             product_types_override=_chg_scope,
-                            is_compat_check=True)
+                            is_compat_check=True,
+                            retrieval_profile=retrieval_profile)
                         _n2 = 0
                         for _dp in _rq2 or []:
                             _dpid = str(_dp.get("item_id") or "")

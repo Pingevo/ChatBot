@@ -449,7 +449,7 @@ listing path:
 | `_doc_matches_model` | doc↔token match | doc, model_token | bool | _model_token_in_name | fetch_products | — | — |
 | `_rerank_with_diversity` | spread results | docs | docs | — | fetch_products | กระจาย shop/brand | — |
 | `_filter_false_positives` | กรองตัวหลอก | docs, types | docs | type regexes | fetch_products | python-side verify หลัง mongo | — |
-| `fetch_products` | **main retrieval** | db, message, shop_filter, limit, desc_message, is_compat_check, skip_charger_subtype, product_types_override, charger_subtype_override, filter_unavailable | list[card] | units.fetch_unit_cards (flag), vector_search, build_query, _filter_*, _rerank_*, _dedupe_products, to_product_card | _chat_impl, chat_v2, product_match | §5.2 fetch path — compat bypass unit pool; empty/error→fallback | mongo reads; error→[] |
+| `fetch_products` | **main retrieval** | db, message, shop_filter, limit, desc_message, is_compat_check, skip_charger_subtype, product_types_override, charger_subtype_override, filter_unavailable, retrieval_profile (4C pass-through ยังไม่ใช้ตัดสินใจ) | list[card] | units.fetch_unit_cards (flag), vector_search, build_query, _filter_*, _rerank_*, _dedupe_products, to_product_card | _chat_impl, chat_v2, product_match | §5.2 fetch path — compat bypass unit pool; empty/error→fallback | mongo reads; error→[] |
 | `fetch_product_by_id` | ดึงตาม item_id | db, item_id, shop_filter | doc/card | coll.find_one | anchor paths, product_match.get_product_by_id | exact id + shop scope | — |
 | `list_shops` | รายชื่อร้าน | db | list[str] | distinct | /shops route | — | — |
 | `list_categories` | รายหมวด | db | list[str] | distinct | /categories route | — | — |
@@ -500,7 +500,7 @@ listing path:
 | `_extract_policy_from_descriptions` | สกัด policy จาก product desc | mongo_coll, policy_type, limit | str | regex over descriptions | build_general_context | รวมข้อความประกัน/คืนสินค้าจาก catalog | — |
 | `build_general_context` | สร้าง general ctx | qtype, shop, mongo_db | dict/None {context, meta} | get_general_faq, _extract_policy_from_descriptions | _chat_impl (app ใช้ชื่อนี้ — chat_v2 เรียกผิดชื่อ §10#1) | KB doc + catalog policy → context | DB reads |
 | `format_kb_context` | KB docs→prompt text | docs | str | — | lookup_kb | format block | — |
-| `lookup_kb` | **KB lookup entry** | message | dict/None {found, context, kb_docs} | extract_model_keywords, search_kb_by_model, format_kb_context | _chat_impl, chat_v2._retrieve_products | kw → search → context | DB reads |
+| `lookup_kb` | **KB lookup entry** | message, retrieval_profile (4C pass-through) | dict/None {found, context, kb_docs} | extract_model_keywords, search_kb_by_model, format_kb_context | _chat_impl, chat_v2._retrieve_products | kw → search → context | DB reads |
 | `_detect_brand_question` | ถามแบรนด์ | message | brand/None | _known_brands | _chat_impl (alias app._detect_brand_question) | — | — |
 | `_build_brand_context` | brand→ctx | db, brand, shop_filter | dict/None {context, meta{shop_scoped}} | mongo query | _chat_impl, chat_v2._check_brand_question | brand products → context; shop-scoped ก่อน | DB read |
 | `_norm_brand` | normalize brand | raw | str | — | brand paths | — | — |
@@ -509,7 +509,7 @@ listing path:
 | `_qa_vectors` | QA vectors cache | — | dict/None | npz/embedding | QA search | — | — |
 | `_qa_embed_missing` | embed QA ที่ขาด | docs | — | embedding.embed_texts | QA search | เติม vector ที่ไม่มี | write-back |
 | `search_qa` | QA-pair search | message, model_codes, … | list[doc] | _qa_docs, _qa_vectors, _qa_embed_missing | qa_context | vector QA (`USE_QA_KB`) | — |
-| `qa_context` | QA→context text | message, conversation_id, claim | str | search_qa | answer ctx | — | — |
+| `qa_context` | QA→context text | message, conversation_id, claim, retrieval_profile (4C pass-through) | str | search_qa | answer ctx | — | — |
 | `qa_troubleshoot_tips` | troubleshoot จาก QA | message, conversation_id, item_id | str | search_qa | problem-question path | tips สำหรับ "ใช้ไม่ได้" | — |
 | `_kb_doc_to_card` | KB doc→product card | doc | card | — | _merge_kb_mongo | uniform card shape | — |
 
@@ -527,7 +527,7 @@ listing path:
 | `detect_uncertainty` | negative-answer detect | answer | (bool, reason/None) | patterns | _chat_impl (reanswer trigger) | "ไม่แน่ใจ/ไม่มีข้อมูล" | — |
 | `should_use_web_search` | trigger decision | message, products, intent, answer… | (bool, reason) | rules + spec-db gate (lazy `_lookup_spec_db`) | _chat_impl, chat_v2._search_if_needed | reasons: no_products/answer_uncertain/compatibility…; skip เมื่อ target_device อยู่ spec-db หรือ yes-no spec มีสินค้า | — |
 | `search_and_extract` | **search + extract** | message, shop, platform, history, reason | dict{search_used, keywords[], product_type, search_info, device_specs, usage, cost_usd, model, error} | OR call, _log_ai_usage, _clean_device_specs, _salvage_json_value | _chat_impl, chat_v2, device_compat (web ladder) | query rewrite → OR search → extract structured | net; error→{error} |
-| `reanswer` | ตอบใหม่จาก search ctx | message, products, search_result, history… | (answer, usage) | llm answer + URL strip | _chat_impl | search_info (ไม่มี URL) → LLM | — |
+| `reanswer` | ตอบใหม่จาก search ctx | message, products, search_result, history…, retrieval_profile (4C pass-through → fetch_products/lookup_kb) | (answer, usage) | llm answer + URL strip | _chat_impl | search_info (ไม่มี URL) → LLM | — |
 
 ### 6.7 `persona.py` — per-shop persona
 
@@ -667,7 +667,7 @@ listing path:
 | `_resolve_device_spec` | resolve spec | device, intent, … | dict/None | _lookup_spec_db → _web_spec_to_dict → intent min_watt | _device_spec_lookup | structured เท่านั้น (ไม่ parse prose watt) | web call ได้ |
 | `_filter_compat_products` | กรองตาม spec | products, spec, mode | products | _extract_product_connectors, _device_mentioned | _device_spec_lookup | connector hard filter (ห้ามข้าม type) | — |
 | `_apply_product_tiers` | tier sort | products, spec | products | _wattage_asc_key, min_watt | _device_spec_lookup | adequate-first (≥min_watt ก่อน) + baseline/upgrade ≤2 | — |
-| `_device_spec_lookup` | **compat orchestrator** | message, products, intent, db, … | (spec, products, meta) | ทั้งหมดข้างบน + product_store.fetch_products + web_search | _chat_impl | ladder: spec-db → re-query (`_charging_scope`+conn syn) → catalog evidence `_device_mentioned` → web → intent min_watt | mongo + web reads |
+| `_device_spec_lookup` | **compat orchestrator** | message, products, intent, db, …, retrieval_profile (4C pass-through → fetch_products) | (spec, products, meta) | ทั้งหมดข้างบน + product_store.fetch_products + web_search | _chat_impl | ladder: spec-db → re-query (`_charging_scope`+conn syn) → catalog evidence `_device_mentioned` → web → intent min_watt | mongo + web reads |
 
 ### 6.15 `device_specs_data.py` — structured spec DB (data only, ไม่มีฟังก์ชัน)
 
@@ -684,7 +684,7 @@ listing path:
 | `_unit_vectors` | unit npz | — | vectors | npz load (mtime) | _vector_search | — | — |
 | `_sellable_mask` | mask sellable | units | mask | sellable field | _vector_search | — | — |
 | `_vector_search` | unit vector search | query, filters | units | _unit_vectors, _sellable_mask, embed_query | fetch_units | cosine top-k | — |
-| `fetch_units` | unit retrieval | db, message, limit, … | units | _vector_search | fetch_products (flag) | — | error→[] → fallback listing |
+| `fetch_units` | unit retrieval | db, message, limit, …, retrieval_profile (4C pass-through) | units | _vector_search | fetch_products (flag) | — | error→[] → fallback listing |
 | `pick_desc_sections` | เลือก desc sections | unit, route | str | sections dict | to_unit_card | highlights/specs/warranty/notes | — |
 | `_live_availability` | availability สด | unit | (item_status, availability dict, model_status) | product_store.resolve_availability | _live_sellable, to_unit_card | join _listing → exact model_doc เข้า resolver; model หาย→model_missing; ไม่มี listing→resolve unit snapshot | — |
 | `_live_sellable` | sellable สด | unit | bool | _live_availability | fetch_unit_cards | `availability["available_for_sale"]` | — |
@@ -694,7 +694,7 @@ listing path:
 | `_unit_warranty` | warranty ของ unit | unit | dict | warranty helpers | to_unit_card | — | — |
 | `attach_image_texts` | ผูก OCR | units | units | `image_texts` coll | fetch_unit_cards | รูปนอก desc | DB read |
 | `attach_listing_fields` | ผูก listing fields | units | units | `ShpProducts` | fetch_unit_cards | เติม field listing | DB read |
-| `fetch_unit_cards` | **unit path entry** | db, message, shop, limit | list[card] | fetch_units, _live_sellable, attach_*, to_unit_card | product_store.fetch_products (`USE_UNIT_INDEX`) | vector→sellable→live→enrich→cards | fallback []→listing path |
+| `fetch_unit_cards` | **unit path entry** | db, message, shop, limit, retrieval_profile (4C → fetch_units) | list[card] | fetch_units, _live_sellable, attach_*, to_unit_card | product_store.fetch_products (`USE_UNIT_INDEX`) | vector→sellable→live→enrich→cards | fallback []→listing path |
 
 ### 6.17 `embedding.py` — embeddings
 
@@ -926,7 +926,7 @@ listing path:
 
 | Service (`src/backend/service/`) | หน้าที่หลัก |
 |---|---|
-| `botWorkerService` | pipeline poll `messages_shp` → `isProcessed` (chat_processing) → trigger → workflowEngine → callBot → `storeBotReply` (shadow_replies) → `markProcessed`; handoff → assignment |
+| `botWorkerService` | pipeline poll `messages_shp` → `isProcessed` (chat_processing) → trigger (`bot_answer`+`bot_template` → ตอบ template ทันทีไม่เรียกบอท, เหมือน test-chat) → workflowEngine → callBot → `storeBotReply` (shadow_replies) → `markProcessed`; handoff → assignment |
 | `botCallService` | `callBot` → POST `{chatbotBaseUrls[platform]}/chat` — `resolveTicketState` (simulate→test_chat_sessions, จริง→conversations), `shouldUseChatV2/V3`, `llm_context_limit` จาก systemConfig |
 | `bufferService` | debounce รวมข้อความ X วิ → 1 bot call (`buffer_messages`) |
 | `workflowEngine` / `workflowService` / `templateService` | visual flow builder (แบบ Zaapi): nodes/edges CRUD, resume paused runs, eval conditions, actions (`let_ai_respond`→callBot), `{{var}}` interpolation (pure) |
@@ -937,7 +937,7 @@ listing path:
 | `shadowReplyService` | `shadow_replies` CRUD — IRON RULE ห้ามส่งจริง/ห้าม platform API |
 | `liveAssignmentService` / `testAssignmentService` / `testChatRatingService` / `chatAnnotationService` | live+test assignment (transcript `qa[]`), ratings, dot+note annotations |
 | `adminKpiService` | KPI aggregate 3 ระบบ (test-chat, test-assignment, shadow-inbox) |
-| `conversationService` / `messageService` / `messageMediaParser` | per-conv storage, `getHistoryForBot`/`getGroupedHistoryForBot`/`toBotText`/`toBotImages`, parse `raw_payload` (item/variation_card/order/sticker/image/video) |
+| `conversationService` / `messageService` / `messageMediaParser` | per-conv storage, `getHistoryForBot`/`getGroupedHistoryForBot`/`toBotText`/`toBotImages` — pair bot reply ด้วย `indexBotRepliesByInbound` (ตัด suffix `__wf<N>` ของ workflow delivered, รวมหลาย bubble เป็น reply เดียว, orphan check เทียบ base id), parse `raw_payload` (item/variation_card/order/sticker/image/video) |
 | `knowledgeBaseService` / `personaService` / `shopSettingsService` / `shopService` / `productService` / `customerService` | CRUD KB/persona/shop-settings/shops; products จาก `dbWallet` read-only; customers join `conversations_shp.to_name` |
 | `authService` | SSO login/session/logout/admin CRUD (JWT `cc_session`, HS256) |
 | `rolePermissionService` | role×page matrix (`system_configs` doc `role_permissions`, seed `DEFAULT_PERMISSIONS`, cache 30s) |

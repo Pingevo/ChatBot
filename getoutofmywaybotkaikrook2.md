@@ -115,6 +115,16 @@
 - **behavior change:** ไม่มี — constants alias ค่าเดิม (profile wire เข้า `app.py` ใน Task 4B ด้านล่าง)
 - **ไม่แตะ:** v2/v3 · fetch_products signature · units/device_compat/web_search/knowledge_base · ranking/selection/prompt · ไม่มี hardcode Mi17 case-by-case
 
+### ✅ Master plan Task 4C: wire profile ผ่าน gateways (2026-09-22) — implement + verified รออนุมัติ commit
+
+- **งาน:** เพิ่ม `retrieval_profile: RetrievalProfile | None = None` (ท้ายสุด) ให้ `fetch_products`/`fetch_units`/`fetch_unit_cards`/`lookup_kb`/`qa_context`/`_device_spec_lookup`/`reanswer` + app.py ส่ง `_retrieval_profile` ทุก legacy callsite — **pass-through เท่านั้น ยังไม่เปิดสวิตช์**
+- **callsite inventory (ก่อนแก้):** app.py: lookup_kb×2 (1858, 4190) · fetch_products×8 (1970, 1982, 3661, 3715, 3732, 3973, 4021, 4215) · _device_spec_lookup×2 (2186, 4486) · qa_context (4503) · reanswer×2 (2296, 4668) · product_store→units.fetch_unit_cards (3052) · device_compat→fetch_products (809, 879, 951) · web_search→fetch_products (786, 809) + lookup_kb (828) · **chat_v2/chatbotv3 ห้ามแตะ** (default None → เดิม)
+- **ห้าม:** ใช้ profile filter/rank/select · source union · live refresh · แก้ signature แบบ break callers
+- **ทำแล้ว:** TYPE_CHECKING import ทั้ง 5 ไฟล์ (device_compat เพิ่ม `from typing import`) · param ท้ายสุด default None · forwarding: fetch_products→fetch_unit_cards · fetch_unit_cards→fetch_units · _device_spec_lookup→fetch_products×3 · reanswer→fetch_products×2+lookup_kb · app.py `retrieval_profile=_retrieval_profile` ×15 callsite
+- **TDD pins:** `test_retrieval_profile_wiring.py` ใหม่ 13 tests — signature+default None+last-param · fetch_unit_cards forward (monkeypatch fetch_units) · no `retrieval_profile.` attr-read ใน 5 gateways · internal forward ใน product_store/device_compat/web_search · app pass ≥15 · v2/v3 untouched
+- **verify:** wiring 13/13 · suite **96/96** · py_compile 7 ไฟล์ OK · app import OK · diff --check OK · route_context/guards(27)/unit_card_fields ผ่าน
+- **behavior:** ไม่เปลี่ยน — param ทั้งหมด default None, callee ไม่อ่าน field ใด (pin โดย test_profile_not_read_in_gateways); callers เดิม (chat_v2/chatbotv3) ไม่ส่ง param → เดิม 100%
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)

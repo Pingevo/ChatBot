@@ -10,7 +10,10 @@ import os
 import sys
 import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
+
+if TYPE_CHECKING:
+    from .route_context import RetrievalProfile
 
 from bson import ObjectId  # type: ignore
 from pymongo import MongoClient
@@ -2999,6 +3002,7 @@ def fetch_products(
     product_types_override: set[str] | None = None,
     charger_subtype_override: str | None = None,
     filter_unavailable: bool = False,
+    retrieval_profile: RetrievalProfile | None = None,
 ) -> list[dict]:
     """กรองและดึงสินค้าที่เกี่ยวข้อง แล้วย่อเป็น product card ส่งให้ LLM.
 
@@ -3015,6 +3019,7 @@ def fetch_products(
         charger_subtype_override: ถ้าระบุ (adapter/cable/set/ฯลฯ) → ใช้ค่านี้แทนการ detect
             จาก message ในทุกจุดกรอง charger subtype เพราะ retrieval_message อาจถูกปนเปื้อน
             จาก reference/carry logic ทำให้ detect ผิด (เช่น ถามหัวชาร์จแต่ query มีชื่อสายชาร์จจาก history)
+        retrieval_profile: request facts เดียวของ request (Task 4C pass-through — ยังไม่ใช้ตัดสินใจ)
 
     ใช้ hybrid approach:
     1. ถ้ามี product type regex (phone/smartwatch/earphone/ฯลฯ) ใช้ regex approach เดิม
@@ -3056,6 +3061,7 @@ def fetch_products(
                 sellable_only=filter_unavailable,
                 product_types=product_types_override,
                 charger_subtype=charger_subtype_override,
+                retrieval_profile=retrieval_profile,
             )
             if _ucards:
                 return _ucards

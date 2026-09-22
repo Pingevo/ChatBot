@@ -13,7 +13,10 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .route_context import RetrievalProfile
 
 import numpy as np
 
@@ -112,6 +115,7 @@ def fetch_units(
     product_types: set[str] | None = None,
     charger_subtype: str | None = None,
     route=None,
+    retrieval_profile: RetrievalProfile | None = None,
 ) -> list[dict]:
     """ดึง units ที่เกี่ยวกับ message — exact code → field filter → vector → merge.
 
@@ -442,7 +446,8 @@ def attach_listing_fields(unit_docs: list[dict]) -> list[dict]:
     return unit_docs
 
 
-def fetch_unit_cards(message: str, **kwargs) -> list[dict]:
+def fetch_unit_cards(message: str, retrieval_profile: RetrievalProfile | None = None,
+                     **kwargs) -> list[dict]:
     """fetch_units + attach_kb_specs + attach_image_texts + attach_listing_fields + to_unit_card."""
     route = kwargs.pop("route", None)
     from . import route_context as _rc
@@ -452,7 +457,8 @@ def fetch_unit_cards(message: str, **kwargs) -> list[dict]:
     #   re-sort ด้วย live status หลัง join (ของที่ตายหลัง build ถูกดีดออกจาก top)
     #   แล้วค่อยตัด limit — code-hit ยังชนะเสมอ
     us = attach_listing_fields(attach_image_texts(attach_kb_specs(
-        fetch_units(message, route=route, limit=limit * 2, **kwargs))))
+        fetch_units(message, route=route, limit=limit * 2,
+                    retrieval_profile=retrieval_profile, **kwargs))))
     us.sort(key=lambda u: (u.get("_matched_by") == "code",
                            _live_sellable(u), u.get("_score") or 0.0),
             reverse=True)

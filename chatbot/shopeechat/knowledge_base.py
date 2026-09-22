@@ -20,7 +20,10 @@ import sys
 import threading
 import time
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .route_context import RetrievalProfile
 
 from dotenv import load_dotenv
 from pathlib import Path
@@ -852,7 +855,8 @@ def format_kb_context(
 # ---- main entry: ค้น KB + คืน context ----
 
 
-def lookup_kb(message: str) -> dict[str, Any] | None:
+def lookup_kb(message: str, *,
+              retrieval_profile: RetrievalProfile | None = None) -> dict[str, Any] | None:
     """ค้น KB ตามข้อความลูกค้า.
 
     คืน dict:
@@ -1216,7 +1220,8 @@ def search_qa(message: str, *, model_codes: set[str] | None = None,
     return out[:limit]
 
 
-def qa_context(message: str, *, conversation_id=None, claim: bool = False) -> str:
+def qa_context(message: str, *, conversation_id=None, claim: bool = False,
+               retrieval_profile: RetrievalProfile | None = None) -> str:
     """context block '=== คำแนะนำจากฐานความรู้ (QA) ===' หรือ '' — entry ที่ app.py เรียก.
 
     ทำงานเฉพาะเมื่อ claim=True หรือ message มี trigger kw (ปัญหา/how-to)
