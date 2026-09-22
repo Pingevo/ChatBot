@@ -52,7 +52,12 @@ export async function GET(req: NextRequest) {
       const platform = url.searchParams.get("platform") as Platform | null;
       const finalStatus = url.searchParams.get("final_status") || undefined;
       const mockStatus = url.searchParams.get("mock_status") as "open" | "closed" | null;
-      const assignedTo = url.searchParams.get("assigned_to") || undefined;
+      // ⚡ assigned_to: "me" → admin_id ตัวเอง · "all"/ไม่ส่ง → ไม่ filter · "unassigned" → งานที่ยังไม่มีผู้รับ
+      const assignedToParam = url.searchParams.get("assigned_to") || "all";
+      const assignedTo =
+        assignedToParam === "all" ? undefined
+        : assignedToParam === "me" ? r.ctx.admin.admin_id
+        : assignedToParam;
       const cursorParam = url.searchParams.get("cursor") || undefined;
       const includeCount = url.searchParams.get("include_count") === "true";
       const limit = parseInt(url.searchParams.get("limit") || "200", 10);

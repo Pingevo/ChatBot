@@ -144,7 +144,9 @@ export async function listConversations(opts: {
     ];
   }
   // ⚡ assigned_to filter — กรองใน Mongo ไม่ใช่ใน JS (กัน paginate แล้วเหลือน้อยเกิน)
-  if (opts.conversationIds && opts.conversationIds.length > 0) {
+  //   สำคัญ: conversationIds ถูกส่งมาแม้เป็น [] ต้อง filter จริง ($in: [] match ไม่มีเลย)
+  //   — ถ้าปล่อย [] เป็น no-filter admin ที่ไม่มีงานจะเห็นแชททั้งหมด
+  if (opts.conversationIds !== undefined) {
     filter.conversation_id = { $in: opts.conversationIds };
   }
   if (opts.excludeConversationIds && opts.excludeConversationIds.length > 0) {

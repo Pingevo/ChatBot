@@ -274,7 +274,14 @@ export async function listLiveAssignments(opts?: {
   if (opts?.platform) filter.platform = opts.platform;
   if (opts?.finalStatus) filter.final_status = opts.finalStatus;
   if (opts?.mockStatus) filter.mock_status = opts.mockStatus;
-  if (opts?.assignedTo) filter.assigned_to = opts.assignedTo;
+  // ⚡ assignedTo: "unassigned" → docs ที่ยังไม่มีผู้รับ ($in null/"" match ทั้ง missing field)
+  //   — ใช้ $in แทน $or เพื่อไม่ชน cursor filter.$or ข้างล่าง
+  //   ห้ามให้ empty/falsy กลายเป็น no-filter — caller ส่ง "all" ถ้าต้องการทั้งหมด
+  if (opts?.assignedTo === "unassigned") {
+    filter.assigned_to = { $in: [null, ""] };
+  } else if (opts?.assignedTo) {
+    filter.assigned_to = opts.assignedTo;
+  }
   if (opts?.replayedBy) filter.replayed_by = opts.replayedBy;
   if (opts?.batchId) filter.batch_id = opts.batchId;
   // ⚡ cursor filter — ดึง docs ที่เก่ากว่า cursor
