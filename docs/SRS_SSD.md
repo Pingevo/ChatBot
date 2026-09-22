@@ -938,6 +938,14 @@ listing path:
 
 **API routes (~70, `src/app/api/`):** conversations CRUD + `send`/`assign`/`handoff`/`resolve`/`messages`/`orders` + `bot-handoff` (รับจาก Python) · `shadow-inbox` (+generate-conversation) · `test-chat` (buffer/flush/upload/workflow-step) · `test-assignment` / `live-assignment` / `test-results` / `admin-chat-result` / `admin-review-kpi` · `chat-annotations` · `kb` (+upload/template/toggle) · `triggers` (+match/toggle) · `workflows` (+restore/toggle) · `llm-config` (+models) · `persona` · `shops`/`shop-settings`/`products` · `stats/*` (dashboard/admin-activity/live/performance) · `team`/`users`/`profile`/`permissions` · `auth/sso` · `quick-replies`/`labels`/`contacts` · `replay-compare` (spawn `replay_compare.py`) · `admin/maintenance` · `botworker/*` (internal) · `chatbot/[...path]` proxy
 
+### 6.27 `retrieval_policy.py` — evidence card contract (observe-only, Task 3)
+
+| ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `make_evidence_card` | แนบ evidence metadata บน card | product, source, evidence=None, selection_reason=None | card ใหม่ (ไม่ mutate) | `_norm_id` | Task 6/8/10 (ยังไม่ wire) | merge `_evidence.sources` ไม่ซ้ำ · normalize `item_id`/`model_id`→str ใน `item_ids`/`model_ids` · evidence param→`facts` · preserve `_evidence` เดิม | — |
+| `strip_private_evidence` | ลบ private keys ก่อน public response | card หรือ list[card] | card/list ใหม่ (ไม่ mutate) | — | Task 8 (product-response boundary — ยังไม่ wire) | pop `_evidence`,`_selection_reason` | — |
+| `_norm_id` | normalize id→str | value | str | — | make_evidence_card | float int-valued→int-str; อื่น→str | — |
+
 ---
 
 ## 7. คอนฟิกและตัวแปรสำคัญ

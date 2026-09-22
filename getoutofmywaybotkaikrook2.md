@@ -74,6 +74,18 @@
 - **real-data sanity (export 11,692 docs):** NORMAL→active 2096 / out_of_stock 1264, UNLIST→unlisted 7089, *DELETE+BANNED→discontinued 1203, REVIEWING→unknown 40; ทุก model มี numeric summary → fallback path ไม่ fire → **behavior change ≈0 บนข้อมูลปัจจุบัน**, fix กัน data shape ที่ summary=0/หาย
 - **ไม่แตะ:** v2/v3 ทั้งหมด · `item_status:"NORMAL"` mongo query filters · LLM prompt notes · `_stock_from_model()` ไม่ได้สร้าง
 
+### ✅ Master plan Task 3: evidence card contract (2026-09-22) — implement + verified รออนุมัติ commit
+
+- **งาน:** สร้าง `chatbot/shopeechat/retrieval_policy.py` — contract กลาง `_evidence`/`_selection_reason` บน product cards (observe-only)
+- **ทำไม:** cards มาจากหลายแหล่ง (product_store/units/KB/anchor/order/compat/web) แต่ไม่มีภาษาเดียวกันบอกว่ามาจากไหน·หลักฐานอะไร·ถูกเลือกเพราะอะไร — Task 6/8/10 ต้องใช้ต่อ
+- **spec (user):** `make_evidence_card(product, *, source, evidence=None, selection_reason=None)` — ไม่ mutate, merge `_evidence.sources` ไม่ซ้ำ, preserve existing `_evidence`, normalize item_id/model_id→str (float→int-str ตาม audit), set `_selection_reason`; `strip_private_evidence(product)` — ลบทั้ง 2 keys, ไม่ mutate (รองรับ list ด้วยสำหรับ response boundary ใน Task 8)
+- **ห้าม:** เปลี่ยน ranking/retrieval/prompt/จำนวน products · หลุด `_evidence`/`_selection_reason` ใน public response · แตะ v2/v3 · สร้าง ranker
+- **TDD:** `docs/test/test_retrieval_evidence.py` ก่อนสร้าง module — **ยังไม่ wire app.py** (observe-only, Task 8 ค่อย wire strip ที่ boundary)
+- **implement (แล้ว):** `retrieval_policy.py` — `make_evidence_card` (copy, merge sources dedup, `_norm_id` float→int-str, facts merge, `_selection_reason`) + `strip_private_evidence` (card หรือ list) + `PRIVATE_KEYS`; ไม่ import heavy modules/app
+- **verify:** `test_retrieval_evidence.py` **14/14 ผ่าน** (RED ยืนยัน ImportError ก่อน) · availability+gold suite 51/51 ผ่าน · py_compile 4 ไฟล์ OK · `git diff --check` OK
+- **behavior change:** ไม่มี — ไฟล์ใหม่เท่านั้น ไม่ wire app.py (observe-only ตาม plan; Task 8 wire strip ที่ response boundary)
+- **impact:** ไฟล์ใหม่เท่านั้น — zero behavior change by construction; SRS เพิ่ม §6.27
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)
