@@ -20,6 +20,27 @@
 
 ## กำลังทำ (active)
 
+### ✅ หัวข้อ "ทดสอบบอท" มองไม่เห็น → เปลี่ยนเป็นสี maroon (2026-09-22) — แก้แล้ว
+
+- **อาการ:** h1 "ทดสอบบอท — {label}" หน้า testchat มองไม่เห็น
+- **วิธีแก้:** `text-text` → `text-brand` (#8b1e28 = maroon ของระบบ) ที่ h1 ทั้ง 2 จุดใน `TestChatClient.tsx` (line ~1776 state unavailable + ~1891 header จริง)
+- **ผลกระทบ:** UI เท่านั้น ไม่แตะ logic
+- **verify:** `text-brand` มีอยู่แล้ว 222 จุดใน codebase (map `--color-brand`) — utility resolve แน่นอน
+
+### 🔄 ShadowStatPanel "All History" ใช้งานไม่ได้ (2026-09-22) — root cause พบแล้ว รออนุญาตแก้
+
+- **อาการ:** panel สถิติขวา tab "All History" ในหน้า /shadow-inbox โชว์ "ยังไม่มีสถิติ" ตลอด
+- **root cause (วัดจริง):** `getShadowReplyStats` (shadowReplyService.ts:836) ทำ `find({deleted_at:{$exists:false}}).toArray()` **ไม่มี projection/limit** → ลาก 4,980 docs = **50.9MB / 140.8s** (probe วัดจริง) — axios timeout 30s → `loadStats` catch → `setStats(null)` → โชว์ "ยังไม่มีสถิติ"; doc อ้วนเพราะ `bot_products` (สูงสุด 354KB/doc)
+- **วิธีแก้ (เสนอ):** projection เฉพาะ field ที่ stats ใช้ (`rating, star_rating, comment, bot_cost_usd, bot_elapsed_ms, bot_tokens.total`) → probe เดียวกัน = **265ms** (~530x เร็วขึ้น) — pattern เดียวกับ fix test-assignment/live-assignment เดิม
+- **ผลกระทบ:** จุดเดียว `shadowReplyService.ts` · caller เดียว route.ts:129 ครอบทั้ง All History + Per Chat · Per Chat (filter conv) เร็วอยู่แล้วได้ประโยชน์ด้วย
+
+### 🔄 botworker history ขาด workflow replies (2026-09-22) — รออนุญาตแก้
+
+- **อาการ:** `getGroupedHistoryForBot` (messageService.ts) เลือกคำตอบบอทจาก `shadow_replies` (origin worker/workflow) แต่ lookup ด้วย `inbound_message_id` ดิบ — `storeWorkflowDelivered` (botWorkerService.ts:168) เขียนเป็น `{msgId}__wf{i}` เพื่อเลี่ยง unique index → workflow answers ไม่เคยเข้า history (fallback Zaapi ผิด design "คำตอบบอทเราชนะ")
+- **user confirm intent:** คำตอบจาก workflow/trigger/vision ทุก path ต้องเข้า botworker history
+- **แพลน (เสนอ user):** strip suffix `__wf\d+$` ตอนสร้าง `botReplyByInboundId` + รวมหลาย delivered ต่อ inbound (ตามลำดับ suffix) เป็น model text เดียว — ไม่แตะ schema/ข้อมูลเก่า
+- **ผลกระทบ:** เฉพาะ history pairing ของ workflow replies · trigger/bot/vision path ใช้ id ดิบอยู่แล้วไม่เปลี่ยน
+
 ### ✅ GitHub issue #19: LLM พิมพ์ `||` แทน `|||` → การ์ดสินค้าติดในฟองข้อความ (2026-09-21) — fixed + verified → ย้ายไป "ผ่านแล้ว"
 
 ### ✅ Legacy Shopee retrieval redesign master plan (2026-09-21) — plan เสร็จ + self-review ผ่าน
@@ -809,3 +830,161 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **root cause:** issue #17 (fixed `c411b1d` 13:42 วันนี้ — หลัง sim run 11:45) — prod image เก่ายังมี `/health` `client.close()` (docker HEALTHCHECK ทุก 30 วิ) ปิด shared MongoClient กลาง `/chat` ที่ถือ db → `Cannot use MongoClient after close` → HTTP 500 สุ่ม ~10-15% (3-4/20 = เท่าที่วัด 9/hr บน prod)
 - **เช็กแล้วว่าไม่ใช่สาเหตุ:** `flush/route.ts` `data.answer||""` (ทำงานเฉพาะ 200) · `TestChatClient` bot_error → แสดง error แดงถูก (user จริงเห็น error ไม่ใช่เงียบ) · direct repro :8010 ทั้ง 3 เคสตอบปกติ (warranty 1213 chars, spec KB+mongo, compat product_store) — retrieval/LLM ไม่พัง
 - **สถานะ:** ไม่ต้องแก้โค้ดเพิ่ม — root cause แก้แล้วใน `c411b1d` · **action = redeploy prod** ให้ image มี fix แล้วลบ/รัน sim sessions ใหม่ยืนยัน
+
+### ✅ 2026-09-22 — Botworker parity fixes: workflow reply pairing (__wf) + trigger bot_template
+
+- **error (a):** คำตอบที่มาจาก workflow engine ไม่เข้า bot history — `storeWorkflowDelivered` เขียน `inbound_message_id` = `<msgId>__wf<N>` (หลาย bubble ต่อ inbound เลี่ยง unique index) แต่ `getHistoryForBot`/`getGroupedHistoryForBot` lookup ด้วย id ดิบ → pair ไม่ได้ → history fallback ไปใช้ Zaapi ทั้งที่บอทเราตอบแล้ว
+- **error (b):** trigger `bot_answer` + `bot_template` — test-chat ตอบ template ทันทีไม่เรียกบอท แต่ botworker เรียก callBot เสมอ → parallel run ไม่ตรง production intent
+- **fix (a):** `messageService.ts` เพิ่ม `indexBotRepliesByInbound` + `baseInboundId` — ตัด suffix `__wf<N>` เป็น base id, รวมหลาย bubble เป็น text เดียวด้วย " ||| " ตามลำดับ N · ใช้ร่วมกันทั้ง 2 ฟังก์ชัน history + orphan check เทียบ base id (กัน wf reply โผล่ซ้ำเป็น orphan)
+- **fix (b):** `botWorkerService.ts` — หลัง `handoff_admin` check ก่อน callBot: `trigger.bot_template` → `storeBotReply` (answer=template, source="trigger_bot_answer") + `markProcessed` status=trigger_matched + `logAdminEvent` (used_bot_template) → return; ไม่เรียก Python bot
+- **verify:** `npx tsc --noEmit` clean · `git diff --check` clean · integration test กับ Mongo จริง (seed conv สังเคราะห์แล้วลบ): grouped — u1 pair "WF-A ||| WF-B" ชนะ zaapi ✓, turn [u2,u3] หา worker reply ผ่าน u3 ✓, ไม่ซ้ำ ✓; history — pair ถูก + orphan จริงยัง append + wf reply ไม่เป็น orphan ซ้ำ ✓ (11/11 PASS)
+- **ผลกระทบเคสอื่น:** reply id ดิบ (worker/trigger/normal) ทำงานเหมือนเดิม — n=-1 sort ก่อน wf bubbles · raw+wf mix ภายใต้ base เดียว join raw ก่อน · schema/index ไม่แตะ · handoff_admin + bot_answer ไม่มี template = path เดิมเป๊ะ · SRS_SSD 6.26 อัปเดต 2 แถว (botWorkerService, messageService)
+
+### 🔧 กำลังจะทำ — Botworker true-parallel sandbox (รออนุญาต)
+
+- **เป้าหมาย:** botworker เป็น parallel run ของ ticket จริง — รับเรื่อง/ปิดแชท/โยนงาน/status ทำงานได้จริง แต่ state ทั้งหมดอยู่ใน test collections ไม่แตะของจริง
+- **audit พบจุดที่แตะ state จริงอยู่:**
+  1. `pickAgent` → `handoffService.handoffToAdmin` (จริง) → เขียน status_conversation + tryAssign จริง — cursor แยกอยู่แล้วเพราะ buildPool poolKey มี source (`*:botworker`)
+  2. status guard อ่าน `status_conversation` จริง (admin กดปิดในหน้า botworker จะไม่มีผลต่อ worker)
+  3. workflow nodes: `assign_ticket`(direct/auto) + `add_label` + `close_ticket` + `add_note` เขียน conversations/status_conversation จริง; conditions `conversation_status`/`assignee` อ่านของจริง
+  4. `callBot(simulate=false)` → Python `_send_handoff` POST /api/admin/conversations/bot-handoff ไม่มี simulate → เขียน status_conversation + conversations.bot_claim_info จริง (route รองรับ simulate แต่ hardcode source="test_chat")
+  5. `storeBotReply` เขียน `image_desc` ลง messages_shp (additive field — ต้องย้ายไป shadow_replies.bot_image_desc ถ้าจะแยกสนิท)
+  6. หน้า /botworker ปุ่ม close/reopen/handoff/transfer ยิง API ticket จริง (`chatService.close/handoff`, `/api/assignment/reassign`) → แก้ของจริง!
+- **แพลน:** (a) worker เปลี่ยนเป็นอ่าน/เขียน `test_status_conversation` source=botworker ทั้งหมด + `handoffToAdminTest` (b) engine เพิ่ม `testSource` — side-effect nodes เขียน test doc เมื่อถูกส่งมาจาก worker (c) callBot+Python เพิ่ม `test_source` → handoff ลง test store + ticket_state อ่านจาก test store (d) image_desc → `bot_image_desc` บน shadow_replies + history map ผ่าน inbound id (e) API routes ใหม่ /api/botworker/conversations/:id/{close,reopen,handoff,transfer,accept,close-history} + หน้าเปลี่ยนมาใช้
+- **คงเดิม:** test-chat ไม่แตะ (conv id ไม่ชนของจริงอยู่แล้ว) · conversation_products/anchor share กับ shadowbot ตามเดิม · workflow_runs ไม่มี source — ไม่กระทบ tickets
+- **คำถามเปิด:** toggle "รับแชท" (is_accepting_chats) บนหน้า botworker เขียน profile แอดมินจริง — เก็บไว้หรือซ่อน?
+- **plan จริง:** `docs/plans/botworker-parallel-plan.md` (เขียนแล้ว — รออนุญาต) · เพิ่มเติมจาก user: รับเรื่อง=self-assign คนกด (ทั้ง tickets+botworker), admin ตอบแชทใน parallel ได้จริง (collection ใหม่ botworker_messages), ปิดแล้วลูกค้าทักซ้ำ=reopen loop, assign history แยก (botworker_events), image_desc/anchor share ได้, toggle รับแชทเก็บไว้
+- **plan update (2026-09-22):** เพิ่มปัญหา pool ว่างแล้วไม่มี pending marker/backlog distributor — handoff ที่หา admin ไม่ได้ต้องเขียน `pending_assignment=true`; ไม่ auto-drain ตอน admin คนแรกเปิดรับแชท; ให้ superadmin/dev เลือก selected admin pool แล้ว preview+commit งานค้างเอง (round_robin_selected / least_loaded_selected / manual_quota); เพิ่มลำดับทำงาน MVP safety → UI sandbox → workflow sandbox → backlog distributor
+- **plan update 2 (2026-09-22):** เพิ่ม bug manual transfer dropdown แสดง admin ที่พักรับแชท — ต้อง filter `active && role=admin && is_accepting_chats !== false` ทั้ง tickets+botworker และ validate ที่ API; เพิ่ม Part H reset หลังจบทดสอบแบบ dry-run→backup→confirm ครอบ ticket/test_chat/shadowbot/botworker/live-assignment/test-assignment assignment+close history ทั้งหมด
+- **plan update 3 (2026-09-22):** user ยืนยันว่า admin reply ใน botworker ต้องนับเป็น history — เพิ่ม requirement ให้ `botworker_messages` merge เข้า sandbox history; history ของ worker ต้อง prioritize `shadow_replies` origin worker/workflow mode standalone ก่อน Zaapi fallback และห้ามปน shadowbot/replay/test source อื่น
+
+### ✅ 2026-09-22 — Botworker true-parallel sandbox (ทั้ง 8 parts เสร็จ + verify 21/21)
+
+- **error/เป้าหมาย:** botworker ต้องเป็น parallel run ของ /tickets ที่ทำงานได้จริงครบ (รับเรื่อง/โยนงาน/ตอบแชท/ปิด-เปิด/status) แต่ state แยกสนิทจาก ticket จริง — audit เจอจุดรั่ว 6 จุด (pickAgent→handoffToAdmin จริง, guard อ่าน status_conversation จริง, workflow nodes เขียนจริง, Python handoff ไม่มี test_source, ปุ่ม UI ยิง API จริง, image_desc เขียน messages_shp)
+- **fix ตาม `docs/plans/botworker-parallel-plan.md`:**
+  - **A** worker: guard อ่าน `test_status_conversation`[botworker] (assigned/open/handoff→skip, closed→reopen เข้าลูปเดิม) · `pickAgent`→`handoffToAdminTest(source=botworker, assignedStatus=open)` · ทุก event→`logBotworkerEvent` (ลบ logAdminEvent ออกจาก worker) · callBot/engineMsg ส่ง `testSource`
+  - **B** testStatusConversationService: +`pending_assignment`/`labels`/`close_history[]`/`bot_claim_info`/`reopen_count` + `manualTestAssign`(atomic)/`setTestPendingAssignment`/`assignPendingTestTicket`/`pushTestCloseHistory`/`addTestLabels` · handoffService `assignedStatus` + pending marker ทั้ง real (`statusConversationService.setPendingAssignment`/`assignPendingTicket`) และ test · `botworkerEventService` ใหม่ (collection `botworker_events` แยกจาก admin_logs) · COLLECTIONS `botworkerMessages`/`botworkerEvents` + index
+  - **C** workflowEngine: `EngineMessage.testSource` — assign_ticket/add_label/close_ticket/add_note เขียน test doc, conditions conversation_status/assignee อ่าน test doc, let_ai_respond ส่ง testSource+includeSandboxAdmin, run persist `test_source` (resume จาก timeout ยังอยู่ sandbox)
+  - **D** botCallService `testSource` → ticket_state อ่าน test store + POST `test_source` · Python `ChatRequest.test_source` + `_send_handoff` payload · route `bot-handoff` branch `test_source="botworker"` → handoffToAdminTest + claim info ลง test doc
+  - **E** API `/api/botworker/conversations/:id/` — accept(self-assign→open)/transfer(validate active+role+accepting)/handoff(pool→open หรือ handoff+pending)/close(+close_history)/reopen(assignee→open, ไม่มี→bot)/send(botworker_messages+claim→open)/close-history/events + messages route merge botworker_messages
+  - **F** หน้า /botworker: ปุ่มทั้งหมดยิง sandbox routes + composer ใหม่ (admin reply→botworker_messages+claim→open→worker skip) + bubble สีตาม `bubble_color` ที่บันทึกตอนส่ง + transfer dropdown filter `is_accepting_chats!==false` · หน้า /tickets "รับเรื่อง"→`POST assign {admin_id:me}` (self-assign จริง แก้ bug เดิมที่ไม่เคย assign ให้คนกด) · `/api/assignment/reassign` validate target active+role+accepting ซ้ำ
+  - **G** `backlogService` + `/api/assignment/backlog` GET + `/preview` + `/commit` (superadmin/dev, idem_key, re-check pending atomic) — modes: round_robin_selected/least_loaded_selected/manual_quota; ticket→status_conversation(handoff), botworker→test store(open) · หน้า `/backlog` ใหม่ (page key `backlog` admin:none/superadmin:dev:edit) · ไม่มี auto-drain
+  - **H** `scripts/reset-assignment-state.ts` — dry-run default, `--confirm --phrase=RESET_ASSIGNMENT_STATE`, backup→`exports/maintenance/reset-assignment-<ts>/`, `--accepting=keep|all-on|all-off`, soft-delete shadow_replies test origins (หรือ --hard), unset status_conversation/conversations เฉพาะ bot-handoff fields, delete test_status/botworker/cursors/processing/buffer/accept-sessions, post-reset verify; ไม่แตะ messages_shp/master data
+- **verify:** `tsc --noEmit` clean · `git diff --check` clean · `py_compile app.py` clean · reset dry-run รันจริงบน DB (ไม่เขียน — count เท่านั้น) · **`scripts/verify-botworker-parallel.ts` 21/21 PASS** (manualTestAssign→test only, status_conversation/conversations ไม่มี doc, pending marker, preview ไม่เขียน, commit assign+idem replay, pool validation reject nonexistent, history: worker reply ชนะ zaapi + admin sandbox เข้าเป็น model turn + shadowbot/manual ไม่รั่ว + flag ปิดไม่มี admin msg, handoffToAdminTest ไม่แตะ real store)
+- **ผลกระทบเคสอื่น:** /tickets "รับเรื่อง" เปลี่ยนจาก pool-handoff → self-assign (ตาม requirement user) · reassign ปฏิเสธ admin พักรับแชท (ทั้ง UI filter + API 422) · handoffToAdmin จริงตอนนี้ mark pending_assignment เมื่อ pool ว่าง (งานค้างไม่หาย) · test-chat/shadowbot ไม่เปลี่ยน (source แยก) · `image_desc` คงบน messages_shp (additive, share ตาม plan) · toggle รับแชทบน botworker เก็บไว้ (profile จริง — user อนุมัติ)
+
+### 🔧 กำลังจะทำ — Audit fixes: test_status index + reset script completeness
+
+- **audit พบจุดผิดพลาด:**
+  1. `test_status_conversation` มี unique index `{conversation_id}` เดี่ยว → conv เดียวกันมี doc ได้แค่ source เดียว (botworker ชน test_assignment/test_chat) — live DB: `conversation_id_1` unique ยังอยู่, compound `{source,conversation_id}` เป็น non-unique · data ปลอดภัย (94 docs ทุกตัวมี source, ไม่มี dupe)
+  2. reset script ไม่ครบตาม requirement "เหมือนไม่เคยทดลอง": ไม่ backup `conversations` ก่อน unset · ไม่ backup `admins` เมื่อใช้ --accepting · ไม่แตะ `admin_logs` scope assign/close/handoff/test เลย · workflow_runs filter ขาด `waiting_for_reply` · post-reset verification ไม่ครบ
+  3. `chat_accept_sessions` แค่ปิด open sessions — ไม่มี hard reset ล้าง history
+  4. ไม่มี warning ให้หยุด bot-worker ก่อน reset จริง · --no-backup ไม่มี warning
+- **plan แก้:**
+  - `mongoClient.ts`: migration block ก่อน Promise.all — drop unique `{conversation_id}` + drop non-unique compound เก่า → `safeCreateIndex` ใหม่: unique `{source:1,conversation_id:1}` + non-unique `{conversation_id:1}` (query เดี่ยวยังเร็ว)
+  - `reset-assignment-state.ts`: +backup `conversations`(filter bot_handoff fields) +backup `admins` เมื่อ --accepting≠keep +backup&delete `admin_logs` scope (chat_assigned/conversation.handoff/status_change/backlog_commit/live_assignment.*/test_assignment.*/test_chat.rate/shadow_reply.*) +workflow_runs เพิ่ม `waiting_for_reply` +`--accept-sessions-hard` ลบ history หลัง backup +verification checklist ครบทุก collection +warning หยุด bot-worker +--no-backup loud warning
+- **verify:** tsc · py_compile · git diff --check · dry-run เท่านั้น (ห้าม --confirm จนกว่าอนุมัติ)
+
+#### ✅ ผลลัพธ์ (verify แล้ว)
+
+- **index migration:** `mongoClient.ts` เพิ่ม drop block ก่อน Promise.all — drop unique `conversation_id_1` + non-unique `source_1_conversation_id_1` เดิม → สร้างใหม่: `{conversation_id:1}` non-unique sparse (query เดี่ยว) + `{source:1,conversation_id:1}` unique — **verify บน DB จริง:** indexes เปลี่ยนถูกต้อง + upsert conv เดียวกัน 2 source สำเร็จ (เดิมจะ E11000)
+- **side finding (ไม่แก้ — นอก scope):** `conversations_shp` มี duplicate `conversation_id` docs ใน dev DB → unique index `conversation_id_1` ของมันสร้างไม่ได้ (E11000) — pre-existing, instrumentation.ts catch error ไว้อยู่แล้วไม่ crash; data มาจาก sellcenter dump
+- **reset script เพิ่ม:** backup `conversations`(bot_handoff fields) + `admins`(เมื่อ --accepting≠keep) + `admin_logs` scope (action_type ใน ADMIN_LOG_SCOPE: chat_assigned/conversation.handoff/status_change/backlog_commit/live_assignment.*/test_assignment.*/test_chat.rate/shadow_reply.*) · workflow_runs filter ครอบ `waiting_for_reply/running/waiting/active/paused` + `test_source` · `--accept-sessions-hard` ลบ history ทั้งหมด (default แค่ปิด open) · post-reset verification 20 checks ครบทุก collection · warning หยุด bot-worker + `--no-backup` loud warning
+- **verify:** tsc clean · py_compile clean · git diff --check clean · dry-run รันจริง 2 variants (default + hard/all-off/no-backup) แสดง count ถูก · `--confirm` ไม่มี phrase → ยัง dry-run + เตือน · verify-botworker-parallel ยัง 21/21 หลัง migration
+- **ยังไม่รัน:** `--confirm --phrase=RESET_ASSIGNMENT_STATE` จริง (รอ approval — จะ wipe test data + scoped admin_logs บน DB นี้)
+
+### 🔧 กำลังจะทำ — Audit fix รอบ 2: close_history collection + admin_logs scope ขาด
+
+- **audit พบ:**
+  1. `close_history` collection (`closeHistoryService.ts`) ไม่ถูก reset เลย — script unset แค่ field `close_history` ใน status_conversation doc แต่ collection แยกยังค้าง → ประวัติปิดแชทจริงเหลือ
+  2. `ADMIN_LOG_SCOPE` ขาด `chat_reassigned` (assignmentService), `conversation.close`/`conversation.open`/`conversation.resolve` (statusConversationService/closeHistoryService)
+- **plan:** reset script — +`closeHistory` เข้า backup+delete+verify · +4 action types เข้า ADMIN_LOG_SCOPE · ไม่แตะ `assignment.*` config logs (mode_change/team_add คือ audit ของ config ไม่ใช่ conversation state)
+- **verify:** tsc · dry-run นับ close_history + admin_logs scope ใหม่
+
+#### ✅ ผลลัพธ์รอบ 2 (verify แล้ว)
+
+- **fix:** `reset-assignment-state.ts` — +`closeHistory` เข้า backup/delete/verify · +`chat_reassigned`/`conversation.open`/`conversation.close`/`conversation.resolve` เข้า ADMIN_LOG_SCOPE (คงไม่แตะ `assignment.mode_change`/team config — audit ของ config)
+- **verify:** tsc clean · dry-run: close_history=3 docs เข้า scope, admin_logs 2388→2395 (+7 จาก action types ใหม่)
+
+### 🔧 กำลังจะทำ — Audit fix รอบ 3: admin-owned state (topic/item_ids/pinned)
+
+- **user อนุมัติเพิ่ม:** ADMIN_LOG_SCOPE += `conversation.set_topic`,`conversation.set_item_ids` · STATUS_UNSET += `topic`,`item_ids`,`pinned` (admin-owned state จากการใช้หน้า tickets/botworker — ไม่ใช่ข้อมูลลูกค้า) · consistency: pin/unpin เกิด admin_logs `conversation.pin`/`unpin` → รวมเข้า scope ด้วยเพราะ unset pinned แล้วแต่ log เหลือจะขัดกัน
+- **verify:** tsc · dry-run
+
+#### ✅ ผลลัพธ์รอบ 3 (verify แล้ว)
+
+- **fix:** `reset-assignment-state.ts` — ADMIN_LOG_SCOPE +`set_topic`/`set_item_ids`/`pin`/`unpin` · STATUS_UNSET +`topic`/`item_ids`/`pinned` (admin-owned state ทั้งหมด — test doc ลบทั้ง doc อยู่แล้วไม่ต้อง unset)
+- **verify:** tsc clean · dry-run: admin_logs=2395 (ไม่เปลี่ยน — DB นี้ยังไม่มี log ของ action ใหม่, scope พร้อมรับเมื่อมี)
+
+### 🔧 กำลังจะทำ — Audit fix รอบ 4: เปลี่ยน scope reset เป็น "assignment/chat-state only" (preserve replay/generate artifacts)
+
+- **requirement ใหม่ (user):** reset เคลียร์เฉพาะ state การทำงาน (assign/handoff/close/reopen/backlog/topic/pin/accept sessions/cursors) — **เก็บ** replay/generate history ทั้งหมด: shadow_replies, test_assignment, test_chat_sessions, test_chat_ratings + logs ที่เป็น replay/generate/rating history
+- **เอาออกจาก reset scope (preserve):**
+  - collections: `shadow_replies` (ทั้ง soft/hard — ลบ TEST_REPLY_FILTER + --hard flag ทิ้ง), `test_assignment`, `test_chat_sessions`, `test_chat_ratings`
+  - admin_logs: `shadow_reply.*` (10 ตัว), `test_assignment.*` (6 ตัว), `test_chat.rate`, `live_assignment.batch_replay`, `live_assignment.admin_reply` (= คำตอบ/ผลทดสอบ)
+- **คงไว้ใน ADMIN_LOG_SCOPE (assignment/chat-state เท่านั้น):** chat_assigned, chat_reassigned, conversation.handoff/status_change/open/close/resolve, set_topic, set_item_ids, pin, unpin, backlog_commit, live_assignment.close_chat, live_assignment.reopen_process · +เพิ่ม `bot.handoff_to_admin` (bot ส่งต่อ=assignment state), `chat_accept.start`/`stop` + `agent.pause`/`resume`/`agent_auto_paused` (accept-session history — ล้าง sessions แล้วต้องล้าง log คู่กันไม่งั้น audit กระหล่อน)
+- **คง reset เหมือนเดิม:** status_conversation unset (รวม topic/item_ids/pinned), conversations bot_handoff fields, close_history (backup+delete), assignment_cursors, chat_accept_sessions (close/hard), test_status_conversation (assignment state ของ test pages — result/history อยู่ใน test_assignment/test_chat_sessions ที่ preserve), workflow_runs (active/test filter เดิม), botworker_messages+events (manual admin action state), chat_processing+buffer_messages (runtime processing state), admins accepting flag (เมื่อ --accepting≠keep)
+- **UI/ข้อความ:** header "Assignment/chat-state reset" + dry-run แสดง section "PRESERVE (replay/generate artifacts)" + verification ไม่เช็ก preserved colls = 0 + เพิ่มเช็ก topic/item_ids/pinned/assigned_at fields
+- **verify:** tsc · git diff --check · dry-run เท่านั้น (ห้าม --confirm)
+
+#### ✅ ผลลัพธ์รอบ 4 (verify แล้ว)
+
+- **fix:** `reset-assignment-state.ts` — scope ใหม่ "assignment/chat-state reset": เอา `shadow_replies`/`test_assignment`/`test_chat_sessions`/`test_chat_ratings` ออกจาก backup+delete+verify (preserve ทั้งหมด) · ลบ `--hard` flag + `TEST_REPLY_FILTER` · ADMIN_LOG_SCOPE เหลือเฉพาะ assign/close/handoff/state (ตัด shadow_reply.*/test_assignment.*/test_chat.rate/live_assignment.batch_replay/admin_reply; เพิ่ม bot.handoff_to_admin, chat_accept.start/stop, agent.pause/resume/agent_auto_paused — accept-session state) · dry-run แสดง section PRESERVE + counts · verification เพิ่มเช็ก assigned_at/assignment_reason/topic/item_ids/pinned
+- **verify:** tsc clean · git diff --check clean · dry-run — admin_logs scope=4 docs
+- **⚠️ สังเกต:** dry-run รอบนี้ state collections เป็น 0 ทั้งหมด (รอบก่อน: test_status=94, sessions=113, close_history=3) — น่าจะมีการเคลียร์ test state บน DB นี้ไปแล้วนอก script นี้ · shadow_replies 6555 docs ยังอยู่ครบ (preserve ถูกต้อง)
+
+### 🔧 กำลังจะทำ — Post-incident: admin filter bugs + legacy residue + live-assignment state (preserve QA history)
+
+- **อาการหลัง reset/restore:** /tickets เห็น handoff ของ admin_temp_001-003 (legacy `conversations_shp.assigned_to` ~15 docs ค้าง + API fallback อ่าน legacy) · filter admin ที่ไม่มีงานกลายเป็น "โชว์ทั้งหมด" (`conversationIds=[]` → no-filter bug) · restore test_assignment ดึง assigned_to/mock_status กลับมาด้วย · /live-assignment + /botworker ไม่มี assigned_to filter ชัดเจน
+- **plan:**
+  - **A** `conversationService.listConversations`: `opts.conversationIds` ถูกส่งมาแต่เป็น `[]` → return `[]` ทันที (ห้าม [] = no-filter) · เช็ก callsite `/api/admin/conversations`
+  - **B** reset script: +unset legacy assignment fields ใน `conversations_shp` (assigned_to/assigned_at/assigned_to_name/assignment_reason — audit field `status` ก่อนว่า master หรือ admin-owned; ถ้าไม่ชัด unset เฉพาะ docs ที่มี assigned_to/bot_handoff fields) + backup + dry-run count
+  - **C** reset script: `test_assignment` เปลี่ยนจาก preserve-ทั้ง-doc → **updateMany $unset เฉพาะ state fields** (assigned_to/assigned_at/assigned_to_name/mock_status/close_*/reopened_* ฯลฯ ตาม schema จริง) — preserve qa/messages/bot_reply/products/retrieval_info · backup affected docs ก่อน · verify state fields=0 แต่ docs ยังอยู่
+  - **D** `/live-assignment`: page → route → service รองรับ `assigned_to=all|me|unassigned|<id>` — empty/falsy ≠ no-filter
+  - **E** `/botworker`: เพิ่ม `assigned_to` param → filter จาก `test_status_conversation[source=botworker]` (ไม่ใช้ conversations_shp.assigned_to) · empty list ถูกต้อง · cache key รวม filter
+  - **verify:** tsc · git diff --check · read-only probes · dry-run เท่านั้น (ห้าม --confirm)
+
+#### ✅ ผลลัพธ์รอบ 5 (verify แล้ว)
+
+- **root causes:**
+  1. `listConversations` — `conversationIds=[]` ถูกข้าม filter (เช็ก length>0) → admin ไม่มีงานเห็นทั้งหมด · fix: `!== undefined` → `$in: []` match 0 จริง
+  2. `/tickets` เห็น admin_temp_* — `status_conversation` สะอาดแล้วแต่ `getAssignedConversationIds` fallback อ่าน legacy `conversations_shp.assigned_to` (15 docs ค้าง) → reset เพิ่ม unset assigned_to/assigned_at/assigned_to_name/assignment_reason/status เฉพาะ docs ที่มี residue (status-only docs ไม่แตะ — อาจเป็น dump field)
+  3. `test_assignment` restore ดึง state กลับ — เปลี่ยนจาก preserve-ทั้ง-doc → `$unset` state fields (assigned_to/mock_status/close_*/reopened_*/pending_assignment) เก็บ qa/ratings/replay metadata · backup affected docs ก่อน
+  4. `/live-assignment` — route รับ `assigned_to` แต่ page ไม่เคยส่ง (chatFilter เป็นแค่ UI) → ส่ง chatFilter ใน loadList/loadMore/poll · service รองรับ `unassigned` ($in [null,""] — ไม่ชน cursor $or) · route resolve me→admin_id
+  5. `/botworker` — route ไม่มี assigned_to param เลย → เพิ่ม all|me|unassigned|<id> filter จาก test_status_conversation[botworker] ($in=[]→empty จริง, unassigned→$nin) + cache key รวม filter + admin name map สำหรับ badge · page ส่ง chatFilter
+- **verify:** tsc clean · diff --check clean · dry-run: conversations_shp legacy=15 docs, test_assignment state=92 docs (docs preserved), shadow_replies 6555 เก็บ, admin_logs scope=4
+- **ยังไม่รัน --confirm**
+
+#### ✅ ผลลัพธ์รอบ 6 (verify แล้ว)
+
+- **fix:** `TEST_ASSIGN_UNSET` +`stopped_at_handoff` · verification +check 同名 (probe: 92 docs มี field นี้)
+- **final_status decision — PRESERVE:** `final_status` คือ replay verdict ("bot_answered"/"handed_off"/"no_agent"/"error") = ผลทดสอบ — ใช้ใน stats + badge เป็น "ผล replay" ไม่ใช่ live state · ล้างแล้ว replay history เสียความหมาย · badge "handoff" ใน list = verdict ของ replay โดยตั้งใจ (admin action state จริงคือ assigned_to/mock_status/close_* ที่ล้างแล้ว) — ถ้าอยากให้ list ดูสะอาดสมบูรณ์ค่อยเพิ่ม flag ล้าง final_status แยก
+- **verify:** tsc clean · dry-run scope ถูก
+
+### 🔧 กำลังจะทำ — live-assignment UI: แยก current state ออกจาก replay verdict
+
+- **root cause:** `liveDocToConversation` map `final_status` (replay verdict) → `status` (current chat state) — reset state หมดแล้วแต่ list ยังขึ้น badge "แอดมิน" เพราะ verdict ค้าง
+- **plan:**
+  - `liveDocToConversation`: status จาก state fields เท่านั้น — `mock_status==="closed"`→closed, `assigned_to||stopped_at_handoff`→handoff (อยู่ในมือแอดมิน/รอรับ), else→bot · post-reset ทุก field unset → "bot" สะอาด
+  - แสดง replay verdict แยก: `Conversation.replay_verdict?` (optional) + chip "replay: X" ใน ChatList badge row (optional — ไม่กระทบหน้าอื่น)
+  - test-assignment page ไม่แตะ — ใช้ replay_status/final_status ในตารางผล replay โดยตรง (context ถูกอยู่แล้ว)
+  - verify: tsc + diff --check
+
+#### ✅ ผลลัพธ์รอบ 7 (verify แล้ว)
+
+- **fix:** `liveDocToConversation` — status จาก state fields เท่านั้น: `mock_status==="closed"`→closed, `assigned_to||stopped_at_handoff`→handoff, else→bot (post-reset ทุก field unset → "bot" สะอาด ไม่มี badge แอดมินหลอก)
+- **replay verdict แยก:** `Conversation.replay_verdict?` (optional) + chip "replay: <final_status>" ใน ChatList badge row — final_status เก็บเป็นข้อมูล/แสดงเป็น verdict ไม่ใช่ current state · optional field ไม่กระทบหน้าอื่น
+- **test-assignment ไม่แตะ:** ใช้ replay_status/final_status ในตารางผล replay โดยตรง — context ถูกอยู่แล้ว
+- **verify:** tsc clean · git diff --check clean
+- **ยังไม่รัน --confirm / ยังไม่ commit**
+
+#### ✅ ผลลัพธ์รอบ 8 — RESET จริง (verify แล้ว)
+
+- **pre-check:** ไม่มี bot-worker รัน (ps + docker ps) — เจอแค่ verify-botworker-parallel.ts ค้าง (read-only)
+- **dry-run สุดท้าย:** conversations_shp=15, test_assignment=92, admin_logs=4 · preserve shadow_replies=6555, test_chat_sessions=115
+- **reset จริง:** `--accept-sessions-hard --confirm --phrase=RESET_ASSIGNMENT_STATE` — backup 111 docs → `exports/maintenance/reset-assignment-2026-09-22T10-41-40-412Z`
+- **post-reset verification:** 26/26 ✓ ไม่มี ✗ — status_conversation/conversations_shp/test_assignment state fields = 0, admin_logs scoped=0, close_history=0, accept_sessions=0 (hard)
+- **probe หลัง reset:** shadow_replies 6555 (active 6555) · test_assignment 160 docs (qa+final_status ครบ) · test_chat_sessions 115 · conversations_shp.assigned_to=0 · test_assignment.assigned_to/mock_status/stopped_at_handoff=0
+- **static:** tsc clean · diff --check clean · py_compile app.py+responses.py clean
+- **manual UI:** รอผู้ใช้ตรวจผ่าน browser preview (ต้อง login session)
+- **ยังไม่ commit**
