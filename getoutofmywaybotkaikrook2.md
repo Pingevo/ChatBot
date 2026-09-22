@@ -30,6 +30,29 @@
 - **ไฟล์:** `docs/plans/2026-09-21-legacy-shopee-evidence-retrieval-implementation-plan.md`
 - **verify:** 2,121 lines หลัง ponytail review · ตัด field/key/report ที่ไม่มี consumer · ใช้ dedupe key เดียว · ระบุ gold drafter/private-metadata boundary ครบ · placeholder/duplicate-owner scan clean · `git diff --check` ผ่าน
 
+### ✅ Legacy retrieval Task 1: measurement + human gold gate (2026-09-22) — release gate ผ่าน
+
+- **งาน:** สร้าง offline evaluator, gold validator/drafter, review UI และ final gold set จาก replay + human review บน branch `feature-legacy-shopee-evidence-retrieval`
+- **ทำแล้ว:** `validate_gold_retrieval.py` + `eval_retrieval.py` + `draft_gold_retrieval.py` + tests ครบ; draft `gold_retrieval.draft.jsonl` 82 rows; `gold_review.html` + `gold_retrieval.draft.js` (approve/reject + correction form + image cards)
+- **human review:** `gold_retrieval.review (3).json` = approved 67 / rejected 15 / pending 0; rejected ทุก row มี correct_answer
+- **promoted corrections:** 12/15 rejected promote เข้า gold ด้วย `CORRECTED` map (item IDs จาก catalog lookup จริง) — Mi17, iPhone13-CTL, q005/q007/q079/q184/q187/q203/q204/q245/q047/q051; exclude q132 (correction ไม่ชัด) + test_200-063/064 (infra 429)
+- **gap fill:** gold สุดท้าย **103 rows** — history 12 (10 conv-derived + Mi17 + old-order), out_of_stock 3 (Hagibis stock_info=0 verified), unlisted/discontinued 3+1, refund 3, tax_invoice 5, real handoff 15, old_order_item 1, Mi17 follow-up 1; `must_not_phrases` ครบทุก negative/sensitive row (substring-safe เท่านั้น)
+- **validator:** เพิ่ม `validate_gaps` — quota 8 ข้อ + บังคับ must_not_phrases ใน negative modes/sensitive intents; CLI ตรวจ rows+gaps
+- **eval fix:** `_record_answer_mode` รู้จัก policy sources (`return_refund_ask_order`, `cert_answer`, `warranty_claim_first_message`) สอดคล้อง draft inference — "ขอเลขออเดอร์" ไม่ถูกนับเป็น recommend อีก
+- **baseline (freeze):** `unit_reg_questions_2026-09-18.jsonl` → n=300, products=177, listing_diversity=0.810, dup_pool_rate=0.492, live_ratio_top5=0.818, unit_share=0.393, fallback_rate=0.050, avg_pool=7.847 · gold metrics n_gold=72 → type_purity=0.237, acceptable_hit=0.200, must_not_violation=1.000 (q184/q005 wrong items ใน pool = bug จริง), phrase_violation=0.182 (q203/q204/q245/q300 false claims), answer_mode=0.917 (mismatch 6/72 ล้วน bug จริงจาก review)
+- **verify:** tests 19/19 ผ่าน · validator ผ่านทั้ง schema+gap · ยังไม่แตะ runtime code — **Task 1 จบ พร้อมเริ่ม Task 2 availability resolver หลังอนุมัติ**
+
+### ✅ ทบทวนและแก้ master implementation plan จากโค้ด/ข้อมูลปัจจุบัน (2026-09-22) — plan review เสร็จ
+
+- **ขอบเขต:** แก้เฉพาะ `docs/plans/2026-09-21-legacy-shopee-evidence-retrieval-implementation-plan.md`; ยังไม่แก้ runtime code
+- **หลักฐานโค้ดที่ตรวจใหม่:** callsite `fetch_products`/compat/web/KB ทั้งหมด, ลำดับ KB กับ conversation anchor ใน `app.py`, unit early-return ใน `product_store`, full-model/card truncation, order item fallback ใน `order_flow`, และ tracking lookup ใน `order_store`
+- **หลักฐาน collection จริง:** อ่านแบบ read-only ผ่าน `load_dotenv` ครบ `ShpProducts`, `ShpOrders`, `itStock.Products`, `knowledge_base`, `kb_products`, `kb_qa`, `kb_raw`, `image_texts`, `sellable_units`, `conversation_products`; ไม่พิมพ์ secret/PII และไม่เขียน DB
+- **ข้อค้นพบหลัก:** tracking จริงอยู่ top-level แต่โค้ดค้น nested package; ID ข้าม collection เป็น float/int/string ต้อง normalize; unit model stale 47 refs; OCR ครอบคลุม image id 19.23%; order เก่าบางรายการไม่อยู่ catalog ปัจจุบัน; `seller_stock` กับ summary ตรงกันด้าน zero/positive แต่ต่างจำนวน 62 units จึงต้อง reuse `_shopee_stock`; approved gold 67 rows ยังไม่มี history/Mi17/must-not coverage ที่พอ
+- **แก้แผน:** เพิ่ม gold gap gate, full-live candidate refresh, bounded unit+legacy source union ก่อน selection, immutable profile ก่อน KB/product fetch, normalized item-id-first KB merge, shop-scoped order lookup, compatibility negative-proof, รายการ duplicate logic ที่ต้องลบ และ final replay gate
+- **refine หลัง user review:** availability resolver ต้องถือ `stock_info_v2.summary_info.total_available_stock` เป็น stock truth ของ variant/model; fallback ไป `shopee_stock`/`seller_stock` เฉพาะเมื่อ summary field หายหรืออ่านไม่ได้เท่านั้น ไม่ใช่เมื่อ summary มีค่า `0`; เพิ่ม test case ใน plan กัน regression summary=0 แล้วหลุดไป fallback
+- **ไม่เพิ่ม abstraction เกินจำเป็น:** ตัดข้อเสนอ `order_items_to_anchor_cards()` ที่ไม่มีจริง; ใช้ minimal-card fallback เดิมใน `order_flow`; ไม่สร้าง stock formula/ID normalizer/pipeline order ซ้ำ
+- **verify เอกสาร/ฐานวัด:** stale-name scan clean, task headings ครบ Task 1-14 + Task 5A recall subtask, code fences 140 จุดสมดุล, `git diff --check` ผ่าน; evaluator/drafter/gold-validator tests 13/13 ผ่าน และ approved gold validator ผ่าน; ยังไม่แตะ runtime code
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)
