@@ -4213,19 +4213,17 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         #   แก้: mark _available_for_sale ในทุก product (context note inject หลัง _apply_product_tiers)
         _pending_context_note = ""
         if products:
+            # ⚡ Task 2 — availability owner เดียว: resolver บน card (status/total_stock)
+            #   cards จาก product_store/units มี catalog_status อยู่แล้ว — เติมให้ card
+            #   ที่มาจาก path อื่น (KB-minimal/timeline) ด้วย setdefault
             for _p in products:
-                _p["_available_for_sale"] = (
-                    _p.get("status") == "NORMAL"
-                    and not _p.get("sold_out", False)
-                    and (_p.get("total_stock", 0) or 0) > 0
-                )
-            _has_unlist = any(not _p.get("_available_for_sale") and _p.get("status") != "NORMAL" for _p in products)
-            _has_sold_out = any(
-                not _p.get("_available_for_sale")
-                and _p.get("status") == "NORMAL"
-                and (_p.get("sold_out", False) or (_p.get("total_stock", 0) or 0) == 0)
-                for _p in products
-            )
+                _av = product_store.resolve_availability(_p)
+                _p["_available_for_sale"] = _av["available_for_sale"]
+                _p.setdefault("catalog_status", _av["catalog_status"])
+            _has_unlist = any(_p.get("catalog_status") in ("unlisted", "discontinued")
+                              for _p in products)
+            _has_sold_out = any(_p.get("catalog_status") == "out_of_stock"
+                                for _p in products)
             _avail_count = sum(1 for _p in products if _p.get("_available_for_sale"))
             print(f"[AVAIL-FOR-SALE] total={len(products)} available={_avail_count} unlist={_has_unlist} sold_out={_has_sold_out}", file=sys.stderr)
 

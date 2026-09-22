@@ -53,6 +53,27 @@
 - **ไม่เพิ่ม abstraction เกินจำเป็น:** ตัดข้อเสนอ `order_items_to_anchor_cards()` ที่ไม่มีจริง; ใช้ minimal-card fallback เดิมใน `order_flow`; ไม่สร้าง stock formula/ID normalizer/pipeline order ซ้ำ
 - **verify เอกสาร/ฐานวัด:** stale-name scan clean, task headings ครบ Task 1-14 + Task 5A recall subtask, code fences 140 จุดสมดุล, `git diff --check` ผ่าน; evaluator/drafter/gold-validator tests 13/13 ผ่าน และ approved gold validator ผ่าน; ยังไม่แตะ runtime code
 
+### ✅ Master plan Task 2: availability single owner (2026-09-22) — implement + verified รออนุมัติ commit
+
+- **error:** สินค้าที่มีของจริงถูกตอบ "ไม่มีสินค้า/หมดสต็อก" (Mi17 case จาก review) · summary `total_available_stock=0` ไหลไป fallback ได้ · availability semantics กระจายหลายจุดต่างกันเงียบๆ
+- **root cause:** `_shopee_stock()` ใช้ `if total_available` (truthiness) → summary=0 ถูกมองเป็น missing → fallback `shopee_stock[]` เอาค่าอื่นมาทับ fact "หมด"; สูตร sellable ซ้ำใน `_doc_sellable` / `to_product_card` / `units._live_sellable` / `app.py` recompute (`_available_for_sale`) / `_doc_stock_total` — ไม่มี owner เดียว
+- **fix plan (ตาม plan §Task 2):** แก้ `_shopee_stock` ให้แยก "field มีค่า" vs "ค่าเป็นตัวเลข" (summary→shopee_stock→seller_stock chain; 0 คือ fact) · เพิ่ม `_stock_info_has_any_stock_source()` + `resolve_availability()` เป็น owner เดียวคืน `{catalog_status, available_for_sale, answerable, reason, total_stock}` · wire เฉพาะ duplicated formulas · ห้ามแตะ v2/v3, ห้ามสร้าง `_stock_from_model()`
+- **กระทบเคสอื่น (impact analysis):**
+  - summary=0 แต่ shopee/seller>0 → out_of_stock (เดิม active ผิด — bug ที่ต้องแก้)
+  - ไม่มี stock source อ่านได้ → `active_unknown_stock` + answerable (เดิม sold_out ผิด)
+  - unit ที่ model_id หายจาก live listing → `model_missing` ไม่ใช่ sold-out ทั้ง listing
+  - `build_sellable_units.py` ได้ semantics ใหม่ผ่าน `_shopee_stock` อัตโนมัติ
+  - `item_status:"NORMAL"` mongo query filters + LLM prompt notes ไม่แตะ — ไม่ใช่ stock formula
+- **TDD:** `docs/test/test_availability.py` + `test_availability_wiring.py` ก่อนแก้ runtime — RED ยืนยัน (AttributeError resolver + `assert 99 == 0` พิสูจน์ bug)
+- **วิธีแก้ (implement แล้ว):**
+  - `_stock_info_has_any_stock_source()` — แยก "มี source อ่านได้" (numeric check; seller เฉพาะ if_saleable!=False) ออกจาก "อ่านได้ 0"
+  - `_shopee_stock()` — แก้ `if total_available` → `isinstance(total_available, (int,float))`: summary=0 คืน 0 ทันที ไม่ไหลไป fallback; chain summary→shopee_stock→saleable seller_stock→0
+  - `resolve_availability(card_or_doc, *, model_doc=None)` — owner เดียวคืน `{catalog_status, available_for_sale, answerable, reason, total_stock}`; doc มี model[] รวมเฉพาะ MODEL_NORMAL; card input fallback ไป total_stock/stock เฉพาะเมื่อไม่ส่ง model_doc
+  - wiring: `_doc_sellable`/`_doc_stock_total`/`to_product_card` (resolve จาก model เต็มก่อนตัด variants[:20]; card เพิ่ม `catalog_status`, `sold_out`=out_of_stock เท่านั้น, `total_stock` int|None) · `units._live_availability` คืน (status, availability, model_status) + model หาย→`model_missing`/unlisted · `units._live_sellable`/`to_unit_card` (เพิ่ม `catalog_status`+`availability_reason`) · `app.py` recompute ใช้ resolver + setdefault catalog_status; `_has_unlist`/`_has_sold_out` อ่าน catalog_status
+- **verify:** pytest `test_availability.py`+`test_availability_wiring.py` = **32/32 ผ่าน**; gold suite 19/19 ผ่าน; `py_compile` 3 ไฟล์ OK; `git diff --check` OK; `test_unit_card_fields`/`test_route_context`/`test_guards`/`test_timeline_card_refresh` ผ่าน (แก้ stale assert EC4==10→>0 — fail บน HEAD เดิมด้วย); `test_sellable_units` fail เดิมจากนับ stale 26970≠27807 (ไม่เกี่ยว)
+- **real-data sanity (export 11,692 docs):** NORMAL→active 2096 / out_of_stock 1264, UNLIST→unlisted 7089, *DELETE+BANNED→discontinued 1203, REVIEWING→unknown 40; ทุก model มี numeric summary → fallback path ไม่ fire → **behavior change ≈0 บนข้อมูลปัจจุบัน**, fix กัน data shape ที่ summary=0/หาย
+- **ไม่แตะ:** v2/v3 ทั้งหมด · `item_status:"NORMAL"` mongo query filters · LLM prompt notes · `_stock_from_model()` ไม่ได้สร้าง
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)

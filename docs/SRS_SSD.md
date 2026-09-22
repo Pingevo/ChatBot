@@ -244,7 +244,7 @@ POST /chat → _require_internal_secret → chat(req)
 | 13 | KB + Mongo merge | `knowledge_base.lookup_kb` | `_merge_kb_mongo` (KB card ก่อน + dedupe) |
 | 14 | Product retrieval | always (ถ้าไม่ return ก่อน) | `product_store.fetch_products` — `USE_UNIT_INDEX` → `units.fetch_unit_cards`; ไม่ก็ hybrid listing path (ตารางด้านล่าง) |
 | 15 | Device compat | intent=compatibility_check หรือ target_device ชัด | `device_compat._device_spec_lookup` → `_filter_compat_products` → `_apply_product_tiers` |
-| 16 | Availability marking | always | `_available_for_sale = status=="NORMAL" && !sold_out && stock>0` + `_context_note` ห้ามเสนอขายตัวไม่พร้อม (ตอบ spec/ประกันได้) |
+| 16 | Availability marking | always | `resolve_availability(card)` owner เดียว → `_available_for_sale` + `catalog_status` (setdefault) + `_context_note` ห้ามเสนอขายตัวไม่พร้อม (ตอบ spec/ประกันได้) |
 | 17 | Tier merge + dedupe | always | `_dedupe_products` (base-name → best sellable) + tier merge |
 | 18 | Web search fallback | `should_use_web_search` (skip เมื่อ spec-db grounded) | `search_and_extract` → keywords re-query → `reanswer` (strip URLs) |
 | 19 | Answer | always | `llm.answer` (products+persona+vision+compat+search ctx) → `_append_base_warranty` |
@@ -419,9 +419,11 @@ listing path:
 | `_price_range` | min-max price | doc | dict | models[] | to_product_card | — | — |
 | `_first_image_url` | รูปแรก | doc | str | — | to_product_card | — | — |
 | `_clean_description` | trim/filter desc | desc, message | str | section markers | to_product_card | intent-aware section pick | — |
-| `_shopee_stock` | live stock join | model_doc | int | stock DB | to_product_card, build_sellable_units | `shopee_ship_box` → itStock | DB read |
-| `_doc_sellable` | sellable check | doc | bool | status/stock fields | fetch, _dedupe_sell_score | NORMAL && !sold_out && stock>0 | — |
-| `to_product_card` | doc→card มาตรฐาน | doc, message | dict(card) | _warranty_info, _price_range, _first_image_url, _clean_description, _shopee_stock | ทุก retrieval path, product_match | uniform card + `_available_for_sale` | — |
+| `_stock_info_has_any_stock_source` | stock source อ่านได้ไหม | stock_info_v2 | bool | — | resolve_availability | summary/shopee/seller มี entry ที่เป็น numeric (seller เฉพาะ if_saleable!=False) | — |
+| `_shopee_stock` | numeric stock owner | model_doc | int | stock_info_v2 fields | resolve_availability, to_product_card, build_sellable_units | chain: summary.total_available_stock (0=fact ห้าม fallback) → shopee_stock[] → saleable seller_stock[] → 0 | — |
+| `resolve_availability` | **availability owner เดียว** | card_or_doc, model_doc=None | dict{catalog_status, available_for_sale, answerable, reason, total_stock} | _stock_info_has_any_stock_source, _shopee_stock | _doc_sellable, to_product_card, units._live_availability, app.py availability marking | NORMAL+stock>0→active / stock=0→out_of_stock / ไม่มี source→active_unknown_stock / UNLIST→unlisted / *DELETE+BANNED→discontinued / model!=MODEL_NORMAL→unlisted / อื่น→unknown; model[] รวมเฉพาะ MODEL_NORMAL | — |
+| `_doc_sellable` | sellable check | doc | bool | resolve_availability | _rerank_by_promo_latest, name-match sort | `resolve_availability(doc)["available_for_sale"]` | — |
+| `to_product_card` | doc→card มาตรฐาน | doc, message | dict(card) | _warranty_info, _price_range, _first_image_url, _clean_description, _shopee_stock, resolve_availability | ทุก retrieval path, product_match | uniform card + `catalog_status` + `_available_for_sale` + `sold_out` (out_of_stock เท่านั้น) + `total_stock` (None=unknown) | — |
 | `_extract_product_name_tokens` | tokenize name | name | list[str] | regex | fuzzy_match_products | — | — |
 | `fuzzy_match_products` | fuzzy name match | docs/message | list | _extract_product_name_tokens | fallback retrieval | token overlap score | — |
 | `_detect_intent` | intent kw → filter hints | message | set[str] | kw tables | build_query | — | — |
@@ -458,7 +460,7 @@ listing path:
 | `_stock_products_coll` | stock coll handle | — | coll | STOCK_* env | _variant_cert_hit, cert join | `itStock.Products` | — |
 | `_variant_cert_hit` | cert ใน variant name | option_name, certs | str/None | _has_cert | search_cert_products | version tokens | — |
 | `_admin_image_texts_coll` | OCR coll handle | — | coll | ADMIN_MONGO_* | search_cert_products | `image_texts` | — |
-| `_doc_stock_total` | sum stock | doc | int | models[] | sellable checks | — | — |
+| `_doc_stock_total` | stock รวม (cert card) | doc | int | resolve_availability | search_cert_products | `total_stock or 0` จาก resolver | — |
 | `_name_matches_types` | name↔type check | name, type_filter | bool | type regexes | search_cert_products | — | — |
 | `search_cert_products` | **cert search** | db, message, shop, certs, type_filter | list[card] | mongo prefilter + _has_cert verify + _stock_products_coll + _variant_cert_hit + _admin_image_texts_coll | cert path (handoffs/app) | 4 แหล่ง: desc + OCR + itStock flags + variant tokens; type_filter กรองหมวด | mongo reads |
 | `search_tisi_products` | TISI wrapper | db, message, shop | list[card] | search_cert_products | TISI path | certs=("tisi","มอก") | — |
@@ -684,10 +686,10 @@ listing path:
 | `_vector_search` | unit vector search | query, filters | units | _unit_vectors, _sellable_mask, embed_query | fetch_units | cosine top-k | — |
 | `fetch_units` | unit retrieval | db, message, limit, … | units | _vector_search | fetch_products (flag) | — | error→[] → fallback listing |
 | `pick_desc_sections` | เลือก desc sections | unit, route | str | sections dict | to_unit_card | highlights/specs/warranty/notes | — |
-| `_live_availability` | availability สด | unit | bool | stock join | _live_sellable | — | DB read |
-| `_live_sellable` | sellable สด | unit | bool | _live_availability | fetch_unit_cards | — | — |
+| `_live_availability` | availability สด | unit | (item_status, availability dict, model_status) | product_store.resolve_availability | _live_sellable, to_unit_card | join _listing → exact model_doc เข้า resolver; model หาย→model_missing; ไม่มี listing→resolve unit snapshot | — |
+| `_live_sellable` | sellable สด | unit | bool | _live_availability | fetch_unit_cards | `availability["available_for_sale"]` | — |
 | `_variant_image_id` | รูปตาม variant | unit | image_id | — | to_unit_card | — | — |
-| `to_unit_card` | unit→card | unit, message | card | pick_desc_sections, _variant_image_id, _live_sellable | fetch_unit_cards | listing-compatible shape | — |
+| `to_unit_card` | unit→card | unit, message | card | pick_desc_sections, _variant_image_id, _live_availability | fetch_unit_cards | listing-compatible shape + `catalog_status` + `availability_reason` | — |
 | `attach_kb_specs` | ผูก KB specs | units | units | knowledge_base | fetch_unit_cards | enrich spec | DB read |
 | `_unit_warranty` | warranty ของ unit | unit | dict | warranty helpers | to_unit_card | — | — |
 | `attach_image_texts` | ผูก OCR | units | units | `image_texts` coll | fetch_unit_cards | รูปนอก desc | DB read |

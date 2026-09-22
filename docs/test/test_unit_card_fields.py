@@ -26,7 +26,8 @@ def main() -> int:
         assert k in v, f"variant missing {k}"
     by_name = {x["name"]: x for x in card["variants"]}
     assert by_name["EC4 เฉพาะกล้อง"]["stock"] == 0, by_name["EC4 เฉพาะกล้อง"]
-    assert by_name["EC4 + Smart Hub"]["stock"] == 10, by_name["EC4 + Smart Hub"]
+    # invariant จริง: +Smart Hub มี stock >0 (ค่าจริงเปลี่ยนตาม export — เคย assert ==10 แล้ว stale)
+    assert by_name["EC4 + Smart Hub"]["stock"] > 0, by_name["EC4 + Smart Hub"]
     print("PASS variants carry model_id/stock/model_status (EC4 mixed stock ถูก)")
 
     # ── add_product เก็บ model_id + dedupe ด้วย (item_id, model_id) ──

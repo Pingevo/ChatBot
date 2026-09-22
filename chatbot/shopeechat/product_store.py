@@ -553,53 +553,145 @@ def _clean_description(desc: str, message: str = "") -> str:
     return result[:3000]
 
 
+def _stock_info_has_any_stock_source(stock_info: dict) -> bool:
+    """stock_info_v2 มี source ที่อ่านค่า stock เป็นตัวเลขได้จริงไหม.
+
+    ใช้แยก "ไม่มี stock source เลย" (unknown) ออกจาก "อ่านแล้วได้ 0" (fact)
+    — presence ของ field ไม่พอ ต้องอ่านเป็นตัวเลขได้ด้วย.
+    """
+    si = stock_info or {}
+    summary = si.get("summary_info") or {}
+    if isinstance(summary.get("total_available_stock"), (int, float)):
+        return True
+    shopee_stock = si.get("shopee_stock")
+    if isinstance(shopee_stock, list) and any(
+            isinstance(x, dict) and isinstance(x.get("stock"), (int, float))
+            for x in shopee_stock):
+        return True
+    seller_stock = si.get("seller_stock")
+    return isinstance(seller_stock, list) and any(
+        isinstance(x, dict) and x.get("if_saleable") is not False
+        and isinstance(x.get("stock"), (int, float))
+        for x in seller_stock)
+
+
 def _shopee_stock(model_doc: dict) -> int:
-    """⚡ คำนวณ Shopee stock จริงจาก model doc หรือ doc.
+    """⚡ คำนวณ Shopee stock จริงจาก model doc หรือ doc — numeric owner เดียว.
 
-    อ่านจาก stock_info_v2.summary_info.total_available_stock เป็นหลัก
-    (เป็นค่า stock รวมรุ่นย่อยที่ Shopee คำนวณให้ — ใช้ตอนแนะนำขายได้จริง)
-    fallback ไปยัง stock_info_v2.shopee_stock[].stock ถ้า summary_info ไม่มี
-
-    Args:
-        model_doc: dict ของ 1 model entry ใน doc["model"] หรือ doc เอง
-
-    Returns:
-        stock จาก summary_info.total_available_stock (0 ถ้า field ไม่มี)
+    ลำดับ stock truth (presence ≠ value — 0 คือ fact ไม่ใช่ missing):
+    1. summary_info.total_available_stock (ค่าจริงจาก Shopee) — มีและเป็นตัวเลข
+       ใช้ทันที รวมถึง 0; ห้าม fallback เมื่อค่าเป็น 0
+    2. shopee_stock[].stock — เฉพาะเมื่อ summary หายหรืออ่านไม่ได้
+    3. seller_stock[].stock เฉพาะ entry ที่ if_saleable != False —
+       เฉพาะเมื่อทั้งสองข้างบนหายหรืออ่านไม่ได้
+    ไม่มี source อ่านได้ → 0 (caller ใช้ _stock_info_has_any_stock_source
+    แยก unknown ออกจาก 0 เอง)
     """
     try:
         si = (model_doc or {}).get("stock_info_v2") or {}
-        # 1. ลอง summary_info.total_available_stock ก่อน (ค่าจริงจาก Shopee)
         summary = si.get("summary_info") or {}
-        total_available = summary.get("total_available_stock", 0)
-        if total_available and isinstance(total_available, (int, float)):
+        total_available = summary.get("total_available_stock")
+        if isinstance(total_available, (int, float)):
             return int(total_available)
-        # 2. fallback ไป shopee_stock[].stock (กรณี summary_info ไม่มี)
-        shopee_stock_list = si.get("shopee_stock") or []
-        if not shopee_stock_list or not isinstance(shopee_stock_list, list):
-            return 0
-        return sum(
-            (entry.get("stock", 0) or 0)
-            for entry in shopee_stock_list
-            if isinstance(entry, dict)
-        )
+
+        shopee_stock = si.get("shopee_stock")
+        if isinstance(shopee_stock, list):
+            usable = [x for x in shopee_stock
+                      if isinstance(x, dict) and isinstance(x.get("stock"), (int, float))]
+            if usable:
+                return sum(int(x["stock"]) for x in usable)
+
+        seller_stock = si.get("seller_stock")
+        if isinstance(seller_stock, list):
+            usable = [x for x in seller_stock
+                      if isinstance(x, dict) and x.get("if_saleable") is not False
+                      and isinstance(x.get("stock"), (int, float))]
+            if usable:
+                return sum(int(x["stock"]) for x in usable)
+        return 0
     except Exception:
         return 0
 
 
-def _doc_sellable(doc: dict) -> bool:
-    """doc ขายได้จริงตอนนี้ไหม — item_status NORMAL + stock>0.
+def resolve_availability(card_or_doc: dict, *, model_doc: dict | None = None) -> dict:
+    """owner เดียวของ availability semantics — status + stock → sellability.
 
-    logic เดียวกับ total_stock ใน to_product_card (มี model → รุ่นใดมี stock
-    ก็ถือว่ามี; ไม่มี model → doc-level stock_info_v2)
+    Args:
+        card_or_doc: raw listing doc (มี item_status/model[]) หรือ card
+            (มี status/total_stock — fallback เมื่อไม่มี stock_info_v2)
+        model_doc: model entry เฉพาะรุ่น (unit path — resolve เฉพาะ model นี้)
+
+    Returns:
+        dict keys:
+          catalog_status: active | active_unknown_stock | out_of_stock |
+              unlisted | discontinued | unknown
+          available_for_sale: ขายได้ตอนนี้ (NORMAL + stock>0 ที่รู้จริง)
+          answerable: ตอบคำถามเกี่ยวกับสินค้านี้ได้ (เคยมี/มีข้อมูล)
+          reason: machine-readable string สั้น
+          total_stock: int | None (None = ไม่มี source อ่านได้ ไม่ใช่ 0)
+    """
+    doc = card_or_doc or {}
+    status = str(doc.get("item_status") or doc.get("status") or "").upper()
+    source_for_status = model_doc if model_doc is not None else doc
+    model_status = str(source_for_status.get("model_status") or "").upper()
+    models = [] if model_doc is not None else list(doc.get("model") or [])
+
+    if models:
+        active_models = [m for m in models
+                         if str(m.get("model_status") or "").upper() == "MODEL_NORMAL"]
+        stock_known = any(_stock_info_has_any_stock_source(m.get("stock_info_v2") or {})
+                          for m in active_models)
+        stock = sum(_shopee_stock(m) for m in active_models) if stock_known else None
+        if not active_models:
+            stock_known, stock = True, 0
+    else:
+        source = model_doc if model_doc is not None else doc
+        info = source.get("stock_info_v2") or {}
+        stock_known = (_stock_info_has_any_stock_source(info)
+                       or source.get("stock") is not None
+                       or source.get("total_stock") is not None)
+        stock = _shopee_stock(source) if _stock_info_has_any_stock_source(info) else None
+        # card input (ไม่มี stock_info_v2) → ใช้ total_stock/stock ของ card เป็น fallback
+        # เฉพาะเมื่อไม่ได้ส่ง model_doc — ห้ามให้ stock ของ listing ไหลเข้า model
+        if stock is None and model_doc is None:
+            raw = doc.get("stock", doc.get("total_stock"))
+            try:
+                stock = int(raw) if raw is not None else None
+            except Exception:
+                stock = None
+    if not stock_known:
+        stock = None
+
+    if status == "NORMAL" and model_status and model_status != "MODEL_NORMAL":
+        return {"catalog_status": "unlisted", "available_for_sale": False,
+                "answerable": True, "reason": "model_not_normal", "total_stock": stock}
+    if status == "NORMAL":
+        if stock is None:
+            return {"catalog_status": "active_unknown_stock", "available_for_sale": False,
+                    "answerable": True, "reason": "normal_unknown_stock", "total_stock": stock}
+        if stock > 0:
+            return {"catalog_status": "active", "available_for_sale": True,
+                    "answerable": True, "reason": "normal_positive_stock", "total_stock": stock}
+        return {"catalog_status": "out_of_stock", "available_for_sale": False,
+                "answerable": True, "reason": "normal_zero_stock", "total_stock": stock}
+    if status == "UNLIST":
+        return {"catalog_status": "unlisted", "available_for_sale": False,
+                "answerable": True, "reason": "item_unlisted", "total_stock": stock}
+    if status in {"SELLER_DELETE", "DELETED", "SHOPEE_DELETE", "BANNED"}:
+        return {"catalog_status": "discontinued", "available_for_sale": False,
+                "answerable": True, "reason": f"item_{status.lower()}", "total_stock": stock}
+    return {"catalog_status": "unknown", "available_for_sale": False,
+            "answerable": False, "reason": f"unknown_status:{status or 'missing'}",
+            "total_stock": stock}
+
+
+def _doc_sellable(doc: dict) -> bool:
+    """doc ขายได้จริงตอนนี้ไหม — delegate ไป resolve_availability (owner เดียว).
+
     ใช้เป็น availability tier แรกของ _rerank_by_promo_latest —
     ของตายยังอยู่ใน context (ตอบ "เคยมีไหม" ได้) แต่ไม่ชนะของที่ขายได้
     """
-    if (doc or {}).get("item_status") != "NORMAL":
-        return False
-    models = doc.get("model") or []
-    if models:
-        return any(_shopee_stock(m) > 0 for m in models)
-    return _shopee_stock(doc) > 0
+    return resolve_availability(doc)["available_for_sale"]
 
 
 def to_product_card(doc: dict, message: str = "") -> dict:
@@ -612,17 +704,10 @@ def to_product_card(doc: dict, message: str = "") -> dict:
     doc = _to_serializable(doc)
     brand = (doc.get("brand") or {}).get("original_brand_name", "")
     price = _price_range(doc)
-    # คำนวณ total stock จาก summary_info.total_available_stock ของทุก model
-    # ⚡ ใช้ summary_info.total_available_stock (ค่าจริงจาก Shopee) — ไม่ใช้ shopee_stock[].stock
-    #   ถ้ามี model → รวม stock ทุกรุ่นย่อย (รุ่นใดมี stock ก็ถือว่าสินค้ามี stock)
-    #   ถ้าไม่มี model → อ่านจาก doc.stock_info_v2.summary_info.total_available_stock
-    total_stock = 0
-    models = doc.get("model") or []
-    if models:
-        for m in models:
-            total_stock += _shopee_stock(m)
-    else:
-        total_stock = _shopee_stock(doc)
+    # ⚡ availability จาก resolver owner เดียว — resolve จาก doc["model"] เต็ม
+    #   ก่อนตัด variants[:20] ด้านล่าง (stock อาจอยู่ที่ model ลำดับท้าย)
+    av = resolve_availability(doc)
+    total_stock = av["total_stock"]
     return {
         "item_id": doc.get("item_id"),
         "name": doc.get("item_name"),
@@ -638,12 +723,11 @@ def to_product_card(doc: dict, message: str = "") -> dict:
         "weight": doc.get("weight"),
         "dimension": doc.get("dimension"),
         "total_stock": total_stock,
-        "sold_out": total_stock == 0,
-        # ⚡ BUG-H fix (revised) — _available_for_sale = ขายได้จริงตอนนี้
-        #   NORMAL + stock>0 — sold_out field แยกบอก "หมดสต็อกชั่วคราว" ต่างจากเลิกจำหน่าย
-        #   (app.py recompute ใช้สูตรเดียวกัน — card ต้องถูกตั้งแต่ source
-        #   เพราะ item_tag/KB-merge/web-search/timeline-restore ไม่ผ่าน recompute)
-        "_available_for_sale": doc.get("item_status") == "NORMAL" and total_stock > 0,
+        "catalog_status": av["catalog_status"],
+        # sold_out = รู้จริงว่าหมด (out_of_stock เท่านั้น) — unknown/unlisted ไม่ใช่ sold out
+        "sold_out": av["catalog_status"] == "out_of_stock",
+        # ⚡ _available_for_sale จาก resolver — app.py recompute เรียก resolver เดียวกัน
+        "_available_for_sale": av["available_for_sale"],
         # ข้อมูลโปรโมชั่น (ใช้ตอน re-rank และให้ LLM บอกลูกค้าได้)
         "has_promotion": _has_active_promotion(doc),
         "is_flash_sale": bool(doc.get("is_flash_sale")),
@@ -3713,7 +3797,8 @@ def _admin_image_texts_coll():
 
 
 def _doc_stock_total(doc: dict) -> int:
-    return ((doc.get("stock_info_v2") or {}).get("summary_info") or {}).get("total_available_stock", 0) or 0
+    """stock รวมของ doc สำหรับ cert card — delegate ไป resolver (owner เดียว)."""
+    return resolve_availability(doc)["total_stock"] or 0
 
 
 def _name_matches_types(name: str, type_filter: set[str]) -> bool:
