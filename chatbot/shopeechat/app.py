@@ -1719,6 +1719,54 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     image_desc=_image_desc_out,
                 )
 
+        # ⚡ Task 4B — resolve conversation active ครั้งเดียวก่อน KB/candidate fetch
+        #   (ผล reuse ที่ CONV-ACTIVE ด้านล่าง — resolver ถูกเรียกแค่จุดนี้จุดเดียว)
+        _conv_model_kw: list[str] = []
+        _conv_active_card = None
+        if req.conversation_id:
+            try:
+                _conv_model_kw = knowledge_base.extract_model_keywords(req.message)
+                # ⚡ Phase 3 — กรอง target device ออกจาก model keywords
+                _conv_model_kw = [kw for kw in _conv_model_kw
+                                  if not knowledge_base.is_target_device_kw(kw)]
+                _conv_active_card = conversation_products.resolve_active_by_message(
+                    conversation_id=req.conversation_id,
+                    message=req.message,
+                    model_keywords=_conv_model_kw,
+                )
+            except Exception as _e:
+                print(f"[PROFILE] conv-active resolve error: {_e}", file=sys.stderr)
+                _conv_active_card = None
+
+        # ⚡ Task 4B — RetrievalProfile เดียวต่อ request (observe-only)
+        #   รวม anchor ที่ flow เดิม resolve ไว้แล้ว: tagged item / hybrid image /
+        #   conv-active / compare pair — ไม่เปลี่ยน products/ranking/answer
+        _resolved_anchor_cards: list[dict] = []
+        for _ac in (anchor_card, _hybrid_anchor_card, _conv_active_card,
+                    _anchor_compare_ctx.get("current"),
+                    _anchor_compare_ctx.get("previous")):
+            if _ac and _ac not in _resolved_anchor_cards:
+                _resolved_anchor_cards.append(_ac)
+        try:
+            _retrieval_profile = _rc.build_retrieval_profile(
+                req.message,
+                history=history,
+                intent_result=_intent_result,
+                shop=req.shop,
+                platform=req.platform or "shopee",
+                anchor_cards=_resolved_anchor_cards,
+            )
+        except Exception as _e:
+            print(f"[PROFILE] build error: {_e}", file=sys.stderr)
+            _retrieval_profile = None
+        if _retrieval_profile is not None:
+            _steps.append({
+                "name": "RetrievalProfile",
+                "input": {"message": req.message,
+                          "anchor_item_ids": list(_retrieval_profile.anchor_item_ids)},
+                "output": _rc.profile_debug(_retrieval_profile, source="app_chat"),
+            })
+
         # ===== ขั้นที่ 1: เช็ค Knowledge Base ก่อน =====
         # ถ้าเป็น follow-up (เช่น "เคลมยังไง", "รับประกัน") ให้เอา model จาก history มาค้น KB ด้วย
         kb_query = req.message
@@ -2540,15 +2588,9 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         #   แต่เช็คเพิ่ม: ถ้า _cur_charger_sub มีค่าและต่างจาก subtype ของ active_card → เปลี่ยนหมวด ไป fetch ใหม่
         if req.conversation_id and not _is_conv_active:
             try:
-                from . import conversation_products as _cp
-                _cur_model_kw = knowledge_base.extract_model_keywords(req.message)
-                # ⚡ Phase 3 — กรอง target device ออกจาก _cur_model_kw
-                _cur_model_kw = [kw for kw in _cur_model_kw if not knowledge_base.is_target_device_kw(kw)]
-                _active_card = _cp.resolve_active_by_message(
-                    conversation_id=req.conversation_id,
-                    message=req.message,
-                    model_keywords=_cur_model_kw,
-                )
+                # ⚡ Task 4B — resolve ครั้งเดียวก่อน KB แล้ว (profile build ด้านบน)
+                _cur_model_kw = list(_conv_model_kw)
+                _active_card = _conv_active_card
                 if _active_card and _active_card.get("item_id"):
                     # ⚡ Phase 3 — เช็ค subtype ของ active_card ว่าตรงกับ _cur_charger_sub ไหม
                     #   ถ้าลูกค้าเปลี่ยนจาก cable → adapter จริงๆ → ไม่ใช้ active (ไป fetch ใหม่)

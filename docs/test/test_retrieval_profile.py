@@ -223,3 +223,40 @@ def test_history_not_carried_when_current_names_other_family():
     assert got.product_types == frozenset({"earphone"})
     assert got.subtype is None
     assert ("subtype", "history") not in got.fact_sources
+
+
+# ── Task 4B: profile_debug + app.py wiring structural pins ──
+
+def test_profile_debug_shape():
+    got = build_retrieval_profile(
+        "สายชาร์จใช้กับ iPhone 13 ได้ไหม",
+        history=[],
+        intent_result={"intent": "compatibility_check", "confidence": 0.95},
+        shop="ZMIThailand",
+    )
+    dbg = route_context.profile_debug(got, source="app_chat",
+                                      used_fields=("shop", "product_types"))
+    assert dbg["source"] == "app_chat"
+    assert dbg["shop"] == "ZMIThailand"
+    assert dbg["product_types"] == ["charger"]
+    assert dbg["subtype"] == "cable"
+    assert dbg["target_device"] == "iphone 13"
+    assert dbg["compat_mode"] == "connector_required"
+    assert dbg["availability_mode"] == "sellable_first"
+    assert dbg["used_fields"] == ["shop", "product_types"]
+    assert isinstance(dbg["fact_sources"], dict)
+    # debug เป็น facts เท่านั้น — ไม่มี history/message dump
+    assert "history" not in dbg
+
+
+def test_app_builds_profile_once_before_kb_lookup():
+    # structural pin: profile build ต้องอยู่ก่อน lookup_kb และก่อน fetch_products แรก
+    src = (ROOT / "chatbot" / "shopeechat" / "app.py").read_text(encoding="utf-8")
+    build_at = src.index("build_retrieval_profile(")
+    assert 0 < build_at < src.index("lookup_kb(kb_query")
+
+
+def test_resolve_active_by_message_called_exactly_once():
+    # timeline resolver ต้องถูกเรียกจุดเดียว (hoisted ก่อน KB) — CONV-ACTIVE reuse ผล
+    src = (ROOT / "chatbot" / "shopeechat" / "app.py").read_text(encoding="utf-8")
+    assert src.count("resolve_active_by_message(") == 1

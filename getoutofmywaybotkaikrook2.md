@@ -98,7 +98,21 @@
 - **app.py:** เพิ่ม `route_context as _rc` ใน import + alias constants 3 ตัวกลับ — **ไม่มี flow/logic เปลี่ยน** (tuple เดิมทุกประการ)
 - **verify:** profile **15/15** · suite รวม (evidence+availability+gold) **80/80** · py_compile 5 ไฟล์ OK · `git diff --check` OK · app import OK · script regressions: route_context ALL PASS / car_charger 16/16 / subtype parity 42/42 / guards / unit_card_fields ผ่าน
 - **verify กับ MongoDB จริง:** `docs/test/test_retrieval_profile_db.py` (load_dotenv→get_client) **17/17** — KingGadgets มี cable sellable จริง 56 รายการ (พิสูจน์ "ไม่มีสินค้า" เป็น false ตั้งแต่ profile) · real anchor cards → compare + float item_id → int-str ถูก · real model code (W01) → answerable_all + ไม่ถูกนับเป็น device
-- **behavior change:** ไม่มี — `build_retrieval_profile` ไม่ถูกเรียกจาก runtime path ใด (Task 4B ค่อย wire); constants alias ค่าเดิม
+
+### ✅ Master plan Task 4B: build profile once ใน app.py ก่อน KB (2026-09-22) — implement + verified รออนุมัติ commit
+
+- **งาน:** `app.py` — resolve conversation active ครั้งเดียวก่อน `lookup_kb` + สร้าง `_retrieval_profile` หลัง intent/anchor blocks (observe-only เท่านั้น)
+- **ทำไม:** เดิม CONV-ACTIVE เรียก `resolve_active_by_message` หลัง KB (~2547) → KB/product fetch ไม่มีโจทย์กลาง; Mi17 follow-up ขาด charger+cable+device facts ตอนดึงสินค้า
+- **จุดวาง:** ก่อน `ขั้นที่ 1: lookup_kb` — หลัง warranty/general/brand early-returns (ข้าม wasted read บน path ที่ไม่ดึงสินค้า) แต่ก่อน candidate fetch แรก
+- **hoist:** `resolve_active_by_message` + `_cur_model_kw` computation → `_conv_active_card`/`_conv_model_kw` — pure read, timeline ไม่มี write คั่น (add_product อยู่ 921/1076 ก่อน intent, 4760 หลังตอบ) → CONV-ACTIVE reuse ผลเดิม · **resolver ยังถูกเรียกครั้งเดียว**
+- **anchor collect:** `anchor_card`(tagged) + `_hybrid_anchor_card` + `_conv_active_card` + `_anchor_compare_ctx` current/previous (dedupe)
+- **debug:** เพิ่ม `route_context.profile_debug()` → append step "RetrievalProfile" เข้า `_steps` (facts เท่านั้น ไม่ใส่ history dump)
+- **equivalence proof:** `_cur_model_kw` ยัง define เฉพาะใน block (guard ที่ ~4063 ใช้ try/NameError เดิม) · subtype-mismatch/new-topic/compat guards ใน CONV-ACTIVE ไม่แตะ · LINK-FOLLOWUP order เดิม
+- **TDD pins:** `profile_debug` shape + `build_retrieval_profile` อยู่ก่อน `lookup_kb` ใน source + `resolve_active_by_message` count==1
+- **verify:** profile **18/18** · suite **83/83** · py_compile 5 ไฟล์ OK · app import OK · `git diff --check` OK · regressions: route_context / qtype guards 27/27 / timeline_card_refresh 8/8 (Mongo จริง) / guards / unit_card_fields ผ่าน
+- **behavior change:** ไม่มี (observe-only) — profile ไม่ถูกใช้ filter/rank/select; ข้อยกเว้นเดียว: conv request ทุกอันมี timeline read เพิ่ม 1 ครั้งแม้ link-followup path (cost เล็ก ไม่เปลี่ยนคำตอบ)
+- **ไม่แตะ:** v2/v3 · fetch_products signature · units/device_compat/web_search/knowledge_base · ranking/selection/prompt · ยังไม่ทำ 4C/4D/5
+- **behavior change:** ไม่มี — constants alias ค่าเดิม (profile wire เข้า `app.py` ใน Task 4B ด้านล่าง)
 - **ไม่แตะ:** v2/v3 · fetch_products signature · units/device_compat/web_search/knowledge_base · ranking/selection/prompt · ไม่มี hardcode Mi17 case-by-case
 
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)

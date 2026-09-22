@@ -465,3 +465,25 @@ def build_retrieval_profile(
         anchor_item_ids=anchor_ids,
         fact_sources=tuple(sources),
     )
+
+
+def profile_debug(profile: RetrievalProfile, *, source: str,
+                  used_fields: tuple[str, ...] = ()) -> dict:
+    """serialize profile เป็น debug dict สำหรับ _steps — log facts เท่านั้น
+    (ไม่ใส่ history/message dump; ไม่แสดงลูกค้า)"""
+    return {
+        "source": source,
+        "platform": profile.platform,
+        "shop": profile.shop,
+        "intent": profile.intent,
+        "product_types": sorted(profile.product_types),
+        "subtype": profile.subtype,
+        "model_codes": list(profile.model_codes),
+        "variant_terms": list(profile.variant_terms),
+        "target_device": profile.target_device,
+        "availability_mode": profile.availability_mode,
+        "compat_mode": profile.compat_mode,
+        "anchor_item_ids": list(profile.anchor_item_ids),
+        "used_fields": list(used_fields),
+        "fact_sources": dict(profile.fact_sources),
+    }

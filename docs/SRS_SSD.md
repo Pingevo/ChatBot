@@ -723,6 +723,7 @@ listing path:
 | `_compat_mode` | type/subtype/device→compat mapping | product_types, subtype, target_device | str | `_CHARGING_TYPES` (device_compat, lazy), `_BLUETOOTH_FAMILY` | build_retrieval_profile | no device→none; charging→connector_required (wireless→power_required); bluetooth family→bluetooth_general; else none | — |
 | `_subtype_explicit` | subtype เป็น strong keyword จริงไหม | low, subtype | bool | `_CHARGER_SUBTYPES` (product_store, lazy) | build_retrieval_profile | kw ของ subtype นั้นอยู่ใน msg (ไม่นับ shorthand หัว/สาย ลอยๆ) | — |
 | `_id_str` | id→str normalize | value | str | — | build_retrieval_profile | float เป็น int → int-str | — |
+| `profile_debug` | serialize profile เป็น _steps debug | profile, source, used_fields | dict | — | app.py chat() (Task 4B observe-only) | facts เท่านั้น ไม่ใส่ history/message | — |
 
 ### 6.19 `responses.py` — response helpers
 
