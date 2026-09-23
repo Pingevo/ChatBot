@@ -274,6 +274,25 @@
 - **findings หลัก:** (1) runtime กินแค่ profile hints (4B/4C/4D) — slots/relations contract-only ไม่มี caller นอก tests (verify ด้วย grep) (2) hard filter ที่ปลอดภัย = shop/platform/model_codes/availability_mode(hลัง resolver) เท่านั้น — ที่เหลือ soft hint (3) ช่องโหว่สำคัญสำหรับ Task 5: virtual slot-<t> ไม่มี backing products, single-slot adapter+cable merge (relation constraints แบก role), wattage⊂model_codes ambiguity, taxonomy substring quirk นอก relation guard
 - **verify:** docs-only · git diff --check clean
 
+#### Task 5A (redefined by user) — Offline Grouped Retrieval Planner (2026-09-23) — contract เสร็จ + verified รออนุมัติ commit
+
+- **note:** plan ใช้ชื่อ "Task 5A" กับงาน source-union ใน product_store/units — user redefined 5A = offline planner prototype (ตรง audit "Recommended Task 5 Shape"); plan's Task 5/5A runtime work ยังไม่แตะ
+- **ทำอะไร:** `chatbot/shopeechat/retrieval_planner.py` ใหม่ — `RetrievalRequest` (frozen) + `build_grouped_retrieval_requests(profile, slots, relations)` → request plan ต่อ slot/relation; observe-only (no Mongo/LLM/fetch/runtime caller)
+- **policy:** model_code→hard filter เสมอ · product_type→hard เฉพาะ slot/rel conf≥0.8 (ต่ำกว่า→soft) · target_device/brand/model_term/constraints→soft เสมอ (ห้ามตัด candidate ใน 5A) · relation target = product-group request (model_codes=(), target_subtype→subtypes) · virtual slot อ่าน type จากชื่อ `slot-<t>` · shop/platform อยู่ profile ไม่ซ้ำ
+- **test เพิ่ม:** `test_grouped_retrieval_requests.py` 6 tests — relation→cable target request (codes ว่าง+cable hint) · exact-model=identity request (no relation_id) · device-compat ไม่สร้าง relation request · multi-slot case+film แยก request ทั้ง dev=iphone 15 · bare-head ไม่มี relation request · low-conf slot→soft hints ไม่มี hard target_device
+- **verify:** 91/91 (7 test files) · probe 6 เคส: AD1404T full → base(hard code+type) + relation target(soft display/length_m=2/speed) ✓ · symmetric คู่กัน → target request ✓ · CMC615 → identity req-0 conf0.4 hard code ✓ · mi14pro → dev soft hint ✓ · py_compile + diff --check OK · regressions เดิมผ่าน
+- **risk:** (1) ~~kw-based relation target ไม่มี target_subtype~~ → แก้แล้วใน hardening ด้านล่าง (2) request ยังไม่รู้จัก availability/compat resolution จริง (3) relation_target request กับ slot request อาจชี้ slot เดียวกัน — dedupe เป็นเรื่องของ consumer (Task 5B)
+- **ยืนยัน:** ไม่ wire runtime · ไม่แตะ app.py/product_store/route_context/v2/v3/ChatAdminWeb/botworker · module ใหม่แยกไฟล์ไม่ทำให้ไฟล์เดิมบวม
+
+##### Task 5A hardening — relation target role ownership (2026-09-23)
+
+- **root cause:** `build_retrieval_relations` ใส่ ("target_subtype",…) เฉพาะ shorthand path ("สายไหน") — kw target "สายชาร์จ" ไม่ได้ subtype ทั้งที่ kw ชี้ cable ชัด → relation target request เป็น charger กว้างไม่มี cable role; source slot ก็กลืน subtype เป้าหมาย (subtypes={adapter,cable})
+- **fix (ที่ owner = route_context):** helper `_mention_subtype(low,pos,t)` — charger taxonomy: kw ยาวสุดที่ match ตรง pos → subtype ('สายชาร์จ'→cable/'หัวชาร์จ'→adapter; 'หัว'-shorthand→adapter ที่ callsite) · relation ใส่ constraints ("target_subtype",…)+("source_subtype",…) ทุก path (kw/symmetric ด้วย — conf ไม่เปลี่ยน: shorthand 0.7, kw 0.8) · planner consume: source-slot request แคบ subtypes เหลือ source_subtype; target_subtype→subtypes เหมือนเดิม — ไม่ hardcode คำ/รุ่นใด
+- **probe:** "หัวชาร์จ AD1404T ใช้กับสายชาร์จไหน…มีจอ ยาว 2 เมตร…เต็มสปีด" → base: codes=AD1404T hard, subs=[adapter] · target: subs=[cable], soft=display/length_m=2/speed/target_subtype ✓ · shorthand "สายไหน" → cable ยังได้ · ip14 → ไม่มี relation · bare head → ไม่มี relation · symmetric คู่กัน → target cable · case+film แยกเหมือนเดิม
+- **test เพิ่ม:** +3 (kw target carries cable subtype / source slot keeps adapter role / symmetric target subtype) — 26/26 grouped+relations, รวมชุด 94/94 · regressions route_context/car_charger/compat_mode ผ่าน · py_compile+diff --check OK
+- **ยืนยัน:** ยังไม่ wire runtime · SRS §6 อัปเดต (_mention_subtype, build_retrieval_relations, _slot_request)
+- **cleanup (role isolation):** `_relation_request` กรอง `source_subtype` ออกจาก target request `soft_hints` — เป็น metadata ฝั่ง source ใช้โดย `_slot_request` เท่านั้น (ยังอยู่ใน `RetrievalRelation.constraints`) · +1 test pin · 95/95 รวมชุด · regressions ผ่าน
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)

@@ -933,6 +933,20 @@ def _shorthand_source_mentions(low: str) -> list[tuple[int, str]]:
     return out
 
 
+def _mention_subtype(low: str, pos: int, t: str) -> str | None:
+    """subtype ของ mention ที่ pos — 'สายชาร์จ'→cable, 'หัวชาร์จ'→adapter
+    เฉพาะ charger taxonomy; kw ยาวสุดที่ match ตรง pos ชนะ"""
+    if t != "charger":
+        return None
+    from . import product_store as _ps
+    best_sub, best_len = None, 0
+    for sub, kws in _ps._CHARGER_SUBTYPES.items():
+        for kw in kws:
+            if len(kw) > best_len and low.startswith(kw, pos):
+                best_sub, best_len = sub, len(kw)
+    return best_sub
+
+
 def _strap_compound_mention(low: str, pos: int) -> bool:
     """kw mention ที่เป็น tail ของ strap compound ('สายนาฬิกา' ทำ 'นาฬิกา' ไม่ใช่
     smartwatch mention) — compound ที่เป็น kw เอง (สายคล้อง) ไม่โดน"""
@@ -959,7 +973,9 @@ def build_retrieval_relations(
                    if not _strap_compound_mention(low, p)]
     kw_pos = {p for p, _ in kw_mentions}
     # source candidates = kw + 'หัว' shorthand (อันนี้/นี้/code ตามหลัง)
-    all_mentions = sorted(kw_mentions + _shorthand_source_mentions(low))
+    shorthand_mentions = _shorthand_source_mentions(low)
+    head_pos = {p for p, _ in shorthand_mentions}
+    all_mentions = sorted(kw_mentions + shorthand_mentions)
     code_mentions = [(m.start(), c)
                      for c in profile.model_codes
                      for m in re.finditer(re.escape(c.lower()), low)]
@@ -972,6 +988,8 @@ def build_retrieval_relations(
         conn = cm.group(0)
         symmetric = conn.endswith("คู่กัน")
         shorthand_sub: str | None = None
+        src_sub: str | None = None
+        tgt_sub: str | None = None
         if symmetric:
             before = [(p, t) for p, t in all_mentions if p < cm.start()]
             # shorthand-only source ไม่พอ — ต้องมี kw/code evidence จริง
@@ -981,6 +999,10 @@ def build_retrieval_relations(
                 continue
             tgt_pos, tgt_type = before[-1]
             src_pos, src_type = before[-2]
+            src_sub = ("adapter" if src_pos in head_pos
+                       else _mention_subtype(low, src_pos, src_type))
+            tgt_sub = ("adapter" if tgt_pos in head_pos
+                       else _mention_subtype(low, tgt_pos, tgt_type))
             q_seg = low[cm.end():cm.end() + 30]
             tail = low[cm.end():]
         else:
@@ -1005,8 +1027,14 @@ def build_retrieval_relations(
             if not after:
                 continue
             tgt_pos, tgt_type = after[0]
+            tgt_sub = (shorthand_sub
+                       or _mention_subtype(low, tgt_pos, tgt_type))
             src_pos = max([p for p, _ in cand] + [p for p, _ in code_before])
             src_type = cand[-1][1] if cand else None
+            if cand:
+                src_sub = ("adapter" if cand[-1][0] in head_pos
+                           else _mention_subtype(low, cand[-1][0],
+                                                 cand[-1][1]))
             q_seg = low[tgt_pos:tgt_pos + 30]
             tail = low[tgt_pos:]
         if not any(q in q_seg for q in _REL_QUESTION):
@@ -1020,8 +1048,10 @@ def build_retrieval_relations(
         seen.add(key)
         start = src_pos if not symmetric else min(src_pos, tgt_pos)
         cons = _relation_constraints(tail)
-        if shorthand_sub:
-            cons += (("target_subtype", shorthand_sub),)
+        if tgt_sub:
+            cons += (("target_subtype", tgt_sub),)
+        if src_sub:
+            cons += (("source_subtype", src_sub),)
         rels.append(RetrievalRelation(
             source_slot_id=src_slot,
             target_slot_id=tgt_slot,
