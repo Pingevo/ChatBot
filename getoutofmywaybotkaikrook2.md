@@ -20,6 +20,13 @@
 
 ## กำลังทำ (active)
 
+### ✅ คัดลอก log ไม่ได้ทั้ง 2 ปุ่ม (ราย log + กอปทั้งหมด) หน้า testchat (2026-09-23) — fixed + tsc ผ่าน
+
+- **error:** `formatLogForCopy` crash `s.cost_usd.toFixed` on undefined → handler ตายก่อนถึง clipboard → กดปุ่มไหนก็ไม่ได้
+- **เกิดเพราะ:** debug step ใหม่ `RetrievalProfile`/`GroupedRetrievalShadow` (Task 4B/5B) ไม่มี model/tokens/time_s/cost fields — formatter เรียก `.toFixed` ตรงๆ
+- **วิธีแก้:** guard `?? "—"`/`?.toFixed` ตาม pattern line 131 + UI render (?? 0) — TestChatClient.tsx:160-161
+- **verify:** `tsc --noEmit` ผ่าน; step ปกติ output เดิม · debug step แสดง "—" + input/output (ข้อมูลจริงของมัน)
+
 ### ✅ อัปเดต master retrieval plan: 4E multi-slot + handoff/workflow audit (2026-09-23) — docs-only เสร็จ
 
 - **ขอบเขต:** แก้เฉพาะ `docs/plans/2026-09-21-legacy-shopee-evidence-retrieval-implementation-plan.md` เพื่อเพิ่มสิ่งที่คุยกันหลัง Task 4D: multi-product/multi-slot retrieval, handoff admin eligibility, และ trigger/workflow audit

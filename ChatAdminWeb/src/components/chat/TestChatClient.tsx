@@ -157,8 +157,8 @@ function formatLogForCopy(stats: MsgStats, rawText: string): string {
     lines.push("");
     lines.push("=== Steps ===");
     stats.steps.forEach((s, i) => {
-      lines.push(`[${i + 1}] ${s.name} (${s.model})`);
-      lines.push(`  tokens: in=${s.tokens_in} out=${s.tokens_out} · ${s.time_s}s · $${s.cost_usd.toFixed(6)} (฿${s.cost_thb})`);
+      lines.push(`[${i + 1}] ${s.name} (${s.model ?? "—"})`);
+      lines.push(`  tokens: in=${s.tokens_in ?? "—"} out=${s.tokens_out ?? "—"} · ${s.time_s ?? "—"}s · $${s.cost_usd?.toFixed(6) ?? "—"} (฿${s.cost_thb ?? "—"})`);
       if (s.input && Object.keys(s.input).length > 0) {
         lines.push(`  input: ${JSON.stringify(s.input)}`);
       }
