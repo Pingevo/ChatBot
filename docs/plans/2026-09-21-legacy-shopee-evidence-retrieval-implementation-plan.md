@@ -1415,12 +1415,36 @@ def test_compact_xiaomi_phone_alias_becomes_target_device():
     prof = _profile("สายชาร์จใช้กับ mi14pro")
     assert prof.target_device == "xiaomi 14 pro"
     assert prof.compat_mode == "connector_required"
+    assert prof.model_codes == ()
+    assert prof.intent != "exact_model"
+    assert prof.availability_mode == "sellable_first"
 
 
 def test_iphone_shorthand_aliases_normalize_to_iphone_family():
     assert device_compat.normalize_device_alias("ip14") == "iphone 14"
     assert device_compat.normalize_device_alias("i14 pro") == "iphone 14 pro"
     assert device_compat._lookup_spec_db("iphone 14 pro")["connector"] == "lightning"
+    for msg, expected in (
+        ("สายชาร์จใช้กับ ip14", "iphone 14"),
+        ("สายชาร์จใช้กับ i14 pro", "iphone 14 pro"),
+    ):
+        prof = _profile(msg)
+        assert prof.target_device == expected
+        assert prof.model_codes == ()
+        assert prof.intent != "exact_model"
+
+
+def test_known_short_spec_aliases_remain_target_devices_not_product_codes():
+    for msg, expected in (
+        ("สายชาร์จใช้กับ s25", "s25"),
+        ("สายชาร์จใช้กับ a56", "a56"),
+    ):
+        assert device_compat._lookup_spec_db(expected)
+        prof = _profile(msg)
+        assert prof.target_device == expected
+        assert prof.compat_mode == "connector_required"
+        assert prof.model_codes == ()
+        assert prof.intent != "exact_model"
 
 
 def test_thai_iphone_alias_normalizes():
@@ -1455,6 +1479,12 @@ In `device_compat.py`:
 - Return canonical values such as `iphone 14 pro`, `iphone 14`, `xiaomi 14 pro`.
 - Return `None` for ambiguous alphanumeric product codes and unsupported families. Do not add a fallback that treats every letters+digits token as a device.
 - Call this helper from `_extract_device_token()` after the regex candidate is found and before the product-code guard drops compact family tokens. If no regex candidate is found, probe the full message for the explicit alias patterns above.
+- Known aliases already present in `_SPEC_INDEX` must be allowed before `_NON_DEVICE_TOKENS` drops them. This protects short real devices such as `s25` and `a56`.
+
+In `route_context.py`:
+- After extracting `cur_device`, remove any `cur_codes` whose compact form equals the current device token, whose `normalize_device_alias(code)` equals `cur_device`, or whose `_lookup_spec_db(code)` resolves to the same spec as `cur_device`.
+- Do not remove real product model codes such as `HA835`, `AD1203P`, `CMC615`, `CMC615P`, `CTC615W`, or `AD653T`.
+- Device aliases must not make the profile `intent="exact_model"`. A compatibility/recommendation query remains `sellable_first` unless the user truly asked about a product model code.
 
 - [ ] **Step 4: Ensure spec lookup coverage**
 
@@ -1484,7 +1514,10 @@ for msg in (
     "หาสายชาร์จใช้กับ ip14",
     "หาสายชาร์จใช้กับ iphone14 pro",
     "หาสายชาร์จใช้กับ ไอโฟน14โปร",
+    "หาสายชาร์จใช้กับ s25",
+    "หาสายชาร์จใช้กับ a56",
     "มีรุ่น HA835 ไหม",
+    "มีรุ่น CMC615 ไหม",
 ):
     prof = route_context.build_retrieval_profile(
         msg,
@@ -1492,7 +1525,8 @@ for msg in (
         intent_result={"intent": "product_recommend", "confidence": 0.92},
         shop="KingGadgets",
     )
-    print(msg, "=>", prof.product_types, prof.target_device, prof.compat_mode,
+    print(msg, "=>", prof.product_types, prof.model_codes, prof.target_device,
+          prof.intent, prof.availability_mode, prof.compat_mode,
           device_compat._lookup_spec_db(prof.target_device or ""))
 PY
 ```
@@ -1500,6 +1534,8 @@ PY
 Expected:
 - compact/shorthand phone requests become target devices for cable/charger questions;
 - product model codes stay model-code/search facts, not target devices;
+- device aliases do not appear in `model_codes` and do not force `exact_model`;
+- known short spec aliases such as `s25` and `a56` still produce `target_device` and `connector_required`;
 - missing exact spec remains unknown evidence, not a fabricated compatibility claim.
 
 - [ ] **Step 6: Verification**
@@ -1513,6 +1549,7 @@ git diff --check
 Expected:
 - Existing Task 4D/4E behavior remains unchanged except normalized target devices.
 - `mi14pro`, `ip14`, `i14 pro`, `iphone14 pro`, and `ไอโฟน14โปร` no longer enter retrieval as unknown device strings.
+- `mi14pro`, `ip14`, `i14 pro`, `s25`, and `a56` do not enter retrieval as product model codes.
 - product codes are not reclassified as devices.
 
 ---
