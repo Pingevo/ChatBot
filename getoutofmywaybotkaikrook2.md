@@ -313,6 +313,21 @@
 - **test:** 11 tests (all-dead evidence / per-slot quota ไม่กินกัน / wrong-device rejected / subtype_mismatch / error isolated / live smoke) — รวมชุด 106/106 · regressions ผ่าน
 - **ยืนยัน:** ไม่ wire runtime · fetch_unit_cards เดิมไม่เปลี่ยน · ไม่แตะ v2/v3/ChatAdminWeb/botworker · 5B2 = legacy/source union + dedupe/rank กลาง
 
+#### Task 5B2 — Source Union + Central Candidate Pool (2026-09-23) — เสร็จ + verified รออนุมัติ commit
+
+- **root cause ที่แก้:** unit path กับ legacy path ต่างคนต่างคัด/ตัดเองก่อนถึง pool รวม → สินค้าหายก่อนถูกจัดอันดับ (เช่น เคสที่ units ตัดทิ้งแต่ legacy เจอ, legacy เจอแต่ units all-dead)
+- **executor ขยายเป็น multi-source:** `legacy_fetcher` param (None=ปิด, "auto"=adapter จริง `_legacy_evidence_fetcher` — fetch_products เดิมผ่าน MONGO_DB, SystemExit→RuntimeError) · `_run_attempt` ต่อ source → `make_evidence_card(source, selection_reason)` tag ทุก card · result เพิ่ม slot_id/relation_id/subtypes/model_codes/target_device (facts ให้ pool) · error ต่อ source เป็น attempt.error — req.error เฉพาะเมื่อทุก source พัง
+- **`_bucket` รับ legacy card:** card ไม่มี `product_type` → `_detect_product_types` จากชื่อ (generic taxonomy เดิม — detect ไม่เจอ = unknown ผ่าน soft ไม่ reject หมด)
+- **`candidate_pool.py` ใหม่ (observe-only):** `build_candidate_pool(results, profile, per_request_limit)` → `CandidatePool`
+  - dedupe identity: unit/model id (variant) → item_id (`_norm_id` float-int) → name+shop · variant ต่าง unit/model id ไม่ merge · item-level card merge เข้า variant เดิม · bucket=ดีสุดในกลุ่ม
+  - `_merge_group`: keep best card (sellable→richer→fields) + union `_evidence.sources`
+  - `_score` อธิบายได้: anchor(3 spec/warranty/compare/history | 1 อื่น) · model_code+2 · subtype+1 · device+1 · relation_target+0.5 · sellable+0.5 · multi-source+0.2/ตัว · +card `_score` → why[] ลง trace
+  - **A/B boundary:** candidates (A) แยกจาก `evidence_pool` (B: anchor/kb_product/image_text attachments — ต้องมี identity, linked_candidate) + `supporting_evidence` (kb_qa/raw contract เท่านั้น) · `llm_ready()` = eligible cards ที่ `strip_private_evidence` แล้ว — boundary เดียว
+  - per-request quota: `by_request` map + `per_request_limit` — slot หนึ่งไม่กิน quota อีก slot
+- **probe Mongo จริง (legacy_fetcher="auto"):** AD1404T spec → base merged `('units','legacy')` score 5.70 (code+subtype+multi-source) · target ได้สาย CTC315P จาก legacy · "เคสกับฟิล์ม iPhone 15" → TORRAS/CUKTECH merge สอง source · screen_protector ยัง elig=0 + rej=13 (ฟิล์มนาฬิกาทั้งหมด — evidence ไม่หาย) · **พบ+แก้ dedup miss จริง 2 จุด:** (1) unit `item_id` float vs legacy int → `_norm_id` normalize; (2) anchor `("123.0",)` float-str vs card int 123 → `retrieval_policy._norm_id` ขยาย normalize numeric float-str → "123" (generic canonicalization ใช้ทุก caller) — anchor match+boost ทำงานแล้ว
+- **test:** `test_candidate_pool_union.py` 14 tests (two-source attempts / merge sources / variant ไม่ dedupe / per-slot quota / relation groups / dead→unavailable / wrong-device rejected / error isolated / code boost / no-mutation / anchor priority / anchor float-str norm / KB-image attachment / llm_ready strip) — รวมชุดเดิม+pool = 120/120 · evidence policy 14/14 · regressions ผ่าน
+- **ยืนยัน:** observe-only — `legacy_fetcher` default None (ปิด) · fetch_products/fetch_unit_cards เดิมไม่เปลี่ยน · ไม่ wire app.py/product_store runtime · ไม่แตะ v2/v3/ChatAdminWeb/botworker · soft_hints ยังเป็น trace · 5B3 = compat/KB evidence เต็มระบบ + selection ส่ง LLM + flag wiring
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)

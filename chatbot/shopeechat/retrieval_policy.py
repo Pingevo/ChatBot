@@ -14,9 +14,15 @@ PRIVATE_KEYS = ("_evidence", "_selection_reason")
 
 
 def _norm_id(value) -> str:
-    """normalize id เป็น string — float int-valued (mongo export) → int-str."""
+    """normalize id เป็น string — float/int-float-str (mongo export) → int-str."""
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
+    if isinstance(value, str):
+        try:
+            f = float(value)
+        except ValueError:
+            return value
+        return str(int(f)) if f.is_integer() else value
     return str(value)
 
 

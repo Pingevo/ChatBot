@@ -169,7 +169,8 @@ def test_wrong_device_card_goes_rejected_not_eligible():
     r = results[0]
     names = {c["name"] for c in r.eligible_candidates}
     assert "ฟิล์มกันรอยสำหรับ iPhone 15" in names
-    rej = {c["name"]: c.get("_bucket_reason") for c in r.rejected_evidence}
+    rej = {c["name"]: c.get("_selection_reason")
+           for c in r.rejected_evidence}
     assert "ฟิล์มกระจก Haylou Watch 8" in rej
     assert "ฟิล์ม Mi Band 8 Pro" in rej
     assert all("device_mismatch" in (v or "") for v in rej.values())

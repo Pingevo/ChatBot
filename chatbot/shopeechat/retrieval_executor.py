@@ -1,26 +1,30 @@
-"""Grouped-retrieval executor — Task 5B1 observe mode (evidence-preserving).
+"""Grouped-retrieval executor — Task 5B1/5B2 observe mode (evidence-preserving).
 
-แปลง RetrievalRequest (จาก retrieval_planner) → fetch calls ผ่าน units path
-แล้วแยก evidence เป็น bucket ต่อ request — observe-only: ไม่มี runtime caller,
-ไม่แตะ ranking/prompt, error ต่อ request ไม่ทำทั้งชุดล้ม
+แปลง RetrievalRequest (จาก retrieval_planner) → fetch calls หลาย source
+(units + legacy product_store) แล้วแยก evidence เป็น bucket ต่อ request —
+observe-only: ไม่มี runtime caller, ไม่แตะ ranking/prompt,
+error ต่อ source ไม่ทำทั้งชุดล้ม
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from .retrieval_planner import RetrievalRequest
+from .retrieval_policy import make_evidence_card
 from .route_context import RetrievalProfile
 
 
 @dataclass(frozen=True)
 class SourceAttempt:
-    """บันทึก 1 fetch attempt — evidence ต้องไม่หายเงียบแม้ raw=0"""
-    source: str                       # "units"
+    """บันทึก 1 fetch attempt — evidence ต้องไม่หายเงียบแม้ raw=0/error"""
+    source: str                       # "units" | "legacy"
     raw_count: int
     eligible_count: int
     unavailable_count: int
     rejected_count: int
     trace: tuple[str, ...]
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,11 @@ class RetrievalExecutionResult:
     """ผล execute ของ request เดียว — bucket แยกตามความพร้อมใช้."""
     request_id: str
     source: str                       # "slot" | "relation_target"
+    slot_id: str = ""
+    relation_id: str | None = None
+    subtypes: frozenset[str] = frozenset()
+    model_codes: tuple[str, ...] = ()
+    target_device: str | None = None
     eligible_candidates: tuple[dict, ...] = ()
     unavailable_evidence: tuple[dict, ...] = ()
     rejected_evidence: tuple[dict, ...] = ()
@@ -62,13 +71,33 @@ def _request_profile(req: RetrievalRequest, query: str, shop: str | None,
     )
 
 
+def _legacy_evidence_fetcher(message: str, *, retrieval_profile, shop, limit):
+    """legacy product_store path เป็น evidence source (observe-only) —
+    fetch_products behavior เดิมไม่เปลี่ยน; SystemExit จาก client → error ต่อ attempt"""
+    from . import product_store as _ps
+    try:
+        db_name = os.environ.get("MONGO_DB", "").strip()
+        db = _ps.get_client()[db_name]
+    except (Exception, SystemExit) as exc:
+        raise RuntimeError(f"legacy db unavailable: {exc}")
+    return _ps.fetch_products(db, message, shop_filter=shop, limit=limit,
+                              retrieval_profile=retrieval_profile)
+
+
 def _bucket(card: dict, req: RetrievalRequest) -> tuple[str, str]:
     """card → (bucket, reason) — eligible / unavailable / rejected"""
     from .units import _SUBTYPE_TO_TYPES
     eff_types = set(req.product_types)
     for s in req.subtypes:
         eff_types |= _SUBTYPE_TO_TYPES.get(s, set())
-    if eff_types and (card.get("product_type") or "") not in eff_types:
+    ptype = card.get("product_type")
+    if not ptype and eff_types:
+        # legacy card ไม่มี product_type field → detect จากชื่อ (generic taxonomy)
+        from .product_store import _detect_product_types
+        det = _detect_product_types(card.get("name") or "")
+        ptype = next((t for t in eff_types if t in det), None) \
+            or next(iter(det), None)
+    if eff_types and ptype and ptype not in eff_types:
         return "rejected", "wrong_type"
     if req.subtypes:
         expanded = set()
@@ -78,7 +107,7 @@ def _bucket(card: dict, req: RetrievalRequest) -> tuple[str, str]:
         # reject เฉพาะเมื่อ subtype evidence ชัดและไม่ตรง — unit type เช่น
         # cable ที่เป็น expansion ของ req subtype ถือว่าตรง (csub อาจว่าง)
         if csub and csub not in req.subtypes \
-                and (card.get("product_type") or "") not in expanded:
+                and (ptype or "") not in expanded:
             return "rejected", "subtype_mismatch"
     if req.target_device:
         from .device_compat import _extract_device_token
@@ -90,6 +119,33 @@ def _bucket(card: dict, req: RetrievalRequest) -> tuple[str, str]:
     return "unavailable", card.get("availability_reason") or "unavailable"
 
 
+def _run_attempt(source: str, fetch_fn, query: str, prof, shop: str,
+                 limit: int, req: RetrievalRequest
+                 ) -> tuple[list[dict], list[dict], list[dict], SourceAttempt]:
+    """fetch 1 source → tag evidence + แยก bucket — error ถูกจับใน attempt"""
+    try:
+        res = fetch_fn(query, retrieval_profile=prof, shop=shop, limit=limit)
+    except (Exception, SystemExit) as exc:
+        return [], [], [], SourceAttempt(
+            source=source, raw_count=0, eligible_count=0,
+            unavailable_count=0, rejected_count=0,
+            trace=(f"{source} error",), error=str(exc))
+    cards = tuple(res.cards) if hasattr(res, "cards") else tuple(res)
+    raw = getattr(res, "raw_count", len(cards))
+    elig: list[dict] = []
+    unav: list[dict] = []
+    rej: list[dict] = []
+    for c in cards:
+        b, why = _bucket(c, req)
+        cc = make_evidence_card(c, source=source, selection_reason=why)
+        (elig if b == "eligible" else
+         unav if b == "unavailable" else rej).append(cc)
+    return elig, unav, rej, SourceAttempt(
+        source=source, raw_count=raw, eligible_count=len(elig),
+        unavailable_count=len(unav), rejected_count=len(rej),
+        trace=tuple(getattr(res, "trace", ()) or ()))
+
+
 def execute_grouped_retrieval_requests(
     requests: tuple[RetrievalRequest, ...],
     *,
@@ -99,17 +155,23 @@ def execute_grouped_retrieval_requests(
     limit_per_request: int = 20,
     observe_only: bool = True,
     fetcher=None,
+    legacy_fetcher=None,
 ) -> tuple[RetrievalExecutionResult, ...]:
     """execute request plan ทีละชิ้น — evidence-preserving observe-only.
 
-    fetcher ต้อง match signature units.fetch_unit_evidence(message, *,
-    retrieval_profile, shop, limit) → obj ที่มี .cards/.raw_count
-    (รับ list ธรรมดาได้สำหรับ mock) — default = fetch_unit_evidence จริง
-    (units path มี live-availability ใน to_unit_card อยู่แล้ว ไม่ bypass)
+    source ต่อ request: units (fetcher, default=fetch_unit_evidence)
+    + legacy product_store (legacy_fetcher — None=ปิด, "auto"=adapter จริง)
+    ทุก card ได้ _evidence.sources + _selection_reason (private — strip
+    ด้วย retrieval_policy.strip_private_evidence ก่อนเข้า LLM)
     """
     if fetcher is None:
         from . import units as _units
         fetcher = _units.fetch_unit_evidence
+    if legacy_fetcher == "auto":
+        legacy_fetcher = _legacy_evidence_fetcher
+    sources = [("units", fetcher)]
+    if legacy_fetcher is not None:
+        sources.append(("legacy", legacy_fetcher))
     results: list[RetrievalExecutionResult] = []
     for req in requests:
         trace = [
@@ -131,43 +193,35 @@ def execute_grouped_retrieval_requests(
             query = qh
             trace.append(f"query_hint={qh[:60]}")
         prof = _request_profile(req, query, shop, platform)
-        try:
-            res = fetcher(
-                query,
-                retrieval_profile=prof,
-                shop=shop,
-                limit=limit_per_request,
-            )
-        except Exception as exc:
-            results.append(RetrievalExecutionResult(
-                request_id=req.request_id, source=req.source,
-                hard_filters=req.hard_filters, soft_hints=req.soft_hints,
-                trace=tuple(trace + [f"error={exc}"]),
-                error=str(exc)))
-            continue
-        cards = tuple(res.cards) if hasattr(res, "cards") else tuple(res)
-        raw = getattr(res, "raw_count", len(cards))
         elig: list[dict] = []
         unav: list[dict] = []
         rej: list[dict] = []
-        for c in cards:
-            b, why = _bucket(c, req)
-            cc = {**c, "_bucket_reason": why}
-            (elig if b == "eligible" else
-             unav if b == "unavailable" else rej).append(cc)
-        trace.append(f"candidates={len(cards)} "
-                     f"eligible={len(elig)} unavailable={len(unav)} "
-                     f"rejected={len(rej)}")
-        attempt = SourceAttempt(
-            source="units", raw_count=raw, eligible_count=len(elig),
-            unavailable_count=len(unav), rejected_count=len(rej),
-            trace=tuple(getattr(res, "trace", ()) or ()))
+        attempts: list[SourceAttempt] = []
+        for src_name, fn in sources:
+            e, u, r, att = _run_attempt(src_name, fn, query, prof, shop,
+                                        limit_per_request, req)
+            elig += e
+            unav += u
+            rej += r
+            attempts.append(att)
+            if att.error:
+                trace.append(f"{src_name}_error={att.error}")
+        trace.append(f"candidates elig={len(elig)} unav={len(unav)} "
+                     f"rej={len(rej)}")
+        # error ระดับ request เฉพาะเมื่อทุก source พัง — source เดียวพังเป็น
+        # attempt.error ไม่ทำทั้ง pool ล้ม
+        req_error = (attempts[0].error
+                     if attempts and all(a.error for a in attempts)
+                     else None)
         results.append(RetrievalExecutionResult(
             request_id=req.request_id, source=req.source,
+            slot_id=req.slot_id, relation_id=req.relation_id,
+            subtypes=req.subtypes, model_codes=req.model_codes,
+            target_device=req.target_device,
             eligible_candidates=tuple(elig),
             unavailable_evidence=tuple(unav),
             rejected_evidence=tuple(rej),
-            source_attempts=(attempt,),
+            source_attempts=tuple(attempts),
             hard_filters=req.hard_filters, soft_hints=req.soft_hints,
-            trace=tuple(trace), error=None))
+            trace=tuple(trace), error=req_error))
     return tuple(results)
