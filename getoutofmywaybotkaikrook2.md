@@ -142,6 +142,35 @@
 - **verify:** wiring 13/13 · suite **96/96** · py_compile 7 ไฟล์ OK · app import OK · diff --check OK · route_context/guards(27)/unit_card_fields ผ่าน
 - **behavior:** ไม่เปลี่ยน — param ทั้งหมด default None, callee ไม่อ่าน field ใด (pin โดย test_profile_not_read_in_gateways); callers เดิม (chat_v2/chatbotv3) ไม่ส่ง param → เดิม 100%
 
+### ✅ Master plan Task 4D: profile-aware retrieval hints (2026-09-23) — implement + verified รออนุมัติ commit
+
+- **งาน:** เปิดใช้ `RetrievalProfile` ใน `fetch_products`/`fetch_units`/`fetch_unit_cards` แบบ conservative recall — profile=None → path เดิมเป๊ะ
+- **fields ที่ใช้จริง (product_store.fetch_products):**
+  - `product_types` → `exact_product_types` (override param > profile > detect; ว่าง→fuzzy เดิม)
+  - `subtype` → subtype source `override > _prof_sub > detect` ทั้ง 5 จุด (shorthand boost + 4 filter sites)
+  - `model_codes` → merge เข้า `aug_tokens`/`model_tokens`/`_raw_toks` + **supplement ใหม่**: bounded item_name regex หลัง subtype re-filter ก่อน `to_product_card` (code-hit ไม่โดน type/subtype narrowing — แก้ที่ regex path ไม่มี code recall เดิม aug_tokens อยู่เฉพาะ vector path)
+  - `compat_mode != none` → `is_compat_check=True` (pool กว้าง + ข้าม unit index — เส้น web_search requery ที่ไม่ส่ง flag ได้ compat sweep ด้วย)
+  - `availability_mode=answerable_all` → `filter_unavailable=False` (spec/compare/history เห็นของหมด/เลิกขาย); sellable_first มีอยู่แล้วใน `_rerank_by_promo_latest` (sellable เป็น sort key แรก)
+  - unit gate: profile present → ไม่เรียก `resolve_route` ซ้ำ
+- **units.py:** `fetch_units` types/subtype/codes จาก profile เมื่อมี (param > profile > route) · `fetch_unit_cards` skip resolve_route เมื่อมี profile
+- **ไม่ใช้:** `target_device` (ยังไม่ inject เข้า query — message มีอยู่แล้ว; ไม่สรุป compat เอง) · `variant_terms` · `fact_sources` · `anchor_item_ids`
+- **behavior change:** มีเจตนาเฉพาะ profile-backed calls (app.py เท่านั้น — v2/v3 ไม่ส่ง profile → เดิม 100%): Mi17 case ตอนนี้ query มี charger regex + cable filter แทน shop-only query
+- **TDD pins (ใหม่ `test_retrieval_profile_hints.py` 10 tests):** profile types→query regex · None→legacy · subtype→cable filter · codes→bounded item_name regex · compat→skip unit index · answerable_all→sellable_only=False · units codes+skip-resolve · unit_cards skip-resolve · sellable_first pool ไม่ว่าง
+- **แก้ 4C pin:** `test_profile_not_read_in_gateways` เหลือ knowledge_base/device_compat/web_search (4D ไม่แตะ behavior สามไฟล์นี้)
+- **verify:** hints 10/10 · suite **106/106** · py_compile 7 ไฟล์ OK · diff --check OK · regressions: route_context/guards(27)/unit_card/car_charger(16)/subtype parity(42) ผ่าน
+- **ไม่แตะ:** app.py (0 บรรทัด) · device_compat/knowledge_base/web_search behavior · v2/v3 · ChatAdminWeb/botworker · ranking/prompt/response shape · ไม่มี source union/live refresh · ยังไม่ทำ Task 5/5A
+
+#### Phase 4D Hardening (2026-09-23) — implement + verified รออนุมัติ commit รวมกับ 4D
+
+- **subtype fail-open:** helper ใหม่ `_filter_charger_subtype_open(docs, subtype, fail_open)` — filter ว่าง + fail_open → คืน docs เดิม (pool ว่างแย่กว่า pool กว้าง เพราะ subtype จาก profile/history อาจคลาด) · wire ทั้ง **4 จุด** ใน fetch_products (vector / pre-rerank / brand-fallback pre-sort / final re-filter) · `fail_open=retrieval_profile is not None` → **profile=None คง legacy hard filter เป๊ะ** (strict subtype ว่าง→ว่างตามเดิม) · units path ไม่ต้องแก้ — subtype ใช้แค่ขยาย ptypes ไม่เคย narrow + vector `if typed` fail-open อยู่แล้ว
+- **comment cleanup:** comment ใหม่ของ 4D ไม่มี `⚡` — สั้น อธิบายหน้าที่จริง; comment เก่าใน `_filter_charger_subtype` (มี ⚡ เดิม) ไม่แตะตาม scope
+- **multi-subtype guard:** `"มีสายชาร์จกับหัวชาร์จไหม"` → profile.subtype="cable" (singular — resolve เลือกตัวแรก) · test pin: pool ต้องไม่ว่าง (fail-open กันเคส subtype คลาด) + profile=None คง hard filter
+- **model_codes supplement audit:** pin ครบ — bounded regex `_model_token_regex_str` + `shopname` ใน query เดียวกัน + `limit(5)` ต่อ code + dedupe ด้วย `item_id` + append เสริมไม่แทนที่ + ไม่มี supplement เมื่อ `model_codes` ว่าง + code ไม่ถูกตีเป็น target_device (pin อยู่ใน test_retrieval_profile.py)
+- **test เพิ่ม:** `test_retrieval_profile_hints.py` 10→16 tests (fail-open/multi-subtype/legacy-hard-filter/supplement regex+shop+limit5/dedupe/no-codes-no-supplement)
+- **SRS:** เพิ่ม row `_filter_charger_subtype_open` + ปรับ row `_filter_charger_subtype` (strict ว่าง→คืนว่าง)
+- **verify:** hints+wiring 29/29 · suite 83/83 · py_compile OK · diff --check OK · regressions: route_context ALL PASS · car_charger 16/16 · subtype parity 42/42 · qtype guards 27/27 · unit_card_fields ALL PASS
+- **risk ที่เหลือ:** (1) `RetrievalProfile.subtype` ยังเป็นค่าเดียว — multi-subtype/multi-product/multi-slot จริงอยู่ใน **Task 4E** (2) brand ยังไม่ใช่ hard-filter contract กลาง (3) fail-open ทำให้เคส "ร้านไม่มี cable จริง" ใน profile-backed call เห็น docs กลุ่มอื่นแทน pool ว่าง — trade-off ที่ตั้งใจ (LLM เลือก/ตอบเองได้) ไม่ใช่ bug
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)

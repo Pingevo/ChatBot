@@ -123,11 +123,23 @@ def fetch_units(
     """
     from . import route_context as _rc
 
-    route = route or _rc.resolve_route(message)
-    ptypes = set(product_types) if product_types is not None else set(route.product_types)
-    subtype = charger_subtype or route.charger_subtype
+    # Task 4D — profile เป็น canonical facts owner: มี profile → ใช้ types/
+    #   subtype/codes จาก profile โดยไม่ต้อง resolve_route ซ้ำ; ไม่มี → เดิม
+    if route is None and retrieval_profile is None:
+        route = _rc.resolve_route(message)
+    if product_types is not None:
+        ptypes = set(product_types)
+    elif retrieval_profile is not None:
+        ptypes = set(retrieval_profile.product_types)
+    else:
+        ptypes = set(route.product_types)
+    subtype = charger_subtype or (retrieval_profile.subtype
+                                  if retrieval_profile is not None
+                                  else route.charger_subtype)
     ptypes |= _SUBTYPE_TO_TYPES.get(subtype or "", set())
-    codes = [c.upper() for c in route.model_codes]
+    codes = [c.upper() for c in (
+        retrieval_profile.model_codes if retrieval_profile is not None
+        else route.model_codes)]
 
     try:
         coll = _units_coll()
@@ -450,8 +462,10 @@ def fetch_unit_cards(message: str, retrieval_profile: RetrievalProfile | None = 
                      **kwargs) -> list[dict]:
     """fetch_units + attach_kb_specs + attach_image_texts + attach_listing_fields + to_unit_card."""
     route = kwargs.pop("route", None)
-    from . import route_context as _rc
-    route = route or _rc.resolve_route(message)
+    # มี profile แล้วไม่ต้อง resolve_route ซ้ำ (fetch_units ใช้ profile ตรง)
+    if route is None and retrieval_profile is None:
+        from . import route_context as _rc
+        route = _rc.resolve_route(message)
     limit = int(kwargs.pop("limit", 8))
     # ⚡ overfetch 2× เพราะ sellable บน unit doc เป็น build-time snapshot —
     #   re-sort ด้วย live status หลัง join (ของที่ตายหลัง build ถูกดีดออกจาก top)

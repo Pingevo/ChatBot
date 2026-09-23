@@ -59,9 +59,11 @@ def test_fetch_unit_cards_forwards_profile(monkeypatch):
 
 
 def test_profile_not_read_in_gateways():
-    """No callee may read profile fields yet — pass-through/debug only."""
+    """4D: product_store/units may READ profile as hints; the rest stay
+    pass-through only (knowledge_base/device_compat/web_search wire facts
+    in later tasks — Task 4D deliberately does not touch their behavior)."""
     pat = re.compile(r"retrieval_profile\.")
-    for name in ("product_store", "units", "knowledge_base", "device_compat", "web_search"):
+    for name in ("knowledge_base", "device_compat", "web_search"):
         src = (SRC / f"{name}.py").read_text()
         hits = pat.findall(src)
         assert not hits, f"{name}.py reads retrieval_profile fields ({len(hits)}x)"

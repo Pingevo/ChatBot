@@ -2137,6 +2137,18 @@ def _filter_charger_subtype(docs: list[dict], subtype: str) -> list[dict]:
     return result
 
 
+def _filter_charger_subtype_open(docs: list[dict], subtype: str, *,
+                                 fail_open: bool) -> list[dict]:
+    """_filter_charger_subtype + fail-open: ผลว่างและ fail_open → คืน docs เดิม.
+
+    ใช้กับ profile-backed call — subtype จาก profile/history อาจคลาด
+    → pool ว่างแย่กว่า pool กว้าง (LLM เลือกจาก context ได้ต่อ)"""
+    filtered = _filter_charger_subtype(docs, subtype)
+    if filtered or not fail_open:
+        return filtered
+    return docs
+
+
 # ---- fuzzy product type detection (จับคำพิมพ์ผิด) ---------------------------
 #
 # ใช้ rapidfuzz + pythainlp word_tokenize เพื่อจับคำพิมพ์ผิด เช่น
@@ -3028,6 +3040,20 @@ def fetch_products(
        ใช้ vector search (semantic) เพราะไม่มี regex ให้กรอง
     3. ถ้า vector search ไม่พร้อม ใช้ regex approach เดิมเป็น fallback
     """
+    # Task 4D — canonical request facts จาก RetrievalProfile
+    #   profile=None → path เดิมทุกประการ; profile มีค่า → ใช้แทน detection จาก message
+    _prof_types = (set(retrieval_profile.product_types)
+                   if retrieval_profile is not None else None)
+    _prof_sub = (retrieval_profile.subtype
+                 if retrieval_profile is not None else None)
+    _prof_codes = ([str(c).upper() for c in retrieval_profile.model_codes]
+                   if retrieval_profile is not None else [])
+    if retrieval_profile is not None:
+        if retrieval_profile.compat_mode not in (None, "", "none"):
+            is_compat_check = True  # compat request → pool กว้าง + ข้าม unit index
+        if retrieval_profile.availability_mode == "answerable_all":
+            filter_unavailable = False  # spec/compare/history ต้องเห็นของหมด/เลิกขาย
+
     coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
     collection = db[coll_name]
 
@@ -3044,9 +3070,14 @@ def fetch_products(
     if _uif == "charger":
         try:
             from . import route_context as _rc, units as _units
-            _rt = _rc.resolve_route(message)
             _chg_types = set().union(*_units._SUBTYPE_TO_TYPES.values())
-            if not (_rt.charger_subtype or _rt.product_types & _chg_types):
+            if retrieval_profile is not None:
+                # profile เป็น canonical facts — ไม่ต้อง resolve_route ซ้ำ
+                _is_chg = bool(_prof_sub or (_prof_types or set()) & _chg_types)
+            else:
+                _rt = _rc.resolve_route(message)
+                _is_chg = bool(_rt.charger_subtype or _rt.product_types & _chg_types)
+            if not _is_chg:
                 _uif = ""
         except Exception as _ge:
             print(f"[UNITS] charger gate error → legacy: {_ge}", file=sys.stderr)
@@ -3073,6 +3104,11 @@ def fetch_products(
     if product_types_override is not None:
         exact_product_types = product_types_override
         fuzzy_product_types = set()
+    elif retrieval_profile is not None:
+        # profile เป็น canonical type owner (รวม history/anchor แล้ว)
+        #   ว่าง = message ไม่มี type จริง (profile detect ด้วยตัวเดียวกัน)
+        exact_product_types = _prof_types or set()
+        fuzzy_product_types = set()
     else:
         exact_product_types = _detect_product_types(message)
         fuzzy_product_types: set[str] = set()
@@ -3097,14 +3133,15 @@ def fetch_products(
     # แต่ message มี charger subtype keyword ชัดเจน และไม่มี phone keyword ชัดเจน
     # → override เป็น {"charger"} เพราะลูกค้าถามเรื่อง charger ไม่ใช่ phone
     _shorthand_sub = _detect_charger_subtype(message)
-    # ⚡ Phase 1F — ถ้ามี charger_subtype_override (จาก intent) ให้ใช้ค่านั้น
+    # subtype source: charger_subtype_override > profile.subtype > detect
     #   และเพิ่ม "charger" เข้า product_types เสมอ (กัน product_types={"phone"} ข้าม subtype filter)
-    if charger_subtype_override:
-        _shorthand_sub = charger_subtype_override
-        print(f"[PRODUCT-TYPE-DEBUG] override={charger_subtype_override!r} product_types_before={product_types}", file=sys.stderr)
+    _sub_src = charger_subtype_override or _prof_sub
+    if _sub_src:
+        _shorthand_sub = _sub_src
+        print(f"[PRODUCT-TYPE-DEBUG] subtype_src={_sub_src!r} product_types_before={product_types}", file=sys.stderr)
         if not product_types or product_types == {"phone"}:
             product_types = {"charger"}
-            print(f"[PRODUCT-TYPE] charger_subtype_override={charger_subtype_override!r} → product_types={product_types}", file=sys.stderr)
+            print(f"[PRODUCT-TYPE] subtype_src={_sub_src!r} → product_types={product_types}", file=sys.stderr)
     if _shorthand_sub:
         if not product_types:
             product_types = {"charger"}
@@ -3120,7 +3157,7 @@ def fetch_products(
     # ถ้าเป็นคำถามเปรียบเทียบหลายรุ่น (มี model tokens เช่น "ec4 vs ec5 vs ec6")
     # ให้ข้าม fuzzy detection ที่อาจจับผิด (เช่น จับ "ec4" เป็น screen_protector)
     # แล้วใช้ vector search + model token supplementation แทน
-    if not exact_product_types and _extract_model_tokens(message):
+    if not exact_product_types and (_extract_model_tokens(message) or _prof_codes):
         product_types = set()
         fuzzy_product_types = set()
 
@@ -3203,6 +3240,9 @@ def fetch_products(
                     #   — query รุ่นเดียว ("PB100 มีไหม") ก็ต้องเสริม doc ที่ชื่อมี token จริง
                     #   เพราะ vector top_k อาจตัด listing ที่ถามทิ้ง (ดัน PB100P ขึ้นแทน)
                     aug_tokens = _raw_model_tokens(message)
+                    # profile model_codes (รวม history/anchor) เข้า direct recall
+                    aug_tokens += [c for c in _prof_codes
+                                   if c.lower() not in {t.lower() for t in aug_tokens}]
                     if aug_tokens:
                         # ดึงสินค้าแต่ละรุ่นจาก MongoDB โดยตรง (NORMAL, จำกัด 5 ต่อรุ่น)
                         existing_ids = {str(d.get("item_id")) for d in docs}
@@ -3243,6 +3283,8 @@ def fetch_products(
                     # re-rank: ถ้าคำถามเปรียบเทียบหลายรุ่น ใช้ diversity re-rank
                     # เพื่อรับประกันว่าแต่ละรุ่นมีอย่างน้อย 2 ตัวใน context
                     model_tokens = _extract_model_tokens(message)
+                    model_tokens += [c for c in _prof_codes
+                                     if c.lower() not in {t.lower() for t in model_tokens}]
                     if model_tokens:
                         docs = _rerank_with_diversity(
                             docs, model_tokens,
@@ -3257,6 +3299,8 @@ def fetch_products(
                     #   ตรงๆ (รุ่นเดียว → diversity ไม่ทำงาน) ให้ doc ที่ชื่อมี token จริง
                     #   ขึ้นก่อน กัน vector rank ดันรุ่นใกล้ (PB100P/LPB100) แซง PB100
                     _raw_toks = _raw_model_tokens(message)
+                    _raw_toks += [c for c in _prof_codes
+                                  if c.lower() not in {t.lower() for t in _raw_toks}]
                     if _raw_toks and docs:
                         _exact_ids = {
                             str(d.get("item_id", ""))
@@ -3271,9 +3315,11 @@ def fetch_products(
                     # ── กรอง charger subtype สำหรับ vector search path ด้วย ──
                     # ยกเว้น superlative question ที่ต้องเปรียบเทียบทุกประเภท
                     if "charger" in product_types and not skip_charger_subtype:
-                        _charger_sub = charger_subtype_override or _detect_charger_subtype(message)
+                        _charger_sub = charger_subtype_override or _prof_sub or _detect_charger_subtype(message)
                         if _charger_sub:
-                            docs = _filter_charger_subtype(docs, _charger_sub)
+                            docs = _filter_charger_subtype_open(
+                                docs, _charger_sub,
+                                fail_open=retrieval_profile is not None)
                             print(f"[CHARGER-SUBTYPE] subtype={_charger_sub} → {len(docs)} docs (vector)", file=sys.stderr)
 
                     used_vector_search = True
@@ -3420,9 +3466,11 @@ def fetch_products(
     # ต้องกรองก่อน re-rank เพราะ re-rank ตัดเหลือ limit แล้ว set products อาจตกไป
     # ยกเว้น superlative question ที่ต้องเปรียบเทียบทุกประเภท (charger + powerbank)
     if "charger" in product_types and not skip_charger_subtype:
-        _charger_sub = charger_subtype_override or _detect_charger_subtype(message)
+        _charger_sub = charger_subtype_override or _prof_sub or _detect_charger_subtype(message)
         if _charger_sub:
-            docs = _filter_charger_subtype(docs, _charger_sub)
+            docs = _filter_charger_subtype_open(
+                docs, _charger_sub,
+                fail_open=retrieval_profile is not None)
             print(f"[CHARGER-SUBTYPE] subtype={_charger_sub} → {len(docs)} docs (pre-rerank)", file=sys.stderr)
 
     # re-rank ตามโปรโมชั่น + ความใหม่ (สำหรับ regex path ที่ไม่ได้ผ่าน vector search)
@@ -3456,6 +3504,8 @@ def fetch_products(
 
         # re-rank เฉพาะส่วนที่ไม่ใช่ exact match
         model_tokens = _extract_model_tokens(message)
+        model_tokens += [c for c in _prof_codes
+                         if c.lower() not in {t.lower() for t in model_tokens}]
         # สำหรับ compatibility check ให้ดึงเยอะกว่า limit เพื่อให้ LLM เห็นทุกรุ่น
         _rerank_limit = max(limit * 3, 50) if is_compat_check else limit
         if rest_docs:
@@ -3489,9 +3539,11 @@ def fetch_products(
         # ไม่งั้น cable ที่ชื่อมี model name (เช่น CTC615N) จะ match msg_words มากกว่า adapter
         # → sort แซง → cut เหลือ cable หมด → re-filter ฆ่าทิ้ง → ได้ 0 ทั้งที่มี adapter อยู่จริง
         if "charger" in product_types and not skip_charger_subtype:
-            _charger_sub_pre_sort = charger_subtype_override or _detect_charger_subtype(message)
+            _charger_sub_pre_sort = charger_subtype_override or _prof_sub or _detect_charger_subtype(message)
             if _charger_sub_pre_sort:
-                docs = _filter_charger_subtype(docs, _charger_sub_pre_sort)
+                docs = _filter_charger_subtype_open(
+                    docs, _charger_sub_pre_sort,
+                    fail_open=retrieval_profile is not None)
                 print(f"[CHARGER-SUBTYPE] pre-sort (brand fallback) subtype={_charger_sub_pre_sort} → {len(docs)} docs", file=sys.stderr)
         # re-rank: สินค้าที่ชื่อตรงกับคำถามมากที่สุดขึ้นก่อน
         # ใช้ text matching score (จำนวนคำใน message ที่อยู่ใน item_name)
@@ -3550,13 +3602,32 @@ def fetch_products(
     # (brand fallback ดึงสินค้าเพิ่ม อาจนำ cable/adapter ปนเข้ามา)
     # ยกเว้น superlative question ที่ต้องเปรียบเทียบทุกประเภท
     if "charger" in product_types and not skip_charger_subtype:
-        _charger_sub_final = charger_subtype_override or _detect_charger_subtype(message)
+        _charger_sub_final = charger_subtype_override or _prof_sub or _detect_charger_subtype(message)
         if _charger_sub_final:
-            docs = _filter_charger_subtype(docs, _charger_sub_final)
+            docs = _filter_charger_subtype_open(
+                docs, _charger_sub_final,
+                fail_open=retrieval_profile is not None)
             print(f"[CHARGER-SUBTYPE] re-filter after brand fallback: subtype={_charger_sub_final} → {len(docs)} docs", file=sys.stderr)
 
     # NOTE: charger subtype filter ถูกกรองก่อน re-rank แล้ว (ด้านบน)
     # เพื่อกัน set products ตกหล่นจาก top-N
+
+    # profile model_codes → direct item_name recall (code = identity)
+    #   วางหลัง subtype re-filter: code-hit ไม่ควรโดน type/subtype narrowing ตัดทิ้ง
+    #   (bounded regex เดียวกับ _model_token_in_name — "PB100" ไม่ชน "LPB100")
+    if _prof_codes:
+        _existing_iids = {str(d.get("item_id")) for d in docs}
+        for _code in _prof_codes:
+            _code_filter = {"item_name": {"$regex": _model_token_regex_str(_code),
+                                          "$options": "i"}}
+            if shop_filter:
+                _code_filter["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$",
+                                            "$options": "i"}
+            for _d in collection.find(_code_filter, PRODUCT_PROJECTION).limit(5):
+                _iid = str(_d.get("item_id"))
+                if _iid and _iid not in _existing_iids:
+                    docs.append(_d)
+                    _existing_iids.add(_iid)
 
     cards = [to_product_card(d, desc_message or message) for d in docs]
 

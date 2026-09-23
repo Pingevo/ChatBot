@@ -435,7 +435,8 @@ listing path:
 | `_detect_categories` | category detect | message | list[str] | cat table | build_query | — | — |
 | `_detect_product_types` | type detect (strict) | message | set[str] | `PRODUCT_TYPES` (kw + name_regex) | fetch_products, app, chat_v2, units | item_name-level — Shopee cat กว้าง | — |
 | `_detect_charger_subtype` | charger subtype | text | str/None | subtype kw table | fetch, app, chat_v2, units | adapter/cable/set/car_charger/wireless/desktop/socket | — |
-| `_filter_charger_subtype` | กรองตาม subtype | docs, subtype | docs | item_name regex | fetch_products | name-level filter | — |
+| `_filter_charger_subtype` | กรองตาม subtype | docs, subtype | docs | item_name regex | `_filter_charger_subtype_open`, fetch_products | name-level filter; strict subtype ว่าง→คืนว่าง | — |
+| `_filter_charger_subtype_open` | subtype filter + fail-open | docs, subtype, fail_open | docs | `_filter_charger_subtype` | fetch_products (4 จุด: vector/pre-rerank/brand-fallback/final) | ผลว่าง + fail_open → คืน docs เดิม (profile-backed call เท่านั้น; profile=None คง hard filter) | — |
 | `_detect_product_types_fuzzy` | type detect (fuzzy) | message | set[str] | typo-tolerant match | fetch_products, chat_v2 | fallback เมื่อ strict ว่าง | — |
 | `_product_type_categories` | type→cat list | types | list[str] | mapping table | build_query | — | — |
 | `_product_type_regex` | type→regex | types | str/None | name_regexes | build_query | — | — |
@@ -451,7 +452,7 @@ listing path:
 | `_doc_matches_model` | doc↔token match | doc, model_token | bool | _model_token_in_name | fetch_products | — | — |
 | `_rerank_with_diversity` | spread results | docs | docs | — | fetch_products | กระจาย shop/brand | — |
 | `_filter_false_positives` | กรองตัวหลอก | docs, types | docs | type regexes | fetch_products | python-side verify หลัง mongo | — |
-| `fetch_products` | **main retrieval** | db, message, shop_filter, limit, desc_message, is_compat_check, skip_charger_subtype, product_types_override, charger_subtype_override, filter_unavailable, retrieval_profile (4C pass-through ยังไม่ใช้ตัดสินใจ) | list[card] | units.fetch_unit_cards (flag), vector_search, build_query, _filter_*, _rerank_*, _dedupe_products, to_product_card | _chat_impl, chat_v2, product_match | §5.2 fetch path — compat bypass unit pool; empty/error→fallback | mongo reads; error→[] |
+| `fetch_products` | **main retrieval** | db, message, shop_filter, limit, desc_message, is_compat_check, skip_charger_subtype, product_types_override, charger_subtype_override, filter_unavailable, retrieval_profile (4D: types/subtype/model_codes เป็น canonical hint แทน detect จาก message; compat_mode→pool กว้าง; answerable_all→ไม่กรอง unavailable) | list[card] | units.fetch_unit_cards (flag), vector_search, build_query, _filter_charger_subtype_open, _filter_*, _rerank_*, _dedupe_products, to_product_card | _chat_impl, chat_v2, product_match | §5.2 fetch path — compat bypass unit pool; empty/error→fallback; profile=None→path เดิม; 4D-hardening: subtype filter fail-open เฉพาะ profile-backed call | mongo reads; error→[] |
 | `fetch_product_by_id` | ดึงตาม item_id | db, item_id, shop_filter | doc/card | coll.find_one | anchor paths, product_match.get_product_by_id | exact id + shop scope | — |
 | `list_shops` | รายชื่อร้าน | db | list[str] | distinct | /shops route | — | — |
 | `list_categories` | รายหมวด | db | list[str] | distinct | /categories route | — | — |
@@ -686,7 +687,7 @@ listing path:
 | `_unit_vectors` | unit npz | — | vectors | npz load (mtime) | _vector_search | — | — |
 | `_sellable_mask` | mask sellable | units | mask | sellable field | _vector_search | — | — |
 | `_vector_search` | unit vector search | query, filters | units | _unit_vectors, _sellable_mask, embed_query | fetch_units | cosine top-k | — |
-| `fetch_units` | unit retrieval | db, message, limit, …, retrieval_profile (4C pass-through) | units | _vector_search | fetch_products (flag) | — | error→[] → fallback listing |
+| `fetch_units` | unit retrieval | db, message, limit, …, retrieval_profile (4D: types/subtype/codes จาก profile แทน resolve_route ซ้ำ) | units | _vector_search | fetch_products (flag) | — | error→[] → fallback listing |
 | `pick_desc_sections` | เลือก desc sections | unit, route | str | sections dict | to_unit_card | highlights/specs/warranty/notes | — |
 | `_live_availability` | availability สด | unit | (item_status, availability dict, model_status) | product_store.resolve_availability | _live_sellable, to_unit_card | join _listing → exact model_doc เข้า resolver; model หาย→model_missing; ไม่มี listing→resolve unit snapshot | — |
 | `_live_sellable` | sellable สด | unit | bool | _live_availability | fetch_unit_cards | `availability["available_for_sale"]` | — |
@@ -696,7 +697,7 @@ listing path:
 | `_unit_warranty` | warranty ของ unit | unit | dict | warranty helpers | to_unit_card | — | — |
 | `attach_image_texts` | ผูก OCR | units | units | `image_texts` coll | fetch_unit_cards | รูปนอก desc | DB read |
 | `attach_listing_fields` | ผูก listing fields | units | units | `ShpProducts` | fetch_unit_cards | เติม field listing | DB read |
-| `fetch_unit_cards` | **unit path entry** | db, message, shop, limit, retrieval_profile (4C → fetch_units) | list[card] | fetch_units, _live_sellable, attach_*, to_unit_card | product_store.fetch_products (`USE_UNIT_INDEX`) | vector→sellable→live→enrich→cards | fallback []→listing path |
+| `fetch_unit_cards` | **unit path entry** | db, message, shop, limit, retrieval_profile (4D: skip resolve_route เมื่อมี profile → fetch_units) | list[card] | fetch_units, _live_sellable, attach_*, to_unit_card | product_store.fetch_products (`USE_UNIT_INDEX`) | vector→sellable→live→enrich→cards | fallback []→listing path |
 
 ### 6.17 `embedding.py` — embeddings
 
