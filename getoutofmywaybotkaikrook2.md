@@ -328,6 +328,16 @@
 - **test:** `test_candidate_pool_union.py` 14 tests (two-source attempts / merge sources / variant ไม่ dedupe / per-slot quota / relation groups / dead→unavailable / wrong-device rejected / error isolated / code boost / no-mutation / anchor priority / anchor float-str norm / KB-image attachment / llm_ready strip) — รวมชุดเดิม+pool = 120/120 · evidence policy 14/14 · regressions ผ่าน
 - **ยืนยัน:** observe-only — `legacy_fetcher` default None (ปิด) · fetch_products/fetch_unit_cards เดิมไม่เปลี่ยน · ไม่ wire app.py/product_store runtime · ไม่แตะ v2/v3/ChatAdminWeb/botworker · soft_hints ยังเป็น trace · 5B3 = compat/KB evidence เต็มระบบ + selection ส่ง LLM + flag wiring
 
+#### Task 5B3-A — Shadow/Observe Wiring หลัง Flag (2026-09-23) — เสร็จ + verified รออนุมัติ commit
+
+- **เป้าหมาย:** pipeline ใหม่วิ่งข้างๆ runtime เดิมเพื่อ log เทียบ — ยังไม่ให้ LLM ใช้ pool
+- **`retrieval_shadow.py` ใหม่:** `run_grouped_retrieval_shadow(profile, message, shop, platform)` → slots→relations→requests→executor(`legacy_fetcher="auto"` union)→pool → `_summary` log-safe (counts/attempts/by_request/top_eligible name+id+sources+score/requests) — private keys ไม่เข้า dict โดย construction, ไม่ log history · error → `{"ok": False, "error"}` ไม่ raise
+- **app.py callsite (+20 บรรทัด):** หลัง step `RetrievalProfile` — `USE_GROUPED_RETRIEVAL_SHADOW=="1"` + profile ไม่ None → lazy import `retrieval_shadow` → append `_steps` "GroupedRetrievalShadow" เท่านั้น · except → stderr `[SHADOW]` · **flag ปิด = zero cost ไม่มี import** · step input = metadata ปลอดภัย (`message_len`/`shop`/`platform`/`shadow_enabled`) — **ไม่ log req.message เต็ม** (PII)
+- **probe จริง (Mongo):** AD1404T spec → summary ok=true, top_eligible merged `("units","legacy")` score 5.7, evidence_attachments=21 — clean JSON ไม่มี `_evidence`
+- **test:** `test_retrieval_shadow.py` 7 tests (call order spies / legacy union flag / error→ok:False ไม่ raise / summary shape+counts / no private keys / app callsite gated+lazy static pin / no v2/v3 caller) — รวมชุด 120 baseline + 46 focused ผ่าน
+- **ยืนยัน:** flag default ปิด · flag ปิด = behavior เดิม 100% (import ใน block เท่านั้น) · flag เปิด = observe-only ยังไม่ส่ง pool เข้า LLM · ไม่แตะ prompt/llm.py/v2/v3/ChatAdminWeb/botworker/fetch_products/fetch_unit_cards
+- **risk ก่อน 5B3-B:** (1) shadow รันเต็มทุก request — latency เพิ่มเมื่อ flag on (ยอมรับได้สำหรับ observe) (2) `_steps` อาจโต — จำกัด top_eligible 5 ตัวแล้ว (3) 5B3-B = selection policy เลือก candidate จาก pool ส่ง LLM + flag แยก
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)

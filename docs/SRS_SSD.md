@@ -1019,6 +1019,15 @@ listing path:
 | `_merge_group` | รวม cards identity เดียว | group[dict] | dict | — | build_candidate_pool | best card = sellable→richer(canonical_specs/image_text)→fields มากสุด; `_evidence.sources` union | — |
 | `_score` | rank score อธิบายได้ | card, res, anchor, anchor_priority | (score, why[]) | `device_compat._extract_device_token` (lazy) | build_candidate_pool | anchor 3/1 · model_code +2 · subtype +1 · device +1 · relation_target +0.5 · sellable +0.5 · sources>1 +0.2/ตัว · +card `_score` — why[] ลง trace | — |
 
+### 6.31 `retrieval_shadow.py` — grouped-retrieval shadow runner (observe-only, Task 5B3-A)
+
+| ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `run_grouped_retrieval_shadow` | รัน pipeline ใหม่ข้าง runtime เดิม | profile, message, shop, platform, limit_per_request, fetcher, legacy_fetcher | dict summary | `build_retrieval_slots`/`_relations`, `build_grouped_retrieval_requests`, `execute_grouped_retrieval_requests`, `build_candidate_pool` | `app.py` callsite หลัง `USE_GROUPED_RETRIEVAL_SHADOW=1` (lazy import + try/except) | slots→relations→requests→executor(union)→pool→`_summary`; error ใดๆ → `{"ok": False, "error"}` ไม่ raise — ไม่แตะ products/LLM/response | Mongo read ผ่าน executor fetchers; error → ok=False |
+| `_summary` | pool+results → log-safe dict | results, pool | dict | — | run_grouped_retrieval_shadow | counts/attempts/by_request/top_eligible(name+item_id+sources+score)/requests — field สาธารณะเท่านั้น, ไม่มี `_evidence`/`_selection_reason` โดย construction, ไม่ log history | — |
+
+`app.py` callsite: หลัง step `RetrievalProfile` — `os.environ.get("USE_GROUPED_RETRIEVAL_SHADOW","0")=="1"` + `_retrieval_profile is not None` → lazy `from . import retrieval_shadow` → ผล append เข้า `_steps` ("GroupedRetrievalShadow") เท่านั้น; except → stderr `[SHADOW]`; flag ปิด = ไม่มี import/ทำงานเพิ่ม
+
 ---
 
 ## 7. คอนฟิกและตัวแปรสำคัญ
@@ -1031,6 +1040,7 @@ listing path:
 | `USE_CHAT_V3` | `"0"` | `1`→chatbotv3 ทั้งระบบ |
 | `req.use_v2` / `req.use_v3` | None | per-request override (shadowbot/replay) |
 | `USE_UNIT_INDEX` | unset | `1`=units ทุก query · `charger`=เฉพาะ charger family · compat bypass เสมอ |
+| `USE_GROUPED_RETRIEVAL_SHADOW` | `"0"` (ปิด) | `1`=รัน grouped-retrieval pipeline ข้าง runtime เดิม (observe/log เท่านั้น — ไม่แตะคำตอบ) |
 | `USE_QA_KB` | unset | เปิด QA-pair RAG |
 | `CHATBOT_INTERNAL_SECRET` | — | คุม internal API ทั้งสองทิศ |
 | `ADMIN_HANDOFF_URL` | `http://127.0.0.1:3000/api/admin/conversations/bot-handoff` | handoff endpoint |

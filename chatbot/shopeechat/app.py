@@ -1770,6 +1770,26 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 "output": _rc.profile_debug(_retrieval_profile, source="app_chat"),
             })
 
+        # ⚡ Task 5B3-A — grouped-retrieval shadow (observe-only, flag-gated)
+        #   รัน pipeline ใหม่ข้างๆ เพื่อ log เทียบ — ไม่แตะ products/LLM/response
+        if (os.environ.get("USE_GROUPED_RETRIEVAL_SHADOW", "0") == "1"
+                and _retrieval_profile is not None):
+            try:
+                from . import retrieval_shadow as _rshadow
+                _steps.append({
+                    "name": "GroupedRetrievalShadow",
+                    "input": {"message_len": len(req.message or ""),
+                              "shop": req.shop,
+                              "platform": req.platform or "shopee",
+                              "shadow_enabled": True},
+                    "output": _rshadow.run_grouped_retrieval_shadow(
+                        _retrieval_profile, message=req.message,
+                        shop=req.shop, platform=req.platform or "shopee"),
+                })
+            except Exception as _e:
+                print(f"[SHADOW] grouped-retrieval error: {_e}",
+                      file=sys.stderr)
+
         # ===== ขั้นที่ 1: เช็ค Knowledge Base ก่อน =====
         # ถ้าเป็น follow-up (เช่น "เคลมยังไง", "รับประกัน") ให้เอา model จาก history มาค้น KB ด้วย
         kb_query = req.message
