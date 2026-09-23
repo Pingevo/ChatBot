@@ -345,6 +345,20 @@
 - **ยืนยัน:** flag default ปิด · flag ปิด = behavior เดิม 100% (import ใน block เท่านั้น) · flag เปิด = observe-only ยังไม่ส่ง pool เข้า LLM · ไม่แตะ prompt/llm.py/v2/v3/ChatAdminWeb/botworker/fetch_products/fetch_unit_cards
 - **risk ก่อน 5B3-B:** (1) shadow รันเต็มทุก request — latency เพิ่มเมื่อ flag on (ยอมรับได้สำหรับ observe) (2) `_steps` อาจโต — จำกัด top_eligible 5 ตัวแล้ว (3) 5B3-B = selection policy เลือก candidate จาก pool ส่ง LLM + flag แยก
 
+#### Task 5B3-B — CandidatePool → LLM Selection (contract-only, 2026-09-23) — เสร็จ + verified รออนุมัติ commit
+
+- **บริบท:** shadow proof เคสจริง — ระบบเดิมส่ง LLM แค่ AD1404T adapter → ตอบผิด "ไม่มีสาย"; pipeline ใหม่เจอ CTC615P/CTC620P สายมีจอ OLED 240W variant 2 เมตร (item 51617544280) — ขาดชั้น "เลือก" ให้ถูกกลุ่ม
+- **`retrieval_selection.py` ใหม่ (ยังไม่ wire runtime):** `select_for_llm_context(pool, requests, profile)` → `SelectionResult`
+  - **per-request quota:** แต่ละ request ได้ quota ตัวเอง (default 3) — relation_target cable ไม่ถูก adapter score สูงกิน quota; role (`slot`/`relation_target`) preserved
+  - **constraint ranking:** soft_hints (display/length_m/speed/power_w/protocol) match card text (name + **variant names** + tier_variation + specs — "2 เมตร" อยู่ใน variant ไม่ใช่ item name) → `constraint_hits` +score — soft hint เป็น rank signal ไม่ตัดทิ้ง
+  - **unavailable ไม่หาย:** `unavailable_evidence` = stripped summaries ({request_id,name,item_id,reason}) จำกัด 5/req
+  - **rejected = counts เท่านั้น:** `rejected_summary` {request_id,reason,count} — ไม่มี card หลุดเข้า selected
+  - **strip boundary:** `strip_private_evidence` ก่อน output ทุก card — test pin ไม่มี `_evidence`/`_selection_reason`
+- **probe Mongo จริง:** AD1404T spec → slot = 3× AD1404T merged (5.70) · relation_target #1 = **CTC615P/CTC620P สายมีจอ OLED hits=(display,length_m,speed) score 4.59** · #2-3 CTC620W 2m (length+speed ไม่มีจอ) · unav: สายตาย item_unlisted/seller_delete เก็บ reason · rej: wrong_type×15, subtype_mismatch×2 counts
+- **test:** `test_retrieval_selection.py` 8 tests (source+target ติดคู่ / quota ไม่กินกัน / constraint ranking มีจอ+2m+240W ชนะ / unavailable fallback / rejected excluded / stripped / explainable / no v2/v3) — รวม focused 54/54 · baseline ผ่าน
+- **ยืนยัน:** contract-only ไม่ wire app.py (ไม่มี flag ใหม่ — ยังไม่จำเป็น) · ไม่แตะ prompt/llm.py/v2/v3/ChatAdminWeb/botworker · pool ทั้งหมดไม่ถูกส่งเข้า LLM — selected ต่อ request เท่านั้น
+- **risk ก่อน wire จริง:** (1) ต้องออกแบบ integration point ว่า selected cards ไปแทน/เสริม products เดิมตรงไหน + flag `USE_GROUPED_RETRIEVAL_SELECTION` (2) replay gate ควรผ่านก่อนเปิด (3) constraint vocab จำกัด 5 keys — subtype/device constraints อื่นยังไม่ match (4) unavailable evidence ต้อง render เป็นภาษาคนใน prompt ไม่ใช่ dict
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)

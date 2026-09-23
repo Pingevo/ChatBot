@@ -1028,6 +1028,16 @@ listing path:
 
 `app.py` callsite: หลัง step `RetrievalProfile` — `os.environ.get("USE_GROUPED_RETRIEVAL_SHADOW","0")=="1"` + `_retrieval_profile is not None` → lazy `from . import retrieval_shadow` → ผล append เข้า `_steps` ("GroupedRetrievalShadow") เท่านั้น; except → stderr `[SHADOW]`; flag ปิด = ไม่มี import/ทำงานเพิ่ม
 
+### 6.32 `retrieval_selection.py` — CandidatePool → LLM context selection (contract-only, Task 5B3-B)
+
+| ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `SelectedCandidate` | candidate ผ่าน selection (frozen) | — | obj | — | select_for_llm_context | role/request_id/slot_id/relation_id/identity + score+constraint_hits+reason + card (strip แล้ว) | immutable |
+| `SelectionResult` | output selection (frozen) | — | obj | — | select_for_llm_context | selected + by_request (per-request quota) + unavailable_evidence (stripped summaries) + rejected_summary (counts) + trace | immutable |
+| `select_for_llm_context` | pool → cards สำหรับ LLM context | pool, requests, profile, per_request_limit=3, unavailable_limit=5 | SelectionResult | `_select_one`, `strip_private_evidence` | (tests/probes only — ยังไม่ wire runtime) | ต่อ request: eligible → `_select_one` (soft_hints match card text → constraint_hits +score) → sort (hits desc, score desc) → quota; unavailable → stripped summaries; rejected → counts by reason | — |
+| `_card_text` | text รวม constraint matching | card | str | — | `_select_one` | name + variant names + tier_variation + canonical_specs — หลักฐานอย่าง "2 เมตร" อยู่ใน variant ไม่ใช่ item name | — |
+| `_constraint_hit` | soft_hint match card text | key, val, text | bool | — | `_select_one` | display→จอ/oled/display · length_m→`N เมตร/ม./m` · speed→W/A/PD/เต็ม/เร็ว · power_w→`N w` · protocol→`pd/qc/pps/ufcs N` — meta keys (query_hint/target_subtype/source_subtype) ไม่ score | — |
+
 ---
 
 ## 7. คอนฟิกและตัวแปรสำคัญ
