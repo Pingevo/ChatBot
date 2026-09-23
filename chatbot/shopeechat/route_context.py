@@ -487,3 +487,255 @@ def profile_debug(profile: RetrievalProfile, *, source: str,
         "used_fields": list(used_fields),
         "fact_sources": dict(profile.fact_sources),
     }
+
+
+# RetrievalSlot — แยก profile แบนเป็น product-request slots ด้วย deterministic
+# span parse (type keyword position → constraint window ถึง mention ของ type
+# ถัดไป) — contract/parser เท่านั้น ยังไม่ wire เข้า retrieval runtime
+
+
+@dataclass(frozen=True)
+class RetrievalSlot:
+    """scoped product request หนึ่งชิ้นใน turn — ไม่ใช่ intent ใหม่."""
+    slot_id: str
+    source_span: str
+    product_types: frozenset[str]
+    subtypes: frozenset[str]
+    primary_subtype: str | None
+    brand_hints: tuple[str, ...]
+    model_codes: tuple[str, ...]
+    model_terms: tuple[str, ...]
+    target_device: str | None
+    target_scope: str                    # "slot" | "shared" | "none"
+    availability_mode: str
+    compat_mode: str
+    confidence: float
+    fact_sources: tuple[tuple[str, str], ...] = ()
+
+
+def _kw_positions(low: str, kw: str) -> list[int]:
+    """ตำแหน่งทั้งหมดของ kw ใน text — latin kw ต้อง token boundary
+    ("phone" ใน "iphone" ไม่นับ); Thai kw ใช้ substring ตามเดิม"""
+    kl = kw.lower()
+    if re.fullmatch(r"[a-z0-9 ._\-]+", kl):
+        return [m.start() for m in re.finditer(
+            rf"(?<![a-z0-9]){re.escape(kl)}(?![a-z0-9])", low)]
+    out: list[int] = []
+    start = 0
+    while True:
+        i = low.find(kl, start)
+        if i < 0:
+            return out
+        out.append(i)
+        start = i + len(kl)
+
+
+def _type_mentions(low: str, allowed: frozenset[str]) -> list[tuple[int, str, str]]:
+    """(pos, type, src) ของ type keyword/regex ใน message — src: "kw" (explicit
+    product request) | "regex" (inferred model/device phrase); merge same-type run"""
+    from . import product_store as _ps
+
+    hits: list[tuple[int, str, str]] = []
+    for name, kws, rx in _ps.PRODUCT_TYPES:
+        if name not in allowed:
+            continue
+        for kw in kws:
+            for pos in _kw_positions(low, kw):
+                hits.append((pos, name, "kw"))
+        if rx:
+            for m in re.finditer(rx, low):
+                hits.append((m.start(), name, "regex"))
+    hits.sort(key=lambda h: h[0])
+    merged: list[tuple[int, str, str]] = []
+    for pos, t, s in hits:
+        if merged and merged[-1][1] == t:
+            continue
+        merged.append((pos, t, s))
+    return merged
+
+
+def _all_charger_subtypes(low: str) -> frozenset[str]:
+    """ทุก charger subtype ที่มี kw ใน text — _detect_charger_subtype คืนตัวเดียว
+    แต่ "สายชาร์จกับหัวชาร์จ" ต้องได้ทั้ง cable + adapter"""
+    from . import product_store as _ps
+    return frozenset(
+        name for name, kws in _ps._CHARGER_SUBTYPES.items()
+        if any(kw in low for kw in kws)
+    )
+
+
+def _model_terms(span_text: str, brands: list[str]) -> tuple[str, ...]:
+    """brand-anchored model phrase hint — "<brand> + ≤4 tokens ถัดไป"
+    ตัดที่ connector/stopword (ใช้กับ/เอา/และ/ราคา/สี/ไหม/ครับ/ค่ะ)"""
+    _stop = ("ใช้กับ", "กับ", "เอา", "และ", "ส่วน", "สำหรับ", "ไหม", "ครับ",
+             "ค่ะ", "ราคา", "สี", "ขอ", "อยาก", "มี", "หรือ", "แบบ", "ตัว")
+    terms: list[str] = []
+    for b in brands:
+        m = re.search(re.escape(b.lower()) + r"((?:\s+\S+){1,4})", span_text)
+        if not m:
+            continue
+        keep: list[str] = []
+        for w in m.group(1).split():
+            if any(w.startswith(s) for s in _stop):
+                break
+            keep.append(w)
+        if keep:
+            phrase = f"{b} {' '.join(keep)}"
+            if phrase not in terms:
+                terms.append(phrase)
+    return tuple(terms)
+
+
+def _span_device_position(low: str, token: str | None) -> int:
+    """ตำแหน่ง device token ใน message (space-insensitive) — -1 ถ้าหาไม่เจอ."""
+    if not token:
+        return -1
+    m = re.search(re.escape(token.lower()).replace(r"\ ", r"\s+"), low)
+    return m.start() if m else -1
+
+
+def _local_target_device(seg: str, shared: str | None,
+                         slot_types: frozenset[str]) -> str | None:
+    """device token ใน segment ที่เป็น target จริง — (a) ตามหลัง compat connector
+    หรือ (b) family ของ token ไม่ตรง slot ("ฟิล์ม iphone 15" → iphone 15 เป็น
+    target; "นาฬิกา mi watch 8" → mi watch 8 คือตัวสินค้า ไม่นับ)"""
+    from . import device_compat as _dc
+    from . import product_store as _ps
+    d = _dc._extract_device_token(seg)
+    if not d or d == shared:
+        return None
+    pos = _span_device_position(seg.lower(), d)
+    if pos < 0:
+        return None
+    if any(kw in seg.lower()[:pos] for kw in
+           ("ใช้กับ", "รองรับ", "สำหรับ", "เชื่อมต่อ", "เข้ากัน")):
+        return d
+    dev_types = _ps._detect_product_types(d)
+    if dev_types and not (dev_types & slot_types):
+        return d
+    return None
+
+
+def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...]:
+    """แยก resolved profile เป็น product-request slots — deterministic เท่านั้น.
+
+    span rule: window ของ type mention คือ text จาก mention นั้นจนถึง mention
+    ของ type อื่นถัดไป → brand/model/subtype ผูกกับ product ที่ระบุใกล้สุด
+    device ที่ตามหลัง ≥2 distinct types (หรือผูก span ไม่ได้) → target_scope=shared
+    0/1 distinct typed span → slot เดียวเทียบเท่า profile (behavior เดิม)
+    ไม่เรียก LLM · ไม่สรุป compatibility (compat_mode เป็น hint เท่านั้น)
+    """
+    from . import product_store as _ps
+    from . import device_compat as _dc
+    from .scripts.unit_classifier import _extract_codes
+
+    msg = profile.message or ""
+    low = msg.lower()
+    mentions = _type_mentions(low, profile.product_types)
+    mentioned = {t for _, t, _ in mentions}
+    explicit = {t for _, t, s in mentions if s == "kw"}
+    carry = profile.product_types - mentioned  # type จาก anchor/history/intent
+
+    # effective types จุดเดียว: explicit kw = product request จริง;
+    # regex-only mention = device phrase (target ไม่ใช่ slot) — มี explicit แล้ว drop;
+    # ไม่มี explicit เลย → inferred เป็น fallback ("อยากได้ iphone 15" → phone slot)
+    effective = (explicit or mentioned) | carry
+    if explicit:
+        mentions = [(p, t, s) for p, t, s in mentions if t in explicit]
+        distinct = {t for _, t, _ in mentions}
+    else:
+        distinct = mentioned
+
+    # single-slot path: ≤1 typed span → slot เดียวด้วย effective types
+    if len(distinct) <= 1:
+        subs = _all_charger_subtypes(low) or (
+            frozenset({profile.subtype}) if profile.subtype else frozenset())
+        target = (profile.target_device
+                  or _local_target_device(low, None, effective))
+        # brand ที่อยู่ใน target phrase ไม่ใช่ product-brand evidence —
+        # เว้นแต่ device คือสินค้าเอง (family ตรง slot, เช่น "อยากได้ iphone 15")
+        _own_dev = bool(target and _ps._detect_product_types(target) & effective)
+        brands = [b for b in _ps._detect_brands(msg)
+                  if _own_dev or not target or b.lower() not in target.lower()]
+        return (RetrievalSlot(
+            slot_id=f"slot-{next(iter(effective), 'open')}",
+            source_span=msg,
+            product_types=frozenset(effective),
+            subtypes=subs,
+            primary_subtype=profile.subtype,
+            brand_hints=tuple(brands),
+            model_codes=profile.model_codes,
+            model_terms=_model_terms(low, brands),
+            target_device=target,
+            target_scope="slot" if target else "none",
+            availability_mode=profile.availability_mode,
+            compat_mode=profile.compat_mode,
+            confidence=1.0 if effective else 0.4,
+            fact_sources=profile.fact_sources,
+        ),)
+
+    # multi-slot: window ของ mention = [pos, next different-type pos)
+    windows: dict[str, list[str]] = {t: [] for t in distinct}
+    for i, (pos, t, _s) in enumerate(mentions):
+        end = len(low)
+        for pos2, t2, _s2 in mentions[i + 1:]:
+            if t2 != t:
+                end = pos2
+                break
+        windows[t].append(low[pos:end])
+
+    # shared device: อยู่หลัง ≥2 distinct types, ก่อน mention แรก, หรือผูก span ไม่ได้
+    dev_tok = profile.target_device or _dc._extract_device_token(msg)
+    dev_pos = _span_device_position(low, dev_tok)
+    types_before = {t for pos, t, _ in mentions if pos < dev_pos}
+    shared_dev = dev_tok if dev_tok and (
+        dev_pos < 0 or len(types_before) >= 2
+        or dev_pos < mentions[0][0]) else None
+
+    first_pos = {t: min(p for p, tt, _ in mentions if tt == t) for t in distinct}
+    slots: list[RetrievalSlot] = []
+    for t in sorted(distinct, key=lambda x: first_pos[x]):
+        span = " ".join(windows[t])
+        subs = _all_charger_subtypes(span) if t == "charger" else frozenset()
+        primary_sub = profile.subtype if t == "charger" else None
+        if t == "charger" and not subs and profile.subtype:
+            subs = frozenset({profile.subtype})
+        brands = _ps._detect_brands(span)
+        codes = tuple(dict.fromkeys(
+            c for seg in windows[t] for c in _extract_codes(seg)))
+        local_dev = next(
+            (d for seg in windows[t]
+             for d in [_local_target_device(seg, shared_dev,
+                                            frozenset({t}))] if d), None)
+        target = local_dev or shared_dev
+        scope = "slot" if local_dev else ("shared" if shared_dev else "none")
+        _own_dev = bool(
+            target and _ps._detect_product_types(target) & {t})
+        brands = [b for b in brands
+                  if _own_dev or not target or b.lower() not in target.lower()]
+        sources: list[tuple[str, str]] = [("product_types", "message")]
+        if subs:
+            sources.append(("subtypes", "span"))
+        if brands:
+            sources.append(("brand_hints", "span"))
+        if codes:
+            sources.append(("model_codes", "span"))
+        if target:
+            sources.append(("target_device", scope))
+        slots.append(RetrievalSlot(
+            slot_id=f"slot-{t}",
+            source_span=span,
+            product_types=frozenset({t}),
+            subtypes=subs,
+            primary_subtype=primary_sub,
+            brand_hints=tuple(brands),
+            model_codes=codes,
+            model_terms=_model_terms(span, brands),
+            target_device=target,
+            target_scope=scope,
+            availability_mode=profile.availability_mode,
+            compat_mode=_compat_mode(frozenset({t}), primary_sub, target),
+            confidence=0.8,
+            fact_sources=tuple(sources),
+        ))
+    return tuple(slots)

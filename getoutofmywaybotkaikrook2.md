@@ -180,6 +180,47 @@
 - **verify:** hints+wiring 29/29 · suite 83/83 · py_compile OK · diff --check OK · regressions: route_context ALL PASS · car_charger 16/16 · subtype parity 42/42 · qtype guards 27/27 · unit_card_fields ALL PASS
 - **risk ที่เหลือ:** (1) `RetrievalProfile.subtype` ยังเป็นค่าเดียว — multi-subtype/multi-product/multi-slot จริงอยู่ใน **Task 4E** (2) brand ยังไม่ใช่ hard-filter contract กลาง (3) fail-open ทำให้เคส "ร้านไม่มี cable จริง" ใน profile-backed call เห็น docs กลุ่มอื่นแทน pool ว่าง — trade-off ที่ตั้งใจ (LLM เลือก/ตอบเองได้) ไม่ใช่ bug
 
+### ✅ Master plan Task 4E: Multi-Product Request Slots (2026-09-23) — contract/parser เสร็จ + verified รออนุมัติ commit
+
+- **งาน:** เพิ่ม `RetrievalSlot` (frozen) + `build_retrieval_slots(profile)` ใน `route_context.py` — deterministic span parse เท่านั้น ไม่เรียก LLM · **ยังไม่ wire เข้า retrieval runtime** (Step 4-5 grouped fetch/selection เป็นงานถัดไป) → runtime behavior ไม่เปลี่ยน
+- **กฎแยก slot:** window ของ type mention = [mention pos, mention ของ type อื่นถัดไป) ต่อ product type ที่ profile resolve แล้ว → brand/subtype/model ผูกกับ product ที่อยู่ span เดียวกัน
+  - ≤1 typed span → slot เดียวเทียบเท่า profile (4D-compatible, subtypes = ทุกตัวที่ detect)
+  - ≥2 → slot ต่อ type: `slot-{type}` · subtypes เฉพาะ charger slot · brand/model/codes จาก span เท่านั้น
+  - device หลัง ≥2 distinct types / ก่อน mention แรก / ผูก span ไม่ได้ → `target_scope="shared"` ทุก slot
+  - local device ต้องตามหลัง compat connector (ใช้กับ/รองรับ/สำหรับ/เชื่อมต่อ/เข้ากัน) — กัน "mi watch 8" ใน watch span ถูกตีเป็น target device
+- **ตัวอย่างที่แก้:** "หัวชาร์จ cuktech กับนาฬิกา xiaomi mi watch 8 ใช้กับ mi 17 ultra" → slot-charger {adapter, CukTech} + slot-smartwatch {Xiaomi, mi watch 8} + device shared — brand/subtype ไม่ปนข้าม
+- **เจอระหว่าง implement:** `_extract_device_token` ตี product phrase ("mi watch 8") เป็น device ใน span ตัวเอง → เพิ่ม `_local_target_device` บังคับ connector ก่อน device
+- **TDD pins (ใหม่ `test_retrieval_slots.py` 7 tests):** charger+watch แยก constraint · multi-subtype {cable,adapter} ไม่บีบ · single product 1 slot · ambiguous → open slot confidence≤0.5 · shared device scope · frozen+no-mutate · one-slot=profile facts
+- **verify:** slots 7/7 · profile+hints+wiring 47/47 · suite 65/65 · route_context regression ALL PASS · py_compile OK · diff --check OK
+- **risk ที่เหลือ:** (1) slots ยังไม่ถูกใช้จริง — grouped fetch/selection คือ Step 4-5 (งานถัดไป) (2) same-type multi-instance ("สายชาร์จ 2 แบบ") merge เป็น slot เดียวตาม design (3) span parse ใช้ kw/regex positions — typo'd type kw อาจไม่มี span → fallback profile slot
+- **ไม่แตะ:** app.py · product_store/retrieval_policy runtime · prompt/llm.py · ChatAdminWeb/botworker/v2/v3 · ChatResponse shape · Task 5/6/8/10/11
+
+#### Task 4E Hardening (2026-09-23) — target-device pseudo-type fix + verified
+
+- **root cause ที่เจอ (probe):** "มีสายชาร์จ Anker กับฟิล์ม iPhone 15 ไหม" → `slot-phone` ผิดเกิด — "iphone 15" match เฉพาะ phone **regex** (model phrase) ไม่ใช่ user_kw → ในบริบท accessory มันคือ target device ไม่ใช่สินค้าที่จะซื้อ
+- **fix ที่ slot layer (ไม่แตะ `_detect_product_types` — กระทบ legacy ทั้งระบบ):**
+  - `_explicit_phone_product(low)` — phone kw match แบบ word-boundary (`"iphone"` ไม่นับเป็น kw `"phone"`); regex-only phone mention + มี type อื่นร่วม + ไม่มี kw → drop phone ออกจาก slot boundaries (ไม่ใช่ product slot)
+  - `_local_target_device(seg, shared, slot_types)` — target จริงต้อง (a) ตามหลัง compat connector หรือ (b) family ของ token ไม่ตรง slot type ("ฟิล์ม iphone 15" → iphone 15 เป็น target ของฟิล์ม; "นาฬิกา mi watch 8" → mi watch 8 คือตัวสินค้า)
+  - single-product phone query ไม่พัง: "โทรศัพท์ iphone 15" มี kw → phone slot อยู่; type เดียว → single-slot เทียบเท่า profile เดิม
+- **test เพิ่ม (7→10):** accessory device ไม่สร้าง phone slot · explicit phone purchase เก็บ slot · accessory+device ไม่มี connector ก็ไม่เป็น slot
+- **verify:** slots 10/10 · profile+hints+wiring 47/47 · route_context regression ALL PASS · py_compile OK · diff --check OK
+- **risk เพิ่ม:** accessory ของ device family เดียวกัน ("สายนาฬิกา mi watch 8") — family-match ทำให้ไม่ได้ target (kw quirk ของ type detect อยู่แล้ว, conservative skip)
+
+#### Task 4E Provenance Hardening (2026-09-23) — root-cause fix + verified
+
+- **root cause (พิสูจน์ด้วย probe):** `_type_mentions()` ลดเหลือ (pos,type) — provenance หายว่า type มาจาก explicit kw ("เคส","โทรศัพท์") หรือ inferred model regex ("iphone 15","mi watch 8") → hardening เดิมต้องใช้ `_explicit_phone_product()` เดาย้อนเฉพาะ phone และยังรั่ว: (a) "เคส iphone 15" → single-slot คืน `profile.product_types`={case,phone} ตรงๆ (b) "เคส mi watch 8" → smartwatch slot ผิด + target=None
+- **fix (จุดเดียว — slot layer เท่านั้น, ไม่แตะ `_detect_product_types`):**
+  - `_type_mentions` คืน `(pos,type,src)` — src "kw"|"regex"; `_kw_positions` latin kw เช็ก token boundary ("phone" ใน "iphone" ไม่นับ explicit)
+  - effective types จุดเดียว: `(explicit or mentioned) | carry(anchor/history/intent)` — มี explicit → drop regex-only mentions ออกจาก boundaries; ไม่มี explicit → inferred เป็น fallback
+  - single-slot ใช้ effective (ไม่ใช่ profile.product_types ตรงๆ) → "เคส iphone 15" → {case} + target iphone 15
+  - `_local_target_device` มี family rule อยู่แล้ว → "เคส mi watch 8" → {case} + target mi watch 8
+  - brand/model_terms hygiene: brand ที่อยู่ใน target phrase ไม่ใช่ product evidence — เว้นแต่ device คือสินค้าเอง (family ตรง slot)
+  - ลบ `_explicit_phone_product` (ไม่จำเป็น — provenance ครอบทุก family)
+- **probe 8 เคส:** เคส iphone15→{case}+dev · เคส mi watch8→{case}+dev · "อยากได้ iphone 15"→phone fallback · "โทรศัพท์ iphone 15"→phone · accessory multi→ไม่มี phone slot · watch multi→แยก constraint · "หัวชาร์จกับ mi watch 8"→charger+target (ambiguous — รายงานข้อจำกัด) · multi-subtype→{cable,adapter}
+- **test เพิ่ม (10→14):** single accessory กรอง inferred phone · family rule ไม่เฉพาะ phone (mi watch 8) · inferred-only fallback (phone slot) · explicit ชนะ inferred same-family
+- **verify:** slots 14/14 · profile+hints+wiring 47/47 · route_context regression ALL PASS · py_compile OK · diff --check OK · callers: helpers ใช้เฉพาะใน route_context · profile ไม่ mutate (frozen) · lazy imports เดิม ไม่มี cycle ใหม่
+- **risk เพิ่ม:** (1) "หัวชาร์จกับ mi watch 8" ambiguous — explicit-wins rule เลือก target แทน product ที่อาจตั้งใจ (2) "เคส xiaomi mi watch 8" — xiaomi อยู่นอก device token → brand_hints ยังเห็น xiaomi (device-brand pollution บางส่วน)
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)

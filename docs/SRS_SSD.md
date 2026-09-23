@@ -727,6 +727,14 @@ listing path:
 | `_subtype_explicit` | subtype เป็น strong keyword จริงไหม | low, subtype | bool | `_CHARGER_SUBTYPES` (product_store, lazy) | build_retrieval_profile | kw ของ subtype นั้นอยู่ใน msg (ไม่นับ shorthand หัว/สาย ลอยๆ) | — |
 | `_id_str` | id→str normalize | value | str | — | build_retrieval_profile | float เป็น int → int-str | — |
 | `profile_debug` | serialize profile เป็น _steps debug | profile, source, used_fields | dict | — | app.py chat() (Task 4B observe-only) | facts เท่านั้น ไม่ใส่ history/message | — |
+| `RetrievalSlot` | scoped product-request contract (frozen) — Task 4E | — | obj | — | build_retrieval_slots | slot_id/source_span/product_types(frozenset)/subtypes(frozenset)/primary_subtype/brand_hints/model_codes/model_terms/target_device/target_scope/availability_mode/compat_mode/confidence/fact_sources | immutable; ไม่ใช่ intent ใหม่ |
+| `build_retrieval_slots` | แยก profile เป็น per-product slots (Task 4E, contract-only — ยังไม่ wire เข้า retrieval) | profile | tuple[RetrievalSlot] | `_type_mentions`, `_all_charger_subtypes`, `_model_terms`, `_local_target_device`, `_detect_brands`/`_extract_codes`/`_extract_device_token` (lazy) | (ยังไม่มี runtime caller) | provenance: kw-mention=explicit product, regex-only=inferred device → มี explicit แล้ว drop inferred slots; ไม่มี explicit → inferred fallback; effective types จุดเดียวใช้ทั้ง single/multi; device หลัง ≥2 types/ก่อน mention แรก/ผูกไม่ได้ → shared; ไม่เรียก LLM ไม่สรุป compat | none |
+| `_type_mentions` | positions+source ของ type kws/regex ใน message | low, allowed | list[(pos,type,src)] | `PRODUCT_TYPES`, `_kw_positions` (product_store lazy + local) | build_retrieval_slots | src="kw"=explicit product / "regex"=inferred device phrase; merge same-type run | — |
+| `_kw_positions` | positions ของ kw (latin = token boundary) | low, kw | list[int] | — | `_type_mentions` | "phone" ใน "iphone" ไม่นับ; Thai kw substring ตามเดิม | — |
+| `_all_charger_subtypes` | ทุก subtype ที่ kw match (multi-subtype) | low | frozenset[str] | `_CHARGER_SUBTYPES` (product_store, lazy) | build_retrieval_slots | cable+adapter ฯลฯ ไม่บีบเหลือตัวเดียว | — |
+| `_model_terms` | brand-anchored model phrase hint | span_text, brands | tuple[str] | stop-word list | build_retrieval_slots | `<brand>+≤4 tokens` ตัดที่ connector/stopword | — |
+| `_span_device_position` | ตำแหน่ง device token (space-insensitive) | low, token | int | — | `_local_target_device`, build_retrieval_slots | regex escape + `\s+` | — |
+| `_local_target_device` | device ใน segment ที่เป็น target จริง | seg, shared, slot_types | str/None | `_extract_device_token` (device_compat), `_detect_product_types` (product_store), `_span_device_position` | build_retrieval_slots | connector นำหน้า หรือ family ของ token ไม่ตรง slot ("ฟิล์ม iphone 15"→target; "นาฬิกา mi watch 8"→ตัวสินค้า) | — |
 
 ### 6.19 `responses.py` — response helpers
 
