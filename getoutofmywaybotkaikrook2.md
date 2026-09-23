@@ -238,6 +238,35 @@
   - `s25` เดิมโดน code==device guard ฆ่า device → ตอนนี้กรองฝั่ง code แทน (guard เดิมคงไว้เป็น safety net)
   - test +3 (aliases≠codes / s25+a56 survive / real codes HA835…AD653T ยัง exact_model) → 68/68 · probe 8 เคสตรง spec · regressions เดิมผ่าน
 
+#### Task 4G Product-to-Product / Mention Relation Parser (2026-09-23) — contract/parser เสร็จ + verified รออนุมัติ commit
+
+- **root cause:** slot parser เก็บ type/code/brand/device แยกกันแต่**ไม่มี representation ของความสัมพันธ์** — "หัวชาร์จ AD1404T ใช้กับสายชาร์จไหน" เห็นแค่ charger+AD1404T+subtypes ปนกันใน slot เดียว ไม่รู้ว่า AD1404T คือ *สินค้าอ้างอิง* และสายชาร์จคือ *เป้าค้นหา* (แถม `_type_mentions` merge same-type run ทำ "สายชาร์จ" mention ที่สองหายไปด้วย)
+- **fix (route_context.py เท่านั้น — contract/parser, ยังไม่ wire เข้า retrieval):**
+  - `RetrievalRelation` (frozen): source_slot_id / target_slot_id / relation_type("works_with") / evidence_span / constraints(tuple[(k,v)]) / confidence
+  - `build_retrieval_relations(profile, slots)` — deterministic เท่านั้น: connector regex (ใช้กับ/คู่กับ/รองรับ/เข้ากับ/ใช้ได้กับ/ใช้คู่กับ/ใช้คู่กัน/ใช้ร่วมกับ/เข้ากัน/คู่กัน) → forward: target=kw-mention หลัง connector ≤25 chars + question marker (ไหน/อะไร/แบบไหน/ตัวไหน/รุ่นไหน/ยี่ห้อไหน/ได้บ้าง) ภายใน 30 chars, source=kw-mention/code ก่อน connector · symmetric (ลงท้าย คู่กัน): สอง mention ก่อน connector + question หลัง · device/target-device mention ไม่ใช่ target (kw-only) → "AD653T ใช้กับ ip14" ไม่สร้าง relation · dedupe ต่อ (src,tgt) slot · ไม่เรียก LLM ไม่สรุป compatibility
+  - `_kw_type_mentions` — kw-only ไม่ merge (ต่างจาก `_type_mentions` ที่ merge same-type run สำหรับ slot boundary — สายชาร์จตัวที่สองต้องเห็น)
+  - `_relation_constraints` — generic detectors: มีจอ/หน้าจอ→(display,required) · N เมตร/ม./m→(length_m,N) · เต็มสปีด/เร็วสุด/เต็มกำลัง→(speed,full) · NNw/วัตต์→(power_w,N) · pd/qc/pps/ufcs X→(protocol,PD3.1)
+  - `_slot_id_for` — map type→slot (single-slot ทุก mention เข้า slot เดียว)
+- **fix รองจาก plan 4G (mention ownership):**
+  - `_product_brands` + adjacency: brand ที่ติดกับ device occurrence ด้านหน้า (whitespace เท่านั้น) = ชื่อ device — "เคส xiaomi mi watch 8" → xiaomi ไม่รั่วเป็น case brand (เดิมกรองเฉพาะ inside-span)
+  - `_ambiguous_device_target` + single-slot confidence: device ตามหลัง "กับ" เปล่า (ไม่ใช่ ใช้กับ/เข้ากับ/คู่กับ) + ไม่มี kw ของ family นั้น → อาจเป็น product อีกชิ้นไม่ใช่ target → confidence 0.6 ("หัวชาร์จกับ mi watch 8" = charger+watch?)
+- **test เพิ่ม:** `test_retrieval_relations.py` 7 tests — adapter-code→cable relation (constraints display/length_m=2/speed=full) · exact-model ไม่มี relation · device-compat (ip14) ไม่มี product relation · pairing ไม่มี code (หัวชาร์จกับสายชาร์จใช้คู่กัน → relation) · list ไม่มี connector ไม่มี relation · device-brand adjacency · ambiguous confidence<0.8
+- **verify:** 75/75 (relations+slots+alias+profile+hints+wiring) · route_context regression ALL PASS · car_charger 16/16 · compat_mode_filter 144/144 · py_compile OK · diff --check OK
+- **risk ที่เหลือ:** (1) relation = contract-only — runtime ยังไม่กิน (Task 5/5A ค่อย wire) (2) connector/question window แบบ char-bound (25/30) — ประโยคยาวหน่อยอาจพลาด (3) adjacency เฉพาะ whitespace — "xiaomi, mi watch 8" ยังนับเป็น brand (4) ambiguous-confidence เฉพาะ single-slot path; multi-slot "A กับ B กับ device" ยัง confidence 0.8 ตามเดิม (5) wattage token เช่น "240W" รั่วเป็น model_codes→exact_model (pre-existing ใน `_extract_codes` ไม่ใช่ 4G) — แก้ไม่ได้ generic เพราะ wattage เป็น product code จริงใน catalog (65W=68 units, 20W=93) ต้อง context-aware resolution ใน task ถัดไป
+
+- **hardening รอบ 2 — 'สาย'/'หัว' shorthand context-aware (2026-09-23) — verify แล้ว รอ commit:**
+  - **ปัญหา:** relation parser จับเฉพาะ kw เต็ม — "ใช้กับสายไหน"/"หัวอันนี้ AD1404T" พลาด แต่ "สาย" ลอยตัวใส่ PRODUCT_TYPES ไม่ได้ (compound พัง)
+  - **fix:** `_shorthand_target_mentions` — 'สาย'→cable/'หัว'→adapter (type=charger) เฉพาะหลัง connector ≤20c + ตามด้วย question marker ทันที + compound blacklist (สายไฟ/สายตา/สายรัด/สายคล้อง/สายนาฬิกา/สายเชือก/สายพาน/สายลม/สายฝน/สายพันธุ์/หัวหน้า/หัวใจ/…) + **gate:** source ต้องเป็น charger ctx (kw/หัว-shorthand/"charger"ใน product_types) → นาฬิกา→สาย ไม่ infer · `_shorthand_source_mentions` — 'หัว'+อันนี้/นี้/ตัวนี้/รุ่นนี้/code → adapter source · shorthand-inferred → constraints+("target_subtype",sub), confidence 0.7 · `_slot_id_for` fallback → "slot-<t>" (virtual, contract-only)
+  - **พบระหว่าง probe:** "สายคล้อง" เป็น case kw จริง (สายคล้องคอ) → charger→case relation ผ่าน kw path = ถูกต้อง — test ปรับเป็น pin "ไม่ infer cable" แทน `==()` · "นาฬิกาใช้กับสายนาฬิกาอะไร" → relation smartwatch→smartwatch (kw "นาฬิกา" substring-match ใน compound — taxonomy quirk ไม่ใช่ cable inference)
+  - **verify:** relations 13/13 · รวมชุด 81/81 · probe 12 เคสตรง (shorthand เข้า / compound ไม่เข้า / watch ไม่ infer cable / ไม่มี connector ไม่มี relation) · regressions เดิมผ่าน
+  - **risk เพิ่ม:** symmetric คู่กัน ไม่รองรับ bare-สาย ตำแหน่งก่อน connector · kw substring-match ใน compound (นาฬิกา⊂สายนาฬิกา) — taxonomy-level ไม่แก้ใน 4G (guard ใน relation parser แล้ว)
+
+- **hardening รอบ 3 — fail-closed source evidence + strap-compound guard (2026-09-23) — verify แล้ว รอ commit:**
+  - **ปัญหา (probe จริง):** (1) "หัวอันนี้ใช้กับสายไหน" (ไม่มี code/kw/anchor) สร้าง relation — 'หัว'-shorthand เพียงลำพังไม่ใช่ source evidence (2) "นาฬิกาใช้กับสายนาฬิกาอะไร" → smartwatch→smartwatch self-relation เพราะ kw "นาฬิกา" substring-match ใน compound "สายนาฬิกา" (สายนาฬิกา = strap accessory ไม่ใช่ watch)
+  - **fix (route_context เท่านั้น):** `_strap_compound_mention` — kw mention ที่ text ก่อนหน้าลงท้าย "สาย" = tail ของ สายX compound → ตัดออกจาก kw_mentions (compound kw เอง เช่น สายคล้อง ไม่โดน) · source gate: relation ต้องมี real evidence = kw mention หรือ code ก่อน connector (shorthand ให้ type เท่านั้น ไม่นับ evidence) — symmetric path เช็กเหมือนกัน · charger_ctx สำหรับ cable-shorthand รวม code-only source ("AD1404T ใช้กับสายไหน" → relation — code คือ product evidence ในร้าน charging)
+  - **verify:** relations 17/17 · รวมชุด 85/85 · probe 9/9 ตรง (หัวอันนี้ลอย→() / +code→rel / code ล้วน→rel / สายนาฬิกา→() / สายคล้อง→charger→case จาก taxonomy kw ไม่ใช่ cable) · regressions เดิมผ่าน
+  - **risk เหลือ:** "รุ่น XYZ ใช้กับสายไหน" โดยไม่มี code ที่รู้จัก → no relation (fail-closed ตั้งใจ) · strap guard เฉพาะ สาย-prefix; compound แบบอื่น ("เคสนาฬิกา") ยังไม่ครอบ · code-only→cable inference ใช้ shop-domain prior (ร้าน charging) — confidence 0.7 สะท้อน
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)

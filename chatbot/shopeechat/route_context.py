@@ -642,8 +642,15 @@ def _product_brands(text: str, brands: list[str],
     out: list[str] = []
     for b in brands:
         hits = list(re.finditer(re.escape(b.lower()), low_t))
-        if not hits or any(
-                not (occ[0] <= m.start() < occ[1]) for m in hits):
+
+        def _device_owned(m: re.Match) -> bool:
+            if occ[0] <= m.start() < occ[1]:
+                return True
+            # brand ติดกับ device ด้านหน้า = ส่วนของชื่อ device ("xiaomi mi watch 8")
+            return (m.end() <= occ[0]
+                    and bool(re.fullmatch(r"\s*", low_t[m.end():occ[0]])))
+
+        if not hits or any(not _device_owned(m) for m in hits):
             out.append(b)
     return out
 
@@ -668,6 +675,28 @@ def _local_target_device(seg: str, shared: str | None,
     if dev_types and not (dev_types & slot_types):
         return d
     return None
+
+
+def _ambiguous_device_target(low: str, target: str | None) -> bool:
+    """device ตามหลัง 'กับ' เปล่า (ไม่ใช่ compat connector) + ไม่มี kw ของ
+    family นั้น — เสี่ยงว่า device คือ product อีกชิ้นไม่ใช่ target
+    ('หัวชาร์จกับ mi watch 8' vs 'สายชาร์จใช้กับ ip14')"""
+    if not target:
+        return False
+    occ = _device_occurrence(low, target)
+    if occ is None:
+        return False
+    head = low[:occ[0]].rstrip()
+    if not head.endswith("กับ") or head.endswith(
+            ("ใช้กับ", "เข้ากับ", "คู่กับ")):
+        return False
+    from . import product_store as _ps
+    dev_types = _ps._detect_product_types(target)
+    for name, kws, _rx in _ps.PRODUCT_TYPES:
+        if name in dev_types and any(
+                _kw_positions(low, kw) for kw in kws):
+            return False
+    return True
 
 
 def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...]:
@@ -724,7 +753,8 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
             target_scope="slot" if target else "none",
             availability_mode=profile.availability_mode,
             compat_mode=profile.compat_mode,
-            confidence=1.0 if effective else 0.4,
+            confidence=0.6 if _ambiguous_device_target(
+                low, target) else (1.0 if effective else 0.4),
             fact_sources=profile.fact_sources,
         ),)
 
@@ -793,3 +823,211 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
             fact_sources=tuple(sources),
         ))
     return tuple(slots)
+
+
+# RetrievalRelation — product-to-product relation (source ที่ลูกค้าอ้างถึง →
+# target ที่อยากหา) ผ่าน compat connector — contract/parser เท่านั้น
+# ยังไม่ wire เข้า retrieval runtime
+
+_REL_CONN_RE = re.compile(
+    r"ใช้คู่กับ|ใช้คู่กัน|ใช้ได้กับ|ใช้ร่วมกับ|ใช้กับ|เข้ากัน|เข้ากับ|"
+    r"รองรับ|คู่กัน|คู่กับ")
+_REL_QUESTION = ("ไหน", "อะไร", "แบบไหน", "ตัวไหน", "รุ่นไหน",
+                 "ยี่ห้อไหน", "ได้บ้าง")
+
+
+@dataclass(frozen=True)
+class RetrievalRelation:
+    """relation ระหว่าง product mention ใน turn เดียว — ไม่ใช่ intent ใหม่."""
+    source_slot_id: str
+    target_slot_id: str
+    relation_type: str                    # "works_with"
+    evidence_span: str
+    constraints: tuple[tuple[str, str], ...] = ()
+    confidence: float = 1.0
+
+
+def _relation_constraints(tail: str) -> tuple[tuple[str, str], ...]:
+    """constraint tokens ที่ผูกกับ target product — generic detectors เท่านั้น"""
+    out: list[tuple[str, str]] = []
+    if re.search(r"มีจอ|จอแสดง|หน้าจอ", tail):
+        out.append(("display", "required"))
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:เมตร|ม\.|m(?![a-z]))", tail)
+    if m:
+        out.append(("length_m", m.group(1)))
+    if re.search(r"เต็มสปีด|เร็วสุด|เต็มกำลัง|สปีดสูงสุด", tail):
+        out.append(("speed", "full"))
+    m = re.search(r"(\d{2,3})\s*(?:w(?![a-z])|วัตต์)", tail)
+    if m:
+        out.append(("power_w", m.group(1)))
+    m = re.search(r"(pd|qc|pps|ufcs)\s*(\d+(?:\.\d+)?)", tail)
+    if m:
+        out.append(("protocol", f"{m.group(1).upper()}{m.group(2)}"))
+    return tuple(out)
+
+
+def _slot_id_for(slots: tuple[RetrievalSlot, ...], t: str) -> str:
+    """slot_id ของ slot ที่มี type t — single-slot ทุก mention map เข้า slot เดียว;
+    type ไม่อยู่ใน slots → ชื่อตาม convention (virtual, contract-only)"""
+    for s in slots:
+        if t in s.product_types:
+            return s.slot_id
+    return f"slot-{t}"
+
+
+def _kw_type_mentions(low: str, allowed: frozenset[str]) -> list[tuple[int, str]]:
+    """kw-only type mentions ไม่ merge — relation parser ต้องเห็น mention ซ้ำ
+    type เดียวกัน ("หัวชาร์จ ... สายชาร์จ" คนละบทบาท)"""
+    from . import product_store as _ps
+    hits: set[tuple[int, str]] = set()
+    for name, kws, _rx in _ps.PRODUCT_TYPES:
+        if name not in allowed:
+            continue
+        for kw in kws:
+            for pos in _kw_positions(low, kw):
+                hits.add((pos, name))
+    return sorted(hits)
+
+
+# 'สาย'/'หัว' shorthand — ใช้เฉพาะ relation-tail ที่มี question marker ตามทันที
+# compound blacklist กัน สายไฟ/สายตา/สายนาฬิกา/หัวหน้า/หัวใจ ฯลฯ
+_REL_SHORT_CABLE_BL = ("ไฟ", "ตา", "รัด", "คล้อง", "นาฬิกา", "เชือก", "พาน",
+                       "ยาง", "ลม", "ฝน", "สัญญาณ", "ดิน", "เปย์", "พันธุ์",
+                       "ชาร์จ", "ชาร์ต", "บัว", "หนีบ", "สปริง", "โลห์")
+_REL_SHORT_HEAD_BL = ("ชาร์จ", "ชาร์ต", "หน้า", "ใจ", "เข่า", "ไฟ", "ขวด",
+                      "บ้าน", "คอ", "ไหล่", "จุด", "เราะ", "มุม", "ท้าย")
+_REL_SHORT_Q = ("ไหน", "อะไร", "แบบไหน", "รุ่นไหน", "ตัวไหน")
+
+
+def _shorthand_target_mentions(low: str, start: int, end: int
+                               ) -> list[tuple[int, str, str]]:
+    """'สาย'/'หัว' + question marker ใน [start,end) → (pos,"charger",subtype)
+    compound blacklist กันคำประสม — kw เต็ม (สายชาร์จ/หัวชาร์จ) จัดการก่อนเสมอ"""
+    out: list[tuple[int, str, str]] = []
+    for m in re.finditer(r"สาย|หัว", low):
+        if not (start <= m.start() < end):
+            continue
+        w = m.group(0)
+        after = low[m.end():].lstrip(" ,")
+        if after.startswith(_REL_SHORT_CABLE_BL if w == "สาย"
+                            else _REL_SHORT_HEAD_BL):
+            continue
+        if after.startswith(_REL_SHORT_Q):
+            out.append((m.start(), "charger",
+                        "cable" if w == "สาย" else "adapter"))
+    return out
+
+
+def _shorthand_source_mentions(low: str) -> list[tuple[int, str]]:
+    """'หัว' + อันนี้/นี้/ตัวนี้/รุ่นนี้/code → (pos,"charger") — adapter ที่อ้างถึง
+    ('หัวอันนี้ AD1404T' = หัวชาร์จตัวเดิม) · compound blacklist เช่น หัวหน้า/หัวใจ
+    shorthand source เพิ่ม type เท่านั้น — ไม่นับเป็น source evidence เอง"""
+    out: list[tuple[int, str]] = []
+    for m in re.finditer("หัว", low):
+        after = low[m.end():]
+        if after.startswith(_REL_SHORT_HEAD_BL):
+            continue
+        if re.match(r"(?:อันนี้|นี้|ตัวนี้|รุ่นนี้|ตัวที่|\s*[a-z]{1,4}\d{2,})",
+                    after):
+            out.append((m.start(), "charger"))
+    return out
+
+
+def _strap_compound_mention(low: str, pos: int) -> bool:
+    """kw mention ที่เป็น tail ของ strap compound ('สายนาฬิกา' ทำ 'นาฬิกา' ไม่ใช่
+    smartwatch mention) — compound ที่เป็น kw เอง (สายคล้อง) ไม่โดน"""
+    return low[:pos].rstrip().endswith("สาย")
+
+
+def build_retrieval_relations(
+        profile: RetrievalProfile,
+        slots: tuple[RetrievalSlot, ...]
+) -> tuple[RetrievalRelation, ...]:
+    """หา product-to-product relations — deterministic เท่านั้น.
+
+    pattern: source(code/type mention) → compat connector → target
+    (explicit type kw + question marker) — เช่น
+    "หัวชาร์จ AD1404T ใช้กับสายชาร์จไหน" = source AD1404T, target cable request
+    connector ลงท้าย "คู่กัน" = สองฝั่งนำหน้า connector
+    device/target-device mention (ip14, mi watch 8) ไม่ใช่ target — type kw เท่านั้น
+    ไม่เรียก LLM · ไม่สรุป compatibility positive
+    """
+    msg = profile.message or ""
+    low = msg.lower()
+    kw_mentions = [(p, t) for p, t in
+                   _kw_type_mentions(low, profile.product_types)
+                   if not _strap_compound_mention(low, p)]
+    kw_pos = {p for p, _ in kw_mentions}
+    # source candidates = kw + 'หัว' shorthand (อันนี้/นี้/code ตามหลัง)
+    all_mentions = sorted(kw_mentions + _shorthand_source_mentions(low))
+    code_mentions = [(m.start(), c)
+                     for c in profile.model_codes
+                     for m in re.finditer(re.escape(c.lower()), low)]
+    if not all_mentions and not code_mentions:
+        return ()
+
+    rels: list[RetrievalRelation] = []
+    seen: set[tuple[str, str]] = set()
+    for cm in _REL_CONN_RE.finditer(low):
+        conn = cm.group(0)
+        symmetric = conn.endswith("คู่กัน")
+        shorthand_sub: str | None = None
+        if symmetric:
+            before = [(p, t) for p, t in all_mentions if p < cm.start()]
+            # shorthand-only source ไม่พอ — ต้องมี kw/code evidence จริง
+            if (len(before) < 2 or
+                    (before[-2][0] not in kw_pos and
+                     not any(p < cm.start() for p, _ in code_mentions))):
+                continue
+            tgt_pos, tgt_type = before[-1]
+            src_pos, src_type = before[-2]
+            q_seg = low[cm.end():cm.end() + 30]
+            tail = low[cm.end():]
+        else:
+            cand = [(p, t) for p, t in all_mentions if p < cm.start()]
+            code_before = [(p, c) for p, c in code_mentions if p < cm.start()]
+            # shorthand source ไม่นับ evidence — ต้องมี kw mention หรือ code จริง
+            if (not code_before and
+                    not any(p in kw_pos for p, _ in cand)):
+                continue
+            after = [(p, t) for p, t in kw_mentions
+                     if p >= cm.end() and p - cm.end() <= 25]
+            if not after:
+                # bare 'สาย'/'หัว' + question — infer เฉพาะเมื่อ source เป็น
+                # charger ctx (kw/หัว-shorthand/code/charger ใน profile)
+                if (code_before or "charger" in profile.product_types or
+                        any(t == "charger" for _, t in cand)):
+                    short = _shorthand_target_mentions(low, cm.end(),
+                                                     cm.end() + 20)
+                    if short:
+                        after = [(short[0][0], "charger")]
+                        shorthand_sub = short[0][2]
+            if not after:
+                continue
+            tgt_pos, tgt_type = after[0]
+            src_pos = max([p for p, _ in cand] + [p for p, _ in code_before])
+            src_type = cand[-1][1] if cand else None
+            q_seg = low[tgt_pos:tgt_pos + 30]
+            tail = low[tgt_pos:]
+        if not any(q in q_seg for q in _REL_QUESTION):
+            continue
+        src_slot = _slot_id_for(slots, src_type) if src_type else (
+            slots[0].slot_id if slots else "slot-open")
+        tgt_slot = _slot_id_for(slots, tgt_type)
+        key = (src_slot, tgt_slot)
+        if key in seen:
+            continue
+        seen.add(key)
+        start = src_pos if not symmetric else min(src_pos, tgt_pos)
+        cons = _relation_constraints(tail)
+        if shorthand_sub:
+            cons += (("target_subtype", shorthand_sub),)
+        rels.append(RetrievalRelation(
+            source_slot_id=src_slot,
+            target_slot_id=tgt_slot,
+            relation_type="works_with",
+            evidence_span=msg[start:].strip(),
+            constraints=cons,
+            confidence=0.7 if shorthand_sub else 0.8,
+        ))
+    return tuple(rels)
