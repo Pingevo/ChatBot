@@ -292,6 +292,26 @@
 - **test เพิ่ม:** +3 (kw target carries cable subtype / source slot keeps adapter role / symmetric target subtype) — 26/26 grouped+relations, รวมชุด 94/94 · regressions route_context/car_charger/compat_mode ผ่าน · py_compile+diff --check OK
 - **ยืนยัน:** ยังไม่ wire runtime · SRS §6 อัปเดต (_mention_subtype, build_retrieval_relations, _slot_request)
 - **cleanup (role isolation):** `_relation_request` กรอง `source_subtype` ออกจาก target request `soft_hints` — เป็น metadata ฝั่ง source ใช้โดย `_slot_request` เท่านั้น (ยังอยู่ใน `RetrievalRelation.constraints`) · +1 test pin · 95/95 รวมชุด · regressions ผ่าน
+- **committed `8794cfc`** — feat: add offline grouped retrieval request planner (5 files)
+
+#### Task 5B1 — Grouped Retrieval Executor observe mode (2026-09-23) — เสร็จ + verified รออนุมัติ commit
+
+- **ทำอะไร:** `retrieval_executor.py` ใหม่ — `RetrievalExecutionResult` (frozen) + `execute_grouped_retrieval_requests(requests, *, message, shop, platform, limit_per_request, observe_only, fetcher)` · ต่อ request สร้าง synthetic `RetrievalProfile` → `units.fetch_unit_cards` (default, lazy; injectable สำหรับ test) → candidates+trace · error ต่อ request ถูกจับไม่ล้มทั้งชุด · soft_hints=trace เท่านั้น ไม่ตัด candidate
+- **root-cause fix ที่เจอจาก probe จริง:** relation_target fetch ด้วย message เต็ม → vector เอียงไป source ("หัวชาร์จ AD1404T") ดึง adapter ซ้ำแทน cable → แก้ที่ owner: `build_retrieval_relations` เพิ่ม constraint `("query_hint", text ฝั่ง target จาก tgt_pos ≤200)` — executor ใช้เป็น query ของ relation_target · generic ไม่ hardcode
+- **probe Mongo จริง (KingGadgets):** "หัวชาร์จ AD1404T ใช้กับสายชาร์จไหน…2 เมตร…เต็มสปีด" → base ได้ AD1404T charger (code-hit) · target ได้ **สายชาร์จจริง CTC620W 2 เมตร PD3.1** ตรง constraints · "รุ่น AD1404T" → identity เดียว · "เคสกับฟิล์ม iPhone 15" → case 6 ตัว / screen_protector **0 ตัว** (units pool ไม่มี/ dead-pool — risk สำหรับ 5B2 union)
+- **test เพิ่ม:** `test_grouped_retrieval_executor.py` 8 tests (mock fetcher + live smoke skip-guard) — รวมชุด 102/102 · regressions route_context/car_charger/compat_mode ผ่าน · py_compile+diff --check OK
+- **risk ก่อน 5B2:** (1) units path อาจว่างทั้งที่ legacy sweep มีของ (screen_protector case) — 5B2 ต้อง union/fallback (2) query_hint ใช้เฉพาะ relation_target — base ยังใช้ message เต็ม (3) soft_hints (display/length/speed) ยังไม่มีผลต่อ rank ใน 5B1
+- **ยืนยัน:** ไม่ wire runtime · ไม่แตะ app.py/product_store runtime · fetcher injectable — production path ไม่เปลี่ยน · SRS §6.29 + relation row อัปเดต
+
+##### 5B1 hardening — evidence-preserving buckets (2026-09-23)
+
+- **ปัญหาเดิม:** executor เรียก `fetch_unit_cards` — all-dead → `[]` เงียบ (runtime fallback signal) → grouped path เสียหลักฐาน "เจอแต่ตาย/ผิดเครื่อง"
+- **fix:**
+  - `units.fetch_unit_evidence()` + `UnitEvidenceFetchResult` — chain เดิม (fetch_units→attach_*→to_unit_card) แต่ไม่ collapse all-dead; `fetch_unit_cards` behavior เดิมไม่เปลี่ยน
+  - executor contract ใหม่: `eligible_candidates` / `unavailable_evidence` / `rejected_evidence` / `source_attempts` (+`candidates` property alias); `_bucket()`: wrong_type / subtype_mismatch (charger-family เท่านั้น, unit type=expansion ผ่าน) / device_mismatch (`_extract_device_token` generic — "haylou watch 8"/"mi band 5" ≠ iphone 15) → rejected; dead→unavailable เก็บ reason
+- **probe Mongo จริง:** AD1404T spec sentence → req-1 cable elig=6 (CTC620W 2m PD3.1) unav=12 rej=2 · "เคสกับฟิล์ม iPhone 15" → case elig=2/unav=4 · screen_protector elig=0 raw=13 — **ร้านมีแต่ฟิล์ม Haylou/Mi Band → rejected device_mismatch ทั้งหมด** (ก่อนหน้านี้หายเงียบเป็น [])
+- **test:** 11 tests (all-dead evidence / per-slot quota ไม่กินกัน / wrong-device rejected / subtype_mismatch / error isolated / live smoke) — รวมชุด 106/106 · regressions ผ่าน
+- **ยืนยัน:** ไม่ wire runtime · fetch_unit_cards เดิมไม่เปลี่ยน · ไม่แตะ v2/v3/ChatAdminWeb/botworker · 5B2 = legacy/source union + dedupe/rank กลาง
 
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 

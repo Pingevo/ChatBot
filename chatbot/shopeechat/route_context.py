@@ -1052,6 +1052,9 @@ def build_retrieval_relations(
             cons += (("target_subtype", tgt_sub),)
         if src_sub:
             cons += (("source_subtype", src_sub),)
+        # query_hint = text ฝั่ง target (target kw + constraints tail) — executor
+        # ใช้เป็น query แทน message เต็มที่มี source terms ปน
+        cons += (("query_hint", low[tgt_pos:tgt_pos + 200].strip()),)
         rels.append(RetrievalRelation(
             source_slot_id=src_slot,
             target_slot_id=tgt_slot,

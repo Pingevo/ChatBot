@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -486,3 +487,44 @@ def fetch_unit_cards(message: str, retrieval_profile: RetrievalProfile | None = 
         print("[UNITS] pool all-dead post-join → legacy fallback", file=sys.stderr)
         return []
     return [to_unit_card(u, route) for u in top]
+
+
+@dataclass(frozen=True)
+class UnitEvidenceFetchResult:
+    """evidence fetch result — cards ครบทั้ง sellable/dead (ไม่ collapse เหมือน
+    fetch_unit_cards ที่คืน [] เมื่อ all-dead เพื่อเป็น runtime fallback signal)"""
+    cards: tuple[dict, ...]
+    raw_count: int
+    sellable_count: int
+    unavailable_count: int
+    trace: tuple[str, ...]
+
+
+def fetch_unit_evidence(
+    message: str,
+    retrieval_profile: RetrievalProfile | None = None,
+    **kwargs,
+) -> UnitEvidenceFetchResult:
+    """chain เดียวกับ fetch_unit_cards แต่คืน evidence ทั้งหมด — observe path
+    ของ grouped executor (Task 5B1): หลักฐาน all-dead ต้องไม่หาย
+    availability คำนวณผ่าน resolve_availability เหมือนเดิม (ใน to_unit_card)"""
+    route = kwargs.pop("route", None)
+    if route is None and retrieval_profile is None:
+        from . import route_context as _rc
+        route = _rc.resolve_route(message)
+    limit = int(kwargs.pop("limit", 8))
+    us = attach_listing_fields(attach_image_texts(attach_kb_specs(
+        fetch_units(message, route=route, limit=limit * 2,
+                    retrieval_profile=retrieval_profile, **kwargs))))
+    us.sort(key=lambda u: (u.get("_matched_by") == "code",
+                           _live_sellable(u), u.get("_score") or 0.0),
+            reverse=True)
+    cards = tuple(to_unit_card(u, route) for u in us[:limit])
+    sellable = sum(1 for c in cards if c.get("_available_for_sale"))
+    return UnitEvidenceFetchResult(
+        cards=cards,
+        raw_count=len(us),
+        sellable_count=sellable,
+        unavailable_count=len(cards) - sellable,
+        trace=(f"units raw={len(us)} top={len(cards)} sellable={sellable}",),
+    )
