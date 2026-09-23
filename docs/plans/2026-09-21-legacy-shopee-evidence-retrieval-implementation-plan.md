@@ -36,6 +36,7 @@
 - **Variant/unit stock:** Listing has many variants but only some have stock. Expected: pick the matching sellable unit, not the parent listing or a dead variant.
 - **Sensitive policies:** Claim, warranty, refund, tax invoice, and human handoff. Expected: deterministic or evidence-backed response; if handoff is promised, `handoff_to_admin=True`.
 - **Compatibility:** Customer asks whether an item works with an existing device. Expected: preserve requested shop/family/subtype/device across every source, answer only from compatible evidence, and never claim no product/all sold out while a sellable compatible candidate exists; say not enough info when evidence is missing.
+- **Device shorthand/alias:** Customer writes compact or shorthand device names such as `mi14pro`, `ip14`, `i14 pro`, `iphone14 pro`, or Thai `ไอโฟน14โปร`. Expected: normalize to a canonical device before retrieval/profile/slot logic, while product codes such as `HA835`, `AD1203P`, and `CMC615` remain product model codes, not target devices.
 - **Compare/spec:** Customer compares products or asks specs. Expected: include both compared products and quote only fields from `ShpProducts`, `kb_products`, `kb_qa`, `image_texts`, `ShpOrders`, or `itStock.Products`.
 - **Old order identity:** An order item may no longer exist in the current catalog. Expected: preserve the order item as history/warranty evidence instead of dropping it because live product hydration misses.
 - **Multi-product request:** Customer asks for more than one product with different brands/models/constraints in the same message. Expected: constraints remain attached to the correct product request; a charger brand must not filter smartwatch candidates, and charger subtype must not filter non-charger candidates.
@@ -140,6 +141,7 @@ handoffs.py / workflow trigger layer
 | `docs/test/test_availability.py` | create | Unit tests for availability resolver |
 | `docs/test/test_retrieval_profile.py` | create | Canonical message/history/intent/anchor reconciliation tests |
 | `docs/test/test_retrieval_slots.py` | create in Task 4E | Multi-product request slot parsing and constraint ownership tests |
+| `docs/test/test_device_alias_normalization.py` | create in Task 4F | Canonical device shorthand/alias tests for route/profile/slot inputs |
 | `docs/test/test_retrieval_evidence.py` | create | Evidence card contract tests |
 | `docs/test/test_candidate_availability_refresh.py` | create | Full live listing/model refresh and normalized ID tests |
 | `docs/test/test_candidate_source_union.py` | create | Bounded unit/listing recall and diversity tests |
@@ -221,6 +223,10 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
     """Split a resolved profile into product-request slots without calling an LLM."""
 
 
+def normalize_device_alias(value: str) -> str | None:
+    """Return a canonical device name for known shorthand, or None when unsafe."""
+
+
 def build_retrieval_profile(
     message: str,
     *,
@@ -255,6 +261,10 @@ Ownership and data flow are strict:
 5. `retrieval_policy.select_context()` ranks and filters candidates using the profile. It does not infer intent, type, subtype, target device, or availability mode.
 
 After Task 4E, one turn may contain multiple `RetrievalSlot` objects. A slot is a scoped product request, not another intent. For example, “หัวชาร์จ CukTech กับนาฬิกา Xiaomi Mi Watch 8 ใช้กับ Mi 17 Ultra” becomes a charger slot with adapter/CukTech constraints and a smartwatch slot with Xiaomi/Mi Watch constraints. Shared target devices must be marked with `target_scope="shared"` and still require compatibility evidence before a positive claim. Do not solve this by adding case-specific rules for Mi, CukTech, Xiaomi, charger, or smartwatch.
+
+Task 4F owns canonical device aliases before slots are wired into retrieval. Device shorthand normalization must happen in `device_compat` and be consumed by `route_context`; it must not be implemented as one-off checks in `app.py`, `product_store`, or prompt text. Compact customer terms such as `mi14pro`, `ip14`, `i14 pro`, `iphone14 pro`, and `ไอโฟน14โปร` may become target devices only when the pattern is a recognized device family. Alphanumeric product model codes remain model codes.
+
+Task 4G hardens the remaining root cause in Task 4E: relation ownership is still implicit in span heuristics. The long-term owner should be a small deterministic mention/relation extractor inside `route_context`, not more slot-specific `if phone/watch/xiaomi` conditions. Ambiguous phrases such as `หัวชาร์จกับ Mi Watch 8` must remain low-confidence or broad until the wording proves whether `Mi Watch 8` is a second product or a target device.
 
 Important rule: `select_context()` returns normal product cards, not a new response shape. Private `_evidence` and `_selection_reason` metadata must be stripped from `ChatResponse.products` after internal selection/answering and before response serialization.
 
@@ -1219,8 +1229,6 @@ Expected:
 
 **Files:**
 - Modify: `chatbot/shopeechat/route_context.py`
-- Modify later in this task: `chatbot/shopeechat/product_store.py`
-- Modify later in this task: `chatbot/shopeechat/retrieval_policy.py`
 - Create: `docs/test/test_retrieval_slots.py`
 - Modify: `docs/SRS_SSD.md`
 - Modify: `getoutofmywaybotkaikrook2.md`
@@ -1229,7 +1237,7 @@ Expected:
 - Produces `RetrievalSlot` and `build_retrieval_slots(profile) -> tuple[RetrievalSlot, ...]`.
 - Consumes the Task 4D `RetrievalProfile`; does not call LLM and does not replace intent classification.
 - Keeps `RetrievalProfile.subtype` for backward compatibility. Adds slot-level `subtypes` for multi-subtype/multi-product queries.
-- Source modules may fetch per slot, but final product cards keep the public response shape. Slot/evidence metadata remains private.
+- This task is contract/parser only. Source modules do not fetch per slot until Task 5A/selection wiring.
 
 - [ ] **Step 1: Write failing slot parsing tests**
 
@@ -1306,36 +1314,43 @@ In `route_context.py`:
 
 Do not add case-specific logic for the example brands/devices. This must work for the same pattern with other product families.
 
-- [ ] **Step 4: Use slots conservatively in retrieval**
+- [ ] **Step 4: Add provenance hardening tests**
 
-Only after slot parsing tests pass:
-- For one-slot turns, keep current Task 4D behavior.
-- For multi-slot turns, fetch a bounded pool per slot using slot-specific product types/subtypes/brand/model hints.
-- Use OR semantics for slot `subtypes`; do not collapse `{"cable", "adapter"}` into a single hard filter.
-- Limit per-slot candidates to a small number before final selection.
-- Add private evidence such as `_evidence.slot_id` or `_selection_reason` only internally; strip it before public response.
-
-- [ ] **Step 5: Add grouped selection tests**
-
-Extend `docs/test/test_retrieval_slots.py` or `docs/test/test_retrieval_policy.py`:
+Extend `docs/test/test_retrieval_slots.py`:
 
 ```python
-def test_grouped_selection_keeps_one_candidate_per_slot_when_available():
-    charger_card = {"item_id": "1", "name": "CukTech 65W", "_evidence": {"slot_id": "slot-charger"}}
-    watch_card = {"item_id": "2", "name": "Xiaomi Mi Watch 8", "_evidence": {"slot_id": "slot-watch"}}
-    extra_card = {"item_id": "3", "name": "Extra charger", "_evidence": {"slot_id": "slot-charger"}}
-    selected, report = retrieval_policy.select_context(
-        [charger_card, watch_card, extra_card],
-        profile=profile_with_two_slots,
-        limit=2,
-        evidence_mode="observe",
-    )
-    assert {p["item_id"] for p in selected} == {"1", "2"}
-    assert report["slot_counts"]["slot-charger"] >= 1
-    assert report["slot_counts"]["slot-watch"] >= 1
+def test_single_accessory_keeps_inferred_phone_out_of_product_types():
+    prof = _profile("มีเคส iPhone 15 ไหม")
+    slots = route_context.build_retrieval_slots(prof)
+    assert len(slots) == 1
+    assert slots[0].product_types == frozenset({"case"})
+    assert slots[0].target_device == "iphone 15"
+
+
+def test_inferred_device_family_rule_is_not_phone_specific():
+    prof = _profile("มีเคส Mi Watch 8 ไหม")
+    slots = route_context.build_retrieval_slots(prof)
+    assert len(slots) == 1
+    assert slots[0].product_types == frozenset({"case"})
+    assert slots[0].target_device == "mi watch 8"
+
+
+def test_inferred_only_model_keeps_product_type_fallback():
+    prof = _profile("อยากได้ iPhone 15")
+    slots = route_context.build_retrieval_slots(prof)
+    assert slots[0].product_types == frozenset({"phone"})
 ```
 
-The test must not require a new public response shape; grouping is an internal context/evidence rule.
+Expected: fail if type mention provenance is lost or if the fix is phone-specific.
+
+- [ ] **Step 5: Implement provenance in slot parsing**
+
+In `route_context.py`:
+- `_type_mentions()` returns `(pos, type, src)` where `src` is `"kw"` for explicit user product keywords and `"regex"` for inferred device/model phrases.
+- Latin keyword matching uses token boundaries so `"phone"` in `"iphone"` is not an explicit product keyword.
+- Compute effective product types once: when any explicit product keyword exists, regex-only device/model mentions do not create product slots; when no explicit keyword exists, inferred model types remain a fallback product request.
+- Single-slot and multi-slot paths both use the same effective product types.
+- Keep brand/model evidence out of the slot when it belongs only to the target device, except when the device is itself the requested product family.
 
 - [ ] **Step 6: Verification**
 
@@ -1349,6 +1364,246 @@ Expected:
 - Single-product turns keep one slot and existing Task 4D behavior.
 - Multi-subtype charger turns do not lose one subtype because of a single `subtype` field.
 - Multi-product turns do not leak product-specific brand/model/subtype constraints into another product slot.
+
+---
+
+## Task 4F: Canonical Device Alias Normalization
+
+**Why this task exists:** Task 4D/4E can preserve target devices only after a device is extracted correctly. Current generic extraction catches normal forms such as `mi 14 pro` and `iphone 14 pro`, but compact or shorthand customer forms can be lost or stay non-canonical: `mi14pro` is dropped by the product-code guard, `i14 pro` and `ip14` are tokens without spec evidence, and Thai `ไอโฟน14โปร` is not normalized. If this remains unfixed before grouped retrieval/compat selection, retrieval can miss compatible products before final ranking even starts.
+
+**Files:**
+- Modify: `chatbot/shopeechat/device_compat.py`
+- Modify: `chatbot/shopeechat/route_context.py` only if the extracted normalized token is not already consumed there
+- Create: `docs/test/test_device_alias_normalization.py`
+- Modify: `docs/SRS_SSD.md`
+- Modify: `getoutofmywaybotkaikrook2.md`
+
+**Interfaces:**
+- Produces `device_compat.normalize_device_alias(value: str) -> str | None`.
+- `_extract_device_token(message)` may call `normalize_device_alias()` before returning a token.
+- `_lookup_spec_db(device_name)` must accept the normalized value without adding alias rules in product retrieval code.
+- Does not change `_detect_product_types()` and does not add prompt text.
+
+- [ ] **Step 1: Write failing alias tests**
+
+Create `docs/test/test_device_alias_normalization.py`:
+
+```python
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "chatbot"))
+
+from shopeechat import device_compat, route_context  # noqa: E402
+
+
+def _profile(message: str):
+    return route_context.build_retrieval_profile(
+        message,
+        history=[],
+        intent_result={"intent": "product_recommend", "confidence": 0.92},
+        shop="KingGadgets",
+    )
+
+
+def test_compact_xiaomi_phone_alias_becomes_target_device():
+    assert device_compat.normalize_device_alias("mi14pro") == "xiaomi 14 pro"
+    assert device_compat._extract_device_token("สายชาร์จใช้กับ mi14pro") == "xiaomi 14 pro"
+    prof = _profile("สายชาร์จใช้กับ mi14pro")
+    assert prof.target_device == "xiaomi 14 pro"
+    assert prof.compat_mode == "connector_required"
+
+
+def test_iphone_shorthand_aliases_normalize_to_iphone_family():
+    assert device_compat.normalize_device_alias("ip14") == "iphone 14"
+    assert device_compat.normalize_device_alias("i14 pro") == "iphone 14 pro"
+    assert device_compat._lookup_spec_db("iphone 14 pro")["connector"] == "lightning"
+
+
+def test_thai_iphone_alias_normalizes():
+    assert device_compat.normalize_device_alias("ไอโฟน14โปร") == "iphone 14 pro"
+    prof = _profile("มีสายชาร์จใช้กับไอโฟน14โปรไหม")
+    assert prof.target_device == "iphone 14 pro"
+
+
+def test_product_model_codes_are_not_target_devices():
+    for value in ("HA835", "AD1203P", "CMC615", "CTC615W"):
+        assert device_compat.normalize_device_alias(value) is None
+        assert device_compat._extract_device_token(f"มีรุ่น {value} ไหม") is None
+```
+
+- [ ] **Step 2: Run tests to verify RED**
+
+```bash
+.venv/bin/python -m pytest docs/test/test_device_alias_normalization.py -v
+```
+
+Expected: fail on compact/shorthand device normalization while product-code negative cases remain the safety gate.
+
+- [ ] **Step 3: Implement minimal canonical alias normalization**
+
+In `device_compat.py`:
+- Add `normalize_device_alias(value: str) -> str | None`.
+- Normalize whitespace and lowercase ASCII.
+- Accept only known device-family prefixes:
+  - `iphone`, `ip`, or `i` followed by iPhone model numbers and optional suffix words `pro`, `pro max`, `plus`, `mini`, `se`, `air`.
+  - Thai `ไอโฟน` followed by model number and optional Thai suffix `โปร`, `โปรแมกซ์`, `พลัส`, `มินิ`, `แอร์`.
+  - `mi` followed by Xiaomi phone model number and optional suffix words `ultra`, `pro`, `pro max`, `t`, `t pro`.
+- Return canonical values such as `iphone 14 pro`, `iphone 14`, `xiaomi 14 pro`.
+- Return `None` for ambiguous alphanumeric product codes and unsupported families. Do not add a fallback that treats every letters+digits token as a device.
+- Call this helper from `_extract_device_token()` after the regex candidate is found and before the product-code guard drops compact family tokens. If no regex candidate is found, probe the full message for the explicit alias patterns above.
+
+- [ ] **Step 4: Ensure spec lookup coverage**
+
+Update `device_specs_data.py` only if the normalized canonical value is missing and there is enough curated data. If a specific variant is missing, add the alias only when it is safe:
+
+```python
+"xiaomi 14 pro": {"connector": "usb-c", "wired_w": 120, "wireless_w": 50,
+                  "protocols": ["hypercharge", "pd", "pps", "qc"],
+                  "year": 2023, "aliases": ["mi 14 pro", "mi14pro"]},
+```
+
+If exact watt/spec evidence is not available, do not invent it. Prefer normalizing `mi14pro` to a token that preserves target identity and let compatibility answer say evidence is incomplete rather than claim a wattage.
+
+- [ ] **Step 5: Probe route/slot behavior**
+
+Run this probe and record the result in `getoutofmywaybotkaikrook2.md`:
+
+```bash
+.venv/bin/python - <<'PY'
+import sys
+sys.path.insert(0, "chatbot")
+from shopeechat import route_context, device_compat
+
+for msg in (
+    "หาสายชาร์จใช้กับ mi14pro",
+    "หาสายชาร์จใช้กับ i14 pro",
+    "หาสายชาร์จใช้กับ ip14",
+    "หาสายชาร์จใช้กับ iphone14 pro",
+    "หาสายชาร์จใช้กับ ไอโฟน14โปร",
+    "มีรุ่น HA835 ไหม",
+):
+    prof = route_context.build_retrieval_profile(
+        msg,
+        history=[],
+        intent_result={"intent": "product_recommend", "confidence": 0.92},
+        shop="KingGadgets",
+    )
+    print(msg, "=>", prof.product_types, prof.target_device, prof.compat_mode,
+          device_compat._lookup_spec_db(prof.target_device or ""))
+PY
+```
+
+Expected:
+- compact/shorthand phone requests become target devices for cable/charger questions;
+- product model codes stay model-code/search facts, not target devices;
+- missing exact spec remains unknown evidence, not a fabricated compatibility claim.
+
+- [ ] **Step 6: Verification**
+
+```bash
+.venv/bin/python -m pytest docs/test/test_device_alias_normalization.py docs/test/test_retrieval_profile.py docs/test/test_retrieval_slots.py -v
+.venv/bin/python -m py_compile chatbot/shopeechat/device_compat.py chatbot/shopeechat/route_context.py
+git diff --check
+```
+
+Expected:
+- Existing Task 4D/4E behavior remains unchanged except normalized target devices.
+- `mi14pro`, `ip14`, `i14 pro`, `iphone14 pro`, and `ไอโฟน14โปร` no longer enter retrieval as unknown device strings.
+- product codes are not reclassified as devices.
+
+---
+
+## Task 4G: Mention Relation Parser Hardening
+
+**Why this task exists:** Task 4E fixes the immediate provenance leak, but relation ownership is still spread across slot span rules, `_local_target_device()`, brand filtering, and family checks. That is better than one-off phone/watch fixes, but still leaves ambiguity and small pollution such as `เคส xiaomi mi watch 8` where `xiaomi` can look like a product brand for the case. The root-cause direction is to make route mentions and their relations explicit once, then let `build_retrieval_slots()` consume that structure.
+
+**Files:**
+- Modify: `chatbot/shopeechat/route_context.py`
+- Create or extend: `docs/test/test_route_mentions.py` or `docs/test/test_retrieval_slots.py`
+- Modify: `docs/SRS_SSD.md`
+- Modify: `getoutofmywaybotkaikrook2.md`
+
+**Interfaces:**
+- Produces a small internal dataclass such as `RouteMention` or plain dicts from `extract_route_mentions(message, allowed_types)`.
+- `build_retrieval_slots(profile)` may use the mention list, but public `RetrievalProfile` and `RetrievalSlot` fields stay unchanged.
+- Does not call LLM.
+- Does not change retrieval runtime, `product_store.fetch_products()`, or prompt text.
+
+- [ ] **Step 1: Write failing relation tests**
+
+Add tests that prove the current span heuristics are not enough:
+
+```python
+def test_device_brand_is_not_product_brand_for_accessory():
+    prof = _profile("มีเคส xiaomi mi watch 8 ไหม")
+    slots = route_context.build_retrieval_slots(prof)
+    assert len(slots) == 1
+    assert slots[0].product_types == frozenset({"case"})
+    assert slots[0].target_device in {"xiaomi mi watch 8", "mi watch 8"}
+    assert "xiaomi" not in {b.lower() for b in slots[0].brand_hints}
+
+
+def test_ambiguous_device_without_product_keyword_is_low_confidence():
+    prof = _profile("หัวชาร์จกับ Mi Watch 8")
+    slots = route_context.build_retrieval_slots(prof)
+    charger = next(s for s in slots if "charger" in s.product_types)
+    assert charger.target_device in (None, "mi watch 8")
+    assert charger.confidence < 0.8
+```
+
+Expected: fail if device-brand pollution remains or if ambiguous relation is treated as high-confidence.
+
+- [ ] **Step 2: Implement one mention extractor**
+
+In `route_context.py`, add one internal owner:
+
+```python
+@dataclass(frozen=True)
+class RouteMention:
+    text: str
+    kind: str        # "product_type" | "device" | "brand" | "model_code"
+    value: str
+    start: int
+    end: int
+    source: str      # "kw" | "regex" | "alias"
+
+
+def extract_route_mentions(message: str, allowed_types: frozenset[str]) -> tuple[RouteMention, ...]:
+    ...
+```
+
+Rules:
+- Product type mentions keep provenance from keyword vs regex.
+- Device mentions use `device_compat._extract_device_token()` after Task 4F normalization.
+- Brand mentions that are inside a device mention are tagged as device-owned and must not become `brand_hints` for a different product slot.
+- Model codes come from the existing `_extract_codes()` helper.
+- Do not add family-specific branches for `iphone`, `mi watch`, `xiaomi`, or `charger` except through existing taxonomy/device helpers.
+
+- [ ] **Step 3: Make `build_retrieval_slots()` consume mentions**
+
+Use the mention list to:
+- create slot boundaries from explicit product type mentions;
+- attach brands/model codes only when their spans are inside the product span and not inside a target device mention;
+- mark relation confidence lower when a device phrase follows `กับ` but there is no compatibility connector and no explicit product keyword for that device family;
+- preserve current passing behavior for 4E tests.
+
+- [ ] **Step 4: Verify**
+
+```bash
+.venv/bin/python -m pytest docs/test/test_retrieval_slots.py docs/test/test_route_mentions.py -v
+.venv/bin/python -m py_compile chatbot/shopeechat/route_context.py
+git diff --check
+```
+
+Expected:
+- No new runtime retrieval behavior.
+- Existing 4E slot tests keep passing.
+- Ambiguous wording is not converted into a high-confidence compatibility/product claim.
+- Device brand pollution is removed through mention ownership, not a product-family special case.
 
 ---
 
@@ -2780,7 +3035,7 @@ Expected:
 - [ ] **Step 1: Run unit/static checks**
 
 ```bash
-.venv/bin/python -m pytest docs/test/test_availability.py docs/test/test_retrieval_profile.py docs/test/test_retrieval_slots.py docs/test/test_candidate_availability_refresh.py docs/test/test_candidate_source_union.py docs/test/test_retrieval_evidence.py docs/test/test_retrieval_policy.py docs/test/test_evidence_requirements.py docs/test/test_compat_recall_gate.py docs/test/test_sensitive_flows.py docs/test/test_handoff_assignment_policy.py docs/test/test_workflow_trigger_audit.py -v
+.venv/bin/python -m pytest docs/test/test_availability.py docs/test/test_retrieval_profile.py docs/test/test_retrieval_slots.py docs/test/test_device_alias_normalization.py docs/test/test_route_mentions.py docs/test/test_candidate_availability_refresh.py docs/test/test_candidate_source_union.py docs/test/test_retrieval_evidence.py docs/test/test_retrieval_policy.py docs/test/test_evidence_requirements.py docs/test/test_compat_recall_gate.py docs/test/test_sensitive_flows.py docs/test/test_handoff_assignment_policy.py docs/test/test_workflow_trigger_audit.py -v
 .venv/bin/python -m py_compile chatbot/shopeechat/app.py chatbot/shopeechat/route_context.py chatbot/shopeechat/product_store.py chatbot/shopeechat/units.py chatbot/shopeechat/knowledge_base.py chatbot/shopeechat/device_compat.py chatbot/shopeechat/web_search.py chatbot/shopeechat/retrieval_policy.py
 ```
 
@@ -2881,10 +3136,12 @@ Do not remove:
 
 - `kb_products` spec coverage is partial. Missing spec must remain “ไม่มีข้อมูลพอ” rather than guessed.
 - Unit classification has `product_type=null` rows. This plan can avoid over-trusting them but does not rebuild the classifier.
+- Device alias normalization is intentionally limited to recognized family prefixes. Unknown shorthand must remain unknown rather than being guessed into a device, especially when it could be a product model code.
 - `itStock.Products` currently looks strongest for package/spec join, not direct cert flags by simple key names. Cert search may still depend more on description/OCR unless deeper stock spec parsing is added.
 - Compatibility remains partly special because it needs broad recall. Do not force it into unit-only retrieval until recall tests prove it.
 - Intent classification remains probabilistic. The profile resolver limits its authority but cannot recover an unstated product family when neither current message, anchor, nor bounded history contains one; that case must clarify rather than guess.
 - Multi-slot extraction is deterministic and span-based. If a customer gives constraints without clear product spans, the system should fail open or ask a clarifying question rather than attach the constraint to the wrong slot.
+- Mention relation parsing is deterministic, not a full natural-language parser. Truly ambiguous messages such as `หัวชาร์จกับ Mi Watch 8` should remain low-confidence or broad until the customer wording gives a clear relation.
 - Handoff eligibility depends on current admin availability/capacity data. If that data is stale or unavailable, assignment must use explicit queue fallback instead of pretending an admin owns the chat.
 - Workflow/trigger audit may find TypeScript runtime ownership outside this legacy Shopee plan. Treat those runtime edits as a separate approved task if they exceed docs/audit scope.
 - Some old comments outside touched blocks will remain. Cleaning the whole file is a separate documentation cleanup, not part of retrieval correctness.
@@ -2897,8 +3154,10 @@ Spec coverage:
 - Variant/unit/stock/unlisted/discontinued: Task 2 availability, Task 5 live refresh, Task 5A source recall, Task 7 protected exact products.
 - Compare/spec/compat/warranty/history: Tasks 4, 5, 7, 8, 10, 11.
 - Multi-product/multi-query turns: Task 4E.
+- Device shorthand/alias recall: Task 4F.
+- Mention/relation root-cause hardening: Task 4G.
 - Intent/history/anchor extraction ownership: Task 4 defines one immutable profile and exact precedence; Tasks 9, 12, and 13 remove secondary owners.
-- Mi 17 Ultra false no-product/out-of-stock: Task 4 preserves cable+device facts, Task 5 refreshes live availability, Task 5A prevents an incomplete unit pool from hiding listing candidates, Task 10 requires compatible-candidate proof before negative wording, Task 14 replays it.
+- Mi 17 Ultra false no-product/out-of-stock: Task 4 preserves cable+device facts, Task 4F normalizes compact device aliases, Task 5 refreshes live availability, Task 5A prevents an incomplete unit pool from hiding listing candidates, Task 10 requires compatible-candidate proof before negative wording, Task 14 replays it.
 - No hallucinated spec/warranty/compat: Task 8 evidence coverage, Task 10 gated compatibility enforcement, and Task 11 sensitive gates.
 - Real human handoff ownership: Tasks 11, 11A, and 11B.
 - Trigger/workflow ordering: Task 11B.
@@ -2923,4 +3182,5 @@ Review focus coverage:
 - Human ownership continuity: Task 11A.
 - Workflow trigger boundary: Task 11B.
 - Compatibility: Tasks 4, 5, 10.
+- Device shorthand/alias: Task 4F.
 - Compare/spec: Tasks 7 and 8.
