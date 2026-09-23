@@ -266,6 +266,13 @@
   - **fix (route_context เท่านั้น):** `_strap_compound_mention` — kw mention ที่ text ก่อนหน้าลงท้าย "สาย" = tail ของ สายX compound → ตัดออกจาก kw_mentions (compound kw เอง เช่น สายคล้อง ไม่โดน) · source gate: relation ต้องมี real evidence = kw mention หรือ code ก่อน connector (shorthand ให้ type เท่านั้น ไม่นับ evidence) — symmetric path เช็กเหมือนกัน · charger_ctx สำหรับ cable-shorthand รวม code-only source ("AD1404T ใช้กับสายไหน" → relation — code คือ product evidence ในร้าน charging)
   - **verify:** relations 17/17 · รวมชุด 85/85 · probe 9/9 ตรง (หัวอันนี้ลอย→() / +code→rel / code ล้วน→rel / สายนาฬิกา→() / สายคล้อง→charger→case จาก taxonomy kw ไม่ใช่ cable) · regressions เดิมผ่าน
   - **risk เหลือ:** "รุ่น XYZ ใช้กับสายไหน" โดยไม่มี code ที่รู้จัก → no relation (fail-closed ตั้งใจ) · strap guard เฉพาะ สาย-prefix; compound แบบอื่น ("เคสนาฬิกา") ยังไม่ครอบ · code-only→cable inference ใช้ shop-domain prior (ร้าน charging) — confidence 0.7 สะท้อน
+  - **✅ commit `b7fe0a9`** — `feat: add product relation parser contract` (route_context +244, test file 17 tests, SRS, log)
+
+#### Phase 4 Final Audit Before Task 5 (2026-09-23) — docs-only เสร็จ
+
+- **audit doc:** `docs/plans/2026-09-23-phase4-final-audit-before-task5.md` — inventory 4A-4G + commits, flow ปัจจุบัน, contract review ต่อ profile/slots/relations, hard-filter vs soft-hint policy, risks 7 ข้อ, Task 5 entry criteria + recommended shape (5A observe → 5B flag → 5C replay gate)
+- **findings หลัก:** (1) runtime กินแค่ profile hints (4B/4C/4D) — slots/relations contract-only ไม่มี caller นอก tests (verify ด้วย grep) (2) hard filter ที่ปลอดภัย = shop/platform/model_codes/availability_mode(hลัง resolver) เท่านั้น — ที่เหลือ soft hint (3) ช่องโหว่สำคัญสำหรับ Task 5: virtual slot-<t> ไม่มี backing products, single-slot adapter+cable merge (relation constraints แบก role), wattage⊂model_codes ambiguity, taxonomy substring quirk นอก relation guard
+- **verify:** docs-only · git diff --check clean
 
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
