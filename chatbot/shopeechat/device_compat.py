@@ -249,6 +249,51 @@ def _lookup_spec_db(device_name: str) -> dict | None:
             **_DEVICE_SPECS[canon]}
 
 
+# compact device shorthand — normalize เป็น canonical เฉพาะ family ที่รู้จัก
+# (iphone/ip/i, ไอโฟน, mi) ไม่ใช่ letters+digits ทั่วไป → product code ไม่รั่ว
+_IPHONE_ALIAS_RE = re.compile(
+    r"^(?:iphone|ip|i)\s*(\d{1,2})\s*"
+    r"(pro\s*max|promax|plus|mini|se|air|pro)?$")
+_MI_ALIAS_RE = re.compile(
+    r"^mi\s*(\d{1,2})\s*"
+    r"(pro\s*max|promax|ultra|t\s*pro|pro|t)?$")
+_THAI_IPHONE_ALIAS_RE = re.compile(
+    r"^ไอโฟน\s*(\d{1,2})\s*(โปรแมกซ์|โปร|พลัส|มินิ|แอร์)?$")
+_THAI_SUFFIX = {"โปรแมกซ์": "pro max", "โปร": "pro", "พลัส": "plus",
+              "มินิ": "mini", "แอร์": "air"}
+_EN_SUFFIX = {"promax": "pro max"}
+
+# probe กว้างสำหรับ form ที่ _DEVICE_TOKEN_RE จับไม่ได้ (glued suffix / ไทย) —
+# normalize_device_alias เป็นตัว validate จริง
+_DEVICE_ALIAS_PROBE_RE = re.compile(
+    r"(?<![a-z0-9])(?:iphone|ip|i|mi)\s*\d{1,2}"
+    r"(?:\s*(?:pro\s*max|promax|ultra|t\s*pro|plus|mini|se|air|pro|t))?"
+    r"(?![a-z0-9])"
+    r"|ไอโฟน\s*\d{1,2}(?:โปรแมกซ์|โปร|พลัส|มินิ|แอร์)?")
+
+
+def normalize_device_alias(value: str) -> str | None:
+    """คืน canonical device สำหรับ shorthand/compact form ที่รู้จัก
+    ('mi14pro'→'xiaomi 14 pro', 'ip14'→'iphone 14', 'ไอโฟน14โปร'→'iphone 14 pro')
+    — None สำหรับ product code / family ที่ไม่รองรับ"""
+    low = re.sub(r"\s+", " ", (value or "").lower()).strip()
+    if not low:
+        return None
+    m = _IPHONE_ALIAS_RE.match(low)
+    if m:
+        suf = _EN_SUFFIX.get(m.group(2) or "", m.group(2) or "")
+        return f"iphone {m.group(1)}{' ' + suf if suf else ''}"
+    m = _THAI_IPHONE_ALIAS_RE.match(low)
+    if m:
+        suf = _THAI_SUFFIX.get(m.group(2) or "", "")
+        return f"iphone {m.group(1)}{' ' + suf if suf else ''}"
+    m = _MI_ALIAS_RE.match(low)
+    if m:
+        suf = _EN_SUFFIX.get(m.group(2) or "", m.group(2) or "")
+        return f"xiaomi {m.group(1)}{' ' + suf if suf else ''}"
+    return None
+
+
 # head token ที่ match "letters+digits" แต่ไม่ใช่ device — protocol/connector/unit/product-noun
 _NON_DEVICE_TOKENS = frozenset({
     "usb", "pd", "qc", "pps", "ufcs", "gan", "mfi", "type", "qi", "qi2",
@@ -276,12 +321,28 @@ def _extract_device_token(msg: str) -> str | None:
     low = (msg or "").lower()
     for _m in _DEVICE_TOKEN_RE.finditer(low):
         cand = _m.group(0).strip()
+        canon = normalize_device_alias(cand)
+        if canon:
+            return canon
         head_m = re.match(r"[a-z]+", cand)
-        if head_m and head_m.group(0) in _NON_DEVICE_TOKENS:
+        if (head_m and head_m.group(0) in _NON_DEVICE_TOKENS
+                and cand not in _SPEC_INDEX):
             continue
         if re.fullmatch(r"[a-z]+\d+[a-z]+", cand):
             continue
+        # compact code shape: glued + head ≥2 letters + เลข 3 หลัก
+        # (ha835/cmc615) ที่ไม่ใช่ family/ไม่มี spec → product code ไม่ใช่ device
+        if " " not in cand:
+            _cc = re.fullmatch(r"([a-z]{2,})(\d{3})[a-z]?", cand)
+            if (_cc and cand not in _SPEC_INDEX
+                    and not _spec_brand(_cc.group(1))):
+                continue
         return cand
+    # regex หลักไม่เจอ → probe alias form (mi14pro glued / ไอโฟน14โปร)
+    for _m in _DEVICE_ALIAS_PROBE_RE.finditer(low):
+        canon = normalize_device_alias(_m.group(0))
+        if canon:
+            return canon
     return None
 
 

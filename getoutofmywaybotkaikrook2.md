@@ -221,6 +221,23 @@
 - **verify:** slots 14/14 · profile+hints+wiring 47/47 · route_context regression ALL PASS · py_compile OK · diff --check OK · callers: helpers ใช้เฉพาะใน route_context · profile ไม่ mutate (frozen) · lazy imports เดิม ไม่มี cycle ใหม่
 - **risk เพิ่ม:** (1) "หัวชาร์จกับ mi watch 8" ambiguous — explicit-wins rule เลือก target แทน product ที่อาจตั้งใจ (2) "เคส xiaomi mi watch 8" — xiaomi อยู่นอก device token → brand_hints ยังเห็น xiaomi (device-brand pollution บางส่วน)
 
+#### Task 4F Canonical Device Alias Normalization (2026-09-23) — root-cause fix + verified
+
+- **root cause (probe):** `_extract_device_token` จับเฉพาะ spaced form → `mi14pro`/`ไอโฟน14โปร` ไม่ match เลย; `ip14`/`i14 pro`/`iphone14 pro` คืน raw non-canonical (spec lookup พลาด/เดา entry ผิด — "iphone14 pro" เคย fuzzy ไป "iphone 14" หาย suffix); และ `ha835`/`cmc615` (letters+digits glued, head≥2+เลข3หลัก) รั่วเป็น device เพราะ glued-guard เดิมบล็อกเฉพาะ letters+digits+letters
+- **fix (device_compat.py เท่านั้น + slot helper เล็ก):**
+  - `normalize_device_alias(value)` — family-bounded: iphone/ip/i, ไอโฟน, mi + เลข 1-2 หลัก + suffix (pro/pro max/plus/mini/se/air | โปร/โปรแมกซ์/พลัส/มินิ/แอร์ | ultra/pro/t/t pro) → canonical; product code → None
+  - `_extract_device_token`: normalize cand ก่อน guards เดิม; เพิ่ม compact-code gate (glued + head≥2 + เลข=3 + ไม่ใช่ family head + ไม่อยู่ spec index → drop: ha835/cmc615); regex ไม่เจอ → `_DEVICE_ALIAS_PROBE_RE` fallback
+  - `xiaomi 14 pro` spec entry เพิ่ม (usb-c, 120W/50W, hypercharge/pd/pps/qc, 2023 — flagship spec จริง; ไม่ใส่จะ fuzzy ไป "xiaomi 14" 90W ผิด)
+  - route_context: `_device_occurrence` (literal span หรือ alias-span normalize เท่ากัน) → `_span_device_position` ใช้ร่วม; `_product_brands` เปลี่ยน brand filter จาก string-containment เป็น position-based (แก้ regression: canonical "xiaomi 17 ultra" มีคำว่า xiaomi ทำ watch-brand หาย — ตอนนี้ตัดเฉพาะ occurrence ที่อยู่ใน device span จริง)
+- **test เพิ่ม:** `test_device_alias_normalization.py` 4 tests; อัปเดต expectation 2 จุด (mi 17 ultra → xiaomi 17 ultra canonical — intended change)
+- **verify:** alias+profile+slots+hints+wiring+gold+evidence+availability 112/112 · route_context regression ALL PASS · car_charger 16/16 · compat_mode_filter 144/144 · py_compile OK · diff --check OK
+- **risk:** (1) `i`+digits bare ("i5") map iphone — plan-approved, ร้านขายของมือถือ (2) compact หัว≥2ตัว+เลข3หลักที่เป็น device จริงหายาก (เช่น nord100) จะโดนตัด — bounded (3) probe `i|mi`+digits ใน message ที่ไม่เกี่ยว — มี boundary guard แต่ edge case เหลือ
+- **hardening ก่อน commit (probe เจอเพิ่ม):**
+  - device alias รั่วเข้า `model_codes` → intent=exact_model/answerable_all ผิด → fix ที่ `build_retrieval_profile`: กรอง `cur_codes` ด้วย `_code_is_device` (compact-eq / normalize-eq / spec-resolve-eq / อยู่ใน device span — "i14" ใน "i14 pro")
+  - `a56` ตายเพราะ head `a` อยู่ใน `_NON_DEVICE_TOKENS` → fix: cand ที่อยู่ใน `_SPEC_INDEX` ชนะ NON_DEVICE guard
+  - `s25` เดิมโดน code==device guard ฆ่า device → ตอนนี้กรองฝั่ง code แทน (guard เดิมคงไว้เป็น safety net)
+  - test +3 (aliases≠codes / s25+a56 survive / real codes HA835…AD653T ยัง exact_model) → 68/68 · probe 8 เคสตรง spec · regressions เดิมผ่าน
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)

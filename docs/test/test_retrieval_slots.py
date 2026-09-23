@@ -66,7 +66,7 @@ def test_single_product_turn_remains_one_slot():
     assert "charger" in s.product_types
     assert "adapter" in s.subtypes
     assert "cuktech" in {b.lower() for b in s.brand_hints}
-    assert s.target_device == "mi 17 ultra"
+    assert s.target_device == "xiaomi 17 ultra"  # canonical (4F normalize)
 
 
 def test_ambiguous_message_falls_back_to_one_open_slot():

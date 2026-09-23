@@ -53,7 +53,7 @@ def test_mi17_carry_cable_from_history():
     )
     assert got.product_types == frozenset({"charger"})
     assert got.subtype == "cable"
-    assert got.target_device.lower() == "mi 17 ultra"
+    assert got.target_device.lower() == "xiaomi 17 ultra"  # canonical (4F)
     assert got.compat_mode == "connector_required"
     assert ("subtype", "history") in got.fact_sources
 

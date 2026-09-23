@@ -336,6 +336,10 @@ def build_retrieval_profile(
     cur_subtype = _ps._detect_charger_subtype(msg)
     cur_codes = tuple(_extract_codes(msg))
     cur_device = _dc._extract_device_token(msg)
+    if cur_device:
+        # code ที่คือ device mention เอง (alias/spec/span เดียวกัน) ไม่ใช่ model code
+        cur_codes = tuple(c for c in cur_codes
+                          if not _code_is_device(c, cur_device, low))
     _code_set = {c.replace(" ", "").upper() for c in cur_codes}
     if cur_device and cur_device.replace(" ", "").upper() in _code_set:
         cur_device = None  # token คือ model code ของสินค้า ไม่ใช่ device เป้าหมาย
@@ -586,12 +590,62 @@ def _model_terms(span_text: str, brands: list[str]) -> tuple[str, ...]:
     return tuple(terms)
 
 
-def _span_device_position(low: str, token: str | None) -> int:
-    """ตำแหน่ง device token ใน message (space-insensitive) — -1 ถ้าหาไม่เจอ."""
+def _device_occurrence(low: str, token: str | None) -> tuple[int, int] | None:
+    """literal span ของ device token ใน message — literal match หรือ span ที่
+    normalize แล้วเท่ากัน ('mi14pro' ↔ 'xiaomi 14 pro')"""
     if not token:
-        return -1
+        return None
     m = re.search(re.escape(token.lower()).replace(r"\ ", r"\s+"), low)
-    return m.start() if m else -1
+    if m:
+        return m.start(), m.end()
+    from . import device_compat as _dc
+    for _m in _dc._DEVICE_ALIAS_PROBE_RE.finditer(low):
+        if _dc.normalize_device_alias(_m.group(0)) == token:
+            return _m.start(), _m.end()
+    return None
+
+
+def _span_device_position(low: str, token: str | None) -> int:
+    """ตำแหน่ง device token ใน message — -1 ถ้าหาไม่เจอ"""
+    occ = _device_occurrence(low, token)
+    return occ[0] if occ else -1
+
+
+def _code_is_device(code: str, device: str, low: str) -> bool:
+    """code token คือ device mention เองไหม — normalize เท่ากัน / spec resolve
+    device เดียวกัน / compact form เท่ากัน / หรืออยู่ภายใน device span"""
+    from . import device_compat as _dc
+    cl = code.lower()
+    if cl.replace(" ", "") == device.replace(" ", ""):
+        return True
+    if _dc.normalize_device_alias(cl) == device:
+        return True
+    cs, ds = _dc._lookup_spec_db(cl), _dc._lookup_spec_db(device)
+    if cs and ds and cs.get("device") == ds.get("device"):
+        return True
+    occ = _device_occurrence(low, device)
+    return bool(occ and any(
+        occ[0] <= m.start() < occ[1]
+        for m in re.finditer(re.escape(cl), low)))
+
+
+def _product_brands(text: str, brands: list[str],
+                    target: str | None) -> list[str]:
+    """brand ที่เป็น product evidence — occurrence ทั้งหมดของ brand ต้องไม่อยู่
+    ภายใน target-device span ('เคส iphone 15' → iphone คือ device ไม่ใช่ brand)"""
+    if not target:
+        return list(brands)
+    occ = _device_occurrence(text.lower(), target)
+    if not occ:
+        return list(brands)
+    low_t = text.lower()
+    out: list[str] = []
+    for b in brands:
+        hits = list(re.finditer(re.escape(b.lower()), low_t))
+        if not hits or any(
+                not (occ[0] <= m.start() < occ[1]) for m in hits):
+            out.append(b)
+    return out
 
 
 def _local_target_device(seg: str, shared: str | None,
@@ -652,11 +706,11 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
             frozenset({profile.subtype}) if profile.subtype else frozenset())
         target = (profile.target_device
                   or _local_target_device(low, None, effective))
-        # brand ที่อยู่ใน target phrase ไม่ใช่ product-brand evidence —
-        # เว้นแต่ device คือสินค้าเอง (family ตรง slot, เช่น "อยากได้ iphone 15")
+        # brand ใน device span ไม่ใช่ product-brand evidence — เว้นแต่ device
+        # คือสินค้าเอง (family ตรง slot, เช่น "อยากได้ iphone 15")
         _own_dev = bool(target and _ps._detect_product_types(target) & effective)
-        brands = [b for b in _ps._detect_brands(msg)
-                  if _own_dev or not target or b.lower() not in target.lower()]
+        brands = _ps._detect_brands(msg) if _own_dev else \
+            _product_brands(low, _ps._detect_brands(msg), target)
         return (RetrievalSlot(
             slot_id=f"slot-{next(iter(effective), 'open')}",
             source_span=msg,
@@ -711,8 +765,8 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
         scope = "slot" if local_dev else ("shared" if shared_dev else "none")
         _own_dev = bool(
             target and _ps._detect_product_types(target) & {t})
-        brands = [b for b in brands
-                  if _own_dev or not target or b.lower() not in target.lower()]
+        if not _own_dev:
+            brands = _product_brands(span, brands, target)
         sources: list[tuple[str, str]] = [("product_types", "message")]
         if subs:
             sources.append(("subtypes", "span"))

@@ -661,7 +661,8 @@ listing path:
 | `_ascii_alnum` | normalize token | text | str | regex | matching | — | — |
 | `_term_boundary_match` | boundary match | text, term | bool | regex boundaries | _device_mentioned, _lookup_spec_db | กัน substring collision ("a73"ใน"xiaomi a73") | — |
 | `_lookup_spec_db` | spec-db lookup | device token | dict/None | `device_specs_data.DEVICE_SPECS` + aliases + brand guard | _resolve_device_spec, web_search gate | key/alias + `_spec_brand` guard กันข้ามแบรนด์ | — |
-| `_extract_device_token` | device จาก msg | message | str | regex + _device_brand_hint | _device_spec_lookup | brand+model pattern | — |
+| `_extract_device_token` | device จาก msg (canonical) | message | str | `_DEVICE_TOKEN_RE` + `normalize_device_alias` + `_DEVICE_ALIAS_PROBE_RE` + `_spec_brand`/`_SPEC_INDEX` | _device_spec_lookup, route_context (profile/slots) | normalize cand ก่อน → NON_DEVICE guard (ยกเว้น cand อยู่ใน _SPEC_INDEX เช่น a56) → glued guard → compact code gate (head≥2+เลข3หลัก+ไม่รู้จัก→code ไม่ใช่ device) → regex ไม่เจอ→probe alias (mi14pro/ไอโฟน14โปร) | — |
+| `normalize_device_alias` | canonical device จาก shorthand | value | str/None | `_IPHONE_ALIAS_RE`/`_MI_ALIAS_RE`/`_THAI_IPHONE_ALIAS_RE` + suffix maps | `_extract_device_token`, route_context `_device_occurrence` | เฉพาะ family ที่รู้จัก (iphone/ip/i, ไอโฟน, mi)+เลข+suffix → 'iphone 14 pro'/'xiaomi 14 pro'; product code/unsupported → None | — |
 | `_charging_scope` | scope type ที่ถามจริง | message, asked_type | set/None | product_store._detect_product_types ∩ `_CHARGING_TYPES` | re-query | 'charger' drop เมื่อมี form เจาะจง; ว่าง→{asked_type} | — |
 | `_compat_mode` | mode detect | message, intent | str | kw/ctx | _device_spec_lookup | charging/model_fit/self_compat/skip | — |
 | `_extract_product_connectors` | connectors ของสินค้า | card | set[str] | `_CONN_QUERY_KW` vocab map | _filter_compat_products | จาก name/desc | — |
@@ -733,7 +734,10 @@ listing path:
 | `_kw_positions` | positions ของ kw (latin = token boundary) | low, kw | list[int] | — | `_type_mentions` | "phone" ใน "iphone" ไม่นับ; Thai kw substring ตามเดิม | — |
 | `_all_charger_subtypes` | ทุก subtype ที่ kw match (multi-subtype) | low | frozenset[str] | `_CHARGER_SUBTYPES` (product_store, lazy) | build_retrieval_slots | cable+adapter ฯลฯ ไม่บีบเหลือตัวเดียว | — |
 | `_model_terms` | brand-anchored model phrase hint | span_text, brands | tuple[str] | stop-word list | build_retrieval_slots | `<brand>+≤4 tokens` ตัดที่ connector/stopword | — |
-| `_span_device_position` | ตำแหน่ง device token (space-insensitive) | low, token | int | — | `_local_target_device`, build_retrieval_slots | regex escape + `\s+` | — |
+| `_device_occurrence` | literal span ของ device (รองรับ alias↔canonical) | low, token | (start,end)/None | `_DEVICE_ALIAS_PROBE_RE`+`normalize_device_alias` (device_compat, lazy) | `_span_device_position`, `_product_brands` | literal space-insensitive match → fallback probe span ที่ normalize เท่ากัน | — |
+| `_span_device_position` | ตำแหน่ง device token | low, token | int | `_device_occurrence` | `_local_target_device`, build_retrieval_slots | occ[0] หรือ -1 | — |
+| `_product_brands` | กรอง brand ที่อยู่ใน device span ออก | text, brands, target | list[str] | `_device_occurrence` | build_retrieval_slots | brand occurrence ทั้งหมดต้องอยู่นอก device span จึงนับเป็น product-brand evidence | — |
+| `_code_is_device` | code token คือ device mention เองไหม | code, device, low | bool | `normalize_device_alias`/`_lookup_spec_db` (device_compat, lazy), `_device_occurrence` | build_retrieval_profile | compact-eq / normalize-eq / spec-resolve-eq / อยู่ใน device span → true; กัน device alias รั่วเป็น model_codes (mi14pro/s25/a56) | — |
 | `_local_target_device` | device ใน segment ที่เป็น target จริง | seg, shared, slot_types | str/None | `_extract_device_token` (device_compat), `_detect_product_types` (product_store), `_span_device_position` | build_retrieval_slots | connector นำหน้า หรือ family ของ token ไม่ตรง slot ("ฟิล์ม iphone 15"→target; "นาฬิกา mi watch 8"→ตัวสินค้า) | — |
 
 ### 6.19 `responses.py` — response helpers
