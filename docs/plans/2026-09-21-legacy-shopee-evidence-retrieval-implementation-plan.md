@@ -25,6 +25,8 @@
 - Exact unavailable products may be shown for spec, warranty, order history, and discontinued/unlisted questions.
 - Shopping recommendation must not recommend unavailable products unless the answer explicitly says unavailable and uses it only as history/spec evidence.
 - `guards.enforce()` must never pretend a handoff happened. If no deterministic flow set `handoff_to_admin=True`, guards may remove or rewrite fake handoff wording, but must not mark a real handoff.
+- `old admin first` is a preference, not a hard gate. Human assignment must pass eligibility checks before a handoff is treated as owned by an admin.
+- Workflow/trigger logic must respect active human handoff state. It may perform deterministic actions before LLM only when doing so cannot answer over an accepted human owner or fake a handoff.
 - Every runtime task that changes `chatbot/shopeechat/` must update `docs/SRS_SSD.md` section 6 and `getoutofmywaybotkaikrook2.md`.
 - Before first commit for this work and before PR, summarize diff, test result, changed files, and ask the user.
 
@@ -36,6 +38,9 @@
 - **Compatibility:** Customer asks whether an item works with an existing device. Expected: preserve requested shop/family/subtype/device across every source, answer only from compatible evidence, and never claim no product/all sold out while a sellable compatible candidate exists; say not enough info when evidence is missing.
 - **Compare/spec:** Customer compares products or asks specs. Expected: include both compared products and quote only fields from `ShpProducts`, `kb_products`, `kb_qa`, `image_texts`, `ShpOrders`, or `itStock.Products`.
 - **Old order identity:** An order item may no longer exist in the current catalog. Expected: preserve the order item as history/warranty evidence instead of dropping it because live product hydration misses.
+- **Multi-product request:** Customer asks for more than one product with different brands/models/constraints in the same message. Expected: constraints remain attached to the correct product request; a charger brand must not filter smartwatch candidates, and charger subtype must not filter non-charger candidates.
+- **Human ownership continuity:** A previous admin should be reused only when still eligible. Expected: if the previous owner is off-duty/not accepting/over capacity, the handoff is reassigned to an eligible admin or team queue instead of silently waiting.
+- **Workflow trigger boundary:** Deterministic workflow actions should happen before LLM when appropriate, but must not answer over active human handoff or claim a handoff occurred without a real assignment/queue.
 
 ---
 
@@ -74,7 +79,11 @@ The final shape after this plan should be:
 
 ```text
 app.py
-  resolve request state, deterministic flows, route facts
+  buffer/debounce input before bot processing
+  load conversation state, bounded history, anchors, and assignment state
+  enforce human handoff gate before bot answers
+  run allowed deterministic workflow/trigger actions before retrieval/LLM
+  resolve request state and route facts
   return early for order/claim/tax/human/general when deterministic
   build one retrieval_profile before the first product source retrieval
   pass that same immutable profile to every product source/re-query
@@ -107,9 +116,17 @@ device_compat.py
   compatibility evidence and compatibility filter
   no final tier/context owner after migration
 
+route_context.py
+  single-product RetrievalProfile first
+  multi-product RetrievalSlot list after Task 4E
+  owns query understanding, not LLM calls
+
 retrieval_policy.py
   protected product merge, availability-aware final selection,
-  evidence coverage report, diversity, final LLM product context
+  evidence coverage report, diversity, grouped final LLM product context
+
+handoffs.py / workflow trigger layer
+  deterministic handoff decisions, admin eligibility, and workflow state gates
 ```
 
 `retrieval_policy.py` must not become a second `app.py`. Route facts stay in `route_context.py`, source evidence annotations stay in source modules, and sensitive handoff decisions stay in deterministic flows plus `guards.enforce()`.
@@ -122,11 +139,14 @@ retrieval_policy.py
 | `docs/test/gold_retrieval.jsonl` | create | Human-reviewed gold set |
 | `docs/test/test_availability.py` | create | Unit tests for availability resolver |
 | `docs/test/test_retrieval_profile.py` | create | Canonical message/history/intent/anchor reconciliation tests |
+| `docs/test/test_retrieval_slots.py` | create in Task 4E | Multi-product request slot parsing and constraint ownership tests |
 | `docs/test/test_retrieval_evidence.py` | create | Evidence card contract tests |
 | `docs/test/test_candidate_availability_refresh.py` | create | Full live listing/model refresh and normalized ID tests |
 | `docs/test/test_candidate_source_union.py` | create | Bounded unit/listing recall and diversity tests |
 | `docs/test/test_retrieval_policy.py` | create | Ranking/diversity/protected merge tests |
 | `docs/test/test_sensitive_flows.py` | create | Claim/warranty/refund/tax/handoff regression tests |
+| `docs/test/test_handoff_assignment_policy.py` | create in Task 11A | Admin eligibility, old-owner continuity, queue fallback tests |
+| `docs/test/test_workflow_trigger_audit.py` | create in Task 11B | Trigger ordering and handoff-gate regression tests |
 | `chatbot/shopeechat/route_context.py` | modify | Sole owner of canonical `RetrievalProfile` from message/history/intent/anchors |
 | `chatbot/shopeechat/product_store.py` | modify | `resolve_availability()`, listing card integration, source annotations |
 | `chatbot/shopeechat/units.py` | modify | Use shared availability and profile, emit unit evidence fields |
@@ -134,6 +154,8 @@ retrieval_policy.py
 | `chatbot/shopeechat/app.py` | modify gradually | Replace local merge/rank/availability formulas with `retrieval_policy` calls |
 | `chatbot/shopeechat/device_compat.py` | modify later | Return compatibility evidence fields, not final context policy |
 | `chatbot/shopeechat/web_search.py` | modify later | Merge web reanswer candidates through policy instead of replacing context |
+| `chatbot/shopeechat/handoffs.py` | modify in Task 11/11A | Real handoff boundary, assignment eligibility, and owner-state decisions |
+| Workflow/bot-worker docs and runtime files | audit in Task 11B, modify only after approval | Trigger ordering, active human handoff gate, and no fake handoff promises |
 | `docs/SRS_SSD.md` | modify with runtime changes | Function docs and call relationships |
 | `getoutofmywaybotkaikrook2.md` | modify each task | Waythrough log |
 
@@ -177,6 +199,28 @@ class RetrievalProfile:
     fact_sources: tuple[tuple[str, str], ...]
 
 
+@dataclass(frozen=True)
+class RetrievalSlot:
+    slot_id: str
+    source_span: str
+    product_types: frozenset[str]
+    subtypes: frozenset[str]
+    primary_subtype: str | None
+    brand_hints: tuple[str, ...]
+    model_codes: tuple[str, ...]
+    model_terms: tuple[str, ...]
+    target_device: str | None
+    target_scope: str
+    availability_mode: str
+    compat_mode: str
+    confidence: float
+    fact_sources: tuple[tuple[str, str], ...]
+
+
+def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...]:
+    """Split a resolved profile into product-request slots without calling an LLM."""
+
+
 def build_retrieval_profile(
     message: str,
     *,
@@ -209,6 +253,8 @@ Ownership and data flow are strict:
 3. `app.py` builds the profile after intent and anchor resolution, before the first broad product-candidate search. Deterministic exact hydration by explicit `item_id`/order anchor may happen earlier because it supplies the anchor input, but it is not a ranked candidate search. `app.py` passes the same profile object to every later product source and re-query in that turn.
 4. `product_store`, `units`, `device_compat`, KB/Mongo candidate fetches, and `web_search.reanswer` may use only the fields relevant to them. They may change their local search string, but must not re-extract or overwrite the canonical shop/type/subtype/device/modes.
 5. `retrieval_policy.select_context()` ranks and filters candidates using the profile. It does not infer intent, type, subtype, target device, or availability mode.
+
+After Task 4E, one turn may contain multiple `RetrievalSlot` objects. A slot is a scoped product request, not another intent. For example, “หัวชาร์จ CukTech กับนาฬิกา Xiaomi Mi Watch 8 ใช้กับ Mi 17 Ultra” becomes a charger slot with adapter/CukTech constraints and a smartwatch slot with Xiaomi/Mi Watch constraints. Shared target devices must be marked with `target_scope="shared"` and still require compatibility evidence before a positive claim. Do not solve this by adding case-specific rules for Mi, CukTech, Xiaomi, charger, or smartwatch.
 
 Important rule: `select_context()` returns normal product cards, not a new response shape. Private `_evidence` and `_selection_reason` metadata must be stripped from `ChatResponse.products` after internal selection/answering and before response serialization.
 
@@ -1164,6 +1210,145 @@ Expected:
 - The Mi 17 Ultra follow-up resolves to charger+cable+target device instead of phone/no-type.
 - All legacy product-candidate callsites can be audited to the same profile id/debug facts.
 - Runtime answer behavior is still unchanged in this task; false out-of-stock is closed by availability/selection/compatibility tasks below, not by prompt changes here.
+
+---
+
+## Task 4E: Multi-Product Request Slots
+
+**Why this task exists:** Task 4D starts trusting one `RetrievalProfile` during retrieval. That is correct for single-product turns, but a flat profile is not enough when a customer asks for multiple products in one message and gives different constraints per product. Without slots, a charger brand can accidentally filter smartwatch candidates, a charger subtype can filter non-charger candidates, or a model phrase can be attached to the wrong product request.
+
+**Files:**
+- Modify: `chatbot/shopeechat/route_context.py`
+- Modify later in this task: `chatbot/shopeechat/product_store.py`
+- Modify later in this task: `chatbot/shopeechat/retrieval_policy.py`
+- Create: `docs/test/test_retrieval_slots.py`
+- Modify: `docs/SRS_SSD.md`
+- Modify: `getoutofmywaybotkaikrook2.md`
+
+**Interfaces:**
+- Produces `RetrievalSlot` and `build_retrieval_slots(profile) -> tuple[RetrievalSlot, ...]`.
+- Consumes the Task 4D `RetrievalProfile`; does not call LLM and does not replace intent classification.
+- Keeps `RetrievalProfile.subtype` for backward compatibility. Adds slot-level `subtypes` for multi-subtype/multi-product queries.
+- Source modules may fetch per slot, but final product cards keep the public response shape. Slot/evidence metadata remains private.
+
+- [ ] **Step 1: Write failing slot parsing tests**
+
+Create `docs/test/test_retrieval_slots.py`:
+
+```python
+from __future__ import annotations
+
+from chatbot.shopeechat import route_context
+
+
+def _profile(message: str):
+    return route_context.build_retrieval_profile(
+        message,
+        history=[],
+        intent_result={"intent": "product_recommend", "confidence": 0.92},
+        shop="KingGadgets",
+    )
+
+
+def test_charger_and_watch_keep_separate_constraints():
+    prof = _profile(
+        "อยากได้หัวชาร์จกับนาฬิกาใช้กับ mi 17 ultra "
+        "brand ที่มองไว้หัวชาร์จเอา cuktech นาฬิกาเอา xiaomi mi watch 8"
+    )
+    slots = route_context.build_retrieval_slots(prof)
+
+    charger = next(s for s in slots if "charger" in s.product_types)
+    watch = next(s for s in slots if "smartwatch" in s.product_types)
+
+    assert "adapter" in charger.subtypes
+    assert "cuktech" in {b.lower() for b in charger.brand_hints}
+    assert "xiaomi" not in {b.lower() for b in charger.brand_hints}
+    assert "smartwatch" not in charger.product_types
+
+    assert "xiaomi" in {b.lower() for b in watch.brand_hints}
+    assert any("watch 8" in t.lower() for t in watch.model_terms)
+    assert "cuktech" not in {b.lower() for b in watch.brand_hints}
+    assert "adapter" not in watch.subtypes
+
+
+def test_multi_subtype_charger_does_not_collapse_to_one_subtype():
+    prof = _profile("มีสายชาร์จกับหัวชาร์จไหม")
+    slots = route_context.build_retrieval_slots(prof)
+    charger = next(s for s in slots if "charger" in s.product_types)
+    assert {"cable", "adapter"} <= set(charger.subtypes)
+    assert charger.primary_subtype in (None, "cable", "adapter")
+
+
+def test_single_product_turn_remains_one_slot():
+    prof = _profile("มีหัวชาร์จ CukTech ใช้กับ Mi 17 Ultra ไหม")
+    slots = route_context.build_retrieval_slots(prof)
+    assert len(slots) == 1
+    assert "charger" in slots[0].product_types
+```
+
+- [ ] **Step 2: Run tests to verify RED**
+
+```bash
+.venv/bin/python -m pytest docs/test/test_retrieval_slots.py -v
+```
+
+Expected: fail because `RetrievalSlot`/`build_retrieval_slots` do not exist or do not split constraints yet.
+
+- [ ] **Step 3: Implement deterministic slot extraction**
+
+In `route_context.py`:
+- Add frozen `RetrievalSlot`.
+- Add `build_retrieval_slots(profile)`.
+- Split by product mentions and connector words such as “กับ”, “ส่วน”, “เอา”, “ของ”, “สำหรับ”, and “ใช้กับ” only as deterministic span hints.
+- Attach brand/model terms to the nearest product span when the span explicitly mentions that product.
+- Mark target devices after “ใช้กับ/รองรับ/สำหรับ” as shared only when the wording is outside a specific product span.
+- If confidence is low or no product boundary is clear, return one slot derived from the original profile and fail open.
+
+Do not add case-specific logic for the example brands/devices. This must work for the same pattern with other product families.
+
+- [ ] **Step 4: Use slots conservatively in retrieval**
+
+Only after slot parsing tests pass:
+- For one-slot turns, keep current Task 4D behavior.
+- For multi-slot turns, fetch a bounded pool per slot using slot-specific product types/subtypes/brand/model hints.
+- Use OR semantics for slot `subtypes`; do not collapse `{"cable", "adapter"}` into a single hard filter.
+- Limit per-slot candidates to a small number before final selection.
+- Add private evidence such as `_evidence.slot_id` or `_selection_reason` only internally; strip it before public response.
+
+- [ ] **Step 5: Add grouped selection tests**
+
+Extend `docs/test/test_retrieval_slots.py` or `docs/test/test_retrieval_policy.py`:
+
+```python
+def test_grouped_selection_keeps_one_candidate_per_slot_when_available():
+    charger_card = {"item_id": "1", "name": "CukTech 65W", "_evidence": {"slot_id": "slot-charger"}}
+    watch_card = {"item_id": "2", "name": "Xiaomi Mi Watch 8", "_evidence": {"slot_id": "slot-watch"}}
+    extra_card = {"item_id": "3", "name": "Extra charger", "_evidence": {"slot_id": "slot-charger"}}
+    selected, report = retrieval_policy.select_context(
+        [charger_card, watch_card, extra_card],
+        profile=profile_with_two_slots,
+        limit=2,
+        evidence_mode="observe",
+    )
+    assert {p["item_id"] for p in selected} == {"1", "2"}
+    assert report["slot_counts"]["slot-charger"] >= 1
+    assert report["slot_counts"]["slot-watch"] >= 1
+```
+
+The test must not require a new public response shape; grouping is an internal context/evidence rule.
+
+- [ ] **Step 6: Verification**
+
+```bash
+.venv/bin/python -m pytest docs/test/test_retrieval_slots.py docs/test/test_retrieval_profile.py docs/test/test_retrieval_profile_hints.py -v
+.venv/bin/python -m py_compile chatbot/shopeechat/route_context.py chatbot/shopeechat/product_store.py chatbot/shopeechat/retrieval_policy.py
+git diff --check
+```
+
+Expected:
+- Single-product turns keep one slot and existing Task 4D behavior.
+- Multi-subtype charger turns do not lose one subtype because of a single `subtype` field.
+- Multi-product turns do not leak product-specific brand/model/subtype constraints into another product slot.
 
 ---
 
@@ -2191,6 +2376,273 @@ Expected:
 
 ---
 
+## Task 11A: Handoff Assignment Eligibility Policy
+
+**Why this task exists:** The current business rule “old admin first” is unsafe when the old admin is off-duty, not accepting chat, over capacity, disabled, or otherwise unavailable. Assignment must prefer continuity, but only after eligibility. A chat should not wait on an admin who cannot actually receive the work.
+
+**Files:**
+- Create: `docs/test/test_handoff_assignment_policy.py`
+- Modify: `chatbot/shopeechat/handoffs.py` or the current deterministic handoff owner after a fresh callsite audit
+- Modify: admin/workflow assignment code only if the runtime owner is outside `chatbot/shopeechat`
+- Modify: `docs/SRS_SSD.md`
+- Modify: `getoutofmywaybotkaikrook2.md`
+
+**Interfaces:**
+- Produces an assignment policy helper with this shape, adjusted to the actual module owner found during audit:
+
+```python
+def choose_handoff_assignee(
+    *,
+    previous_owner_admin_id: str | None,
+    last_successful_owner_admin_id: str | None,
+    eligible_admins: list[dict],
+    function_key: str | None,
+    shop: str | None,
+    platform: str = "shopee",
+) -> dict:
+    """Return assignee or queue decision; old owner is preference after eligibility."""
+```
+
+- Tracks these semantics:
+  - `current_assigned_admin_id`: admin currently assigned by the system.
+  - `last_human_responder_admin_id`: latest admin who actually replied to the customer.
+  - `last_successful_owner_admin_id`: latest admin who accepted, replied, or closed the case after handling it.
+  - `previous_owner_admin_id`: previous owner used as a continuity preference.
+  - `assigned != accepted != successful owner`.
+
+- [ ] **Step 1: Write failing assignment policy tests**
+
+Create `docs/test/test_handoff_assignment_policy.py`:
+
+```python
+from __future__ import annotations
+
+from chatbot.shopeechat import handoffs
+
+
+def _admin(admin_id, *, accepting=True, active=True, capacity=0,
+           max_capacity=5, functions=("sales",), shops=("KingGadgets",)):
+    return {
+        "admin_id": admin_id,
+        "accepting": accepting,
+        "active": active,
+        "capacity": capacity,
+        "max_capacity": max_capacity,
+        "functions": list(functions),
+        "shops": list(shops),
+        "disabled": False,
+    }
+
+
+def test_old_owner_wins_only_when_eligible():
+    got = handoffs.choose_handoff_assignee(
+        previous_owner_admin_id="a1",
+        last_successful_owner_admin_id="a1",
+        eligible_admins=[_admin("a1"), _admin("a2")],
+        function_key="sales",
+        shop="KingGadgets",
+    )
+    assert got["admin_id"] == "a1"
+
+
+def test_old_owner_off_duty_falls_back_to_eligible_pool():
+    got = handoffs.choose_handoff_assignee(
+        previous_owner_admin_id="a1",
+        last_successful_owner_admin_id="a1",
+        eligible_admins=[_admin("a1", accepting=False), _admin("a2")],
+        function_key="sales",
+        shop="KingGadgets",
+    )
+    assert got["admin_id"] == "a2"
+    assert got["reason"] == "old_owner_not_eligible"
+
+
+def test_no_eligible_admin_returns_team_queue():
+    got = handoffs.choose_handoff_assignee(
+        previous_owner_admin_id="a1",
+        last_successful_owner_admin_id="a1",
+        eligible_admins=[_admin("a1", accepting=False), _admin("a2", capacity=5)],
+        function_key="sales",
+        shop="KingGadgets",
+    )
+    assert got["queue"] == "team"
+    assert got["admin_id"] is None
+```
+
+- [ ] **Step 2: Run tests to verify RED**
+
+```bash
+.venv/bin/python -m pytest docs/test/test_handoff_assignment_policy.py -v
+```
+
+- [ ] **Step 3: Implement eligibility gates**
+
+Eligibility must check:
+- admin is accepting chat.
+- admin is inside working hours and not on leave when that data is available.
+- admin is active/online according to current policy.
+- admin can handle the requested shop/platform/function.
+- admin capacity is below max capacity.
+- admin is not disabled/suspended.
+- active assignment is not past reassignment timeout/SLA.
+
+Assignment order:
+1. last successful owner if eligible.
+2. eligible admins in the same function/shop.
+3. round robin among eligible admins.
+4. backup/supervisor/team queue if none are eligible.
+
+Do not update old owner merely because the system assigned an admin. Update successful owner only when an admin accepts, replies, or closes the case after handling it.
+
+- [ ] **Step 4: Wire only the real deterministic handoff owner**
+
+Before editing runtime code, run:
+
+```bash
+rg -n "handoff|assigned_to|assign|round robin|round_robin|accepting|capacity|admin" chatbot ChatAdminWeb docs/plans
+```
+
+Record the owner module in `getoutofmywaybotkaikrook2.md`. Wire the helper at that owner only. Do not add a second assignment pipeline.
+
+- [ ] **Step 5: Verification**
+
+```bash
+.venv/bin/python -m pytest docs/test/test_handoff_assignment_policy.py docs/test/test_sensitive_flows.py -v
+git diff --check
+```
+
+Expected:
+- Previous owner continuity remains when the old owner is eligible.
+- Ineligible old owner is skipped instead of blocking the customer.
+- Queue fallback is explicit when nobody is eligible.
+- A promised handoff still requires real assignment or real queue entry.
+
+---
+
+## Task 11B: Trigger And Workflow Flow Audit
+
+**Why this task exists:** Workflow/trigger behavior is useful and should stay before LLM for deterministic cases, but it must be audited as a state machine boundary. It must not answer over an active human owner, must not fake a handoff, and must not run duplicate retrieval/LLM work after a deterministic action already resolved the turn.
+
+**Files:**
+- Create: `docs/test/test_workflow_trigger_audit.py`
+- Modify after audit: current workflow/trigger owner modules only
+- Modify: `docs/SRS_SSD.md`
+- Modify: `getoutofmywaybotkaikrook2.md`
+
+**Interfaces:**
+- Produces no new public API at first. The first deliverable is an audit table and tests around the current owner.
+- If runtime changes are needed, introduce a small deterministic gate function rather than spreading checks through `app.py`.
+
+- [ ] **Step 1: Inventory current trigger/workflow callsites**
+
+Run:
+
+```bash
+rg -n "workflow|trigger|handoff|ticket_state|assigned_to|bot reply|bot_reply|shadow_replies|storeWorkflowDelivered|getGroupedHistoryForBot" chatbot ChatAdminWeb docs
+```
+
+Record in the active log:
+- where buffer/debounce happens;
+- where workflow/trigger replies are produced;
+- how each trigger matches text: exact, contains, keyword-any, keyword-all, regex, fuzzy, semantic, or custom code;
+- whether trigger matching normalizes case, punctuation, repeated whitespace, Thai particles, and common typos;
+- where bot history is built;
+- where handoff is requested;
+- where assignment state is checked;
+- where the bot is prevented from answering during active human handoff.
+
+- [ ] **Step 2: Write expected flow tests or executable assertions**
+
+Create `docs/test/test_workflow_trigger_audit.py`. If the current runtime owner is TypeScript, write a small Python static test that reads the documented audit result committed in this task, then add the TypeScript test command once the runtime owner is modified. Pin these rules:
+
+```python
+def test_flow_order_documented():
+    expected_order = [
+        "buffer/debounce",
+        "load_state_history_assignment",
+        "handoff_gate",
+        "workflow_trigger",
+        "intent_route_context",
+        "rag_product_retrieval",
+        "llm",
+        "search_fallback",
+        "handoff_assignment",
+    ]
+    assert expected_order.index("handoff_gate") < expected_order.index("workflow_trigger")
+    assert expected_order.index("workflow_trigger") < expected_order.index("intent_route_context")
+```
+
+When the owner module is identified, replace the static flow-order test with module-level checks against that owner in the same task. Do not leave a permanent no-op.
+
+- [ ] **Step 3: Audit rules**
+
+Classify each workflow/trigger:
+- deterministic before LLM and safe to return;
+- deterministic action that requires handoff assignment;
+- informational trigger that can run only when no active human owner exists;
+- trigger that should be blocked or delayed while human handoff is active;
+- trigger that duplicates RAG/LLM and should be removed or moved.
+
+Every trigger that says “ส่งต่อแอดมิน” must set or call a deterministic handoff path that creates a real assignment or queue entry.
+
+Audit matching behavior explicitly. If the current trigger is exact-match only, document that `"สวัสดีมินเนี่ยน"` will not match `"ดีจ้ามินเนี่ยน"` and decide whether that trigger should remain exact or move to a safer mode. Target trigger match modes:
+
+| Match mode | Use for | Risk rule |
+|---|---|---|
+| exact | risky commands, state transitions, claim/refund/tax/handoff actions | safest default for sensitive actions |
+| contains / keyword-any | greeting, low-risk FAQ, broad informational triggers | must not perform handoff or irreversible actions |
+| keyword-all | intent-like deterministic FAQ where all concepts must appear | require tests for false positives |
+| regex | structured values such as order numbers, tracking numbers, phone/email patterns | keep patterns bounded and shop/state aware |
+| fuzzy | typo-tolerant low-risk greetings/FAQ only | require explicit threshold and negative tests |
+| semantic/LLM | not a default trigger mode | use only behind approval, evidence, and handoff gates |
+
+Do not silently convert all exact triggers to fuzzy. Match mode must be stored or derived per trigger so sensitive triggers remain exact while safe greetings can use contains/keyword/fuzzy behavior.
+
+- [ ] **Step 4: Design the target gate**
+
+Target order:
+
+```text
+message
+  -> buffer/debounce
+  -> load conversation state + history + assignment state
+  -> human handoff gate
+       active accepted owner: bot stops
+       owner ineligible/timeout: reassign through Task 11A policy
+  -> deterministic workflow/trigger
+  -> intent + route_context
+  -> RAG/product retrieval
+  -> LLM
+  -> search fallback
+  -> RAG
+  -> LLM
+  -> handoff assignment policy
+```
+
+The audit may conclude that the current ordering is already correct for some triggers. Keep those unchanged and document why.
+
+- [ ] **Step 5: Verification**
+
+Run the tests discovered in the audit. At minimum:
+
+```bash
+git diff --check
+```
+
+If TypeScript runtime files are modified, also run:
+
+```bash
+cd ChatAdminWeb && npx tsc --noEmit
+```
+
+Expected:
+- Bot does not answer over active accepted human handoff.
+- Workflow trigger replies are included in bot history where intended.
+- Handoff promises correspond to real assignment/queue state.
+- Deterministic triggers still happen before LLM when safe.
+
+---
+
 ## Task 12: Make Web Search Reanswer Evidence-Aware
 
 **Files:**
@@ -2328,7 +2780,7 @@ Expected:
 - [ ] **Step 1: Run unit/static checks**
 
 ```bash
-.venv/bin/python -m pytest docs/test/test_availability.py docs/test/test_retrieval_profile.py docs/test/test_candidate_availability_refresh.py docs/test/test_candidate_source_union.py docs/test/test_retrieval_evidence.py docs/test/test_retrieval_policy.py docs/test/test_evidence_requirements.py docs/test/test_compat_recall_gate.py docs/test/test_sensitive_flows.py -v
+.venv/bin/python -m pytest docs/test/test_availability.py docs/test/test_retrieval_profile.py docs/test/test_retrieval_slots.py docs/test/test_candidate_availability_refresh.py docs/test/test_candidate_source_union.py docs/test/test_retrieval_evidence.py docs/test/test_retrieval_policy.py docs/test/test_evidence_requirements.py docs/test/test_compat_recall_gate.py docs/test/test_sensitive_flows.py docs/test/test_handoff_assignment_policy.py docs/test/test_workflow_trigger_audit.py -v
 .venv/bin/python -m py_compile chatbot/shopeechat/app.py chatbot/shopeechat/route_context.py chatbot/shopeechat/product_store.py chatbot/shopeechat/units.py chatbot/shopeechat/knowledge_base.py chatbot/shopeechat/device_compat.py chatbot/shopeechat/web_search.py chatbot/shopeechat/retrieval_policy.py
 ```
 
@@ -2409,6 +2861,9 @@ Remove only after the owning task passes replay:
 | Local float/int/string ID cleanup | `product_store.normalize_shopee_id()` at source boundaries |
 | Per-source type/device rediscovery from rewritten queries | the single `RetrievalProfile` passed through all legacy product sources |
 | Web search final product replacement | evidence-aware union through `retrieval_policy.select_context()` |
+| Flat single-profile handling for multi-product turns | `route_context.build_retrieval_slots()` plus grouped selection |
+| Unconditional `old admin first` assignment | old successful owner only after eligibility checks |
+| Workflow trigger replies that bypass human handoff state | trigger gate after assignment-state load and before retrieval/LLM |
 | Long historical comments in touched blocks | short purpose/input/output/calls/fallback comments |
 
 Do not remove:
@@ -2429,6 +2884,9 @@ Do not remove:
 - `itStock.Products` currently looks strongest for package/spec join, not direct cert flags by simple key names. Cert search may still depend more on description/OCR unless deeper stock spec parsing is added.
 - Compatibility remains partly special because it needs broad recall. Do not force it into unit-only retrieval until recall tests prove it.
 - Intent classification remains probabilistic. The profile resolver limits its authority but cannot recover an unstated product family when neither current message, anchor, nor bounded history contains one; that case must clarify rather than guess.
+- Multi-slot extraction is deterministic and span-based. If a customer gives constraints without clear product spans, the system should fail open or ask a clarifying question rather than attach the constraint to the wrong slot.
+- Handoff eligibility depends on current admin availability/capacity data. If that data is stale or unavailable, assignment must use explicit queue fallback instead of pretending an admin owns the chat.
+- Workflow/trigger audit may find TypeScript runtime ownership outside this legacy Shopee plan. Treat those runtime edits as a separate approved task if they exceed docs/audit scope.
 - Some old comments outside touched blocks will remain. Cleaning the whole file is a separate documentation cleanup, not part of retrieval correctness.
 
 ## Self-Review
@@ -2438,9 +2896,12 @@ Spec coverage:
 - 65 shops / many product types: Task 1 gold by shop/type; Task 4 retrieval profile; Task 9 route context; Task 14 replay gates.
 - Variant/unit/stock/unlisted/discontinued: Task 2 availability, Task 5 live refresh, Task 5A source recall, Task 7 protected exact products.
 - Compare/spec/compat/warranty/history: Tasks 4, 5, 7, 8, 10, 11.
+- Multi-product/multi-query turns: Task 4E.
 - Intent/history/anchor extraction ownership: Task 4 defines one immutable profile and exact precedence; Tasks 9, 12, and 13 remove secondary owners.
 - Mi 17 Ultra false no-product/out-of-stock: Task 4 preserves cable+device facts, Task 5 refreshes live availability, Task 5A prevents an incomplete unit pool from hiding listing candidates, Task 10 requires compatible-candidate proof before negative wording, Task 14 replays it.
 - No hallucinated spec/warranty/compat: Task 8 evidence coverage, Task 10 gated compatibility enforcement, and Task 11 sensitive gates.
+- Real human handoff ownership: Tasks 11, 11A, and 11B.
+- Trigger/workflow ordering: Task 11B.
 - Reduce hardcode and pipeline duplication: Tasks 4, 9, 12, 13.
 - Do not bloat code: one new runtime module first, Task 13 file-size check.
 
@@ -2450,6 +2911,7 @@ Placeholder scan:
 
 Type consistency:
 - `build_retrieval_profile()` returns one frozen `RetrievalProfile`; no task defines `build_profile()` elsewhere.
+- `build_retrieval_slots()` returns frozen `RetrievalSlot` objects and does not replace `RetrievalProfile`; one-slot turns remain backward compatible.
 - `resolve_availability()` returns dict keys used by `refresh_candidate_availability()` and `select_context()`.
 - `select_context()` consumes `RetrievalProfile` and returns `(list[dict], dict)` in all tasks; rollout-only `evidence_mode` is a separate argument.
 - Private evidence keys are `_evidence` and `_selection_reason`; Task 8 strips both at the public response boundary.
@@ -2458,5 +2920,7 @@ Review focus coverage:
 - Unavailable exact model: Tasks 2, 4, 7, 14.
 - Variant/unit stock: Tasks 2, 5, 14.
 - Sensitive policies: Task 11.
+- Human ownership continuity: Task 11A.
+- Workflow trigger boundary: Task 11B.
 - Compatibility: Tasks 4, 5, 10.
 - Compare/spec: Tasks 7 and 8.

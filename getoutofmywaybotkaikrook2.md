@@ -20,6 +20,15 @@
 
 ## กำลังทำ (active)
 
+### ✅ อัปเดต master retrieval plan: 4E multi-slot + handoff/workflow audit (2026-09-23) — docs-only เสร็จ
+
+- **ขอบเขต:** แก้เฉพาะ `docs/plans/2026-09-21-legacy-shopee-evidence-retrieval-implementation-plan.md` เพื่อเพิ่มสิ่งที่คุยกันหลัง Task 4D: multi-product/multi-slot retrieval, handoff admin eligibility, และ trigger/workflow audit
+- **ห้าม:** ยังไม่แก้ runtime code, ไม่แตะ ChatAdminWeb/botworker/v2/v3, ไม่เริ่ม Task 4E implementation จริง
+- **เหตุผล:** profile แบนตัวเดียวเสี่ยงปน constraint เมื่อคำถามมีหลายสินค้า; old admin first ต้องผ่าน eligibility; workflow/trigger ต้องถูก audit ว่าไม่ตอบทับ human handoff และไม่ fake handoff
+- **เพิ่มใน plan:** Global constraints/review focus/target flow/file structure/interface เพิ่ม `RetrievalSlot`; เพิ่ม Task 4E, Task 11A, Task 11B; final replay gate และ self-review รู้จัก test ใหม่
+- **เพิ่มหลัง user ถาม trigger:** Task 11B ต้อง audit trigger match mode ชัดเจน (`exact`, `contains`, `keyword-any/all`, `regex`, `fuzzy`, `semantic`) และระบุว่า exact-only เช่น "สวัสดีมินเนี่ยน" จะไม่ hit "ดีจ้ามินเนี่ยน" เว้นแต่ trigger นั้นตั้ง mode ที่เหมาะสม
+- **verify:** `git diff --check` ผ่าน; markdown code fence count 168 เป็นเลขคู่
+
 ### ✅ หัวข้อ "ทดสอบบอท" มองไม่เห็นบน laptop (2026-09-22) — fixed root cause + verified
 
 - **error:** h1 "ทดสอบบอท — {label}" หน้า testchat มองไม่เห็น **เฉพาะจอ ≥1280px (xl)** — จอเล็กเห็นปกติ
