@@ -1790,6 +1790,22 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 print(f"[SHADOW] grouped-retrieval error: {_e}",
                       file=sys.stderr)
 
+        # ⚡ Task 5B3-C — grouped-retrieval selection (flag-gated)
+        #   compute ครั้งเดียว — merge เข้า products ที่ llm.answer callsites
+        #   error/empty → _grouped_sel=None → products เดิมต่อ (fallback)
+        _grouped_sel = None
+        if (os.environ.get("USE_GROUPED_RETRIEVAL_SELECTION", "0") == "1"
+                and _retrieval_profile is not None):
+            try:
+                from . import retrieval_runtime as _rr
+                _grouped_sel = _rr.run_grouped_selection(
+                    _retrieval_profile, message=req.message, shop=req.shop,
+                    platform=req.platform or "shopee")
+            except Exception as _e:
+                print(f"[SELECTION] grouped-retrieval error: {_e}",
+                      file=sys.stderr)
+                _grouped_sel = None
+
         # ===== ขั้นที่ 1: เช็ค Knowledge Base ก่อน =====
         # ถ้าเป็น follow-up (เช่น "เคลมยังไง", "รับประกัน") ให้เอา model จาก history มาค้น KB ด้วย
         kb_query = req.message
@@ -2224,6 +2240,20 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     if _kb_device_products:
                         merged_products = merged_products + _kb_device_products
                         print(f"[DEVICE-SPEC-LOOKUP-KB] merge {len(_kb_device_products)} สินค้าจาก re-query เข้า merged_products (now {len(merged_products)})", file=sys.stderr)
+
+                    # ⚡ Task 5B3-C — merge selected context (flag on เท่านั้น)
+                    if _grouped_sel:
+                        merged_products = _rr.merge_selected_products(
+                            _grouped_sel["selected_cards"], merged_products,
+                            _llm_ctx_limit)
+                        if _grouped_sel.get("extra_context"):
+                            _hybrid_extra_ctx = (
+                                _hybrid_extra_ctx + "\n\n"
+                                + _grouped_sel["extra_context"]).strip()
+                        _steps.append({
+                            "name": "GroupedRetrievalSelection",
+                            "input": {"path": "kb"},
+                            "output": _grouped_sel["summary"]})
 
                     try:
                         answer, usage_info = llm.answer(
@@ -4589,6 +4619,16 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         if products and _pending_context_note:
             _add_context_note(products, _pending_context_note)
             print(f"[DEBUG-3D] injected context_note len={len(_pending_context_note)} products[0]_has_note=True", file=sys.stderr)
+        # ⚡ Task 5B3-C — merge selected context (flag on เท่านั้น)
+        if _grouped_sel:
+            products = _rr.merge_selected_products(
+                _grouped_sel["selected_cards"], products, _llm_ctx_limit)
+            if _grouped_sel.get("extra_context"):
+                _combined_extra = (_combined_extra + "\n\n"
+                                   + _grouped_sel["extra_context"]).strip()
+            _steps.append({"name": "GroupedRetrievalSelection",
+                           "input": {"path": "main"},
+                           "output": _grouped_sel["summary"]})
         try:
             answer, usage_info = llm.answer(
                 message=desc_message,

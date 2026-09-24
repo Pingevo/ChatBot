@@ -359,6 +359,19 @@
 - **ยืนยัน:** contract-only ไม่ wire app.py (ไม่มี flag ใหม่ — ยังไม่จำเป็น) · ไม่แตะ prompt/llm.py/v2/v3/ChatAdminWeb/botworker · pool ทั้งหมดไม่ถูกส่งเข้า LLM — selected ต่อ request เท่านั้น
 - **risk ก่อน wire จริง:** (1) ต้องออกแบบ integration point ว่า selected cards ไปแทน/เสริม products เดิมตรงไหน + flag `USE_GROUPED_RETRIEVAL_SELECTION` (2) replay gate ควรผ่านก่อนเปิด (3) constraint vocab จำกัด 5 keys — subtype/device constraints อื่นยังไม่ match (4) unavailable evidence ต้อง render เป็นภาษาคนใน prompt ไม่ใช่ dict
 
+#### Task 5B3-C — Wire Selected Context เข้า LLM หลัง Flag (2026-09-23) — เสร็จ + verified รออนุมัติ commit
+
+- **ค้นพบ callsite จริง:** `llm.answer(products=…)` มีหลายจุด — AD1404T case ตอบที่ **KB path (~2240, `merged_products`)** ไม่ใช่ main path (~4622) — wire callsite เดียวจะพลาดเคสนี้
+- **`retrieval_runtime.py`:** `run_grouped_selection` (compute ครั้งเดียว → selected_cards role-tagged + extra_context unavailable note + summary) + `merge_selected_products` (selected ก่อน + base dedupe item_id + cap) + `prepare_grouped_selection` (composition สำหรับ tests)
+- **app.py wiring:** compute block หลัง RetrievalProfile step (flag `USE_GROUPED_RETRIEVAL_SELECTION` default ปิด + lazy import + try/except→None) → merge 2 llm.answer callsites (KB `merged_products` + main `products`) + extra_context note + `_steps` "GroupedRetrievalSelection"
+- **A/B proof จริง (patch llm.answer จับ products):**
+  - flag OFF → products=3 (AD1404T เท่านั้น — bug เดิม reproduce) · sel step NONE
+  - flag ON → products=9: selected 6 role-tagged (3× AD1404T + **CTC615P/CTC620P สายมีจอ OLED 240W 2m** + 2× CTC620W) + base dedup · extra_context = unavailable note (สายตายไม่เข้า products) · sel step ใน steps
+- **hardening:** `_item_id` ใช้ `retrieval_policy._norm_id` — float/int-float-str dedupe ตรงกัน (selected 123 vs base 123.0/"123.0" ไม่ duplicate เข้า LLM) — bug root เดียวกับ candidate_pool/anchor ก่อนหน้า
+- **test:** `test_retrieval_selection_runtime.py` 11 tests (merge order/dedup float-int/error→None/strip+role-tag/AD1404T both groups/quota/unavailable ไม่ใช่ recommendation/empty→None/callsite gated+lazy+merge≥2/no v2/v3) — รวม 65/65
+- **ยืนยัน:** flag ปิด = behavior เดิม 100% (พิสูจน์แล้วด้วย A/B) · pool ทั้งหมดไม่เข้า LLM — selected+base merge เท่านั้น · ไม่แตะ prompt/llm.py/v2/v3/ChatAdminWeb/botworker
+- **risk ก่อน replay/gold gate:** (1) selected unit cards เป็น variant-level — merge อาจให้ unit card แทน listing card (ข้อดี: variant ชัด) (2) callsite 1005 (item_id card path) ยังไม่ wire — เคสส่งการ์ดสินค้ามาเองไม่ผ่าน selection (3) unavailable note เป็น text ไทยเพิ่มใน extra_context — token +เล็กน้อย (4) `llm.answer` callsite 2353 (web-search re-answer) ไม่ wire
+
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
 - **แพลน:** `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` (rev 1.2 — user review 2 รอบ อนุมัติแล้ว)

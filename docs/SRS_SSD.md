@@ -1038,6 +1038,16 @@ listing path:
 | `_card_text` | text รวม constraint matching | card | str | — | `_select_one` | name + variant names + tier_variation + canonical_specs — หลักฐานอย่าง "2 เมตร" อยู่ใน variant ไม่ใช่ item name | — |
 | `_constraint_hit` | soft_hint match card text | key, val, text | bool | — | `_select_one` | display→จอ/oled/display · length_m→`N เมตร/ม./m` · speed→W/A/PD/เต็ม/เร็ว · power_w→`N w` · protocol→`pd/qc/pps/ufcs N` — meta keys (query_hint/target_subtype/source_subtype) ไม่ score | — |
 
+### 6.33 `retrieval_runtime.py` — grouped-retrieval → LLM context (flag-gated, Task 5B3-C)
+
+| ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `run_grouped_selection` | profile → pipeline → selection (ครั้งเดียว/request) | profile, message, shop, platform, per_request_limit=3, unavailable_limit=5, fetcher, legacy_fetcher | dict {"selected_cards","extra_context","summary"} / None | slots→relations→requests→executor→pool→`select_for_llm_context` | `app.py` flag block (lazy import) | selected cards role-tagged `_context_note` (stripped); unavailable → Thai evidence note (ไม่ใช่ recommendation); error/empty → None | Mongo read; error → None |
+| `merge_selected_products` | merge selected + base | selected_cards, base_products, limit | list[dict] | `_item_id` | `app.py` llm.answer callsites (KB path ~2240, main ~4622) | selected มาก่อน + base ที่ไม่ซ้ำ item_id (selected ชนะ) + cap limit | — |
+| `prepare_grouped_selection` | run+merge ครบจบ (tests/probes) | profile, …, base_products, limit | dict {"products","extra_context","summary"} / None | `run_grouped_selection`, `merge_selected_products` | tests/probes | composition ของ 2 ฟังก์ชันบน | — |
+
+`app.py` wiring (flag `USE_GROUPED_RETRIEVAL_SELECTION`, default ปิด): compute block หลัง RetrievalProfile step → `_grouped_sel` → merge 2 llm.answer callsites (KB `merged_products` ~2240 + main `products` ~4622) → `_steps` "GroupedRetrievalSelection"; flag ปิด/ผล None = products เดิม 100%
+
 ---
 
 ## 7. คอนฟิกและตัวแปรสำคัญ
@@ -1051,6 +1061,7 @@ listing path:
 | `req.use_v2` / `req.use_v3` | None | per-request override (shadowbot/replay) |
 | `USE_UNIT_INDEX` | unset | `1`=units ทุก query · `charger`=เฉพาะ charger family · compat bypass เสมอ |
 | `USE_GROUPED_RETRIEVAL_SHADOW` | `"0"` (ปิด) | `1`=รัน grouped-retrieval pipeline ข้าง runtime เดิม (observe/log เท่านั้น — ไม่แตะคำตอบ) |
+| `USE_GROUPED_RETRIEVAL_SELECTION` | `"0"` (ปิด) | `1`=merge selected cards เข้า products ที่ llm.answer (KB+main callsites) — **มีผลต่อคำตอบจริง** |
 | `USE_QA_KB` | unset | เปิด QA-pair RAG |
 | `CHATBOT_INTERNAL_SECRET` | — | คุม internal API ทั้งสองทิศ |
 | `ADMIN_HANDOFF_URL` | `http://127.0.0.1:3000/api/admin/conversations/bot-handoff` | handoff endpoint |
