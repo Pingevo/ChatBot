@@ -172,6 +172,34 @@ def test_selection_summary_explainable():
     assert target.request_id
 
 
+def test_multi_subtype_quota_one_subtype_cannot_eat_all():
+    # request เดียว subtypes={adapter,cable} — adapter score สูงกว่าเต็ม quota
+    # cable ต้องได้อย่างน้อย 1 ที่ (ลูกค้าถามทั้งคู่ — subtype เดียวกิน quota
+    # หมด = สายชาร์จที่ขายได้หายจาก context)
+    from shopeechat.retrieval_planner import RetrievalRequest
+    from shopeechat.retrieval_executor import (
+        RetrievalExecutionResult, SourceAttempt)
+
+    req = RetrievalRequest(
+        "req-0", "slot-charger", "slot",
+        frozenset({"charger"}), frozenset({"adapter", "cable"}),
+        (), None, "sellable_first", "none")
+    cards = [_adapter(name=f"adapter rank{i}", item_id=f"a{i}",
+                      unit_id=f"ua{i}", model_codes=())
+             for i in range(3)]
+    cards.append(_cable("สายชาร์จ B", "uc"))
+    res = RetrievalExecutionResult(
+        request_id="req-0", source="slot", slot_id="slot-charger",
+        subtypes=req.subtypes, model_codes=(),
+        eligible_candidates=tuple(cards),
+        source_attempts=(SourceAttempt("units", 4, 4, 0, 0, ("t",)),))
+    pool = build_candidate_pool((res,))
+    sel = select_for_llm_context(pool, (req,), None, per_request_limit=3)
+    subs = {s.card.get("charger_subtype") or s.card.get("cable_subtype")
+            for s in sel.selected}
+    assert "cable" in subs
+
+
 def test_no_v2_v3_caller():
     for mod in ("chatbotv2", "chatbotv3"):
         p = ROOT / "chatbot" / "shopeechat" / f"{mod}.py"

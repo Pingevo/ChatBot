@@ -220,6 +220,39 @@ def test_source_error_isolated_not_fatal():
                for r in results[1:])
 
 
+def test_multi_subtype_slot_fetch_not_narrowed_to_one_subtype():
+    # slot subtypes={adapter,cable} ("หัวชาร์จกับสายชาร์จ") — fetch ที่กรอง
+    # ตาม profile.subtype (เหมือน product_store._filter_charger_subtype)
+    # ต้องได้ candidate ทั้งสอง subtype — ห้าม collapse เหลือตัวเดียว
+    from shopeechat.retrieval_planner import RetrievalRequest
+    req = RetrievalRequest(
+        "req-0", "slot-charger", "slot",
+        frozenset({"charger"}), frozenset({"adapter", "cable"}),
+        (), None, "sellable_first", "none")
+
+    def subtype_filtered_fetcher(message, *, retrieval_profile=None, **kw):
+        # เลียน _filter_charger_subtype: subtype ตั้งไว้ → เหลือเฉพาะตัวนั้น
+        cards = [
+            _card("หัวชาร์จ A", "charger", charger_subtype="adapter",
+                  unit_id="ua"),
+            _card("สายชาร์จ B", "cable", charger_subtype="cable",
+                  unit_id="uc"),
+        ]
+        sub = retrieval_profile.subtype
+        if sub:
+            cards = [c for c in cards
+                     if (c.get("charger_subtype") or c.get("cable_subtype"))
+                     == sub]
+        return _res(cards)
+
+    results = execute_grouped_retrieval_requests(
+        (req,), message="หัวชาร์จกับสายชาร์จ", shop="s",
+        fetcher=subtype_filtered_fetcher, legacy_fetcher=None)
+    got = {c.get("charger_subtype") or c.get("cable_subtype")
+           for c in results[0].eligible_candidates}
+    assert {"adapter", "cable"} <= got
+
+
 def test_live_units_fetch_smoke():
     """integration — skip ถ้า Mongo/env ไม่พร้อม (read-only)"""
     try:

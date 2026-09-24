@@ -1512,3 +1512,28 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 3. ห้ามขยาย `handoffs.py`/`warranty_flow.py` helper — routing ใหม่ไปที่ Task 11 owner
 4. helper ใหม่ใน Phase 6 ต้องตอบ: ลบ duplicate อะไร / inline ไม่ได้เพราะอะไร
 5. port `_is_active_post_handoff` ไป v2 เมื่อ policy อนุญาตให้แตะ v2 (หรือบันทึกเป็น Task 11 item)
+
+---
+
+## Phase 6 — Selection Policy Owner Refinement (audit → 2 bugs → TDD fix)
+
+### Audit result (flow จริงที่ตรวจ)
+
+`app.py` flag `USE_GROUPED_RETRIEVAL_SELECTION` → `run_grouped_selection` (planner→executor→pool→selection) → `merge_selected_products` เข้า KB path (~2325) + main path (~4725) — boundary เดิม 2 จุด ไม่เพิ่ม · flag-off → `_grouped_sel=None` fallback path เดิมครบ · unavailable/hidden ไป `extra_context` เท่านั้น (ไม่ใช่ selected card) · rejected → summary counts · dedupe key = item_id→unit_id→model_id normalized · private evidence strip ที่ `_select_one`/pool `llm_ready` · web search merge เป็น boundary แยก — ไม่แตะ
+
+### Bugs found + fixed (TDD)
+
+| Bug | Root cause | Fix (owner) | RED→GREEN |
+|---|---|---|---|
+| multi-subtype slot (`หัวชาร์จกับสายชาร์จ` → subtypes={adapter,cable}) fetch เหลือ subtype เดียว — อีก subtype ไม่เคยเข้า pool | `_request_profile` ส่ง subtype เดียว → `product_store._filter_charger_subtype` hard-cut + units `ptypes` narrowing | `retrieval_executor._request_profile`: multi-subtype → `subtype=None` + expand `product_types` ตาม `_SUBTYPE_TO_TYPES` ทุก subtype | `test_multi_subtype_slot_fetch_not_narrowed_to_one_subtype` |
+| request เดียวหลาย subtype — subtype score สูงกิน `per_request_limit` หมด → subtype ที่ถาม (ขายได้) หายจาก LLM context | `select_for_llm_context` pick `ranked[:quota]` ไม่เช็ก coverage | `retrieval_selection`: subtype coverage — ทุก subtype ที่ถาม+มี candidate ได้ ≥1 ที่ (swap tail ที่ไม่ใช่ representative เดียว) | `test_multi_subtype_quota_one_subtype_cannot_eat_all` |
+
+### Verify: focused 8 ไฟล์ 92 pass (รวม 2 test ใหม่ + slots/requests regression) · py_compile OK · diff --check OK · hardcode scan clean
+
+### Audit answers ที่เหลือ (ไม่มี bug)
+- unavailable/UNLIST = evidence เท่านั้น ไม่ recommend (pin โดย 5C tests) · exact/anchor preserve (code-hit + subject role) · cross-request dedupe ที่ merge boundary (5E) · spec constraints (display/2m/speed) มีผล ranking จริง (`test_constraint_ranking_display_length_speed`)
+- lower-ranked sellable หลุดเพราะ quota = by design ยกเว้น subtype coverage ที่แก้แล้ว
+
+### Residual risk
+- `per_request_limit=3` ยังตัดสินค้าขายได้ rank ต่ำใน subtype เดียวกัน — trade-off context size เดิม
+- coverage swap เลือกตาม subtype field ใน card — card ไม่มี subtype field ไม่ถือเป็น representative (conservative)

@@ -144,7 +144,37 @@ def select_for_llm_context(
         ranked = sorted(
             (_select_one(c, req, text_cache) for c in cands),
             key=lambda s: (len(s.constraint_hits), s.score), reverse=True)
-        picked = tuple(ranked[:per_request_limit])
+        picked = list(ranked[:per_request_limit])
+        if len(req.subtypes) > 1:
+            # coverage: subtype ที่ถามและมี candidate ต้องได้ ≥1 ที่ —
+            # subtype เดียวห้ามกิน quota ทั้ง request
+            present: set[str] = set()
+            protected: set[int] = set()
+            for i, s in enumerate(picked):
+                sub = (s.card.get("charger_subtype")
+                       or s.card.get("cable_subtype"))
+                if sub in req.subtypes and sub not in present:
+                    present.add(sub)
+                    protected.add(i)
+            for sub in req.subtypes:
+                if sub in present:
+                    continue
+                alt = next((s for s in ranked
+                            if (s.card.get("charger_subtype")
+                                or s.card.get("cable_subtype")) == sub), None)
+                if alt is None:
+                    continue
+                if len(picked) < per_request_limit:
+                    picked.append(alt)
+                else:
+                    evict = next((i for i in range(len(picked) - 1, -1, -1)
+                                  if i not in protected), None)
+                    if evict is None:
+                        break
+                    picked[evict] = alt
+                    protected.add(evict)
+                present.add(sub)
+        picked = tuple(picked)
         selected.extend(picked)
         by_req.append((req.request_id, picked))
         trace.append(f"{req.request_id}: elig={len(cands)} "
