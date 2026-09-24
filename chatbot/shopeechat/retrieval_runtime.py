@@ -28,17 +28,48 @@ def _item_id(card: dict) -> str | None:
     return _norm_id(v) if v is not None else None
 
 
+def _identity_keys(card: dict) -> list[str]:
+    """dedupe keys ของ card — item_id → unit_id → model_id (canonical เหมือน
+    candidate_pool._norm_id); ไม่มี identity เลย → [] (dedupe ไม่ได้ เก็บหมด)"""
+    from .retrieval_policy import _norm_id
+
+    def _key(prefix, v):
+        # "" / whitespace / None → ไม่ใช่ identity จริง — ไม่สร้าง key
+        if v is None:
+            return None
+        nv = _norm_id(v)
+        return f"{prefix}:{nv}" if nv and nv.strip() else None
+
+    return [k for k in (
+        _key("i", card.get("item_id")),
+        _key("u", card.get("unit_id")),
+        _key("m", card.get("model_id")),
+    ) if k]
+
+
 def merge_selected_products(
     selected_cards: list[dict],
     base_products: list[dict] | None,
     limit: int,
 ) -> list[dict]:
-    """selected มาก่อน + base ที่ไม่ซ้ำ item_id — dedupe (selected ชนะ) + cap"""
-    sel_ids = {_item_id(c) for c in selected_cards} - {None}
-    merged = list(selected_cards)
-    for p in base_products or []:
-        if _item_id(p) in sel_ids:
+    """selected มาก่อน + base ที่ไม่ซ้ำ identity — dedupe (selected ตัวแรกชนะ) + cap.
+
+    selected ซ้ำกันเองก็ถูกคัด (card เดียวกัน eligible ใต้หลาย request →
+    select_for_llm_context extend ต่อ request อาจซ้ำ) — ไม่งั้น LLM เห็นซ้ำ
+    """
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for c in selected_cards or []:
+        keys = _identity_keys(c)
+        if keys and any(k in seen for k in keys):
             continue
+        seen.update(keys)
+        merged.append(c)
+    for p in base_products or []:
+        keys = _identity_keys(p)
+        if keys and any(k in seen for k in keys):
+            continue
+        seen.update(keys)
         merged.append(p)
     return merged[:limit]
 

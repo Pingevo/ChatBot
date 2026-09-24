@@ -1358,3 +1358,15 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - profile types=∅ เมื่อ message ขึ้น code ล้วน+device kw ("WPB100L ใช้กับมือถือ") → eff_types ว่าง → type check ผ่านหมด (wide net — code-match rank นำอยู่แล้ว; compat typing คือ scope Task 9/10)
 
 **tests:** +5 pinning (`test_candidate_pool_sources_5d.py` — dedupe cross-source, query_hint routing, per-request quota isolation, all-dead evidence preserved, anchor tag limitation) · verify: focused suite 77 pass · py_compile OK · diff --check OK · **ไม่มี runtime diff**
+
+### 🔧 Task 5E: Selection Dedup + Runtime Guard Audit (2026-09-24) — fix แล้ว (ยังไม่ commit)
+
+- **เป้า:** พิสูจน์ risk "selected card ซ้ำข้าม request เข้า LLM" ก่อนเปิด flag กว้าง
+- **root cause (พิสูจน์ด้วย failing test):** `candidate_pool` dedupe เฉพาะภายใน request (merged per-res) → `select_for_llm_context` `selected.extend(picked)` ต่อ request ไม่ dedupe ข้าม → `merge_selected_products` เดิม `merged = list(selected_cards)` ไม่ dedupe ตัวเองเลย → card เดียวกัน eligible ใต้ 2 requests → **ซ้ำเข้า LLM context ได้จริง**
+- **fix (root cause, generic):** `retrieval_runtime.merge_selected_products` + helper `_identity_keys(card)` — canonical identity `item_id`→`unit_id`→`model_id` (`_norm_id` เหมือน candidate_pool) — selected dedupe กันเอง first-wins, base ที่ชน identity ใดๆ ถูกตัด; card ไม่มี identity → เก็บหมด (dedupe ไม่ได้)
+- **ไม่เปลี่ยน:** selection ranking, prompt, planning — ไม่มี hardcode รุ่น/สินค้า/ร้าน
+- **private evidence:** ปลอดภัยอยู่แล้ว — `strip_private_evidence` ที่ selection layer ×3 + pin test `assert "_evidence"/"_selection_reason" not in p`
+- **flag flow:** `_grouped_sel` set เฉพาะ flag-on (app.py ~1868); error→None, empty (ไม่มี selected+hidden)→None; merge `if _grouped_sel:` ที่ 2 callsites (~2315 KB, ~4713 main) — **flag off = products เดิม 100%, error/empty = base fallback**
+- **tests:** +2 regression (`merge_dedupes_selected_among_themselves` — int/"123.0" float-str ซ้ำ+first wins+base dup ตัด, `merge_dedupes_selected_unit_model_fallback` — unit_id/model_id fallback) — RED→GREEN ยืนยัน
+- **verify:** focused suite 65 pass · py_compile 5 ไฟล์ OK · diff --check OK
+- **final hardening (review edge):** `_identity_keys` เดิม `""`→key `i:` → card ไม่มี identity ชนกันเองผิด — fix ให้ blank/whitespace normalize แล้วไม่สร้าง key (+test `test_merge_does_not_dedupe_blank_identity_fields` RED→GREEN)
