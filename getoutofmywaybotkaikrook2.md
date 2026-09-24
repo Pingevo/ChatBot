@@ -20,6 +20,26 @@
 
 ## กำลังทำ (active)
 
+### ✅ อัปเดต master retrieval plan หลัง 5F — reality/deviation/complexity gate (2026-09-24) — docs-only
+
+- **เหตุผล:** user ชี้ถูกว่าแผนเดิม drift จาก implementation จริงและ helper เริ่ม implicit/nested มากขึ้น โดยเฉพาะ grouped retrieval prototype + 5F routing hotfix ที่อยู่นอกแผน retrieval เดิม
+- **แก้ไฟล์:** `docs/plans/2026-09-21-legacy-shopee-evidence-retrieval-implementation-plan.md` เท่านั้น
+- **เพิ่ม:** Current Implementation Reality Check, Deviation Audit, Complexity Gate, Task 5F Pre-Retrieval Safety Hotfix Gate, และ Task 13 simplification/owner-map gate
+- **สรุป:** 5F เป็น legacy hotfix ที่ commit ได้เพื่อกัน production bug แต่ไม่ใช่ root architecture; Task 11 ยังต้องทำ message/action route owner; Task 13 กลายเป็น mandatory cleanup ก่อน release
+- **verify:** `git diff --check` ผ่าน · ไม่มี runtime code change
+
+### 🧪 เทส anger/human-request regression set จาก user (2026-09-24) — test-only ยังไม่แก้โค้ด
+
+- **งาน:** รันเคสใน `~/Downloads/test_anger_detection_regression.py` (issue #26, ข้อความ shopee จริง 90 วัน + QA รอบ 5) กับ logic จริงใน `handoffs.py` — ไฟล์ที่ user ส่ง embed logic **เก่า** (flat substring "กาก") ในตัว ไม่ตรงกับโค้ดปัจจุบันที่มี `_toxic_token_present` (5F-A) แล้ว → ต้องรันเคสเดียวกันกับ `detect_human_request` จริง
+- **วิธี:** runner ชั่วคราว import case lists จากไฟล์ user + เรียก `detect_human_request` ตรงๆ (conversation_id=None) — read-only ไม่แตะ prod
+- **ผล (2026-09-24):** embedded stale copy 11/32 · **โค้ดจริง 21/32** — MUST_ESCALATE 9/9 ผ่าน, substring กาก 10/10 ผ่าน (5F-A ทำงาน) · ล้มเหลว 11 เคสล้วน FP:
+  - อาการสินค้า 8: `ช้ามาก/ช้าจัง` ในบริบทชาร์จ (3), `ไม่มีการตอบ` ⊂ "ไม่มีการตอบสนอง" ปุ่ม/เครื่อง (2), `นานมาก` วัดระยะเวลาสินค้า (3)
+  - greeting ร้าน 1: "ตอบช้าหน่อย" ใน auto-greeting ที่ถูกเก็บเป็น inbound
+  - affiliate spam 1: "เฮ้ย" strong marker ใน "เฮ้ย <shopname>!รับคอมมิชชั่น..."
+  - คำถาม+vocative 1: "รอนานไหมครับแอด" — QGUARD ไม่รับ "แอด" ท้ายประโยค + bare-แอด rule (≤15 ตัวอักษร) ยิง human_request
+- **root cause รวม:** mild markers วัด "ความช้า/ไม่ตอบ" แบบไม่แยกบริบท — ของบริการร้าน (ตอบแชท/ส่งของ) vs อาการสินค้า (ชาร์จช้า/ปุ่มไม่ตอบสนอง/หมุนนาน)
+- **สถานะ:** แก้แล้วใน Task 5F-R (Message Routing Before Retrieval) — ดู entry ท้ายไฟล์; probe battery 32/32 PASS
+
 ### 🔍 Audit live chat failures จาก transcript KingGadgets (2026-09-24) — audit-only ห้ามแก้โค้ด
 
 - **เคส:** (A) Q6 AC65B เทียบ AC65B2 → บอทบอกไม่พร้อมจำหน่าย (listing SELLER_DELETE/UNLIST แต่ variant ปน AD653C/AD652S sellable) · (B) Q15/Q17/Q18 WPB100L — Q15 บอกใช้ได้+ลิงก์, Q17 บอกไม่พร้อมจำหน่าย, Q18 ลิงก์หลุดเป็น AD653C/AD653T/AD1003T (listing UNLIST แต่ sellable_units บาง variant sellable=True) · (C) Q10 "รุ่นไหนมี มอก. บ้าง" → ตอบกว้างทั้งร้าน ไม่ filter subtype/context ไม่บอก availability
@@ -1370,3 +1390,77 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **tests:** +2 regression (`merge_dedupes_selected_among_themselves` — int/"123.0" float-str ซ้ำ+first wins+base dup ตัด, `merge_dedupes_selected_unit_model_fallback` — unit_id/model_id fallback) — RED→GREEN ยืนยัน
 - **verify:** focused suite 65 pass · py_compile 5 ไฟล์ OK · diff --check OK
 - **final hardening (review edge):** `_identity_keys` เดิม `""`→key `i:` → card ไม่มี identity ชนกันเองผิด — fix ให้ blank/whitespace normalize แล้วไม่สร้าง key (+test `test_merge_does_not_dedupe_blank_identity_fields` RED→GREEN)
+
+### 🔧 กำลังจะทำ — Phase 5F: Issue Root-Cause Remediation + Token Audit (2026-09-24)
+
+- **เป้า:** แก้ issues #26-#30 + token audit แบบ root-cause (ห้ามเชื่อ issue summary ตรงๆ — trace flow+test ก่อนแตะ)
+- **scope:** 5F-A handoff anger substring FP · 5F-B claim/warranty state · 5F-C availability/link anchor · 5F-D spec grounding · 5F-E token/web_search audit · 5F-F misc QA
+- **กฎ:** failing test ก่อนแก้ทุกจุด · ไม่ commit จนรายงาน+approve · ไม่ hardcode รุ่น/ร้าน/keyword
+
+#### 5F-A ✅ — anger substring FP → `_toxic_token_present` (verify ผ่าน, ยังไม่ commit)
+- **root cause:** `"กาก" in _msg_low` substring → "นาฬิกากันน้ำ" มี "กาก" (ท้ายคำ+ต้นคำถัดไป) → FP handoff; strong anger ข้าม question guard
+- **fix:** module helper `_toxic_token_present` — short toxic token ต้อง standalone: หลัง token เป็นสระ/วรรณยุกต์→reject; ตัวอักษรไทยติด→นับเฉพาะ intensifier (กากมาก/ห่วยแย่); prev จบสระ→strict กว่า (หน้ากาก=product type จริงของร้าน); generic ไม่ hardcode "นาฬิกา"
+- **tests:** `test_issue_5f_handoff.py` 11 pass (นาฬิกากันน้ำ/นาฬิกากับมือถือ ไม่ handoff · กากมาก/ห่วยมาก/ผิดหวังมาก handoff · ส่งช้ามากไหม ไม่ handoff)
+- **tradeoff (documented):** "สินค้ากากครับ" → ไม่ handoff (polite particle ท้าย) — soft complaint ปลอดภัยกว่า FP
+
+#### 5F-B ✅ — claim flow: name/phone hygiene + handoff no-refire (verify ผ่าน)
+- **bugs จริง 3 จุด (จาก failing tests ไม่ใช่ guess):**
+  1. `_extract_name_ner` เก็บ glued particle/honorific/field label → "สมชายนะคะ"/"คุณสมชาย"/"เลขคำสั่งซื้อ" เป็นชื่อ — fix strip ท้ายคำ+คำนำหน้า+reject labels (generic)
+  2. `_PHONE_PATTERN` collapse spaces → "0812345678 2508088B5T4W1D" (phone ติด order) phone หาย — fix pattern บน text จริง + masking
+  3. anger/human-request ยิง `_send_handoff` ซ้ำทุกข้อความระหว่าง ticket handoff แล้ว — fix `ticket_state=="handoff"` → None (post-handoff lock ตอบแทนอยู่แล้ว)
+- **tests:** `test_issue_5f_claim_flow.py` 22 pass + phone/date regression 11 pass
+
+#### 5F-C ✅ — availability audit (owner ถูกแล้ว · pin tests)
+- **audit result:** `resolve_availability` = owner เดียว ใช้ครบทุก callsite (app mark `_available_for_sale` ทุก card · UNLIST note เข้า context · link follow-up ตัด short_link+ไม่ silent swap · cert label ผ่าน resolver)
+- **contract pin:** `test_issue_5f_availability_anchor.py` 5 pass — UNLIST+stock>0→hidden ไม่ขาย · SELLER_DELETE/BANNED→historical answerable (ตอบ spec ได้ ห้ามขาย) · NORMAL stock0→oos visible · stock>0→sellable
+- **ไม่มี runtime diff** — resolver contract เดิมครอบ semantics ครบ (ตัวเลข 0=known fact, missing=unknown)
+
+#### 5F-D ✅ — spec grounding: prompt placeholders + spec_claim guard (verify ผ่าน)
+- **root cause 2 ชั้น:** ① SYSTEM_INSTRUCTION/KB_SYSTEM_INSTRUCTION ตัวอย่างมี literal จริง (5200mAh/IP68/iOS 13/22มม./6.7นิ้ว/5W/12W + ชื่อรุ่นจริง CUKTECH/Lagenio/EC4/SC230/BioKoop) → LLM ยืมไปตอบ ② guards มี model_claim แต่ไม่เช็กเลข+หน่วย
+- **fix ①:** ตัวอย่างทั้งหมด → placeholder `<…จาก context>` (เก็บ domain-knowledge numbers ใน reasoning guidance ที่สั่งห้ามตอบจากความรู้อยู่แล้ว)
+- **fix ②:** `guards.enforce` + `_SPEC_CLAIM_RE` — เลข+หน่วย (mAh/W/V/A/Hz/GB/MP/ATM/dB/nit/นิ้ว/มม/ซม/เมตร/กรัม/ชั่วโมง/นาที/วัน/เดือน/ปี/ครั้ง/เท่า/พอร์ต) + IPxx + protocol ver (PD/QC/USB/BT/WiFi/Bluetooth/Qi) + bare UFCS/PPS/GaN/Qi ต้องอยู่ใน context pool (strip-space+lower) — negation นำหน้าข้าม, loop ≤4, หลัง model_claim
+- **tests:** `test_issue_5f_spec_grounding.py` 26 pass (prompt hygiene pin + ungrounded→rewrite + grounded/negated/plain/handoff ผ่าน)
+
+#### 5F-E ✅ — token accounting + web_search gate (verify ผ่าน)
+- **audit: ไม่มี double-count** — `resp.usage` = billable total เดียว, `steps` = debug breakdown; UI (`bot_tokens.total`, TestChatClient) + DB (`bot_tokens`) + replay ใช้ usage ตรง ไม่บวก steps ซ้ำ
+- **bug จริง — KB branch undercount:** `usage_info = _ws_r["usage"]` ทับ LLM1 ทิ้ง + `cost` ไม่รวม `_ws_cost` (product branch ถูก: `_combined_usage`+`cost+_ws_cost`) — fix `_sum_usage` helper ใช้ทั้ง 2 branch + KB cost เพิ่ม `_ws_cost`
+- **contract pin:** `reanswer().usage` = LLM2 เท่านั้น; search-call tokens (OpenRouter) อยู่ steps+cost_usd — ด้วย design (ต่าง provider)
+- **web_search gate bug:** `pass1_low_confidence` ยิงแม้มี products+คำตอบมั่นใจ — fix ยิงเฉพาะไม่มี products (negative answer → rule 5 จัดการเหมือนเดิม)
+- **tests:** `test_issue_5f_token_accounting.py` — accounting contract + gating
+
+#### 5F-F ✅ — misc QA audit (ส่วนใหญ่ fixed/deliberate อยู่แล้ว + 1 gate)
+- **abubu:** fixed แล้ว — `bot_name` จาก persona doc fallback "ทางร้าน" (app.py ~770)
+- **separator `||`/`|||`:** fixed แล้ว — `_strip_kb_markup` normalize pipe≥2→` ||| ` (issue #19)
+- **language mirror:** deliberate policy — ตอบไทยเสมอ, explicit lang request → English instruction (`_lang_instruction` + `_LANG_REQUEST_RE` หลายภาษา)
+- **multi-intent:** grouped retrieval ครอบแล้ว (5B-D — multi-type request slots + per-request quota)
+- **sticker/noise → search:** bug จริง — placeholder-only message (`[สติกเกอร์]`/ว่าง) low conf+no products → search ยิง — fix gate ใน `should_use_web_search` (bracket-tag-l้วน/ว่าง → skip, class เดียวกับ greeting)
+- **deferred (next phase — ต้อง product decision):** sticker/noise ยังผ่าน intent+LLM (2 calls ~ต้นทุนน้อย) — canned reply/เงียบต้องเลือก policy ก่อน
+
+### Phase 5F-Hardening Gate — reviewer blocking fixes (กำลังทำ — ยังไม่ commit)
+- **ทำไม:** reviewer probe เจอ 4 ช่องโหว่จริงในงาน 5F → ต้อง harden ก่อน commit 5F
+- **H1:** `_TOXIC_FOLLOW_STRONG` มีคำทั่วไป (อะไร/แล้ว/ละ/อีก) → `หน้ากากอะไร` FP เป็น toxic — แก้ด้วย pythainlp tokenize (มีใน env, warranty.py ใช้อยู่แล้ว) + strict fallback
+- **H2:** `spec_claim` ใช้ `_context_pool` (รวม message+history) → "รองรับ 65W ไหม" ground "รองรับ 65W" เอง — แยก `_evidence_pool` (cards+grounding เท่านั้น)
+- **H3:** prompt ยังเหลือเลข spec จริงใน reasoning guidance (45W, 65W/100W/140W, 20W/30W) → genericize
+- **H4:** `ticket_state in ("handoff","open")` ยังพึ่ง history marker → ยึด state เป็น source of truth
+- **H5:** เพิ่ม e2e pin — hidden-only selection note / UNLIST ไม่เสนอขาย / link follow-up ไม่ silent swap / SELLER_DELETE answerable-not-sellable
+- **กฎ:** failing test ก่อนแก้ทุกจุด · ไม่ hardcode คำ/รุ่น/ร้าน · ไม่ commit จน reviewer approve
+
+#### 5F-Hardening Gate ✅ — reviewer blocking fixes (verify ผ่าน, ยังไม่ commit)
+- **H1 anger matcher root fix:** `_TOXIC_FOLLOW_STRONG` มีคำทั่วไป (อะไร/แล้ว/ละ/อีก/ดิ/สิ) → "หน้ากากอะไร" FP — **fix:** pythainlp `word_tokenize` เป็น primary (token "กาก" ต้องเป็นคำแยกจริง — "หน้ากาก"=1 token, "สินค้ากาก"→["สินค้า","กาก"]); fallback = strict boundary + subject-prefix (ของ/สินค้า/ร้าน/บริการ…) + intensifier จริงเท่านั้น; lazy-load `_get_word_tokenizer` (pattern warranty._get_ner); bonus: "กากครับ"/"นาฬิกากาก" จับได้แล้ว
+- **H2 spec evidence pool:** `spec_claim` เดิมใช้ `_context_pool` (รวม req.message+history) → "รองรับ 65W ไหม" ground ตัวเอง — **fix:** แยก `_identity_pool` (model_claim ใช้ message/history ได้) vs `_evidence_pool` (cards+grounding เท่านั้น); ลบ test เก่าที่ pin พฤติกรรมบอค
+- **H3 prompt literals:** reasoning guidance เหลือ 45W, 65W/100W/140W, 20W/30W, Samsung S23-25, iPhone 15/14 → genericize ทั้งหมด ("วัตต์สูง/ต่ำ", "รุ่นใหม่/เก่า")
+- **H4 ticket_state = truth:** `handle_warranty_flow_legacy` — เพิ่ม `_is_active_post_handoff` (handoff/open/pending→lock, closed/resolved/bot→ไม่, None→marker fallback) + `_post_handoff_gate` (extract จาก inline — info/product-q/exception ปล่อยผ่านเหมือนเดิม); lock ทำงานแม้ history ว่าง; `detect_human_request` no-refire ขยายเป็น open/pending; **v2 `handle_warranty_flow` ไม่แตะ** (out of scope)
+- **H5 e2e pins:** hidden-only selection→hidden_mentions (ไม่มี card เข้า LLM) · UNLIST+stock>0 reject ทุก mode · link follow-up SELLER_DELETE→ลิงก์อยู่+note+ทดแทน tag · UNLIST anchor→ลิงก์ถูกตัดแต่เก็บผ่าน note
+- **verify:** focused 95 pass + broad 14-file 158 pass · py_compile OK · diff --check OK · probes ตรง expected ทุกเคส
+
+### Task 5F-R: Message Routing Before Retrieval ✅ (verify ผ่าน, ยังไม่ commit)
+- **ทำไม:** probe battery (ข้อความ shopee จริง) เจอ mild-anger/human-request ยิงบนอาการสินค้า+คำถาม+noise — ด่านแรกพังก่อน retrieval ทำงาน
+- **root cause:** mild markers ("ช้ามาก/นานมาก/ไม่มีการตอบ") + bare-"แอด" rule เป็น flat substring — ไม่แยก subject (บริการร้าน vs อาการสินค้า vs กริยาเวลา vs greeting/spam)
+- **fix (`handoffs.py` — semantic groups + span masking, ไม่มี exception รายคำ):**
+  - `_term_spans`/`_overlaps`: marker/kw ที่ทับ product span ไม่นับ ("ไม่มีการตอบ|สนอง", "ทำไมไม่ตอบ|สนอง")
+  - `_mild_anger_fires`: mild fires iff มี service context (รอ/ตอบ/ส่ง/ทัก/ร้าน/พัสดุ…) นอก marker+product span — หรือไม่มี product/history context เลย (bare "ช้ามาก" ยังยิง)
+  - `_is_question_message`: QGUARD ตรวจหลังตัด vocative tail (ครับ/ค่ะ/แอด/นะ) → "รอนานไหมครับแอด" = คำถาม + bare-แอด rule ยกเว้นคำถาม
+  - `_SHOP_SCRIPT_TERMS` (ยินดีต้อนรับ/ตอบช้าหน่อย) → suppress mild; `_PROMO_TERMS` (คอมมิชชั่น/affiliate) → suppress anger ทั้งหมด
+- **ผลกระทบเคสอื่น:** service complaint ปน product noun ยังยิง ("สั่งสายชาร์จแล้วร้านส่งช้ามาก"→fire); claim intent ("ชาร์จช้ามากขอเคลม") ไหลต่อไป warranty_flow ไม่โดน anger กลืน; strong anger ไม่แตะ (ยกเว้น promo)
+- **verify:** ไฟล์ใหม่ `docs/test/test_anger_detection_regression.py` 39 เคส (11 escalate + 10 product + 14 neutral + 2 noise + claim/service mix) + probe 32/32 + focused 10 ไฟล์ 139 pass · py_compile OK · diff --check OK · hardcode scan clean
+- **ยังไม่ครอบ:** v2 `detect_human_request` (SRS 6.x ตาราง chat_v3 — แยก implementation, out of scope)

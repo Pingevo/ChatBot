@@ -74,6 +74,53 @@ These facts shape the plan and must be rechecked if the data is rebuilt. Counts 
 | `unit_embeddings.npz` | 27,807 rows | Unit semantic search |
 | `qa_embeddings.npz` | 392 rows | QA semantic search |
 
+## Current Implementation Reality Check
+
+This section records what actually happened during implementation so future workers do not follow the original sketch blindly.
+
+| Area | Current state | Plan fit | Action |
+|---|---|---|---|
+| Task 1-4G request facts | Implemented in phases: gold gate, availability owner, evidence contract, `RetrievalProfile`, profile wiring, profile hints, slots, device aliases, relation parser | Mostly on-plan, with extra hardening rounds for provenance/alias/relation ambiguity | Keep. Do not reintroduce local route parsers in `app.py` or source modules |
+| Task 5A-5B grouped retrieval | Implemented as observe/prototype modules: `retrieval_planner.py`, `retrieval_executor.py`, `candidate_pool.py`, `retrieval_selection.py`, `retrieval_runtime.py`, `retrieval_shadow.py` | Drifted from the original "Task 5/5A" labels; still consistent with evidence-first architecture | Treat these as the current source-union/selection prototype. Task 13 must decide what remains and what is deleted |
+| Runtime selection flag | `USE_GROUPED_RETRIEVAL_SELECTION` can route selected pool into LLM behind runtime config | Ahead of the original observe-only wording | Keep gated. Do not default-on without replay gate |
+| Task 5C-5E safety fixes | Availability/anchor/spec/link/dedup hotfixes added before Task 6 | Necessary because replay found production bugs | Keep tests; document as safety gate, not final architecture |
+| Task 5F routing/handoff hotfix | Added pre-retrieval message-category helpers in `handoffs.py` to stop anger/handoff false positives | Intentionally out of original retrieval scope; necessary to stop early-return bugs before retrieval can run | Keep as legacy hotfix only. Root architecture still belongs to Task 11/11B |
+| Task 6-10 | Not fully executed as originally written | Partly superseded by grouped selection prototype and 5F safety fixes | Replan before implementing; do not stack more helpers without a deletion plan |
+| Task 11/11A/11B | Not executed as architecture work | Hotfixes touched adjacent behavior but did not create a route owner | Must still create a real message/action routing owner or explicitly reject that architecture |
+| Task 13 | Not done | More important than originally planned because helper count grew | Must be a mandatory simplification gate before release, not optional cleanup |
+
+### Deviation Audit
+
+The implementation did **not** stay as "one new runtime module first." It created several focused modules because the work split into request facts, grouped requests, execution, pooling, selection, runtime merge, shadow reporting, and runtime config. That is acceptable only if Task 13 removes duplicate legacy paths and confirms each module has one caller/owner reason.
+
+The biggest deviation is Task 5F: routing/handoff hardening was added because early handoff runs before retrieval. This is a valid production hotfix, but it is not the final root architecture. It must not be used as proof that handoff/workflow is solved. Task 11 remains responsible for a single message/action route owner.
+
+The current risk is code becoming "implicit helper soup": many small helpers encode decision rules without a single visible flow. From this point forward, new helpers are allowed only when they replace duplicated logic or make an existing owner clearer. Otherwise, prefer deleting or moving rules into the owner already named by this plan.
+
+### Complexity Gate From This Point On
+
+Every remaining phase must include a short complexity review before commit:
+
+```bash
+git diff --stat
+rg -n "def _|class |TODO|FIXME|HACK|Phase|Task" chatbot/shopeechat docs/test
+wc -l chatbot/shopeechat/app.py chatbot/shopeechat/handoffs.py chatbot/shopeechat/route_context.py chatbot/shopeechat/retrieval_policy.py chatbot/shopeechat/retrieval_runtime.py
+```
+
+Commit is blocked when:
+- a new helper only wraps one line or one caller without reducing duplication;
+- a keyword table is added without an owner and negative tests;
+- `app.py` grows for orchestration that can live in an existing owner;
+- `handoffs.py` gains more routing categories instead of Task 11 route ownership;
+- a test passes only because of product/model/shop-specific text;
+- a temporary flag or compatibility shim is added without a deletion task in Task 13.
+
+Commit may proceed when:
+- the changed helper has a named owner in this plan and SRS;
+- tests include both positive and negative examples;
+- public behavior is gated or replay-verified;
+- the diff deletes or replaces at least one older duplicated path, or logs why deletion must wait.
+
 ## Target Runtime Flow
 
 The final shape after this plan should be:
@@ -131,6 +178,20 @@ handoffs.py / workflow trigger layer
 ```
 
 `retrieval_policy.py` must not become a second `app.py`. Route facts stay in `route_context.py`, source evidence annotations stay in source modules, and sensitive handoff decisions stay in deterministic flows plus `guards.enforce()`.
+
+After Task 11, the target flow must be more explicit than the current hotfix:
+
+```text
+message
+  -> message/action route owner
+       message_role: product_issue | service_complaint | human_request |
+                     neutral_question | spam_like | claim_info |
+                     sales_question | workflow_trigger
+       action_gate: bot_allowed | human_owned | workflow_action | handoff_required
+  -> handoff/workflow/warranty/retrieval use the same route facts
+```
+
+Until that owner exists, `handoffs.py` message-category helpers are a stopgap and must not expand into a second route engine.
 
 ## File Structure
 
@@ -1844,6 +1905,126 @@ Expected: correct candidates are present before final selection, pool size remai
 
 ---
 
+## Task 5F: Pre-Retrieval Safety Hotfix Gate
+
+**Status:** Implemented as a production-safety gate after replay/issue review. It was not part of the original retrieval-only sequence, but it was required because these bugs run before retrieval and can prevent every retrieval improvement from executing.
+
+**Purpose:** Stop sensitive or wrong early returns before retrieval:
+- product issue or claim symptom must not become anger handoff;
+- neutral question must not become human request because it says "แอด" as a vocative;
+- shop greeting or affiliate spam must not become customer frustration;
+- ungrounded spec/warranty/compat claims must be rewritten before response;
+- active handoff must not be re-fired or answered over by the bot;
+- unavailable/unlisted anchor and link follow-up must not silently swap products.
+
+**Files touched in the implemented hotfix:**
+- `chatbot/shopeechat/handoffs.py`
+- `chatbot/shopeechat/warranty_flow.py`
+- `chatbot/shopeechat/guards.py`
+- `chatbot/shopeechat/llm.py`
+- `chatbot/shopeechat/warranty.py`
+- `chatbot/shopeechat/app.py`
+- `chatbot/shopeechat/web_search.py`
+- `docs/test/test_anger_detection_regression.py`
+- `docs/test/test_issue_5f_handoff.py`
+- `docs/test/test_issue_5f_claim_flow.py`
+- `docs/test/test_issue_5f_spec_grounding.py`
+- `docs/test/test_issue_5f_availability_anchor.py`
+- `docs/test/test_issue_5f_token_accounting.py`
+- `docs/SRS_SSD.md`
+- `getoutofmywaybotkaikrook2.md`
+
+**What this task is allowed to be:** a bounded legacy hotfix that protects the customer-visible bot while retrieval work continues.
+
+**What this task is not allowed to become:** the final message-routing architecture. Do not keep adding categories to `handoffs.py` indefinitely. New routing categories after this task require Task 11 message/action route ownership.
+
+### Task 5F-A: Handoff And Anger Regression
+
+Required tests:
+
+```bash
+.venv/bin/python -m pytest docs/test/test_anger_detection_regression.py docs/test/test_issue_5f_handoff.py -q
+```
+
+Regression requirements:
+- `ชาร์จช้ามากขอเคลม`, `ไม่มีการตอบสนอง`, `หมุนนานมาก` -> no pre-intent anger handoff.
+- `รอนานไหมครับแอด` -> no human request.
+- shop greeting with `ตอบช้าหน่อย` -> no anger handoff.
+- affiliate/promo with `เฮ้ย` -> no anger handoff.
+- `บริการแย่มาก`, `ไม่มีใครตอบ`, `ระบบกาก` -> still handoff.
+
+Implementation rule:
+- Generic message-category helpers are acceptable only as a hotfix.
+- No product-specific exceptions such as "นาฬิกา", "หน้ากาก", "imilab", or model/shop names in runtime logic.
+- Every keyword group must have negative tests proving it does not catch a nearby but different concept.
+
+### Task 5F-B: Claim/Post-Handoff State Safety
+
+Required tests:
+
+```bash
+.venv/bin/python -m pytest docs/test/test_issue_5f_claim_flow.py -q
+```
+
+Regression requirements:
+- `ticket_state in ("handoff", "open", "pending")` prevents duplicate handoff firing.
+- active handoff lock works even when history is empty or missing a marker.
+- claim data sent after handoff can still be accepted.
+- `closed`, `resolved`, and `bot` do not keep stale handoff lock.
+
+Implementation rule:
+- `ticket_state` is source of truth for active handoff in legacy Shopee.
+- Do not make "old history text says handoff" stronger than a closed/resolved ticket.
+
+### Task 5F-C: Grounding And Prompt Hygiene
+
+Required tests:
+
+```bash
+.venv/bin/python -m pytest docs/test/test_issue_5f_spec_grounding.py docs/test/test_guards.py -q
+```
+
+Regression requirements:
+- Customer question/history must not ground a spec claim.
+- Product cards and explicit grounding text may ground a spec claim.
+- Prompt examples must not contain reusable real product names or specific spec literals that LLM can borrow.
+
+Implementation rule:
+- `guards.py` may rewrite unsafe output, but it must not invent a handoff.
+- This is an output boundary, not a substitute for retrieval evidence.
+
+### Task 5F-D: Availability/Anchor/Link Safety
+
+Required tests:
+
+```bash
+.venv/bin/python -m pytest docs/test/test_issue_5f_availability_anchor.py docs/test/test_link_followup_5c.py -q
+```
+
+Regression requirements:
+- `UNLIST` with stock is hidden for shopping recommendations.
+- unavailable anchor link follow-up must not silently swap to another product.
+- if an unavailable anchor is mentioned, answer must say unavailable and recommend alternatives explicitly.
+
+Implementation rule:
+- `UNLIST` means not customer-buyable. It may be internal catalog evidence only if another status/source makes it answerable for history/spec; it must not be recommended as sellable.
+
+### Task 5F Exit Gate
+
+Before commit:
+
+```bash
+.venv/bin/python -m pytest docs/test/test_anger_detection_regression.py docs/test/test_issue_5f_handoff.py docs/test/test_issue_5f_claim_flow.py docs/test/test_issue_5f_spec_grounding.py docs/test/test_issue_5f_availability_anchor.py docs/test/test_issue_5f_token_accounting.py docs/test/test_troubleshoot_claim_5c.py docs/test/test_guards.py docs/test/test_general_qtype_guards.py docs/test/test_link_followup_5c.py -q
+.venv/bin/python -m py_compile chatbot/shopeechat/app.py chatbot/shopeechat/guards.py chatbot/shopeechat/handoffs.py chatbot/shopeechat/llm.py chatbot/shopeechat/warranty.py chatbot/shopeechat/warranty_flow.py chatbot/shopeechat/web_search.py
+git diff --check
+```
+
+Also run the downloaded regression as data by importing its case lists and calling the real `handoffs.detect_human_request()`. Running the downloaded file directly is not sufficient because it contains a stale copy of old logic.
+
+**Task 5F exit does not mean Task 11 is complete.** It only means the current legacy early route is safe enough to continue retrieval work.
+
+---
+
 ## Task 6: Add Selection Policy In Observe-Only Mode
 
 **Files:**
@@ -2990,30 +3171,52 @@ Expected: web fallback cannot erase protected anchor products.
 
 ## Task 13: Remove Duplicate Logic And Clean Comments In Touched Areas
 
+**Status:** Must be treated as a mandatory simplification phase before release. Earlier tasks added focused helper modules and 5F hotfix helpers to stop production bugs. That was acceptable for safety, but the release cannot leave multiple hidden route/retrieval owners in place.
+
 **Files:**
 - Modify: `chatbot/shopeechat/app.py`
 - Modify: `chatbot/shopeechat/product_store.py`
 - Modify: `chatbot/shopeechat/units.py`
 - Modify: `chatbot/shopeechat/device_compat.py`
 - Modify: `chatbot/shopeechat/knowledge_base.py`
+- Modify only when replacing or deleting duplicated logic: `chatbot/shopeechat/handoffs.py`
+- Modify only when the Task 11 owner exists: `chatbot/shopeechat/warranty_flow.py`
 - Modify: `docs/SRS_SSD.md`
 - Modify: `getoutofmywaybotkaikrook2.md`
 
 **Interfaces:**
 - No new API.
 - Deletes only branches proven replaced by tests and replay.
+- New helpers are disallowed in this task unless they delete a larger duplicated block in the same commit.
+- If a helper has one caller and does not replace duplication, inline it.
 
 - [ ] **Step 1: Static scan**
 
 Run:
 
 ```bash
-rg -n "available_for_sale|sold_out|catalog_status|_resolve_charger_subtype|CHARGER-SUBTYPE|Tier merge|Direct regex search" chatbot/shopeechat/app.py chatbot/shopeechat/product_store.py chatbot/shopeechat/units.py chatbot/shopeechat/device_compat.py
+rg -n "available_for_sale|sold_out|catalog_status|_resolve_charger_subtype|CHARGER-SUBTYPE|Tier merge|Direct regex search|_MILD_ANGER|_SERVICE_CONTEXT|_PRODUCT_CONTEXT|USE_GROUPED_RETRIEVAL|retrieval_shadow|retrieval_runtime|retrieval_executor|retrieval_planner" chatbot/shopeechat/app.py chatbot/shopeechat/product_store.py chatbot/shopeechat/units.py chatbot/shopeechat/device_compat.py chatbot/shopeechat/handoffs.py chatbot/shopeechat
+wc -l chatbot/shopeechat/app.py chatbot/shopeechat/handoffs.py chatbot/shopeechat/route_context.py chatbot/shopeechat/retrieval_policy.py chatbot/shopeechat/retrieval_runtime.py chatbot/shopeechat/retrieval_executor.py chatbot/shopeechat/candidate_pool.py
 ```
 
 Record duplicated blocks in the active log.
 
-- [ ] **Step 2: Delete one replaced block at a time**
+- [ ] **Step 2: Build an owner map before deleting**
+
+Create an owner map in `getoutofmywaybotkaikrook2.md`:
+
+| Decision | Final owner | Current duplicate owners | Delete / keep |
+|---|---|---|---|
+| request facts | `route_context.py` | `app.py`, `product_store.py`, source-specific regex | delete shims after replay |
+| availability | availability resolver / source evidence | `app.py`, `units.py`, `product_store.py` | delete duplicate formulas |
+| candidate pool | candidate/policy module chosen after Task 6-10 | unit early return, legacy-only path, KB merge | collapse to one path |
+| final LLM context | selection/runtime owner | `app.py` local merge, grouped runtime merge, web replacement | one merge boundary only |
+| message action route | Task 11 owner | `handoffs.py`, `warranty_flow.py`, workflow trigger layer | move out of hotfix helpers |
+| compatibility proof | `device_compat.py` evidence + selection gate | product family hardlogic | delete after Task 10 |
+
+Do not delete until every row has a test or replay gate named.
+
+- [ ] **Step 3: Delete one replaced block at a time**
 
 For each deleted block:
 - name the replacement function
@@ -3027,8 +3230,11 @@ Delete only after its replacement gate passes:
 - local item/model ID conversions after `normalize_shopee_id()` covers every touched boundary
 - duplicate availability formulas after `resolve_availability()` and live refresh are wired
 - the temporary bounded-union rollout setting after final replay acceptance
+- 5F `handoffs.py` semantic routing groups only after Task 11 message/action route owner proves equivalent behavior
+- observe-only modules or flags with no production/replay role after release decision
+- duplicate grouped-selection merge paths once one public LLM context boundary is chosen
 
-- [ ] **Step 3: Rewrite comments only in touched areas**
+- [ ] **Step 4: Rewrite comments only in touched areas**
 
 Comment style for touched blocks:
 
@@ -3044,19 +3250,39 @@ Fallback: keeps protected products when evidence filtering would remove all cont
 
 Do not rewrite unrelated historical comments in the whole file.
 
-- [ ] **Step 4: Verify file size and call ownership**
+- [ ] **Step 5: Verify file size and call ownership**
 
 Run:
 
 ```bash
-wc -l chatbot/shopeechat/app.py chatbot/shopeechat/retrieval_policy.py chatbot/shopeechat/product_store.py chatbot/shopeechat/units.py
-rg -n "select_context\\(|resolve_availability\\(|collect_protected_products\\(" chatbot/shopeechat
+wc -l chatbot/shopeechat/app.py chatbot/shopeechat/handoffs.py chatbot/shopeechat/retrieval_policy.py chatbot/shopeechat/product_store.py chatbot/shopeechat/units.py
+rg -n "select_context\\(|resolve_availability\\(|collect_protected_products\\(|build_retrieval_profile\\(|build_retrieval_slots\\(|detect_human_request\\(" chatbot/shopeechat
 ```
 
 Expected:
 - `app.py` does not grow from this plan.
 - `retrieval_policy.py` stays focused on profile/protection/selection only.
 - availability formulas are not duplicated in `app.py`.
+- `handoffs.py` does not grow further unless Task 11 explicitly rejects a separate message/action route owner.
+- the public response boundary strips private evidence once, not in many modules.
+- each runtime flag has a removal decision: keep, default-on after replay, or delete.
+
+- [ ] **Step 6: Ponytail review**
+
+Run a simplification-only review before final replay:
+
+```bash
+git diff --stat
+rg -n "def _|class |lambda|TYPE_CHECKING|Protocol|Any|dict\\[str, object\\]|TODO|HACK" chatbot/shopeechat
+```
+
+For every new helper added after Task 5F, answer:
+- What duplicate code did it remove?
+- Why can it not be inlined?
+- Which module owns the decision?
+- Which test fails if it is deleted?
+
+If the answer is unclear, delete or inline before release.
 
 ---
 
@@ -3196,10 +3422,11 @@ Spec coverage:
 - Intent/history/anchor extraction ownership: Task 4 defines one immutable profile and exact precedence; Tasks 9, 12, and 13 remove secondary owners.
 - Mi 17 Ultra false no-product/out-of-stock: Task 4 preserves cable+device facts, Task 4F normalizes compact device aliases, Task 5 refreshes live availability, Task 5A prevents an incomplete unit pool from hiding listing candidates, Task 10 requires compatible-candidate proof before negative wording, Task 14 replays it.
 - No hallucinated spec/warranty/compat: Task 8 evidence coverage, Task 10 gated compatibility enforcement, and Task 11 sensitive gates.
+- Pre-retrieval false handoff/anger bugs: Task 5F hotfix protects legacy runtime; Task 11 still owns the final architecture.
 - Real human handoff ownership: Tasks 11, 11A, and 11B.
 - Trigger/workflow ordering: Task 11B.
 - Reduce hardcode and pipeline duplication: Tasks 4, 9, 12, 13.
-- Do not bloat code: one new runtime module first, Task 13 file-size check.
+- Do not bloat code: the original "one new runtime module first" target was exceeded by grouped-retrieval prototypes and 5F safety helpers; Task 13 is now mandatory and must delete/inline/owner-map before release.
 
 Placeholder scan:
 - No task contains placeholder wording or deferred implementation language.
@@ -3215,9 +3442,15 @@ Type consistency:
 Review focus coverage:
 - Unavailable exact model: Tasks 2, 4, 7, 14.
 - Variant/unit stock: Tasks 2, 5, 14.
-- Sensitive policies: Task 11.
+- Sensitive policies: Task 5F hotfix and Task 11 final route/action owner.
 - Human ownership continuity: Task 11A.
 - Workflow trigger boundary: Task 11B.
 - Compatibility: Tasks 4, 5, 10.
 - Device shorthand/alias: Task 4F.
 - Compare/spec: Tasks 7 and 8.
+
+Current plan quality assessment:
+- Good enough to continue only if Task 5F is treated as a legacy safety gate, not proof that routing is architecturally solved.
+- Not good enough to release without Task 13 simplification and Task 14 replay.
+- Not good enough to declare handoff/workflow solved until Task 11/11A/11B produce one action-route owner and assignment/trigger gates.
+- Any remaining task that adds helpers without deleting older paths violates the updated plan.

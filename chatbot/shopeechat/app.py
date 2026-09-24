@@ -534,6 +534,16 @@ def _add_context_note(products: list, note: str) -> None:
         products[0]["_context_note"] = products[0]["_context_note"] + " " + note
 
 
+def _sum_usage(a: dict, b: dict) -> dict:
+    """รวม token usage 2 รอบ (เช่น LLM1 + LLM2 หลัง web search) → billable total
+    สำหรับ resp.usage — steps เป็น debug breakdown แยกต่างหาก ห้ามนำมาบวกที่นี่"""
+    return {
+        "prompt": a.get("prompt", 0) + b.get("prompt", 0),
+        "output": a.get("output", 0) + b.get("output", 0),
+        "total": a.get("total", 0) + b.get("total", 0),
+    }
+
+
 def _recent_qa_pairs(history: list[dict] | None, n: int = 10) -> list[dict]:
     """⚡ Phase 8 — จับคู่ user+model message เป็น QA pairs แล้วคืน n คู่ล่าสุด.
 
@@ -2442,7 +2452,10 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                                 # merge steps จาก _web_search_reanswer เข้า _steps
                                 _steps.extend(_ws_r["steps"])
                                 answer = _ws_r["answer"]
-                                usage_info = _ws_r["usage"]
+                                _ws_llm_usage = _ws_r["usage"]
+                                # ⚡ 5F-E — usage ต้องเป็น LLM1+LLM2 (เหมือน product_store branch)
+                                #   เดิม overwrite ด้วย _ws_r["usage"] → LLM1 tokens หาย
+                                usage_info = _sum_usage(usage_info, _ws_llm_usage)
                                 products = _ws_r["products"]
                                 _ws_cost = _ws_r["cost_usd"]
                                 _ws_elapsed = _ws_r["search_elapsed"]
@@ -2450,7 +2463,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
 
                                 prompt_t = usage_info.get("prompt", 0)
                                 output_t = usage_info.get("output", 0)
-                                cost = llm._gemini_cost(prompt_t, output_t)
+                                cost = llm._gemini_cost(prompt_t, output_t) + _ws_cost
                                 _timing_breakdown["web_search"] = _ws_elapsed
                                 _timing_breakdown["total"] = round(_total_elapsed, 2)
                                 _kb_ws_used = True
@@ -4864,11 +4877,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     _total_ws = round(_time.time() - _total_start, 2)
                     _timing_breakdown["web_search"] = _ws_elapsed
                     _timing_breakdown["total"] = _total_ws
-                    _combined_usage = {
-                        "prompt": usage_info.get("prompt", 0) + _ws_llm_usage.get("prompt", 0),
-                        "output": usage_info.get("output", 0) + _ws_llm_usage.get("output", 0),
-                        "total": usage_info.get("total", 0) + _ws_llm_usage.get("total", 0),
-                    }
+                    _combined_usage = _sum_usage(usage_info, _ws_llm_usage)
                     print(f"[WEB-SEARCH] used web search answer  total={_total_ws}s  products={len(_final_products)}", file=sys.stderr)
                     _final_response_products = [] if _suppress_cards else _final_products[:req.limit]
                     _record_suggestion_products(req, _final_response_products)

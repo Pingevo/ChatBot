@@ -318,6 +318,7 @@ listing path:
 - `return_claim` — "เปลี่ยนได้/คืนได้" เมื่อ context ไม่อนุญาต (รวม KB ที่ห้ามชัด)
 - `stock_claim` (BUG-K) — "พร้อมส่ง/เช็คสต็อกแล้ว/มีของ" เมื่อไม่มี card `_available_for_sale`
 - `model_claim` (NEW-6 residual) — model token `UPPERCASE≥2+digits≥2` ที่ไม่อยู่ใน context pool เลย = LLM แต่งรุ่น; boundary ASCII lookaround (ทำงานใน text ไทยติดกัน); stoplist spec tokens (IP66/PD65W/WiFi6)
+- `spec_claim` (5F-D, hardened 5F-H2) — เลข+หน่วย spec / IPxx rating / protocol version (`_SPEC_CLAIM_RE`: `65W`,`500mAh`,`IP68`,`PD3.0`,`WiFi6`,`GaN`,`PPS`,`UFCS`,`Qi`, `นิ้ว/มม/กรัม/ชั่วโมง/วัน/ปี/ครั้ง/เท่า/พอร์ต` ฯลฯ) ที่ไม่อยู่ใน **evidence pool** (cards+grounding_text เท่านั้น — message/history ของลูกค้าไม่ใช่หลักฐาน spec; strip-space+comma+lower ก่อนเทียบ — "20,000mAh"="20000mAh") = LLM ยืมเลขจากตัวอย่าง prompt/แต่งสเปก; negation นำหน้าใน 20 chars ("ไม่รองรับ IP68") ข้าม; loop ≤4 เคลียร์หลาย clause; ทำงานหลัง model_claim — rewrite แล้วข้าม
 
 ### 5.6 PRODUCT_TYPES taxonomy + charger subtypes
 
@@ -363,6 +364,7 @@ listing path:
 | `_general_qtype_bypass` | กัน general path กลืน follow-up | qtype, message | qtype/None | — | _chat_impl | ถ้า qtype เป็น warranty/return + ข้อความสั้นมี history → ปล่อยผ่าน | — |
 | `_add_context_note` | แนบ note เข้า cards | products, note | — | — | _chat_impl | set `_context_note` ทุก card | mutate list |
 | `_recent_qa_pairs` | ดึง QA pairs จาก history | history, n=10 | list[dict] | — | _chat_impl, KB ctx | pair user/model turns | — |
+| `_sum_usage` | รวม token usage 2 รอบ (5F-E) | a dict, b dict | dict{prompt,output,total} | — | `_chat_impl` web-search merge (KB branch + product_store branch) | billable `resp.usage` = LLM1+LLM2; `steps` เป็น debug แยกต่างหาก ห้ามบวกซ้ำ — KB branch เดิม overwrite ทิ้ง LLM1 | — |
 | `chat` | **`POST /chat` entry** | ChatRequest | ChatResponse | _chat_impl, guards.enforce | FastAPI | route engine → enforce | guard อาจ escalate |
 | `_chat_impl` | **legacy orchestrator** | ChatRequest | ChatResponse | ทุกโมดูล (§5.2) | chat() | pipeline 21 ขั้น | writes: conversation_products, handoff POST, usage; RuntimeError→HTTPException 500; ⚠️ client.close() บน shared client (§10#2) |
 | ↳ `_resolve_charger_subtype` | subtype resolution | message, intent, anchor, ctx | subtype str | product_store._detect_charger_subtype | _chat_impl | anchor > intent > message; carry ยกเว้น subtype ชัดใหม่ | — |
@@ -406,8 +408,8 @@ listing path:
 | `_build_context` | product context block | products, shop_hint, options | str | card fields | answer() | serialize cards + `_context_note` + availability flags | — |
 | `describe_image` | vision 1 ไฟล์ | url, shop_hint, history_context | (text, usage) | urllib fetch, _client, types.Part.from_bytes | describe_images | bytes→Part; video suffix→180s + video prompt; MIME จาก Content-Type+suffix; `_VISION_PROMPT` กัน hallucination | net fetch; error→("",{}) |
 | `describe_images` | vision หลายไฟล์ | urls, shop_hint, max_images, history_context | (text, usage) | describe_image | _run_vision (v2), _chat_impl | loop ≤max, label `[รูป/วิดีโอที่ N]` | — |
-| `answer` | **ตอบหลักจาก products** | message, products, shop_hint, history, persona_extra, intent_result, extra_context | (answer, usage) | _build_context, _lang_instruction, _generate | _chat_impl, chat_v2._build_answer | SYSTEM_INSTRUCTION + ctx + hints → LLM | RuntimeError→caller raise 500 |
-| `answer_with_kb` | ตอบจาก KB | message, kb_context, history, persona_extra | (answer, usage) | _generate, `KB_SYSTEM_INSTRUCTION` | KB path | RAG over KB | — |
+| `answer` | **ตอบหลักจาก products** | message, products, shop_hint, history, persona_extra, intent_result, extra_context | (answer, usage) | _build_context, _lang_instruction, _generate | _chat_impl, chat_v2._build_answer | SYSTEM_INSTRUCTION + ctx + hints → LLM; **5F-D: ตัวอย่างคำตอบใน prompt ใช้ placeholder `<…จาก context>` ห้าม literal spec/ชื่อรุ่นจริง (กัน LLM ยืมเลข/ชื่อไปตอบ)** | RuntimeError→caller raise 500 |
+| `answer_with_kb` | ตอบจาก KB | message, kb_context, history, persona_extra | (answer, usage) | _generate, `KB_SYSTEM_INSTRUCTION` | KB path | RAG over KB; **KB_SYSTEM_INSTRUCTION ใช้ placeholder policy เดียวกัน (5F-D)** | — |
 | `answer_general` | ตอบ policy/brand/order | message, context, qtype, history, persona_extra, shop_hint | (answer, usage) | _generate | order/general/brand paths | qtype-specific prompt — ทุก qtype: ตอบคำถามเฉพาะจาก context ก่อน ห้าม dump list ดิบ/ห้ามตอบ bare "ทักแอดมิน" เมื่อ context ตอบได้ (NEW-8) | RuntimeError→caller 500 |
 
 ### 6.3 `product_store.py` — retrieval/ranking/cards/certs/dedupe
@@ -531,7 +533,7 @@ listing path:
 | `_salvage_json_value` | JSON salvage | text, key | any | regex | extract parse | ดึง value จาก JSON พัง | — |
 | `_clean_device_specs` | normalize spec | raw | list[dict] | — | search result | structured device specs | — |
 | `detect_uncertainty` | negative-answer detect | answer | (bool, reason/None) | patterns | _chat_impl (reanswer trigger) | "ไม่แน่ใจ/ไม่มีข้อมูล" | — |
-| `should_use_web_search` | trigger decision | message, products, intent, answer… | (bool, reason) | rules + spec-db gate (lazy `_lookup_spec_db`) | _chat_impl, chat_v2._search_if_needed | reasons: no_products/answer_uncertain/compatibility…; skip เมื่อ target_device อยู่ spec-db หรือ yes-no spec มีสินค้า | — |
+| `should_use_web_search` | trigger decision | message, products, intent, answer… | (bool, reason) | rules + spec-db gate (lazy `_lookup_spec_db`) | _chat_impl, chat_v2._search_if_needed | reasons: no_products/answer_uncertain/compatibility…; skip เมื่อ target_device อยู่ spec-db หรือ yes-no spec มีสินค้า; **5F-E/F gates: `pass1_low_confidence` ไม่ยิงเมื่อมี products แล้ว (low conf อย่างเดียวไม่พอ — คำตอบติดลบยังไหล rule 5) · placeholder/sticker-only message (`[…]` ล้วน/ว่าง) → ไม่ search** | — |
 | `search_and_extract` | **search + extract** | message, shop, platform, history, reason | dict{search_used, keywords[], product_type, search_info, device_specs, usage, cost_usd, model, error} | OR call, _log_ai_usage, _clean_device_specs, _salvage_json_value | _chat_impl, chat_v2, device_compat (web ladder) | query rewrite → OR search → extract structured | net; error→{error} |
 | `reanswer` | ตอบใหม่จาก search ctx | message, products, search_result, history…, retrieval_profile (4C pass-through → fetch_products/lookup_kb) | (answer, usage) | llm answer + URL strip | _chat_impl | search_info (ไม่มี URL) → LLM | — |
 
@@ -561,9 +563,9 @@ listing path:
 | `detect_confirmation` | detect ยืนยัน | message | bool | kw | claim SM State 4 | — | — |
 | `_mask_digits` | mask เลข | msg, digits | str | — | NER preprocess | กัน NER กลืนเบอร์/order | — |
 | `_get_ner` | lazy NER model | — | model | transformers | _extract_name_ner | load once | model load |
-| `_extract_name_ner` | สกัดชื่อด้วย NER | message | str | _get_ner, _mask_digits | extract_customer_info | NER primary | fallback regex |
-| `extract_customer_info` | สกัด name/phone/addr | message | dict | _extract_name_ner + regex | claim SM State 3 | NER→regex fallback; reject ชื่อมีตัวเลข (⚠️ fallback ลบ "ค"/"ชื่อ" ผิด §10#9) | — |
-| `detect_purchase_date_and_order` | date+order ใน msg | message | dict | regex | claim SM | — | — |
+| `_extract_name_ner` | สกัดชื่อด้วย NER | message | str | _get_ner, _mask_digits | extract_customer_info | NER primary; post-process: strip particle ติดท้ายคำสุดท้าย (นะคะ/ครับ glued, 5F-B) + คำนำหน้า (คุณ/นาย/นางสาว) + reject field labels (เลขคำสั่งซื้อ/เบอร์โทร/นามสกุล) | fallback regex |
+| `extract_customer_info` | สกัด name/phone/addr | message | dict | _extract_name_ner + regex | claim SM State 3 | NER→regex fallback; reject ชื่อมีตัวเลข; **phone pattern รับ separator ในตัว บน text จริง — "เบอร์ order" ติดกันไม่ collapse แล้วหาย (5F-B)** | — |
+| `detect_purchase_date_and_order` | date+order ใน msg | message | dict | regex | claim SM | phone mask ใช้ pattern ใหม่เหมือน extract_customer_info | — |
 | `detect_warranty_duration_question` | ถามประกันกี่ปี | message | bool | kw | claim SM | — | — |
 | `detect_tax_invoice_request` | ขอใบกำกับ | message | bool | kw | handoffs, chat_v2._check_tax_invoice | — | — |
 | `detect_tisi_question` | ถาม มอก. | message | bool | kw | cert paths | — | — |
@@ -585,12 +587,14 @@ listing path:
 | `_maybe_clear_claim_state` | clear ตามเงื่อนไข | req, claim_ctx, answer | — | _clear_claim_state | SM | เช่น handoff แล้ว | — |
 | `handle_warranty_flow` | **SM entry (v2 ใช้)** | req, ctx, history, db | resp dict/None | warranty.*, _cp claim fns, order_store, llm, _send_handoff, _get_post_handoff_exceptions | chat_v2._check_warranty_state_machine | State 0-7 ตาม §5.2 — detect→order→date→consent→info→confirm→handoff→evidence; State 6 post-handoff เงียบ (ticket_state!=closed) | claim_state writes, handoff POST |
 | `_handle_review_request` | ขอ review ใน claim | req, ctx, history | resp | llm | handle_warranty_flow | — | — |
-| `_build_post_handoff_response` | resp หลัง handoff | req, ctx | resp | llm, _app_module | State 6 | เงียบ/รับรู้สั้น | — |
+| `_build_post_handoff_response` | resp หลัง handoff | req, ctx | resp | llm, _app_module | State 6, `_post_handoff_gate` | เงียบ/รับรู้สั้น | — |
+| `_is_active_post_handoff` | post-handoff lock active ไหม (5F-H4) | req, history_marker | bool | — | `handle_warranty_flow_legacy` | ticket_state = source of truth: handoff/open/pending→True, closed/resolved/bot→False, ไม่ทราบ→fallback marker | — |
+| `_post_handoff_gate` | gate "รอแอดมิน" (5F-H4) | req, ctx, _warranty_mod, _app_module, llm | resp/None | warranty.extract_customer_info/parse_purchase_date, `_get_post_handoff_exceptions`, `_build_post_handoff_response` | `handle_warranty_flow_legacy` (history + no-history path) | lock เว้น: ส่งข้อมูลเคลม (รูป/วันที่/order/phone/ชื่อ) / product question / shop exception | — |
 | `_build_warranty_claim_response` | resp claim ปกติ | req, ctx, answer, handoff, claim_ctx | resp | _make_response-equivalent | SM | สร้าง ChatResponse dict + claim payload | — |
 | `_handle_warranty_date_followup` | follow-up วันที่ | req, ctx, history, purchase_date, db | resp/None | warranty.is_in_warranty, llm | State 2 | คำนวณใน/นอกประกัน | state write |
 | `_handle_tax_invoice_followup` | follow-up ใบกำกับ | req, ctx, history | resp/None | _send_handoff | SM | tax → handoff | handoff POST |
 | `_handle_first_message_claim` | claim ข้อความแรก | req, ctx, is_claim | resp/None | warranty.* (รวม `malfunction_safe_check` 5C-F: malfunction→acknowledge+safe checks ก่อนขอข้อมูลเคลม), llm | SM State 0/1 | — | — |
-| `handle_warranty_flow_legacy` | wrapper legacy | req, ctx, history, db | resp/None | handle_warranty_flow | _chat_impl | arg order เดิม | — |
+| `handle_warranty_flow_legacy` | wrapper legacy | req, ctx, history, db | resp/None | handle_warranty_flow, `_is_active_post_handoff`, `_post_handoff_gate` (5F-H4) | _chat_impl | arg order เดิม; ticket_state lock ทำงานแม้ไม่มี history (handoff/open/pending→gate) | — |
 
 ### 6.10 `conversation_products.py` — timeline/anchor/claim state (admin DB, key=conversation_id)
 
@@ -651,7 +655,13 @@ listing path:
 
 | ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
 |---|---|---|---|---|---|---|---|
-| `detect_human_request` | pre-intent human req + frustration | req, ctx | resp/None | kw tables, anger composition, responses._send_handoff | _chat_impl | "ขอคุยกับคน/แอดมิน/คนตอบ" → `human_request`; strong anger (ผิดหวัง/หัวร้อน/โกรธ/ตีของกลับ) หรือ mild complaint (ช้ามาก/รอนาน/ไม่มีใครตอบ) ที่ไม่ใช่คำถาม → `customer_frustration` | handoff POST |
+| `_get_word_tokenizer` | lazy-load pythainlp word_tokenize | — | callable/None | pythainlp | `_toxic_token_present` | 5F-H1: cache ตัวเดียว, fail→False mark (pattern เดียวกับ warranty._get_ner) | — |
+| `_toxic_token_present` | short toxic token standalone match | msg_low, token | bool | `_get_word_tokenizer`, `_TOXIC_DEPENDENT`, `_TOXIC_INTENSIFIERS`, `_TOXIC_SUBJECTS`, `_is_thai_word_char` | `detect_human_request` | 5F-A/H1: **primary = tokenizer** — token ต้องเป็นคำแยกจริง ("หน้ากาก"=1 token→False, "สินค้ากาก"→["สินค้า","กาก"]→True); fallback (ไม่มี lib): หลัง token เป็นสระ→ขึ้นพยางค์ใหม่ reject; subject นำ ("ของกาก"/"ร้านกาก")→นับ; ติดคำก่อน→compound tail reject; boundary→นับ; intensifier ตาม ("กากมาก")→นับ — ไม่ใช้ generic follower (อะไร/แล้ว/ละ) | — |
+| `_term_spans` | occurrence spans ของ terms | text, terms | list[(s,e)] | — | `_mild_anger_fires`, `detect_human_request` | find loop ทุก term | — |
+| `_overlaps` | span ทับกันไหม | s, e, spans | bool | — | `_mild_anger_fires` | interval overlap | — |
+| `_is_question_message` | คำถามจริงหลังตัด vocative tail | msg_low | bool | `_QUESTION_RE`, `_VOCATIVE_TAIL_RE` | `detect_human_request` | "รอนานไหมครับแอด"→"รอนานไหม"→คำถาม (5F routing) | — |
+| `_mild_anger_fires` | mild marker = บ่นบริการจริงไหม | msg_low, mild_terms | bool | `_term_spans`, `_overlaps`, `_SERVICE_CONTEXT_TERMS`, `_PRODUCT_CONTEXT_TERMS`, `_HISTORY_CONTEXT_TERMS` | `detect_human_request` | 5F routing: marker ทับ product span ไม่นับ ("ไม่มีการตอบ|สนอง"); fires iff มี service context นอก marker/product span หรือไม่มี product context เลย (bare "ช้ามาก"=บ่นบริการ) | — |
+| `detect_human_request` | pre-intent human req + frustration | req, ctx | resp/None | kw tables, `_toxic_token_present`, `_mild_anger_fires`, `_is_question_message`, `_term_spans`, `_PROMO_TERMS`, `_SHOP_SCRIPT_TERMS`, responses._send_handoff | _chat_impl | **5F-B/H4: ticket_state ∈ handoff/open/pending → None (ห้าม re-fire)**; "ขอคุยกับคน/แอดมิน/คนตอบ" → `human_request` (kw ที่จบกลาง product term ไม่นับ — "ทำไมไม่ตอบ\|สนอง"); strong anger (ผิดหวัง/หัวร้อน/**กาก token**) → `customer_frustration`; **5F routing: promo/affiliate terms → suppress anger ทั้งหมด; shop-script greeting (ยินดีต้อนรับ/ตอบช้าหน่อย) → suppress mild; bare-"แอด" ยกเว้นคำถาม** | handoff POST |
 | `post_intent_handoffs` | tax invoice + cert | req, ctx, db | resp/None | warranty.detect_tax_invoice_request/extract_tisi_model_keyword/detect_cert_question, product_store.search_cert_products/_detect_charger_subtype/resolve_availability, route_context.requested_product_types, unit_classifier._extract_codes, conversation_products.get_active_product | _chat_impl | tax→handoff `tax_invoice_request`; cert→cert cards answer; **Task 5C-E+hardening: cert type_filter ใช้ provenance (`requested_product_types` — explicit type noun ชนะ device/model regex mention) fallback message→history→anchor; model_keyword ที่ไม่ใช่ code-shape ถูก suppress เมื่อ explicit type ชี้หมวดอื่น (compat target ไม่ใช่รุ่นสินค้า); subtype filter เมื่อ detect ได้; availability label คำนวณจาก status+stock ผ่าน resolver (NORMAL stock0→หมดสต็อก); ไม่มี context → cap 12 + ถามหมวด** | handoff POST; mongo read |
 
 ### 6.14 `device_compat.py` — compatibility engine
@@ -770,13 +780,14 @@ listing path:
 |---|---|---|---|---|---|---|---|
 | `build_flags` | detect violations | resp, req | flags | regex (ext URLs, policy phrases, claim-confirm w/o handoff) | enforce | — | — |
 | `check_output` | evaluate flags | answer/resp, handoff_sent | violations list | build_flags | ChatResponse.model_post_init (observe), enforce | log + คืน violations | log stderr |
-| `enforce` | **final boundary** | resp, req | resp | build_flags, check_output, _escalate, _claim_grounded, _replace_clause | app.chat() ทุก engine | escalate rules (`_ESCALATE_RULES`) → rewrite tier (`_REWRITE_RULES`): claim โปร/เปลี่ยนคืนที่ ungrounded → แทน clause ด้วยข้อความขอแอดมินตรวจสอบ | อาจ handoff |
+| `enforce` | **final boundary** | resp, req | resp | build_flags, check_output, _escalate, _claim_grounded, _replace_clause, `_SPEC_CLAIM_RE` | app.chat() ทุก engine | escalate rules (`_ESCALATE_RULES`) → rewrite tier (`_REWRITE_RULES` + model_claim + spec_claim 5F-D): claim ที่ ungrounded → แทน clause ด้วยข้อความขอแอดมินตรวจสอบ | อาจ handoff |
 | `_escalate` | handoff on violation | resp, req | resp | responses._send_handoff | enforce | — | POST |
 | `_claim_grounded` | claim มีหลักฐานใน context | resp, pos_rx, flags, mode | bool | `_pos_grounded`, `_card_available`, `_grounding_text` | enforce | mode "text": `_pos_grounded` (negation-aware) บน card desc + `grounding_text`; mode "stock": มี card `_available_for_sale` | — |
 | `_pos_grounded` | polarity-aware match | text, pos_rx | bool | `_NEGATION_RE` | `_claim_grounded` | match pos_rx ที่ไม่มี ไม่/ห้าม/หมด ใน 20 chars ก่อนหน้า | — |
 | `_card_available` | card ขายได้จริง | card dict | bool | — | `_claim_grounded` | `_available_for_sale` หรือ fallback `status==NORMAL && !sold_out` | — |
 | `_grounding_text` | KB context ของ general: | resp | str | — | `_claim_grounded`, `_context_pool` | อ่าน `routing_decision["grounding_text"]` (app.py แนบ gen_context[:2000]) | — |
-| `_context_pool` | pool ข้อความที่ LLM เห็น | resp, req | str | `_grounding_text` | enforce | cards name/desc + grounding_text + req.message + history text/image_desc → lower | — |
+| `_identity_pool` | pool identity (ชื่อ/รุ่น) ที่ LLM เห็น | resp, req | str | `_evidence_pool` | enforce (model_claim) | cards name/desc + grounding_text + req.message + history text/image_desc → lower — message/history ใช้ได้เพราะลูกค้าพิมพ์ชื่อรุ่นเอง echo กลับเป็นปกติ | — |
+| `_evidence_pool` | pool หลักฐาน spec เท่านั้น (5F-H2) | resp | str | `_grounding_text` | enforce (spec_claim) | cards name/desc + grounding_text → lower — ห้ามรวม message/history ("รองรับ 65W ไหม" ห้าม ground "รองรับ 65W") | — |
 | `_replace_clause` | แทน claim ทั้ง clause | text, start, end, repl | str | `_CLAUSE_BOUNDARY` | enforce | หา boundary (newline/`|||`/`.!?`/particle ไทย+space) รอบ span → swap ทั้ง clause กันเศษค้าง | — |
 
 ### 6.21 `chat_models.py` — structured context dataclasses

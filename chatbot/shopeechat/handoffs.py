@@ -12,6 +12,161 @@ import re
 import sys
 import time as _time
 
+# --- short toxic token matcher (5F-A, hardened 5F-H1) ---
+# สระ/วรรณยุกต์/เครื่องหมายที่ต้องแปะพยัญชนะ — ถ้าอยู่ "หลัง" token แปลว่า
+# พยัญชนะตัวท้ายขึ้นพยางค์ใหม่ ("นาฬิกากัน"=นาฬิกา+กัน ไม่มี "กาก")
+# ถ้าอยู่ "ก่อน" token แปลว่าคำก่อนจบสระ — token อาจเป็นหางคำประสม ("หน้ากาก")
+_TOXIC_DEPENDENT = frozenset("ะัาำิีึืฺุูๅ็่้๊๋์ํ")
+# intensifier ที่ตามหลัง token = บ่นจริง (ใช้เฉพาะ fallback เมื่อไม่มี tokenizer)
+#   ห้ามใส่คำทั่วไป (อะไร/แล้ว/ละ/อีก) — "หน้ากากอะไร" เป็นคำถามสินค้าไม่ใช่คำด่า
+_TOXIC_INTENSIFIERS = (
+    "มาก", "จัง", "สุด", "จริง", "แท้", "เลย", "ว่ะ", "เว้ย", "วะ",
+    "เว่อ", "เวอร์", "โว้ย", "เกิน", "เหลือเกิน", "ชิบ", "โคตร",
+)
+# subject นำหน้า token = complaint phrase ชัด ("ของกาก"/"สินค้ากาก"/"ร้านกาก")
+_TOXIC_SUBJECTS = (
+    "ของ", "สินค้า", "ร้าน", "บริการ", "งาน", "พัสดุ", "แอดมิน",
+    "คุณภาพ", "เจ้าหน้าที่", "ไอเทม", "ไอเท็ม", "ตัวนี้", "ชิ้นนี้",
+)
+
+_WORD_TOKENIZER = None
+
+
+def _get_word_tokenizer():
+    """lazy-load pythainlp word_tokenize (pattern เดียวกับ warranty._get_ner) —
+    คืน callable หรือ None ถ้าไม่มี lib."""
+    global _WORD_TOKENIZER
+    if _WORD_TOKENIZER is None:
+        try:
+            from pythainlp import word_tokenize
+            _WORD_TOKENIZER = word_tokenize
+        except Exception:
+            _WORD_TOKENIZER = False
+    return _WORD_TOKENIZER if _WORD_TOKENIZER is not False else None
+
+
+def _is_thai_word_char(ch: str) -> bool:
+    return "ก" <= ch <= "ๅ"  # U+0E01–U+0E45 consonant/vowel/sign (ไม่รวม ๆ)
+
+
+def _starts_with_any(text: str, prefixes: tuple) -> bool:
+    return any(text.startswith(p) for p in prefixes)
+
+
+def _endswith_any(text: str, suffixes: tuple) -> bool:
+    return any(text.endswith(s) for s in suffixes)
+
+
+def _toxic_token_present(msg_low: str, token: str) -> bool:
+    """True เมื่อ short toxic token เป็นคำแยกจริง — ไม่ใช่ substring กลาง/ท้าย
+    คำประสม ("หน้ากาก"=product, "นาฬิกากัน"=นาฬิกา+กัน). ใช้ tokenizer เป็นหลัก;
+    fallback = strict boundary + subject/intensifier complaint markers."""
+    _wt = _get_word_tokenizer()
+    if _wt is not None:
+        try:
+            return token in _wt(msg_low)
+        except Exception:
+            pass  # tokenizer fail → strict fallback ด้านล่าง
+    pos = 0
+    while True:
+        i = msg_low.find(token, pos)
+        if i < 0:
+            return False
+        prev = msg_low[i - 1] if i else ""
+        rest = msg_low[i + len(token):]
+        nxt = rest[:1]
+        if nxt in _TOXIC_DEPENDENT:
+            pos = i + 1  # พยัญชนะท้ายขึ้นพยางค์ใหม่ → ไม่ใช่คำ standalone
+            continue
+        if _endswith_any(msg_low[:i], _TOXIC_SUBJECTS):
+            return True  # "ของกาก"/"ร้านกาก" = complaint มี subject ชัด
+        if prev and (_is_thai_word_char(prev) or prev in _TOXIC_DEPENDENT):
+            pos = i + 1  # ติดคำก่อนหน้า → compound tail ("หน้ากาก")
+            continue
+        if not nxt or not _is_thai_word_char(nxt):
+            return True  # standalone boundary ("กาก", "กาก!")
+        if _starts_with_any(rest, _TOXIC_INTENSIFIERS):
+            return True  # "กากมาก"/"กากจัง" = บ่นจริง
+        pos = i + 1
+
+
+# --- message-category context (5F routing hardening) ---
+# mild anger ("ช้ามาก"/"นานมาก"/"ไม่มีการตอบ") วัดความช้า/ไม่ตอบ — ต้องแยกว่า
+# บ่น "บริการร้าน" (ตอบแชท/จัดส่ง) vs "อาการสินค้า" (ชาร์จช้า/ปุ่มไม่ตอบสนอง)
+# ใช้ semantic group + span masking — ไม่ใช่ exception รายคำ/รายสินค้า
+_SERVICE_CONTEXT_TERMS = (
+    "รอ", "ตอบ", "ส่ง", "จัดส่ง", "ทัก", "แชท", "แอดมิน", "แอด",
+    "ร้าน", "พัสดุ", "ขนส่ง", "คิว", "เจ้าหน้าที่", "พนักงาน",
+    "บริการ", "ออเดอร์", "order", "เพจ", "inbox", "แจ้ง", "เช็ค",
+    "ติดตาม", "ยกเลิก", "คืนเงิน",
+)
+_PRODUCT_CONTEXT_TERMS = (
+    "ชาร์จ", "เชื่อม", "ปุ่ม", "กด", "หมุน", "เสียบ", "ตอบสนอง",
+    "เปิด", "ปิด", "จอ", "แอป", "แอพ", "app", "ภาพ", "เสียง",
+    "พัดลม", "กล้อง", "แบต", "เครื่อง", "ทำงาน", "ใช้งาน", "เคลม",
+    "ดึง", "จับคู่", "ซิงค์", "sync", "pair", "ค้าง", "ดับ",
+    "พัง", "เสีย", "โหลด", "บูต", "รีเซ็ต", "นิ่ง", "รวน", "เพี้ยน",
+)
+# กริยาเวลา/ประวัติ — "ซื้อมานานมากแล้ว" = ระยะเวลาผ่าน ไม่ใช่รอคิวร้าน
+_HISTORY_CONTEXT_TERMS = ("เคย", "ซื้อ", "ลืม", "นานมา", "มานาน", "ตั้งแต่")
+# auto-greeting/สคริปต์ร้านที่รั่วเป็น inbound — "อาจจะตอบช้าหน่อย" คือคำขอโทษร้าน
+_SHOP_SCRIPT_TERMS = (
+    "ยินดีต้อนรับ", "ต้อนรับ", "สอบถามได้", "สอบถามเข้ามา",
+    "ตอบช้าหน่อย", "อาจจะตอบช้า", "ขออภัยที่ตอบช้า", "ขอโทษที่ตอบช้า",
+)
+# affiliate/spam — "เฮ้ย" เป็นการจับตา ไม่ใช่ลูกค้าโกรธ
+_PROMO_TERMS = (
+    "คอมมิชชั่น", "ค่าคอม", "commission", "affiliate",
+    "ตัวแทนจำหน่าย", "สมัครตัวแทน", "รับเปอร์เซ็นต์", "เปอร์เซ็นต์",
+)
+
+# question markers — ตรวจหลังตัด vocative tail (ครับ/ค่ะ/แอด/นะ) ท้ายประโยค
+_QUESTION_RE = re.compile(
+    r"(ไหม|มั้ย|หรอ|เหรอ|รึเปล่า|หรือเปล่า|ป่าว|บ้าง|แค่ไหน|เท่าไหร่|เท่าไหน"
+    r"|กี่วัน|กี่ชั่วโมง|เมื่อไหร่|เมื่อไหน|ตอนไหน|รึ)[คะค่ะครับ\s\?]*$")
+_VOCATIVE_TAIL_RE = re.compile(
+    r"(?:ครับ|ค่ะ|คะ|จ้า|จ๊ะ|นะ|น๊า|งับ|งั้บ|ฮะ|หะ|เอย|คร้าบ|คับ|ค่า"
+    r"|แอดมิน|แอด|admin)+[\s\?\.!~]*$")
+
+
+def _term_spans(text: str, terms: tuple) -> list[tuple[int, int]]:
+    """ทุก occurrence (start,end) ของ terms ใน text — สำหรับ span masking."""
+    out = []
+    for t in terms:
+        pos = 0
+        while True:
+            i = text.find(t, pos)
+            if i < 0:
+                break
+            out.append((i, i + len(t)))
+            pos = i + 1
+    return out
+
+
+def _overlaps(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start < e and s < end for s, e in spans)
+
+
+def _is_question_message(msg_low: str) -> bool:
+    """คำถามจริง — ตัด vocative tail ก่อน ("รอนานไหมครับแอด" → "รอนานไหม")."""
+    return bool(_QUESTION_RE.search(_VOCATIVE_TAIL_RE.sub("", msg_low)))
+
+
+def _mild_anger_fires(msg_low: str, mild_terms: tuple) -> bool:
+    """mild marker = บ่นบริการร้านเท่านั้นถึง escalate:
+    - occurrence ที่ทับ product span ไม่นับ ("ไม่มีการตอบ|สนอง" = อาการสินค้า)
+    - ต้องมี service context นอก marker/product span — หรือไม่มี product
+      context เลย (bare "ช้ามาก" ในแชทร้าน ≈ บ่นบริการ)"""
+    _ctx = _term_spans(msg_low, _PRODUCT_CONTEXT_TERMS + _HISTORY_CONTEXT_TERMS)
+    _hits = [(s, e) for s, e in _term_spans(msg_low, mild_terms)
+             if not _overlaps(s, e, _ctx)]
+    if not _hits:
+        return False
+    _blocked = _ctx + _hits
+    _has_svc = any(not _overlaps(s, e, _blocked)
+                   for s, e in _term_spans(msg_low, _SERVICE_CONTEXT_TERMS))
+    return _has_svc or not _ctx
+
 
 def detect_human_request(req, ctx: dict) -> dict | None:
     """Human-request handoff — ย้าย verbatim จาก app.py chat() (BUG-3 fix).
@@ -26,6 +181,13 @@ def detect_human_request(req, ctx: dict) -> dict | None:
     _total_start = ctx.get("total_start", _time.time())
     _image_desc_out = ctx.get("image_desc_out", "")
     model_name = ctx.get("model_name", "")
+
+    # ⚡ 5F-B/H4 — ticket อยู่ฝั่งแอดมินแล้ว → ห้าม re-fire handoff
+    #   open=แอดมินรับงาน, handoff=รอ distributor, pending=อยู่ในคิว
+    #   (ลูกค้าโมโห/ขอคนระหว่างรอแอดมิน = duplicate POST + notification spam)
+    #   ให้ post-handoff lock ใน warranty_flow ตอบ "รอแอดมิน" แทน
+    if getattr(req, "ticket_state", None) in ("handoff", "open", "pending"):
+        return None
 
     # ===== BUG-3 fix — ลูกค้าขอคุยกับคน/แอดมิน → handoff ทันที ห้ามบอทตอบเอง =====
     # ก่อนหน้านี้: ลูกค้าถาม "Admin ไม่ทำงานกันหรอคะ เมื่อไหร่จะมีมนุษย์มาตอบ"
@@ -48,7 +210,15 @@ def detect_human_request(req, ctx: dict) -> dict | None:
         "ติดต่อกลับด่วน", "ติดต่อกลับหน่อย", "กลับหน่อย",
     )
     _msg_low = (req.message or "").lower().replace("ำ", "ัม")
-    _is_human_request = any(kw in _msg_low for kw in _HUMAN_REQUEST_KWS)
+    _is_question = _is_question_message(_msg_low)
+    # kw ที่จบ "กลาง" product term ไม่นับ — "ทำไมไม่ตอบ|สนอง" = อาการสินค้า
+    # (เทียบ end boundary อย่างเดียว: "แอดมินไม่ทำงาน" จบตรงขอบคำ → ยังนับ)
+    _prod_spans = _term_spans(
+        _msg_low, _PRODUCT_CONTEXT_TERMS + _HISTORY_CONTEXT_TERMS)
+    _is_human_request = any(
+        any(not any(s < e_kw < e for s, e in _prod_spans)
+            for _, e_kw in _term_spans(_msg_low, (kw,)))
+        for kw in _HUMAN_REQUEST_KWS)
     # ⚡ BUG-M phase 2 — composition: (verb + target) ครอบ phrasing ใหม่โดยไม่ต้องเพิ่มทีละเคส
     #   เคส QA ที่หลุด: "ติดต่อเจ้าหน้าที่" / "แชทกับเจ้าหน้าที่" / "ติดต่อร้านค้า"
     #   gap [กับหาด่วน]{0,6} รองรับ "ขอคุยกับแอดมิน" / "โทรหาเจ้าหน้าที่" / "แชทกับพนักงาน"
@@ -79,6 +249,7 @@ def detect_human_request(req, ctx: dict) -> dict | None:
         if (
             len(_msg_stripped) <= 15
             and "แอด" in _msg_stripped
+            and not _is_question  # "รอนานไหมครับแอด" = คำถาม+เรียกท้าย ไม่ใช่ขอคน
             and not any(w in _msg_stripped for w in (
                 "แอดเพื่อน", "แอดไลน์", "แอดเดรส", "แอดเคาท์",
                 "แอดมิชั่น", "แอดปโน", "แอดมิน",  # แอดมิน already covered above
@@ -92,29 +263,38 @@ def detect_human_request(req, ctx: dict) -> dict | None:
     #   - mild marker ต้องมากับคำหยาบ/คำเน้นบ่น ("ช้ามากว่ะ", "นานมากกก") —
     #     กัน "ส่งช้าไหม" (คำถาม) หลุดเป็น anger
     _is_angry = False
-    _STRONG_ANGER = (
+    # strong phrase (≥หลายพยางค์) — substring match ปลอดภัย;
+    # short token ("กาก") — ต้อง _toxic_token_present กันชนคำประสม
+    # ("นาฬิกากัน"=นาฬิกา+กัน, "หน้ากาก"=product จริง)
+    _STRONG_ANGER_PHRASES = (
         "เห้ย", "เฮ้ย", "หัวร้อน", "โกรธ", "โมโห", "ผิดหวัง", "เซ็ง",
-        "รำคาญ", "ห่วย", "กาก", "แย่มาก", "แย่จริง", "แย่จัง", "แย่สุด",
+        "รำคาญ", "ห่วย", "แย่มาก", "แย่จริง", "แย่จัง", "แย่สุด",
         "แย่ที่สุด", "ไม่ไหวแล้ว", "ตีของกลับ", "ไม่เอาแล้ว",
         "เลวร้าย", "แย่เอามาก", "worst",
     )
+    _STRONG_ANGER_TOKENS = ("กาก",)
+
+    def _strong() -> bool:
+        return any(kw in _msg_low for kw in _STRONG_ANGER_PHRASES) or \
+            any(_toxic_token_present(_msg_low, t) for t in _STRONG_ANGER_TOKENS)
+
     _MILD_ANGER = (
         "ช้ามาก", "ช้าจัง", "ช้าเกิน", "ช้าสุด", "นานมาก", "นานเกิน",
         "รอนาน", "ไม่ตอบเลย", "ตอบช้า", "เงียบหาย", "ไม่มีคนตอบ",
         "ไม่มีใครตอบ", "ไม่มีการตอบ", "ช้าว่ะ", "ช้าเว้ย",
     )
-    if any(kw in _msg_low for kw in _STRONG_ANGER):
+    # 5F routing — promo/affiliate ไม่ใช่ลูกค้าโกรธ ("เฮ้ย รับคอมมิชชั่น");
+    # shop-script ที่รั่วเป็น inbound กันเฉพาะ mild ("อาจจะตอบช้าหน่อย")
+    _is_promo = any(t in _msg_low for t in _PROMO_TERMS)
+    _is_shop_script = any(t in _msg_low for t in _SHOP_SCRIPT_TERMS)
+    if _strong() and not _is_promo:
         _is_angry = True
-    elif any(kw in _msg_low for kw in _MILD_ANGER):
+    elif not _is_shop_script and _mild_anger_fires(_msg_low, _MILD_ANGER):
         _is_angry = True
-    # question-guard — ถามจริง ("ช้ามากไหม" / "รอนานไหมคะ") ไม่ใช่บ่น → ไม่ escalate
-    #   (ใช้เฉพาะ mild marker; strong marker เช่น "ผิดหวังไหม" แทบไม่มีในการใช้จริง)
-    if _is_angry and not any(kw in _msg_low for kw in _STRONG_ANGER):
-        if re.search(
-            r"(ไหม|มั้ย|หรอ|เหรอ|รึเปล่า|หรือเปล่า|ป่าว|บ้าง|แค่ไหน|เท่าไหร่|เท่าไหน|กี่วัน|กี่ชั่วโมง|เมื่อไหร่|เมื่อไหน|ตอนไหน|รึ)[คะค่ะครับ\s\?]*$",
-            _msg_low,
-        ):
-            _is_angry = False
+    # question-guard — ถามจริง ("ช้ามากไหม" / "รอนานไหมคะ" / "รอนานไหมครับแอด")
+    #   ไม่ใช่บ่น → ไม่ escalate (ใช้เฉพาะ mild marker)
+    if _is_angry and not _strong() and _is_question:
+        _is_angry = False
 
     if _is_human_request or _is_angry:
         _reason = "human_request" if _is_human_request else "customer_frustration"
