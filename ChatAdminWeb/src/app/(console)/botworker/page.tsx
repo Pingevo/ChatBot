@@ -1,12 +1,13 @@
 "use client";
-// Bot Worker — หน้าตาเหมือน /tickets แต่:
-//   - ซ้าย: ChatList (เดียวกับ tickets — ดึงจาก /admin/conversations)
-//   - กลาง: BotWorkerChatPanel — แสดงแชท 3 สี (user/zaapi/bot) ไม่มี composer
+// Bot Worker — parallel sandbox ของ /tickets (state แยกผ่าน test_status_conversation[botworker]):
+//   - ซ้าย: ChatList (เดียวกับ tickets — ดึงจาก /botworker/conversations)
+//   - กลาง: BotWorkerChatPanel — แสดงแชท 4 สี (user/zaapi/admin/bot) + composer
 //   - ขวา: ข้อมูล + ประวัติแชท (เหมือน tickets)
 //
 // ความแตกต่างจาก /tickets:
-//   - ไม่มี composer (อ่านอย่างเดียว — botworker รันอัตโนมัติ)
-//   - แสดง 3 สี: user (เทา) + zaapi (เขียว) + bot เรา (ฟ้า)
+//   - ทุก action (รับเรื่อง/โยนงาน/ตอบ/ปิด/เปิด) เขียน test store เท่านั้น — ไม่แตะ ticket จริง
+//   - admin reply เก็บใน botworker_messages (ไม่ส่ง Shopee ไม่เขียน messages_shp)
+//   - แสดง 4 สี: user (เทา) + zaapi (เขียว) + admin (สี profile) + bot เรา (ฟ้า)
 //   - ข้อความ bot มาจาก shadow_replies (ไม่ใช่ messages_shp)
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { ArrowLeft, Info, X, PanelRightClose, PanelRightOpen, Bot, AlertCircle, Headset, RotateCcw, Lock, UserCog, ChevronDown } from "lucide-react";
@@ -49,6 +50,7 @@ interface UnifiedMessage {
   mode?: string;
   origin?: string;
   image_desc?: string;
+  bubble_color?: string; // ⚡ สี bubble ที่ admin เลือก (จาก botworker_messages)
   // ⚡ rich media (parsed from raw_payload) — เหมือน /tickets
   message_type?: string;
   media?: { type: string; url?: string; thumb_url?: string; thumb_width?: number; thumb_height?: number; duration_seconds?: number };
@@ -105,7 +107,7 @@ export default function BotWorkerPage() {
     try {
       const r = await api().get<{ rows: Conversation[]; total_count: number; has_more?: boolean; cursor?: string | null }>(
         "/botworker/conversations",
-        { params: { limit: "200", include_count: "true", ...(searchQuery ? { q: searchQuery } : {}) }, timeout: 45000 }
+        { params: { limit: "200", include_count: "true", assigned_to: chatFilter, ...(searchQuery ? { q: searchQuery } : {}) }, timeout: 45000 }
       );
       const rows = r.data.rows || [];
       const total = r.data.total_count || rows.length;
@@ -127,7 +129,7 @@ export default function BotWorkerPage() {
     } finally {
       setLoadingConversations(false);
     }
-  }, [searchQuery]);
+  }, [searchQuery, chatFilter]);
 
   // ⚡ loadMore — โหลด page ถัดไป (tail) ตอน scroll ใกล้ล่าง
   const loadMore = useCallback(async () => {
@@ -136,7 +138,7 @@ export default function BotWorkerPage() {
     try {
       const r = await api().get<{ rows: Conversation[]; has_more?: boolean; cursor?: string | null }>(
         "/botworker/conversations",
-        { params: { limit: "200", cursor, ...(searchQuery ? { q: searchQuery } : {}) }, timeout: 45000 }
+        { params: { limit: "200", cursor, assigned_to: chatFilter, ...(searchQuery ? { q: searchQuery } : {}) }, timeout: 45000 }
       );
       const rows = r.data.rows || [];
       const existingIds = new Set([...conversations.map((c) => c.id), ...tail.map((c) => c.id)]);
@@ -153,7 +155,7 @@ export default function BotWorkerPage() {
     } finally {
       setLoadingMore(false);
     }
-  }, [cursor, hasMore, loadingMore, conversations, tail, searchQuery]);
+  }, [cursor, hasMore, loadingMore, conversations, tail, searchQuery, chatFilter]);
 
   // ⚡ combined conversations = head + tail (deduped)
   const allConversations = useMemo(() => {
@@ -222,14 +224,20 @@ export default function BotWorkerPage() {
     { enabled: !!selectedId }
   );
 
-  // Load close history
+  // ⚡ Load close history จาก test store (botworker) — แยกจาก ticket จริง
+  const loadBwCloseHistory = useCallback(async (id: string) => {
+    try {
+      const r = await api().get<{ close_history: CloseHistoryRecord[] }>(`/botworker/conversations/${id}/close-history`);
+      setCloseHistory(r.data.close_history || []);
+    } catch {
+      setCloseHistory([]);
+    }
+  }, []);
+
   useEffect(() => {
     if (!selectedId) { setCloseHistory([]); return; }
-    chatService
-      .closeHistory(selectedId)
-      .then((d) => setCloseHistory(d.history || []))
-      .catch(() => setCloseHistory([]));
-  }, [selectedId]);
+    loadBwCloseHistory(selectedId);
+  }, [selectedId, loadBwCloseHistory]);
 
   const handleSelect = useCallback((id: string) => {
     setSelectedId(id);
@@ -265,64 +273,97 @@ export default function BotWorkerPage() {
     setShowCloseModal(true);
   }, [selectedId]);
 
+  // ⚡ ปิดแชทใน sandbox — เขียน test_status_conversation เท่านั้น ไม่แตะ ticket จริง
   const handleClose = useCallback(
     async (data: { reason: string; category: ProblemCategory; resolution: string; note?: string }) => {
       if (!selectedId) return;
       setClosing(true);
       try {
-        await chatService.close(selectedId, data);
+        await api().post(`/botworker/conversations/${selectedId}/close`, data);
         setConversations((prev) =>
           prev.map((c) => (c.id === selectedId ? { ...c, status: "closed" as never } : c))
         );
         setShowCloseModal(false);
-        const d = await chatService.closeHistory(selectedId);
-        setCloseHistory(d.history || []);
-      } catch {
-        // ignore — keep modal open
+        await loadBwCloseHistory(selectedId);
+      } catch (e) {
+        catchError(e, "ปิดแชทไม่สำเร็จ");
       } finally {
         setClosing(false);
       }
     },
-    [selectedId]
+    [selectedId, loadBwCloseHistory]
   );
 
+  // ⚡ เปิดแชทใหม่ใน sandbox — เขียน test store เท่านั้น
   const handleReopen = useCallback(async () => {
     if (!selectedId) return;
     try {
-      await chatService.reopen(selectedId, "แอดมินเปิดแชทใหม่ (botworker)");
+      const r = await api().post<{ status?: string }>(`/botworker/conversations/${selectedId}/reopen`, {
+        reason: "แอดมินเปิดแชทใหม่ (botworker)",
+      });
       setConversations((prev) =>
-        prev.map((c) => (c.id === selectedId ? { ...c, status: "handoff" as never } : c))
+        prev.map((c) => (c.id === selectedId ? { ...c, status: (r.data.status || "open") as never } : c))
       );
-      const d = await chatService.closeHistory(selectedId);
-      setCloseHistory(d.history || []);
-    } catch {
-      // ignore
+      await loadBwCloseHistory(selectedId);
+    } catch (e) {
+      catchError(e, "เปิดแชทใหม่ไม่สำเร็จ");
+    }
+  }, [selectedId, loadBwCloseHistory]);
+
+  // ⚡ "รับเรื่อง" = self-assign ใน sandbox — เขียน test store, worker จะ skip แชทนี้
+  const handleHandoff = useCallback(async () => {
+    if (!selectedId) return;
+    try {
+      const r = await api().post<{ status?: string; assigned_to?: string; assigned_to_name?: string }>(
+        `/botworker/conversations/${selectedId}/accept`,
+        {}
+      );
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === selectedId
+            ? { ...c, status: (r.data.status || "open") as never, assigned_to: r.data.assigned_to, assigned_to_name: r.data.assigned_to_name }
+            : c
+        )
+      );
+    } catch (e) {
+      catchError(e, "รับเรื่องไม่สำเร็จ — อาจมีแอดมินคนอื่นรับไปแล้ว");
     }
   }, [selectedId]);
 
-  const handleHandoff = useCallback(() => {
-    if (!selectedId) return;
-    chatService.handoff(selectedId).catch((e) => catchError(e, "ส่งต่อแชทให้แอดมินไม่สำเร็จ"));
-    setConversations((prev) =>
-      prev.map((c) => (c.id === selectedId ? { ...c, status: "handoff" } : c))
-    );
-  }, [selectedId]);
-
+  // ⚡ โยนแชทให้ admin อื่นใน sandbox — เขียน test store เท่านั้น
   const handleTransfer = useCallback(async (newAdminId: string) => {
     if (!selectedId) return;
     try {
-      await api().post("/assignment/reassign", {
-        conversation_id: selectedId,
-        new_admin_id: newAdminId,
-        reason: "โยนแชทจากหน้า botworker",
-      });
+      const r = await api().post<{ status?: string; assigned_to?: string; assigned_to_name?: string }>(
+        `/botworker/conversations/${selectedId}/transfer`,
+        { admin_id: newAdminId }
+      );
       setConversations((prev) =>
         prev.map((c) =>
-          c.id === selectedId ? { ...c, assigned_to: newAdminId } : c
+          c.id === selectedId
+            ? { ...c, assigned_to: r.data.assigned_to, assigned_to_name: r.data.assigned_to_name, status: (r.data.status || "open") as never }
+            : c
         )
       );
-    } catch {
-      // ignore
+    } catch (e) {
+      catchError(e, "โยนแชทไม่สำเร็จ");
+    }
+  }, [selectedId]);
+
+  // ⚡ admin ตอบแชทใน sandbox — เขียน botworker_messages เท่านั้น ไม่ส่ง Shopee/messages_shp
+  const handleSend = useCallback(async (text: string) => {
+    if (!selectedId || !text.trim()) return;
+    try {
+      const r = await api().post<{ message?: UnifiedMessage; conflict?: boolean; assigned_to?: string }>(
+        `/botworker/conversations/${selectedId}/send`,
+        { text: text.trim() }
+      );
+      if (r.data.message) {
+        setMessages((prev) => (prev.some((m) => m.id === r.data.message!.id) ? prev : [...prev, r.data.message!]));
+      }
+    } catch (e) {
+      catchError(e, "ส่งข้อความไม่สำเร็จ");
+      throw e;
     }
   }, [selectedId]);
 
@@ -391,6 +432,7 @@ export default function BotWorkerPage() {
           onResolve={handleResolve}
           onReopen={handleReopen}
           onTransfer={handleTransfer}
+          onSend={handleSend}
           admins={admins}
         />
       </div>
@@ -503,11 +545,14 @@ interface BotWorkerChatPanelProps {
   onResolve?: () => void;
   onReopen?: () => void;
   onTransfer?: (newAdminId: string) => void;
+  onSend?: (text: string) => Promise<void>;
   admins?: AdminUser[];
 }
 
-function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onResolve, onReopen, onTransfer, admins = [] }: BotWorkerChatPanelProps) {
+function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onResolve, onReopen, onTransfer, onSend, admins = [] }: BotWorkerChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
   // ⚡ track ว่า user อยู่ใกล้ล่างไหม — ถ้าไม่ใช่ (กำลังเลื่อนขึ้นอ่าน) จะไม่ auto-scroll
   const wasNearBottomRef = useRef(true);
   const prevConvIdRef = useRef<string | null>(null);
@@ -641,6 +686,48 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
           </>
         )}
       </div>
+
+      {/* ── Composer — admin ตอบใน sandbox (เขียน botworker_messages, ไม่ส่ง Shopee) ── */}
+      {onSend && conversation.status !== "closed" && (
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (!draft.trim() || sending) return;
+            setSending(true);
+            try {
+              await onSend(draft);
+              setDraft("");
+            } finally {
+              setSending(false);
+            }
+          }}
+          className="p-3 border-t border-border bg-surface shrink-0"
+        >
+          <div className="flex items-end gap-2">
+            <textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  e.currentTarget.form?.requestSubmit();
+                }
+              }}
+              placeholder="ตอบแชทใน sandbox... (Enter ส่ง · Shift+Enter ขึ้นบรรทัด) — ไม่ส่งถึงลูกค้าจริง"
+              rows={2}
+              className="flex-1 resize-none rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-1 focus:ring-brand"
+            />
+            <Button type="submit" size="sm" disabled={!draft.trim() || sending} className="shrink-0">
+              {sending ? "กำลังส่ง..." : "ส่ง"}
+            </Button>
+          </div>
+          {conversation.status === "bot" && (
+            <div className="text-[10px] text-text-subtle mt-1.5">
+              การตอบจะ assign แชทนี้ให้คุณใน sandbox — บอทจะหยุดตอบจนกว่าจะปิด/เปิดแชทใหม่
+            </div>
+          )}
+        </form>
+      )}
     </div>
   );
 }
@@ -655,10 +742,10 @@ function UnifiedBubble({ msg, customerName, customerAvatar }: { msg: UnifiedMess
   const isZaapi = msg.role === "zaapi";
   const isBot = msg.role === "bot";
   const isAdmin = msg.role === "admin";
-  // ⚡ ดึง admin_id + bubble_color ปัจจุบันจาก authStore — admin ปัจจุบัน → ใช้สีที่ตั้งใน profile
+  // ⚡ สี admin — ใช้ bubble_color ที่บันทึกตอนส่ง (botworker_messages) ก่อน แล้ว fallback สี profile ปัจจุบัน
   const myAdminId = useAuth((s) => s.user?.admin_id);
   const myBubbleColor = useAuth((s) => s.user?.bubble_color);
-  const adminColor = adminBubbleColor(msg.admin_id, myAdminId, myBubbleColor);
+  const adminColor = msg.bubble_color || adminBubbleColor(msg.admin_id, myAdminId, myBubbleColor);
 
   // Multi-bubble support (bot แบ่งคำตอบด้วย |||)
   const segments = !isUser ? splitAnswerSegments(msg.text) : [msg.text];
@@ -772,6 +859,7 @@ interface AdminRow {
   username?: string;
   role: string;
   active: boolean;
+  is_accepting_chats?: boolean; // ⚡ eligibility — พักรับแชทไม่ให้โยน
 }
 
 function BotWorkerTransferDropdown({
@@ -790,7 +878,10 @@ function BotWorkerTransferDropdown({
     try {
       const r = await fetch("/api/users/list");
       const data = await r.json();
-      const list = (data.users || []).filter((u: AdminRow) => u.role === "admin" && u.active);
+      // กรองเฉพาะ role=admin + active + เปิดรับแชทอยู่ (พักรับแชทไม่แสดง)
+      const list = (data.users || []).filter(
+        (u: AdminRow) => u.role === "admin" && u.active && u.is_accepting_chats !== false
+      );
       setAdmins(list);
     } catch {
       // ignore
@@ -840,6 +931,9 @@ function BotWorkerTransferDropdown({
                 {a.admin_id === currentAdminId && <span className="text-[10px] text-text-muted">ปัจจุบัน</span>}
               </button>
             ))}
+            {admins.length === 0 && !loading && (
+              <div className="px-3 py-3 text-xs text-text-muted text-center">ไม่มีแอดมินที่เปิดรับแชท</div>
+            )}
           </div>
         </>
       )}

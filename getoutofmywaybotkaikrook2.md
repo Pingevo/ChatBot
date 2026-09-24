@@ -20,6 +20,39 @@
 
 ## กำลังทำ (active)
 
+### ✅ คัดลอก log ไม่ได้ทั้ง 2 ปุ่ม (ราย log + กอปทั้งหมด) หน้า testchat (2026-09-23) — fixed + tsc ผ่าน
+
+- **error:** `formatLogForCopy` crash `s.cost_usd.toFixed` on undefined → handler ตายก่อนถึง clipboard → กดปุ่มไหนก็ไม่ได้
+- **เกิดเพราะ:** debug step ใหม่ `RetrievalProfile`/`GroupedRetrievalShadow` (Task 4B/5B) ไม่มี model/tokens/time_s/cost fields — formatter เรียก `.toFixed` ตรงๆ
+- **วิธีแก้:** guard `?? "—"`/`?.toFixed` ตาม pattern line 131 + UI render (?? 0) — TestChatClient.tsx:160-161
+- **verify:** `tsc --noEmit` ผ่าน; step ปกติ output เดิม · debug step แสดง "—" + input/output (ข้อมูลจริงของมัน)
+
+### ✅ อัปเดต master retrieval plan: 4E multi-slot + handoff/workflow audit (2026-09-23) — docs-only เสร็จ
+
+- **ขอบเขต:** แก้เฉพาะ `docs/plans/2026-09-21-legacy-shopee-evidence-retrieval-implementation-plan.md` เพื่อเพิ่มสิ่งที่คุยกันหลัง Task 4D: multi-product/multi-slot retrieval, handoff admin eligibility, และ trigger/workflow audit
+- **ห้าม:** ยังไม่แก้ runtime code, ไม่แตะ ChatAdminWeb/botworker/v2/v3, ไม่เริ่ม Task 4E implementation จริง
+- **เหตุผล:** profile แบนตัวเดียวเสี่ยงปน constraint เมื่อคำถามมีหลายสินค้า; old admin first ต้องผ่าน eligibility; workflow/trigger ต้องถูก audit ว่าไม่ตอบทับ human handoff และไม่ fake handoff
+- **เพิ่มใน plan:** Global constraints/review focus/target flow/file structure/interface เพิ่ม `RetrievalSlot`; เพิ่ม Task 4E, Task 11A, Task 11B; final replay gate และ self-review รู้จัก test ใหม่
+- **เพิ่มหลัง user ถาม trigger:** Task 11B ต้อง audit trigger match mode ชัดเจน (`exact`, `contains`, `keyword-any/all`, `regex`, `fuzzy`, `semantic`) และระบุว่า exact-only เช่น "สวัสดีมินเนี่ยน" จะไม่ hit "ดีจ้ามินเนี่ยน" เว้นแต่ trigger นั้นตั้ง mode ที่เหมาะสม
+- **verify:** `git diff --check` ผ่าน; markdown code fence count 168 เป็นเลขคู่
+
+### ✅ หัวข้อ "ทดสอบบอท" มองไม่เห็นบน laptop (2026-09-22) — fixed root cause + verified
+
+- **error:** h1 "ทดสอบบอท — {label}" หน้า testchat มองไม่เห็น **เฉพาะจอ ≥1280px (xl)** — จอเล็กเห็นปกติ
+- **เกิดเพราะ:** `--color-base: #ffffff` ใน `@theme` (globals.css) ชนกับ utility `text-base` (font-size) ของ Tailwind → `.text-base` ถูก gen เป็น **color ขาว** แทน font-size (font-size หายไปเลย) → `xl:text-base` บน h1 ทำตัวขาวบนพื้นขาวตอน ≥1280px; `.text-text`/`.text-brand` แพ้เพราะ rule ใน media query มาทีหลังใน cascade
+- **แก้ด้วย:** ลบ `--color-base` ออกจาก @theme (ซ้ำ `--color-bg`/`--color-surface` ขาวเหมือนกัน) + `bg-base`→`bg-surface` 11 จุด (shop-settings/persona/test-results — สีขาวเดียวกัน หน้าตาไม่เปลี่ยน) + h1 คง `text-brand` (#8b1e28 maroon ตามที่ user ขอ)
+- **verify:** compiled CSS จาก dev server — `.text-base`/`.xl:text-base` กลับเป็น `font-size: var(--text-base)` แล้ว ไม่มี color ขาว; reproduce ด้วย Playwright+CSS จริงพิสูจน์ก่อนแก้ว่า h1 = rgb(255,255,255) ที่ 1440px
+- **ผลกระทบเคสอื่น (แก้ latent bug ด้วย):** ทุก `sm:/xl:text-base` เคยเป็นตัวขาวที่ breakpoint นั้น (เช่น `text-sm sm:text-base` ขาวตั้งแต่ 640px) · `text-base` ~20 จุดได้ font-size 1rem กลับมา (render เดิม 16px เท่ากัน → หน้าตาไม่เปลี่ยน) · `bg-base`→`bg-surface` สีเดียวกัน
+
+### ✅ ShadowStatPanel "All History" ใช้งานไม่ได้ (2026-09-22) — fixed + verified → ย้ายไป "ผ่านแล้ว"
+
+### 🔄 botworker history ขาด workflow replies (2026-09-22) — รออนุญาตแก้
+
+- **อาการ:** `getGroupedHistoryForBot` (messageService.ts) เลือกคำตอบบอทจาก `shadow_replies` (origin worker/workflow) แต่ lookup ด้วย `inbound_message_id` ดิบ — `storeWorkflowDelivered` (botWorkerService.ts:168) เขียนเป็น `{msgId}__wf{i}` เพื่อเลี่ยง unique index → workflow answers ไม่เคยเข้า history (fallback Zaapi ผิด design "คำตอบบอทเราชนะ")
+- **user confirm intent:** คำตอบจาก workflow/trigger/vision ทุก path ต้องเข้า botworker history
+- **แพลน (เสนอ user):** strip suffix `__wf\d+$` ตอนสร้าง `botReplyByInboundId` + รวมหลาย delivered ต่อ inbound (ตามลำดับ suffix) เป็น model text เดียว — ไม่แตะ schema/ข้อมูลเก่า
+- **ผลกระทบ:** เฉพาะ history pairing ของ workflow replies · trigger/bot/vision path ใช้ id ดิบอยู่แล้วไม่เปลี่ยน
+
 ### ✅ GitHub issue #19: LLM พิมพ์ `||` แทน `|||` → การ์ดสินค้าติดในฟองข้อความ (2026-09-21) — fixed + verified → ย้ายไป "ผ่านแล้ว"
 
 ### ✅ Legacy Shopee retrieval redesign master plan (2026-09-21) — plan เสร็จ + self-review ผ่าน
@@ -29,6 +62,315 @@
 - **ขอบเขต:** แผน 14 tasks เริ่ม measurement/gold gate → profile/availability/evidence/selection → compat negative-proof → cleanup/replay; ไม่แตะ v2/v3 หรือ product code
 - **ไฟล์:** `docs/plans/2026-09-21-legacy-shopee-evidence-retrieval-implementation-plan.md`
 - **verify:** 2,121 lines หลัง ponytail review · ตัด field/key/report ที่ไม่มี consumer · ใช้ dedupe key เดียว · ระบุ gold drafter/private-metadata boundary ครบ · placeholder/duplicate-owner scan clean · `git diff --check` ผ่าน
+
+### ✅ Legacy retrieval Task 1: measurement + human gold gate (2026-09-22) — release gate ผ่าน
+
+- **งาน:** สร้าง offline evaluator, gold validator/drafter, review UI และ final gold set จาก replay + human review บน branch `feature-legacy-shopee-evidence-retrieval`
+- **ทำแล้ว:** `validate_gold_retrieval.py` + `eval_retrieval.py` + `draft_gold_retrieval.py` + tests ครบ; draft `gold_retrieval.draft.jsonl` 82 rows; `gold_review.html` + `gold_retrieval.draft.js` (approve/reject + correction form + image cards)
+- **human review:** `gold_retrieval.review (3).json` = approved 67 / rejected 15 / pending 0; rejected ทุก row มี correct_answer
+- **promoted corrections:** 12/15 rejected promote เข้า gold ด้วย `CORRECTED` map (item IDs จาก catalog lookup จริง) — Mi17, iPhone13-CTL, q005/q007/q079/q184/q187/q203/q204/q245/q047/q051; exclude q132 (correction ไม่ชัด) + test_200-063/064 (infra 429)
+- **gap fill:** gold สุดท้าย **103 rows** — history 12 (10 conv-derived + Mi17 + old-order), out_of_stock 3 (Hagibis stock_info=0 verified), unlisted/discontinued 3+1, refund 3, tax_invoice 5, real handoff 15, old_order_item 1, Mi17 follow-up 1; `must_not_phrases` ครบทุก negative/sensitive row (substring-safe เท่านั้น)
+- **validator:** เพิ่ม `validate_gaps` — quota 8 ข้อ + บังคับ must_not_phrases ใน negative modes/sensitive intents; CLI ตรวจ rows+gaps
+- **eval fix:** `_record_answer_mode` รู้จัก policy sources (`return_refund_ask_order`, `cert_answer`, `warranty_claim_first_message`) สอดคล้อง draft inference — "ขอเลขออเดอร์" ไม่ถูกนับเป็น recommend อีก
+- **baseline (freeze):** `unit_reg_questions_2026-09-18.jsonl` → n=300, products=177, listing_diversity=0.810, dup_pool_rate=0.492, live_ratio_top5=0.818, unit_share=0.393, fallback_rate=0.050, avg_pool=7.847 · gold metrics n_gold=72 → type_purity=0.237, acceptable_hit=0.200, must_not_violation=1.000 (q184/q005 wrong items ใน pool = bug จริง), phrase_violation=0.182 (q203/q204/q245/q300 false claims), answer_mode=0.917 (mismatch 6/72 ล้วน bug จริงจาก review)
+- **verify:** tests 19/19 ผ่าน · validator ผ่านทั้ง schema+gap · ยังไม่แตะ runtime code — **Task 1 จบ พร้อมเริ่ม Task 2 availability resolver หลังอนุมัติ**
+
+### ✅ ทบทวนและแก้ master implementation plan จากโค้ด/ข้อมูลปัจจุบัน (2026-09-22) — plan review เสร็จ
+
+- **ขอบเขต:** แก้เฉพาะ `docs/plans/2026-09-21-legacy-shopee-evidence-retrieval-implementation-plan.md`; ยังไม่แก้ runtime code
+- **หลักฐานโค้ดที่ตรวจใหม่:** callsite `fetch_products`/compat/web/KB ทั้งหมด, ลำดับ KB กับ conversation anchor ใน `app.py`, unit early-return ใน `product_store`, full-model/card truncation, order item fallback ใน `order_flow`, และ tracking lookup ใน `order_store`
+- **หลักฐาน collection จริง:** อ่านแบบ read-only ผ่าน `load_dotenv` ครบ `ShpProducts`, `ShpOrders`, `itStock.Products`, `knowledge_base`, `kb_products`, `kb_qa`, `kb_raw`, `image_texts`, `sellable_units`, `conversation_products`; ไม่พิมพ์ secret/PII และไม่เขียน DB
+- **ข้อค้นพบหลัก:** tracking จริงอยู่ top-level แต่โค้ดค้น nested package; ID ข้าม collection เป็น float/int/string ต้อง normalize; unit model stale 47 refs; OCR ครอบคลุม image id 19.23%; order เก่าบางรายการไม่อยู่ catalog ปัจจุบัน; `seller_stock` กับ summary ตรงกันด้าน zero/positive แต่ต่างจำนวน 62 units จึงต้อง reuse `_shopee_stock`; approved gold 67 rows ยังไม่มี history/Mi17/must-not coverage ที่พอ
+- **แก้แผน:** เพิ่ม gold gap gate, full-live candidate refresh, bounded unit+legacy source union ก่อน selection, immutable profile ก่อน KB/product fetch, normalized item-id-first KB merge, shop-scoped order lookup, compatibility negative-proof, รายการ duplicate logic ที่ต้องลบ และ final replay gate
+- **refine หลัง user review:** availability resolver ต้องถือ `stock_info_v2.summary_info.total_available_stock` เป็น stock truth ของ variant/model; fallback ไป `shopee_stock`/`seller_stock` เฉพาะเมื่อ summary field หายหรืออ่านไม่ได้เท่านั้น ไม่ใช่เมื่อ summary มีค่า `0`; เพิ่ม test case ใน plan กัน regression summary=0 แล้วหลุดไป fallback
+- **ไม่เพิ่ม abstraction เกินจำเป็น:** ตัดข้อเสนอ `order_items_to_anchor_cards()` ที่ไม่มีจริง; ใช้ minimal-card fallback เดิมใน `order_flow`; ไม่สร้าง stock formula/ID normalizer/pipeline order ซ้ำ
+- **verify เอกสาร/ฐานวัด:** stale-name scan clean, task headings ครบ Task 1-14 + Task 5A recall subtask, code fences 140 จุดสมดุล, `git diff --check` ผ่าน; evaluator/drafter/gold-validator tests 13/13 ผ่าน และ approved gold validator ผ่าน; ยังไม่แตะ runtime code
+
+### ✅ Master plan Task 2: availability single owner (2026-09-22) — implement + verified รออนุมัติ commit
+
+- **error:** สินค้าที่มีของจริงถูกตอบ "ไม่มีสินค้า/หมดสต็อก" (Mi17 case จาก review) · summary `total_available_stock=0` ไหลไป fallback ได้ · availability semantics กระจายหลายจุดต่างกันเงียบๆ
+- **root cause:** `_shopee_stock()` ใช้ `if total_available` (truthiness) → summary=0 ถูกมองเป็น missing → fallback `shopee_stock[]` เอาค่าอื่นมาทับ fact "หมด"; สูตร sellable ซ้ำใน `_doc_sellable` / `to_product_card` / `units._live_sellable` / `app.py` recompute (`_available_for_sale`) / `_doc_stock_total` — ไม่มี owner เดียว
+- **fix plan (ตาม plan §Task 2):** แก้ `_shopee_stock` ให้แยก "field มีค่า" vs "ค่าเป็นตัวเลข" (summary→shopee_stock→seller_stock chain; 0 คือ fact) · เพิ่ม `_stock_info_has_any_stock_source()` + `resolve_availability()` เป็น owner เดียวคืน `{catalog_status, available_for_sale, answerable, reason, total_stock}` · wire เฉพาะ duplicated formulas · ห้ามแตะ v2/v3, ห้ามสร้าง `_stock_from_model()`
+- **กระทบเคสอื่น (impact analysis):**
+  - summary=0 แต่ shopee/seller>0 → out_of_stock (เดิม active ผิด — bug ที่ต้องแก้)
+  - ไม่มี stock source อ่านได้ → `active_unknown_stock` + answerable (เดิม sold_out ผิด)
+  - unit ที่ model_id หายจาก live listing → `model_missing` ไม่ใช่ sold-out ทั้ง listing
+  - `build_sellable_units.py` ได้ semantics ใหม่ผ่าน `_shopee_stock` อัตโนมัติ
+  - `item_status:"NORMAL"` mongo query filters + LLM prompt notes ไม่แตะ — ไม่ใช่ stock formula
+- **TDD:** `docs/test/test_availability.py` + `test_availability_wiring.py` ก่อนแก้ runtime — RED ยืนยัน (AttributeError resolver + `assert 99 == 0` พิสูจน์ bug)
+- **วิธีแก้ (implement แล้ว):**
+  - `_stock_info_has_any_stock_source()` — แยก "มี source อ่านได้" (numeric check; seller เฉพาะ if_saleable!=False) ออกจาก "อ่านได้ 0"
+  - `_shopee_stock()` — แก้ `if total_available` → `isinstance(total_available, (int,float))`: summary=0 คืน 0 ทันที ไม่ไหลไป fallback; chain summary→shopee_stock→saleable seller_stock→0
+  - `resolve_availability(card_or_doc, *, model_doc=None)` — owner เดียวคืน `{catalog_status, available_for_sale, answerable, reason, total_stock}`; doc มี model[] รวมเฉพาะ MODEL_NORMAL; card input fallback ไป total_stock/stock เฉพาะเมื่อไม่ส่ง model_doc
+  - wiring: `_doc_sellable`/`_doc_stock_total`/`to_product_card` (resolve จาก model เต็มก่อนตัด variants[:20]; card เพิ่ม `catalog_status`, `sold_out`=out_of_stock เท่านั้น, `total_stock` int|None) · `units._live_availability` คืน (status, availability, model_status) + model หาย→`model_missing`/unlisted · `units._live_sellable`/`to_unit_card` (เพิ่ม `catalog_status`+`availability_reason`) · `app.py` recompute ใช้ resolver + setdefault catalog_status; `_has_unlist`/`_has_sold_out` อ่าน catalog_status
+- **verify:** pytest `test_availability.py`+`test_availability_wiring.py` = **32/32 ผ่าน**; gold suite 19/19 ผ่าน; `py_compile` 3 ไฟล์ OK; `git diff --check` OK; `test_unit_card_fields`/`test_route_context`/`test_guards`/`test_timeline_card_refresh` ผ่าน (แก้ stale assert EC4==10→>0 — fail บน HEAD เดิมด้วย); `test_sellable_units` fail เดิมจากนับ stale 26970≠27807 (ไม่เกี่ยว)
+- **real-data sanity (export 11,692 docs):** NORMAL→active 2096 / out_of_stock 1264, UNLIST→unlisted 7089, *DELETE+BANNED→discontinued 1203, REVIEWING→unknown 40; ทุก model มี numeric summary → fallback path ไม่ fire → **behavior change ≈0 บนข้อมูลปัจจุบัน**, fix กัน data shape ที่ summary=0/หาย
+- **ไม่แตะ:** v2/v3 ทั้งหมด · `item_status:"NORMAL"` mongo query filters · LLM prompt notes · `_stock_from_model()` ไม่ได้สร้าง
+
+### ✅ Master plan Task 3: evidence card contract (2026-09-22) — implement + verified รออนุมัติ commit
+
+- **งาน:** สร้าง `chatbot/shopeechat/retrieval_policy.py` — contract กลาง `_evidence`/`_selection_reason` บน product cards (observe-only)
+- **ทำไม:** cards มาจากหลายแหล่ง (product_store/units/KB/anchor/order/compat/web) แต่ไม่มีภาษาเดียวกันบอกว่ามาจากไหน·หลักฐานอะไร·ถูกเลือกเพราะอะไร — Task 6/8/10 ต้องใช้ต่อ
+- **spec (user):** `make_evidence_card(product, *, source, evidence=None, selection_reason=None)` — ไม่ mutate, merge `_evidence.sources` ไม่ซ้ำ, preserve existing `_evidence`, normalize item_id/model_id→str (float→int-str ตาม audit), set `_selection_reason`; `strip_private_evidence(product)` — ลบทั้ง 2 keys, ไม่ mutate (รองรับ list ด้วยสำหรับ response boundary ใน Task 8)
+- **ห้าม:** เปลี่ยน ranking/retrieval/prompt/จำนวน products · หลุด `_evidence`/`_selection_reason` ใน public response · แตะ v2/v3 · สร้าง ranker
+- **TDD:** `docs/test/test_retrieval_evidence.py` ก่อนสร้าง module — **ยังไม่ wire app.py** (observe-only, Task 8 ค่อย wire strip ที่ boundary)
+- **implement (แล้ว):** `retrieval_policy.py` — `make_evidence_card` (copy, merge sources dedup, `_norm_id` float→int-str, facts merge, `_selection_reason`) + `strip_private_evidence` (card หรือ list) + `PRIVATE_KEYS`; ไม่ import heavy modules/app
+- **verify:** `test_retrieval_evidence.py` **14/14 ผ่าน** (RED ยืนยัน ImportError ก่อน) · availability+gold suite 51/51 ผ่าน · py_compile 4 ไฟล์ OK · `git diff --check` OK
+- **behavior change:** ไม่มี — ไฟล์ใหม่เท่านั้น ไม่ wire app.py (observe-only ตาม plan; Task 8 wire strip ที่ response boundary)
+- **impact:** ไฟล์ใหม่เท่านั้น — zero behavior change by construction; SRS เพิ่ม §6.27
+
+### ✅ Master plan Task 4A: RetrievalProfile owner กลางของ request facts (2026-09-22) — implement + verified รออนุมัติ commit
+
+- **งาน:** เพิ่ม `@dataclass(frozen=True) RetrievalProfile` + `build_retrieval_profile()` ใน `route_context.py` — โจทย์กลางก่อนดึงสินค้า (contract-only, **ยังไม่ wire app.py/flow**)
+- **ทำไม:** ตอนนี้ facts (type/subtype/device/model/shop) ถูก re-derive ซ้ำหลายจุดจาก message/intent/history คนละวิธี → Mi17 bug: "ที่ใช้กับ mi 17 ultra" หลังถามสายชาร์จ ถูกสกัดเป็น phone แทน charger+cable — ถ้า profile ผิดตั้งแต่ต้น rank ดีแค่ไหนก็ดึงของผิด
+- **spec (user):** precedence ต่อ field — shop/platform=arg เท่านั้น · product_types: current→anchor→intent(≥0.7)→bounded history · subtype: strong current→anchor→intent(≥0.7)→history→weak current · model_codes: current→anchor→history(follow-up) · target_device: current→intent→history(compat follow-up เท่านั้น) · availability/compat_mode: deterministic mapping เท่านั้น · history อ่าน user ใหม่สุด ≤4, ไม่ concatenate · intent = proposal ไม่ใช่ truth
+- **reuse:** `_detect_product_types`/`_detect_charger_subtype`/`_extract_device_token`/`_extract_codes` ผ่าน lazy import — ห้าม copy regex table · move `_COMPARISON_FOLLOWUP_KW`/`_SUPERLATIVE_KW`/`_SINGLE_ITEM_REF_KW` จาก app.py มา route_context (app.py alias กลับ — ไม่เปลี่ยน flow, plan กำหนดให้ owner คือ route_context, Task 9 ลบ consumers ที่เหลือ)
+- **ห้าม (4A):** ย้าย app.py flow ก่อน KB · pass profile เข้า product_store/units/KB/device_compat/web_search · เปลี่ยน ranking/retrieval/selection · hardcode Mi17 case-by-case · แตะ v2/v3
+- **TDD:** `docs/test/test_retrieval_profile.py` ก่อน — RED ยืนยัน AttributeError → GREEN 15/15
+- **implement (แล้ว):** `route_context.py` — `RetrievalProfile` (frozen) + `build_retrieval_profile` + helpers `_bounded_history_facts`/`_variant_terms`/`_resolved_intent`/`_availability_mode`/`_compat_mode`/`_subtype_explicit`/`_id_str` + `_INTENT_MAP`; model-code token ≠ device (เช่น HA835 → code ไม่ใช่ target_device); subtype ⇒ charger family merge
+- **app.py:** เพิ่ม `route_context as _rc` ใน import + alias constants 3 ตัวกลับ — **ไม่มี flow/logic เปลี่ยน** (tuple เดิมทุกประการ)
+- **verify:** profile **15/15** · suite รวม (evidence+availability+gold) **80/80** · py_compile 5 ไฟล์ OK · `git diff --check` OK · app import OK · script regressions: route_context ALL PASS / car_charger 16/16 / subtype parity 42/42 / guards / unit_card_fields ผ่าน
+- **verify กับ MongoDB จริง:** `docs/test/test_retrieval_profile_db.py` (load_dotenv→get_client) **17/17** — KingGadgets มี cable sellable จริง 56 รายการ (พิสูจน์ "ไม่มีสินค้า" เป็น false ตั้งแต่ profile) · real anchor cards → compare + float item_id → int-str ถูก · real model code (W01) → answerable_all + ไม่ถูกนับเป็น device
+
+### ✅ Master plan Task 4B: build profile once ใน app.py ก่อน KB (2026-09-22) — implement + verified รออนุมัติ commit
+
+- **งาน:** `app.py` — resolve conversation active ครั้งเดียวก่อน `lookup_kb` + สร้าง `_retrieval_profile` หลัง intent/anchor blocks (observe-only เท่านั้น)
+- **ทำไม:** เดิม CONV-ACTIVE เรียก `resolve_active_by_message` หลัง KB (~2547) → KB/product fetch ไม่มีโจทย์กลาง; Mi17 follow-up ขาด charger+cable+device facts ตอนดึงสินค้า
+- **จุดวาง:** ก่อน `ขั้นที่ 1: lookup_kb` — หลัง warranty/general/brand early-returns (ข้าม wasted read บน path ที่ไม่ดึงสินค้า) แต่ก่อน candidate fetch แรก
+- **hoist:** `resolve_active_by_message` + `_cur_model_kw` computation → `_conv_active_card`/`_conv_model_kw` — pure read, timeline ไม่มี write คั่น (add_product อยู่ 921/1076 ก่อน intent, 4760 หลังตอบ) → CONV-ACTIVE reuse ผลเดิม · **resolver ยังถูกเรียกครั้งเดียว**
+- **anchor collect:** `anchor_card`(tagged) + `_hybrid_anchor_card` + `_conv_active_card` + `_anchor_compare_ctx` current/previous (dedupe)
+- **debug:** เพิ่ม `route_context.profile_debug()` → append step "RetrievalProfile" เข้า `_steps` (facts เท่านั้น ไม่ใส่ history dump)
+- **equivalence proof:** `_cur_model_kw` ยัง define เฉพาะใน block (guard ที่ ~4063 ใช้ try/NameError เดิม) · subtype-mismatch/new-topic/compat guards ใน CONV-ACTIVE ไม่แตะ · LINK-FOLLOWUP order เดิม
+- **TDD pins:** `profile_debug` shape + `build_retrieval_profile` อยู่ก่อน `lookup_kb` ใน source + `resolve_active_by_message` count==1
+- **verify:** profile **18/18** · suite **83/83** · py_compile 5 ไฟล์ OK · app import OK · `git diff --check` OK · regressions: route_context / qtype guards 27/27 / timeline_card_refresh 8/8 (Mongo จริง) / guards / unit_card_fields ผ่าน
+- **behavior change:** ไม่มี (observe-only) — profile ไม่ถูกใช้ filter/rank/select; ข้อยกเว้นเดียว: conv request ทุกอันมี timeline read เพิ่ม 1 ครั้งแม้ link-followup path (cost เล็ก ไม่เปลี่ยนคำตอบ)
+- **ไม่แตะ:** v2/v3 · fetch_products signature · units/device_compat/web_search/knowledge_base · ranking/selection/prompt · ยังไม่ทำ 4C/4D/5
+- **behavior change:** ไม่มี — constants alias ค่าเดิม (profile wire เข้า `app.py` ใน Task 4B ด้านล่าง)
+- **ไม่แตะ:** v2/v3 · fetch_products signature · units/device_compat/web_search/knowledge_base · ranking/selection/prompt · ไม่มี hardcode Mi17 case-by-case
+
+### ✅ Master plan Task 4C: wire profile ผ่าน gateways (2026-09-22) — implement + verified รออนุมัติ commit
+
+- **งาน:** เพิ่ม `retrieval_profile: RetrievalProfile | None = None` (ท้ายสุด) ให้ `fetch_products`/`fetch_units`/`fetch_unit_cards`/`lookup_kb`/`qa_context`/`_device_spec_lookup`/`reanswer` + app.py ส่ง `_retrieval_profile` ทุก legacy callsite — **pass-through เท่านั้น ยังไม่เปิดสวิตช์**
+- **callsite inventory (ก่อนแก้):** app.py: lookup_kb×2 (1858, 4190) · fetch_products×8 (1970, 1982, 3661, 3715, 3732, 3973, 4021, 4215) · _device_spec_lookup×2 (2186, 4486) · qa_context (4503) · reanswer×2 (2296, 4668) · product_store→units.fetch_unit_cards (3052) · device_compat→fetch_products (809, 879, 951) · web_search→fetch_products (786, 809) + lookup_kb (828) · **chat_v2/chatbotv3 ห้ามแตะ** (default None → เดิม)
+- **ห้าม:** ใช้ profile filter/rank/select · source union · live refresh · แก้ signature แบบ break callers
+- **ทำแล้ว:** TYPE_CHECKING import ทั้ง 5 ไฟล์ (device_compat เพิ่ม `from typing import`) · param ท้ายสุด default None · forwarding: fetch_products→fetch_unit_cards · fetch_unit_cards→fetch_units · _device_spec_lookup→fetch_products×3 · reanswer→fetch_products×2+lookup_kb · app.py `retrieval_profile=_retrieval_profile` ×15 callsite
+- **TDD pins:** `test_retrieval_profile_wiring.py` ใหม่ 13 tests — signature+default None+last-param · fetch_unit_cards forward (monkeypatch fetch_units) · no `retrieval_profile.` attr-read ใน 5 gateways · internal forward ใน product_store/device_compat/web_search · app pass ≥15 · v2/v3 untouched
+- **verify:** wiring 13/13 · suite **96/96** · py_compile 7 ไฟล์ OK · app import OK · diff --check OK · route_context/guards(27)/unit_card_fields ผ่าน
+- **behavior:** ไม่เปลี่ยน — param ทั้งหมด default None, callee ไม่อ่าน field ใด (pin โดย test_profile_not_read_in_gateways); callers เดิม (chat_v2/chatbotv3) ไม่ส่ง param → เดิม 100%
+
+### ✅ Master plan Task 4D: profile-aware retrieval hints (2026-09-23) — implement + verified รออนุมัติ commit
+
+- **งาน:** เปิดใช้ `RetrievalProfile` ใน `fetch_products`/`fetch_units`/`fetch_unit_cards` แบบ conservative recall — profile=None → path เดิมเป๊ะ
+- **fields ที่ใช้จริง (product_store.fetch_products):**
+  - `product_types` → `exact_product_types` (override param > profile > detect; ว่าง→fuzzy เดิม)
+  - `subtype` → subtype source `override > _prof_sub > detect` ทั้ง 5 จุด (shorthand boost + 4 filter sites)
+  - `model_codes` → merge เข้า `aug_tokens`/`model_tokens`/`_raw_toks` + **supplement ใหม่**: bounded item_name regex หลัง subtype re-filter ก่อน `to_product_card` (code-hit ไม่โดน type/subtype narrowing — แก้ที่ regex path ไม่มี code recall เดิม aug_tokens อยู่เฉพาะ vector path)
+  - `compat_mode != none` → `is_compat_check=True` (pool กว้าง + ข้าม unit index — เส้น web_search requery ที่ไม่ส่ง flag ได้ compat sweep ด้วย)
+  - `availability_mode=answerable_all` → `filter_unavailable=False` (spec/compare/history เห็นของหมด/เลิกขาย); sellable_first มีอยู่แล้วใน `_rerank_by_promo_latest` (sellable เป็น sort key แรก)
+  - unit gate: profile present → ไม่เรียก `resolve_route` ซ้ำ
+- **units.py:** `fetch_units` types/subtype/codes จาก profile เมื่อมี (param > profile > route) · `fetch_unit_cards` skip resolve_route เมื่อมี profile
+- **ไม่ใช้:** `target_device` (ยังไม่ inject เข้า query — message มีอยู่แล้ว; ไม่สรุป compat เอง) · `variant_terms` · `fact_sources` · `anchor_item_ids`
+- **behavior change:** มีเจตนาเฉพาะ profile-backed calls (app.py เท่านั้น — v2/v3 ไม่ส่ง profile → เดิม 100%): Mi17 case ตอนนี้ query มี charger regex + cable filter แทน shop-only query
+- **TDD pins (ใหม่ `test_retrieval_profile_hints.py` 10 tests):** profile types→query regex · None→legacy · subtype→cable filter · codes→bounded item_name regex · compat→skip unit index · answerable_all→sellable_only=False · units codes+skip-resolve · unit_cards skip-resolve · sellable_first pool ไม่ว่าง
+- **แก้ 4C pin:** `test_profile_not_read_in_gateways` เหลือ knowledge_base/device_compat/web_search (4D ไม่แตะ behavior สามไฟล์นี้)
+- **verify:** hints 10/10 · suite **106/106** · py_compile 7 ไฟล์ OK · diff --check OK · regressions: route_context/guards(27)/unit_card/car_charger(16)/subtype parity(42) ผ่าน
+- **ไม่แตะ:** app.py (0 บรรทัด) · device_compat/knowledge_base/web_search behavior · v2/v3 · ChatAdminWeb/botworker · ranking/prompt/response shape · ไม่มี source union/live refresh · ยังไม่ทำ Task 5/5A
+
+#### Phase 4D Hardening (2026-09-23) — implement + verified รออนุมัติ commit รวมกับ 4D
+
+- **subtype fail-open:** helper ใหม่ `_filter_charger_subtype_open(docs, subtype, fail_open)` — filter ว่าง + fail_open → คืน docs เดิม (pool ว่างแย่กว่า pool กว้าง เพราะ subtype จาก profile/history อาจคลาด) · wire ทั้ง **4 จุด** ใน fetch_products (vector / pre-rerank / brand-fallback pre-sort / final re-filter) · `fail_open=retrieval_profile is not None` → **profile=None คง legacy hard filter เป๊ะ** (strict subtype ว่าง→ว่างตามเดิม) · units path ไม่ต้องแก้ — subtype ใช้แค่ขยาย ptypes ไม่เคย narrow + vector `if typed` fail-open อยู่แล้ว
+- **comment cleanup:** comment ใหม่ของ 4D ไม่มี `⚡` — สั้น อธิบายหน้าที่จริง; comment เก่าใน `_filter_charger_subtype` (มี ⚡ เดิม) ไม่แตะตาม scope
+- **multi-subtype guard:** `"มีสายชาร์จกับหัวชาร์จไหม"` → profile.subtype="cable" (singular — resolve เลือกตัวแรก) · test pin: pool ต้องไม่ว่าง (fail-open กันเคส subtype คลาด) + profile=None คง hard filter
+- **model_codes supplement audit:** pin ครบ — bounded regex `_model_token_regex_str` + `shopname` ใน query เดียวกัน + `limit(5)` ต่อ code + dedupe ด้วย `item_id` + append เสริมไม่แทนที่ + ไม่มี supplement เมื่อ `model_codes` ว่าง + code ไม่ถูกตีเป็น target_device (pin อยู่ใน test_retrieval_profile.py)
+- **test เพิ่ม:** `test_retrieval_profile_hints.py` 10→16 tests (fail-open/multi-subtype/legacy-hard-filter/supplement regex+shop+limit5/dedupe/no-codes-no-supplement)
+- **SRS:** เพิ่ม row `_filter_charger_subtype_open` + ปรับ row `_filter_charger_subtype` (strict ว่าง→คืนว่าง)
+- **verify:** hints+wiring 29/29 · suite 83/83 · py_compile OK · diff --check OK · regressions: route_context ALL PASS · car_charger 16/16 · subtype parity 42/42 · qtype guards 27/27 · unit_card_fields ALL PASS
+- **risk ที่เหลือ:** (1) `RetrievalProfile.subtype` ยังเป็นค่าเดียว — multi-subtype/multi-product/multi-slot จริงอยู่ใน **Task 4E** (2) brand ยังไม่ใช่ hard-filter contract กลาง (3) fail-open ทำให้เคส "ร้านไม่มี cable จริง" ใน profile-backed call เห็น docs กลุ่มอื่นแทน pool ว่าง — trade-off ที่ตั้งใจ (LLM เลือก/ตอบเองได้) ไม่ใช่ bug
+
+### ✅ Master plan Task 4E: Multi-Product Request Slots (2026-09-23) — contract/parser เสร็จ + verified รออนุมัติ commit
+
+- **งาน:** เพิ่ม `RetrievalSlot` (frozen) + `build_retrieval_slots(profile)` ใน `route_context.py` — deterministic span parse เท่านั้น ไม่เรียก LLM · **ยังไม่ wire เข้า retrieval runtime** (Step 4-5 grouped fetch/selection เป็นงานถัดไป) → runtime behavior ไม่เปลี่ยน
+- **กฎแยก slot:** window ของ type mention = [mention pos, mention ของ type อื่นถัดไป) ต่อ product type ที่ profile resolve แล้ว → brand/subtype/model ผูกกับ product ที่อยู่ span เดียวกัน
+  - ≤1 typed span → slot เดียวเทียบเท่า profile (4D-compatible, subtypes = ทุกตัวที่ detect)
+  - ≥2 → slot ต่อ type: `slot-{type}` · subtypes เฉพาะ charger slot · brand/model/codes จาก span เท่านั้น
+  - device หลัง ≥2 distinct types / ก่อน mention แรก / ผูก span ไม่ได้ → `target_scope="shared"` ทุก slot
+  - local device ต้องตามหลัง compat connector (ใช้กับ/รองรับ/สำหรับ/เชื่อมต่อ/เข้ากัน) — กัน "mi watch 8" ใน watch span ถูกตีเป็น target device
+- **ตัวอย่างที่แก้:** "หัวชาร์จ cuktech กับนาฬิกา xiaomi mi watch 8 ใช้กับ mi 17 ultra" → slot-charger {adapter, CukTech} + slot-smartwatch {Xiaomi, mi watch 8} + device shared — brand/subtype ไม่ปนข้าม
+- **เจอระหว่าง implement:** `_extract_device_token` ตี product phrase ("mi watch 8") เป็น device ใน span ตัวเอง → เพิ่ม `_local_target_device` บังคับ connector ก่อน device
+- **TDD pins (ใหม่ `test_retrieval_slots.py` 7 tests):** charger+watch แยก constraint · multi-subtype {cable,adapter} ไม่บีบ · single product 1 slot · ambiguous → open slot confidence≤0.5 · shared device scope · frozen+no-mutate · one-slot=profile facts
+- **verify:** slots 7/7 · profile+hints+wiring 47/47 · suite 65/65 · route_context regression ALL PASS · py_compile OK · diff --check OK
+- **risk ที่เหลือ:** (1) slots ยังไม่ถูกใช้จริง — grouped fetch/selection คือ Step 4-5 (งานถัดไป) (2) same-type multi-instance ("สายชาร์จ 2 แบบ") merge เป็น slot เดียวตาม design (3) span parse ใช้ kw/regex positions — typo'd type kw อาจไม่มี span → fallback profile slot
+- **ไม่แตะ:** app.py · product_store/retrieval_policy runtime · prompt/llm.py · ChatAdminWeb/botworker/v2/v3 · ChatResponse shape · Task 5/6/8/10/11
+
+#### Task 4E Hardening (2026-09-23) — target-device pseudo-type fix + verified
+
+- **root cause ที่เจอ (probe):** "มีสายชาร์จ Anker กับฟิล์ม iPhone 15 ไหม" → `slot-phone` ผิดเกิด — "iphone 15" match เฉพาะ phone **regex** (model phrase) ไม่ใช่ user_kw → ในบริบท accessory มันคือ target device ไม่ใช่สินค้าที่จะซื้อ
+- **fix ที่ slot layer (ไม่แตะ `_detect_product_types` — กระทบ legacy ทั้งระบบ):**
+  - `_explicit_phone_product(low)` — phone kw match แบบ word-boundary (`"iphone"` ไม่นับเป็น kw `"phone"`); regex-only phone mention + มี type อื่นร่วม + ไม่มี kw → drop phone ออกจาก slot boundaries (ไม่ใช่ product slot)
+  - `_local_target_device(seg, shared, slot_types)` — target จริงต้อง (a) ตามหลัง compat connector หรือ (b) family ของ token ไม่ตรง slot type ("ฟิล์ม iphone 15" → iphone 15 เป็น target ของฟิล์ม; "นาฬิกา mi watch 8" → mi watch 8 คือตัวสินค้า)
+  - single-product phone query ไม่พัง: "โทรศัพท์ iphone 15" มี kw → phone slot อยู่; type เดียว → single-slot เทียบเท่า profile เดิม
+- **test เพิ่ม (7→10):** accessory device ไม่สร้าง phone slot · explicit phone purchase เก็บ slot · accessory+device ไม่มี connector ก็ไม่เป็น slot
+- **verify:** slots 10/10 · profile+hints+wiring 47/47 · route_context regression ALL PASS · py_compile OK · diff --check OK
+- **risk เพิ่ม:** accessory ของ device family เดียวกัน ("สายนาฬิกา mi watch 8") — family-match ทำให้ไม่ได้ target (kw quirk ของ type detect อยู่แล้ว, conservative skip)
+
+#### Task 4E Provenance Hardening (2026-09-23) — root-cause fix + verified
+
+- **root cause (พิสูจน์ด้วย probe):** `_type_mentions()` ลดเหลือ (pos,type) — provenance หายว่า type มาจาก explicit kw ("เคส","โทรศัพท์") หรือ inferred model regex ("iphone 15","mi watch 8") → hardening เดิมต้องใช้ `_explicit_phone_product()` เดาย้อนเฉพาะ phone และยังรั่ว: (a) "เคส iphone 15" → single-slot คืน `profile.product_types`={case,phone} ตรงๆ (b) "เคส mi watch 8" → smartwatch slot ผิด + target=None
+- **fix (จุดเดียว — slot layer เท่านั้น, ไม่แตะ `_detect_product_types`):**
+  - `_type_mentions` คืน `(pos,type,src)` — src "kw"|"regex"; `_kw_positions` latin kw เช็ก token boundary ("phone" ใน "iphone" ไม่นับ explicit)
+  - effective types จุดเดียว: `(explicit or mentioned) | carry(anchor/history/intent)` — มี explicit → drop regex-only mentions ออกจาก boundaries; ไม่มี explicit → inferred เป็น fallback
+  - single-slot ใช้ effective (ไม่ใช่ profile.product_types ตรงๆ) → "เคส iphone 15" → {case} + target iphone 15
+  - `_local_target_device` มี family rule อยู่แล้ว → "เคส mi watch 8" → {case} + target mi watch 8
+  - brand/model_terms hygiene: brand ที่อยู่ใน target phrase ไม่ใช่ product evidence — เว้นแต่ device คือสินค้าเอง (family ตรง slot)
+  - ลบ `_explicit_phone_product` (ไม่จำเป็น — provenance ครอบทุก family)
+- **probe 8 เคส:** เคส iphone15→{case}+dev · เคส mi watch8→{case}+dev · "อยากได้ iphone 15"→phone fallback · "โทรศัพท์ iphone 15"→phone · accessory multi→ไม่มี phone slot · watch multi→แยก constraint · "หัวชาร์จกับ mi watch 8"→charger+target (ambiguous — รายงานข้อจำกัด) · multi-subtype→{cable,adapter}
+- **test เพิ่ม (10→14):** single accessory กรอง inferred phone · family rule ไม่เฉพาะ phone (mi watch 8) · inferred-only fallback (phone slot) · explicit ชนะ inferred same-family
+- **verify:** slots 14/14 · profile+hints+wiring 47/47 · route_context regression ALL PASS · py_compile OK · diff --check OK · callers: helpers ใช้เฉพาะใน route_context · profile ไม่ mutate (frozen) · lazy imports เดิม ไม่มี cycle ใหม่
+- **risk เพิ่ม:** (1) "หัวชาร์จกับ mi watch 8" ambiguous — explicit-wins rule เลือก target แทน product ที่อาจตั้งใจ (2) "เคส xiaomi mi watch 8" — xiaomi อยู่นอก device token → brand_hints ยังเห็น xiaomi (device-brand pollution บางส่วน)
+
+#### Task 4F Canonical Device Alias Normalization (2026-09-23) — root-cause fix + verified
+
+- **root cause (probe):** `_extract_device_token` จับเฉพาะ spaced form → `mi14pro`/`ไอโฟน14โปร` ไม่ match เลย; `ip14`/`i14 pro`/`iphone14 pro` คืน raw non-canonical (spec lookup พลาด/เดา entry ผิด — "iphone14 pro" เคย fuzzy ไป "iphone 14" หาย suffix); และ `ha835`/`cmc615` (letters+digits glued, head≥2+เลข3หลัก) รั่วเป็น device เพราะ glued-guard เดิมบล็อกเฉพาะ letters+digits+letters
+- **fix (device_compat.py เท่านั้น + slot helper เล็ก):**
+  - `normalize_device_alias(value)` — family-bounded: iphone/ip/i, ไอโฟน, mi + เลข 1-2 หลัก + suffix (pro/pro max/plus/mini/se/air | โปร/โปรแมกซ์/พลัส/มินิ/แอร์ | ultra/pro/t/t pro) → canonical; product code → None
+  - `_extract_device_token`: normalize cand ก่อน guards เดิม; เพิ่ม compact-code gate (glued + head≥2 + เลข=3 + ไม่ใช่ family head + ไม่อยู่ spec index → drop: ha835/cmc615); regex ไม่เจอ → `_DEVICE_ALIAS_PROBE_RE` fallback
+  - `xiaomi 14 pro` spec entry เพิ่ม (usb-c, 120W/50W, hypercharge/pd/pps/qc, 2023 — flagship spec จริง; ไม่ใส่จะ fuzzy ไป "xiaomi 14" 90W ผิด)
+  - route_context: `_device_occurrence` (literal span หรือ alias-span normalize เท่ากัน) → `_span_device_position` ใช้ร่วม; `_product_brands` เปลี่ยน brand filter จาก string-containment เป็น position-based (แก้ regression: canonical "xiaomi 17 ultra" มีคำว่า xiaomi ทำ watch-brand หาย — ตอนนี้ตัดเฉพาะ occurrence ที่อยู่ใน device span จริง)
+- **test เพิ่ม:** `test_device_alias_normalization.py` 4 tests; อัปเดต expectation 2 จุด (mi 17 ultra → xiaomi 17 ultra canonical — intended change)
+- **verify:** alias+profile+slots+hints+wiring+gold+evidence+availability 112/112 · route_context regression ALL PASS · car_charger 16/16 · compat_mode_filter 144/144 · py_compile OK · diff --check OK
+- **risk:** (1) `i`+digits bare ("i5") map iphone — plan-approved, ร้านขายของมือถือ (2) compact หัว≥2ตัว+เลข3หลักที่เป็น device จริงหายาก (เช่น nord100) จะโดนตัด — bounded (3) probe `i|mi`+digits ใน message ที่ไม่เกี่ยว — มี boundary guard แต่ edge case เหลือ
+- **hardening ก่อน commit (probe เจอเพิ่ม):**
+  - device alias รั่วเข้า `model_codes` → intent=exact_model/answerable_all ผิด → fix ที่ `build_retrieval_profile`: กรอง `cur_codes` ด้วย `_code_is_device` (compact-eq / normalize-eq / spec-resolve-eq / อยู่ใน device span — "i14" ใน "i14 pro")
+  - `a56` ตายเพราะ head `a` อยู่ใน `_NON_DEVICE_TOKENS` → fix: cand ที่อยู่ใน `_SPEC_INDEX` ชนะ NON_DEVICE guard
+  - `s25` เดิมโดน code==device guard ฆ่า device → ตอนนี้กรองฝั่ง code แทน (guard เดิมคงไว้เป็น safety net)
+  - test +3 (aliases≠codes / s25+a56 survive / real codes HA835…AD653T ยัง exact_model) → 68/68 · probe 8 เคสตรง spec · regressions เดิมผ่าน
+
+#### Task 4G Product-to-Product / Mention Relation Parser (2026-09-23) — contract/parser เสร็จ + verified รออนุมัติ commit
+
+- **root cause:** slot parser เก็บ type/code/brand/device แยกกันแต่**ไม่มี representation ของความสัมพันธ์** — "หัวชาร์จ AD1404T ใช้กับสายชาร์จไหน" เห็นแค่ charger+AD1404T+subtypes ปนกันใน slot เดียว ไม่รู้ว่า AD1404T คือ *สินค้าอ้างอิง* และสายชาร์จคือ *เป้าค้นหา* (แถม `_type_mentions` merge same-type run ทำ "สายชาร์จ" mention ที่สองหายไปด้วย)
+- **fix (route_context.py เท่านั้น — contract/parser, ยังไม่ wire เข้า retrieval):**
+  - `RetrievalRelation` (frozen): source_slot_id / target_slot_id / relation_type("works_with") / evidence_span / constraints(tuple[(k,v)]) / confidence
+  - `build_retrieval_relations(profile, slots)` — deterministic เท่านั้น: connector regex (ใช้กับ/คู่กับ/รองรับ/เข้ากับ/ใช้ได้กับ/ใช้คู่กับ/ใช้คู่กัน/ใช้ร่วมกับ/เข้ากัน/คู่กัน) → forward: target=kw-mention หลัง connector ≤25 chars + question marker (ไหน/อะไร/แบบไหน/ตัวไหน/รุ่นไหน/ยี่ห้อไหน/ได้บ้าง) ภายใน 30 chars, source=kw-mention/code ก่อน connector · symmetric (ลงท้าย คู่กัน): สอง mention ก่อน connector + question หลัง · device/target-device mention ไม่ใช่ target (kw-only) → "AD653T ใช้กับ ip14" ไม่สร้าง relation · dedupe ต่อ (src,tgt) slot · ไม่เรียก LLM ไม่สรุป compatibility
+  - `_kw_type_mentions` — kw-only ไม่ merge (ต่างจาก `_type_mentions` ที่ merge same-type run สำหรับ slot boundary — สายชาร์จตัวที่สองต้องเห็น)
+  - `_relation_constraints` — generic detectors: มีจอ/หน้าจอ→(display,required) · N เมตร/ม./m→(length_m,N) · เต็มสปีด/เร็วสุด/เต็มกำลัง→(speed,full) · NNw/วัตต์→(power_w,N) · pd/qc/pps/ufcs X→(protocol,PD3.1)
+  - `_slot_id_for` — map type→slot (single-slot ทุก mention เข้า slot เดียว)
+- **fix รองจาก plan 4G (mention ownership):**
+  - `_product_brands` + adjacency: brand ที่ติดกับ device occurrence ด้านหน้า (whitespace เท่านั้น) = ชื่อ device — "เคส xiaomi mi watch 8" → xiaomi ไม่รั่วเป็น case brand (เดิมกรองเฉพาะ inside-span)
+  - `_ambiguous_device_target` + single-slot confidence: device ตามหลัง "กับ" เปล่า (ไม่ใช่ ใช้กับ/เข้ากับ/คู่กับ) + ไม่มี kw ของ family นั้น → อาจเป็น product อีกชิ้นไม่ใช่ target → confidence 0.6 ("หัวชาร์จกับ mi watch 8" = charger+watch?)
+- **test เพิ่ม:** `test_retrieval_relations.py` 7 tests — adapter-code→cable relation (constraints display/length_m=2/speed=full) · exact-model ไม่มี relation · device-compat (ip14) ไม่มี product relation · pairing ไม่มี code (หัวชาร์จกับสายชาร์จใช้คู่กัน → relation) · list ไม่มี connector ไม่มี relation · device-brand adjacency · ambiguous confidence<0.8
+- **verify:** 75/75 (relations+slots+alias+profile+hints+wiring) · route_context regression ALL PASS · car_charger 16/16 · compat_mode_filter 144/144 · py_compile OK · diff --check OK
+- **risk ที่เหลือ:** (1) relation = contract-only — runtime ยังไม่กิน (Task 5/5A ค่อย wire) (2) connector/question window แบบ char-bound (25/30) — ประโยคยาวหน่อยอาจพลาด (3) adjacency เฉพาะ whitespace — "xiaomi, mi watch 8" ยังนับเป็น brand (4) ambiguous-confidence เฉพาะ single-slot path; multi-slot "A กับ B กับ device" ยัง confidence 0.8 ตามเดิม (5) wattage token เช่น "240W" รั่วเป็น model_codes→exact_model (pre-existing ใน `_extract_codes` ไม่ใช่ 4G) — แก้ไม่ได้ generic เพราะ wattage เป็น product code จริงใน catalog (65W=68 units, 20W=93) ต้อง context-aware resolution ใน task ถัดไป
+
+- **hardening รอบ 2 — 'สาย'/'หัว' shorthand context-aware (2026-09-23) — verify แล้ว รอ commit:**
+  - **ปัญหา:** relation parser จับเฉพาะ kw เต็ม — "ใช้กับสายไหน"/"หัวอันนี้ AD1404T" พลาด แต่ "สาย" ลอยตัวใส่ PRODUCT_TYPES ไม่ได้ (compound พัง)
+  - **fix:** `_shorthand_target_mentions` — 'สาย'→cable/'หัว'→adapter (type=charger) เฉพาะหลัง connector ≤20c + ตามด้วย question marker ทันที + compound blacklist (สายไฟ/สายตา/สายรัด/สายคล้อง/สายนาฬิกา/สายเชือก/สายพาน/สายลม/สายฝน/สายพันธุ์/หัวหน้า/หัวใจ/…) + **gate:** source ต้องเป็น charger ctx (kw/หัว-shorthand/"charger"ใน product_types) → นาฬิกา→สาย ไม่ infer · `_shorthand_source_mentions` — 'หัว'+อันนี้/นี้/ตัวนี้/รุ่นนี้/code → adapter source · shorthand-inferred → constraints+("target_subtype",sub), confidence 0.7 · `_slot_id_for` fallback → "slot-<t>" (virtual, contract-only)
+  - **พบระหว่าง probe:** "สายคล้อง" เป็น case kw จริง (สายคล้องคอ) → charger→case relation ผ่าน kw path = ถูกต้อง — test ปรับเป็น pin "ไม่ infer cable" แทน `==()` · "นาฬิกาใช้กับสายนาฬิกาอะไร" → relation smartwatch→smartwatch (kw "นาฬิกา" substring-match ใน compound — taxonomy quirk ไม่ใช่ cable inference)
+  - **verify:** relations 13/13 · รวมชุด 81/81 · probe 12 เคสตรง (shorthand เข้า / compound ไม่เข้า / watch ไม่ infer cable / ไม่มี connector ไม่มี relation) · regressions เดิมผ่าน
+  - **risk เพิ่ม:** symmetric คู่กัน ไม่รองรับ bare-สาย ตำแหน่งก่อน connector · kw substring-match ใน compound (นาฬิกา⊂สายนาฬิกา) — taxonomy-level ไม่แก้ใน 4G (guard ใน relation parser แล้ว)
+
+- **hardening รอบ 3 — fail-closed source evidence + strap-compound guard (2026-09-23) — verify แล้ว รอ commit:**
+  - **ปัญหา (probe จริง):** (1) "หัวอันนี้ใช้กับสายไหน" (ไม่มี code/kw/anchor) สร้าง relation — 'หัว'-shorthand เพียงลำพังไม่ใช่ source evidence (2) "นาฬิกาใช้กับสายนาฬิกาอะไร" → smartwatch→smartwatch self-relation เพราะ kw "นาฬิกา" substring-match ใน compound "สายนาฬิกา" (สายนาฬิกา = strap accessory ไม่ใช่ watch)
+  - **fix (route_context เท่านั้น):** `_strap_compound_mention` — kw mention ที่ text ก่อนหน้าลงท้าย "สาย" = tail ของ สายX compound → ตัดออกจาก kw_mentions (compound kw เอง เช่น สายคล้อง ไม่โดน) · source gate: relation ต้องมี real evidence = kw mention หรือ code ก่อน connector (shorthand ให้ type เท่านั้น ไม่นับ evidence) — symmetric path เช็กเหมือนกัน · charger_ctx สำหรับ cable-shorthand รวม code-only source ("AD1404T ใช้กับสายไหน" → relation — code คือ product evidence ในร้าน charging)
+  - **verify:** relations 17/17 · รวมชุด 85/85 · probe 9/9 ตรง (หัวอันนี้ลอย→() / +code→rel / code ล้วน→rel / สายนาฬิกา→() / สายคล้อง→charger→case จาก taxonomy kw ไม่ใช่ cable) · regressions เดิมผ่าน
+  - **risk เหลือ:** "รุ่น XYZ ใช้กับสายไหน" โดยไม่มี code ที่รู้จัก → no relation (fail-closed ตั้งใจ) · strap guard เฉพาะ สาย-prefix; compound แบบอื่น ("เคสนาฬิกา") ยังไม่ครอบ · code-only→cable inference ใช้ shop-domain prior (ร้าน charging) — confidence 0.7 สะท้อน
+  - **✅ commit `b7fe0a9`** — `feat: add product relation parser contract` (route_context +244, test file 17 tests, SRS, log)
+
+#### Phase 4 Final Audit Before Task 5 (2026-09-23) — docs-only เสร็จ
+
+- **audit doc:** `docs/plans/2026-09-23-phase4-final-audit-before-task5.md` — inventory 4A-4G + commits, flow ปัจจุบัน, contract review ต่อ profile/slots/relations, hard-filter vs soft-hint policy, risks 7 ข้อ, Task 5 entry criteria + recommended shape (5A observe → 5B flag → 5C replay gate)
+- **findings หลัก:** (1) runtime กินแค่ profile hints (4B/4C/4D) — slots/relations contract-only ไม่มี caller นอก tests (verify ด้วย grep) (2) hard filter ที่ปลอดภัย = shop/platform/model_codes/availability_mode(hลัง resolver) เท่านั้น — ที่เหลือ soft hint (3) ช่องโหว่สำคัญสำหรับ Task 5: virtual slot-<t> ไม่มี backing products, single-slot adapter+cable merge (relation constraints แบก role), wattage⊂model_codes ambiguity, taxonomy substring quirk นอก relation guard
+- **verify:** docs-only · git diff --check clean
+
+#### Task 5A (redefined by user) — Offline Grouped Retrieval Planner (2026-09-23) — contract เสร็จ + verified รออนุมัติ commit
+
+- **note:** plan ใช้ชื่อ "Task 5A" กับงาน source-union ใน product_store/units — user redefined 5A = offline planner prototype (ตรง audit "Recommended Task 5 Shape"); plan's Task 5/5A runtime work ยังไม่แตะ
+- **ทำอะไร:** `chatbot/shopeechat/retrieval_planner.py` ใหม่ — `RetrievalRequest` (frozen) + `build_grouped_retrieval_requests(profile, slots, relations)` → request plan ต่อ slot/relation; observe-only (no Mongo/LLM/fetch/runtime caller)
+- **policy:** model_code→hard filter เสมอ · product_type→hard เฉพาะ slot/rel conf≥0.8 (ต่ำกว่า→soft) · target_device/brand/model_term/constraints→soft เสมอ (ห้ามตัด candidate ใน 5A) · relation target = product-group request (model_codes=(), target_subtype→subtypes) · virtual slot อ่าน type จากชื่อ `slot-<t>` · shop/platform อยู่ profile ไม่ซ้ำ
+- **test เพิ่ม:** `test_grouped_retrieval_requests.py` 6 tests — relation→cable target request (codes ว่าง+cable hint) · exact-model=identity request (no relation_id) · device-compat ไม่สร้าง relation request · multi-slot case+film แยก request ทั้ง dev=iphone 15 · bare-head ไม่มี relation request · low-conf slot→soft hints ไม่มี hard target_device
+- **verify:** 91/91 (7 test files) · probe 6 เคส: AD1404T full → base(hard code+type) + relation target(soft display/length_m=2/speed) ✓ · symmetric คู่กัน → target request ✓ · CMC615 → identity req-0 conf0.4 hard code ✓ · mi14pro → dev soft hint ✓ · py_compile + diff --check OK · regressions เดิมผ่าน
+- **risk:** (1) ~~kw-based relation target ไม่มี target_subtype~~ → แก้แล้วใน hardening ด้านล่าง (2) request ยังไม่รู้จัก availability/compat resolution จริง (3) relation_target request กับ slot request อาจชี้ slot เดียวกัน — dedupe เป็นเรื่องของ consumer (Task 5B)
+- **ยืนยัน:** ไม่ wire runtime · ไม่แตะ app.py/product_store/route_context/v2/v3/ChatAdminWeb/botworker · module ใหม่แยกไฟล์ไม่ทำให้ไฟล์เดิมบวม
+
+##### Task 5A hardening — relation target role ownership (2026-09-23)
+
+- **root cause:** `build_retrieval_relations` ใส่ ("target_subtype",…) เฉพาะ shorthand path ("สายไหน") — kw target "สายชาร์จ" ไม่ได้ subtype ทั้งที่ kw ชี้ cable ชัด → relation target request เป็น charger กว้างไม่มี cable role; source slot ก็กลืน subtype เป้าหมาย (subtypes={adapter,cable})
+- **fix (ที่ owner = route_context):** helper `_mention_subtype(low,pos,t)` — charger taxonomy: kw ยาวสุดที่ match ตรง pos → subtype ('สายชาร์จ'→cable/'หัวชาร์จ'→adapter; 'หัว'-shorthand→adapter ที่ callsite) · relation ใส่ constraints ("target_subtype",…)+("source_subtype",…) ทุก path (kw/symmetric ด้วย — conf ไม่เปลี่ยน: shorthand 0.7, kw 0.8) · planner consume: source-slot request แคบ subtypes เหลือ source_subtype; target_subtype→subtypes เหมือนเดิม — ไม่ hardcode คำ/รุ่นใด
+- **probe:** "หัวชาร์จ AD1404T ใช้กับสายชาร์จไหน…มีจอ ยาว 2 เมตร…เต็มสปีด" → base: codes=AD1404T hard, subs=[adapter] · target: subs=[cable], soft=display/length_m=2/speed/target_subtype ✓ · shorthand "สายไหน" → cable ยังได้ · ip14 → ไม่มี relation · bare head → ไม่มี relation · symmetric คู่กัน → target cable · case+film แยกเหมือนเดิม
+- **test เพิ่ม:** +3 (kw target carries cable subtype / source slot keeps adapter role / symmetric target subtype) — 26/26 grouped+relations, รวมชุด 94/94 · regressions route_context/car_charger/compat_mode ผ่าน · py_compile+diff --check OK
+- **ยืนยัน:** ยังไม่ wire runtime · SRS §6 อัปเดต (_mention_subtype, build_retrieval_relations, _slot_request)
+- **cleanup (role isolation):** `_relation_request` กรอง `source_subtype` ออกจาก target request `soft_hints` — เป็น metadata ฝั่ง source ใช้โดย `_slot_request` เท่านั้น (ยังอยู่ใน `RetrievalRelation.constraints`) · +1 test pin · 95/95 รวมชุด · regressions ผ่าน
+- **committed `8794cfc`** — feat: add offline grouped retrieval request planner (5 files)
+
+#### Task 5B1 — Grouped Retrieval Executor observe mode (2026-09-23) — เสร็จ + verified รออนุมัติ commit
+
+- **ทำอะไร:** `retrieval_executor.py` ใหม่ — `RetrievalExecutionResult` (frozen) + `execute_grouped_retrieval_requests(requests, *, message, shop, platform, limit_per_request, observe_only, fetcher)` · ต่อ request สร้าง synthetic `RetrievalProfile` → `units.fetch_unit_cards` (default, lazy; injectable สำหรับ test) → candidates+trace · error ต่อ request ถูกจับไม่ล้มทั้งชุด · soft_hints=trace เท่านั้น ไม่ตัด candidate
+- **root-cause fix ที่เจอจาก probe จริง:** relation_target fetch ด้วย message เต็ม → vector เอียงไป source ("หัวชาร์จ AD1404T") ดึง adapter ซ้ำแทน cable → แก้ที่ owner: `build_retrieval_relations` เพิ่ม constraint `("query_hint", text ฝั่ง target จาก tgt_pos ≤200)` — executor ใช้เป็น query ของ relation_target · generic ไม่ hardcode
+- **probe Mongo จริง (KingGadgets):** "หัวชาร์จ AD1404T ใช้กับสายชาร์จไหน…2 เมตร…เต็มสปีด" → base ได้ AD1404T charger (code-hit) · target ได้ **สายชาร์จจริง CTC620W 2 เมตร PD3.1** ตรง constraints · "รุ่น AD1404T" → identity เดียว · "เคสกับฟิล์ม iPhone 15" → case 6 ตัว / screen_protector **0 ตัว** (units pool ไม่มี/ dead-pool — risk สำหรับ 5B2 union)
+- **test เพิ่ม:** `test_grouped_retrieval_executor.py` 8 tests (mock fetcher + live smoke skip-guard) — รวมชุด 102/102 · regressions route_context/car_charger/compat_mode ผ่าน · py_compile+diff --check OK
+- **risk ก่อน 5B2:** (1) units path อาจว่างทั้งที่ legacy sweep มีของ (screen_protector case) — 5B2 ต้อง union/fallback (2) query_hint ใช้เฉพาะ relation_target — base ยังใช้ message เต็ม (3) soft_hints (display/length/speed) ยังไม่มีผลต่อ rank ใน 5B1
+- **ยืนยัน:** ไม่ wire runtime · ไม่แตะ app.py/product_store runtime · fetcher injectable — production path ไม่เปลี่ยน · SRS §6.29 + relation row อัปเดต
+
+##### 5B1 hardening — evidence-preserving buckets (2026-09-23)
+
+- **ปัญหาเดิม:** executor เรียก `fetch_unit_cards` — all-dead → `[]` เงียบ (runtime fallback signal) → grouped path เสียหลักฐาน "เจอแต่ตาย/ผิดเครื่อง"
+- **fix:**
+  - `units.fetch_unit_evidence()` + `UnitEvidenceFetchResult` — chain เดิม (fetch_units→attach_*→to_unit_card) แต่ไม่ collapse all-dead; `fetch_unit_cards` behavior เดิมไม่เปลี่ยน
+  - executor contract ใหม่: `eligible_candidates` / `unavailable_evidence` / `rejected_evidence` / `source_attempts` (+`candidates` property alias); `_bucket()`: wrong_type / subtype_mismatch (charger-family เท่านั้น, unit type=expansion ผ่าน) / device_mismatch (`_extract_device_token` generic — "haylou watch 8"/"mi band 5" ≠ iphone 15) → rejected; dead→unavailable เก็บ reason
+- **probe Mongo จริง:** AD1404T spec sentence → req-1 cable elig=6 (CTC620W 2m PD3.1) unav=12 rej=2 · "เคสกับฟิล์ม iPhone 15" → case elig=2/unav=4 · screen_protector elig=0 raw=13 — **ร้านมีแต่ฟิล์ม Haylou/Mi Band → rejected device_mismatch ทั้งหมด** (ก่อนหน้านี้หายเงียบเป็น [])
+- **test:** 11 tests (all-dead evidence / per-slot quota ไม่กินกัน / wrong-device rejected / subtype_mismatch / error isolated / live smoke) — รวมชุด 106/106 · regressions ผ่าน
+- **ยืนยัน:** ไม่ wire runtime · fetch_unit_cards เดิมไม่เปลี่ยน · ไม่แตะ v2/v3/ChatAdminWeb/botworker · 5B2 = legacy/source union + dedupe/rank กลาง
+
+#### Task 5B2 — Source Union + Central Candidate Pool (2026-09-23) — เสร็จ + verified รออนุมัติ commit
+
+- **root cause ที่แก้:** unit path กับ legacy path ต่างคนต่างคัด/ตัดเองก่อนถึง pool รวม → สินค้าหายก่อนถูกจัดอันดับ (เช่น เคสที่ units ตัดทิ้งแต่ legacy เจอ, legacy เจอแต่ units all-dead)
+- **executor ขยายเป็น multi-source:** `legacy_fetcher` param (None=ปิด, "auto"=adapter จริง `_legacy_evidence_fetcher` — fetch_products เดิมผ่าน MONGO_DB, SystemExit→RuntimeError) · `_run_attempt` ต่อ source → `make_evidence_card(source, selection_reason)` tag ทุก card · result เพิ่ม slot_id/relation_id/subtypes/model_codes/target_device (facts ให้ pool) · error ต่อ source เป็น attempt.error — req.error เฉพาะเมื่อทุก source พัง
+- **`_bucket` รับ legacy card:** card ไม่มี `product_type` → `_detect_product_types` จากชื่อ (generic taxonomy เดิม — detect ไม่เจอ = unknown ผ่าน soft ไม่ reject หมด)
+- **`candidate_pool.py` ใหม่ (observe-only):** `build_candidate_pool(results, profile, per_request_limit)` → `CandidatePool`
+  - dedupe identity: unit/model id (variant) → item_id (`_norm_id` float-int) → name+shop · variant ต่าง unit/model id ไม่ merge · item-level card merge เข้า variant เดิม · bucket=ดีสุดในกลุ่ม
+  - `_merge_group`: keep best card (sellable→richer→fields) + union `_evidence.sources`
+  - `_score` อธิบายได้: anchor(3 spec/warranty/compare/history | 1 อื่น) · model_code+2 · subtype+1 · device+1 · relation_target+0.5 · sellable+0.5 · multi-source+0.2/ตัว · +card `_score` → why[] ลง trace
+  - **A/B boundary:** candidates (A) แยกจาก `evidence_pool` (B: anchor/kb_product/image_text attachments — ต้องมี identity, linked_candidate) + `supporting_evidence` (kb_qa/raw contract เท่านั้น) · `llm_ready()` = eligible cards ที่ `strip_private_evidence` แล้ว — boundary เดียว
+  - per-request quota: `by_request` map + `per_request_limit` — slot หนึ่งไม่กิน quota อีก slot
+- **probe Mongo จริง (legacy_fetcher="auto"):** AD1404T spec → base merged `('units','legacy')` score 5.70 (code+subtype+multi-source) · target ได้สาย CTC315P จาก legacy · "เคสกับฟิล์ม iPhone 15" → TORRAS/CUKTECH merge สอง source · screen_protector ยัง elig=0 + rej=13 (ฟิล์มนาฬิกาทั้งหมด — evidence ไม่หาย) · **พบ+แก้ dedup miss จริง 2 จุด:** (1) unit `item_id` float vs legacy int → `_norm_id` normalize; (2) anchor `("123.0",)` float-str vs card int 123 → `retrieval_policy._norm_id` ขยาย normalize numeric float-str → "123" (generic canonicalization ใช้ทุก caller) — anchor match+boost ทำงานแล้ว
+- **test:** `test_candidate_pool_union.py` 14 tests (two-source attempts / merge sources / variant ไม่ dedupe / per-slot quota / relation groups / dead→unavailable / wrong-device rejected / error isolated / code boost / no-mutation / anchor priority / anchor float-str norm / KB-image attachment / llm_ready strip) — รวมชุดเดิม+pool = 120/120 · evidence policy 14/14 · regressions ผ่าน
+- **ยืนยัน:** observe-only — `legacy_fetcher` default None (ปิด) · fetch_products/fetch_unit_cards เดิมไม่เปลี่ยน · ไม่ wire app.py/product_store runtime · ไม่แตะ v2/v3/ChatAdminWeb/botworker · soft_hints ยังเป็น trace · 5B3 = compat/KB evidence เต็มระบบ + selection ส่ง LLM + flag wiring
+
+#### Task 5B3-A — Shadow/Observe Wiring หลัง Flag (2026-09-23) — เสร็จ + verified รออนุมัติ commit
+
+- **เป้าหมาย:** pipeline ใหม่วิ่งข้างๆ runtime เดิมเพื่อ log เทียบ — ยังไม่ให้ LLM ใช้ pool
+- **`retrieval_shadow.py` ใหม่:** `run_grouped_retrieval_shadow(profile, message, shop, platform)` → slots→relations→requests→executor(`legacy_fetcher="auto"` union)→pool → `_summary` log-safe (counts/attempts/by_request/top_eligible name+id+sources+score/requests) — private keys ไม่เข้า dict โดย construction, ไม่ log history · error → `{"ok": False, "error"}` ไม่ raise
+- **app.py callsite (+20 บรรทัด):** หลัง step `RetrievalProfile` — `USE_GROUPED_RETRIEVAL_SHADOW=="1"` + profile ไม่ None → lazy import `retrieval_shadow` → append `_steps` "GroupedRetrievalShadow" เท่านั้น · except → stderr `[SHADOW]` · **flag ปิด = zero cost ไม่มี import** · step input = metadata ปลอดภัย (`message_len`/`shop`/`platform`/`shadow_enabled`) — **ไม่ log req.message เต็ม** (PII)
+- **probe จริง (Mongo):** AD1404T spec → summary ok=true, top_eligible merged `("units","legacy")` score 5.7, evidence_attachments=21 — clean JSON ไม่มี `_evidence`
+- **test:** `test_retrieval_shadow.py` 7 tests (call order spies / legacy union flag / error→ok:False ไม่ raise / summary shape+counts / no private keys / app callsite gated+lazy static pin / no v2/v3 caller) — รวมชุด 120 baseline + 46 focused ผ่าน
+- **ยืนยัน:** flag default ปิด · flag ปิด = behavior เดิม 100% (import ใน block เท่านั้น) · flag เปิด = observe-only ยังไม่ส่ง pool เข้า LLM · ไม่แตะ prompt/llm.py/v2/v3/ChatAdminWeb/botworker/fetch_products/fetch_unit_cards
+- **risk ก่อน 5B3-B:** (1) shadow รันเต็มทุก request — latency เพิ่มเมื่อ flag on (ยอมรับได้สำหรับ observe) (2) `_steps` อาจโต — จำกัด top_eligible 5 ตัวแล้ว (3) 5B3-B = selection policy เลือก candidate จาก pool ส่ง LLM + flag แยก
+
+#### Task 5B3-B — CandidatePool → LLM Selection (contract-only, 2026-09-23) — เสร็จ + verified รออนุมัติ commit
+
+- **บริบท:** shadow proof เคสจริง — ระบบเดิมส่ง LLM แค่ AD1404T adapter → ตอบผิด "ไม่มีสาย"; pipeline ใหม่เจอ CTC615P/CTC620P สายมีจอ OLED 240W variant 2 เมตร (item 51617544280) — ขาดชั้น "เลือก" ให้ถูกกลุ่ม
+- **`retrieval_selection.py` ใหม่ (ยังไม่ wire runtime):** `select_for_llm_context(pool, requests, profile)` → `SelectionResult`
+  - **per-request quota:** แต่ละ request ได้ quota ตัวเอง (default 3) — relation_target cable ไม่ถูก adapter score สูงกิน quota; role (`slot`/`relation_target`) preserved
+  - **constraint ranking:** soft_hints (display/length_m/speed/power_w/protocol) match card text (name + **variant names** + tier_variation + specs — "2 เมตร" อยู่ใน variant ไม่ใช่ item name) → `constraint_hits` +score — soft hint เป็น rank signal ไม่ตัดทิ้ง
+  - **unavailable ไม่หาย:** `unavailable_evidence` = stripped summaries ({request_id,name,item_id,reason}) จำกัด 5/req
+  - **rejected = counts เท่านั้น:** `rejected_summary` {request_id,reason,count} — ไม่มี card หลุดเข้า selected
+  - **strip boundary:** `strip_private_evidence` ก่อน output ทุก card — test pin ไม่มี `_evidence`/`_selection_reason`
+- **probe Mongo จริง:** AD1404T spec → slot = 3× AD1404T merged (5.70) · relation_target #1 = **CTC615P/CTC620P สายมีจอ OLED hits=(display,length_m,speed) score 4.59** · #2-3 CTC620W 2m (length+speed ไม่มีจอ) · unav: สายตาย item_unlisted/seller_delete เก็บ reason · rej: wrong_type×15, subtype_mismatch×2 counts
+- **test:** `test_retrieval_selection.py` 8 tests (source+target ติดคู่ / quota ไม่กินกัน / constraint ranking มีจอ+2m+240W ชนะ / unavailable fallback / rejected excluded / stripped / explainable / no v2/v3) — รวม focused 54/54 · baseline ผ่าน
+- **ยืนยัน:** contract-only ไม่ wire app.py (ไม่มี flag ใหม่ — ยังไม่จำเป็น) · ไม่แตะ prompt/llm.py/v2/v3/ChatAdminWeb/botworker · pool ทั้งหมดไม่ถูกส่งเข้า LLM — selected ต่อ request เท่านั้น
+- **risk ก่อน wire จริง:** (1) ต้องออกแบบ integration point ว่า selected cards ไปแทน/เสริม products เดิมตรงไหน + flag `USE_GROUPED_RETRIEVAL_SELECTION` (2) replay gate ควรผ่านก่อนเปิด (3) constraint vocab จำกัด 5 keys — subtype/device constraints อื่นยังไม่ match (4) unavailable evidence ต้อง render เป็นภาษาคนใน prompt ไม่ใช่ dict
+
+#### Task 5B3-C — Wire Selected Context เข้า LLM หลัง Flag (2026-09-23) — เสร็จ + verified รออนุมัติ commit
+
+- **ค้นพบ callsite จริง:** `llm.answer(products=…)` มีหลายจุด — AD1404T case ตอบที่ **KB path (~2240, `merged_products`)** ไม่ใช่ main path (~4622) — wire callsite เดียวจะพลาดเคสนี้
+- **`retrieval_runtime.py`:** `run_grouped_selection` (compute ครั้งเดียว → selected_cards role-tagged + extra_context unavailable note + summary) + `merge_selected_products` (selected ก่อน + base dedupe item_id + cap) + `prepare_grouped_selection` (composition สำหรับ tests)
+- **app.py wiring:** compute block หลัง RetrievalProfile step (flag `USE_GROUPED_RETRIEVAL_SELECTION` default ปิด + lazy import + try/except→None) → merge 2 llm.answer callsites (KB `merged_products` + main `products`) + extra_context note + `_steps` "GroupedRetrievalSelection"
+- **A/B proof จริง (patch llm.answer จับ products):**
+  - flag OFF → products=3 (AD1404T เท่านั้น — bug เดิม reproduce) · sel step NONE
+  - flag ON → products=9: selected 6 role-tagged (3× AD1404T + **CTC615P/CTC620P สายมีจอ OLED 240W 2m** + 2× CTC620W) + base dedup · extra_context = unavailable note (สายตายไม่เข้า products) · sel step ใน steps
+- **hardening:** `_item_id` ใช้ `retrieval_policy._norm_id` — float/int-float-str dedupe ตรงกัน (selected 123 vs base 123.0/"123.0" ไม่ duplicate เข้า LLM) — bug root เดียวกับ candidate_pool/anchor ก่อนหน้า
+- **test:** `test_retrieval_selection_runtime.py` 11 tests (merge order/dedup float-int/error→None/strip+role-tag/AD1404T both groups/quota/unavailable ไม่ใช่ recommendation/empty→None/callsite gated+lazy+merge≥2/no v2/v3) — รวม 65/65
+- **ยืนยัน:** flag ปิด = behavior เดิม 100% (พิสูจน์แล้วด้วย A/B) · pool ทั้งหมดไม่เข้า LLM — selected+base merge เท่านั้น · ไม่แตะ prompt/llm.py/v2/v3/ChatAdminWeb/botworker
+- **risk ก่อน replay/gold gate:** (1) selected unit cards เป็น variant-level — merge อาจให้ unit card แทน listing card (ข้อดี: variant ชัด) (2) callsite 1005 (item_id card path) ยังไม่ wire — เคสส่งการ์ดสินค้ามาเองไม่ผ่าน selection (3) unavailable note เป็น text ไทยเพิ่มใน extra_context — token +เล็กน้อย (4) `llm.answer` callsite 2353 (web-search re-answer) ไม่ wire
 
 ### 🔄 กำลังทำ — Plan 1: measurement + availability single owner + item_id diversity (2026-10-02)
 
@@ -289,6 +631,15 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 ---
 
 ## ผ่านแล้ว (file 2)
+
+### ✅ 2026-09-22 — ShadowStatPanel "All History" โชว์ "ยังไม่มีสถิติ" ตลอด
+
+- **error:** panel สถิติขวา tab "All History" ใน /shadow-inbox โหลดไม่เคยสำเร็จ — frontend catch → `setStats(null)` → โชว์ "ยังไม่มีสถิติ"
+- **เกิดเพราะ:** `getShadowReplyStats` (shadowReplyService.ts) ทำ `find({deleted_at:{$exists:false}}).toArray()` ไม่มี projection/limit → ลาก 4,980 docs = 50.9MB / **140.8s** (doc อ้วนเพราะ `bot_products` สูงสุด 354KB/doc) — axios timeout 30s → request ตาย
+- **แก้ด้วย:** `.project()` เฉพาะ field ที่ stats ใช้ (`rating, star_rating, comment, bot_cost_usd, bot_elapsed_ms, bot_tokens.total`) — pattern เดียวกับ fix test-assignment/live-assignment
+- **verify:** `getShadowReplyStats({})` จริงผ่าน tsx = **333ms** (เดิม ~141s) ค่าถูก (total=4980, win_rate=100%, cost=$21.17, tokens=64.3M) · `tsc --noEmit` ผ่าน · commit `83509de`
+- **ผลกระทบเคสอื่น:** caller เดียว route.ts `?stats=1` ครอบทั้ง All History + Per Chat (conv filter) — Per Chat เร็วขึ้นด้วย; output shape ไม่เปลี่ยน
+- **probe script:** `ChatAdminWeb/scripts/probe-shadow-stats.ts` (committed — ใช้วัดซ้ำได้)
 
 ### ✅ 2026-09-21 — Legacy Shopee evidence-first retrieval implementation plan
 
@@ -705,3 +1056,184 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **fix:** ลบ `client.close()` ทั้ง 5 จุด (try/finally ที่มีแค่เพื่อ close ถูกยุบ+dedent) · เพิ่ม `@app.on_event("shutdown")` `_shutdown_db_clients()` ปิดทั้ง product + admin singletons ตอน process จบเท่านั้น · แก้ docstring `_db()`/`get_client()` เตือนห้าม close
 - **verify:** live :8030 — /health ×3 + /shops(auth) ×2 คั่นกลาง /chat → ทุก request 200, "Cannot use MongoClient after close" = 0 · py_compile ครบ
 - **ผลกระทบเคสอื่น:** export_mongo.py (script แยก client เอง) ไม่แตะ · chat_v2 `_build_context` ยังคืน client เดิมใน tuple (ไม่มีใคร close แล้ว) · connection อยู่จน process shutdown — พฤติกรรมที่ถูกของ singleton
+
+### ✅ 2026-09-21 — DX: SIM sessions ตอบว่าง (Black Shark Pad 7 warranty + อีก 3) = issue #17 บน prod
+
+- **อาการที่ user รายงาน:** session `SIM warranty · Black Shark Pad 7` + แชทอื่นในหน้า /test-chat/shopee ตอบเปล่า/ไม่ตอบ
+- **สแกน DB:** 47 sessions ล่าสุด → `empty_model=3` (Pad 7 warranty, FunCooler 5 spec, GS3 compat) + `user_last=1` (CUKTECH PB200P compat ไม่มี model msg) — ทั้ง 4 เป็น session `SIM ·` จาก sim run เดียวกัน (11:45–12:04 local, admin=sim) ไม่ใช่แชทจริง
+- **หลักฐาน boundary:** model msg ว่างมี `stats` เป็น null ทั้งหมด (source/intent/usage/cost/timing.total) + `sim_checks:["EMPTY"]` → request ระดับ HTTP ล้ม (non-200/non-JSON) ไม่ใช่ 200-answer-ว่าง · `conversation_products` มี docs `sim:20260921-1145-448d:*` → request ถึง bot แล้วตายกลางทาง · `sim:` IDs ไม่อยู่ใน log บอท local เลย → sim ยิงไป **prod bot**
+- **root cause:** issue #17 (fixed `c411b1d` 13:42 วันนี้ — หลัง sim run 11:45) — prod image เก่ายังมี `/health` `client.close()` (docker HEALTHCHECK ทุก 30 วิ) ปิด shared MongoClient กลาง `/chat` ที่ถือ db → `Cannot use MongoClient after close` → HTTP 500 สุ่ม ~10-15% (3-4/20 = เท่าที่วัด 9/hr บน prod)
+- **เช็กแล้วว่าไม่ใช่สาเหตุ:** `flush/route.ts` `data.answer||""` (ทำงานเฉพาะ 200) · `TestChatClient` bot_error → แสดง error แดงถูก (user จริงเห็น error ไม่ใช่เงียบ) · direct repro :8010 ทั้ง 3 เคสตอบปกติ (warranty 1213 chars, spec KB+mongo, compat product_store) — retrieval/LLM ไม่พัง
+- **สถานะ:** ไม่ต้องแก้โค้ดเพิ่ม — root cause แก้แล้วใน `c411b1d` · **action = redeploy prod** ให้ image มี fix แล้วลบ/รัน sim sessions ใหม่ยืนยัน
+
+### ✅ 2026-09-22 — Botworker parity fixes: workflow reply pairing (__wf) + trigger bot_template
+
+- **error (a):** คำตอบที่มาจาก workflow engine ไม่เข้า bot history — `storeWorkflowDelivered` เขียน `inbound_message_id` = `<msgId>__wf<N>` (หลาย bubble ต่อ inbound เลี่ยง unique index) แต่ `getHistoryForBot`/`getGroupedHistoryForBot` lookup ด้วย id ดิบ → pair ไม่ได้ → history fallback ไปใช้ Zaapi ทั้งที่บอทเราตอบแล้ว
+- **error (b):** trigger `bot_answer` + `bot_template` — test-chat ตอบ template ทันทีไม่เรียกบอท แต่ botworker เรียก callBot เสมอ → parallel run ไม่ตรง production intent
+- **fix (a):** `messageService.ts` เพิ่ม `indexBotRepliesByInbound` + `baseInboundId` — ตัด suffix `__wf<N>` เป็น base id, รวมหลาย bubble เป็น text เดียวด้วย " ||| " ตามลำดับ N · ใช้ร่วมกันทั้ง 2 ฟังก์ชัน history + orphan check เทียบ base id (กัน wf reply โผล่ซ้ำเป็น orphan)
+- **fix (b):** `botWorkerService.ts` — หลัง `handoff_admin` check ก่อน callBot: `trigger.bot_template` → `storeBotReply` (answer=template, source="trigger_bot_answer") + `markProcessed` status=trigger_matched + `logAdminEvent` (used_bot_template) → return; ไม่เรียก Python bot
+- **verify:** `npx tsc --noEmit` clean · `git diff --check` clean · integration test กับ Mongo จริง (seed conv สังเคราะห์แล้วลบ): grouped — u1 pair "WF-A ||| WF-B" ชนะ zaapi ✓, turn [u2,u3] หา worker reply ผ่าน u3 ✓, ไม่ซ้ำ ✓; history — pair ถูก + orphan จริงยัง append + wf reply ไม่เป็น orphan ซ้ำ ✓ (11/11 PASS)
+- **ผลกระทบเคสอื่น:** reply id ดิบ (worker/trigger/normal) ทำงานเหมือนเดิม — n=-1 sort ก่อน wf bubbles · raw+wf mix ภายใต้ base เดียว join raw ก่อน · schema/index ไม่แตะ · handoff_admin + bot_answer ไม่มี template = path เดิมเป๊ะ · SRS_SSD 6.26 อัปเดต 2 แถว (botWorkerService, messageService)
+
+### 🔧 กำลังจะทำ — Botworker true-parallel sandbox (รออนุญาต)
+
+- **เป้าหมาย:** botworker เป็น parallel run ของ ticket จริง — รับเรื่อง/ปิดแชท/โยนงาน/status ทำงานได้จริง แต่ state ทั้งหมดอยู่ใน test collections ไม่แตะของจริง
+- **audit พบจุดที่แตะ state จริงอยู่:**
+  1. `pickAgent` → `handoffService.handoffToAdmin` (จริง) → เขียน status_conversation + tryAssign จริง — cursor แยกอยู่แล้วเพราะ buildPool poolKey มี source (`*:botworker`)
+  2. status guard อ่าน `status_conversation` จริง (admin กดปิดในหน้า botworker จะไม่มีผลต่อ worker)
+  3. workflow nodes: `assign_ticket`(direct/auto) + `add_label` + `close_ticket` + `add_note` เขียน conversations/status_conversation จริง; conditions `conversation_status`/`assignee` อ่านของจริง
+  4. `callBot(simulate=false)` → Python `_send_handoff` POST /api/admin/conversations/bot-handoff ไม่มี simulate → เขียน status_conversation + conversations.bot_claim_info จริง (route รองรับ simulate แต่ hardcode source="test_chat")
+  5. `storeBotReply` เขียน `image_desc` ลง messages_shp (additive field — ต้องย้ายไป shadow_replies.bot_image_desc ถ้าจะแยกสนิท)
+  6. หน้า /botworker ปุ่ม close/reopen/handoff/transfer ยิง API ticket จริง (`chatService.close/handoff`, `/api/assignment/reassign`) → แก้ของจริง!
+- **แพลน:** (a) worker เปลี่ยนเป็นอ่าน/เขียน `test_status_conversation` source=botworker ทั้งหมด + `handoffToAdminTest` (b) engine เพิ่ม `testSource` — side-effect nodes เขียน test doc เมื่อถูกส่งมาจาก worker (c) callBot+Python เพิ่ม `test_source` → handoff ลง test store + ticket_state อ่านจาก test store (d) image_desc → `bot_image_desc` บน shadow_replies + history map ผ่าน inbound id (e) API routes ใหม่ /api/botworker/conversations/:id/{close,reopen,handoff,transfer,accept,close-history} + หน้าเปลี่ยนมาใช้
+- **คงเดิม:** test-chat ไม่แตะ (conv id ไม่ชนของจริงอยู่แล้ว) · conversation_products/anchor share กับ shadowbot ตามเดิม · workflow_runs ไม่มี source — ไม่กระทบ tickets
+- **คำถามเปิด:** toggle "รับแชท" (is_accepting_chats) บนหน้า botworker เขียน profile แอดมินจริง — เก็บไว้หรือซ่อน?
+- **plan จริง:** `docs/plans/botworker-parallel-plan.md` (เขียนแล้ว — รออนุญาต) · เพิ่มเติมจาก user: รับเรื่อง=self-assign คนกด (ทั้ง tickets+botworker), admin ตอบแชทใน parallel ได้จริง (collection ใหม่ botworker_messages), ปิดแล้วลูกค้าทักซ้ำ=reopen loop, assign history แยก (botworker_events), image_desc/anchor share ได้, toggle รับแชทเก็บไว้
+- **plan update (2026-09-22):** เพิ่มปัญหา pool ว่างแล้วไม่มี pending marker/backlog distributor — handoff ที่หา admin ไม่ได้ต้องเขียน `pending_assignment=true`; ไม่ auto-drain ตอน admin คนแรกเปิดรับแชท; ให้ superadmin/dev เลือก selected admin pool แล้ว preview+commit งานค้างเอง (round_robin_selected / least_loaded_selected / manual_quota); เพิ่มลำดับทำงาน MVP safety → UI sandbox → workflow sandbox → backlog distributor
+- **plan update 2 (2026-09-22):** เพิ่ม bug manual transfer dropdown แสดง admin ที่พักรับแชท — ต้อง filter `active && role=admin && is_accepting_chats !== false` ทั้ง tickets+botworker และ validate ที่ API; เพิ่ม Part H reset หลังจบทดสอบแบบ dry-run→backup→confirm ครอบ ticket/test_chat/shadowbot/botworker/live-assignment/test-assignment assignment+close history ทั้งหมด
+- **plan update 3 (2026-09-22):** user ยืนยันว่า admin reply ใน botworker ต้องนับเป็น history — เพิ่ม requirement ให้ `botworker_messages` merge เข้า sandbox history; history ของ worker ต้อง prioritize `shadow_replies` origin worker/workflow mode standalone ก่อน Zaapi fallback และห้ามปน shadowbot/replay/test source อื่น
+
+### ✅ 2026-09-22 — Botworker true-parallel sandbox (ทั้ง 8 parts เสร็จ + verify 21/21)
+
+- **error/เป้าหมาย:** botworker ต้องเป็น parallel run ของ /tickets ที่ทำงานได้จริงครบ (รับเรื่อง/โยนงาน/ตอบแชท/ปิด-เปิด/status) แต่ state แยกสนิทจาก ticket จริง — audit เจอจุดรั่ว 6 จุด (pickAgent→handoffToAdmin จริง, guard อ่าน status_conversation จริง, workflow nodes เขียนจริง, Python handoff ไม่มี test_source, ปุ่ม UI ยิง API จริง, image_desc เขียน messages_shp)
+- **fix ตาม `docs/plans/botworker-parallel-plan.md`:**
+  - **A** worker: guard อ่าน `test_status_conversation`[botworker] (assigned/open/handoff→skip, closed→reopen เข้าลูปเดิม) · `pickAgent`→`handoffToAdminTest(source=botworker, assignedStatus=open)` · ทุก event→`logBotworkerEvent` (ลบ logAdminEvent ออกจาก worker) · callBot/engineMsg ส่ง `testSource`
+  - **B** testStatusConversationService: +`pending_assignment`/`labels`/`close_history[]`/`bot_claim_info`/`reopen_count` + `manualTestAssign`(atomic)/`setTestPendingAssignment`/`assignPendingTestTicket`/`pushTestCloseHistory`/`addTestLabels` · handoffService `assignedStatus` + pending marker ทั้ง real (`statusConversationService.setPendingAssignment`/`assignPendingTicket`) และ test · `botworkerEventService` ใหม่ (collection `botworker_events` แยกจาก admin_logs) · COLLECTIONS `botworkerMessages`/`botworkerEvents` + index
+  - **C** workflowEngine: `EngineMessage.testSource` — assign_ticket/add_label/close_ticket/add_note เขียน test doc, conditions conversation_status/assignee อ่าน test doc, let_ai_respond ส่ง testSource+includeSandboxAdmin, run persist `test_source` (resume จาก timeout ยังอยู่ sandbox)
+  - **D** botCallService `testSource` → ticket_state อ่าน test store + POST `test_source` · Python `ChatRequest.test_source` + `_send_handoff` payload · route `bot-handoff` branch `test_source="botworker"` → handoffToAdminTest + claim info ลง test doc
+  - **E** API `/api/botworker/conversations/:id/` — accept(self-assign→open)/transfer(validate active+role+accepting)/handoff(pool→open หรือ handoff+pending)/close(+close_history)/reopen(assignee→open, ไม่มี→bot)/send(botworker_messages+claim→open)/close-history/events + messages route merge botworker_messages
+  - **F** หน้า /botworker: ปุ่มทั้งหมดยิง sandbox routes + composer ใหม่ (admin reply→botworker_messages+claim→open→worker skip) + bubble สีตาม `bubble_color` ที่บันทึกตอนส่ง + transfer dropdown filter `is_accepting_chats!==false` · หน้า /tickets "รับเรื่อง"→`POST assign {admin_id:me}` (self-assign จริง แก้ bug เดิมที่ไม่เคย assign ให้คนกด) · `/api/assignment/reassign` validate target active+role+accepting ซ้ำ
+  - **G** `backlogService` + `/api/assignment/backlog` GET + `/preview` + `/commit` (superadmin/dev, idem_key, re-check pending atomic) — modes: round_robin_selected/least_loaded_selected/manual_quota; ticket→status_conversation(handoff), botworker→test store(open) · หน้า `/backlog` ใหม่ (page key `backlog` admin:none/superadmin:dev:edit) · ไม่มี auto-drain
+  - **H** `scripts/reset-assignment-state.ts` — dry-run default, `--confirm --phrase=RESET_ASSIGNMENT_STATE`, backup→`exports/maintenance/reset-assignment-<ts>/`, `--accepting=keep|all-on|all-off`, soft-delete shadow_replies test origins (หรือ --hard), unset status_conversation/conversations เฉพาะ bot-handoff fields, delete test_status/botworker/cursors/processing/buffer/accept-sessions, post-reset verify; ไม่แตะ messages_shp/master data
+- **verify:** `tsc --noEmit` clean · `git diff --check` clean · `py_compile app.py` clean · reset dry-run รันจริงบน DB (ไม่เขียน — count เท่านั้น) · **`scripts/verify-botworker-parallel.ts` 21/21 PASS** (manualTestAssign→test only, status_conversation/conversations ไม่มี doc, pending marker, preview ไม่เขียน, commit assign+idem replay, pool validation reject nonexistent, history: worker reply ชนะ zaapi + admin sandbox เข้าเป็น model turn + shadowbot/manual ไม่รั่ว + flag ปิดไม่มี admin msg, handoffToAdminTest ไม่แตะ real store)
+- **ผลกระทบเคสอื่น:** /tickets "รับเรื่อง" เปลี่ยนจาก pool-handoff → self-assign (ตาม requirement user) · reassign ปฏิเสธ admin พักรับแชท (ทั้ง UI filter + API 422) · handoffToAdmin จริงตอนนี้ mark pending_assignment เมื่อ pool ว่าง (งานค้างไม่หาย) · test-chat/shadowbot ไม่เปลี่ยน (source แยก) · `image_desc` คงบน messages_shp (additive, share ตาม plan) · toggle รับแชทบน botworker เก็บไว้ (profile จริง — user อนุมัติ)
+
+### 🔧 กำลังจะทำ — Audit fixes: test_status index + reset script completeness
+
+- **audit พบจุดผิดพลาด:**
+  1. `test_status_conversation` มี unique index `{conversation_id}` เดี่ยว → conv เดียวกันมี doc ได้แค่ source เดียว (botworker ชน test_assignment/test_chat) — live DB: `conversation_id_1` unique ยังอยู่, compound `{source,conversation_id}` เป็น non-unique · data ปลอดภัย (94 docs ทุกตัวมี source, ไม่มี dupe)
+  2. reset script ไม่ครบตาม requirement "เหมือนไม่เคยทดลอง": ไม่ backup `conversations` ก่อน unset · ไม่ backup `admins` เมื่อใช้ --accepting · ไม่แตะ `admin_logs` scope assign/close/handoff/test เลย · workflow_runs filter ขาด `waiting_for_reply` · post-reset verification ไม่ครบ
+  3. `chat_accept_sessions` แค่ปิด open sessions — ไม่มี hard reset ล้าง history
+  4. ไม่มี warning ให้หยุด bot-worker ก่อน reset จริง · --no-backup ไม่มี warning
+- **plan แก้:**
+  - `mongoClient.ts`: migration block ก่อน Promise.all — drop unique `{conversation_id}` + drop non-unique compound เก่า → `safeCreateIndex` ใหม่: unique `{source:1,conversation_id:1}` + non-unique `{conversation_id:1}` (query เดี่ยวยังเร็ว)
+  - `reset-assignment-state.ts`: +backup `conversations`(filter bot_handoff fields) +backup `admins` เมื่อ --accepting≠keep +backup&delete `admin_logs` scope (chat_assigned/conversation.handoff/status_change/backlog_commit/live_assignment.*/test_assignment.*/test_chat.rate/shadow_reply.*) +workflow_runs เพิ่ม `waiting_for_reply` +`--accept-sessions-hard` ลบ history หลัง backup +verification checklist ครบทุก collection +warning หยุด bot-worker +--no-backup loud warning
+- **verify:** tsc · py_compile · git diff --check · dry-run เท่านั้น (ห้าม --confirm จนกว่าอนุมัติ)
+
+#### ✅ ผลลัพธ์ (verify แล้ว)
+
+- **index migration:** `mongoClient.ts` เพิ่ม drop block ก่อน Promise.all — drop unique `conversation_id_1` + non-unique `source_1_conversation_id_1` เดิม → สร้างใหม่: `{conversation_id:1}` non-unique sparse (query เดี่ยว) + `{source:1,conversation_id:1}` unique — **verify บน DB จริง:** indexes เปลี่ยนถูกต้อง + upsert conv เดียวกัน 2 source สำเร็จ (เดิมจะ E11000)
+- **side finding (ไม่แก้ — นอก scope):** `conversations_shp` มี duplicate `conversation_id` docs ใน dev DB → unique index `conversation_id_1` ของมันสร้างไม่ได้ (E11000) — pre-existing, instrumentation.ts catch error ไว้อยู่แล้วไม่ crash; data มาจาก sellcenter dump
+- **reset script เพิ่ม:** backup `conversations`(bot_handoff fields) + `admins`(เมื่อ --accepting≠keep) + `admin_logs` scope (action_type ใน ADMIN_LOG_SCOPE: chat_assigned/conversation.handoff/status_change/backlog_commit/live_assignment.*/test_assignment.*/test_chat.rate/shadow_reply.*) · workflow_runs filter ครอบ `waiting_for_reply/running/waiting/active/paused` + `test_source` · `--accept-sessions-hard` ลบ history ทั้งหมด (default แค่ปิด open) · post-reset verification 20 checks ครบทุก collection · warning หยุด bot-worker + `--no-backup` loud warning
+- **verify:** tsc clean · py_compile clean · git diff --check clean · dry-run รันจริง 2 variants (default + hard/all-off/no-backup) แสดง count ถูก · `--confirm` ไม่มี phrase → ยัง dry-run + เตือน · verify-botworker-parallel ยัง 21/21 หลัง migration
+- **ยังไม่รัน:** `--confirm --phrase=RESET_ASSIGNMENT_STATE` จริง (รอ approval — จะ wipe test data + scoped admin_logs บน DB นี้)
+
+### 🔧 กำลังจะทำ — Audit fix รอบ 2: close_history collection + admin_logs scope ขาด
+
+- **audit พบ:**
+  1. `close_history` collection (`closeHistoryService.ts`) ไม่ถูก reset เลย — script unset แค่ field `close_history` ใน status_conversation doc แต่ collection แยกยังค้าง → ประวัติปิดแชทจริงเหลือ
+  2. `ADMIN_LOG_SCOPE` ขาด `chat_reassigned` (assignmentService), `conversation.close`/`conversation.open`/`conversation.resolve` (statusConversationService/closeHistoryService)
+- **plan:** reset script — +`closeHistory` เข้า backup+delete+verify · +4 action types เข้า ADMIN_LOG_SCOPE · ไม่แตะ `assignment.*` config logs (mode_change/team_add คือ audit ของ config ไม่ใช่ conversation state)
+- **verify:** tsc · dry-run นับ close_history + admin_logs scope ใหม่
+
+#### ✅ ผลลัพธ์รอบ 2 (verify แล้ว)
+
+- **fix:** `reset-assignment-state.ts` — +`closeHistory` เข้า backup/delete/verify · +`chat_reassigned`/`conversation.open`/`conversation.close`/`conversation.resolve` เข้า ADMIN_LOG_SCOPE (คงไม่แตะ `assignment.mode_change`/team config — audit ของ config)
+- **verify:** tsc clean · dry-run: close_history=3 docs เข้า scope, admin_logs 2388→2395 (+7 จาก action types ใหม่)
+
+### 🔧 กำลังจะทำ — Audit fix รอบ 3: admin-owned state (topic/item_ids/pinned)
+
+- **user อนุมัติเพิ่ม:** ADMIN_LOG_SCOPE += `conversation.set_topic`,`conversation.set_item_ids` · STATUS_UNSET += `topic`,`item_ids`,`pinned` (admin-owned state จากการใช้หน้า tickets/botworker — ไม่ใช่ข้อมูลลูกค้า) · consistency: pin/unpin เกิด admin_logs `conversation.pin`/`unpin` → รวมเข้า scope ด้วยเพราะ unset pinned แล้วแต่ log เหลือจะขัดกัน
+- **verify:** tsc · dry-run
+
+#### ✅ ผลลัพธ์รอบ 3 (verify แล้ว)
+
+- **fix:** `reset-assignment-state.ts` — ADMIN_LOG_SCOPE +`set_topic`/`set_item_ids`/`pin`/`unpin` · STATUS_UNSET +`topic`/`item_ids`/`pinned` (admin-owned state ทั้งหมด — test doc ลบทั้ง doc อยู่แล้วไม่ต้อง unset)
+- **verify:** tsc clean · dry-run: admin_logs=2395 (ไม่เปลี่ยน — DB นี้ยังไม่มี log ของ action ใหม่, scope พร้อมรับเมื่อมี)
+
+### 🔧 กำลังจะทำ — Audit fix รอบ 4: เปลี่ยน scope reset เป็น "assignment/chat-state only" (preserve replay/generate artifacts)
+
+- **requirement ใหม่ (user):** reset เคลียร์เฉพาะ state การทำงาน (assign/handoff/close/reopen/backlog/topic/pin/accept sessions/cursors) — **เก็บ** replay/generate history ทั้งหมด: shadow_replies, test_assignment, test_chat_sessions, test_chat_ratings + logs ที่เป็น replay/generate/rating history
+- **เอาออกจาก reset scope (preserve):**
+  - collections: `shadow_replies` (ทั้ง soft/hard — ลบ TEST_REPLY_FILTER + --hard flag ทิ้ง), `test_assignment`, `test_chat_sessions`, `test_chat_ratings`
+  - admin_logs: `shadow_reply.*` (10 ตัว), `test_assignment.*` (6 ตัว), `test_chat.rate`, `live_assignment.batch_replay`, `live_assignment.admin_reply` (= คำตอบ/ผลทดสอบ)
+- **คงไว้ใน ADMIN_LOG_SCOPE (assignment/chat-state เท่านั้น):** chat_assigned, chat_reassigned, conversation.handoff/status_change/open/close/resolve, set_topic, set_item_ids, pin, unpin, backlog_commit, live_assignment.close_chat, live_assignment.reopen_process · +เพิ่ม `bot.handoff_to_admin` (bot ส่งต่อ=assignment state), `chat_accept.start`/`stop` + `agent.pause`/`resume`/`agent_auto_paused` (accept-session history — ล้าง sessions แล้วต้องล้าง log คู่กันไม่งั้น audit กระหล่อน)
+- **คง reset เหมือนเดิม:** status_conversation unset (รวม topic/item_ids/pinned), conversations bot_handoff fields, close_history (backup+delete), assignment_cursors, chat_accept_sessions (close/hard), test_status_conversation (assignment state ของ test pages — result/history อยู่ใน test_assignment/test_chat_sessions ที่ preserve), workflow_runs (active/test filter เดิม), botworker_messages+events (manual admin action state), chat_processing+buffer_messages (runtime processing state), admins accepting flag (เมื่อ --accepting≠keep)
+- **UI/ข้อความ:** header "Assignment/chat-state reset" + dry-run แสดง section "PRESERVE (replay/generate artifacts)" + verification ไม่เช็ก preserved colls = 0 + เพิ่มเช็ก topic/item_ids/pinned/assigned_at fields
+- **verify:** tsc · git diff --check · dry-run เท่านั้น (ห้าม --confirm)
+
+#### ✅ ผลลัพธ์รอบ 4 (verify แล้ว)
+
+- **fix:** `reset-assignment-state.ts` — scope ใหม่ "assignment/chat-state reset": เอา `shadow_replies`/`test_assignment`/`test_chat_sessions`/`test_chat_ratings` ออกจาก backup+delete+verify (preserve ทั้งหมด) · ลบ `--hard` flag + `TEST_REPLY_FILTER` · ADMIN_LOG_SCOPE เหลือเฉพาะ assign/close/handoff/state (ตัด shadow_reply.*/test_assignment.*/test_chat.rate/live_assignment.batch_replay/admin_reply; เพิ่ม bot.handoff_to_admin, chat_accept.start/stop, agent.pause/resume/agent_auto_paused — accept-session state) · dry-run แสดง section PRESERVE + counts · verification เพิ่มเช็ก assigned_at/assignment_reason/topic/item_ids/pinned
+- **verify:** tsc clean · git diff --check clean · dry-run — admin_logs scope=4 docs
+- **⚠️ สังเกต:** dry-run รอบนี้ state collections เป็น 0 ทั้งหมด (รอบก่อน: test_status=94, sessions=113, close_history=3) — น่าจะมีการเคลียร์ test state บน DB นี้ไปแล้วนอก script นี้ · shadow_replies 6555 docs ยังอยู่ครบ (preserve ถูกต้อง)
+
+### 🔧 กำลังจะทำ — Post-incident: admin filter bugs + legacy residue + live-assignment state (preserve QA history)
+
+- **อาการหลัง reset/restore:** /tickets เห็น handoff ของ admin_temp_001-003 (legacy `conversations_shp.assigned_to` ~15 docs ค้าง + API fallback อ่าน legacy) · filter admin ที่ไม่มีงานกลายเป็น "โชว์ทั้งหมด" (`conversationIds=[]` → no-filter bug) · restore test_assignment ดึง assigned_to/mock_status กลับมาด้วย · /live-assignment + /botworker ไม่มี assigned_to filter ชัดเจน
+- **plan:**
+  - **A** `conversationService.listConversations`: `opts.conversationIds` ถูกส่งมาแต่เป็น `[]` → return `[]` ทันที (ห้าม [] = no-filter) · เช็ก callsite `/api/admin/conversations`
+  - **B** reset script: +unset legacy assignment fields ใน `conversations_shp` (assigned_to/assigned_at/assigned_to_name/assignment_reason — audit field `status` ก่อนว่า master หรือ admin-owned; ถ้าไม่ชัด unset เฉพาะ docs ที่มี assigned_to/bot_handoff fields) + backup + dry-run count
+  - **C** reset script: `test_assignment` เปลี่ยนจาก preserve-ทั้ง-doc → **updateMany $unset เฉพาะ state fields** (assigned_to/assigned_at/assigned_to_name/mock_status/close_*/reopened_* ฯลฯ ตาม schema จริง) — preserve qa/messages/bot_reply/products/retrieval_info · backup affected docs ก่อน · verify state fields=0 แต่ docs ยังอยู่
+  - **D** `/live-assignment`: page → route → service รองรับ `assigned_to=all|me|unassigned|<id>` — empty/falsy ≠ no-filter
+  - **E** `/botworker`: เพิ่ม `assigned_to` param → filter จาก `test_status_conversation[source=botworker]` (ไม่ใช้ conversations_shp.assigned_to) · empty list ถูกต้อง · cache key รวม filter
+  - **verify:** tsc · git diff --check · read-only probes · dry-run เท่านั้น (ห้าม --confirm)
+
+#### ✅ ผลลัพธ์รอบ 5 (verify แล้ว)
+
+- **root causes:**
+  1. `listConversations` — `conversationIds=[]` ถูกข้าม filter (เช็ก length>0) → admin ไม่มีงานเห็นทั้งหมด · fix: `!== undefined` → `$in: []` match 0 จริง
+  2. `/tickets` เห็น admin_temp_* — `status_conversation` สะอาดแล้วแต่ `getAssignedConversationIds` fallback อ่าน legacy `conversations_shp.assigned_to` (15 docs ค้าง) → reset เพิ่ม unset assigned_to/assigned_at/assigned_to_name/assignment_reason/status เฉพาะ docs ที่มี residue (status-only docs ไม่แตะ — อาจเป็น dump field)
+  3. `test_assignment` restore ดึง state กลับ — เปลี่ยนจาก preserve-ทั้ง-doc → `$unset` state fields (assigned_to/mock_status/close_*/reopened_*/pending_assignment) เก็บ qa/ratings/replay metadata · backup affected docs ก่อน
+  4. `/live-assignment` — route รับ `assigned_to` แต่ page ไม่เคยส่ง (chatFilter เป็นแค่ UI) → ส่ง chatFilter ใน loadList/loadMore/poll · service รองรับ `unassigned` ($in [null,""] — ไม่ชน cursor $or) · route resolve me→admin_id
+  5. `/botworker` — route ไม่มี assigned_to param เลย → เพิ่ม all|me|unassigned|<id> filter จาก test_status_conversation[botworker] ($in=[]→empty จริง, unassigned→$nin) + cache key รวม filter + admin name map สำหรับ badge · page ส่ง chatFilter
+- **verify:** tsc clean · diff --check clean · dry-run: conversations_shp legacy=15 docs, test_assignment state=92 docs (docs preserved), shadow_replies 6555 เก็บ, admin_logs scope=4
+- **ยังไม่รัน --confirm**
+
+#### ✅ ผลลัพธ์รอบ 6 (verify แล้ว)
+
+- **fix:** `TEST_ASSIGN_UNSET` +`stopped_at_handoff` · verification +check 同名 (probe: 92 docs มี field นี้)
+- **final_status decision — PRESERVE:** `final_status` คือ replay verdict ("bot_answered"/"handed_off"/"no_agent"/"error") = ผลทดสอบ — ใช้ใน stats + badge เป็น "ผล replay" ไม่ใช่ live state · ล้างแล้ว replay history เสียความหมาย · badge "handoff" ใน list = verdict ของ replay โดยตั้งใจ (admin action state จริงคือ assigned_to/mock_status/close_* ที่ล้างแล้ว) — ถ้าอยากให้ list ดูสะอาดสมบูรณ์ค่อยเพิ่ม flag ล้าง final_status แยก
+- **verify:** tsc clean · dry-run scope ถูก
+
+### 🔧 กำลังจะทำ — live-assignment UI: แยก current state ออกจาก replay verdict
+
+- **root cause:** `liveDocToConversation` map `final_status` (replay verdict) → `status` (current chat state) — reset state หมดแล้วแต่ list ยังขึ้น badge "แอดมิน" เพราะ verdict ค้าง
+- **plan:**
+  - `liveDocToConversation`: status จาก state fields เท่านั้น — `mock_status==="closed"`→closed, `assigned_to||stopped_at_handoff`→handoff (อยู่ในมือแอดมิน/รอรับ), else→bot · post-reset ทุก field unset → "bot" สะอาด
+  - แสดง replay verdict แยก: `Conversation.replay_verdict?` (optional) + chip "replay: X" ใน ChatList badge row (optional — ไม่กระทบหน้าอื่น)
+  - test-assignment page ไม่แตะ — ใช้ replay_status/final_status ในตารางผล replay โดยตรง (context ถูกอยู่แล้ว)
+  - verify: tsc + diff --check
+
+#### ✅ ผลลัพธ์รอบ 7 (verify แล้ว)
+
+- **fix:** `liveDocToConversation` — status จาก state fields เท่านั้น: `mock_status==="closed"`→closed, `assigned_to||stopped_at_handoff`→handoff, else→bot (post-reset ทุก field unset → "bot" สะอาด ไม่มี badge แอดมินหลอก)
+- **replay verdict แยก:** `Conversation.replay_verdict?` (optional) + chip "replay: <final_status>" ใน ChatList badge row — final_status เก็บเป็นข้อมูล/แสดงเป็น verdict ไม่ใช่ current state · optional field ไม่กระทบหน้าอื่น
+- **test-assignment ไม่แตะ:** ใช้ replay_status/final_status ในตารางผล replay โดยตรง — context ถูกอยู่แล้ว
+- **verify:** tsc clean · git diff --check clean
+- **ยังไม่รัน --confirm / ยังไม่ commit**
+
+#### ✅ ผลลัพธ์รอบ 8 — RESET จริง (verify แล้ว)
+
+- **pre-check:** ไม่มี bot-worker รัน (ps + docker ps) — เจอแค่ verify-botworker-parallel.ts ค้าง (read-only)
+- **dry-run สุดท้าย:** conversations_shp=15, test_assignment=92, admin_logs=4 · preserve shadow_replies=6555, test_chat_sessions=115
+- **reset จริง:** `--accept-sessions-hard --confirm --phrase=RESET_ASSIGNMENT_STATE` — backup 111 docs → `exports/maintenance/reset-assignment-2026-09-22T10-41-40-412Z`
+- **post-reset verification:** 26/26 ✓ ไม่มี ✗ — status_conversation/conversations_shp/test_assignment state fields = 0, admin_logs scoped=0, close_history=0, accept_sessions=0 (hard)
+- **probe หลัง reset:** shadow_replies 6555 (active 6555) · test_assignment 160 docs (qa+final_status ครบ) · test_chat_sessions 115 · conversations_shp.assigned_to=0 · test_assignment.assigned_to/mock_status/stopped_at_handoff=0
+- **static:** tsc clean · diff --check clean · py_compile app.py+responses.py clean
+- **manual UI:** รอผู้ใช้ตรวจผ่าน browser preview (ต้อง login session)
+- **ยังไม่ commit**
+
+### 🔧 กำลังจะทำ — Task 5B3-D: runtime config toggle สำหรับ grouped retrieval (2026-09-23)
+
+- **เป้าหมาย:** เปิด/ปิด `grouped_retrieval_shadow_enabled` + `grouped_retrieval_selection_enabled` จากหน้า /config (dev-only) โดยไม่แก้ .env / ไม่ restart process
+- **design:** DB `system_configs.main_config` เป็น owner (field absent → env fallback เดิม) · Python `runtime_config.py` TTL 5s · ไม่มีปุ่ม refresh เพราะรอ ≤5s เพียงพอและลด surface
+- **tests ต้อง RED ก่อน:** `docs/test/test_runtime_config.py` + pin update ใน selection_runtime/shadow tests (env check ย้ายเข้า runtime_config)
+
+#### ✅ ผลลัพธ์ Task 5B3-D (verify แล้ว — ยังไม่ commit)
+
+- **Python `runtime_config.py` (ใหม่):** `get_runtime_config` อ่าน `system_configs.main_config` TTL 5s · `_flag` = DB bool ชนะ / field absent / DB error → env fallback · `grouped_retrieval_shadow_enabled()` + `grouped_retrieval_selection_enabled()`
+- **app.py:** 2 flag blocks เรียก runtime_config (lazy, except→False) แทน env ตรงๆ · ไม่มี runtime-config reload endpoint
+- **Admin:** SystemConfig +2 fields · whitelist + boolean validate 422 · card "Legacy Shopee Retrieval" หน้า /config — 2 toggles + warning selection กระทบคำตอบจริง · ไม่มีปุ่ม refresh/reload
+- **live probe (Mongo จริง):** doc มีแต่ยังไม่มี fields → env fallback: shadow=True (env=1) / selection=False — DB จะเป็น owner หลัง toggle เขียนครั้งแรก
+- **verify:** pytest 77/77 · py_compile · tsc clean · next build ผ่าน · diff --check clean

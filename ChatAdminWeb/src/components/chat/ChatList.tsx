@@ -626,6 +626,11 @@ export function ChatList({
                   <div className="text-xs text-text-muted truncate mt-0.5">{c.last_message}</div>
                   <div className="flex items-center gap-1.5 mt-1">
                     <Badge tone={statusTone[c.status] || "neutral"}>{statusLabel[c.status] || c.status}</Badge>
+                    {c.replay_verdict && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-surface-2 text-text-muted truncate">
+                        replay: {c.replay_verdict}
+                      </span>
+                    )}
                     {c.assigned_to && (
                       <span
                         className="text-[10px] px-1.5 py-0.5 rounded-full bg-brand/10 text-brand truncate max-w-[110px]"

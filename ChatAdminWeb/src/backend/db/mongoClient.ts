@@ -63,6 +63,22 @@ export async function ensureIndexes(): Promise<void> {
       // index อาจไม่มี (fresh install) → ไม่เป็นไร
     }
   }
+  // ⚡ migration — test_status_conversation เดิม unique(conversation_id) เดี่ยว
+  //   → conv เดียวกันมี doc ได้แค่ source เดียว (botworker parallel ชน test_assignment/test_chat/shadowbot)
+  //   drop unique เดิม + drop non-unique compound เก่า → สร้างใหม่: unique(source,conversation_id) + non-unique(conversation_id)
+  try {
+    const tsc = db.collection(COLLECTIONS.testStatusConversation);
+    for (const idx of await tsc.indexes()) {
+      const keys = Object.keys(idx.key || {});
+      const isSingleConv = keys.length === 1 && keys[0] === "conversation_id";
+      const isCompound = keys.length === 2 && keys[0] === "source" && keys[1] === "conversation_id";
+      if (idx.name && ((isSingleConv && !!idx.unique) || (isCompound && !idx.unique))) {
+        await tsc.dropIndex(idx.name);
+      }
+    }
+  } catch {
+    // collection/index อาจยังไม่มี (fresh install) → ข้าม
+  }
   await Promise.all([
     safeCreateIndex(db, COLLECTIONS.admins, { email: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.admins, { username: 1 }, { unique: true, sparse: true }),
@@ -199,8 +215,15 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.statusConversation, { conversation_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.statusConversation, { assigned_to: 1 }),
     safeCreateIndex(db, COLLECTIONS.statusConversation, { status: 1 }),
-    // ⚡ Phase 2J — test_status_conversation (ทดสอบ — ใช้กับ test-assignment, shadowbot, replay-compare, test-chat)
-    safeCreateIndex(db, COLLECTIONS.testStatusConversation, { conversation_id: 1 }, { unique: true, sparse: true }),
-    safeCreateIndex(db, COLLECTIONS.testStatusConversation, { source: 1, conversation_id: 1 }),
+    // ⚡ Phase 2J — test_status_conversation (ทดสอบ — ใช้กับ test-assignment, shadowbot, replay-compare, test-chat, botworker)
+    //   unique key = (source, conversation_id) — conv เดียวกันแยก doc ได้ต่อ sandbox source
+    //   + non-unique conversation_id สำหรับ query เดี่ยว (legacy callers ที่ไม่รู้ source)
+    safeCreateIndex(db, COLLECTIONS.testStatusConversation, { conversation_id: 1 }, { sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.testStatusConversation, { source: 1, conversation_id: 1 }, { unique: true }),
+    // ⚡ botworker parallel sandbox — parallel admin messages + event log
+    safeCreateIndex(db, COLLECTIONS.botworkerMessages, { message_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.botworkerMessages, { conversation_id: 1, created_at: 1 }),
+    safeCreateIndex(db, COLLECTIONS.botworkerEvents, { conversation_id: 1, created_at: -1 }),
+    safeCreateIndex(db, COLLECTIONS.botworkerEvents, { type: 1, created_at: -1 }),
   ]);
 }

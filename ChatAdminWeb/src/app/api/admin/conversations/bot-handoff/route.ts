@@ -35,6 +35,7 @@ interface BotHandoffBody {
   platform?: string;
   reason?: string;
   simulate?: boolean; // ⚡ simulate mode — เก็บลง test_chat_sessions ไม่กระทบ conversations
+  test_source?: string; // ⚡ parallel sandbox — "botworker" ฯลฯ → เขียน test_status_conversation[source]
   claim?: {
     customer_name?: string;
     customer_phone?: string;
@@ -82,6 +83,73 @@ export async function POST(req: NextRequest) {
   const simulate = body.simulate === true;
   const shopId = body.shop_id != null ? String(body.shop_id) : undefined;
   const platform = body.platform != null ? String(body.platform) : undefined;
+
+  // ⚡ botworker parallel — test_source ระบุ sandbox source ของ test_status_conversation
+  //   validate ให้เป็น TestSource ที่รู้จักเท่านั้น (กันเขียน source แปลก)
+  const TEST_SOURCES = ["botworker", "test_chat", "shadowbot", "replay_compare", "test_assignment"] as const;
+  type TestSource = (typeof TEST_SOURCES)[number];
+  const testSource: TestSource | undefined =
+    body.test_source && (TEST_SOURCES as readonly string[]).includes(body.test_source)
+      ? (body.test_source as TestSource)
+      : undefined;
+  if (body.test_source && !testSource) {
+    return error(`invalid test_source: ${body.test_source}`, 422);
+  }
+
+  // ⚡ parallel sandbox path — test_source มี → เขียน test_status_conversation[source] เท่านั้น
+  //   ไม่แตะ status_conversation/conversations จริง; claim → bot_claim_info บน test doc
+  if (testSource) {
+    const result = await handoffService.handoffToAdminTest({
+      conversationId: conversation_id,
+      shopId: shopId || "",
+      platform: platform || "shopee",
+      reason: reason || "sandbox handoff",
+      source: testSource,
+      assignedStatus: testSource === "botworker" ? "open" : "handoff",
+    });
+    // claim info → bot_claim_info บน test doc (แทน test_chat_sessions/conversations)
+    if (claim && Object.keys(claim).length > 0) {
+      try {
+        const coll = await getCollection<{ conversation_id: string; source: string }>(COLLECTIONS.testStatusConversation);
+        await coll.updateOne(
+          { conversation_id, source: testSource },
+          { $set: { bot_claim_info: claim, bot_handoff_at: new Date(), bot_handoff_reason: reason || "warranty_claim", updated_at: new Date() } },
+          { upsert: true }
+        );
+      } catch (e) {
+        console.error("[bot-handoff:test] failed to save claim info:", e);
+      }
+    }
+    // log — botworker source → botworker_events; source อื่น → admin_logs (เดิม)
+    if (testSource === "botworker") {
+      const { logBotworkerEvent } = await import("@/backend/service/botworkerEventService");
+      await logBotworkerEvent({
+        conversation_id,
+        type: "bot_handoff",
+        actor: "bot",
+        shop_id: shopId,
+        platform,
+        metadata: { assigned_to: result.assignedTo, reason, assignment_reason: result.assignmentReason, claim },
+      });
+    } else {
+      await logAdminEvent({
+        action_type: "conversation.handoff",
+        actor: "bot",
+        conversation_id,
+        metadata: { assigned_to: result.assignedTo, reason, assignment_reason: result.assignmentReason, test_source: testSource, claim },
+      });
+    }
+    invalidateBotworkerCache();
+    return json({
+      ok: true,
+      simulate: true,
+      test_source: testSource,
+      assigned_to: result.assignedTo,
+      assigned_to_name: result.assignedToName,
+      reopened: result.reopened,
+      assignment_reason: result.assignmentReason,
+    });
+  }
 
   // ⚡ Phase 2J — Simulate mode ใช้ test_status_conversation (ไม่กระทบ status_conversation จริง)
   //   ใช้ round-robin จริง (cursor ขยับจริง) แต่เก็บใน test_status_conversation

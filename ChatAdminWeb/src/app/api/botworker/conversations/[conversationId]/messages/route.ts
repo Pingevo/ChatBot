@@ -22,6 +22,7 @@ import type { MessageType, MessageMedia, MessageTable, ProductCard } from "@/lib
 // ⚡ source label ใช้ค่าจาก COLLECTIONS (ไม่ hardcode) — กัน env เปลี่ยนแล้ว label ไม่ตรง
 const MSG_SOURCE = COLLECTIONS.messages;     // "messages_shp" (จาก env)
 const SHADOW_SOURCE = COLLECTIONS.shadowReplies; // "shadow_replies" (จาก env)
+const BW_MSG_SOURCE = COLLECTIONS.botworkerMessages; // "botworker_messages" (parallel admin replies)
 
 interface UnifiedMessage {
   id: string;
@@ -40,6 +41,7 @@ interface UnifiedMessage {
   origin?: string;
   image_desc?: string;
   images?: string[];
+  bubble_color?: string;  // ⚡ สี bubble ของแอดมินใน sandbox (botworker_messages)
   // ⚡ rich media (parsed from raw_payload) — เหมือน /admin/conversations/:id/messages
   message_type?: MessageType;
   media?: MessageMedia;
@@ -119,6 +121,26 @@ export async function GET(
 
   const srDocs = await srColl
     .find(srFilter)
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray();
+
+  // ⚡ 2.5 parallel sandbox — ดึง admin replies จาก botworker_messages (แอดมินตอบใน /botworker)
+  const bwColl = await getCollection<{
+    message_id: string;
+    conversation_id: string;
+    platform: Platform;
+    role: string;
+    actor: string;
+    actor_name?: string;
+    bubble_color?: string;
+    text: string;
+    created_at: Date;
+  }>(COLLECTIONS.botworkerMessages);
+  const bwFilter: Record<string, unknown> = { conversation_id: conversationId, role: "admin" };
+  if (platform) bwFilter.platform = platform;
+  const bwDocs = await bwColl
+    .find(bwFilter)
     .sort({ created_at: -1 })
     .limit(limit)
     .toArray();
@@ -318,6 +340,20 @@ export async function GET(
       trigger_id: d.trigger_id,
       mode: d.mode,
       origin: d.origin,
+    });
+  }
+
+  // ⚡ parallel sandbox admin replies — role=admin + bubble_color ของแอดมินนั้น
+  for (const d of bwDocs) {
+    unified.push({
+      id: d.message_id,
+      role: "admin",
+      text: d.text,
+      timestamp: d.created_at.toISOString(),
+      source: BW_MSG_SOURCE,
+      admin_id: d.actor,
+      admin_name: d.actor_name,
+      bubble_color: d.bubble_color,
     });
   }
 

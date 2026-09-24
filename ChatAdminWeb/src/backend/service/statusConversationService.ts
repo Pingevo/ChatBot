@@ -28,6 +28,9 @@ export interface StatusConversationDoc {
   closed_at?: Date | null;
   closed_by?: string;
   close_count?: number;
+  // ⚡ pending backlog — handoff แล้วหา admin ไม่ได้ → รอ manual distributor จ่าย
+  pending_assignment?: boolean;
+  assignment_reason?: string;
   // other admin-owned fields
   pinned?: boolean;
   topic?: string;
@@ -289,6 +292,45 @@ export async function resetUnread(conversationId: string): Promise<void> {
   // แต่ถ้าต้องการ track ฝั่งเรา ก็เพิ่มได้
 }
 
+/** ⚡ pending backlog — handoff แล้วหา admin ไม่ได้ → mark รอ distributor; จ่ายสำเร็จ → clear */
+export async function setPendingAssignment(
+  conversationId: string,
+  pending: boolean,
+  reason?: string
+): Promise<void> {
+  const fields: Partial<StatusConversationDoc> = { pending_assignment: pending };
+  if (pending) {
+    fields.status = "handoff";
+    fields.assigned_to = null;
+    if (reason) fields.assignment_reason = reason;
+  }
+  await upsertMeta(conversationId, fields);
+}
+
+/** ⚡ backlog distributor — assign ตรงให้ pending ticket (re-check ว่ายัง pending อยู่ กัน race) */
+export async function assignPendingTicket(
+  conversationId: string,
+  agentId: string,
+  actor: string
+): Promise<boolean> {
+  const coll = await getCollection<StatusConversationDoc>(COLLECTIONS.statusConversation);
+  const result = await coll.findOneAndUpdate(
+    { conversation_id: conversationId, pending_assignment: true, $or: [{ assigned_to: null }, { assigned_to: { $exists: false } }] },
+    { $set: { assigned_to: agentId, assigned_at: new Date(), assignment_mode_used: "backlog_distributor", pending_assignment: false, updated_at: new Date() } },
+    { returnDocument: "after" }
+  );
+  if (result) {
+    await logAdminEvent({
+      action_type: "chat_assigned",
+      actor,
+      target_admin_id: agentId,
+      conversation_id: conversationId,
+      metadata: { mode_used: "backlog_distributor" },
+    });
+  }
+  return !!result;
+}
+
 export const statusConversationService = {
   getMeta,
   getMetaMap,
@@ -300,4 +342,6 @@ export const statusConversationService = {
   setTopic,
   setItemIds,
   togglePinned,
+  setPendingAssignment,
+  assignPendingTicket,
 };

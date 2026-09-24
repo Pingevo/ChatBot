@@ -38,6 +38,10 @@ export async function GET(req: NextRequest) {
   const includeCount = url.searchParams.get("include_count") === "true";
   const limitParam = parseInt(url.searchParams.get("limit") || "200", 10);
   const limit = Math.min(Math.max(limitParam, 1), 5000);
+  // ⚡ assigned_to filter — source of truth = test_status_conversation[source="botworker"]
+  //   "all"(default) | "me" | "unassigned" | <admin_id>
+  const assignedToParam = url.searchParams.get("assigned_to") || "all";
+  const me = r.ctx.admin.admin_id;
 
   // ⚡ parse cursor (timestamp|conversation_id — เหมือน /admin/conversations)
   let parsedCursor: { ts: Date; id: string } | undefined;
@@ -52,7 +56,7 @@ export async function GET(req: NextRequest) {
   }
 
   // ⚡ G-fix — เช็ค cache ก่อน query DB (เฉพาะ head — ไม่ cache tail)
-  const cacheKey = `${platform || ""}|${shopId || ""}|${search || ""}|${limit}|${cursorParam || ""}`;
+  const cacheKey = `${assignedToParam}|${platform || ""}|${shopId || ""}|${search || ""}|${limit}|${cursorParam || ""}`;
   const now = Date.now();
   if (bwCache && bwCache.key === cacheKey && now - bwCache.ts < BW_CACHE_TTL) {
     if (includeCount) {
@@ -66,6 +70,28 @@ export async function GET(req: NextRequest) {
   const filter: Record<string, unknown> = {};
   if (platform) filter.platform = platform;
   if (shopId) filter.shop_id = shopId;
+
+  // ⚡ assigned_to filter — pre-fetch conv ids จาก test_status_conversation[botworker]
+  //   admin ที่ไม่มีงาน → $in: [] → empty list (ไม่ใช่โชว์ทั้งหมด)
+  if (assignedToParam !== "all") {
+    const testColl = await getCollection<{ conversation_id: string; assigned_to?: string | null }>(
+      COLLECTIONS.testStatusConversation
+    );
+    if (assignedToParam === "unassigned") {
+      // ยกเว้น conv ที่มี assignee ใน sandbox store
+      const assigned = await testColl
+        .find({ source: "botworker", assigned_to: { $nin: [null, ""] } }, { projection: { conversation_id: 1 } })
+        .toArray();
+      filter.conversation_id = { $nin: assigned.map((d) => d.conversation_id) };
+    } else {
+      const target = assignedToParam === "me" ? me : assignedToParam;
+      const mine = await testColl
+        .find({ source: "botworker", assigned_to: target }, { projection: { conversation_id: 1 } })
+        .toArray();
+      filter.conversation_id = { $in: mine.map((d) => d.conversation_id) };
+    }
+  }
+
   // ⚡ cursor filter — ดึงแชทที่เก่ากว่า cursor
   if (parsedCursor) {
     filter.$or = [
@@ -117,6 +143,12 @@ export async function GET(req: NextRequest) {
   const convIds = deduped.map((d) => d.conversation_id);
   const metaMap = await testStatusConversationService.getTestStatusMap(convIds, "botworker");
 
+  // ⚡ admin id→name map สำหรับ badge "ผู้รับ" (เหมือน /admin/conversations)
+  const adminColl = await getCollection<{ admin_id: string; name: string; username: string }>(COLLECTIONS.admins);
+  const adminRows = await adminColl.find({}, { projection: { admin_id: 1, name: 1, username: 1 } }).toArray();
+  const adminMap = new Map<string, string>();
+  for (const a of adminRows) adminMap.set(a.admin_id, a.name || a.username || "");
+
   // map เป็น Conversation shape
   const conversations: Conversation[] = deduped.map((doc) => {
     const meta = metaMap.get(doc.conversation_id);
@@ -146,7 +178,7 @@ export async function GET(req: NextRequest) {
       last_timestamp: doc.last_message_timestamp.toISOString(),
       unread: 0,
       assigned_to: effectiveAssignedTo || undefined,
-      assigned_to_name: undefined,
+      assigned_to_name: effectiveAssignedTo ? adminMap.get(effectiveAssignedTo) : undefined,
     };
   });
 

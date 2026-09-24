@@ -38,6 +38,13 @@ export async function POST(req: NextRequest) {
     if (targetAdmin.role !== "admin") {
       return error("ไม่สามารถมอบหมายงานให้ superadmin หรือ dev ได้ — เฉพาะ admin เท่านั้น", 403);
     }
+    // ⚡ transfer eligibility — ห้ามโยนให้ admin ที่ inactive หรือพักรับแชท
+    if (targetAdmin.active === false) {
+      return error("ไม่สามารถมอบหมายงานให้ admin ที่ inactive ได้", 422);
+    }
+    if (targetAdmin.is_accepting_chats === false) {
+      return error("ไม่สามารถมอบหมายงานให้ admin ที่พักรับแชทอยู่ได้", 422);
+    }
   }
 
   const actor = r.ctx.admin.username || r.ctx.admin.email || "admin";

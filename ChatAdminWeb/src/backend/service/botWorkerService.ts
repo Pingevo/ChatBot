@@ -19,7 +19,6 @@ import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { triggerService } from "./triggerService";
 import { assignmentService } from "./assignmentService";
-import { logAdminEvent } from "./adminLogService";
 import { listMessages, getHistoryForBot, getGroupedHistoryForBot, toBotText, toBotImages, type MessageDoc } from "./messageService";
 import { getConversation } from "./conversationService";
 import { handoffService } from "./handoffService";
@@ -31,6 +30,12 @@ import { getSystemConfig } from "./systemConfigService";
 import { callBot } from "./botCallService";
 // ⚡ Workflow engine (แบบ Zaapi Flow Builder) — ① resume ② priority ③ บอท
 import { workflowEngine, type EngineResult, type DeliveredMessage } from "./workflowEngine";
+// ⚡ botworker parallel sandbox — event log แยกจาก admin_logs + test status store
+import { logBotworkerEvent } from "./botworkerEventService";
+import { testStatusConversationService } from "./testStatusConversationService";
+
+// ⚡ parallel sandbox — source ของ test_status_conversation ที่ worker ใช้
+const WORKER_SOURCE = "botworker" as const;
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -125,12 +130,14 @@ async function storeBotReply(opts: {
     mode: "standalone",  // ⚡ Phase 2R — โหมด standalone (botworker รันอัตโนมัติ)
     trigger_id: opts.triggerId,
     chat_engine: opts.botResp.chat_engine || "legacy", // ⚡ บันทึก engine ที่ใช้
+    bot_image_desc: opts.botResp.image_desc,           // ⚡ vision desc บน reply doc ด้วย (self-contained)
     created_at: now,
     updated_at: now,
   });
 
   // ⚡ Phase 1A multimodal — เก็บ image_desc ที่ vision pass สกัดได้ ลงใน inbound message doc
   //    ทำให้ turn ถัดไปส่ง image_desc ใน history → bot ไม่ต้องอ่านรูปซ้ำ
+  //    (แชร์กับของจริงได้ตาม requirement — เป็น additive cache field ไม่กระทบ ticket state)
   if (opts.botResp.image_desc) {
     const msgColl = await getCollection<MessageDoc>(COLLECTIONS.messages);
     await msgColl.updateOne(
@@ -200,7 +207,7 @@ async function settleWorkflowResult(
   });
 
   if (wfResult.handoff) {
-    // assign_ticket action → จ่ายงานแล้ว (engine ทำแล้ว) — แค่ mark + log
+    // assign_ticket action → จ่ายงานแล้ว (engine ทำแล้วใน test store) — แค่ mark + log
     await markProcessed({
       message_id: msg.message_id,
       conversation_id: msg.conversation_id,
@@ -209,10 +216,12 @@ async function settleWorkflowResult(
       status: "handed_off",
       assigned_to: wfResult.handoff.agentId || undefined,
     });
-    await logAdminEvent({
-      action_type: "bot.reply",
+    await logBotworkerEvent({
+      type: "workflow",
       actor: "bot-worker",
       conversation_id: msg.conversation_id,
+      shop_id: msg.shop_id,
+      platform: msg.platform,
       metadata: {
         workflow_id: wfResult.workflow_id,
         assigned_to: wfResult.handoff.agentId,
@@ -229,10 +238,12 @@ async function settleWorkflowResult(
     platform: msg.platform,
     status: statusLabel,
   });
-  await logAdminEvent({
-    action_type: "bot.reply",
+  await logBotworkerEvent({
+    type: "workflow",
     actor: "bot-worker",
     conversation_id: msg.conversation_id,
+    shop_id: msg.shop_id,
+    platform: msg.platform,
     metadata: {
       workflow_id: wfResult.workflow_id,
       shadow_reply_ids: shadowReplyIds,
@@ -249,8 +260,10 @@ async function settleWorkflowResult(
 //   3. ถ้าไม่มี → round-robin (autoAssignConversation)
 //   4. ถ้า conversation ปิดอยู่ → reopen ก่อน
 //
-// ⚡ Phase 2V — เขียนผลลัพธ์ลง test_status_conversation (source=botworker)
-//   ไม่ใช่ status_conversation เพื่อไม่ให้กระทบ /tickets
+// ⚡ botworker parallel sandbox — ใช้ handoffToAdminTest เท่านั้น
+//   เขียนเฉพาะ test_status_conversation (source=botworker) + cursor *:botworker
+//   ไม่แตะ status_conversation จริง — assign สำเร็จ → status="open" (แอดมินรับงานจริง)
+//   หา admin ไม่ได้ → pending_assignment=true + status="handoff" (รอ distributor)
 async function pickAgent(
   shopId: string,
   platform: Platform,
@@ -258,26 +271,27 @@ async function pickAgent(
   reason?: string
 ): Promise<{ agentId: string | null; mode: string }> {
   const mode = await assignmentService.getActiveAssignmentConfig();
-  const result = await handoffService.handoffToAdmin({
+  const result = await handoffService.handoffToAdminTest({
     conversationId,
     shopId,
     platform,
     reason: reason || "bot-worker handoff",
-    source: "botworker",
+    source: WORKER_SOURCE,
+    assignedStatus: "open",
   });
-  // ⚡ Phase 2V — mirror ผลลัพธ์ลง test_status_conversation (source=botworker)
-  //   เพื่อให้ /botworker UI เห็น status/assigned_to โดยไม่กระทบ /tickets
-  try {
-    const { testStatusConversationService } = await import("./testStatusConversationService");
-    await testStatusConversationService.updateTestStatus(
-      conversationId,
-      "botworker",
-      "handoff",
-      result.assignedTo || undefined
-    );
-  } catch {
-    // ignore — ไม่วิกฤตถ้า mirror ล้มเหลว
-  }
+  await logBotworkerEvent({
+    conversation_id: conversationId,
+    type: result.assignedTo ? "handoff" : "bot_handoff",
+    actor: "bot-worker",
+    shop_id: shopId,
+    platform,
+    metadata: {
+      reason: reason || "bot-worker handoff",
+      assigned_to: result.assignedTo,
+      assignment_reason: result.assignmentReason,
+      pending: !result.assignedTo,
+    },
+  });
   return { agentId: result.assignedTo, mode };
 }
 
@@ -314,30 +328,25 @@ export async function processMessage(msg: {
   const conv = await getConversation(msg.conversation_id);
   const shopName = conv?.shop_name || undefined;
 
-  // ── Guard: จ่ายงานเฉพาะแอดมิน + ตรวจสถานะ conversation ──
-  // ⚡ Phase 2V — แยก collection ระหว่าง botworker กับ ticket
-  //   อ่าน: status_conversation (read-only — เช็ค admin จริงกำลังตอบไหม)
-  //   เขียน: test_status_conversation source="botworker" (handoff/reopen/status)
-  //   ทำให้ botworker ไม่กระทบ /tickets เลย
+  // ── Guard: ตรวจสถานะ conversation จาก test_status_conversation (source=botworker) เท่านั้น ──
+  // ⚡ botworker parallel sandbox — ไม่อ่าน/ไม่เขียน status_conversation จริง
+  //   state ของแชทใน botworker แยกจาก /tickets สมบูรณ์
   //
-  // 1. ถ้ามี assigned_to และ status เปิดอยู่ (handoff) → ข้าม (ปล่อยให้แอดมินตอบ)
-  // 2. ถ้า status === closed → reopen ใน test_status_conversation + ประมวลผลปกติ
-  // 3. ถ้าไม่มี assigned_to (status=bot) → ประมวลผลปกติ
+  // 1. ถ้ามี assigned_to หรือ status=open/handoff → ข้าม (แอดมินใน sandbox กำลังตอบ / รอ pool)
+  // 2. ถ้า status === closed → reopen ใน test store + ประมวลผลปกติ (ลูกค้าทักซ้ำเข้าลูปเดิม)
+  // 3. ถ้าไม่มี doc / status=bot → ประมวลผลปกติ
   if (conv) {
-    const { statusConversationService } = await import("./statusConversationService");
-    const { testStatusConversationService } = await import("./testStatusConversationService");
-    // ⚡ Phase 2V — อ่านจาก status_conversation (จริง) เพื่อเช็ค admin จริง
-    const meta = await statusConversationService.getMeta(msg.conversation_id);
+    const meta = await testStatusConversationService.getTestStatus(msg.conversation_id, WORKER_SOURCE);
     const effectiveStatus = meta?.status || "bot";
     const effectiveAssignedTo = meta?.assigned_to || null;
     const isClosed = effectiveStatus === "closed" || effectiveStatus === "resolved";
-    if (effectiveAssignedTo && !isClosed) {
+    if (effectiveAssignedTo || (!isClosed && (effectiveStatus === "open" || effectiveStatus === "handoff"))) {
       // ⚡ Workflow guard — admin รับแชทแล้ว → flow ที่รอ reply ต้อง cancel อัตโนมัติ (planner ข้อ 3)
       await workflowEngine.cancelActiveRuns(
         msg.conversation_id,
-        `admin ${effectiveAssignedTo} กำลังดูแชท — cancel flow ที่รอ reply`
+        `admin ${effectiveAssignedTo || "(pending)"} กำลังดูแชท — cancel flow ที่รอ reply`
       );
-      // แอดมินกำลังดูแชทอยู่ → ข้าม (ปล่อยให้แอดมินตอบ)
+      // แอดมินกำลังดูแชทอยู่ (หรือรอ assign ใน pool) → ข้าม (บอทเงียบ)
       await markProcessed({
         message_id: msg.message_id,
         conversation_id: msg.conversation_id,
@@ -345,16 +354,16 @@ export async function processMessage(msg: {
         platform: msg.platform,
         status: "no_action",
       });
-      return { status: "skip_assigned", detail: `conversation has assigned_to=${effectiveAssignedTo} (handoff) — skip` };
+      return { status: "skip_assigned", detail: `test store: status=${effectiveStatus} assigned_to=${effectiveAssignedTo || "none"} — skip` };
     }
     if (isClosed) {
-      // ⚡ Phase 2V — reopen ใน test_status_conversation (source=botworker) ไม่ใช่ status_conversation
-      //   ไม่กระทบ /tickets — ticket จริงยังปิดอยู่
-      await testStatusConversationService.updateTestStatus(
+      // ⚡ ลูกค้าทักซ้ำหลังปิดแชท → reopen ใน test store เข้าลูปเดิม
+      //   targetStatus="bot" → เคลียร์ assigned_to + status=bot → บอทตอบต่อ (ตาม lifecycle)
+      await testStatusConversationService.reopenTestConversation(
         msg.conversation_id,
-        "botworker",
-        "bot",
-        undefined  // clear assigned_to
+        WORKER_SOURCE,
+        undefined,
+        "bot"
       );
     }
   }
@@ -383,6 +392,8 @@ export async function processMessage(msg: {
     platform: msg.platform,
     text: botText,
     customer_id: conv?.customer_id,
+    // ⚡ botworker parallel — engine เขียน side-effects ลง test store ไม่ใช่ของจริง
+    testSource: WORKER_SOURCE,
     // ⚡ ส่ง media URLs (image/video) เข้า engine ด้วย — EngineMessage ไม่มี raw_payload
     //    ทำให้ toBotImages(engineMsg) ใน let_ai_respond คืน [] → ทิ้ง video URL
     ...(botImages.length > 0 ? { images: botImages } : {}),
@@ -457,13 +468,47 @@ export async function processMessage(msg: {
           assigned_to: agentId || undefined,
           assignment_mode: mode,
         });
-        await logAdminEvent({
-          action_type: "bot.handoff_to_admin",
+        await logBotworkerEvent({
+          type: "bot_handoff",
           actor: "bot-worker",
           conversation_id: msg.conversation_id,
+          shop_id: msg.shop_id,
+          platform: msg.platform,
           metadata: { trigger_id: trigger.trigger_id, assigned_to: agentId, delivered_to_platform: false },
         });
         return { status: "handed_off", detail: `trigger→handoff→${agentId || "no agent"}` };
+      }
+
+      // ⚡ bot_template — trigger bot_answer ที่ตั้ง template → ตอบ template ทันทีไม่เรียกบอท (เหมือน test-chat)
+      if (trigger.bot_template) {
+        const shadowReplyId = await storeBotReply({
+          messageId: msg.message_id,
+          messageText: botText,
+          conversationId: msg.conversation_id,
+          shopId: msg.shop_id,
+          platform: msg.platform,
+          botResp: { answer: trigger.bot_template, source: "trigger_bot_answer" },
+          triggerId: trigger.trigger_id,
+        });
+        await markProcessed({
+          message_id: msg.message_id,
+          conversation_id: msg.conversation_id,
+          shop_id: msg.shop_id,
+          platform: msg.platform,
+          status: "trigger_matched",
+          trigger_id: trigger.trigger_id,
+          trigger_action: "bot_answer",
+          shadow_reply_id: shadowReplyId,
+        });
+        await logBotworkerEvent({
+          type: "bot_reply",
+          actor: "bot-worker",
+          conversation_id: msg.conversation_id,
+          shop_id: msg.shop_id,
+          platform: msg.platform,
+          metadata: { trigger_id: trigger.trigger_id, shadow_reply_id: shadowReplyId, used_bot_template: true, delivered_to_platform: false },
+        });
+        return { status: "trigger_matched", detail: `trigger→bot_template→${shadowReplyId}` };
       }
 
       // trigger.action === "bot_answer" → เรียกบอท → เก็บใน shadow_replies
@@ -472,6 +517,7 @@ export async function processMessage(msg: {
         conversationId: msg.conversation_id,
         platform: msg.platform,
         maxTurns: 10,
+        includeSandboxAdmin: true,  // ⚡ merge botworker_messages (แอดมินใน parallel เคยตอบอะไร)
       });
       // ⚡ Phase 2Q — acquire concurrency slot ก่อนยิงบอท
       await acquireBotSlot();
@@ -484,9 +530,10 @@ export async function processMessage(msg: {
           shopName,
           history,
           ...(botImages.length > 0 ? { images: botImages } : {}),
-          // ⚡ Phase 2A — ส่ง conversationId (production path, simulate=false)
+          // ⚡ Phase 2A — ส่ง conversationId + testSource (parallel sandbox — handoff เขียน test store)
           conversationId: msg.conversation_id,
-          simulate: false,
+          simulate: true,
+          testSource: WORKER_SOURCE,
         });
       } finally {
         releaseBotSlot();
@@ -510,10 +557,12 @@ export async function processMessage(msg: {
         trigger_action: "bot_answer",
         shadow_reply_id: shadowReplyId,
       });
-      await logAdminEvent({
-        action_type: "bot.reply",
+      await logBotworkerEvent({
+        type: "bot_reply",
         actor: "bot-worker",
         conversation_id: msg.conversation_id,
+        shop_id: msg.shop_id,
+        platform: msg.platform,
         metadata: { trigger_id: trigger.trigger_id, shadow_reply_id: shadowReplyId, delivered_to_platform: false },
       });
       return { status: "trigger_matched", detail: `trigger→bot_answer→${shadowReplyId}` };
@@ -544,6 +593,7 @@ export async function processMessage(msg: {
       conversationId: msg.conversation_id,
       platform: msg.platform,
       maxTurns: 10,
+      includeSandboxAdmin: true,  // ⚡ merge botworker_messages (แอดมินใน parallel เคยตอบอะไร)
     });
     // ⚡ Phase 2Q — acquire concurrency slot ก่อนยิงบอท
     await acquireBotSlot();
@@ -556,9 +606,10 @@ export async function processMessage(msg: {
         shopName,
         history,
         ...(botImages.length > 0 ? { images: botImages } : {}),
-        // ⚡ Phase 2A — ส่ง conversationId (production path, simulate=false)
+        // ⚡ Phase 2A — ส่ง conversationId + testSource (parallel sandbox — handoff เขียน test store)
         conversationId: msg.conversation_id,
-        simulate: false,
+        simulate: true,
+        testSource: WORKER_SOURCE,
       });
     } finally {
       releaseBotSlot();
@@ -576,10 +627,12 @@ export async function processMessage(msg: {
         assigned_to: agentId || undefined,
         assignment_mode: mode,
       });
-      await logAdminEvent({
-        action_type: "bot.handoff_to_admin",
+      await logBotworkerEvent({
+        type: "bot_handoff",
         actor: "bot-worker",
         conversation_id: msg.conversation_id,
+        shop_id: msg.shop_id,
+        platform: msg.platform,
         metadata: { reason: "bot empty answer", assigned_to: agentId, delivered_to_platform: false },
       });
       return { status: "handed_off", detail: `no trigger→bot empty→handoff→${agentId || "no agent"}` };
@@ -602,10 +655,12 @@ export async function processMessage(msg: {
       status: "bot_answered",
       shadow_reply_id: shadowReplyId,
     });
-    await logAdminEvent({
-      action_type: "bot.reply",
+    await logBotworkerEvent({
+      type: "bot_reply",
       actor: "bot-worker",
       conversation_id: msg.conversation_id,
+      shop_id: msg.shop_id,
+      platform: msg.platform,
       metadata: { shadow_reply_id: shadowReplyId, delivered_to_platform: false },
     });
     return { status: "bot_answered", detail: `no trigger→bot→${shadowReplyId}` };
@@ -621,10 +676,12 @@ export async function processMessage(msg: {
       status: "bot_failed",
       error: errorMsg,
     });
-    await logAdminEvent({
-      action_type: "bot.process_failed",
+    await logBotworkerEvent({
+      type: "bot_error",
       actor: "bot-worker",
       conversation_id: msg.conversation_id,
+      shop_id: msg.shop_id,
+      platform: msg.platform,
       metadata: { error: errorMsg },
     });
     return { status: "bot_failed", detail: errorMsg };

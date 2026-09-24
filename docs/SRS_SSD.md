@@ -106,7 +106,7 @@
 | ทิศทาง | วิธี | รายละเอียด |
 |---|---|---|
 | ChatAdminWeb → bot | `POST {CHATBOT_BASE_URL_*}/chat` | header `X-Internal-Secret`; payload มี `conversation_id`, `simulate_assignment`, `ticket_state`, `use_v2`/`use_v3`, `llm_context_limit` |
-| bot → ChatAdminWeb | `POST {ADMIN_HANDOFF_URL}` (default `…/api/admin/conversations/bot-handoff`) | `simulate=true` → `test_status_conversation`; `false` → `conversations` จริง + assign admin |
+| bot → ChatAdminWeb | `POST {ADMIN_HANDOFF_URL}` (default `…/api/admin/conversations/bot-handoff`) | `simulate=true` → `test_status_conversation`; `test_source="botworker"` → test store sandbox; `false` → `conversations` จริง + assign admin |
 | bot → AI Usage Hub | `POST {AI_USAGE_HUB_URL}/internal/ai-usage/logs` | fire-and-forget ทุก LLM call (ไม่ block คำตอบ) |
 | bot → OpenRouter | `POST {OPENROUTER_BASE_URL}/chat/completions` | web_search + chatbotv3; key rotation 1-9 |
 | bot → Gemini | `google.genai` SDK | intent/answer/vision; key rotation + quota tracking (RPD/RPM/TPM) |
@@ -131,7 +131,9 @@ sellcenter dump แชท Shopee ลง `conversations_shp`/`messages_shp` (เ�
 | `conversations` | แชทหลัก (ถูก sellcenter dump ทับบาง field) | sellcenter + Next.js |
 | `messages` | message log (raw_payload ของ Shopee) | sellcenter |
 | `status_conversation` | admin-owned state (assigned_to/status/closed_at/close_count) — กัน dump ทับ | Next.js |
-| `test_status_conversation` | เวอร์ชัน test ของ status | Next.js (`simulate` path) |
+| `test_status_conversation` | เวอร์ชัน test ของ status — unique key `(source, conversation_id)` ทำให้ conv เดียวกันมี doc แยกต่อ sandbox source (`botworker`/`test_chat`/`shadowbot`/`replay_compare`/`test_assignment`) + `labels`/`close_history`/`pending_assignment`/`bot_claim_info` | Next.js (`simulate`/`test_source` path) |
+| `botworker_messages` | admin reply ใน parallel sandbox `/botworker` (role=admin, actor, bubble_color) — ไม่เขียน messages_shp ไม่ส่ง platform | Next.js botworker routes |
+| `botworker_events` | event log ของ sandbox (accept/transfer/handoff/close/reopen/send/bot_reply/workflow/backlog_commit) — แยกจาก admin_logs | Next.js |
 | `shadow_replies` | คำตอบบอทที่ generate (ไม่ส่งจริง — IRON RULE) | Next.js botWorker |
 | `chat_processing` | idempotency ของ bot worker (message_id) | Next.js |
 | `buffer_messages` | debounce buffer | Next.js bufferService |
@@ -244,7 +246,7 @@ POST /chat → _require_internal_secret → chat(req)
 | 13 | KB + Mongo merge | `knowledge_base.lookup_kb` | `_merge_kb_mongo` (KB card ก่อน + dedupe) |
 | 14 | Product retrieval | always (ถ้าไม่ return ก่อน) | `product_store.fetch_products` — `USE_UNIT_INDEX` → `units.fetch_unit_cards`; ไม่ก็ hybrid listing path (ตารางด้านล่าง) |
 | 15 | Device compat | intent=compatibility_check หรือ target_device ชัด | `device_compat._device_spec_lookup` → `_filter_compat_products` → `_apply_product_tiers` |
-| 16 | Availability marking | always | `_available_for_sale = status=="NORMAL" && !sold_out && stock>0` + `_context_note` ห้ามเสนอขายตัวไม่พร้อม (ตอบ spec/ประกันได้) |
+| 16 | Availability marking | always | `resolve_availability(card)` owner เดียว → `_available_for_sale` + `catalog_status` (setdefault) + `_context_note` ห้ามเสนอขายตัวไม่พร้อม (ตอบ spec/ประกันได้) |
 | 17 | Tier merge + dedupe | always | `_dedupe_products` (base-name → best sellable) + tier merge |
 | 18 | Web search fallback | `should_use_web_search` (skip เมื่อ spec-db grounded) | `search_and_extract` → keywords re-query → `reanswer` (strip URLs) |
 | 19 | Answer | always | `llm.answer` (products+persona+vision+compat+search ctx) → `_append_base_warranty` |
@@ -419,9 +421,11 @@ listing path:
 | `_price_range` | min-max price | doc | dict | models[] | to_product_card | — | — |
 | `_first_image_url` | รูปแรก | doc | str | — | to_product_card | — | — |
 | `_clean_description` | trim/filter desc | desc, message | str | section markers | to_product_card | intent-aware section pick | — |
-| `_shopee_stock` | live stock join | model_doc | int | stock DB | to_product_card, build_sellable_units | `shopee_ship_box` → itStock | DB read |
-| `_doc_sellable` | sellable check | doc | bool | status/stock fields | fetch, _dedupe_sell_score | NORMAL && !sold_out && stock>0 | — |
-| `to_product_card` | doc→card มาตรฐาน | doc, message | dict(card) | _warranty_info, _price_range, _first_image_url, _clean_description, _shopee_stock | ทุก retrieval path, product_match | uniform card + `_available_for_sale` | — |
+| `_stock_info_has_any_stock_source` | stock source อ่านได้ไหม | stock_info_v2 | bool | — | resolve_availability | summary/shopee/seller มี entry ที่เป็น numeric (seller เฉพาะ if_saleable!=False) | — |
+| `_shopee_stock` | numeric stock owner | model_doc | int | stock_info_v2 fields | resolve_availability, to_product_card, build_sellable_units | chain: summary.total_available_stock (0=fact ห้าม fallback) → shopee_stock[] → saleable seller_stock[] → 0 | — |
+| `resolve_availability` | **availability owner เดียว** | card_or_doc, model_doc=None | dict{catalog_status, available_for_sale, answerable, reason, total_stock} | _stock_info_has_any_stock_source, _shopee_stock | _doc_sellable, to_product_card, units._live_availability, app.py availability marking | NORMAL+stock>0→active / stock=0→out_of_stock / ไม่มี source→active_unknown_stock / UNLIST→unlisted / *DELETE+BANNED→discontinued / model!=MODEL_NORMAL→unlisted / อื่น→unknown; model[] รวมเฉพาะ MODEL_NORMAL | — |
+| `_doc_sellable` | sellable check | doc | bool | resolve_availability | _rerank_by_promo_latest, name-match sort | `resolve_availability(doc)["available_for_sale"]` | — |
+| `to_product_card` | doc→card มาตรฐาน | doc, message | dict(card) | _warranty_info, _price_range, _first_image_url, _clean_description, _shopee_stock, resolve_availability | ทุก retrieval path, product_match | uniform card + `catalog_status` + `_available_for_sale` + `sold_out` (out_of_stock เท่านั้น) + `total_stock` (None=unknown) | — |
 | `_extract_product_name_tokens` | tokenize name | name | list[str] | regex | fuzzy_match_products | — | — |
 | `fuzzy_match_products` | fuzzy name match | docs/message | list | _extract_product_name_tokens | fallback retrieval | token overlap score | — |
 | `_detect_intent` | intent kw → filter hints | message | set[str] | kw tables | build_query | — | — |
@@ -431,7 +435,8 @@ listing path:
 | `_detect_categories` | category detect | message | list[str] | cat table | build_query | — | — |
 | `_detect_product_types` | type detect (strict) | message | set[str] | `PRODUCT_TYPES` (kw + name_regex) | fetch_products, app, chat_v2, units | item_name-level — Shopee cat กว้าง | — |
 | `_detect_charger_subtype` | charger subtype | text | str/None | subtype kw table | fetch, app, chat_v2, units | adapter/cable/set/car_charger/wireless/desktop/socket | — |
-| `_filter_charger_subtype` | กรองตาม subtype | docs, subtype | docs | item_name regex | fetch_products | name-level filter | — |
+| `_filter_charger_subtype` | กรองตาม subtype | docs, subtype | docs | item_name regex | `_filter_charger_subtype_open`, fetch_products | name-level filter; strict subtype ว่าง→คืนว่าง | — |
+| `_filter_charger_subtype_open` | subtype filter + fail-open | docs, subtype, fail_open | docs | `_filter_charger_subtype` | fetch_products (4 จุด: vector/pre-rerank/brand-fallback/final) | ผลว่าง + fail_open → คืน docs เดิม (profile-backed call เท่านั้น; profile=None คง hard filter) | — |
 | `_detect_product_types_fuzzy` | type detect (fuzzy) | message | set[str] | typo-tolerant match | fetch_products, chat_v2 | fallback เมื่อ strict ว่าง | — |
 | `_product_type_categories` | type→cat list | types | list[str] | mapping table | build_query | — | — |
 | `_product_type_regex` | type→regex | types | str/None | name_regexes | build_query | — | — |
@@ -447,7 +452,7 @@ listing path:
 | `_doc_matches_model` | doc↔token match | doc, model_token | bool | _model_token_in_name | fetch_products | — | — |
 | `_rerank_with_diversity` | spread results | docs | docs | — | fetch_products | กระจาย shop/brand | — |
 | `_filter_false_positives` | กรองตัวหลอก | docs, types | docs | type regexes | fetch_products | python-side verify หลัง mongo | — |
-| `fetch_products` | **main retrieval** | db, message, shop_filter, limit, desc_message, is_compat_check, skip_charger_subtype, product_types_override, charger_subtype_override, filter_unavailable | list[card] | units.fetch_unit_cards (flag), vector_search, build_query, _filter_*, _rerank_*, _dedupe_products, to_product_card | _chat_impl, chat_v2, product_match | §5.2 fetch path — compat bypass unit pool; empty/error→fallback | mongo reads; error→[] |
+| `fetch_products` | **main retrieval** | db, message, shop_filter, limit, desc_message, is_compat_check, skip_charger_subtype, product_types_override, charger_subtype_override, filter_unavailable, retrieval_profile (4D: types/subtype/model_codes เป็น canonical hint แทน detect จาก message; compat_mode→pool กว้าง; answerable_all→ไม่กรอง unavailable) | list[card] | units.fetch_unit_cards (flag), vector_search, build_query, _filter_charger_subtype_open, _filter_*, _rerank_*, _dedupe_products, to_product_card | _chat_impl, chat_v2, product_match | §5.2 fetch path — compat bypass unit pool; empty/error→fallback; profile=None→path เดิม; 4D-hardening: subtype filter fail-open เฉพาะ profile-backed call | mongo reads; error→[] |
 | `fetch_product_by_id` | ดึงตาม item_id | db, item_id, shop_filter | doc/card | coll.find_one | anchor paths, product_match.get_product_by_id | exact id + shop scope | — |
 | `list_shops` | รายชื่อร้าน | db | list[str] | distinct | /shops route | — | — |
 | `list_categories` | รายหมวด | db | list[str] | distinct | /categories route | — | — |
@@ -458,7 +463,7 @@ listing path:
 | `_stock_products_coll` | stock coll handle | — | coll | STOCK_* env | _variant_cert_hit, cert join | `itStock.Products` | — |
 | `_variant_cert_hit` | cert ใน variant name | option_name, certs | str/None | _has_cert | search_cert_products | version tokens | — |
 | `_admin_image_texts_coll` | OCR coll handle | — | coll | ADMIN_MONGO_* | search_cert_products | `image_texts` | — |
-| `_doc_stock_total` | sum stock | doc | int | models[] | sellable checks | — | — |
+| `_doc_stock_total` | stock รวม (cert card) | doc | int | resolve_availability | search_cert_products | `total_stock or 0` จาก resolver | — |
 | `_name_matches_types` | name↔type check | name, type_filter | bool | type regexes | search_cert_products | — | — |
 | `search_cert_products` | **cert search** | db, message, shop, certs, type_filter | list[card] | mongo prefilter + _has_cert verify + _stock_products_coll + _variant_cert_hit + _admin_image_texts_coll | cert path (handoffs/app) | 4 แหล่ง: desc + OCR + itStock flags + variant tokens; type_filter กรองหมวด | mongo reads |
 | `search_tisi_products` | TISI wrapper | db, message, shop | list[card] | search_cert_products | TISI path | certs=("tisi","มอก") | — |
@@ -498,7 +503,7 @@ listing path:
 | `_extract_policy_from_descriptions` | สกัด policy จาก product desc | mongo_coll, policy_type, limit | str | regex over descriptions | build_general_context | รวมข้อความประกัน/คืนสินค้าจาก catalog | — |
 | `build_general_context` | สร้าง general ctx | qtype, shop, mongo_db | dict/None {context, meta} | get_general_faq, _extract_policy_from_descriptions | _chat_impl (app ใช้ชื่อนี้ — chat_v2 เรียกผิดชื่อ §10#1) | KB doc + catalog policy → context | DB reads |
 | `format_kb_context` | KB docs→prompt text | docs | str | — | lookup_kb | format block | — |
-| `lookup_kb` | **KB lookup entry** | message | dict/None {found, context, kb_docs} | extract_model_keywords, search_kb_by_model, format_kb_context | _chat_impl, chat_v2._retrieve_products | kw → search → context | DB reads |
+| `lookup_kb` | **KB lookup entry** | message, retrieval_profile (4C pass-through) | dict/None {found, context, kb_docs} | extract_model_keywords, search_kb_by_model, format_kb_context | _chat_impl, chat_v2._retrieve_products | kw → search → context | DB reads |
 | `_detect_brand_question` | ถามแบรนด์ | message | brand/None | _known_brands | _chat_impl (alias app._detect_brand_question) | — | — |
 | `_build_brand_context` | brand→ctx | db, brand, shop_filter | dict/None {context, meta{shop_scoped}} | mongo query | _chat_impl, chat_v2._check_brand_question | brand products → context; shop-scoped ก่อน | DB read |
 | `_norm_brand` | normalize brand | raw | str | — | brand paths | — | — |
@@ -507,7 +512,7 @@ listing path:
 | `_qa_vectors` | QA vectors cache | — | dict/None | npz/embedding | QA search | — | — |
 | `_qa_embed_missing` | embed QA ที่ขาด | docs | — | embedding.embed_texts | QA search | เติม vector ที่ไม่มี | write-back |
 | `search_qa` | QA-pair search | message, model_codes, … | list[doc] | _qa_docs, _qa_vectors, _qa_embed_missing | qa_context | vector QA (`USE_QA_KB`) | — |
-| `qa_context` | QA→context text | message, conversation_id, claim | str | search_qa | answer ctx | — | — |
+| `qa_context` | QA→context text | message, conversation_id, claim, retrieval_profile (4C pass-through) | str | search_qa | answer ctx | — | — |
 | `qa_troubleshoot_tips` | troubleshoot จาก QA | message, conversation_id, item_id | str | search_qa | problem-question path | tips สำหรับ "ใช้ไม่ได้" | — |
 | `_kb_doc_to_card` | KB doc→product card | doc | card | — | _merge_kb_mongo | uniform card shape | — |
 
@@ -525,7 +530,7 @@ listing path:
 | `detect_uncertainty` | negative-answer detect | answer | (bool, reason/None) | patterns | _chat_impl (reanswer trigger) | "ไม่แน่ใจ/ไม่มีข้อมูล" | — |
 | `should_use_web_search` | trigger decision | message, products, intent, answer… | (bool, reason) | rules + spec-db gate (lazy `_lookup_spec_db`) | _chat_impl, chat_v2._search_if_needed | reasons: no_products/answer_uncertain/compatibility…; skip เมื่อ target_device อยู่ spec-db หรือ yes-no spec มีสินค้า | — |
 | `search_and_extract` | **search + extract** | message, shop, platform, history, reason | dict{search_used, keywords[], product_type, search_info, device_specs, usage, cost_usd, model, error} | OR call, _log_ai_usage, _clean_device_specs, _salvage_json_value | _chat_impl, chat_v2, device_compat (web ladder) | query rewrite → OR search → extract structured | net; error→{error} |
-| `reanswer` | ตอบใหม่จาก search ctx | message, products, search_result, history… | (answer, usage) | llm answer + URL strip | _chat_impl | search_info (ไม่มี URL) → LLM | — |
+| `reanswer` | ตอบใหม่จาก search ctx | message, products, search_result, history…, retrieval_profile (4C pass-through → fetch_products/lookup_kb) | (answer, usage) | llm answer + URL strip | _chat_impl | search_info (ไม่มี URL) → LLM | — |
 
 ### 6.7 `persona.py` — per-shop persona
 
@@ -656,7 +661,8 @@ listing path:
 | `_ascii_alnum` | normalize token | text | str | regex | matching | — | — |
 | `_term_boundary_match` | boundary match | text, term | bool | regex boundaries | _device_mentioned, _lookup_spec_db | กัน substring collision ("a73"ใน"xiaomi a73") | — |
 | `_lookup_spec_db` | spec-db lookup | device token | dict/None | `device_specs_data.DEVICE_SPECS` + aliases + brand guard | _resolve_device_spec, web_search gate | key/alias + `_spec_brand` guard กันข้ามแบรนด์ | — |
-| `_extract_device_token` | device จาก msg | message | str | regex + _device_brand_hint | _device_spec_lookup | brand+model pattern | — |
+| `_extract_device_token` | device จาก msg (canonical) | message | str | `_DEVICE_TOKEN_RE` + `normalize_device_alias` + `_DEVICE_ALIAS_PROBE_RE` + `_spec_brand`/`_SPEC_INDEX` | _device_spec_lookup, route_context (profile/slots) | normalize cand ก่อน → NON_DEVICE guard (ยกเว้น cand อยู่ใน _SPEC_INDEX เช่น a56) → glued guard → compact code gate (head≥2+เลข3หลัก+ไม่รู้จัก→code ไม่ใช่ device) → regex ไม่เจอ→probe alias (mi14pro/ไอโฟน14โปร) | — |
+| `normalize_device_alias` | canonical device จาก shorthand | value | str/None | `_IPHONE_ALIAS_RE`/`_MI_ALIAS_RE`/`_THAI_IPHONE_ALIAS_RE` + suffix maps | `_extract_device_token`, route_context `_device_occurrence` | เฉพาะ family ที่รู้จัก (iphone/ip/i, ไอโฟน, mi)+เลข+suffix → 'iphone 14 pro'/'xiaomi 14 pro'; product code/unsupported → None | — |
 | `_charging_scope` | scope type ที่ถามจริง | message, asked_type | set/None | product_store._detect_product_types ∩ `_CHARGING_TYPES` | re-query | 'charger' drop เมื่อมี form เจาะจง; ว่าง→{asked_type} | — |
 | `_compat_mode` | mode detect | message, intent | str | kw/ctx | _device_spec_lookup | charging/model_fit/self_compat/skip | — |
 | `_extract_product_connectors` | connectors ของสินค้า | card | set[str] | `_CONN_QUERY_KW` vocab map | _filter_compat_products | จาก name/desc | — |
@@ -665,7 +671,7 @@ listing path:
 | `_resolve_device_spec` | resolve spec | device, intent, … | dict/None | _lookup_spec_db → _web_spec_to_dict → intent min_watt | _device_spec_lookup | structured เท่านั้น (ไม่ parse prose watt) | web call ได้ |
 | `_filter_compat_products` | กรองตาม spec | products, spec, mode | products | _extract_product_connectors, _device_mentioned | _device_spec_lookup | connector hard filter (ห้ามข้าม type) | — |
 | `_apply_product_tiers` | tier sort | products, spec | products | _wattage_asc_key, min_watt | _device_spec_lookup | adequate-first (≥min_watt ก่อน) + baseline/upgrade ≤2 | — |
-| `_device_spec_lookup` | **compat orchestrator** | message, products, intent, db, … | (spec, products, meta) | ทั้งหมดข้างบน + product_store.fetch_products + web_search | _chat_impl | ladder: spec-db → re-query (`_charging_scope`+conn syn) → catalog evidence `_device_mentioned` → web → intent min_watt | mongo + web reads |
+| `_device_spec_lookup` | **compat orchestrator** | message, products, intent, db, …, retrieval_profile (4C pass-through → fetch_products) | (spec, products, meta) | ทั้งหมดข้างบน + product_store.fetch_products + web_search | _chat_impl | ladder: spec-db → re-query (`_charging_scope`+conn syn) → catalog evidence `_device_mentioned` → web → intent min_watt | mongo + web reads |
 
 ### 6.15 `device_specs_data.py` — structured spec DB (data only, ไม่มีฟังก์ชัน)
 
@@ -682,17 +688,19 @@ listing path:
 | `_unit_vectors` | unit npz | — | vectors | npz load (mtime) | _vector_search | — | — |
 | `_sellable_mask` | mask sellable | units | mask | sellable field | _vector_search | — | — |
 | `_vector_search` | unit vector search | query, filters | units | _unit_vectors, _sellable_mask, embed_query | fetch_units | cosine top-k | — |
-| `fetch_units` | unit retrieval | db, message, limit, … | units | _vector_search | fetch_products (flag) | — | error→[] → fallback listing |
+| `fetch_units` | unit retrieval | db, message, limit, …, retrieval_profile (4D: types/subtype/codes จาก profile แทน resolve_route ซ้ำ) | units | _vector_search | fetch_products (flag) | — | error→[] → fallback listing |
 | `pick_desc_sections` | เลือก desc sections | unit, route | str | sections dict | to_unit_card | highlights/specs/warranty/notes | — |
-| `_live_availability` | availability สด | unit | bool | stock join | _live_sellable | — | DB read |
-| `_live_sellable` | sellable สด | unit | bool | _live_availability | fetch_unit_cards | — | — |
+| `_live_availability` | availability สด | unit | (item_status, availability dict, model_status) | product_store.resolve_availability | _live_sellable, to_unit_card | join _listing → exact model_doc เข้า resolver; model หาย→model_missing; ไม่มี listing→resolve unit snapshot | — |
+| `_live_sellable` | sellable สด | unit | bool | _live_availability | fetch_unit_cards | `availability["available_for_sale"]` | — |
 | `_variant_image_id` | รูปตาม variant | unit | image_id | — | to_unit_card | — | — |
-| `to_unit_card` | unit→card | unit, message | card | pick_desc_sections, _variant_image_id, _live_sellable | fetch_unit_cards | listing-compatible shape | — |
+| `to_unit_card` | unit→card | unit, message | card | pick_desc_sections, _variant_image_id, _live_availability | fetch_unit_cards | listing-compatible shape + `catalog_status` + `availability_reason` | — |
 | `attach_kb_specs` | ผูก KB specs | units | units | knowledge_base | fetch_unit_cards | enrich spec | DB read |
 | `_unit_warranty` | warranty ของ unit | unit | dict | warranty helpers | to_unit_card | — | — |
 | `attach_image_texts` | ผูก OCR | units | units | `image_texts` coll | fetch_unit_cards | รูปนอก desc | DB read |
 | `attach_listing_fields` | ผูก listing fields | units | units | `ShpProducts` | fetch_unit_cards | เติม field listing | DB read |
-| `fetch_unit_cards` | **unit path entry** | db, message, shop, limit | list[card] | fetch_units, _live_sellable, attach_*, to_unit_card | product_store.fetch_products (`USE_UNIT_INDEX`) | vector→sellable→live→enrich→cards | fallback []→listing path |
+| `fetch_unit_cards` | **unit path entry** | db, message, shop, limit, retrieval_profile (4D: skip resolve_route เมื่อมี profile → fetch_units) | list[card] | fetch_units, _live_sellable, attach_*, to_unit_card | product_store.fetch_products (`USE_UNIT_INDEX`) | vector→sellable→live→enrich→cards | fallback []→listing path |
+| `UnitEvidenceFetchResult` | evidence fetch contract (frozen, 5B1) | — | obj | — | fetch_unit_evidence | cards/raw_count/sellable_count/unavailable_count/trace | immutable |
+| `fetch_unit_evidence` | evidence-preserving unit fetch (observe path 5B1) | message, retrieval_profile, **kwargs (shop/limit/…) | UnitEvidenceFetchResult | fetch_units, attach_*, _live_sellable, to_unit_card | retrieval_executor (default fetcher) | chain เดียวกับ fetch_unit_cards แต่ไม่ collapse all-dead→[] — คืน cards ทั้ง sellable/dead พร้อม availability fields | mongo reads |
 
 ### 6.17 `embedding.py` — embeddings
 
@@ -712,6 +720,37 @@ listing path:
 | `_load_typo_dict` | โหลด typo map | — | dict | json `exports/typo_dict.json` | normalize_message | cache | file read; miss→{} |
 | `normalize_message` | แก้คำผิด | message | str | _load_typo_dict | resolve_route | vocab replace | — |
 | `resolve_route` | entry | req | RouteContext | normalize_message | _chat_impl | — | — |
+| `RetrievalProfile` | request-facts contract (frozen) | — | obj | — | build_retrieval_profile | platform/shop/message/intent/product_types(frozenset)/subtype/model_codes/variant_terms/target_device/availability_mode/compat_mode/anchor_item_ids/fact_sources | immutable |
+| `build_retrieval_profile` | owner กลางของ request facts (Task 4A, observe-only) | message, history, intent_result, shop, platform, anchor_cards | RetrievalProfile | `_detect_product_types`/`_detect_charger_subtype` (product_store, lazy), `_extract_device_token`/`_CHARGING_TYPES` (device_compat, lazy), `_extract_codes` (unit_classifier) + helpers ด้านล่าง | (ยังไม่ wire — Task 4B จะเรียกใน app.py) | reconcile ต่อ field: shop/platform=arg เท่านั้น; types current→anchor→intent≥0.7→history; subtype strong→anchor→intent→history→weak; codes current→anchor→history; device current→intent→history(compat) | none; lazy imports กัน cycle |
+| `_bounded_history_facts` | user msgs ใหม่สุด ≤4 → type/subtype/device/codes | history | dict | lazy detectors (เหมือน build) | build_retrieval_profile | newest-first, role=user เท่านั้น, ไม่ concat เป็น query | — |
+| `_variant_terms` | ดึง สี/ความจุ/ไซส์ จาก message | message | tuple[str] | `_VARIANT_RES` | build_retrieval_profile | regex phrases | — |
+| `_resolved_intent` | normalize intent + deterministic overrides | message, intent_result, model_codes, anchor_cards | str | `_INTENT_MAP`, compare/superlative/order kws, `_detect_product_types` (lazy) | build_retrieval_profile | compare(≥2 anchors+kw) → exact_model(codes+soft) → superlative(kw+family, ไม่ใช่ single-ref) → history(order kw/anchor) → mapped intent | — |
+| `_availability_mode` | intent→availability mapping | intent, model_codes, message | str | `_STOCK_ONLY_KW` | build_retrieval_profile | history→exact_history; spec/warranty/claim/compare/exact_model→answerable_all; stock-words→sellable_only; else sellable_first | — |
+| `_compat_mode` | type/subtype/device→compat mapping | product_types, subtype, target_device | str | `_CHARGING_TYPES` (device_compat, lazy), `_BLUETOOTH_FAMILY` | build_retrieval_profile | no device→none; charging→connector_required (wireless→power_required); bluetooth family→bluetooth_general; else none | — |
+| `_subtype_explicit` | subtype เป็น strong keyword จริงไหม | low, subtype | bool | `_CHARGER_SUBTYPES` (product_store, lazy) | build_retrieval_profile | kw ของ subtype นั้นอยู่ใน msg (ไม่นับ shorthand หัว/สาย ลอยๆ) | — |
+| `_id_str` | id→str normalize | value | str | — | build_retrieval_profile | float เป็น int → int-str | — |
+| `profile_debug` | serialize profile เป็น _steps debug | profile, source, used_fields | dict | — | app.py chat() (Task 4B observe-only) | facts เท่านั้น ไม่ใส่ history/message | — |
+| `RetrievalSlot` | scoped product-request contract (frozen) — Task 4E | — | obj | — | build_retrieval_slots | slot_id/source_span/product_types(frozenset)/subtypes(frozenset)/primary_subtype/brand_hints/model_codes/model_terms/target_device/target_scope/availability_mode/compat_mode/confidence/fact_sources | immutable; ไม่ใช่ intent ใหม่ |
+| `build_retrieval_slots` | แยก profile เป็น per-product slots (Task 4E, contract-only — ยังไม่ wire เข้า retrieval) | profile | tuple[RetrievalSlot] | `_type_mentions`, `_all_charger_subtypes`, `_model_terms`, `_local_target_device`, `_detect_brands`/`_extract_codes`/`_extract_device_token` (lazy) | (ยังไม่มี runtime caller) | provenance: kw-mention=explicit product, regex-only=inferred device → มี explicit แล้ว drop inferred slots; ไม่มี explicit → inferred fallback; effective types จุดเดียวใช้ทั้ง single/multi; device หลัง ≥2 types/ก่อน mention แรก/ผูกไม่ได้ → shared; single-slot confidence 0.6 เมื่อ `_ambiguous_device_target` (device หลัง "กับ" เปล่าอาจเป็น product อีกชิ้น); ไม่เรียก LLM ไม่สรุป compat | none |
+| `_type_mentions` | positions+source ของ type kws/regex ใน message | low, allowed | list[(pos,type,src)] | `PRODUCT_TYPES`, `_kw_positions` (product_store lazy + local) | build_retrieval_slots | src="kw"=explicit product / "regex"=inferred device phrase; merge same-type run | — |
+| `_kw_positions` | positions ของ kw (latin = token boundary) | low, kw | list[int] | — | `_type_mentions` | "phone" ใน "iphone" ไม่นับ; Thai kw substring ตามเดิม | — |
+| `_all_charger_subtypes` | ทุก subtype ที่ kw match (multi-subtype) | low | frozenset[str] | `_CHARGER_SUBTYPES` (product_store, lazy) | build_retrieval_slots | cable+adapter ฯลฯ ไม่บีบเหลือตัวเดียว | — |
+| `_model_terms` | brand-anchored model phrase hint | span_text, brands | tuple[str] | stop-word list | build_retrieval_slots | `<brand>+≤4 tokens` ตัดที่ connector/stopword | — |
+| `_device_occurrence` | literal span ของ device (รองรับ alias↔canonical) | low, token | (start,end)/None | `_DEVICE_ALIAS_PROBE_RE`+`normalize_device_alias` (device_compat, lazy) | `_span_device_position`, `_product_brands` | literal space-insensitive match → fallback probe span ที่ normalize เท่ากัน | — |
+| `_span_device_position` | ตำแหน่ง device token | low, token | int | `_device_occurrence` | `_local_target_device`, build_retrieval_slots | occ[0] หรือ -1 | — |
+| `_product_brands` | กรอง brand ที่อยู่ใน device span ออก | text, brands, target | list[str] | `_device_occurrence` | build_retrieval_slots | brand occurrence ทั้งหมดต้องอยู่นอก device span **และไม่ติดกับ device ด้านหน้า** (whitespace เท่านั้นระหว่างกัน — "xiaomi mi watch 8" → xiaomi คือชื่อ device ไม่ใช่ product brand) จึงนับเป็น product-brand evidence | — |
+| `_code_is_device` | code token คือ device mention เองไหม | code, device, low | bool | `normalize_device_alias`/`_lookup_spec_db` (device_compat, lazy), `_device_occurrence` | build_retrieval_profile | compact-eq / normalize-eq / spec-resolve-eq / อยู่ใน device span → true; กัน device alias รั่วเป็น model_codes (mi14pro/s25/a56) | — |
+| `_local_target_device` | device ใน segment ที่เป็น target จริง | seg, shared, slot_types | str/None | `_extract_device_token` (device_compat), `_detect_product_types` (product_store), `_span_device_position` | build_retrieval_slots | connector นำหน้า หรือ family ของ token ไม่ตรง slot ("ฟิล์ม iphone 15"→target; "นาฬิกา mi watch 8"→ตัวสินค้า) | — |
+| `_ambiguous_device_target` | device อาจเป็น product อีกชิ้นไม่ใช่ target ไหม | low, target | bool | `_device_occurrence`, `_detect_product_types`/`_kw_positions` (lazy) | build_retrieval_slots (single-slot confidence) | device ตามหลัง "กับ" เปล่า (ไม่ใช่ ใช้กับ/เข้ากับ/คู่กับ) + ไม่มี kw ของ family นั้นใน msg → true → confidence 0.6 ("หัวชาร์จกับ mi watch 8" อาจเป็น charger+watch สองสินค้า) | — |
+| `RetrievalRelation` | product-to-product relation contract (frozen) — Task 4G | — | obj | — | build_retrieval_relations | source_slot_id/target_slot_id/relation_type("works_with")/evidence_span/constraints(tuple[(k,v)])/confidence | immutable; contract-only ไม่ใช่ intent ใหม่ |
+| `build_retrieval_relations` | หา relation ระหว่าง product mentions (Task 4G, contract-only — ยังไม่ wire เข้า retrieval) | profile, slots | tuple[RetrievalRelation] | `_kw_type_mentions`, `_shorthand_source_mentions`, `_shorthand_target_mentions`, `_relation_constraints`, `_slot_id_for`, `_extract_codes` (lazy) | (ยังไม่มี runtime caller) | connector regex (ใช้กับ/คู่กับ/รองรับ/…) → forward: target=kw-mention หลัง connector ≤25 chars หรือ 'สาย'/'หัว'+question shorthand (เฉพาะเมื่อ source เป็น charger ctx หรือมี code; blacklist คำประสม) + question marker ใน 30 chars, source=mention/code ก่อน connector; symmetric (ลงท้าย คู่กัน): สอง mention ก่อน connector + question หลัง; **source ต้องมี real evidence (kw/code) — 'หัว'-shorthand ลอยตัวไม่พอ**; device mention ไม่ใช่ target; shorthand target → +("target_subtype",cable|adapter), confidence 0.7; kw target ได้ subtype จาก `_mention_subtype` เช่นกัน ("สายชาร์จ"→cable) และ source mention ได้ ("source_subtype",…); +("query_hint", text ฝั่ง target ≤200 chars) สำหรับ executor; dedupe ต่อ (src,tgt) slot; ไม่เรียก LLM | none |
+| `_kw_type_mentions` | kw-only type mentions ไม่ merge | low, allowed | list[(pos,type)] | `PRODUCT_TYPES`, `_kw_positions` (product_store lazy) | build_retrieval_relations | relation parser ต้องเห็น mention ซ้ำ type เดียวกัน ("หัวชาร์จ…สายชาร์จ") — `_type_mentions` merge same-type run ใช้ไม่ได้ | — |
+| `_relation_constraints` | constraint tokens ของ target product | tail | tuple[(key,val)] | regex detectors | build_retrieval_relations | generic: มีจอ/หน้าจอ→(display,required), N เมตร/ม./m→(length_m,N), เต็มสปีด/เร็วสุด→(speed,full), NNw/วัตต์→(power_w,N), pd/qc/pps/ufcs X→(protocol,PD3.1) | — |
+| `_slot_id_for` | slot_id ของ slot ที่มี type | slots, t | str | — | build_retrieval_relations | single-slot ทุก mention map เข้า slot เดียว; type ไม่อยู่ใน slots → "slot-<t>" (virtual, contract-only) | — |
+| `_shorthand_target_mentions` | 'สาย'/'หัว' + question marker หลัง connector → charger target | low, start, end | list[(pos,type,subtype)] | `_REL_SHORT_CABLE_BL`/`_REL_SHORT_HEAD_BL`/`_REL_SHORT_Q` | build_retrieval_relations | สาย→cable/หัว→adapter เฉพาะเมื่อตามด้วย ไหน/อะไร/แบบไหน/รุ่นไหน/ตัวไหน และไม่ต่อ compound (สายไฟ/สายตา/สายนาฬิกา/หัวหน้า/…) | — |
+| `_shorthand_source_mentions` | 'หัว' shorthand เป็น adapter source (type เท่านั้น ไม่นับ evidence) | low | list[(pos,"charger")] | `_REL_SHORT_HEAD_BL` + follower regex | build_retrieval_relations | หัว+อันนี้/นี้/ตัวนี้/รุ่นนี้/model code → adapter mention ('หัวอันนี้ AD1404T'); หัวชาร์จ/หัวหน้า/หัวใจ blacklist; relation ยังต้องมี kw/code evidence จริง | — |
+| `_strap_compound_mention` | kw mention เป็น tail ของ strap compound ไหม | low, pos | bool | — | build_retrieval_relations (filter kw_mentions) | mention ที่ text ก่อนหน้าลงท้าย "สาย" → tail ของ "สายX" (สายนาฬิกา→นาฬิกา ไม่ใช่ smartwatch mention); compound kw เอง (สายคล้อง) ไม่โดน | — |
+| `_mention_subtype` | subtype ของ kw mention ที่ pos | low, pos, t | str/None | `_CHARGER_SUBTYPES` (product_store lazy) | build_retrieval_relations | charger เท่านั้น — kw ยาวสุดที่ startswith ตรง pos ชนะ: 'สายชาร์จ'→cable, 'หัวชาร์จ'→adapter; 'หัว' shorthand (pos ∈ head_pos) → adapter ที่ callsite | — |
 
 ### 6.19 `responses.py` — response helpers
 
@@ -914,18 +953,20 @@ listing path:
 
 | Service (`src/backend/service/`) | หน้าที่หลัก |
 |---|---|
-| `botWorkerService` | pipeline poll `messages_shp` → `isProcessed` (chat_processing) → trigger → workflowEngine → callBot → `storeBotReply` (shadow_replies) → `markProcessed`; handoff → assignment |
+| `botWorkerService` | pipeline poll `messages_shp` → `isProcessed` (chat_processing) → trigger (`bot_answer`+`bot_template` → ตอบ template ทันทีไม่เรียกบอท, เหมือน test-chat) → workflowEngine → callBot → `storeBotReply` (shadow_replies) → `markProcessed`; handoff → assignment |
 | `botCallService` | `callBot` → POST `{chatbotBaseUrls[platform]}/chat` — `resolveTicketState` (simulate→test_chat_sessions, จริง→conversations), `shouldUseChatV2/V3`, `llm_context_limit` จาก systemConfig |
 | `bufferService` | debounce รวมข้อความ X วิ → 1 bot call (`buffer_messages`) |
-| `workflowEngine` / `workflowService` / `templateService` | visual flow builder (แบบ Zaapi): nodes/edges CRUD, resume paused runs, eval conditions, actions (`let_ai_respond`→callBot), `{{var}}` interpolation (pure) |
+| `workflowEngine` / `workflowService` / `templateService` | visual flow builder (แบบ Zaapi): nodes/edges CRUD, resume paused runs, eval conditions, actions (`let_ai_respond`→callBot), `{{var}}` interpolation (pure); `EngineMessage.testSource` → node side-effects (assign_ticket/add_label/close_ticket/add_note) + conditions (conversation_status/assignee) อ่าน/เขียน test store แทนของจริง, run persist `test_source` |
 | `triggerService` | keyword rules → `bot_answer`/`handoff_admin` (`triggers`) |
-| `handoffService` | รับ bot-handoff: reopen ถ้า closed → assign admin (คืน admin เดิมก่อนเสมอ) |
+| `handoffService` | รับ bot-handoff: reopen ถ้า closed → assign admin (คืน admin เดิมก่อนเสมอ) · `handoffToAdminTest` เขียน test store + `assignedStatus` param + `pending_assignment` marker เมื่อ pool ว่าง (ทั้ง real/test) |
+| `backlogService` | pending-assignment distributor — `listPending`/`buildPlan` (round_robin_selected/least_loaded_selected/manual_quota, ไม่เขียน DB)/`commitPlan` (re-check pending atomic + idem_key)/`validateAdminPool` |
+| `botworkerEventService` | `botworker_events` CRUD — event log แยกของ sandbox (ไม่เขียน admin_logs) |
 | `assignmentService` | round-robin: equal_global / equal_per_shop / weighted (`assignment_configs`/`assignment_cursors`/`shop_team_assignments`/`platform_team_assignments`) |
 | `statusConversationService` / `testStatusConversationService` | admin-owned state แยกจาก dump (จริง/`status_conversation`, test/`test_status_conversation`) |
 | `shadowReplyService` | `shadow_replies` CRUD — IRON RULE ห้ามส่งจริง/ห้าม platform API |
 | `liveAssignmentService` / `testAssignmentService` / `testChatRatingService` / `chatAnnotationService` | live+test assignment (transcript `qa[]`), ratings, dot+note annotations |
 | `adminKpiService` | KPI aggregate 3 ระบบ (test-chat, test-assignment, shadow-inbox) |
-| `conversationService` / `messageService` / `messageMediaParser` | per-conv storage, `getHistoryForBot`/`getGroupedHistoryForBot`/`toBotText`/`toBotImages`, parse `raw_payload` (item/variation_card/order/sticker/image/video) |
+| `conversationService` / `messageService` / `messageMediaParser` | per-conv storage, `getHistoryForBot`/`getGroupedHistoryForBot`/`toBotText`/`toBotImages` — pair bot reply ด้วย `indexBotRepliesByInbound` (ตัด suffix `__wf<N>` ของ workflow delivered, รวมหลาย bubble เป็น reply เดียว, orphan check เทียบ base id), parse `raw_payload` (item/variation_card/order/sticker/image/video); `getGroupedHistoryForBot` filter `origin∈[worker,workflow]`+`mode=standalone` และ `includeSandboxAdmin` merge `botworker_messages` เข้า model turns (priority: worker reply → admin sandbox → zaapi fallback) |
 | `knowledgeBaseService` / `personaService` / `shopSettingsService` / `shopService` / `productService` / `customerService` | CRUD KB/persona/shop-settings/shops; products จาก `dbWallet` read-only; customers join `conversations_shp.to_name` |
 | `authService` | SSO login/session/logout/admin CRUD (JWT `cc_session`, HS256) |
 | `rolePermissionService` | role×page matrix (`system_configs` doc `role_permissions`, seed `DEFAULT_PERMISSIONS`, cache 30s) |
@@ -934,7 +975,89 @@ listing path:
 | `ticketService` / `quickReplyService` / `closeHistoryService` / `chatAcceptService` / `adminLogService` | tickets, canned replies, close/reopen history (sequence), accept/pause sessions, audit log |
 | `lib/*` | `jwt`, `urlSafety`, `safety` (platform API disabled asserts), `rateLimit`, `sanitizeFields`, `config` (env→collections map), `pages` (PAGES registry) |
 
-**API routes (~70, `src/app/api/`):** conversations CRUD + `send`/`assign`/`handoff`/`resolve`/`messages`/`orders` + `bot-handoff` (รับจาก Python) · `shadow-inbox` (+generate-conversation) · `test-chat` (buffer/flush/upload/workflow-step) · `test-assignment` / `live-assignment` / `test-results` / `admin-chat-result` / `admin-review-kpi` · `chat-annotations` · `kb` (+upload/template/toggle) · `triggers` (+match/toggle) · `workflows` (+restore/toggle) · `llm-config` (+models) · `persona` · `shops`/`shop-settings`/`products` · `stats/*` (dashboard/admin-activity/live/performance) · `team`/`users`/`profile`/`permissions` · `auth/sso` · `quick-replies`/`labels`/`contacts` · `replay-compare` (spawn `replay_compare.py`) · `admin/maintenance` · `botworker/*` (internal) · `chatbot/[...path]` proxy
+**API routes (~75, `src/app/api/`):** conversations CRUD + `send`/`assign`/`handoff`/`resolve`/`messages`/`orders` + `bot-handoff` (รับจาก Python — รองรับ `test_source` branch) · `shadow-inbox` (+generate-conversation) · `test-chat` (buffer/flush/upload/workflow-step) · `test-assignment` / `live-assignment` / `test-results` / `admin-chat-result` / `admin-review-kpi` · `chat-annotations` · `kb` (+upload/template/toggle) · `triggers` (+match/toggle) · `workflows` (+restore/toggle) · `llm-config` (+models) · `persona` · `shops`/`shop-settings`/`products` · `stats/*` (dashboard/admin-activity/live/performance) · `team`/`users`/`profile`/`permissions` · `auth/sso` · `quick-replies`/`labels`/`contacts` · `replay-compare` (spawn `replay_compare.py`) · `admin/maintenance` · `botworker/*` (internal) · `botworker/conversations/:id/{accept,transfer,handoff,close,reopen,send,close-history,events,messages}` (sandbox — เขียน test store/botworker_messages เท่านั้น) · `assignment/backlog` (+preview/commit — superadmin/dev) · `assignment/reassign` (validate target active+role+accepting) · `chatbot/[...path]` proxy
+
+### 6.27 `retrieval_policy.py` — evidence card contract (observe-only, Task 3)
+
+| ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `make_evidence_card` | แนบ evidence metadata บน card | product, source, evidence=None, selection_reason=None | card ใหม่ (ไม่ mutate) | `_norm_id` | Task 6/8/10 (ยังไม่ wire) | merge `_evidence.sources` ไม่ซ้ำ · normalize `item_id`/`model_id`→str ใน `item_ids`/`model_ids` · evidence param→`facts` · preserve `_evidence` เดิม | — |
+| `strip_private_evidence` | ลบ private keys ก่อน public response | card หรือ list[card] | card/list ใหม่ (ไม่ mutate) | — | Task 8 (product-response boundary — ยังไม่ wire) | pop `_evidence`,`_selection_reason` | — |
+| `_norm_id` | normalize id→str | value | str | — | make_evidence_card | float int-valued→int-str; อื่น→str | — |
+
+### 6.28 `retrieval_planner.py` — grouped-retrieval request planner (observe-only, Task 5A)
+
+| ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `RetrievalRequest` | per-slot/relation retrieval request contract (frozen) | — | obj | — | build_grouped_retrieval_requests | request_id/slot_id/source("slot"|"relation_target")/product_types/subtypes/model_codes/target_device/availability_mode/compat_mode/hard_filters/soft_hints/relation_id/confidence | immutable; ยังไม่ execute |
+| `build_grouped_retrieval_requests` | profile+slots+relations → request plan | profile, slots, relations | tuple[RetrievalRequest] | `_slot_request`, `_relation_request`, `_slot_types` | (tests only — ยังไม่ wire runtime) | 1 base request/slot (skip slot ว่างเปล่า) + 1 target request/relation; hard=model_code เสมอ + product_type เฉพาะ conf≥0.8; soft=target_device/brand/model_term/constraints; relation target=codes ว่าง+target_subtype→subtypes | none; ไม่เรียก LLM/Mongo |
+| `_slot_request` | base request จาก slot | req_id, slot, src_sub | RetrievalRequest/None | — | build_grouped_retrieval_requests | ไม่มี type+code → None; model_code→hard; type→hard ถ้า conf≥0.8 else soft; device/brand/term→soft; src_sub (จาก relation source_subtype) แคบ subtypes เหลือฝั่ง source | — |
+| `_relation_request` | target request จาก relation | req_id, rel_id, rel, slots | RetrievalRequest | `_slot_types` | build_grouped_retrieval_requests | types จาก target slot/virtual `slot-<t>`; constraints→soft ยกเว้น `source_subtype` (metadata ฝั่ง source ใช้โดย _slot_request เท่านั้น); target_subtype→subtypes; codes=() (target คือ group ไม่ใช่ code); inherit slot's avail/compat ถ้ามี backing | — |
+| `_slot_types` | product_types ของ slot_id | slots, slot_id | frozenset[str] | — | `_relation_request` | real slot → product_types; virtual `slot-<t>` → {t} จากชื่อ | — |
+
+### 6.29 `retrieval_executor.py` — grouped-retrieval executor (observe-only, Task 5B1)
+
+| ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `RetrievalExecutionResult` | ผล execute ต่อ request (frozen) | — | obj | — | execute_grouped_retrieval_requests, candidate_pool | request_id/source + slot_id/relation_id/subtypes/model_codes/target_device (facts สำหรับ pool scoring) + buckets: eligible_candidates / unavailable_evidence / rejected_evidence (card+`_evidence.sources`+`_selection_reason`) + source_attempts + hard_filters/soft_hints/trace/error; `candidates` = property alias ของ eligible_candidates | immutable |
+| `SourceAttempt` | 1 fetch attempt (frozen) | — | obj | — | execute_grouped_retrieval_requests | source/raw_count/eligible/unavailable/rejected/trace/error — evidence ไม่หายเงียบแม้ raw=0; error ต่อ source ไม่ล้ม pool | immutable |
+| `execute_grouped_retrieval_requests` | execute request plan ทีละชิ้น (observe-only) | requests, message, shop, platform, limit_per_request, observe_only, fetcher, legacy_fetcher | tuple[RetrievalExecutionResult] | `_request_profile`, `_run_attempt`, `_bucket`, `units.fetch_unit_evidence` (default fetcher, lazy), `_legacy_evidence_fetcher` | (tests/probes only — ยังไม่ wire runtime) | ต่อ request: synthetic RetrievalProfile → ทุก source fetcher(query หรือ query_hint สำหรับ relation_target) → `_run_attempt` แยก bucket ทุก card + tag `make_evidence_card(source=…)` → result+attempts+trace; source error → attempt.error (req.error เฉพาะเมื่อทุก source พัง); soft_hints เป็น trace ไม่ตัด candidate | Mongo read ผ่าน fetchers; error ถูกจับต่อ source |
+| `_legacy_evidence_fetcher` | legacy product_store evidence adapter (observe) | message, retrieval_profile, shop, limit | list[card] | `product_store.get_client`/`fetch_products` | execute_grouped_retrieval_requests (`legacy_fetcher="auto"`) | fetch_products เดิมผ่าน MONGO_DB env; SystemExit/error → RuntimeError ต่อ attempt (ไม่ kill process) | Mongo read |
+| `_request_profile` | synthetic profile ต่อ request | req, query, shop, platform | RetrievalProfile | — | execute_grouped_retrieval_requests | subtype = first sorted subtypes; intent=""; variant_terms=() — fetch_* ใช้ facts ชุดเดียวกัน | — |
+| `_run_attempt` | fetch 1 source → tag + bucket | source, fetch_fn, query, prof, shop, limit, req | (elig, unav, rej, SourceAttempt) | `_bucket`, `make_evidence_card` | execute_grouped_retrieval_requests | cards จาก fetcher → `_bucket` → `make_evidence_card(source, selection_reason)` แยก 3 list; Exception/SystemExit → attempt.error | — |
+| `_bucket` | card → bucket+reason | card, req | ("eligible"/"unavailable"/"rejected", reason) | `_SUBTYPE_TO_TYPES` (units), `product_store._detect_product_types` (lazy, legacy card ไม่มี product_type), `device_compat._extract_device_token` (lazy) | `_run_attempt` | type∉eff_types→wrong_type (legacy card detect จากชื่อ — detect ไม่เจอ = unknown ผ่าน) · subtype evidence ชัดไม่ตรง→subtype_mismatch (unit type ที่เป็น subtype expansion ผ่าน) · device token≠target→device_mismatch · avail→eligible else unavailable; device unknown→ผ่าน (soft) | — |
+
+### 6.30 `candidate_pool.py` — central candidate pool (observe-only, Task 5B2)
+
+| ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `PooledCandidate` | candidate หลัง dedupe+rank (frozen) | — | obj | — | build_candidate_pool | identity/item_id/model_id/unit_id + sources(request_ids/slot_id/relation_id) + bucket/reason + score+trace + card copy + is_anchor | immutable |
+| `EvidenceAttachment` | group-B evidence (anchor/kb/image_text) | — | obj | — | build_candidate_pool | kind/identity/item_id/linked_candidate/trace — attachments ผูก candidate ไม่ใช่ candidate เอง | immutable |
+| `CandidatePool` | pool กลาง (frozen) | — | obj | — | build_candidate_pool | eligible/unavailable/rejected + by_request (per-slot quota) + evidence_pool + supporting_evidence (kb_qa/raw — contract เท่านั้น) + trace; `llm_ready()` strip `_evidence`/`_selection_reason` ผ่าน retrieval_policy | immutable |
+| `build_candidate_pool` | results → pool กลาง | results, profile, per_request_limit | CandidatePool | `_card_ids`, `_merge_group`, `_score` | (tests/probes only — ยังไม่ wire runtime) | ต่อ request: dedupe identity (unit/model id→item_id→name+shop; variant ต่าง id ไม่ merge, item-level merge เข้า variant เดิม, bucket=ดีสุดในกลุ่ม) → `_merge_group` (best card + union sources) → `_score` (anchor/model_code/subtype/device/relation_target/sellable/multi-source boosts) → sort+quota → รวม eligible/unavailable/rejected; profile.anchor_item_ids + spec/warranty/compare/history intent → anchor boost สูงสุด + EvidenceAttachment | — |
+| `_card_ids` | (unit,model,item) id normalized | card | tuple[str\|None] | `retrieval_policy._norm_id` | build_candidate_pool | float-int normalize (Mongo export) ตรงกับ `_evidence` contract | — |
+| `_merge_group` | รวม cards identity เดียว | group[dict] | dict | — | build_candidate_pool | best card = sellable→richer(canonical_specs/image_text)→fields มากสุด; `_evidence.sources` union | — |
+| `_score` | rank score อธิบายได้ | card, res, anchor, anchor_priority | (score, why[]) | `device_compat._extract_device_token` (lazy) | build_candidate_pool | anchor 3/1 · model_code +2 · subtype +1 · device +1 · relation_target +0.5 · sellable +0.5 · sources>1 +0.2/ตัว · +card `_score` — why[] ลง trace | — |
+
+### 6.31 `retrieval_shadow.py` — grouped-retrieval shadow runner (observe-only, Task 5B3-A)
+
+| ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `run_grouped_retrieval_shadow` | รัน pipeline ใหม่ข้าง runtime เดิม | profile, message, shop, platform, limit_per_request, fetcher, legacy_fetcher | dict summary | `build_retrieval_slots`/`_relations`, `build_grouped_retrieval_requests`, `execute_grouped_retrieval_requests`, `build_candidate_pool` | `app.py` callsite หลัง `USE_GROUPED_RETRIEVAL_SHADOW=1` (lazy import + try/except) | slots→relations→requests→executor(union)→pool→`_summary`; error ใดๆ → `{"ok": False, "error"}` ไม่ raise — ไม่แตะ products/LLM/response | Mongo read ผ่าน executor fetchers; error → ok=False |
+| `_summary` | pool+results → log-safe dict | results, pool | dict | — | run_grouped_retrieval_shadow | counts/attempts/by_request/top_eligible(name+item_id+sources+score)/requests — field สาธารณะเท่านั้น, ไม่มี `_evidence`/`_selection_reason` โดย construction, ไม่ log history | — |
+
+`app.py` callsite: หลัง step `RetrievalProfile` — `os.environ.get("USE_GROUPED_RETRIEVAL_SHADOW","0")=="1"` + `_retrieval_profile is not None` → lazy `from . import retrieval_shadow` → ผล append เข้า `_steps` ("GroupedRetrievalShadow") เท่านั้น; except → stderr `[SHADOW]`; flag ปิด = ไม่มี import/ทำงานเพิ่ม
+
+### 6.32 `retrieval_selection.py` — CandidatePool → LLM context selection (contract-only, Task 5B3-B)
+
+| ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `SelectedCandidate` | candidate ผ่าน selection (frozen) | — | obj | — | select_for_llm_context | role/request_id/slot_id/relation_id/identity + score+constraint_hits+reason + card (strip แล้ว) | immutable |
+| `SelectionResult` | output selection (frozen) | — | obj | — | select_for_llm_context | selected + by_request (per-request quota) + unavailable_evidence (stripped summaries) + rejected_summary (counts) + trace | immutable |
+| `select_for_llm_context` | pool → cards สำหรับ LLM context | pool, requests, profile, per_request_limit=3, unavailable_limit=5 | SelectionResult | `_select_one`, `strip_private_evidence` | (tests/probes only — ยังไม่ wire runtime) | ต่อ request: eligible → `_select_one` (soft_hints match card text → constraint_hits +score) → sort (hits desc, score desc) → quota; unavailable → stripped summaries; rejected → counts by reason | — |
+| `_card_text` | text รวม constraint matching | card | str | — | `_select_one` | name + variant names + tier_variation + canonical_specs — หลักฐานอย่าง "2 เมตร" อยู่ใน variant ไม่ใช่ item name | — |
+| `_constraint_hit` | soft_hint match card text | key, val, text | bool | — | `_select_one` | display→จอ/oled/display · length_m→`N เมตร/ม./m` · speed→W/A/PD/เต็ม/เร็ว · power_w→`N w` · protocol→`pd/qc/pps/ufcs N` — meta keys (query_hint/target_subtype/source_subtype) ไม่ score | — |
+
+### 6.33 `retrieval_runtime.py` — grouped-retrieval → LLM context (flag-gated, Task 5B3-C)
+
+| ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `run_grouped_selection` | profile → pipeline → selection (ครั้งเดียว/request) | profile, message, shop, platform, per_request_limit=3, unavailable_limit=5, fetcher, legacy_fetcher | dict {"selected_cards","extra_context","summary"} / None | slots→relations→requests→executor→pool→`select_for_llm_context` | `app.py` flag block (lazy import) | selected cards role-tagged `_context_note` (stripped); unavailable → Thai evidence note (ไม่ใช่ recommendation); error/empty → None | Mongo read; error → None |
+| `merge_selected_products` | merge selected + base | selected_cards, base_products, limit | list[dict] | `_item_id` | `app.py` llm.answer callsites (KB path ~2240, main ~4622) | selected มาก่อน + base ที่ไม่ซ้ำ item_id (selected ชนะ) + cap limit | — |
+| `prepare_grouped_selection` | run+merge ครบจบ (tests/probes) | profile, …, base_products, limit | dict {"products","extra_context","summary"} / None | `run_grouped_selection`, `merge_selected_products` | tests/probes | composition ของ 2 ฟังก์ชันบน | — |
+
+`app.py` wiring (flag `USE_GROUPED_RETRIEVAL_SELECTION`, default ปิด): compute block หลัง RetrievalProfile step → `_grouped_sel` → merge 2 llm.answer callsites (KB `merged_products` ~2240 + main `products` ~4622) → `_steps` "GroupedRetrievalSelection"; flag ปิด/ผล None = products เดิม 100%
+
+### 6.34 `runtime_config.py` — runtime flags จาก admin DB (Task 5B3-D)
+
+| ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `get_runtime_config` | อ่าน `system_configs.main_config` doc (TTL 5s) | force_refresh=False | dict doc | `_fetch` → `knowledge_base._admin_db` | `_flag` | cache 5s; DB error → cache เดิม/`{}` | Mongo read (max_time_ms 1500); fail → stale/empty |
+| `_flag` | resolve flag หนึ่งตัว | db_key, env_key | bool | `get_runtime_config` | `grouped_retrieval_*_enabled` | DB field เป็น bool → ใช้ค่านั้น (owner); absent/`{}` → env `"1"` fallback | — |
+| `grouped_retrieval_shadow_enabled` | flag shadow pipeline | — | bool | `_flag("grouped_retrieval_shadow_enabled","USE_GROUPED_RETRIEVAL_SHADOW")` | `app.py` shadow block (lazy import) | ดู `_flag` | error → False (ปิด) |
+| `grouped_retrieval_selection_enabled` | flag selection→LLM | — | bool | `_flag("grouped_retrieval_selection_enabled","USE_GROUPED_RETRIEVAL_SELECTION")` | `app.py` selection block (lazy import) | ดู `_flag` | error → False (ปิด) |
+
+`app.py` wiring (Task 5B3-D): shadow/selection blocks เรียก `runtime_config` (lazy, try/except → False) แทน `os.environ` ตรงๆ — ไม่มี manual reload endpoint; ค่า toggle จากหน้า config มีผลเมื่อ cache หมดอายุภายในประมาณ 5 วินาที
 
 ---
 
@@ -948,6 +1071,8 @@ listing path:
 | `USE_CHAT_V3` | `"0"` | `1`→chatbotv3 ทั้งระบบ |
 | `req.use_v2` / `req.use_v3` | None | per-request override (shadowbot/replay) |
 | `USE_UNIT_INDEX` | unset | `1`=units ทุก query · `charger`=เฉพาะ charger family · compat bypass เสมอ |
+| `USE_GROUPED_RETRIEVAL_SHADOW` | `"0"` (ปิด) | env fallback เมื่อ DB field absent — owner จริงคือ `system_configs.main_config.grouped_retrieval_shadow_enabled` (หน้า /config, runtime_config TTL 5s) · `1`=รัน pipeline ข้าง runtime เดิม observe เท่านั้น |
+| `USE_GROUPED_RETRIEVAL_SELECTION` | `"0"` (ปิด) | env fallback เมื่อ DB field absent — owner จริงคือ `system_configs.main_config.grouped_retrieval_selection_enabled` · `1`=merge selected cards เข้า llm.answer — **มีผลต่อคำตอบจริง** |
 | `USE_QA_KB` | unset | เปิด QA-pair RAG |
 | `CHATBOT_INTERNAL_SECRET` | — | คุม internal API ทั้งสองทิศ |
 | `ADMIN_HANDOFF_URL` | `http://127.0.0.1:3000/api/admin/conversations/bot-handoff` | handoff endpoint |
@@ -955,6 +1080,7 @@ listing path:
 | `BOT_VISION_ALLOW_LOOPBACK` | — | อนุญาต loopback image URL (test-chat upload) |
 | `req.ticket_state` | — | `open|closed|handoff|resolved|pending` — คุม post-handoff silence |
 | `req.simulate_assignment` | False | handoff→`test_status_conversation` แทน conversations จริง |
+| `req.test_source` | None | `"botworker"` → handoff/ticket_state ผูกกับ test store source=botworker (parallel sandbox) |
 | `req.llm_context_limit` | 30 (10-50) | จำนวนสินค้าสูงสุดใน LLM ctx (หน้า config ตั้ง) |
 
 ### 7.2 LLM (Gemini)

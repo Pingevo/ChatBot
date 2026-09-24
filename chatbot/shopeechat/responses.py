@@ -69,6 +69,10 @@ def _send_handoff(req, ctx: dict | None = None, *, reason: str, claim_topic: str
         }
         if simulate:
             _payload["simulate"] = req.simulate_assignment
+        # ⚡ botworker parallel — ส่ง test_source ให้ admin route เขียน test_status_conversation
+        _test_source = getattr(req, "test_source", None)
+        if _test_source:
+            _payload["test_source"] = _test_source
         _body = json.dumps(_payload).encode("utf-8")
         _handoff_req = urllib.request.Request(
             _handoff_url,

@@ -49,6 +49,9 @@ interface SystemConfig {
   chat_engine: "legacy" | "v2" | "v3";
   // ⚡ Phase 8 — LLM context limit (จำนวนสินค้าสูงสุดที่ส่งเข้า LLM)
   llm_context_limit: number;
+  // ⚡ Task 5B3-D — grouped retrieval flags (bot อ่านจาก DB, env fallback)
+  grouped_retrieval_shadow_enabled: boolean;
+  grouped_retrieval_selection_enabled: boolean;
   updated_by: string;
   updated_at: string;
 }
@@ -300,6 +303,34 @@ export default function ConfigPage() {
 
   // ⚡ LLM Context Limit ย้ายไป /admin-config — handler ถูกลบพร้อม card ซ้ำ
 
+  // ⚡ Task 5B3-D — grouped retrieval toggles (bot อ่านจาก DB ≤5s ไม่ต้อง restart)
+  async function handleRetrievalToggle(
+    key: "grouped_retrieval_shadow_enabled" | "grouped_retrieval_selection_enabled",
+    value: boolean
+  ) {
+    if (!config) return;
+    const isSelection = key === "grouped_retrieval_selection_enabled";
+    const label = isSelection ? "Grouped Retrieval Selection" : "Grouped Retrieval Shadow";
+    const ok = await confirm.ask({
+      title: `${value ? "เปิด" : "ปิด"} ${label}?`,
+      message: isSelection && value
+        ? "⚠️ Selection มีผลกับคำตอบจริงของลูกค้า — pipeline ใหม่จะเลือกสินค้าส่งเข้า LLM แทน retrieval เดิม (error จะ fallback เดิม) — bot ใช้ค่าใหม่ใน ~5 วินาที"
+        : `ยืนยันเปลี่ยน "${label}" เป็น ${value ? "เปิด" : "ปิด"} — bot ใช้ค่าใหม่ใน ~5 วินาที`,
+      confirmText: "บันทึก",
+    });
+    if (!ok) return;
+    setSaving(true);
+    try {
+      const r = await api().put<{ ok: boolean; config: SystemConfig }>("/config", { [key]: value });
+      setConfig(r.data.config);
+      toast.success(`เปลี่ยน "${label}" เป็น ${value ? "เปิด" : "ปิด"} แล้ว`);
+    } catch (err) {
+      catchError(err, "บันทึกไม่สำเร็จ");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="h-full flex items-center justify-center">
@@ -463,6 +494,51 @@ export default function ConfigPage() {
               </div>
             )}
           </div>
+        </Card>
+
+        {/* ⚡ Task 5B3-D — Legacy Shopee Retrieval (grouped pipeline flags) */}
+        <Card className="p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Cpu size={14} className="text-brand" />
+            <h2 className="text-sm font-semibold text-text">Legacy Shopee Retrieval</h2>
+            <Badge tone={config?.grouped_retrieval_selection_enabled ? "warning" : "neutral"} className="ml-auto">
+              {config?.grouped_retrieval_selection_enabled ? "selection on" : "off"}
+            </Badge>
+          </div>
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between py-2.5 px-3 rounded-lg bg-surface-2">
+              <div className="min-w-0 flex-1 mr-3">
+                <div className="text-sm font-medium text-text">Grouped Retrieval Shadow</div>
+                <div className="text-[11px] text-text-muted">
+                  รัน pipeline ใหม่ข้างๆ เพื่อ log เทียบเท่านั้น — ไม่กระทบคำตอบลูกค้า
+                </div>
+              </div>
+              <ToggleSwitch
+                enabled={!!config?.grouped_retrieval_shadow_enabled}
+                onChange={() => editable && handleRetrievalToggle("grouped_retrieval_shadow_enabled", !config?.grouped_retrieval_shadow_enabled)}
+                disabled={saving || !editable}
+              />
+            </div>
+            <div className="flex items-center justify-between py-2.5 px-3 rounded-lg bg-surface-2">
+              <div className="min-w-0 flex-1 mr-3">
+                <div className="text-sm font-medium text-text">Grouped Retrieval Selection</div>
+                <div className="text-[11px] text-text-muted">
+                  pipeline ใหม่เลือกสินค้าส่งเข้า LLM แทน retrieval เดิม — error fallback เดิม
+                </div>
+              </div>
+              <ToggleSwitch
+                enabled={!!config?.grouped_retrieval_selection_enabled}
+                onChange={() => editable && handleRetrievalToggle("grouped_retrieval_selection_enabled", !config?.grouped_retrieval_selection_enabled)}
+                disabled={saving || !editable}
+              />
+            </div>
+          </div>
+          {config?.grouped_retrieval_selection_enabled && (
+            <div className="mt-2 text-[11px] text-warning flex items-center gap-1">
+              <AlertCircle size={11} />
+              Selection เปิดอยู่ — มีผลกับคำตอบจริงของลูกค้า (เฉพาะ legacy engine)
+            </div>
+          )}
         </Card>
 
         {/* ⚡ LLM Context Limit ย้ายไป /admin-config แล้ว (slider version) — ตั้งค่าที่เดียว กันสับสน */}

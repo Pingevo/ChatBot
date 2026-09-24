@@ -12,8 +12,12 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .route_context import RetrievalProfile
 
 import numpy as np
 
@@ -112,6 +116,7 @@ def fetch_units(
     product_types: set[str] | None = None,
     charger_subtype: str | None = None,
     route=None,
+    retrieval_profile: RetrievalProfile | None = None,
 ) -> list[dict]:
     """ดึง units ที่เกี่ยวกับ message — exact code → field filter → vector → merge.
 
@@ -119,11 +124,23 @@ def fetch_units(
     """
     from . import route_context as _rc
 
-    route = route or _rc.resolve_route(message)
-    ptypes = set(product_types) if product_types is not None else set(route.product_types)
-    subtype = charger_subtype or route.charger_subtype
+    # Task 4D — profile เป็น canonical facts owner: มี profile → ใช้ types/
+    #   subtype/codes จาก profile โดยไม่ต้อง resolve_route ซ้ำ; ไม่มี → เดิม
+    if route is None and retrieval_profile is None:
+        route = _rc.resolve_route(message)
+    if product_types is not None:
+        ptypes = set(product_types)
+    elif retrieval_profile is not None:
+        ptypes = set(retrieval_profile.product_types)
+    else:
+        ptypes = set(route.product_types)
+    subtype = charger_subtype or (retrieval_profile.subtype
+                                  if retrieval_profile is not None
+                                  else route.charger_subtype)
     ptypes |= _SUBTYPE_TO_TYPES.get(subtype or "", set())
-    codes = [c.upper() for c in route.model_codes]
+    codes = [c.upper() for c in (
+        retrieval_profile.model_codes if retrieval_profile is not None
+        else route.model_codes)]
 
     try:
         coll = _units_coll()
@@ -193,39 +210,37 @@ def pick_desc_sections(unit: dict, route=None) -> str:
     return "\n\n".join(parts)[:3000]
 
 
-def _live_availability(unit: dict) -> tuple[str, int, str]:
-    """คืน (item_status, stock, model_status) สดจาก _listing (attach_listing_fields join).
+def _live_availability(unit: dict) -> tuple[str, dict, str]:
+    """คืน (item_status, availability, model_status) — availability จาก resolver owner เดียว.
 
-    - ไม่มี _listing → snapshot build-time เดิมของ unit
-    - unit มี model_id → เฉพาะ model นั้นใน lst["model"]
-      (ไม่เจอ = variant ถูกลบออกจาก listing → stock 0)
-    - solo unit (model_id=None) → doc-level stock_info_v2
+    - ไม่มี _listing → resolve จาก snapshot build-time ของ unit เอง
+    - unit มี model_id → ส่ง exact model doc ใน lst["model"] เข้า resolver
+      (ไม่เจอ = variant ถูกลบออกจาก listing → model_missing ไม่ใช่ sold-out ทั้ง listing)
+    - solo unit (model_id=None) → resolve ทั้ง listing (รวม MODEL_NORMAL ทุกรุ่น)
     """
     from . import product_store as _ps   # lazy — กัน circular
     lst = unit.get("_listing")
     if not lst:
-        return (unit.get("item_status") or "", int(unit.get("stock") or 0),
+        return (unit.get("item_status") or "", _ps.resolve_availability(unit),
                 unit.get("model_status") or "")
     status = lst.get("item_status") or unit.get("item_status") or ""
     mid = unit.get("model_id")
     if mid is None:
-        return status, _ps._shopee_stock(lst), unit.get("model_status") or ""
+        return status, _ps.resolve_availability(lst), unit.get("model_status") or ""
     m = next((m for m in (lst.get("model") or []) if m.get("model_id") == mid), None)
     if m is None:
-        return status, 0, ""
-    return status, _ps._shopee_stock(m), m.get("model_status") or ""
+        return status, {"catalog_status": "unlisted", "available_for_sale": False,
+                        "answerable": True, "reason": "model_missing",
+                        "total_stock": None}, ""
+    return status, _ps.resolve_availability(lst, model_doc=m), m.get("model_status") or ""
 
 
 def _live_sellable(unit: dict) -> bool:
-    """unit ขายได้จริงตอนนี้ — semantics เดียวกับ build (NORMAL + stock>0) แต่อ่านค่าสด.
+    """unit ขายได้จริงตอนนี้ — delegate ไป resolve_availability (owner เดียว).
 
     ใช้ re-sort หลัง attach_listing_fields — ของที่ตายหลัง build จะถูกดีดออกจาก top
-    ยังไม่ join (_listing ไม่มี) → ใช้ sellable build-time เดิม
     """
-    if "_listing" not in unit:
-        return bool(unit.get("sellable"))
-    status, stock, _mstatus = _live_availability(unit)
-    return status == "NORMAL" and stock > 0
+    return _live_availability(unit)[1]["available_for_sale"]
 
 
 def _variant_image_id(lst: dict, model_name: str) -> str:
@@ -256,10 +271,11 @@ def to_unit_card(unit: dict, route=None) -> dict:
     brand = unit.get("brand") or {}
     brand_name = brand.get("original_brand_name", "") if isinstance(brand, dict) else str(brand)
     lst = unit.get("_listing") or {}   # attach_listing_fields join มา (อาจไม่มี)
-    # ⚡ status/stock/model_status อ่านสดจาก _listing — unit snapshot เป็น build-time
+    # ⚡ availability สดจาก _listing ผ่าน resolver owner เดียว — unit snapshot เป็น build-time
     #   ของที่ร้านลบ/หมดหลัง build ต้องเห็นตาย (ทุก field ต้องสด — app.py recompute
-    #   _available_for_sale จาก status/total_stock/sold_out จะทับถ้า field stale)
-    status, stock, model_status = _live_availability(unit)
+    #   _available_for_sale ผ่าน resolver เดียวกันจะทับถ้า field stale)
+    status, av, model_status = _live_availability(unit)
+    stock = av["total_stock"]
     price = unit.get("price")
     # shape เดียวกับ _price_range ของ product card — downstream อ่าน price.get("min"/"max")
     price_range = {"min": int(price), "max": int(price), "currency": "THB"} if price else {}
@@ -286,8 +302,11 @@ def to_unit_card(unit: dict, route=None) -> dict:
         "weight": lst.get("weight"),
         "dimension": lst.get("dimension"),
         "total_stock": stock,
-        "sold_out": stock == 0,
-        "_available_for_sale": status == "NORMAL" and stock > 0,
+        "catalog_status": av["catalog_status"],
+        "availability_reason": av["reason"],
+        # sold_out = รู้จริงว่าหมดเท่านั้น — unknown/unlisted/model_missing ไม่ใช่ sold out
+        "sold_out": av["catalog_status"] == "out_of_stock",
+        "_available_for_sale": av["available_for_sale"],
         "has_promotion": _ps._has_active_promotion(lst) if lst else False,
         "is_flash_sale": bool(lst.get("is_flash_sale")),
         "description_excerpt": (
@@ -311,7 +330,7 @@ def to_unit_card(unit: dict, route=None) -> dict:
         "model_name": unit.get("model_name"),
         "model_sku": unit.get("model_sku"),
         "model_status": model_status,
-        "sellable": status == "NORMAL" and stock > 0,
+        "sellable": av["available_for_sale"],
         "kind": unit.get("kind"),
         "components": unit.get("components"),
         "product_type": unit.get("product_type"),
@@ -440,17 +459,21 @@ def attach_listing_fields(unit_docs: list[dict]) -> list[dict]:
     return unit_docs
 
 
-def fetch_unit_cards(message: str, **kwargs) -> list[dict]:
+def fetch_unit_cards(message: str, retrieval_profile: RetrievalProfile | None = None,
+                     **kwargs) -> list[dict]:
     """fetch_units + attach_kb_specs + attach_image_texts + attach_listing_fields + to_unit_card."""
     route = kwargs.pop("route", None)
-    from . import route_context as _rc
-    route = route or _rc.resolve_route(message)
+    # มี profile แล้วไม่ต้อง resolve_route ซ้ำ (fetch_units ใช้ profile ตรง)
+    if route is None and retrieval_profile is None:
+        from . import route_context as _rc
+        route = _rc.resolve_route(message)
     limit = int(kwargs.pop("limit", 8))
     # ⚡ overfetch 2× เพราะ sellable บน unit doc เป็น build-time snapshot —
     #   re-sort ด้วย live status หลัง join (ของที่ตายหลัง build ถูกดีดออกจาก top)
     #   แล้วค่อยตัด limit — code-hit ยังชนะเสมอ
     us = attach_listing_fields(attach_image_texts(attach_kb_specs(
-        fetch_units(message, route=route, limit=limit * 2, **kwargs))))
+        fetch_units(message, route=route, limit=limit * 2,
+                    retrieval_profile=retrieval_profile, **kwargs))))
     us.sort(key=lambda u: (u.get("_matched_by") == "code",
                            _live_sellable(u), u.get("_score") or 0.0),
             reverse=True)
@@ -464,3 +487,44 @@ def fetch_unit_cards(message: str, **kwargs) -> list[dict]:
         print("[UNITS] pool all-dead post-join → legacy fallback", file=sys.stderr)
         return []
     return [to_unit_card(u, route) for u in top]
+
+
+@dataclass(frozen=True)
+class UnitEvidenceFetchResult:
+    """evidence fetch result — cards ครบทั้ง sellable/dead (ไม่ collapse เหมือน
+    fetch_unit_cards ที่คืน [] เมื่อ all-dead เพื่อเป็น runtime fallback signal)"""
+    cards: tuple[dict, ...]
+    raw_count: int
+    sellable_count: int
+    unavailable_count: int
+    trace: tuple[str, ...]
+
+
+def fetch_unit_evidence(
+    message: str,
+    retrieval_profile: RetrievalProfile | None = None,
+    **kwargs,
+) -> UnitEvidenceFetchResult:
+    """chain เดียวกับ fetch_unit_cards แต่คืน evidence ทั้งหมด — observe path
+    ของ grouped executor (Task 5B1): หลักฐาน all-dead ต้องไม่หาย
+    availability คำนวณผ่าน resolve_availability เหมือนเดิม (ใน to_unit_card)"""
+    route = kwargs.pop("route", None)
+    if route is None and retrieval_profile is None:
+        from . import route_context as _rc
+        route = _rc.resolve_route(message)
+    limit = int(kwargs.pop("limit", 8))
+    us = attach_listing_fields(attach_image_texts(attach_kb_specs(
+        fetch_units(message, route=route, limit=limit * 2,
+                    retrieval_profile=retrieval_profile, **kwargs))))
+    us.sort(key=lambda u: (u.get("_matched_by") == "code",
+                           _live_sellable(u), u.get("_score") or 0.0),
+            reverse=True)
+    cards = tuple(to_unit_card(u, route) for u in us[:limit])
+    sellable = sum(1 for c in cards if c.get("_available_for_sale"))
+    return UnitEvidenceFetchResult(
+        cards=cards,
+        raw_count=len(us),
+        sellable_count=sellable,
+        unavailable_count=len(cards) - sellable,
+        trace=(f"units raw={len(us)} top={len(cards)} sellable={sellable}",),
+    )

@@ -45,6 +45,7 @@ import {
   X,
   HelpCircle,
   UserCog,
+  Inbox,
   type LucideIcon,
 } from "lucide-react";
 
@@ -131,6 +132,7 @@ const navGroups: NavGroup[] = [
       { href: "/shops", label: "ร้านค้า", icon: Store, page: "shop" },
       { href: "/contacts", label: "รายชื่อลูกค้า", icon: ContactIcon, page: "customer" },
       { href: "/team", label: "ทีม & มอบหมาย", icon: Headset, page: "team" },
+      { href: "/backlog", label: "งานค้างรอจ่าย", icon: Inbox, page: "backlog" },
       { href: "/users", label: "จัดการผู้ใช้", icon: Users, badgeTag: "Super", page: "user" },
     ],
   },

@@ -157,8 +157,8 @@ function formatLogForCopy(stats: MsgStats, rawText: string): string {
     lines.push("");
     lines.push("=== Steps ===");
     stats.steps.forEach((s, i) => {
-      lines.push(`[${i + 1}] ${s.name} (${s.model})`);
-      lines.push(`  tokens: in=${s.tokens_in} out=${s.tokens_out} · ${s.time_s}s · $${s.cost_usd.toFixed(6)} (฿${s.cost_thb})`);
+      lines.push(`[${i + 1}] ${s.name} (${s.model ?? "—"})`);
+      lines.push(`  tokens: in=${s.tokens_in ?? "—"} out=${s.tokens_out ?? "—"} · ${s.time_s ?? "—"}s · $${s.cost_usd?.toFixed(6) ?? "—"} (฿${s.cost_thb ?? "—"})`);
       if (s.input && Object.keys(s.input).length > 0) {
         lines.push(`  input: ${JSON.stringify(s.input)}`);
       }
@@ -1773,7 +1773,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
               <PlatformIcon platform={platform} size={20} />
             </div>
             <div className="min-w-0">
-              <h1 className="text-base font-semibold text-text truncate">ทดสอบบอท — {meta.label}</h1>
+              <h1 className="text-base font-semibold text-brand truncate">ทดสอบบอท — {meta.label}</h1>
               <div className="text-xs text-text-muted flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-text-subtle inline-block" />
                 ยังไม่เชื่อมต่อ
@@ -1888,7 +1888,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
               <PlatformIcon platform={platform} size={18} />
             </div>
             <div className="min-w-0">
-              <h1 className="text-sm xl:text-base font-semibold text-text truncate">ทดสอบบอท — {meta.label}</h1>
+              <h1 className="text-sm xl:text-base font-semibold text-brand truncate">ทดสอบบอท — {meta.label}</h1>
               <div className="text-[11px] xl:text-xs text-text-muted flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-brand inline-block" />
                 Gemini + MongoDB · เชื่อมต่อแล้ว

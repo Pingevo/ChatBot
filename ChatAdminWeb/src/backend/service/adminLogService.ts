@@ -142,6 +142,8 @@ export type AdminActionType =
   // Chat accept/pause — admin เปิด/ปิดรับแชท
   | "chat_accept.start"
   | "chat_accept.stop"
+  // ⚡ backlog distributor — commit batch จ่ายงานค้าง
+  | "backlog_commit"
   // ⚡ Phase 2M — conversation metadata changes (ใครทำอะไร)
   | "conversation.set_topic"
   | "conversation.set_item_ids"

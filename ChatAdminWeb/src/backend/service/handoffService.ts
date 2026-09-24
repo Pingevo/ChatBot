@@ -145,6 +145,13 @@ export async function handoffToAdmin(opts: {
       assignedTo,
       "bot"
     );
+    // ⚡ backlog — assign สำเร็จ → clear pending marker (กรณีเคยค้าง)
+    if (meta?.pending_assignment) {
+      await statusConversationService.setPendingAssignment(opts.conversationId, false);
+    }
+  } else {
+    // ⚡ backlog — หา admin ไม่ได้ → mark pending_assignment กันงานค้างหาย (distributor จ่ายทีหลัง)
+    await statusConversationService.setPendingAssignment(opts.conversationId, true, "no_available_admin");
   }
 
   // ── ดึงชื่อ admin ──
@@ -178,6 +185,8 @@ export async function handoffToAdminTest(opts: {
   platform: string;
   reason?: string;
   source: TestSource;
+  // ⚡ botworker — assign สำเร็จ = status "open" (แอดมินกำลังตอบ); default "handoff" คงพฤติกรรม test หน้าอื่น
+  assignedStatus?: "handoff" | "open";
 }): Promise<{
   assignedTo: string | null;
   assignedToName: string | null;
@@ -197,6 +206,9 @@ export async function handoffToAdminTest(opts: {
 
   // Step 1: ถ้ามี assigned_to อยู่แล้ว → ใช้คนเดิม
   let assignedTo = meta?.assigned_to || null;
+  if (assignedTo) {
+    assignmentReason = "existing_assignment: มี admin ดูแลอยู่แล้ว (test)";
+  }
 
   // Step 2: หา admin คนสุดท้ายที่เคยตอบ
   if (!assignedTo) {
@@ -232,8 +244,6 @@ export async function handoffToAdminTest(opts: {
         assignmentReason = `round_robin: ไม่มี admin เดิม → จ่ายคิว (test:${opts.source})`;
       }
     }
-  } else if (!assignmentReason) {
-    assignmentReason = "existing_assignment: มี admin ดูแลอยู่แล้ว (test)";
   }
 
   // เขียนลง test_status_conversation (ไม่ใช่ status_conversation จริง)
@@ -241,9 +251,21 @@ export async function handoffToAdminTest(opts: {
     await testStatusConversationService.updateTestStatus(
       opts.conversationId,
       opts.source,
-      "handoff",
+      opts.assignedStatus || "handoff",
       assignedTo,
       assignmentReason
+    );
+    // ⚡ backlog — assign สำเร็จ → clear pending marker (กรณีเคยค้าง)
+    if (meta?.pending_assignment) {
+      await testStatusConversationService.setTestPendingAssignment(opts.conversationId, opts.source, false);
+    }
+  } else {
+    // ⚡ backlog — หา admin ไม่ได้ → mark pending_assignment กันงานค้างหาย
+    await testStatusConversationService.setTestPendingAssignment(
+      opts.conversationId,
+      opts.source,
+      true,
+      "no_available_admin"
     );
   }
 

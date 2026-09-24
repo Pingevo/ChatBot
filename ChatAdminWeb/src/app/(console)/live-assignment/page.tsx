@@ -96,10 +96,10 @@ type ChatFilter = "me" | "all" | string;
 
 // แปลง LiveAssignmentDoc → Conversation (เพื่อส่งเข้า ChatList/TicketChatPanel)
 function liveDocToConversation(doc: LiveAssignmentDoc): Conversation {
+  // current state มาจาก state fields เท่านั้น — final_status คือ replay verdict (แสดงแยกเป็น replay_verdict)
   const status =
     doc.mock_status === "closed" ? "closed"
-    : doc.final_status === "handed_off" || doc.final_status === "no_agent" ? "handoff"
-    : doc.final_status === "admin_replied" ? "open"
+    : doc.assigned_to || doc.stopped_at_handoff ? "handoff"
     : "bot";
 
   // หา last message จาก qa
@@ -122,6 +122,7 @@ function liveDocToConversation(doc: LiveAssignmentDoc): Conversation {
     unread: 0,
     assigned_to: doc.assigned_to || undefined,
     assigned_to_name: undefined,
+    replay_verdict: doc.final_status || undefined,
   };
 }
 
@@ -236,7 +237,7 @@ export default function LiveAssignmentPage() {
   const loadList = useCallback(async () => {
     setLoading(true);
     try {
-      const params: Record<string, string> = { list: "1", limit: "200", include_count: "true" };
+      const params: Record<string, string> = { list: "1", limit: "200", include_count: "true", assigned_to: chatFilter };
       if (batchPlatform !== "all") params.platform = batchPlatform;
       const r = await api().get<{ conversations: LiveAssignmentDoc[]; total: number; has_more?: boolean; cursor?: string | null }>("/live-assignment", { params });
       setDocs(r.data.conversations || []);
@@ -249,7 +250,7 @@ export default function LiveAssignmentPage() {
     } finally {
       setLoading(false);
     }
-  }, [batchPlatform]);
+  }, [batchPlatform, chatFilter]);
 
   useEffect(() => {
     loadList();
@@ -260,7 +261,7 @@ export default function LiveAssignmentPage() {
     if (!cursor || !hasMore || loadingMore) return;
     setLoadingMore(true);
     try {
-      const params: Record<string, string> = { list: "1", limit: "200", cursor };
+      const params: Record<string, string> = { list: "1", limit: "200", cursor, assigned_to: chatFilter };
       if (batchPlatform !== "all") params.platform = batchPlatform;
       const r = await api().get<{ conversations: LiveAssignmentDoc[]; has_more?: boolean; cursor?: string | null }>("/live-assignment", { params });
       const newDocs = r.data.conversations || [];
@@ -278,13 +279,13 @@ export default function LiveAssignmentPage() {
     } finally {
       setLoadingMore(false);
     }
-  }, [cursor, hasMore, loadingMore, docs, tailDocs, batchPlatform]);
+  }, [cursor, hasMore, loadingMore, docs, tailDocs, batchPlatform, chatFilter]);
 
   // ── Poll list (head only — ไม่กระทบ tail) ──
   usePolling(
     useCallback(async () => {
       try {
-        const params: Record<string, string> = { list: "1", limit: "200", include_count: "true" };
+        const params: Record<string, string> = { list: "1", limit: "200", include_count: "true", assigned_to: chatFilter };
         if (batchPlatform !== "all") params.platform = batchPlatform;
         const r = await api().get<{ conversations: LiveAssignmentDoc[]; total: number; has_more?: boolean; cursor?: string | null }>("/live-assignment", { params });
         setDocs(r.data.conversations || []);
@@ -293,7 +294,7 @@ export default function LiveAssignmentPage() {
       } catch {
         // ignore
       }
-    }, [batchPlatform]),
+    }, [batchPlatform, chatFilter]),
     5000,
     { enabled: !batchRunning }
   );

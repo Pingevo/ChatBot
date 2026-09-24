@@ -554,7 +554,7 @@ export default function ShopSettingsPage() {
                     {/* Delete */}
                     <button
                       onClick={() => handleDelete(row)}
-                      className="text-text-muted hover:text-error shrink-0 p-1.5 rounded hover:bg-base"
+                      className="text-text-muted hover:text-error shrink-0 p-1.5 rounded hover:bg-surface"
                       title="ลบ"
                       aria-label="ลบ"
                     >
@@ -795,7 +795,7 @@ export default function ShopSettingsPage() {
                     onClick={() => setNewEnabled(!newEnabled)}
                     title={newEnabled ? "ปิดใช้งาน" : "เปิดใช้งาน"}
                     aria-label={newEnabled ? "ปิดใช้งาน" : "เปิดใช้งาน"}
-                    className="p-1.5 rounded hover:bg-base text-text-subtle hover:text-text"
+                    className="p-1.5 rounded hover:bg-surface text-text-subtle hover:text-text"
                   >
                     <Power size={14} />
                   </button>

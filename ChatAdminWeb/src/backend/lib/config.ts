@@ -96,6 +96,9 @@ export const serverConfig = {
     testChatSessions: required("ADMIN_MONGO_COLLECTION_TEST_CHAT_SESSIONS", "test_chat_sessions"),
     // ⚡ Phase 3B-1 — chat annotations (markup dot + note สำหรับ test-assignment + shadow-bot)
     chatAnnotations: required("ADMIN_MONGO_COLLECTION_CHAT_ANNOTATIONS", "chat_annotations"),
+    // ⚡ botworker parallel sandbox — ข้อความแอดมิน + event log ของหน้า /botworker (แยกจากของจริง)
+    botworkerMessages: required("ADMIN_MONGO_COLLECTION_BOTWORKER_MESSAGES", "botworker_messages"),
+    botworkerEvents: required("ADMIN_MONGO_COLLECTION_BOTWORKER_EVENTS", "botworker_events"),
   },
   jwtSecret: requiredStrict("ADMIN_JWT_SECRET"),
   jwtAlgo: "HS256" as const,

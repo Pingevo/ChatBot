@@ -123,6 +123,7 @@ export interface Conversation {
   unread: number;
   assigned_to?: string; // admin id
   assigned_to_name?: string; // admin display name (lookup)
+  replay_verdict?: string; // live-assignment replay result — display only, not current state
 
   // Ticket metadata — embedded in every conversation (Zaapi-style)
   // A conversation becomes a ticket the moment these are filled in

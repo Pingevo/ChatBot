@@ -226,7 +226,7 @@ export default function PersonaPage() {
             <div className="relative">
               <button
                 onClick={() => setShowPlatformDd(!showPlatformDd)}
-                className="h-8 px-2.5 rounded-lg border border-border bg-surface text-xs text-text flex items-center gap-1.5 hover:bg-base"
+                className="h-8 px-2.5 rounded-lg border border-border bg-surface text-xs text-text flex items-center gap-1.5 hover:bg-surface"
               >
                 <Globe size={12} className="text-text-subtle" />
                 {filterPlatform === "all" ? "ทุกแพลตฟอร์ม" : platformLabel(filterPlatform)}
@@ -317,7 +317,7 @@ export default function PersonaPage() {
                       onClick={() => openEdit(row)}
                       title="แก้ไข"
                       aria-label="แก้ไข"
-                      className="p-1.5 rounded hover:bg-base text-text-subtle hover:text-text"
+                      className="p-1.5 rounded hover:bg-surface text-text-subtle hover:text-text"
                     >
                       <Pencil size={14} />
                     </button>
@@ -325,7 +325,7 @@ export default function PersonaPage() {
                       onClick={() => handleDelete(row)}
                       title="ลบ"
                       aria-label="ลบ"
-                      className="p-1.5 rounded hover:bg-base text-vibrant-coral/70 hover:text-vibrant-coral"
+                      className="p-1.5 rounded hover:bg-surface text-vibrant-coral/70 hover:text-vibrant-coral"
                     >
                       <Trash2 size={14} />
                     </button>
@@ -344,7 +344,7 @@ export default function PersonaPage() {
               <h2 className="font-semibold text-text">
                 {editing ? "แก้ไข persona" : "เพิ่ม persona"}
               </h2>
-              <button onClick={() => setShowForm(false)} title="ปิด" aria-label="ปิด" className="p-1 rounded hover:bg-base text-text-subtle">
+              <button onClick={() => setShowForm(false)} title="ปิด" aria-label="ปิด" className="p-1 rounded hover:bg-surface text-text-subtle">
                 <X size={18} />
               </button>
             </div>
@@ -357,7 +357,7 @@ export default function PersonaPage() {
                     <label className="block text-sm font-medium text-text mb-1.5">ร้านค้า</label>
                     <button
                       onClick={() => setShowShopDd(!showShopDd)}
-                      className="w-full h-10 px-3 rounded-lg border border-border bg-surface text-sm text-text flex items-center justify-between hover:bg-base"
+                      className="w-full h-10 px-3 rounded-lg border border-border bg-surface text-sm text-text flex items-center justify-between hover:bg-surface"
                     >
                       <span className={form.shopname ? "text-text" : "text-text-subtle"}>
                         {form.shopname || "เลือกร้าน..."}
@@ -376,7 +376,7 @@ export default function PersonaPage() {
                                 setForm({ ...form, shopname: s.shopname, platform: s.platform });
                                 setShowShopDd(false);
                               }}
-                              className="w-full text-left px-3 py-2 text-sm hover:bg-base flex items-center gap-2"
+                              className="w-full text-left px-3 py-2 text-sm hover:bg-surface flex items-center gap-2"
                             >
                               <Store size={12} className="text-text-subtle" />
                               <span className="flex-1 truncate">{s.shopname}</span>
@@ -391,7 +391,7 @@ export default function PersonaPage() {
                   {/* Platform (disabled — ใช้จากร้านที่เลือก) */}
                   <div>
                     <label className="block text-sm font-medium text-text mb-1.5">แพลตฟอร์ม</label>
-                    <div className="h-10 px-3 rounded-lg border border-border bg-base text-sm text-text-subtle flex items-center gap-2">
+                    <div className="h-10 px-3 rounded-lg border border-border bg-surface text-sm text-text-subtle flex items-center gap-2">
                       <PlatformIcon platform={form.platform} size={14} />
                       {platformLabel(form.platform)}
                     </div>
@@ -400,7 +400,7 @@ export default function PersonaPage() {
               )}
 
               {editing && (
-                <div className="rounded-lg bg-base p-3 text-sm">
+                <div className="rounded-lg bg-surface p-3 text-sm">
                   <div className="flex items-center gap-2 text-text-subtle">
                     <Store size={14} />
                     <span>{editing.shopname}</span>

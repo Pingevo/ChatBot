@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(_REPO_ROOT / ".env")
 
-from . import llm, product_store, knowledge_base, persona, conversation_products, test_chat_api, device_compat
+from . import llm, product_store, knowledge_base, persona, conversation_products, test_chat_api, device_compat, route_context as _rc
 from .responses import _routing, _send_handoff
 
 app = FastAPI(
@@ -156,6 +156,9 @@ class ChatRequest(BaseModel):
     platform: str | None = Field(None, description="platform ของแชท (shopee/tiktok/lazada) — สำหรับ handoff")
     # ⚡ simulate mode — จำลองการจ่ายงานโดยไม่กระทบ conversations จริง (ใช้ใน test chat)
     simulate_assignment: bool = Field(False, description="ถ้า true → handoff จะเก็บลง test_chat_sessions ไม่ใช่ conversations")
+    # ⚡ botworker parallel — ระบุ test source (เช่น "botworker")
+    #    ส่งคู่กับ simulate_assignment → handoff เขียน test_status_conversation[source] แทนของจริง
+    test_source: str | None = Field(None, description="test sandbox source (botworker/test_chat/...) — handoff เขียน test_status_conversation")
     # ⚡ Phase 2A — state-driven handoff: สถานะ ticket จาก DB (open|closed|handoff|...)
     #    ถ้า "closed" → บอทตอบปกติ (ข้าม post-handoff lock)
     #    ถ้า "handoff"/"open" + มี handoff marker → ล็อค (ยกเว้น exceptions ใน KB)
@@ -415,19 +418,13 @@ _NEW_TOPIC_KWS = ("สวัสดี", "หวัดดี", "hi", "hello", "�
 
 # คำถาม "ชุดสินค้า" — เปรียบเทียบ/superlative อ้างหลายชิ้น ไม่ใช่ anchor เดี่ยว
 #   ใช้ร่วมกัน: ITEM-TAG shortcut bypass (~895) + FOLLOWUP-COMP trigger (~1244)
-_COMPARISON_FOLLOWUP_KW = ("ต่างกัน", "ต่างยังไง", "ต่างไหม", "เปรียบเทียบ", "เทียบ", "เทียบกัน",
-                           "แนะนำตัวไหนดี", "ตัวไหนดีกว่า", "อันไหนดีกว่า", "ซื้อตัวไหนดี",
-                           "เลือกตัวไหนดี", "ตัวไหนน่าซื้อ", "อันไหนน่าซื้อ",
-                           # คำเปรียบเทียบโดยนัย — "อันไหนใหม่กว่า/ถูกกว่า/ล่าสุด"
-                           "ใหม่กว่า", "ถูกกว่า", "ล่าสุด")
-_SUPERLATIVE_KW = ("สุด", "ที่สุด", "แรงสุด", "ไวสุด", "เร็วสุด", "มากสุด", "น้อยสุด",
-                   "แรงที่สุด", "ไวที่สุด", "เร็วที่สุด", "มากที่สุด", "น้อยที่สุด",
-                   "เบาสุด", "จุมากสุด", "คุ้มสุด", "คุ้มที่สุด",
-                   "กว่านี้", "เร็วกว่า", "แรงกว่า", "ไวกว่า", "ดีกว่า", "มากกว่า",
-                   "ไวๆ", "เร็วๆ", "แรงๆ", "ชาร์จไว", "ชาร์จเร็ว")
+# ⚡ generic question-shape constants ย้ายไป route_context.py (Task 4A — owner เดียว
+#    ของ route facts; alias ไว้เพื่อไม่เปลี่ยน usage sites/flow ในไฟล์นี้)
+_COMPARISON_FOLLOWUP_KW = _rc._COMPARISON_FOLLOWUP_KW
+_SUPERLATIVE_KW = _rc._SUPERLATIVE_KW
 # คำอ้าง "ชิ้นเดียว" (deictic) — ถ้ามี = ถามเกี่ยวกับ anchor ไม่ใช่เทียบชุด
 #   กัน false positive ของ _SUPERLATIVE_KW เช่น "ตัวนี้ชาร์จเร็วไหม" (ไม่ใช่ set question)
-_SINGLE_ITEM_REF_KW = ("ตัวนี้", "รุ่นนี้", "อันนี้", "ชิ้นนี้", "สินค้านี้", "เรือนนี้")
+_SINGLE_ITEM_REF_KW = _rc._SINGLE_ITEM_REF_KW
 
 # --- general_qtype bypass guards (2026-09-18 — test_200 #143/#199) ---
 # intent classifier อาจส่ง general_qtype ผิดบริบท → early return ตอบ policy/categories
@@ -1725,6 +1722,101 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     image_desc=_image_desc_out,
                 )
 
+        # ⚡ Task 4B — resolve conversation active ครั้งเดียวก่อน KB/candidate fetch
+        #   (ผล reuse ที่ CONV-ACTIVE ด้านล่าง — resolver ถูกเรียกแค่จุดนี้จุดเดียว)
+        _conv_model_kw: list[str] = []
+        _conv_active_card = None
+        if req.conversation_id:
+            try:
+                _conv_model_kw = knowledge_base.extract_model_keywords(req.message)
+                # ⚡ Phase 3 — กรอง target device ออกจาก model keywords
+                _conv_model_kw = [kw for kw in _conv_model_kw
+                                  if not knowledge_base.is_target_device_kw(kw)]
+                _conv_active_card = conversation_products.resolve_active_by_message(
+                    conversation_id=req.conversation_id,
+                    message=req.message,
+                    model_keywords=_conv_model_kw,
+                )
+            except Exception as _e:
+                print(f"[PROFILE] conv-active resolve error: {_e}", file=sys.stderr)
+                _conv_active_card = None
+
+        # ⚡ Task 4B — RetrievalProfile เดียวต่อ request (observe-only)
+        #   รวม anchor ที่ flow เดิม resolve ไว้แล้ว: tagged item / hybrid image /
+        #   conv-active / compare pair — ไม่เปลี่ยน products/ranking/answer
+        _resolved_anchor_cards: list[dict] = []
+        for _ac in (anchor_card, _hybrid_anchor_card, _conv_active_card,
+                    _anchor_compare_ctx.get("current"),
+                    _anchor_compare_ctx.get("previous")):
+            if _ac and _ac not in _resolved_anchor_cards:
+                _resolved_anchor_cards.append(_ac)
+        try:
+            _retrieval_profile = _rc.build_retrieval_profile(
+                req.message,
+                history=history,
+                intent_result=_intent_result,
+                shop=req.shop,
+                platform=req.platform or "shopee",
+                anchor_cards=_resolved_anchor_cards,
+            )
+        except Exception as _e:
+            print(f"[PROFILE] build error: {_e}", file=sys.stderr)
+            _retrieval_profile = None
+        if _retrieval_profile is not None:
+            _steps.append({
+                "name": "RetrievalProfile",
+                "input": {"message": req.message,
+                          "anchor_item_ids": list(_retrieval_profile.anchor_item_ids)},
+                "output": _rc.profile_debug(_retrieval_profile, source="app_chat"),
+            })
+
+        # ⚡ Task 5B3-A — grouped-retrieval shadow (observe-only, flag-gated)
+        #   รัน pipeline ใหม่ข้างๆ เพื่อ log เทียบ — ไม่แตะ products/LLM/response
+        #   flag: runtime_config (DB system_configs) → env fallback; error → ปิด
+        _shadow_flag = False
+        try:
+            from . import runtime_config as _rcfg
+            _shadow_flag = _rcfg.grouped_retrieval_shadow_enabled()
+        except Exception:
+            _shadow_flag = False
+        if _shadow_flag and _retrieval_profile is not None:
+            try:
+                from . import retrieval_shadow as _rshadow
+                _steps.append({
+                    "name": "GroupedRetrievalShadow",
+                    "input": {"message_len": len(req.message or ""),
+                              "shop": req.shop,
+                              "platform": req.platform or "shopee",
+                              "shadow_enabled": True},
+                    "output": _rshadow.run_grouped_retrieval_shadow(
+                        _retrieval_profile, message=req.message,
+                        shop=req.shop, platform=req.platform or "shopee"),
+                })
+            except Exception as _e:
+                print(f"[SHADOW] grouped-retrieval error: {_e}",
+                      file=sys.stderr)
+
+        # ⚡ Task 5B3-C — grouped-retrieval selection (flag-gated)
+        #   compute ครั้งเดียว — merge เข้า products ที่ llm.answer callsites
+        #   error/empty → _grouped_sel=None → products เดิมต่อ (fallback)
+        _grouped_sel = None
+        _sel_flag = False
+        try:
+            from . import runtime_config as _rcfg
+            _sel_flag = _rcfg.grouped_retrieval_selection_enabled()
+        except Exception:
+            _sel_flag = False
+        if _sel_flag and _retrieval_profile is not None:
+            try:
+                from . import retrieval_runtime as _rr
+                _grouped_sel = _rr.run_grouped_selection(
+                    _retrieval_profile, message=req.message, shop=req.shop,
+                    platform=req.platform or "shopee")
+            except Exception as _e:
+                print(f"[SELECTION] grouped-retrieval error: {_e}",
+                      file=sys.stderr)
+                _grouped_sel = None
+
         # ===== ขั้นที่ 1: เช็ค Knowledge Base ก่อน =====
         # ถ้าเป็น follow-up (เช่น "เคลมยังไง", "รับประกัน") ให้เอา model จาก history มาค้น KB ด้วย
         kb_query = req.message
@@ -1813,7 +1905,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             )
             print(f"[TIMING] KB lookup SKIPPED ({_skip_reason} follow-up)", file=sys.stderr)
         else:
-            kb_result = knowledge_base.lookup_kb(kb_query)
+            kb_result = knowledge_base.lookup_kb(kb_query, retrieval_profile=_retrieval_profile)
             print(f"[TIMING] KB lookup: {_time.time()-_t0:.2f}s  query={kb_query[:60]!r}", file=sys.stderr)
         if kb_result and kb_result.get("found"):
             kb_context = kb_result.get("context", "")
@@ -1931,6 +2023,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         shop_filter=req.shop,
                         limit=_llm_ctx_limit,
                         desc_message=_desc_msg,
+                        retrieval_profile=_retrieval_profile,
                     )
                 print(f"[TIMING] Mongo (KB merge): {_time.time()-_t1:.2f}s  query={mongo_query[:60]!r}  products={len(mongo_products)}", file=sys.stderr)
 
@@ -1943,6 +2036,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         shop_filter=req.shop,
                         limit=_llm_ctx_limit,
                         desc_message=_desc_msg,
+                        retrieval_profile=_retrieval_profile,
                     )
                     print(f"[TIMING] Mongo (original query): {_time.time()-_t2:.2f}s  query={req.message[:60]!r}  products={len(extra_products)}", file=sys.stderr)
                     # ต่อท้าย products ที่ไม่ซ้ำ
@@ -2152,10 +2246,25 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         hybrid_anchor_card=_hybrid_anchor_card,
                         llm_ctx_limit=_llm_ctx_limit,
                         resolve_subtype_fn=_resolve_charger_subtype,
+                        retrieval_profile=_retrieval_profile,
                     )
                     if _kb_device_products:
                         merged_products = merged_products + _kb_device_products
                         print(f"[DEVICE-SPEC-LOOKUP-KB] merge {len(_kb_device_products)} สินค้าจาก re-query เข้า merged_products (now {len(merged_products)})", file=sys.stderr)
+
+                    # ⚡ Task 5B3-C — merge selected context (flag on เท่านั้น)
+                    if _grouped_sel:
+                        merged_products = _rr.merge_selected_products(
+                            _grouped_sel["selected_cards"], merged_products,
+                            _llm_ctx_limit)
+                        if _grouped_sel.get("extra_context"):
+                            _hybrid_extra_ctx = (
+                                _hybrid_extra_ctx + "\n\n"
+                                + _grouped_sel["extra_context"]).strip()
+                        _steps.append({
+                            "name": "GroupedRetrievalSelection",
+                            "input": {"path": "kb"},
+                            "output": _grouped_sel["summary"]})
 
                     try:
                         answer, usage_info = llm.answer(
@@ -2268,6 +2377,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                                 do_model_code_regex=False,  # KB branch ไม่ใช้ model code regex
                                 do_dedup_rerank=False,  # KB branch ไม่ dedup/rerank (ใช้ products เดิม)
                                 req_limit=req.limit,
+                                retrieval_profile=_retrieval_profile,
                             )
                             if _ws_r.get("search_used") and _ws_r.get("answer"):
                                 # merge steps จาก _web_search_reanswer เข้า _steps
@@ -2546,15 +2656,9 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         #   แต่เช็คเพิ่ม: ถ้า _cur_charger_sub มีค่าและต่างจาก subtype ของ active_card → เปลี่ยนหมวด ไป fetch ใหม่
         if req.conversation_id and not _is_conv_active:
             try:
-                from . import conversation_products as _cp
-                _cur_model_kw = knowledge_base.extract_model_keywords(req.message)
-                # ⚡ Phase 3 — กรอง target device ออกจาก _cur_model_kw
-                _cur_model_kw = [kw for kw in _cur_model_kw if not knowledge_base.is_target_device_kw(kw)]
-                _active_card = _cp.resolve_active_by_message(
-                    conversation_id=req.conversation_id,
-                    message=req.message,
-                    model_keywords=_cur_model_kw,
-                )
+                # ⚡ Task 4B — resolve ครั้งเดียวก่อน KB แล้ว (profile build ด้านบน)
+                _cur_model_kw = list(_conv_model_kw)
+                _active_card = _conv_active_card
                 if _active_card and _active_card.get("item_id"):
                     # ⚡ Phase 3 — เช็ค subtype ของ active_card ว่าตรงกับ _cur_charger_sub ไหม
                     #   ถ้าลูกค้าเปลี่ยนจาก cable → adapter จริงๆ → ไม่ใช้ active (ไป fetch ใหม่)
@@ -3631,6 +3735,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     is_compat_check=False,
                     skip_charger_subtype=True,
                     product_types_override=set(),
+                    retrieval_profile=_retrieval_profile,
                 )
             else:
                 # ⚡ ใช้ charger_subtype เป็น override เพื่อกัน retrieval_message ปนเปื้อน
@@ -3682,6 +3787,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                                 shop_filter=req.shop,
                                 limit=5,
                                 desc_message=desc_message,
+                                retrieval_profile=_retrieval_profile,
                             )
                             for _p in _sub:
                                 _iid = str(_p.get("item_id") or _p.get("id") or "")
@@ -3706,6 +3812,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         skip_charger_subtype=_skip_sub,
                         charger_subtype_override=_intent_sub,
                         # ⚡ Phase 3 — RAG ไม่กรอง status/stock (LLM prompt กรองตอนแนะนำขาย)
+                        retrieval_profile=_retrieval_profile,
                     )
             # ⚡ ปิด block if not _ref_regex_products (ข้าม fetch ถ้ามี active product แล้ว)
         print(f"[TIMING] fetch_products: {_time.time()-_t1:.2f}s  (retrieval={retrieval_message!r})  products={len(products)}", file=sys.stderr)
@@ -3939,6 +4046,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     message="charger charging adapter cable",
                     shop_filter=req.shop,
                     limit=_llm_ctx_limit,
+                    retrieval_profile=_retrieval_profile,
                 )
                 # กรอง fallback ให้เหลือเฉพาะที่เกี่ยวข้อง:
                 # - ถ้าถาม adapter → เอา set + adapter (ไม่เอา cable เดี่ยว)
@@ -3987,6 +4095,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     message="สินค้า แนะนำ มาใหม่ โปรด",  # คำค้นกว้างๆ เพื่อดึงสินค้าทั่วไปของร้าน
                     shop_filter=req.shop,
                     limit=5,
+                    retrieval_profile=_retrieval_profile,
                 )
                 if alt_products:
                     products = alt_products
@@ -4151,7 +4260,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     missing_tokens = [t for t in model_tokens if t.lower() not in seen_tokens]
                     if missing_tokens:
                         _t_kb = _time.time()
-                        kb_comp = knowledge_base.lookup_kb(" ".join(missing_tokens))
+                        kb_comp = knowledge_base.lookup_kb(" ".join(missing_tokens),
+                                                           retrieval_profile=_retrieval_profile)
                         if kb_comp and kb_comp.get("found"):
                             for kd in kb_comp.get("kb_docs", []):
                                 model = (kd.get("model") or "").lower()
@@ -4181,6 +4291,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     message=alt_msg,
                     shop_filter=req.shop,
                     limit=5,
+                    retrieval_profile=_retrieval_profile,
                 )
                 # แยกกลุ่ม: UNLIST (ตอบ warranty) + NORMAL (แนะนำทางเลือก)
                 unlist_products = [p for p in products if p.get("status") != "NORMAL"]
@@ -4213,19 +4324,17 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         #   แก้: mark _available_for_sale ในทุก product (context note inject หลัง _apply_product_tiers)
         _pending_context_note = ""
         if products:
+            # ⚡ Task 2 — availability owner เดียว: resolver บน card (status/total_stock)
+            #   cards จาก product_store/units มี catalog_status อยู่แล้ว — เติมให้ card
+            #   ที่มาจาก path อื่น (KB-minimal/timeline) ด้วย setdefault
             for _p in products:
-                _p["_available_for_sale"] = (
-                    _p.get("status") == "NORMAL"
-                    and not _p.get("sold_out", False)
-                    and (_p.get("total_stock", 0) or 0) > 0
-                )
-            _has_unlist = any(not _p.get("_available_for_sale") and _p.get("status") != "NORMAL" for _p in products)
-            _has_sold_out = any(
-                not _p.get("_available_for_sale")
-                and _p.get("status") == "NORMAL"
-                and (_p.get("sold_out", False) or (_p.get("total_stock", 0) or 0) == 0)
-                for _p in products
-            )
+                _av = product_store.resolve_availability(_p)
+                _p["_available_for_sale"] = _av["available_for_sale"]
+                _p.setdefault("catalog_status", _av["catalog_status"])
+            _has_unlist = any(_p.get("catalog_status") in ("unlisted", "discontinued")
+                              for _p in products)
+            _has_sold_out = any(_p.get("catalog_status") == "out_of_stock"
+                                for _p in products)
             _avail_count = sum(1 for _p in products if _p.get("_available_for_sale"))
             print(f"[AVAIL-FOR-SALE] total={len(products)} available={_avail_count} unlist={_has_unlist} sold_out={_has_sold_out}", file=sys.stderr)
 
@@ -4460,6 +4569,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             hybrid_anchor_card=_hybrid_anchor_card,
             llm_ctx_limit=_llm_ctx_limit,
             resolve_subtype_fn=_resolve_charger_subtype,
+            retrieval_profile=_retrieval_profile,
         )
         if _device_additional:
             products.extend(_device_additional)
@@ -4467,7 +4577,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             _combined_extra = (_combined_extra + _device_spec_extra).strip()
         # ⚡ QA-KB — คำแนะนำจาก kb_qa (trigger kw เท่านั้น; model/brand scoped ใน search_qa)
         _qa_ctx = knowledge_base.qa_context(
-            req.message, conversation_id=req.conversation_id)
+            req.message, conversation_id=req.conversation_id,
+            retrieval_profile=_retrieval_profile)
         if _qa_ctx:
             _combined_extra = (_combined_extra + "\n\n" + _qa_ctx).strip()
         # ⚡ CODE-level compat filter — กรองสินค้าที่ connector ไม่ตรงกับอุปกรณ์ออก
@@ -4519,6 +4630,16 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         if products and _pending_context_note:
             _add_context_note(products, _pending_context_note)
             print(f"[DEBUG-3D] injected context_note len={len(_pending_context_note)} products[0]_has_note=True", file=sys.stderr)
+        # ⚡ Task 5B3-C — merge selected context (flag on เท่านั้น)
+        if _grouped_sel:
+            products = _rr.merge_selected_products(
+                _grouped_sel["selected_cards"], products, _llm_ctx_limit)
+            if _grouped_sel.get("extra_context"):
+                _combined_extra = (_combined_extra + "\n\n"
+                                   + _grouped_sel["extra_context"]).strip()
+            _steps.append({"name": "GroupedRetrievalSelection",
+                           "input": {"path": "main"},
+                           "output": _grouped_sel["summary"]})
         try:
             answer, usage_info = llm.answer(
                 message=desc_message,
@@ -4648,6 +4769,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     do_model_code_regex=True,  # product_store branch ใช้ model code regex
                     do_dedup_rerank=True,  # product_store branch dedup + rerank
                     req_limit=req.limit,
+                    retrieval_profile=_retrieval_profile,
                 )
 
                 if _ws_r.get("search_used") and _ws_r.get("answer"):

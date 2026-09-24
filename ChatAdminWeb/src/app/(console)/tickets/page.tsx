@@ -239,13 +239,19 @@ export default function TicketsPage() {
     }
   }, [selectedId, conflictPopup, me, sendInternal]);
 
-  const handleHandoff = useCallback(() => {
-    if (!selectedId) return;
-    chatService.handoff(selectedId).catch((e) => catchError(e, "ส่งต่อแชทให้แอดมินไม่สำเร็จ"));
-    setConversations((prev) =>
-      prev.map((c) => (c.id === selectedId ? { ...c, status: "handoff" } : c))
-    );
-  }, [selectedId]);
+  // ⚡ "รับเรื่อง" = self-assign ให้คนที่กด (เดิมเรียก handoff pool → ไม่เคย assign ให้คนกด)
+  const handleHandoff = useCallback(async () => {
+    if (!selectedId || !me) return;
+    try {
+      await chatService.assign(selectedId, me);
+      setConversations((prev) =>
+        prev.map((c) => (c.id === selectedId ? { ...c, status: "handoff", assigned_to: me } : c))
+      );
+      invalidateSharedConversations();
+    } catch (e) {
+      catchError(e, "รับเรื่องไม่สำเร็จ — อาจมีแอดมินคนอื่นรับไปแล้ว");
+    }
+  }, [selectedId, me]);
 
   // Phase 7.9 — เปิด/ปิดสถานะรับแชทของตัวเอง
   const handleToggleAccepting = useCallback(async () => {

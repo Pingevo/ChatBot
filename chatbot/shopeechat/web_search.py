@@ -22,7 +22,10 @@ import sys
 import time
 import urllib.request
 import urllib.error
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .route_context import RetrievalProfile
 
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -705,6 +708,7 @@ def reanswer(
     do_model_code_regex: bool = True,
     do_dedup_rerank: bool = True,
     req_limit: int = 10,
+    retrieval_profile: RetrievalProfile | None = None,
 ) -> dict:
     """Web search → re-query DB → LLM2 re-answer.
 
@@ -790,6 +794,7 @@ def reanswer(
                 limit=llm_ctx_limit,
                 desc_message=llm_message,
                 product_types_override=_pto,
+                retrieval_profile=retrieval_profile,
             )
             print(f"[WEB-SEARCH-REANSWER] DB re-query: {_search_query!r} → {len(_new_products)} products", file=sys.stderr)
         except Exception as _e:
@@ -812,6 +817,7 @@ def reanswer(
                             shop_filter=shop,
                             limit=3,
                             desc_message=llm_message,
+                            retrieval_profile=retrieval_profile,
                         )
                         _existing_ids = {p.get("item_id") or p.get("name") for p in _new_products}
                         for _cp in _code_products:
@@ -825,7 +831,8 @@ def reanswer(
         # KB lookup — optional
         if do_kb_lookup:
             try:
-                _ws_kb_r = knowledge_base.lookup_kb(_search_query)
+                _ws_kb_r = knowledge_base.lookup_kb(_search_query,
+                                                    retrieval_profile=retrieval_profile)
                 if _ws_kb_r and _ws_kb_r.get("found"):
                     _ws_kb_context = _ws_kb_r.get("context", "") or ""
                     for _kd in _ws_kb_r.get("kb_docs", [])[:3]:

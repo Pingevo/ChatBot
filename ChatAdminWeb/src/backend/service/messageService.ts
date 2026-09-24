@@ -334,12 +334,8 @@ export async function getHistoryForBot(opts: {
     .toArray();
 
   // ⚡ E1 — group: สร้าง map ของ bot replies ตาม inbound_message_id เพื่อ pair กับ user message
-  const botReplyByInboundId = new Map<string, typeof botDocs[0]>();
-  for (const d of botDocs) {
-    if (d.inbound_message_id && !botReplyByInboundId.has(d.inbound_message_id)) {
-      botReplyByInboundId.set(d.inbound_message_id, d);
-    }
-  }
+  //   (indexBotRepliesByInbound ตัด suffix __wf<N> ของ workflow delivered + รวมหลาย bubble)
+  const botReplyByInboundId = indexBotRepliesByInbound(botDocs);
 
   // merge user + bot replies → เรียงตามเวลา (เก่า → ใหม่)
   type HistoryItem = { role: "user" | "model"; text: string; images?: string[]; image_desc?: string; _ts: Date };
@@ -366,14 +362,15 @@ export async function getHistoryForBot(opts: {
       merged.push({
         role: "model" as const,
         _ts: botReply.created_at,
-        text: botReply.bot_reply_text,
+        text: botReply.text,
       });
     }
   }
 
   // ⚡ E1 — เพิ่ม bot replies ที่ไม่มี user message คู่ (เช่น workflow trigger ที่ bot ส่งเอง)
+  //   เทียบ base id — workflow delivered ใช้ "<id>__wf<N>" จะ pair แล้วไม่ต้องมาเป็น orphan ซ้ำ
   for (const d of botDocs) {
-    if (!d.inbound_message_id || !userDocs.some((u) => u.message_id === d.inbound_message_id)) {
+    if (!d.inbound_message_id || !userDocs.some((u) => u.message_id === baseInboundId(d.inbound_message_id))) {
       merged.push({
         role: "model" as const,
         _ts: d.created_at,
@@ -388,6 +385,41 @@ export async function getHistoryForBot(opts: {
 
   // ลบ field _ts ออกก่อน return
   return trimmed.map(({ _ts, ...rest }) => rest);
+}
+
+// ⚡ workflow delivered replies ใช้ inbound_message_id = "<id>__wf<N>" (หลาย bubble ต่อ inbound — เลี่ยง unique index)
+//   index ด้วย base id เสมอ — ถ้ามีหลาย bubble รวม text ตามลำดับ N เป็น reply เดียว
+const WF_INBOUND_SUFFIX = /__wf(\d+)$/;
+
+export interface IndexedBotReply {
+  text: string;       // รวมหลาย bubble ด้วย " ||| " (ตามลำดับ __wf<N>)
+  created_at: Date;   // เวลาของ bubble แรก — ใช้ sort ใน getHistoryForBot
+}
+
+export function indexBotRepliesByInbound<T extends { inbound_message_id?: string; bot_reply_text: string; created_at: Date }>(
+  botDocs: T[]
+): Map<string, IndexedBotReply> {
+  const grouped = new Map<string, { n: number; doc: T }[]>();
+  for (const d of botDocs) {
+    const raw = d.inbound_message_id || "";
+    const m = WF_INBOUND_SUFFIX.exec(raw);
+    const baseId = m ? raw.slice(0, m.index) : raw;
+    if (!baseId) continue;
+    const arr = grouped.get(baseId) || [];
+    arr.push({ n: m ? parseInt(m[1], 10) : -1, doc: d });
+    grouped.set(baseId, arr);
+  }
+  const out = new Map<string, IndexedBotReply>();
+  for (const [baseId, arr] of grouped) {
+    arr.sort((a, b) => a.n - b.n);
+    out.set(baseId, { text: arr.map((x) => x.doc.bot_reply_text).join(" ||| "), created_at: arr[0].doc.created_at });
+  }
+  return out;
+}
+
+/** base id ของ inbound_message_id (ตัด suffix __wf<N> ของ workflow delivered) */
+export function baseInboundId(inboundId: string | undefined): string {
+  return (inboundId || "").replace(WF_INBOUND_SUFFIX, "");
 }
 
 /**
@@ -413,6 +445,9 @@ export async function getGroupedHistoryForBot(opts: {
   conversationId: string;
   platform: Platform;
   maxTurns?: number;
+  // ⚡ botworker parallel — merge botworker_messages (แอดมินใน sandbox ตอบ) เข้า history
+  //   เป็น model turn ตามลำดับเวลา — ให้บอทเห็นว่าแอดมินใน parallel เคยตอบอะไรไปแล้ว
+  includeSandboxAdmin?: boolean;
 }): Promise<{ role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[]> {
   const maxTurns = opts.maxTurns || 10;
 
@@ -436,7 +471,9 @@ export async function getGroupedHistoryForBot(opts: {
     .limit(50)
     .toArray();
 
-  // 2. ดึง bot replies จาก shadow_replies (origin=worker/workflow)
+  // 2. ดึง bot replies จาก shadow_replies — เฉพาะ worker/workflow + mode=standalone
+  //    (กันปน shadowbot/replay/test source อื่น — plan Part A.5)
+  //    mode ไม่มี (legacy docs ก่อน Phase 2R) ยังรับ — origin filter คัด source อื่นออกแล้ว
   const srColl = await getCollection<{
     conversation_id: string;
     platform: Platform;
@@ -444,6 +481,7 @@ export async function getGroupedHistoryForBot(opts: {
     inbound_message_id: string;
     created_at: Date;
     origin?: string;
+    mode?: string;
     deleted_at?: Date;
   }>(COLLECTIONS.shadowReplies);
   const botDocs = await srColl
@@ -453,22 +491,41 @@ export async function getGroupedHistoryForBot(opts: {
       deleted_at: { $exists: false },
       bot_reply_text: { $exists: true, $ne: "" },
       origin: { $in: ["worker", "workflow"] },
+      $or: [{ mode: "standalone" }, { mode: { $exists: false } }],
     })
     .sort({ created_at: -1 })
     .limit(50)
     .toArray();
 
-  // 3. สร้าง map: inbound_message_id → bot reply
-  const botReplyByInboundId = new Map<string, typeof botDocs[0]>();
-  for (const d of botDocs) {
-    if (d.inbound_message_id && !botReplyByInboundId.has(d.inbound_message_id)) {
-      botReplyByInboundId.set(d.inbound_message_id, d);
-    }
+  // 3. สร้าง map: inbound_message_id (base) → bot reply (workflow __wf<N> รวมเป็น reply เดียว)
+  const botReplyByInboundId = indexBotRepliesByInbound(botDocs);
+
+  // 3.5 ⚡ botworker parallel — ดึง admin replies จาก botworker_messages (เฉพาะ sandbox)
+  let bwDocs: { message_id: string; text: string; created_at: Date }[] = [];
+  if (opts.includeSandboxAdmin) {
+    const bwColl = await getCollection<{
+      conversation_id: string;
+      platform: Platform;
+      role: string;
+      text: string;
+      message_id: string;
+      created_at: Date;
+    }>(COLLECTIONS.botworkerMessages);
+    bwDocs = await bwColl
+      .find({
+        conversation_id: opts.conversationId,
+        platform: opts.platform,
+        role: "admin",
+        text: { $exists: true, $ne: "" },
+      })
+      .sort({ created_at: -1 })
+      .limit(50)
+      .toArray();
   }
 
-  // 4. แยก user messages และ Zaapi replies
+  // 4. แยก user messages / Zaapi replies / botworker admin replies
   type SortedDoc = {
-    role: "user" | "zaapi";
+    role: "user" | "zaapi" | "admin_sandbox";
     text: string;
     message_id: string;
     ts: Date;
@@ -496,6 +553,15 @@ export async function getGroupedHistoryForBot(opts: {
       });
     }
   }
+  // ⚡ merge botworker admin replies เข้า stream เดียวกัน (เรียงเวลารวมกัน)
+  for (const d of bwDocs) {
+    sorted.push({
+      role: "admin_sandbox",
+      text: d.text,
+      message_id: d.message_id,
+      ts: d.created_at,
+    });
+  }
   // เรียงเก่า → ใหม่
   sorted.sort((a, b) => a.ts.getTime() - b.ts.getTime());
 
@@ -507,20 +573,27 @@ export async function getGroupedHistoryForBot(opts: {
     userMsgIds: string[];
     lastUserTs: Date;
     zaapiReply?: { text: string; ts: Date };
+    adminTexts: string[];  // ⚡ botworker admin replies (sandbox)
   };
   const turns: Turn[] = [];
   let currentTurn: Turn | null = null;
 
+  const newTurn = (ts: Date): Turn => ({
+    userTexts: [], userImages: [], imageDescs: [], userMsgIds: [],
+    lastUserTs: ts, adminTexts: [],
+  });
+  // pseudo-turn = orphan admin reply ไม่มี user คู่ (แอดมินตอบต่อเนื่องหลัง turn ปิดไปแล้ว)
+  const isOrphanAdminTurn = (t: Turn) => t.userTexts.length === 0 && t.adminTexts.length > 0;
+
   for (const doc of sorted) {
     if (doc.role === "user") {
+      // orphan admin turn ปิดก่อนเริ่ม user turn ใหม่
+      if (currentTurn && isOrphanAdminTurn(currentTurn)) {
+        turns.push(currentTurn);
+        currentTurn = null;
+      }
       if (!currentTurn) {
-        currentTurn = {
-          userTexts: [],
-          userImages: [],
-          imageDescs: [],
-          userMsgIds: [],
-          lastUserTs: doc.ts,
-        };
+        currentTurn = newTurn(doc.ts);
       }
       currentTurn.userTexts.push(doc.text);
       currentTurn.userMsgIds.push(doc.message_id);
@@ -535,10 +608,25 @@ export async function getGroupedHistoryForBot(opts: {
       if (doc.image_desc && !currentTurn.imageDescs.includes(doc.image_desc)) {
         currentTurn.imageDescs.push(doc.image_desc);
       }
+    } else if (doc.role === "admin_sandbox") {
+      // ⚡ botworker admin reply — ปิด user turn ปัจจุบัน (admin ตอบ) หรือต่อ orphan turn
+      if (currentTurn && isOrphanAdminTurn(currentTurn)) {
+        currentTurn.adminTexts.push(doc.text); // admin พิมพ์ต่อเนื่อง — รวม turn เดียว
+      } else if (currentTurn) {
+        currentTurn.adminTexts.push(doc.text);
+        turns.push(currentTurn);
+        currentTurn = null;
+      } else {
+        // orphan — ไม่มี user คู่ → pseudo-turn (append ตามเวลาเป็น model context)
+        currentTurn = newTurn(doc.ts);
+        currentTurn.adminTexts.push(doc.text);
+      }
     } else {
-      // Zaapi reply — ปิด turn ปัจจุบัน
+      // Zaapi reply — ปิด turn ปัจจุบัน (orphan admin turn ก็ปิดเหมือนกัน แต่ zaapi ไม่แนบ)
       if (currentTurn) {
-        currentTurn.zaapiReply = { text: doc.text, ts: doc.ts };
+        if (!isOrphanAdminTurn(currentTurn)) {
+          currentTurn.zaapiReply = { text: doc.text, ts: doc.ts };
+        }
         turns.push(currentTurn);
         currentTurn = null;
       }
@@ -557,21 +645,26 @@ export async function getGroupedHistoryForBot(opts: {
   const history: HistoryItem[] = [];
 
   for (const turn of trimmedTurns) {
-    // user turn — รวมข้อความทั้งหมด
-    const userText = turn.userTexts.join(" ");
-    const userItem: HistoryItem = { role: "user", text: userText };
-    if (turn.userImages.length > 0) userItem.images = turn.userImages;
-    if (turn.imageDescs.length > 0) userItem.image_desc = turn.imageDescs.join(" | ");
-    history.push(userItem);
+    // user turn — รวมข้อความทั้งหมด (orphan admin turn ไม่มี user → ข้าม)
+    if (turn.userTexts.length > 0) {
+      const userText = turn.userTexts.join(" ");
+      const userItem: HistoryItem = { role: "user", text: userText };
+      if (turn.userImages.length > 0) userItem.images = turn.userImages;
+      if (turn.imageDescs.length > 0) userItem.image_desc = turn.imageDescs.join(" | ");
+      history.push(userItem);
+    }
 
-    // reply turn — เลือก bot เราก่อน, ถ้าไม่มี fallback Zaapi
+    // reply turn — priority: shadow_replies(worker/workflow) → botworker_messages → Zaapi fallback
     let botReply: { text: string } | null = null;
     for (const msgId of turn.userMsgIds) {
       const sr = botReplyByInboundId.get(msgId);
-      if (sr && sr.bot_reply_text) {
-        botReply = { text: sr.bot_reply_text };
+      if (sr && sr.text) {
+        botReply = { text: sr.text };
         break;
       }
+    }
+    if (!botReply && turn.adminTexts.length > 0) {
+      botReply = { text: turn.adminTexts.join(" ||| ") };
     }
     if (!botReply && turn.zaapiReply) {
       botReply = { text: turn.zaapiReply.text };
