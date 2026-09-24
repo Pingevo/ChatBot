@@ -18,10 +18,24 @@ _META_HINT_KEYS = frozenset(
     {"query_hint", "target_subtype", "source_subtype"})
 
 
+def _code_match(card: dict, codes) -> bool:
+    """card ตรงกับ model code ที่ถามถึงไหม — unit card ใช้ model_codes field;
+    legacy card ไม่มี field → boundary-match จากชื่อ (กัน 'AC65B' เชี่ยน 'AC65B2')"""
+    want = {str(m).upper() for m in codes or ()}
+    if not want:
+        return False
+    have = {str(m).upper() for m in (card.get("model_codes") or [])}
+    if have & want:
+        return True
+    name = (card.get("name") or "").upper()
+    return any(re.search(rf"(?<![A-Z0-9]){re.escape(m)}(?![A-Z0-9])", name)
+               for m in want)
+
+
 @dataclass(frozen=True)
 class SelectedCandidate:
     """candidate ที่ผ่าน selection — card strip private evidence แล้ว"""
-    role: str                         # "slot" | "relation_target"
+    role: str                         # "subject" | "alternative" | "slot" | "relation_target"
     request_id: str
     slot_id: str
     relation_id: str | None
@@ -38,7 +52,9 @@ class SelectionResult:
     by_request: tuple[tuple[str, tuple[SelectedCandidate, ...]], ...]
     unavailable_evidence: tuple[dict, ...]   # stripped summaries (มีแต่หมด/เลิก)
     rejected_summary: tuple[dict, ...]       # counts by reason — debug เท่านั้น
-    trace: tuple[str, ...]
+    # รุ่นที่ถามถึงแต่ UNLIST-only (ยังไม่ publish) — name-level note เท่านั้น
+    hidden_mentions: tuple[dict, ...] = ()
+    trace: tuple[str, ...] = ()
 
 
 def _card_text(card: dict) -> str:
@@ -86,8 +102,14 @@ def _select_one(c: PooledCandidate, req: RetrievalRequest,
     score = c.score + len(hits)
     why = [t[4:] for t in c.trace if t.startswith("why:")]
     why += [f"hint:{k}" for k in hits]
+    if _code_match(card, req.model_codes):
+        role = "subject"
+    elif req.model_codes and req.source == "slot":
+        role = "alternative"
+    else:
+        role = req.source
     return SelectedCandidate(
-        role=req.source, request_id=req.request_id, slot_id=c.slot_id,
+        role=role, request_id=req.request_id, slot_id=c.slot_id,
         relation_id=c.relation_id, identity=cid,
         score=round(score, 3), constraint_hits=hits,
         reason="; ".join(why) or "eligible",
@@ -127,19 +149,66 @@ def select_for_llm_context(
         by_req.append((req.request_id, picked))
         trace.append(f"{req.request_id}: elig={len(cands)} "
                      f"selected={len(picked)}")
-    # unavailable — evidence ว่ามีของแต่หมด/เลิก (stripped, จำกัดต่อ request)
+    # compare/spec (answerable_all) + ถามถึง model code ตรงๆ → ยก unavailable
+    # ที่ customer-visible ขึ้นเป็น subject (ตอบ spec/compare ได้พร้อม label)
+    # — ไม่กิน quota ของ alternative, cap ตามจำนวน codes ที่ถาม
     unav_by_req: dict[str, list[PooledCandidate]] = {}
     for c in pool.unavailable:
         for rid in c.request_ids:
             unav_by_req.setdefault(rid, []).append(c)
+    promoted: set[str] = set()
+    for req in requests:
+        if req.availability_mode != "answerable_all" or not req.model_codes:
+            continue
+        cands = [c for c in unav_by_req.get(req.request_id, [])
+                 if _code_match(c.card, req.model_codes)]
+        if not cands:
+            continue
+        ranked = sorted(cands, key=lambda c: c.score, reverse=True)
+        subjects: list[SelectedCandidate] = []
+        for c in ranked[:len(req.model_codes)]:
+            if c.identity in promoted:
+                continue
+            promoted.add(c.identity)
+            subjects.append(SelectedCandidate(
+                role="subject", request_id=req.request_id, slot_id=c.slot_id,
+                relation_id=c.relation_id, identity=c.identity,
+                score=round(c.score, 3), constraint_hits=(),
+                reason=f"unavailable_subject:{c.reason}",
+                card=strip_private_evidence(c.card)))
+        if subjects:
+            selected.extend(subjects)
+            by_req = [(rid, tuple(list(cs) + subjects) if rid == req.request_id
+                       else cs) for rid, cs in by_req]
+            trace.append(f"{req.request_id}: unavailable_subjects="
+                         f"{len(subjects)}")
+    # unavailable — evidence ว่ามีของแต่หมด/เลิก (stripped, จำกัดต่อ request)
+    # subject ที่ promote แล้วไม่ซ้ำใน note
     unav_out: list[dict] = []
     for rid, cands in unav_by_req.items():
-        for c in cands[:unavailable_limit]:
+        left = [c for c in cands if c.identity not in promoted]
+        for c in left[:unavailable_limit]:
             u = strip_private_evidence(c.card)
             unav_out.append({
                 "request_id": rid, "name": u.get("name"),
                 "item_id": c.item_id, "reason": c.reason,
                 "unavailable": True})
+    # hidden mentions — รุ่นที่ถามถึงแต่ UNLIST-only (ไม่ publish ไม่ใช้เป็น
+    # evidence) — ส่งแค่ชื่อให้ตอบ 'ยังไม่เปิดขาย' ได้
+    asked = {m.upper() for r in requests for m in r.model_codes}
+    hidden_out: list[dict] = []
+    seen_h: set[str] = set()
+    if asked:
+        for c in pool.rejected:
+            if c.reason != "customer_hidden" or not _code_match(c.card, asked):
+                continue
+            key = c.item_id or c.identity
+            if key in seen_h:
+                continue
+            seen_h.add(key)
+            hidden_out.append({"name": (c.card.get("name") or "").strip(),
+                               "item_id": c.item_id, "reason": "not_published"})
+    hidden_out = hidden_out[:5]
     # rejected — summary counts เท่านั้น ไม่ส่ง card เข้า LLM
     rej_counts: dict[tuple[str, str], int] = {}
     for c in pool.rejected:
@@ -151,4 +220,5 @@ def select_for_llm_context(
     return SelectionResult(
         selected=tuple(selected), by_request=tuple(by_req),
         unavailable_evidence=tuple(unav_out),
-        rejected_summary=tuple(rej_out), trace=tuple(trace))
+        rejected_summary=tuple(rej_out),
+        hidden_mentions=tuple(hidden_out), trace=tuple(trace))

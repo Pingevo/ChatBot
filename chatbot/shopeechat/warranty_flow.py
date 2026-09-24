@@ -954,8 +954,11 @@ def _handle_first_message_claim(req, ctx, is_claim, _warranty_mod, llm, _app_mod
     if not is_claim:
         return None
     _bot_name = ctx.get("bot_name", "เรา")
+    # ⚡ Task 5C-F — malfunction claim ต้อง acknowledge + safe checks ก่อน
+    #   ขอข้อมูลเคลม (ไม่เดาสเปค/สาเหตุเฉพาะรุ่น)
     _answer = (
-        f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
+        _warranty_mod.malfunction_safe_check(req.message)
+        + f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
         f"• วันที่ซื้อสินค้า\n"
         f"• เลขที่คำสั่งซื้อ\n"
         f"• รูปหรือวิดีโอแสดงอาการ/ความเสียหาย\n\n"
@@ -1964,8 +1967,11 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
     if _is_claim_request and not _warranty_claim_answer:
         _total_elapsed = _time.time() - _total_start
 
+        # ⚡ Task 5C-F — malfunction claim ต้อง acknowledge + safe checks ก่อน
+        #   ขอข้อมูลเคลม (QA tips ถ้ามีจะชนะ — return ก่อนถึงข้อความนี้)
         _claim_first_answer = (
-            f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
+            warranty.malfunction_safe_check(req.message)
+            + f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
             f"• วันที่ซื้อสินค้า\n"
             f"• เลขที่คำสั่งซื้อ\n"
             f"• รูปหรือวิดีโอแสดงอาการ/ความเสียหาย\n\n"

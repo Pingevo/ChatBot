@@ -133,7 +133,8 @@ def test_ad1404t_case_has_both_groups():
     assert any("CTC620P" in n for n in names)
     summ = out["summary"]
     assert summ["selected"]["relation_target"] >= 1
-    assert summ["selected"]["slot"] >= 1
+    # Task 5C — card ที่ match code ที่ถาม = "subject" (เดิม "slot")
+    assert summ["selected"]["subject"] >= 1
 
 
 def test_target_quota_not_eaten_by_source():

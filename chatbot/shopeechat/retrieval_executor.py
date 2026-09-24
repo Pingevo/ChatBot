@@ -86,6 +86,10 @@ def _legacy_evidence_fetcher(message: str, *, retrieval_profile, shop, limit):
 
 def _bucket(card: dict, req: RetrievalRequest) -> tuple[str, str]:
     """card → (bucket, reason) — eligible / unavailable / rejected"""
+    # UNLIST/unknown = customer_hidden (ยังไม่ publish — ห้ามใช้เป็น evidence
+    # ตอบลูกค้าเลย ทั้ง spec/compare/link) — live status ชนะ unit snapshot เสมอ
+    if card.get("customer_visible") is False:
+        return "rejected", "customer_hidden"
     from .units import _SUBTYPE_TO_TYPES
     eff_types = set(req.product_types)
     for s in req.subtypes:

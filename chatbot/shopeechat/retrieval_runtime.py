@@ -13,7 +13,10 @@ from .candidate_pool import build_candidate_pool
 from .retrieval_selection import select_for_llm_context
 
 _ROLE_NOTE = {
+    "subject": "สินค้าที่ลูกค้าถามถึงหรืออ้างอิงโดยตรง",
     "slot": "สินค้าที่ลูกค้าถามถึงหรืออ้างอิงโดยตรง",
+    "alternative": "สินค้าแนะนำทดแทน — ไม่ใช่รุ่นที่ลูกค้าถามถึงโดยตรง "
+                   "ให้บอกว่าเป็นรุ่นทดแทน",
     "relation_target": "สินค้าที่ใช้ร่วมกันได้ตามความสัมพันธ์ของคำถาม",
 }
 
@@ -70,7 +73,9 @@ def run_grouped_selection(
             unavailable_limit=unavailable_limit)
     except Exception:
         return None
-    if not sel.selected:
+    # ไม่มีของขายได้ ≠ ไม่มีคำตอบ — hidden_mentions (รุ่นที่ถามแต่ยังไม่ publish)
+    # ยังต้องไปถึง LLM เป็น extra_context เพื่อตอบ "ยังไม่เปิดขาย" ตรงๆ
+    if not sel.selected and not sel.hidden_mentions:
         return None
 
     # selected cards — role tag ผ่าน _context_note (stripped แล้วจาก selector)
@@ -80,6 +85,12 @@ def run_grouped_selection(
         note = _ROLE_NOTE.get(s.role)
         if note:
             card["_context_note"] = note
+        if s.role == "subject" and not card.get("_available_for_sale"):
+            # subject ที่ไม่ขาย — ตอบ spec/compare/history ได้ แต่ห้ามบอกว่าซื้อได้
+            card["_context_note"] = (
+                f"{note or ''} — สินค้านี้ยังไม่พร้อมจำหน่าย "
+                "(หมดสต็อก/เลิกขาย/ถูกลบ) ให้แจ้งสถานะตรงๆ "
+                "ห้ามบอกว่าซื้อได้หรือส่งลิงค์ซื้อ").strip()
         selected_cards.append(card)
 
     # unavailable → evidence note (ไม่ใช่ recommendation) ผ่าน extra_context
@@ -95,6 +106,18 @@ def run_grouped_selection(
                 "หมายเหตุ: พบสินค้าที่เกี่ยวข้องในร้านแต่ยังไม่พร้อมจำหน่าย "
                 "(หมดสต็อก/เลิกขาย/ถูกลบ) — ใช้เป็นข้อมูลเท่านั้น "
                 "ห้ามแนะนำเป็นสินค้าที่ซื้อได้: " + ", ".join(names))
+    # UNLIST-only รุ่นที่ถามถึง — name-level note (ไม่ใช่ spec/link evidence)
+    hnames: list[str] = []
+    for h in sel.hidden_mentions:
+        n = (h.get("name") or "").strip()
+        if n and n not in hnames:
+            hnames.append(n)
+    if hnames:
+        hnote = ("หมายเหตุ: รุ่นที่ลูกค้าถามถึงบางรุ่นยังไม่เปิดขาย/ยังไม่มีจำหน่าย"
+                 "ในร้านตอนนี้ (listing ยังไม่ publish): " + ", ".join(hnames)
+                 + " — ให้แจ้งลูกค้าตรงๆ ห้ามส่งลิงค์หรือบอกว่าซื้อได้ "
+                 "และเสนอรุ่นทดแทนชนิดเดียวกันได้")
+        extra_context = f"{extra_context}\n{hnote}" if extra_context else hnote
 
     role_counts: dict[str, int] = {}
     for s in sel.selected:

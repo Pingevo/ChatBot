@@ -84,7 +84,8 @@ def test_relation_source_and_target_both_selected():
     assert any("AD1404T" in n for n in names)          # source product ติด
     assert any("CTC620P" in n for n in names)          # target ที่ตรง constraint
     roles = {s.role for s in sel.selected}
-    assert "slot" in roles and "relation_target" in roles
+    # Task 5C — card ที่ match code ที่ถาม = "subject" (เดิม "slot")
+    assert "subject" in roles and "relation_target" in roles
 
 
 def test_per_request_quota_source_cannot_eat_target():

@@ -665,27 +665,40 @@ def resolve_availability(card_or_doc: dict, *, model_doc: dict | None = None) ->
     if not stock_known:
         stock = None
 
+    # customer_visible=False เฉพาะ listing ที่ยังไม่เคย publish (UNLIST/unknown)
+    # — SELLER_DELETE/SHOPEE_DELETE/BANNED/NORMAL+stock0 = เคย publish แล้ว
+    #   ใช้เป็น spec/compare/warranty evidence ได้ แต่ไม่ sellable
+    vis = bool(status) and status != "UNLIST"
     if status == "NORMAL" and model_status and model_status != "MODEL_NORMAL":
+        # variant ถูก unlist ใน listing ที่ยัง NORMAL — variant-level ≠ listing-level
+        # (SELLER_DELETE เคย publish ทั้ง listing; รุ่นย่อยที่ไม่เคย/ไม่ publish
+        #  ไม่มี historical evidence ของตัวเอง → customer_hidden)
         return {"catalog_status": "unlisted", "available_for_sale": False,
-                "answerable": True, "reason": "model_not_normal", "total_stock": stock}
+                "answerable": True, "reason": "model_not_normal",
+                "total_stock": stock, "customer_visible": False}
     if status == "NORMAL":
         if stock is None:
             return {"catalog_status": "active_unknown_stock", "available_for_sale": False,
-                    "answerable": True, "reason": "normal_unknown_stock", "total_stock": stock}
+                    "answerable": True, "reason": "normal_unknown_stock",
+                    "total_stock": stock, "customer_visible": vis}
         if stock > 0:
             return {"catalog_status": "active", "available_for_sale": True,
-                    "answerable": True, "reason": "normal_positive_stock", "total_stock": stock}
+                    "answerable": True, "reason": "normal_positive_stock",
+                    "total_stock": stock, "customer_visible": vis}
         return {"catalog_status": "out_of_stock", "available_for_sale": False,
-                "answerable": True, "reason": "normal_zero_stock", "total_stock": stock}
+                "answerable": True, "reason": "normal_zero_stock",
+                "total_stock": stock, "customer_visible": vis}
     if status == "UNLIST":
         return {"catalog_status": "unlisted", "available_for_sale": False,
-                "answerable": True, "reason": "item_unlisted", "total_stock": stock}
+                "answerable": True, "reason": "item_unlisted",
+                "total_stock": stock, "customer_visible": vis}
     if status in {"SELLER_DELETE", "DELETED", "SHOPEE_DELETE", "BANNED"}:
         return {"catalog_status": "discontinued", "available_for_sale": False,
-                "answerable": True, "reason": f"item_{status.lower()}", "total_stock": stock}
+                "answerable": True, "reason": f"item_{status.lower()}",
+                "total_stock": stock, "customer_visible": vis}
     return {"catalog_status": "unknown", "available_for_sale": False,
             "answerable": False, "reason": f"unknown_status:{status or 'missing'}",
-            "total_stock": stock}
+            "total_stock": stock, "customer_visible": vis}
 
 
 def _doc_sellable(doc: dict) -> bool:
@@ -731,6 +744,8 @@ def to_product_card(doc: dict, message: str = "") -> dict:
         "sold_out": av["catalog_status"] == "out_of_stock",
         # ⚡ _available_for_sale จาก resolver — app.py recompute เรียก resolver เดียวกัน
         "_available_for_sale": av["available_for_sale"],
+        # UNLIST/unknown = ยังไม่ publish → ห้ามใช้เป็น evidence ตอบลูกค้า
+        "customer_visible": av["customer_visible"],
         # ข้อมูลโปรโมชั่น (ใช้ตอน re-rank และให้ LLM บอกลูกค้าได้)
         "has_promotion": _has_active_promotion(doc),
         "is_flash_sale": bool(doc.get("is_flash_sale")),
@@ -1722,6 +1737,27 @@ PRODUCT_TYPES: tuple[tuple[str, tuple[str, ...], str], ...] = (
 )
 
 
+# ⚡ typo fix ก่อน detect product type — module-level เพื่อ reuse ใน
+#   route_context.requested_product_types (provenance path) ให้ behavior เดียวกัน
+_PT_TYPO_FIXES = (
+    ("หัวชาจ", "หัวชาร์จ"), ("หัวชารจ", "หัวชาร์จ"),
+    ("หัวชาาร์จ", "หัวชาร์จ"), ("หัวชาร์จจ", "หัวชาร์จ"),
+    ("หัวชารต", "หัวชาร์ต"), ("หัวชาต", "หัวชาร์ต"),
+    ("สายชาจ", "สายชาร์จ"), ("สายชารจ", "สายชาร์จ"),
+    ("สายชาาร์จ", "สายชาร์จ"), ("สายชาร์จจ", "สายชาร์จ"),
+    ("สายชารต", "สายชาร์ต"), ("สายชาต", "สายชาร์ต"),
+    ("ชุดชาจ", "ชุดชาร์จ"), ("ชุดชารจ", "ชุดชาร์จ"),
+)
+
+
+def _fix_product_type_typos(text: str) -> str:
+    """lowercase + แก้ typo คำ charger ก่อน type detect (owner เดียวของ list)."""
+    low = (text or "").lower()
+    for wrong, right in _PT_TYPO_FIXES:
+        low = low.replace(wrong, right)
+    return low
+
+
 def _detect_product_types(message: str) -> set[str]:
     """ตรวจว่าลูกค้าอ้างถึง product type ใดบ้าง (เพื่อกรอง item_name แบบละเอียด).
 
@@ -1735,20 +1771,7 @@ def _detect_product_types(message: str) -> set[str]:
     - "พาวเวอร์แบงค์ใช้กับ mi 17" → สินค้าคือ powerbank ไม่ใช่ phone
     - ถ้ามี non-phone type + "ใช้กับ/รองรับ" + phone brand → ลบ phone ออก
     """
-    low = message.lower()
-    # ⚡ แก้คำพิมพ์ผิดเกี่ยวกับ charger ก่อน detect product type
-    # (เดิม typo fix มีเฉพาะใน _detect_charger_subtype ทำให้ "หัวชาจในรถ" ไม่ถูก detect เป็น car_charger)
-    _pt_typo_fixes = [
-        ("หัวชาจ", "หัวชาร์จ"), ("หัวชารจ", "หัวชาร์จ"),
-        ("หัวชาาร์จ", "หัวชาร์จ"), ("หัวชาร์จจ", "หัวชาร์จ"),
-        ("หัวชารต", "หัวชาร์ต"), ("หัวชาต", "หัวชาร์ต"),
-        ("สายชาจ", "สายชาร์จ"), ("สายชารจ", "สายชาร์จ"),
-        ("สายชาาร์จ", "สายชาร์จ"), ("สายชาร์จจ", "สายชาร์จ"),
-        ("สายชารต", "สายชาร์ต"), ("สายชาต", "สายชาร์ต"),
-        ("ชุดชาจ", "ชุดชาร์จ"), ("ชุดชารจ", "ชุดชาร์จ"),
-    ]
-    for wrong, right in _pt_typo_fixes:
-        low = low.replace(wrong, right)
+    low = _fix_product_type_typos(message)
     found: set[str] = set()
     for type_name, user_kws, _regex in PRODUCT_TYPES:
         if any(kw in low for kw in user_kws):

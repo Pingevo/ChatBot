@@ -222,10 +222,36 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
     if _certs:
         _cert_label = "/".join({"tisi": "มอก."}.get(c, c.upper()) for c in _certs)
         _tisi_model_kw = warranty.extract_tisi_model_keyword(req.message)
-        # หมวดสินค้าที่ลูกค้าระบุ (เช่น "พาวแบง มี มอก ไหม" → {"powerbank"})
-        # ใช้กรองผล cert search — กันเคสตอบ surge module/จักรยาน สำหรับคำถาม powerbank
-        # ใช้เฉพาะคำถามทั่วไป (ไม่มี model_keyword — เจาะจงรุ่นอยู่แล้วไม่ต้องกรองหมวด)
-        _cert_types = product_store._detect_product_types(req.message) if not _tisi_model_kw else set()
+        # หมวดสินค้าที่ลูกค้าระบุ — provenance-aware (route_context owner):
+        #   explicit type noun ชนะ device/model regex mention — "หัวชาร์จ
+        #   iphone 17" → {charger} (iphone เป็น compat target ไม่ใช่หมวดที่ถาม)
+        from . import route_context as _rc_cert
+        _cert_types = _rc_cert.requested_product_types(req.message)
+        if _tisi_model_kw and _rc_cert.requested_product_types(
+                req.message, explicit_only=True):
+            # model_kw ที่ไม่ใช่ code-shaped (ชื่อ device/brand เช่น "iPhone")
+            # เมื่อ explicit type noun ชี้หมวดอื่น → token นั้นคือ compat target
+            # ไม่ใช่รุ่นสินค้า → ค้นตามหมวดแทน (code-shaped เช่น "AC65B2"
+            # หรือข้อความที่ไม่มี explicit type เลย → เก็บไว้ค้นชื่อตรงๆ)
+            from .scripts.unit_classifier import _extract_codes as _uc_codes
+            if not _uc_codes(_tisi_model_kw):
+                _tisi_model_kw = ""
+        # ⚡ Task 5C-E — carry context: message ไม่มี type → history user msgs → active anchor
+        _cert_ctx_text = " ".join(
+            (getattr(m, "text", "") or "")
+            for m in list(req.history or [])[-4:]
+            if getattr(m, "role", "") == "user")
+        if not _cert_types and _cert_ctx_text:
+            _cert_types = _rc_cert.requested_product_types(_cert_ctx_text)
+        if not _cert_types and req.conversation_id:
+            try:
+                from . import conversation_products as _cp_cert
+                _ac = _cp_cert.get_active_product(req.conversation_id)
+                if _ac:
+                    _cert_types = _rc_cert.requested_product_types(
+                        _ac.get("name") or "")
+            except Exception:
+                pass
         print(f"[CERT] cert question detected certs={_certs}, model_keyword={_tisi_model_kw!r}, types={_cert_types}", file=sys.stderr)
         _cert_fallback_products = []
         try:
@@ -250,6 +276,18 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
             print(f"[TISI] search error: {_te}", file=sys.stderr)
             _tisi_products = []
 
+        # ⚡ Task 5C-E — subtype-aware: context บอก adapter/cable → กรองผลตาม
+        #   subtype เมื่อกรองแล้วยังเหลือ (กัน "หัวชาร์จ มอก." ตอบสายชาร์จ)
+        _cert_sub = (
+            product_store._detect_charger_subtype(req.message)
+            or product_store._detect_charger_subtype(_cert_ctx_text))
+        if _cert_sub and _tisi_products:
+            _sub_ok = [p for p in _tisi_products
+                       if product_store._detect_charger_subtype(
+                           p.get("name") or "") == _cert_sub]
+            if _sub_ok:
+                _tisi_products = _sub_ok
+
         _TYPE_TH = {
             "powerbank": "พาวเวอร์แบงค์", "charger": "อุปกรณ์ชาร์จ",
             "phone": "โทรศัพท์", "earphone": "หูฟัง", "smartwatch": "สมาร์ทวอช",
@@ -260,11 +298,23 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
 
         if _tisi_products or _cert_fallback_products:
             # สร้างคำตอบ — แสดงรุ่นที่มี cert ที่ถาม
+            # ⚡ Task 5C-E — ผลที่ไม่ NORMAL ต้องมี availability label
+            #   (ห้ามดูเหมือนขายได้ — customer_hidden/เลิกขาย ระบุชัด)
+            _CERT_AV_LABEL = {"out_of_stock": "หมดสต็อกชั่วคราว",
+                              "unlisted": "ยังไม่เปิดขาย",
+                              "discontinued": "เลิกจำหน่าย",
+                              "unknown": "ไม่พร้อมจำหน่าย"}
             _tisi_names = []
             for p in (_tisi_products or _cert_fallback_products):
                 _name = p.get("name", "")
                 # ตัด prefix ราคา/โค้ดออกจากชื่อ (เช่น "[ราคาพิเศษ 1990บ.] PowerConnex..." → "PowerConnex...")
                 _clean_name = re.sub(r"^\[.*?\]\s*", "", _name).strip()
+                _av = product_store.resolve_availability(
+                    {"item_status": p.get("status"),
+                     "total_stock": p.get("stock")})
+                _lab = _CERT_AV_LABEL.get(_av["catalog_status"], "")
+                if _lab:
+                    _clean_name = f"{_clean_name} ({_lab})"
                 _tisi_names.append(_clean_name)
             if _tisi_model_kw:
                 # ลูกค้าเจาะจงรุ่น → ตอบเฉพาะรุ่นนั้น
@@ -299,11 +349,23 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
                 )
             else:
                 # ลูกค้าถามทั่วไป "รุ่นไหนมี X บ้าง" → แสดงรุ่นทั้งหมด
-                _tisi_list = "\n".join(f"• {n}" for n in _tisi_names)
+                # ⚡ Task 5C-E — ถามลอยๆ ไม่มี context เลย: cap list + ถามหมวด
+                #   (ไม่ dump สินค้าทั้งร้านทุกหมวด)
+                _names_show = _tisi_names
+                _clarify = ""
+                if not _cert_types:
+                    _names_show = _tisi_names[:12]
+                    _clarify = ("หากสนใจหมวดไหน (เช่น พาวเวอร์แบงค์/หัวชาร์จ/"
+                                "สายชาร์จ) แจ้งได้นะคะ จะได้แนะนำเจาะหมวดให้ค่ะ")
+                    if len(_tisi_names) > 12:
+                        _clarify = (f"และยังมีอีก {len(_tisi_names) - 12} รุ่นค่ะ "
+                                    + _clarify)
+                _tisi_list = "\n".join(f"• {n}" for n in _names_show)
                 _tisi_answer = (
                     f"ค่ะ สินค้าที่มี {_cert_label} ในร้าน ได้แก่:\n"
                     f"{_tisi_list}\n\n"
-                    f"สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ"
+                    + (_clarify + "\n" if _clarify else "")
+                    + "สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ"
                 )
             _total_elapsed = _time.time() - _total_start
 

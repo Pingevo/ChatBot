@@ -411,6 +411,65 @@ def _extract_item_id_tag(text: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _prepare_link_followup(products: list[dict], alt_fetcher=None) -> list[dict]:
+    """LINK-FOLLOWUP card prep — availability-aware (Task 5C-D, ห้าม silent swap).
+
+    - UNLIST/unknown (ยังไม่ publish) → ตัด short_link + note "ยังไม่เปิดขาย"
+      (ห้ามใช้เป็น spec/compat/link evidence — customer_hidden)
+    - customer-visible แต่ขายไม่ได้ (out_of_stock/discontinued) → note สถานะตรงๆ
+      ลิงค์ดูข้อมูลได้ แต่ห้ามบอกว่าซื้อได้
+    - ถ้าไม่มีตัวที่ขายได้เลย → alt_fetcher ดึงทดแทน type เดียวกัน tag "ทดแทน"
+
+    Args:
+        products: cards จาก timeline (anchor+suggestions) — ไม่ mutate input
+        alt_fetcher: callable(query: str) -> list[dict] | None
+    """
+    out = [dict(p) for p in products or []]
+    sellable = False
+    for p in out:
+        av = product_store.resolve_availability(p)
+        if not av["customer_visible"]:
+            p.pop("short_link", None)
+            p["_context_note"] = (
+                "รุ่นนี้ยังไม่เปิดขาย/ยังไม่มีจำหน่ายในร้าน "
+                "(listing ยังไม่ publish) — ห้ามส่งลิงค์ ให้แจ้งลูกค้าตรงๆ")
+        elif not av["available_for_sale"]:
+            p["_context_note"] = (
+                "รุ่นนี้ไม่พร้อมจำหน่ายในตอนนี้ (หมดสต็อก/เลิกขาย) "
+                "— แจ้งสถานะตรงๆ ส่งลิงค์ให้ดูข้อมูลได้แต่ห้ามบอกว่าซื้อได้")
+        else:
+            sellable = True
+    if not sellable and out and alt_fetcher is not None:
+        try:
+            types: set[str] = set()
+            for p in out:
+                types |= product_store._detect_product_types(
+                    p.get("name") or "")
+            terms = [kws[0] for tn, kws, _r in product_store.PRODUCT_TYPES
+                     if tn in types and kws]
+            alts = [a for a in (alt_fetcher(" ".join(terms[:2])) or [])
+                    if a.get("_available_for_sale")][:3]
+            for a in alts:
+                a["_context_note"] = (
+                    "สินค้าแนะนำทดแทน — ไม่ใช่รุ่นที่ลูกค้าถามถึง "
+                    "ให้บอกว่าเป็นรุ่นทดแทน")
+            out += alts
+        except Exception:
+            pass
+    return out
+
+
+def _link_followup_keep(p: dict) -> bool:
+    """LINK-FOLLOWUP post-prep filter — card มีประโยชน์ให้ LLM ตอบ.
+
+    keep เมื่อมี short_link/image_url ส่งได้ หรือมี _context_note (เช่น anchor
+    UNLIST ที่ _prepare_link_followup ตัดลิงค์ออก — ทิ้งแล้ว LLM ไม่เห็นรุ่นที่
+    ถาม → silent swap ไปรุ่นอื่น)
+    """
+    return bool(p.get("short_link") or p.get("image_url")
+                or p.get("_context_note"))
+
+
 # ⚡ keyword ที่บ่ง new topic (ใช้ร่วมกัน item_tag block + carry-forward block)
 #   ⚠️ อย่าเอา "สอบถาม" กลับเข้ามา — ใช้ได้ทั้งคำถามใหม่และต่อเนื่อง
 _NEW_TOPIC_KWS = ("สวัสดี", "หวัดดี", "hi", "hello", "แนะนำ", "มีอะไร", "มีไร",
@@ -2628,11 +2687,16 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 from . import conversation_products as _cp_link
                 _link_products = _cp_link.get_anchor_and_suggestions(req.conversation_id, limit=5)
                 if _link_products:
-                    # กรองเฉพาะที่มี short_link หรือ image_url (มีประโยชน์ให้ LLM ส่งได้)
+                    # ⚡ Task 5C-D — availability-aware: UNLIST ตัดลิงค์, ของหมด
+                    #   note สถานะ, ไม่มีของขาย → fetch ทดแทน type เดียวกัน
+                    _link_products = _prepare_link_followup(
+                        _link_products,
+                        alt_fetcher=lambda q: product_store.fetch_products(
+                            db, q, shop_filter=req.shop, limit=6))
+                    # กรองเฉพาะที่มีประโยชน์ให้ LLM — รวม note-only card ของ
+                    #   unavailable anchor (ห้ามทิ้ง → LLM ต้องเห็นรุ่นที่ถาม)
                     _link_products = [
-                        p for p in _link_products
-                        if p.get("short_link") or p.get("image_url")
-                    ]
+                        p for p in _link_products if _link_followup_keep(p)]
                 if _link_products:
                     _ref_regex_products = _link_products
                     _is_conv_active = True
@@ -3617,13 +3681,28 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             if _is_conv_active and products:
                 # ⚡ LINK-FOLLOWUP — ลูกค้าขอลิงค์/ช่องทางซื้อ → ส่งลิงค์+รูปของทุกสินค้าใน context
                 if _is_link_followup and len(products) > 1:
-                    _conv_note = (
-                        "⚠️ ลูกค้าขอลิงค์/ช่องทางซื้อของสินค้าที่ bot แนะนำไปก่อนหน้า "
-                        "สินค้าใน context คือสินค้าที่ bot แนะนำล่าสุด — "
-                        "ให้ส่งลิงค์สั่งซื้อ (short_link) และรูปภาพ (image_url) ของสินค้า status=NORMAL ทุกตัวใน context "
-                        "ห้ามตอบแค่ 1 ตัว ห้ามเลือกเองแค่บางตัว "
-                        "ห้ามดึงสินค้าอื่นที่ไม่อยู่ใน context มาตอบ"
-                    )
+                    _has_unav = any(
+                        not p.get("_available_for_sale")
+                        or p.get("customer_visible") is False
+                        for p in products)
+                    if _has_unav:
+                        # Task 5C-D — ห้าม silent swap: แจ้งสถานะรุ่นที่ถามตรงๆ
+                        _conv_note = (
+                            "⚠️ ลูกค้าขอลิงค์/ช่องทางซื้อของสินค้าที่คุยกันก่อนหน้า "
+                            "สินค้าใน context มีสถานะต่างกัน — ให้แจ้งสถานะของรุ่นที่ลูกค้าถามตรงๆ "
+                            "(รุ่นที่ไม่มี short_link คือยังไม่เปิดขาย/ไม่พร้อมจำหน่าย ห้ามส่งลิงค์ของมัน) "
+                            "ส่งลิงค์สั่งซื้อ (short_link) และรูปภาพ (image_url) เฉพาะรุ่นที่ขายอยู่ "
+                            "สินค้าที่ tag ว่า 'แนะนำทดแทน' ให้บอกลูกค้าว่าเป็นรุ่นทดแทน "
+                            "ห้ามดึงสินค้าอื่นที่ไม่อยู่ใน context มาตอบ"
+                        )
+                    else:
+                        _conv_note = (
+                            "⚠️ ลูกค้าขอลิงค์/ช่องทางซื้อของสินค้าที่ bot แนะนำไปก่อนหน้า "
+                            "สินค้าใน context คือสินค้าที่ bot แนะนำล่าสุด — "
+                            "ให้ส่งลิงค์สั่งซื้อ (short_link) และรูปภาพ (image_url) ของสินค้า status=NORMAL ทุกตัวใน context "
+                            "ห้ามตอบแค่ 1 ตัว ห้ามเลือกเองแค่บางตัว "
+                            "ห้ามดึงสินค้าอื่นที่ไม่อยู่ใน context มาตอบ"
+                        )
                 else:
                     _conv_note = (
                         "⚠️ สินค้าใน context คือสินค้าที่ลูกค้าส่งมา/สนใจในแชทนี้ "

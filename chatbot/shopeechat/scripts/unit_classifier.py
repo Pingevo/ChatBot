@@ -80,7 +80,7 @@ _SKIP_SEGMENTS = (
     "bk", "wh", "gr", "gd", "bl", "pk", "rd", "sl", "gl", "rg", "bkwh",
 )
 
-_CODE_RE = re.compile(r"^[A-Za-z]{0,5}\d{2,5}[A-Za-z]{0,3}$")
+_CODE_RE = re.compile(r"^[A-Za-z]{0,5}\d{2,5}(?:[A-Za-z]{0,3}\d{0,2})?$")
 _GB_RE = re.compile(r"\b\d{2,4}\s*gb\b", re.I)
 _OOS_RE = re.compile(r"หมด|sold\s*out|out\s*of\s*stock", re.I)
 _CHARGING_TYPES = {"charger", "cable", "car_charger", "wireless_charger",

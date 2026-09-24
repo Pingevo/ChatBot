@@ -20,6 +20,12 @@
 
 ## กำลังทำ (active)
 
+### 🔍 Audit live chat failures จาก transcript KingGadgets (2026-09-24) — audit-only ห้ามแก้โค้ด
+
+- **เคส:** (A) Q6 AC65B เทียบ AC65B2 → บอทบอกไม่พร้อมจำหน่าย (listing SELLER_DELETE/UNLIST แต่ variant ปน AD653C/AD652S sellable) · (B) Q15/Q17/Q18 WPB100L — Q15 บอกใช้ได้+ลิงก์, Q17 บอกไม่พร้อมจำหน่าย, Q18 ลิงก์หลุดเป็น AD653C/AD653T/AD1003T (listing UNLIST แต่ sellable_units บาง variant sellable=True) · (C) Q10 "รุ่นไหนมี มอก. บ้าง" → ตอบกว้างทั้งร้าน ไม่ filter subtype/context ไม่บอก availability
+- **วิธี:** probe Mongo จริง (ShpProducts/sellable_units/conversation_products/image_texts) + trace fetch_products/handoffs cert path/anchor resolve + runtime flags — read-only เท่านั้น
+- **output:** report 4 ส่วน (Facts / Flow trace / Root cause / Recommended fixes) — ห้าม hardcode per-case
+
 ### ✅ คัดลอก log ไม่ได้ทั้ง 2 ปุ่ม (ราย log + กอปทั้งหมด) หน้า testchat (2026-09-23) — fixed + tsc ผ่าน
 
 - **error:** `formatLogForCopy` crash `s.cost_usd.toFixed` on undefined → handler ตายก่อนถึง clipboard → กดปุ่มไหนก็ไม่ได้
@@ -1237,3 +1243,92 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **Admin:** SystemConfig +2 fields · whitelist + boolean validate 422 · card "Legacy Shopee Retrieval" หน้า /config — 2 toggles + warning selection กระทบคำตอบจริง · ไม่มีปุ่ม refresh/reload
 - **live probe (Mongo จริง):** doc มีแต่ยังไม่มี fields → env fallback: shadow=True (env=1) / selection=False — DB จะเป็น owner หลัง toggle เขียนครั้งแรก
 - **verify:** pytest 77/77 · py_compile · tsc clean · next build ผ่าน · diff --check clean
+
+### 🔍 Audit (read-only, ไม่แก้โค้ด) — live chat failures จาก transcript KingGadgets (2026-09-24)
+
+**ขอบเขต:** probe Mongo จริง + run code path จริง (fetch_products / fuzzy_match / grouped pipeline / conversation_products / cert search) — ไม่แตะโค้ด ไม่เขียน DB
+
+#### A. AC65B เทียบ AC65B2 (Q6)
+
+- **DB facts:** AC65B item 28053691336 = `SELLER_DELETE` (discontinued จริง — variant นึงมี seller stock 199 แต่ listing ตาย) · AC65B2 item 49217564003 = `UNLIST` (variant AC65B2 stock=0; siblings AD653C/AD652S ใน listing เดียวกัน stock ~1,288) · `sellable_units`: AC65B ทั้ง 6 units=False, AC65B2 units=False แต่ AD653C/AD652S units=True (snapshot ตอน build)
+- **KB มี spec ทั้งคู่** (kb_products AC65B+AC65B2) → compare ทำได้ถ้า retrieval ส่งมา
+- **จุดหายที่ 1 (confirmed):** `unit_classifier._CODE_RE = ^[A-Za-z]{0,5}\d{2,5}[A-Za-z]{0,3}$` parse `AC65B2` ไม่ได้ (letters→digits→letter→digit) → `build_retrieval_profile` codes=('AC65B',) เท่านั้น — AC65B2 ไม่เข้า slot/request ตั้งแต่ต้น
+- **grouped pipeline จริง (selection ON):** units fetcher 'AC65B' → 37 hits (ดึง units ของ AC65B2 listing มาด้วยเพราะชื่อมี "AC65B2" substring) → pool มี AC65B=discontinued + AC65B2 listing=unlisted ใน unavailable ครบ → **selector เลือก AD653C/AD653T/AD652S จาก listing อื่น (eligible/sellable) 3 ใบ tag "สินค้าที่ลูกค้าถามถึงโดยตรง"** → LLM เห็นเพื่อนบ้านแทนคู่ที่ถาม; คู่จริงอยู่แค่ใน extra_context note (ชื่ออย่างเดียว ไม่มี spec/link)
+- **legacy path:** MODEL-REGEX hardcode `item_status:NORMAL` → ทั้งคู่หลุด; FUZZY-MATCH (ไม่ filter status) เจอทั้งคู่เป็น top 2 → card เข้า context พร้อม status ถูกต้อง
+- **สรุป:** verdict "ไม่พร้อมจำหน่าย" ถูกต้องตาม DB; ที่พลาดคือ (1) extraction ทิ้ง AC65B2 (2) selector ไม่มี compare/unavailable-subject role — เติม quota ด้วยของขายได้แทนคู่ที่ถาม (3) unavailable evidence ไม่พก spec → เปรียบเทียบไม่ได้ทั้งที่ KB มี
+- **fix phase:** `unit_classifier._CODE_RE` (extraction) + `retrieval_selection` (compare intent ต้อง promote unavailable targets เข้า context ไม่ใช่แทนด้วย sellable neighbors) + attach KB spec ให้ unavailable compare subjects
+
+#### B. WPB100L (Q15/Q17/Q18)
+
+- **DB facts:** item 45367578327 = `UNLIST`, seller stock รวม ~440 ทั้ง 6 variants `if_saleable=True` · `sellable_units` ทั้ง 6 = sellable=True (**stale** — build ตอน listing ยัง NORMAL; runtime `resolve_availability` join สด → `unlisted`/`available_for_sale=False` ถูกต้อง)
+- **Q15 (compat):** KB hit (WPB100L spec) → `mongo_query` จาก kb_models → fetch_products supplement (ดึงทุก status) → card UNLIST + link เข้า context → bot ตอบ compatible + ส่งลิงค์ listing ที่ตายแล้ว (ไม่มี flag ถึงลูกค้า)
+- **Q17 ("สนใจ PB WPB100L"):** fuzzy_match เจอ WPB100L #1 (UNLIST, sell=False) → bot ตอบ "ไม่พร้อมจำหน่าย" ถูกต้อง — **Q15/Q17 ไม่ได้ขัดกันที่ retrieval: card เดียวกัน ต่างกันที่ framing ตอน LLM ตอบ**
+- **Q18 ("ขอลิงค์สินค้า") — root cause confirmed:** LINK-FOLLOWUP (`app.py` ~2626) → `get_anchor_and_suggestions` เอา anchors ก่อน — ตอนนั้น anchors = WPB100L(ล่าสุด)+AC65B2+AC30S+LPB100 **UNLIST ทั้งหมด** → แล้ว prompt (`app.py` ~3619) สั่ง LLM "ส่งลิงค์ของสินค้า status=NORMAL ทุกตัวใน context" → LLM ข้าม anchors เงียบๆ ไปลิงค์ NORMAL chargers (AD653C/AD653T/AD1003T) จาก suggestion tail → ลิงค์ผิดรุ่น + ไม่บอกลูกค้าว่า WPB100L ถูก unlist
+- **conv timeline (shp_152520383445167602):** WPB100L เป็น `bot_suggestion` + `is_anchor=true` @10:30:12 — anchor ถูกบันทึกถูกต้อง ปัญหาอยู่ที่ link-followup instruction + ไม่มี unavailable-aware answer
+- **fix phase:** `app.py` LINK-FOLLOWUP block — เมื่อ anchor ล่าสุด unavailable ต้องบอกตรงๆ (unlisted/เลิกขาย + link ดูได้ถ้าต้องการ) แทน silent swap ไป NORMAL items; grouped path ต้องเก็บ exact-model unavailable card เป็น primary context ของ turn นั้น
+
+#### C. มอก. path (Q10 "รุ่นไหนมี มอก. บ้าง")
+
+- **reproduce ตรง transcript เป๊ะ:** `detect_cert_question` → ('tisi',) · `extract_tisi_model_keyword` → '' · `_detect_product_types(msg)` → ∅ → `type_filter=None` → 15 items ทุกหมวดของร้าน (PowerConnex/Eloop×9/inFace/ROIDMI/Huawei) = ตรงคำตอบจริง
+- **status handling ถูกแล้ว:** generic cert search filter `item_status==NORMAL` (`product_store.py` ~4129) + sellable-first sort — ไม่มีของหมด/ปลดลงปน
+- **ที่พลาด:** `_cert_types` อ่านเฉพาะ `req.message` (`handoffs.py` ~228) — context จากคำถามก่อน (charger/powerbank) ไม่ถูก carry; `RetrievalProfile` มี precedence current→anchor→intent→history พร้อมใช้แต่ cert handler ไม่ได้ใช้
+- **fix phase:** `handoffs.py` cert block — fallback `type_filter` ไปที่ profile.product_types (+subtype expansion) เมื่อ message ไม่มี type word
+
+#### สรุปหลัก
+
+- availability verdict ทุกเคส**ถูกต้อง**ตาม live DB (UNLIST/SELLER_DELETE จริง) — ไม่ใช่ false "หมดสต็อก"
+- จุดพังจริง 3 จุด: `_CODE_RE` ทิ้ง code pattern letter-digit-letter-digit · selector/followup ไม่มี "unavailable subject" semantics (แทนด้วยของขายได้เงียบๆ) · cert handler ไม่ carry context
+
+### 🔧 กำลังจะทำ — Task 5C: availability policy + unavailable compare subjects + cert context + follow-up safety (2026-09-24)
+
+- **จาก audit ข้างบน** — root causes: `_CODE_RE` ทิ้ง AC65B2 · grouped selector ไม่มี subject semantics · LINK-FOLLOWUP silent swap · cert ไม่ carry context · "ใช้งานไม่ได้" หลุด claim detect
+- **policy ใหม่ (user spec):** UNLIST = customer_hidden (ยังไม่ publish — ไม่ใช้ตอบ spec/compat/compare/link ถ้าไม่มี visible listing อื่นของ model เดียวกัน) · SELLER_DELETE/NORMAL+stock0 = customer-visible historical → ตอบ spec/compare ได้พร้อม label · live item_status ชนะ unit snapshot เสมอ (มีอยู่แล้ว — lock ด้วย test)
+- **plan:**
+  - B) `unit_classifier._CODE_RE` รับ letter→digit→letter→digit (AC65B2) — generic ไม่ hardcode
+  - A) `resolve_availability` +`customer_visible` (UNLIST→False) → card field → executor `_bucket` UNLIST→rejected(customer_hidden) → selection เก็บ hidden_mentions เป็น name-level note "ยังไม่เปิดขาย" (ไม่ใช่ spec/link evidence)
+  - C) selection: candidates ที่ match requested model_codes → role "subject" (รวม customer-visible unavailable ใน answerable_all mode) · ที่ไม่ match → "alternative" tag "รุ่นแนะนำทดแทน" — ห้าม substitute แอบเป็น subject
+  - D) app.py LINK-FOLLOWUP: anchor ล่าสุด unavailable → UNLIST ตัด short_link + note "ยังไม่มีจำหน่าย"+ทดแทนหมวดเดียวกัน; visible-unavailable → บอกสถานะ+ลิงค์ดูข้อมูลได้; ห้าม silent swap
+  - E) handoffs cert: type_filter fallback → RetrievalProfile (history/intent/anchor types + subtype expansion) · no-context → cap list+clarify · stock=0 label
+  - F) warranty claim detect +keywords ("ใช้งานไม่ได้"/"ชาร์จไฟไม่ได้" ฯลฯ) + first-claim answer มี safe checks ก่อนขอข้อมูลเคลม
+- **TDD:** tests ใหม่ก่อนแต่ละจุด · verify: pytest + py_compile + diff --check · **ยังไม่ commit จน user approve**
+
+### ✅ Task 5C เสร็จ (ยังไม่ commit — รอ user approve)
+
+- **B) `_CODE_RE`** → `^[A-Za-z]{0,5}\d{2,5}(?:[A-Za-z]{0,3}\d{0,2})?$` — AC65B2 เข้า; i14/ip14/s25/a56 ยัง device (filter ที่ profile level `_code_is_device`)
+- **A) availability policy:** `resolve_availability` +`customer_visible` (False เฉพาะ UNLIST/unknown) → propagate ผ่าน `to_product_card`/`to_unit_card`/`_live_availability` → executor `_bucket` reject 'customer_hidden' ก่อนทุก check → selection `hidden_mentions` (name-level) เฉพาะรุ่นที่ถาม
+- **C) subject/alternative:** selection `_code_match` (model_codes ∪ name boundary-regex) → code-match=role 'subject'; code-bearing req ไม่ match→'alternative'; unavailable-visible + answerable_all → promote เป็น subject (cap len(codes), ไม่ซ้ำ unav note); runtime `_ROLE_NOTE` +subject/alternative + unavailable-subject warning
+- **D) link-followup:** `app._prepare_link_followup` — UNLIST ตัด short_link+note; visible-dead note สถานะ+ลิงค์ดูได้; ไม่มีตัวขาย→fetch ทดแทน type เดียวกัน tag 'ทดแทน'; conv note แยก has_unav (ห้าม silent swap)
+- **E) cert context:** handoffs — type_filter fallback message→history(4 user msgs)→anchor card; phone compat-target ตัดเมื่อไม่มี phone noun; subtype filter เมื่อ detect; ผลไม่ NORMAL มี label; no-context → cap 12 + ถามหมวด
+- **F) claim detect:** warranty +คำ "ใช้งานไม่ได้"/"ชาร์จไฟไม่ได้"/"ชาร์จไม่ขึ้น"/"เสียบแล้วไม่ชาร์จ" + `malfunction_safe_check()` (acknowledge+เช็กสาย/หัว/ปลั๊ก/พอร์ต+หยุดใช้ถ้าร้อน/ไหม้) prepend ใน first-claim ทั้ง 2 sites
+- **tests ใหม่:** test_code_extraction_5c (5), test_availability_subjects_5c (11), test_link_followup_5c (5), test_cert_context_5c (5), test_troubleshoot_claim_5c (5) = 31
+- **regression:** retrieval suite 164 pass · role rename slot→subject ตั้งใจ (2 test อัปเดตตาม semantic ใหม่)
+- **live verify:** AC65B compare → codes ทั้งคู่เข้า profile; AC65B(SELLER_DELETE)=subject, AC65B2(UNLIST listing)=hidden_mention, AD653C/T=alternative ✓
+
+### 🔧 กำลังจะทำ — Task 5C hardening: 5 gaps จาก code review ก่อน commit (2026-09-24 รอบ 2)
+
+- **1) hidden-only grouped selection หาย:** `run_grouped_selection` return None เมื่อ `sel.selected` ว่าง ทั้งที่ `hidden_mentions` มี → ต้องคืน result (selected_cards=[] + extra_context บอกยังไม่เปิดขาย)
+- **2) link-followup ทิ้ง note-only anchor:** `_prepare_link_followup` ตัด short_link ของ UNLIST แล้ว caller filter `short_link or image_url` ทิ้ง card ที่เหลือแต่ note → LLM ไม่เห็นรุ่นที่ถาม → silent swap — fix: caller ใช้ predicate ที่ keep card มี `_context_note`
+- **3) model-level visibility ไม่ consistent:** `resolve_availability`/`_live_availability` ให้ `customer_visible` ไม่ครบ — model_status != MODEL_NORMAL หรือ model missing ใน NORMAL listing ต้อง False (variant-level ≠ listing-level SELLER_DELETE)
+- **4) cert label ไม่ส่ง stock:** `resolve_availability({"item_status": ...})` ไม่มี total_stock → NORMAL stock=0 label ผิด → ส่ง stock เข้า resolver
+- **5) cert phone hardlogic:** `if "phone" in _cert_types: discard` เป็น product-specific hack — root cause: type derivation ไม่มี provenance → ใช้ `route_context._type_mentions` (kw explicit ชนะ regex device/model mention) + suppress model_kw ที่ไม่ใช่ code-shape เมื่อ explicit type ชี้หมวดอื่น
+- **TDD:** tests ก่อนแก้ทั้ง 5 จุด · ยังไม่ commit
+
+### ✅ Task 5C hardening เสร็จ (ยังไม่ commit — รอ user approve)
+
+- **1) hidden-only selection:** `retrieval_runtime.run_grouped_selection` guard `not sel.selected → None` ทำ hidden_mentions หาย → แก้เป็น return None เฉพาะเมื่อไม่มีทั้ง selected+hidden_mentions; LLM ได้ note "ยังไม่เปิดขาย" แม้ไม่มีของขาย
+- **2) note-only anchor หลุด:** caller filter `short_link or image_url` ทิ้ง card ที่เหลือแต่ `_context_note` → เพิ่ม `app._link_followup_keep` (keep เมื่อมี link/image/**หรือ _context_note**) ใช้ที่ call site จริง
+- **3) model-level visibility:** `resolve_availability` คำนวณ `vis` ก่อน model_status check → model_not_normal ใต้ NORMAL listing ได้ visible=True ผิด → fix `customer_visible=False`; `units._live_availability` model_missing → visible เฉพาะ listing status ที่เป็น historical evidence (SELLER_DELETE/DELETED/SHOPEE_DELETE/BANNED), NORMAL/UNLIST → hidden
+- **4) cert label ไม่มี stock:** handoffs ส่งแค่ item_status เข้า resolver → NORMAL stock=0 label ผิด → ส่ง `total_stock: p["stock"]` ด้วย
+- **5) cert phone hardlogic:** ลบ `if "phone" in _cert_types … discard` — แทนด้วย provenance: `route_context.requested_product_types(text, explicit_only=)` ใช้ `_type_mentions` src=kw|regex (explicit type noun ชนะ device/model mention); + suppress `model_keyword` ที่ไม่ใช่ code-shape (unit_classifier._extract_codes) เมื่อมี explicit type — "iPhone"/"Watch" เป็น compat target ไม่ใช่รุ่นสินค้า; hoist typo-fix list เป็น `_PT_TYPO_FIXES`/`_fix_product_type_typos` (product_store) ใช้ร่วมกันกัน regression "หัวชาจ"
+- **tests ใหม่:** +7 (hidden-only runtime, note-only filter predicate, model_not_normal, model_missing, cert stock label, provenance matrix 4 เคส, code-shaped model_kw เก็บ)
+- **verify:** focused suite 89 pass · retrieval/warranty regression 227 pass · py_compile 11 files OK · git diff --check OK
+- **remaining risk:** explicit_only suppression ทำ "โทรศัพท์ iPhone 15 มี มอก" ค้นด้วย type_filter={phone} แทน name~iPhone (กว้างขึ้นเล็กน้อย) · hidden-only result ยัง merge base products จาก legacy path (note สั่งห้ามส่งลิงค์รุ่นนั้นอยู่แล้ว)
+
+### 📌 งานค้าง — Task 9/10 follow-up: phone/compat hardlogic audit (ยังไม่แก้ — อยู่นอก scope 5C)
+
+inventory จุดที่ยังเป็น device/phone-specific hardlogic (audit ก่อน refactor ให้เข้ากับ RetrievalProfile provenance):
+
+- `product_store.py:~1790` — `_detect_product_types` ยังมี `found.discard("phone")` เมื่อ compat kw (ใช้กับ/รองรับ) — compat rule เฉพาะ phone
+- `product_store.py:~3165-3178` — `product_types == {"phone"}` override + `phone→charger` shorthand subtype override (false positive จาก device name)
+- `device_compat.py:~357,397-403` — `_SKIP_TYPES = {"phone","voucher"}` + skip branch เฉพาะ type
+- ทิศทาง: inventory ทั้งหมด → เสนอ root-cause refactor เข้า `RetrievalProfile`/`requested_product_types` provenance (kw explicit ชนะ regex mention) แทน guard ต่อ type — ห้ามแก้ทันทีใน 5C เพราะเสี่ยงบาน
