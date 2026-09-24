@@ -1332,3 +1332,29 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - `product_store.py:~3165-3178` — `product_types == {"phone"}` override + `phone→charger` shorthand subtype override (false positive จาก device name)
 - `device_compat.py:~357,397-403` — `_SKIP_TYPES = {"phone","voucher"}` + skip branch เฉพาะ type
 - ทิศทาง: inventory ทั้งหมด → เสนอ root-cause refactor เข้า `RetrievalProfile`/`requested_product_types` provenance (kw explicit ชนะ regex mention) แทน guard ต่อ type — ห้ามแก้ทันทีใน 5C เพราะเสี่ยงบาน
+
+### 🔧 กำลังจะทำ — Task 5D: Candidate Pool / Source Union Audit (2026-09-24)
+
+- **เป้า:** ยืนยันว่า sources ทั้งหมด (units/legacy/exact/relation_target/anchor/KB/image_texts/unavailable) เข้า grouped candidate pool ก่อน selection — ยังไม่แก้ compat hardlogic 9/10
+- **probes:** A) AD1404T relation (subject+relation_target cable) · B) AC65B/AC65B2 compare · C) WPB100L hidden · D) multi-type case+film quota · E) anchor link follow-up
+- **กฎ:** audit-first — แก้เฉพาะเมื่อเจอ blocker จริง · prefer executor/candidate_pool/runtime มากกว่า app.py · ยังไม่ commit
+
+### ✅ Task 5D audit เสร็จ — pool union ไม่มี blocker (ไม่แก้ runtime · ยังไม่ commit)
+
+**source union ปัจจุบัน (ต่อ request):** `units` (`fetch_unit_evidence` — units index + join listing/image_texts/kb_specs, status-agnostic) + `legacy` (`fetch_products` ผ่าน `_legacy_evidence_fetcher` — NORMAL-only ที่ Mongo query) → `_bucket` แยก eligible/unavailable/rejected(customer_hidden) → `build_candidate_pool` dedupe (unit/model→item→name+shop) + EvidenceAttachment (anchor/kb_product/image_text เมื่อ card มี field) → `select_for_llm_context` per-request quota
+
+**live probe results (DB จริง):**
+- **A relation "หัวชาร์จ AD1404T ใช้กับสายชาร์จ…มีจอ 2 เมตร เต็มสปีด":** slot=adapter+code, relation_target=cable+query_hint ฝั่ง target ✓ — subject=AD1404T listings, relation_target=CTC615P/CTC620P (hits display+length_m+speed) + CTC620W 2m; สายตาย (Mcdodo/Baseus/ZMI) เป็น unavailable evidence; adapter Eloop C2 ใน target req → subtype_mismatch ✓
+- **B compare AC65B/AC65B2:** codes ทั้งคู่เข้า profile; AC65B(SELLER_DELETE)→subject promoted; AC65B2(UNLIST)→hidden_mentions; AD653C/T→alternative ✓
+- **C WPB100L:** customer_hidden → hidden_mentions "ยังไม่เปิดขาย" + alternatives เข้า ✓
+- **D multi-type "เคส+ฟิล์ม iphone 15":** slot แยก req-0(case)/req-1(screen_protector), quota ต่อ request ไม่กินกัน; film ทั้งหมด rejected (customer_hidden×7 + device_mismatch×6) เก็บใน pool.rejected + rejected_summary — ไม่หาย ✓
+- **E link follow-up:** อยู่นอก grouped pool โดย design (app.py conversation_products path — 5C fix แล้ว)
+
+**sources นอก pool (ตั้งใจ/contract-only):** kb_qa/kb_raw (supporting_evidence ยังไม่ populate), web_search, item-tag direct, link-followup, warranty/history lookup, device_compat re-query
+
+**known limitations (ไม่ใช่ blocker — ไม่แก้):**
+- anchor เข้า pool แค่ tag (`anchor_item_ids`→is_anchor+score+attachment) — ไม่มี fetcher ดึง anchor โดยตรง; codeless anchor ที่ fetcher พลาดอาจไม่เข้า pool แต่ไม่หายเพราะ `merge_selected_products` เก็บ base products
+- legacy source NORMAL-only → hidden/discontinued evidence เข้าผ่าน units เท่านั้น (units index มีเฉพาะของที่เคยอยู่ใน index ตอน build)
+- profile types=∅ เมื่อ message ขึ้น code ล้วน+device kw ("WPB100L ใช้กับมือถือ") → eff_types ว่าง → type check ผ่านหมด (wide net — code-match rank นำอยู่แล้ว; compat typing คือ scope Task 9/10)
+
+**tests:** +5 pinning (`test_candidate_pool_sources_5d.py` — dedupe cross-source, query_hint routing, per-request quota isolation, all-dead evidence preserved, anchor tag limitation) · verify: focused suite 77 pass · py_compile OK · diff --check OK · **ไม่มี runtime diff**
