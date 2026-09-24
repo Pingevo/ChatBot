@@ -1464,3 +1464,51 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **ผลกระทบเคสอื่น:** service complaint ปน product noun ยังยิง ("สั่งสายชาร์จแล้วร้านส่งช้ามาก"→fire); claim intent ("ชาร์จช้ามากขอเคลม") ไหลต่อไป warranty_flow ไม่โดน anger กลืน; strong anger ไม่แตะ (ยกเว้น promo)
 - **verify:** ไฟล์ใหม่ `docs/test/test_anger_detection_regression.py` 39 เคส (11 escalate + 10 product + 14 neutral + 2 noise + claim/service mix) + probe 32/32 + focused 10 ไฟล์ 139 pass · py_compile OK · diff --check OK · hardcode scan clean
 - **ยังไม่ครอบ:** v2 `detect_human_request` (SRS 6.x ตาราง chat_v3 — แยก implementation, out of scope)
+
+### Task 13-lite: Owner/Complexity Checkpoint (audit-only — ก่อน Phase 6, ยังไม่ commit)
+
+#### Owner map (สแกนโค้ดจริง 2026-09-24)
+
+| Decision | Final owner | Duplicate owners ปัจจุบัน | Delete/keep + gate |
+|---|---|---|---|
+| request facts (types/subtype/codes/question shape) | `route_context.py` (`build_retrieval_profile`, `requested_product_types`) | `product_store._detect_charger_subtype`/`_detect_product_types` (impl ต้นทาง), nested `_resolve_charger_subtype` ใน app.py:661 + call sites อย่างน้อย 5 จุด (KB/device lookup, superlative skip, main fetch, no-product guard) | ลบ closure หลัง profile ครอบทุก call site — gate: `test_route_context.py` + replay |
+| message/action route | `handoffs.detect_human_request` (legacy) — owner ถาวรรอ Task 11 | `chatbotv3/emotion.detect_human_request`+`detect_negative_emotion` (v3, impl แยก logic เก่าแบบ substring) | Task 11 ตัดสิน owner; ห้ามขยาย handoffs.py เพิ่ม — gate: `test_anger_detection_regression.py` |
+| warranty/claim route | `warranty_flow.handle_warranty_flow_legacy` (app.py:1669 caller) | `handle_warranty_flow` (v2, chat_v2.py:608) — ~850 บรรทัด/อัน parallel impls; **H4 fix อยู่เฉพาะ legacy** | Task 11 unify หรือ port `_is_active_post_handoff`/`_post_handoff_gate` ไป v2 — gate: `test_issue_5f_claim_flow.py` |
+| candidate retrieval | legacy: `product_store.fetch_products` + app.py branches; grouped: planner→executor→pool→selection→runtime | 2 paths คู่ขนานจนกว่า Phase 6-10 เลือก | เก็บทั้งคู่จน replay gate — flag: `USE_GROUPED_RETRIEVAL_*` |
+| candidate pool | `candidate_pool.build_candidate_pool` | เข้าถึงได้เฉพาะผ่าน runtime/shadow (flag-gated) | เก็บ; ลบทั้ง chain ถ้า replay ปฏิเสธ grouped |
+| final LLM context | `retrieval_selection.select_for_llm_context` + `retrieval_runtime.merge_selected_products` | merge จุดอื่นใน app.py: `_merge_kb_mongo` (KB+mongo), web-search replacement merge | Task 13 เลือก merge boundary เดียว — gate: `test_retrieval_selection_runtime.py` |
+| availability | `product_store.resolve_availability` ✅ | callers: units/app/handoffs — ศูนย์กลางถูกแล้ว | keep |
+| compatibility proof | `device_compat.py` | shim `_resolve_charger_subtype` (app.py), product-family hardlogic | ลบ shim หลัง Task 10 |
+| handoff POST / post-handoff lock | `handoffs` + `warranty_flow._post_handoff_gate` (legacy เท่านั้น) | v2 inline gate ยังพึ่ง history marker | parity gap — port หรือรอ Task 11 |
+| link follow-up | `app._prepare_link_followup`/`_link_followup_keep` | — | keep (owner เดียวอยู่แล้ว) |
+| usage accounting | `app._sum_usage` | — | keep |
+
+#### Duplicate/complexity audit
+
+| Item | Caller | Verdict |
+|---|---|---|
+| `retrieval_runtime.prepare_grouped_selection` | wrapper ครบจบที่ใช้ใน tests/probes เท่านั้น; production flag path ใช้ `run_grouped_selection` แล้ว merge เองใน app.py | **contract/probe wrapper** — อาจลบหรือ inline หลัง Phase 6-10 เลือก final boundary |
+| `retrieval_shadow.run_grouped_retrieval_shadow` | app.py:1860 (flag `USE_GROUPED_RETRIEVAL_SHADOW`) | observe-only — เก็บจน replay แล้วลบ (plan กำหนด) |
+| `retrieval_runtime.run_grouped_selection`/`merge_selected_products` | app.py:1881 + merge site (flag `USE_GROUPED_RETRIEVAL_SELECTION`) | flag-gated — removal decision หลัง replay |
+| `app._resolve_charger_subtype` (nested closure) | app.py:2010, 2192, 3784, 3845, 4235 (อย่างน้อย 5 call sites) | **shim ใหญ่ — Task 13 delete หลัง `RetrievalProfile.subtype` ครอบทุก caller** |
+| `chatbotv3/emotion.detect_human_request`/`detect_negative_emotion` | chatbotv3/engine.py | duplicate impl logic เก่า — Task 11/13 delete หรือ port |
+| `handle_warranty_flow` vs `_legacy` | v2 vs app.py | **duplication ใหญ่สุด** (~850×2 บรรทัด) — Task 11 |
+| `app._get_post_handoff_exceptions` | ไม่มี direct caller ใน app.py แต่ `warranty_flow` เรียกผ่าน `_app_module` ทั้ง v2/legacy | owner คลาดเพราะ helper อยู่ app.py แต่ decision อยู่ warranty_flow — ย้ายความเป็นเจ้าของได้ใน Task 13/11 |
+| `app._recent_qa_pairs`, `_merge_kb_mongo`, `_link_followup_keep` | 1 call site ต่ออัน | inline candidates — ตัดสิน Task 13 |
+| nested closures (`_extract_charger_constraints`, `_is_good_keyword`, `_extract_max_mah`, `_extract_weight`) | local เท่านั้น | keep — scope ถูก |
+| `USE_GROUPED_RETRIEVAL_SHADOW`/`_SELECTION` | runtime_config DB+env | เก็บจน replay decision |
+
+#### File size: app.py 5,159 (+~860 จากต้นแผน) · warranty_flow 2,082 (2 impls) · handoffs 608 · route_context 1,090 · product_store 4,346
+
+#### Risk ถ้าเริ่ม Phase 6 ตอนนี้
+- เพิ่ม retrieval path ที่ 3 โดยไม่เลือก legacy vs grouped → owner ซ้อน
+- final LLM context มี merge ≥3 จุด (KB merge / grouped merge / web merge) — Phase 6 ห้ามเพิ่มจุดที่ 4
+- handoffs.py ห้ามโตต่อจนกว่า Task 11 owner ชัด (plan บังคับ)
+- v2 warranty path ขาด H4 fix → ถ้า v2 live อยู่จริง product escape risk ยังเปิดอยู่
+
+#### Verdict: ไป Phase 6 ได้ ภายใต้ guardrails
+1. Phase 6 ต้องเลือก/ประกาศ candidate path winner (หรือเก็บ flag ไว้และ commit ว่าจะตัดใน Task 13)
+2. ห้ามเพิ่ม merge boundary ใหม่ — ใช้ `merge_selected_products` หรือ boundary เดิมเท่านั้น
+3. ห้ามขยาย `handoffs.py`/`warranty_flow.py` helper — routing ใหม่ไปที่ Task 11 owner
+4. helper ใหม่ใน Phase 6 ต้องตอบ: ลบ duplicate อะไร / inline ไม่ได้เพราะอะไร
+5. port `_is_active_post_handoff` ไป v2 เมื่อ policy อนุญาตให้แตะ v2 (หรือบันทึกเป็น Task 11 item)

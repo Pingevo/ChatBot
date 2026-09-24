@@ -3212,6 +3212,7 @@ Create an owner map in `getoutofmywaybotkaikrook2.md`:
 | candidate pool | candidate/policy module chosen after Task 6-10 | unit early return, legacy-only path, KB merge | collapse to one path |
 | final LLM context | selection/runtime owner | `app.py` local merge, grouped runtime merge, web replacement | one merge boundary only |
 | message action route | Task 11 owner | `handoffs.py`, `warranty_flow.py`, workflow trigger layer | move out of hotfix helpers |
+| warranty claim route | `handle_warranty_flow_legacy` | `handle_warranty_flow` (v2, chat_v2.py caller) — parallel ~850-line impls; 5F-H4 helpers exist only in legacy | unify or port `_is_active_post_handoff`/`_post_handoff_gate` in Task 11 — gate: `test_issue_5f_claim_flow.py` |
 | compatibility proof | `device_compat.py` evidence + selection gate | product family hardlogic | delete after Task 10 |
 
 Do not delete until every row has a test or replay gate named.
