@@ -166,14 +166,17 @@ def test_empty_selection_returns_none():
 
 def test_app_callsite_flag_gated_lazy():
     src = (ROOT / "chatbot" / "shopeechat" / "app.py").read_text()
-    flag = "USE_GROUPED_RETRIEVAL_SELECTION"
-    assert flag in src
+    # Task 5B3-D — flag ผ่าน runtime_config (DB owner + env fallback ข้างใน)
+    flag_fn = "grouped_retrieval_selection_enabled"
+    assert flag_fn in src
+    assert 'os.environ.get("USE_GROUPED_RETRIEVAL_SELECTION"' not in src
     head = src[:src.index("def chat")]
     assert "import retrieval_runtime" not in head
     assert "from . import retrieval_runtime" not in head
-    idx = src.index(flag)
-    window = src[idx:idx + 1500]
-    assert '== "1"' in window
+    assert "import runtime_config" not in head
+    idx = src.index(flag_fn)
+    window = src[max(0, idx - 400):idx + 1500]
+    assert "import runtime_config" in window
     assert "retrieval_runtime" in window
     assert "run_grouped_selection" in window
     assert "try:" in window and "except" in window

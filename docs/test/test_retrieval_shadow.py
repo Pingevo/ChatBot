@@ -142,18 +142,23 @@ def test_shadow_summary_has_no_private_keys():
 
 
 def test_app_callsite_is_flag_gated_and_lazy():
-    """static pin: callsite เดียวใน app.py ต้องอยู่หลัง env flag + lazy import"""
+    """static pin: callsite เดียวใน app.py ต้องอยู่หลัง runtime_config flag + lazy import
+
+    Task 5B3-D — flag เช็กผ่าน runtime_config (DB owner + env fallback ข้างใน)
+    app.py เองไม่เช็ก USE_GROUPED_RETRIEVAL_SHADOW env ตรงๆ"""
     src = (ROOT / "chatbot" / "shopeechat" / "app.py").read_text()
-    flag = "USE_GROUPED_RETRIEVAL_SHADOW"
-    assert src.count(flag) >= 1
-    # module top ต้องไม่ import retrieval_shadow — flag off = zero cost
+    flag_fn = "grouped_retrieval_shadow_enabled"
+    assert flag_fn in src
+    assert 'os.environ.get("USE_GROUPED_RETRIEVAL_SHADOW"' not in src
+    # module top ต้องไม่ import retrieval_shadow/runtime_config — flag off = zero cost
     head = src[:src.index("def chat")]
     assert "import retrieval_shadow" not in head
     assert "from . import retrieval_shadow" not in head
-    # callsite ต้อง gated ด้วย flag + lazy import ในบล็อกเดียวกัน
-    idx = src.index(flag)
-    window = src[idx:idx + 1200]
-    assert '== "1"' in window
+    assert "import runtime_config" not in head
+    # callsite ต้อง gated ด้วย runtime_config flag + lazy import ในบล็อกเดียวกัน
+    idx = src.index(flag_fn)
+    window = src[max(0, idx - 400):idx + 1200]
+    assert "import runtime_config" in window
     assert "retrieval_shadow" in window
     assert "run_grouped_retrieval_shadow" in window
     assert "try:" in window and "except" in window

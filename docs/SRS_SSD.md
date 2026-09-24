@@ -1048,6 +1048,17 @@ listing path:
 
 `app.py` wiring (flag `USE_GROUPED_RETRIEVAL_SELECTION`, default ปิด): compute block หลัง RetrievalProfile step → `_grouped_sel` → merge 2 llm.answer callsites (KB `merged_products` ~2240 + main `products` ~4622) → `_steps` "GroupedRetrievalSelection"; flag ปิด/ผล None = products เดิม 100%
 
+### 6.34 `runtime_config.py` — runtime flags จาก admin DB (Task 5B3-D)
+
+| ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `get_runtime_config` | อ่าน `system_configs.main_config` doc (TTL 5s) | force_refresh=False | dict doc | `_fetch` → `knowledge_base._admin_db` | `_flag` | cache 5s; DB error → cache เดิม/`{}` | Mongo read (max_time_ms 1500); fail → stale/empty |
+| `_flag` | resolve flag หนึ่งตัว | db_key, env_key | bool | `get_runtime_config` | `grouped_retrieval_*_enabled` | DB field เป็น bool → ใช้ค่านั้น (owner); absent/`{}` → env `"1"` fallback | — |
+| `grouped_retrieval_shadow_enabled` | flag shadow pipeline | — | bool | `_flag("grouped_retrieval_shadow_enabled","USE_GROUPED_RETRIEVAL_SHADOW")` | `app.py` shadow block (lazy import) | ดู `_flag` | error → False (ปิด) |
+| `grouped_retrieval_selection_enabled` | flag selection→LLM | — | bool | `_flag("grouped_retrieval_selection_enabled","USE_GROUPED_RETRIEVAL_SELECTION")` | `app.py` selection block (lazy import) | ดู `_flag` | error → False (ปิด) |
+
+`app.py` wiring (Task 5B3-D): shadow/selection blocks เรียก `runtime_config` (lazy, try/except → False) แทน `os.environ` ตรงๆ — ไม่มี manual reload endpoint; ค่า toggle จากหน้า config มีผลเมื่อ cache หมดอายุภายในประมาณ 5 วินาที
+
 ---
 
 ## 7. คอนฟิกและตัวแปรสำคัญ
@@ -1060,8 +1071,8 @@ listing path:
 | `USE_CHAT_V3` | `"0"` | `1`→chatbotv3 ทั้งระบบ |
 | `req.use_v2` / `req.use_v3` | None | per-request override (shadowbot/replay) |
 | `USE_UNIT_INDEX` | unset | `1`=units ทุก query · `charger`=เฉพาะ charger family · compat bypass เสมอ |
-| `USE_GROUPED_RETRIEVAL_SHADOW` | `"0"` (ปิด) | `1`=รัน grouped-retrieval pipeline ข้าง runtime เดิม (observe/log เท่านั้น — ไม่แตะคำตอบ) |
-| `USE_GROUPED_RETRIEVAL_SELECTION` | `"0"` (ปิด) | `1`=merge selected cards เข้า products ที่ llm.answer (KB+main callsites) — **มีผลต่อคำตอบจริง** |
+| `USE_GROUPED_RETRIEVAL_SHADOW` | `"0"` (ปิด) | env fallback เมื่อ DB field absent — owner จริงคือ `system_configs.main_config.grouped_retrieval_shadow_enabled` (หน้า /config, runtime_config TTL 5s) · `1`=รัน pipeline ข้าง runtime เดิม observe เท่านั้น |
+| `USE_GROUPED_RETRIEVAL_SELECTION` | `"0"` (ปิด) | env fallback เมื่อ DB field absent — owner จริงคือ `system_configs.main_config.grouped_retrieval_selection_enabled` · `1`=merge selected cards เข้า llm.answer — **มีผลต่อคำตอบจริง** |
 | `USE_QA_KB` | unset | เปิด QA-pair RAG |
 | `CHATBOT_INTERNAL_SECRET` | — | คุม internal API ทั้งสองทิศ |
 | `ADMIN_HANDOFF_URL` | `http://127.0.0.1:3000/api/admin/conversations/bot-handoff` | handoff endpoint |

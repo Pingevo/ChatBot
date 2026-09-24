@@ -78,6 +78,11 @@ export interface SystemConfigDoc extends Document {
   // default 30, range 10-50 (ปรับได้จากหน้า config)
   llm_context_limit: number;
 
+  // === Legacy Shopee grouped retrieval (Task 5B3-D) — dev-only ===
+  // DB เป็น owner เมื่อเขียนค่าแล้ว · field absent → bot fallback env เดิม
+  grouped_retrieval_shadow_enabled: boolean;    // observe-only pipeline (log เทียบ)
+  grouped_retrieval_selection_enabled: boolean; // ⚠️ มีผลกับคำตอบจริงเมื่อเปิด
+
   updated_by: string;
   updated_at: Date;
 }
@@ -115,6 +120,9 @@ function getSafeDefaults(): Partial<SystemConfigDoc> {
     chat_engine: (process.env.CHAT_ENGINE as 'legacy' | 'v2' | 'v3') || 'legacy',
     // ⚡ Phase 8 — LLM context limit (default 30, range 10-50)
     llm_context_limit: Number(process.env.LLM_CONTEXT_LIMIT || 30),
+    // ⚡ Task 5B3-D — grouped retrieval flags (default ปิด — DB เป็น owner หลังเขียน)
+    grouped_retrieval_shadow_enabled: process.env.USE_GROUPED_RETRIEVAL_SHADOW === 'true',
+    grouped_retrieval_selection_enabled: process.env.USE_GROUPED_RETRIEVAL_SELECTION === 'true',
   };
 }
 
@@ -172,6 +180,10 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
 
     // ⚡ Phase 8 — LLM context limit (default 30, range 10-50)
     llm_context_limit: dbConfig.llm_context_limit ?? safeDefaults.llm_context_limit ?? 30,
+
+    // ⚡ Task 5B3-D — grouped retrieval (default ปิด)
+    grouped_retrieval_shadow_enabled: dbConfig.grouped_retrieval_shadow_enabled ?? safeDefaults.grouped_retrieval_shadow_enabled ?? false,
+    grouped_retrieval_selection_enabled: dbConfig.grouped_retrieval_selection_enabled ?? safeDefaults.grouped_retrieval_selection_enabled ?? false,
 
     updated_by: dbConfig.updated_by || 'system',
     updated_at: dbConfig.updated_at || new Date(),
@@ -231,6 +243,9 @@ export async function getSystemConfig(forceRefresh = false): Promise<SystemConfi
         chat_engine: safeDefaults.chat_engine ?? 'legacy',
         // ⚡ Phase 8 — LLM context limit (default 30)
         llm_context_limit: safeDefaults.llm_context_limit ?? 30,
+        // ⚡ Task 5B3-D — grouped retrieval (default ปิด)
+        grouped_retrieval_shadow_enabled: safeDefaults.grouped_retrieval_shadow_enabled ?? false,
+        grouped_retrieval_selection_enabled: safeDefaults.grouped_retrieval_selection_enabled ?? false,
         updated_by: 'initial_setup',
         updated_at: new Date(),
       };
@@ -277,6 +292,9 @@ export async function updateSystemConfig(
     'chat_engine',
     // ⚡ Phase 8 — LLM context limit (admin-configurable)
     'llm_context_limit',
+    // ⚡ Task 5B3-D — grouped retrieval (dev-only)
+    'grouped_retrieval_shadow_enabled',
+    'grouped_retrieval_selection_enabled',
   ];
 
   const sanitized: Record<string, unknown> = { updated_by: updatedBy, updated_at: new Date() };

@@ -1223,3 +1223,17 @@ verify ระดับ retrieval (quota-free) ผ่านแล้ว — ท�
 - **static:** tsc clean · diff --check clean · py_compile app.py+responses.py clean
 - **manual UI:** รอผู้ใช้ตรวจผ่าน browser preview (ต้อง login session)
 - **ยังไม่ commit**
+
+### 🔧 กำลังจะทำ — Task 5B3-D: runtime config toggle สำหรับ grouped retrieval (2026-09-23)
+
+- **เป้าหมาย:** เปิด/ปิด `grouped_retrieval_shadow_enabled` + `grouped_retrieval_selection_enabled` จากหน้า /config (dev-only) โดยไม่แก้ .env / ไม่ restart process
+- **design:** DB `system_configs.main_config` เป็น owner (field absent → env fallback เดิม) · Python `runtime_config.py` TTL 5s · ไม่มีปุ่ม refresh เพราะรอ ≤5s เพียงพอและลด surface
+- **tests ต้อง RED ก่อน:** `docs/test/test_runtime_config.py` + pin update ใน selection_runtime/shadow tests (env check ย้ายเข้า runtime_config)
+
+#### ✅ ผลลัพธ์ Task 5B3-D (verify แล้ว — ยังไม่ commit)
+
+- **Python `runtime_config.py` (ใหม่):** `get_runtime_config` อ่าน `system_configs.main_config` TTL 5s · `_flag` = DB bool ชนะ / field absent / DB error → env fallback · `grouped_retrieval_shadow_enabled()` + `grouped_retrieval_selection_enabled()`
+- **app.py:** 2 flag blocks เรียก runtime_config (lazy, except→False) แทน env ตรงๆ · ไม่มี runtime-config reload endpoint
+- **Admin:** SystemConfig +2 fields · whitelist + boolean validate 422 · card "Legacy Shopee Retrieval" หน้า /config — 2 toggles + warning selection กระทบคำตอบจริง · ไม่มีปุ่ม refresh/reload
+- **live probe (Mongo จริง):** doc มีแต่ยังไม่มี fields → env fallback: shadow=True (env=1) / selection=False — DB จะเป็น owner หลัง toggle เขียนครั้งแรก
+- **verify:** pytest 77/77 · py_compile · tsc clean · next build ผ่าน · diff --check clean

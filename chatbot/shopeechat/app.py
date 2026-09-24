@@ -1772,8 +1772,14 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
 
         # ⚡ Task 5B3-A — grouped-retrieval shadow (observe-only, flag-gated)
         #   รัน pipeline ใหม่ข้างๆ เพื่อ log เทียบ — ไม่แตะ products/LLM/response
-        if (os.environ.get("USE_GROUPED_RETRIEVAL_SHADOW", "0") == "1"
-                and _retrieval_profile is not None):
+        #   flag: runtime_config (DB system_configs) → env fallback; error → ปิด
+        _shadow_flag = False
+        try:
+            from . import runtime_config as _rcfg
+            _shadow_flag = _rcfg.grouped_retrieval_shadow_enabled()
+        except Exception:
+            _shadow_flag = False
+        if _shadow_flag and _retrieval_profile is not None:
             try:
                 from . import retrieval_shadow as _rshadow
                 _steps.append({
@@ -1794,8 +1800,13 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         #   compute ครั้งเดียว — merge เข้า products ที่ llm.answer callsites
         #   error/empty → _grouped_sel=None → products เดิมต่อ (fallback)
         _grouped_sel = None
-        if (os.environ.get("USE_GROUPED_RETRIEVAL_SELECTION", "0") == "1"
-                and _retrieval_profile is not None):
+        _sel_flag = False
+        try:
+            from . import runtime_config as _rcfg
+            _sel_flag = _rcfg.grouped_retrieval_selection_enabled()
+        except Exception:
+            _sel_flag = False
+        if _sel_flag and _retrieval_profile is not None:
             try:
                 from . import retrieval_runtime as _rr
                 _grouped_sel = _rr.run_grouped_selection(
