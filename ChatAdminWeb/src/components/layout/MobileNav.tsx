@@ -36,6 +36,7 @@ import {
   HelpCircle,
   X,
   UserCog,
+  Inbox,
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
@@ -55,36 +56,67 @@ const primaryItems: NavItem[] = [
   { href: "/analytics/live", label: "สถิติ", icon: BarChart3, page: "analytics" },
 ];
 
-// ไอเทมรอง — แสดงใน "เพิ่มเติม" drawer
-const secondaryItems: NavItem[] = [
-  { href: "/triggers", label: "ทริกเกอร์", icon: Zap, page: "trigger" },
-  { href: "/workflows", label: "เวิร์กโฟลว์", icon: GitBranch, page: "workflow" },
-  { href: "/quick-replies", label: "คำตอบเร็ว", icon: Reply, page: "quickreply" },
-  { href: "/knowledge", label: "ฐานความรู้", icon: BookOpen, page: "kb" },
-  { href: "/persona", label: "ตัวแทนร้าน", icon: Sparkles, page: "persona" },
-  { href: "/shop-settings", label: "ตั้งค่าร้าน", icon: Settings2, page: "shop-setting" },
-  { href: "/test-chat/shopee", label: "ทดสอบบอท", icon: Bot, page: "testchat" },
-  { href: "/shadow-inbox", label: "กล่องเงา", icon: Ghost, page: "shadow-inbox" },
-  { href: "/botworker", label: "เครื่องบอท", icon: Wrench, page: "botworker" },
-  { href: "/live-assignment", label: "จ่ายงานสด", icon: Headset, page: "live-assignment" },
-  { href: "/test-assignment", label: "ทดสอบจ่ายงาน", icon: TestTube2, page: "test-assignment" },
-  { href: "/replay-compare", label: "เปรียบเทียบรีเพลย์", icon: Scale, page: "replay-compare" },
-  { href: "/test-results", label: "ผลการทดสอบ", icon: ClipboardCheck, page: "test-result" },
-  { href: "/admin-review-kpi", label: "KPI รีวิว", icon: Gauge, page: "admin-review-kpi" },
-  { href: "/admin-chat-result", label: "ผลแชทแอดมิน", icon: FileSearch, page: "admin-chat-result" },
-  { href: "/test-chat-result", label: "ผลทดสอบแชท", icon: FileSearch, page: "test-chat-result" },
-  { href: "/shops", label: "ร้านค้า", icon: Store, page: "shop" },
-  { href: "/contacts", label: "รายชื่อลูกค้า", icon: ContactIcon, page: "customer" },
-  { href: "/team", label: "ทีม & มอบหมาย", icon: Headset, page: "team" },
-  { href: "/users", label: "จัดการผู้ใช้", icon: Users, page: "user" },
-  { href: "/admin-config", label: "ตั้งค่าแอดมิน", icon: Sliders, page: "admin-config" },
-  { href: "/config", label: "ตั้งค่าระบบ", icon: Shield, page: "config" },
-  { href: "/llm", label: "LLM & API Keys", icon: KeyRound, page: "llm" },
-  { href: "/roles", label: "สิทธิ์การใช้งาน", icon: UserCog, page: "role-admin" },
-  { href: "/logs", label: "บันทึกระบบ", icon: ScrollText, page: "log" },
-  // footer items — ไม่มี role gate (เหมือน Sidebar footer)
-  { href: "/help", label: "คู่มือ", icon: HelpCircle },
-  { href: "/settings", label: "โปรไฟล์", icon: Settings },
+// ไอเทมรอง — แสดงใน "เพิ่มเติม" drawer แบ่งกลุ่มตาม sidebar (แบบ A)
+interface NavGroup {
+  label: string;
+  items: NavItem[];
+}
+
+const secondaryGroups: NavGroup[] = [
+  {
+    label: "กระบวนการ",
+    items: [
+      { href: "/triggers", label: "ทริกเกอร์", icon: Zap, page: "trigger" },
+      { href: "/workflows", label: "เวิร์กโฟลว์", icon: GitBranch, page: "workflow" },
+      { href: "/quick-replies", label: "คำตอบเร็ว", icon: Reply, page: "quickreply" },
+      { href: "/knowledge", label: "ฐานความรู้", icon: BookOpen, page: "kb" },
+      { href: "/persona", label: "ตัวแทนร้าน", icon: Sparkles, page: "persona" },
+      { href: "/shop-settings", label: "ตั้งค่าร้าน", icon: Settings2, page: "shop-setting" },
+    ],
+  },
+  {
+    label: "การทดสอบบอท",
+    items: [
+      { href: "/test-chat/shopee", label: "ทดสอบบอท", icon: Bot, page: "testchat" },
+      { href: "/shadow-inbox", label: "กล่องเงา", icon: Ghost, page: "shadow-inbox" },
+      { href: "/botworker", label: "เครื่องบอท", icon: Wrench, page: "botworker" },
+      { href: "/test-assignment", label: "ทดสอบจ่ายงาน", icon: TestTube2, page: "test-assignment" },
+      { href: "/live-assignment", label: "จ่ายงานสด", icon: Headset, page: "live-assignment" },
+      { href: "/replay-compare", label: "เปรียบเทียบรีเพลย์", icon: Scale, page: "replay-compare" },
+      { href: "/test-results", label: "ผลการทดสอบ", icon: ClipboardCheck, page: "test-result" },
+      { href: "/admin-review-kpi", label: "KPI รีวิว", icon: Gauge, page: "admin-review-kpi" },
+      { href: "/admin-chat-result", label: "ผลแชทแอดมิน", icon: FileSearch, page: "admin-chat-result" },
+      { href: "/test-chat-result", label: "ผลทดสอบแชท", icon: FileSearch, page: "test-chat-result" },
+    ],
+  },
+  {
+    label: "จัดการ",
+    items: [
+      { href: "/shops", label: "ร้านค้า", icon: Store, page: "shop" },
+      { href: "/contacts", label: "รายชื่อลูกค้า", icon: ContactIcon, page: "customer" },
+      { href: "/team", label: "ทีม & มอบหมาย", icon: Headset, page: "team" },
+      { href: "/backlog", label: "งานค้างรอจ่าย", icon: Inbox, page: "backlog" },
+      { href: "/users", label: "จัดการผู้ใช้", icon: Users, page: "user" },
+    ],
+  },
+  {
+    label: "ตั้งค่า",
+    items: [
+      { href: "/admin-config", label: "ตั้งค่าแอดมิน", icon: Sliders, page: "admin-config" },
+      { href: "/config", label: "ตั้งค่าระบบ", icon: Shield, page: "config" },
+      { href: "/llm", label: "LLM & API Keys", icon: KeyRound, page: "llm" },
+      { href: "/roles", label: "สิทธิ์การใช้งาน", icon: UserCog, page: "role-admin" },
+      { href: "/logs", label: "บันทึกระบบ", icon: ScrollText, page: "log" },
+    ],
+  },
+  {
+    // footer items — ไม่มี role gate (เหมือน Sidebar footer)
+    label: "ทั่วไป",
+    items: [
+      { href: "/help", label: "คู่มือ", icon: HelpCircle },
+      { href: "/settings", label: "โปรไฟล์", icon: Settings },
+    ],
+  },
 ];
 
 export function MobileNav() {
@@ -97,8 +129,14 @@ export function MobileNav() {
     () => primaryItems.filter((item) => !item.page || canAccessPage(user, item.page)),
     [user]
   );
-  const visibleSecondary = useMemo(
-    () => secondaryItems.filter((item) => !item.page || canAccessPage(user, item.page)),
+  const visibleSecondaryGroups = useMemo(
+    () =>
+      secondaryGroups
+        .map((g) => ({
+          ...g,
+          items: g.items.filter((item) => !item.page || canAccessPage(user, item.page)),
+        }))
+        .filter((g) => g.items.length > 0),
     [user]
   );
 
@@ -162,31 +200,40 @@ export function MobileNav() {
                 <X size={18} />
               </button>
             </div>
-            {/* Grid of items */}
-            <div className="overflow-y-auto p-4 grid grid-cols-4 gap-3">
-              {visibleSecondary.map((item) => {
-                const active = isActive(item.href);
-                const Icon = item.icon;
-                return (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    onClick={() => setMoreOpen(false)}
-                    className={`flex flex-col items-center gap-1.5 p-2 rounded-xl transition-colors ${
-                      active ? "bg-brand/10 text-brand" : "text-text-muted hover:bg-surface-2 hover:text-text"
-                    }`}
-                  >
-                    <div className={`w-11 h-11 rounded-xl flex items-center justify-center ${
-                      active ? "bg-brand/15" : "bg-surface-2"
-                    }`}>
-                      <Icon size={20} />
-                    </div>
-                    <span className="text-[10px] text-center leading-tight line-clamp-2">
-                      {item.label}
-                    </span>
-                  </Link>
-                );
-              })}
+            {/* Grouped items — row 2 คอลัมน์ต่อกลุ่ม (icons + text style เดิม) */}
+            <div className="overflow-y-auto p-4">
+              {visibleSecondaryGroups.map((group, gi) => (
+                <div key={group.label}>
+                  <div className={`text-[10px] font-semibold uppercase tracking-wider text-text-subtle px-1 mb-1.5 ${gi === 0 ? "" : "mt-4"}`}>
+                    {group.label}
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {group.items.map((item) => {
+                      const active = isActive(item.href);
+                      const Icon = item.icon;
+                      return (
+                        <Link
+                          key={item.href}
+                          href={item.href}
+                          onClick={() => setMoreOpen(false)}
+                          className={`flex items-center gap-2.5 px-2.5 py-2 rounded-xl transition-colors ${
+                            active ? "bg-brand/10 text-brand" : "text-text-muted hover:bg-surface-2 hover:text-text"
+                          }`}
+                        >
+                          <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                            active ? "bg-brand/15" : "bg-surface-2"
+                          }`}>
+                            <Icon size={18} />
+                          </div>
+                          <span className="text-[10px] leading-tight line-clamp-2">
+                            {item.label}
+                          </span>
+                        </Link>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
             </div>
             {/* Safe area padding */}
             <div className="h-2 safe-area-pb" />

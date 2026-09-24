@@ -35,11 +35,11 @@ export const PAGES: PageDef[] = [
   { key: "admin-review-kpi", label: "KPI รีวิวแอดมิน", group: "การทดสอบบอท" },
   { key: "admin-chat-result", label: "ผลแชทแอดมิน", group: "การทดสอบบอท" },
   { key: "test-chat-result", label: "ผลทดสอบแชท", group: "การทดสอบบอท" },
-  { key: "backlog", label: "งานค้างรอจ่าย", group: "การทดสอบบอท" },
   // management
   { key: "shop", label: "ร้านค้า", group: "จัดการ" },
   { key: "customer", label: "รายชื่อลูกค้า", group: "จัดการ" },
   { key: "team", label: "ทีม & มอบหมาย", group: "จัดการ" },
+  { key: "backlog", label: "งานค้างรอจ่าย", group: "จัดการ" },
   { key: "user", label: "จัดการผู้ใช้", group: "จัดการ" },
   // config
   { key: "admin-config", label: "ตั้งค่าแอดมิน", group: "ตั้งค่า" },

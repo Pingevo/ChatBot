@@ -124,7 +124,6 @@ const navGroups: NavGroup[] = [
       { href: "/admin-review-kpi", label: "KPI รีวิวแอดมิน", icon: Gauge, page: "admin-review-kpi" },
       { href: "/admin-chat-result", label: "ผลแชทแอดมิน", icon: FileSearch, page: "admin-chat-result" },
       { href: "/test-chat-result", label: "ผลทดสอบแชท", icon: FileSearch, page: "test-chat-result" },
-      { href: "/backlog", label: "งานค้างรอจ่าย", icon: Inbox, page: "backlog" },
     ],
   },
   {
@@ -133,6 +132,7 @@ const navGroups: NavGroup[] = [
       { href: "/shops", label: "ร้านค้า", icon: Store, page: "shop" },
       { href: "/contacts", label: "รายชื่อลูกค้า", icon: ContactIcon, page: "customer" },
       { href: "/team", label: "ทีม & มอบหมาย", icon: Headset, page: "team" },
+      { href: "/backlog", label: "งานค้างรอจ่าย", icon: Inbox, page: "backlog" },
       { href: "/users", label: "จัดการผู้ใช้", icon: Users, badgeTag: "Super", page: "user" },
     ],
   },
