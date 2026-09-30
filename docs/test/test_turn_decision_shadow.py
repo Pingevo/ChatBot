@@ -195,11 +195,17 @@ def _legacy_family(rec) -> str:
 
 def test_shadow_sweep_all_fixtures(monkeypatch, capsys):
     rows, bad = [], 0
+    mismatches: list[str] = []
     for fx in replay._load_fixtures():
         if (fx.get("expected") or {}).get("pending_live_replay"):
             continue
         records, _cap, _client = _run_records(monkeypatch, fx)
-        for rec in records:
+        tde = fx.get("turn_decision_expect")
+        if tde is not None and len(tde) != len(records):
+            mismatches.append(
+                f"{fx['id']}: turn_decision_expect={len(tde)} entries "
+                f"but {len(records)} user turns")
+        for i, rec in enumerate(records):
             steps = _shadow_steps(rec["resp"])
             if not steps:
                 bad += 1
@@ -210,12 +216,27 @@ def test_shadow_sweep_all_fixtures(monkeypatch, capsys):
             shadow = s.get("action") if s.get("ok") else f"ERROR:{s.get('error')}"
             rows.append((fx["id"], rec["turn"][:40], legacy, shadow,
                          "" if s.get("ok") else "ERR"))
+            # Phase 1G — exact per-turn contract expectations when present
+            if tde is not None and i < len(tde):
+                want = tde[i]
+                if s.get("action") != want["action"]:
+                    mismatches.append(
+                        f"{fx['id']}[{i}]: action={s.get('action')!r} "
+                        f"want {want['action']!r}")
+                got_flags = set(s.get("flags") or [])
+                missing_f = set(want.get("flags_contains") or []) - got_flags
+                if missing_f:
+                    mismatches.append(
+                        f"{fx['id']}[{i}]: flags {sorted(got_flags)} "
+                        f"missing {sorted(missing_f)}")
     with capsys.disabled():
         print("\n=== TurnDecisionShadow sweep (observe-only) ===")
         for r in rows:
             print(" | ".join(str(x) for x in r))
         print(f"turns={len(rows)} missing={bad}")
     assert bad == 0, f"{bad} fixture turns produced no shadow trace"
+    assert not mismatches, "turn_decision_expect mismatches:\n" + \
+        "\n".join(mismatches)
 
 
 def test_shadow_phase1c_hardened_cases(monkeypatch):

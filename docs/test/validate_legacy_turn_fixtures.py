@@ -38,6 +38,7 @@ _TOP_LEVEL_KEYS = {
     "id", "source", "title", "shop", "platform", "conversation_id",
     "catalog", "orders", "turns", "history_extra", "timeline_seed",
     "claim_state_seed", "ticket_state", "intent_result", "runtime_flags",
+    "shop_settings_seed", "turn_decision_expect",
     "expected", "profile_expect", "slot_expect", "availability_expect",
     "selection_expect", "expected_owner", "secondary_owners",
     "incident_levels", "levels", "status", "boundary_note", "pending_reason",
@@ -191,6 +192,96 @@ def check_row(fx: dict) -> list[str]:
                     "the prod answer-side symptom)")
     if status == "pending_live_replay" and not fx.get("pending_reason"):
         errs.append("pending_live_replay without pending_reason")
+
+    # turn_decision_expect — per-user-turn TurnDecision contract assertions
+    # (consumed by shadow sweep + contract test; one entry per user turn)
+    tde = fx.get("turn_decision_expect")
+    if tde is not None:
+        _td_actions = {
+            "locked", "noise", "handoff", "claim_collect", "claim_request",
+            "answer_product", "answer_general", "followup", "unknown",
+        }
+        _tde_keys = {"action", "flags_contains"}
+        user_turns = sum(1 for t in (fx.get("turns") or [])
+                         if (t or {}).get("role", "user") == "user")
+        if not isinstance(tde, list) or not tde:
+            errs.append("turn_decision_expect must be a non-empty list")
+        elif len(tde) != user_turns:
+            errs.append(f"turn_decision_expect has {len(tde)} entries but "
+                        f"{user_turns} user turns")
+        else:
+            for i, ent in enumerate(tde):
+                path = f"turn_decision_expect[{i}]"
+                if not isinstance(ent, dict):
+                    errs.append(f"{path} must be a dict")
+                    continue
+                for k in ent:
+                    if k not in _tde_keys:
+                        errs.append(f"unknown nested key {path}.{k!r}")
+                if "action" not in ent:
+                    errs.append(f"{path}.action required")
+                elif (not isinstance(ent["action"], str)
+                        or ent["action"] not in _td_actions):
+                    errs.append(f"{path}.action={ent['action']!r} not in "
+                                f"{sorted(_td_actions)}")
+                fc = ent.get("flags_contains")
+                if fc is not None:
+                    if (not isinstance(fc, list)
+                            or any(not isinstance(f, str) or not f
+                                   for f in fc)):
+                        errs.append(f"{path}.flags_contains must be "
+                                    "list[str] non-empty items")
+                    elif len(set(fc)) != len(fc):
+                        errs.append(f"{path}.flags_contains has duplicates")
+
+    # shop_settings_seed — nested schema (per-shop settings docs)
+    sss = fx.get("shop_settings_seed")
+    if sss is not None:
+        _ss_keys = {"shopname", "platform", "post_handoff_exceptions",
+                    "is_deleted"}
+        if not isinstance(sss, list):
+            errs.append("shop_settings_seed must be a list")
+        else:
+            for i, row in enumerate(sss):
+                path = f"shop_settings_seed[{i}]"
+                if not isinstance(row, dict):
+                    errs.append(f"{path} must be a dict")
+                    continue
+                for k in row:
+                    if k not in _ss_keys:
+                        errs.append(f"unknown nested key {path}.{k!r}")
+                if not isinstance(row.get("shopname"), str) \
+                        or not row["shopname"]:
+                    errs.append(f"{path}.shopname must be non-empty str")
+                if not isinstance(row.get("platform"), str) \
+                        or not row["platform"]:
+                    errs.append(f"{path}.platform must be non-empty str")
+                exc = row.get("post_handoff_exceptions")
+                if exc is not None:
+                    if (not isinstance(exc, list)
+                            or any(not isinstance(e, str) or not e
+                                   for e in exc)):
+                        errs.append(f"{path}.post_handoff_exceptions must "
+                                    "be list[str] non-empty items")
+                if "is_deleted" in row and not isinstance(
+                        row["is_deleted"], bool):
+                    errs.append(f"{path}.is_deleted must be bool")
+
+    # vacuous claim assertion — seeded claim_state already exists;
+    # claim_state_exists=true without final_claim_state asserts nothing
+    if (fx.get("claim_state_seed") and exp.get("claim_state_exists")
+            and not exp.get("final_claim_state")):
+        errs.append("claim_state_exists with claim_state_seed is vacuous "
+                    "— seed already creates it; assert final_claim_state")
+
+    # vacuous final_claim_state — asserting only values already present in
+    # the seed proves nothing about what the turn persisted
+    seed = fx.get("claim_state_seed") or {}
+    fcs = exp.get("final_claim_state")
+    if seed and isinstance(fcs, dict) and fcs and all(
+            k in seed and seed[k] == v for k, v in fcs.items()):
+        errs.append("final_claim_state is vacuous — every key/value already "
+                    "in claim_state_seed before replay")
 
     # no PII / raw customer data in turns — a fixture may declare
     # synthetic_pii when a claim test NEEDS a valid-format value

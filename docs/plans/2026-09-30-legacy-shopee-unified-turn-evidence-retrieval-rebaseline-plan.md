@@ -571,3 +571,42 @@ Evidence: shadow sweep 52 turns / 40 fixtures (`test_turn_decision_shadow.py::te
 ### Rollback (when wiring happens)
 
 Single seam: `_turn_decision_shadow` callsite + future enforcement flag. Revert = flag off (default) or delete callsite — decision owner never mutates legacy paths.
+
+---
+
+## Phase 1G — TurnDecision coverage/readiness re-audit (2026-09-30)
+
+Test/audit/docs only — no runtime change, no wiring. Hypothesis confirmed (review-corrected): coverage gap came from absent stateful fixtures and a single missing harness boundary (`shop_settings_seed`) — not from a TurnDecision input gap; `timeline_seed`/`claim_state_seed`/`ticket_state` already existed.
+
+### Evidence after Phase 1F + 1G fixtures (66 turns / 52 fixtures)
+
+| action | turns | boundary coverage | parity vs legacy | verdict |
+|---|---:|---|---|---|
+| noise | 2 | boundary (sticker seq) | legacy answers placeholder turns — contract `noise` intended | `needs_more_evidence` — no defined runtime response/no-reply contract |
+| locked | 4 | boundary incl. shop-exception, info/product escapes | lock-vs-escape decision matches production gate; downstream action after escape intentionally differs in documented rows | `needs_more_evidence` — only non-escape pin cases |
+| handoff | 1 | boundary | match | `needs_more_evidence` — thin + side-effecting |
+| claim_request | 3 | boundary | legacy answers where claim never starts (incident) | `blocked_by_phase2` — needs claim-state owner |
+| claim_collect | 3 | **boundary via claim_state_seed** (first real coverage) | TurnDecision matches `_claim_collecting` owner, including the resolved+retained-slots behavior. Legacy executor diverges on some rows by handing off or not persisting submitted fields; lifecycle/executor ownership remains a Phase 2 blocker. | `blocked_by_phase2` |
+| followup | 12 | boundary via timeline_seed anchor | anchor turns now followup = production-parity | `blocked_by_phase2` — subject/anchor owner pending |
+| answer_product | 27 | boundary | mostly parity; diverges on empty-catalog guards | `blocked_by_phase2` — retrieval owner |
+| answer_general | 1 | thin | — | `needs_more_evidence` |
+| unknown | 13 | — | honest fallback where no context | `not_a_wiring_target` |
+
+### Decision
+
+**Wire nothing yet.** Reasons split by owner: claim/subject actions (`claim_request`, `claim_collect`, `followup`, `answer_product`) → blocked by Phase 2 owners; `noise` → undefined response/no-reply contract; `handoff`/`answer_general`/`locked` → evidence/side-effect gate not yet met; `unknown` → not a wiring target.
+
+Review-fix hardened the evidence itself: `turn_decision_expect` adds exact per-turn action+flags assertions consumed by both the shadow sweep and the contract test (replacing the `_KNOWN_DIVERGENT_IDS` skip-list); validator now enforces its schema, `shop_settings_seed` nested schema, and rejects vacuous `claim_state_exists` on seeded rows; three rows pinned empty-catalog handoff artifacts as positive behavior and are now contract-only (`expectation_note`, acceptance via `turn_decision_expect`).
+
+Final integrity pass: `claim-resolved-retained-slots` is fully contract-only (no legacy `expected` block — asserting retained seed fields was vacuous); validator now rejects `final_claim_state` that is a pure subset of `claim_state_seed`, and `turn_decision_expect[].action` type-checks non-strings instead of crashing; the direct contract test asserts explicit expectations before the generic noise skip (`_fixture_contract_check` ordering proven by mutation test).
+
+### Tests required before wiring
+
+- locked: more escape combinations (date/media/name) through boundary
+- claim_collect: full lifecycle fixture (request → collect → resolve)
+- noise: defined response path (needs owner decision, Phase 2)
+- subject set owner for followup beyond single anchor
+
+### Rollback
+
+Unchanged — shadow flag default off; no enforcement callsite exists.

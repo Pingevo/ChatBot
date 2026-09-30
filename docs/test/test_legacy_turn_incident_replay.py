@@ -379,7 +379,7 @@ def _fixture_dbs(fx: dict):
         "conversation_products": conv_docs,
         "sellable_units": [],
         "system_configs": [],
-        "shop_settings": [],
+        "shop_settings": fx.get("shop_settings_seed") or [],
         "status_conversation": [],
         "test_status_conversation": [],
         "test_chat_sessions": [],
@@ -1177,3 +1177,118 @@ def test_harness_import_boundary_subprocess():
                          capture_output=True, text=True, timeout=120, env=env)
     assert out.returncode == 0 and "IMPORT_OK" in out.stdout, (
         f"import leaked or crashed:\n{out.stdout}\n{out.stderr[-2000:]}")
+
+
+def test_meta_validator_turn_decision_expect():
+    """turn_decision_expect: per-user-turn TurnDecision expectations —
+    validator must enforce count/shape/action enum."""
+    vmod = _validator_mod()
+    ok = {"id": "meta-td", "status": "positive", "levels": [3],
+          "shop": "MetaShop", "turns": [{"text": "ทัก"}, {"text": "ถาม"}],
+          "catalog": [{"item_id": 1001.0, "shopname": "MetaShop"}]}
+    # valid block must pass
+    errs = vmod.check_row({**ok, "turn_decision_expect": [
+        {"action": "unknown"}, {"action": "answer_product",
+                                "flags_contains": ["post_handoff_escape"]}]})
+    assert not errs, errs
+    # unknown nested key rejected
+    errs = vmod.check_row({**ok, "turn_decision_expect": [
+        {"action": "unknown"}, {"action": "unknown", "magic": 1}]})
+    assert any("magic" in e for e in errs), errs
+    # invalid action rejected
+    errs = vmod.check_row({**ok, "turn_decision_expect": [
+        {"action": "spin"}, {"action": "unknown"}]})
+    assert any("action" in e for e in errs), errs
+    # count must equal user-turn count
+    errs = vmod.check_row({**ok, "turn_decision_expect": [
+        {"action": "unknown"}]})
+    assert any("turn" in e.lower() for e in errs), errs
+    # flags_contains must be list[str]
+    errs = vmod.check_row({**ok, "turn_decision_expect": [
+        {"action": "unknown", "flags_contains": "x"},
+        {"action": "unknown"}]})
+    assert any("flags_contains" in e for e in errs), errs
+
+
+def test_meta_validator_shop_settings_seed_schema():
+    """shop_settings_seed rows must be well-formed (nested keys enforced)."""
+    vmod = _validator_mod()
+    ok = {"id": "meta-ss", "status": "positive", "levels": [3],
+          "shop": "MetaShop", "turns": [{"text": "ทัก"}],
+          "catalog": [{"item_id": 1001.0, "shopname": "MetaShop"}]}
+    good = {"shopname": "MetaShop", "platform": "shopee",
+            "post_handoff_exceptions": ["ทวนข้อมูล"]}
+    errs = vmod.check_row({**ok, "shop_settings_seed": [good]})
+    assert not errs, errs
+    errs = vmod.check_row({**ok, "shop_settings_seed": [
+        {**good, "unknown_key": 1}]})
+    assert any("unknown_key" in e for e in errs), errs
+    errs = vmod.check_row({**ok, "shop_settings_seed": [
+        {**good, "post_handoff_exceptions": "ทวนข้อมูล"}]})
+    assert any("post_handoff_exceptions" in e for e in errs), errs
+    errs = vmod.check_row({**ok, "shop_settings_seed": [
+        {**good, "post_handoff_exceptions": [123]}]})
+    assert any("post_handoff_exceptions" in e for e in errs), errs
+    errs = vmod.check_row({**ok, "shop_settings_seed": [
+        {**good, "shopname": ""}]})
+    assert any("shopname" in e for e in errs), errs
+
+
+def test_meta_validator_rejects_vacuous_claim_state_exists():
+    """claim_state_seed + claim_state_exists=true without final_claim_state
+    is vacuous — the seed already makes it exist."""
+    vmod = _validator_mod()
+    ok = {"id": "meta-vc", "status": "positive", "levels": [3],
+          "shop": "MetaShop", "turns": [{"text": "0812345678"}],
+          "catalog": [{"item_id": 1001.0, "shopname": "MetaShop"}],
+          "claim_state_seed": {"stage": "collecting"},
+          "synthetic_pii": ["phone"]}
+    errs = vmod.check_row({**ok, "expected": {
+        "action": "claim_collect", "claim_state_exists": True}})
+    assert any("vacuous" in e or "claim_state_exists" in e for e in errs), errs
+    # same row with final_claim_state is a real assertion
+    errs = vmod.check_row({**ok, "expected": {
+        "action": "claim_collect",
+        "final_claim_state": {"customer_phone": "0812345678"}}})
+    assert not errs, errs
+
+
+def test_meta_validator_rejects_vacuous_final_claim_state():
+    """final_claim_state ที่ทุก key/value เท่ากับ seed อยู่แล้ว = vacuous —
+    assert ไม่มีอะไร (state เดิมก่อน replay)."""
+    vmod = _validator_mod()
+    ok = {"id": "meta-vf", "status": "positive", "levels": [3],
+          "shop": "MetaShop", "turns": [{"text": "0812345678"}],
+          "catalog": [{"item_id": 1001.0, "shopname": "MetaShop"}],
+          "claim_state_seed": {"stage": "resolved",
+                               "customer_name": "สมชาย ใจดี"},
+          "synthetic_pii": ["phone"]}
+    # retained-seed subset → vacuous → reject
+    errs = vmod.check_row({**ok, "expected": {
+        "action": "claim_collect",
+        "final_claim_state": {"customer_name": "สมชาย ใจดี"}}})
+    assert any("vacuous" in e or "final_claim_state" in e for e in errs), errs
+    # new value not in seed → real assertion → pass
+    errs = vmod.check_row({**ok, "expected": {
+        "action": "claim_collect",
+        "final_claim_state": {"customer_phone": "0812345678"}}})
+    assert not errs, errs
+    # key absent from seed is NOT vacuous even when expected value is None —
+    # seed.get(k)==None would false-positive without the `k in seed` guard
+    ok2 = {**ok, "claim_state_seed": {"stage": "collecting"}}
+    errs = vmod.check_row({**ok2, "expected": {
+        "action": "claim_collect",
+        "final_claim_state": {"customer_phone": None}}})
+    assert not errs, errs
+
+
+def test_meta_validator_turn_decision_nonstring_action():
+    """action ที่ไม่ใช่ string (list/dict/int) ต้อง reject ไม่ใช่ crash."""
+    vmod = _validator_mod()
+    ok = {"id": "meta-td2", "status": "positive", "levels": [3],
+          "shop": "MetaShop", "turns": [{"text": "ทัก"}],
+          "catalog": [{"item_id": 1001.0, "shopname": "MetaShop"}]}
+    for bad_action in ([], {"x": 1}, 5):
+        errs = vmod.check_row({**ok, "turn_decision_expect": [
+            {"action": bad_action}]})
+        assert errs, f"action={bad_action!r} should fail validation"

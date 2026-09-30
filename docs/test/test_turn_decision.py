@@ -405,27 +405,61 @@ _ACTION_FAMILY = {
 _KNOWN_INCIDENT_IDS = {"tx-q22q25-claim-persist", "iss30-multi-intent-claim-plus-product"}
 
 
+def _fixture_contract_check(fx):
+    """Run decide_turn on a fixture's first user turn (Phase 1F inputs
+    forwarded จาก fixture seeds เทียบเท่า shadow callsite) and return a
+    mismatch tuple (id, actual, expected) or None.
+
+    Order matters: explicit `turn_decision_expect` is asserted FIRST —
+    a fixture that declares exact contract actions is never swallowed by
+    the generic noise skip or the legacy family comparison."""
+    if not fx.get("turns"):
+        return None
+    turn = fx["turns"][0]
+    _tseed = fx.get("timeline_seed") or {}
+    _anchor = ({"item_id": str(_tseed["active_item_id"])}
+               if _tseed.get("active_item_id") else None)
+    _exc = [e for s in (fx.get("shop_settings_seed") or [])
+            for e in (s.get("post_handoff_exceptions") or [])]
+    d = _decide(turn["text"],
+                ticket_state={"state": fx["ticket_state"]}
+                if fx.get("ticket_state") else None,
+                claim_state=fx.get("claim_state_seed"),
+                active_anchor=_anchor,
+                post_handoff_exceptions=_exc or None)
+    tde = fx.get("turn_decision_expect")
+    if tde:
+        want_td = tde[0]
+        if d.action != want_td["action"]:
+            return (fx["id"], d.action, [want_td["action"]])
+        miss_f = (set(want_td.get("flags_contains") or [])
+                  - set(d.flags))
+        if miss_f:
+            return (fx["id"], sorted(d.flags),
+                    [f"flags⊇{sorted(miss_f)}"])
+        return None
+    # placeholder-only turn → "noise" is the correct owner decision even
+    # where legacy produced a generic answer (noise-handler answers later)
+    if d.action == "noise" and not d.normalized_message.strip():
+        return None
+    _note = fx.get("expectation_note")
+    exp = (fx.get("expected")
+           or (_note if isinstance(_note, dict) else {})
+           or {})
+    want = _ACTION_FAMILY.get(exp.get("action"))
+    if not want:
+        return None
+    if d.action not in want and fx["id"] not in _KNOWN_INCIDENT_IDS:
+        return (fx["id"], d.action, sorted(want))
+    return None
+
+
 def test_shadow_fixture_actions_contract():
     """decide_turn on real fixture first-turns must agree with the legacy
     action family — except rows already marked incident (known-broken
     legacy behavior; the contract documents the intended decision)."""
-    mismatches = []
-    for fx in _fixture_rows():
-        exp = (fx.get("expected") or fx.get("expectation_note") or {})
-        want = _ACTION_FAMILY.get(exp.get("action"))
-        if not want or not fx.get("turns"):
-            continue
-        turn = fx["turns"][0]
-        # ticket_state lives at fixture level (request-level field in prod)
-        d = _decide(turn["text"],
-                    ticket_state={"state": fx["ticket_state"]}
-                    if fx.get("ticket_state") else None)
-        # placeholder-only turn → "noise" is the correct owner decision even
-        # where legacy produced a generic answer (noise-handler answers later)
-        if d.action == "noise" and not d.normalized_message.strip():
-            continue
-        if d.action not in want and fx["id"] not in _KNOWN_INCIDENT_IDS:
-            mismatches.append((fx["id"], d.action, sorted(want)))
+    mismatches = [c for fx in _fixture_rows()
+                  if (c := _fixture_contract_check(fx))]
     assert not mismatches, f"contract/legacy family mismatches: {mismatches}"
 
 
@@ -519,3 +553,14 @@ def test_resolved_with_retained_slots_collects__parity_pin():
                 claim_state={"stage": "resolved",
                              "customer_name": "สมชาย ใจดี"})
     assert d.action == "claim_collect"  # parity กับ owner — Phase 2 ต้องทบทวน
+
+
+def test_explicit_noise_expectation_is_consumed_not_skipped():
+    """turn_decision_expect ต้องถูก assert ก่อน generic noise skip —
+    mutation action ใน expectation (in-memory เท่านั้น) ต้องถูกจับ mismatch."""
+    import copy
+    fx = next(f for f in _fixture_rows() if f["id"] == "noise-then-product")
+    assert _fixture_contract_check(fx) is None  # real expectation passes
+    bad = copy.deepcopy(fx)
+    bad["turn_decision_expect"][0]["action"] = "locked"
+    assert _fixture_contract_check(bad) is not None  # mutation must flag

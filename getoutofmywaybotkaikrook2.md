@@ -1758,7 +1758,7 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **รายละเอียดตาราง risk ต่อ family + tests-that-must-exist + rollback อยู่ใน rebaseline plan §Phase 1E**
 - verify: ไม่มี code change — suite เดิมผ่าน (78p turn_decision+shadow, 46/19/8 replay)
 
-### 📋 Phase 1F — TurnDecision contract inputs (2026-09-30 · ยังไม่ commit)
+### 📋 Phase 1F — TurnDecision contract inputs (2026-09-30 · committed 813e3ec)
 
 - **Root cause**: contract ขาด 3 inputs ที่ production gate ใช้ — (1) `post_handoff_exceptions` → contract over-lock (ข้อความที่แอดมินตั้ง exception ก็โดน locked); จริงๆแล้ว production escape กว้างกว่าที่เคยเข้าใจ: greeting `"สวัสดี"` ก็อยู่ใน `_POST_HANDOFF_PRODUCT_KWS` → test lock เดิม encode semantics ผิด (2) `active_anchor` → anchor-backed turns (`รุ่นนี้ยังมีขายไหม`, `ขอลิงค์ตัวนี้`) เป็น unknown เพราะไม่มี context (3) `claim_state` ใช้ truthy แทน provenance — production ใช้ `_claim_collecting` (stage=collecting หรือมี slot persist)
 - **Fix (contract-only + shadow callsite snapshot)**: `decide_turn` +2 params (`post_handoff_exceptions`, `active_anchor`) backward compatible · step 2 เพิ่ม `_post_handoff_escape` mirror `_post_handoff_gate` ทุก escape (claim info / product kw ¬warranty kw / shop exceptions) → flag `post_handoff_escape` · claim_state gate เปลี่ยนเป็น `_wf._claim_collecting` (reuse เจ้าของเดิม) · step 7 ctx += `_anchor_has_product_context` · callsite: `load_timeline` ครั้งเดียว → `claim_state` + `active_item_id` จาก doc เดียวกัน (anchor snapshot = `{item_id}` เท่านั้น, ไม่ materialize card) + exceptions เฉพาะ ticket active
@@ -1767,9 +1767,35 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **Residual**: claim_collect ยังไม่มี fixture rows จริง · `noise`/`locked` ยังไม่ wire — รอ readiness ใหม่หลัง inputs ครบ
 - verify: 90p turn_decision+shadow · 46/19/8 replay+iso · validator 40 rows · py_compile · forbidden=0 · **runtime answer ไม่เปลี่ยน (shadow-only)**
 
-### 🔧 Phase 1F review-fix — honest claim semantics + minimal snapshot (2026-09-30 · ยังไม่ commit)
+### 🔧 Phase 1F review-fix — honest claim semantics + minimal snapshot (2026-09-30 · committed 813e3ec)
 
 - **Finding 1 (claim provenance)**: `update_claim_state` merge ไม่ล้าง slot → `{stage:"resolved", customer_name:...}` เกิดได้จริง และ `_claim_collecting` เช็ก slot ไม่เช็ก stage → resolved+retained-slots **ยัง collect** — report เดิมเขียน "resolved ไม่นับ" กว้างเกิน · fix: rename tests → `resolved_without_slots`, เพิ่ม parity-pin test `test_resolved_with_retained_slots_collects__parity_pin` บันทึก semantics จริงเป็น Phase 2 blocker (ห้ามแก้ `_claim_collecting` ใน phase นี้เพราะเปลี่ยน runtime)
 - **Finding 2 (snapshot)**: callsite เดิมเรียก load_claim_state + get_active_product (materialize card = product-DB read + live-cache write) + exceptions ทุก ticket → แก้เป็น `load_timeline` ครั้งเดียว (claim_state + active_item_id จาก doc เดียว, anchor = `{item_id}` เท่านั้น) + exceptions เฉพาะ ticket active — shadow reads: **timeline reads 2→1 · product materialization 1+→0 · shop-settings ทุก turn→เฉพาะ active ticket**
 - **Finding 3 (forwarding tests)**: +6 direct shadow-boundary tests (timeline once / ไม่เรียก load_claim_state+get_active_product / inactive skip exceptions / active forwards / loader fail ไม่ raise / trace PII-free) — RED 2 จุด (แยก claim read, query exceptions ตอน inactive) → GREEN
 - verify: 97p turn_decision+shadow · 46/19/8 replay+iso · validator 40 rows · py_compile · forbidden=0 · **runtime answer ไม่เปลี่ยน**
+
+### 📋 Phase 1G — coverage + readiness re-audit (2026-09-30 · ยังไม่ commit · test/audit only)
+
+- **Baseline ก่อนแก้**: 52 turns — claim_collect=0, locked=2, noise=1 · hypothesis ยืนยัน: gap มาจาก harness ไม่ seed state ไม่ใช่ contract ขาด input
+- **Harness**: เพิ่ม `shop_settings_seed` (ขั้นต่ำ — admindb fake) + validator key · timeline/claim/ticket seed มีอยู่แล้ว
+- **+12 fixtures**: lock-escape×5 (shop-exception/phone/product-q/product+warranty/plain), claim-collect-seeded (2 turns), claim-resolved±slots, anchor stock/link followup, no-anchor negative, noise→product seq — ผ่าน `app.chat()` + shadow boundary จริง ไม่ใช่ direct decide_turn
+- **ผล sweep 66 turns**: claim_collect 0→3 · locked 2→4 · noise 1→2 · followup 10→12 · ยืนยัน resolved+retained-slots → collect (parity pin)
+- **Pin test แก้ให้ forward fixture seeds** (claim_state/anchor/exceptions) เข้า `_decide` + `_KNOWN_DIVERGENT_IDS` 5 รายการพร้อมเหตุ (exception→claim_request vs legacy handoff, empty-catalog guard artifact, claim-info→unknown vs admin handoff)
+- **Readiness verdict**: ทุก family `blocked_by_phase2` หรือ `needs_more_evidence` — **wire nothing yet**
+- verify: 97p turn_decision+shadow · 58/19/8 replay+iso · validator 52 rows · forbidden=0 · **runtime ไม่เปลี่ยน**
+
+#### Phase 1G review-fix — evidence honesty (2026-09-30 · ยังไม่ commit · test/audit only)
+
+- **False-green 1 — divergence allowlist**: `_KNOWN_DIVERGENT_IDS` ลบแล้ว — แทนด้วย `turn_decision_expect` (per-user-turn exact action + `flags_contains`) ที่ sweep และ contract test assert จริง 12 rows
+- **False-green 2 — vacuous claim**: `claim-collect-seeded`/`claim-resolved-retained` เดิม assert `claim_state_exists` (seed สร้างอยู่แล้ว) → เปลี่ยน `final_claim_state` ตาม post-state จริง: collect-seeded persist แค่ `customer_phone` (name turn ไม่เขียน), resolved-retained assert retained name เท่านั้น (legacy ไม่ persist phone — no-product-guard handoff)
+- **False-green 3 — empty-catalog artifact**: `lock-escape-product-question`/`no-anchor-stock-unknown`/`noise-then-product` เดิม pin legacy handoff (no-product guard) เป็น positive → เปลี่ยนเป็น contract-only (`expectation_note` + `turn_decision_expect` เป็น acceptance owner)
+- **Validator hardening**: `turn_decision_expect` schema (count=user turns, action enum, flags list[str], unknown nested key reject) + `shop_settings_seed` nested schema + vacuous `claim_state_exists` guard — meta-tests RED→GREEN
+- **Doc wording**: hypothesis แก้เป็น "absent stateful fixtures + missing shop_settings_seed boundary" (ไม่ใช่ input gap) · noise verdict → needs_more_evidence (ไม่ใช่ phase2 blocker) · locked parity → "lock-vs-escape matches gate; downstream ต่างใน documented rows"
+- verify: 97p turn_decision+shadow · 61/19/8 replay+iso · validator 52 rows · runtime/Admin diff=0 · **runtime ไม่เปลี่ยน**
+
+##### Phase 1G review-fix#2 — final evidence integrity (ยังไม่ commit · test/audit only)
+
+- **claim-resolved-retained-slots → contract-only จริง**: ลบ `expected` block (final_claim_state assert เฉพาะ retained seed field = vacuous) — acceptance = `turn_decision_expect` claim_collect+claim_resume; note ระบุ executor divergence = Phase 2 blocker
+- **Validator เพิ่ม 2 guards**: (1) `final_claim_state` ที่ทุก key/value ⊆ claim_state_seed → reject vacuous; (2) `turn_decision_expect[].action` non-string (list/dict/int) → reject ไม่ crash (TypeError fix)
+- **Contract test ordering**: `_fixture_contract_check` extract + explicit expectation ถูก assert ก่อน generic noise skip — proven ด้วย mutation test (flip noise→locked in-memory ต้อง mismatch)
+- verify: 98p turn_decision+shadow (+1 mutation test) · 63/19/8 replay+iso (+2 validator meta-tests; contract-only conversion เปลี่ยน acceptance semantics ไม่ใช่จำนวน test case) · validator 52 rows · sweep 66 turns action counts คงเดิม · runtime/Admin diff=0
