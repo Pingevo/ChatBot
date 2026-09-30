@@ -68,6 +68,15 @@ _NON_PRODUCT_LINK_KWS = (
     "กลุ่ม", "ไลน์", "line@", "ติดต่อ", "สอบถามแอดมิน",
 )
 _PRICE_ASK_KWS = ("ราคา", "เท่าไหร", "กี่บาท")
+# stock/select — ถามสถานะของ/เลือกจากชุด ต้องมี product context เหมือนกัน
+_STOCK_ASK_KWS = (
+    "มีขายไหม", "ขายไหม", "มีของไหม", "มีของ", "พร้อมส่ง",
+    "ยังมีขาย", "ยังมีไหม", "ยังขายไหม", "เหลือไหม", "หมดไหม",
+)
+_SELECT_ASK_KWS = (
+    "ตัวไหนบ้าง", "อันไหนบ้าง", "รุ่นไหนบ้าง", "แบบไหนบ้าง",
+    "มีตัวไหน", "มีอันไหน", "มีรุ่นไหน", "มีแบบไหน",
+)
 
 _ACTIVE_TICKET_STATES = frozenset({"handoff", "open", "pending"})
 
@@ -146,6 +155,15 @@ def _history_has_product_context(history: list[dict] | None) -> bool:
     return False
 
 
+def _valid_claim_name(info: dict) -> bool:
+    """ชื่อที่ extract ได้เป็น claim name จริงไหม — rule เดียวกับ
+    warranty_flow._merge_claim_slots: มี space (ชื่อ+นามสกุล), ≤40 ตัวอักษร,
+    ไม่มีตัวเลข."""
+    name = info.get("name") or ""
+    return bool(name) and " " in name and len(name) <= 40 \
+        and not any(c.isdigit() for c in name)
+
+
 def _has_claim_signal(msg: str) -> bool:
     """message มี claim signal ใหม่ไหม (ไม่นับ claim_state เก่า)."""
     if _warranty.detect_claim_request(msg):
@@ -154,6 +172,7 @@ def _has_claim_signal(msg: str) -> bool:
     return bool(
         info.get("order_id") or info.get("phone")
         or _warranty.parse_purchase_date(msg) is not None
+        or _valid_claim_name(info)
     )
 
 
@@ -228,6 +247,14 @@ def decide_turn(
             return TurnDecision("followup", "price ask + context", 0.8, norm,
                                 frozenset(flags | {"price_followup",
                                                    "needs_history"}))
+        if any(kw in low for kw in _STOCK_ASK_KWS):
+            return TurnDecision("followup", "stock ask + context", 0.8, norm,
+                                frozenset(flags | {"stock_followup",
+                                                   "needs_history"}))
+        if any(kw in low for kw in _SELECT_ASK_KWS):
+            return TurnDecision("followup", "select ask + context", 0.8, norm,
+                                frozenset(flags | {"select_followup",
+                                                   "needs_history"}))
         if any(kw in low for kw in
                _rc._COMPARISON_FOLLOWUP_KW + _rc._SUPERLATIVE_KW):
             return TurnDecision("followup", "comparison phrasing + context",
@@ -249,7 +276,8 @@ def decide_turn(
     # (route_context) ไม่ copy keyword list เข้ามาใหม่
     _model_kws = _detectors.extract_model_keywords(norm)
     _info = _warranty.extract_customer_info(norm)
-    if _info.get("phone") or _info.get("order_id"):
+    if (_info.get("phone") or _info.get("order_id")
+            or _valid_claim_name(_info)):
         flags.add("contact_info")
         # token ที่เป็น contact value (เบอร์โทร/order id) ไม่ใช่ model keyword —
         # "0812345678"/"2508088B5T4W1D" ลอยๆ ต้องไม่กลายเป็น product query

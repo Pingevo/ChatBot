@@ -1741,3 +1741,13 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **ยืนยัน:** shadow-only — ไม่มี runtime caller ใหม่, app.py diff เดิม (helper+callsite เดียว), คำตอบจริงไม่เปลี่ยน
 
 - **Phase 1C review fix — context gate กว้างเกิน (reviewer probe พบ):** `bool(history)` นับทุก history เป็น context → "ราคาเท่าไหร่" หลัง greeting/human-request/claim history เป็น followup ผิด · **fix:** `_history_has_product_context()` — scan last 6 turns, normalize+ข้าม placeholder/noise, True เมื่อเจอ item_tag / extract_model_keywords / resolve_route(product_types|subtype|model_codes); exception ต่อข้อความ → ข้าม (ไม่ทำ decision พัง) · ใช้ gate step 7 ทั้ง link/price/compare · **TDD:** +5 tests (3 RED: greeting/human-request/claim history → not followup; 2 positive: product history → followup) · verify: turn_decision+shadow 70p · replay+iso 46/19/8 unchanged · runtime ไม่เปลี่ยน
+
+### 🛠 Phase 1D — residual gap hardening (stock/select + name fill) (2026-09-30, รอ review · ยังไม่ commit)
+
+- **Production owners (จาก code จริง):** stock/select ไม่มี detector เฉพาะ — ไหลผ่าน product path ปกติผ่าน anchor (`_SINGLE_ITEM_REF_KW` "รุ่นนี้" → CONV-ACTIVE) หรือ fetch · name fill อยู่ใน `warranty_flow._merge_claim_slots` — name valid ต้องมี space + ≤40 chars + ไม่มี digit; `extract_customer_info` (NER+regex) จับ "สมชาย ใจดี" ได้จริง
+- **แก้ (contract-only):**
+  - `_STOCK_ASK_KWS`/`_SELECT_ASK_KWS` semantic families ใน step 7 — product-context-gated เหมือน price/link → `followup` + `stock_followup`/`select_followup`
+  - `_valid_claim_name()` — mirror production slot rule; เข้า `_has_claim_signal` (claim_state+name → `claim_collect`) และ contact_info check ใน step 8 (name-only ไม่มี state → `unknown`+`contact_info` ไม่ใช่ product)
+- **TDD:** +8 tests — RED 4 (stock/select w/ product history, name w/ + w/o claim_state) → GREEN · negative: greeting/claim history → not followup, no-history stock → not product, `มี AC65B ไหม`+claim_state → ไม่กลืนเป็น claim_collect
+- **Sweep residual (ตั้งใจ — contract เห็นแค่ request-level context):** tx-q15 `รุ่นนี้ยังมีขายไหม` / tx-q18 `ขอลิงค์ตัวนี้` / sel-all-dead / avail-* / pos-image — single-turn, ไม่มี history → `unknown` ถูกต้อง (anchor จริงอยู่ใน DB — wiring phase ต้องส่ง anchor เข้ามา) · tx-q22q25 name turn → `unknown` เพราะ fake ไม่มี claim_state (incident เดิม)
+- **Verify:** turn_decision+shadow 78p · replay+iso 46/19/8 unchanged · validator 40 rows · py_compile · diff --check · forbidden=0 · runtime ไม่เปลี่ยน (shadow-only)

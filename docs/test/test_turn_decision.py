@@ -327,6 +327,56 @@ def test_cert_question_is_cert_flagged_product():
     assert "cert_question" in d.flags
 
 
+# ── Phase 1D: stock/select questions — context-gated like price/link ─────────
+
+def test_stock_ask_with_product_history_is_followup():
+    d = _decide("รุ่นนี้ยังมีขายไหมครับ", history=_PROD_HISTORY)
+    assert d.action == "followup", d
+    assert "stock_followup" in d.flags
+
+
+def test_select_ask_with_product_history_is_followup():
+    d = _decide("มีตัวไหนบ้าง", history=_PROD_HISTORY)
+    assert d.action == "followup", d
+    assert "select_followup" in d.flags
+
+
+def test_stock_ask_without_history_not_followup():
+    d = _decide("รุ่นนี้ยังมีขายไหมครับ")
+    assert d.action not in ("followup", "answer_product"), d
+
+
+def test_select_ask_after_greeting_history_not_followup():
+    d = _decide("มีตัวไหนบ้าง",
+                history=[{"role": "user", "text": "สวัสดีครับ"}])
+    assert d.action != "followup", d
+
+
+def test_select_ask_after_claim_history_not_followup():
+    d = _decide("มีตัวไหนบ้าง",
+                history=[{"role": "user", "text": "สินค้าเสียขอเคลม"}])
+    assert d.action != "followup", d
+
+
+# ── Phase 1D: name-only claim fill ───────────────────────────────────────────
+
+def test_name_only_with_claim_state_collects():
+    d = _decide("ชื่อ สมชาย ใจดี", claim_state={"stage": "collecting"})
+    assert d.action == "claim_collect", d
+
+
+def test_name_only_without_claim_state_unknown():
+    d = _decide("ชื่อ สมชาย ใจดี")
+    assert d.action == "unknown", d
+    assert "contact_info" in d.flags
+
+
+def test_product_query_with_claim_state_not_swallowed():
+    # claim_state มีอยู่ แต่ข้อความเป็น product query จริง → ห้ามกลืนเป็น collect
+    d = _decide("มี AC65B ไหมครับ", claim_state={"stage": "collecting"})
+    assert d.action != "claim_collect", d
+
+
 # ── shadow vs real fixtures (contract level, action boundary only) ───────────
 
 def _fixture_rows():
