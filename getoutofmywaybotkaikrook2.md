@@ -20,6 +20,117 @@
 
 ## กำลังทำ (active)
 
+### ✅ Phase 0D — ย้าย Shadow batch isolation เข้าสู่ legacy branch (verify ผ่าน · commit เฉพาะ 4 ไฟล์ `55ec118`)
+- **baseline:** `feature-legacy-shopee-evidence-retrieval` @ `ab1b853` มี Phase 0C/docs ค้างเดิม; index ว่าง · Shadow fix เดิมอยู่ commit `58f7262` บน branch แยก
+- **plan:** นำเฉพาะ `shadowReplyService.ts` และ regression scripts 3 ไฟล์เข้ามา; ไม่แก้/ไม่ stage ไฟล์ Phase 0C หรือ log นี้ · ทดสอบ service/route mock, typecheck, build, ตรวจ staged diff ก่อน commit
+- **ผลกระทบ:** batch ใหม่แยก bot state ตาม generation batch; single-message และ public `conversation_id` ไม่เปลี่ยน · ไม่มีการลบ state เดิม
+- **ผล verify:** RED ก่อนแก้ 18 ผ่าน/4 ไม่ผ่าน (state ID รอบใหม่ยังเท่าเดิม) → GREEN 22/22 · `tsc --noEmit` และ `npm run build` ผ่าน · commit `55ec118` มีเฉพาะ 4 ไฟล์ Shadow (`375 insertions/1 deletion`), ไม่ stage log/Phase 0C · ไม่ push/PR
+- **คงค้าง:** single-message ยังใช้ namespace เดิม; ไม่มี live Mongo replay
+- **cleanup หลังอนุญาต:** ยกเลิก cherry-pick ที่ค้างใน shadow worktree แล้ว; ลบ branch `fix/shadow-replay-batch-isolation-pr` และ `fix/shadow-replay-batch-isolation` · เก็บ commit ต้นฉบับ `58f7262` ด้วย local tag `backup-shadow-batch-isolation-58f7262`; worktree เดิมยังอยู่แบบ detached (ไม่ลบ directory) · legacy/Phase 0C ไม่ถูกแตะนอกจาก entry Phase 0D นี้
+
+### ✅ Phase 0C Final Semantic Closure (2026-09-30) — เสร็จ รอ review · ไม่มี runtime change · ยังไม่ commit
+
+- **งาน:** ปิด semantic gaps ของ harness แบบ TDD — RED mutation tests 5 ตัวล้มก่อน (nonsense action / answer-on-handoff / handoff_reason ผิด / web_search=True / card_status-absent) แล้ว implement จนเขียว
+- **ผลสำคัญที่พบจาก hardening จริง:**
+  - `tx-q15-unlist-anchor` เดิม "reproduce" ได้ — คำอธิบายที่สอดคล้องคือ **fake-DB mismatch** (.env-era run อาจชี้ `ADMIN_MONGO_DB` ไป db จริง → timeline seed ใน fake `chatbot_admin` หาไม่เจอ → anchor หายเอง) — เป็น plausible explanation ไม่ใช่ข้อพิสูจน์ เพราะห้ามอ่าน .env. ตอน suppress dotenv แล้ว boundary ทำงานถูก (3001 status=unlisted ถึง LLM จริง) → reclassify **pending_live_replay** (prod drop ต้อง live evidence)
+  - `sel-all-dead-evidence` + `expected` block บน 13 non-L3 fixtures = false-green claims → migrate เป็น `expectation_note` metadata; validator reject `expected` ถ้าไม่มี level 3
+- **แก้:** action enum {answer,handoff,locked,claim_collect,order_info} + answer↔handoff/no-answer asserts + web_search equality ทั้งสองทิศ + llm_card_status absent-item fail + `_ID_EXPECT_KEYS` ชื่อจริง (llm_item_ids/llm_must_not_item_ids/card_status keys, escape=`noncatalog_item_reason`) + exec-mode นับเฉพาะ L3 (**25 flag_off / 0 grouped_on / 13 contract_only** ⚠ superseded — validator สดหลังเพิ่ม policy fixtures = **27 flag_off**; ดู Review Closure ท้ายไฟล์) + negative control base==[] + fail ต้องชี้ `request coverage '<key>' missing` + `_card_group` enumerate `_SUBTYPE_TO_TYPES` (ไม่ copy keyword list) + docstring ซื่อสัตย์ว่า L2 ครอบ planner→bucket→pool→selection **ไม่ครอบ** public executor/source adapters + import-time tripwires (dotenv stub, socket, MongoClient, urlopen, HF env pins, `MONGO_DB`/`ADMIN_MONGO_DB` fake names) ก่อน shopeechat import + subprocess import probe
+- **filter-policy corpus (item 7):** `tx-policy-wrong-model-filter` (answer_level, owner=policy_eligibility — transcript wrong-model filter; probe ยืนยัน route `answer_general`/`return_policy` ctx กว้าง ~68 chars ไม่มี structured decision — ไม่ fabricate green) + `pos-policy-seller-wrong-item` (⚠ superseded claim: เดิมเขียน "counterexample กัน deny-all" — จริง assert แค่ answer ไม่ว่าง/ไม่ handoff/ไม่ web_search; ไม่ได้ assert route/LLM/eligibility — ดู Review Closure ท้ายไฟล์) · เพิ่ม `llm_general_qtype` assertion + owner `policy_eligibility` เข้า taxonomy · เพิ่ม qtype/context capture ใน `_CapturedLLM`
+- **ผล:** validator 40 rows ผ่าน (28 pos / 8 inc / 2 answer_level / 2 pending) · replay `44 passed, 19 skipped, 8 xfailed, 5 warnings` ×2 deterministic · compile+diff check ผ่าน · runtime/v2v3/ChatAdminWeb แตะ=0 · ไม่มี commit
+- **เพดาน:** `gold-q187` + `tx-q15` pending live replay · grouped-selection-on runtime ยังไม่มี fixture · L2 ไม่ครอบ source adapters (fetch/unit/KB queries) ตาม docstring · q15 ต้อง live ยืนยัน prod drop จริง
+
+### 🧭 เพิ่ม filter wrong-model policy incident เข้า rebaseline roadmap (2026-09-30) — docs-only เสร็จ · runtime ยังไม่แก้
+
+- **หลักฐาน:** transcript 12 เทิร์นร้าน Youpin — ลูกค้าสั่งไส้กรองผิดรุ่น แต่ Q5/Q6/Q10/Q11/Q12 บอทรับรองว่าเปลี่ยนได้ ทั้งที่ business rule จริงคือกรณีลูกค้าเลือกผิดรุ่นไม่รับเปลี่ยน/คืน
+- **root cause จาก code flow:** `return_policy` → `knowledge_base.build_general_context()` รวม FAQ + policy snippets จาก description สินค้า NORMAL แบบไม่ผูก shop/category/reason/condition → `llm.answer_general()` รับ bot history เดิมด้วย → คำรับรองผิดรอบแรกถูกทำซ้ำ; `guards.enforce()` ตรวจ positive wording ใน prose แต่ไม่มี case-specific eligibility decision จึงไม่ใช่ owner ที่แก้ต้นเหตุ
+- **plan decision:** ห้าม `if filter/shop/sentence`; เพิ่ม structured/versioned policy records + `PolicyQuery`/`PolicyDecision` owner ใน Revised Phase 5, โดย Phase 0 เพิ่ม incident/positive counterexamples, Phase 1 แยก policy need, Phase 2 รักษา subject/order facts, Phase 7 ส่ง bounded policy evidence, Phase 8 validate claim ที่ boundary
+- **safety semantics:** `eligible` เท่านั้นจึงรับรองว่าเปลี่ยน/คืนได้ · `ineligible` อธิบายตาม rule · `unknown/admin_review` ห้ามทั้งรับรองและปฏิเสธ; seller-sent-wrong/defect/damage ต้องแยกจาก customer-selected-wrong-model
+- **scope:** แก้เฉพาะ rebaseline plan + active log; ไม่แตะ runtime/test fixture ในรอบนี้ และไม่ชน Phase 0C ที่กำลังทำ
+
+### ✅ Revised Phase 0C — Harness Semantic Hardening (2026-09-30) — เสร็จ รอ review · ไม่มี runtime change · ยังไม่ commit
+
+- **งาน:** ปิดช่องเขียวปลอมใน replay harness — ทุก expectation key ต้องมี assertion จริง, offline guard ไม่กลืน HTTP นอก allowlist, fake fetch รักษา shop boundary
+- **RED ที่จับได้ก่อนแก้:** validator allowlist fail 3 keys พร้อม fixture id — `expected.link_policy` (tx-q09, tx-q18) + `selection_expect.request_type_coverage` (sel-quota-multi-type) — ทั้งคู่เคยเป็นเขียวปลอม
+- **A:** validator มี allowlist ครบทุก block (top-level/expected/profile_expect/slot_expect/availability_expect/selection_expect) — unknown key fail พร้อม `fixture_id.key` · meta-test `test_harness_validator_rejects_unasserted_keys` พิสูจน์ `selected_magic_product` ถูก reject
+- **B:** `test_l2_selection_contract` เขียนใหม่ผ่าน production chain จริงทั้งเส้น: `build_retrieval_profile`→`build_retrieval_slots`→`build_retrieval_relations`→`build_grouped_retrieval_requests`→`retrieval_executor._bucket`(per-request)→`build_candidate_pool`→`select_for_llm_context` · assert `request_type_coverage` ผ่าน `result.by_request` + per-request quota (subtype ที่ขอต้องไม่ถูก starve) + isolation (card ต้องอยู่ใน request scope) · negative control `test_l2_selection_quota_negative_control`: drop docs ของแต่ละ coverage key → assertion ต้อง fail (ไม่ vacuous)
+- **C:** `link_policy` assert ที่ **L3 LLM-input boundary** (cards ที่ส่งเข้า LLM ⊆ subject ids จาก `llm_item_ids`) — จับ incident จริง: **tx-q09 มี 3004/3005/3006 รั่วเข้า llm input** ตอนขอ link → reclassify answer_level→incident (conversation_subject) · tx-q18 เดิม incident อยู่แล้ว assertion ยืนยันเพิ่ม · prose/link text ที่ LLM สร้างอยู่นอกขอบเขต offline (answer-level)
+- **D:** `_fake_fetch` แก้ shop boundary — filter ว่าง/ตรง shop → docs; ไม่ตรง → `[]` (เดิมคืน docs ทุกกรณี) · regression `test_harness_fetch_shop_boundary`
+- **E:** `_fake_urlopen` เหลือ allowlist เฉพาะ `bot-handoff` endpoint — URL อื่น `pytest.fail("OFFLINE LEAK")` · tests: handoff URL capture ได้ + `example.com` fail ด้วย tripwire
+- **F:** flag coverage ตรง — `_expectations_met` assert flag-off fixture ต้อง `chat_engine=="legacy"`; validator พิมพ์ exec mode: **38 legacy_flag_off / 0 grouped_selection_on** → L3 = Legacy default flag-off orchestration เท่านั้น, grouped contract พิสูจน์ที่ L2
+- **fixture fix:** `sel-all-dead-evidence` — planner ไม่สร้าง request ให้ generic browse ("มีตัวไหนบ้าง" → slot-open empty types → n_reqs=0) ทำให้ flat-request เดิมเป็น fabrication → ย้ายเป็น L3 expectation ตามพฤติกรรมจริงที่ probe ได้ (dead items ถึง llm input พร้อม status, resp products=0)
+- **ผล:** `36 passed, 18 skipped, 9 xfailed, 5 warnings` ×2 รันเหมือนกัน (~1.4s) — **5 warnings เป็น DeprecationWarning (FastAPI on_event) ไม่ใช่ functional failure** · validator 38 rows: 27 positive / **9 incident** / 1 answer_level / 1 pending
+- **เพดาน:** `gold-q187` ยัง pending_live_replay (source recall ต้อง Mongo จริง) · grouped-selection-on runtime path ยังไม่มี fixture (ตาม rollout plan — L2 contract cover อยู่) · ไม่มี commit
+
+### ✅ Revised Phase 0B — Replay Harness Hardening & Fixture Integrity Gate (2026-09-30) — เสร็จ รอ review · ไม่มี runtime change · ยังไม่ commit
+
+- **งาน (user สั่ง):** ทำให้ replay suite offline/deterministic จริง + audit fixture integrity ทุก row ก่อนเริ่มเฟสถัดไป — งานนี้แก้เฉพาะ test harness/fixture/evaluator/docs
+- **root cause ของ non-determinism/HF hang (พิสูจน์แล้ว ไม่ใช่เดา):** `app.py:27` `load_dotenv` ตอน import → `.env` เข้า process → branch ที่อ่าน env ต่างกันตามเครื่อง:
+  1. engine routing `USE_CHAT_V3`/`USE_LEGACY_CHAT` (app.py:612/621)
+  2. grouped flags `runtime_config` DB-absent → env fallback (`USE_GROUPED_RETRIEVAL_*`) → `retrieval_executor` → `units.fetch_unit_evidence` → `units._vector_search` → `embedding.embed_query` → `_get_model` → `SentenceTransformer("BAAI/bge-m3")` → **HF hub download ~2GB = hang** (เส้นทางเดียวกันผ่าน `product_store.vector_search` / `knowledge_base.search_qa` — npz 3 ไฟล์มีอยู่จริงใน exports/)
+  3. cert path `[CERT]` → `product_store._cached_stock_client` → **real MongoClient(STOCK_URI)** — tripwire จับได้จริงตอน tx-q10 (connect ไป itStock จริง ผ่าน pymongo monitor thread)
+  4. `warranty_flow`/`responses` handoff POST ยิง `urllib.request.urlopen` ตรง (ไม่ผ่าน `app._send_handoff`) — เคย patch ไม่ครอบ
+- **fix (owner boundary เท่านั้น):** autouse `_offline_guard` — fail เมื่อ `socket.socket.connect` / `pymongo.MongoClient()` / `urlopen`(unhandled) / `embedding._get_model` ถูก reach · `_install` pin env (`USE_CHAT_V3=0`,`USE_LEGACY_CHAT=1`,`USE_UNIT_INDEX=0`) + patch flag fns ตาม `fx.runtime_flags` + `embed_query/embed_texts` → zero vector + `_cached_stock_client`/`persona._cached_admin_client`/`order_store._ORDER_CLIENT` → FakeClient + `urlopen` → capture payload + `BytesIO(b"{}")`
+- **fixture fixes:** `inc-ad1404t-relation` shop→KingGadgets (ตรง catalog) · `tx-q07`/`tx-q09` → `answer_level` (boundary contract ผ่าน — incident อยู่ฝั่ง answer) · `gold-q187` rewrite ตาม gold row จริง (ZMIThailand compare CTC620W vs AC30S/T/301) → `pending_live_replay` เพราะ recall-miss ต้องใช้ Mongo query จริง · ลบ `fetchable_item_ids` ทั้งระบบ (fabricate failure) · `tx-q22q25` ประกาศ `synthetic_pii=["phone"]`
+- **validator ใหม่:** `docs/test/validate_legacy_turn_fixtures.py` — shop/catalog consistency, expected-ids ∈ catalog, forbidden fetchable mechanism, status/taxonomy/incident_levels honesty, PII scan → **38 rows ผ่าน: 27 positive / 8 incident / 2 answer_level / 1 pending**
+- **ผลจริง (3 รันติด เหมือนกันเป๊ะ):** `33 passed, 19 skipped, 8 xfailed` — pytest ~1.2s (wall ~2.1s) จากเดิมที่ค้าง >4 นาที · xfail 8 = reproduced pipeline incidents (L1×1 ad1404t, L3×7) · skips 19 = no-expectation 18 + pending 1
+- **evaluator:** `gold_metrics` แสดง `n_gold_total/evaluated/no_record` + `handoff_policy_hit_rate` (denominator = expected-handoff evaluated) + dict-guard products — rates นับเฉพาะ rows ที่ match จริง
+- **verify:** py_compile OK · `git diff --check` clean · runtime `chatbot/shopeechat/` diff = **0 ไฟล์** · ไม่มี HF/Mongo/network เหลือ (tripwires prove)
+
+### ✅ Revised Phase 0 — Gold Replay Baseline & Failure Ownership Gate (2026-09-30) — เสร็จ รอ review · ไม่มี runtime change · ยังไม่ commit
+
+- **งาน (user สั่ง):** สร้าง baseline/replay gate พิสูจน์ว่า chatbot พังตรง owner ใด ก่อนเริ่มแก้ architecture ใน Revised Phase 1 — ทำให้ known incidents "พังแบบอธิบายได้และทำซ้ำได้" เท่านั้น ไม่ต้องทำให้เขียว
+- **baseline ก่อนแก้:** branch `feature-legacy-shopee-evidence-retrieval` HEAD=`ab1b853` (Phase 6) · uncommitted = rebaseline docs เดิม 3 ไฟล์ (historical plan status map, rebaseline plan ใหม่, log นี้) — ห้าม revert/stage รวม · **ไม่มี Phase 7 (old) diff ค้าง — old Task 7 superseded โดย rebaseline plan**
+- **scope:** fixtures + replay test + gold join + evaluator reporting + token/web baseline — ทั้งหมดอยู่ใต้ `docs/test/` + log
+- **files ที่อนุญาต:** `docs/test/fixtures/legacy_turn_incidents.jsonl` (สร้าง) · `docs/test/test_legacy_turn_incident_replay.py` (สร้าง) · `docs/test/gold_retrieval.jsonl` (แก้ตาม review join) · `docs/test/eval_retrieval.py` (แก้เฉพาะที่จำเป็น) · log นี้
+- **files ที่ห้ามแตะ:** `chatbot/shopeechat/` ทุกไฟล์ runtime (app.py, llm.py, product_store.py, handoffs.py, warranty_flow.py, route_context.py, retrieval_* ทั้งหมด) · ChatAdminWeb · botworker · v2/v3 · prompts · runtime flags/config · `.env`/secrets · file 1 (frozen) · SRS_SSD.md (Phase 0 ไม่เปลี่ยน function — ถ้าจำเป็นต้องแก้ runtime ให้หยุดรายงาน)
+- **known incidents (sources):** GitHub #26-#30 (จาก rebaseline incident map + 5F log — GitHub API unreachable ไม่มี gh/MCP auth) · 39-turn mistorethailand transcript (attachment c5a584d1 — Q6-Q10 subject drift, Q15-Q18 WPB100L UNLIST/link swap, Q22-Q39 claim/handoff state, Q12-Q13 PB200P positive) · AD1404T relation · Mi 17 aliases · multi-subtype `cable_only`/`c-to-c` vocab mismatch (Phase 5 closeout P8a) · availability 7 modes · sticker/noise · human-owned ticket
+- **ผล gold join (82 review rows vs 103 gold):** approved 67 → `review_status=accepted` · rejected 15 → 12 มี correction เป็น `corrected` (expectations เดิมคงไว้ — note "corrected:" อยู่แล้ว) · 24 gold rows ไม่อยู่ใน review → `provisional` · review-only ids 3 (q132 + 2) ไม่ merge เข้า gold (ไม่มี original row) · ไม่มี dup/malformed/PII (scan phone/email/tracking clean; `conv-shp_*` 9 ids เก็บเป็น fixture id เท่านั้น) · sidecar `fixtures/gold_retrieval.review.json` 82 rows
+- **fixture schema:** `legacy_turn_incidents.jsonl` 38 rows — 15 incident + 23 positive · levels: L1 profile/parse · L2 availability/selection · L3 multi-turn `chat()` boundary (fake Mongo collections real-shaped: float item_id, `model[].stock_info_v2.summary_info`, `tier_variation`, `item_status`, `short_link`; fake intent/LLM/handoff POST; deterministic)
+- **incident gate:** `_gate(fx,fails,level)` — incident ที่ reproduce ใน `incident_levels` → xfail พร้อม owner+evidence · incident ที่หายไป → hard fail บังคับลบ flag · positive → assert ตรง
+- **reproduction ที่ยืนยัน (9 xfail — deterministic):** `inc-ad1404t-relation` L1 (relation/cable type ไม่ถูก parse, owner=profile_or_slot_parse) · `tx-q08` price follow-up pair drift (llm [3002] ขาด 3003, conversation_subject) · `tx-q10` cert → llm input ว่าง (answer_context) · `tx-q15` UNLIST anchor หายจาก llm input (canonical_availability) · `tx-q18` link follow-up ดึง 3002/3003 ต้องห้ามเข้า llm (conversation_subject) · `tx-q22q25` claim name/phone ไม่ persist — turn1 โดน general warranty-policy กลืน (turn_action) · `tx-q12` PB200P (สินค้าที่ถามเอง 150W) หลุดจาก llm input ทั้งที่ charger/cable อื่นเข้า (compatibility_evidence) · `iss30-claim-plus-product` multi-intent → claim collect ไม่เริ่ม (turn_action) · `gold-q187` AC30 recall ว่างทั้งที่ docs อยู่ (source_recall)
+- **positive/regression ผ่าน:** 33 pass — anchors, pair continuity, link follow-up, order lookup, warranty-question-vs-claim, post-handoff lock, noise/sticker, human-owned ticket, availability 6 modes (L2), selection quota, compat unknown≠negative, gold-q203/q204
+- **focused suites:** 373 pytest pass (profile/slots/relations/hints/executor/pool/selection×2/evidence/availability×3/5F-anchor/link/cert-ctx/claim/handoff/spec/token/anger/validate/eval/anchor-compare/alias/code-extract/troubleshoot) + script suites: route_context ALL PASS, cert_standards 66/0, guards ALL PASS, general_qtype 27/27, qa_context 4/4, compat_mode 144/144 — `test_timeline_card_refresh` 7/8 (listing cover-image refresh fail = **pre-existing runtime gap** ไม่เกี่ยว Phase 0)
+- **token/web baseline (measured, `shadow_replies` n=6611 read-only):** input tok p50=12,790 p95=35,279 (n=5,588) · output p50=161 p95=295 (n=4,749) · cost p50=$0.0041 p95=$0.0126 (n=6,611) · products/turn p50=1 p95=30 · handoff 774 (11.7%) · web_search_used=0 ใน sample · steps n=77 เท่านั้น · per-turn llm_calls ไม่มี field → **unavailable** · `SYSTEM_INSTRUCTION`=34,304 chars · `KB_SYSTEM_INSTRUCTION`=3,573 · `_LLM_CONTEXT_LIMIT` default=30 (range 10-50)
+- **eval_retrieval.py:** เพิ่ม `--by-owner`/`--by-review-status` (reuse group metrics เดิม) + `handoff_policy_hit_rate` + `n_evidence_required` + dict-guard `_product_rows` (legacy result formats) — answer exact-string ไม่ใช่ score อยู่แล้ว · ไม่มี results file ที่ map gold ids (replay live เท่านั้นสร้างได้ — out of scope)
+- **verify:** replay `33 passed, 18 skipped, 9 xfailed` · focused 373 pass · `py_compile` OK · `git diff --check` clean · runtime files changed = **0** · ยังไม่ stage/commit
+
+### ✅ แยก historical plan กับ rebaseline roadmap หลัง Phase 5/6 incident audit (2026-09-30) — docs-only เสร็จ รอ review/commit
+
+- **งาน:** อ่าน historical plan ทั้ง 3,457 บรรทัด, เทียบ implementation/commits จริง, issues #26-#30 และ transcript 39 เทิร์น แล้วแยกเอกสารเป็น historical plan ฉบับเต็มกับ rebaseline roadmap ฉบับใหม่
+- **root cause ที่ยืนยัน:** grouped retrieval ถูก wire แบบ augmentation เข้า legacy KB/main merge หลาย boundary; action/subject/state/evidence schema ยังมีหลาย owner; Phase 5C/5F จึงเพิ่ม safety hotfix บน flow ที่ยังไม่รวมศูนย์ และ tests ส่วนใหญ่พิสูจน์ helper/mocked fixture มากกว่า multi-turn runtime กับ schema จริง
+- **ข้อห้าม:** docs-only; ไม่แก้ runtime; ไม่เพิ่ม case-specific keyword/model/shop logic; ไม่เชื่อ issue suggestion โดยไม่ trace code; รักษา Phase 5 Closeout diff ที่ค้างอยู่; ไม่แตะ `.env`/secret/DB write
+- **output:** เก็บ `2026-09-21-legacy-shopee-evidence-retrieval-implementation-plan.md` ฉบับเต็มและเพิ่ม status map (`KEEP / PROVISIONAL / SUPERSEDED / NOT STARTED`); สร้าง `2026-09-30-legacy-shopee-unified-turn-evidence-retrieval-rebaseline-plan.md` แยกสำหรับทิศทางใหม่
+- **ผล:** รายละเอียดเดิมไม่ถูกลบ; roadmap ใหม่จัด Revised Phase 0-10: baseline → turn owner → subject/claim state → canonical schema → source union → field evidence/compat → selector → context/token/web → answer boundary → workflow/handoff → cleanup/release
+- **สถานะงานเดิม:** Task 1-4 และ grouped retrieval core = accepted foundation; Phase 5C/5F/Phase 6 = provisional ต้อง migrate+ลบ local rules; old Task 5/5A/6/7 interfaces = superseded ห้าม implement ตามชื่อเดิม
+- **issue coverage:** map GitHub #26-#30 และ transcript Q6-Q10/Q15-Q18/Q22-Q39 ไปยัง owner phases; Q12-Q13 ถูก pin เป็น positive regression
+- **confidence:** owner/sequence ระดับ architecture มีหลักฐานเพียงพอจาก code/callsites/issues/replay; interface และ scoring บางเฟสยัง provisional และต้องผ่าน Revised Phase 0 replay gate ก่อน freeze
+- **verify docs:** historical plan 3,485 บรรทัด + rebaseline roadmap 484 บรรทัด · code fences สมดุล (200/14) · placeholder/status/link scan clean · `git diff --check` clean · diff มีเฉพาะ plan docs + active log ไม่มี runtime/test/env
+
+### 🔍 Phase 5 Closeout Gate — audit + รายงานตัดสินใจ (2026-09-24) — audit-only ห้ามแก้ runtime/ห้าม commit
+
+- **งาน (user สั่ง):** ตรวจจากโค้ด/flow/probe จริงว่า Phase 5 ปิดได้หรือยัง — status table ทุก sub-task (original Task 5 live refresh, original 5A source union, 5A planner, 5B1-5B3-D, 5C, 5D, 5E, 5F, Phase 6 multi-subtype) + gap original Task 5/5A vs grouped pipeline + runtime flow audit flag OFF/ON + probe ≥8 กลุ่ม + token/description audit + focused tests
+- **กฎ:** ห้ามแก้ runtime ก่อน audit จบ · ห้าม commit จนรายงาน+อนุมัติ · ห้ามเชื่อ session history/comment อย่างเดียว · ห้าม hardcode product/model/shop · ห้ามแตะ v2/v3/ChatAdminWeb/botworker · ห้ามเพิ่ม helper/nested fn ใน app.py · ใช้ `.venv/bin/python` เท่านั้น · Mongo ผ่าน `load_dotenv()` เท่านั้น · Product DB read-only
+- **output:** รายงานตัดสินใจ (ปิด Phase 5 ได้ไหม / ต้องมี Phase 5G ไหม / original Task 5/5A ยังต้องทำไหม / ไป Phase 7 ได้หรือยัง)
+- **ผล audit (2026-09-24, code+probe จริง):**
+  - **live flags:** `grouped_retrieval_shadow_enabled`=True (env) · `grouped_retrieval_selection_enabled`=True (DB `system_configs.main_config` — toggle ใน /config ทำงานจริง, TTL 5s)
+  - **wiring จริง:** `_grouped_sel` compute ครั้งเดียวที่ app.py:~1868 (flag ON เท่านั้น, lazy import, exception→None→fallback legacy) → merge เข้า `merged_products` KB path (~2325) + `products` main path (~4726) — **augmentation ไม่ใช่ retrieval path ที่ 3**; `merge_selected_products` dedupe identity `item_id→unit_id→model_id` + cap `_llm_ctx_limit`(30)
+  - **ไม่ wire:** item-tag early return (~1074, อยู่ก่อน profile สร้าง — by design), `web_search` LLM2 reanswer (web_search.py:969 — module แยก fetch เอง), chat_v2 (out of scope)
+  - **original Task 5/5A:** helper ทุกตัว (`normalize_shopee_id`, `refresh_candidate_availability`, `_refresh_cards_from_docs`, `_merge_candidate_sources`, `candidate-mode`, `bounded_union`) **ไม่มีใน code — มีแค่ใน plan doc**; `eval_retrieval.py` ไม่มี `--candidate-mode`; unit early-return ใน `fetch_products` (product_store:3120) ยังอยู่แต่ dormant เพราะ `USE_UNIT_INDEX` unset; grouped pipeline supersede ที่ executor (units+legacy ต่อ request) + `candidate_pool.build_candidate_pool` (cross-source dedupe/union) — ยกเว้น `requested_variant_status`/`has_other_sellable_variants` annotation ที่ไม่มีทดแทน
+  - **probe flag OFF vs ON (Mongo จริง, shop=ZMIThailand, ไม่ยิง LLM):**
+    - P1 AD1404T relation: OFF=30 adapter ไม่มีสายเลย (bug เดิม) · ON=req-0 adapter 3 subject + req-1 relation_target cable 3 ตัว hits=(display,length_m,speed) — **PASS**
+    - P2 compare AC65B/AC65B2: OFF=คู่จริงปนกับของไม่เกี่ยว · ON=4 subject (sellable + unavailable_subject:normal_zero_stock label ชัด) + hidden_mentions=1 (ZMI AC65B UNLIST) + extra_context note — **PASS**
+    - P3 follow-up "แนะนำอันไหน 2 อันนี้": profile resolve types=phone (current ชนะ anchor) → grouped selected เหลือน้อย แต่ merge กับ base products อยู่ดี (augmentation) — **PASS+ข้อควรระวัง** (probe ไม่มี conversation_products timeline จริง)
+    - P4 "ราคาเท่าไหร่": anchor carry ทำงาน codes/types จาก anchor — **PASS**
+    - P5 WPB100L xiaomi: ON promote WPB100L เป็น subject `unavailable_subject:normal_zero_stock` + 3 alternatives + note ห้ามบอกว่าซื้อได้ — **PASS**
+    - P6 link follow-up: `_prepare_link_followup` ตัด short_link ของ UNLIST anchor + note "ยังไม่เปิดขาย ห้ามส่งลิงค์" (keep=True เพราะมี note) — **PASS**
+    - P7 "รุ่นไหนมี มอก. บ้าง": subtype carry adapter จาก history ทั้ง OFF/ON — **PASS** (cert evidence คุณภาพอยู่ที่ data/KB ไม่ใช่ retrieval)
+    - P8a multi-subtype หัวชาร์จ+สายชาร์จ: **พบ gap จริง** — elig มี cable_only=12 + adapter=8 แต่ selected 3 ตัวเป็น adapter ล้วน เพราะ coverage check เทียบ `card subtype in req.subtypes` โดยตรง: request ใช้ vocab `cable` แต่ unit doc ใช้ `charger_subtype=cable_only`/`cable_subtype=c-to-c` → coverage (ab1b853) ไม่ fire; base merge ยังพก cable อยู่จึงไม่หายจาก context แต่ selected priority ผิด — **FAIL ระดับ quality (Phase 6 scope)**
+    - P8b เคส+ฟิล์ม: 2 requests quota แยก, film 0 eligible (device_mismatch ถูกต้อง) — **PASS**
+    - claim/handoff: `หัวชาร์จ a18t ใช้งานไม่ได้`/`ชาร์จช้ามากขอเคลม`/`เสียงไม่ชัด`/`สินค้าเสีย`/`ช้ามากไหมคะ` → ไม่ fire anger ✓; `ร้านไม่ตอบเลยโว้ย`/`ผิดหวังมาก` → customer_frustration ✓; `เฮ้ย รับคอมมิชชั่น` → promo guard ✓; `ขอคุยกับแอดมิน` → human_request ✓; `malfunction_safe_check`+`detect_claim_request` ทำงาน — **PASS**
+  - **token audit:** `_LLM_CONTEXT_LIMIT=30` · `SYSTEM_INSTRUCTION` 34,304 chars · `description_excerpt` ≤3,000 chars/ใบ (`_clean_description` กรอง section ตามคำถาม) · `include_desc` = `intent.needs_description`(≥0.7) OR `desc_kw` (list กว้าง — เกือบทุก spec-ish คำถาม match) → ส่ง description เฉพาะ spec/warranty/compare/detail ไม่ใช่ทุกคำถาม · worst case ≈ 30×3,000 chars descriptions + 34k chars system · `web_search` LLM2 reanswer = llm.answer ครั้งที่ 2 เต็ม (system ซ้ำ) · **พบ dead code:** `merged_context` app.py:2301 build context ด้วย include_description=True แต่ไม่เคยถูกส่ง (CPU waste ไม่ใช่ token)
+  - **tests:** 226 focused tests PASS · py_compile 13 ไฟล์ OK · `git status` clean ก่อน audit (มีเฉพาะ waythrough entry นี้แตะ)
+  - **verdict ในรายงาน:** Phase 5 ปิดได้แบบมีเงื่อนไข — gap ที่พบ (P8a subtype vocab mismatch, requested_variant annotation, dead merged_context, merge boundaries 3 จุดใน app.py) จัดเป็น Phase 5G-lite หรือ Phase 6 follow-up ไม่ใช่ blocker
+
 ### ✅ อัปเดต master retrieval plan หลัง 5F — reality/deviation/complexity gate (2026-09-24) — docs-only
 
 - **เหตุผล:** user ชี้ถูกว่าแผนเดิม drift จาก implementation จริงและ helper เริ่ม implicit/nested มากขึ้น โดยเฉพาะ grouped retrieval prototype + 5F routing hotfix ที่อยู่นอกแผน retrieval เดิม
@@ -1537,3 +1648,36 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 ### Residual risk
 - `per_request_limit=3` ยังตัดสินค้าขายได้ rank ต่ำใน subtype เดียวกัน — trade-off context size เดิม
 - coverage swap เลือกตาม subtype field ใน card — card ไม่มี subtype field ไม่ถือเป็น representative (conservative)
+
+---
+
+## Phase 0C — Review Closure: import-boundary isolation + report honesty (แก้ 2026-09-30)
+
+### Root causes → fixes (TDD)
+
+| Finding | Root cause | Fix | RED→GREEN |
+|---|---|---|---|
+| A: import stubs leaked process-wide | lambdas ติดตั้ง dotenv/socket/urlopen/MongoClient ตอน collection ไม่มี restore — test module อื่นใน pytest process เดียว inherit patches | stub เฉพาะใน try/finally รอบ `from shopeechat import ...` — restore originals ทันทีหลัง import | `test_replay_import_isolation.py` (ไฟล์แยก ไม่มี autouse guard): RED `leaked=[...4 lambdas]` → GREEN; ต้องอยู่คนละ module เพราะ `_offline_guard` re-patch ตอนเทสต์ mask leak |
+| B: `pos-policy-seller-wrong-item` อ้าง "กัน deny-all" เกินหลักฐาน | assert แค่ answer ไม่ว่าง/ไม่ handoff/ไม่ web_search — ไม่ได้ assert route, LLM-call count หรือ eligibility | title/boundary_note เขียนใหม่ตรง assertion จริง (option A — ไม่เพิ่ม evaluator logic); eligibility/deny-all รอ Phase 5 PolicyDecision | fixture text only — validator 40 rows ยังผ่าน |
+| C: policy incident note ไม่แยก proven/unproven | boundary_note รวม claim เดียว | แยกชัด: PROVEN=route answer_general/qtype=return_policy ภายใต้ fixture+stub; NOT PROVEN=real classifier route/live FAQ text/eligibility | fixture text only |
+| D: L3 count/คำอธิบายเกินหลักฐาน | รายงานเดิม L3=25 stale; "legacy engine actually ran" อ้างเกิน | ใช้ validator output สด (L3=27); comment `_expectations_met` ชี้ chat_engine=engine-flag check ไม่ใช่หลักฐานทุก adapter รัน | live output |
+| E: tx-q15 ยัง unproven | pending_reason เดิมฟันธง artifact เกินไป | เขียนใหม่: fake-DB mismatch = คำอธิบายที่สอดคล้องกับอาการ ไม่ใช่ข้อพิสูจน์; live replay ยังต้องทำ | fixture text only |
+| F: warnings attribution ผิด | รายงานเดิม "5 warnings = FastAPI ทั้งหมด" | output สด: 4× FastAPI `on_event` (app.py:77/:107 + fastapi internals) + 1× google.genai.types `_UnionGenericAlias` (py3.17) | grep warnings summary |
+
+### ผล verify สด
+- validator: 40 rows — 28 positive / 8 incident / 2 answer_level / 2 pending_live_replay · **L3=27** · grouped-on=0 · contract-only=13
+- replay+isolation (combined same process): **45 passed, 19 skipped, 8 xfailed, 5 warnings** — isolation test พิสูจน์ไม่มี lambda ค้างใน globals
+- py_compile 4 files OK · git diff --check clean · runtime/ChatAdminWeb/.env diff = 0
+- ไม่มี commit/stage — รอ review
+
+### ✅ Review Closure รอบ 2 (2026-09-30) — เสร็จ รอ review · ไม่มี runtime change · ยังไม่ commit
+- F1 (option A — ลด claim): `pos-policy-seller-wrong-item` title/note เขียนใหม่ — assert เพียง answer ไม่ว่าง + ไม่ handoff + ไม่ web_search; ไม่อ้าง route, no-LLM-call, eligibility หรือ deny-all guard (รอ Phase 5 PolicyDecision)
+- F2 (subprocess identity probe + bound-alias hardening): `test_replay_import_isolation.py` — fresh interpreter ติดตั้ง fail-fast trap บน `dotenv.load_dotenv` **ก่อน** import replay module (app.py ส่ง explicit `.env` path — cwd sentinel เดิมพิสูจน์ไม่ได้และ unsafe-on-regress → ถูกตัดออก) → snapshot identity 4 provider globals → import → assert trap ไม่ถูกเรียก + identity คืนเหมือนเดิม (`is`) **+ เช็ก module-bound aliases `replay.app.load_dotenv` / `replay.knowledge_base.load_dotenv` ด้วย** (รอบแรกเช็กแค่ provider — `from dotenv import load_dotenv` bind lambda ไว้ใน module namespace ทำให้ restore provider เดียวไม่พอ) · ordering-independent · RED 1: ถอด dotenv-stub ใน module → trap จับ `load_dotenv('repo/.env')` fail ก่อนอ่าน `.env` จริง · RED 2: alias check → `bound dotenv aliases installed: app.load_dotenv, knowledge_base.load_dotenv` (lambda ค้างจริง) → fix: finally restore aliases ด้วย `_orig[0]` → GREEN · `_offline_guard` เพิ่ม `_dotenv_guard` fail-fast patch ทั้ง 3 bindings (dotenv/app/knowledge_base) — ห้าม silent-False lambda + meta-test `test_offline_guard_blocks_dotenv_aliases` พิสูจน์ทุก binding trip `OFFLINE LEAK` · ยังไม่พิสูจน์ global อื่นนอก set นี้และ env pins
+- F3 (supersede-note): entry Phase 0C Final Semantic Closure เก่า — annotate ตัวเลข 25→27 flag_off, claim "กัน deny-all", และ tx-q15 เป็น plausible explanation ไม่ใช่ข้อพิสูจน์ (history คงไว้ ไม่ลบ)
+
+### Phase 0 follow-up findings — shadow rerun 2026-09-30 (จดเข้า rebaseline plan แล้ว)
+- **Runtime check:** bot rerun ผ่าน screen session `shadowbot-debug`; รอบที่ bot พร้อมจริง shadow conversation `shp_152520383445167602` จบครบ `done docs=39` และ Python `/chat` เป็น `200 OK` ทุก turn — error "ข้อความที่ 10" ก่อนหน้าเกิดจาก bot port 8010 ไม่พร้อมช่วง restart/debug (`fetch failed`) ไม่ใช่ traceback Python ของ Q10
+- **UNLIST leak ยังไม่จบ:** transcript ล่าสุด Q15 ตอบ WPB100L เป็น not-yet-on-sale ถูกทาง แต่ Q17 กลับแนะนำ WPB100L รุ่นเดียวกันพร้อมรูป/ลิงก์ในฐานะ alternative — แปลว่า `customer_hidden`/UNLIST ยังไม่ถูก enforce ที่ final answer-context boundary ทุกทาง (anchor/alternative/base merge/link follow-up ยังรั่วได้)
+- **Token/latency จริง:** live log เห็นหลาย product turns ใช้ prompt ~53K-56K tokens (`products=30`, `include_desc=True`, history โตถึง 20 turns) และ batch 39 turns ใช้เวลาหลายนาที — Phase 0 ต้องเพิ่ม token/latency baseline + Phase 7 ต้องมี AnswerContext budget ก่อน LLM
+- **Shadow placeholder pollution:** `[bundle_message]` และ `[faq_liveagent]` ถูกส่งเข้า bot เป็น message จริง ทำ retrieval/LLM และ handoff text เข้า history แล้วกระทบ turn ถัดไป — ต้องทำ fixture/gate ใน Phase 0 และแก้ผ่าน TurnDecision/Shadow input normalization ไม่ใช่ hardcodeคำตอบรายเคส
+- **Plan update:** เพิ่ม rows ใน `docs/plans/2026-09-30-legacy-shopee-unified-turn-evidence-retrieval-rebaseline-plan.md` สำหรับ UNLIST leakage, token/latency, placeholder normalization และ RED gates ใน Revised Phase 0

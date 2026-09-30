@@ -10,6 +10,34 @@
 
 **Spec:** This plan implements the current audit from 2026-09-21 plus `docs/plans/2026-09-21-plan1-measurement-availability-identity.md` and supersedes the high-level direction in `docs/plans/2026-09-21-legacy-retrieval-redesign-rev2-current-flow.md`.
 
+## Document Status (Historical Plan, Preserved)
+
+This is the full historical implementation plan. Keep it as the detailed record of the original requirements, audits, interfaces, tests, and decisions. Do not delete or compress it. New implementation work must follow the rebaseline roadmap at `docs/plans/2026-09-30-legacy-shopee-unified-turn-evidence-retrieval-rebaseline-plan.md` when that roadmap explicitly supersedes an unchecked step here.
+
+Status labels used below:
+
+- **KEEP:** implemented foundation whose contract and regressions remain useful.
+- **PROVISIONAL:** implemented or partly implemented, but not accepted as the final owner or final runtime path.
+- **SUPERSEDED:** requirement remains relevant, but the function sequence or implementation approach written here must not be executed as-is.
+- **NOT STARTED:** architecture work still required; adjacent hotfixes do not count as completion.
+
+| Historical area | Status | What remains valid | What must change or happen next |
+|---|---|---|---|
+| Tasks 1-3 | **KEEP** | measurement/gold tooling, availability fact resolution, evidence-card and ID-normalization contracts | expand replay coverage with current incidents and real-shaped fixtures |
+| Task 4A-4D | **KEEP** | one `RetrievalProfile`, provenance, gateway wiring, profile-aware hints | make downstream owners consume the same facts; do not re-parse them locally |
+| Task 4E-4G | **PROVISIONAL** | slots, aliases, and relation contracts plus their regression tests | stop adding keyword exceptions; ambiguous relations must broaden or clarify rather than hard-filter |
+| Historical Tasks 5/5A | **SUPERSEDED AS WRITTEN** | live evidence, source union, bounded retrieval, and availability requirements | use the implemented planner/executor/pool modules and Revised Phases 3-6; do not build the stale helper interfaces below |
+| Implemented Phase 5A-5B3 | **PROVISIONAL FOUNDATION** | planner, evidence-preserving executor, candidate pool, selector, shadow/selection flags, canonical dedupe | replace grouped-plus-legacy augmentation with one selection and answer boundary after replay proves parity |
+| Phase 5C/5F safety work | **PROVISIONAL SAFETY NET** | regression cases for availability, cert/link continuity, claim, anger, grounding, and token accounting | migrate decisions into turn/subject/evidence owners, then remove local guards and duplicate helpers |
+| Historical Task 6 and commit `ab1b853` | **REOPENED** | observe/selection concepts and multi-subtype coverage tests | canonicalize real subtype vocabulary before selection; synthetic passing tests are insufficient |
+| Historical Tasks 7-10 | **SUPERSEDED AS WRITTEN / NOT COMPLETE** | protected merge, evidence coverage, hardlogic removal, and compatibility proof remain required outcomes | execute through Revised Phases 2-8 with one owner per decision, not the old call sequence |
+| Historical Tasks 11/11A/11B | **NOT STARTED AS ARCHITECTURE** | claim/handoff/workflow/assignment requirements remain valid | hotfixes are not completion; implement authoritative action/state ownership in Revised Phases 1, 2, and 9 |
+| Historical Task 12 | **NOT STARTED** | web evidence must be explicit and cost-bounded | move the web gate behind catalog/evidence completeness in Revised Phase 7 |
+| Historical Task 13 | **IN PROGRESS AS AUDIT ONLY** | owner map and complexity findings are valid | deletion becomes a gate in every revised phase and is completed in Revised Phase 10 |
+| Historical Task 14 | **NOT STARTED** | replay, canary, rollback, and release gates remain mandatory | execute only after Revised Phases 0-9 pass |
+
+**Decision rule:** A commit or focused unit test marks implementation evidence, not architectural acceptance. Only the rebaseline replay gates may promote a provisional area to **KEEP**.
+
 ## Global Constraints
 
 - Scope is legacy Shopee chatbot only. Do not change `chat_v2` or `chatbotv3`.
