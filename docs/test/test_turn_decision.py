@@ -227,6 +227,106 @@ def test_unknown_fallback():
     assert d.action in ("unknown", "answer_product", "answer_general")
 
 
+# ── Phase 1C: price/link follow-up needs context ────────────────────────────
+_PROD_HISTORY = [
+    {"role": "user", "text": "มีพาวเวอร์แบงค์แนะนำไหมครับ"},
+    {"role": "model", "text": "มี AC65B กับ AC65B2 ค่ะ"},
+]
+
+
+def test_price_ask_with_history_is_followup():
+    d = _decide("ราคาเท่าไหร่", history=_PROD_HISTORY)
+    assert d.action == "followup", d
+    assert "price_followup" in d.flags
+
+
+def test_link_ask_with_history_is_followup():
+    d = _decide("ขอลิงค์", history=_PROD_HISTORY)
+    assert d.action == "followup", d
+    assert "link_followup" in d.flags
+
+
+def test_price_ask_without_history_not_product():
+    # bare price ask ลอยๆ — ไม่มี anchor/context → ไม่ใช่ product/followup
+    d = _decide("ราคาเท่าไหร่")
+    assert d.action not in ("followup", "answer_product"), d
+
+
+def test_link_ask_non_product_link_not_followup():
+    # "ขอลิงค์สมัครสมาชิก" — link ที่ไม่ใช่ product link (exclusion family)
+    d = _decide("ขอลิงค์สมัครสมาชิก", history=_PROD_HISTORY)
+    assert not (d.action == "followup" and "link_followup" in d.flags), d
+
+
+def test_price_adjective_without_history_not_followup():
+    d = _decide("ราคาแพงไหม")
+    assert d.action != "followup", d
+
+
+# ── Phase 1C gate: price/link needs *product* context, not any history ──────
+
+def test_price_ask_after_greeting_history_not_followup():
+    d = _decide("ราคาเท่าไหร่",
+                history=[{"role": "user", "text": "สวัสดีครับ"}])
+    assert d.action != "followup", d
+
+
+def test_link_ask_after_human_request_history_not_followup():
+    d = _decide("ขอลิงค์",
+                history=[{"role": "user", "text": "ขอคุยกับแอดมิน"}])
+    assert d.action != "followup", d
+
+
+def test_price_ask_after_claim_history_not_followup():
+    d = _decide("ราคาเท่าไหร่",
+                history=[{"role": "user", "text": "สินค้าเสียขอเคลม"}])
+    assert d.action != "followup", d
+
+
+def test_price_ask_after_product_history_is_followup():
+    d = _decide("ราคาเท่าไหร่",
+                history=[{"role": "model", "text": "มี AC65B กับ AC65B2 ค่ะ"}])
+    assert d.action == "followup", d
+
+
+def test_link_ask_after_product_history_is_followup():
+    d = _decide("ขอลิงค์",
+                history=[{"role": "model", "text": "มี CTC615P สายชาร์จค่ะ"}])
+    assert d.action == "followup", d
+
+
+# ── Phase 1C: contact-info fill is not a product query ───────────────────────
+
+def test_phone_only_with_claim_state_collects():
+    d = _decide("0812345678", claim_state={"customer_name": "สมชาย"})
+    assert d.action == "claim_collect", d
+
+
+def test_phone_only_without_claim_state_not_product():
+    d = _decide("0812345678")
+    assert d.action != "answer_product", d
+    assert "contact_info" in d.flags
+
+
+def test_order_id_only_without_claim_state_not_product():
+    d = _decide("2508088B5T4W1D")
+    assert d.action != "answer_product", d
+
+
+def test_model_code_still_product():
+    # numeric-looking model code ต้องไม่พังจาก contact-info rule
+    d = _decide("ctc615")
+    assert d.action == "answer_product", d
+
+
+# ── Phase 1C: cert standards question → cert evidence path ──────────────────
+
+def test_cert_question_is_cert_flagged_product():
+    d = _decide("ตัวไหนมี มอก. บ้าง", history=_PROD_HISTORY)
+    assert d.action == "answer_product", d
+    assert "cert_question" in d.flags
+
+
 # ── shadow vs real fixtures (contract level, action boundary only) ───────────
 
 def _fixture_rows():

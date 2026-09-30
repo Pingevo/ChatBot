@@ -1724,3 +1724,20 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **ยืนยัน:** runtime answer ไม่เปลี่ยน (flag default off + test พิสูจน์ answer identical on/off) · TurnDecision ยังไม่เป็น owner จริง
 
 - **Hotfix (reviewer พบ blocker):** helper แทรกผิดตำแหน่ง — `@app.post("/chat")` ติดกับ `_turn_decision_shadow` แทน `chat` → route `/chat` ถูกผูกกับ helper · **fix:** ย้าย decorator กลับไปหา `def chat` (helper อยู่ก่อน decorator) — logic ใน helper ไม่เปลี่ยน · **regression test:** `test_chat_route_still_points_to_chat_endpoint` assert `/chat` POST endpoint = `chat` (RED → GREEN) · verify สด: shadow 11p / turn_decision 43p / replay+iso 46p-19s-8x / validator 40 rows / py_compile 5 files / forbidden diff=0 · runtime answer ไม่เปลี่ยน · ยังไม่ commit
+
+### 🛠 Phase 1C — TurnDecision mismatch hardening (contract/shadow only) (2026-09-30, รอ review · ยังไม่ commit)
+
+- **แก้ (contract เท่านั้น, runtime ไม่เปลี่ยน):**
+  - **price/link follow-up → unknown** — เพิ่ม semantic families `_LINK_NOUN_KWS`+`_LINK_OBTAIN_KWS`/`_PRICE_ASK_KWS` ใน step 7, **context-gated** (history หรือ item_tag) + `_NON_PRODUCT_LINK_KWS` exclusion (สมัคร/สมาชิก/เพจ/ไลน์ ฯลฯ) → `followup` + `link_followup`/`price_followup` flag · comparison family เปลี่ยนจาก ad-hoc `_FOLLOWUP_KWS` เป็น canonical `route_context._COMPARISON_FOLLOWUP_KW + _SUPERLATIVE_KW` (เจ้าของเดิม ไม่ copy)
+  - **phone/order-only → answer_product** — step 8: `warranty.extract_customer_info` hit → flag `contact_info` + ตัด token ที่เป็น contact value ออกจาก model-kw evidence → "0812345678"/"2508088B5T4W1D" ลอยๆ → `unknown` ("contact info without claim context"); มี claim_state → `claim_collect` เหมือนเดิม
+  - **cert/มอก → step 6.5 ใหม่** — `warranty.detect_cert_question` → `answer_product`+`cert_question` (owner = deterministic cert path ใน post_intent_handoffs — escalate เมื่อไม่เจอเป็น downstream) · ชนะ generic follow-up ("ตัวไหนมี" กลืนรอบแรก) → ต้องอยู่ก่อน step 7
+- **Root cause ของ mismatch:** contract step 7 follow-up ใช้ kw set ad-hoc (ไม่มี price/link family) + step 8 นับ digit/alnum token เป็น model kw ไม่ว่าบริบท + ไม่มี cert family
+- **TDD:** +11 tests ใน test_turn_decision (5 RED → GREEN: price/link w/ history, phone-only w/o state, order-id w/o state, cert) · +1 pin test ใน shadow suite ยึด 4 fixture turns ที่แก้
+- **Intentional mismatch ที่ยังเหลือ (ไม่ force pass):**
+  - tx-q10 "ตัวไหนมี มอก. บ้าง" → contract `answer_product` vs legacy `handoff` — legacy handoff เพราะ fake catalog ไม่มี cert docs (contract ถูกทาง — cert path ตอบ deterministic ถ้ามี evidence)
+  - "ชื่อ สมชาย ใจดี" (name-only fill) → `unknown` (ยัง — name ไม่ใช่ claim signal เดี่ยวใน contract)
+  - "รุ่นนี้ยังมีขายไหมครับ" / "มีตัวไหนบ้าง" → `unknown` — ไม่มี stock-ask/select family (Phase ถัดไปค่อยตัดสิน owner)
+- **Verify:** turn_decision 53p · shadow 12p · replay+iso 46p/19s/8x unchanged · validator 40 rows · py_compile · diff --check clean · forbidden diff=0
+- **ยืนยัน:** shadow-only — ไม่มี runtime caller ใหม่, app.py diff เดิม (helper+callsite เดียว), คำตอบจริงไม่เปลี่ยน
+
+- **Phase 1C review fix — context gate กว้างเกิน (reviewer probe พบ):** `bool(history)` นับทุก history เป็น context → "ราคาเท่าไหร่" หลัง greeting/human-request/claim history เป็น followup ผิด · **fix:** `_history_has_product_context()` — scan last 6 turns, normalize+ข้าม placeholder/noise, True เมื่อเจอ item_tag / extract_model_keywords / resolve_route(product_types|subtype|model_codes); exception ต่อข้อความ → ข้าม (ไม่ทำ decision พัง) · ใช้ gate step 7 ทั้ง link/price/compare · **TDD:** +5 tests (3 RED: greeting/human-request/claim history → not followup; 2 positive: product history → followup) · verify: turn_decision+shadow 70p · replay+iso 46/19/8 unchanged · runtime ไม่เปลี่ยน

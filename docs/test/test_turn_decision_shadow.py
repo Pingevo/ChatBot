@@ -214,6 +214,32 @@ def test_shadow_sweep_all_fixtures(monkeypatch, capsys):
     assert bad == 0, f"{bad} fixture turns produced no shadow trace"
 
 
+def test_shadow_phase1c_hardened_cases(monkeypatch):
+    """Pin the Phase 1C contract hardening at the shadow boundary —
+    fixture turns that used to mismatch are now asserted."""
+    want = {
+        "tx-q08-price-followup": {"ราคาเท่าไหร่": "followup"},
+        "tx-q09-link-followup": {"ขอลิงค์": "followup"},
+        "tx-q10-cert-scope": {"ตัวไหนมี มอก. บ้าง": "answer_product"},
+        "tx-q22q25-claim-persist": {"0812345678": "unknown"},
+    }
+    seen = set()
+    for fx in replay._load_fixtures():
+        if fx["id"] not in want:
+            continue
+        records, _cap, _client = _run_records(monkeypatch, fx)
+        for rec in records:
+            for text, act in want[fx["id"]].items():
+                if rec["turn"].startswith(text):
+                    steps = _shadow_steps(rec["resp"])
+                    assert steps and steps[0]["ok"], (fx["id"], text, steps)
+                    assert steps[0]["action"] == act, (fx["id"], text,
+                                                     steps[0])
+                    seen.add((fx["id"], text))
+    missing = {(fid, t) for fid, m in want.items() for t in m} - seen
+    assert not missing, f"fixture turns not found: {missing}"
+
+
 def _run_records(monkeypatch, fx):
     """_install + flag on + replay; return full per-turn records."""
     replay._install(monkeypatch, fx)
