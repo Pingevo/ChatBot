@@ -38,6 +38,7 @@ from . import handoffs as _handoffs
 from . import message_detectors as _detectors
 from . import route_context as _rc
 from . import warranty as _warranty
+from . import warranty_flow as _wf
 
 # ── placeholder families (canonical owner — mirrors the ad-hoc lists that
 #   were previously duplicated inside app.py/_post_handoff_gate) ────────────
@@ -155,6 +156,39 @@ def _history_has_product_context(history: list[dict] | None) -> bool:
     return False
 
 
+def _post_handoff_escape(norm: str, flags: set[str], low: str,
+                         exceptions: list[str] | None) -> bool:
+    """ticket active แต่ควรปล่อยไหม — mirror warranty_flow._post_handoff_gate.
+
+    escape เมื่อ: ลูกค้าส่งข้อมูลเคลม (media placeholder/วันที่/order/phone/
+    ชื่อ valid) / product question (product kw โดยไม่มี warranty kw) /
+    message match per-shop post_handoff_exceptions (admin ตั้งใน shop_settings).
+    """
+    if ("media_placeholder" in flags
+            or _warranty.parse_purchase_date(norm) is not None):
+        return True
+    info = _warranty.extract_customer_info(norm)
+    if info.get("order_id") or info.get("phone"):
+        return True
+    name = info.get("name") or ""
+    if name and " " in name and len(name) <= 40:
+        return True
+    if (any(kw in low for kw in _wf._POST_HANDOFF_PRODUCT_KWS)
+            and not any(kw in low for kw in _wf._POST_HANDOFF_WARRANTY_KWS)):
+        return True
+    if exceptions and any(str(e).lower() in low for e in exceptions if e):
+        return True
+    return False
+
+
+def _anchor_has_product_context(anchor: dict | None) -> bool:
+    """active anchor (product card ของแชท) ถือเป็น product context ไหม."""
+    if not isinstance(anchor, dict) or not anchor:
+        return False
+    return bool(str(anchor.get("name") or "").strip()
+                or str(anchor.get("item_id") or "").strip())
+
+
 def _valid_claim_name(info: dict) -> bool:
     """ชื่อที่ extract ได้เป็น claim name จริงไหม — rule เดียวกับ
     warranty_flow._merge_claim_slots: มี space (ชื่อ+นามสกุล), ≤40 ตัวอักษร,
@@ -183,6 +217,8 @@ def decide_turn(
     ticket_state: dict | str | None = None,
     claim_state: dict | None = None,
     intent_result: object | None = None,
+    post_handoff_exceptions: list[str] | None = None,
+    active_anchor: dict | None = None,
 ) -> TurnDecision:
     """ตัดสิน action เดียวของ turn — pure, deterministic (ยกเว้น intent_result ที่ caller ส่งมา)."""
     intent: dict = intent_result if isinstance(intent_result, dict) else {}
@@ -192,10 +228,16 @@ def decide_turn(
     # 1. normalize
     norm, flags = _normalize(message)
 
-    # 2. post-handoff lock — owner เดียว: ticket_state ชนะทุกอย่าง
+    # 2. post-handoff lock — ticket_state ชนะทุกอย่าง เว้น escape paths
+    #   ที่ production gate ปล่อย (claim info / product question / shop
+    #   exceptions) — caller ส่ง exceptions เป็น snapshot, contract ไม่อ่าน DB
     if _ticket_active(ticket_state):
-        return TurnDecision("locked", "ticket active → post-handoff lock",
-                            1.0, norm, frozenset(flags | {"post_handoff"}))
+        if _post_handoff_escape(norm, flags, norm.lower(),
+                                post_handoff_exceptions):
+            flags.add("post_handoff_escape")
+        else:
+            return TurnDecision("locked", "ticket active → post-handoff lock",
+                                1.0, norm, frozenset(flags | {"post_handoff"}))
 
     # 3. system/noise/placeholder — เหลือว่างหลัง cleanup = ไม่ใช่ข้อความลูกค้า
     if not norm and flags:
@@ -213,7 +255,10 @@ def decide_turn(
                             frozenset(flags))
 
     # 5. claim resume / request / product issue — ก่อน anger เสมอ
-    if claim_state and _has_claim_signal(norm):
+    #   provenance เจ้าของเดิม: warranty_flow._claim_collecting —
+    #   stage=collecting หรือมี slot persist; resolved ที่ไม่มี slot ไม่นับ
+    #   แต่ resolved+retained slots ยังนับตาม owner เดิม (Phase 2 blocker)
+    if _wf._claim_collecting(claim_state) and _has_claim_signal(norm):
         return TurnDecision("claim_collect", "claim_state + fresh claim signal",
                             1.0, norm, frozenset(flags | {"claim_resume"}))
     if _warranty.detect_claim_request(norm) or intent_name == "warranty_claim":
@@ -233,8 +278,10 @@ def decide_turn(
                             norm, frozenset(flags | {"cert_question"}))
 
     # 7. follow-up family — ต้องมี *product* context (item tag หรือ
-    #   product signal ใน recent history) — ไม่ใช่ history ใดๆ
+    #   active anchor จาก caller หรือ product signal ใน recent history)
+    #   — ไม่ใช่ history ใดๆ
     _has_product_ctx = ("has_item_tag" in flags
+                        or _anchor_has_product_context(active_anchor)
                         or _history_has_product_context(history))
     if _has_product_ctx:
         if (any(kw in low for kw in _LINK_NOUN_KWS)

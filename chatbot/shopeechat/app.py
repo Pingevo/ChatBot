@@ -609,17 +609,37 @@ def _turn_decision_shadow(req: ChatRequest, history: list[dict],
         return
     try:
         from . import turn_decision as _td
+        # Phase 1F — minimal context snapshot: timeline read ครั้งเดียว
+        #   (claim_state + active_item_id จาก doc เดียวกัน — ไม่เรียก
+        #   get_active_product เพราะ materialize card ไปอ่าน product DB
+        #   และเขียน live cache โดยไม่จำเป็น); exceptions เฉพาะ ticket active
         _claim = None
+        _anchor = None
+        _exc = None
         try:
             from . import conversation_products as _cp_sh
-            _claim = _cp_sh.load_claim_state(req.conversation_id)
+            _doc = _cp_sh.load_timeline(req.conversation_id) or {}
+            _claim = _doc.get("claim_state")
+            _aid = _doc.get("active_item_id")
+            if _aid:
+                _anchor = {"item_id": str(_aid)}
         except Exception:
-            _claim = None
+            pass
+        _ts = getattr(req, "ticket_state", None)
+        if isinstance(_ts, dict):
+            _ts = _ts.get("state")
+        if _ts in ("handoff", "open", "pending"):
+            try:
+                _exc = _get_post_handoff_exceptions(req.shop, req.platform)
+            except Exception:
+                _exc = None
         d = _td.decide_turn(
             req.message or "",
             history=history,
             ticket_state=req.ticket_state,
             claim_state=_claim,
+            post_handoff_exceptions=_exc,
+            active_anchor=_anchor,
         )
         steps.append({
             "name": "TurnDecisionShadow",

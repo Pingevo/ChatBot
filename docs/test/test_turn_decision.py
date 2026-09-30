@@ -164,14 +164,21 @@ def test_product_word_not_anger():
 
 # ── 2. post-handoff lock ─────────────────────────────────────────────────────
 
-def test_active_ticket_locks_greeting():
-    d = _decide("สวัสดีครับ", ticket_state={"state": "handoff"})
+def test_active_ticket_locks_plain_text():
+    d = _decide("ยังไม่มีใครตอบเลย", ticket_state={"state": "handoff"})
     assert d.action == "locked"
+
+
+def test_active_ticket_does_not_lock_greeting():
+    # "สวัสดี" อยู่ใน production _POST_HANDOFF_PRODUCT_KWS → gate escape
+    d = _decide("สวัสดีครับ", ticket_state={"state": "handoff"})
+    assert d.action != "locked"
 
 
 @pytest.mark.parametrize("state", ["handoff", "open", "pending"])
 def test_active_ticket_states_lock(state):
-    assert _decide("สวัสดีครับ", ticket_state={"state": state}).action == "locked"
+    assert _decide("ยังไม่มีใครตอบเลย",
+                   ticket_state={"state": state}).action == "locked"
 
 
 @pytest.mark.parametrize("state", ["closed", "resolved", "bot"])
@@ -180,7 +187,7 @@ def test_closed_ticket_states_unlock(state):
 
 
 def test_ticket_state_string_form():
-    assert _decide("สวัสดีครับ", ticket_state="open").action == "locked"
+    assert _decide("ยังไม่มีใครตอบเลย", ticket_state="open").action == "locked"
 
 
 # ── 5. claim resume requires a fresh claim signal ────────────────────────────
@@ -199,7 +206,7 @@ def test_stale_claim_state_product_question_not_collect():
 
 def test_claim_state_plus_claim_signal_collects():
     d = _decide("ส่งเบอร์โทรมาแล้ว 0812345678 เคลม",
-                claim_state={"name": "สมชาย"})
+                claim_state={"customer_name": "สมชาย ใจดี"})
     assert d.action == "claim_collect"
 
 
@@ -420,3 +427,95 @@ def test_shadow_fixture_actions_contract():
         if d.action not in want and fx["id"] not in _KNOWN_INCIDENT_IDS:
             mismatches.append((fx["id"], d.action, sorted(want)))
     assert not mismatches, f"contract/legacy family mismatches: {mismatches}"
+
+
+# ── Phase 1F — contract inputs: exceptions / anchor / claim provenance ──────
+
+# ticket active + escape paths (mirror warranty_flow._post_handoff_gate)
+
+def test_locked_escaped_by_shop_exception():
+    d = _decide("ทวนข้อมูลเคลมหน่อย", ticket_state={"state": "handoff"},
+                post_handoff_exceptions=["ทวนข้อมูลเคลม"])
+    assert d.action != "locked"
+
+
+def test_locked_escaped_by_claim_info():
+    # ลูกค้าส่งข้อมูลเคลมหลัง handoff → production gate ปล่อย
+    d = _decide("0812345678", ticket_state="open")
+    assert d.action != "locked"
+
+
+def test_locked_escaped_by_product_question():
+    d = _decide("มีสายชาร์จไหมครับ", ticket_state="pending")
+    assert d.action != "locked"
+
+
+def test_locked_no_escape_still_locked():
+    d = _decide("ยังไม่มีใครตอบเลย", ticket_state={"state": "handoff"},
+                post_handoff_exceptions=["ทวนข้อมูลเคลม"])
+    assert d.action == "locked"
+
+
+# active anchor → product context
+
+def test_stock_ask_with_active_anchor_is_followup():
+    d = _decide("รุ่นนี้ยังมีขายไหมครับ",
+                active_anchor={"item_id": "3004", "name": "AC65B"})
+    assert d.action == "followup"
+    assert "stock_followup" in d.flags
+
+
+def test_link_ask_with_active_anchor_is_followup():
+    d = _decide("ขอลิงค์ตัวนี้หน่อย",
+                active_anchor={"item_id": "3004", "name": "AC65B"})
+    assert d.action == "followup"
+    assert "link_followup" in d.flags
+
+
+def test_stock_ask_no_anchor_no_history_not_followup():
+    d = _decide("รุ่นนี้ยังมีขายไหมครับ")
+    assert d.action != "followup"
+
+
+# claim_state provenance — production _claim_collecting semantics
+
+def test_name_only_with_collecting_claim_state_is_claim_collect():
+    d = _decide("ชื่อ สมชาย ใจดี",
+                claim_state={"stage": "collecting"})
+    assert d.action == "claim_collect"
+
+
+def test_name_only_with_filled_slots_is_claim_collect():
+    d = _decide("ชื่อ สมชาย ใจดี",
+                claim_state={"customer_phone": "0812345678"})
+    assert d.action == "claim_collect"
+
+
+def test_name_only_with_resolved_without_slots_not_collect():
+    # resolved และไม่มี retained slots → _claim_collecting False → ไม่ collect
+    d = _decide("ชื่อ สมชาย ใจดี",
+                claim_state={"stage": "resolved"})
+    assert d.action != "claim_collect"
+
+
+def test_phone_with_resolved_without_slots_not_collect():
+    d = _decide("0812345678",
+                claim_state={"stage": "resolved"})
+    assert d.action != "claim_collect"
+
+
+def test_resolved_with_retained_slots_collects__parity_pin():
+    """⚠️ PARITY PIN — pin พฤติกรรม owner ปัจจุบันอย่างซื่อสัตย์, ไม่ใช่
+    พฤติกรรมที่ถูกต้องสมบูรณ์.
+
+    production `update_claim_state` merge state (stage="resolved" ไม่ล้าง
+    slot) → `{stage:"resolved", customer_name:...}` เกิดได้จริง.
+    `_claim_collecting()` เช็ก slot ไม่เช็ก stage → True → contract mirror
+    owner → claim_collect.
+
+    Phase 2 blocker: ถ้า resolved+retained-slots ไม่ควร collect ต้องแก้
+    `_claim_collecting` ที่ owner ก่อน wiring — ห้ามแก้แค่ contract."""
+    d = _decide("0812345678",
+                claim_state={"stage": "resolved",
+                             "customer_name": "สมชาย ใจดี"})
+    assert d.action == "claim_collect"  # parity กับ owner — Phase 2 ต้องทบทวน
