@@ -531,3 +531,43 @@ Run `0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10`.
 ## Decision
 
 Do not continue the old Phase 7 sequence and do not add a Phase 5G keyword/helper patch. Start at Revised Phase 0, then Phase 1. The completed work remains useful infrastructure; the new plan changes decision ownership and migration order.
+
+---
+
+## Phase 1E — TurnDecision readiness audit (2026-09-30)
+
+Evidence: shadow sweep 52 turns / 40 fixtures (`test_turn_decision_shadow.py::test_shadow_sweep_all_fixtures`) + 78 contract/shadow tests. Legacy remains production owner; `decide_turn` is trace-only.
+
+### Action-family risk table
+
+| action | fixture evidence | verdict | if wired now |
+|---|---|---|---|
+| `noise` | sticker→noise + 5 placeholder families in unit tests | **candidate** — but no noise-answer path exists; wiring = new runtime behavior, needs defined response | placeholder turns stop hitting retrieval/LLM (desired fix for [bundle_message]/[faq_liveagent] pollution) |
+| `locked` | tx-q28 + route-open-ticket-locks (legacy=handoff→locked) | **NOT ready** — production `_post_handoff_gate` honors per-shop `post_handoff_exceptions` from admin DB; contract takes only ticket_state → would over-lock configured exceptions | suppresses answers admin configured to allow |
+| `handoff` | iss26-real-complaint match; unit test human-request | needs more fixture rows; predicates verbatim so parity high | side-effecting (admin POST) — wire only via existing paths |
+| `claim_request` | tx-q22q25 + iss30-multi (both legacy=answer — known incident: claim never starts) | contract is *intended* behavior; wiring starts claim flow where legacy answered | real behavior change — needs claim-state owner first |
+| `claim_collect` | zero fixture coverage (no claim_state in fakes) | **NOT ready** — needs Phase 2 claim-state owner/provenance | unknown |
+| `followup` | 7 turns match answer-family | **NOT ready** — needs anchor/subject owner (contract sees request-level context only; anchor lives in DB) | wrong-context followups |
+| `answer_product` | 18 turns match | **NOT ready** — depends on retrieval/subject owner; cert family = deterministic evidence path | changes retrieval boundary |
+| `answer_general` | 1 fixture + unit tests | thin coverage | low impact but low evidence |
+| `unknown` | residual unknowns all context-free single turns — honest fallback | n/a | n/a |
+
+### Decision
+
+**Wire nothing yet.** Blockers:
+
+1. `locked` missing `post_handoff_exceptions` input (contract would over-lock admin-configured messages)
+2. `noise` has no defined response path — wiring it creates new runtime behavior needing approval of the answer text/path
+3. `claim_collect`/`followup` need anchor + claim-state owners (Phase 2)
+4. Coverage: 52 turns, claim_collect=0 rows, locked=2 rows — too thin for ownership transfer
+
+### Tests required before any wiring
+
+- locked: fixtures covering shop-settings exceptions (exception keyword → not locked)
+- noise: defined response path + multi-turn placeholder sequences
+- anchor-aware decide_turn input (active product) — kills residual unknowns
+- claim_state provenance fixtures (collect mid-flow)
+
+### Rollback (when wiring happens)
+
+Single seam: `_turn_decision_shadow` callsite + future enforcement flag. Revert = flag off (default) or delete callsite — decision owner never mutates legacy paths.

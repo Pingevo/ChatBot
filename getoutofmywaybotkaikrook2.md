@@ -1751,3 +1751,9 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **TDD:** +8 tests — RED 4 (stock/select w/ product history, name w/ + w/o claim_state) → GREEN · negative: greeting/claim history → not followup, no-history stock → not product, `มี AC65B ไหม`+claim_state → ไม่กลืนเป็น claim_collect
 - **Sweep residual (ตั้งใจ — contract เห็นแค่ request-level context):** tx-q15 `รุ่นนี้ยังมีขายไหม` / tx-q18 `ขอลิงค์ตัวนี้` / sel-all-dead / avail-* / pos-image — single-turn, ไม่มี history → `unknown` ถูกต้อง (anchor จริงอยู่ใน DB — wiring phase ต้องส่ง anchor เข้ามา) · tx-q22q25 name turn → `unknown` เพราะ fake ไม่มี claim_state (incident เดิม)
 - **Verify:** turn_decision+shadow 78p · replay+iso 46/19/8 unchanged · validator 40 rows · py_compile · diff --check · forbidden=0 · runtime ไม่เปลี่ยน (shadow-only)
+
+### 📋 Phase 1E — readiness audit (2026-09-30, audit-only · ไม่มี code change)
+
+- **Verdict: wire nothing yet** — blockers: (1) `locked` ไม่มี `post_handoff_exceptions` input — production gate honor per-shop exceptions จาก shop_settings (app.py `_get_post_handoff_exceptions`), contract ใช้แค่ ticket_state → wire ทับจะ over-lock (2) `noise` ไม่มี answer path — wiring = runtime behavior ใหม่ต้อง approve ก่อน (3) claim_collect/followup ต้องมี anchor+claim-state owner (Phase 2) (4) coverage บาง: claim_collect=0 rows, locked=2 rows
+- **รายละเอียดตาราง risk ต่อ family + tests-that-must-exist + rollback อยู่ใน rebaseline plan §Phase 1E**
+- verify: ไม่มี code change — suite เดิมผ่าน (78p turn_decision+shadow, 46/19/8 replay)
