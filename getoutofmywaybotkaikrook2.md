@@ -1710,3 +1710,17 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **Tests เพิ่ม (subprocess probes):** `test_turn_decision_pure_import_and_call` — fail-fast trap บน `dotenv.load_dotenv` ก่อน import turn_decision + เรียก decide_turn 2 เคส (product/general) · `test_knowledge_base_detector_compat_unchanged` — suppress-only lambda (ไม่ใช่ trap — knowledge_base import ต้องผ่าน) แล้ว pin parity `knowledge_base.*` ≡ `message_detectors.*` ทั้ง 3 symbols · ทั้งคู่ไม่อ่าน `.env` จริง
 - **Verify:** turn_decision 43p · replay+isolation 46p/19s/8x (unchanged — parity proof) · validator 40 rows · py_compile 4 files · diff --check clean · forbidden diff=0
 - **Residual risk:** purity probe ครอบ dotenv-load path ของ turn_decision เท่านั้น — module อื่นที่มี side effect อื่น (เช่น module-level env read นอก load_dotenv) ไม่ได้ถูกจับ; SRS §6.36 เพิ่ม, §6.35/§6.x knowledge_base rows อัปเดตเป็น re-export
+
+### 🔬 Phase 1B — TurnDecision shadow wiring (observe-only) (2026-09-30, รอ review · ยังไม่ commit)
+
+- **สิ่งที่ทำ:** `_turn_decision_shadow(req, history, steps)` ใน `app.py` — เรียก `decide_turn` ผ่าน lazy import หลัง history step ใน `_chat_impl` (ก่อน deterministic/handoff early returns → จับทุก turn; intent_result ยังไม่มี → None) · flag `USE_TURN_DECISION_SHADOW=1` (default off) · trace = `{name, ok, action, reason, confidence, flags, message_len}` — ไม่มี raw message/history (PII-safe) · exception → `ok=False` step · **ไม่ mutate/early-return/กระทบคำตอบ**
+- **Root cause ที่แก้:** contract มีแต่ไม่มีข้อมูลจริงเทียบ legacy — shadow wiring ให้ compare data โดยไม่เสี่ยงเปลี่ยน behavior
+- **TDD:** `docs/test/test_turn_decision_shadow.py` 10 tests — RED 7 fail (ไม่มี trace) → GREEN · covers: flag off → ไม่มี trace, flag on → trace เดียว, decide_turn raise → ok=False + chat ไม่พัง, answer identical on/off, trace ไม่มี PII (เบอร์โทรไม่รั่ว), placeholder→noise, product issue→ไม่ handoff, human request→handoff, ticket active→locked
+- **Sweep (52 turns, 40 fixtures, missing=0):** match — placeholders→noise, claim→claim_request, product→answer_product, ticket→locked (tx-q28, route-open-ticket-locks ถูก lock ก่อน anger — parity ทิศทาง) · **mismatch ที่บันทึก (ไม่แก้ — Phase 1C data):**
+  - "ราคาเท่าไหร่"/"ขอลิงค์" follow-ups → `unknown` (`_FOLLOWUP_KWS` ยังไม่ครอบ price/link asks — contract step 7 แคบกว่า production follow-up family)
+  - "0812345678" (claim fill turn) → `answer_product` แทน claim_collect — digit token โดน extract_model_keywords จับ + claim_state ใน fixture อาจว่าง (ต้อง trace เพิ่มใน 1C)
+  - "ตัวไหนมี มอก. บ้าง" → followup vs legacy handoff (tx-q10)
+- **Verify:** shadow 10p · turn_decision 43p · replay+iso 46p/19s/8x (unchanged) · validator 40 rows · py_compile 5 files · diff --check clean · forbidden diff=0 · SRS §6.1 เพิ่ม `_turn_decision_shadow`
+- **ยืนยัน:** runtime answer ไม่เปลี่ยน (flag default off + test พิสูจน์ answer identical on/off) · TurnDecision ยังไม่เป็น owner จริง
+
+- **Hotfix (reviewer พบ blocker):** helper แทรกผิดตำแหน่ง — `@app.post("/chat")` ติดกับ `_turn_decision_shadow` แทน `chat` → route `/chat` ถูกผูกกับ helper · **fix:** ย้าย decorator กลับไปหา `def chat` (helper อยู่ก่อน decorator) — logic ใน helper ไม่เปลี่ยน · **regression test:** `test_chat_route_still_points_to_chat_endpoint` assert `/chat` POST endpoint = `chat` (RED → GREEN) · verify สด: shadow 11p / turn_decision 43p / replay+iso 46p-19s-8x / validator 40 rows / py_compile 5 files / forbidden diff=0 · runtime answer ไม่เปลี่ยน · ยังไม่ commit

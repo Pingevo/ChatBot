@@ -596,6 +596,45 @@ def _recent_qa_pairs(history: list[dict] | None, n: int = 10) -> list[dict]:
     return _flat
 
 
+def _turn_decision_shadow(req: ChatRequest, history: list[dict],
+                          steps: list[dict]) -> None:
+    """Shadow-run the turn-decision contract (observe-only, Phase 1B).
+
+    Trace-only: appends a "TurnDecisionShadow" step carrying
+    action/reason/confidence/flags/message_len — never raw message or
+    history. Never mutates req, never raises, never affects the response.
+    Off unless USE_TURN_DECISION_SHADOW=1.
+    """
+    if os.environ.get("USE_TURN_DECISION_SHADOW") != "1":
+        return
+    try:
+        from . import turn_decision as _td
+        _claim = None
+        try:
+            from . import conversation_products as _cp_sh
+            _claim = _cp_sh.load_claim_state(req.conversation_id)
+        except Exception:
+            _claim = None
+        d = _td.decide_turn(
+            req.message or "",
+            history=history,
+            ticket_state=req.ticket_state,
+            claim_state=_claim,
+        )
+        steps.append({
+            "name": "TurnDecisionShadow",
+            "ok": True,
+            "action": d.action,
+            "reason": d.reason,
+            "confidence": d.confidence,
+            "flags": sorted(d.flags),
+            "message_len": len(d.normalized_message),
+        })
+    except Exception as _e:  # pragma: no cover — must never break chat
+        steps.append({"name": "TurnDecisionShadow", "ok": False,
+                      "error": type(_e).__name__})
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
     # ⚡ RC-A — output policy boundary จุดเดียว: enforce หลัง engine คืนคำตอบ
@@ -758,6 +797,11 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             },
             "output": None,
         })
+
+        # ⚡ Phase 1B — TurnDecision shadow (observe-only, flag-off default):
+        #   contract อ่าน raw req.message ก่อน deterministic/handoff early
+        #   returns — intent_result ยังไม่มี ณ จุดนี้ → ส่ง None
+        _turn_decision_shadow(req, history, _steps)
 
         # ===== ดึง persona ของร้าน (Phase 3 — admin ตั้งชื่อตัวแทนบอทในหน้า /persona) =====
         # ถ้าร้านยังไม่ได้ตั้ง persona → persona_extra = "" → ใช้ SYSTEM_INSTRUCTION เดิม (default behavior)
