@@ -1681,3 +1681,32 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **Token/latency จริง:** live log เห็นหลาย product turns ใช้ prompt ~53K-56K tokens (`products=30`, `include_desc=True`, history โตถึง 20 turns) และ batch 39 turns ใช้เวลาหลายนาที — Phase 0 ต้องเพิ่ม token/latency baseline + Phase 7 ต้องมี AnswerContext budget ก่อน LLM
 - **Shadow placeholder pollution:** `[bundle_message]` และ `[faq_liveagent]` ถูกส่งเข้า bot เป็น message จริง ทำ retrieval/LLM และ handoff text เข้า history แล้วกระทบ turn ถัดไป — ต้องทำ fixture/gate ใน Phase 0 และแก้ผ่าน TurnDecision/Shadow input normalization ไม่ใช่ hardcodeคำตอบรายเคส
 - **Plan update:** เพิ่ม rows ใน `docs/plans/2026-09-30-legacy-shopee-unified-turn-evidence-retrieval-rebaseline-plan.md` สำหรับ UNLIST leakage, token/latency, placeholder normalization และ RED gates ใน Revised Phase 0
+
+---
+
+## Phase 0 Closeout + Phase 1 Audit/Plan (2026-09-30)
+
+### ✅ Phase 0 committed: `3acefe3` — `test: add legacy replay rebaseline and import isolation gates`
+- 10 files (harness 3 + fixtures 2 + gold/eval + plans 2 + log) · verify สดก่อน commit: validator 40 rows / replay+isolation 46p 19s 8x / py_compile / diff --check / runtime diff=0
+
+### 🔍 Phase 1 audit (plan-only — รออนุมัติ ยังไม่แก้ runtime)
+- Action decision กระจาย ≥6 owners ที่ evaluate คนละจุด/คนละ input: `handoffs.detect_human_request` (pre-intent), intent_classifier + inline intent↔keyword merge (app.py ~1329), `warranty.detect_claim_request`, `warranty_flow.handle_warranty_flow_legacy` (claim SM + `_post_handoff_gate`), follow-up rewriters ที่ mutate `req.message` กลางทาง, item_tag/CONV-ACTIVE keyword blocks
+- Input ไม่ได้ normalize รวม: placeholder stripping ทำซ้ำ ≥4 จุด (~957, ~1530, ~2517, `_post_handoff_gate` inline re.sub) — `route_context.normalize_message` แก้แค่ typo
+- แนวแก้เสนอ: `TurnDecision` owner เดียว (fixed-order evaluation, detectors เป็น predicates) — รายละเอียดในรายงานส่ง user รอ approval
+
+### 🚧 Revised Phase 1 — TurnDecision contract owner (contract-only, ยังไม่ wire runtime)
+
+- **ทำ:** `shopeechat/turn_decision.py` — `TurnDecision` frozen dataclass (9 actions) + `decide_turn()` pure function, fixed order: normalize→lock→noise→human→claim(resume→request)→anger→followup→product/general→unknown · ใช้ detectors เดิมเป็น predicates เท่านั้น (ไม่ copy keyword): `handoffs.is_human_request`/`is_service_anger` (extract verbatim → module-level จาก detect_human_request, zero behavior change), `warranty.detect_claim_request`/`extract_customer_info`/`parse_purchase_date`, `knowledge_base.detect_general_question`/`extract_model_keywords`, `route_context.resolve_route`
+- **Root cause ที่แก้:** decision กระจาย ≥6 จุด + placeholder stripping ซ้ำ ≥4 ที่ + req.message ถูก mutate กลางทาง + anger อยู่ก่อน claim (product issue เสี่ยงโดนกลืน)
+- **TDD:** `docs/test/test_turn_decision.py` 41 tests — RED (module missing→collection error) → GREEN · shadow-vs-fixtures contract test พบว่า: product-question ต้องใช้ route_context detector (ไม่ใช่แค่ intent), ticket_state อยู่ fixture-level, placeholder→noise ต้องยกเว้นใน family check (legacy ตอบ generic)
+- **ยังไม่ wire เข้า app.py** — contract เท่านั้น; SRS §6.35 + §6.13 อัปเดต
+
+### 🔧 Phase 1A Hardening — purity leak ของ turn_decision (2026-09-30, รอ review · ยังไม่ commit)
+
+- **Blocker (reviewer พบ):** `turn_decision.py` import `knowledge_base` top-level → `knowledge_base._load_env()` เรียก `load_dotenv(repo/.env)` ตอน import → contract ที่ claim pure/no-env ไม่จริง (รั่วเข้า test แล้วตอน `test_turn_decision` รันเดี่ยว) — root cause เดียวกับ Phase 0C alias issue: purity ต้องพิสูจน์ ไม่ใช่ประกาศ
+- **Fix:** สร้าง `message_detectors.py` (pure, stdlib `re` เท่านั้น) — ย้าย verbatim `GENERAL_QUESTION_KEYWORDS`, `detect_general_question`, `_TARGET_DEVICE_KWS`, `is_target_device_kw`, `extract_model_keywords`; `knowledge_base.py` re-export 4 symbols (public API คงเดิม — app/web_search/chat_v2 เรียก `knowledge_base.*` เหมือนเดิม); `turn_decision` เปลี่ยน import เป็น `message_detectors` (ห้าม import knowledge_base — docstring ระบุไว้)
+- **Audit chain:** warranty/handoffs/route_context ไม่มี dotenv/DB ตอน import; route_context lazy-import product_store (pymongo ตอน import แต่ไม่ connect/ไม่อ่าน env — MongoClient สร้างใน function เท่านั้น); turn_decision lazy-import route_context ใน decide_turn → probe ยืนยัน call-time ก็ไม่แตะ dotenv
+- **TDD:** RED (purity probe fail — trap จับ `load_dotenv` ผ่าน knowledge_base import; compat probe fail — module ไม่มี) → GREEN 43 tests
+- **Tests เพิ่ม (subprocess probes):** `test_turn_decision_pure_import_and_call` — fail-fast trap บน `dotenv.load_dotenv` ก่อน import turn_decision + เรียก decide_turn 2 เคส (product/general) · `test_knowledge_base_detector_compat_unchanged` — suppress-only lambda (ไม่ใช่ trap — knowledge_base import ต้องผ่าน) แล้ว pin parity `knowledge_base.*` ≡ `message_detectors.*` ทั้ง 3 symbols · ทั้งคู่ไม่อ่าน `.env` จริง
+- **Verify:** turn_decision 43p · replay+isolation 46p/19s/8x (unchanged — parity proof) · validator 40 rows · py_compile 4 files · diff --check clean · forbidden diff=0
+- **Residual risk:** purity probe ครอบ dotenv-load path ของ turn_decision เท่านั้น — module อื่นที่มี side effect อื่น (เช่น module-level env read นอก load_dotenv) ไม่ได้ถูกจับ; SRS §6.36 เพิ่ม, §6.35/§6.x knowledge_base rows อัปเดตเป็น re-export

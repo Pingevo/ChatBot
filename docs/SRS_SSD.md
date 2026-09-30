@@ -498,10 +498,10 @@ listing path:
 | `_kb_coll` | `knowledge_base` coll | — | coll | _admin_db | KB queries | — | — |
 | `_kb_products_coll` | `knowledge_base_products` coll | — | coll | _admin_db | search_kb_by_model | — | — |
 | `_kb_qa_coll` | `knowledge_base_qa` coll | — | coll | _admin_db | QA search | — | — |
-| `detect_general_question` | policy topic detect | message | qtype/None | kw tables | _chat_impl, chat_v2._check_general_question | warranty_policy/return_policy/shipping/brands/categories/… | — |
+| `detect_general_question` | policy topic detect | message | qtype/None | kw tables (§6.36 message_detectors — re-export) | _chat_impl, chat_v2._check_general_question | warranty_policy/return_policy/shipping/brands/categories/… | — |
 | `detect_topic` | subtopic detect | message | str/None | kw | general paths | — | — |
-| `is_target_device_kw` | kw เป็น device ไหม | kw | bool | device vocab | extraction | — | — |
-| `extract_model_keywords` | สกัด model kw | message | list[str] | regex + brand tables + stoplist | retrieval, KB, app | กรองคำทั่วไป/brand-only | — |
+| `is_target_device_kw` | kw เป็น device ไหม | kw | bool | device vocab (§6.36 — re-export) | extraction | — | — |
+| `extract_model_keywords` | สกัด model kw | message | list[str] | regex + brand tables + stoplist (§6.36 — re-export) | retrieval, KB, app | กรองคำทั่วไป/brand-only | — |
 | `search_kb_by_model` | KB search หลาย kw | message, limit | list[doc] | _search_kb_single (loop) | lookup_kb | per-kw search merge | — |
 | `_search_kb_single` | KB search kw เดียว | message, limit | list[doc] | _kb_products_coll + vectors | search_kb_by_model | text + vector merge | DB read |
 | `get_general_faq` | ดึง FAQ topic | topic | doc/None | _kb_coll | build_general_context | — | — |
@@ -661,7 +661,9 @@ listing path:
 | `_overlaps` | span ทับกันไหม | s, e, spans | bool | — | `_mild_anger_fires` | interval overlap | — |
 | `_is_question_message` | คำถามจริงหลังตัด vocative tail | msg_low | bool | `_QUESTION_RE`, `_VOCATIVE_TAIL_RE` | `detect_human_request` | "รอนานไหมครับแอด"→"รอนานไหม"→คำถาม (5F routing) | — |
 | `_mild_anger_fires` | mild marker = บ่นบริการจริงไหม | msg_low, mild_terms | bool | `_term_spans`, `_overlaps`, `_SERVICE_CONTEXT_TERMS`, `_PRODUCT_CONTEXT_TERMS`, `_HISTORY_CONTEXT_TERMS` | `detect_human_request` | 5F routing: marker ทับ product span ไม่นับ ("ไม่มีการตอบ|สนอง"); fires iff มี service context นอก marker/product span หรือไม่มี product context เลย (bare "ช้ามาก"=บ่นบริการ) | — |
-| `detect_human_request` | pre-intent human req + frustration | req, ctx | resp/None | kw tables, `_toxic_token_present`, `_mild_anger_fires`, `_is_question_message`, `_term_spans`, `_PROMO_TERMS`, `_SHOP_SCRIPT_TERMS`, responses._send_handoff | _chat_impl | **5F-B/H4: ticket_state ∈ handoff/open/pending → None (ห้าม re-fire)**; "ขอคุยกับคน/แอดมิน/คนตอบ" → `human_request` (kw ที่จบกลาง product term ไม่นับ — "ทำไมไม่ตอบ\|สนอง"); strong anger (ผิดหวัง/หัวร้อน/**กาก token**) → `customer_frustration`; **5F routing: promo/affiliate terms → suppress anger ทั้งหมด; shop-script greeting (ยินดีต้อนรับ/ตอบช้าหน่อย) → suppress mild; bare-"แอด" ยกเว้นคำถาม** | handoff POST |
+| `is_human_request` | **pure predicate** — ขอคุยกับคน/แอดมิน | message (ดิบ) | bool | `_HUMAN_REQUEST_KWS`, `_HUMAN_VERB_RE`, `_HUMAN_TARGET_RE`, `_term_spans`, `_is_question_message`, `_PRODUCT_CONTEXT_TERMS`, `_HISTORY_CONTEXT_TERMS` | `detect_human_request`, `turn_decision.decide_turn` | Revised Phase 1 — extract verbatim จาก detect_human_request (kw ที่จบกลาง product term ไม่นับ; composition verb+target; "ร้าน" เฉพาะ contact-verbs; English; bare-"แอด" ยกเว้นคำถาม) — normalize lower+ำ→ัม เอง ไม่ fire handoff | — |
+| `is_service_anger` | **pure predicate** — โกรธ/ผิดหวังบริการ | message (ดิบ) | bool | `_STRONG_ANGER_PHRASES`, `_STRONG_ANGER_TOKENS`, `_MILD_ANGER`, `_toxic_token_present`, `_mild_anger_fires`, `_PROMO_TERMS`, `_SHOP_SCRIPT_TERMS`, `_is_question_message` | `detect_human_request`, `turn_decision.decide_turn` | extract verbatim — strong เดี่ยวพอ / mild ต้อง service context / promo+shop-script suppress / question-guard เฉพาะ mild | — |
+| `detect_human_request` | pre-intent human req + frustration | req, ctx | resp/None | `is_human_request`, `is_service_anger` (delegates — logic เดิม verbatim ย้ายเป็น module-level predicates), responses._send_handoff | _chat_impl | **5F-B/H4: ticket_state ∈ handoff/open/pending → None (ห้าม re-fire)**; human → `human_request`; anger → `customer_frustration` | handoff POST |
 | `post_intent_handoffs` | tax invoice + cert | req, ctx, db | resp/None | warranty.detect_tax_invoice_request/extract_tisi_model_keyword/detect_cert_question, product_store.search_cert_products/_detect_charger_subtype/resolve_availability, route_context.requested_product_types, unit_classifier._extract_codes, conversation_products.get_active_product | _chat_impl | tax→handoff `tax_invoice_request`; cert→cert cards answer; **Task 5C-E+hardening: cert type_filter ใช้ provenance (`requested_product_types` — explicit type noun ชนะ device/model regex mention) fallback message→history→anchor; model_keyword ที่ไม่ใช่ code-shape ถูก suppress เมื่อ explicit type ชี้หมวดอื่น (compat target ไม่ใช่รุ่นสินค้า); subtype filter เมื่อ detect ได้; availability label คำนวณจาก status+stock ผ่าน resolver (NORMAL stock0→หมดสต็อก); ไม่มี context → cap 12 + ถามหมวด** | handoff POST; mongo read |
 
 ### 6.14 `device_compat.py` — compatibility engine
@@ -1075,6 +1077,29 @@ listing path:
 | `grouped_retrieval_selection_enabled` | flag selection→LLM | — | bool | `_flag("grouped_retrieval_selection_enabled","USE_GROUPED_RETRIEVAL_SELECTION")` | `app.py` selection block (lazy import) | ดู `_flag` | error → False (ปิด) |
 
 `app.py` wiring (Task 5B3-D): shadow/selection blocks เรียก `runtime_config` (lazy, try/except → False) แทน `os.environ` ตรงๆ — ไม่มี manual reload endpoint; ค่า toggle จากหน้า config มีผลเมื่อ cache หมดอายุภายในประมาณ 5 วินาที
+
+### 6.35 `turn_decision.py` — ตัวตัดสินใจกลางต่อ 1 turn (Revised Phase 1, contract-only)
+
+ยังไม่ถูก wire เข้า `app.py` — เป็น decision contract ที่รออนุมัติ wiring แยก จึงยังไม่เปลี่ยนคำตอบจริง
+
+| ฟังก์ชัน/สมาชิก | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `TurnDecision` | dataclass frozen — action เดียว + reason ย้อนกลับได้ | action(Literal 9 ค่า), reason, confidence, normalized_message, flags | — | — | `decide_turn` | action enum: locked/noise/handoff/claim_collect/claim_request/answer_product/answer_general/followup/unknown | — |
+| `_normalize` | ตัด placeholders/tags | message | (text, flags) | `_ITEM_TAG_RE`, `_MEDIA_PLACEHOLDER_RE`, `_SYSTEM_PLACEHOLDERS`, `_BARE_ITEM_PLACEHOLDERS` | `decide_turn` | strip [สินค้า:id]→flag has_item_tag; media/system/bare-item placeholders → flags + remove | — |
+| `_ticket_active` | ticket อยู่ฝั่งแอดมินไหม | ticket_state dict/str/None | bool | `_ACTIVE_TICKET_STATES` | `decide_turn` | state ∈ {handoff,open,pending} | — |
+| `_has_claim_signal` | claim signal ใหม่ใน message | msg | bool | warranty.detect_claim_request/extract_customer_info/parse_purchase_date | `decide_turn` | claim kw หรือ order_id/phone/date — ไม่นับ claim_state เก่า | — |
+| `decide_turn` | **action owner เดียว (pure)** | message, *, history, ticket_state, claim_state, intent_result | `TurnDecision` | `_normalize`, `_ticket_active`, handoffs.is_human_request/is_service_anger, warranty.detect_claim_request, `_has_claim_signal`, `_FOLLOWUP_KWS`, message_detectors.detect_general_question/extract_model_keywords, route_context.resolve_route | (ยังไม่มี runtime caller — tests เท่านั้น) | fixed order: normalize→lock→noise→human→claim resume/request→anger→followup→product/general→unknown; **ไม่ mutate input, ไม่ DB/LLM/network, ไม่ import app, ไม่ import knowledge_base** (import chain ต้องไม่แตะ .env — purity gate ใน test_turn_decision) | — |
+
+### 6.36 `message_detectors.py` — pure message detectors (Phase 1A, side-effect-free)
+
+module ใหม่ที่แยก pure detectors ออกจาก `knowledge_base.py` (ซึ่ง `_load_env()` ตอน import) เพื่อให้ contract module อย่าง `turn_decision.py` ใช้ได้โดยไม่ลาก .env read ติดมา — ใช้ stdlib `re` เท่านั้น ไม่มี DB/LLM/network/env ทั้งหมด; `knowledge_base.py` re-export ทุก symbol เพื่อรักษา public API เดิม
+
+| ฟังก์ชัน/สมาชิก | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
+|---|---|---|---|---|---|---|---|
+| `GENERAL_QUESTION_KEYWORDS` | kw table คำถามทั่วไป | — | dict[str, list[str]] | — | `detect_general_question`, (re-export ผ่าน knowledge_base) | qtype → kw list (verbatim move จาก knowledge_base) | — |
+| `detect_general_question` | policy topic detect | message | qtype/None | `extract_model_keywords`, `GENERAL_QUESTION_KEYWORDS` | knowledge_base re-export → _chat_impl/chat_v2; turn_decision.decide_turn | model kw ≥2 → None; brand+indicator → None; kw match → qtype | — |
+| `is_target_device_kw` | kw เป็น device ไหม | kw | bool | `_TARGET_DEVICE_KWS`, regex | `extract_model_keywords`; knowledge_base re-export → app.py | set membership + regex (iphone/ไอโฟน/รุ่นไทย) | — |
+| `extract_model_keywords` | สกัด model kw | message | list[str] | `is_target_device_kw`, regex stoplist | knowledge_base re-export → app/web_search/turn_decision | tokenize → stoplist/budget filter → กรอง target device | — |
 
 ---
 

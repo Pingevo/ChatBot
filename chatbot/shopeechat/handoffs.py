@@ -168,6 +168,118 @@ def _mild_anger_fires(msg_low: str, mild_terms: tuple) -> bool:
     return _has_svc or not _ctx
 
 
+# ── pure decision predicates (Revised Phase 1 — extracted verbatim from
+#   detect_human_request so turn_decision can reuse them without firing a
+#   handoff; behavior must not change) ─────────────────────────────────────
+
+_HUMAN_REQUEST_KWS = (
+    "ขอคุยกับคน", "ขอคุยกับแอดมิน", "ขอแอดมิน", "มีคนตอบไหม",
+    "มีคนไหม", "มีมนุษย์ไหม", "มนุษย์ตอบ", "มนุษย์มาตอบ", "คนตอบหน่อย",
+    "admin มา", "admin ตอบ", "แอดมินมา", "แอดมินตอบ", "แอดมินไม่ทำงาน",
+    "ไม่มีคนตอบ", "ไม่มีแอดมิน", "เมื่อไหร่จะมีคน", "เมื่อไหร่จะมีแอดมิน",
+    "เมื่อไหร่จะมีมนุษย์", "อยากคุยกับคน", "อยากคุยกับแอดมิน",
+    "ให้คนตอบ", "ให้แอดมินตอบ", "ติดต่อแอดมิน",
+    "พูดกับแอดมิน", "ส่งต่อแอดมิน",
+    # ⚡ "ขอคน"/"ติดต่อคน"/"พูดกับคน"/"ส่งต่อคน" ย้ายไป composition (มี guard กัน "คนละ"/"คนขับ")
+    # BUG-M fix — เพิ่มคำที่ลูกค้าไทยใช้จริงแต่หลุด (จาก QA 2026-09-11)
+    "กรุณาตอบกลับ", "ตอบหน่อย", "มีใครอยู่ไหม", "ยังอยู่ไหม",
+    "แอดดด", "ทำไมไม่ตอบ", "หายไปไหน", "แอดมินยังไม่ตอบ",
+    "คนยังไม่ตอบ", "รอแอดมิน", "รอคน", "แอดมินยังไม่มา",
+    "ทำไมไม่มีคน", "ทำไมไม่มีแอดมิน", "ขอเบอร์แอดมิน",
+    "ติดต่อกลับด่วน", "ติดต่อกลับหน่อย", "กลับหน่อย",
+)
+# ⚡ BUG-M phase 2 — composition: (verb + target) ครอบ phrasing ใหม่โดยไม่ต้องเพิ่มทีละเคส
+_HUMAN_VERB_RE = (
+    r"(?:ติดต่อ|โทรหา|โทร|คุยกับ|คุย|แชทกับ|แชท|พูดคุยกับ|พูดคุย|พูดกับ|พูด"
+    r"|ขอคุย|ขอพูด|ขอแชท|ขอ|ส่งต่อ|ให้|อยากคุย|อยากพูด|อยากแชท|อยาก)"
+)
+#   target "คน" ต้องกัน "คนละ"/"คนขับ"/"คนส่ง" (คำทั่วไป ไม่ใช่ขอคุยกับคน)
+_HUMAN_TARGET_RE = r"(?:เจ้าหน้าที่|พนักงาน|ทีมงาน|แอดมิน|admin|มนุษย์|human|agent|staff|คนจริง|ตัวคน|คน(?!ละ|ขับ|ส่ง|รับ))"
+
+_STRONG_ANGER_PHRASES = (
+    "เห้ย", "เฮ้ย", "หัวร้อน", "โกรธ", "โมโห", "ผิดหวัง", "เซ็ง",
+    "รำคาญ", "ห่วย", "แย่มาก", "แย่จริง", "แย่จัง", "แย่สุด",
+    "แย่ที่สุด", "ไม่ไหวแล้ว", "ตีของกลับ", "ไม่เอาแล้ว",
+    "เลวร้าย", "แย่เอามาก", "worst",
+)
+# short token ("กาก") — ต้อง _toxic_token_present กันชนคำประสม
+_STRONG_ANGER_TOKENS = ("กาก",)
+_MILD_ANGER = (
+    "ช้ามาก", "ช้าจัง", "ช้าเกิน", "ช้าสุด", "นานมาก", "นานเกิน",
+    "รอนาน", "ไม่ตอบเลย", "ตอบช้า", "เงียบหาย", "ไม่มีคนตอบ",
+    "ไม่มีใครตอบ", "ไม่มีการตอบ", "ช้าว่ะ", "ช้าเว้ย",
+)
+
+
+def is_human_request(message: str) -> bool:
+    """pure predicate — ลูกค้าขอคุยกับคน/แอดมิน (ไม่ fire handoff, ไม่แตะ req).
+
+    รับ message ดิบ; normalize เอง (lower + ำ→ัม) เหมือน detect_human_request.
+    """
+    msg_low = (message or "").lower().replace("ำ", "ัม")
+    _is_question = _is_question_message(msg_low)
+    # kw ที่จบ "กลาง" product term ไม่นับ — "ทำไมไม่ตอบ|สนอง" = อาการสินค้า
+    _prod_spans = _term_spans(
+        msg_low, _PRODUCT_CONTEXT_TERMS + _HISTORY_CONTEXT_TERMS)
+    is_hr = any(
+        any(not any(s < e_kw < e for s, e in _prod_spans)
+            for _, e_kw in _term_spans(msg_low, (kw,)))
+        for kw in _HUMAN_REQUEST_KWS)
+    if not is_hr and re.search(
+        _HUMAN_VERB_RE + r"[กับหาด่วน]{0,6}\s*" + _HUMAN_TARGET_RE, msg_low
+    ):
+        is_hr = True
+    # "ร้าน" เป็น target เฉพาะ contact-verbs — "คุยเรื่องร้าน" ไม่ใช่ขอคุยกับคน
+    if not is_hr and re.search(r"(?:ติดต่อ|โทรหา|โทร|ขอเบอร์)\S{0,6}ร้าน", msg_low):
+        is_hr = True
+    # English — "talk to human" / "speak to agent" / "contact staff" / "real person"
+    if not is_hr and re.search(
+        r"(?:talk|speak|chat|call|contact|connect)\W{0,5}(?:to\W{0,5})?(?:a\W{0,5})?"
+        r"(?:human|agent|staff|admin|person|someone|real)",
+        msg_low,
+    ):
+        is_hr = True
+    # BUG-M fix — "แอด" สั้น → เฉพาะข้อความสั้นที่ไม่มีคำต่อท้าย
+    if not is_hr:
+        _msg_stripped = msg_low.strip()
+        if (
+            len(_msg_stripped) <= 15
+            and "แอด" in _msg_stripped
+            and not _is_question
+            and not any(w in _msg_stripped for w in (
+                "แอดเพื่อน", "แอดไลน์", "แอดเดรส", "แอดเคาท์",
+                "แอดมิชั่น", "แอดปโน", "แอดมิน",
+            ))
+        ):
+            is_hr = True
+    return is_hr
+
+
+def is_service_anger(message: str) -> bool:
+    """pure predicate — ลูกค้าโกรธ/ผิดหวังกับบริการ (ไม่ fire handoff).
+
+    composition เดิม: strong marker เดี่ยวพอ / mild ต้องมี service context /
+    promo+shop-script ไม่นับ / question-guard สำหรับ mild.
+    """
+    msg_low = (message or "").lower().replace("ำ", "ัม")
+
+    def _strong() -> bool:
+        return any(kw in msg_low for kw in _STRONG_ANGER_PHRASES) or \
+            any(_toxic_token_present(msg_low, t) for t in _STRONG_ANGER_TOKENS)
+
+    _is_promo = any(t in msg_low for t in _PROMO_TERMS)
+    _is_shop_script = any(t in msg_low for t in _SHOP_SCRIPT_TERMS)
+    is_angry = False
+    if _strong() and not _is_promo:
+        is_angry = True
+    elif not _is_shop_script and _mild_anger_fires(msg_low, _MILD_ANGER):
+        is_angry = True
+    # question-guard — เฉพาะ mild marker
+    if is_angry and not _strong() and _is_question_message(msg_low):
+        is_angry = False
+    return is_angry
+
+
 def detect_human_request(req, ctx: dict) -> dict | None:
     """Human-request handoff — ย้าย verbatim จาก app.py chat() (BUG-3 fix).
 
@@ -193,108 +305,11 @@ def detect_human_request(req, ctx: dict) -> dict | None:
     # ก่อนหน้านี้: ลูกค้าถาม "Admin ไม่ทำงานกันหรอคะ เมื่อไหร่จะมีมนุษย์มาตอบ"
     #   → บอทตอบ "แอดมินมาดูแลแล้วค่ะ" (เท็จ) + handoff_to_admin=null (ไม่ escalate)
     # ตอนนี้: detect คำขอคุยกับคน → ส่งต่อแอดมินจริง + ตอบว่า "เดี๋ยวส่งต่อให้แอดมินนะคะ"
-    _HUMAN_REQUEST_KWS = (
-        "ขอคุยกับคน", "ขอคุยกับแอดมิน", "ขอแอดมิน", "มีคนตอบไหม",
-        "มีคนไหม", "มีมนุษย์ไหม", "มนุษย์ตอบ", "มนุษย์มาตอบ", "คนตอบหน่อย",
-        "admin มา", "admin ตอบ", "แอดมินมา", "แอดมินตอบ", "แอดมินไม่ทำงาน",
-        "ไม่มีคนตอบ", "ไม่มีแอดมิน", "เมื่อไหร่จะมีคน", "เมื่อไหร่จะมีแอดมิน",
-        "เมื่อไหร่จะมีมนุษย์", "อยากคุยกับคน", "อยากคุยกับแอดมิน",
-        "ให้คนตอบ", "ให้แอดมินตอบ", "ติดต่อแอดมิน",
-        "พูดกับแอดมิน", "ส่งต่อแอดมิน",
-        # ⚡ "ขอคน"/"ติดต่อคน"/"พูดกับคน"/"ส่งต่อคน" ย้ายไป composition (มี guard กัน "คนละ"/"คนขับ")
-        # BUG-M fix — เพิ่มคำที่ลูกค้าไทยใช้จริงแต่หลุด (จาก QA 2026-09-11)
-        "กรุณาตอบกลับ", "ตอบหน่อย", "มีใครอยู่ไหม", "ยังอยู่ไหม",
-        "แอดดด", "ทำไมไม่ตอบ", "หายไปไหน", "แอดมินยังไม่ตอบ",
-        "คนยังไม่ตอบ", "รอแอดมิน", "รอคน", "แอดมินยังไม่มา",
-        "ทำไมไม่มีคน", "ทำไมไม่มีแอดมิน", "ขอเบอร์แอดมิน",
-        "ติดต่อกลับด่วน", "ติดต่อกลับหน่อย", "กลับหน่อย",
-    )
-    _msg_low = (req.message or "").lower().replace("ำ", "ัม")
-    _is_question = _is_question_message(_msg_low)
-    # kw ที่จบ "กลาง" product term ไม่นับ — "ทำไมไม่ตอบ|สนอง" = อาการสินค้า
-    # (เทียบ end boundary อย่างเดียว: "แอดมินไม่ทำงาน" จบตรงขอบคำ → ยังนับ)
-    _prod_spans = _term_spans(
-        _msg_low, _PRODUCT_CONTEXT_TERMS + _HISTORY_CONTEXT_TERMS)
-    _is_human_request = any(
-        any(not any(s < e_kw < e for s, e in _prod_spans)
-            for _, e_kw in _term_spans(_msg_low, (kw,)))
-        for kw in _HUMAN_REQUEST_KWS)
-    # ⚡ BUG-M phase 2 — composition: (verb + target) ครอบ phrasing ใหม่โดยไม่ต้องเพิ่มทีละเคส
-    #   เคส QA ที่หลุด: "ติดต่อเจ้าหน้าที่" / "แชทกับเจ้าหน้าที่" / "ติดต่อร้านค้า"
-    #   gap [กับหาด่วน]{0,6} รองรับ "ขอคุยกับแอดมิน" / "โทรหาเจ้าหน้าที่" / "แชทกับพนักงาน"
-    _HUMAN_VERB_RE = (
-        r"(?:ติดต่อ|โทรหา|โทร|คุยกับ|คุย|แชทกับ|แชท|พูดคุยกับ|พูดคุย|พูดกับ|พูด"
-        r"|ขอคุย|ขอพูด|ขอแชท|ขอ|ส่งต่อ|ให้|อยากคุย|อยากพูด|อยากแชท|อยาก)"
-    )
-    #   target "คน" ต้องกัน "คนละ"/"คนขับ"/"คนส่ง" (คำทั่วไป ไม่ใช่ขอคุยกับคน)
-    _HUMAN_TARGET_RE = r"(?:เจ้าหน้าที่|พนักงาน|ทีมงาน|แอดมิน|admin|มนุษย์|human|agent|staff|คนจริง|ตัวคน|คน(?!ละ|ขับ|ส่ง|รับ))"
-    if not _is_human_request and re.search(
-        _HUMAN_VERB_RE + r"[กับหาด่วน]{0,6}\s*" + _HUMAN_TARGET_RE, _msg_low
-    ):
-        _is_human_request = True
-    # "ร้าน" เป็น target เฉพาะ contact-verbs — "คุยเรื่องร้าน" ไม่ใช่ขอคุยกับคน
-    if not _is_human_request and re.search(r"(?:ติดต่อ|โทรหา|โทร|ขอเบอร์)\S{0,6}ร้าน", _msg_low):
-        _is_human_request = True
-    # English — "talk to human" / "speak to agent" / "contact staff" / "real person"
-    if not _is_human_request and re.search(
-        r"(?:talk|speak|chat|call|contact|connect)\W{0,5}(?:to\W{0,5})?(?:a\W{0,5})?"
-        r"(?:human|agent|staff|admin|person|someone|real)",
-        _msg_low,
-    ):
-        _is_human_request = True
-    # BUG-M fix — "แอด" คำเรียกแอดมินที่สั้นและใช้บ่อยที่สุด แต่ต้องกัน false positive
-    #   ("แอดเพื่อน", "แอดไลน์", "แอดเดรส") → ใช้เฉพาะข้อความสั้นที่ไม่มีคำต่อท้าย
-    if not _is_human_request:
-        _msg_stripped = _msg_low.strip()
-        if (
-            len(_msg_stripped) <= 15
-            and "แอด" in _msg_stripped
-            and not _is_question  # "รอนานไหมครับแอด" = คำถาม+เรียกท้าย ไม่ใช่ขอคน
-            and not any(w in _msg_stripped for w in (
-                "แอดเพื่อน", "แอดไลน์", "แอดเดรส", "แอดเคาท์",
-                "แอดมิชั่น", "แอดปโน", "แอดมิน",  # แอดมิน already covered above
-            ))
-        ):
-            _is_human_request = True
-    # ⚡ BUG-M part D — ลูกค้าโกรธ/ผิดหวัง → escalate ให้คนจริง
-    #   เคส QA: "เห้ยช้าว่ะ จำไม่ได้เว้ย" / "ผิดหวังมากกกกกค่ะ" / "หัวร้อนแล้วนะ"
-    #   composition ไม่ใช่ flat kw:
-    #   - strong marker เดี่ยวพอ ("ผิดหวัง", "หัวร้อน", "ตีของกลับ")
-    #   - mild marker ต้องมากับคำหยาบ/คำเน้นบ่น ("ช้ามากว่ะ", "นานมากกก") —
-    #     กัน "ส่งช้าไหม" (คำถาม) หลุดเป็น anger
-    _is_angry = False
-    # strong phrase (≥หลายพยางค์) — substring match ปลอดภัย;
-    # short token ("กาก") — ต้อง _toxic_token_present กันชนคำประสม
-    # ("นาฬิกากัน"=นาฬิกา+กัน, "หน้ากาก"=product จริง)
-    _STRONG_ANGER_PHRASES = (
-        "เห้ย", "เฮ้ย", "หัวร้อน", "โกรธ", "โมโห", "ผิดหวัง", "เซ็ง",
-        "รำคาญ", "ห่วย", "แย่มาก", "แย่จริง", "แย่จัง", "แย่สุด",
-        "แย่ที่สุด", "ไม่ไหวแล้ว", "ตีของกลับ", "ไม่เอาแล้ว",
-        "เลวร้าย", "แย่เอามาก", "worst",
-    )
-    _STRONG_ANGER_TOKENS = ("กาก",)
-
-    def _strong() -> bool:
-        return any(kw in _msg_low for kw in _STRONG_ANGER_PHRASES) or \
-            any(_toxic_token_present(_msg_low, t) for t in _STRONG_ANGER_TOKENS)
-
-    _MILD_ANGER = (
-        "ช้ามาก", "ช้าจัง", "ช้าเกิน", "ช้าสุด", "นานมาก", "นานเกิน",
-        "รอนาน", "ไม่ตอบเลย", "ตอบช้า", "เงียบหาย", "ไม่มีคนตอบ",
-        "ไม่มีใครตอบ", "ไม่มีการตอบ", "ช้าว่ะ", "ช้าเว้ย",
-    )
-    # 5F routing — promo/affiliate ไม่ใช่ลูกค้าโกรธ ("เฮ้ย รับคอมมิชชั่น");
-    # shop-script ที่รั่วเป็น inbound กันเฉพาะ mild ("อาจจะตอบช้าหน่อย")
-    _is_promo = any(t in _msg_low for t in _PROMO_TERMS)
-    _is_shop_script = any(t in _msg_low for t in _SHOP_SCRIPT_TERMS)
-    if _strong() and not _is_promo:
-        _is_angry = True
-    elif not _is_shop_script and _mild_anger_fires(_msg_low, _MILD_ANGER):
-        _is_angry = True
-    # question-guard — ถามจริง ("ช้ามากไหม" / "รอนานไหมคะ" / "รอนานไหมครับแอด")
-    #   ไม่ใช่บ่น → ไม่ escalate (ใช้เฉพาะ mild marker)
-    if _is_angry and not _strong() and _is_question:
-        _is_angry = False
+    # ⚡ Revised Phase 1 — detection ย้ายไป module-level predicates
+    #   (is_human_request / is_service_anger) เพื่อให้ turn_decision reuse ได้
+    #   โดยไม่ fire handoff — logic เดิม verbatim, ไม่มี keyword เพิ่ม
+    _is_human_request = is_human_request(req.message)
+    _is_angry = is_service_anger(req.message)
 
     if _is_human_request or _is_angry:
         _reason = "human_request" if _is_human_request else "customer_frustration"
