@@ -18,7 +18,8 @@ from pathlib import Path
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "legacy_turn_incidents.jsonl"
 
 OWNERS = {
-    "turn_action", "conversation_subject", "claim_or_ticket_state",
+    "turn_action", "conversation_subject",
+    "conversation_ownership", "claim_lifecycle", "claim_field_acceptance",
     "profile_or_slot_parse", "canonical_identity", "canonical_availability",
     "source_recall", "compatibility_evidence", "selection_coverage",
     "answer_context", "final_claim_validation", "handoff_or_workflow_state",
@@ -73,6 +74,39 @@ _EXPECT_BLOCKS = {
     "slot_expect": _SLOT_KEYS,
     "selection_expect": _SELECTION_KEYS,
 }
+
+
+def tde_entry_error(ent: dict, got_action, got_flags, *, incident: bool):
+    """Per-turn TurnDecision expectation check — shared by the shadow
+    sweep and the contract test (do NOT duplicate).
+
+    - entry without `current`: actual must equal `action` and carry every
+      `flags_contains` flag — a current-pin; valid on positive AND
+      incident rows (incident does not exempt flags).
+    - entry with `current` (incident rows only): `current` declares the
+      buggy action current code produces; actual MUST equal it and must
+      differ from desired `action`. If actual == `action` the pin is
+      stale — the incident is resolved at contract level and the
+      declaration must be removed.
+    Returns an error string, or None when the entry holds."""
+    want = ent["action"]
+    cur = ent.get("current")
+    if cur is not None:
+        if not incident:
+            return "'current' declared on a non-incident fixture"
+        if got_action == want:
+            return (f"stale incident — desired action {want!r} now "
+                    "produced; remove the incident pin / 'current'")
+        if got_action != cur:
+            return (f"action {got_action!r} — declared current {cur!r}, "
+                    f"desired {want!r}")
+        return None
+    if got_action != want:
+        return f"action {got_action!r} want {want!r}"
+    missing = set(ent.get("flags_contains") or []) - set(got_flags or [])
+    if missing:
+        return f"flags missing {sorted(missing)}"
+    return None
 
 
 def _norm(v):
@@ -144,6 +178,9 @@ def check_row(fx: dict) -> list[str]:
             errs.append(f"expected_owner={owner!r} not in taxonomy")
     elif owner and owner not in OWNERS:
         errs.append(f"expected_owner={owner!r} not in taxonomy")
+    for o in fx.get("secondary_owners") or []:
+        if o not in OWNERS:
+            errs.append(f"secondary_owners entry {o!r} not in taxonomy")
 
     # shop/catalog consistency — multi-shop needs an explicit reason
     if cat:
@@ -201,7 +238,7 @@ def check_row(fx: dict) -> list[str]:
             "locked", "noise", "handoff", "claim_collect", "claim_request",
             "answer_product", "answer_general", "followup", "unknown",
         }
-        _tde_keys = {"action", "flags_contains"}
+        _tde_keys = {"action", "flags_contains", "current"}
         user_turns = sum(1 for t in (fx.get("turns") or [])
                          if (t or {}).get("role", "user") == "user")
         if not isinstance(tde, list) or not tde:
@@ -233,6 +270,17 @@ def check_row(fx: dict) -> list[str]:
                                     "list[str] non-empty items")
                     elif len(set(fc)) != len(fc):
                         errs.append(f"{path}.flags_contains has duplicates")
+                cur = ent.get("current")
+                if cur is not None:
+                    if status != "incident":
+                        errs.append(f"{path}.current allowed only on "
+                                    "incident fixtures")
+                    if not isinstance(cur, str) or cur not in _td_actions:
+                        errs.append(f"{path}.current={cur!r} not in "
+                                    f"{sorted(_td_actions)}")
+                    elif cur == ent.get("action"):
+                        errs.append(f"{path}.current equals desired "
+                                    "action — declare nothing")
 
     # shop_settings_seed — nested schema (per-shop settings docs)
     sss = fx.get("shop_settings_seed")
@@ -268,9 +316,17 @@ def check_row(fx: dict) -> list[str]:
                     errs.append(f"{path}.is_deleted must be bool")
 
     # vacuous claim assertion — seeded claim_state already exists;
-    # claim_state_exists=true without final_claim_state asserts nothing
+    # claim_state_exists=true without final_claim_state asserts nothing —
+    # UNLESS the turn exercises a path that could delete state: the
+    # closed-ticket clear branch only runs when history is non-empty
+    # (a model/history_extra turn before the user turn). Any other ticket
+    # state, or closed without history, must not bypass.
+    _has_history = bool(fx.get("history_extra")) or any(
+        (t or {}).get("role") == "model" for t in fx.get("turns") or [])
+    _can_clear = fx.get("ticket_state") == "closed" and _has_history
     if (fx.get("claim_state_seed") and exp.get("claim_state_exists")
-            and not exp.get("final_claim_state")):
+            and not exp.get("final_claim_state")
+            and not _can_clear):
         errs.append("claim_state_exists with claim_state_seed is vacuous "
                     "— seed already creates it; assert final_claim_state")
 

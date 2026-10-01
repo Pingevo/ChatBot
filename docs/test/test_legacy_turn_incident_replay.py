@@ -893,16 +893,29 @@ def _expectations_met(fx, records, captured):
             fails.append("expected bot answer but resp.answer is empty")
     elif action == "claim_collect":
         claim = conversation_products.load_claim_state(fx.get("conversation_id"))
-        want = exp.get("final_claim_state") or {}
-        for k, v in want.items():
-            if not claim or claim.get(k) != v:
-                fails.append(f"claim_state.{k}={claim and claim.get(k)!r} want {v!r}")
-    if exp.get("claim_state_exists") and not conversation_products.load_claim_state(
-            fx.get("conversation_id")):
-        fails.append("claim_state missing (claim collect never started)")
+        if not claim:
+            fails.append("action=claim_collect but no claim_state persisted")
+    if "claim_state_exists" in exp:
+        _exists = bool(conversation_products.load_claim_state(
+            fx.get("conversation_id")))
+        if _exists != bool(exp["claim_state_exists"]):
+            fails.append(f"claim_state_exists: got {_exists} "
+                         f"want {exp['claim_state_exists']}")
     elif action == "order_info":
         if getattr(resp, "handoff_to_admin", False):
             fails.append("order lookup unexpectedly handed off")
+
+    # final_claim_state is an independent post-state assertion — it runs
+    # for EVERY action (handoff/answer/…), not only claim_collect; a
+    # None value asserts the key is absent in persisted state
+    fcs = exp.get("final_claim_state")
+    if fcs:
+        claim = conversation_products.load_claim_state(
+            fx.get("conversation_id"))
+        for k, v in fcs.items():
+            if not claim or claim.get(k) != v:
+                fails.append(f"claim_state.{k}={claim and claim.get(k)!r} "
+                             f"want {v!r}")
 
     if "llm_max_calls" in exp and len(rec["llm_calls"]) > exp["llm_max_calls"]:
         fails.append(f"llm_calls={len(rec['llm_calls'])} > {exp['llm_max_calls']}")
@@ -1251,6 +1264,72 @@ def test_meta_validator_rejects_vacuous_claim_state_exists():
         "action": "claim_collect",
         "final_claim_state": {"customer_phone": "0812345678"}}})
     assert not errs, errs
+    # claim_state_exists:true + closed ticket is NOT vacuous — the executor
+    # has a clear path (closed-ticket clear), so "still exists" is real.
+    # But the clear path only executes when the warranty branch actually
+    # runs with non-empty history — narrow the exception to that path.
+    errs = vmod.check_row({**ok, "ticket_state": "closed",
+                           "turns": [{"role": "model",
+                                      "text": "รับทราบค่ะ"},
+                                     {"text": "0812345678"}],
+                           "expected": {
+                               "action": "answer",
+                               "claim_state_exists": True}})
+    assert not errs, errs
+
+
+def test_meta_validator_claim_exists_survival_path_is_narrow():
+    """Seeded-state `claim_state_exists` survival assertions are only
+    non-vacuous along the path where current code can actually clear
+    (ticket_state=closed AND non-empty history via model/history_extra).
+    Any other ticket state — or closed without history — must reject."""
+    vmod = _validator_mod()
+    ok = {"id": "meta-vc2", "status": "positive", "levels": [3],
+          "shop": "MetaShop", "turns": [{"text": "สวัสดีครับ"}],
+          "catalog": [{"item_id": 1001.0, "shopname": "MetaShop"}],
+          "claim_state_seed": {"stage": "collecting"}}
+    exp = {"action": "answer", "claim_state_exists": True}
+    # open ticket — no clear path → vacuous
+    errs = vmod.check_row({**ok, "ticket_state": "open", "expected": exp})
+    assert errs, "open ticket must not bypass the vacuous guard"
+    # closed but no model/history turn → clear branch unreachable → vacuous
+    errs = vmod.check_row({**ok, "ticket_state": "closed", "expected": exp})
+    assert errs, "closed without history must not bypass the vacuous guard"
+    for other in ("handoff", "pending", "resolved", "bot"):
+        errs = vmod.check_row({**ok, "ticket_state": other,
+                               "expected": exp})
+        assert errs, f"ticket_state={other} must not bypass"
+    # closed + model history turn → real survival assertion
+    errs = vmod.check_row({**ok, "ticket_state": "closed",
+                           "turns": [{"role": "model",
+                                      "text": "รับทราบค่ะ"},
+                                     {"text": "สวัสดีครับ"}],
+                           "expected": exp})
+    assert not errs, errs
+    # history_extra also establishes the executable path
+    errs = vmod.check_row({**ok, "ticket_state": "closed",
+                           "history_extra": [
+                               {"role": "model", "text": "x"}],
+                           "expected": exp})
+    assert not errs, errs
+
+
+def test_meta_validator_owner_taxonomy_three_axes():
+    """Owner vocabulary: the combined legacy axis `claim_or_ticket_state`
+    is retired — three independent axes replace it."""
+    vmod = _validator_mod()
+    ok = {"id": "meta-ow", "status": "positive", "levels": [3],
+          "shop": "MetaShop", "turns": [{"text": "สวัสดีครับ"}],
+          "catalog": [{"item_id": 1001.0, "shopname": "MetaShop"}]}
+    for good in ("conversation_ownership", "claim_lifecycle",
+                 "claim_field_acceptance"):
+        errs = vmod.check_row({**ok, "expected_owner": good})
+        assert not errs, f"new axis {good!r} should be accepted: {errs}"
+    errs = vmod.check_row({**ok, "expected_owner": "claim_or_ticket_state"})
+    assert errs, "combined legacy owner name must be rejected"
+    errs = vmod.check_row({**ok, "secondary_owners":
+                           ["claim_or_ticket_state"]})
+    assert errs, "combined name must be rejected in secondary_owners too"
 
 
 def test_meta_validator_rejects_vacuous_final_claim_state():
@@ -1280,6 +1359,91 @@ def test_meta_validator_rejects_vacuous_final_claim_state():
         "action": "claim_collect",
         "final_claim_state": {"customer_phone": None}}})
     assert not errs, errs
+
+
+def test_meta_final_claim_state_checked_for_any_action(monkeypatch):
+    """final_claim_state must be asserted for EVERY action, not only
+    claim_collect — otherwise handoff+fcs expectations pass silently."""
+    fx = _meta_fx({"action": "handoff", "handoff_reason": "claim",
+                   "final_claim_state": {"stage": "collecting"}})
+    rec = _synthetic_rec(handoff=True, handoff_reason="claim")
+    monkeypatch.setattr(conversation_products, "load_claim_state",
+                        lambda cid: {"stage": "resolved"})
+    assert _expectations_met(fx, rec, None), \
+        "handoff + mismatched final_claim_state passed silently"
+    monkeypatch.setattr(conversation_products, "load_claim_state",
+                        lambda cid: {"stage": "collecting"})
+    assert not _expectations_met(fx, rec, None)
+    # None value asserts field absence — old-case fields must not carry over
+    fx_none = _meta_fx({"action": "handoff", "handoff_reason": "claim",
+                        "final_claim_state": {"stage": "collecting",
+                                              "customer_order_id": None}})
+    monkeypatch.setattr(
+        conversation_products, "load_claim_state",
+        lambda cid: {"stage": "collecting", "customer_order_id": "X1"})
+    assert _expectations_met(fx_none, rec, None), \
+        "final_claim_state None-absence assertion skipped under handoff"
+    monkeypatch.setattr(conversation_products, "load_claim_state",
+                        lambda cid: {"stage": "collecting"})
+    assert not _expectations_met(fx_none, rec, None)
+
+
+def test_meta_validator_tde_current_divergence_key():
+    """tde entry `current` declares the buggy action current code produces —
+    incident rows only, and it must differ from the desired `action`."""
+    vmod = _validator_mod()
+    ok = {"id": "meta-tdc", "status": "incident", "levels": [3],
+          "incident_levels": [3], "shop": "MetaShop",
+          "turns": [{"text": "x"}],
+          "catalog": [{"item_id": 1001.0, "shopname": "MetaShop"}],
+          "expected_owner": "claim_lifecycle",
+          "expected": {"action": "answer"}}
+    errs = vmod.check_row({**ok, "turn_decision_expect": [
+        {"action": "claim_request", "current": "claim_collect"}]})
+    assert not errs, errs
+    # current == action is a no-op declaration → reject
+    errs = vmod.check_row({**ok, "turn_decision_expect": [
+        {"action": "claim_collect", "current": "claim_collect"}]})
+    assert errs, "current==action must be rejected"
+    # current not in action enum → reject
+    errs = vmod.check_row({**ok, "turn_decision_expect": [
+        {"action": "claim_request", "current": "bogus"}]})
+    assert errs
+    # current on a positive row → reject (nothing diverges to declare)
+    errs = vmod.check_row({**ok, "status": "positive",
+                           "incident_levels": None,
+                           "turn_decision_expect": [
+                               {"action": "claim_request",
+                                "current": "claim_collect"}]})
+    assert errs, "'current' must be incident-only"
+
+
+def test_meta_tde_entry_semantics():
+    """strict TurnDecision expectation semantics shared by the contract
+    test and the shadow sweep (validator-owned helper)."""
+    from validate_legacy_turn_fixtures import tde_entry_error  # noqa
+    chk = tde_entry_error
+    # incident + declared current + actual==current → expected divergence
+    assert chk({"action": "claim_request", "current": "claim_collect"},
+               "claim_collect", ["claim_resume"], incident=True) is None
+    # incident + declared current + actual==desired → STALE incident
+    assert chk({"action": "claim_request", "current": "claim_collect"},
+               "claim_request", [], incident=True), \
+        "incident whose desired action now holds must fail (stale pin)"
+    # incident + declared current + drifted actual → fail
+    assert chk({"action": "claim_request", "current": "claim_collect"},
+               "unknown", [], incident=True)
+    # positive + mismatch → fail
+    assert chk({"action": "claim_collect"}, "claim_request", [],
+               incident=False)
+    # positive + match → pass
+    assert chk({"action": "claim_collect"}, "claim_collect", [],
+               incident=False) is None
+    # incident row WITHOUT current = current-pin — flags still asserted
+    assert chk({"action": "claim_collect",
+                "flags_contains": ["claim_resume"]},
+               "claim_collect", [], incident=True), \
+        "flags_contains on incident current-pins must not be exempt"
 
 
 def test_meta_validator_turn_decision_nonstring_action():

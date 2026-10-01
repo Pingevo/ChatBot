@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT / "chatbot"))
 # harness module installs its own import-time offline guards (dotenv trap,
 # socket/mongo/urlopen tripwires) — importing it first makes this file safe
 import test_legacy_turn_incident_replay as replay  # noqa: E402
+import validate_legacy_turn_fixtures as vfx  # noqa: E402
 from shopeechat import conversation_products as _cp_shadow  # noqa: E402
 from shopeechat import turn_decision as _td_mod  # noqa: E402
 
@@ -216,19 +217,16 @@ def test_shadow_sweep_all_fixtures(monkeypatch, capsys):
             shadow = s.get("action") if s.get("ok") else f"ERROR:{s.get('error')}"
             rows.append((fx["id"], rec["turn"][:40], legacy, shadow,
                          "" if s.get("ok") else "ERR"))
-            # Phase 1G — exact per-turn contract expectations when present
+            # Per-turn contract expectations — shared semantics via
+            # tde_entry_error: positive/current-pin entries must match
+            # (flags included); incident entries declaring `current` must
+            # diverge exactly as declared — agreement = stale pin (fails).
             if tde is not None and i < len(tde):
-                want = tde[i]
-                if s.get("action") != want["action"]:
-                    mismatches.append(
-                        f"{fx['id']}[{i}]: action={s.get('action')!r} "
-                        f"want {want['action']!r}")
-                got_flags = set(s.get("flags") or [])
-                missing_f = set(want.get("flags_contains") or []) - got_flags
-                if missing_f:
-                    mismatches.append(
-                        f"{fx['id']}[{i}]: flags {sorted(got_flags)} "
-                        f"missing {sorted(missing_f)}")
+                err = vfx.tde_entry_error(
+                    tde[i], s.get("action"), s.get("flags") or [],
+                    incident=fx.get("status") == "incident")
+                if err:
+                    mismatches.append(f"{fx['id']}[{i}]: {err}")
     with capsys.disabled():
         print("\n=== TurnDecisionShadow sweep (observe-only) ===")
         for r in rows:

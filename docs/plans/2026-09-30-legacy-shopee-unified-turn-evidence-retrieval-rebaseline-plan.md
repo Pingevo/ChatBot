@@ -172,7 +172,7 @@ request
 
 | Decision | Final owner | Legacy owners to remove |
 |---|---|---|
-| Turn action and multi-question needs | new `turn_policy.py` | pre-intent anger branches, app-local claim/general overrides, trigger-like response routing |
+| Turn action and multi-question needs | `turn_decision.py` (evolved — contract grows `needs[]`; do NOT create a parallel `turn_policy.py`/`test_turn_policy.py`) | pre-intent anger branches, app-local claim/general overrides, trigger-like response routing |
 | Product query facts | `route_context.py` | source-specific type/subtype/device rediscovery |
 | Active subjects and claim/ticket continuity | `conversation_products.py` plus claim executor | history prose scans, app-local anchor insertion, per-turn claim slot reconstruction |
 | Raw availability facts | `product_store.resolve_availability()` | unit snapshots or prompt wording used as truth |
@@ -259,7 +259,7 @@ git diff --check
 
 **Purpose:** Replace flat intent plus early substring branches with one explicit action and multiple independent needs.
 
-**Files:** Create `turn_policy.py` and `test_turn_policy.py`; modify `app.py` and later reduce `handoffs.py`; update SRS/log.
+**Files:** Evolve `chatbot/shopeechat/turn_decision.py` and `docs/test/test_turn_decision.py` (the existing contract owner — do NOT create `turn_policy.py`/`test_turn_policy.py`); modify `app.py` and later reduce `handoffs.py`; update SRS/log.
 
 ```python
 @dataclass(frozen=True)
@@ -310,7 +310,7 @@ class ConversationSubjectSet:
 - [ ] Make compare/price/link consume the subject set. Unavailable subjects cannot be silently swapped.
 - [ ] Keep the referenced product/category and order-policy facts stable across follow-ups such as packaging condition and "กรณีนี้เปลี่ยนได้ไหม". Persist customer/order facts, never the prior bot's policy conclusion.
 - [ ] RED-test issue #27 across labelled/name-only data, field ordering, media, troubleshooting acknowledgement, policy during claim, closed ticket, and handoff.
-- [ ] Merge current parsed fields into persisted claim state fill-once; validate phone/order separately; transitions are monotonic except reset/close.
+- [ ] Merge current parsed fields into persisted claim state fill-once; validate phone/order separately; terminal transitions require an explicit claim-resolution event — ticket close is conversation ownership, never a lifecycle transition (see Phase 2A `BLOCKED_BY_MISSING_CLAIM_RESOLUTION_EVENT`).
 - [ ] Choose one claim executor and stop editing parallel implementations in the same phase.
 
 **Exit gate:** issue #27 passes, follow-up identity remains stable, and ticket state outranks history markers.
@@ -610,3 +610,140 @@ Final integrity pass: `claim-resolved-retained-slots` is fully contract-only (no
 ### Rollback
 
 Unchanged — shadow flag default off; no enforcement callsite exists.
+
+## Phase 2A — Claim lifecycle owner audit + RED contract baseline (test/audit only)
+
+**Root-cause hypothesis (proven by trace):** claim flow has no single lifecycle owner. `_claim_collecting()` (warranty_flow.py:69) uses retained slots as an active marker even when `stage=resolved`; `update_claim_state` (conversation_products.py:786) merges `stage` without clearing retained slots; stage writes/clears are scattered across ≥10 callsites in two parallel SM impls (`handle_warranty_flow` v2 for chat_v2.py, `handle_warranty_flow_legacy` for app.py); and the whole legacy SM body is history-gated (`if history` at warranty_flow.py:1110) so state transitions silently skip when history is empty.
+
+### Claim-state schema inventory (conversation_products doc field `claim_state`)
+
+| field | shape | writers | readers | merge semantics | lifecycle role | risk |
+|---|---|---|---|---|---|---|
+| `stage` | str enum: absent / `collecting` / `resolved` / `ts_suggested` | `_update_claim_state` wrapper (~10 callsites across both SM impls); direct `update_claim_state` bypasses ×2 (troubleshoot success → `resolved`, troubleshoot tip sent → `ts_suggested`) | `_claim_collecting` (stage==collecting OR any retained slot — slot-based check, no terminal precedence), ts_suggested check at top of both SM impls, shadow `load_timeline` | merge overwrite (new value wins, None/"" skipped) | **lifecycle marker — but not honored terminally** | resolved+slots still counts as collecting |
+| `customer_name` | str | claim-info persistence writes in both SM impls (guarded by `_has_name` NER+space+≤40) | `_merge_claim_slots`, awaiting-confirmation review lines | fill-once | slot | NER miss → silent non-persist (Phase 2A fixture gap) |
+| `customer_phone` | str | same sites | `_merge_claim_slots`, review lines | fill-once | slot | — |
+| `customer_order_id` | str | same sites | `_merge_claim_slots`, review lines | fill-once | slot | — |
+| `purchase_date` | str (YYYY-MM-DD) | `handle_warranty_flow_legacy` State 7 persistence | `_merge_claim_slots`, claim ctx | fill-once | slot | written only on some paths |
+| `has_image`/`has_video` | bool | `handle_warranty_flow_legacy` State 7 (`has_image` only) | `_merge_claim_slots` (either counts) | fill-once | slot | `has_video` never written — dead field |
+| `started_at`/`updated_at` | iso str | `update_claim_state` auto | none (audit) | auto | audit | — |
+
+### Writer/reader callsite map
+
+| callsite | file:line | writes/reads | transition | side effect | reopens resolved? | owner dup? |
+|---|---|---|---|---|---|---|
+| `load_claim_state` | conv_products:767 | read | — | — | — | store owner |
+| `update_claim_state` | conv_products:786 | merge+upsert | any→any | DB write | **yes — no guard** | — |
+| `clear_claim_state` | conv_products:836 | `$unset` | →absent | DB write | — | — |
+| `_claim_collecting` | wf:69 | read | — | pure predicate | treats retained slots as active | **shared legacy predicate — not a dup**: `turn_decision.py:261` delegates to it, so incorrect slot-based semantics propagate to both warranty execution and TurnDecision shadow |
+| `_maybe_clear_claim_state` | wf:114 | clear | →absent on bot-side clear reason (heuristic — see `_TERMINAL_CLAIM_REASONS` note below) | DB write | — | answer-text guarded |
+| clear on closed ticket | `handle_warranty_flow_legacy` closed-ticket branch | clear | →absent | inside `if history` block | — | **semantically wrong + history-gated** — ticket close is ownership, not claim resolution |
+| ts success | `handle_warranty_flow_legacy` ts-followup success branch | stage→resolved | ts_suggested→resolved | direct `_cp` call | — | bypasses `_update_claim_state` wrapper |
+| ts failed | `handle_warranty_flow_legacy` ts-followup failure branch | stage→collecting | ts_suggested→collecting | +handoff | — | — |
+| info submission | `handle_warranty_flow_legacy` State 7 + awaiting-confirmation persistence | stage→collecting + slots | — | +handoff | — | two parallel writes |
+| first-message claim | `handle_warranty_flow_legacy` first-message claim block | stage→collecting | absent→collecting | +handoff | — | — |
+
+**Duplicates found:** stage is written by the `_update_claim_state` wrapper AND by two direct `update_claim_state` calls (ts success / ts suggest) bypassing the wrapper; the "start collecting" write exists at 5+ sites; `handle_warranty_flow` (v2) duplicates the entire SM for chat_v2 (SRS §6 documents both).
+
+### Transition truth table (current proven vs desired candidate)
+
+| # | current stage | slots | ticket | turn | current behavior (proven) | desired candidate | evidence |
+|---|---|---|---|---|---|---|---|
+| 1 | absent | — | — | claim request | ask-info + handoff + stage=collecting | absent→collecting | legacy claim-request / first-message claim blocks; existing fixtures |
+| 2 | collecting | — | — | valid name | receipt + persist name? — **NER path drops lone names in some paths** (gap) | persist name | p2a-claim-collect-name-phone (xfail) |
+| 3 | collecting | — | — | phone | receipt + persist phone | persist | claim-collect-seeded (green) |
+| 4 | collecting | — | — | order_id | persist via _update_claim_state | persist | info-submission persistence write |
+| 5 | collecting | — | — | purchase date | persist purchase_date | persist | State 7 persistence write |
+| 6 | collecting | — | — | [รูปภาพ] | has_image=True + receipt | persist | State 7 persistence write |
+| 7 | collecting | any | — | product question | **fallthrough → product answer; state kept** | same | question-fallthrough branch; p2a-claim-product-question-resume |
+| 8 | collecting | any | — | policy question | question fallthrough | same | `_is_question_msg` branch |
+| 9 | collecting | any | — | correction (new phone) | merge: fresh wins | same | `_merge_claim_slots` fill-once contract |
+| 10 | ts_suggested | — | — | "หายแล้ว" | stage→resolved, thanks, no handoff | terminal | ts-success branch; p2a-claim-ts-success |
+| 11 | ts_suggested | — | — | "ไม่หาย" | stage→collecting + ask-info + handoff | ts→collecting | ts-failed branch; p2a-claim-ts-failed |
+| 12 | resolved | none | — | phone | not collecting → normal flow | not collecting | claim-resolved-no-slots (green) |
+| 13 | resolved | retained | — | phone | **`_claim_collecting` True → resume collect; legacy executor actually hands off (empty-catalog guard)** | terminal wins → not collecting | claim-resolved-retained (contract-only) + xfail param×3 |
+| 14 | collecting | any | closed | any (with history) | **clears claim_state — WRONG per business rule**: ticket close = ownership return, not claim resolution | claim survives; bot may answer | p2a-claim-ticket-closed-keeps-state (incident xfail) |
+| 14c | collecting | any | closed | product question | answers product but **clears claim first** (history path) | answer + claim kept | p2a-claim-ticket-closed-product-question (incident xfail) |
+| 14d | collecting | any | closed | phone | clears claim → re-collects via history-marker path → phone persisted, **retained name lost** | field accepted, all slots kept | p2a-claim-ticket-closed-phone-resume (incident xfail) |
+| 15b | resolved | retained | — | explicit new claim request | contract `claim_collect`+`claim_resume` via slot-check — retained slots win over `detect_claim_request`, no handoff | resolved→collecting as a FRESH claim via `claim_request`; old slots are audit, not active collection | p2a-claim-resolved-new-request (incident, strict xfail) |
+| 15 | — | — | handoff | claim info | escape gate → collect | same | lock-escape-* fixtures |
+| 16 | — | — | handoff | product question | escape → answer | same | lock-escape-product-question |
+| 17 | any | any | — | explicit reset | **no reset path exists in code** | owner-decided | — (none found) |
+
+### Minimal lifecycle contract proposal (design only — no code in 2A)
+
+Three independent axes replace the ambiguous "active":
+
+1. **conversation_ownership** (`ticket_state` / `status_conversation`): who may answer — `closed`/`resolved`/`bot` → bot may answer; `handoff`/`open`/`pending` → human owns/locks. Ticket close means the admin returned answering rights to the bot — it says nothing about the claim. **Ticket close is never a claim lifecycle transition and must NOT clear `claim_state`** (current code does, inside a history-gated branch → wrong semantics + history-dependent).
+2. **claim_lifecycle** (`claim_state.stage`): whether a claim episode exists and whether it is terminal.
+3. **claim_field_acceptance** (`accepts_claim_fields`): whether this turn may add claim fields — depends on claim lifecycle + information type + claim context, never on ticket close.
+
+| stage | lifecycle_open | accepts_claim_fields | terminal |
+|---|---:|---:|---:|
+| absent | false | false | — (no state) |
+| ts_suggested | true | false | false |
+| collecting | true | true | false |
+| resolved | false | false | true |
+
+- **Persisted slots affect neither claim axis** — they are audit data; only explicit stage drives both. A slot submission while `resolved` must not reopen collection.
+
+**BLOCKER — `BLOCKED_BY_MISSING_CLAIM_RESOLUTION_EVENT`:** audit found no field/event marking a claim resolved/cancelled. Conversation `status` (open/closed/bot/handoff/resolved/pending in `status_conversation`, `conversationService.ts`) is ownership-only; `ticketService` tickets have `status` (open/in_progress/resolved/closed) — also ticket-level, not claim-level. Admin-side claim resolution does not exist in the schema.
+
+The only claim-terminal signals today are bot-side **cleanup heuristics, not authoritative claim-resolution events**:
+
+- `_TERMINAL_CLAIM_REASONS` (`warranty_claim_in_warranty`, `warranty_claim_out_of_warranty`, `claim_info_incomplete`, `review_request`) trigger `_maybe_clear_claim_state` — they are flow/handoff reasons for wiping working state. A warranty-claim handoff, a review request, or an incomplete-info timeout does **not** prove the claim was resolved or cancelled; `claim_info_incomplete` in particular may just be abandoned collection. Phase 2B must **audit/delete/replace** these heuristics after a real lifecycle event is defined — they must not be migrated to the new owner as if they were correct behavior.
+- The ts-success branch (`stage=resolved`) marks the **troubleshooting episode** resolved — not proof that an admin claim case was closed.
+
+General terminal transitions (`collecting → terminal`, `any → absent`) are BLOCKED until an explicit claim resolved/cancelled event or field exists — "admin resolved the claim" cannot be implemented without it.
+
+**BLOCKER — `BLOCKED_BY_CLAIM_EPISODE_IDENTITY`:** the flat `claim_state` dict cannot represent an audit-history vs active-episode boundary. The fresh-claim slot policy (evidenced by `p2a-claim-resolved-new-request`): customer-identity allowlist (`customer_name`, `customer_phone`) may be reused into a new episode; case-specific evidence (`customer_order_id`, `purchase_date`, `has_image`, `has_video`) must not carry over. A real "new claim episode" therefore needs an episode boundary (e.g. episode id / prior-episode archive) so retained identity slots are explicit reuse, not silent inheritance — until then, do not claim a fully fresh claim beyond what the flat state can express.
+
+**BLOCKER — multi-intent TurnDecision:** `decide_turn` returns one action; "สินค้าเสียอยากเคลม + อยากดูพาวเวอร์แบงค์" loses the product need. Do not wire production until the contract supports primary action + independent `needs[]`. Phase 2A does not implement TurnPlan; the final owner map evolves `turn_decision.py` — no parallel `turn_policy.py`.
+- **Reopen from resolved:** only via explicit new claim request (`detect_claim_request` / `intent=warranty_claim`) → `resolved → collecting` starts a fresh collection; never via bare phone/name/order text.
+- **TurnDecision consumes `accepts_claim_fields`** for the `claim_collect` branch (today it delegates to `_claim_collecting`, which conflates both axes).
+- **Claim executor consumes both:** `accepts_claim_fields` gates slot persistence/receipt; `lifecycle_open` gates claim-context behaviors (ts follow-up, review request).
+- **Mutation owner:** one module owns `lifecycle_open`/`accepts_claim_fields`/transition/clear. Storage owner ≠ lifecycle owner: `conversation_products` stores fields; the lifecycle contract decides transitions (may live beside `update_claim_state`, but as decision logic, not just persistence). `_claim_collecting`/`_merge_claim_slots`/`_maybe_clear_claim_state` collapse into it.
+- **Allowed transitions:**
+  - `absent → collecting` — explicit claim request
+  - `absent → ts_suggested` — troubleshooting advice sent (current implementation)
+  - `ts_suggested → resolved` — customer confirms troubleshooting succeeded; this resolves the **troubleshooting episode**, it is not proof an admin claim case was closed
+  - `ts_suggested → collecting` — troubleshooting failed and claim collection begins
+  - `resolved → collecting` — explicit **new** claim request only (fresh claim); never bare phone/name/order text
+  - `collecting → terminal` — **BLOCKED** until an explicit claim resolved/cancelled event exists (`BLOCKED_BY_MISSING_CLAIM_RESOLUTION_EVENT`)
+  - `any → absent` — **BLOCKED** until an explicit reset/cancel lifecycle event exists
+  - ticket close is **not** a claim lifecycle transition
+
+### Phase 2B — replacement commits (plan only, no add-first/delete-later)
+
+**Scope — locked by user: Legacy Shopee runtime only.** `chat_v2`/`chatbotv3`/`botworker` are frozen and out of scope; no v2 tests are added. If a shared-helper change would alter v2 behavior, stop and design a legacy migration boundary first — do not change v2 semantics. No long-lived shim and no duplicate lifecycle owner inside legacy (migrate + delete in the same commit).
+
+**Commit 1 — terminal predicate replacement.** Single commit: add/fix lifecycle terminal precedence (`resolved` + retained slots → not collecting; explicit new claim request → `claim_request` fresh claim), migrate approved consumers (warranty executor + TurnDecision callee), delete the replaced predicate implementation/branch — no long-lived shim. Un-xfail `p2a-claim-resolved-new-request`. Report: owner before/after, predicate callers before/after, runtime LOC added/deleted, v2 impact (must be zero — shared-helper changes that alter v2 stop here).
+
+**Commit 2 — troubleshooting transitions.** Migrate `ts_suggested→resolved`/`→collecting` writes to the owner transition API; delete the two direct `update_claim_state` calls bypassing the wrapper in the same commit.
+
+**Commit 3 — collecting transitions.** Migrate one coherent group of `stage=collecting` writes (e.g., info-submission sites) and delete migrated direct writes immediately. Do not batch all callsites into one giant commit if it hurts review.
+
+**Commit 4 — ticket-close semantics.** Ticket close is ownership, not claim resolution: delete the closed-ticket `clear_claim_state` branch (it wrongly destroys in-flight claims); un-xfail `p2a-claim-ticket-closed-keeps-state`, `-product-question`, `-phone-resume`. NOT a move — the branch must not exist at all. General claim terminal transitions stay BLOCKED on `BLOCKED_BY_MISSING_CLAIM_RESOLUTION_EVENT`; `_TERMINAL_CLAIM_REASONS` are cleanup heuristics to audit/delete/replace, not resolution semantics to preserve.
+
+**Commit 5 — name persistence.** Fix the parsing/persistence owner for lone-name turns; delete the branch-local duplicate name validation it replaces; un-xfail `p2a-claim-collect-name-phone`.
+
+**Commit 6 — residual deletion audit.** Only real cleanup: grep owners/callsites, delete dead helpers, delete dead fields (`has_video` once no consumer is proven). Not a parking lot for deletions deferred from Commits 1–5.
+
+**Rules:** 1 commit = 1 verified fix; claim lifecycle stays separate from ConversationSubjectSet (Phase 2C); no subject/retrieval changes inside claim commits; TurnDecision consumes owner result (signature already supports claim_state input).
+
+**Complexity gates — every runtime commit must report:**
+
+```
+Runtime files added/deleted · Runtime lines added/deleted/net
+Functions/helpers added/deleted
+Decision owners before/after · Direct stage-write callsites before/after
+Keyword tables added/deleted · Flags added/deleted
+Shims added/deleted · Parallel paths added/deleted
+```
+
+Mandatory: new semantic keyword tables = 0 · new runtime flags = 0 · long-lived shims = 0 · owner count must decrease · migrated old branch deleted in same commit · runtime net LOC ≤ 0 for refactor-only commits. Failure → `INCREASES_COMPLEXITY_BLOCKED`, no commit.
+
+### YAGNI cuts
+
+- `claim_state_expect` per-turn schema — not added: final-state `final_claim_state` + `turn_decision_expect` per-turn already cover every case in the truth table; intermediate non-mutation is implied by both.
+- Public lifecycle wrapper — not created in 2A (tests target `_claim_collecting` as temporary owner).
+- `has_video` writer — dead field documented; removal deferred to Phase 2B owner consolidation.

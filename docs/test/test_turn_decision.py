@@ -18,6 +18,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "chatbot"))
 
+import validate_legacy_turn_fixtures as vfx  # noqa: E402
 from shopeechat.turn_decision import TurnDecision, decide_turn  # noqa: E402
 
 
@@ -413,9 +414,11 @@ def _fixture_contract_check(fx):
     Order matters: explicit `turn_decision_expect` is asserted FIRST —
     a fixture that declares exact contract actions is never swallowed by
     the generic noise skip or the legacy family comparison."""
-    if not fx.get("turns"):
+    user_turns = [t for t in (fx.get("turns") or [])
+                  if (t or {}).get("role", "user") == "user"]
+    if not user_turns:
         return None
-    turn = fx["turns"][0]
+    turn = user_turns[0]
     _tseed = fx.get("timeline_seed") or {}
     _anchor = ({"item_id": str(_tseed["active_item_id"])}
                if _tseed.get("active_item_id") else None)
@@ -429,14 +432,11 @@ def _fixture_contract_check(fx):
                 post_handoff_exceptions=_exc or None)
     tde = fx.get("turn_decision_expect")
     if tde:
-        want_td = tde[0]
-        if d.action != want_td["action"]:
-            return (fx["id"], d.action, [want_td["action"]])
-        miss_f = (set(want_td.get("flags_contains") or [])
-                  - set(d.flags))
-        if miss_f:
-            return (fx["id"], sorted(d.flags),
-                    [f"flags⊇{sorted(miss_f)}"])
+        err = vfx.tde_entry_error(
+            tde[0], d.action, d.flags,
+            incident=fx.get("status") == "incident")
+        if err:
+            return (fx["id"], d.action, [err])
         return None
     # placeholder-only turn → "noise" is the correct owner decision even
     # where legacy produced a generic answer (noise-handler answers later)
@@ -457,9 +457,14 @@ def _fixture_contract_check(fx):
 def test_shadow_fixture_actions_contract():
     """decide_turn on real fixture first-turns must agree with the legacy
     action family — except rows already marked incident (known-broken
-    legacy behavior; the contract documents the intended decision)."""
-    mismatches = [c for fx in _fixture_rows()
-                  if (c := _fixture_contract_check(fx))]
+    legacy behavior; the contract documents the intended decision).
+
+    Incident fixtures declare their contract-level divergence per tde
+    entry via `current` (the buggy action); an incident whose desired
+    action is already produced fails as a stale pin — same strict
+    semantics as replay `_gate`, enforced inside `tde_entry_error`."""
+    mismatches = {fx["id"]: c for fx in _fixture_rows()
+                  if (c := _fixture_contract_check(fx))}
     assert not mismatches, f"contract/legacy family mismatches: {mismatches}"
 
 

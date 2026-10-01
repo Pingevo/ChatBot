@@ -1774,7 +1774,7 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **Finding 3 (forwarding tests)**: +6 direct shadow-boundary tests (timeline once / ไม่เรียก load_claim_state+get_active_product / inactive skip exceptions / active forwards / loader fail ไม่ raise / trace PII-free) — RED 2 จุด (แยก claim read, query exceptions ตอน inactive) → GREEN
 - verify: 97p turn_decision+shadow · 46/19/8 replay+iso · validator 40 rows · py_compile · forbidden=0 · **runtime answer ไม่เปลี่ยน**
 
-### 📋 Phase 1G — coverage + readiness re-audit (2026-09-30 · ยังไม่ commit · test/audit only)
+### 📋 Phase 1G — coverage + readiness re-audit (2026-09-30 · committed 40b66e7 · test/audit only)
 
 - **Baseline ก่อนแก้**: 52 turns — claim_collect=0, locked=2, noise=1 · hypothesis ยืนยัน: gap มาจาก harness ไม่ seed state ไม่ใช่ contract ขาด input
 - **Harness**: เพิ่ม `shop_settings_seed` (ขั้นต่ำ — admindb fake) + validator key · timeline/claim/ticket seed มีอยู่แล้ว
@@ -1784,7 +1784,7 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **Readiness verdict**: ทุก family `blocked_by_phase2` หรือ `needs_more_evidence` — **wire nothing yet**
 - verify: 97p turn_decision+shadow · 58/19/8 replay+iso · validator 52 rows · forbidden=0 · **runtime ไม่เปลี่ยน**
 
-#### Phase 1G review-fix — evidence honesty (2026-09-30 · ยังไม่ commit · test/audit only)
+#### Phase 1G review-fix — evidence honesty (2026-09-30 · committed 40b66e7 · test/audit only)
 
 - **False-green 1 — divergence allowlist**: `_KNOWN_DIVERGENT_IDS` ลบแล้ว — แทนด้วย `turn_decision_expect` (per-user-turn exact action + `flags_contains`) ที่ sweep และ contract test assert จริง 12 rows
 - **False-green 2 — vacuous claim**: `claim-collect-seeded`/`claim-resolved-retained` เดิม assert `claim_state_exists` (seed สร้างอยู่แล้ว) → เปลี่ยน `final_claim_state` ตาม post-state จริง: collect-seeded persist แค่ `customer_phone` (name turn ไม่เขียน), resolved-retained assert retained name เท่านั้น (legacy ไม่ persist phone — no-product-guard handoff)
@@ -1793,9 +1793,72 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **Doc wording**: hypothesis แก้เป็น "absent stateful fixtures + missing shop_settings_seed boundary" (ไม่ใช่ input gap) · noise verdict → needs_more_evidence (ไม่ใช่ phase2 blocker) · locked parity → "lock-vs-escape matches gate; downstream ต่างใน documented rows"
 - verify: 97p turn_decision+shadow · 61/19/8 replay+iso · validator 52 rows · runtime/Admin diff=0 · **runtime ไม่เปลี่ยน**
 
-##### Phase 1G review-fix#2 — final evidence integrity (ยังไม่ commit · test/audit only)
+##### Phase 1G review-fix#2 — final evidence integrity (committed 40b66e7 · test/audit only)
 
 - **claim-resolved-retained-slots → contract-only จริง**: ลบ `expected` block (final_claim_state assert เฉพาะ retained seed field = vacuous) — acceptance = `turn_decision_expect` claim_collect+claim_resume; note ระบุ executor divergence = Phase 2 blocker
 - **Validator เพิ่ม 2 guards**: (1) `final_claim_state` ที่ทุก key/value ⊆ claim_state_seed → reject vacuous; (2) `turn_decision_expect[].action` non-string (list/dict/int) → reject ไม่ crash (TypeError fix)
 - **Contract test ordering**: `_fixture_contract_check` extract + explicit expectation ถูก assert ก่อน generic noise skip — proven ด้วย mutation test (flip noise→locked in-memory ต้อง mismatch)
 - verify: 98p turn_decision+shadow (+1 mutation test) · 63/19/8 replay+iso (+2 validator meta-tests; contract-only conversion เปลี่ยน acceptance semantics ไม่ใช่จำนวน test case) · validator 52 rows · sweep 66 turns action counts คงเดิม · runtime/Admin diff=0
+
+### 📋 Phase 2A — claim lifecycle audit + RED contract baseline (ยังไม่ commit · test/audit only)
+
+- **Hypothesis ยืนยัน**: ไม่มี lifecycle owner เดียว — `_claim_collecting` (wf:69) ใช้ retained slots เป็น active marker แม้ `stage=resolved`; `update_claim_state` merge stage โดยไม่ล้าง slots; stage writes กระจาย ≥10 callsites ใน 2 SM impls ขนานกัน (`handle_warranty_flow` v2 / `_legacy` app.py); direct `_cp_ts*` calls bypass wrapper (wf:1151,2006)
+- **Schema inventory + callsite map + transition truth table** (17 rows) → plan ตอน Phase 2A
+- **New findings**: (1) `has_video` เป็น dead field (ไม่เคยถูก write); (2) closed-ticket clear (wf:1361) อยู่ใน `if history` guard → no-history ปล่อย stale claim_state ทิ้งไว้; (3) name persistence gap — NER path ไม่ persist lone-name turn (incident pin)
+- **test_phase2_claim_state_contract.py** (ใหม่, offline): 9 parity pins pass + 3 strict xfail (resolved+retained → desired not-collecting; terminal precedence; slots-not-activation) — delete condition = Phase 2B owner lands
+- **+5 fixtures** (rows 53-57): collect name→phone (incident/xfail — name gap), product-q resume, ticket-closed clears (model-turn history เพื่อเข้าถึง SM path), ts_suggested success→resolved, ts_suggested failed→collecting+handoff — ทุกอันมี turn_decision_expect
+- **Harness**: `claim_state_exists` เป็น bidirectional consumer (false = assert cleared); `_fixture_contract_check` ใช้ first **user** turn (model turns = history seed)
+- **YAGNI**: ไม่เพิ่ม per-turn claim schema (final_claim_state + tde พอ); ไม่สร้าง public wrapper
+- verify: 9p+3x contract · 98p td+shadow · 67/19/9 replay+iso · validator 57 rows · sweep 73 turns missing=0 · runtime/Admin diff=0 · **wire nothing yet ยังคงเดิม**
+
+#### Phase 2A review-fix — honest RED pins + replacement plan (ยังไม่ commit)
+
+- **No-history gap เป็น executable**: `p2a-claim-ticket-closed-no-history-stale` (row 58) — ticket closed + collecting + history ว่าง → stale claim_state ไม่ถูก clear → incident/strict-xfail ผ่าน gate เดิม; deletion condition = Phase 2B Commit 4 ย้าย terminal reset ก่อน `if history`
+- **xfail consolidation**: 3 ฟังก์ชัน desired-terminal → parametrized เดียว `test_desired_terminal_stage_beats_retained_slots` (3 cases: name / phone / 3-slot) — coverage เดิม net LOC ลด
+- **Owner map แก้**: TurnDecision ไม่ใช่ duplicate — มัน delegate ไป `_claim_collecting` ตัวเดียว → shared predicate ผิด = bug กระจายทั้ง executor + shadow; Phase 2B ต้อง replace owner ไม่ใช่เพิ่มชั้น
+- **Line refs → stable names** ทั้ง Phase 2A section (function/branch names ไม่ใช่ wf:NNNN)
+- **Terminology แยกสองแกน**: `lifecycle_open` vs `accepts_claim_fields` (ts_suggested = open แต่ไม่รับ fields; resolved = terminal; slots = audit data ไม่กระทบแกน; ticket closed override ทั้งคู่)
+- **Phase 2B rewrite เป็น replacement commits** (6 commits — migrate+delete ใน commit เดียว, ไม่มี long-lived shim) + **pre-implementation blocker: engine scope** (A: shared legacy+v2 / B: legacy-only — ต้อง user approval) + **complexity gates** (owner count ต้องลด, keyword tables/flags/shims = 0, net LOC ≤0 refactor commits ไม่งั้น INCREASES_COMPLEXITY_BLOCKED)
+- verify (fresh): 9p+3x contract (3 xfail funcs → 1 parametrized ×3 cases, count เดิม) · 98p td+shadow · 67/19/10 replay+iso (57→58 fixtures, +1 strict xfail no-history) · validator 58 rows · sweep 74 turns missing=0 · runtime/Admin diff=0 · **wire nothing yet**
+
+#### Phase 2A correction — ticket ownership ≠ claim lifecycle (ยังไม่ commit)
+
+- **Root cause ของ correction**: Phase 2A เดิมถือว่า ticket closed = claim จบ → pin "clear claim_state" เป็นตัวอย่างถูก — ผิด business rule: ticket_state คือ conversation ownership (status_conversation), claim resolution ต้องเป็น explicit event
+- **Audit finding (BLOCKER)**: ไม่มี claim-resolution event/field ในระบบ — `ConversationStatus` (open/closed/bot/handoff/resolved/pending) = ownership เท่านั้น; ticketService.status เป็น ticket-level เหมือนกัน; claim terminal signals มีแค่ bot-side: `_TERMINAL_CLAIM_REASONS` + ts-success `stage=resolved` → `BLOCKED_BY_MISSING_CLAIM_RESOLUTION_EVENT`
+- **Fixture corrections**: `p2a-claim-ticket-closed-clears`→`keeps-state` (desired=claim survive → incident: current clears wrongly) · `no-history-stale`→positive (survives accidentally, pin semantics) · +3 rows: closed+product-q (incident: clears+answers), closed+phone-resume (incident: clear→re-collect แต่ retained name หาย), resolved+new-claim-request (contract-only)
+- **Validator relax**: `claim_state_exists:true`+seed+`ticket_state` = survival assertion ไม่ vacuous (executor มี clear path จริง)
+- **Plan**: truth table rows 14-15b rewrite · ticket=third axis (ownership) · Commit 4 = delete wrongful clear (ไม่ใช่ move) · +multi-intent blocker (TurnDecision ต้องรองรับ needs[] ก่อน wire; ห้าม turn_policy.py ซ้ำ)
+- verify (fresh): contract+td+shadow 107p+3x · replay+iso 68/19/12 · validator 61 rows · sweep 77 turns missing=0 · runtime/Admin diff=0 · **wire nothing yet**
+
+#### Phase 2A review-fix round 2 — lifecycle vs ownership separation hardened (ยังไม่ commit)
+
+- **error**: review ชี้ plan ขัดกันเอง (top บอก closed ไม่ล้าง claim แต่ allowed transitions ยังมี `collecting→resolved (terminal handoff)` + `any→absent (closed ticket/clear)`) + fixture `resolved-new-request` pin bug เป็น positive + validator vacuous-guard bypass ด้วย ticket_state ใดๆ + owner `claim_or_ticket_state` รวมสองแกนที่เพิ่งแยก + Option A/B ค้าง
+- **cause**: correction รอบแรกแก้ truth table แต่ลืม contract-proposal transition list + validator bypass กว้างเกิน path ที่ execute ได้จริง
+- **fix**:
+  - transitions ใหม่: absent→collecting (explicit request) · absent→ts_suggested · ts_suggested→resolved (resolution ของ troubleshooting episode ไม่ใช่ admin case) · ts_suggested→collecting · resolved→collecting (explicit new request เท่านั้น) · `collecting→terminal` BLOCKED จนมี explicit resolved/cancelled event · `any→absent` BLOCKED จนมี reset/cancel event · ticket close ไม่ใช่ lifecycle transition
+  - `_TERMINAL_CLAIM_REASONS` ระบุชัด = bot-side cleanup heuristics ไม่ใช่ authoritative resolution; Phase 2B ต้อง audit/delete/replace ห้าม migrate แบบถือว่าถูก
+  - `Three independent axes`: conversation_ownership / claim_lifecycle / claim_field_acceptance
+  - ลบ `p2a-claim-ticket-closed-no-history-stale` (exists-only บน no-history path = assertion ไม่พิสูจน์ root cause; with-history 3 rows ครอบ wrongful clear แล้ว)
+  - `resolved-new-request` → incident+strict xfail: expected handoff/claim + stage=collecting, tde=`claim_request` (current: claim_collect+claim_resume ไม่ handoff — retained slots ชนะ detect_claim_request)
+  - validator: OWNERS เพิ่ม `conversation_ownership`/`claim_lifecycle`/`claim_field_acceptance`, ลบ `claim_or_ticket_state` (+reject ใน secondary_owners) · vacuous-exists guard แคบเป็น `ticket_state=="closed" AND มี model/history_extra turn` เท่านั้น
+  - meta-tests TDD: RED (2 fail) → validator fix → GREEN (8 pass)
+  - migrate 14 fixtures: lock-escape×2→conversation_ownership, claim rows→claim_lifecycle (+secondary_owners 1 รายการ)
+  - plan: ลบ Option A/B → scope locked = Legacy runtime only, v2/v3 frozen, shared-helper change ที่กระทบ v2 ต้องหยุดออกแบบ boundary ก่อน
+  - sweep/contract test: incident+tde divergence เป็น expected (resolved-new-request contract=claim_request vs current=claim_collect) — strictness อยู่ที่ replay `_gate` (unexpected pass = fail)
+- **impact on other cases**: ไม่มี — meta-tests เก่า 6 ตัวยังผ่าน, incident xefail count +1 (resolved-new-request), fixture count 61→60, sweep turns 77→76
+- verify (fresh): contract+td+shadow 107p+3x · replay+iso 67/19/13 · validator 60 rows · sweep 76 turns missing=0 · runtime/Admin diff=0 · **wire nothing yet**
+
+#### Phase 2A review-fix round 3 — false-green hardening (ยังไม่ commit)
+
+- **error**: (1) `final_claim_state` ถูก assert เฉพาะ action=claim_collect → handoff+fcs ผ่านเงียบ; (2) `expected_mismatch_ids` เป็น dead variable — incident tde mismatch ถูกกรองทิ้งโดยไม่ assert อะไร; (3) fresh-claim fixture ไม่ระบุ slot policy; (4) plan สั่งสร้าง `turn_policy.py` ขัดกับ blocker ที่ห้าม owner ซ้ำ; (5) `claim_field_acceptance` เป็น taxonomy ไม่มีผู้ใช้
+- **cause**: tde strictness รอบ 2 ออกแบบเป็น "incident = tolerate" ทั้งแถว → divergence กลายเป็น silent; fcs ผูกกับ action branch โดยไม่ได้ตั้งใจ
+- **fix**:
+  - `tde_entry_error()` (validator-owned, shared โดย contract test + sweep): entry ไม่มี `current` = current-pin ต้อง match รวม flags (incident ไม่ยกเว้น); entry มี `current` (incident-only) = actual ต้อง == current และต่างจาก desired — match desired = stale pin fail, ต่างทั้งคู่ = drift fail
+  - `final_claim_state` ย้ายเป็น independent post-state assertion ตรวจทุก action; `None` value = assert key absent; claim_collect branch เหลือ assert claim state มีจริง
+  - `resolved-new-request`: seed เพิ่ม order_id/purchase_date/has_image; expected assert case fields absent (None) + handoff claim; tde `{"action":"claim_request","current":"claim_collect"}`; slot policy = identity allowlist (name/phone reuse OK, case evidence ห้าม carry); blocker `BLOCKED_BY_CLAIM_EPISODE_IDENTITY` (flat claim_state ไม่มี episode boundary)
+  - validator: tde `current` key rules (incident-only, enum, ≠action) + secondary_owners taxonomy check
+  - plan: owner map/Phase 1 Files → evolve `turn_decision.py` ไม่สร้าง turn_policy; "monotonic except reset/close" ลบ; `_claim_collecting` reader cell แก้เป็น "collecting OR retained slots"
+  - `claim_field_acceptance` มีผู้ใช้: secondary_owners บน name-phone + phone-resume fixtures
+- **RED evidence**: meta-tests 3 ตัว fail ก่อนแก้ (fcs-skipped-under-handoff, `current` rejected, tde_entry_error missing) → GREEN 15/15 meta
+- **impact**: executor-side incident rows (name-phone, ticket-closed×3) tde เป็น current-pins — flags ถูกตรวจด้วยแล้ว; replay xfail ยัง 13 (resolved-new-request fail ด้วย handoff + case-field retention)
+- verify (fresh): contract+td+shadow 107p+3x · replay+iso 71/19/13 · validator 60 rows · sweep 76 turns missing=0 · runtime/Admin diff=0 · **wire nothing yet**
