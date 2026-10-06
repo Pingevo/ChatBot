@@ -134,6 +134,9 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.adminLogs, { ticket_id: 1 }, { sparse: true }),
     safeCreateIndex(db, COLLECTIONS.adminLogs, { timestamp: 1 }),
     safeCreateIndex(db, COLLECTIONS.adminLogs, { action_type: 1, timestamp: -1 }),
+    // ⚡ /logs numbered pagination — sort {timestamp:-1,_id:-1} ทุก request (poll 5s หน้า 1)
+    //   ไม่มี compound index → blocking sort ทั้งชุดทุกครั้ง
+    safeCreateIndex(db, COLLECTIONS.adminLogs, { timestamp: -1, _id: -1 }),
     // triggers — brand new collection.
     safeCreateIndex(db, COLLECTIONS.triggers, { trigger_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.triggers, { shop_id: 1 }, { sparse: true }),

@@ -2308,3 +2308,34 @@ Smoke harness พร้อมรันแล้ว — ขาดแค่ Mongo 
 S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mongod` หรือ cached image) เท่านั้น
 
 > **Committed:** `8fb416a test: add loopback-only botworker Mongo smoke harness` (3 files, +812) — staging ว่าง, leftovers untouched, S1–S6 ยัง unproven (รอ disposable Mongo)
+
+---
+
+## [ผ่านแล้ว] /logs server-side pagination + responsive Pagination (2026-10-06) — ✅ fixed + verified
+
+- **requirement (user update ล่าสุด)**: PAGE_SIZE=100 (API default+clamp 1–100) · sort `{timestamp:-1,_id:-1}` · summary `รายการ X–Y จากทั้งหมด Z รายการ` · Pagination +optional props `showBoundaryButtons`/`responsive` (CSS-only: phone≤3/md≤5/lg≤maxButtons numbered) · poll 5s เฉพาะหน้า 1, silent, ไม่ reset filter/expanded/view/scroll · verify screenshot 4 viewports (375/768/1366/1920)
+- **baseline**: `/logs` fetch `limit=200` ครั้งเดียว + filter client-side ทั้งหมด ไม่มี pagination UI · API คืน `total=rows.length` (ผิด) · service `$sort timestamp:-1` ไม่มี `_id` tiebreaker · Pagination ใช้โดย shops/contacts/knowledge/ProductsTab (props ขั้นต่ำ — ห้ามเปลี่ยน behavior)
+- **root cause**: ไม่มี server-side pagination เลย — filter client-side บน 200 rows แรกทำให้ log เก่ากว่านั้นหาไม่เจอ + total ผิด + sort ไม่ deterministic
+- **วิธีแก้**:
+  - `adminLogService.listAdminLogsExtended` → คืน `{rows,page,pageSize,total,totalPages}` · pipeline เดียว: `$match(base)→$lookup→$addFields→$match(search)→$sort{timestamp:-1,_id:-1}→$facet{rows:[$skip,$limit],meta:[$count]}` · search regex-escape (reuse `safeRegexSearch`) ครอบ 8 fields รวม joined username/name · actionType exact ชนะ actionTypes
+  - `route.ts` → params ใหม่ `page`(≥1) `pageSize`(default 100, clamp 1–100) `admin_id` `action_type` `action_types`(CSV dedupe) `since`(invalid→ignore) `q`(≤100) — `limit` param เดิมถูกแทนด้วย pageSize
+  - `Pagination.tsx` → +`showBoundaryButtons`(«/» aria-label ไทย) +`responsive`(3 CSS clusters `md:hidden`/`md:flex lg:hidden`/`lg:flex` ผ่าน `windowPages` — numbered รวม ≤3/≤5/≤maxButtons) · default path algorithm เดิมไม่แตะ → 4 หน้าอื่น render เหมือนเดิม
+  - `logs/page.tsx` → `PAGE_SIZE=100` + `page/total/totalPages` state · loadLogs ส่ง server params (admin_id/action_type/action_types/q) + `reqSeq` stale-guard · filter ทุกจุด `setPage(1)` · search debounce 300ms · `usePolling {enabled: canViewLogs && page===1}` · row key `log._id` (แก้ expanded หลุดตอน poll) · footer summary+Pagination เดียวใช้ร่วม list/table
+  - `shop-settings/page.tsx` → `limit:50` → `pageSize:50` (caller เดียวที่ใช้ param เก่า — คง behavior 50 rows)
+- **verify**: TDD RED 44 fail → GREEN **51/51** (`scripts/test-admin-logs-pagination.ts` + fake-Mongo mocks) · `tsc --noEmit` clean · `next build` pass (warnings เดิมเท่า baseline) · `diff --check` clean
+- **browser verify จริง** (playwright + minted session dev account, ลบ session แล้ว): 4 viewports ทุกตัว hScroll=false, numbered visible phone=3/tablet=5/laptop=pc=7, table แสดงเฉพาะ lg+, page1=100 rows, last page 349=40 rows (34,840 total ตรง), next/last/first ใช้งานจริง, summary `รายการ 101–200 จากทั้งหมด 34,840 รายการ · หน้า 2 จาก 349` ตรง format, poll page1=1 call/5s page2=0
+- **เคสอื่น**: Pagination หน้าอื่นไม่เปลี่ยน (default path เดิม) · `/admin/logs` caller อื่นมีแค่ shop-settings (แก้แล้ว) · `listAdminLogs` ไม่แตะ
+- **ยังไม่ commit** — รอ user review diff ก่อนตามกฎข้อ 10
+
+### Review-fix รอบ 2: $lookup ก่อน pagination = performance regression (2026-10-06) — ✅ fixed + verified
+
+- **root cause**: pipeline แรกทำ `$lookup` admins บน log ทั้งชุดก่อน `$facet` — page 1 poll ทุก 5s = join ทั้ง ~34,840 records ต่อ request แม้แสดงแค่ 100
+- **RED evidence (fake pipeline วัด input จริง)**: F1 `lookup input=252` (page1, ต้อง ≤100) · F2 `input=252` (page3, ต้อง =52) · F3 top-level `$lookup` ก่อน `$facet` · F4 ไม่มี admin resolution query · F6 index ยังไม่มี — 51 tests เดิมยังผ่าน (mock ไม่พัง)
+- **วิธีแก้ (stage order เท่านั้น, semantics เดิม)**:
+  - `$match(base+search)` → `$sort{timestamp:-1,_id:-1}` → `$facet{ rows:[$skip,$limit,$lookup,$addFields,$project], meta:[$count] }`
+  - search username/name: `find()` admins ด้วย escaped regex เดียวกัน (projection `admin_id`, ≤1 query เฉพาะเมื่อมี q) → fold `{admin_id:{$in:ids}}` เข้า `$or` ร่วมกับ raw fields 6 ตัว — search semantics ไม่เปลี่ยน
+  - index ใหม่ 1 ตัวผ่าน owner เดิม: `safeCreateIndex(db, COLLECTIONS.adminLogs, { timestamp: -1, _id: -1 })` — ไม่รัน prod เอง, index เดิมครบ
+- **after (probe)**: `lookup_input page1=100, page3=52` (เทียบ before=252) · admin resolution findCalls: no-search=0, with-search=1
+- **verify**: focused suite **57/57** (51 เดิม + 6 ใหม่ — B15 rewrite บังคับ pipeline ใหม่ตาม prompt) · tsc clean · `next build` pass · `diff --check` clean · diff เฉพาะไฟล์ที่อนุญาต (service/mongoClient/2 test files) · ไม่มี UI เปลี่ยน → ไม่ mint session / ไม่ screenshot ใหม่
+- **complexity delta**: modules/deps/env/collections/helpers = 0 · indexes +1 · duplicate pagination paths = 0 · behavior change = query execution order only
+- **ยังไม่ commit** — งานเดิม + fix นี้รวม review เดียวรอ user อนุมัติ

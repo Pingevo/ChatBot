@@ -109,7 +109,7 @@ export default function ShopSettingsPage() {
     setLogLoading(true);
     try {
       const r = await api().get<{ rows: LogRow[] }>("/admin/logs", {
-        params: { action_type: "shop_settings", limit: 50 },
+        params: { action_type: "shop_settings", pageSize: 50 },
       });
       setLogs(r.data.rows || []);
     } catch {

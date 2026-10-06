@@ -13,13 +13,18 @@ import { usePolling } from "@/lib/usePolling";
 import { useSearchShortcut, useEscToClear, useListboxNav } from "@/lib/useKeyboardShortcuts";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { FilterPresets } from "@/components/ui/FilterPresets";
+import { Pagination } from "@/components/ui/Pagination";
 import { ACTION_CATEGORIES, ACTION_TONE, actionTypeLabel } from "@/lib/actionTypes";
 
 // Phase 7.10 — หน้า Logs แยกจาก config
 // แสดง audit trail ของทุก action ในระบบ พร้อม filter admin + action_type
 // ⚡ v2 — เพิ่ม tab สลับมุมมอง ลิสต์/ตาราง (ตารางแสดงทุก field จริงใน doc)
+// ⚡ v3 — server-side numbered pagination (100/หน้า) + filter/search ย้ายไป server
+
+const PAGE_SIZE = 100;
 
 interface AdminLogRow {
+  _id: string;
   admin_id: string;
   username?: string;
   name?: string;
@@ -55,7 +60,12 @@ export default function LogsPage() {
   const [viewMode, setViewMode] = useState<"list" | "table">("list");
   const [filterActionType, setFilterActionType] = useState<string>("all");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(0);
+  const reqSeq = useRef(0); // stale-response guard — response เก่ากว่าต้องไม่ overwrite state ล่าสุด
   const [showAdminDropdown, setShowAdminDropdown] = useState(false);
   const [showCatDropdown, setShowCatDropdown] = useState(false);
   // Column visibility for table view (persisted in localStorage)
@@ -78,15 +88,15 @@ export default function LogsPage() {
 
   // arrow-key navigation for filter dropdowns
   const adminNav = useListboxNav(admins.length + 2, (i) => {
-    if (i === 0) { setFilterAdmin("all"); setShowAdminDropdown(false); return; }
-    if (i === 1) { setFilterAdmin("system"); setShowAdminDropdown(false); return; }
+    if (i === 0) { setFilterAdmin("all"); setPage(1); setShowAdminDropdown(false); return; }
+    if (i === 1) { setFilterAdmin("system"); setPage(1); setShowAdminDropdown(false); return; }
     const a = admins[i - 2];
-    if (a) { setFilterAdmin(a.admin_id); setShowAdminDropdown(false); }
+    if (a) { setFilterAdmin(a.admin_id); setPage(1); setShowAdminDropdown(false); }
   }, () => setShowAdminDropdown(false));
   const catNav = useListboxNav(ACTION_CATEGORIES.length + 1, (i) => {
-    if (i === 0) { setFilterCategory("all"); setFilterActionType("all"); setShowCatDropdown(false); return; }
+    if (i === 0) { setFilterCategory("all"); setFilterActionType("all"); setPage(1); setShowCatDropdown(false); return; }
     const c = ACTION_CATEGORIES[i - 1];
-    if (c) { setFilterCategory(c.label); setFilterActionType("all"); setShowCatDropdown(false); }
+    if (c) { setFilterCategory(c.label); setFilterActionType("all"); setPage(1); setShowCatDropdown(false); }
   }, () => setShowCatDropdown(false));
 
   // โหลด admins list (สำหรับ filter + แสดงชื่อ)
@@ -102,30 +112,54 @@ export default function LogsPage() {
 
   const canViewLogs = user?.role === "superadmin" || user?.role === "dev";
 
+  // search debounce ~300ms — ส่ง q เข้า server filter เมื่อผู้ใช้หยุดพิมพ์ + reset หน้า 1
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedSearch(search.trim());
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
   const loadLogs = useCallback(async (silent = false) => {
-    if (!canViewLogs) { setLogs([]); setLoading(false); return; }
+    if (!canViewLogs) { setLoading(false); return; }
     if (!silent) setLoading(true);
+    const seq = ++reqSeq.current;
     try {
-      const params: Record<string, string | number> = { limit: 200 };
+      const params: Record<string, string | number> = { page, pageSize: PAGE_SIZE };
+      if (filterAdmin !== "all") params.admin_id = filterAdmin;
       if (filterActionType !== "all") params.action_type = filterActionType;
-      const r = await api().get<{ rows: AdminLogRow[]; total: number }>("/admin/logs", { params });
+      else if (filterCategory !== "all") {
+        const cat = ACTION_CATEGORIES.find((c) => c.label === filterCategory);
+        if (cat) params.action_types = cat.types.join(",");
+      }
+      if (debouncedSearch) params.q = debouncedSearch;
+      const r = await api().get<{
+        rows: AdminLogRow[]; page: number; pageSize: number; total: number; totalPages: number;
+      }>("/admin/logs", { params });
+      if (seq !== reqSeq.current) return; // response เก่ากว่า — ทิ้ง
       setLogs(r.data.rows || []);
+      setTotal(r.data.total);
+      setTotalPages(r.data.totalPages);
+      // หน้าเกินขอบ (ข้อมูลหดหลัง filter/ลบ) → กลับหน้าสุดท้าย แล้ว effect โหลดใหม่
+      if (r.data.totalPages > 0 && page > r.data.totalPages) setPage(r.data.totalPages);
     } catch (err) {
+      if (seq !== reqSeq.current) return;
       console.error("load logs failed", err);
-      toast.error("โหลดบันทึกระบบไม่สำเร็จ", 0, { label: "ลองใหม่", onClick: () => loadLogs() });
-      setLogs([]);
+      if (!silent) toast.error("โหลดบันทึกระบบไม่สำเร็จ", 0, { label: "ลองใหม่", onClick: () => loadLogs() });
+      // error → เก็บ rows เดิมเสมอ (silent poll ห้ามเคลียร์ข้อมูลที่แสดงอยู่)
     } finally {
-      setLoading(false);
+      if (seq === reqSeq.current) setLoading(false);
     }
-  }, [filterActionType, canViewLogs]);
+  }, [page, filterAdmin, filterCategory, filterActionType, debouncedSearch, canViewLogs]);
 
   useEffect(() => {
     loadLogs();
   }, [loadLogs]);
 
-  // poll 5 วิ (เฉพาะ superadmin/dev) — silent: ไม่แตะ loading ไม่งั้น list ถูกแทนด้วย
-  // spinner ทุก 5 วิ → DOM หาย → scroll เด้งกลับบน + กระพริบ
-  usePolling(canViewLogs ? () => loadLogs(true) : async () => {}, canViewLogs ? 5000 : 0);
+  // poll 5 วิ เฉพาะหน้า 1 — หน้า 2+ ไม่ poll เพื่อไม่ให้ตำแหน่ง log เลื่อน
+  // silent: ไม่แตะ loading ไม่งั้น list ถูกแทนด้วย spinner ทุก 5 วิ → DOM หาย → scroll เด้งกลับบน
+  usePolling(() => loadLogs(true), 5000, { enabled: canViewLogs && page === 1 });
 
   // ชื่อ admin สำหรับแสดง
   const adminName = (id: string): string => {
@@ -134,23 +168,14 @@ export default function LogsPage() {
     return a?.name || a?.username || id;
   };
 
-  // filter ใน frontend
-  const filtered = logs.filter((log) => {
-    if (filterAdmin !== "all" && log.admin_id !== filterAdmin) return false;
-    if (filterCategory !== "all") {
-      const cat = ACTION_CATEGORIES.find((c) => c.label === filterCategory);
-      if (cat && !cat.types.includes(log.action_type)) return false;
-    }
-    if (search) {
-      const q = search.toLowerCase();
-      const name = (adminName(log.admin_id || "") || "").toLowerCase();
-      if (!(log.action_type || "").toLowerCase().includes(q) &&
-          !name.includes(q) &&
-          !(log.conversation_id || "").toLowerCase().includes(q) &&
-          !(log.shop_id || "").toLowerCase().includes(q)) return false;
-    }
-    return true;
-  });
+  // summary range ของหน้าปัจจุบัน — "รายการ X–Y จากทั้งหมด Z รายการ"
+  const rangeFrom = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+  const rangeTo = Math.min(page * PAGE_SIZE, total);
+
+  const handlePageChange = (p: number) => {
+    setExpandedId(null); // ปิด expanded row — หน้าใหม่เป็นชุดข้อมูลใหม่
+    setPage(p);
+  };
 
   const selectedAdminLabel = filterAdmin === "all"
     ? "ทุกแอดมิน"
@@ -187,7 +212,7 @@ export default function LogsPage() {
       icon={ScrollText}
       title="บันทึกระบบ"
       helpHref="/help#logs"
-      subtitle={<>audit trail · {filtered.length} รายการ · รีเฟรชทุก 5 วิ · <a href="/help#action-types" className="text-brand hover:text-brand-dark">ดูรหัส action_type ทั้งหมด →</a></>}
+      subtitle={<>audit trail · {total.toLocaleString("th-TH")} รายการ · รีเฟรชทุก 5 วิ (หน้า 1) · <a href="/help#action-types" className="text-brand hover:text-brand-dark">ดูรหัส action_type ทั้งหมด →</a></>}
       actions={
         <>
           {/* ⚡ v2 — tab สลับมุมมอง ลิสต์/ตาราง */}
@@ -232,14 +257,14 @@ export default function LogsPage() {
               <div ref={(el) => { if (showAdminDropdown && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามแอดมิน" aria-activedescendant={`admin-option-${adminNav.activeIndex}`} onKeyDown={(e) => { adminNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[180px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1 max-h-72 overflow-y-auto">
                 <button
                   id="admin-option-0" role="option" aria-selected={filterAdmin === "all"}
-                  onClick={() => { setFilterAdmin("all"); setShowAdminDropdown(false); }}
+                  onClick={() => { setFilterAdmin("all"); setPage(1); setShowAdminDropdown(false); }}
                   className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterAdmin === "all" ? "text-brand font-medium" : "text-text"}`}
                 >
                   ทุกแอดมิน
                 </button>
                 <button
                   id="admin-option-1" role="option" aria-selected={filterAdmin === "system"}
-                  onClick={() => { setFilterAdmin("system"); setShowAdminDropdown(false); }}
+                  onClick={() => { setFilterAdmin("system"); setPage(1); setShowAdminDropdown(false); }}
                   className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterAdmin === "system" ? "text-brand font-medium" : "text-text"}`}
                 >
                   system
@@ -249,7 +274,7 @@ export default function LogsPage() {
                   <button
                     key={a.admin_id}
                     id={`admin-option-${i + 2}`} role="option" aria-selected={filterAdmin === a.admin_id}
-                    onClick={() => { setFilterAdmin(a.admin_id); setShowAdminDropdown(false); }}
+                    onClick={() => { setFilterAdmin(a.admin_id); setPage(1); setShowAdminDropdown(false); }}
                     className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterAdmin === a.admin_id ? "text-brand font-medium" : "text-text"}`}
                   >
                     {a.name || a.username} <span className="text-text-subtle">({a.role})</span>
@@ -275,7 +300,7 @@ export default function LogsPage() {
               <div ref={(el) => { if (showCatDropdown && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามหมวด" aria-activedescendant={`cat-option-${catNav.activeIndex}`} onKeyDown={(e) => { catNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[160px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
                 <button
                   id="cat-option-0" role="option" aria-selected={filterCategory === "all"}
-                  onClick={() => { setFilterCategory("all"); setFilterActionType("all"); setShowCatDropdown(false); }}
+                  onClick={() => { setFilterCategory("all"); setFilterActionType("all"); setPage(1); setShowCatDropdown(false); }}
                   className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterCategory === "all" ? "text-brand font-medium" : "text-text"}`}
                 >
                   ทุกหมวด
@@ -284,7 +309,7 @@ export default function LogsPage() {
                   <button
                     key={c.label}
                     id={`cat-option-${i + 1}`} role="option" aria-selected={filterCategory === c.label}
-                    onClick={() => { setFilterCategory(c.label); setFilterActionType("all"); setShowCatDropdown(false); }}
+                    onClick={() => { setFilterCategory(c.label); setFilterActionType("all"); setPage(1); setShowCatDropdown(false); }}
                     className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterCategory === c.label ? "text-brand font-medium" : "text-text"}`}
                   >
                     {c.label}
@@ -325,13 +350,14 @@ export default function LogsPage() {
               setFilterActionType(v.filterActionType || "all");
               setSearch(v.search || "");
               setViewMode(v.viewMode || "list");
+              setPage(1);
             }}
           />
 
           {/* Clear filter */}
           {(filterAdmin !== "all" || filterCategory !== "all" || search) && (
             <button
-              onClick={() => { setFilterAdmin("all"); setFilterCategory("all"); setFilterActionType("all"); setSearch(""); }}
+              onClick={() => { setFilterAdmin("all"); setFilterCategory("all"); setFilterActionType("all"); setSearch(""); setPage(1); }}
               className="h-8 px-2 rounded-lg text-xs text-text-muted hover:text-vibrant-coral hover:bg-surface-2 flex items-center gap-1 transition-colors"
             >
               <X size={12} /> ล้าง
@@ -344,12 +370,12 @@ export default function LogsPage() {
           <div className="mt-2">
             <FilterChips
               chips={[
-                ...(search ? [{ key: "search", label: `ค้นหา: ${search}`, onRemove: () => setSearch("") }] : []),
-                ...(filterAdmin !== "all" ? [{ key: "admin", label: `แอดมิน: ${adminName(filterAdmin)}`, onRemove: () => setFilterAdmin("all") }] : []),
-                ...(filterCategory !== "all" ? [{ key: "category", label: `หมวด: ${filterCategory}`, onRemove: () => setFilterCategory("all") }] : []),
-                ...(filterActionType !== "all" ? [{ key: "actionType", label: `action: ${actionTypeLabel(filterActionType)}`, onRemove: () => setFilterActionType("all") }] : []),
+                ...(search ? [{ key: "search", label: `ค้นหา: ${search}`, onRemove: () => { setSearch(""); setPage(1); } }] : []),
+                ...(filterAdmin !== "all" ? [{ key: "admin", label: `แอดมิน: ${adminName(filterAdmin)}`, onRemove: () => { setFilterAdmin("all"); setPage(1); } }] : []),
+                ...(filterCategory !== "all" ? [{ key: "category", label: `หมวด: ${filterCategory}`, onRemove: () => { setFilterCategory("all"); setPage(1); } }] : []),
+                ...(filterActionType !== "all" ? [{ key: "actionType", label: `action: ${actionTypeLabel(filterActionType)}`, onRemove: () => { setFilterActionType("all"); setPage(1); } }] : []),
               ]}
-              onClearAll={() => { setFilterAdmin("all"); setFilterCategory("all"); setFilterActionType("all"); setSearch(""); }}
+              onClearAll={() => { setFilterAdmin("all"); setFilterCategory("all"); setFilterActionType("all"); setSearch(""); setPage(1); }}
             />
           </div>
         )}
@@ -361,15 +387,15 @@ export default function LogsPage() {
       <div>
         {loading ? (
           <div className="flex items-center justify-center py-12"><Loading /></div>
-        ) : filtered.length === 0 ? (
+        ) : logs.length === 0 ? (
           <EmptyState icon={FileText} title="ยังไม่มี log ตรงเงื่อนไข" description="ลองเปลี่ยน filter หรือล้างการกรอง" />
         ) : (
           <>
           {/* ── List view — บนจอ <lg ใช้เสมอ (แม้เลือกโหมดตาราง เพราะตารางกว้าง) ── */}
           <div className={viewMode === "table" ? "lg:hidden" : ""}>
           <div className="space-y-1.5">
-            {filtered.map((log, i) => {
-              const key = `${log.admin_id}-${log.timestamp}-${i}`;
+            {logs.map((log) => {
+              const key = log._id; // _id = identity คงที่ — poll แล้ว expanded ไม่หลุดไปคนละ row
               const expanded = expandedId === key;
               const tone = ACTION_TONE[log.action_type] || "neutral";
               return (
@@ -442,9 +468,23 @@ export default function LogsPage() {
           {/* ── Table view — เฉพาะ lg+ (แสดงทุก field จริงใน AdminLogDoc) ── */}
           {viewMode === "table" && (
             <div className="hidden lg:block">
-              <LogTableView logs={filtered} adminName={adminName} actionTypeLabel={actionTypeLabel} expandedId={expandedId} setExpandedId={setExpandedId} hiddenCols={hiddenCols} toggleCol={toggleCol} />
+              <LogTableView logs={logs} adminName={adminName} actionTypeLabel={actionTypeLabel} expandedId={expandedId} setExpandedId={setExpandedId} hiddenCols={hiddenCols} toggleCol={toggleCol} />
             </div>
           )}
+          {/* ── Pagination + summary — ชุดเดียวใช้ร่วม list/table; wrap ได้ไม่ overlap ── */}
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+            <div className="text-xs text-text-muted">
+              รายการ {rangeFrom}–{rangeTo} จากทั้งหมด {total.toLocaleString("th-TH")} รายการ · หน้า {page} จาก {totalPages}
+            </div>
+            <Pagination
+              page={page}
+              totalPages={totalPages}
+              onChange={handlePageChange}
+              maxButtons={7}
+              showBoundaryButtons
+              responsive
+            />
+          </div>
           </>
         )}
       </div>
@@ -537,8 +577,8 @@ function LogTableView({
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
-            {logs.map((log, i) => {
-              const key = `${log.admin_id}-${log.timestamp}-${i}`;
+            {logs.map((log) => {
+              const key = log._id;
               const expanded = expandedId === key;
               const tone = ACTION_TONE[log.action_type] || "neutral";
               const hasDetail = metaCount(log.metadata) > 0 || metaCount(log.meta) > 0;
