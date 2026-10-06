@@ -2306,3 +2306,5 @@ Smoke harness พร้อมรันแล้ว — ขาดแค่ Mongo 
 
 ### Verdict: `HARNESS_SAFETY_READY_DISPOSABLE_MONGO_UNAVAILABLE`
 S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mongod` หรือ cached image) เท่านั้น
+
+> **Committed:** `8fb416a test: add loopback-only botworker Mongo smoke harness` (3 files, +812) — staging ว่าง, leftovers untouched, S1–S6 ยัง unproven (รอ disposable Mongo)
