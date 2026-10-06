@@ -124,6 +124,78 @@ def _maybe_clear_claim_state(req, claim_ctx: dict, answer: str = "") -> None:
         _clear_claim_state(req)
 
 
+# ─── Post-handoff lock helpers (5F-H4) ───────────────────────────────────────
+# ticket_state เป็น source of truth — ไม่พึ่ง history marker อย่างเดียว
+# (history fetch fail/marker missing ตอน ticket ยังเปิด = bot ตอบเองผิดจังหวะ)
+_POST_HANDOFF_PRODUCT_KWS = (
+    "สายชาร์จ", "หัวชาร์จ", "ชุดชาร์จ", "แท่นชาร์จ", "พาวเวอร์แบงค์", "แบตสำรอง",
+    "แบตเตอรี่", "สาย usb", "สาย c", "สาย type", "หาสาย", "หาหัว", "หาแบต",
+    "มีสาย", "มีหัว", "มีแบต", "มีพาวเวอร์", "มีสินค้า", "ดูสินค้า", "แนะนำ",
+    "สอบถามสินค้า", "รุ่นไหนดี", "ราคา", "กี่บาท", "ชาร์จเร็ว", "watt", "วัตต์",
+    "สายแรง", "หัวแรง", "แบตแรง", "ชาร์จแรง", "pd 3.1", "gan", "wireless",
+    "สวัสดี", "hello", "hi ", "ขอดูสินค้า", "ขอสอบถาม",
+)
+_POST_HANDOFF_WARRANTY_KWS = (
+    "เคลม", "ประกัน", "ทวนข้อมูล", "ส่งสินค้า", "พัสดุ", "tracking", "EMS",
+    "เบอร์", "เลขคำสั่ง", "วันที่ซื้อ", "รูปสินค้า", "แสดงอาการ", "ความเสียหาย",
+    "เปลี่ยนสินค้า", "คืนสินค้า", "refund", "return", "เคลมสาย", "เคลมหัว",
+    "ใช้ไม่ได้", "ไม่ทำงาน", "ชาร์จไม่เข้า", "ไม่ชาร์จ", "ชาร์จไม่ติด",
+    "เสีย", "พัง", "ซ่อม", "ไม่ติด", "ค้าง",
+)
+
+
+def _is_active_post_handoff(req, history_marker: bool) -> bool:
+    """ticket_state = source of truth ของ post-handoff lock.
+
+    - "handoff"/"open"/"pending" → active (ticket อยู่ฝั่งแอดมิน/distributor)
+      แม้ history ไม่มี handoff marker — เช่น history fetch fail
+    - "closed"/"resolved"/"bot" → ไม่ active (จบแล้ว/บอทคืนสิทธิ์ ตอบปกติ)
+    - ไม่ทราบ state (None/อื่น) → fallback history marker (backward compat)
+    """
+    _ts = getattr(req, "ticket_state", None)
+    if _ts in ("closed", "resolved", "bot"):
+        return False
+    if _ts in ("handoff", "open", "pending"):
+        return True
+    return history_marker
+
+
+def _post_handoff_gate(req, ctx, _warranty_mod, _app_module, llm) -> dict | None:
+    """Post-handoff lock gate — คืน response "รอแอดมิน" ถ้าควรล็อค, None ถ้าปล่อย.
+
+    ปล่อยผ่านเมื่อ: ลูกค้าส่งข้อมูลเคลม (รูป/วันที่/order/phone/ชื่อ) /
+    ถาม product question ชัด / message match shop exception —
+    decision ขึ้นกับ req.message เท่านั้น ไม่ต้องการ history
+    """
+    _msg_lower = (req.message or "").lower()
+    _msg_is_image = req.message.strip() in (
+        "[รูปภาพ]", "[image]", "[วิดีโอ]", "[video]", "[sticker]", "[สติกเกอร์]")
+    _msg_has_image_placeholder = bool(re.search(
+        r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]",
+        req.message, re.IGNORECASE))
+    _info = _warranty_mod.extract_customer_info(
+        re.sub(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", "",
+               req.message, flags=re.IGNORECASE).strip())
+    _has_info = (
+        _msg_is_image or _msg_has_image_placeholder
+        or _warranty_mod.parse_purchase_date(req.message) is not None
+        or bool(_info["order_id"]) or bool(_info["phone"])
+        or (_info["name"] and len(_info["name"]) <= 40
+            and " " in _info["name"]))
+    if _has_info:
+        return None
+    if (any(kw in _msg_lower for kw in _POST_HANDOFF_PRODUCT_KWS)
+            and not any(kw in _msg_lower for kw in _POST_HANDOFF_WARRANTY_KWS)):
+        print(f"[POST-HANDOFF-ESCAPE] product question หลัง handoff → ปล่อยปกติ: {req.message!r}", file=sys.stderr)
+        return None
+    _exc = _app_module._get_post_handoff_exceptions(req.shop, req.platform)
+    if _exc and any(e.lower() in _msg_lower for e in _exc):
+        print(f"[POST-HANDOFF-EXCEPTION] match exception → ปล่อยปกติ: {req.message!r} exceptions={_exc}", file=sys.stderr)
+        return None
+    print(f"[POST-HANDOFF] ลูกค้าทักใหม่หลัง handoff → บอทหยุดตอบ บอกรอแอดมิน", file=sys.stderr)
+    return _build_post_handoff_response(req, ctx, _app_module, llm)
+
+
 def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
     """Warranty state machine — ย้ายจาก legacy app.py บรรทัด 1413-2351.
 
@@ -954,8 +1026,11 @@ def _handle_first_message_claim(req, ctx, is_claim, _warranty_mod, llm, _app_mod
     if not is_claim:
         return None
     _bot_name = ctx.get("bot_name", "เรา")
+    # ⚡ Task 5C-F — malfunction claim ต้อง acknowledge + safe checks ก่อน
+    #   ขอข้อมูลเคลม (ไม่เดาสเปค/สาเหตุเฉพาะรุ่น)
     _answer = (
-        f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
+        _warranty_mod.malfunction_safe_check(req.message)
+        + f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
         f"• วันที่ซื้อสินค้า\n"
         f"• เลขที่คำสั่งซื้อ\n"
         f"• รูปหรือวิดีโอแสดงอาการ/ความเสียหาย\n\n"
@@ -1022,6 +1097,14 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             _claim_state = _cp_claim.load_claim_state(req.conversation_id) or {}
         except Exception:
             pass
+    # ⚡ 5F-H4 — ticket_state lock ไม่ต้องการ history: ticket เปิดอยู่
+    #   (handoff/open/pending = ฝั่งแอดมินถืองาน) → post-handoff gate ทันที
+    #   แม้ history ว่าง/fetch fail — กัน bot ตอบเองตอนแอดมินควรดูแล
+    if _is_active_post_handoff(req, False):
+        _phr = _post_handoff_gate(req, ctx, warranty, _app_module, llm)
+        if _phr is not None:
+            return _phr
+
     # ⚡ ถ้ามี _anchor_compare_ctx (comparison/partial-comparison/post-comparison) → ข้าม warranty state machine
     #   กัน "คุณภาพเสียง" ถูก detect เป็น claim request ("เสียง" = พัง) ทั้งที่ลูกค้าถามเปรียบเทียบ
     if history and not _anchor_compare_ctx:
@@ -1267,21 +1350,17 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             kw in _last_model_text
             for kw in ("มอบหมายงาน", "รอการติดต่อกลับ", "ดำเนินการเรื่อง", "แอดมินดูแล")
         )
+        # ⚡ 5F-H4 — ticket_state เป็น source of truth: handoff/open/pending =
+        #   active lock แม้ history marker หาย; closed/resolved = ไม่ lock;
+        #   ไม่ทราบ state = fallback marker เดิม (backward compat)
+        _bot_handed_off = _is_active_post_handoff(req, _history_handoff_marker)
         if req.ticket_state == "closed":
-            # แอดมินปิดแชทแล้ว → บอทตอบปกติ ไม่ล็อค post-handoff
-            _bot_handed_off = False
             if _history_handoff_marker:
                 print(f"[POST-HANDOFF] ticket_state=closed → ข้าม lock แม้ history มี handoff marker", file=sys.stderr)
             # ⚡ T5 — ticket ปิดแล้ว → เลิกเก็บข้อมูลเคลม (ล้าง marker resume กัน stale)
             if _claim_state:
                 _clear_claim_state(req)
                 _claim_state = {}
-        elif req.ticket_state in ("handoff", "open"):
-            # ยังเปิดอยู่ / ส่งต่อแอดมิน → ใช้ history marker เป็น secondary check
-            _bot_handed_off = _history_handoff_marker
-        else:
-            # None — fallback แบบเดิม (backward compat สำหรับ caller เก่าที่ไม่ส่ง ticket_state)
-            _bot_handed_off = _history_handoff_marker
 
         # State 7: บอทเคยขอข้อมูลเคลม (วันที่+order+รูป) → ลูกค้าอาจส่งรูป/วิดีโอหรือข้อมูลบางส่วน
         # ⚡ สำคัญ: ลูกค้าส่ง [รูปภาพ] หรือ [วิดีโอ] ตามที่บอทขอ → ต้องรับและเก็บเป็นข้อมูลเคลม
@@ -1298,82 +1377,13 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
         # ตรวจว่าลูกค้าให้วันที่จริงไหม (ใช้ในหลาย state)
         _msg_has_date = warranty.parse_purchase_date(req.message) is not None
 
-        # ⚡ Post-handoff: ถ้าบอทเคย handoff แล้ว และลูกค้าทักใหม่ (ไม่ใช่ claim info)
-        # → บอทหยุดตอบทุกอย่าง ปล่อยให้แอดมินดูแล
-        # เหตุผล: เรื่องเคลม/รับประกัน sensitive, แอดมินเห็นประวัติ, ลูกค้าต้องการคนจริง
-        # บอทแค่บอกลูกค้าว่าส่งต่อแอดมินแล้ว รอการติดต่อกลับ
-        # ⚡ post-handoff: ถ้าบอทเคย handoff แล้ว และลูกค้าไม่ได้ส่งข้อมูลเคลม → บอกรอแอดมิน
-        #   ถ้าลูกค้าส่งข้อมูลเคลม (image/date/order/name/phone) → ให้ State 7 รับข้อมูล
-        _post_handoff_info = warranty.extract_customer_info(
-            re.sub(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", "", req.message, flags=re.IGNORECASE).strip()
-        )
-        _post_handoff_has_info = (
-            _msg_is_image or _msg_has_image_placeholder or _msg_has_date
-            or bool(_post_handoff_info["order_id"])
-            or bool(_post_handoff_info["phone"])
-            or (_post_handoff_info["name"] and len(_post_handoff_info["name"]) <= 40 and " " in _post_handoff_info["name"])
-        )
-        # ⚡ Phase 1F — Post-handoff escape: ถ้าลูกค้าถาม product question ชัด (ไม่เกี่ยว warranty)
-        #   → ปล่อยออกจาก lock ให้ไปเส้นทางปกติ (เช่น แอดมินปิดแชทแล้วลูกค้าทักใหม่)
-        #   ตรวจ: มี product keyword และไม่มี warranty keyword
-        _product_q_kws = (
-            "สายชาร์จ", "หัวชาร์จ", "ชุดชาร์จ", "แท่นชาร์จ", "พาวเวอร์แบงค์", "แบตสำรอง",
-            "แบตเตอรี่", "สาย usb", "สาย c", "สาย type", "หาสาย", "หาหัว", "หาแบต",
-            "มีสาย", "มีหัว", "มีแบต", "มีพาวเวอร์", "มีสินค้า", "ดูสินค้า", "แนะนำ",
-            "สอบถามสินค้า", "รุ่นไหนดี", "ราคา", "กี่บาท", "ชาร์จเร็ว", "watt", "วัตต์",
-            "สายแรง", "หัวแรง", "แบตแรง", "ชาร์จแรง", "pd 3.1", "gan", "wireless",
-            "สวัสดี", "hello", "hi ", "ขอดูสินค้า", "ขอสอบถาม",
-        )
-        _warranty_q_kws = (
-            "เคลม", "ประกัน", "ทวนข้อมูล", "ส่งสินค้า", "พัสดุ", "tracking", "EMS",
-            "เบอร์", "เลขคำสั่ง", "วันที่ซื้อ", "รูปสินค้า", "แสดงอาการ", "ความเสียหาย",
-            "เปลี่ยนสินค้า", "คืนสินค้า", "refund", "return", "เคลมสาย", "เคลมหัว",
-            # ⚡ Phase 2B — เพิ่ม complaint keywords กัน "เปลี่ยนหัวชาร์จก็ใช้ไม่ได้ค่ะ" หลุดไป product flow
-            "ใช้ไม่ได้", "ไม่ทำงาน", "ชาร์จไม่เข้า", "ไม่ชาร์จ", "ชาร์จไม่ติด",
-            "เสีย", "พัง", "ซ่อม", "ไม่ติด", "ค้าง",
-        )
-        _msg_lower_for_check = req.message.lower()
-        _has_product_kw = any(kw in _msg_lower_for_check for kw in _product_q_kws)
-        _has_warranty_kw = any(kw in _msg_lower_for_check for kw in _warranty_q_kws)
-        _is_post_handoff_product_q = _has_product_kw and not _has_warranty_kw
-        if _is_post_handoff_product_q:
-            print(f"[POST-HANDOFF-ESCAPE] ลูกค้าถาม product question หลัง handoff → ปล่อยไปเส้นทางปกติ: {req.message!r}", file=sys.stderr)
-        # ⚡ Phase 2A — post-handoff exceptions (จาก ShopSettings, แอดมินตั้งได้ต่อร้าน)
-        #    ถ้า message match exception → ปล่อยผ่าน ไม่ล็อค (เช่น "ทวนข้อมูลเคลม", "ส่งลิงก์กรอกฟอร์ม")
-        _post_handoff_exceptions = _app_module._get_post_handoff_exceptions(req.shop, req.platform)
-        _is_post_handoff_exception = bool(_post_handoff_exceptions) and any(
-            exc.lower() in _msg_lower_for_check for exc in _post_handoff_exceptions
-        )
-        if _is_post_handoff_exception:
-            print(f"[POST-HANDOFF-EXCEPTION] message match exception → ปล่อยไปเส้นทางปกติ: {req.message!r} exceptions={_post_handoff_exceptions}", file=sys.stderr)
-        if _bot_handed_off and not _post_handoff_has_info and not _is_post_handoff_product_q and not _is_post_handoff_exception:
-
-            _warranty_claim_answer = (
-                "ระบบได้บันทึกข้อมูลของคุณและส่งต่อให้แอดมินดูแลเรียบร้อยแล้วค่ะ "
-                "รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ "
-                "ทางเราจะดำเนินการโดยเร็วที่สุดค่ะ"
-            )
-            print(f"[POST-HANDOFF] ลูกค้าทักใหม่ หลัง handoff → บอทหยุดตอบ บอกลูกค้ารอแอดมิน", file=sys.stderr)
-            return dict(
-                answer=_warranty_claim_answer,
-                answer_segments=llm.split_segments(_warranty_claim_answer),
-                products=[],
-                shop=req.shop,
-                model=_model_name,
-                source="warranty_claim_flow",
-                usage={},
-                elapsed=round(_time.time() - _t0, 2),
-                cost=0.0,
-                handoff_to_admin=True,
-                handoff_reason="post_handoff_waiting",
-                handoff_claim={},
-                steps=_steps + [{"name": "post_handoff", "model": _model_name, "detail": "รอแอดมิน → ลูกค้าทักใหม่ → บอทหยุดตอบ"}],
-                routing_decision=_app_module._routing(
-                    "handoff", "post_handoff: รอแอดมิน → บอทหยุดตอบ",
-                    handoff_reason="post_handoff_waiting",
-                ),
-                image_desc=_image_desc_out,
-            )
+        # ⚡ Post-handoff gate (5F-H4) — extract เป็น _post_handoff_gate เพื่อให้
+        #   no-history path ใช้ gate เดียวกัน (ticket_state = source of truth)
+        #   ปล่อยผ่านเมื่อ: ลูกค้าส่งข้อมูลเคลม / ถาม product question / shop exception
+        if _bot_handed_off:
+            _phr = _post_handoff_gate(req, ctx, warranty, _app_module, llm)
+            if _phr is not None:
+                return _phr
 
         # ── State 7: awaiting_claim_info → ลูกค้าส่งรูป/วิดีโอ หรือข้อมูลบางส่วน ──
         # ถ้าบอทเคยขอ วันที่+order+รูป แล้วลูกค้าส่งรูป/วิดีโอ หรือให้ข้อมูลบางส่วน
@@ -1964,8 +1974,11 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
     if _is_claim_request and not _warranty_claim_answer:
         _total_elapsed = _time.time() - _total_start
 
+        # ⚡ Task 5C-F — malfunction claim ต้อง acknowledge + safe checks ก่อน
+        #   ขอข้อมูลเคลม (QA tips ถ้ามีจะชนะ — return ก่อนถึงข้อความนี้)
         _claim_first_answer = (
-            f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
+            warranty.malfunction_safe_check(req.message)
+            + f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
             f"• วันที่ซื้อสินค้า\n"
             f"• เลขที่คำสั่งซื้อ\n"
             f"• รูปหรือวิดีโอแสดงอาการ/ความเสียหาย\n\n"

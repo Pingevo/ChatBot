@@ -47,6 +47,7 @@ export type AdminActionType =
   | "admin.maintenance.clear_status"
   | "bot.buffer_flush"
   | "bot.buffer_recover"
+  | "bot.recovery_quarantine"
   // ⚡ Workflow engine (แบบ Zaapi Flow Builder)
   | "workflow.create"
   | "workflow.update"

@@ -12,7 +12,9 @@
 //     worker path: caller เก็บลง shadow_replies / test chat path: caller ส่งกลับ client render
 //   - send_http ผ่าน isSafeFetchUrl (SSRF guard) เหมือน systemConfigService
 import { Document } from "mongodb";
+import { createHash } from "node:crypto";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
+import { botworkerRuntime } from "./botworkerRuntime";
 import { getSystemConfig, type Platform } from "./systemConfigService";
 import { workflowService, type WorkflowDoc, type WorkflowNode, isMultiBranchCondition, type ConditionBranch, isPhase2WaitConfig, type WaitForReplyConfig, WAIT_BRANCH, isPhase3AddLabelConfig } from "./workflowService";
 import { callBot } from "./botCallService";
@@ -57,6 +59,25 @@ export interface WorkflowRunDoc extends Document {
   // ผลลัพธ์สุดท้าย
   outcome?: "actioned" | "no_match" | "condition_false" | "error" | "timeout" | "cancelled_by_admin" | "retry_exceeded" | "no_reply";
 
+  // ⚡ botworker Part 1B — run ผูกกับ claim ที่เรียก engine (idempotent match/run)
+  operation_key?: string;
+  // ⚡ result snapshot — retry ด้วย operation_key เดิมคืนผลนี้ ไม่ re-run graph
+  result?: {
+    status: string;
+    detail: string;
+    delivered: DeliveredMessage[];
+    handoff?: { agentId: string | null; reason: string };
+  };
+
+  // ⚡ run ownership — สอง worker ห้ามเดิน graph พร้อมกันบน run เดียว
+  //   (เฉพาะ op-key callers — botworker; legacy callers ไม่มี = adopt ได้เมื่อ reclaim)
+  owner_id?: string;
+  fencing_token?: number;
+  lease_expires_at?: Date;
+  // ⚡ resume dedupe — resume_results[operation_key] = ผล resume เดิม
+  //   (crash หลัง resume commit ก่อน caller finalize → คืนผลนี้ ไม่เดิน graph ซ้ำ)
+  resume_results?: Record<string, EngineResult>;
+
   started_at: Date;
   updated_at: Date;
   completed_at?: Date;
@@ -79,6 +100,13 @@ export interface EngineMessage {
   // ⚡ botworker parallel — ถ้ามี → node side-effects/conditions เขียน+อ่าน test_status_conversation[testSource]
   //    แทน status_conversation/conversations จริง (worker ส่ง "botworker" เสมอ)
   testSource?: string;
+  // ⚡ botworker Part 1B — deterministic op key ของ claim ที่เรียก engine
+  //    crash retry ด้วย key เดิม → engine คืนผล run เดิม ไม่ deliver/assign ซ้ำ
+  operation_key?: string;
+  // ⚡ current-batch exclusion — message_ids ของ batch ที่กำลังประมวลผล
+  //    let_ai_respond ส่งต่อให้ getGroupedHistoryForBot กัน current turn ซ้ำใน history
+  //    (worker ส่ง ctx.message_ids; non-botworker callers ไม่ส่ง → behavior เดิม)
+  exclude_message_ids?: string[];
 }
 
 export interface DeliveredMessage {
@@ -88,12 +116,21 @@ export interface DeliveredMessage {
 }
 
 export interface EngineResult {
-  status: "actioned" | "resumed" | "no_match" | "exit_to_bot" | "exit_drop" | "error";
+  // ⚡ "in_flight" = run/op กำลังถูก owner อื่น execute อยู่ — retryable, ห้ามถือเป็น terminal
+  status: "actioned" | "resumed" | "no_match" | "exit_to_bot" | "exit_drop" | "error" | "in_flight";
   detail: string;
   delivered: DeliveredMessage[];
   run_id?: string;
   workflow_id?: string;
   handoff?: { agentId: string | null; reason: string };
+  // ⚡ error เท่านั้น: false = op ตายแล้ว (committed แต่ไม่มีผล) — caller ห้าม fallback ไป bot
+  //   (side effect อาจเกิดแล้วโดยไม่มีหลักฐาน); absent = error ทั่วไป fallback ได้ตามเดิม
+  recoverable?: boolean;
+}
+
+/** result มาตรฐานเมื่อเสีย run ownership ระหว่างทาง — caller retry ได้ เดินต่อไม่ได้ */
+function inFlightResult(runId: string, workflowId: string | undefined, detail: string): EngineResult {
+  return { status: "in_flight", detail, delivered: [], run_id: runId, workflow_id: workflowId };
 }
 
 // ─── Constants ─────────────────────────────────────────────
@@ -106,18 +143,128 @@ function genRunId(): string {
   return "wfr_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
+// ⚡ deterministic run identity สำหรับ op-key callers — run เดียวต่อ (op key, workflow)
+//   concurrent matchAndRun ด้วย key เดียว → _id ชน → E11000 → ใช้ run เดิมร่วมกัน
+function opRunIdFor(operationKey: string, workflowId: string): string {
+  return "wfr_" + createHash("sha256").update(`${operationKey}:${workflowId}`).digest("hex").slice(0, 20);
+}
+
 // ─── Run CRUD helpers ─────────────────────────────────────
 
 async function getRunsCollection() {
   return getCollection<WorkflowRunDoc>(COLLECTIONS.workflowRuns);
 }
 
-async function updateRun(runId: string, fields: Partial<WorkflowRunDoc>): Promise<void> {
+// ─── Run ownership / fencing ───────────────────────────────
+// ⚡ op-key runs มี owner_id+fencing_token+lease — caller ที่ "ครอง" run ต้อง
+//   เขียนผ่าน ownedUpdateRun เท่านั้น (CAS owner_id=self + fencing_token=snapshot)
+//   lease renewal ฝังทุก mutation = heartbeat ระหว่าง graph walk
+//   legacy runs (ไม่มี owner) → unfenced — behavior เดิม
+
+/** CAS write โดย owner — false = เสีย ownership (reclaim ไปแล้ว) → ห้ามเขียนทับ
+ *  (fields เป็น Record เพื่อรองรับ dotted keys เช่น `resume_results.<opKey>`) */
+async function ownedUpdateRun(run: WorkflowRunDoc, fields: Record<string, unknown>): Promise<boolean> {
   const coll = await getRunsCollection();
-  await coll.updateOne(
-    { run_id: runId },
+  const set: Record<string, unknown> = { ...fields, updated_at: new Date() };
+  if (run.owner_id) {
+    set.lease_expires_at = new Date(Date.now() + botworkerRuntime.claimLeaseMs); // renew = heartbeat
+    const res = await coll.updateOne(
+      {
+        run_id: run.run_id,
+        owner_id: botworkerRuntime.ownerId,
+        fencing_token: run.fencing_token,
+        status: { $in: ["running", "waiting_for_reply"] }, // ห้าม resurrect run ที่จบ/cancelled แล้ว
+      },
+      { $set: set }
+    );
+    return res.matchedCount === 1;
+  }
+  const res = await coll.updateOne({ run_id: run.run_id }, { $set: set });
+  return res.matchedCount === 1;
+}
+
+/** acquire run ownership — waiting = parked (CAS ชนะ→flip running ทันที กัน resumer ซ้อน),
+ *  running = เฉพาะ lease หมดหรือไม่มี owner (ห้าม same-owner re-entry — concurrent same-op = in_flight) */
+/** heartbeat + ownership check ต่อ step ของ graph walk — CAS renew lease;
+ *  false = เสีย ownership/run จบไปแล้ว → หยุดเดินทันที (กัน side effect ซ้ำหลัง reclaim) */
+async function heartbeatRun(run: WorkflowRunDoc): Promise<boolean> {
+  if (!run.owner_id) return true; // legacy run — ไม่มี ownership contract
+  const coll = await getRunsCollection();
+  const res = await coll.updateOne(
+    {
+      run_id: run.run_id,
+      owner_id: botworkerRuntime.ownerId,
+      fencing_token: run.fencing_token,
+      status: { $in: ["running", "waiting_for_reply"] },
+    },
+    { $set: { lease_expires_at: new Date(Date.now() + botworkerRuntime.claimLeaseMs), updated_at: new Date() } }
+  );
+  return res.matchedCount === 1;
+}
+
+async function acquireRun(runId: string): Promise<WorkflowRunDoc | null> {
+  const coll = await getRunsCollection();
+  const now = new Date();
+  return coll.findOneAndUpdate(
+    {
+      run_id: runId,
+      status: { $in: ["running", "waiting_for_reply"] },
+      $or: [
+        { status: "waiting_for_reply" },   // parked — CAS ตัวแรก flip เป็น running ก่อนเดิน graph
+        { lease_expires_at: { $lt: now } },
+        { owner_id: { $exists: false } },
+      ],
+    },
+    {
+      $set: {
+        status: "running",
+        owner_id: botworkerRuntime.ownerId,
+        lease_expires_at: new Date(now.getTime() + botworkerRuntime.claimLeaseMs),
+        updated_at: now,
+      },
+      $inc: { fencing_token: 1 },
+    },
+    { returnDocument: "after" }
+  );
+}
+
+/** acquire แพ้ → fresh-read แล้วจำแนกจริง — terminal/missing ห้ามโกหกเป็น in_flight
+ *  result มี → committed outcome · running/waiting → owner อื่นกำลังทำ → in_flight
+ *  terminal ไม่มี result / doc หาย → error recoverable:false (op ตาย — retry ไม่ช่วย) */
+async function resolveUnacquiredRun(runId: string, workflowId?: string): Promise<EngineResult> {
+  const coll = await getRunsCollection();
+  const cur = await coll.findOne({ run_id: runId });
+  if (cur?.result) {
+    return { ...cur.result, run_id: cur.run_id, workflow_id: cur.workflow_id } as EngineResult;
+  }
+  if (cur && (cur.status === "running" || cur.status === "waiting_for_reply")) {
+    return inFlightResult(runId, cur.workflow_id, "run in-flight (owned by another worker)");
+  }
+  return {
+    status: "error",
+    recoverable: false,
+    detail: cur
+      ? `run ${runId} is ${cur.status}${cur.outcome ? ` (${cur.outcome})` : ""} without committed result — terminal`
+      : `run ${runId} doc missing — terminal`,
+    delivered: [],
+    run_id: runId,
+    workflow_id: cur?.workflow_id ?? workflowId,
+  };
+}
+
+/** cancel เฉพาะ run ที่ owner หาย/lease หมด — reader ห้าม kill run ที่ owner อื่นกำลังเดิน */
+async function cancelIfAbandoned(run: WorkflowRunDoc, fields: Partial<WorkflowRunDoc>): Promise<boolean> {
+  const coll = await getRunsCollection();
+  const now = new Date();
+  const res = await coll.updateOne(
+    {
+      run_id: run.run_id,
+      status: { $in: ["running", "waiting_for_reply"] },
+      $or: [{ owner_id: { $exists: false } }, { lease_expires_at: { $lt: now } }],
+    },
     { $set: { ...fields, updated_at: new Date() } }
   );
+  return res.matchedCount === 1;
 }
 
 // ─── ① Active Flow Resume ─────────────────────────────────
@@ -141,12 +288,14 @@ export async function getActiveRun(conversationId: string): Promise<WorkflowRunD
   const timeoutMs = config.workflow_run_timeout_ms || 1800000;
   const ageMs = Date.now() - run.updated_at.getTime();
   if (ageMs > timeoutMs) {
-    await updateRun(run.run_id, {
+    // ⚡ fenced cancel — run ที่ owner อื่นยังครองอยู่ (lease active) ห้าม kill
+    const cancelled = await cancelIfAbandoned(run, {
       status: "cancelled",
       outcome: "timeout",
       completed_at: new Date(),
       error: `run timed out after ${Math.floor(ageMs / 1000)}s (limit ${Math.floor(timeoutMs / 1000)}s)`,
     });
+    if (!cancelled) return run; // owner อื่นครองอยู่ → คืน run ให้ caller ไป resume/acquire
     await logAdminEvent({
       action_type: "workflow.run_timeout",
       actor: "workflow-engine",
@@ -223,6 +372,37 @@ function matchTriggerNode(node: WorkflowNode, text: string): boolean {
  * หลาย flow ฮิตพร้อมกัน → เรียงตาม priority แล้ว created_at (listWorkflows sort แล้ว)
  */
 export async function matchAndRun(msg: EngineMessage): Promise<EngineResult> {
+  // ⚡ existing-operation recovery ก่อน eligibility gates — retry ต้องอ่านผลเดิมได้
+  //   แม้ workflow ถูก disable/unpublish, frequency ครบ, หรือ global flag ปิดหลัง commit
+  //   index audit: workflow_runs ไม่มี operation_key index (mongoClient.ensureIndexes
+  //   มีเฉพาะ run_id/conversation_id+status/...) → compound filter ใช้ index prefix
+  //   conversation_id แล้ว scan เฉพาะ runs ของ conv นั้นฝั่ง server — ไม่เพิ่ม index
+  if (msg.operation_key) {
+    const runsColl = await getRunsCollection();
+    const prior = await runsColl.findOne({
+      conversation_id: msg.conversation_id,
+      operation_key: msg.operation_key,
+    });
+    if (prior) {
+      // op เคยเริ่มแล้ว → คืน committed result / fenced acquire / in_flight (gate ไม่เกี่ยว)
+      if (prior.result) {
+        return { ...prior.result, run_id: prior.run_id, workflow_id: prior.workflow_id } as EngineResult;
+      }
+      const acquired = await acquireRun(prior.run_id);
+      if (!acquired) {
+        return resolveUnacquiredRun(prior.run_id, prior.workflow_id);
+      }
+      // เดินต่อด้วย workflow เดิมของ run — แม้ถูก disable หลัง commit (op ต้องจบตามที่เริ่ม)
+      const wf = await workflowService.getWorkflow(acquired.workflow_id);
+      if (!wf) {
+        if (await failRun(acquired, "workflow deleted while run active")) { /* errored */ }
+        return { status: "error", detail: "workflow not found", delivered: [], run_id: acquired.run_id, workflow_id: acquired.workflow_id };
+      }
+      return runFlow(wf, acquired, msg);
+    }
+    // ไม่มี prior → op ใหม่ → ผ่าน config/frequency/keyword gates ปกติ
+  }
+
   const config = await getSystemConfig();
   if (!config.workflow_enabled) {
     return { status: "no_match", detail: "workflow engine disabled", delivered: [] };
@@ -243,6 +423,42 @@ export async function matchAndRun(msg: EngineMessage): Promise<EngineResult> {
     // ผ่าน keyword → เช็ค trigger_frequency
     if (!(await checkTriggerFrequency(wf, msg))) continue;
 
+    // ⚡ Part 1B — idempotent match/run: crash retry ด้วย operation_key เดิม
+    //   run identity deterministic (op+wf) → concurrent same-key ได้ run เดียว
+    //   run เดิมจบแล้ว (result) → คืนผลเดิม ไม่ re-run graph (ไม่ deliver/assign ซ้ำ)
+    //   run เดิมยังไม่จบ → fenced reclaim เท่านั้น (active owner อื่น = in-flight ห้ามเดินซ้ำ)
+    //   side effects ข้างใน (assign_ticket) dedupe ด้วย operation key ของตัวเอง
+    if (msg.operation_key) {
+      const runsColl = await getRunsCollection();
+      const runId = opRunIdFor(msg.operation_key, wf.workflow_id);
+      const prior = await runsColl.findOne({ run_id: runId });
+      if (prior?.result) {
+        return { ...prior.result, run_id: prior.run_id, workflow_id: wf.workflow_id } as EngineResult;
+      }
+      if (prior) {
+        // ⚡ acquire = single-flight: running ต้อง lease หมด/ไม่มี owner เท่านั้น
+        //   (same-owner concurrent ก็ห้าม — owner_id เดียวกันแยก caller ไม่ได้ → in_flight)
+        //   waiting = parked → CAS serialize ผู้ครองคนถัดไป
+        const acquired = await acquireRun(runId);
+        if (!acquired) {
+          return resolveUnacquiredRun(runId, wf.workflow_id);
+        }
+        return runFlow(wf, acquired, msg);
+      }
+      // ไม่มี run → deterministic insert (E11000 = concurrent same-op ชนะไปแล้ว)
+      try {
+        const run = await createRun(wf, msg, runId);
+        return await runFlow(wf, run, msg);
+      } catch (e) {
+        if ((e as { code?: number }).code !== 11000) throw e;
+        const p2 = await runsColl.findOne({ run_id: runId });
+        if (p2?.result) {
+          return { ...p2.result, run_id: p2.run_id, workflow_id: wf.workflow_id } as EngineResult;
+        }
+        return inFlightResult(runId, wf.workflow_id, "run in-flight (concurrent same-op caller)");
+      }
+    }
+
     // สร้าง run แล้วเริ่มเดิน graph
     const run = await createRun(wf, msg);
     return runFlow(wf, run, msg);
@@ -251,11 +467,14 @@ export async function matchAndRun(msg: EngineMessage): Promise<EngineResult> {
   return { status: "no_match", detail: "no workflow matched", delivered: [] };
 }
 
-async function createRun(workflow: WorkflowDoc, msg: EngineMessage): Promise<WorkflowRunDoc> {
+async function createRun(workflow: WorkflowDoc, msg: EngineMessage, forcedRunId?: string): Promise<WorkflowRunDoc> {
   const coll = await getRunsCollection();
   const now = new Date();
+  const runId = forcedRunId || genRunId();
   const run: WorkflowRunDoc = {
-    run_id: genRunId(),
+    // deterministic _id เมื่อ caller ส่ง op key → concurrent insert = E11000 (run เดียว)
+    ...(forcedRunId ? { _id: forcedRunId } : {}),
+    run_id: runId,
     workflow_id: workflow.workflow_id,
     workflow_version: workflow.version,
     conversation_id: msg.conversation_id,
@@ -266,6 +485,15 @@ async function createRun(workflow: WorkflowDoc, msg: EngineMessage): Promise<Wor
     current_node_id: "",
     context: {},
     ...(msg.testSource ? { test_source: msg.testSource } : {}),
+    ...(msg.operation_key ? { operation_key: msg.operation_key } : {}),
+    // ⚡ run ownership — op-key callers ถือ lease บน run (กันสอง worker เดิน graph พร้อมกัน)
+    ...(msg.operation_key
+      ? {
+          owner_id: botworkerRuntime.ownerId,
+          fencing_token: 1,
+          lease_expires_at: new Date(now.getTime() + botworkerRuntime.claimLeaseMs),
+        }
+      : {}),
     started_at: now,
     updated_at: now,
   };
@@ -286,7 +514,11 @@ async function walkGraph(
   workflow: WorkflowDoc,
   run: WorkflowRunDoc,
   msg: EngineMessage,
-  startNodeId: string
+  startNodeId: string,
+  // ⚡ op ที่กำลัง execute — `result` (immutable snapshot) เขียนเฉพาะตอน
+  //   execOpKey === run.operation_key (operation ที่สร้าง run) เท่านั้น;
+  //   resume/timeout ผ่าน key อื่นหรือ undefined → ห้ามเขียนทับ result ของ initial op
+  execOpKey?: string
 ): Promise<EngineResult> {
   const delivered: DeliveredMessage[] = [];
   const context: Record<string, unknown> = { ...run.context };
@@ -296,10 +528,17 @@ async function walkGraph(
 
   while (currentNodeId && steps < MAX_ENGINE_STEPS) {
     steps++;
+    // ⚡ heartbeat ต่อ step — เสีย ownership (reclaim/lease หมด) → หยุดทันที
+    //   ห้าม execute side effect ถัดไปบน run ที่ owner ใหม่กำลังเดิน
+    if (!(await heartbeatRun(run))) {
+      return inFlightResult(run.run_id, workflow.workflow_id, `lost run ownership mid-graph at step ${steps} (${currentNodeId})`);
+    }
     const node = workflow.nodes.find((n) => n.node_id === currentNodeId);
     if (!node) {
       // Graph พัง — อ้าง node ที่ไม่มีอยู่
-      await failRun(run, `node ${currentNodeId} not found in workflow`);
+      if (!(await failRun(run, `node ${currentNodeId} not found in workflow`))) {
+        return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before failRun");
+      }
       return { status: "error", detail: `node ${currentNodeId} not found`, delivered, run_id: run.run_id, workflow_id: workflow.workflow_id };
     }
 
@@ -307,7 +546,7 @@ async function walkGraph(
     if (node.type === "trigger") {
       const next = nextNodeIds(workflow, node.node_id);
       if (next.length === 0) {
-        return await completeRun(workflow, run, context, delivered, "actioned", "trigger node has no outgoing edge — flow ends");
+        return await completeRun(workflow, run, context, delivered, "actioned", "trigger node has no outgoing edge — flow ends", undefined, execOpKey);
       }
       currentNodeId = next[0];
       continue;
@@ -319,7 +558,7 @@ async function walkGraph(
       if (actionResult.handoff) handoff = actionResult.handoff;
       if (actionResult.stop) {
         // action สั่งจบ flow (close_ticket / assign แล้วจบ)
-        return await completeRun(workflow, run, context, delivered, "actioned", `stopped at action ${node.subtype}`, handoff);
+        return await completeRun(workflow, run, context, delivered, "actioned", `stopped at action ${node.subtype}`, handoff, execOpKey);
       }
       // ⚡ jump_to — action ตั้ง context._jump_target → กระโดดไป node นั้น (วนกลับได้)
       const jumpTarget = context._jump_target;
@@ -330,7 +569,7 @@ async function walkGraph(
       }
       const next = nextNodeIds(workflow, node.node_id);
       if (next.length === 0) {
-        return await completeRun(workflow, run, context, delivered, "actioned", `action ${node.subtype} done — flow ends`, handoff);
+        return await completeRun(workflow, run, context, delivered, "actioned", `action ${node.subtype} done — flow ends`, handoff, execOpKey);
       }
       currentNodeId = next[0];
       continue;
@@ -341,7 +580,9 @@ async function walkGraph(
     if (node.type === "condition") {
       const condResult = await evalCondition(workflow, node, msg, context);
       if (condResult.error) {
-        await failRun(run, `condition ${node.subtype} error: ${condResult.error}`);
+        if (!(await failRun(run, `condition ${node.subtype} error: ${condResult.error}`))) {
+          return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before failRun");
+        }
         return { status: "error", detail: condResult.error, delivered, run_id: run.run_id, workflow_id: workflow.workflow_id };
       }
 
@@ -357,51 +598,66 @@ async function walkGraph(
       //   - legacy "false" และไม่มี false edge → ใช้ false_branch_policy
       //   - multi-branch หรือ legacy "true" ไม่มี edge → จบ flow (graph ไม่สมบูรณ์)
       if (branch === "false") {
-        return await handleFalseBranch(workflow, run, node, msg, context, delivered);
+        return await handleFalseBranch(workflow, run, node, msg, context, delivered, execOpKey);
       }
-      return await completeRun(workflow, run, context, delivered, "condition_false", `condition branch "${branch}" has no outgoing edge from ${node.node_id}`);
+      return await completeRun(workflow, run, context, delivered, "condition_false", `condition branch "${branch}" has no outgoing edge from ${node.node_id}`, undefined, execOpKey);
     }
 
     // ── wait node → หยุด รอลูกค้าพิมพ์ต่อ ──
     if (node.type === "wait" && node.subtype === "wait_for_reply") {
       const now = new Date();
       // ⚡ Phase 2: ถ้ามี Phase 2 config → เก็บ wait state เพิ่ม (retry_count, started_at, node_id)
-      if (isPhase2WaitConfig(node.config)) {
-        await updateRun(run.run_id, {
-          status: "waiting_for_reply",
-          current_node_id: node.node_id,
-          waiting_for: "next_message",
-          context,
-          wait_retry_count: 0,
-          wait_started_at: now,
-          wait_node_id: node.node_id,
-        });
-      } else {
-        // legacy — รอ reply เดียว + global timeout
-        await updateRun(run.run_id, {
-          status: "waiting_for_reply",
-          current_node_id: node.node_id,
-          waiting_for: "next_message",
-          context,
-        });
-      }
-      return {
-        status: "actioned",
+      const waitFields: Partial<WorkflowRunDoc> = isPhase2WaitConfig(node.config)
+        ? {
+            status: "waiting_for_reply",
+            current_node_id: node.node_id,
+            waiting_for: "next_message",
+            context,
+            wait_retry_count: 0,
+            wait_started_at: now,
+            wait_node_id: node.node_id,
+          }
+        : {
+            // legacy — รอ reply เดียว + global timeout
+            status: "waiting_for_reply",
+            current_node_id: node.node_id,
+            waiting_for: "next_message",
+            context,
+          };
+      // ⚡ persist outcome เมื่อ park — atomic กับ state transition เดียวกัน:
+      //   initial op → result (immutable snapshot); resume op → resume_results[execOpKey]
+      //   (crash หลัง commit ก่อน wrapper write → retry คืนผลนี้ ไม่เดิน graph ซ้ำ)
+      const isResumeOp = !!execOpKey && execOpKey !== run.operation_key;
+      const parkedResult: EngineResult = {
+        status: isResumeOp ? "resumed" : "actioned",
         detail: `waiting for reply at node ${node.node_id}`,
         delivered,
         run_id: run.run_id,
         workflow_id: workflow.workflow_id,
-        handoff,
+        ...(handoff ? { handoff } : {}),
       };
+      const waitWrite: Record<string, unknown> = { ...waitFields };
+      if (run.operation_key && execOpKey === run.operation_key) {
+        waitWrite.result = { status: "actioned", detail: parkedResult.detail, delivered, ...(handoff ? { handoff } : {}) };
+      }
+      if (isResumeOp) waitWrite[`resume_results.${execOpKey}`] = parkedResult;
+      if (!(await ownedUpdateRun(run, waitWrite))) {
+        return inFlightResult(run.run_id, workflow.workflow_id, `lost run ownership before wait checkpoint at ${node.node_id}`);
+      }
+      return parkedResult;
     }
 
     // unknown node type → จบ
-    await failRun(run, `unknown node type ${node.type}/${node.subtype}`);
+    if (!(await failRun(run, `unknown node type ${node.type}/${node.subtype}`))) {
+      return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before failRun");
+    }
     return { status: "error", detail: `unknown node type ${node.type}`, delivered, run_id: run.run_id, workflow_id: workflow.workflow_id };
   }
 
   // เกิน MAX_ENGINE_STEPS — กัน infinite loop (jump_to วนไม่รู้จบ)
-  await failRun(run, `exceeded ${MAX_ENGINE_STEPS} steps — possible jump_to loop`);
+  if (!(await failRun(run, `exceeded ${MAX_ENGINE_STEPS} steps — possible jump_to loop`))) {
+    return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before failRun");
+  }
   return { status: "error", detail: "max steps exceeded", delivered, run_id: run.run_id, workflow_id: workflow.workflow_id };
 }
 
@@ -411,50 +667,95 @@ async function walkGraph(
 async function runFlow(workflow: WorkflowDoc, run: WorkflowRunDoc, msg: EngineMessage): Promise<EngineResult> {
   const triggerNode = workflow.nodes.find((n) => n.type === "trigger");
   if (!triggerNode) {
-    await failRun(run, "workflow has no trigger node");
+    if (!(await failRun(run, "workflow has no trigger node"))) {
+      return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before failRun");
+    }
     return { status: "error", detail: "no trigger node", delivered: [], run_id: run.run_id, workflow_id: workflow.workflow_id };
   }
   // เก็บข้อความตั้งต้นลง context
   const context = { ...run.context, initial_message: msg.text };
-  await updateRun(run.run_id, { context });
+  if (!(await ownedUpdateRun(run, { context }))) {
+    return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before graph walk");
+  }
   run.context = context;
-  return walkGraph(workflow, run, msg, triggerNode.node_id);
+  // ⚡ initial execution — execOpKey = run.operation_key → result snapshot เขียนได้
+  return walkGraph(workflow, run, msg, triggerNode.node_id, run.operation_key);
 }
 
 /**
  * Resume flow จาก wait node — ลูกค้าพิมพ์ต่อ
  * ป้อนข้อความใหม่เข้า context.customer_reply แล้วเดินต่อจาก node ถัดไปของ wait
+ *
+ * ⚡ dedupe ด้วย msg.operation_key — crash หลัง resume commit ก่อน caller finalize
+ *   → คืน resume_results[key] เดิม ไม่เดิน graph/deliver/assign ซ้ำ
+ * ⚡ ownership: op-key callers ต้อง acquireRun (atomic CAS) ก่อนเดิน graph —
+ *   read→execute→write เดิมเปิดให้สอง caller เดิน graph พร้อมกัน;
+ *   resume_results write ก็ fenced (owner+fence ที่ acquire ได้)
  */
 export async function resumeFlow(run: WorkflowRunDoc, msg: EngineMessage): Promise<EngineResult> {
+  const opKey = msg.operation_key;
+  if (!opKey) {
+    // legacy callers (ไม่มี op key) — behavior เดิม
+    return doResumeFlow(run, msg);
+  }
+  const coll = await getRunsCollection();
+  // fresh read — caller snapshot อาจ stale (dedupe ต้องเช็กของล่าสุดเสมอ)
+  // ⚡ ดูเฉพาะ resume_results[opKey] — run.result เป็นของ op ที่สร้าง run คนละ key ห้ามคืนแทน
+  const fresh = await coll.findOne({ run_id: run.run_id });
+  if (fresh?.resume_results?.[opKey]) return fresh.resume_results[opKey];
+  // atomic acquire — waiting=parked ใครก็ครองได้ / running=เฉพาะ lease หมดหรือไม่มี owner
+  const acquired = await acquireRun(run.run_id);
+  if (!acquired) {
+    const cur = await coll.findOne({ run_id: run.run_id });
+    if (cur?.resume_results?.[opKey]) return cur.resume_results[opKey];
+    if (cur && cur.status !== "running" && cur.status !== "waiting_for_reply") {
+      // run จบไปแล้ว (completed/cancelled) → caller ควร fall through ไป match/trigger/bot
+      return { status: "error", detail: `run ${run.run_id} is ${cur.status} — cannot resume`, delivered: [], run_id: run.run_id, workflow_id: cur.workflow_id };
+    }
+    return inFlightResult(run.run_id, cur?.workflow_id, "resume in-flight — run owned by another worker");
+  }
+  // ⚡ helpers เขียน resume_results[opKey] atomic กับ state commit เดียวกันทุก success
+  //   path (wait-park/completeRun/handleFalseBranch/phase2 retry) — audit แล้วไม่มี
+  //   path สำเร็จที่ขาด atomic write → ไม่มี wrapper post-write (ลด write + ไม่ซ่อน regression)
+  return doResumeFlow(acquired, msg);
+}
+
+async function doResumeFlow(run: WorkflowRunDoc, msg: EngineMessage): Promise<EngineResult> {
   const workflow = await workflowService.getWorkflow(run.workflow_id);
   if (!workflow) {
-    await failRun(run, "workflow deleted while run active");
+    if (!(await failRun(run, "workflow deleted while run active"))) {
+      return inFlightResult(run.run_id, run.workflow_id, "lost run ownership before failRun");
+    }
     return { status: "error", detail: "workflow not found", delivered: [], run_id: run.run_id };
   }
 
-  // ป้อนข้อความใหม่เข้า context
+  // ป้อนข้อความใหม่เข้า context — fenced (caller ต้องครอง run จาก acquireRun)
   const context = { ...run.context, customer_reply: msg.text };
-  await updateRun(run.run_id, { status: "running", context, waiting_for: undefined });
+  if (!(await ownedUpdateRun(run, { status: "running", context, waiting_for: undefined }))) {
+    return inFlightResult(run.run_id, run.workflow_id, "lost run ownership at resume start");
+  }
   run.context = context;
 
   const waitNode = workflow.nodes.find((n) => n.node_id === run.current_node_id);
   if (!waitNode || waitNode.type !== "wait") {
     // current_node_id ไม่ใช่ wait node (ข้อมูลพัง) → จบ run
-    await failRun(run, `current node ${run.current_node_id} is not a wait node`);
+    if (!(await failRun(run, `current node ${run.current_node_id} is not a wait node`))) {
+      return inFlightResult(run.run_id, run.workflow_id, "lost run ownership before failRun");
+    }
     return { status: "error", detail: "cannot resume — not at wait node", delivered: [], run_id: run.run_id };
   }
 
   // ⚡ Phase 2: ถ้า wait node มี Phase 2 config → validate answer_type → success/retry/exceeded
   if (isPhase2WaitConfig(waitNode.config)) {
-    return resumePhase2Wait(workflow, run, waitNode, msg, context);
+    return resumePhase2Wait(workflow, run, waitNode, msg, context, msg.operation_key);
   }
 
   // legacy — เดินต่อจาก node ถัดไปของ wait
   const next = nextNodeIds(workflow, waitNode.node_id);
   if (next.length === 0) {
-    return await completeRun(workflow, run, context, [], "actioned", "wait node has no outgoing edge — flow ends");
+    return await completeRun(workflow, run, context, [], "actioned", "wait node has no outgoing edge — flow ends", undefined, msg.operation_key);
   }
-  const result = await walkGraph(workflow, { ...run, context }, msg, next[0]);
+  const result = await walkGraph(workflow, { ...run, context }, msg, next[0], msg.operation_key);
   return { ...result, status: result.status === "actioned" ? "resumed" : result.status };
 }
 
@@ -488,7 +789,8 @@ async function resumePhase2Wait(
   run: WorkflowRunDoc,
   waitNode: WorkflowNode,
   msg: EngineMessage,
-  context: Record<string, unknown>
+  context: Record<string, unknown>,
+  execOpKey?: string
 ): Promise<EngineResult> {
   const cfg = waitNode.config as unknown as WaitForReplyConfig;
   const maxRetries = Math.max(0, Number(cfg.max_retries ?? 3));
@@ -502,21 +804,23 @@ async function resumePhase2Wait(
     // ✅ ผ่าน → branch "success" → เดินต่อ
     const next = nextNodeIds(workflow, waitNode.node_id, WAIT_BRANCH.SUCCESS);
     // ล้าง wait state
-    await updateRun(run.run_id, {
+    if (!(await ownedUpdateRun(run, {
       wait_retry_count: 0,
       wait_started_at: undefined,
       wait_node_id: undefined,
-    });
+    }))) {
+      return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership clearing wait state");
+    }
     if (next.length === 0) {
       // ไม่มี success edge → ใช้ edge เดี่ยว (legacy compat) หรือจบ
       const fallback = nextNodeIds(workflow, waitNode.node_id);
       if (fallback.length === 0) {
-        return await completeRun(workflow, run, context, delivered, "actioned", "wait success but no outgoing edge — flow ends");
+        return await completeRun(workflow, run, context, delivered, "actioned", "wait success but no outgoing edge — flow ends", undefined, execOpKey);
       }
-      const result = await walkGraph(workflow, { ...run, context }, msg, fallback[0]);
+      const result = await walkGraph(workflow, { ...run, context }, msg, fallback[0], execOpKey);
       return { ...result, status: result.status === "actioned" ? "resumed" : result.status };
     }
-    const result = await walkGraph(workflow, { ...run, context }, msg, next[0]);
+    const result = await walkGraph(workflow, { ...run, context }, msg, next[0], execOpKey);
     return { ...result, status: result.status === "actioned" ? "resumed" : result.status };
   }
 
@@ -527,41 +831,48 @@ async function resumePhase2Wait(
       ? cfg.retry_message
       : DEFAULT_STAY_RETRY_MESSAGE;
     delivered.push({ text: retryText, source: "workflow.wait_retry", node_id: waitNode.node_id });
-    await updateRun(run.run_id, {
-      status: "waiting_for_reply",
-      waiting_for: "next_message",
-      wait_retry_count: currentRetry + 1,
-      wait_started_at: new Date(), // reset timeout clock
-      context,
-    });
-    await logAdminEvent({
-      action_type: "workflow.wait_retry",
-      actor: "workflow-engine",
-      conversation_id: run.conversation_id,
-      metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, retry_count: currentRetry + 1, max_retries: maxRetries },
-    });
-    return {
+    // ⚡ committed outcome → resume_results[execOpKey] ใน write เดียวกัน (atomic)
+    const retryResult: EngineResult = {
       status: "resumed",
       detail: `wait retry ${currentRetry + 1}/${maxRetries} — answer invalid, asking again`,
       delivered,
       run_id: run.run_id,
       workflow_id: workflow.workflow_id,
     };
+    if (!(await ownedUpdateRun(run, {
+      status: "waiting_for_reply",
+      waiting_for: "next_message",
+      wait_retry_count: currentRetry + 1,
+      wait_started_at: new Date(), // reset timeout clock
+      context,
+      ...(execOpKey ? { [`resume_results.${execOpKey}`]: retryResult } : {}),
+    }))) {
+      return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership at wait retry");
+    }
+    await logAdminEvent({
+      action_type: "workflow.wait_retry",
+      actor: "workflow-engine",
+      conversation_id: run.conversation_id,
+      metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, retry_count: currentRetry + 1, max_retries: maxRetries },
+    });
+    return retryResult;
   }
 
   // ❌ retry ครบแล้ว → branch "retry_exceeded"
-  await updateRun(run.run_id, {
+  if (!(await ownedUpdateRun(run, {
     wait_retry_count: 0,
     wait_started_at: undefined,
     wait_node_id: undefined,
-  });
+  }))) {
+    return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership at retry_exceeded");
+  }
   const exceededNext = nextNodeIds(workflow, waitNode.node_id, WAIT_BRANCH.RETRY_EXCEEDED);
   if (exceededNext.length > 0) {
-    const result = await walkGraph(workflow, { ...run, context }, msg, exceededNext[0]);
+    const result = await walkGraph(workflow, { ...run, context }, msg, exceededNext[0], execOpKey);
     return { ...result, status: result.status === "actioned" ? "resumed" : result.status };
   }
   // ไม่มี retry_exceeded edge → จบ flow
-  return await completeRun(workflow, run, context, delivered, "retry_exceeded", `wait retry exceeded ${maxRetries} — no retry_exceeded edge, flow ends`);
+  return await completeRun(workflow, run, context, delivered, "retry_exceeded", `wait retry exceeded ${maxRetries} — no retry_exceeded edge, flow ends`, undefined, execOpKey);
 }
 
 // ─── false_branch_policy ───────────────────────────────────
@@ -572,42 +883,45 @@ async function handleFalseBranch(
   node: WorkflowNode,
   msg: EngineMessage,
   context: Record<string, unknown>,
-  delivered: DeliveredMessage[]
+  delivered: DeliveredMessage[],
+  execOpKey?: string
 ): Promise<EngineResult> {
   const policy = workflow.false_branch_policy || "exit_to_bot";
+  // ⚡ resume exec → outcome เก็บที่ resume_results[execOpKey] atomic กับ state write เดียวกัน
+  const isResumeOp = !!execOpKey && execOpKey !== run.operation_key;
 
   if (policy === "exit_to_bot") {
     // cancel flow → ข้อความนี้ไป trigger/bot (caller ทำต่อ)
-    await updateRun(run.run_id, {
+    const detail = `condition ${node.subtype} false → exit_to_bot (message goes to trigger/bot)`;
+    const res: EngineResult = { status: "exit_to_bot", detail, delivered, run_id: run.run_id, workflow_id: workflow.workflow_id };
+    if (!(await ownedUpdateRun(run, {
       status: "cancelled",
       outcome: "condition_false",
       completed_at: new Date(),
       context,
-    });
-    return {
-      status: "exit_to_bot",
-      detail: `condition ${node.subtype} false → exit_to_bot (message goes to trigger/bot)`,
-      delivered,
-      run_id: run.run_id,
-      workflow_id: workflow.workflow_id,
-    };
+      ...(run.operation_key && execOpKey === run.operation_key ? { result: { status: "exit_to_bot", detail, delivered } } : {}),
+      ...(isResumeOp ? { [`resume_results.${execOpKey}`]: res } : {}),
+    }))) {
+      return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership at exit_to_bot");
+    }
+    return res;
   }
 
   if (policy === "exit_drop") {
     // cancel flow → ทิ้งข้อความ (บังคับให้ลูกค้าพิมพ์ใหม่)
-    await updateRun(run.run_id, {
+    const detail = `condition ${node.subtype} false → exit_drop`;
+    const res: EngineResult = { status: "exit_drop", detail, delivered, run_id: run.run_id, workflow_id: workflow.workflow_id };
+    if (!(await ownedUpdateRun(run, {
       status: "cancelled",
       outcome: "condition_false",
       completed_at: new Date(),
       context,
-    });
-    return {
-      status: "exit_drop",
-      detail: `condition ${node.subtype} false → exit_drop`,
-      delivered,
-      run_id: run.run_id,
-      workflow_id: workflow.workflow_id,
-    };
+      ...(run.operation_key && execOpKey === run.operation_key ? { result: { status: "exit_drop", detail, delivered } } : {}),
+      ...(isResumeOp ? { [`resume_results.${execOpKey}`]: res } : {}),
+    }))) {
+      return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership at exit_drop");
+    }
+    return res;
   }
 
   // stay_retry — ส่ง fixed msg → กลับ wait_for_reply
@@ -619,33 +933,37 @@ async function handleFalseBranch(
   const waitNode = workflow.nodes.find((n) => n.type === "wait" && n.subtype === "wait_for_reply");
   if (!waitNode) {
     // ไม่มี wait node ใน flow → fallback จบ flow แบบ condition_false
-    await updateRun(run.run_id, {
+    const detail = "stay_retry but no wait node in flow → exit_to_bot";
+    const res: EngineResult = { status: "exit_to_bot", detail, delivered, run_id: run.run_id, workflow_id: workflow.workflow_id };
+    if (!(await ownedUpdateRun(run, {
       status: "cancelled",
       outcome: "condition_false",
       completed_at: new Date(),
       context,
-    });
-    return {
-      status: "exit_to_bot",
-      detail: "stay_retry but no wait node in flow → exit_to_bot",
-      delivered,
-      run_id: run.run_id,
-      workflow_id: workflow.workflow_id,
-    };
+      ...(run.operation_key && execOpKey === run.operation_key ? { result: { status: "exit_to_bot", detail, delivered } } : {}),
+      ...(isResumeOp ? { [`resume_results.${execOpKey}`]: res } : {}),
+    }))) {
+      return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership at stay_retry fallback");
+    }
+    return res;
   }
-  await updateRun(run.run_id, {
+  const stayDetail = `condition false → stay_retry (back to wait ${waitNode.node_id})`;
+  // resume exec → status ที่ persist/return เป็น "resumed" (caller mapping เดิมกลายเป็น no-op)
+  const res: EngineResult = {
+    status: isResumeOp ? "resumed" : "actioned",
+    detail: stayDetail, delivered, run_id: run.run_id, workflow_id: workflow.workflow_id,
+  };
+  if (!(await ownedUpdateRun(run, {
     status: "waiting_for_reply",
     current_node_id: waitNode.node_id,
     waiting_for: "next_message",
     context,
-  });
-  return {
-    status: "actioned",
-    detail: `condition false → stay_retry (back to wait ${waitNode.node_id})`,
-    delivered,
-    run_id: run.run_id,
-    workflow_id: workflow.workflow_id,
-  };
+    ...(run.operation_key && execOpKey === run.operation_key ? { result: { status: "actioned", detail: stayDetail, delivered } } : {}),
+    ...(isResumeOp ? { [`resume_results.${execOpKey}`]: res } : {}),
+  }))) {
+    return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership at stay_retry wait");
+  }
+  return res;
 }
 
 // ─── Run lifecycle helpers ─────────────────────────────────
@@ -657,14 +975,36 @@ async function completeRun(
   delivered: DeliveredMessage[],
   outcome: "actioned" | "condition_false" | "retry_exceeded" | "no_reply",
   detail: string,
-  handoff?: { agentId: string | null; reason: string }
+  handoff?: { agentId: string | null; reason: string },
+  execOpKey?: string
 ): Promise<EngineResult> {
-  await updateRun(run.run_id, {
+  // ⚡ resume exec → outcome persist atomic ใน state write เดียวกัน (crash window ปิด);
+  //   status normalize เป็น "resumed" ที่นี่ → stored === returned (caller mapping no-op)
+  const isResumeOp = !!execOpKey && execOpKey !== run.operation_key;
+  const res: EngineResult = {
+    status: isResumeOp ? "resumed" : "actioned",
+    detail,
+    delivered,
+    run_id: run.run_id,
+    workflow_id: workflow.workflow_id,
+    handoff,
+  };
+  // ⚡ fenced — stale worker ที่เสีย ownership ห้ามเขียน result/complete ทับ owner ใหม่
+  const ok = await ownedUpdateRun(run, {
     status: "completed",
     outcome,
     completed_at: new Date(),
     context,
+    // ⚡ Part 1B — result = immutable snapshot ของ initial op เท่านั้น (execOpKey === run.operation_key);
+    //   resume/timeout ห้ามทับ — ผล resume อยู่ใน resume_results[opKey]
+    ...(run.operation_key && execOpKey === run.operation_key
+      ? { result: { status: "actioned", detail, delivered, ...(handoff ? { handoff } : {}) } }
+      : {}),
+    ...(isResumeOp ? { [`resume_results.${execOpKey}`]: res } : {}),
   });
+  if (!ok) {
+    return inFlightResult(run.run_id, workflow.workflow_id, `lost run ownership before completion (${detail})`);
+  }
   await logAdminEvent({
     action_type: "workflow.run_completed",
     actor: "workflow-engine",
@@ -676,29 +1016,25 @@ async function completeRun(
       delivered_count: delivered.length,
     },
   });
-  return {
-    status: "actioned",
-    detail,
-    delivered,
-    run_id: run.run_id,
-    workflow_id: workflow.workflow_id,
-    handoff,
-  };
+  return res;
 }
 
-async function failRun(run: WorkflowRunDoc, error: string): Promise<void> {
-  await updateRun(run.run_id, {
+/** fenced — stale owner ห้าม error ทับ run ของ owner ใหม่; false = เสีย ownership */
+async function failRun(run: WorkflowRunDoc, error: string): Promise<boolean> {
+  const ok = await ownedUpdateRun(run, {
     status: "errored",
     outcome: "error",
     completed_at: new Date(),
     error,
   });
+  if (!ok) return false;
   await logAdminEvent({
     action_type: "workflow.run_errored",
     actor: "workflow-engine",
     conversation_id: run.conversation_id,
     metadata: { run_id: run.run_id, workflow_id: run.workflow_id, error },
   });
+  return true;
 }
 
 // ─── Condition evaluation ──────────────────────────────────
@@ -913,6 +1249,7 @@ async function performAction(
             platform: msg.platform,
             maxTurns: 10,
             includeSandboxAdmin: true,
+            excludeMessageIds: msg.exclude_message_ids,
           })
         : await getHistoryForBot({
             conversationId: msg.conversation_id,
@@ -968,6 +1305,8 @@ async function performAction(
             reason,
             source: src,
             assignedStatus: src === "botworker" ? "open" : "handoff",
+            // ⚡ Part 1B — assign ซ้ำกันได้ด้วย op key: crash retry คืนผลเดิมไม่จ่ายคิวซ้ำ
+            ...(msg.operation_key ? { operationKey: `${msg.operation_key}:assign:${node.node_id}` } : {}),
           });
           if (src === "botworker") {
             await logBotworkerEvent({
@@ -1203,8 +1542,8 @@ export async function checkWaitTimeouts(): Promise<number> {
     // หา wait node เพื่ออ่าน per-node timeout_ms
     const workflow = await workflowService.getWorkflow(run.workflow_id);
     if (!workflow) {
-      // workflow ถูกลบ → cancel run
-      await updateRun(run.run_id, { status: "cancelled", outcome: "cancelled_by_admin", completed_at: now, error: "workflow deleted" });
+      // workflow ถูกลบ → cancel run (เฉพาะ abandoned — owner อื่น lease active ห้าม kill)
+      await cancelIfAbandoned(run, { status: "cancelled", outcome: "cancelled_by_admin", completed_at: now, error: "workflow deleted" });
       continue;
     }
     const waitNode = workflow.nodes.find((n) => n.node_id === run.current_node_id && n.type === "wait");
@@ -1238,12 +1577,16 @@ export async function checkWaitTimeouts(): Promise<number> {
 
 /** ประมวลผล wait timeout — branch "no_reply" หรือ จบ flow */
 async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc): Promise<void> {
+  // acquire ownership ก่อน (waiting=parked → CAS flip running / running=expired เท่านั้น)
+  const acquired = await acquireRun(run.run_id);
+  if (!acquired) return; // owner อื่น active → skip
+
   // ทำเครื่องหมายว่ากำลังประมวลผล (race-safe — กัน resume ซ้อน)
-  await updateRun(run.run_id, { status: "running", waiting_for: undefined });
+  if (!(await ownedUpdateRun(acquired, { status: "running", waiting_for: undefined }))) return;
 
   const waitNode = workflow.nodes.find((n) => n.node_id === run.current_node_id);
   if (!waitNode) {
-    await failRun(run, "wait node not found during timeout processing");
+    await failRun(acquired, "wait node not found during timeout processing");
     return;
   }
 
@@ -1251,11 +1594,11 @@ async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc): P
   const delivered: DeliveredMessage[] = [];
 
   // ล้าง wait state
-  await updateRun(run.run_id, {
+  if (!(await ownedUpdateRun(acquired, {
     wait_retry_count: 0,
     wait_started_at: undefined,
     wait_node_id: undefined,
-  });
+  }))) return;
 
   if (noReplyNext.length > 0) {
     // เดินตาม no_reply branch
@@ -1269,10 +1612,10 @@ async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc): P
       // ⚡ propagate sandbox source — run ของ botworker ต้องเขียน test store เท่านั้น
       ...(run.test_source ? { testSource: run.test_source } : {}),
     };
-    await walkGraph(workflow, { ...run, context: { ...run.context, customer_reply: "" } }, dummyMsg, noReplyNext[0]);
+    await walkGraph(workflow, { ...acquired, context: { ...acquired.context, customer_reply: "" } }, dummyMsg, noReplyNext[0]);
   } else {
     // ไม่มี no_reply edge → จบ flow ด้วย outcome=no_reply
-    await completeRun(workflow, run, run.context, delivered, "no_reply", `wait timeout (${run.wait_started_at?.toISOString()}) — no no_reply edge, flow ends`);
+    await completeRun(workflow, acquired, acquired.context, delivered, "no_reply", `wait timeout (${run.wait_started_at?.toISOString()}) — no no_reply edge, flow ends`);
   }
 }
 

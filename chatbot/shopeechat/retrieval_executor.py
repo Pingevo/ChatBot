@@ -55,13 +55,22 @@ class RetrievalExecutionResult:
 def _request_profile(req: RetrievalRequest, query: str, shop: str | None,
                      platform: str) -> RetrievalProfile:
     """synthetic profile ต่อ request — fetch_* ใช้ facts จากที่นี่ชุดเดียว"""
-    subtype = next(iter(sorted(req.subtypes)), None)
+    # subtype เป็น hard filter ฝั่ง fetch — request ที่ขอหลาย subtype
+    # ต้องไม่ narrow เหลือตัวเดียว (bucket ยัง reject subtype_mismatch อยู่)
+    subtype = next(iter(req.subtypes), None) if len(req.subtypes) == 1 else None
+    ptypes = set(req.product_types)
+    if len(req.subtypes) > 1:
+        # unit product_type ไม่ตรง listing type (สายชาร์จอยู่ใน listing charger
+        # แต่ unit type="cable") — expand ตาม subtype ทั้งหมดที่ขอ
+        from .units import _SUBTYPE_TO_TYPES
+        for s in req.subtypes:
+            ptypes |= _SUBTYPE_TO_TYPES.get(s, set())
     return RetrievalProfile(
         platform=platform,
         shop=shop,
         message=query,
         intent="",
-        product_types=req.product_types,
+        product_types=frozenset(ptypes),
         subtype=subtype,
         model_codes=req.model_codes,
         variant_terms=(),
@@ -86,6 +95,10 @@ def _legacy_evidence_fetcher(message: str, *, retrieval_profile, shop, limit):
 
 def _bucket(card: dict, req: RetrievalRequest) -> tuple[str, str]:
     """card → (bucket, reason) — eligible / unavailable / rejected"""
+    # UNLIST/unknown = customer_hidden (ยังไม่ publish — ห้ามใช้เป็น evidence
+    # ตอบลูกค้าเลย ทั้ง spec/compare/link) — live status ชนะ unit snapshot เสมอ
+    if card.get("customer_visible") is False:
+        return "rejected", "customer_hidden"
     from .units import _SUBTYPE_TO_TYPES
     eff_types = set(req.product_types)
     for s in req.subtypes:

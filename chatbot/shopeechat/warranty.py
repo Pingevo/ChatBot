@@ -397,6 +397,10 @@ _CLAIM_REQUEST_INDICATORS = [
     #    ทำให้ "รู้สึกน้องชาร์จไม่เข้าเลยค่ะ" ไม่ถูกตรวจจับเป็น claim request
     "ชาร์จไม่เข้า", "ไม่ชาร์จ", "ชาร์จไม่ติด", "ชาร์จไม่ได้",
     "ชาร์จไม่เข้าเลย", "ไม่เข้าเลย", "ชาร์จไม่อยู่", "ไฟไม่เข้า",
+    # ⚡ Task 5C-F — phrasing ที่เคยหลุด: "ใช้งานไม่ได้" (มี 'งาน' คั่น)
+    #   "ชาร์จไฟไม่ได้" (มี 'ไฟ' คั่น) — เคส transcript KingGadgets
+    "ใช้งานไม่ได้", "ใช้งานไม่ได้เลย", "ชาร์จไฟไม่ได้", "ชาร์จไฟไม่เข้า",
+    "ชาร์จไม่ขึ้น", "เสียบแล้วไม่ชาร์จ", "ชาร์จเข้าไม่ได้",
     "ไม่สแกน", "ไม่เชื่อมต่อ", "ไม่แสดงผล", "ไม่ได้เสียง",
     # ⚡ Phase 3B-5 — หน้าจอผิดปกติ (สีเขียว/แดง/ดำ/ขาว) + รีสตาร์ทไม่ได้
     #    เคสจริง: "หน้าจอขึ้นสีเขียวครับ" → "กดรีสตาร์ทเครื่องไม่ได้ครับจอเขียวตลอดครับ"
@@ -464,6 +468,8 @@ def detect_claim_request(message: str) -> bool:
             "ไม่ทำงาน", "ไม่ติด", "ไม่เปิด", "ค้าง", "ดับ", "มืด",
             "แบตเสีย", "จอเสีย", "ปุ่มเสีย", "น้ำเข้า", "ตก",
             "เสียงดัง", "เสียงแปลก", "ไม่ชาร์จ", "ชาร์จไม่เข้า",
+            "ใช้งานไม่ได้", "ชาร์จไฟไม่ได้", "ชาร์จไฟไม่เข้า",
+            "ชาร์จไม่ขึ้น", "เสียบแล้วไม่ชาร์จ",
             "ไม่เชื่อมต่อ", "หาย", "ไม่แสดง", "ไม่สแกน",
             # ⚡ Phase 3B-5 — หน้าจอผิดปกติ + รีสตาร์ทไม่ได้
             "หน้าจอเขียว", "จอเขียว", "สีเขียว", "หน้าจอแดง", "จอแดง",
@@ -476,6 +482,28 @@ def detect_claim_request(message: str) -> bool:
             return True
         return False
     return any(ind in msg_lower for ind in _CLAIM_REQUEST_INDICATORS)
+
+
+def malfunction_safe_check(message: str) -> str:
+    """ขั้นตอนเช็กเบื้องต้นแบบปลอดภัยสำหรับข้อความแจ้งอาการเสีย (Task 5C-F).
+
+    คืน "" ถ้าไม่ใช่ข้อความแจ้งอาการ — ไม่เดาสเปค/สาเหตุเฉพาะรุ่น
+    (เช่น ห้ามบอก 'ใช้ได้แต่ไม่รองรับชาร์จด่วน' ถ้าไม่มี evidence)
+    """
+    msg = (message or "").lower()
+    _mal = (
+        "ใช้ไม่ได้", "ใช้งานไม่ได้", "ไม่ทำงาน", "เสีย", "พัง",
+        "ชาร์จไม่", "ไม่ชาร์จ", "ชาร์จไฟไม่", "ไม่ติด", "ไม่เปิด",
+        "ไม่เข้า", "ไม่ขึ้น", "ค้าง", "ดับ", "เสียบแล้วไม่ชาร์จ",
+    )
+    if not any(k in msg for k in _mal):
+        return ""
+    return (
+        "ขออภัยที่สินค้ามีปัญหานะคะ\n"
+        "เบื้องต้นรบกวนลองเช็กก่อนนะคะ: เปลี่ยนสายชาร์จ/หัวชาร์จหรือปลั๊กไฟ "
+        "ลองกับเครื่องอื่น และตรวจพอร์ตชาร์จว่าสะอาดไหมค่ะ "
+        "ถ้ามีกลิ่นไหม้ ร้อนผิดปกติ หรือรอยเสียหาย รบกวนหยุดใช้งานทันทีนะคะ\n\n"
+    )
 
 
 def detect_consent(message: str) -> bool:
@@ -503,7 +531,9 @@ def detect_confirmation(message: str) -> bool:
 # Pattern สำหรับดึงข้อมูลจากข้อความลูกค้า
 # ⚡ NEW-1 fix — ใช้ (?<!\d)...(?!\d) แทน \b: normalized text ตัด space แล้วเบอร์ติด
 #   กับตัวไทย ("ใจดี0812345678") ทำ \b พัง → เบอร์หลุดไปเป็น order_id
-_PHONE_PATTERN = re.compile(r"(?<!\d)0\d{8,9}(?!\d)")
+# ⚡ 5F-B fix — match บน text จริง รับ separator คั่นกลางเบอร์ ("087 788 7888")
+#   เดิม collapse space ทั้งข้อความ → "เบอร์ order" ติดกัน → (?!\d) fail → เบอร์หาย
+_PHONE_PATTERN = re.compile(r"(?<!\d)0\d{1,2}[\s\-]?\d{3}[\s\-]?\d{4}(?!\d)")
 # เลขคำสั่งซื้อ Shopee มัก 9-19 หลัก (order_sn ตัวเลขล้วนยาวถึง 19) อาจมี suffix เช่น "123456789shp"
 _ORDER_ID_PATTERN = re.compile(r"\b\d{9,19}(?:[a-zA-Z]{1,5})?\b")
 # ⚡ Shopee mixed alphanumeric order ID เช่น "2508088B5T4W1D" (มีตัวอักษรผสม)
@@ -570,15 +600,35 @@ def _extract_name_ner(message: str) -> str:
         r"\s+ครับผม\s*$",
         "", name
     ).strip()
+    # 1b) ⚡ 5F-B — particle ที่ติดท้ายคำสุดท้ายแบบไม่มี space (NER เก็บ
+    #   "ใจดีนะคะ"/"สมชายนะ" ติดกัน) — strip เฉพาะหางคำสุดท้าย เหลือ ≥2 ตัวอักษร
+    if name:
+        _parts = name.rsplit(" ", 1)
+        _tail = _parts[-1]
+        for _p in ("นะคะ", "นะครับ", "นะคับ", "นะค้าบ", "ค่ะ", "ครับ", "คับ",
+                   "จ้า", "จ๊ะ", "หน่อย", "ข่ะ", "นะ", "คะ"):
+            if _tail.endswith(_p) and len(_tail) - len(_p) >= 2:
+                _tail = _tail[:-len(_p)]
+                break
+        _parts[-1] = _tail
+        name = " ".join(_parts).strip()
+    # 1c) ⚡ 5F-B — คำนำหน้าที่ NER เก็บติด ("คุณสมชาย" → "สมชาย") — longest first
+    for _h in ("นางสาว", "คุณ", "นาย", "นาง", "ว่าที่"):
+        if name.startswith(_h) and len(name) - len(_h) >= 2:
+            name = name[len(_h):].strip()
+            break
     # 2) ถ้าชื่อยาวเกิน 40 ตัวอักษร → น่าจะจับผิด (เป็นประโยค) ให้คืน ""
     if len(name) > 40:
         return ""
     # 3) ถ้าชื่อมีคำว่า "มัน"/"ต้อง"/"มี"/"ทำ"/"บ้าง" → ไม่ใช่ชื่อ คืน ""
     #    NEW-1: เพิ่มคำกริยา/คำถาม (NER อาจจับประโยคคำถามมาเป็นชื่อ)
+    #    5F-B: + field labels — NER จับ label ("เลขคำสั่งซื้อ") เป็นชื่อบ่อย
     _non_name_words = (
         "มัน", "ต้อง", "มี", "ทำ", "บ้าง", "หรือ", "ยัง", "อยาก",
         "ไหม", "มั้ย", "ครับ", "ค่ะ", "แล้ว", "ได้", "ไม่", "ที่ไหน",
         "อะไร", "กี่", "เท่าไหร่",
+        "เลขคำสั่งซื้อ", "หมายเลข", "เบอร์โทร", "เบอร์มือถือ", "วันที่ซื้อ",
+        "นามสกุล", "รูปภาพ", "วิดีโอ",
     )
     if any(w in name for w in _non_name_words):
         return ""
@@ -607,11 +657,10 @@ def extract_customer_info(message: str) -> dict:
     if not message:
         return {"name": "", "phone": "", "order_id": ""}
     msg = message.strip()
-    # ดึงเบอร์โทร (0xxxxxxxxx หรือ 0xx-xxx-xxxx หรือ 0xx xxx xxxx)
-    # ⚡ ลบทั้ง "-" และ space ก่อน match (กัน "087 788 7888" ไม่ถูกจับ)
-    _msg_for_phone = re.sub(r"[\s\-]", "", msg)
-    phone_match = _PHONE_PATTERN.search(_msg_for_phone)
-    phone = phone_match.group(0) if phone_match else ""
+    # ดึงเบอร์โทร — pattern รับ separator ในตัว ("087 788 7888" / "087-788-7888")
+    # match บน msg จริง (ไม่ collapse — collapse ทำ "เบอร์ order" ติดกัน เบอร์หาย)
+    phone_match = _PHONE_PATTERN.search(msg)
+    phone = re.sub(r"[\s\-]", "", phone_match.group(0)) if phone_match else ""
     # ดึงเลขคำสั่งซื้อ (เลข 9-19 หลัก ที่ไม่ใช่เบอร์โทร) — mask เบอร์ออกก่อน scan
     # (เดิมเช็ค candidate != phone พลาดเพราะ normalize คนละแบบกับข้อความที่ scan)
     _msg_for_order = _mask_digits(msg, phone)
@@ -662,8 +711,10 @@ def detect_purchase_date_and_order(message: str) -> dict:
     # ตัดวันที่ออกก่อน เพื่อกัน pattern ไปจับตัวเลขในวันที่
     msg_cleaned = re.sub(r"\b\d{1,4}[/\-.]\d{1,2}[/\-.]\d{2,4}\b", "", message)
     # ⚡ NEW-1 fix — mask เบอร์โทรออกก่อน scan order (เดิมไม่มี → เบอร์ 10 หลักกลายเป็น order_id)
-    _phone_m = _PHONE_PATTERN.search(re.sub(r"[\s\-]", "", msg_cleaned))
-    msg_cleaned = _mask_digits(msg_cleaned, _phone_m.group(0) if _phone_m else "")
+    _phone_m = _PHONE_PATTERN.search(msg_cleaned)
+    msg_cleaned = _mask_digits(
+        msg_cleaned,
+        re.sub(r"[\s\-]", "", _phone_m.group(0)) if _phone_m else "")
     msg_cleaned = msg_cleaned.replace("-", "")
     for m in _ORDER_ID_PATTERN.finditer(msg_cleaned):
         candidate = m.group(0)

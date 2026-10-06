@@ -229,9 +229,15 @@ def _live_availability(unit: dict) -> tuple[str, dict, str]:
         return status, _ps.resolve_availability(lst), unit.get("model_status") or ""
     m = next((m for m in (lst.get("model") or []) if m.get("model_id") == mid), None)
     if m is None:
+        # variant ไม่อยู่ใน live listing — customer-visible เฉพาะเมื่อ listing
+        # เป็น historical evidence ชัดเจน (SELLER_DELETE/DELETED/BANNED = เคย
+        # publish ทั้ง listing); NORMAL/UNLIST = variant ถูกถอด/ยังไม่ publish
         return status, {"catalog_status": "unlisted", "available_for_sale": False,
                         "answerable": True, "reason": "model_missing",
-                        "total_stock": None}, ""
+                        "total_stock": None,
+                        "customer_visible": status.upper() in {
+                            "SELLER_DELETE", "DELETED", "SHOPEE_DELETE",
+                            "BANNED"}}, ""
     return status, _ps.resolve_availability(lst, model_doc=m), m.get("model_status") or ""
 
 
@@ -307,6 +313,8 @@ def to_unit_card(unit: dict, route=None) -> dict:
         # sold_out = รู้จริงว่าหมดเท่านั้น — unknown/unlisted/model_missing ไม่ใช่ sold out
         "sold_out": av["catalog_status"] == "out_of_stock",
         "_available_for_sale": av["available_for_sale"],
+        # UNLIST/unknown = ยังไม่ publish → ห้ามใช้เป็น evidence ตอบลูกค้า
+        "customer_visible": av["customer_visible"],
         "has_promotion": _ps._has_active_promotion(lst) if lst else False,
         "is_flash_sale": bool(lst.get("is_flash_sale")),
         "description_excerpt": (
