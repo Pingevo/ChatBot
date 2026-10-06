@@ -2229,3 +2229,80 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **verify (combined branch)**: audit 41/41 · freshness 59/59 · checkpoint 18/18 · idempotency 43/43 · boundary 20/20 · races 37/37 · tsc clean · build ✓ · py_compile ✓ · all diffs clean
 - **leftovers**: `llm.py`, `test_vision_dedupe.py`, `quarantine_rollback.py`, `test_quarantine_rollback_verify.py` — excluded by spec, untouched
 - **NOT RUN**: real-Mongo runtime verify (verify-parallel unsafe — listPending ไม่จำกัด prefix) · quarantine/rollback ยังไม่ execute · worker off · Mongo write=0 · LLM/API=0 · no push/deploy
+
+#### [กำลังจะทำ] Botworker real-Mongo smoke harness — Part 1 safety gate (no execute)
+
+- **เป้าหมาย**: harness `verify-botworker-runtime-mongo.ts` + safety test `test-botworker-runtime-mongo-safety.ts` — isolated temp DB (`<prod>_botworker_verify_<rand>`) + local fake `/chat` + marker-token cleanup + fail-closed CLI (default dry-run, `--apply` ต้อง token) — Part 1 ไม่รัน Mongo writes จริง
+- **constraints**: production/runtime/UI/API=0 แก้ · worker off · no LLM/Shopee · no .env read/print · dynamic-import production services หลังตั้ง ADMIN_MONGO_DB/CHATBOT_BASE_URL_SHOPEE เท่านั้น · ไม่เรียก ensureIndexes (สร้างเฉพาะ minimal index ใน temp DB) · ห้าม commit/push
+- **ผล Part 1 (verify แล้ว, ยังไม่ commit)**: safety test **39/39** (RED ก่อน implement: `harness file exists` fail → GREEN) · dry-run prints sanitized plan exit=0 · `--apply` no-token/wrong-token → exit=1 **ก่อน** load env/Mongo · tsc clean · diff --check clean · harness 469 LOC (<500 gate) · guards=4 (apply token / db-name pattern+≠prod / cleanup marker+token / output sanitizer) · production LOC/helpers/schema/index=0 · scenarios S1–S6 implemented แต่ execute เฉพาะ --apply (Part 2 หลังอนุมัติ) · Mongo writes=0 · network binds=0 · runtime imports=0 · `verify-botworker-parallel` ไม่ถูกอ้างอิง
+- **residual**: scenario assertions ยังไม่ proven กับ Mongo จริง (ตัวเลข claim/reply/row ต้องยืนยันใน Part 2) · fake `/chat` รับ body เท่านั้น (ไม่เก็บ headers) · isolated name = `<prod>_botworker_verify_<rand16>` — prod prefix เป็นส่วนหนึ่งของ pattern โดยตั้งใจ (ต่างจาก prod name ตรงๆ)
+- **review fix (exit-code overwrite, verify แล้ว)**: `finally` เคยเขียน `process.exitCode=1` เมื่อ cleanup ล้ม แต่ `runApply` return 0 → `.then` เขียนทับเป็น 0 → temp DB ค้างแต่รายงาน success — **fix**: pure `smokeExitCode(failedAssertions, cleanupFailed)` + `runApply` ไม่มี return ใน try / ไม่แตะ `process.exitCode` (pin: count=2 เฉพาะ then+catch) · fake.close() fail → cleanupFailed แล้วทำ DB cleanup ต่อ · scenario throw → propagate ผ่าน finally → outer catch → exit 1 · 4-case control flow: pass/pass→0 · fail/pass→1 · pass/fail→1 · throw→1 · safety test 39→**47/47** (RED ก่อน fix: 7 fails ตรง finding) · tsc clean · --apply ยัง refuse ก่อน env load · Mongo writes=0
+
+#### [กำลังจะทำ] Botworker real-Mongo smoke Part 1.1/2 — Mongo client closure + one-shot apply
+
+- **root cause**: `mongoClient.getDb()` singleton MongoClient ไม่ถูกปิดใน runApply → socket/timer ค้าง process อาจไม่จบแม้ dropDatabase สำเร็จ — แก้ด้วย `db.client.close()` ใน nested finally (driver API ตรง ห้ามสร้าง production closeMongo helper)
+- **plan**: RED source-contract tests (client.close ใน finally / dropDatabase return check / close-fail→cleanupFailed / exitCode ยังเฉพาะ boundary) → minimal fix → GREEN → Part 2 one-shot --apply
+- **Part 1.1 (verify แล้ว)**: `db.client.close()` ใน nested finally + `dropDatabase()` return ต้อง true — RED 5 fails (no close / unchecked return) → GREEN **52/52** · tsc clean · dry-run ok
+- **Part 2 (รัน --apply ครั้งเดียว)**: exit=1 — **seed insert แรกถูก Mongo auth ปฏิเสธ** (`not authorized on <prod>_botworker_verify_<rand>` — user ไม่มีสิทธิ์เขียน DB อื่นนอก configured) → S1–S6 ไม่ได้ execute · writes=0 · cleanup refuse ถูกต้อง (no marker→no drop) · client close ทำงาน process จบปกติ · read-only `listDatabases` ยืนยัน `*_botworker_verify_*` = **0 DBs** — temp DB ไม่เคยถูกสร้างจริง (Mongo สร้าง lazily เมื่อ write แรกซึ่งถูก reject)
+- **finding ใหม่**: driver error message แสดง temp DB name เต็มใน console — sanitized guard ครอบเฉพาะ string ของเราเอง ไม่ครอบ error จาก Mongo (ต้อง sanitize e.message ใน Part 3 ถ้าจะใช้ต่อ)
+- **residual**: ต้องการ Mongo user ที่มีสิทธิ์ create/write/drop บน `*_botworker_verify_*` หรือ role `dbAdminAnyDatabase`/`readWriteAnyDatabase` — หรือเปลี่ยน approach เป็น separate verify user/URI (ต้องตัดสินใจนอก scope)
+- verdict งานนี้: REAL_MONGO_SMOKE_FAILED (auth boundary, ไม่ใช่ runtime bug) · Mongo writes=0 · LLM/API=0 · worker off
+
+---
+## งาน: Botworker real-Mongo smoke Part 3 — loopback-only disposable Mongo + error sanitization
+**สถานะ:** ✅ harness rewrite เสร็จ + verify ผ่าน — ❌ disposable Mongo ไม่มีในเครื่อง → apply ไม่ได้รัน
+
+### Baseline / RED / GREEN
+- Baseline ก่อนแก้: safety 52/52, tsc clean, dry-run 0
+- RED (new contract): 25 fails — verify URI validator, harness-constant DB name, sanitizer, source pins ทั้งหมด absent
+- GREEN: safety **73/73**, `npx tsc --noEmit` clean, dry-run exit 0, `git diff --check` clean
+
+### วิธีแก้ (harness only — production/runtime = 0)
+- `BOTWORKER_VERIFY_MONGO_URI` required ใน apply — `validateLoopbackMongoUri()` รับเฉพาะ `mongodb://` + host ∈ {127.0.0.1, localhost, [::1]} + explicit port ≠ 27017 + ไม่มี credentials/query — reject srv, non-loopback, malformed
+- `ADMIN_MONGO_URI` + `ADMIN_MONGO_DB` set จากค่า verified ก่อน dynamic import — DB name = `botworker_runtime_verify_<rand>` (harness constant, ไม่ derive จาก prod)
+- `sanitizeError(e, stage)` ตัวเดียวสำหรับทุก error path — whitelist: stage + error name + code เท่านั้น — ปิด raw driver message leak (ก่อนหน้านี้ leak temp DB name ทั้งก้อน)
+- apply-refusal matrix verified: empty/srv/non-loopback/27017/creds/no-port → exit 1 ทุกกรณีก่อน Mongo connect/bind
+
+### Disposable Mongo discovery → UNAVAILABLE
+- Option A native `mongod`: `which`+`/opt/homebrew/bin`+`/usr/local/bin`+`brew list` → ไม่มี binary
+- Option B cached Docker image: `docker` CLI ไม่มีอยู่ในเครื่องเลย (command not found)
+- ตามสเปก: ห้าม install/download/pull, ห้าม fallback production → **apply ไม่ได้รัน**
+- port 27017 closed — configured Mongo เป็น remote server
+
+### Files changed
+- `ChatAdminWeb/scripts/verify-botworker-runtime-mongo.ts` (+validator, +sanitizer, rewrite apply-boundary ~±60 LOC)
+- `ChatAdminWeb/scripts/test-botworker-runtime-mongo-safety.ts` (+21 checks = 73 total)
+- `getoutofmywaybotkaikrook2.md` (entry นี้)
+
+### Verdict: `DISPOSABLE_MONGO_UNAVAILABLE`
+Smoke harness พร้อมรันแล้ว — ขาดแค่ Mongo ที่เครื่องนี้: native `mongod` (brew install mongodb-community) หรือ cached mongo Docker image → rerun apply ครั้งเดียวตาม spec ได้ทันที
+
+---
+## งาน: Botworker smoke harness final safety correction — explicit URI provenance + strict error sanitizer
+**สถานะ:** ✅ เสร็จ (harness/test only — ไม่ได้รัน apply, disposable Mongo ยังไม่มี)
+
+### Finding 1 (High): verify-URI provenance — dotenv โหลดก่อนอ่าน URI
+- Root cause: `runApply()` โหลด `dotenv/config` ก่อนอ่าน `BOTWORKER_VERIFY_MONGO_URI` → URI อาจมาจาก `.env` แทน explicit env → provenance ไม่ชัด
+- RED: 2 pins fail (env-read + validate อยู่หลัง dotenv import — index 217/192 > 153)
+- Fix ขั้นต่ำ: ย้าย `const uri = validateLoopbackMongoUri(process.env[VERIFY_URI_ENV] || "")` ขึ้นก่อน `await import("dotenv/config")` — ลำดับใหม่: **approval token → explicit URI validate → dotenv → ADMIN_MONGO_URI/DB rebind → fake → dynamic imports**
+- ไม่มี fallback ไป ADMIN_MONGO_URI; dotenv ไม่เป็นแหล่ง verify URI อีกต่อไป
+
+### Finding 2 (Medium): sanitizer ไม่ใช่ whitelist จริง
+- Root cause: `e.name`/`code` ส่งออกโดยไม่กรอง → name/code ที่แปลก (URI, spaces, newline, string code) รั่วได้
+- RED: 7 fails (malicious name, spaces, uri-chars, string code, NaN, Infinity, non-Error)
+- Fix ขั้นต่ำใน `sanitizeError` ตัวเดิม: name ต้องผ่าน `/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/` มิฉะนั้น `"Error"`; code แสดงเฉพาะ `typeof number && Number.isFinite` — string/NaN/Infinity/object ไม่แสดง
+- แก้ pin regex ผิดของตัวเองด้วย: `\s*` backtrack ทำ lookahead ผ่านบน space → เปลี่ยนเป็น `(?!\s*["'`])` ตรงหลัง comma
+
+### Task 3: doc accuracy
+- test header `<prod>_botworker_verify_<rand>` → `botworker_runtime_verify_<rand>` + lifecycle line
+- harness header import-order แก้เป็น verify-URI → dotenv (เดิมเขียนกลับ)
+- แก้ wording รอบก่อน: refusal matrix เดิม reject หลัง dotenv (dotenv ถูกโหลดใน process แต่ไม่มีการเปิด/แสดงเนื้อหาไฟล์) — หลัง correction นี้ missing/invalid URI reject **ก่อน** dotenv แล้วจริง
+
+### Verify สด (ไม่มี --apply)
+- safety **88/88** (73 + 15 new: 9 sanitizer strict + 4 provenance pins + 2 stage-constant)
+- `npx tsc --noEmit` clean · dry-run exit 0 · `git diff --check` clean
+- refusal probes: token+no-URI → exit 1 ก่อน dotenv/bind; token+`:27017` → exit 1 ก่อน dotenv/bind; output sanitized ทั้งคู่
+- production/configured Mongo connections = 0 · Mongo writes = 0 · ports bound = 0 · LLM/Shopee = 0
+
+### Verdict: `HARNESS_SAFETY_READY_DISPOSABLE_MONGO_UNAVAILABLE`
+S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mongod` หรือ cached image) เท่านั้น
