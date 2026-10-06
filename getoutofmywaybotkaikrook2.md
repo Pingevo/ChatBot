@@ -2217,3 +2217,15 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **RED evidence**: mutation `| {"__contract_drift_probe__"}` → `FAIL ... extra={'__contract_drift_probe__'}` → คืนแล้ว
 - **GREEN**: 41/41 — owner extracted = 7 statuses, missing=∅ extra=∅
 - verify: py_compile ✓ · diff --check clean · audit file untouched (ไม่รัน real audit ซ้ำตามเงื่อนไข) · runtime/UI/API/schema=0
+
+#### Botworker commit closeout — 0/A/B แยก + isolated worktree verify (committed)
+
+- **commits**: `88efc77` test: correct botworker incident audit contracts (2 files) · `43d1ff1` fix: make botworker processing idempotent and recoverable (25 files) · `20cbca8` fix: isolate botworker history and sandbox replies (8 files)
+- **error found by isolation**: `test-botworker-boundary.*` ถูกวางใน Commit A แต่ suite มี P2 (inbox-cache timestamp) + P3 (usePolling `immediate`) ที่ทดสอบ contract ของไฟล์ฝั่ง B → isolated A: tsc TS2353 + FAIL P2/P3
+- **fix**: ย้าย boundary suite (3 ไฟล์) ไป Commit B — B depends on A อยู่แล้ว ไม่เสีย coverage; ไม่แก้โค้ดใดๆ
+- **isolation method**: `git write-tree`+`commit-tree` → detached worktree = exact staged content; `node_modules` ต้อง `cp -Rc` clonefile (Turbopack ปฏิเสธ symlink ชี้ออกนอก project root); `.env` ถูกคัดลอกชั่วคราวเข้า isolated worktree และถูก build process โหลดใช้งานเพื่อให้ `ADMIN_JWT_SECRET` พร้อมสำหรับ build แต่ไม่มีการแสดงเนื้อหา ไม่มีไฟล์ `.env` ถูก commit และ temporary worktree/patch ถูกลบแล้ว
+- **verify (isolated A)**: freshness 59/59 · checkpoint 18/18 · idempotency 43/43 · races 37/37 · tsc clean · build 84/84 ✓
+- **verify (isolated B, base=A)**: tsc clean · boundary 20/20 (P2/P3 green เมื่อ B ครบ) · build 84/84 ✓ · diff --check ✓
+- **verify (combined branch)**: audit 41/41 · freshness 59/59 · checkpoint 18/18 · idempotency 43/43 · boundary 20/20 · races 37/37 · tsc clean · build ✓ · py_compile ✓ · all diffs clean
+- **leftovers**: `llm.py`, `test_vision_dedupe.py`, `quarantine_rollback.py`, `test_quarantine_rollback_verify.py` — excluded by spec, untouched
+- **NOT RUN**: real-Mongo runtime verify (verify-parallel unsafe — listPending ไม่จำกัด prefix) · quarantine/rollback ยังไม่ execute · worker off · Mongo write=0 · LLM/API=0 · no push/deploy
