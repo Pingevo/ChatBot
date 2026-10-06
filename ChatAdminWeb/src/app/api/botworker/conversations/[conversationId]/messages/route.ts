@@ -15,6 +15,7 @@ import { json } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { conversationService } from "@/backend/service/conversationService";
 import { productService } from "@/backend/service/productService";
+import { BOTWORKER_REPLY_FILTER } from "@/backend/service/messageService";
 import { parseRawMessage, toProductCard } from "@/backend/service/messageMediaParser";
 import type { Platform } from "@/backend/lib/safety";
 import type { MessageType, MessageMedia, MessageTable, ProductCard } from "@/lib/types";
@@ -112,10 +113,11 @@ export async function GET(
     deleted_at?: Date;
   }>(COLLECTIONS.shadowReplies);
 
+  // ⚡ source boundary — เฉพาะ botworker replies (contract เดียวกับ getGroupedHistoryForBot)
+  //   กัน replay/shadowbot/manual generate ปนในหน้า /botworker
   const srFilter: Record<string, unknown> = {
     conversation_id: conversationId,
-    deleted_at: { $exists: false },
-    bot_reply_text: { $nin: ["", null] },
+    ...BOTWORKER_REPLY_FILTER,
   };
   if (platform) srFilter.platform = platform;
 

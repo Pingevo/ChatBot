@@ -16,9 +16,11 @@ import { useEffect, useRef } from "react";
 export function usePolling(
   fn: () => void | Promise<void>,
   intervalMs: number,
-  options?: { enabled?: boolean }
+  options?: { enabled?: boolean; immediate?: boolean; restartKey?: unknown }
 ): void {
   const enabled = options?.enabled ?? true;
+  const immediate = options?.immediate ?? false;
+  const restartKey = options?.restartKey;
   const fnRef = useRef(fn);
   fnRef.current = fn;
 
@@ -61,6 +63,9 @@ export function usePolling(
       }
     };
 
+    // ⚡ immediate — ยิง fn ทันทีตอน mount/restart (แทน initial fetch effect แยก)
+    //   ผ่าน run() เดียวกัน → running flag กัน overlap กับ tick แรก
+    if (immediate) run();
     scheduleNext();
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", onVisibility);
@@ -68,10 +73,13 @@ export function usePolling(
 
     return () => {
       active = false;
-      if (timer) { clearTimeout(timer); timer = null; }
+      if (timer) { clearTimeout(timer); timer = null;
+      }
       if (typeof document !== "undefined") {
         document.removeEventListener("visibilitychange", onVisibility);
       }
     };
-  }, [enabled, intervalMs]);
+    // ⚡ restartKey — restart loop (+ immediate re-fire) เมื่อ caller เปลี่ยน context
+    //   เช่น searchQuery/selectedId — แทน useEffect แยกที่ fetch ซ้ำซ้อน
+  }, [enabled, intervalMs, immediate, restartKey]);
 }

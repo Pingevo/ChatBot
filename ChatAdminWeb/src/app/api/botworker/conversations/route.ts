@@ -18,7 +18,7 @@ import type { Platform, ConversationStatus } from "@/backend/service/conversatio
 
 // ⚡ G-fix — in-memory cache (เหมือน /admin/conversations) ลด query ซ้ำจาก polling
 let bwCache: { key: string; data: Conversation[]; totalCount: number; hasMore: boolean; cursor: string | null; ts: number } | null = null;
-const BW_CACHE_TTL = 2500; // ⚡ 2.5 วิ — สั้นกว่า poll interval (3s) เล็กน้อย
+const BW_CACHE_TTL = 5000; // ⚡ 5 วิ — ครอบ poll interval (3s) เหมือน /admin/conversations
 
 /** Invalidate botworker cache — เรียกจาก close/reopen/handoff/assign route */
 export function invalidateBotworkerCache() {
@@ -192,8 +192,9 @@ export async function GET(req: NextRequest) {
   const totalCount = parsedCursor ? 0 : await coll.countDocuments(filter);
 
   // ⚡ G-fix — save cache (เฉพาะ head)
+  //    ts จับตอน data พร้อม — ไม่ใช่ตอน request เริ่ม (query ช้า → data ไม่ควร stale ตั้งแต่เกิด)
   if (!parsedCursor) {
-    bwCache = { key: cacheKey, data: conversations, totalCount, hasMore, cursor: nextCursor, ts: now };
+    bwCache = { key: cacheKey, data: conversations, totalCount, hasMore, cursor: nextCursor, ts: Date.now() };
   }
 
   if (includeCount) {
