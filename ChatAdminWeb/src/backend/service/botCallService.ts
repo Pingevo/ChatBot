@@ -24,6 +24,9 @@ export interface BotCallParams {
   //    → ticket_state อ่านจาก test_status_conversation(source)
   //    → Python _send_handoff ส่ง test_source กลับ → bot-handoff route เขียน test store
   testSource?: string;
+  // ⚡ bounded HTTP timeout — caller (botworker) ส่ง AbortSignal.timeout(botCallTimeoutMs)
+  //    รวมกับ ownership-abort; timeout ต้อง < claim lease
+  signal?: AbortSignal;
 }
 
 export interface BotCallResponse {
@@ -124,6 +127,8 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       // ⚡ Phase 8 — ส่ง llm_context_limit ให้บอท (จำนวนสินค้าใน LLM context)
       llm_context_limit: llmContextLimit,
     }),
+    // ⚡ bounded timeout / ownership abort — fetch ยอมรับ AbortSignal ตรงๆ
+    ...(params.signal ? { signal: params.signal } : {}),
   });
   if (!resp.ok) throw new Error(`bot call failed: ${resp.status}`);
   const data = await resp.json();

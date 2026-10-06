@@ -69,6 +69,7 @@
 | `statusConversation` | `status_conversation` | admin | admin-owned meta (ไม่โดน dump) |
 | `testStatusConversation` | `test_status_conversation` | admin | test version ของ status |
 | `testChatSessions` | `test_chat_sessions` | admin | test chat session (Python เขียนหลัก) |
+| `botworkerEvents` | `botworker_events` | admin | botworker event log + handoff op idempotency docs |
 
 ### 1.3 DB connections (4 DBs)
 
@@ -686,12 +687,24 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `assignment_mode` | string? | |
 | `error` | string? | |
 | `processed_at` | Date | |
+| `owner_id` | string? | claim ownership — worker instance ที่ถือ claim (deterministic `_id` = `botworker:claim:<message_id>`; legacy docs ใช้ ObjectId) |
+| `fencing_token` | number? | +1 ทุก reclaim — stale owner เขียนไม่ติด |
+| `lease_expires_at` | Date? | หมดอายุ → worker อื่น reclaim ได้ |
+| `attempt` | number? | +1 ทุก reclaim — เกิน maxClaimAttempts → `bot_failed` |
+| `batch_id` | string? | canonical sha256 batch identity |
+| `outcome_type` | string? | terminal outcome ที่บันทึกก่อน finalize |
+| `reply_ids` | string[]? | shadow reply ids ของ batch นี้ |
+| `side_effects` | object[]? | `{type, ref?, workflow_id?, at}` |
+| `claimed_at` | Date? | |
+| `updated_at` | Date? | |
+
+**หมายเหตุ:** claim/fencing fields ทั้งหมดเป็น optional บน collection เดิม — ไม่มี migration, legacy docs (ObjectId `_id`, status terminal) ยังอ่านได้เหมือนเดิม
 
 **Access:**
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
 | Read | isProcessed (internal) | bot worker |
-| Write | markProcessed (internal) | bot worker |
+| Write | markProcessed, claim CAS (internal) | bot worker |
 | Delete | ไม่มี | |
 
 **หน้าที่เข้าถึง:** ไม่มี UI ตรง — ใช้ภายใน bot worker
@@ -935,6 +948,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `assigned_at` | Date? | |
 | `assignment_mode_used` | string? | |
 | `assignment_reason` | string? | |
+| `assignment_operation_key` | string? | op key ที่ commit assignment นี้ — handoff crash recovery นับเป็นหลักฐานเฉพาะเมื่อ key ตรง (`assigned_to` เก่าจาก op อื่นไม่ใช่หลักฐาน); optional บน collection เดิม ไม่มี migration |
 | `status` | string? | |
 | `closed_at` | Date? | |
 | `closed_by` | string? | |
@@ -1090,10 +1104,20 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `text` | string | |
 | `raw_payload` | object? | |
 | `received_at` | Date | |
+| `claim_id` | string? | deterministic claim `_id` ของ message นี้ (claim identity — claim ก่อน insert เสมอ) |
+| `owner_id` | string? | worker owner ของ claim |
+| `fencing_token` | number? | fence ตอน insert |
+| `kind` | string? | `"conv_lock"` = conversation-lock row (แยกจาก message rows); ไม่มี = message row |
+| `status` | string? | message row: `buffered`/`processing`; lock row: `locked`/`released` |
+| `batch_id` | string? | batch ที่ row ถูก claim เข้า |
+
+**Conversation-lock rows:** doc `kind:"conv_lock"` ใน collection เดียวกัน — มี `conversation_id`, `status:"locked"|"released"`, `owner_id`, `fencing_token`, `lease_expires_at`, `updated_at` (query แยกด้วย kind)
+
+**หมายเหตุ:** fields ใหม่ทั้งหมด optional บน collection เดิม — ไม่มี migration, ไม่มี collection/index ใหม่, legacy rows (ไม่มี claim_id/kind) อ่านได้เหมือนเดิม
 
 **Access:**
 | Read | getBufferedMessages | buffer service |
-| Write | insertToBuffer | bufferOrProcess |
+| Write | insertToBuffer, lock CAS | bufferOrProcess |
 | Delete | deleteBufferedMessages | flushBuffer |
 | Recover | recoverStaleBuffers | ตอน boot |
 
@@ -1179,24 +1203,61 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `shop_id` | string | |
 | `platform` | string | |
 | `customer_id` | string? | |
-| `status` | string | running/waiting/completed/cancelled/error |
+| `status` | string | running/waiting_for_reply/completed/cancelled/errored |
 | `current_node_id` | string | node ปัจจุบัน |
 | `waiting_for` | string? | รออะไร (wait node) |
 | `wait_retry_count` | number? | |
 | `wait_started_at` | Date? | |
 | `wait_node_id` | string? | |
 | `context` | object | context ระหว่าง run |
+| `test_source` | string? | sandbox source ที่ run ถูกสร้าง (persist กับ run — timeout/resume ยังเขียน test store) |
+| `operation_key` | string? | claim op key ที่สร้าง run (botworker idempotent match/run) |
+| `result` | object? | immutable snapshot ของ initial `operation_key` เท่านั้น — resume/timeout ห้ามเขียนทับ; retry ด้วย key เดิมคืนผลนี้ |
+| `resume_results` | object? | map `operation_key → EngineResult` ของแต่ละ resume op (key-scoped idempotent — คนละ key อ่านผลของกันไม่ได้) |
+| `owner_id` | string? | worker owner ของ run (op-key callers เท่านั้น — legacy callers ไม่มี) |
+| `fencing_token` | number? | +1 ทุก acquire/reclaim — stale owner เขียนไม่ติด |
+| `lease_expires_at` | Date? | run lease — renew ทุก fenced write (heartbeat); หมดอายุ → reclaim ได้ |
 | `outcome` | string? | ผลลัพธ์ |
 | `started_at` | Date | |
 | `updated_at` | Date | |
 | `completed_at` | Date? | |
 | `error` | string? | |
 
+**หมายเหตุ:** `operation_key`/`result`/`resume_results`/ownership fields เป็น optional บน collection เดิม — ไม่มี migration, ไม่มี index ใหม่, legacy runs (ไม่มี operation_key) ทำงานเหมือนเดิม
+
 **Access:**
 | Read | getActiveRun | workflow engine |
 | Write/Update | matchAndRun, resumeFlow, cancelActiveRuns, checkWaitTimeouts | workflow engine |
 
 **หน้าที่เข้าถึง:** ไม่มี UI ตรง — ใช้ภายใน workflow engine
+
+---
+
+### 2.33 `botworker_events`
+
+**Schema:** event doc ใน `botworkerEventService.ts` + `HandoffOpDoc` ใน `handoffService.ts` (op docs ใช้ deterministic `_id` = operation key)
+
+**Fields (handoff op doc):**
+| Field | Type | หมายเหตุ |
+|-------|------|---------|
+| `_id` | string | deterministic operation key |
+| `status` | string | `pending` / `done` |
+| `owner_id` | string? | worker owner ของ op |
+| `fencing_token` | number? | +1 ทุก reclaim — terminal write ต้อง CAS `{_id, status:"pending", owner_id, fencing_token}` |
+| `lease_expires_at` | Date? | หมดอายุ → reclaim ได้ (caller เดียวผ่าน CAS) |
+| `result` | object? | committed `HandoffTestResult` — crash retry คืนผลนี้ |
+| `created_at` | Date | |
+| `updated_at` | Date? | |
+
+**หมายเหตุ:** collection เดียวกันใช้เก็บ event log ของ botworker (`logBotworkerEvent`) และ op idempotency docs — op fields ทั้งหมด optional บน collection เดิม, ไม่มี migration, ไม่มี index ใหม่, event docs เดิมอ่านได้เหมือนเดิม
+
+**Access:**
+| การกระทำ | โดยใคร | ผ่านไหน |
+|---------|-------|--------|
+| Read | op dedupe/recovery (internal) | handoff service |
+| Write | logBotworkerEvent, handoff op insertOne/CAS | botworker, handoff service |
+
+**หน้าที่เข้าถึง:** ไม่มี UI ตรง — ใช้ภายใน bot worker / handoff
 
 ---
 
