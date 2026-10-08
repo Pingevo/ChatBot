@@ -190,28 +190,62 @@ async function main() {
     check("sanitizeError used for error paths", (runApplyBody.match(/sanitizeError\(/g) || []).length >= 3,
       `count=${(runApplyBody.match(/sanitizeError\(/g) || []).length}`);
     check("sanitizeError stage args are callsite constants", !/sanitizeError\([^,]+,(?!\s*[`'"])/.test(runApplyBody));
-    check("dotenv wording: contents not opened or printed", /file contents were not opened or printed/.test(src));
 
-    // ── final correction pins: explicit URI provenance BEFORE dotenv ──
+    // ── env isolation: apply path must never touch dotfiles/env loaders ──
+    check("no dotenv anywhere in harness source", !/dotenv/i.test(src));
+    check("runApply never imports dotenv", !/import\(["']dotenv/.test(runApplyBody));
+    check("no env-file reads (readFile/readFileSync on dotfiles)", !/readFile(Sync)?\([^)]*\.\s*env/.test(src));
+    check("no config/env-file path resolution (resolvePath on dotfiles)", !/resolvePath\([^)]*\.\s*env/.test(src));
+
+    // ── strict runtime vars must be test-local constants, set BEFORE imports ──
+    check("ADMIN_JWT_SECRET assigned fixed verify value", /process\.env\.ADMIN_JWT_SECRET\s*=\s*(["'`][^"'`]+["'`]|VERIFY_ONLY_\w+)/.test(runApplyBody));
+    check("CHATBOT_INTERNAL_SECRET assigned fixed verify value", /process\.env\.CHATBOT_INTERNAL_SECRET\s*=\s*(["'`][^"'`]+["'`]|VERIFY_ONLY_\w+)/.test(runApplyBody));
+    check("VERIFY_ONLY_* consts are fixed non-secret literals", (src.match(/const VERIFY_ONLY_\w+\s*=\s*"verify-only[^"]*"/g) || []).length >= 2);
+    check("CHATBOT_BASE_URL_SHOPEE assigned from fake server", /process\.env\.CHATBOT_BASE_URL_SHOPEE\s*=\s*fake\.url/.test(runApplyBody));
+    const iImport = runApplyBody.indexOf('import("../src/backend/');
+    for (const v of ["ADMIN_MONGO_URI", "ADMIN_MONGO_DB", "ADMIN_JWT_SECRET", "CHATBOT_INTERNAL_SECRET", "CHATBOT_BASE_URL_SHOPEE"]) {
+      const i = runApplyBody.indexOf(`process.env.${v} =`);
+      check(`env ${v} set before any production import`, i !== -1 && iImport !== -1 && i < iImport, `set=${i} import=${iImport}`);
+    }
+    check("no env-var passthrough for strict secrets", !/process\.env\.(ADMIN_JWT_SECRET|CHATBOT_INTERNAL_SECRET)\s*=\s*process\.env/.test(runApplyBody));
+
+    // ── ordering: explicit URI read → validate → rebind → fake → import ──
     const iEnvRead = runApplyBody.search(/process\.env(\[VERIFY_URI_ENV\]|\.BOTWORKER_VERIFY_MONGO_URI)/);
     const iValidate = runApplyBody.indexOf("validateLoopbackMongoUri(");
-    const iDotenv = runApplyBody.indexOf('import("dotenv/config")');
     const iRebind = runApplyBody.indexOf("process.env.ADMIN_MONGO_URI");
-    check("explicit env read before dotenv import", iEnvRead !== -1 && iDotenv !== -1 && iEnvRead < iDotenv,
-      `env=${iEnvRead} dotenv=${iDotenv}`);
-    check("URI validated before dotenv import", iValidate !== -1 && iDotenv !== -1 && iValidate < iDotenv,
-      `validate=${iValidate} dotenv=${iDotenv}`);
-    check("dotenv before ADMIN_MONGO_URI rebind", iDotenv !== -1 && iRebind !== -1 && iDotenv < iRebind);
-    check("dotenv before any runtime import (fake server follows rebind)", iRebind !== -1 && iRebind < runApplyBody.indexOf("startFakeChatbot("));
+    // env read may sit inside the validate() call args — contract = both precede any rebind
+    check("explicit env read before any rebind", iEnvRead !== -1 && iRebind !== -1 && iEnvRead < iRebind,
+      `env=${iEnvRead} rebind=${iRebind}`);
+    check("URI validated before ADMIN_MONGO_URI rebind", iValidate !== -1 && iRebind !== -1 && iValidate < iRebind,
+      `validate=${iValidate} rebind=${iRebind}`);
+    check("rebind before fake server / runtime imports", iRebind !== -1 && iRebind < runApplyBody.indexOf("startFakeChatbot("));
   }
 
   // ── scenario matrix ──
   if (H) {
     const ids = H.SCENARIOS.map((s: { id: string }) => s.id);
-    check("scenario plan covers S1–S6", JSON.stringify(ids) === JSON.stringify(["S1", "S2", "S3", "S4", "S5", "S6"]), `got=${JSON.stringify(ids)}`);
+    check("scenario plan covers S1–S9", JSON.stringify(ids) === JSON.stringify(["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"]), `got=${JSON.stringify(ids)}`);
     for (const s of H.SCENARIOS) {
       check(`scenario ${s.id} has expects`, Array.isArray(s.expects) && s.expects.length > 0);
     }
+  }
+
+  // ── S7–S9 real-Mongo leadership race contract ──
+  if (src) {
+    check("harness calls svc.ensureLeadership (DB-level CAS verb)", /svc\.ensureLeadership\(/.test(src));
+    check("leadership scenarios use COLLECTIONS.botworkerState", /COLLECTIONS\.botworkerState/.test(src));
+    const iS7 = src.indexOf("async function s7");
+    const iRun = src.indexOf("async function runApply");
+    check("s7/s8/s9 functions exist between s6 and runApply", iS7 !== -1 && iRun !== -1 && iS7 < iRun
+      && src.indexOf("async function s8", iS7) !== -1 && src.indexOf("async function s9", iS7) !== -1);
+    const leadBodies = iS7 !== -1 && iRun !== -1 ? src.slice(iS7, iRun) : "";
+    check("S7–S9 concurrency via Promise.all (no sleep picks winner)",
+      (leadBodies.match(/Promise\.all\(/g) || []).length >= 2
+      && !/await\s+sleep\(/.test(leadBodies));
+    check("S7–S9 never invoke message-work paths (no fake /chat reachability)",
+      !/svc\.(processMessage|pollNewMessages|recoverStale|checkWaitTimeouts)/.test(leadBodies));
+    check("S7–S9 owner IDs carry harness verify prefix", /ID_PREFIX`?\}?\s*worker_|`\$\{ID_PREFIX\}worker/.test(leadBodies));
+    check("S7–S9 assert zero fake-call delta", (leadBodies.match(/fake\.calls\.length\s*-\s*n0\s*={2,3}\s*0/g) || []).length >= 3);
   }
 
   console.log(`\n=== ${pass} passed, ${fail} failed ===`);

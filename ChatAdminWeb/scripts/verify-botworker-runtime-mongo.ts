@@ -10,9 +10,11 @@
 //   --apply                                      → refuse ถ้าไม่มี approval token
 //   token + --apply                              → refuse ถ้าไม่มี loopback URI
 //
-// Import ordering (จำเป็น): explicit verify URI validate → dotenv →
-//   ADMIN_MONGO_URI/DB rebind → fake chatbot → CHATBOT_BASE_URL_SHOPEE →
-//   dynamic import services → seed → scenarios → cleanup (production
+// Import ordering (จำเป็น): explicit verify URI validate → strict-env
+//   rebind จาก test-local constants เท่านั้น (ADMIN_MONGO_URI/DB,
+//   ADMIN_JWT_SECRET, CHATBOT_INTERNAL_SECRET, CHATBOT_BASE_URL_SHOPEE —
+//   ห้ามอ่าน env file หรือ fallback ไป configured env) → dynamic import
+//   services → seed → scenarios → cleanup (production
 //   config/mongoClient ผูก env ตอน module evaluation — ห้าม static import)
 import { randomBytes } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
@@ -170,6 +172,36 @@ export const SCENARIOS = [
       "fake /chat calls = 0",
       "finalize-only; terminal preserves outcome_type",
       "reply count ไม่เพิ่ม; buffer row deleted",
+    ],
+  },
+  {
+    id: "S7", name: "concurrent absent acquire (worker-leadership)",
+    goal: "2 owner IDs แย่ง singleton leader doc ที่หายไป — DB-level CAS จริง",
+    expects: [
+      "winner เพียงหนึ่งราย; loser คืน false",
+      "botworker_state มี singleton doc เดียว",
+      "owner_id = winner; fencing_token = 1",
+      "fake /chat calls เพิ่ม = 0",
+    ],
+  },
+  {
+    id: "S8", name: "active renew + foreign rejection",
+    goal: "winner renew lease สำเร็จ ขณะ loser active-lease admission ถูกปฏิเสธ",
+    expects: [
+      "winner renew สำเร็จ; owner_id เดิม; token ยัง 1",
+      "lease_expires_at เพิ่มขึ้น",
+      "loser คืน false; document ไม่ถูก loser แก้",
+      "fake /chat calls เพิ่ม = 0",
+    ],
+  },
+  {
+    id: "S9", name: "expired concurrent takeover",
+    goal: "lease หมดอายุ → owner ใหม่ 2 รายแย่ง takeover — fenced token +1 ครั้งเดียว",
+    expects: [
+      "takeover winner เพียงหนึ่งราย; อีกฝ่าย false",
+      "singleton doc เดียว; owner_id = winner; token = 2 พอดี",
+      "lease_expires_at อนาคต; stale owner (token 1) re-call → false",
+      "fake /chat calls เพิ่ม = 0",
     ],
   },
 ] as const;
@@ -403,19 +435,94 @@ async function s6(ctx: RunCtx) {
   expect(ctx, "S6", "buffer row deleted", rows.length === 0, `rows=${rows.length}`);
 }
 
-async function runApply(): Promise<number> {
-  // 1) explicit verify URI from process env ONLY — validated before dotenv so
-  //    .env can never supply it (missing/invalid → refuse before any import)
-  const uri = validateLoopbackMongoUri(process.env[VERIFY_URI_ENV] || "");
+// verify-only fixed values — NOT secrets; injected so strict requiredStrict()
+// envs never fall back to real environment/config (no env file is ever read)
+const VERIFY_ONLY_JWT_SECRET = "verify-only-jwt-nonsecret";
+const VERIFY_ONLY_INTERNAL_SECRET = "verify-only-internal-nonsecret";
 
-  // 2) dotenv for other runtime config; file contents were not opened or printed
-  await import("dotenv/config");
+// S7 — concurrent absent acquire: DB-level worker-leadership race (BW-2)
+// uses ensureLeadership(explicitOwnerId) directly — process-global owner ไม่ถูก rebind
+async function s7(ctx: RunCtx): Promise<{ winner: string; loser: string }> {
+  const A = `${ID_PREFIX}worker_A`, B = `${ID_PREFIX}worker_B`;
+  const n0 = ctx.fake.calls.length;
+  const state = ctx.db.collection(ctx.COLLECTIONS.botworkerState);
+  await state.deleteOne({ _id: "botworker:leader" }); // temp DB singleton only
+  const [ra, rb] = await Promise.all([ctx.svc.ensureLeadership(A), ctx.svc.ensureLeadership(B)]);
+  const docs = await state.find({ _id: "botworker:leader" }).toArray();
+  const doc = docs[0];
+  const winners = [ra && A, rb && B].filter(Boolean);
+  const winner = (ra ? A : B) as string;
+  const loser = winner === A ? B : A;
+  expect(ctx, "S7", "exactly one winner, loser false", winners.length === 1 && (winner === A ? rb === false : ra === false), `ra=${!!ra} rb=${!!rb}`);
+  expect(ctx, "S7", "singleton leader doc = 1", docs.length === 1, `docs=${docs.length}`);
+  expect(ctx, "S7", "doc owner = winner", doc?.owner_id === winner, `owner=${doc?.owner_id}`);
+  expect(ctx, "S7", "fencing_token = 1", doc?.fencing_token === 1, `token=${doc?.fencing_token}`);
+  expect(ctx, "S7", "no fake /chat calls", ctx.fake.calls.length - n0 === 0, `calls=${ctx.fake.calls.length - n0}`);
+  return { winner, loser };
+}
+
+// S8 — active renew (same owner, token unchanged) + foreign rejection while active
+async function s8(ctx: RunCtx, p: { winner: string; loser: string }) {
+  const n0 = ctx.fake.calls.length;
+  const state = ctx.db.collection(ctx.COLLECTIONS.botworkerState);
+  const before = await state.findOne({ _id: "botworker:leader" });
+  const renew = await ctx.svc.ensureLeadership(p.winner);
+  const afterRenew = await state.findOne({ _id: "botworker:leader" });
+  const foreign = await ctx.svc.ensureLeadership(p.loser);
+  const afterLoser = await state.findOne({ _id: "botworker:leader" });
+  expect(ctx, "S8", "winner renew returns ctx", !!renew, `renew=${!!renew}`);
+  expect(ctx, "S8", "owner_id unchanged", afterRenew?.owner_id === p.winner, `owner=${afterRenew?.owner_id}`);
+  expect(ctx, "S8", "fencing_token still 1", afterRenew?.fencing_token === 1, `token=${afterRenew?.fencing_token}`);
+  expect(ctx, "S8", "lease_expires_at increased",
+    !!before && !!afterRenew && new Date(afterRenew.lease_expires_at).getTime() > new Date(before.lease_expires_at).getTime(),
+    `${before?.lease_expires_at} -> ${afterRenew?.lease_expires_at}`);
+  expect(ctx, "S8", "foreign loser returns false", foreign === false, `foreign=${!!foreign}`);
+  expect(ctx, "S8", "loser did not modify doc",
+    !!afterLoser && afterLoser.owner_id === afterRenew?.owner_id
+      && afterLoser.fencing_token === afterRenew?.fencing_token
+      && new Date(afterLoser.lease_expires_at).getTime() === new Date(afterRenew.lease_expires_at).getTime());
+  expect(ctx, "S8", "no fake /chat calls", ctx.fake.calls.length - n0 === 0, `calls=${ctx.fake.calls.length - n0}`);
+}
+
+// S9 — expired concurrent takeover: fenced $inc token exactly once; stale owner refused
+async function s9(ctx: RunCtx, p: { winner: string }) {
+  const C = `${ID_PREFIX}worker_C`, D = `${ID_PREFIX}worker_D`;
+  const n0 = ctx.fake.calls.length;
+  const state = ctx.db.collection(ctx.COLLECTIONS.botworkerState);
+  const snap = await state.findOne({ _id: "botworker:leader" });
+  // expire the winner's lease with a fenced update (CAS on observed owner+token)
+  const exp = await state.updateOne(
+    { _id: "botworker:leader", owner_id: snap?.owner_id, fencing_token: snap?.fencing_token },
+    { $set: { lease_expires_at: new Date(Date.now() - 1000), updated_at: new Date(Date.now() - 1000) } },
+  );
+  expect(ctx, "S9", "fenced expire applied", exp.matchedCount === 1, `matched=${exp.matchedCount}`);
+  const [rc, rd] = await Promise.all([ctx.svc.ensureLeadership(C), ctx.svc.ensureLeadership(D)]);
+  const winner2 = rc ? C : D;
+  const docs = await state.find({ _id: "botworker:leader" }).toArray();
+  const doc = docs[0];
+  const stale = await ctx.svc.ensureLeadership(p.winner);
+  expect(ctx, "S9", "exactly one takeover winner, other false", [rc, rd].filter(Boolean).length === 1, `rc=${!!rc} rd=${!!rd}`);
+  expect(ctx, "S9", "singleton doc still 1", docs.length === 1, `docs=${docs.length}`);
+  expect(ctx, "S9", "owner_id = takeover winner", doc?.owner_id === winner2, `owner=${doc?.owner_id}`);
+  expect(ctx, "S9", "fencing_token = 2 exactly", doc?.fencing_token === 2, `token=${doc?.fencing_token}`);
+  expect(ctx, "S9", "lease_expires_at in future", !!doc && new Date(doc.lease_expires_at).getTime() > Date.now());
+  expect(ctx, "S9", "stale owner (token 1) refused", stale === false, `stale=${!!stale}`);
+  expect(ctx, "S9", "no fake /chat calls", ctx.fake.calls.length - n0 === 0, `calls=${ctx.fake.calls.length - n0}`);
+}
+
+async function runApply(): Promise<number> {
+  // 1) explicit verify URI from process env ONLY — missing/invalid → refuse
+  //    before any env rebind or production import
+  const uri = validateLoopbackMongoUri(process.env[VERIFY_URI_ENV] || "");
   const suffix = randomBytes(8).toString("hex");
   const dbName = deriveIsolatedDbName(suffix);
 
-  // 3) rebind env BEFORE importing any production module (config binds at import)
+  // 2) rebind ALL strict runtime env from test-local constants BEFORE importing
+  //    any production module (config binds at import) — never from env file
   process.env.ADMIN_MONGO_URI = uri;
   process.env.ADMIN_MONGO_DB = dbName;
+  process.env.ADMIN_JWT_SECRET = VERIFY_ONLY_JWT_SECRET;
+  process.env.CHATBOT_INTERNAL_SECRET = VERIFY_ONLY_INTERNAL_SECRET;
   const fake = await startFakeChatbot();
   process.env.CHATBOT_BASE_URL_SHOPEE = fake.url;
 
@@ -452,6 +559,9 @@ async function runApply(): Promise<number> {
     await s4(ctx, s3state);
     await s5(ctx);
     await s6(ctx);
+    const s7state = await s7(ctx);
+    await s8(ctx, s7state);
+    await s9(ctx, s7state);
     await botWorkerService.clearPendingWork();
 
     // 6) report (sanitized)
