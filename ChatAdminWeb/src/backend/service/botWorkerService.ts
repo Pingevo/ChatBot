@@ -747,14 +747,6 @@ async function processClaimedMessage(msg: {
   assertPlatformApiDisabled(msg.platform, "send");
   assertPlatformApiDisabled(msg.platform, "read");
 
-  // ⚡ Phase 2Q — อัปเดต concurrency limit จาก config (admin ปรับได้ใน /admin-config)
-  try {
-    const sysConfig = await getSystemConfig();
-    currentConcurrencyLimit = sysConfig.bot_concurrency_limit || 50;
-  } catch {
-    // ถ้าอ่าน config ไม่ได้ → ใช้ค่าเดิม
-  }
-
   // ดึง shop_name จาก conversation — Python bot ต้องการชื่อร้าน (ไม่ใช่ shop_id ตัวเลข)
   // เพื่อกรองสินค้าเฉพาะร้านที่ลูกค้าทักเข้ามา
   const conv = await getConversation(msg.conversation_id);
@@ -988,27 +980,21 @@ async function processClaimedMessage(msg: {
         includeSandboxAdmin: true,  // ⚡ merge botworker_messages (แอดมินใน parallel เคยตอบอะไร)
         excludeMessageIds: ctx.message_ids,
       });
-      // ⚡ Phase 2Q — acquire concurrency slot ก่อนยิงบอท
-      await acquireBotSlot();
-      let botResp;
-      try {
-        botResp = await callBot({
-          platform: msg.platform,
-          message: botText,
-          shopId: msg.shop_id,
-          shopName,
-          history,
-          ...(botImages.length > 0 ? { images: botImages } : {}),
-          // ⚡ Phase 2A — ส่ง conversationId + testSource (parallel sandbox — handoff เขียน test store)
-          conversationId: msg.conversation_id,
-          simulate: true,
-          testSource: WORKER_SOURCE,
-          // ⚡ bounded HTTP timeout + abort เมื่อเสีย ownership กลางคัน
-          signal: botCallSignal(signal),
-        });
-      } finally {
-        releaseBotSlot();
-      }
+      // ⚡ outbound concurrency อยู่ใน callBot (testSource=botworker) — owner เดียวครอบทุก path
+      const botResp = await callBot({
+        platform: msg.platform,
+        message: botText,
+        shopId: msg.shop_id,
+        shopName,
+        history,
+        ...(botImages.length > 0 ? { images: botImages } : {}),
+        // ⚡ Phase 2A — ส่ง conversationId + testSource (parallel sandbox — handoff เขียน test store)
+        conversationId: msg.conversation_id,
+        simulate: true,
+        testSource: WORKER_SOURCE,
+        // ⚡ bounded HTTP timeout + abort เมื่อเสีย ownership กลางคัน
+        signal: botCallSignal(signal),
+      });
       // heartbeat lost กลางคัน → stale owner — ห้าม persist/finalize
       if (ctx.lost) return { status: "lost_ownership", detail: "claim lost mid-bot-call" };
       const shadowReplyId = await storeBotReply({
@@ -1082,27 +1068,21 @@ async function processClaimedMessage(msg: {
       includeSandboxAdmin: true,  // ⚡ merge botworker_messages (แอดมินใน parallel เคยตอบอะไร)
       excludeMessageIds: ctx.message_ids,
     });
-    // ⚡ Phase 2Q — acquire concurrency slot ก่อนยิงบอท
-    await acquireBotSlot();
-    let botResp;
-    try {
-      botResp = await callBot({
-        platform: msg.platform,
-        message: botText,
-        shopId: msg.shop_id,
-        shopName,
-        history,
-        ...(botImages.length > 0 ? { images: botImages } : {}),
-        // ⚡ Phase 2A — ส่ง conversationId + testSource (parallel sandbox — handoff เขียน test store)
-        conversationId: msg.conversation_id,
-        simulate: true,
-        testSource: WORKER_SOURCE,
-        // ⚡ bounded HTTP timeout + abort เมื่อเสีย ownership กลางคัน
-        signal: botCallSignal(signal),
-      });
-    } finally {
-      releaseBotSlot();
-    }
+    // ⚡ outbound concurrency อยู่ใน callBot (testSource=botworker) — owner เดียวครอบทุก path
+    const botResp = await callBot({
+      platform: msg.platform,
+      message: botText,
+      shopId: msg.shop_id,
+      shopName,
+      history,
+      ...(botImages.length > 0 ? { images: botImages } : {}),
+      // ⚡ Phase 2A — ส่ง conversationId + testSource (parallel sandbox — handoff เขียน test store)
+      conversationId: msg.conversation_id,
+      simulate: true,
+      testSource: WORKER_SOURCE,
+      // ⚡ bounded HTTP timeout + abort เมื่อเสีย ownership กลางคัน
+      signal: botCallSignal(signal),
+    });
     // heartbeat lost กลางคัน → stale owner — ห้าม persist/finalize
     if (ctx.lost) return { status: "lost_ownership", detail: "claim lost mid-bot-call" };
 
@@ -1191,34 +1171,6 @@ async function processClaimedMessage(msg: {
 //   10 คำถามเข้าพร้อมกัน → ยิง 10 reqs ไปบอทพร้อมกัน → บอทตอบทีละคำตอบเสร็จก่อนก็ตอบก่อน
 //   ไม่ใช่นั่งรอคำถามแรกเสร็จถึงเริ่มคำถามสอง และไม่ใช่รอทั้ง 10 เสร็จถึงส่งคำตอบ
 //
-// ⚡ Phase 2Q — Concurrency limiter (semaphore pattern)
-//   ถ้า buffer เปิด → 500 ข้อความเข้ามา → buffer รวมเป็น 200 context → flush พร้อมกัน
-//   ถ้าไม่จำกัด → ยิงบอท 200 reqs พร้อมกัน → Python bot โอเวอร์โหลด
-//   ใช้ bot_concurrency_limit จาก config (admin ปรับได้ใน /admin-config, default 50)
-let activeBotCalls = 0;
-let currentConcurrencyLimit = 50;
-const botCallQueue: Array<() => void> = [];
-
-async function acquireBotSlot(): Promise<void> {
-  // ⚡ Phase 2Q — อ่าน limit จาก config ทุกครั้ง (admin อาจเปลี่ยนได้)
-  if (activeBotCalls < currentConcurrencyLimit) {
-    activeBotCalls++;
-    return;
-  }
-  await new Promise<void>((resolve) => {
-    botCallQueue.push(() => {
-      activeBotCalls++;
-      resolve();
-    });
-  });
-}
-
-function releaseBotSlot(): void {
-  activeBotCalls--;
-  const next = botCallQueue.shift();
-  if (next) next();
-}
-
 // ─── Worker leadership — single active worker ต่อ production scope ──
 // ⚡ singleton doc botworker_state._id="botworker:leader" — CAS vocabulary เดียว
 //   กับ message claim (owner_id + fencing_token + lease_expires_at)

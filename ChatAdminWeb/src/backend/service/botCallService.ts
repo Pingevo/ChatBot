@@ -82,6 +82,63 @@ async function resolveTicketState(
 }
 
 /** เรียก Python bot ตรง (server-to-server ใช้ x-internal-secret — ไม่ใช้ cookie) */
+// ─── Botworker outbound concurrency — owner เดียวสำหรับทุก worker path ──
+// ⚡ limiter ต้องอยู่ที่ outbound boundary (callBot) — botWorkerService มี 2 call sites
+//   (direct + trigger bot_answer) และ workflowEngine.let_ai_respond เรียก callBot ตรง
+//   ถ้า limiter อยู่ฝั่ง worker workflow path จะ bypass → ย้ายมาที่นี่จุดเดียว
+//   apply เฉพาะ testSource === "botworker" — normal ticket/live callers ไม่เปลี่ยน behavior
+//   queue รองรับ AbortSignal — abort ก่อน/กลาง queue → waiter ถูก remove ไม่เรียก fetch
+//   drain อ่าน limit ล่าสุดทุก release — admin ลด limit กลางคันจะไม่ admit เกิน limit ใหม่
+
+interface BotCallWaiter {
+  resolve(): void;
+  reject(err: unknown): void;
+  signal?: AbortSignal;
+  onAbort(): void;
+}
+
+let activeBotCalls = 0;
+const botCallQueue: BotCallWaiter[] = [];
+
+async function readBotCallLimit(): Promise<number> {
+  const { getSystemConfig } = await import("./systemConfigService");
+  return (await getSystemConfig()).bot_concurrency_limit || 50;
+}
+
+function acquireBotCallSlot(limit: number, signal?: AbortSignal): Promise<void> | void {
+  if (signal?.aborted) throw signal.reason ?? new Error("bot call aborted");
+  if (activeBotCalls < limit) {
+    activeBotCalls++;
+    return;
+  }
+  return new Promise<void>((resolve, reject) => {
+    const waiter: BotCallWaiter = {
+      resolve,
+      reject,
+      signal,
+      onAbort() {
+        const i = botCallQueue.indexOf(waiter);
+        if (i >= 0) botCallQueue.splice(i, 1);
+        reject(signal!.reason ?? new Error("bot call aborted"));
+      },
+    };
+    botCallQueue.push(waiter);
+    signal?.addEventListener("abort", waiter.onAbort, { once: true });
+  });
+}
+
+async function releaseBotCallSlot(): Promise<void> {
+  activeBotCalls--;
+  // drain ด้วย limit ล่าสุด — ลด limit กลางคัน → ไม่ admit จน active ต่ำกว่า limit ใหม่
+  const limit = await readBotCallLimit().catch(() => 50);
+  while (botCallQueue.length && activeBotCalls < limit) {
+    const w = botCallQueue.shift()!;
+    w.signal?.removeEventListener("abort", w.onAbort);
+    activeBotCalls++;
+    w.resolve();
+  }
+}
+
 export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
   const baseUrl = serverConfig.chatbotBaseUrls[params.platform] || serverConfig.chatbotBaseUrls.shopee;
   const url = baseUrl.replace(/\/$/, "") + "/chat";
@@ -98,49 +155,61 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
   //   ก่อนหน้านี้ไม่ได้ส่ง limit → bot default 10 → shadow inbox เห็นแค่ 10 สินค้า
   //   ตอนนี้ส่ง limit = llm_context_limit → shadow inbox เห็นสินค้าเท่ากับที่ LLM เห็น
   const productLimit = await getBotProductLimit();
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-internal-secret": serverConfig.chatbotInternalSecret,
-    },
-    body: JSON.stringify({
-      message: params.message,
-      // ⚠️ Python bot รับ field "shop" (ชื่อร้าน) ไม่ใช่ "shop_id" (ตัวเลข)
-      // ถ้าไม่มี shopName ใช้ shopId เป็น fallback (อาจไม่กรองร้านได้)
-      shop: params.shopName || params.shopId,
-      history: params.history,
-      // ⚡ ส่ง limit (frontend display) จาก config — ใช้ค่าเดียวกับ llm_context_limit
-      limit: productLimit,
-      // ⚡ Phase 1A multimodal — ส่ง URL รูปให้ bot ใช้ Gemini vision อ่าน
-      ...(params.images && params.images.length > 0 ? { images: params.images } : {}),
-      // ⚡ Phase 2A — ส่ง ticket_state ให้บอทใช้ตัดสินใจ post-handoff
-      ...(ticketState ? { ticket_state: ticketState } : {}),
-      // ⚡ Phase 2A — ส่ง conversation_id + simulate ให้บอท (สำหรับ handoff API)
-      ...(params.conversationId ? { conversation_id: params.conversationId } : {}),
-      // ⚡ testSource → simulate_assignment=true เสมอ (กัน Python เขียน assign จริง) + test_source เพื่อ route เข้า test store
-      ...(params.simulate || params.testSource ? { simulate_assignment: true } : {}),
-      ...(params.testSource ? { test_source: params.testSource } : {}),
-      // ⚡ chat_engine — ส่ง use_v2/use_v3 ตามที่ config เลือก (v3 มี priority เหนือ v2)
-      ...(useV3 ? { use_v3: true } : {}),
-      ...(useV2 && !useV3 ? { use_v2: true } : {}),
-      // ⚡ Phase 8 — ส่ง llm_context_limit ให้บอท (จำนวนสินค้าใน LLM context)
-      llm_context_limit: llmContextLimit,
-    }),
-    // ⚡ bounded timeout / ownership abort — fetch ยอมรับ AbortSignal ตรงๆ
-    ...(params.signal ? { signal: params.signal } : {}),
-  });
-  if (!resp.ok) throw new Error(`bot call failed: ${resp.status}`);
-  const data = await resp.json();
-  return {
-    answer: data.answer || "",
-    source: data.source,
-    model: data.model,
-    elapsed: typeof data.elapsed === "number" ? data.elapsed : undefined,
-    usage: data.usage,
-    cost: typeof data.cost === "number" ? data.cost : undefined,
-    products: data.products,
-    image_desc: typeof data.image_desc === "string" ? data.image_desc : undefined,
-    chat_engine: useV3 ? "v3" : useV2 ? "v2" : "legacy",
-  };
+  // ⚡ botworker outbound ทุก path (direct/trigger/workflow) ผ่าน limiter เดียวที่นี่ —
+  //   acquire ก่อน fetch, release ใน finally; non-botworker callers ไม่ถูก limit
+  const isWorkerCall = params.testSource === "botworker";
+  let slotHeld = false;
+  if (isWorkerCall) {
+    await acquireBotCallSlot(sysConfig.bot_concurrency_limit || 50, params.signal);
+    slotHeld = true;
+  }
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-internal-secret": serverConfig.chatbotInternalSecret,
+      },
+      body: JSON.stringify({
+        message: params.message,
+        // ⚠️ Python bot รับ field "shop" (ชื่อร้าน) ไม่ใช่ "shop_id" (ตัวเลข)
+        // ถ้าไม่มี shopName ใช้ shopId เป็น fallback (อาจไม่กรองร้านได้)
+        shop: params.shopName || params.shopId,
+        history: params.history,
+        // ⚡ ส่ง limit (frontend display) จาก config — ใช้ค่าเดียวกับ llm_context_limit
+        limit: productLimit,
+        // ⚡ Phase 1A multimodal — ส่ง URL รูปให้ bot ใช้ Gemini vision อ่าน
+        ...(params.images && params.images.length > 0 ? { images: params.images } : {}),
+        // ⚡ Phase 2A — ส่ง ticket_state ให้บอทใช้ตัดสินใจ post-handoff
+        ...(ticketState ? { ticket_state: ticketState } : {}),
+        // ⚡ Phase 2A — ส่ง conversation_id + simulate ให้บอท (สำหรับ handoff API)
+        ...(params.conversationId ? { conversation_id: params.conversationId } : {}),
+        // ⚡ testSource → simulate_assignment=true เสมอ (กัน Python เขียน assign จริง) + test_source เพื่อ route เข้า test store
+        ...(params.simulate || params.testSource ? { simulate_assignment: true } : {}),
+        ...(params.testSource ? { test_source: params.testSource } : {}),
+        // ⚡ chat_engine — ส่ง use_v2/use_v3 ตามที่ config เลือก (v3 มี priority เหนือ v2)
+        ...(useV3 ? { use_v3: true } : {}),
+        ...(useV2 && !useV3 ? { use_v2: true } : {}),
+        // ⚡ Phase 8 — ส่ง llm_context_limit ให้บอท (จำนวนสินค้าใน LLM context)
+        llm_context_limit: llmContextLimit,
+      }),
+      // ⚡ bounded timeout / ownership abort — fetch ยอมรับ AbortSignal ตรงๆ
+      ...(params.signal ? { signal: params.signal } : {}),
+    });
+    if (!resp.ok) throw new Error(`bot call failed: ${resp.status}`);
+    const data = await resp.json();
+    return {
+      answer: data.answer || "",
+      source: data.source,
+      model: data.model,
+      elapsed: typeof data.elapsed === "number" ? data.elapsed : undefined,
+      usage: data.usage,
+      cost: typeof data.cost === "number" ? data.cost : undefined,
+      products: data.products,
+      image_desc: typeof data.image_desc === "string" ? data.image_desc : undefined,
+      chat_engine: useV3 ? "v3" : useV2 ? "v2" : "legacy",
+    };
+  } finally {
+    if (slotHeld) await releaseBotCallSlot();
+  }
 }
