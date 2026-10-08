@@ -2307,7 +2307,15 @@ Smoke harness พร้อมรันแล้ว — ขาดแค่ Mongo 
 ### Verdict: `HARNESS_SAFETY_READY_DISPOSABLE_MONGO_UNAVAILABLE`
 S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mongod` หรือ cached image) เท่านั้น
 
-> **Committed:** `8fb416a test: add loopback-only botworker Mongo smoke harness` (3 files, +812) — staging ว่าง, leftovers untouched, S1–S6 ยัง unproven (รอ disposable Mongo)
+### Real-Mongo smoke closeout (2026-10-06) — ✅ proven on disposable MongoDB 5.0
+- Docker Desktop client/server `29.8.2`; image `mongo:5.0` native arm64; container ชั่วคราว bind เฉพาะ `127.0.0.1:27018`, ไม่ mount volume
+- preflight: safety **88/88**, `npx tsc --noEmit` clean, dry-run exit 0
+- apply รันหนึ่งครั้ง: S1–S6 **27/27 passed** — duplicate claim once, buffer batch once, HTTP 429 terminal `bot_failed`/no retry, new inbound พา failed turn เข้า history ครั้งเดียว, stale/evidence recovery finalize-only
+- cleanup: harness drop `botworker_runtime_verify_<rand>`; read-only `listDatabases` เหลือ `[]`; ลบ container `chatbot-mongo-smoke` แล้ว; เก็บ image ไว้สำหรับ rerun
+- fake `/chat` เท่านั้น: Gemini/OpenRouter/Shopee calls = 0; production/configured Mongo writes = 0
+- verdict: `REAL_MONGO_SMOKE_PROVEN`
+
+> **Committed:** `8fb416a test: add loopback-only botworker Mongo smoke harness` (3 files, +812) — staging ว่าง, leftovers untouched; S1–S6 พิสูจน์ภายหลังผ่าน disposable MongoDB 5.0 ครบแล้วตาม closeout ด้านบน
 
 ---
 
@@ -2339,3 +2347,32 @@ S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mon
 - **verify**: focused suite **57/57** (51 เดิม + 6 ใหม่ — B15 rewrite บังคับ pipeline ใหม่ตาม prompt) · tsc clean · `next build` pass · `diff --check` clean · diff เฉพาะไฟล์ที่อนุญาต (service/mongoClient/2 test files) · ไม่มี UI เปลี่ยน → ไม่ mint session / ไม่ screenshot ใหม่
 - **complexity delta**: modules/deps/env/collections/helpers = 0 · indexes +1 · duplicate pagination paths = 0 · behavior change = query execution order only
 - **ยังไม่ commit** — งานเดิม + fix นี้รวม review เดียวรอ user อนุมัติ
+
+---
+## งาน: Phase BW-1 — Fix Duplicate-Poll Buffer Livelock + Prove Shutdown Gates
+**สถานะ:** 🚧 กำลังทำ — audit owner code + hypothesis ก่อน RED
+
+### BW-1 ผลงาน (หลัง verify)
+- **Root cause พิสูจน์จากโค้ด**: `insertToBuffer` กลืน E11000 คืน void → `bufferOrProcess` เดินต่อ → `clearTimer`+re-arm debounce ทุกครั้ง → poll (1s) < window (7s) → timer ไม่มีวันครบ = livelock (chain: poll→claim claimed(owner self+lease)→bufferOrProcess→E11000)
+- **Fix ขั้นต่ำที่ owner เดียว**: `insertToBuffer` คืน `"inserted"|"duplicate"`; duplicate ที่มี debounce/retry timer อยู่แล้วไม่ re-arm; duplicate ที่ timer หายหลัง transient failure ซ่อม deadline จาก `received_at` โดยไม่เริ่ม window ใหม่ — ไม่มี helper/flag/config ใหม่
+- **RED**: L1/L2/L3 fail จาก livelock/contract; review พบ L4 insert สำเร็จแต่ read ล้มก่อน arm timer → early-return ทำ row ค้าง (`processCalls=0`) → **GREEN 47/47** หลังซ่อม deadline
+- **Suites**: idempotency 46/46 · freshness 59/59 · enable-checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · build 84/84 · diff-check clean
+- **Shutdown gates** มีอยู่แล้ว (cite): freshness ~L782 (toggle-off+clearPendingWork→callBot=0, row survive), ~L945 (disabled-window silent + procTransitions=0), enable-checkpoint S1-S3
+- **SRS_SSD.md** อัปเดต bufferService row (duplicate contract)
+- **ยังไม่ทำ**: single-worker lease, 429/500 carry-forward, real-Mongo smoke (S1-S6 disposable)
+
+### BW-1 review-fix: missing-timer liveness gap (audit scratch + TDD)
+- **Finding (High) พิสูจน์จริง**: fix เดิม (`duplicate → early-return`) ทำ row ค้างถ้า insert สำเร็จแต่ `getBufferedMessages` throw ก่อน arm — duplicate ถัดไป return ตลอดโดยไม่มี timer → ไม่มี execution path จน restart. Controlled revert (guard เดิม) → L4 fail (`processCalls=0`) → restore scratch → pass
+- **Contract ที่ audit แล้วเก็บ scratch ไว้**: dup+timer(debounce|retry)→early return · dup+no timer+buffered>0→arm `max(0, latest received_at + window − now)` (deadline อิง original received_at ไม่เริ่ม window ใหม่) · dup+buffered=0→"batch already processing" · distinct→re-arm เดิม · max→immediate flush เดิม
+- **mocks scratch**: `findHook` field (+2 บรรทัด — fakemongo engine รองรับอยู่แล้ว, resetState null อยู่แล้ว)
+- **Network trap (Task 4)**: เพิ่มใน mocks.mjs owner เดียว — fetch/http.request/https.request/net.connect/Socket.connect throw `[test-net-trap]` + self-check T0
+- **Timing margins (Task 3)**: ไม่มี fake clock — widen L1(100ms window/check@140) L2(200ms/check@310) L4(120ms/check@180+) — margin ~40-70ms ทั้งสองฝั่ง
+- **Stale `.next/types`** เคยทำ tsc ด่า (dev-session artifact) — ลบ regen แล้ว clean
+- **Suites**: idempotency **48/48** · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · build 84/84
+- verdict: `ROOT_CAUSE_CLOSED` — ยังไม่ commit
+
+### BW-1 final test-honesty fix (test-only — runtime ไม่เปลี่ยน)
+- **F1 L4 timing**: window 120→300, repair@~120, intermediate checkpoint @~340 (original deadline 300 ผ่าน / incorrect fresh 420 ยังไม่ถึง) → assert `processCalls===1` โดยไม่ settle ก่อน; หลัง fresh deadline assert ยัง 1 + row consumed
+- **Controlled mutation**: repair delay → full `effectiveWindowMs` → `FAIL L4 processCalls=0 @t≈340` (ยิงตอน ~420) → restore → GREEN
+- **F2 T0 trap ครบ**: +https.request + `new net.Socket().connect` — matrix: fetch/http/https/net.connect/Socket.connect ทั้ง 5 throw `[test-net-trap]`; import graph audit — ไม่มี network client อื่น (mongodb driver ไม่โหลดเพราะ mongoClient ถูก redirect) → known boundaries covered
+- runtime diff ไม่เปลี่ยนจาก candidate · suites: idempotency 48/48 · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · build pass
