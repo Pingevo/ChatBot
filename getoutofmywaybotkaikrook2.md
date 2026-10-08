@@ -2376,3 +2376,72 @@ S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mon
 - **Controlled mutation**: repair delay → full `effectiveWindowMs` → `FAIL L4 processCalls=0 @t≈340` (ยิงตอน ~420) → restore → GREEN
 - **F2 T0 trap ครบ**: +https.request + `new net.Socket().connect` — matrix: fetch/http/https/net.connect/Socket.connect ทั้ง 5 throw `[test-net-trap]`; import graph audit — ไม่มี network client อื่น (mongodb driver ไม่โหลดเพราะ mongoClient ถูก redirect) → known boundaries covered
 - runtime diff ไม่เปลี่ยนจาก candidate · suites: idempotency 48/48 · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · build pass
+
+---
+## งาน: Phase BW-2 — Single Active Botworker Ownership
+**สถานะ:** 🚧 กำลังทำ — audit + RED contract tests เท่านั้น ยังไม่แก้ runtime
+
+### BW-2 audit (ก่อนแก้ — evidence จากโค้ดจริง)
+- **ไม่มี worker-leadership boundary เลย**: `pollNewMessages`/`recoverStaleBuffersAndClaims` ไม่มี gate — process ไหนก็ยิงได้; claim-level fencing (E11000/lease/CAS owner_id+fencing_token) เป็น backstop เดียว
+- **ownerId** = `worker-<pid>-<uuid>` ต่อ boot, scope = claim doc เท่านั้น — ไม่มี worker lease doc
+- **duplicate work จริงของ worker สองเครื่อง**: messages/chat_processing scan ทุก cycle, claim CAS ชน, recovery scans, deferred timers, `checkWaitTimeouts` scan, `bot.recovery_quarantine` log ซ้อน
+- **reuse leader doc พิสูจน์ว่าไม่ได้**: chat_processing → recoverStaleClaims scan `{status:processing,lease<now}` จะ CAS `no_action` ทับ lease (ไม่มี message_id→ไม่ fresh); buffer_messages → P1 orphan `deleteOne`; system_configs → admin save clobber + shape pollution; botworker_events/messages → UI log/inbox semantics
+- **proposal**: `botworker_state` singleton `_id:"botworker:leader"` {owner_id,fencing_token,lease_expires_at} — CAS acquire-on-entry ใน pollNewMessages + recovery เท่านั้น (vocabulary เดียวกับ claim protocol)
+- **two-instance honesty**: mocks ให้ `botworkerRuntime.ownerId` rebind ระหว่าง call (fake Mongo resolve owner dynamic = process แยกจริงที่ DB layer); assertion เฉพาะ DB-observable outcome (found/processed/claim owner/callBot) ไม่พึ่ง singleton in-memory
+- **RED 5/6**: M1 loser poll found=1/processed=1 · M2 loser recovery recovered=1 (steal งาน expired-claim ของ foreign owner!) · M4 expired lease ไม่ transfer · M5/M6 ไม่มี leader doc → acquire-on-entry ไม่มี · M3 green-pin (ไม่มี write ให้ห้าม — vacuous วันนี้)
+
+### BW-2 review-fix (audit/contract/tests — ยังไม่แก้ runtime)
+- **Corrected audit**: `system_configs` เป็น keyed docs — update path filter `{config_key:"main_config"}` → leader doc ภายใต้ key อื่นจะไม่ถูก config save clobber (แก้ claim เดิมที่บอกว่า clobber). เหลือเหตุผล semantic: coordination state ≠ admin configuration + blast radius (config tooling/migration/listing) → ยังเสนอ `botworker_state` singleton `_id:"botworker:leader"`, ไม่มี index เพิ่ม
+- **Two-instance honesty (fixed)**: DB-level tests เรียก `ensureLeadership(ownerId)` ด้วย explicit param — ไม่ rebind global ขณะงานค้าง; integration tests rebind `botworkerRuntime.ownerId` เฉพาะหลัง `settle()`; concurrent absent-acquire ทดสอบด้วย `Promise.all` (fake Mongo enforce `_id` E11000 จริง)
+- **Vacuous M3 (fixed)**: loser ต้อง produced found=0/processed=0/recovered=0/claim writes=0/buffer mutations=0/callBot=0 + leader doc untouched — RED วันนี้ (found=1/processed=1)
+- **Query-counter proof**: ใช้ `state.onQuery` seam ที่มีอยู่ (ครอบทุก op) — loser อนุญาตเฉพาะ `botworker_state`; pin poll+recovery+`botWorkerService.checkWaitTimeouts()` (proposed gated wrapper — workflowEngine→botWorkerService import ตรงจะวน circular dep จึง gate ที่ service surface)
+- **Lease/heartbeat contract pinned**: renew ก่อน expiry token ไม่เพิ่ม · expired takeover token+1 once · heartbeat เกิน lease span รักษา ownership · CAS lose→false · no heartbeat→lapse→takeover · leader loss ไม่ฆ่า in-flight claim work (message fencing เป็น owner) แต่ห้ามรับงานใหม่ · disable/shutdown ฆ่า heartbeat → lease lapse
+- **Rollout limitation (explicit)**: lease คุ้มเฉพาะ worker เวอร์ชันใหม่ — worker เก่าไม่อ่าน leader doc เลย; deployment gate = stop old workers → deploy → verify singleton leader doc → start 1 instance; BW-2 alone หยุด deployed worker เก่าไม่ได้
+- **RED สด**: 48 passed, 14 failed (M0a-f "coordinator contract missing" + M1-M8 real gaps: loser scan found=1, loser recovery stole foreign work=1, takeover ไม่เกิด, acquire-on-entry ไม่มี)
+
+### BW-2 contract final correction (tests/mocks เท่านั้น — runtime ยังไม่แตะ)
+- **onQuery ครบทุก op**: +updateMany/deleteOne/deleteMany/distinct/estimatedDocumentCount/aggregate (นับ attempt แม้ veto/unsupported) — meta-test M-INT พิสูจน์ทุกชนิด, จับ bug READ_OPS ขาด estimatedDocumentCount
+- **M0b แก้**: seed lease now+1000 (< leaderLeaseMs 5000) → renew → owner/token เดิม, newExpiry > oldExpiry และ ≈now+leaderLeaseMs (tolerance 2s)
+- **lifecycle semantics แยกชัด**: leadership loss = หยุด heartbeat + ปฏิเสธ admission ใหม่ (ไม่เรียก clearPendingWork, ไม่ abort in-flight ClaimContext work, รอบถัดไป reacquire ก่อน); disable/shutdown = clearPendingWork → abort era + heartbeat + timers ทั้งหมด
+- **M9 automatic heartbeat** *(superseded — ถูกแทนด้วย recovery-based M9 ใน "contract cleanup รอบสุดท้าย"; poll-acquire ไม่พิสูจน์ recovery path จริง)*: acquire ผ่าน poll → findHook block work-query 260ms (>3× lease 80ms) → heartbeat 20ms renew อัตโนมัติ ~12 beat → mid-block doc ยัง A/token1 → ensure(B)=false → หลัง block owner เดียว (test ไม่เรียก renew เอง)
+- **M10 CAS-loss race**: updateOne/findOneAndUpdateHook flip doc→B กลาง renewal write → CAS miss → A=false → heartbeat ตาย (0 writes หลัง loss) → admission ถัดไป scan 0 work collections
+- **M11 timer cleanup**: test() finally + reset() เรียก clearPendingWork (single stop owner) — post-cleanup sleep>4×heartbeat → 0 writes ใน botworker_state; heartbeat unref
+- **Collection parity**: mock COLLECTIONS + `botworkerState:"botworker_state"` — test/proposal อ้างผ่าน COLLECTIONS เท่านั้น ไม่ hardcode
+- **Naming honesty**: M0d=manual renewal · M1=sequential active-leader/loser (A settle ก่อน B) · concurrency จริงอยู่ M0a เท่านั้น
+- **RED สด**: 49 passed (48 เดิม + M-INT) / 17 failed — M0a-f contract missing, M1-M11 real gaps; sibling suites 59/18/20/37 unchanged, tsc clean
+
+### BW-2 contract cleanup รอบสุดท้าย (test/docs only)
+- **M9 → recovery จริง**: seed stale claim(expired owner A)+buffer row → `recoverStaleBuffers()` as A → findHook block work-query 260ms (lease 80/heartbeat 20, ≥3× margin) → mid-block doc A/token1 + ensure(B)=false (heartbeat renew อัตโนมัติ ~12 beat, test ไม่เรียก renew) → ปล่อย block → recovered=1, callBot=1, claim เดียว finalize owner A
+- **M-INT exact**: `op→bucket` map ตรง — assert reads==Σread-ops, writes==Σwrite-ops (ไม่ใช่ >=N; insertMany→insertOne delegate ระวังนับซ้ำ)
+- **Dedup**: ลบ M0d (manual renewal — ครอบโดย M0b+M9) + M0e (CAS-loss — ครอบโดย M0c+M10); คง M0a/b/c/f + M1-M11
+- **Test count จริง**: 64 tests — 49 pass (48 legacy + M-INT) / 15 RED (contract gaps ทั้งหมด)
+- **Complexity delta**: test file net −46 LOC จากรอบก่อน (ลบ 2 tests ~36 บรรทัด, M-INT rewrite, M9 rewrite)
+- siblings unchanged: 59/18/20/37 · tsc clean · diff-check clean
+
+### BW-2 implementation final round (runtime — รอ review ก่อน commit)
+- **M-INT honesty proof**: controlled mutation สลับ bucket `distinct`↔`updateMany` → RED `op distinct classified as write, want read` → restore → GREEN; baseline กลับ 49/15 ตรง
+- **Coordinator**: `ensureLeadership(ownerId = botworkerRuntime.ownerId)` — `botworker_state` singleton `_id:"botworker:leader"` {owner_id,fencing_token,lease_expires_at,updated_at}; absent→insert token 1 (E11000=loser) · self+active→renew CAS `{_id,owner_id,fencing_token}` ไม่เพิ่ม token · expired→takeover CAS `{+lease<now}` + `$inc token` ครั้งเดียว · foreign/CAS-miss→false · ไม่มี unfenced read-then-update
+- **Heartbeat**: `leaderHeartbeat` timer เดียว (unref, `leaderHeartbeatMs`) — arm หลัง acquire สำเร็จผ่าน `acquireWorkerLeadership()`; CAS-loss→`stopLeaderHeartbeat` ตัวเอง (ไม่ abort in-flight claim work); `clearPendingWork` += stop heartbeat
+- **Gates (3 จุดเท่านั้น)**: `pollNewMessages` + `recoverStaleBuffersAndClaims` + `botWorkerService.checkWaitTimeouts` (bot-worker.ts เรียก wrapper แทน workflowEngine ตรง) — loser = 0 work scan/0 mutation นอก state doc/0 provider call
+- **Ordering regression ที่พบ+แก้**: gate ไว้ *ก่อน* `eraSignal()`/`recoveryInFlight`/`activePolls` registration → waitForInFlight gap (R42) + era resurrect (R43/R51) → ย้าย gate เข้า *ใน* tracked run หลัง eraSignal capture ซิงก์ + เช็ค `signal.aborted` ก่อน/หลัง gate → freshness กลับ 59/59
+- **Runtime delta**: botWorkerService +~120 LOC (coordinator ~80, heartbeat ~20, gates ~10, export ~10) · botworkerRuntime +2 constants (leaderLeaseMs=15000, leaderHeartbeatMs=5000) · config.ts +1 key `botworkerState` · bot-worker.ts −1 import +1 call site · 0 feature flag / 0 index / 0 coordinator ตัวที่สอง
+- **Schema delta**: collection ใหม่ `botworker_state` doc `{_id,owner_id,fencing_token,lease_expires_at,updated_at}` — singleton `_id`, ไม่เพิ่ม index
+- **GREEN สด**: 64/64 (48 legacy + M-INT + 15 contract) · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · `npm run build` ผ่าน · diff-check clean
+- **Rollout invariant (ข้อจำกัด)**: lease คุ้มเฉพาะ worker code ใหม่ — worker เก่าไม่อ่าน leader doc; deploy ต้อง stop old workers ทั้งหมด → deploy → verify singleton → start 1 instance; BW-2 alone หยุด old deployed worker ไม่ได้
+- **Residual risks**: งาน in-flight ของ old-version worker ที่ไม่รู้ lease ยังรันต่อได้จน drain; takeover latency ≤leaderLeaseMs(15s) หลัง leader ตาย; lease clock เพิงพา wall clock ของ Mongo server+client เครื่องเดียว (test=host เดียวกัน)
+
+### BW-2 lifecycle review-fix (2 High + 1 Medium — ownership lifecycle เดียว)
+- **F1 heartbeat ใช้ verb ผิด semantics**: เดิม heartbeat tick เรียก `ensureLeadership()` — renew+takeover+reacquire ปนกัน → stale beat ที่ resume หลัง lease หมดสามารถ takeover เองโดยไม่ผ่าน admission → **แก้**: `ensureLeadership` คืน `LeaderCtx{owner_id,fencing_token}|false`; heartbeat ใช้ `renewLeadership(ctx)` verb ใหม่ — `findOne`→`leaderCtx!==ctx` superseded→true → owner/token mismatch→false → lease expired→false → fenced `updateOne{_id,owner_id,fencing_token,lease>now}` — renew-only ไม่มี takeover path; tick หยุดตัวเองเฉพาะเมื่อ `leaderCtx===ctx` เดิม (superseded ctx ไม่ฆ่า heartbeat ใหม่)
+- **F2 checkWaitTimeouts ไม่มี cancel/drain**: เดิม wrapper เป็น bare `async` — ไม่มี era signal, ไม่ register ใน tracked set → abort กลาง leadership lookup แล้ว engine ยังรัน + heartbeat arm ทับ shutdown + waitForInFlight ไม่รอ → **แก้**: capture `eraSignal()` sync ก่อน await → register `run` เข้า `inFlight` (reuse set เดิม) ก่อน gate → `signal.aborted || !(await acquireWorkerLeadership(signal))` — abort กลาง acquire → return false โดยไม่ arm (heartbeat stop เป็นของ clearPendingWork เท่านั้น — กันยิง heartbeat ของ era ใหม่ที่เพิ่ง arm)
+- **F3 same-process concurrent admission**: poll+recovery ชน absent doc → E11000 loser ได้ false → `acquireWorkerLeadership` ฝั่ง loser ไป `stopLeaderHeartbeat()` ฆ่า heartbeat ที่ winner เพิ่ง arm → lease ไม่ถูกต่อ → **แก้**: E11000/CAS miss → `rereadLeaderForOwner` bounded re-read ครั้งเดียว — winner เป็น ownerId เดียวกัน+active → คืน ctx นั้น (admission สำเร็จ); `false` เหลือเฉพาะ foreign/loss จริง → stop heartbeat ถูกต้อง
+- **RED evidence ก่อนแก้**: 64 pass / 5 fail — M12c (post-cleanup renewal write landed), M13 (engine ran after abort + heartbeat armed + drain ไม่รอ), M14 (heartbeat ถูกฆ่าโดย concurrent loser → lease lapsed) ล้วน RED ตาม design; M12a/M12b ผ่านบน impl เก่า (M12b เพราะ stale `now` capture ก่อน blocked findOne ทำให้ resumed call เห็น foreign doc เป็น active พอดี) — tests ยัง pin semantics ที่ถูกต้องหลังแก้
+- **GREEN หลังแก้**: 69/69 · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · build ผ่าน · diff-check clean
+- **Delta**: botWorkerService +~75 LOC รวม (LeaderCtx/reread/renewLeadership/acquireWorkerLeadership rewrite + 3 gate sites) · test file +5 tests (M12a-c, M13, M14) · 0 collection/flag/index เพิ่ม
+
+### BW-2 final admission-race correction (1 High + 1 Medium)
+- **F1 stale admission clock**: `ensureLeadership` เดิมจับ `now` ก่อน `await findOne` — lease หมดระหว่าง read แต่ stale-now ทำให้เข้า renew branch และ CAS filter `lease>staleNow` match เศษ lease → คืน ctx token เดิม + เขียน expiry ที่ตายแล้ว → **แก้**: ย้าย `now = Date.now()` ไปหลัง findOne — decision+filter+lease_expires_at+updated_at ทุก branch อิง post-read timestamp เดียว (แก้ในฟังก์ชันเดิม ไม่เพิ่ม helper)
+- **F2 stale admission result kills newer heartbeat**: `acquireWorkerLeadership` เดิม `if (!ctx) stopLeaderHeartbeat()` — ผล false ของ op ที่อ่าน stale/foreign view ฆ่า heartbeat ที่ admission ใหม่กว่าเพิ่ง arm (same-process re-acquire ติดตั้ง ctx ref ใหม่) → **แก้**: ลบ stop ออกจาก false path — heartbeat ตายเฉพาะ (a) `renewLeadership` fail (single loss detector) หรือ (b) `clearPendingWork` (single stop owner) — false ของ admission ไม่ใช่หลักฐานว่า armed ctx invalid
+- **RED evidence**: 69 pass / 2 fail (of 71) — M15 (stale-now renew คืน ctx token5 + lease ตายแล้ว แทนที่ takeover token6), M16 (stale B-view false ฆ่า heartbeat{ctx ใหม่} → lease lapsed ทั้งที่ doc ยังของเรา)
+- **M16 timeline**: A poll acquire ctx{A,1}+arm → rebind ownerId=B (loser-view) → op1 poll park ที่ leader findOne → rebind กลับ A → op2 recovery renew→`leaderCtx` ref ใหม่ (same token) → release op1 → read {A,1}=foreign(B)→false → stale false ต้องไม่ฆ่า heartbeat → lease renew ต่อ >150ms, token ค้าง 1, callBot=1
+- **GREEN หลังแก้**: 71/71 · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · build ผ่าน · diff-check clean
+- **Delta**: botWorkerService net +~8 LOC (ย้าย clock + ลบ false-path stop + comments) · test +2 tests (M15, M16) · 0 helper/coordinator เพิ่ม
