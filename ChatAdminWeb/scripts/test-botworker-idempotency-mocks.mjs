@@ -11,6 +11,19 @@
 //
 // ไม่มี Mongo/LLM/network จริง
 
+// ── network trap — fail-fast ถ้า production code path ใดหลุดไปแตะ network จริง ──
+//   ติดตั้งก่อน import production modules (test import mocks นี้ก่อนเสมอ)
+//   leaf mocks ครอบ boundary เดิมอยู่แล้ว — trap นี้เป็น last-line กัน module ใหม่หลุด
+import http from "node:http";
+import https from "node:https";
+import net from "node:net";
+const netTrap = (what) => () => { throw new Error(`[test-net-trap] blocked: ${what}`); };
+http.request = netTrap("http.request");
+https.request = netTrap("https.request");
+net.connect = netTrap("net.connect");
+net.Socket.prototype.connect = netTrap("net.Socket.connect");
+globalThis.fetch = () => Promise.reject(new Error("[test-net-trap] blocked: fetch"));
+
 // ── shared mutable test state ────────────────────────────────
 
 // ── botworkerRuntime boundary (claim coordinator timing/worker identity) ──
@@ -49,6 +62,8 @@ export const state = {
   },
   events: [],
   // ⚡ hook seam — เรียกภายใน FakeCollection.findOne (จำลอง race ระหว่าง read→write)
+  /** @type {null | ((coll: string, filter: any) => Promise<void> | void)} */
+  findHook: null,
   /** @type {null | ((coll: string, filter: any) => Promise<void> | void)} */
   findOneHook: null,
   /** @type {null | ((coll: string, filter: any, update: any) => Promise<void> | void)} */

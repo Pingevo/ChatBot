@@ -122,7 +122,7 @@ async function insertToBuffer(msg: {
   text: string;
   raw_payload?: unknown;
   claimContext?: ClaimContext;
-}): Promise<void> {
+}): Promise<"inserted" | "duplicate"> {
   const coll = await getCollection<BufferMessageDoc>(COLLECTIONS.bufferMessages);
   try {
     await coll.insertOne({
@@ -140,9 +140,11 @@ async function insertToBuffer(msg: {
       owner_id: msg.claimContext?.owner_id,
       fencing_token: msg.claimContext?.fencing_token,
     });
+    return "inserted";
   } catch (e) {
     // row มีอยู่แล้ว (re-poll ขณะ claim processing) → ไม่ re-buffer ซ้ำ
-    if ((e as { code?: number }).code === 11000) return;
+    // ⚡ duplicate ต้องแยกจาก new activity — caller ห้าม re-arm debounce จาก insert ซ้ำ
+    if ((e as { code?: number }).code === 11000) return "duplicate";
     throw e;
   }
 }
@@ -587,11 +589,19 @@ export async function bufferOrProcess(
 
   const convId = msg.conversation_id;
 
-  // เพิ่มเข้า buffer_messages collection
-  await insertToBuffer(msg);
+  // เพิ่มเข้า buffer_messages collection — duplicate = ไม่มี activity ใหม่:
+  //   ห้าม re-arm debounce จาก re-poll ของ message เดิม (poll interval < window
+  //   ทำ timer ไม่มีวันครบ → flush ไม่ยิง → livelock) — timer ของ insert แรกยังเดิน
+  const admitted = await insertToBuffer(msg);
+  if (admitted === "duplicate" && (bufferTimers.has(convId) || flushRetryTimers.has(convId))) {
+    return { status: "buffered", detail: "duplicate — not admitted, debounce unchanged" };
+  }
 
   // ดึงจำนวนข้อความที่ buffer อยู่ใน conversation นี้
   const buffered = await getBufferedMessages(convId);
+  if (admitted === "duplicate" && buffered.length === 0) {
+    return { status: "buffered", detail: "duplicate — batch already processing" };
+  }
 
   // ⚡ Phase 1E — ตรวจว่ามี media (รูป/วิดีโอ) ใน buffer ไหม
   //    ถ้ามี → ใช้ window นานกว่า + max มากกว่า (ลูกค้ามักส่งหลายรูปติดกัน)
@@ -610,7 +620,16 @@ export async function bufferOrProcess(
     return flushBuffer(convId, processMessage, markProcessed, signal);
   }
 
-  // รีเซ็ต timer (debounce) — ใช้ window ตาม media
+  // รีเซ็ต timer เฉพาะ new activity; duplicate ที่ไม่มี timer ซ่อมจาก deadline
+  // เดิมของแถวล่าสุด เพื่อไม่ให้ transient error ทำ row ค้างหรือยืด debounce ใหม่
+  const latestReceivedAt = Math.max(
+    ...buffered.map((row) => new Date(row.received_at).getTime()).filter(Number.isFinite)
+  );
+  const timerDelayMs = admitted === "duplicate"
+    ? (Number.isFinite(latestReceivedAt)
+        ? Math.max(0, latestReceivedAt + effectiveWindowMs - Date.now())
+        : 0)
+    : effectiveWindowMs;
   clearTimer(convId);
   bufferTimers.set(
     convId,
@@ -620,12 +639,14 @@ export async function bufferOrProcess(
       trackedFlush(convId, processMessage, markProcessed, signal).catch((err) =>
         console.error(`[buffer] timer flush error for ${convId}:`, err)
       );
-    }, effectiveWindowMs)
+    }, timerDelayMs)
   );
 
   return {
     status: "buffered",
-    detail: `buffered (${buffered.length} msgs, ${hasAnyMedia ? "media" : "text"} window ${effectiveWindowMs}ms)`,
+    detail: admitted === "duplicate"
+      ? `duplicate — restored missing debounce (${timerDelayMs}ms remaining)`
+      : `buffered (${buffered.length} msgs, ${hasAnyMedia ? "media" : "text"} window ${effectiveWindowMs}ms)`,
   };
 }
 

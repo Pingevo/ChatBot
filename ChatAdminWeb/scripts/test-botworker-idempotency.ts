@@ -1074,6 +1074,172 @@ async function main() {
     assert(claimDocs("m11").length === 0, `must not create claim while disabled`);
   });
 
+  // ── L. duplicate-poll debounce livelock (BW-1 incident root) ─────────
+  //   chain: poll → claim(processing,self,lease-active)→claimed →
+  //   bufferOrProcess → insertToBuffer E11000 swallowed → timer RE-ARMED
+  //   poll 1s < window 7s → timer ไม่มีวันครบ → flush ไม่ยิง → ข้อความค้าง
+
+  // R1+R6: duplicate re-polls must not extend the first-admitted deadline;
+  //   flush fires on the ORIGINAL deadline — bot call ≤ 1 across N dups
+  await test("L1 duplicate re-poll during debounce must not extend deadline → flush once, callBot<=1", async () => {
+    state.config.bot_buffer_enabled = true;
+    state.config.bot_buffer_window_ms = 100;
+    state.callBotDelayMs = 20;
+    seedInbound("mL1", "conv_l1");
+
+    await svc.pollNewMessages();          // t≈0: insert + arm (deadline ≈100ms)
+    for (let i = 0; i < 3; i++) {
+      await sleep(30);                    // t≈30/60/90 — each before deadline
+      await svc.pollNewMessages();        // duplicate → claim claimed → bufferOrProcess
+    }
+    await sleep(50);                      // t≈140 — original deadline (100) past; buggy extension (~190) not yet
+    // BUG: each dup re-armed → deadline ~190 → flush not fired yet → callBot=0
+    assert(state.calls.callBot >= 1, `callBot=${state.calls.callBot} want >=1 by original deadline — duplicate polls extended it`);
+    await sleep(140);                     // let any late flush land
+    await settle();
+
+    // BUG: each dup re-armed → deadline pushed to ~155+ → flush starved → callBot=0
+    assert(state.calls.callBot === 1, `callBot=${state.calls.callBot} want 1 — duplicate polls must not starve/extend the debounce`);
+    assert(repliesFor("mL1").length === 1, `replies=${repliesFor("mL1").length} want 1`);
+    const claims = claimDocs("mL1");
+    assert(claims.length === 1 && TERMINAL.has(claims[0].status), `claim terminal=${claims.map((d: any) => d.status)}`);
+    assert(mocks.fakeColl("buffer_messages").filter((d: any) => d.status === "buffered").length === 0,
+      "buffer rows must be consumed");
+  });
+
+  // R2: distinct new message re-arms legitimately; duplicates after must NOT extend again
+  await test("L2 distinct message extends debounce; later duplicates must not extend again", async () => {
+    state.config.bot_buffer_enabled = true;
+    state.config.bot_buffer_window_ms = 200;
+    state.callBotDelayMs = 20;
+    seedInbound("mL2a", "conv_l2");
+
+    await svc.pollNewMessages();              // t≈0 → deadline ≈200
+    await sleep(60);
+    seedInbound("mL2b", "conv_l2");
+    await svc.pollNewMessages();              // t≈60: DISTINCT → legit re-arm → deadline ≈260
+    await sleep(60);
+    await svc.pollNewMessages();              // t≈120: dup a+b → must NOT re-arm
+    await sleep(60);
+    await svc.pollNewMessages();              // t≈180: dup a+b → must NOT re-arm
+    await sleep(130);                         // t≈310 — legit deadline (260) past; buggy (380) not
+
+    // BUG: dups re-armed to ~210 → callBot still 0 here
+    assert(state.calls.callBot === 1, `callBot=${state.calls.callBot} want 1 — flush must fire on the last DISTINCT admit, not last duplicate`);
+    await settle();
+    for (const id of ["mL2a", "mL2b"]) {
+      const c = claimDocs(id);
+      assert(c.length === 1 && TERMINAL.has(c[0].status), `${id} claim terminal`);
+      assert(c[0].batch_id === BATCH_ID("conv_l2", ["mL2a", "mL2b"]), `${id} batch_id=${c[0].batch_id} want joint batch`);
+    }
+    assert(repliesFor("mL2a", "mL2b").length === 1, `batch reply want 1`);
+  });
+
+  // R3: insert contract — duplicate admit must be distinguishable (not new activity)
+  await test("L3 bufferOrProcess duplicate → recognized contract, no second row", async () => {
+    state.config.bot_buffer_enabled = true;
+    const cfg = {
+      bufferEnabled: true, bufferWindowMs: 500, bufferMaxMessages: 10,
+      bufferWindowMediaMs: 500, bufferMaxMediaMessages: 20,
+    };
+    const m = { message_id: "mL3", conversation_id: "conv_l3", shop_id: "shop_1", platform: "shopee" as const, text: "hi" };
+    const markStub = async () => {};
+
+    const r1 = await buf.bufferOrProcess(m, cfg, svc.processMessage, markStub);
+    const r2 = await buf.bufferOrProcess(m, cfg, svc.processMessage, markStub);
+
+    assert(r1.status === "buffered", `first insert status=${r1.status}`);
+    // contract: duplicate must NOT look like fresh activity — caller-visible signal
+    assert(/dup/i.test(r2.detail), `duplicate admit must be recognizable, got detail="${r2.detail}"`);
+    assert(mocks.fakeColl("buffer_messages").filter((d: any) => d.message_id === "mL3").length === 1,
+      "duplicate must not create a second row");
+    buf.clearAllBufferTimers();               // pending debounce — release before next test
+  });
+
+  // R7: an insert can succeed before the following buffer read fails. The next
+  // duplicate poll must restore an execution path without extending the original deadline.
+  await test("L4 duplicate without an active timer repairs the original debounce deadline", async () => {
+    state.config.bot_buffer_enabled = true;
+    const cfg = {
+      bufferEnabled: true, bufferWindowMs: 300, bufferMaxMessages: 10,
+      bufferWindowMediaMs: 300, bufferMaxMediaMessages: 20,
+    };
+    const m = {
+      message_id: "mL4", conversation_id: "conv_l4", shop_id: "shop_1",
+      platform: "shopee" as const, text: "repair timer",
+      claimContext: {
+        claim_id: CLAIM_ID("mL4"), claim_ids: [CLAIM_ID("mL4")],
+        owner_id: runtime.ownerId, fencing_token: 1,
+        lease_expires_at: new Date(Date.now() + 60_000),
+        batch_id: BATCH_ID("conv_l4", ["mL4"]), message_ids: ["mL4"], lost: false,
+      },
+    };
+    const markStub = async () => {};
+    let processCalls = 0;
+    const processStub = async () => {
+      processCalls++;
+      return { status: "bot_answered", detail: "mocked", finalized: true, lost: false };
+    };
+    mocks.fakeColl("chat_processing").push(claimDoc("mL4", {
+      conv: "conv_l4", owner: runtime.ownerId,
+    }));
+    let failFirstBufferRead = true;
+    state.findHook = async (name: string) => {
+      if (name === "buffer_messages" && failFirstBufferRead) {
+        failFirstBufferRead = false;
+        throw new Error("simulated read failure after insert");
+      }
+    };
+
+    let firstFailed = false;
+    try {
+      await buf.bufferOrProcess(m, cfg, processStub, markStub);
+    } catch (e: any) {
+      firstFailed = /simulated read failure/.test(e?.message || String(e));
+    }
+    assert(firstFailed, "first call must fail after the row was inserted");
+    assert(mocks.fakeColl("buffer_messages").filter((d: any) => d.message_id === "mL4").length === 1,
+      "inserted row must survive the transient read failure");
+
+    state.findHook = null;
+    await sleep(120);
+    const repaired = await buf.bufferOrProcess(m, cfg, processStub, markStub);
+    assert(/dup/i.test(repaired.detail), `repair must remain duplicate-aware, got ${repaired.detail}`);
+
+    // intermediate checkpoint ≈t340: original deadline (received_at+300) ผ่านแล้ว
+    // แต่ incorrect full-window re-arm (t120+300=420) ยังไม่ถึง — ห้าม settle() ก่อน
+    //   เพราะ settle รอจนงานหมด → อาจข้าม fresh deadline ไปแล้ว
+    await sleep(220);
+    assert(processCalls === 1,
+      `processCalls=${processCalls} @t≈340 want 1 — flush ต้องยิงที่ original deadline ไม่ใช่ fresh re-arm (fresh≈420)`);
+    assert(mocks.fakeColl("buffer_messages").filter((d: any) => d.message_id === "mL4").length === 0,
+      "row must be consumed by original deadline");
+
+    // รอข้าม fresh deadline (≈t420) — ต้องไม่มี processing ซ้ำ
+    await sleep(140);
+    await settle();
+    assert(processCalls === 1, `processCalls=${processCalls} after fresh deadline want exactly 1 — no duplicate processing`);
+    assert(mocks.fakeColl("buffer_messages").filter((d: any) => d.message_id === "mL4").length === 0,
+      "repaired row must stay consumed");
+  });
+
+  // Task 4 — network trap proof: owner = test-botworker-idempotency-mocks.mjs
+  //   (installed before production imports — fetch/http/https/socket must throw)
+  await test("T0 network trap active — fetch/http/socket escape must fail fast", async () => {
+    let hit = "";
+    try { await fetch("http://127.0.0.1:1/blocked"); } catch (e: any) { if (/test-net-trap/.test(e?.message)) hit = "fetch"; }
+    assert(hit === "fetch", "global fetch must be trapped");
+    try { (await import("node:http")).request("http://127.0.0.1:1/x"); } catch (e: any) { if (/test-net-trap/.test(e?.message)) hit += ",http"; }
+    assert(hit === "fetch,http", "http.request must be trapped");
+    try { (await import("node:https")).request("https://127.0.0.1:1/x"); } catch (e: any) { if (/test-net-trap/.test(e?.message)) hit += ",https"; }
+    assert(hit === "fetch,http,https", "https.request must be trapped");
+    try { (await import("node:net")).connect({ host: "127.0.0.1", port: 1 }); } catch (e: any) { if (/test-net-trap/.test(e?.message)) hit += ",net"; }
+    assert(hit === "fetch,http,https,net", "net.connect must be trapped");
+    // net.Socket path แยกจาก net.connect — Socket.connect ต้องโดน trap เช่นกัน
+    try { new (await import("node:net")).Socket().connect({ host: "127.0.0.1", port: 1 }); } catch (e: any) { if (/test-net-trap/.test(e?.message)) hit += ",socket"; }
+    assert(hit === "fetch,http,https,net,socket", "Socket.connect must be trapped");
+  });
+
   const pass = results.filter((r) => r.ok).length;
   const fail = results.length - pass;
   console.log(`\n${pass} passed, ${fail} failed (of ${results.length})`);
