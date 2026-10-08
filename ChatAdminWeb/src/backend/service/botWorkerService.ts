@@ -1219,6 +1219,180 @@ function releaseBotSlot(): void {
   if (next) next();
 }
 
+// ─── Worker leadership — single active worker ต่อ production scope ──
+// ⚡ singleton doc botworker_state._id="botworker:leader" — CAS vocabulary เดียว
+//   กับ message claim (owner_id + fencing_token + lease_expires_at)
+//   acquire/renew/takeover อยู่ใน ensureLeadership() ฟังก์ชันเดียว — admission
+//   gates (poll/recovery/wait-timeout) เรียกผ่าน acquireWorkerLeadership() เท่านั้น
+//   ห้าม duplicate CAS protocol หรือสร้าง owner ที่สอง
+
+interface WorkerLeaderDoc extends Document {
+  _id: string;
+  owner_id: string;
+  fencing_token: number;
+  lease_expires_at: Date;
+  updated_at: Date;
+}
+
+const WORKER_LEADER_ID = "botworker:leader";
+
+// ⚡ fencing context ที่ admission capture — heartbeat renew ได้เฉพาะ ctx นี้
+//   (owner_id+fencing_token ตรงเป๊ะ + lease ยังไม่หมด) — ห้าม takeover/reacquire
+//   ผ่าน heartbeat; takeover เป็น admission-time operation เท่านั้น
+interface LeaderCtx {
+  owner_id: string;
+  fencing_token: number;
+}
+
+let leaderCtx: LeaderCtx | null = null; // lease ctx ปัจจุบันของ process (null = ไม่ถือ/invalid)
+
+// ⚡ bounded re-read หลัง CAS miss/E11000 — same-process concurrent admission
+//   (poll+recovery ชนกันบน absent doc) ต้องเห็น winner ที่เป็น ownerId เดียวกัน
+//   เป็น admission สำเร็จ ไม่ใช่ loss — re-read ครั้งเดียวเท่านั้น ห้าม loop
+async function rereadLeaderForOwner(
+  coll: Awaited<ReturnType<typeof getCollection<WorkerLeaderDoc>>>,
+  ownerId: string,
+): Promise<LeaderCtx | false> {
+  const d = await coll.findOne({ _id: WORKER_LEADER_ID });
+  if (d && d.owner_id === ownerId && (d.lease_expires_at?.getTime() || 0) > Date.now()) {
+    return { owner_id: ownerId, fencing_token: d.fencing_token };
+  }
+  return false;
+}
+
+// ⚡ DB-level verb — explicit ownerId param สำหรับ lease tests; production callers
+//   ใช้ default = process identity (botworkerRuntime.ownerId) เท่านั้น
+//   absent→insert(token 1) · mine+active→renew (token ไม่เพิ่ม) · expired→takeover
+//   CAS (+1 token) · foreign+active→false · CAS miss/E11000→bounded re-read
+//   (same-owner active → ctx; foreign → false) · ไม่มี unfenced read-then-update
+export async function ensureLeadership(
+  ownerId = botworkerRuntime.ownerId,
+): Promise<LeaderCtx | false> {
+  const coll = await getCollection<WorkerLeaderDoc>(COLLECTIONS.botworkerState);
+  const doc = await coll.findOne({ _id: WORKER_LEADER_ID });
+  // ⚡ clock ต้องจับหลัง read — lease อาจหมดระหว่าง await findOne; decision +
+  //   CAS filter + lease_expires_at/updated_at ของทุก branch อิง now รอบเดียวกัน
+  //   ที่นี่เท่านั้น (stale-now จะทำ renew expired doc ด้วย token เดิมผิด contract)
+  const now = Date.now();
+  if (doc) {
+    const active = (doc.lease_expires_at?.getTime() || 0) > now;
+    if (doc.owner_id === ownerId && active) {
+      // renew own lease — fenced ด้วย identity+token+lease>now (token เดิม ไม่ $inc;
+      //   lease ที่หมดอายุไปแล้วห้ามต่อ — takeover ต้องผ่าน expired branch เท่านั้น)
+      const r = await coll.updateOne(
+        {
+          _id: WORKER_LEADER_ID,
+          owner_id: ownerId,
+          fencing_token: doc.fencing_token,
+          lease_expires_at: { $gt: new Date(now) },
+        },
+        { $set: { lease_expires_at: new Date(now + botworkerRuntime.leaderLeaseMs), updated_at: new Date(now) } },
+      );
+      if (r.matchedCount === 1) return { owner_id: ownerId, fencing_token: doc.fencing_token };
+      return rereadLeaderForOwner(coll, ownerId); // CAS miss — bounded re-read
+    }
+    if (!active) {
+      // expired (owner ไหนก็ได้) — fenced takeover: identity+token+expiry ต้องตรง
+      //   snapshot ที่ observe ไว้; CAS miss = มีผู้ชนะอื่น → bounded re-read
+      const r = await coll.updateOne(
+        {
+          _id: WORKER_LEADER_ID,
+          owner_id: doc.owner_id,
+          fencing_token: doc.fencing_token,
+          lease_expires_at: { $lt: new Date(now) },
+        },
+        {
+          $set: {
+            owner_id: ownerId,
+            lease_expires_at: new Date(now + botworkerRuntime.leaderLeaseMs),
+            updated_at: new Date(now),
+          },
+          $inc: { fencing_token: 1 },
+        },
+      );
+      if (r.matchedCount === 1) return { owner_id: ownerId, fencing_token: doc.fencing_token + 1 };
+      return rereadLeaderForOwner(coll, ownerId);
+    }
+    return false; // foreign active lease — loser
+  }
+  // absent → insert singleton (E11000 = raced acquire — re-read พิสูจน์ winner)
+  try {
+    await coll.insertOne({
+      _id: WORKER_LEADER_ID,
+      owner_id: ownerId,
+      fencing_token: 1,
+      lease_expires_at: new Date(now + botworkerRuntime.leaderLeaseMs),
+      updated_at: new Date(now),
+    } as unknown as WorkerLeaderDoc);
+    return { owner_id: ownerId, fencing_token: 1 };
+  } catch (e) {
+    if ((e as { code?: number }).code === 11000) return rereadLeaderForOwner(coll, ownerId);
+    throw e;
+  }
+}
+
+// ⚡ renew verb — heartbeat เท่านั้นที่ใช้: ต่ออายุ lease ctx ที่ capture ตอน
+//   admission เท่านั้น (exact owner_id+fencing_token และ lease ต้องยังไม่หมด)
+//   ห้าม takeover/reacquire — ctx superseded → true (beat ใหม่ใช้ ctx ใหม่เอง)
+//   ctx invalid/foreign/expired → false → caller ตัดสิน stop heartbeat
+async function renewLeadership(ctx: LeaderCtx): Promise<boolean> {
+  const coll = await getCollection<WorkerLeaderDoc>(COLLECTIONS.botworkerState);
+  const d = await coll.findOne({ _id: WORKER_LEADER_ID });
+  if (leaderCtx !== ctx) return true; // ctx ถูก admission ใหม่แทนแล้ว — beat ถัดไปใช้ ctx ใหม่
+  if (!d || d.owner_id !== ctx.owner_id || d.fencing_token !== ctx.fencing_token) return false;
+  if ((d.lease_expires_at?.getTime() || 0) <= Date.now()) return false; // expired = takeover territory
+  const now = Date.now();
+  const r = await coll.updateOne(
+    {
+      _id: WORKER_LEADER_ID,
+      owner_id: ctx.owner_id,
+      fencing_token: ctx.fencing_token,
+      lease_expires_at: { $gt: new Date(now) },
+    },
+    { $set: { lease_expires_at: new Date(now + botworkerRuntime.leaderLeaseMs), updated_at: new Date(now) } },
+  );
+  return r.matchedCount === 1;
+}
+
+// ⚡ heartbeat owner เดียว — timer เดียวต่อ process; renew เฉพาะ leaderCtx ที่
+//   capture ตอน admission; renew fail หรือ ctx invalid → stop ตัวเอง
+//   (leadership loss ≠ shutdown: in-flight ClaimContext work ทำต่อ
+//   แต่ admission gate รอบถัดไปปฏิเสธงานใหม่)
+let leaderHeartbeat: NodeJS.Timeout | null = null;
+
+function startLeaderHeartbeat(): void {
+  if (leaderHeartbeat) return; // single timer — ห้ามซ้อน
+  leaderHeartbeat = setInterval(() => {
+    const ctx = leaderCtx;
+    if (!ctx) return stopLeaderHeartbeat();
+    renewLeadership(ctx)
+      .then((ok) => { if (!ok && leaderCtx === ctx) stopLeaderHeartbeat(); })
+      .catch(() => { if (leaderCtx === ctx) stopLeaderHeartbeat(); });
+  }, botworkerRuntime.leaderHeartbeatMs);
+  leaderHeartbeat.unref();
+}
+
+function stopLeaderHeartbeat(): void {
+  leaderCtx = null; // invalidate ctx — renew ที่ค้างอยู่ต้องไม่เขียนต่อ
+  if (leaderHeartbeat) clearInterval(leaderHeartbeat);
+  leaderHeartbeat = null;
+}
+
+// ⚡ admission gate เดียวของ worker — acquire สำเร็จ → capture ctx + arm heartbeat
+//   ล้มเหลว → คืน false เฉยๆ ห้าม stop heartbeat: false สะท้อน view ของ caller
+//   (อาจ stale หรือ owner อื่นใน test rebind) — ctx ที่ arm อยู่อาจเป็นของ
+//   admission ใหม่กว่า; heartbeat ตายด้วย renewLeadership fail (single loss
+//   detector) หรือ clearPendingWork (single stop owner) เท่านั้น
+//   era abort กลาง acquire → คืน false โดยไม่ arm — heartbeat lifecycle เป็น
+//   หน้าที่ของ clearPendingWork เช่นกัน
+async function acquireWorkerLeadership(signal?: AbortSignal): Promise<LeaderCtx | false> {
+  const ctx = await ensureLeadership();
+  if (!ctx || signal?.aborted) return false; // loser/era-dead — heartbeat ห้ามถูกแตะจากตรงนี้
+  leaderCtx = ctx;
+  startLeaderHeartbeat();
+  return ctx;
+}
+
 // track in-flight promises (เก็บไว้สำหรับ graceful shutdown เท่านั้น — ไม่ await ในลูป)
 const inFlight = new Set<Promise<unknown>>();
 // ⚡ parent poll เองก็ต้องอยู่ใน drain — poll ที่รอ Mongo ข้าม shutdown ต้องถูกรอจนจบ
@@ -1229,10 +1403,19 @@ export function pollNewMessages(since?: Date): Promise<{
   processed: number;
   results: { message_id: string; status: string; detail: string }[];
 }> {
-  // ⚡ era signal capture ก่อน await แรกเสมอ — poll ที่รอ Mongo ข้าม shutdown
-  //   ต้องตายพร้อม era เดิม (clearPendingWork abort ถึง) ห้ามสร้าง era ใหม่เอง
+  // ⚡ era signal capture ก่อน await แรกเสมอ (synchronous — ห้ามย้ายหลัง gate;
+  //   eraSignal() สร้าง controller ใหม่เมื่อเดิมถูก abort ดังนั้นต้องจับก่อน
+  //   shutdown จะได้ตายพร้อม era เดิม ไม่ resurrect era ใหม่)
   const signal = eraSignal();
-  const run = pollNewMessagesInEra(since, signal);
+  const run = (async () => {
+    // ⚡ single-active-worker admission gate — loser ห้าม scan/mutate work
+    //   collections เลย; abort ก่อน/กลาง gate ต้องออกเงียบ (abort กลาง acquire →
+    //   acquireWorkerLeadership unwind เอง — heartbeat ไม่รอด shutdown)
+    if (signal.aborted || !(await acquireWorkerLeadership(signal))) {
+      return { found: 0, processed: 0, results: [] as { message_id: string; status: string; detail: string }[] };
+    }
+    return pollNewMessagesInEra(since, signal);
+  })();
   activePolls.add(run);
   run.then(() => activePolls.delete(run), () => activePolls.delete(run));
   return run;
@@ -1760,7 +1943,14 @@ async function recoverStaleBuffersAndClaims(): Promise<{ recovered: number; conv
     // ⚡ controller หนึ่งตัวต่อ enabled era (ไม่ใช่ต่อ pass) — child work เช่น
     //   flush-retry callback อาจอยู่ข้าม pass; abort เดียวต้องถึงทุก child ใน era
     //   สร้างผ่าน eraSignal() เท่านั้น — reuse ตลอด era, era ใหม่เมื่อเดิมถูก abort
+    //   (capture ก่อน await แรก — eraSignal() สร้าง controller ใหม่หลัง abort
+    //   ดังนั้นต้องจับ sync ที่ entry ไม่ใช่หลัง leadership gate)
     const signal = eraSignal();
+    // ⚡ single-active-worker gate — loser ห้าม scan/reclaim เลย; abort ก่อน/กลาง
+    //   gate ต้องออกเงียบ (deferred timer เรียกผ่านฟังก์ชันนี้ → reacquire ทุก run)
+    if (signal.aborted || !(await acquireWorkerLeadership(signal))) {
+      return result;
+    }
     do {
       recoveryAgain = false;
       // orchestration gate — disabled worker ห้าม recover/flush/process
@@ -1842,7 +2032,22 @@ export const botWorkerService = {
   callBot,
   isProcessed,
   waitForInFlight,
+  ensureLeadership,
   recoverStaleBuffers: recoverStaleBuffersAndClaims,
+  // ⚡ workflow wait-timeout = top-level worker work — era signal capture sync
+  //   ก่อน await แรก + register ใน inFlight ทันที (shutdown drain ต้องรอ op นี้จบ)
+  //   abort ก่อน/กลาง gate → ออกเงียบ ห้ามเรียก engine ห้าม armed heartbeat รอด
+  //   (gate ผ่าน service surface — workflowEngine ไม่ import กลับมา)
+  checkWaitTimeouts: (): Promise<number> => {
+    const signal = eraSignal();
+    const run = (async (): Promise<number> => {
+      if (signal.aborted || !(await acquireWorkerLeadership(signal))) return 0;
+      return workflowEngine.checkWaitTimeouts();
+    })();
+    inFlight.add(run);
+    run.then(() => inFlight.delete(run), () => inFlight.delete(run));
+    return run;
+  },
   clearAllBufferTimers: bufferService.clearAllBufferTimers,
   // ⚡ falling edge — ยกเลิก pending work ทั้งหมด: abort active recovery pass +
   //   buffer debounce + flush retry + deferred recovery timers
@@ -1850,6 +2055,7 @@ export const botWorkerService = {
   clearPendingWork: () => {
     eraAbort?.abort();      // abort era — boundary ถัดไปของทุก scheduled work ออกเงียบ
     recoveryAgain = false;  // rerun ที่ queue ไว้ใน cancelled era ห้ามเริ่มงานใหม่
+    stopLeaderHeartbeat();  // disable/shutdown — heartbeat ตาย → lease lapse
     bufferService.clearAllBufferTimers();
     cancelDeferredRecovery();
   },

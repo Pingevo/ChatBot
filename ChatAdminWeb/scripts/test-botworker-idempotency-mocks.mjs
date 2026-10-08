@@ -35,6 +35,9 @@ export const botworkerRuntime = {
   botCallTimeoutMs: 90000,   // = liveAssignmentService timeout (90s) — ห้ามต่ำกว่า valid latency
   flushErrorRetryMs: 5000,   // flush error → retry delay (claim owner เดิม re-fence ได้ทันที)
   ownerId: "test-worker",
+  // BW-2 contract constants — single-active-worker leadership (proposed, not yet in production)
+  leaderLeaseMs: 5000,
+  leaderHeartbeatMs: 1500,
   maxClaimAttempts: 3,
 };
 
@@ -58,7 +61,7 @@ export const state = {
     callBot: 0, botInFlight: 0, shadowReply: 0, handoffTest: 0, reopenTest: 0,
     matchAndRun: 0, resumeFlow: 0,
     // Part 1B — executions จริงของ side-effect owners (แยกจาก call count)
-    handoffExec: 0, workflowExec: 0, resumeExec: 0,
+    handoffExec: 0, workflowExec: 0, resumeExec: 0, checkWaitTimeouts: 0,
   },
   events: [],
   // ⚡ hook seam — เรียกภายใน FakeCollection.findOne (จำลอง race ระหว่าง read→write)
@@ -122,7 +125,7 @@ export const state = {
 };
 
 export function resetState() {
-  state.calls = { callBot: 0, botInFlight: 0, shadowReply: 0, handoffTest: 0, reopenTest: 0, matchAndRun: 0, resumeFlow: 0, handoffExec: 0, workflowExec: 0, resumeExec: 0 };
+  state.calls = { callBot: 0, botInFlight: 0, shadowReply: 0, handoffTest: 0, reopenTest: 0, matchAndRun: 0, resumeFlow: 0, handoffExec: 0, workflowExec: 0, resumeExec: 0, checkWaitTimeouts: 0 };
   state.events = [];
   state.findHook = null;
   state.findOneHook = null;
@@ -144,6 +147,8 @@ export function resetState() {
   botworkerRuntime.botCallTimeoutMs = 90000;
   botworkerRuntime.flushErrorRetryMs = 5000;
   botworkerRuntime.ownerId = "test-worker";
+  botworkerRuntime.leaderLeaseMs = 5000;
+  botworkerRuntime.leaderHeartbeatMs = 1500;
   botworkerRuntime.maxClaimAttempts = 3;
   state.trigger = null;
   state.testStatus = null;
@@ -186,6 +191,9 @@ export const COLLECTIONS = {
   statusConversation: "status_conversation",
   botworkerMessages: "botworker_messages",
   botworkerEvents: "botworker_events",
+  // BW-2 — worker coordination state (leader lease singleton); production
+  //   proposal must reference COLLECTIONS.botworkerState, no hardcoded string
+  botworkerState: "botworker_state",
   workflowRuns: "workflow_runs",
   workflows: "workflows",
   admins: "admins",
@@ -413,7 +421,8 @@ export const workflowEngine = {
     return out;
   },
   cancelActiveRuns: async () => 0,
-  checkWaitTimeouts: async () => 0,
+  // BW-2 pin — inner timeout scan must never run under a non-leader
+  checkWaitTimeouts: async () => { state.calls.checkWaitTimeouts++; return 0; },
 };
 
 export async function logBotworkerEvent(evt) {

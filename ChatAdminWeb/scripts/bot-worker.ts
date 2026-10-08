@@ -18,7 +18,6 @@
 import "dotenv/config";
 import { botWorkerService } from "../src/backend/service/botWorkerService";
 import { getSystemConfig } from "../src/backend/service/systemConfigService";
-import { workflowEngine } from "../src/backend/service/workflowEngine";
 
 const DEFAULT_INTERVAL_MS = 1000;
 // ⚡ Phase 2Q — ไม่ limit แล้ว — ดึงทั้งหมดที่เข้ามาใหม่ (buffer + concurrency limiter เป็นตัวคุม)
@@ -112,7 +111,7 @@ async function main() {
         // ⚡ Phase 2 — เช็ค wait_for_reply timeout (ทุก cycle ถ้า workflow เปิด)
         if (config.workflow_enabled) {
           try {
-            const timedOut = await workflowEngine.checkWaitTimeouts();
+            const timedOut = await botWorkerService.checkWaitTimeouts();
             if (timedOut > 0) {
               console.log(`[bot-worker] cycle ${cycle}: wait_timeout processed=${timedOut}`);
             }

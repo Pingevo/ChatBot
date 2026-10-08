@@ -182,11 +182,18 @@ async function test(name: string, fn: () => Promise<void>) {
   } catch (e: any) {
     results.push({ name, ok: false, err: e?.message || String(e) });
     console.log(`FAIL ${name}\n     ${e?.message || e}`);
+  } finally {
+    // BW-2 — module-level timers (leadership heartbeat / debounce / retry /
+    //   deferred recovery) ต้องไม่รั่วข้าม test — clearPendingWork คือ lifecycle
+    //   stop owner เดียว (ห้ามพึ่ง resetState เพื่อหยุด timer)
+    svc.botWorkerService.clearPendingWork();
   }
 }
 
 function reset() {
   mocks.resetState();
+  // หยุด lifecycle ของ test ก่อนหน้าที่อาจค้าง timer ไว้ (pre-clean, idempotent)
+  svc.botWorkerService.clearPendingWork();
   mocks.state.config.bot_worker_enabled = true;
   mocks.state.config.bot_buffer_enabled = false;
   mocks.state.config.bot_buffer_window_ms = 60;
@@ -1221,6 +1228,613 @@ async function main() {
     assert(processCalls === 1, `processCalls=${processCalls} after fresh deadline want exactly 1 — no duplicate processing`);
     assert(mocks.fakeColl("buffer_messages").filter((d: any) => d.message_id === "mL4").length === 0,
       "repaired row must stay consumed");
+  });
+
+  // ── M. single-active-worker ownership (BW-2 contract) ────────
+  // contract artifact: leader lease doc (singleton) in botworker_state —
+  //   { _id:"botworker:leader", owner_id, fencing_token, lease_expires_at }
+  //   vocabulary reuses claim protocol (owner/token/lease CAS) — no config/env
+  // coordinator seam (proposed, DB-level tests pin it with explicit ownerId):
+  //   svc.botWorkerService.ensureLeadership(ownerId?): Promise<boolean>
+  //     absent→insert token=1 · mine→renew (token unchanged) · foreign+active→false
+  //     expired→takeover CAS {_id,owner,token,lease<now} $inc token (once)
+  //   svc.botWorkerService.checkWaitTimeouts(): gated wrapper (loser → 0)
+  //   clearPendingWork: cancels heartbeat lifecycle → lease lapses naturally
+  //
+  // two-instance honesty rules (this suite):
+  //   • DB-level tests pass ownerId explicitly — NO global rebind mid-test
+  //   • integration tests rebind botworkerRuntime.ownerId ONLY after settle()
+  //     (no in-flight work of the previous owner may be pending at flip time)
+  //   • fake Mongo resolves owner_id dynamically per op (= separate processes
+  //     sharing one DB); assertions stay on DB-observable outcomes + op counters
+
+  const LEADER_COLL = mocks.COLLECTIONS.botworkerState; // parity — ห้าม hardcode collection string
+  const LEADER_ID = "botworker:leader";
+  const leaderDocs = () => mocks.fakeColl(LEADER_COLL).filter((d: any) => d._id === LEADER_ID);
+  // returns LeaderCtx {owner_id, fencing_token} | false — truthy = admitted
+  const ensureLeadership = (owner: string): Promise<any> => {
+    const fn = (svc.botWorkerService as any).ensureLeadership;
+    if (typeof fn !== "function")
+      throw new Error("ensureLeadership(ownerId) not implemented — coordinator contract missing");
+    return fn.call(svc.botWorkerService, owner);
+  };
+  function seedLeader(owner: string, opts: { expired?: boolean; token?: number } = {}) {
+    const now = Date.now();
+    mocks.fakeColl(LEADER_COLL).push({
+      _id: LEADER_ID,
+      owner_id: owner,
+      fencing_token: opts.token ?? 1,
+      lease_expires_at: new Date(now + (opts.expired ? -1000 : 60000)),
+      updated_at: new Date(now - 1000),
+    });
+  }
+  function bufferRowDoc(messageId: string, conv: string, opts: { owner?: string; token?: number } = {}) {
+    return {
+      _id: `buf_${messageId}`,
+      kind: "message",
+      message_id: messageId,
+      conversation_id: conv,
+      shop_id: "shop_1",
+      platform: "shopee",
+      text: `buffered ${messageId}`,
+      status: "buffered",
+      claim_id: CLAIM_ID(messageId),
+      owner_id: opts.owner || "worker-A",
+      fencing_token: opts.token ?? 1,
+      received_at: new Date(),
+      updated_at: new Date(),
+    };
+  }
+  // per-collection op counters via existing fake-Mongo onQuery seam
+  //   loser may touch ONLY botworker_state — nothing else
+  const READ_OPS = new Set(["find", "findOne", "countDocuments", "distinct", "aggregate", "estimatedDocumentCount"]);
+  function countOps() {
+    const reads: Record<string, number> = {};
+    const writes: Record<string, number> = {};
+    state.onQuery = (coll: string, op: string) => {
+      const bucket = READ_OPS.has(op) ? reads : writes;
+      bucket[coll] = (bucket[coll] || 0) + 1;
+    };
+    return {
+      reads, writes,
+      touched: () => [...new Set([...Object.keys(reads), ...Object.keys(writes)])],
+      stop: () => { state.onQuery = null; },
+    };
+  }
+
+  // ── DB-level coordinator contract (explicit ownerId — no global rebind) ──
+
+  await test("M0a concurrent absent acquire → exactly one winner, singleton doc", async () => {
+    const [a, b] = await Promise.all([ensureLeadership("worker-A"), ensureLeadership("worker-B")]);
+    assert((a ? 1 : 0) + (b ? 1 : 0) === 1, `exactly one winner required — got A=${a} B=${b}`);
+    const leaders = leaderDocs();
+    assert(leaders.length === 1, `singleton leader doc required, got ${leaders.length}`);
+    const winner = a ? "worker-A" : "worker-B";
+    assert(leaders[0].owner_id === winner && leaders[0].fencing_token === 1,
+      `leader doc must be winner with token 1 — got ${leaders[0].owner_id}/${leaders[0].fencing_token}`);
+  });
+
+  await test("M0b leader renew before expiry → same owner/token, expiry extends to ~now+leaseMs", async () => {
+    // seed lease ACTIVE but shorter than leaderLeaseMs (contract: 5000ms) —
+    //   renew ต้องต่ออายุเป็น ~now+leaderLeaseMs ไม่ใช่คงเดิม/ไม่ใช่เพิ่ม token
+    const now = Date.now();
+    mocks.fakeColl(LEADER_COLL).push({
+      _id: LEADER_ID, owner_id: "worker-A", fencing_token: 7,
+      lease_expires_at: new Date(now + 1000), updated_at: new Date(now - 1000),
+    });
+    const oldExpiry = now + 1000;
+    const t0 = Date.now();
+    const ok = await ensureLeadership("worker-A");
+    const l = leaderDocs()[0];
+    assert(ok !== false && ok?.owner_id === "worker-A", "active self lease must return LeaderCtx");
+    assert(l?.owner_id === "worker-A" && l?.fencing_token === 7,
+      `renew must keep owner/token — got ${l?.owner_id}/${l?.fencing_token}`);
+    const newExpiry = l?.lease_expires_at?.getTime() || 0;
+    assert(newExpiry > oldExpiry, `renew must extend expiry — ${newExpiry} <= ${oldExpiry}`);
+    const expected = t0 + mocks.botworkerRuntime.leaderLeaseMs;
+    assert(Math.abs(newExpiry - expected) < 2000,
+      `renew expiry must be ≈now+leaderLeaseMs(${mocks.botworkerRuntime.leaderLeaseMs}) — got ${newExpiry}, expected ~${expected}`);
+  });
+
+  await test("M0c expired lease → takeover CAS bumps fencing_token exactly once", async () => {
+    seedLeader("worker-A", { expired: true, token: 7 });
+    const ok = await ensureLeadership("worker-B");
+    const l = leaderDocs()[0];
+    assert(ok !== false && ok?.fencing_token === 8, "expired lease must be acquirable — ctx token should be takeover value");
+    assert(l?.owner_id === "worker-B" && l?.fencing_token === 8,
+      `takeover must bump token once — got ${l?.owner_id}/${l?.fencing_token} want worker-B/8`);
+    const again = await ensureLeadership("worker-A");
+    assert(again === false, "loser of takeover must stay fenced while B active");
+  });
+
+
+
+  await test("M0f no renewal (heartbeat dead) → lease lapses → takeover once", async () => {
+    mocks.botworkerRuntime.leaderLeaseMs = 80;
+    await ensureLeadership("worker-A");
+    await sleep(140); // no beats — lease dead
+    const ok = await ensureLeadership("worker-B");
+    const l = leaderDocs()[0];
+    assert(ok !== false && l?.owner_id === "worker-B" && l?.fencing_token === 2,
+      `lapsed lease must transfer once — got ${ok} ${l?.owner_id}/${l?.fencing_token}`);
+  });
+
+  // ── integration entry points (global ownerId rebind ONLY after settle) ──
+
+  // sequential active-leader/loser integration — A drained before B runs
+  //   (concurrency จริงของ absent-acquire อยู่ที่ M0a Promise.all เท่านั้น)
+  await test("M1 active-leader/loser integration — B poll quiet, touches only botworker_state", async () => {
+    seedInbound("m_M1", "conv_M1");
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    const rA = await svc.pollNewMessages();
+    await settle(); // drain all A work BEFORE flipping owner — no pending work at rebind
+    assert(rA.found >= 1, `leader poll must see inbound, got ${rA.found}`);
+    mocks.botworkerRuntime.ownerId = "worker-B";
+    const ops = countOps();
+    const rB = await svc.pollNewMessages();
+    ops.stop();
+    assert(rB.found === 0 && rB.processed === 0,
+      `loser poll must do zero work — got found=${rB.found} processed=${rB.processed}`);
+    const foreign = ops.touched().filter((c) => c !== LEADER_COLL);
+    assert(foreign.length === 0, `loser may touch only ${LEADER_COLL} — touched ${foreign}`);
+    assert(leaderDocs()[0]?.owner_id === "worker-A", "loser must not overwrite active leader");
+    assert(state.calls.callBot === 1, `callBot=${state.calls.callBot} want 1 (leader only)`);
+  });
+
+  await test("M2 loser recovery → 0 recovered, 0 writes to claims/buffer, 0 bot calls", async () => {
+    seedLeader("worker-A");
+    mocks.fakeColl("chat_processing").push(claimDoc("m_M2", { owner: "worker-A", expired: true, conv: "conv_M2" }));
+    mocks.fakeColl("buffer_messages").push(bufferRowDoc("m_M2", "conv_M2"));
+    mocks.botworkerRuntime.ownerId = "worker-B";
+    const ops = countOps();
+    const rec = await svc.botWorkerService.recoverStaleBuffers();
+    ops.stop();
+    await settle();
+    assert(rec.recovered === 0, `loser recovery must recover 0, got ${rec.recovered}`);
+    const claim = mocks.fakeColl("chat_processing").find((d: any) => d._id === CLAIM_ID("m_M2"));
+    assert(claim?.owner_id === "worker-A", `loser must not reclaim foreign claim — owner=${claim?.owner_id}`);
+    assert(mocks.fakeColl("buffer_messages").some((d: any) => d.message_id === "m_M2"),
+      "loser must not consume foreign buffer row");
+    assert(state.calls.callBot === 0, `loser callBot=${state.calls.callBot} want 0`);
+    const foreignWrites = Object.keys(ops.writes).filter((c) => c !== LEADER_COLL);
+    assert(foreignWrites.length === 0, `loser must write nothing outside ${LEADER_COLL} — wrote ${foreignWrites}`);
+  });
+
+  await test("M3 loser full cycle (poll + recovery + wait-timeout) → only botworker_state ops", async () => {
+    seedLeader("worker-A", { token: 7 });
+    seedInbound("m_M3", "conv_M3");
+    mocks.botworkerRuntime.ownerId = "worker-B";
+    const ops = countOps();
+    const r = await svc.pollNewMessages();
+    const rec = await svc.botWorkerService.recoverStaleBuffers();
+    // workflow timeout path is part of worker work — gated wrapper on the service surface
+    const wt = await (svc.botWorkerService as any).checkWaitTimeouts?.();
+    ops.stop();
+    await settle();
+    assert(r.found === 0 && r.processed === 0, `loser poll quiet — got ${r.found}/${r.processed}`);
+    assert(rec.recovered === 0, `loser recovery quiet — got ${rec.recovered}`);
+    assert(typeof wt === "number" && wt === 0, `loser wait-timeout must return 0, got ${wt}`);
+    assert(state.calls.checkWaitTimeouts === 0,
+      `inner timeout engine must not run for loser — ran ${state.calls.checkWaitTimeouts}x`);
+    const foreign = ops.touched().filter((c) => c !== LEADER_COLL);
+    assert(foreign.length === 0,
+      `loser must not query messages/chat_processing/buffer_messages/workflow_runs — touched ${foreign}`);
+    const l = leaderDocs()[0];
+    assert(l?.owner_id === "worker-A" && l?.fencing_token === 7,
+      `active leader doc must be untouched — got ${l?.owner_id}/${l?.fencing_token}`);
+    assert(state.calls.callBot === 0, `callBot=${state.calls.callBot} want 0`);
+  });
+
+  await test("M4 expired leader lease → B takeover once, stale A fenced out of new claims", async () => {
+    seedLeader("worker-A", { expired: true, token: 7 });
+    seedInbound("m_M4", "conv_M4");
+    mocks.botworkerRuntime.ownerId = "worker-B";
+    const rB = await svc.pollNewMessages();
+    await settle();
+    const l = leaderDocs()[0];
+    assert(l?.owner_id === "worker-B" && l?.fencing_token === 8,
+      `expired lease must transfer once — got ${l?.owner_id}/${l?.fencing_token} want worker-B/8`);
+    assert(rB.found >= 1, `new leader must work, got found=${rB.found}`);
+    seedInbound("m_M4b", "conv_M4");
+    mocks.botworkerRuntime.ownerId = "worker-A"; // flip only after settle — B drained
+    const rA = await svc.pollNewMessages();
+    await settle();
+    assert(rA.found === 0 && rA.processed === 0,
+      `stale leader must be fenced — got found=${rA.found} processed=${rA.processed}`);
+    assert(claimDocs("m_M4b").length === 0, `stale leader must not write claims`);
+  });
+
+  await test("M5 leader lost mid-era → re-poll quiet, no new claims, in-flight work intact", async () => {
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    seedInbound("m_M5", "conv_M5");
+    await svc.pollNewMessages();
+    await settle();
+    assert(leaderDocs()[0]?.owner_id === "worker-A", "A must hold leadership first");
+    // B wins takeover (external CAS) — A's next cycle must see foreign lease and stop
+    const stale = leaderDocs()[0];
+    stale.owner_id = "worker-B"; stale.fencing_token = 2;
+    stale.lease_expires_at = new Date(Date.now() + 60000);
+    seedInbound("m_M5b", "conv_M5");
+    const rA2 = await svc.pollNewMessages();
+    await settle();
+    assert(rA2.found === 0 && rA2.processed === 0,
+      `stale leader re-poll must be quiet — got ${rA2.found}/${rA2.processed}`);
+    assert(claimDocs("m_M5b").length === 0, "stale leader must not claim new inbound");
+    assert(state.calls.callBot === 1, `callBot=${state.calls.callBot} want 1 (A's era work only)`);
+  });
+
+  await test("M6 leader lease lapses while process alive → same owner re-acquires once", async () => {
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    seedInbound("m_M6", "conv_M6");
+    await svc.pollNewMessages();
+    await settle();
+    const l = leaderDocs()[0];
+    assert(l?.owner_id === "worker-A", "A must be leader");
+    l.lease_expires_at = new Date(Date.now() - 1); // lease lapses between cycles
+    seedInbound("m_M6b", "conv_M6");
+    const rA2 = await svc.pollNewMessages();
+    await settle();
+    assert(rA2.found >= 1, `same-owner re-acquire must resume work, got found=${rA2.found}`);
+    const l2 = leaderDocs()[0];
+    assert(l2?.owner_id === "worker-A" && l2?.fencing_token === 2,
+      `re-acquire must bump token once — got ${l2?.owner_id}/${l2?.fencing_token} want worker-A/2`);
+  });
+
+  await test("M7 in-flight claimed work survives leader loss; new work refused", async () => {
+    state.callBotDelayMs = 120;
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    seedInbound("m_M7", "conv_M7");
+    await svc.pollNewMessages(); // fires claim + in-flight bot call under A leadership
+    const stale = leaderDocs()[0];
+    assert(stale?.owner_id === "worker-A", "A must be leader before loss");
+    stale.owner_id = "worker-B"; stale.fencing_token = 2; // external takeover mid-call
+    stale.lease_expires_at = new Date(Date.now() + 60000);
+    seedInbound("m_M7b", "conv_M7");
+    const rA2 = await svc.pollNewMessages(); // A may still be mid-call — must not start new work
+    assert(rA2.found === 0, `leader-lost poll must refuse new work — found=${rA2.found}`);
+    assert(claimDocs("m_M7b").length === 0, "no new claims after leadership loss");
+    await settle();
+    // in-flight claim work is owned by message-claim fencing — allowed to finalize once
+    assert(state.calls.callBot === 1, `callBot=${state.calls.callBot} want 1 (in-flight completes, not killed)`);
+    assert(repliesFor("m_M7").length === 1, "in-flight reply must persist exactly once");
+  });
+
+  await test("M8 disable/shutdown cancels heartbeat → lease lapses → takeover once", async () => {
+    mocks.botworkerRuntime.leaderLeaseMs = 80;
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    await svc.pollNewMessages(); // acquires leadership + arms heartbeat
+    assert(leaderDocs()[0]?.owner_id === "worker-A", "A must hold leadership");
+    svc.botWorkerService.clearPendingWork(); // falling edge / shutdown — heartbeat must die
+    await sleep(140); // lease would be renewed if heartbeat survived
+    const ok = await ensureLeadership("worker-B");
+    const l = leaderDocs()[0];
+    assert(ok !== false && l?.owner_id === "worker-B" && l?.fencing_token === 2,
+      `dead heartbeat → lease lapses → takeover once — got ${ok} ${l?.owner_id}/${l?.fencing_token}`);
+  });
+
+  // ── harness meta + lifecycle pins ────────────────────────────
+
+  await test("M-INT op instrumentation meta-test — per-event op→bucket classification", async () => {
+    const coll = await mocks.getCollection("meta_probe");
+    // exact contract — assert per-event observed bucket === expected (ไม่ใช่แค่ผลรวม
+    //   เพราะ read/write สลับกันอย่างละหนึ่งอาจทำผลรวมผ่านได้)
+    const BUCKETS: Record<string, "read" | "write"> = {
+      find: "read", findOne: "read", countDocuments: "read", distinct: "read",
+      aggregate: "read", estimatedDocumentCount: "read",
+      insertOne: "write", updateOne: "write", updateMany: "write",
+      findOneAndUpdate: "write", deleteOne: "write", deleteMany: "write",
+    };
+    const seen = new Set<string>();
+    const observed: Record<string, string> = {};
+    state.onQuery = (c: string, op: string) => {
+      if (c !== "meta_probe") return;
+      seen.add(op);
+      observed[op] = READ_OPS.has(op) ? "read" : "write";
+    };
+    await coll.findOne({}); await coll.find({}).toArray();
+    await coll.insertOne({ _id: "p1", x: 1 });
+    await coll.insertMany([{ _id: "p2", x: 2 }]); // delegates → นับเป็น insertOne
+    await coll.updateOne({ _id: "p1" }, { $set: { x: 2 } });
+    await coll.updateMany({}, { $set: { y: 1 } });
+    await coll.findOneAndUpdate({ _id: "p1" }, { $set: { z: 1 } });
+    await coll.countDocuments({});
+    await coll.distinct("x");
+    await coll.estimatedDocumentCount();
+    try { coll.aggregate(); } catch { /* unsupported in fake — attempt still counted */ }
+    await coll.deleteOne({ _id: "p2" });
+    await coll.deleteMany({});
+    state.onQuery = null;
+    for (const op of Object.keys(BUCKETS)) {
+      assert(seen.has(op), `onQuery must fire for ${op} — saw [${[...seen].join(",")}]`);
+      assert(observed[op] === BUCKETS[op],
+        `op ${op} classified as ${observed[op]}, want ${BUCKETS[op]}`);
+    }
+  });
+
+  // automatic heartbeat — real recovery path: stale claim + buffer row enter
+  //   recoverStaleBuffers; a work-collection query is blocked > leaderLeaseMs so
+  //   the process-owned heartbeat (armed on acquisition inside the recovery gate,
+  //   NOT by this test) must renew the lease while recovery is still running
+  await test("M9 automatic heartbeat — blocked recovery >lease keeps A, renews without test", async () => {
+    mocks.botworkerRuntime.leaderLeaseMs = 80;
+    mocks.botworkerRuntime.leaderHeartbeatMs = 20; // ~12 beats inside the 260ms block (≥3× margin)
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    mocks.fakeColl("chat_processing").push(claimDoc("m_M9", { owner: "worker-A", expired: true, conv: "conv_M9" }));
+    mocks.fakeColl("buffer_messages").push(bufferRowDoc("m_M9", "conv_M9"));
+    // block the FIRST work-collection find inside recovery — heartbeat renewals
+    //   (findOne/updateOne on LEADER_COLL) are unaffected by findHook
+    let blocked = true;
+    state.findHook = async (coll: string) => {
+      if (blocked && coll !== LEADER_COLL) await sleep(260);
+    };
+    const recoveryDone = svc.botWorkerService.recoverStaleBuffers();
+    await sleep(150); // mid-block — recovery still running, leaseMs(80) already passed
+    const lMid = leaderDocs()[0];
+    assert(lMid?.owner_id === "worker-A" && lMid?.fencing_token === 1,
+      `mid-recovery leader must be A token 1 — got ${lMid?.owner_id}/${lMid?.fencing_token} (heartbeat did not auto-renew)`);
+    assert((await ensureLeadership("worker-B")) === false,
+      "B must stay fenced while A's heartbeat renews during blocked recovery");
+    blocked = false;
+    const rec = await recoveryDone;
+    await settle();
+    // recovery completes exactly once — no duplicate bot call, no extra reclaim
+    assert(rec.recovered >= 1, `recovery must process the stale row, got ${rec.recovered}`);
+    assert(state.calls.callBot === 1, `callBot=${state.calls.callBot} want exactly 1 — no duplicate`);
+    const claims = claimDocs("m_M9");
+    assert(claims.length === 1, `single claim doc — got ${claims.length}`);
+    assert(claims[0].owner_id === "worker-A", `claim owner=${claims[0].owner_id} want worker-A`);
+    assert(TERMINAL.has(claims[0].status), `claim must finalize, got ${claims[0].status}`);
+    const l = leaderDocs()[0];
+    assert(l?.owner_id === "worker-A" && l?.fencing_token === 1,
+      `post-recovery leader must stay A token 1 — got ${l?.owner_id}/${l?.fencing_token}`);
+  });
+
+  await test("M10 heartbeat CAS-loss race — B takeover mid-renew → A stops, next admission scans nothing", async () => {
+    mocks.botworkerRuntime.leaderLeaseMs = 60;
+    mocks.botworkerRuntime.leaderHeartbeatMs = 15;
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    await svc.pollNewMessages(); // acquire + arm heartbeat
+    assert(leaderDocs()[0]?.owner_id === "worker-A", "A must hold leadership");
+    // inject B takeover precisely inside A's next renewal write (CAS filter now stale)
+    let injected = false;
+    const flip = (coll: string) => {
+      if (injected || coll !== LEADER_COLL) return;
+      injected = true;
+      const d = leaderDocs()[0];
+      if (d) { d.owner_id = "worker-B"; d.fencing_token = 2; d.lease_expires_at = new Date(Date.now() + 60000); }
+    };
+    state.updateOneHook = async (coll: string) => flip(coll);
+    state.findOneAndUpdateHook = async (coll: string) => flip(coll);
+    await sleep(120); // several beats at 15ms — A's renew must CAS-miss then stop
+    state.updateOneHook = null; state.findOneAndUpdateHook = null;
+    // heartbeat must be dead after loss — snapshot writes then verify silence
+    const ops = countOps();
+    await sleep(80); // >5× heartbeatMs — surviving heartbeat would keep writing
+    const postLossWrites = ops.writes[LEADER_COLL] || 0;
+    seedInbound("m_M10", "conv_M10");
+    const rA = await svc.pollNewMessages();
+    await settle();
+    ops.stop();
+    assert(postLossWrites === 0, `heartbeat must die on CAS loss — ${postLossWrites} renewal writes after loss`);
+    assert(rA.found === 0, `post-loss admission must be quiet — found=${rA.found}`);
+    const foreign = ops.touched().filter((c) => c !== LEADER_COLL);
+    assert(foreign.length === 0, `post-loss admission must scan no work collections — touched ${foreign}`);
+    assert(leaderDocs()[0]?.owner_id === "worker-B", "B's takeover doc must not be overwritten by stale A");
+  });
+
+  await test("M11 lifecycle cleanup — clearPendingWork kills heartbeat, zero post-cleanup writes", async () => {
+    mocks.botworkerRuntime.leaderLeaseMs = 120;
+    mocks.botworkerRuntime.leaderHeartbeatMs = 20;
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    await svc.pollNewMessages(); // acquires + arms heartbeat
+    assert(leaderDocs()[0]?.owner_id === "worker-A", "A must hold leadership");
+    svc.botWorkerService.clearPendingWork(); // disable/shutdown — heartbeat dies NOW
+    const ops = countOps();
+    await sleep(100); // >4× heartbeatMs — any surviving beat would write botworker_state
+    ops.stop();
+    assert((ops.writes[LEADER_COLL] || 0) === 0,
+      `no renewal writes after cleanup — got ${ops.writes[LEADER_COLL]}`);
+  });
+
+  // ── BW-2 lifecycle review-fix: heartbeat renew-verb / timeout drain / same-process race ──
+
+  // F1 — heartbeat renews ONLY the ctx captured at admission {owner_id, fencing_token};
+  //   it must never takeover/reacquire — takeover is an admission-time operation
+  await test("M12a heartbeat renew blocked → lease lapse + B takeover → stale heartbeat cannot renew/takeover", async () => {
+    mocks.botworkerRuntime.leaderLeaseMs = 80;
+    mocks.botworkerRuntime.leaderHeartbeatMs = 20;
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    await svc.pollNewMessages(); // acquire + arm ctx{worker-A,1}
+    assert(leaderDocs()[0]?.owner_id === "worker-A", "A must be leader");
+    // flag-gated block: renew's leadership findOne waits on `gate` while blockNew;
+    //   blockNew=false lets OTHER (B's admission) findOne calls pass immediately
+    let blockNew = true;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    state.findOneHook = async (coll: string) => { if (blockNew && coll === LEADER_COLL) await gate; };
+    await sleep(60);  // ≥1 heartbeat beat is blocked inside its leadership findOne
+    await sleep(120); // A's lease(80) lapses while its renew is blocked
+    blockNew = false; // B's admission findOne must pass NOW (A's stays parked on gate)
+    assert((await ensureLeadership("worker-B")) !== false, "B must take over lapsed lease");
+    const tokB = leaderDocs()[0].fencing_token;
+    release();
+    state.findOneHook = null;
+    const ops = countOps();
+    await sleep(80); // >4× heartbeat — any surviving stale-ctx renewer would write
+    ops.stop();
+    const l = leaderDocs()[0];
+    assert(l?.owner_id === "worker-B" && l?.fencing_token === tokB,
+      `stale heartbeat must not renew/takeover B's lease — got ${l?.owner_id}/${l?.fencing_token}`);
+    assert((ops.writes[LEADER_COLL] || 0) === 0,
+      `post-release writes from stale heartbeat must be zero — got ${ops.writes[LEADER_COLL]}`);
+  });
+
+  await test("M12b stale heartbeat vs expired foreign lease → heartbeat must NOT reacquire (takeover = admission only)", async () => {
+    mocks.botworkerRuntime.leaderLeaseMs = 60;
+    mocks.botworkerRuntime.leaderHeartbeatMs = 15;
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    await svc.pollNewMessages();
+    assert(leaderDocs()[0]?.owner_id === "worker-A", "A must be leader");
+    let blockNew = true;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    state.findOneHook = async (coll: string) => { if (blockNew && coll === LEADER_COLL) await gate; };
+    await sleep(35);   // a heartbeat renew is blocked inside findOne
+    await sleep(100);  // A's lease(60) lapses during the block
+    blockNew = false;
+    assert((await ensureLeadership("worker-B")) !== false, "B must take over lapsed lease");
+    await sleep(90);   // B's lease(60) lapses too — doc is now expired FOREIGN
+    release();         // A's stale renew resumes onto an expired foreign doc
+    await sleep(60);
+    state.findOneHook = null;
+    const l = leaderDocs()[0];
+    assert(l?.owner_id === "worker-B",
+      `heartbeat is renew-only — stale beat must never takeover; got owner=${l?.owner_id}`);
+  });
+
+  await test("M12c clearPendingWork mid-heartbeat-op → zero post-cleanup renewal writes", async () => {
+    mocks.botworkerRuntime.leaderLeaseMs = 90;
+    mocks.botworkerRuntime.leaderHeartbeatMs = 20;
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    await svc.pollNewMessages();
+    let blockNew = true;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    state.findOneHook = async (coll: string) => { if (blockNew && coll === LEADER_COLL) await gate; };
+    await sleep(45); // a heartbeat renew is blocked inside its findOne
+    svc.botWorkerService.clearPendingWork(); // cleanup mid-op — heartbeat ctx invalidated
+    blockNew = false; release();             // stale renew resumes post-cleanup
+    const ops = countOps();
+    await sleep(80); // >4× heartbeat — surviving renewal would write botworker_state
+    ops.stop();
+    assert((ops.writes[LEADER_COLL] || 0) === 0,
+      `no renewal write may succeed after cleanup — got ${ops.writes[LEADER_COLL]}`);
+  });
+
+  // F2 — checkWaitTimeouts is top-level worker work: era-cancel + drain lifecycle
+  await test("M13 checkWaitTimeouts blocked at gate + clearPendingWork → engine skipped, no heartbeat, drain waits", async () => {
+    mocks.botworkerRuntime.leaderHeartbeatMs = 20;
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    let blockNew = true;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    state.findOneHook = async (coll: string) => { if (blockNew && coll === LEADER_COLL) await gate; };
+    const op = svc.botWorkerService.checkWaitTimeouts(); // blocks inside leadership lookup
+    await sleep(40);
+    let drained = false;
+    const drain = svc.botWorkerService.waitForInFlight(2000).then(() => { drained = true; });
+    await sleep(40);
+    assert(!drained, "waitForInFlight must wait the gated timeout op");
+    svc.botWorkerService.clearPendingWork(); // era abort while admission still blocked
+    blockNew = false; release();
+    const wt = await op;
+    await drain;
+    assert(wt === 0, `aborted-era timeout op must return 0, got ${wt}`);
+    assert(state.calls.checkWaitTimeouts === 0,
+      `inner workflowEngine.checkWaitTimeouts must not run after abort — ran ${state.calls.checkWaitTimeouts}x`);
+    assert(drained, "drain must complete once op resolves");
+    const ops = countOps();
+    await sleep(80); // >4× heartbeat — armed heartbeat would keep renewing
+    ops.stop();
+    assert((ops.writes[LEADER_COLL] || 0) === 0,
+      `heartbeat must not stay armed after era abort — ${ops.writes[LEADER_COLL]} renewal writes`);
+  });
+
+  // F3 — same-process concurrent admission: two entries race an absent leader doc;
+  //   the E11000 loser must re-read (bounded) and recognise its own process's lease
+  await test("M14 same-process concurrent admission (poll+recovery) → one doc/token1, heartbeat survives", async () => {
+    mocks.botworkerRuntime.leaderLeaseMs = 70;
+    mocks.botworkerRuntime.leaderHeartbeatMs = 20;
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    seedInbound("m_M14", "conv_M14");
+    const [r, rec] = await Promise.all([
+      svc.pollNewMessages(),
+      svc.botWorkerService.recoverStaleBuffers(),
+    ]);
+    await settle();
+    const leaders = leaderDocs();
+    assert(leaders.length === 1 && leaders[0].owner_id === "worker-A" && leaders[0].fencing_token === 1,
+      `single leader doc A/token1 — got ${leaders.length} docs ${leaders[0]?.owner_id}/${leaders[0]?.fencing_token}`);
+    assert(r.found >= 1, `poll must admit — found=${r.found}`);
+    assert(typeof rec.recovered === "number" && rec.recovered >= 0, "recovery must admit (not rejected)");
+    await sleep(110); // >5× heartbeat — surviving heartbeat keeps lease ahead of now
+    assert((leaderDocs()[0].lease_expires_at?.getTime() || 0) > Date.now(),
+      "heartbeat must survive concurrent same-owner admission — lease lapsed");
+    assert(state.calls.callBot === 1, `callBot=${state.calls.callBot} want 1 — no duplicate work`);
+  });
+
+  // ── BW-2 final admission-race correction ────────────────────
+
+  // F1 — `now` ต้องจับหลัง await findOne: lease อาจหมดระหว่าง DB read —
+  //   stale clock ทำ renew ด้วย token เดิม + เขียน expiry ที่หมดไปแล้ว
+  await test("M15 stale admission clock — leader findOne blocked past lease → expired admission must takeover (token+1) or return false", async () => {
+    mocks.botworkerRuntime.leaderLeaseMs = 60;
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    seedLeader("worker-A", { token: 5 });
+    leaderDocs()[0].lease_expires_at = new Date(Date.now() + 60); // short lease — dies mid-read
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let first = true;
+    state.findOneHook = async (coll: string) => {
+      if (first && coll === LEADER_COLL) { first = false; await gate; } // park ONLY this read
+    };
+    const p = ensureLeadership("worker-A"); // its findOne is parked
+    await sleep(140);                        // lease(60) lapses inside the blocked read
+    release();
+    const ok = await p;
+    state.findOneHook = null;
+    const l = leaderDocs()[0];
+    // stale-clock renew would return ctx{token5} and write lease measured from
+    //   pre-read time — already expired; contract: takeover (token 6) or false
+    assert(ok === false || (l?.owner_id === "worker-A" && l?.fencing_token === 6),
+      `expired-at-read lease must takeover token+1 or return false — got ok=${JSON.stringify(ok)} doc=${l?.owner_id}/${l?.fencing_token}`);
+    if (ok !== false) {
+      assert((l?.lease_expires_at?.getTime() || 0) > Date.now(),
+        "new lease_expires_at must be computed from post-read time — got an already-dead lease");
+    }
+  });
+
+  // F2 — `!ctx → stopLeaderHeartbeat()` lets a STALE loser wipe a ctx that a newer
+  //   admission installed meanwhile: parked B-view admission resumes false AFTER
+  //   the process re-acquired — its loss must not kill the armed heartbeat
+  await test("M16 stale admission result must not kill newer ctx — loser resolves after re-arm, heartbeat keeps renewing", async () => {
+    mocks.botworkerRuntime.leaderLeaseMs = 150;
+    mocks.botworkerRuntime.leaderHeartbeatMs = 20;
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    seedInbound("m_M16", "conv_M16");
+    await svc.pollNewMessages(); // A acquires ctx{A,1} + arms heartbeat
+    await settle();
+    assert(leaderDocs()[0]?.owner_id === "worker-A", "A must be leader");
+    // op1 = stale admission under a foreign view — parks at the leader findOne
+    mocks.botworkerRuntime.ownerId = "worker-B";
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let first = true;
+    state.findOneHook = async (coll: string) => {
+      if (first && coll === LEADER_COLL) { first = false; await gate; }
+    };
+    const op1 = svc.pollNewMessages(); // B-view admission parks inside ensureLeadership
+    await sleep(50);                   // op1 parked; A's heartbeat keeps renewing meanwhile
+    // same-process NEWER admission refreshes leaderCtx to a new {A,1} object
+    mocks.botworkerRuntime.ownerId = "worker-A";
+    const rec = await svc.botWorkerService.recoverStaleBuffers();
+    assert(rec.recovered === 0, `no seeded work — recovery just re-arms ctx, got ${rec.recovered}`);
+    release();                         // op1 resumes → reads {A,1} → foreign(B) → false
+    const r1 = await op1;
+    state.findOneHook = null;
+    await settle();
+    assert(r1.found === 0, `stale loser must stay quiet — found=${r1.found}`);
+    const ops = countOps();
+    await sleep(120); // >5× heartbeat — if op1's stale false killed the heartbeat, lease lapses
+    ops.stop();
+    const l = leaderDocs()[0];
+    assert(l?.owner_id === "worker-A" && l?.fencing_token === 1,
+      `newer ctx must survive stale false — got ${l?.owner_id}/${l?.fencing_token}`);
+    assert((l?.lease_expires_at?.getTime() || 0) > Date.now(),
+      "heartbeat must keep renewing after stale false — lease lapsed");
+    assert((ops.writes[LEADER_COLL] || 0) > 0,
+      "armed heartbeat must still be renewing — zero renewal writes observed");
+    assert(state.calls.callBot === 1, `callBot=${state.calls.callBot} want 1 — no duplicate work`);
   });
 
   // Task 4 — network trap proof: owner = test-botworker-idempotency-mocks.mjs

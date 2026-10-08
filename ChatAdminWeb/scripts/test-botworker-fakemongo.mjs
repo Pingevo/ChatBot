@@ -254,6 +254,7 @@ export function createFakeMongo(state = {}) {
       return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedCount: 0 };
     }
     async updateMany(filter, update, opts = {}) {
+      state.onQuery?.(this.name, "updateMany", filter);
       const h = hook("updateManyHook");
       if (h && (await h(this.name, filter, update)) === "skip") {
         return { acknowledged: true, matchedCount: 0, modifiedCount: 0 }; // veto — simulate CAS miss
@@ -289,12 +290,14 @@ export function createFakeMongo(state = {}) {
       return opts.returnDocument === "after" ? structuredClone(d) : before;
     }
     async deleteMany(filter = {}) {
+      state.onQuery?.(this.name, "deleteMany", filter);
       const docs = this.docs;
       const before = docs.length;
       for (let i = docs.length - 1; i >= 0; i--) if (matches(docs[i], filter)) docs.splice(i, 1);
       return { acknowledged: true, deletedCount: before - docs.length };
     }
     async deleteOne(filter = {}) {
+      state.onQuery?.(this.name, "deleteOne", filter);
       const h = hook("deleteOneHook");
       if (h) await h(this.name, filter);
       const i = this.docs.findIndex((d) => matches(d, filter));
@@ -303,6 +306,7 @@ export function createFakeMongo(state = {}) {
       return { acknowledged: true, deletedCount: 1 };
     }
     async distinct(field, filter = {}) {
+      state.onQuery?.(this.name, "distinct", filter);
       return [...new Set(this.docs.filter((d) => matches(d, filter)).map((d) => val(d, field)).filter((v) => v !== undefined))];
     }
     async countDocuments(filter = {}) {
@@ -310,9 +314,9 @@ export function createFakeMongo(state = {}) {
       if (state.queryDelayMs) await new Promise((r) => setTimeout(r, state.queryDelayMs));
       return this.docs.filter((d) => matches(d, filter)).length;
     }
-    async estimatedDocumentCount() { return this.docs.length; }
+    async estimatedDocumentCount() { state.onQuery?.(this.name, "estimatedDocumentCount", {}); return this.docs.length; }
     async indexes() { return []; }
-    aggregate() { throw new Error(`fake mongo: aggregate not supported (${this.name})`); }
+    aggregate() { state.onQuery?.(this.name, "aggregate", {}); throw new Error(`fake mongo: aggregate not supported (${this.name})`); }
   }
 
   async function getCollection(name) { return new FakeCollection(name); }

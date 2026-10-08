@@ -24,6 +24,11 @@ export const botworkerRuntime = {
   // owner identity unique ต่อ process boot — stale owner จาก process เก่า
   // เขียนทับไม่ได้เพราะ fencing_token เปลี่ยนทุก reclaim
   ownerId: `worker-${process.pid}-${randomUUID()}`,
+  // ⚡ BW-2 — worker leadership lease (single active worker ต่อ production scope)
+  //   อัตราส่วน lease/heartbeat เหมือน claim protocol (lease ≈ 3× heartbeat)
+  //   heartbeat ต้อง < lease; takeover latency หลัง leader ตาย ≤ leaderLeaseMs
+  leaderLeaseMs: 15000,
+  leaderHeartbeatMs: 5000,
   // attempt cap — reclaim เกินนี้ → bot_failed terminal (กันวนไม่สิ้นสุด)
   maxClaimAttempts: 3,
 };

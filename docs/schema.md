@@ -70,6 +70,7 @@
 | `testStatusConversation` | `test_status_conversation` | admin | test version ของ status |
 | `testChatSessions` | `test_chat_sessions` | admin | test chat session (Python เขียนหลัก) |
 | `botworkerEvents` | `botworker_events` | admin | botworker event log + handoff op idempotency docs |
+| `botworkerState` | `botworker_state` | admin | single-active botworker leadership lease (BW-2) |
 
 ### 1.3 DB connections (4 DBs)
 
@@ -1258,6 +1259,35 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | Write | logBotworkerEvent, handoff op insertOne/CAS | botworker, handoff service |
 
 **หน้าที่เข้าถึง:** ไม่มี UI ตรง — ใช้ภายใน bot worker / handoff
+
+---
+
+### 2.34 `botworker_state`
+
+**Purpose:** runtime coordination ของ bot worker — singleton leader lease คุม single-active-worker admission (BW-2); runtime state แยกจาก configuration (`system_configs`)
+
+**Singleton doc:** `_id: "botworker:leader"` — มี doc เดียวเสมอหลัง acquire ครั้งแรก; เข้าถึงด้วย `_id` เท่านั้น
+
+**Fields:**
+
+| Field | Type | หมายเหตุ |
+|-------|------|---------|
+| `_id` | string | `"botworker:leader"` เท่านั้น |
+| `owner_id` | string | owner process ปัจจุบัน (`botworkerRuntime.ownerId` = `worker-<pid>-<uuid>`) |
+| `fencing_token` | number | +1 ทุก expired takeover เท่านั้น — renew ไม่เพิ่ม |
+| `lease_expires_at` | Date | `now + botworkerRuntime.leaderLeaseMs`; หมดอายุ → takeover ได้ผ่าน CAS `{_id, owner_id, fencing_token, lease_expires_at<$lt:now}` |
+| `updated_at` | Date | write ล่าสุด |
+
+**Index:** ไม่มี custom index — `_id` built-in เท่านั้น (singleton doc)
+
+**Access:**
+
+| การกระทำ | โดยใคร | ผ่านไหน |
+|---------|-------|--------|
+| Read | leadership admission/renew (`ensureLeadership`/`renewLeadership`) | `botWorkerService` |
+| Write | acquire insert / renew CAS / takeover CAS | `botWorkerService` เท่านั้น |
+
+**หน้าที่เข้าถึง:** ไม่มี UI — worker runtime coordination เท่านั้น
 
 ---
 

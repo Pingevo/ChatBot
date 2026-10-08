@@ -99,6 +99,9 @@ export const serverConfig = {
     // ⚡ botworker parallel sandbox — ข้อความแอดมิน + event log ของหน้า /botworker (แยกจากของจริง)
     botworkerMessages: required("ADMIN_MONGO_COLLECTION_BOTWORKER_MESSAGES", "botworker_messages"),
     botworkerEvents: required("ADMIN_MONGO_COLLECTION_BOTWORKER_EVENTS", "botworker_events"),
+    // ⚡ BW-2 — worker coordination state (singleton leader lease doc)
+    //   runtime state แยกจาก config — ห้ามใส่ใน system_configs
+    botworkerState: required("ADMIN_MONGO_COLLECTION_BOTWORKER_STATE", "botworker_state"),
   },
   jwtSecret: requiredStrict("ADMIN_JWT_SECRET"),
   jwtAlgo: "HS256" as const,
