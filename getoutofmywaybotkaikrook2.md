@@ -2445,3 +2445,15 @@ S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mon
 - **M16 timeline**: A poll acquire ctx{A,1}+arm → rebind ownerId=B (loser-view) → op1 poll park ที่ leader findOne → rebind กลับ A → op2 recovery renew→`leaderCtx` ref ใหม่ (same token) → release op1 → read {A,1}=foreign(B)→false → stale false ต้องไม่ฆ่า heartbeat → lease renew ต่อ >150ms, token ค้าง 1, callBot=1
 - **GREEN หลังแก้**: 71/71 · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · build ผ่าน · diff-check clean
 - **Delta**: botWorkerService net +~8 LOC (ย้าย clock + ลบ false-path stop + comments) · test +2 tests (M15, M16) · 0 helper/coordinator เพิ่ม
+
+### BW-2 real-Mongo smoke gate (disposable Docker Mongo 7 — commit 9539f9e verified)
+- **Part 0 env-isolation fix (RED→GREEN)**: `verify-botworker-runtime-mongo.ts::runApply` เดิม `await import("dotenv/config")` — ขัดกฎ no-env-file → ลบออก + rebind strict env ทั้ง 5 ตัวจาก test-local constants เท่านั้น (ADMIN_MONGO_URI=validated loopback, ADMIN_MONGO_DB=verify_<rand>, ADMIN_JWT_SECRET/CHATBOT_INTERNAL_SECRET=`VERIFY_ONLY_*` fixed literals, CHATBOT_BASE_URL_SHOPEE=fake.url) ก่อน dynamic import ทุกตัว; safety suite เปลี่ยน dotenv-ordering pins → env-isolation pins → **110/110**
+- **Round 1 (S1–S6)**: disposable `mongo:7` container `--rm` bind `127.0.0.1:27018:27017` เท่านั้น → `--apply` exit 0, **27/27 PASS**; verdict เดิม `REAL_MONGO_CORE_SMOKE_PASS`
+- **Correction (reviewer)**: S1 loser เป็น **message-claim loser** (E11000 บน `botworker:claim:<mid>`) ไม่ใช่ **worker-leadership loser** — verdict รอบ 1 จึงถูกต้องแค่ core smoke; leadership race ยัง `BW2_REAL_MONGO_LEADERSHIP_RACE_UNPROVEN`
+- **Round 2 (S7–S9 added, TDD RED 7 fails → GREEN 110/110 safety)**: scenarios ใหม่เรียก `svc.ensureLeadership(explicitOwnerId)` ตรง (DB-level CAS จริง, ไม่ rebind process owner, ไม่มี sleep-เลือก-winner, ไม่มี retry)
+  - **S7 concurrent absent acquire = 5/5**: delete singleton → `Promise.all([A,B])` → winner เดียว/loser false · doc=1 · owner=winner · token=1 · fake calls+0
+  - **S8 active renew + foreign reject = 7/7**: winner renew → owner เดิม/token=1/lease เพิ่ม · loser→false · post-loser doc byte-identical (loser เขียน 0) · fake+0
+  - **S9 expired concurrent takeover = 8/8**: fenced expire `matchedCount=1` → `Promise.all([C,D])` → winner เดียว/other false · doc=1 · token=**2** พอดี · lease อนาคต · stale token-1 owner re-call→false · fake+0
+- **Round 2 apply**: exit 0, **S1–S9 = 47/47 PASS**; verdict **`BW2_REAL_MONGO_LEADERSHIP_PASS`**
+- **Cleanup**: harness marker/token-guarded dropDatabase → post-check `getDBNames()` = 0 verify DBs · container `--rm` removed · port 27018 closed · 0 volumes/containers เหลือ
+- **Safety**: worker ไม่เคยเปิด · provider/Python/Shopee calls = **0** (fake `/chat` in-process เท่านั้น, total 4 calls S1–S4) · `.env` ไม่ถูกอ่าน · configured/prod Mongo ไม่ถูกเชื่อม · ไม่มี retry --apply
