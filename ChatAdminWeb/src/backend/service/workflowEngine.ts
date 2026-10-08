@@ -107,6 +107,10 @@ export interface EngineMessage {
   //    let_ai_respond ส่งต่อให้ getGroupedHistoryForBot กัน current turn ซ้ำใน history
   //    (worker ส่ง ctx.message_ids; non-botworker callers ไม่ส่ง → behavior เดิม)
   exclude_message_ids?: string[];
+  // ⚡ claim/era cancellation signal — let_ai_respond ส่งต่อให้ callBot:
+  //   queued outbound ออกเมื่อ kill switch/ownership ตาย + bounded timeout ใน callBot
+  //   (botworker paths เท่านั้น; non-botworker callers ไม่ส่ง → behavior เดิม)
+  signal?: AbortSignal;
 }
 
 export interface DeliveredMessage {
@@ -1269,6 +1273,8 @@ async function performAction(
         ...(wfBotImages.length > 0 ? { images: wfBotImages } : {}),
         // ⚡ botworker parallel — handoff จากบอทต้องเขียน test store ไม่ใช่ของจริง
         ...(msg.testSource ? { conversationId: msg.conversation_id, simulate: true, testSource: msg.testSource } : {}),
+        // ⚡ claim/era cancellation — queued call ออกก่อน fetch, in-flight abort ตาม signal
+        ...(msg.signal ? { signal: msg.signal } : {}),
       });
       context.bot_answer = botResp.answer;
       context.bot_source = botResp.source;
@@ -1517,7 +1523,7 @@ async function performAction(
 //    query: status=waiting_for_reply + wait_started_at มี + wait_started_at < now - timeout
 //    ⚠️ race-safe: ใช้ $set status=running ก่อนเดิน graph (เหมือน resumeFlow)
 
-export async function checkWaitTimeouts(): Promise<number> {
+export async function checkWaitTimeouts(signal?: AbortSignal): Promise<number> {
   const config = await getSystemConfig();
   if (!config.workflow_enabled) return 0;
 
@@ -1556,7 +1562,7 @@ export async function checkWaitTimeouts(): Promise<number> {
     // เกิน timeout → branch "no_reply"
     processed++;
     try {
-      await processWaitTimeout(workflow, run);
+      await processWaitTimeout(workflow, run, signal);
     } catch (err) {
       await failRun(run, `wait timeout processing error: ${(err as Error).message}`);
     }
@@ -1576,7 +1582,7 @@ export async function checkWaitTimeouts(): Promise<number> {
 }
 
 /** ประมวลผล wait timeout — branch "no_reply" หรือ จบ flow */
-async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc): Promise<void> {
+async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc, signal?: AbortSignal): Promise<void> {
   // acquire ownership ก่อน (waiting=parked → CAS flip running / running=expired เท่านั้น)
   const acquired = await acquireRun(run.run_id);
   if (!acquired) return; // owner อื่น active → skip
@@ -1611,6 +1617,8 @@ async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc): P
       text: "",
       // ⚡ propagate sandbox source — run ของ botworker ต้องเขียน test store เท่านั้น
       ...(run.test_source ? { testSource: run.test_source } : {}),
+      // ⚡ era/cancellation signal — resumed let_ai_respond ออก queue เมื่อ shutdown
+      ...(signal ? { signal } : {}),
     };
     await walkGraph(workflow, { ...acquired, context: { ...acquired.context, customer_reply: "" } }, dummyMsg, noReplyNext[0]);
   } else {

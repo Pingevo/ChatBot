@@ -689,7 +689,10 @@ export async function processMessage(msg: {
   raw_payload?: unknown;
   images?: string[];  // ⚡ Phase 1F — image URLs รวมจาก buffer flush
   claimContext?: ClaimContext; // ⚡ batch flusher ส่ง ctx ของ member claims มา — ห้าม claim ซ้ำ
-}): Promise<{ status: string; detail: string; finalized: boolean; lost: boolean }> {
+  // ⚡ outer cancellation signal — era (kill switch/shutdown) / recovery abort
+  //   combine กับ claim ownership heartbeat เป็น claimSignal เดียว → ไหลถึง
+  //   processClaimedMessage → engineMsg → callBot queue/fetch
+}, signal?: AbortSignal): Promise<{ status: string; detail: string; finalized: boolean; lost: boolean }> {
   let ctx = msg.claimContext;
   if (!ctx) {
     const claimed = await claimMessage(msg);
@@ -706,9 +709,14 @@ export async function processMessage(msg: {
   //   (recovery เจอ same-owner + in-flight → leave ได้เพราะ executor จริงอยู่)
   for (const id of ctx.claim_ids) activeClaims.add(id);
   const abortCtrl = new AbortController();
+  // ⚡ claim signal = era cancellation + claim ownership — source รวมเดียวสำหรับ
+  //   outbound/queue/finalize boundary (timeout อยู่ใน callBot ไม่ใช่ที่นี่)
+  const claimSignal = signal
+    ? AbortSignal.any([signal, abortCtrl.signal])
+    : abortCtrl.signal;
   const heartbeat = startHeartbeat(ctx, abortCtrl);
   try {
-    const res = await processClaimedMessage(msg, ctx, abortCtrl.signal);
+    const res = await processClaimedMessage(msg, ctx, claimSignal);
     // fenced finalize — heartbeat lost (matchedCount=0) → ห้าม persist/finalize
     // ⚡ finalization contract: finalized เมื่อ terminal write ครบทุก claim_ids เท่านั้น
     //    lost/no-outcome → finalized=false → caller (flush) ห้ามลบ buffer rows
@@ -722,14 +730,6 @@ export async function processMessage(msg: {
     clearInterval(heartbeat);
     for (const id of ctx.claim_ids) activeClaims.delete(id);
   }
-}
-
-// bounded signal สำหรับ external bot call: timeout < lease + abort เมื่อเสีย ownership
-function botCallSignal(ownershipSignal: AbortSignal): AbortSignal {
-  return AbortSignal.any([
-    AbortSignal.timeout(botworkerRuntime.botCallTimeoutMs),
-    ownershipSignal,
-  ]);
 }
 
 // processing core — ต้องได้ ctx มาเท่านั้น (ห้าม claim เอง)
@@ -823,8 +823,15 @@ async function processClaimedMessage(msg: {
     // ⚡ current-batch exclusion — let_ai_respond ตัด batch นี้ออกจาก history
     //   (ข้อความเดียวกันอยู่ใน msg.text/images แล้ว — ห้ามซ้ำเป็น history turn)
     exclude_message_ids: ctx.message_ids,
+    // ⚡ claim signal (era+ownership) — let_ai_respond ส่งต่อให้ callBot:
+    //   queued workflow call ต้องออกเมื่อ kill switch/ownership ตาย, fetch bounded ใน callBot
+    signal,
   };
 
+  // ⚡ try ต้องครอบ workflow sections ด้วย — matchAndRun/resumeFlow throw
+  //   (callBot abort/provider error) ต้องไหลถึง classification catch เดียวด้านล่าง
+  //   (signal.aborted → cancelled recoverable / else → bot_failed terminal)
+  try {
   if (wfConfig.workflow_enabled) {
     // ① Active Flow Resume — flow รอ reply อยู่ → ข้อความใหม่เข้า flow ก่อนเสมอ
     const activeRun = await workflowEngine.getActiveRun(msg.conversation_id);
@@ -892,7 +899,6 @@ async function processClaimedMessage(msg: {
     }
   }
 
-  try {
     // 2. Check trigger
     const trigger = await triggerService.matchTrigger(msg.text, {
       shopId: msg.shop_id,
@@ -992,8 +998,8 @@ async function processClaimedMessage(msg: {
         conversationId: msg.conversation_id,
         simulate: true,
         testSource: WORKER_SOURCE,
-        // ⚡ bounded HTTP timeout + abort เมื่อเสีย ownership กลางคัน
-        signal: botCallSignal(signal),
+        // ⚡ claim signal (era+ownership) — timeout composition อยู่ใน callBot
+        signal,
       });
       // heartbeat lost กลางคัน → stale owner — ห้าม persist/finalize
       if (ctx.lost) return { status: "lost_ownership", detail: "claim lost mid-bot-call" };
@@ -1080,8 +1086,8 @@ async function processClaimedMessage(msg: {
       conversationId: msg.conversation_id,
       simulate: true,
       testSource: WORKER_SOURCE,
-      // ⚡ bounded HTTP timeout + abort เมื่อเสีย ownership กลางคัน
-      signal: botCallSignal(signal),
+      // ⚡ claim signal (era+ownership) — timeout composition อยู่ใน callBot
+      signal,
     });
     // heartbeat lost กลางคัน → stale owner — ห้าม persist/finalize
     if (ctx.lost) return { status: "lost_ownership", detail: "claim lost mid-bot-call" };
@@ -1148,8 +1154,22 @@ async function processClaimedMessage(msg: {
     };
 
   } catch (err) {
-    // บอท error → บันทึก error — bot_failed terminal one-shot (ไม่ retry อัตโนมัติ)
     const errorMsg = err instanceof Error ? err.message : String(err);
+    // ⚡ cancellation ≠ provider error — kill switch (era) / ownership loss abort
+    //   outbound+queue: claim คง processing → rising-edge recovery รับต่อ
+    //   (timeout ของ fetch ไม่ abort claim signal → provider timeout ยังเป็น bot_failed)
+    if (signal.aborted) {
+      await logBotworkerEvent({
+        type: "bot_cancelled",
+        actor: "bot-worker",
+        conversation_id: msg.conversation_id,
+        shop_id: msg.shop_id,
+        platform: msg.platform,
+        metadata: { error: errorMsg },
+      });
+      return { status: "cancelled", detail: `cancelled: ${errorMsg}` };
+    }
+    // บอท error → บันทึก error — bot_failed terminal one-shot (ไม่ retry อัตโนมัติ)
     await logBotworkerEvent({
       type: "bot_error",
       actor: "bot-worker",
@@ -1870,7 +1890,7 @@ async function recoverStaleClaims(freshAfter: Date, stats: RecoveryStats, signal
         ownedCtx = claimed.ctx;
       }
       if (signal.aborted) continue; // abort หลัง claim → ห้าม launch (claim คง lease ใหม่ → edge ถัดไปกู้)
-      const p = processMessage({ ...msg, claimContext: ownedCtx });
+      const p = processMessage({ ...msg, claimContext: ownedCtx }, signal);
       inFlight.add(p.catch(() => {}).finally(() => inFlight.delete(p)));
       recovered++;
     } catch (err) {
@@ -1994,7 +2014,7 @@ export const botWorkerService = {
     const signal = eraSignal();
     const run = (async (): Promise<number> => {
       if (signal.aborted || !(await acquireWorkerLeadership(signal))) return 0;
-      return workflowEngine.checkWaitTimeouts();
+      return workflowEngine.checkWaitTimeouts(signal);
     })();
     inFlight.add(run);
     run.then(() => inFlight.delete(run), () => inFlight.delete(run));

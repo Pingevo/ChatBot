@@ -57,12 +57,16 @@ async function test(name: string, fn: () => Promise<void>) {
 }
 
 async function reset() {
+  // ⚡ drain leaked gated fetches ของ test ก่อน — admitted fetch ที่ค้าง gate ต้อง
+  //   settle ก่อน มิฉะนั้น limiter slot รั่วไป test ถัดไป (module state ค้างข้าม test)
+  releaseGate(999);
+  await sleep(60);
   mocks.resetState();
   try { await svc.botWorkerService.clearPendingWork(); } catch { /* era may not exist */ }
   installFetchStub();
 }
 
-function assert(cond: boolean, msg = "assertion failed") {
+function assert(cond: boolean, msg = "assertion failed"): asserts cond {
   if (!cond) throw new Error(msg);
 }
 
@@ -76,6 +80,7 @@ function installFetchStub() {
   globalThis.fetch = async (url: any, opts: any = {}) => {
     s.fetchCalls++;
     s.fetchUrls.push(String(url));
+    try { s.fetchBodies.push(JSON.parse(opts?.body ?? "null")); } catch { s.fetchBodies.push(null); }
     s.fetchInFlight++;
     if (s.fetchInFlight > s.fetchPeak) s.fetchPeak = s.fetchInFlight;
     try {
@@ -212,7 +217,9 @@ function seedAiWorkflow() {
     false_branch_policy: "exit_to_bot",
     nodes: [
       { node_id: "n1", type: "trigger", subtype: "message_content", config: { keywords: ["wfkw"] }, position: { x: 0, y: 0 } },
-      { node_id: "n2", type: "action", subtype: "let_ai_respond", config: {}, position: { x: 0, y: 0 } },
+      // ⚡ prompt marker — let_ai_respond ส่ง promptPrefix+text → fetch body ต้องขึ้นต้น
+      //    ด้วย marker (หลักฐานว่า workflow path จริง ไม่ใช่ direct fallback)
+      { node_id: "n2", type: "action", subtype: "let_ai_respond", config: { prompt: "WF_PROMPT_MARKER" }, position: { x: 0, y: 0 } },
     ],
     edges: [{ edge_id: "e1", source_node_id: "n1", target_node_id: "n2" }],
     priority: 1, version: 1, created_by: "t", created_at: new Date(), updated_at: new Date(),
@@ -434,7 +441,12 @@ async function main() {
     releaseGate(2);
     const [a, r] = await Promise.all([direct, wf]);
     assert(a === "synthetic bot answer");
-    assert(r.status === "trigger_matched" || r.status === "bot_answered" || r.status === "workflow_actioned", `wf status=${r.status} ${r.detail}`);
+    // ⚡ exact workflow evidence — ห้ามยอมให้ direct fallback ทำให้ผ่าน
+    assert(r.status === "workflow_actioned", `wf status=${r.status} ${r.detail} — let_ai_respond ต้อง execute จริง`);
+    const runs = mocks.fakeColl("workflow_runs").filter((d: any) => d.conversation_id === conv);
+    assert(runs.length === 1 && runs[0].workflow_id === "wf_ai", `run evidence missing: ${JSON.stringify(runs.map((x: any) => x.workflow_id))}`);
+    const wfBody = mocks.state.fetchBodies.find((b: any) => typeof b?.message === "string" && b.message.startsWith("WF_PROMPT_MARKER"));
+    assert(!!wfBody, "no fetch body carries workflow prompt — let_ai_respond path not proven");
     assert(callParams().fetchCalls === 2, `fetch=${callParams().fetchCalls}`);
     assert(callParams().fetchPeak <= 1, `peak=${callParams().fetchPeak}`);
   });
@@ -453,7 +465,10 @@ async function main() {
     assert(callParams().fetchCalls === 2,
       `fetch=${callParams().fetchCalls} want 2 — workflow call bypassed the shared limit`);
     releaseGate(3);
-    await Promise.all([c1, c2, wf]);
+    const [, , r] = await Promise.all([c1, c2, wf]);
+    assert(r.status === "workflow_actioned", `wf status=${r.status} ${r.detail}`);
+    const wfBody = mocks.state.fetchBodies.find((b: any) => typeof b?.message === "string" && b.message.startsWith("WF_PROMPT_MARKER"));
+    assert(!!wfBody, "workflow prompt marker missing — direct fallback path would pass falsely");
     assert(callParams().fetchPeak <= 2, `peak=${callParams().fetchPeak} > limit 2`);
     assert(callParams().fetchCalls === 3);
   });
@@ -503,18 +518,19 @@ async function main() {
       await sleep(120); // ≥2 heartbeat ticks
       releaseGate(2);
       const r1 = await p1;
-      // ⚡ โค้ดเก่า: acquireBotSlot ไม่รองรับ abort → waiter ค้างถาวร → race-timeout
-      //    เป็น expected RED behavior; โค้ดใหม่: waiter ถูก remove → p2 resolve bot_failed
+      // ⚡ strict — waiter ต้อง settle ภายในเวลา ไม่ใช่ค้างถาวร (no P2_STUCK allowance)
       const r2 = await Promise.race([
         p2,
         sleep(3000).then(() => "P2_STUCK_IN_QUEUE" as const),
       ]);
       assert(r1.status === "bot_answered", `r1=${r1.status}`);
+      assert(r2 !== "P2_STUCK_IN_QUEUE", "queued call stuck after ownership loss — must settle");
       assert(callParams().fetchCalls === 1,
         `fetch=${callParams().fetchCalls} — aborted queued call must never reach fetch`);
-      if (r2 !== "P2_STUCK_IN_QUEUE") {
-        assert(!r2.finalized, "lost claim must not finalize");
-      }
+      assert(!r2.finalized, "lost claim must not finalize");
+      const c2doc = claimDoc("m2");
+      assert(c2doc?.status === "processing",
+        `claim=${c2doc?.status} — cancellation ต้องคง recoverable ไม่ใช่ terminal`);
     } finally {
       rt.botworkerRuntime.heartbeatMs = oldHb;
     }
@@ -604,6 +620,152 @@ async function main() {
     assert(s.fetchCalls >= 1);
     assert(s.fetchUrls.every((u) => u === EXPECTED_CHAT_URL),
       `unexpected URL: ${s.fetchUrls.join(",")}`);
+  });
+
+  // ═══ Review-fix: signal threading + kill switch + fail-stale ═══
+
+  await test("D1 workflow queued + ownership loss → settles, never fetches, no finalize", async () => {
+    const conv = "conv_d1";
+    seedConv(conv);
+    seedAiWorkflow();
+    seedUserMsg(conv, "m1", "wfkw hi");
+    mocks.state.config.bot_concurrency_limit = 1;
+    mocks.state.fetchGate = true;
+    const holder = botCall({ ...wc, message: "holder" }).then((r) => r.answer);
+    await sleep(20);
+    assert(callParams().fetchCalls === 1, `holder fetch=${callParams().fetchCalls}`);
+    const oldHb = rt.botworkerRuntime.heartbeatMs;
+    rt.botworkerRuntime.heartbeatMs = 30;
+    try {
+      const wf = processOne(conv, "m1", "wfkw hi");
+      await sleep(60);
+      assert(callParams().fetchCalls === 1, `fetch=${callParams().fetchCalls} — workflow call must be queued`);
+      // ownership loss กลาง queue — heartbeat CAS miss → ctx.lost + abort
+      claimDoc("m1")!.owner_id = "foreign-owner";
+      await sleep(120);
+      releaseGate(1);
+      const rwf = await Promise.race([wf, sleep(3000).then(() => "WF_STUCK" as const)]);
+      assert(rwf !== "WF_STUCK", "workflow queued call must settle after ownership loss");
+      assert(callParams().fetchCalls === 1,
+        `fetch=${callParams().fetchCalls} — aborted workflow call must never reach fetch`);
+      assert(!rwf.finalized, "lost claim must not finalize");
+      assert(claimDoc("m1")?.status === "processing",
+        `claim=${claimDoc("m1")?.status} — cancellation must stay recoverable`);
+      // workflow path จริง — run doc ถูกสร้างก่อนเดิน graph
+      const runs = mocks.fakeColl("workflow_runs").filter((d: any) => d.conversation_id === conv);
+      assert(runs.length >= 1, "no workflow run — workflow path not proven");
+      await holder;
+    } finally {
+      rt.botworkerRuntime.heartbeatMs = oldHb;
+    }
+  });
+
+  await test("D3 falling edge mid-queue (direct path) → no fetch, promise settles, claim recoverable", async () => {
+    const conv = "conv_d3";
+    seedConv(conv);
+    mocks.state.config.bot_concurrency_limit = 1;
+    mocks.state.fetchGate = true;
+    const holder = botCall({ ...wc, message: "holder" }).then((r) => r.answer);
+    await sleep(20);
+    assert(callParams().fetchCalls === 1);
+    await svc.ensureLeadership();
+    const since = new Date();
+    await sleep(5);
+    seedUserMsg(conv, "m1", "queued msg", { created_timestamp: new Date() });
+    await svc.pollNewMessages(since);
+    await sleep(80);
+    assert(callParams().fetchCalls === 1,
+      `fetch=${callParams().fetchCalls} — m1 must be queued behind holder`);
+    // ⚡ production kill switch — falling edge / shutdown
+    await svc.botWorkerService.clearPendingWork();
+    await svc.waitForInFlight(5000);
+    releaseGate(1);
+    await holder;
+    assert(callParams().fetchCalls === 1,
+      `fetch=${callParams().fetchCalls} — queued call must never start after kill switch`);
+    const c = claimDoc("m1");
+    assert(c?.status === "processing",
+      `claim=${c?.status} — kill-switch cancellation ต้องไม่ terminal (recoverable by rising edge)`);
+  });
+
+  await test("D4 falling edge mid-queue (workflow path) → no fetch, claim recoverable, run evidence", async () => {
+    const conv = "conv_d4";
+    seedConv(conv);
+    seedAiWorkflow();
+    mocks.state.config.bot_concurrency_limit = 1;
+    mocks.state.fetchGate = true;
+    const holder = botCall({ ...wc, message: "holder" }).then((r) => r.answer);
+    await sleep(20);
+    await svc.ensureLeadership();
+    const since = new Date();
+    await sleep(5);
+    seedUserMsg(conv, "m1", "wfkw queued", { created_timestamp: new Date() });
+    await svc.pollNewMessages(since);
+    await sleep(100);
+    assert(callParams().fetchCalls === 1,
+      `fetch=${callParams().fetchCalls} — workflow call must be queued`);
+    // workflow path ถูกเดินจริงก่อนรอ queue — run doc เป็น evidence
+    const runs = mocks.fakeColl("workflow_runs").filter((d: any) => d.conversation_id === conv);
+    assert(runs.length >= 1, "no workflow run — m1 did not take workflow path");
+    await svc.botWorkerService.clearPendingWork();
+    await svc.waitForInFlight(5000);
+    releaseGate(1);
+    await holder;
+    assert(callParams().fetchCalls === 1,
+      `fetch=${callParams().fetchCalls} — queued workflow call must never start after kill switch`);
+    const c = claimDoc("m1");
+    assert(c?.status === "processing",
+      `claim=${c?.status} — kill-switch cancellation must stay recoverable`);
+  });
+
+  await test("D5 config read failure at release → fail-stale (no burst to default)", async () => {
+    mocks.state.config.bot_concurrency_limit = 1;
+    mocks.state.fetchGate = true;
+    const calls = Array.from({ length: 3 }, (_, i) =>
+      botCall({ ...wc, message: `q${i}` }).then((r) => r.answer));
+    await sleep(20);
+    assert(callParams().fetchCalls === 1, `fetch=${callParams().fetchCalls} want 1`);
+    // config read ล้มกลาง drain — ต้อง fail-stale ที่ last accepted (1) ไม่ใช่ fallback 50
+    mocks.state.configError = true;
+    releaseGate(1);
+    await sleep(40);
+    assert(callParams().fetchCalls === 2,
+      `fetch=${callParams().fetchCalls} — drain must not burst beyond last accepted limit 1`);
+    assert(callParams().fetchPeak <= 1, `peak=${callParams().fetchPeak} — never exceed limit on read failure`);
+    // config กลับมาปกติ → queue เดินต่อ
+    mocks.state.configError = false;
+    releaseGate(1);
+    await sleep(40);
+    assert(callParams().fetchCalls === 3, `fetch=${callParams().fetchCalls} want 3`);
+    releaseGate(1);
+    await Promise.all(calls);
+  });
+
+  // ⚡ D2 รันสุดท้าย — โค้ดเก่าที่ signal ไม่ถึง workflow call จะ leak slot ถาวร
+  //    (hang ไม่มี abort) — อยู่ท้ายเพื่อไม่ให้ contamination กับ test อื่น
+  await test("D2 workflow let_ai_respond hang → bounded timeout → bot_failed, slot released", async () => {
+    const conv = "conv_d2";
+    seedConv(conv);
+    seedAiWorkflow();
+    seedUserMsg(conv, "m1", "wfkw hi");
+    mocks.state.config.bot_concurrency_limit = 1;
+    mocks.state.fetchHang = true; // hang จน signal abort — timeout ต้องผูกกับ workflow call ด้วย
+    const oldT = rt.botworkerRuntime.botCallTimeoutMs;
+    rt.botworkerRuntime.botCallTimeoutMs = 80;
+    try {
+      const wf = processOne(conv, "m1", "wfkw hi");
+      const rwf = await Promise.race([wf, sleep(4000).then(() => "WF_NO_TIMEOUT" as const)]);
+      assert(rwf !== "WF_NO_TIMEOUT",
+        "workflow callBot hung — no bounded timeout on workflow path (signal never threaded)");
+      assert(rwf.status === "bot_failed", `status=${rwf.status} ${rwf.detail} — timeout → bot_failed policy`);
+      assert(claimDoc("m1")?.status === "bot_failed", `claim=${claimDoc("m1")?.status}`);
+      // slot ถูกคืน — next call ต้องเดินต่อ ไม่ deadlock
+      mocks.state.fetchHang = false;
+      const r2 = await botCall({ ...wc, message: "after-timeout" });
+      assert(r2.answer === "synthetic bot answer", "queue deadlocked after timed-out slot");
+    } finally {
+      rt.botworkerRuntime.botCallTimeoutMs = oldT;
+    }
   });
 
   // ── summary ──────────────────────────────────────────────

@@ -6,6 +6,7 @@ import { serverConfig } from "../lib/config";
 import type { Platform } from "./systemConfigService";
 import { shouldUseChatV2, shouldUseChatV3, getBotProductLimit } from "./systemConfigService";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
+import { botworkerRuntime } from "./botworkerRuntime";
 
 export interface BotCallParams {
   platform: Platform;
@@ -88,7 +89,9 @@ async function resolveTicketState(
 //   ถ้า limiter อยู่ฝั่ง worker workflow path จะ bypass → ย้ายมาที่นี่จุดเดียว
 //   apply เฉพาะ testSource === "botworker" — normal ticket/live callers ไม่เปลี่ยน behavior
 //   queue รองรับ AbortSignal — abort ก่อน/กลาง queue → waiter ถูก remove ไม่เรียก fetch
-//   drain อ่าน limit ล่าสุดทุก release — admin ลด limit กลางคันจะไม่ admit เกิน limit ใหม่
+//   drain ไม่ขยายเพดานเกิน last accepted — admin ลด limit มีผลทันที,
+//   เพิ่ม limit propagate ผ่าน acquire ของ call ใหม่ (bounded ramp, ไม่ยิงซ้ำ),
+//   config read failure → fail-stale ไม่ fallback burst เป็น default
 
 interface BotCallWaiter {
   resolve(): void;
@@ -98,12 +101,8 @@ interface BotCallWaiter {
 }
 
 let activeBotCalls = 0;
+let lastAcceptedBotCallLimit = 50;
 const botCallQueue: BotCallWaiter[] = [];
-
-async function readBotCallLimit(): Promise<number> {
-  const { getSystemConfig } = await import("./systemConfigService");
-  return (await getSystemConfig()).bot_concurrency_limit || 50;
-}
 
 function acquireBotCallSlot(limit: number, signal?: AbortSignal): Promise<void> | void {
   if (signal?.aborted) throw signal.reason ?? new Error("bot call aborted");
@@ -129,8 +128,25 @@ function acquireBotCallSlot(limit: number, signal?: AbortSignal): Promise<void> 
 
 async function releaseBotCallSlot(): Promise<void> {
   activeBotCalls--;
-  // drain ด้วย limit ล่าสุด — ลด limit กลางคัน → ไม่ admit จน active ต่ำกว่า limit ใหม่
-  const limit = await readBotCallLimit().catch(() => 50);
+  // ⚡ fail-stale drain — getSystemConfig กลืน DB error → mergeWithSafety({}) (limit=50)
+  //   ตรวจสุขภาพ read ด้วย cache identity: healthy = cachedConfig ref เดียวกัน (a===b);
+  //   failure/unstable = doc ใหม่ทุกครั้ง (a!==b) หรือ throw → drain ที่ last accepted
+  //   healthy read: admin ลด limit มีผลทันที / เพิ่ม limit drain queue ต่อได้ไม่ยิงซ้ำ
+  let limit = lastAcceptedBotCallLimit;
+  try {
+    const { getSystemConfig } = await import("./systemConfigService");
+    const a = await getSystemConfig();
+    const b = await getSystemConfig();
+    if (a === b) {
+      const fresh = a.bot_concurrency_limit;
+      if (typeof fresh === "number" && fresh > 0) {
+        limit = lastAcceptedBotCallLimit = fresh;
+      }
+    }
+    // a !== b → read ไม่เสถียร (fallback doc ใหม่ทุกครั้ง) → fail-stale ที่ last accepted
+  } catch {
+    // read throw → fail-stale ที่ last accepted (ค่าที่เคย admit จริง) ห้าม fallback เพดานสูงกว่า
+  }
   while (botCallQueue.length && activeBotCalls < limit) {
     const w = botCallQueue.shift()!;
     w.signal?.removeEventListener("abort", w.onAbort);
@@ -160,9 +176,21 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
   const isWorkerCall = params.testSource === "botworker";
   let slotHeld = false;
   if (isWorkerCall) {
-    await acquireBotCallSlot(sysConfig.bot_concurrency_limit || 50, params.signal);
+    // accepted limit = ค่าที่ admit จริงใน call นี้ — ใช้เป็นเพดานสูงสุดของ drain
+    const confLimit = sysConfig.bot_concurrency_limit;
+    if (typeof confLimit === "number" && confLimit > 0) lastAcceptedBotCallLimit = confLimit;
+    await acquireBotCallSlot(lastAcceptedBotCallLimit, params.signal);
     slotHeld = true;
   }
+  // ⚡ bounded timeout สำหรับ worker outbound ทุก path — composition owner เดียวที่นี่
+  //   (direct/trigger/workflow เข้าทาง params.signal = era+ownership แล้ว;
+  //   non-worker callers ไม่เพิ่ม timeout — signal semantics เดิม)
+  const fetchSignal = isWorkerCall
+    ? AbortSignal.any([
+        ...(params.signal ? [params.signal] : []),
+        AbortSignal.timeout(botworkerRuntime.botCallTimeoutMs),
+      ])
+    : params.signal;
   try {
     const resp = await fetch(url, {
       method: "POST",
@@ -194,7 +222,7 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
         llm_context_limit: llmContextLimit,
       }),
       // ⚡ bounded timeout / ownership abort — fetch ยอมรับ AbortSignal ตรงๆ
-      ...(params.signal ? { signal: params.signal } : {}),
+      ...(fetchSignal ? { signal: fetchSignal } : {}),
     });
     if (!resp.ok) throw new Error(`bot call failed: ${resp.status}`);
     const data = await resp.json();

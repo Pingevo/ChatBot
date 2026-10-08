@@ -9,7 +9,6 @@
 
 import {
   createFakeMongo,
-  makeGetSystemConfigMock,
   shouldUseChatV2,
   shouldUseChatV3,
   getBotProductLimit,
@@ -31,6 +30,9 @@ export const state = {
   fetchGate: false,          // hold responses until test releases gate
   /** @type {(() => void)[]} */ gateResolvers: [],
   gateReleased: 0,           // quota-based release — survives resolver timing
+  /** @type {any[]} parsed request bodies — proves which call path reached fetch */
+  fetchBodies: [],
+  configError: false,        // true → getSystemConfig throws (fail-stale drain test)
   /** @type {{coll:string, op:string, filter:any}[]} */ queryLog: [],
   config: {
     bot_worker_enabled: true,
@@ -76,6 +78,8 @@ export function resetState() {
   state.fetchHang = false;
   state.fetchGate = false;
   state.gateResolvers.length = 0;
+  state.fetchBodies.length = 0;
+  state.configError = false;
   state.queryLog.length = 0;
   Object.assign(state.config, JSON.parse(JSON.stringify(DEFAULT_CONFIG)));
   fm.store.clear();
@@ -93,6 +97,13 @@ export async function ensureIndexes() {}
 
 // ── systemConfigService mock ─────────────────────────────────
 
-export const getSystemConfig = makeGetSystemConfigMock(state);
+export const getSystemConfig = async () => {
+  // ⚡ configError = injected read failure — limiter drain ต้อง fail-stale
+  //   (last accepted limit) ห้าม fallback burst เป็น default
+  if (state.configError) throw new Error("config read failed (test-injected)");
+  // ⚡ identity-stable — production getSystemConfig คืน cachedConfig ref เดียวกัน
+  //   เมื่อ read สุขภาพดี (callBot drain ใช้ a===b ตรวจ read health ตอน fail-stale)
+  return state.config;
+};
 export const systemConfigService = { getSystemConfig };
 export { shouldUseChatV2, shouldUseChatV3, getBotProductLimit };

@@ -14,6 +14,7 @@ export type BotworkerEventType =
   | "bot_reply"       // บอทตอบ (shadow_replies)
   | "bot_handoff"     // บอท/Python handoff (trigger, empty answer, warranty claim)
   | "bot_error"       // บอทประมวลผลล้มเหลว
+  | "bot_cancelled"   // kill-switch/ownership abort — ไม่ใช่ provider error (claim คง processing)
   | "workflow"        // workflow node side-effects (assign/label/close)
   | "backlog_assign"  // distributor จ่ายงานค้าง (per-ticket)
   | "backlog_commit"; // distributor commit batch (aggregate — ไม่ผูก conversation เดียว)

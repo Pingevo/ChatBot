@@ -284,7 +284,9 @@ type ProcessMessageFn = (msg: {
   raw_payload?: unknown;
   images?: string[];  // ⚡ Phase 1F — image URLs รวมจากทุก message ใน buffer
   claimContext?: ClaimContext;
-}) => Promise<{ status: string; detail: string; finalized: boolean; lost: boolean }>;
+  // ⚡ era/kill-switch signal — forward เข้า claim signal ของ processMessage
+  //   (queued outbound ต้องออกเมื่อ era ตาย — claimed work ห้ามเริ่ม provider call ใหม่)
+}, signal?: AbortSignal) => Promise<{ status: string; detail: string; finalized: boolean; lost: boolean }>;
 
 type MarkProcessedFn = (doc: {
   message_id: string;
@@ -502,7 +504,7 @@ export async function flushBuffer(
         raw_payload: firstMsg.raw_payload,
         images: allImages.length > 0 ? allImages : undefined,
         claimContext: ctx,
-      });
+      }, signal);
 
       // ⚡ finalization contract — ลบ rows เฉพาะเมื่อ finalize ครบทุก member claim
       //   partial/lost → คืน buffered (claims ยัง processing → lease หมด → recovery)
@@ -582,9 +584,9 @@ export async function bufferOrProcess(
   // ⚡ era aborted — ห้ามเขียน buffer row / arm timer / launch flush ใหม่ใน cancelled era
   if (signal?.aborted) return { status: "skip", detail: "era aborted" };
 
-  // ถ้าปิด buffer → ประมวลผลทันที (เหมือนเดิม)
+  // ถ้าปิด buffer → ประมวลผลทันที (เหมือนเดิม) — era signal forward เข้า claim
   if (!config.bufferEnabled) {
-    return processMessage(msg);
+    return processMessage(msg, signal);
   }
 
   const convId = msg.conversation_id;
