@@ -2512,3 +2512,35 @@ S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mon
 - **Test-infra**: config suite เซ็ต env switches=true ก่อน dynamic import (honest cold-start) · error-policy mocks เพิ่ม `findOneHook`/`updateOneHook` keys ใน state literal (tsc) · note: tsc incremental cache (`tsconfig.tsbuildinfo`) stale เคยหนึ่งครั้ง — ลบแล้วรันใหม่ clean
 - **Residual**: wait-node-missing `failRun` branch เป็น defensive (unreachable ผ่าน checkWaitTimeouts — outer filter require current_node_id=wait node) — fix ใส่ไว้ symmetric · abort ระหว่าง `coll.find(candidates)`/`logAdminEvent` ไม่มี write-run side effect (find=read, log=audit เท่านั้น) · era abort หลัง completeRun เริ่มเขียนแล้ว = contract เดิม
 - **Readiness**: BW-5 ปิดด้วย production config suite + timeout/accounting races ผ่านจริง · BW-6 ยังไม่ deploy/canary
+
+### BW-6 preflight G2+G3 (approved เฉพาะ G2+G3 — G4 ยังไม่อนุมัติ)
+- **G2 real-Mongo smoke PASS — `47/47` exit 0 รันเดียว บน HEAD `f316cdb`**: disposable `mongo:7` (image `1f995ad6fdb9` เดิม ไม่ pull) `--rm` bind `127.0.0.1:27018` เท่านั้น, ไม่มี volume/credentials — S1 claim idempotency+single reply · S2 buffered merge+row delete · S3 `bot_failed`+no re-invoke · S4 retry history-once · S5 stale→`no_action`+`stale_at_recovery` · S6 outcome preserved · S7 concurrent acquire winner เดียว/token=1 · S8 renew+foreign reject+doc byte-identical · S9 fenced takeover token=2+stale refused — `BOTWORKER_REAL_MONGO_SMOKE` token + loopback URI เท่านั้น, fake `/chat`, provider=0, worker=0
+- **G2 cleanup verified**: harness drop `botworker_runtime_verify_*` เอง → mongosh `getDBNames` กรอง verify = 0 DBs · `docker stop` + `--rm` → `ps -a` = 0 containers · port 27018 = 0 listeners
+- **G3 canary plan docs-only**: `docs/plans/botworker-canary-plan.md` — proven-vs-unproven matrix, staged enable (Stage 0 dry config `limit=1`/`workflow_enabled=false` → Stage A single-shop 30min obs → Stage B ramp 3+workflow 60min → Stage C ≥24h), success/failure criteria, dup-detection queries (`shadow_replies.inbound_message_id` unique, `chat_processing` claims, `admin_logs`, `botworker_state` lease), 429/500 monitoring, cost ceiling (limit=hard cap, calls ≤ inbound), kill switch 2 ระดับ (DB toggle ≤~7s / `compose stop`), rollback (claims processing → recovered next era, no data cleanup), pre-enable checklist — collection/field names verify จาก config.ts จริง
+- **ไม่แตะ**: runtime, worker, deploy, canary จริง, `.env`, push/PR — uncommitted doc รอ review
+
+### BW-6 G3 canary plan correction (docs-only, HEAD `f316cdb` — uncommitted รอ review)
+- **Review findings → fixed ใน `docs/plans/botworker-canary-plan.md`**:
+  - **single-shop ไม่จริง**: `pollNewMessagesInEra` query `{role:user, direction:in, created_timestamp>since}` ไม่มี `shop_id` filter (verify line 1418) → plan แยก 2 modes: **A isolated env/DB** (recommended — shop scope จริงเพราะ data มีแค่ test shop) vs **B production-global** (ทุก shop post-edge eligible — `limit=1` จำกัด concurrent calls เท่านั้น ไม่จำกัดร้าน/total calls; ต้อง pre-compute worst-case spend จาก inbound rate) — shop allowlist runtime อยู่นอก scope docs-only
+  - **cost ceiling ไม่ hard**: limit ≠ ceiling → mandatory values table (`EXECUTION_MODE`/`MAX_CANARY_DURATION_MINUTES`/`MAX_PROVIDER_CALLS`/`MAX_PROVIDER_COST_USD`/`OBSERVER_OWNER`/`ABORT_AUTHORITY`/`CANARY_START_TS`/`FORCED_STOP_TS` — ทุกช่อง `MUST_SET_BEFORE_G4` ห้าม invent) + hard-stop contract: provider-side budget/counter ที่เชื่อถือได้ หรือ G4=BLOCKED + wall-clock forced stop
+  - **workflow calls อาจ > inbound**: Stage A `workflow_enabled=false` คง ≤1 call/claimed turn; Stage B ต้องนับ calls ฝั่ง provider จริง ห้าม derive จาก inbound
+  - **shadow_replies ไม่พิสูจน์ calls หยุด**: 429/500/timeout ไม่มี reply doc → rollback verify = process state + worker logs + **provider dashboard (primary)** + claims/admin_logs supporting
+  - **emergency order แยก 2 กรณี**: normal = DB toggle→paused confirm→stop; cost spike = `compose stop` ก่อน→DB toggle ก่อน restart→verify process+provider activity
+  - **monitoring**: queries window-scoped (`CANARY_START`) + origin worker, 429/500 ดู 3 แหล่ง, cost criterion = ตัวเลขก่อน G4
+- **Gate**: G1 PASS · G2 PASS 47/47 (หลักฐานเดิมคงไว้ข้างบน) · G3 READY_FOR_REVIEW · **G4 BLOCKED_BY_MODE_AND_COST_LIMIT_APPROVAL** · G5 NOT APPROVED
+- **Uncommitted**: `docs/plans/botworker-canary-plan.md` (rewrite) + log นี้ — ห้าม stage จน review ผ่าน
+
+### BW-6 G3 final safety correction (docs-only, HEAD `f316cdb` — uncommitted รอ review)
+- **5 findings fixed ใน canary plan** (หลักฐาน G2 คงไว้ด้านบน ไม่รันซ้ำ):
+  - **High1 counter≠hard stop**: §4.1 บังคับ enforcement จริง — provider-enforced hard budget/rate cap (reject calls เมื่อชนเพดาน) หรือ automated supervisor อ่าน authoritative usage→`compose stop` เมื่อแตะ MAX_*; manual observer=monitoring เท่านั้น; ไม่มี→`BLOCKED_BY_MISSING_AUTOMATED_COST_STOP` + review evidence: mechanism owner/threshold/armed proof/stop action/usage-API-down behavior
+  - **High2 callBot≠provider call**: terminology §1 — worker request=HTTP `/chat`→Python, provider call=upstream OpenRouter/Gemini/search/model ใน Python (1 request อาจหลาย calls); Stage A พิสูจน์แค่ ≤1 **worker request**/turn ไม่ใช่ provider call; `MAX_PROVIDER_*` อ่าน provider-side usage เท่านั้น ห้าม derive จาก claims/inbound/callBot/shadow_replies; Mode B worst-case ต้อง `PROVIDER_COST_PER_CHAT_P95_USD` วัดจริง ไม่มี→BLOCKED
+  - **Med3 forced stop enforcement**: `FORCED_STOP_TS` เดียวไม่พอ → `FORCED_STOP_MECHANISM`+`OWNER`+`ARMED_AT` keys + armed proof + exact stop action + scheduler-fail fallback (cost-stop ยังตัด + observer hard-stop); ไม่ invent command ใช้ `MUST_SET_BEFORE_G4`
+  - **Med4 dup query origin filter**: verify `origin:"worker"|"workflow"`+`mode:"standalone"` (botWorkerService:472/538) + `__wf<N>` suffix — query ตรวจ same-identity dup เท่านั้น (multi workflow deliveries=ตั้งใจ)
+  - **Med5 mandatory thresholds**: เพิ่ม `MAX_BOT_FAILED_RATE_PERCENT`/`MAX_CONSECUTIVE_429`/`MAX_CONSECUTIVE_5XX`/`PROVIDER_COST_PER_CHAT_P95_USD`/`FORCED_STOP_MECHANISM`/`OWNER`/`ARMED_AT`/`COST_STOP_MECHANISM`/`ARMED_AT` — ทุกช่อง `MUST_SET_BEFORE_G4`, criteria อ้าง key ตรงๆ
+- **Gate**: `G4 = BLOCKED_BY_EXECUTION_MODE_AND_ENFORCED_LIMITS` (ปลดเมื่อ mode+thresholds+cost-per-chat+armed cost stop+armed forced stop+owners+rollback reviewed+explicit approval ครบ) · G5 NOT APPROVED
+- **Uncommitted**: plan rewrite + log นี้ — ห้าม stage จน review ผ่าน
+
+### BW-6 G3 cleanup — review passed, 2 จุดแก้เพิ่ม (docs-only, HEAD `f316cdb`)
+- **`COST_STOP_OWNER`** เพิ่มใน mandatory table (`MUST_SET_BEFORE_G4`) + อ้างตรงใน §4.1 evidence/checklist/G4 unblock — เจ้าของกลไก cost-stop จริง ห้ามแทนด้วย `OBSERVER_OWNER`/`ABORT_AUTHORITY` (คนละหน้าที่)
+- **p95 ≠ worst-case**: เปลี่ยน "worst-case spend" → **planned spend estimate (p95-based)** — สูตร `inbound_rate × PROVIDER_COST_PER_CHAT_P95_USD × duration` ใช้วางแผนเท่านั้น tail cost อาจเกิน; ตัวจำกัดจริง = `COST_STOP_MECHANISM` + provider-enforced limit
+- **G3 review ผ่าน → commit** `docs: add botworker canary safety gate` · G4 ยัง `BLOCKED_BY_EXECUTION_MODE_AND_ENFORCED_LIMITS` — ไม่ได้เปิด worker/deploy/canary
