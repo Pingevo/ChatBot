@@ -89,9 +89,10 @@ async function resolveTicketState(
 //   ถ้า limiter อยู่ฝั่ง worker workflow path จะ bypass → ย้ายมาที่นี่จุดเดียว
 //   apply เฉพาะ testSource === "botworker" — normal ticket/live callers ไม่เปลี่ยน behavior
 //   queue รองรับ AbortSignal — abort ก่อน/กลาง queue → waiter ถูก remove ไม่เรียก fetch
-//   drain ไม่ขยายเพดานเกิน last accepted — admin ลด limit มีผลทันที,
-//   เพิ่ม limit propagate ผ่าน acquire ของ call ใหม่ (bounded ramp, ไม่ยิงซ้ำ),
-//   config read failure → fail-stale ไม่ fallback burst เป็น default
+//   เพดานมาจาก config owner (systemConfigService) จุดเดียว — healthy = ค่าจริง,
+//   read failure = last-known-good / cold-start fail-closed 1 — fallback default 50
+//   ไม่มีทางขยายเพดานตอน admission หรือ drain
+//   admin ลด limit มีผลทันที, เพิ่ม limit propagate ผ่าน acquire/drain ตามค่าอ่านได้
 
 interface BotCallWaiter {
   resolve(): void;
@@ -101,7 +102,6 @@ interface BotCallWaiter {
 }
 
 let activeBotCalls = 0;
-let lastAcceptedBotCallLimit = 50;
 const botCallQueue: BotCallWaiter[] = [];
 
 function acquireBotCallSlot(limit: number, signal?: AbortSignal): Promise<void> | void {
@@ -128,24 +128,15 @@ function acquireBotCallSlot(limit: number, signal?: AbortSignal): Promise<void> 
 
 async function releaseBotCallSlot(): Promise<void> {
   activeBotCalls--;
-  // ⚡ fail-stale drain — getSystemConfig กลืน DB error → mergeWithSafety({}) (limit=50)
-  //   ตรวจสุขภาพ read ด้วย cache identity: healthy = cachedConfig ref เดียวกัน (a===b);
-  //   failure/unstable = doc ใหม่ทุกครั้ง (a!==b) หรือ throw → drain ที่ last accepted
-  //   healthy read: admin ลด limit มีผลทันที / เพิ่ม limit drain queue ต่อได้ไม่ยิงซ้ำ
-  let limit = lastAcceptedBotCallLimit;
+  // ⚡ drain อ่าน limit จาก config owner จุดเดียว — getSystemConfig คืน last-known-good
+  //   เมื่อ read ล้ม (cold-start → fail-closed 1) — เพดานไม่ขยายจากค่า fallback
+  let limit = 1;
   try {
     const { getSystemConfig } = await import("./systemConfigService");
-    const a = await getSystemConfig();
-    const b = await getSystemConfig();
-    if (a === b) {
-      const fresh = a.bot_concurrency_limit;
-      if (typeof fresh === "number" && fresh > 0) {
-        limit = lastAcceptedBotCallLimit = fresh;
-      }
-    }
-    // a !== b → read ไม่เสถียร (fallback doc ใหม่ทุกครั้ง) → fail-stale ที่ last accepted
+    const fresh = (await getSystemConfig()).bot_concurrency_limit;
+    if (typeof fresh === "number" && fresh > 0) limit = fresh;
   } catch {
-    // read throw → fail-stale ที่ last accepted (ค่าที่เคย admit จริง) ห้าม fallback เพดานสูงกว่า
+    // read throw ที่ไม่คาด → fail-closed ที่ 1 (ข้าม drain ไป slot ถัดไปรอ release ถัดไป)
   }
   while (botCallQueue.length && activeBotCalls < limit) {
     const w = botCallQueue.shift()!;
@@ -176,10 +167,10 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
   const isWorkerCall = params.testSource === "botworker";
   let slotHeld = false;
   if (isWorkerCall) {
-    // accepted limit = ค่าที่ admit จริงใน call นี้ — ใช้เป็นเพดานสูงสุดของ drain
+    // ⚡ admission limit มาจาก config owner เดียว — getSystemConfig รับประกัน
+    //   last-known-good/fail-closed แล้ว (ไม่มี fallback-50 รั่วมาที่นี่)
     const confLimit = sysConfig.bot_concurrency_limit;
-    if (typeof confLimit === "number" && confLimit > 0) lastAcceptedBotCallLimit = confLimit;
-    await acquireBotCallSlot(lastAcceptedBotCallLimit, params.signal);
+    await acquireBotCallSlot(typeof confLimit === "number" && confLimit > 0 ? confLimit : 1, params.signal);
     slotHeld = true;
   }
   // ⚡ bounded timeout สำหรับ worker outbound ทุก path — composition owner เดียวที่นี่

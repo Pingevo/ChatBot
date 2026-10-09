@@ -32,7 +32,10 @@ export const state = {
   gateReleased: 0,           // quota-based release — survives resolver timing
   /** @type {any[]} parsed request bodies — proves which call path reached fetch */
   fetchBodies: [],
-  configError: false,        // true → getSystemConfig throws (fail-stale drain test)
+  configError: false,        // true → getSystemConfig failure (production-faithful: fresh fallback doc, no throw)
+  /** @type {null | {coll:string, op:string, promise:Promise<void>}} persistence-boundary pause gate */
+  queryPause: null,
+  queryPauseHits: 0,
   /** @type {{coll:string, op:string, filter:any}[]} */ queryLog: [],
   config: {
     bot_worker_enabled: true,
@@ -65,6 +68,13 @@ export const store = fm.store;
 
 state.onQuery = (coll, op, filter) => {
   state.queryLog.push({ coll, op, filter });
+  // ⚡ persistence-boundary pause — test ค้าง write ชนิดเดียวกลางทาง (kill-switch
+  //   post-response race) — fakemongo await return นี้; ปล่อยด้วย release() จาก pauseQuery
+  const p = state.queryPause;
+  if (p && p.coll === coll && p.op === op) {
+    state.queryPauseHits++;
+    return p.promise;
+  }
 };
 
 export function resetState() {
@@ -80,6 +90,9 @@ export function resetState() {
   state.gateResolvers.length = 0;
   state.fetchBodies.length = 0;
   state.configError = false;
+  lastGoodConfig = null;
+  state.queryPause = null;
+  state.queryPauseHits = 0;
   state.queryLog.length = 0;
   Object.assign(state.config, JSON.parse(JSON.stringify(DEFAULT_CONFIG)));
   fm.store.clear();
@@ -97,13 +110,17 @@ export async function ensureIndexes() {}
 
 // ── systemConfigService mock ─────────────────────────────────
 
+// ⚡ last-known-good — mirror ของ systemConfigService contract:
+//   healthy read → snapshot ล่าสุด; read ล้ม → last-known-good เดิม;
+//   cold start ไม่เคยสำเร็จ → fail-closed ที่ concurrency=1 (ไม่ใช่ default 50)
+let lastGoodConfig = null;
+
 export const getSystemConfig = async () => {
-  // ⚡ configError = injected read failure — limiter drain ต้อง fail-stale
-  //   (last accepted limit) ห้าม fallback burst เป็น default
-  if (state.configError) throw new Error("config read failed (test-injected)");
-  // ⚡ identity-stable — production getSystemConfig คืน cachedConfig ref เดียวกัน
-  //   เมื่อ read สุขภาพดี (callBot drain ใช้ a===b ตรวจ read health ตอน fail-stale)
-  return state.config;
+  if (state.configError) {
+    return lastGoodConfig ?? { ...state.config, bot_concurrency_limit: 1 };
+  }
+  lastGoodConfig = { ...state.config };
+  return lastGoodConfig;
 };
 export const systemConfigService = { getSystemConfig };
 export { shouldUseChatV2, shouldUseChatV3, getBotProductLimit };

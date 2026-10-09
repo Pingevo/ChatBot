@@ -180,7 +180,7 @@ export function createFakeMongo(state = {}) {
     async findOne(filter = {}) {
       const h = hook("findOneHook");
       if (h) await h(this.name, filter);
-      state.onQuery?.(this.name, "findOne", filter);
+      await state.onQuery?.(this.name, "findOne", filter);
       if (state.queryDelayMs) await new Promise((r) => setTimeout(r, state.queryDelayMs));
       const d = this.docs.find((d) => matches(d, filter));
       return d ? structuredClone(d) : null;
@@ -194,7 +194,7 @@ export function createFakeMongo(state = {}) {
         limit(n) { limited = n; return cursor; },
         project(spec) { proj = spec; return cursor; },
         async toArray() {
-          state.onQuery?.(self.name, "find", filter);
+          await state.onQuery?.(self.name, "find", filter);
           const h = hook("findHook");
           if (h) await h(self.name, filter);
           if (state.queryDelayMs) await new Promise((r) => setTimeout(r, state.queryDelayMs));
@@ -218,7 +218,7 @@ export function createFakeMongo(state = {}) {
       return cursor;
     }
     async insertOne(doc) {
-      state.onQuery?.(this.name, "insertOne", doc);
+      await state.onQuery?.(this.name, "insertOne", doc);
       enforceUnique(this.name, doc);
       if (doc._id === undefined) doc._id = genOid();
       this.docs.push(doc);
@@ -233,7 +233,7 @@ export function createFakeMongo(state = {}) {
     async updateOne(filter, update, opts = {}) {
       const h = hook("updateOneHook");
       if (h) await h(this.name, filter, update);
-      state.onQuery?.(this.name, "updateOne", filter);
+      await state.onQuery?.(this.name, "updateOne", filter);
       const d = this.docs.find((d) => matches(d, filter));
       if (d) {
         applyUpdate(d, update, false);
@@ -254,7 +254,7 @@ export function createFakeMongo(state = {}) {
       return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedCount: 0 };
     }
     async updateMany(filter, update, opts = {}) {
-      state.onQuery?.(this.name, "updateMany", filter);
+      await state.onQuery?.(this.name, "updateMany", filter);
       const h = hook("updateManyHook");
       if (h && (await h(this.name, filter, update)) === "skip") {
         return { acknowledged: true, matchedCount: 0, modifiedCount: 0 }; // veto — simulate CAS miss
@@ -268,7 +268,7 @@ export function createFakeMongo(state = {}) {
     async findOneAndUpdate(filter, update, opts = {}) {
       const h = hook("findOneAndUpdateHook");
       if (h) await h(this.name, filter);
-      state.onQuery?.(this.name, "findOneAndUpdate", filter);
+      await state.onQuery?.(this.name, "findOneAndUpdate", filter);
       const d = this.docs.find((d) => matches(d, filter));
       if (!d) {
         if (opts.upsert) {
@@ -290,14 +290,14 @@ export function createFakeMongo(state = {}) {
       return opts.returnDocument === "after" ? structuredClone(d) : before;
     }
     async deleteMany(filter = {}) {
-      state.onQuery?.(this.name, "deleteMany", filter);
+      await state.onQuery?.(this.name, "deleteMany", filter);
       const docs = this.docs;
       const before = docs.length;
       for (let i = docs.length - 1; i >= 0; i--) if (matches(docs[i], filter)) docs.splice(i, 1);
       return { acknowledged: true, deletedCount: before - docs.length };
     }
     async deleteOne(filter = {}) {
-      state.onQuery?.(this.name, "deleteOne", filter);
+      await state.onQuery?.(this.name, "deleteOne", filter);
       const h = hook("deleteOneHook");
       if (h) await h(this.name, filter);
       const i = this.docs.findIndex((d) => matches(d, filter));
@@ -306,15 +306,15 @@ export function createFakeMongo(state = {}) {
       return { acknowledged: true, deletedCount: 1 };
     }
     async distinct(field, filter = {}) {
-      state.onQuery?.(this.name, "distinct", filter);
+      await state.onQuery?.(this.name, "distinct", filter);
       return [...new Set(this.docs.filter((d) => matches(d, filter)).map((d) => val(d, field)).filter((v) => v !== undefined))];
     }
     async countDocuments(filter = {}) {
-      state.onQuery?.(this.name, "countDocuments", filter);
+      await state.onQuery?.(this.name, "countDocuments", filter);
       if (state.queryDelayMs) await new Promise((r) => setTimeout(r, state.queryDelayMs));
       return this.docs.filter((d) => matches(d, filter)).length;
     }
-    async estimatedDocumentCount() { state.onQuery?.(this.name, "estimatedDocumentCount", {}); return this.docs.length; }
+    async estimatedDocumentCount() { await state.onQuery?.(this.name, "estimatedDocumentCount", {}); return this.docs.length; }
     async indexes() { return []; }
     aggregate() { state.onQuery?.(this.name, "aggregate", {}); throw new Error(`fake mongo: aggregate not supported (${this.name})`); }
   }

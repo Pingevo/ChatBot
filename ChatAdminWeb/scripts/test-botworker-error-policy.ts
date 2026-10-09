@@ -207,6 +207,23 @@ const repliesIn = (conv: string) =>
   mocks.fakeColl("shadow_replies").filter((d: any) => d.conversation_id === conv);
 const callParams = () => mocks.state; // fetch counters live on state
 
+/** poll cond จนจริงหรือหมดเวลา (deterministic wait — ไม่พึ่ง sleep เดี่ยว) */
+async function waitFor(cond: () => boolean, ms = 4000): Promise<void> {
+  const t0 = Date.now();
+  while (!cond()) {
+    if (Date.now() - t0 > ms) return;
+    await sleep(15);
+  }
+}
+
+/** pause fake-mongo write ชนิดเดียวกลางทาง — persist boundary gate (kill-switch post-response)
+ *  คืน release() — เรียกเพื่อปล่อย write ให้เดินต่อ */
+function pauseQuery(coll: string, op: string): () => void {
+  let release!: () => void;
+  mocks.state.queryPause = { coll, op, promise: new Promise<void>((r) => (release = r)) };
+  return release;
+}
+
 /** seed workflow ที่ trigger("wfkw") → let_ai_respond (pattern เดียวกับ E7 boundary) */
 function seedAiWorkflow() {
   mocks.state.config.workflow_enabled = true;
@@ -739,6 +756,230 @@ async function main() {
     assert(callParams().fetchCalls === 3, `fetch=${callParams().fetchCalls} want 3`);
     releaseGate(1);
     await Promise.all(calls);
+  });
+
+  // ═══ BW-5 final corrective: config failure at admission + post-response
+  //     kill switch + wait-timeout abort rollback ═══
+
+  await test("D6 config failure at ADMISSION → fallback-50 must never raise the ceiling", async () => {
+    mocks.state.config.bot_concurrency_limit = 1;
+    mocks.state.fetchGate = true;
+    const holder = botCall({ ...wc, message: "holder" }).then((r) => r.answer);
+    await sleep(20);
+    assert(callParams().fetchCalls === 1, `holder fetch=${callParams().fetchCalls}`);
+    // ⚡ production-faithful failure — getSystemConfig ไม่ throw แต่คืน fresh
+    //   fallback doc (bot_concurrency_limit=50) ทุก call — call ใหม่ห้ามยึด 50 เป็นเพดาน
+    mocks.state.configError = true;
+    const queued = Array.from({ length: 3 }, (_, i) =>
+      botCall({ ...wc, message: `burst${i}` }).then((r) => r.answer));
+    await sleep(60);
+    assert(callParams().fetchCalls === 1,
+      `fetch=${callParams().fetchCalls} — config failure must not admit beyond last-known-good 1`);
+    assert(callParams().fetchPeak <= 1, `peak=${callParams().fetchPeak}`);
+    // config กลับมา + increase มีผลจริง — queue เดินตาม limit ใหม่
+    mocks.state.configError = false;
+    mocks.state.config.bot_concurrency_limit = 3;
+    releaseGate(1);
+    await sleep(60);
+    assert(callParams().fetchCalls === 4,
+      `fetch=${callParams().fetchCalls} want 4 — healthy increase must drain`);
+    assert(callParams().fetchPeak <= 3, `peak=${callParams().fetchPeak}`);
+    releaseGate(4);
+    await Promise.all([holder, ...queued]);
+  });
+
+  await test("D7 cold-start config failure → fail-closed 1 (never fallback-50)", async () => {
+    // ⚡ cold start — ไม่มี healthy read เลย (ไม่มี last-known-good)
+    //   failure ต้อง fail-closed ที่ 1 — ห้าม admit ตาม fallback default 50
+    mocks.state.configError = true;
+    mocks.state.fetchGate = true;
+    const calls = Array.from({ length: 3 }, (_, i) =>
+      botCall({ ...wc, message: `cold${i}` }).then((r) => r.answer));
+    await sleep(60);
+    assert(callParams().fetchCalls === 1,
+      `fetch=${callParams().fetchCalls} — cold-start failure must admit at most 1`);
+    assert(callParams().fetchPeak <= 1, `peak=${callParams().fetchPeak}`);
+    // config กลับมา → drain ตาม healthy config จริง
+    mocks.state.configError = false;
+    releaseGate(3);
+    await Promise.all(calls);
+    assert(callParams().fetchCalls === 3, `fetch=${callParams().fetchCalls} want 3`);
+  });
+
+  await test("D8 kill switch AFTER provider response (direct) → no finalize, recovery reuses evidence", async () => {
+    const conv = "conv_d8";
+    seedConv(conv);
+    // ⚡ pause ที่ persist boundary — provider response สำเร็จแล้ว แต่ reply write ค้าง
+    const release = pauseQuery("shadow_replies", "insertOne");
+    await svc.ensureLeadership();
+    const since = new Date();
+    await sleep(5);
+    seedUserMsg(conv, "m1", "direct post-resp", { created_timestamp: new Date() });
+    await svc.pollNewMessages(since);
+    await waitFor(() => mocks.state.queryPauseHits === 1);
+    assert(mocks.state.queryPauseHits === 1,
+      `pauseHits=${mocks.state.queryPauseHits} — reply persist boundary never reached`);
+    assert(callParams().fetchCalls === 1, `fetch=${callParams().fetchCalls}`);
+    // kill switch กลาง persist — era abort หลัง provider response สำเร็จ
+    await svc.botWorkerService.clearPendingWork();
+    release();
+    await svc.waitForInFlight(5000);
+    const c = claimDoc("m1");
+    assert(c?.status === "processing",
+      `claim=${c?.status} — post-response era-abort must not finalize claim`);
+    // deterministic evidence persist ไปแล้ว (หยุด write กลางทางไม่ได้) — recovery reuse
+    assert(repliesIn(conv).length === 1, `replies=${repliesIn(conv).length} — one persisted reply`);
+    c!.lease_expires_at = new Date(Date.now() - 1000);
+    await svc.botWorkerService.recoverStaleBuffers();
+    assert(claimDoc("m1")?.status !== "processing",
+      `claim=${claimDoc("m1")?.status} — recovery must finalize claim from committed evidence`);
+    assert(callParams().fetchCalls === 1,
+      `fetch=${callParams().fetchCalls} — recovery must not call provider again`);
+    assert(repliesIn(conv).length === 1, "no duplicate reply after recovery");
+  });
+
+  await test("D9 kill switch AFTER provider response (workflow) → no finalize, no dup delivery", async () => {
+    const conv = "conv_d9";
+    seedConv(conv);
+    seedAiWorkflow();
+    const release = pauseQuery("shadow_replies", "insertOne");
+    await svc.ensureLeadership();
+    const since = new Date();
+    await sleep(5);
+    seedUserMsg(conv, "m1", "wfkw post-resp", { created_timestamp: new Date() });
+    await svc.pollNewMessages(since);
+    await waitFor(() => mocks.state.queryPauseHits === 1);
+    assert(mocks.state.queryPauseHits === 1,
+      `pauseHits=${mocks.state.queryPauseHits} — workflow persist boundary never reached`);
+    assert(callParams().fetchCalls === 1, `fetch=${callParams().fetchCalls}`);
+    // workflow path จริง — run doc เป็น evidence ก่อน assert cancellation
+    const runs = mocks.fakeColl("workflow_runs").filter((d: any) => d.conversation_id === conv);
+    assert(runs.length >= 1, "no workflow run — m1 did not take workflow path");
+    await svc.botWorkerService.clearPendingWork();
+    release();
+    await svc.waitForInFlight(5000);
+    const c = claimDoc("m1");
+    assert(c?.status === "processing",
+      `claim=${c?.status} — post-response era-abort must not finalize claim`);
+    assert(repliesIn(conv).length === 1, `replies=${repliesIn(conv).length} — one workflow reply persisted`);
+    c!.lease_expires_at = new Date(Date.now() - 1000);
+    await svc.botWorkerService.recoverStaleBuffers();
+    assert(claimDoc("m1")?.status !== "processing",
+      `claim=${claimDoc("m1")?.status} — recovery must finalize from committed evidence`);
+    assert(callParams().fetchCalls === 1, "no provider call on recovery");
+    assert(repliesIn(conv).length === 1, "no duplicate workflow reply");
+  });
+
+  await test("D10 wait-timeout abort (fenced run) → parked state restored, retry once", async () => {
+    const conv = "conv_d10";
+    seedConv(conv);
+    mocks.state.config.workflow_enabled = true;
+    mocks.fakeColl("workflows").push({
+      workflow_id: "wf_wait", name: "wf_wait", enabled: true, status: "published", is_deleted: false,
+      shop_ids: ["shop_1"], platforms: ["shopee"], trigger_frequency: "every_time",
+      false_branch_policy: "exit_to_bot",
+      nodes: [
+        { node_id: "n1", type: "trigger", subtype: "message_content", config: { keywords: ["waitkw"] }, position: { x: 0, y: 0 } },
+        { node_id: "w1", type: "wait", subtype: "wait_for_reply", config: { answer_type: "any", max_retries: 3, timeout_ms: 50 }, position: { x: 0, y: 0 } },
+        { node_id: "n3", type: "action", subtype: "let_ai_respond", config: {}, position: { x: 0, y: 0 } },
+      ],
+      edges: [
+        { edge_id: "e1", source_node_id: "n1", target_node_id: "w1" },
+        { edge_id: "e2", source_node_id: "w1", target_node_id: "n3", branch: "no_reply" },
+      ],
+      priority: 1, version: 1, created_by: "t", created_at: new Date(), updated_at: new Date(),
+    });
+    // ⚡ fenced parked run — wait node, lease/timeout ครบแล้ว
+    const parkedAt = new Date(Date.now() - 60000);
+    mocks.fakeColl("workflow_runs").push({
+      run_id: "run_d10", workflow_id: "wf_wait",
+      conversation_id: conv, shop_id: "shop_1", platform: "shopee",
+      customer_id: "cust_1",
+      status: "waiting_for_reply", current_node_id: "w1",
+      waiting_for: "next_message", wait_node_id: "w1",
+      wait_started_at: parkedAt, wait_retry_count: 0,
+      context: {}, test_source: "botworker",
+      owner_id: "stale-owner", fencing_token: 5,
+      lease_expires_at: new Date(Date.now() - 1000),
+      started_at: new Date(Date.now() - 61000), updated_at: new Date(Date.now() - 60000),
+      version: 1,
+    });
+    mocks.state.fetchHang = true; // resumed let_ai_respond ค้างจน abort
+    await svc.ensureLeadership();
+    const p = svc.botWorkerService.checkWaitTimeouts();
+    await waitFor(() => callParams().fetchCalls === 1, 3000);
+    assert(callParams().fetchCalls === 1,
+      `fetch=${callParams().fetchCalls} — resumed let_ai_respond must reach the stub`);
+    // kill switch กลางเดิน no_reply branch — abort หลัง acquire + running flip
+    await svc.botWorkerService.clearPendingWork();
+    await p; // ต้อง settle ไม่ค้าง
+    assert(callParams().fetchCalls === 1, `fetch=${callParams().fetchCalls} — no provider call after abort`);
+    const run = mocks.fakeColl("workflow_runs").find((d: any) => d.run_id === "run_d10");
+    assert(run.status === "waiting_for_reply",
+      `run.status=${run.status} — abort must restore parked state (fenced rollback)`);
+    assert(run.wait_started_at?.getTime?.() === parkedAt.getTime(),
+      `wait_started_at=${run.wait_started_at} — parked wait context must be preserved`);
+    assert(run.wait_node_id === "w1" && run.current_node_id === "w1" && run.waiting_for === "next_message",
+      `wait context lost — node=${run.wait_node_id} current=${run.current_node_id} waiting_for=${run.waiting_for}`);
+    // era ใหม่ — timeout retry ทำต่อครั้งเดียว
+    mocks.state.fetchHang = false;
+    await svc.botWorkerService.checkWaitTimeouts();
+    assert(callParams().fetchCalls === 2, `fetch=${callParams().fetchCalls} — retry once only`);
+    const after = mocks.fakeColl("workflow_runs").find((d: any) => d.run_id === "run_d10");
+    assert(after.status === "completed",
+      `run.status=${after.status} — retried no_reply branch must complete`);
+    assert(repliesIn(conv).length === 0, "wait-timeout path must not emit duplicate replies");
+  });
+
+  await test("D11 wait-timeout abort (legacy unfenced run) → parked state restored", async () => {
+    const conv = "conv_d11";
+    seedConv(conv);
+    mocks.state.config.workflow_enabled = true;
+    mocks.fakeColl("workflows").push({
+      workflow_id: "wf_wait_l", name: "wf_wait_l", enabled: true, status: "published", is_deleted: false,
+      shop_ids: ["shop_1"], platforms: ["shopee"], trigger_frequency: "every_time",
+      false_branch_policy: "exit_to_bot",
+      nodes: [
+        { node_id: "n1", type: "trigger", subtype: "message_content", config: { keywords: ["waitkw"] }, position: { x: 0, y: 0 } },
+        { node_id: "w1", type: "wait", subtype: "wait_for_reply", config: { answer_type: "any", max_retries: 3, timeout_ms: 50 }, position: { x: 0, y: 0 } },
+        { node_id: "n3", type: "action", subtype: "let_ai_respond", config: {}, position: { x: 0, y: 0 } },
+      ],
+      edges: [
+        { edge_id: "e1", source_node_id: "n1", target_node_id: "w1" },
+        { edge_id: "e2", source_node_id: "w1", target_node_id: "n3", branch: "no_reply" },
+      ],
+      priority: 1, version: 1, created_by: "t", created_at: new Date(), updated_at: new Date(),
+    });
+    // ⚡ legacy run — ไม่มี owner_id/fencing_token/lease (pre-fencing era)
+    const parkedAt = new Date(Date.now() - 60000);
+    mocks.fakeColl("workflow_runs").push({
+      run_id: "run_d11", workflow_id: "wf_wait_l",
+      conversation_id: conv, shop_id: "shop_1", platform: "shopee",
+      customer_id: "cust_1",
+      status: "waiting_for_reply", current_node_id: "w1",
+      waiting_for: "next_message", wait_node_id: "w1",
+      wait_started_at: parkedAt, wait_retry_count: 0,
+      context: {}, test_source: "botworker",
+      started_at: new Date(Date.now() - 61000), updated_at: new Date(Date.now() - 60000),
+      version: 1,
+    });
+    mocks.state.fetchHang = true;
+    await svc.ensureLeadership();
+    const p = svc.botWorkerService.checkWaitTimeouts();
+    await waitFor(() => callParams().fetchCalls === 1, 3000);
+    assert(callParams().fetchCalls === 1,
+      `fetch=${callParams().fetchCalls} — resumed let_ai_respond must reach the stub`);
+    await svc.botWorkerService.clearPendingWork();
+    await p;
+    assert(callParams().fetchCalls === 1, `fetch=${callParams().fetchCalls} — no provider call after abort`);
+    const run = mocks.fakeColl("workflow_runs").find((d: any) => d.run_id === "run_d11");
+    // ⚡ legacy contract — era abort ห้าม terminalize เป็น errored; state ต้อง retryable
+    //   (rollback ผ่าน acquired doc ที่ acquire ใส่ owner ให้แล้ว — ไม่ใช่ fenced guarantee
+    //   ของ run เดิม แต่ต้องไม่ทิ้ง run ค้าง running/errored)
+    assert(run.status === "waiting_for_reply",
+      `run.status=${run.status} — legacy abort must not terminalize (pre-fix: errored)`);
+    assert(run.wait_started_at?.getTime?.() === parkedAt.getTime(),
+      `wait_started_at=${run.wait_started_at} — wait context must be preserved`);
   });
 
   // ⚡ D2 รันสุดท้าย — โค้ดเก่าที่ signal ไม่ถึง workflow call จะ leak slot ถาวร

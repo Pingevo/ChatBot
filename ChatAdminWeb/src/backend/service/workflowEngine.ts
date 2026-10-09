@@ -1564,6 +1564,9 @@ export async function checkWaitTimeouts(signal?: AbortSignal): Promise<number> {
     try {
       await processWaitTimeout(workflow, run, signal);
     } catch (err) {
+      // ⚡ era abort → parked-state rollback อยู่ใน processWaitTimeout (ถือ acquired
+      //   context) แล้ว — ห้าม failRun ที่นี่ (snapshot เก่า + terminalize ผิด contract)
+      if (signal?.aborted) continue;
       await failRun(run, `wait timeout processing error: ${(err as Error).message}`);
     }
   }
@@ -1587,43 +1590,66 @@ async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc, si
   const acquired = await acquireRun(run.run_id);
   if (!acquired) return; // owner อื่น active → skip
 
-  // ทำเครื่องหมายว่ากำลังประมวลผล (race-safe — กัน resume ซ้อน)
-  if (!(await ownedUpdateRun(acquired, { status: "running", waiting_for: undefined }))) return;
+  // ⚡ era-abort rollback — run ถูก flip เป็น running แล้ว ต้องคืน parked wait state
+  //   ด้วย fenced write ของ owner ปัจจุบัน (acquired snapshot — CAS owner+token)
+  //   CAS miss = owner ใหม่ reclaim ไปแล้ว → ห้ามเขียนทับ
+  //   (timeout scanner เห็นเฉพาะ waiting_for_reply → ทิ้ง running ไว้ = run หายไปตลอด)
+  const restoreWaitPark = () => ownedUpdateRun(acquired, {
+    status: "waiting_for_reply",
+    waiting_for: run.waiting_for ?? "next_message",
+    current_node_id: run.current_node_id,
+    wait_retry_count: run.wait_retry_count ?? 0,
+    wait_started_at: run.wait_started_at,
+    wait_node_id: run.wait_node_id,
+  });
 
-  const waitNode = workflow.nodes.find((n) => n.node_id === run.current_node_id);
-  if (!waitNode) {
-    await failRun(acquired, "wait node not found during timeout processing");
-    return;
-  }
+  try {
+    // abort ตั้งแต่ก่อนเดิน → rollback ทันที (ยังไม่ได้ล้าง wait fields)
+    if (signal?.aborted) { await restoreWaitPark(); return; }
 
-  const noReplyNext = nextNodeIds(workflow, waitNode.node_id, WAIT_BRANCH.NO_REPLY);
-  const delivered: DeliveredMessage[] = [];
+    // ทำเครื่องหมายว่ากำลังประมวลผล (race-safe — กัน resume ซ้อน)
+    if (!(await ownedUpdateRun(acquired, { status: "running", waiting_for: undefined }))) return;
 
-  // ล้าง wait state
-  if (!(await ownedUpdateRun(acquired, {
-    wait_retry_count: 0,
-    wait_started_at: undefined,
-    wait_node_id: undefined,
-  }))) return;
+    const waitNode = workflow.nodes.find((n) => n.node_id === run.current_node_id);
+    if (!waitNode) {
+      await failRun(acquired, "wait node not found during timeout processing");
+      return;
+    }
 
-  if (noReplyNext.length > 0) {
-    // เดินตาม no_reply branch
-    const dummyMsg: EngineMessage = {
-      message_id: `timeout_${run.run_id}`,
-      conversation_id: run.conversation_id,
-      shop_id: run.shop_id,
-      platform: run.platform,
-      customer_id: run.customer_id,
-      text: "",
-      // ⚡ propagate sandbox source — run ของ botworker ต้องเขียน test store เท่านั้น
-      ...(run.test_source ? { testSource: run.test_source } : {}),
-      // ⚡ era/cancellation signal — resumed let_ai_respond ออก queue เมื่อ shutdown
-      ...(signal ? { signal } : {}),
-    };
-    await walkGraph(workflow, { ...acquired, context: { ...acquired.context, customer_reply: "" } }, dummyMsg, noReplyNext[0]);
-  } else {
-    // ไม่มี no_reply edge → จบ flow ด้วย outcome=no_reply
-    await completeRun(workflow, acquired, acquired.context, delivered, "no_reply", `wait timeout (${run.wait_started_at?.toISOString()}) — no no_reply edge, flow ends`);
+    const noReplyNext = nextNodeIds(workflow, waitNode.node_id, WAIT_BRANCH.NO_REPLY);
+    const delivered: DeliveredMessage[] = [];
+
+    // ล้าง wait state
+    if (!(await ownedUpdateRun(acquired, {
+      wait_retry_count: 0,
+      wait_started_at: undefined,
+      wait_node_id: undefined,
+    }))) return;
+
+    if (noReplyNext.length > 0) {
+      // เดินตาม no_reply branch
+      const dummyMsg: EngineMessage = {
+        message_id: `timeout_${run.run_id}`,
+        conversation_id: run.conversation_id,
+        shop_id: run.shop_id,
+        platform: run.platform,
+        customer_id: run.customer_id,
+        text: "",
+        // ⚡ propagate sandbox source — run ของ botworker ต้องเขียน test store เท่านั้น
+        ...(run.test_source ? { testSource: run.test_source } : {}),
+        // ⚡ era/cancellation signal — resumed let_ai_respond ออก queue เมื่อ shutdown
+        ...(signal ? { signal } : {}),
+      };
+      await walkGraph(workflow, { ...acquired, context: { ...acquired.context, customer_reply: "" } }, dummyMsg, noReplyNext[0]);
+    } else {
+      // ไม่มี no_reply edge → จบ flow ด้วย outcome=no_reply
+      await completeRun(workflow, acquired, acquired.context, delivered, "no_reply", `wait timeout (${run.wait_started_at?.toISOString()}) — no no_reply edge, flow ends`);
+    }
+  } catch (err) {
+    // era abort กลางเดิน → คืน parked wait state (fenced — acquired owner/token)
+    //   ห้าม terminalize; real non-abort error → outer catch → failRun (policy เดิม)
+    if (signal?.aborted) { await restoreWaitPark(); return; }
+    throw err;
   }
 }
 

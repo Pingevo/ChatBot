@@ -258,8 +258,12 @@ export async function getSystemConfig(forceRefresh = false): Promise<SystemConfi
     return cachedConfig;
   } catch (err) {
     console.error('[systemConfigService] error getting SystemConfig:', err);
-    // Fallback — สวิตช์อันตรายเสมอ false จาก SAFETY
-    return mergeWithSafety({});
+    // ⚡ last-known-good owner — read ล้มแต่เคยอ่านสำเร็จ → คืน cached config เดิม
+    //   (caller อย่าง worker limiter เชื่อค่านี้ — fallback default ห้ามขยายเพดาน)
+    if (cachedConfig) return cachedConfig;
+    // cold start ไม่มี last-known-good → fail-closed ที่ concurrency=1
+    //   (field อื่นคง safety default เดิม — สวิตช์อันตรายยัง false)
+    return { ...mergeWithSafety({}), bot_concurrency_limit: 1 };
   }
 }
 

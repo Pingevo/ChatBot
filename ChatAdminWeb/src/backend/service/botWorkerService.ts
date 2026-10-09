@@ -720,8 +720,11 @@ export async function processMessage(msg: {
     // fenced finalize — heartbeat lost (matchedCount=0) → ห้าม persist/finalize
     // ⚡ finalization contract: finalized เมื่อ terminal write ครบทุก claim_ids เท่านั้น
     //    lost/no-outcome → finalized=false → caller (flush) ห้ามลบ buffer rows
+    // ⚡ cancellation fence — era abort หลัง provider response แต่ก่อน finalize
+    //    → claim ค้าง processing (recoverable); evidence ที่ persist ไปแล้วถูก
+    //    recovery reuse — ห้าม finalize ใน cancelled era
     let finalized = false;
-    if (res.outcome && !ctx.lost) {
+    if (res.outcome && !ctx.lost && !claimSignal.aborted) {
       const n = await finalizeClaims(ctx, res.outcome);
       finalized = n === ctx.claim_ids.length;
     }
