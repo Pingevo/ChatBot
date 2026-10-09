@@ -258,11 +258,25 @@ export async function getSystemConfig(forceRefresh = false): Promise<SystemConfi
     return cachedConfig;
   } catch (err) {
     console.error('[systemConfigService] error getting SystemConfig:', err);
-    // ⚡ last-known-good owner — read ล้มแต่เคยอ่านสำเร็จ → คืน cached config เดิม
-    //   (caller อย่าง worker limiter เชื่อค่านี้ — fallback default ห้ามขยายเพดาน)
-    if (cachedConfig) return cachedConfig;
-    // cold start ไม่มี last-known-good → fail-closed ที่ concurrency=1
-    //   (field อื่นคง safety default เดิม — สวิตช์อันตรายยัง false)
+    // ⚡ explicit fail policy on read failure — owner เดียวที่นี่:
+    //   fail-closed (false) = operational enable switches — ห้าม stale-true
+    //     (worker/buffer/workflow/shadow/mock/grouped-retrieval ทำงานต่อกลาง
+    //     DB outage ไม่ได้ — side effect จริง)
+    //   fail-stale  = limits/windows/URLs/engine (ค่าล่าสุดที่ validate แล้ว
+    //     — เช่น bot_concurrency_limit ป้องกัน burst)
+    //   cold start (ไม่เคยอ่านสำเร็จ) = safety defaults + concurrency fail-closed 1
+    if (cachedConfig) {
+      return {
+        ...cachedConfig,
+        bot_worker_enabled: false,
+        bot_buffer_enabled: false,
+        workflow_enabled: false,
+        shadow_bot_enabled: false,
+        mock_mode_enabled: false,
+        grouped_retrieval_shadow_enabled: false,
+        grouped_retrieval_selection_enabled: false,
+      };
+    }
     return { ...mergeWithSafety({}), bot_concurrency_limit: 1 };
   }
 }

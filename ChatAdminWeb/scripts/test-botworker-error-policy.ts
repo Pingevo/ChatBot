@@ -873,37 +873,8 @@ async function main() {
   await test("D10 wait-timeout abort (fenced run) → parked state restored, retry once", async () => {
     const conv = "conv_d10";
     seedConv(conv);
-    mocks.state.config.workflow_enabled = true;
-    mocks.fakeColl("workflows").push({
-      workflow_id: "wf_wait", name: "wf_wait", enabled: true, status: "published", is_deleted: false,
-      shop_ids: ["shop_1"], platforms: ["shopee"], trigger_frequency: "every_time",
-      false_branch_policy: "exit_to_bot",
-      nodes: [
-        { node_id: "n1", type: "trigger", subtype: "message_content", config: { keywords: ["waitkw"] }, position: { x: 0, y: 0 } },
-        { node_id: "w1", type: "wait", subtype: "wait_for_reply", config: { answer_type: "any", max_retries: 3, timeout_ms: 50 }, position: { x: 0, y: 0 } },
-        { node_id: "n3", type: "action", subtype: "let_ai_respond", config: {}, position: { x: 0, y: 0 } },
-      ],
-      edges: [
-        { edge_id: "e1", source_node_id: "n1", target_node_id: "w1" },
-        { edge_id: "e2", source_node_id: "w1", target_node_id: "n3", branch: "no_reply" },
-      ],
-      priority: 1, version: 1, created_by: "t", created_at: new Date(), updated_at: new Date(),
-    });
-    // ⚡ fenced parked run — wait node, lease/timeout ครบแล้ว
-    const parkedAt = new Date(Date.now() - 60000);
-    mocks.fakeColl("workflow_runs").push({
-      run_id: "run_d10", workflow_id: "wf_wait",
-      conversation_id: conv, shop_id: "shop_1", platform: "shopee",
-      customer_id: "cust_1",
-      status: "waiting_for_reply", current_node_id: "w1",
-      waiting_for: "next_message", wait_node_id: "w1",
-      wait_started_at: parkedAt, wait_retry_count: 0,
-      context: {}, test_source: "botworker",
-      owner_id: "stale-owner", fencing_token: 5,
-      lease_expires_at: new Date(Date.now() - 1000),
-      started_at: new Date(Date.now() - 61000), updated_at: new Date(Date.now() - 60000),
-      version: 1,
-    });
+    seedWaitWorkflow("wf_wait");
+    const parkedAt = seedParkedRun("run_d10", "wf_wait", conv);
     mocks.state.fetchHang = true; // resumed let_ai_respond ค้างจน abort
     await svc.ensureLeadership();
     const p = svc.botWorkerService.checkWaitTimeouts();
@@ -934,35 +905,9 @@ async function main() {
   await test("D11 wait-timeout abort (legacy unfenced run) → parked state restored", async () => {
     const conv = "conv_d11";
     seedConv(conv);
-    mocks.state.config.workflow_enabled = true;
-    mocks.fakeColl("workflows").push({
-      workflow_id: "wf_wait_l", name: "wf_wait_l", enabled: true, status: "published", is_deleted: false,
-      shop_ids: ["shop_1"], platforms: ["shopee"], trigger_frequency: "every_time",
-      false_branch_policy: "exit_to_bot",
-      nodes: [
-        { node_id: "n1", type: "trigger", subtype: "message_content", config: { keywords: ["waitkw"] }, position: { x: 0, y: 0 } },
-        { node_id: "w1", type: "wait", subtype: "wait_for_reply", config: { answer_type: "any", max_retries: 3, timeout_ms: 50 }, position: { x: 0, y: 0 } },
-        { node_id: "n3", type: "action", subtype: "let_ai_respond", config: {}, position: { x: 0, y: 0 } },
-      ],
-      edges: [
-        { edge_id: "e1", source_node_id: "n1", target_node_id: "w1" },
-        { edge_id: "e2", source_node_id: "w1", target_node_id: "n3", branch: "no_reply" },
-      ],
-      priority: 1, version: 1, created_by: "t", created_at: new Date(), updated_at: new Date(),
-    });
+    seedWaitWorkflow("wf_wait_l");
     // ⚡ legacy run — ไม่มี owner_id/fencing_token/lease (pre-fencing era)
-    const parkedAt = new Date(Date.now() - 60000);
-    mocks.fakeColl("workflow_runs").push({
-      run_id: "run_d11", workflow_id: "wf_wait_l",
-      conversation_id: conv, shop_id: "shop_1", platform: "shopee",
-      customer_id: "cust_1",
-      status: "waiting_for_reply", current_node_id: "w1",
-      waiting_for: "next_message", wait_node_id: "w1",
-      wait_started_at: parkedAt, wait_retry_count: 0,
-      context: {}, test_source: "botworker",
-      started_at: new Date(Date.now() - 61000), updated_at: new Date(Date.now() - 60000),
-      version: 1,
-    });
+    const parkedAt = seedParkedRun("run_d11", "wf_wait_l", conv, false);
     mocks.state.fetchHang = true;
     await svc.ensureLeadership();
     const p = svc.botWorkerService.checkWaitTimeouts();
@@ -980,6 +925,114 @@ async function main() {
       `run.status=${run.status} — legacy abort must not terminalize (pre-fix: errored)`);
     assert(run.wait_started_at?.getTime?.() === parkedAt.getTime(),
       `wait_started_at=${run.wait_started_at} — wait context must be preserved`);
+  });
+
+  // ═══ BW-5 root-cause correction: abort boundary + acquired-context terminalize ═══
+
+  /** seed workflow พร้อม wait node → no_reply → let_ai_respond */
+  function seedWaitWorkflow(wfId: string) {
+    mocks.state.config.workflow_enabled = true;
+    mocks.fakeColl("workflows").push({
+      workflow_id: wfId, name: wfId, enabled: true, status: "published", is_deleted: false,
+      shop_ids: ["shop_1"], platforms: ["shopee"], trigger_frequency: "every_time",
+      false_branch_policy: "exit_to_bot",
+      nodes: [
+        { node_id: "n1", type: "trigger", subtype: "message_content", config: { keywords: ["waitkw"] }, position: { x: 0, y: 0 } },
+        { node_id: "w1", type: "wait", subtype: "wait_for_reply", config: { answer_type: "any", max_retries: 3, timeout_ms: 50 }, position: { x: 0, y: 0 } },
+        { node_id: "n3", type: "action", subtype: "let_ai_respond", config: {}, position: { x: 0, y: 0 } },
+      ],
+      edges: [
+        { edge_id: "e1", source_node_id: "n1", target_node_id: "w1" },
+        { edge_id: "e2", source_node_id: "w1", target_node_id: "n3", branch: "no_reply" },
+      ],
+      priority: 1, version: 1, created_by: "t", created_at: new Date(), updated_at: new Date(),
+    });
+  }
+
+  /** fenced parked run (lease+timeout ครบแล้ว) — owner เก่า stale, token=5 */
+  function seedParkedRun(runId: string, wfId: string, conv: string, fenced = true) {
+    const parkedAt = new Date(Date.now() - 60000);
+    mocks.fakeColl("workflow_runs").push({
+      run_id: runId, workflow_id: wfId,
+      conversation_id: conv, shop_id: "shop_1", platform: "shopee",
+      customer_id: "cust_1",
+      status: "waiting_for_reply", current_node_id: "w1",
+      waiting_for: "next_message", wait_node_id: "w1",
+      wait_started_at: parkedAt, wait_retry_count: 0,
+      context: {}, test_source: "botworker",
+      ...(fenced
+        ? { owner_id: "stale-owner", fencing_token: 5, lease_expires_at: new Date(Date.now() - 1000) }
+        : {}),
+      started_at: new Date(Date.now() - 61000), updated_at: new Date(Date.now() - 60000),
+      version: 1,
+    });
+    return parkedAt;
+  }
+
+  const runWrites = () =>
+    mocks.state.queryLog.filter((q: any) =>
+      q.coll === "workflow_runs" && (q.op === "findOneAndUpdate" || q.op === "updateOne" || q.op === "updateMany"));
+
+  await test("D12 pre-aborted signal → checkWaitTimeouts must not acquire/write/fetch", async () => {
+    const conv = "conv_d12";
+    seedConv(conv);
+    seedWaitWorkflow("wf_wait_d12");
+    seedParkedRun("run_d12", "wf_wait_d12", conv);
+    const engine = await import("../src/backend/service/workflowEngine");
+    const ac = new AbortController();
+    ac.abort();
+    // ⚡ abort ก่อนเริ่ม candidate → zero acquire/write/provider calls
+    const n = await engine.workflowEngine.checkWaitTimeouts(ac.signal);
+    assert(n === 0, `processed=${n} — aborted scan must report 0`);
+    assert(callParams().fetchCalls === 0, `fetch=${callParams().fetchCalls} — no provider call`);
+    assert(runWrites().length === 0,
+      `workflow_runs writes=${runWrites().length} — aborted scan must not touch runs`);
+    const run = mocks.fakeColl("workflow_runs").find((d: any) => d.run_id === "run_d12");
+    assert(run.status === "waiting_for_reply" && run.fencing_token === 5,
+      `run mutated — status=${run.status} token=${run.fencing_token}`);
+  });
+
+  await test("D13 abort between candidates → next candidate untouched, processed=0", async () => {
+    const conv = "conv_d13";
+    seedConv(conv);
+    seedWaitWorkflow("wf_wait_d13");
+    const parkedAt = seedParkedRun("run_d13a", "wf_wait_d13", conv);
+    seedParkedRun("run_d13b", "wf_wait_d13", conv);
+    mocks.state.fetchHang = true; // candidate แรกค้างใน fetch จน abort
+    await svc.ensureLeadership();
+    const p = svc.botWorkerService.checkWaitTimeouts();
+    await waitFor(() => callParams().fetchCalls === 1, 3000);
+    assert(callParams().fetchCalls === 1, `fetch=${callParams().fetchCalls}`);
+    await svc.botWorkerService.clearPendingWork();
+    const n = await p;
+    const runA = mocks.fakeColl("workflow_runs").find((d: any) => d.run_id === "run_d13a");
+    const runB = mocks.fakeColl("workflow_runs").find((d: any) => d.run_id === "run_d13b");
+    assert(runA.status === "waiting_for_reply" && runA.wait_started_at?.getTime?.() === parkedAt.getTime(),
+      `run_a=${runA.status} — aborted candidate must be restored to parked`);
+    // ⚡ abort ระหว่าง candidates → ห้ามแตะ candidate ถัดไป (zero acquire/write)
+    assert(runB.status === "waiting_for_reply" && runB.fencing_token === 5 && runB.owner_id === "stale-owner",
+      `run_b mutated after abort — status=${runB.status} token=${runB.fencing_token} owner=${runB.owner_id}`);
+    assert(callParams().fetchCalls === 1, `fetch=${callParams().fetchCalls} — no provider call after abort`);
+    assert(n === 0, `processed=${n} — aborted work must not count as processed`);
+  });
+
+  await test("D14 non-abort error after acquire → terminalize with acquired fencing context", async () => {
+    const conv = "conv_d14";
+    seedConv(conv);
+    seedWaitWorkflow("wf_wait_d14");
+    seedParkedRun("run_d14", "wf_wait_d14", conv);
+    // ⚡ real processing error (provider 500) — ไม่ใช่ abort → run ต้อง errored ด้วย
+    //    fencing token ปัจจุบัน (acquired) ไม่ใช่ stale snapshot
+    mocks.state.fetchResponse = { status: 500, body: { error: "boom" } };
+    await svc.ensureLeadership();
+    const n = await svc.botWorkerService.checkWaitTimeouts();
+    assert(n === 1, `processed=${n} — handled run counts once`);
+    const run = mocks.fakeColl("workflow_runs").find((d: any) => d.run_id === "run_d14");
+    assert(run.status === "errored",
+      `run.status=${run.status} — real error post-acquire must terminalize (stale-snapshot failRun leaves it running)`);
+    assert(run.outcome === "error", `outcome=${run.outcome}`);
+    assert(typeof run.error === "string" && run.error.includes("wait timeout"),
+      `error=${run.error} — terminal record must name the cause`);
   });
 
   // ⚡ D2 รันสุดท้าย — โค้ดเก่าที่ signal ไม่ถึง workflow call จะ leak slot ถาวร

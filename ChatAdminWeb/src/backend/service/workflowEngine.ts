@@ -1542,6 +1542,9 @@ export async function checkWaitTimeouts(signal?: AbortSignal): Promise<number> {
 
   let processed = 0;
   for (const run of candidates) {
+    // ⚡ abort boundary เดียวของ loop — era abort → หยุด ไม่แตะ candidate ถัดไป
+    //   (zero acquire/write/provider สำหรับ candidate ที่ยังไม่ถึง)
+    if (signal?.aborted) break;
     if (!run.wait_started_at) continue;
     const ageMs = now.getTime() - run.wait_started_at.getTime();
 
@@ -1559,15 +1562,15 @@ export async function checkWaitTimeouts(signal?: AbortSignal): Promise<number> {
     const perNodeTimeout = Math.max(1000, Number(cfg.timeout_ms || 0));
     if (ageMs < perNodeTimeout) continue; // ยังไม่เกิน timeout
 
-    // เกิน timeout → branch "no_reply"
-    processed++;
+    // เกิน timeout → branch "no_reply" — processed นับเฉพาะ run ที่จัดการจริง
+    //   (walked/terminalized); aborted/acquire-miss → false → ไม่นับ
     try {
-      await processWaitTimeout(workflow, run, signal);
+      if (await processWaitTimeout(workflow, run, signal)) processed++;
     } catch (err) {
-      // ⚡ era abort → parked-state rollback อยู่ใน processWaitTimeout (ถือ acquired
-      //   context) แล้ว — ห้าม failRun ที่นี่ (snapshot เก่า + terminalize ผิด contract)
-      if (signal?.aborted) continue;
-      await failRun(run, `wait timeout processing error: ${(err as Error).message}`);
+      // เหลือเฉพาะ write failure ที่ owner จับไม่ได้ (acquire/restore/failRun CAS)
+      //   — terminal transition อยู่ใน processWaitTimeout เท่านั้น ห้าม failRun
+      //   ด้วย stale snapshot ที่นี่ (CAS miss → run ค้าง running)
+      console.error(`[workflowEngine] wait timeout processing failed for run ${run.run_id}:`, err);
     }
   }
 
@@ -1584,11 +1587,15 @@ export async function checkWaitTimeouts(signal?: AbortSignal): Promise<number> {
   return processed;
 }
 
-/** ประมวลผล wait timeout — branch "no_reply" หรือ จบ flow */
-async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc, signal?: AbortSignal): Promise<void> {
+/** ประมวลผล wait timeout — branch "no_reply" หรือ จบ flow
+ *  คืน true = run ถูกจัดการจริง (walked/terminalized), false = skipped/aborted */
+async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc, signal?: AbortSignal): Promise<boolean> {
+  // ⚡ abort ก่อน acquire — zero writes (pre-aborted ไม่แตะ candidate เลย)
+  if (signal?.aborted) return false;
+
   // acquire ownership ก่อน (waiting=parked → CAS flip running / running=expired เท่านั้น)
   const acquired = await acquireRun(run.run_id);
-  if (!acquired) return; // owner อื่น active → skip
+  if (!acquired) return false; // owner อื่น active → skip
 
   // ⚡ era-abort rollback — run ถูก flip เป็น running แล้ว ต้องคืน parked wait state
   //   ด้วย fenced write ของ owner ปัจจุบัน (acquired snapshot — CAS owner+token)
@@ -1605,15 +1612,15 @@ async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc, si
 
   try {
     // abort ตั้งแต่ก่อนเดิน → rollback ทันที (ยังไม่ได้ล้าง wait fields)
-    if (signal?.aborted) { await restoreWaitPark(); return; }
+    if (signal?.aborted) { await restoreWaitPark(); return false; }
 
     // ทำเครื่องหมายว่ากำลังประมวลผล (race-safe — กัน resume ซ้อน)
-    if (!(await ownedUpdateRun(acquired, { status: "running", waiting_for: undefined }))) return;
+    if (!(await ownedUpdateRun(acquired, { status: "running", waiting_for: undefined }))) return false;
 
     const waitNode = workflow.nodes.find((n) => n.node_id === run.current_node_id);
     if (!waitNode) {
       await failRun(acquired, "wait node not found during timeout processing");
-      return;
+      return true;
     }
 
     const noReplyNext = nextNodeIds(workflow, waitNode.node_id, WAIT_BRANCH.NO_REPLY);
@@ -1624,7 +1631,7 @@ async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc, si
       wait_retry_count: 0,
       wait_started_at: undefined,
       wait_node_id: undefined,
-    }))) return;
+    }))) return false;
 
     if (noReplyNext.length > 0) {
       // เดินตาม no_reply branch
@@ -1645,11 +1652,15 @@ async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc, si
       // ไม่มี no_reply edge → จบ flow ด้วย outcome=no_reply
       await completeRun(workflow, acquired, acquired.context, delivered, "no_reply", `wait timeout (${run.wait_started_at?.toISOString()}) — no no_reply edge, flow ends`);
     }
+    return true;
   } catch (err) {
     // era abort กลางเดิน → คืน parked wait state (fenced — acquired owner/token)
-    //   ห้าม terminalize; real non-abort error → outer catch → failRun (policy เดิม)
-    if (signal?.aborted) { await restoreWaitPark(); return; }
-    throw err;
+    //   ห้าม terminalize — next-era timeout scan retry ได้โดยไม่ reply ซ้ำ
+    if (signal?.aborted) { await restoreWaitPark(); return false; }
+    // ⚡ real error หลัง acquire — terminalize ด้วย acquired fencing context
+    //    เท่านั้น (outer catch ถือ snapshot เก่า → CAS miss → run ค้าง running)
+    await failRun(acquired, `wait timeout processing error: ${(err as Error).message}`);
+    return true;
   }
 }
 

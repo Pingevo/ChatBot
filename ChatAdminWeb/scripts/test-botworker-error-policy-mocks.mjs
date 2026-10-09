@@ -111,13 +111,25 @@ export async function ensureIndexes() {}
 // ── systemConfigService mock ─────────────────────────────────
 
 // ⚡ last-known-good — mirror ของ systemConfigService contract:
-//   healthy read → snapshot ล่าสุด; read ล้ม → last-known-good เดิม;
-//   cold start ไม่เคยสำเร็จ → fail-closed ที่ concurrency=1 (ไม่ใช่ default 50)
+//   healthy read → snapshot ล่าสุด; read ล้ม → last-known-good เดิมแต่ enable
+//   switches fail-closed (worker/workflow/buffer/shadow/mock/grouped → false),
+//   concurrency = last-validated; cold start ไม่เคยสำเร็จ → fail-closed ที่
+//   concurrency=1 (ไม่ใช่ default 50)
 let lastGoodConfig = null;
 
 export const getSystemConfig = async () => {
   if (state.configError) {
-    return lastGoodConfig ?? { ...state.config, bot_concurrency_limit: 1 };
+    return {
+      ...(lastGoodConfig ?? state.config),
+      mock_mode_enabled: false,
+      shadow_bot_enabled: false,
+      bot_worker_enabled: false,
+      bot_buffer_enabled: false,
+      workflow_enabled: false,
+      grouped_retrieval_shadow_enabled: false,
+      grouped_retrieval_selection_enabled: false,
+      bot_concurrency_limit: lastGoodConfig?.bot_concurrency_limit ?? 1,
+    };
   }
   lastGoodConfig = { ...state.config };
   return lastGoodConfig;
