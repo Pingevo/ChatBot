@@ -92,6 +92,19 @@ let cachedConfig: SystemConfigDoc | null = null;
 let lastFetchTime = 0;
 const CACHE_TTL_MS = 5000;
 
+// ⚡ fail-closed projection — operational enable switches = false เสมอเมื่อ DB read ล้ม
+//   (warm: override บน cachedConfig / cold: override บน safety defaults —
+//   env/DB/stale ห้ามรั่วเป็น true กลาง outage)
+const FAIL_CLOSED_SWITCHES = {
+  bot_worker_enabled: false,
+  bot_buffer_enabled: false,
+  workflow_enabled: false,
+  shadow_bot_enabled: false,
+  mock_mode_enabled: false,
+  grouped_retrieval_shadow_enabled: false,
+  grouped_retrieval_selection_enabled: false,
+} as const;
+
 // ค่า default สำหรับสวิตช์ปลอดภัย (อ่านจาก env ตอน boot)
 function getSafeDefaults(): Partial<SystemConfigDoc> {
   return {
@@ -259,25 +272,15 @@ export async function getSystemConfig(forceRefresh = false): Promise<SystemConfi
   } catch (err) {
     console.error('[systemConfigService] error getting SystemConfig:', err);
     // ⚡ explicit fail policy on read failure — owner เดียวที่นี่:
-    //   fail-closed (false) = operational enable switches — ห้าม stale-true
-    //     (worker/buffer/workflow/shadow/mock/grouped-retrieval ทำงานต่อกลาง
-    //     DB outage ไม่ได้ — side effect จริง)
+    //   fail-closed (false) = operational enable switches (FAIL_CLOSED_SWITCHES
+    //     — ใช้ร่วมทั้ง warm/cold; env หรือ stale cache ห้ามรั่วเป็น true)
     //   fail-stale  = limits/windows/URLs/engine (ค่าล่าสุดที่ validate แล้ว
     //     — เช่น bot_concurrency_limit ป้องกัน burst)
     //   cold start (ไม่เคยอ่านสำเร็จ) = safety defaults + concurrency fail-closed 1
     if (cachedConfig) {
-      return {
-        ...cachedConfig,
-        bot_worker_enabled: false,
-        bot_buffer_enabled: false,
-        workflow_enabled: false,
-        shadow_bot_enabled: false,
-        mock_mode_enabled: false,
-        grouped_retrieval_shadow_enabled: false,
-        grouped_retrieval_selection_enabled: false,
-      };
+      return { ...cachedConfig, ...FAIL_CLOSED_SWITCHES };
     }
-    return { ...mergeWithSafety({}), bot_concurrency_limit: 1 };
+    return { ...mergeWithSafety({}), ...FAIL_CLOSED_SWITCHES, bot_concurrency_limit: 1 };
   }
 }
 

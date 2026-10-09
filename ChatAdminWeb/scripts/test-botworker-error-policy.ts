@@ -1035,6 +1035,72 @@ async function main() {
       `error=${run.error} — terminal record must name the cause`);
   });
 
+  await test("D15 abort during workflow lookup → zero writes (cancelIfAbandoned must not run)", async () => {
+    const conv = "conv_d15";
+    seedConv(conv);
+    mocks.state.config.workflow_enabled = true;
+    // ⚡ workflow หาย (ไม่ seed) → getWorkflow→null → cancelIfAbandoned path
+    //   abort ลงกลาง await lookup → ห้ามเขียน cancellation เลย
+    seedParkedRun("run_d15", "wf_gone_d15", conv);
+    const engine = await import("../src/backend/service/workflowEngine");
+    const ac = new AbortController();
+    let lookupEntered = false;
+    let releaseLookup: () => void = () => {};
+    mocks.state.findOneHook = (coll: string) => {
+      if (coll !== "workflows") return undefined;
+      lookupEntered = true;
+      return new Promise<void>((r) => { releaseLookup = r; });
+    };
+    try {
+      const p = engine.workflowEngine.checkWaitTimeouts(ac.signal);
+      await waitFor(() => lookupEntered, 3000);
+      ac.abort();          // ⚡ abort ระหว่าง workflow lookup (async gap)
+      releaseLookup();     // lookup คืน null หลัง abort
+      const n = await p;
+      const run = mocks.fakeColl("workflow_runs").find((d: any) => d.run_id === "run_d15");
+      assert(n === 0, `processed=${n} — aborted scan must report 0`);
+      assert(runWrites().length === 0,
+        `workflow_runs writes=${runWrites().length} — abort mid-lookup must not write cancellation`);
+      assert(run.status === "waiting_for_reply" && run.fencing_token === 5
+        && run.owner_id === "stale-owner" && !run.completed_at,
+        `run mutated — status=${run.status} token=${run.fencing_token} owner=${run.owner_id}`);
+      assert(callParams().fetchCalls === 0, `fetch=${callParams().fetchCalls}`);
+    } finally {
+      mocks.state.findOneHook = null;
+    }
+  });
+
+  await test("D16 terminal CAS miss after acquire → processed must not count fake terminal", async () => {
+    const conv = "conv_d16";
+    seedConv(conv);
+    seedWaitWorkflow("wf_wait_d16");
+    seedParkedRun("run_d16", "wf_wait_d16", conv);
+    mocks.state.fetchResponse = { status: 500, body: { error: "boom" } };
+    // ⚡ foreign owner reclaim ก่อน terminal CAS — flip owner/token ตอน failRun write
+    //   (updateOneHook fires pre-apply → เทียบเท่า findOneAndUpdate ของ owner ใหม่ชนะ)
+    mocks.state.updateOneHook = (coll: string, _filter: any, update: any) => {
+      if (coll === "workflow_runs" && update?.$set?.status === "errored") {
+        const d = mocks.fakeColl("workflow_runs").find((x: any) => x.run_id === "run_d16");
+        if (d) { d.owner_id = "foreign-owner"; d.fencing_token = 999; }
+      }
+    };
+    try {
+      await svc.ensureLeadership();
+      const n = await svc.botWorkerService.checkWaitTimeouts();
+      assert(n === 0,
+        `processed=${n} — terminal CAS miss = fencing loss, must not count as handled`);
+      const run = mocks.fakeColl("workflow_runs").find((d: any) => d.run_id === "run_d16");
+      assert(run.owner_id === "foreign-owner" && run.fencing_token === 999,
+        `foreign-owned run overwritten — owner=${run.owner_id} token=${run.fencing_token}`);
+      assert(run.status !== "errored",
+        `status=${run.status} — stale owner must not write terminal outcome on foreign run`);
+      assert(callParams().fetchCalls === 1,
+        `fetch=${callParams().fetchCalls} — no provider retry on fencing loss`);
+    } finally {
+      mocks.state.updateOneHook = null;
+    }
+  });
+
   // ⚡ D2 รันสุดท้าย — โค้ดเก่าที่ signal ไม่ถึง workflow call จะ leak slot ถาวร
   //    (hang ไม่มี abort) — อยู่ท้ายเพื่อไม่ให้ contamination กับ test อื่น
   await test("D2 workflow let_ai_respond hang → bounded timeout → bot_failed, slot released", async () => {

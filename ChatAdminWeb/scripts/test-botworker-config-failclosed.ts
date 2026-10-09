@@ -23,6 +23,17 @@ process.env.ADMIN_JWT_SECRET = "verify-only-jwt-nonsecret";
 process.env.CHATBOT_INTERNAL_SECRET = "verify-only-internal-nonsecret";
 process.env.CHATBOT_BASE_URL_SHOPEE = "http://verify-only-chatbot.invalid";
 
+// ⚡ Finding A — จำลอง production env ที่เปิด switches ไว้ (admin เซ็ต env=true)
+//   getSafeDefaults อ่าน env ตอน call → cold-start catch ต้อง fail-closed
+//   ทุก switch แม้ env=true (DB outage = authoritative config หาย)
+process.env.MOCK_MODE_ENABLED = "true";
+process.env.SHADOW_BOT_ENABLED = "true";
+process.env.BOT_WORKER_ENABLED = "true";
+process.env.BOT_BUFFER_ENABLED = "true";
+process.env.WORKFLOW_ENABLED = "true";
+process.env.USE_GROUPED_RETRIEVAL_SHADOW = "true";
+process.env.USE_GROUPED_RETRIEVAL_SELECTION = "true";
+
 type Mocks = typeof import("./test-botworker-config-failclosed-mocks.mjs");
 type Cfg = typeof import("../src/backend/service/systemConfigService");
 
@@ -97,6 +108,10 @@ async function main() {
       `healthy read must return DB values — worker=${c.bot_worker_enabled} limit=${c.bot_concurrency_limit}`);
     assert(c.llm_context_limit === 21 && c.workflow_run_timeout_ms === 42000,
       "non-switch fields must pass through from DB");
+    // ⚡ pin healthy env-fallback — switch ที่ DB ไม่ได้เซ็ตยังอ่าน env ตามเดิม
+    //   (fix ต้อง fail-closed เฉพาะ failure path ไม่ใช่เปลี่ยน healthy semantics)
+    assert(c.mock_mode_enabled === true,
+      `healthy: mock_mode_enabled=${c.mock_mode_enabled} — env fallback must apply when DB field absent`);
   });
 
   await test("F3 warm-cache outage → switches fail closed, concurrency keeps last-validated", async () => {

@@ -1550,6 +1550,9 @@ export async function checkWaitTimeouts(signal?: AbortSignal): Promise<number> {
 
     // หา wait node เพื่ออ่าน per-node timeout_ms
     const workflow = await workflowService.getWorkflow(run.workflow_id);
+    // ⚡ abort ระหว่าง lookup await — boundary เดียวที่ async gap;
+    //   ห้ามเขียน cancellation/cancelIfAbandoned หลัง era ตาย
+    if (signal?.aborted) break;
     if (!workflow) {
       // workflow ถูกลบ → cancel run (เฉพาะ abandoned — owner อื่น lease active ห้าม kill)
       await cancelIfAbandoned(run, { status: "cancelled", outcome: "cancelled_by_admin", completed_at: now, error: "workflow deleted" });
@@ -1619,8 +1622,8 @@ async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc, si
 
     const waitNode = workflow.nodes.find((n) => n.node_id === run.current_node_id);
     if (!waitNode) {
-      await failRun(acquired, "wait node not found during timeout processing");
-      return true;
+      // CAS miss = เสีย fencing แล้ว → ไม่นับเป็น handled
+      return await failRun(acquired, "wait node not found during timeout processing");
     }
 
     const noReplyNext = nextNodeIds(workflow, waitNode.node_id, WAIT_BRANCH.NO_REPLY);
@@ -1659,8 +1662,8 @@ async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc, si
     if (signal?.aborted) { await restoreWaitPark(); return false; }
     // ⚡ real error หลัง acquire — terminalize ด้วย acquired fencing context
     //    เท่านั้น (outer catch ถือ snapshot เก่า → CAS miss → run ค้าง running)
-    await failRun(acquired, `wait timeout processing error: ${(err as Error).message}`);
-    return true;
+    //    CAS miss = fencing หายระหว่างเดิน → false (ไม่นับเป็น handled)
+    return await failRun(acquired, `wait timeout processing error: ${(err as Error).message}`);
   }
 }
 

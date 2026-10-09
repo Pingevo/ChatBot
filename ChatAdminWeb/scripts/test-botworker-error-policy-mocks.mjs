@@ -37,6 +37,10 @@ export const state = {
   queryPause: null,
   queryPauseHits: 0,
   /** @type {{coll:string, op:string, filter:any}[]} */ queryLog: [],
+  /** @type {null | ((coll:string, filter:any)=>any)} findOne race seam (fake mongo) */
+  findOneHook: null,
+  /** @type {null | ((coll:string, filter:any, update:any)=>any)} updateOne race seam */
+  updateOneHook: null,
   config: {
     bot_worker_enabled: true,
     bot_concurrency_limit: 50,
