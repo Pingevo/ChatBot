@@ -39,7 +39,7 @@ const OID_CHARS = "0123456789abcdef";
 
 /**
  * @param {object} state — caller-owned mutable state; fields consulted lazily:
- *   findHook/findOneHook/updateOneHook/findOneAndUpdateHook?: (coll, filter, update?) => any — race seams
+ *   findHook/findOneHook/insertOneHook/updateOneHook/findOneAndUpdateHook?: (coll, filter, update?) => any — race/error-injection seams
  *   uniqueKeys?: Record<string,string[]>,
  *   onInsert?: (name, doc) => void — side counter hooks
  *   onQuery?: (coll, op, filter) => void — query counter (find/findOne/count/insert/update/delete/distinct)
@@ -282,6 +282,8 @@ export function createFakeMongo(state = {}) {
       return cursor;
     }
     async insertOne(doc) {
+      const h = hook("insertOneHook");
+      if (h) await h(this.name, doc);
       await state.onQuery?.(this.name, "insertOne", doc);
       enforceUnique(this.name, doc);
       if (doc._id === undefined) doc._id = genOid();

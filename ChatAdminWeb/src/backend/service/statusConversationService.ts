@@ -23,10 +23,11 @@ export interface StatusConversationDoc {
   assigned_at?: Date | null;
   assignment_mode_used?: string;
   // status (admin-owned — ไม่โดน dump ทับ)
-  status?: ConversationStatus;
+  // null ได้ใน storage จริง (topic-only doc ที่มี status:null) — init CAS ต้อง match ทั้งคู่
+  status?: ConversationStatus | null;
   // close tracking
   closed_at?: Date | null;
-  closed_by?: string;
+  closed_by?: string | null;
   close_count?: number;
   // ⚡ pending backlog — handoff แล้วหา admin ไม่ได้ → รอ manual distributor จ่าย
   pending_assignment?: boolean;
@@ -35,6 +36,9 @@ export interface StatusConversationDoc {
   pinned?: boolean;
   topic?: string;
   item_ids?: string[];
+  // ⚡ inbound lifecycle — message_id ของ inbound event ที่ชนะ CAS
+  //   (loser/retry เทียบ identity แล้ว settle audit แบบ idempotent ได้)
+  inbound_reopen_event_id?: string;
   updated_at: Date;
 }
 
@@ -317,6 +321,111 @@ export async function assignPendingTicket(
   return !!result;
 }
 
+// ── Inbound lifecycle command ────────────────────────────────────────────
+// ⚡ single ownership owner สำหรับ external inbound writer hook:
+//   writer persist message สำเร็จ → ยิง command นี้หลัง persist เท่านั้น
+//   command self-fences — ยิงซ้ำ/ยิงทุก message ปลอดภัย (unchanged = no-op)
+//
+// guarantees:
+//   - state transition = single-winner fenced CAS (authoritative)
+//   - history/audit = idempotent convergence under retry/reconciliation
+//     (ไม่ใช่ atomic transaction — crash โดยไม่มี retry → audit อาจขาด)
+//   - initialization (missing/no-status meta) ≠ reopen — zero history/log
+//   - side-effect owner เดียว = closeHistoryService.recordReopen
+export interface InboundOwnershipEvent {
+  conversationId: string;
+  messageId: string;
+  inboundAt: Date;
+}
+export type InboundTransitionOutcome = "initialized" | "reopened" | "unchanged";
+
+export async function applyInboundOwnershipTransition(
+  event: InboundOwnershipEvent
+): Promise<InboundTransitionOutcome> {
+  const coll = await getCollection<StatusConversationDoc>(COLLECTIONS.statusConversation);
+  const now = new Date();
+
+  let meta = await coll.findOne({ conversation_id: event.conversationId });
+  if (!meta) {
+    // missing meta → initialize authoritative bot state (unique conversation_id arbitrates races)
+    try {
+      await coll.insertOne({
+        conversation_id: event.conversationId,
+        status: "bot",
+        assigned_to: null,
+        updated_at: now,
+      } as StatusConversationDoc);
+      return "initialized";
+    } catch (e) {
+      if ((e as { code?: number })?.code !== 11000) throw e;
+      // lost insert race → bounded re-read once, dispatch on the observed state (no loop)
+      meta = await coll.findOne({ conversation_id: event.conversationId });
+      if (!meta) return "unchanged"; // winner's doc vanished — fail closed
+    }
+  }
+
+  const settleReopen = () => closeHistoryService.recordReopen({
+    conversationId: event.conversationId,
+    reopenedBy: "bot",
+    reopenReason: "customer_inbound",
+    messageId: event.messageId,
+  });
+
+  // doc exists but has no status (topic-only metadata) → initialize, preserve fields
+  if (meta.status === undefined || meta.status === null) {
+    const r = await coll.findOneAndUpdate(
+      { conversation_id: event.conversationId, $or: [{ status: { $exists: false } }, { status: null }] },
+      { $set: { status: "bot", assigned_to: null, updated_at: now } },
+      { returnDocument: "after" }
+    );
+    return r ? "initialized" : "unchanged"; // CAS miss → someone else resolved it
+  }
+
+  if (meta.status === "closed" || meta.status === "resolved") {
+    // stale/equal inbound → unchanged, zero write
+    if (!(meta.closed_at instanceof Date && meta.closed_at < event.inboundAt)) return "unchanged";
+    const r = await coll.findOneAndUpdate(
+      {
+        conversation_id: event.conversationId,
+        status: { $in: ["closed", "resolved"] },
+        closed_at: { $lt: event.inboundAt },
+      },
+      {
+        $set: {
+          status: "bot",
+          assigned_to: null,
+          assigned_at: null,
+          closed_at: null,
+          closed_by: null,
+          pending_assignment: false,
+          inbound_reopen_event_id: event.messageId,
+          updated_at: now,
+        },
+      },
+      { returnDocument: "after" }
+    );
+    if (r) {
+      await settleReopen(); // failure propagates — state commits, retry converges audit
+      return "reopened";
+    }
+    // CAS miss → bounded reconcile once: settle only if the winner committed THIS event
+    const observed = await coll.findOne({ conversation_id: event.conversationId });
+    if (observed?.status === "bot" && observed.inbound_reopen_event_id === event.messageId) {
+      await settleReopen();
+    }
+    return "unchanged";
+  }
+
+  // bot + matching event id → committed winner whose audit may be missing → converge
+  if (meta.status === "bot" && meta.inbound_reopen_event_id === event.messageId) {
+    await settleReopen();
+    return "unchanged";
+  }
+
+  // bot/open/handoff/pending/other → unchanged, zero write
+  return "unchanged";
+}
+
 export const statusConversationService = {
   getMeta,
   getMetaMap,
@@ -327,4 +436,5 @@ export const statusConversationService = {
   reopenConversation,
   setPendingAssignment,
   assignPendingTicket,
+  applyInboundOwnershipTransition,
 };

@@ -2,6 +2,7 @@
 // (previously scoped to ticket_id + admin_id + timestamp only) to also record
 // general admin actions (trigger/KB/user management/etc.), needed for the
 // "การทำงานของแอดมิน" statistics page. `ticket_id` is now optional.
+import { createHash } from "node:crypto";
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { safeRegexSearch } from "../lib/regexEscape";
@@ -198,19 +199,43 @@ export async function logAdminEvent(opts: {
   shop_id?: string;
   metadata?: Record<string, unknown>;
   ip?: string;
+  // ⚡ eventId — deterministic dedupe identity (inbound lifecycle audit):
+  //   _id = "adminlog:event:" + sha256([action, conversation_id, eventId])[:32]
+  //   E11000 + matching stored identity → already-logged (idempotent converge)
+  //   E11000 + mismatched identity / non-E11000 → throw (never blindly swallowed)
+  //   no eventId → auto _id + identical legacy behavior (no extra read)
+  eventId?: string;
 }): Promise<void> {
   const coll = await getCollection<AdminLogDoc>(COLLECTIONS.adminLogs);
-  await coll.insertOne({
+  const doc: AdminLogDoc = {
     admin_id: opts.actor === "system" ? "system" : opts.actor,
     action_type: opts.action_type,
     actor: opts.actor,
     target_admin_id: opts.target_admin_id,
     conversation_id: opts.conversation_id,
     shop_id: opts.shop_id,
-    metadata: opts.metadata || {},
+    metadata: opts.eventId
+      ? { ...(opts.metadata || {}), message_id: opts.eventId }
+      : opts.metadata || {},
     ip: opts.ip,
     timestamp: new Date(),
-  });
+  };
+  if (opts.eventId) {
+    doc._id = "adminlog:event:" + createHash("sha256")
+      .update(JSON.stringify([opts.action_type, opts.conversation_id ?? "", opts.eventId]))
+      .digest("hex").slice(0, 32) as AdminLogDoc["_id"];
+  }
+  try {
+    await coll.insertOne(doc);
+  } catch (e) {
+    if ((e as { code?: number })?.code !== 11000 || !opts.eventId) throw e;
+    const existing = await coll.findOne({ _id: doc._id } as Document);
+    const same = !!existing
+      && existing.action_type === doc.action_type
+      && (existing.conversation_id ?? "") === (doc.conversation_id ?? "")
+      && existing.metadata?.message_id === opts.eventId;
+    if (!same) throw e;
+  }
 }
 
 /**

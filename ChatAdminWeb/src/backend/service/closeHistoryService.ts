@@ -92,6 +92,9 @@ export async function recordReopen(opts: {
   conversationId: string;
   reopenedBy: string;
   reopenReason?: string;
+  // ⚡ messageId — inbound lifecycle event identity → deterministic audit _id
+  //   via logAdminEvent(eventId) (retry/concurrent-loser converge to one log)
+  messageId?: string;
 }): Promise<void> {
   const coll = await getCollection<CloseHistoryDoc>(COLLECTIONS.closeHistory);
 
@@ -122,6 +125,7 @@ export async function recordReopen(opts: {
       reopen_reason: opts.reopenReason,
       previous_close_sequence: lastRecord?.sequence,
     },
+    ...(opts.messageId ? { eventId: opts.messageId } : {}),
   });
 }
 

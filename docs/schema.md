@@ -633,7 +633,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 |---------|-------|--------|
 | Read | listCloseHistory, listCustomerCloseHistory | `/conversations/[id]/close-history` |
 | Write | recordClose | statusConversationService.closeConversation |
-| Update | recordReopen | statusConversationService.reopenConversation |
+| Update | recordReopen | statusConversationService.reopenConversation (manual/admin — ไม่ส่ง messageId), statusConversationService.applyInboundOwnershipTransition (inbound — ส่ง `messageId` เพื่อ deterministic audit identity ผ่าน `logAdminEvent(eventId)`; CAS loser/retry ของ event เดิม settle idempotently) |
 | Delete | ไม่มี | |
 
 **หน้าที่เข้าถึง:** `/tickets`, `/botworker` (close history panel)
@@ -921,6 +921,8 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `pinned` | boolean? | |
 | `topic` | string? | |
 | `item_ids` | string[]? | |
+| `pending_assignment` | boolean? | backlog handoff flag (หา admin ไม่ได้ → รอ distributor) |
+| `inbound_reopen_event_id` | string? | message_id ของ inbound event ที่ชนะ fenced CAS (closed/resolved→bot) — CAS loser/retry เทียบ identity แล้ว settle audit idempotently; ไม่มี index ใหม่ |
 | `updated_at` | Date | |
 
 **⚠️ สำคัญ:** Source of truth สำหรับ admin-owned meta — ไม่โดน sellcenter dump ทับ
@@ -929,7 +931,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
 | Read | getMeta, getMetaMap | `/admin/conversations`, assign/handoff/resolve/close/reopen routes |
-| Write/Update | upsertMeta, updateStatus, manualAssign, tryAssign, closeConversation, reopenConversation, setTopic, setItemIds, togglePinned, resetUnread | ทุก mutation route |
+| Write/Update | upsertMeta, updateStatus, manualAssign, tryAssign, closeConversation, reopenConversation, setTopic, setItemIds, togglePinned, resetUnread, applyInboundOwnershipTransition | ทุก mutation route + `POST /api/internal/inbound-lifecycle` (external writer hook) |
 | Delete | ไม่มี | |
 
 **หน้าที่เข้าถึง:** `/tickets` (จริง), ทุก conversation mutation route

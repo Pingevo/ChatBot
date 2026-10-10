@@ -28,6 +28,13 @@ export const state = {
   queryLog: [],
   /** @type {null | ((coll:string, filter:any)=>any)} read-error seam (findOne) */
   findOneHook: null,
+  // ── inbound-lifecycle service spy counters (route leaf seam — ไม่ใช่ impl จริง)
+  inboundTransitionCalls: 0,
+  /** @type {any[]} */
+  inboundTransitionArgs: [],
+  inboundTransitionResult: "unchanged",
+  /** @type {Error | null} */
+  inboundTransitionError: null,
   config: {
     bot_worker_enabled: true,
     bot_concurrency_limit: 50,
@@ -62,6 +69,10 @@ export function resetState() {
   state.fetchResponse = null;
   state.configError = false;
   state.findOneHook = null;
+  state.inboundTransitionCalls = 0;
+  state.inboundTransitionArgs.length = 0;
+  state.inboundTransitionResult = "unchanged";
+  state.inboundTransitionError = null;
   state.queryLog.length = 0;
   lastGoodConfig = null;
   Object.assign(state.config, JSON.parse(JSON.stringify(DEFAULT_CONFIG)));

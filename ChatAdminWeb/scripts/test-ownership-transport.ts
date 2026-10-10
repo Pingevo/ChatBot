@@ -162,6 +162,7 @@ const paramsOf = (conversationId: string) => ({
 // ── module refs (dynamic import หลัง env+hooks) ───────────────
 
 let statusSvc: typeof import("../src/backend/service/statusConversationService");
+let adminLogSvc: typeof import("../src/backend/service/adminLogService");
 let assignSvc: typeof import("../src/backend/service/assignmentService");
 let handoffSvc: typeof import("../src/backend/service/handoffService");
 let botCall: typeof import("../src/backend/service/botCallService");
@@ -182,6 +183,7 @@ let responseStatsLib: typeof import("../src/backend/lib/responseStats");
 async function main() {
   mocks = await import("./test-ownership-transport-mocks.mjs");
   statusSvc = await import("../src/backend/service/statusConversationService");
+  adminLogSvc = await import("../src/backend/service/adminLogService");
   assignSvc = await import("../src/backend/service/assignmentService");
   handoffSvc = await import("../src/backend/service/handoffService");
   botCall = await import("../src/backend/service/botCallService");
@@ -1668,6 +1670,675 @@ async function main() {
     const returns = [...mainBody.matchAll(/\breturn\b/g)].map((m) => m.index!);
     assert(finallyIdx > 0 && returns.every((i) => i < finallyIdx),
       `every early return in main must precede the finally block (cleanup covers all paths)`);
+  });
+
+  // ═══ W. inbound lifecycle command contract — Phase 2B.1 review-fix ═══
+  // RED forward contract (review A3): production command does NOT exist yet.
+  // Seam = statusConversationService.applyInboundOwnershipTransition(event)
+  //   event   = { conversationId, messageId, inboundAt: Date }
+  //   returns = "initialized" | "reopened" | "unchanged"
+  // Same single owner (statusConversationService) — separate command boundary
+  // from reopenConversation (manual admin reopen / handoffService / reopen
+  // route keep calling the existing function — their semantics unchanged).
+  // Every W2+ test fails today ONLY because the command is missing; behavior
+  // assertions encode the approved contract for implementation review.
+  type InboundOutcome = "initialized" | "reopened" | "unchanged";
+  type InboundEvent = { conversationId: string; messageId: string; inboundAt: Date };
+  const applyInbound = (ev: InboundEvent): Promise<InboundOutcome> => {
+    const cmd = (statusSvc as unknown as Record<string, (e: InboundEvent) => Promise<InboundOutcome>>)
+      .applyInboundOwnershipTransition;
+    assert(typeof cmd === "function",
+      "statusConversationService.applyInboundOwnershipTransition missing — RED forward contract");
+    return cmd(ev);
+  };
+  const metaWrites = () =>
+    mocks.state.queryLog.filter((q: any) => q.coll === "status_conversation"
+      && (q.op === "updateOne" || q.op === "findOneAndUpdate" || q.op === "updateMany"));
+  const reopenLogs = () =>
+    mocks.fakeColl("admin_logs").filter((d: any) => d.action_type === "conversation.open");
+  const closeHistOf = (id: string) =>
+    mocks.fakeColl("close_history").filter((d: any) => d.conversation_id === id);
+  const adminLogs = (id?: string) =>
+    mocks.fakeColl("admin_logs").filter((d: any) => !id || d.conversation_id === id);
+  const noSideEffects = () =>
+    adminLogs().length === 0 && mocks.fakeColl("close_history").length === 0;
+
+  const CT0 = new Date("2026-10-01T00:00:00Z");
+  const CT1 = new Date("2026-10-05T00:00:00Z"); // newer inbound
+  const ev = (id: string, at: Date = CT1): InboundEvent =>
+    ({ conversationId: id, messageId: `m-${id}`, inboundAt: at });
+
+  await test("W1 [in-repo pin] raw dump rewrite{status:open,assigned_to} → meta ไม่เปลี่ยน", async () => {
+    // structural in-repo pin เท่านั้น — พิสูจน์ว่าไม่มี code path raw→meta ใน repo
+    // ห้ามอ้างเป็นหลักฐาน behavior ของ external process (A4)
+    seedConv("w1");
+    seedMeta("w1", { status: "handoff", assigned_to: "admin-1" });
+    const raw = mocks.fakeColl("conversations").find((d: any) => d.conversation_id === "w1");
+    raw.status = "open"; raw.assigned_to = "ghost-from-dump"; raw.closed_at = null;
+    const m = metaOf("w1");
+    assert(m?.status === "handoff" && m?.assigned_to === "admin-1",
+      `meta=${JSON.stringify(m)} — in-repo raw write must not touch meta`);
+  });
+
+  // ── W.service state contract (boundary: command missing) ──
+
+  await test("W2 missing meta + first inbound → initialized{status:bot} ไม่มี reopen side-effects", async () => {
+    const r = await applyInbound(ev("w2"));
+    assert(r === "initialized", `expected initialized, got ${r}`);
+    const m = metaOf("w2");
+    assert(m?.status === "bot" && m?.assigned_to === null,
+      `ingress must create authoritative meta — got ${JSON.stringify(m)}`);
+    assert(noSideEffects(),
+      `initialization is not a reopen — zero history/log expected, got logs=${adminLogs().length} history=${closeHistOf("w2").length}`);
+  });
+
+  await test("W3 topic-only meta (no status) + inbound → เติม status:bot รักษา metadata เดิม", async () => {
+    seedMeta("w3", { topic: "warranty", pinned: true, item_ids: ["p1"] });
+    const r = await applyInbound(ev("w3"));
+    assert(r === "initialized", `expected initialized, got ${r}`);
+    const m = metaOf("w3");
+    assert(m?.status === "bot" && m?.topic === "warranty" && m?.pinned === true
+      && JSON.stringify(m?.item_ids) === JSON.stringify(["p1"]),
+      `existing metadata must be preserved — got ${JSON.stringify(m)}`);
+  });
+
+  await test("W4 closed + new inbound → reopened: bot + clear owner/close/pending + audit identity", async () => {
+    seedMeta("w4", {
+      status: "closed", closed_at: CT0, closed_by: "admin-1",
+      assigned_to: "admin-1", assigned_at: new Date("2026-09-01T00:00:00Z"),
+      assignment_mode_used: "manual", close_count: 1, pending_assignment: true,
+    });
+    mocks.fakeColl("close_history").push({
+      record_id: "chr-w4", conversation_id: "w4", shop_id: "shop-1",
+      customer_id: "cust-w4", closed_by: "admin-1", closed_at: CT0,
+      reason: "done", category: "product", resolution: "answered", sequence: 1,
+    });
+    const e = ev("w4");
+    const r = await applyInbound(e);
+    assert(r === "reopened", `expected reopened, got ${r}`);
+    const m = metaOf("w4");
+    assert(m?.status === "bot" && m?.assigned_to === null && m?.assigned_at == null
+      && m?.closed_at === null && m?.closed_by == null && !m?.pending_assignment,
+      `reopen must clear owner+close+pending residue — got ${JSON.stringify(m)}`);
+    assert(m?.close_count === 1, `close_count is history — must survive, got ${m?.close_count}`);
+    assert(reopenLogs().length === 1 && reopenLogs()[0].metadata?.message_id === "m-w4",
+      `reopen audit must carry inbound message_id — logs=${JSON.stringify(reopenLogs().map((l: any) => l.metadata))}`);
+    assert(adminLogs("w4").length === 1,
+      `single side-effect owner — exactly ONE conversation.open total, got ${adminLogs("w4").length} (recordReopen already logs internally; a second logAdminEvent = double)`);
+    const hr = closeHistOf("w4")[0];
+    assert(hr?.reopened_at instanceof Date,
+      `successful closed→bot must mark latest close record reopened — got ${JSON.stringify(hr)}`);
+  });
+
+  await test("W5 bot + inbound → unchanged (zero write attempt + zero side-effects)", async () => {
+    seedMeta("w5", { status: "bot", assigned_to: null });
+    const r = await applyInbound(ev("w5"));
+    const m = metaOf("w5");
+    assert(r === "unchanged" && m?.status === "bot",
+      `already-bot must be unchanged — r=${r} meta=${JSON.stringify(m)}`);
+    assert(metaWrites().length === 0 && noSideEffects(),
+      `no-op state must not attempt any write — writes=${metaWrites().length} logs=${adminLogs().length}`);
+  });
+
+  await test("W6 open+assigned + inbound → unchanged (admin-owned preserved, zero write)", async () => {
+    seedMeta("w6", { status: "open", assigned_to: "admin-1" });
+    const r = await applyInbound(ev("w6"));
+    const m = metaOf("w6");
+    assert(r === "unchanged" && m?.status === "open" && m?.assigned_to === "admin-1",
+      `inbound must not flip admin-owned open — r=${r} meta=${JSON.stringify(m)}`);
+    assert(metaWrites().length === 0 && noSideEffects(), "no write attempt / no side-effects");
+  });
+
+  await test("W7 handoff+assigned + inbound → unchanged (locked, zero write)", async () => {
+    seedMeta("w7", { status: "handoff", assigned_to: "admin-1" });
+    const r = await applyInbound(ev("w7"));
+    const m = metaOf("w7");
+    assert(r === "unchanged" && m?.status === "handoff" && m?.assigned_to === "admin-1",
+      `handoff must refuse inbound transition — r=${r} meta=${JSON.stringify(m)}`);
+    assert(metaWrites().length === 0 && noSideEffects(), "no write attempt / no side-effects");
+  });
+
+  await test("W8 handoff+pending_assignment + inbound → unchanged (pending kept, zero write)", async () => {
+    seedMeta("w8", { status: "handoff", pending_assignment: true, assigned_to: null });
+    const r = await applyInbound(ev("w8"));
+    const m = metaOf("w8");
+    assert(r === "unchanged" && m?.status === "handoff" && m?.pending_assignment === true,
+      `pending must refuse inbound transition — r=${r} meta=${JSON.stringify(m)}`);
+    assert(metaWrites().length === 0 && noSideEffects(), "no write attempt / no side-effects");
+  });
+
+  await test("W9 reopened write = exact CAS {conversation_id, status∈{closed,resolved}, closed_at<$lt inboundAt}", async () => {
+    seedMeta("w9", { status: "closed", closed_at: CT0, assigned_to: "admin-1" });
+    const e = ev("w9");
+    await applyInbound(e);
+    const fenced = metaWrites().find((q: any) => q.filter && q.filter.status !== undefined);
+    assert(fenced,
+      `transition must write via fenced CAS — writes=${JSON.stringify(metaWrites().map((q: any) => q.filter))}`);
+    const f = fenced!.filter;
+    assert(f.conversation_id === "w9", `filter.conversation_id=${f.conversation_id}`);
+    const stSet: string[] = f.status?.$in ?? [f.status];
+    assert(stSet.length === 2 && stSet.includes("closed") && stSet.includes("resolved"),
+      `status fence must be exactly {closed,resolved} — ${JSON.stringify(f.status)}`);
+    assert(f.closed_at?.$lt instanceof Date && f.closed_at.$lt.getTime() === e.inboundAt.getTime(),
+      `closed_at must bound to event inboundAt ($lt) — ${JSON.stringify(f.closed_at)}`);
+  });
+
+  await test("W10 stale inbound (inboundAt < closed_at) → unchanged + meta identical + zero write/side-effects", async () => {
+    seedMeta("w10", { status: "closed", closed_at: CT1, closed_by: "admin-1", assigned_to: "admin-1" });
+    const r = await applyInbound(ev("w10", CT0)); // inbound older than close
+    const m = metaOf("w10");
+    assert(r === "unchanged",
+      `stale inbound must not transition — r=${r}`);
+    assert(m?.status === "closed" && m?.assigned_to === "admin-1"
+      && m?.closed_at?.getTime?.() === CT1.getTime() && m?.closed_by === "admin-1",
+      `meta must be identical — got ${JSON.stringify(m)}`);
+    assert(metaWrites().length === 0 && noSideEffects(),
+      "stale inbound must not attempt write / must not write history+log");
+  });
+
+  await test("W11 equal inbound (inboundAt === closed_at) → unchanged + zero write", async () => {
+    seedMeta("w11", { status: "closed", closed_at: CT0 });
+    const r = await applyInbound(ev("w11", CT0));
+    const m = metaOf("w11");
+    assert(r === "unchanged" && m?.status === "closed",
+      `equal ts is not a new inbound — r=${r} meta=${JSON.stringify(m)}`);
+    assert(metaWrites().length === 0 && noSideEffects(), "no write attempt / no side-effects");
+  });
+
+  await test("W12 resolved + new inbound → reopened: bot + residue cleared + audit", async () => {
+    seedMeta("w12", { status: "resolved", closed_at: CT0, closed_by: "admin-1", assigned_to: "admin-1" });
+    const r = await applyInbound(ev("w12"));
+    const m = metaOf("w12");
+    assert(r === "reopened" && m?.status === "bot" && m?.assigned_to === null
+      && m?.closed_at === null && m?.closed_by == null,
+      `resolved = wasClosed → must reopen like closed — r=${r} meta=${JSON.stringify(m)}`);
+    assert(reopenLogs().length === 1, `reopened must emit audit — logs=${reopenLogs().length}`);
+  });
+
+  await test("W13 replay same event after reopened → unchanged + no duplicate side-effects", async () => {
+    seedMeta("w13", { status: "closed", closed_at: CT0, assigned_to: "admin-1" });
+    const e = ev("w13");
+    const r1 = await applyInbound(e);
+    assert(r1 === "reopened", `first call should reopen — got ${r1}`);
+    const logsAfterFirst = reopenLogs().length;
+    const r2 = await applyInbound(e); // duplicate poll/import replay
+    assert(r2 === "unchanged" && reopenLogs().length === logsAfterFirst,
+      `replay must be no-op — r2=${r2} logs ${logsAfterFirst}→${reopenLogs().length}`);
+  });
+
+  // ── W.init/race contract (boundary: command missing) ──
+  // fake-mongo write hooks (findOneAndUpdateHook/updateOneHook) fire right
+  // BEFORE the write executes — letting the admin mutation land between the
+  // command's dispatch read and its fenced CAS = a genuine interleaving,
+  // not a pre-call state change.
+  const withWriteInterleave = (fn: (coll: string, filter: any) => Promise<void>) => {
+    (mocks.state as any).findOneAndUpdateHook = fn;
+    (mocks.state as any).updateOneHook = fn;
+  };
+  const clearWriteInterleave = () => {
+    (mocks.state as any).findOneAndUpdateHook = null;
+    (mocks.state as any).updateOneHook = null;
+  };
+  const metaReads = () =>
+    mocks.state.queryLog.filter((q: any) => q.coll === "status_conversation" && q.op === "findOne");
+
+  await test("W14 real read/CAS race: read sees closed → admin flip lands before CAS write → miss → bounded re-read → unchanged", async () => {
+    seedMeta("w14", { status: "closed", closed_at: CT0 });
+    let casAttempts = 0;
+    withWriteInterleave(async (coll: string, filter: any) => {
+      if (coll === "status_conversation" && filter?.status !== undefined && casAttempts === 0) {
+        casAttempts++; // fenced-CAS write attempt → admin wins the interleaving at write time
+        const d = metaOf("w14")!;
+        d.status = "open"; d.assigned_to = "admin-2"; d.assigned_at = new Date();
+      }
+    });
+    const r = await applyInbound(ev("w14"));
+    clearWriteInterleave();
+    const m = metaOf("w14");
+    assert(r === "unchanged", `CAS must lose to admin-owned open — r=${r}`);
+    assert(m?.status === "open" && m?.assigned_to === "admin-2",
+      `admin-owned state must survive — meta=${JSON.stringify(m)}`);
+    assert(casAttempts === 1, `exactly one fenced-CAS write attempt, no retry loop — got ${casAttempts}`);
+    assert(metaReads().length <= 2, `read must be bounded (dispatch + ≤1 re-read) — got ${metaReads().length}`);
+    assert(noSideEffects(), "zero history/log on lost race");
+  });
+
+  await test("W15 replay-after-reclose: E1 reopened → admin reclose(T2) → replay E1 → unchanged", async () => {
+    seedMeta("w15", { status: "closed", closed_at: CT0 });
+    const e = ev("w15", CT1);
+    const r1 = await applyInbound(e);
+    assert(r1 === "reopened", `first event should reopen — got ${r1}`);
+    const doc = metaOf("w15")!; // admin closes again at T2 > E1.inboundAt
+    doc.status = "closed"; doc.closed_at = new Date("2026-10-10T00:00:00Z"); doc.closed_by = "admin-1";
+    const r2 = await applyInbound(e); // replay E1 — now stale vs new closed_at
+    assert(r2 === "unchanged" && metaOf("w15")?.status === "closed",
+      `stale replay must not reopen the second close — r2=${r2} meta=${JSON.stringify(metaOf("w15"))}`);
+  });
+
+  await test("W16 missing-meta replay: first initialized → second unchanged + single doc + no logs", async () => {
+    const e = ev("w16");
+    const r1 = await applyInbound(e);
+    assert(r1 === "initialized", `first should initialize — got ${r1}`);
+    const r2 = await applyInbound(e);
+    assert(r2 === "unchanged",
+      `init must be idempotent — r2=${r2}`);
+    const docs = mocks.fakeColl("status_conversation").filter((d: any) => d.conversation_id === "w16");
+    assert(docs.length === 1 && docs[0].status === "bot",
+      `single meta doc — got ${docs.length}`);
+    assert(noSideEffects(), "init replay must not emit reopen history/log");
+  });
+
+  await test("W17 successful reopened → conversation_products untouched (claim preserved)", async () => {
+    seedMeta("w17", { status: "closed", closed_at: CT0, assigned_to: "admin-1" });
+    await applyInbound(ev("w17"));
+    assert(!mocks.state.queryLog.some((q: any) => q.coll === "conversation_products"),
+      "ownership transition must not touch claim-state collection");
+  });
+
+  await test("W18 literal status:'pending' + inbound → unchanged (distinct from handoff+pending_assignment)", async () => {
+    // "pending" เป็น status literal ของตัวเอง — คนละ representation กับ W8
+    // (handoff + pending_assignment:true) — ทั้งคู่ต้อง refuse
+    seedMeta("w18", { status: "pending", assigned_to: "admin-1" });
+    const r = await applyInbound(ev("w18"));
+    const m = metaOf("w18");
+    assert(r === "unchanged" && m?.status === "pending" && m?.assigned_to === "admin-1",
+      `literal pending must refuse inbound transition — r=${r} meta=${JSON.stringify(m)}`);
+    assert(metaWrites().length === 0 && noSideEffects(), "no write attempt / no side-effects");
+  });
+
+  // ── W.side-effect policy (missing boundary: side-effect contract on the command) ──
+
+  await test("W19 reopened → exactly ONE conversation.open total (recordReopen is sole owner)", async () => {
+    seedMeta("w19", { status: "closed", closed_at: CT0, assigned_to: "admin-1" });
+    await applyInbound(ev("w19"));
+    assert(reopenLogs().length === 1 && adminLogs("w19").length === 1,
+      `double-emit contract: recordReopen logs conversation.open internally — a second logAdminEvent after it = 2. got reopen=${reopenLogs().length} total=${adminLogs("w19").length}`);
+  });
+
+  await test("W20 CAS-miss (admin-owned) → zero history + zero logs", async () => {
+    seedMeta("w20", { status: "handoff", assigned_to: "admin-1" });
+    await applyInbound(ev("w20"));
+    assert(noSideEffects(),
+      `refused transition must emit nothing — logs=${adminLogs().length} history=${mocks.fakeColl("close_history").length}`);
+  });
+
+  await test("W21 initialization → zero history + zero logs (init ≠ reopen)", async () => {
+    await applyInbound(ev("w21"));
+    assert(noSideEffects(),
+      `initialization must not produce reopen artifacts — logs=${adminLogs().length} history=${mocks.fakeColl("close_history").length}`);
+  });
+
+  // ── W.concurrent reconciliation (boundary: command missing) ──
+
+  await test("W22 crash window: side-effect failure after CAS → state commits + retry converges audit once", async () => {
+    // option-B contract: CAS is authoritative; a crash between CAS and audit
+    // must not roll back state, and an external retry of the SAME event must
+    // converge audit to exactly-once via stored event identity
+    seedMeta("w22", { status: "closed", closed_at: CT0, assigned_to: "admin-1" });
+    mocks.fakeColl("close_history").push({
+      record_id: "chr-w22", conversation_id: "w22", shop_id: "shop-1",
+      customer_id: "cust-w22", closed_by: "admin-1", closed_at: CT0,
+      reason: "done", category: "product", resolution: "answered", sequence: 1,
+    });
+    assert(typeof (statusSvc as any).applyInboundOwnershipTransition === "function",
+      "statusConversationService.applyInboundOwnershipTransition missing — RED forward contract");
+    const e = ev("w22");
+    (mocks.state as any).findOneHook = async (coll: string) => {
+      if (coll === "close_history") throw new Error("simulated crash between CAS and audit");
+    };
+    let crashed = false;
+    try { await applyInbound(e); } catch { crashed = true; }
+    assert(crashed, "side-effect failure must surface to caller (transport retries)");
+    assert(metaOf("w22")?.status === "bot",
+      `CAS must commit despite audit crash — meta=${JSON.stringify(metaOf("w22"))}`);
+    (mocks.state as any).findOneHook = null;
+    const r2 = await applyInbound(e); // external retry of the same event
+    assert(r2 === "unchanged", `retry on committed state → unchanged, got ${r2}`);
+    assert(adminLogs("w22").length === 1 && closeHistOf("w22")[0]?.reopened_at instanceof Date,
+      `retry must converge audit to exactly-once — logs=${adminLogs("w22").length} history=${JSON.stringify(closeHistOf("w22"))}`);
+  });
+
+  await test("W23 duplicate transport request (same event twice) → converged side-effects", async () => {
+    seedMeta("w23", { status: "closed", closed_at: CT0, assigned_to: "admin-1" });
+    mocks.fakeColl("close_history").push({
+      record_id: "chr-w23", conversation_id: "w23", shop_id: "shop-1",
+      customer_id: "cust-w23", closed_by: "admin-1", closed_at: CT0,
+      reason: "done", category: "product", resolution: "answered", sequence: 1,
+    });
+    const e = ev("w23");
+    await applyInbound(e);
+    await applyInbound(e); // duplicate HTTP delivery of the same event
+    assert(adminLogs("w23").length === 1,
+      `duplicate request must not double-emit — logs=${adminLogs("w23").length}`);
+  });
+
+  await test("W27 concurrent loser reconcile: A wins CAS + dies mid-audit → B's CAS misses → re-read sees matching event id → B settles", async () => {
+    // timeline: A reads closed, wins fenced CAS (status=bot +
+    // inbound_reopen_event_id=E1.messageId), dies before audit completes.
+    // B (same event) read closed before A's commit; B's CAS must miss,
+    // B re-reads (bounded ≤1), sees bot + matching event id → settles the
+    // missing audit idempotently, returns unchanged. (A's throw contract
+    // — transport knows the operation was incomplete — is pinned by W22.)
+    seedMeta("w27", { status: "closed", closed_at: CT0 });
+    mocks.fakeColl("close_history").push({
+      record_id: "chr-w27", conversation_id: "w27", shop_id: "shop-1",
+      customer_id: "cust-w27", closed_by: "admin-1", closed_at: CT0,
+      reason: "done", category: "product", resolution: "answered", sequence: 1,
+    });
+    const e = ev("w27");
+    let bCas = 0;
+    withWriteInterleave(async (coll: string, filter: any) => {
+      if (coll === "status_conversation" && filter?.status !== undefined && bCas === 0) {
+        bCas++; // A's CAS commits between B's read and B's write
+        const d = metaOf("w27")!;
+        d.status = "bot"; d.assigned_to = null; d.assigned_at = null;
+        d.closed_at = null; d.closed_by = null; d.pending_assignment = false;
+        d.inbound_reopen_event_id = e.messageId;
+      }
+    });
+    const r = await applyInbound(e);
+    clearWriteInterleave();
+    assert(r === "unchanged", `CAS loser reports unchanged (state committed by winner) — r=${r}`);
+    assert(metaOf("w27")?.status === "bot",
+      `winner state preserved — meta=${JSON.stringify(metaOf("w27"))}`);
+    assert(bCas === 1, `exactly one fenced CAS attempt by the loser — got ${bCas}`);
+    assert(adminLogs("w27").length === 1 && closeHistOf("w27")[0]?.reopened_at instanceof Date,
+      `loser must settle matching event's audit — logs=${adminLogs("w27").length} hist=${JSON.stringify(closeHistOf("w27"))}`);
+    assert(metaReads().length <= 2, `bounded re-read only — got ${metaReads().length}`);
+  });
+
+  await test("W28 CAS loser sees DIFFERENT inbound_reopen_event_id → must NOT settle side-effects", async () => {
+    // same race but the committed bot state belongs to a different inbound
+    // event — settling E1's audit now would fabricate E1's reopen.
+    seedMeta("w28", { status: "closed", closed_at: CT0 });
+    withWriteInterleave(async (coll: string, filter: any) => {
+      if (coll === "status_conversation" && filter?.status !== undefined) {
+        const d = metaOf("w28")!; // winner was a different event
+        d.status = "bot"; d.assigned_to = null; d.closed_at = null;
+        d.inbound_reopen_event_id = "m-older-event";
+      }
+    });
+    const r = await applyInbound(ev("w28"));
+    clearWriteInterleave();
+    assert(r === "unchanged" && metaOf("w28")?.status === "bot",
+      `unchanged + winner state kept — r=${r} meta=${JSON.stringify(metaOf("w28"))}`);
+    assert(adminLogs().length === 0,
+      `different event id → zero audit settle — logs=${adminLogs().length}`);
+  });
+
+  // ── W.deterministic audit identity (boundary: logAdminEvent eventId support) ──
+  // contract: _id = "adminlog:event:" + sha256(JSON.stringify([action, convId, messageId])).slice(0,32)
+  // E11000 + matching existing identity → already-logged (no throw, no dup)
+  // E11000 + mismatched identity / non-E11000 → throw (no blind swallow)
+  // legacy callers without eventId → auto _id, unchanged
+  const { createHash } = await import("node:crypto");
+  const detLogId = (action: string, convId: string, messageId: string) =>
+    "adminlog:event:" + createHash("sha256")
+      .update(JSON.stringify([action, convId, messageId])).digest("hex").slice(0, 32);
+  const logEvt = (over: any = {}): any =>
+    ({ action_type: "conversation.open", actor: "test-suite",
+      conversation_id: "w-log", metadata: {}, eventId: "m-log", ...over });
+
+  await test("W29 same action+conversation+message → deterministic _id + single doc", async () => {
+    const expected = detLogId("conversation.open", "w29", "m-w29");
+    await adminLogSvc.logAdminEvent(logEvt({ conversation_id: "w29", eventId: "m-w29" }));
+    const docs = adminLogs("w29");
+    assert(docs.length === 1 && docs[0]._id === expected,
+      `deterministic _id contract — got ${JSON.stringify(docs.map((d: any) => d._id))} expected ${expected}`);
+  });
+
+  await test("W30 same message + different conversation → different _id (both persist)", async () => {
+    await adminLogSvc.logAdminEvent(logEvt({ conversation_id: "w30a", eventId: "m-x" }));
+    await adminLogSvc.logAdminEvent(logEvt({ conversation_id: "w30b", eventId: "m-x" }));
+    const a = adminLogs("w30a")[0], b = adminLogs("w30b")[0];
+    assert(a?._id === detLogId("conversation.open", "w30a", "m-x")
+        && b?._id === detLogId("conversation.open", "w30b", "m-x") && a._id !== b._id,
+      `conversation must participate in id — got ${a?._id} / ${b?._id}`);
+  });
+
+  await test("W31 same conversation+message + different action → different _id", async () => {
+    await adminLogSvc.logAdminEvent(logEvt({ conversation_id: "w31", eventId: "m-w31" }));
+    await adminLogSvc.logAdminEvent(logEvt({ action_type: "conversation.assign", conversation_id: "w31", eventId: "m-w31" }));
+    const ids = adminLogs("w31").map((d: any) => d._id);
+    assert(ids.includes(detLogId("conversation.open", "w31", "m-w31"))
+        && ids.includes(detLogId("conversation.assign", "w31", "m-w31")),
+      `action must participate in id — got ${JSON.stringify(ids)}`);
+  });
+
+  await test("W32 delimiter-like values must not collide (JSON-array serialization)", async () => {
+    const a = detLogId("conversation.open", 'c"],["x', "m");
+    const b = detLogId("conversation.open", "c", 'm"],["x');
+    assert(a !== b, "crafted values collided");
+    await adminLogSvc.logAdminEvent(logEvt({ conversation_id: 'c"],["x', eventId: "m" }));
+    await adminLogSvc.logAdminEvent(logEvt({ conversation_id: "c", eventId: 'm"],["x' }));
+    const docs = adminLogs().filter((d: any) =>
+      typeof d._id === "string" && d._id.startsWith("adminlog:event:"));
+    assert(docs.length === 2, `crafted events must produce 2 distinct docs — got ${docs.length}`);
+  });
+
+  await test("W33 duplicate exact event redelivery → single doc, no throw", async () => {
+    await adminLogSvc.logAdminEvent(logEvt({ conversation_id: "w33", eventId: "m-w33" }));
+    await adminLogSvc.logAdminEvent(logEvt({ conversation_id: "w33", eventId: "m-w33" })); // retry
+    assert(adminLogs("w33").length === 1,
+      `idempotent redelivery must converge to one doc — got ${adminLogs("w33").length}`);
+  });
+
+  await test("W34 _id collision with DIFFERENT identity → throw (no blind E11000 swallow)", async () => {
+    mocks.fakeColl("admin_logs").push({
+      _id: detLogId("conversation.open", "w34", "m-w34"),
+      action_type: "conversation.close", conversation_id: "w34",
+      actor: "seeded", metadata: {},
+    });
+    let threw = false;
+    try {
+      await adminLogSvc.logAdminEvent(logEvt({ conversation_id: "w34", eventId: "m-w34" }));
+    } catch { threw = true; }
+    assert(threw, "E11000 + mismatched existing identity must surface, not be swallowed");
+  });
+
+  await test("W35 non-E11000 insert failure → throw (no silent swallow)", async () => {
+    (mocks.state as any).insertOneHook = async (coll: string) => {
+      if (coll === "admin_logs") throw new Error("simulated write concern failure");
+    };
+    let threw = false;
+    try { await adminLogSvc.logAdminEvent(logEvt({ conversation_id: "w35" })); } catch { threw = true; }
+    (mocks.state as any).insertOneHook = null;
+    assert(threw, "non-E11000 errors must propagate to caller");
+  });
+
+  await test("W36 legacy caller without eventId → unchanged behavior (auto _id, no dedupe)", async () => {
+    await adminLogSvc.logAdminEvent(logEvt({ conversation_id: "w36", eventId: undefined }));
+    const d = adminLogs("w36")[0];
+    assert(d && !(typeof d._id === "string" && d._id.startsWith("adminlog:event:")),
+      `no eventId → no deterministic _id — got ${d?._id}`);
+  });
+
+  // ── W.executable transport (boundary: route module missing) ──
+  // route runs against REAL lib/config (env CHATBOT_INTERNAL_SECRET set at
+  // suite top) + service spy leaf (importer-filtered to /src/app/api/internal/)
+  // — auth/validation/delegation asserted via runtime calls, not regex.
+  const INTERNAL_SECRET = "verify-only-internal-nonsecret"; // set as env at suite top
+  const loadInboundRoute = async () => {
+    // dynamic specifier — the route file may not exist yet (RED boundary);
+    // a literal specifier would fail tsc resolution instead of asserting at runtime
+    const routePath = "../src/app/api/internal/inbound-lifecycle/route";
+    try { return await import(routePath); }
+    catch { return null; }
+  };
+  const postInbound = async (body: any, secret?: string) => {
+    const mod = await loadInboundRoute();
+    assert(mod?.POST,
+      "route module missing — RED forward contract (api/internal/inbound-lifecycle/route.ts)");
+    const { NextRequest } = await import("next/server");
+    const req = new NextRequest("http://localhost/api/internal/inbound-lifecycle", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(secret ? { "x-internal-secret": secret } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+    return mod.POST(req);
+  };
+  const validBody = { conversation_id: "w-t1", message_id: "m-w-t1", inbound_at: CT1.toISOString() };
+  const expectReject = async (body: any, secret: string | undefined, status: number, label: string) => {
+    const res = await postInbound(body, secret);
+    assert(res.status === status && mocks.state.inboundTransitionCalls === 0,
+      `${label}: expected ${status} + zero service calls — got ${res.status} calls=${mocks.state.inboundTransitionCalls}`);
+  };
+
+  await test("W37 route: no x-internal-secret → 401 + service never invoked (auth before service, by call count)", async () => {
+    await expectReject(validBody, undefined, 401, "no secret");
+  });
+
+  await test("W38 route: wrong secret → 401 + calls=0", async () => {
+    await expectReject(validBody, "wrong-secret", 401, "wrong secret");
+  });
+
+  await test("W39 route: missing conversation_id → 422 + calls=0", async () => {
+    await expectReject({ ...validBody, conversation_id: undefined }, INTERNAL_SECRET, 422, "missing conversation_id");
+  });
+
+  await test("W40 route: missing message_id → 422 + calls=0", async () => {
+    await expectReject({ ...validBody, message_id: undefined }, INTERNAL_SECRET, 422, "missing message_id");
+  });
+
+  await test("W41 route: missing/invalid inbound_at → 422 + calls=0", async () => {
+    await expectReject({ ...validBody, inbound_at: undefined }, INTERNAL_SECRET, 422, "missing inbound_at");
+    await expectReject({ ...validBody, inbound_at: "not-a-date" }, INTERNAL_SECRET, 422, "unparseable inbound_at");
+  });
+
+  await test("W42 route: non-string/empty fields → 422 + calls=0", async () => {
+    await expectReject({ ...validBody, conversation_id: "" }, INTERNAL_SECRET, 422, "empty conversation_id");
+    await expectReject({ ...validBody, conversation_id: 123 }, INTERNAL_SECRET, 422, "non-string conversation_id");
+    await expectReject({ ...validBody, message_id: " " }, INTERNAL_SECRET, 422, "blank message_id");
+  });
+
+  await test("W43 route: valid request → delegates once, camelCase args, 200 {outcome}", async () => {
+    const res = await postInbound(validBody, INTERNAL_SECRET);
+    const body = await res.json().catch(() => null);
+    assert(res.status === 200, `expected 200 — got ${res.status} body=${JSON.stringify(body)}`);
+    assert(mocks.state.inboundTransitionCalls === 1,
+      `exactly one service call — got ${mocks.state.inboundTransitionCalls}`);
+    const arg = mocks.state.inboundTransitionArgs[0];
+    assert(arg?.conversationId === "w-t1" && arg?.messageId === "m-w-t1" && arg?.inboundAt instanceof Date,
+      `route must map snake→camel and parse ISO→Date — got ${JSON.stringify(arg)}`);
+    assert(body && typeof body.outcome === "string",
+      `200 body must carry typed outcome — got ${JSON.stringify(body)}`);
+  });
+
+  await test("W44 route: service throws → 500 + no raw error/secret leak", async () => {
+    mocks.state.inboundTransitionError = new Error("simulated-failure-should-not-leak");
+    const res = await postInbound(validBody, INTERNAL_SECRET);
+    const body = await res.json().catch(() => null);
+    assert(res.status === 500, `expected 500 — got ${res.status} body=${JSON.stringify(body)}`);
+    const leak = JSON.stringify(body);
+    assert(!leak.includes("simulated-failure-should-not-leak") && !leak.includes(INTERNAL_SECRET),
+      `500 body must not expose raw error/secret — got ${leak}`);
+  });
+
+  await test("W45 route: duplicate valid delivery → route delegates every time (dedupe lives in command)", async () => {
+    const r1 = await postInbound(validBody, INTERNAL_SECRET);
+    const r2 = await postInbound(validBody, INTERNAL_SECRET);
+    assert(r1.status === 200 && r2.status === 200 && mocks.state.inboundTransitionCalls === 2,
+      `route must not self-dedupe — got statuses ${r1.status}/${r2.status} calls=${mocks.state.inboundTransitionCalls}`);
+  });
+
+  await test("W46 middleware: exact path in PUBLIC_API → unauthenticated POST passes through to route", async () => {
+    const { middleware } = await import("../src/middleware");
+    const { NextRequest } = await import("next/server");
+    const req = new NextRequest("http://localhost/api/internal/inbound-lifecycle", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const res = await middleware(req);
+    assert(res.status === 200,
+      `middleware must pass the allowlisted route through — got ${res.status}`);
+    assert(res.headers.get("x-middleware-next") === "1",
+      `NextResponse.next() marker expected — got ${res.headers.get("x-middleware-next")}`);
+  });
+
+  await test("W48 route: overlong conversation_id/message_id → 422 + calls=0", async () => {
+    const long = "x".repeat(300);
+    await expectReject({ ...validBody, conversation_id: long }, INTERNAL_SECRET, 422, "overlong conversation_id");
+    await expectReject({ ...validBody, message_id: long }, INTERNAL_SECRET, 422, "overlong message_id");
+  });
+
+  await test("W49 route: ISO string without timezone → 422 + calls=0", async () => {
+    await expectReject({ ...validBody, inbound_at: "2026-10-05T00:00:00" }, INTERNAL_SECRET, 422, "no-timezone ISO");
+  });
+
+  await test("W50 route: valid timezone offset → delegates with correct Date", async () => {
+    const res = await postInbound(
+      { ...validBody, inbound_at: "2026-10-05T07:00:00+07:00" }, INTERNAL_SECRET);
+    assert(res.status === 200 && mocks.state.inboundTransitionCalls === 1,
+      `offset timestamp must be accepted — got ${res.status}`);
+    const arg = mocks.state.inboundTransitionArgs[0];
+    assert(arg?.inboundAt instanceof Date
+      && arg.inboundAt.getTime() === new Date("2026-10-05T00:00:00Z").getTime(),
+      `offset must parse to correct UTC instant — got ${arg?.inboundAt}`);
+  });
+
+  await test("W51 route: calendar-invalid date 2026-02-30 → 422 + calls=0 (no Date normalization)", async () => {
+    // new Date("2026-02-30T00:00:00Z") silently normalizes to Mar 2 — an
+    // invented instant must never drive the closed→bot staleness fence
+    await expectReject({ ...validBody, inbound_at: "2026-02-30T00:00:00Z" }, INTERNAL_SECRET, 422, "2026-02-30");
+    await expectReject({ ...validBody, inbound_at: "2026-13-01T00:00:00Z" }, INTERNAL_SECRET, 422, "month 13");
+  });
+
+  await test("W52 route: out-of-range clock/offset fields → 422 + calls=0", async () => {
+    await expectReject({ ...validBody, inbound_at: "2026-10-05T25:00:00Z" }, INTERNAL_SECRET, 422, "hour 25");
+    await expectReject({ ...validBody, inbound_at: "2026-10-05T00:00:00+24:00" }, INTERNAL_SECRET, 422, "offset hour 24");
+    await expectReject({ ...validBody, inbound_at: "2026-10-05T00:00:60Z" }, INTERNAL_SECRET, 422, "second 60");
+  });
+
+  await test("W53 route: real leap day 2028-02-29 → 200 + correct Date", async () => {
+    const res = await postInbound({ ...validBody, inbound_at: "2028-02-29T00:00:00Z" }, INTERNAL_SECRET);
+    assert(res.status === 200 && mocks.state.inboundTransitionCalls === 1,
+      `valid leap day must be accepted — got ${res.status}`);
+    const arg = mocks.state.inboundTransitionArgs[0];
+    assert(arg?.inboundAt instanceof Date
+      && arg.inboundAt.getTime() === new Date("2028-02-29T00:00:00Z").getTime(),
+      `leap-day instant must be exact — got ${arg?.inboundAt}`);
+  });
+
+  await test("W54 route: fractional seconds canonicalize to ms by truncation (no round, no carry)", async () => {
+    // Python-style microsecond timestamps — receiver contract stores ms only
+    let res = await postInbound(
+      { ...validBody, inbound_at: "2026-10-05T00:00:00.123456Z" }, INTERNAL_SECRET);
+    assert(res.status === 200 && mocks.state.inboundTransitionCalls === 1,
+      `microsecond timestamp must be accepted — got ${res.status}`);
+    let arg = mocks.state.inboundTransitionArgs[0];
+    assert(arg?.inboundAt instanceof Date
+      && arg.inboundAt.getTime() === new Date("2026-10-05T00:00:00.123Z").getTime(),
+      `.123456 must truncate to .123 — got ${arg?.inboundAt?.toISOString()}`);
+
+    mocks.state.inboundTransitionCalls = 0;
+    mocks.state.inboundTransitionArgs.length = 0;
+    res = await postInbound(
+      { ...validBody, inbound_at: "2026-10-05T07:00:00.999999+07:00" }, INTERNAL_SECRET);
+    assert(res.status === 200 && mocks.state.inboundTransitionCalls === 1,
+      `.999999 must be accepted (no second carry) — got ${res.status}`);
+    arg = mocks.state.inboundTransitionArgs[0];
+    assert(arg?.inboundAt instanceof Date
+      && arg.inboundAt.getTime() === new Date("2026-10-05T00:00:00.999Z").getTime(),
+      `.999999+07:00 must be 00:00:00.999Z, not carried — got ${arg?.inboundAt?.toISOString()}`);
+  });
+
+  // ── W.source pins (structure only — never cited as runtime behavior) ──
+
+  await test("W47 [source pin] route file contains no direct Mongo access", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    let src = "";
+    try {
+      src = readFileSync(fileURLToPath(
+        new URL("../src/app/api/internal/inbound-lifecycle/route.ts", import.meta.url)), "utf8");
+    } catch { /* missing */ }
+    assert(src.length > 0, "route missing — RED forward contract");
+    assert(!/getCollection|mongoClient|insertOne|updateOne|findOneAndUpdate|deleteOne|deleteMany/.test(src),
+      "route must be a transport adapter only — Mongo/CAS lives in the service owner");
   });
 
   const passed = results.filter((r) => r.ok).length;
