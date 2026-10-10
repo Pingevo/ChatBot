@@ -26,6 +26,7 @@ import { getCustomer } from "./customerService";
 import { logAdminEvent } from "./adminLogService";
 // ⚡ botworker parallel — test store + sandbox event log (ใช้เมื่อ msg.testSource มี)
 import { testStatusConversationService, type TestSource } from "./testStatusConversationService";
+import { statusConversationService } from "./statusConversationService";
 import { logBotworkerEvent } from "./botworkerEventService";
 import { isSafeFetchUrl } from "../lib/urlSafety";
 
@@ -1103,7 +1104,7 @@ export function matchBranch(lowerText: string, b: ConditionBranch): boolean {
 }
 
 /** legacy binary condition — คืน boolean (true/false) */
-async function evalLegacyCondition(
+export async function evalLegacyCondition(
   node: WorkflowNode,
   msg: EngineMessage,
   context: Record<string, unknown>
@@ -1129,9 +1130,11 @@ async function evalLegacyCondition(
         const isOpen = st !== "closed" && st !== "resolved";
         return wantStatus === "open" ? isOpen : !isOpen;
       }
-      const conv = await getConversation(msg.conversation_id);
-      if (!conv) return false;
-      const isOpen = conv.status !== "closed" && conv.status !== "resolved";
+      // status อ่านจาก status_conversation เท่านั้น
+      //   raw conv.status เป็น dump field ("open" เสมอ) ห้ามใช้ตัดสิน
+      const meta = await statusConversationService.getMeta(msg.conversation_id);
+      const st = meta?.status || "bot";
+      const isOpen = st !== "closed" && st !== "resolved";
       return wantStatus === "open" ? isOpen : !isOpen;
     }
 
@@ -1161,10 +1164,11 @@ async function evalLegacyCondition(
         if (wantAdmin) return meta?.assigned_to === wantAdmin;
         return !!meta?.assigned_to;
       }
-      const conv = await getConversation(msg.conversation_id);
-      if (!conv) return false;
-      if (wantAdmin) return conv.assigned_to === wantAdmin;
-      return !!conv.assigned_to;
+      // ownership อ่านจาก status_conversation เท่านั้น
+      //   raw conv.assigned_to เป็น dump field (ถูก sellcenter ทับได้) ห้ามใช้ตัดสิน
+      const meta = await statusConversationService.getMeta(msg.conversation_id);
+      if (wantAdmin) return meta?.assigned_to === wantAdmin;
+      return !!meta?.assigned_to;
     }
 
     default:
@@ -1335,11 +1339,15 @@ async function performAction(
 
       if (wantAdmin) {
         // assign ตรงแบบ (เหมือน Zaapi ที่เลือกคนได้)
-        const coll = await getCollection<{ assigned_to: string | null }>(COLLECTIONS.conversations);
-        await coll.updateOne(
-          { conversation_id: msg.conversation_id },
-          { $set: { assigned_to: wantAdmin, updated_at: new Date() } }
+        // ownership เขียนผ่าน status_conversation เท่านั้น
+        //   raw conversations.assigned_to เป็น dump field (ถูกทับ) — เขียนลงนั่นไม่มีผล
+        const meta = await statusConversationService.getMeta(msg.conversation_id);
+        const ok = await statusConversationService.manualAssign(
+          msg.conversation_id, wantAdmin, meta?.assigned_to, "workflow-engine"
         );
+        if (!ok) {
+          return { handoff: { agentId: meta?.assigned_to || null, reason: `${reason} (conflict — already assigned)` } };
+        }
         await logAdminEvent({
           action_type: "workflow.assign_ticket",
           actor: "workflow-engine",

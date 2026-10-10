@@ -54,6 +54,7 @@ export async function GET(req: NextRequest) {
 
   const convColl = await getCollection(COLLECTIONS.conversations);
   const msgColl = await getCollection(COLLECTIONS.messages);
+  const statusColl = await getCollection(COLLECTIONS.statusConversation);
   const shops = await shopService.listShops();
 
   // สร้าง dayLabels ตาม range
@@ -199,32 +200,62 @@ export async function GET(req: NextRequest) {
     msgColl.countDocuments({ role: { $in: ["bot", "admin"] }, ...dateFilter("created_timestamp") }),
   ]);
 
-  // 4. Total conversations + derived counts (ไม่กรองตาม status เพราะ sellcenter ไม่เขียน)
-  const [totalConv, closedCount, handoffCount] = await Promise.all([
+  // 4. Total conversations + ownership counts — อ่านจาก status_conversation
+  //    (raw conversations(_shp).status="open" ทั้งหมด + assigned_to/closed_at ถูก dump ทับ)
+  //    partition: closed = meta {closed,resolved}; humanOpen = meta {handoff,open,pending}
+  //    bounded: meta-driven $lookup (status index → unique conversation_id index)
+  //    + range match ใน pipeline — ไม่มี find({}) / id arrays
+  const convJoin = [
+    { $lookup: { from: COLLECTIONS.conversations, localField: "conversation_id", foreignField: "conversation_id", as: "conv" } },
+    { $unwind: "$conv" },
+  ];
+  const convCreatedMatch = Object.keys(dateFilter("created_at")).length
+    ? { "conv.created_at": dateFilter("created_at").created_at }
+    : {};
+  const [totalConv, partitionAgg] = await Promise.all([
     convColl.countDocuments({ ...dateFilter("created_at") }),
-    convColl.countDocuments({ closed_at: { $exists: true, $ne: null }, ...dateFilter("created_at") }),
-    convColl.countDocuments({ assigned_to: { $exists: true, $nin: [null, ""] }, ...dateFilter("created_at") }),
+    statusColl.aggregate<{ _id: string | null; n: number }>([
+      { $match: { status: { $in: ["handoff", "open", "pending", "closed", "resolved"] } } },
+      ...convJoin,
+      ...(Object.keys(convCreatedMatch).length ? [{ $match: convCreatedMatch }] : []),
+      { $group: { _id: "$status", n: { $sum: 1 } } },
+    ]).toArray(),
   ]);
+  let closedCount = 0;
+  for (const g of partitionAgg) {
+    if (g._id === "closed" || g._id === "resolved") closedCount += g.n;
+  }
   const totals = { total: totalConv, resolved: totalConv - closedCount, weekCount: totalConv };
   const newCustomers = totals.weekCount;
   const existingCustomers = 0;
   const responseRate12h = totals.total ? Math.round((totals.resolved / totals.total) * 1000) / 10 : 0;
 
   // 5+6. Response rate 10min + Avg response time — ⚡ ใช้ helper แทน $lookup (เร็วขึ้นมาก)
-  //    คำนวณทั้งสองค่าในการ scan ครั้งเดียว
-  const responseStats = await computeResponseStats(msgColl, { start: weekStart, end: weekEnd });
-  const reply10minCount = responseStats.replyWithin10min;
-  const responseRate10min = totals.total ? Math.round((reply10minCount / totals.total) * 1000) / 10 : 0;
+  //    measurement unit = customer turn (numerator/denominator population เดียวกัน → ≤100)
+  //    ⚡ adminOnly — UI footnote "คำนวณจากการตอบกลับของแอดมินบนระบบเท่านั้น"
+  const responseStats = await computeResponseStats(msgColl, { start: weekStart, end: weekEnd, adminOnly: true });
+  const responseRate10min = responseStats.totalTurns
+    ? Math.round((responseStats.within10minTurns / responseStats.totalTurns) * 1000) / 10
+    : 0;
   const avgResponseTimeSeconds = responseStats.avgResponseSeconds
     ? Math.round(responseStats.avgResponseSeconds)
     : 0;
 
-  // 7. Unanswered — conversations ที่ยังไม่ปิด + มี unread > 0
-  const unanswered12h = await convColl.countDocuments({
-    closed_at: { $in: [null, undefined] },
-    unread_count: { $gt: 0 },
-    ...dateFilter("created_at"),
-  });
+  // 7. Unanswered — conversations ที่ยังไม่ปิด (ตาม meta) + มี unread > 0
+  //    = all{unread>0,range} − meta-closed ∩ {unread>0,range} (DB-side subtract)
+  const [unansweredAll, closedUnansweredAgg] = await Promise.all([
+    convColl.countDocuments({
+      unread_count: { $gt: 0 },
+      ...dateFilter("created_at"),
+    }),
+    statusColl.aggregate<{ n: number }>([
+      { $match: { status: { $in: ["closed", "resolved"] } } },
+      ...convJoin,
+      { $match: { "conv.unread_count": { $gt: 0 }, ...convCreatedMatch } },
+      { $count: "n" },
+    ]).toArray(),
+  ]);
+  const unanswered12h = unansweredAll - (closedUnansweredAgg[0]?.n || 0);
 
   // 8. Heatmap — messages by hour-of-day × day-of-week
   const heatmapAgg = await msgColl.aggregate<{

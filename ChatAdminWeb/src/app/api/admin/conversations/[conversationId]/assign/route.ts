@@ -37,7 +37,7 @@ export async function POST(
   //   ไม่เขียน conversations อีกต่อไป เพราะโดน sellcenter dump ทับทุก 2 วิ
   //   อ่าน previousAssignedTo จาก statusConversation (source of truth) แทน conv.assigned_to
   const meta = await statusConversationService.getMeta(conversationId);
-  const previousAssignedTo = meta?.assigned_to ?? conv.assigned_to ?? null;
+  const previousAssignedTo = meta?.assigned_to ?? null;
 
   const ok = await statusConversationService.manualAssign(
     conversationId,

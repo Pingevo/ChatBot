@@ -911,8 +911,8 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | Field | Type | หมายเหตุ |
 |-------|------|---------|
 | `conversation_id` | string | PK |
-| `assigned_to` | string? | admin_id |
-| `assigned_at` | Date? | |
+| `assigned_to` | string? \| null | admin_id; `null` = unassigned (clear owner โดย `updateStatus`/`reassign null`/auto-reopen/`setPendingAssignment`) |
+| `assigned_at` | Date? \| null | set เมื่อ assign; `null` เมื่อ owner ถูกล้าง (ไม่ลบ audit `close_history`/`admin_logs`) |
 | `assignment_mode_used` | string? | |
 | `status` | string? | open/closed/handoff/bot/resolved |
 | `closed_at` | Date? | |
@@ -1614,7 +1614,7 @@ vector (`exports/unit_embeddings.npz`) → merge+rank; ว่าง → fallback
 | `knowledge_base` | knowledgeBaseService, Python (fallback) | knowledgeBaseService | knowledgeBaseService | knowledgeBaseService (soft) | knowledge, shops, Python bot (legacy fallback) |
 | `tickets` | ticketService | ticketService | ticketService | ticketService (soft) | stats/dashboard |
 | `admin_logs` | adminLogService | ทุก service (audit), `cleanup-test-artifacts.ts` (read) | — | — | logs, analytics |
-| `conversations` | conversationService, หลาย route, workflowEngine, Python `replay_compare.py` | conversationService, sellcenter dump | conversationService, statusConversationService, `/labels` | — | tickets, botworker, shadow-inbox, ... |
+| `conversations` | conversationService, หลาย route, Python `replay_compare.py` | conversationService, sellcenter dump | conversationService, statusConversationService, `/labels` | — | tickets, botworker, shadow-inbox, ... — **`status`/`assigned_to`/`closed_at` = dump display fields เท่านั้น ไม่ใช่ ownership authority (Phase 2B.1)** |
 | `messages` | messageService, bot worker, liveAssignmentService, Python `replay_compare.py` | messageService, sellcenter dump | botWorkerService (image_desc cache) | — | tickets, botworker, shadow-inbox |
 | `shops` | shopService | shopService, `sync-shops.ts`, data writer | shopService | — | shops, config, workflows, triggers, ... |
 | `customers` | customerService | customerService (data writer) | customerService | — | contacts |
@@ -1632,7 +1632,7 @@ vector (`exports/unit_embeddings.npz`) → merge+rank; ว่าง → fallback
 | `assignment_cursors` | assignmentService | assignmentService | assignmentService | — | (internal) |
 | `shop_team_assignments` | assignmentService | assignmentService | assignmentService | assignmentService | team |
 | `platform_team_assignments` | assignmentService | assignmentService | assignmentService | assignmentService | team |
-| `status_conversation` | statusConversationService | statusConversationService | statusConversationService | `/admin/maintenance/clear-status` | tickets (จริง), mutation routes |
+| `status_conversation` | statusConversationService, botCallService (`ticket_state`), admin conversation routes (list/`[id]`/send/assign — status+assigned_to filter prefetch), team route (workload+counts), stats routes (`live`/`dashboard`/`admin-activity`/`performance` ownership metrics), workflowEngine (prod conditions+assign_ticket), assignmentService, handoffService | statusConversationService | statusConversationService | `/admin/maintenance/clear-status` | tickets (จริง), mutation routes |
 | `test_status_conversation` | testStatusConversationService, bot-handoff route | testStatusConversationService | testStatusConversationService | clearTestSource | botworker, shadow-inbox, test-assignment |
 | `test_chat_sessions` | Python `test_chat_api.py`, Next.js routes | Python `test_chat_api.py`, `shadow_openrouter.py` | Python, Next.js (bot_claim_info) | Python, `/admin/maintenance/soft-delete-all` | test-chat |
 | `test_chat_ratings` | testChatRatingService, adminKpiService | testChatRatingService (upsert) | testChatRatingService | `/admin/maintenance/soft-delete-all` | test-chat, admin-chat-result |

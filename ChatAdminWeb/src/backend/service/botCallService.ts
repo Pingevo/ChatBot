@@ -49,8 +49,13 @@ export interface BotCallResponse {
  * ⚡ Phase 2A — ดึง ticket state จาก DB
  *   testSource → test_status_conversation(source) — botworker parallel sandbox
  *   simulate=true (ไม่มี testSource) → test_chat_sessions (test-chat mock)
- *   simulate=false → conversations (จริง — เฉพาะเส้นทางจริงเท่านั้น)
- *   คืน "open" | "closed" | "handoff" | "resolved" | "pending" | null
+ *   production → status_conversation เท่านั้น (authoritative owner เดียว)
+ *     - meta.status → ส่งค่าตรงๆ (handoff/open/pending → Python lock;
+ *       bot/closed/resolved → Python unlock)
+ *     - meta ไม่มี หรือไม่มี status → "bot" (explicit unlocked — ห้าม omit
+ *       เพราะ Python fallback ไป history scan เมื่อ ticket_state เป็น null)
+ *     - meta read error → throw (fail closed — caller ห้ามเรียก Python)
+ *   คืน "open" | "closed" | "handoff" | "resolved" | "pending" | "bot" | null
  */
 async function resolveTicketState(
   conversationId: string | undefined,
@@ -58,28 +63,24 @@ async function resolveTicketState(
   testSource: string | undefined
 ): Promise<string | null> {
   if (!conversationId) return null;
-  try {
-    if (testSource) {
-      // ⚡ parallel sandbox — อ่านจาก test_status_conversation เท่านั้น
-      const coll = await getCollection<{ conversation_id: string; source: string; status?: string }>(COLLECTIONS.testStatusConversation);
-      const doc = await coll.findOne({ conversation_id: conversationId, source: testSource });
-      return doc?.status || null;
-    }
-    if (simulate) {
-      // test chat — ดึงจาก test_chat_sessions
-      const { ObjectId } = await import("mongodb");
-      const coll = await getCollection<{ _id: typeof ObjectId.prototype; status?: string }>(COLLECTIONS.testChatSessions);
-      const doc = await coll.findOne({ _id: new ObjectId(conversationId) });
-      return doc?.status || null;
-    }
-    // production — ดึงจาก conversations
-    const coll = await getCollection<{ conversation_id: string; status?: string }>(COLLECTIONS.conversations);
-    const doc = await coll.findOne({ conversation_id: conversationId });
+  if (testSource) {
+    // ⚡ parallel sandbox — อ่านจาก test_status_conversation เท่านั้น
+    const coll = await getCollection<{ conversation_id: string; source: string; status?: string }>(COLLECTIONS.testStatusConversation);
+    const doc = await coll.findOne({ conversation_id: conversationId, source: testSource });
     return doc?.status || null;
-  } catch (e) {
-    console.error("[botCallService] resolveTicketState failed:", e);
-    return null;
   }
+  if (simulate) {
+    // test chat — ดึงจาก test_chat_sessions
+    const { ObjectId } = await import("mongodb");
+    const coll = await getCollection<{ _id: typeof ObjectId.prototype; status?: string }>(COLLECTIONS.testChatSessions);
+    const doc = await coll.findOne({ _id: new ObjectId(conversationId) });
+    return doc?.status || null;
+  }
+  // production ownership authority = status_conversation เท่านั้น
+  //   ห้าม fallback ไป conversations(_shp).status — dump เขียนทับทุก 2 วิ
+  const coll = await getCollection<{ conversation_id: string; status?: string }>(COLLECTIONS.statusConversation);
+  const doc = await coll.findOne({ conversation_id: conversationId });
+  return doc?.status || "bot";
 }
 
 /** เรียก Python bot ตรง (server-to-server ใช้ x-internal-secret — ไม่ใช้ cookie) */

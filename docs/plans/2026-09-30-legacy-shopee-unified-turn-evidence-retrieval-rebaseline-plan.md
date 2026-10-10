@@ -2,22 +2,61 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` task-by-task. Do not implement two phases in parallel on the same branch. Every runtime phase is TDD, requires a fresh reviewer, and must delete or retire an older decision path before it can close.
 
-**Goal:** Make the legacy Shopee bot understand one turn once, preserve the correct conversation subjects, retrieve all relevant product evidence into one canonical pool, select context once, and answer through one guarded boundary without case-specific keyword patches.
+**Goal:** Make the legacy Shopee bot understand one turn once, keep conversation ownership separate from claim/business lifecycle, verify side effects before claiming success, preserve the correct conversation subjects, retrieve all relevant product evidence into one canonical pool, select context once, and answer through one grounded boundary without case-specific keyword patches.
 
-**Architecture:** Keep the useful Phase 1-5 retrieval foundation, but stop treating grouped retrieval as an extra list merged into the legacy pipeline. Introduce one turn/action decision, one conversation subject set, one canonical product/evidence schema, one candidate pool, one selector, and one answer-context compiler. Migrate callers behind flags and delete each replaced legacy branch after replay proves parity.
+**Architecture:** Keep the useful availability, unit/live-listing, evidence-card, OCR/cert, history, workflow, assignment, and botworker foundations. Introduce one multi-need turn plan, independent ownership/claim axes, a typed handoff command/result boundary, one conversation subject set, one canonical product/evidence schema, one candidate pool, one selector, and one answer-context compiler. Every migration deletes the replaced owner in the same commit; grouped retrieval may not remain an extra list merged into legacy.
 
-**Tech Stack:** Python 3, FastAPI legacy Shopee runtime, MongoDB read-only product/order/stock data, existing local embeddings, Gemini/OpenRouter clients, pytest-style tests under `docs/test/`, Next.js admin config only for existing rollout flags.
+**Tech Stack:** Python 3, FastAPI legacy Shopee runtime, MongoDB read-only product/order/stock data plus admin-owned state collections, existing local embeddings, Gemini/OpenRouter clients, pytest-style tests under `docs/test/`, and the existing Next.js admin status/handoff boundary.
 
-**Status:** Proposed rebaseline roadmap. This file does not erase the historical plan and does not authorize runtime implementation by itself. Each revised phase must pass its stated replay/evidence gate before its interfaces become final.
+**Status:** Active rebaseline roadmap, revised and accepted 2026-10-09 after the repository-wide architecture audit. Phase 2A is an accepted/frozen test baseline. Phase 2B and 2C below supersede their earlier implementation sequence. Runtime implementation starts at Phase 2B.1 and proceeds sequentially under the RED-first and deletion gates below.
 
 **Historical plan:** `docs/plans/2026-09-21-legacy-shopee-evidence-retrieval-implementation-plan.md`
 
-**Spec:** This roadmap reorders the remaining work after reviewing the historical plan, current runtime, Phase 5/6 commits, GitHub issues #26-#30, and the 39-turn conversation replay. Completed historical work remains evidence. Unchecked historical runtime steps are superseded only where the status map in the historical plan or this roadmap says so explicitly.
+**Spec:** `docs/plans/2026-10-09-current-system-architecture-audit.md`. This roadmap also preserves evidence from the historical plan, Phase 5/6 commits, GitHub issues #26-#30, and recorded replays. Waythrough entries are chronology, not authority; current code/contracts win when they disagree.
+
+### 2026-10-09 revision decision
+
+- Do not restart the project and do not create a parallel roadmap.
+- Freeze Phase 2A: its fixtures, strict xfails, three-axis terminology, missing-resolution-event blocker, episode-identity blocker, and multi-intent blocker remain accepted evidence.
+- Replace the old Phase 2B sequence with state transport, claim episode ownership, typed handoff outcome, and explicit admin-side claim outcome work.
+- Make Phase 2C evolve `turn_decision.py` into a multi-need `TurnPlan` before it becomes the authoritative subject/follow-up owner.
+- Preserve good components as sources/primitives; replace only their competing decision ownership.
+
+### Delivery checkpoint — 2026-10-16
+
+**Target:** Make the legacy Shopee answer path review/PR-ready by 2026-10-16. This checkpoint is not approval to deploy and is not a promise that Lazada/TikTok, workflow-editor UX, KPI/rating semantics, botworker production canary, or production observation will be complete.
+
+**Definition of done for this checkpoint:**
+
+- Phase 2B authoritative ownership, typed handoff result, claim episode lifecycle, close semantics, and explicit claim outcome pass their focused and replay gates.
+- Phase 2C multi-need `TurnPlan` and authoritative `ConversationSubjectSet` preserve anchor, follow-up, and history behavior without a parallel long-lived policy path.
+- Product evidence continues to include live listings, `units.py`, historical products, KB, image/OCR/cert evidence, anchors, and compatibility evidence.
+- Grouped retrieval owns one candidate pool and selection path for migrated cases; a migrated legacy/shadow branch is deleted in the same commit.
+- Comparison, compatibility, stock, warranty/claim, certification, troubleshooting, and handoff incidents have end-to-end `chat()` evidence.
+- The closeout reports answer quality, LLM/provider-call count, latency, context tokens, estimated cost, owner count, direct state writers, runtime LOC delta, and remaining blockers against a fresh baseline.
+- The branch is review/PR-ready with SRS/log updates and clean verification. Production deploy/canary requires separate approval.
+
+**Execution calendar:**
+
+| Date | Planned work | Required gate |
+|---|---|---|
+| 2026-10-09 | Freeze accepted architecture, baseline fixtures, deadline, and exclusions | Plan accepted; no runtime edit before 2B.1 RED |
+| 2026-10-10 | Phase 2B.1-2B.3: ownership transport and truthful handoff outcome | State owner and persisted side effect agree |
+| 2026-10-11 | Phase 2B.4-2B.6: claim episode, close semantics, explicit admin outcome | Close does not resolve claim; episode-scoped outcome works |
+| 2026-10-12 | Phase 2B.7 and Phase 2C.1: residual deletion and multi-need TurnPlan | Old owner/writer counts decrease |
+| 2026-10-13 | Phase 2C.2-2C.3: subject set, anchor/history/follow-up migration | Ambiguity clarifies; migrated app-local branches deleted |
+| 2026-10-14 | Retrieval ownership: units/live listing/history/KB/image evidence into one pool | Visibility, availability, provenance, and dedupe gates pass |
+| 2026-10-15 | Quality/performance replay: compare, compat, stock, cert, warranty, troubleshooting | Fresh quality/call/latency/token/cost measurements recorded |
+| 2026-10-16 | Full regression, deletion audit, docs, diff review, PR-readiness report | No unresolved Critical/High in checkpoint scope |
+
+**Schedule rule:** correctness and owner deletion outrank calendar cosmetics. If a real replay exposes a Critical/High issue, do not hide it with a helper, guard, keyword, xfail, or fallback. Report the blocker and move production deployment past the checkpoint rather than declaring paper completion.
+
+**Estimated effort and confidence:** 45-65 engineering hours; 70-80% confidence for review/PR readiness by 2026-10-16 if scope remains fixed. Production readiness remains subject to an approved canary and real observation.
 
 ## Global Constraints
 
 - Scope is the legacy Shopee runtime unless a phase explicitly names `ChatAdminWeb` or bot-worker.
-- Do not read `.env` directly. DB probes use `load_dotenv()` and existing client helpers; never print secrets.
+- Do not read `.env*` or secret files. Any DB probe requires separate user approval plus an explicitly supplied safe connection boundary; never print credentials.
 - Product/order/stock databases are read-only.
 - Do not add product, model, shop, brand, device, or example-sentence exceptions to production routing or ranking.
 - Keyword lists are allowed only as versioned taxonomy/config data or bounded protocol grammar such as order numbers; they are not allowed as one-off bug fixes.
@@ -27,6 +66,11 @@
 - Do not add nested decision helpers to `app.py`. `app.py` must become orchestration only.
 - Do not create a new wrapper if an existing owner can be extended. A new helper must remove duplicated logic or have a named deletion gate in the same phase.
 - Preserve the current `ChatResponse` public shape until a separate API migration is approved.
+- `handoff_to_admin` may remain as a compatibility output field, but it must be derived from a persisted handoff result; it is never input evidence that the side effect succeeded.
+- `status_conversation` is the production ownership source of truth. Raw `conversations.status` may not override it or silently substitute for it.
+- Admin close returns answer ownership to the bot. It is never a claim resolution/cancellation event.
+- `chat_v2` and `chatbotv3` are frozen for deletion: do not add semantic fixes, tests, flags, or compatibility shims to them. Shared changes that alter them require an explicit boundary review.
+- Botworker runtime/canary work is paused and out of scope. Its tested transport/idempotency primitives are preserved.
 - Every function change under `chatbot/shopeechat/` updates SRS section 6 and call relationships.
 - Every phase updates `getoutofmywaybotkaikrook2.md`; never edit the frozen history log.
 - Before a phase commit, report the diff, tests, real-data probes, residual risks, and deletion count.
@@ -43,6 +87,8 @@
 7. **Noise and ambiguity:** sticker, media-only, typo, bare model, and ambiguous relation messages must not trigger unrelated sales or web search.
 8. **Cost:** web fallback cannot run because catalog retrieval was incomplete; LLM context must be selected and budgeted before generation.
 9. **Policy eligibility:** a general FAQ or prior bot answer must not prove that a specific order can be returned or exchanged. Customer-selected wrong model, seller-sent wrong item, defect, damage, and unknown cause remain distinct decisions.
+10. **Side-effect truth:** assigned, durably queued, failed, and not-attempted handoffs must be distinguishable; customer text and response flags must agree with the stored outcome.
+11. **Ownership versus outcome:** closing a conversation, waiting for the customer, resolving troubleshooting, resolving a claim, and cancelling a claim are separate events.
 
 ---
 
@@ -105,6 +151,7 @@ Consequences:
 | Phase 5B2 candidate pool/source union | `762d8b5` | Keep pool concept and identity dedupe |
 | Phase 5B3 shadow/selection/runtime flags | `0a22754`, `d960cae`, `d8d5a39`, `f6a191a` | Keep rollout mechanism; runtime selection remains provisional |
 | Phase 5D/5E pool tests and final merge dedupe | `86c05d8`, `2792d8a` | Keep regressions and canonical ID behavior |
+| Phase 2A claim lifecycle baseline | `37f6d30`; 60-row incident fixture; strict xfails | Freeze as evidence; do not expand it into another runtime owner |
 
 ### Completed But Provisional
 
@@ -141,14 +188,16 @@ Consequences:
 | Q26-Q39 | handoff/claim continues inconsistently | shadow generation and live ownership state are not represented by one action gate | Phases 1, 2, 8 |
 | Q12-Q13 | PB200P answer and link are correct | important positive regression | All replay gates |
 | Filter Q5-Q12 | bot promises exchange after customer ordered the wrong filter model, then repeats its own unsupported promise | no structured policy-eligibility owner; broad description/FAQ text and bot history are treated as case proof | Phases 0, 1, 2, 5, 7, 8 |
+| no-product handoff trace | response says admin handoff and sets `handoff_to_admin=True`, but no handoff POST occurs | desired command and completed side effect share one boolean; final guard trusts the boolean | Phase 2B |
+| production ticket-state transport | `botCallService.resolveTicketState()` reads raw `conversations`, while ticket ownership is stored in `status_conversation` | state owner and transport source disagree | Phase 2B |
 
 ## Target Runtime Flow
 
 ```text
 request
-  -> load authoritative conversation/ticket/workflow/claim state once
-  -> build TurnDecision once
-       action + independent query needs + confidence + provenance
+  -> load authoritative conversation ownership + claim episode + workflow state once
+  -> build TurnPlan once
+       primary action + independent needs[] + subjects + confidence + provenance
   -> action gate
        no-op/media | workflow | human-owned | claim/troubleshoot |
        order/policy | clarify | product-answer
@@ -165,16 +214,21 @@ request
   -> compile one bounded AnswerContext
   -> call LLM once, unless an explicit pre-answer external-evidence gate ran
   -> validate claims and render response once
-  -> persist subjects, claim state, and handoff/workflow outcome
+  -> execute typed commands
+       handoff → assigned | queued | failed | not_attempted
+       claim outcome → resolved | cancelled (explicit event only)
+  -> persist subjects, claim episode, and verified command/workflow outcome
 ```
 
 ## Final Owner Map
 
 | Decision | Final owner | Legacy owners to remove |
 |---|---|---|
-| Turn action and multi-question needs | `turn_decision.py` (evolved — contract grows `needs[]`; do NOT create a parallel `turn_policy.py`/`test_turn_policy.py`) | pre-intent anger branches, app-local claim/general overrides, trigger-like response routing |
+| Turn action and multi-question needs | `turn_decision.py` evolved to `TurnPlan` with `needs[]`; do NOT create `turn_policy.py` | pre-intent anger branches, app-local claim/general overrides, trigger-like response routing |
 | Product query facts | `route_context.py` | source-specific type/subtype/device rediscovery |
-| Active subjects and claim/ticket continuity | `conversation_products.py` plus claim executor | history prose scans, app-local anchor insertion, per-turn claim slot reconstruction |
+| Conversation ownership | `status_conversation`, transported explicitly into `/chat` | raw `conversations.status`, history prose, ticket-close inference |
+| Claim episode/lifecycle | one legacy lifecycle owner using `conversation_products.claim_state` as storage | retained-slot activation, direct stage writes, close-ticket clear, `_TERMINAL_CLAIM_REASONS` as fake resolution |
+| Active product subjects | `conversation_products.py` subject set | history prose scans, app-local anchor insertion, per-branch follow-up guesses |
 | Raw availability facts | `product_store.resolve_availability()` | unit snapshots or prompt wording used as truth |
 | Canonical product/evidence schema | `retrieval_policy.make_evidence_card()` | selector checks against raw source field names |
 | Candidate execution and pool | `retrieval_executor.py` + `candidate_pool.py` | blind unit early return and branch-local source union |
@@ -183,7 +237,7 @@ request
 | Compatibility proof | `device_compat.py` evidence producer, selector consumes proof | `phone -> charger`, `_SKIP_TYPES`, source-local family guessing |
 | Return/exchange eligibility | new `policy_resolver.py` consuming versioned structured policy records | broad FAQ/description snippets, LLM inference, and prior bot prose used as case-specific approval |
 | Claim executor | one legacy claim state machine | duplicated legacy/v2 behavior and history-marker ownership |
-| Handoff/workflow ownership | actual assignment/workflow service | reply text pretending assignment and bot-side old-admin assumption |
+| Handoff result | `handoffService`/bot-handoff API returns typed persisted outcome; Python `responses._send_handoff` maps it | reply text/boolean pretending assignment, `ok:true` with ambiguous `assigned_to:null` |
 | Final rendering/claim validation | one response boundary | LLM-only cleanup versus canned-only cleanup differences |
 
 ## Rollout Rules
@@ -191,7 +245,7 @@ request
 - During Phases 0-6: production selection default remains off; shadow may remain on. A dedicated test shop/environment may enable selection for replay.
 - Phase 7 introduces a separate canary flag for the unified answer boundary. Do not reuse a flag whose old semantics are “merge selected cards into legacy.”
 - Error, timeout, or empty result falls back to the last accepted legacy path until Phase 9 removes it.
-- Each canary decision is per shop, logged with turn-decision/profile/subject/pool/selection/context counts, never raw secrets or full customer history.
+- Canary only in an isolated environment/dataset or through an already-proven explicit scope boundary. Do not claim per-shop isolation when the runtime query has no shop allowlist. Log turn-plan/profile/subject/pool/selection/context counts, never raw secrets or full customer history.
 - Rollback is a config toggle until final release acceptance.
 
 ## Confidence And Change Control
@@ -201,15 +255,17 @@ The target architecture is based on current callsites, commit diffs, issue repro
 | Revised phase | Confidence | Why | What can still change it |
 |---|---|---|---|
 | 0: replay baseline | **High** | known incidents are currently spread across unit tests, issues, and transcripts | fixture shape may change after real-schema sanitization |
-| 1: one turn decision | **High on ownership; medium on interface** | early routing currently prevents retrieval and multi-intent handling | replay may show that some deterministic workflow actions need a separate pre-route gate |
-| 2: subjects and claim state | **High on ownership; medium on storage contract** | follow-up identity and claim progression demonstrably fail when inferred from prose/history | existing persisted conversation schema may require a smaller migration than proposed |
+| 1: pure turn-decision baseline | **High as shadow evidence** | import purity and current one-action behavior are pinned | production interface is intentionally deferred to Phase 2C |
+| 2A: lifecycle baseline | **High** | executable incidents and blockers are committed | frozen; new findings belong to the owning implementation phase |
+| 2B: state and verified commands | **High on ownership; medium on cross-service schema** | false-success handoff and state-source mismatch are proven in code | exact admin claim-outcome UI/API shape must stay minimal during implementation |
+| 2C: TurnPlan and subjects | **High on ownership; medium on interface** | one-action and prose-derived follow-up failures are proven | fixture replay may refine need/subject fields without changing ownership |
 | 3: canonical schema | **High** | raw subtype, publish, stock, and variant vocabularies already disagree across sources | field names may be refined after sampling every collection again |
 | 4: source union | **High on boundary; medium on source order** | the candidate pool is already useful, but source attempts are not yet the sole runtime path | latency and recall measurements may change per-source budgets |
 | 5: evidence/compatibility | **High on proof requirement; medium on representation** | issue failures show product-level context is insufficient for field claims | OCR/KB quality may require confidence levels beyond a boolean proof |
 | 6: selector | **High on one-owner rule; medium on scoring** | per-request coverage and dedupe are already validated, while live schema mismatch remains | replay metrics may change quotas and weights without changing ownership |
 | 7: context/token/web gate | **High** | duplicate answer/search calls and oversized repeated context are visible in code and logs | model/provider limits may change exact budgets |
 | 8: answer boundary | **High on goal; medium on migration order** | multiple LLM boundaries produce inconsistent behavior | item-tag or web paths may need temporary adapters during rollout |
-| 9: workflow/handoff/assignment | **Medium** | requirements are clear, but ownership crosses bot, admin, worker, and persisted state | a dedicated child design must verify the live assignment service before implementation |
+| 9: workflow/trigger consolidation | **Medium** | precedence and multi-output risks are visible, while botworker is paused | implementation waits for Phase 2B/2C contracts and explicit reopening of botworker scope |
 | 10: deletion/release | **High** | parallel owners and stale helpers are the measured source of complexity | deletion list depends on which adapters survive canary |
 
 Rules for changing this roadmap:
@@ -243,7 +299,7 @@ Rules for changing this roadmap:
 - [ ] Add RED rows for token/latency budget: product-answer turns must record a bounded `AnswerContext` estimate; no normal replay turn should send 30 full-description cards by default, and any turn above the agreed token budget must fail the gate with a reason.
 - [ ] Add RED rows for shadow placeholder normalization: `[bundle_message]`, `[faq_liveagent]`, media-only, sticker-only, and punctuation-only turns must not enter product retrieval or LLM product answer as ordinary customer questions.
 - [ ] Add the sanitized filter-policy replay: customer selected the wrong model, outer box may be opened while the inner wrap remains sealed, and the authoritative shop/category rule says ineligible. Q5/Q6/Q10/Q11/Q12 must never claim exchange eligibility; prior bot prose must not become policy evidence. Add distinct positive fixtures for seller-sent wrong item and an explicit eligible rule so the fix cannot become a blanket refusal.
-- [ ] Through `load_dotenv()` and read-only clients, create sanitized fixtures for mixed stock, UNLIST, deleted, raw subtype vocab, missing evidence, and old-order identity.
+- [ ] From already-sanitized artifacts or a separately approved explicit read-only connection, create fixtures for mixed stock, UNLIST, deleted, raw subtype vocab, missing evidence, and old-order identity. Never load `.env*` as part of the test plan.
 - [ ] Add pure owner tests, integration tests with real-shaped fixtures, and multi-turn `chat()` boundary tests that capture LLM inputs.
 - [ ] Run and record failures by owner; do not patch runtime in this phase.
 
@@ -255,65 +311,49 @@ git diff --check
 
 **Exit gate:** Every known failure has a stable replay and every previously good case has a positive regression.
 
-## Revised Phase 1: One Turn Decision Before Retrieval Or Handoff
+## Revised Phase 1: Pure Turn-Decision Baseline (Accepted, Shadow-Only)
 
-**Purpose:** Replace flat intent plus early substring branches with one explicit action and multiple independent needs.
+**Purpose:** Preserve the pure, import-safe, one-action shadow classifier and its fixture evidence. It is not production-ready and must not be wired as-is; multi-need evolution moved to Phase 2C.
 
-**Files:** Evolve `chatbot/shopeechat/turn_decision.py` and `docs/test/test_turn_decision.py` (the existing contract owner — do NOT create `turn_policy.py`/`test_turn_policy.py`); modify `app.py` and later reduce `handoffs.py`; update SRS/log.
+**Files:** Existing `chatbot/shopeechat/turn_decision.py`, `docs/test/test_turn_decision.py`, and shadow tests. No runtime work remains in this phase.
 
 ```python
-@dataclass(frozen=True)
-class TurnNeed:
-    kind: str
-    text_span: str
-    subject_ref: str | None
-    required_evidence: frozenset[str]
-    confidence: float
-    provenance: tuple[str, ...]
-
 @dataclass(frozen=True)
 class TurnDecision:
-    action: str  # no_reply|workflow|human_wait|handoff|claim|troubleshoot|answer|clarify
-    needs: tuple[TurnNeed, ...]
+    action: str  # current one-action shadow contract
+    reason: str
     confidence: float
-    reason_codes: tuple[str, ...]
-    state_version: str | None
+    normalized_message: str
+    flags: frozenset[str]
 ```
 
-- [ ] RED-test product issue vs service complaint, explicit human request, neutral question, noise/media, multi-intent, cancel vs return, contact request, troubleshoot before claim, active handoff, and clarification.
-- [ ] Represent a policy question as an independent `TurnNeed` carrying the requested operation and known reason/condition facts; do not collapse it into a generic FAQ intent or infer eligibility at this layer.
-- [ ] Implement observe-only `decide_turn()` from intent output, authoritative state, and deterministic structural facts. Do not add semantic keyword tables.
-- [ ] Log only action/need kinds/confidence/provenance and compare with old routing.
-- [ ] Migrate gates in order: no-reply, human ownership, explicit handoff, troubleshoot/claim, workflow, product/policy.
-- [ ] Delete or thin the corresponding early branches and Phase 5F message-category ownership.
+- [x] Pure/import-safe `decide_turn()` and shadow trace exist.
+- [x] Placeholder, handoff, claim, cert, follow-up, product/general, context-gate, stock/select, and contact-info fixture coverage exists.
+- [x] Readiness audit proved state/side-effect/multi-intent blockers; no production caller was added.
+- [ ] No further runtime work here. Phase 2C replaces the one-action contract and names each legacy branch it deletes.
 
-**Exit gate:** issues #26/#30 route cases pass; real complaints still hand off; multi-intent retains all needs; `app.py` has one action switch.
+**Exit gate:** accepted as evidence only. Production wiring remains blocked until Phase 2B state/command truth and Phase 2C multi-need contract pass.
 
-## Revised Phase 2: Authoritative Subjects And Claim State
+## Revised Phase 2A-2C: State, Verified Commands, And Authoritative Subjects
 
-**Purpose:** Persist what products are being discussed and what claim data is collected instead of guessing from bot prose.
+**Purpose:** Separate who may answer, which claim episode is active, what commands actually completed, and which products the customer is discussing. No layer may infer these facts from bot prose.
 
-**Files:** Modify `conversation_products.py`, `warranty.py`, `warranty_flow.py`, `app.py`; create subject and multi-turn claim tests; update SRS/log.
+**Phase split:**
 
-```python
-@dataclass(frozen=True)
-class ConversationSubjectSet:
-    subject_ids: tuple[str, ...]
-    source_turn_id: str | None
-    relation: str              # single|compare|alternatives|bundle
-    requested_operation: str  # describe|compare|recommend|price|link|compat|policy
-    confidence: float
-```
+- **2A — accepted/frozen baseline:** executable lifecycle incidents, three-axis terminology, and blockers. Test/audit only; already committed as `37f6d30`.
+- **2B — next implementation package:** authoritative ownership transport, claim episode/lifecycle consolidation, verified handoff result, and explicit claim outcome event.
+- **2C — after 2B:** evolve `turn_decision.py` into multi-need `TurnPlan`, then make `ConversationSubjectSet` authoritative for follow-ups.
 
-- [ ] RED-test Q6->Q9, Q12->Q13, Q15->Q18, explicit topic switch, and ambiguous references.
-- [ ] Resolve subjects once: explicit identity wins; referential turns use persisted subjects; bot prose is never truth; ambiguity clarifies.
-- [ ] Make compare/price/link consume the subject set. Unavailable subjects cannot be silently swapped.
-- [ ] Keep the referenced product/category and order-policy facts stable across follow-ups such as packaging condition and "กรณีนี้เปลี่ยนได้ไหม". Persist customer/order facts, never the prior bot's policy conclusion.
-- [ ] RED-test issue #27 across labelled/name-only data, field ordering, media, troubleshooting acknowledgement, policy during claim, closed ticket, and handoff.
-- [ ] Merge current parsed fields into persisted claim state fill-once; validate phone/order separately; terminal transitions require an explicit claim-resolution event — ticket close is conversation ownership, never a lifecycle transition (see Phase 2A `BLOCKED_BY_MISSING_CLAIM_RESOLUTION_EVENT`).
-- [ ] Choose one claim executor and stop editing parallel implementations in the same phase.
+**Files:** Phase 2B may modify `responses.py`, `warranty_flow.py`, `conversation_products.py`, `app.py`, `ChatAdminWeb/src/backend/service/handoffService.ts`, `statusConversationService.ts`, `botCallService.ts`, and the existing handoff/close API boundaries. Phase 2C may modify `turn_decision.py`, `conversation_products.py`, `route_context.py`, and `app.py`. Exact tasks and deletion gates are specified in the detailed Phase 2B/2C sections below.
 
-**Exit gate:** issue #27 passes, follow-up identity remains stable, and ticket state outranks history markers.
+- [ ] Phase 2B first proves ownership-state transport and handoff outcomes independently from claim parsing.
+- [ ] Phase 2B then consolidates claim episode activation, field acceptance, and transitions in one legacy owner; storage remains in `conversation_products`.
+- [ ] Phase 2C RED-tests Q6->Q9, Q12->Q13, Q15->Q18, explicit topic switch, ambiguous references, and multi-need turns.
+- [ ] Phase 2C resolves subjects once: explicit identity wins; referential turns use persisted subjects; bot prose is never truth; ambiguity clarifies.
+- [ ] Compare/price/link/compat/policy consume the same subject set. An unavailable subject cannot be silently replaced by another product.
+- [ ] Keep referenced product/category and order-policy facts stable across follow-ups. Persist customer/order facts, never the prior bot's policy conclusion.
+
+**Exit gate:** Phase 2B closes false-success handoff and claim lifecycle incidents with fewer owners/direct writes; Phase 2C preserves all independent needs and stable subjects. Ticket ownership and explicit events outrank history markers throughout.
 
 ## Revised Phase 3: Canonical Product, Variant, And Availability Schema
 
@@ -460,19 +500,19 @@ class AnswerContext:
 
 **Exit gate:** issue #30 formatting/language/noise cases and issue #28 claim checks pass; one product-answer boundary remains.
 
-## Revised Phase 9: Workflow, Trigger, Handoff, And Assignment
+## Revised Phase 9: Workflow And Trigger Ownership Consolidation
 
-**Purpose:** Use the action decision and authoritative assignment state to prevent bot/human overlap.
+**Purpose:** Apply the Phase 2B ownership/handoff contract and Phase 2C TurnPlan to the pre-chat workflow/trigger stack, leaving one orchestration order without changing the proven assignment primitive.
 
-**Files:** Audit then modify actual worker/workflow owner and `handoffs.py` only where required; add workflow/handoff state tests; update docs/log.
+**Files:** Audit then modify the actual workflow/trigger orchestration owner; add precedence/state tests; update docs/log. Botworker changes require its paused-canary gate to be reopened explicitly.
 
-- [ ] Inventory buffer, trigger, delivery, ticket, assignment, accept/reply/close, timeout, and bot suppression ownership.
-- [ ] Separate assigned, accepted, last responder, and last successful owner. Old owner wins only when eligible.
-- [ ] Gate triggers by action/state; sensitive actions remain exact/structured, low-risk FAQ may be tolerant.
-- [ ] Label shadow generation as non-delivered; live bot stops after accepted handoff except approved data collection.
-- [ ] Fall back to eligible round-robin or explicit team queue, never silent waiting.
+- [ ] Inventory workflow resume/match, trigger match, chatbot invocation, delivery, and multi-output ownership.
+- [ ] Choose one precedence contract for active workflow, new workflow, trigger, and TurnPlan; remove `both` behavior where it can emit competing customer answers.
+- [ ] Gate workflow/trigger execution by authoritative ownership and verified command outcomes from Phase 2B.
+- [ ] Label shadow generation as non-delivered; no shadow/test state may prove a live handoff.
+- [ ] Delete duplicate TestChatClient orchestration or make it call the production owner rather than reimplementing precedence.
 
-**Exit gate:** live bot does not answer over humans; handoff wording maps to real queue/assignment; triggers and claim collection respect state.
+**Exit gate:** one orchestration order exists; workflow/trigger cannot bypass ownership or produce an untracked second answer.
 
 ## Revised Phase 10: Mandatory Deletion, Replay, Canary, Release
 
@@ -493,15 +533,16 @@ class AnswerContext:
 - No unavailable/unpublished subject is silently swapped.
 - No unsupported spec/cert/compat claim reaches the customer.
 - No return/exchange eligibility claim reaches the customer without a matching effective structured policy decision for the same shop, subject/category, reason, and condition.
-- One normal turn has one action, subject set, pool, selection, context, and answer boundary.
+- One normal turn has one TurnPlan, subject set, pool, selection, context, and answer boundary; independent needs are preserved inside the plan.
 - `app.py`, `handoffs.py`, and `warranty_flow.py` have net complexity reduction from Phase 0.
 - p95 estimated cost stays below 1 THB and every web fallback has an evidence reason.
 
 ## Execution Order And Parallelism
 
-Run `0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10`.
+Run `0 -> 1 -> 2A (accepted) -> 2B -> 2C -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10`.
 
-- Do not run Phases 1-8 in parallel on one branch; contracts and `app.py` boundaries are sequential.
+- Begin next at **2B.1** after this revision is reviewed. Do not rerun or enlarge 2A as a substitute for implementation.
+- Do not run Phases 2B-8 in parallel on one branch; contracts and `app.py` boundaries are sequential.
 - Read-only DB audits, fixture sanitization, and corpus review may use isolated worktrees in parallel.
 - Phase 9 inventory may run read-only while Phase 7 runs, but runtime edits wait for Phase 8 contracts.
 - Use a fresh dev-worker session per phase and a fresh reviewer before commit.
@@ -514,7 +555,7 @@ Run `0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10`.
 4. State one root-cause hypothesis and changed boundary.
 5. Implement the smallest owner change.
 6. Migrate named callers.
-7. Delete or disable the replaced branch.
+7. Delete the replaced branch; a disabled duplicate is not retirement.
 8. Run unit, integration, multi-turn replay, compile/typecheck, and `git diff --check`.
 9. Update SRS/log with measurements and residual risks.
 10. Show staged scope and ask before the phase's first commit.
@@ -524,13 +565,13 @@ Run `0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10`.
 - Retrieval, availability, variants, subjects, multi-query, evidence, compatibility, claim, handoff/workflow, token cost, and cleanup all have owners and gates.
 - AC65B, WPB100L, A18T, iPhone, Mi Watch, and shop names appear only in regression evidence, never as production branching requirements.
 - Every migration phase names old logic to delete; release is blocked if duplicate owners remain.
-- `TurnDecision` precedes subjects; subjects precede profile/requests; sources emit canonical cards before pool/selection; `AnswerContext` is the sole LLM input contract.
+- `TurnPlan` consumes authoritative ownership/claim views before subjects; subjects precede profile/requests; sources emit canonical cards before pool/selection; `AnswerContext` is the sole LLM input contract.
 - Real-schema fixtures are mandatory because synthetic `subtype="cable"` tests missed live `cable_only`/`c-to-c` values.
 - Rollout stays reversible until full replay and canary pass.
 
 ## Decision
 
-Do not continue the old Phase 7 sequence and do not add a Phase 5G keyword/helper patch. Start at Revised Phase 0, then Phase 1. The completed work remains useful infrastructure; the new plan changes decision ownership and migration order.
+Do not continue the old Phase 7 sequence and do not add a Phase 5G keyword/helper patch. Phase 0, Phase 1 shadow work, and Phase 2A are preserved evidence. After review of the 2026-10-09 revision, implementation starts at **Phase 2B.1 authoritative ownership transport**, then proceeds sequentially through 2B and 2C. The completed work remains useful infrastructure; this revision changes ownership and migration order without restarting the project.
 
 ---
 
@@ -712,38 +753,284 @@ General terminal transitions (`collecting → terminal`, `any → absent`) are B
   - `any → absent` — **BLOCKED** until an explicit reset/cancel lifecycle event exists
   - ticket close is **not** a claim lifecycle transition
 
-### Phase 2B — replacement commits (plan only, no add-first/delete-later)
+### Phase 2B — State And Verified Side-Effect Replacement
 
-**Scope — locked by user: Legacy Shopee runtime only.** `chat_v2`/`chatbotv3`/`botworker` are frozen and out of scope; no v2 tests are added. If a shared-helper change would alter v2 behavior, stop and design a legacy migration boundary first — do not change v2 semantics. No long-lived shim and no duplicate lifecycle owner inside legacy (migrate + delete in the same commit).
+**Scope:** Legacy Shopee is the only answer executor changed. `chat_v2`/`chatbotv3` are frozen for deletion and botworker remains paused. This phase may change the existing ChatAdmin handoff/status boundary because Python cannot prove assignment or claim outcome by itself. It must not change workflow, retrieval, selection, prompts, or product policy.
 
-**Commit 1 — terminal predicate replacement.** Single commit: add/fix lifecycle terminal precedence (`resolved` + retained slots → not collecting; explicit new claim request → `claim_request` fresh claim), migrate approved consumers (warranty executor + TurnDecision callee), delete the replaced predicate implementation/branch — no long-lived shim. Un-xfail `p2a-claim-resolved-new-request`. Report: owner before/after, predicate callers before/after, runtime LOC added/deleted, v2 impact (must be zero — shared-helper changes that alter v2 stop here).
+**Interfaces owned by this phase:**
 
-**Commit 2 — troubleshooting transitions.** Migrate `ts_suggested→resolved`/`→collecting` writes to the owner transition API; delete the two direct `update_claim_state` calls bypassing the wrapper in the same commit.
+```python
+@dataclass(frozen=True)
+class HandoffResult:
+    state: Literal["assigned", "queued", "failed", "not_attempted"]
+    assigned_admin_id: str | None
+    assigned_admin_name: str | None
+    persisted: bool
+    reason: str
+    error_code: str | None
 
-**Commit 3 — collecting transitions.** Migrate one coherent group of `stage=collecting` writes (e.g., info-submission sites) and delete migrated direct writes immediately. Do not batch all callsites into one giant commit if it hurts review.
-
-**Commit 4 — ticket-close semantics.** Ticket close is ownership, not claim resolution: delete the closed-ticket `clear_claim_state` branch (it wrongly destroys in-flight claims); un-xfail `p2a-claim-ticket-closed-keeps-state`, `-product-question`, `-phone-resume`. NOT a move — the branch must not exist at all. General claim terminal transitions stay BLOCKED on `BLOCKED_BY_MISSING_CLAIM_RESOLUTION_EVENT`; `_TERMINAL_CLAIM_REASONS` are cleanup heuristics to audit/delete/replace, not resolution semantics to preserve.
-
-**Commit 5 — name persistence.** Fix the parsing/persistence owner for lone-name turns; delete the branch-local duplicate name validation it replaces; un-xfail `p2a-claim-collect-name-phone`.
-
-**Commit 6 — residual deletion audit.** Only real cleanup: grep owners/callsites, delete dead helpers, delete dead fields (`has_video` once no consumer is proven). Not a parking lot for deletions deferred from Commits 1–5.
-
-**Rules:** 1 commit = 1 verified fix; claim lifecycle stays separate from ConversationSubjectSet (Phase 2C); no subject/retrieval changes inside claim commits; TurnDecision consumes owner result (signature already supports claim_state input).
-
-**Complexity gates — every runtime commit must report:**
-
+@dataclass(frozen=True)
+class ClaimLifecycleView:
+    episode_id: str | None
+    stage: Literal["absent", "ts_suggested", "collecting", "resolved", "cancelled"]
+    lifecycle_open: bool
+    accepts_claim_fields: bool
 ```
-Runtime files added/deleted · Runtime lines added/deleted/net
+
+```ts
+type HandoffOutcome = {
+  state: "assigned" | "queued" | "failed";
+  assigned_to: string | null;
+  assigned_to_name: string | null;
+  persisted: boolean;
+  reason: string;
+  error_code: string | null;
+};
+
+type ClaimOutcome = {
+  episode_id: string;
+  outcome: "resolved" | "cancelled";
+  actor: string;
+  occurred_at: Date;
+};
+```
+
+`queued` means the handoff request was durably persisted for human ownership but no admin id was assigned yet. It is an exceptional backlog state, not the normal business assumption and not customer copy saying "no admin available". Both `assigned` and `queued` stop bot answers; only `assigned` may name an admin. `failed` never sets human ownership and never permits customer copy claiming that the handoff completed.
+
+#### Commit 2B.1A — ownership initialization/backfill gate (inserted 2026-10-09)
+
+**Context (proven by lifecycle audit):** missing `status_conversation` is not safe to read as bot-owned. Fresh bot-owned conversations have no meta doc by design, and legacy human-owned rows can also lack one — live code derives `"handoff"`/`"closed"` from raw `conversations.assigned_to`/`closed_at` (`mapToConversation`, `getAssignedConversationIds`, `send` Phase 7.9 guard). Therefore `missing → "bot"` may only be wired after a one-time initialization pass.
+
+**Files:** `ChatAdminWeb/scripts/backfill-legacy-ownership.ts` + `test-ownership-backfill.ts` (+ hooks/mocks). Offline script only — request path must not invoke it; no runtime service imports at module load.
+
+- [x] Contract tests M1–M12 + V1–V18 + C1–C3 + D1–D3 + E1–E5 + F1–F5 (46/46): authoritative skip, meta-fill, missing-meta create, closed precedence, raw-status exclusion, idempotency, CAS loss, invariant audit, bounded output, import purity, strict input classification, exit matrix, `_id`-seek pagination, sanitized errors, client lifecycle + cleanup-exit contract, canonical IDs, canonical collection binding, empty-source + empty-audit fail closed.
+- [x] **Canonical collection binding (E1–E5)** — source default = `conversations_shp` (sellcenter-dump legacy ownership source; `ADMIN_MONGO_COLLECTION_CONVERSATIONS` remains an explicit override); target = `status_conversation`; `message_shp`/`messages_shp` are never opened. **The 2026-10-09 real dry-run (`scanned=0`, all-zero) is invalidated as evidence** — it read the wrong collection (`conversations` fallback: the runner forwarded only `ADMIN_MONGO_URI`/`ADMIN_MONGO_DB`, and a find on a nonexistent collection returns an empty cursor). A corrected real dry-run has not been run yet.
+- [x] **Empty-source fail closed** — `scanned===0` (no rows matched the candidate filter) exits 1 in every mode; output carries `empty_source:true`. Contract sharpened (F1–F5): dry-run/apply additionally require **both** `summary.scanned>0` **and** `audit.scanned>0` — a summary that saw rows but a final audit that scanned zero means the audit never reached the source (vacuous audit → exit 1, not clean). `cas_lost` success is permitted only when the final audit has real evidence (`scanned>0`) and is clean.
+- [x] **Single classification boundary** (`classifyRow`) consumed by both `runBackfill` and `auditOwnershipInvariant` — no duplicated derivation. Invalid `conversation_id`/ownership fields → `invalid_rows` (blocked, never written, never used to query meta); unknown non-empty `meta.status` → `invalid_authoritative_status` (blocked, never overwritten); invalid `closed_by` → omitted + `invalid_optional_fields` (non-blocking).
+- [x] **Canonical IDs only** — `conversation_id` accepted iff `typeof string ∧ length > 0 ∧ v === v.trim()`. Whitespace-padded IDs are invalid rows, never trimmed/normalized, never used to query `status_conversation` — the migration never rewrites identity implicitly.
+- [x] **Counts-only output** — `conversation_ids` and all per-row arrays removed; summary carries scalar counters only (scanned/candidates/would_*/created/filled/skipped_authoritative/cas_lost/invalid_*/errors). No raw identifiers, messages, names, phones, or order ids in output.
+- [x] **Stable pagination** — `_id`-seek (`sort {_id:1}` + `_id > lastSeen`), replaces skip/offset. `conversations` is read-only; rows inserted behind the cursor are caught by the final audit, rows ahead are processed once.
+- [x] **Client lifecycle** — `try/finally` wraps `connect()` onward, so `close()` runs exactly once even when `connect()` throws (C1); a connect-failure dry-run cannot hang on an open socket. Cleanup failures can never report success: `runCli` holds the result in a local `exitCode`, performs no `return` from inside `try`, and a `close()` failure logs a sanitized error and forces final exit 1 (D1–D3); operation and cleanup errors are both reported sanitized, cleanup never masks the operation error.
+- [x] **CLI/exit contract** — dry-run default; apply requires the exact token `--apply=BACKFILL_LEGACY_OWNERSHIP` (any other `--apply*` token refuses before connecting); `--batch=N` validated as integer 1–1000 before env/Mongo import; `--audit` runs invariant count only. Exit decision computed once at the CLI boundary (`decideExit`): dry-run always runs the final invariant audit after the scan — `actionable > 0` is allowed, but `invalid`/`errors`/`invalid_authoritative_status` fail dry-run; audit-only runs one audit and succeeds only at all-zero; apply succeeds only when the post-audit is clean on all four counts (`cas_lost` acceptable when the audit is clean). `process.exitCode` is written only by the outer direct-invocation boundary.
+- [x] **Sanitized errors** — CLI prints `safeErrorLabel` output only (safe `name` + finite numeric `code`); never `e.message`, stack, URI, host, or DB name.
+- [x] **Gate (resolved by census, not by apply):** 2026-10-12 corrected real dry-run (`conversations_shp` source) exited 1 with `empty_source:true` — the fail-closed gate fired correctly. Follow-up read-only census of the real Admin DB (`diag_admin_collections.py`, user-run): `conversations_shp` total=150,396, **raw ownership evidence `assigned_to != null ∨ closed_at` = 0 rows**, `distinct status = ["open"]` only, field census shows no alternative ownership field; `status_conversation` total=2; `tickets`/`chat_accept_sessions`/`platform_team_assignments`/`assignment_cursors` empty; `shop_team_assignments`=7 (shop→admin mapping, not conversation ownership).
+- [x] **Invariant conclusion:** `BACKFILL_NOT_APPLICABLE_CENSUS_COMPLETE` — the legacy dump never carries `assigned_to`/`closed_at` (or any prior content was overwritten by dump long ago and is unrecoverable by backfill). There are zero raw human-owned rows to migrate, so **migration apply is forbidden/no-op**. Census proves *existing data* has no violations; it does **not** by itself prove runtime correctness — Phase 2B.1 additionally requires writer/reader contract tests before the transport switch (user direction 2026-10-12).
+
+**Exit:** invariant discharged by real-DB census; writer/reader contract tests + transport implementation proceed under 2B.1.
+
+#### Commit 2B.1 — authoritative ownership transport
+
+**Files:** modify `ChatAdminWeb/src/backend/service/botCallService.ts` and its existing tests/mocks; update SRS/log.
+
+- [x] Prerequisite: Phase 2B.1A invariant verified on real Admin DB (raw human-owned rows lacking authoritative status = 0). Discharged by census (`BACKFILL_NOT_APPLICABLE_CENSUS_COMPLETE`, see 2B.1A).
+
+- [x] RED-test production calls where raw `conversations.status` disagrees with `status_conversation.status`; expected request uses `status_conversation`. (`scripts/test-ownership-transport.ts` — 14/35 RED → 37/37 GREEN)
+- [x] RED-test missing meta as explicit `null/unknown`, not a history-derived ownership claim. (missing meta → explicit `"bot"`; Python `None` would trigger history-scan fallback — A1/A11 pin this)
+- [x] Change `resolveTicketState()` production read from `COLLECTIONS.conversations` to `COLLECTIONS.statusConversation`; keep test-source stores unchanged.
+- [x] Delete the raw-conversation production fallback and stale comments in the same commit.
+- [x] Verify handoff/open/closed/pending/resolved transport plus existing bot-call/botworker suites. Do not start the worker.
+
+**Scope extended per user brief 2026-10-12 (all meta-authority readers/writers, not only `resolveTicketState`):**
+
+- Readers switched to `status_conversation`: `resolveTicketState` (missing meta → `"bot"` explicit, meta w/o status → `"bot"`, read error → throw = fail closed, no `conversationId` → no query/no field), `admin/conversations` list+`mapToConversation`+`getAssignedConversationIds`+status filter/auto-reopen, `[conversationId]` GET (status/assigned_to from meta, raw kept display-only), `send` conflict guard (`meta.assigned_to`), `assign` route previous-owner, `team` route workload counts (meta-only; `total` stays thread inventory from `conversations`), `shadow-inbox` + `botworker` conversation maps (`meta?.closed_at` not raw), `workflowEngine` conditions `conversation_status`+`assignee` (prod branch), `assignmentService.autoAssignConversation` early-exit + `reassignConversation` `from_admin_id`.
+- Writers: `workflowEngine` `assign_ticket` direct-assign (prod) now CAS-assigns through `statusConversationService.manualAssign` (was raw `conversations.assigned_to` write — dump-overwritable, no authority); `statusConversationService` CAS losers catch E11000 → `false` (unique `conversation_id` index — `manualAssign`/`tryAssign` no longer throw under contention).
+- Contract suite: `scripts/test-ownership-transport.ts` 37/37 (A transport ×11, B writer ×15, C reader ×11); suites re-run green: idempotency 71/71, production-races 37/37, recovery-freshness 59/59, boundary 20/20, error-policy 38/38, runtime-mongo-safety 110/110, config-failclosed 4/4, enable-checkpoint 18/18, ownership-backfill 46/46; `tsc --noEmit` clean, `npm run build` clean, `git diff --check` clean.
+- Harness additions: fakemongo `aggregate` ($match/$group + accumulators for team route), ObjectId/Date equality, `uniqueKeys` E11000 modeling, eager `onQuery` for aggregate (instrumentation contract).
+
+**Review fix 2026-10-12 (2 High + 1 Medium — all closed, suite 53/53):**
+
+- **F1 (High) — explicit owner-clear semantics:** `updateStatus(conversationId, status, assignedTo?: string | null, actor?)` — `undefined` = keep owner, `null` = clear `assigned_to`+`assigned_at` (audit/history `close_history`/`admin_logs` untouched), `string` = set owner + `assigned_at`. Fixed the two paths that collapsed `null`→`undefined`: `assignmentService.reassignConversation` (`new_admin_id=null` unassign now persists `status=handoff + assigned_to=null`) and list auto-reopen (`closed→bot` now persists `assigned_to=null`, not only in the response map). `conversationService.updateConversationStatus` widened pass-through.
+- **F2 (High) — status filter on meta:** `/api/admin/conversations?status=` no longer filters raw `conversations_shp.status` (always `"open"` on real data). Route prefetches conversation_ids from `status_conversation`: `status=bot` → exclude all meta with non-bot status (missing/no-status meta = bot); other statuses → include `{status}` ids; combined with `assigned_to` filter via include-set intersection / exclude-set union **before** raw limit+cursor pagination. `include_count` reuses the same ID constraints.
+- **F3 (Medium) — canonical metric partition (mutually exclusive):** active = `{handoff,open,pending}`+assigned; awaiting = `{handoff,pending}`+no owner; closed = `{closed,resolved}` (retained `assigned_to` = history, not workload); bot = missing/no-status/`bot` meta. Applied to `/api/team` (workload agg + realCounts — no more overlapping assigned/closed subtraction), `/api/stats/live`, `/api/stats/dashboard`. Audit additionally found+fixed the last two raw ownership readers: `/api/stats/admin-activity`, `/api/stats/performance`. Remaining raw `conversations` reads = inventory/display/time-bucket only (`unread_count`, `last_message_*`, `created_at`, thread identity) + test-domain collections.
+- RED→GREEN: 14 honest RED (F1×3, F2×8, F3×3) → 53/53 GREEN; regression suites all re-run green after fix; `tsc`/build/diff-check clean. Fakemongo extended: `$max/$min/$push/$first/$last` accumulators, `$sort/$limit/$skip/$project` stages.
+
+**Review fix round 2, 2026-10-12 (2 High + 2 Medium — all closed, suite 74/74):**
+
+- **G (High) — response rate as customer-turn population:** `computeResponseStats` now measures *customer turns* (run of consecutive `role=user` msgs; turn ts = last user msg; first qualifying `bot|admin` — or `admin`-only — out msg closes the turn; later replies ignored). Numerator (`within10minTurns`) and denominator (`totalTurns`) are the same event population → rate ≤100 by construction, never clamped. `avgResponseSeconds` = first-response latency only. `perAdmin` attributes turns to first-reply *actor* (historical responder, not current owner). `stats/performance` uses `adminOnly` per UI footnote "คำนวณจากการตอบกลับของแอดมินบนระบบเท่านั้น"; `stats/admin-activity` per-admin rate = admin's within-10min turns / admin's answered turns.
+- **H (High) — auto-reopen transition before filter/count/cache:** the `closed→bot` transition (closed meta + `conversations.last_message_timestamp` > `closed_at`) now runs *before* the cache check and all ID prefetches in `/api/admin/conversations`, via bounded `status_conversation {status∈{closed,resolved},closed_at≠null} → $lookup conversations` aggregate (status index → unique `conversation_id` index). Writes invalidate the list cache. No inbound-ingestion owner exists in this codebase (`messages_shp`/`conversations_shp` are written by the external dump; botworker is an optional poller) so the list route remains the transition owner, but it now transitions before every evaluation — `?status=closed` never returns a row that just reopened, `?status=bot` sees it immediately, `total_count` and pagination are consistent, and repeat GETs are write-free (idempotent).
+- **J (Medium) — exhaustive partition everywhere:** canonical buckets `active_assigned {h,o,p}+owner | awaiting_assignment {h,o,p}+no-owner | closed {closed,resolved} | bot (missing/no-status/bot-meta)`. `open`+no-owner is **awaiting/human-open** (still locks the bot per transport contract), not bot: `team.unassigned_handoff` filter widened to include `open`; `live.open_unassigned` now counts awaiting only (was `openTotal−openAssigned` = bot+awaiting); `admin-activity` unanswered bucket widened to `{h,o,p}` and closed/resolved/bot count as resolved (closed+retained-owner = activity history, was silently uncounted).
+- **J (Medium) — bounded status queries:** stats routes no longer run `statusColl.find({}).toArray()` or ship `$in/$nin` ID arrays. Live/dashboard/performance/admin-activity partition counts run as meta-driven `$lookup` aggregations (`status_conversation` $match → `$lookup conversations` on the unique `conversation_id` index → `$unwind` → conv-side range `$match` → `$group`/`$count`). Unanswered/open-per-shop metrics = in-range total minus meta-closed∩same-conditions (DB-side subtract, exact for disjoint sets). `listConversations` lost the dead `opts.status` param (raw `status` filter can no longer be requested by any caller).
+- RED→GREEN: 18 honest RED (G×9 route/unit, H×5, J×4 — G4/G6/G10/J6 pass as coverage pins) → 74/74 GREEN. Fakemongo extended: `$lookup`/`$unwind`/`$count` stages, composite `_id` group keys, pipeline passed to `onQuery` for query-shape pins.
+
+**Closure + deletion gate, 2026-10-13 (suite 82/82, runtime net −202 vs HEAD):**
+
+- **K — response-time boundary contract:** `computeResponseStats` now fetches messages `>= start` (bounded forward by `now`, no full-history scan) and attributes a turn to a period by `turn_ts` (last user msg of the run) ∈ `[start,end)`. A reply after `end` closes an in-range turn; a user msg after `end` extending the run moves the turn to the next period (reply then can't close it here — no double count); `adminOnly` bot replies after `end` don't close admin turns. Daily/performance routes share the same owner — no per-route patches.
+- **L — read-only list GET:** lifecycle audit confirmed **no production inbound-lifecycle owner exists in this repo** (`messages_shp` written by external Sellcenter dump; `botWorkerService` polls inbound but writes `test_status_conversation` only — sandbox isolation by design; `botCallService` is a ticket_state reader; `bot-handoff` = handoff-event callback). Per outcome B, the in-GET `closed→bot` write was **removed entirely** — `admin/conversations` GET is now read-only (zero writes, zero status queries on repeat/cache-hit; source-pinned). `closed`+new-inbound stays `closed` in list reads → **`BLOCKED_BY_MISSING_INBOUND_LIFECYCLE_OWNER`** — smallest integration point for a later phase: external dump writer post-write hook, or a dedicated inbound poller that CAS-updates `status_conversation` (status=`bot`, assigned_to=null) on `closed` meta + newer inbound.
+- **M — DB-side status/assigned filter:** list route no longer runs meta census → `conversation_id.$in/$nin` arrays. Rows and `total_count` share one conv-driven pipeline: conv `$match` (platform/shop/cursor/search) → `$lookup status_conversation` → `$unwind(preserve)` → meta `$match` (`status=bot` = `meta.status`∉owned-set covering missing/no-status/`bot`; `assigned_to`/`me`/`unassigned` as meta predicates) → `$sort` → `$limit`; no-meta-filter path joins after `$limit` (page-scoped). 3-page cursor parity pinned.
+- **Deletion (1,449 LOC tooling + 212 LOC src):** `backfill-legacy-ownership.ts` (379) + `test-ownership-backfill*` (948) + `diag_admin_collections.py` (122) deleted — census `BACKFILL_NOT_APPLICABLE_CENSUS_COMPLETE` discharged the invariant; backfill suite not re-run by design. `conversationService`: `genConversationId`/`createConversation`/`findOrCreateConversation`/`listConversations`/wrappers `setConversationTopic`/`setConversationItemIds`/`togglePinned`/`resetUnread` (0 prod callers; `generate-all-shadow.ts` repointed to direct collection find). `statusConversationService`: `setTopic`/`setItemIds`/`togglePinned`/`resetUnread` (callers were only the dead wrappers; B8 test removed, B7 repointed to `setPendingAssignment`). `getAssignedConversationIds` removed with the route rewrite. Phase-history comment prefixes stripped from all diff-added lines (contract text kept).
+- **Gate evidence:** `git diff --numstat ChatAdminWeb/src` = +605/−807 = **net −202 ≤ 0**; backfill LOC 0; new helper/module/flag/index/dependency 0; prod raw-ownership fallback refs 0; list-GET lifecycle writes 0; fakemongo net +109 unchanged (every op load-bearing across 5 sharing routes). Verify: transport 82/82, error-policy 38, idempotency 71, races 37, recovery 59, boundary 20, mongo-safety 110, config 4, enable 18; `tsc`/build(84)/diff-check clean. Verdict: `BLOCKED_BY_MISSING_INBOUND_LIFECYCLE_OWNER`.
+
+**Exit:** one production ownership source; raw conversation dumps cannot override bot silence/resume; one owner for set/clear, status filtering, and metrics.
+
+#### Commit 2B.2 — typed handoff outcome at the assignment owner
+
+**Files:** modify `handoffService.ts`, bot-handoff route, existing handoff/assignment tests; update schema/SRS/log only if stored fields change.
+
+- [ ] RED-test assigned, durable queue, conversation missing, assignment write failure, status write failure, and repeated command outcomes.
+- [ ] Make `handoffToAdmin()` return `HandoffOutcome`; the service decides `assigned|queued|failed` only after the corresponding status/pending write completes.
+- [ ] Persist `assigned` as `status=handoff + assigned_to`; persist `queued` as `status=pending + assigned_to=null + pending_assignment=true`. A failed command may not leave a transient reopened/bot-owned state.
+- [ ] Select/reuse the admin before the final ownership write where possible; test partial-failure boundaries so a thrown write cannot be reported as success.
+- [ ] Make the API return the typed outcome. HTTP success means the command was evaluated, not that assignment necessarily succeeded.
+- [ ] Preserve round-robin CAS and multiple-chat behavior. Do not add load caps, admin-unavailable copy, keyword rules, or another assignment service.
+- [ ] Delete ambiguous `ok:true + assigned_to:null` interpretation from callers/tests in the same commit.
+
+**Exit:** assignment/status persistence is the sole handoff truth owner.
+
+#### Commit 2B.3 — Python handoff command/result boundary
+
+**Files:** modify `responses.py`, `guards.py`, `app.py`, focused handoff tests, SRS/log.
+
+- [ ] RED-test no-product, explicit-human, guard escalation, HTTP error, invalid response, `assigned`, and `queued` paths.
+- [ ] Make `_send_handoff()` return `HandoffResult`; network/setup/parse failures map to `failed`, never `{}` interpreted by convention.
+- [ ] Derive compatibility fields `handoff_to_admin` and `handoff_reason` from `assigned|queued` only.
+- [ ] Replace the no-product flag-only return with command execution and outcome-based customer copy.
+- [ ] Remove `guards.enforce()`'s assumption that a pre-set flag proves success; do not add a second retry or fallback handoff call.
+- [ ] Delete replaced bool-only branches and assertions in the same commit.
+
+**Exit:** response text, response metadata, and persisted ownership agree; one turn makes at most one handoff command.
+
+#### Commit 2B.4 — claim episode/lifecycle owner
+
+**Files:** modify `warranty_flow.py`, `conversation_products.py`, Phase 2A tests/fixtures, SRS/log. Do not create `claim_lifecycle.py` unless the reviewer proves deletion cannot keep `warranty_flow.py` understandable; the default is reuse and consolidate.
+
+- [ ] RED-test terminal precedence, explicit fresh request after resolved, customer identity reuse, case-evidence reset, and bare contact data after terminal.
+- [ ] Add `episode_id` at `absent|resolved|cancelled -> collecting`; retain `customer_name/customer_phone` only through an explicit allowlist and clear prior case evidence.
+- [ ] Make one lifecycle evaluator produce `ClaimLifecycleView`. Replace and delete `_claim_collecting` slot-based activation.
+- [ ] Route stage changes through one transition owner; storage helpers remain persistence-only.
+- [ ] Un-xfail `p2a-claim-resolved-new-request` only when the executor and TurnDecision consumer use the same lifecycle view.
+
+**Exit:** retained slots are audit data, not activation; a new incident has a distinct episode id.
+
+#### Commit 2B.5 — ticket close semantics and field persistence
+
+**Files:** modify `warranty_flow.py` and existing Phase 2A fixtures/tests; update SRS/log.
+
+- [ ] Delete the closed-ticket `clear_claim_state` branch; close changes ownership only.
+- [ ] Un-xfail `p2a-claim-ticket-closed-keeps-state`, `-product-question`, and `-phone-resume`.
+- [ ] Fix lone-name persistence at the existing parser/persistence owner and delete duplicate branch-local validation.
+- [ ] Un-xfail `p2a-claim-collect-name-phone` only after name and phone persist through the same episode.
+
+**Exit:** closing and reopening a conversation cannot erase or resolve a claim episode.
+
+#### Commit 2B.6 — explicit admin claim outcome
+
+**Files:** create `ChatAdminWeb/src/app/api/admin/conversations/[conversationId]/claim-outcome/route.ts`; modify `statusConversationService.ts`, `bot-handoff/route.ts`, `botCallService.ts`, the admin conversation response/type, and `components/chat/InfoTab.tsx`; consume the event in the legacy claim owner; update schema/SRS/log and focused API/UI/contract tests. Do not repurpose the existing conversation `close` or `resolve` routes.
+
+- [ ] RED-test ordinary close with an active claim: ownership returns to bot and claim remains collecting.
+- [ ] RED-test explicit `resolved` and `cancelled` for the current `episode_id`, stale episode id, repeated event, and non-claim conversation.
+- [ ] Move production `bot_claim_info` ownership from raw `conversations` into `status_conversation`, including `active_claim_episode_id`; test/sandbox stores remain isolated as today.
+- [ ] Persist `ClaimOutcome` in `status_conversation` separately from conversation `status`; require actor, timestamp, outcome, and matching episode id.
+- [ ] Add a dedicated claim section in `InfoTab` only when `active_claim_episode_id` exists, with explicit `resolved` and `cancelled` commands plus confirmation. Ordinary close remains a separate action and never sends a claim outcome.
+- [ ] Extend the existing `/chat` state payload with the episode-scoped outcome. The wire form uses an ISO timestamp; storage keeps a Mongo `Date`.
+- [ ] Apply the event idempotently to the Python claim lifecycle on the next authoritative turn. A stale/mismatched episode cannot terminate the active claim, and repeated delivery is a no-op.
+- [ ] Delete `_TERMINAL_CLAIM_REASONS` as lifecycle resolution evidence; keep any still-needed reason only as audit/routing metadata.
+- [ ] Do not infer resolution from close reason, free-text resolution, bot answer, handoff reason, or ticket status.
+
+**Exit:** `BLOCKED_BY_MISSING_CLAIM_RESOLUTION_EVENT` and `BLOCKED_BY_CLAIM_EPISODE_IDENTITY` are closed by explicit, episode-scoped evidence.
+
+#### Commit 2B.7 — residual deletion and gate
+
+- [ ] Inventory direct claim-stage writers, handoff bool writers, raw production ticket-state readers, and lifecycle predicates.
+- [ ] Delete dead direct writes/helpers/fields, including `has_video` only if no live writer/consumer remains.
+- [ ] Run Phase 2A contract, legacy replay/isolation, handoff/API, typecheck/build, and diff checks.
+- [ ] Report owner count, direct writer count, runtime LOC delta, un-xfails, and residual blockers. No cleanup item may be deferred here from an earlier commit merely to make that commit additive.
+
+### Phase 2C — Multi-Need TurnPlan And Authoritative Subjects
+
+**Scope:** Phase 2C starts only after 2B passes. It changes turn understanding and subject continuity, not retrieval ranking or answer prompting. Extend existing `turn_decision.py` and `conversation_products.py`; do not create parallel policy/subject modules.
+
+**Interfaces owned by this phase:**
+
+```python
+@dataclass(frozen=True)
+class TurnNeed:
+    kind: Literal["product", "compare", "compat", "policy", "order", "troubleshoot", "claim", "human"]
+    operation: Literal["describe", "compare", "recommend", "price", "link", "stock", "compat", "policy", "lookup", "collect", "handoff"]
+    subject_refs: tuple[str, ...]
+    confidence: float
+    provenance: tuple[str, ...]
+
+@dataclass(frozen=True)
+class TurnPlan:
+    primary_action: Literal["no_reply", "human_wait", "execute_needs", "handoff", "clarify"]
+    needs: tuple[TurnNeed, ...]
+    ownership: Literal["bot", "human", "unknown"]
+    claim: ClaimLifecycleView
+    requires_clarification: bool
+
+@dataclass(frozen=True)
+class ConversationSubjectSet:
+    subject_ids: tuple[str, ...]
+    source_turn_id: str | None
+    relation: Literal["single", "compare", "alternatives", "bundle"]
+    requested_operations: tuple[str, ...]
+    confidence: float
+```
+
+#### Commit 2C.1 — evolve TurnDecision in place
+
+- [ ] RED-test mixed claim+product, product+policy, comparison+compatibility, explicit human request plus information need, and noise/media-only turns.
+- [ ] Replace the one-action result with `TurnPlan.needs[]` in `turn_decision.py`; no new semantic keyword table and no `turn_policy.py`.
+- [ ] Keep shadow comparison until every consumer understands `needs[]`; delete the superseded one-action assertions/adapter in the same commit.
+
+#### Commit 2C.2 — persisted subject set
+
+- [ ] RED-test explicit model identity, compare pairs, recommendation batches, topic switch, ambiguous "ตัวนี้", unavailable subject, and no-history turns with persisted subjects.
+- [ ] Persist subject ids/relations/operations from explicit evidence and selected results; never persist a conclusion parsed from bot prose.
+- [ ] Migrate compare/price/link/compat follow-ups to the subject set and delete the corresponding app-local history/keyword owner blocks.
+- [ ] Ambiguity produces clarification; it must not silently select the newest or sellable tail product.
+
+#### Commit 2C.3 — one action switch and deletion gate
+
+- [ ] Make legacy orchestration consume one `TurnPlan` and one `ConversationSubjectSet` before retrieval.
+- [ ] Delete migrated early action/anchor/follow-up branches from `app.py`; retain deterministic extractors only as evidence producers.
+- [ ] Pin Q6-Q9, Q12-Q13, Q15-Q18 and multi-need incidents through `chat()` replay.
+- [ ] Report action owners and subject owners before/after; Phase 2C fails if either count does not decrease.
+
+**Phase 2B/2C complexity gates — every runtime commit reports:**
+
+```text
+Runtime files and lines added/deleted/net
 Functions/helpers added/deleted
-Decision owners before/after · Direct stage-write callsites before/after
-Keyword tables added/deleted · Flags added/deleted
-Shims added/deleted · Parallel paths added/deleted
+Decision owners and direct state writers before/after
+Keyword tables, flags, shims, and parallel paths added/deleted
+Xfails removed/remaining and exact blocker for each remainder
 ```
 
-Mandatory: new semantic keyword tables = 0 · new runtime flags = 0 · long-lived shims = 0 · owner count must decrease · migrated old branch deleted in same commit · runtime net LOC ≤ 0 for refactor-only commits. Failure → `INCREASES_COMPLEXITY_BLOCKED`, no commit.
+Mandatory: new semantic keyword tables = 0; new rollout flags = 0; long-lived shims = 0; migrated branch deleted in the same commit; owner count decreases; refactor-only runtime net LOC <= 0. Failure means `INCREASES_COMPLEXITY_BLOCKED`, no commit.
 
 ### YAGNI cuts
 
 - `claim_state_expect` per-turn schema — not added: final-state `final_claim_state` + `turn_decision_expect` per-turn already cover every case in the truth table; intermediate non-mutation is implied by both.
 - Public lifecycle wrapper — not created in 2A (tests target `_claim_collecting` as temporary owner).
 - `has_video` writer — dead field documented; removal deferred to Phase 2B owner consolidation.
+
+## Master Requirement Traceability (2026-10-13)
+
+Acceptance ledger for the 21 user requirements. `blocked` rows cite the blocking contract; nothing here expands this round's implementation scope.
+
+| # | Requirement | Current owner/path | Action | Target phase | Acceptance evidence | Status |
+|---|---|---|---|---|---|---|
+| 1 | Workflow/trigger consolidation | `src/backend/service/workflowEngine.ts`, `src/app/api/triggers/` | replace (single gated owner) | Phase 9 | trigger/workflow suites + ownership gate tests | not_started |
+| 2 | Deep product specs | `product_store.py`, `knowledge_base.py` | replace (canonical schema) | Phase 3+5 | schema fixture + field-evidence tests | not_started |
+| 3 | Complexity reduction | repo-wide (`ChatAdminWeb/src` net LOC vs HEAD) | keep (gate per phase) | every phase / Phase 10 | numstat net ≤0 at each phase close | in_progress (2B.1: −116) |
+| 4 | Latency/cost | `llm.py` pipeline, shadow cost metrics | replace (one answer boundary) | Phase 8 | bounded context + per-call cost report | not_started |
+| 5 | Regressions | `docs/test/` corpus + `scripts/test-*` suites | keep (expand coverage pins) | all | 9 offline suites green + replay fixtures | in_progress |
+| 6 | Product pool (canonical evidence) | `product_store.py` multi-source fetch | replace (single union pool) | Phase 4 | pool-completeness tests vs source census | not_started |
+| 7 | Stock freshness | availability fields in product schema | replace (schema contract) | Phase 3 | freshness TTL + staleness tests | not_started |
+| 8 | Order history | `order_store.py` | keep (owner exists) | Phase 2C integration | lookup tests via TurnPlan context | not_started |
+| 9 | Anchor/follow-up/history | `conversation_products.py`, `turn_decision.py` | replace (ConversationSubjectSet) | Phase 2C | subject-set migration + deleted app-local branches | not_started |
+| 10 | LLM/websearch pipeline | `llm.py`, `web_search.py` | replace (web gate) | Phase 7 | gated search tests, no unbounded fetch | not_started |
+| 11 | Intent reliability | `intent_classifier.py` | replace (multi-need TurnPlan) | Phase 2C | multi-intent fixture resolves blockers | not_started |
+| 12 | Logs/metrics | `src/app/api/stats/*`, `responseStats.ts`, `adminLogService` | keep + replace (bounded contract) | Phase 2B.1 (done) | T1–T13 grace contract + freeze proof | **verified** (response metric); logs keep |
+| 13 | Ratings | `testChatRatingService` | keep | — | existing rating tests | not_started |
+| 14 | Troubleshooting/handoff | `handoffService`, `bot-handoff` route, `statusConversationService` | keep (transport verified) | Phase 2B | ownership suites green | in_progress — reopen path **blocked** by external inbound writer |
+| 15 | Round robin | `liveAssignmentService`, `assignmentService` | keep | Phase 2B integration | assignment contract tests | not_started |
+| 16 | Comparison (replay) | `replay-compare` route + `replay_compare.py` | keep | — | replay fixtures + suite | in_progress (in use) |
+| 17 | Compatibility | field evidence + proof booleans | replace (compat proof contract) | Phase 5 | compat-proof tests on real incident rows | not_started |
+| 18 | Warranty/claim intent | `warranty.py`, claim episode state | replace (episode owner) | Phase 2B.4-2B.6 | episode-scoped outcome tests | not_started |
+| 19 | Certification/TISI | `knowledge_base.py` evidence fields | replace (field evidence) | Phase 5 | evidence-card coverage tests | not_started |
+| 20 | Legacy/new-plan consolidation | this roadmap | keep (traceability ledger) | all | this table 21/21 rows | in_progress |
+| 21 | v2/v3 retirement | superseded phases + dead exports | delete | Phase 10 | deletion manifest + zero-prod-caller audit | in_progress (2B.1: backfill/dead exports removed) |
+
+Blocking contracts: **external inbound writer** (Sellcenter dump must CAS `status_conversation {status:bot, assigned_to:null}` on `closed/resolved` + newer inbound, and write complete meta at ingress — also unbounds `status=bot`/`unassigned` list queries) blocks #14 reopen path; **Phase 2B state/command truth** gates #1, #11, #18 per rollout rules.

@@ -156,7 +156,7 @@ export async function GET(req: NextRequest) {
     let derivedStatus: Conversation["status"];
     if (meta?.status) {
       derivedStatus = meta.status as Conversation["status"];
-    } else if (doc.closed_at) {
+    } else if (meta?.closed_at) {
       derivedStatus = "closed";
     } else if (effectiveAssignedTo) {
       derivedStatus = "handoff";

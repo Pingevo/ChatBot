@@ -1101,6 +1101,18 @@ async function main() {
     }
   });
 
+  // ═══ OT-B — Phase 2B.1 ownership transport boundary pin
+  //   (blocker characterization B1–B4 removed — ห้ามล็อก defect เป็น PASS;
+  //    lifecycle evidence อยู่ใน active log + architecture audit)
+
+  await test("B5 no conversationId → ไม่มี ownership query + ticket_state omitted (pin — boundary เดิม)", async () => {
+    await botCall({ platform: "shopee", shopId: "shop_1", message: "q", history: [] });
+    const body = (mocks.state.fetchBodies[0] || {}) as Record<string, unknown>;
+    assert(!("ticket_state" in body), `ticket_state=${body.ticket_state}`);
+    assert(!mocks.state.queryLog.some((q: any) => q.coll === "conversations" || q.coll === "status_conversation"),
+      "no-conversationId path ต้องไม่ทำ ownership query เลย");
+  });
+
   // ⚡ D2 รันสุดท้าย — โค้ดเก่าที่ signal ไม่ถึง workflow call จะ leak slot ถาวร
   //    (hang ไม่มี abort) — อยู่ท้ายเพื่อไม่ให้ contamination กับ test อื่น
   await test("D2 workflow let_ai_respond hang → bounded timeout → bot_failed, slot released", async () => {

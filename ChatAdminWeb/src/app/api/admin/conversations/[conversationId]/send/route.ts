@@ -16,6 +16,7 @@ import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { messageService } from "@/backend/service/messageService";
 import { conversationService } from "@/backend/service/conversationService";
+import { statusConversationService } from "@/backend/service/statusConversationService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { assertPlatformApiDisabled } from "@/backend/lib/safety";
 import { auth } from "@/backend/service/authService";
@@ -53,18 +54,21 @@ export async function POST(
   // ⛔ Iron Rule guard — กันใครเพิ่ม code เรียก platform API โดยไม่ตั้งใจ
   assertPlatformApiDisabled(conv.platform, "send");
 
-  // Phase 7.9 — เช็ค assigned_to สดๆ
+  // เช็ค assigned_to จาก status_conversation (authority เดียว)
   // ℹ️ Shared inbox model — admin ทุกคนตอบได้ แต่มี conflict detection
   //   - ถ้า assigned ให้คนอื่น → 409 + frontend เตือน popup
   //   - ถ้า assigned ให้ตัวเอง หรือ ยังไม่ assigned → ตอบได้
   //   - force=true ข้าม conflict ได้ (audit log บันทึกไว้)
+  //   raw conversations(_shp).assigned_to เป็น dump field — ห้ามใช้ตัดสิน conflict
   const me = r.ctx.admin.admin_id;
-  const assignedToOther = conv.assigned_to && conv.assigned_to !== me;
+  const meta = await statusConversationService.getMeta(conversationId);
+  const currentAssignee = meta?.assigned_to || null;
+  const assignedToOther = currentAssignee && currentAssignee !== me;
   if (assignedToOther && !force) {
     return json({
       ok: false,
       conflict: true,
-      assigned_to: conv.assigned_to,
+      assigned_to: currentAssignee,
       message: "conversation assigned to another admin",
     }, 409);
   }
@@ -92,7 +96,7 @@ export async function POST(
       message_id: doc.message_id,
       text_preview: text.slice(0, 100),
       delivered_to_platform: false,
-      assigned_to: conv.assigned_to || null,
+      assigned_to: currentAssignee,
       reply_as_assigned_owner: !assignedToOther,
       forced_override: force && assignedToOther,
     },
@@ -115,5 +119,5 @@ export async function POST(
   // ⚡ invalidate cache — ให้ list อัปเดตทันที (unanswered count เปลี่ยน)
   invalidateConversationsCache();
   invalidateBotworkerCache();
-  return json({ message, assigned_to: conv.assigned_to || null });
+  return json({ message, assigned_to: currentAssignee });
 }

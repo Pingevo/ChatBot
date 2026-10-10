@@ -20,7 +20,7 @@ export interface StatusConversationDoc {
   conversation_id: string;
   // assignment
   assigned_to?: string | null;
-  assigned_at?: Date;
+  assigned_at?: Date | null;
   assignment_mode_used?: string;
   // status (admin-owned — ไม่โดน dump ทับ)
   status?: ConversationStatus;
@@ -62,15 +62,23 @@ async function upsertMeta(conversationId: string, fields: Partial<StatusConversa
   );
 }
 
-/** อัปเดต status + assigned_to */
+/** อัปเดต status + assigned_to
+ *  assignedTo มี 3 ความหมายชัดเจน:
+ *    - undefined → ไม่แตะ owner เดิม
+ *    - null      → ล้าง current ownership (ไม่ลบ audit/history)
+ *    - string    → ตั้ง owner ใหม่
+ */
 export async function updateStatus(
   conversationId: string,
   status: ConversationStatus,
-  assignedTo?: string,
+  assignedTo?: string | null,
   actor?: string
 ): Promise<boolean> {
   const fields: Partial<StatusConversationDoc> = { status };
-  if (assignedTo !== undefined) {
+  if (assignedTo === null) {
+    fields.assigned_to = null;
+    fields.assigned_at = null;
+  } else if (assignedTo !== undefined) {
     fields.assigned_to = assignedTo;
     fields.assigned_at = new Date();
   }
@@ -102,23 +110,33 @@ export async function tryAssign(
 ): Promise<boolean> {
   const coll = await getCollection<StatusConversationDoc>(COLLECTIONS.statusConversation);
   // atomic: ถ้ายังไม่มี assigned_to (หรือยังไม่มี doc) → assign ได้
-  const result = await coll.findOneAndUpdate(
-    { conversation_id: conversationId, $or: [{ assigned_to: null }, { assigned_to: { $exists: false } }] },
-    { $set: { assigned_to: agentId, assigned_at: new Date(), assignment_mode_used: mode, status: "handoff", updated_at: new Date() } },
-    { upsert: true, returnDocument: "after" }
-  );
-  // ⚡ Phase 2M — เขียน log ทุกครั้ง (กัน caller ลืม)
-  await logAdminEvent({
-    action_type: "chat_assigned",
-    actor: "system",
-    target_admin_id: agentId,
-    conversation_id: conversationId,
-    metadata: { mode_used: mode, atomic: true },
-  });
+  // filter miss + upsert insert ชน unique(conversation_id) → E11000
+  //   = คนอื่น assign ชนะ race → แพ้ CAS คืน false (ห้ามโยน exception เป็น false-success)
+  let result;
+  try {
+    result = await coll.findOneAndUpdate(
+      { conversation_id: conversationId, $or: [{ assigned_to: null }, { assigned_to: { $exists: false } }] },
+      { $set: { assigned_to: agentId, assigned_at: new Date(), assignment_mode_used: mode, status: "handoff", updated_at: new Date() } },
+      { upsert: true, returnDocument: "after" }
+    );
+  } catch (e) {
+    if ((e as { code?: number })?.code === 11000) return false;
+    throw e;
+  }
+  // log เฉพาะเมื่อ assign สำเร็จจริง (CAS loser ห้ามบันทึก chat_assigned)
+  if (result) {
+    await logAdminEvent({
+      action_type: "chat_assigned",
+      actor: "system",
+      target_admin_id: agentId,
+      conversation_id: conversationId,
+      metadata: { mode_used: mode, atomic: true },
+    });
+  }
   return !!result;
 }
 
-/** ⚡ C1 — manual assign (admin กดรับช่วง/เปลี่ยนคน) — atomic guard แบบ "ทับได้ถ้ายังเป็นคนเดิมหรือยังไม่มี"
+/** manual assign (admin กดรับช่วง/เปลี่ยนคน) — atomic guard แบบ "ทับได้ถ้ายังเป็นคนเดิมหรือยังไม่มี"
  *  เขียน statusConversation เท่านั้น (ไม่เขียน conversations ที่โดน dump ทับ)
  *  คืน true ถ้าสำเร็จ, false ถ้าโดนแย่งโดย admin อื่น
  */
@@ -129,27 +147,35 @@ export async function manualAssign(
   actor: string
 ): Promise<boolean> {
   const coll = await getCollection<StatusConversationDoc>(COLLECTIONS.statusConversation);
-  const result = await coll.findOneAndUpdate(
-    {
-      conversation_id: conversationId,
-      // ต้องยังเป็น assigned_to เดิม หรือยังไม่ assigned (กันทับคนอื่น)
-      $or: [
-        { assigned_to: previousAssignedTo ?? null },
-        { assigned_to: null },
-        { assigned_to: { $exists: false } },
-      ],
-    },
-    {
-      $set: {
-        assigned_to: agentId,
-        assigned_at: new Date(),
-        assignment_mode_used: "manual",
-        status: "handoff",
-        updated_at: new Date(),
+  // filter miss + upsert insert ชน unique(conversation_id) → E11000
+  //   = ถูกแย่งระหว่างรอ → คืน false (conflict) ไม่โยน exception
+  let result;
+  try {
+    result = await coll.findOneAndUpdate(
+      {
+        conversation_id: conversationId,
+        // ต้องยังเป็น assigned_to เดิม หรือยังไม่ assigned (กันทับคนอื่น)
+        $or: [
+          { assigned_to: previousAssignedTo ?? null },
+          { assigned_to: null },
+          { assigned_to: { $exists: false } },
+        ],
       },
-    },
-    { upsert: true, returnDocument: "after" }
-  );
+      {
+        $set: {
+          assigned_to: agentId,
+          assigned_at: new Date(),
+          assignment_mode_used: "manual",
+          status: "handoff",
+          updated_at: new Date(),
+        },
+      },
+      { upsert: true, returnDocument: "after" }
+    );
+  } catch (e) {
+    if ((e as { code?: number })?.code === 11000) return false;
+    throw e;
+  }
   if (result) {
     await logAdminEvent({
       action_type: "conversation.handoff",
@@ -252,46 +278,6 @@ export async function reopenConversation(opts: {
   return true;
 }
 
-// ⚡ Phase 2M — setTopic/setItemIds/togglePinned เขียน log ด้วย (ใครทำอะไร)
-export async function setTopic(conversationId: string, topic: string, actor?: string): Promise<void> {
-  const existing = await getMeta(conversationId);
-  const oldTopic = existing?.topic;
-  await upsertMeta(conversationId, { topic });
-  await logAdminEvent({
-    action_type: "conversation.set_topic",
-    actor: actor || "system",
-    conversation_id: conversationId,
-    metadata: { old_topic: oldTopic || null, new_topic: topic },
-  });
-}
-
-export async function setItemIds(conversationId: string, itemIds: string[], actor?: string): Promise<void> {
-  const existing = await getMeta(conversationId);
-  const oldItemIds = existing?.item_ids || [];
-  await upsertMeta(conversationId, { item_ids: itemIds });
-  await logAdminEvent({
-    action_type: "conversation.set_item_ids",
-    actor: actor || "system",
-    conversation_id: conversationId,
-    metadata: { old_item_ids: oldItemIds, new_item_ids: itemIds },
-  });
-}
-
-export async function togglePinned(conversationId: string, pinned: boolean, actor?: string): Promise<void> {
-  await upsertMeta(conversationId, { pinned });
-  await logAdminEvent({
-    action_type: pinned ? "conversation.pin" : "conversation.unpin",
-    actor: actor || "system",
-    conversation_id: conversationId,
-    metadata: { pinned },
-  });
-}
-
-export async function resetUnread(conversationId: string): Promise<void> {
-  // unread_count ยังอยู่ใน conversations (เขียนโดย dump) — ไม่ย้าย
-  // แต่ถ้าต้องการ track ฝั่งเรา ก็เพิ่มได้
-}
-
 /** ⚡ pending backlog — handoff แล้วหา admin ไม่ได้ → mark รอ distributor; จ่ายสำเร็จ → clear */
 export async function setPendingAssignment(
   conversationId: string,
@@ -339,9 +325,6 @@ export const statusConversationService = {
   manualAssign,
   closeConversation,
   reopenConversation,
-  setTopic,
-  setItemIds,
-  togglePinned,
   setPendingAssignment,
   assignPendingTicket,
 };

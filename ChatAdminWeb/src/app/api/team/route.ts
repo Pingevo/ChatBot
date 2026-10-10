@@ -72,8 +72,11 @@ export async function GET(req: NextRequest) {
         $group: {
           _id: "$assigned_to",
           all: { $sum: 1 },
-          active: { $sum: { $cond: [{ $ne: ["$status", "closed"] }, 1, 0] } },
-          closed: { $sum: { $cond: [{ $eq: ["$status", "closed"] }, 1, 0] } },
+          // canonical partition:
+          //   active = {handoff,open,pending} เท่านั้น (closed/resolved + retained owner ≠ active)
+          //   closed = {closed,resolved} (เก็บ owner ไว้เป็น history แต่ไม่ใช่ workload)
+          active: { $sum: { $cond: [{ $in: ["$status", ["handoff", "open", "pending"]] }, 1, 0] } },
+          closed: { $sum: { $cond: [{ $in: ["$status", ["closed", "resolved"]] }, 1, 0] } },
         },
       },
     ]).toArray();
@@ -128,22 +131,31 @@ export async function GET(req: NextRequest) {
       ]).toArray();
       return new Map(agg.map((a) => [a._id || "", a]));
     })(),
-    // ⚡ real counts จาก DB aggregation (ไม่จำกัด limit 5000)
-    //   - total = ทั้งหมดใน conversations_shp
-    //   - assigned = มี assigned_to ที่ไม่ใช่ null
-    //   - unassigned = ไม่มี assigned_to + ไม่ใช่ closed/resolved
-    //   - unassigned_handoff = ไม่มี assigned_to + status=handoff (รอแอดมินรับจริง)
-    //   - unassigned_open = ไม่มี assigned_to + status=open (บอทตอบอยู่หรือยังไม่มีคนตอบ)
+    // ⚡ real counts — canonical partition (mutually exclusive)
+    //   - total = ทั้งหมดใน conversations (thread inventory — display เท่านั้น)
+    //   - assigned (active) = meta status∈{handoff,open,pending} + assigned_to nonempty
+    //   - closedResolved = meta status∈{closed,resolved} (assigned_to ที่ค้างไว้ = history ไม่ใช่ active)
+    //   - unassignedHandoff (awaiting) = meta status∈{handoff,open,pending} + ไม่มี owner
+    //     (open+no-owner = human-open awaiting — ยัง lock bot ตาม transport ไม่ใช่ bot)
+    //   - unassigned = total − active − closed = awaiting + bot (partition ไม่ overlap)
+    //   - unassignedOpen = unassigned − awaiting = bot-owned (missing meta/no-status/bot)
     (async () => {
-      const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
-      const notAssigned = { $or: [{ assigned_to: { $type: 10 } }, { assigned_to: { $exists: false } }] } as Record<string, unknown>;
-      const [total, assigned, unassigned, unassignedHandoff, unassignedOpen] = await Promise.all([
-        coll.countDocuments({}),
-        coll.countDocuments({ assigned_to: { $type: 2 } }),
-        coll.countDocuments({ ...notAssigned, status: { $nin: ["resolved", "closed"] } }),
-        coll.countDocuments({ ...notAssigned, status: "handoff" }),
-        coll.countDocuments({ ...notAssigned, status: "open" }),
+      const convColl = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
+      const statusColl = await getCollection(COLLECTIONS.statusConversation);
+      const [total, assigned, closedResolved, unassignedHandoff] = await Promise.all([
+        convColl.countDocuments({}),
+        statusColl.countDocuments({
+          status: { $in: ["handoff", "open", "pending"] },
+          assigned_to: { $exists: true, $nin: [null, ""] },
+        }),
+        statusColl.countDocuments({ status: { $in: ["closed", "resolved"] } }),
+        statusColl.countDocuments({
+          status: { $in: ["handoff", "open", "pending"] },
+          $or: [{ assigned_to: null }, { assigned_to: "" }, { assigned_to: { $exists: false } }],
+        }),
       ]);
+      const unassigned = Math.max(0, total - assigned - closedResolved);
+      const unassignedOpen = Math.max(0, unassigned - unassignedHandoff);
       return { total, assigned, unassigned, unassignedHandoff, unassignedOpen };
     })(),
   ]);

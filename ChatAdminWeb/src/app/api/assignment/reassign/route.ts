@@ -53,7 +53,6 @@ export async function POST(req: NextRequest) {
       _id: conv._id as unknown as ObjectId,
       conversation_id: conv.conversation_id,
       shop_id: conv.shop_id,
-      assigned_to: conv.assigned_to,
     },
     newAdminId,
     actor,

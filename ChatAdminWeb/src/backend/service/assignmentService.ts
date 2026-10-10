@@ -176,7 +176,10 @@ export async function autoAssignConversation(conv: {
   platform: string;
   assigned_to?: string | null;
 }, source: string = "ticket"): Promise<string | null> {
-  if (conv.assigned_to) return null; // มีคนรับผิดชอบอยู่แล้ว
+  // เช็ค owner จาก meta เท่านั้น; conv.assigned_to เป็น dump field (ถูกทับได้)
+  const { statusConversationService } = await import("./statusConversationService");
+  const existingMeta = await statusConversationService.getMeta(conv.conversation_id);
+  if (existingMeta?.assigned_to) return null; // มีคนรับผิดชอบอยู่แล้ว
 
   const shopColl = await getCollection<{ shop_id: string; platform: string; enabled_for_chat: boolean }>(COLLECTIONS.shops);
   const shop = await shopColl.findOne({ shop_id: conv.shop_id, platform: conv.platform });
@@ -192,8 +195,6 @@ export async function autoAssignConversation(conv: {
   if (!agentId) return null;
 
   // ⚡ Phase 2J — atomic guard เขียน assigned_to ลง status_conversation (ไม่ใช่ conversations ที่โดน dump ทับ)
-  //   ใช้ statusConversationService.tryAssign (atomic upsert กัน race condition)
-  const { statusConversationService } = await import("./statusConversationService");
   const assigned = await statusConversationService.tryAssign(
     conv.conversation_id,
     agentId,
@@ -216,20 +217,23 @@ export async function autoAssignConversation(conv: {
 // lead/admin ย้ายงานเอง — ไม่แตะคิว round-robin
 // ⚡ Phase 2J — เขียน assigned_to ลง status_conversation (ไม่ใช่ conversations ที่โดน dump ทับ)
 export async function reassignConversation(
-  conv: { _id: ObjectId; conversation_id: string; shop_id: string; assigned_to?: string | null },
+  conv: { _id: ObjectId; conversation_id: string; shop_id: string },
   newAgentId: string | null,
   actor: string,
   reason?: string
 ): Promise<void> {
-  const fromAdminId = conv.assigned_to || null;
+  // from_admin_id อ่านจาก meta (authority) ไม่ใช่ raw conv field
+  const { statusConversationService } = await import("./statusConversationService");
+  const meta = await statusConversationService.getMeta(conv.conversation_id);
+  const fromAdminId = meta?.assigned_to || null;
   const mode = await getActiveAssignmentConfig();
 
   // ⚡ Phase 2J — เขียนลง status_conversation แทน conversations
-  const { statusConversationService } = await import("./statusConversationService");
+  // ส่ง newAgentId ตรงๆ: null = unassign (ล้าง owner) ห้าม || undefined
   await statusConversationService.updateStatus(
     conv.conversation_id,
     "handoff",
-    newAgentId || undefined,
+    newAgentId,
     actor
   );
 
