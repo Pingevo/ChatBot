@@ -2843,3 +2843,10 @@ S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mon
   - Verify สด: ownership **159/159** · error-policy 38 · idempotency 71 · races 37 · recovery 59 · boundary 20 · mongo-safety 110 · config 4 · enable 18 · `tsc --noEmit` ✓ · `npm run build` ✓ (route ƒ) · `git diff --check` ✓
   - Complexity delta รอบนี้: route.ts **+4/−2** เท่านั้น · helpers/functions เพิ่ม **1** (`parseInboundTimestamp`) · runtime modules/files เพิ่ม **1** (`inbound-lifecycle/route.ts`) · dependencies/config/env/indexes/collections เพิ่ม = **0** · ไม่มี abstraction layer/parallel owner ใหม่ · route zero-Mongo delegate ครั้งเดียว · ไม่มี retry impl ใน receiver · worker/provider/Mongo/.env = 0
   - **Verdict: `PHASE_2B1_RUNTIME_FINAL_GREEN_EXTERNAL_HOOK_PENDING`** — external writer wiring ยังเป็น blocker เดิม · ยังไม่ stage/commit/push/deploy
+
+#### Commit Closeout (2026-10-13 — ผ่านแล้ว)
+- Commit 1: `d403f0a` `fix: add authoritative inbound ownership lifecycle` — 13 files +953/−10 (runtime +224/−5 · tests/harness +714/−1 · docs +15/−4)
+- Commit 2: `e3e0b4d` `docs: record phase 2b.1 inbound lifecycle closeout` — log-only +83
+- Complexity final: helpers/functions เพิ่ม 1 (`parseInboundTimestamp` local) · runtime modules/files เพิ่ม 1 (`inbound-lifecycle/route.ts`) · deps/config/env/indexes/collections เพิ่ม 0 · ownership owner 1→1 · ไม่มี abstraction layer/retry owner/guard family/parallel runtime path
+- Leftovers ไม่ถูกแตะ: llm.py · diag-worker-dup×5 · quarantine/vision×3 · architecture-audit doc
+- **Verdict: `PHASE_2B1_RUNTIME_COMMITTED_EXTERNAL_HOOK_PENDING`** — `BLOCKED_BY_EXTERNAL_WRITER_WIRING` ยังอยู่ · ไม่มี push/PR/deploy
