@@ -43,6 +43,11 @@ exports/
 docs/test/logs/
 docs/test/results/
 
+# Local botworker incident diagnostics
+ChatAdminWeb/scripts/diag-worker-dup*.ts
+chatbot/testscript/quarantine_rollback.py
+chatbot/testscript/test_quarantine_rollback_verify.py
+
 # Personal agent rules (local only)
 AGENTS.local.md
 
