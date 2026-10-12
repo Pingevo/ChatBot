@@ -87,6 +87,8 @@ export async function recordClose(opts: {
 /** บันทึกการ reopen — update record ปิดล่าสุด (เก็บ reopened_by, reopened_at, reopen_reason)
  *  ⚡ Phase 2O — ไม่สร้าง record ใหม่ แค่อัปเดต record ปิดล่าสุด
  *  sequence ยังนับเฉพาะการปิด (1, 2, 3...) ไม่นับ reopen
+ *  ⚡ Phase 2B.2-fix — audit ก่อน stamp: crash ระหว่าง log→update → retry stamp ซ้ำได้
+ *    (log dedupe ด้วย eventId; update-first จะทำ log หายถาวร)
  */
 export async function recordReopen(opts: {
   conversationId: string;
@@ -104,6 +106,17 @@ export async function recordReopen(opts: {
     { sort: { sequence: -1 } }
   );
 
+  await logAdminEvent({
+    action_type: "conversation.open",
+    actor: opts.reopenedBy,
+    conversation_id: opts.conversationId,
+    metadata: {
+      reopen_reason: opts.reopenReason,
+      previous_close_sequence: lastRecord?.sequence,
+    },
+    ...(opts.messageId ? { eventId: opts.messageId } : {}),
+  });
+
   if (lastRecord) {
     await coll.updateOne(
       { record_id: lastRecord.record_id },
@@ -116,17 +129,6 @@ export async function recordReopen(opts: {
       }
     );
   }
-
-  await logAdminEvent({
-    action_type: "conversation.open",
-    actor: opts.reopenedBy,
-    conversation_id: opts.conversationId,
-    metadata: {
-      reopen_reason: opts.reopenReason,
-      previous_close_sequence: lastRecord?.sequence,
-    },
-    ...(opts.messageId ? { eventId: opts.messageId } : {}),
-  });
 }
 
 /** ดึงประวัติการปิด/เปิด ของ conversation — เรียงจากใหม่ไปเก่า */

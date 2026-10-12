@@ -312,6 +312,7 @@ def detect_human_request(req, ctx: dict) -> dict | None:
     _is_angry = is_service_anger(req.message)
 
     if _is_human_request or _is_angry:
+        from . import responses as _resp_mod
         _reason = "human_request" if _is_human_request else "customer_frustration"
         _topic = "ลูกค้าขอคุยกับแอดมิน" if _is_human_request else "ลูกค้าไม่พอใจ/โกรธ"
         _human_answer = (
@@ -323,11 +324,15 @@ def detect_human_request(req, ctx: dict) -> dict | None:
         )
         _total_elapsed = _time.time() - _total_start
 
-        # ส่งต่อแอดมิน (best-effort) — เหมือน tax invoice handoff
-        if req.conversation_id:
+        # ส่งต่อแอดมิน — outcome ยืนยันเท่านั้นถึง claim ส่งสำเร็จ
+        #   failed/exhausted → flag False + ตอบตรงๆ ว่าติดต่อแอดมินไม่ได้ (ห้ามโกหก)
+        _handoff_ok = bool(
             _app_module._send_handoff(req, None, reason=_reason,
                           claim={"topic": _topic}, log_tag="HUMAN-HANDOFF")
-        print(f"[TIMING] HUMAN-HANDOFF({_reason}): {_total_elapsed:.2f}s", file=sys.stderr)
+        ) if req.conversation_id else False
+        if not _handoff_ok:
+            _human_answer = _resp_mod.HANDOFF_FAILED_REPLY
+        print(f"[TIMING] HUMAN-HANDOFF({_reason}): {_total_elapsed:.2f}s ok={_handoff_ok}", file=sys.stderr)
         return dict(
             answer=_human_answer,
             answer_segments=llm.split_segments(_human_answer),
@@ -338,13 +343,15 @@ def detect_human_request(req, ctx: dict) -> dict | None:
             usage={},
             elapsed=round(_total_elapsed, 2),
             cost=0.0,
-            handoff_to_admin=True,
-            handoff_reason=_reason,
+            handoff_to_admin=_handoff_ok,
+            handoff_reason=_reason if _handoff_ok else None,
             timing=_timing_breakdown,
             steps=_steps,
             routing_decision=_app_module._routing(
-                "handoff", f"{_reason}: {_topic} → ส่งแอดมิน",
-                handoff_reason=_reason,
+                "handoff" if _handoff_ok else "bot_reply",
+                f"{_reason}: {_topic} → ส่งแอดมิน" if _handoff_ok
+                    else f"{_reason}: {_topic} → handoff ไม่สำเร็จ (ติดต่อแอดมินไม่ได้)",
+                handoff_reason=_reason if _handoff_ok else None,
             ),
             image_desc=_image_desc_out,
         )
@@ -376,6 +383,7 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
     # ⚡ Phase 6 — ย้ายมาหลัง intent classification เพื่อให้ intent_result มีส่วนร่วม
     #   แต่ keyword detection ยังจับ data submission (เลขผู้เสียภาษี/หจก.) ที่ intent อาจไม่จับ
     if _is_tax_invoice:
+        from . import responses as _resp_mod
         _tax_answer = (
             f"ได้ค่ะ เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
             f"เพื่อดำเนินการเรื่องใบกำกับภาษีให้นะคะ "
@@ -383,11 +391,14 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
         )
         _total_elapsed = _time.time() - _total_start
 
-        # ส่งต่อแอดมิน (best-effort)
-        if req.conversation_id:
+        # ส่งต่อแอดมิน — outcome ยืนยันเท่านั้นถึง claim ส่งสำเร็จ
+        _handoff_ok = bool(
             _app_module._send_handoff(req, None, reason="tax_invoice_request",
                           claim={"topic": "ใบกำกับภาษี"}, log_tag="TAX-HANDOFF")
-        print(f"[TIMING] TAX-HANDOFF: {_total_elapsed:.2f}s", file=sys.stderr)
+        ) if req.conversation_id else False
+        if not _handoff_ok:
+            _tax_answer = _resp_mod.HANDOFF_FAILED_REPLY
+        print(f"[TIMING] TAX-HANDOFF: {_total_elapsed:.2f}s ok={_handoff_ok}", file=sys.stderr)
         return dict(
             answer=_tax_answer,
             answer_segments=llm.split_segments(_tax_answer),
@@ -398,13 +409,15 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
             usage={},
             elapsed=round(_total_elapsed, 2),
             cost=0.0,
-            handoff_to_admin=True,
-            handoff_reason="tax_invoice_request",
+            handoff_to_admin=_handoff_ok,
+            handoff_reason="tax_invoice_request" if _handoff_ok else None,
             timing=_timing_breakdown,
             steps=_steps,
             routing_decision=_app_module._routing(
-                "handoff", "tax_invoice: ลูกค้าขอใบกำกับภาษี → ส่งแอดมิน",
-                handoff_reason="tax_invoice_request",
+                "handoff" if _handoff_ok else "bot_reply",
+                "tax_invoice: ลูกค้าขอใบกำกับภาษี → ส่งแอดมิน" if _handoff_ok
+                    else "tax_invoice: ลูกค้าขอใบกำกับภาษี → handoff ไม่สำเร็จ",
+                handoff_reason="tax_invoice_request" if _handoff_ok else None,
             ),
             image_desc=_image_desc_out,
         )
@@ -586,6 +599,7 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
                 image_desc=_image_desc_out,
             )
         else:
+            from . import responses as _resp_mod
             # ไม่พบสินค้าที่มี cert ที่ถาม → ส่งเรื่องให้แอดมิน + handoff
             _tisi_handoff_answer = (
                 f"ขออภัยค่ะ {_bot_name} ไม่พบข้อมูล {_cert_label} ของสินค้าในระบบ "
@@ -595,11 +609,17 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
             )
             _total_elapsed = _time.time() - _total_start
 
-            # ส่งต่อแอดมิน (best-effort)
-            if req.conversation_id:
+            # ส่งต่อแอดมิน — outcome ยืนยันเท่านั้นถึง claim ส่งสำเร็จ
+            _handoff_ok = bool(
                 _app_module._send_handoff(req, None, reason="cert_not_found",
                               claim={"topic": f"สอบถาม {_cert_label}"}, log_tag="CERT-HANDOFF")
-            print(f"[CERT] no products with {_cert_label} found → handoff to admin", file=sys.stderr)
+            ) if req.conversation_id else False
+            if not _handoff_ok:
+                _tisi_handoff_answer = (
+                    f"ขออภัยค่ะ {_bot_name} ไม่พบข้อมูล {_cert_label} ของสินค้าในระบบ "
+                    + _resp_mod.HANDOFF_FAILED_REPLY
+                )
+            print(f"[CERT] no products with {_cert_label} found → handoff ok={_handoff_ok}", file=sys.stderr)
             return dict(
                 answer=_tisi_handoff_answer,
                 answer_segments=llm.split_segments(_tisi_handoff_answer),
@@ -610,13 +630,15 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
                 usage={},
                 elapsed=round(_total_elapsed, 2),
                 cost=0.0,
-                handoff_to_admin=True,
-                handoff_reason="cert_not_found",
+                handoff_to_admin=_handoff_ok,
+                handoff_reason="cert_not_found" if _handoff_ok else None,
                 timing=_timing_breakdown,
                 steps=_steps,
                 routing_decision=_app_module._routing(
-                    "handoff", f"{_cert_label}: ไม่พบสินค้าที่มี {_cert_label} → ส่งแอดมิน",
-                    handoff_reason="cert_not_found",
+                    "handoff" if _handoff_ok else "bot_reply",
+                    f"{_cert_label}: ไม่พบสินค้าที่มี {_cert_label} → ส่งแอดมิน" if _handoff_ok
+                        else f"{_cert_label}: ไม่พบสินค้าที่มี {_cert_label} → handoff ไม่สำเร็จ",
+                    handoff_reason="cert_not_found" if _handoff_ok else None,
                 ),
                 image_desc=_image_desc_out,
             )

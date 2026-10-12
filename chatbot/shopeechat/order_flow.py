@@ -207,17 +207,21 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
         )
         _total_elapsed = _time.time() - _total_start
 
-        # handoff แอดมิน
-        if req.conversation_id:
+        # handoff แอดมิน — outcome ยืนยันเท่านั้นถึง claim ส่งสำเร็จ
+        from . import responses as _resp_mod
+        _handoff_ok = bool(
             _app_module._send_handoff(req, None, reason="address_request",
                           claim={"topic": "ขอที่อยู่ส่งกลับ/ส่งเคลม"}, log_tag="ADDRESS-REQUEST")
+        ) if req.conversation_id else False
+        if not _handoff_ok:
+            _addr_answer = _resp_mod.HANDOFF_FAILED_REPLY
         _steps.append({
             "name": "address_request_handoff",
             "model": model_name,
             "tokens_in": 0, "tokens_out": 0,
             "time_s": round(_total_elapsed, 2),
             "cost_usd": 0.0, "cost_thb": 0.0,
-            "detail": "address_request: handoff admin (no order_sn needed)",
+            "detail": f"address_request: handoff admin (no order_sn needed) ok={_handoff_ok}",
         })
         return dict(
             answer=_addr_answer,
@@ -229,12 +233,14 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
             usage={"prompt": 0, "output": 0, "total": 0},
             elapsed=round(_total_elapsed, 2),
             cost=0.0,
-            handoff_to_admin=True,
-            handoff_reason="address_request",
+            handoff_to_admin=_handoff_ok,
+            handoff_reason="address_request" if _handoff_ok else None,
             steps=_steps,
             routing_decision=_app_module._routing(
-                "handoff", "address_request: ขอที่อยู่ส่งกลับ/ส่งเคลม → ส่งแอดมิน",
-                handoff_reason="address_request",
+                "handoff" if _handoff_ok else "bot_reply",
+                "address_request: ขอที่อยู่ส่งกลับ/ส่งเคลม → ส่งแอดมิน" if _handoff_ok
+                    else "address_request: ขอที่อยู่ส่งกลับ/ส่งเคลม → handoff ไม่สำเร็จ",
+                handoff_reason="address_request" if _handoff_ok else None,
             ),
             image_desc=_image_desc_out,
         )
@@ -313,16 +319,21 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
                 _rr_source = "return_refund_handoff"
             _total_elapsed = _time.time() - _total_start
 
-            if req.conversation_id:
+            # outcome ยืนยันเท่านั้นถึง claim ส่งสำเร็จ
+            from . import responses as _resp_mod
+            _handoff_ok = bool(
                 _app_module._send_handoff(req, None, reason=_rr_reason,
                               claim=_rr_claim, log_tag=_rr_source.upper())
+            ) if req.conversation_id else False
+            if not _handoff_ok:
+                _rr_answer = _resp_mod.HANDOFF_FAILED_REPLY
             _steps.append({
                 "name": _rr_source,
                 "model": model_name,
                 "tokens_in": 0, "tokens_out": 0,
                 "time_s": round(_total_elapsed, 2),
                 "cost_usd": 0.0, "cost_thb": 0.0,
-                "detail": f"order_sn={_order_sn} {_rr_source}",
+                "detail": f"order_sn={_order_sn} {_rr_source} ok={_handoff_ok}",
             })
             return dict(
                 answer=_rr_answer,
@@ -334,12 +345,14 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
                 usage={"prompt": 0, "output": 0, "total": 0},
                 elapsed=round(_total_elapsed, 2),
                 cost=0.0,
-                handoff_to_admin=True,
-                handoff_reason=_rr_reason,
+                handoff_to_admin=_handoff_ok,
+                handoff_reason=_rr_reason if _handoff_ok else None,
                 steps=_steps,
                 routing_decision=_app_module._routing(
-                    "handoff", f"{_rr_reason}: order_sn={_order_sn} → ส่งแอดมิน",
-                    handoff_reason=_rr_reason,
+                    "handoff" if _handoff_ok else "bot_reply",
+                    f"{_rr_reason}: order_sn={_order_sn} → ส่งแอดมิน" if _handoff_ok
+                        else f"{_rr_reason}: order_sn={_order_sn} → handoff ไม่สำเร็จ",
+                    handoff_reason=_rr_reason if _handoff_ok else None,
                 ),
                 image_desc=_image_desc_out,
             )

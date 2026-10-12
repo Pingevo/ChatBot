@@ -374,20 +374,27 @@ def enforce(resp, req):
 
 def _escalate(resp, req, *, reason: str, rule_name: str,
               new_answer: str | None = None) -> None:
-    """ทำให้ claim 'ส่งต่อแอดมิน' เป็นจริง — ส่ง handoff + set flag + แทนข้อความ."""
+    """ทำให้ claim 'ส่งต่อแอดมิน' เป็นจริง — ส่ง handoff + set flag + แทนข้อความ.
+
+    outcome ไม่ยืนยัน → flag=False + แทน claim ด้วยข้อความล้มเหลวตรงๆ —
+    draft ที่ guard จับได้ claim admin-contact อยู่แล้ว → เก็บไว้ = โกหกลูกค้า
+    """
     import sys as _sys
     from . import responses as _resp_mod
-    _resp_mod._send_handoff(
+    from . import llm as _llm
+    _handoff_ok = bool(_resp_mod._send_handoff(
         req, None, reason=reason,
         claim={"topic": f"guard:{rule_name}"}, log_tag="GUARD-ENFORCE",
-    )
-    resp.handoff_to_admin = True
-    resp.handoff_reason = reason
-    if new_answer is not None:
-        from . import llm as _llm
+    ))
+    resp.handoff_to_admin = _handoff_ok
+    resp.handoff_reason = reason if _handoff_ok else None
+    if not _handoff_ok:
+        resp.answer = _resp_mod.HANDOFF_FAILED_REPLY
+        resp.answer_segments = _llm.split_segments(resp.answer)
+    elif new_answer is not None:
         resp.answer = new_answer
         resp.answer_segments = _llm.split_segments(new_answer)
     _rd = getattr(resp, "routing_decision", None)
     if isinstance(_rd, dict):
         _rd["guard_escalated"] = rule_name
-    print(f"[GUARD-ENFORCE] {rule_name}: escalated → handoff sent", file=_sys.stderr)
+    print(f"[GUARD-ENFORCE] {rule_name}: escalated → handoff ok={_handoff_ok}", file=_sys.stderr)

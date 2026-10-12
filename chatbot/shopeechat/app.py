@@ -4335,10 +4335,20 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         f"(vector fuzzy ล้วน products={len(products)}) → ผลไม่น่าเชื่อ → ตอบไม่พบ + handoff (กัน BUG-10)",
                         file=sys.stderr,
                     )
+                # ส่ง handoff จริง — outcome ยืนยันเท่านั้นถึง claim/flag
+                #   (เดิมตั้ง flag โดยไม่ยิง transport เลย = บอทหยุดตอบแต่ไม่มีแอดมินรับ)
+                _npf_ok = bool(_send_handoff(
+                    req, None, reason="no_product_found",
+                    claim={"topic": "ค้นสินค้าไม่พบ/ผลค้นไม่น่าเชื่อ"},
+                    simulate=True, log_tag="NO-PRODUCT-GUARD",
+                )) if req.conversation_id else False
                 return ChatResponse(
                     answer=(
                         "ขออภัยค่ะ ตอนนี้ระบบไม่พบข้อมูลสินค้าตามที่สอบถามไว้ "
                         "เดี๋ยวขอส่งเรื่องให้แอดมินช่วยตรวจสอบและตอบกลับให้ไวที่สุดนะคะ "
+                        "ระหว่างนี้หากสนใจสินค้าอื่นสอบถามได้เลยค่ะ"
+                        if _npf_ok else
+                        "ขออภัยค่ะ ตอนนี้ระบบไม่พบข้อมูลสินค้าตามที่สอบถามไว้ "
                         "ระหว่างนี้หากสนใจสินค้าอื่นสอบถามได้เลยค่ะ"
                     ),
                     products=[],
@@ -4350,11 +4360,13 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     web_search_used=False,
                     steps=_steps,
                     timing={"total": round(_time.time() - _total_start, 3)},
-                    handoff_to_admin=True,
-                    handoff_reason="no_product_found",
+                    handoff_to_admin=_npf_ok,
+                    handoff_reason="no_product_found" if _npf_ok else None,
                     routing_decision=_routing(
-                        "handoff",
-                        "no_product_found: ค้นสินค้าไม่เจอ/ผลค้นไม่น่าเชื่อ → ตอบไม่พบ + handoff แอดมินตรวจสอบ",
+                        "handoff" if _npf_ok else "bot_reply",
+                        "no_product_found: ค้นสินค้าไม่เจอ/ผลค้นไม่น่าเชื่อ → ตอบไม่พบ + handoff แอดมินตรวจสอบ"
+                        if _npf_ok else
+                        "no_product_found: ค้นสินค้าไม่เจอ/ผลค้นไม่น่าเชื่อ → ตอบไม่พบ (handoff ไม่สำเร็จ)",
                     ),
                 )
         # ถ้าเป็น follow-up (retrieval_message != req.message) ให้เก็บแค่สินค้า top 1

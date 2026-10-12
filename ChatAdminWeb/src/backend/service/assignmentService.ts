@@ -96,44 +96,72 @@ async function buildPool(
   return { poolKey: `global:${source}`, orderedAgentIds: Array.from(adminOnlyIds) };
 }
 
+// ⚡ Phase 2B.2-final — typed selection: แยก "claim ไม่ได้เพราะ contention"
+//   ออกจาก "pool ว่างจริง" — caller ห้ามแปล contention เป็น queued/no_available_admin
+//   (eligible admins มีอยู่แต่ claim พิสูจน์ไม่ได้ = retryable failure ไม่ใช่ business state)
+export type AgentSelection =
+  | { result: "reserved"; agentId: string }
+  | { result: "no_eligible_agent" }
+  | { result: "contention" };
+
 // เดินคิว 1→2→3→4→1 ไม่สนภาระงาน — ข้าม agent ที่ active=false แต่ไม่ขยับตำแหน่งคิว
 // ใช้ admin_id (string) ทั้งระบบ
 // ⚠️ เช็คเพิ่มว่า role=admin เท่านั้น (กันกรณี role เปลี่ยนหลังเข้าคิว)
-async function pickNextAgent(
+// ⚡ Phase 2B.2-arch — reservation-order: ตำแหน่งคิวถูก claim แบบ atomic ณ เวลาเลือก
+//   (CAS บน cursor doc — unique pool_key) ไม่ใช่เขียนหลัง commit:
+//     - conversations พร้อมกัน → claim serialize → ได้ admin คนละคนตามลำดับ
+//     - commit ของ caller ล้มเหลว → position forfeit (bounded skip — rotation ไม่ rewind)
+//     - ไม่มี cursor write หลัง commit → delayed emit/transition เก่า rewind ไม่ได้
+//   fence = observed last value → stale observer แพ้ CAS → อ่านใหม่ (bounded 3 ครั้ง)
+//   CAS miss ครบ cap แต่ eligible มี → contention (retryable) ไม่ใช่ no_eligible_agent
+export async function reserveNextAgent(
   poolKey: string,
   orderedAgentIds: string[]
-): Promise<string | null> {
-  if (!orderedAgentIds.length) return null;
-
+): Promise<AgentSelection> {
+  if (!orderedAgentIds.length) return { result: "no_eligible_agent" };
   const cursorColl = await getCollection<AssignmentCursorDoc>(COLLECTIONS.assignmentCursors);
-  const cursor = await cursorColl.findOne({ pool_key: poolKey });
-  const lastId = cursor?.last_assigned_admin_id ? String(cursor.last_assigned_admin_id) : null;
-  const startIdx = lastId ? orderedAgentIds.findIndex((id) => String(id) === lastId) : -1;
-
   const adminColl = await getCollection<{
     admin_id: string; active: boolean; role: string; is_accepting_chats?: boolean;
   }>(COLLECTIONS.admins);
-
-  for (let step = 1; step <= orderedAgentIds.length; step++) {
-    const idx = (startIdx + step + orderedAgentIds.length) % orderedAgentIds.length;
-    const agentId = orderedAgentIds[idx];
-    // eslint-disable-next-line no-await-in-loop
-    const agent = await adminColl.findOne({
-      admin_id: agentId,
-      active: { $ne: false },
-      role: "admin",
-      is_accepting_chats: { $ne: false },
-    });
-    if (agent) {
-      await cursorColl.updateOne(
-        { pool_key: poolKey },
-        { $set: { last_assigned_admin_id: agentId, updated_at: new Date() } },
-        { upsert: true }
-      );
-      return agentId;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const cursor = await cursorColl.findOne({ pool_key: poolKey });
+    const lastId = cursor?.last_assigned_admin_id ? String(cursor.last_assigned_admin_id) : null;
+    const startIdx = lastId ? orderedAgentIds.findIndex((id) => String(id) === lastId) : -1;
+    let next: string | null = null;
+    for (let step = 1; step <= orderedAgentIds.length; step++) {
+      const idx = (startIdx + step + orderedAgentIds.length) % orderedAgentIds.length;
+      const cand = orderedAgentIds[idx];
+      // eslint-disable-next-line no-await-in-loop
+      const agent = await adminColl.findOne({
+        admin_id: cand,
+        active: { $ne: false },
+        role: "admin",
+        is_accepting_chats: { $ne: false },
+      });
+      if (agent) { next = cand; break; }
     }
+    if (!next) return { result: "no_eligible_agent" }; // ทั้งคิวพักหมด — pool ว่างจริง
+    if (!cursor) {
+      // first claim — unique pool_key arbitrates concurrent inserts
+      try {
+        await cursorColl.insertOne({
+          pool_key: poolKey, last_assigned_admin_id: next, updated_at: new Date(),
+        } as AssignmentCursorDoc);
+        return { result: "reserved", agentId: next };
+      } catch (e) {
+        if ((e as { code?: number })?.code !== 11000) throw e;
+        continue; // คนอื่น insert ก่อน → อ่านใหม่
+      }
+    }
+    // CAS claim — fence บน observed last value (stale observer แพ้ → retry fresh)
+    const claim = await cursorColl.updateOne(
+      { pool_key: poolKey, last_assigned_admin_id: cursor.last_assigned_admin_id ?? null },
+      { $set: { last_assigned_admin_id: next, updated_at: new Date() } }
+    );
+    if (claim.matchedCount === 1) return { result: "reserved", agentId: next };
+    // CAS miss — cursor ถูก claim ไปแล้ว → compute ตำแหน่งถัดไปจากค่าจริง
   }
-  return null; // ทั้งคิวพักหมด
+  return { result: "contention" }; // claim พิสูจน์ไม่ได้ — retryable ไม่ใช่ "ไม่มี admin"
 }
 
 // ดึง config ปัจจุบัน — สร้าง default ถ้ายังไม่มี
@@ -167,51 +195,26 @@ export async function setAssignmentMode(mode: AssignmentMode, updatedBy = "admin
   });
 }
 
-// เรียกตอนมีข้อความขาเข้าใหม่ — assign แบบ atomic กัน race condition
-// ⚡ C1 — เพิ่ม source parameter เพื่อแยก cursor ตามหน้า (default: "ticket")
-export async function autoAssignConversation(conv: {
-  _id?: ObjectId;
-  conversation_id: string;
-  shop_id: string;
-  platform: string;
-  assigned_to?: string | null;
-}, source: string = "ticket"): Promise<string | null> {
-  // เช็ค owner จาก meta เท่านั้น; conv.assigned_to เป็น dump field (ถูกทับได้)
-  const { statusConversationService } = await import("./statusConversationService");
-  const existingMeta = await statusConversationService.getMeta(conv.conversation_id);
-  if (existingMeta?.assigned_to) return null; // มีคนรับผิดชอบอยู่แล้ว
-
-  const shopColl = await getCollection<{ shop_id: string; platform: string; enabled_for_chat: boolean }>(COLLECTIONS.shops);
-  const shop = await shopColl.findOne({ shop_id: conv.shop_id, platform: conv.platform });
-  if (!shop) return null;
-  // ถ้าร้านปิดดึงข้อความแล้ว → ไม่มอบหมาย
-  if (shop.enabled_for_chat === false) return null;
-
+// ⚡ Phase 2B.2 — selection + reservation: shop gate + mode + pool + reserveNextAgent
+//   (ตำแหน่งคิวถูก claim แบบ atomic ณ จุดนี้ — commit ของ caller ล้มเหลว = forfeit)
+//   คืน AgentSelection ตรงๆ — contention ต้องถึง caller ไม่ถูกกลืนเป็น agentId:null
+export async function selectNextAgent(
+  shop: { shop_id: string; platform: string },
+  source: string = "ticket"
+): Promise<AgentSelection & { mode: AssignmentMode }> {
   const mode = await getActiveAssignmentConfig();
-  const { poolKey, orderedAgentIds } = await buildPool(mode, shop, source);
-  if (!orderedAgentIds.length) return null;
+  const shopColl = await getCollection<{ shop_id: string; platform: string; enabled_for_chat: boolean }>(COLLECTIONS.shops);
+  const shopDoc = await shopColl.findOne({ shop_id: shop.shop_id, platform: shop.platform });
+  const none = { result: "no_eligible_agent" as const, mode };
+  if (!shopDoc) return none;
+  // ถ้าร้านปิดดึงข้อความแล้ว → ไม่มอบหมาย
+  if (shopDoc.enabled_for_chat === false) return none;
 
-  const agentId = await pickNextAgent(poolKey, orderedAgentIds);
-  if (!agentId) return null;
+  const { poolKey, orderedAgentIds } = await buildPool(mode, shopDoc, source);
+  if (!orderedAgentIds.length) return none;
 
-  // ⚡ Phase 2J — atomic guard เขียน assigned_to ลง status_conversation (ไม่ใช่ conversations ที่โดน dump ทับ)
-  const assigned = await statusConversationService.tryAssign(
-    conv.conversation_id,
-    agentId,
-    mode
-  );
-  if (!assigned) return null; // มีคนอื่น assign ไปแล้ว — เสียตาคิวไปหนึ่งตา ยอมรับได้
-
-  await logAdminEvent({
-    action_type: "chat_assigned",
-    actor: "system",
-    target_admin_id: agentId,
-    conversation_id: conv.conversation_id,
-    shop_id: conv.shop_id,
-    metadata: { mode_used: mode, pool_size: orderedAgentIds.length },
-  });
-
-  return agentId;
+  const selection = await reserveNextAgent(poolKey, orderedAgentIds);
+  return { ...selection, mode };
 }
 
 // lead/admin ย้ายงานเอง — ไม่แตะคิว round-robin
@@ -306,12 +309,12 @@ export async function removeAgentFromPlatform(platform: string, adminId: string)
 export const assignmentService = {
   getActiveAssignmentConfig,
   setAssignmentMode,
-  autoAssignConversation,
+  selectNextAgent,
   reassignConversation,
   addAgentToShop,
   removeAgentFromShop,
   addAgentToPlatform,
   removeAgentFromPlatform,
   buildPool,
-  pickNextAgent,
+  reserveNextAgent,
 };

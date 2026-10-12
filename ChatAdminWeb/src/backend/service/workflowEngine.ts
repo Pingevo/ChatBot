@@ -21,7 +21,7 @@ import { callBot } from "./botCallService";
 import { getConversation, closeConversation, type ProblemCategory } from "./conversationService";
 import { resolveTemplate, type TemplateVars } from "./templateService";
 import { getHistoryForBot, getGroupedHistoryForBot, toBotImages } from "./messageService";
-import { handoffService } from "./handoffService";
+import { handoffService, type HandoffOutcomeState } from "./handoffService";
 import { getCustomer } from "./customerService";
 import { logAdminEvent } from "./adminLogService";
 // ⚡ botworker parallel — test store + sandbox event log (ใช้เมื่อ msg.testSource มี)
@@ -67,7 +67,7 @@ export interface WorkflowRunDoc extends Document {
     status: string;
     detail: string;
     delivered: DeliveredMessage[];
-    handoff?: { agentId: string | null; reason: string };
+    handoff?: { agentId: string | null; reason: string; state: Exclude<HandoffOutcomeState, "failed"> };
   };
 
   // ⚡ run ownership — สอง worker ห้ามเดิน graph พร้อมกันบน run เดียว
@@ -127,7 +127,7 @@ export interface EngineResult {
   delivered: DeliveredMessage[];
   run_id?: string;
   workflow_id?: string;
-  handoff?: { agentId: string | null; reason: string };
+  handoff?: { agentId: string | null; reason: string; state: Exclude<HandoffOutcomeState, "failed"> };
   // ⚡ error เท่านั้น: false = op ตายแล้ว (committed แต่ไม่มีผล) — caller ห้าม fallback ไป bot
   //   (side effect อาจเกิดแล้วโดยไม่มีหลักฐาน); absent = error ทั่วไป fallback ได้ตามเดิม
   recoverable?: boolean;
@@ -529,7 +529,7 @@ async function walkGraph(
   const context: Record<string, unknown> = { ...run.context };
   let currentNodeId = startNodeId;
   let steps = 0;
-  let handoff: { agentId: string | null; reason: string } | undefined;
+  let handoff: { agentId: string | null; reason: string; state: Exclude<HandoffOutcomeState, "failed"> } | undefined;
 
   while (currentNodeId && steps < MAX_ENGINE_STEPS) {
     steps++;
@@ -980,7 +980,7 @@ async function completeRun(
   delivered: DeliveredMessage[],
   outcome: "actioned" | "condition_false" | "retry_exceeded" | "no_reply",
   detail: string,
-  handoff?: { agentId: string | null; reason: string },
+  handoff?: { agentId: string | null; reason: string; state: Exclude<HandoffOutcomeState, "failed"> },
   execOpKey?: string
 ): Promise<EngineResult> {
   // ⚡ resume exec → outcome persist atomic ใน state write เดียวกัน (crash window ปิด);
@@ -1230,7 +1230,7 @@ async function performAction(
   msg: EngineMessage,
   context: Record<string, unknown>,
   delivered: DeliveredMessage[]
-): Promise<{ stop?: boolean; handoff?: { agentId: string | null; reason: string } }> {
+): Promise<{ stop?: boolean; handoff?: { agentId: string | null; reason: string; state: Exclude<HandoffOutcomeState, "failed"> } }> {
   const cfg = node.config || {};
 
   switch (node.subtype) {
@@ -1305,7 +1305,9 @@ async function performAction(
             src === "botworker" ? "open" : "handoff"
           );
           if (!ok) {
-            return { handoff: { agentId: meta?.assigned_to || null, reason: `${reason} (conflict — already assigned)` } };
+            // CAS แพ้ — owner จริงคือ meta.assigned_to (persisted); ไม่มี owner = assign ไม่สำเร็จ
+            if (!meta?.assigned_to) return {};
+            return { handoff: { agentId: meta.assigned_to, reason: `${reason} (conflict — already assigned)`, state: "assigned" } };
           }
         } else {
           const result = await handoffService.handoffToAdminTest({
@@ -1325,7 +1327,9 @@ async function performAction(
               metadata: { action: "assign_ticket", run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: result.assignedTo, mode: "auto" },
             });
           }
-          return { handoff: { agentId: result.assignedTo, reason } };
+          // failed/in-flight → ไม่ surface handoff (กัน downstream finalize เป็น handed_off)
+          if (result.in_flight) return {};
+          return { handoff: { agentId: result.assignedTo, reason, state: result.assignedTo ? "assigned" : "queued" } };
         }
         if (src === "botworker") {
           await logBotworkerEvent({
@@ -1334,43 +1338,47 @@ async function performAction(
             metadata: { action: "assign_ticket", run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: wantAdmin, direct: true },
           });
         }
-        return { handoff: { agentId: wantAdmin, reason } };
+        return { handoff: { agentId: wantAdmin, reason, state: "assigned" } };
       }
 
+      // ⚡ Phase 2B.2 — direct assign ผ่าน typed owner เดียวกัน (persisted-outcome)
+      //   CAS แพ้ → converge คืน persisted winner (ไม่ใช่ stale meta)
       if (wantAdmin) {
-        // assign ตรงแบบ (เหมือน Zaapi ที่เลือกคนได้)
-        // ownership เขียนผ่าน status_conversation เท่านั้น
-        //   raw conversations.assigned_to เป็น dump field (ถูกทับ) — เขียนลงนั่นไม่มีผล
-        const meta = await statusConversationService.getMeta(msg.conversation_id);
-        const ok = await statusConversationService.manualAssign(
-          msg.conversation_id, wantAdmin, meta?.assigned_to, "workflow-engine"
-        );
-        if (!ok) {
-          return { handoff: { agentId: meta?.assigned_to || null, reason: `${reason} (conflict — already assigned)` } };
-        }
+        const outcome = await handoffService.handoffToAdmin({
+          conversationId: msg.conversation_id,
+          shopId: msg.shop_id,
+          platform: msg.platform,
+          reason,
+          targetAdminId: wantAdmin,
+          actor: "workflow-engine",
+        });
+        if (outcome.state === "failed") return {};
         await logAdminEvent({
           action_type: "workflow.assign_ticket",
           actor: "workflow-engine",
           conversation_id: msg.conversation_id,
-          metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: wantAdmin, direct: true },
+          metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: outcome.assigned_to, direct: true, outcome_state: outcome.state },
         });
-        return { handoff: { agentId: wantAdmin, reason } };
+        return { handoff: { agentId: outcome.assigned_to, reason, state: outcome.state } };
       }
 
       // auto — ใช้ handoffService (คนเดิม → last-reply → round-robin)
-      const result = await handoffService.handoffToAdmin({
+      // ⚡ Phase 2B.2 — typed outcome: agentId มาจาก persisted state เท่านั้น
+      //   failed → ไม่ surface handoff + ไม่เขียน success audit (bot ไม่ lock — ไม่มี durable state)
+      const outcome = await handoffService.handoffToAdmin({
         conversationId: msg.conversation_id,
         shopId: msg.shop_id,
         platform: msg.platform,
         reason,
       });
+      if (outcome.state === "failed") return {};
       await logAdminEvent({
         action_type: "workflow.assign_ticket",
         actor: "workflow-engine",
         conversation_id: msg.conversation_id,
-        metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: result.assignedTo, mode: "auto" },
+        metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: outcome.assigned_to, mode: "auto", outcome_state: outcome.state },
       });
-      return { handoff: { agentId: result.assignedTo, reason } };
+      return { handoff: { agentId: outcome.assigned_to, reason, state: outcome.state } };
     }
 
     case "add_label": {

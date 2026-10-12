@@ -156,3 +156,14 @@ def test_desired_terminal_stage_beats_retained_slots(retained_slots):
     Only an explicit new claim request may reopen. Current owner returns
     True for any retained slot (slot-based check, no terminal precedence)."""
     assert _collecting({"stage": "resolved", **retained_slots}) is False
+
+
+# ── Phase 2B.2 review-fix — cross-module transport stub isolation ────────────
+# 5f test files เคย patch `shopeechat.app._send_handoff` ที่ module level
+# (lambda ไม่ restore) → process เดียวกันเห็น stub ถาวร; ตอนนี้ต้อง scoped
+# (monkeypatch restore) — file นี้รันหลัง 5f files ตาม alphabetical order
+def test_handoff_transport_owner_not_globally_stubbed():
+    import shopeechat.app as _app
+    fn = _app._send_handoff
+    assert getattr(fn, "__name__", "") == "_send_handoff", (
+        f"transport owner ถูก stub รั่วข้าม module: {fn!r}")

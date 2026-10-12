@@ -631,7 +631,7 @@ async function settleWorkflowResult(
 // ลำดับ:
 //   1. ถ้ามี assigned_to อยู่แล้ว → ใช้คนเดิม
 //   2. ถ้าไม่มี → หา admin คนสุดท้ายที่เคยตอบ (getLastReplyAdmin)
-//   3. ถ้าไม่มี → round-robin (autoAssignConversation)
+//   3. ถ้าไม่มี → round-robin (reserveNextAgent ผ่าน handoffToAdminTest)
 //   4. ถ้า conversation ปิดอยู่ → reopen ก่อน
 //
 // ⚡ botworker parallel sandbox — ใช้ handoffToAdminTest เท่านั้น

@@ -176,6 +176,7 @@ let statsLiveRoute: typeof import("../src/app/api/stats/live/route");
 let statsDashboardRoute: typeof import("../src/app/api/stats/dashboard/route");
 let statsPerfRoute: typeof import("../src/app/api/stats/performance/route");
 let statsAdminActivityRoute: typeof import("../src/app/api/stats/admin-activity/route");
+let botHandoffRoute: typeof import("../src/app/api/admin/conversations/bot-handoff/route");
 let responseStatsLib: typeof import("../src/backend/lib/responseStats");
 
 // ── main ─────────────────────────────────────────────────────
@@ -197,6 +198,7 @@ async function main() {
   statsDashboardRoute = await import("../src/app/api/stats/dashboard/route");
   statsPerfRoute = await import("../src/app/api/stats/performance/route");
   statsAdminActivityRoute = await import("../src/app/api/stats/admin-activity/route");
+  botHandoffRoute = await import("../src/app/api/admin/conversations/bot-handoff/route");
   responseStatsLib = await import("../src/backend/lib/responseStats");
 
   const callBotOnce = async (conversationId: string | undefined, extra: any = {}) => {
@@ -300,30 +302,40 @@ async function main() {
 
   // ═══ B. writer contracts — persist meta ก่อน claim success ═══
 
-  await test("B1 manualAssign → meta{status:handoff,assigned_to} persist ก่อน return", async () => {
-    const ok = await statusSvc.manualAssign("b1", "admin-1", null, "actor-1");
-    assert(ok === true, "manualAssign should succeed");
+  await test("B1 direct assign (targetAdminId) → typed assigned + meta persist ก่อน return", async () => {
+    seedConv("b1"); seedShop(); seedAdmin("admin-1");
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "b1", shopId: "shop-1", platform: "shopee",
+      targetAdminId: "admin-1",
+    });
+    assert(r?.state === "assigned" && r.assigned_to === "admin-1" && r.persisted === true,
+      `direct assign must return typed outcome — got ${JSON.stringify(r)}`);
     const m = metaOf("b1");
     assert(m?.status === "handoff" && m?.assigned_to === "admin-1",
       `meta=${JSON.stringify(m)} expected handoff/admin-1`);
   });
 
-  await test("B1b manualAssign ทับเมื่อ previous ไม่ตรง → false + meta ไม่เปลี่ยน", async () => {
+  await test("B1b direct assign CAS guard — owner เปลี่ยนระหว่าง read→commit → converge persisted winner", async () => {
+    seedConv("b1b"); seedShop(); seedAdmin("admin-2"); seedAdmin("admin-9");
     seedMeta("b1b", { status: "handoff", assigned_to: "admin-1" });
-    const ok = await statusSvc.manualAssign("b1b", "admin-2", "admin-9-wrong", "actor-1");
-    assert(ok === false, "manualAssign with wrong previous should fail (CAS)");
+    // winner admin-9 ลงระหว่าง meta-read กับ commit CAS — fence ต้องกันการทับ
+    let landed = false;
+    (mocks.state as any).findOneAndUpdateHook = async (coll: string) => {
+      if (coll === "status_conversation" && !landed) {
+        landed = true;
+        const d = metaOf("b1b");
+        if (d) { d.assigned_to = "admin-9"; d.assigned_at = new Date(); }
+      }
+    };
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "b1b", shopId: "shop-1", platform: "shopee",
+      targetAdminId: "admin-2",
+    });
+    (mocks.state as any).findOneAndUpdateHook = null;
+    assert(r?.assigned_to === "admin-9",
+      `must converge to persisted winner, not stale target — got ${JSON.stringify(r)}`);
     const m = metaOf("b1b");
-    assert(m?.assigned_to === "admin-1", "meta.assigned_to must stay admin-1");
-  });
-
-  await test("B2 tryAssign → meta handoff+assigned_to; second tryAssign → false", async () => {
-    const ok1 = await statusSvc.tryAssign("b2", "admin-1", "equal_global");
-    assert(ok1 === true, "first tryAssign should succeed");
-    const ok2 = await statusSvc.tryAssign("b2", "admin-2", "equal_global");
-    assert(ok2 === false, "second tryAssign must lose (atomic guard)");
-    const m = metaOf("b2");
-    assert(m?.assigned_to === "admin-1" && m?.status === "handoff",
-      `meta=${JSON.stringify(m)} expected admin-1/handoff`);
+    assert(m?.assigned_to === "admin-9", "meta must keep the real winner");
   });
 
   await test("B3 closeConversation → meta{closed,closed_at,closed_by,close_count++}", async () => {
@@ -355,15 +367,8 @@ async function main() {
       `reopen bot → bot+assigned cleared, got ${JSON.stringify(m2)}`);
   });
 
-  await test("B5 setPendingAssignment(true) → meta{handoff,pending,assigned_to:null}", async () => {
-    await statusSvc.setPendingAssignment("b5", true, "no_available_admin");
-    const m = metaOf("b5");
-    assert(m?.status === "handoff" && m?.pending_assignment === true && m?.assigned_to === null,
-      `meta=${JSON.stringify(m)} expected handoff+pending+unassigned`);
-  });
-
   await test("B6 assignPendingTicket → assign เฉพาะ pending; non-pending → false", async () => {
-    await statusSvc.setPendingAssignment("b6a", true);
+    seedMeta("b6a", { status: "handoff", assigned_to: null, pending_assignment: true });
     const ok = await statusSvc.assignPendingTicket("b6a", "admin-1", "distributor");
     assert(ok === true, "assignPendingTicket on pending should succeed");
     const m = metaOf("b6a");
@@ -371,37 +376,6 @@ async function main() {
       `meta=${JSON.stringify(m)} expected assigned+pending cleared`);
     const ok2 = await statusSvc.assignPendingTicket("b6b", "admin-1", "distributor");
     assert(ok2 === false, "assignPendingTicket on non-pending must fail");
-  });
-
-  await test("B7 meta write ที่ไม่ใช่ ownership → meta doc ไม่มี status (metadata ≠ ownership)", async () => {
-    await statusSvc.setPendingAssignment("b7", false);
-    const m = metaOf("b7");
-    assert(m && m.status === undefined && m.assigned_to === undefined,
-      `meta=${JSON.stringify(m)} — non-ownership write must not fabricate status/owner`);
-  });
-
-  await test("B9 autoAssign → persist meta{assigned_to,handoff} ผ่าน tryAssign", async () => {
-    seedShop();
-    seedAdmin("admin-1");
-    const agentId = await assignSvc.autoAssignConversation({
-      conversation_id: "b9", shop_id: "shop-1", platform: "shopee", assigned_to: null,
-    });
-    assert(agentId === "admin-1", `autoAssign should pick admin-1, got ${agentId}`);
-    const m = metaOf("b9");
-    assert(m?.assigned_to === "admin-1" && m?.status === "handoff",
-      `meta=${JSON.stringify(m)} expected admin-1/handoff`);
-  });
-
-  await test("B10 raw assigned_to stale + meta ว่าง → autoAssign ยังจ่าย (meta = authority)", async () => {
-    seedShop();
-    seedAdmin("admin-1");
-    const agentId = await assignSvc.autoAssignConversation({
-      conversation_id: "b10", shop_id: "shop-1", platform: "shopee",
-      assigned_to: "stale-ghost-from-dump",
-    });
-    assert(agentId === "admin-1",
-      `raw stale assigned_to must NOT block assign (meta is authority) — got ${agentId}`);
-    assert(metaOf("b10")?.assigned_to === "admin-1", "meta must record admin-1");
   });
 
   await test("B11 reassign: from_admin_id ใน log ต้องมาจาก meta ไม่ใช่ raw", async () => {
@@ -423,7 +397,7 @@ async function main() {
     const r = await handoffSvc.handoffToAdmin({
       conversationId: "b12", shopId: "shop-1", platform: "shopee",
     });
-    assert(r.assignedTo === null, "no admin → assignedTo null");
+    assert(r.assigned_to === null, "no admin → assigned_to null");
     const m = metaOf("b12");
     assert(m?.pending_assignment === true && m?.assigned_to === null
       && (m?.status === "handoff" || m?.status === "pending"),
@@ -437,7 +411,7 @@ async function main() {
     const r = await handoffSvc.handoffToAdmin({
       conversationId: "b13", shopId: "shop-1", platform: "shopee",
     });
-    assert(r.assignedTo === "admin-1", `handoff should assign admin-1, got ${r.assignedTo}`);
+    assert(r.assigned_to === "admin-1", `handoff should assign admin-1, got ${r.assigned_to}`);
     const m = metaOf("b13");
     assert(m?.status === "handoff" && m?.assigned_to === "admin-1",
       `meta=${JSON.stringify(m)} expected handoff/admin-1 persisted before return`);
@@ -2324,6 +2298,1244 @@ async function main() {
     assert(arg?.inboundAt instanceof Date
       && arg.inboundAt.getTime() === new Date("2026-10-05T00:00:00.999Z").getTime(),
       `.999999+07:00 must be 00:00:00.999Z, not carried — got ${arg?.inboundAt?.toISOString()}`);
+  });
+
+  // ═══ H. typed handoff outcome — Phase 2B.2 contract ═══
+  // HandoffOutcome = { state:"assigned"|"queued"|"failed", assigned_to,
+  //   assigned_to_name, persisted, reason, error_code, reopened, emit_incomplete }
+  // state ต้องสะท้อน persisted DB truth เท่านั้น — ห้าม derive จาก selection
+  // assigned ⇔ meta{status:handoff,assigned_to:X} committed/converged
+  // queued   ⇔ meta{status:handoff,assigned_to:null,pending_assignment:true}
+  // failed   ⇔ ไม่มี durable state ที่ verify ได้ — ห้าม claim success
+
+  await test("H1 persisted assignment → outcome{state:assigned,assigned_to,persisted:true}", async () => {
+    seedConv("h1"); seedShop(); seedAdmin("admin-1");
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "h1", shopId: "shop-1", platform: "shopee",
+    });
+    assert(r?.state === "assigned" && r.assigned_to === "admin-1"
+      && r.persisted === true && r.error_code === null,
+      `typed outcome missing/incorrect — got ${JSON.stringify(r)}`);
+    const m = metaOf("h1");
+    assert(m?.status === "handoff" && m?.assigned_to === "admin-1",
+      `persisted meta must back the outcome — got ${JSON.stringify(m)}`);
+  });
+
+  await test("H2 no admin in pool → outcome{state:queued} + durable pending marker", async () => {
+    seedConv("h2"); seedShop();
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "h2", shopId: "shop-1", platform: "shopee",
+    });
+    assert(r?.state === "queued" && r.assigned_to === null && r.persisted === true,
+      `queued outcome required — got ${JSON.stringify(r)}`);
+    const m = metaOf("h2");
+    assert(m?.pending_assignment === true && m?.assigned_to === null
+      && m?.status === "handoff",
+      `durable queued state = handoff + pending_assignment — got ${JSON.stringify(m)}`);
+  });
+
+  await test("H3 conversation missing → outcome{state:failed,persisted:false} + zero writes/audit", async () => {
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "h3-ghost", shopId: "shop-1", platform: "shopee",
+    });
+    assert(r?.state === "failed" && r.persisted === false && r.error_code,
+      `missing conv must be typed failure — got ${JSON.stringify(r)}`);
+    assert(!metaOf("h3-ghost") && noSideEffects(),
+      "failed outcome must leave no meta doc / audit rows");
+  });
+
+  await test("H4 assignment CAS throws → outcome{state:failed}; no owner persisted, no success audit", async () => {
+    seedConv("h4"); seedShop(); seedAdmin("admin-1");
+    (mocks.state as any).findOneAndUpdateHook = async (coll: string) => {
+      if (coll === "status_conversation") throw new Error("simulated db failure");
+    };
+    let r: any;
+    try {
+      r = await (handoffSvc.handoffToAdmin as any)({
+        conversationId: "h4", shopId: "shop-1", platform: "shopee",
+      });
+    } catch { /* raw throw is NOT a typed outcome */ }
+    (mocks.state as any).findOneAndUpdateHook = null;
+    assert(r?.state === "failed" && r.persisted === false && r.error_code,
+      `commit failure must surface as failed outcome — got ${JSON.stringify(r)}`);
+    const m = metaOf("h4");
+    assert(!m?.assigned_to, `failed outcome must not persist an owner — got ${JSON.stringify(m)}`);
+    const audit = mocks.fakeColl("admin_logs").filter((d: any) =>
+      d.conversation_id === "h4" && (d.action_type === "chat_assigned" || d.action_type === "conversation.handoff"));
+    assert(audit.length === 0, `failed handoff must emit zero success audit — got ${audit.length}`);
+  });
+
+  await test("H5 existing admin owner → converge assigned; zero writes + zero new audit (no duplicate)", async () => {
+    seedConv("h5"); seedShop(); seedAdmin("admin-1");
+    seedMeta("h5", { status: "handoff", assigned_to: "admin-1", assigned_at: new Date() });
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "h5", shopId: "shop-1", platform: "shopee",
+    });
+    assert(r?.state === "assigned" && r.assigned_to === "admin-1",
+      `existing owner must converge as assigned — got ${JSON.stringify(r)}`);
+    assert(metaWrites().length === 0,
+      `converge on owned conv must not rewrite meta — writes=${metaWrites().length}`);
+    const audit = mocks.fakeColl("admin_logs").filter((d: any) => d.conversation_id === "h5");
+    assert(audit.length === 0,
+      `converge must not emit assignment/handoff audit — got ${audit.length} rows`);
+    assert(metaOf("h5")?.assigned_to === "admin-1",
+      "existing owner must survive unchanged");
+  });
+
+  await test("H6 duplicate handoff → converge; assignment/log exactly once", async () => {
+    seedConv("h6"); seedShop(); seedAdmin("admin-1");
+    const opts = { conversationId: "h6", shopId: "shop-1", platform: "shopee" };
+    const r1 = await (handoffSvc.handoffToAdmin as any)(opts);
+    const r2 = await (handoffSvc.handoffToAdmin as any)(opts);
+    assert(r1?.state === "assigned" && r2?.state === "assigned"
+      && r1.assigned_to === "admin-1" && r2.assigned_to === "admin-1",
+      `duplicate must converge to same owner — r1=${JSON.stringify(r1)} r2=${JSON.stringify(r2)}`);
+    const assignedLogs = mocks.fakeColl("admin_logs").filter((d: any) =>
+      d.conversation_id === "h6" && d.action_type === "chat_assigned").length;
+    const handoffLogs = mocks.fakeColl("admin_logs").filter((d: any) =>
+      d.conversation_id === "h6" && d.action_type === "conversation.handoff").length;
+    assert(assignedLogs === 1 && handoffLogs === 1,
+      `audit must be exactly-once — chat_assigned=${assignedLogs} handoff=${handoffLogs}`);
+    assert(metaOf("h6")?.assigned_to === "admin-1" && metaOf("h6")?.pending_assignment !== true,
+      "duplicate must not flip to pending");
+  });
+
+  await test("H7 stale-read race: winner lands between dispatch-read and CAS → loser converges, no clobber", async () => {
+    seedConv("h7"); seedShop(); seedAdmin("admin-1");
+    // genuine interleave (W14 pattern): findOneAndUpdateHook fires right before
+    // the fenced CAS write — a concurrent winner's assignment lands in between
+    let landed = false;
+    (mocks.state as any).findOneAndUpdateHook = async (coll: string) => {
+      if (coll === "status_conversation" && !landed) {
+        landed = true;
+        const d = metaOf("h7");
+        if (d) { d.status = "handoff"; d.assigned_to = "admin-1"; d.assigned_at = new Date(); }
+        else seedMeta("h7", { status: "handoff", assigned_to: "admin-1", assigned_at: new Date() });
+      }
+    };
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "h7", shopId: "shop-1", platform: "shopee",
+    });
+    (mocks.state as any).findOneAndUpdateHook = null;
+    assert(r?.state === "assigned" && r.assigned_to === "admin-1",
+      `CAS loser must converge to committed winner — got ${JSON.stringify(r)}`);
+    const m = metaOf("h7");
+    assert(m?.assigned_to === "admin-1" && m?.pending_assignment !== true,
+      `winner's assignment must survive — loser's pending write must be fenced out — meta=${JSON.stringify(m)}`);
+  });
+
+  await test("H8 queued conv + retry (admin now in pool) → assigned upgrade, pending cleared", async () => {
+    seedConv("h8"); seedShop(); seedAdmin("admin-1");
+    seedMeta("h8", { status: "handoff", assigned_to: null, pending_assignment: true, assignment_reason: "no_available_admin" });
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "h8", shopId: "shop-1", platform: "shopee",
+    });
+    assert(r?.state === "assigned" && r.assigned_to === "admin-1",
+      `queued retry must upgrade to assigned — got ${JSON.stringify(r)}`);
+    const m = metaOf("h8");
+    assert(m?.assigned_to === "admin-1" && m?.pending_assignment === false,
+      `pending flag must clear on upgrade — got ${JSON.stringify(m)}`);
+  });
+
+  await test("H9 bot-handoff route response carries typed outcome", async () => {
+    seedConv("h9"); seedShop(); seedAdmin("admin-1");
+    const { NextRequest } = await import("next/server");
+    const req = new NextRequest("http://localhost/api/admin/conversations/bot-handoff", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-internal-secret": "verify-only-internal-nonsecret",
+      },
+      body: JSON.stringify({ conversation_id: "h9" }),
+    });
+    const res = await (botHandoffRoute as any).POST(req);
+    const j = await res.json();
+    assert(j?.outcome?.state === "assigned" && j.outcome.assigned_to === "admin-1"
+      && j.outcome.persisted === true,
+      `route must return typed outcome — got ${JSON.stringify(j)}`);
+  });
+
+  await test("H10 workflow assign_ticket (auto) → handoff outcome state surfaced", async () => {
+    (mocks.state as any).config.workflow_enabled = true;
+    seedAdmin("admin-1"); seedShop();
+    mocks.fakeColl("workflows").push({
+      workflow_id: "wf-auto", name: "auto assign",
+      shop_ids: ["shop-1"], platforms: ["shopee"],
+      enabled: true, status: "published", is_deleted: false,
+      trigger_frequency: "every_time", priority: 1, created_at: new Date(),
+      nodes: [
+        { node_id: "t1", type: "trigger", subtype: "message_received", config: { keywords: ["สวัสดี"] } },
+        { node_id: "a1", type: "action", subtype: "assign_ticket", config: { reason: "wf-auto" } },
+      ],
+      edges: [{ edge_id: "e1", source_node_id: "t1", target_node_id: "a1" }],
+    });
+    seedConv("h10");
+    const res = await wf.matchAndRun({
+      message_id: "m-h10", conversation_id: "h10", shop_id: "shop-1",
+      platform: "shopee", text: "สวัสดีครับ",
+    });
+    assert((res.handoff as any)?.state === "assigned" && res.handoff?.agentId === "admin-1",
+      `workflow auto-assign must surface typed outcome — got ${JSON.stringify(res.handoff)}`);
+  });
+
+  await test("H11 closed conv + handoff → assigned + reopened; single reopen settle + single assignment audit", async () => {
+    seedConv("h11"); seedShop(); seedAdmin("admin-1");
+    seedMeta("h11", { status: "closed", closed_at: new Date("2026-10-01"), closed_by: "admin-1", assigned_to: null });
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "h11", shopId: "shop-1", platform: "shopee",
+    });
+    assert(r?.state === "assigned" && r.assigned_to === "admin-1" && r.reopened === true,
+      `closed conv must reopen+assign — got ${JSON.stringify(r)}`);
+    const m = metaOf("h11");
+    assert(m?.status === "handoff" && m?.assigned_to === "admin-1" && m?.closed_at === null,
+      `closed residue must clear in the same commit — got ${JSON.stringify(m)}`);
+    const openLogs = mocks.fakeColl("admin_logs").filter((d: any) =>
+      d.conversation_id === "h11" && d.action_type === "conversation.open").length;
+    const assignedLogs = mocks.fakeColl("admin_logs").filter((d: any) =>
+      d.conversation_id === "h11" && d.action_type === "chat_assigned").length;
+    assert(openLogs === 1 && assignedLogs === 1,
+      `exactly-once audit — open=${openLogs} assigned=${assignedLogs}`);
+  });
+
+  await test("H12 assigned outcome → ticket_state resolves handoff (bot-stop derives from persisted meta)", async () => {
+    seedConv("h12"); seedShop(); seedAdmin("admin-1");
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "h12", shopId: "shop-1", platform: "shopee",
+    });
+    assert(r?.state === "assigned", `need assigned outcome — got ${JSON.stringify(r)}`);
+    await botCall.callBot({
+      conversationId: "h12", shopId: "shop-1", platform: "shopee",
+      message: "test", history: [],
+    } as any);
+    const last = mocks.state.fetchBodies[mocks.state.fetchBodies.length - 1];
+    assert(last?.ticket_state === "handoff",
+      `persisted handoff must lock bot via ticket_state — got ${last?.ticket_state}`);
+  });
+
+  await test("H13 queued conv + repeat handoff (still no admin) → converge queued, zero re-write", async () => {
+    seedConv("h13"); seedShop();
+    seedMeta("h13", { status: "handoff", assigned_to: null, pending_assignment: true, assignment_reason: "no_available_admin" });
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "h13", shopId: "shop-1", platform: "shopee",
+    });
+    assert(r?.state === "queued" && r.persisted === true,
+      `queued repeat must converge — got ${JSON.stringify(r)}`);
+    assert(metaWrites().length === 0,
+      `already-queued conv must not be rewritten — writes=${metaWrites().length}`);
+    assert(metaOf("h13")?.pending_assignment === true && metaOf("h13")?.assigned_to === null,
+      "queued state must persist unchanged");
+  });
+
+  // ═══ I. persisted-outcome settlement + workflow truth + cursor race — Phase 2B.2 review-fix ═══
+  // Contract:
+  //   - commit สำเร็จ = ownership เป็น authoritative แล้ว — outcome ห้าม persisted:false
+  //   - settle (reopen/audit/cursor) ต้อง converge idempotently ด้วย transition identity เดิม
+  //   - workflow assign_ticket: failed → ไม่มี handoff ให้ downstream finalize เป็น handed_off
+  //   - workflow direct admin_id → owner typed เดียวกัน; CAS แพ้ต้องคืน persisted winner
+  //   - cursor ขยับ 1 ครั้งต่อ committed assignment เท่านั้น
+  //   - outcome.reason/API/stdout ห้าม expose raw exception text
+
+  const insertErrorOnce = (matchAction: string) => {
+    let fired = false;
+    (mocks.state as any).insertOneHook = async (coll: string, doc: any) => {
+      if (!fired && coll === "admin_logs" && doc?.action_type === matchAction) {
+        fired = true;
+        throw new Error("simulated settle crash");
+      }
+    };
+  };
+  const clearHooks = () => {
+    (mocks.state as any).insertOneHook = null;
+    (mocks.state as any).updateOneHook = null;
+    (mocks.state as any).findOneAndUpdateHook = null;
+    (mocks.state as any).findOneHook = null;
+  };
+  const logsOf = (id: string, action: string) =>
+    mocks.fakeColl("admin_logs").filter((d: any) =>
+      d.conversation_id === id && d.action_type === action);
+
+  await test("I1 commit assigned + recordReopen throws → persisted truth kept; retry settles reopen+audit exactly once", async () => {
+    seedConv("i1"); seedShop(); seedAdmin("admin-1");
+    seedMeta("i1", { status: "closed", closed_at: new Date("2026-10-01"), closed_by: "admin-9", assigned_to: null });
+    mocks.fakeColl("close_history").push({
+      record_id: "chr-i1", conversation_id: "i1", shop_id: "shop-1",
+      customer_id: "cust-i1", closed_by: "admin-9", closed_at: new Date("2026-10-01"),
+      reason: "done", category: "other", resolution: "answered", sequence: 1,
+    });
+    insertErrorOnce("conversation.open");
+    const opts = { conversationId: "i1", shopId: "shop-1", platform: "shopee" };
+    const r1 = await (handoffSvc.handoffToAdmin as any)(opts);
+    const m1 = metaOf("i1");
+    assert(m1?.status === "handoff" && m1?.assigned_to === "admin-1",
+      `commit must persist despite settle crash — meta=${JSON.stringify(m1)}`);
+    assert(r1?.persisted === true && r1?.state === "assigned" && r1?.emit_incomplete === true,
+      `committed ownership + emit-incomplete signal — got ${JSON.stringify(r1)}`);
+    // retry — same transition must converge missing close-history/audit exactly once
+    const r2 = await (handoffSvc.handoffToAdmin as any)(opts);
+    clearHooks();
+    assert(r2?.state === "assigned" && r2.persisted === true,
+      `retry must converge — got ${JSON.stringify(r2)}`);
+    const hr = closeHistOf("i1")[0];
+    assert(hr?.reopened_at instanceof Date,
+      `retry must settle the missing close-history stamp — got ${JSON.stringify(hr)}`);
+    assert(logsOf("i1", "conversation.open").length === 1
+      && logsOf("i1", "chat_assigned").length === 1
+      && logsOf("i1", "conversation.handoff").length === 1,
+      `settle must be exactly-once across retry — open=${logsOf("i1", "conversation.open").length} assigned=${logsOf("i1", "chat_assigned").length} handoff=${logsOf("i1", "conversation.handoff").length}`);
+  });
+
+  await test("I2 commit + conversation.handoff audit throws → retry settles audit only (no dup chat_assigned)", async () => {
+    seedConv("i2"); seedShop(); seedAdmin("admin-1");
+    insertErrorOnce("conversation.handoff");
+    const opts = { conversationId: "i2", shopId: "shop-1", platform: "shopee" };
+    const r1 = await (handoffSvc.handoffToAdmin as any)(opts);
+    assert(metaOf("i2")?.assigned_to === "admin-1",
+      "commit must persist despite audit crash");
+    assert(r1?.persisted === true && r1?.state === "assigned" && r1?.emit_incomplete === true,
+      `committed assignment + emit-incomplete signal — got ${JSON.stringify(r1)}`);
+    const r2 = await (handoffSvc.handoffToAdmin as any)(opts);
+    clearHooks();
+    assert(r2?.state === "assigned", `retry must converge — got ${JSON.stringify(r2)}`);
+    assert(logsOf("i2", "chat_assigned").length === 1,
+      `chat_assigned must not duplicate on retry — got ${logsOf("i2", "chat_assigned").length}`);
+    assert(logsOf("i2", "conversation.handoff").length === 1,
+      `missing handoff audit must be settled by retry — got ${logsOf("i2", "conversation.handoff").length}`);
+  });
+
+  await test("I4 workflow auto + handoff commit throws → no handoff surfaced; no success audit", async () => {
+    (mocks.state as any).config.workflow_enabled = true;
+    seedShop(); seedAdmin("admin-1");
+    mocks.fakeColl("workflows").push({
+      workflow_id: "wf-fail", name: "auto assign fail",
+      shop_ids: ["shop-1"], platforms: ["shopee"],
+      enabled: true, status: "published", is_deleted: false,
+      trigger_frequency: "every_time", priority: 1, created_at: new Date(),
+      nodes: [
+        { node_id: "t1", type: "trigger", subtype: "message_received", config: { keywords: ["สวัสดี"] } },
+        { node_id: "a1", type: "action", subtype: "assign_ticket", config: { reason: "wf-fail" } },
+      ],
+      edges: [{ edge_id: "e1", source_node_id: "t1", target_node_id: "a1" }],
+    });
+    seedConv("i4");
+    (mocks.state as any).findOneAndUpdateHook = async (coll: string) => {
+      if (coll === "status_conversation") throw new Error("simulated commit failure");
+    };
+    const res = await wf.matchAndRun({
+      message_id: "m-i4", conversation_id: "i4", shop_id: "shop-1",
+      platform: "shopee", text: "สวัสดีครับ",
+    });
+    clearHooks();
+    assert(res.handoff === undefined,
+      `failed outcome must not surface a handoff for downstream handed_off — got ${JSON.stringify(res.handoff)}`);
+    const wfAudit = logsOf("i4", "workflow.assign_ticket");
+    assert(!wfAudit.some((d: any) => d.metadata?.assigned_to || d.metadata?.outcome_state === "assigned"),
+      `no success-shaped workflow audit — got ${JSON.stringify(wfAudit)}`);
+    assert(!metaOf("i4")?.assigned_to,
+      "no owner may persist on failed handoff");
+  });
+
+  await test("I5 workflow auto + no admin → handoff{state:queued,agentId:null} distinguishable from assigned", async () => {
+    (mocks.state as any).config.workflow_enabled = true;
+    seedShop();
+    mocks.fakeColl("workflows").push({
+      workflow_id: "wf-queued", name: "auto assign queued",
+      shop_ids: ["shop-1"], platforms: ["shopee"],
+      enabled: true, status: "published", is_deleted: false,
+      trigger_frequency: "every_time", priority: 1, created_at: new Date(),
+      nodes: [
+        { node_id: "t1", type: "trigger", subtype: "message_received", config: { keywords: ["สวัสดี"] } },
+        { node_id: "a1", type: "action", subtype: "assign_ticket", config: { reason: "wf-queued" } },
+      ],
+      edges: [{ edge_id: "e1", source_node_id: "t1", target_node_id: "a1" }],
+    });
+    seedConv("i5");
+    const res = await wf.matchAndRun({
+      message_id: "m-i5", conversation_id: "i5", shop_id: "shop-1",
+      platform: "shopee", text: "สวัสดีครับ",
+    });
+    assert(res.handoff?.state === "queued" && res.handoff.agentId === null,
+      `queued must surface as typed queued (durable, bot stops) — got ${JSON.stringify(res.handoff)}`);
+    const m = metaOf("i5");
+    assert(m?.status === "handoff" && m?.pending_assignment === true && m?.assigned_to === null,
+      `durable queued = handoff + pending + no owner — got ${JSON.stringify(m)}`);
+  });
+
+  await test("I6 workflow direct admin_id → typed assigned via same persisted owner", async () => {
+    (mocks.state as any).config.workflow_enabled = true;
+    seedShop(); seedAdmin("admin-1"); seedAdmin("admin-2");
+    mocks.fakeColl("workflows").push({
+      workflow_id: "wf-direct", name: "direct assign",
+      shop_ids: ["shop-1"], platforms: ["shopee"],
+      enabled: true, status: "published", is_deleted: false,
+      trigger_frequency: "every_time", priority: 1, created_at: new Date(),
+      nodes: [
+        { node_id: "t1", type: "trigger", subtype: "message_received", config: { keywords: ["สวัสดี"] } },
+        { node_id: "a1", type: "action", subtype: "assign_ticket", config: { admin_id: "admin-2", reason: "wf-direct" } },
+      ],
+      edges: [{ edge_id: "e1", source_node_id: "t1", target_node_id: "a1" }],
+    });
+    seedConv("i6");
+    const res = await wf.matchAndRun({
+      message_id: "m-i6", conversation_id: "i6", shop_id: "shop-1",
+      platform: "shopee", text: "สวัสดีครับ",
+    });
+    assert(res.handoff?.state === "assigned" && res.handoff.agentId === "admin-2",
+      `direct assign must return typed outcome — got ${JSON.stringify(res.handoff)}`);
+    const m = metaOf("i6");
+    assert(m?.status === "handoff" && m?.assigned_to === "admin-2" && m?.pending_assignment === false,
+      `direct assign must persist via same commit — got ${JSON.stringify(m)}`);
+  });
+
+  await test("I7 workflow direct CAS-loser → returns persisted winner (not stale pre-race meta)", async () => {
+    (mocks.state as any).config.workflow_enabled = true;
+    seedShop(); seedAdmin("admin-1"); seedAdmin("admin-2"); seedAdmin("admin-9");
+    mocks.fakeColl("workflows").push({
+      workflow_id: "wf-race", name: "direct assign race",
+      shop_ids: ["shop-1"], platforms: ["shopee"],
+      enabled: true, status: "published", is_deleted: false,
+      trigger_frequency: "every_time", priority: 1, created_at: new Date(),
+      nodes: [
+        { node_id: "t1", type: "trigger", subtype: "message_received", config: { keywords: ["สวัสดี"] } },
+        { node_id: "a1", type: "action", subtype: "assign_ticket", config: { admin_id: "admin-2", reason: "wf-race" } },
+      ],
+      edges: [{ edge_id: "e1", source_node_id: "t1", target_node_id: "a1" }],
+    });
+    seedConv("i7");
+    // meta read says owner admin-1 → CAS wants admin-2; winner admin-9 lands between read and CAS
+    seedMeta("i7", { status: "handoff", assigned_to: "admin-1", assigned_at: new Date("2026-10-01") });
+    let landed = false;
+    (mocks.state as any).findOneAndUpdateHook = async (coll: string) => {
+      if (coll === "status_conversation" && !landed) {
+        landed = true;
+        const d = metaOf("i7");
+        if (d) { d.assigned_to = "admin-9"; d.assigned_at = new Date(); }
+      }
+    };
+    const res = await wf.matchAndRun({
+      message_id: "m-i7", conversation_id: "i7", shop_id: "shop-1",
+      platform: "shopee", text: "สวัสดีครับ",
+    });
+    clearHooks();
+    assert(res.handoff?.agentId === "admin-9",
+      `CAS loser must report the persisted winner, not stale meta — got ${JSON.stringify(res.handoff)}`);
+    assert(metaOf("i7")?.assigned_to === "admin-9",
+      "winner must not be clobbered");
+  });
+
+  await test("I9 raw exception → sanitized outcome.reason/error_code; API + stdout clean", async () => {
+    seedConv("i9"); seedShop(); seedAdmin("admin-1");
+    const RAW = "mongodb://admin:secret-pw@db.internal.corp:27017/chat\nquery: { assigned_to: 1 }";
+    (mocks.state as any).findOneAndUpdateHook = async (coll: string) => {
+      if (coll === "status_conversation") throw new Error(RAW);
+    };
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "i9", shopId: "shop-1", platform: "shopee",
+    });
+    assert(r?.state === "failed" && r.persisted === false,
+      `commit failure stays typed failed — got ${JSON.stringify(r)}`);
+    assert(typeof r.error_code === "string" && r.error_code.length > 0,
+      `stable error_code required — got ${JSON.stringify(r)}`);
+    for (const leak of ["mongodb://", "secret-pw", "db.internal", "assigned_to", "\n"]) {
+      assert(!String(r.reason ?? "").includes(leak),
+        `outcome.reason must not expose raw error text (${leak}) — got ${JSON.stringify(r)}`);
+    }
+    // route level: response body + stdout must not leak either
+    const { NextRequest } = await import("next/server");
+    const seen: string[] = [];
+    const origLog = console.log;
+    console.log = (...a: unknown[]) => { seen.push(a.map(String).join(" ")); };
+    try {
+      const req = new NextRequest("http://localhost/api/admin/conversations/bot-handoff", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-internal-secret": "verify-only-internal-nonsecret" },
+        body: JSON.stringify({ conversation_id: "i9b" }),
+      });
+      seedConv("i9b");
+      const res = await (botHandoffRoute as any).POST(req);
+      const j = await res.json();
+      for (const leak of ["mongodb://", "secret-pw", "db.internal"]) {
+        assert(!JSON.stringify(j).includes(leak), `API response leaked ${leak}`);
+        assert(!seen.join(" ").includes(leak), `stdout leaked ${leak}`);
+      }
+    } finally {
+      console.log = origLog;
+      clearHooks();
+    }
+  });
+
+  // ═══ J. architecture correction — single-phase ownership + reservation-order round-robin ═══
+  // Contract ที่ตัดสินแล้ว (PART 2 gate — audit ยืนยันไม่มี caller ใดเป็น guaranteed
+  // repair owner ของ pending-settlement phase):
+  //   1. ownership CAS = durable phase เดียวที่ระบบ guarantee — ไม่มี pending-settlement phase
+  //      side effects = eid-idempotent emissions: emit หลัง commit + re-emit ทุก converge
+  //      (dedupe = free repair — ไม่มี marker ที่ต้องหา owner มาซ่อม)
+  //   2. outcome = ownership truth เท่านั้น — ไม่มี settled field อ้าง side-effect completion
+  //   3. round-robin = reservation-order: selection atomically claim ตำแหน่งบน cursor doc
+  //      (unique index เดิม) — commit miss → position forfeit (bounded skip, business contract)
+  //   4. ไม่มี cursor write หลัง commit → delayed emit ไม่มีทาง rewind cursor
+  //   5. legacy/dead ownership paths ถูกลบ — writer เดียวต่อ transition kind
+
+  const cursorOps = () =>
+    mocks.state.queryLog.filter((q: any) =>
+      q.coll === "assignment_cursors"
+      && (q.op === "updateOne" || q.op === "findOneAndUpdate" || q.op === "insertOne"));
+
+  await test("J1 emit crash post-commit → outcome = ownership truth only (no settled); converge re-emit repairs exactly once", async () => {
+    seedConv("j1"); seedShop(); seedAdmin("admin-1");
+    seedMeta("j1", { status: "closed", closed_at: new Date("2026-10-01"), closed_by: "admin-9", assigned_to: null });
+    mocks.fakeColl("close_history").push({
+      record_id: "chr-j1", conversation_id: "j1", shop_id: "shop-1",
+      customer_id: "cust-j1", closed_by: "admin-9", closed_at: new Date("2026-10-01"),
+      reason: "done", category: "other", resolution: "answered", sequence: 1,
+    });
+    insertErrorOnce("conversation.open");
+    const opts = { conversationId: "j1", shopId: "shop-1", platform: "shopee" };
+    const r1 = await (handoffSvc.handoffToAdmin as any)(opts);
+    assert(r1?.state === "assigned" && r1.persisted === true && !("settled" in r1)
+      && r1?.emit_incomplete === true,
+      `outcome = ownership truth + emit-incomplete signal — got ${JSON.stringify(r1)}`);
+    const m1 = metaOf("j1");
+    assert(m1?.status === "handoff" && m1?.assigned_to === "admin-1"
+      && !("handoff_settled" in m1) && !("handoff_rr_pool_key" in m1),
+      `ห้ามมี pending-settlement fields บน doc — ${JSON.stringify(m1)}`);
+    const r2 = await (handoffSvc.handoffToAdmin as any)(opts);
+    clearHooks();
+    assert(r2?.state === "assigned" && r2.persisted === true,
+      `converge ต้องคืน ownership truth เดิม — got ${JSON.stringify(r2)}`);
+    const hr = closeHistOf("j1")[0];
+    assert(hr?.reopened_at instanceof Date,
+      `converge ต้อง emit close-history stamp ที่ขาด — got ${JSON.stringify(hr)}`);
+    assert(logsOf("j1", "conversation.open").length === 1
+      && logsOf("j1", "chat_assigned").length === 1
+      && logsOf("j1", "conversation.handoff").length === 1,
+      `converge-emit ต้องเป็น exactly-once — open=${logsOf("j1", "conversation.open").length} assigned=${logsOf("j1", "chat_assigned").length} handoff=${logsOf("j1", "conversation.handoff").length}`);
+  });
+
+  await test("J2 bot-handoff route + audit emit throws → 503 retryable + ownership truth kept; retry converges emit", async () => {
+    seedConv("j2"); seedShop(); seedAdmin("admin-1");
+    insertErrorOnce("chat_assigned");
+    const { NextRequest } = await import("next/server");
+    const mkReq = () => new NextRequest("http://localhost/api/admin/conversations/bot-handoff", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-internal-secret": "verify-only-internal-nonsecret" },
+      body: JSON.stringify({ conversation_id: "j2" }),
+    });
+    const res = await (botHandoffRoute as any).POST(mkReq());
+    const j = await res.json();
+    assert(res.status === 503 && j?.ok === false
+      && j?.outcome?.state === "assigned" && j?.outcome?.persisted === true
+      && j?.outcome?.emit_incomplete === true,
+      `emit-incomplete ต้องเป็น retryable non-2xx (ownership truth ไม่ย้อน) — status=${res.status} body=${JSON.stringify(j)}`);
+    assert(!("settled" in (j?.outcome ?? {})),
+      `ห้ามมี settled ใน outcome — body=${JSON.stringify(j)}`);
+    assert(!("handoff_settled" in (metaOf("j2") ?? {})),
+      "ห้ามมี pending-settlement marker บน doc");
+    // retry request เดิม → converge owner เดิม + re-emit ด้วย eid เดิม → 200
+    const res2 = await (botHandoffRoute as any).POST(mkReq());
+    clearHooks();
+    const j2 = await res2.json();
+    assert(res2.status === 200 && j2?.outcome?.emit_incomplete === false,
+      `retry ต้อง converge+emit สำเร็จ — status=${res2.status} body=${JSON.stringify(j2)}`);
+    assert(logsOf("j2", "chat_assigned").length === 1
+      && logsOf("j2", "conversation.handoff").length === 1,
+      "re-emit ต้อง exactly-once ด้วย eid เดิม");
+  });
+
+  await test("J3 converge บน committed-but-never-emitted transition → emit audits ซ่อม exactly once (caller ใดก็ซ่อมได้)", async () => {
+    seedConv("j3"); seedShop(); seedAdmin("admin-1");
+    // จำลอง crash-หลัง-commit: doc committed (owner + eid) แต่ audits ไม่เคยถูก emit
+    seedMeta("j3", {
+      status: "handoff", assigned_to: "admin-1", assigned_at: new Date(),
+      assignment_mode_used: "equal_global", handoff_event_id: "eid-j3", handoff_reopened: false,
+    });
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "j3", shopId: "shop-1", platform: "shopee",
+    });
+    assert(r?.state === "assigned" && r.assigned_to === "admin-1",
+      `converge ต้องคืน persisted owner — got ${JSON.stringify(r)}`);
+    assert(logsOf("j3", "chat_assigned").length === 1
+      && logsOf("j3", "conversation.handoff").length === 1,
+      `converge ต้อง emit audits ของ transition ที่ยังไม่ได้ emit — assigned=${logsOf("j3", "chat_assigned").length} handoff=${logsOf("j3", "conversation.handoff").length}`);
+    // call ซ้ำ → dedupe — ยัง exactly-once
+    await (handoffSvc.handoffToAdmin as any)({ conversationId: "j3", shopId: "shop-1", platform: "shopee" });
+    assert(logsOf("j3", "chat_assigned").length === 1
+      && logsOf("j3", "conversation.handoff").length === 1,
+      "re-emit ต้อง dedupe ด้วย eid เดิม — ห้ามเขียน audit ซ้ำ");
+  });
+
+  await test("J4 [source pin] pending-settlement + parallel cursor/ownership paths ถูกลบ — เหลือ owner เดียวต่อ transition kind", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const read = (p: string) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8");
+    const hs = read("../src/backend/service/handoffService.ts");
+    const as_ = read("../src/backend/service/assignmentService.ts");
+    const ss = read("../src/backend/service/statusConversationService.ts");
+    for (const gone of ["settleHandoffTransition", "markHandoffSettled", "handoff_settled",
+      "handoff_rr_pool_key", "markCursorAssigned", "pickNextAgent", "peekNextAgent"]) {
+      assert(!hs.includes(gone) && !as_.includes(gone) && !ss.includes(gone),
+        `${gone} ต้องถูกลบออกจาก runtime sources`);
+    }
+    assert(!/\bsettled\b/.test(hs), "outcome ห้ามมี settled field");
+    assert(as_.includes("reserveNextAgent"), "reservation-order cursor owner required");
+    for (const gone of ["tryAssign", "autoAssignConversation", "setPendingAssignment"]) {
+      assert(!ss.includes(`export async function ${gone}`)
+        && !as_.includes(`export async function ${gone}`),
+        `${gone} = dead parallel ownership path — ต้องถูกลบ`);
+    }
+  });
+
+  await test("J5 multi-conv concurrent → reservation serializes → conv ละคน ตามลำดับตำแหน่ง", async () => {
+    seedConv("j5x"); seedConv("j5y"); seedShop();
+    seedAdmin("admin-1"); seedAdmin("admin-2"); seedAdmin("admin-3");
+    // interleave: Y รันเต็มรอบอยู่ระหว่าง X's reserve → commit window
+    let fired = false;
+    let inner: any = null;
+    (mocks.state as any).findOneAndUpdateHook = async (coll: string) => {
+      if (coll === "status_conversation" && !fired) {
+        fired = true;
+        inner = await (handoffSvc.handoffToAdmin as any)({
+          conversationId: "j5y", shopId: "shop-1", platform: "shopee",
+        });
+      }
+    };
+    const outer = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "j5x", shopId: "shop-1", platform: "shopee",
+    });
+    clearHooks();
+    const mx = metaOf("j5x"); const my = metaOf("j5y");
+    assert(mx?.assigned_to && my?.assigned_to && mx.assigned_to !== my.assigned_to,
+      `conversations พร้อมกันห้ามได้ admin คนเดียวกัน — x=${mx?.assigned_to} y=${my?.assigned_to}`);
+    assert(outer?.assigned_to === mx?.assigned_to && inner?.assigned_to === my?.assigned_to,
+      `outcome ต้องตรง persisted owner — outer=${JSON.stringify(outer)} inner=${JSON.stringify(inner)}`);
+  });
+
+  await test("J6 reserve แล้ว commit แพ้ → position ถูก consume (forfeit) — rotation เดินต่อไม่ rollback", async () => {
+    seedConv("j6"); seedShop();
+    seedAdmin("admin-1"); seedAdmin("admin-2"); seedAdmin("admin-9");
+    // winner admin-9 ลงระหว่าง reserve → commit ของ X
+    let landed = false;
+    (mocks.state as any).findOneAndUpdateHook = async (coll: string) => {
+      if (coll === "status_conversation" && !landed) {
+        landed = true;
+        const d = metaOf("j6");
+        if (d) { d.status = "handoff"; d.assigned_to = "admin-9"; d.assigned_at = new Date(); }
+        else seedMeta("j6", { status: "handoff", assigned_to: "admin-9", assigned_at: new Date() });
+      }
+    };
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "j6", shopId: "shop-1", platform: "shopee",
+    });
+    clearHooks();
+    assert(r?.state === "assigned" && r.assigned_to === "admin-9",
+      `commit แพ้ต้อง converge ไปที่ผู้ชนะ — got ${JSON.stringify(r)}`);
+    const cursor = mocks.fakeColl("assignment_cursors").find((d: any) => d.pool_key === "global:ticket");
+    assert(cursor?.last_assigned_admin_id === "admin-1",
+      `reservation consume ณ เวลา claim — commit miss = forfeit (bounded skip, contract) — cursor=${JSON.stringify(cursor)}`);
+    seedConv("j6z");
+    const rz = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "j6z", shopId: "shop-1", platform: "shopee",
+    });
+    assert(rz?.assigned_to === "admin-2",
+      `rotation ต้องเดินต่อหลัง forfeited position — got ${JSON.stringify(rz)}`);
+  });
+
+  await test("J7 same-conv duplicate concurrent → 1 commit; reservation สูงสุด 2 ตำแหน่ง (bounded forfeit); rotation ต่อ", async () => {
+    seedConv("j7"); seedShop();
+    seedAdmin("admin-1"); seedAdmin("admin-2"); seedAdmin("admin-3");
+    const opts = { conversationId: "j7", shopId: "shop-1", platform: "shopee" };
+    let fired = false;
+    let inner: any = null;
+    (mocks.state as any).findOneAndUpdateHook = async (coll: string) => {
+      if (coll === "status_conversation" && !fired) {
+        fired = true;
+        inner = await (handoffSvc.handoffToAdmin as any)(opts);
+      }
+    };
+    const outer = await (handoffSvc.handoffToAdmin as any)(opts);
+    clearHooks();
+    const m = metaOf("j7");
+    assert(m?.assigned_to && outer?.assigned_to === m.assigned_to
+      && inner?.assigned_to === m.assigned_to,
+      `ownership transition เดียว — loser converge เป็นผู้ชนะ — outer=${JSON.stringify(outer)} inner=${JSON.stringify(inner)} meta=${JSON.stringify(m)}`);
+    const ops = cursorOps();
+    assert(ops.length >= 1 && ops.length <= 2,
+      `duplicate pair consume อย่างมาก 2 reservation (1 committed + ≤1 forfeit) — ops=${ops.length}`);
+    seedConv("j7z");
+    const rz = await (handoffSvc.handoffToAdmin as any)({ ...opts, conversationId: "j7z" });
+    assert(rz?.assigned_to === "admin-3",
+      `rotation ต้องเดินต่อหลัง reservation ทั้งสอง — got ${JSON.stringify(rz)}`);
+  });
+
+  await test("J8 commit order ≠ reservation order → cursor = last reservation (no rewind)", async () => {
+    seedConv("j8x"); seedConv("j8y"); seedShop();
+    seedAdmin("admin-1"); seedAdmin("admin-2"); seedAdmin("admin-3");
+    // X reserve ก่อน แต่ commit หลัง Y: X(admin-1) → Y(admin-2) commit ก่อน → X commit ทีหลัง
+    let innerDone = false;
+    (mocks.state as any).findOneAndUpdateHook = async (coll: string) => {
+      if (coll === "status_conversation" && !innerDone) {
+        innerDone = true;
+        await (handoffSvc.handoffToAdmin as any)({
+          conversationId: "j8y", shopId: "shop-1", platform: "shopee",
+        });
+      }
+    };
+    await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "j8x", shopId: "shop-1", platform: "shopee",
+    });
+    clearHooks();
+    const cursor = mocks.fakeColl("assignment_cursors").find((d: any) => d.pool_key === "global:ticket");
+    seedConv("j8z");
+    const rz = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "j8z", shopId: "shop-1", platform: "shopee",
+    });
+    assert(rz?.assigned_to === "admin-3",
+      `cursor ต้องอยู่ที่ reservation ล่าสุด (admin-2) — ห้าม rewind จาก commit ที่ช้ากว่า — next=${JSON.stringify(rz)} cursor=${JSON.stringify(cursor)}`);
+  });
+
+  await test("J9 workflow assign + audit emit throws → truthful assigned; ไม่มี pending-settlement marker ทิ้งไว้", async () => {
+    (mocks.state as any).config.workflow_enabled = true;
+    seedShop(); seedAdmin("admin-1");
+    mocks.fakeColl("workflows").push({
+      workflow_id: "wf-emit", name: "emit crash",
+      shop_ids: ["shop-1"], platforms: ["shopee"],
+      enabled: true, status: "published", is_deleted: false,
+      trigger_frequency: "every_time", priority: 1, created_at: new Date(),
+      nodes: [
+        { node_id: "t1", type: "trigger", subtype: "message_received", config: { keywords: ["สวัสดี"] } },
+        { node_id: "a1", type: "action", subtype: "assign_ticket", config: { reason: "wf-emit" } },
+      ],
+      edges: [{ edge_id: "e1", source_node_id: "t1", target_node_id: "a1" }],
+    });
+    seedConv("j9");
+    insertErrorOnce("chat_assigned");
+    const res = await wf.matchAndRun({
+      message_id: "m-j9", conversation_id: "j9", shop_id: "shop-1",
+      platform: "shopee", text: "สวัสดีครับ",
+    });
+    clearHooks();
+    assert(res.handoff?.state === "assigned" && res.handoff.agentId === "admin-1",
+      `committed ownership ต้อง surface ตรงๆ — got ${JSON.stringify(res.handoff)}`);
+    const m = metaOf("j9");
+    assert(m?.status === "handoff" && m?.assigned_to === "admin-1"
+      && !("handoff_settled" in m) && !("handoff_rr_pool_key" in m),
+      `workflow ห้ามทิ้ง pending-settlement marker — ${JSON.stringify(m)}`);
+    // audit gap ซ่อมได้ด้วย call ใดๆ ของ conv นั้น (converge-emit — dedupe ด้วย eid เดิม)
+    await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "j9", shopId: "shop-1", platform: "shopee",
+    });
+    assert(logsOf("j9", "chat_assigned").length === 1,
+      `audit ที่ขาดต้องถูกซ่อมด้วย converge-emit — got ${logsOf("j9", "chat_assigned").length}`);
+  });
+
+  // ═══ K. Final Root-Cause — selection typing + HTTP contract + emit signal ═══
+  // Contract:
+  //   - selection แยก 3 ชนิด: reserved / no_eligible_agent / contention
+  //   - contention = retryable failure — ห้าม persist queued/no_available_admin (โกหก)
+  //   - route: assigned/queued persisted → 2xx เท่านั้น; failed → non-2xx ตาม
+  //     error_code (contention/5xx-like → 503 retryable, not_found → 404);
+  //     emit_incomplete → 503 retryable (ownership truth ไม่ย้อน)
+  //   - test/simulate path ส่ง outcome เดียวกัน (uniform typed truth สำหรับ Python)
+
+  // rival claimant ชนะ cursor race ทุก attempt — mutation จริงบน doc →
+  // filter last:observed miss ของจริง (ไม่ใช่ return-value forgery)
+  //   ⚠️ sentinel ต้องไม่เท่า observed เสมอ — เซ็ตเป็น admin ใน pool อาจชน observed
+  //   แล้ว CAS ผ่าน (miss ปลอม) → ใช้ค่านอก pool ที่เปลี่ยนทุกครั้งแทน
+  const forceCursorMiss = (limit = 99) => {
+    let n = 0;
+    (mocks.state as any).updateOneHook = async (coll: string) => {
+      if (coll === "assignment_cursors" && n < limit) {
+        n++;
+        const cur = mocks.fakeColl("assignment_cursors")[0];
+        if (cur) cur.last_assigned_admin_id = `__rival_claim_${n}`;
+      }
+    };
+  };
+  const seedCursor = (last: string, poolKey = "global:ticket") =>
+    mocks.fakeColl("assignment_cursors").push({
+      pool_key: poolKey, last_assigned_admin_id: last, updated_at: new Date(),
+    });
+
+  await test("K1 reserveNextAgent typing — reserved / no_eligible_agent / contention", async () => {
+    const empty = await (assignSvc as any).reserveNextAgent("global:k1-empty", []);
+    assert(empty?.result === "no_eligible_agent",
+      `pool ว่าง → no_eligible_agent — got ${JSON.stringify(empty)}`);
+    seedShop(); seedAdmin("admin-1"); seedAdmin("admin-2"); seedAdmin("admin-3");
+    seedCursor("admin-3", "global:k1");
+    const r = await (assignSvc as any).reserveNextAgent("global:k1", ["admin-1", "admin-2", "admin-3"]);
+    assert(r?.result === "reserved" && r?.agentId === "admin-1",
+      `claim สำเร็จ → reserved — got ${JSON.stringify(r)}`);
+    forceCursorMiss();
+    const c = await (assignSvc as any).reserveNextAgent("global:k1", ["admin-1", "admin-2", "admin-3"]);
+    clearHooks();
+    assert(c?.result === "contention",
+      `CAS miss ครบ cap + eligible admins มี → contention ห้ามเป็น no_eligible — got ${JSON.stringify(c)}`);
+  });
+
+  await test("K2 selectNextAgent propagate outcome — contention ไม่ใช่ agentId:null เฉยๆ", async () => {
+    seedShop(); seedAdmin("admin-1"); seedAdmin("admin-2");
+    seedCursor("admin-2");
+    forceCursorMiss();
+    const sel = await (assignSvc as any).selectNextAgent({ shop_id: "shop-1", platform: "shopee" }, "ticket");
+    clearHooks();
+    assert(sel?.result === "contention",
+      `selectNextAgent ต้อง surface contention — got ${JSON.stringify(sel)}`);
+  });
+
+  await test("K3 contention ครบ cap → failed{reservation_contention}; ห้าม persist queued/no_available_admin", async () => {
+    seedConv("k3"); seedShop(); seedAdmin("admin-1"); seedAdmin("admin-2"); seedAdmin("admin-3");
+    seedCursor("admin-3");
+    forceCursorMiss();
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "k3", shopId: "shop-1", platform: "shopee",
+    });
+    clearHooks();
+    assert(r?.state === "failed" && r?.error_code === "reservation_contention",
+      `contention = retryable failure — got ${JSON.stringify(r)}`);
+    const m = metaOf("k3");
+    assert(!m || (m.pending_assignment !== true && !m.assigned_to),
+      `ห้าม persist queued/false pending จาก contention — meta=${JSON.stringify(m)}`);
+  });
+
+  await test("K4 >3 contenders: winner assigned / losers retryable-failed — แยกประเภทถูก ไม่มี queued", async () => {
+    seedConv("k4x"); seedConv("k4y"); seedShop();
+    seedAdmin("admin-1"); seedAdmin("admin-2"); seedAdmin("admin-3");
+    seedCursor("admin-3");
+    // X loses every race (rival winner ทุก attempt) → retryable contention
+    forceCursorMiss(3);
+    const rx = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "k4x", shopId: "shop-1", platform: "shopee",
+    });
+    clearHooks();
+    // Y claims normally → assigned
+    const ry = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "k4y", shopId: "shop-1", platform: "shopee",
+    });
+    assert(rx?.state === "failed" && rx?.error_code === "reservation_contention",
+      `contention loser → retryable failed — got ${JSON.stringify(rx)}`);
+    assert(ry?.state === "assigned" && ry?.assigned_to,
+      `winner → assigned — got ${JSON.stringify(ry)}`);
+    const mx = metaOf("k4x");
+    assert(!mx || mx.pending_assignment !== true,
+      `contention loser ห้ามกลายเป็น pending_assignment — meta=${JSON.stringify(mx)}`);
+  });
+
+  await test("K5 real cursor-CAS interleave (2 rivals claim ระหว่าง outer's reserve→commit) → 3 convs ได้ admin คนละคน ไม่มี queued/failed", async () => {
+    seedConv("k5-0"); seedConv("k5-1"); seedConv("k5-2"); seedShop();
+    seedAdmin("admin-1"); seedAdmin("admin-2"); seedAdmin("admin-3");
+    seedCursor("admin-3");
+    let fired = 0;
+    const inners: any[] = [];
+    // hook บน cursor claim ของ caller ใดก็ได้ — rival จริง 2 คนยิง claim+commit เต็มรอบ
+    //   (genuine interleave: inner ทำ reserve→commit จริงก่อน outer's write execute)
+    (mocks.state as any).updateOneHook = async (coll: string) => {
+      if (coll === "assignment_cursors" && fired < 2) {
+        fired++;
+        inners.push(await (handoffSvc.handoffToAdmin as any)({
+          conversationId: `k5-${fired}`, shopId: "shop-1", platform: "shopee",
+        }));
+      }
+    };
+    const outer = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "k5-0", shopId: "shop-1", platform: "shopee",
+    });
+    clearHooks();
+    assert(fired === 2, `rival ต้องชนกันที่ cursor CAS จริง — fired=${fired}`);
+    const owners = new Set([outer, ...inners].map((r: any) => r?.assigned_to));
+    assert(owners.size === 3 && outer?.state === "assigned"
+      && inners.every((r: any) => r?.state === "assigned"),
+      `ทุก conv ต้อง assigned คนละ admin — outer=${JSON.stringify(outer)} inners=${JSON.stringify(inners)}`);
+  });
+
+  await test("K6 bot-handoff route + contention → non-2xx retryable (503) + ok:false; ไม่มี pending write", async () => {
+    seedConv("k6"); seedShop(); seedAdmin("admin-1"); seedAdmin("admin-2");
+    seedCursor("admin-2");
+    forceCursorMiss();
+    const { NextRequest } = await import("next/server");
+    const req = new NextRequest("http://localhost/api/admin/conversations/bot-handoff", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-internal-secret": "verify-only-internal-nonsecret" },
+      body: JSON.stringify({ conversation_id: "k6" }),
+    });
+    const res = await (botHandoffRoute as any).POST(req);
+    clearHooks();
+    const j = await res.json();
+    assert(res.status === 503 && j?.ok === false && j?.outcome?.state === "failed"
+      && j?.outcome?.error_code === "reservation_contention",
+      `contention → 503 retryable — status=${res.status} body=${JSON.stringify(j)}`);
+    const m = metaOf("k6");
+    assert(!m || m.pending_assignment !== true,
+      `ห้าม persist false pending — meta=${JSON.stringify(m)}`);
+  });
+
+  await test("K7 bot-handoff route + internal throw → non-2xx retryable (503) + sanitized body", async () => {
+    seedConv("k7"); seedShop(); seedAdmin("admin-1");
+    (mocks.state as any).findOneHook = async (coll: string) => {
+      if (coll === "status_conversation") {
+        throw new Error("mongodb://admin:secret-pw@db.internal.corp assigned_to\nquery failed");
+      }
+    };
+    const { NextRequest } = await import("next/server");
+    const req = new NextRequest("http://localhost/api/admin/conversations/bot-handoff", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-internal-secret": "verify-only-internal-nonsecret" },
+      body: JSON.stringify({ conversation_id: "k7" }),
+    });
+    const res = await (botHandoffRoute as any).POST(req);
+    clearHooks();
+    const j = await res.json();
+    const bodyStr = JSON.stringify(j);
+    assert(res.status === 503 && j?.ok === false && j?.outcome?.state === "failed",
+      `internal failure → 503 retryable — status=${res.status} body=${bodyStr}`);
+    for (const leak of ["mongodb://", "secret-pw", "db.internal", "\n"]) {
+      assert(!bodyStr.includes(leak), `response ห้าม leak '${leak}' — body=${bodyStr}`);
+    }
+  });
+
+  await test("K8 admin assign route + emit throws → non-2xx retryable (503); retry converges emit", async () => {
+    seedConv("k8"); seedShop(); seedAdmin("admin-1"); seedAdmin("admin-2");
+    seedAdmin("lead-1", { role: "lead" });
+    insertErrorOnce("chat_assigned");
+    const { NextRequest } = await import("next/server");
+    const mkReq = () => authReq("lead-1", "http://localhost/api/admin/conversations/k8/assign", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ admin_id: "admin-1" }),
+    });
+    const res = await (assignRoute as any).POST(await mkReq(), paramsOf("k8"));
+    const j = await res.json();
+    assert(res.status === 503,
+      `assign route emit-incomplete → 503 retryable — status=${res.status} body=${JSON.stringify(j)}`);
+    const res2 = await (assignRoute as any).POST(await mkReq(), paramsOf("k8"));
+    clearHooks();
+    const j2 = await res2.json();
+    assert(res2.status === 200 && j2?.ok === true,
+      `retry converge+emit → 200 — status=${res2.status} body=${JSON.stringify(j2)}`);
+    assert(logsOf("k8", "chat_assigned").length === 1,
+      "re-emit ต้อง exactly-once");
+  });
+
+  await test("K9 bot-handoff queued (pool ว่างจริง) → 200 + outcome.state=queued (contract pin)", async () => {
+    seedConv("k9"); seedShop();
+    const { NextRequest } = await import("next/server");
+    const req = new NextRequest("http://localhost/api/admin/conversations/bot-handoff", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-internal-secret": "verify-only-internal-nonsecret" },
+      body: JSON.stringify({ conversation_id: "k9" }),
+    });
+    const res = await (botHandoffRoute as any).POST(req);
+    const j = await res.json();
+    assert(res.status === 200 && j?.outcome?.state === "queued"
+      && metaOf("k9")?.pending_assignment === true,
+      `queued persisted → 200 — status=${res.status} body=${JSON.stringify(j)}`);
+  });
+
+  await test("K10 test_source path มี outcome เดียวกัน; contention → failed + non-2xx (503); ไม่มี pending_assignment โกหก", async () => {
+    seedConv("k10"); seedShop(); seedAdmin("admin-1"); seedAdmin("admin-2");
+    seedCursor("admin-2", "global:botworker");
+    forceCursorMiss();
+    const { NextRequest } = await import("next/server");
+    const req = new NextRequest("http://localhost/api/admin/conversations/bot-handoff", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-internal-secret": "verify-only-internal-nonsecret" },
+      body: JSON.stringify({ conversation_id: "k10", test_source: "botworker" }),
+    });
+    const res = await (botHandoffRoute as any).POST(req);
+    clearHooks();
+    const j = await res.json();
+    assert(res.status === 503 && j?.outcome?.state === "failed",
+      `test_source contention → 503 + outcome.failed — status=${res.status} body=${JSON.stringify(j)}`);
+    const tdoc = mocks.fakeColl("test_status_conversation")
+      .find((d: any) => d.conversation_id === "k10");
+    assert(!tdoc || tdoc.pending_assignment !== true,
+      `test path ห้าม persist false pending — doc=${JSON.stringify(tdoc)}`);
+  });
+
+  await test("K11 handoffToAdminTest contention → in_flight result (retryable) ไม่ใช่ no_available_admin", async () => {
+    seedConv("k11"); seedShop(); seedAdmin("admin-1"); seedAdmin("admin-2");
+    seedCursor("admin-2", "global:test_chat");
+    forceCursorMiss();
+    const r = await (handoffSvc.handoffToAdminTest as any)({
+      conversationId: "k11", shopId: "shop-1", platform: "shopee",
+      reason: "k11", source: "test_chat",
+    });
+    clearHooks();
+    assert(r?.in_flight === true,
+      `contention ใน test path → in_flight (retryable) — got ${JSON.stringify(r)}`);
+    const tdoc = mocks.fakeColl("test_status_conversation")
+      .find((d: any) => d.conversation_id === "k11");
+    assert(!tdoc || tdoc.pending_assignment !== true,
+      `ห้าม persist false pending จาก contention — doc=${JSON.stringify(tdoc)}`);
+  });
+
+  await test("K12 test_source in_flight → 503 + zero success side-effects (claim/log/audit) — retry converges exactly once", async () => {
+    seedConv("k12"); seedShop(); seedAdmin("admin-1"); seedAdmin("admin-2");
+    seedCursor("admin-2", "global:botworker");
+    forceCursorMiss();
+    const { NextRequest } = await import("next/server");
+    const mkReq = () => new NextRequest("http://localhost/api/admin/conversations/bot-handoff", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-internal-secret": "verify-only-internal-nonsecret" },
+      body: JSON.stringify({
+        conversation_id: "k12", test_source: "botworker",
+        reason: "warranty_claim", claim: { customer_name: "ลูกค้า K12" },
+      }),
+    });
+    const res = await (botHandoffRoute as any).POST(mkReq());
+    clearHooks();
+    const j = await res.json();
+    assert(res.status === 503 && j?.ok === false && j?.outcome?.state === "failed",
+      `in_flight → 503 failed — status=${res.status} body=${JSON.stringify(j)}`);
+    const tdoc = mocks.fakeColl("test_status_conversation")
+      .find((d: any) => d.conversation_id === "k12");
+    assert(!tdoc?.bot_claim_info,
+      `failed outcome ห้ามเขียน claim metadata ก่อน classify — doc=${JSON.stringify(tdoc)}`);
+    const evts = mocks.fakeColl("botworker_events")
+      .filter((d: any) => d.conversation_id === "k12" && d.type === "bot_handoff");
+    assert(evts.length === 0,
+      `failed outcome ห้ามเขียน bot_handoff success audit — events=${JSON.stringify(evts)}`);
+    // retry สำเร็จภายหลัง → side effects ครบครั้งเดียว (single emission point)
+    const res2 = await (botHandoffRoute as any).POST(mkReq());
+    const j2 = await res2.json();
+    assert(res2.status === 200 && j2?.outcome?.state === "assigned",
+      `retry → assigned 200 — status=${res2.status} body=${JSON.stringify(j2)}`);
+    const tdoc2 = mocks.fakeColl("test_status_conversation")
+      .find((d: any) => d.conversation_id === "k12");
+    const evts2 = mocks.fakeColl("botworker_events")
+      .filter((d: any) => d.conversation_id === "k12" && d.type === "bot_handoff");
+    assert(tdoc2?.bot_claim_info?.customer_name === "ลูกค้า K12" && evts2.length === 1,
+      `retry success → claim+audit exactly once — claim=${JSON.stringify(tdoc2?.bot_claim_info)} events=${evts2.length}`);
+  });
+
+  await test("K13 simulate in_flight → 503 + zero claim write (same ordering bug, same owner)", async () => {
+    seedShop(); seedAdmin("admin-1"); seedAdmin("admin-2");
+    seedCursor("admin-2", "global:test_chat");
+    forceCursorMiss();
+    const oid = new ObjectId();
+    mocks.fakeColl("test_chat_sessions").push({ _id: oid, status: "open" });
+    const convId = oid.toHexString();
+    const { NextRequest } = await import("next/server");
+    const req = new NextRequest("http://localhost/api/admin/conversations/bot-handoff", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-internal-secret": "verify-only-internal-nonsecret" },
+      body: JSON.stringify({
+        conversation_id: convId, simulate: true,
+        claim: { customer_name: "ลูกค้า K13" },
+      }),
+    });
+    const res = await (botHandoffRoute as any).POST(req);
+    clearHooks();
+    const j = await res.json();
+    assert(res.status === 503 && j?.outcome?.state === "failed",
+      `simulate in_flight → 503 failed — status=${res.status} body=${JSON.stringify(j)}`);
+    const sess = mocks.fakeColl("test_chat_sessions").find((d: any) => d._id === oid);
+    assert(!(sess as any)?.bot_claim_info,
+      `failed outcome ห้ามเขียน claim metadata ก่อน classify — session=${JSON.stringify(sess)}`);
+  });
+
+  // ── L. production path outcome ordering (Finding 2 — same bug class as K12/K13) ──
+  const mkProdReq = async (convId: string) => {
+    const { NextRequest } = await import("next/server");
+    return new NextRequest("http://localhost/api/admin/conversations/bot-handoff", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-internal-secret": "verify-only-internal-nonsecret" },
+      body: JSON.stringify({
+        conversation_id: convId,
+        reason: "warranty_claim",
+        claim: { customer_name: `ลูกค้า ${convId}` },
+      }),
+    });
+  };
+
+  await test("K14 production failed (contention) → 503 + zero claim/handoff metadata + zero route audit", async () => {
+    seedConv("k14"); seedShop(); seedAdmin("admin-1"); seedAdmin("admin-2");
+    seedCursor("admin-2");
+    forceCursorMiss();
+    const res = await (botHandoffRoute as any).POST(await mkProdReq("k14"));
+    clearHooks();
+    const j = await res.json();
+    assert(res.status === 503 && j?.ok === false && j?.outcome?.state === "failed",
+      `production failed → non-2xx — status=${res.status} body=${JSON.stringify(j)}`);
+    const conv = mocks.fakeColl("conversations")
+      .find((d: any) => d.conversation_id === "k14");
+    assert(!conv?.bot_claim_info && !conv?.bot_handoff_at && !conv?.bot_handoff_reason,
+      `failed outcome ห้ามเขียน success metadata ลง conversations — doc=${JSON.stringify(conv)}`);
+    const routeLogs = mocks.fakeColl("admin_logs")
+      .filter((d: any) => d.conversation_id === "k14");
+    assert(routeLogs.length === 0,
+      `failed outcome ห้ามมี audit จาก route — logs=${JSON.stringify(routeLogs)}`);
+  });
+
+  await test("K15 production assigned + claim → 200 + claim write = 1 query พอดี (measured)", async () => {
+    seedConv("k15"); seedShop(); seedAdmin("admin-1");
+    mocks.state.queryLog.length = 0;
+    const res = await (botHandoffRoute as any).POST(await mkProdReq("k15"));
+    const j = await res.json();
+    assert(res.status === 200 && j?.ok === true && j?.outcome?.state === "assigned",
+      `assigned → 200 — status=${res.status} body=${JSON.stringify(j)}`);
+    const conv = mocks.fakeColl("conversations")
+      .find((d: any) => d.conversation_id === "k15");
+    assert(conv?.bot_claim_info?.customer_name === "ลูกค้า k15"
+      && conv?.bot_handoff_at instanceof Date && conv?.bot_handoff_reason === "warranty_claim",
+      `assigned → claim metadata เขียนครบ — doc=${JSON.stringify(conv)}`);
+    const writes = mocks.state.queryLog.filter((q: any) =>
+      q.coll === "conversations" && q.op === "updateOne"
+      && q.filter?.conversation_id === "k15");
+    assert(writes.length === 1,
+      `assigned request เดียว → claim metadata write ต้อง 1 query พอดี — writes=${writes.length}`);
+  });
+
+  await test("K16 production queued (pool ว่าง) + claim → 200 + claim metadata written", async () => {
+    seedConv("k16"); seedShop();
+    const res = await (botHandoffRoute as any).POST(await mkProdReq("k16"));
+    const j = await res.json();
+    assert(res.status === 200 && j?.outcome?.state === "queued",
+      `queued → 200 — status=${res.status} body=${JSON.stringify(j)}`);
+    const conv = mocks.fakeColl("conversations")
+      .find((d: any) => d.conversation_id === "k16");
+    assert(conv?.bot_claim_info?.customer_name === "ลูกค้า k16",
+      `queued persisted → claim metadata เขียนได้ — doc=${JSON.stringify(conv)}`);
+  });
+
+  await test("K17 production emit_incomplete → 503 → retry converge 200 + audit once + claim ไม่เสีย", async () => {
+    seedConv("k17"); seedShop(); seedAdmin("admin-1");
+    insertErrorOnce("chat_assigned");
+    const res = await (botHandoffRoute as any).POST(await mkProdReq("k17"));
+    const j = await res.json();
+    assert(res.status === 503 && j?.ok === false
+      && j?.outcome?.state === "assigned" && j?.outcome?.persisted === true
+      && j?.outcome?.emit_incomplete === true,
+      `emit_incomplete → 503 + persisted truth — status=${res.status} body=${JSON.stringify(j)}`);
+    const conv = mocks.fakeColl("conversations")
+      .find((d: any) => d.conversation_id === "k17");
+    assert(conv?.bot_claim_info?.customer_name === "ลูกค้า k17",
+      `ownership persisted แล้ว → claim metadata เขียน — doc=${JSON.stringify(conv)}`);
+    const t1 = conv?.bot_handoff_at;
+    assert(t1 instanceof Date,
+      `request แรกต้องตั้ง bot_handoff_at — doc=${JSON.stringify(conv)}`);
+
+    // ── retry payload เดิม (transport เห็น 503 → bounded retry) — converge owner เดิม
+    await new Promise((r) => setTimeout(r, 10));
+    mocks.state.queryLog.length = 0;
+    const res2 = await (botHandoffRoute as any).POST(await mkProdReq("k17"));
+    const j2 = await res2.json();
+    assert(res2.status === 200 && j2?.ok === true
+      && j2?.outcome?.state === "assigned" && j2?.outcome?.persisted === true
+      && j2?.outcome?.emit_incomplete === false
+      && j2?.outcome?.reason === "existing_assignment",
+      `retry → converge 200 + emit สมบูรณ์ — status=${res2.status} body=${JSON.stringify(j2)}`);
+    const conv2 = mocks.fakeColl("conversations")
+      .find((d: any) => d.conversation_id === "k17");
+    assert(conv2?.bot_claim_info?.customer_name === "ลูกค้า k17"
+      && conv2?.bot_handoff_reason === "warranty_claim",
+      `retry → claim fields ต้องไม่เสีย — doc=${JSON.stringify(conv2)}`);
+    assert(conv2?.bot_handoff_at instanceof Date
+      && conv2.bot_handoff_at.getTime() >= t1.getTime(),
+      `retry → bot_handoff_at เป็น Date (refresh ได้ — contract: last write time) — t1=${t1?.toISOString?.()} t2=${conv2?.bot_handoff_at}`);
+    // claim refresh ยังเขียนได้ (เติม claim ภายหลังไม่ถูกปิดกั้น) — 1 write/req
+    const retryWrites = mocks.state.queryLog.filter((q: any) =>
+      q.coll === "conversations" && q.op === "updateOne"
+      && q.filter?.conversation_id === "k17");
+    assert(retryWrites.length === 1,
+      `retry → claim write ต้อง 1 query (refresh เดิม ไม่ใช่ parallel write) — writes=${retryWrites.length}`);
+    // ownership/audit exactly-once: re-emit เติม audit ที่ขาดพอดี (eid dedupe)
+    assert(logsOf("k17", "chat_assigned").length === 1
+      && logsOf("k17", "conversation.handoff").length === 1,
+      `retry ต้องเติม audit ที่ขาดพอดี — chat_assigned=${logsOf("k17", "chat_assigned").length} handoff=${logsOf("k17", "conversation.handoff").length}`);
+  });
+
+  await test("K18 production close→reopen→handoff ใหม่ → 200 + claim refresh + audit แยกต่อ transition", async () => {
+    seedConv("k18"); seedShop(); seedAdmin("admin-1");
+    const res1 = await (botHandoffRoute as any).POST(await mkProdReq("k18"));
+    const j1 = await res1.json();
+    assert(res1.status === 200 && j1?.outcome?.state === "assigned",
+      `episode1 assigned → 200 — status=${res1.status} body=${JSON.stringify(j1)}`);
+    const conv1 = mocks.fakeColl("conversations")
+      .find((d: any) => d.conversation_id === "k18");
+    const t1 = conv1?.bot_handoff_at;
+    assert(t1 instanceof Date,
+      `episode1 ต้องตั้ง bot_handoff_at — doc=${JSON.stringify(conv1)}`);
+
+    // close (admin resolves) → reopen เป็น bot (ลูกค้าทักกลับ) — production owners จริง
+    await statusSvc.closeConversation({
+      conversationId: "k18", closedBy: "admin-1",
+      reason: "done", category: "product", resolution: "answered",
+    });
+    await statusSvc.reopenConversation({
+      conversationId: "k18", reopenedBy: "bot", targetStatus: "bot",
+    });
+
+    await new Promise((r) => setTimeout(r, 10));
+    const res2 = await (botHandoffRoute as any).POST(await mkProdReq("k18"));
+    const j2 = await res2.json();
+    assert(res2.status === 200 && j2?.outcome?.state === "assigned"
+      && j2?.outcome?.persisted === true && j2?.outcome?.reason === "round_robin",
+      `episode2 ต้องเป็น transition ใหม่ — status=${res2.status} body=${JSON.stringify(j2)}`);
+    const conv2 = mocks.fakeColl("conversations")
+      .find((d: any) => d.conversation_id === "k18");
+    assert(conv2?.bot_handoff_at instanceof Date
+      && conv2.bot_handoff_at.getTime() >= t1.getTime(),
+      `handoff รอบใหม่ → bot_handoff_at เป็น Date (refresh ได้ — contract: last write time) — t1=${t1?.toISOString?.()} t2=${conv2?.bot_handoff_at}`);
+    assert(conv2?.bot_claim_info?.customer_name === "ลูกค้า k18"
+      && conv2?.bot_handoff_reason === "warranty_claim",
+      `episode2 → claim fields ของรอบใหม่ — doc=${JSON.stringify(conv2)}`);
+    // audit per-episode exactly once (eid ต่างกัน → 2 docs/action รวม 2 episodes)
+    assert(logsOf("k18", "chat_assigned").length === 2
+      && logsOf("k18", "conversation.handoff").length === 2,
+      `แต่ละ episode audit พอดีครั้งเดียว — chat_assigned=${logsOf("k18", "chat_assigned").length} handoff=${logsOf("k18", "conversation.handoff").length}`);
+  });
+
+  await test("K19 production queued retry → converge queued + audit ไม่ซ้ำ + claim ไม่เสีย", async () => {
+    seedConv("k19"); seedShop(); // ไม่มี admin → queued
+    const res1 = await (botHandoffRoute as any).POST(await mkProdReq("k19"));
+    const j1 = await res1.json();
+    assert(res1.status === 200 && j1?.outcome?.state === "queued",
+      `first queued → 200 — status=${res1.status} body=${JSON.stringify(j1)}`);
+
+    const res2 = await (botHandoffRoute as any).POST(await mkProdReq("k19"));
+    const j2 = await res2.json();
+    assert(res2.status === 200 && j2?.outcome?.state === "queued"
+      && j2?.outcome?.persisted === true,
+      `queued retry → converge queued persisted — status=${res2.status} body=${JSON.stringify(j2)}`);
+    const conv2 = mocks.fakeColl("conversations")
+      .find((d: any) => d.conversation_id === "k19");
+    assert(conv2?.bot_handoff_at instanceof Date
+      && conv2?.bot_claim_info?.customer_name === "ลูกค้า k19"
+      && conv2?.bot_handoff_reason === "warranty_claim",
+      `claim fields ต้องไม่เสีย + timestamp เป็น Date — doc=${JSON.stringify(conv2)}`);
+    // queued emit = conversation.handoff เท่านั้น (ไม่มี owner → ไม่มี chat_assigned) — eid dedupe
+    assert(logsOf("k19", "conversation.handoff").length === 1
+      && logsOf("k19", "chat_assigned").length === 0,
+      `queued retry audit ต้องพอดีครั้งเดียว — handoff=${logsOf("k19", "conversation.handoff").length} chat_assigned=${logsOf("k19", "chat_assigned").length}`);
+  });
+
+  await test("K20 production queued→assigned upgrade → owner persisted + pending cleared + audit", async () => {
+    seedConv("k20"); seedShop(); // ไม่มี admin → queued
+    const res1 = await (botHandoffRoute as any).POST(await mkProdReq("k20"));
+    const j1 = await res1.json();
+    assert(res1.status === 200 && j1?.outcome?.state === "queued",
+      `first queued → 200 — status=${res1.status} body=${JSON.stringify(j1)}`);
+
+    // admin พร้อมแล้ว → request เดิม → upgrade assigned
+    seedAdmin("admin-1");
+    const res2 = await (botHandoffRoute as any).POST(await mkProdReq("k20"));
+    const j2 = await res2.json();
+    assert(res2.status === 200 && j2?.outcome?.state === "assigned"
+      && j2?.outcome?.persisted === true,
+      `queued→assigned upgrade → 200 persisted — status=${res2.status} body=${JSON.stringify(j2)}`);
+    const conv2 = mocks.fakeColl("conversations")
+      .find((d: any) => d.conversation_id === "k20");
+    assert(conv2?.bot_handoff_at instanceof Date
+      && conv2?.bot_claim_info?.customer_name === "ลูกค้า k20",
+      `claim fields ต้องไม่เสีย + timestamp เป็น Date — doc=${JSON.stringify(conv2)}`);
+    // owner persisted + pending cleared
+    const meta = mocks.fakeColl("status_conversation")
+      .find((d: any) => d.conversation_id === "k20");
+    assert(meta?.assigned_to === "admin-1" && meta?.pending_assignment === false,
+      `upgrade ต้อง persist owner + clear pending — meta=${JSON.stringify(meta)}`);
+    // audit per-transition: queued emit (eid1) + assigned emit (eid2 — transition ใหม่) พอดี
+    assert(logsOf("k20", "chat_assigned").length === 1
+      && logsOf("k20", "conversation.handoff").length === 2,
+      `upgrade audit — chat_assigned=${logsOf("k20", "chat_assigned").length} handoff=${logsOf("k20", "conversation.handoff").length}`);
   });
 
   // ── W.source pins (structure only — never cited as runtime behavior) ──

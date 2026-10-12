@@ -323,6 +323,9 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `closed_at` | Date? | ⚠️ โดน dump ทับ |
 | `closed_by` | string? | ⚠️ โดน dump ทับ |
 | `close_count` | number? | ⚠️ โดน dump ทับ |
+| `bot_claim_info` | object? | claim payload จาก `/admin/conversations/bot-handoff` — refresh ทุก request (เขียนซ้ำซ่อม claim ที่ขาดได้) |
+| `bot_handoff_at` | Date? | เวลาที่ bot-handoff claim metadata ถูกเขียน/refresh ล่าสุด — **ไม่ใช่ ownership authority** (authority = `status_conversation` + `HandoffOutcome.state`) และไม่ใช้ dedupe/idempotency |
+| `bot_handoff_reason` | string? | reason จาก bot-handoff request ล่าสุด |
 
 **⚠️ สำคัญ:** `assigned_to`, `closed_at`, `closed_by`, `close_count` โดน sellcenter dump ทับทุก 2 วินาที
 → ใช้ `status_conversation` เป็น source of truth สำหรับ admin-owned meta
@@ -633,7 +636,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 |---------|-------|--------|
 | Read | listCloseHistory, listCustomerCloseHistory | `/conversations/[id]/close-history` |
 | Write | recordClose | statusConversationService.closeConversation |
-| Update | recordReopen | statusConversationService.reopenConversation (manual/admin — ไม่ส่ง messageId), statusConversationService.applyInboundOwnershipTransition (inbound — ส่ง `messageId` เพื่อ deterministic audit identity ผ่าน `logAdminEvent(eventId)`; CAS loser/retry ของ event เดิม settle idempotently) |
+| Update | recordReopen | statusConversationService.reopenConversation (manual/admin — ไม่ส่ง messageId), statusConversationService.applyInboundOwnershipTransition (inbound — ส่ง `messageId` เพื่อ deterministic audit identity ผ่าน `logAdminEvent(eventId)`; CAS loser/retry ของ event เดิม settle idempotently), handoffService.emitHandoffSideEffects (handoff reopen — `messageId = handoff_event_id`; เรียกหลัง commit และบน converge ใดๆ) |
 | Delete | ไม่มี | |
 
 **หน้าที่เข้าถึง:** `/tickets`, `/botworker` (close history panel)
@@ -860,7 +863,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `last_assigned_admin_id` | string | admin ล่าสุดที่ถูกจ่าย |
 | `updated_at` | Date | |
 
-**Access:** internal ใน `assignmentService.autoAssignConversation/reassignConversation`
+**Access:** internal ใน `assignmentService.selectNextAgent`/`reserveNextAgent` — **reservation-order: ตำแหน่งคิวถูก claim แบบ atomic CAS บน doc นี้ ณ เวลาเลือก (unique `pool_key`) — ไม่มี writer อื่น**; commit ของ caller ล้มเหลว → position forfeit (bounded skip)
 
 ---
 
@@ -911,7 +914,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | Field | Type | หมายเหตุ |
 |-------|------|---------|
 | `conversation_id` | string | PK |
-| `assigned_to` | string? \| null | admin_id; `null` = unassigned (clear owner โดย `updateStatus`/`reassign null`/auto-reopen/`setPendingAssignment`) |
+| `assigned_to` | string? \| null | admin_id; `null` = unassigned (clear owner โดย `updateStatus`/`reassign null`/auto-reopen/queued commit ใน `commitHandoffState`) |
 | `assigned_at` | Date? \| null | set เมื่อ assign; `null` เมื่อ owner ถูกล้าง (ไม่ลบ audit `close_history`/`admin_logs`) |
 | `assignment_mode_used` | string? | |
 | `status` | string? | open/closed/handoff/bot/resolved |
@@ -921,8 +924,13 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `pinned` | boolean? | |
 | `topic` | string? | |
 | `item_ids` | string[]? | |
-| `pending_assignment` | boolean? | backlog handoff flag (หา admin ไม่ได้ → รอ distributor) |
+| `pending_assignment` | boolean? | backlog handoff flag (หา admin ไม่ได้ → รอ distributor) — **queued outcome ของ handoff = `status:handoff` + `assigned_to:null` + flag นี้** |
+| `assignment_reason` | string? \| null | เหตุผลของ handoff outcome ล่าสุด (`no_available_admin` ตอน queued; handoff reason ตอน assigned; `null` เมื่อไม่มี) |
 | `inbound_reopen_event_id` | string? | message_id ของ inbound event ที่ชนะ fenced CAS (closed/resolved→bot) — CAS loser/retry เทียบ identity แล้ว settle audit idempotently; ไม่มี index ใหม่ |
+| `handoff_event_id` | string? \| null | dedupe identity ของ handoff transition ล่าสุด — เขียนใน CAS เดียวกับ ownership (`commitHandoffState`); side-effect emissions (`chat_assigned`/`conversation.handoff`/`conversation.open`/reopen stamp) เป็น eid-idempotent → emit หลัง commit + re-emit บน converge ใดๆ ไม่ทำซ้ำ (**ไม่มี pending-settlement phase — caller ใดก็ emit/repair ได้**) |
+| `handoff_reopened` | boolean? | commit นี้เป็น reopen จริงหรือไม่ — fenced truth: fence มี `status:{$in:[closed,resolved]}` เมื่อ caller claim reopen → `true` ⟹ prior ปิดจริง ณ CAS time (ไม่ใช่ stale read) |
+| `handoff_actor` | string? \| null | actor ของ transition (persisted — converge/repair emit ด้วย attribution เดิม) |
+| `handoff_reason` | string? \| null | caller free-text reason ของ transition (persisted — เหมือนกัน) |
 | `updated_at` | Date | |
 
 **⚠️ สำคัญ:** Source of truth สำหรับ admin-owned meta — ไม่โดน sellcenter dump ทับ
@@ -931,7 +939,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
 | Read | getMeta, getMetaMap | `/admin/conversations`, assign/handoff/resolve/close/reopen routes |
-| Write/Update | upsertMeta, updateStatus, manualAssign, tryAssign, closeConversation, reopenConversation, setTopic, setItemIds, togglePinned, resetUnread, applyInboundOwnershipTransition | ทุก mutation route + `POST /api/internal/inbound-lifecycle` (external writer hook) |
+| Write/Update | upsertMeta, updateStatus, closeConversation, reopenConversation, setTopic, setItemIds, togglePinned, resetUnread, commitHandoffState, assignPendingTicket, applyInboundOwnershipTransition | ทุก mutation route + `POST /api/internal/inbound-lifecycle` (external writer hook); **ownership assignment ทั้งหมด (auto+direct) ผ่าน `commitHandoffState` เท่านั้น** |
 | Delete | ไม่มี | |
 
 **หน้าที่เข้าถึง:** `/tickets` (จริง), ทุก conversation mutation route

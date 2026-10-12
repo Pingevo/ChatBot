@@ -10,7 +10,7 @@
 import { NextRequest } from "next/server";
 import { json, error, readJson } from "@/backend/lib/http";
 import { serverConfig } from "@/backend/lib/config";
-import { handoffService } from "@/backend/service/handoffService";
+import { handoffService, handoffOutcomeHttpStatus, type HandoffOutcome } from "@/backend/service/handoffService";
 import { conversationService } from "@/backend/service/conversationService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { invalidateConversationsCache } from "@/app/api/admin/conversations/route";
@@ -96,6 +96,25 @@ export async function POST(req: NextRequest) {
     return error(`invalid test_source: ${body.test_source}`, 422);
   }
 
+  // ⚡ uniform typed truth — test/simulate paths ต้องคืน outcome เดียวกับ production
+  //   (Python อ่าน outcome.state เท่านั้น ไม่ derive จาก ok/compat fields)
+  //   in_flight = claim/op พิสูจน์ไม่ได้ → failed retryable (503) ไม่ใช่ queued โกหก
+  const testOutcome = (r: {
+    assignedTo: string | null; assignedToName: string | null;
+    reopened: boolean; assignmentReason: string; in_flight?: boolean;
+  }): HandoffOutcome =>
+    r.in_flight
+      ? { state: "failed", assigned_to: null, assigned_to_name: null, persisted: false,
+          reason: r.assignmentReason, error_code: "in_flight", reopened: false,
+          emit_incomplete: false }
+      : r.assignedTo
+        ? { state: "assigned", assigned_to: r.assignedTo, assigned_to_name: r.assignedToName,
+            persisted: true, reason: r.assignmentReason, error_code: null,
+            reopened: r.reopened, emit_incomplete: false }
+        : { state: "queued", assigned_to: null, assigned_to_name: null,
+            persisted: true, reason: "no_available_admin", error_code: null,
+            reopened: r.reopened, emit_incomplete: false };
+
   // ⚡ parallel sandbox path — test_source มี → เขียน test_status_conversation[source] เท่านั้น
   //   ไม่แตะ status_conversation/conversations จริง; claim → bot_claim_info บน test doc
   if (testSource) {
@@ -107,6 +126,22 @@ export async function POST(req: NextRequest) {
       source: testSource,
       assignedStatus: testSource === "botworker" ? "open" : "handoff",
     });
+    // ⚡ classify outcome ก่อน side effects — failed/in_flight ต้อง return non-2xx
+    //   ก่อนเขียน claim metadata / success audit / cache invalidation
+    const tOutcome = testOutcome(result);
+    const tBody = {
+      ok: tOutcome.state !== "failed",
+      simulate: true,
+      test_source: testSource,
+      outcome: tOutcome,
+      assigned_to: result.assignedTo,
+      assigned_to_name: result.assignedToName,
+      reopened: result.reopened,
+      assignment_reason: result.assignmentReason,
+    };
+    if (tOutcome.state === "failed") {
+      return json(tBody, handoffOutcomeHttpStatus(tOutcome));
+    }
     // claim info → bot_claim_info บน test doc (แทน test_chat_sessions/conversations)
     if (claim && Object.keys(claim).length > 0) {
       try {
@@ -140,15 +175,7 @@ export async function POST(req: NextRequest) {
       });
     }
     invalidateBotworkerCache();
-    return json({
-      ok: true,
-      simulate: true,
-      test_source: testSource,
-      assigned_to: result.assignedTo,
-      assigned_to_name: result.assignedToName,
-      reopened: result.reopened,
-      assignment_reason: result.assignmentReason,
-    });
+    return json(tBody, handoffOutcomeHttpStatus(tOutcome));
   }
 
   // ⚡ Phase 2J — Simulate mode ใช้ test_status_conversation (ไม่กระทบ status_conversation จริง)
@@ -161,6 +188,20 @@ export async function POST(req: NextRequest) {
       reason: reason || "simulate handoff",
       source: "test_chat",
     });
+    // ⚡ classify outcome ก่อน side effects — failed/in_flight return non-2xx ก่อน claim write
+    const sOutcome = testOutcome(result);
+    const sBody = {
+      ok: sOutcome.state !== "failed",
+      simulate: true,
+      outcome: sOutcome,
+      assigned_to: result.assignedTo,
+      assigned_to_name: result.assignedToName,
+      reopened: result.reopened,
+      assignment_reason: result.assignmentReason,
+    };
+    if (sOutcome.state === "failed") {
+      return json(sBody, handoffOutcomeHttpStatus(sOutcome));
+    }
     // เก็บ claim info ลง test_chat_sessions เหมือนเดิม (ถ้ามี)
     if (claim && Object.keys(claim).length > 0) {
       try {
@@ -173,14 +214,7 @@ export async function POST(req: NextRequest) {
         );
       } catch { /* ignore */ }
     }
-    return json({
-      ok: true,
-      simulate: true,
-      assigned_to: result.assignedTo,
-      assigned_to_name: result.assignedToName,
-      reopened: result.reopened,
-      assignment_reason: result.assignmentReason,
-    });
+    return json(sBody, handoffOutcomeHttpStatus(sOutcome));
   }
 
   // ดึง conversation เพื่อหา shop_id/platform
@@ -189,13 +223,34 @@ export async function POST(req: NextRequest) {
     return error("conversation not found", 404);
   }
 
-  // 1. Handoff ให้แอดมิน (assign คืน admin เดิมก่อน ถ้าไม่มี → round-robin)
-  const result = await handoffService.handoffToAdmin({
+  // 1. Handoff ให้แอดมิน — typed outcome จาก persisted state เท่านั้น
+  //    (assigned|queued|failed — caller ห้าม derive success จาก ok:true)
+  const outcome = await handoffService.handoffToAdmin({
     conversationId: conversation_id,
     shopId: conv.shop_id,
     platform: conv.platform,
     reason: reason || "warranty claim — bot handoff",
   });
+
+  // ⚡ failed/emit_incomplete ห้าม 2xx — Python transport ต้องเห็น retryable signal
+  const httpStatus = handoffOutcomeHttpStatus(outcome);
+  const respBody = {
+    ok: httpStatus < 300,
+    // ⚡ Phase 2B.2 — authoritative typed outcome (persisted state เท่านั้น)
+    outcome,
+    // compat fields — derive จาก outcome (Phase 2B.3 จะให้ Python อ่าน outcome โดยตรง)
+    assigned_to: outcome.assigned_to,
+    assigned_to_name: outcome.assigned_to_name,
+    reopened: outcome.reopened,
+    assignment_reason: outcome.reason,
+  };
+
+  // ⚡ failed → non-2xx ก่อน success metadata/cache side effects
+  //   (claim/handoff fields สื่อว่า handoff สำเร็จ — emit_incomplete ownership
+  //    persisted แล้วจึงเดิน path นี้ได้: claim metadata refresh ซ้ำได้อย่างปลอดภัยตอน retry)
+  if (outcome.state === "failed") {
+    return json(respBody, httpStatus);
+  }
 
   // 2. บันทึก claim info ลง conversation metadata
   if (claim && Object.keys(claim).length > 0) {
@@ -208,6 +263,7 @@ export async function POST(req: NextRequest) {
         {
           $set: {
             bot_claim_info: claim,
+            // last write/refresh time ของ claim metadata — ไม่ใช่ ownership authority
             bot_handoff_at: new Date(),
             bot_handoff_reason: reason || "warranty_claim",
           },
@@ -219,143 +275,16 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 3. Log admin event
-  await logAdminEvent({
-    action_type: "conversation.handoff",
-    actor: "bot",
-    conversation_id,
-    metadata: {
-      assigned_to: result.assignedTo,
-      assigned_to_name: result.assignedToName,
-      reopened: result.reopened,
-      reason,
-      assignment_reason: result.assignmentReason,
-      claim,
-    },
-  });
+  // audit = handoffService owner เดียว (committed outcomes เท่านั้น) — route ไม่ log ซ้ำ
 
   invalidateConversationsCache();
   invalidateBotworkerCache();
 
-  // 4. ส่งแจ้งเตือน (best-effort — ถ้ามี notification service)
+  // ส่งแจ้งเตือน (best-effort — ถ้ามี notification service)
   // TODO: เชื่อมกับ notification service (telegram/line/email) ถ้ามี
   // ตอนนี้ log ไว้ก่อน
   // 🔒 ไม่ log PII (assigned_to_name, reason) ไปยัง stdout — audit log ใน DB พอแล้ว
-  console.log(`[bot-handoff] conversation=${conversation_id} assigned_to=${result.assignedTo} assignment_reason=${result.assignmentReason}`);
+  console.log(`[bot-handoff] conversation=${conversation_id} outcome=${outcome.state} assigned_to=${outcome.assigned_to} reason=${outcome.reason}`);
 
-  return json({
-    ok: true,
-    assigned_to: result.assignedTo,
-    assigned_to_name: result.assignedToName,
-    reopened: result.reopened,
-    assignment_reason: result.assignmentReason,
-  });
-}
-
-// ── Simulate handoff — จำลองการจ่ายงานโดยไม่กระทบ conversations จริง ──
-// เก็บประวัติ assign ลง test_chat_sessions เท่านั้น
-// ใช้ session_id ของ test chat เป็น conversation_id
-async function simulateHandoff(
-  sessionId: string,
-  shopId?: string,
-  platform?: string,
-  reason?: string,
-  claim?: BotHandoffBody["claim"]
-) {
-  const { ObjectId } = await import("mongodb");
-  type TestChatSessionDoc = {
-    _id: typeof ObjectId.prototype;
-    assigned_to?: string | null;
-    assigned_to_name?: string | null;
-    assignment_reason?: string | null;
-    assignment_history?: unknown[];
-  };
-  const adminDb = await getCollection<TestChatSessionDoc>(COLLECTIONS.testChatSessions);
-
-  // หา admin ที่จะรับงาน — ใช้ logic เดียวกับ handoffService แต่ไม่เขียน conversations
-  // Step 1: เช็ค assigned_to เดิมใน session
-  const session = await adminDb.findOne({ _id: new ObjectId(sessionId) as never });
-  let assignedTo: string | null = session?.assigned_to || null;
-  let assignmentReason = "unknown";
-
-  // Step 2: ถ้าไม่มี → round-robin (เรียก pickNextAgent โดยตรง ไม่ผ่าน autoAssignConversation)
-  // ⚡ Phase 2D — แก้ bug: เดิมเรียก autoAssignConversation({ conversation_id: "sim_xxx" })
-  //   แต่ sim_xxx ไม่มีใน conversations → findOneAndUpdate ล้มเหลว → คืน null
-  //   แต่ pickNextAgent ขยับ cursor ไปแล้ว → replay ครั้งถัดไปได้ admin คนใหม่ทุกครั้ง
-  //   แก้: เรียก pickNextAgent โดยตรง + เก็บใน test_chat_sessions (ไม่ต้อง atomic update conversations)
-  if (!assignedTo) {
-    try {
-      const { assignmentService } = await import("@/backend/service/assignmentService");
-      const mode = await assignmentService.getActiveAssignmentConfig();
-      const { poolKey, orderedAgentIds } = await assignmentService.buildPool(
-        mode,
-        { shop_id: shopId || "", platform: platform || "shopee" },
-        "test_chat"
-      );
-      if (orderedAgentIds.length > 0) {
-        const agentId = await assignmentService.pickNextAgent(poolKey, orderedAgentIds);
-        if (agentId) {
-          assignedTo = agentId;
-          assignmentReason = "round_robin: ไม่มี admin เดิม → จ่ายคิว (simulate)";
-        }
-      }
-    } catch (e) {
-      console.error("[bot-handoff:simulate] pickNextAgent failed:", e);
-    }
-  } else {
-    assignmentReason = "existing_assignment: มี admin ดูแลอยู่แล้ว (simulate)";
-  }
-
-  // ดึงชื่อ admin
-  let assignedToName: string | null = null;
-  if (assignedTo) {
-    try {
-      const adminColl = await getCollection<{ admin_id: string; name: string }>(COLLECTIONS.admins);
-      const admin = await adminColl.findOne({ admin_id: assignedTo });
-      assignedToName = admin?.name || null;
-    } catch { /* ignore */ }
-  }
-
-  // บันทึกลง test_chat_sessions — เก็บ assigned_to + assignment_history
-  const historyEntry = {
-    assigned_to: assignedTo,
-    assigned_to_name: assignedToName,
-    reason: reason || "simulate handoff",
-    assignment_reason: assignmentReason,
-    timestamp: new Date(),
-    claim: claim || null,
-  };
-  await adminDb.updateOne(
-    { _id: new ObjectId(sessionId) as never },
-    {
-      $set: { assigned_to: assignedTo, assigned_to_name: assignedToName, assignment_reason: assignmentReason, updated_at: new Date() } as never,
-      $push: { assignment_history: historyEntry } as never,
-    }
-  );
-
-  await logAdminEvent({
-    action_type: "conversation.handoff" as never,
-    actor: "bot",
-    conversation_id: sessionId,
-    metadata: {
-      assigned_to: assignedTo,
-      assigned_to_name: assignedToName,
-      reason,
-      assignment_reason: assignmentReason,
-      simulate: true,
-      claim,
-    },
-  });
-
-  // 🔒 ไม่ log PII (assigned_to_name, reason) ไปยัง stdout
-  console.log(`[bot-handoff:simulate] session=${sessionId} assigned_to=${assignedTo}`);
-
-  return json({
-    ok: true,
-    simulate: true,
-    assigned_to: assignedTo,
-    assigned_to_name: assignedToName,
-    reopened: false,
-    assignment_reason: assignmentReason,
-  });
+  return json(respBody, httpStatus);
 }

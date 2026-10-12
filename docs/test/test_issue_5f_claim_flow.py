@@ -19,6 +19,21 @@ sys.path.insert(0, str(ROOT / "chatbot"))
 from shopeechat import warranty, warranty_flow  # noqa: E402
 from shopeechat.handoffs import detect_human_request  # noqa: E402
 
+# Phase 2B.2 — flag/reason emit เฉพาะ confirmed transport outcome (offline ไม่มี
+# admin server → stub success ที่ transport owner เดียว; callers resolve per-call)
+# monkeypatch fixture: restore หลังแต่ละ test → ห้ามรั่วข้าม module
+import pytest  # noqa: E402
+import shopeechat.app as _app_mod  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _stub_handoff_transport(monkeypatch):
+    monkeypatch.setattr(_app_mod, "_send_handoff", lambda *a, **k: {
+        "outcome": {"state": "assigned"},
+        "assigned_to": "a1", "assigned_to_name": "Admin One",
+        "assignment_reason": "round_robin",
+    })
+
 
 # ---------- name extraction hygiene ----------
 

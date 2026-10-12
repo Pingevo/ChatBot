@@ -841,7 +841,7 @@ async function main() {
       _id: "op_b4", status: "pending", owner_id: "w-dead", fencing_token: 5,
       lease_expires_at: new Date(Date.now() - 1000), created_at: new Date(),
     });
-    // ชะลอ cursor-read ของ caller แรกใน pickNextAgent — caller สอง exec เสร็จ
+    // ชะลอ cursor-read ของ caller แรกใน reserveNextAgent — caller สอง exec เสร็จ
     // (commit a1) ก่อน caller หนึ่งอ่าน cursor → ถ้าไม่มี ownership fencing
     // ทั้งคู่ exec → caller หนึ่งจะเห็น a1 แล้วจ่าย a2 (double-assign)
     let delayed = false;

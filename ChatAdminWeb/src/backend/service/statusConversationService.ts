@@ -11,6 +11,7 @@
 //   - closed_at, closed_by, close_count
 //   - pinned, topic, item_ids
 //   - updated_at
+import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { logAdminEvent } from "./adminLogService";
 import { closeHistoryService } from "./closeHistoryService";
@@ -31,7 +32,7 @@ export interface StatusConversationDoc {
   close_count?: number;
   // ⚡ pending backlog — handoff แล้วหา admin ไม่ได้ → รอ manual distributor จ่าย
   pending_assignment?: boolean;
-  assignment_reason?: string;
+  assignment_reason?: string | null;
   // other admin-owned fields
   pinned?: boolean;
   topic?: string;
@@ -39,6 +40,14 @@ export interface StatusConversationDoc {
   // ⚡ inbound lifecycle — message_id ของ inbound event ที่ชนะ CAS
   //   (loser/retry เทียบ identity แล้ว settle audit แบบ idempotent ได้)
   inbound_reopen_event_id?: string;
+  // ⚡ handoff transition truth — เขียนใน commit CAS เดียวกัน (ไม่มี pending-settlement phase):
+  //   handoff_event_id = dedupe identity ของ side-effect emissions (audit/reopen stamp)
+  //   handoff_reopened = fenced truth (commit apply ⟹ prior ปิดจริง)
+  //   handoff_actor/handoff_reason = transition attribution — caller ใดก็ emit ได้ถูกต้อง
+  handoff_event_id?: string | null;
+  handoff_reopened?: boolean;
+  handoff_actor?: string | null;
+  handoff_reason?: string | null;
   updated_at: Date;
 }
 
@@ -104,96 +113,6 @@ export async function updateStatus(
     });
   }
   return true;
-}
-
-/** อัปเดต assigned_to (atomic guard — กัน race condition) */
-export async function tryAssign(
-  conversationId: string,
-  agentId: string,
-  mode: string
-): Promise<boolean> {
-  const coll = await getCollection<StatusConversationDoc>(COLLECTIONS.statusConversation);
-  // atomic: ถ้ายังไม่มี assigned_to (หรือยังไม่มี doc) → assign ได้
-  // filter miss + upsert insert ชน unique(conversation_id) → E11000
-  //   = คนอื่น assign ชนะ race → แพ้ CAS คืน false (ห้ามโยน exception เป็น false-success)
-  let result;
-  try {
-    result = await coll.findOneAndUpdate(
-      { conversation_id: conversationId, $or: [{ assigned_to: null }, { assigned_to: { $exists: false } }] },
-      { $set: { assigned_to: agentId, assigned_at: new Date(), assignment_mode_used: mode, status: "handoff", updated_at: new Date() } },
-      { upsert: true, returnDocument: "after" }
-    );
-  } catch (e) {
-    if ((e as { code?: number })?.code === 11000) return false;
-    throw e;
-  }
-  // log เฉพาะเมื่อ assign สำเร็จจริง (CAS loser ห้ามบันทึก chat_assigned)
-  if (result) {
-    await logAdminEvent({
-      action_type: "chat_assigned",
-      actor: "system",
-      target_admin_id: agentId,
-      conversation_id: conversationId,
-      metadata: { mode_used: mode, atomic: true },
-    });
-  }
-  return !!result;
-}
-
-/** manual assign (admin กดรับช่วง/เปลี่ยนคน) — atomic guard แบบ "ทับได้ถ้ายังเป็นคนเดิมหรือยังไม่มี"
- *  เขียน statusConversation เท่านั้น (ไม่เขียน conversations ที่โดน dump ทับ)
- *  คืน true ถ้าสำเร็จ, false ถ้าโดนแย่งโดย admin อื่น
- */
-export async function manualAssign(
-  conversationId: string,
-  agentId: string,
-  previousAssignedTo: string | null | undefined,
-  actor: string
-): Promise<boolean> {
-  const coll = await getCollection<StatusConversationDoc>(COLLECTIONS.statusConversation);
-  // filter miss + upsert insert ชน unique(conversation_id) → E11000
-  //   = ถูกแย่งระหว่างรอ → คืน false (conflict) ไม่โยน exception
-  let result;
-  try {
-    result = await coll.findOneAndUpdate(
-      {
-        conversation_id: conversationId,
-        // ต้องยังเป็น assigned_to เดิม หรือยังไม่ assigned (กันทับคนอื่น)
-        $or: [
-          { assigned_to: previousAssignedTo ?? null },
-          { assigned_to: null },
-          { assigned_to: { $exists: false } },
-        ],
-      },
-      {
-        $set: {
-          assigned_to: agentId,
-          assigned_at: new Date(),
-          assignment_mode_used: "manual",
-          status: "handoff",
-          updated_at: new Date(),
-        },
-      },
-      { upsert: true, returnDocument: "after" }
-    );
-  } catch (e) {
-    if ((e as { code?: number })?.code === 11000) return false;
-    throw e;
-  }
-  if (result) {
-    await logAdminEvent({
-      action_type: "conversation.handoff",
-      actor,
-      target_admin_id: agentId,
-      conversation_id: conversationId,
-      metadata: {
-        assigned_to: agentId,
-        previous_assigned_to: previousAssignedTo || null,
-        mode: "manual",
-      },
-    });
-  }
-  return !!result;
 }
 
 /** ปิดแชท — บันทึก closed_at, closed_by, close_count + close_history */
@@ -282,19 +201,99 @@ export async function reopenConversation(opts: {
   return true;
 }
 
-/** ⚡ pending backlog — handoff แล้วหา admin ไม่ได้ → mark รอ distributor; จ่ายสำเร็จ → clear */
-export async function setPendingAssignment(
-  conversationId: string,
-  pending: boolean,
-  reason?: string
-): Promise<void> {
-  const fields: Partial<StatusConversationDoc> = { pending_assignment: pending };
-  if (pending) {
-    fields.status = "handoff";
-    fields.assigned_to = null;
-    if (reason) fields.assignment_reason = reason;
+/** ⚡ Phase 2B.2 — handoff outcome fenced writer (commit point เดียว)
+ *  adminId != null → assigned commit: status:handoff + owner + pending clear + close residue clear
+ *  adminId == null → queued commit: status:handoff + assigned_to:null + pending_assignment:true
+ *
+ *  fence (committed ⟹ real transition — no-op commit ห้ามเกิด กัน event identity หมุน):
+ *    - direct           → {assigned_to ∈ {expectedOwner, null, missing}} — reassign ได้ถ้า owner ไม่เปลี่ยน
+ *    - expectedOwner    → {assigned_to:expectedOwner, status:closed|resolved} — retained re-assert เฉพาะตอนยังปิด
+ *    - unowned          → {assigned_to null|missing} — กันทับผู้ชนะที่ commit ก่อน
+ *    - queued commit    → +{pending_assignment≠true} — ที่ queued อยู่แล้ว → miss → converge
+ *
+ *  transition truth เขียนใน CAS เดียวกัน (ไม่มี pending-settlement phase —
+ *  emissions เป็น eid-idempotent: emit หลัง commit + re-emit บน converge ใดๆ):
+ *    handoff_event_id (dedupe identity), handoff_reopened (fenced truth),
+ *    handoff_actor/handoff_reason (attribution — caller ใดก็ emit ได้ถูกต้อง)
+ *
+ *  คืน {committed, doc} — doc = after-doc (null = CAS miss); error อื่น → throw
+ */
+export async function commitHandoffState(opts: {
+  conversationId: string;
+  adminId: string | null;
+  expectedOwner?: string | null;
+  direct?: boolean;
+  mode?: string;
+  reason?: string;
+  callerReason?: string;
+  actor?: string;
+  eventId?: string;
+  reopened?: boolean;
+}): Promise<{ committed: boolean; doc: StatusConversationDoc | null }> {
+  const coll = await getCollection<StatusConversationDoc>(COLLECTIONS.statusConversation);
+  const unowned = [{ assigned_to: null }, { assigned_to: { $exists: false } }];
+  let fence: Document;
+  if (opts.direct) {
+    // reassign command — claim iff owner ยังเป็น expectedOwner หรือยังว่าง
+    fence = {
+      conversation_id: opts.conversationId,
+      $or: opts.expectedOwner != null
+        ? [{ assigned_to: opts.expectedOwner }, ...unowned]
+        : unowned,
+    };
+  } else if (opts.expectedOwner != null) {
+    // retained-owner re-assert
+    fence = { conversation_id: opts.conversationId, assigned_to: opts.expectedOwner };
+  } else {
+    // unowned claim — queued target กัน no-op commit บน conv ที่ queued อยู่แล้ว
+    fence = { conversation_id: opts.conversationId, $or: unowned };
+    if (opts.adminId == null) fence.pending_assignment = { $ne: true };
   }
-  await upsertMeta(conversationId, fields);
+  // caller อ่านว่า conv ปิดอยู่ → commit เฉพาะตอน status ยัง closed/resolved จริง
+  //   → handoff_reopened persist เป็น true ได้ก็ต่อเมื่อ prior ปิดจริง (flag = truth ไม่ใช่ stale read)
+  if (opts.reopened === true) fence.status = { $in: ["closed", "resolved"] };
+  const now = new Date();
+  const transition = {
+    handoff_event_id: opts.eventId ?? null,
+    handoff_reopened: opts.reopened === true,
+    handoff_actor: opts.actor ?? null,
+    handoff_reason: opts.callerReason ?? null,
+  };
+  const set: Partial<StatusConversationDoc> = opts.adminId != null
+    ? {
+        status: "handoff",
+        assigned_to: opts.adminId,
+        assigned_at: now,
+        assignment_mode_used: opts.mode || "handoff",
+        assignment_reason: opts.reason ?? null,
+        pending_assignment: false,
+        closed_at: null,
+        closed_by: null,
+        ...transition,
+        updated_at: now,
+      }
+    : {
+        status: "handoff",
+        assigned_to: null,
+        assigned_at: null,
+        pending_assignment: true,
+        assignment_reason: opts.reason || "no_available_admin",
+        closed_at: null,
+        closed_by: null,
+        ...transition,
+        updated_at: now,
+      };
+  try {
+    const doc = await coll.findOneAndUpdate(
+      fence,
+      { $set: { conversation_id: opts.conversationId, ...set } },
+      { upsert: true, returnDocument: "after" }
+    );
+    return { committed: true, doc: (doc as StatusConversationDoc | null) ?? null };
+  } catch (e) {
+    if ((e as { code?: number })?.code === 11000) return { committed: false, doc: null };
+    throw e;
+  }
 }
 
 /** ⚡ backlog distributor — assign ตรงให้ pending ticket (re-check ว่ายัง pending อยู่ กัน race) */
@@ -430,11 +429,9 @@ export const statusConversationService = {
   getMeta,
   getMetaMap,
   updateStatus,
-  tryAssign,
-  manualAssign,
   closeConversation,
   reopenConversation,
-  setPendingAssignment,
   assignPendingTicket,
+  commitHandoffState,
   applyInboundOwnershipTransition,
 };

@@ -5,7 +5,7 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { conversationService } from "@/backend/service/conversationService";
-import { statusConversationService } from "@/backend/service/statusConversationService";
+import { handoffService, handoffOutcomeHttpStatus } from "@/backend/service/handoffService";
 import { invalidateConversationsCache } from "@/app/api/admin/conversations/route";
 // ⚡ G-fix — invalidate botworker cache ด้วย (dynamic import กัน circular dep)
 async function invalidateBotworkerCache() {
@@ -33,24 +33,31 @@ export async function POST(
   const conv = await conversationService.getConversation(conversationId);
   if (!conv) return error("conversation not found", 404);
 
-  // ⚡ C1 — ใช้ statusConversationService.manualAssign (atomic guard + เขียน statusConversation)
-  //   ไม่เขียน conversations อีกต่อไป เพราะโดน sellcenter dump ทับทุก 2 วิ
-  //   อ่าน previousAssignedTo จาก statusConversation (source of truth) แทน conv.assigned_to
-  const meta = await statusConversationService.getMeta(conversationId);
-  const previousAssignedTo = meta?.assigned_to ?? null;
-
-  const ok = await statusConversationService.manualAssign(
+  // ⚡ Phase 2B.2 — direct assign ผ่าน persisted-outcome owner เดียว (commitHandoffState)
+  //   ไม่เขียน conversations เพราะโดน sellcenter dump ทับทุก 2 วิ
+  const outcome = await handoffService.handoffToAdmin({
     conversationId,
+    shopId: conv.shop_id,
+    platform: conv.platform,
+    reason: `manual assign by ${r.ctx.admin.admin_id}`,
     targetAdminId,
-    previousAssignedTo,
-    r.ctx.admin.admin_id
-  );
+    actor: r.ctx.admin.admin_id,
+  });
 
-  if (!ok) {
-    // conversation ถูกเปลี่ยน assigned_to ระหว่างที่เราตรวจ — ปฏิเสธ
+  // ⚡ emit_incomplete → 503 retryable (ownership kept — caller ลองใหม่ได้);
+  //   failed อื่น → non-2xx ตาม error_code (route contract เดียวกับ bot-handoff)
+  if (outcome.emit_incomplete || outcome.state === "failed") {
+    return error(
+      outcome.state === "failed" ? "assign failed" : "assign emitted but side-effects incomplete — retry",
+      handoffOutcomeHttpStatus(outcome)
+    );
+  }
+  if (outcome.assigned_to !== targetAdminId) {
+    // owner เปลี่ยนระหว่างรอ — รายงาน persisted winner (ไม่ใช่ stale guess)
     return json({
       ok: false,
       conflict: true,
+      assigned_to: outcome.assigned_to,
       message: "conversation was modified by another admin — please refresh",
     }, 409);
   }
