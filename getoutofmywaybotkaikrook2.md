@@ -20,9 +20,230 @@
 
 ## กำลังทำ (active)
 
-### 🔍 Phase 2B.1 — External Inbound Writer Audit/Closure (2026-10-13) · audit-only · ยังไม่ commit
+### 🔍 Phase 2B.2 — Typed Handoff Outcome @ assignment owner (2026-10-12) · audit + RED contract ก่อน · ยังไม่ commit
+
+- **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `b4fbc82` (docs atop `d403f0a` fix 2B.1) · working tree dirty เดิม = `llm.py` M + `getoutofmywaybotkaikrook2.md` M + untracked diag/testscript/architecture doc — **leftovers ไม่แตะ**
+- **scope**: ทำ `handoffToAdmin()` คืน `HandoffOutcome` typed (`assigned|queued|failed`) จาก persisted DB จริง แทน `{assignedTo nullable}`+`ok:true` ambiguous · bot-handoff route + caller ใน scope migrate · `queued` = durable `pending_assignment` (มีจริงใน code — backlogService/assignPendingTicket consume) · Python copy/flag = Phase 2B.3 boundary (audit map เท่านั้น ไม่แก้)
+- **safety**: ไม่ worker/Mongo จริง/.env/provider/LLM/Shopee API · fake Mongo+hooks เท่านั้น · ไม่แก้ external Sellcenter writer · ไม่ stage/commit · ไม่แก้ runtime ก่อน audit+RED เสร็จ
+- **baseline suite**: `test-ownership-transport.ts` **159/159 PASS** (ก่อนแตะ)
+
+#### 📋 Audit findings (PART 1-3, อ่านจาก code จริง)
+
+**caller/owner map (prod handoff command — 3 callers เท่านั้น)**
+
+| caller | file:line | path |
+|---|---|---|
+| Python bot handoff | `api/admin/conversations/bot-handoff/route.ts:193` | prod branch (internal secret) |
+| admin manual handoff | `api/.../[conversationId]/handoff/route.ts:32` | `json({ok,...result})` — no UI caller พบ |
+| workflow assign_ticket auto | `workflowEngine.ts:1361` | `res.handoff={agentId:assignedTo,reason}` |
+
+**owner layers วันนี้ (ใน handoffToAdmin เดียวมี write ≥4 จุด)**
+- `handoffToAdmin` L74-175: getConv → getMeta → `reopenConversation`(unfenced upsert, wasClosed) → keep/reuse `assigned_to` → preferPrevious → `autoAssignConversation`→`tryAssign`(CAS fence `assigned_to null|missing`) → `updateStatus`(unfenced upsert) → `setPendingAssignment`(unfenced upsert `assigned_to:null`!) → `conversation.handoff` log
+- route L223-235: `conversation.handoff` log ซ้ำอีก 1 (รวม handoff log ≤3 + chat_assigned ≤2 + conversation.open ≤1 = **audit ≤6 rows/1 handoff**)
+- `simulateHandoff` L258-361 = **DEAD CODE** (~104 บรรทัด — simulate branch เรียก handoffToAdminTest ไม่ใช่ตัวนี้)
+
+**false-success sites**
+1. route → `{ok:true, assigned_to:null}` ทั้ง queued/failed — Python แยกไม่ได้
+2. `conversation.handoff` log ยิงแม้ `assigned_to=null` (queued) + route ยิงซ้ำ
+3. Python `guards._escalate` set `handoff_to_admin=True` หลัง fire-and-forget `_send_handoff` (returns `{}` on error ≡ `{assigned_to:null}` on queued)
+4. **`setPendingAssignment` unfenced upsert `assigned_to:null` → loser race clobber winner's committed assignment** (bug จริง — ไม่ใช่แค่ ambiguity): A wins tryAssign → B's tryAssign miss → B `setPendingAssignment(true)` ทับ `assigned_to:null` ของ A
+5. reopen→assign-fail window: closed conv ถูก reopen (handoff) แล้ว selection เจอปัญหา/throw → ค้าง unowned+no pending marker
+6. `tryAssign` ไม่ clear `closed_at`/`pending_assignment` → residue ต้องพึ่ง write ตามหลัง
+
+**queued = durable จริง**: `status:"handoff" + assigned_to:null + pending_assignment:true` — backlogService query `pending_assignment:true`, `assignPendingTicket` CAS claim, `/api/assignment/backlog` + `/backlog` page consume — **ไม่ใช้ `status:"pending"`** เพราะ (a) flag คือ durable marker เดิมที่ pipeline ทั้งสายอ่าน (b) UI filter มีแค่ `all|bot|handoff|closed` — queued ที่ status=pending จะหลุดจาก tab "ส่งต่อแอดมิน" (regression) (c) prompt: contract ต้องตรง DB จริง
+
+**outcome forms วันนี้**: `{assignedTo,assignedToName,reopened,assignmentReason}` + null-ambiguity + throw + route `ok:true` + Python `{}` — caller เดา 4 แบบ
+
+**implementation plan (minimal, owner เดิม)**:
+- `statusConversationService.commitHandoffState` (ใหม่ — fenced writer เดียว): `findOneAndUpdate(fence, $set, {upsert, returnDocument:"before"})` — fence `{assigned_to null|missing}` (fresh) หรือ `{assigned_to:X}` (closed+owner re-assert); assigned→`{status:handoff,assigned_to:X,assigned_at,mode,pending_assignment:false,closed_at:null,closed_by:null}`; queued→`{status:handoff,assigned_to:null,pending_assignment:true,reason,closed_at:null,closed_by:null}`; คืน `{committed,prior}` (prior=before doc → dedupe audit/transition; E11000→miss→caller converge)
+- `assignmentService.selectNextAgent` (extract จาก autoAssignConversation — shop-check+mode+buildPool+pickNextAgent) — autoAssignConversation refactor ใช้ตัวเดียวกัน (กัน duplicate selection logic)
+- `handoffToAdmin` → `Promise<HandoffOutcome>`: owned+!closed→converge assigned(0 write,0 log); closed+owner→commit re-assert; unowned→select→commit; miss→bounded re-read→converge; commit→settle reopen(wasClosed)+audit 1×; throw→failed
+- route: `{ok:true,outcome,assigned_to,...compat fields}` + ลบ log ซ้ำ; `[id]/handoff` spread outcome; workflowEngine auto → `handoff:{agentId,reason,state}`
+- ลบ dead `simulateHandoff`
+- out-of-scope inventory: handoffToAdminTest/test stores, manualAssign (explicit-admin CAS — assign route+workflow wantAdmin), assignPendingTicket (distributor CAS — status=handoff คงเดิมเข้ากันได้), reopen/close/resolve routes, Python (`_send_handoff`/`_escalate`/copy = 2B.3), external writer, bot_claim_info write (2B.6)
+
+#### ✅ RED→GREEN evidence (2026-10-12) · gate PASSES → implemented · ยังไม่ commit
+
+- **RED**: suite `test-ownership-transport.ts` + 13 tests (H1-H13) → **159/172** (H ทั้ง 13 FAIL honest — missing `.state`/`.outcome` contract + H7 race clobber จริง: loser `setPendingAssignment` ทับ winner `assigned_to:null`)
+- **Gate**: root cause+owner ชัด · RED honest (fakemongo รองรับ returnDocument:"before"/E11000/interleave hooks อยู่แล้ว) · ไม่มี arch ใหม่ (+1 method +1 extraction ใน owner เดิม) · outcome อยู่ใน handoffToAdmin เดิม · ไม่มี guard ซ้อน → **PASS → implement**
+- **Runtime changes**:
+  - `statusConversationService.commitHandoffState` (ใหม่ ~55 บรรทัด) — fenced writer เดียว: `findOneAndUpdate(fence,$set,{upsert,returnDocument:"before"})` fence `{assigned_to null|missing}`/`{assigned_to:X}`; assigned→`{status:handoff,owner,assigned_at,mode,pending_assignment:false,closed_at:null,closed_by:null}` / queued→`{status:handoff,assigned_to:null,pending_assignment:true}`; E11000→miss
+  - `assignmentService.selectNextAgent` (extract) — pure selection ใช้ร่วม autoAssignConversation+handoffToAdmin
+  - `handoffToAdmin` → `Promise<HandoffOutcome>`: owned+!closed→converge(0 write/log); select→commit; miss→re-read converge; committed→prior-doc dedupe → audit 1× (chat_assigned+conversation.handoff / queued→handoff only) + reopen settle ผ่าน recordReopen
+  - route bot-handoff: `outcome` + compat fields + **ลบ route handoff log ซ้ำ + dead `simulateHandoff` ~105 บรรทัด**
+  - `[id]/handoff` route + workflowEngine auto assign_ticket → consume outcome (+`state` ใน handoff result)
+- **GREEN**: **172/172 PASS** (H1-H13 ครบ + 159 เดิม) · tsc --noEmit clean · `next build` pass · `git diff --check` clean · regression: workflow-phase1 69/0, workflow-phase6 69/0, admin-logs-pagination 57/0, shadow-batch-isolation 22/0 (e2e ข้าม — real Mongo)
+- **SRS/schema**: อัปเดต SRS rows (handoffService/statusConversationService/assignmentService/route transport) + schema.md (assignment_reason field, commitHandoffState writer)
+- **bug ที่แก้จริง**: (a) race clobber — loser `setPendingAssignment` unfenced upsert ทับ `assigned_to:null` ของ winner (b) audit ≤6 rows/handoff → 1-2 หลัง commit (c) `assignedTo:null` ambiguity → typed state 3 ค่า (d) dead simulateHandoff (e) reopen→pending-fail window — commit เดิมคลุม close residue
+
+#### 🔍 Phase 2B.2 review-fix (2026-10-13) — independent review 2 High + 2 Medium · TDD RED→GREEN · ยังไม่ commit
+
+- **PART 0 verify (code จริงทั้ง 5 ข้อ = CONFIRMED)**:
+  1. `handoffToAdmin` post-CAS settle (`recordReopen`/`logAdminEvent`×2) throw → catch คืน `failed/persisted:false` ทั้งที่ meta committed แล้ว; retry ชน early-converge → audit/close-history ไม่ถูกซ่อมถาวร (ไม่มี durable unsettled marker)
+  2. `workflowEngine` auto คืน `{handoff:{agentId:null,state:"failed"}}` → `botWorkerService.settleWorkflowResult` เช็ก `wfResult.handoff ? "handed_off"` (presence-only) → failed กลายเป็น handed_off + `ref:null`; audit `workflow.assign_ticket` ยิง unconditional
+  3. workflow direct `admin_id` ใช้ `manualAssign():boolean` (parallel boolean owner — ไม่ clear pending/closed residue) + CAS แพ้คืน `meta?.assigned_to` (stale pre-race ไม่ใช่ persisted winner)
+  4. `pickNextAgent` เขียน cursor ใน selection ก่อน `commitHandoffState` — duplicate/concurrent 1 assignment กิน 2 ตำแหน่งคิว
+  5. catch ใส่ `e.message` ดิบลง `outcome.reason` → route `console.log` + API response — Mongo URI/query/newline leak
+- **RED gate**: suite **173/180** — I1/I2 settle-throw คืน `failed/persisted:false` ทั้งที่ commit แล้ว · I4 workflow auto failed ยัง surface `handoff` · I6 direct คืน untyped `{agentId}` · I7 CAS loser คืน stale `admin-1` แทน persisted winner · I8 1 assignment กิน cursor 2 ตำแหน่ง · I9 Mongo URI+credential+query+newline leak ผ่าน `outcome.reason`/route log · I5 queued pin PASS · 172 เดิมเขียวครบ zero regression
+- **design gate (ผ่าน — ไม่มี infra ใหม่)**: unsettled marker = `handoff_settled:false`+`handoff_event_id`+`handoff_reopened`+`handoff_rr_pool_key` persist **ใน commit CAS เดียวกัน** · stable identity = eid จาก committing caller (retry อ่านจาก doc ไม่ gen ใหม่) · audit dedupe ผ่าน `logAdminEvent(eventId)` sha256 `_id` เดิม · `markHandoffSettled` fenced บน eid · single owner = `handoffToAdmin({targetAdminId,actor})` (`manualAssign` ลบ — callers 2 จุด migrate) · cursor = `peekNextAgent` (no write) → commit persist poolKey → settle `markCursorAssigned(committed owner)` หลัง commit เท่านั้น · `failed` ไม่ surface `EngineResult.handoff` (type `Exclude<HandoffOutcomeState,"failed">` กัน compile-time)
+- **ผ่านแล้ว (Review-Fix Impl, 2026-10-13):**
+  - `statusConversationService.commitHandoffState` — tightened fences (committed ⟹ real transition: direct→owner∈{expected,null}, retained→assigned_to=expected, unowned→null, queued→+`pending_assignment≠true`, caller-claim-reopen→+`status∈{closed,resolved}` → `handoff_reopened` = fenced truth ไม่ใช่ stale read) + settlement marker ใน `$set` เดียวกัน + คืน after-doc · +`markHandoffSettled(convId,eid)` fenced clear · `manualAssign` ลบ
+  - `handoffService.handoffToAdmin` — crash-recovery: meta.`handoff_settled===false`→`settleHandoffTransition` ด้วย eid เดิม (recordReopen ตอน flag, `chat_assigned`+`conversation.handoff` audits, `markCursorAssigned`, eid-fenced clear — ทุก step idempotent) · settle throw → `{persisted:true,settled:false,error_code:"settle_error"}` ไม่ใช่ failed · CAS miss converge +ซ่อม settle ผู้ชนะ · `targetAdminId` direct-assign · sanitizer: catch→`{reason:"handoff failed",error_code:"handoff_error"}` (raw exception ไม่ออก outcome/API/stdout)
+  - `assignmentService` — `selectNextAgent`→`peekNextAgent` (cursor read-only, คืน poolKey) · +`markCursorAssigned(poolKey,agentId)` caller-owned post-commit · `autoAssignConversation` mark หลัง `tryAssign` สำเร็จ · `pickNextAgent` เหลือเป็น legacy test contract
+  - `workflowEngine assign_ticket` — prod direct `admin_id`→`handoffToAdmin({targetAdminId,actor:"workflow-engine"})` (CAS loser → persisted winner); prod auto+direct: `failed`→`{}` ไม่ surface handoff ไม่ยิง success audit; `EngineResult.handoff.state` = `Exclude<…,"failed">` → `botWorkerService.settleWorkflowResult` presence-check = `handed_off` ถูกต้องโดย type
+  - `[id]/assign` route — `manualAssign`→`handoffToAdmin({targetAdminId})`; 409 คืน persisted `assigned_to` ของผู้ชนะ
+  - `closeHistoryService.recordReopen` — audit-first คงไว้ (`conversation.open` eid-dedupe ก่อน stamp) — settle path เรียกด้วย `messageId=handoff_event_id`
+  - **Verify**: ownership transport **180/180** (I1–I9 ผ่าน + B1/B1b rewrite ผ่าน typed owner + H11 fenced-reopen แก้ regression รอบแรก) · workflow-phase1 69/0 · phase6 69/0 · admin-logs 57/0 · shadow-isolation 22/0 · botworker: idempotency 71/0, races 37/0, boundary 20/0, error-policy 38/0, recovery-freshness 59/0, mongo-safety 110/0, config-failclosed 4/0, enable-checkpoint 18/0 · `tsc --noEmit` ✓ · `next build` ✓ · `git diff --check` ✓
+  - Docs: SRS_SSD handoffService/assignmentService/statusConversationService/workflowEngine rows · schema.md +4 settlement fields +writer row +recordReopen callers
+  - กรณีพิเศษที่เจอระหว่าง impl: `onlyIfCloseRecord` gate ตอนแรกทำ H11 regression (closed conv ไม่มี close-history → open audit หาย) → root fix ที่ fence (`status∈{closed,resolved}` guard เมื่อ claim reopen) ทำให้ flag เป็น truth แทนการ gate ฝั่ง settle → param ถูกลบ
+  - **Verdict: `PHASE_2B2_ROOT_CAUSE_CLOSED`** — ยังไม่ stage/commit/push/deploy รอ review
+
+#### 🔍 Phase 2B.2 Architecture Correction (2026-10-13) — Settlement Liveness + Concurrent RR Correctness · audit/RED ก่อน · ยังไม่ commit
+
+- **PART 0 state diagram (code จริง)**:
+  ```
+  unowned/bot/closed → commit CAS {owner, eid, settled:false, reopened, rr_pool_key}
+    → settle: recordReopen? → chat_assigned? → conversation.handoff → markCursorAssigned? → markHandoffSettled(eid)
+    settled:true
+  ```
+  | transition | writer | retry | durable id | caller gets | process ตายตรงนั้น ใครปลุก |
+  |---|---|---|---|---|---|
+  | ownership commit | commitHandoffState CAS | CAS miss→converge re-read | meta doc | typed outcome | n/a (committed) |
+  | reopen stamp+open audit | settle→recordReopen | call ถัดไปเท่านั้น | eid | outcome.settled | **ไม่มี** |
+  | chat_assigned/handoff audit | settle→logAdminEvent | call ถัดไปเท่านั้น | eid dedupe | outcome.settled | **ไม่มี** |
+  | cursor mark | settle→markCursorAssigned | call ถัดไปเท่านั้น | pool_key doc | — | **ไม่มี** |
+  | settled flag | markHandoffSettled | call ถัดไปเท่านั้น | eid fence | — | **ไม่มี** |
+- **PART 0 findings (9/9 CONFIRMED)**:
+  1. `handoff_settled:false` ซ่อมเฉพาะ call ถัดไปของ `handoffToAdmin` — committed conv ล็อคบอท → Python ไม่ call ซ้ำ → **ไม่มี guaranteed repair owner**
+  2. bot-handoff route คืน 200 เมื่อ `settled:false` — Python `_send_handoff` best-effort **ไม่ retry non-2xx** (responses.py:94-99) + post-commit conv locked → ไม่มี second call ทั้งสองทิศ
+  3. workflow `failRun` = terminal (`status:"errored"`); `checkWaitTimeouts` scan เฉพาะ `waiting_for_reply`; completed run ไม่ retry → unsettled marker ทิ้งไว้
+  4. admin assign: human retry เท่านั้น (unguaranteed)
+  5. `peekNextAgent` read-only → conv X/Y พร้อมกัน peek cursor เดียวกัน → ได้ admin คนเดียวกันทั้งคู่ → rotation เสีย
+  6. `markCursorAssigned` unconditional update → event เก่า settle ช้าเขียนทับ cursor ของ transition ใหม่ (rewind)
+  7. `pickNextAgent` legacy wrapper (read+unconditional write — racy) ยัง exported ใช้โดย test path
+  8. CAS-loser converge คืน `settled` จาก pre-settle snapshot (m2 อ่านก่อน settle รัน)
+  9. `markHandoffSettled` ไม่เช็ก matchedCount
+- **caller inventory**: `commitHandoffState`→handoffToAdmin (prod owner เดียว) · `tryAssign`→autoAssignConversation+tests only · `autoAssignConversation`→tests only (botWorkerService = stale comment) · `setPendingAssignment`→tests only · `pickNextAgent`→doHandoffToAdminTest only · `peekNextAgent`→selectNextAgent · `markCursorAssigned`→settle+autoAssign · `markHandoffSettled`→settle · `reassignConversation`→/api/assignment/reassign (distinct admin-transfer command — ไม่กินคิว) · `assignPendingTicket`→backlogService (distinct queued→assigned command) · `recordReopen`→settle+reopenConversation+applyInbound (reopen side-effect owner เดียว)
+- **key code evidence**: `assignment_cursors.pool_key` มี unique index อยู่แล้ว (mongoClient.ts:152) → atomic CAS-claim ทำได้โดยไม่ต้องเพิ่ม index · `failRun`→`status:"errored"` terminal · `checkWaitTimeouts` leader-gated แต่ scan เฉพาะ waiting_for_reply · Python no-retry verified
+- **PART 1 RED (180/189 — 9 honest fails)**: J1/J2/J9 `settled`/`handoff_settled`/`handoff_rr_pool_key` marker ยังอยู่ · J3 committed-but-never-emitted doc → converge ไม่ emit → audits=0 (permanent gap) · J4 legacy paths ยังอยู่ · J5 `x=admin-1 y=admin-1` (multi-conv race reproduce) · J6 cursor=undefined (commit-miss ไม่ consume) · J7/J8 next=admin-2 (rewind/re-consume) — 180 เดิมเขียวครบ
+- **PART 2 architecture gate (PASS — zero new infra)**: settlement → **Option A' marker-free single-phase** (Option A caller-retry FAIL: Python best-effort no-retry + workflow failRun terminal + admin human-only; Option B extend checkWaitTimeouts = เพิ่ม background recovery → stop-trigger + couples web correctness กับ worker liveness; Option C transaction ไม่มี topology evidence) — ไม่เพิ่ม owner ให้ pending state แต่**ลบ pending state**: ownership CAS = guaranteed durable phase เดียว; emissions = eid-idempotent emit หลัง commit + re-emit ทุก converge (dedupe = free repair); residual = audit gap iff emit-fail+no-later-call (same window as marker design, detectable ผ่าน eid — precedent: `applyInboundOwnershipTransition` run model เดียวกันอยู่แล้ว) · RR → **reservation-order** (committed-order exact ข้าม 2 collections เป็นไปไม่ได้โดยไม่มี txn; `reserveNextAgent` = atomic CAS-claim `{pool_key,last:observed}→{last:next}` บน unique index เดิม; commit-miss→forfeit bounded skip; ไม่มี cursor write หลัง commit → rewind เป็นไปไม่ได้ by construction)
+- **ผ่านแล้ว (Architecture Impl, 2026-10-13):**
+  - `statusConversationService` — fields: `-handoff_settled -handoff_rr_pool_key +handoff_actor +handoff_reason` (transition truth ครบ — caller ใดก็ emit ด้วย attribution เดิม); `commitHandoffState` opts `-rrPoolKey +callerReason +actor`; **ลบ `markHandoffSettled`/`tryAssign`/`setPendingAssignment`** (parallel ownership/settlement paths)
+  - `assignmentService` — **`reserveNextAgent`** = cursor writer เดียว (atomic CAS-claim bounded 3: stale-observer loses→re-read); `selectNextAgent` คืน `{agentId,mode}`; **ลบ `peekNextAgent`/`pickNextAgent`/`markCursorAssigned`/`autoAssignConversation`**
+  - `handoffService` — `HandoffOutcome` ลบ `settled` (outcome = ownership truth only); `settleHandoffTransition`→`emitHandoffSideEffects` (persisted attribution, ไม่มี cursor, ไม่มี clear); `handoffToAdmin`: ลบ settle-pending block; converge/CAS-miss/post-commit ทุกจุด `tryEmitHandoff` (emit fail→warn เท่านั้น outcome ยัง truth); commit ส่ง `callerReason`/`actor`; `doHandoffToAdminTest` ใช้ `reserveNextAgent`
+  - tests — +J1–J9 (9 tests); **ลบ** B2/B5/B7/B9/B10/I8 (test-only functions + superseded contract); B6 re-seed ผ่าน seedMeta
+  - **Verify**: ownership transport **183/183** · workflow-phase1 69/0 · phase6 69/0 · admin-logs 57/0 · shadow-isolation 22/0 · botworker: idempotency 71/0, races 37/0 (B4 op-fence ผ่านใต้ reservation semantics), boundary 20/0, error-policy 38/0, recovery-freshness 59/0, mongo-safety 110/0, config-failclosed 4/0, enable-checkpoint 18/0 · `tsc --noEmit` ✓ · `next build` ✓ · `git diff --check` ✓
+  - Docs: SRS_SSD handoffService/assignmentService/statusConversationService rows · schema.md status_conversation +4 transition fields (−2 marker fields) + assignment_cursors access + writer list + recordReopen callers
+  - **Complexity**: functions −7 (`tryAssign`/`setPendingAssignment`/`autoAssignConversation`/`markHandoffSettled`/`peekNextAgent`/`pickNextAgent`/`markCursorAssigned`) +2 (`reserveNextAgent`/`emitHandoffSideEffects`+`tryEmitHandoff`); durable fields 4→4 (settled/rr_pool_key → actor/reason); ownership writers 1 (`commitHandoffState`); cursor writers 1 (`reserveNextAgent`); settlement-retry owners 0 (ไม่มี pending phase); outcome fields −1
+  - **Verdict: `PHASE_2B2_ARCHITECTURE_ROOT_CLOSED`** — residual documented (audit gap iff emit-fail+no-later-call, detectable via eid) · ยังไม่ stage/commit/push/deploy รอ review
 
 - **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `4c5e57a` (docs) atop `ad13494` (fix) · working tree dirty เดิม = `llm.py` modified + untracked `diag-worker-dup*`, `quarantine_rollback*`, `test_vision_dedupe`, architecture-audit doc — **leftovers ไม่แตะ**
+
+## Phase 2B.2 Final Root-Cause Correction — transport truth (2026-10-13, รอบ 3)
+
+- **เป้าหมาย**: 4 findings จาก independent review — A. contention กลายเป็น no_available_admin, B. route 200 ตอน failed, C. emit failure ถูก swallow ไม่มี repair caller, D. SRS contract เก่าซ้ำ — แก้ contract ต้นทาง ไม่เพิ่ม subsystem
+- **PART 0 audit — CONFIRMED ทั้งหมด**:
+  - A. `reserveNextAgent:155` return `null` รวม no-eligible+contention → `selectNextAgent.agentId:null` → `handoffToAdmin:222` → `desired:null` → commit `adminId:null` = **queued+`no_available_admin` persisted** ทั้งที่ eligible admins มี — contention เขียนสถานะโกหก durable
+  - B. `bot-handoff/route.ts:234` `json({ok:true,outcome,...})` — **200 ทุก state** incl. failed; `responses._send_handoff:87-93` คืน body บน 2xx ใดๆ (ไม่อ่าน outcome) → caller เห็น truthy
+  - C. `tryEmitHandoff:138-147` swallow emit error → outcome `persisted:true` → route 200 → Python หยุด — **repair caller ไม่มี** (bot หยุดตอบหลัง handoff → converge-emit ไม่มีใครเรียก) — mechanism มีแต่ไม่มี signal
+  - D. `SRS_SSD.md:985` tail มี stale block `commitHandoffState({conversationId,adminId,fenceOwner?...})→{committed,prior}` ขัด contract ใหม่ `{adminId,expectedOwner,direct,mode,reason,callerReason,actor,eventId,reopened}→{committed,doc}`
+  - **Python caller audit**: `_send_handoff` no-retry คืน `{}` ทุก failure; **11+ call sites** claim `handoff_to_admin=True`+คำตอบ "ส่งแอดมิน" โดยไม่อ่านผล: handoffs.py:328/388/600, order_flow.py:212/317, chat_v2.py:568/592, warranty_flow.py:1699/1925/2047, guards._escalate:384 — **app.py:4353 no_product_found ตั้ง flag=True โดยไม่มี transport call เลย** · direct urllib blocks: warranty_flow.py:762-801 (v2 builder), :976-1002 (tax follow-up fire-and-forget ไม่อ่าน response!), chatbotv3/engine.py:90 `_send_handoff_to_admin` (USE_CHAT_V3 production-reachable — impl ที่ 3) · `_maybe_clear_claim_state` (:805,:1731) clear บน attempt ไม่ใช่ผลจริง · `check_output(handoff_sent=True)` ข้าม output-policy ทั้งหมด — flag ปลอม = ปิด validation
+- **Design gate (PASS — zero new infra)**: (1) `reserveNextAgent`→discriminated `ReservationResult{result:"reserved",agentId}|"no_eligible_agent"|"contention"`; `selectNextAgent` propagate; `handoffToAdmin` map contention→`failed{reservation_contention}` **ก่อน commit — ไม่ persist อะไร**; (2) `emitHandoffSideEffects`→`Promise<boolean>` (merge tryEmitHandoff — ไม่ swallow อีกต่อไป); `HandoffOutcome.emit_incomplete` = transport signal (ไม่ใช่ durable marker — ownership truth ไม่ย้อน); (3) `handoffOutcomeHttpStatus(outcome)` shared mapper: failed→404/503/500 ตาม error_code, emit_incomplete→503, else 200 — test_source/simulate สร้าง outcome เดียวกัน (in_flight→failed→503); (4) Python `_send_handoff` = transport owner เดียว — `_post_handoff` bounded retry (same bytes→same identity): 2xx+outcome∈{assigned,queued}→body; 2xx+failed/no-outcome→None; 401/403/404/422→None immediate; 408/429/5xx/network/timeout→retry ≤3; caller ทุก site gate flag+answer บนผลจริง (shared `_HANDOFF_FAILED_ANSWER` copy); urllib dup blocks → `_send_handoff`; chatbotv3 → `_post_handoff` เดียวกัน · residual: emit-fail+retry-exhausted → audit gap (detectable ผ่าน eid) — report ตรงๆ ไม่ claim guaranteed
+- **RED evidence (ห้าม patch ก่อน)**:
+  - TS `test-ownership-transport.ts` **181/194** — RED 13: K1–K4 (typing/selection→queued เท็จ) · K6–K8/K10–K11 (route/test-path HTTP+outcome) · I1/I2/J1/J2 (emit_incomplete signal เดิมไม่มี) · K5 real CAS interleave + K9 queued-pin PASS แล้ว (reservation core รอด)
+  - Python `docs/test/test_handoff_transport.py` **12/29** — RED 17: T3/T4 (2xx+failed/ไม่มี outcome → truthy) · T5/T6/T9/T10 (zero retry) · C1–C5 (callers claim ส่งแอดมินบน exhaustion — flag=True+claim answer) · C6 (v3 ไม่มี retry) · C4a เผย test bug → answer ชน keep-collecting guard ("ได้รับข้อมูล") แก้เป็น terminal answer แล้ว
+- **กำลังทำ**: implementation — TS typed selection + emit_incomplete + route status mapper; Python `_send_handoff` bounded retry + caller gating + urllib consolidation; SRS stale-block rewrite
+- **ผ่านแล้ว (รอบ 3 — 2026-10-13)**:
+  - TS: `AgentSelection{reserved|no_eligible_agent|contention}` ที่ `reserveNextAgent` (CAS-miss ครบ cap→contention ไม่ใช่ null); `selectNextAgent` propagate+mode; `handoffToAdmin` map contention→`failed{reservation_contention}` ก่อน commit (zero durable write); `emitHandoffSideEffects`→boolean → `emit_incomplete` บนทุก outcome (ownership คงอยู่); `handoffOutcomeHttpStatus`: assigned/queued→200, `conversation_not_found`→404, failed/emit_incomplete→503 sanitized; assign/handoff admin routes ใช้ mapper เดียวกัน; `handoffToAdminTest` contention→`in_flight` ไม่ใช่ no_available_admin
+  - Python: `_send_handoff` = transport owner เดียว — `dict|None`, typed outcome เป็น authority (2xx+assigned/queued เท่านั้น), 4xx-permanent→None ทันที, 408/429/5xx/network→retry ≤3 payload เดิม; `HANDOFF_FAILED_REPLY` shared; callers ทุก site gate flag+answer+claim-clear บนผลจริง (handoffs×3, order_flow×2, chat_v2×3 incl. `_no_product_guard`, guards._escalate, warranty builder+tax+legacy block, app.py no_product_found — เดิม flag=True โดยไม่มี transport เลย)
+  - Consolidation: direct urllib handoff blocks ลบ 3 (warranty_flow ×2, chatbotv3 → delegate `_send_handoff`) + warranty_flow legacy transport block (~70 บรรทัด dup ของ `_build_warranty_claim_response` — crash บน None + flag ไม่ gate) → delegate builder เดียว
+  - SRS: ลบ stale `commitHandoffState({fenceOwner})→{committed,prior}` tail ซ้ำ · outcome +`emit_incomplete` · assignmentService typed selection · transport row HTTP matrix · `_send_handoff`/`_send_handoff_to_admin` contract ใหม่
+  - Test bug fix: `forceCursorMiss` เดิม set `last=pool[n%len]` ชน observed ได้ → sentinel คนละค่าเสมอ (K2/K6/K10/K11 เขียวหลังแก้ harness ไม่ใช่ prod)
+  - **Verify สด**: TS ownership **194/194** (K1–K11 ครบ) · Python **29/29** · error-policy 38 · idempotency 71 · races 37 · recovery 59 · boundary 20 · mongo-safety 110 · config 4 · enable 18 · py_compile 8 files · `tsc --noEmit` 0 · `npm run build` ✓ (84/84) · `git diff --check` ✓
+  - Residual (ตรงๆ): emit-fail+retry-exhausted+ไม่มี call ถัดไป → audit gap ถาวร (detectable ผ่าน `handoff_event_id` ไม่ใช่ guaranteed repair — ไม่มี durable outbox); contention→failed ทำให้ลูกค้าได้ fallback reply + conv ยัง bot-owned (bot ตอบต่อได้ ไม่ใช่งานหาย)
+  - **Verdict: `PHASE_2B2_TRANSPORT_TRUTH_CLOSED`** — 4 findings ปิดที่ต้นทาง · ไม่มี helper/subsystem ใหม่ · ยังไม่ stage/commit/push/deploy รอ review
+
+#### Legacy Path Closure (2026-10-13, รอบ 4 — 2 High + 1 Medium)
+
+- **PART 0 audit — CONFIRMED**:
+  - L-tax: `warranty_flow.handle_warranty_flow_legacy` ~1800-1847 — duplicate ของ canonical `_handle_tax_invoice_followup` (trigger logic เหมือนกัน verbatim) แต่ `_send_handoff` ทิ้งผล + `handoff_to_admin=True` unconditional + answer claim ส่งแอดมินเสมอ
+  - L-first: `handle_warranty_flow_legacy` ~1942-1981 — `_send_handoff` คืน `None` ได้ แต่เรียก `.get()` ทันที (AttributeError บน transport fail) + `handoff_to_admin=True` unconditional; canonical `_handle_first_message_claim`→`_build_warranty_claim_response` มี truth gating อยู่แล้ว
+  - T-src: `bot-handoff/route.ts` test_source branch — `handoffToAdminTest` return แล้วเขียน claim metadata (`bot_claim_info`/`bot_handoff_at`) + `logBotworkerEvent(bot_handoff)`/`logAdminEvent(conversation.handoff)` + `invalidateBotworkerCache` **ก่อน** `testOutcome` classify — `in_flight→failed→503` แต่ side effects เขียนไปแล้ว; `simulate` branch บัคเดียวกัน (claim write ก่อน sOutcome)
+- **Plan**: delegate ไม่ใช่ patch — legacy tax → `_handle_tax_invoice_followup`; legacy first-message → `_build_warranty_claim_response` (claim_ctx เดียวกับ canonical: `{"claim_topic":"เคลม/ซ่อม/ประกันสินค้า"}` = reason "warranty_claim" เหมือนเดิม; answer "รบกวนแจ้งข้อมูล" → keep-collecting guard รอด ไม่ clear stage); route → คำนวณ `tOutcome`/`sOutcome` ทันทีหลัง handoffToAdminTest + early return failed ก่อน side effects ทั้งสอง branch
+- **RED baseline (ก่อนแก้ — fail จาก behavior จริงทั้งหมด)**:
+  - Python `test_handoff_transport.py`: **32/35** — L1b (exhausted → flag=True + "ส่งต่อแอดมิน" answer), L2b (`AttributeError: 'NoneType' object has no attribute 'get'` บน transport fail), L2c; success paths L1a/L2a ผ่าน
+  - TS `test-ownership-transport.ts`: **194/196** — K12 (in_flight → 503 แต่ `bot_claim_info`+`bot_handoff_at` เขียนลง test_status_conversation ก่อน classify), K13 (simulate เขียน `bot_claim_info` ลง test_chat_sessions ก่อน sOutcome)
+- **Fixes (error → cause → fix → impact)**:
+  - L-tax: exhausted 503 → `handoff_to_admin=True` + "ส่งต่อแอดมิน" answer → legacy block duplicate ของ canonical ทิ้งผล `_send_handoff` → delegate `_handle_tax_invoice_followup` (owner เดิม, `tax_invoice_handoff` label เหมือนกัน) → tax branch เดิน canonical gating; canonical ได้ `intent`/`timing` จาก ctx คืบค่าที่ legacy เคย emit
+  - L-first: transport fail → `AttributeError 'NoneType'.get` / `handoff_to_admin=True` → inline `_send_handoff`+`.get`+flag unconditional → เก็บ troubleshoot-first/`auto_ctx`/`update_claim_state` แล้ว delegate tail → `_build_warranty_claim_response(claim_ctx={claim_topic, handoff_reason:"warranty_claim"}, source="warranty_claim_first_message")` → crash หาย, flag ตาม outcome, claim state เดิม (ask-info marker → ไม่ clear), `handoff_reason="warranty_claim"`/`reason`/simulate/timeout เหมือนเดิม; eval `_POLICY_SOURCES` ไม่กระทบ
+  - L-review (เจอเพิ่ม ระหว่าง audit): legacy review block ~84 บรรทัด duplicate `_handle_review_request` verbatim (extraction/name-filter/answer/flag เหมือนกัน) → delegate — flag semantics เดิม (mid-flow marker, future-tense answer)
+  - T-src: in_flight → claim metadata+bot_handoff audit+cache invalidation เขียนก่อน classify → `tOutcome`/`sOutcome` คำนวณทันทีหลัง `handoffToAdminTest` + early return failed → failed 503 side effects=0; success → side-effect path เดิม; retry converge exactly-once (K12)
+  - Builder: `source` param (default `warranty_claim_flow`) + emit `intent`/`timing` จาก ctx (pattern เดียวกับ `steps`/`image_desc_out`) → legacy fields ไม่หาย, callers เดิมไม่กระทบ
+- **GREEN**: Python **35/35** · TS ownership **196/196** · error-policy **38/38** · idempotency **71 passed** · production-races **37 passed** · recovery-freshness **59/59** · boundary **20/20** · mongo-safety **110 passed** · config-failclosed **4/4** · enable-checkpoint **18 passed** · `tsc --noEmit` 0 · `npm run build` ✓ · `py_compile` ✓ · `git diff --check` clean
+- **Audit**: `_send_handoff` call sites ทั้งหมด truth-gated (guards/builder/tax/order×2/app/chat_v2×3/handoffs×3/engine) · literal `handoff_to_admin=True` เหลือ 2 จุด — review marker (future-tense mid-flow) + post-handoff lock (persisted ticket_state) · helpers ใหม่ = 0 · transport owners = 1
+- **Test-contract fix**: `test_issue_5f_handoff`/`test_issue_5f_claim_flow` 8 tests pin old lying contract (unstubbed transport → flag/reason unconditional) → stub `_send_handoff` success ที่ app module + `conversation_id` ใน `_req` → 47 passed + 3 xfailed (HEAD baseline 33/39 เดิม) · SRS rows อัปเดต: builder `source` param + intent/timing, review/tax delegation, route ordering invariant
+- **Verdict**: legacy path closure เสร็จ — tax/review/first-message delegate canonical owner เดียว, test/simulate classify ก่อน side effects, runtime net ≈ −134 LOC (warranty_flow −145 / route +11), ยังไม่ stage/commit/push/deploy
+
+#### Review-Fix (2026-10-13, รอบ 5 — 2 High + 1 Medium จาก independent review)
+
+- **PART 0 audit — CONFIRMED ทั้ง 3**:
+  - F1: `warranty_flow.py:1150` legacy review delegate ส่ง `(warranty, _app_module, llm)` แต่ signature คือ `(_warranty_mod, llm, _app_module)` — swapped 2 ตัวท้าย → production review path crash `AttributeError: module 'shopeechat.app' has no attribute 'split_segments'` (app มี `_routing` แต่ไม่มี `split_segments`; llm มี `split_segments` แต่ไม่มี `_routing`)
+  - F2: `bot-handoff/route.ts` production branch — เขียน `bot_claim_info`/`bot_handoff_at`/`bot_handoff_reason` + invalidate caches ก่อน `handoffOutcomeHttpStatus` classify → failed outcome ทิ้ง success metadata (ต่างจาก test/simulate ที่แก้รอบก่อน)
+  - F3: `test_issue_5f_{handoff,claim_flow}.py` — `_app_mod._send_handoff = lambda` ที่ module import, ไม่ restore → process-global mutation รั่วข้าม module
+- **Contract check (F2-D)**: `handoffOutcomeHttpStatus` — emit_incomplete→503, state≠failed→200, failed→404/503; `emit_incomplete` = persisted assigned/queued → claim metadata เขียนได้ (ownership จริงเกิด), เกณฑ์คือ `state==="failed"` เท่านั้นที่ early-return
+- **RED baseline**:
+  - Python transport: **35/37** — L3a crash `AttributeError split_segments` (production entry จริง), L3b res=None — พิสูจน์ F1
+  - pytest: **42 passed, 1 failed** — `test_handoff_transport_owner_not_globally_stubbed` เห็น lambda (name `<lambda>`) — พิสูจน์ F3 leak
+  - TS ownership: **199/200** — K14 `bot_claim_info`/`bot_handoff_at`/`bot_handoff_reason` เขียนลง conversations doc บน failed — พิสูจน์ F2; K15/K16/K17 pin keep-behaviors (assigned/queued/emit_incomplete เขียน claim ได้)
+- **Minimal fix (3 edits, 0 helper ใหม่)**:
+  - `warranty_flow.py:1150` — argument order `(warranty, llm, _app_module)` ให้ตรง signature
+  - `bot-handoff/route.ts` production — ย้าย `handoffOutcomeHttpStatus`+respBody ขึ้นหลัง `handoffToAdmin` ทันที, `state==="failed"` early-return ก่อน claim write/cache invalidation (assigned/queued/emit_incomplete เดิน success path เดิม)
+  - `test_issue_5f_{handoff,claim_flow}.py` — module-level `_app_mod._send_handoff = lambda` → `@pytest.fixture(autouse=True)` + `monkeypatch.setattr` (restore ทุก test)
+- **SRS_SSD.md line 109**: ordering invariant ขยายครอบ production branch
+- **GREEN**: transport **37/37** · ownership **200/200** (K14 ผ่าน + K15-17 pin) · pytest **48 passed, 3 xfailed** (isolation test ผ่าน — stub restore) · error-policy 38 · idempotency 71 · production-races 37 · recovery-freshness 59 · boundary 20 · mongo-safety 110 · config-failclosed 4 · enable-checkpoint 18 · py_compile ✓ · tsc 0 · build ✓ · diff-check clean
+- **Audit**: `_handle_review_request` callers 2 จุด (V2:261 + legacy:1150) — argument order ตรง signature ทั้งคู่; ทุก branch ของ route classify ก่อน success side effects; classifier owner = `handoffOutcomeHttpStatus` ตัวเดียว
+- **Verdict**: `PHASE_2B2_LEGACY_PATH_REVIEW_FIXED` — runtime delta รอบนี้ ≈ +9 LOC (route reorder), warranty_flow ±0 (arg swap), ยังไม่ stage/commit/push/deploy
+
+#### Retry-Idempotency Evidence Correction (2026-10-13, รอบ 6 — test-honesty + 1 defect)
+
+- **PART 0 audit**: `bot_handoff_at` ไม่มี contract semantic ที่ไหนเลย (schema.md:1000 = bare `Date?`, reset script ถือ 3 fields เป็น handoff-episode marker เดียวกัน) → ยึดหลักข้อมูลไม่โกหก: retry logical handoff เดิมห้ามเลื่อนเวลาความสำเร็จแรก → **Case C**
+- **RED**: K17 retry — `bot_handoff_at` เลื่อนจาก `05:23:22.114Z` → req2 time (write ซ้ำทับทุก field) — defect จริง: claim write block `$set: new Date()` ไม่เช็คค่าเดิม
+- **Fix (minimal, update block เดิม)**: `bot_handoff_at: (conv as {bot_handoff_at?: Date}).bot_handoff_at ?? new Date()` — `conv` ถูก fetch ก่อน handoff อยู่แล้ว → อ่านค่าเดิมได้ฟรี, claim fields ยัง refresh ทุก attempt, 0 helper/query ใหม่
+- **K15**: เปลี่ยนจาก assert terminal value → วัดจริงผ่าน `queryLog` (updateOne conversations) = 1 write/req
+- **K17**: retry payload เดิมจริง → converge `existing_assignment` 200 + `bot_handoff_at` คงเดิม + claim intact + retry write = 1 + audit eid-dedupe เติมพอดี 2 events (chat_assigned + conversation.handoff)
+- **GREEN**: ownership **200/200** · error-policy 38 · boundary 20 · config-failclosed 4 · idempotency 71 · production-races 37 · recovery-freshness 59 · mongo-safety 110 · enable-checkpoint 18 · tsc 0 · build ✓ · diff-check clean · Python suites ไม่ได้รัน (ไม่มี Python file เปลี่ยน)
+- **Verdict**: `PHASE_2B2_RETRY_IDEMPOTENCY_FIXED` — runtime delta +1 LOC (expression เดิม), ยังไม่ stage/commit/push/deploy
+
+#### Handoff-Episode Timestamp Correction (2026-10-13, รอบ 7)
+
+- **PART 0 audit**: `existing_assignment` เป็น converge signal เพียวๆ ไม่ได้ — retained-owner commit ตอน conv closed ใช้ reason เดียวกัน (handoffService:212-215→319) แต่ commit path นั้น `reopened:true` เสมอ (fence ต้อง status closed) → compound `reason==="existing_assignment" && !outcome.reopened` = converge เดิมเท่านั้น (code-provable)
+- **Residual**: queued converge (`no_available_admin`,`reopened:false`) ชนกับ fresh queued commit — outcome เดิมแยกไม่ได้ โดยไม่แตะ handoffService → รายงานไว้ ไม่เดาสัญญาณ
+- **RED**: K18 — episode1 assigned → close (`statusSvc.closeConversation` จริง) → reopen bot (assigned_to cleared) → req2 `round_robin` commit ใหม่ — `bot_handoff_at` คง T1 เดิม (stale preserve)
+- **Fix**: expression เดิมใน claim write block — preserve `conv.bot_handoff_at` เฉพาะ `(existing_assignment && !reopened)`, นอกนั้น `new Date()`; 0 query/helper เพิ่ม (conv/outcome อยู่ในมือแล้ว)
+- **GREEN**: ownership **201/201** — K17 retry คง T1, K18 episode ใหม่ T2>T1 + audit per-episode exactly-once (2 docs/action = 2 eids); error-policy 38 · boundary 20 · config-failclosed 4 · enable-checkpoint 18 · idempotency 71 · recovery-freshness 59 · mongo-safety 110 · production-races 37 · tsc 0 · build ✓ · diff-check clean · Python suites ไม่รัน (ไม่มี Python diff)
+- **Docs**: schema.md §2.6 เพิ่ม 3 rows (bot_claim_info/bot_handoff_at/bot_handoff_reason + episode semantics); SRS line 109 เพิ่ม `bot_handoff_at` contract
+- **Verdict**: `PHASE_2B2_HANDOFF_EPISODE_TIMESTAMP_CLOSED` — runtime +4 LOC (expression conditional), ยังไม่ stage/commit/push/deploy
+
+#### Structural Episode Contract (2026-10-13, รอบ 8)
+
+- **Root cause**: `HandoffOutcome` ไม่มี structural truth ว่า outcome อยู่ episode เดิม/ใหม่ → route เดาด้วย `reason==="existing_assignment"` (queued converge แยกไม่ได้ + keyword collision retained-commit)
+- **Fix**: เพิ่ม `episode: "started"|"continued"|"none"` (type `HandoffEpisode`) ที่ HandoffOutcome + HandoffTestResult (type คนละตัว — sync ตาม contract); return sites: failedOutcome→none, converge assigned/queued→continued, CAS-miss→started (winner commit = episode ใหม่), committed→`wasClosed?started:(assigned_to||pending_assignment?continued:started)` — ครอบ direct transfer + queued→assigned upgrade; test path: in_flight/contention→none, recovered→continued, final→same meta rule
+- **Route**: `outcome.episode==="continued"` แทน reason string (0 helper/query เพิ่ม); mapper pass-through `r.episode`
+- **RED baseline**: 196/203 — J2,K15,K16,K17,K18,K19,K20 ทั้งหมด `episode===undefined` (field ไม่มี); K19 queued retry เลื่อน T1 จริง
+- **GREEN**: **203/203** — K19 queued retry T1 คงเดิม + audit eid-dedupe 1 doc; K20 upgrade `continued` T1 คงเดิม + pending cleared + audit per-transition (chat_assigned 1 / handoff 2); K17 assigned retry T1; K18 new episode T2>T1
+- **Consumers audit**: assign/handoff routes + workflowEngine ใช้ state/emit_incomplete เท่านั้น — ไม่แตก; Python `_send_handoff` อ่าน `outcome.state` เดิม (ไม่ต้องรู้ episode); 0 helper/classifier เพิ่ม
+- **GREEN อื่น**: error-policy 38 · boundary 20 · config-failclosed 4 · enable-checkpoint 18 · idempotency 71 · recovery-freshness 59 · mongo-safety 110 · production-races 37 · tsc 0 · build ✓ · diff-check clean · Python suites ไม่รัน (ไม่มี Python diff)
+- **Verdict**: `PHASE_2B2_STRUCTURAL_HANDOFF_EPISODE_CLOSED` — 1 field ใหม่, ยังไม่ stage/commit/push/deploy
+
+#### Structural Episode Simplification (2026-10-13, รอบ 9 — YAGNI deletion)
+
+- **Correction**: รอบ 8 เพิ่ม `HandoffEpisode` เพื่อ semantics ของ `bot_handoff_at` — audit พิสูจน์ field นี้ **ไม่มี production/UI/metric reader เลย** (writers เท่านั้น + reset script) → machinery ทั้งหมดเป็น over-engineering → ลบออกทั้งหมด
+- **ลบ**: `HandoffEpisode` type + `episode` field จาก HandoffOutcome/HandoffTestResult + ค่าใน return sites ทั้งหมด + route import/mapper/preserve-conditional → `bot_handoff_at: new Date()` ธรรมดา
+- **Contract ใหม่**: `bot_handoff_at` = last write/refresh time ของ claim metadata — ไม่ใช่ authority/first-success/dedupe signal (authority = status_conversation + outcome.state เหมือนเดิม); failed ยัง zero-write
+- **เก็บไว้ครบ**: failed early-return, K14 zero-write, K15 write-count, K16 queued write, K17 emit_incomplete→503→converge+audit once, K18 close→reopen→handoff ใหม่, K19 queued retry converge+audit dedupe, K20 upgrade+pending cleared+audit per-transition — timestamp asserts ผ่อนเป็น `instanceof Date && >= t1` ตาม contract
+- **GREEN**: **203/203** · error-policy 38 · boundary 20 · config-failclosed 4 · enable-checkpoint 18 · idempotency 71 · recovery-freshness 59 · mongo-safety 110 · production-races 37 · tsc 0 · build ✓ · diff-check clean · Python ไม่รัน (ไม่มี Python diff)
+- **Complexity**: types −1 (HandoffEpisode), outcome fields −1 (episode), route classification logic −1, runtime refs `episode`/`HandoffEpisode` = 0 (rg verified)
+- **Verdict**: `PHASE_2B2_EPISODE_OVERENGINEERING_REMOVED` — runtime net ลดลง, ยังไม่ stage/commit/push/deploy
 - **เป้าหมาย**: พิสูจน์จาก code จริงว่า path รับข้อความ Sellcenter → persist inbound ไม่เขียน `open` ทับ `status_conversation` + กำหนด contract transition บน inbound ใหม่
 - **safety**: audit จาก code เท่านั้น · ไม่ worker/Mongo จริง/.env/provider/LLM · ไม่แก้ production runtime รอบนี้ · ไม่ guard/helper/flag อุดอาการ · owner เดียว = statusConversationService · ไม่ stage/commit
 - **writer graph audit (code เสร็จแล้ว)**:
@@ -2850,3 +3071,22 @@ S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mon
 - Complexity final: helpers/functions เพิ่ม 1 (`parseInboundTimestamp` local) · runtime modules/files เพิ่ม 1 (`inbound-lifecycle/route.ts`) · deps/config/env/indexes/collections เพิ่ม 0 · ownership owner 1→1 · ไม่มี abstraction layer/retry owner/guard family/parallel runtime path
 - Leftovers ไม่ถูกแตะ: llm.py · diag-worker-dup×5 · quarantine/vision×3 · architecture-audit doc
 - **Verdict: `PHASE_2B1_RUNTIME_COMMITTED_EXTERNAL_HOOK_PENDING`** — `BLOCKED_BY_EXTERNAL_WRITER_WIRING` ยังอยู่ · ไม่มี push/PR/deploy
+
+#### External Writer Audit (2026-10-13 — กำลังทำ, read-only TIMEBOX)
+- **Plan**: หา writer ตัวจริงที่ persist `messages_shp`/`conversations_shp` (role=user inbound) — sweep in-repo → sibling repos → topology → spec สิ่งที่ต้องขอจาก external owner
+- **ผ่านแล้ว (Writer Audit, read-only):**
+  - In-repo sweep: `messageService.addMessage` เขียน `messages_shp` แต่ caller เดียวคือ admin `/send` (role=admin, direction=out) · botWorkerService เขียน `shadow_replies` เท่านั้น (comment ชัด "ไม่เขียน messages_shp") · Python chatbot ไม่ resolve messages/conversations collections · `sync-shops.ts` อ่าน conversations_shp READ-ONLY เขียนเฉพาะ `shops` · bot-worker.ts = poll reader เท่านั้น → **ไม่มี in-repo inbound writer**
+  - Sibling repos sweep (`ChatbotPythonbackend/Chatbot/ChatbotPPing/ChatBotPDigg/ChatBotPhase1/biokoop chatbot/dataclean*`): zero code hits สำหรับ `messages_shp|conversations_shp` — `ChatBotPDigg` เป็น unified-inbox clone เขียน DB ตัวเอง (`zaapi_clone` mongoose `messages`/`conversations`), อ่าน sellcenter Mongo แค่ tokens — **ไม่ใช่ writer ของ admin DB นี้**
+  - Topology truth (SRS/DEPLOY): "Shopee (sellcenter mirror → MongoDB)" dump ทับ `conversations_shp`/`messages_shp`/`customers_shp`/`shops` ทุก ~2s ตรงลง shared `chatbot` Mongo (host :27017) — writer = **Sellcenter system (external infra)** ไม่มี service ใน docker-compose, ไม่มี process local
+  - Payload semantics: `created_timestamp` = platform time (message ที่แท้) → ใช้เป็น `inbound_at` ใน hook contract · `data_received_at` = writer persist time (debug field)
+  - **Verdict: `BLOCKED_BY_EXTERNAL_WRITER_REPO_REQUIRED`** — ต้องขอ Sellcenter repo/path + entrypoint จาก owner เพื่อวาง hook หลัง durable persist; receiver ไม่สร้าง caller ปลอม
+
+#### Phase 2B.2 Commit Closeout (2026-10-13 — ผ่านแล้ว)
+- Commit 1: `1c26317` `fix: make bot handoff outcomes authoritative` — 26 files +2721/−1023 (TS services/routes + Python bot + tests + SRS/schema)
+- Root causes ที่ปิด: legacy review swapped args (crash AttributeError) · failed handoff เขียน success metadata ก่อน classify · pytest transport stub leak ทั่ว global · reason-string ทาย episode ชน retained-commit · HandoffEpisode over-engineering → ลบ (YAGNI — `bot_handoff_at` ไม่มี reader เลย)
+- Verification (fresh ก่อน commit): ownership **203/203** · handoff-transport Python **37/37** · pytest 5 suites **59 passed 3 xfailed** · error-policy 38 · boundary 20 · config-failclosed 4 · enable-checkpoint 18 · idempotency 71 · recovery-freshness 59 · mongo-safety 110 · production-races 37 · py_compile 12 files OK · tsc 0 · build ✓ · diff-check clean
+- Complexity: types −1 (HandoffEpisode) · outcome fields −1 (episode) · route string-classification −1 · helpers/guards/modules/queries/config/index/collection เพิ่ม 0
+- Contract ปิดท้าย: `bot_handoff_at` = last claim-metadata refresh เท่านั้น (ไม่ใช่ authority/first-success/dedupe signal) · failed → zero success side effects · emit_incomplete → 503 retryable · authority = status_conversation + outcome.state
+- Leftovers ไม่ถูกแตะ/ไม่ถูก stage: llm.py (vision URL dedupe — งานอื่น) · diag-worker-dup×5 · quarantine/vision×3 · architecture-audit doc
+- Residual blockers: `BLOCKED_BY_EXTERNAL_WRITER_REPO_REQUIRED` ยังอยู่ · ไม่มี push/PR/deploy/worker/provider/real Mongo
+- **Verdict: `PHASE_2B2_HANDOFF_CLOSED_AND_COMMITTED`**
