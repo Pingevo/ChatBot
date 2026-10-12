@@ -3114,3 +3114,10 @@ S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mon
 - Leftovers ไม่แตะ: `.gitignore` (user's diag ignore) · `llm.py` · vision/quarantine×3 · architecture-audit · diag-worker-dup×5 (ignored, on disk)
 - Residual: `BLOCKED_BY_EXTERNAL_WRITER_REPO_REQUIRED` ยังอยู่ · ไม่มี push/PR/deploy/worker/provider/real Mongo
 - **Verdict: `PHASE_2B2_HANDOFF_CONTRACT_CORRECTED_AND_COMMITTED`**
+
+#### Leftover Cleanup + Commit Preparation (2026-10-13 — กำลังทำ)
+- **Scope**: ปิด working-tree leftovers แยก ownership ชัดเจน — vision URL dedupe (`llm.py` + focused test), architecture audit snapshot, และ local incident-tool ignore เท่านั้น
+- **Safety decision**: `diag-worker-dup*.ts` และ `quarantine_rollback*.py` เป็น local incident artifacts; rollback พึ่ง gitignored export และมี `--apply` เขียน DB จริง จึงเก็บบน disk แต่ไม่ commit source จนกว่าจะออกแบบ safety gate ใหม่
+- **Commit plan**: vision fix+test แยก · architecture audit docs-only แยก · `.gitignore` แยก · active log closeout แยก; exact-path staging เท่านั้น ห้าม `git add -A`
+- **ผ่านแล้ว (Leftover Cleanup Closeout)**: vision test 4/4 + py_compile ผ่าน (API keys loaded=0) → `6f29145` `fix: dedupe vision image URLs` (2 files) · architecture snapshot → `43bef5c` `docs: add current system architecture audit` (1 file; trailing whitespace แก้ก่อน commit) · local incident ignores → `9c1b779` `chore: ignore local incident diagnostics` (`.gitignore` only)
+- **Final state target**: tracked/untracked status ว่าง; diag-worker×5 + quarantine×2 ยังอยู่บน disk แต่ถูก ignore; ไม่มี worker/provider/Mongo/`.env`/push/PR/deploy
