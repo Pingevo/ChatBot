@@ -128,9 +128,19 @@ def _norm(v):
     return v
 
 
+def _get_path(doc: dict, path: str):
+    """Resolve a dotted Mongo path — returns (value, present)."""
+    cur = doc
+    for p in path.split("."):
+        if not isinstance(cur, dict) or p not in cur:
+            return None, False
+        cur = cur[p]
+    return cur, True
+
+
 def _match(doc: dict, filt: dict) -> bool:
     for k, cond in (filt or {}).items():
-        val = doc.get(k)
+        val, present = _get_path(doc, k) if "." in k else (doc.get(k), k in doc)
         if isinstance(cond, dict):
             if "$in" in cond:
                 if _norm(val) not in {_norm(x) for x in cond["$in"]}:
@@ -412,6 +422,11 @@ def _install(monkeypatch, fx: dict):
     monkeypatch.setenv("USE_CHAT_V3", "0")
     monkeypatch.setenv("USE_LEGACY_CHAT", "1")
     monkeypatch.setenv("USE_UNIT_INDEX", "0")
+    # ADMIN_MONGO_DB: .env overrides the module-level setdefault when a
+    # sibling test file imported shopeechat.app first — re-pin per test so
+    # _admin_db() routes to the seeded db, never an env-shadowed one
+    monkeypatch.setenv("ADMIN_MONGO_DB", ADMIN_DB)
+    monkeypatch.setenv("MONGO_DB", PRODUCT_DB)
     monkeypatch.setattr(runtime_config, "grouped_retrieval_shadow_enabled",
                         lambda: bool(flags.get("grouped_shadow", False)))
     monkeypatch.setattr(runtime_config,
@@ -492,11 +507,13 @@ def _install(monkeypatch, fx: dict):
     monkeypatch.setattr(order_store, "lookup_by_tracking",
                         lambda tn, shop_filter=None: None)
 
-    # handoff POST seam
+    # handoff POST seam — capture the call and report a confirmed outcome
+    # (the transport's own bounded-retry/state parsing lives in
+    # test_handoff_transport.py; here a stub success is the honest model)
     def _fake_send(req, ctx=None, *, reason="", **kw):
         handoff_calls.append({"reason": reason, "conversation_id":
                               getattr(req, "conversation_id", None)})
-        return {}
+        return {"outcome": {"state": "assigned"}}
     monkeypatch.setattr(app, "_send_handoff", _fake_send)
     try:
         from shopeechat import responses as _resp_mod

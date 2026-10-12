@@ -1411,8 +1411,22 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `active_item_id` | string \| int? | anchor ล่าสุด |
 | `order_anchors` | array? | list ของ order ที่ลูกค้าส่งมา {order_sn, mentioned_at, ...} |
 | `active_order_sn` | string? | order ล่าสุด (อัปเดตทุกครั้งที่มี order anchor ใหม่) |
-| `claim_state` | object? | warranty claim state — {customer_name, customer_phone, customer_order_id, ...} merge-fill โดย `warranty_flow` |
+| `claim_state` | object? | warranty claim episode — ดู field breakdown ด้านล่าง (2B.4) |
 | `last_updated` | Date | |
+
+**Indexes:** `{conversation_id: 1} unique sparse` — declared ที่ index owner `ChatAdminWeb/src/backend/db/mongoClient.ts::ensureIndexes` ผ่าน `COLLECTIONS.conversationProducts` (config.ts) — Python request path ไม่สร้าง index; **deploy gate: `BLOCKED_BY_CONVERSATION_PRODUCTS_UNIQUENESS_AUDIT`** — ต้อง census duplicate + ยืนยัน index บน real DB ก่อนถือว่า production-safe
+
+**claim_state fields (Phase 2B.4 — lifecycle owner = `warranty_flow._claim_transition`, storage = `transition_claim_state`/`merge_claim_fields`):**
+| Field | Type | หมายเหตุ |
+|-------|------|---------|
+| `episode_id` | string | uuid ต่อ episode — absent/terminal+fresh claim → ค่าใหม่เสมอ |
+| `stage` | string | `collecting`/`ts_suggested` (open) · `resolved`/`cancelled` (terminal) — **lifecycle authority เดียว**; doc ที่มีแต่ slot fields ไม่มี stage = absent |
+| `started_at` | ISO string | เวลาเริ่ม episode (reset ทุก episode ใหม่) |
+| `updated_at` | ISO string | เวลา transition ล่าสุด |
+| `resolved_at` | ISO string? | เวลาเข้า terminal stage |
+| `resolution_reason` | string? | valid producer เดียวตอนนี้ `troubleshoot_confirmed` (customer ยืนยันแก้สำเร็จ); admin event = Phase 2B.6 |
+| `customer_name`/`customer_phone` | string? | **identity allowlist** — reuse ข้าม episode ได้ |
+| `customer_order_id`/`purchase_date`/`has_image`/`has_video` | various | **case evidence — ไม่ข้าม episode**; terminal episode เก็บเป็น audit record |
 
 **product entry:** `{item_id, name, source: user_item_card|user_variation_card|user_order|bot_suggestion, mentioned_at, is_anchor, card?}`
 
@@ -1420,7 +1434,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
 | Read | load_timeline, get_active_product, get_suggestion_latest, resolve_active_by_message, get_active_order_sn, get_order_anchors, load_claim_state | Python `/chat` (app.py, chat_v2, warranty_flow, order_flow) |
-| Write/Update | save_timeline, add_product, add_order_anchor, update_claim_state, clear_claim_state | Python `/chat` |
+| Write/Update | save_timeline, add_product, add_order_anchor, transition_claim_state (fenced episode+stage CAS — new-episode whole-state only, insert+E11000 reconcile), merge_claim_fields (fenced episode+stage dotted partial update — same-episode field merge AND terminal transition) | Python `/chat` |
 
 **หน้าที่เข้าถึง:** ไม่มี UI ตรง — Python bot ใช้ภายใน
 

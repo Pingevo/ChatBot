@@ -102,6 +102,10 @@ export const serverConfig = {
     // ⚡ BW-2 — worker coordination state (singleton leader lease doc)
     //   runtime state แยกจาก config — ห้ามใส่ใน system_configs
     botworkerState: required("ADMIN_MONGO_COLLECTION_BOTWORKER_STATE", "botworker_state"),
+    // ⚡ Phase 2B.4 — Python-owned conversation_products (timeline/claim episodes)
+    //   declared here เพื่อให้ unique index {conversation_id:1} อยู่ที่ index owner
+    //   เดียว (ensureIndexes) — Python request path ไม่สร้าง index
+    conversationProducts: required("ADMIN_MONGO_COLLECTION_CONVERSATION_PRODUCTS", "conversation_products"),
   },
   jwtSecret: requiredStrict("ADMIN_JWT_SECRET"),
   jwtAlgo: "HS256" as const,

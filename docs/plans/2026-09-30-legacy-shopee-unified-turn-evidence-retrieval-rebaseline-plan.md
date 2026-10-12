@@ -898,26 +898,38 @@ type ClaimOutcome = {
 
 **Exit:** response text, response metadata, and persisted ownership agree; one turn makes at most one handoff command.
 
-#### Commit 2B.4 — claim episode/lifecycle owner
+#### Commit 2B.4 — claim episode/lifecycle owner ✅ (working tree verified — pending review/commit)
 
-**Files:** modify `warranty_flow.py`, `conversation_products.py`, Phase 2A tests/fixtures, SRS/log. Do not create `claim_lifecycle.py` unless the reviewer proves deletion cannot keep `warranty_flow.py` understandable; the default is reuse and consolidate.
+**Files:** modified `warranty_flow.py`, `conversation_products.py`, `turn_decision.py`, `order_flow.py`, Phase 2A tests/fixtures, SRS/log.
 
-- [ ] RED-test terminal precedence, explicit fresh request after resolved, customer identity reuse, case-evidence reset, and bare contact data after terminal.
-- [ ] Add `episode_id` at `absent|resolved|cancelled -> collecting`; retain `customer_name/customer_phone` only through an explicit allowlist and clear prior case evidence.
-- [ ] Make one lifecycle evaluator produce `ClaimLifecycleView`. Replace and delete `_claim_collecting` slot-based activation.
-- [ ] Route stage changes through one transition owner; storage helpers remain persistence-only.
-- [ ] Un-xfail `p2a-claim-resolved-new-request` only when the executor and TurnDecision consumer use the same lifecycle view.
+- [x] RED-test terminal precedence, explicit fresh request after resolved, customer identity reuse, case-evidence reset, and bare contact data after terminal. → `test_phase2_claim_state_contract.py` (30 tests incl. race/idempotency: duplicate retry, concurrent fresh CAS, stale-writer fence, CAS-loser reread)
+- [x] Add `episode_id` at `absent|resolved|cancelled -> collecting`; retain `customer_name/customer_phone` only through an explicit allowlist (`_CLAIM_IDENTITY_FIELDS`) and clear prior case evidence.
+- [x] Make one lifecycle evaluator produce `ClaimLifecycleView` (`_claim_lifecycle`). Replaced and deleted `_claim_collecting` slot-based activation — including `order_flow`/`turn_decision` consumers.
+- [x] Route stage changes through one transition owner (`_claim_transition`); storage helpers `transition_claim_state`/`merge_claim_fields` are persistence-only fenced CAS primitives (no policy, no LWW, bounded reread on miss).
+- [x] Un-xfail `p2a-claim-resolved-new-request` — executor and TurnDecision consumer use the same lifecycle view (flipped to `positive`, green).
+- [x] Correction A applied: `_maybe_clear_claim_state`, `_TERMINAL_CLAIM_REASONS`, handoff-reason resolution, closed-ticket clears — all deleted as lifecycle authority; terminal evidence = ts-success confirm + persisted terminal stage only (admin events = 2B.6).
+- [x] Correction B applied: terminal transition preserves episode + collected evidence as audit record (`resolved_at`/`resolution_reason`); fresh episode reuses identity allowlist only.
+- [x] Correction C applied: fenced CAS (`expected_episode_id`, `$exists` for absent), single bounded reread on CAS miss, no unconditional replace.
+- [x] Correction D applied: history-marker lifecycle branches deleted (no second owner); `accepts_claim_fields` = `collecting` only.
+- [x] Correction E applied: `ClaimLifecycleView` single name, no parallel class.
 
-**Exit:** retained slots are audit data, not activation; a new incident has a distinct episode id.
+**Exit:** retained slots are audit data, not activation; a new incident has a distinct episode id. **Harness fix recorded:** `_install` now pins `ADMIN_MONGO_DB`/`MONGO_DB` per test — sibling module importing `shopeechat.app` first let `.env` (`ADMIN_MONGO_DB=chatbot`) shadow the seeded db and silently drop `claim_state`/anchor in the shadow sweep (pre-existing isolation gap, exposed when the history-marker fallback was deleted).
 
-#### Commit 2B.5 — ticket close semantics and field persistence
+**Review-fix round (CAS/uniqueness hardening — verified, pending commit):**
+- [x] H1: fence = `expected_episode_id + expected_stage` on every write; stale same-episode merge after terminal cannot reopen (R1); terminal transition = partial `$set` via `merge_claim_fields` — concurrent evidence preserved (R2); whole-state write only for new-episode create.
+- [x] H2: unique `{conversation_id:1}` declared at `COLLECTIONS.conversationProducts` + `safeCreateIndex` in `mongoClient.ts` (existing owner); create path uses `insert_one` (not upsert — upsert would match the rival's doc and overwrite it); E11000 → single reread. **Deploy gate `BLOCKED_BY_CONVERSATION_PRODUCTS_UNIQUENESS_AUDIT` stays** — real-DB duplicate census + index proof still required; not production-safe until then.
+- [x] M1: contract `_FakeColl` extended with `docs` list, `interleave` hook queue, unique-insert E11000 — races interleave deterministically (R1–R4), no threads.
+- [x] M2: `test_issue_5f_claim_flow` wraps shopeechat imports in a try/finally dotenv stub; subprocess import-purity test asserts zero `load_dotenv` calls regardless of collection order.
+- [x] `_claim_episode_fence` deleted — filters inlined in the two primitives; storage helper count unchanged.
+
+#### Commit 2B.5 — ticket close semantics and field persistence (partially unblocked by 2B.4 — not complete)
 
 **Files:** modify `warranty_flow.py` and existing Phase 2A fixtures/tests; update SRS/log.
 
-- [ ] Delete the closed-ticket `clear_claim_state` branch; close changes ownership only.
-- [ ] Un-xfail `p2a-claim-ticket-closed-keeps-state`, `-product-question`, and `-phone-resume`.
+- [x] Delete the closed-ticket `clear_claim_state` branch; close changes ownership only. *(done in 2B.4 as one-owner prerequisite — closed early)*
+- [~] Un-xfail `p2a-claim-ticket-closed-keeps-state`, `-product-question`, and `-phone-resume`. *(`-product-question` and `-phone-resume` flipped to positive + green; `-keeps-state` remains incident — claim state now survives close, but greeting still re-escalates to handoff: post-handoff ownership axis, not lifecycle clearing)*
 - [ ] Fix lone-name persistence at the existing parser/persistence owner and delete duplicate branch-local validation.
-- [ ] Un-xfail `p2a-claim-collect-name-phone` only after name and phone persist through the same episode.
+- [x] Un-xfail `p2a-claim-collect-name-phone` only after name and phone persist through the same episode. *(green — same episode, fenced merge)*
 
 **Exit:** closing and reopening a conversation cannot erase or resolve a claim episode.
 

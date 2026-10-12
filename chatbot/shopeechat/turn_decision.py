@@ -255,10 +255,10 @@ def decide_turn(
                             frozenset(flags))
 
     # 5. claim resume / request / product issue — ก่อน anger เสมอ
-    #   provenance เจ้าของเดิม: warranty_flow._claim_collecting —
-    #   stage=collecting หรือมี slot persist; resolved ที่ไม่มี slot ไม่นับ
-    #   แต่ resolved+retained slots ยังนับตาม owner เดิม (Phase 2 blocker)
-    if _wf._claim_collecting(claim_state) and _has_claim_signal(norm):
+    #   provenance เจ้าของ: warranty_flow._claim_lifecycle — collecting เท่านั้น
+    #   ที่ resume fields; ts_suggested รับ verdict ผ่าน flow เท่านั้น;
+    #   terminal + retained slots ไม่นับ (2B.4 — slots ไม่ใช่ activation authority)
+    if _wf._claim_lifecycle(claim_state).accepts_claim_fields and _has_claim_signal(norm):
         return TurnDecision("claim_collect", "claim_state + fresh claim signal",
                             1.0, norm, frozenset(flags | {"claim_resume"}))
     if _warranty.detect_claim_request(norm) or intent_name == "warranty_claim":

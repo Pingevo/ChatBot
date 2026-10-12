@@ -60,13 +60,14 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
             and any(kw in _last_model_text_check for kw in ("รูป", "วิดีโอ", "photo", "video", "แสดงอาการ", "ความเสียหาย"))):
             _in_claim_flow = True
             print(f"[ORDER] ข้าม order_lookup เพราะอยู่ใน claim flow", file=sys.stderr)
-    # ⚡ T5 — persisted claim_state: กำลังเก็บข้อมูลเคลมอยู่ → order_sn นี้เป็นของ claim flow
+    # ⚡ T5 — persisted claim_state: episode เปิดอยู่ → order_sn นี้เป็นของ claim flow
     #   (ครอบเคสลูกค้าแทรกคำถามกลาง flow แล้วส่งเลขต่อ — last model msg ไม่ใช่ claim prompt แล้ว)
+    #   2B.4 — อ่าน lifecycle view จาก owner เดียว; retained slots ไม่ใช่ activation
     if _order_sn and not _in_claim_flow and req.conversation_id:
         try:
             from . import conversation_products as _cp_claim
-            from .warranty_flow import _claim_collecting
-            if _claim_collecting(_cp_claim.load_claim_state(req.conversation_id)):
+            from .warranty_flow import _claim_lifecycle
+            if _claim_lifecycle(_cp_claim.load_claim_state(req.conversation_id)).lifecycle_open:
                 _in_claim_flow = True
                 print(f"[ORDER] ข้าม order_lookup เพราะ claim_state กำลังเก็บข้อมูล", file=sys.stderr)
         except Exception:

@@ -783,64 +783,109 @@ def load_claim_state(conversation_id: str) -> dict | None:
         return None
 
 
-def update_claim_state(
+def transition_claim_state(
     conversation_id: str,
-    platform: str | None = None,
-    shop: str | None = None,
-    fields: dict | None = None,
+    platform: str | None,
+    shop: str | None,
+    *,
+    expected_episode_id: str | None,
+    expected_stage: str | None,
+    claim_state: dict,
 ) -> dict | None:
-    """อัปเดต claim state — merge fields ใหม่เข้าไปใน state เดิม.
+    """new-episode whole-state write เท่านั้น — fenced CAS (storage primitive).
 
-    Args:
-        conversation_id: ID ของแชท
-        platform: platform (shopee/lazada/tiktok)
-        shop: ชื่อร้าน
-        fields: fields ใหม่ที่จะ merge เช่น {"customer_name": "John", "has_image": True}
+    ใช้เฉพาะ absent→episode ใหม่ / terminal→fresh episode; same-episode field
+    merge และ terminal transition ต้องผ่าน merge_claim_fields (partial $set).
+    fence = exact episode + exact stage ที่ caller คาด (None = missing∨null —
+    Mongo null-equality). miss → reread ครั้งเดียว คืน state ผู้ชนะ — ไม่ retry.
+
+    doc ยังไม่มีจริง → create ผ่าน insert_one; unique index {conversation_id:1}
+    (declared ที่ TS index owner) ทำให้ concurrent create แพ้ E11000 →
+    reread ครั้งเดียว คืน doc ของผู้ชนะ.
 
     Returns:
-        claim_state หลังอัปเดต หรือ None ถ้า error
+        claim_state ที่ commit แล้ว หรือ state ของผู้ชนะ หรือ None ถ้า error
+    """
+    if not conversation_id:
+        return None
+    filt = {
+        "conversation_id": conversation_id,
+        "claim_state.episode_id": expected_episode_id,
+        "claim_state.stage": expected_stage,
+    }
+    try:
+        res = _coll().update_one(
+            filt,
+            {"$set": {
+                "claim_state": claim_state,
+                "platform": platform or "",
+                "shop": shop or "",
+            }},
+        )
+        if getattr(res, "matched_count", 0):
+            return claim_state
+        doc = _coll().find_one({"conversation_id": conversation_id})
+        if doc is not None:
+            return doc.get("claim_state")
+        # doc ยังไม่มีจริง → insert (ไม่ใช่ upsert — upsert จะ match doc ของ
+        # rival ที่เพิ่ง insert แล้วทับ claim_state เงียบๆ); unique index
+        # {conversation_id:1} ทำให้ concurrent insert แพ้ E11000 → reread
+        try:
+            _coll().insert_one({
+                "conversation_id": conversation_id,
+                "claim_state": claim_state,
+                "platform": platform or "",
+                "shop": shop or "",
+            })
+            return claim_state
+        except Exception as e:
+            from pymongo.errors import DuplicateKeyError
+            if not isinstance(e, DuplicateKeyError):
+                raise
+            # E11000 — writer อื่นชนะ insert race → reread ครั้งเดียว
+            doc = _coll().find_one({"conversation_id": conversation_id})
+            return doc.get("claim_state") if doc else None
+    except Exception:
+        return None
+
+
+def merge_claim_fields(
+    conversation_id: str,
+    *,
+    episode_id: str | None,
+    expected_stage: str | None,
+    fields: dict | None,
+) -> dict | None:
+    """same-episode partial update — dotted $set เท่านั้น (storage primitive).
+
+    เขียนได้ก็ต่อเมื่อ episode_id AND stage ยังตรงที่ caller คาด — stale
+    writer (stage เดิม) เขียนทับ episode ที่เปลี่ยน stage แล้วไม่ได้.
+    $set เฉพาะ field ที่ส่งมา (skip None/empty — fill-once) + updated_at;
+    ใช้สำหรับ field merge และ same-episode stage transition (รวม terminal:
+    stage/resolved_at/resolution_reason) — ห้าม $set claim_state ทั้งก้อน.
+    miss → reread ครั้งเดียว คืน state ปัจจุบัน (authoritative).
+
+    Returns:
+        claim_state หลังเขียน (หรือของผู้ชนะถ้า fence miss) หรือ None ถ้า error
     """
     if not conversation_id:
         return None
     fields = fields or {}
+    filt = {
+        "conversation_id": conversation_id,
+        "claim_state.episode_id": episode_id,
+        "claim_state.stage": expected_stage,
+    }
     try:
         from datetime import datetime, timezone
-        _now = datetime.now(timezone.utc).isoformat()
-        # โหลด state เดิม
-        existing = load_claim_state(conversation_id) or {}
-        # merge fields ใหม่ (ไม่เขียนทับด้วย None/empty)
-        merged = dict(existing)
-        for k, v in fields.items():
-            if v is not None and v != "":
-                merged[k] = v
-        merged["updated_at"] = _now
-        if "started_at" not in merged:
-            merged["started_at"] = _now
-        # upsert ลง conversation_products
-        _coll().update_one(
-            {"conversation_id": conversation_id},
-            {
-                "$set": {
-                    "claim_state": merged,
-                    "platform": platform or "",
-                    "shop": shop or "",
-                },
-            },
-            upsert=True,
-        )
-        return merged
+        sets = {
+            f"claim_state.{k}": v
+            for k, v in fields.items()
+            if v is not None and v != ""
+        }
+        sets["claim_state.updated_at"] = datetime.now(timezone.utc).isoformat()
+        _coll().update_one(filt, {"$set": sets})
+        doc = _coll().find_one({"conversation_id": conversation_id})
+        return doc.get("claim_state") if doc else None
     except Exception:
         return None
-
-
-def clear_claim_state(conversation_id: str) -> None:
-    """ล้าง claim state หลัง handoff (แอดมินรับงานแล้ว)."""
-    if not conversation_id:
-        return
-    try:
-        _coll().update_one(
-            {"conversation_id": conversation_id},
-            {"$unset": {"claim_state": ""}},
-        )
-    except Exception:
-        pass

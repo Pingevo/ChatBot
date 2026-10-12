@@ -171,8 +171,9 @@ sys.modules.setdefault("shopeechat.warranty", types.ModuleType("shopeechat.warra
 
 _cp_stub = types.ModuleType("shopeechat.conversation_products")
 _cp_calls: list[str] = []
-_cp_stub.update_claim_state = lambda *a, **k: _cp_calls.append("update")
-_cp_stub.clear_claim_state = lambda *a, **k: _cp_calls.append("clear")
+_cp_stub.transition_claim_state = lambda *a, **k: _cp_calls.append("transition")
+_cp_stub.merge_claim_fields = lambda *a, **k: _cp_calls.append("merge")
+_cp_stub.load_claim_state = lambda *a, **k: None
 sys.modules["shopeechat.conversation_products"] = _cp_stub
 
 import shopeechat.handoffs as _handoffs_mod
@@ -274,8 +275,8 @@ check("C3c transport = bounded retry owner เดียว (3 calls, ไม่ f
 print("== C4 warranty claim response builder (canonical owner + claim_state) ==")
 
 _claim_ctx = {"handoff_reason": "warranty_claim_in_warranty", "order_id": "o1"}
-# answer ต้องไม่มี "รบกวนแจ้งข้อมูล"/"ได้รับข้อมูล" — marker พวกนั้นคือ keep-collecting
-# guard ของ _maybe_clear_claim_state (clear ถูก skip โดยเจตนา)
+# 2B.4 — handoff = ownership change, ไม่ใช่ claim resolution; builder ห้าม
+# เขียน claim_state ไม่ว่า transport จะสำเร็จหรือล้ม
 
 _cp_calls.clear()
 calls, fake = _script_urlopen([_body("assigned")])
@@ -284,8 +285,8 @@ with patch("urllib.request.urlopen", side_effect=fake), \
     res = _wf_mod._build_warranty_claim_response(
         _req(), dict(_ctx), "แจ้งแอดมินดำเนินการเคลมให้แล้วนะคะ", True, dict(_claim_ctx),
         _app_stub, _llm_stub)
-check("C4a success → flag True + claim_state cleared (terminal จริง)",
-      res.get("handoff_to_admin") is True and "clear" in _cp_calls,
+check("C4a success → flag True + ไม่เขียน claim_state (handoff ≠ resolution)",
+      res.get("handoff_to_admin") is True and not _cp_calls,
       f"flag={res.get('handoff_to_admin')} cp={_cp_calls}")
 
 _cp_calls.clear()
@@ -295,8 +296,8 @@ with patch("urllib.request.urlopen", side_effect=fake), \
     res = _wf_mod._build_warranty_claim_response(
         _req(), dict(_ctx), "แจ้งแอดมินดำเนินการเคลมให้แล้วนะคะ", True, dict(_claim_ctx),
         _app_stub, _llm_stub)
-check("C4b exhausted → flag False + claim_state ห้าม clear (terminal flag โกหก)",
-      res.get("handoff_to_admin") is False and "clear" not in _cp_calls,
+check("C4b exhausted → flag False + ไม่เขียน claim_state เช่นกัน",
+      res.get("handoff_to_admin") is False and not _cp_calls,
       f"flag={res.get('handoff_to_admin')} cp={_cp_calls}")
 check("C4c exhausted → ไม่ claim ส่งแอดมินใน answer",
       "ส่งต่อ" not in (res.get("answer") or ""),

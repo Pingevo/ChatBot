@@ -117,6 +117,10 @@ export async function ensureIndexes(): Promise<void> {
     // ⚡ Phase 1 pagination — index สำหรับ pre-fetch assigned_to ids
     safeCreateIndex(db, COLLECTIONS.statusConversation, { conversation_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.statusConversation, { assigned_to: 1 }, { sparse: true }),
+    // ⚡ Phase 2B.4 — Python-owned conversation_products: one doc per
+    //   conversation_id (claim-episode CAS + timeline upsert rely on it).
+    //   sparse เหมือน statusConversation — docs ขาด key ไม่นับ unique
+    safeCreateIndex(db, COLLECTIONS.conversationProducts, { conversation_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.tickets, { ticket_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.tickets, { status: 1 }),
     safeCreateIndex(db, COLLECTIONS.tickets, { channel: 1 }),

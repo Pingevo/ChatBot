@@ -206,9 +206,20 @@ def test_stale_claim_state_product_question_not_collect():
 
 
 def test_claim_state_plus_claim_signal_collects():
+    # open episode (stage persist) + fresh claim signal → resume collection
+    d = _decide("ส่งเบอร์โทรมาแล้ว 0812345678 เคลม",
+                claim_state={"stage": "collecting", "episode_id": "e1",
+                             "customer_name": "สมชาย ใจดี"})
+    assert d.action == "claim_collect"
+
+
+def test_slot_only_state_plus_claim_signal_is_request_not_collect():
+    # 2B.4 — retained slots without stage = audit data, never activation;
+    # explicit claim signal in the message → claim_request (fresh episode
+    # gets minted by the transition owner downstream, not by this contract)
     d = _decide("ส่งเบอร์โทรมาแล้ว 0812345678 เคลม",
                 claim_state={"customer_name": "สมชาย ใจดี"})
-    assert d.action == "claim_collect"
+    assert d.action == "claim_request"
 
 
 # ── 7-9. follow-up / product / general / unknown ─────────────────────────────
@@ -306,8 +317,18 @@ def test_link_ask_after_product_history_is_followup():
 # ── Phase 1C: contact-info fill is not a product query ───────────────────────
 
 def test_phone_only_with_claim_state_collects():
-    d = _decide("0812345678", claim_state={"customer_name": "สมชาย"})
+    # open episode + contact-info signal → resume collection
+    d = _decide("0812345678",
+                claim_state={"stage": "collecting", "episode_id": "e1",
+                             "customer_name": "สมชาย"})
     assert d.action == "claim_collect", d
+
+
+def test_phone_only_with_slot_only_state_not_collect():
+    # 2B.4 — bare phone after absent/terminal must not resume; slots are
+    # audit data, not an activation signal
+    d = _decide("0812345678", claim_state={"customer_name": "สมชาย"})
+    assert d.action != "claim_collect", d
 
 
 def test_phone_only_without_claim_state_not_product():
@@ -525,13 +546,22 @@ def test_name_only_with_collecting_claim_state_is_claim_collect():
 
 
 def test_name_only_with_filled_slots_is_claim_collect():
+    # open episode + name submission → resume collection
     d = _decide("ชื่อ สมชาย ใจดี",
-                claim_state={"customer_phone": "0812345678"})
+                claim_state={"stage": "collecting", "episode_id": "e1",
+                             "customer_phone": "0812345678"})
     assert d.action == "claim_collect"
 
 
+def test_name_only_with_slot_only_state_not_collect():
+    # 2B.4 — retained slots without stage are audit data, never activation
+    d = _decide("ชื่อ สมชาย ใจดี",
+                claim_state={"customer_phone": "0812345678"})
+    assert d.action != "claim_collect"
+
+
 def test_name_only_with_resolved_without_slots_not_collect():
-    # resolved และไม่มี retained slots → _claim_collecting False → ไม่ collect
+    # resolved → terminal → ไม่ collect
     d = _decide("ชื่อ สมชาย ใจดี",
                 claim_state={"stage": "resolved"})
     assert d.action != "claim_collect"
@@ -543,21 +573,17 @@ def test_phone_with_resolved_without_slots_not_collect():
     assert d.action != "claim_collect"
 
 
-def test_resolved_with_retained_slots_collects__parity_pin():
-    """⚠️ PARITY PIN — pin พฤติกรรม owner ปัจจุบันอย่างซื่อสัตย์, ไม่ใช่
-    พฤติกรรมที่ถูกต้องสมบูรณ์.
+def test_resolved_with_retained_slots_not_collect():
+    """2B.4 contract — terminal stage beats retained slots.
 
-    production `update_claim_state` merge state (stage="resolved" ไม่ล้าง
-    slot) → `{stage:"resolved", customer_name:...}` เกิดได้จริง.
-    `_claim_collecting()` เช็ก slot ไม่เช็ก stage → True → contract mirror
-    owner → claim_collect.
-
-    Phase 2 blocker: ถ้า resolved+retained-slots ไม่ควร collect ต้องแก้
-    `_claim_collecting` ที่ owner ก่อน wiring — ห้ามแก้แค่ contract."""
+    `{stage:"resolved", customer_name:...}` เกิดได้จริง (merge เก็บ slot ไว้
+    เป็น audit). owner เดิม (`_claim_collecting`, slot-based) นับเป็น
+    collecting — blocker ที่ Phase 2B.4 ปิด: `_claim_lifecycle` ให้ terminal
+    stage ชนะ slots เสมอ → ไม่ใช่ claim_collect (ต้อง explicit fresh claim)."""
     d = _decide("0812345678",
                 claim_state={"stage": "resolved",
                              "customer_name": "สมชาย ใจดี"})
-    assert d.action == "claim_collect"  # parity กับ owner — Phase 2 ต้องทบทวน
+    assert d.action != "claim_collect"
 
 
 def test_explicit_noise_expectation_is_consumed_not_skipped():
