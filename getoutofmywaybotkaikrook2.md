@@ -3090,3 +3090,27 @@ S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mon
 - Leftovers ไม่ถูกแตะ/ไม่ถูก stage: llm.py (vision URL dedupe — งานอื่น) · diag-worker-dup×5 · quarantine/vision×3 · architecture-audit doc
 - Residual blockers: `BLOCKED_BY_EXTERNAL_WRITER_REPO_REQUIRED` ยังอยู่ · ไม่มี push/PR/deploy/worker/provider/real Mongo
 - **Verdict: `PHASE_2B2_HANDOFF_CLOSED_AND_COMMITTED`**
+
+#### Phase 2B.2 Post-Commit Contract Correction (2026-10-13 — กำลังทำ)
+- **Baseline**: HEAD `aed9fb3` — 2 findings จาก diff review:
+  - A. `_handle_review_request` (warranty_flow.py:707-718) คืน `handoff_to_admin=True`+`handoff_reason="review_request"`+routing `handoff` โดยไม่เคยเรียก `_send_handoff` — mid-flow response ที่แค่ขอลูกค้ายืนยัน ("ถ้าถูกต้องเดี๋ยวส่งต่อ"); flag=True ทำให้ `check_output` skip ทุก guard (guards.py:37)
+  - B. `handoffToAdmin` converge (handoffService.ts:188) gate แค่ `assigned_to && !wasClosed` — `{status:"bot", assigned_to:X}` คืน `state:"assigned"` ทั้งที่ `resolveTicketState` ยังส่ง "bot" ให้ Python
+- **Plan**: A — flip 3 fields เป็น bot_reply (confirm path มีอยู่แล้ว line 1492 → `_build_warranty_claim_response` → transport จริง); B — converge gate เพิ่ม `status ∈ {"handoff","open","pending"}` (set เดียวกับ Python handoffs.py:301) → `status:"bot"`/missing ไหลไป retained-owner fenced commit → normalize เป็น handoff โดย owner เดิม — ไม่มี helper/guard/ใหม่
+- **ผ่านแล้ว (Post-Commit Contract Correction, TDD):**
+  - RED: L3b `handoff_to_admin:True`+`path:handoff` (ไม่มี transport call — L3c ยืนยัน `calls==[]` ตั้งแต่ก่อนแก้) · H14 `{status:"bot",assigned_to:"admin-1"}` → converge คืน `assigned` แต่ meta ยัง `"bot"`
+  - Fix A: `warranty_flow.py` flip 3 fields — `handoff_to_admin:False`/`handoff_reason:None`/`routing("bot_reply")`; `handoff_claim` เก็บไว้ (claim-info data ไม่ใช่ success marker); guard-safe (`_VIOLATION_RES`/`_ESCALATE_RULES` ไม่ match review text)
+  - Fix B: `handoffService.ts` converge gate เพิ่ม `status∈{handoff,open,pending}` (set เดียวกับ `handoffs.py:301` ที่ Python อ่านผ่าน resolveTicketState) — inconsistent `{status:"bot"}+owner` ไหลเข้า retained-owner fenced commit (line 212→commitHandoffState fence `{assigned_to:expectedOwner}` ไม่ต้องการ status) → normalize `status:"handoff"` owner เดิม + eid audit · call ซ้ำ converge zero-write
+  - GREEN: ownership **204/204** (H14 ใหม่) · handoff-transport **38/38** (L3b/L3c ใหม่) · pytest 59+3xf · error-policy 38 · boundary 20 · config-failclosed 4 · enable-checkpoint 18 · idempotency 71 · recovery-freshness 59 · mongo-safety 110 · production-races 37 · py_compile OK · tsc 0 · build ✓ · diff-check clean
+  - Complexity: helpers 0 · guards 0 · modules/types/config/env/index/collection +0 · ownership writer 1→1 · runtime delta: warranty_flow −1 line · handoffService +6/−3 (gate+comment) — condition/return semantics เท่านั้น
+  - Residual: `_TERMINAL_CLAIM_REASONS` ยังมี `"review_request"` vestigial (ไม่มี call path ใช้ — `_maybe_clear_claim_state` ถูกเรียกเฉพาะใน `_build_warranty_claim_response`) — ไม่มีผล behavior
+  - ยังไม่ stage/commit — รอ review; suggested msg: `fix: align handoff flags with persisted lifecycle state`
+
+#### Phase 2B.2 Contract Correction Closeout (2026-10-13 — ผ่านแล้ว)
+- Commit: `3775366` `fix: align handoff flags with persisted lifecycle state` — 5 files +54/−19
+- Findings ปิด: (A) `_handle_review_request` false-success (`handoff_to_admin=True`+routing `handoff` โดยไม่มี `_send_handoff` → guard skip ทั้งหมด) → bot_reply contract; (B) `handoffToAdmin` converge ไม่เช็ค status → `{status:"bot"}+owner` คืน assigned โกหก → gate `status∈{handoff,open,pending}` แล้ว normalize ผ่าน retained-owner fenced commit
+- Cleanup: ลบ `"review_request"` จาก `_TERMINAL_CLAIM_REASONS` (vestigial — ไม่มี claim_ctx ผลิต reason นี้, `_maybe_clear_claim_state` reachable เฉพาะผ่าน `_build_warranty_claim_response`) → behavior delta = 0
+- Fresh verification: ownership **204/204** · handoff-transport **38/38** · pytest **59+3xf** · error-policy 38 · boundary 20 · config-failclosed 4 · enable-checkpoint 18 · idempotency 71 · recovery-freshness 59 · mongo-safety 110 · production-races 37 · py_compile OK · tsc 0 · build ✓ · diff-check clean
+- Complexity: helpers/guards/modules/types/config/env/index/collection +0 · ownership writer 1→1 · runtime diff = 2 condition/return fixes + 1 dead-contract removal
+- Leftovers ไม่แตะ: `.gitignore` (user's diag ignore) · `llm.py` · vision/quarantine×3 · architecture-audit · diag-worker-dup×5 (ignored, on disk)
+- Residual: `BLOCKED_BY_EXTERNAL_WRITER_REPO_REQUIRED` ยังอยู่ · ไม่มี push/PR/deploy/worker/provider/real Mongo
+- **Verdict: `PHASE_2B2_HANDOFF_CONTRACT_CORRECTED_AND_COMMITTED`**
