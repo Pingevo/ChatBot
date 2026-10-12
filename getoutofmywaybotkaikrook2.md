@@ -20,6 +20,62 @@
 
 ## กำลังทำ (active)
 
+### 🔍 Phase 2B.4 — Claim Episode/Lifecycle Owner (2026-10-14) · audit เสร็จ → รออนุญาต implement · ยังไม่ commit
+
+- **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `01d17d4` · tree สะอาด · commits 2B.2/2B.3 ยืนยัน (`1c26317`,`3775366`,`7e42bee`)
+- **root cause (code จริง)**: `_claim_collecting` (warranty_flow.py:69) ใช้ retained slots เป็น activation — `{stage:"resolved", customer_name:...}` → True · stage/episode write กระจาย 11 จุด + 2 direct `_cp_ts*` bypass · resolve/clear อนุมานจาก reason string + ticket_state — ไม่มี episode identity
+- **safety**: offline/fake เท่านั้น · ไม่ worker/.env/provider/LLM/TS · ไม่ stage/commit
+
+#### 📋 Audit census (อ่านจาก code จริง)
+
+- **lifecycle evaluators = 3+shadow**: `_claim_collecting` slot-predicate (call sites wf:288,295,412,1189,1196,1319,1389 + order_flow:68 + turn_decision:261) · `handle_warranty_flow` v2 + `handle_warranty_flow_legacy` = SM 2 ตัว · `decide_turn` = shadow (delegate `_claim_collecting`)
+- **direct stage writers = 11**: `_update_claim_state({stage:collecting})` v2:461,518,601 + `_handle_first_message_claim`:1007 + legacy:1134,1376,1482,1570,1819 · direct bypass `_cp_ts2.update_claim_state({stage:resolved})`:1115 + `_cp_ts.update_claim_state({stage:ts_suggested})`:1785
+- **clear writers = 3**: closed-ticket clear v2:327 + legacy:1247 · `_maybe_clear_claim_state`:123 (reason ∈ `_TERMINAL_CLAIM_REASONS` เป็น clear evidence)
+- **activation slots**: `customer_name, customer_phone, customer_order_id, purchase_date, has_image, has_video`
+- **`_TERMINAL_CLAIM_REASONS`** = {in_warranty, out_of_warranty, claim_info_incomplete} — live producers ครบ (ไม่มี dead entry) — ใช้เป็น clear evidence (ผิด role)
+- **persisted fields วันนี้**: `stage, customer_name, customer_phone, customer_order_id, purchase_date, has_image, has_video, started_at, updated_at` — ไม่มี `episode_id`/`resolved_at`/`resolution_reason`
+- **production paths**: `app.chat`→`handle_warranty_flow_legacy` (default) + `chat_v2`→`handle_warranty_flow` (opt-in) — owner ต้อง serve ทั้งคู่
+- **xfails/fixtures เป้าหมาย**: `test_desired_terminal_stage_beats_retained_slots` (strict) · `p2a-claim-resolved-new-request` (executor: handoff+reason `"claim"`+new episode เคลียร์ case fields; tde `claim_request`/`current:claim_collect`) · `p2a-claim-ticket-closed-*` ×3 (desired: ticket close ≠ claim resolution → claim รอด) · `p2a-claim-collect-name-phone` (secondary owner claim_field_acceptance)
+- **parity pins ต้องอัปเดต**: `claim-resolved-retained-slots` (tde claim_collect→unknown+contact_info) · `test_claim_collecting_marker` (slot-only→False) · `test_name_only_with_filled_slots_is_claim_collect` · `test_resolved_with_retained_slots_collects__parity_pin` · `test_clear_claim_state_unsets` · transport C4a/C4b (clear→resolve)
+
+#### 🛠 Corrected implementation plan (post-review 2026-10-14 — Corrections A–E applied)
+
+**Correction A — no reason-based resolution (แก้ plan เดิม)**: `_TERMINAL_CLAIM_REASONS`, `handoff_reason`, `claim_info_incomplete`, `warranty_claim_*` ลบจาก lifecycle authority — เป็น routing/audit metadata เท่านั้น (handoff สำเร็จ = ownership เปลี่ยน ไม่ใช่ claim จบ) · `_maybe_clear_claim_state`+`_TERMINAL_CLAIM_REASONS` ลบทิ้ง ไม่ rename · valid terminal evidence ใน 2B.4: (1) customer ยืนยันแก้สำเร็จหลัง troubleshoot (ts_success path :1109 เดิม) (2) persisted resolved|cancelled ที่อ่านจาก storage · admin event = 2B.6 ห้ามสร้างปลอม
+
+**Correction B — terminal เก็บ evidence ไว้**: →resolved/cancelled = preserve episode_id + collected fields เป็น terminal record + terminal metadata จาก valid evidence เท่านั้น · fresh claim หลัง terminal = episode ใหม่ + identity allowlist `customer_name,customer_phone` เท่านั้น + reset `customer_order_id,purchase_date,has_image,has_video` + started_at ใหม่
+
+**Correction C — fenced/idempotent persistence (audit เพิ่ม)**: `conversation_products` ไม่มี unique index บน conversation_id (ไม่มี create_index ใน repo เลย) · `ChatRequest` ไม่มี stable message_id → CAS บน expected episode = single-winner boundary · `update_claim_state` เดิม = read-modify-write whole-doc (non-atomic, LWW — race exposure จริง) · FakeColl `_match` ไม่ resolve dotted path (`doc.get(k)`) — ต้องขยายทั้ง 2 test fakes (Mongo จริงรองรับ natively) · `update_one` คืน matched_count (ใช้เป็น CAS signal ได้) · `$set` dotted key ทำงานใน `_apply` แล้ว · upsert insert-doc race (doc ยังไม่มีเลย) = pre-existing collection-wide hazard เทียบเท่า save_timeline/add_order_anchor — fenced CAS ปิด episode-level races; dup-doc window บันทึกเป็น residual (unique index = งาน 2B.5+)
+
+**Correction D — history = evidence ไม่ใช่ owner**: `absent + genuine claim-info marker + current field` → transition absent→collecting ผ่าน owner (persist ก่อนรับ field) · `terminal + stale marker` → ห้าม reopen — owner refuses non-fresh transition จาก terminal รวมศูนย์ (caller ไม่ต้อง guard เอง)
+
+**Correction E — interface**: `ClaimLifecycleView{episode_id, stage: absent|ts_suggested|collecting|resolved|cancelled, lifecycle_open, accepts_claim_fields}` — ชื่อเดียวตาม roadmap
+
+**Design**:
+1. `ClaimLifecycleView` (frozen dataclass) + `_claim_lifecycle(state)` evaluator เดียวใน warranty_flow.py — `lifecycle_open = stage∈{collecting,ts_suggested}`, `accepts_claim_fields = lifecycle_open` (open episode รับ claim-field submission; ts_suggested→collecting เมื่อรับ field); unknown/missing stage → absent
+2. `_claim_transition(req, claim_state, to, fields=None, fresh_claim=False)` — transition owner เดียว คืน authoritative state:
+   - `to=open-stage` + open → same-episode fenced merge (episode_id=None legacy doc → merge พร้อม episode_id ใหม่ = promotion)
+   - `to=collecting` + absent → new episode (`episode_id=uuid4`, started_at) + identity copy + fields — CAS fence `episode_id $exists:false`
+   - `to=collecting` + terminal + `fresh_claim=True` → new episode + identity allowlist copy เท่านั้น — CAS fence `episode_id==old`; fresh=True+open → same episode (retry-idempotent)
+   - terminal + `fresh_claim=False` → **refuse** (คืน state เดิม) — stale marker ปลอดภัยทุก caller
+   - `to=resolved` → fenced merge `{stage:resolved,resolved_at,resolution_reason}` preserve fields — caller เดียวคือ ts_success
+   - `to=cancelled` → ไม่มี producer ใน 2B.4 (2B.6) — ไม่ implement path ที่ไม่มี caller
+   - CAS miss → reread ครั้งเดียว → คืน authoritative winner · ห้าม retry loop
+3. `conversation_products` storage primitives เท่านั้น: `load_claim_state` (คงเดิม) · `transition_claim_state(cid,platform,shop,expected_episode_id,claim_state)` CAS update_one fence บน `claim_state.episode_id` (`$exists:false` เมื่อ None) — miss → reread → doc ยังไม่มี → fenced upsert ครั้งเดียว (residual window เดิม) · `merge_claim_fields(cid,episode_id,fields)` fenced dotted `$set` + updated_at — miss → reread · `update_claim_state`+`clear_claim_state` **ลบ** (unfenced/no callers)
+4. consumers: `order_flow:68`→`lifecycle_open`, `turn_decision:261`→`accepts_claim_fields`, wf gates ทั้ง v2+legacy → view เดียวกัน; marker legs (`_bot_asked_info`,`_bot_asked_claim_info`,`_warranty_ctx_in_history`) เข้า transition owner เสมอ — absent+marker → episode ใหม่ persist ก่อนรับ field; terminal → owner refuse
+5. fresh-claim routing: `_is_claim_request` + `not lifecycle_open` → `_handle_first_message_claim` เส้นทางเดียว v2+legacy — `_claim_transition(collecting,fresh_claim=True)` + `handoff_reason="claim"` (fixture pin; ts-failed path ยัง `warranty_claim`)
+6. ลบ: `_claim_collecting`, `_update_claim_state`/`_clear_claim_state` wrappers, closed-ticket clears :327/:1247 (**2B.5 prerequisite ปิดก่อนกำหนด — ticket close ≠ claim resolution; 2B.5 ยังเป็นเจ้าของ field-persistence/close-semantic tests ที่เหลือ — ห้ามประกาศ 2B.5 เสร็จ**), `_maybe_clear_claim_state`, `_TERMINAL_CLAIM_REASONS`, `_cp_ts*/_cp_ts2` bypasses :1115/:1785
+7. terminal handoff ไม่แตะ claim_state เลย (แค่ลบ call `_maybe_clear_claim_state` ที่ :775) — episode เปิดต่อได้ post-handoff (flow เดิมออกแบบไว้) — `clear_claim_state`/`$unset` path หายทั้งหมด
+
+**RED matrix** (ทั้งหมด fail ก่อน implement):
+- A terminal precedence: resolved+slots→not collecting; bare name/phone หลัง terminal → ไม่ reopen (`test_desired_terminal_stage_beats_retained_slots` un-xfail + เพิ่ม cancelled + marker-refusal)
+- B fresh episode: resolved/cancelled+explicit request → episode ใหม่≠เดิม, identity retained, case fields reset, started_at reset (`p2a-claim-resolved-new-request`)
+- C same episode: collecting continuation episode เดิม; name→phone persist episode เดียว (`p2a-claim-collect-name-phone`)
+- D ticket separation: closed ticket ไม่ clear (`p2a-claim-ticket-closed-*` ×3); terminal handoff ไม่ resolve/clear; handoff failure ไม่เปลี่ยน lifecycle
+- E history migration: absent+marker+field → persist collecting; terminal+stale marker → refuse
+- F race/idempotency: retry new-claim → episode เดิม; concurrent terminal→new → winner เดียว; stale-episode merge → miss+reread ไม่เขียนทับ; CAS loss → bounded reread
+
+**Un-xfails**: `test_desired_terminal_stage_beats_retained_slots`, `p2a-claim-resolved-new-request`, `p2a-claim-ticket-closed-keeps-state`, `p2a-claim-ticket-closed-product-question`, `p2a-claim-ticket-closed-phone-resume`, `p2a-claim-collect-name-phone` (ถ้าเขียวจริง) — fixture flips: status incident→positive, ลบ `current`/`incident_levels` pins, อัปเดต boundary_note
+
 ### 🔍 Phase 2B.2 — Typed Handoff Outcome @ assignment owner (2026-10-12) · audit + RED contract ก่อน · ยังไม่ commit
 
 - **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `b4fbc82` (docs atop `d403f0a` fix 2B.1) · working tree dirty เดิม = `llm.py` M + `getoutofmywaybotkaikrook2.md` M + untracked diag/testscript/architecture doc — **leftovers ไม่แตะ**
@@ -3121,3 +3177,50 @@ S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mon
 - **Commit plan**: vision fix+test แยก · architecture audit docs-only แยก · `.gitignore` แยก · active log closeout แยก; exact-path staging เท่านั้น ห้าม `git add -A`
 - **ผ่านแล้ว (Leftover Cleanup Closeout)**: vision test 4/4 + py_compile ผ่าน (API keys loaded=0) → `6f29145` `fix: dedupe vision image URLs` (2 files) · architecture snapshot → `43bef5c` `docs: add current system architecture audit` (1 file; trailing whitespace แก้ก่อน commit) · local incident ignores → `9c1b779` `chore: ignore local incident diagnostics` (`.gitignore` only)
 - **Final state target**: tracked/untracked status ว่าง; diag-worker×5 + quarantine×2 ยังอยู่บน disk แต่ถูก ignore; ไม่มี worker/provider/Mongo/`.env`/push/PR/deploy
+
+#### Phase 2B.4 Claim Episode/Lifecycle Owner — GREEN + Isolation Fix (working tree — รอ review, ห้าม commit)
+- **Root cause เพิ่มที่พบระหว่าง GREEN**: shadow sweep พังเฉพาะเมื่อรันร่วม `test_issue_5f_claim_flow.py` — 5f import `shopeechat.app` ตรงๆ ก่อน `test_legacy_turn_incident_replay` ทำให้ `load_dotenv()` อ่าน `.env` จริง → `ADMIN_MONGO_DB=chatbot` ชน `setdefault("chatbot_admin")` ที่มาทีหลัง (no-op) → `cp._admin_db()` อ่าน `client["chatbot"]` (FakeDb ว่าง) แทน seeded `client["chatbot_admin"]` → `load_timeline` คืน None → claim_state/anchor หายหมดใน shadow snapshot → action 'unknown'/'locked' ทุก fixture ที่ seed claim/anchor. baseline ไม่พังเพราะ `decide_turn` มี history-marker fallback owner (mask bug นี้ไว้) — ตอนลบ second owner ตาม Correction D เลยโผล่
+- **วิธีแก้**: `_install` pin `ADMIN_MONGO_DB`/`MONGO_DB` ต่อ test (env-pinned boundary มีอยู่แล้ว — เติม 2 ตัวที่หลุด) — ไม่แตะ production code, ไม่เพิ่ม fallback
+- **ผลกระทบเคสอื่น**: sweep/executor replay ทุก fixture ได้ claim_state+anchor ถูกต้อง; `test_shadow_human_request_is_handoff` (baseline combo-fail) ผ่านด้วย `_fake_send` truthy outcome fix เดิม
+- **GREEN สุดท้าย (run เดียวกัน)**: `contract 30 + turn_decision 113 + 5f 18 + shadow 18 + replay 74` = **221 passed, 19 skipped, 9 xfailed, 0 failed**; handoff-transport script 38/38; qa_batch 12 passed + 4 failed (`_strip_kb_markup` — identical บน baseline, pre-existing ไม่เกี่ยว claim); py_compile 10 files OK; `git diff --check` clean
+- **xfail คงเหลือ 9 (honest)**: claim-persist×2 (routing interception — 2C scope), keeps-state (claim รอดแล้ว แต่ greeting re-escalate — ownership axis), อีก 6 ไม่เกี่ยว claim
+- **Un-xfails ปิดจริง**: `p2a-claim-resolved-new-request`, `p2a-claim-ticket-closed-product-question`, `p2a-claim-ticket-closed-phone-resume`, `p2a-claim-collect-name-phone` + baseline handoff-transport×5 หาย (fake คืน assigned outcome)
+- **ยังไม่ stage/commit/push** — รอ final report review
+
+#### Phase 2B.4 Review-Fix (PHASE_2B4_REVIEW_FIX_REQUIRED → กำลังทำ)
+- **H1 episode-only fence ไม่พอ**: stale writer `{e1,collecting}` merge หลัง e1→resolved จะเขียน stage กลับ (episode fence ยัง match) + terminal whole-state `$set claim_state` ลบ evidence ที่ concurrent writer เพิ่งเพิ่ม → plan: fence = `expected_episode_id + expected_stage` ทุก transition; terminal ผ่าน `merge_claim_fields` partial `$set` (stage/resolved_at/resolution_reason); whole-state เฉพาะ new-episode create; CAS miss → reread ครั้งเดียว
+- **H2 upsert ไม่มี uniqueness**: `conversation_products` ไม่มี unique index → concurrent create อาจได้ 2 docs → plan: `COLLECTIONS.conversationProducts` (config.ts) + `safeCreateIndex {conversation_id:1} unique` (mongoClient.ts owner เดิม); upsert path reconcile E11000 → reread 1 ครั้ง; ไม่มี Python index helper; deploy gate `BLOCKED_BY_CONVERSATION_PRODUCTS_UNIQUENESS_AUDIT` ค้างจน real census+index proof
+- **M1 race tests ไม่ interleave**: extend `_FakeColl` เดิมด้วย `docs` list + `interleave` hook queue (fire ก่อน apply ใน update_one) + calls log → deterministic interleave จริง
+- **M2 `.env` import purity**: `test_issue_5f_claim_flow.py` import `shopeechat.app` ก่อน trap → wrap dotenv stub รอบ shopeechat imports + restore + subprocess import-purity test
+- **ข้อห้ามคงเดิม**: ไม่เพิ่ม owner/fallback/reason table/helper ใหม่; `_claim_episode_fence` ลบ (inline filter); absent fence ใช้ Mongo null-equality (`field: None` match missing∨null)
+- **ผ่านแล้ว (Review-Fix RED→GREEN)**:
+  - RED จริง: R1 stale merge reopen resolved (`collecting` กลับมา) · R2 whole-state terminal ทิ้ง evidence · R3 CAS-loss · R4 single-doc · R5 index pin — 6 failed ก่อนแก้
+  - **ค้นพบเพิ่มระหว่าง fix**: create path ใช้ `update_one(upsert)` — rival insert ก่อน → upsert **match doc ของ rival แล้วทับ claim_state เงียบๆ** (ไม่ใช่แค่ dup doc) → เปลี่ยนเป็น `insert_one` + E11000→reread (unique index เป็นตัวตัดสิน)
+  - GREEN: contract **35/35** · รวมสุทธิ **227 passed, 19 skipped, 9 xfailed, 0 failed** · handoff-transport 38/38 · py_compile 4 files · tsc 0 error · `npm run build` ✓ · `git diff --check` clean
+  - `_claim_episode_fence` ลบแล้ว (inline filter) · helper รวม −1 · expected_stage fence ทุก write · terminal = partial `$set` เท่านั้น
+  - M2 ปิด: 5f wrap shopeechat imports ด้วย dotenv stub try/finally + subprocess purity test (`test_module_import_never_reads_dotenv`) — `.env` ไม่ถูกอ่านไม่ว่า collection order ไหน
+  - Changed files จริง = 17 (เพิ่ม config.ts + mongoClient.ts นอกชุดเดิม 15)
+  - **Deploy gate คงอยู่**: `BLOCKED_BY_CONVERSATION_PRODUCTS_UNIQUENESS_AUDIT` — real-DB duplicate census + index proof ยังไม่ได้รัน (ห้ามในรอบนี้) → offline pass เท่านั้น ยังไม่ production-safe
+
+#### Phase 2B.4 Test-Purity Correction (PHASE_2B4_LOGIC_PASS_TEST_PURITY_CORRECTION_REQUIRED → ผ่านแล้ว)
+- **Finding A (leaked alias)**: 5f import trap restore เฉพาะ `dotenv.load_dotenv` — `app.load_dotenv`/`knowledge_base.load_dotenv` bind stub lambda ค้างทั้ง process → RED: `test_load_dotenv_aliases_restored_after_import` FAILED (`app.load_dotenv` ≠ provider fn) → fix: finally restore ผ่าน `sys.modules.get()` ทั้ง 2 alias (replay file ทำ pattern นี้อยู่แล้ว lines 95-102)
+- **Finding B (self-import .env)**: `test_handoff_transport_owner_not_globally_stubbed` import `shopeechat.app` เอง → standalone run อ่าน `.env` จริง (proof: `[KEYS] โหลด API keys จำนวน: 9` ตอนรันเดี่ยว) → fix: `sys.modules.get` + `pytest.skip` เมื่อ app ไม่ได้โหลด — leakage check ทำงานเต็มใน combined order (issue_5f โหลด app ก่อน)
+- **GREEN**: standalone contract 34 passed+1 skipped, `[KEYS]` absent (app ไม่ถูก import เลย — .env=0 มี executable proof) · standalone 5f 18/18 (purity subprocess + alias restore) · combined 5f→contract: transport assertion **executes** (ไม่ skip) + aliases restored · full suite **228 passed, 19 skipped, 9 xfailed, 0 failed** · handoff-transport 38/38 · py_compile OK · `git diff --check` clean
+- **ไม่แตะ**: runtime, CAS, index, fixtures, expectations — TS/runtime diff คงเดิมจาก reviewed candidate · changed files จริง = **17**
+- **RED count แก้ไข**: รอบนี้ RED = 2 findings (A ผ่าน alias test fail จริง, B ผ่าน [KEYS]=9 evidence) — R6 ไม่นับ (ไม่มี pre-fix failing output)
+- **Deploy gate คงเดิม**: `BLOCKED_BY_CONVERSATION_PRODUCTS_UNIQUENESS_AUDIT`
+
+#### Phase 2B.4 Evidence Correction + Real-DB Audit Gate (กำลังทำ/บล็อก env)
+- **Test evidence corrected (fresh raw runs)**: contract standalone `34 passed, 1 skipped` (no `[KEYS]` — app ไม่ถูก import) · 5f standalone `18 passed` (18 tests จริง — รายงานก่อนหน้าเขียน 19 ผิด) · 5f+contract combined `53 passed` (transport leakage assertion executes, ไม่ skip) · turn_decision standalone `83 passed` (รายงานก่อนหน้าเขียน 113 ผิด — นับรวม suite อื่น) · shadow `18 passed` · replay `74 passed, 19 skipped, 9 xfailed` · full suite raw line: **`228 passed, 19 skipped, 9 xfailed, 5 warnings in 4.51s`** — per-file sum 35+83+18+18+74 = 228 ✓ ตรง
+- **Mongo census verdict: `PREFLIGHT_BLOCKED_ENV_MISSING`** — `ADMIN_MONGO_URI`/`ADMIN_MONGO_DB`/`MONGO_*` ทั้งหมด unset ใน process env; กฎห้ามอ่าน `.env` + ห้าม fallback → ไม่ connect เลย; ยังไม่มี total/duplicate/index census — `BLOCKED_BY_CONVERSATION_PRODUCTS_UNIQUENESS_AUDIT` คงเดิม ไม่ใช่ pass
+- **ยังไม่ stage/commit/push** · runtime/TS/fixtures ไม่แตะรอบนี้ · botworker/provider/API = 0 · Mongo writes = 0
+- **Real-DB census done (read-only, one-shot)**: ephemeral /tmp script · `load_dotenv(override=False)` โหลด root `.env` ตามการอนุญาตชั่วคราวภายใน subprocess เดียว; ไม่แสดงเนื้อหาหรือค่า env/URI/credentials และ environment สิ้นสุดพร้อม subprocess · collection `conversation_products` (env override unset → owner default) · **total=3112 · exists=3112 · missing=0 · null=0 · empty=0 · non-string=0 · duplicate_groups=0 · extra=0 · largest=0** · index: เหลือแค่ `_id_` ไม่มี index บน `conversation_id` (unique sparse contract ยังไม่ถูกสร้าง) · consistency checks pass ทั้งหมด · mongo_writes=0 · client closed · verdict `PHASE_2B4_CENSUS_PASS_INDEX_CREATION_APPROVAL_PENDING` — ข้อมูล clean, index รออนุมัติสร้างแยกต่างหาก
+
+#### Phase 2B.4 — COMMITTED closeout (commit 1: `8885a5a` `fix: fence warranty claim lifecycle transitions`, 16 files)
+- **Root causes ที่ปิด**: (1) retained slots/history/reason strings เคยเป็น lifecycle authority แข่งกัน (2) stale same-episode write reopen terminal ได้ (3) terminal whole-state `$set` ลบ concurrent evidence ได้ (4) upsert create path overwrite doc ของ rival เงียบๆ (5) ไม่มี unique index → concurrent-create correctness ไม่ถูกคุ้ม
+- **Final architecture**: `_claim_lifecycle` = evaluator เดียว · `_claim_transition` = transition owner เดียว · `transition_claim_state`+`merge_claim_fields` = storage primitives 2 ตัว · fence = `episode_id + expected_stage` · fresh episode ผ่าน `insert_one` · E11000 → reread ครั้งเดียวไม่ retry · terminal = partial dotted `$set` (เก็บ evidence เป็น audit record) · ไม่มี ticket-close/reason/history-marker เป็น lifecycle owner
+- **Verification (frozen pre-commit)**: `228 passed, 19 skipped, 9 xfailed` · handoff transport `38/38` · py_compile pass · `tsc --noEmit` pass · `npm run build` pass · diff checks clean
+- **Real-DB census**: 3112 docs · `conversation_id` ทุกตัวเป็น non-empty string · duplicate groups=0 · mongo writes=0 · index บน `conversation_id` ยังไม่มี
+- **Complexity**: evaluator=1 · transition owner=1 · storage write primitives=2 · retry loops=0 · whole-state terminal writes=0 · +1 collection config key · +1 unique sparse index declaration · ไม่มี dep/env/flag/module ใหม่
+- **.env ความจริง**: census โหลด root `.env` ครั้งเดียวภายใต้การอนุญาตชั่วคราวใน subprocess เดียว (ไม่แสดงค่า); Next build อาจ auto-load `.env` เอง — ห้ามอ้างว่า `.env=0` ทั้งรอบ
+- **BLOCKER เหลือ**: `INDEX_CREATION_APPROVAL_PENDING` — **committed code ยังไม่ deploy-approved**; ห้าม deploy ก่อน create unique index `{conversation_id:1} unique sparse` บน real DB + verify ด้วย `listIndexes` (data clean พร้อมแล้วตาม census)
