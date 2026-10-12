@@ -1311,7 +1311,10 @@ def describe_images(
     if not image_urls:
         return "", {"prompt": 0, "output": 0, "total": 0}
 
-    urls = image_urls[:max_images]
+    # ⚡ dedupe exact-string URL (preserve order) ก่อน cap —
+    #   _urls_to_read รวม history+current sources โดยไม่ dedupe ข้ามแหล่ง
+    #   (ลูกค้าส่งรูปเดิมซ้ำ / history image ที่ยังไม่มี desc) — dup เสีย Vision call
+    urls = list(dict.fromkeys(image_urls))[:max_images]
     descriptions = []
     total_usage = {"prompt": 0, "output": 0, "total": 0}
 
