@@ -2526,6 +2526,33 @@ async function main() {
       "queued state must persist unchanged");
   });
 
+  await test("H14 meta status:'bot'+assigned_to (inconsistent) → owner เดิม normalize เป็น handoff; call ซ้ำ converge zero-write", async () => {
+    // assigned outcome ต้องสอดคล้อง persisted lifecycle — status:"bot" หมายถึง bot ยังถือ ownership
+    // ตาม resolveTicketState → converge zero-write บน state นี้จะโกหก (คืน assigned แต่ ticket_state=bot)
+    seedConv("h14"); seedShop();
+    seedMeta("h14", { status: "bot", assigned_to: "admin-1" });
+    const r = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "h14", shopId: "shop-1", platform: "shopee",
+    });
+    assert(r?.state === "assigned" && r.assigned_to === "admin-1" && r.persisted === true,
+      `inconsistent bot-owned state must normalize to assigned outcome — got ${JSON.stringify(r)}`);
+    const m = metaOf("h14");
+    assert(m?.status === "handoff" && m?.assigned_to === "admin-1",
+      `persisted meta must be handoff after call — got ${JSON.stringify({ status: m?.status, assigned_to: m?.assigned_to })}`);
+    const handoffLogs = adminLogs("h14").filter((d: any) => d.action_type === "chat_assigned" || d.action_type === "conversation.handoff").length;
+    assert(handoffLogs >= 1, `normalize transition must audit — logs=${handoffLogs}`);
+    mocks.state.queryLog.length = 0;
+    const r2 = await (handoffSvc.handoffToAdmin as any)({
+      conversationId: "h14", shopId: "shop-1", platform: "shopee",
+    });
+    assert(r2?.state === "assigned" && r2.assigned_to === "admin-1",
+      `second call must converge assigned — got ${JSON.stringify(r2)}`);
+    assert(metaWrites().length === 0,
+      `converge on normalized state must be zero-write — writes=${metaWrites().length}`);
+    assert(adminLogs("h14").filter((d: any) => d.action_type === "chat_assigned" || d.action_type === "conversation.handoff").length === handoffLogs,
+      "converge must not duplicate transition audit (eid dedupe)");
+  });
+
   // ═══ I. persisted-outcome settlement + workflow truth + cursor race — Phase 2B.2 review-fix ═══
   // Contract:
   //   - commit สำเร็จ = ownership เป็น authoritative แล้ว — outcome ห้าม persisted:false

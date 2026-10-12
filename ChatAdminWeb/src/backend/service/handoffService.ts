@@ -182,10 +182,13 @@ export async function handoffToAdmin(opts: {
     const meta = await statusConversationService.getMeta(opts.conversationId);
     const wasClosed = meta?.status === "closed" || meta?.status === "resolved";
 
-    // converge — owned & not closed → persisted truth + emit (idempotent —
-    //   re-emit ซ่อม audit ที่ขาดจาก emit crash ก่อนหน้าได้ฟรีด้วย eid dedupe)
-    //   (direct command: converge เฉพาะเมื่อ owner ตรง target แล้ว — owner อื่นต้อง reassign)
+    // converge — owned & not closed & status เป็น post-handoff state → persisted truth + emit
+    //   (idempotent — re-emit ซ่อม audit ที่ขาดจาก emit crash ก่อนหน้าได้ฟรีด้วย eid dedupe)
+    //   post-handoff set = {handoff,open,pending} ตาม ticket_state contract ที่ Python อ่าน
+    //   (status:"bot"/missing + owner = inconsistent → หลุดไป retained-owner fenced commit
+    //   normalize เป็น handoff; direct command: converge เฉพาะเมื่อ owner ตรง target แล้ว)
     if (meta?.assigned_to && !wasClosed
+        && (meta.status === "handoff" || meta.status === "open" || meta.status === "pending")
         && (!direct || meta.assigned_to === opts.targetAdminId)) {
       const emitted = await tryEmitHandoff(meta, opts);
       return {

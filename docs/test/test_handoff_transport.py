@@ -459,23 +459,29 @@ _history_review = [
     {"role": "model", "text": "รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ"},
 ]
 _crash = None
+_cp_calls.clear()
+# urlopen scripted — review turn ต้องไม่มี transport call เลย (ยังไม่ใช่ handoff)
+calls, fake = _script_urlopen([_body("assigned")])
 try:
-    res = _wf_mod.handle_warranty_flow_legacy(
-        _req(message="ทวนข้อมูลที่ให้ไปหน่อยค่ะ", ticket_state=None, item_id=None),
-        dict(_legacy_ctx), _history_review, None)
+    with patch("urllib.request.urlopen", side_effect=fake):
+        res = _wf_mod.handle_warranty_flow_legacy(
+            _req(message="ทวนข้อมูลที่ให้ไปหน่อยค่ะ", ticket_state=None, item_id=None),
+            dict(_legacy_ctx), _history_review, None)
 except Exception as _e:
     res, _crash = None, _e
 check("L3a review → ไม่ crash", _crash is None, f"crash={_crash}")
-check("L3b review resp — segments จาก llm + routing จาก app + contract fields เดิม",
+check("L3b review resp — mid-flow bot_reply: ไม่ใช่ completed handoff (ยังรอลูกค้ายืนยัน)",
       res is not None
       and res.get("answer_segments") == [res.get("answer")]
-      and res.get("handoff_to_admin") is True
-      and res.get("handoff_reason") == "review_request"
+      and res.get("handoff_to_admin") is False
+      and res.get("handoff_reason") is None
       and res.get("source") == "warranty_claim_flow"
       and isinstance(res.get("routing_decision"), dict)
-      and res["routing_decision"].get("path") == "handoff"
-      and res["routing_decision"].get("handoff_reason") == "review_request",
+      and res["routing_decision"].get("path") == "bot_reply",
       f"res={res and {k: res.get(k) for k in ('answer_segments','handoff_to_admin','handoff_reason','source','routing_decision')}}")
+check("L3c review → ไม่มี _send_handoff call + ไม่มี claim-state clear",
+      calls == [] and "clear" not in _cp_calls,
+      f"calls={len(calls)} cp={_cp_calls}")
 
 print(f"\n{PASS}/{PASS + FAIL} passed")
 sys.exit(0 if FAIL == 0 else 1)

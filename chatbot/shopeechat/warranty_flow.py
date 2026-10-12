@@ -102,12 +102,12 @@ def _clear_claim_state(req) -> None:
         pass
 
 
-# handoff reasons ที่ปิดการเก็บข้อมูลจริง (ยืนยันแล้ว/ปรึกษาแอดมิน/ให้ข้อมูลไม่ครบ/ทวน)
+# handoff reasons ที่ปิดการเก็บข้อมูลจริง (ยืนยันแล้ว/ปรึกษาแอดมิน/ให้ข้อมูลไม่ครบ)
 # — reason "warranty_claim" (default ของ ask-info/State-7 receipt) ไม่อยู่ใน set นี้
 #   เพราะ flow ออกแบบให้เก็บข้อมูลต่อหลัง handoff — clear ตอนนั้น = fill-once พัง
 _TERMINAL_CLAIM_REASONS = frozenset((
     "warranty_claim_in_warranty", "warranty_claim_out_of_warranty",
-    "claim_info_incomplete", "review_request",
+    "claim_info_incomplete",
 ))
 
 
@@ -704,8 +704,8 @@ def _handle_review_request(req, ctx, history, _warranty_mod, llm, _app_module) -
         "usage": {},
         "elapsed": _total,
         "cost": 0.0,
-        "handoff_to_admin": True,
-        "handoff_reason": "review_request",
+        "handoff_to_admin": False,
+        "handoff_reason": None,
         "handoff_claim": {
             "customer_name": _hist_name,
             "customer_phone": _hist_phone,
@@ -713,8 +713,7 @@ def _handle_review_request(req, ctx, history, _warranty_mod, llm, _app_module) -
         },
         "steps": ctx.get("steps", []) + [{"name": "warranty_review", "model": _model_name, "detail": "ทวนข้อมูลจาก history"}],
         "routing_decision": _app_module._routing(
-            "handoff", "warranty_review: ทวนข้อมูลจาก history",
-            handoff_reason="review_request",
+            "bot_reply", "warranty_review: ทวนข้อมูลจาก history",
         ),
         "image_desc": ctx.get("image_desc_out", ""),
     }
