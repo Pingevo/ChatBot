@@ -323,9 +323,9 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `closed_at` | Date? | ⚠️ โดน dump ทับ |
 | `closed_by` | string? | ⚠️ โดน dump ทับ |
 | `close_count` | number? | ⚠️ โดน dump ทับ |
-| `bot_claim_info` | object? | claim payload จาก `/admin/conversations/bot-handoff` — refresh ทุก request (เขียนซ้ำซ่อม claim ที่ขาดได้) |
-| `bot_handoff_at` | Date? | เวลาที่ bot-handoff claim metadata ถูกเขียน/refresh ล่าสุด — **ไม่ใช่ ownership authority** (authority = `status_conversation` + `HandoffOutcome.state`) และไม่ใช้ dedupe/idempotency |
-| `bot_handoff_reason` | string? | reason จาก bot-handoff request ล่าสุด |
+| `bot_claim_info` | object? | ⚠️ **Phase 2B.6 — writer ย้ายไป `status_conversation`** (dump ทับทุก 2 วิ); field นี้อาจคงจาก doc เก่า — ห้ามใช้เป็น authority |
+| `bot_handoff_at` | Date? | ⚠️ writer ย้ายไป `status_conversation` (2B.6) — **ไม่ใช่ ownership authority** (authority = `status_conversation` + `HandoffOutcome.state`) |
+| `bot_handoff_reason` | string? | ⚠️ writer ย้ายไป `status_conversation` (2B.6) — reason จาก bot-handoff request ล่าสุด |
 
 **⚠️ สำคัญ:** `assigned_to`, `closed_at`, `closed_by`, `close_count` โดน sellcenter dump ทับทุก 2 วินาที
 → ใช้ `status_conversation` เป็น source of truth สำหรับ admin-owned meta
@@ -931,6 +931,11 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `handoff_reopened` | boolean? | commit นี้เป็น reopen จริงหรือไม่ — fenced truth: fence มี `status:{$in:[closed,resolved]}` เมื่อ caller claim reopen → `true` ⟹ prior ปิดจริง ณ CAS time (ไม่ใช่ stale read) |
 | `handoff_actor` | string? \| null | actor ของ transition (persisted — converge/repair emit ด้วย attribution เดิม) |
 | `handoff_reason` | string? \| null | caller free-text reason ของ transition (persisted — เหมือนกัน) |
+| `active_claim_episode_id` | string? \| null | **2B.6** — open Python claim episode (`episode_id` จาก `conversation_products.claim_state` — ส่งผ่าน `_send_handoff` payload แบบ explicit param → `recordClaimHandoff` เขียน; `applyClaimOutcome` เคลียร์เป็น null เมื่อ outcome applied) — **review-fix: fenced write** (`{claim_outcome.episode_id:{$ne:ep}, $or:[{active==ep},{active==null}]}`) — same-ep refresh / terminal no-resurrect / stale no-op / absent→open+clear outcome atomically · **round-2: fence verdict กลับเป็น typed result** — `recordClaimHandoff → {status: written\|already_terminal\|stale_episode, claimOutcome?}` (fenced no-op = classification ไม่ใช่ silent 2xx; stale→route 409) |
+| `claim_outcome` | object? \| null | **2B.6** — explicit admin terminal command ต่อ episode: `{episode_id, outcome: resolved\|cancelled, actor_id, occurred_at}` — immutable เมื่อ set (first terminal wins; fence `claim_outcome.episode_id ≠ target` ใน CAS — malformed `{active:E,outcome:E}` ก็ไม่ถูกทับ); dedupe identity = `episode_id` (audit `eventId=episode_id`) · **round-2**: `applyClaimOutcome` คืน `{result, claimOutcome}` persisted-authoritative — claim-outcome route ส่งต่อบน wire (UI ใช้ค่านี้ ไม่ใช่ค่าที่กด); already_applied path repair audit ด้วย persisted actor/outcome ก่อน return (audit-crash window ปิด — repair ≤1 ครั้ง) |
+| `bot_claim_info` | object? \| null | **2B.6** — claim payload จาก `/admin/conversations/bot-handoff` (ย้ายจาก raw `conversations` — dump ทับทุก 2 วิ) — refresh เฉพาะเมื่อ episode fence ผ่าน · canonical shape (Python claim ctx): `{customer_name, customer_phone, customer_order_id, purchase_date, claim_topic}` — **ไม่มี `order_id`** (review-fix: UI/API contract unify) |
+| `bot_handoff_at` | Date? \| null | **2B.6** — เวลา claim metadata ถูกเขียน/refresh ล่าสุด (ย้ายจาก raw `conversations`) |
+| `bot_handoff_reason` | string? \| null | **2B.6** — reason จาก bot-handoff request ล่าสุด (ย้ายจาก raw `conversations`) |
 | `updated_at` | Date | |
 
 **⚠️ สำคัญ:** Source of truth สำหรับ admin-owned meta — ไม่โดน sellcenter dump ทับ
@@ -939,7 +944,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
 | Read | getMeta, getMetaMap | `/admin/conversations`, assign/handoff/resolve/close/reopen routes |
-| Write/Update | upsertMeta, updateStatus, closeConversation, reopenConversation, setTopic, setItemIds, togglePinned, resetUnread, commitHandoffState, assignPendingTicket, applyInboundOwnershipTransition | ทุก mutation route + `POST /api/internal/inbound-lifecycle` (external writer hook); **ownership assignment ทั้งหมด (auto+direct) ผ่าน `commitHandoffState` เท่านั้น** |
+| Write/Update | upsertMeta, updateStatus, closeConversation, reopenConversation, setTopic, setItemIds, togglePinned, resetUnread, commitHandoffState, assignPendingTicket, applyInboundOwnershipTransition, recordClaimHandoff, applyClaimOutcome | ทุก mutation route + `POST /api/internal/inbound-lifecycle` (external writer hook) + `POST /admin/conversations/[id]/claim-outcome` (2B.6 explicit claim outcome) + bot-handoff claim metadata; **ownership assignment ทั้งหมด (auto+direct) ผ่าน `commitHandoffState` เท่านั้น (round-4: เมื่อเป็น claim handoff มี `expectedClaimEpisodeId=E` CAS เดียวกันบังคับ `{active_claim_episode_id:E, claim_outcome.episode_id:{$ne:E}}` + `upsert:false` atomic กับ status/assigned_to/pending/reopen/event-id — ปิด TOCTOU gate↔ownership และห้าม upsert สร้าง episode เอง); claim outcome ผ่าน `applyClaimOutcome` เท่านั้น (CAS fence `active_claim_episode_id`)** |
 | Delete | ไม่มี | |
 
 **หน้าที่เข้าถึง:** `/tickets` (จริง), ทุก conversation mutation route

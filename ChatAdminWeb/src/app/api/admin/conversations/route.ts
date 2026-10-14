@@ -64,6 +64,15 @@ interface MetaRow {
   topic?: string;
   item_ids?: string[];
   pinned?: boolean;
+  // ⚡ Phase 2B.6 — claim lifecycle fields (transport จาก status_conversation)
+  active_claim_episode_id?: string | null;
+  claim_outcome?: {
+    episode_id: string;
+    outcome: "resolved" | "cancelled";
+    actor_id: string;
+    occurred_at: Date | string;
+  } | null;
+  bot_claim_info?: Record<string, unknown> | null;
 }
 
 export function mapToConversation(
@@ -96,6 +105,15 @@ export function mapToConversation(
     unread: unansweredCount,  // ⚠️ ใช้ unanswered แทน unread_count ของ sellcenter
     assigned_to: effectiveAssignedTo || undefined,
     assigned_to_name: adminInfo?.name || adminInfo?.username,
+    // ⚡ Phase 2B.6 — claim lifecycle transport (meta เท่านั้น)
+    active_claim_episode_id: meta?.active_claim_episode_id ?? undefined,
+    claim_outcome: meta?.claim_outcome
+      ? { ...meta.claim_outcome,
+          occurred_at: meta.claim_outcome.occurred_at instanceof Date
+            ? meta.claim_outcome.occurred_at.toISOString()
+            : String(meta.claim_outcome.occurred_at) }
+      : undefined,
+    bot_claim_info: (meta?.bot_claim_info as Conversation["bot_claim_info"]) ?? undefined,
   };
 }
 
@@ -251,7 +269,9 @@ export async function GET(req: NextRequest) {
     fetched = metaRows.length;
     docs = metaRows.slice(0, limit).map((d) => ({
       ...d.conv,
-      meta: { status: d.status, assigned_to: d.assigned_to, topic: d.topic, item_ids: d.item_ids, pinned: d.pinned },
+      meta: { status: d.status, assigned_to: d.assigned_to, topic: d.topic, item_ids: d.item_ids, pinned: d.pinned,
+        active_claim_episode_id: d.active_claim_episode_id, claim_outcome: d.claim_outcome,
+        bot_claim_info: d.bot_claim_info },
     }));
     if (includeCount) {
       totalCount = ((await metaColl.aggregate<{ n: number }>([

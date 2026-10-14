@@ -944,17 +944,43 @@ type ClaimOutcome = {
 
 **Files:** create `ChatAdminWeb/src/app/api/admin/conversations/[conversationId]/claim-outcome/route.ts`; modify `statusConversationService.ts`, `bot-handoff/route.ts`, `botCallService.ts`, the admin conversation response/type, and `components/chat/InfoTab.tsx`; consume the event in the legacy claim owner; update schema/SRS/log and focused API/UI/contract tests. Do not repurpose the existing conversation `close` or `resolve` routes.
 
-- [ ] RED-test ordinary close with an active claim: ownership returns to bot and claim remains collecting.
-- [ ] RED-test explicit `resolved` and `cancelled` for the current `episode_id`, stale episode id, repeated event, and non-claim conversation.
-- [ ] Move production `bot_claim_info` ownership from raw `conversations` into `status_conversation`, including `active_claim_episode_id`; test/sandbox stores remain isolated as today.
-- [ ] Persist `ClaimOutcome` in `status_conversation` separately from conversation `status`; require actor, timestamp, outcome, and matching episode id.
-- [ ] Add a dedicated claim section in `InfoTab` only when `active_claim_episode_id` exists, with explicit `resolved` and `cancelled` commands plus confirmation. Ordinary close remains a separate action and never sends a claim outcome.
-- [ ] Extend the existing `/chat` state payload with the episode-scoped outcome. The wire form uses an ISO timestamp; storage keeps a Mongo `Date`.
-- [ ] Apply the event idempotently to the Python claim lifecycle on the next authoritative turn. A stale/mismatched episode cannot terminate the active claim, and repeated delivery is a no-op.
-- [ ] Delete `_TERMINAL_CLAIM_REASONS` as lifecycle resolution evidence; keep any still-needed reason only as audit/routing metadata.
-- [ ] Do not infer resolution from close reason, free-text resolution, bot answer, handoff reason, or ticket status.
+- [x] RED-test ordinary close with an active claim: ownership returns to bot and claim remains collecting. — CO15 pin green (close ไม่แตะ claim fields); Python side ไม่มี ordinary-close terminal path
+- [x] RED-test explicit `resolved` and `cancelled` for the current `episode_id`, stale episode id, repeated event, and non-claim conversation. — contract suite section G + CO3–CO8 (applied/already_applied/stale_episode/no_active_claim/invalid + race)
+- [x] Move production `bot_claim_info` ownership from raw `conversations` into `status_conversation`, including `active_claim_episode_id`; test/sandbox stores remain isolated as today. — `recordClaimHandoff` (status service owner); raw-`conversations` writer deleted; test/simulate branches เขียน test stores เหมือนเดิม
+- [x] Persist `ClaimOutcome` in `status_conversation` separately from conversation `status`; require actor, timestamp, outcome, and matching episode id. — `claim_outcome{episode_id,outcome,actor_id,occurred_at}` ผ่าน `applyClaimOutcome` fenced CAS เท่านั้น
+- [x] Add a dedicated claim section in `InfoTab` only when `active_claim_episode_id` exists, with explicit `resolved` and `cancelled` commands plus confirmation. Ordinary close remains a separate action and never sends a claim outcome. — `ClaimSection` + `confirm.ask` (ConfirmDialog เดิม); แยกจาก close chat
+- [x] Extend the existing `/chat` state payload with the episode-scoped outcome. The wire form uses an ISO timestamp; storage keeps a Mongo `Date`. — `ChatRequest.claim_outcome` top-level; `botCallService` serialize `occurred_at` ISO (prod only)
+- [x] Apply the event idempotently to the Python claim lifecycle on the next authoritative turn. A stale/mismatched episode cannot terminate the active claim, and repeated delivery is a no-op. — `_consume_claim_outcome` ที่ SM heads ทั้งสอง ผ่าน `_claim_transition` เดิม (fencing เดิม); stale/mismatch/terminal/malformed → no-op
+- [x] Delete `_TERMINAL_CLAIM_REASONS` as lifecycle resolution evidence; keep any still-needed reason only as audit/routing metadata. — absent ตั้งแต่ 2B.4 (verified — ไม่ถูกสร้างกลับ)
+- [x] Do not infer resolution from close reason, free-text resolution, bot answer, handoff reason, or ticket status. — outcome มาจาก `req.claim_outcome` explicit transport เท่านั้น; `_consume_claim_outcome` ไม่มี text/reason scan
 
-**Exit:** `BLOCKED_BY_MISSING_CLAIM_RESOLUTION_EVENT` and `BLOCKED_BY_CLAIM_EPISODE_IDENTITY` are closed by explicit, episode-scoped evidence.
+**Exit:** `BLOCKED_BY_MISSING_CLAIM_RESOLUTION_EVENT` and `BLOCKED_BY_CLAIM_EPISODE_IDENTITY` are closed by explicit, episode-scoped evidence. — **implemented 2026-10-14 (ยังไม่ commit — รอ review ตาม stop gate)**
+
+**2B.6 Review-Fix (independent review: 2 High + 2 Medium — implemented 2026-10-14, unstaged)**
+
+- [x] **H1 episode resurrection / terminal overwrite** — `recordClaimHandoff` เดิม `upsertMeta` unconditional `$set` → fenced atomic write `{conversation_id, claim_outcome.episode_id:{$ne:ep}, $or:[{active==ep},{active==null}]}` + `$set{active:ep, claim_outcome:null, …}` (E11000→bounded CAS re-fence ครั้งเดียว); `applyClaimOutcome` เพิ่ม `claim_outcome.episode_id:{$ne:ep}` ใน CAS → same-episode outcome immutable (first terminal wins แม้ malformed `{active:E,outcome:E}`) — RED R1–R6 → GREEN
+- [x] **H2 false success on metadata failure** — route เดิม catch `recordClaimHandoff` throw แล้วต่อ → 503 `ok:false` retryable (ownership ที่ commit แล้วคงอยู่; retry identity เดิม converge ผ่าน `handoff_event_id` dedupe + metadata once); `_send_handoff` ลบ hidden `load_claim_state`/Mongo read → explicit `episode_id` param; `_build_warranty_claim_response` รับ `claim_state` จาก caller — claim caller เดียวส่ง episode — RED R7–R9 + U1–U5 + R8a–d → GREEN
+- [x] **M1 UI state leak** — `ClaimSection` key `\`${conversation.id}|${conversation.active_claim_episode_id ?? "-"}\`` — remount/reset busy/applied/errorMsg เมื่อ conversation หรือ episode เปลี่ยน — R10–R11 source pins
+- [x] **M2 production claim shape** — canonical `customer_order_id` ตั้งแต่ Python ctx → route body type → `Conversation.bot_claim_info` → InfoTab; `order_id` contract ลบ (ไม่มี legacy producer) — R12
+- [x] **F3-3 flake (test-only, ระหว่าง verify)** — seed `new Date()` เท่า route `end` ใน ms เดียวกัน → `$lt` exclusive หลุด (binary 0/5); fix seed `now-1000ms` clamp ≥ local-midnight+1 — 5 consecutive runs 231/231
+
+**Owner counts หลัง review-fix:** lifecycle evaluator=1 (`_claim_lifecycle`) · Python transition owner=1 (`_claim_transition`) · transport owner=1 (`_send_handoff`, explicit `episode_id`, no store read) · claim metadata writer=1 (`recordClaimHandoff`) · outcome writer=1 (`applyClaimOutcome`) · `_TERMINAL_CLAIM_REASONS`=0 · raw `conversations` claim writer=0 · `order_id` UI contract=0
+
+**2B.6 Review-Fix round 2 (final correctness: 2 High + 1 Medium — implemented 2026-10-14, unstaged)**
+
+- [x] **F1 stale handoff silent 2xx** — `recordClaimHandoff` เดิม `Promise<void>`: fenced no-op เงียบ → route คืน 2xx → Python confirm stale episode → เปลี่ยนเป็น typed result `{status: written|already_terminal|stale_episode, claimOutcome?}` — no-op/E11000 → bounded reread ครั้งเดียว classify (outcome.ep==E→already_terminal+persisted outcome · active=E'≠E→stale_episode · อื่น→throw); route: written→success เดิม · already_terminal→200 converged `claim_metadata:"already_terminal"`+`claim_outcome` · **stale_episode→409 `ok:false`** (Python ไม่ retry/ไม่ confirm) · throw→503 — RED R13 → GREEN
+- [x] **F2 audit crash window** — `applyClaimOutcome` เดิม commit CAS ก่อน `logAdminEvent`: audit throw→500; retry เจอ already_applied return ก่อน repair → audit หายถาวร → already_applied path เรียก `logAdminEvent(eventId=episodeId)` ด้วย **persisted actor/outcome** ก่อน return (ไม่ใช่ request's conflicting values; dedupe=E11000 ใน logAdminEvent เท่านั้น — repair ≤1 ครั้ง) — RED R15 → GREEN
+- [x] **F3 authoritative outcome on wire/UI** — route เดิมคืนแค่ `{ok,result:"already_applied"}`; InfoTab `setApplied(o)` ใช้ค่าที่กด → conflicting retry (admin-B cancelled เทียบ admin-A resolved persisted) แสดงผิด → `applyClaimOutcome` คืน `{result, claimOutcome}`; route ส่ง `claim_outcome` persisted ทั้ง applied/already_applied; InfoTab อ่าน `body.claim_outcome.outcome` — absent → error ไม่ synthesize — RED R16 → GREEN
+
+**Result:** `recordClaimHandoff` = typed verdict owner เดียว · `applyClaimOutcome` = `{result,claimOutcome}` owner เดียว · audit dedupe = `logAdminEvent` E11000 เดียว · route ทั้งสอง zero Mongo · stale→409 (ไม่ใช่ 2xx) ตลอด chain
+
+**2B.6 Review-Fix round 3 — Final Handoff Ordering (High — implemented 2026-10-14, unstaged)**
+
+- [x] **Ordering root cause** — route เดิมเรียก `handoffToAdmin` (ownership CAS+reopen+audits commit) ก่อน `recordClaimHandoff` classify → stale/terminal verdict มาหลัง side effects → reorder: request มี `episode_id` → `recordClaimHandoff` เป็น gate ก่อน `handoffToAdmin` — written→handoff · stale_episode→409 (handoff calls=0) · already_terminal→200 converged+persisted outcome (handoff calls=0, `outcome:null` — ไม่ synthesize; Python confirm เฉพาะ outcome.state∈{assigned,queued}) · throw→503 (handoff calls=0) · written+handoff-fail→เก็บ metadata ไม่ rollback, retry converge · no `episode_id`→non-claim flow เดิม — RED R17–R20 → GREEN 239/239 · R7 assertions อัปเดตตาม ordering contract ใหม่ (metadata fail → no ownership commit)
+
+**2B.6 Review-Fix round 4 — Atomic Episode Fence on Ownership CAS (High — implemented 2026-10-14, unstaged)**
+
+- [x] **TOCTOU gate↔ownership CAS root cause** — round-3 ปิด sequential bypass แล้วแต่ `commitHandoffState` CAS ยังไม่มี episode fence → terminalize E หรือ E2-active แทรกระหว่าง `recordClaimHandoff(E)→written` กับ ownership CAS ได้ → แก้ที่ CAS owner เดียว: `expectedClaimEpisodeId` ไหล `route → handoffToAdmin → commitHandoffState` บังคับ `{active_claim_episode_id: E, claim_outcome.episode_id: {$ne: E}}` ใน atomic `findOneAndUpdate` เดียวกับ `status/assigned_to/pending_assignment/reopen/handoff_event_id`; CAS miss (และ initial `getMeta`) classify `claim_verdict: already_terminal|stale_episode` ก่อน generic converge โดยไม่ emit audit — route คืน converged 200 (+persisted `claim_outcome`, `outcome:null`) หรือ 409 `ok:false`; non-claim (`expectedClaimEpisodeId` absent) byte-equivalent; `commitHandoffState` ใช้ `upsert: !opts.expectedClaimEpisodeId` (`committed: Boolean(doc)`) และ `handoffToAdmin` เช็ค `if (E)` แม้ `meta == null` เพื่อห้าม upsert สร้าง episode เองเมื่อไม่มี meta doc — RED R21–R22 (interleave via `findOneAndUpdateHook`) + R23–R24 pins + R25 (missing-meta no-upsert) → GREEN 244/244
 
 #### Commit 2B.7 — residual deletion and gate
 

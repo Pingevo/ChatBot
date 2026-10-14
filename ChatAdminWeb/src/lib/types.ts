@@ -125,6 +125,26 @@ export interface Conversation {
   assigned_to_name?: string; // admin display name (lookup)
   replay_verdict?: string; // live-assignment replay result — display only, not current state
 
+  // ⚡ Phase 2B.6 — claim lifecycle (authoritative = status_conversation meta)
+  //   active_claim_episode_id: episode ที่เปิดอยู่ → admin สั่ง resolved/cancelled ได้
+  //   claim_outcome: terminal command ที่ apply แล้ว (immutable)
+  //   bot_claim_info: ข้อมูลเคลมที่บอทเก็บได้ตอน handoff
+  active_claim_episode_id?: string | null;
+  claim_outcome?: {
+    episode_id: string;
+    outcome: "resolved" | "cancelled";
+    actor_id: string;
+    occurred_at: string; // ISO (wire)
+  } | null;
+  // production shape (Python claim ctx — warranty_flow): ไม่มี order_id/product_name
+  bot_claim_info?: {
+    customer_name?: string;
+    customer_phone?: string;
+    customer_order_id?: string;
+    purchase_date?: string;
+    claim_topic?: string;
+  } | null;
+
   // Ticket metadata — embedded in every conversation (Zaapi-style)
   // A conversation becomes a ticket the moment these are filled in
   ticket_id?: string;

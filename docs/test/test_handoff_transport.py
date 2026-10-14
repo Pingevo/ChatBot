@@ -31,6 +31,15 @@ sys.path.insert(0, str(_REPO_ROOT / "chatbot"))
 
 import shopeechat.responses as _responses
 
+# ⚡ conversation_products ต้อง stub ก่อน _send_handoff call แรก —
+#   transport owner derive open claim episode ผ่าน load_claim_state (Phase 2B.6)
+_cp_stub = types.ModuleType("shopeechat.conversation_products")
+_cp_calls: list[str] = []
+_cp_stub.transition_claim_state = lambda *a, **k: _cp_calls.append("transition") or k.get("claim_state")
+_cp_stub.merge_claim_fields = lambda *a, **k: _cp_calls.append("merge")
+_cp_stub.load_claim_state = lambda *a, **k: None
+sys.modules["shopeechat.conversation_products"] = _cp_stub
+
 PASS = FAIL = 0
 
 
@@ -169,13 +178,6 @@ sys.modules["shopeechat.app"] = _app_stub
 sys.modules.setdefault("shopeechat.product_store", types.ModuleType("shopeechat.product_store"))
 sys.modules.setdefault("shopeechat.warranty", types.ModuleType("shopeechat.warranty"))
 
-_cp_stub = types.ModuleType("shopeechat.conversation_products")
-_cp_calls: list[str] = []
-_cp_stub.transition_claim_state = lambda *a, **k: _cp_calls.append("transition")
-_cp_stub.merge_claim_fields = lambda *a, **k: _cp_calls.append("merge")
-_cp_stub.load_claim_state = lambda *a, **k: None
-sys.modules["shopeechat.conversation_products"] = _cp_stub
-
 import shopeechat.handoffs as _handoffs_mod
 import shopeechat.warranty_flow as _wf_mod
 import shopeechat.guards as _guards_mod
@@ -280,22 +282,29 @@ _claim_ctx = {"handoff_reason": "warranty_claim_in_warranty", "order_id": "o1"}
 
 _cp_calls.clear()
 calls, fake = _script_urlopen([_body("assigned")])
-with patch("urllib.request.urlopen", side_effect=fake), \
-     patch("time.sleep", lambda *_a, **_k: None):
-    res = _wf_mod._build_warranty_claim_response(
-        _req(), dict(_ctx), "แจ้งแอดมินดำเนินการเคลมให้แล้วนะคะ", True, dict(_claim_ctx),
-        _app_stub, _llm_stub)
+res = None
+try:
+    with patch("urllib.request.urlopen", side_effect=fake), \
+         patch("time.sleep", lambda *_a, **_k: None):
+        res = _wf_mod._build_warranty_claim_response(
+            _req(), dict(_ctx), "แจ้งแอดมินดำเนินการเคลมให้แล้วนะคะ", True, dict(_claim_ctx),
+            _app_stub, _llm_stub, claim_state={})
+except TypeError:
+    res = None
 check("C4a success → flag True + ไม่เขียน claim_state (handoff ≠ resolution)",
-      res.get("handoff_to_admin") is True and not _cp_calls,
-      f"flag={res.get('handoff_to_admin')} cp={_cp_calls}")
+      res is not None and res.get("handoff_to_admin") is True and not _cp_calls,
+      f"flag={res and res.get('handoff_to_admin')} cp={_cp_calls}")
 
 _cp_calls.clear()
 calls, fake = _script_urlopen([_http(503)] * 5)
-with patch("urllib.request.urlopen", side_effect=fake), \
-     patch("time.sleep", lambda *_a, **_k: None):
-    res = _wf_mod._build_warranty_claim_response(
-        _req(), dict(_ctx), "แจ้งแอดมินดำเนินการเคลมให้แล้วนะคะ", True, dict(_claim_ctx),
-        _app_stub, _llm_stub)
+try:
+    with patch("urllib.request.urlopen", side_effect=fake), \
+         patch("time.sleep", lambda *_a, **_k: None):
+        res = _wf_mod._build_warranty_claim_response(
+            _req(), dict(_ctx), "แจ้งแอดมินดำเนินการเคลมให้แล้วนะคะ", True, dict(_claim_ctx),
+            _app_stub, _llm_stub, claim_state={})
+except TypeError:
+    res = {}
 check("C4b exhausted → flag False + ไม่เขียน claim_state เช่นกัน",
       res.get("handoff_to_admin") is False and not _cp_calls,
       f"flag={res.get('handoff_to_admin')} cp={_cp_calls}")
@@ -483,6 +492,146 @@ check("L3b review resp — mid-flow bot_reply: ไม่ใช่ completed hand
 check("L3c review → ไม่มี _send_handoff call + ไม่มี claim-state clear",
       calls == [] and "clear" not in _cp_calls,
       f"calls={len(calls)} cp={_cp_calls}")
+
+# ═══ U. claim episode transport — Phase 2B.6 review-fix (explicit param) ═══
+# episode_id ต้องมาจาก caller ที่ถือ authoritative claim_state — _send_handoff
+# ห้ามอ่าน claim state/Mongo เอง (transport owner ไม่ใช่ lifecycle reader)
+
+print("== U. claim episode_id transport (explicit param — Phase 2B.6 review-fix) ==")
+
+# counting stub — transport ห้ามอ่าน claim state เลย (แม้ open episode ก็ตาม)
+_load_calls: list = []
+_cp_stub.load_claim_state = lambda *a, **k: _load_calls.append(1) or {
+    "episode_id": "ep-must-not-be-read", "stage": "collecting"}
+
+# U1 explicit episode_id param → payload top-level episode_id
+try:
+    _r, calls = _run([_body("assigned")], episode_id="ep-live-1")
+except TypeError:
+    _r, calls = None, []
+_p = json.loads(calls[0].decode()) if calls else {}
+check("U1 explicit episode_id → payload top-level episode_id",
+      _p.get("episode_id") == "ep-live-1", f"payload={_p}")
+
+# U2 claim data แต่ไม่มี episode param → ห้ามมี key (transport ห้ามเดา/อ่านเอง)
+try:
+    _r, calls = _run([_body("assigned")],
+                     claim={"customer_order_id": "o-1", "claim_topic": "เคลม"})
+except TypeError:
+    _r, calls = None, []
+_p = json.loads(calls[0].decode()) if calls else {}
+check("U2 claim payload โดยไม่มี episode_id param → ไม่มี episode_id key",
+      "episode_id" not in _p, f"payload={_p}")
+
+# U3 non-claim handoff → ไม่มี episode key (reason ไม่ใช่ตัวเดา episode)
+calls, fake = _script_urlopen([_body("assigned")])
+with patch("urllib.request.urlopen", side_effect=fake), \
+     patch("time.sleep", lambda *_a, **_k: None):
+    _responses._send_handoff(_req(), None, reason="human_request",
+                             claim={"topic": "ขอคุยกับแอดมิน"})
+_p = json.loads(calls[0].decode()) if calls else {}
+check("U3 non-claim handoff → ไม่มี episode_id key",
+      "episode_id" not in _p, f"payload={_p}")
+
+# U4 claim={} + explicit episode → episode ยังส่ง (transport ไม่ผูกกับ claim dict)
+try:
+    _r, calls = _run([_body("assigned")], claim={}, episode_id="ep-live-2")
+except TypeError:
+    _r, calls = None, []
+_p = json.loads(calls[0].decode()) if calls else {}
+check("U4 claim={} + explicit episode_id → episode_id ยังส่ง",
+      _p.get("episode_id") == "ep-live-2", f"payload={_p}")
+
+# U5 pin — _send_handoff ห้ามอ่าน claim state/Mongo เอง (load_claim_state count=0)
+check("U5 _send_handoff ไม่อ่าน claim_state/Mongo เอง (load_claim_state ไม่ถูกเรียก)",
+      len(_load_calls) == 0, f"load_calls={len(_load_calls)}")
+
+print("== R8 claim handoff episode identity — lifecycle transport contract ==")
+# R8: claim handoff ที่ขาด episode identity (lifecycle open แต่ไม่มี episode /
+#     caller ไม่ส่ง claim_state) ห้ามรายงาน handoff success — fail closed
+
+# R8a open episode → episode_id ไหลลง payload ผ่าน explicit param
+_sent_payloads: list = []
+_orig_send = _app_stub._send_handoff
+def _spy_send(*a, **k):
+    if k.get("episode_id"):
+        _sent_payloads.append(k["episode_id"])
+    return _orig_send(*a, **k)
+_app_stub._send_handoff = _spy_send
+calls, fake = _script_urlopen([_body("assigned")])
+_res = None
+try:
+    with patch("urllib.request.urlopen", side_effect=fake), \
+         patch("time.sleep", lambda *_a, **_k: None):
+        _res = _wf_mod._build_warranty_claim_response(
+            _req(), dict(_ctx), "ตอบ claim", True,
+            {"claim_topic": "เคลม", "handoff_reason": "claim"},
+            _app_stub, _llm_stub,
+            claim_state={"episode_id": "ep-r8", "stage": "collecting"})
+except TypeError:
+    _res = None
+_app_stub._send_handoff = _orig_send
+check("R8a open claim episode → episode_id explicit ลง transport + flag True",
+      _res is not None and _res.get("handoff_to_admin") is True
+      and _sent_payloads == ["ep-r8"],
+      f"res={_res and _res.get('handoff_to_admin')} sent={_sent_payloads}")
+
+# R8b lifecycle open แต่ไม่มี episode_id (legacy episode-less doc) → ห้าม POST
+_sent2: list = []
+def _spy_send2(*a, **k):
+    _sent2.append(1)
+    return _orig_send(*a, **k)
+_app_stub._send_handoff = _spy_send2
+_res = None
+try:
+    _res = _wf_mod._build_warranty_claim_response(
+        _req(), dict(_ctx), "ตอบ claim", True,
+        {"claim_topic": "เคลม", "handoff_reason": "claim"},
+        _app_stub, _llm_stub,
+        claim_state={"stage": "collecting"})   # open แต่ขาด episode identity
+except TypeError:
+    _res = None
+_app_stub._send_handoff = _orig_send
+check("R8b open-without-episode → ห้าม POST + flag False (ไม่ใช่ success)",
+      _res is not None and _res.get("handoff_to_admin") is False and not _sent2,
+      f"flag={_res and _res.get('handoff_to_admin')} sent={_sent2}")
+
+# R8c caller ไม่ส่ง claim_state (lifecycle truth ไม่ทราบ) → fail closed เช่นกัน
+_res = None
+try:
+    _res = _wf_mod._build_warranty_claim_response(
+        _req(), dict(_ctx), "ตอบ claim", True,
+        {"claim_topic": "เคลม", "handoff_reason": "claim"},
+        _app_stub, _llm_stub, claim_state=None)
+except TypeError:
+    _res = None
+check("R8c claim_state=None (unknown lifecycle) → ห้าม POST + flag False",
+      _res is not None and _res.get("handoff_to_admin") is False and not _sent2,
+      f"flag={_res and _res.get('handoff_to_admin')}")
+
+# R8d terminal claim_state → handoff ยังทำงาน (info-only) แต่ไม่ส่ง episode
+_sent3: list = []
+def _spy_send3(*a, **k):
+    _sent3.append(k.get("episode_id"))
+    return _orig_send(*a, **k)
+_app_stub._send_handoff = _spy_send3
+calls, fake = _script_urlopen([_body("assigned")])
+_res = None
+try:
+    with patch("urllib.request.urlopen", side_effect=fake), \
+         patch("time.sleep", lambda *_a, **_k: None):
+        _res = _wf_mod._build_warranty_claim_response(
+            _req(), dict(_ctx), "ตอบ claim", True,
+            {"claim_topic": "เคลม", "handoff_reason": "claim"},
+            _app_stub, _llm_stub,
+            claim_state={"episode_id": "ep-term", "stage": "resolved"})
+except TypeError:
+    _res = None
+_app_stub._send_handoff = _orig_send
+check("R8d terminal claim_state → POST info-only (episode_id=None)",
+      _res is not None and _res.get("handoff_to_admin") is True
+      and _sent3 == [None],
+      f"flag={_res and _res.get('handoff_to_admin')} sent={_sent3}")
 
 print(f"\n{PASS}/{PASS + FAIL} passed")
 sys.exit(0 if FAIL == 0 else 1)

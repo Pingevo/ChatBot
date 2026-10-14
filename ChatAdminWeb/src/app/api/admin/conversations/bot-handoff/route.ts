@@ -12,6 +12,7 @@ import { json, error, readJson } from "@/backend/lib/http";
 import { serverConfig } from "@/backend/lib/config";
 import { handoffService, handoffOutcomeHttpStatus, type HandoffOutcome } from "@/backend/service/handoffService";
 import { conversationService } from "@/backend/service/conversationService";
+import { statusConversationService } from "@/backend/service/statusConversationService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { invalidateConversationsCache } from "@/app/api/admin/conversations/route";
 // ⚡ G-fix — invalidate botworker cache ด้วย
@@ -36,17 +37,18 @@ interface BotHandoffBody {
   reason?: string;
   simulate?: boolean; // ⚡ simulate mode — เก็บลง test_chat_sessions ไม่กระทบ conversations
   test_source?: string; // ⚡ parallel sandbox — "botworker" ฯลฯ → เขียน test_status_conversation[source]
+  // ⚡ canonical production shape (Python claim ctx): customer_* + claim_topic
+  //   — ไม่มี order_id/product_name/warranty_* producer ใน runtime
   claim?: {
     customer_name?: string;
     customer_phone?: string;
-    order_id?: string;
-    claim_topic?: string;
-    product_name?: string;
-    warranty_status?: "in_warranty" | "out_of_warranty";
+    customer_order_id?: string;
     purchase_date?: string;
-    warranty_months?: number;
-    expiry_date?: string;
+    claim_topic?: string;
+    topic?: string; // non-claim handoff metadata (tax/noproduct/cert/human)
   };
+  // ⚡ Phase 2B.6 — open claim episode (Python hoist ผ่าน _send_handoff owner เดียว)
+  episode_id?: string;
 }
 
 export async function POST(req: NextRequest) {
@@ -223,6 +225,40 @@ export async function POST(req: NextRequest) {
     return error("conversation not found", 404);
   }
 
+  // ⚡ Phase 2B.6 — episode fence เป็น gate ก่อน ownership mutation:
+  //    request ที่มี episode_id → recordClaimHandoff ตัดสินก่อน handoffToAdmin
+  //    (stale/terminal ห้ามถึง ownership/reopen/audit; verdict=written ค่อย handoff)
+  const episodeId =
+    typeof body.episode_id === "string" && body.episode_id ? body.episode_id : null;
+  if (episodeId) {
+    try {
+      const claimWrite = await statusConversationService.recordClaimHandoff({
+        conversationId: conversation_id,
+        claim,
+        reason,
+        episodeId,
+      });
+      //   stale_episode → 409 permanent (Python ห้าม confirm/retry —
+      //     episode write ไม่ใช่ success; ownership ไม่ถูกแตะเลย)
+      //   already_terminal → converged 200 + persisted outcome (episode เดียวกัน
+      //     จบไปแล้ว — ไม่ synthesize handoff outcome: Python confirm เฉพาะ
+      //     outcome.state ∈ {assigned,queued} → absent outcome = not confirmed)
+      if (claimWrite.status === "stale_episode") {
+        return json({ ok: false, outcome: null, claim_metadata: "stale_episode" }, 409);
+      }
+      if (claimWrite.status === "already_terminal") {
+        return json({
+          ok: true, outcome: null,
+          claim_metadata: "already_terminal",
+          claim_outcome: claimWrite.claimOutcome ?? null,
+        });
+      }
+    } catch (e) {
+      console.error("[bot-handoff] claim metadata persist failed:", e);
+      return json({ ok: false, outcome: null, claim_metadata: "persist_failed" }, 503);
+    }
+  }
+
   // 1. Handoff ให้แอดมิน — typed outcome จาก persisted state เท่านั้น
   //    (assigned|queued|failed — caller ห้าม derive success จาก ok:true)
   const outcome = await handoffService.handoffToAdmin({
@@ -230,7 +266,23 @@ export async function POST(req: NextRequest) {
     shopId: conv.shop_id,
     platform: conv.platform,
     reason: reason || "warranty claim — bot handoff",
+    // ⚡ 2B.6 — atomic episode fence บน ownership CAS (gate→commit ระหว่างกัน
+    //   terminalize/E2 ได้ → CAS miss → claim verdict แทน handoff success)
+    expectedClaimEpisodeId: episodeId ?? undefined,
   });
+
+  // ⚡ 2B.6 — claim verdict จาก atomic fence (terminalize/E2 แทรกหลัง gate):
+  //   response เดียวกับ gate verdict — permanent ไม่ใช่ retryable failure
+  if (outcome.claim_verdict === "stale_episode") {
+    return json({ ok: false, outcome: null, claim_metadata: "stale_episode" }, 409);
+  }
+  if (outcome.claim_verdict === "already_terminal") {
+    return json({
+      ok: true, outcome: null,
+      claim_metadata: "already_terminal",
+      claim_outcome: outcome.claim_outcome ?? null,
+    });
+  }
 
   // ⚡ failed/emit_incomplete ห้าม 2xx — Python transport ต้องเห็น retryable signal
   const httpStatus = handoffOutcomeHttpStatus(outcome);
@@ -252,26 +304,22 @@ export async function POST(req: NextRequest) {
     return json(respBody, httpStatus);
   }
 
-  // 2. บันทึก claim info ลง conversation metadata
-  if (claim && Object.keys(claim).length > 0) {
+  // 2. บันทึก claim info ลง status_conversation (owner เดียว) — เฉพาะ request
+  //    ที่ไม่มี episode_id (non-claim flow เดิม: handoff ก่อน metadata write)
+  //    ⚡ Phase 2B.6 — ย้ายจาก raw conversations (dump ทับทุก 2 วิ ไม่ใช่ owner)
+  //    persist ไม่สำเร็จ → 503 retryable (ownership commit แล้วคงอยู่ — retry
+  //    request เดิม converge ผ่าน handoffService + emit eid เดิม)
+  if (!episodeId && claim && Object.keys(claim).length > 0) {
     try {
-      const coll = await getCollection<{ conversation_id: string; bot_claim_info?: unknown }>(
-        COLLECTIONS.conversations
-      );
-      await coll.updateOne(
-        { conversation_id },
-        {
-          $set: {
-            bot_claim_info: claim,
-            // last write/refresh time ของ claim metadata — ไม่ใช่ ownership authority
-            bot_handoff_at: new Date(),
-            bot_handoff_reason: reason || "warranty_claim",
-          },
-        }
-      );
+      await statusConversationService.recordClaimHandoff({
+        conversationId: conversation_id,
+        claim,
+        reason,
+        episodeId: null,
+      });
     } catch (e) {
-      // ไม่ fatal — log แล้วทำต่อ
-      console.error("[bot-handoff] failed to save claim info:", e);
+      console.error("[bot-handoff] claim metadata persist failed:", e);
+      return json({ ...respBody, ok: false, claim_metadata: "persist_failed" }, 503);
     }
   }
 

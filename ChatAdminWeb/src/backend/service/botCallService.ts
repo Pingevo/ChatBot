@@ -45,6 +45,14 @@ export interface BotCallResponse {
   chat_engine?: "legacy" | "v2" | "v3";
 }
 
+/** ⚡ Phase 2B.6 — admin claim outcome ที่ transport ไป Python (production เท่านั้น) */
+interface ClaimOutcomeWire {
+  episode_id: string;
+  outcome: "resolved" | "cancelled";
+  actor_id: string;
+  occurred_at: Date;
+}
+
 /**
  * ⚡ Phase 2A — ดึง ticket state จาก DB
  *   testSource → test_status_conversation(source) — botworker parallel sandbox
@@ -54,33 +62,37 @@ export interface BotCallResponse {
  *       bot/closed/resolved → Python unlock)
  *     - meta ไม่มี หรือไม่มี status → "bot" (explicit unlocked — ห้าม omit
  *       เพราะ Python fallback ไป history scan เมื่อ ticket_state เป็น null)
+ *     - meta.claim_outcome → claim outcome transport (Phase 2B.6 —
+ *       test/simulate ไม่มี outcome — isolation)
  *     - meta read error → throw (fail closed — caller ห้ามเรียก Python)
- *   คืน "open" | "closed" | "handoff" | "resolved" | "pending" | "bot" | null
+ *   คืน { state, claimOutcome } — state: "open"|"closed"|"handoff"|"resolved"|"pending"|"bot"|null
  */
 async function resolveTicketState(
   conversationId: string | undefined,
   simulate: boolean | undefined,
   testSource: string | undefined
-): Promise<string | null> {
-  if (!conversationId) return null;
+): Promise<{ state: string | null; claimOutcome: ClaimOutcomeWire | null }> {
+  if (!conversationId) return { state: null, claimOutcome: null };
   if (testSource) {
     // ⚡ parallel sandbox — อ่านจาก test_status_conversation เท่านั้น
     const coll = await getCollection<{ conversation_id: string; source: string; status?: string }>(COLLECTIONS.testStatusConversation);
     const doc = await coll.findOne({ conversation_id: conversationId, source: testSource });
-    return doc?.status || null;
+    return { state: doc?.status || null, claimOutcome: null };
   }
   if (simulate) {
     // test chat — ดึงจาก test_chat_sessions
     const { ObjectId } = await import("mongodb");
     const coll = await getCollection<{ _id: typeof ObjectId.prototype; status?: string }>(COLLECTIONS.testChatSessions);
     const doc = await coll.findOne({ _id: new ObjectId(conversationId) });
-    return doc?.status || null;
+    return { state: doc?.status || null, claimOutcome: null };
   }
   // production ownership authority = status_conversation เท่านั้น
   //   ห้าม fallback ไป conversations(_shp).status — dump เขียนทับทุก 2 วิ
-  const coll = await getCollection<{ conversation_id: string; status?: string }>(COLLECTIONS.statusConversation);
+  const coll = await getCollection<{
+    conversation_id: string; status?: string; claim_outcome?: ClaimOutcomeWire | null;
+  }>(COLLECTIONS.statusConversation);
   const doc = await coll.findOne({ conversation_id: conversationId });
-  return doc?.status || "bot";
+  return { state: doc?.status || "bot", claimOutcome: doc?.claim_outcome ?? null };
 }
 
 /** เรียก Python bot ตรง (server-to-server ใช้ x-internal-secret — ไม่ใช้ cookie) */
@@ -150,8 +162,9 @@ async function releaseBotCallSlot(): Promise<void> {
 export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
   const baseUrl = serverConfig.chatbotBaseUrls[params.platform] || serverConfig.chatbotBaseUrls.shopee;
   const url = baseUrl.replace(/\/$/, "") + "/chat";
-  // ⚡ Phase 2A — ดึง ticket_state จาก DB (testSource → test store)
-  const ticketState = await resolveTicketState(params.conversationId, params.simulate, params.testSource);
+  // ⚡ Phase 2A — ดึง ticket_state + claim_outcome จาก DB (testSource → test store)
+  const { state: ticketState, claimOutcome } =
+    await resolveTicketState(params.conversationId, params.simulate, params.testSource);
   // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
   const useV2 = await shouldUseChatV2();
   const useV3 = await shouldUseChatV3();
@@ -202,6 +215,18 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
         ...(params.images && params.images.length > 0 ? { images: params.images } : {}),
         // ⚡ Phase 2A — ส่ง ticket_state ให้บอทใช้ตัดสินใจ post-handoff
         ...(ticketState ? { ticket_state: ticketState } : {}),
+        // ⚡ Phase 2B.6 — explicit admin claim outcome (episode-scoped;
+        //   occurred_at เป็น ISO บน wire, storage เก็บ Mongo Date)
+        ...(claimOutcome ? {
+          claim_outcome: {
+            episode_id: claimOutcome.episode_id,
+            outcome: claimOutcome.outcome,
+            actor_id: claimOutcome.actor_id,
+            occurred_at: claimOutcome.occurred_at instanceof Date
+              ? claimOutcome.occurred_at.toISOString()
+              : String(claimOutcome.occurred_at),
+          },
+        } : {}),
         // ⚡ Phase 2A — ส่ง conversation_id + simulate ให้บอท (สำหรับ handoff API)
         ...(params.conversationId ? { conversation_id: params.conversationId } : {}),
         // ⚡ testSource → simulate_assignment=true เสมอ (กัน Python เขียน assign จริง) + test_source เพื่อ route เข้า test store

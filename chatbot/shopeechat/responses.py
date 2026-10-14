@@ -45,7 +45,8 @@ _HANDOFF_MAX_ATTEMPTS = 3
 
 def _send_handoff(req, ctx: dict | None = None, *, reason: str, claim_topic: str = "",
                   claim: dict | None = None, simulate: bool = False,
-                  timeout: float = 3.0, log_tag: str = "HANDOFF") -> dict | None:
+                  timeout: float = 3.0, log_tag: str = "HANDOFF",
+                  episode_id: str | None = None) -> dict | None:
     """ส่ง handoff ไปแอดมิน — transport owner เดียวของฝั่ง Python.
 
     Contract (typed outcome เป็น authority — ไม่ใช่ HTTP status เฉยๆ):
@@ -65,6 +66,8 @@ def _send_handoff(req, ctx: dict | None = None, *, reason: str, claim_topic: str
         simulate: ใส่ key "simulate" ใน payload (ค่าจาก req.simulate_assignment)
         timeout: urllib timeout ต่อ attempt (วินาที)
         log_tag: prefix ของ log line
+        episode_id: open claim episode ที่ caller derive จาก authoritative
+            claim_state เอง — transport owner ไม่อ่าน claim state/Mongo เอง
     Returns:
         parsed response dict เมื่อ authoritative handoff ยืนยัน, None เมื่อไม่สำเร็จ
     """
@@ -93,6 +96,11 @@ def _send_handoff(req, ctx: dict | None = None, *, reason: str, claim_topic: str
         _test_source = getattr(req, "test_source", None)
         if _test_source:
             _payload["test_source"] = _test_source
+        # ⚡ Phase 2B.6 — open claim episode_id (explicit — caller ที่ถือ
+        #   authoritative claim_state ส่งมา; transport ไม่อ่าน claim state เอง)
+        #   → status_conversation.active_claim_episode_id = เป้าหมายของ admin outcome
+        if episode_id:
+            _payload["episode_id"] = episode_id
         # body เดิมทุก attempt — identity เดิม (request retry = converge เดิม)
         _body = json.dumps(_payload).encode("utf-8")
         _headers = {

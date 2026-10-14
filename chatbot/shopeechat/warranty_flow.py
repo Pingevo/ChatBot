@@ -157,6 +157,44 @@ def _claim_transition(req, claim_state: dict, to: str,
         expected_stage=view.stage, fields=merge) or cs
 
 
+def _consume_claim_outcome(req, claim_state: dict | None) -> dict:
+    """apply explicit admin claim outcome (Phase 2B.6) — episode-scoped, idempotent.
+
+    req.claim_outcome = {episode_id, outcome: resolved|cancelled, actor_id,
+    occurred_at (ISO)} — transport จาก status_conversation ผ่าน /chat payload.
+    apply เฉพาะเมื่อ episode ตรงกับ active episode + lifecycle เปิดอยู่ —
+    ผ่าน _claim_transition เดียว (fencing เดิมครอบ race/replay/terminal);
+    malformed/stale/absent → no-op, คืน state เดิม.
+    """
+    oc = getattr(req, "claim_outcome", None)
+    if not isinstance(oc, dict):
+        return claim_state or {}
+    outcome = oc.get("outcome")
+    episode = oc.get("episode_id")
+    if (outcome not in _CLAIM_TERMINAL_STAGES
+            or not isinstance(episode, str) or not episode):
+        return claim_state or {}
+    cs = dict(claim_state or {})
+    view = _claim_lifecycle(cs)
+    if not view.lifecycle_open or view.episode_id != episode:
+        return cs
+    from datetime import datetime, timezone
+    occurred = oc.get("occurred_at")
+    resolved_at = None
+    if isinstance(occurred, str):
+        try:
+            resolved_at = datetime.fromisoformat(
+                occurred.replace("Z", "+00:00")).isoformat()
+        except ValueError:
+            resolved_at = None
+    fields = {
+        "resolution_reason": f"admin_{outcome}",
+        "resolved_by": oc.get("actor_id"),
+        "resolved_at": resolved_at or datetime.now(timezone.utc).isoformat(),
+    }
+    return _claim_transition(req, cs, outcome, fields=fields)
+
+
 # ─── Post-handoff lock helpers (5F-H4) ───────────────────────────────────────
 # ticket_state เป็น source of truth — ไม่พึ่ง history marker อย่างเดียว
 # (history fetch fail/marker missing ตอน ticket ยังเปิด = bot ตอบเองผิดจังหวะ)
@@ -237,6 +275,8 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
             _claim_state = _cp_claim.load_claim_state(req.conversation_id) or {}
         except Exception:
             pass
+    # ⚡ 2B.6 — explicit admin outcome ก่อน lifecycle evaluate (authoritative turn)
+    _claim_state = _consume_claim_outcome(req, _claim_state)
     # ⚡ 2B.4 — lifecycle view จาก evaluator เดียว: marker/field evidence ใช้ได้
     #   เฉพาะตอนไม่ terminal (terminal ต้อง explicit fresh claim เท่านั้น)
     _view = _claim_lifecycle(_claim_state)
@@ -577,7 +617,7 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
     if _warranty_claim_answer:
         return _build_warranty_claim_response(
             req, ctx, _warranty_claim_answer, _warranty_claim_handoff,
-            _warranty_claim_ctx, _app_module, llm
+            _warranty_claim_ctx, _app_module, llm, claim_state=_claim_state
         )
 
     # ── Warranty date follow-up ──
@@ -728,21 +768,39 @@ def _build_post_handoff_response(req, ctx, _app_module, llm) -> dict:
 
 
 def _build_warranty_claim_response(req, ctx, answer, handoff, claim_ctx,
-                                     _app_module, llm, source="warranty_claim_flow") -> dict:
-    """สร้าง response สำหรับ warranty claim พร้อม handoff API call."""
+                                     _app_module, llm, source="warranty_claim_flow",
+                                     claim_state: dict | None = None) -> dict:
+    """สร้าง response สำหรับ warranty claim พร้อม handoff API call.
+
+    claim_state = authoritative claim lifecycle state ของ caller (เป้าหมาย:
+    open episode ⟹ episode_id ส่งผ่าน transport explicitly — `_send_handoff`
+    ไม่อ่าน Mongo เอง). lifecycle open แต่ไม่มี episode_id หรือ claim_state
+    ไม่ทราบ → handoff ถือไม่สมบูรณ์: ไม่ POST + flag False (ห้าม false success)
+    """
     _model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
     _total = round(_time.time() - ctx.get("total_start", _time.time()), 2)
     _handoff_result: dict = {}
     _assigned_admin_name: str | None = None
     _assignment_reason: str | None = None
     if handoff and req.conversation_id:
-        # transport owner เดียว — outcome ยืนยันเท่านั้นถึง claim/flag/clear
-        _handoff_result = _app_module._send_handoff(
-            req, None,
-            reason=claim_ctx.get("handoff_reason", "warranty_claim"),
-            claim={k: v for k, v in claim_ctx.items() if k != "handoff_reason" and v},
-            simulate=True, timeout=5.0, log_tag="HANDOFF-V2",
-        ) or {}
+        # claim episode identity มาจาก evaluator เดียวบน authoritative state —
+        # open ⟹ episode_id ต้องมี; ขาด = transport identity failure (fail closed)
+        _ep_view = _claim_lifecycle(claim_state) if claim_state is not None else None
+        _episode_id = (_ep_view.episode_id
+                       if _ep_view is not None and _ep_view.lifecycle_open
+                       else None)
+        if _ep_view is not None and (not _ep_view.lifecycle_open or _episode_id):
+            # transport owner เดียว — outcome ยืนยันเท่านั้นถึง claim/flag/clear
+            _handoff_result = _app_module._send_handoff(
+                req, None,
+                reason=claim_ctx.get("handoff_reason", "warranty_claim"),
+                claim={k: v for k, v in claim_ctx.items() if k != "handoff_reason" and v},
+                simulate=True, timeout=5.0, log_tag="HANDOFF-V2",
+                episode_id=_episode_id,
+            ) or {}
+        else:
+            print("[WARRANTY-CLAIM] handoff blocked: claim episode identity "
+                  "unavailable (lifecycle open แต่ไม่มี episode_id)", file=sys.stderr)
         _assigned_admin_name = _handoff_result.get("assigned_to_name")
         _assignment_reason = _handoff_result.get("assignment_reason")
 
@@ -985,10 +1043,13 @@ def _handle_first_message_claim(req, ctx, is_claim, _warranty_mod, llm, _app_mod
         f"(ขึ้นกับเงื่อนไขเฉพาะรุ่น) หากข้อมูลครบ {_bot_name} จะตรวจสอบและประสานงานต่อให้ค่ะ"
     )
     # ⚡ 2B.4 — explicit fresh claim request → episode lifecycle ผ่าน owner เดียว
-    _claim_transition(req, claim_state or {}, "collecting", fresh_claim=True)
+    #   (capture authoritative return — episode_id ของ episode ที่เพิ่ง mint
+    #   อยู่ใน state นี้ ไม่ใช่ claim_state เดิม)
+    claim_state = _claim_transition(req, claim_state or {}, "collecting", fresh_claim=True)
     _claim_ctx = {"claim_topic": "เคลม/ซ่อม/ประกันสินค้า", "handoff_reason": "claim"}
     return _build_warranty_claim_response(
-        req, ctx, _answer, True, _claim_ctx, _app_module, llm
+        req, ctx, _answer, True, _claim_ctx, _app_module, llm,
+        claim_state=claim_state
     )
 
 
@@ -1042,6 +1103,8 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             _claim_state = _cp_claim.load_claim_state(req.conversation_id) or {}
         except Exception:
             pass
+    # ⚡ 2B.6 — explicit admin outcome ก่อน lifecycle evaluate (authoritative turn)
+    _claim_state = _consume_claim_outcome(req, _claim_state)
     # ⚡ 2B.4 — lifecycle view จาก evaluator เดียว: marker/field evidence ใช้ได้
     #   เฉพาะตอนไม่ terminal (terminal ต้อง explicit fresh claim เท่านั้น)
     _view = _claim_lifecycle(_claim_state)
@@ -1493,6 +1556,7 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             return _build_warranty_claim_response(
                 req, ctx, _warranty_claim_answer, _warranty_claim_handoff,
                 _warranty_claim_ctx, _app_module, llm,
+                claim_state=_claim_state,
             )
 
     if history and not _is_followup_policy:
@@ -1696,7 +1760,7 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                     f"เดี๋ยวช่วยตรวจสอบเรื่องเคลม/รับประกันให้นะคะ")
                 # ⚡ 2B.4 — troubleshoot-first ตอบ explicit claim request → episode
                 #   ใหม่ที่ stage ts_suggested ผ่าน owner (fresh path เดียวกัน)
-                _claim_transition(req, _claim_state, "ts_suggested", fresh_claim=True)
+                _claim_state = _claim_transition(req, _claim_state, "ts_suggested", fresh_claim=True)
                 print("[QA-KB] troubleshoot-first: แนะนำวิธีแก้ ยังไม่ handoff", file=sys.stderr)
                 _total_elapsed = _time.time() - _total_start
                 return dict(
@@ -1734,4 +1798,5 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             req, ctx, _claim_first_answer, True,
             {"claim_topic": "เคลม/ซ่อม/ประกันสินค้า", "handoff_reason": "claim"},
             _app_module, llm, source="warranty_claim_first_message",
+            claim_state=_claim_state,
         )

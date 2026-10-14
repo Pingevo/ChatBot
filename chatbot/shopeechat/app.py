@@ -164,6 +164,10 @@ class ChatRequest(BaseModel):
     #    ถ้า "handoff"/"open" + มี handoff marker → ล็อค (ยกเว้น exceptions ใน KB)
     #    ถ้า None → fallback ใช้ history scan แบบเดิม (backward compat)
     ticket_state: str | None = Field(None, description="สถานะ ticket จาก DB: open|closed|handoff|resolved|pending (None = ไม่ทราบ ใช้ history scan)")
+    # ⚡ Phase 2B.6 — explicit admin claim outcome (episode-scoped event จาก
+    #    status_conversation): {episode_id, outcome: resolved|cancelled,
+    #    actor_id, occurred_at (ISO)} — apply เฉพาะ episode ตรง + open เท่านั้น
+    claim_outcome: dict[str, Any] | None = Field(None, description="admin claim outcome event: {episode_id, outcome: resolved|cancelled, actor_id, occurred_at}")
     # ⚡ per-request chat_v2 override — shadowbot/replay ส่ง use_v2=true เพื่อทดสอบ chat_v2
     #    โดยไม่กระทบ traffic จริง (ที่ยังใช้ legacy ตาม USE_LEGACY_CHAT env)
     use_v2: bool | None = Field(None, description="ถ้า true → บังคับใช้ chat_v2 แม้ USE_LEGACY_CHAT=1 (สำหรับ shadowbot/replay)")

@@ -20,6 +20,40 @@
 
 ## กำลังทำ (active)
 
+### 🔧 Phase 2B.6 — Explicit Admin Claim Outcome (2026-10-14) · audit→RED→impl เสร็จ · verify/docs ค้าง · ยังไม่ commit
+
+- **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `c28edb1` (docs 2B.5 atop `e26456c`) · tree clean · 2B.1–2B.5 committed ทั้งหมด
+- **เป้าหมาย**: claim outcome ที่แอดมินสั่งชัดเจน (resolved|cancelled) ผูก episode_id — แยกจาก close/resolve/ticket status/handoff reason/bot text — `status_conversation` = transport+ownership owner, `conversation_products.claim_state` = lifecycle/evidence owner
+- **รูปแบบ**: audit ก่อน (read-first) → contract design → RED tests → implement → verify → docs — ห้าม commit ก่อน review
+- **ข้อห้าม**: ไม่ worker/.env/มาแล้วจ้า/provider/LLM/real Mongo/port 8010/push/PR/deploy · ไม่สร้าง `_TERMINAL_CLAIM_REASONS` กลับ (ตรวจ absent เท่านั้น) · ไม่ repurpose close/resolve routes · ไม่เพิ่ม collection/dep/env flag/helper ซ้อน
+- **residual จาก 2B.5**: `BLOCKED_BY_EXTERNAL_WRITER_REPO_REQUIRED` (inbound hook) + `BLOCKED_BY_MISSING_CLAIM_RESOLUTION_EVENT`/`BLOCKED_BY_CLAIM_EPISODE_IDENTITY` (ปิดใน phase นี้)
+
+#### Audit result (ไม่มี divergence — implement ต่อได้ตามที่อนุมัติ)
+
+- owner เดิมครบ: TS transport/ownership = `statusConversationService` เดียว · Py lifecycle evaluator = `_claim_lifecycle` เดียว · transition owner = `_claim_transition` เดียว · `_TERMINAL_CLAIM_REASONS` absent ✓
+- migration target ตาม roadmap:949 = `bot_claim_info`/`bot_handoff_*` บน raw `conversations` (writer เดียว `bot-handoff/route.ts` · **production reader = 0**) → ย้ายไป `status_conversation`
+- contract: `status_conversation` += `active_claim_episode_id` + `claim_outcome{episode_id,outcome,actor_id,occurred_at,event_id?}` · result enum `applied|already_applied|stale_episode|no_active_claim|invalid` · CAS fence `{conversation_id,active_claim_episode_id}` + bounded reread · audit dedupe `logAdminEvent(eventId=episode_id)` · `/chat` += top-level `claim_outcome` (ticket_state ยัง string)
+
+#### RED evidence (ก่อน implement)
+
+- `test_phase2_claim_state_contract.py`: **18 fail/34 pass** (`AttributeError: _consume_claim_outcome` + source pins)
+- `test_handoff_transport.py` U-section: **U1/U4 fail** (open episode/claim={} ไม่ hoist `episode_id`); U2/U3 green negative pins
+- `test-ownership-transport.ts`: **15 fail/205 pass** — CO1-2 (claim metadata ไม่ย้าย status_conversation) · CO3-8 (`applyClaimOutcome` ไม่มี) · CO9-13 (route ไม่มี) · CO14 (botCall ไม่ส่ง claim_outcome) · CO16 (route source pin) · **CO15 green** (close ไม่แตะ claim อยู่แล้ว)
+
+#### Implementation (ทุก owner เดิม — ไม่มี abstraction ใหม่)
+
+- TS: `StatusConversationDoc` += 5 fields · `recordClaimHandoff` + `applyClaimOutcome` (CAS fence + reread reconcile + `logAdminEvent` eventId=episode) · `AdminActionType` += `conversation.claim_outcome` · route ใหม่ `claim-outcome/route.ts` (requireAuth → validate → service → status map 200/409/422/401/500) · bot-handoff route ย้าย claim write→status service · `botCallService` prod payload += `claim_outcome` (ISO occurred_at; test/simulate omit) · `Conversation`/`MetaRow`/`mapToConversation`/detail GET expose fields · `InfoTab` claim section + ConfirmDialog
+- Py: `ChatRequest.claim_outcome` · `_consume_claim_outcome` (validate shape/episode/lifecycle_open → `_claim_transition` เดิม; malformed/mismatch/terminal = no-op) ที่ SM heads ทั้งสอง · `_send_handoff` hoist `episode_id` top-level เมื่อ lifecycle_open (ครอบ claim={})
+
+#### Fix log (error → cause → fix → impact)
+
+- `test_handoff_transport.py` hang ~98% CPU → `_send_handoff` ได้ dep ใหม่ `conversation_products` แต่ `_cp_stub` install ที่ :172 **หลัง** T-section call แรก (:108) → real import → Mongo→knowledge_base→sentence_transformers load + pkg-attr landmine (stub ไม่ชนะ `from . import` หลัง real import) → ย้าย `_cp_stub` install ไปก่อน section T (seam เดียวกับ stub ตัวอื่น) → **42/42 passed** · impact: test-seam เท่านั้น, production code ไม่เปลี่ยน
+- **Verify (fresh, post-impl)**: TS ownership transport **220/220** (CO1–CO16 + legacy 204) · claim contract **52 passed, 1 skipped** · handoff transport **42/42** · canonical batch (contract+td+5f+shadow+replay) **283 passed, 19 skipped, 8 xfailed** · siblings (replay_isolation+5f_handoff+troubleshoot_5c+td/5f/shadow dup) **156 passed** · fixture validator **all rows pass** · anger suite **11 fail = baseline signature** (offline `_send_handoff` POST — pre-existing, identical to `72c325e`) · `tsc --noEmit` clean · `npm run build` pass · `py_compile` 5 files OK · `git diff --check` clean
+- **Complexity/deletion gate**: evaluator=1 (`_claim_lifecycle`) · Py transition owner=1 (`_claim_transition`) · TS command owner=1 (`applyClaimOutcome`) · raw `conversations` claim writer **1→0** (`COLLECTIONS.conversations` refs in bot-handoff = 0) · claim metadata writer=1 (`recordClaimHandoff`→status_conversation) · keyword/reason/status terminal evidence=0 (`_TERMINAL_CLAIM_REASONS` absent, `_consume_claim_outcome` ไม่ scan text) · ordinary-close terminal=0 (close/resolve routes ไม่แตะ claim fields) · runtime LOC net **+408** (TS +350 incl. route ใหม่ 63 · Py +58) · helper/type เพิ่ม: `_consume_claim_outcome`, `recordClaimHandoff`, `applyClaimOutcome`, `ClaimOutcomeResult`, `ClaimOutcomeWire`, `ClaimSection`, claim-outcome route — ไม่มี abstraction ขนาน
+- **UI verify**: ไม่มี component test infra + browser จริงต้อง auth session+real Mongo → รายงานข้อจำกัด; code-level: `ClaimSection` render เฉพาะเมื่อมี episode/outcome/info · `Button`/`InfoRow`/`confirm.ask`/`Section` contracts ตรงทุกจุด (variant/size/badge/tone valid) · vertical stack + `flex gap-2` sm buttons เข้า sidebar/drawer · pending/success/error/repeated-click states ครบ
+- docs: SRS_SSD §5.0 ChatRequest + §6.9 `_consume_claim_outcome`/`_send_handoff`/SM heads + service rows · schema §2.24 fields+access + `conversations` deprecation notes · roadmap 2B.6 checklist ครบ
+- ยังไม่ stage/commit/push/deploy — รอ review (stop gate)
+
 ### 🔍 Phase 2B.4 — Claim Episode/Lifecycle Owner (2026-10-14) · audit เสร็จ → รออนุญาต implement · ยังไม่ commit
 
 - **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `01d17d4` · tree สะอาด · commits 2B.2/2B.3 ยืนยัน (`1c26317`,`3775366`,`7e42bee`)
@@ -3249,3 +3283,110 @@ S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mon
   - `test_anger_detection_regression` **11 failures** = identical signature vs baseline `72c325e` (offline `_send_handoff` POST limitation — pre-existing, ไม่รวมใน green totals)
   - Residual: `_is_active_post_handoff` ยังมี **compatibility marker fallback** (scan marker ใน model message ล่าสุด) เฉพาะเมื่อ `ticket_state` ไม่ทราบ — structured state ยังไม่แทน keyword 100%; direct SM call bypass `app.chat` ไม่ enforce ownership (by design — /chat คือ boundary เดียว)
   - Next: **Phase 2B.6** (episode-scoped admin event สำหรับ explicit claim resolution/cancellation) แล้ว **2B.7** ก่อน 2C — 2C (multi-need turn planning + authoritative subjects) ยังไม่เริ่ม
+
+#### Phase 2B.6 Review-Fix (กำลังทำ — independent review: H1+H2+M1+M2, ห้าม commit/2B.7)
+- **Root causes (source-proven)**:
+  - H1: `recordClaimHandoff` → `upsertMeta` unconditional `$set` (ไม่มี fence) → terminal episode resurrect / stale ep ทับ active ใหม่ / outcome เก่าค้าง block ep ใหม่; `applyClaimOutcome` CAS เช็คแค่ active ep — malformed `{active:ep1,outcome:ep1}` overwrite terminal ได้
+  - H2: route กลืน `recordClaimHandoff` throw → 2xx false success; `_send_handoff` อ่าน `conversation_products.load_claim_state` + `_claim_lifecycle` เองแบบ best-effort (hidden Mongo read ใน transport owner — เคยทำ test import real module → load sentence_transformers)
+  - M1: `ClaimSection` ไม่มี key → `busy/applied/errorMsg` รั่วข้าม conversation/episode switch
+  - M2: UI/type อ่าน `order_id` แต่ Python producers ทุกจุดส่ง `customer_order_id` (wf:469/525/569/1363/1427/1472 — keys จริง: customer_name/customer_phone/customer_order_id/purchase_date/claim_topic เท่านั้น; `order_id`/`product_name`/`warranty_status`/`warranty_months`/`expiry_date` ไม่มี producer)
+- **Correction plan (owner เดิมเท่านั้น — ไม่มี helper/guard/retry owner ใหม่)**:
+  1. `recordClaimHandoff` — episodeId present → fenced `findOneAndUpdate`+upsert: filter `{conversation_id, "claim_outcome.episode_id":{$ne:E}, $or:[{active:E},{active:null}]}` + `$set` พร้อม `claim_outcome:null` (same-open-ep refresh / null-active supersede เขียนได้; terminal-ep E fenced out; active E'≠E fenced out) · E11000 → CAS อีกครั้งเดียวบน winner doc (bounded, no loop) · episodeId absent → upsertMeta เดิม (non-claim unchanged)
+  2. `applyClaimOutcome` — เพิ่ม `"claim_outcome.episode_id":{$ne:episodeId}` ใน CAS filter → first-terminal-wins แม้ malformed seed
+  3. `_send_handoff` — ลบ hidden Mongo read (lines 96-107) → `episode_id` optional kwarg explicit; payload ใส่เมื่อมีค่า
+  4. `_build_warranty_claim_response` — รับ `claim_state` param → evaluate `_claim_lifecycle` → open⟹episode บังคับ (open-without-episode = transport identity failure → falsy handoff, ไม่ POST); 4 call sites (618/1030/1535/1775) ส่ง `_claim_state`/`claim_state` เดิมใน scope; `_handle_first_message_claim` capture `_claim_transition` return (เดิมทิ้ง)
+  5. bot-handoff route — `recordClaimHandoff` throw → `json({...respBody, ok:false}, 503)` retryable (ownership committed แล้ว → Python retry → converge+emit eid เดิม → audit once)
+  6. `ClaimSection` — `key={conversation.id + "|" + (active_claim_episode_id ?? "-")}` ที่ callsite (remount = reset local state); อ่าน `customer_order_id` แทน `order_id`, ลบ `product_name` row
+  7. types — `bot_claim_info.order_id`→`customer_order_id`, ลบ `product_name`/`warranty_status` (ไม่มี producer); `BotHandoffBody.claim` เหลือเฉพาะ runtime keys
+- **RED tests**: R1-R7,R9-R12 ใน test-ownership-transport.ts + R8 + U-rewrite ใน test_handoff_transport.py (U5 = no-Mongo-read pin ผ่าน counting stub)
+- **Residual ที่รับ**: delayed-stale-ep หลัง *อีก* episode terminal ไม่ distinguishable (episode_id=uuid4 ไม่มี ordering, doc มี outcome slot เดียว) — ตาม truth table ที่อนุมัติ
+- **แก้แล้ว (implemented, unstaged)**:
+  - `recordClaimHandoff` fenced write + `applyClaimOutcome` outcome-guard — error: terminal ep resurrect/stale ทับ active/outcome ทับได้ → cause: unconditional upsert + CAS ไม่เช็ค outcome เดิม → fix: fence `{claim_outcome.episode_id:{$ne:E}, $or:[{active:E},{active:null}]}` + CAS มี `claim_outcome.episode_id≠E` → impact: stale/duplicate handoff harmless; episode ใหม่ supersede outcome เก่า atomically; non-claim path (no episodeId) ไม่เปลี่ยน
+  - route `recordClaimHandoff` throw → 503 `ok:false` (เดิม catch แล้วต่อ→false 2xx); ownership committed คงอยู่ → Python retry converge ผ่าน `handoff_event_id` dedupe + metadata write once → impact: claim handoff completion ไม่มี false success; audit ไม่ซ้ำ
+  - `_send_handoff` ลบ `load_claim_state`/`_claim_lifecycle` hidden read → explicit `episode_id` kwarg; `_build_warranty_claim_response(claim_state=...)` + `_handle_first_message_claim` capture transition return (episode ที่ mint จริง); open-without-episode → ไม่ POST+flag False (identity failure ไม่ใช่ success); terminal → POST info-only; non-claim callers ทั้งหมดไม่ส่ง → ไม่มี key → impact: episode transport explicit เดียว ไม่มี hidden read
+  - `ClaimSection` key `{conv.id}|{active_claim_episode_id ?? "-"}` → remount reset busy/applied/errorMsg; `customer_order_id` canonical (route body/type/UI) — `order_id` producer=0 → contract ลบ → impact: UI แสดง order id จริง + state ไม่รั่ว
+- **F3-3 flake (test-only)**: error `total must be 5, got 0` intermittent → cause: seed `new Date()` shared instance เท่า route `end` (daily `$lt` exclusive) ใน ms เดียวกันเมื่อ JWT path เร็ว → fix: seed `now-1000ms` clamp ≥ local midnight+1 → impact: เคสอื่นไม่แตะ; 5 consecutive full runs green
+- **Verify (fresh, post-fix)**: TS ownership transport **231/231** ×5 consecutive (R1–R12 + CO1–CO16 + controls) · Python handoff transport **47/47** (U1–U5 + R8a–d + C4a/b sig-update) · claim contract **52 passed, 1 skipped** · canonical batch (contract+td+td-shadow+retrieval-shadow+5f-claim+5f-handoff+troubleshoot-5c+legacy-replay) **312 passed, 19 skipped, 8 xfailed** · replay import isolation exit 0 · fixture validator all rows pass · `py_compile` 3 ไฟล์ OK · `tsc --noEmit` clean · `npm run build` pass · `git diff --check` clean · anger suite **11 fail = baseline signature** (offline `_send_handoff` POST — pre-existing, identical `72c325e`)
+- **Structural audit**: `_send_handoff` Mongo/claim read=0 · episode producer=1 (`_claim_transition` 2 mint sites in-owner: new ep + legacy promote) · claim transport path=1 (builder→`_send_handoff`) · raw `conversations` claim writer=0 · claim metadata owner=1 · outcome owner=1 · lifecycle evaluator=1 · Python transition owner=1 · `_TERMINAL_CLAIM_REASONS`=0 · `order_id` UI contract=0 · helper/guard/retry owner ใหม่=0
+- **Complexity delta**: runtime net ≈ +60 LOC (fence filters + docstrings + explicit param plumbing) — ไม่มี module/helper/retry loop ใหม่
+- **ยังไม่ stage/commit/push/deploy — รอ review; Phase 2B.7 ยังไม่เริ่ม**
+
+##### 2B.6 Review-Fix รอบ 2 (independent review: F1+F2+F3 — กำลังทำ)
+
+- **Root causes (source-proven)**:
+  - F1: `recordClaimHandoff` → `Promise<void>` — fenced no-op (stale/terminal) ไม่มีผลลัพธ์ → route ยังคืน 2xx assigned/queued เดิม → Python ถือ stale handoff confirmed
+  - F2: `applyClaimOutcome` commit CAS ก่อน `logAdminEvent` — audit throw → route 500; retry เจอ persisted outcome → `already_applied` return โดยไม่ repair audit → audit หายถาวร
+  - F3: claim-outcome route คืน `already_applied` เปล่าๆ; InfoTab `setApplied(requested)` → conflicting retry (resolved→cancelled) แสดงผิดจาก authoritative
+- **Correction plan (owner เดิมเท่านั้น)**:
+  1. `recordClaimHandoff` → `{status: written|already_terminal|stale_episode, claimOutcome?}` — inspect fenced result; null/E11000-reconciled → bounded reread ครั้งเดียว classify (outcome.ep==E→already_terminal / active==E→written / active อื่น→stale_episode / anomalous→throw)
+  2. route: written→success เดิม · already_terminal→200 converged `{claim_metadata:"already_terminal", claim_outcome}` · stale_episode→409 `ok:false` (permanent 4xx → Python falsy no retry) · throw→503 เดิม — ownership committed ไม่ undo
+  3. `applyClaimOutcome` → `{result, claimOutcome}` — `already_applied` path call `logAdminEvent(eventId=ep)` ด้วย **persisted** actor/outcome (E11000 dedupe เป็น owner เดียวของ exactly-once; throw→propagate→retry repair)
+  4. claim-outcome route คืน `claim_outcome` persisted ทั้ง applied/already_applied
+  5. InfoTab `setApplied(body.claim_outcome.outcome)` — absent→errorMsg ไม่เดาค่า
+- **RED tests**: R13 stale-ep → typed stale + 409 + ep2 metadata intact · R14 terminal-ep → already_terminal + converged 200 + outcome truth · R15 audit crash → retry repair exactly-once · R16 conflicting retry → persisted outcome on wire + UI pin
+
+**ผลลัพธ์ (2026-10-14 — review-fix round 2 เสร็จ, ยังไม่ commit)**
+- **RED**: 231/235 → fail เฉพาะ R13-R16 ด้วยเหตุที่คาด (recordClaimHandoff void=undefined, terminal no-op ไม่ classify, audit=0 หลัง retry, route ไม่มี claim_outcome บน wire) · เดิม 231 green ครบ
+- **Impl (owner เดิมทั้งหมด)**: `recordClaimHandoff → Promise<{status: written|already_terminal|stale_episode, claimOutcome?}>` — fenced write + E11000 reconcile + bounded reread ครั้งเดียว classify (ไม่ใช่ silent no-op) · bot-handoff route mapping: written→success · already_terminal→200 converged+claim_metadata marker+persisted outcome · **stale_episode→409 ok:false** · throw→503 · `applyClaimOutcome → {result, claimOutcome}` — already_applied path repair `logAdminEvent(eventId=ep)` ด้วย persisted actor/outcome ก่อน return (audit crash window ปิด — commit ก่อน audit ล้มแล้ว retry สามารถ repair ได้ ≤1 ครั้ง ผ่าน E11000 dedupe เดิม) · claim-outcome route คืน `claim_outcome` ทั้ง applied/already_applied · InfoTab อ่าน `body.claim_outcome.outcome` — absent→error ไม่สร้างค่าจากปุ่ม
+- **GREEN**: TS 235/235 (R13-16 ผ่าน + เดิม 231 ครบ; CO1-16 assertions อัปเดตเป็น `.result` เพราะ return shape เปลี่ยน) · Python transport 47/47 · claim contract 52+1s · canonical batch 312 pass/19 skip/8 xfail · replay isolation exit 0 · fixture validator all rows · py_compile OK · tsc clean · npm build pass · git diff --check clean · anger 11 fail = baseline signature เดิม (offline `_send_handoff` POST — เทียบ `72c325e` ตรงกัน ไม่ใช่ regression)
+- **Structural audit**: metadata writer=1 · outcome writer=1 · audit dedupe owner=1 (logAdminEvent E11000 — repair path ใช้ owner เดียว ไม่เพิ่ม settlement helper) · route claim-outcome Mongo access=0 · stale→2xx impossible (409 เท่านั้น) · UI ไม่ derive outcome จากค่าที่กด
+- ยังไม่ stage/commit — รออนุมัติ + Phase 2B.7 ยังไม่เริ่ม
+
+##### 2B.6 Review-Fix รอบ 3 — Final Handoff Ordering Correction (กำลังทำ)
+
+- **Finding (High — source-proven)**: `handoffToAdmin` commit ownership/reopen/audit ก่อน `recordClaimHandoff` classify — stale ep หรือ terminal ep ได้รับ verdict (409/already_terminal) หลัง side effects เกิดไปแล้ว: closed conv ถูก reopen, admin ถูก assign, audits เขียนแล้ว
+- **Root cause**: route ordering — `handoffToAdmin` (route:230) รันก่อน `recordClaimHandoff` (route:266); episode fence verdict มาหลัง ownership mutation
+- **Correction plan (reorder owner เดิม — ไม่มี helper/guard/module ใหม่)**:
+  1. request มี `episode_id` → `recordClaimHandoff` **ก่อน** `handoffToAdmin` (หลัง getConversation 404)
+  2. stale_episode→409 ทันที (handoff calls=0) · already_terminal→converged 200+persisted `claim_outcome` (handoff calls=0, ไม่ synthesize outcome — Python confirm เฉพาะ outcome.state∈{assigned,queued} → absent outcome = not confirmed) · written→ไป handoffToAdmin · throw→503 (handoff calls=0)
+  3. written แล้ว handoff fail → เก็บ metadata ไม่ rollback → retry same identity converge (fence ผ่าน same-ep refresh)
+  4. ไม่มี `episode_id` → non-claim flow เดิมทั้งหมด (claim-only write อยู่ post-handoff เหมือนเดิม)
+- **RED tests**: R17 stale→409+handoff=0+status/owner/audit ไม่เปลี่ยน · R18 terminal→converge ไม่มี handoff/reopen/synthetic outcome · R19 metadata throw→503+handoff=0 · R20 metadata-written→handoff retryable-fail→retry converge (ownership เดิม+metadata intact+audit once)
+
+**ผลลัพธ์ (2026-10-14 — review-fix round 3 เสร็จ, ยังไม่ commit)**
+- **RED**: 235/239 → fail เฉพาะ R17-R20 ด้วย ordering จริง (R17/R19 handoff calls=1, R18 reopened:true+assigned ก่อน terminal verdict — smoking gun, R20 meta=undefined เพราะ failed return ก่อน metadata write) · เดิม 235 green
+- **Impl**: reorder owner เดิมเท่านั้น — `recordClaimHandoff` เป็น gate หลัง getConversation/404 ก่อน `handoffToAdmin` เมื่อมี `episode_id`; stale→409 / terminal→200 converged (outcome:null — Python ไม่ confirm เพราะไม่มี outcome.state) / written→handoff / throw→503 — ทุก fail path handoff calls=0 · claim-only (no episode_id) อยู่ post-handoff เดิม · ไม่มี helper/guard/module/retry ใหม่
+- **GREEN**: TS 239/239 (R17-20 ผ่าน + เดิมครบ; R7 อัปเดตตาม ordering contract ใหม่ — metadata fail→ไม่มี ownership commit) · Python transport 47/47 · claim contract 52+1s · canonical batch 312/19s/8x · isolation exit 0 · fixtures all rows · py_compile OK · tsc clean · build pass · diff --check clean · anger 11 fail = baseline signature เดิม
+- **Ordering invariant ใหม่**: `conversation exists → episode fence/metadata → handoff ownership` — stale/terminal/metadata-fail paths ไม่มีทางถึง handoffToAdmin
+- ยังไม่ stage/commit — รอ review; Phase 2B.7 ยังไม่เริ่ม
+
+##### 2B.6 Review-Fix รอบ 4 — Atomic Episode Fence (TOCTOU gate↔ownership CAS) (กำลังทำ)
+
+- **Finding (High — source-proven)**: round-3 ordering ปิด sequential bypass แล้ว แต่ยังมี TOCTOU — gate `recordClaimHandoff(E)`→written แล้ว `handoffToAdmin`→`commitHandoffState` CAS มี fence เฉพาะ ownership (`assigned_to`/`pending_assignment`/`status`) **ไม่มี `active_claim_episode_id`/`claim_outcome.episode_id`** → terminalize E หรือ E2-active แทรกระหว่าง gate กับ CAS → CAS ยัง commit → assign/reopen บน episode ที่ตายแล้ว
+- **Race timeline**: req(E) gate→written → admin `applyClaimOutcome(E,resolved)` (outcome=E, active→null) → req(E) เดิม resume → ownership CAS ผ่าน → handoff assigned + audits emit — terminal E ถูก override
+- **Correction plan (atomic ที่ ownership CAS owner เดิม — ไม่มี helper/retry/parallel path)**:
+  1. `expectedClaimEpisodeId` optional param ไหล `route → handoffToAdmin → commitHandoffState`
+  2. CAS fence เดิม + `{active_claim_episode_id: E, claim_outcome.episode_id: {$ne: E}}` เมื่อมี E — atomic กับ status/assigned_to/pending/reopen/event-id write เดียวกัน
+  3. `handoffToAdmin`: meta read เดิม (getMeta) เช็ค claim verdict ก่อน converge — outcome.ep==E→terminal / active≠E→stale → return verdict (ไม่ emit); CAS miss → bounded reread เดิม → claim verdict ก่อน generic converge
+  4. verdict → `HandoffOutcome.claim_verdict + claim_outcome` (type เดิม ขยาย optional เท่านั้น) → route map เหมือน gate: stale→409 / terminal→200 converged+persisted outcome / ไม่ synthesize
+  5. ไม่มี `episode_id` → fence/behavior byte-equivalent เดิม
+- **RED tests**: R21 terminalize ระหว่าง gate↔CAS → ไม่ assign/reopen/audit + converged terminal · R22 E2 active ระหว่าง gate↔CAS → E1 ไม่ assign + E2 intact + 409 · R23 non-episode regression pin (pass ทั้งก่อน/หลัง) · R24 same-ep active ตลอด → assigned+audit once (pin)
+- baseline: TS 239 · transport 47
+
+**ผลลัพธ์ (2026-10-14 — review-fix round 4 เสร็จ, ยังไม่ commit)**
+- **RED**: 241/243 → R21/R22 fail จริงเพราะ `commitHandoffState` CAS ไม่มี episode fence (interleave terminalize/E2 แล้ว CAS ยัง commit → คืน `200 outcome.state:"assigned"` ทั้งคู่) · R23/R24 pass เป็น regression pins · เดิม 239 green
+- **Impl (atomic ที่ CAS owner เดิม — ไม่มี helper/guard/retry/module ใหม่)**: `expectedClaimEpisodeId` optional ไหล `bot-handoff/route.ts → handoffService.handoffToAdmin → statusConversationService.commitHandoffState` · CAS fence เพิ่ม `fence.active_claim_episode_id = E; fence["claim_outcome.episode_id"] = {$ne: E}` ใน `findOneAndUpdate` เดียวกับ ownership/reopen/event-id · `handoffToAdmin` เช็ค claim verdict บน initial `getMeta` และ CAS-miss re-read **ก่อน** generic converge + **ไม่ emit** audit เมื่อเป็น `already_terminal`/`stale_episode` · `HandoffOutcome` ขยาย optional `claim_verdict`/`claim_outcome` · route map verdict เดียวกับ gate (stale→409 `ok:false`, terminal→200 converged `outcome:null`+persisted `claim_outcome`) · absent `episode_id` → CAS filter ไม่เปลี่ยน
+- **GREEN & full verification**: TS ownership transport **243/243** · Python handoff transport **47/47** · claim contract **52+1s** · canonical Phase 2B batch **312 pass/19 skip/8 xfail** · error-policy **38/38** · boundary **20/20** · config-failclosed **4/4** · enable-checkpoint **18/18** · idempotency **71/71** · recovery-freshness **59/59** · runtime-mongo-safety **110/110** · production-races **37/37** · replay isolation exit 0 · fixture validator all rows · `py_compile` OK · `tsc --noEmit` clean · `npm run build` pass · `git diff --check` clean · anger **11 fail = baseline signature เดิม** (`72c325e`, offline `_send_handoff` POST — รายงานแยก ไม่นับ green)
+- **ยังไม่ stage/commit/push/deploy — รอ review; Phase 2B.7 ยังไม่เริ่ม**
+
+##### 2B.6 Final Cleanup + Independent Pre-Commit Gate (กำลังทำ)
+
+- **Manifest Partitioning (ยืนยันจาก working tree จริง — 21 entries รวม)**:
+  - **Phase 2B.6 = 20 entries** (19 modified + 1 untracked `ChatAdminWeb/src/app/api/admin/conversations/[conversationId]/claim-outcome/`)
+  - **Out-of-scope entry ที่ 21** = `?? docs/plans/2026-10-14-conversations-shp-duplicate-remediation-plan.md` (งาน duplicate audit แยกต่างหาก)
+  - **Out-of-scope hunks ในไฟล์ร่วม** = Phase 2D plan hunks ใน `docs/plans/2026-09-30-legacy-shopee-unified-turn-evidence-retrieval-rebaseline-plan.md` และ `getoutofmywaybotkaikrook2.md` (ต้องแยกออกตอน stage candidate)
+- **Known cleanup (comment/docs)**:
+  1. `statusConversationService.ts:454` comment บน `recordClaimHandoff` ยังเขียนว่าเรียกหลัง ownership commit → แก้ให้ตรง flow จริง (มี `episode_id` = gate ก่อน ownership commit + ownership CAS บังคับ atomic episode fence ซ้ำ; ไม่มี `episode_id` = หลัง ownership commit เดิม)
+  2. `SRS_SSD.md:109` ปรับคำอธิบาย `recordClaimHandoff` throw ให้แยกชัดระหว่าง episode gate (ก่อน handoff → 503 zero ownership commit) กับ non-episode claim refresh (หลัง handoff → 503 ownership คงอยู่)
+- **Independent Full-Diff Audit Finding (Medium — source-proven)**:
+  - `statusConversationService.commitHandoffState` (:305) ใช้ `{ upsert: true }` เสมอ แม้เมื่อมี `expectedClaimEpisodeId` และคืน `committed: true` โดยไม่เช็ค `Boolean(doc)`; บวกกับ `handoffService.handoffToAdmin` (:200) เช็ค `if (E && meta)` (ข้ามเมื่อ `meta == null`) → หากเรียก `commitHandoffState` หรือ `handoffToAdmin` พร้อม `expectedClaimEpisodeId` บน conversation ที่ไม่มี `status_conversation` doc (หรือ doc หายก่อน CAS), Mongo upsert จะคัดลอก `active_claim_episode_id: E` จาก filter ไปสร้าง doc ใหม่และ commit ownership สำเร็จ (`commitHandoffState` กลายเป็นแอบสร้าง claim episode เองโดยไม่ผ่าน `recordClaimHandoff`)
+  - **Fix plan (ใน owner เดิม)**:
+    1. `commitHandoffState`: `upsert: !opts.expectedClaimEpisodeId` และ `committed: Boolean(doc)` (เมื่อมี `expectedClaimEpisodeId` ต้อง match doc ที่เปิด episode นั้นอยู่แล้วเท่านั้น ห้าม upsert สร้างเอง)
+    2. `handoffToAdmin`: เปลี่ยน `if (E && meta)` เป็น `if (E)` (`meta?.claim_outcome?.episode_id === E` / `meta?.active_claim_episode_id !== E`) — ถ้า `meta` ไม่มีขณะมี `expectedClaimEpisodeId` ให้คืน `claim_verdict: "stale_episode"` ทันที ไม่ไป reserve cursor หรือ upsert
+  - **RED test**: R25 `expectedClaimEpisodeId` เมื่อไม่มี meta doc (ทั้ง `commitHandoffState` ตรงและ `handoffToAdmin`) → ห้าม upsert สร้าง episode/ownership ใหม่ (`committed: false` / `claim_verdict: "stale_episode"`, `metaOf === undefined`)
+
+**ผลลัพธ์ (2026-10-14 — Final Cleanup + Independent Pre-Commit Gate เสร็จ, staged เฉพาะ 2B.6 candidate, ยังไม่ commit)**
+- **RED (R25)**: 243/244 → R25 fail จริง (`got committed=true meta={"conversation_id":"r25a","active_claim_episode_id":"ep-ghost","status":"handoff","assigned_to":"admin-1",...}`) เพราะ `upsert: true` คัดลอก `active_claim_episode_id` จาก filter ไปสร้าง doc ใหม่
+- **Impl**: `commitHandoffState` ใช้ `upsert: !opts.expectedClaimEpisodeId` + `committed: Boolean(doc)` · `handoffToAdmin` เปลี่ยน `if (E && meta)` เป็น `if (E)` · แก้ comment `statusConversationService.ts` + docs `SRS_SSD.md`/`schema.md`/roadmap ให้ตรง flow จริง
+- **GREEN & Fresh Verification**: TS ownership transport **244/244** · Python handoff transport **47/47** · claim contract **52+1s** · canonical Phase 2B batch **312 pass/19 skip/8 xfail** · error-policy **38/38** · boundary **20/20** · config-failclosed **4/4** · enable-checkpoint **18/18** · idempotency **71/71** · recovery-freshness **59/59** · runtime-mongo-safety **110/110** · production-races **37/37** · replay isolation exit 0 · fixture validator all rows · `py_compile` OK · `tsc --noEmit` clean · `npm run build` pass · `git diff --check` clean · anger **11 fail = baseline signature เดิม** (`72c325e`, offline `_send_handoff` POST — รายงานแยก ไม่นับ green)
+- **Pre-commit staging**: stage เฉพาะ Phase 2B.6 20 entries (แยก Phase 2D plan hunks ใน roadmap/active log และแยก `conversations_shp` duplicate audit + `docs/plans/2026-10-14-conversations-shp-duplicate-remediation-plan.md` ไว้ใน unstaged working tree) · ยังไม่ commit/push/deploy — รอ review

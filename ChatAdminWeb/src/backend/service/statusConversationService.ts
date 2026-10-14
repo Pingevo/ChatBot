@@ -48,6 +48,21 @@ export interface StatusConversationDoc {
   handoff_reopened?: boolean;
   handoff_actor?: string | null;
   handoff_reason?: string | null;
+  // ⚡ Phase 2B.6 — claim episode transport + explicit admin outcome:
+  //   active_claim_episode_id = open Python claim episode (bot-handoff POST เขียน;
+  //     applyClaimOutcome clear) — ห้ามเขียนลง raw conversations (dump ทับทุก 2 วิ)
+  //   claim_outcome = terminal command ต่อ episode — immutable เมื่อ set แล้ว
+  //   bot_claim_info/bot_handoff_* = claim metadata (ย้ายจาก raw conversations)
+  active_claim_episode_id?: string | null;
+  claim_outcome?: {
+    episode_id: string;
+    outcome: "resolved" | "cancelled";
+    actor_id: string;
+    occurred_at: Date;
+  } | null;
+  bot_claim_info?: Record<string, unknown> | null;
+  bot_handoff_at?: Date | null;
+  bot_handoff_reason?: string | null;
   updated_at: Date;
 }
 
@@ -229,6 +244,10 @@ export async function commitHandoffState(opts: {
   actor?: string;
   eventId?: string;
   reopened?: boolean;
+  // ⚡ 2B.6 — claim episode fence (atomic กับ ownership write เดียวกัน):
+  //   มีค่า → commit เฉพาะเมื่อ episode นั้นยังเปิดอยู่จริงและไม่มี terminal
+  //   outcome ของมัน — ปิด TOCTOU ระหว่าง claim metadata gate กับ ownership CAS
+  expectedClaimEpisodeId?: string;
 }): Promise<{ committed: boolean; doc: StatusConversationDoc | null }> {
   const coll = await getCollection<StatusConversationDoc>(COLLECTIONS.statusConversation);
   const unowned = [{ assigned_to: null }, { assigned_to: { $exists: false } }];
@@ -252,6 +271,12 @@ export async function commitHandoffState(opts: {
   // caller อ่านว่า conv ปิดอยู่ → commit เฉพาะตอน status ยัง closed/resolved จริง
   //   → handoff_reopened persist เป็น true ได้ก็ต่อเมื่อ prior ปิดจริง (flag = truth ไม่ใช่ stale read)
   if (opts.reopened === true) fence.status = { $in: ["closed", "resolved"] };
+  // ⚡ 2B.6 — claim handoff: ownership commit ต้อง atomic กับ episode still-open
+  //   (terminalize หรือ episode ใหม่แทรกก่อน CAS → miss → caller classify verdict)
+  if (opts.expectedClaimEpisodeId) {
+    fence.active_claim_episode_id = opts.expectedClaimEpisodeId;
+    fence["claim_outcome.episode_id"] = { $ne: opts.expectedClaimEpisodeId };
+  }
   const now = new Date();
   const transition = {
     handoff_event_id: opts.eventId ?? null,
@@ -287,9 +312,9 @@ export async function commitHandoffState(opts: {
     const doc = await coll.findOneAndUpdate(
       fence,
       { $set: { conversation_id: opts.conversationId, ...set } },
-      { upsert: true, returnDocument: "after" }
+      { upsert: !opts.expectedClaimEpisodeId, returnDocument: "after" }
     );
-    return { committed: true, doc: (doc as StatusConversationDoc | null) ?? null };
+    return { committed: Boolean(doc), doc: (doc as StatusConversationDoc | null) ?? null };
   } catch (e) {
     if ((e as { code?: number })?.code === 11000) return { committed: false, doc: null };
     throw e;
@@ -425,6 +450,176 @@ export async function applyInboundOwnershipTransition(
   return "unchanged";
 }
 
+/** ⚡ Phase 2B.6 — claim handoff metadata + episode transport (owner เดียว)
+ *  เขียน claim info + open episode_id ลง status_conversation — ห้ามเขียนลง
+ *  raw conversations (dump ทับทุก 2 วิ):
+ *    - claim request (มี episodeId): bot-handoff route เรียกเป็น gate **ก่อน**
+ *      handoffToAdmin (stale/terminal ถูกปฏิเสธก่อนแตะ ownership; written ค่อย
+ *      เข้า handoffToAdmin ซึ่งบังคับ atomic episode fence ซ้ำใน ownership CAS)
+ *    - non-episode request (ไม่มี episodeId): เรียกหลัง ownership commit เพื่อ
+ *      refresh bot_claim_info/bot_handoff_* อย่างเดียว ไม่แตะ episode/outcome
+ *
+ *  episodeId present → fenced atomic write (episode truth table):
+ *    active==E ∧ outcome.ep≠E   → refresh metadata (same open episode retry)
+ *    active null/missing ∧ outcome.ep≠E → open episode ใหม่ + clear outcome เดิม
+ *        ใน atomic transition เดียว (episode supersede)
+ *    outcome.ep==E              → terminal — fenced out (ห้าม reopen)
+ *    active==E'≠E               → stale writer — fenced out (ห้ามทับ ep ใหม่)
+ *  E11000 (upsert create race) → CAS อีกครั้งเดียวบน doc ของ winner — bounded,
+ *    ไม่มี retry loop; fence re-evaluate truth เสมอ
+ *  absent episode_id → metadata refresh อย่างเดียว ไม่แตะ episode/outcome
+ *    (non-claim handoff path เดิม — transient-read safe)
+ *
+ *  result (2B.6 review-fix): fenced no-op ต้อง classify ไม่ใช่ silent success
+ *    written          → write ผ่าน (insert/refresh/supersede)
+ *    already_terminal → outcome.ep==E → terminal episode (persisted outcome คืนด้วย)
+ *    stale_episode    → active=E'≠E — stale writer ห้ามรายงาน success
+ *    anomalous        → throw (route คืน 503 retryable — ให้ retry converge) */
+export type ClaimHandoffWriteResult = {
+  status: "written" | "already_terminal" | "stale_episode";
+  /** persisted terminal outcome — เฉพาะ already_terminal */
+  claimOutcome?: StatusConversationDoc["claim_outcome"] | null;
+};
+
+export async function recordClaimHandoff(opts: {
+  conversationId: string;
+  claim?: Record<string, unknown> | null;
+  reason?: string | null;
+  episodeId?: string | null;
+}): Promise<ClaimHandoffWriteResult> {
+  const now = new Date();
+  const fields: Partial<StatusConversationDoc> = {
+    bot_handoff_at: now,
+    bot_handoff_reason: opts.reason || "warranty_claim",
+  };
+  if (opts.claim && Object.keys(opts.claim).length > 0) {
+    fields.bot_claim_info = opts.claim;
+  }
+  if (!opts.episodeId) {
+    await upsertMeta(opts.conversationId, fields);
+    return { status: "written" };
+  }
+  const coll = await getCollection<StatusConversationDoc>(COLLECTIONS.statusConversation);
+  const filter = {
+    conversation_id: opts.conversationId,
+    "claim_outcome.episode_id": { $ne: opts.episodeId },
+    $or: [
+      { active_claim_episode_id: opts.episodeId },
+      { active_claim_episode_id: null },
+    ],
+  };
+  const update = {
+    $set: {
+      conversation_id: opts.conversationId,
+      ...fields,
+      active_claim_episode_id: opts.episodeId,
+      claim_outcome: null,
+      updated_at: now,
+    },
+  };
+  let applied: StatusConversationDoc | null;
+  try {
+    applied = await coll.findOneAndUpdate(
+      filter, update, { upsert: true, returnDocument: "after" });
+  } catch (e) {
+    if ((e as { code?: number })?.code !== 11000) throw e;
+    // lost create race → winner's doc exists → single bounded CAS (fence ตัดสินอีกครั้ง)
+    applied = await coll.findOneAndUpdate(filter, update, { returnDocument: "after" });
+  }
+  if (applied) return { status: "written" };
+  // fenced out / upsert-insert null → bounded reread ครั้งเดียว classify จาก truth
+  const cur = await coll.findOne({ conversation_id: opts.conversationId });
+  if (cur?.claim_outcome?.episode_id === opts.episodeId) {
+    return { status: "already_terminal", claimOutcome: cur.claim_outcome };
+  }
+  if (cur?.active_claim_episode_id === opts.episodeId) return { status: "written" };
+  if (cur?.active_claim_episode_id) return { status: "stale_episode" };
+  // fence ควรผ่านสำหรับ state นี้ — write ไม่ลง + อธิบายไม่ได้ → fail ให้ retry converge
+  throw new Error("recordClaimHandoff: fenced write not persisted");
+}
+
+/** typed result ของ explicit admin claim outcome command */
+export type ClaimOutcomeResult =
+  | "applied"          // CAS ชนะ — outcome persist + episode cleared
+  | "already_applied"  // outcome ของ episode นี้ commit ไปแล้ว (first terminal wins)
+  | "stale_episode"    // active episode เปลี่ยนไปแล้ว — ห้ามจบ episode ใหม่
+  | "no_active_claim"  // ไม่มี open claim episode ให้จบ
+  | "invalid";         // input ไม่ผ่าน shape/enum
+
+/** ⚡ Phase 2B.6 — explicit admin claim outcome (episode-scoped, idempotent)
+ *  CAS fence {conversation_id, active_claim_episode_id: episodeId} → write
+ *  claim_outcome + clear active episode atomically (single write)
+ *  CAS miss → bounded reread once → classify จาก truth:
+ *    outcome.episode_id === target  → already_applied (first terminal wins)
+ *    active_claim_episode_id อื่นอยู่ → stale_episode
+ *    อื่น → no_active_claim
+ *  audit: logAdminEvent(eventId=episodeId) → dedupe exactly-once ต่อ episode
+ *  ห้ามแตะ status/assigned_to — claim lifecycle ไม่ใช่ ownership */
+export async function applyClaimOutcome(
+  conversationId: string,
+  opts: { episodeId: string; outcome: "resolved" | "cancelled"; actorId: string }
+): Promise<{
+  result: ClaimOutcomeResult;
+  /** authoritative persisted outcome — applied/already_applied เท่านั้น */
+  claimOutcome?: StatusConversationDoc["claim_outcome"] | null;
+}> {
+  const { episodeId, outcome, actorId } = opts;
+  if (!conversationId || typeof episodeId !== "string" || !episodeId
+      || (outcome !== "resolved" && outcome !== "cancelled")
+      || typeof actorId !== "string" || !actorId) {
+    return { result: "invalid" };
+  }
+  const coll = await getCollection<StatusConversationDoc>(COLLECTIONS.statusConversation);
+  const now = new Date();
+  const applied = await coll.findOneAndUpdate(
+    {
+      conversation_id: conversationId,
+      active_claim_episode_id: episodeId,
+      // first terminal wins — malformed {active:E, outcome:E} ก็ห้าม overwrite
+      "claim_outcome.episode_id": { $ne: episodeId },
+    },
+    {
+      $set: {
+        claim_outcome: {
+          episode_id: episodeId, outcome, actor_id: actorId, occurred_at: now,
+        },
+        active_claim_episode_id: null,
+        updated_at: now,
+      },
+    },
+    { returnDocument: "after" }
+  );
+  if (!applied) {
+    const cur = await coll.findOne({ conversation_id: conversationId });
+    const persisted = cur?.claim_outcome;
+    if (persisted?.episode_id === episodeId) {
+      // ⚡ audit convergence (2B.6 review-fix): commit ก่อน audit → crash ทิ้ง
+      //   outcome ที่ persist แล้วโดยไม่มี audit; retry ต้อง emit audit ด้วย
+      //   persisted identity (eventId=episodeId → E11000 dedupe exactly-once)
+      //   — ห้ามใช้ actor/outcome ของ retry request (อาจ conflict)
+      await logAdminEvent({
+        action_type: "conversation.claim_outcome",
+        actor: typeof persisted.actor_id === "string" && persisted.actor_id
+          ? persisted.actor_id : actorId,
+        conversation_id: conversationId,
+        eventId: episodeId,
+        metadata: { episode_id: episodeId, outcome: persisted.outcome },
+      });
+      return { result: "already_applied", claimOutcome: persisted };
+    }
+    if (cur?.active_claim_episode_id) return { result: "stale_episode" };
+    return { result: "no_active_claim" };
+  }
+  await logAdminEvent({
+    action_type: "conversation.claim_outcome",
+    actor: actorId,
+    conversation_id: conversationId,
+    eventId: episodeId,
+    metadata: { episode_id: episodeId, outcome },
+  });
+  return { result: "applied", claimOutcome: applied.claim_outcome };
+}
+
 export const statusConversationService = {
   getMeta,
   getMetaMap,
@@ -434,4 +629,6 @@ export const statusConversationService = {
   assignPendingTicket,
   commitHandoffState,
   applyInboundOwnershipTransition,
+  recordClaimHandoff,
+  applyClaimOutcome,
 };

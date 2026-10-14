@@ -807,7 +807,12 @@ async function main() {
 
   await test("F3-3 stats/dashboard: bot_answered/with_admin/closed จาก meta", async () => {
     seedAdmin("me", { role: "dev" }); seedAdmin("admin-1");
-    seedMetricSet("d", { last_message_timestamp: new Date() });
+    // ⚡ seed ย้อน 1s — end bound ของ route ใช้ $lt (exclusive); ถ้า ts == end
+    //    millisecond เดียวกัน (JWT path เร็ว) จะหลุดจาก range → flake 0/5
+    //    (clamp ไม่ให้ข้ามเที่ยงคืน local — range daily = [00:00, now))
+    seedMetricSet("d", {
+      last_message_timestamp: new Date(Math.max(Date.now() - 1000, new Date().setHours(0, 0, 0, 1))),
+    });
     const req = await authReq("me", "http://t/api/stats/dashboard?range=daily");
     const body = await (await statsDashboardRoute.GET(req as any)).json();
     assert(body.total_conversations === 5, `total must be 5, got ${body.total_conversations}`);
@@ -3360,7 +3365,7 @@ async function main() {
   });
 
   // ── L. production path outcome ordering (Finding 2 — same bug class as K12/K13) ──
-  const mkProdReq = async (convId: string) => {
+  const mkProdReq = async (convId: string, extra: Record<string, unknown> = {}) => {
     const { NextRequest } = await import("next/server");
     return new NextRequest("http://localhost/api/admin/conversations/bot-handoff", {
       method: "POST",
@@ -3369,6 +3374,7 @@ async function main() {
         conversation_id: convId,
         reason: "warranty_claim",
         claim: { customer_name: `ลูกค้า ${convId}` },
+        ...extra,
       }),
     });
   };
@@ -3384,8 +3390,10 @@ async function main() {
       `production failed → non-2xx — status=${res.status} body=${JSON.stringify(j)}`);
     const conv = mocks.fakeColl("conversations")
       .find((d: any) => d.conversation_id === "k14");
-    assert(!conv?.bot_claim_info && !conv?.bot_handoff_at && !conv?.bot_handoff_reason,
-      `failed outcome ห้ามเขียน success metadata ลง conversations — doc=${JSON.stringify(conv)}`);
+    const meta14 = metaOf("k14");
+    assert(!conv?.bot_claim_info && !conv?.bot_handoff_at && !conv?.bot_handoff_reason
+      && !meta14?.bot_claim_info && !meta14?.active_claim_episode_id,
+      `failed outcome ห้ามเขียน claim metadata ทั้งบน dump/meta — conv=${JSON.stringify(conv)} meta=${JSON.stringify(meta14)}`);
     const routeLogs = mocks.fakeColl("admin_logs")
       .filter((d: any) => d.conversation_id === "k14");
     assert(routeLogs.length === 0,
@@ -3399,13 +3407,17 @@ async function main() {
     const j = await res.json();
     assert(res.status === 200 && j?.ok === true && j?.outcome?.state === "assigned",
       `assigned → 200 — status=${res.status} body=${JSON.stringify(j)}`);
-    const conv = mocks.fakeColl("conversations")
+    // ⚡ 2B.6 — claim metadata ย้ายไป status_conversation (owner เดียว)
+    const meta15 = metaOf("k15");
+    assert(meta15?.bot_claim_info?.customer_name === "ลูกค้า k15"
+      && meta15?.bot_handoff_at instanceof Date && meta15?.bot_handoff_reason === "warranty_claim",
+      `assigned → claim metadata บน status_conversation — meta=${JSON.stringify(meta15)}`);
+    const conv15 = mocks.fakeColl("conversations")
       .find((d: any) => d.conversation_id === "k15");
-    assert(conv?.bot_claim_info?.customer_name === "ลูกค้า k15"
-      && conv?.bot_handoff_at instanceof Date && conv?.bot_handoff_reason === "warranty_claim",
-      `assigned → claim metadata เขียนครบ — doc=${JSON.stringify(conv)}`);
+    assert(!conv15?.bot_claim_info && !conv15?.bot_handoff_at,
+      `ห้ามเขียน claim ลง raw conversations อีก — doc=${JSON.stringify(conv15)}`);
     const writes = mocks.state.queryLog.filter((q: any) =>
-      q.coll === "conversations" && q.op === "updateOne"
+      q.coll === "status_conversation" && q.op === "updateOne"
       && q.filter?.conversation_id === "k15");
     assert(writes.length === 1,
       `assigned request เดียว → claim metadata write ต้อง 1 query พอดี — writes=${writes.length}`);
@@ -3417,10 +3429,9 @@ async function main() {
     const j = await res.json();
     assert(res.status === 200 && j?.outcome?.state === "queued",
       `queued → 200 — status=${res.status} body=${JSON.stringify(j)}`);
-    const conv = mocks.fakeColl("conversations")
-      .find((d: any) => d.conversation_id === "k16");
-    assert(conv?.bot_claim_info?.customer_name === "ลูกค้า k16",
-      `queued persisted → claim metadata เขียนได้ — doc=${JSON.stringify(conv)}`);
+    const meta16 = metaOf("k16");
+    assert(meta16?.bot_claim_info?.customer_name === "ลูกค้า k16",
+      `queued persisted → claim metadata บน status_conversation — meta=${JSON.stringify(meta16)}`);
   });
 
   await test("K17 production emit_incomplete → 503 → retry converge 200 + audit once + claim ไม่เสีย", async () => {
@@ -3432,13 +3443,12 @@ async function main() {
       && j?.outcome?.state === "assigned" && j?.outcome?.persisted === true
       && j?.outcome?.emit_incomplete === true,
       `emit_incomplete → 503 + persisted truth — status=${res.status} body=${JSON.stringify(j)}`);
-    const conv = mocks.fakeColl("conversations")
-      .find((d: any) => d.conversation_id === "k17");
-    assert(conv?.bot_claim_info?.customer_name === "ลูกค้า k17",
-      `ownership persisted แล้ว → claim metadata เขียน — doc=${JSON.stringify(conv)}`);
-    const t1 = conv?.bot_handoff_at;
+    const meta17 = metaOf("k17");
+    assert(meta17?.bot_claim_info?.customer_name === "ลูกค้า k17",
+      `ownership persisted แล้ว → claim metadata บน status_conversation — meta=${JSON.stringify(meta17)}`);
+    const t1 = meta17?.bot_handoff_at;
     assert(t1 instanceof Date,
-      `request แรกต้องตั้ง bot_handoff_at — doc=${JSON.stringify(conv)}`);
+      `request แรกต้องตั้ง bot_handoff_at — meta=${JSON.stringify(meta17)}`);
 
     // ── retry payload เดิม (transport เห็น 503 → bounded retry) — converge owner เดิม
     await new Promise((r) => setTimeout(r, 10));
@@ -3450,17 +3460,16 @@ async function main() {
       && j2?.outcome?.emit_incomplete === false
       && j2?.outcome?.reason === "existing_assignment",
       `retry → converge 200 + emit สมบูรณ์ — status=${res2.status} body=${JSON.stringify(j2)}`);
-    const conv2 = mocks.fakeColl("conversations")
-      .find((d: any) => d.conversation_id === "k17");
-    assert(conv2?.bot_claim_info?.customer_name === "ลูกค้า k17"
-      && conv2?.bot_handoff_reason === "warranty_claim",
-      `retry → claim fields ต้องไม่เสีย — doc=${JSON.stringify(conv2)}`);
-    assert(conv2?.bot_handoff_at instanceof Date
-      && conv2.bot_handoff_at.getTime() >= t1.getTime(),
-      `retry → bot_handoff_at เป็น Date (refresh ได้ — contract: last write time) — t1=${t1?.toISOString?.()} t2=${conv2?.bot_handoff_at}`);
+    const meta17b = metaOf("k17");
+    assert(meta17b?.bot_claim_info?.customer_name === "ลูกค้า k17"
+      && meta17b?.bot_handoff_reason === "warranty_claim",
+      `retry → claim fields ต้องไม่เสีย — meta=${JSON.stringify(meta17b)}`);
+    assert(meta17b?.bot_handoff_at instanceof Date
+      && meta17b.bot_handoff_at.getTime() >= t1.getTime(),
+      `retry → bot_handoff_at เป็น Date (refresh ได้ — contract: last write time) — t1=${t1?.toISOString?.()} t2=${meta17b?.bot_handoff_at}`);
     // claim refresh ยังเขียนได้ (เติม claim ภายหลังไม่ถูกปิดกั้น) — 1 write/req
     const retryWrites = mocks.state.queryLog.filter((q: any) =>
-      q.coll === "conversations" && q.op === "updateOne"
+      q.coll === "status_conversation" && q.op === "updateOne"
       && q.filter?.conversation_id === "k17");
     assert(retryWrites.length === 1,
       `retry → claim write ต้อง 1 query (refresh เดิม ไม่ใช่ parallel write) — writes=${retryWrites.length}`);
@@ -3476,11 +3485,10 @@ async function main() {
     const j1 = await res1.json();
     assert(res1.status === 200 && j1?.outcome?.state === "assigned",
       `episode1 assigned → 200 — status=${res1.status} body=${JSON.stringify(j1)}`);
-    const conv1 = mocks.fakeColl("conversations")
-      .find((d: any) => d.conversation_id === "k18");
-    const t1 = conv1?.bot_handoff_at;
+    const meta18a = metaOf("k18");
+    const t1 = meta18a?.bot_handoff_at;
     assert(t1 instanceof Date,
-      `episode1 ต้องตั้ง bot_handoff_at — doc=${JSON.stringify(conv1)}`);
+      `episode1 ต้องตั้ง bot_handoff_at — meta=${JSON.stringify(meta18a)}`);
 
     // close (admin resolves) → reopen เป็น bot (ลูกค้าทักกลับ) — production owners จริง
     await statusSvc.closeConversation({
@@ -3497,14 +3505,13 @@ async function main() {
     assert(res2.status === 200 && j2?.outcome?.state === "assigned"
       && j2?.outcome?.persisted === true && j2?.outcome?.reason === "round_robin",
       `episode2 ต้องเป็น transition ใหม่ — status=${res2.status} body=${JSON.stringify(j2)}`);
-    const conv2 = mocks.fakeColl("conversations")
-      .find((d: any) => d.conversation_id === "k18");
-    assert(conv2?.bot_handoff_at instanceof Date
-      && conv2.bot_handoff_at.getTime() >= t1.getTime(),
-      `handoff รอบใหม่ → bot_handoff_at เป็น Date (refresh ได้ — contract: last write time) — t1=${t1?.toISOString?.()} t2=${conv2?.bot_handoff_at}`);
-    assert(conv2?.bot_claim_info?.customer_name === "ลูกค้า k18"
-      && conv2?.bot_handoff_reason === "warranty_claim",
-      `episode2 → claim fields ของรอบใหม่ — doc=${JSON.stringify(conv2)}`);
+    const meta18b = metaOf("k18");
+    assert(meta18b?.bot_handoff_at instanceof Date
+      && meta18b.bot_handoff_at.getTime() >= t1.getTime(),
+      `handoff รอบใหม่ → bot_handoff_at เป็น Date (refresh ได้ — contract: last write time) — t1=${t1?.toISOString?.()} t2=${meta18b?.bot_handoff_at}`);
+    assert(meta18b?.bot_claim_info?.customer_name === "ลูกค้า k18"
+      && meta18b?.bot_handoff_reason === "warranty_claim",
+      `episode2 → claim fields ของรอบใหม่ — meta=${JSON.stringify(meta18b)}`);
     // audit per-episode exactly once (eid ต่างกัน → 2 docs/action รวม 2 episodes)
     assert(logsOf("k18", "chat_assigned").length === 2
       && logsOf("k18", "conversation.handoff").length === 2,
@@ -3523,12 +3530,11 @@ async function main() {
     assert(res2.status === 200 && j2?.outcome?.state === "queued"
       && j2?.outcome?.persisted === true,
       `queued retry → converge queued persisted — status=${res2.status} body=${JSON.stringify(j2)}`);
-    const conv2 = mocks.fakeColl("conversations")
-      .find((d: any) => d.conversation_id === "k19");
-    assert(conv2?.bot_handoff_at instanceof Date
-      && conv2?.bot_claim_info?.customer_name === "ลูกค้า k19"
-      && conv2?.bot_handoff_reason === "warranty_claim",
-      `claim fields ต้องไม่เสีย + timestamp เป็น Date — doc=${JSON.stringify(conv2)}`);
+    const meta19 = metaOf("k19");
+    assert(meta19?.bot_handoff_at instanceof Date
+      && meta19?.bot_claim_info?.customer_name === "ลูกค้า k19"
+      && meta19?.bot_handoff_reason === "warranty_claim",
+      `claim fields ต้องไม่เสีย + timestamp เป็น Date — meta=${JSON.stringify(meta19)}`);
     // queued emit = conversation.handoff เท่านั้น (ไม่มี owner → ไม่มี chat_assigned) — eid dedupe
     assert(logsOf("k19", "conversation.handoff").length === 1
       && logsOf("k19", "chat_assigned").length === 0,
@@ -3549,11 +3555,10 @@ async function main() {
     assert(res2.status === 200 && j2?.outcome?.state === "assigned"
       && j2?.outcome?.persisted === true,
       `queued→assigned upgrade → 200 persisted — status=${res2.status} body=${JSON.stringify(j2)}`);
-    const conv2 = mocks.fakeColl("conversations")
-      .find((d: any) => d.conversation_id === "k20");
-    assert(conv2?.bot_handoff_at instanceof Date
-      && conv2?.bot_claim_info?.customer_name === "ลูกค้า k20",
-      `claim fields ต้องไม่เสีย + timestamp เป็น Date — doc=${JSON.stringify(conv2)}`);
+    const meta20 = metaOf("k20");
+    assert(meta20?.bot_handoff_at instanceof Date
+      && meta20?.bot_claim_info?.customer_name === "ลูกค้า k20",
+      `claim fields ต้องไม่เสีย + timestamp เป็น Date — meta=${JSON.stringify(meta20)}`);
     // owner persisted + pending cleared
     const meta = mocks.fakeColl("status_conversation")
       .find((d: any) => d.conversation_id === "k20");
@@ -3563,6 +3568,912 @@ async function main() {
     assert(logsOf("k20", "chat_assigned").length === 1
       && logsOf("k20", "conversation.handoff").length === 2,
       `upgrade audit — chat_assigned=${logsOf("k20", "chat_assigned").length} handoff=${logsOf("k20", "conversation.handoff").length}`);
+  });
+
+  // ═══ CO. explicit admin claim outcome — Phase 2B.6 ═══
+  //   status_conversation = claim-outcome transport owner เดียว:
+  //   - bot_claim_info/episode ย้ายจาก raw conversations → meta (route เดิม)
+  //   - statusSvc.applyClaimOutcome = episode-scoped CAS command เดียว
+  //     → applied | already_applied | stale_episode | no_active_claim | invalid
+  //   - /api/admin/conversations/[id]/claim-outcome = transport adapter เดียว
+  //   - botCallService ส่ง claim_outcome (occurred_at = ISO บน wire) → Python
+  //   - ordinary close ห้ามแตะ claim episode / ห้ามสร้าง outcome
+
+  let claimOutcomeRoute: any = null;
+  try {
+    claimOutcomeRoute = await import(
+      "../src/app/api/admin/conversations/[conversationId]/claim-outcome/route");
+  } catch { /* ยังไม่มีไฟล์ → assertions ข้างล่าง fail เป็น RED */ }
+
+  const mkOutcomeReq = async (adminId: string | null, convId: string,
+                              body: Record<string, unknown> = {}) => {
+    const url = `http://localhost/api/admin/conversations/${convId}/claim-outcome`;
+    const init = {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(body),
+    };
+    if (adminId) return authReq(adminId, url, init);
+    const { NextRequest } = await import("next/server");
+    return new NextRequest(url, init);
+  };
+
+  await test("CO1 production handoff → claim metadata + active_claim_episode_id บน status_conversation (ย้ายจาก raw dump)", async () => {
+    seedConv("co1"); seedShop(); seedAdmin("admin-1");
+    const res = await (botHandoffRoute as any).POST(
+      await mkProdReq("co1", { episode_id: "ep-co1" }));
+    assert(res.status === 200 && (await res.json())?.outcome?.state === "assigned",
+      `assigned → 200 — status=${res.status}`);
+    const meta = metaOf("co1");
+    assert(meta?.bot_claim_info?.customer_name === "ลูกค้า co1"
+      && meta?.bot_handoff_at instanceof Date
+      && meta?.bot_handoff_reason === "warranty_claim",
+      `claim metadata ต้องอยู่บน status_conversation — meta=${JSON.stringify(meta)}`);
+    assert(meta?.active_claim_episode_id === "ep-co1",
+      `episode_id ต้อง transport เป็น active_claim_episode_id — meta=${JSON.stringify(meta)}`);
+    const conv = mocks.fakeColl("conversations")
+      .find((d: any) => d.conversation_id === "co1");
+    assert(conv && !("bot_claim_info" in conv) && !("bot_handoff_at" in conv)
+      && !("bot_handoff_reason" in conv),
+      `ห้ามเขียน claim ลง raw conversations อีก — doc=${JSON.stringify(conv)}`);
+  });
+
+  await test("CO2 handoff ไม่มี claim info แต่มี episode_id → episode ยัง transport", async () => {
+    seedConv("co2"); seedShop(); seedAdmin("admin-1");
+    const res = await (botHandoffRoute as any).POST(
+      await mkProdReq("co2", { episode_id: "ep-co2", claim: null }));
+    assert(res.status === 200, `status=${res.status}`);
+    const meta = metaOf("co2");
+    assert(meta?.active_claim_episode_id === "ep-co2" && !meta?.bot_claim_info,
+      `episode_id transport ต้องไม่ผูกกับ claim info — meta=${JSON.stringify(meta)}`);
+  });
+
+  await test("CO3 applyClaimOutcome resolved → applied + persisted + episode cleared + ownership ไม่ถูกแตะ", async () => {
+    seedConv("co3");
+    seedMeta("co3", { status: "handoff", assigned_to: "admin-1",
+                      active_claim_episode_id: "ep-co3" });
+    const r = await (statusSvc as any).applyClaimOutcome("co3", {
+      episodeId: "ep-co3", outcome: "resolved", actorId: "admin-1" });
+    assert(r.result === "applied", `result=${JSON.stringify(r)}`);
+    const meta = metaOf("co3");
+    assert(meta?.claim_outcome?.episode_id === "ep-co3"
+      && meta?.claim_outcome?.outcome === "resolved"
+      && meta?.claim_outcome?.actor_id === "admin-1"
+      && meta?.claim_outcome?.occurred_at instanceof Date,
+      `claim_outcome ต้อง persist ครบ (Date ไม่ใช่ string) — meta=${JSON.stringify(meta)}`);
+    assert(meta?.active_claim_episode_id === null,
+      `episode ที่ outcome แล้วต้อง clear — meta=${JSON.stringify(meta)}`);
+    assert(meta?.status === "handoff" && meta?.assigned_to === "admin-1",
+      `claim outcome ห้ามแตะ ownership/status — meta=${JSON.stringify(meta)}`);
+    assert(logsOf("co3", "conversation.claim_outcome").length === 1,
+      `audit claim_outcome ครั้งเดียว — ${logsOf("co3", "conversation.claim_outcome").length}`);
+  });
+
+  await test("CO4 repeat same command → already_applied + state เดิม + audit ไม่ซ้ำ", async () => {
+    seedConv("co4");
+    seedMeta("co4", { status: "handoff", assigned_to: "admin-1",
+                      active_claim_episode_id: "ep-co4" });
+    const r1 = await (statusSvc as any).applyClaimOutcome("co4", {
+      episodeId: "ep-co4", outcome: "resolved", actorId: "admin-1" });
+    const r2 = await (statusSvc as any).applyClaimOutcome("co4", {
+      episodeId: "ep-co4", outcome: "resolved", actorId: "admin-1" });
+    assert(r1.result === "applied" && r2.result === "already_applied",
+      `r1=${JSON.stringify(r1)} r2=${JSON.stringify(r2)}`);
+    const meta = metaOf("co4");
+    assert(meta?.claim_outcome?.outcome === "resolved"
+      && meta?.active_claim_episode_id === null,
+      `state ต้องคงเดิม — meta=${JSON.stringify(meta)}`);
+    assert(logsOf("co4", "conversation.claim_outcome").length === 1,
+      "audit ต้อง dedupe (eventId=episode) ไม่ซ้ำ");
+  });
+
+  await test("CO5 conflicting outcome same episode → already_applied + first terminal wins", async () => {
+    seedConv("co5");
+    seedMeta("co5", { status: "handoff", active_claim_episode_id: "ep-co5" });
+    const r1 = await (statusSvc as any).applyClaimOutcome("co5", {
+      episodeId: "ep-co5", outcome: "resolved", actorId: "admin-1" });
+    const r2 = await (statusSvc as any).applyClaimOutcome("co5", {
+      episodeId: "ep-co5", outcome: "cancelled", actorId: "admin-2" });
+    assert(r1.result === "applied" && r2.result === "already_applied", `r1=${JSON.stringify(r1)} r2=${JSON.stringify(r2)}`);
+    const meta = metaOf("co5");
+    assert(meta?.claim_outcome?.outcome === "resolved"
+      && meta?.claim_outcome?.actor_id === "admin-1",
+      `terminal แรกต้องชนะ — meta=${JSON.stringify(meta)}`);
+  });
+
+  await test("CO6 stale episode → stale_episode + zero write", async () => {
+    seedConv("co6");
+    seedMeta("co6", { status: "handoff", active_claim_episode_id: "ep-new" });
+    const r = await (statusSvc as any).applyClaimOutcome("co6", {
+      episodeId: "ep-old", outcome: "resolved", actorId: "admin-1" });
+    assert(r.result === "stale_episode", `result=${JSON.stringify(r)}`);
+    const meta = metaOf("co6");
+    assert(meta?.active_claim_episode_id === "ep-new" && !meta?.claim_outcome,
+      `stale command ห้ามเขียน — meta=${JSON.stringify(meta)}`);
+    assert(logsOf("co6", "conversation.claim_outcome").length === 0,
+      "stale ห้าม audit");
+  });
+
+  await test("CO7 no active claim → no_active_claim + zero write", async () => {
+    seedConv("co7");
+    seedMeta("co7", { status: "handoff", assigned_to: "admin-1" });
+    const r = await (statusSvc as any).applyClaimOutcome("co7", {
+      episodeId: "ep-x", outcome: "resolved", actorId: "admin-1" });
+    assert(r.result === "no_active_claim", `result=${JSON.stringify(r)}`);
+    const meta = metaOf("co7");
+    assert(!meta?.claim_outcome && meta?.status === "handoff",
+      `ห้ามเขียน outcome — meta=${JSON.stringify(meta)}`);
+  });
+
+  await test("CO8 race — rival commits first → loser already_applied (terminal wins)", async () => {
+    seedConv("co8");
+    seedMeta("co8", { status: "handoff", active_claim_episode_id: "ep-co8" });
+    (mocks.state as any).findOneAndUpdateHook = async (coll: string) => {
+      if (coll !== "status_conversation") return;
+      (mocks.state as any).findOneAndUpdateHook = null;
+      const doc = metaOf("co8")!;
+      doc.claim_outcome = { episode_id: "ep-co8", outcome: "resolved",
+                            actor_id: "admin-9", occurred_at: new Date() };
+      doc.active_claim_episode_id = null;
+    };
+    const r = await (statusSvc as any).applyClaimOutcome("co8", {
+      episodeId: "ep-co8", outcome: "cancelled", actorId: "admin-1" });
+    (mocks.state as any).findOneAndUpdateHook = null;
+    assert(r.result === "already_applied",
+      `loser ต้อง reconcile เป็น already_applied — r=${JSON.stringify(r)}`);
+    const meta = metaOf("co8");
+    assert(meta?.claim_outcome?.outcome === "resolved"
+      && meta?.claim_outcome?.actor_id === "admin-9",
+      `winner ห้ามถูก overwrite — meta=${JSON.stringify(meta)}`);
+  });
+
+  await test("CO9 route: no session → 401 + zero write", async () => {
+    seedConv("co9");
+    seedMeta("co9", { status: "handoff", active_claim_episode_id: "ep-co9" });
+    assert(claimOutcomeRoute, "claim-outcome route missing");
+    const res = await claimOutcomeRoute.POST(
+      await mkOutcomeReq(null, "co9",
+        { episode_id: "ep-co9", outcome: "resolved" }),
+      paramsOf("co9"));
+    assert(res.status === 401, `status=${res.status}`);
+    assert(!metaOf("co9")?.claim_outcome, "unauth ห้ามเขียน");
+  });
+
+  await test("CO10 route: invalid body → 422 (missing episode / bad outcome / wrong type)", async () => {
+    seedAdmin("admin-1");
+    assert(claimOutcomeRoute, "claim-outcome route missing");
+    for (const [label, body] of [
+      ["missing episode_id", { outcome: "resolved" }],
+      ["missing outcome", { episode_id: "ep-co10" }],
+      ["bad outcome enum", { episode_id: "ep-co10", outcome: "done" }],
+      ["episode non-string", { episode_id: 42, outcome: "resolved" }],
+      ["episode overlong", { episode_id: "x".repeat(300), outcome: "resolved" }],
+    ] as const) {
+      const res = await claimOutcomeRoute.POST(
+        await mkOutcomeReq("admin-1", "co10", body), paramsOf("co10"));
+      assert(res.status === 422,
+        `${label} → 422 expected — got ${res.status} body=${JSON.stringify(await res.json().catch(() => null))}`);
+    }
+  });
+
+  await test("CO11 route: valid → 200 {ok,result:'applied'} + meta persisted + audit", async () => {
+    seedConv("co11"); seedAdmin("admin-1");
+    seedMeta("co11", { status: "handoff", assigned_to: "admin-1",
+                       active_claim_episode_id: "ep-co11" });
+    assert(claimOutcomeRoute, "claim-outcome route missing");
+    const res = await claimOutcomeRoute.POST(
+      await mkOutcomeReq("admin-1", "co11",
+        { episode_id: "ep-co11", outcome: "cancelled" }),
+      paramsOf("co11"));
+    const body = await res.json();
+    assert(res.status === 200 && body?.ok === true && body?.result === "applied",
+      `status=${res.status} body=${JSON.stringify(body)}`);
+    const meta = metaOf("co11");
+    assert(meta?.claim_outcome?.outcome === "cancelled"
+      && meta?.claim_outcome?.actor_id === "admin-1"
+      && meta?.active_claim_episode_id === null,
+      `meta=${JSON.stringify(meta)}`);
+    assert(logsOf("co11", "conversation.claim_outcome").length === 1,
+      "audit ครั้งเดียว");
+  });
+
+  await test("CO12 route: stale → 409 {result:'stale_episode'}; no active → 409", async () => {
+    seedConv("co12a"); seedAdmin("admin-1");
+    seedMeta("co12a", { status: "handoff", active_claim_episode_id: "ep-new" });
+    assert(claimOutcomeRoute, "claim-outcome route missing");
+    const r1 = await claimOutcomeRoute.POST(
+      await mkOutcomeReq("admin-1", "co12a",
+        { episode_id: "ep-old", outcome: "resolved" }), paramsOf("co12a"));
+    const b1 = await r1.json();
+    assert(r1.status === 409 && b1?.result === "stale_episode",
+      `stale → 409 — status=${r1.status} body=${JSON.stringify(b1)}`);
+    seedConv("co12b");
+    seedMeta("co12b", { status: "handoff" });
+    const r2 = await claimOutcomeRoute.POST(
+      await mkOutcomeReq("admin-1", "co12b",
+        { episode_id: "ep-x", outcome: "resolved" }), paramsOf("co12b"));
+    const b2 = await r2.json();
+    assert(r2.status === 409 && b2?.result === "no_active_claim",
+      `no active → 409 — status=${r2.status} body=${JSON.stringify(b2)}`);
+  });
+
+  await test("CO13 route: service throws → 500 sanitized (no raw error leak)", async () => {
+    seedConv("co13"); seedAdmin("admin-1");
+    seedMeta("co13", { status: "handoff", active_claim_episode_id: "ep-co13" });
+    assert(claimOutcomeRoute, "claim-outcome route missing");
+    (mocks.state as any).findOneAndUpdateHook = async (coll: string) => {
+      if (coll === "status_conversation") {
+        throw new Error("simulated-failure-should-not-leak");
+      }
+    };
+    const res = await claimOutcomeRoute.POST(
+      await mkOutcomeReq("admin-1", "co13",
+        { episode_id: "ep-co13", outcome: "resolved" }), paramsOf("co13"));
+    (mocks.state as any).findOneAndUpdateHook = null;
+    const body = await res.json().catch(() => null);
+    assert(res.status === 500, `status=${res.status}`);
+    const leak = JSON.stringify(body);
+    assert(!leak.includes("simulated-failure-should-not-leak"),
+      `500 ห้าม leak raw error — body=${leak}`);
+  });
+
+  await test("CO14 botCall: meta.claim_outcome → claim_outcome บน wire (occurred_at ISO); absent → key absent; test/simulate → absent", async () => {
+    seedConv("co14");
+    seedMeta("co14", { status: "bot",
+      claim_outcome: { episode_id: "ep-co14", outcome: "resolved",
+                       actor_id: "admin-1",
+                       occurred_at: new Date("2026-10-01T01:02:03Z") } });
+    const body = await callBotOnce("co14");
+    assert(body.claim_outcome?.episode_id === "ep-co14"
+      && body.claim_outcome?.outcome === "resolved"
+      && body.claim_outcome?.actor_id === "admin-1",
+      `claim_outcome ต้องอยู่บน /chat payload — body=${JSON.stringify(body)}`);
+    assert(typeof body.claim_outcome?.occurred_at === "string"
+      && body.claim_outcome.occurred_at.startsWith("2026-10-01T01:02:03"),
+      `occurred_at ต้องเป็น ISO string บน wire — ${body.claim_outcome?.occurred_at}`);
+    mocks.state.fetchBodies.length = 0;
+    seedConv("co14b"); seedMeta("co14b", { status: "bot" });
+    const body2 = await callBotOnce("co14b");
+    assert(!("claim_outcome" in body2),
+      `ไม่มี outcome → ห้ามส่ง key — body=${JSON.stringify(body2)}`);
+    mocks.state.fetchBodies.length = 0;
+    mocks.fakeColl("test_status_conversation").push({
+      conversation_id: "co14c", source: "botworker", status: "bot",
+      claim_outcome: { episode_id: "ep-t", outcome: "resolved" },
+    });
+    const body3 = await callBotOnce("co14c", { testSource: "botworker" });
+    assert(!("claim_outcome" in body3),
+      `test/simulate isolation — outcome ห้ามรั่วเข้า test path — body=${JSON.stringify(body3)}`);
+  });
+
+  await test("CO15 ordinary close → status closed + claim episode preserved + ไม่มี outcome", async () => {
+    seedConv("co15");
+    seedMeta("co15", { status: "handoff", assigned_to: "admin-1",
+                       active_claim_episode_id: "ep-co15" });
+    await statusSvc.closeConversation({
+      conversationId: "co15", closedBy: "admin-1",
+      reason: "done", category: "product", resolution: "answered" });
+    const meta = metaOf("co15");
+    assert(meta?.status === "closed", `close ต้องทำงานปกติ — meta=${JSON.stringify(meta)}`);
+    assert(meta?.active_claim_episode_id === "ep-co15",
+      `close ห้ามจบ claim episode — meta=${JSON.stringify(meta)}`);
+    assert(!meta?.claim_outcome, "close ห้ามสร้าง claim_outcome");
+  });
+
+  await test("CO16 [source pin] claim-outcome route = transport adapter (no direct Mongo)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    let src = "";
+    try {
+      src = readFileSync(fileURLToPath(new URL(
+        "../src/app/api/admin/conversations/[conversationId]/claim-outcome/route.ts",
+        import.meta.url)), "utf8");
+    } catch { /* missing → RED */ }
+    assert(src.length > 0, "route file missing — RED forward contract");
+    assert(!/getCollection|mongoClient|insertOne|updateOne|findOneAndUpdate|deleteOne|deleteMany/.test(src),
+      "route ต้องเป็น transport adapter — Mongo/CAS อยู่ใน statusConversationService");
+  });
+
+  // ── R. Phase 2B.6 review-fix — episode fencing / metadata contract / UI scope / shape ──
+
+  await test("R1 terminal ep1 → retry recordClaimHandoff(ep1) → ห้าม reopen (active null, outcome คงอยู่)", async () => {
+    seedMeta("r1", { status: "handoff", active_claim_episode_id: null,
+      claim_outcome: { episode_id: "ep-r1", outcome: "resolved",
+                       actor_id: "admin-1", occurred_at: new Date() } });
+    await (statusSvc as any).recordClaimHandoff({
+      conversationId: "r1",
+      claim: { customer_name: "retry" }, reason: "warranty_claim",
+      episodeId: "ep-r1" });
+    const meta = metaOf("r1");
+    assert(meta?.active_claim_episode_id == null,
+      `terminal episode ห้าม reopen — meta=${JSON.stringify(meta)}`);
+    assert(meta?.claim_outcome?.episode_id === "ep-r1"
+      && meta?.claim_outcome?.outcome === "resolved",
+      `terminal outcome ต้องคงอยู่ — meta=${JSON.stringify(meta)}`);
+  });
+
+  await test("R2 ep1 resolved → retry handoff ep1 → cancelled command → first terminal wins + audit เดิม", async () => {
+    seedConv("r2"); seedAdmin("admin-1");
+    seedMeta("r2", { status: "handoff", active_claim_episode_id: "ep-r2" });
+    const r1 = await (statusSvc as any).applyClaimOutcome("r2", {
+      episodeId: "ep-r2", outcome: "resolved", actorId: "admin-1" });
+    assert(r1.result === "applied", `setup apply ต้องสำเร็จ — r1=${JSON.stringify(r1)}`);
+    // delayed/duplicate handoff ของ ep1 มาหลัง terminal
+    await (statusSvc as any).recordClaimHandoff({
+      conversationId: "r2", claim: { customer_name: "dup" },
+      reason: "warranty_claim", episodeId: "ep-r2" });
+    // conflicting outcome command ของ episode เดิม
+    const r2 = await (statusSvc as any).applyClaimOutcome("r2", {
+      episodeId: "ep-r2", outcome: "cancelled", actorId: "admin-1" });
+    const meta = metaOf("r2");
+    assert(r2.result === "already_applied",
+      `cancelled ห้าม overwrite resolved — r2=${JSON.stringify(r2)}`);
+    assert(meta?.claim_outcome?.outcome === "resolved"
+      && meta?.claim_outcome?.actor_id === "admin-1"
+      && meta?.active_claim_episode_id == null,
+      `resolved ต้องชนะ + episode ห้าม reopen — meta=${JSON.stringify(meta)}`);
+    assert(logsOf("r2", "conversation.claim_outcome").length === 1,
+      `audit ต้องคงครั้งเดียว — ${logsOf("r2", "conversation.claim_outcome").length}`);
+  });
+
+  await test("R3 active ep2 + delayed recordClaimHandoff(ep1) → stale fenced: ep2 + metadata ไม่ถูกทับ", async () => {
+    seedMeta("r3", { status: "handoff", active_claim_episode_id: "ep-r3-new",
+      bot_claim_info: { customer_name: "episode-2" } });
+    await (statusSvc as any).recordClaimHandoff({
+      conversationId: "r3",
+      claim: { customer_name: "stale-ep1" }, reason: "warranty_claim",
+      episodeId: "ep-r3-old" });
+    const meta = metaOf("r3");
+    assert(meta?.active_claim_episode_id === "ep-r3-new",
+      `stale writer ห้ามทับ active — meta=${JSON.stringify(meta)}`);
+    assert((meta?.bot_claim_info as any)?.customer_name === "episode-2",
+      `stale handoff ห้ามทับ claim metadata — meta=${JSON.stringify(meta)}`);
+  });
+
+  await test("R4 terminal ep1 → new recordClaimHandoff(ep2) → ep2 open + outcome เก่าถูก supersede + ep2 apply ได้", async () => {
+    seedMeta("r4", { status: "handoff", active_claim_episode_id: "ep-r4-1" });
+    const r1 = await (statusSvc as any).applyClaimOutcome("r4", {
+      episodeId: "ep-r4-1", outcome: "resolved", actorId: "admin-1" });
+    assert(r1.result === "applied", `setup — r1=${JSON.stringify(r1)}`);
+    await (statusSvc as any).recordClaimHandoff({
+      conversationId: "r4",
+      claim: { customer_order_id: "ord-2" }, reason: "claim",
+      episodeId: "ep-r4-2" });
+    const meta = metaOf("r4");
+    assert(meta?.active_claim_episode_id === "ep-r4-2",
+      `episode ใหม่ต้อง open — meta=${JSON.stringify(meta)}`);
+    assert(meta?.claim_outcome == null,
+      `outcome ของ ep1 ต้องถูก clear ใน transition เดียว — meta=${JSON.stringify(meta)}`);
+    const r2 = await (statusSvc as any).applyClaimOutcome("r4", {
+      episodeId: "ep-r4-2", outcome: "cancelled", actorId: "admin-1" });
+    assert(r2.result === "applied", `ep2 outcome ต้อง apply ได้ — r2=${JSON.stringify(r2)}`);
+    const meta2 = metaOf("r4");
+    assert(meta2?.claim_outcome?.episode_id === "ep-r4-2"
+      && meta2?.claim_outcome?.outcome === "cancelled",
+      `ep2 outcome persist — meta=${JSON.stringify(meta2)}`);
+  });
+
+  await test("R5 concurrent — winner(ep2) lands before stale(ep1) fenced write → loser cannot overwrite (bounded)", async () => {
+    seedConv("r5");
+    // genuine interleave: hook fires right before the fenced write — winner lands first
+    let landed = false;
+    (mocks.state as any).findOneAndUpdateHook = async (coll: string) => {
+      if (coll === "status_conversation" && !landed) {
+        landed = true;
+        const d = metaOf("r5");
+        if (d) d.active_claim_episode_id = "ep-r5-new";
+        else mocks.fakeColl("status_conversation").push({
+          conversation_id: "r5", status: "handoff",
+          active_claim_episode_id: "ep-r5-new",
+          bot_claim_info: { customer_name: "winner" }, updated_at: new Date() });
+      }
+    };
+    await (statusSvc as any).recordClaimHandoff({
+      conversationId: "r5",
+      claim: { customer_name: "stale-loser" }, reason: "warranty_claim",
+      episodeId: "ep-r5-old" });
+    (mocks.state as any).findOneAndUpdateHook = null;
+    const meta = metaOf("r5");
+    assert(meta?.active_claim_episode_id === "ep-r5-new",
+      `loser ห้าม overwrite winner — meta=${JSON.stringify(meta)}`);
+    assert((meta?.bot_claim_info as any)?.customer_name === "winner",
+      `stale claim metadata ห้ามเขียน — meta=${JSON.stringify(meta)}`);
+  });
+
+  await test("R6 malformed {active:ep1, outcome:ep1} → applyClaimOutcome ห้าม overwrite terminal", async () => {
+    seedMeta("r6", { status: "handoff", active_claim_episode_id: "ep-r6",
+      claim_outcome: { episode_id: "ep-r6", outcome: "resolved",
+                       actor_id: "admin-9", occurred_at: new Date() } });
+    const r = await (statusSvc as any).applyClaimOutcome("r6", {
+      episodeId: "ep-r6", outcome: "cancelled", actorId: "admin-1" });
+    const meta = metaOf("r6");
+    assert(r.result === "already_applied",
+      `terminal outcome ต้องชนะแม้ storage ผิดปกติ — r=${JSON.stringify(r)}`);
+    assert(meta?.claim_outcome?.outcome === "resolved"
+      && meta?.claim_outcome?.actor_id === "admin-9",
+      `terminal outcome ห้ามถูกเขียนทับ — meta=${JSON.stringify(meta)}`);
+  });
+
+  // round-3 ordering: episode fence มาก่อน handoff — metadata fail →
+  //   503 ก่อน ownership mutation (เดิม: commit ก่อน → ownership คงอยู่)
+  await test("R7 metadata write failure → non-2xx retryable + ไม่มี ownership commit + sanitized", async () => {
+    seedConv("r7"); seedShop(); seedAdmin("admin-1");
+    const orig = (statusSvc.statusConversationService as any).recordClaimHandoff;
+    (statusSvc.statusConversationService as any).recordClaimHandoff = async () => {
+      throw new Error("simulated-metadata-persist-failure");
+    };
+    const res = await (botHandoffRoute as any).POST(await mkProdReq("r7", { episode_id: "ep-r7" }));
+    (statusSvc.statusConversationService as any).recordClaimHandoff = orig;
+    const body = await res.json().catch(() => null);
+    assert(!(res.status >= 200 && res.status < 300),
+      `metadata failure ห้ามคืน success — status=${res.status} body=${JSON.stringify(body)}`);
+    assert(res.status === 503 || res.status === 500 || res.status === 429,
+      `ต้องเป็น retryable failure — status=${res.status}`);
+    const meta = metaOf("r7");
+    assert(meta?.status !== "handoff" && !meta?.assigned_to,
+      `episode fence fail ก่อน handoff → ห้ามมี ownership commit — meta=${JSON.stringify(meta)}`);
+    assert(!JSON.stringify(body).includes("simulated-metadata-persist-failure"),
+      `response ห้าม leak raw error — body=${JSON.stringify(body)}`);
+  });
+
+  await test("R9 retry after metadata failure → converge: ownership เดิม + metadata once + audit once", async () => {
+    seedConv("r9"); seedShop(); seedAdmin("admin-1");
+    const orig = (statusSvc.statusConversationService as any).recordClaimHandoff;
+    let failFirst = true;
+    let calls = 0;
+    (statusSvc.statusConversationService as any).recordClaimHandoff = async (o: any) => {
+      calls++;
+      if (failFirst) { failFirst = false; throw new Error("transient"); }
+      return orig(o);
+    };
+    const res1 = await (botHandoffRoute as any).POST(await mkProdReq("r9", { episode_id: "ep-r9" }));
+    assert(!(res1.status >= 200 && res1.status < 300),
+      `first attempt ต้อง fail — status=${res1.status}`);
+    const res2 = await (botHandoffRoute as any).POST(await mkProdReq("r9", { episode_id: "ep-r9" }));
+    (statusSvc.statusConversationService as any).recordClaimHandoff = orig;
+    const j2 = await res2.json();
+    assert(res2.status === 200 && j2?.outcome?.state === "assigned",
+      `retry ต้อง converge — status=${res2.status} body=${JSON.stringify(j2)}`);
+    const meta = metaOf("r9");
+    assert(meta?.status === "handoff" && meta?.active_claim_episode_id === "ep-r9"
+      && (meta?.bot_claim_info as any)?.customer_name,
+      `metadata persist หลัง retry — meta=${JSON.stringify(meta)}`);
+    assert(calls === 2,
+      `recordClaimHandoff ถูกเรียกพอดี 2 ครั้ง (1 fail + 1 success) — calls=${calls}`);
+    assert(logsOf("r9", "conversation.handoff").length === 1
+      && logsOf("r9", "chat_assigned").length === 1,
+      `audit ห้ามซ้ำบน retry — handoff=${logsOf("r9", "conversation.handoff").length} assigned=${logsOf("r9", "chat_assigned").length}`);
+  });
+
+  await test("R10 [source pin] ClaimSection keyed by conversation.id → state reset เมื่อ switch conversation", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const src = readFileSync(fileURLToPath(new URL(
+      "../src/components/chat/InfoTab.tsx", import.meta.url)), "utf8");
+    const usage = src.match(/<ClaimSection\b[\s\S]*?\/>/)?.[0] || "";
+    assert(/key=\{/.test(usage) && usage.includes("conversation.id"),
+      `ClaimSection ต้อง key ตาม conversation.id — usage=${usage}`);
+  });
+
+  await test("R11 [source pin] ClaimSection key รวม episode identity → reset เมื่อ episode เปลี่ยน", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const src = readFileSync(fileURLToPath(new URL(
+      "../src/components/chat/InfoTab.tsx", import.meta.url)), "utf8");
+    const usage = src.match(/<ClaimSection\b[\s\S]*?\/>/)?.[0] || "";
+    assert(usage.includes("active_claim_episode_id") || usage.includes("episodeId"),
+      `key ต้องผูก episode identity — usage=${usage}`);
+  });
+
+  await test("R12 production claim shape → customer_order_id ไหลถึง meta + UI อ่าน canonical key เดียว", async () => {
+    seedConv("r12"); seedShop(); seedAdmin("admin-1");
+    const claim = {
+      customer_name: "ลูกค้า r12", customer_phone: "0810000000",
+      customer_order_id: "ord-r12-99", purchase_date: "2026-09-01",
+      claim_topic: "เคลม/ซ่อม/ประกันสินค้า",
+    };
+    const res = await (botHandoffRoute as any).POST(
+      await mkProdReq("r12", { episode_id: "ep-r12", claim }));
+    assert(res.status === 200, `status=${res.status}`);
+    const meta = metaOf("r12");
+    assert((meta?.bot_claim_info as any)?.customer_order_id === "ord-r12-99",
+      `customer_order_id ต้อง persist — meta=${JSON.stringify(meta?.bot_claim_info)}`);
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const ui = readFileSync(fileURLToPath(new URL(
+      "../src/components/chat/InfoTab.tsx", import.meta.url)), "utf8");
+    assert(!/info\?\.order_id\b/.test(ui),
+      "UI ห้ามอ่าน order_id — production ส่ง customer_order_id");
+    assert(/info\?\.customer_order_id/.test(ui),
+      "UI ต้องอ่าน customer_order_id (canonical)");
+    const types = readFileSync(fileURLToPath(new URL(
+      "../src/lib/types.ts", import.meta.url)), "utf8");
+    const claimBlock = types.match(/bot_claim_info\?:\s*\{[^}]*\}/)?.[0] || "";
+    assert(/customer_order_id/.test(claimBlock) && !/\border_id\?:/.test(claimBlock),
+      `Conversation.bot_claim_info ต้องใช้ customer_order_id — block=${claimBlock}`);
+  });
+
+  // ═══ R13–R16 — Phase 2B.6 review-fix round 2 (typed metadata result,
+  //   audit convergence, authoritative outcome on wire) ═══
+
+  await test("R13 stale ep1 while ep2 active → typed stale_episode + route 409 + ep2 metadata intact", async () => {
+    seedConv("r13"); seedShop(); seedAdmin("admin-1");
+    seedMeta("r13", { status: "handoff", assigned_to: "admin-1",
+                      active_claim_episode_id: "ep2",
+                      bot_claim_info: { customer_order_id: "ep2-order" } });
+    const wr = await (statusSvc as any).recordClaimHandoff({
+      conversationId: "r13", claim: { customer_order_id: "ep1-order" },
+      reason: "warranty_claim", episodeId: "ep1" });
+    assert(wr?.status === "stale_episode",
+      `recordClaimHandoff ต้อง classify stale — got ${JSON.stringify(wr)}`);
+    const res = await (botHandoffRoute as any).POST(
+      await mkProdReq("r13", { episode_id: "ep1",
+                               claim: { customer_order_id: "ep1-order" } }));
+    const j = await res.json();
+    // 409 permanent → Python _send_handoff ห้าม classify เป็น confirmed
+    //   (4xx ไม่ retry — ownership ที่ commit แล้วคงอยู่ แต่ episode metadata
+    //   ของ stale ep ห้ามกลายเป็น success)
+    assert(res.status === 409 && j?.ok === false,
+      `stale episode → 409 — status=${res.status} body=${JSON.stringify(j)}`);
+    const meta = metaOf("r13");
+    assert(meta?.active_claim_episode_id === "ep2"
+      && (meta?.bot_claim_info as any)?.customer_order_id === "ep2-order",
+      `ep2 metadata ห้ามถูก stale ep1 ทับ — meta=${JSON.stringify(meta)}`);
+  });
+
+  await test("R14 same episode already terminal → already_terminal + converged 200 carrying outcome truth", async () => {
+    seedConv("r14"); seedShop(); seedAdmin("admin-1");
+    seedMeta("r14", { status: "handoff", assigned_to: "admin-1",
+      active_claim_episode_id: null,
+      claim_outcome: { episode_id: "ep1", outcome: "resolved",
+                       actor_id: "admin-1",
+                       occurred_at: new Date("2026-10-14T01:00:00Z") } });
+    const wr = await (statusSvc as any).recordClaimHandoff({
+      conversationId: "r14", claim: { customer_order_id: "x" },
+      reason: "warranty_claim", episodeId: "ep1" });
+    assert(wr?.status === "already_terminal",
+      `recordClaimHandoff ต้อง classify terminal — got ${JSON.stringify(wr)}`);
+    const res = await (botHandoffRoute as any).POST(
+      await mkProdReq("r14", { episode_id: "ep1" }));
+    const j = await res.json();
+    assert(res.status === 200 && j?.claim_metadata === "already_terminal"
+        && j?.claim_outcome?.outcome === "resolved"
+        && j?.claim_outcome?.actor_id === "admin-1",
+      `terminal episode → converged 200 carrying authoritative outcome — status=${res.status} body=${JSON.stringify(j)}`);
+    const meta = metaOf("r14");
+    assert(meta?.claim_outcome?.outcome === "resolved"
+      && meta?.claim_outcome?.actor_id === "admin-1"
+      && meta?.active_claim_episode_id === null,
+      `terminal outcome ห้าม reopen/overwrite — meta=${JSON.stringify(meta)}`);
+  });
+
+  await test("R15 audit crash window → committed outcome kept; retry repairs audit exactly-once", async () => {
+    seedConv("r15");
+    seedMeta("r15", { status: "handoff", assigned_to: "admin-1",
+                      active_claim_episode_id: "ep-r15" });
+    insertErrorOnce("conversation.claim_outcome");
+    let threw = false;
+    try {
+      await (statusSvc as any).applyClaimOutcome("r15", {
+        episodeId: "ep-r15", outcome: "resolved", actorId: "admin-1" });
+    } catch { threw = true; }
+    assert(threw, "audit crash ต้อง propagate");
+    const mid = metaOf("r15");
+    assert(mid?.claim_outcome?.episode_id === "ep-r15"
+      && mid?.active_claim_episode_id === null,
+      `CAS committed ต้องคงอยู่แม้ audit fail — meta=${JSON.stringify(mid)}`);
+    assert(logsOf("r15", "conversation.claim_outcome").length === 0,
+      "audit ต้องยังไม่มีหลัง crash");
+    const r2 = await (statusSvc as any).applyClaimOutcome("r15", {
+      episodeId: "ep-r15", outcome: "resolved", actorId: "admin-1" });
+    assert(r2.result === "already_applied",
+      `retry ต้อง already_applied — got ${JSON.stringify(r2)}`);
+    assert(logsOf("r15", "conversation.claim_outcome").length === 1,
+      `retry ต้อง repair audit exactly-once — got ${logsOf("r15", "conversation.claim_outcome").length}`);
+    const meta = metaOf("r15");
+    assert(meta?.claim_outcome?.outcome === "resolved"
+      && meta?.claim_outcome?.actor_id === "admin-1",
+      `first terminal ต้องคงเป็น authoritative — meta=${JSON.stringify(meta)}`);
+  });
+
+  await test("R16 conflicting retry → already_applied + authoritative persisted outcome (route→UI)", async () => {
+    seedConv("r16"); seedAdmin("admin-b");
+    seedMeta("r16", { status: "handoff", assigned_to: "admin-a",
+      active_claim_episode_id: null,
+      claim_outcome: { episode_id: "ep-r16", outcome: "resolved",
+                       actor_id: "admin-a", occurred_at: new Date() } });
+    const res = await claimOutcomeRoute.POST(
+      await mkOutcomeReq("admin-b", "r16",
+        { episode_id: "ep-r16", outcome: "cancelled" }),
+      paramsOf("r16"));
+    const j = await res.json();
+    assert(res.status === 200 && j?.result === "already_applied",
+      `conflict → already_applied — status=${res.status} body=${JSON.stringify(j)}`);
+    assert(j?.claim_outcome?.outcome === "resolved"
+      && j?.claim_outcome?.actor_id === "admin-a",
+      `route ต้องคืน authoritative persisted outcome — body=${JSON.stringify(j)}`);
+    // UI pin — ClaimSection ต้องอ่าน persisted outcome จาก body ไม่ใช่ค่าที่กด
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const ui = readFileSync(fileURLToPath(new URL(
+      "../src/components/chat/InfoTab.tsx", import.meta.url)), "utf8");
+    assert(/body\??\.claim_outcome\??\.outcome/.test(ui),
+      "UI ต้องอ่าน authoritative outcome จาก body.claim_outcome.outcome");
+    assert(!/setApplied\(o\)/.test(ui),
+      "UI ห้าม set applied จากค่าที่กด (o) — ต้องใช้ persisted outcome");
+  });
+
+  // ═══ R17–R20 — Phase 2B.6 review-fix round 3 (handoff ordering) ═══
+  //   episode fence verdict ต้องมาก่อน ownership mutation:
+  //   conversation exists → episode fence/metadata → handoff ownership
+
+  await test("R17 stale ep → 409 + handoffToAdmin calls=0 + status/owner/audit/meta ไม่เปลี่ยน", async () => {
+    seedConv("r17"); seedShop(); seedAdmin("admin-1");
+    seedMeta("r17", { status: "bot", assigned_to: null,
+                      active_claim_episode_id: "ep-new",
+                      bot_claim_info: { customer_order_id: "epnew-order" } });
+    const metaBefore = JSON.stringify(metaOf("r17"));
+    let handoffCalls = 0;
+    const origH = (handoffSvc.handoffService as any).handoffToAdmin;
+    (handoffSvc.handoffService as any).handoffToAdmin = async (o: any) => {
+      handoffCalls++; return origH(o);
+    };
+    const res = await (botHandoffRoute as any).POST(
+      await mkProdReq("r17", { episode_id: "ep-old",
+                               claim: { customer_order_id: "epold-order" } }));
+    (handoffSvc.handoffService as any).handoffToAdmin = origH;
+    const j = await res.json();
+    assert(res.status === 409 && j?.ok === false
+        && j?.claim_metadata === "stale_episode",
+      `stale → 409 — status=${res.status} body=${JSON.stringify(j)}`);
+    assert(handoffCalls === 0,
+      `stale verdict ต้องมาก่อน handoff — handoffToAdmin calls=${handoffCalls}`);
+    assert(JSON.stringify(metaOf("r17")) === metaBefore,
+      `status/owner/ep-new metadata ต้อง byte-equivalent — meta=${JSON.stringify(metaOf("r17"))}`);
+    assert(logsOf("r17", "chat_assigned").length === 0
+      && logsOf("r17", "conversation.handoff").length === 0
+      && logsOf("r17", "conversation.open").length === 0,
+      `stale → ownership/reopen/handoff audits ต้อง = 0`);
+  });
+
+  await test("R18 terminal ep retry → converged 200 + persisted outcome + zero handoff/reopen", async () => {
+    seedConv("r18"); seedShop(); seedAdmin("admin-1");
+    seedMeta("r18", { status: "closed",
+      closed_at: new Date("2026-10-13T00:00:00Z"), closed_by: "admin-1",
+      assigned_to: null, active_claim_episode_id: null,
+      claim_outcome: { episode_id: "ep-term", outcome: "resolved",
+                       actor_id: "admin-1",
+                       occurred_at: new Date("2026-10-14T01:00:00Z") } });
+    const metaBefore = JSON.stringify(metaOf("r18"));
+    let handoffCalls = 0;
+    const origH = (handoffSvc.handoffService as any).handoffToAdmin;
+    (handoffSvc.handoffService as any).handoffToAdmin = async (o: any) => {
+      handoffCalls++; return origH(o);
+    };
+    const res = await (botHandoffRoute as any).POST(
+      await mkProdReq("r18", { episode_id: "ep-term" }));
+    (handoffSvc.handoffService as any).handoffToAdmin = origH;
+    const j = await res.json();
+    assert(res.status === 200 && j?.claim_metadata === "already_terminal"
+      && j?.claim_outcome?.outcome === "resolved"
+      && j?.claim_outcome?.actor_id === "admin-1",
+      `terminal → converged 200 carrying persisted outcome — status=${res.status} body=${JSON.stringify(j)}`);
+    assert(j?.outcome?.state !== "assigned" && j?.outcome?.state !== "queued",
+      `ห้าม synthesize typed handoff outcome — Python confirm เฉพาะ outcome.state∈{assigned,queued} — body=${JSON.stringify(j)}`);
+    assert(handoffCalls === 0,
+      `terminal verdict ต้องมาก่อน handoff — handoffToAdmin calls=${handoffCalls}`);
+    assert(JSON.stringify(metaOf("r18")) === metaBefore,
+      `closed/status/owner/claim_outcome ต้อง byte-equivalent — meta=${JSON.stringify(metaOf("r18"))}`);
+    assert(logsOf("r18", "chat_assigned").length === 0
+      && logsOf("r18", "conversation.handoff").length === 0
+      && logsOf("r18", "conversation.open").length === 0,
+      `terminal → ownership/reopen/handoff audits ต้อง = 0`);
+  });
+
+  await test("R19 metadata persist failure → sanitized 503 ก่อน handoff + calls=0", async () => {
+    seedConv("r19"); seedShop(); seedAdmin("admin-1");
+    const orig = (statusSvc.statusConversationService as any).recordClaimHandoff;
+    (statusSvc.statusConversationService as any).recordClaimHandoff = async () => {
+      throw new Error("simulated-metadata-persist-failure");
+    };
+    let handoffCalls = 0;
+    const origH = (handoffSvc.handoffService as any).handoffToAdmin;
+    (handoffSvc.handoffService as any).handoffToAdmin = async (o: any) => {
+      handoffCalls++; return origH(o);
+    };
+    const res = await (botHandoffRoute as any).POST(
+      await mkProdReq("r19", { episode_id: "ep-r19" }));
+    (statusSvc.statusConversationService as any).recordClaimHandoff = orig;
+    (handoffSvc.handoffService as any).handoffToAdmin = origH;
+    const body = await res.json().catch(() => null);
+    assert(res.status === 503 && body?.ok === false,
+      `metadata failure → retryable 503 — status=${res.status} body=${JSON.stringify(body)}`);
+    assert(handoffCalls === 0,
+      `metadata gate ต้องมาก่อน handoff — handoffToAdmin calls=${handoffCalls}`);
+    const meta = metaOf("r19");
+    assert(!meta?.assigned_to && meta?.status !== "handoff",
+      `ownership ห้าม commit เมื่อ episode fence fail — meta=${JSON.stringify(meta)}`);
+    assert(!JSON.stringify(body).includes("simulated-metadata-persist-failure"),
+      `response ห้าม leak raw error — body=${JSON.stringify(body)}`);
+    assert(logsOf("r19", "chat_assigned").length === 0
+      && logsOf("r19", "conversation.handoff").length === 0,
+      `metadata failure → handoff audits ต้อง = 0`);
+  });
+
+  await test("R20 metadata written + handoff retryable fail → ownership unassigned → retry converge + audit once", async () => {
+    seedConv("r20"); seedShop(); seedAdmin("admin-1"); seedAdmin("admin-2");
+    seedCursor("admin-2");
+    forceCursorMiss(); // contention → failed retryable, ไม่มี ownership commit
+    const res1 = await (botHandoffRoute as any).POST(
+      await mkProdReq("r20", { episode_id: "ep-r20" }));
+    const j1 = await res1.json();
+    assert(res1.status === 503 && j1?.outcome?.state === "failed",
+      `contention → retryable failed — status=${res1.status} body=${JSON.stringify(j1)}`);
+    const m1 = metaOf("r20");
+    assert(m1?.active_claim_episode_id === "ep-r20"
+      && !m1?.assigned_to
+      && (m1?.bot_claim_info as any)?.customer_name === "ลูกค้า r20",
+      `metadata ต้องเขียนก่อน handoff และ ownership ยังไม่ commit — meta=${JSON.stringify(m1)}`);
+    // retry identity เดิม → fence ผ่าน (same-ep refresh) → handoff converge
+    clearHooks();
+    const res2 = await (botHandoffRoute as any).POST(
+      await mkProdReq("r20", { episode_id: "ep-r20" }));
+    const j2 = await res2.json();
+    assert(res2.status === 200 && j2?.outcome?.state === "assigned",
+      `retry ต้อง converge — status=${res2.status} body=${JSON.stringify(j2)}`);
+    const m2 = metaOf("r20");
+    assert(m2?.active_claim_episode_id === "ep-r20"
+      && (m2?.bot_claim_info as any)?.customer_name === "ลูกค้า r20"
+      && m2?.assigned_to === "admin-1",
+      `retry → metadata ไม่ซ้ำ/ไม่เสีย + owner persisted — meta=${JSON.stringify(m2)}`);
+    assert(logsOf("r20", "chat_assigned").length === 1
+      && logsOf("r20", "conversation.handoff").length === 1,
+      `handoff success audit exactly once — chat_assigned=${logsOf("r20", "chat_assigned").length} handoff=${logsOf("r20", "conversation.handoff").length}`);
+  });
+
+  // ═══ R21–R24 — Phase 2B.6 review-fix round 4 (atomic episode fence) ═══
+  //   TOCTOU: gate written → terminalize/E2 interleave → ownership CAS ต้อง miss
+  //   interleave seam = findOneAndUpdateHook fires pre-op; commit CAS แยกจาก
+  //   metadata gate ด้วย $or keys (assigned_to) — gate/outcome CAS ไม่มี
+
+  const onCommitCas = (fn: () => Promise<void>) => {
+    let fired = false;
+    (mocks.state as any).findOneAndUpdateHook = async (coll: string, filter: any) => {
+      if (fired || coll !== "status_conversation") return;
+      const orKeys = (filter?.$or ?? [])
+        .map((c: any) => Object.keys(c ?? {}).join(",")).join("|");
+      const isOwnershipCommit = orKeys.includes("assigned_to")
+        || "assigned_to" in (filter ?? {});
+      if (!isOwnershipCommit) return;
+      fired = true;
+      await fn();
+    };
+  };
+
+  await test("R21 terminal outcome interleave gate↔CAS → no assign/reopen + converged terminal", async () => {
+    seedConv("r21"); seedShop(); seedAdmin("admin-1");
+    seedMeta("r21", { status: "bot", assigned_to: null });
+    onCommitCas(async () => {
+      await (statusSvc as any).applyClaimOutcome("r21", {
+        episodeId: "ep-r21", outcome: "resolved", actorId: "admin-1" });
+    });
+    const res = await (botHandoffRoute as any).POST(
+      await mkProdReq("r21", { episode_id: "ep-r21" }));
+    clearHooks();
+    const j = await res.json();
+    // contract: terminal interleave → converged permanent 200 carrying
+    //   persisted outcome — ห้าม 503 retry-loop, ห้าม handoff success
+    assert(res.status === 200 && j?.claim_metadata === "already_terminal"
+      && j?.claim_outcome?.outcome === "resolved"
+      && j?.claim_outcome?.actor_id === "admin-1",
+      `terminal interleave → converged 200 + persisted outcome — status=${res.status} body=${JSON.stringify(j)}`);
+    assert(j?.outcome?.state !== "assigned" && j?.outcome?.state !== "queued",
+      `ห้ามรายงาน handoff success — body=${JSON.stringify(j)}`);
+    const meta = metaOf("r21");
+    assert(meta?.claim_outcome?.episode_id === "ep-r21"
+      && meta?.claim_outcome?.outcome === "resolved"
+      && meta?.active_claim_episode_id === null
+      && !meta?.assigned_to
+      && meta?.status !== "handoff" && meta?.status !== "open",
+      `terminal outcome คงอยู่ + active cleared + ownership ไม่เปลี่ยน — meta=${JSON.stringify(meta)}`);
+    assert(logsOf("r21", "chat_assigned").length === 0
+      && logsOf("r21", "conversation.handoff").length === 0
+      && logsOf("r21", "conversation.open").length === 0,
+      `rejected claim handoff → audits=0 — logs=${JSON.stringify(mocks.fakeColl("admin_logs").filter((d: any) => d.conversation_id === "r21"))}`);
+  });
+
+  await test("R22 newer episode E2 interleave gate↔CAS → E1 ไม่ assign + E2 intact + 409", async () => {
+    seedConv("r22"); seedShop(); seedAdmin("admin-1");
+    seedMeta("r22", { status: "bot", assigned_to: null });
+    onCommitCas(async () => {
+      // E2 กลายเป็น active ผ่าน owner จริง: terminalize E1 แล้วเปิด E2
+      await (statusSvc as any).applyClaimOutcome("r22", {
+        episodeId: "ep-1", outcome: "resolved", actorId: "admin-1" });
+      await (statusSvc.statusConversationService as any).recordClaimHandoff({
+        conversationId: "r22",
+        claim: { customer_order_id: "ep2-order" },
+        reason: "warranty_claim", episodeId: "ep2" });
+    });
+    const res = await (botHandoffRoute as any).POST(
+      await mkProdReq("r22", { episode_id: "ep-1",
+                               claim: { customer_order_id: "ep1-order" } }));
+    clearHooks();
+    const j = await res.json();
+    assert(res.status === 409 && j?.ok === false
+      && j?.claim_metadata === "stale_episode",
+      `E1 stale → 409 permanent — status=${res.status} body=${JSON.stringify(j)}`);
+    const meta = metaOf("r22");
+    assert(meta?.active_claim_episode_id === "ep2"
+      && (meta?.bot_claim_info as any)?.customer_order_id === "ep2-order"
+      && !meta?.assigned_to
+      && meta?.status !== "handoff" && meta?.status !== "open",
+      `E2 + metadata ห้ามถูก E1 ทับ + ownership ไม่เปลี่ยน — meta=${JSON.stringify(meta)}`);
+    assert(logsOf("r22", "chat_assigned").length === 0
+      && logsOf("r22", "conversation.handoff").length === 0
+      && logsOf("r22", "conversation.open").length === 0,
+      `E1 rejected → ownership/reopen/handoff audits = 0`);
+  });
+
+  await test("R23 non-episode request → handoff path เดิม assigned (no episode fence forced)", async () => {
+    seedConv("r23"); seedShop(); seedAdmin("admin-1");
+    seedMeta("r23", { status: "bot", assigned_to: null });
+    const res = await (botHandoffRoute as any).POST(await mkProdReq("r23"));
+    const j = await res.json();
+    assert(res.status === 200 && j?.outcome?.state === "assigned"
+      && j?.outcome?.persisted === true,
+      `non-episode → assigned เดิม — status=${res.status} body=${JSON.stringify(j)}`);
+    const meta = metaOf("r23");
+    assert(meta?.status === "handoff" && meta?.assigned_to === "admin-1"
+      && meta?.active_claim_episode_id == null,
+      `ownership commit เดิม + ไม่มี episode fields — meta=${JSON.stringify(meta)}`);
+    assert(logsOf("r23", "chat_assigned").length === 1
+      && logsOf("r23", "conversation.handoff").length === 1,
+      `non-episode audit เดิม exactly-once`);
+  });
+
+  await test("R24 same active episode ตลอด CAS → assigned + audit once + retry converge", async () => {
+    seedConv("r24"); seedShop(); seedAdmin("admin-1");
+    seedMeta("r24", { status: "bot", assigned_to: null,
+                      active_claim_episode_id: "ep-r24",
+                      bot_claim_info: { customer_order_id: "ep24-order" } });
+    const res1 = await (botHandoffRoute as any).POST(
+      await mkProdReq("r24", { episode_id: "ep-r24" }));
+    const j1 = await res1.json();
+    assert(res1.status === 200 && j1?.outcome?.state === "assigned",
+      `same-ep active → assigned — status=${res1.status} body=${JSON.stringify(j1)}`);
+    const meta = metaOf("r24");
+    assert(meta?.status === "handoff" && meta?.assigned_to === "admin-1"
+      && meta?.active_claim_episode_id === "ep-r24",
+      `ownership commit + episode คงอยู่ — meta=${JSON.stringify(meta)}`);
+    const res2 = await (botHandoffRoute as any).POST(
+      await mkProdReq("r24", { episode_id: "ep-r24" }));
+    const j2 = await res2.json();
+    assert(res2.status === 200 && j2?.outcome?.state === "assigned",
+      `retry → converge — status=${res2.status} body=${JSON.stringify(j2)}`);
+    assert(logsOf("r24", "chat_assigned").length === 1
+      && logsOf("r24", "conversation.handoff").length === 1,
+      `audit exactly-once across retry — assigned=${logsOf("r24", "chat_assigned").length} handoff=${logsOf("r24", "conversation.handoff").length}`);
+  });
+
+  await test("R25 expectedClaimEpisodeId with missing meta doc → must NOT upsert-create episode or ownership", async () => {
+    seedConv("r25a"); seedConv("r25b"); seedShop(); seedAdmin("admin-1");
+    // 1) commitHandoffState ตรงเมื่อไม่มี status_conversation doc
+    const c = await statusSvc.commitHandoffState({
+      conversationId: "r25a",
+      adminId: "admin-1",
+      expectedClaimEpisodeId: "ep-ghost",
+    });
+    assert(c.committed === false && !metaOf("r25a"),
+      `commitHandoffState ห้าม upsert สร้าง episode เองเมื่อไม่มี meta doc — got committed=${c.committed} meta=${JSON.stringify(metaOf("r25a"))}`);
+    // 2) handoffToAdmin เมื่อไม่มี meta doc แต่ส่ง expectedClaimEpisodeId
+    const h = await handoffSvc.handoffToAdmin({
+      conversationId: "r25b",
+      shopId: "shop-1",
+      platform: "shopee",
+      expectedClaimEpisodeId: "ep-ghost",
+    });
+    assert(h.state === "failed" && h.claim_verdict === "stale_episode" && !metaOf("r25b"),
+      `handoffToAdmin ห้าม upsert/assign เมื่อไม่มี active episode doc — got ${JSON.stringify(h)} meta=${JSON.stringify(metaOf("r25b"))}`);
   });
 
   // ── W.source pins (structure only — never cited as runtime behavior) ──

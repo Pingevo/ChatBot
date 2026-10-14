@@ -80,6 +80,13 @@ export interface HandoffOutcome {
   // ⚡ transport signal (ไม่ใช่ durable marker): side-effect emission ไม่ครบ —
   //   ownership truth ไม่ย้อน แต่ caller/transport ต้องเห็นว่า audit ขาด → retry converge
   emit_incomplete: boolean;
+  // ⚡ 2B.6 — claim episode verdict (เฉพาะ request ที่ส่ง expectedClaimEpisodeId):
+  //   fence/CAS พบ episode ตายหรือถูกแทนที่ → ห้าม converge เป็น handoff success
+  claim_verdict?: "already_terminal" | "stale_episode";
+  //   persisted outcome ของ episode (already_terminal เท่านั้น) — route ส่งต่อบน wire
+  claim_outcome?: {
+    episode_id?: string; outcome?: string; actor_id?: string; occurred_at?: Date;
+  } | null;
 }
 
 const failedOutcome = (reason: string, error_code: string): HandoffOutcome => ({
@@ -172,6 +179,10 @@ export async function handoffToAdmin(opts: {
   source?: string; // ⚡ C1 — source สำหรับ cursor separation (default: "ticket")
   targetAdminId?: string; // ⚡ direct-assign command (workflow admin_id / assign route)
   actor?: string; // audit actor — default bot/system
+  // ⚡ 2B.6 — claim episode fence: มีค่า → ownership CAS ต้อง atomic กับ
+  //   episode identity (active==E ยังเปิดอยู่ + ไม่มี terminal outcome ของ E)
+  //   terminalize/E2 แทรกระหว่าง gate↔CAS → commit miss → verdict แทน converge
+  expectedClaimEpisodeId?: string;
 }): Promise<HandoffOutcome> {
   // ⚡ Phase 2J — อ่าน status/assigned_to จาก meta (ไม่ใช่ conversations ที่โดน dump ทับ)
   const conv = await conversationService.getConversation(opts.conversationId);
@@ -181,6 +192,26 @@ export async function handoffToAdmin(opts: {
   try {
     const meta = await statusConversationService.getMeta(opts.conversationId);
     const wasClosed = meta?.status === "closed" || meta?.status === "resolved";
+
+    // ⚡ 2B.6 — claim episode verdict จาก read เดียวกับ converge (ไม่มี query เพิ่ม):
+    //   terminal outcome ของ E อยู่แล้ว / episode อื่นเป็น active → ห้าม converge
+    //   หรือ commit ownership — verdict เป็น permanent truth ไม่ใช่ retryable failure
+    const E = opts.expectedClaimEpisodeId;
+    if (E) {
+      if (meta?.claim_outcome?.episode_id === E) {
+        return { state: "failed", assigned_to: null, assigned_to_name: null,
+          persisted: false, reason: "claim_episode_terminal",
+          error_code: "claim_episode_terminal", reopened: false,
+          emit_incomplete: false,
+          claim_verdict: "already_terminal", claim_outcome: meta.claim_outcome };
+      }
+      if (meta?.active_claim_episode_id !== E) {
+        return { state: "failed", assigned_to: null, assigned_to_name: null,
+          persisted: false, reason: "claim_episode_stale",
+          error_code: "claim_episode_stale", reopened: false,
+          emit_incomplete: false, claim_verdict: "stale_episode" };
+      }
+    }
 
     // converge — owned & not closed & status เป็น post-handoff state → persisted truth + emit
     //   (idempotent — re-emit ซ่อม audit ที่ขาดจาก emit crash ก่อนหน้าได้ฟรีด้วย eid dedupe)
@@ -286,11 +317,30 @@ export async function handoffToAdmin(opts: {
       actor: opts.actor,
       eventId: randomUUID(),
       reopened: wasClosed,
+      expectedClaimEpisodeId: opts.expectedClaimEpisodeId,
     });
 
     if (!commit.committed) {
-      // CAS miss → bounded converge re-read (ห้ามเขียนทับผู้ชนะ) + emit ของผู้ชนะ (idempotent)
+      // CAS miss → bounded converge re-read (ห้ามเขียนทับผู้ชนะ)
       const m2 = await statusConversationService.getMeta(opts.conversationId);
+      // ⚡ 2B.6 — claim episode verdict ก่อน generic converge + ก่อน emit:
+      //   terminal/stale ห้ามตีความเป็น existing/converged handoff success
+      //   และห้าม emit ownership/reopen/handoff audit ของ request ที่ถูกปฏิเสธ
+      if (E) {
+        if (m2?.claim_outcome?.episode_id === E) {
+          return { state: "failed", assigned_to: null, assigned_to_name: null,
+            persisted: false, reason: "claim_episode_terminal",
+            error_code: "claim_episode_terminal", reopened: false,
+            emit_incomplete: false,
+            claim_verdict: "already_terminal", claim_outcome: m2.claim_outcome };
+        }
+        if (m2?.active_claim_episode_id !== E) {
+          return { state: "failed", assigned_to: null, assigned_to_name: null,
+            persisted: false, reason: "claim_episode_stale",
+            error_code: "claim_episode_stale", reopened: false,
+            emit_incomplete: false, claim_verdict: "stale_episode" };
+        }
+      }
       const emitted = m2 ? await tryEmitHandoff(m2, opts) : true;
       if (m2?.assigned_to) {
         return {

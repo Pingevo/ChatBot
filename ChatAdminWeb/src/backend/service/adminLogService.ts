@@ -31,6 +31,7 @@ export type AdminActionType =
   | "conversation.reply"
   | "conversation.handoff"
   | "conversation.resolve"
+  | "conversation.claim_outcome"
   // Phase 0 — assignment events (adapted from ChatBotPDigg AuditLog)
   | "chat_assigned"
   | "chat_reassigned"

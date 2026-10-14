@@ -40,6 +40,15 @@ export async function GET(
     last_timestamp: doc.last_message_timestamp.toISOString(),
     unread: doc.unread_count,
     assigned_to: meta?.assigned_to || undefined,
+    // ⚡ Phase 2B.6 — claim lifecycle fields อ่านจาก meta เท่านั้น
+    active_claim_episode_id: meta?.active_claim_episode_id ?? undefined,
+    claim_outcome: meta?.claim_outcome
+      ? { ...meta.claim_outcome,
+          occurred_at: meta.claim_outcome.occurred_at instanceof Date
+            ? meta.claim_outcome.occurred_at.toISOString()
+            : String(meta.claim_outcome.occurred_at) }
+      : undefined,
+    bot_claim_info: (meta?.bot_claim_info as Conversation["bot_claim_info"]) ?? undefined,
   };
 
   return json(conv);

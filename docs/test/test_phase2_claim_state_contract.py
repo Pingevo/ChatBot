@@ -565,3 +565,136 @@ def test_handoff_transport_owner_not_globally_stubbed():
     fn = _app._send_handoff
     assert getattr(fn, "__name__", "") == "_send_handoff", (
         f"transport owner ถูก stub รั่วข้าม module: {fn!r}")
+
+
+# ── Phase 2B.6 — explicit admin claim outcome (episode-scoped, idempotent) ──
+# Contract: admin สั่ง resolved|cancelled ผูก episode_id ผ่าน status_conversation
+# → ChatRequest.claim_outcome → consume ใน SM heads หลัง load_claim_state
+# ก่อน _claim_lifecycle — apply เฉพาะเมื่อ episode ตรง + lifecycle open
+# stale/mismatch/replay = no-op; first terminal wins; ห้าม infer จาก text/reason
+
+def _outcome_req(cid="c1", **outcome):
+    oc = {"episode_id": "e-live", "outcome": "resolved",
+          "occurred_at": "2026-10-01T00:00:00+00:00", "actor_id": "admin-1"}
+    oc.update(outcome)
+    return SimpleNamespace(conversation_id=cid, platform="shopee",
+                           shop="Shop", claim_outcome=oc)
+
+
+def test_admin_outcome_resolved_applies_to_matching_episode(coll):
+    cur = {"episode_id": "e-live", "stage": "collecting",
+           "customer_name": "สมชาย ใจดี", "customer_phone": "0812345678"}
+    _seed(coll, "c1", cur)
+    state = warranty_flow._consume_claim_outcome(_outcome_req(), dict(cur))
+    assert state["stage"] == "resolved" and state["episode_id"] == "e-live"
+    assert state["resolution_reason"] == "admin_resolved"
+    assert state["resolved_by"] == "admin-1"
+    # resolved_at = admin occurred_at (ISO string — claim_state convention)
+    assert state["resolved_at"] == "2026-10-01T00:00:00+00:00"
+    # evidence of the episode survives the terminal transition
+    assert state["customer_name"] == "สมชาย ใจดี"
+    assert state["customer_phone"] == "0812345678"
+    stored = conversation_products.load_claim_state("c1")
+    assert stored["stage"] == "resolved" and stored["episode_id"] == "e-live"
+
+
+def test_admin_outcome_cancelled_applies(coll):
+    cur = {"episode_id": "e-live", "stage": "ts_suggested",
+           "customer_name": "สมชาย ใจดี"}
+    _seed(coll, "c1", cur)
+    state = warranty_flow._consume_claim_outcome(
+        _outcome_req(outcome="cancelled"), dict(cur))
+    assert state["stage"] == "cancelled" and state["episode_id"] == "e-live"
+    assert state["resolution_reason"] == "admin_cancelled"
+    stored = conversation_products.load_claim_state("c1")
+    assert stored["stage"] == "cancelled"
+
+
+def test_admin_outcome_stale_episode_cannot_terminate(coll):
+    # event ของ episode เก่า ห้ามจบ active episode ใหม่
+    cur = {"episode_id": "e-new", "stage": "collecting"}
+    _seed(coll, "c1", cur)
+    state = warranty_flow._consume_claim_outcome(
+        _outcome_req(episode_id="e-old"), dict(cur))
+    assert state["stage"] == "collecting" and state["episode_id"] == "e-new"
+    stored = conversation_products.load_claim_state("c1")
+    assert stored["stage"] == "collecting" and stored["episode_id"] == "e-new"
+
+
+def test_admin_outcome_repeat_delivery_is_idempotent(coll):
+    cur = {"episode_id": "e-live", "stage": "collecting"}
+    _seed(coll, "c1", cur)
+    first = warranty_flow._consume_claim_outcome(_outcome_req(), dict(cur))
+    again = warranty_flow._consume_claim_outcome(_outcome_req(), dict(first))
+    assert again["stage"] == "resolved" and again["episode_id"] == "e-live"
+    assert again["resolved_at"] == first["resolved_at"]
+
+
+def test_admin_outcome_conflicting_replay_keeps_first_terminal(coll):
+    # resolved applied แล้ว → cancelled replay ต้องไม่ flip terminal
+    cur = {"episode_id": "e-live", "stage": "collecting"}
+    _seed(coll, "c1", cur)
+    first = warranty_flow._consume_claim_outcome(
+        _outcome_req(outcome="resolved"), dict(cur))
+    again = warranty_flow._consume_claim_outcome(
+        _outcome_req(outcome="cancelled"), dict(first))
+    assert again["stage"] == "resolved"
+
+
+def test_admin_outcome_no_claim_is_fail_closed_no_write(coll):
+    # non-claim conversation — ห้ามสร้าง doc/claim_state
+    state = warranty_flow._consume_claim_outcome(_outcome_req(), None)
+    assert not state or state.get("stage") in (None, "absent")
+    assert not any(c[0] in ("insert_one", "update_one") for c in coll.calls)
+
+
+def test_admin_outcome_on_terminal_episode_is_noop(coll):
+    cur = {"episode_id": "e-live", "stage": "resolved",
+           "resolved_at": "2026-09-01"}
+    _seed(coll, "c1", cur)
+    state = warranty_flow._consume_claim_outcome(
+        _outcome_req(episode_id="e-live", outcome="cancelled"), dict(cur))
+    assert state["stage"] == "resolved" and state["resolved_at"] == "2026-09-01"
+
+
+@pytest.mark.parametrize("bad", [
+    None, "resolved", 42,
+    {"episode_id": "e-live"},                        # outcome missing
+    {"outcome": "resolved"},                         # episode missing
+    {"episode_id": "e-live", "outcome": "bogus"},    # unknown outcome
+    {"episode_id": 42, "outcome": "resolved"},       # wrong type
+    {"episode_id": "e-live", "outcome": "Resolved"}, # case-sensitive enum
+])
+def test_admin_outcome_malformed_is_noop(coll, bad):
+    cur = {"episode_id": "e-live", "stage": "collecting"}
+    _seed(coll, "c1", cur)
+    req = SimpleNamespace(conversation_id="c1", platform="shopee",
+                          shop="Shop", claim_outcome=bad)
+    state = warranty_flow._consume_claim_outcome(req, dict(cur))
+    assert state["stage"] == "collecting"
+    stored = conversation_products.load_claim_state("c1")
+    assert stored["stage"] == "collecting"
+
+
+def test_admin_outcome_missing_request_field_is_noop(coll):
+    # req ที่ไม่มี claim_outcome attr (ChatRequest เก่า/duck-type) → no-op
+    cur = {"episode_id": "e-live", "stage": "collecting"}
+    _seed(coll, "c1", cur)
+    state = warranty_flow._consume_claim_outcome(_req(), dict(cur))
+    assert state["stage"] == "collecting"
+
+
+def test_admin_outcome_consumed_at_both_sm_heads_before_lifecycle():
+    # source pin — consume ใน SM heads ทั้งสอง ก่อน _claim_lifecycle evaluate
+    import inspect
+    for name in ("handle_warranty_flow", "handle_warranty_flow_legacy"):
+        src = inspect.getsource(getattr(warranty_flow, name))
+        i_consume = src.find("_consume_claim_outcome")
+        i_lifecycle = src.find("_claim_lifecycle(")
+        assert i_consume != -1 and i_lifecycle != -1 and i_consume < i_lifecycle, name
+
+
+def test_chat_request_wire_field_declared():
+    # source pin — ChatRequest ต้องรับ claim_outcome (wire dict; ISO occurred_at)
+    src = (ROOT / "chatbot/shopeechat/app.py").read_text()
+    assert "claim_outcome" in src
