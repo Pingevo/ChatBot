@@ -1894,7 +1894,10 @@ async function recoverStaleClaims(freshAfter: Date, stats: RecoveryStats, signal
       }
       if (signal.aborted) continue; // abort หลัง claim → ห้าม launch (claim คง lease ใหม่ → edge ถัดไปกู้)
       const p = processMessage({ ...msg, claimContext: ownedCtx }, signal);
-      inFlight.add(p.catch(() => {}).finally(() => inFlight.delete(p)));
+      // ⚡ add/delete ต้อง promise object เดียวกัน — catch consume rejection, drain เห็นงานจน settle จริง
+      const tracked = p.catch(() => {});
+      inFlight.add(tracked);
+      tracked.then(() => inFlight.delete(tracked));
       recovered++;
     } catch (err) {
       console.error(`[worker] stale claim recovery error for ${claim.message_id}:`, err);

@@ -1506,11 +1506,37 @@ async function main() {
     seedInbound("n7", "conv_n7");
     const res = await svc.botWorkerService.pollNewMessages(new Date(0)); // era ใหม่ชัดเจน (eraAbort เดิม aborted จาก N6)
     assert(res.processed === 1, `processed=${res.processed} want 1 — explicit poll must kick`);
+    // debounce(60) = armed timer ไม่ใช่ in-flight work — settle เดิมเคยช้าพอให้ timer ยิง
+    //   (drain leak burn ~80ms/round); drain ถูกต้องแล้ว return เร็ว → รอ flush deterministic
+    for (let i = 0; i < 100 && state.calls.callBot === 0; i++) await sleep(10);
     await settle();
     assert(state.calls.callBot === 1, `callBot=${state.calls.callBot} want 1`);
     assert(replyInboundIds("conv_n7").length === 1, "one reply");
     assert(claimOf("n7") !== undefined && claimOf("n7")!.status !== "processing", "claim terminal");
     assert(bufRows("conv_n7").length === 0, "row consumed");
+  });
+
+  // R52 [RED] — recovered direct-claim child ต้องออกจาก inFlight เมื่อ settle:
+  //   drain ต้อง return ทันที — settled promise ที่รั่วค้างใน Set ทำ waitForInFlight
+  //   หมุนจน timeout ทุกครั้ง (add/delete identity ต้องเป็น object เดียวกัน)
+  await test("R52 recovered child released from inFlight — drain returns promptly", async () => {
+    mocks.fakeColl("chat_processing").push(
+      claimDoc("lk1", { conv: "conv_lk", batch: ["lk1"], claimedAgoMs: MIN }));
+    seedInbound("lk1", "conv_lk");
+    await svc.botWorkerService.recoverStaleBuffers();
+    await settle(); // deterministic: recovered processMessage จบจริง (callBot fired + claim terminal)
+    assert(state.calls.callBot === 1,
+      `callBot=${state.calls.callBot} want 1 — recovered claim processed exactly once (fake provider)`);
+    assert(claimOf("lk1")?.status !== "processing",
+      `claim must reach terminal, got ${claimOf("lk1")?.status}`);
+    // bounded drain checkpoint — elapsed measure: sleep-continuation ถูก starve ได้
+    //   จาก spin allocation storm (watched: flag@400ms อ่านค่าผิด) → elapsed ตอน return คือสัญญาณจริง
+    const t0 = Date.now();
+    await svc.botWorkerService.waitForInFlight(1000);
+    const elapsed = Date.now() - t0;
+    assert(elapsed < 500,
+      `waitForInFlight must return promptly after recovered child settled (took ${elapsed}ms — settled promise still held in inFlight, add/delete identity mismatch)`);
+    assert(state.calls.callBot === 1, `callBot=${state.calls.callBot} want 1 — no extra work from drain`);
   });
 
   const pass = results.filter((r) => r.ok).length;
