@@ -7,12 +7,14 @@
 // เรียกจาก: data writer (sellcenter เขียนลง MongoDB) หรือ trigger match
 // ⚡ Phase 2J — status/assigned_to เก็บใน status_conversation (จริง) ไม่โดน dump ทับ
 //   ส่วน test หน้าอื่นใช้ handoffToAdminTest เก็บใน test_status_conversation
+import { Document, type Collection } from "mongodb";
 import { conversationService } from "./conversationService";
 import { statusConversationService } from "./statusConversationService";
 import { testStatusConversationService, type TestSource } from "./testStatusConversationService";
 import { assignmentService } from "./assignmentService";
 import { logAdminEvent } from "./adminLogService";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
+import { botworkerRuntime } from "./botworkerRuntime";
 
 /**
  * ดึงชื่อ admin จาก admin_id
@@ -179,6 +181,53 @@ export async function handoffToAdmin(opts: {
  *   ไม่เขียน admin_logs / close_history (test ไม่ต้อง audit)
  *   ใช้กับ: test-assignment, shadowbot, replay-compare, test-chat
  */
+type HandoffTestResult = {
+  assignedTo: string | null;
+  assignedToName: string | null;
+  reopened: boolean;
+  assignmentReason: string;
+  // ⚡ op ถูก owner อื่น execute อยู่ — retryable, ห้ามถือว่า assign สำเร็จ
+  in_flight?: boolean;
+};
+
+type HandoffOpDoc = Document & {
+  _id: string;
+  status: "pending" | "done";
+  owner_id?: string;
+  fencing_token?: number;
+  lease_expires_at?: Date;
+  result?: HandoffTestResult;
+};
+
+function inFlightHandoff(opKey: string): HandoffTestResult {
+  return {
+    assignedTo: null, assignedToName: null, reopened: false,
+    assignmentReason: `in_flight: op ${opKey} owned by another worker`,
+    in_flight: true,
+  };
+}
+
+/** CAS claim op — pending+lease หมด/ไม่มี owner เท่านั้น (active foreign → null) */
+async function acquireHandoffOp(opColl: Collection<HandoffOpDoc>, opKey: string): Promise<HandoffOpDoc | null> {
+  const now = new Date();
+  return opColl.findOneAndUpdate(
+    {
+      _id: opKey,
+      status: "pending",
+      $or: [{ lease_expires_at: { $lt: now } }, { owner_id: { $exists: false } }],
+    },
+    {
+      $set: {
+        owner_id: botworkerRuntime.ownerId,
+        lease_expires_at: new Date(now.getTime() + botworkerRuntime.claimLeaseMs),
+        updated_at: now,
+      },
+      $inc: { fencing_token: 1 },
+    },
+    { returnDocument: "after" }
+  );
+}
+
 export async function handoffToAdminTest(opts: {
   conversationId: string;
   shopId: string;
@@ -187,6 +236,106 @@ export async function handoffToAdminTest(opts: {
   source: TestSource;
   // ⚡ botworker — assign สำเร็จ = status "open" (แอดมินกำลังตอบ); default "handoff" คงพฤติกรรม test หน้าอื่น
   assignedStatus?: "handoff" | "open";
+  // ⚡ botworker Part 1B — deterministic operation key: crash หลัง assign commit
+  //   แต่ก่อน claim outcome → retry ด้วย key เดิมจะได้ result เดิม ไม่ assign ซ้ำ
+  //   (idempotency อยู่ที่ handoff owner — dedupe doc ใน botworker_events)
+  operationKey?: string;
+}): Promise<HandoffTestResult> {
+  if (!opts.operationKey) return doHandoffToAdminTest(opts);
+
+  // ⚡ op-key path — fenced operation ownership:
+  //   insert pending(owner+lease) → E11000 = เคยมี op นี้
+  //   pending+expired/unowned → CAS reclaim (caller เดียว)
+  //   pending+active foreign → in_flight (ห้าม exec)
+  //   pending+same-owner (sibling call ใน process เดียวกัน) → รอ result แล้วคืนอันเดียวกัน
+  //   assignment evidence = test_status.assignment_operation_key === opKey เท่านั้น
+  //   (assigned_to เก่าจาก op อื่น ห้ามนับว่า op นี้ commit แล้ว)
+  const opKey = opts.operationKey;
+  const opColl = await getCollection<HandoffOpDoc>(COLLECTIONS.botworkerEvents);
+  const now = new Date();
+  let op: HandoffOpDoc | null = null;
+  try {
+    await opColl.insertOne({
+      _id: opKey,
+      status: "pending",
+      owner_id: botworkerRuntime.ownerId,
+      fencing_token: 1,
+      lease_expires_at: new Date(now.getTime() + botworkerRuntime.claimLeaseMs),
+      created_at: now,
+    });
+    op = { _id: opKey, status: "pending", owner_id: botworkerRuntime.ownerId, fencing_token: 1 };
+  } catch (e) {
+    if ((e as { code?: number }).code !== 11000) throw e;
+  }
+
+  if (!op) {
+    // มี op doc อยู่แล้ว → result? / CAS reclaim / in_flight
+    const prior = await opColl.findOne({ _id: opKey });
+    if (prior?.result) return prior.result;
+    op = await acquireHandoffOp(opColl, opKey);
+    if (!op) {
+      const cur = await opColl.findOne({ _id: opKey });
+      if (cur?.result) return cur.result;
+      // sibling ใน process เดียวกันกำลัง exec (owner เดียวกัน) → รอ result สั้นๆ
+      if (cur?.status === "pending" && cur.owner_id === botworkerRuntime.ownerId) {
+        for (let i = 0; i < 40; i++) {
+          await new Promise((r) => setTimeout(r, 50));
+          const again = await opColl.findOne({ _id: opKey });
+          if (again?.result) return again.result;
+          if (again?.status !== "pending" || again?.owner_id !== botworkerRuntime.ownerId) break;
+        }
+      }
+      return inFlightHandoff(opKey);
+    }
+    // ⚡ ครอง op แล้ว — เช็กว่า assignment commit ไปแล้วหรือยัง (crash window)
+    //   หลักฐานต้องเป็น assignment_operation_key === opKey เท่านั้น
+    const meta = await testStatusConversationService.getTestStatus(opts.conversationId, opts.source);
+    if (meta?.assigned_to && meta.assignment_operation_key === opKey) {
+      const recovered: HandoffTestResult = {
+        assignedTo: meta.assigned_to,
+        assignedToName: await getAdminName(meta.assigned_to),
+        reopened: false,
+        assignmentReason: "recovered_pending_op: assignment committed before crash",
+      };
+      // ⚡ fenced — stale owner ที่เสีย CAS (op ถูก reclaim ด้วย fence ใหม่) ห้ามเขียน result ทับ;
+      //   CAS fail → converge อ่าน result ของ winner หรือ in_flight
+      const rwr = await opColl.updateOne(
+        { _id: opKey, status: "pending", owner_id: botworkerRuntime.ownerId, fencing_token: op.fencing_token ?? 1 },
+        { $set: { status: "done", result: recovered, updated_at: new Date() } }
+      );
+      if (rwr.matchedCount !== 1) {
+        const cur = await opColl.findOne({ _id: opKey });
+        if (cur?.result) return cur.result;
+        return inFlightHandoff(opKey);
+      }
+      return recovered;
+    }
+  }
+
+  // exec — fenced result write (เสีย ownership ระหว่าง exec → ห้ามเขียนทับ result ของ reclaimer)
+  const result = await doHandoffToAdminTest(opts);
+  const fence = op.fencing_token ?? 1;
+  const wr = await opColl.updateOne(
+    { _id: opKey, owner_id: botworkerRuntime.ownerId, fencing_token: fence, status: "pending" },
+    { $set: { status: "done", result, updated_at: new Date() } }
+  );
+  if (wr.matchedCount !== 1) {
+    // op ถูก reclaim+commit โดย caller อื่นแล้ว → คืนผลที่ commit จริง (converge)
+    const cur = await opColl.findOne({ _id: opKey });
+    if (cur?.result) return cur.result;
+    return inFlightHandoff(opKey);
+  }
+  return result;
+}
+
+async function doHandoffToAdminTest(opts: {
+  conversationId: string;
+  shopId: string;
+  platform: string;
+  reason?: string;
+  source: TestSource;
+  assignedStatus?: "handoff" | "open";
+  operationKey?: string;
 }): Promise<{
   assignedTo: string | null;
   assignedToName: string | null;
@@ -253,7 +402,9 @@ export async function handoffToAdminTest(opts: {
       opts.source,
       opts.assignedStatus || "handoff",
       assignedTo,
-      assignmentReason
+      assignmentReason,
+      // ⚡ stamp op key = หลักฐานว่า assignment นี้ commit โดย op ไหน (crash recovery)
+      opts.operationKey
     );
     // ⚡ backlog — assign สำเร็จ → clear pending marker (กรณีเคยค้าง)
     if (meta?.pending_assignment) {

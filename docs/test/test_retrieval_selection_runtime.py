@@ -133,7 +133,8 @@ def test_ad1404t_case_has_both_groups():
     assert any("CTC620P" in n for n in names)
     summ = out["summary"]
     assert summ["selected"]["relation_target"] >= 1
-    assert summ["selected"]["slot"] >= 1
+    # Task 5C — card ที่ match code ที่ถาม = "subject" (เดิม "slot")
+    assert summ["selected"]["subject"] >= 1
 
 
 def test_target_quota_not_eaten_by_source():
@@ -192,3 +193,53 @@ def test_no_v2_v3_caller():
             src = p.read_text()
             assert "retrieval_runtime" not in src
             assert "prepare_grouped_selection" not in src
+
+
+def test_merge_dedupes_selected_among_themselves():
+    # regression 5E: card เดียวกัน eligible ใต้หลาย request → select_for_llm_context
+    # extend ต่อ request → selected ซ้ำ item_id → merge ต้องคัดซ้ำ (ตัวแรกชนะ)
+    # ไม่งั้น LLM เห็นสินค้าซ้ำ (ตอบมั่ว/เสีย quota)
+    from shopeechat.retrieval_runtime import merge_selected_products
+    dup_a = {"name": "first-pick", "item_id": 123, "_context_note": "r0"}
+    dup_b = {"name": "second-pick", "item_id": "123.0", "_context_note": "r1"}
+    out = merge_selected_products(
+        [dup_a, dup_b, {"name": "other", "item_id": 456}],
+        [{"name": "base-same", "item_id": 123},
+         {"name": "base-other", "item_id": 789}],
+        limit=10)
+    names = [p["name"] for p in out]
+    assert names == ["first-pick", "other", "base-other"]
+    # float/int normalize ข้าม selected ด้วย — "123.0" เท่ากับ 123
+
+
+def test_merge_dedupes_selected_unit_model_fallback():
+    # card ไม่มี item_id → fallback dedupe ด้วย unit_id/model_id
+    # (unit cards ทุกใบมี item_id แต่ edge card อาจไม่มี — กันซ้ำราย variant)
+    from shopeechat.retrieval_runtime import merge_selected_products
+    out = merge_selected_products(
+        [{"name": "v1", "unit_id": "u1"},
+         {"name": "v1-dup", "unit_id": "u1"},
+         {"name": "v2", "unit_id": "u2"},
+         {"name": "m1", "model_id": "m9"},
+         {"name": "m1-dup", "model_id": "m9"}],
+        [], limit=10)
+    names = [p["name"] for p in out]
+    assert names == ["v1", "v2", "m1"]
+
+
+def test_merge_does_not_dedupe_blank_identity_fields():
+    # hardening 5E: "" / whitespace ไม่ใช่ identity จริง — card เหล่านี้
+    # ต้องไม่ถูก dedupe กันเอง และ base ที่ id ว่างก็ห้ามถูกตัด
+    from shopeechat.retrieval_runtime import merge_selected_products
+    out = merge_selected_products(
+        [{"name": "blank-iid-1", "item_id": ""},
+         {"name": "blank-iid-2", "item_id": ""},
+         {"name": "blank-uid", "unit_id": ""},
+         {"name": "blank-mid", "model_id": "  "},
+         {"name": "no-id"}],
+        [{"name": "base-blank", "item_id": ""},
+         {"name": "base-real", "item_id": 42}],
+        limit=10)
+    names = [p["name"] for p in out]
+    assert names == ["blank-iid-1", "blank-iid-2", "blank-uid",
+                     "blank-mid", "no-id", "base-blank", "base-real"]

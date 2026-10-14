@@ -397,6 +397,7 @@ export async function generateConversationShadowReplies(opts: {
 
   // ⚡ Phase 3B-6 — สร้าง batch_id สำหรับรอบนี้ (tag ทุก Q&A pair ในรอบเดียวกัน)
   const batchId = genGenerationBatchId(conversationId);
+  const botStateConversationId = `${conversationId}:${batchId}`;
 
   // อ่าน conversation จาก DB
   const conv = await getConversation(conversationId);
@@ -459,7 +460,7 @@ export async function generateConversationShadowReplies(opts: {
       history: [...trimmedHistory], // copy เพื่อกัน mutation
       shopId: conv.shop_id,
       shopName: conv.shop_name,
-      conversationId,  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
+      conversationId: botStateConversationId,  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
       ...(botImages.length > 0 ? { images: botImages } : {}),
     });
 

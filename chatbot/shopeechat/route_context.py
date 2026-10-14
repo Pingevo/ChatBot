@@ -558,6 +558,30 @@ def _type_mentions(low: str, allowed: frozenset[str]) -> list[tuple[int, str, st
     return merged
 
 
+def requested_product_types(text: str, *, explicit_only: bool = False) -> set[str]:
+    """product types ที่ผู้เขียนถามถึงจริง — provenance-aware.
+
+    explicit type noun (src="kw" เช่น "หัวชาร์จ", "เคส") ชนะ regex-mention
+    (src="regex" = ชื่อรุ่น/อุปกรณ์ที่ infer เป็น type — เช่น "iphone 15" ใน
+    "หัวชาร์จ iphone 15" คือ compat target ไม่ใช่หมวดที่ถาม).
+    ข้อความที่มีแต่ regex mention (ขึ้นชื่อรุ่นล้วน) → คืน regex types
+    เพราะนั่นคือหมวดที่ถามโดยนัย.
+
+    Args:
+        text: ข้อความลูกค้า หรือ product name (ชื่อสินค้าใช้ได้เหมือนกัน —
+              kw ในชื่อ = type ที่ชื่อสินค้า claim ตัวเอง)
+        explicit_only: True → คืนเฉพาะ kw-mention (ไม่ fallback regex) —
+              ใช้เช็คว่ามี explicit type noun จริงไหม
+    """
+    from . import product_store as _ps
+    allowed = frozenset(n for n, _k, _r in _ps.PRODUCT_TYPES)
+    mentions = _type_mentions(_ps._fix_product_type_typos(text), allowed)
+    kw = {t for _p, t, s in mentions if s == "kw"}
+    if kw or explicit_only:
+        return kw
+    return {t for _p, t, _s in mentions}
+
+
 def _all_charger_subtypes(low: str) -> frozenset[str]:
     """ทุก charger subtype ที่มี kw ใน text — _detect_charger_subtype คืนตัวเดียว
     แต่ "สายชาร์จกับหัวชาร์จ" ต้องได้ทั้ง cable + adapter"""

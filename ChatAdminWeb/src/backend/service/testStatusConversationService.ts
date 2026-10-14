@@ -34,6 +34,9 @@ export interface TestStatusConversationDoc {
   assigned_at?: Date;
   assignment_mode_used?: string;
   assignment_reason?: string;
+  // ⚡ op key ที่ commit assignment นี้ — crash recovery ต้อง match key เท่านั้น
+  //   (assigned_to เดิมจาก op อื่น ห้ามนับเป็นหลักฐานว่า op ปัจจุบันสำเร็จ)
+  assignment_operation_key?: string;
   // ⚡ pending backlog — handoff แล้วหา admin ไม่ได้ → รอ manual distributor จ่าย
   pending_assignment?: boolean;
   // status
@@ -92,13 +95,14 @@ async function upsertTestStatus(
   );
 }
 
-/** อัปเดต status + assigned_to (test) */
+/** อัปเดต status + assigned_to (test) — operationKey = op ที่ commit assignment (crash-recovery evidence) */
 export async function updateTestStatus(
   conversationId: string,
   source: TestSource,
   status: ConversationStatus,
   assignedTo?: string,
-  assignmentReason?: string
+  assignmentReason?: string,
+  operationKey?: string
 ): Promise<void> {
   const fields: Partial<TestStatusConversationDoc> = { status };
   if (assignedTo !== undefined) {
@@ -106,6 +110,7 @@ export async function updateTestStatus(
     fields.assigned_at = new Date();
   }
   if (assignmentReason) fields.assignment_reason = assignmentReason;
+  if (operationKey) fields.assignment_operation_key = operationKey;
   await upsertTestStatus(conversationId, source, fields);
 }
 

@@ -441,6 +441,17 @@ export function baseInboundId(inboundId: string | undefined): string {
  *
  * maxTurns = จำนวน turn สูงสุด (default 10) — 1 turn = 1 user group + 1 reply
  */
+// ⚡ Botworker reply source contract — module-level owner เดียว
+//   ใช้ร่วมโดย: getGroupedHistoryForBot, /api/botworker/messages, /api/botworker/replies
+//   origin∈{worker,workflow} + mode=standalone|absent(legacy) + !deleted + text ไม่ว่าง
+//   → manual/shadowbot/replay/ticket sources ไม่ปนในหน้า botworker และ history
+export const BOTWORKER_REPLY_FILTER: Record<string, unknown> = {
+  deleted_at: { $exists: false },
+  bot_reply_text: { $exists: true, $nin: ["", null] },
+  origin: { $in: ["worker", "workflow"] },
+  $or: [{ mode: "standalone" }, { mode: { $exists: false } }],
+};
+
 export async function getGroupedHistoryForBot(opts: {
   conversationId: string;
   platform: Platform;
@@ -448,6 +459,10 @@ export async function getGroupedHistoryForBot(opts: {
   // ⚡ botworker parallel — merge botworker_messages (แอดมินใน sandbox ตอบ) เข้า history
   //   เป็น model turn ตามลำดับเวลา — ให้บอทเห็นว่าแอดมินใน parallel เคยตอบอะไรไปแล้ว
   includeSandboxAdmin?: boolean;
+  // ⚡ current-batch exclusion — history = turns ก่อนหน้าเท่านั้น
+  //   caller ส่ง ctx.message_ids ของ batch ปัจจุบัน → ไม่ซ้ำกับ message/images ใน request
+  //   (ตัดที่ Mongo query ไม่ใช่ filter ใน Node — ป้องกัน limit 50 ถูก current batch กิน)
+  excludeMessageIds?: string[];
 }): Promise<{ role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[]> {
   const maxTurns = opts.maxTurns || 10;
 
@@ -459,6 +474,9 @@ export async function getGroupedHistoryForBot(opts: {
     .find({
       conversation_id: opts.conversationId,
       platform: opts.platform,
+      ...(opts.excludeMessageIds?.length
+        ? { message_id: { $nin: opts.excludeMessageIds } }
+        : {}),
       $or: [
         { role: "user" },
         // Zaapi: role=admin ไม่มี actor, direction=out, source ไม่ใช่ "admin"
@@ -488,10 +506,7 @@ export async function getGroupedHistoryForBot(opts: {
     .find({
       conversation_id: opts.conversationId,
       platform: opts.platform,
-      deleted_at: { $exists: false },
-      bot_reply_text: { $exists: true, $ne: "" },
-      origin: { $in: ["worker", "workflow"] },
-      $or: [{ mode: "standalone" }, { mode: { $exists: false } }],
+      ...BOTWORKER_REPLY_FILTER,
     })
     .sort({ created_at: -1 })
     .limit(50)

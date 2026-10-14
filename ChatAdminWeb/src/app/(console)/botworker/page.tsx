@@ -170,38 +170,19 @@ export default function BotWorkerPage() {
     return result;
   }, [conversations, tail]);
 
-  useEffect(() => {
-    loadConversations();
-  }, [loadConversations]);
+  // ⚡ poll เดียวทำ initial load + refresh — immediate ยิงตอน mount/restart
+  //   restartKey=loadConversations → searchQuery/chatFilter เปลี่ยน = effect เดิม refire
+  //   (กัน overlap ระหว่าง initial fetch กับ poll tick — เหลือ mechanism เดียว)
+  usePolling(loadConversations, 3000, { immediate: true, restartKey: loadConversations });
 
-  // ⚡ G-fix — poll 3 วิ (เท่า tickets) เพราะดึงแชท
-  usePolling(loadConversations, 3000);
-
-  // ⚡ Phase 2T — โหลด unified messages (user + zaapi + bot) จาก API ใหม่
+  // ⚡ Phase 2T — messages: clear ตอนเลือก/ยกเลิก conv (non-fetch effect)
+  //   fetch เดียวอยู่ใน usePolling — immediate+restartKey=selectedId
   useEffect(() => {
-    if (!selectedId) { setMessages([]); return; }
-    setLoadingMessages(true);
-    api()
-      .get<{ messages: UnifiedMessage[]; total: number }>(
-        `/botworker/conversations/${selectedId}/messages`,
-        { params: { limit: "200" }, timeout: 30000 }
-      )
-      .then((r) => {
-        const seen = new Set<string>();
-        setMessages((r.data.messages || []).filter((m) => {
-          if (seen.has(m.id)) return false;
-          seen.add(m.id);
-          return true;
-        }));
-      })
-      .catch((err) => {
-        console.error("load messages failed", err);
-        setMessages([]);
-      })
-      .finally(() => setLoadingMessages(false));
+    setMessages([]);
+    setLoadingMessages(!!selectedId);
   }, [selectedId]);
 
-  // ⚡ G-fix — message poll 3 วิ + timeout 30s กันล็อค
+  // ⚡ G-fix — message poll 3 วิ + timeout 30s กันล็อค (initial load อยู่ในนี้แล้ว)
   usePolling(
     useCallback(async () => {
       if (!selectedId) return;
@@ -218,10 +199,12 @@ export default function BotWorkerPage() {
         }));
       } catch {
         // ignore — keep existing messages
+      } finally {
+        setLoadingMessages(false);
       }
     }, [selectedId]),
     3000,
-    { enabled: !!selectedId }
+    { enabled: !!selectedId, immediate: true, restartKey: selectedId }
   );
 
   // ⚡ Load close history จาก test store (botworker) — แยกจาก ticket จริง

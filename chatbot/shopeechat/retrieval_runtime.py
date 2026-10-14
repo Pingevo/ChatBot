@@ -13,7 +13,10 @@ from .candidate_pool import build_candidate_pool
 from .retrieval_selection import select_for_llm_context
 
 _ROLE_NOTE = {
+    "subject": "สินค้าที่ลูกค้าถามถึงหรืออ้างอิงโดยตรง",
     "slot": "สินค้าที่ลูกค้าถามถึงหรืออ้างอิงโดยตรง",
+    "alternative": "สินค้าแนะนำทดแทน — ไม่ใช่รุ่นที่ลูกค้าถามถึงโดยตรง "
+                   "ให้บอกว่าเป็นรุ่นทดแทน",
     "relation_target": "สินค้าที่ใช้ร่วมกันได้ตามความสัมพันธ์ของคำถาม",
 }
 
@@ -25,17 +28,48 @@ def _item_id(card: dict) -> str | None:
     return _norm_id(v) if v is not None else None
 
 
+def _identity_keys(card: dict) -> list[str]:
+    """dedupe keys ของ card — item_id → unit_id → model_id (canonical เหมือน
+    candidate_pool._norm_id); ไม่มี identity เลย → [] (dedupe ไม่ได้ เก็บหมด)"""
+    from .retrieval_policy import _norm_id
+
+    def _key(prefix, v):
+        # "" / whitespace / None → ไม่ใช่ identity จริง — ไม่สร้าง key
+        if v is None:
+            return None
+        nv = _norm_id(v)
+        return f"{prefix}:{nv}" if nv and nv.strip() else None
+
+    return [k for k in (
+        _key("i", card.get("item_id")),
+        _key("u", card.get("unit_id")),
+        _key("m", card.get("model_id")),
+    ) if k]
+
+
 def merge_selected_products(
     selected_cards: list[dict],
     base_products: list[dict] | None,
     limit: int,
 ) -> list[dict]:
-    """selected มาก่อน + base ที่ไม่ซ้ำ item_id — dedupe (selected ชนะ) + cap"""
-    sel_ids = {_item_id(c) for c in selected_cards} - {None}
-    merged = list(selected_cards)
-    for p in base_products or []:
-        if _item_id(p) in sel_ids:
+    """selected มาก่อน + base ที่ไม่ซ้ำ identity — dedupe (selected ตัวแรกชนะ) + cap.
+
+    selected ซ้ำกันเองก็ถูกคัด (card เดียวกัน eligible ใต้หลาย request →
+    select_for_llm_context extend ต่อ request อาจซ้ำ) — ไม่งั้น LLM เห็นซ้ำ
+    """
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for c in selected_cards or []:
+        keys = _identity_keys(c)
+        if keys and any(k in seen for k in keys):
             continue
+        seen.update(keys)
+        merged.append(c)
+    for p in base_products or []:
+        keys = _identity_keys(p)
+        if keys and any(k in seen for k in keys):
+            continue
+        seen.update(keys)
         merged.append(p)
     return merged[:limit]
 
@@ -70,7 +104,9 @@ def run_grouped_selection(
             unavailable_limit=unavailable_limit)
     except Exception:
         return None
-    if not sel.selected:
+    # ไม่มีของขายได้ ≠ ไม่มีคำตอบ — hidden_mentions (รุ่นที่ถามแต่ยังไม่ publish)
+    # ยังต้องไปถึง LLM เป็น extra_context เพื่อตอบ "ยังไม่เปิดขาย" ตรงๆ
+    if not sel.selected and not sel.hidden_mentions:
         return None
 
     # selected cards — role tag ผ่าน _context_note (stripped แล้วจาก selector)
@@ -80,6 +116,12 @@ def run_grouped_selection(
         note = _ROLE_NOTE.get(s.role)
         if note:
             card["_context_note"] = note
+        if s.role == "subject" and not card.get("_available_for_sale"):
+            # subject ที่ไม่ขาย — ตอบ spec/compare/history ได้ แต่ห้ามบอกว่าซื้อได้
+            card["_context_note"] = (
+                f"{note or ''} — สินค้านี้ยังไม่พร้อมจำหน่าย "
+                "(หมดสต็อก/เลิกขาย/ถูกลบ) ให้แจ้งสถานะตรงๆ "
+                "ห้ามบอกว่าซื้อได้หรือส่งลิงค์ซื้อ").strip()
         selected_cards.append(card)
 
     # unavailable → evidence note (ไม่ใช่ recommendation) ผ่าน extra_context
@@ -95,6 +137,18 @@ def run_grouped_selection(
                 "หมายเหตุ: พบสินค้าที่เกี่ยวข้องในร้านแต่ยังไม่พร้อมจำหน่าย "
                 "(หมดสต็อก/เลิกขาย/ถูกลบ) — ใช้เป็นข้อมูลเท่านั้น "
                 "ห้ามแนะนำเป็นสินค้าที่ซื้อได้: " + ", ".join(names))
+    # UNLIST-only รุ่นที่ถามถึง — name-level note (ไม่ใช่ spec/link evidence)
+    hnames: list[str] = []
+    for h in sel.hidden_mentions:
+        n = (h.get("name") or "").strip()
+        if n and n not in hnames:
+            hnames.append(n)
+    if hnames:
+        hnote = ("หมายเหตุ: รุ่นที่ลูกค้าถามถึงบางรุ่นยังไม่เปิดขาย/ยังไม่มีจำหน่าย"
+                 "ในร้านตอนนี้ (listing ยังไม่ publish): " + ", ".join(hnames)
+                 + " — ให้แจ้งลูกค้าตรงๆ ห้ามส่งลิงค์หรือบอกว่าซื้อได้ "
+                 "และเสนอรุ่นทดแทนชนิดเดียวกันได้")
+        extra_context = f"{extra_context}\n{hnote}" if extra_context else hnote
 
     role_counts: dict[str, int] = {}
     for s in sel.selected:

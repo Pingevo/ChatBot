@@ -124,7 +124,9 @@ def _mean(values: list[float]) -> float:
 
 def _product_rows(rec: dict) -> list[dict]:
     products = rec.get("products")
-    return products if isinstance(products, list) else []
+    if not isinstance(products, list):
+        return []
+    return [p for p in products if isinstance(p, dict)]
 
 
 def pool_metrics(recs: list[dict]) -> dict:
@@ -138,7 +140,7 @@ def pool_metrics(recs: list[dict]) -> dict:
                 with_products += 1
                 pools.append(float(products))
             continue
-        products = products or []
+        products = _product_rows(rec)
         if not products:
             continue
         with_products += 1
@@ -213,16 +215,25 @@ def gold_metrics(recs: list[dict], gold: list[dict]) -> dict:
     must_not_cases = must_not_hits = 0
     phrase_cases = phrase_hits = 0
     status_hits = status_total = 0
+    handoff_cases = handoff_hits = 0
+    evidence_required = 0
     used = 0
+    no_record = 0
 
     for row in gold:
         rec = _find_record(recs, row)
         if rec is None:
+            no_record += 1
             continue
         used += 1
         products = _product_rows(rec)
         ids = {_norm_item_id(p.get("item_id")) for p in products}
         expected_mode = row.get("expected_answer_mode")
+        if row.get("requires_evidence"):
+            evidence_required += 1
+        if expected_mode == "handoff":
+            handoff_cases += 1
+            handoff_hits += 1 if rec.get("handoff_to_admin") else 0
 
         want_type = row.get("expected_product_type")
         if (want_type and products and row.get("intent") in _WANTS_PRODUCTS
@@ -265,6 +276,9 @@ def gold_metrics(recs: list[dict], gold: list[dict]) -> dict:
             modes.append(1.0 if _record_answer_mode(rec) == _expected_mode(expected_mode) else 0.0)
 
     return {
+        "n_gold_total": len(gold),
+        "n_gold_evaluated": used,
+        "n_gold_no_record": no_record,
         "n_gold": used,
         "type_purity": _mean(purity),
         "acceptable_hit_rate": _mean(acceptable_hits),
@@ -274,18 +288,35 @@ def gold_metrics(recs: list[dict], gold: list[dict]) -> dict:
         "adequacy_at_1": _mean(adequacy),
         "min_distinct_listings_rate": _mean(distinct_hits),
         "answer_mode_accuracy": _mean(modes),
+        "handoff_policy_hit_rate": handoff_hits / handoff_cases if handoff_cases else None,
+        "n_evidence_required": evidence_required,
     }
 
 
-def by_intent(recs: list[dict], gold: list[dict]) -> dict[str, dict]:
+def _group_metrics(recs: list[dict], gold: list[dict],
+                   keyfn) -> dict[str, dict]:
     groups: dict[str, list[dict]] = defaultdict(list)
     for row in gold:
-        groups[row.get("intent") or "?"].append(row)
+        groups[keyfn(row)].append(row)
     out: dict[str, dict] = {}
-    for intent, rows in sorted(groups.items()):
+    for name, rows in sorted(groups.items()):
         matched = [m for row in rows if (m := _find_record(recs, row))]
-        out[intent] = {**pool_metrics(matched), **gold_metrics(recs, rows)}
+        out[name] = {**pool_metrics(matched), **gold_metrics(recs, rows)}
     return out
+
+
+def by_intent(recs: list[dict], gold: list[dict]) -> dict[str, dict]:
+    return _group_metrics(recs, gold, lambda r: r.get("intent") or "?")
+
+
+def by_review_status(recs: list[dict], gold: list[dict]) -> dict[str, dict]:
+    return _group_metrics(recs, gold,
+                          lambda r: r.get("review_status") or "unmarked")
+
+
+def by_owner(recs: list[dict], gold: list[dict]) -> dict[str, dict]:
+    return _group_metrics(recs, gold,
+                          lambda r: r.get("expected_owner") or "-")
 
 
 def _print(title: str, metrics: dict) -> None:
@@ -302,6 +333,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("results")
     parser.add_argument("--gold")
     parser.add_argument("--by-intent", action="store_true")
+    parser.add_argument("--by-review-status", action="store_true")
+    parser.add_argument("--by-owner", action="store_true")
     args = parser.parse_args(argv)
 
     recs = load_results(args.results)
@@ -321,6 +354,12 @@ def main(argv: list[str]) -> int:
     if args.by_intent:
         for intent, metrics in by_intent(recs, gold).items():
             _print(f"intent={intent}", metrics)
+    if args.by_review_status:
+        for status, metrics in by_review_status(recs, gold).items():
+            _print(f"review_status={status}", metrics)
+    if args.by_owner:
+        for owner, metrics in by_owner(recs, gold).items():
+            _print(f"owner={owner}", metrics)
     return 0
 
 

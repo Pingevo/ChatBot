@@ -275,6 +275,12 @@ def should_use_web_search(
     _is_greeting = any(kw in _msg_lower for kw in _greeting_kws) and len(message.split()) <= 4
     if _is_greeting:
         return False, "greeting_or_thanks"
+    # ⚡ 5F-F — placeholder/sticker-only message (ไม่มีคำถามจริง) → ไม่ search
+    #   ครอบ [สติกเกอร์]/[sticker]/[รูปภาพ]/[item]/[สินค้า: id] + ข้อความว่าง
+    #   bracket tag ล้วนเท่านั้น — มี text ต่อท้าย → ไม่ใช่ noise ไป gate ปกติ
+    _stripped = message.strip()
+    if not _stripped or re.fullmatch(r"(?:\[[^\]]{1,40}\]\s*)+", _stripped):
+        return False, "placeholder_only_or_empty"
     if _has_products and _is_ordinary_product_q:
         return False, "ordinary_product_query_with_context"
 
@@ -349,7 +355,10 @@ def should_use_web_search(
     if intent_result:
         conf = intent_result.get("confidence")
         if conf is not None and conf < 0.5:
-            return True, f"pass1_low_confidence ({conf:.2f})"
+            # ⚡ 5F-E — catalog retrieval มี products แล้ว → context พอตอบ
+            #   low conf อย่างเดียวห้าม search external (คำตอบติดลบ → rule 5 จัดการ)
+            if not _has_products:
+                return True, f"pass1_low_confidence ({conf:.2f})"
 
     # 3. Compatibility question → search เฉพาะเมื่อจำเป็น
     #    - ถ้า LLM ตอบไม่ได้/ไม่มั่นใจ → search

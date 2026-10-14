@@ -1,0 +1,464 @@
+[
+  {
+    "id": "q049",
+    "decision": "approved"
+  },
+  {
+    "id": "q072",
+    "decision": "approved"
+  },
+  {
+    "id": "q073",
+    "decision": "approved"
+  },
+  {
+    "id": "q074",
+    "decision": "approved"
+  },
+  {
+    "id": "q075",
+    "decision": "approved"
+  },
+  {
+    "id": "q076",
+    "decision": "approved"
+  },
+  {
+    "id": "q077",
+    "decision": "approved"
+  },
+  {
+    "id": "q078",
+    "decision": "approved"
+  },
+  {
+    "id": "q079",
+    "decision": "rejected",
+    "owner": "handoff_or_workflow_state",
+    "correction": {
+      "expected_action": "handoff",
+      "handoff_policy": "admin_required_for_return_or_exchange",
+      "forbidden_claims": [
+        "claim_all_cases",
+        "instant_refund"
+      ]
+    }
+  },
+  {
+    "id": "q182",
+    "decision": "approved"
+  },
+  {
+    "id": "q183",
+    "decision": "approved"
+  },
+  {
+    "id": "q184",
+    "decision": "rejected",
+    "owner": "source_recall",
+    "correction": {
+      "expected_action": "answer",
+      "acceptable_subjects": [
+        "iSUPER Dash Cam Lite Plus",
+        "iSUPER Dash Cam Lite Pro2"
+      ],
+      "forbidden_claims": [
+        "wrong_category_items"
+      ]
+    }
+  },
+  {
+    "id": "q185",
+    "decision": "approved"
+  },
+  {
+    "id": "q186",
+    "decision": "approved"
+  },
+  {
+    "id": "q187",
+    "decision": "rejected",
+    "owner": "source_recall",
+    "correction": {
+      "expected_action": "answer",
+      "acceptable_subjects": [
+        "AC30S",
+        "AC30T",
+        "AC301"
+      ],
+      "required_facts": [
+        "fetched_subject_items_present"
+      ]
+    }
+  },
+  {
+    "id": "compat-iphone13-cable",
+    "decision": "rejected",
+    "owner": "source_recall",
+    "correction": {
+      "expected_action": "answer",
+      "acceptable_subjects": [
+        "CTL"
+      ],
+      "required_facts": [
+        "compatible_cables_exist_30w_plus"
+      ],
+      "forbidden_claims": [
+        "no_compatible_products"
+      ]
+    }
+  },
+  {
+    "id": "compat-mi17-history-cable",
+    "decision": "rejected",
+    "owner": "source_recall",
+    "correction": {
+      "expected_action": "answer",
+      "required_facts": [
+        "compatible_products_exist_for_mi17_ultra"
+      ],
+      "forbidden_claims": [
+        "no_products_available"
+      ]
+    }
+  },
+  {
+    "id": "q001",
+    "decision": "approved"
+  },
+  {
+    "id": "q002",
+    "decision": "approved"
+  },
+  {
+    "id": "q003",
+    "decision": "approved"
+  },
+  {
+    "id": "q005",
+    "decision": "rejected",
+    "owner": "answer_context",
+    "correction": {
+      "expected_action": "answer",
+      "required_facts": [
+        "no_type_c_cable_disclosure_before_alternatives"
+      ],
+      "link_policy": "label_alternatives_as_different_type"
+    }
+  },
+  {
+    "id": "q007",
+    "decision": "rejected",
+    "owner": "source_recall",
+    "correction": {
+      "expected_action": "answer",
+      "required_facts": [
+        "wireless_chargers_in_stock_recommended"
+      ],
+      "forbidden_claims": [
+        "no_products_available"
+      ]
+    }
+  },
+  {
+    "id": "q008",
+    "decision": "approved"
+  },
+  {
+    "id": "q031",
+    "decision": "approved"
+  },
+  {
+    "id": "q032",
+    "decision": "approved"
+  },
+  {
+    "id": "q033",
+    "decision": "approved"
+  },
+  {
+    "id": "q034",
+    "decision": "approved"
+  },
+  {
+    "id": "q035",
+    "decision": "approved"
+  },
+  {
+    "id": "test_200_selected100-041",
+    "decision": "approved"
+  },
+  {
+    "id": "test_200_selected100-042",
+    "decision": "approved"
+  },
+  {
+    "id": "test_200_selected100-043",
+    "decision": "approved"
+  },
+  {
+    "id": "test_200_selected100-044",
+    "decision": "approved"
+  },
+  {
+    "id": "test_200_selected100-045",
+    "decision": "approved"
+  },
+  {
+    "id": "test_200_selected100-046",
+    "decision": "approved"
+  },
+  {
+    "id": "test_200_selected100-082",
+    "decision": "approved"
+  },
+  {
+    "id": "q236",
+    "decision": "approved"
+  },
+  {
+    "id": "q237",
+    "decision": "approved"
+  },
+  {
+    "id": "q238",
+    "decision": "approved"
+  },
+  {
+    "id": "q239",
+    "decision": "approved"
+  },
+  {
+    "id": "q240",
+    "decision": "approved"
+  },
+  {
+    "id": "q241",
+    "decision": "approved"
+  },
+  {
+    "id": "q242",
+    "decision": "approved"
+  },
+  {
+    "id": "q243",
+    "decision": "approved"
+  },
+  {
+    "id": "q244",
+    "decision": "approved"
+  },
+  {
+    "id": "q245",
+    "decision": "rejected",
+    "owner": "source_recall",
+    "correction": {
+      "expected_action": "answer",
+      "acceptable_subjects": [
+        "C201",
+        "XMIC201"
+      ],
+      "forbidden_claims": [
+        "product_not_found"
+      ]
+    }
+  },
+  {
+    "id": "q036",
+    "decision": "approved"
+  },
+  {
+    "id": "q207",
+    "decision": "approved"
+  },
+  {
+    "id": "q004",
+    "decision": "approved"
+  },
+  {
+    "id": "q006",
+    "decision": "approved"
+  },
+  {
+    "id": "q197",
+    "decision": "approved"
+  },
+  {
+    "id": "q198",
+    "decision": "approved"
+  },
+  {
+    "id": "q199",
+    "decision": "approved"
+  },
+  {
+    "id": "q200",
+    "decision": "approved"
+  },
+  {
+    "id": "q201",
+    "decision": "approved"
+  },
+  {
+    "id": "q202",
+    "decision": "approved"
+  },
+  {
+    "id": "q203",
+    "decision": "rejected",
+    "owner": "canonical_availability",
+    "correction": {
+      "expected_action": "answer",
+      "required_facts": [
+        "earphones_in_stock"
+      ],
+      "forbidden_claims": [
+        "all_out_of_stock"
+      ]
+    }
+  },
+  {
+    "id": "q204",
+    "decision": "rejected",
+    "owner": "final_claim_validation",
+    "correction": {
+      "expected_action": "answer",
+      "availability_statement": "no_phones_in_shop",
+      "forbidden_claims": [
+        "fabricated_phone_models"
+      ]
+    }
+  },
+  {
+    "id": "q205",
+    "decision": "approved"
+  },
+  {
+    "id": "q206",
+    "decision": "approved"
+  },
+  {
+    "id": "q208",
+    "decision": "approved"
+  },
+  {
+    "id": "q209",
+    "decision": "approved"
+  },
+  {
+    "id": "q210",
+    "decision": "approved"
+  },
+  {
+    "id": "q211",
+    "decision": "approved"
+  },
+  {
+    "id": "q212",
+    "decision": "approved"
+  },
+  {
+    "id": "test_200_selected100-081",
+    "decision": "approved"
+  },
+  {
+    "id": "test_200_selected100-083",
+    "decision": "approved"
+  },
+  {
+    "id": "q021",
+    "decision": "approved"
+  },
+  {
+    "id": "q132",
+    "decision": "rejected",
+    "owner": "selection_coverage",
+    "correction": {
+      "expected_action": "answer",
+      "required_facts": [
+        "same_category_in_stock_items"
+      ],
+      "note": "review_only_missing_gold_row"
+    }
+  },
+  {
+    "id": "q133",
+    "decision": "approved"
+  },
+  {
+    "id": "q134",
+    "decision": "approved"
+  },
+  {
+    "id": "q135",
+    "decision": "approved"
+  },
+  {
+    "id": "q136",
+    "decision": "approved"
+  },
+  {
+    "id": "test_200_selected100-084",
+    "decision": "approved"
+  },
+  {
+    "id": "test_200_selected100-061",
+    "decision": "approved"
+  },
+  {
+    "id": "test_200_selected100-062",
+    "decision": "approved"
+  },
+  {
+    "id": "test_200_selected100-063",
+    "decision": "rejected",
+    "owner": "data_quality",
+    "correction": {
+      "expected_action": "infra_error",
+      "note": "rate_limit_429_not_product_answer"
+    }
+  },
+  {
+    "id": "test_200_selected100-064",
+    "decision": "rejected",
+    "owner": "data_quality",
+    "correction": {
+      "expected_action": "infra_error",
+      "note": "rate_limit_429_not_product_answer"
+    }
+  },
+  {
+    "id": "q046",
+    "decision": "approved"
+  },
+  {
+    "id": "q047",
+    "decision": "rejected",
+    "owner": "answer_context",
+    "correction": {
+      "expected_action": "answer_or_handoff",
+      "required_facts": [
+        "thai_center_warranty_stated_or_handoff"
+      ]
+    }
+  },
+  {
+    "id": "q048",
+    "decision": "approved"
+  },
+  {
+    "id": "q050",
+    "decision": "approved"
+  },
+  {
+    "id": "q051",
+    "decision": "rejected",
+    "owner": "answer_context",
+    "correction": {
+      "expected_action": "answer",
+      "required_facts": [
+        "warranty_duration_stated"
+      ]
+    }
+  }
+]

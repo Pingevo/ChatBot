@@ -118,6 +118,23 @@ _MODEL_TOKEN_STOP = re.compile(
     r"|LCD|OLED|GPS|SIM|ESIM|TYPEC|GEN|VER|TH|EN|ISO|CE|FCC|ROHS|CCC|GB|TLS)"
     r"\d*[A-Z]?$")
 
+# spec claim — เลข+หน่วย spec / rating / protocol version ที่ไม่มีใน context
+#   pool = LLM ยืมเลขจากตัวอย่าง prompt หรือแต่งสเปก (5F-D: 5200mAh/IP68 leak)
+#   3 กลุ่ม: <เลข><หน่วย> / IPxx rating / protocol version (PD3.0/QC4/WiFi6)
+#   + bare protocol ที่เจาะจง (UFCS/PPS/GaN/Qi) — negation นำหน้าข้ามใน enforce
+_SPEC_CLAIM_RE = re.compile(
+    r"(?:\d+(?:\.\d+)?\s*(?:"
+    r"mAh|mWh|Wh|mA|kW|W|kV|V|A|Hz|kHz|MHz|GHz"
+    r"|GB|TB|MB|KB|Gbps|Mbps|MP|ATM|dB|nits?|ohm|Ω"
+    r"|วัตต์|โวลต์|แอมป์|นิ้ว|มม\.?|ซม\.?|เมตร"
+    r"|กรัม|กก\.?|กิโลกรัม|ชั่วโมง|นาที|วินาที"
+    r"|วัน|เดือน|ปี|ครั้ง|เท่า|พอร์ต"
+    r")(?![A-Za-z0-9]))"
+    r"|(?:IPX?\s?\d{1,2}(?![A-Za-z0-9]))"
+    r"|(?:(?:PD|QC|PPS|UFCS|USB|BT|BLE|Wi-?Fi|Bluetooth|Qi)\s?\d+(?:\.\d+)?)"
+    r"|(?:(?:UFCS|PPS|GaN|Qi)(?![A-Za-z0-9]))",
+    re.I)
+
 _NEGATION_RE = re.compile(r"(?:ไม่|ห้าม|มิได้|ไม่สามารถ|ไม่ได้|หมด)")
 
 
@@ -170,16 +187,13 @@ def _claim_grounded(resp, pos_rx, flags, mode: str = "text") -> bool:
     return bool(_gt) and _pos_grounded(_gt, pos_rx)
 
 
-def _context_pool(resp, req) -> str:
+def _identity_pool(resp, req) -> str:
     """pool ข้อความที่ LLM เห็นจริง — cards + grounding_text + message + history.
 
-    ใช้เช็ค model_claim: token รุ่นใน answer ต้องมาจาก pool นี้เท่านั้น
+    ใช้เช็ค model_claim: token รุ่น/ชื่อใน answer ต้องมาจาก pool นี้เท่านั้น
+    (message/history ใส่ได้ — ลูกค้าพิมพ์ชื่อรุ่นเอง echo กลับเป็นเรื่องปกติ)
     """
-    _parts = [_grounding_text(resp)]
-    for _p in getattr(resp, "products", None) or []:
-        _parts.append(str(_p.get("name") or ""))
-        _parts.append(str(_p.get("description_excerpt") or ""))
-        _parts.append(str(_p.get("raw_description") or ""))
+    _parts = [_evidence_pool(resp)]
     _parts.append(getattr(req, "message", "") or "")
     for _h in getattr(req, "history", None) or []:
         if isinstance(_h, dict):
@@ -188,6 +202,21 @@ def _context_pool(resp, req) -> str:
         else:
             _parts.append(str(getattr(_h, "text", "") or ""))
             _parts.append(str(getattr(_h, "image_desc", "") or ""))
+    return " ".join(_parts).lower()
+
+
+def _evidence_pool(resp) -> str:
+    """pool หลักฐานสินค้าเท่านั้น — cards + grounding_text (5F-H2).
+
+    ใช้เช็ค spec_claim: เลข+หน่วย spec ต้องมาจากข้อมูลสินค้าจริง —
+    คำถามลูกค้า/history ห้ามเป็น evidence ("รองรับ 65W ไหม" ห้าม
+    ground "รองรับ 65W" — ลูกค้าเป็นคนพิมพ์เลขนั้นเอง)
+    """
+    _parts = [_grounding_text(resp)]
+    for _p in getattr(resp, "products", None) or []:
+        _parts.append(str(_p.get("name") or ""))
+        _parts.append(str(_p.get("description_excerpt") or ""))
+        _parts.append(str(_p.get("raw_description") or ""))
     return " ".join(_parts).lower()
 
 
@@ -288,7 +317,7 @@ def enforce(resp, req):
                         if _MODEL_TOKEN_STOP.match(_tok):
                             continue
                         if _pool is None:
-                            _pool = _context_pool(resp, req)
+                            _pool = _identity_pool(resp, req)
                         if _tok.lower() not in _pool:
                             _bad_tok = _tok
                             break
@@ -304,6 +333,40 @@ def enforce(resp, req):
                         if isinstance(_rd, dict):
                             _rd["guard_rewritten"] = "model_claim"
                         print(f"[GUARD-ENFORCE] rewrite model_claim: unknown token {_bad_tok!r}", file=_sys.stderr)
+                # ⚡ 5F-D spec_claim — เลข+หน่วย spec/rating/protocol version ที่
+                #   ไม่มีใน evidence pool = LLM ยืมเลขจากตัวอย่าง prompt/แต่งสเปก
+                #   5F-H2 — pool = cards+grounding เท่านั้น: message/history ของ
+                #   ลูกค้าไม่ใช่หลักฐาน spec ("รองรับ 65W ไหม" ห้าม ground ตัวเอง)
+                #   negation นำหน้า ("ไม่รองรับ IP68") = ปฏิเสธ spec ไม่ใช่ claim → ข้าม
+                #   loop ≤4 เคลียร์หลาย clause; token normalize = strip ช่องว่าง+lower
+                _rd = getattr(resp, "routing_decision", None)
+                if not _rewritten and not (isinstance(_rd, dict) and _rd.get("guard_rewritten")):
+                    _pool_ns = None
+                    for _ in range(4):
+                        _ans = getattr(resp, "answer", "") or ""
+                        _bad_spec = None
+                        for _sm in _SPEC_CLAIM_RE.finditer(_ans):
+                            if _NEGATION_RE.search(_ans[max(0, _sm.start() - 20):_sm.start()]):
+                                continue
+                            if _pool_ns is None:
+                                _pool_ns = re.sub(
+                                    r"[\s,]+", "", _evidence_pool(resp))
+                            if re.sub(r"[\s,]+", "", _sm.group(0)).lower() not in _pool_ns:
+                                _bad_spec = _sm
+                                break
+                        if not _bad_spec:
+                            break
+                        _new = _replace_clause(
+                            _ans, _bad_spec.start(), _bad_spec.end(),
+                            "เรื่องสเปก/ตัวเลขที่กล่าวถึง เดี๋ยวขอให้แอดมินตรวจสอบให้นะคะ")
+                        _new = re.sub(r"(?:นะคะ|ค่ะ|คะ)\s*(?:นะคะ|ค่ะ|คะ)", "นะคะ", _new)
+                        if _new == _ans:
+                            break
+                        resp.answer = _new
+                        resp.answer_segments = _llm.split_segments(_new)
+                        if isinstance(_rd, dict):
+                            _rd["guard_rewritten"] = "spec_claim"
+                        print(f"[GUARD-ENFORCE] rewrite spec_claim: ungrounded {_bad_spec.group(0)!r}", file=_sys.stderr)
     except Exception as _e:
         print(f"[GUARD-ENFORCE] error: {_e}", file=_sys.stderr)
     return resp

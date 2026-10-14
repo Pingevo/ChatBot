@@ -16,6 +16,7 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
+import { BOTWORKER_REPLY_FILTER } from "@/backend/service/messageService";
 import type { ShadowReplyDoc } from "@/backend/service/shadowReplyService";
 import type { Platform } from "@/backend/lib/safety";
 
@@ -31,10 +32,9 @@ export async function GET(req: NextRequest) {
   const limit = Math.min(Math.max(limitParam, 1), 500);
 
   const coll = await getCollection<ShadowReplyDoc>(COLLECTIONS.shadowReplies);
-  const filter: Record<string, unknown> = {
-    mode: "standalone",  // ⚡ Phase 2R — เฉพาะ botworker
-    deleted_at: { $exists: false },  // ไม่เอาที่ถูก soft delete
-  };
+  // ⚡ source boundary — contract เดียวกับ messages route/getGroupedHistoryForBot:
+  //   worker/workflow + standalone|legacy(mode absent) + !deleted + text ไม่ว่าง
+  const filter: Record<string, unknown> = { ...BOTWORKER_REPLY_FILTER };
   if (platform) filter.platform = platform;
   if (shopId) filter.shop_id = shopId;
   if (conversationId) filter.conversation_id = conversationId;
