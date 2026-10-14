@@ -3284,6 +3284,17 @@ S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mon
   - Residual: `_is_active_post_handoff` ยังมี **compatibility marker fallback** (scan marker ใน model message ล่าสุด) เฉพาะเมื่อ `ticket_state` ไม่ทราบ — structured state ยังไม่แทน keyword 100%; direct SM call bypass `app.chat` ไม่ enforce ownership (by design — /chat คือ boundary เดียว)
   - Next: **Phase 2B.6** (episode-scoped admin event สำหรับ explicit claim resolution/cancellation) แล้ว **2B.7** ก่อน 2C — 2C (multi-need turn planning + authoritative subjects) ยังไม่เริ่ม
 
+#### conversations_shp duplicate identity audit (ผ่าน read-only audit — รอ writer fix + cleanup approval)
+- **เหตุผล:** Next instrumentation สร้าง `{conversation_id:1} unique sparse` ไม่ผ่านด้วย E11000 ที่ `shp_103952262954224262`; ต้องแยกว่าเป็น duplicate ใน logical conversation เดียวหรือ ID ชนข้าม shop/platform ก่อนแก้ข้อมูลหรือ schema
+- **ขอบเขตที่อนุมัติ:** โหลด root `.env` ด้วย `load_dotenv(override=False)` ใน subprocess ชั่วคราวโดยห้ามแสดง/จดจำค่า; full duplicate census + target structural comparison + `listIndexes` เท่านั้น
+- **safety:** Mongo writes=0; ห้าม delete/merge/update/createIndex; ไม่เปิด botworker/provider/API; ปิด client และลบ `/tmp` script หลัง audit
+- **ผล census:** total=151,853 และทุก doc มี string `conversation_id`; duplicate groups=731, extra docs=1,004, group size 2/3/4/5 = 471/248/11/1; cross-shop=0, cross-platform=0, cross-nonempty-customer=0 (478 groups เป็น missing→filled customer field ไม่ใช่คนละลูกค้า)
+- **root cause evidence:** duplicate receive range 2026-09-04 ถึง 2026-10-14 → writer ยังสร้าง snapshot ใหม่แทน upsert logical conversation เดิม; target E11000 pair อยู่ shop/platform/customer เดียวกัน ต่างเฉพาะ message/timestamp snapshot fields
+- **cleanup readiness:** ตรวจ duplicate docs 1,735 ตัว; legacy admin residue=0; latest-by-data_received_at เก็บข้อมูลครบ 730/731 groups, มี 1 group ต้อง preserve `status` และเลือก last-message tuple จาก timestamp ใหม่สุดแทนการลบแบบ keep-latest ตรงๆ
+- **index state:** ไม่มี standalone `{conversation_id:1}`; มีเพียง non-unique `{shop_id:1,conversation_id:1}` และ indexes สำหรับ list/sort อื่น; Mongo writes=0, client closed ทุก run, `/tmp` script deleted
+- **verdict:** `CONVERSATIONS_DUPLICATE_ROOT_CAUSE_CONFIRMED_WRITER_FIX_REQUIRED_BEFORE_CLEANUP` — ห้ามลบ 1,004 docs หรือสร้าง unique index จน writer เปลี่ยนเป็น atomic upsert ที่ stable identity; หลัง writer fix จึง dry-run field-wise merge/delete แล้ว create+verify unique index
+- **remediation plan:** `docs/plans/2026-10-14-conversations-shp-duplicate-remediation-plan.md` — online writer-first, zero-service-downtime rollout, bounded CAS cleanup, unique-index gate, rollback และ 24h observation; ยังไม่ execute/commit
+
 #### Phase 2B.6 Review-Fix (กำลังทำ — independent review: H1+H2+M1+M2, ห้าม commit/2B.7)
 - **Root causes (source-proven)**:
   - H1: `recordClaimHandoff` → `upsertMeta` unconditional `$set` (ไม่มี fence) → terminal episode resurrect / stale ep ทับ active ใหม่ / outcome เก่าค้าง block ep ใหม่; `applyClaimOutcome` CAS เช็คแค่ active ep — malformed `{active:ep1,outcome:ep1}` overwrite terminal ได้
