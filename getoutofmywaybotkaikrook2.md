@@ -3336,6 +3336,16 @@ S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mon
   5. InfoTab `setApplied(body.claim_outcome.outcome)` — absent→errorMsg ไม่เดาค่า
 - **RED tests**: R13 stale-ep → typed stale + 409 + ep2 metadata intact · R14 terminal-ep → already_terminal + converged 200 + outcome truth · R15 audit crash → retry repair exactly-once · R16 conflicting retry → persisted outcome on wire + UI pin
 
+#### Phase 2D Botworker Platform/Shop Scope Gate — วางแผนแล้ว, รอ 2B/2C ปิดก่อน
+
+- **ลำดับ:** ทำ 2B.6 → 2B.7 → 2C.1-2C.3 ให้เสร็จก่อน แล้วทำ 2D ก่อน Revised Phase 3; ห้ามแทรก runtime diff เข้า working tree ของ 2B.6
+- **เป้าหมาย:** ทดลองคำตอบผ่าน `/botworker` sandbox กับร้านเดียวโดยไม่ส่งออก Shopee จริง และไม่เปิดสิทธิ์ให้ร้าน/platform อื่นโดยอุบัติเหตุ
+- **contract:** `global bot_worker_enabled AND platform enabled AND exact (platform,shop_id) shop.bot_worker_enabled`; missing/new config = OFF; `connected`/`enabled_for_chat` ไม่ถูกนำมาใช้แทน
+- **runtime owner:** resolve scope ครั้งเดียวต่อ cycle แล้วกรอง Mongo ก่อน claim; recovery ใช้ scope เดียวกัน; ไม่มี per-message settings lookup/guard chain/parallel poller; ปิดร้าน/platform = หยุด admission ใหม่และปล่อย in-flight จบ, global OFF = abort/drain เดิม
+- **UI:** `/shops` มี platform switches + switch ต่อร้าน พร้อม effective state; TikTok/Lazada default OFF จน backend พร้อม
+- **canary:** global+Shopee+ร้านเดียว, workflow OFF, concurrency=1, platform API calls=0, ร้านอื่น unclaimed; AI agent ห้ามเปิด botworker/live canary เอง ต้องมี operator approval แยก
+- **สถานะ:** plan-only; runtime/tests/schema ยังไม่เปลี่ยนจากรายการนี้
+
 **ผลลัพธ์ (2026-10-14 — review-fix round 2 เสร็จ, ยังไม่ commit)**
 - **RED**: 231/235 → fail เฉพาะ R13-R16 ด้วยเหตุที่คาด (recordClaimHandoff void=undefined, terminal no-op ไม่ classify, audit=0 หลัง retry, route ไม่มี claim_outcome บน wire) · เดิม 231 green ครบ
 - **Impl (owner เดิมทั้งหมด)**: `recordClaimHandoff → Promise<{status: written|already_terminal|stale_episode, claimOutcome?}>` — fenced write + E11000 reconcile + bounded reread ครั้งเดียว classify (ไม่ใช่ silent no-op) · bot-handoff route mapping: written→success · already_terminal→200 converged+claim_metadata marker+persisted outcome · **stale_episode→409 ok:false** · throw→503 · `applyClaimOutcome → {result, claimOutcome}` — already_applied path repair `logAdminEvent(eventId=ep)` ด้วย persisted actor/outcome ก่อน return (audit crash window ปิด — commit ก่อน audit ล้มแล้ว retry สามารถ repair ได้ ≤1 ครั้ง ผ่าน E11000 dedupe เดิม) · claim-outcome route คืน `claim_outcome` ทั้ง applied/already_applied · InfoTab อ่าน `body.claim_outcome.outcome` — absent→error ไม่สร้างค่าจากปุ่ม

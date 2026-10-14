@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3, FastAPI legacy Shopee runtime, MongoDB read-only product/order/stock data plus admin-owned state collections, existing local embeddings, Gemini/OpenRouter clients, pytest-style tests under `docs/test/`, and the existing Next.js admin status/handoff boundary.
 
-**Status:** Active rebaseline roadmap, revised and accepted 2026-10-09 after the repository-wide architecture audit. Phase 2A is an accepted/frozen test baseline. Phase 2B and 2C below supersede their earlier implementation sequence. Runtime implementation starts at Phase 2B.1 and proceeds sequentially under the RED-first and deletion gates below.
+**Status:** Active rebaseline roadmap, revised and accepted 2026-10-09 after the repository-wide architecture audit. Phase 2A is an accepted/frozen test baseline. Phase 2B and 2C below supersede their earlier implementation sequence; Phase 2D is inserted after 2C as the botworker scope gate before Phase 3. Runtime implementation starts at Phase 2B.1 and proceeds sequentially under the RED-first and deletion gates below.
 
 **Historical plan:** `docs/plans/2026-09-21-legacy-shopee-evidence-retrieval-implementation-plan.md`
 
@@ -334,7 +334,7 @@ class TurnDecision:
 
 **Exit gate:** accepted as evidence only. Production wiring remains blocked until Phase 2B state/command truth and Phase 2C multi-need contract pass.
 
-## Revised Phase 2A-2C: State, Verified Commands, And Authoritative Subjects
+## Revised Phase 2A-2D: State, Verified Commands, Authoritative Subjects, And Botworker Scope
 
 **Purpose:** Separate who may answer, which claim episode is active, what commands actually completed, and which products the customer is discussing. No layer may infer these facts from bot prose.
 
@@ -343,8 +343,9 @@ class TurnDecision:
 - **2A — accepted/frozen baseline:** executable lifecycle incidents, three-axis terminology, and blockers. Test/audit only; already committed as `37f6d30`.
 - **2B — next implementation package:** authoritative ownership transport, claim episode/lifecycle consolidation, verified handoff result, and explicit claim outcome event.
 - **2C — after 2B:** evolve `turn_decision.py` into multi-need `TurnPlan`, then make `ConversationSubjectSet` authoritative for follow-ups.
+- **2D — after 2C, before Phase 3:** add fail-closed botworker eligibility at global, platform, and shop levels so a sandbox canary can process one selected shop without admitting any other shop.
 
-**Files:** Phase 2B may modify `responses.py`, `warranty_flow.py`, `conversation_products.py`, `app.py`, `ChatAdminWeb/src/backend/service/handoffService.ts`, `statusConversationService.ts`, `botCallService.ts`, and the existing handoff/close API boundaries. Phase 2C may modify `turn_decision.py`, `conversation_products.py`, `route_context.py`, and `app.py`. Exact tasks and deletion gates are specified in the detailed Phase 2B/2C sections below.
+**Files:** Phase 2B may modify `responses.py`, `warranty_flow.py`, `conversation_products.py`, `app.py`, `ChatAdminWeb/src/backend/service/handoffService.ts`, `statusConversationService.ts`, `botCallService.ts`, and the existing handoff/close API boundaries. Phase 2C may modify `turn_decision.py`, `conversation_products.py`, `route_context.py`, and `app.py`. Phase 2D may modify the existing system/shop configuration owners, botworker admission queries, `/shops` UI/API, and focused safety tests. Exact tasks and deletion gates are specified in the detailed Phase 2B/2C/2D sections below.
 
 - [ ] Phase 2B first proves ownership-state transport and handoff outcomes independently from claim parsing.
 - [ ] Phase 2B then consolidates claim episode activation, field acceptance, and transitions in one legacy owner; storage remains in `conversation_products`.
@@ -352,8 +353,10 @@ class TurnDecision:
 - [ ] Phase 2C resolves subjects once: explicit identity wins; referential turns use persisted subjects; bot prose is never truth; ambiguity clarifies.
 - [ ] Compare/price/link/compat/policy consume the same subject set. An unavailable subject cannot be silently replaced by another product.
 - [ ] Keep referenced product/category and order-policy facts stable across follow-ups. Persist customer/order facts, never the prior bot's policy conclusion.
+- [ ] Phase 2D requires `global AND platform AND shop` eligibility before claim, buffer, or recovery admission; every new platform/shop defaults OFF.
+- [ ] Phase 2D exposes platform switches and per-shop botworker switches on `/shops`, while preserving `connected` and `enabled_for_chat` as separate, unchanged concepts.
 
-**Exit gate:** Phase 2B closes false-success handoff and claim lifecycle incidents with fewer owners/direct writes; Phase 2C preserves all independent needs and stable subjects. Ticket ownership and explicit events outrank history markers throughout.
+**Exit gate:** Phase 2B closes false-success handoff and claim lifecycle incidents with fewer owners/direct writes; Phase 2C preserves all independent needs and stable subjects; Phase 2D proves one-shop sandbox admission without processing another shop. Ticket ownership and explicit events outrank history markers throughout.
 
 ## Revised Phase 3: Canonical Product, Variant, And Availability Schema
 
@@ -539,10 +542,10 @@ class AnswerContext:
 
 ## Execution Order And Parallelism
 
-Run `0 -> 1 -> 2A (accepted) -> 2B -> 2C -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10`.
+Run `0 -> 1 -> 2A (accepted) -> 2B -> 2C -> 2D -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10`.
 
 - Begin next at **2B.1** after this revision is reviewed. Do not rerun or enlarge 2A as a substitute for implementation.
-- Do not run Phases 2B-8 in parallel on one branch; contracts and `app.py` boundaries are sequential.
+- Do not run Phases 2B-8 in parallel on one branch; contracts and `app.py`/botworker boundaries are sequential.
 - Read-only DB audits, fixture sanitization, and corpus review may use isolated worktrees in parallel.
 - Phase 9 inventory may run read-only while Phase 7 runs, but runtime edits wait for Phase 8 contracts.
 - Use a fresh dev-worker session per phase and a fresh reviewer before commit.
@@ -571,7 +574,7 @@ Run `0 -> 1 -> 2A (accepted) -> 2B -> 2C -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 1
 
 ## Decision
 
-Do not continue the old Phase 7 sequence and do not add a Phase 5G keyword/helper patch. Phase 0, Phase 1 shadow work, and Phase 2A are preserved evidence. After review of the 2026-10-09 revision, implementation starts at **Phase 2B.1 authoritative ownership transport**, then proceeds sequentially through 2B and 2C. The completed work remains useful infrastructure; this revision changes ownership and migration order without restarting the project.
+Do not continue the old Phase 7 sequence and do not add a Phase 5G keyword/helper patch. Phase 0, Phase 1 shadow work, and Phase 2A are preserved evidence. After review of the 2026-10-09 revision, implementation starts at **Phase 2B.1 authoritative ownership transport**, then proceeds sequentially through 2B, 2C, and the inserted 2D botworker scope gate before Phase 3. The completed work remains useful infrastructure; this revision changes ownership and migration order without restarting the project.
 
 ---
 
@@ -1041,7 +1044,34 @@ class ConversationSubjectSet:
 - [ ] Pin Q6-Q9, Q12-Q13, Q15-Q18 and multi-need incidents through `chat()` replay.
 - [ ] Report action owners and subject owners before/after; Phase 2C fails if either count does not decrease.
 
-**Phase 2B/2C complexity gates — every runtime commit reports:**
+### Phase 2D — Botworker Platform And Shop Scope Gate
+
+**Scope:** Starts only after Phase 2B and 2C are closed, and finishes before Phase 3. This phase controls botworker admission for the existing `/botworker` sandbox; it does not enable delivery to Shopee/TikTok/Lazada and does not change answer logic.
+
+**Authoritative eligibility:**
+
+```text
+system_configs.bot_worker_enabled
+AND platform is enabled for botworker
+AND shops.bot_worker_enabled for the exact (platform, shop_id)
+= eligible for botworker admission
+```
+
+- [ ] Add one platform-scope field under the existing `main_config` owner and one `bot_worker_enabled` field on `shops`; all missing/new values resolve to OFF (fail-closed).
+- [ ] Do not reuse `connected` or `enabled_for_chat`: they retain connection/sync semantics and must not grant botworker admission.
+- [ ] Resolve the enabled `(platform, shop_id)` scope once per worker cycle and apply it in Mongo discovery before `claimMessage`; do not add a per-message settings lookup or distributed guards.
+- [ ] Apply the same scope to stale-claim/buffer recovery admission so disabled work cannot re-enter through restart recovery. Already-running work may finish; the existing global switch remains the immediate abort/drain kill switch.
+- [ ] Add platform switches and per-shop Botworker switches to `/shops`, with explicit effective-state labels: globally disabled, platform disabled, shop disabled, or enabled.
+- [ ] Keep Shopee/TikTok/Lazada platform values in the contract, default all OFF, and do not enable a platform whose chatbot backend is not implemented.
+- [ ] RED-test global/platform/shop truth table, missing-config fail-closed, query-before-claim behavior, disabled recovery rows, scope changes between cycles, API authorization/audit, and responsive `/shops` UI states.
+- [ ] Canary: enable global + Shopee + exactly one shop; keep workflow disabled and concurrency 1; inspect replies only in `/botworker`/`shadow_replies`; assert platform-delivery calls remain zero and another shop remains unclaimed.
+- [ ] Stop criteria: any non-selected shop claim, platform API call, duplicate reply, uncontrolled provider spend, or inability to disable admission. No botworker process may be started by an AI agent; live execution requires separate operator approval.
+
+**Deletion/complexity gate:** eligibility has one configuration owner and one runtime admission owner; no second poller, per-message DB lookup, helper chain, parallel allowlist, or reuse of unrelated shop flags. Report query count, owner count, runtime LOC, and removed/replaced logic.
+
+**Exit gate:** one selected shop can be exercised in the sandbox while every other shop/platform remains unclaimed, provider cost limits are armed, and global shutdown still aborts/drains the active era.
+
+**Phase 2B/2C/2D complexity gates — every runtime commit reports:**
 
 ```text
 Runtime files and lines added/deleted/net
