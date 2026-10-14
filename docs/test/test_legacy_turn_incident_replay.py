@@ -890,13 +890,23 @@ def _expectations_met(fx, records, captured):
 
     action = exp.get("action")
     if action == "locked":
-        if not getattr(resp, "handoff_to_admin", False):
-            fails.append("expected post-handoff lock (handoff_to_admin)")
+        # ⚡ 2B.5 boundary fix — "locked" = wait-only state, NOT a handoff
+        #   command: handoff_to_admin/handoff_reason/routing-path="handoff"
+        #   all mean "perform a new handoff" downstream — must stay clean.
+        if getattr(resp, "handoff_to_admin", False):
+            fails.append("locked response must not signal handoff_to_admin")
+        if getattr(resp, "handoff_reason", None) is not None:
+            fails.append(f"locked handoff_reason="
+                         f"{getattr(resp, 'handoff_reason', None)!r} want None")
+        _rd = getattr(resp, "routing_decision", None) or {}
+        if _rd.get("path") != "human_wait":
+            fails.append(f"locked routing path={_rd.get('path')!r} "
+                         "want 'human_wait'")
         if rec["llm_calls"]:
             fails.append(f"llm called {len(rec['llm_calls'])}x during lock")
-        hr = exp.get("handoff_reason")
-        if hr and getattr(resp, "handoff_reason", None) != hr:
-            fails.append(f"handoff_reason={getattr(resp, 'handoff_reason', None)!r}")
+        _prev_h = records[-2]["handoffs"] if len(records) > 1 else []
+        if len(rec["handoffs"]) != len(_prev_h):
+            fails.append("handoff POST fired during locked turn")
     elif action == "handoff":
         if not getattr(resp, "handoff_to_admin", False):
             fails.append("expected handoff_to_admin")
@@ -1034,7 +1044,304 @@ def test_l3_chat_boundary(monkeypatch, fx):
     _gate(fx, fails, level=3)
 
 
+# ── Phase 2B.5: ticket-close/lock safety — episode identity, not just action ──
+
+_P2B5_SHOP = "KingGadgets"
+
+
+def _p2b5_fx(**over):
+    fx = {"id": "p2b5-dedicated", "shop": _P2B5_SHOP, "platform": "shopee",
+          "conversation_id": "fx-conv-p2b5-ded", "catalog": [],
+          "status": "positive", "levels": [3],
+          "intent_result": {"intent": "other", "confidence": 0.5},
+          "turns": []}
+    fx.update(over)
+    return fx
+
+
+def test_p2b5_closed_greeting_no_post_same_episode(monkeypatch):
+    """closed→bot + collecting claim + greeting → normal answer, ZERO new
+    handoff POST, same episode_id/stage — ticket close must not resolve,
+    cancel, duplicate, or re-escalate the claim episode."""
+    seed = {"stage": "collecting", "episode_id": "ep-keep",
+            "customer_name": "สมชาย ใจดี"}
+    fx = _p2b5_fx(
+        conversation_id="fx-conv-p2b5-keep", ticket_state="closed",
+        claim_state_seed=seed,
+        turns=[{"role": "model",
+                "text": "รับทราบค่ะ เดี๋ยวแอดมินดูแลเรื่องเคลมต่อนะคะ"},
+               {"text": "สวัสดีครับ"}])
+    records, _cap, _client = _replay(monkeypatch, fx)
+    resp = records[-1]["resp"]
+    assert not getattr(resp, "handoff_to_admin", False), \
+        "closed-ticket greeting must answer, not hand off"
+    assert records[-1]["handoffs"] == [], \
+        f"no new handoff POST during lock-free turn: {records[-1]['handoffs']}"
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-keep")
+    assert claim and claim.get("episode_id") == "ep-keep"
+    assert claim.get("stage") == "collecting"
+    assert claim.get("customer_name") == "สมชาย ใจดี"
+
+
+def test_p2b5_active_handoff_locks_and_writes_nothing(monkeypatch):
+    """open ticket + collecting claim + claim-field message → wait-admin
+    lock: no new POST, no claim write, episode untouched."""
+    seed = {"stage": "collecting", "episode_id": "ep-lock",
+            "customer_name": "สมชาย ใจดี"}
+    fx = _p2b5_fx(
+        conversation_id="fx-conv-p2b5-lock", ticket_state="open",
+        claim_state_seed=seed,
+        turns=[{"text": "0812345678"}])
+    records, _cap, _client = _replay(monkeypatch, fx)
+    resp = records[-1]["resp"]
+    # ⚡ wait-only contract: lock ≠ handoff command — flag/reason/path must
+    #   stay clean so downstream callers cannot re-fire a handoff
+    assert resp.handoff_to_admin is False
+    assert resp.handoff_reason is None
+    assert (resp.routing_decision or {}).get("path") == "human_wait"
+    assert records[-1]["handoffs"] == [], "lock must not POST again"
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-lock")
+    assert claim and claim.get("episode_id") == "ep-lock"
+    assert claim.get("stage") == "collecting"
+    assert claim.get("customer_name") == "สมชาย ใจดี"
+    assert not claim.get("customer_phone"), \
+        "locked turn must not write claim fields"
+
+
+def test_p2b5_double_close_idempotent(monkeypatch):
+    """close twice (two greeting turns under closed) → both answer normally,
+    zero POSTs, episode stable across both."""
+    seed = {"stage": "collecting", "episode_id": "ep-dbl"}
+    fx = _p2b5_fx(
+        conversation_id="fx-conv-p2b5-dbl", ticket_state="closed",
+        claim_state_seed=seed,
+        turns=[{"role": "model",
+                "text": "รับทราบค่ะ เดี๋ยวแอดมินดูแลเรื่องเคลมต่อนะคะ"},
+               {"text": "สวัสดีครับ"},
+               {"text": "สวัสดีครับ"}])
+    records, _cap, _client = _replay(monkeypatch, fx)
+    for i, rec in enumerate(records):
+        assert not getattr(rec["resp"], "handoff_to_admin", False), \
+            f"turn {i} must answer, not hand off"
+        assert rec["handoffs"] == [], f"turn {i} posted handoff"
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-dbl")
+    assert claim and claim.get("episode_id") == "ep-dbl"
+    assert claim.get("stage") == "collecting"
+
+
+def test_p2b5_handoff_failure_then_close_keeps_episode(monkeypatch):
+    """Failed claim handoff POST (transport down) must not resolve the
+    claim; admin closing afterwards must not erase/restart the episode."""
+    client, captured, handoff_calls = _install(monkeypatch, _p2b5_fx(
+        conversation_id="fx-conv-p2b5-fail", ticket_state="bot",
+        claim_state_seed={"stage": "collecting", "episode_id": "ep-fail"}))
+    # turn 1: claim field arrives but the handoff POST fails (transport owner
+    # stub → None). The merge must still persist the field.
+    monkeypatch.setattr(app, "_send_handoff", lambda *a, **k: None)
+    from shopeechat import responses as _resp_mod
+    monkeypatch.setattr(_resp_mod, "_send_handoff", lambda *a, **k: None)
+    history: list = []
+    resp1 = app.chat(app.ChatRequest(
+        message="0812345678", shop=_P2B5_SHOP, platform="shopee",
+        history=list(history), conversation_id="fx-conv-p2b5-fail",
+        ticket_state="bot", limit=5, simulate_assignment=True,
+        test_source="phase2b5"))
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-fail")
+    assert claim and claim.get("episode_id") == "ep-fail"
+    assert claim.get("customer_phone") == "0812345678", \
+        "field merge must persist even when the handoff POST fails"
+    history += [{"role": "user", "text": "0812345678"},
+                {"role": "model", "text": getattr(resp1, "answer", "") or ""},
+                {"role": "model",
+                 "text": "รับทราบค่ะ เดี๋ยวแอดมินดูแลเรื่องเคลมต่อนะคะ"}]
+    # turn 2: restore a RECORDING success stub first — a re-escalating POST
+    # (BUG-D) must show up in handoff_calls and flip handoff_to_admin.
+    def _cap_send(req, ctx=None, *, reason="", **kw):
+        handoff_calls.append({"reason": reason})
+        return {"outcome": {"state": "assigned"}}
+    monkeypatch.setattr(app, "_send_handoff", _cap_send)
+    monkeypatch.setattr(_resp_mod, "_send_handoff", _cap_send)
+    resp2 = app.chat(app.ChatRequest(
+        message="สวัสดีครับ", shop=_P2B5_SHOP, platform="shopee",
+        history=list(history), conversation_id="fx-conv-p2b5-fail",
+        ticket_state="closed", limit=5, simulate_assignment=True,
+        test_source="phase2b5"))
+    assert not getattr(resp2, "handoff_to_admin", False), \
+        "post-close greeting must not re-escalate"
+    assert handoff_calls == [], \
+        f"no handoff POST may fire on the closed+greeting turn: {handoff_calls}"
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-fail")
+    assert claim and claim.get("episode_id") == "ep-fail"
+    assert claim.get("stage") == "collecting"
+    assert claim.get("customer_phone") == "0812345678"
+
+
+def test_p2b5_stale_field_replay_same_episode(monkeypatch):
+    """closed ticket + collecting claim + re-sending an already-stored field
+    → merges into the SAME episode (no duplicate/restart)."""
+    seed = {"stage": "collecting", "episode_id": "ep-stale",
+            "customer_phone": "0812345678"}
+    fx = _p2b5_fx(
+        conversation_id="fx-conv-p2b5-stale", ticket_state="closed",
+        claim_state_seed=seed,
+        turns=[{"role": "model",
+                "text": "รับทราบค่ะ เดี๋ยวแอดมินดูแลเรื่องเคลมต่อนะคะ"},
+               {"text": "0812345678"}],
+        synthetic_pii=["phone"])
+    records, _cap, _client = _replay(monkeypatch, fx)
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-stale")
+    assert claim and claim.get("episode_id") == "ep-stale", \
+        "re-sending a stored field must stay in the same episode"
+    assert claim.get("customer_phone") == "0812345678"
+    assert claim.get("stage") == "collecting"
+
+
+# ── Phase 2B.5 boundary correction — single lock owner at /chat entry ────────
+
+def _assert_wait_only(resp):
+    """Wait-only contract — downstream callers branch on these fields:
+    handoff_to_admin/reason/routing-path mean "perform a NEW handoff",
+    never "already human-owned"."""
+    assert resp.handoff_to_admin is False
+    assert resp.handoff_reason is None
+    assert (resp.routing_decision or {}).get("path") == "human_wait"
+    assert "รอการติดต่อกลับ" in (resp.answer or ""), \
+        "lock must keep the wait-admin answer"
+
+
+def test_p2b5_wait_response_is_not_handoff_command(monkeypatch):
+    """R1 — active ticket → wait-admin answer with ZERO handoff-command
+    fields; no POST, no claim write, no LLM call."""
+    _client, captured, handoff_calls = _install(monkeypatch, _p2b5_fx(
+        conversation_id="fx-conv-p2b5-wait", ticket_state="handoff",
+        claim_state_seed={"stage": "collecting", "episode_id": "ep-wait"}))
+    resp = app.chat(app.ChatRequest(
+        message="สวัสดีครับ", shop=_P2B5_SHOP, platform="shopee",
+        history=[], conversation_id="fx-conv-p2b5-wait",
+        ticket_state="handoff", limit=5, test_source="phase2b5"))
+    _assert_wait_only(resp)
+    assert handoff_calls == [], "waiting state must not POST a new handoff"
+    assert captured.calls == [], "lock must not spend LLM calls"
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-wait")
+    assert claim and claim.get("episode_id") == "ep-wait"
+    assert claim.get("stage") == "collecting"
+
+
+def test_p2b5_v2_image_never_reaches_vision(monkeypatch):
+    """R3 — use_v2 + active ticket + image → lock fires at /chat BEFORE v2
+    dispatch: chat_v2 never entered, describe_images never called."""
+    _client, captured, handoff_calls = _install(monkeypatch, _p2b5_fx(
+        conversation_id="fx-conv-p2b5-v2img", ticket_state="open"))
+    from shopeechat import chat_v2 as _cv2
+    v2_calls, vision_calls = [], []
+    monkeypatch.setattr(_cv2, "chat_v2",
+                        lambda *a, **k: v2_calls.append(a) or {})
+    monkeypatch.setattr(llm, "describe_images",
+                        lambda *a, **k: vision_calls.append(a) or "")
+    resp = app.chat(app.ChatRequest(
+        message="[รูปภาพ]", shop=_P2B5_SHOP, platform="shopee",
+        images=["https://img.example/x.jpg"], use_v2=True,
+        history=[], conversation_id="fx-conv-p2b5-v2img",
+        ticket_state="open", limit=5, test_source="phase2b5"))
+    _assert_wait_only(resp)
+    assert v2_calls == [], "active ticket must not reach chat_v2"
+    assert vision_calls == [], "active ticket must not spend vision calls"
+    assert captured.calls == []
+    assert handoff_calls == []
+
+
+def test_p2b5_v3_never_dispatched_when_locked(monkeypatch):
+    """R4 — use_v3 + active ticket → lock fires before v3 dispatch."""
+    _client, captured, handoff_calls = _install(monkeypatch, _p2b5_fx(
+        conversation_id="fx-conv-p2b5-v3", ticket_state="pending"))
+    from shopeechat import chatbotv3
+    v3_calls = []
+    monkeypatch.setattr(chatbotv3, "chat_v3",
+                        lambda *a, **k: v3_calls.append(a) or {})
+    resp = app.chat(app.ChatRequest(
+        message="สวัสดีครับ", shop=_P2B5_SHOP, platform="shopee",
+        use_v3=True, history=[], conversation_id="fx-conv-p2b5-v3",
+        ticket_state="pending", limit=5, test_source="phase2b5"))
+    _assert_wait_only(resp)
+    assert v3_calls == [], "active ticket must not reach chatbotv3"
+    assert handoff_calls == []
+
+
+def test_p2b5_closed_states_still_dispatch_engines(monkeypatch):
+    """R4 control — closed/resolved/bot bypass the lock: v2 and v3
+    dispatch normally."""
+    _client, _cap, _hc = _install(monkeypatch, _p2b5_fx(
+        conversation_id="fx-conv-p2b5-disp", ticket_state="bot"))
+    from shopeechat import chatbotv3
+    from shopeechat import chat_v2 as _cv2
+    v2_calls, v3_calls = [], []
+    monkeypatch.setattr(
+        _cv2, "chat_v2",
+        lambda *a, **k: v2_calls.append(a) or {
+            "answer": "v2-ok", "products": [], "shop": _P2B5_SHOP,
+            "model": "stub"})
+    monkeypatch.setattr(
+        chatbotv3, "chat_v3",
+        lambda *a, **k: v3_calls.append(a) or {
+            "answer": "v3-ok", "products": [], "shop": _P2B5_SHOP,
+            "model": "stub"})
+    for state in ("closed", "resolved", "bot"):
+        app.chat(app.ChatRequest(
+            message="สวัสดีครับ", shop=_P2B5_SHOP, platform="shopee",
+            use_v2=True, history=[], conversation_id="fx-conv-p2b5-disp",
+            ticket_state=state, limit=5, test_source="phase2b5"))
+        app.chat(app.ChatRequest(
+            message="สวัสดีครับ", shop=_P2B5_SHOP, platform="shopee",
+            use_v3=True, history=[], conversation_id="fx-conv-p2b5-disp",
+            ticket_state=state, limit=5, test_source="phase2b5"))
+    assert len(v2_calls) == 3, f"closed states must reach chat_v2: {v2_calls}"
+    assert len(v3_calls) == 3, f"closed states must reach chatbotv3: {v3_calls}"
+
+
 # ── harness self-tests (Phase 0C): prove doubles/tripwires actually work ─────
+
+def _locked_fx():
+    return {"id": "selftest-locked", "status": "positive", "levels": [3],
+            "expected": {"action": "locked"}}
+
+
+def _locked_rec(**resp_kw):
+    base = dict(chat_engine="legacy", handoff_to_admin=False,
+                handoff_reason=None, routing_decision={"path": "human_wait"},
+                answer="รอแอดมิน")
+    base.update(resp_kw)
+    return {"resp": SimpleNamespace(**base), "llm_calls": [],
+            "handoffs": []}
+
+
+def test_harness_selftest_locked_accepts_wait_only():
+    """A genuine wait-only response must pass action=locked."""
+    fails = _expectations_met(_locked_fx(), [_locked_rec()], SimpleNamespace())
+    assert fails == [], f"wait-only response wrongly failed: {fails}"
+
+
+def test_harness_selftest_locked_rejects_handoff_flag():
+    """handoff_to_admin=True is a NEW-handoff command — must fail locked."""
+    fails = _expectations_met(
+        _locked_fx(), [_locked_rec(handoff_to_admin=True)], SimpleNamespace())
+    assert any("handoff_to_admin" in f for f in fails), fails
+
+
+def test_harness_selftest_locked_rejects_handoff_path():
+    """routing path 'handoff' is a handoff command — must fail locked."""
+    fails = _expectations_met(
+        _locked_fx(), [_locked_rec(routing_decision={"path": "handoff"})],
+        SimpleNamespace())
+    assert any("routing" in f for f in fails), fails
+
+
+def test_harness_selftest_locked_rejects_recorded_handoff():
+    """A recorded handoff POST on the locked turn must fail action=locked."""
+    rec = _locked_rec()
+    rec["handoffs"] = [{"reason": "post_handoff_waiting"}]
+    fails = _expectations_met(_locked_fx(), [rec], SimpleNamespace())
+    assert any("handoff POST" in f for f in fails), fails
+
 
 def _validator_mod():
     import importlib.util

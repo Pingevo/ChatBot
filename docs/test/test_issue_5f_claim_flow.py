@@ -86,6 +86,90 @@ def test_normal_name_unchanged():
     assert info["name"] == "สมชาย ใจดี"
 
 
+# ---------- Phase 2B.5: name validity = extract_customer_info final output ----------
+
+def test_final_name_lone_thai_accepted():
+    # ชื่อเดี่ยวใช้ได้ — กติกาไม่บังคับ space อีกต่อไป
+    assert warranty.extract_customer_info("สมชาย")["name"] == "สมชาย"
+
+
+def test_final_name_english_accepted():
+    assert warranty.extract_customer_info("John Doe")["name"] == "John Doe"
+
+
+def test_final_name_digit_rejected():
+    # NER อาจคืนชื่อที่ติดตัวเลข — final sanitation ต้อง reject
+    assert warranty.extract_customer_info("สมชาย ใจดี9")["name"] == ""
+    assert warranty.extract_customer_info("ชื่อสมชาย9")["name"] == ""
+
+
+def test_final_name_over_40_rejected():
+    # English fallback ผลิตชื่อเกิน 40 ตัว → final sanitation ต้อง reject
+    info = warranty.extract_customer_info(
+        "Christopher Alexander Benjamin Montgomery")
+    assert info["name"] == ""
+
+
+def test_final_fields_unchanged():
+    # phone/order extraction ไม่เปลี่ยน
+    info = warranty.extract_customer_info("0812345678 2508088B5T4W1D")
+    assert info["phone"] == "0812345678"
+    assert info["order_id"] == "2508088B5T4W1D"
+
+
+def test_merge_slots_lone_name_persists():
+    # _merge_claim_slots = merge precedence เท่านั้น — ไม่ re-judge shape
+    # (parser รับผิดชอบ validity แล้ว): ชื่อเดี่ยวต้องไม่ถูกทิ้ง
+    slots = warranty_flow._merge_claim_slots(
+        {"name": "สมชาย", "phone": "", "order_id": ""}, claim_state={})
+    assert slots["name"] == "สมชาย"
+
+
+def test_merge_slots_lone_name_survives_next_turn():
+    # lone name ที่ persist แล้วต้องไม่หายใน turn ต่อไป (precedence เก็บของเก่า)
+    state = {"customer_name": "สมชาย", "stage": "collecting"}
+    slots = warranty_flow._merge_claim_slots(
+        {"name": "", "phone": "0812345678", "order_id": ""}, claim_state=state)
+    assert slots["name"] == "สมชาย"
+    assert slots["phone"] == "0812345678"
+
+
+# ---------- Phase 2B.5: history scan = contextual denylist เท่านั้น ----------
+
+def _review_out_for(history_texts):
+    """Drive _handle_review_request with user-text history; return its dict."""
+    from shopeechat import llm
+    req = SimpleNamespace(
+        message="ทวนข้อมูลเคลมหน่อย", conversation_id=None, shop=None,
+        platform=None, ticket_state=None, simulate_assignment=False)
+    history = [{"role": "user", "text": t} for t in history_texts]
+    return warranty_flow._handle_review_request(
+        req, {"total_start": 0.0, "t0": 0.0, "steps": []},
+        history, warranty, llm, _app_mod)
+
+
+def test_history_scan_contextual_denylist_kept():
+    # contextual denylist ยังทำงาน: ข้อความเก่าเรื่องพัสดุ/ส่งของ/รูป
+    # ต้องไม่ถูกยกเป็น customer_name ใน review answer
+    out = _review_out_for(["ทวนเลขพัสดุ", "ส่งรูปสินค้ามาแล้วนะ"])
+    assert "ทวนเลขพัสดุ" not in out["answer"]
+    assert "ชื่อ-นามสกุล" not in out["answer"]
+
+
+def test_history_scan_valid_name_still_used():
+    # ชื่อจริงใน history ยังถูกใช้ใน review (shape checks ถูกลบ แต่
+    # contextual admissibility คงอยู่ — parser เป็นผู้ validate)
+    out = _review_out_for(["ผมชื่อสมชาย ใจดี"])
+    assert "สมชาย ใจดี" in out["answer"]
+
+
+def test_history_scan_lone_name_used():
+    # lone name ใน history ต้องถูกยอมรับเช่นกัน — space rule ที่ history scan
+    # ซ้ำกับ parser ถูกลบแล้ว (denylist ยังคุม context อยู่)
+    out = _review_out_for(["ผมชื่อสมชายนะ"])
+    assert "สมชาย" in out["answer"]
+
+
 # ---------- multi-message merge (fill-once) ----------
 
 def test_merge_slots_across_messages():
@@ -144,71 +228,94 @@ def test_anger_normal_ticket_still_handoff():
 # ---------- H4: ticket_state = source of truth สำหรับ post-handoff lock ----------
 
 def test_active_handoff_state_helper():
+    # Phase 2B.5 — evaluator รับ history แล้วคำนวณ marker เอง (owner เดียว)
+    _marker_hist = [{"role": "model",
+                     "text": "รับทราบค่ะ เดี๋ยวแอดมินดูแลให้นะคะ"}]
     assert warranty_flow._is_active_post_handoff(
-        SimpleNamespace(ticket_state="handoff"), history_marker=False) is True
+        SimpleNamespace(ticket_state="handoff"), []) is True
     assert warranty_flow._is_active_post_handoff(
-        SimpleNamespace(ticket_state="open"), history_marker=False) is True
+        SimpleNamespace(ticket_state="open"), []) is True
     assert warranty_flow._is_active_post_handoff(
-        SimpleNamespace(ticket_state="pending"), history_marker=False) is True
+        SimpleNamespace(ticket_state="pending"), []) is True
     assert warranty_flow._is_active_post_handoff(
-        SimpleNamespace(ticket_state="closed"), history_marker=True) is False
+        SimpleNamespace(ticket_state="closed"), _marker_hist) is False
     assert warranty_flow._is_active_post_handoff(
-        SimpleNamespace(ticket_state="resolved"), history_marker=True) is False
-    # fallback เฉพาะตอนไม่ทราบ state
+        SimpleNamespace(ticket_state="resolved"), _marker_hist) is False
+    # fallback เฉพาะตอนไม่ทราบ state — marker อ่านจาก last model text
     assert warranty_flow._is_active_post_handoff(
-        SimpleNamespace(ticket_state=None), history_marker=True) is True
+        SimpleNamespace(ticket_state=None), _marker_hist) is True
     assert warranty_flow._is_active_post_handoff(
-        SimpleNamespace(ticket_state=None), history_marker=False) is False
+        SimpleNamespace(ticket_state=None), []) is False
+    assert warranty_flow._is_active_post_handoff(
+        SimpleNamespace(ticket_state=None),
+        [{"role": "model", "text": "สวัสดีค่ะ มีอะไรให้ช่วยไหมคะ"}]) is False
+
+
+def _chat_boundary(**kw):
+    """Drive the real /chat boundary — the single production lock owner."""
+    return _app_mod.chat(_app_mod.ChatRequest(**kw))
+
+
+def _assert_wait_only(out):
+    # wait-only contract: lock ≠ handoff command — downstream callers must
+    # never see a new-handoff signal from a waiting-state response
+    assert out.handoff_to_admin is False
+    assert out.handoff_reason is None
+    assert (out.routing_decision or {}).get("path") == "human_wait"
 
 
 def test_active_handoff_without_history_marker_still_locks():
     # ticket_state="handoff" + history ไม่มี handoff marker → lock ต้องทำงาน
-    req = SimpleNamespace(
+    out = _chat_boundary(
         message="ทำไมยังไม่มีคนตอบ", conversation_id=None, shop=None,
         platform=None, ticket_state="handoff", simulate_assignment=False,
-    )
-    history = [{"role": "model", "text": "สวัสดีค่ะ มีอะไรให้ช่วยไหมคะ"}]
-    out = warranty_flow.handle_warranty_flow_legacy(
-        req, {"total_start": 0.0, "t0": 0.0, "steps": []}, history=history, db=None)
-    assert out is not None
-    assert out["handoff_to_admin"] is True
-    assert out["handoff_reason"] == "post_handoff_waiting"
+        history=[{"role": "model", "text": "สวัสดีค่ะ มีอะไรให้ช่วยไหมคะ"}])
+    _assert_wait_only(out)
 
 
 def test_active_handoff_empty_history_still_locks():
     # ticket_state="handoff" + history ว่าง (history fetch fail) → ยังต้อง lock
-    req = SimpleNamespace(
+    out = _chat_boundary(
         message="ทำไมยังไม่มีคนตอบ", conversation_id=None, shop=None,
         platform=None, ticket_state="handoff", simulate_assignment=False,
-    )
-    out = warranty_flow.handle_warranty_flow_legacy(
-        req, {"total_start": 0.0, "t0": 0.0, "steps": []}, history=[], db=None)
-    assert out is not None
-    assert out["handoff_reason"] == "post_handoff_waiting"
+        history=[])
+    _assert_wait_only(out)
 
 
 def test_open_state_locks_too():
     # open = แอดมินรับงานจริงแล้ว (botWorkerService: assign สำเร็จ → open)
-    req = SimpleNamespace(
+    out = _chat_boundary(
         message="แล้วไงต่อ", conversation_id=None, shop=None,
         platform=None, ticket_state="open", simulate_assignment=False,
-    )
-    out = warranty_flow.handle_warranty_flow_legacy(
-        req, {"total_start": 0.0, "t0": 0.0, "steps": []}, history=[], db=None)
-    assert out is not None
-    assert out["handoff_reason"] == "post_handoff_waiting"
+        history=[])
+    _assert_wait_only(out)
 
 
-def test_active_handoff_claim_info_still_accepted():
-    # ticket handoff แต่ลูกค้าส่งเบอร์/order → gate ปล่อยผ่าน (เก็บข้อมูลต่อ)
-    req = SimpleNamespace(
+def test_active_handoff_claim_info_locked():
+    # Phase 2B.5 — ticket active = unconditional lock: claim info
+    # (เบอร์/order) ไม่ override ownership — ต้อง wait-admin, ไม่มี claim write
+    out = _chat_boundary(
         message="เบอร์ 0812345678 order 2508088B5T4W1D", conversation_id=None,
-        shop=None, platform=None, ticket_state="handoff", simulate_assignment=False,
-    )
-    out = warranty_flow.handle_warranty_flow_legacy(
-        req, {"total_start": 0.0, "t0": 0.0, "steps": []}, history=[], db=None)
-    # gate ปล่อยผ่าน → ไม่ใช่ post_handoff_waiting (ตกไป pipeline ปกติ/claim collect)
-    assert out is None or out.get("handoff_reason") != "post_handoff_waiting"
+        shop=None, platform=None, ticket_state="handoff",
+        simulate_assignment=False, history=[])
+    _assert_wait_only(out)
+
+
+def test_active_handoff_image_locked():
+    # รูปเคลมระหว่าง active ticket → lock เช่นกัน (ไม่มี media escape)
+    out = _chat_boundary(
+        message="[รูปภาพ]", conversation_id=None, shop=None, platform=None,
+        ticket_state="open", simulate_assignment=False, images=[], history=[])
+    _assert_wait_only(out)
+
+
+def test_active_handoff_product_question_locked():
+    # product question ระหว่าง active ticket → lock (ไม่มี product escape)
+    out = _chat_boundary(
+        message="มีสายชาร์จไหมครับ", conversation_id=None, shop=None,
+        platform=None, ticket_state="pending", simulate_assignment=False,
+        history=[])
+    _assert_wait_only(out)
 
 
 def test_module_import_never_reads_dotenv(tmp_path=None):

@@ -262,35 +262,6 @@ def _db():
     return client, client[db_name]
 
 
-def _get_post_handoff_exceptions(shop: str | None, platform: str | None) -> list[str]:
-    """⚡ Phase 2A — ดึง post_handoff_exceptions จาก shop_settings ใน admin DB.
-
-    แอดมินตั้งได้ต่อร้าน — รายการ keywords ที่บอทยังตอบได้หลัง handoff (ก่อนปิดแชท)
-    เช่น ["ทวนข้อมูลเคลม", "ส่งลิงก์กรอกฟอร์ม", "เปลี่ยนเบอร์", "แก้ที่อยู่"]
-
-    ถ้า message match exception → บอทตอบปกติ ไม่ล็อค post-handoff
-    ถ้าไม่พบร้านหรือไม่มี field → คืน [] (ไม่มี exception)
-    """
-    if not shop:
-        return []
-    try:
-        db = conversation_products._admin_db()
-        # shop_settings เก็บด้วย shopname + platform
-        _plat = platform or "shopee"
-        doc = db["shop_settings"].find_one({
-            "shopname": shop,
-            "platform": _plat,
-            "is_deleted": {"$ne": True},
-        })
-        exceptions = (doc or {}).get("post_handoff_exceptions") or []
-        if isinstance(exceptions, list):
-            return [str(e) for e in exceptions if e]
-        return []
-    except Exception as _e:
-        print(f"[POST-HANDOFF-EXCEPTIONS] error: {_e}", file=sys.stderr)
-        return []
-
-
 # ---- routes -------------------------------------------------------------------
 
 @app.get("/health")
@@ -612,10 +583,9 @@ def _turn_decision_shadow(req: ChatRequest, history: list[dict],
         # Phase 1F — minimal context snapshot: timeline read ครั้งเดียว
         #   (claim_state + active_item_id จาก doc เดียวกัน — ไม่เรียก
         #   get_active_product เพราะ materialize card ไปอ่าน product DB
-        #   และเขียน live cache โดยไม่จำเป็น); exceptions เฉพาะ ticket active
+        #   และเขียน live cache โดยไม่จำเป็น)
         _claim = None
         _anchor = None
-        _exc = None
         try:
             from . import conversation_products as _cp_sh
             _doc = _cp_sh.load_timeline(req.conversation_id) or {}
@@ -625,20 +595,11 @@ def _turn_decision_shadow(req: ChatRequest, history: list[dict],
                 _anchor = {"item_id": str(_aid)}
         except Exception:
             pass
-        _ts = getattr(req, "ticket_state", None)
-        if isinstance(_ts, dict):
-            _ts = _ts.get("state")
-        if _ts in ("handoff", "open", "pending"):
-            try:
-                _exc = _get_post_handoff_exceptions(req.shop, req.platform)
-            except Exception:
-                _exc = None
         d = _td.decide_turn(
             req.message or "",
             history=history,
             ticket_state=req.ticket_state,
             claim_state=_claim,
-            post_handoff_exceptions=_exc,
             active_anchor=_anchor,
         )
         steps.append({
@@ -665,6 +626,20 @@ def chat(req: ChatRequest) -> ChatResponse:
 
 
 def _chat_impl(req: ChatRequest) -> ChatResponse:
+    import time as _time
+    _total_start = _time.time()
+    # ⚡ 2B.5 — post-handoff ownership lock (production owner เดียวที่ /chat
+    #   boundary): ticket_state = authority เดียว — handoff/open/pending →
+    #   wait-admin response ทุกข้อความ ก่อน engine dispatch (v3/v2/legacy),
+    #   Mongo, vision, persona, TurnDecision shadow, deterministic
+    #   responders, intent, retrieval, LLM; closed/resolved/bot → pipeline
+    #   ปกติ (evaluator: warranty_flow._is_active_post_handoff — marker
+    #   fallback เฉพาะตอนไม่ทราบ state)
+    from . import warranty_flow as _wf_lock
+    if _wf_lock._is_active_post_handoff(req, req.history):
+        return ChatResponse(**_wf_lock._build_post_handoff_response(
+            req, {"steps": [], "total_start": _total_start},
+            sys.modules[__name__], llm))
     # ⚡ chatbotv3 — OpenRouter-first paradigm (2026-09-20)
     #   USE_CHAT_V3=1 หรือ req.use_v3=True → route ไป chatbotv3.engine.chat_v3
     #   ไม่กระทบ legacy/v2 (default ยังใช้ legacy/v2 ตาม USE_LEGACY_CHAT)
@@ -682,8 +657,6 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         _resp = chat_v2.chat_v2(req)
         _resp["chat_engine"] = "v2"  # ⚡ บันทึกว่าใช้ chat_v2
         return ChatResponse(**_resp)
-    import time as _time
-    _total_start = _time.time()
     _timing_breakdown: dict[str, float] = {}  # pass1, retrieval, llm, total
     _steps: list[dict[str, Any]] = []  # per-step breakdown for log panel
     model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")

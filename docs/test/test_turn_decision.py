@@ -170,10 +170,11 @@ def test_active_ticket_locks_plain_text():
     assert d.action == "locked"
 
 
-def test_active_ticket_does_not_lock_greeting():
-    # "สวัสดี" อยู่ใน production _POST_HANDOFF_PRODUCT_KWS → gate escape
+def test_active_ticket_locks_greeting():
+    # Phase 2B.5 — content ไม่มีสิทธิ์ override ticket ownership:
+    # greeting ระหว่าง active ticket ต้อง lock เหมือนกัน
     d = _decide("สวัสดีครับ", ticket_state={"state": "handoff"})
-    assert d.action != "locked"
+    assert d.action == "locked"
 
 
 @pytest.mark.parametrize("state", ["handoff", "open", "pending"])
@@ -443,14 +444,11 @@ def _fixture_contract_check(fx):
     _tseed = fx.get("timeline_seed") or {}
     _anchor = ({"item_id": str(_tseed["active_item_id"])}
                if _tseed.get("active_item_id") else None)
-    _exc = [e for s in (fx.get("shop_settings_seed") or [])
-            for e in (s.get("post_handoff_exceptions") or [])]
     d = _decide(turn["text"],
                 ticket_state={"state": fx["ticket_state"]}
                 if fx.get("ticket_state") else None,
                 claim_state=fx.get("claim_state_seed"),
-                active_anchor=_anchor,
-                post_handoff_exceptions=_exc or None)
+                active_anchor=_anchor)
     tde = fx.get("turn_decision_expect")
     if tde:
         err = vfx.tde_entry_error(
@@ -491,29 +489,49 @@ def test_shadow_fixture_actions_contract():
 
 # ── Phase 1F — contract inputs: exceptions / anchor / claim provenance ──────
 
-# ticket active + escape paths (mirror warranty_flow._post_handoff_gate)
+# ticket active = unconditional lock — Phase 2B.5 ลบทุก content-based
+# escape: claim info / product question / shop exception / greeting ทั้งหมด
+# ต้อง locked (content ไม่ override ticket ownership)
 
-def test_locked_escaped_by_shop_exception():
-    d = _decide("ทวนข้อมูลเคลมหน่อย", ticket_state={"state": "handoff"},
-                post_handoff_exceptions=["ทวนข้อมูลเคลม"])
-    assert d.action != "locked"
-
-
-def test_locked_escaped_by_claim_info():
-    # ลูกค้าส่งข้อมูลเคลมหลัง handoff → production gate ปล่อย
+def test_active_ticket_locks_claim_info():
     d = _decide("0812345678", ticket_state="open")
-    assert d.action != "locked"
-
-
-def test_locked_escaped_by_product_question():
-    d = _decide("มีสายชาร์จไหมครับ", ticket_state="pending")
-    assert d.action != "locked"
-
-
-def test_locked_no_escape_still_locked():
-    d = _decide("ยังไม่มีใครตอบเลย", ticket_state={"state": "handoff"},
-                post_handoff_exceptions=["ทวนข้อมูลเคลม"])
     assert d.action == "locked"
+
+
+def test_active_ticket_locks_claim_name():
+    d = _decide("สมชาย ใจดี", ticket_state={"state": "handoff"})
+    assert d.action == "locked"
+
+
+def test_active_ticket_locks_lone_name():
+    d = _decide("สมชาย", ticket_state={"state": "handoff"})
+    assert d.action == "locked"
+
+
+def test_active_ticket_locks_product_question():
+    d = _decide("มีสายชาร์จไหมครับ", ticket_state="pending")
+    assert d.action == "locked"
+
+
+def test_active_ticket_locks_image_placeholder():
+    d = _decide("[รูปภาพ]", ticket_state={"state": "open"})
+    assert d.action == "locked"
+
+
+def test_decide_turn_has_no_exceptions_param():
+    """post_handoff_exceptions ถูกลบ — content override ไม่มีสิทธิ์อยู่แล้ว."""
+    import inspect
+    assert "post_handoff_exceptions" not in \
+        inspect.signature(decide_turn).parameters
+
+
+def test_lone_name_is_claim_signal_when_collecting():
+    """parser เป็น validity owner เดียว: ชื่อเดี่ยว "สมชาย" ที่ extract ได้
+    = claim signal เมื่อ episode collecting (Phase 2B.5)."""
+    d = _decide("สมชาย",
+                claim_state={"stage": "collecting", "episode_id": "e1"})
+    assert d.action == "claim_collect"
+    assert "claim_resume" in d.flags
 
 
 # active anchor → product context

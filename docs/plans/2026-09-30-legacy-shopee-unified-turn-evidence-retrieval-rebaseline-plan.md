@@ -922,16 +922,23 @@ type ClaimOutcome = {
 - [x] M2: `test_issue_5f_claim_flow` wraps shopeechat imports in a try/finally dotenv stub; subprocess import-purity test asserts zero `load_dotenv` calls regardless of collection order.
 - [x] `_claim_episode_fence` deleted — filters inlined in the two primitives; storage helper count unchanged.
 
-#### Commit 2B.5 — ticket close semantics and field persistence (partially unblocked by 2B.4 — not complete)
+#### Commit 2B.5 — ticket close semantics and field persistence ✅ (working tree verified — pending review/commit)
 
-**Files:** modify `warranty_flow.py` and existing Phase 2A fixtures/tests; update SRS/log.
+**Files:** modified `warranty_flow.py`, `warranty.py`, `turn_decision.py`, `app.py`, `chat_v2.py` + Phase 2A fixtures/tests; updated SRS/log.
 
 - [x] Delete the closed-ticket `clear_claim_state` branch; close changes ownership only. *(done in 2B.4 as one-owner prerequisite — closed early)*
-- [~] Un-xfail `p2a-claim-ticket-closed-keeps-state`, `-product-question`, and `-phone-resume`. *(`-product-question` and `-phone-resume` flipped to positive + green; `-keeps-state` remains incident — claim state now survives close, but greeting still re-escalates to handoff: post-handoff ownership axis, not lifecycle clearing)*
-- [ ] Fix lone-name persistence at the existing parser/persistence owner and delete duplicate branch-local validation.
+- [x] Un-xfail `p2a-claim-ticket-closed-keeps-state`, `-product-question`, and `-phone-resume`. *(all green — `-keeps-state` flipped to positive; BUG-D catch-all that re-escalated closed-ticket greetings is deleted)*
+- [x] Fix lone-name persistence at the existing parser/persistence owner and delete duplicate branch-local validation. *(`extract_customer_info` is sole name-validity owner: final gate 2–40 chars, no digit, space not required; `_merge_claim_slots` is precedence-only; 12 duplicate `len≤40+" "+digit` sites deleted; history scan keeps only contextual denylist)*
 - [x] Un-xfail `p2a-claim-collect-name-phone` only after name and phone persist through the same episode. *(green — same episode, fenced merge)*
+- [x] Unconditional active-ticket lock: `handoff/open/pending` → wait-admin for every message class — no claim-info/product/shop-exception escapes, no claim writes, no re-POST. `closed/resolved/bot` → normal pipeline; episode unchanged.
+- [x] **Boundary correction (review H1/H2/M3):** lock owner = exactly one site at `_chat_impl` entry — runs before v3/v2 dispatch, `_db()`, vision, persona, TurnDecision shadow, deterministic responders, intent/retrieval/LLM. `_build_post_handoff_response` is wait-only: `handoff_to_admin=False`, `handoff_reason=None`, routing path `"human_wait"` (flag/reason/path="handoff" are new-handoff *commands* for downstream callers — never emitted by the waiting state). Duplicate runtime gates removed from `chat_v2._check_deterministic`, `handle_warranty_flow`, `handle_warranty_flow_legacy`, and the inner `_chat_impl` gate; `turn_decision` keeps pure `locked` classification only.
+- [x] Legacy confirm-correction persists via `_claim_transition` (v2 parity — previously rebuilt ctx only).
+- [x] Structural audit: BUG-D branch=0, `claim_info_incomplete` producer=0, `_QUESTION_MARKERS`/`_is_question_msg`=0, escape helpers (`_post_handoff_escape`/`_post_handoff_gate`/`_get_post_handoff_exceptions`/`post_handoff_exceptions`/`_is_post_handoff_exception`/`_is_post_handoff_product_q`)=0, duplicate name validators outside parser=0 (contextual history denylist preserved), `_claim_lifecycle`=1, `_claim_transition`=1, storage writers=2, new helpers=0, runtime −201 LOC net.
+- [x] Latent `NameError` fixed: legacy `_is_post_handoff_product_q` (v2-only scope) → inline `_is_product_q` from module kw constants.
 
-**Exit:** closing and reopening a conversation cannot erase or resolve a claim episode.
+**Verification (fresh, post-boundary-correction):** replay+5f+contract+turn_decision+shadow `265 passed, 19 skipped, 8 xfailed`; sibling suites `79 passed`; handoff transport standalone `38/38`; `npx tsc --noEmit` clean; `npm run build` green; py_compile 5 touched files; `git diff --check` clean. `test_anger_detection_regression` 11 failures identical to baseline `72c325e` (offline `_send_handoff` POST — pre-existing env limitation, not this diff).
+
+**Exit:** closing and reopening a conversation cannot erase or resolve a claim episode; active ticket is an unconditional ownership lock; lone names accepted by the parser persist; corrections persist through the transition owner.
 
 #### Commit 2B.6 — explicit admin claim outcome
 

@@ -195,10 +195,12 @@ def test_merge_claim_slots_fill_once_and_correction():
     s = merge({"name": "", "phone": "0999999999", "order_id": ""},
               claim_state=seed)
     assert s["phone"] == "0999999999" and s["name"] == "สมชาย ใจดี"
-    # invalid name shape (>40 chars / no space / digits) is dropped
-    s = merge({"name": "x" * 50, "phone": "", "order_id": ""},
+    # Phase 2B.5 — merge is precedence-only: parser (extract_customer_info)
+    # owns name validity, so a lone name must survive merge; over-40/digit
+    # rejection is pinned at the parser, not re-judged here
+    s = merge({"name": "สมชาย", "phone": "", "order_id": ""},
               claim_state={})
-    assert s["name"] is None
+    assert s["name"] == "สมชาย"
 
 
 def test_merge_claim_fields_skips_none_and_empty(coll):

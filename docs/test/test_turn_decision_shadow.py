@@ -174,10 +174,16 @@ def test_shadow_human_request_is_handoff(monkeypatch):
 
 
 def test_shadow_ticket_active_is_locked(monkeypatch):
+    """active ticket → boundary lock returns wait-only BEFORE the shadow
+    runs — no TurnDecisionShadow step, no handoff-command fields.
+    (pure `locked` classification stays pinned in test_turn_decision.py)"""
     resp = _run(monkeypatch, _fx("lock", "ยังไม่มีใครตอบเลย",
                                  ticket_state="open"))
-    s = _shadow_steps(resp)[0]
-    assert s["action"] == "locked", s
+    assert resp.handoff_to_admin is False
+    assert resp.handoff_reason is None
+    assert (resp.routing_decision or {}).get("path") == "human_wait"
+    assert _shadow_steps(resp) == [], \
+        "boundary lock must run before the TurnDecision shadow"
 
 
 # ── fixture sweep — observe-only comparison data for Phase 1C ─────────────
@@ -208,6 +214,17 @@ def test_shadow_sweep_all_fixtures(monkeypatch, capsys):
                 f"but {len(records)} user turns")
         for i, rec in enumerate(records):
             steps = _shadow_steps(rec["resp"])
+            _resp = rec["resp"]
+            # Phase 2B.5 boundary — the active-ticket lock runs at /chat
+            # entry BEFORE the shadow executes, so boundary-locked turns
+            # legitimately carry no TurnDecisionShadow step (wait-only
+            # contract is asserted instead).
+            if ((getattr(_resp, "routing_decision", None) or {})
+                    .get("path") == "human_wait"
+                    and getattr(_resp, "handoff_to_admin", False) is False):
+                rows.append((fx["id"], rec["turn"][:40],
+                             "boundary_lock", "-", ""))
+                continue
             if not steps:
                 bad += 1
                 rows.append((fx["id"], rec["turn"][:40], "MISSING", "", ""))
@@ -328,8 +345,6 @@ def test_shadow_reads_timeline_once_for_claim_and_anchor(monkeypatch):
     monkeypatch.setattr(
         _cp_shadow, "get_active_product",
         lambda cid: pytest.fail("get_active_product ต้องไม่ถูกเรียก"))
-    monkeypatch.setattr(app, "_get_post_handoff_exceptions",
-                        lambda *a, **k: [])
     captured = _capture_decide(monkeypatch)
     steps: list = []
     app._turn_decision_shadow(_stub_req(), [], steps)
@@ -346,37 +361,24 @@ def test_shadow_no_anchor_no_claim_passes_none(monkeypatch):
     monkeypatch.setattr(_cp_shadow, "load_timeline", lambda cid: None)
     monkeypatch.setattr(_cp_shadow, "load_claim_state", lambda cid: None)
     monkeypatch.setattr(_cp_shadow, "get_active_product", lambda cid: None)
-    monkeypatch.setattr(app, "_get_post_handoff_exceptions",
-                        lambda *a, **k: [])
     captured = _capture_decide(monkeypatch)
     app._turn_decision_shadow(_stub_req(), [], [])
     assert captured.get("claim_state") is None
     assert captured.get("active_anchor") is None
 
 
-def test_shadow_inactive_ticket_skips_exceptions_query(monkeypatch):
-    """ticket ไม่ active → ห้าม query shop_settings เลย."""
+def test_shadow_active_ticket_never_forwards_exceptions(monkeypatch):
+    """Phase 2B.5 — content override ถูกลบ: shadow ต้องไม่ส่ง
+    post_handoff_exceptions เข้า decide_turn ไม่ว่า ticket จะ active หรือไม่."""
     monkeypatch.setenv("USE_TURN_DECISION_SHADOW", "1")
     monkeypatch.setattr(_cp_shadow, "load_timeline", lambda cid: None)
     monkeypatch.setattr(_cp_shadow, "load_claim_state", lambda cid: None)
     monkeypatch.setattr(_cp_shadow, "get_active_product", lambda cid: None)
-    monkeypatch.setattr(
-        app, "_get_post_handoff_exceptions",
-        lambda *a, **k: pytest.fail("inactive ticket ห้าม query exceptions"))
-    _capture_decide(monkeypatch)
-    app._turn_decision_shadow(_stub_req(ticket_state=None), [], [])
-
-
-def test_shadow_active_ticket_forwards_exceptions(monkeypatch):
-    monkeypatch.setenv("USE_TURN_DECISION_SHADOW", "1")
-    monkeypatch.setattr(_cp_shadow, "load_timeline", lambda cid: None)
-    monkeypatch.setattr(_cp_shadow, "load_claim_state", lambda cid: None)
-    monkeypatch.setattr(_cp_shadow, "get_active_product", lambda cid: None)
-    monkeypatch.setattr(app, "_get_post_handoff_exceptions",
-                        lambda shop, plat: ["ทวนข้อมูลเคลม"])
     captured = _capture_decide(monkeypatch)
     app._turn_decision_shadow(_stub_req(ticket_state="open"), [], [])
-    assert captured.get("post_handoff_exceptions") == ["ทวนข้อมูลเคลม"]
+    assert "post_handoff_exceptions" not in captured, captured
+    app._turn_decision_shadow(_stub_req(ticket_state=None), [], [])
+    assert "post_handoff_exceptions" not in captured, captured
 
 
 def test_shadow_timeline_failure_falls_back_to_empty_snapshot(monkeypatch):
@@ -388,8 +390,6 @@ def test_shadow_timeline_failure_falls_back_to_empty_snapshot(monkeypatch):
     monkeypatch.setattr(_cp_shadow, "load_timeline", _boom)
     monkeypatch.setattr(_cp_shadow, "load_claim_state", lambda cid: None)
     monkeypatch.setattr(_cp_shadow, "get_active_product", lambda cid: None)
-    monkeypatch.setattr(app, "_get_post_handoff_exceptions",
-                        lambda *a, **k: [])
     captured = _capture_decide(monkeypatch)
     steps: list = []
     app._turn_decision_shadow(_stub_req(), [], steps)  # ห้าม raise
@@ -408,8 +408,6 @@ def test_shadow_trace_carries_no_snapshot_payload(monkeypatch):
                      "active_item_id": "3004"})
     monkeypatch.setattr(_cp_shadow, "load_claim_state", lambda cid: None)
     monkeypatch.setattr(_cp_shadow, "get_active_product", lambda cid: None)
-    monkeypatch.setattr(app, "_get_post_handoff_exceptions",
-                        lambda *a, **k: [])
     steps: list = []
     app._turn_decision_shadow(_stub_req(message="ลูกค้าแจ้ง 0812345678"),
                               [{"role": "user", "text": "ประวัติ"}], steps)

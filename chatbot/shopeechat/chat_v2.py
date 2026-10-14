@@ -435,7 +435,6 @@ def _check_deterministic(req, ctx: dict, history: list[dict], db) -> dict | None
     # ⚡ ย้าย logic จาก legacy บรรทัด 758-2440 มาเป็น helper
     #    เก็บ logic เดิมไว้ ไม่แก้ เพราะ deterministic flow ทำงานถูกแล้ว
     #    แค่ย้ายมาเป็น function แยก ไม่ mutate shared state
-    from . import warranty as _warranty_mod
 
     # 2.1 Order lookup
     _resp = _check_order_lookup(req, ctx, history, db)

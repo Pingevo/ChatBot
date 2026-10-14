@@ -694,6 +694,11 @@ def extract_customer_info(message: str) -> dict:
     # ⚡ NEW-1 fix — ลบ regex fallback แบบเดิมทิ้ง: เดิมลบ "ชื่อ"/คำสุภาพออกจากข้อความ
     #   แล้วเอาที่เหลือเป็นชื่อ → ทำลายคำ ("เชื่อม"→"เ ม") และเก็บขยะเป็นชื่อ
     #   ตอนนี้: NER → English-name pattern → จบ — ขาดชื่อดีกว่าเก็บขยะ
+    # ⚡ 2B.5 — name validity contract อยู่ตรงนี้ที่เดียว (หลัง NER+EN fallback):
+    #   non-empty name ต้องยาว 2-40 ตัว และห้ามมี digit — caller เช็ค bool เท่านั้น
+    if name and (len(name) < 2 or len(name) > 40
+                 or any(c.isdigit() for c in name)):
+        name = ""
     return {"name": name, "phone": phone, "order_id": order_id}
 
 
