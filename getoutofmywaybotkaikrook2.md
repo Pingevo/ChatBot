@@ -3390,3 +3390,21 @@ S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mon
 - **Impl**: `commitHandoffState` ใช้ `upsert: !opts.expectedClaimEpisodeId` + `committed: Boolean(doc)` · `handoffToAdmin` เปลี่ยน `if (E && meta)` เป็น `if (E)` · แก้ comment `statusConversationService.ts` + docs `SRS_SSD.md`/`schema.md`/roadmap ให้ตรง flow จริง
 - **GREEN & Fresh Verification**: TS ownership transport **244/244** · Python handoff transport **47/47** · claim contract **52+1s** · canonical Phase 2B batch **312 pass/19 skip/8 xfail** · error-policy **38/38** · boundary **20/20** · config-failclosed **4/4** · enable-checkpoint **18/18** · idempotency **71/71** · recovery-freshness **59/59** · runtime-mongo-safety **110/110** · production-races **37/37** · replay isolation exit 0 · fixture validator all rows · `py_compile` OK · `tsc --noEmit` clean · `npm run build` pass · `git diff --check` clean · anger **11 fail = baseline signature เดิม** (`72c325e`, offline `_send_handoff` POST — รายงานแยก ไม่นับ green)
 - **Pre-commit staging**: stage เฉพาะ Phase 2B.6 20 entries (แยก Phase 2D plan hunks ใน roadmap/active log และแยก `conversations_shp` duplicate audit + `docs/plans/2026-10-14-conversations-shp-duplicate-remediation-plan.md` ไว้ใน unstaged working tree) · ยังไม่ commit/push/deploy — รอ review
+
+##### Phase 2B.6 Commit Closeout (committed — 2026-10-14)
+
+- **Commit 1**: `34a0756` `fix: make claim outcomes episode authoritative` — 20 files, +2128/-148 (13 runtime + 3 test + SRS/schema + roadmap Commit-2B.6 hunk + active log 2B.6 blocks)
+- **Final contracts (frozen)**:
+  - claim metadata owner = `recordClaimHandoff` (fenced write + typed `written|already_terminal|stale_episode`)
+  - outcome owner = `applyClaimOutcome` (CAS `claim_outcome.episode_id != ep` + `logAdminEvent` dedupe/repair)
+  - ownership owner = `commitHandoffState` (CAS เดียว: status/assigned_to/pending/reopen/event-id + episode fence)
+  - atomic expected-episode fence: `{active_claim_episode_id: E, claim_outcome.episode_id: {$ne: E}}` ใน `findOneAndUpdate` เดียวกัน
+  - missing-meta claim commit ห้าม upsert (`upsert: !expectedClaimEpisodeId`, `committed: Boolean(doc)`)
+  - terminal/stale classify บน initial meta + CAS-miss reread ก่อน generic converge/emit
+  - Python `_send_handoff` confirm เฉพาะ HTTP ok + `outcome.state ∈ {assigned, queued}` (converged-200 `outcome:null` ≠ success)
+- **RED→GREEN**: R21 terminal interleave gate↔CAS / R22 E2 interleave → RED ก่อน fix, GREEN หลัง atomic fence · R25 missing-meta no-upsert RED (`committed=true ep-ghost`) → GREEN · final **244/244**
+- **Frozen verification**: TS 244/244 · Python transport 47/47 · claim contract 52+1s · canonical batch 312/19s/8x · error-policy 38/38 · boundary 20/20 · config-failclosed 4/4 · enable-checkpoint 18/18 · idempotency 71/71 · recovery-freshness 59/59 · runtime-mongo-safety 110/110 · production-races 37/37 · replay isolation exit 0 · fixture validator pass · py_compile/tsc/build/diff-check clean
+- **anger suite 11 fail** = baseline-identical (`72c325e`, offline `_send_handoff` POST) — รายงานแยก ไม่นับ green
+- **botworker `inFlight` promise-identity leak** (`botWorkerService.ts:1897` add chained promise แต่ delete `p`) = pre-existing จาก commit `43d1ff1` — separate task ไม่รวมใน commit นี้
+- **Phase 2D plan hunks + `conversations_shp` duplicate-remediation plan/blocks ยังไม่รวม** — คงไว้ unstaged/untracked ใน working tree
+- **No push/PR/deploy/botworker/provider/real Mongo/port 8010** — next: Phase 2B.7 residual deletion + botworker inFlight leak fix (parallel tracks)
