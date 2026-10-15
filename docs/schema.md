@@ -1416,6 +1416,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `order_anchors` | array? | list ของ order ที่ลูกค้าส่งมา {order_sn, mentioned_at, ...} |
 | `active_order_sn` | string? | order ล่าสุด (อัปเดตทุกครั้งที่มี order anchor ใหม่) |
 | `claim_state` | object? | warranty claim episode — ดู field breakdown ด้านล่าง (2B.4) |
+| `subject_set` | object? | **2C.2 — authoritative conversation subject set** (owner = `conversation_products.record_subject_set`, read = `get_subject_set`) — ดู breakdown ด้านล่าง |
 | `last_updated` | Date | |
 
 **Indexes:** `{conversation_id: 1} unique sparse` — declared ที่ index owner `ChatAdminWeb/src/backend/db/mongoClient.ts::ensureIndexes` ผ่าน `COLLECTIONS.conversationProducts` (config.ts) — Python request path ไม่สร้าง index; **deploy gate: `BLOCKED_BY_CONVERSATION_PRODUCTS_UNIQUENESS_AUDIT`** — ต้อง census duplicate + ยืนยัน index บน real DB ก่อนถือว่า production-safe
@@ -1432,13 +1433,26 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `customer_name`/`customer_phone` | string? | **identity allowlist** — reuse ข้าม episode ได้ |
 | `customer_order_id`/`purchase_date`/`has_image` | various | **case evidence — ไม่ข้าม episode**; terminal episode เก็บเป็น audit record |
 
+**subject_set fields (Phase 2C.2 — decision owner = `decide_subject_set`, writer = `record_subject_set`, reader = `get_subject_set`, resolver = `resolve_subjects`):**
+| Field | Type | หมายเหตุ |
+|-------|------|---------|
+| `subject_ids` | array[string] | canonical **item_id strings เท่านั้น** (normalized/deduped/sorted) — model code/keyword เป็น evidence resolve เป็น item_id ก่อน persist; variant detail อยู่บน `products[]` entry ไม่ใช่ subject id |
+| `source_turn_id` | string? | turn ที่ตัดสิน (None เมื่อ transport ไม่มี turn id) |
+| `relation` | string | `single`/`compare`/`alternatives`/`bundle` |
+| `requested_operations` | array[string] | ops ของ **turn ที่ตัดสิน** — snapshot replace ไม่สะสม (consume turn ไม่เขียนทับ) |
+| `confidence` | number | 0-1 (anchor-derived bootstrap = 0.5 — เฉพาะ effective view ไม่ถูก persist เว้นแต่ decision จริง) |
+| `rev` | number | **CAS fence token — +1 ต่อ committed write** (convention เดียวกับ `fencing_token` ของ lease docs); writer เท่านั้นที่ set — caller/proposed set ใช้ 0 เสมอ; pre-token doc (เขียนก่อนมี field) parse เป็น 0 |
+| `updated_at` | Date | |
+
+**Update semantics:** dotted `$set:{subject_set,last_updated}` เท่านั้น — CAS fence = **`subject_set.rev` == expected_prior.rev** (monotonic — semantic snapshot อย่างเดียวปิด ABA ไม่ได้ เพราะ state กลับมาเท่าเดิมได้): `prior.rev>0` → `subject_set.rev:<rev>` · `prior.rev=0` → `subject_set.rev:null` (missing∨null = pre-token doc — write ไม่ persist 0) · `expected_prior=None` → `subject_set:null` (absent∨null — doc ที่มี set อยู่ไม่ match → fail-safe); stale writer miss → reread ครั้งเดียวคืน winner ไม่ retry (caller แยก committed/lost ด้วย `==` — `rev` compare=False จึงเป็น semantic equality: return≠proposed = lost-to-winner ห้ามนับเป็น persisted); absent doc → `insert_one` minimal `{conversation_id, subject_set(rev=1), platform?, shop?, last_updated}` ใต้ `{conversation_id:1}` unique เดิม (E11000 → reread winner) — **ห้ามสร้าง `products`/`active_item_id`/`order_anchors`/`claim_state` ปลอม**; `subject_ids` = canonical item_id strings เท่านั้น (`_norm_subject_ids` digit-canonical domain — model code/arbitrary string refuse `→None`); ≤1 subject-set read + 0-1 write ต่อ turn
+
 **product entry:** `{item_id, name, source: user_item_card|user_variation_card|user_order|bot_suggestion, mentioned_at, is_anchor, card?}`
 
 **Access:**
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
-| Read | load_timeline, get_active_product, get_suggestion_latest, resolve_active_by_message, get_active_order_sn, get_order_anchors, load_claim_state | Python `/chat` (app.py, chat_v2, warranty_flow, order_flow) |
-| Write/Update | save_timeline, add_product, add_order_anchor, transition_claim_state (fenced episode+stage CAS — new-episode whole-state only, insert+E11000 reconcile), merge_claim_fields (fenced episode+stage dotted partial update — same-episode field merge AND terminal transition) | Python `/chat` |
+| Read | load_timeline, get_active_product, get_suggestion_latest, get_subject_set, materialize_subject_cards, get_active_order_sn, get_order_anchors, load_claim_state | Python `/chat` (app.py, chat_v2, warranty_flow, order_flow) |
+| Write/Update | save_timeline, add_product, add_order_anchor, record_subject_set (fenced rev CAS — `subject_set.rev` +1/commit, minimal absent-doc insert + E11000 reconcile), transition_claim_state (fenced episode+stage CAS — new-episode whole-state only, insert+E11000 reconcile), merge_claim_fields (fenced episode+stage dotted partial update — same-episode field merge AND terminal transition) | Python `/chat` |
 
 **หน้าที่เข้าถึง:** ไม่มี UI ตรง — Python bot ใช้ภายใน
 

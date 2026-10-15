@@ -5,7 +5,8 @@ test_timeline_card_refresh.py — timeline restore ต้องคืน card �
 ที่มา (shadow gen thitirat.rac, 2026-09-18): หลัง fix variant image แล้ว
 generate ใหม่ยังโชว์ desc banner th-11134208 — เพราะ card ที่เก็บใน
 conversation_products เป็น snapshot จากโค้ดเก่า ถูก replay ผ่าน
-CONV-ACTIVE/resolve_active_by_message โดยไม่ rebuild (ไม่มี TTL, self-perpetuate)
+CONV-ACTIVE/subject-resolution path (ปัจจุบัน _materialize_card/
+materialize_subject_cards) โดยไม่ rebuild (ไม่มี TTL, self-perpetuate)
 
 ตรวจ:
 1. unit-level entry (variants ตัวเดียว) → card สด: image_url = variant image จริง
@@ -72,7 +73,7 @@ def main() -> int:
                 "variants": [{"name": _UNIT_MODEL}],
             },
         }], _ITEM_ID)
-        card = cp.resolve_active_by_message(_CID, "ตัวนี้ยังมีไหม")
+        card = cp.get_active_product(_CID)
         total += 4
         passed += _check("unit entry → variant image สด",
                          (card or {}).get("image_url"), _UNIT_IMG)

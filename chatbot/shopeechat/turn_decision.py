@@ -104,14 +104,27 @@ TurnPrimaryAction = Literal[
 TurnOwnership = Literal["bot", "human", "unknown"]
 
 
+TurnSubjectScope = Literal[
+    "none", "explicit", "current_single", "current_set"]
+
+_TURN_SUBJECT_SCOPES = frozenset(
+    {"none", "explicit", "current_single", "current_set"})
+
+
 @dataclass(frozen=True)
 class TurnNeed:
-    """ความต้องการอิสระ 1 รายการที่สกัดได้ใน turn เดียว."""
+    """ความต้องการอิสระ 1 รายการที่สกัดได้ใน turn เดียว.
+
+    subject_scope/subject_count = structured deictic reference จาก
+    interpretation boundary (intent Pass-1) — kind=="product" เท่านั้น;
+    resolver validate กับ persisted ConversationSubjectSet"""
     kind: TurnNeedKind
     operation: TurnNeedOp
     subject_refs: tuple[str, ...] = ()
     confidence: float = 1.0
     provenance: tuple[str, ...] = ()
+    subject_scope: TurnSubjectScope = "none"
+    subject_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +137,9 @@ class TurnPlan:
     requires_clarification: bool
     normalized_message: str = ""
     flags: frozenset[str] = field(default_factory=frozenset)
+    # confidence ของ interpretation boundary ที่ผลิต plan นี้ — resolver
+    # ใช้ gate signal ต่ำ-confidence (0 = ไม่มี intent_result)
+    intent_confidence: float = 0.0
 
 
 def _normalize(message: str) -> tuple[str, set[str], tuple[str, ...]]:
@@ -221,6 +237,16 @@ def decide_turn(
     intent: dict = intent_result if isinstance(intent_result, dict) else {}
     intent_name = intent.get("intent")
     intent_conf = float(intent.get("confidence") or 0.0)
+    # structured subject deictic signal — validate typed contract, no language
+    # interpretation here (resolver validates against persisted set)
+    _subj_scope = intent.get("subject_scope")
+    if _subj_scope not in _TURN_SUBJECT_SCOPES:
+        _subj_scope = "none"
+    try:
+        _subj_count = intent.get("subject_count")
+        _subj_count = None if _subj_count is None else int(_subj_count)
+    except (TypeError, ValueError):
+        _subj_count = None
 
     # 1. normalize + lifecycle & ownership axes
     norm, flags, item_ids = _normalize(message)
@@ -241,6 +267,7 @@ def decide_turn(
             requires_clarification=False,
             normalized_message=norm,
             flags=frozenset(flags | {"post_handoff"}),
+            intent_confidence=intent_conf,
         )
 
     # 3. system/noise/placeholder — เหลือว่างหลัง cleanup
@@ -261,6 +288,7 @@ def decide_turn(
                 requires_clarification=False,
                 normalized_message="",
                 flags=frozenset(flags),
+                intent_confidence=intent_conf,
             )
         return TurnPlan(
             primary_action="no_reply",
@@ -270,6 +298,7 @@ def decide_turn(
             requires_clarification=False,
             normalized_message="",
             flags=frozenset(flags),
+            intent_confidence=intent_conf,
         )
     if not norm:
         return TurnPlan(
@@ -280,6 +309,7 @@ def decide_turn(
             requires_clarification=True,
             normalized_message="",
             flags=frozenset(flags),
+            intent_confidence=intent_conf,
         )
 
     low = norm.lower()
@@ -292,6 +322,8 @@ def decide_turn(
                   refs: tuple[str, ...] = (), conf: float = 1.0,
                   prov: tuple[str, ...] = ()) -> None:
         full_prov = tuple(dict.fromkeys(prov + media_prov))
+        _scope = _subj_scope if kind == "product" else "none"
+        _count = _subj_count if kind == "product" else None
         for idx, existing in enumerate(needs):
             if existing.kind == kind and existing.operation == op:
                 merged_refs = tuple(dict.fromkeys(existing.subject_refs + refs))
@@ -302,6 +334,8 @@ def decide_turn(
                     subject_refs=merged_refs,
                     confidence=max(existing.confidence, conf),
                     provenance=merged_prov,
+                    subject_scope=_scope,
+                    subject_count=_count,
                 )
                 return
         needs.append(TurnNeed(
@@ -310,6 +344,8 @@ def decide_turn(
             subject_refs=refs,
             confidence=conf,
             provenance=full_prov,
+            subject_scope=_scope,
+            subject_count=_count,
         ))
 
     # 4. explicit human request (predicate เจ้าของ: handoffs)
@@ -530,4 +566,5 @@ def decide_turn(
         requires_clarification=requires_clarification,
         normalized_message=norm,
         flags=frozenset(flags),
+            intent_confidence=intent_conf,
     )

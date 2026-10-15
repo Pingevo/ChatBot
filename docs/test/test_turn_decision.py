@@ -850,3 +850,50 @@ def test_explicit_noise_expectation_is_consumed_not_skipped():
     bad = copy.deepcopy(fx)
     bad["turn_decision_expect"][0]["primary_action"] = "human_wait"
     assert _fixture_contract_check(bad) is not None  # mutation must flag
+
+
+# ═══ 2C.3 slice-1 — TurnNeed.subject_scope/subject_count ════════════════════
+
+def _needs_of(plan):
+    return {(n.kind, n.operation): n for n in plan.needs}
+
+
+def test_product_need_carries_structured_subject_scope():
+    p = _decide("iphone หละแนะนำอันไหน 2 อันนี้", history=_PROD_HISTORY,
+                intent_result={"intent": "product_question",
+                               "confidence": 0.8,
+                               "subject_scope": "current_set",
+                               "subject_count": 2})
+    prod = [n for n in p.needs if n.kind == "product"]
+    assert prod, "expected a product need"
+    assert all(n.subject_scope == "current_set" for n in prod)
+    assert all(n.subject_count == 2 for n in prod)
+
+
+def test_non_product_needs_never_carry_scope():
+    p = _decide("สั่งซื้อของเลขที่ SHP12345",
+                intent_result={"intent": "order_status", "confidence": 0.9,
+                               "subject_scope": "current_set",
+                               "subject_count": 2})
+    for n in p.needs:
+        if n.kind != "product":
+            assert n.subject_scope == "none"
+            assert n.subject_count is None
+
+
+def test_no_intent_scope_defaults_none():
+    p = _decide("มีพาวเวอร์แบงค์ไหม")
+    for n in p.needs:
+        assert n.subject_scope == "none"
+        assert n.subject_count is None
+
+
+def test_invalid_scope_in_intent_normalizes_none():
+    p = _decide("มีพาวเวอร์แบงค์ไหม",
+                intent_result={"intent": "product_question",
+                               "confidence": 0.8,
+                               "subject_scope": "bogus",
+                               "subject_count": "x"})
+    for n in p.needs:
+        assert n.subject_scope == "none"
+        assert n.subject_count is None

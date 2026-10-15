@@ -571,42 +571,26 @@ def _recent_qa_pairs(history: list[dict] | None, n: int = 10) -> list[dict]:
     return _flat
 
 
-def _turn_decision_shadow(req: ChatRequest, history: list[dict],
-                          steps: list[dict]) -> None:
-    """Shadow-run the TurnPlan contract (observe-only, Phase 1B / 2C.1).
+def _turn_decision_shadow(plan, steps: list[dict]) -> None:
+    """Serialize the turn's TurnPlan into a trace step (observe-only,
+    Phase 1B / 2C.1 / 2C.3).
 
     Trace-only: appends a "TurnDecisionShadow" step carrying
     primary_action/needs/ownership/claim_stage/requires_clarification/
     flags/message_len — never raw message, history, or snapshot item_id/PII.
     Never mutates req, never raises, never affects the response.
-    Off unless USE_TURN_DECISION_SHADOW=1.
+    Off unless USE_TURN_DECISION_SHADOW=1. The plan passed in is the same
+    object consumed by production — this fn never calls decide_turn itself.
     """
     if os.environ.get("USE_TURN_DECISION_SHADOW") != "1":
         return
+    if plan is None:
+        # callsite เดียวมาถึงจุดนี้ได้เฉพาะตอน decide_turn raise → log เป็น
+        # ok=False (plan_unavailable) — ไม่ใช่ข้ามเงียบ
+        steps.append({"name": "TurnDecisionShadow", "ok": False,
+                      "error": "plan_unavailable"})
+        return
     try:
-        from . import turn_decision as _td
-        # Phase 1F — minimal context snapshot: timeline read ครั้งเดียว
-        #   (claim_state + active_item_id จาก doc เดียวกัน — ไม่เรียก
-        #   get_active_product เพราะ materialize card ไปอ่าน product DB
-        #   และเขียน live cache โดยไม่จำเป็น)
-        _claim = None
-        _anchor = None
-        try:
-            from . import conversation_products as _cp_sh
-            _doc = _cp_sh.load_timeline(req.conversation_id) or {}
-            _claim = _doc.get("claim_state")
-            _aid = _doc.get("active_item_id")
-            if _aid:
-                _anchor = {"item_id": str(_aid)}
-        except Exception:
-            pass
-        plan = _td.decide_turn(
-            req.message or "",
-            history=history,
-            ticket_state=req.ticket_state,
-            claim_state=_claim,
-            active_anchor=_anchor,
-        )
         steps.append({
             "name": "TurnDecisionShadow",
             "ok": True,
@@ -617,6 +601,8 @@ def _turn_decision_shadow(req: ChatRequest, history: list[dict],
                     "operation": n.operation,
                     "confidence": n.confidence,
                     "provenance": list(n.provenance),
+                    "subject_scope": n.subject_scope,
+                    "subject_count": n.subject_count,
                 }
                 for n in plan.needs
             ],
@@ -683,6 +669,19 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
     #   → ตัวแปร unbound → 500 (พบตอน replay QA 12 แชท: nt_sumittra Q2 / aroranuch Q1,Q11 ฯลฯ)
     _intent_sub: str | None = None
     _is_conv_active = False
+    # ⚡ Phase 2C.2 — persisted ConversationSubjectSet state (authoritative)
+    #   _subject_stored    = raw stored set (CAS prior สำหรับ record)
+    #   _subject_effective = stored หรือ anchor-derived view ที่ resolver ใช้
+    #   _subject_res       = SubjectResolution ของ turn นี้ (None = ข้าม)
+    #   _subject_ev        = evidence carrier → _record_suggestion_products
+    _subject_stored = None
+    _subject_effective = None
+    _subject_res = None
+    _subject_ev = None
+    _subject_products = ()
+    _subject_view_loaded = False
+    _sv = None
+    _turn_plan = None
 
     # ⚡ Phase 8 — resolve effective LLM context limit (per-request from admin config)
     #   ถ้า req.llm_context_limit ส่งมา → ใช้ค่านั้น (range 10-50)
@@ -805,11 +804,6 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             },
             "output": None,
         })
-
-        # ⚡ Phase 1B — TurnDecision shadow (observe-only, flag-off default):
-        #   contract อ่าน raw req.message ก่อน deterministic/handoff early
-        #   returns — intent_result ยังไม่มี ณ จุดนี้ → ส่ง None
-        _turn_decision_shadow(req, history, _steps)
 
         # ===== ดึง persona ของร้าน (Phase 3 — admin ตั้งชื่อตัวแทนบอทในหน้า /persona) =====
         # ถ้าร้านยังไม่ได้ตั้ง persona → persona_extra = "" → ใช้ SYSTEM_INSTRUCTION เดิม (default behavior)
@@ -1053,6 +1047,25 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         is_anchor=True,
                     )
                     print(f"[CONV-PRODUCTS] anchor added: item_id={_tagged_item_id} conv={req.conversation_id}", file=sys.stderr)
+                    # ⚡ Phase 2C.2 — explicit item card = highest precedence
+                    #   subject identity → single. mutually exclusive callsite
+                    #   (item-tag early return ไม่ถึง recorder choke ด้านล่าง)
+                    _sv_item = _cp.get_subject_set(req.conversation_id)
+                    _sv = _sv_item
+                    _subject_view_loaded = True
+                    _subject_stored = _sv_item.stored
+                    _subject_products = _sv_item.products
+                    _dec_item = _cp.decide_subject_set(
+                        _sv_item.stored, explicit_ids=(_tagged_item_id,),
+                        requested_operations=("item_card",))
+                    if _dec_item is not None:
+                        _w_item = _cp.record_subject_set(
+                            req.conversation_id, _dec_item,
+                            expected_prior=_sv_item.stored,
+                            platform=req.platform, shop=req.shop)
+                        if _w_item is not None:
+                            _subject_stored = _w_item
+                    _subject_effective = _subject_stored or _sv_item.effective
                 except Exception as _e:
                     print(f"[CONV-PRODUCTS] error adding anchor: {_e}", file=sys.stderr)
             if anchor_card:
@@ -1349,6 +1362,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 "target_device": _intent_result.get("target_device"),
                 "needs_description": _intent_result.get("needs_description"),
                 "general_qtype": _intent_result.get("general_qtype"),
+                "subject_scope": _intent_result.get("subject_scope"),
+                "subject_count": _intent_result.get("subject_count"),
             },
         })
 
@@ -1435,6 +1450,33 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             if _is_tax_invoice:
                 print(f"[INTENT] _is_tax_invoice=True from keyword fallback (intent={_intent_name} qtype={_intent_gq})", file=sys.stderr)
 
+        # ⚡ Phase 2C.3 — subject view + one authoritative TurnPlan (post-classify):
+        #   doc เดียวกัน (≤1 read/turn) → claim/anchor → decide_turn รับ
+        #   _intent_result ของ Pass-1 เดิม → product need ถือ
+        #   subject_scope/subject_count ที่ resolver validate — ห้ามอ่าน
+        #   scope/count จาก _intent_result โดยตรง (single owner = plan)
+        if req.conversation_id and not _subject_view_loaded:
+            _sv = conversation_products.get_subject_set(req.conversation_id)
+            _subject_view_loaded = True
+            _subject_stored = _sv.stored
+            _subject_effective = _sv.effective
+            _subject_products = _sv.products
+        try:
+            from . import turn_decision as _td
+            _turn_plan = _td.decide_turn(
+                req.message or "",
+                history=history,
+                ticket_state=req.ticket_state,
+                claim_state=(_sv.claim_state if _sv else None),
+                active_anchor=(
+                    {"item_id": _sv.active_item_id}
+                    if _sv and _sv.active_item_id else None),
+                intent_result=_intent_result,
+            )
+        except Exception:
+            _turn_plan = None
+        _turn_decision_shadow(_turn_plan, _steps)
+
         # ===== Tax invoice + TISI handlers (ย้ายไป handoffs.post_intent_handoffs) =====
         _phr = _handoffs.post_intent_handoffs(req, {
             "is_tax_invoice": _is_tax_invoice,
@@ -1516,6 +1558,56 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         _anchor_compare_ctx: dict = {}  # {current: card, previous: card}
         _is_partial_comp = False  # ⚡ partial comparison: 1 anchor + model keyword (เช่น "ตัวนี้กับ swim ต่างกันยังไง")
 
+        # ⚡ Phase 2C.2 — subject set: ≤1 load, 1 resolve ต่อ turn
+        #   explicit evidence (item card / image anchor / model kw / claim flow)
+        #   → resolver ไม่ consult (explicit ชนะ precedence เสมอ)
+        _subject_ev = {"explicit_ids": (), "pair_ids": (), "ops": (),
+                       "stored": _subject_stored}
+        # ⚡ Phase 2C.3 — resolver อ่าน subject signal ทั้งหมดจาก TurnPlan
+        #   เดียวที่คำนวณ post-classify (ไม่ใช่ _intent_result ตรง):
+        #   scope/count จาก product need + signal conf จาก plan
+        _plan_scope = None
+        _plan_count = None
+        _plan_sig_conf = None
+        if _turn_plan is not None:
+            _plan_sig_conf = _turn_plan.intent_confidence
+            for _n in _turn_plan.needs:
+                if _n.kind == "product" and _n.subject_scope != "none":
+                    _plan_scope = _n.subject_scope
+                    _plan_count = _n.subject_count
+                    break
+        _subj_explicit = tuple(
+            str(i) for i in (
+                _tagged_item_id,
+                (_hybrid_anchor_card or {}).get("item_id"),
+            ) if i)
+        if _subj_explicit:
+            _subject_ev["explicit_ids"] = _subj_explicit
+        if not (_tagged_item_id or anchor_card or _hybrid_anchor_card
+                or _current_has_model or _is_claim_request):
+            _subject_res = conversation_products.resolve_subjects(
+                _subject_effective, (req.message or "").lower(),
+                subject_scope=_plan_scope,
+                subject_count=_plan_count,
+                signal_confidence=_plan_sig_conf)
+            if (_subject_res.outcome == "resolved"
+                    and _subject_res.subject_set):
+                _subject_ev["resolved"] = _subject_res.subject_set
+        if _subject_res and _subject_res.outcome == "clarify":
+            return ChatResponse(
+                answer=("ขอโทษค่ะ ลูกค้าหมายถึงสินค้าตัวไหนคะ "
+                        "ช่วยแจ้งชื่อรุ่นหรือส่งการ์ดสินค้าให้หน่อยนะคะ"),
+                products=[],
+                source="subject_clarify",
+                shop=req.shop,
+                model=model_name,
+                usage={"prompt": 0, "output": 0, "total": 0},
+                intent=_intent_result if isinstance(_intent_result, dict) else {},
+                web_search_used=False,
+                steps=list(_steps),
+                timing={"total": round(_time.time() - _total_start, 3)},
+            )
+
         # ===== Comparison follow-up =====
         # กรณี: ลูกค้าถาม "ต่างกันยังไง", "เปรียบเทียบ", "เทียบ" โดยไม่มี model keyword
         # แต่มี model ใน history → ดึง model จาก history มาเปรียบเทียบ
@@ -1529,114 +1621,60 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         )
         if _is_comparison_followup:
             print(f"[FOLLOWUP-COMP] triggered: msg={req.message!r}  history={len(history)}  has_model={_current_has_model}", file=sys.stderr)
-            # ⚡ ใช้ anchor history ก่อนดึง model keyword จาก history text
-            #   เพราะ extract_model_keywords ดึงชื่อแบรนด์/ซีรีส์ (iSUPER, SoundActiv) แทนชื่อรุ่น
-            #   และ [:3] ตัดทำให้รุ่นที่อยู่ด้านหลังหายไป (เช่น Swim หาย มีแค่ Run)
-            #   ถ้ามี 2+ anchor ใน timeline → ใช้ anchor ทั้งสองตัว ไม่ต้อง modify req.message
-            _anchor_comp_from_followup = False
-            if req.conversation_id:
+            # ⚡ Phase 2C.2 — compare pair มาจาก resolved subject set เท่านั้น
+            #   (structured item_id identity — เลิกดึง pair จาก history text/
+            #    bot-prose; unresolved → ctx ว่าง → fall through ตามปกติ)
+            if (_subject_res and _subject_res.outcome == "resolved"
+                    and _subject_res.subject_set
+                    and len(_subject_res.subject_set.subject_ids) >= 2):
+                _fc_ids = _subject_res.subject_set.subject_ids[:2]
                 try:
-                    from . import conversation_products as _cp_fc
-                    _fc_anchors = _cp_fc.get_anchor_history(req.conversation_id, limit=5)
-                    if len(_fc_anchors) >= 2:
-                        _fc_cur = _cp_fc.get_active_product(req.conversation_id)
-                        _fc_prev = _cp_fc.get_previous_anchor(
-                            req.conversation_id,
-                            exclude_item_id=_fc_cur.get("item_id") if _fc_cur else None,
-                        )
-                        if _fc_cur and _fc_prev:
-                            _anchor_compare_ctx = {"current": _fc_cur, "previous": _fc_prev}
-                            _anchor_comp_from_followup = True
-                            print(f"[FOLLOWUP-COMP] using anchor history: current={_fc_cur.get('name','')[:40]} previous={_fc_prev.get('name','')[:40]}", file=sys.stderr)
+                    _fc_cur = product_store.fetch_product_by_id(
+                        db, _fc_ids[0], shop_filter=req.shop)
+                    _fc_prev = product_store.fetch_product_by_id(
+                        db, _fc_ids[1], shop_filter=req.shop)
+                    if _fc_cur and _fc_prev:
+                        _anchor_compare_ctx = {"current": _fc_cur,
+                                               "previous": _fc_prev}
+                        _subject_ev["pair_ids"] = _fc_ids
+                        _subject_ev["ops"] += ("compare",)
+                        print(f"[FOLLOWUP-COMP] resolved set → pair {_fc_ids}", file=sys.stderr)
                 except Exception as _e:
-                    print(f"[FOLLOWUP-COMP] anchor history error: {_e}", file=sys.stderr)
-            if not _anchor_comp_from_followup and req.conversation_id:
-                # ⚡ ลูกค้าอาจเปรียบเทียบ "ของที่ bot เพิ่งแนะนำ" ไม่ใช่ anchor —
-                #   เช่น กด Case → bot แนะนำ Run+Free → "อันไหนดีกว่า" = Run vs Free
-                #   (anchor <2 จึงมาถึงจุดนี้; trailing suggestion batch = เทิร์นเดียวกัน)
-                try:
-                    from . import conversation_products as _cp_sug
-                    _sug_batch = _cp_sug.get_latest_suggestion_batch(req.conversation_id)
-                    if 0 < len(_sug_batch) < 2:
-                        # ⚡ batch ตัวเดียว → เติม anchor ล่าสุดเป็นคู่เทียบ
-                        #   (สินค้าที่คุยกันอยู่ 2 ชิ้นล่าสุด — เช่น ส่งการ์ด Case แล้ว bot แนะนำ Run ตัวเดียว)
-                        for _a in _cp_sug.get_anchor_history(req.conversation_id, limit=3):
-                            _a_card = _a.get("card") or {
-                                "item_id": _a.get("item_id"), "name": _a.get("name")}
-                            if all(str(c.get("item_id")) != str(_a_card.get("item_id"))
-                                   for c in _sug_batch):
-                                _sug_batch.append(_a_card)
-                                break
-                    if len(_sug_batch) >= 2:
-                        _anchor_compare_ctx = {"current": _sug_batch[0],
-                                               "previous": _sug_batch[1]}
-                        _anchor_comp_from_followup = True
-                        print(f"[FOLLOWUP-COMP] using suggestion batch: "
-                              f"current={_sug_batch[0].get('name','')[:40]} "
-                              f"previous={_sug_batch[1].get('name','')[:40]}", file=sys.stderr)
-                except Exception as _e:
-                    print(f"[FOLLOWUP-COMP] suggestion batch error: {_e}", file=sys.stderr)
-            if not _anchor_comp_from_followup:
-                # Fallback: ดึง model keywords จาก history text (เดิม)
-                # ดึง model keywords จาก history ทั้งหมด (user + model)
-                # ⚡ กรอง placeholder/tag ออกก่อน (เช่น [variation_card], [สินค้า: 123], [item])
-                #   ไม้งั้น extract_model_keywords จะจับ "[variation_card]" เป็น model
-                _all_history_text2 = " ".join(h.get("text", "") for h in _qa10)
-                _all_history_text2 = _ITEM_TAG_RE.sub("", _all_history_text2)
-                for _ph in ("[variation_card]", "[item]", "[itemid]", "[สินค้า]",
-                            "[ตัวเลือกสินค้า]", "[bundle_message]", "[bundle_deal]",
-                            "[bundle]", "[order]", "[คำสั่งซื้อ]"):
-                    _all_history_text2 = _all_history_text2.replace(_ph, "")
-                _history_models2 = knowledge_base.extract_model_keywords(_all_history_text2)
-                # กรอง "vs" ออก
-                _history_models2 = [m for m in _history_models2 if m.lower() != "vs"]
-                if len(_history_models2) >= 2:
-                    # dedup
-                    _seen2 = set()
-                    _unique2 = []
-                    for m in _history_models2:
-                        _ml2 = m.lower()
-                        if _ml2 not in _seen2:
-                            _seen2.add(_ml2)
-                            _unique2.append(m)
-                    print(f"[FOLLOWUP-COMP] comparison follow-up detected, models={_unique2[:3]}", file=sys.stderr)
-                    _original_msg2 = req.message
-                    # สร้าง message: "K5 vs K9" เพื่อให้เข้า comparison path ใน KB lookup
-                    req.message = " vs ".join(_unique2[:3])
-                    req._followup_original = _original_msg2
-                    print(f"[FOLLOWUP-COMP] new message: {req.message!r}  desc={_original_msg2!r}", file=sys.stderr)
+                    print(f"[FOLLOWUP-COMP] subject pair fetch error: {_e}", file=sys.stderr)
 
         # ===== Anchor comparison follow-up (Phase 7) =====
         # กรณี: ลูกค้าถาม "อันนี้กับอันก่อนต่างกันยังไง", "อันนี้กับอันก่อนหน้า"
         # โดย "อันนี้" = anchor ล่าสุด (active) และ "อันก่อน" = anchor อันดับ 2
         # ดึงจาก conversation_products timeline แทนการ extract model keyword จาก history
         # (เพราะลูกค้าอ้างอิง anchor ไม่ใช่ชื่อรุ่น)
-        _anchor_compare_kws = (
-            "อันนี้กับอันก่อน", "อันนี้กับอันก่อนหน้า",
-            "อันนี้กับอันนั้น", "ตัวนี้กับตัวก่อน",
-            "ตัวนี้กับตัวก่อนหน้า", "ตัวนี้กับตัวนั้น",
-            "อันนี้กับอันเดิม", "ตัวนี้กับตัวเดิม",
-            "รุ่นนี้กับรุ่นก่อน", "รุ่นนี้กับรุ่นก่อนหน้า",
-            "อันนี้กับอันที่แล้ว", "ตัวนี้กับตัวที่แล้ว",
-        )
+        _anchor_compare_kws = conversation_products._SUBJECT_PAIR_KWS
         _is_anchor_compare = (
             any(kw in (req.message or "").lower() for kw in _anchor_compare_kws)
             and bool(req.conversation_id)
         )
         # _anchor_compare_ctx ประกาศก่อนหน้า (ก่อน comparison follow-up) — ไม่ reset ถ้า set แล้ว
+        # ⚡ Phase 2C.2 — pair ref ใช้ resolved subject set (effective view
+        #   ครอบ anchor-derived set ของ conversation เก่า) ไม่ดึง anchor ladder
         if _is_anchor_compare and not _anchor_compare_ctx:
             try:
-                from . import conversation_products as _cp_cmp
-                _cur_anchor = _cp_cmp.get_active_product(req.conversation_id)
-                _prev_anchor = _cp_cmp.get_previous_anchor(
-                    req.conversation_id,
-                    exclude_item_id=_cur_anchor.get("item_id") if _cur_anchor else None,
-                )
-                if _cur_anchor and _prev_anchor:
-                    _anchor_compare_ctx = {"current": _cur_anchor, "previous": _prev_anchor}
-                    print(f"[ANCHOR-COMP] current={_cur_anchor.get('name','')[:40]} previous={_prev_anchor.get('name','')[:40]}", file=sys.stderr)
+                if (_subject_res and _subject_res.outcome == "resolved"
+                        and _subject_res.subject_set
+                        and len(_subject_res.subject_set.subject_ids) >= 2):
+                    _ac_ids = _subject_res.subject_set.subject_ids[:2]
+                    _ac_cur = product_store.fetch_product_by_id(
+                        db, _ac_ids[0], shop_filter=req.shop)
+                    _ac_prev = product_store.fetch_product_by_id(
+                        db, _ac_ids[1], shop_filter=req.shop)
+                    if _ac_cur and _ac_prev:
+                        _anchor_compare_ctx = {"current": _ac_cur,
+                                               "previous": _ac_prev}
+                        _subject_ev["pair_ids"] = _ac_ids
+                        _subject_ev["ops"] += ("compare",)
+                        print(f"[ANCHOR-COMP] resolved set → pair {_ac_ids}", file=sys.stderr)
+                    else:
+                        print("[ANCHOR-COMP] resolved pair fetch ไม่ครบ → ข้าม", file=sys.stderr)
                 else:
-                    print(f"[ANCHOR-COMP] ไม่มี anchor พอ (current={bool(_cur_anchor)} previous={bool(_prev_anchor)}) → ข้าม", file=sys.stderr)
+                    print("[ANCHOR-COMP] ไม่มี resolved pair (set <2 หรือ unresolved) → ข้าม", file=sys.stderr)
             except Exception as _e:
                 print(f"[ANCHOR-COMP] error: {_e}", file=sys.stderr)
 
@@ -1853,11 +1891,20 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 # ⚡ Phase 3 — กรอง target device ออกจาก model keywords
                 _conv_model_kw = [kw for kw in _conv_model_kw
                                   if not knowledge_base.is_target_device_kw(kw)]
-                _conv_active_card = conversation_products.resolve_active_by_message(
-                    conversation_id=req.conversation_id,
-                    message=req.message,
-                    model_keywords=_conv_model_kw,
-                )
+                # ⚡ Phase 2C.2 — resolved subject set = conversation-active truth
+                #   materialize card จาก item_id (timeline materialize →
+                #   catalog fetch fallback — unavailable/historical ยัง resolve ได้)
+                if (_subject_res and _subject_res.outcome == "resolved"
+                        and _subject_res.subject_set):
+                    _subj_cards = conversation_products.materialize_subject_cards(
+                        db, _subject_res.subject_set.subject_ids[:5],
+                        products=_subject_products,
+                        shop_filter=req.shop, message=req.message)
+                    if _subj_cards:
+                        _conv_active_card = _subj_cards[0]
+                        _ref_regex_products = _subj_cards
+                        _is_conv_active = True
+                        print(f"[SUBJECT-RES] resolved {list(_subject_res.subject_set.subject_ids)} → pin {len(_subj_cards)} cards", file=sys.stderr)
             except Exception as _e:
                 print(f"[PROFILE] conv-active resolve error: {_e}", file=sys.stderr)
                 _conv_active_card = None
@@ -2526,7 +2573,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     # ⚡ บันทึก suggestion products ลง conversation_products timeline
                     #    กัน case: kb+mongo ตอบแล้วไม่บันทึก → active product ว่าง
                     #    → คำถามถัดไป (เช่น "ขอลิงค์กับรูป") ไม่มี active ใช้ → ดึงสินค้าอื่นมาแทน
-                    _record_suggestion_products(req, products[:req.limit])
+                    _record_suggestion_products(req, products[:req.limit],
+                                                subject_evidence=_subject_ev)
                     return ChatResponse(
                         answer=answer,
                         answer_segments=llm.split_segments(answer),
@@ -2732,12 +2780,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         #   ⚡ ต้องทำก่อน CONV-ACTIVE เพราะ CONV-ACTIVE ดึง active product แค่ 1 ตัว
         #      และตั้ง _is_conv_active=True → LINK-FOLLOWUP จะไม่ทำงาน
         _is_link_followup = False
-        _link_followup_kws = (
-            "ลิงค์", "ลิงก์", "ลิ้งค์", "ลิ้งก์", "link", "ขอลิงค์", "ขอลิงก์",
-            "ขอลิ้งค์", "ขอลิ้งก์", "ขอ link", "ขอ url", "url",
-            "ช่องทางซื้อ", "สั่งซื้อ", "ขอสั่ง", "ขอซื้อ", "สั่งได้เลย",
-            "ส่งลิงค์", "ส่งลิงก์", "ส่ง link", "ขอเว็บ", "เว็บสินค้า",
-        )
+        _link_followup_kws = conversation_products._SUBJECT_LINK_KWS
         _is_link_followup = (
             req.conversation_id
             and any(kw in (req.message or "").lower() for kw in _link_followup_kws)
@@ -2750,14 +2793,22 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         if _is_link_followup:
             try:
                 from . import conversation_products as _cp_link
-                _link_products = _cp_link.get_anchor_and_suggestions(req.conversation_id, limit=5)
+                _subject_driven = bool(_is_conv_active and _ref_regex_products)
+                if _subject_driven:
+                    # ⚡ resolved subject set = subject truth — link ต้อง serve
+                    #   set เดียวกัน (ยังผ่าน availability note/link-cut)
+                    _link_products = list(_ref_regex_products)
+                else:
+                    _link_products = _cp_link.get_anchor_and_suggestions(req.conversation_id, limit=5)
                 if _link_products:
                     # ⚡ Task 5C-D — availability-aware: UNLIST ตัดลิงค์, ของหมด
-                    #   note สถานะ, ไม่มีของขาย → fetch ทดแทน type เดียวกัน
+                    #   note สถานะ — resolved subject → ไม่ fetch ทดแทน
+                    #   (subject_kept_link_may_be_cut: ห้าม silent swap)
                     _link_products = _prepare_link_followup(
                         _link_products,
-                        alt_fetcher=lambda q: product_store.fetch_products(
-                            db, q, shop_filter=req.shop, limit=6))
+                        alt_fetcher=None if _subject_driven else (
+                            lambda q: product_store.fetch_products(
+                                db, q, shop_filter=req.shop, limit=6)))
                     # กรองเฉพาะที่มีประโยชน์ให้ LLM — รวม note-only card ของ
                     #   unavailable anchor (ห้ามทิ้ง → LLM ต้องเห็นรุ่นที่ถาม)
                     _link_products = [
@@ -2909,21 +2960,6 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 "รุ่นอื่น", "อันอื่น", "อื่นๆ", "อีกไหม", "มีอีกไหม",
                 "ตัวอื่น", "อีกบ้าง", "แนะนำไหม", "แนะนำอีก",
             ]
-            # "reference indicator" = คำที่อ้างถึงสินค้าล่าสุดที่แนะนำ
-            # เช่น "ขอรายละเอียดเรือนนี้", "ตัวนี้ราคาเท่าไหร่", "รุ่นนี้รับประกันไหม"
-            # รวมถึง "ขอรายละเอียด" ล้วน ๆ (ไม่ระบุรุ่น) เพราะลูกค้าพิมพ์สั้น ๆ
-            # หมายถึงสินค้าล่าสุดที่ bot แนะนำ
-            reference_indicators = [
-                "เรือนนี้", "ตัวนี้", "รุ่นนี้", "อันนี้", "นาฬิกาเรือนนี้",
-                "สินค้านี้", "ชิ้นนี้", "รุ่นที่แนะนำ", "ที่แนะนำ",
-                "ขอรายละเอียด", "ขอสเปก", "ขอข้อมูลเพิ่มเติม",
-                "ขอรายละเอียดเพิ่มเติม", "ขอดูสเปก", "ขอดูรายละเอียด",
-                "ขอข้อมูลสินค้า", "ขอรายละเอียดสินค้า",
-                # ⚡ Phase 2Z+++ — เพิ่ม "รุ่นไหนประกัน" เป็น reference indicator
-                #    กัน case: "รุ่นไหนประกันยังไงบ้าง" หลัง bot แนะนำพาวเวอร์แบงค์ → ตอบสายชาร์จผิด
-                #    (เจาะจงเฉพาะ "รุ่นไหนประกัน" ไม่ใช่ "รุ่นไหน" เฉยๆ เพราะอาจเป็นคำถามใหม่)
-                "รุ่นไหนประกัน", "รุ่นไหนรับประกัน", "รุ่นไหนบ้างประกัน",
-            ]
             # "new topic indicator" = คำที่บอกว่าลูกค้าเปลี่ยนหัวข้อไปแล้ว ไม่ใช่ follow-up
             # เช่น "อุปกรณ์ป้องกันตัว", "โทสับ", "มีโทสับไหม", "อยากได้กล้อง"
             # ถ้ามีคำเหล่านี้ → เป็นคำถามใหม่ ไม่ใช้ history context
@@ -3044,185 +3080,9 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         retrieval_message = f"{_sub_kw} {retrieval_message}"
                         print(f"[SUBTYPE-CARRY] carry subtype={_history_subtype} from history → retrieval={retrieval_message!r}", file=sys.stderr)
 
-            is_reference_question = any(ind in req.message for ind in reference_indicators)
-
-            # Heuristic ใหม่: ถ้า message ปัจจุบันไม่มี model keyword ของตัวเอง
-            # (ไม่มี digit+brand) + ไม่มี product type ที่ชัดเจน + ไม่ใช่ new topic + มี history
-            # → น่าจะเป็น follow-up ที่ถามต่อจากสินค้าเดิม
-            # เช่น "จอกี่นิ้วเหรอคะ", "ใช้กับ iPhone ได้ไหม", "เอามาเล่นเกมได้ไหม"
-            _msg_has_model_kw = any(
-                (any(c.isdigit() for c in w) and len(w) >= 2 and not re.fullmatch(r"\d+\.?", w))
-                for w in re.split(r"\s+", req.message.lower().strip())
-            )
-            # compatibility question: "ใช้กับ iPhone ได้ไหม", "รองรับ Samsung ไหม"
-            # เป็นคำถามเกี่ยวกับสินค้าเดิม ไม่ใช่คำถามใหม่ที่อยากซื้อ iPhone/Samsung
-            _compat_indicators = ["ใช้กับ", "รองรับ", "เชื่อมต่อ", "pair", "จับคู่", "เชื่อมกับ",
-                                  "ใช้สาย", "ใช้กับสาย", "ขึ้นเครื่อง", "เครื่องบิน", "นำขึ้น",
-                                  "ติดตัวขึ้น", "carry", "เครื่อง", "ไปจีน", "ต่างประเทศ"]
-            _is_compat_question = any(ind in req.message for ind in _compat_indicators)
-            _is_generic_followup = (
-                not _msg_has_model_kw
-                and (not current_types or _is_compat_question or _types_from_history)
-                and not is_new_topic
-                and not is_other_model_question
-                and len(_msg_words) <= 10  # ไม่ยาวเกินไป
-            )
-
-            # ถ้าเป็น reference question ("เรือนนี้", "ตัวนี้", "รุ่นนี้", "ขอรายละเอียด")
-            # หรือ short followup ("ประกัน", "เคลม", "กันน้ำไหม", "แบต", "ราคาเท่าไหร่")
-            # หรือ generic followup (ไม่มี model keyword ของตัวเอง + ไม่มี product type)
-            # ให้ดึงชื่อสินค้าจากคำตอบ bot ล่าสุดมาเป็น retrieval keyword
-            # เช่น "ขอรายละเอียดเรือนนี้ได้ไหม" หลังจาก bot แนะนำ Black Shark GS3
-            # → retrieval = "Black Shark GS3 ขอรายละเอียดเรือนนี้ได้ไหม"
-            # หรือ "ประกัน" ล้วน ๆ หลัง bot แนะนำ KOSPET TANK M3
-            # → retrieval = "KOSPET TANK M3 ประกัน"
-            # ยกเว้นถ้าเป็น other_model_question ("ขอรายละเอียดรุ่นอื่น") → ไม่ใช่ reference
-            # ⚡ ถ้าคำถามปัจจุบันระบุ charger subtype ชัดเจน (หัวชาร์จ/สายชาร์จ/ชุดชาร์จ)
-            # → เป็นคำถามใหม่เกี่ยวกับ subtype นั้น ไม่ใช่ follow-up ถึงสินค้าเดิม
-            # ห้ามให้ reference logic ดึงชื่อสินค้าเก่า (ที่อาจเป็น subtype ต่างกัน) มาปนใน retrieval
-            # เพราะทำให้ brand/model filter กรองสินค้า subtype ที่ลูกค้าถามออกหมด
-            # (เช่น ถาม "มีหัวชาร์จไหม" หลัง bot แนะนำสายชาร์จ CTC615N → ได้แต่ CTC615N)
-            _cur_charger_sub_ref = (
-                (_intent_result or {}).get("charger_subtype")
-                if (_intent_result or {}).get("product_type") == "charger"
-                else product_store._detect_charger_subtype(req.message)
-            )
-            _skip_ref_due_to_subtype = _cur_charger_sub_ref in ("adapter", "cable", "set", "car_charger")
-            _is_ref_like = (
-                is_reference_question
-                or (_is_short_followup and not is_other_model_question and not is_new_topic
-                    and not _skip_ref_due_to_subtype)
-                or (_is_generic_followup and not is_other_model_question
-                    and not _skip_ref_due_to_subtype)
-            )
-            if _is_ref_like and not is_new_topic and not is_other_model_question:
-                all_model_texts_ref = [
-                    m.text for m in req.history
-                    if m.role == "model" and m.text.strip()
-                ]
-                if all_model_texts_ref:
-                    latest_bot_answer = all_model_texts_ref[-1]
-                    # ── ดึงชื่อสินค้าเต็มจาก markdown link ก่อน (แม่นยำกว่า) ──
-                    # เช่น [CUKTECH AD1003T + CMC615P เซตหัวชาร์จ Adapter 100W](https://...)
-                    # → ใช้ "CUKTECH AD1003T + CMC615P เซตหัวชาร์จ Adapter 100W" เป็น retrieval
-                    _md_link_products = re.findall(
-                        r"\[([^\]]{5,120})\]\(https?://",
-                        latest_bot_answer,
-                    )
-                    ref_models = []
-                    # ⚡ เช็คว่าเป็น comparison question ไหม — ถ้าใช่ ดึงทุกรุ่นจาก markdown link
-                    _comparison_kws_ref = ("ต่างกัน", "ต่างไหม", "เปรียบเทียบ", "vs", "ดีกว่า", "สูงกว่า", "แรงกว่า")
-                    _is_comparison_ref = any(kw in req.message.lower() for kw in _comparison_kws_ref)
-                    if _md_link_products:
-                        # ใช้ product name จาก markdown link ที่ไม่ใช่ "สั่งซื้อ..."
-                        for _pname in _md_link_products:
-                            if _pname.lower().startswith(("สั่งซื้อ", "ดูรายละเอียด", "ลิงก์")):
-                                continue
-                            ref_models.append(_pname.strip())
-                            if not _is_comparison_ref:
-                                break  # กรณีปกติ เอาแค่รุ่นแรก
-                        if ref_models:
-                            print(f"[REFERENCE] ดึงชื่อสินค้าจาก markdown link: {ref_models}", file=sys.stderr)
-
-                    # ── Fallback: ดึง brand + model pattern จากคำตอบ bot ──
-                    if not ref_models:
-                        # pattern: word(2+) + space + alphanumeric(2+) ที่มีตัวเลข
-                        # หรือ known brand + model
-                        ref_brands = {
-                            "kospet", "lagenio", "kieslect", "imilab", "xiaomi",
-                            "redmi", "black shark", "blackshark", "imiki", "heyplus",
-                            "zmi", "cuktech", "70mai", "viomi", "qcy", "yaber",
-                            "1more", "leravan", "deerma", "mili", "lydsto", "eloop",
-                            "isuper", "ztec", "anker", "baseus", "ugreen", "oraimo",
-                            "jbl", "sony", "samsung", "oppo", "vivo", "realme",
-                        }
-                        # หา pattern "brand model" ในคำตอบ
-                        # pattern 1: known brand + alphanumeric model
-                        for brand in ref_brands:
-                            pattern = rf"\b{re.escape(brand)}\s+([A-Za-z]*\d+[A-Za-z]*)\b"
-                            matches = re.findall(pattern, latest_bot_answer, re.IGNORECASE)
-                            for m in matches:
-                                full = f"{brand} {m}"
-                                if full.lower() not in [x.lower() for x in ref_models]:
-                                    ref_models.append(full)
-                        # pattern 2: word(2+) + space + alphanumeric(2+) ที่มีตัวเลข
-                        all_patterns = re.findall(
-                            r"\b([A-Za-z]{2,})\s+([A-Za-z]*\d+[A-Za-z]*)\b",
-                            latest_bot_answer
-                        )
-                        _stop_ref = {"งบ", "บาท", "ราคา", "โค้ด", "พิเศษ", "ลด", "เหลือ",
-                                     "ใช้", "พร้อม", "ส่ง", "ศูนย์", "ไทย", "เดือน", "ปี",
-                                     "วัน", "ชั่วโมง", "GB", "RAM", "ROM", "ATM", "IP",
-                                     "AMOLED", "Bluetooth", "Smartwatch", "สมาร์ทวอทช์",
-                                     "นาฬิกา", "ร้าน", "ของ", "จาก", "หน้าจอ", "ความ",
-                                     "นิ้ว", "กรัม", "มิลลิ", "เมตร", "วัสดุ", "สาย",
-                                     "แบตเตอรี่", "ความจุ", "โหมด", "ฟังก์ชัน", "ขนาด",
-                                     "น้ำหนัก", "อุปกรณ์", "กล่อง", "คู่มือ", "สี",
-                                     "รับประกัน", "เงื่อนไข", "นโยบาย", "บริการ",
-                                     "แนะนำ", "สนใจ", "สั่งซื้อ", "ลิงก์", "ทัก",
-                                     "แอดมิน", "ยินดี", "ขออภัย", "สอบถาม", "เพิ่มเติม",
-                                     "ข้อมูล", "รายละเอียด", "สเปก", "คุณสมบัติ", "จุดเด่น",
-                                     "ดีไซน์", "ความแข็งแรง", "ทนทาน", "กลางแจ้ง",
-                                     "เดินป่า", "สายลุย", "กันน้ำ", "กันฝุ่น",
-                                     "หน้าจอ", "เชื่อมต่อ", "วัสดุ", "ตัวเรือน",
-                                     "สายนาฬิกา", "แบตเตอรี่", "โหมดกีฬา", "สุขภาพ",
-                                     "ระบบ", "รองรับ", "มาตรฐาน", "ความละเอียด",
-                                     "ความสว่าง", "ระบบปฏิบัติการ", "เครือข่าย",
-                                     "ฟังก์ชันโทร", "สนทนา", "เม็ดมะยม", "ซิลิโคน",
-                                     "โครงสรีร", "สรีรศาสตร์", "Refresh", "Rate",
-                                     "Supplier", "Manufacturer", "Warranty",
-                                     "Months", "Year", "Month", "Day", "Hours",
-                                     "Standby", "Mode", "AOD", "GPS", "SpO2",
-                                     "Heart", "Rate", "Stress", "Sleep",
-                                     "Aluminum", "Stainless", "steel", "Polyamide",
-                                     "Glass", "Fiber", "Zinc", "alloy",
-                                     "Liquid", "silicone", "rubber", "Nylon",
-                                     "Leather", "Deployant", "Strap", "Band",
-                                     "Type", "USB", "HDMI", "LAN", "Hub",
-                                     "Pad", "Shark", "Black", "Special", "Edition",
-                                     "Rugged", "Smart", "Watch", "Phone",
-                                     "Tank", "Ultra", "Lite", "Active", "Elite",
-                                     "Magic", "Pulse", "Orb", "Air", "Loop",
-                                     "Alpha", "Camouflage", "Archlan",
-                        }
-                        for brand_part, model_part in all_patterns:
-                            if brand_part.lower() in _stop_ref:
-                                continue
-                            if not re.search(r"\d", model_part):
-                                continue
-                            if re.fullmatch(r"\d+", model_part):
-                                continue
-                            full = f"{brand_part} {model_part}"
-                            if full.lower() not in [x.lower() for x in ref_models]:
-                                ref_models.append(full)
-                    if ref_models and not _is_superlative_q:
-                        # เช็ค subtype ของ message ปัจจุบัน ถ้าเป็น cable และ ref_model เป็น adapter → ไม่ดึง
-                        _cur_sub_ref = product_store._detect_charger_subtype(req.message)
-                        # ⚡ คำนวณ subtype ของ ref_models (จากชื่อสินค้าในคำตอบล่าสุด)
-                        _ref_text = " ".join(ref_models)
-                        _ref_sub = product_store._detect_charger_subtype(_ref_text)
-                        _ref_is_cable = _ref_sub == "cable"
-                        _ref_is_adapter = _ref_sub == "adapter"
-                        if _cur_sub_ref == "cable" and _ref_is_adapter and not _ref_is_cable:
-                            print(f"[REFERENCE] skip: ลูกค้าถาม cable แต่ ref เป็น adapter: {ref_models[0]}", file=sys.stderr)
-                        elif _cur_sub_ref == "adapter" and _ref_is_cable and not _ref_is_adapter:
-                            print(f"[REFERENCE] skip: ลูกค้าถาม adapter แต่ ref เป็น cable: {ref_models[0]}", file=sys.stderr)
-                        elif _cur_sub_ref in ("adapter", "cable", "set") and not _ref_is_adapter and not _ref_is_cable:
-                            # ⚡ ref ไม่มี charger keyword เลย (เช่น "CUKTECH CTC615N" จาก markdown link รูป)
-                            # → ยืนยัน subtype ของ ref ไม่ได้ → ห้าม override กันกรองสินค้าผิดประเภท
-                            print(f"[REFERENCE] skip: คำถามเป็น charger subtype={_cur_sub_ref} แต่ ref ไม่มี charger keyword: {ref_models[0]}", file=sys.stderr)
-                        else:
-                            # ⚡ comparison follow-up: ถ้าคำถามเป็นการเปรียบเทียบ ("ต่างกัน", "vs", "ดีกว่า")
-                            # และมี ref_models มากกว่า 1 → ใช้ทุกรุ่นใน retrieval
-                            _comparison_kws = ("ต่างกัน", "ต่างไหม", "เปรียบเทียบ", "vs", "ดีกว่า", "สูงกว่า", "แรงกว่า")
-                            _is_comparison_q = any(kw in req.message.lower() for kw in _comparison_kws)
-                            if _is_comparison_q and len(ref_models) >= 2:
-                                retrieval_message = f"{' vs '.join(ref_models[:4])} {req.message}"
-                                print(f"[REFERENCE] comparison follow-up: ดึง {len(ref_models[:4])} รุ่นจากคำตอบล่าสุด: {ref_models[:4]}", file=sys.stderr)
-                            else:
-                                # ใช้ model name แรกที่เจอ + คำถามปัจจุบัน
-                                retrieval_message = f"{ref_models[0]} {req.message}"
-                                print(f"[REFERENCE] ดึงสินค้าจากคำตอบล่าสุด: {ref_models[0]}", file=sys.stderr)
+            # ⚡ Phase 2C.2 — เลิก bot-prose subject selection (markdown link /
+            #   brand-model regex จากคำตอบ bot) — resolved subject set เป็น
+            #   authority เดียว; unresolved → ไม่มี subject (ตาม contract)
 
             # ถ้า fuzzy เจอ type แต่เป็นคำถามต่อ → ถือว่า false positive ให้เป็น follow-up
             # ถ้า fuzzy เจอ type และไม่ใช่คำถามต่อ → เป็นคำถามใหม่
@@ -3321,18 +3181,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
 
             # ถ้าปัจจุบันไม่มี product type → เป็น follow-up ให้ใช้ history ค้นสินค้า
             # ยกเว้นถ้าเป็น new topic (เช่น "อุปกรณ์ป้องกันตัว", "โทสับ") → ไม่ใช้ history
-            # ยกเว้นถ้าเป็น reference question (เช่น "เรือนนี้") → ใช้ retrieval จาก reference logic แล้ว
-            # ยกเว้นถ้า short followup ("ราคาเท่าไหร่") ที่ reference logic จับ model จาก history ได้แล้ว
-            #   ถ้า reference logic ไม่เจอ model → ยังใช้ history-words logic ต่อ
             # ยกเว้นถ้า message ปัจจุบันมี model keyword (เช่น "lagenio k9 รับประกัน") → เป็นคำถามใหม่
             # ยกเว้นถ้าเป็น superlative question (สุด/แรงสุด/ไวสุด/กว่านี้) → ต้องดึงสินค้าทุกรุ่นในหมวด ไม่ใช่แค่รุ่นเดิมจาก history
-            _ref_handled = _is_ref_like and retrieval_message != req.message
-            # ⚡ Partial comparison: ถ้า _is_partial_comp → ไม่ถือว่า ref_handled
-            #   เพราะลูกค้าตั้งใจระบุ model อื่น (เช่น "swim") ต้องไป fetch สินค้านั้นด้วย
-            #   ถ้าถือว่า ref_handled → MODEL-REGEX จะถูกข้าม → ไม่เจอ Swim
-            if _ref_handled and _is_partial_comp:
-                _ref_handled = False
-                print(f"[REFERENCE] partial comparison → ไม่ถือ ref_handled (ต้อง fetch model อื่นด้วย)", file=sys.stderr)
             if not current_types and not is_other_model_question and not is_new_topic and not _ref_handled and not _current_has_model and not _phone_model_followup and not _is_superlative_q:
                 all_user_msgs = [
                     m.text for m in req.history
@@ -3605,36 +3455,59 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 _cur_alpha_kws = [w for w in _cur_alpha_kws if w.lower() not in _common_words]
                 _cur_model_kws = _cur_alpha_kws[:1]  # เอาแค่คำแรก
             if _cur_model_kws:
-                _cur_kw = _cur_model_kws[0]
-                # จัดการคำผิด (พิมพ์ซ้ำ) เช่น "biokoopp" → "biokoop", "bikooppppp" → "bikoop"
-                # โดยตัด tail ที่ซ้ำกัน 3+ ครั้งออก
-                _cur_kw_clean = re.sub(r"(.)\1{2,}$", r"\1", _cur_kw.lower())
-                if _cur_kw_clean != _cur_kw.lower():
-                    print(f"[MODEL-REGEX] ตัด tail ซ้ำ: {_cur_kw!r} → {_cur_kw_clean!r}", file=sys.stderr)
-                    _cur_kw = _cur_kw_clean
-                # สร้าง regex pattern:
-                # - ถ้ามีตัวเลข (เช่น "Watch6") → "Watch.?6" (ยอมรับ space ระหว่างคำและตัวเลข)
-                # - ถ้าเป็นคำอังกฤษล้วน (เช่น "biokoop") → "biokoop" (case-insensitive)
-                if re.search(r"\d", _cur_kw):
-                    # bounded model code — "PB100" ไม่ match "PB100P"/"LPB100"
-                    _cur_kw_pattern = product_store._model_token_regex_str(_cur_kw)
-                else:  # คำอังกฤษล้วน — ใช้ prefix 6 ตัวแรกเพื่อจัดการคำผิด
-                    _prefix = _cur_kw[:6] if len(_cur_kw) >= 6 else _cur_kw
-                    _cur_kw_pattern = re.escape(_prefix)
-                try:
-                    _ref_coll = db[os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"]
-                    _ref_filter = {
-                        "item_status": "NORMAL",
-                        "item_name": {"$regex": _cur_kw_pattern, "$options": "i"},
-                    }
-                    if req.shop:
-                        _ref_filter["shopname"] = {"$regex": f"^{re.escape(req.shop)}$", "$options": "i"}
-                    _ref_docs = list(_ref_coll.find(_ref_filter, product_store.PRODUCT_PROJECTION).limit(5))
-                    if _ref_docs:
-                        _ref_regex_products = [product_store.to_product_card(d, req.message) for d in _ref_docs]
-                        print(f"[MODEL-REGEX] ดึงสินค้าตรง model keyword '{_cur_kw}' (pattern={_cur_kw_pattern!r}) ด้วย Mongo regex: {len(_ref_regex_products)} ตัว", file=sys.stderr)
-                except Exception as _e:
-                    print(f"[MODEL-REGEX] error: {_e}", file=sys.stderr)
+                # ⚡ explicit compare ("A เทียบกับ B") ต้องได้สินค้าทุกรุ่นที่ลูกค้าระบุ
+                #   — fetch ทีละ kw แล้ว merge (ไม่ใช่แค่ kw แรก) เพื่อให้ evidence
+                #   pool ครบทั้งคู่; compare ตอบไม่ได้ถ้า context มีแค่ข้างเดียว
+                #   ใช้ extract_model_keywords (tokenizer เดียวกับ subject evidence)
+                #   เพราะ inline regex ข้างบนตัด digit-tail (AC65B2→AC65B) ไม่ได้
+                _comp_kws = [k for k in knowledge_base.extract_model_keywords(
+                                req.message or "")
+                             if not knowledge_base.is_target_device_kw(k)]
+                _is_multi_model_comp = (
+                    len(_comp_kws) >= 2
+                    and any(kw in (req.message or "").lower()
+                            for kw in _COMPARISON_FOLLOWUP_KW))
+                _fetch_kws = (_comp_kws[:4] if _is_multi_model_comp
+                              else _cur_model_kws[:1])
+                _merged_docs: list = []
+                _merged_seen: set = set()
+                for _cur_kw in _fetch_kws:
+                    # จัดการคำผิด (พิมพ์ซ้ำ) เช่น "biokoopp" → "biokoop"
+                    # โดยตัด tail ที่ซ้ำกัน 3+ ครั้งออก
+                    _cur_kw_clean = re.sub(r"(.)\1{2,}$", r"\1", _cur_kw.lower())
+                    if _cur_kw_clean != _cur_kw.lower():
+                        print(f"[MODEL-REGEX] ตัด tail ซ้ำ: {_cur_kw!r} → {_cur_kw_clean!r}", file=sys.stderr)
+                        _cur_kw = _cur_kw_clean
+                    # สร้าง regex pattern:
+                    # - ถ้ามีตัวเลข (เช่น "Watch6") → "Watch.?6" (ยอมรับ space ระหว่างคำและตัวเลข)
+                    # - ถ้าเป็นคำอังกฤษล้วน (เช่น "biokoop") → "biokoop" (case-insensitive)
+                    if re.search(r"\d", _cur_kw):
+                        # bounded model code — "PB100" ไม่ match "PB100P"/"LPB100"
+                        _cur_kw_pattern = product_store._model_token_regex_str(_cur_kw)
+                    else:  # คำอังกฤษล้วน — ใช้ prefix 6 ตัวแรกเพื่อจัดการคำผิด
+                        _prefix = _cur_kw[:6] if len(_cur_kw) >= 6 else _cur_kw
+                        _cur_kw_pattern = re.escape(_prefix)
+                    try:
+                        _ref_coll = db[os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"]
+                        _ref_filter = {
+                            "item_status": "NORMAL",
+                            "item_name": {"$regex": _cur_kw_pattern, "$options": "i"},
+                        }
+                        if req.shop:
+                            _ref_filter["shopname"] = {"$regex": f"^{re.escape(req.shop)}$", "$options": "i"}
+                        _ref_docs = list(_ref_coll.find(_ref_filter, product_store.PRODUCT_PROJECTION).limit(5))
+                        if _ref_docs:
+                            for _d in _ref_docs:
+                                _did = _d.get("item_id")
+                                if _did in _merged_seen:
+                                    continue
+                                _merged_seen.add(_did)
+                                _merged_docs.append(_d)
+                            print(f"[MODEL-REGEX] ดึงสินค้าตรง model keyword '{_cur_kw}' (pattern={_cur_kw_pattern!r}) ด้วย Mongo regex: {len(_ref_docs)} ตัว", file=sys.stderr)
+                    except Exception as _e:
+                        print(f"[MODEL-REGEX] error: {_e}", file=sys.stderr)
+                if _merged_docs:
+                    _ref_regex_products = [product_store.to_product_card(d, req.message) for d in _merged_docs]
 
         # ⚡ Fuzzy matching fallback — ถ้า MODEL-REGEX ไม่เจอ ให้ลอง fuzzy match
         # รับพิมพ์ผิด เช่น biokooooooooop, biokooppppppp, redmi wach 6
@@ -3649,42 +3522,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             except Exception as _e:
                 print(f"[FUZZY-MATCH] error: {_e}", file=sys.stderr)
 
-        # ⚡ Carry-forward products จาก history — ถ้า message ปัจจุบันเป็น follow-up
-        # และไม่มี model keyword ชัดเจน ให้ลอง fuzzy match กับ model answer ล่าสุด
-        # เพื่อหาสินค้าที่เคยตอบไปแล้ว ทำให้ถามซ้ำได้โดยไม่ลืมสินค้า
-        # ⚡ ห้าม carry-forward เมื่อคำถามปัจจุบันระบุ charger subtype ชัด (หัว/สาย/ชุด/ฯลฯ)
-        # เพราะแปลว่าลูกค้าถามหา subtype ใหม่ ไม่ใช่ follow-up สินค้าเดิม
-        # (เช่น "มีหัวไหม" หลัง bot แนะนำสายชาร์จ → ห้ามดึงสายชาร์จเดิมมา carry)
-        _is_carry_forward = False
-        # ⚡ _is_conv_active และ _cur_charger_sub ถูก set ก่อน history block (ที่บรรทัด ~2124)
-        # ไม่ต้อง reset ที่นี่ เพราะอาจถูก set แล้วจาก CONV-ACTIVE check
-
-        if not _ref_regex_products and not _ref_handled and req.history and not _cur_charger_sub:
-            _cur_has_model_kw = bool(knowledge_base.extract_model_keywords(req.message))
-            _cur_msg_lower = (req.message or "").lower().strip()
-            # ⚡ ขยาย carry-forward ให้รองรับ message ยาวขึ้น (<= 25 คำ)
-            # เพราะคำถาม follow-up อาจยาว เช่น "ถ้าผมซื้อแล้วผมเชื่อถือได้ใช่ไหมครับมีการรับประกันนะครับ"
-            _is_short_followup = len(req.message.split()) <= 25 and not _cur_has_model_kw
-            # ไม่ใช่ new topic (เช่น "สวัสดี", "มีอะไรแนะนำไหม")
-            _is_new_topic = any(kw in _cur_msg_lower for kw in _NEW_TOPIC_KWS)
-            if _is_short_followup and not _is_new_topic:
-                # หา model answer ล่าสุดจาก history
-                _last_model_text = ""
-                for h in reversed(req.history):
-                    if h.role == "model" and h.text.strip():
-                        _last_model_text = h.text
-                        break
-                if _last_model_text:
-                    try:
-                        _carry_products = product_store.fuzzy_match_products(
-                            db, _last_model_text, shop=req.shop, limit=5, score_threshold=70
-                        )
-                        if _carry_products:
-                            _ref_regex_products = _carry_products
-                            _is_carry_forward = True
-                            print(f"[CARRY-FORWARD] ใช้สินค้าจาก model answer ล่าสุด: {len(_ref_regex_products)} ตัว", file=sys.stderr)
-                    except Exception as _e:
-                        print(f"[CARRY-FORWARD] error: {_e}", file=sys.stderr)
+        # ⚡ Phase 2C.2 — เลิก CARRY-FORWARD: fuzzy match บน bot answer ล่าสุด
+        #   = bot-prose subject truth — resolved subject set แทนที่แล้ว
 
         # ⚡ Charging spec question detection (ทำก่อน if _ref_regex_products)
         # ถ้าลูกค้าถาม "สินค้าX ใช้สายชาร์จอะไรได้บ้าง" / "X ชาร์จยังไง" / "X พอร์ตอะไร"
@@ -3730,17 +3569,6 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     products = []
                     _ref_regex_products = None
                     print(f"[REF-SUBTYPE-FILTER] เหลือ 0 → ยกเลิก _ref_regex_products ไป fetch_products ปกติ", file=sys.stderr)
-            # ⚡ ถ้าเป็น carry-forward จาก history → เพิ่ม context note บอก LLM
-            # ว่าสินค้าเหล่านี้คือสินค้าที่ลูกค้าสนใจจากคำถามก่อนหน้า
-            # ลูกค้าถามซ้ำเพราะอยากได้ข้อมูลเพิ่ม ไม่ใช่ถามหาสินค้าใหม่
-            if _is_carry_forward and products:
-                _carry_note = (
-                    "⚠️ สินค้าใน context คือสินค้าที่ลูกค้าสนใจจากคำถามก่อนหน้า "
-                    "ลูกค้าถามซ้ำเพราะอยากได้ข้อมูลเพิ่มเติมเกี่ยวกับสินค้าเดิม "
-                    "ห้ามบอกว่าไม่มีสินค้ารุ่นนี้ หรือแนะนำสินค้าอื่นแทน "
-                    "ให้ตอบข้อมูลเพิ่มเติมของสินค้าใน context เท่านั้น"
-                )
-                _add_context_note(products, _carry_note)
             # ⚡ ถ้าใช้ active product จาก conversation_products timeline
             # บอก LLM ชัดๆ ว่าสินค้านี้คือสินค้าที่ลูกค้าสนใจ ห้ามสลับไปสินค้าอื่น
             if _is_conv_active and products:
@@ -4944,7 +4772,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     _combined_usage = _sum_usage(usage_info, _ws_llm_usage)
                     print(f"[WEB-SEARCH] used web search answer  total={_total_ws}s  products={len(_final_products)}", file=sys.stderr)
                     _final_response_products = [] if _suppress_cards else _final_products[:req.limit]
-                    _record_suggestion_products(req, _final_response_products)
+                    _record_suggestion_products(req, _final_response_products,
+                                                subject_evidence=_subject_ev)
                     return ChatResponse(
                         answer=_ws_answer,
                         answer_segments=llm.split_segments(_ws_answer),
@@ -4967,7 +4796,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 else:
                     print(f"[WEB-SEARCH] skipped (no answer from LLM re-answer or search not used)", file=sys.stderr)
 
-        _record_suggestion_products(req, products_for_response)
+        _record_suggestion_products(req, products_for_response,
+                                    subject_evidence=_subject_ev)
         return ChatResponse(
             answer=answer,
             answer_segments=llm.split_segments(answer),
@@ -4988,7 +4818,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         pass  # ไม่ปิด client เพราะใช้ cache
 
 
-def _record_suggestion_products(req, products: list[dict]) -> None:
+def _record_suggestion_products(req, products: list[dict],
+                                subject_evidence: dict | None = None) -> None:
     """บันทึกสินค้าที่ bot แนะนำลง conversation_products timeline.
 
     เรียกก่อน return ChatResponse ทุกจุดที่ bot ตอบพร้อม products.
@@ -5016,7 +4847,9 @@ def _record_suggestion_products(req, products: list[dict]) -> None:
         # หาสินค้าตัวแรกที่ชื่อมี model keyword ของลูกค้า → anchor
         #   scan 5 ตัวแรก (ตรงกับ record loop) — bounded match ทำให้ listing จริง
         #   ที่ไม่ได้อยู่อันดับแรก (เช่น "PB100 / PB100S / LPB100" อันดับ 4) ยัง anchor ได้
+        #   ⚡ Phase 2C.2 — เก็บ matched ทั้งหมดเป็น explicit identity evidence
         _anchor_item_id = None
+        _matched_item_ids: list = []
         if _msg_model_kws:
             for p in products[:5]:
                 _p_name = p.get("name") or ""
@@ -5026,12 +4859,12 @@ def _record_suggestion_products(req, products: list[dict]) -> None:
                 for kw in _msg_model_kws:
                     # bounded match — "PB100" ต้องไม่ไป anchor "PB100S"/"LPB100"
                     if product_store._model_token_in_name(_p_name, kw):
-                        _anchor_item_id = _p_item_id
-                        print(f"[TEXT-ANCHOR] ลูกค้าพิมพ์ '{kw}' ตรงกับสินค้า "
-                              f"'{_p_name[:40]}' → anchor", file=sys.stderr)
+                        _matched_item_ids.append(_p_item_id)
+                        if _anchor_item_id is None:
+                            _anchor_item_id = _p_item_id
+                            print(f"[TEXT-ANCHOR] ลูกค้าพิมพ์ '{kw}' ตรงกับสินค้า "
+                                  f"'{_p_name[:40]}' → anchor", file=sys.stderr)
                         break
-                if _anchor_item_id:
-                    break  # ใช้แค่ตัวแรกที่ match (สินค้าที่เกี่ยวข้องที่สุดจาก RAG)
 
         for p in products[:5]:  # จำกัด 5 ชิ้นแรก (เพิ่มจาก 3 เพื่อให้ link-followup มีสินค้าเพียงพอ)
             item_id = p.get("item_id")
@@ -5049,6 +4882,43 @@ def _record_suggestion_products(req, products: list[dict]) -> None:
                 card=p,
                 is_anchor=_is_text_anchor,
             )
+
+        # ⚡ Phase 2C.2 — one authoritative subject decision per turn
+        #   precedence: explicit identity > pair > selected batch > persisted
+        _ev = subject_evidence if isinstance(subject_evidence, dict) else {}
+        _explicit = [str(i) for i in (_ev.get("explicit_ids") or ())]
+        _explicit += [str(i) for i in _matched_item_ids
+                      if str(i) not in _explicit]
+        _pair = [str(i) for i in (_ev.get("pair_ids") or ())]
+        if (not _pair and len(_matched_item_ids) >= 2
+                and any(kw in (req.message or "").lower()
+                        for kw in _COMPARISON_FOLLOWUP_KW)):
+            _pair = [str(i) for i in _matched_item_ids[:2]]
+        _ops = tuple(_ev.get("ops") or ()) or (("recommend",) if products else ())
+        _decided = _cp.decide_subject_set(
+            _ev.get("stored"),
+            explicit_ids=_explicit,
+            pair_ids=_pair,
+            resolved=_ev.get("resolved"),
+            selected_ids=[p.get("item_id") for p in products[:5]],
+            requested_operations=_ops,
+        )
+        if _decided is not None:
+            _w = _cp.record_subject_set(
+                req.conversation_id, _decided,
+                expected_prior=_ev.get("stored"),
+                platform=getattr(req, "platform", None),
+                shop=getattr(req, "shop", None))
+            if _w is not None and isinstance(subject_evidence, dict):
+                subject_evidence["stored"] = _w
+            # _w == _decided → committed · _w != _decided → CAS loss, winner
+            #   returned (ห้าม log ว่า persisted) · None → write refused
+            print(f"[SUBJECT-SET] decided {_decided.relation}"
+                  f"{list(_decided.subject_ids)} → "
+                  + ("persisted" if _w == _decided
+                     else (f"lost-to-winner {list(_w.subject_ids)}"
+                           if _w is not None else "write refused")),
+                  file=sys.stderr)
     except Exception as _e:
         print(f"[CONV-PRODUCTS] error recording suggestions: {_e}", file=sys.stderr)
 

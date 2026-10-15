@@ -462,10 +462,22 @@ def _install(monkeypatch, fx: dict):
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
 
     # intent classifier is LLM-backed — deterministic fixture injection
+    # row-level default + optional per-turn override (turn["intent_result"],
+    # keyed by message text — same structured boundary, zero extra calls)
     intent_result = dict(fx.get("intent_result") or
                          {"intent": "other", "confidence": 0.5})
-    monkeypatch.setattr(intent_classifier, "classify_intent",
-                        lambda message, history=None, shop=None: dict(intent_result))
+    _turn_results = {
+        t["text"]: dict(t["intent_result"])
+        for t in fx.get("turns", []) if t.get("intent_result")
+    }
+    intent_calls: list[dict] = []
+
+    def _fake_classify(message, history=None, shop=None):
+        intent_calls.append({"message": message})
+        return dict(_turn_results.get(message) or intent_result)
+
+    monkeypatch.setattr(intent_classifier, "classify_intent", _fake_classify)
+    captured.intent_calls = intent_calls
 
     # retrieval: serve collection docs as product cards (real to_product_card)
     shop = fx.get("shop")

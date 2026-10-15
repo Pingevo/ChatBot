@@ -256,7 +256,8 @@ def test_app_builds_profile_once_before_kb_lookup():
     assert 0 < build_at < src.index("lookup_kb(kb_query")
 
 
-def test_resolve_active_by_message_called_exactly_once():
-    # timeline resolver ต้องถูกเรียกจุดเดียว (hoisted ก่อน KB) — CONV-ACTIVE reuse ผล
+def test_resolve_subjects_called_exactly_once():
+    # subject resolver ต้องถูกเรียกจุดเดียวต่อ turn (hoisted ก่อน KB) —
+    # Phase 2C.2: persisted/derived subject set แทน timeline resolver เดิม
     src = (ROOT / "chatbot" / "shopeechat" / "app.py").read_text(encoding="utf-8")
-    assert src.count("resolve_active_by_message(") == 1
+    assert src.count("resolve_subjects(") == 1

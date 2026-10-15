@@ -47,6 +47,7 @@ _TOP_LEVEL_KEYS = {
     "availability_probe",  # metadata: points at the item under test
     "expectation_note",    # metadata: L1/L2-only expectation prose (no assert)
     "noncatalog_item_reason",  # metadata: why expected ids are absent
+    "fixed_in",            # metadata: change that turned an incident positive
 }
 _EXPECTED_KEYS = {
     "action", "handoff_reason", "web_search",

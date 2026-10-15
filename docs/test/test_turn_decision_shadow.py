@@ -1,10 +1,12 @@
-"""Phase 2C.1 — TurnPlan shadow wiring tests (observe-only).
+"""Phase 2C.1/2C.3 — TurnPlan shadow wiring tests (observe-only).
 
-Shadow contract: app.chat() runs decide_turn() as a trace-only step
-("TurnDecisionShadow") behind USE_TURN_DECISION_SHADOW=1 (default OFF).
-The shadow must never change the response: no early return or mutation.
-Snapshot-loader errors use empty inputs (ok=True); decision/outer errors
-become ok=False — never a failed chat.
+Shadow contract: app.chat() computes ONE authoritative TurnPlan post-classify
+(consumed by production); the "TurnDecisionShadow" step serializes that same
+plan behind USE_TURN_DECISION_SHADOW=1 (default OFF) — it never plans again.
+Turns returning before classify carry no step (boundary lock, human request,
+item-tag, order). Subject-view read failures yield empty plan inputs
+(ok=True); decide_turn errors become ok=False (plan_unavailable) — never a
+failed chat.
 
 PII contract: the trace carries ok/primary_action/needs[{kind,operation,
 confidence,provenance}]/ownership/claim_stage/requires_clarification/flags/
@@ -175,13 +177,14 @@ def test_shadow_product_issue_not_handoff(monkeypatch):
 
 
 def test_shadow_human_request_is_handoff(monkeypatch):
+    """human-request turn returns at the pre-Pass-1 handoff boundary —
+    the authoritative plan is computed post-classify, so this turn
+    legitimately carries no TurnDecisionShadow step (pure need content
+    stays pinned in test_turn_decision.py)."""
     resp = _run(monkeypatch, _fx("hr", "ขอคุยกับแอดมิน"))
-    s = _shadow_steps(resp)[0]
-    assert s["primary_action"] == "handoff", s
-    assert any(n["kind"] == "human" and n["operation"] == "handoff"
-               for n in s["needs"])
-    # legacy path also handoffs — parity at boundary, not forced
     assert resp.handoff_to_admin is True
+    assert _shadow_steps(resp) == [], \
+        "pre-Pass-1 handoff return must not carry a plan step"
 
 
 def test_shadow_ticket_active_is_locked(monkeypatch):
@@ -235,6 +238,15 @@ def test_shadow_sweep_all_fixtures(monkeypatch, capsys):
                     and getattr(_resp, "handoff_to_admin", False) is False):
                 rows.append((fx["id"], rec["turn"][:40],
                              "boundary_lock", "-", ""))
+                continue
+            # Phase 2C.3 — the production TurnPlan is computed after the
+            # Pass-1 interpretation boundary; turns that early-return before
+            # it (item_tag / order flow / human-request handoff) have no
+            # intent-informed plan and legitimately carry no shadow step.
+            if not any(s.get("name") == "Intent"
+                       for s in (getattr(_resp, "steps", None) or ())):
+                rows.append((fx["id"], rec["turn"][:40],
+                             "pre_pass1_return", "-", ""))
                 continue
             if not steps:
                 bad += 1
@@ -327,114 +339,100 @@ def _run_records(monkeypatch, fx):
 # ── Phase 1F — shadow callsite forwarding / minimal snapshot ────────────────
 
 
-def _stub_req(**kw):
-    d = {"message": "ทักครับ", "conversation_id": "c-stub",
-         "shop": "testshop", "platform": "shopee", "ticket_state": None}
-    d.update(kw)
-    return SimpleNamespace(**d)
-
-
 def _capture_decide(monkeypatch):
     captured: dict = {}
     def _fake(msg, **kw):
         captured["message"] = msg
         captured.update(kw)
-        return SimpleNamespace(
+        from shopeechat import warranty_flow as _wf
+        return _td_mod.TurnPlan(
             primary_action="clarify", needs=(), ownership="unknown",
-            claim=SimpleNamespace(stage="absent", episode_id=None,
-                                  lifecycle_open=False,
-                                  accepts_claim_fields=False),
+            claim=_wf._claim_lifecycle(kw.get("claim_state")),
             requires_clarification=True, normalized_message="x",
-            flags=frozenset())
+            flags=frozenset(), intent_confidence=0.5)
     monkeypatch.setattr(_td_mod, "decide_turn", _fake)
     return captured
 
 
-def test_shadow_reads_timeline_once_for_claim_and_anchor(monkeypatch):
-    """claim_state + active anchor ต้องมาจาก load_timeline ครั้งเดียว —
-    ห้ามเรียก load_claim_state/get_active_product แยก (materialize card
-    อ่าน product DB + เขียน live cache โดยไม่จำเป็น)."""
+def test_plan_claim_and_anchor_come_from_subject_view(monkeypatch):
+    """claim_state + active_anchor ของ decide_turn ต้องมาจาก subject view
+    doc เดียว (≤1 get_subject_set/turn) — ห้ามเรียก
+    load_claim_state/get_active_product แยกสำหรับ plan inputs."""
     monkeypatch.setenv("USE_TURN_DECISION_SHADOW", "1")
-    calls = {"timeline": 0}
-    def _tl(cid):
-        calls["timeline"] += 1
-        return {"conversation_id": cid,
-                "claim_state": {"stage": "collecting"},
-                "active_item_id": "3004",
-                "products": [{"item_id": "3004", "name": "x"}]}
-    monkeypatch.setattr(_cp_shadow, "load_timeline", _tl)
-    monkeypatch.setattr(
-        _cp_shadow, "load_claim_state",
-        lambda cid: pytest.fail("load_claim_state ต้องไม่ถูกเรียกแยก"))
-    monkeypatch.setattr(
-        _cp_shadow, "get_active_product",
-        lambda cid: pytest.fail("get_active_product ต้องไม่ถูกเรียก"))
+    calls = {"view": 0}
+    def _view(cid):
+        calls["view"] += 1
+        return _cp_shadow.SubjectSetView(
+            None, None, (),
+            claim_state={"stage": "collecting"},
+            active_item_id="3004")
+    monkeypatch.setattr(_cp_shadow, "get_subject_set", _view)
+    # load_claim_state/get_active_product ยังถูกเรียกโดย claim lifecycle
+    # (warranty_flow) — owner คนละตัวกับ plan inputs; ที่ pin คือ
+    # decide_turn kwargs มาจาก view doc เดียวกัน + view ≤1 call/turn
     captured = _capture_decide(monkeypatch)
-    steps: list = []
-    app._turn_decision_shadow(_stub_req(), [], steps)
-    assert calls["timeline"] == 1, calls
+    resp = _run(monkeypatch, _fx("view", "สวัสดีครับ"), flag="1")
+    assert resp is not None
+    assert calls["view"] == 1, calls
     assert captured.get("claim_state") == {"stage": "collecting"}
     anchor = captured.get("active_anchor")
     assert anchor is not None and anchor.get("item_id") == "3004", anchor
     assert "description" not in anchor and "products" not in anchor
-    assert steps and steps[0]["ok"] is True
 
 
-def test_shadow_no_anchor_no_claim_passes_none(monkeypatch):
-    monkeypatch.setenv("USE_TURN_DECISION_SHADOW", "1")
-    monkeypatch.setattr(_cp_shadow, "load_timeline", lambda cid: None)
-    monkeypatch.setattr(_cp_shadow, "load_claim_state", lambda cid: None)
-    monkeypatch.setattr(_cp_shadow, "get_active_product", lambda cid: None)
+def test_plan_no_anchor_no_claim_passes_none(monkeypatch):
+    """ไม่มี conversation doc → view ว่าง → decide_turn รับ None ทั้งคู่."""
     captured = _capture_decide(monkeypatch)
-    app._turn_decision_shadow(_stub_req(), [], [])
+    resp = _run(monkeypatch, _fx("none", "สวัสดีครับ"))
+    assert resp is not None
     assert captured.get("claim_state") is None
     assert captured.get("active_anchor") is None
 
 
-def test_shadow_active_ticket_never_forwards_exceptions(monkeypatch):
-    """Phase 2B.5 — content override ถูกลบ: shadow ต้องไม่ส่ง
-    post_handoff_exceptions เข้า decide_turn ไม่ว่า ticket จะ active หรือไม่."""
-    monkeypatch.setenv("USE_TURN_DECISION_SHADOW", "1")
-    monkeypatch.setattr(_cp_shadow, "load_timeline", lambda cid: None)
-    monkeypatch.setattr(_cp_shadow, "load_claim_state", lambda cid: None)
-    monkeypatch.setattr(_cp_shadow, "get_active_product", lambda cid: None)
+def test_plan_never_forwards_post_handoff_exceptions(monkeypatch):
+    """Phase 2B.5 — content override ถูกลบ: production plan ต้องไม่ส่ง
+    post_handoff_exceptions เข้า decide_turn; open-ticket turn ถูก
+    boundary-lock ก่อน classify → decide_turn ไม่ถูกเรียกเลย."""
     captured = _capture_decide(monkeypatch)
-    app._turn_decision_shadow(_stub_req(ticket_state="open"), [], [])
-    assert "post_handoff_exceptions" not in captured, captured
-    app._turn_decision_shadow(_stub_req(ticket_state=None), [], [])
+    resp = _run(monkeypatch,
+                _fx("lock2", "ยังไม่มีใครตอบเลย", ticket_state="open"))
+    assert resp is not None
+    assert captured == {}, "locked turn must not reach decide_turn"
+    captured = _capture_decide(monkeypatch)
+    resp = _run(monkeypatch, _fx("tick", "สวัสดีครับ",
+                                 ticket_state=None))
+    assert resp is not None
+    assert captured, "normal turn must reach decide_turn"
     assert "post_handoff_exceptions" not in captured, captured
 
 
-def test_shadow_timeline_failure_falls_back_to_empty_snapshot(monkeypatch):
-    """timeline loader พัง → snapshot เป็น None แล้ว decide_turn ทำงานต่อ
-    (ok=True) — ห้าม raise ออกนอก helper."""
+def test_subject_view_failure_yields_empty_plan_inputs(monkeypatch):
+    """subject-view DB read พัง → get_subject_set คืน view ว่าง (catch
+    ภายใน) → decide_turn ทำงานต่อด้วย claim/anchor=None, step ok=True."""
     monkeypatch.setenv("USE_TURN_DECISION_SHADOW", "1")
-    def _boom(cid):
+    def _boom():
         raise RuntimeError("db down")
-    monkeypatch.setattr(_cp_shadow, "load_timeline", _boom)
-    monkeypatch.setattr(_cp_shadow, "load_claim_state", lambda cid: None)
-    monkeypatch.setattr(_cp_shadow, "get_active_product", lambda cid: None)
+    monkeypatch.setattr(_cp_shadow, "_coll", _boom)
     captured = _capture_decide(monkeypatch)
-    steps: list = []
-    app._turn_decision_shadow(_stub_req(), [], steps)  # ห้าม raise
-    assert captured["claim_state"] is None
-    assert captured["active_anchor"] is None
-    assert steps and steps[0]["name"] == "TurnDecisionShadow"
-    assert steps[0]["ok"] is True
+    resp = _run(monkeypatch, _fx("boom", "สวัสดีครับ"))
+    assert resp is not None
+    assert captured.get("claim_state") is None
+    assert captured.get("active_anchor") is None
+    steps = _shadow_steps(resp)
+    assert steps and steps[0]["ok"] is True
 
 
 def test_shadow_trace_carries_no_snapshot_payload(monkeypatch):
-    """trace ต้อง PII-safe — ไม่มี timeline/card/raw message/history."""
+    """trace ต้อง PII-safe — serializer รับ plan object เท่านั้น, step
+    มีเฉพาะ key ที่อนุญาต."""
     monkeypatch.setenv("USE_TURN_DECISION_SHADOW", "1")
-    monkeypatch.setattr(
-        _cp_shadow, "load_timeline",
-        lambda cid: {"claim_state": {"customer_name": "สมชาย ใจดี"},
-                     "active_item_id": "3004"})
-    monkeypatch.setattr(_cp_shadow, "load_claim_state", lambda cid: None)
-    monkeypatch.setattr(_cp_shadow, "get_active_product", lambda cid: None)
+    plan = SimpleNamespace(
+        primary_action="clarify", needs=(), ownership="unknown",
+        claim=SimpleNamespace(stage="collecting"),
+        requires_clarification=True, normalized_message="x" * 10,
+        flags=frozenset({"some_flag"}))
     steps: list = []
-    app._turn_decision_shadow(_stub_req(message="ลูกค้าแจ้ง 0812345678"),
-                              [{"role": "user", "text": "ประวัติ"}], steps)
+    app._turn_decision_shadow(plan, steps)
     step = steps[0]
     allowed = {"name", "ok", "primary_action", "needs", "ownership",
                "claim_stage", "requires_clarification", "flags",
