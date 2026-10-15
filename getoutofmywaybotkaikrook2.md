@@ -94,6 +94,106 @@
 - **safety**: worker/provider/LLM/real Mongo/`.env`/port 8010/push/PR/deploy = **0** · Commit 2 = active log only
 - **verdict**: `PHASE_2C1_COMMITTED_READY_FOR_PHASE_2C2`
 
+#### Phase 2C.2 — Persisted ConversationSubjectSet (2026-10-15) · เริ่มงาน · implementation-only ห้าม commit
+
+- **baseline ยืนยันแล้ว**: branch `feature-legacy-shopee-evidence-retrieval` @ `ba14fb4` (2C.1 head) · tree clean · staging ว่าง · re-run baseline ตรง accepted: focused 177 passed · canonical 334 passed / 19 skipped / 8 xfailed · validator 69/69 · `py_compile` clean
+- **PART 1 audit (producer/consumer/writer) สรุป**:
+  - **subject decision owners ≈16**: `conversation_products._compute_active` + `resolve_active_by_message` (kw ladder: `_SAME_PRODUCT_KWS`/`_SUGGESTION_REF_KWS`/`_GENERIC_Q_KWS`) · app.py blocks: ITEM-TAG+history-tag scan (978-1006) · IMG-ANCHOR (1161-1216) · warranty-policy prose model-parse (1452-1513) · FOLLOWUP-COMP (1519-1607 รวม **bot-prose model parse** 1568-1605) · ANCHOR-COMP (1614-1641) · POST-COMP-FUP (1643-1682) · PARTIAL-COMP (1684-1718) · LINK-FOLLOWUP (2734-2772) · CONV-ACTIVE apply (2781-2858) · ref-like bot-prose parse (3098-3225) · CARRY-FORWARD prose fuzzy (3662-3687) · TEXT-ANCHOR (5019-5034) · `handoffs.py` cert fallback `get_active_product` (457) · `knowledge_base.py` QA anchor `get_active_product` ×2 (1052,1111)
+  - **subject DB writers = 3 บน doc เดียว**: `save_timeline` (products+active_item_id, whole-array `$set`) · `add_product` (load-modify-save) · `add_order_anchor` (dotted `$set`) — +ghost calls `add_item_anchor`/`get_timeline` ใน `chat_v2.py` ที่ **ไม่มีอยู่จริง**ใน module (dead-path inconsistency → audit note)
+  - **app-local follow-up kw tables ≈20**: `_SAME_PRODUCT_KWS`/`_SUGGESTION_REF_KWS`/`_GENERIC_Q_KWS` (cp.py) + `_anchor_compare_kws`/`_pcf_comp_kws`/`_link_followup_kws`/`followup_indicators`×2/`other_model_indicators`/`reference_indicators`/`new_topic_indicators`/`_compat_*`×4/`_charging_spec_kws`/`_fuzzy_false_positive_types`/`ref_brands` prose set/...
+  - **subject-path Mongo reads/turn (worst case)**: ~8 conv_products loads + per-card product rebuilds (`_rebuild_card`) เพราะทุก getter `load_timeline` แยกกัน
+  - **establish clarify pattern (มีอยู่แล้ว)**: `superlative_no_match_clarify` (app.py:3970) + warranty multi-item ask (warranty.py:1112) → clarify ใน 2C.2 = deterministic `ChatResponse` pattern เดิม ไม่ใช่ TurnPlan action switch → **2C.3 boundary feasible**
+  - **other consumers (retain)**: order axis (`order_flow` anchors/`resolve_active_order_sn`) · claim axis (`warranty_flow` claim_state) · KB follow-up query merge (user text ไม่ใช่ bot prose — retrieval machinery) · REF-REGEX/MODEL-REGEX/FUZZY retrieval exec
+- **plan**: PART2 freeze minimal surface (ConversationSubjectSet + record/get/resolve ใน `conversation_products.py`, dotted `$set` เดียว, no prose) → PART3 RED tests (cases A–Q + e2e replay + ambiguity mutation) → PART4 migrate subject-selection points เท่านั้น (ITEM-TAG/IMG-ANCHOR/COMP ctx/LINK/CONV-ACTIVE/cert+QA fallback + writes ใน `_record_suggestion_products`/order items) + delete replaced owner blocks → PART5 green+deletion gate → PART6 complexity → PART7 docs → PART8 report
+- **retained→2C.3 (จะรายงานเป็น migration items)**: warranty-policy prose parse · CARRY-FORWARD prose fuzzy (no-subject conversations) · ref-like bot-prose parse (3098-3225) · retrieval query machinery ทั้งหมด · `chat_v2` dead engine
+
+#### Phase 2C.2 Design Correction (review findings H1–H3 + relation/read/accounting — 2026-10-15) · design-only ยังไม่เขียน tests/runtime
+
+- **H1 — one decision + ≤1 persistence call/turn (call-graph-verified)**:
+  - **decision owner**: `decide_subject_set` (pure, `conversation_products.py`) — precedence `explicit identity > explicit pair > selected batch > persisted-ref(consume) > none`; caller `= 1` textual site ภายใน `_record_suggestion_products` head (ครอบ 3 return paths: KB 2529 / web-search 4947 / product_store 4970) + 1 site ที่ ITEM-TAG anchor block (~1055) สำหรับ early-return path 1142 ที่ไม่ถึง recorder — mutually exclusive per turn path → writer callsites=2 textual, ≤1 write/turn; `decide == persisted` → skip write (idempotent replay)
+  - **evidence carrier**: `_subject_ev` per-turn dict — explicit_ids (item tag ~978 / IMG-ANCHOR ~1194 / TEXT-ANCHOR fetch-matched) · pair_ids (compare ctx + fetched pair) · resolved (ref resolution) · selected_ids (response products) · ops (intent/qtype/gate) — no per-callsite guard chain
+  - **ref resolution**: `resolve_subjects` pure เรียกครั้งเดียว ~1515 หลัง `_anchor_compare_ctx` init ก่อน FOLLOWUP-COMP (consumer แรก) — outcome ถูกส่งต่อให้ทุก migrated gate
+- **H2 — truthful persistence**: `record_subject_set(conv_id, subject_set, *, platform, shop) -> ConversationSubjectSet | None` — คืน set เฉพาะ acknowledged write; invalid input / PyMongo error → `None` (สอดคล้อง error contract เดิมของไฟล์: `load_timeline`→None, `save_timeline`→swallow); caller ห้าม claim saved เมื่อ None, ห้าม fallback เดา newest/active tail — persist-fail = ไม่มี subject (clarify ถ้า turn ต้องใช้)
+- **H3 — bot prose is never subject truth (disposition matrix, call-graph-verified)**:
+  | path | ops | selects subject? | 2C.2 disposition |
+  |---|---|---|---|
+  | warranty-policy prose parse 1452-1513 | policy (non-migrated) | rewrites req.message (retrieval enricher) — prose-derived | RETAIN→2C.3 (flagged, never feeds subject_set) |
+  | FOLLOWUP-COMP history-prose fallback 1579-1607 | compare (migrated) | selects pair from history text | DELETE — replaced by persisted set compare resolution |
+  | ref-like bot-prose parse 3098-3225 | price/link/describe (migrated) | selects models from latest bot answer → retrieval_message | DELETE — fires only when unresolved; migrated cases resolve via set |
+  | CARRY-FORWARD 3652-3687 | generic followups | fuzzy-match products on bot answer → `_ref_regex_products` | DELETE — prose→subject; non-ref generic turns → `no_subject_ref` honest |
+  - owner count รายงานจริง: migrated bot-prose subject selectors = **0**; retained prose-derived enricher (non-migrated policy op) = **1** → 2C.3 — ไม่ claim `16→1` โดยรวม
+- **Relation/update semantics (snapshot, not accumulator)**: `subject_set` = subdocument ทั้งก้อน via dotted `$set` field-level เท่านั้น (ไม่ replace doc) — same `subject_ids` → replace `relation`/`requested_operations`/`confidence`/`source_turn_id`/`updated_at` ด้วยค่า turn ปัจจุบัน (ห้าม merge ops สะสม); ref-consume (deictic resolved via persisted) ≠ new decision → 0 writes; order items **ไม่** auto-`alternatives` — persist เฉพาะเมื่อ structured product-answer path ยืนยัน order-product question, หลาย item + ไม่ชัด → prefer no write; `bundle` เฉพาะ evidence ยืนยัน
+- **Read/resolution surface**: `get_subject_set` ≤1 DB read/turn (load ~1515) → ส่ง `ConversationSubjectSet | None` ให้ `resolve_subjects(persisted, message)` (pure, ไม่รับ conversation_id ไม่ query ซ้ำ) → `SubjectResolution(outcome, subject_set)` NamedTuple — outcome ∈ {resolved, clarify, no_subject_ref} — malformed persisted → clarify/no_subject_ref ไม่ guess; visibility/sellability ไม่ตัดสินใน resolver; resolver ถูก consult เฉพาะเมื่อ turn ไม่มี explicit subject evidence (tag/img/model-kw — condition เดิม `not _current_has_model`)
+- **Corrected targets**: migrated subject decision owner = **1 module** (resolve+decide ใน `conversation_products.py`) · subject DB writer fn = **1** · subject-set reads/turn = **0–1** · writes/turn = **0–1** · migrated prose subject selectors = **0** · ไม่ claim global owner=1 (anchor-axis readers `get_active_product` ใน handoffs/kb + order axis retained → 2C.3)
+- **boundary**: feasible โดยไม่ต้อง full TurnPlan orchestration — clarify ใช้ deterministic `ChatResponse` pattern เดิม (superlative_no_match_clarify precedent); item-tag early-return มี callsite ของตัวเอง → ไม่ต้อง bridge/helper
+
+#### Phase 2C.2 Implementation (2026-10-15) · RED→GREEN→verify เสร็จ · รอ independent review · ยังไม่ commit
+
+##### Contract pins (P1–P3 — proven before runtime edits)
+
+- **P1 identity domain (Option B)**: `subject_ids` = normalized **item_id strings เท่านั้น** (canonical form เดียวกับ `_to_serializable`) — model code/kw เป็น *evidence* ที่ resolve เป็น item_id ก่อน persist; variant detail (`model_id`/`model_name`) คงอยู่บน `products[]` timeline entry — ไม่มี composite encoding · round-trip = `fetch_product_by_id` (status-agnostic) + `_materialize_card` timeline fallback
+- **P2 absent doc**: `insert_one` minimal `{conversation_id, subject_set, platform?, shop?, last_updated}` ใต้ `{conversation_id:1}` unique เดิม · E11000 → reread winner · ห้าม fabricate `products`/`active_item_id`/`order_anchors`/`claim_state`
+- **P3 concurrency**: production = bot-worker `bufferService` conv_lock (`convLockIdFor` E11000 claim) serialize `/chat` ต่อ conversation; direct `/chat`/test อาจข้าม → CAS fence `subject_set.subject_ids == expected` (None=missing∨null) + reread winner ครั้งเดียว, ไม่ retry, ไม่ LWW (pattern เดียวกับ `transition_claim_state`)
+
+##### RED → fixes (root cause ต่อจุด)
+
+- **RED**: `test_conversation_subject_set.py` ใหม่ — **58 AttributeError missing-contract** (ไม่มี `ConversationSubjectSet`/`get_subject_set`/`resolve_subjects`/`decide_subject_set`/`record_subject_set`) + 1 vacuous pass
+- **error 1**: subject unit tests ใช้ `cp._utcnow` ที่ไม่มี → fix test helper (module ใช้ `datetime.now(timezone.utc)` โดยตรง)
+- **error 2 — semantic conflict ที่พบระหว่าง wiring**: legacy conversation ที่มี 1 explicit customer anchor แต่ยังไม่มี `subject_set` (เช่น `anchor-link-followup` positive row) — literal "no persisted → clarify" ทำลาย positive เดิม → **fix = documented bootstrap**: `get_subject_set` คืน `SubjectSetView(effective, stored)` — effective = stored ∨ derived จาก `is_anchor` timeline entries เท่านั้น (1→single, หลาย→alternatives, conf 0.5; suggestion/prose ไม่ derive); CAS fence ใช้ `stored` (None = absent-field equality)
+- **error 3 — precedence bug ใน decide เดิม**: resolved-deictic turn ที่ pin products → selected batch ทับ relation `compare`→`alternatives` → fix: same-ids guard + `resolved` param (consume turn ไม่เขียนทับ ops ของ deciding turn)
+- **error 4 — q07 regression + compare e2e fail**: MODEL-REGEX fetch เฉพาะ kw แรก (`_cur_model_kws[0]`) + inline regex `[A-Za-z]+\d+[A-Za-z]*` ตัด digit-tail (`AC65B2`→`AC65B`+orphan `2`) → explicit "A เทียบ B" ได้สินค้าข้างเดียว → fix: compare wording + ≥2 model kws → fetch ทีละ kw merge (tokenizer = `extract_model_keywords` เดียวกับ evidence) → pair evidence ครบ → `compare{3002,3003}` persist + LLM ได้ทั้งคู่
+- **error 5 — anchor-stock-followup handoff regression**: seeded timeline-only subject (catalog ว่าง) — pin ใช้ `fetch_product_by_id` อย่างเดียว → None → products=0 → NO-PRODUCT-GUARD handoff → fix: `materialize_subject_cards` (timeline entry → `_materialize_card` rebuild→stored fallback; นอก timeline → `fetch_product_by_id`) = semantics เดิมของ `resolve_active_by_message` getters
+- **error 6 — tx-q18 silent swap ยังอยู่**: `_prepare_link_followup` แขน substitution fetch ทดแทน type เดียวกันเมื่อ subject UNLIST → non-subject 3002-3004 เข้า LLM input → fix: resolved-subject link path เรียก `_prepare_link_followup(alt_fetcher=None)` — เก็บ note/link-cut (subject_kept_link_may_be_cut) ไม่แทนที่
+- **error 7 — shadow MISSING**: clarify early return ส่ง `steps=[]` ทิ้ง TurnDecisionShadow step → fix: `steps=list(_steps)`
+- **error 8 — ≤1-read edge**: item-tag + doc ว่าง → view empty → fields None → main reload ยิงซ้ำ → fix: `_subject_view_loaded` flag
+
+##### Deletions (proven caller replacement)
+
+- `resolve_active_by_message` (cp.py — external callsite เดียวถูกแทนด้วย resolve+pin) + kw ladder consumption (`_SAME_PRODUCT_KWS`/`_SUGGESTION_REF_KWS`/`_GENERIC_Q_KWS` ย้ายเป็น canonical tables ใน resolver)
+- FOLLOWUP-COMP history-prose pair fallback · `_is_ref_like` block (~128 บรรทัด: markdown-link extraction + brand-model regex + `ref_brands`/`_stop_ref` sets + `reference_indicators`) · CARRY-FORWARD fuzzy-match-on-bot-answer · `resolve_active_by_message` callsite
+- เก็บไว้→2C.3: warranty-policy prose enricher (non-migrated op, rewrites req.message — retrieval-only ไม่แตะ subject) · timeline readers ใน kb/handoffs · order axis
+
+##### GREEN + incidents fixed
+
+- `test_conversation_subject_set.py`: **63 passed** (A–Q + R + P-contracts + mutations + e2e)
+- `test_legacy_turn_incident_replay.py`: tx-q08 (price followup pair) · tx-q09 (link followup pair) · tx-q18 (UNLIST anchor link no-swap) — **fixed → status flipped incident→positive** ตาม gate design; `anchor-link-followup`/`anchor-stock-followup`/`pos-anchor-item-card` positive คงเขียว
+- `test_turn_decision_shadow.py`: 17 (`turns=85 missing=0`)
+- canonical batch (contract+td+td-shadow+retrieval-shadow+5f-claim+5f-handoff+troubleshoot-5c+replay+subject): **401 passed / 19 skipped / 5 xfailed**
+- affected suites: anchor_compare+timeline_refresh+retrieval_profile **25** · link_followup_5c+availability_subjects_5c+compare_3way+candidate_pool×2+5f_availability_anchor **49** · units+unit_live_compare+cert×2+warranty_delivery **19** · retrieval/cluster **195** · availability+guards+qa×2+recent_qa **42**
+- script suites: handoff_transport **47/47** · guards ALL PASS · route_context ALL PASS · charger_subtype_parity **42/42** · unit_card_fields/classifier PASS · new_product_types **66/66**
+- pre-existing live-data failures (unchanged, ไม่เกี่ยวกับ 2C.2): `test_retrieval_profile_db` 16/17 (device check บน live catalog) · `test_sellable_units` count vs live DB (27807≠26970 — data drift)
+- fixture validator 69 rows · `py_compile` · `git diff --check` — clean
+
+##### Owner/writer/read accounting (จริง — ไม่ claim global=1)
+
+| metric | before | after |
+|---|---|---|
+| migrated subject decision owner | ~16 blocks | **1 module / 2 fns** (resolve+decide) |
+| subject DB writer fns | 3 timeline writers | **+1** `record_subject_set` (subject_set field เท่านั้น) |
+| writer callsites / writes-per-turn | scattered | **2 textual, ≤1 write/turn** (idempotent decide → skip) |
+| subject-set conv-doc reads/turn | 0 | **≤1** (`get_subject_set` + `_subject_view_loaded` fence) |
+| conv-doc reads incl. materialize | ~8 loads worst-case | **≤2** (view + materialize เมื่อ resolved) |
+| migrated bot-prose subject selectors | 3 | **0** |
+| retained prose-derived enricher | 1 (policy) | **1 → 2C.3** |
+| anchor-axis readers (kb/handoffs `get_active_product`) | 3 callsites | retained → 2C.3 |
+
+- runtime LOC: app.py **−~180 net** (ลบ prose/fuzzy blocks ~200, เพิ่ม subject wiring ~60) · conversation_products.py **+~300** (types+surface+docstrings) · deleted fns: `resolve_active_by_message` · deleted kw tables: `reference_indicators`, `ref_brands`/`_stop_ref` (inline) · added: 3 types + 5 fns + `_SUBJECT_*` canonical tables (ย้าย/รวมจาก app.py `_anchor_compare_kws`/`_link_followup_kws`)
+- **safety**: worker/provider/LLM/real Mongo/.env/port 8010/stage/commit/push/PR/deploy = **0**
+- **residual → 2C.3**: TurnPlan production consumption + action switch · warranty-policy prose enricher · kb/handoffs anchor-axis readers · remaining legacy follow-up heuristics ที่ไม่ใช่ subject truth
+- **verdict**: `PHASE_2C2_IMPLEMENTED_READY_FOR_INDEPENDENT_REVIEW` — unstaged
+
+#### Phase 2C.2 Root-Cause Review Fix (2026-10-15) · audit done → RED next · ยังไม่ commit
+
+- **findings verified from source (ไม่เชื่อ review โดยอัตโนมัติ)**:
+  - **A same-ids semantic race — CONFIRMED**: `record_subject_set` fence = `subject_set.subject_ids` เท่านั้น → T1/T2 อ่าน prior เดียวกัน T2 เขียน ids เดิมแต่ semantic ใหม่ แล้ว T1 (stale) ยังผ่าน fence → ทับ winner ได้ (relation/ops/confidence หาย) → fix: fence = dotted equality ทุก semantic field (ids+relation+ops+confidence+source_turn_id, ยกเว้น updated_at) — **ไม่ต้องเพิ่ม field** เพราะ subdoc fields ครบและ deterministic อยู่แล้ว; absent prior → fence `subject_ids: None` เดิม
+  - **B buffer-disabled concurrency — CONFIRMED (call graph)**: `bufferService.bufferOrProcess` → `!config.bufferEnabled` → `processMessage` ตรง (bufferService.ts:588-590); `acquireConvLock` อยู่ใน `flushBuffer` (344) เท่านั้น → overlap ได้จริง → writer ต้อง self-safe (A cover) — ไม่แก้ botworker รอบนี้
+  - **C identity domain — CONFIRMED 2 จุด**: (1) `_norm_subject_ids`/`record_subject_set` ไม่ reject non-canonical — "AC65B" persist เป็น subject_id ได้ → enforce digit-canonical ที่ `_norm_subject_ids` (drop) + `record_subject_set` (reject proposed ที่ normalize แล้วไม่เท่า input) + `_parse_subject_set` (stored non-canonical → malformed→None) (2) `materialize_subject_cards` `entries[sid]=p` = last-array-order wins สำหรับ same-item multi-variant → เลือก deterministic ตาม `_compute_active` semantic (is_anchor > latest `mentioned_at`) — structured evidence เดิม ไม่เพิ่ม resolver
+  - **D read-count — CONFIRMED**: resolved path อ่าน conv doc 2 ครั้ง (`get_subject_set.find_one` + `materialize_subject_cards.find_one`) → `SubjectSetView` รับ `products` มาด้วย, materialize เปลี่ยน signature รับ `products` (ตัด find_one ออก — caller เดียว app.py:1881)
+  - **E CAS-loss observability — CONFIRMED**: app.py:4901 log `'persisted' if _w is not None` — CAS-loss reread คืน winner (≠None) → log ว่า persisted ทั้งที่ proposed แพ้ → compare `_w == _decided` แยก committed กับ lost-to-winner
+  - **F keyword audit — DONE**: `_SUBJECT_LINK_KWS`/`_SUBJECT_PAIR_KWS` moved 1:1 จาก `_link_followup_kws`/`_anchor_compare_kws` (canonical) · `_SUBJECT_WHICH_KWS`+`_SET_COUNT_REF_RE` = semantics จำเป็นที่ไม่มี canonical owner (`_REL_QUESTION` กว้างเกิน — bare ไหน/อะไร; TurnPlan ไม่ classify ref form — 2C.3) → เก็บเป็น owner เดียวใน module พร้อมหลักฐาน · `_SAME_PRODUCT_KWS`/`_SUGGESTION_REF_KWS`/`_GENERIC_Q_KWS` canonical เดิมในไฟล์ · new semantic kw tables added = 0 · to delete = 0
+- **test-side updates ที่บังคับตาม**: letter ids "X"/"Y"/"W" ใน TestConcurrentTurns → numeric (domain enforcement); `SubjectSetView` 2→3 fields; `materialize_subject_cards` signature; `_subject_ev["persisted"]` → `"stored"` (truthful naming — เก็บ authoritative prior รวม winner หลัง CAS loss)
+- **preserve**: q08/q09/q18 positives · singular→clarify · bootstrap derive · claim/handoff/text/image/video paths · decide precedence · no bot-prose subject
+
 ### 🔧 Phase 2B.7 — Residual Deletion + Complexity Gate (2026-10-14) · audit+delete เสร็จ · verified · ยังไม่ commit (รอ independent review)
 
 - **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `ad00048` (docs botworker drain atop `76a8064`) · tree clean · 2B.1–2B.6 committed
@@ -3587,3 +3687,131 @@ S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mon
 - **Test-side correction (N7)**: settle() เห็นเฉพาะ in-flight work ไม่เห็น armed debounce timer — เดิมผ่านเพราะ drain leak burn ~80ms/round ให้ timer(60ms) ยิงทัน; drain ถูกต้องแล้ว return เร็ว → เพิ่ม deterministic wait (`callBot===0` loop ≤1s) ตาม pattern N5 — runtime semantics ไม่เปลี่ยน
 - **Structural audit**: `inFlight.add` owners = 3 — poll child `p.finally(delete p)` · recovered `tracked.then(delete tracked)` (fixed) · `checkWaitTimeouts` `run.then(delete,delete)` — identity ตรงครบ · `activePolls` owner เดียวตรงอยู่แล้ว · runtime LOC +3 net · query/provider/shutdown semantics ไม่เปลี่ยน · **shutdown ก่อน/หลัง**: เดิม drain ช้าเต็ม timeout+alloc storm หลังเคย recover; ใหม่ return เมื่องานจบจริง
 - **ไม่มี worker/provider/real Mongo/LLM/port 8010** — fake-mock offline เท่านั้น · **Phase 2B.7 ยังไม่เริ่ม** · ไม่ push/PR/deploy
+
+#### Phase 2C.2 Persisted ConversationSubjectSet — Contract Pins + RED (กำลังทำ — 2026-10-15, branch `feature-legacy-shopee-evidence-retrieval` @ `ba14fb4`)
+
+- **Baseline (fresh, pre-edit)**: `test_turn_decision.py` **107** · `test_turn_decision_shadow.py` **17** · `test_phase2_claim_state_contract.py` **52+1s** · canonical batch **334/19s/8x** · fixture validator **69 rows pass** · anchor/compare suites **23** · `py_compile`+`git diff --check` clean · state: tree มีเฉพาะ `getoutofmywaybotkaikrook2.md` modified + test file ใหม่ untracked
+- **P1 — identity domain = Option B (item_id เท่านั้น)**: `subject_ids` = normalized item_id string (`str(_to_serializable)` — form เดียวกับ `retrieval_policy._norm_id`: `123.0`/`123`/`"123.0"`→`"123"`) · model code/keyword = evidence เท่านั้น resolve→item_id ก่อน persist (ห้าม persist raw model string) · variant (`model_id`/`model_name`) อยู่บน timeline `products[]` entry เดิม — ไม่ encode composite ลง `subject_ids` · round-trip: `subject_ids → product_store.fetch_product_by_id` (ไม่มี status filter → UNLIST/historical resolve ได้)
+- **P2 — absent doc**: `insert_one` minimal `{conversation_id, subject_set, platform?, shop?, last_updated}` ใต้ unique `{conversation_id:1}` เดิม → E11000 → reread winner เท่านั้น · ห้ามสร้าง `products`/`active_item_id`/`order_anchors`/`claim_state` ปลอม · existing doc = dotted `$set` เฉพาะ `subject_set`+`last_updated`
+- **P3 — concurrency**: production serialization = bot-worker `bufferService` conv_lock (`convLockIdFor` deterministic doc, E11000 claim, lease reclaim) — proven สำหรับ `/chat` ที่มาจาก worker; direct `chat()` (testchat/replay) bypass → belt = CAS fence `{"conversation_id":c,"subject_set.subject_ids":expected_ids|None}` (pattern เดียวกับ claim-state fenced CAS, no retry) → miss → reread ครั้งเดียว → คืน winner จริง/`None` · malformed stored set = conservative non-clobber (object ที่ parse ไม่ได้ไม่ถูกทับ)
+- **RED evidence**: `docs/test/test_conversation_subject_set.py` ใหม่ — **58 failed / 1 vacuous-pass** บน code เดิม (`AttributeError: no attribute 'decide_subject_set'/'resolve_subjects'/'record_subject_set'/'get_subject_set'/'ConversationSubjectSet'`) = missing contract เท่านั้น · matrix: P1 normalize/round-trip/collision · P2 absent-minimal/preserve-fields/dup-race/exception/invalid · P3 stale-CAS/absent-belief/unrelated-fields · decide precedence (explicit>pair>batch, explicit∈pair→pair, conflict→explicit, single/batch, identical→None, ops-replace-not-accumulate, relation-change, topic-replace, dedup-ordered) · resolve matrix (singular/pair/set-size/which/link/generic × single/multi/none) · malformed-safe · mutation probes (first-pick + reversed-precedence) · e2e replay (item-card→single→deictic, compare pair→price followup, batch→alternatives, ambiguous→clarify+0 writes, bot-prose-never-persists, ≤1 read/turn, UNLIST subject, field preservation)
+- **Frozen surface (≤ approved max)**: `ConversationSubjectSet`(5 fields) + `SubjectResolution`(NamedTuple) + `get_subject_set`/`resolve_subjects`/`decide_subject_set`/`record_subject_set` · resolver pure (รับ persisted ที่ load แล้ว, no conv_id, no hidden read) · writer truthful (`→ set | None`) · `expected_prior` = CAS fence input
+- **ยังไม่ implement** — next: minimal cp.py impl → app.py wiring (1 decision/≤1 write per turn) → GREEN → full verification
+
+#### Phase 2C.2 Review-Fix Closeout (independent-review round — 2026-10-15, still unstaged @ `ba14fb4`)
+
+- **Findings audit (source/call-graph proven)**:
+  - A same-ID semantic race = **CONFIRMED** — CAS fence เดิมเช็คแค่ `subject_set.subject_ids` → stale writer ที่อ่าน prior เดียวกันเขียนทับ relation/ops/confidence ใหม่ได้ · fix = full-snapshot fence ใน `record_subject_set`: `subject_ids + relation + requested_operations + confidence + source_turn_id` เทียบ `expected_prior` ทั้งหมด (None→`subject_ids:null` match absent∨missing) · miss → reread winner 1 ครั้ง → คืน winner (caller แยก committed/lost ด้วย `==`) · ไม่มี retry/lock/version field ใหม่
+  - B buffer-disabled = **CONFIRMED but no change needed** — bot-worker `bufferEnabled=false` → `processMessage` ตรง (ไม่ผ่าน conv lock ใน flushBuffer) → ห้ามพึ่ง worker serialization; CAS เดิมทำ `record_subject_set` self-safe อยู่แล้ว → ไม่แตะ botworker
+  - C identity domain = **CONFIRMED** — `_to_serializable` ปล่อย "AC65B"/arbitrary string ผ่านเป็น subject id ได้ · fix = `_norm_subject_ids` (digit-canonical domain เท่านั้น, non-canonical drop) + `record_subject_set` refuse non-canonical (`!= proposed → None`) + `_parse_subject_set` fail-safe (malformed → conservative non-clobber) · multi-variant same-item → deterministic pick (is_anchor ก่อน แล้ว latest mentioned_at — structured evidence เดิม, ไม่ใช่ array-order)
+  - D read-once = **CONFIRMED** — `materialize_subject_cards` เดิม reread conv doc · fix = `SubjectSetView.products` รถบรรทุก timeline products ที่ load มากับ doc เดียวกัน → materialize ใช้ `products=` (0 doc reread); test นับ collection calls จริง (`_coll().find_one` spy ไม่ใช่ชื่อ fn)
+  - E CAS-loss observability = **CONFIRMED** — เดิม `"persisted" if _w is not None` → lost-CAS ก็ log persisted · fix = `_w == _decided → persisted · _w != _decided → lost-to-winner · None → write refused`; winner เข้า `subject_evidence["stored"]` เหมือนเดิม
+  - F keyword audit = **CONFIRMED partial** — `_SUBJECT_PAIR_KWS`/`_SUBJECT_LINK_KWS` เป็น literal copy ของ app.py `_anchor_compare_kws`/`_link_followup_kws` (gate owner เดิม) → dedup: app locals = alias ไป cp table (owner เดียวใน cp.py, −14 LOC) · `_SUBJECT_WHICH_KWS`/`_SET_COUNT_REF_RE` = new-but-necessary (bare "อันไหน"/"2 อันนี้" set-ref ไม่มี canonical owner — route_context tables คนละ semantics, TurnPlan consumption = 2C.3) — เก็บพร้อม comment provenance
+- **RED ก่อนแก้ (raw)**: `test_same_ids_semantic_change_is_a_cas_conflict` + `test_cas_loss_is_distinguishable_from_commit` + `test_raw_model_code_cannot_persist_as_subject_id` + `test_view_carries_products_and_materialize_skips_reread` = **4 failed** (missing contract: stale writer commit / model-code persist / view ไม่มี products / log persisted on loss) — pin tests เดิม (stale-id conflict/absent-winner) ผ่านอยู่แล้ว ไม่นับเป็น RED
+- **GREEN**: subject suite **71 passed** · replay+shadow **118 passed, 19 skipped, 5 xfailed** (q07 answer_level/q08/q09/q18 คง positive)
+- **Test-infra poison found & fixed (verification จริงเจอ)**: `test_conversation_subject_set` import replay module → replay suppresses `load_dotenv` ตอน import app → `.env` ไม่ถูกอ่านทั้ง process → live-DB test files ที่รันหลัง (anchor/refresh/profile — real Mongo ไม่มี fake) fallback `127.0.0.1:27017` → server-selection ค้าง ~30s/op = เหมือน hang · root-cause fix ใน **ไฟล์ตัวเอง** (ไม่แตะ replay module — isolation contract `test_replay_import_isolation` บังคับ zero side-effect): `dotenv.load_dotenv(ROOT/".env")` หลัง import → env เท่า clean process · validator เพิ่ม `fixed_in` metadata key สำหรับ incident→positive provenance
+- **Fresh verification (post-fix, run เดียวกัน)**: combined batch (subject+replay+td+shadow+claim+retrieval-shadow+5f-claim+5f-handoff+5c-troubleshoot+anchor+refresh+profile) **433 passed, 19 skipped, 5 xfailed in 5.42s** · wide offline batch **84 passed** · retrieval sweep **124 passed** · handoff transport **47/47** · fixture validator **all rows pass** · `py_compile` 5 files OK · `git diff --check` clean
+- **Complexity**: types +3 (`ConversationSubjectSet`/`SubjectResolution`/`SubjectSetView`) · public fns +5/−1 (`resolve_active_by_message` ลบ) · private helpers +5 · kw tables: −2 app literals (alias→cp) +2 new-necessary (which/set-count) · Mongo/turn ≤1 doc read + ≤1 write + ≤1 CAS reread · app.py +243/−383 net −140 · cp.py +421/−51 net +370 · retry loop=0 · process-lock=0 · duplicate resolver owner=0 · bot-prose subject parse=0 · redundant doc read=0 · subject-ID-only CAS=0
+- **ยัง unstaged/uncommitted** · ไม่ stage/commit/push/deploy/worker/.env-read-by-me/real-Mongo-by-me/port 8010 · Phase 2C.3 (TurnPlan consumption/action switch) ยังไม่เริ่ม
+
+#### Phase 2C.2 Final Safety + ABA Correction (กำลังทำ — 2026-10-15, unstaged @ `ba14fb4`)
+
+- **Preflight**: stale pytest trees (3× `test_numeric…+test_anchor_compare` จาก debug round ก่อน) killed เฉพาะ PID ตรง combo · port 8010 มี uvicorn `--reload` listener (PID 84243 — **ไม่ใช่ของ session นี้ ไม่แตะ รายงานเฉยๆ**) · ไม่มี botworker · tree = manifest เดิม
+- **PART 1 plan (test purity — CONFIRMED จาก source)**: test file ปัจจุบันเรียก `dotenv.load_dotenv(ROOT/".env")` — violation ชัด (อ่าน .env จริง) · root cause ของ contamination chain = `import test_legacy_turn_incident_replay` suppresses `load_dotenv` ตอน import app **และ knowledge_base** → `.env` ไม่ถูก load ทั้ง process → live-DB files ที่รันหลัง fallback `127.0.0.1:27017` → server-selection ~30s/op = hang · fix ที่ถูก: ลบ load_dotenv call + snapshot `os.environ` ก่อน replay import แล้ว restore additions (setdefault เพิ่มอย่างเดียว — `ADMIN_DB`/`PRODUCT_DB`/`COLL` เป็น hardcoded constants ปลอดภัย, `_install` ไม่อ่าน env) → import env-neutral, .env ไม่ถูก load/restore · live-DB files (`test_anchor_compare`/`test_timeline_card_refresh`/`test_retrieval_profile`/`test_retrieval_profile_db`/`test_sellable_units`) = `NOT_RUN_REAL_DB_REQUIRES_SEPARATE_APPROVAL` — ห้ามรวมใน offline count และห้าม batch ต่อท้าย replay-importing file · เพิ่ม purity probes: subprocess import (traps: load_dotenv/MongoClient/socket/urlopen = 0 calls, env Mongo keys identical) + order-independence (pytest subprocess [subject, turn_decision])
+- **PART 2-3 plan (ABA — CONFIRMED จาก source)**: full-snapshot fence ตรวจ A→B ได้แต่ A→B→A ผ่านเพราะ semantic กลับมาเท่าเดิม · repo convention = monotonic token (`fencing_token` leases/cursors, episode fences) → minimal fence = `subject_set.rev` int (+1 ต่อ commit, caller ไม่เคยเขียนเอง) · compat rule เดียว: pre-token doc = missing rev ≡ 0 (`_parse_subject_set` default, malformed→parse fail→non-clobber) · filter: prior.rev>0 → `subject_set.rev:r` · prior.rev==0 → `subject_set.rev:None` (missing∨null = pre-token เท่านั้น — write ไม่เคย persist 0) · prior None → `subject_set:None` (absent∨null — doc ที่มี subject_set rev-less ไม่ match = fail-safe ไม่ทับ) · commit คืน `replace(set, rev=r+1)`; **`rev` ต้อง `compare=False`** ใน dataclass มิฉะนั้น committed≠proposed ทำ caller `==` (committed/lost-to-winner) พัง · ABA timeline: A(rev1)→B(rev2)→A'(rev3); stale(prior rev1) → fence miss → reread 1 ครั้ง → คืน winner rev3
+- **PART 4 plan (keyword gate — CONFIRMED จาก source+fixtures)**: `_SUBJECT_PAIR_KWS`/`_SUBJECT_LINK_KWS` = 1:1 moved canonical (app literals ลบแล้ว, alias เหลือจุดเดียว) — เก็บ · `_SUBJECT_WHICH_KWS`/`_SET_COUNT_REF_RE` = new semantics ไม่มี canonical owner: TurnPlan มีแค่ explicit `subject_refs`+ops (ไม่มี deictic-kind/count signal — consumption = 2C.3), route_context `_REL_QUESTION`/`_SINGLE_ITEM_REF_KW`/`_SUPERLATIVE_KW`/`_COMPARISON_FOLLOWUP_KW` คนละ semantics · ลบทั้งคู่ตาม rule 5 → ผลกระทบ: "2 อันนี้/ทั้งสอง" → fallthrough `อันนี้`∈`_SAME_PRODUCT_KWS`→singular→n≥2→clarify = **q07 t3 deferred** (mark `pending_live_replay`+`pending_reason` ไม่ silent-flip) · bare "อันไหน/ตัวไหน" → no_subject_ref (unpinned — deferred) · unit tests ที่ pin removed semantics → ลบ/แปลงเป็น deferred-pin · verdict น่าจะ `PHASE_2C2_BLOCKED_BY_TURNPLAN_SIGNAL_SET_COUNT_DEIXIS` (q07-t3 set-count resolution ต้องรอ TurnPlan subject-arity/set-ref signal — 2C.3)
+- **ยังไม่ implement** — RED: purity probes + ABA test ก่อน แล้วค่อยแก้ runtime
+
+#### Phase 2C.2 Final Safety + ABA Correction — DONE (2026-10-15, unstaged @ `ba14fb4`)
+
+- **PART 1 test purity — DONE**: RED `impure:impure call: load_dotenv` (probe จับ `_dotenv.load_dotenv(ROOT/".env")` ที่ module level) → ลบ call+import · env snapshot/restore รอบ `import test_legacy_turn_incident_replay` (undo setdefault additions เท่านั้น — ไม่ load .env) · เพิ่ม `TestImportPurity` 3 tests: subprocess probe (traps load_dotenv/MongoClient/socket/urlopen = 0 calls + env identical added/removed/changed) + order-independence pytest subprocess ทั้งสองทิศ (recursion guard `SUBJECT_SET_ORDER_PROBE` env — nested run skip probes, ป้องกัน spawn loop ที่เคยพ่น 200+ pytest procs) · live-DB files ที่เคยปนใน batch (anchor_compare/timeline_card_refresh/retrieval_profile(_db)/sellable_units/unit_live_compare/compare_3way/grouped_retrieval_executor/compat_mode_filter + cert_standards/general_qtype_guards/new_product_types/qa_context_guard ที่ load_dotenv ที่ import) = `NOT_RUN_REAL_DB_REQUIRES_SEPARATE_APPROVAL`
+- **PART 2-3 ABA — DONE**: RED เดิม: `test_aba_returned_state_still_loses_stale_writer` — stale writer (prior=A rev-less) commit {9002} ทับ A' ได้เพราะ snapshot เท่ากัน (ids เดิมตลอด, `source_turn_id=None` = production shape) · GREEN: `ConversationSubjectSet.rev` (`field(default=0, compare=False)` — equality ยัง semantic → caller `==` committed/lost-to-winner ไม่พัง) · `_parse_subject_set` compat rule เดียว: missing rev ≡ 0, non-int/negative → unparseable → None (non-clobber) · `record_subject_set` fence: prior.rev>0 → `subject_set.rev:r` · rev=0 → `subject_set.rev:None` (pre-token) · prior=None → `subject_set:None` (doc มี set ไม่ match = fail-safe) · commit/insert persist rev = prior+1 / 1 · miss → find_one ครั้งเดียวคืน winner · E11000 → reread · **no retry/no lock/no new collection-index-flag**
+- **PART 4 keyword gate — DONE (blocked verdict)**: `_SUBJECT_WHICH_KWS`+`_SET_COUNT_REF_RE` ลบแล้ว (ไม่มี canonical owner — TurnPlan ไม่มี deictic-kind/count signal, route_context tables คนละ semantics) → new semantic kw tables = **0** แต่พฤติกรรม deferred: bare "อันไหนดี" → no_subject_ref · "อันไหน 2 อันนี้"/"ทั้งสอง" บน multi set → singular "อันนี้" → clarify · **q07 (`tx-q07-pair-continuity`) → `pending_live_replay` + `pending_reason` ชื่อ signal ที่ขาด (TurnPlan subject-arity/set-ref — 2C.3)** · `_SUBJECT_PAIR_KWS`/`_SUBJECT_LINK_KWS` = moved 1:1 canonical เก็บ (app literals ลบแล้วตั้งแต่รอบก่อน) · set_soft เหลือ `_SUPERLATIVE_KW` เท่านั้น, set_hard เหลือ `_SUBJECT_LINK_KWS` เท่านั้น
+- **Verify (fresh, offline only)**: subject suite **79 pass** · replay **100/20s/5x** (skip+1 = q07 deferral; xfail 5 เดิม — q10 ยัง incident คงที่) · offline batch 33 files **612 pass/20s/5x** ใน 16.85s (ไม่มี Mongo stall) · handoff transport **47/47** · fixture validator **all rows** · `py_compile` cp.py+test file OK · `git diff --check` clean · **TS files ไม่เปลี่ยน → ไม่รัน TS checks**
+- **Safety**: stage/commit/push/PR/deploy=0 · botworker=0 · port 8010 uvicorn listener (PID 84243 `--reload`) = เจออยู่แล้ว ไม่แตะ · .env read/load=0 (probe พิสูจน์ executable) · real Mongo=0 ใน batch นี้
+- **BLOCKER (ส่งต่อ 2C.3)**: `PHASE_2C2_BLOCKED_BY_TURNPLAN_SIGNAL_SET_COUNT_DEIXIS` — q07-t3 "อันไหน 2 อันนี้" pair-resolution ต้องรอ TurnPlan structured signal; bare which-of-set resolve ก็ deferred ด้วย
+
+---
+
+## Phase 2C.3 slice 1 — structured subject-reference signal (กำลังทำ)
+
+เป้าหมาย: ปิด 2C.2 blocker (q07 "อันไหน 2 อันนี้") ด้วย structured signal แทน kw table
+
+Boundary ที่ reuse (trace จาก source แล้ว):
+- `intent_classifier.classify_intent` — Pass-1 LLM JSON call ที่รันทุกข้อความ (Phase 6 ยกเลิก gate) → extend schema เดิม `subject_scope`/`subject_count` = 0 extra model call
+- `decide_turn(intent_result=...)` — รับ intent_result อยู่แล้ว → map ลง `TurnNeed.subject_scope`/`subject_count` (kind=="product" เท่านั้น)
+- `resolve_subjects` — เพิ่ม typed params (`subject_scope`, `subject_count`, `signal_confidence`) validate กับ persisted set: current_set+count match→resolved · current_single+n==1→resolved · missing/mismatch/invalid/low-conf→clarify · explicit→no_subject_ref (explicit evidence owner ชนะก่อน resolver เสมอ)
+- app callsite 1569 ส่ง `_intent_result` fields + `_intent_conf` (อยู่ใน scope อยู่แล้ว)
+- q07 t3 ได้ resolved pair → materialize_subject_cards pin ทั้งคู่ → llm_item_ids [3002,3003] (consumption path เดิมของ 2C.2)
+
+Harness: per-turn `intent_result` override keyed by message text (row-level key มีอยู่แล้ว — เพิ่ม turn-level; validator ไม่ whitelist turn keys → schema ไม่ขยาย)
+Fixture q07: t3 ใส่ intent_result {recommendation,conf0.8,target_device iphone,subject_scope current_set,count 2} → restore answer_level หลัง replay ผ่าน
+ข้อจำกัด: ไม่ใช่ completion ของ 2C.3 — action-switch/deletion ยังค้าง
+
+## Phase 2C.3 slice-1 — structured subject-reference signal — DONE (2C.2 blocker closed)
+
+**ผล:** q07 "iphone หละแนะนำอันไหน 2 อันนี้" resolve ผ่าน typed signal แทน kw table — verdict `PHASE_2C2_CLOSED_PHASE_2C3_STRUCTURED_REFERENCE_STARTED`
+
+**Boundary ที่ reuse:** `intent_classifier.classify_intent` (Pass-1 LLM JSON — Phase 6 รันทุกข้อความ) → extend schema เดิม `subject_scope`(`none|explicit|current_single|current_set`)+`subject_count` = **0 model call เพิ่ม** (พิสูจน์: `captured.intent_calls==2` ต่อ 2 user turns e2e)
+
+**เปลี่ยน:**
+- `intent_classifier.py` — prompt spec+example, `_DEFAULT_RESULT`, normalize (invalid scope→none, count cast fail/<1→null)
+- `turn_decision.py` — `TurnNeed.subject_scope`/`subject_count` (product needs เท่านั้น; `_subj_scope`/`_subj_count` extract จาก intent_result ที่ `decide_turn` รับอยู่แล้ว)
+- `conversation_products.py` — `resolve_subjects(..., *, subject_scope, subject_count, signal_confidence)` — typed signal ก่อน `_classify_subject_ref`: invalid→clarify · explicit→no_subject_ref · current_set+n+count absent/match→resolved · current_single+n==1→resolved · conf<0.7→clarify · none/absent→canonical path
+- `app.py` — callsite ส่ง `_intent_result` fields + `_intent_conf`; intent step output เพิ่ม 2 fields
+- replay harness — per-turn `intent_result` override keyed by message text + `captured.intent_calls` counter
+- fixture q07 — t3 override {recommend,0.8,iphone,current_set,2} → `answer_level` คืน (pending_reason ลบ)
+
+**Verify (fresh):** RED 15 fail ก่อน implement → GREEN: structured+td+shadow **220** · replay **101/19s/5x** (q07 unskip, q08/q09/q18 ครบ) · offline batch 37 files **774/19s/5x** + anger 11 = baseline signature เดิม (`72c325e` offline POST, ไม่ใช่ regression) · validator all rows · py_compile+diff --check clean · e2e: pair {4001,4002} resolve→LLM pool + intent_calls==2
+
+**ค้าง (2C.3 ต่อ):** TurnPlan action-switch consumption, branch deletion, `decide_turn` intent wiring เข้า production (shadow callsite ยังอยู่ก่อน classify ส่ง None), warranty-policy enricher, `get_active_product` readers
+
+## Phase 2C.3 — structured-reference owner correction (กำลังทำ)
+
+เป้าหมาย: production consume subject_scope/count ผ่าน TurnPlan owner เดียว — ลบ direct path `_intent_result` → `resolve_subjects`
+
+Call graph ใหม่: classify (1339, Pass-1 เดิม 1 ครั้ง/turn) → `_intent_result` → `decide_turn(intent_result=...)` post-classify (1 ครั้ง/turn) → product TurnNeed.scope/count → resolve_subjects
+
+Constraint ที่เจอจาก source:
+- shadow callsite เดิม @823 อยู่ก่อน classify → intent ยังไม่มี → ต้องย้ายมาหลัง plan computation
+- sweep `test_turn_decision_shadow` บังคับ step ทุก turn (bad==0) — turns ที่ early-return ก่อน classify (item_tag 1171, order_flow 1281, human 1320) ไม่มี interpretation เลยไม่มี plan → exemption เหมือน boundary_lock (no Intent step = no plan legitimately)
+- plan ต้องการ claim_state/active_item_id ที่ shadow เคย load_timeline เอง → ขยาย SubjectSetView +2 fields (claim_state, active_item_id) จาก find_one เดียวกัน = 0 extra read
+- resolve kwargs: scope/count จาก product need (first non-none) ใน plan; signal_confidence = _intent_conf (metadata ของ interpretation call, ไม่ใช่ signal)
+- fix classifier example: AC65B/AC65B2 = charger ไม่ใช่ powerbank
+
+## 2026-10-04 — Phase 2C.3 single-owner correction (structured subject signal)
+
+- error: production มี 2 owner ของ subject signal — resolver อ่าน
+  `_intent_result.get("subject_scope"/"subject_count")` ตรง ๆ ขณะที่
+  shadow callsite pre-classify เรียก `decide_turn` โดยไม่มี intent_result
+- root cause: decide_turn ไม่เคยถูกเรียกใน normal path → TurnPlan ไม่มี
+  production consumer; resolver เลยผูกกับ classifier output โดยตรง
+- fix: ย้าย `decide_turn(..., intent_result=_intent_result, claim_state=
+  _sv.claim_state, active_anchor=_sv.active_item_id)` ไปไว้หลัง Pass-1
+  ก่อน post_intent_handoffs (ครั้งเดียว/turn); `_turn_decision_shadow`
+  เหลือ serializer ของ plan เดียวกัน; resolver อ่าน scope/count จาก
+  product TurnNeed + signal conf จาก `TurnPlan.intent_confidence`;
+  `get_subject_set` แก้ให้ claim/aid/products ไหลแม้ doc ไม่มี subject
+  identity (เดิม return empty ทิ้ง claim → claim-resume plans เพี้ยน);
+  classifier example แก้ AC65B/AC65B2 = charger ไม่ใช่ powerbank
+- impact: q07 pair resolve เหมือนเดิม, q08/q09/q18 preserve;
+  tax/TISI/human/order early-return turns ที่ return ก่อน plan callsite
+  ไม่มี shadow step (sweep exempt เหมือน boundary_lock); tax/TISI
+  post-classify turns อ่าน subject doc 1 ครั้งเพิ่ม (ยัง ≤1/turn);
+  shadow tests 9 ตัวที่ pin internal-planner contract เดิมเขียนใหม่ตาม
+  single-plan API; ยังไม่ migrate action switches (งาน 2C.3 ที่เหลือ)
+- verify: subject+td+shadow 229 + replay 101 = 330 pass / 19s / 5x;
+  py_compile + git diff --check clean; decide_turn 1 callsite;
+  ไม่มี _intent_result→resolver path เหลือ
+
+## 2026-10-04 — Phase 2C.2 + 2C.3 structured-reference COMMITTED
+
+- Commit 1: `0179849` `refactor: make conversation subjects authoritative` — 16 files +2352/−596 (runtime 4 + docs 4 + tests/fixtures/harness 7 + validator + suite ใหม่ `test_conversation_subject_set.py` 1313 บรรทัด; ไฟล์นี้ไม่ commit)
+- ปิด contracts 2C.2: persisted `ConversationSubjectSet` (canonical item_id, one owner `decide_subject_set`, writer `record_subject_set`, reader `get_subject_set` ≤1 read/turn) · `resolve_active_by_message` + bot-prose subject selectors + duplicated app kw literals ลบหมด · q08/q09/q18 incident→positive
+- ABA fix: CAS fence = persisted monotonic `subject_set.rev` (+1/commit, compare=False semantic equality) — snapshot equality เดิมปิด ABA ไม่ได้; pre-token doc fence `rev:null` fail-safe
+- 2C.3 slice เสร็จ (structured reference เท่านั้น): Pass-1 `classify_intent` schema +`subject_scope`/`subject_count` (0 model callsite ใหม่) → `decide_turn` ครั้งเดียว/turn post-classify → product `TurnNeed` ถือ signal + `TurnPlan.intent_confidence` → `resolve_subjects` validate กับ persisted set (missing/mismatch/invalid/low-conf → clarify, zero guessing) · `_turn_decision_shadow` = serializer เฉยๆ
+- q07 "อันไหน 2 อันนี้" resolve ผ่าน TurnPlan จริง (ไม่ใช่ kw/regex/helper) — `answer_level` GREEN ใน mocked replay; `_SET_COUNT_REF_RE`/`_SUBJECT_WHICH_KWS` absent ตลอด; new semantic kw table = 0
+- Verify: offline batch 37 files **782 pass/19 skip/5 xfail** + anger **11 fail = baseline signature เดิม `72c325e`** (ไม่ใช่ regression, ไม่แก้) · validator all rows · py_compile + diff --check clean
+- ไม่ได้พิสูจน์: live classifier interpretation quality (mocked replay พิสูจน์ plumbing เท่านั้น), live-DB suites (ยังไม่รัน — ต้อง approve แยก)
+- ค้าง 2C.3: action-switch consumption ทุก need, branch deletion, warranty-policy enricher, `get_active_product` readers, live canary
+- Process: no push/PR/deploy · no worker/provider/Mongo/.env · port 8010 = pre-existing uvicorn watcher (ไม่แตะ)
