@@ -3815,3 +3815,216 @@ Constraint ที่เจอจาก source:
 - ไม่ได้พิสูจน์: live classifier interpretation quality (mocked replay พิสูจน์ plumbing เท่านั้น), live-DB suites (ยังไม่รัน — ต้อง approve แยก)
 - ค้าง 2C.3: action-switch consumption ทุก need, branch deletion, warranty-policy enricher, `get_active_product` readers, live canary
 - Process: no push/PR/deploy · no worker/provider/Mongo/.env · port 8010 = pre-existing uvicorn watcher (ไม่แตะ)
+
+## Phase 2C.3 slice 2 — action-switch consumption + legacy branch deletion (กำลังทำ — branch `feature-legacy-shopee-evidence-retrieval` @ `880d36d`)
+
+เป้าหมาย: production consume `TurnPlan.primary_action` + `needs` เป็น action owner เดียว post-classify แล้วลบ branch ที่ owner ใหม่แทนที่แล้ว (orchestration migration ไม่ใช่ retrieval architecture ใหม่)
+
+Audit (call-graph proven จาก source ตอน audit):
+- `decide_turn` ถูกเรียก 1 ครั้ง post-classify (@~1466) แต่ `primary_action`/`needs` **ไม่มีผลกับ control flow** — plan เป็น observe-only; action ตัดสินเองที่ ~15 จุด (lock/item-tag return/order_flow/detect_hr/post_intent/resolver-clarify/warranty_flow/general/brand/kb/superlative/guard/websearch/final + comp/link selectors)
+- subject-side selectors ซ้ำ owner: FOLLOWUP-COMP/ANCHOR-COMP gate ด้วย kw (แต่ consume resolved set), POST-COMP-FUP/PARTIAL-COMP ใช้ anchor ladder (`get_anchor_history`/`get_active_product`/`get_previous_anchor`), LINK-FOLLOWUP gate ด้วย `_SUBJECT_LINK_KWS` + ladder fallback, `_is_followup_policy` enricher parse bot prose, item-tag else-arm = early answer decision ของตัวเอง
+- contract gap ใน `decide_turn` เดิม: `not needs → clarify` จะกลืน greeting/claim-resume text ("สวัสดีครับ", "ลองแล้วไม่หายเลยครับ") — gate แบบ pure switch ใช้ไม่ได้ → แก้ semantics: clarify เฉพาะ `_unanchored_followup_ask` (หรือ message ว่างจริง) · needs=() + ข้อความปกติ → execute_needs (empty needs = pipeline ปกติตอบ)
+
+Plan (RED batch เดียวก่อน → implement+delete ชุดเดียว):
+1. `decide_turn`: `requires_clarification = bool(_unanchored_followup_ask)` · primary_action=clarify เฉพาะ `unanchored and not needs` · suppress link need เมื่อ claim/order/policy need มีอยู่ (แทน exclusion list ใน app) — ย้าย `_gen_qtype` eval ขึ้นก่อน link (pure detector reorder)
+2. `app.py` gate เดียวหลัง shadow (~1478): human_wait→`_build_post_handoff_response` · no_reply→`ChatResponse(answer="",source="no_reply")` · clarify→deterministic subject-clarify text · handoff→`detect_human_request` transport (ย้ายมาจาก pre-classify) · execute_needs→fall through
+3. ลบ pre-classify `detect_human_request` callsite (~1294) — handoff dispatch อยู่ใน gate แทน (cost: human/anger turn จ่าย classify +1 call = ราคาของ unified shape)
+4. ลบ item-tag early-return arm (~1105-1168: `_is_set_q_multi` ladder call + elif tree + `llm.answer` return) — card turn ไหลผ่าน pipeline ปกติ, subject=explicit pin; `req.message = _clean or synth` ให้ classify/plan เห็นข้อความจริง; compat+target ยัง set `_hybrid_anchor_card`
+5. ลบ `_is_followup_policy` prose-parse (~1494-1555) → ย้ายหลัง resolve: `general_qtype=None` เมื่อ resolved set มี (subject pin supply product identity — ไม่ต้องเขียน message ทับ)
+6. unified subject consumption จุดเดียว (~1600): resolved set → `materialize_subject_cards` ครั้งเดียว → `_conv_active_card`/`_ref_regex_products`/`_is_conv_active` pin · compare ctx จาก pair เมื่อ (plan compare need ∨ relation=="compare") ∧ n≥2 · partial-comp: compare need + current model + single subject → ctx{"current"} · explicit-anchor turn → `_conv_active_card=anchor_card` — แทน FOLLOWUP-COMP/ANCHOR-COMP/POST-COMP-FUP/PARTIAL-COMP (4 gates ~145 LOC) + pin block (~1897)
+7. LINK-FOLLOWUP gate → `product:link` need ของ plan; serve `_subject_cards`/`_ref_regex_products` เท่านั้น (alt_fetcher=None); ลบ `get_anchor_and_suggestions` fallback + `_SUBJECT_LINK_KWS` gate
+8. CONV-ACTIVE (2837+): `_conv_active_card` มาจาก consumption site เดียว; guard chain เดิม (subtype/new-topic/compat) ทำงานบน explicit path ต่อ; เพิ่ม `_compare_need` ใน pin-suppress guard (แทน `_is_set_q_multi`)
+9. mixed product+policy: `general_qtype` + product need → ไม่ early-return answer_general; carry `build_general_context` context เข้า `_combined_extra` → llm.answer ตอบทั้งคู่ (policy-only turn ยัง early-return เดิม)
+
+Retain พร้อม blocker (ไม่ลบ — spec อนุญาต):
+- post-handoff lock @640 — ownership boundary ครอบ v2/v3/legacy ก่อน DB/LLM; ย้ายหลัง classify = จ่าย Mongo+LLM ต่อ locked turn + v2/v3 ไร้ gate → plan.human_wait arm อยู่ใน switch เพื่อ contract totality
+- `early_order_flow` @1250 — order/refund/tracking transports อยู่นอก TurnNeed vocabulary (refund→handoff reason/topic ของตัวเอง, order anchor); migrate ต้องสอน decide_turn kw surface ใหม่ → retained
+- `post_intent_handoffs` (tax/TISI) — deterministic domain responder อยู่หลัง plan แล้ว ไม่ใช่ local switch ที่ซ้ำ primary_action
+- `warranty_flow` — claim/troubleshoot domain owner self-decide ด้วย persisted state+history markers (ครอบ legacy conv ที่ไม่มี claim_state persisted — plan.claim เห็นเฉพาะ persisted)
+- general/brand/KB/superlative/guard/websearch/final-answer = execution owners เดิม
+- `_turn_decision_shadow` = serializer ของ plan จริง (observability ใน steps, ไม่ใช่ parallel path)
+
+RED batch: `docs/test/test_phase2c3_action_switch.py` — reuse offline harness (`_install`/`_replay`): human_wait lock, no_reply placeholder (RED: today LLM answers), plan-gate clarify, handoff-via-plan (RED: today no plan), mixed product+policy carry (RED: today policy-only), claim+product, admin+info need → handoff, q07-q09/q12-13/q15/q18 replay, subject ambiguity clarify, image/image_text/video, exactly-1 plan+resolve counters, zero duplicate retrieval/action.
+
+RED batch (pre-edit, raw): docs/test/test_phase2c3_action_switch.py 23 cases — **9 failed**:
+- no_reply ×3 ([สติกเกอร์]/[sticker]/[วิดีโอ] — เดิม bot ตอบ placeholder)
+- bare [รูปภาพ] no_reply (เดิมตอบ)
+- handoff_dispatched_by_plan + one_plan_for_handoff + admin+info (เดิม early-return ก่อน plan → decide_turn=0)
+- mixed product+policy (เดิม general_qtype early-return → products=[])
+- item_card_executes_via_plan (เดิม item-tag arm return ก่อน plan)
+14 passed (lock/clarify/ambiguity/claim+product plan/compare+compat/counts/no-dup/media pins) + 2 xfail (q10 ฯลฯ) + 1 skip
+
+### 2C.3 action-switch — ผลลัพธ์ (GREEN)
+
+ทำตาม plan ข้างบน + แก้เพิ่มจาก test ที่ RED→fail ระหว่าง implement:
+
+- `turn_decision` clarify semantics: clarify เฉพาะ unanchored follow-up / message ว่าง — เจอ edge เพิ่ม 3 จุด:
+  1. `[รูปภาพ]+question` → `has_visual_media` นับเป็น product ctx (รูป = subject evidence ลูกค้าส่งเอง) — เดิม clarify ผิดเพราะไม่มี anchor
+  2. history มี image turn (`visual_media_placeholder`/`image_desc`/`images`) = product ctx — เดิม normalize เป็น "" แล้ว skip → "สายแบบในรูปมีขายไหม" clarify ผิด
+  3. select-ask ("มีตัวไหนบ้าง") = self-anchoring browse — emit product:recommend เสมอ ไม่ต้องมี ctx (ต่างจาก stock/price/link ที่อ้าง subject เดิม) — เดิม unanchored→clarify ทำ sel-all-dead-evidence หลุด
+- `decide_subject_set` revert: pair/explicit same-ids+same-rel → write ใหม่ = pinned contract (ops replace) — แก้ churn ที่ callsite แทน: app ไม่ส่ง explicit id ที่ persist แล้วใน turn เดียวกัน (`_persisted_ids` filter) → item-tag turn เขียน 1 ครั้ง (tag block) ไม่ซ้ำที่ recorder
+- policy carry gate: `_productish_need` + concrete subject (tag/anchor/hybrid/model/resolved cards) เท่านั้น — "ไส้กรองผิดรุ่น" (policy + product-type ลอย) ยังตอบ general path
+- ลบ dead `_followup_original` getattr chain 6 จุด (setter ถูกลบไปกับ prose enricher)
+- harness+fixture ตาม contract ใหม่: `no_reply` action ใน validator/`_expectations_met`/`_ACTION_FAMILY` · iss30-noise-sticker → action=no_reply · 6 fixture tde clarify→execute_needs · shadow test pin ใหม่ (handoff ผ่าน plan step, q22q25 phone=execute_needs) · select-ask pins → execute_needs
+
+Verify (focused เท่านั้น, ยังไม่รัน broad batch):
+- `test_phase2c3_action_switch.py` 23p/1s/2xf · `test_turn_decision.py`+`test_conversation_subject_set.py` 208p · `test_turn_decision_shadow.py` ผ่าน · `test_legacy_turn_incident_replay.py` เต็มไฟล์ 101p/19s/5xf · `test_handoff_transport.py` 47/47 · `test_issue_5f_handoff.py`/`test_issue_5f_claim_flow.py` exit 0 · validator all rows pass · py_compile clean · `git diff --check` clean
+- LOC: app.py +173/−356 (net −183) · runtime files net −211 · รวม tests/docs +281/−393
+- ยังไม่ commit — รอ independent review ตาม plan
+
+## 2C.3 correction round — independent-review findings (2 High + 3 Medium)
+
+Plan (PART 0 verify → PART 1 test honesty → PART 2 RED → PART 3 minimal fix → PART 4 focused GREEN → PART 5 gate → PART 6 docs):
+
+- **H1 fail-closed planner**: `except Exception: _turn_plan=None` + `if _turn_plan is not None` = planner พังแล้ว legacy ยังรัน — แก้: except → shadow(None) + `raise HTTPException(500)` (boundary เดียวกับ llm RuntimeError sites) + เอา `is not None` guard ออกให้ switch เป็น unconditional (โครงสร้างพิสูจน์ fail-closed)
+- **H2 claim+product**: warranty owner early-return ที่ app callsite ทิ้ง product need — แก้ที่ orchestration boundary (app `_wfr` site): `_wfr` + `_productish_need` → fetch_products + llm.answer (1 retrieval/1 call — งานของ product need) merge เข้า `_wfr` response; claim owner logic ไม่แตะ
+- **M1 handoff re-detect/fallthrough**: `detect_human_request` เพิ่ม ctx `plan_decided_reason` — ตัด re-classify เมื่อ plan ตัดสินแล้ว (reason จาก need provenance); `_hr is None` → fail-closed HANDOFF_FAILED_REPLY (ห้ามตก bot answer)
+- **M2 vacuous test**: ใช้ `captured` ที่ `_install` คืนจริง (เลิก `replay._CapturedLLM()` ใหม่ที่ไม่ attached) + assert `== 1`
+- **M3 SRS**: อัปเดต `docs/SRS_SSD.md` sec.6 ทุกฟังก์ชันที่เปลี่ยน
+
+### RED evidence (focused, 4 tests)
+- `test_planner_exception_fails_closed` → `DID NOT RAISE HTTPException` (planner exception continued into legacy pipeline)
+- `test_handoff_never_falls_through_when_detector_declines` → `answer` call with products fired on a handoff turn (fallthrough confirmed)
+- `test_handoff_dispatch_uses_plan_decision` → transport ctx had `plan_decided_reason=None` (re-detection confirmed)
+- `test_claim_plus_product_both_owners_execute` → claim_state persisted BUT 0 answer calls / 0 product evidence (product need dropped at warranty early-return)
+- M2 repair (PART 1): replaced detached `replay._CapturedLLM()` with `_install`'s installed capture → observed exactly 1 real `answer` call → non-vacuous GREEN
+
+### GREEN + corrections (all 4 findings)
+- **H1**: `except → _turn_decision_shadow(None,_steps) + raise HTTPException(500)`; gate dedented to unconditional (plan รับประกัน); `if _turn_plan is not None` ที่ subject-signal block ถูกลบ (dead-defensive) → planner พัง = 500 ที่ boundary เดิม, zero retrieval/llm/handoff
+- **M1**: app ส่ง `plan_decided_reason` (map จาก human need provenance: `is_service_anger`→`customer_frustration` else `human_request`); `detect_human_request` consume decision ไม่ re-detect; `_hr is None` → `HANDOFF_FAILED_REPLY` fail-closed (ticket_state guard ยังอยู่ใน transport)
+- **H2**: `_wfr` site — plan มี product/compare/compat need → product owner ต่อ 1 ครั้ง (`_subject_cards` ที่ resolve แล้ว หรือ `fetch_products`+`_dedupe_products`+`llm.answer`) merge เข้า claim response (answer+products+usage) — claim text เดิมอยู่ครบ, ไม่ย้าย logic ไป TurnPlan
+- **M2**: test ใช้ captured จาก `_install` จริง + assert `==1` — repair แรกเจอ 0 calls เพราะ turn clarify (ไม่มี active subject) → เพิ่ม `active_item_id` ใน seed ให้เป็น eligible answer turn → observed exactly 1 answer call (non-vacuous, จะ fail ถ้ามี duplicate)
+- **M3**: `docs/SRS_SSD.md` — §5.2 table (rows 3/4 แก้ตามสถานะจริง, +7.5 TurnPlan gate, +6.5 warranty SM/mixed dispatch) + §6 entries (`_chat_impl`, `_turn_decision_shadow`, `detect_human_request`); roadmap 2C.3 note
+- **stale pin**: `test_shadow_error_never_breaks_chat` pin contract เก่า (planner raise → chat ไม่พัง) = H1 bug ตัวจริง → แก้เป็น pin 500 fail-closed
+
+Verify (focused): action_switch 27p/1s/2xf · turn_decision+subject_set+shadow 229p · claim+handoff 47p · transport script 47/47 · replay 101p/19s/5xf — **รวม 404p/20s/7xf** · py_compile clean · `git diff --check` clean
+Structure: decide_turn callsite=1 (1374) · resolve_subjects=1 (1523) · detect_human_request=1 (gate) · new helpers/tables/model-calls=0 · runtime +263/−377 **net −114** (app+handoffs+td) · total tracked +410/−420 net −10
+Owner count (honest): post-classify action-decision sites ~7→1 (gate); domain transports (lock/order/tax/cert/claim) ยังเป็น owner ของตัวเอง ไม่นับเป็น action duplicates — แก้คำ overclaim รอบก่อน: ตัวเลข 1 คือ "post-classify action selection" เท่านั้น
+
+## 2C.3 correction round 2 — handoff dominance + canonical path + transport re-detect removal
+
+`_wfr` return matrix (verified source):
+- `handoff_to_admin=True` → transport confirmed (claim builders + tax) → terminal
+- `answer == HANDOFF_FAILED_REPLY` → handoff attempted/blocked/failed → terminal (ห้าม silent-continue)
+- else → bot-owned claim response (review request / warranty-date / troubleshoot-KB / auto-answer / info-collect) → +productish need → continue canonical pipeline
+
+Plan:
+- **H1+H2+M1**: ลบ inline `fetch_products+llm.answer` block ที่ `_wfr` ทิ้ง → `_wfr` terminal เมื่อ `handoff_to_admin` หรือ `answer==HANDOFF_FAILED_REPLY`; bot-owned + productish need → `_mixed_claim_carry = _wfr["answer"]` แล้วไหลต่อ canonical path; compose ครั้งเดียวต่อ canonical answer boundary (`answer` ปกติ + `_ws_answer` web-search branch — boundary เดียวกัน 2 exits)
+- **M2**: `detect_human_request` = transport-only — `plan_decided_reason` required (`ctx.get` → None → return None, gate fail-closed); ลบ predicate fallback; migrate direct test callers → transport tests ส่ง reason ชัดเจน, detection tests migrate ไป `is_human_request`/`is_service_anger` (detection owner เดิมที่ decide_turn ใช้)
+- ตัวอย่าง claim+product "สินค้าเสียอยากเคลม อยากดูพาวเวอร์แบงค์ด้วย" → first-message claim → handoff confirmed → terminal (zero product work) — นี่คือ contract ใหม่
+
+### RED → GREEN (2C.3 correction round 2)
+
+RED (3/3 honest):
+- A `test_claim_handoff_dominates_product_need` — `llm.answer` รันหลัง confirmed handoff (answer_calls non-empty หลัง handoffs==1 ผ่านแล้ว)
+- B `test_bot_owned_claim_plus_product_canonical_path` — `_wfr` early-return; steps = `['history','vision','Intent','warranty_review']` ไม่มี RAG/LLM2
+- C `test_handoff_transport_never_reclassifies` — `detect_human_request(req,{})` re-classify ผ่าน predicates → return handoff dict แทน None
+
+Implementation:
+- `_wfr` boundary (app.py:1629): terminal เมื่อ `handoff_to_admin` หรือ `answer==HANDOFF_FAILED_REPLY` → return; bot-owned + productish need → `_mixed_claim_carry` = claim answer → ไหลต่อ pipeline เดิม; compose ครั้งเดียวต่อ `answer`/`_ws_answer` ก่อน ChatResponse (2 exits = boundary เดียวกัน)
+- ลบ inline `fetch_products`+`_dedupe_products`+`llm.answer`+merge block ทั้งก้อน (−36→+15 net ที่ boundary)
+- `detect_human_request`: `plan_decided_reason` required — absent → None (ไม่ re-classify); ลบ predicate fallback
+- test callers migrate: claim_flow ticket-guard ส่ง reason ชัดเจน; 5f_handoff/anger_regression = detection suites → `_handoff()` probe เหนือ `is_human_request`/`is_service_anger` (owner เดิม); transport script ส่ง reason; replay probe → predicate pair
+
+GREEN: action_switch 29p/1s/2xf · claim_flow+5f_handoff+anger_regression 86p · transport script 47/47 · turn_decision+subject_set+shadow 229p · replay 101p/19s/5xf · py_compile clean · diff --check clean
+
+Claim-response decision matrix (`_wfr`):
+- `handoff_to_admin=True` (claim builders + tax + human gate) → terminal — zero product work
+- `answer == HANDOFF_FAILED_REPLY` (attempted/blocked/failed — ทุก builder เขียนเมื่อ transport falsy) → terminal — honest failure คงเดิม
+- else (review request, warranty-date verdict, troubleshoot-KB, info-collect review, auto-answer) → bot-owned → +productish need → carry → canonical pipeline; ไม่มี need → return `_wfr` เหมือนเดิม
+
+## 2C.3 correction round 3 — typed disposition + single composition + required reason + real cost
+
+`_wfr` return shapes (verified — shared builders serve handle_warranty_flow + _legacy):
+- `_build_warranty_claim_response` — `handoff` param = attempted → terminal; False → continue_product
+- `_handle_review_request` — never handoff → continue_product
+- `_handle_tax_invoice_followup` — always attempts → terminal
+- `_handle_warranty_date_followup` (v2 helper) — never → continue_product
+- legacy inline: warranty_date_followup(1676) / warranty_auto(1704) / troubleshoot(1757) → continue_product
+- `_handle_first_message_claim` → delegates claim builder (handoff=True → terminal)
+
+Post-`_wfr` ChatResponse exits (reachable): general(1710) / brand(1754) / KB+mongo(2448) /
+superlative-clarify(3651) / no-product-found(4014) / ws(4637) / main(4661).
+Offline reachability: general(kw fallback)+brand+catalog doc, superlative(ไวสุด+0 products),
+no-product(seeking+0 products) — testable; KB (admindb.knowledge_base=[]) + ws (not configured) — unreachable offline → document.
+
+Plan:
+- H1: `warranty_disposition` field ("terminal"/"continue_product") เขียนที่ owner ทุก builder/dict;
+  app boundary `pop` + `=="terminal"`; ลบ prose compare
+- H2: composition owner เดียว = `_append_base_warranty(claim_carry=)` ที่ 4 exits ที่มันเรียกอยู่
+  (general/KB/main/ws); carry turns bypass alternates (general-elif, brand, kb-skip, superlative,
+  no-product-guard) → canonical boundary เดียว
+- H3: `detect_human_request(req, ctx, *, plan_decided_reason)` required kw-only; callers migrate
+- H4: pin `usage=={10,5,15}` + `cost==_gemini_cost(10,5)>0` + RAG/LLM2/timing
+
+### RED evidence (round 3 — 6/6 honest)
+
+- `test_failed_handoff_terminal_via_typed_disposition`: `warranty_disposition` ไม่มีใน `_wfr` keys → `None == 'terminal'` — control flow อ่าน prose เดิมจริง (mutated copy ยัง terminal ผ่าน string compare — ยืนยัน defect: lifecycle = copy)
+- `test_mixed_carry_general_branch_routes_canonical`: calls=`['answer_general']` — general branch ดักก่อน canonical (claim carry + product need หาย)
+- `test_mixed_carry_brand_branch_routes_canonical`: calls=`['answer_general']` — brand ctx branch ดักก่อน (fixture ต้อง set `brand.original_brand_name` จริงกว่าจะ RED)
+- `test_mixed_carry_superlative_clarify_routes_canonical`: calls=`[]` — superlative clarify return ก่อน boundary (LLM-free exit ทิ้ง carry)
+- `test_mixed_carry_no_product_guard_routes_canonical`: calls=`[]` — `_guard_arm1` ยิง `_send_handoff` + return (side effect ซ้ำ + carry หาย)
+- `test_handoff_transport_never_reclassifies`: `detect_human_request(req,{})` ไม่ raise TypeError — reason ยัง optional ctx.get
+
+GREEN-fixture note: ต้อง empty catalog สำหรับ superlative/no-product (fake fetch คืนทั้ง catalog → branch ไม่ fire) + brand docs ต้องมี `original_brand_name` — เคสแรกผ่าน vacuously ก่อนแก้ fixture (honest-RED repair)
+
+### GREEN (round 3 — ทุก finding ปิด)
+
+- **H1 typed disposition**: `_wfr` boundary อ่าน `warranty_disposition` (pop ก่อน ChatResponse + pop ที่ `chat_v2` boundary — field เป็น internal ไม่ใช่ API model); producers ทั้งหมดเขียน — `_build_warranty_claim_response`=`"terminal" if handoff else "continue_product"`, `_build_post_handoff_response`/`_handle_tax_invoice_followup`=terminal, `_handle_review_request`/`_handle_warranty_date_followup`+inline legacy dicts (warranty_date/warranty_auto/troubleshoot)=continue_product; ลบ prose compare `answer==HANDOFF_FAILED_REPLY` — test mutate copy แล้วยัง terminal ผ่าน typed signal (copy-independent ✓)
+- **H2 single composition**: carry turn ผ่าน canonical boundary เดียว — bypass gates ที่ entry ของ alternate families: `_policy_carry` elif รับ `_mixed_claim_carry` (policy ctx ไป `_combined_extra` → general ไม่ intercept), `brand_q=None` เมื่อ carry, KB lookup skip reason `"claim_carry"`, superlative clarify + no-product guard `not _mixed_claim_carry` (guard ห้ามยิง handoff ซ้ำบน bot-owned turn); compose เฉพาะ canonical `llm.answer`/`_ws_answer` exits (2 exits ของ boundary เดียวกัน — ไม่ paste ทุก return)
+- **H3 required decision**: `detect_human_request(req, ctx, *, plan_decided_reason)` kw-only required — omit→TypeError ก่อน predicate/transport ใดๆ; ลบ `ctx.get`+`if None→return None`+always-true `if _is_human_request or _is_angry` wrapper+unreachable `return None`; caller migration: app gate + transport script ×2 + claim_flow ×3 + action_switch (kwarg)
+- **H4 real metrics**: pin `resp.usage=={prompt:10,output:5,total:15}` + `resp.cost==_llm2_step["cost_usd"]>0` (vision-inclusive เดียวกับ canonical call) + RAG×1+LLM2×1+`timing["llm"]` present
+- **answer-family reachability**: general/brand/superlative/no-product — bypassed + tested (RED confirmed แต่ละ branch เคยดักจริง); KB (admindb.knowledge_base=[] offline) + web-search (is_configured=False) → unreachable ใน harness → ถูก document ไม่สร้าง fixture ปลอม
+- **fixture honesty**: superlative/no-product ต้อง empty catalog (fake fetch คืนทั้ง catalog → branch ไม่ fire); brand ต้อง `original_brand_name` จริง; spy ต้อง capture disposition ตอน call (boundary pop ลบ field ออกจาก dict object เดียวกัน)
+
+Verify: action_switch **34p/1s/2xf** · claim_flow+5f_handoff+anger+turn_decision+subject_set+shadow+replay **416p/19s/5xf** · transport script **47/47** · py_compile clean · `git diff --check` clean
+Runtime LOC: app+231/−371 · handoffs+7/−3 · td+18/−10 · warranty_flow+12/0 · chat_v2+5/−1 → **net −127 vs HEAD** (= round-2 state — typed contract + bypass gates ชดเชยด้วย prose compare/fallback/always-true-if/comment trims)
+Structure: `decide_turn`×1 (1374) · `resolve_subjects`×1 (1520) · `detect_human_request`×1 (1436 kw-only) · predicates=0 ใน transport · `HANDOFF_FAILED_REPLY` control-flow reads=0 (เหลือ presentation write เท่านั้น) · new helpers/tables/model-calls/modules=0 · ไม่มี branch ที่ลบไปถูก restore
+
+### กำลังจะทำ — PHASE 2C.3 CORRECTION ROUND 4 — GUARD-CHAIN REMOVAL + TYPED CONTRACTS
+
+- [ ] PART 0 — verified: `_mixed_claim_carry` guards routing at 5 sites (general `_policy_carry` elif / brand detect / KB skip / superlative clarify / npf guard); `_append_base_warranty` = existing shared finisher (4 app sites + v2); `warranty_disposition` = raw strings ×8 producers + `pop(...,"terminal")` fallback; `plan_decided_reason` accepts arbitrary strings (typo → anger)
+- [ ] H1 — remove carry from ALL branch-selection conditions; restore general/brand/KB/superlative/npf routing invariant
+- [ ] H2 — `_append_base_warranty(..., *, claim_guidance="")` = single composition owner; pass `_mixed_claim_carry` as data at every finisher callsite (incl. brand/superlative/npf which gain the call); delete 2 manual prepends
+- [ ] H3 — `_WarrantyDisposition` enum (TERMINAL/CONTINUE_PRODUCT) in warranty_flow; exhaustive consume in app (anything ≠ CONTINUE_PRODUCT → return; no string fallback)
+- [ ] H4 — `plan_decided_reason: Literal["human_request","customer_frustration"]` + explicit `ValueError` on invalid
+- [ ] RED tests: routing invariance per family (with/without carry same branch), KB seeded via kb_products, enum members, missing→fail-closed, TypeError/ValueError on handoff decision
+
+### ผ่านแล้ว — PHASE 2C.3 CORRECTION ROUND 4 — GUARD-CHAIN REMOVED + TYPED CONTRACTS (uncommitted)
+
+**RED → GREEN** (honest):
+- `test_carry_invariant_*` ×5 — `mixed.source='product_store'` ≠ `general:shipping_policy`/`general:brand_info`/`knowledge_base+mongo`/`superlative_no_match_clarify`/`no_product_found_handoff` — carry bypassed EVERY domain branch
+- `test_failed_handoff_terminal_via_typed_disposition` — `ImportError: _WarrantyDisposition` (enum absent; strings scattered)
+- `test_handoff_transport_never_reclassifies` — typo `plan_decided_reason` silently became customer_frustration (no closed set)
+
+**Fix (root cause — ownership contract, not per-return guards):**
+- `_mixed_claim_carry` removed from ALL branch-selection conditions (policy-elif, brand detect, KB skip, superlative, npf guard) → **routing invariant**: same ask → same domain branch with/without carry
+- `_append_base_warranty(*, claim_guidance="")` = single composition owner — guidance prepends once inside the finisher; param passed at all 7 answer families (general/brand/KB/superlative/npf/main/ws) + v2; 2 manual prepend blocks deleted
+- `_WarrantyDisposition` StrEnum (TERMINAL/CONTINUE_PRODUCT) in warranty_flow — all 8 producers write members; app boundary consumes exhaustively (`pop` + `is not CONTINUE_PRODUCT` → return); missing/unknown fail-closed; zero raw strings outside enum def
+- `plan_decided_reason: Literal["human_request","customer_frustration"]` + `ValueError` on invalid — closed set, no reinterpretation; `_reason`/`_HandoffDecision` aliases deleted
+
+**Impact**: claim carry = presentation data — domain routing (brand/KB/clarify/no-product safety) identical; npf guard's authoritative handoff preserved; carry turns no longer forced into canonical llm.answer; missing disposition can never become continue-product.
+
+**Verify**: action_switch 36p/1s/2xf · claim+5f+anger 86p · transport 47/47 · combined 452p/20s/7xf · py_compile clean · diff --check clean · runtime net **−127** vs HEAD (= round-3 bound — deletions ≥ additions). Broad suite deferred.
+
+### ผ่านแล้ว — PHASE 2C.3 CORRECTION ROUND 5 — HANDOFF-REASON OWNER CORRECTED (uncommitted)
+
+**RED → GREEN**: `test_handoff_reason_owned_by_plan_flag_not_provenance` — renamed `TurnNeed.provenance` (`handoffs.diagnostic_marker_renamed`) flipped `plan_decided_reason` to `human_request` despite `customer_frustration` flag → fixed: gate now reads `"customer_frustration" in _turn_plan.flags`; sibling `test_handoff_reason_human_request_without_frustration_flag` pins the no-flag→`human_request` contract.
+
+**Root cause**: provenance = diagnostic evidence (`handoffs.is_service_anger` marker serialized in TurnDecisionShadow) — app.py searched it to pick behavior; flag was already authoritative in `decide_turn` (line 386).
+
+**Impact**: diagnostic rename can never steer transport; zero new helpers/guards/types/tables/calls; LOC −130 vs HEAD (−3 vs round-4).
+
+**Verify**: 2 new tests green · action_switch+turn_decision 149p/1s/2xf · transport 47/47 · py_compile · diff --check clean. Broad suite deferred.
+
+## Phase 2C.3 — COMMITTED closeout (2026-10-15)
+
+- **Commit 1**: `0d200c9` `refactor: centralize turn action dispatch` — 17 files +1454/−551 (runtime 5 + SRS + roadmap + fixtures + 7 test files + validator + new `test_phase2c3_action_switch.py` 998 บรรทัด; ไฟล์นี้ไม่ commit — commit ถัดไปแยก)
+- **Root causes ที่ปิด**: (1) action ownership กระจาย — item-tag early-answer/pre-classify handoff/anchor-ladder selectors → TurnPlan.primary_action owner เดียว; (2) prose-derived lifecycle — `answer==HANDOFF_FAILED_REPLY`/`handoff_to_admin` → `_WarrantyDisposition` enum; (3) `_mixed_claim_carry` guard chain → presentation data ผ่าน `_append_base_warranty` เดียว; (4) handoff reason จาก provenance diagnostic → canonical `TurnPlan.flags` contract
+- **Owners สุดท้าย**: `decide_turn` ×1/turn (fail-closed 500) · `primary_action` gate ×1 · `resolve_subjects`/`ConversationSubjectSet` ×1 · `_send_handoff` transport ×1 · `_append_base_warranty` finalizer ×1 (claim_guidance kwarg เดียว)
+- **Typed contracts**: `_WarrantyDisposition`{TERMINAL,CONTINUE_PRODUCT} — 8 producers write members, boundary pop+consume exhaustively, missing/unknown→fail-closed, pop ก่อน ChatResponse + chat_v2 · `plan_decided_reason: Literal["human_request","customer_frustration"]` required — omit→TypeError, invalid→ValueError, predicates อยู่ใน decide_turn เท่านั้น
+- **Deleted**: item-tag early-answer arm · pre-classify detect_human_request · FOLLOWUP-COMP/ANCHOR-COMP/POST-COMP-FUP/PARTIAL-COMP selector blocks + pin duplication · warranty-policy prose enricher + `req._followup_original` machinery · LINK-FOLLOWUP kw-gate/anchor-ladder · `_ho_prov` provenance gate
+- **Retained (เหตุผลชัด)**: `post_intent_handoffs` (tax/cert — นอก TurnPlan scope) · `early_order_flow`/`auto_check_delivery_warranty` (order-side owners) · `_hybrid_anchor_card` compat merge · `_prepare_link_followup` availability notes · `_turn_decision_shadow` (serialize-only)
+- **Verify (รอบสุดท้าย)**: offline batch 47 files **831p/20s/7xf/5w/0f** (13 live-DB = NOT_RUN_REAL_DB + 5 port-8010 scripts excluded) · transport **47/47** · validator **all rows** · py_compile 6 files · diff --check clean · anger suite green เพราะ probe ย้ายไป predicate boundary (POST-baseline signature `72c325e` เกษียณ — transport tests fake transport แล้ว)
+- **LOC**: runtime net **−130 vs HEAD** (app +230/−393) · new helpers/flags/kw-tables/model-calls = 0 · enum ตัวเดียว (approved)
+- **Safety**: working tree clean หลัง commit · no push/PR/deploy/.env/Mongo/provider/botworker/port-8010 · Phase 2D = next, ยังไม่เริ่ม
