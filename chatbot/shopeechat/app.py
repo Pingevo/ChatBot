@@ -573,11 +573,12 @@ def _recent_qa_pairs(history: list[dict] | None, n: int = 10) -> list[dict]:
 
 def _turn_decision_shadow(req: ChatRequest, history: list[dict],
                           steps: list[dict]) -> None:
-    """Shadow-run the turn-decision contract (observe-only, Phase 1B).
+    """Shadow-run the TurnPlan contract (observe-only, Phase 1B / 2C.1).
 
     Trace-only: appends a "TurnDecisionShadow" step carrying
-    action/reason/confidence/flags/message_len — never raw message or
-    history. Never mutates req, never raises, never affects the response.
+    primary_action/needs/ownership/claim_stage/requires_clarification/
+    flags/message_len — never raw message, history, or snapshot item_id/PII.
+    Never mutates req, never raises, never affects the response.
     Off unless USE_TURN_DECISION_SHADOW=1.
     """
     if os.environ.get("USE_TURN_DECISION_SHADOW") != "1":
@@ -599,7 +600,7 @@ def _turn_decision_shadow(req: ChatRequest, history: list[dict],
                 _anchor = {"item_id": str(_aid)}
         except Exception:
             pass
-        d = _td.decide_turn(
+        plan = _td.decide_turn(
             req.message or "",
             history=history,
             ticket_state=req.ticket_state,
@@ -609,11 +610,21 @@ def _turn_decision_shadow(req: ChatRequest, history: list[dict],
         steps.append({
             "name": "TurnDecisionShadow",
             "ok": True,
-            "action": d.action,
-            "reason": d.reason,
-            "confidence": d.confidence,
-            "flags": sorted(d.flags),
-            "message_len": len(d.normalized_message),
+            "primary_action": plan.primary_action,
+            "needs": [
+                {
+                    "kind": n.kind,
+                    "operation": n.operation,
+                    "confidence": n.confidence,
+                    "provenance": list(n.provenance),
+                }
+                for n in plan.needs
+            ],
+            "ownership": plan.ownership,
+            "claim_stage": plan.claim.stage,
+            "requires_clarification": plan.requires_clarification,
+            "flags": sorted(plan.flags),
+            "message_len": len(plan.normalized_message),
         })
     except Exception as _e:  # pragma: no cover — must never break chat
         steps.append({"name": "TurnDecisionShadow", "ok": False,

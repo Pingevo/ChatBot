@@ -1539,33 +1539,43 @@ def test_harness_import_boundary_subprocess():
 
 
 def test_meta_validator_turn_decision_expect():
-    """turn_decision_expect: per-user-turn TurnDecision expectations —
-    validator must enforce count/shape/action enum."""
+    """turn_decision_expect: per-user-turn TurnPlan expectations —
+    validator must enforce count/shape/primary_action/needs enum."""
     vmod = _validator_mod()
     ok = {"id": "meta-td", "status": "positive", "levels": [3],
           "shop": "MetaShop", "turns": [{"text": "ทัก"}, {"text": "ถาม"}],
           "catalog": [{"item_id": 1001.0, "shopname": "MetaShop"}]}
     # valid block must pass
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "unknown"}, {"action": "answer_product",
-                                "flags_contains": ["post_handoff_escape"]}]})
+        {"primary_action": "clarify", "needs": [],
+         "requires_clarification": True},
+        {"primary_action": "execute_needs",
+         "needs": [{"kind": "product", "operation": "describe"}],
+         "flags_contains": ["cert_question"]}]})
     assert not errs, errs
     # unknown nested key rejected
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "unknown"}, {"action": "unknown", "magic": 1}]})
+        {"primary_action": "clarify"},
+        {"primary_action": "clarify", "magic": 1}]})
     assert any("magic" in e for e in errs), errs
-    # invalid action rejected
+    # invalid primary_action rejected
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "spin"}, {"action": "unknown"}]})
-    assert any("action" in e for e in errs), errs
+        {"primary_action": "spin"}, {"primary_action": "clarify"}]})
+    assert any("primary_action" in e for e in errs), errs
+    # invalid need kind/operation rejected
+    errs = vmod.check_row({**ok, "turn_decision_expect": [
+        {"primary_action": "execute_needs",
+         "needs": [{"kind": "bogus", "operation": "describe"}]},
+        {"primary_action": "clarify"}]})
+    assert any("kind" in e for e in errs), errs
     # count must equal user-turn count
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "unknown"}]})
+        {"primary_action": "clarify"}]})
     assert any("turn" in e.lower() for e in errs), errs
     # flags_contains must be list[str]
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "unknown", "flags_contains": "x"},
-        {"action": "unknown"}]})
+        {"primary_action": "clarify", "flags_contains": "x"},
+        {"primary_action": "clarify"}]})
     assert any("flags_contains" in e for e in errs), errs
 
 
@@ -1745,60 +1755,65 @@ def test_meta_validator_tde_current_divergence_key():
           "expected_owner": "claim_lifecycle",
           "expected": {"action": "answer"}}
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "claim_request", "current": "claim_collect"}]})
+        {"primary_action": "execute_needs", "current": "clarify"}]})
     assert not errs, errs
-    # current == action is a no-op declaration → reject
+    # current == primary_action is a no-op declaration → reject
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "claim_collect", "current": "claim_collect"}]})
-    assert errs, "current==action must be rejected"
-    # current not in action enum → reject
+        {"primary_action": "execute_needs", "current": "execute_needs"}]})
+    assert errs, "current==primary_action must be rejected"
+    # current not in primary_action enum → reject
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "claim_request", "current": "bogus"}]})
+        {"primary_action": "execute_needs", "current": "bogus"}]})
     assert errs
     # current on a positive row → reject (nothing diverges to declare)
     errs = vmod.check_row({**ok, "status": "positive",
                            "incident_levels": None,
                            "turn_decision_expect": [
-                               {"action": "claim_request",
-                                "current": "claim_collect"}]})
+                               {"primary_action": "execute_needs",
+                                "current": "clarify"}]})
     assert errs, "'current' must be incident-only"
 
 
 def test_meta_tde_entry_semantics():
-    """strict TurnDecision expectation semantics shared by the contract
+    """strict TurnPlan expectation semantics shared by the contract
     test and the shadow sweep (validator-owned helper)."""
     from validate_legacy_turn_fixtures import tde_entry_error  # noqa
     chk = tde_entry_error
     # incident + declared current + actual==current → expected divergence
-    assert chk({"action": "claim_request", "current": "claim_collect"},
-               "claim_collect", ["claim_resume"], incident=True) is None
+    assert chk({"primary_action": "execute_needs", "current": "clarify"},
+               {"primary_action": "clarify"}, ["claim_resume"],
+               incident=True) is None
     # incident + declared current + actual==desired → STALE incident
-    assert chk({"action": "claim_request", "current": "claim_collect"},
-               "claim_request", [], incident=True), \
-        "incident whose desired action now holds must fail (stale pin)"
+    assert chk({"primary_action": "execute_needs", "current": "clarify"},
+               {"primary_action": "execute_needs"}, [], incident=True), \
+        "incident whose desired primary_action now holds must fail (stale pin)"
     # incident + declared current + drifted actual → fail
-    assert chk({"action": "claim_request", "current": "claim_collect"},
-               "unknown", [], incident=True)
+    assert chk({"primary_action": "execute_needs", "current": "clarify"},
+               {"primary_action": "handoff"}, [], incident=True)
     # positive + mismatch → fail
-    assert chk({"action": "claim_collect"}, "claim_request", [],
+    assert chk({"primary_action": "execute_needs"},
+               {"primary_action": "clarify"}, [],
                incident=False)
     # positive + match → pass
-    assert chk({"action": "claim_collect"}, "claim_collect", [],
+    assert chk({"primary_action": "execute_needs",
+                "needs": [{"kind": "claim", "operation": "collect"}]},
+               {"primary_action": "execute_needs",
+                "needs": [{"kind": "claim", "operation": "collect"}]}, [],
                incident=False) is None
     # incident row WITHOUT current = current-pin — flags still asserted
-    assert chk({"action": "claim_collect",
+    assert chk({"primary_action": "execute_needs",
                 "flags_contains": ["claim_resume"]},
-               "claim_collect", [], incident=True), \
+               {"primary_action": "execute_needs"}, [], incident=True), \
         "flags_contains on incident current-pins must not be exempt"
 
 
 def test_meta_validator_turn_decision_nonstring_action():
-    """action ที่ไม่ใช่ string (list/dict/int) ต้อง reject ไม่ใช่ crash."""
+    """primary_action ที่ไม่ใช่ string (list/dict/int) ต้อง reject ไม่ใช่ crash."""
     vmod = _validator_mod()
     ok = {"id": "meta-td2", "status": "positive", "levels": [3],
           "shop": "MetaShop", "turns": [{"text": "ทัก"}],
           "catalog": [{"item_id": 1001.0, "shopname": "MetaShop"}]}
     for bad_action in ([], {"x": 1}, 5):
         errs = vmod.check_row({**ok, "turn_decision_expect": [
-            {"action": bad_action}]})
-        assert errs, f"action={bad_action!r} should fail validation"
+            {"primary_action": bad_action}]})
+        assert errs, f"primary_action={bad_action!r} should fail validation"

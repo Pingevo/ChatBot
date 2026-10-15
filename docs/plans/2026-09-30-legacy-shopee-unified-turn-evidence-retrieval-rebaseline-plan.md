@@ -1066,9 +1066,9 @@ class ConversationSubjectSet:
 
 #### Commit 2C.1 — evolve TurnDecision in place
 
-- [ ] RED-test mixed claim+product, product+policy, comparison+compatibility, explicit human request plus information need, and noise/media-only turns.
-- [ ] Replace the one-action result with `TurnPlan.needs[]` in `turn_decision.py`; no new semantic keyword table and no `turn_policy.py`.
-- [ ] Keep shadow comparison until every consumer understands `needs[]`; delete the superseded one-action assertions/adapter in the same commit.
+- [x] RED-test mixed claim+product, product+policy, comparison+compatibility, explicit human request plus information need, and noise/media-only turns (initial type-availability RED + controlled single-need mutation RED across 9 mixed-need/fixture tests + subject-identity RED).
+- [x] Replace the one-action result with `TurnPlan.needs[]` in `turn_decision.py`; no new semantic keyword table and no `turn_policy.py` (reuses `route_context._REL_CONN_RE` for compat connector; `subject_refs` restricted to stable explicit identities: `_ITEM_TAG_RE` item IDs, `route.model_codes`, and `order_sn` for order lookup; dead `_ticket_active` deleted; `_resolve_ownership` replaces `_ticket_active` [module-level helper net 0], plus 1 local nested aggregator `_add_need`).
+- [x] Keep shadow comparison until every consumer understands `needs[]`; delete the superseded one-action assertions/adapter in the same commit.
 
 #### Commit 2C.2 — persisted subject set
 

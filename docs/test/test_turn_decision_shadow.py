@@ -1,4 +1,4 @@
-"""Revised Phase 1B — TurnDecision shadow wiring tests (observe-only).
+"""Phase 2C.1 — TurnPlan shadow wiring tests (observe-only).
 
 Shadow contract: app.chat() runs decide_turn() as a trace-only step
 ("TurnDecisionShadow") behind USE_TURN_DECISION_SHADOW=1 (default OFF).
@@ -6,8 +6,10 @@ The shadow must never change the response: no early return or mutation.
 Snapshot-loader errors use empty inputs (ok=True); decision/outer errors
 become ok=False — never a failed chat.
 
-PII contract: the trace carries action/reason/confidence/flags/message_len
-only — never raw customer text or history.
+PII contract: the trace carries ok/primary_action/needs[{kind,operation,
+confidence,provenance}]/ownership/claim_stage/requires_clarification/flags/
+message_len (or error type when ok=False) only — never raw customer text,
+history, or subject_refs.
 
 Run:  .venv/bin/python -m pytest docs/test/test_turn_decision_shadow.py -v
 """
@@ -104,12 +106,14 @@ def test_shadow_on_appends_trace(monkeypatch):
     assert len(steps) == 1
     s = steps[0]
     assert s["ok"] is True
-    assert s["action"] in {
-        "locked", "noise", "handoff", "claim_collect", "claim_request",
-        "answer_product", "answer_general", "followup", "unknown",
+    assert s["primary_action"] in {
+        "no_reply", "human_wait", "execute_needs", "handoff", "clarify",
     }
-    assert isinstance(s["reason"], str) and s["reason"]
-    assert isinstance(s["confidence"], (int, float))
+    assert isinstance(s["needs"], list)
+    assert s["ownership"] in {"bot", "human", "unknown"}
+    assert isinstance(s["requires_clarification"], bool)
+    assert "action" not in s, "one-action shadow field must be deleted"
+    assert "reason" not in s, "one-action reason field must be deleted"
 
 
 def test_shadow_error_never_breaks_chat(monkeypatch):
@@ -152,23 +156,30 @@ def test_shadow_trace_no_raw_message(monkeypatch):
 
 # ── decision content at the shadow boundary ────────────────────────────────
 
-def test_shadow_placeholder_is_noise(monkeypatch):
+def test_shadow_placeholder_is_no_reply(monkeypatch):
     for ph in ("[faq_liveagent]", "[bundle_message]"):
         resp = _run(monkeypatch, _fx(f"ph-{ph}", ph))
         s = _shadow_steps(resp)[0]
-        assert s["ok"] is True and s["action"] == "noise", (ph, s)
+        assert s["ok"] is True and s["primary_action"] == "no_reply", (ph, s)
+        assert s["needs"] == []
 
 
 def test_shadow_product_issue_not_handoff(monkeypatch):
     resp = _run(monkeypatch, _fx("prod", "ชาร์จแล้วไฟไม่เข้าเป็นที่อะไรครับ"))
     s = _shadow_steps(resp)[0]
-    assert s["action"] in {"claim_request", "answer_product"}, s
+    assert s["primary_action"] == "execute_needs", s
+    pairs = {(n["kind"], n["operation"]) for n in s["needs"]}
+    assert ("claim", "collect") in pairs
+    assert ("troubleshoot", "describe") in pairs
+    assert ("human", "handoff") not in pairs
 
 
 def test_shadow_human_request_is_handoff(monkeypatch):
     resp = _run(monkeypatch, _fx("hr", "ขอคุยกับแอดมิน"))
     s = _shadow_steps(resp)[0]
-    assert s["action"] == "handoff", s
+    assert s["primary_action"] == "handoff", s
+    assert any(n["kind"] == "human" and n["operation"] == "handoff"
+               for n in s["needs"])
     # legacy path also handoffs — parity at boundary, not forced
     assert resp.handoff_to_admin is True
 
@@ -176,7 +187,7 @@ def test_shadow_human_request_is_handoff(monkeypatch):
 def test_shadow_ticket_active_is_locked(monkeypatch):
     """active ticket → boundary lock returns wait-only BEFORE the shadow
     runs — no TurnDecisionShadow step, no handoff-command fields.
-    (pure `locked` classification stays pinned in test_turn_decision.py)"""
+    (pure `human_wait` classification stays pinned in test_turn_decision.py)"""
     resp = _run(monkeypatch, _fx("lock", "ยังไม่มีใครตอบเลย",
                                  ticket_state="open"))
     assert resp.handoff_to_admin is False
@@ -186,10 +197,10 @@ def test_shadow_ticket_active_is_locked(monkeypatch):
         "boundary lock must run before the TurnDecision shadow"
 
 
-# ── fixture sweep — observe-only comparison data for Phase 1C ─────────────
-# Runs EVERY fixture turn through chat() with shadow on. Asserts only that
-# the shadow executed (ok=True step exists) — mismatches vs legacy outcomes
-# are recorded in the printed report, never forced to pass.
+# ── fixture sweep — observe-only comparison data for Phase 2C.1 ───────────
+# Runs EVERY fixture turn through chat() with shadow on. Asserts that
+# the shadow executed (ok=True step exists) and checks per-turn TurnPlan
+# expectations via tde_entry_error.
 
 
 def _legacy_family(rec) -> str:
@@ -231,16 +242,13 @@ def test_shadow_sweep_all_fixtures(monkeypatch, capsys):
                 continue
             s = steps[0]
             legacy = _legacy_family(rec)
-            shadow = s.get("action") if s.get("ok") else f"ERROR:{s.get('error')}"
+            shadow = (s.get("primary_action") if s.get("ok")
+                      else f"ERROR:{s.get('error')}")
             rows.append((fx["id"], rec["turn"][:40], legacy, shadow,
                          "" if s.get("ok") else "ERR"))
-            # Per-turn contract expectations — shared semantics via
-            # tde_entry_error: positive/current-pin entries must match
-            # (flags included); incident entries declaring `current` must
-            # diverge exactly as declared — agreement = stale pin (fails).
             if tde is not None and i < len(tde):
                 err = vfx.tde_entry_error(
-                    tde[i], s.get("action"), s.get("flags") or [],
+                    tde[i], s, s.get("flags") or [],
                     incident=fx.get("status") == "incident")
                 if err:
                     mismatches.append(f"{fx['id']}[{i}]: {err}")
@@ -255,13 +263,21 @@ def test_shadow_sweep_all_fixtures(monkeypatch, capsys):
 
 
 def test_shadow_phase1c_hardened_cases(monkeypatch):
-    """Pin the Phase 1C contract hardening at the shadow boundary —
-    fixture turns that used to mismatch are now asserted."""
+    """Pin the contract hardening at the shadow boundary —
+    fixture turns that used to mismatch are now asserted on TurnPlan."""
     want = {
-        "tx-q08-price-followup": {"ราคาเท่าไหร่": "followup"},
-        "tx-q09-link-followup": {"ขอลิงค์": "followup"},
-        "tx-q10-cert-scope": {"ตัวไหนมี มอก. บ้าง": "answer_product"},
-        "tx-q22q25-claim-persist": {"0812345678": "unknown"},
+        "tx-q08-price-followup": {
+            "ราคาเท่าไหร่": ("execute_needs", {("product", "price")}),
+        },
+        "tx-q09-link-followup": {
+            "ขอลิงค์": ("execute_needs", {("product", "link")}),
+        },
+        "tx-q10-cert-scope": {
+            "ตัวไหนมี มอก. บ้าง": ("execute_needs", {("product", "describe")}),
+        },
+        "tx-q22q25-claim-persist": {
+            "0812345678": ("clarify", set()),
+        },
     }
     seen = set()
     for fx in replay._load_fixtures():
@@ -269,12 +285,16 @@ def test_shadow_phase1c_hardened_cases(monkeypatch):
             continue
         records, _cap, _client = _run_records(monkeypatch, fx)
         for rec in records:
-            for text, act in want[fx["id"]].items():
+            for text, (want_pa, want_needs) in want[fx["id"]].items():
                 if rec["turn"].startswith(text):
                     steps = _shadow_steps(rec["resp"])
                     assert steps and steps[0]["ok"], (fx["id"], text, steps)
-                    assert steps[0]["action"] == act, (fx["id"], text,
-                                                     steps[0])
+                    assert steps[0]["primary_action"] == want_pa, (
+                        fx["id"], text, steps[0])
+                    got_needs = {(n["kind"], n["operation"])
+                                 for n in steps[0]["needs"]}
+                    assert want_needs <= got_needs, (
+                        fx["id"], text, got_needs, want_needs)
                     seen.add((fx["id"], text))
     missing = {(fid, t) for fid, m in want.items() for t in m} - seen
     assert not missing, f"fixture turns not found: {missing}"
@@ -319,9 +339,13 @@ def _capture_decide(monkeypatch):
     def _fake(msg, **kw):
         captured["message"] = msg
         captured.update(kw)
-        return SimpleNamespace(action="unknown", reason="captured",
-                               confidence=0.0, normalized_message="x",
-                               flags=frozenset())
+        return SimpleNamespace(
+            primary_action="clarify", needs=(), ownership="unknown",
+            claim=SimpleNamespace(stage="absent", episode_id=None,
+                                  lifecycle_open=False,
+                                  accepts_claim_fields=False),
+            requires_clarification=True, normalized_message="x",
+            flags=frozenset())
     monkeypatch.setattr(_td_mod, "decide_turn", _fake)
     return captured
 
@@ -412,7 +436,8 @@ def test_shadow_trace_carries_no_snapshot_payload(monkeypatch):
     app._turn_decision_shadow(_stub_req(message="ลูกค้าแจ้ง 0812345678"),
                               [{"role": "user", "text": "ประวัติ"}], steps)
     step = steps[0]
-    allowed = {"name", "ok", "action", "reason", "confidence", "flags",
+    allowed = {"name", "ok", "primary_action", "needs", "ownership",
+               "claim_stage", "requires_clarification", "flags",
                "message_len", "error"}
     assert set(step) <= allowed, step
     blob = str(step)

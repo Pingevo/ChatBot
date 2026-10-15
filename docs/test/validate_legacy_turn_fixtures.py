@@ -76,34 +76,91 @@ _EXPECT_BLOCKS = {
 }
 
 
-def tde_entry_error(ent: dict, got_action, got_flags, *, incident: bool):
-    """Per-turn TurnDecision expectation check — shared by the shadow
+_TD_PRIMARY_ACTIONS = {
+    "no_reply", "human_wait", "execute_needs", "handoff", "clarify",
+}
+_TD_NEED_KINDS = {
+    "product", "compare", "compat", "policy",
+    "order", "troubleshoot", "claim", "human",
+}
+_TD_NEED_OPS = {
+    "describe", "compare", "recommend", "price",
+    "link", "stock", "compat", "policy",
+    "lookup", "collect", "handoff",
+}
+_TD_OWNERSHIPS = {"bot", "human", "unknown"}
+
+
+def _plan_view(plan_or_step) -> tuple[str | None, list[tuple[str, str]],
+                                      str | None, bool | None, set[str]]:
+    """Extract (primary_action, [(kind, op)], ownership, requires_clarification, flags)
+    from either a TurnPlan dataclass or a TurnDecisionShadow step dict."""
+    if isinstance(plan_or_step, dict):
+        pa = plan_or_step.get("primary_action")
+        raw_needs = plan_or_step.get("needs") or []
+        needs = [(n.get("kind"), n.get("operation"))
+                 for n in raw_needs if isinstance(n, dict)]
+        own = plan_or_step.get("ownership")
+        req_c = plan_or_step.get("requires_clarification")
+        flags = set(plan_or_step.get("flags") or [])
+    else:
+        pa = getattr(plan_or_step, "primary_action", None)
+        raw_needs = getattr(plan_or_step, "needs", ()) or ()
+        needs = [(getattr(n, "kind", None), getattr(n, "operation", None))
+                 for n in raw_needs]
+        own = getattr(plan_or_step, "ownership", None)
+        req_c = getattr(plan_or_step, "requires_clarification", None)
+        flags = set(getattr(plan_or_step, "flags", ()) or ())
+    return pa, needs, own, req_c, flags
+
+
+def tde_entry_error(ent: dict, got_plan, got_flags=None, *, incident: bool):
+    """Per-turn TurnPlan expectation check — shared by the shadow
     sweep and the contract test (do NOT duplicate).
 
-    - entry without `current`: actual must equal `action` and carry every
-      `flags_contains` flag — a current-pin; valid on positive AND
-      incident rows (incident does not exempt flags).
+    - entry without `current`: actual must equal `primary_action`, match
+      declared `needs` (or `needs_contains`), `ownership`,
+      `requires_clarification`, and carry every `flags_contains` flag.
     - entry with `current` (incident rows only): `current` declares the
-      buggy action current code produces; actual MUST equal it and must
-      differ from desired `action`. If actual == `action` the pin is
-      stale — the incident is resolved at contract level and the
-      declaration must be removed.
+      buggy `primary_action` current code produces; actual MUST equal it
+      and must differ from desired `primary_action`. If actual == desired
+      the pin is stale and fails.
     Returns an error string, or None when the entry holds."""
-    want = ent["action"]
+    pa, got_needs, own, req_c, flags = _plan_view(got_plan)
+    if got_flags is not None:
+        flags = set(got_flags or [])
+    want = ent.get("primary_action")
     cur = ent.get("current")
     if cur is not None:
         if not incident:
             return "'current' declared on a non-incident fixture"
-        if got_action == want:
-            return (f"stale incident — desired action {want!r} now "
+        if pa == want:
+            return (f"stale incident — desired primary_action {want!r} now "
                     "produced; remove the incident pin / 'current'")
-        if got_action != cur:
-            return (f"action {got_action!r} — declared current {cur!r}, "
+        if pa != cur:
+            return (f"primary_action {pa!r} — declared current {cur!r}, "
                     f"desired {want!r}")
         return None
-    if got_action != want:
-        return f"action {got_action!r} want {want!r}"
-    missing = set(ent.get("flags_contains") or []) - set(got_flags or [])
+    if pa != want:
+        return f"primary_action {pa!r} want {want!r}"
+    if "ownership" in ent and own != ent["ownership"]:
+        return f"ownership {own!r} want {ent['ownership']!r}"
+    if ("requires_clarification" in ent
+            and req_c is not ent["requires_clarification"]):
+        return (f"requires_clarification {req_c!r} want "
+                f"{ent['requires_clarification']!r}")
+    if "needs" in ent:
+        want_needs = [(n.get("kind"), n.get("operation"))
+                      for n in (ent.get("needs") or [])]
+        if set(want_needs) != set(got_needs) or len(want_needs) != len(got_needs):
+            return f"needs {got_needs!r} want {want_needs!r}"
+    if "needs_contains" in ent:
+        want_sub = {(n.get("kind"), n.get("operation"))
+                    for n in (ent.get("needs_contains") or [])}
+        missing_n = want_sub - set(got_needs)
+        if missing_n:
+            return f"needs missing {sorted(missing_n)} (got {got_needs!r})"
+    missing = set(ent.get("flags_contains") or []) - flags
     if missing:
         return f"flags missing {sorted(missing)}"
     return None
@@ -230,15 +287,14 @@ def check_row(fx: dict) -> list[str]:
     if status == "pending_live_replay" and not fx.get("pending_reason"):
         errs.append("pending_live_replay without pending_reason")
 
-    # turn_decision_expect — per-user-turn TurnDecision contract assertions
+    # turn_decision_expect — per-user-turn TurnPlan contract assertions
     # (consumed by shadow sweep + contract test; one entry per user turn)
     tde = fx.get("turn_decision_expect")
     if tde is not None:
-        _td_actions = {
-            "locked", "noise", "handoff", "claim_collect", "claim_request",
-            "answer_product", "answer_general", "followup", "unknown",
+        _tde_keys = {
+            "primary_action", "needs", "needs_contains", "ownership",
+            "requires_clarification", "flags_contains", "current",
         }
-        _tde_keys = {"action", "flags_contains", "current"}
         user_turns = sum(1 for t in (fx.get("turns") or [])
                          if (t or {}).get("role", "user") == "user")
         if not isinstance(tde, list) or not tde:
@@ -255,12 +311,44 @@ def check_row(fx: dict) -> list[str]:
                 for k in ent:
                     if k not in _tde_keys:
                         errs.append(f"unknown nested key {path}.{k!r}")
-                if "action" not in ent:
-                    errs.append(f"{path}.action required")
-                elif (not isinstance(ent["action"], str)
-                        or ent["action"] not in _td_actions):
-                    errs.append(f"{path}.action={ent['action']!r} not in "
-                                f"{sorted(_td_actions)}")
+                if "primary_action" not in ent:
+                    errs.append(f"{path}.primary_action required")
+                elif (not isinstance(ent["primary_action"], str)
+                        or ent["primary_action"] not in _TD_PRIMARY_ACTIONS):
+                    errs.append(
+                        f"{path}.primary_action={ent['primary_action']!r} "
+                        f"not in {sorted(_TD_PRIMARY_ACTIONS)}")
+                if "ownership" in ent and (
+                        not isinstance(ent["ownership"], str)
+                        or ent["ownership"] not in _TD_OWNERSHIPS):
+                    errs.append(f"{path}.ownership={ent['ownership']!r} "
+                                f"not in {sorted(_TD_OWNERSHIPS)}")
+                if ("requires_clarification" in ent
+                        and not isinstance(ent["requires_clarification"], bool)):
+                    errs.append(
+                        f"{path}.requires_clarification must be bool")
+                for nk in ("needs", "needs_contains"):
+                    nlist = ent.get(nk)
+                    if nlist is None:
+                        continue
+                    if not isinstance(nlist, list):
+                        errs.append(f"{path}.{nk} must be a list")
+                        continue
+                    for j, n in enumerate(nlist):
+                        npath = f"{path}.{nk}[{j}]"
+                        if not isinstance(n, dict):
+                            errs.append(f"{npath} must be a dict")
+                            continue
+                        for fk in n:
+                            if fk not in {"kind", "operation"}:
+                                errs.append(f"unknown key {npath}.{fk!r}")
+                        if n.get("kind") not in _TD_NEED_KINDS:
+                            errs.append(f"{npath}.kind={n.get('kind')!r} "
+                                        f"not in {sorted(_TD_NEED_KINDS)}")
+                        if n.get("operation") not in _TD_NEED_OPS:
+                            errs.append(
+                                f"{npath}.operation={n.get('operation')!r} "
+                                f"not in {sorted(_TD_NEED_OPS)}")
                 fc = ent.get("flags_contains")
                 if fc is not None:
                     if (not isinstance(fc, list)
@@ -275,12 +363,13 @@ def check_row(fx: dict) -> list[str]:
                     if status != "incident":
                         errs.append(f"{path}.current allowed only on "
                                     "incident fixtures")
-                    if not isinstance(cur, str) or cur not in _td_actions:
+                    if (not isinstance(cur, str)
+                            or cur not in _TD_PRIMARY_ACTIONS):
                         errs.append(f"{path}.current={cur!r} not in "
-                                    f"{sorted(_td_actions)}")
-                    elif cur == ent.get("action"):
+                                    f"{sorted(_TD_PRIMARY_ACTIONS)}")
+                    elif cur == ent.get("primary_action"):
                         errs.append(f"{path}.current equals desired "
-                                    "action — declare nothing")
+                                    "primary_action — declare nothing")
 
     # shop_settings_seed — nested schema (per-shop settings docs)
     sss = fx.get("shop_settings_seed")

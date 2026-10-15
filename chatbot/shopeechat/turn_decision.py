@@ -1,32 +1,34 @@
-"""Revised Phase 1 — ตัวตัดสินใจกลางต่อ 1 turn (contract owner, pure).
+"""Phase 2C.1 — Multi-Need TurnPlan contract owner (pure, in-place evolution).
 
-decide_turn() คืน TurnDecision: action เดียวต่อ turn ตามลำดับ audit-confirmed:
+decide_turn() คืน TurnPlan: เก็บ primary_action + independent needs[] + ownership
++ claim lifecycle view + requires_clarification ต่อ 1 turn:
 
     1. normalize/input cleanup — ตัด system/media/item placeholders
-    2. post-handoff lock      — ticket_state ยังอยู่ฝั่งแอดมิน → locked
-    3. system/noise/placeholder — message เหลือว่างหลัง cleanup → noise
-    4. explicit human request — ขอคุยกับคน/แอดมิน → handoff
-    5. claim resume/request/product issue — claim_state+signal → claim_collect;
-       claim keywords/intent → claim_request (ก่อน anger เสมอ —
-       product issue ห้ามโดนบริการ-anger กลืน)
-    6. service anger/frustration — handoff (parity เดิม)
-    6.5 cert standards (มอก./CE/...) — deterministic cert evidence path
-       (production owner: post_intent_handoffs cert handler) → answer_product
-       + cert_question flag — ต้องชนะ generic follow-up phrasing
-    7. follow-up family        — compare/link/price ที่ต้องใช้ context → followup
-    8. product/general         — intent/keyword → answer_product/answer_general;
-       contact-info-only message ไม่นับ pure-digit token เป็น model kw
-    9. unknown/fallback        — unknown
+    2. ownership & claim lifecycle view — ticket_state ∈ {handoff,open,pending}
+       → ownership="human", primary_action="human_wait", needs=() ทันที
+       (หยุดก่อนประเมิน needs — zero need-extraction side effects)
+    3. system/noise/placeholder — message เหลือว่างหลัง cleanup:
+       - ถ้า claim.accepts_claim_fields + visual media ([รูปภาพ]/[วิดีโอ])
+         → claim:collect need
+       - ถ้าเป็น placeholder/sticker อื่นๆ → primary_action="no_reply", needs=()
+       - ถ้าข้อความว่างเปล่า → primary_action="clarify", needs=()
+    4. independent need extraction (ไม่กลืนกัน):
+       - human: handoffs.is_human_request / is_service_anger
+       - claim / troubleshoot: warranty_flow._claim_lifecycle,
+         warranty.detect_claim_request, warranty.malfunction_safe_check
+       - order: order_store.extract_order_sn
+       - policy: message_detectors.detect_general_question,
+         warranty.detect_warranty_duration_question, route.needs_shipping
+       - compare: route_context._COMPARISON_FOLLOWUP_KW
+       - compat: route_context._REL_CONN_RE + message_detectors.is_target_device_kw
+         หรือ intent compatibility_check / target_device
+       - product: follow-up families (link/price/stock/select/superlative),
+         warranty.detect_cert_question, route_context.resolve_route,
+         message_detectors.extract_model_keywords, item_tag
 
 กฎ: pure function — ไม่เรียก DB/LLM/network, ไม่ mutate input, ไม่ import
-app.py. detectors ของเดิม (handoffs predicates, warranty.detect_claim_request,
-message_detectors.detect_general_question, route_context.resolve_route) ใช้เป็น
-predicates เท่านั้น — เจ้าของ keyword/composition ยังเป็นโมดูลเดิม.
-message_detectors เป็น pure module (ไม่อ่าน .env/DB) — ห้าม import
-knowledge_base ที่นี่เพราะมัน _load_env() ตอน import (purity leak เคยเกิด).
-
-หมายเหตุขอบเขต: ไฟล์นี้เป็น decision contract — ยังไม่ถูก wire เข้า chat()
-(ต้องอนุมัติแยกก่อน) จึงยังไม่เปลี่ยนคำตอบจริง.
+app.py หรือ knowledge_base.py, ไม่เรียก retrieval slot/relation/profile หรือ
+device-spec helpers (Phase 2C.1 H1/H2 boundary).
 """
 from __future__ import annotations
 
@@ -36,9 +38,11 @@ from typing import Any, Literal
 
 from . import handoffs as _handoffs
 from . import message_detectors as _detectors
+from . import order_store as _order_store
 from . import route_context as _rc
 from . import warranty as _warranty
 from . import warranty_flow as _wf
+from .warranty_flow import ClaimLifecycleView
 
 # ── placeholder families (canonical owner — mirrors the ad-hoc lists that
 #   were previously duplicated inside app.py/post-handoff gate) ────────────
@@ -51,6 +55,8 @@ _BARE_ITEM_PLACEHOLDERS = (
 )
 _MEDIA_PLACEHOLDER_RE = re.compile(
     r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", re.IGNORECASE)
+_VISUAL_MEDIA_PLACEHOLDER_RE = re.compile(
+    r"\[(?:รูปภาพ|image|วิดีโอ|video)\]", re.IGNORECASE)
 _ITEM_TAG_RE = re.compile(
     r"\[(?:สินค้า|item|itemid)\s*:\s*(\d+)\]", re.IGNORECASE)
 
@@ -80,28 +86,57 @@ _SELECT_ASK_KWS = (
 )
 
 _ACTIVE_TICKET_STATES = frozenset({"handoff", "open", "pending"})
+_BOT_TICKET_STATES = frozenset({"closed", "resolved", "bot"})
+
+TurnNeedKind = Literal[
+    "product", "compare", "compat", "policy",
+    "order", "troubleshoot", "claim", "human",
+]
+TurnNeedOp = Literal[
+    "describe", "compare", "recommend", "price",
+    "link", "stock", "compat", "policy",
+    "lookup", "collect", "handoff",
+]
+TurnPrimaryAction = Literal[
+    "no_reply", "human_wait", "execute_needs",
+    "handoff", "clarify",
+]
+TurnOwnership = Literal["bot", "human", "unknown"]
 
 
 @dataclass(frozen=True)
-class TurnDecision:
-    """ผลตัดสินใจต่อ 1 turn — action เดียว + reason ที่ตัดสินได้ย้อนกลับ."""
-    action: Literal[
-        "locked", "noise", "handoff", "claim_collect", "claim_request",
-        "answer_product", "answer_general", "followup", "unknown",
-    ]
-    reason: str
-    confidence: float
-    normalized_message: str
+class TurnNeed:
+    """ความต้องการอิสระ 1 รายการที่สกัดได้ใน turn เดียว."""
+    kind: TurnNeedKind
+    operation: TurnNeedOp
+    subject_refs: tuple[str, ...] = ()
+    confidence: float = 1.0
+    provenance: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TurnPlan:
+    """แผนการตัดสินใจต่อ 1 turn — รองรับหลายความต้องการอิสระพร้อม ownership/claim view."""
+    primary_action: TurnPrimaryAction
+    needs: tuple[TurnNeed, ...]
+    ownership: TurnOwnership
+    claim: ClaimLifecycleView
+    requires_clarification: bool
+    normalized_message: str = ""
     flags: frozenset[str] = field(default_factory=frozenset)
 
 
-def _normalize(message: str) -> tuple[str, set[str]]:
-    """ตัด placeholders/tags ออกจากข้อความลูกค้า — คืน (text, flags)."""
+def _normalize(message: str) -> tuple[str, set[str], tuple[str, ...]]:
+    """ตัด placeholders/tags ออกจากข้อความลูกค้า — คืน (text, flags, item_ids)."""
     flags: set[str] = set()
     msg = message or ""
-    if _ITEM_TAG_RE.search(msg):
+    item_ids = tuple(dict.fromkeys(
+        m.group(1) for m in _ITEM_TAG_RE.finditer(msg) if m.group(1)))
+    if item_ids:
         flags.add("has_item_tag")
     msg = _ITEM_TAG_RE.sub(" ", msg)
+    if _VISUAL_MEDIA_PLACEHOLDER_RE.search(msg):
+        flags.add("visual_media_placeholder")
     if _MEDIA_PLACEHOLDER_RE.search(msg):
         flags.add("media_placeholder")
     msg = _MEDIA_PLACEHOLDER_RE.sub(" ", msg)
@@ -113,27 +148,24 @@ def _normalize(message: str) -> tuple[str, set[str]]:
         if ph in msg.lower():
             flags.add("bare_item_placeholder")
         msg = msg.replace(ph, "").replace(ph.upper(), "")
-    return re.sub(r"\s+", " ", msg).strip(), flags
+    return re.sub(r"\s+", " ", msg).strip(), flags, item_ids
 
 
-def _ticket_active(ticket_state: Any) -> bool:
-    """ticket_state dict {"state": ...} / str / None → อยู่ฝั่งแอดมินไหม."""
+def _resolve_ownership(ticket_state: Any) -> TurnOwnership:
+    """ticket_state dict {"state": ...} / str / None → ownership axis."""
     if isinstance(ticket_state, dict):
         state = ticket_state.get("state")
     else:
         state = ticket_state
-    return state in _ACTIVE_TICKET_STATES
+    if state in _ACTIVE_TICKET_STATES:
+        return "human"
+    if state in _BOT_TICKET_STATES:
+        return "bot"
+    return "unknown"
 
 
 def _history_has_product_context(history: list[dict] | None) -> bool:
-    """recent history มี product signal จริงไหม — ไม่ใช่ any-history gate.
-
-    ดู last 6 turns: normalize แล้วว่าง (placeholder/noise) → ข้าม;
-    item tag → True; model keywords → True; resolve_route เจอ
-    product_types/charger_subtype/model_codes → True.
-    greeting/human-request/claim-only/noise → False.
-    exception ต่อข้อความ → ข้ามข้อความนั้น (ห้ามทำ decision พัง).
-    """
+    """recent history มี product signal จริงไหม — ไม่ใช่ any-history gate."""
     if not history:
         return False
     for h in list(history)[-6:]:
@@ -141,7 +173,7 @@ def _history_has_product_context(history: list[dict] | None) -> bool:
         if not text.strip():
             continue
         try:
-            tnorm, tflags = _normalize(text)
+            tnorm, tflags, _ = _normalize(text)
             if "has_item_tag" in tflags:
                 return True
             if not tnorm:
@@ -184,123 +216,318 @@ def decide_turn(
     claim_state: dict | None = None,
     intent_result: object | None = None,
     active_anchor: dict | None = None,
-) -> TurnDecision:
-    """ตัดสิน action เดียวของ turn — pure, deterministic (ยกเว้น intent_result ที่ caller ส่งมา)."""
+) -> TurnPlan:
+    """สร้าง TurnPlan ของ turn — pure, deterministic (ยกเว้น intent_result ที่ caller ส่งมา)."""
     intent: dict = intent_result if isinstance(intent_result, dict) else {}
     intent_name = intent.get("intent")
-    intent_conf = float(intent.get("confidence") or 0)
+    intent_conf = float(intent.get("confidence") or 0.0)
 
-    # 1. normalize
-    norm, flags = _normalize(message)
+    # 1. normalize + lifecycle & ownership axes
+    norm, flags, item_ids = _normalize(message)
+    has_visual_media = "visual_media_placeholder" in flags
+    flags.discard("visual_media_placeholder")
+    ownership = _resolve_ownership(ticket_state)
+    claim = _wf._claim_lifecycle(claim_state)
 
     # 2. post-handoff lock — ticket_state เป็น ownership authority เดียว:
-    #   active → locked ทุกข้อความ ไม่มี content escape (Phase 2B.5)
-    if _ticket_active(ticket_state):
-        return TurnDecision("locked", "ticket active → post-handoff lock",
-                            1.0, norm, frozenset(flags | {"post_handoff"}))
+    #   active → human_wait ทุกข้อความ ไม่มี content escape (Phase 2B.5 / M2)
+    #   หยุดก่อนประเมิน needs เพื่อรับประกัน zero need-extraction side effects
+    if ownership == "human":
+        return TurnPlan(
+            primary_action="human_wait",
+            needs=(),
+            ownership="human",
+            claim=claim,
+            requires_clarification=False,
+            normalized_message=norm,
+            flags=frozenset(flags | {"post_handoff"}),
+        )
 
-    # 3. system/noise/placeholder — เหลือว่างหลัง cleanup = ไม่ใช่ข้อความลูกค้า
+    # 3. system/noise/placeholder — เหลือว่างหลัง cleanup
     if not norm and flags:
-        return TurnDecision("noise", "placeholder-only message", 1.0, "",
-                            frozenset(flags))
+        if claim.accepts_claim_fields and has_visual_media:
+            flags.add("claim_resume")
+            return TurnPlan(
+                primary_action="execute_needs",
+                needs=(TurnNeed(
+                    kind="claim",
+                    operation="collect",
+                    subject_refs=(),
+                    confidence=1.0,
+                    provenance=("claim_state", "media_placeholder"),
+                ),),
+                ownership=ownership,
+                claim=claim,
+                requires_clarification=False,
+                normalized_message="",
+                flags=frozenset(flags),
+            )
+        return TurnPlan(
+            primary_action="no_reply",
+            needs=(),
+            ownership=ownership,
+            claim=claim,
+            requires_clarification=False,
+            normalized_message="",
+            flags=frozenset(flags),
+        )
     if not norm:
-        return TurnDecision("unknown", "empty message", 1.0, "",
-                            frozenset(flags))
+        return TurnPlan(
+            primary_action="clarify",
+            needs=(),
+            ownership=ownership,
+            claim=claim,
+            requires_clarification=True,
+            normalized_message="",
+            flags=frozenset(flags),
+        )
 
     low = norm.lower()
+    media_prov: tuple[str, ...] = (
+        ("media_placeholder",) if "media_placeholder" in flags else ()
+    )
+    needs: list[TurnNeed] = []
+
+    def _add_need(kind: TurnNeedKind, op: TurnNeedOp,
+                  refs: tuple[str, ...] = (), conf: float = 1.0,
+                  prov: tuple[str, ...] = ()) -> None:
+        full_prov = tuple(dict.fromkeys(prov + media_prov))
+        for idx, existing in enumerate(needs):
+            if existing.kind == kind and existing.operation == op:
+                merged_refs = tuple(dict.fromkeys(existing.subject_refs + refs))
+                merged_prov = tuple(dict.fromkeys(existing.provenance + full_prov))
+                needs[idx] = TurnNeed(
+                    kind=kind,
+                    operation=op,
+                    subject_refs=merged_refs,
+                    confidence=max(existing.confidence, conf),
+                    provenance=merged_prov,
+                )
+                return
+        needs.append(TurnNeed(
+            kind=kind,
+            operation=op,
+            subject_refs=refs,
+            confidence=conf,
+            provenance=full_prov,
+        ))
 
     # 4. explicit human request (predicate เจ้าของ: handoffs)
-    if _handoffs.is_human_request(norm):
-        return TurnDecision("handoff", "explicit human request", 1.0, norm,
-                            frozenset(flags))
+    _is_human = _handoffs.is_human_request(norm)
+    if _is_human:
+        _add_need("human", "handoff", conf=1.0, prov=("handoffs.is_human_request",))
 
-    # 5. claim resume / request / product issue — ก่อน anger เสมอ
-    #   provenance เจ้าของ: warranty_flow._claim_lifecycle — collecting เท่านั้น
-    #   ที่ resume fields; ts_suggested รับ verdict ผ่าน flow เท่านั้น;
-    #   terminal + retained slots ไม่นับ (2B.4 — slots ไม่ใช่ activation authority)
-    if _wf._claim_lifecycle(claim_state).accepts_claim_fields and _has_claim_signal(norm):
-        return TurnDecision("claim_collect", "claim_state + fresh claim signal",
-                            1.0, norm, frozenset(flags | {"claim_resume"}))
-    if _warranty.detect_claim_request(norm) or intent_name == "warranty_claim":
-        return TurnDecision("claim_request", "claim request detected", 1.0,
-                            norm, frozenset(flags))
+    # 5. claim resume / request / troubleshoot — ก่อน anger เสมอ
+    _is_claim_resume = claim.accepts_claim_fields and (
+        _has_claim_signal(norm) or has_visual_media
+    )
+    _is_claim_req = (
+        _warranty.detect_claim_request(norm)
+        or intent_name == "warranty_claim"
+    )
+    _has_malfunction = bool(_warranty.malfunction_safe_check(norm))
 
-    # 6. service anger/frustration — parity เดิม (handoffs composition)
-    if _handoffs.is_service_anger(norm):
-        return TurnDecision("handoff", "service anger/frustration", 1.0, norm,
-                            frozenset(flags | {"customer_frustration"}))
+    if _is_claim_resume:
+        flags.add("claim_resume")
+        _add_need("claim", "collect", conf=1.0,
+                  prov=("warranty_flow._claim_lifecycle", "claim_signal"))
+    elif _is_claim_req:
+        _add_need("claim", "collect", conf=1.0,
+                  prov=("warranty.detect_claim_request",))
 
-    # 6.5 cert standards (มอก./CE/...) — deterministic cert evidence path
-    #   production owner: post_intent_handoffs cert handler — ตอบด้วย cert
-    #   products หรือ escalate เมื่อไม่เจอ; ต้องชนะ generic follow-up phrasing
-    if _warranty.detect_cert_question(norm):
-        return TurnDecision("answer_product", "cert standards question", 0.9,
-                            norm, frozenset(flags | {"cert_question"}))
+    if _has_malfunction and not _is_claim_resume:
+        _add_need("troubleshoot", "describe", conf=0.9,
+                  prov=("warranty.malfunction_safe_check",))
 
-    # 7. follow-up family — ต้องมี *product* context (item tag หรือ
-    #   active anchor จาก caller หรือ product signal ใน recent history)
-    #   — ไม่ใช่ history ใดๆ
-    _has_product_ctx = ("has_item_tag" in flags
-                        or _anchor_has_product_context(active_anchor)
-                        or _history_has_product_context(history))
-    if _has_product_ctx:
-        if (any(kw in low for kw in _LINK_NOUN_KWS)
-                and any(kw in low for kw in _LINK_OBTAIN_KWS)
-                and not any(kw in low for kw in _NON_PRODUCT_LINK_KWS)):
-            return TurnDecision("followup", "link ask + context", 0.8, norm,
-                                frozenset(flags | {"link_followup",
-                                                   "needs_history"}))
-        if any(kw in low for kw in _PRICE_ASK_KWS):
-            return TurnDecision("followup", "price ask + context", 0.8, norm,
-                                frozenset(flags | {"price_followup",
-                                                   "needs_history"}))
-        if any(kw in low for kw in _STOCK_ASK_KWS):
-            return TurnDecision("followup", "stock ask + context", 0.8, norm,
-                                frozenset(flags | {"stock_followup",
-                                                   "needs_history"}))
-        if any(kw in low for kw in _SELECT_ASK_KWS):
-            return TurnDecision("followup", "select ask + context", 0.8, norm,
-                                frozenset(flags | {"select_followup",
-                                                   "needs_history"}))
-        if any(kw in low for kw in
-               _rc._COMPARISON_FOLLOWUP_KW + _rc._SUPERLATIVE_KW):
-            return TurnDecision("followup", "comparison phrasing + context",
-                                0.8, norm,
-                                frozenset(flags | {"needs_history"}))
+    # 6. service anger/frustration — เฉพาะเมื่อไม่มี claim/troubleshoot signal
+    if (not _is_human and not _is_claim_resume and not _is_claim_req
+            and not _has_malfunction and _handoffs.is_service_anger(norm)):
+        flags.add("customer_frustration")
+        _add_need("human", "handoff", conf=1.0,
+                  prov=("handoffs.is_service_anger",))
 
-    # 8. product vs general — intent ก่อน (ถ้ามี), keyword fallback
-    if intent_name == "product_question" and intent_conf >= 0.7:
-        return TurnDecision("answer_product", "intent=product_question",
-                            intent_conf, norm, frozenset(flags))
-    if intent_name == "general_question" and intent_conf >= 0.7:
-        return TurnDecision("answer_general",
-                            f"intent=general_question ({intent.get('general_qtype')})",
-                            intent_conf, norm, frozenset(flags))
-    if _detectors.detect_general_question(norm):
-        return TurnDecision("answer_general", "keyword general question",
-                            0.8, norm, frozenset(flags))
-    # production detector reuse — types/subtype/model codes เจ้าของเดิม
-    # (route_context) ไม่ copy keyword list เข้ามาใหม่
-    _model_kws = _detectors.extract_model_keywords(norm)
+    # 7. contact info / order lookup / route / detectors (canonical producers)
     _info = _warranty.extract_customer_info(norm)
     if _info.get("phone") or _info.get("order_id") or _info.get("name"):
         flags.add("contact_info")
-        # token ที่เป็น contact value (เบอร์โทร/order id) ไม่ใช่ model keyword —
-        # "0812345678"/"2508088B5T4W1D" ลอยๆ ต้องไม่กลายเป็น product query
-        _contact_vals = {(_info.get("phone") or "").lower(),
-                         (_info.get("order_id") or "").lower()} - {""}
-        _model_kws = [k for k in _model_kws if k.lower() not in _contact_vals]
-    _route = _rc.resolve_route(norm, intent)
-    if ("has_item_tag" in flags or _route.product_types
-            or _route.charger_subtype or _route.model_codes
-            or _model_kws):
-        return TurnDecision("answer_product", "product signal detected",
-                            0.7, norm, frozenset(flags))
-    if "contact_info" in flags:
-        return TurnDecision("unknown",
-                            "contact info without claim context", 0.3, norm,
-                            frozenset(flags))
+    _contact_vals = {
+        (_info.get("phone") or "").lower(),
+        (_info.get("order_id") or "").lower(),
+    } - {""}
 
-    # 9. fallback
-    return TurnDecision("unknown", "no decision rule matched", 0.0, norm,
-                        frozenset(flags))
+    _order_sn = _order_store.extract_order_sn(message)
+    _has_order_tag = bool(_order_store._ORDER_TAG_RE.search(message or ""))
+    _order_match = _order_store._ORDER_SN_RE.search(message or "")
+    _has_order_prefix = bool(
+        _order_match and _order_match.group(0).strip().lower()
+        != _order_match.group(1).strip().lower()
+    )
+    if (_order_sn and not _is_claim_resume and not _is_claim_req
+            and (_has_order_tag or _has_order_prefix
+                 or intent_name == "order_status")):
+        _add_need("order", "lookup", refs=(_order_sn,), conf=0.9,
+                  prov=("order_store.extract_order_sn",))
+
+    _model_kws = [
+        k for k in _detectors.extract_model_keywords(norm)
+        if k.lower() not in _contact_vals
+        and (not _order_sn or k.lower() not in {"order", _order_sn.lower()})
+    ]
+    _route = _rc.resolve_route(norm, intent)
+    _explicit_codes = tuple(dict.fromkeys(
+        c for c in _route.model_codes
+        if c and c.lower() not in _contact_vals
+        and not _detectors.is_target_device_kw(c)
+    ))
+    _subject_refs = tuple(dict.fromkeys(list(item_ids) + list(_explicit_codes)))
+
+    # 6.5 cert standards (มอก./CE/...)
+    _is_cert = bool(_warranty.detect_cert_question(norm))
+    if _is_cert:
+        flags.add("cert_question")
+        _add_need("product", "describe", refs=_subject_refs, conf=0.9,
+                  prov=("warranty.detect_cert_question",))
+
+    # 8. follow-up & comparison & compatibility & policy & product
+    _has_product_ctx = (
+        "has_item_tag" in flags
+        or _anchor_has_product_context(active_anchor)
+        or _history_has_product_context(history)
+    )
+    _has_explicit_product = bool(
+        "has_item_tag" in flags
+        or _route.product_types
+        or _route.charger_subtype
+        or _explicit_codes
+        or _model_kws
+        or (intent_name in ("product_question", "product_recommend", "product_spec")
+            and intent_conf >= 0.7)
+    )
+
+    _is_link_ask = (
+        any(kw in low for kw in _LINK_NOUN_KWS)
+        and any(kw in low for kw in _LINK_OBTAIN_KWS)
+        and not any(kw in low for kw in _NON_PRODUCT_LINK_KWS)
+    )
+    _is_price_ask = any(kw in low for kw in _PRICE_ASK_KWS)
+    _is_stock_ask = any(kw in low for kw in _STOCK_ASK_KWS)
+    _is_select_ask = any(kw in low for kw in _SELECT_ASK_KWS)
+    _is_cmp_kw = any(kw in low for kw in _rc._COMPARISON_FOLLOWUP_KW)
+    _is_sup_kw = any(kw in low for kw in _rc._SUPERLATIVE_KW)
+
+    _unanchored_followup_ask = False
+
+    if _is_link_ask:
+        if _has_product_ctx or _has_explicit_product:
+            if _has_product_ctx and not _has_explicit_product:
+                flags.add("link_followup")
+                flags.add("needs_history")
+            _add_need("product", "link", refs=_subject_refs, conf=0.8,
+                      prov=("turn_decision.link_ask",))
+        else:
+            _unanchored_followup_ask = True
+
+    if _is_price_ask:
+        if _has_product_ctx or _has_explicit_product:
+            if _has_product_ctx and not _has_explicit_product:
+                flags.add("price_followup")
+                flags.add("needs_history")
+            _add_need("product", "price", refs=_subject_refs, conf=0.8,
+                      prov=("turn_decision.price_ask",))
+        else:
+            _unanchored_followup_ask = True
+
+    if _is_stock_ask:
+        if _has_product_ctx or _has_explicit_product:
+            if _has_product_ctx and not _has_explicit_product:
+                flags.add("stock_followup")
+                flags.add("needs_history")
+            _add_need("product", "stock", refs=_subject_refs, conf=0.8,
+                      prov=("turn_decision.stock_ask",))
+        else:
+            _unanchored_followup_ask = True
+
+    if _is_select_ask:
+        if _has_product_ctx or _has_explicit_product:
+            if _has_product_ctx and not _has_explicit_product:
+                flags.add("select_followup")
+                flags.add("needs_history")
+            _add_need("product", "recommend", refs=_subject_refs, conf=0.8,
+                      prov=("turn_decision.select_ask",))
+        else:
+            _unanchored_followup_ask = True
+
+    if _is_cmp_kw or (_is_sup_kw and _has_product_ctx and not _has_explicit_product):
+        if len(_explicit_codes) >= 2 or _has_product_ctx:
+            if _has_product_ctx:
+                flags.add("needs_history")
+            _add_need("compare", "compare", refs=_subject_refs, conf=0.85,
+                      prov=("route_context._COMPARISON_FOLLOWUP_KW",))
+        elif _is_cmp_kw:
+            _unanchored_followup_ask = True
+
+    # compat need (canonical producers: intent compatibility_check / target_device,
+    # or route_context._REL_CONN_RE paired with target device or product signal)
+    _has_target_dev = (
+        bool(intent.get("target_device"))
+        or any(_detectors.is_target_device_kw(t) for t in norm.split())
+    )
+    _has_compat_conn = bool(_rc._REL_CONN_RE.search(low))
+    if intent_name == "compatibility_check" and intent_conf >= 0.7:
+        _add_need("compat", "compat", refs=_subject_refs, conf=intent_conf,
+                  prov=("intent=compatibility_check",))
+    elif _has_compat_conn and (_has_target_dev or _has_explicit_product):
+        _add_need("compat", "compat", refs=_subject_refs, conf=0.85,
+                  prov=("route_context._REL_CONN_RE",))
+
+    # policy need (canonical producers: detect_general_question,
+    # detect_warranty_duration_question, route.needs_shipping, intent)
+    _gen_qtype = _detectors.detect_general_question(norm)
+    _is_warr_dur = _warranty.detect_warranty_duration_question(norm)
+    if (intent_name in ("general_question", "warranty_duration")
+            and intent_conf >= 0.7):
+        _add_need("policy", "policy", refs=_subject_refs, conf=intent_conf,
+                  prov=(f"intent={intent_name}",))
+    elif _is_warr_dur and not _is_claim_req and not _is_claim_resume:
+        _add_need("policy", "policy", refs=_subject_refs, conf=0.85,
+                  prov=("warranty.detect_warranty_duration_question",))
+    elif _gen_qtype and not (
+            _gen_qtype == "warranty_policy"
+            and (_is_claim_req or _is_claim_resume)
+            and not _is_warr_dur):
+        _add_need("policy", "policy", refs=_subject_refs, conf=0.8,
+                  prov=(f"message_detectors.detect_general_question:{_gen_qtype}",))
+    elif _route.needs_shipping and not _is_claim_req and not _is_claim_resume:
+        _add_need("policy", "policy", refs=_subject_refs, conf=0.8,
+                  prov=("route_context.needs_shipping",))
+
+    # product need — emitted whenever explicit product signal exists and was
+    # not already captured as a specific product operation or pure compare-only
+    _has_product_or_compare_need = any(
+        n.kind in ("product", "compare") for n in needs
+    )
+    if _has_explicit_product and not _has_product_or_compare_need:
+        _op: TurnNeedOp = (
+            "recommend" if intent_name == "product_recommend" else "describe"
+        )
+        _add_need("product", _op, refs=_subject_refs, conf=0.75,
+                  prov=("route_context.resolve_route",))
+
+    requires_clarification = bool(not needs or _unanchored_followup_ask)
+
+    if any(n.kind == "human" and n.operation == "handoff" for n in needs):
+        primary_action: TurnPrimaryAction = "handoff"
+    elif not needs:
+        primary_action = "clarify"
+    else:
+        primary_action = "execute_needs"
+
+    return TurnPlan(
+        primary_action=primary_action,
+        needs=tuple(needs),
+        ownership=ownership,
+        claim=claim,
+        requires_clarification=requires_clarification,
+        normalized_message=norm,
+        flags=frozenset(flags),
+    )
