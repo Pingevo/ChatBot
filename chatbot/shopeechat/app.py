@@ -159,11 +159,11 @@ class ChatRequest(BaseModel):
     # ⚡ botworker parallel — ระบุ test source (เช่น "botworker")
     #    ส่งคู่กับ simulate_assignment → handoff เขียน test_status_conversation[source] แทนของจริง
     test_source: str | None = Field(None, description="test sandbox source (botworker/test_chat/...) — handoff เขียน test_status_conversation")
-    # ⚡ Phase 2A — state-driven handoff: สถานะ ticket จาก DB (open|closed|handoff|...)
-    #    ถ้า "closed" → บอทตอบปกติ (ข้าม post-handoff lock)
-    #    ถ้า "handoff"/"open" + มี handoff marker → ล็อค (ยกเว้น exceptions ใน KB)
-    #    ถ้า None → fallback ใช้ history scan แบบเดิม (backward compat)
-    ticket_state: str | None = Field(None, description="สถานะ ticket จาก DB: open|closed|handoff|resolved|pending (None = ไม่ทราบ ใช้ history scan)")
+    # ⚡ Phase 2A/2B.5 — state-driven handoff: สถานะ ticket จาก DB (open|closed|handoff|...)
+    #    "handoff"/"open"/"pending" → post-handoff lock ทุกข้อความ (unconditional — ไม่มี exceptions)
+    #    "closed"/"resolved"/"bot" → บอทตอบปกติ
+    #    ไม่ทราบ/None → fallback marker ใน history scan (backward compat)
+    ticket_state: str | None = Field(None, description="สถานะ ticket จาก DB: handoff|open|pending = active (ล็อคทุกข้อความ unconditional) · closed|resolved|bot = ปกติ · None/อื่น = ไม่ทราบ → history-marker fallback")
     # ⚡ Phase 2B.6 — explicit admin claim outcome (episode-scoped event จาก
     #    status_conversation): {episode_id, outcome: resolved|cancelled,
     #    actor_id, occurred_at (ISO)} — apply เฉพาะ episode ตรง + open เท่านั้น

@@ -309,7 +309,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `customer_id` | string | |
 | `to_name` | string | ชื่อลูกค้า |
 | `customer_avatar` | string? | |
-| `status` | string | open/closed/handoff/bot/resolved |
+| `status` | string | open/closed/handoff/bot/resolved/pending |
 | `topic` | string? | |
 | `item_ids` | string[]? | |
 | `pinned` | boolean | |
@@ -759,7 +759,6 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `platform` | string | |
 | `faq_liveagent_enabled` | boolean | เปิด FAQ liveagent ไหม |
 | `faq_liveagent_action` | `"handoff" \| "bot_reply"` | action เมื่อ FAQ liveagent trigger |
-| `post_handoff_exceptions` | string[]? | keywords ที่บอทยังตอบได้หลัง handoff |
 | `notes` | string? | |
 | `created_at` | Date | |
 | `updated_at` | Date | |
@@ -771,11 +770,11 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 **Access:**
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
-| Read | shopSettingsService (Next.js), app.py (Python) | `/shop-settings`, Python `/chat` (post_handoff_exceptions) |
+| Read | shopSettingsService (Next.js) | `/shop-settings` |
 | Write (upsert) | upsertShopSettings, upsertShopSettingsBatch | `/shop-settings` POST |
 | Delete (soft) | deleteShopSettings | `/shop-settings/[id]` DELETE |
 
-**หน้าที่เข้าถึง:** `/shop-settings`, Python bot (อ่าน post_handoff_exceptions)
+**หน้าที่เข้าถึง:** `/shop-settings` — post-handoff lock เป็น unconditional (ไม่มี exception setting; field `post_handoff_exceptions` ใน doc เก่าถูก runtime ignore)
 
 ---
 
@@ -917,7 +916,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `assigned_to` | string? \| null | admin_id; `null` = unassigned (clear owner โดย `updateStatus`/`reassign null`/auto-reopen/queued commit ใน `commitHandoffState`) |
 | `assigned_at` | Date? \| null | set เมื่อ assign; `null` เมื่อ owner ถูกล้าง (ไม่ลบ audit `close_history`/`admin_logs`) |
 | `assignment_mode_used` | string? | |
-| `status` | string? | open/closed/handoff/bot/resolved |
+| `status` | string? | open/closed/handoff/bot/resolved/pending |
 | `closed_at` | Date? | |
 | `closed_by` | string? | |
 | `close_count` | number? | |
@@ -1431,7 +1430,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `resolved_at` | ISO string? | เวลาเข้า terminal stage |
 | `resolution_reason` | string? | valid producer เดียวตอนนี้ `troubleshoot_confirmed` (customer ยืนยันแก้สำเร็จ); admin event = Phase 2B.6 |
 | `customer_name`/`customer_phone` | string? | **identity allowlist** — reuse ข้าม episode ได้ |
-| `customer_order_id`/`purchase_date`/`has_image`/`has_video` | various | **case evidence — ไม่ข้าม episode**; terminal episode เก็บเป็น audit record |
+| `customer_order_id`/`purchase_date`/`has_image` | various | **case evidence — ไม่ข้าม episode**; terminal episode เก็บเป็น audit record |
 
 **product entry:** `{item_id, name, source: user_item_card|user_variation_card|user_order|bot_suggestion, mentioned_at, is_anchor, card?}`
 

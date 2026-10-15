@@ -765,11 +765,13 @@ def get_previous_anchor(
 
 
 def load_claim_state(conversation_id: str) -> dict | None:
-    """โหลด claim state ของแชท.
+    """โหลด persisted `claim_state` dict ของแชท (canonical schema ใน docs/schema.md).
 
     Returns:
-        dict ที่มี fields: customer_name, customer_phone, customer_order_id,
-        purchase_date, has_image, has_video, started_at, updated_at
+        dict ของ episode ล่าสุด — lifecycle (`episode_id`, `stage`,
+        `started_at`, `updated_at`, `resolved_at`, `resolution_reason`,
+        `resolved_by`) + customer slots (`customer_name`, `customer_phone`,
+        `customer_order_id`) + evidence (`purchase_date`, `has_image`)
         หรือ None ถ้าไม่มี
     """
     if not conversation_id:

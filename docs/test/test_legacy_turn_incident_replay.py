@@ -1298,6 +1298,28 @@ def test_p2b5_closed_states_still_dispatch_engines(monkeypatch):
     assert len(v3_calls) == 3, f"closed states must reach chatbotv3: {v3_calls}"
 
 
+def test_p2b7_video_placeholder_persists_has_image(monkeypatch):
+    """2B.7 regression pin — [วิดีโอ] turn on a collecting episode persists
+    canonical image evidence through the real path (app.chat → legacy SM →
+    _claim_transition → fake Mongo): has_image=True, same episode, and the
+    removed has_video alias never appears in persisted state."""
+    fx = _p2b5_fx(
+        conversation_id="fx-conv-p2b7-vid", ticket_state="bot",
+        claim_state_seed={"stage": "collecting", "episode_id": "ep-vid",
+                          "customer_name": "สมชาย ใจดี"},
+        turns=[{"text": "[วิดีโอ]"}],
+        synthetic_pii=["name"])
+    _records, _cap, _client = _replay(monkeypatch, fx)
+    claim = conversation_products.load_claim_state("fx-conv-p2b7-vid")
+    assert claim and claim.get("episode_id") == "ep-vid", \
+        "video evidence must merge into the same open episode"
+    assert claim.get("stage") == "collecting"
+    assert claim.get("has_image") is True, \
+        "[วิดีโอ] placeholder must persist as canonical has_image evidence"
+    assert "has_video" not in claim, \
+        "persisted claim_state must never carry the removed has_video field"
+
+
 # ── harness self-tests (Phase 0C): prove doubles/tripwires actually work ─────
 
 def _locked_fx():

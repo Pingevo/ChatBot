@@ -987,10 +987,50 @@ type ClaimOutcome = {
 
 #### Commit 2B.7 — residual deletion and gate
 
-- [ ] Inventory direct claim-stage writers, handoff bool writers, raw production ticket-state readers, and lifecycle predicates.
-- [ ] Delete dead direct writes/helpers/fields, including `has_video` only if no live writer/consumer remains.
-- [ ] Run Phase 2A contract, legacy replay/isolation, handoff/API, typecheck/build, and diff checks.
-- [ ] Report owner count, direct writer count, runtime LOC delta, un-xfails, and residual blockers. No cleanup item may be deferred here from an earlier commit merely to make that commit additive.
+- [x] Inventory direct claim-stage writers, handoff bool writers, raw production ticket-state readers, and lifecycle predicates.
+- [x] Delete dead direct writes/helpers/fields, including `has_video` only if no live writer/consumer remains. — **`has_video` deleted**: git history proves zero truthy writers ever (production only ever wrote `None`; video evidence always folded into `has_image` via `วิดีโอ|video` placeholder). Sole reader was `_merge_claim_slots` `or cs.get("has_video")` — removed; docstring/schema/test-seed cleaned in same change. Marker fallback in `_is_active_post_handoff` retained (reachable when callers omit `ticket_state`: simulate/botworker/replay paths) — executable contract pins it.
+- [x] Run Phase 2A contract, legacy replay/isolation, handoff/API, typecheck/build, and diff checks.
+- [x] Report owner count, direct writer count, runtime LOC delta, un-xfails, and residual blockers. No cleanup item may be deferred here from an earlier commit merely to make that commit additive.
+
+**2B.7 actual (unstaged — รอ independent review):**
+
+| metric | before | after |
+|---|---|---|
+| claim lifecycle transition owner | 1 (`_claim_transition`) | 1 |
+| claim storage primitives | 2 (`transition_claim_state`/`merge_claim_fields`) | 2 |
+| lifecycle evaluator | 1 (`_claim_lifecycle`) | 1 |
+| Python handoff transport writer | 1 (`_send_handoff`) | 1 |
+| TS ownership writers | `statusConversationService` only (commitHandoffState/updateStatus/recordClaimHandoff/applyClaimOutcome/applyInboundOwnershipTransition) | same |
+| raw production ticket-state readers | 0 (prod = `status_conversation` เท่านั้น) | 0 |
+| marker/keyword fallbacks | 2 live legs (`_is_active_post_handoff` marker leg; `order_flow` claim-prompt leg) | 2 (kept — both cover callers/data without structured state) |
+| dead claim fields | `has_video` reader 1 | 0 |
+| new helpers/guards/shims/flags/modules | — | **0** |
+| runtime LOC net (refactor-only) | — | **0** (in-place edits; no line added/removed) |
+
+**Verification (2B.7)**: ownership transport **244/244** · Python handoff transport **47/47** · claim contract **52+1s** · canonical batch **312 pass/19 skip/8 xfail** · replay isolation **1 pass** · fixture validator **all rows** · `py_compile` 3 files OK · `tsc --noEmit` clean · `npm run build` pass · `git diff --check` clean · anger suite not rerun (baseline 11 fail = pre-existing `72c325e` signature, unchanged — reported separately, not green).
+
+**2B.7 correction round (post independent review — unstaged, รอ final read-only review):**
+
+Independent review: no Critical/High; `has_video` deletion ถูกต้องและ video input ทำงาน — แต่ gate ไม่ครบ: เหลือ dead writable config + dead function surface + stale enum docs + ไม่มี executable pin ของ video evidence. Corrections (source-verified before accept):
+
+- **Dead config `post_handoff_exceptions` deleted**: zero runtime readers repo-wide (Python reader ถูกลบตั้งแต่ 2B.5; TS reads nothing) — removed write surface: `route.ts` body field + passthrough, `shopSettingsService.ts` doc field / `DEFAULT_SHOP_SETTINGS` / upsert opts / `$set` path / insert default (UI controls = 0 already). `shop_settings` docs ที่มี field เก่า = inert historical data — runtime ignores (lock unconditional); no migration/cleanup. Fixture `lock-shop-exception-escape` + validator `_ss_keys` + meta-tests retained: seed simulates a legacy doc still carrying the field — the executor wires it into fake admindb so the row pins "active ticket stays locked even when a DB doc has the field".
+- **Dead `_merge_claim_slots` surface deleted**: params `has_date`/`has_image` + output keys `date`/`image` — zero consumers of those keys (callers read only name/phone/order_id; evidence persists via `_claim_transition` independently). Signature now `(info, *, claim_state)` → `{name, phone, order_id}`; both production call sites (v2 + legacy) updated.
+- **Enum/doc corrections**: `ChatRequest.ticket_state` Field description + SRS enum lists now state the full set `handoff|open|pending|closed|resolved|bot` (active = handoff/open/pending → unconditional lock; closed/resolved/bot → normal; None/other → marker fallback); `schema.md` `status_conversation.status` rows add missing `pending` (canonical `ConversationStatus` = 6 values); `load_claim_state` docstring now names the real persisted key set (lifecycle + slots + evidence) pointing at canonical schema.
+- **Video evidence executable pin added**: `test_p2b7_video_placeholder_persists_has_image` — `[วิดีโอ]` turn on a seeded collecting episode through real `app.chat` → legacy SM → `_claim_transition` → fake Mongo: `has_image is True`, same `episode_id`, `stage` collecting, and `"has_video" not in claim` (absence — airtight, not None-equality). Mutation evidence: removing `วิดีโอ|video` from the placeholder recognition makes the pin FAIL; reverted → PASS.
+- **Shop-settings behavior test added** (`scripts/test-shop-settings.ts`, same hooks+fakemongo harness — no parallel harness): passing `post_handoff_exceptions` on create/update is never persisted; legacy doc field stays inert (service never rewrites it); `faq_liveagent_*` still persists.
+
+| correction metric | before | after |
+|---|---|---|
+| `post_handoff_exceptions` runtime readers | 0 | 0 |
+| `post_handoff_exceptions` writers (API+service surface) | 6 sites | **0** |
+| `post_handoff_exceptions` UI controls | 0 | 0 |
+| `_merge_claim_slots` params | 4 (`info, has_date, has_image, claim_state`) | **2** (`info, claim_state`) |
+| `_merge_claim_slots` output keys | 5 | **3** (`name, phone, order_id`) |
+| `_merge_claim_slots` kwarg call sites | 2 (v2+legacy passing dead args) | **0** |
+| new helpers/guards/shims/flags/modules | — | **0** |
+| runtime LOC delta | — | **−18 net** (code −20: route.ts −2, shopSettingsService −9, warranty_flow −9; +2 docstring in conversation_products; app.py ±0) |
+
+**Verification (correction — fresh)**: TS ownership transport **244/244** · shop-settings contract **3/3** · Python handoff transport **47/47** · claim contract **52+1s** · canonical batch **313 pass/19 skip/8 xfail** (baseline 312 + new video pin; skips/xfails identical) · replay isolation+warranty_delivery **12/12** · fixture validator **all rows** · `py_compile` 3 files OK · `tsc --noEmit` clean · `npm run build` pass (84/84) · `git diff --check` clean · anger suite **11 fail = baseline-identical `72c325e` signature** (offline `_send_handoff` POST — pre-existing, reported separately, not green).
 
 ### Phase 2C — Multi-Need TurnPlan And Authoritative Subjects
 

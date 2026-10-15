@@ -292,7 +292,7 @@ def test_fresh_claim_after_terminal_mints_new_episode(coll, terminal):
     old = {"episode_id": "e-old", "stage": terminal,
            "customer_name": "สมชาย ใจดี", "customer_phone": "0812345678",
            "customer_order_id": "2508088B5T4W1D", "purchase_date": "2026-08-10",
-           "has_image": True, "has_video": True, "started_at": "2026-01-01"}
+           "has_image": True, "started_at": "2026-01-01"}
     _seed(coll, "c1", old)
     state = warranty_flow._claim_transition(
         _req(), old, "collecting", fresh_claim=True)
@@ -302,7 +302,7 @@ def test_fresh_claim_after_terminal_mints_new_episode(coll, terminal):
     assert state["customer_name"] == "สมชาย ใจดี"
     assert state["customer_phone"] == "0812345678"
     # case evidence of the old episode must not leak into the new one
-    for k in ("customer_order_id", "purchase_date", "has_image", "has_video"):
+    for k in ("customer_order_id", "purchase_date", "has_image"):
         assert k not in state, k
     # new episode gets its own started_at, not the old terminal record's
     assert state["started_at"] != "2026-01-01"

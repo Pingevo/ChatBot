@@ -142,7 +142,7 @@ sellcenter dump แชท Shopee ลง `conversations_shp`/`messages_shp` (เ�
 | `knowledge_base` | FAQ + product_spec + general_faq | import script + admin UI `/knowledge` |
 | `knowledge_base_products` / `knowledge_base_qa` | KB product entries / QA pairs (`USE_QA_KB`) | import + admin |
 | `shop_personas` | persona ต่อร้าน (bot_name ฯลฯ) | admin UI `/persona` |
-| `shop_settings` | per-shop settings (`faq_liveagent_action`, post-handoff exceptions ฯลฯ) | admin UI |
+| `shop_settings` | per-shop settings (`faq_liveagent_action`, `faq_liveagent_enabled`, notes) — post-handoff lock เป็น unconditional ไม่มี exception setting | admin UI |
 | `system_configs` | `llm_config` (key pool AES-GCM + per-role models) + `role_permissions` + switches | `/llm`, `/roles`, `/config` |
 | `test_chat_sessions` / `test_chat_ratings` | test chat จาก `/test-chat` + rating | Python `test_chat_api` + Next.js |
 | `test_assignment` | replay results (QA sets, transcript เต็มใน `qa` — docs ใหญ่ ~60KB avg, list endpoints ใช้ projection) | scripts + admin |
@@ -210,7 +210,7 @@ sellcenter dump แชท Shopee ลง `conversations_shp`/`messages_shp` (เ�
 
 `POST /chat` — header `X-Internal-Secret` → `chat(req: ChatRequest) → ChatResponse`
 
-**ChatRequest fields:** `message` (จำเป็น) · `shop` · `item_id` (การ์ดสินค้าที่ส่งมา) · `order_sn` (การ์ด order) · `history[]` (`{role, text, images[], image_desc}`) · `limit` (1-50, default 10) · `images[]` (≤3 รูป/turn) · `conversation_id` · `platform` · `simulate_assignment` (test/shadow) · `ticket_state` (`open|closed|handoff|resolved|pending`) · `claim_outcome` (2B.6 — `{episode_id, outcome: resolved|cancelled, actor_id, occurred_at(ISO)}` จาก `status_conversation` prod เท่านั้น; test/simulate ไม่ส่ง) · `use_v2`/`use_v3` (override engine) · `llm_context_limit` (10-50)
+**ChatRequest fields:** `message` (จำเป็น) · `shop` · `item_id` (การ์ดสินค้าที่ส่งมา) · `order_sn` (การ์ด order) · `history[]` (`{role, text, images[], image_desc}`) · `limit` (1-50, default 10) · `images[]` (≤3 รูป/turn) · `conversation_id` · `platform` · `simulate_assignment` (test/shadow) · `ticket_state` (`handoff|open|pending|closed|resolved|bot` — handoff/open/pending = active lock; closed/resolved/bot = ปกติ; None → marker fallback) · `claim_outcome` (2B.6 — `{episode_id, outcome: resolved|cancelled, actor_id, occurred_at(ISO)}` จาก `status_conversation` prod เท่านั้น; test/simulate ไม่ส่ง) · `use_v2`/`use_v3` (override engine) · `llm_context_limit` (10-50)
 
 **ChatResponse fields:** `answer` · `answer_segments[]` (split `|||`) · `products[]` (cards) · `shop` · `model` · `source` · `chat_engine` (`legacy|v2|v3`) · `usage{prompt,output,total}` · `elapsed` · `cost` · `handoff_to_admin`/`handoff_reason`/`handoff_claim` — **command fields: True/non-None = "เพิ่ง verify/s่ง handoff ใหม่" เท่านั้น (downstream เช่น liveAssignmentService เอาไป handoff ต่อ) — human-wait state ต้อง `False`/`None` + routing path `"human_wait"`** · `intent` · `timing` · `retrieval_info` · `web_search_used`/`web_search_reason`/`web_search_model` · `image_desc` (cache ให้ turn ถัดไป) · `steps[]` (per-stage breakdown) · `routing_decision{path, reason, …}`
 
@@ -279,7 +279,7 @@ listing path:
 | 3 | บอทเคยถามชื่อ/เบอร์ | `extract_customer_info` (NER+regex) → merge slots |
 | 4 | บอทเคยทวนข้อมูล | `detect_confirmation` → handoff พร้อม claim payload |
 | 5 | บอทเคยบอกนอกประกัน | สนใจปรึกษาแอดมิน → handoff |
-| 6 | post-handoff | บอทเงียบจน `ticket_state=="closed"`; exceptions จาก `shop_settings` |
+| 6 | post-handoff | `ticket_state∈{handoff,open,pending}` → บอทเงียบทุกข้อความ (unconditional — ไม่มี exception); `closed`/`resolved`/`bot` → ปกติ; ไม่ทราบ → marker fallback |
 | 7 | เคยขอข้อมูล/รูป | รับรูป/วิดีโอเป็น evidence → merge slots |
 
 ### 5.3 chat_v2 (`chat_v2.chat_v2`) — 8 stages
@@ -580,7 +580,7 @@ listing path:
 
 | ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
 |---|---|---|---|---|---|---|---|
-| `_merge_claim_slots` | รวม claim slots | info, has_date, has_image, claim_state | dict | — | handle_warranty_flow | merge ข้อมูลสะสมข้าม turn — **2B.5: precedence เท่านั้น (current ชนะ persisted); name validity เป็นงาน `warranty.extract_customer_info` ไม่ re-check ที่นี่** | — |
+| `_merge_claim_slots` | รวม claim slots | info, claim_state | dict {name,phone,order_id} | — | handle_warranty_flow (+ legacy) | merge ข้อมูลสะสมข้าม turn — **2B.5: precedence เท่านั้น (current ชนะ persisted); name validity เป็นงาน `warranty.extract_customer_info` ไม่ re-check ที่นี่; 2B.7: ลบ dead `has_date`/`has_image` params + `date`/`image` output (evidence persist ผ่าน `_claim_transition` อยู่แล้ว)** | — |
 | `ClaimLifecycleView` | lifecycle snapshot (frozen dataclass) | episode_id, stage, lifecycle_open, accepts_claim_fields | — | — | `_claim_lifecycle` สร้าง; SM/turn_decision/order_flow consume | stage: absent\|collecting\|ts_suggested\|resolved\|cancelled | — |
 | `_claim_lifecycle` | **lifecycle evaluator เดียว (2B.4)** | claim_state | ClaimLifecycleView | — | handle_warranty_flow (v2/legacy), turn_decision.decide_turn, order_flow | persisted stage เท่านั้นที่นับ — retained slots เป็น reuse/audit data ไม่ใช่ activation; accepts_claim_fields เฉพาะ stage==collecting (ts_suggested เปิดแต่ไม่รับ field) | — |
 | `_claim_transition` | **transition owner เดียว (2B.4)** | req, claim_state, to, fields=None, fresh_claim=False | claim_state (authoritative) | `_claim_lifecycle`, conversation_products.transition_claim_state/merge_claim_fields | SM ทุกจุดเปลี่ยน stage (v2+legacy) + `_consume_claim_outcome` (2B.6) | absent/terminal+fresh→episode ใหม่ (identity allowlist name/phone เท่านั้นข้าม; case evidence ไม่ข้าม); open→open merge fenced `episode_id+expected_stage`; →terminal = partial $set (stage/resolved_at/resolution_reason) เก็บ evidence; terminal+fresh_claim=False→refuse; CAS miss→reread ครั้งเดียวคืนผู้ชนะ | Mongo write |
@@ -1121,7 +1121,7 @@ module ใหม่ที่แยก pure detectors ออกจาก `knowled
 | `ADMIN_HANDOFF_URL` | `http://127.0.0.1:3000/api/admin/conversations/bot-handoff` | handoff endpoint |
 | `BOT_MAX_IMAGES_PER_TURN` | `5` | จำกัดรูป/turn ของ vision pass |
 | `BOT_VISION_ALLOW_LOOPBACK` | — | อนุญาต loopback image URL (test-chat upload) |
-| `req.ticket_state` | — | `open|closed|handoff|resolved|pending` — คุม post-handoff silence |
+| `req.ticket_state` | — | `handoff|open|pending|closed|resolved|bot` — คุม post-handoff silence (handoff/open/pending = lock ทุกข้อความ; closed/resolved/bot = ปกติ; None/อื่น → marker fallback) |
 | `req.simulate_assignment` | False | handoff→`test_status_conversation` แทน conversations จริง |
 | `req.test_source` | None | `"botworker"` → handoff/ticket_state ผูกกับ test store source=botworker (parallel sandbox) |
 | `req.llm_context_limit` | 30 (10-50) | จำนวนสินค้าสูงสุดใน LLM ctx (หน้า config ตั้ง) |

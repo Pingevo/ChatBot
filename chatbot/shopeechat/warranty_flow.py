@@ -35,8 +35,7 @@ from typing import Any
 
 # ─── Claim-slot helpers (fill-once) ─────────────────────────────────────────
 # ใช้ร่วมกัน handle_warranty_flow (v2) + handle_warranty_flow_legacy (app.py)
-def _merge_claim_slots(info: dict, *, has_date: bool = False, has_image: bool = False,
-                       claim_state: dict | None = None) -> dict:
+def _merge_claim_slots(info: dict, *, claim_state: dict | None = None) -> dict:
     """รวม claim slots: ข้อความปัจจุบัน ∪ claim_state ที่ persist (fill-once).
 
     ค่าจากข้อความปัจจุบันชนะเสมอ (ลูกค้าแก้ข้อมูลได้) — ถ้าข้อความไม่มีใช้ค่าที่เคยเก็บ
@@ -49,8 +48,6 @@ def _merge_claim_slots(info: dict, *, has_date: bool = False, has_image: bool = 
         "name": info.get("name") or cs.get("customer_name"),
         "phone": info.get("phone") or cs.get("customer_phone"),
         "order_id": info.get("order_id") or cs.get("customer_order_id"),
-        "date": has_date or bool(cs.get("purchase_date")),
-        "image": has_image or bool(cs.get("has_image") or cs.get("has_video")),
     }
 
 
@@ -64,7 +61,7 @@ def _merge_claim_slots(info: dict, *, has_date: bool = False, has_image: bool = 
 _CLAIM_OPEN_STAGES = frozenset(("collecting", "ts_suggested"))
 _CLAIM_TERMINAL_STAGES = frozenset(("resolved", "cancelled"))
 # identity allowlist — copy ข้าม episode ได้ (reuse เท่านั้น); case evidence
-# (customer_order_id, purchase_date, has_image, has_video) ไม่ข้าม episode
+# (customer_order_id, purchase_date, has_image) ไม่ข้าม episode
 _CLAIM_IDENTITY_FIELDS = ("customer_name", "customer_phone")
 
 
@@ -462,10 +459,7 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
             )
             _warranty_claim_handoff = True
             # ⚡ T5 — merge กับ claim_state: handoff claim ได้ข้อมูลครบ (ไม่ใช่แค่ turn นี้)
-            _slots = _merge_claim_slots(
-                _info, has_date=_has_date, has_image=_has_image,
-                claim_state=_claim_state,
-            )
+            _slots = _merge_claim_slots(_info, claim_state=_claim_state)
             _warranty_claim_ctx = {
                 "customer_name": _slots["name"],
                 "customer_phone": _slots["phone"],
@@ -1377,10 +1371,7 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                 # ⚡ handoff=True เสมอ — แอดมินต้องรู้ว่าลูกค้าส่งข้อมูลใหม่มา
                 _warranty_claim_handoff = True
                 # ⚡ T5 — merge กับ claim_state: handoff claim ได้ข้อมูลครบ (ไม่ใช่แค่ turn นี้)
-                _slots = _merge_claim_slots(
-                    _info, has_date=_has_date, has_image=_has_image,
-                    claim_state=_claim_state,
-                )
+                _slots = _merge_claim_slots(_info, claim_state=_claim_state)
                 _warranty_claim_ctx = {
                     "customer_name": _slots["name"],
                     "customer_phone": _slots["phone"],
