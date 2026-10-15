@@ -20,6 +20,72 @@
 
 ## กำลังทำ (active)
 
+### 🔧 Phase 2B.7 — Residual Deletion + Complexity Gate (2026-10-14) · audit+delete เสร็จ · verified · ยังไม่ commit (รอ independent review)
+
+- **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `ad00048` (docs botworker drain atop `76a8064`) · tree clean · 2B.1–2B.6 committed
+- **เป้าหมาย**: inventory residual จาก call graph จริง (claim-stage writers, handoff bool writers, raw ticket-state readers, lifecycle predicates, marker fallback, dead fields เช่น `has_video`) → ลบเฉพาะที่พิสูจน์ producer/consumer/caller + replacement contract ครบ → verify → gate report
+- **หลัก**: ลบได้เมื่อพิสูจน์เท่านั้น · ยัง live/หลักฐานไม่พอ → เก็บ+รายงาน blocker · runtime เล็กลงหรือเท่าเดิม · ห้าม helper/guard/shim/flag/module ใหม่
+- **ข้อห้าม**: ไม่ worker/.env/มาแล้วจ้า/provider/LLM/real Mongo/port 8010/stage/commit/push/PR/deploy · ไม่แตะ 2C/2D/botworker · ไม่แตะ answer quality/retrieval/ranking/prompt
+
+#### Audit result + สิ่งที่ลบ
+
+- **error**: `has_video` — dead field ใน claim_state contract: zero truthy writer ตลอด git history (production เขียนได้แค่ `None`; video evidence fold เข้า `has_image` ผ่าน `วิดีโอ|video` placeholder มาตลอด) → reader `cs.get("has_video")` ใน `_merge_claim_slots` (wf:53) = dead `or`-branch
+- **cause**: field ถูกสร้างเป็น schema slot ตั้งแต่ claim-state epoch (368897f) แต่ไม่มี producer เขียนค่า truthy เลย — เหลือ reader + doc mentions เป็นกะเทาะ
+- **fix**: ลบ reader wf:53 · comment wf:66-67 · docstring `conversation_products.py:772` · schema.md row · test seed+assert (`test_phase2_claim_state_contract.py`) — pure deletion, ไม่มี behavior change (falsy เสมอ)
+- **impact ต่อเคสอื่น**: ไม่มี — executable contract (claim-state suite 52+1s, canonical batch 312) เขียวเหมือนเดิม; `handoff_claim` wire field เก็บไว้ (serialized, consumer นอก repo พิสูจน์ไม่ได้ว่าไม่มี); marker fallback `_is_active_post_handoff` + `order_flow` marker leg เก็บ (รองรับ caller ที่ไม่ส่ง ticket_state/ข้อมูล unstructured — executable tests pin อยู่)
+- **แก้ comment stale ด้วย**: `app.py` ChatRequest.ticket_state ยังบอก "handoff/open + marker → ล็อค (exceptions ใน KB)" — post-2B.5 คือ unconditional lock; SRS state-6 row เดียวกัน stale → แก้ทั้งคู่ให้ตรง contract จริง
+
+#### Owner/writer counts (ก่อน=หลัง — proven single owner, ไม่มีใครเพิ่ม)
+
+- claim transition owner = 1 (`_claim_transition`) · storage primitives = 2 · lifecycle evaluator = 1 (`_claim_lifecycle`) · outcome consumer = 1 (`_consume_claim_outcome`)
+- handoff transport writer = 1 (`_send_handoff`) · flag producers ทุกจุด gated บน typed outcome (unconditional `handoff_to_admin=True` = 0)
+- raw production ticket-state reader = **0** (prod อ่าน `status_conversation` เท่านั้น; raw `conversations` ที่เหลือ = labels write/contents display/test-store เท่านั้น)
+- dead-field reader `has_video` = 1 → **0** · helper/guard/shim/flag/module ใหม่ = **0** · runtime LOC net = **0** (in-place edits)
+- finding ที่ไม่ลบ (นอก scope 2B.7): `chat_models.py` dead dataclasses (`AnchorData`/`IntentData`/`SearchData`/`AnswerData` — zero refs แต่เป็น artifact ของ chat_v2 ไม่ใช่ residual ของ Phase 2B) · `clear-status` maintenance route (superadmin escape hatch ตั้งใจไว้) · `handoff_claim` wire field (serialized ทุก claim response — consumer ภายนอก repo พิสูจน์ไม่ได้)
+
+#### Verification (2B.7 — fresh, post-edit)
+
+- TS ownership transport **244/244** · Python handoff transport **47/47** · claim contract **52 passed + 1 skipped** · canonical Phase 2B batch **312 pass / 19 skip / 8 xfail** (identical baseline) · replay isolation **1 pass** · fixture validator **all rows pass** · warranty_delivery+guards **11/11** · cert_standards **66/0**
+- `py_compile` warranty_flow+conversation_products+app **OK** · `tsc --noEmit` **clean** · `npm run build` **pass** · `git diff --check` **clean**
+- anger suite: ไม่รันรอบนี้ — baseline 11 fail เดิมจาก `72c325e` (offline `_send_handoff` POST — pre-existing, รายงานแยก ไม่นับ green)
+- **safety**: worker=0 · provider/LLM=0 · real Mongo=0 · .env=0 · port 8010=0 · stage/commit/push/PR/deploy=0
+- **verdict: `PHASE_2B7_CLOSED_READY_FOR_INDEPENDENT_REVIEW`** — unstaged, รอ reviewer อิสระ
+
+#### 2B.7 Correction Round (2026-10-14 — correction เสร็จ · verified · ยังไม่ commit)
+
+- **Independent review verdict**: ไม่มี Critical/High · `has_video` deletion ถูกต้อง video input ทำงาน · แต่ deletion gate ไม่ครบ — เหลือ dead config + dead function surface
+- **Findings ที่ตรวจ source แล้วรับ (source-proven)**:
+  1. `post_handoff_exceptions` = dead writable config — Python reader ถูกลบตั้งแต่ 2B.5 (grep ทั้ง repo: ไม่มี runtime reader เหลือ) แต่ ChatAdminWeb ยังรับ/persist: `route.ts:51` body field · `:110` passthrough · `shopSettingsService.ts:27` doc field · `:45` DEFAULT · `:87` upsert opts · `:105-106` `$set` · `:136` insert default · UI control = **0** (ไม่มี .tsx เลย)
+  2. `_merge_claim_slots` dead surface — output keys `date`/`image` ไม่มี consumer ใดๆ (callers อ่านแค่ name/phone/order_id); params `has_date`/`has_image` มีไว้สร้าง 2 key ที่ไม่มีใครอ่าน (callers ส่งที่ wf:466, 1381 เท่านั้น) — persisted `purchase_date`/`has_image` เขียนโดย `_claim_transition` แยกอยู่แล้ว (wf:481-482, 1397-1398)
+  3. ticket_state enum docs stale — `app.py:166` + `SRS_SSD.md:213,1124` ขาด `bot`; `schema.md:312,920` ขาด `pending` (canonical `ConversationStatus` = 6 ค่า)
+  4. `load_claim_state` docstring ไม่ครบ persisted keys (ขาด episode_id/stage/resolved_*)
+  5. ไม่มี executable test ว่า `[วิดีโอ]`/`[video]` → persisted `has_image:true` (independent review ยืนยัน runtime ทำงานแต่ไม่มี pin)
+
+#### Correction applied + verification (fresh)
+
+- **ลบ write surface `post_handoff_exceptions` ทั้งหมด**: route body field + passthrough · service doc field/DEFAULT/upsert-opts/`$set`/insert-default — production TS เหลือ **0 refs** · UI = 0 อยู่แล้ว · fixture `lock-shop-exception-escape`+validator+meta-tests **เก็บ** (seed จำลอง legacy doc — executor wire เข้า fake admindb → pin "locked แม้ doc เคยมี field" ตามที่ task กำหนดให้รักษา) · `scripts/test-shop-settings.ts` ใหม่ (hooks+fakemongo harness เดิม — ไม่ใช่ parallel harness): create/update ไม่ persist field + legacy doc คง inert + faq_liveagent persist — **3/3**
+- **`_merge_claim_slots` slim**: params 4→**2** (`info, claim_state`) · output keys 5→**3** (`name/phone/order_id`) · kwarg call sites 2→**0** (v2+legacy แก้แล้ว) — merge tests 8 ผ่านเดิม
+- **video pin เพิ่ม**: `test_p2b7_video_placeholder_persists_has_image` — `[วิดีโอ]` บน seeded collecting episode ผ่าน `app.chat` จริง→legacy SM→`_claim_transition`→fake Mongo: `has_image is True` · same episode_id · `"has_video" not in claim` (airtight) — **mutation evidence**: ตัด `วิดีโอ|video` ออกจาก placeholder recognition → pin FAIL; revert → PASS
+- **docs**: `app.py:166` Field desc ครบ 6 states+lock semantics · SRS:145/213/583/1124 · schema.md status enum +pending · shop_settings section ลบ field row · `load_claim_state` docstring ครบ key set
+- **Verify**: TS ownership **244/244** · shop-settings **3/3** · Python transport **47/47** · claim contract **52+1s** · canonical batch **313 pass/19 skip/8 xfail** (baseline 312 + pin ใหม่; skip/xfail เดิม) · isolation+warranty_delivery **12/12** · fixture validator **all rows** · py_compile 3 files OK · tsc clean · npm build pass (84/84) · diff --check clean · anger **11 fail = baseline `72c325e` เดิมเป๊ะ** (offline `_send_handoff` POST — ไม่นับ green)
+- **LOC**: runtime **−18 net** (code −20: route −2/service −9/warranty_flow −9; docstring +2; app.py ±0) · test +22 (replay pin) + test-shop-settings.ts ใหม่
+- **safety**: worker/provider/LLM/real Mongo/.env/port 8010/stage/commit/push/PR/deploy = **0** · ไม่แตะ 2C/2D/botworker · helper/guard/shim/flag/module ใหม่ = **0**
+- **verdict: `PHASE_2B7_CORRECTED_READY_FOR_FINAL_READONLY_REVIEW`** — unstaged, รอ final read-only review
+
+#### Phase 2B.7 Commit Closeout (committed — 2026-10-14)
+
+- **Commit 1**: `56ec5f5` `refactor: remove residual phase 2b lifecycle state` — 11 files, +204/−49
+- **Root causes ที่ปิด**:
+  - `post_handoff_exceptions` = dead writable config — Python reader ลบตั้งแต่ 2B.5, TS ไม่มี reader แต่ API/service ยังเขียนได้ → ลบทั้ง write surface; doc เก่าใน DB ที่มี field = retained historical data ที่ runtime ignore (lock unconditional, ไม่มี migration)
+  - `has_video` = dead persisted alias — zero truthy writer ตลอด history (video → `has_image` ผ่าน `วิดีโอ|video` placeholder) → ลบ reader/doc/test-seed + เพิ่ม executable pin `[วิดีโอ]`→`has_image:true` same-episode + `"has_video" not in claim`
+  - `_merge_claim_slots` dead surface — params `has_date`/`has_image` + outputs `date`/`image` ไม่มี consumer → ลบ เหลือ `(info, claim_state)` → `{name,phone,order_id}`
+  - ticket/status docs ไม่ครบ → `ticket_state`/`status_conversation.status` enum แก้ให้ตรง canonical 6 ค่า (เพิ่ม `bot`/`pending`) + `load_claim_state` docstring ครบ persisted keys
+- **Complexity**: runtime net **−18** (code −20: route −2/service −9/warranty_flow −9; docstring +2; app.py ±0) · helpers/guards/shims/flags/modules **+0** · claim transition owner 1 · handoff transport owner 1 · raw prod ticket-state readers 0
+- **Verification (fresh, pre-commit)**: shop-settings **3/3** · ownership transport **244/244** · `tsc --noEmit` clean · pytest batch **296 pass/19 skip/8 xfail** (replay+contract+5f+td+td-shadow+isolation+warranty_delivery — canonical batch รวม retrieval_shadow+5f_handoff+troubleshoot = **313/19/8** เมื่อรันครบ) · handoff transport **47/47** · fixture validator **all rows** · `git diff --check` clean · `npm run build` 84/84 (รอบก่อนหน้า) · anger **11 fail = baseline `72c325e` เดิม** (offline `_send_handoff` POST — pre-existing, ไม่นับ green)
+- **Phase 2C/2D/botworker ไม่ถูกแตะ** · ไม่มี deploy/push/PR/worker/provider/LLM/real Mongo/`.env`/port 8010
+- **Residual ที่ยังเหลือจริง**: `chat_models.py` dead dataclasses (chat_v2 artifact นอก scope 2B) · `handoff_claim` wire field (serialized — consumer นอก repo พิสูจน์ไม่ได้) · anger suite 11 fails เดิม · `conversations_shp` duplicate remediation plan คง untracked แยกงาน
+- **Phase 2B complete — พร้อม Phase 2C ตามลำดับ roadmap (2C.1–2C.3 → 2D → Revised Phase 3)**
+
 ### 🔧 Phase 2B.6 — Explicit Admin Claim Outcome (2026-10-14) · audit→RED→impl เสร็จ · verify/docs ค้าง · ยังไม่ commit
 
 - **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `c28edb1` (docs 2B.5 atop `e26456c`) · tree clean · 2B.1–2B.5 committed ทั้งหมด
