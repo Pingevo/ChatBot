@@ -206,7 +206,8 @@ calls, fake = _script_urlopen([_body("assigned")])
 with patch("urllib.request.urlopen", side_effect=fake), \
      patch("time.sleep", lambda *_a, **_k: None):
     res = _handoffs_mod.detect_human_request(
-        _req(message="ขอคุยกับแอดมินหน่อย", ticket_state=None), dict(_ctx))
+        _req(message="ขอคุยกับแอดมินหน่อย", ticket_state=None),
+        dict(_ctx), plan_decided_reason="human_request")
 check("C1a success → handoff_to_admin=True + claim answer",
       res is not None and res.get("handoff_to_admin") is True
       and "ส่งต่อ" in (res.get("answer") or ""),
@@ -216,7 +217,8 @@ calls, fake = _script_urlopen([_http(503)] * 5)
 with patch("urllib.request.urlopen", side_effect=fake), \
      patch("time.sleep", lambda *_a, **_k: None):
     res = _handoffs_mod.detect_human_request(
-        _req(message="ขอคุยกับแอดมินหน่อย", ticket_state=None), dict(_ctx))
+        _req(message="ขอคุยกับแอดมินหน่อย", ticket_state=None),
+        dict(_ctx), plan_decided_reason="human_request")
 check("C1b exhausted → handoff_to_admin=False + ไม่ claim ส่งแอดมิน",
       res is not None and res.get("handoff_to_admin") is False
       and "ส่งต่อ" not in (res.get("answer") or ""),

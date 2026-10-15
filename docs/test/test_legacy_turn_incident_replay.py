@@ -664,14 +664,13 @@ def test_l1_owner_probes(fx):
         pytest.skip("no owner probe")
     msg = fx["turns"][-1]["text"]
     if probe == "detect_human_request":
-        req = SimpleNamespace(message=msg, conversation_id="fx",
-                              shop=fx.get("shop"),
-                              ticket_state=fx.get("ticket_state"))
-        out = handoffs.detect_human_request(req, {})
+        # detection probe — decide_turn เจ้าของ decision; transport ไม่ re-detect
+        out = (handoffs.is_human_request(msg)
+               or handoffs.is_service_anger(msg))
         if fx["expected"]["action"] == "handoff":
-            assert out is not None, "expected handoff detection"
+            assert out, "expected handoff detection"
         else:
-            assert out is None, f"unexpected handoff: {out}"
+            assert not out, f"unexpected handoff detection"
     elif probe == "guards_spec_claim":
         # output boundary must flag spec claims not grounded in card context
         out = guards.check_output("ตัวนี้กันน้ำ IP68 นะคะ")
@@ -930,6 +929,15 @@ def _expectations_met(fx, records, captured):
             fails.append("expected answer but response handed off")
         if not (getattr(resp, "answer", "") or "").strip():
             fails.append("expected bot answer but resp.answer is empty")
+    elif action == "no_reply":
+        # ⚡ Phase 2C.3 — TurnPlan no_reply = noise/placeholder turn:
+        #   ไม่ตอบ ไม่เรียก LLM ไม่ handoff (bot silent โดยเจตนา)
+        if getattr(resp, "handoff_to_admin", False):
+            fails.append("no_reply response must not signal handoff_to_admin")
+        if (getattr(resp, "answer", "") or "").strip():
+            fails.append("expected empty answer for no_reply turn")
+        if rec["llm_calls"]:
+            fails.append(f"llm called {len(rec['llm_calls'])}x during no_reply")
     elif action == "claim_collect":
         claim = conversation_products.load_claim_state(fx.get("conversation_id"))
         if not claim:

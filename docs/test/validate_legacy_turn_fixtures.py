@@ -25,7 +25,8 @@ OWNERS = {
     "answer_context", "final_claim_validation", "handoff_or_workflow_state",
     "token_or_web_gate", "policy_eligibility",
 }
-ACTIONS = {"answer", "handoff", "locked", "claim_collect", "order_info"}
+ACTIONS = {"answer", "handoff", "locked", "claim_collect", "order_info",
+           "no_reply"}
 STATUSES = {"positive", "incident", "answer_level", "pending_live_replay"}
 _PHONE = re.compile(r"(?<!\d)0\d{9}(?!\d)")
 _EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")

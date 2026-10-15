@@ -192,6 +192,11 @@ def _history_has_product_context(history: list[dict] | None) -> bool:
             tnorm, tflags, _ = _normalize(text)
             if "has_item_tag" in tflags:
                 return True
+            # ลูกค้าเคยส่งรูป/วิดีโอในเทิร์นก่อน = subject evidence
+            #   (สติกเกอร์ไม่นับ — ไม่ใช่ product signal)
+            if ("visual_media_placeholder" in tflags
+                    or h.get("image_desc") or h.get("images")):
+                return True
             if not tnorm:
                 continue  # placeholder/noise turn — ไม่นับเป็น context
             if _detectors.extract_model_keywords(tnorm):
@@ -427,6 +432,7 @@ def decide_turn(
     # 8. follow-up & comparison & compatibility & policy & product
     _has_product_ctx = (
         "has_item_tag" in flags
+        or has_visual_media  # [รูปภาพ]/[วิดีโอ] = subject evidence จากลูกค้าเอง
         or _anchor_has_product_context(active_anchor)
         or _history_has_product_context(history)
     )
@@ -484,14 +490,13 @@ def decide_turn(
             _unanchored_followup_ask = True
 
     if _is_select_ask:
-        if _has_product_ctx or _has_explicit_product:
-            if _has_product_ctx and not _has_explicit_product:
-                flags.add("select_followup")
-                flags.add("needs_history")
-            _add_need("product", "recommend", refs=_subject_refs, conf=0.8,
-                      prov=("turn_decision.select_ask",))
-        else:
-            _unanchored_followup_ask = True
+        # self-anchoring browse ask — "มีตัวไหนบ้าง" ขอ set ทั้งหมด ไม่ได้
+        #   อ้างถึง subject เดิม (ต่างจาก stock/price/link ที่ต้องมี subject)
+        if _has_product_ctx and not _has_explicit_product:
+            flags.add("select_followup")
+            flags.add("needs_history")
+        _add_need("product", "recommend", refs=_subject_refs, conf=0.8,
+                  prov=("turn_decision.select_ask",))
 
     if _is_cmp_kw or (_is_sup_kw and _has_product_ctx and not _has_explicit_product):
         if len(_explicit_codes) >= 2 or _has_product_ctx:
@@ -549,11 +554,14 @@ def decide_turn(
         _add_need("product", _op, refs=_subject_refs, conf=0.75,
                   prov=("route_context.resolve_route",))
 
-    requires_clarification = bool(not needs or _unanchored_followup_ask)
+    requires_clarification = bool(_unanchored_followup_ask)
 
     if any(n.kind == "human" and n.operation == "handoff" for n in needs):
         primary_action: TurnPrimaryAction = "handoff"
-    elif not needs:
+    elif _unanchored_followup_ask and not needs:
+        # subject-demanding follow-up ที่ไม่มี context เลย → deterministic
+        #   clarify; needs=() แต่เป็นข้อความปกติ (greeting/claim-resume text/
+        #   คำถามเปิด) → execute_needs ให้ pipeline ปกติตอบ
         primary_action = "clarify"
     else:
         primary_action = "execute_needs"

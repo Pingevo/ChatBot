@@ -11,20 +11,23 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "chatbot"))
 
-from shopeechat.handoffs import detect_human_request  # noqa: E402
+from shopeechat.handoffs import is_human_request, is_service_anger  # noqa: E402
 
 
-def _handoff(message: str) -> dict | None:
-    req = SimpleNamespace(message=message, conversation_id=None,
-                          shop=None, ticket_state=None)
-    return detect_human_request(req, {})
+def _handoff(message: str):
+    """detection probe — decide_turn เจ้าของ decision; transport ไม่ re-detect
+    (Phase 2C.3)."""
+    if is_human_request(message):
+        return {"handoff_reason": "human_request"}
+    if is_service_anger(message):
+        return {"handoff_reason": "customer_frustration"}
+    return None
 
 
 # ---------- ต้อง escalate: service complaint / anger จริง ----------
@@ -47,7 +50,7 @@ MUST_ESCALATE = [
 @pytest.mark.parametrize("msg", MUST_ESCALATE)
 def test_real_service_complaint_escalates(msg):
     out = _handoff(msg)
-    assert out is not None and out["handoff_to_admin"] is True
+    assert out is not None, f"detection must escalate: {msg!r}"
 
 
 # ---------- ห้าม escalate: อาการสินค้า (→ troubleshoot/claim) ----------

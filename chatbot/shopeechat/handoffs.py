@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import sys
 import time as _time
+from typing import Literal
 
 # --- short toxic token matcher (5F-A, hardened 5F-H1) ---
 # สระ/วรรณยุกต์/เครื่องหมายที่ต้องแปะพยัญชนะ — ถ้าอยู่ "หลัง" token แปลว่า
@@ -280,10 +281,14 @@ def is_service_anger(message: str) -> bool:
     return is_angry
 
 
-def detect_human_request(req, ctx: dict) -> dict | None:
+def detect_human_request(req, ctx: dict, *, plan_decided_reason:
+                         Literal["human_request", "customer_frustration"]
+                         ) -> dict | None:
     """Human-request handoff — ย้าย verbatim จาก app.py chat() (BUG-3 fix).
 
-    ctx keys: steps, timing_breakdown, total_start, image_desc_out, model_name
+    ctx keys: steps, timing_breakdown, total_start, image_desc_out, model_name.
+    plan_decided_reason (required): TurnPlan decision — closed set
+    (human_request | customer_frustration); transport never re-detects.
     """
     from . import llm
     from . import app as _app_module
@@ -308,54 +313,54 @@ def detect_human_request(req, ctx: dict) -> dict | None:
     # ⚡ Revised Phase 1 — detection ย้ายไป module-level predicates
     #   (is_human_request / is_service_anger) เพื่อให้ turn_decision reuse ได้
     #   โดยไม่ fire handoff — logic เดิม verbatim, ไม่มี keyword เพิ่ม
-    _is_human_request = is_human_request(req.message)
-    _is_angry = is_service_anger(req.message)
+    # ⚡ Phase 2C.3 — transport-only: decision owner = TurnPlan; required kwarg — ห้าม re-detect
+    if plan_decided_reason not in ("human_request", "customer_frustration"):
+        raise ValueError(f"plan_decided_reason must be "
+                         f"human_request|customer_frustration: {plan_decided_reason!r}")
+    _human_req = plan_decided_reason == "human_request"
 
-    if _is_human_request or _is_angry:
-        from . import responses as _resp_mod
-        _reason = "human_request" if _is_human_request else "customer_frustration"
-        _topic = "ลูกค้าขอคุยกับแอดมิน" if _is_human_request else "ลูกค้าไม่พอใจ/โกรธ"
-        _human_answer = (
-            f"ขออภัยที่ให้รอนะคะ เดี๋ยวส่งต่อแชทนี้ให้แอดมินดูแลให้นะคะ "
-            f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
-            if _is_human_request else
-            f"ขออภัยที่ทำให้ไม่พอใจนะคะ เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
-            f"ดูแลให้โดยเร็วนะคะ รบกวนรอการติดต่อกลับอีกครั้งนะคะ"
-        )
-        _total_elapsed = _time.time() - _total_start
+    from . import responses as _resp_mod
+    _topic = "ลูกค้าขอคุยกับแอดมิน" if _human_req else "ลูกค้าไม่พอใจ/โกรธ"
+    _human_answer = (
+        f"ขออภัยที่ให้รอนะคะ เดี๋ยวส่งต่อแชทนี้ให้แอดมินดูแลให้นะคะ "
+        f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+        if _human_req else
+        f"ขออภัยที่ทำให้ไม่พอใจนะคะ เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
+        f"ดูแลให้โดยเร็วนะคะ รบกวนรอการติดต่อกลับอีกครั้งนะคะ"
+    )
+    _total_elapsed = _time.time() - _total_start
 
-        # ส่งต่อแอดมิน — outcome ยืนยันเท่านั้นถึง claim ส่งสำเร็จ
-        #   failed/exhausted → flag False + ตอบตรงๆ ว่าติดต่อแอดมินไม่ได้ (ห้ามโกหก)
-        _handoff_ok = bool(
-            _app_module._send_handoff(req, None, reason=_reason,
-                          claim={"topic": _topic}, log_tag="HUMAN-HANDOFF")
-        ) if req.conversation_id else False
-        if not _handoff_ok:
-            _human_answer = _resp_mod.HANDOFF_FAILED_REPLY
-        print(f"[TIMING] HUMAN-HANDOFF({_reason}): {_total_elapsed:.2f}s ok={_handoff_ok}", file=sys.stderr)
-        return dict(
-            answer=_human_answer,
-            answer_segments=llm.split_segments(_human_answer),
-            products=[],
-            shop=req.shop,
-            model=model_name,
-            source="human_request_handoff",
-            usage={},
-            elapsed=round(_total_elapsed, 2),
-            cost=0.0,
-            handoff_to_admin=_handoff_ok,
-            handoff_reason=_reason if _handoff_ok else None,
-            timing=_timing_breakdown,
-            steps=_steps,
-            routing_decision=_app_module._routing(
-                "handoff" if _handoff_ok else "bot_reply",
-                f"{_reason}: {_topic} → ส่งแอดมิน" if _handoff_ok
-                    else f"{_reason}: {_topic} → handoff ไม่สำเร็จ (ติดต่อแอดมินไม่ได้)",
-                handoff_reason=_reason if _handoff_ok else None,
-            ),
-            image_desc=_image_desc_out,
-        )
-    return None
+    # ส่งต่อแอดมิน — outcome ยืนยันเท่านั้นถึง claim ส่งสำเร็จ
+    #   failed/exhausted → flag False + ตอบตรงๆ ว่าติดต่อแอดมินไม่ได้ (ห้ามโกหก)
+    _handoff_ok = bool(
+        _app_module._send_handoff(req, None, reason=plan_decided_reason,
+                      claim={"topic": _topic}, log_tag="HUMAN-HANDOFF")
+    ) if req.conversation_id else False
+    if not _handoff_ok:
+        _human_answer = _resp_mod.HANDOFF_FAILED_REPLY
+    print(f"[TIMING] HUMAN-HANDOFF({plan_decided_reason}): {_total_elapsed:.2f}s ok={_handoff_ok}", file=sys.stderr)
+    return dict(
+        answer=_human_answer,
+        answer_segments=llm.split_segments(_human_answer),
+        products=[],
+        shop=req.shop,
+        model=model_name,
+        source="human_request_handoff",
+        usage={},
+        elapsed=round(_total_elapsed, 2),
+        cost=0.0,
+        handoff_to_admin=_handoff_ok,
+        handoff_reason=plan_decided_reason if _handoff_ok else None,
+        timing=_timing_breakdown,
+        steps=_steps,
+        routing_decision=_app_module._routing(
+            "handoff" if _handoff_ok else "bot_reply",
+            f"{plan_decided_reason}: {_topic} → ส่งแอดมิน" if _handoff_ok
+                else f"{plan_decided_reason}: {_topic} → handoff ไม่สำเร็จ (ติดต่อแอดมินไม่ได้)",
+            handoff_reason=plan_decided_reason if _handoff_ok else None,
+        ),
+        image_desc=_image_desc_out,
+    )
 
 
 def post_intent_handoffs(req, ctx: dict, db) -> dict | None:

@@ -204,24 +204,26 @@ def test_claim_lifecycle_view():
 # ---------- post-handoff: ห้าม re-fire handoff ----------
 
 def test_anger_during_active_handoff_no_refire():
-    # ticket_state="handoff" + ลูกค้าโมโห → ไม่ใช่ handoff ใหม่
+    # ticket_state="handoff" + plan decided frustration → ไม่ใช่ handoff ใหม่
     req = SimpleNamespace(message="กากมาก", conversation_id="c1",
                           shop=None, ticket_state="handoff")
-    out = detect_human_request(req, {})
+    out = detect_human_request(req, {}, plan_decided_reason="customer_frustration")
     assert out is None  # → ให้ post-handoff lock ใน warranty_flow ตอบ
 
 
 def test_human_request_during_active_handoff_no_refire():
     req = SimpleNamespace(message="ขอคุยกับคน", conversation_id="c1",
                           shop=None, ticket_state="handoff")
-    assert detect_human_request(req, {}) is None
+    assert detect_human_request(
+        req, {}, plan_decided_reason="human_request") is None
 
 
 def test_anger_normal_ticket_still_handoff():
-    # ticket ยังไม่ handoff → anger ต้อง escalate ปกติ
+    # ticket ยังไม่ handoff → plan-decided anger ต้อง escalate ปกติ
     req = SimpleNamespace(message="กากมาก", conversation_id="c1",
                           shop=None, ticket_state=None)
-    out = detect_human_request(req, {})
+    out = detect_human_request(
+        req, {}, plan_decided_reason="customer_frustration")
     assert out is not None and out["handoff_reason"] == "customer_frustration"
 
 

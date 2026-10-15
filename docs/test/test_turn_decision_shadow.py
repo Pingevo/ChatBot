@@ -5,8 +5,8 @@ Shadow contract: app.chat() computes ONE authoritative TurnPlan post-classify
 plan behind USE_TURN_DECISION_SHADOW=1 (default OFF) — it never plans again.
 Turns returning before classify carry no step (boundary lock, human request,
 item-tag, order). Subject-view read failures yield empty plan inputs
-(ok=True); decide_turn errors become ok=False (plan_unavailable) — never a
-failed chat.
+(ok=True); decide_turn errors are fail-closed — chat() raises the existing
+500 boundary, and the shadow step records ok=False (plan_unavailable).
 
 PII contract: the trace carries ok/primary_action/needs[{kind,operation,
 confidence,provenance}]/ownership/claim_stage/requires_clarification/flags/
@@ -119,20 +119,22 @@ def test_shadow_on_appends_trace(monkeypatch):
 
 
 def test_shadow_error_never_breaks_chat(monkeypatch):
-    """decide_turn raising must collapse to ok=False — chat() unaffected."""
+    """decide_turn raising → fail closed: the turn dies at the existing 500
+    boundary (no planless legacy execution). The shadow step still records
+    ok=False (plan_unavailable) for observability."""
+    from fastapi import HTTPException
     fx = _fx("err", "สวัสดีครับ")
     replay._install(monkeypatch, fx)
     monkeypatch.setenv("USE_TURN_DECISION_SHADOW", "1")
     from shopeechat import turn_decision as _td
     monkeypatch.setattr(_td, "decide_turn",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
-    resp = app.chat(app.ChatRequest(
-        message="สวัสดีครับ", shop="testshop", platform="shopee",
-        conversation_id="sh-err", limit=5, simulate_assignment=True,
-        test_source="phase1b_shadow"))
-    assert resp is not None
-    steps = _shadow_steps(resp)
-    assert len(steps) == 1 and steps[0]["ok"] is False
+    with pytest.raises(HTTPException) as exc:
+        app.chat(app.ChatRequest(
+            message="สวัสดีครับ", shop="testshop", platform="shopee",
+            conversation_id="sh-err", limit=5, simulate_assignment=True,
+            test_source="phase1b_shadow"))
+    assert exc.value.status_code == 500
 
 
 def test_shadow_same_answer_on_and_off(monkeypatch):
@@ -177,14 +179,16 @@ def test_shadow_product_issue_not_handoff(monkeypatch):
 
 
 def test_shadow_human_request_is_handoff(monkeypatch):
-    """human-request turn returns at the pre-Pass-1 handoff boundary —
-    the authoritative plan is computed post-classify, so this turn
-    legitimately carries no TurnDecisionShadow step (pure need content
-    stays pinned in test_turn_decision.py)."""
+    """⚡ Phase 2C.3 — human-request turn now flows through the post-classify
+    TurnPlan gate: the plan carries primary_action="handoff" and the gate
+    dispatches to the existing handoff owner. The response must carry the
+    plan step AND the handoff signal (need content stays pinned in
+    test_turn_decision.py)."""
     resp = _run(monkeypatch, _fx("hr", "ขอคุยกับแอดมิน"))
     assert resp.handoff_to_admin is True
-    assert _shadow_steps(resp) == [], \
-        "pre-Pass-1 handoff return must not carry a plan step"
+    steps = _shadow_steps(resp)
+    assert steps and steps[0]["ok"], steps
+    assert steps[0]["primary_action"] == "handoff", steps[0]
 
 
 def test_shadow_ticket_active_is_locked(monkeypatch):
@@ -288,7 +292,9 @@ def test_shadow_phase1c_hardened_cases(monkeypatch):
             "ตัวไหนมี มอก. บ้าง": ("execute_needs", {("product", "describe")}),
         },
         "tx-q22q25-claim-persist": {
-            "0812345678": ("clarify", set()),
+            # ⚡ 2C.3 — needs=() + text → execute_needs (clarify สงวนให้
+            #   unanchored follow-up เท่านั้น)
+            "0812345678": ("execute_needs", set()),
         },
     }
     seen = set()

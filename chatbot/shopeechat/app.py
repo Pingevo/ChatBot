@@ -1069,108 +1069,29 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 except Exception as _e:
                     print(f"[CONV-PRODUCTS] error adding anchor: {_e}", file=sys.stderr)
             if anchor_card:
-                # ⚡ เช็ค charger subtype mismatch — ถ้า message ปัจจุบันมี charger subtype ชัด
-                # และต่างจาก anchor → ลูกค้าเปลี่ยนประเภทสินค้า ไม่ใช่ follow-up ของ anchor
-                # เช่น แชร์การ์ดสายชาร์จ CTL301 แล้วถาม "หัวชาร์จละ" → ไม่ตอบจาก anchor (cable)
-                # ให้ fall through ไป fetch_products ที่กรอง subtype ที่ถูกต้อง
-                # anchor ยังอยู่ใน conversation_products timeline ให้ CONV-ACTIVE ใช้ในอนาคต
-                _cur_sub_anchor = product_store._detect_charger_subtype(req.message)
-                _anchor_sub = product_store._detect_charger_subtype(
-                    anchor_card.get("name") or anchor_card.get("item_name") or ""
-                )
-                # ⚡ 2026-09-12 — compat + target_device → hybrid anchor+fetch
-                #   "อยากได้ของที่ใช้กับ xiaomi 17 ultra" มี "ใช้กับ" + phone brand
-                #   → เก็บ anchor ไว้ใน context + fetch สินค้าที่ใช้กับ target_device
-                #   → LLM ตอบ: "CTL301 เป็น Lightning ไม่ใช้กับ Mi 17 Ultra แนะนำสาย USB-C แทน"
+                # ⚡ Phase 2C.3 — item-tag turn ไม่ตอบเองก่อน plan อีกต่อไป:
+                #   card flow ผ่าน classify→TurnPlan→pipeline เดียวกัน
+                #   (subject identity = explicit write ที่ subject block ข้างบน)
+                #   compat+target → เก็บ anchor ไว้ hybrid-merge กับ fetch เดิม;
+                #   subtype/set questions → TurnPlan+CONV-ACTIVE ตัดสินแทน ladder
                 _compat_kws_anchor = ("ใช้กับ", "รองรับ", "สำหรับ", "compatible", "support", "works with")
-                _has_compat_anchor = any(kw in (req.message or "").lower() for kw in _compat_kws_anchor)
                 _phone_brands_anchor = ("iphone", "ipad", "samsung", "xiaomi", "redmi",
                                         "huawei", "honor", "oppo", "vivo", "realme",
                                         "poco", "oneplus", "pixel", "mi ", "note ", "ultra")
-                _has_target_device_anchor = any(b in (req.message or "").lower() for b in _phone_brands_anchor)
-                _is_compat_with_target = _has_compat_anchor and _has_target_device_anchor
-                # ⚡ 2026-09-12 — guard "หัว" ลอยๆ เหมือน CONV-ACTIVE (บรรทัด ~3088)
-                #   "แข็งแรงมั้ยคับ ชอบมีปันกาเรื่องหัว ชาน" → _detect_charger_subtype=adapter
-                #   แต่ไม่มี strong adapter keyword (หัวชาร์จ/adapter/gan) → ไม่ใช่การเปลี่ยนหมวดจริง
-                #   → ใช้ anchor ต่อ (เหมือนเคส ZMIThailand Q10 ที่เคยผ่าน)
-                _strong_adapter_kw_anchor = ("หัวชาร์จ", "หัวชาร์ต", "adapter", "แอ็ดอปเตอร์", "gan", "qc 3", "pd fast")
-                _has_strong_adapter_anchor = any(kw in (req.message or "").lower() for kw in _strong_adapter_kw_anchor)
-                _is_loose_head = (
-                    _cur_sub_anchor == "adapter" and _anchor_sub == "cable"
-                    and not _has_strong_adapter_anchor
-                )
-                # ⚡ คำถาม "ชุดสินค้า" (compare/superlative) + timeline มี ≥2 ชิ้น
-                #   → ไม่ใช่คำถามเกี่ยวกับ anchor เดี่ยว → ไม่ควรตอบจากการ์ดเดี่ยว
-                #   ยกเว้น: มีคำอ้างชิ้นเดียว ("ตัวนี้/รุ่นนี้") = ถาม anchor จริงๆ
-                _is_set_q_multi = False
-                _msg_l_set = (req.message or "").lower()
-                if (req.conversation_id
-                        and not any(kw in _msg_l_set for kw in _SINGLE_ITEM_REF_KW)
-                        and any(kw in _msg_l_set
-                                for kw in _COMPARISON_FOLLOWUP_KW + _SUPERLATIVE_KW)):
-                    try:
-                        from . import conversation_products as _cp_multi
-                        _is_set_q_multi = len(_cp_multi.get_anchor_and_suggestions(
-                            req.conversation_id, limit=2)) >= 2
-                    except Exception:
-                        _is_set_q_multi = False
-                if _cur_sub_anchor and _cur_sub_anchor != _anchor_sub and not _is_loose_head:
-                    print(f"[ITEM-TAG] subtype mismatch: msg={_cur_sub_anchor} anchor={_anchor_sub} → fall through to fetch_products", file=sys.stderr)
-                    # ไม่ return — ปล่อยไป main flow (fetch_products จะกรอง subtype ที่ถูกต้อง)
-                elif _is_compat_with_target:
+                _msg_l_anchor = (req.message or "").lower()
+                if (any(kw in _msg_l_anchor for kw in _compat_kws_anchor)
+                        and any(b in _msg_l_anchor for b in _phone_brands_anchor)):
                     print(f"[ITEM-TAG] compat+target_device → hybrid anchor+fetch (anchor อยู่ใน context)", file=sys.stderr)
-                    # ⚡ เก็บ anchor ไว้ merge ภายหลังหลัง fetch_products
                     _hybrid_anchor_card = anchor_card
-                    # ไม่ return — ปล่อยไป main flow (fetch_products + merge anchor ภายหลัง)
-                elif _is_set_q_multi:
-                    # ⚡ คำถามเปรียบเทียบ/superlative อ้าง "ชุดสินค้า" ไม่ใช่ anchor เดี่ยว —
-                    #   เช่น ส่งการ์ด A → bot แนะนำ B → "อันไหนใหม่กว่า" ต้องเทียบ A/B
-                    #   ปล่อยไป main flow ให้ FOLLOWUP-COMP/CONV-ACTIVE จัดการ context
-                    print(f"[ITEM-TAG] compare/superlative + ≥2 products in timeline → fall through to main flow", file=sys.stderr)
-                else:
-                    # ถ้าลูกค้าไม่ได้พิมพ์คำถามเพิ่ม (ส่งแค่การ์ดสินค้ามาเฉย ๆ)
-                    # ให้ตั้งคำถามแทน โดยบอกชัดว่าลูกค้าระบุสินค้านี้แล้ว (ผ่านการแชร์การ์ดสินค้า)
-                    # ป้องกัน LLM เข้าใจผิดว่า "ยังไม่ได้ระบุสินค้า"
-                    _followup_q = (
-                        _clean_message
-                        or "ลูกค้าส่งการ์ดสินค้าชิ้นนี้มาในแชท สนใจสอบถามว่ามีของไหม และอยากดูรายละเอียดสินค้า"
-                    )
-                    try:
-                        answer, usage_info = llm.answer(
-                            message=_followup_q,
-                            products=[anchor_card],
-                            shop_hint=req.shop,
-                            history=_qa10,
-                            persona_extra=_persona_extra,
-                            extra_context=_vision_context,
-                        )
-                    except RuntimeError as exc:
-                        raise HTTPException(status_code=500, detail=str(exc))
-                    _total_elapsed = _time.time() - _total_start
-
-                    prompt_t = usage_info.get("prompt", 0)
-                    output_t = usage_info.get("output", 0)
-                    cost = llm._gemini_cost(prompt_t, output_t)
-                    answer = _append_base_warranty(answer, _followup_q, source="item_tag")
-                    return ChatResponse(
-                        answer=answer,
-                        answer_segments=llm.split_segments(answer),
-                        products=[anchor_card],
-                        shop=req.shop,
-                        model=model_name,
-                        source="item_tag",
-                        usage=usage_info,
-                        elapsed=round(_total_elapsed, 2),
-                        cost=round(cost, 6),
-                        steps=_steps,
-                        routing_decision=_routing("bot_reply", "item_tag: ลูกค้าคลิกสินค้า → ตอบจาก tag"),
-                        image_desc=_image_desc_out,
-                    )
             else:
                 print(f"[ITEM-TAG] ไม่พบสินค้า item_id={_tagged_item_id} ในระบบ", file=sys.stderr)
-            # ถ้าไม่เจอสินค้า (ถูกลบ/item_id ผิด) ให้ตกไปใช้ flow ปกติต่อด้วยข้อความที่ตัด tag แล้ว
+            # ข้อความที่ pipeline เห็น — tag ถูกตัดออกแล้ว; card-only → synth
+            #   ให้ classify/plan เห็นความหมายของ turn (การ์ดเปล่า = สนใจสินค้านั้น)
             if _clean_message:
                 req.message = _clean_message
+            elif anchor_card:
+                req.message = ("ลูกค้าส่งการ์ดสินค้าชิ้นนี้มาในแชท "
+                               "สนใจสอบถามว่ามีของไหม และอยากดูรายละเอียดสินค้า")
         # ⚡ T9 — image_desc → model keywords → match สินค้าร้าน → hybrid anchor (NEW-6)
         #   เดิม: vision อ่านรูปได้แต่ไม่เคยผูกกับสินค้าในร้าน (ค้นด้วย desc ดิบ fuzzy พลาด)
         #   guard: ข้อความไม่มี product ref ชัด (ไม่มี model kw / ไม่มี tag / ไม่มี anchor อยู่แล้ว)
@@ -1290,19 +1211,6 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             _warranty_auto_answer, _warranty_auto_info, _warranty_auto_ctx = (
                 warranty.auto_check_delivery_warranty(_order_sn, req.shop, _bot_name)
             )
-
-        # ===== Human-request handoff (ย้ายไป handoffs.detect_human_request) =====
-        from . import handoffs as _handoffs
-        _hr = _handoffs.detect_human_request(req, {
-            "steps": _steps,
-            "timing_breakdown": _timing_breakdown,
-            "total_start": _total_start,
-            "image_desc_out": _image_desc_out,
-            "model_name": model_name,
-        })
-        if _hr is not None:
-            return ChatResponse(**_hr)
-
 
         # ===== Pass 1: LLM Intent Classification (รันทุกข้อความ) =====
         # ⚡ Phase 6 — ยกเลิก should_run_pass1() gate
@@ -1474,8 +1382,77 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 intent_result=_intent_result,
             )
         except Exception:
-            _turn_plan = None
+            _turn_decision_shadow(None, _steps)
+            # fail closed — ทุก eligible turn ต้องมี TurnPlan เดียวก่อน retrieval;
+            #   planner พัง → boundary 500 เดียวกับ llm error sites, ห้าม
+            #   legacy pipeline ทำงานต่อโดยไม่มี plan
+            raise HTTPException(
+                status_code=500,
+                detail="Internal error during AI response processing")
         _turn_decision_shadow(_turn_plan, _steps)
+
+        # ⚡ Phase 2C.3 — action switch (owner เดียว): TurnPlan.primary_action
+        #   ตัดสิน action ของ turn นี้ — non-execute actions return ตรงนี้ก่อน
+        #   domain handlers; execute_needs → dispatch ตาม needs ด้านล่าง
+        from . import handoffs as _handoffs
+        _turn_action = _turn_plan.primary_action
+        if _turn_action == "human_wait":
+            return ChatResponse(**_wf_lock._build_post_handoff_response(
+                req, {"steps": _steps, "total_start": _total_start,
+                      "image_desc_out": _image_desc_out},
+                sys.modules[__name__], llm))
+        if _turn_action == "no_reply":
+            return ChatResponse(
+                answer="", products=[], shop=req.shop, model=model_name,
+                source="no_reply", usage={},
+                elapsed=round(_time.time() - _total_start, 2), cost=0.0,
+                steps=list(_steps),
+                intent=(_intent_result
+                        if isinstance(_intent_result, dict) else {}),
+                timing={"total": round(_time.time() - _total_start, 3)},
+                routing_decision=_routing(
+                    "no_reply",
+                    "turn_plan: placeholder/noise turn → ไม่ตอบ ไม่ค้นสินค้า"),
+                image_desc=_image_desc_out)
+        if _turn_action == "clarify":
+            return ChatResponse(
+                answer=("ขอโทษค่ะ ลูกค้าหมายถึงสินค้าตัวไหนคะ "
+                        "ช่วยแจ้งชื่อรุ่นหรือส่งการ์ดสินค้าให้หน่อยนะคะ"),
+                products=[], source="subject_clarify", shop=req.shop,
+                model=model_name,
+                usage={"prompt": 0, "output": 0, "total": 0},
+                intent=(_intent_result
+                        if isinstance(_intent_result, dict) else {}),
+                web_search_used=False, steps=list(_steps),
+                timing={"total": round(_time.time() - _total_start, 3)},
+            )
+        if _turn_action == "handoff":
+            # ⚡ correction — plan เป็น owner เดียวของ action นี้: ส่ง decision
+            #   ให้ transport (เลิก re-detect intent) + ห้าม fallthrough ไป bot
+            #   answer ถ้า transport ไม่มีผลลัพธ์ → fail closed
+            _hr = _handoffs.detect_human_request(req, {
+                "steps": _steps,
+                "timing_breakdown": _timing_breakdown,
+                "total_start": _total_start,
+                "image_desc_out": _image_desc_out,
+                "model_name": model_name,
+            }, plan_decided_reason=(
+                "customer_frustration"
+                if "customer_frustration" in _turn_plan.flags
+                else "human_request"))
+            if _hr is not None:
+                return ChatResponse(**_hr)
+            from . import responses as _resp_mod
+            return ChatResponse(
+                answer=_resp_mod.HANDOFF_FAILED_REPLY,
+                products=[], shop=req.shop, model=model_name,
+                source="handoff_failed", usage={},
+                elapsed=round(_time.time() - _total_start, 2), cost=0.0,
+                steps=list(_steps),
+                intent=(_intent_result
+                        if isinstance(_intent_result, dict) else {}),
+                timing={"total": round(_time.time() - _total_start, 3)},
+                image_desc=_image_desc_out)
 
         # ===== Tax invoice + TISI handlers (ย้ายไป handoffs.post_intent_handoffs) =====
         _phr = _handoffs.post_intent_handoffs(req, {
@@ -1491,6 +1468,10 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             return ChatResponse(**_phr)
 
 
+        # ⚡ Phase 2C.3 — warranty/return-policy follow-up flag เท่านั้น;
+        #   เลิก parse model จาก bot prose + เลิกเขียน message ทับ —
+        #   resolved subject set (ด้านล่าง) เป็น owner ของ subject identity
+        #   → resolved → general_qtype=None ให้ product flow เห็น subject cards
         _is_followup_policy = (
             general_qtype in ("warranty_policy", "return_policy")
             and history
@@ -1498,61 +1479,6 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             and not _is_claim_request  # ไม่ใช่ claim request (เคลม/ซ่อม/เสีย)
             and len(req.message.split()) <= 4  # คำถามสั้นๆ
         )
-        if _is_followup_policy:
-            # ดึง model words จาก history — เน้น model answer ล่าสุดก่อน
-            # เพราะ user อาจพิมพ์ "โทสับงบ 2000" (ไม่มี model keyword)
-            # แต่ model answer มักมีชื่อสินค้าจริง เช่น "Xiaomi Redmi 8A", "Lagenio K9"
-            # ใช้ model answer ล่าสุดเป็นหลัก เพื่อหลีกเลี่ยงการเลือกรุ่นเก่าจาก history
-            _last_model_msgs = [h for h in _qa10 if h.get("role") == "model"][-2:]
-            _last_model_text = " ".join(h.get("text", "") for h in _last_model_msgs)
-            _all_history_text = " ".join(h.get("text", "") for h in _qa10)
-            # ใช้ model answer ล่าสุดเป็นหลัก ถ้าไม่มีค่อยใช้ history ทั้งหมด
-            history_text = _last_model_text if _last_model_text.strip() else _all_history_text
-            # หา pattern ที่เป็น "brand/word + model number" เช่น "Redmi 8A", "Xiaomi 12", "Lagenio K9"
-            # ไม่ใช่แค่ตัวเลขเดี่ยวๆ เช่น "8A" หรือ "2000"
-            # pattern: word(2+) + space + alphanumeric(2+) ที่มีตัวเลข
-            model_patterns = re.findall(
-                r"\b([A-Za-z]{2,})\s+([A-Za-z]*\d+[A-Za-z]*)\b",
-                history_text
-            )
-            # กรอง: ตัวที่ 2 ต้องมีตัวเลข และตัวแรกไม่ใช่ stop word
-            _stop = {"งบ", "บาท", "ราคา", "โค้ด", "พิเศษ", "ลด", "เหลือ", "ใช้", "พร้อม", "ส่ง",
-                     "ศูนย์", "ไทย", "เดือน", "ปี", "วัน", "ชั่วโมง", "gb", "ram", "rom", "mb",
-                     "vs", "กับ", "ต่าง", "ยัง", "ไง", "ไหน", "อะ", "ครับ", "ค่ะ", "นะ",
-                     "usb", "type", "c", "a", "pd", "qc", "w", "mah", "mm", "นิ้ว", "กรัม"}
-            valid_models = []
-            for brand_part, model_part in model_patterns:
-                if brand_part.lower() in _stop:
-                    continue
-                if not re.search(r"\d", model_part):
-                    continue
-                # ไม่เอาตัวเลขล้วน (เช่น "2000")
-                if re.fullmatch(r"\d+", model_part):
-                    continue
-                valid_models.append(f"{brand_part} {model_part}")
-            if valid_models:
-                # dedup models (เก็บเฉพาะรุ่นที่ไม่ซ้ำกัน)
-                _seen_models = set()
-                _unique_models = []
-                for m in valid_models:
-                    _ml = m.lower()
-                    if _ml not in _seen_models:
-                        _seen_models.add(_ml)
-                        _unique_models.append(m)
-                print(f"[FOLLOWUP] warranty follow-up detected, models={_unique_models[:3]}", file=sys.stderr)
-                general_qtype = None
-                # สร้าง message ใหม่: ใช้รุ่นล่าสุด + "รับประกัน"
-                # (รุ่นล่าสุด = รุ่นที่ model answer พูดถึงล่าสุด)
-                _original_msg = req.message
-                _latest_model = _unique_models[0]
-                # ถ้ามีหลายรุ่น ใช้รุ่นล่าสุดเป็นหลัก แต่ส่งทุกรุ่นใน message
-                if len(_unique_models) > 1:
-                    req.message = " รับประกัน ".join(_unique_models[:3]) + " รับประกัน"
-                else:
-                    req.message = _latest_model + " รับประกัน"
-                # เก็บ original message ไว้ในตัวแปรเพื่อส่งเป็น desc_message
-                req._followup_original = _original_msg
-                print(f"[FOLLOWUP] new message: {req.message!r}  desc={_original_msg!r}", file=sys.stderr)
 
         # ⚡ ประกาศ _anchor_compare_ctx ก่อน comparison follow-up (ใช้ร่วมกับ anchor compare block)
         _anchor_compare_ctx: dict = {}  # {current: card, previous: card}
@@ -1568,19 +1494,22 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         #   scope/count จาก product need + signal conf จาก plan
         _plan_scope = None
         _plan_count = None
-        _plan_sig_conf = None
-        if _turn_plan is not None:
-            _plan_sig_conf = _turn_plan.intent_confidence
-            for _n in _turn_plan.needs:
-                if _n.kind == "product" and _n.subject_scope != "none":
-                    _plan_scope = _n.subject_scope
-                    _plan_count = _n.subject_count
-                    break
+        _plan_sig_conf = _turn_plan.intent_confidence
+        for _n in _turn_plan.needs:
+            if _n.kind == "product" and _n.subject_scope != "none":
+                _plan_scope = _n.subject_scope
+                _plan_count = _n.subject_count
+                break
+        # explicit ids ที่ persist ไปแล้วใน turn นี้ (item-tag block เขียนไว้
+        #   แล้ว) → ไม่ส่งเป็น explicit evidence ซ้ำให้ recorder ตัดสินใหม่
+        #   (same set churn write) — ส่งเฉพาะ explicit ที่ยังไม่ถูก commit
+        _persisted_ids = set(
+            _subject_stored.subject_ids) if _subject_stored else set()
         _subj_explicit = tuple(
             str(i) for i in (
                 _tagged_item_id,
                 (_hybrid_anchor_card or {}).get("item_id"),
-            ) if i)
+            ) if i and str(i) not in _persisted_ids)
         if _subj_explicit:
             _subject_ev["explicit_ids"] = _subj_explicit
         if not (_tagged_item_id or anchor_card or _hybrid_anchor_card
@@ -1608,152 +1537,71 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 timing={"total": round(_time.time() - _total_start, 3)},
             )
 
-        # ===== Comparison follow-up =====
-        # กรณี: ลูกค้าถาม "ต่างกันยังไง", "เปรียบเทียบ", "เทียบ" โดยไม่มี model keyword
-        # แต่มี model ใน history → ดึง model จาก history มาเปรียบเทียบ
-        _is_comparison_followup = (
-            any(kw in req.message.lower()
-                for kw in _COMPARISON_FOLLOWUP_KW + _SUPERLATIVE_KW)
-            and history
-            and not _current_has_model  # message ปัจจุบันไม่มี model keyword
-            and not any(kw in req.message.lower() for kw in _SINGLE_ITEM_REF_KW)  # "ตัวนี้ใหม่สุดไหม" = ถามชิ้นเดียว
-            and len(req.message.split()) <= 4  # คำถามสั้นๆ
-        )
-        if _is_comparison_followup:
-            print(f"[FOLLOWUP-COMP] triggered: msg={req.message!r}  history={len(history)}  has_model={_current_has_model}", file=sys.stderr)
-            # ⚡ Phase 2C.2 — compare pair มาจาก resolved subject set เท่านั้น
-            #   (structured item_id identity — เลิกดึง pair จาก history text/
-            #    bot-prose; unresolved → ctx ว่าง → fall through ตามปกติ)
-            if (_subject_res and _subject_res.outcome == "resolved"
-                    and _subject_res.subject_set
-                    and len(_subject_res.subject_set.subject_ids) >= 2):
-                _fc_ids = _subject_res.subject_set.subject_ids[:2]
-                try:
-                    _fc_cur = product_store.fetch_product_by_id(
-                        db, _fc_ids[0], shop_filter=req.shop)
-                    _fc_prev = product_store.fetch_product_by_id(
-                        db, _fc_ids[1], shop_filter=req.shop)
-                    if _fc_cur and _fc_prev:
-                        _anchor_compare_ctx = {"current": _fc_cur,
-                                               "previous": _fc_prev}
-                        _subject_ev["pair_ids"] = _fc_ids
-                        _subject_ev["ops"] += ("compare",)
-                        print(f"[FOLLOWUP-COMP] resolved set → pair {_fc_ids}", file=sys.stderr)
-                except Exception as _e:
-                    print(f"[FOLLOWUP-COMP] subject pair fetch error: {_e}", file=sys.stderr)
-
-        # ===== Anchor comparison follow-up (Phase 7) =====
-        # กรณี: ลูกค้าถาม "อันนี้กับอันก่อนต่างกันยังไง", "อันนี้กับอันก่อนหน้า"
-        # โดย "อันนี้" = anchor ล่าสุด (active) และ "อันก่อน" = anchor อันดับ 2
-        # ดึงจาก conversation_products timeline แทนการ extract model keyword จาก history
-        # (เพราะลูกค้าอ้างอิง anchor ไม่ใช่ชื่อรุ่น)
-        _anchor_compare_kws = conversation_products._SUBJECT_PAIR_KWS
-        _is_anchor_compare = (
-            any(kw in (req.message or "").lower() for kw in _anchor_compare_kws)
-            and bool(req.conversation_id)
-        )
-        # _anchor_compare_ctx ประกาศก่อนหน้า (ก่อน comparison follow-up) — ไม่ reset ถ้า set แล้ว
-        # ⚡ Phase 2C.2 — pair ref ใช้ resolved subject set (effective view
-        #   ครอบ anchor-derived set ของ conversation เก่า) ไม่ดึง anchor ladder
-        if _is_anchor_compare and not _anchor_compare_ctx:
+        # ⚡ Phase 2C.3 — subject consumption site เดียว (owner = resolved
+        #   subject set): materialize ครั้งเดียว → pin/merge state เดียวที่
+        #   downstream execution ใช้ — เลิก anchor-ladder / kw-gate /
+        #   bot-prose history selection ของ compare/link/post-comp/partial
+        _compare_need = bool(_turn_plan and any(
+            n.kind == "compare" for n in _turn_plan.needs))
+        _link_need = bool(_turn_plan and any(
+            n.kind == "product" and n.operation == "link"
+            for n in _turn_plan.needs))
+        _productish_need = bool(_turn_plan and any(
+            n.kind in ("product", "compare", "compat")
+            for n in _turn_plan.needs))
+        _policy_carry = _mixed_claim_carry = ""
+        _conv_active_card = None
+        _subject_cards: list[dict] = []
+        if (_subject_res and _subject_res.outcome == "resolved"
+                and _subject_res.subject_set):
             try:
-                if (_subject_res and _subject_res.outcome == "resolved"
-                        and _subject_res.subject_set
-                        and len(_subject_res.subject_set.subject_ids) >= 2):
-                    _ac_ids = _subject_res.subject_set.subject_ids[:2]
-                    _ac_cur = product_store.fetch_product_by_id(
-                        db, _ac_ids[0], shop_filter=req.shop)
-                    _ac_prev = product_store.fetch_product_by_id(
-                        db, _ac_ids[1], shop_filter=req.shop)
-                    if _ac_cur and _ac_prev:
-                        _anchor_compare_ctx = {"current": _ac_cur,
-                                               "previous": _ac_prev}
-                        _subject_ev["pair_ids"] = _ac_ids
-                        _subject_ev["ops"] += ("compare",)
-                        print(f"[ANCHOR-COMP] resolved set → pair {_ac_ids}", file=sys.stderr)
-                    else:
-                        print("[ANCHOR-COMP] resolved pair fetch ไม่ครบ → ข้าม", file=sys.stderr)
-                else:
-                    print("[ANCHOR-COMP] ไม่มี resolved pair (set <2 หรือ unresolved) → ข้าม", file=sys.stderr)
+                _subject_cards = conversation_products.materialize_subject_cards(
+                    db, _subject_res.subject_set.subject_ids[:5],
+                    products=_subject_products,
+                    shop_filter=req.shop, message=req.message)
             except Exception as _e:
-                print(f"[ANCHOR-COMP] error: {_e}", file=sys.stderr)
-
-        # ===== Post-comparison follow-up (Phase 7+) =====
-        # กรณี: รอบก่อนลูกค้าถามเปรียบเทียบ ("ต่างกันยังไง", "เทียบ", ฯลฯ)
-        # รอบนี้ถาม follow-up สั้นๆ ไม่มี model keyword (เช่น "อยากทราบคุณภาพเสียงค่ะ")
-        # → ใช้ both anchors ต่อ (อย่าตัด context กลับเป็น active ตัวเดียว)
-        # เงื่อนไข: มี 2+ anchor, ไม่มี model keyword, ไม่ใช่ new topic, สั้น, รอบก่อนเป็น comparison
-        if (
-            not _anchor_compare_ctx  # ยังไม่ได้ set (ไม่ซ้ำกับ block ด้านบน)
-            and req.conversation_id
-            and not _current_has_model
-            and history
-        ):
-            try:
-                from . import conversation_products as _cp_pcf
-                _pcf_anchors = _cp_pcf.get_anchor_history(req.conversation_id, limit=5)
-                if len(_pcf_anchors) >= 2:
-                    # เช็คว่ารอบก่อน (last user msg ใน history) เป็น comparison question ไหม
-                    _pcf_recent_user = [h.get("text", "") for h in (history or []) if h.get("role") == "user"][-1:]
-                    _pcf_comp_kws = ("ต่างกัน", "ต่างยังไง", "ต่างไหม", "เปรียบเทียบ", "เทียบ", "เทียบกัน",
-                                     "กับตัว", "กับรุ่น", "กับอัน", "กับสอง")
-                    _pcf_was_comp = any(
-                        any(kw in m.lower() for kw in _pcf_comp_kws)
-                        for m in _pcf_recent_user
-                    )
-                    # เช็คว่า current message ไม่ใช่ new topic
-                    _pcf_msg_lower = (req.message or "").lower().strip()
-                    _pcf_new_topic = any(kw in _pcf_msg_lower for kw in
-                                         ("สวัสดี", "หวัดดี", "hi", "hello", "มีอะไร", "มีไร",
-                                          "สนใจ", "อยากได้", "หาสินค้า", "แนะนำ"))
-                    _pcf_short = len((req.message or "").split()) <= 8
-                    if _pcf_was_comp and not _pcf_new_topic and _pcf_short:
-                        _pcf_cur = _cp_pcf.get_active_product(req.conversation_id)
-                        _pcf_prev = _cp_pcf.get_previous_anchor(
-                            req.conversation_id,
-                            exclude_item_id=_pcf_cur.get("item_id") if _pcf_cur else None,
-                        )
-                        if _pcf_cur and _pcf_prev:
-                            _anchor_compare_ctx = {"current": _pcf_cur, "previous": _pcf_prev}
-                            print(f"[POST-COMP-FUP] prev was comparison → both anchors: current={_pcf_cur.get('name','')[:40]} previous={_pcf_prev.get('name','')[:40]}", file=sys.stderr)
-            except Exception as _e:
-                print(f"[POST-COMP-FUP] error: {_e}", file=sys.stderr)
-
-        # ===== Partial comparison (1 anchor + model keyword) =====
-        # กรณี: ลูกค้าส่ง item card Run แล้วถาม "ตัวนี้กับ swim ต่างกันยังไง"
-        # มี anchor แค่ 1 ตัว (Run) + model keyword "swim" ใน message
-        # → ใช้ anchor (Run) เป็น "current" + ปล่อยให้ fetch_products ค้น "swim" เป็น "other"
-        # → CONV-ACTIVE ใช้ anchor (Run) แม้ _cur_model_kw ไม่ว่าง
-        # → merge point เพิ่ม Run เข้า products + comparison note
-        if (
-            not _anchor_compare_ctx  # ยังไม่ได้ set (ไม่ซ้ำกับ block ด้านบน)
-            and any(kw in (req.message or "").lower() for kw in _COMPARISON_FOLLOWUP_KW)
-            and _current_has_model  # มี model keyword (ต่างจาก full comparison ที่ต้องไม่มี)
-            and bool(req.conversation_id)
-        ):
-            try:
-                from . import conversation_products as _cp_part
-                _part_anchors = _cp_part.get_anchor_history(req.conversation_id, limit=5)
-                if len(_part_anchors) == 1:  # มี anchor แค่ 1 ตัว (ถ้า 2+ เป็น full comparison ด้านบน)
-                    _part_cur = _cp_part.get_active_product(req.conversation_id)
-                    if _part_cur and _part_cur.get("item_id"):
-                        # guard: ถ้า model keyword ตรงกับชื่อ anchor → ไม่ใช่ comparison (ถามตัวเดิม)
-                        _part_cur_name = (_part_cur.get("name") or "").lower()
-                        _part_model_kws = knowledge_base.extract_model_keywords(req.message)
-                        _part_model_kws = [k for k in _part_model_kws if not knowledge_base.is_target_device_kw(k)]
-                        _kw_is_anchor = any(
-                            product_store._model_token_in_name(_part_cur_name, kw)
-                            for kw in _part_model_kws
-                            if re.search(r"\d", kw)  # model code pattern only
-                        )
-                        if not _kw_is_anchor:
-                            _anchor_compare_ctx = {"current": _part_cur}  # no "previous"
-                            _is_partial_comp = True
-                            print(f"[PARTIAL-COMP] current={_part_cur.get('name','')[:40]} model_kw={_part_model_kws}", file=sys.stderr)
-                        else:
-                            print(f"[PARTIAL-COMP] model kw ตรง anchor → ไม่ใช่ comparison (ถามตัวเดิม)", file=sys.stderr)
-            except Exception as _e:
-                print(f"[PARTIAL-COMP] error: {_e}", file=sys.stderr)
+                print(f"[SUBJECT-RES] materialize error: {_e}", file=sys.stderr)
+                _subject_cards = []
+            if _subject_cards:
+                _conv_active_card = _subject_cards[0]
+                _ref_regex_products = _subject_cards
+                _is_conv_active = True
+                print(f"[SUBJECT-RES] resolved {list(_subject_res.subject_set.subject_ids)} → pin {len(_subject_cards)} cards", file=sys.stderr)
+        elif anchor_card and not _hybrid_anchor_card:
+            _subject_cards = [anchor_card]
+            _conv_active_card = anchor_card
+        # compare pair ctx — plan compare need หรือ persisted relation=compare;
+        #   ต้อง subject ≥2 (set เดี่ยวไม่มีอะไรเทียบ)
+        if (not _anchor_compare_ctx and len(_subject_cards) >= 2
+                and (_compare_need
+                     or (_subject_res.subject_set
+                         and _subject_res.subject_set.relation == "compare"))):
+            _anchor_compare_ctx = {"current": _subject_cards[0],
+                                   "previous": _subject_cards[1]}
+            _subject_ev["pair_ids"] = tuple(
+                _subject_res.subject_set.subject_ids[:2])
+            _subject_ev["ops"] += ("compare",)
+            print(f"[SUBJECT-RES] compare ctx pair ← resolved set", file=sys.stderr)
+        # partial comparison — compare need + model kw ใน message + subject
+        #   เดี่ยว ("ตัวนี้กับ swim ต่างกันไหม") → pin current แล้วปล่อย fetch
+        #   หาคู่เทียบ (merge point เดิมใช้ ctx นี้)
+        if (_compare_need and not _anchor_compare_ctx
+                and _current_has_model and req.conversation_id
+                and len(_subject_cards) == 1):
+            _pname = (_subject_cards[0].get("name") or "").lower()
+            _pkw = [k for k in knowledge_base.extract_model_keywords(req.message)
+                    if not knowledge_base.is_target_device_kw(k)]
+            _kw_is_anchor = any(
+                product_store._model_token_in_name(_pname, k)
+                for k in _pkw if re.search(r"\d", k))
+            if not _kw_is_anchor:
+                _anchor_compare_ctx = {"current": _subject_cards[0]}
+                _is_partial_comp = True
+        # warranty/return-policy follow-up — resolved set supply ตัวสินค้า
+        #   → product flow (เลิก parse model จาก bot-prose + rewrite message)
+        if (_is_followup_policy and _subject_res
+                and _subject_res.outcome == "resolved"):
+            general_qtype = None
 
         # ===== Warranty claim state machine (ย้ายไป warranty_flow.handle_warranty_flow_legacy) =====
         _wfr = _warranty_flow.handle_warranty_flow_legacy(req, {
@@ -1774,7 +1622,12 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             "model_name": model_name,
         }, _qa10, db)
         if _wfr is not None:
-            return ChatResponse(**_wfr)
+            # ⚡ 2C.3 — CONTINUE_PRODUCT + productish need เท่านั้นที่ไปต่อ (ห้ามอ่าน prose)
+            if (_wfr.pop("warranty_disposition", None) is not
+                    _warranty_flow._WarrantyDisposition.CONTINUE_PRODUCT
+                    or not _productish_need):
+                return ChatResponse(**_wfr)
+            _mixed_claim_carry = _wfr.get("answer") or ""
 
         if general_qtype:
             # guard: intent อาจส่ง general_qtype ผิดบริบท (travel question → shipping,
@@ -1790,8 +1643,23 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             if general_qtype in ("warranty_policy", "return_policy") and (_current_has_model or _tagged_item_id):
                 print(f"[INTENT] warranty_policy with model/item_id → skip general, go to product flow", file=sys.stderr)
                 general_qtype = None
-            else:
-                print(f"[TIMING] General question detected: {general_qtype}  ({_time.time()-_t0:.2f}s)", file=sys.stderr)
+            elif _productish_need and (_subject_cards or _tagged_item_id or anchor_card
+                                       or _hybrid_anchor_card or _current_has_model):
+                # ⚡ Phase 2C.3 — mixed product+policy need: policy context ติดไปเป็น
+                #   extra_context ของ product answer; gate = product side มี concrete subject
+                _gen_shop_filter = req.shop if general_qtype in ("categories", "brands") else None
+                _gen_res = knowledge_base.build_general_context(
+                    general_qtype, mongo_db=db, shop_filter=_gen_shop_filter,
+                )
+                if _gen_shop_filter and not _gen_res:
+                    _gen_res = knowledge_base.build_general_context(
+                        general_qtype, mongo_db=db)
+                if _gen_res and _gen_res.get("context"):
+                    _policy_carry = _gen_res["context"]
+                print(f"[MIXED-NEED] general_qtype={general_qtype} + productish need → carry policy ctx ({len(_policy_carry)} chars) ไป product flow", file=sys.stderr)
+                general_qtype = None
+        if general_qtype:
+            print(f"[TIMING] General question detected: {general_qtype}  ({_time.time()-_t0:.2f}s)", file=sys.stderr)
             # ถ้ารู้ว่าลูกค้าทักมาจากร้านไหน (req.shop) ให้จำกัด categories/brands
             # เฉพาะร้านนั้น ไม่ปนร้านอื่นในเครือ (shops question ยังคงตอบภาพรวมทั้งเครือ)
             _gen_shop_filter = req.shop if general_qtype in ("categories", "brands") else None
@@ -1820,7 +1688,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 prompt_t = usage_info.get("prompt", 0)
                 output_t = usage_info.get("output", 0)
                 cost = llm._gemini_cost(prompt_t, output_t)
-                answer = _append_base_warranty(answer, req.message, source=f"general:{general_qtype}")
+                answer = _append_base_warranty(answer, req.message, source=f"general:{general_qtype}", claim_guidance=_mixed_claim_carry)
                 return ChatResponse(
                     answer=answer,
                     answer_segments=llm.split_segments(answer),
@@ -1865,6 +1733,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 prompt_t = usage_info.get("prompt", 0)
                 output_t = usage_info.get("output", 0)
                 cost = llm._gemini_cost(prompt_t, output_t)
+                answer = _append_base_warranty(answer, req.message, source="general:brand_info", claim_guidance=_mixed_claim_carry)
                 return ChatResponse(
                     answer=answer,
                     answer_segments=llm.split_segments(answer),
@@ -1881,33 +1750,17 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     image_desc=_image_desc_out,
                 )
 
-        # ⚡ Task 4B — resolve conversation active ครั้งเดียวก่อน KB/candidate fetch
-        #   (ผล reuse ที่ CONV-ACTIVE ด้านล่าง — resolver ถูกเรียกแค่จุดนี้จุดเดียว)
+        # ⚡ Task 4B — model keywords ครั้งเดียวก่อน KB/candidate fetch
+        #   (subject pin ย้ายขึ้นไปอยู่ใน consumption site เดียวแล้ว — 2C.3)
         _conv_model_kw: list[str] = []
-        _conv_active_card = None
         if req.conversation_id:
             try:
                 _conv_model_kw = knowledge_base.extract_model_keywords(req.message)
                 # ⚡ Phase 3 — กรอง target device ออกจาก model keywords
                 _conv_model_kw = [kw for kw in _conv_model_kw
                                   if not knowledge_base.is_target_device_kw(kw)]
-                # ⚡ Phase 2C.2 — resolved subject set = conversation-active truth
-                #   materialize card จาก item_id (timeline materialize →
-                #   catalog fetch fallback — unavailable/historical ยัง resolve ได้)
-                if (_subject_res and _subject_res.outcome == "resolved"
-                        and _subject_res.subject_set):
-                    _subj_cards = conversation_products.materialize_subject_cards(
-                        db, _subject_res.subject_set.subject_ids[:5],
-                        products=_subject_products,
-                        shop_filter=req.shop, message=req.message)
-                    if _subj_cards:
-                        _conv_active_card = _subj_cards[0]
-                        _ref_regex_products = _subj_cards
-                        _is_conv_active = True
-                        print(f"[SUBJECT-RES] resolved {list(_subject_res.subject_set.subject_ids)} → pin {len(_subj_cards)} cards", file=sys.stderr)
             except Exception as _e:
                 print(f"[PROFILE] conv-active resolve error: {_e}", file=sys.stderr)
-                _conv_active_card = None
 
         # ⚡ Task 4B — RetrievalProfile เดียวต่อ request (observe-only)
         #   รวม anchor ที่ flow เดิม resolve ไว้แล้ว: tagged item / hybrid image /
@@ -2064,13 +1917,11 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         # superlative keywords (define ก่อนใช้ใน follow-up skip logic และ fetch_limit logic)
         _msg_lower_super = (req.message or "").lower()
         _is_superlative_q = any(kw in _msg_lower_super for kw in _SUPERLATIVE_KW)
-        if _wattage_followup_skip_kb or _compat_followup_skip_kb or _ref_indicator_skip_kb:
+        if (_wattage_followup_skip_kb or _compat_followup_skip_kb
+                or _ref_indicator_skip_kb):
             kb_result = None
-            _skip_reason = (
-                "wattage" if _wattage_followup_skip_kb
-                else "compat" if _compat_followup_skip_kb
-                else "ref_indicator"
-            )
+            _skip_reason = ("wattage" if _wattage_followup_skip_kb
+                            else "compat" if _compat_followup_skip_kb else "ref_indicator")
             print(f"[TIMING] KB lookup SKIPPED ({_skip_reason} follow-up)", file=sys.stderr)
         else:
             kb_result = knowledge_base.lookup_kb(kb_query, retrieval_profile=_retrieval_profile)
@@ -2137,7 +1988,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 _t1 = _time.time()
                 # desc_message ใช้ original message (ที่มี "การรับประกัน" ฯลฯ)
                 # เพื่อให้ _clean_description กรอง section ที่เกี่ยวข้องได้ถูก
-                _desc_msg = getattr(req, "_followup_original", None) or req.message
+                _desc_msg = req.message
 
                 # ⚡ MODEL-REGEX in KB path — ถ้า message มี model keyword ชัดเจน
                 # ให้ดึงด้วย Mongo regex ก่อน vector search (แม่นยำกว่าสำหรับชื่อสินค้าเฉพาะ)
@@ -2436,7 +2287,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
 
                     try:
                         answer, usage_info = llm.answer(
-                            message=getattr(req, "_followup_original", None) or req.message,
+                            message=req.message,
                             products=merged_products,
                             shop_hint=req.shop,
                             history=_qa10,
@@ -2481,7 +2332,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         "cost_usd": cost,
                         "cost_thb": cost * 36,
                         "input": {
-                            "message": (getattr(req, "_followup_original", None) or req.message)[:200],
+                            "message": (req.message)[:200],
                             "product_count": len(merged_products),
                             "intent": _intent_result.get("intent"),
                         },
@@ -2510,7 +2361,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                             "แล้วแนะนำเฉพาะสินค้า status=NORMAL เท่านั้น"
                         )
                         _add_context_note(products, _kb_unlist_note)
-                    answer = _append_base_warranty(answer, getattr(req, "_followup_original", None) or req.message)
+                    answer = _append_base_warranty(answer, req.message, claim_guidance=_mixed_claim_carry)
                     _timing_breakdown["total"] = round(_time.time() - _total_start, 3)
 
                     # ── Web search fallback (ด่านสุดท้าย) ──
@@ -2532,7 +2383,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                                 db=db,
                                 llm_ctx_limit=_llm_ctx_limit,
                                 search_message=req.message,
-                                llm_message=getattr(req, "_followup_original", None) or req.message,
+                                llm_message=req.message,
                                 products_in=products,
                                 reason=_kb_search_reason,
                                 shop=req.shop,
@@ -2607,8 +2458,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         # สินค้าเดิมทุกรอบ แต่ description เปลี่ยนตามคำถาม
         # ถ้าเป็น followup policy (warranty/return/shipping) ที่เรา override message
         # ให้ desc_message เป็น original message (ที่มี "การรับประกัน" ฯลฯ)
-        _followup_orig = getattr(req, "_followup_original", None)
-        desc_message = _followup_orig or req.message
+        desc_message = req.message
         retrieval_message = req.message
         # ⚡ Phase 1F — ถ้า message เป็น placeholder รูป/วิดีโอทั้งหมด + มี vision context
         #    ให้ใช้ vision description แทนใน retrieval (กัน "[รูปภาพ]" ดึงสินค้าไม่ได้)
@@ -2779,36 +2629,20 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         #   แก้: ถ้าลูกค้าขอลิงค์/ช่องทางซื้อ และมีสินค้าก่อนหน้าใน timeline → ใช้สินค้านั้น
         #   ⚡ ต้องทำก่อน CONV-ACTIVE เพราะ CONV-ACTIVE ดึง active product แค่ 1 ตัว
         #      และตั้ง _is_conv_active=True → LINK-FOLLOWUP จะไม่ทำงาน
-        _is_link_followup = False
-        _link_followup_kws = conversation_products._SUBJECT_LINK_KWS
-        _is_link_followup = (
-            req.conversation_id
-            and any(kw in (req.message or "").lower() for kw in _link_followup_kws)
-            and not any(kw in (req.message or "").lower() for kw in (
-                # ห้าม trigger ในเคส warranty/refund/cancel
-                "เคลม", "รับประกัน", "ประกัน", "คืนเงิน", "ขอเงินคืน",
-                "ยกเลิก", "ส่งคืน", "ไม่รับ", "ใบกำกับ", "ใบเสร็จ",
-            ))
-        )
+        # ⚡ Phase 2C.3 — LINK-FOLLOWUP gate ย้ายไป TurnPlan: product:link need
+        #   = "ลูกค้าขอลิงค์สินค้าใน subject set" → serve subject cards เดียวกัน
+        #   (เลิก kw gate + anchor-ladder fallback — explicit-model link ask
+        #   ไม่มี product:link need → fall through ไป retrieval ตามปกติ)
+        _is_link_followup = bool(req.conversation_id and _link_need)
         if _is_link_followup:
             try:
-                from . import conversation_products as _cp_link
-                _subject_driven = bool(_is_conv_active and _ref_regex_products)
-                if _subject_driven:
-                    # ⚡ resolved subject set = subject truth — link ต้อง serve
-                    #   set เดียวกัน (ยังผ่าน availability note/link-cut)
-                    _link_products = list(_ref_regex_products)
-                else:
-                    _link_products = _cp_link.get_anchor_and_suggestions(req.conversation_id, limit=5)
+                _link_products = list(_ref_regex_products or _subject_cards)
                 if _link_products:
                     # ⚡ Task 5C-D — availability-aware: UNLIST ตัดลิงค์, ของหมด
                     #   note สถานะ — resolved subject → ไม่ fetch ทดแทน
                     #   (subject_kept_link_may_be_cut: ห้าม silent swap)
                     _link_products = _prepare_link_followup(
-                        _link_products,
-                        alt_fetcher=None if _subject_driven else (
-                            lambda q: product_store.fetch_products(
-                                db, q, shop_filter=req.shop, limit=6)))
+                        _link_products, alt_fetcher=None)
                     # กรองเฉพาะที่มีประโยชน์ให้ LLM — รวม note-only card ของ
                     #   unavailable anchor (ห้ามทิ้ง → LLM ต้องเห็นรุ่นที่ถาม)
                     _link_products = [
@@ -3796,12 +3630,12 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         if _is_superlative_q and len(products) == 0 and not _super_has_charge:
             print(f"[SUPERLATIVE-NO-MATCH] ไม่เจอสินค้า ถามกลับแทน web search", file=sys.stderr)
             return ChatResponse(
-                answer=(
+                answer=_append_base_warranty(
                     "รบกวนช่วยระบุประเภทสินค้าที่สนใจหน่อยค่ะ "
                     "เช่น หัวชาร์จ สายชาร์จ พาวเวอร์แบงค์ เครื่องฟอกอากาศ "
                     "หรือสินค้าประเภทใดที่ต้องการแบบไวสุด/แรงสุดคะ "
-                    "เพื่อให้เราแนะนำรุ่นที่ตรงกับความต้องการได้แม่นยำขึ้น"
-                ),
+                    "เพื่อให้เราแนะนำรุ่นที่ตรงกับความต้องการได้แม่นยำขึ้น",
+                    req.message, claim_guidance=_mixed_claim_carry),
                 products=[],
                 source="superlative_no_match_clarify",
                 shop=req.shop,
@@ -4158,15 +3992,14 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     claim={"topic": "ค้นสินค้าไม่พบ/ผลค้นไม่น่าเชื่อ"},
                     simulate=True, log_tag="NO-PRODUCT-GUARD",
                 )) if req.conversation_id else False
+                _npf_text = (
+                    "ขออภัยค่ะ ตอนนี้ระบบไม่พบข้อมูลสินค้าตามที่สอบถามไว้ "
+                    "เดี๋ยวขอส่งเรื่องให้แอดมินช่วยตรวจสอบและตอบกลับให้ไวที่สุดนะคะ "
+                    "ระหว่างนี้หากสนใจสินค้าอื่นสอบถามได้เลยค่ะ" if _npf_ok else
+                    "ขออภัยค่ะ ตอนนี้ระบบไม่พบข้อมูลสินค้าตามที่สอบถามไว้ "
+                    "ระหว่างนี้หากสนใจสินค้าอื่นสอบถามได้เลยค่ะ")
                 return ChatResponse(
-                    answer=(
-                        "ขออภัยค่ะ ตอนนี้ระบบไม่พบข้อมูลสินค้าตามที่สอบถามไว้ "
-                        "เดี๋ยวขอส่งเรื่องให้แอดมินช่วยตรวจสอบและตอบกลับให้ไวที่สุดนะคะ "
-                        "ระหว่างนี้หากสนใจสินค้าอื่นสอบถามได้เลยค่ะ"
-                        if _npf_ok else
-                        "ขออภัยค่ะ ตอนนี้ระบบไม่พบข้อมูลสินค้าตามที่สอบถามไว้ "
-                        "ระหว่างนี้หากสนใจสินค้าอื่นสอบถามได้เลยค่ะ"
-                    ),
+                    answer=_append_base_warranty(_npf_text, req.message, claim_guidance=_mixed_claim_carry),
                     products=[],
                     source="no_product_found_handoff",
                     shop=req.shop,
@@ -4471,7 +4304,9 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 "ลูกค้าสนใจประเภทใดโดยเฉพาะ อย่าคิดแทนลูกค้า\n"
             )
         # รวม extra_context: rejection memory + superlative clarification + vision description
-        _combined_extra = (_vision_context + _rejection_extra + _superlative_clarify_extra).strip()
+        #   + policy carry (mixed product+policy need — 2C.3)
+        _combined_extra = (_vision_context + _rejection_extra
+                           + _superlative_clarify_extra + _policy_carry).strip()
         # ⚡ 2026-09-12 — hybrid anchor+fetch: merge anchor กับ products ที่ fetch มา
         #   กรณี "อยากได้ของที่ใช้กับ xiaomi 17 ultra" หลังแชร์การ์ด CTL301 (cable Lightning)
         #   → products = สินค้าที่ใช้กับ Mi 17 Ultra (USB-C) + anchor (CTL301)
@@ -4691,7 +4526,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 "answer_full_length": len(answer),
             },
         })
-        answer = _append_base_warranty(answer, desc_message)
+        answer = _append_base_warranty(answer, desc_message, claim_guidance=_mixed_claim_carry)
         # ส่ง product cards ทั้งหมดที่เป็น context ให้ frontend (เหมือนเดิม)
         # frontend จะโชว์ว่าคำตอบนี้ใช้สินค้าอะไรตัดสินใจบ้าง
         # LLM จะเลือกแนะนำไม่เกิน 3 รายการจาก context เอง (ตาม prompt)
@@ -4765,7 +4600,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     _ws_cost = _ws_r["cost_usd"]
                     _ws_elapsed = _ws_r["search_elapsed"]
                     _ws_usage = {"prompt": 0, "output": 0, "total": 0}  # search usage อยู่ใน steps แล้ว
-                    _ws_answer = _append_base_warranty(_ws_answer, desc_message)
+                    _ws_answer = _append_base_warranty(_ws_answer, desc_message, claim_guidance=_mixed_claim_carry)
                     _total_ws = round(_time.time() - _total_start, 2)
                     _timing_breakdown["web_search"] = _ws_elapsed
                     _timing_breakdown["total"] = _total_ws
@@ -4923,16 +4758,18 @@ def _record_suggestion_products(req, products: list[dict],
         print(f"[CONV-PRODUCTS] error recording suggestions: {_e}", file=sys.stderr)
 
 
-def _append_base_warranty(answer: str, message: str, source: str = "") -> str:
-    """ถ้าคำถามเกี่ยวกับประกัน/เคลม → แนบเงื่อนไขการรับประกันสินค้าเบื้องต้นท้ายคำตอบ.
-
-    แนบเฉพาะถ้า:
-    - คำถามเกี่ยวประกัน/เคลม
-    - คำตอบยังไม่มีเงื่อนไขเบื้องต้นอยู่แล้ว (กันซ้ำ)
-    - ไม่ใช่ general:warranty_policy (เพราะ context มี general_faq อยู่แล้ว)
+def _append_base_warranty(answer: str, message: str, source: str = "",
+                          *, claim_guidance: str = "") -> str:
+    """finalizer เดียวของ bot answer: compose claim_guidance หนึ่งครั้ง
+    (presentation data — ไม่ใช่ routing signal; ว่าง → no-op) แล้วแนบ
+    เงื่อนไขการรับประกันเบื้องต้นท้ายคำตอบถ้าคำถามเกี่ยวประกัน/เคลม —
+    เว้นเมื่อมีอยู่แล้ว หรือ source=general:warranty_policy (context มี
+    general_faq อยู่แล้ว).
     """
     if not answer:
         return answer
+    if claim_guidance:
+        answer = (claim_guidance.rstrip() + "\n\n" + answer).strip()
     # ⚡ BUG-2 fix — strip KB markup `[[ ]]`, `---`, `หมายเหตุ:` ที่หลุดจาก LLM ก่อนแนบ warranty
     answer = llm._strip_kb_markup(answer)
     if not knowledge_base.is_warranty_question(message):

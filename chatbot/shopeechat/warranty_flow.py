@@ -23,6 +23,7 @@ States ที่จัดการ:
 """
 from __future__ import annotations
 
+import enum as _enum
 import json
 import os
 import re
@@ -31,6 +32,14 @@ import time as _time
 import uuid as _uuid
 from dataclasses import dataclass
 from typing import Any
+
+
+class _WarrantyDisposition(_enum.StrEnum):
+    """Warranty-owner lifecycle contract: TERMINAL → return now;
+    CONTINUE_PRODUCT → bot-owned, product need may continue.
+    Internal only — popped before ChatResponse."""
+    TERMINAL = "terminal"
+    CONTINUE_PRODUCT = "continue_product"
 
 
 # ─── Claim-slot helpers (fill-once) ─────────────────────────────────────────
@@ -719,6 +728,7 @@ def _handle_review_request(req, ctx, history, _warranty_mod, llm, _app_module) -
             "customer_phone": _hist_phone,
             "customer_order_id": _hist_order,
         },
+        "warranty_disposition": _WarrantyDisposition.CONTINUE_PRODUCT,
         "steps": ctx.get("steps", []) + [{"name": "warranty_review", "model": _model_name, "detail": "ทวนข้อมูลจาก history"}],
         "routing_decision": _app_module._routing(
             "bot_reply", "warranty_review: ทวนข้อมูลจาก history",
@@ -753,6 +763,7 @@ def _build_post_handoff_response(req, ctx, _app_module, llm) -> dict:
         "handoff_to_admin": False,
         "handoff_reason": None,
         "handoff_claim": {},
+        "warranty_disposition": _WarrantyDisposition.TERMINAL,
         "steps": ctx.get("steps", []) + [{"name": "post_handoff", "model": _model_name, "detail": "post_handoff_waiting: รอแอดมิน → ลูกค้าทักใหม่"}],
         "routing_decision": _app_module._routing(
             "human_wait", "post_handoff_waiting: รอแอดมิน → บอทหยุดตอบ",
@@ -838,6 +849,7 @@ def _build_warranty_claim_response(req, ctx, answer, handoff, claim_ctx,
         "timing": ctx.get("timing_breakdown") or {},
         # flag = authoritative outcome เท่านั้น (request handoff แต่ transport fail → False)
         "handoff_to_admin": bool(handoff and _handoff_result),
+        "warranty_disposition": _WarrantyDisposition.TERMINAL if handoff else _WarrantyDisposition.CONTINUE_PRODUCT,
         "handoff_reason": claim_ctx.get("handoff_reason") if handoff and _handoff_result else None,
         "handoff_claim": claim_ctx,
         "steps": ctx.get("steps", []),
@@ -948,6 +960,7 @@ def _handle_warranty_date_followup(req, ctx, history, purchase_date, db,
         "usage": {},
         "elapsed": _total,
         "cost": 0.0,
+        "warranty_disposition": _WarrantyDisposition.CONTINUE_PRODUCT,
         "steps": ctx.get("steps", []),
         "routing_decision": _app_module._routing("bot_reply", "warranty_date_followup: คำนวณวันหมดประกัน"),
         "image_desc": ctx.get("image_desc_out", ""),
@@ -998,6 +1011,7 @@ def _handle_tax_invoice_followup(req, ctx, history, _warranty_mod, _app_module, 
         "usage": {},
         "elapsed": _total,
         "cost": 0.0,
+        "warranty_disposition": _WarrantyDisposition.TERMINAL,
         "handoff_to_admin": _handoff_ok,
         "handoff_reason": "tax_invoice_request" if _handoff_ok else None,
         "intent": ctx.get("intent_result") or {},
@@ -1683,6 +1697,7 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             usage={},
             elapsed=round(_total_elapsed, 2),
             cost=0.0,
+            warranty_disposition=_WarrantyDisposition.CONTINUE_PRODUCT,
             steps=_steps,
             routing_decision=_app_module._routing("bot_reply", "warranty_date_followup: คำนวณวันหมดประกัน"),
             image_desc=_image_desc_out,
@@ -1707,6 +1722,7 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             usage={},
             elapsed=round(_total_elapsed, 2),
             cost=0.0,
+            warranty_disposition=_WarrantyDisposition.CONTINUE_PRODUCT,
             timing=_timing_breakdown,
             steps=_steps,
             routing_decision=_app_module._routing(
@@ -1764,6 +1780,7 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                     usage={},
                     elapsed=round(_total_elapsed, 2),
                     cost=0.0,
+                    warranty_disposition=_WarrantyDisposition.CONTINUE_PRODUCT,
                     timing=_timing_breakdown,
                     steps=_steps,
                     routing_decision=_app_module._routing(

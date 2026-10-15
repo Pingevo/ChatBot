@@ -619,7 +619,10 @@ def _check_warranty_state_machine(req, ctx, history, db) -> dict | None:
     คืน singleton cached client ถ้า close แล้วจะกระทบ context หลัก
     """
     from . import warranty_flow as _wf
-    return _wf.handle_warranty_flow(req, ctx, history, db)
+    _resp = _wf.handle_warranty_flow(req, ctx, history, db)
+    if _resp is not None:  # 2C.3 — pop internal disposition signal ก่อน payload
+        _resp.pop("warranty_disposition", None)
+    return _resp
 
 
 def _check_general_question(req, ctx, history, db) -> dict | None:

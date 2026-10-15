@@ -347,10 +347,13 @@ def test_general_question_keyword():
 
 
 def test_unknown_fallback():
+    # 2C.3 — no-signal text has no needs but is still an executable turn:
+    # execute_needs(()) = normal pipeline path (clarify คือ subject-demanding
+    # follow-up ที่ไม่มี context เท่านั้น)
     p = _decide("x")
-    assert p.primary_action == "clarify"
+    assert p.primary_action == "execute_needs"
     assert p.needs == ()
-    assert p.requires_clarification is True
+    assert p.requires_clarification is False
 
 
 # ── Phase 1C: price/link follow-up needs context ────────────────────────────
@@ -442,20 +445,20 @@ def test_phone_only_with_claim_state_collects():
 def test_phone_only_with_slot_only_state_not_collect():
     p = _decide("0812345678", claim_state={"customer_name": "สมชาย"})
     assert ("claim", "collect") not in _pairs(p), p
-    assert p.primary_action == "clarify"
+    assert p.primary_action == "execute_needs"
 
 
 def test_phone_only_without_claim_state_not_product():
     p = _decide("0812345678")
     assert not any(n.kind == "product" for n in p.needs), p
     assert "contact_info" in p.flags
-    assert p.primary_action == "clarify"
+    assert p.primary_action == "execute_needs"
 
 
 def test_order_id_only_without_claim_state_not_product():
     p = _decide("2508088B5T4W1D")
     assert not any(n.kind == "product" for n in p.needs), p
-    assert p.primary_action == "clarify"
+    assert p.primary_action == "execute_needs"
 
 
 def test_explicit_order_lookup_produces_order_need():
@@ -506,17 +509,22 @@ def test_stock_ask_without_history_not_followup():
 
 
 def test_select_ask_after_greeting_history_not_followup():
+    # 2C.3 — select ask เป็น self-anchoring browse ("มีตัวไหนบ้าง" = ขอดู
+    #   catalog) ไม่ใช่ subject-demanding follow-up → execute_needs เสมอ
+    #   (pin: sel-all-dead-evidence — LLM ต้องเห็น catalog evidence)
     p = _decide("มีตัวไหนบ้าง",
                 history=[{"role": "user", "text": "สวัสดีครับ"}])
-    assert p.primary_action == "clarify", p
-    assert p.needs == ()
+    assert p.primary_action == "execute_needs", p
+    assert ("product", "recommend") in _pairs(p)
+    assert "select_followup" not in p.flags  # ไม่มี product ctx → ไม่ใช่ follow-up
 
 
 def test_select_ask_after_claim_history_not_followup():
     p = _decide("มีตัวไหนบ้าง",
                 history=[{"role": "user", "text": "สินค้าเสียขอเคลม"}])
-    assert p.primary_action == "clarify", p
-    assert p.needs == ()
+    assert p.primary_action == "execute_needs", p
+    assert ("product", "recommend") in _pairs(p)
+    assert "select_followup" not in p.flags
 
 
 # ── Phase 1D: name-only claim fill ───────────────────────────────────────────
@@ -527,11 +535,13 @@ def test_name_only_with_claim_state_collects():
     assert _pairs(p) == {("claim", "collect")}
 
 
-def test_name_only_without_claim_state_clarify():
+def test_name_only_without_claim_state_executes():
+    # 2C.3 — name-only text = no needs → execute_needs (normal pipeline ตอบ),
+    # ไม่ใช่ clarify (clarify = subject-demanding follow-up เท่านั้น)
     p = _decide("ชื่อ สมชาย ใจดี")
-    assert p.primary_action == "clarify", p
+    assert p.primary_action == "execute_needs", p
     assert p.needs == ()
-    assert p.requires_clarification is True
+    assert p.requires_clarification is False
     assert "contact_info" in p.flags
 
 
@@ -687,6 +697,7 @@ _ACTION_FAMILY = {
     "answer": {"execute_needs", "clarify"},
     "claim_collect": {"execute_needs"},
     "order_info": {"execute_needs"},
+    "no_reply": {"no_reply"},
 }
 _KNOWN_INCIDENT_IDS: set[str] = set()
 
