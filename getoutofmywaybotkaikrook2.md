@@ -20,6 +20,80 @@
 
 ## กำลังทำ (active)
 
+### 🔧 Phase 2C.1 — Evolve TurnDecision In Place เป็น Multi-Need TurnPlan (2026-10-15) · RED→GREEN→verify เสร็จ · รอ independent review · ยังไม่ commit
+
+- **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `4edd273` · working tree & staging clean · Phase 2B ปิดและ commit แล้ว
+- **baseline counts (fresh)**:
+  - `docs/test/test_turn_decision.py`: **86 passed** (1.04s)
+  - `docs/test/test_turn_decision_shadow.py`: **17 passed** (0.93s) — shadow sweep `turns=85 missing=0`
+  - `docs/test/test_phase2_claim_state_contract.py`: **52 passed, 1 skipped** (0.07s)
+  - canonical Phase 2B batch: **313 passed, 19 skipped, 8 xfailed** (3.05s)
+  - `docs/test/validate_legacy_turn_fixtures.py`: **69 rows, all rows pass**
+- **scope**: ทำเฉพาะ Phase 2C.1 — evolve `turn_decision.py` in place จาก one-action `TurnDecision` เป็น multi-need `TurnPlan` (`TurnNeed` + `TurnPlan`) และอัปเดต shadow/validator/fixture/test consumers โดยลบ one-action contract/assertions ที่หมดหน้าที่ในรอบเดียวกัน · ห้ามเริ่ม 2C.2/2C.3/2D · ห้ามเพิ่ม keyword table / module คู่ขนาน / LLM call / retrieval call
+
+#### Root cause → Fix → Impact (waythrough format)
+- **error**: one-action `TurnDecision` บังคับ early-return action เดียวต่อ turn ทำให้ข้อความที่มีหลายความต้องการ (เช่น เคลม+ถามสินค้า `iss30-multi-intent-claim-plus-product`, สินค้า+ประกัน, เทียบ+compat, ขอแอดมิน+ถามสินค้า, ส่งรูป/วิดีโอ+ข้อความ) ข้อมูลหาย
+- **cause**: `decide_turn()` ใน `turn_decision.py` คืน `TurnDecision(action=...)` 1 ค่า และหยุดทันทีที่ตรงเงื่อนไขแรก
+- **fix**:
+  1. ลบ `TurnDecision` และแทนที่ in-place ด้วย `TurnNeed(kind, operation, subject_refs, confidence, provenance)` + `TurnPlan(primary_action, needs, ownership, claim, requires_clarification, normalized_message, flags)`
+  2. H1/H2 boundary: ใช้เฉพาะ canonical producers เดิม (`handoffs`, `warranty_flow._claim_lifecycle`, `warranty`, `order_store.extract_order_sn`, `message_detectors`, `route_context.resolve_route`) — **0 semantic keyword tables ใหม่**, **0 calls ไปยัง `build_retrieval_profile`/`build_retrieval_slots`/`build_retrieval_relations`/`device_compat`**
+  3. M2 boundary: เมื่อ `ownership == "human"` (`ticket_state` ∈ `{handoff,open,pending}`) คืน `primary_action="human_wait", needs=()` ทันทีก่อนประเมิน needs (zero need-extraction side effects); เมื่อ `ownership != "human"` และลูกค้าขอแอดมินพร้อมถามสินค้า เก็บทั้ง `human:handoff` และ `product` need
+  4. M1 honesty: อัปเดต `_turn_decision_shadow`, `validate_legacy_turn_fixtures.py`, `legacy_turn_incidents.jsonl` (29 rows เดิม + เพิ่ม `turn_decision_expect` บน `iss30-multi-intent-claim-plus-product` ให้ตรวจทั้ง `claim:collect`, `troubleshoot:describe`, `product:describe` และลบออกจาก `_KNOWN_INCIDENT_IDS`)
+- **impact ต่อเคสอื่น**: production `app.chat` answer path ยังไม่เปลี่ยนใน 2C.1 (contract + shadow step เท่านั้น); canonical batch 331 passed / 19 skipped / 8 xfailed (เพิ่มขึ้น +18 tests จาก 313 เดิม, 0 regressions)
+
+#### RED → GREEN Evidence & Verification (fresh)
+- **RED**:
+  - `test_turn_decision.py`: `ImportError: cannot import name 'TurnNeed' from 'shopeechat.turn_decision'`
+  - `test_turn_decision_shadow.py`: **9 failed, 8 passed** (`KeyError: 'primary_action'`, `TurnDecisionShadow` step ยังเป็น `action`/`reason` แบบเก่า)
+- **GREEN**:
+  - `docs/test/test_turn_decision.py`: **104 passed** (เพิ่ม 18 multi-need/H1/M2/media/order tests)
+  - `docs/test/test_turn_decision_shadow.py`: **17 passed** (`turns=85 missing=0`, 0 mismatches)
+  - `docs/test/test_phase2_claim_state_contract.py`: **52 passed, 1 skipped**
+  - Canonical Phase 2B+2C.1 batch: **331 passed, 19 skipped, 8 xfailed**
+  - `docs/test/validate_legacy_turn_fixtures.py`: **69 rows, all rows pass**
+  - `py_compile` (`turn_decision.py`, `app.py`, tests) + `git diff --check`: **clean**
+- **verdict**: `PHASE_2C1_MULTI_NEED_TURNPLAN_GREEN_READY_FOR_INDEPENDENT_REVIEW` — หยุดก่อน stage/commit
+
+#### 2C.1 Narrow Review-Fix (2026-10-15 — correction เสร็จ · verified · รอ final independent review · ยังไม่ commit)
+- **Findings จาก independent review (1 High + 2 Medium + 1 Low)**:
+  1. **Finding A (High) — `subject_refs` ปน heuristic `extract_model_keywords()`**: `decide_turn("มีสายชาร์จ type c ไหม")` เดิมได้ `subject_refs=("type",)` เพราะนำ `_model_kws` ไปรวมใน `_explicit_codes` → **RED**: `test_generic_model_keyword_is_signal_not_subject_identity` FAIL (`AssertionError: assert 'type' not in ('type',)`) → **Fix**: `_explicit_codes` ใช้เฉพาะ `_route.model_codes` (ทำให้ `_subject_refs` มีเฉพาะ `item_ids` จาก `_ITEM_TAG_RE` + `_route.model_codes` และ `order_sn` เฉพาะ order need; `_model_kws` ใช้เป็น signal ใน `_has_explicit_product` เท่านั้น) → **GREEN**: `"type"` ไม่อยู่ใน `subject_refs`, pins สำหรับ `[สินค้า: 123456]`→`("123456",)`, `AC65B`→`("AC65B",)`, order lookup→`("2508088B5T4W1D",)`, target device `iphone 15`→`()` ผ่านครบ
+  2. **Finding B (Medium) — inline compat tuple ซ้ำ + provenance สมมติ**: เดิม `turn_decision.py` มี `("ใช้กับ", "รองรับ", "เชื่อมต่อ", "เข้ากัน")` และ provenance `"route_context.compat_signal"` → **RED**: `test_compat_behavior_pins_and_provenance` FAIL (`AssertionError: assert 'route_context._REL_CONN_RE' in ('route_context.compat_signal',)`) → **Fix**: ลบ inline tuple ซ้ำ เปลี่ยนไปใช้ `route_context._REL_CONN_RE.search(low)` (canonical pure regex owner) และตั้ง provenance เป็น `"route_context._REL_CONN_RE"` (หรือ `"intent=compatibility_check"` เมื่อมาจาก intent) → **GREEN**
+  3. **Finding C (Medium) — honest multi-need mutation evidence**: RED รอบแรกเป็น type-availability RED (`ImportError: TurnNeed`) ไม่ใช่ behavioral RED ของ multi-need → ทำ controlled mutation บน `turn_decision.py` (SHA-256 ก่อนแก้ `f8f69614c30083efcf43d35fbb1944d297f40103b89f8c4e26b09c5c9f5eb0ad`, backup ไว้ `/tmp`) ให้ `_add_need` เก็บแค่ need แรก (`if needs: return`) → รัน mixed-need subset ได้ **9 failed**: `test_product_issue_not_anger_handoff`, `test_multi_need_claim_plus_product`, `test_multi_need_product_plus_warranty_policy`, `test_multi_need_model_warranty_duration_keeps_product_and_policy`, `test_multi_need_compare_plus_compat`, `test_multi_need_human_request_plus_product_info`, `test_multi_need_media_placeholder_plus_text`, `test_multi_need_video_placeholder_plus_claim_text`, `test_shadow_fixture_actions_contract` (จับ `iss30-multi-intent-claim-plus-product` และ `p2a-claim-resolved-new-request` ที่ secondary needs หาย) → restore จาก backup + ลบ `/tmp` backup + ยืนยัน SHA-256 กลับเป็น `f8f69614c30083efcf43d35fbb1944d297f40103b89f8c4e26b09c5c9f5eb0ad` เป๊ะ
+  4. **Finding D (Low) — dead `_ticket_active` + complexity honesty**: ลบ `_ticket_active` ออกจาก `turn_decision.py` (`rg` ยืนยัน 0 references ในโค้ด); รายงาน complexity ตามจริง: `_resolve_ownership` แทนที่ `_ticket_active` (module-level helper net **0**), เพิ่ม local nested aggregator `_add_need` **+1** (รวม helper/aggregator delta = **+1 nested aggregator, 0 module-level helpers**)
+- **Verification (fresh, post-correction)**:
+  - `test_turn_decision.py`: **107 passed** (เดิม 104 + 3 tests ใหม่สำหรับ Finding A/B)
+  - `test_turn_decision_shadow.py`: **17 passed** (`turns=85 missing=0`)
+  - `test_phase2_claim_state_contract.py`: **52 passed, 1 skipped**
+  - Canonical batch: **334 passed, 19 skipped, 8 xfailed**
+  - `validate_legacy_turn_fixtures.py`: **69 rows, all rows pass**
+  - `py_compile` 6 files OK · `git diff --check` clean · `rg` forbidden symbols = 0
+- **verdict**: `PHASE_2C1_REVIEW_FIXED_READY_FOR_FINAL_INDEPENDENT_REVIEW` — หยุดก่อน stage/commit
+
+#### 2C.1 Independent-Review Low Cleanup (2026-10-15 — correction เสร็จ · verified · รอ final review · ยังไม่ commit)
+
+- **ขอบเขต**: แก้ Low findings 4 จุดจาก independent review — pure deletion + docs correction เท่านั้น · ห้ามเพิ่ม helper/guard/abstraction/keyword/module · ห้ามเปลี่ยน decision behavior/subject_refs contract/public API · ห้าม RED test ปลอมสำหรับ dead code/docs
+- **Findings re-proven จาก source ปัจจุบัน**:
+  1. **L1 unreachable `elif` (`turn_decision.py:515-520`)**: `if` = `_has_explicit_product ∧ ¬(product|compare need)`; `elif` = `compat need ∧ ¬(product|compare need) ∧ (product_types ∨ charger_subtype ∨ _explicit_codes ∨ has_item_tag)` — disjunct ทุกตัวของเงื่อนไขสุดท้ายเป็น subset ของ `_has_explicit_product` ดังนั้นถ้าเงื่อนไขนั้นจริง `if` จะจับไปก่อนเสมอ → unreachable จริง, ไม่มี side effect นอก `_add_need` → ลบ block, behavior delta = 0
+  2. **L2 stale module docstring**: docstring เขียน compat owner เป็น `route_context._FOLLOWUP_KW` แต่ runtime ใช้ `route_context._REL_CONN_RE` → แก้ docstring ให้ตรง code เท่านั้น
+  3. **L3 stale shadow-test docstring**: `test_turn_decision_shadow.py` docstring อธิบาย trace แบบเก่า (`action/reason/confidence/flags/message_len`) ทั้งที่ trace จริงคือ `ok/primary_action/needs[{kind,operation,confidence,provenance}]/ownership/claim_stage/requires_clarification/flags/message_len` (+`error` เมื่อ ok=False) — test เอง assert `action`/`reason` ต้องไม่อยู่ → แก้ docstring ให้ตรง schema ที่ test อ่าน
+  4. **L4 SRS §6.35 Calls ไม่ครบ**: `decide_turn` อ่าน `order_store._ORDER_TAG_RE`/`_ORDER_SN_RE` เพื่อตรวจ order tag/SN signal จริงแต่ Calls cell ขาดสองรายการนี้ → เพิ่มพร้อมเหตุผลสั้น
+- **Exact edits**: ลบ unreachable `elif` 6 บรรทัด (turn_decision.py, behavior delta=0 เพราะเข้าไม่ถึง) · docstring compat owner `_FOLLOWUP_KW`→`_REL_CONN_RE` · shadow-test docstring → TurnPlan trace schema จริง · SRS §6.35 Calls เพิ่ม `_ORDER_TAG_RE`/`_ORDER_SN_RE` (ตรวจ order tag/SN signal)
+- **Verification (fresh, post-cleanup)**: `test_turn_decision.py` **107 passed** · `test_turn_decision_shadow.py` **17 passed** (`turns=85 missing=0`) · `test_phase2_claim_state_contract.py` **52 passed, 1 skipped** · canonical batch **334 passed, 19 skipped, 8 xfailed** · fixtures **69 rows pass** · `py_compile` + `git diff --check` clean · forbidden patterns (`_ticket_active`, inline compat tuple, retrieval/device calls) = **0** · direct `subject_refs` evidence เดิมครบ (`"type"`→`()`, item/model/order SN pinned, `iphone 15` ไม่เป็น subject ref, compat prov=`_REL_CONN_RE`)
+- **Deletion/complexity**: dead runtime −6 LOC (runtime LOC delta รวมตอนนี้ **+238 net**: turn_decision.py +381/−154, app.py +20/−9) · docs-only corrections 3 จุด · helper/guard/module/dependency/config/env/index/collection เพิ่ม = **0**
+- **verdict**: `PHASE_2C1_LOW_CLEANUP_COMPLETE_READY_FOR_PRECOMMIT` — หยุดก่อน stage/commit
+
+#### Phase 2C.1 Commit Closeout (committed — 2026-10-15)
+
+- **Commit 1**: `837d39f` `refactor: introduce multi-need turn planning` — 9 files, +1137/−532 (active log ถูก unstage ออกก่อน — commit นี้ไม่มี `getoutofmywaybotkaikrook2.md`)
+- **9-file manifest**: `chatbot/shopeechat/turn_decision.py` · `chatbot/shopeechat/app.py` · `docs/SRS_SSD.md` · roadmap rebaseline plan · `docs/test/fixtures/legacy_turn_incidents.jsonl` · `docs/test/test_legacy_turn_incident_replay.py` · `docs/test/test_turn_decision.py` · `docs/test/test_turn_decision_shadow.py` · `docs/test/validate_legacy_turn_fixtures.py`
+- **TurnPlan contract (frozen)**: `decide_turn` คืน multi-need `TurnPlan` (`primary_action` + independent `needs[]` + `ownership` + `claim` lifecycle view + `requires_clarification`) — `ownership=="human"` → `human_wait`,`needs=()` หยุดก่อน need extraction (zero side effects) · `subject_refs` = stable explicit identities เท่านั้น (item tag IDs + `route.model_codes` + `order_sn` บน order need; heuristic `extract_model_keywords` เป็น signal ไม่ใช่ subject) · compat owner = `route_context._REL_CONN_RE` · shadow `TurnDecisionShadow` ยัง observe-only trace-only (flag `USE_TURN_DECISION_SHADOW`, ไม่มี raw message/history/subject_refs)
+- **Low cleanup ที่รวมใน commit**: unreachable `elif` ถูกลบ (behavior delta=0) · docstrings + SRS §6.35 ตรง code (compat `_REL_CONN_RE`, Calls ครบ `_ORDER_TAG_RE`/`_ORDER_SN_RE`)
+- **Frozen verification (pre-commit)**: `test_turn_decision.py` 107 passed · `test_turn_decision_shadow.py` 17 passed (`turns=85 missing=0`) · `test_phase2_claim_state_contract.py` 52 passed + 1 skipped · canonical batch 334 passed / 19 skipped / 8 xfailed · fixture validator 69/69 · `py_compile` + `git diff --check` clean
+- **Complexity**: runtime net **+238 LOC** (turn_decision.py +381/−154, app.py +20/−9) · dead runtime removed **−6 LOC** (unreachable elif) · helpers/guards/modules/dependencies/config/env/indexes/collections added = **0 runtime** (module-level helper net 0: `_resolve_ownership` แทน `_ticket_active`; +1 local nested aggregator `_add_need`)
+- **Residual (ยังไม่ทำ — ห้าม claim เสร็จ)**: Phase 2C.2 `ConversationSubjectSet` (contextual/deictic turns ยัง `subject_refs=()`) · Phase 2C.3 production `chat()` consumption ของ TurnPlan/clarification
+- **safety**: worker/provider/LLM/real Mongo/`.env`/port 8010/push/PR/deploy = **0** · Commit 2 = active log only
+- **verdict**: `PHASE_2C1_COMMITTED_READY_FOR_PHASE_2C2`
+
 ### 🔧 Phase 2B.7 — Residual Deletion + Complexity Gate (2026-10-14) · audit+delete เสร็จ · verified · ยังไม่ commit (รอ independent review)
 
 - **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `ad00048` (docs botworker drain atop `76a8064`) · tree clean · 2B.1–2B.6 committed
