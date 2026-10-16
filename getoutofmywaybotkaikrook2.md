@@ -4365,3 +4365,57 @@ config-failclosed 4/4 · boundary 20/20 · recovery-freshness 60/60 · error-pol
 **LOC (แยกประเภท)**: runtime/UI +1289/−553 (net +736 — ใหม่คือ scope machinery; service สุทธิ −120) · tests +2900/−1372 (scope-gate ใหม่ 1831 + mocks/hooks 283; recovery-freshness rewrite −1207) · docs +59/−26 · log entry นี้แยก Commit 2
 
 **ค้าง/ไม่ได้ทำ (สำคัญ)**: UI visual gate `/shops` = **login-blocked** (ไม่มี authenticated session; `.env` อ่านไม่ได้ — verify ระดับ source เท่านั้น) · `verify-botworker-runtime-mongo` (disposable real-Mongo harness) **ยังไม่ได้รัน** (env-gated; fix เป็น static proof) · workflow phase1/phase6/e2e env-blocked ด้วย secrets · local canary **ยังไม่ได้ทำ** · deploy **ยังไม่ได้ทำ** · **Phase 2D ไม่ใช่ production-approved — เป็น pre-commit closeout เท่านั้น**
+
+---
+
+### 🔧 กำลังทำ — PHASE 2D DISPOSABLE MONGO HARNESS CONTRACT CORRECTION (2026-10-16, branch `feature-legacy-shopee-evidence-retrieval` @ `78129be`, tree clean — หยุดก่อน stage/commit ตามสั่ง)
+
+**Real disposable-Mongo run จริงแล้ว (baseline RED — ห้ามสร้าง RED ปลอม)**: loopback `mongo:7` บน port ไม่ใช่ prod → temp DB `botworker_runtime_verify_<rand>` → `45 passed, 2 failed` → drop DB + remove container + git clean — fail 2 จุด: S5 ได้ `error=scope_superseded` (expected `stale_at_recovery`) · S6 ได้ terminal `no_action` (expected `bot_answered`)
+
+**PART 0 root cause (source-proven, ไม่ใช่ runtime defect)**:
+
+- **error**: harness S5/S6 expect เดิมอยู่บน pre-Phase-2D recovery contract (`stale_at_recovery`/`bot_answered` ผ่าน evidence เสมอ) แต่ production ได้ `scope_superseded`/`no_action`
+- **cause**: `classifyRecoveredBufferRow` (botWorkerService.ts:1702-1721) — row `buffered`+`!carried` + claim `processing` lease หมด → `superseded = !pair || !(row.msg_created_at instanceof Date) || msg_created_at <= pair.cutoff` → fenced CAS claim→`no_action`+`error=scope_superseded` + exact-identity delete row · S5/S6 seed rows **ไม่มี `msg_created_at`** → superseded จริงตาม contract · field เดียวที่ทำให้เข้า branch = `msg_created_at` (`admitted_edge` ไม่ถูกอ่านใน classifier — ใช้เฉพาะ flushBuffer delayed-execution gate :504 แต่ row ที่ admit จริงต้องมีทั้งคู่ตาม insertToBuffer:155-156) · S6 outcome evidence ไม่ถูก consult เพราะ scope block อยู่ก่อน claimMessage evidence reconcile (:1725) = contract ถูกต้อง
+- **offline fixtures ที่ทำงานอยู่**: recovery-freshness `bufferRow()` (:86) + scope-gate `seedBufferRow()` (:131)/`seedFailedRow()` (:146) seed `msg_created_at`+`admitted_edge` เสมอ + scope `cutoff:new Date(0)` → post-cutoff → RC1 dormant `bot_failed`/`failed`, RC2/RC3 finalize-only, R8 no_action superseded
+- **`stale_at_recovery` ไม่มีใน production เลย** — error string ตายตั้งแต่ Phase 2D reconcile contract (เจอแค่ใน harness/log/build artifact) · ไม่มี test ไหน pin `scope_superseded` error ตอนนี้ → harness จะเป็น pin แรก
+
+**Correction plan (harness + related contract test เท่านั้น — runtime 0)**:
+
+- `verify-botworker-runtime-mongo.ts`:
+  1. `RunCtx.scope` type ขยายให้มี `cutoff:Date` บน pairs + `global_enabled_since` (shape จริงของ BotworkerCycleScope — local type ไม่ import production)
+  2. S5 = scope-superseded: seed เดิม (ขาด admission evidence = legacy row จริง) → expect provider=0, claim `no_action`, `error=scope_superseded`, row deleted
+  3. S6 ใหม่ = post-cutoff no-evidence: row `msg_created_at = pair.cutoff+margin` + `admitted_edge=scope.global_enabled_since` (ใช้ค่า scope จริง) + expired claim ไม่มี evidence → expect provider=0, claim `bot_failed`+`interrupted_before_durable_outcome`, row `status:"failed"` retained; wait + recovery pass ซ้ำ → dormant คงเดิม calls=0
+  4. S7 = post-cutoff committed evidence (S6 เดิม + admission fields) → provider=0, claim `bot_answered`, outcome/reply_ids identity preserved, reply count=1, row deleted
+  5. leadership s7/s8/s9 → s8/s9/s10 (rename fns + callsites + SCENARIOS ids)
+  6. SCENARIOS matrix + comment header → S1–S10 ตรง executed scenarios
+- `test-botworker-runtime-mongo-safety.ts` (harness contract test โดยตรง): list check → S1–S10 · leadership scan เริ่ม `async function s8` · check names "S7–S9"→"S8–S10" · comment S1–S6→S1–S10
+- `getoutofmywaybotkaikrook2.md` — log entry นี้ + closeout
+- **ผลกระทบเคสอื่น**: production runtime/flush gate/classifier/scope = 0 แตะ · S1–S4,S8–S10 seed/behavior เดิม · fail-closed scope เดิมไม่ถูกอ่อนลง
+- **ห้าม**: runtime edit (เว้น PART 0 พบ defect ใหม่→STOP), helper/guard/retry/module/collection/dep/env เพิ่ม, `.env`/`มาแล้วจ้า.md`, commit/push/deploy/worker/provider call จริง
+
+### ✅ ผ่านแล้ว — PHASE 2D DISPOSABLE MONGO HARNESS CORRECTION (2026-10-16)
+
+**error → cause → fix → impact**: harness S5/S6 expect pre-2D contract (`stale_at_recovery`/`bot_answered`) แต่ได้ `scope_superseded`/`no_action` → seed rows ขาด `msg_created_at`+`admitted_edge` → classifier fail-close scope-superseded ถูกต้อง (ไม่ใช่ runtime defect) → แก้เฉพาะ harness: S5=superseded contract, S6 ใหม่=post-cutoff dormant `bot_failed`, S7=post-cutoff finalize-only `bot_answered`, leadership→S8–S10 · **impact**: runtime 0 บรรทัด; fail-closed scope เดิม; S1–S4 + leadership contracts คงเดิม
+
+**Changed files (harness/contract-test/log เท่านั้น — production runtime delta = 0 LOC)**:
+- `ChatAdminWeb/scripts/verify-botworker-runtime-mongo.ts` (+165/−63 เมื่อเทียบก่อนแก้: RunCtx scope type ตรง `BotworkerCycleScope`, SCENARIOS S1–S10, s5 assertion `scope_superseded`, s6 ใหม่ dormant re-pass proof, s7 evidence fields+reply_ids pin, s8–s10 rename)
+- `ChatAdminWeb/scripts/test-botworker-runtime-mongo-safety.ts` (±22: pin S1–S10, leadership scan s8→runApply, label S8–S10)
+- `getoutofmywaybotkaikrook2.md` (entry นี้)
+
+**Offline verification (fresh output)**:
+- `test-botworker-runtime-mongo-safety.ts` → **111 passed, 0 failed** (token/URI/marker/sanitize/S1–S10 pins ครบ)
+- `verify-botworker-runtime-mongo.ts` dry-run → plan S1–S10 ตรง executed, exit 0, **Mongo connections = 0**
+- `test-botworker-recovery-freshness.ts` → **30/30 passed**
+- `test-botworker-scope-gate.ts` → **107 passed, 0 failed** (SD/R/CF/K/X/TP/XP + carry-forward ครบ)
+- `npx tsc --noEmit` → clean · `git diff --check` → clean
+
+**Real disposable-Mongo re-run (run once, no retry)**:
+- port 27018 free → `docker run -d --rm -p 127.0.0.1:27018:27017 mongo:7` (loopback-only, no creds, no volume) → `ping: {ok:1}`
+- `BOTWORKER_REAL_MONGO_SMOKE=I_UNDERSTAND_ISOLATED_DB_WRITES BOTWORKER_VERIFY_MONGO_URI=mongodb://127.0.0.1:27018 npx tsx scripts/verify-botworker-runtime-mongo.ts --apply` → **55 passed, 0 failed**
+- Contract proof บน Mongo จริง: S5 `no_action`+`scope_superseded`+row deleted (calls=0) · S6 `bot_failed`+`interrupted_before_durable_outcome`+row dormant `failed` คงเดิมหลัง wait+re-pass (calls=0) · S7 finalize-only `bot_answered`+`reply_ids` preserved+reply count=1+row deleted (calls=0) · **dormant ไม่เคยถูกปลุกโดยไม่มี inbound ใหม่**
+- Output sanitized: ไม่มี URI/secret/DB random suffix (`botworker_runtime_verify_<rand>` masked)
+- **Cleanup proof**: `listDatabases` → `[admin, config, local]` เท่านั้น (temp DB dropped โดย harness marker+token guard) · `docker stop` → container auto-removed (`--rm`, `docker ps -a` ว่าง) · Mongo writes จำกัดเฉพาะ disposable DB
+
+**Status**: harness green on real Mongo — **พร้อม pre-commit candidate** (หยุดก่อน stage/commit ตามสั่ง — ไม่มี push/PR/deploy/provider/production Mongo)
+
+**Commit closeout**: Commit 1 = `94f8a33` `test: align botworker real-mongo recovery harness` — manifest `verify-botworker-runtime-mongo.ts` +113/−52, `test-botworker-runtime-mongo-safety.ts` +11/−11 (2 files, +124/−63) · original real run `45 passed / 2 failed` · root cause: S5/S6 seed rows ขาด Phase 2D admission evidence (`msg_created_at`+`admitted_edge`) → classifier `scope_superseded` ถูกต้อง · corrected real run `55 passed / 0 failed` (single `--apply`, disposable `mongo:7` loopback:27018, temp DB `botworker_runtime_verify_<rand>` dropped, container removed) · safety suite `111/111` · offline: recovery-freshness `30/30`, scope-gate `107/107`, `tsc --noEmit` clean, `git diff --check` clean · runtime files changed = **0** · ไม่มี production Mongo/provider/platform API/botworker start · ค้าง: authenticated `/shops` UI visual gate, provider hard budget, local one-shop canary (concurrency=1), deploy/canary approval
