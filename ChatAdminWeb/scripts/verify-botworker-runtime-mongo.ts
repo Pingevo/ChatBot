@@ -115,7 +115,7 @@ export function smokeExitCode(failedAssertions: number, cleanupFailed: boolean):
   return failedAssertions > 0 || cleanupFailed ? 1 : 0;
 }
 
-// ── scenario matrix (S1–S6) ──────────────────────────────────
+// ── scenario matrix (S1–S10) ─────────────────────────────────
 export const SCENARIOS = [
   {
     id: "S1", name: "duplicate claim",
@@ -157,25 +157,35 @@ export const SCENARIOS = [
     ],
   },
   {
-    id: "S5", name: "stale recovery without evidence",
-    goal: "expired processing claim + stale buffer row, ไม่มี outcome/reply",
+    id: "S5", name: "scope-superseded recovery",
+    goal: "expired processing claim + buffered row ขาด admission evidence (pre-2D shape)",
     expects: [
-      "fake /chat calls = 0 (finalize-only)",
-      "claim terminal no_action, error=stale_at_recovery",
-      "buffer row deleted on fenced finalize",
+      "fake /chat calls = 0 (reconcile-only)",
+      "claim terminal no_action, error=scope_superseded",
+      "buffer row deleted (terminal settle — ไม่ใช่ dormant)",
     ],
   },
   {
-    id: "S6", name: "recovery with committed evidence",
-    goal: "expired claim + row + outcome_type/persisted reply",
+    id: "S6", name: "post-cutoff recovery without evidence",
+    goal: "expired claim + post-cutoff admitted row, ไม่มี outcome/reply",
     expects: [
       "fake /chat calls = 0",
-      "finalize-only; terminal preserves outcome_type",
+      "claim terminal bot_failed, error=interrupted_before_durable_outcome",
+      "buffer row retained status=failed (dormant, payload ครบ)",
+      "dormant คงเดิมหลัง wait + recovery pass ซ้ำ — ไม่มี provider call",
+    ],
+  },
+  {
+    id: "S7", name: "post-cutoff recovery with committed evidence",
+    goal: "expired claim + post-cutoff row + outcome_type/persisted reply",
+    expects: [
+      "fake /chat calls = 0",
+      "finalize-only; terminal preserves outcome_type + reply_ids",
       "reply count ไม่เพิ่ม; buffer row deleted",
     ],
   },
   {
-    id: "S7", name: "concurrent absent acquire (worker-leadership)",
+    id: "S8", name: "concurrent absent acquire (worker-leadership)",
     goal: "2 owner IDs แย่ง singleton leader doc ที่หายไป — DB-level CAS จริง",
     expects: [
       "winner เพียงหนึ่งราย; loser คืน false",
@@ -185,7 +195,7 @@ export const SCENARIOS = [
     ],
   },
   {
-    id: "S8", name: "active renew + foreign rejection",
+    id: "S9", name: "active renew + foreign rejection",
     goal: "winner renew lease สำเร็จ ขณะ loser active-lease admission ถูกปฏิเสธ",
     expects: [
       "winner renew สำเร็จ; owner_id เดิม; token ยัง 1",
@@ -195,7 +205,7 @@ export const SCENARIOS = [
     ],
   },
   {
-    id: "S9", name: "expired concurrent takeover",
+    id: "S10", name: "expired concurrent takeover",
     goal: "lease หมดอายุ → owner ใหม่ 2 รายแย่ง takeover — fenced token +1 ครั้งเดียว",
     expects: [
       "takeover winner เพียงหนึ่งราย; อีกฝ่าย false",
@@ -285,8 +295,9 @@ interface RunCtx {
   fake: FakeChatbot;
   results: { id: string; ok: boolean; detail: string }[];
   // ⚡ Phase 2D — required cycle-scope snapshot สำหรับ poll/recovery calls
+  //   (shape = BotworkerCycleScope — local type, ห้าม import production)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  scope: { config: any; pairs: { platform: string; shop_id: string }[] };
+  scope: { config: any; pairs: { platform: string; shop_id: string; cutoff: Date }[]; global_enabled_since: Date | null };
 }
 function expect(ctx: RunCtx, id: string, name: string, cond: boolean, detail = "") {
   ctx.results.push({ id, ok: cond, detail: cond ? name : `${name} — ${detail}` });
@@ -376,7 +387,9 @@ async function s4(ctx: RunCtx, p: { conv: string; mid: string; oldText: string }
   expect(ctx, "S4", "new claim terminal", claim?.status === "bot_answered", `status=${claim?.status}`);
 }
 
-// S5 — stale recovery without evidence
+// S5 — scope-superseded recovery (missing/pre-cutoff admission evidence)
+//   row ไม่มี msg_created_at/admitted_edge → Phase 2D classifier settle
+//   no_action + scope_superseded + delete row (terminal — ห้าม dormant)
 async function s5(ctx: RunCtx) {
   const conv = `${ID_PREFIX}conv_s5`, mid = `${ID_PREFIX}s5_m1`;
   const claimId = `botworker:claim:${mid}`;
@@ -399,15 +412,60 @@ async function s5(ctx: RunCtx) {
   const rows = await ctx.db.collection(ctx.COLLECTIONS.bufferMessages).find({ conversation_id: conv, kind: "message" }).toArray();
   expect(ctx, "S5", "no bot call", ctx.fake.calls.length - n0 === 0, `calls=${ctx.fake.calls.length - n0}`);
   expect(ctx, "S5", "claim terminal no_action", claim?.status === "no_action", `status=${claim?.status}`);
-  expect(ctx, "S5", "error=stale_at_recovery", claim?.error === "stale_at_recovery", `error=${claim?.error}`);
+  expect(ctx, "S5", "error=scope_superseded", claim?.error === "scope_superseded", `error=${claim?.error}`);
   expect(ctx, "S5", "buffer row deleted", rows.length === 0, `rows=${rows.length}`);
 }
 
-// S6 — recovery with committed evidence
+// S6 — post-cutoff expired claim ไม่มี durable evidence → dormant
+//   row มี admission evidence ใหม่กว่า pair.cutoff → classifier ผ่าน scope gate
+//   ไปถึง claimMessage reconcile: ไม่มี outcome/reply → settle bot_failed +
+//   row status=failed (dormant — wake ได้เฉพาะ distinct inbound ใหม่เท่านั้น)
 async function s6(ctx: RunCtx) {
   const conv = `${ID_PREFIX}conv_s6`, mid = `${ID_PREFIX}s6_m1`;
-  const claimId = `botworker:claim:${mid}`, rid = `${ID_PREFIX}s6_reply`;
+  const claimId = `botworker:claim:${mid}`;
   const past = new Date(Date.now() - 3600_000);
+  const pair = ctx.scope.pairs[0];
+  const postCutoff = new Date(pair.cutoff.getTime() + 60_000);
+  const n0 = ctx.fake.calls.length;
+  await ctx.db.collection(ctx.COLLECTIONS.chatProcessing).insertOne({
+    _id: claimId, message_id: mid, conversation_id: conv, shop_id: `${ID_PREFIX}shop`,
+    platform: "shopee", status: "processing", owner_id: `${ID_PREFIX}dead_owner`,
+    fencing_token: 1, attempt: 1, lease_expires_at: past, claimed_at: past, processed_at: past,
+  });
+  await ctx.db.collection(ctx.COLLECTIONS.bufferMessages).insertOne({
+    message_id: mid, conversation_id: conv, shop_id: `${ID_PREFIX}shop`, platform: "shopee",
+    text: `${ID_PREFIX}s6 stale`, raw_payload: { synthetic: true }, received_at: past,
+    kind: "message", status: "buffered", claim_id: claimId,
+    owner_id: `${ID_PREFIX}dead_owner`, fencing_token: 1,
+    // ⚡ admission evidence ใหม่กว่า resolved pair cutoff (shape เดียวกับ insertToBuffer)
+    msg_created_at: postCutoff, admitted_edge: ctx.scope.global_enabled_since,
+  });
+  await ctx.svc.recoverStaleBuffers(ctx.scope);
+  await ctx.svc.waitForInFlight(10000);
+  const claim = await ctx.db.collection(ctx.COLLECTIONS.chatProcessing).findOne({ _id: claimId });
+  const rows = await ctx.db.collection(ctx.COLLECTIONS.bufferMessages).find({ conversation_id: conv, kind: "message" }).toArray();
+  expect(ctx, "S6", "no bot call", ctx.fake.calls.length - n0 === 0, `calls=${ctx.fake.calls.length - n0}`);
+  expect(ctx, "S6", "claim terminal bot_failed", claim?.status === "bot_failed", `status=${claim?.status}`);
+  expect(ctx, "S6", "error=interrupted_before_durable_outcome", claim?.error === "interrupted_before_durable_outcome", `error=${claim?.error}`);
+  expect(ctx, "S6", "row retained dormant failed", rows.length === 1 && rows[0]?.status === "failed", `rows=${JSON.stringify(rows.map((r: AnyDoc) => r.status))}`);
+  // dormancy — wait + recovery pass ซ้ำต้องไม่ปลุกงาน (provider=0 เสมอ)
+  await sleep(400);
+  await ctx.svc.recoverStaleBuffers(ctx.scope);
+  await ctx.svc.waitForInFlight(10000);
+  const claim2 = await ctx.db.collection(ctx.COLLECTIONS.chatProcessing).findOne({ _id: claimId });
+  const rows2 = await ctx.db.collection(ctx.COLLECTIONS.bufferMessages).find({ conversation_id: conv, kind: "message" }).toArray();
+  expect(ctx, "S6", "still no bot call after wait+re-pass", ctx.fake.calls.length - n0 === 0, `calls=${ctx.fake.calls.length - n0}`);
+  expect(ctx, "S6", "claim stays bot_failed", claim2?.status === "bot_failed", `status=${claim2?.status}`);
+  expect(ctx, "S6", "row stays dormant failed", rows2.length === 1 && rows2[0]?.status === "failed", `rows=${JSON.stringify(rows2.map((r: AnyDoc) => r.status))}`);
+}
+
+// S7 — post-cutoff recovery with committed evidence → finalize-only
+async function s7(ctx: RunCtx) {
+  const conv = `${ID_PREFIX}conv_s7`, mid = `${ID_PREFIX}s7_m1`;
+  const claimId = `botworker:claim:${mid}`, rid = `${ID_PREFIX}s7_reply`;
+  const past = new Date(Date.now() - 3600_000);
+  const pair = ctx.scope.pairs[0];
+  const postCutoff = new Date(pair.cutoff.getTime() + 60_000);
   const n0 = ctx.fake.calls.length;
   await ctx.db.collection(ctx.COLLECTIONS.chatProcessing).insertOne({
     _id: claimId, message_id: mid, conversation_id: conv, shop_id: `${ID_PREFIX}shop`,
@@ -422,19 +480,21 @@ async function s6(ctx: RunCtx) {
   });
   await ctx.db.collection(ctx.COLLECTIONS.bufferMessages).insertOne({
     message_id: mid, conversation_id: conv, shop_id: `${ID_PREFIX}shop`, platform: "shopee",
-    text: `${ID_PREFIX}s6 stale`, raw_payload: { synthetic: true }, received_at: past,
+    text: `${ID_PREFIX}s7 stale`, raw_payload: { synthetic: true }, received_at: past,
     kind: "message", status: "buffered", claim_id: claimId,
     owner_id: `${ID_PREFIX}dead_owner`, fencing_token: 1,
+    msg_created_at: postCutoff, admitted_edge: ctx.scope.global_enabled_since,
   });
   await ctx.svc.recoverStaleBuffers(ctx.scope);
   await ctx.svc.waitForInFlight(10000);
   const claim = await ctx.db.collection(ctx.COLLECTIONS.chatProcessing).findOne({ _id: claimId });
   const replies = await ctx.db.collection(ctx.COLLECTIONS.shadowReplies).find({ conversation_id: conv }).toArray();
   const rows = await ctx.db.collection(ctx.COLLECTIONS.bufferMessages).find({ conversation_id: conv, kind: "message" }).toArray();
-  expect(ctx, "S6", "no bot call", ctx.fake.calls.length - n0 === 0, `calls=${ctx.fake.calls.length - n0}`);
-  expect(ctx, "S6", "terminal preserves outcome_type", claim?.status === "bot_answered", `status=${claim?.status}`);
-  expect(ctx, "S6", "reply count unchanged", replies.length === 1, `replies=${replies.length}`);
-  expect(ctx, "S6", "buffer row deleted", rows.length === 0, `rows=${rows.length}`);
+  expect(ctx, "S7", "no bot call", ctx.fake.calls.length - n0 === 0, `calls=${ctx.fake.calls.length - n0}`);
+  expect(ctx, "S7", "terminal preserves outcome_type", claim?.status === "bot_answered" && claim?.outcome_type === "bot_answered", `status=${claim?.status} outcome=${claim?.outcome_type}`);
+  expect(ctx, "S7", "persisted reply_ids preserved", Array.isArray(claim?.reply_ids) && claim.reply_ids[0] === rid, `reply_ids=${JSON.stringify(claim?.reply_ids)}`);
+  expect(ctx, "S7", "reply count unchanged", replies.length === 1, `replies=${replies.length}`);
+  expect(ctx, "S7", "buffer row deleted", rows.length === 0, `rows=${rows.length}`);
 }
 
 // verify-only fixed values — NOT secrets; injected so strict requiredStrict()
@@ -442,9 +502,9 @@ async function s6(ctx: RunCtx) {
 const VERIFY_ONLY_JWT_SECRET = "verify-only-jwt-nonsecret";
 const VERIFY_ONLY_INTERNAL_SECRET = "verify-only-internal-nonsecret";
 
-// S7 — concurrent absent acquire: DB-level worker-leadership race (BW-2)
+// S8 — concurrent absent acquire: DB-level worker-leadership race (BW-2)
 // uses ensureLeadership(explicitOwnerId) directly — process-global owner ไม่ถูก rebind
-async function s7(ctx: RunCtx): Promise<{ winner: string; loser: string }> {
+async function s8(ctx: RunCtx): Promise<{ winner: string; loser: string }> {
   const A = `${ID_PREFIX}worker_A`, B = `${ID_PREFIX}worker_B`;
   const n0 = ctx.fake.calls.length;
   const state = ctx.db.collection(ctx.COLLECTIONS.botworkerState);
@@ -455,16 +515,16 @@ async function s7(ctx: RunCtx): Promise<{ winner: string; loser: string }> {
   const winners = [ra && A, rb && B].filter(Boolean);
   const winner = (ra ? A : B) as string;
   const loser = winner === A ? B : A;
-  expect(ctx, "S7", "exactly one winner, loser false", winners.length === 1 && (winner === A ? rb === false : ra === false), `ra=${!!ra} rb=${!!rb}`);
-  expect(ctx, "S7", "singleton leader doc = 1", docs.length === 1, `docs=${docs.length}`);
-  expect(ctx, "S7", "doc owner = winner", doc?.owner_id === winner, `owner=${doc?.owner_id}`);
-  expect(ctx, "S7", "fencing_token = 1", doc?.fencing_token === 1, `token=${doc?.fencing_token}`);
-  expect(ctx, "S7", "no fake /chat calls", ctx.fake.calls.length - n0 === 0, `calls=${ctx.fake.calls.length - n0}`);
+  expect(ctx, "S8", "exactly one winner, loser false", winners.length === 1 && (winner === A ? rb === false : ra === false), `ra=${!!ra} rb=${!!rb}`);
+  expect(ctx, "S8", "singleton leader doc = 1", docs.length === 1, `docs=${docs.length}`);
+  expect(ctx, "S8", "doc owner = winner", doc?.owner_id === winner, `owner=${doc?.owner_id}`);
+  expect(ctx, "S8", "fencing_token = 1", doc?.fencing_token === 1, `token=${doc?.fencing_token}`);
+  expect(ctx, "S8", "no fake /chat calls", ctx.fake.calls.length - n0 === 0, `calls=${ctx.fake.calls.length - n0}`);
   return { winner, loser };
 }
 
-// S8 — active renew (same owner, token unchanged) + foreign rejection while active
-async function s8(ctx: RunCtx, p: { winner: string; loser: string }) {
+// S9 — active renew (same owner, token unchanged) + foreign rejection while active
+async function s9(ctx: RunCtx, p: { winner: string; loser: string }) {
   const n0 = ctx.fake.calls.length;
   const state = ctx.db.collection(ctx.COLLECTIONS.botworkerState);
   const before = await state.findOne({ _id: "botworker:leader" });
@@ -472,22 +532,22 @@ async function s8(ctx: RunCtx, p: { winner: string; loser: string }) {
   const afterRenew = await state.findOne({ _id: "botworker:leader" });
   const foreign = await ctx.svc.ensureLeadership(p.loser);
   const afterLoser = await state.findOne({ _id: "botworker:leader" });
-  expect(ctx, "S8", "winner renew returns ctx", !!renew, `renew=${!!renew}`);
-  expect(ctx, "S8", "owner_id unchanged", afterRenew?.owner_id === p.winner, `owner=${afterRenew?.owner_id}`);
-  expect(ctx, "S8", "fencing_token still 1", afterRenew?.fencing_token === 1, `token=${afterRenew?.fencing_token}`);
-  expect(ctx, "S8", "lease_expires_at increased",
+  expect(ctx, "S9", "winner renew returns ctx", !!renew, `renew=${!!renew}`);
+  expect(ctx, "S9", "owner_id unchanged", afterRenew?.owner_id === p.winner, `owner=${afterRenew?.owner_id}`);
+  expect(ctx, "S9", "fencing_token still 1", afterRenew?.fencing_token === 1, `token=${afterRenew?.fencing_token}`);
+  expect(ctx, "S9", "lease_expires_at increased",
     !!before && !!afterRenew && new Date(afterRenew.lease_expires_at).getTime() > new Date(before.lease_expires_at).getTime(),
     `${before?.lease_expires_at} -> ${afterRenew?.lease_expires_at}`);
-  expect(ctx, "S8", "foreign loser returns false", foreign === false, `foreign=${!!foreign}`);
-  expect(ctx, "S8", "loser did not modify doc",
+  expect(ctx, "S9", "foreign loser returns false", foreign === false, `foreign=${!!foreign}`);
+  expect(ctx, "S9", "loser did not modify doc",
     !!afterLoser && afterLoser.owner_id === afterRenew?.owner_id
       && afterLoser.fencing_token === afterRenew?.fencing_token
       && new Date(afterLoser.lease_expires_at).getTime() === new Date(afterRenew.lease_expires_at).getTime());
-  expect(ctx, "S8", "no fake /chat calls", ctx.fake.calls.length - n0 === 0, `calls=${ctx.fake.calls.length - n0}`);
+  expect(ctx, "S9", "no fake /chat calls", ctx.fake.calls.length - n0 === 0, `calls=${ctx.fake.calls.length - n0}`);
 }
 
-// S9 — expired concurrent takeover: fenced $inc token exactly once; stale owner refused
-async function s9(ctx: RunCtx, p: { winner: string }) {
+// S10 — expired concurrent takeover: fenced $inc token exactly once; stale owner refused
+async function s10(ctx: RunCtx, p: { winner: string }) {
   const C = `${ID_PREFIX}worker_C`, D = `${ID_PREFIX}worker_D`;
   const n0 = ctx.fake.calls.length;
   const state = ctx.db.collection(ctx.COLLECTIONS.botworkerState);
@@ -497,19 +557,19 @@ async function s9(ctx: RunCtx, p: { winner: string }) {
     { _id: "botworker:leader", owner_id: snap?.owner_id, fencing_token: snap?.fencing_token },
     { $set: { lease_expires_at: new Date(Date.now() - 1000), updated_at: new Date(Date.now() - 1000) } },
   );
-  expect(ctx, "S9", "fenced expire applied", exp.matchedCount === 1, `matched=${exp.matchedCount}`);
+  expect(ctx, "S10", "fenced expire applied", exp.matchedCount === 1, `matched=${exp.matchedCount}`);
   const [rc, rd] = await Promise.all([ctx.svc.ensureLeadership(C), ctx.svc.ensureLeadership(D)]);
   const winner2 = rc ? C : D;
   const docs = await state.find({ _id: "botworker:leader" }).toArray();
   const doc = docs[0];
   const stale = await ctx.svc.ensureLeadership(p.winner);
-  expect(ctx, "S9", "exactly one takeover winner, other false", [rc, rd].filter(Boolean).length === 1, `rc=${!!rc} rd=${!!rd}`);
-  expect(ctx, "S9", "singleton doc still 1", docs.length === 1, `docs=${docs.length}`);
-  expect(ctx, "S9", "owner_id = takeover winner", doc?.owner_id === winner2, `owner=${doc?.owner_id}`);
-  expect(ctx, "S9", "fencing_token = 2 exactly", doc?.fencing_token === 2, `token=${doc?.fencing_token}`);
-  expect(ctx, "S9", "lease_expires_at in future", !!doc && new Date(doc.lease_expires_at).getTime() > Date.now());
-  expect(ctx, "S9", "stale owner (token 1) refused", stale === false, `stale=${!!stale}`);
-  expect(ctx, "S9", "no fake /chat calls", ctx.fake.calls.length - n0 === 0, `calls=${ctx.fake.calls.length - n0}`);
+  expect(ctx, "S10", "exactly one takeover winner, other false", [rc, rd].filter(Boolean).length === 1, `rc=${!!rc} rd=${!!rd}`);
+  expect(ctx, "S10", "singleton doc still 1", docs.length === 1, `docs=${docs.length}`);
+  expect(ctx, "S10", "owner_id = takeover winner", doc?.owner_id === winner2, `owner=${doc?.owner_id}`);
+  expect(ctx, "S10", "fencing_token = 2 exactly", doc?.fencing_token === 2, `token=${doc?.fencing_token}`);
+  expect(ctx, "S10", "lease_expires_at in future", !!doc && new Date(doc.lease_expires_at).getTime() > Date.now());
+  expect(ctx, "S10", "stale owner (token 1) refused", stale === false, `stale=${!!stale}`);
+  expect(ctx, "S10", "no fake /chat calls", ctx.fake.calls.length - n0 === 0, `calls=${ctx.fake.calls.length - n0}`);
 }
 
 async function runApply(): Promise<number> {
@@ -543,7 +603,7 @@ async function runApply(): Promise<number> {
       db, COLLECTIONS: mongo.COLLECTIONS as Record<string, string>,
       svc: botWorkerService, fake, results: [],
       // ⚡ Phase 2D — scope resolved จาก temp-DB จริง (seed ด้านล่าง) ผ่าน production resolver
-      scope: { config: {} as Record<string, unknown>, pairs: [] },
+      scope: { config: {} as Record<string, unknown>, pairs: [], global_enabled_since: null },
     };
 
     // 4) seed: marker first, temp-DB config, minimal index (never ensureIndexes)
@@ -576,9 +636,10 @@ async function runApply(): Promise<number> {
     await s4(ctx, s3state);
     await s5(ctx);
     await s6(ctx);
-    const s7state = await s7(ctx);
-    await s8(ctx, s7state);
-    await s9(ctx, s7state);
+    await s7(ctx);
+    const s8state = await s8(ctx);
+    await s9(ctx, s8state);
+    await s10(ctx, s8state);
     await botWorkerService.clearPendingWork();
 
     // 6) report (sanitized)

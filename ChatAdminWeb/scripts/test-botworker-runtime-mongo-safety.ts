@@ -7,7 +7,7 @@
 //   - explicit BOTWORKER_VERIFY_MONGO_URI ต้อง valid ก่อน dotenv/runtime import เสมอ
 //   - cleanup ต้องมี marker token ตรงกันเท่านั้น
 //   - output ห้ามมี URI/secret
-//   - scenario plan S1–S6 ครบ
+//   - scenario plan S1–S10 ครบ
 //   - ห้ามอ้างอิง verify-botworker-parallel.ts
 //
 // ไฟล์นี้ pure: ไม่ connect Mongo, ไม่ bind port, ไม่ load .env, ไม่ import serverConfig
@@ -224,28 +224,28 @@ async function main() {
   // ── scenario matrix ──
   if (H) {
     const ids = H.SCENARIOS.map((s: { id: string }) => s.id);
-    check("scenario plan covers S1–S9", JSON.stringify(ids) === JSON.stringify(["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"]), `got=${JSON.stringify(ids)}`);
+    check("scenario plan covers S1–S10", JSON.stringify(ids) === JSON.stringify(["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10"]), `got=${JSON.stringify(ids)}`);
     for (const s of H.SCENARIOS) {
       check(`scenario ${s.id} has expects`, Array.isArray(s.expects) && s.expects.length > 0);
     }
   }
 
-  // ── S7–S9 real-Mongo leadership race contract ──
+  // ── S8–S10 real-Mongo leadership race contract ──
   if (src) {
     check("harness calls svc.ensureLeadership (DB-level CAS verb)", /svc\.ensureLeadership\(/.test(src));
     check("leadership scenarios use COLLECTIONS.botworkerState", /COLLECTIONS\.botworkerState/.test(src));
-    const iS7 = src.indexOf("async function s7");
+    const iS8 = src.indexOf("async function s8");
     const iRun = src.indexOf("async function runApply");
-    check("s7/s8/s9 functions exist between s6 and runApply", iS7 !== -1 && iRun !== -1 && iS7 < iRun
-      && src.indexOf("async function s8", iS7) !== -1 && src.indexOf("async function s9", iS7) !== -1);
-    const leadBodies = iS7 !== -1 && iRun !== -1 ? src.slice(iS7, iRun) : "";
-    check("S7–S9 concurrency via Promise.all (no sleep picks winner)",
+    check("s8/s9/s10 functions exist between s7 and runApply", iS8 !== -1 && iRun !== -1 && iS8 < iRun
+      && src.indexOf("async function s9", iS8) !== -1 && src.indexOf("async function s10", iS8) !== -1);
+    const leadBodies = iS8 !== -1 && iRun !== -1 ? src.slice(iS8, iRun) : "";
+    check("S8–S10 concurrency via Promise.all (no sleep picks winner)",
       (leadBodies.match(/Promise\.all\(/g) || []).length >= 2
       && !/await\s+sleep\(/.test(leadBodies));
-    check("S7–S9 never invoke message-work paths (no fake /chat reachability)",
+    check("S8–S10 never invoke message-work paths (no fake /chat reachability)",
       !/svc\.(processMessage|pollNewMessages|recoverStale|checkWaitTimeouts)/.test(leadBodies));
-    check("S7–S9 owner IDs carry harness verify prefix", /ID_PREFIX`?\}?\s*worker_|`\$\{ID_PREFIX\}worker/.test(leadBodies));
-    check("S7–S9 assert zero fake-call delta", (leadBodies.match(/fake\.calls\.length\s*-\s*n0\s*={2,3}\s*0/g) || []).length >= 3);
+    check("S8–S10 owner IDs carry harness verify prefix", /ID_PREFIX`?\}?\s*worker_|`\$\{ID_PREFIX\}worker/.test(leadBodies));
+    check("S8–S10 assert zero fake-call delta", (leadBodies.match(/fake\.calls\.length\s*-\s*n0\s*={2,3}\s*0/g) || []).length >= 3);
   }
 
   console.log(`\n=== ${pass} passed, ${fail} failed ===`);
