@@ -12,7 +12,8 @@
 #
 # ⚠️ lazada/tiktok เป็น placeholder (ยังไม่มี app.py) — เปิดด้วย --profile lazada/tiktok
 #    แต่ container จะ crash จนกว่าจะ implement app.py จริง
-#    ค่า default รันเฉพาะ: chatbot-shopee + chatadmin-web + bot-worker + caddy
+#    ค่า default รันเฉพาะ: chatbot-shopee + chatadmin-web + caddy
+#    bot-worker เป็น opt-in สำหรับ local canary: --profile botworker
 
 services:
   # ─────────────────────────────────────────────────────────────
@@ -171,6 +172,7 @@ services:
       - "host.docker.internal:host-gateway"
     networks:
       - chatbot-net
+    profiles: ["botworker"]  # ไม่รันบน deploy default — เปิด explicit เฉพาะ local canary
 
   # ─────────────────────────────────────────────────────────────
   # Caddy — reverse proxy + auto SSL (Let's Encrypt)

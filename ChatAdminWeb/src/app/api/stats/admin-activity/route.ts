@@ -52,6 +52,7 @@ export async function GET(req: NextRequest) {
 
   const convColl = await getCollection(COLLECTIONS.conversations);
   const msgColl = await getCollection(COLLECTIONS.messages);
+  const statusColl = await getCollection(COLLECTIONS.statusConversation);
   const [admins, shops] = await Promise.all([
     auth.listAdmins(),
     shopService.listShops(),
@@ -88,46 +89,71 @@ export async function GET(req: NextRequest) {
     return Object.keys(f).length ? { [field]: f } : {};
   };
 
-  // 1. Top handled admins (by assigned conversation count) — aggregation
-  const handledAgg = await convColl.aggregate<{ _id: string; count: number }>([
-    { $match: { assigned_to: { $exists: true, $ne: null }, ...dateFilter("created_at") } },
-    { $group: { _id: "$assigned_to", count: { $sum: 1 } } },
-    { $sort: { count: -1 } },
-    { $limit: 10 },
-  ]).toArray();
-  const topAdminIds = handledAgg.map((a) => a._id);
+  // ownership อ่านจาก status_conversation เท่านั้น
+  //   (raw conversations(_shp).status="open" ทั้งหมด + assigned_to/closed_at ถูก dump ทับ)
+  //   - handled per admin = meta.assigned_to ∩ in-range convs (รวม closed ที่ค้าง owner = activity history)
+  //   - closed = meta status ∈ {closed,resolved}
+  //   bounded: meta-driven $lookup (assigned_to index → unique conversation_id index)
+  //   group by owner×status + push created_at สำหรับ per-day series — ไม่มี find({}) / full conv load
+  const convJoin = [
+    { $lookup: { from: COLLECTIONS.conversations, localField: "conversation_id", foreignField: "conversation_id", as: "conv" } },
+    { $unwind: "$conv" },
+  ];
+  const convCreatedCond = dateFilter("created_at").created_at as Record<string, unknown> | undefined;
+  const convJoinMatch = convCreatedCond ? { "conv.created_at": convCreatedCond } : {};
+  const [ownerAgg, closedInRangeAgg, overallConv] = await Promise.all([
+    statusColl.aggregate<{ _id: { o: string | null; s: string | null }; n: number; dates: Date[] }>([
+      { $match: { assigned_to: { $exists: true, $nin: [null, ""] } } },
+      ...convJoin,
+      ...(Object.keys(convJoinMatch).length ? [{ $match: convJoinMatch }] : []),
+      { $group: { _id: { o: "$assigned_to", s: "$status" }, n: { $sum: 1 }, dates: { $push: "$conv.created_at" } } },
+    ]).toArray(),
+    statusColl.aggregate<{ n: number }>([
+      { $match: { status: { $in: ["closed", "resolved"] } } },
+      ...convJoin,
+      ...(Object.keys(convJoinMatch).length ? [{ $match: convJoinMatch }] : []),
+      { $count: "n" },
+    ]).toArray(),
+    convColl.countDocuments({ ...dateFilter("created_at") }),
+  ]);
+  const overallClosed = closedInRangeAgg[0]?.n || 0;
 
-  // bucket ตาม range
-  let bucketId: Record<string, unknown>;
-  if (range === "daily") {
-    bucketId = { y: { $year: "$created_at" }, m: { $month: "$created_at" }, d: { $dayOfMonth: "$created_at" } };
-  } else if (range === "monthly") {
-    bucketId = { d: { $dayOfMonth: "$created_at" } };
-  } else if (range === "yearly") {
-    bucketId = { m: { $month: "$created_at" } };
-  } else {
-    bucketId = { y: { $year: "$created_at" } };
+  // pivot owner×status → per-admin handled/resolved/unanswered + created dates
+  //   resolved   = {closed,resolved,bot}   (ตอบ/ปิดแล้ว — retained owner = activity history)
+  //   unanswered = {handoff,open,pending}  (non-closed human-owned — รวม open+no-owner case)
+  const perOwner = new Map<string, { total: number; resolved: number; unanswered: number; dates: Date[] }>();
+  for (const g of ownerAgg) {
+    const owner = g._id.o;
+    if (!owner) continue;
+    const e = perOwner.get(owner) || { total: 0, resolved: 0, unanswered: 0, dates: [] };
+    e.total += g.n;
+    const s = g._id.s;
+    if (s === "closed" || s === "resolved" || s === "bot") e.resolved += g.n;
+    else if (s === "handoff" || s === "open" || s === "pending") e.unanswered += g.n;
+    e.dates.push(...g.dates);
+    perOwner.set(owner, e);
   }
 
-  // 2. Conversations by admin per day — aggregation per top admin
+  // 1. Top handled admins (by owned conversation count in range)
+  const topAdminIds = [...perOwner.entries()]
+    .sort((a, b) => b[1].total - a[1].total)
+    .slice(0, 10)
+    .map(([id]) => id);
+
+  // 2. Conversations by admin per day — bucket ใน JS จาก in-range dates ของ meta owner
   const conversationsByAdminPerDay: Record<string, unknown>[] = dayLabels.map((date) => ({ date }));
   for (const adminId of topAdminIds) {
     const name = adminMap.get(adminId)?.name || adminId;
-    const agg = await convColl.aggregate<{ _id: Record<string, number>; count: number }>([
-      { $match: { assigned_to: adminId, ...dateFilter("created_at") } },
-      { $group: { _id: bucketId, count: { $sum: 1 } } },
-      { $sort: { "_id.y": 1, "_id.m": 1, "_id.d": 1 } },
-    ]).toArray();
     const map = new Map<string, number>();
-    for (const d of agg) {
+    for (const d of perOwner.get(adminId)?.dates || []) {
       const key = range === "daily"
-        ? `${d._id.y}-${d._id.m}-${d._id.d}`
+        ? `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`
         : range === "monthly"
-        ? `${d._id.d}`
+        ? `${d.getDate()}`
         : range === "yearly"
-        ? `${d._id.m}`
-        : `${d._id.y}`;
-      map.set(key, d.count);
+        ? `${d.getMonth() + 1}`
+        : `${d.getFullYear()}`;
+      map.set(key, (map.get(key) || 0) + 1);
     }
     if (range === "daily") {
       for (let i = 6; i >= 0; i--) {
@@ -158,31 +184,20 @@ export async function GET(req: NextRequest) {
   //    คำนวณ response stats ครั้งเดียว (ไม่ใช่ 2 $lookup ต่อ admin)
   const [responseStats, ...perfAggs] = await Promise.all([
     computeResponseStats(msgColl, { start: weekStart, end: weekEnd, adminOnly: true }),
-    ...admins.map((a) =>
-      convColl.aggregate<{
-        _id: null;
-        total: number;
-        resolved: number;
-        unanswered: number;
-      }>([
-        { $match: { assigned_to: a.admin_id, ...dateFilter("created_at") } },
-        {
-          $group: {
-            _id: null,
-            total: { $sum: 1 },
-            resolved: { $sum: { $cond: [{ $in: ["$status", ["resolved", "bot"]] }, 1, 0] } },
-            unanswered: { $sum: { $cond: [{ $in: ["$status", ["handoff", "pending"]] }, 1, 0] } },
-          },
-        },
-      ]).toArray().then((agg) => ({ admin: a, perf: agg[0] || { total: 0, resolved: 0, unanswered: 0 } }))
-    ),
+    // ⚡ per-admin perf — partition บน meta status (raw conv.status = "open" เสมอ ใช้ไม่ได้)
+    ...admins.map(async (a) => {
+      const p = perOwner.get(a.admin_id);
+      return { admin: a, perf: { total: p?.total || 0, resolved: p?.resolved || 0, unanswered: p?.unanswered || 0 } };
+    }),
   ]);
 
   const individualPerformance = perfAggs.map(({ admin: a, perf }) => {
     const adminStats = responseStats.perAdmin.get(a.admin_id);
     const avgSeconds = adminStats?.avgSeconds ? Math.round(adminStats.avgSeconds) : 0;
-    const fastCount = adminStats?.within10min || 0;
-    const responseRate10min = perf.total ? Math.round((fastCount / perf.total) * 1000) / 10 : 0;
+    // ⚡ rate = within10min turns / admin's answered turns — population เดียวกัน (≤100)
+    const responseRate10min = adminStats?.total
+      ? Math.round((adminStats.within10min / adminStats.total) * 1000) / 10
+      : 0;
     return {
       admin_id: a.admin_id,
       name: a.name || a.username,
@@ -210,14 +225,14 @@ export async function GET(req: NextRequest) {
 
   const totalConversations = individualPerformance.reduce((s, a) => s + a.conversations, 0);
 
-  // ⚠️ ถ้าไม่มี assigned admins (sellcenter ไม่ set assigned_to) ให้ดึง overall stats จาก messages
+  // ⚠️ ถ้าไม่มี assigned admins ให้ดึง overall stats จาก messages
   // เพื่อให้หน้า admin-activity ยังแสดงข้อมูลรวมได้
-  const [overallConv, overallMsgsIn, overallMsgsOut, overallClosed] = await Promise.all([
-    convColl.countDocuments({ ...dateFilter("created_at") }),
+  //   ⚡ overall closed = meta closed ∩ in-range (raw closed_at ถูก dump ทับ ใช้ไม่ได้)
+  const [overallMsgsIn, overallMsgsOut] = await Promise.all([
     msgColl.countDocuments({ role: "user", direction: "in", ...dateFilter("created_timestamp") }),
     msgColl.countDocuments({ role: { $in: ["admin", "bot"] }, direction: "out", ...dateFilter("created_timestamp") }),
-    convColl.countDocuments({ closed_at: { $exists: true, $ne: null }, ...dateFilter("created_at") }),
   ]);
+  // overallConv / overallClosed — จาก Promise.all ข้างบน (countDocuments + meta-closed agg)
 
   // date_range_label ตาม range
   let dateRangeLabel = "";

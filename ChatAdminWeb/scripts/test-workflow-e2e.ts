@@ -215,8 +215,13 @@ async function main() {
 
   // ─── D. ข้อความแรก "สเปค" → menu → wait timeout (no_reply) ──
   // ไม่ทดสอบ timeout จริงเพราะรอ 5 นาที — ทดสอบแค่ว่า checkWaitTimeouts รันไม่พัง
+  // ⚡ Phase 2D — required scope snapshot (e2e shop อยู่ใน scope)
   console.log("\n=== D. checkWaitTimeouts รันไม่พัง ===");
-  const timeoutCount = await workflowEngine.checkWaitTimeouts();
+  const timeoutCount = await workflowEngine.checkWaitTimeouts(undefined, {
+    config: await getSystemConfig(),
+    global_enabled_since: new Date(0),
+    pairs: [{ platform: "shopee", shop_id: "test_e2e_shop", cutoff: new Date(0) }],
+  });
   assert(timeoutCount >= 0, `D: checkWaitTimeouts รันสำเร็จ (processed=${timeoutCount})`);
 
   // ─── E. ข้อความไม่ match trigger → no_match ──

@@ -1,23 +1,12 @@
-// Conversation service — real per-conversation storage (fixes the
-// "multichat" gap: each conversation now has its own persisted history
-// in MongoDB instead of the client re-sending everything or using mock data).
-//
-// Collection shape mirrors the indexes already provisioned on `conversations`:
-//   shop_id_1, conversation_id_1, shop_id_1_conversation_id_1,
-//   platform_1_shop_id_1_pinned_-1_last_message_timestamp_-1,
-//   platform_1_shop_id_1_unread_count_1_pinned_-1_last_message_timestamp_-1,
-//   shop_id_1_to_name_1
+// Conversation service — raw conversations(_shp) doc access.
+// ⚡ ownership/status/pinned/topic/item_ids live in status_conversation (meta) —
+//   raw conversations fields are dump-owned and never authoritative.
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
-import { logAdminEvent } from "./adminLogService";
-import { closeHistoryService } from "./closeHistoryService";
-import { safeRegexSearch } from "../lib/regexEscape";
-// ⚡ Phase 2J — admin-owned fields เก็บใน conversation_admin_meta (ไม่โดน dump ทับ)
 import { statusConversationService } from "./statusConversationService";
 
 export type Platform = "shopee" | "tiktok" | "lazada";
-// "open" = แชทเปิดอยู่ (ใหม่หรือ reopen), "closed" = แอดมินปิดแล้ว
-// เก็บค่าเดิมไว้ backward compat: bot/handoff/resolved/pending
+// "open" = แชทเปิดอยู่, "closed" = แอดมินปิดแล้ว — meta statuses: bot/handoff/resolved/pending
 export type ConversationStatus = "open" | "closed" | "bot" | "handoff" | "resolved" | "pending";
 
 // ประเภทปัญหา — ใช้ตอนปิดแชท
@@ -46,72 +35,12 @@ export interface ConversationDoc extends Document {
   unread_count: number;
   last_message_text: string;
   last_message_timestamp: Date;
-  assigned_to?: string; // admin_id
+  assigned_to?: string; // dump field — not authoritative (meta owns assignment)
   created_at: Date;
   updated_at: Date;
-  // Phase 5 — close tracking
   closed_at?: Date | null;
-  closed_by?: string; // admin_id
-  close_count?: number; // จำนวนครั้งที่ปิดแล้วเปิดใหม่
-}
-
-function genConversationId(): string {
-  return "conv_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-}
-
-export async function createConversation(opts: {
-  shopId: string;
-  shopName: string;
-  platform: Platform;
-  customerId: string;
-  toName: string;
-  customerAvatar?: string;
-  itemIds?: string[];
-}): Promise<ConversationDoc> {
-  const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
-  const now = new Date();
-  const doc: ConversationDoc = {
-    conversation_id: genConversationId(),
-    shop_id: opts.shopId,
-    shop_name: opts.shopName,
-    platform: opts.platform,
-    customer_id: opts.customerId,
-    to_name: opts.toName,
-    customer_avatar: opts.customerAvatar,
-    status: "open",
-    item_ids: opts.itemIds || [],
-    pinned: false,
-    unread_count: 0,
-    last_message_text: "",
-    last_message_timestamp: now,
-    created_at: now,
-    updated_at: now,
-    closed_at: null,
-    close_count: 0,
-  };
-  await coll.insertOne(doc);
-  return doc;
-}
-
-/** Find an existing open conversation for a customer, or create one. Used by
- * the data writer layer so each (shop, customer) pair maps to one active thread. */
-export async function findOrCreateConversation(opts: {
-  shopId: string;
-  shopName: string;
-  platform: Platform;
-  customerId: string;
-  toName: string;
-  customerAvatar?: string;
-}): Promise<ConversationDoc> {
-  const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
-  // หา conversation ที่ยังไม่ปิด — ถ้ามี closed อยู่ จะไม่ reuse (ต้อง reopen แทน)
-  const existing = await coll.findOne({
-    shop_id: opts.shopId,
-    customer_id: opts.customerId,
-    status: { $nin: ["closed", "resolved"] },
-  });
-  if (existing) return existing;
-  return createConversation(opts);
+  closed_by?: string;
+  close_count?: number;
 }
 
 export async function getConversation(conversationId: string): Promise<ConversationDoc | null> {
@@ -119,98 +48,13 @@ export async function getConversation(conversationId: string): Promise<Conversat
   return coll.findOne({ conversation_id: conversationId });
 }
 
-export async function listConversations(opts: {
-  platform?: Platform;
-  shopId?: string;
-  status?: ConversationStatus;
-  search?: string;
-  limit?: number;
-  cursor?: { ts: Date; id: string };       // ⚡ compound cursor — timestamp + conversation_id (tiebreaker)
-  conversationIds?: string[];              // ⚡ filter by conversation_id (for assigned_to)
-  excludeConversationIds?: string[];       // ⚡ exclude conversation_ids (for unassigned)
-} = {}): Promise<ConversationDoc[]> {
-  const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
-  const filter: Record<string, unknown> = {};
-  if (opts.platform) filter.platform = opts.platform;
-  if (opts.shopId) filter.shop_id = opts.shopId;
-  if (opts.status) filter.status = opts.status;
-  // ⚡ compound cursor — กันข้ามแชทที่มี timestamp เดียวกัน
-  //   sort: { pinned:-1, last_message_timestamp:-1, conversation_id:-1 }
-  //   cursor filter: (ts < cursor.ts) OR (ts = cursor.ts AND conversation_id < cursor.id)
-  if (opts.cursor) {
-    filter.$or = [
-      { last_message_timestamp: { $lt: opts.cursor.ts } },
-      { last_message_timestamp: opts.cursor.ts, conversation_id: { $lt: opts.cursor.id } },
-    ];
-  }
-  // ⚡ assigned_to filter — กรองใน Mongo ไม่ใช่ใน JS (กัน paginate แล้วเหลือน้อยเกิน)
-  //   สำคัญ: conversationIds ถูกส่งมาแม้เป็น [] ต้อง filter จริง ($in: [] match ไม่มีเลย)
-  //   — ถ้าปล่อย [] เป็น no-filter admin ที่ไม่มีงานจะเห็นแชททั้งหมด
-  if (opts.conversationIds !== undefined) {
-    filter.conversation_id = { $in: opts.conversationIds };
-  }
-  if (opts.excludeConversationIds && opts.excludeConversationIds.length > 0) {
-    const existing = filter.conversation_id as Record<string, unknown> | undefined;
-    filter.conversation_id = { ...(existing || {}), $nin: opts.excludeConversationIds };
-  }
-  if (opts.search) {
-    // 🔒 escape regex metacharacters ป้องกัน $regex injection / ReDoS
-    const safeSearch = safeRegexSearch(opts.search);
-    if (safeSearch) {
-      // ถ้ามี cursor $or อยู่แล้ว → ต้องใช้ $and รวม search $or
-      if (filter.$or) {
-        filter.$and = [
-          { $or: filter.$or },
-          { $or: [
-            { to_name: { $regex: safeSearch, $options: "i" } },
-            { last_message_text: { $regex: safeSearch, $options: "i" } },
-            { shop_name: { $regex: safeSearch, $options: "i" } },
-          ]},
-        ];
-        delete filter.$or;
-      } else {
-        filter.$or = [
-          { to_name: { $regex: safeSearch, $options: "i" } },
-          { last_message_text: { $regex: safeSearch, $options: "i" } },
-          { shop_name: { $regex: safeSearch, $options: "i" } },
-        ];
-      }
-    }
-  }
-  return coll
-    .find(filter)
-    .sort({ pinned: -1, last_message_timestamp: -1, conversation_id: -1 })
-    .limit(opts.limit || 200)
-    .toArray();
-}
-
 export async function updateConversationStatus(
   conversationId: string,
   status: ConversationStatus,
-  assignedTo?: string,
+  assignedTo?: string | null,
   actor?: string
 ): Promise<boolean> {
-  // ⚡ Phase 2J — เขียน status/assigned_to ลง meta (ไม่ใช่ conversations ที่โดน dump ทับ)
   return statusConversationService.updateStatus(conversationId, status, assignedTo, actor);
-}
-
-// ⚡ Phase 2M — เพิ่ม actor parameter เพื่อเขียน log (ใครทำอะไร)
-export async function setConversationTopic(conversationId: string, topic: string, actor?: string): Promise<boolean> {
-  // ⚡ Phase 2J — topic เก็บใน meta
-  await statusConversationService.setTopic(conversationId, topic, actor);
-  return true;
-}
-
-export async function setConversationItemIds(conversationId: string, itemIds: string[], actor?: string): Promise<boolean> {
-  // ⚡ Phase 2J — item_ids เก็บใน meta
-  await statusConversationService.setItemIds(conversationId, itemIds, actor);
-  return true;
-}
-
-export async function togglePinned(conversationId: string, pinned: boolean, actor?: string): Promise<boolean> {
-  // ⚡ Phase 2J — pinned เก็บใน meta
-  await statusConversationService.togglePinned(conversationId, pinned, actor);
-  return true;
 }
 
 /** Bump last_message preview + timestamp, and increment unread_count unless
@@ -232,22 +76,10 @@ export async function touchLastMessage(
   await coll.updateOne({ conversation_id: conversationId }, update);
 }
 
-export async function resetUnread(conversationId: string): Promise<void> {
-  const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
-  await coll.updateOne({ conversation_id: conversationId }, { $set: { unread_count: 0 } });
-}
-
 export const conversationService = {
-  createConversation,
-  findOrCreateConversation,
   getConversation,
-  listConversations,
   updateConversationStatus,
-  setConversationTopic,
-  setConversationItemIds,
-  togglePinned,
   touchLastMessage,
-  resetUnread,
   closeConversation,
   reopenConversation,
 };
@@ -261,7 +93,6 @@ export async function closeConversation(opts: {
   resolution: string;
   note?: string;
 }): Promise<boolean> {
-  // ⚡ Phase 2J — ดึง shop_id/customer_id จาก conversations (dump) แต่เขียน close ลง meta
   const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
   const conv = await coll.findOne({ conversation_id: opts.conversationId });
   if (!conv) return false;
@@ -278,9 +109,7 @@ export async function closeConversation(opts: {
   });
 }
 
-/** เปิดแชทใหม่ — ใช้ตอนบอทส่งต่อแอดมิน หรือ แอดมินเปิด手动
- *  ⚡ Phase 2N — targetStatus: "handoff" (default) หรือ "bot" (บอท reopen ตอนลูกค้าทักกลับมา)
- */
+/** เปิดแชทใหม่ — targetStatus: "handoff" (แอดมิน) | "bot" (ลูกค้าทักกลับ) */
 export async function reopenConversation(opts: {
   conversationId: string;
   reopenedBy: string; // "bot" หรือ admin_id
@@ -288,6 +117,5 @@ export async function reopenConversation(opts: {
   assignedTo?: string; // ถ้ามีการ assign ใหม่
   targetStatus?: "handoff" | "bot";
 }): Promise<boolean> {
-  // ⚡ Phase 2J — reopen เขียนลง meta
   return statusConversationService.reopenConversation(opts);
 }

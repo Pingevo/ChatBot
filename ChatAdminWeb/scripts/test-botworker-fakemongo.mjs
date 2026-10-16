@@ -10,6 +10,7 @@
 export const COLLECTIONS = {
   conversations: "conversations",
   messages: "messages",
+  shops: "shops", // ⚡ Phase 2D — botworker scope resolver reads shops coll
   bufferMessages: "buffer_messages",
   chatProcessing: "chat_processing",
   shadowReplies: "shadow_replies",
@@ -39,7 +40,7 @@ const OID_CHARS = "0123456789abcdef";
 
 /**
  * @param {object} state — caller-owned mutable state; fields consulted lazily:
- *   findHook/findOneHook/updateOneHook/findOneAndUpdateHook?: (coll, filter, update?) => any — race seams
+ *   findHook/findOneHook/insertOneHook/updateOneHook/findOneAndUpdateHook?: (coll, filter, update?) => any — race/error-injection seams
  *   uniqueKeys?: Record<string,string[]>,
  *   onInsert?: (name, doc) => void — side counter hooks
  *   onQuery?: (coll, op, filter) => void — query counter (find/findOne/count/insert/update/delete/distinct)
@@ -94,6 +95,10 @@ export function createFakeMongo(state = {}) {
     if (cond instanceof RegExp) return typeof v === "string" && cond.test(v);
     // Mongo: ค่า null ใน filter match ทั้ง missing field และ null
     if (cond === null) return v == null;
+    // Mongo compares ObjectId by value — intercept ก่อน operator-object branch
+    if (cond && typeof cond === "object" && typeof cond.equals === "function") {
+      return !!(v && typeof v.equals === "function" && v.equals(cond));
+    }
     if (cond !== null && typeof cond === "object" && !(cond instanceof Date) && !Array.isArray(cond)) {
       for (const [op, operand] of Object.entries(cond)) {
         if (op === "$ne") { if (v === operand || (operand == null && v == null)) return false; continue; }
@@ -113,6 +118,8 @@ export function createFakeMongo(state = {}) {
       return true;
     }
     if (Array.isArray(v)) return v.includes(cond);
+    // Mongo compares Date by value, not identity
+    if (v instanceof Date && cond instanceof Date) return v.getTime() === cond.getTime();
     return v === cond;
   }
 
@@ -161,6 +168,73 @@ export function createFakeMongo(state = {}) {
     }
   }
 
+  // aggregation expression eval — scope: field refs + ops used by routes
+  function evalExpr(expr, doc) {
+    if (typeof expr === "string" && expr.startsWith("$")) return val(doc, expr.slice(1));
+    if (expr && typeof expr === "object" && !Array.isArray(expr)) {
+      if (expr.$ifNull) {
+        for (const e of expr.$ifNull) { const v = evalExpr(e, doc); if (v != null) return v; }
+        return null;
+      }
+      if (expr.$eq) { const [a, b] = expr.$eq.map((e) => evalExpr(e, doc)); return a === b; }
+      if (expr.$ne) { const [a, b] = expr.$ne.map((e) => evalExpr(e, doc)); return a !== b; }
+      if (expr.$in) { const [a, arr] = [evalExpr(expr.$in[0], doc), expr.$in[1]]; return Array.isArray(arr) && arr.includes(a); }
+      if (expr.$cond) { const [c, t, f] = expr.$cond; return evalExpr(c, doc) ? evalExpr(t, doc) : evalExpr(f, doc); }
+    }
+    return expr;
+  }
+
+  function groupDocs(docs, spec) {
+    const groups = new Map();
+    const isPlainIdObj = (e) =>
+      e && typeof e === "object" && !Array.isArray(e) && !(e instanceof Date) &&
+      !Object.keys(e).some((k) => k.startsWith("$"));
+    for (const d of docs) {
+      // composite _id object → evaluate each sub-expression (e.g. {s:"$status", o:"$assigned_to"})
+      const id = isPlainIdObj(spec._id)
+        ? Object.fromEntries(Object.entries(spec._id).map(([k, v]) => [k, evalExpr(v, d)]))
+        : evalExpr(spec._id, d) ?? null;
+      const key = JSON.stringify(id);
+      if (!groups.has(key)) groups.set(key, { _id: id, __docs: [] });
+      groups.get(key).__docs.push(d);
+    }
+    return [...groups.values()].map((g) => {
+      const out = { _id: g._id };
+      for (const [k, acc] of Object.entries(spec)) {
+        if (k === "_id") continue;
+        if (acc && acc.$sum !== undefined) {
+          out[k] = g.__docs.reduce((n, d) => n + (Number(evalExpr(acc.$sum, d)) || 0), 0);
+        } else if (acc && acc.$max !== undefined) {
+          out[k] = g.__docs.reduce((m, d) => { const v = evalExpr(acc.$max, d); return m === undefined || v > m ? v : m; }, undefined);
+        } else if (acc && acc.$min !== undefined) {
+          out[k] = g.__docs.reduce((m, d) => { const v = evalExpr(acc.$min, d); return m === undefined || v < m ? v : m; }, undefined);
+        } else if (acc && acc.$push !== undefined) {
+          out[k] = g.__docs.map((d) => evalExpr(acc.$push, d));
+        } else if (acc && acc.$first !== undefined) {
+          out[k] = evalExpr(acc.$first, g.__docs[0]);
+        } else if (acc && acc.$last !== undefined) {
+          out[k] = evalExpr(acc.$last, g.__docs[g.__docs.length - 1]);
+        } else {
+          throw new Error("fake mongo: unsupported group accumulator " + JSON.stringify(acc));
+        }
+      }
+      return out;
+    });
+  }
+
+  // multi-key sort — shared by find() cursor และ aggregate $sort stage
+  function sortDocs(docs, spec) {
+    const entries = Array.isArray(spec) ? spec : Object.entries(spec || {});
+    return [...docs].sort((a, b) => {
+      for (const [k, dir] of entries) {
+        const av = val(a, k) ?? 0, bv = val(b, k) ?? 0;
+        if (av < bv) return dir === -1 ? 1 : -1;
+        if (av > bv) return dir === -1 ? -1 : 1;
+      }
+      return 0;
+    });
+  }
+
   function applyProject(docs, spec) {
     const entries = Object.entries(spec || {});
     if (!entries.length) return docs;
@@ -180,7 +254,7 @@ export function createFakeMongo(state = {}) {
     async findOne(filter = {}) {
       const h = hook("findOneHook");
       if (h) await h(this.name, filter);
-      state.onQuery?.(this.name, "findOne", filter);
+      await state.onQuery?.(this.name, "findOne", filter);
       if (state.queryDelayMs) await new Promise((r) => setTimeout(r, state.queryDelayMs));
       const d = this.docs.find((d) => matches(d, filter));
       return d ? structuredClone(d) : null;
@@ -194,21 +268,12 @@ export function createFakeMongo(state = {}) {
         limit(n) { limited = n; return cursor; },
         project(spec) { proj = spec; return cursor; },
         async toArray() {
-          state.onQuery?.(self.name, "find", filter);
+          await state.onQuery?.(self.name, "find", filter);
           const h = hook("findHook");
           if (h) await h(self.name, filter);
           if (state.queryDelayMs) await new Promise((r) => setTimeout(r, state.queryDelayMs));
           let docs = self.docs.filter((d) => matches(d, filter));
-          if (sorted) {
-            docs = [...docs].sort((a, b) => {
-              for (const [k, dir] of sorted) {
-                const av = val(a, k) ?? 0, bv = val(b, k) ?? 0;
-                if (av < bv) return dir === -1 ? 1 : -1;
-                if (av > bv) return dir === -1 ? -1 : 1;
-              }
-              return 0;
-            });
-          }
+          if (sorted) docs = sortDocs(docs, sorted);
           if (skipped) docs = docs.slice(skipped);
           if (limited != null) docs = docs.slice(0, limited);
           if (proj) docs = applyProject(docs, proj);
@@ -218,7 +283,9 @@ export function createFakeMongo(state = {}) {
       return cursor;
     }
     async insertOne(doc) {
-      state.onQuery?.(this.name, "insertOne", doc);
+      const h = hook("insertOneHook");
+      if (h) await h(this.name, doc);
+      await state.onQuery?.(this.name, "insertOne", doc);
       enforceUnique(this.name, doc);
       if (doc._id === undefined) doc._id = genOid();
       this.docs.push(doc);
@@ -233,7 +300,7 @@ export function createFakeMongo(state = {}) {
     async updateOne(filter, update, opts = {}) {
       const h = hook("updateOneHook");
       if (h) await h(this.name, filter, update);
-      state.onQuery?.(this.name, "updateOne", filter);
+      await state.onQuery?.(this.name, "updateOne", filter);
       const d = this.docs.find((d) => matches(d, filter));
       if (d) {
         applyUpdate(d, update, false);
@@ -254,6 +321,7 @@ export function createFakeMongo(state = {}) {
       return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedCount: 0 };
     }
     async updateMany(filter, update, opts = {}) {
+      await state.onQuery?.(this.name, "updateMany", filter);
       const h = hook("updateManyHook");
       if (h && (await h(this.name, filter, update)) === "skip") {
         return { acknowledged: true, matchedCount: 0, modifiedCount: 0 }; // veto — simulate CAS miss
@@ -267,7 +335,7 @@ export function createFakeMongo(state = {}) {
     async findOneAndUpdate(filter, update, opts = {}) {
       const h = hook("findOneAndUpdateHook");
       if (h) await h(this.name, filter);
-      state.onQuery?.(this.name, "findOneAndUpdate", filter);
+      await state.onQuery?.(this.name, "findOneAndUpdate", filter);
       const d = this.docs.find((d) => matches(d, filter));
       if (!d) {
         if (opts.upsert) {
@@ -289,12 +357,14 @@ export function createFakeMongo(state = {}) {
       return opts.returnDocument === "after" ? structuredClone(d) : before;
     }
     async deleteMany(filter = {}) {
+      await state.onQuery?.(this.name, "deleteMany", filter);
       const docs = this.docs;
       const before = docs.length;
       for (let i = docs.length - 1; i >= 0; i--) if (matches(docs[i], filter)) docs.splice(i, 1);
       return { acknowledged: true, deletedCount: before - docs.length };
     }
     async deleteOne(filter = {}) {
+      await state.onQuery?.(this.name, "deleteOne", filter);
       const h = hook("deleteOneHook");
       if (h) await h(this.name, filter);
       const i = this.docs.findIndex((d) => matches(d, filter));
@@ -303,16 +373,62 @@ export function createFakeMongo(state = {}) {
       return { acknowledged: true, deletedCount: 1 };
     }
     async distinct(field, filter = {}) {
+      await state.onQuery?.(this.name, "distinct", filter);
       return [...new Set(this.docs.filter((d) => matches(d, filter)).map((d) => val(d, field)).filter((v) => v !== undefined))];
     }
     async countDocuments(filter = {}) {
-      state.onQuery?.(this.name, "countDocuments", filter);
+      await state.onQuery?.(this.name, "countDocuments", filter);
       if (state.queryDelayMs) await new Promise((r) => setTimeout(r, state.queryDelayMs));
       return this.docs.filter((d) => matches(d, filter)).length;
     }
-    async estimatedDocumentCount() { return this.docs.length; }
+    async estimatedDocumentCount() { await state.onQuery?.(this.name, "estimatedDocumentCount", {}); return this.docs.length; }
     async indexes() { return []; }
-    aggregate() { throw new Error(`fake mongo: aggregate not supported (${this.name})`); }
+    aggregate(pipeline = []) {
+      const self = this;
+      // onQuery ต้อง fire ตอน call (ไม่ใช่ตอน consume) — instrumentation contract:
+      //   attempt นับแม้ cursor ไม่ถูก iterate (M-INT meta-test)
+      const fire = state.onQuery?.(self.name, "aggregate", pipeline);
+      return {
+        async toArray() {
+          await fire;
+          let docs = self.docs.slice();
+          for (const stage of pipeline) {
+            if (stage.$match) docs = docs.filter((d) => matches(d, stage.$match));
+            else if (stage.$group) docs = groupDocs(docs, stage.$group);
+            else if (stage.$sort) docs = sortDocs(docs, stage.$sort);
+            else if (stage.$limit !== undefined) docs = docs.slice(0, stage.$limit);
+            else if (stage.$skip !== undefined) docs = docs.slice(stage.$skip);
+            else if (stage.$project) docs = applyProject(docs, stage.$project);
+            else if (stage.$lookup) {
+              const { from, localField, foreignField, as } = stage.$lookup;
+              const foreign = fakeColl(from);
+              docs = docs.map((d) => ({
+                ...d,
+                [as]: foreign.filter((f) => val(f, foreignField) === val(d, localField)),
+              }));
+            }
+            else if (stage.$unwind) {
+              const path = typeof stage.$unwind === "string" ? stage.$unwind : stage.$unwind.path;
+              const key = path.startsWith("$") ? path.slice(1) : path;
+              const preserveEmpty = typeof stage.$unwind === "object" && stage.$unwind.preserveNullAndEmptyArrays === true;
+              const out = [];
+              for (const d of docs) {
+                const arr = val(d, key);
+                if (!Array.isArray(arr) || arr.length === 0) {
+                  if (preserveEmpty) out.push(d);
+                  continue;
+                }
+                for (const el of arr) { const c = { ...d }; setPath(c, key, el); out.push(c); }
+              }
+              docs = out;
+            }
+            else if (stage.$count) docs = [{ [stage.$count]: docs.length }];
+            else throw new Error(`fake mongo: aggregate stage unsupported (${Object.keys(stage)})`);
+          }
+          return docs.map((d) => structuredClone(d));
+        },
+      };
+    }
   }
 
   async function getCollection(name) { return new FakeCollection(name); }

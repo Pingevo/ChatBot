@@ -4,7 +4,7 @@
 import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error } from "@/backend/lib/http";
-import { handoffService } from "@/backend/service/handoffService";
+import { handoffService, handoffOutcomeHttpStatus } from "@/backend/service/handoffService";
 import { conversationService } from "@/backend/service/conversationService";
 import { invalidateConversationsCache } from "@/app/api/admin/conversations/route";
 // ⚡ G-fix — invalidate botworker cache ด้วย (dynamic import กัน circular dep)
@@ -29,7 +29,7 @@ export async function POST(
   if (!conv) return error("conversation not found", 404);
 
   // ℹ️ Shared inbox — admin ทุกคน handoff ได้
-  const result = await handoffService.handoffToAdmin({
+  const outcome = await handoffService.handoffToAdmin({
     conversationId,
     platform: conv.platform,
     shopId: conv.shop_id,
@@ -38,5 +38,14 @@ export async function POST(
 
   invalidateConversationsCache();
   invalidateBotworkerCache();
-  return json({ ok: true, ...result });
+  // ⚡ failed/emit_incomplete ห้าม 2xx (route contract เดียวกับ bot-handoff)
+  const httpStatus = handoffOutcomeHttpStatus(outcome);
+  return json({
+    ok: httpStatus < 300,
+    outcome,
+    assigned_to: outcome.assigned_to,
+    assigned_to_name: outcome.assigned_to_name,
+    reopened: outcome.reopened,
+    assignment_reason: outcome.reason,
+  }, httpStatus);
 }

@@ -19,9 +19,8 @@
 //   --skip-done     ข้าม conversation ที่มี shadow_replies แล้ว (default: true)
 
 import "dotenv/config";
-import { MongoClient } from "mongodb";
+import { getDb } from "../src/backend/db/mongoClient";
 import { shadowReplyService } from "../src/backend/service/shadowReplyService";
-import { listConversations } from "../src/backend/service/conversationService";
 import { listMessages } from "../src/backend/service/messageService";
 import { serverConfig } from "../src/backend/lib/config";
 import { getBotProductLimit } from "../src/backend/service/systemConfigService";
@@ -138,20 +137,10 @@ async function callOurBot(params: {
 }
 
 // ── helper: หา conversation ที่ยังไม่ได้ generate ──
-async function getAlreadyGeneratedConvIds(): Promise<Set<string>> {
-  const uri = process.env.ADMIN_MONGO_URI || "";
-  if (!uri) throw new Error("ADMIN_MONGO_URI not set");
-  const dbName = process.env.ADMIN_MONGO_DB || "chatbot";
-  const client = new MongoClient(uri);
-  try {
-    await client.connect();
-    const db = client.db(dbName);
-    const collName = process.env.ADMIN_MONGO_COLLECTION_SHADOW_REPLIES || "shadow_replies";
-    const distinct = await db.collection(collName).distinct("conversation_id", {});
-    return new Set(distinct as string[]);
-  } finally {
-    await client.close();
-  }
+async function getAlreadyGeneratedConvIds(db: import("mongodb").Db): Promise<Set<string>> {
+  const collName = process.env.ADMIN_MONGO_COLLECTION_SHADOW_REPLIES || "shadow_replies";
+  const distinct = await db.collection(collName).distinct("conversation_id", {});
+  return new Set(distinct as string[]);
 }
 
 // ── helper: นับ user inbound messages ใน conversation ──
@@ -169,17 +158,22 @@ async function main() {
   console.log("╚══════════════════════════════════════════════════════════╝");
   console.log("");
 
+  // ⚡ DB owner เดียวกับ listMessages/shadowReplyService (getDb singleton)
+  //   ปิดใน finally ทุก path (รวม dry-run/early return); close error ไม่ mask op error
+  const db = await getDb();
+  try {
+
   // 1. โหลด conversations ทั้งหมด
   console.log("→ โหลด conversations ทั้งหมด...");
-  const allConvs = await listConversations({
-    platform: platformArg,
-    limit: 100000,
-  });
+  const allConvs = await db.collection(serverConfig.collections.conversations)
+    .find(platformArg ? { platform: platformArg } : {})
+    .limit(100000)
+    .toArray();
   console.log(`  พบ ${allConvs.length} conversations${platformArg ? ` (${platformArg})` : ""}`);
 
   // 2. หา conversations ที่ generate แล้ว
   console.log("→ เช็ค conversations ที่ generate แล้ว...");
-  const doneIds = await getAlreadyGeneratedConvIds();
+  const doneIds = await getAlreadyGeneratedConvIds(db);
   console.log(`  ทำแล้ว: ${doneIds.size} conversations`);
 
   // 3. กรองเฉพาะที่ยังไม่ได้ทำ และมี user inbound
@@ -313,6 +307,15 @@ async function main() {
   console.log("");
   console.log(`  → ดูผลได้ที่หน้า Shadow Inbox → tab History`);
   console.log("");
+  } finally {
+    // close error แยกจับ — ห้าม throw ทับ operation error ที่กำลัง propagate
+    try {
+      await db.client.close();
+    } catch (e) {
+      console.error("⚠️ mongo close failed:", e);
+      process.exitCode = 1;
+    }
+  }
 }
 
 main().catch((e) => {

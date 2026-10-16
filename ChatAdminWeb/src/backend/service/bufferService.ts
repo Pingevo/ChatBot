@@ -8,11 +8,13 @@
 //   - timer map (in-memory) — debounce timer per conversation_id
 //   - ตอนเข้า buffer → insert ลง buffer_messages (ยังไม่ mark chat_processing)
 //   - ตอน flush → รวมข้อความ → processMessage → mark chat_processing ปกติ → ลบจาก buffer_messages
-//   - ตอน boot → recover stale buffers (flush เลย ไม่รอ)
+//   - ตอน boot → recover stale buffers = reconcile-only (ไม่ flush — provider=0)
+//   - flush technical failure → rows dormant "failed" → ข้อความใหม่ distinct ใน
+//     conv เดียวกันเท่านั้นที่ carry-forward เข้า batch ใหม่ (ไม่มี retry timer)
 //
 // ⚠️ ปลอดภัย:
 //   - ไม่ mark chat_processing ตอนเข้า buffer (กัน isProcessed ขัดกับ processMessage)
-//   - ถ้า bot-worker restart ข้อความใน buffer_messages ยังอยู่ → recover ตอน boot
+//   - ถ้า bot-worker restart ข้อความใน buffer_messages ยังอยู่ → reconcile ตอน boot
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { logAdminEvent } from "./adminLogService";
@@ -23,6 +25,9 @@ import {
   claimIdFor,
   batchIdFor,
   convLockIdFor,
+  withScope,
+  resolveBotworkerScope,
+  type BotworkerCycleScope,
   type ClaimContext,
 } from "./botworkerRuntime";
 
@@ -43,8 +48,17 @@ export interface BufferMessageDoc extends Document {
   fencing_token?: number;
   // ── batch transition fields ──
   kind?: string;                // "message" rows เท่านั้น — lock docs ใช้ kind:"conv_lock"
-  status?: "buffered" | "processing";
+  // buffered = รอ debounce/flush · processing = batch flush กำลังทำ
+  // failed = dormant (technical failure — ไม่ retry เอง; ข้อความใหม่ distinct
+  //   ใน conv เดียวกันเท่านั้นที่ carry ต่อ) · quarantined = attempt cap หมด (terminal)
+  status?: "buffered" | "processing" | "failed" | "quarantined";
   batch_id?: string;
+  error?: string;               // technical failure class ของ dormant row
+  failed_at?: Date;
+  // ── delayed-execution admission proof (PART B correction) ──
+  msg_created_at?: Date;        // inbound created_timestamp — flush revalidates > cutoff
+  admitted_edge?: Date | null;  // global era edge ณ admission (resolve scope ตอน flush)
+  carried?: boolean;            // carry-forward revive — bypass cutoff (wake = inbound ใหม่แล้ว)
 }
 
 // ─── Conversation lock doc (kind:"conv_lock" — query แยกจาก message rows) ──
@@ -108,8 +122,10 @@ function extractMediaUrls(rawPayload: unknown): string[] {
   return [];
 }
 
-// ─── In-memory timer map (per conversation) ───────────────
+// ─── In-memory timer map (per exact tuple) ───────────────
 // timer อยู่ใน memory (ไม่ใช่ DB) — ถ้า restart หาย แต่ recover ตอน boot ช่วยได้
+// ⚡ key = convLockIdFor(platform, shop_id, conversation_id) — tuple เดียวกับ
+//   lock/batch/rows เสมอ (conversation_id เดียวข้าม shop/platform ห้ามชนกัน)
 const bufferTimers = new Map<string, NodeJS.Timeout>();
 
 // ─── Insert message into buffer_messages collection ───────
@@ -121,8 +137,10 @@ async function insertToBuffer(msg: {
   platform: Platform;
   text: string;
   raw_payload?: unknown;
+  created_timestamp?: Date;
+  admitted_edge?: Date | null;
   claimContext?: ClaimContext;
-}): Promise<void> {
+}): Promise<"inserted" | "duplicate"> {
   const coll = await getCollection<BufferMessageDoc>(COLLECTIONS.bufferMessages);
   try {
     await coll.insertOne({
@@ -133,6 +151,9 @@ async function insertToBuffer(msg: {
       text: msg.text,
       raw_payload: msg.raw_payload,
       received_at: new Date(),
+      // ⚡ admission proof — flush boundary เช็ค msg_created_at > current cutoff
+      msg_created_at: msg.created_timestamp,
+      admitted_edge: msg.admitted_edge ?? null,
       // ⚡ claim ก่อนเข้า buffer เสมอ — row ถือ ClaimContext ไปให้ batch processor
       kind: "message",
       status: "buffered",
@@ -140,20 +161,27 @@ async function insertToBuffer(msg: {
       owner_id: msg.claimContext?.owner_id,
       fencing_token: msg.claimContext?.fencing_token,
     });
+    return "inserted";
   } catch (e) {
     // row มีอยู่แล้ว (re-poll ขณะ claim processing) → ไม่ re-buffer ซ้ำ
-    if ((e as { code?: number }).code === 11000) return;
+    // ⚡ duplicate ต้องแยกจาก new activity — caller ห้าม re-arm debounce จาก insert ซ้ำ
+    if ((e as { code?: number }).code === 11000) return "duplicate";
     throw e;
   }
 }
 
-// ─── Get buffered messages for a conversation ─────────────
-// อ่านเฉพาะ message rows (status buffered) — ห้ามดูด lock docs เข้า batch
+// ─── Get buffered messages for an exact tuple ─────────────
+// อ่านเฉพาะ message rows (status buffered) ของ (platform, shop_id, conversation_id)
+// เท่านั้น — ห้ามดูด lock docs เข้า batch ห้ามข้าม shop/platform
 
-async function getBufferedMessages(conversationId: string): Promise<BufferMessageDoc[]> {
+async function getBufferedMessages(
+  platform: Platform,
+  shopId: string,
+  conversationId: string
+): Promise<BufferMessageDoc[]> {
   const coll = await getCollection<BufferMessageDoc>(COLLECTIONS.bufferMessages);
   return coll
-    .find({ conversation_id: conversationId, status: "buffered", kind: { $ne: "conv_lock" } })
+    .find({ conversation_id: conversationId, shop_id: shopId, platform, status: "buffered", kind: { $ne: "conv_lock" } })
     .sort({ received_at: 1 })
     .toArray();
 }
@@ -172,9 +200,9 @@ async function deleteBatchRows(messageIds: string[]): Promise<void> {
 // expired lease → reclaim ด้วย fenced update บน doc เดิม
 
 async function acquireConvLock(
-  conversationId: string,
+  platform: Platform,
   shopId: string,
-  platform: Platform
+  conversationId: string
 ): Promise<{ lockId: string; fencingToken: number } | null> {
   const coll = await getCollection<ConvLockDoc>(COLLECTIONS.bufferMessages);
   const lockId = convLockIdFor(platform, shopId, conversationId);
@@ -217,13 +245,13 @@ async function releaseConvLock(lockId: string, fencingToken: number): Promise<vo
   await coll.deleteMany({ _id: lockId, owner_id: botworkerRuntime.ownerId, fencing_token: fencingToken });
 }
 
-// ─── Clear timer for a conversation ───────────────────────
+// ─── Clear timer for an exact tuple ───────────────────────
 
-function clearTimer(conversationId: string): void {
-  const timer = bufferTimers.get(conversationId);
+function clearTimer(tupleKey: string): void {
+  const timer = bufferTimers.get(tupleKey);
   if (timer) {
     clearTimeout(timer);
-    bufferTimers.delete(conversationId);
+    bufferTimers.delete(tupleKey);
   }
 }
 
@@ -231,32 +259,125 @@ function clearTimer(conversationId: string): void {
 //   drain (waitForInFlight) รอจนจบ; clear ใน finally-equivalent เสมอ (ไม่ใช่ queue/scheduler)
 const activeFlushes = new Set<Promise<unknown>>();
 
-// retry timer สำหรับ flush ที่แพ้ lock / error — ข้อความไม่หาย รอ batch ถัดไป
-// ⚡ cadence ต่างกัน: lock contention = 50ms (winner ปล่อยเร็ว) /
-//    flush error หรือ finalize ไม่ครบ = flushErrorRetryMs (backoff)
-const flushRetryTimers = new Map<string, NodeJS.Timeout>();
-const LOCK_RETRY_MS = 50;
+// ⚡ NO autonomous flush timers — lock contention และ foreign-claim ไม่มี retry/
+//   recheck loop: lock loser skip เปล่า (winner hand-off arm debounce ให้ leftover
+//   rows หลัง release); foreign lease expiry → recovery reconcile ไม่ใช่ re-exec
 
-function scheduleFlushRetry(
-  conversationId: string,
-  processMessage: ProcessMessageFn,
-  markProcessed: MarkProcessedFn,
-  delayMs: number = botworkerRuntime.flushErrorRetryMs,
-  signal?: AbortSignal
-): void {
-  // ⚡ retry scheduling คือ side-effect boundary — cancelled run ห้ามฝาก timer ไว้
-  if (signal?.aborted) return;
-  if (flushRetryTimers.has(conversationId)) return;
-  flushRetryTimers.set(
-    conversationId,
-    setTimeout(() => {
-      flushRetryTimers.delete(conversationId);
-      // ⚡ callback ต้องถือ signal เดิม — abort ที่มาหลัง timer fired ต้องถึง flush นี้ด้วย
-      trackedFlush(conversationId, processMessage, markProcessed, signal).catch((err) =>
-        console.error(`[buffer] retry flush error for ${conversationId}:`, err)
-      );
-    }, delayMs)
+// ─── Dormant failed state ─────────────────────────────────
+// claim doc lite (หลีกเลี่ยง circular import กับ botWorkerService —
+//   ใช้เฉพาะ status/attempt/fencing เพื่อ carry-gate)
+interface ClaimDocLite {
+  _id?: string;
+  status?: string;
+  attempt?: number;
+  fencing_token?: number;
+  error?: string;
+  owner_id?: string;
+  lease_expires_at?: Date;
+  claimed_at?: Date;
+  updated_at?: Date;
+  processed_at?: Date;
+  outcome_type?: string;
+}
+
+/** technical flush failure → rows dormant (retain payload สำหรับ carry-forward) */
+async function markRowsFailed(coll: Awaited<ReturnType<typeof getCollection<BufferMessageDoc>>>, messageIds: string[], error: string): Promise<void> {
+  if (messageIds.length === 0) return;
+  await coll.updateMany(
+    { message_id: { $in: messageIds }, kind: { $ne: "conv_lock" } },
+    { $set: { status: "failed", error, failed_at: new Date() } }
   );
+}
+
+/** dormant batch = claim+row settle หน่วยเดียว — member claims ที่ยังของเรา →
+ *   bot_failed (fenced CAS บน owner/token ที่ re-fence ไว้; foreign/stolen CAS miss)
+ *   → carry-forward ใช้ได้ทันที ไม่ต้องรอ lease expiry + recovery */
+async function settleOwnedClaimsFailed(
+  procColl: Awaited<ReturnType<typeof getCollection<ClaimDocLite>>>,
+  claimedIds: string[],
+  fencingMap: Record<string, number>,
+  error: string
+): Promise<void> {
+  const now = new Date();
+  for (const claimId of claimedIds) {
+    await procColl.updateOne(
+      { _id: claimId, owner_id: botworkerRuntime.ownerId, fencing_token: fencingMap[claimId], status: "processing" },
+      { $set: { status: "bot_failed", outcome_type: "bot_failed", error, processed_at: now, updated_at: now } }
+    );
+  }
+}
+
+/**
+ * carry-forward owner เดียว — distinct new inbound (admitted) ใน exact
+ *   (platform, shop_id, conversation_id) เดียวกันเท่านั้นที่ปลุก dormant failed batch:
+ *   revive claim bot_failed→processing (fenced CAS + attempt++) แล้ว CAS row→buffered
+ *   claim เกิน maxClaimAttempts → quarantined (ไม่ carry ตลอดกาล)
+ *   caller: bufferOrProcess เท่านั้น — poll/recovery/timer ไม่เรียก
+ */
+async function carryDormantRows(msg: {
+  conversation_id: string;
+  shop_id: string;
+  platform: Platform;
+}): Promise<number> {
+  const coll = await getCollection<BufferMessageDoc>(COLLECTIONS.bufferMessages);
+  const procColl = await getCollection<ClaimDocLite>(COLLECTIONS.chatProcessing);
+  const rows = await coll
+    .find({
+      conversation_id: msg.conversation_id,
+      shop_id: msg.shop_id,
+      platform: msg.platform,
+      status: "failed",
+      kind: { $ne: "conv_lock" },
+    })
+    .toArray();
+  let carried = 0;
+  for (const row of rows) {
+    const claimId = row.claim_id || claimIdFor(row.message_id);
+    const claim = await procColl.findOne({ _id: claimId });
+    if (!claim || claim.status !== "bot_failed") continue; // claim state อื่น = recovery owns
+    if ((claim.attempt || 1) >= botworkerRuntime.maxClaimAttempts) {
+      await coll.updateOne(
+        { message_id: row.message_id, status: "failed" },
+        { $set: { status: "quarantined" } }
+      );
+      continue;
+    }
+    // revive — fenced บน token ที่ observe; CAS lost = carrier อื่นชนะแล้ว
+    const now = new Date();
+    const ref = await procColl.findOneAndUpdate(
+      { _id: claimId, status: "bot_failed", fencing_token: claim.fencing_token },
+      {
+        $set: {
+          status: "processing",
+          owner_id: botworkerRuntime.ownerId,
+          lease_expires_at: new Date(now.getTime() + botworkerRuntime.claimLeaseMs),
+          claimed_at: now,
+          updated_at: now,
+        },
+        $inc: { fencing_token: 1, attempt: 1 },
+        $unset: { outcome_type: "", error: "", processed_at: "" },
+      },
+      { returnDocument: "after" }
+    );
+    if (!ref) continue;
+    // row กลับเข้า batch — เฉพาะ CAS บน failed เท่านั้น (identity เดิม)
+    // ⚡ carried=true — dormant row ที่ distinct inbound ปลุกแล้ว bypass cutoff
+    //   check ตอน flush (wake-up gate คือ inbound ใหม่ ไม่ใช่ created_timestamp เดิม)
+    const upd = await coll.updateOne(
+      { message_id: row.message_id, status: "failed", kind: { $ne: "conv_lock" } },
+      {
+        $set: {
+          status: "buffered",
+          owner_id: botworkerRuntime.ownerId,
+          fencing_token: ref.fencing_token,
+          carried: true,
+        },
+        $unset: { error: "", failed_at: "", batch_id: "" },
+      }
+    );
+    if (upd.matchedCount === 1) carried++;
+  }
+  return carried;
 }
 
 // ─── Flush buffer — conv lock → per-row CAS → process → member delete ──
@@ -271,7 +392,8 @@ function scheduleFlushRetry(
 //   → processClaimedMessage(combined, ctx) — core ไม่ claim ซ้ำ
 //   → core finalize member claims (fenced) → ลบเฉพาะ member rows
 //   → release lock ใน finally (fenced)
-// error → rows กลับ buffered + release lock — ข้อความไม่หาย
+// technical failure → rows dormant "failed" (retained สำหรับ carry-forward)
+//   + release lock — ไม่มี autonomous retry
 
 type ProcessMessageFn = (msg: {
   message_id: string;
@@ -282,7 +404,9 @@ type ProcessMessageFn = (msg: {
   raw_payload?: unknown;
   images?: string[];  // ⚡ Phase 1F — image URLs รวมจากทุก message ใน buffer
   claimContext?: ClaimContext;
-}) => Promise<{ status: string; detail: string; finalized: boolean; lost: boolean }>;
+  // ⚡ era/kill-switch signal — forward เข้า claim signal ของ processMessage
+  //   (queued outbound ต้องออกเมื่อ era ตาย — claimed work ห้ามเริ่ม provider call ใหม่)
+}, signal?: AbortSignal) => Promise<{ status: string; detail: string; finalized: boolean; lost: boolean }>;
 
 type MarkProcessedFn = (doc: {
   message_id: string;
@@ -292,39 +416,72 @@ type MarkProcessedFn = (doc: {
   status: "trigger_matched" | "bot_answered" | "handed_off" | "bot_failed" | "no_action" | "workflow_actioned" | "workflow_resumed" | "processing";
 }) => Promise<void>;
 
-// ⚡ trackedFlush — timer callback (debounce/retry) launch flush แบบไม่มี parent promise;
+// ⚡ trackedFlush — timer callback (debounce) launch flush แบบไม่มี parent promise;
 //   promise ต้องอยู่ใน activeFlushes เพื่อให้ shutdown drain รอ — clear เมื่อ settle เสมอ
 //   (immediate flush / recovery flush มี parent อยู่แล้ว — inFlight p / recoveryInFlight)
 function trackedFlush(
+  platform: Platform,
+  shopId: string,
   conversationId: string,
   processMessage: ProcessMessageFn,
   markProcessed: MarkProcessedFn,
   signal?: AbortSignal
 ): Promise<{ status: string; detail: string }> {
-  const p = flushBuffer(conversationId, processMessage, markProcessed, signal);
+  const p = flushBuffer(platform, shopId, conversationId, processMessage, markProcessed, signal);
   activeFlushes.add(p);
   p.then(() => activeFlushes.delete(p), () => activeFlushes.delete(p));
   return p;
 }
 
+/** scope-superseded ordinary buffered row → terminal settle (PART B):
+ *   fenced CAS claim → no_action (หน่วยเดียว) + markProcessed + delete row —
+ *   ไม่ใช่ technical failure → ห้ามกลายเป็น dormant (ไม่ carryable);
+ *   foreign-active claim → leave ให้ owner/recovery จัดการเอง */
+async function settleScopeRejectedRow(
+  row: BufferMessageDoc,
+  markProcessed: MarkProcessedFn
+): Promise<void> {
+  const procColl = await getCollection<ClaimDocLite>(COLLECTIONS.chatProcessing);
+  const coll = await getCollection<BufferMessageDoc>(COLLECTIONS.bufferMessages);
+  const claimId = row.claim_id || claimIdFor(row.message_id);
+  const now = new Date();
+  const upd = await procColl.updateOne(
+    { _id: claimId, status: "processing", owner_id: row.owner_id, fencing_token: row.fencing_token },
+    { $set: { status: "no_action", outcome_type: "no_action", error: "scope_superseded", processed_at: now, updated_at: now } }
+  );
+  if (upd.matchedCount === 1) {
+    await markProcessed({
+      message_id: row.message_id, conversation_id: row.conversation_id,
+      shop_id: row.shop_id, platform: row.platform, status: "no_action",
+    });
+    await coll.deleteOne({ message_id: row.message_id, kind: { $ne: "conv_lock" } });
+    return;
+  }
+  const c = await procColl.findOne({ _id: claimId });
+  if (c?.status === "processing") return; // foreign-active → owner/recovery owns
+  if (!c) {
+    await markProcessed({
+      message_id: row.message_id, conversation_id: row.conversation_id,
+      shop_id: row.shop_id, platform: row.platform, status: "no_action",
+    });
+  }
+  await coll.deleteOne({ message_id: row.message_id, kind: { $ne: "conv_lock" } });
+}
+
 export async function flushBuffer(
+  platform: Platform,
+  shopId: string,
   conversationId: string,
   processMessage: ProcessMessageFn,
   markProcessed: MarkProcessedFn,
   signal?: AbortSignal
 ): Promise<{ status: string; detail: string }> {
-  // ล้าง timer
-  clearTimer(conversationId);
+  const tupleKey = convLockIdFor(platform, shopId, conversationId);
+  // ล้าง timer ของ tuple นี้
+  clearTimer(tupleKey);
 
-  // ⚡ enabled boundary — debounce/retry/recovery callers ยิง flush เองได้ทุกเมื่อ
-  //   ห้ามอาศัย main-loop gate อย่างเดียว: worker ปิด → ห้าม transition row →processing ใหม่
-  const cfg = await getSystemConfig();
-  if (!cfg.bot_worker_enabled) {
-    return { status: "skip", detail: "worker disabled" };
-  }
-
-  // ดึงข้อความที่ buffer อยู่ (message rows เท่านั้น — lock docs ไม่ปน)
-  const candidates = await getBufferedMessages(conversationId);
+  // ดึงข้อความที่ buffer อยู่ของ tuple เดียวเท่านั้น (message rows — lock docs ไม่ปน)
+  const candidates = await getBufferedMessages(platform, shopId, conversationId);
   if (candidates.length === 0) {
     return { status: "skip", detail: "no buffered messages" };
   }
@@ -335,12 +492,39 @@ export async function flushBuffer(
     return { status: "skip", detail: "recovery aborted" };
   }
 
-  // ── conv lock: flusher เดียวต่อ conversation ──
-  const first = candidates[0];
-  const lock = await acquireConvLock(conversationId, first.shop_id, first.platform);
+  // ── delayed-execution admission owner เดียว (PART B) ──
+  //   debounce work อาจอายุยาวกว่า cycle snapshot — resolve สวิตช์จริงปัจจุบัน
+  //   ครั้งเดียวที่นี่: global+platform+exact shop ต้องยังเปิด และ row ต้อง
+  //   admit ภายใต้ current effective cutoff (msg_created_at > pair.cutoff)
+  //   carried dormant rows bypass cutoff เท่านั้น — wake gate คือ inbound ใหม่แล้ว
+  //   superseded ordinary rows → settle no_action terminal (ไม่ใช่ dormant)
+  const cfg = await getSystemConfig(true);
+  // ⚡ sentinel -1 — edge epoch(0) เป็น Date ที่ valid แต่ falsy; row ที่ไม่มี
+  //   admitted_edge เลย (legacy/manual seed) → null → resolver fail-closed ทั้ง batch
+  const edgeMs = candidates.reduce((m, r) => Math.max(m, r.admitted_edge?.getTime() ?? -1), -1);
+  const scope = await resolveBotworkerScope(cfg, edgeMs >= 0 ? new Date(edgeMs) : null);
+  const pair = scope.pairs.find((p) => p.platform === platform && p.shop_id === shopId);
+  const eligible: BufferMessageDoc[] = [];
+  for (const row of candidates) {
+    const admissible = pair !== undefined &&
+      (row.carried === true ||
+        (row.msg_created_at instanceof Date && row.msg_created_at.getTime() > pair.cutoff.getTime()));
+    if (admissible) {
+      eligible.push(row);
+    } else {
+      await settleScopeRejectedRow(row, markProcessed);
+    }
+  }
+  if (eligible.length === 0) {
+    return { status: "skip", detail: "scope superseded before flush — rows settled terminal" };
+  }
+
+  // ── conv lock: flusher เดียวต่อ tuple ──
+  //   แพ้ lock → skip เปล่า — winner จบ flush แล้ว arm debounce ให้ leftover
+  //   rows เอง (hand-off ใน finally — ไม่มี lock/lease polling timer เลย)
+  const first = eligible[0];
+  const lock = await acquireConvLock(platform, shopId, conversationId);
   if (!lock) {
-    // แพ้ lock → ข้อความค้าง buffered รอ batch ถัดไป (retry สั้น — winner ปล่อยเร็ว)
-    scheduleFlushRetry(conversationId, processMessage, markProcessed, LOCK_RETRY_MS, signal);
     return { status: "skip", detail: "conv lock held by another flusher" };
   }
 
@@ -350,8 +534,9 @@ export async function flushBuffer(
   const memberIds: string[] = [];
   const rows: BufferMessageDoc[] = [];
   const coll = await getCollection<BufferMessageDoc>(COLLECTIONS.bufferMessages);
+  let ownsBatch = false; // ⚡ hand-off arm เฉพาะ flusher ที่ชนะ batch จริง — foreign-only leftovers ไม่ arm (กัน no-op flush loop)
   try {
-    for (const row of candidates) {
+    for (const row of eligible) {
       const cas = await coll.updateOne(
         { message_id: row.message_id, kind: { $ne: "conv_lock" }, status: "buffered" },
         { $set: { status: "processing" } }
@@ -365,26 +550,26 @@ export async function flushBuffer(
       return { status: "skip", detail: "no rows claimed (all transitioned)" };
     }
 
-    // ── re-fence member claims — expected owner/token ของ row หรือ expired เท่านั้น ──
-    //   ⚡ ห้ามแย่ง active claim ของ owner อื่น: match เฉพาะ (a) claim ยังเป็นของเรา
-    //      ด้วย token ที่ row บันทึก (idempotent re-flush) หรือ (b) lease หมดแล้ว
+    // ── re-fence member claims — owner/token ที่ row บันทึกเท่านั้น ──
+    //   ⚡ expired/foreign claim ห้ามถูก re-fence เป็นงานใหม่ — lease expiry ไม่ใช่
+    //      execution trigger: owner ที่ตายไร้ evidence → recovery reconcile dormant
     //   ⚡ claim fencing เป็น per-claim sequence ($inc) — ห้ามใช้ conv-lock token
-    const procColl = await getCollection<Document & { _id?: string; status?: string }>(COLLECTIONS.chatProcessing);
+    const procColl = await getCollection<ClaimDocLite>(COLLECTIONS.chatProcessing);
     const now = new Date();
     const claimedIds: string[] = [];
     const claimedMsgIds: string[] = [];
     const fencingMap: Record<string, number> = {};
-    let retryableLeft = false; // มี row ที่ยัง retry ได้ (foreign active claim) → ต้อง schedule retry
     for (const row of rows) {
       const claimId = row.claim_id || claimIdFor(row.message_id);
+      // ⚡ re-fence เฉพาะ claim ที่เราเป็น owner อยู่แล้ว — foreign-owned claim
+      //   (row.owner_id ต่างจากเรา) ห้ามถูกแตะ: active lease = งานของ owner นั้น,
+      //   expired = recovery reconcile dormant เท่านั้น (ไม่ใช่ execution trigger)
       const ref = await procColl.findOneAndUpdate(
         {
           _id: claimId,
           status: "processing",
-          $or: [
-            { owner_id: botworkerRuntime.ownerId, fencing_token: row.fencing_token },
-            { lease_expires_at: { $lt: now } },
-          ],
+          owner_id: botworkerRuntime.ownerId,
+          fencing_token: row.fencing_token,
         },
         {
           $set: {
@@ -399,7 +584,7 @@ export async function flushBuffer(
       if (ref) {
         claimedIds.push(claimId);
         claimedMsgIds.push(row.message_id);
-        fencingMap[claimId] = ref.fencing_token;
+        fencingMap[claimId] = ref.fencing_token ?? 0;
         // row ถือ expected identity ใหม่ → retry/next flush re-fence ได้ถูกต้อง
         await coll.updateOne(
           { message_id: row.message_id, kind: { $ne: "conv_lock" } },
@@ -408,10 +593,22 @@ export async function flushBuffer(
         continue;
       }
       // re-fence ไม่ผ่าน → แยกสาเหตุด้วย claim doc จริง (ห้ามตีรวนเป็น buffered ทุกกรณี):
-      //   claim terminal/missing → settle message ตาม outcome ของ claim + ลบ row (ห้ามกลับ buffered)
+      //   bot_failed → dormant failed/quarantined (payload retained — ห้ามลบ)
+      //   terminal อื่น/missing → settle message ตาม outcome ของ claim + ลบ row (ห้ามกลับ buffered)
       //   claim processing ของ owner อื่น active → คง buffered รอ owner finalize/lease หมด
+      //   ⚡ ไม่มี recheck — owner ตายไร้ evidence → recovery reconcile dormant เท่านั้น
       const claimDoc = await procColl.findOne({ _id: claimId });
-      if (!claimDoc || claimDoc.status !== "processing") {
+      if (claimDoc?.status === "bot_failed") {
+        const capped = (claimDoc.attempt ?? 1) >= botworkerRuntime.maxClaimAttempts;
+        await coll.updateOne(
+          { message_id: row.message_id, kind: { $ne: "conv_lock" } },
+          {
+            $set: capped
+              ? { status: "quarantined" }
+              : { status: "failed", error: claimDoc.error ?? "bot_failed", failed_at: new Date() },
+          }
+        );
+      } else if (!claimDoc || claimDoc.status !== "processing") {
         await markProcessed({
           message_id: row.message_id,
           conversation_id: row.conversation_id,
@@ -425,14 +622,12 @@ export async function flushBuffer(
           { message_id: row.message_id, kind: { $ne: "conv_lock" } },
           { $set: { status: "buffered" }, $unset: { batch_id: "" } }
         );
-        retryableLeft = true;
       }
     }
     if (claimedIds.length === 0) {
-      // ⚡ retryable rows ค้าง (foreign active) → ต้องมี retry เสมอ ไม่งั้นข้อความค้างตลอด
-      if (retryableLeft) scheduleFlushRetry(conversationId, processMessage, markProcessed, undefined, signal);
       return { status: "skip", detail: "no owned claims in batch" };
     }
+    ownsBatch = true;
 
     // ⚡ batch_id canonical = sorted OWNED member ids — recompute หลังรู้ set จริง
     const realBatchId = batchIdFor(first.platform, first.shop_id, conversationId, claimedMsgIds);
@@ -500,18 +695,20 @@ export async function flushBuffer(
         raw_payload: firstMsg.raw_payload,
         images: allImages.length > 0 ? allImages : undefined,
         claimContext: ctx,
-      });
+      }, signal);
 
       // ⚡ finalization contract — ลบ rows เฉพาะเมื่อ finalize ครบทุก member claim
-      //   partial/lost → คืน buffered (claims ยัง processing → lease หมด → recovery)
-      if (result.finalized) {
+      //   ด้วย outcome ปกติ; technical failure (bot_failed finalized) → dormant failed
+      //   interrupted (partial/lost/cancelled) → dormant failed + settle owned claims
+      //   เข้าหน่วยเดียวกัน (foreign-owned CAS miss — recovery reconcile เมื่อ lease หมด)
+      //   — ไม่มี retry timer ทั้งคู่
+      if (result.finalized && result.status === "bot_failed") {
+        await markRowsFailed(coll, claimedMsgIds, result.detail);
+      } else if (result.finalized) {
         await deleteBatchRows(claimedMsgIds);
       } else {
-        await coll.updateMany(
-          { message_id: { $in: claimedMsgIds }, kind: { $ne: "conv_lock" } },
-          { $set: { status: "buffered" }, $unset: { batch_id: "" } }
-        );
-        scheduleFlushRetry(conversationId, processMessage, markProcessed, undefined, signal);
+        await markRowsFailed(coll, claimedMsgIds, `interrupted: ${result.detail}`);
+        await settleOwnedClaimsFailed(procColl, claimedIds, fencingMap, `interrupted: ${result.detail}`);
       }
 
       await logAdminEvent({
@@ -531,16 +728,12 @@ export async function flushBuffer(
         detail: `flushed ${claimedMsgIds.length} msgs → ${result.status}`,
       };
     } catch (err) {
-      // error → rows กลับ buffered (ข้อความไม่หาย) + schedule retry —
-      //   claims ยัง owner/token เดิม → retry re-fence ผ่าน expected-owner ได้ทันที
-      //   (ไม่ต้องรอ lease หมด) — ถ้า retry พังต่อเนื่อง lease หมด → recovery
+      // error → dormant failed (payload retained) — ไม่มี retry อัตโนมัติ;
+      //   owned member claims settle bot_failed หน่วยเดียวกัน (fenced CAS)
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(`[buffer] flush error for ${conversationId}:`, errorMsg);
-      await coll.updateMany(
-        { message_id: { $in: claimedMsgIds }, kind: { $ne: "conv_lock" } },
-        { $set: { status: "buffered" }, $unset: { batch_id: "" } }
-      );
-      scheduleFlushRetry(conversationId, processMessage, markProcessed, undefined, signal);
+      await markRowsFailed(coll, claimedMsgIds, errorMsg);
+      await settleOwnedClaimsFailed(procColl, claimedIds, fencingMap, errorMsg);
       await logAdminEvent({
         action_type: "bot.buffer_flush",
         actor: "bot-worker",
@@ -555,6 +748,30 @@ export async function flushBuffer(
   } finally {
     // fenced release — owner/token เดิมเท่านั้น
     await releaseConvLock(lock.lockId, lock.fencingToken);
+    // ⚡ liveness hand-off (ไม่ใช่ retry) — rows ที่ insert ระหว่าง flush นี้
+    //   bufferOrProcess ของมัน arm debounce เอง แต่ถ้า timer fire ตอน lock ยังถือ
+    //   อยู่ → flush นั้น skip เปล่าและ timer ตาย → winner (เรา) arm ให้ leftover
+    //   หลัง release — debounce ปกติ ไม่ใช่ lease polling ของ foreign claim
+    if (ownsBatch && !signal?.aborted) {
+      const leftovers = await getBufferedMessages(platform, shopId, conversationId).catch(() => []);
+      if (leftovers.length > 0 && !bufferTimers.has(tupleKey)) {
+        const hasMediaRow = leftovers.some((r) => hasMedia(r.raw_payload));
+        const win = hasMediaRow
+          ? (cfg.bot_buffer_window_media_ms ?? (cfg.bot_buffer_window_ms ?? 0) * 2)
+          : (cfg.bot_buffer_window_ms ?? 0);
+        const latest = Math.max(...leftovers.map((r) => new Date(r.received_at).getTime()).filter(Number.isFinite));
+        const delay = Math.max(0, (Number.isFinite(latest) ? latest : Date.now()) + win - Date.now());
+        bufferTimers.set(
+          tupleKey,
+          setTimeout(() => {
+            if (signal?.aborted) return;
+            trackedFlush(platform, shopId, conversationId, processMessage, markProcessed, signal).catch((err) =>
+              console.error(`[buffer] hand-off flush error for ${conversationId}:`, err)
+            );
+          }, delay)
+        );
+      }
+    }
   }
 }
 
@@ -568,30 +785,71 @@ export async function bufferOrProcess(
     platform: Platform;
     text: string;
     raw_payload?: unknown;
+    // ⚡ admission proof — row persist ไว้ให้ flush boundary revalidate scope/cutoff
+    created_timestamp?: Date;
+    admitted_edge?: Date | null;
     claimContext?: ClaimContext; // ⚡ claim ก่อนเข้า buffer เสมอ — row ถือ ctx
   },
   config: BufferConfig,
   processMessage: ProcessMessageFn,
   markProcessed: MarkProcessedFn,
-  // ⚡ enabled-era signal — debounce/retry callback ลูกต้องถือ signal เดียวกัน;
+  // ⚡ enabled-era signal — debounce callback ลูกต้องถือ signal เดียวกัน;
   //   ไม่ส่งมา (caller เก่า/recovery-less path) → signal-less เหมือนเดิม
   signal?: AbortSignal
 ): Promise<{ status: string; detail: string }> {
   // ⚡ era aborted — ห้ามเขียน buffer row / arm timer / launch flush ใหม่ใน cancelled era
   if (signal?.aborted) return { status: "skip", detail: "era aborted" };
 
-  // ถ้าปิด buffer → ประมวลผลทันที (เหมือนเดิม)
+  const convId = msg.conversation_id;
+  // ⚡ tuple identity เดียวทุก boundary — lock/timer/batch/rows แยกตาม
+  //   (platform, shop_id, conversation_id) เต็ม ห้าม key ด้วย conversation_id เดียว
+  const tupleKey = convLockIdFor(msg.platform, msg.shop_id, convId);
+
+  // ถ้าปิด buffer → ประมวลผลทันที (เหมือนเดิม) — era signal forward เข้า claim
   if (!config.bufferEnabled) {
-    return processMessage(msg);
+    // ⚡ carry-forward — distinct new inbound ใน conv เดียวกันปลุก dormant failed batch:
+    //   revive rows เข้า buffered แล้ว flush ทันที = combined attempt เดียว (ไม่มี debounce)
+    const carried = await carryDormantRows(msg);
+    if (carried > 0) {
+      await insertToBuffer(msg);
+      return flushBuffer(msg.platform, msg.shop_id, convId, processMessage, markProcessed, signal);
+    }
+    try {
+      const res = await processMessage(msg, signal);
+      // ⚡ technical failure → persist dormant row (payload retained — inbound ถัดไป carry ต่อ)
+      if (res.status === "bot_failed") {
+        await persistDormantRow(msg, res.detail);
+      }
+      return res;
+    } catch (err) {
+      // infra throw ก่อน inner error boundary (เช่น conversation fetch) →
+      //   retain payload เช่นเดียวกัน (cancelled era ห้ามเขียน — recovery settle แทน)
+      if (!signal?.aborted) {
+        await persistDormantRow(msg, err instanceof Error ? err.message : String(err));
+      }
+      throw err;
+    }
   }
 
-  const convId = msg.conversation_id;
+  // เพิ่มเข้า buffer_messages collection — duplicate = ไม่มี activity ใหม่:
+  //   ห้าม re-arm debounce จาก re-poll ของ message เดิม (poll interval < window
+  //   ทำ timer ไม่มีวันครบ → flush ไม่ยิง → livelock) — timer ของ insert แรกยังเดิน
+  const admitted = await insertToBuffer(msg);
+  if (admitted === "duplicate" && bufferTimers.has(tupleKey)) {
+    return { status: "buffered", detail: "duplicate — not admitted, debounce unchanged" };
+  }
 
-  // เพิ่มเข้า buffer_messages collection
-  await insertToBuffer(msg);
+  // ⚡ distinct new inbound เท่านั้นที่ปลุก dormant failed batch (PART 5) —
+  //   duplicate/re-poll/conv อื่น/pre-cutoff ไม่ปลุก; carried rows เข้า batch เดียวกัน
+  if (admitted === "inserted") {
+    await carryDormantRows(msg);
+  }
 
-  // ดึงจำนวนข้อความที่ buffer อยู่ใน conversation นี้
-  const buffered = await getBufferedMessages(convId);
+  // ดึงจำนวนข้อความที่ buffer อยู่ใน tuple นี้เท่านั้น
+  const buffered = await getBufferedMessages(msg.platform, msg.shop_id, convId);
+  if (admitted === "duplicate" && buffered.length === 0) {
+    return { status: "buffered", detail: "duplicate — batch already processing" };
+  }
 
   // ⚡ Phase 1E — ตรวจว่ามี media (รูป/วิดีโอ) ใน buffer ไหม
   //    ถ้ามี → ใช้ window นานกว่า + max มากกว่า (ลูกค้ามักส่งหลายรูปติดกัน)
@@ -607,88 +865,129 @@ export async function bufferOrProcess(
 
   // ถ้าครบ max → flush ทันที ไม่รอ
   if (buffered.length >= effectiveMaxMessages) {
-    return flushBuffer(convId, processMessage, markProcessed, signal);
+    return flushBuffer(msg.platform, msg.shop_id, convId, processMessage, markProcessed, signal);
   }
 
-  // รีเซ็ต timer (debounce) — ใช้ window ตาม media
-  clearTimer(convId);
+  // รีเซ็ต timer เฉพาะ new activity; duplicate ที่ไม่มี timer ซ่อมจาก deadline
+  // เดิมของแถวล่าสุด เพื่อไม่ให้ transient error ทำ row ค้างหรือยืด debounce ใหม่
+  const latestReceivedAt = Math.max(
+    ...buffered.map((row) => new Date(row.received_at).getTime()).filter(Number.isFinite)
+  );
+  const timerDelayMs = admitted === "duplicate"
+    ? (Number.isFinite(latestReceivedAt)
+        ? Math.max(0, latestReceivedAt + effectiveWindowMs - Date.now())
+        : 0)
+    : effectiveWindowMs;
+  clearTimer(tupleKey);
   bufferTimers.set(
-    convId,
+    tupleKey,
     setTimeout(() => {
       // ⚡ cancelled era — callback ที่ fired ก่อน abort แต่ยังไม่ process → ออกเงียบ
       if (signal?.aborted) return;
-      trackedFlush(convId, processMessage, markProcessed, signal).catch((err) =>
+      trackedFlush(msg.platform, msg.shop_id, convId, processMessage, markProcessed, signal).catch((err) =>
         console.error(`[buffer] timer flush error for ${convId}:`, err)
       );
-    }, effectiveWindowMs)
+    }, timerDelayMs)
   );
 
   return {
     status: "buffered",
-    detail: `buffered (${buffered.length} msgs, ${hasAnyMedia ? "media" : "text"} window ${effectiveWindowMs}ms)`,
+    detail: admitted === "duplicate"
+      ? `duplicate — restored missing debounce (${timerDelayMs}ms remaining)`
+      : `buffered (${buffered.length} msgs, ${hasAnyMedia ? "media" : "text"} window ${effectiveWindowMs}ms)`,
   };
 }
 
-// ─── Recover stale buffers ตอน boot ───────────────────────
-// ถ้า bot-worker restart ขณะมีข้อความค้างใน buffer_messages
-// → flush เลย (ไม่รอ timer เพราะ timer หายแล้ว)
+// ─── Dormant row persistence (unbuffered technical failure) ──
+// เก็บ payload + claim identity ไว้ให้ inbound ถัดไป carry ต่อ — upsert ตาม
+// message_id เดิม (ห้าม fabricate identity ใหม่)
+
+async function persistDormantRow(
+  msg: {
+    message_id: string;
+    conversation_id: string;
+    shop_id: string;
+    platform: Platform;
+    text: string;
+    raw_payload?: unknown;
+    created_timestamp?: Date;
+    admitted_edge?: Date | null;
+    claimContext?: ClaimContext;
+  },
+  error: string
+): Promise<void> {
+  const coll = await getCollection<BufferMessageDoc>(COLLECTIONS.bufferMessages);
+  await coll.updateOne(
+    { message_id: msg.message_id, kind: { $ne: "conv_lock" } },
+    {
+      $set: {
+        conversation_id: msg.conversation_id,
+        shop_id: msg.shop_id,
+        platform: msg.platform,
+        text: msg.text,
+        raw_payload: msg.raw_payload,
+        msg_created_at: msg.created_timestamp,
+        admitted_edge: msg.admitted_edge ?? null,
+        kind: "message",
+        status: "failed",
+        error,
+        failed_at: new Date(),
+        claim_id: msg.claimContext?.claim_id ?? claimIdFor(msg.message_id),
+        owner_id: msg.claimContext?.owner_id ?? botworkerRuntime.ownerId,
+        fencing_token: msg.claimContext?.fencing_token,
+      },
+      $setOnInsert: { received_at: new Date() },
+    },
+    { upsert: true }
+  );
+}
+
+// ─── Recover stale buffers ตอน boot/restart/rising-edge ────
+// ⚡ reconciliation-only (provider=0): scan rows ใน scope → classifier
+//   (claim authority owner ใน botWorkerService) ตัดสิน delete/leave —
+//   ไม่มี flush/processMessage ที่นี่; dormant failed rows คงอยู่จนกว่า
+//   distinct new inbound จะ carry ต่อ (PART 5/6 contract)
 
 export async function recoverStaleBuffers(
-  processMessage: ProcessMessageFn,
-  markProcessed: MarkProcessedFn,
-  // ⚡ row classifier (botWorkerService เป็น owner — claim/evidence/freshness/CAS)
-  //   "fresh" → เข้า batch flush ปกติ · "delete" → row ถูก settle แล้ว ลบทิ้ง · "leave" → ปล่อยไว้
-  classifyRow?: (row: BufferMessageDoc) => Promise<"fresh" | "delete" | "leave">,
-  // ⚡ recovery cancellation — AbortSignal จาก owner เดียว (botWorkerService);
-  //   flush ที่ launch ด้วย signal นี้ตรวจก่อน batch transition/processMessage
-  signal?: AbortSignal
+  // ⚡ row classifier (botWorkerService เป็น owner — claim/evidence/CAS)
+  //   "delete" → ลบ row ด้วย exact-identity CAS · "leave" → ปล่อย/อัปเดตเองแล้ว
+  classifyRow: (row: BufferMessageDoc) => Promise<"delete" | "leave">,
+  // ⚡ recovery cancellation — AbortSignal จาก owner เดียว (botWorkerService)
+  signal: AbortSignal | undefined,
+  // ⚡ Phase 2D — admission scope snapshot ของ pass (REQUIRED — ทุก recovery
+  //   enumeration ต้อง scoped; disabled (platform,shop) rows ไม่ถูก scan/แก้ไขเลย)
+  scope: BotworkerCycleScope
 ): Promise<{ recovered: number; conversations: string[] }> {
   const coll = await getCollection<BufferMessageDoc>(COLLECTIONS.bufferMessages);
 
-  // หา conversation ที่มีข้อความค้าง (เฉพาะ buffered message rows — ไม่เอา lock docs)
-  let staleConvIds: string[];
-  if (classifyRow) {
-    // per-row evidence/freshness gate — stale/orphan rows ถูกกำจัดก่อน flush
-    //   → ห้ามถูกดูดเข้า batch ของ conversation เดียวกัน
-    //   ⚡ รวม status:"processing" (crash-leftover mid-flush) — classifier ตัดสิน owner จาก claim
-    const rows = await coll
-      .find({ status: { $in: ["buffered", "processing"] }, kind: { $ne: "conv_lock" } })
-      .toArray();
-    const fresh = new Set<string>();
-    for (const row of rows) {
-      const d = await classifyRow(row);
-      if (d === "fresh") fresh.add(row.conversation_id);
-      else if (d === "delete") {
-        // ⚡ exact-identity delete — row ถูกแทนด้วย identity ใหม่หลัง classify → ห้ามลบ (TOCTOU)
-        await coll.deleteOne({
-          message_id: row.message_id,
-          claim_id: row.claim_id,
-          status: row.status,
-          owner_id: row.owner_id,
-          fencing_token: row.fencing_token,
-          kind: { $ne: "conv_lock" },
-        });
-      }
+  // สแกนทุก row state ที่ต้อง reconcile (buffered/processing/failed — ไม่เอา lock/quarantined)
+  const rows = await coll
+    .find(withScope({ status: { $in: ["buffered", "processing", "failed"] }, kind: { $ne: "conv_lock" } }, scope))
+    .toArray();
+
+  let settled = 0;
+  const conversations = new Set<string>();
+  for (const row of rows) {
+    if (signal?.aborted) break;
+    const d = await classifyRow(row);
+    conversations.add(row.conversation_id);
+    if (d === "delete") {
+      // ⚡ exact-identity delete — row ถูกแทนด้วย identity ใหม่หลัง classify → ห้ามลบ (TOCTOU)
+      const del = await coll.deleteOne({
+        message_id: row.message_id,
+        claim_id: row.claim_id,
+        status: row.status,
+        owner_id: row.owner_id,
+        fencing_token: row.fencing_token,
+        kind: { $ne: "conv_lock" },
+      });
+      if (del.deletedCount === 1) settled++;
     }
-    staleConvIds = [...fresh];
-  } else {
-    staleConvIds = await coll.distinct("conversation_id", { status: "buffered", kind: { $ne: "conv_lock" } });
   }
-  if (staleConvIds.length === 0) {
+  if (rows.length === 0) {
     return { recovered: 0, conversations: [] };
   }
-
-  console.log(`[buffer] recovering ${staleConvIds.length} stale conversations from buffer_messages`);
-
-  const conversations: string[] = [];
-  for (const convId of staleConvIds) {
-    try {
-      await flushBuffer(convId, processMessage, markProcessed, signal);
-      conversations.push(convId);
-    } catch (err) {
-      console.error(`[buffer] recovery error for ${convId}:`, err);
-    }
-  }
+  console.log(`[buffer] reconciled ${settled} stale rows across ${conversations.size} conversations`);
 
   // audit write เป็น side-effect — cancelled run ไม่เขียน recovery event ต่อ
   if (!signal?.aborted) {
@@ -696,27 +995,22 @@ export async function recoverStaleBuffers(
       action_type: "bot.buffer_recover",
       actor: "bot-worker",
       metadata: {
-        recovered_conversations: conversations.length,
-        conversation_ids: conversations,
+        reconciled_rows: settled,
+        conversation_ids: [...conversations],
       },
     });
   }
 
-  return { recovered: conversations.length, conversations };
+  return { recovered: settled, conversations: [...conversations] };
 }
 
 // ─── Clear all timers (สำหรับ graceful shutdown) ──────────
 
 export function clearAllBufferTimers(): void {
-  for (const [convId, timer] of bufferTimers.entries()) {
+  for (const [, timer] of bufferTimers.entries()) {
     clearTimeout(timer);
   }
   bufferTimers.clear();
-  // flush-retry timers เป็น pending work เหมือนกัน — falling edge/shutdown ต้องยกเลิกรวม
-  for (const [convId, timer] of flushRetryTimers.entries()) {
-    clearTimeout(timer);
-  }
-  flushRetryTimers.clear();
 }
 
 export const bufferService = {

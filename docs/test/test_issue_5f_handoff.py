@@ -10,20 +10,25 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "chatbot"))
 
-from shopeechat.handoffs import detect_human_request  # noqa: E402
+from shopeechat.handoffs import is_human_request, is_service_anger  # noqa: E402
+
+# Phase 2C.3 — detect_human_request เป็น transport-only (ต้องการ
+#   plan_decided_reason); detection owner = turn_decision.decide_turn
+#   predicates — suite นี้ pin detection boundary เดิมผ่าน predicate pair
+import pytest  # noqa: E402
 
 
-def _req(message: str):
-    return SimpleNamespace(message=message, conversation_id=None, shop=None)
-
-
-def _handoff(message: str) -> dict | None:
-    return detect_human_request(_req(message), {})
+def _handoff(message: str):
+    """detection probe — ลำดับเดียวกับ decide_turn: human_request ก่อน anger."""
+    if is_human_request(message):
+        return {"handoff_reason": "human_request"}
+    if is_service_anger(message):
+        return {"handoff_reason": "customer_frustration"}
+    return None
 
 
 # ---------- false positives: "กาก" substring กลางคำ ----------

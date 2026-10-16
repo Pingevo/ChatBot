@@ -81,6 +81,7 @@ export async function GET(req: NextRequest) {
   const convColl = await getCollection(COLLECTIONS.conversations);
   const msgColl = await getCollection(COLLECTIONS.messages);
   const ticketColl = await getCollection(COLLECTIONS.tickets);
+  const statusColl = await getCollection(COLLECTIONS.statusConversation);
 
   // ⚡ ใช้ last_message_timestamp แทน created_at
   //   - last_message_timestamp = วันที่ข้อความล่าสุด → นับแชทที่มี activity จริงในช่วงเวลานั้น
@@ -94,12 +95,27 @@ export async function GET(req: NextRequest) {
     return Object.keys(f).length ? { [field]: f } : {};
   };
 
+  // ownership อ่านจาก status_conversation เท่านั้น
+  //   (raw conversations(_shp).status="open" ทั้งหมด + assigned_to/closed_at ถูก dump ทับ)
+  //   canonical partition (mutually exclusive):
+  //     closed     = meta status ∈ {closed,resolved} (assigned_to ที่ค้างไว้ = history ไม่ใช่ active)
+  //     with_admin = meta status ∈ {handoff,open,pending} (human-owned + awaiting)
+  //     bot        = ไม่มี meta | ไม่มี status | status="bot"
+  //   bounded: meta-driven $lookup (status index → unique conversation_id index)
+  //   + range match ใน pipeline — ไม่มี find({}) / id arrays
+  const tsRange: Record<string, unknown> = {};
+  if (start) tsRange.$gte = start;
+  if (end) tsRange.$lt = end;
+  const partitionAggPromise = statusColl.aggregate<{ _id: string | null; n: number }>([
+    { $match: { status: { $in: ["handoff", "open", "pending", "closed", "resolved"] } } },
+    { $lookup: { from: COLLECTIONS.conversations, localField: "conversation_id", foreignField: "conversation_id", as: "conv" } },
+    { $unwind: "$conv" },
+    ...(Object.keys(tsRange).length ? [{ $match: { "conv.last_message_timestamp": tsRange } }] : []),
+    { $group: { _id: "$status", n: { $sum: 1 } } },
+  ]).toArray();
+
   // ⚡ parallel — รัน aggregation ทั้งหมดพร้อมกัน + ใช้ helper แทน $lookup
-  // ⚠️ sellcenter ไม่เขียน status → ใช้ derived counts แทน:
-  //   บอทตอบ = ไม่มี assigned_to และไม่มี closed_at
-  //   กำลังตอบอยู่ (ส่งแอดมิน) = มี assigned_to และไม่มี closed_at
-  //   ปิดแล้ว = มี closed_at
-  const [platformBreakdown, convTopics, ticketTopics, responseStats, totalConv, closedCount, withAdminCount, botAnsweredCount, unreadCount, msgCounts] = await Promise.all([
+  const [platformBreakdown, convTopics, ticketTopics, responseStats, totalConv, partitionAgg, unreadCount, msgCounts] = await Promise.all([
     // 1. Platform breakdown
     convColl.aggregate<{ _id: string; count: number }>([
       { $match: { ...dateFilter() } },
@@ -133,28 +149,8 @@ export async function GET(req: NextRequest) {
     })(),
     // 4. Total conversations
     convColl.countDocuments({ ...dateFilter() }),
-    // 5. ปิดแล้ว = มี closed_at หรือ status=closed/resolved (sellcenter อาจเขียน status แต่ไม่เขียน closed_at)
-    convColl.countDocuments({
-      $or: [
-        { closed_at: { $exists: true, $ne: null } },
-        { status: { $in: ["closed", "resolved"] } },
-      ],
-      ...dateFilter(),
-    }),
-    // 6. กำลังตอบอยู่ = มี assigned_to และไม่มี closed_at และ status ไม่ใช่ closed/resolved
-    convColl.countDocuments({
-      assigned_to: { $exists: true, $nin: [null, ""] },
-      closed_at: { $in: [null, undefined] },
-      status: { $nin: ["closed", "resolved"] },
-      ...dateFilter(),
-    }),
-    // 7. บอทตอบ = ไม่มี assigned_to และไม่มี closed_at และ status ไม่ใช่ closed/resolved
-    convColl.countDocuments({
-      assigned_to: { $in: [null, undefined, ""] },
-      closed_at: { $in: [null, undefined] },
-      status: { $nin: ["closed", "resolved"] },
-      ...dateFilter(),
-    }),
+    // 5+6. ownership partition — meta status ∩ in-range convs (DB-side lookup)
+    partitionAggPromise,
     // 8. Unread conversations (unread_count > 0)
     convColl.countDocuments({ unread_count: { $gt: 0 }, ...dateFilter() }),
     // 9. Message counts (user in / admin out)
@@ -164,8 +160,18 @@ export async function GET(req: NextRequest) {
     ]),
   ]);
 
+  // pivot partition: closed = {closed,resolved}; with_admin = {handoff,open,pending}
+  let closedCount = 0;
+  let withAdminCount = 0;
+  for (const g of partitionAgg) {
+    if (g._id === "closed" || g._id === "resolved") closedCount += g.n;
+    else if (g._id === "handoff" || g._id === "open" || g._id === "pending") withAdminCount += g.n;
+  }
+
   const total = totalConv;
   const [messagesReceived, messagesSent] = msgCounts;
+  // ⚡ bot_answered = inventory − with_admin − closed (partition mutually exclusive)
+  const botAnsweredCount = Math.max(0, total - withAdminCount - closedCount);
 
   // ⚡ debug log ผลลัพธ์ KPI หลัก
   console.log(`[dashboard] totalConv=${totalConv} messagesReceived=${messagesReceived} messagesSent=${messagesSent}`);

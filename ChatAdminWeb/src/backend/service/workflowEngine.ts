@@ -16,16 +16,18 @@ import { createHash } from "node:crypto";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { botworkerRuntime } from "./botworkerRuntime";
 import { getSystemConfig, type Platform } from "./systemConfigService";
+import { withScope, type BotworkerCycleScope } from "./botworkerRuntime";
 import { workflowService, type WorkflowDoc, type WorkflowNode, isMultiBranchCondition, type ConditionBranch, isPhase2WaitConfig, type WaitForReplyConfig, WAIT_BRANCH, isPhase3AddLabelConfig } from "./workflowService";
 import { callBot } from "./botCallService";
 import { getConversation, closeConversation, type ProblemCategory } from "./conversationService";
 import { resolveTemplate, type TemplateVars } from "./templateService";
 import { getHistoryForBot, getGroupedHistoryForBot, toBotImages } from "./messageService";
-import { handoffService } from "./handoffService";
+import { handoffService, type HandoffOutcomeState } from "./handoffService";
 import { getCustomer } from "./customerService";
 import { logAdminEvent } from "./adminLogService";
 // ⚡ botworker parallel — test store + sandbox event log (ใช้เมื่อ msg.testSource มี)
 import { testStatusConversationService, type TestSource } from "./testStatusConversationService";
+import { statusConversationService } from "./statusConversationService";
 import { logBotworkerEvent } from "./botworkerEventService";
 import { isSafeFetchUrl } from "../lib/urlSafety";
 
@@ -66,7 +68,7 @@ export interface WorkflowRunDoc extends Document {
     status: string;
     detail: string;
     delivered: DeliveredMessage[];
-    handoff?: { agentId: string | null; reason: string };
+    handoff?: { agentId: string | null; reason: string; state: Exclude<HandoffOutcomeState, "failed"> };
   };
 
   // ⚡ run ownership — สอง worker ห้ามเดิน graph พร้อมกันบน run เดียว
@@ -107,6 +109,10 @@ export interface EngineMessage {
   //    let_ai_respond ส่งต่อให้ getGroupedHistoryForBot กัน current turn ซ้ำใน history
   //    (worker ส่ง ctx.message_ids; non-botworker callers ไม่ส่ง → behavior เดิม)
   exclude_message_ids?: string[];
+  // ⚡ claim/era cancellation signal — let_ai_respond ส่งต่อให้ callBot:
+  //   queued outbound ออกเมื่อ kill switch/ownership ตาย + bounded timeout ใน callBot
+  //   (botworker paths เท่านั้น; non-botworker callers ไม่ส่ง → behavior เดิม)
+  signal?: AbortSignal;
 }
 
 export interface DeliveredMessage {
@@ -122,7 +128,7 @@ export interface EngineResult {
   delivered: DeliveredMessage[];
   run_id?: string;
   workflow_id?: string;
-  handoff?: { agentId: string | null; reason: string };
+  handoff?: { agentId: string | null; reason: string; state: Exclude<HandoffOutcomeState, "failed"> };
   // ⚡ error เท่านั้น: false = op ตายแล้ว (committed แต่ไม่มีผล) — caller ห้าม fallback ไป bot
   //   (side effect อาจเกิดแล้วโดยไม่มีหลักฐาน); absent = error ทั่วไป fallback ได้ตามเดิม
   recoverable?: boolean;
@@ -524,7 +530,7 @@ async function walkGraph(
   const context: Record<string, unknown> = { ...run.context };
   let currentNodeId = startNodeId;
   let steps = 0;
-  let handoff: { agentId: string | null; reason: string } | undefined;
+  let handoff: { agentId: string | null; reason: string; state: Exclude<HandoffOutcomeState, "failed"> } | undefined;
 
   while (currentNodeId && steps < MAX_ENGINE_STEPS) {
     steps++;
@@ -975,7 +981,7 @@ async function completeRun(
   delivered: DeliveredMessage[],
   outcome: "actioned" | "condition_false" | "retry_exceeded" | "no_reply",
   detail: string,
-  handoff?: { agentId: string | null; reason: string },
+  handoff?: { agentId: string | null; reason: string; state: Exclude<HandoffOutcomeState, "failed"> },
   execOpKey?: string
 ): Promise<EngineResult> {
   // ⚡ resume exec → outcome persist atomic ใน state write เดียวกัน (crash window ปิด);
@@ -1099,7 +1105,7 @@ export function matchBranch(lowerText: string, b: ConditionBranch): boolean {
 }
 
 /** legacy binary condition — คืน boolean (true/false) */
-async function evalLegacyCondition(
+export async function evalLegacyCondition(
   node: WorkflowNode,
   msg: EngineMessage,
   context: Record<string, unknown>
@@ -1125,9 +1131,11 @@ async function evalLegacyCondition(
         const isOpen = st !== "closed" && st !== "resolved";
         return wantStatus === "open" ? isOpen : !isOpen;
       }
-      const conv = await getConversation(msg.conversation_id);
-      if (!conv) return false;
-      const isOpen = conv.status !== "closed" && conv.status !== "resolved";
+      // status อ่านจาก status_conversation เท่านั้น
+      //   raw conv.status เป็น dump field ("open" เสมอ) ห้ามใช้ตัดสิน
+      const meta = await statusConversationService.getMeta(msg.conversation_id);
+      const st = meta?.status || "bot";
+      const isOpen = st !== "closed" && st !== "resolved";
       return wantStatus === "open" ? isOpen : !isOpen;
     }
 
@@ -1157,10 +1165,11 @@ async function evalLegacyCondition(
         if (wantAdmin) return meta?.assigned_to === wantAdmin;
         return !!meta?.assigned_to;
       }
-      const conv = await getConversation(msg.conversation_id);
-      if (!conv) return false;
-      if (wantAdmin) return conv.assigned_to === wantAdmin;
-      return !!conv.assigned_to;
+      // ownership อ่านจาก status_conversation เท่านั้น
+      //   raw conv.assigned_to เป็น dump field (ถูก sellcenter ทับได้) ห้ามใช้ตัดสิน
+      const meta = await statusConversationService.getMeta(msg.conversation_id);
+      if (wantAdmin) return meta?.assigned_to === wantAdmin;
+      return !!meta?.assigned_to;
     }
 
     default:
@@ -1222,7 +1231,7 @@ async function performAction(
   msg: EngineMessage,
   context: Record<string, unknown>,
   delivered: DeliveredMessage[]
-): Promise<{ stop?: boolean; handoff?: { agentId: string | null; reason: string } }> {
+): Promise<{ stop?: boolean; handoff?: { agentId: string | null; reason: string; state: Exclude<HandoffOutcomeState, "failed"> } }> {
   const cfg = node.config || {};
 
   switch (node.subtype) {
@@ -1269,6 +1278,8 @@ async function performAction(
         ...(wfBotImages.length > 0 ? { images: wfBotImages } : {}),
         // ⚡ botworker parallel — handoff จากบอทต้องเขียน test store ไม่ใช่ของจริง
         ...(msg.testSource ? { conversationId: msg.conversation_id, simulate: true, testSource: msg.testSource } : {}),
+        // ⚡ claim/era cancellation — queued call ออกก่อน fetch, in-flight abort ตาม signal
+        ...(msg.signal ? { signal: msg.signal } : {}),
       });
       context.bot_answer = botResp.answer;
       context.bot_source = botResp.source;
@@ -1295,7 +1306,9 @@ async function performAction(
             src === "botworker" ? "open" : "handoff"
           );
           if (!ok) {
-            return { handoff: { agentId: meta?.assigned_to || null, reason: `${reason} (conflict — already assigned)` } };
+            // CAS แพ้ — owner จริงคือ meta.assigned_to (persisted); ไม่มี owner = assign ไม่สำเร็จ
+            if (!meta?.assigned_to) return {};
+            return { handoff: { agentId: meta.assigned_to, reason: `${reason} (conflict — already assigned)`, state: "assigned" } };
           }
         } else {
           const result = await handoffService.handoffToAdminTest({
@@ -1315,7 +1328,9 @@ async function performAction(
               metadata: { action: "assign_ticket", run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: result.assignedTo, mode: "auto" },
             });
           }
-          return { handoff: { agentId: result.assignedTo, reason } };
+          // failed/in-flight → ไม่ surface handoff (กัน downstream finalize เป็น handed_off)
+          if (result.in_flight) return {};
+          return { handoff: { agentId: result.assignedTo, reason, state: result.assignedTo ? "assigned" : "queued" } };
         }
         if (src === "botworker") {
           await logBotworkerEvent({
@@ -1324,39 +1339,47 @@ async function performAction(
             metadata: { action: "assign_ticket", run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: wantAdmin, direct: true },
           });
         }
-        return { handoff: { agentId: wantAdmin, reason } };
+        return { handoff: { agentId: wantAdmin, reason, state: "assigned" } };
       }
 
+      // ⚡ Phase 2B.2 — direct assign ผ่าน typed owner เดียวกัน (persisted-outcome)
+      //   CAS แพ้ → converge คืน persisted winner (ไม่ใช่ stale meta)
       if (wantAdmin) {
-        // assign ตรงแบบ (เหมือน Zaapi ที่เลือกคนได้)
-        const coll = await getCollection<{ assigned_to: string | null }>(COLLECTIONS.conversations);
-        await coll.updateOne(
-          { conversation_id: msg.conversation_id },
-          { $set: { assigned_to: wantAdmin, updated_at: new Date() } }
-        );
+        const outcome = await handoffService.handoffToAdmin({
+          conversationId: msg.conversation_id,
+          shopId: msg.shop_id,
+          platform: msg.platform,
+          reason,
+          targetAdminId: wantAdmin,
+          actor: "workflow-engine",
+        });
+        if (outcome.state === "failed") return {};
         await logAdminEvent({
           action_type: "workflow.assign_ticket",
           actor: "workflow-engine",
           conversation_id: msg.conversation_id,
-          metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: wantAdmin, direct: true },
+          metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: outcome.assigned_to, direct: true, outcome_state: outcome.state },
         });
-        return { handoff: { agentId: wantAdmin, reason } };
+        return { handoff: { agentId: outcome.assigned_to, reason, state: outcome.state } };
       }
 
       // auto — ใช้ handoffService (คนเดิม → last-reply → round-robin)
-      const result = await handoffService.handoffToAdmin({
+      // ⚡ Phase 2B.2 — typed outcome: agentId มาจาก persisted state เท่านั้น
+      //   failed → ไม่ surface handoff + ไม่เขียน success audit (bot ไม่ lock — ไม่มี durable state)
+      const outcome = await handoffService.handoffToAdmin({
         conversationId: msg.conversation_id,
         shopId: msg.shop_id,
         platform: msg.platform,
         reason,
       });
+      if (outcome.state === "failed") return {};
       await logAdminEvent({
         action_type: "workflow.assign_ticket",
         actor: "workflow-engine",
         conversation_id: msg.conversation_id,
-        metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: result.assignedTo, mode: "auto" },
+        metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: outcome.assigned_to, mode: "auto", outcome_state: outcome.state },
       });
-      return { handoff: { agentId: result.assignedTo, reason } };
+      return { handoff: { agentId: outcome.assigned_to, reason, state: outcome.state } };
     }
 
     case "add_label": {
@@ -1517,8 +1540,9 @@ async function performAction(
 //    query: status=waiting_for_reply + wait_started_at มี + wait_started_at < now - timeout
 //    ⚠️ race-safe: ใช้ $set status=running ก่อนเดิน graph (เหมือน resumeFlow)
 
-export async function checkWaitTimeouts(): Promise<number> {
-  const config = await getSystemConfig();
+export async function checkWaitTimeouts(signal: AbortSignal | undefined, scope: BotworkerCycleScope): Promise<number> {
+  // ⚡ Phase 2D — config จาก cycle-scope snapshot (ห้าม re-read ภายใน pass)
+  const config = scope.config;
   if (!config.workflow_enabled) return 0;
 
   const coll = await getRunsCollection();
@@ -1529,18 +1553,42 @@ export async function checkWaitTimeouts(): Promise<number> {
   const globalTimeoutMs = config.workflow_run_timeout_ms || 1800000;
 
   // query run ที่ status=waiting_for_reply และมี wait_started_at
-  const candidates = await coll.find({
+  // ⚡ Phase 2D — scope filter: timeout-resume เป็น bot-invoking path เช่นกัน —
+  //   parked run ของ disabled (platform,shop) ไม่ถูก scan/acquire เลย
+  const candidates = await coll.find(withScope({
     status: "waiting_for_reply",
     wait_started_at: { $exists: true, $type: "date" },
-  }).toArray();
+  }, scope)).toArray();
+
+  // ⚡ per-pair effective cutoff — run ที่ park ก่อน enable ครบสามชั้น
+  //   ต้องไม่ resume เข้า provider work: settle cancelled (abandoned เท่านั้น —
+  //   owner อื่น lease active ทิ้งไว้ให้หมด lease แล้วรอบหน้า settle)
+  const pairCutoff = new Map<string, number>();
+  for (const p of scope.pairs) pairCutoff.set(`${p.platform}/${p.shop_id}`, p.cutoff.getTime());
 
   let processed = 0;
   for (const run of candidates) {
+    // ⚡ abort boundary เดียวของ loop — era abort → หยุด ไม่แตะ candidate ถัดไป
+    //   (zero acquire/write/provider สำหรับ candidate ที่ยังไม่ถึง)
+    if (signal?.aborted) break;
     if (!run.wait_started_at) continue;
+    const cutoff = pairCutoff.get(`${run.platform}/${run.shop_id}`);
+    if (cutoff !== undefined && run.wait_started_at.getTime() <= cutoff) {
+      await cancelIfAbandoned(run, {
+        status: "cancelled",
+        outcome: "error",
+        completed_at: now,
+        error: "wait_started_at before effective enable cutoff — settled without resume",
+      });
+      continue;
+    }
     const ageMs = now.getTime() - run.wait_started_at.getTime();
 
     // หา wait node เพื่ออ่าน per-node timeout_ms
     const workflow = await workflowService.getWorkflow(run.workflow_id);
+    // ⚡ abort ระหว่าง lookup await — boundary เดียวที่ async gap;
+    //   ห้ามเขียน cancellation/cancelIfAbandoned หลัง era ตาย
+    if (signal?.aborted) break;
     if (!workflow) {
       // workflow ถูกลบ → cancel run (เฉพาะ abandoned — owner อื่น lease active ห้าม kill)
       await cancelIfAbandoned(run, { status: "cancelled", outcome: "cancelled_by_admin", completed_at: now, error: "workflow deleted" });
@@ -1553,12 +1601,15 @@ export async function checkWaitTimeouts(): Promise<number> {
     const perNodeTimeout = Math.max(1000, Number(cfg.timeout_ms || 0));
     if (ageMs < perNodeTimeout) continue; // ยังไม่เกิน timeout
 
-    // เกิน timeout → branch "no_reply"
-    processed++;
+    // เกิน timeout → branch "no_reply" — processed นับเฉพาะ run ที่จัดการจริง
+    //   (walked/terminalized); aborted/acquire-miss → false → ไม่นับ
     try {
-      await processWaitTimeout(workflow, run);
+      if (await processWaitTimeout(workflow, run, signal)) processed++;
     } catch (err) {
-      await failRun(run, `wait timeout processing error: ${(err as Error).message}`);
+      // เหลือเฉพาะ write failure ที่ owner จับไม่ได้ (acquire/restore/failRun CAS)
+      //   — terminal transition อยู่ใน processWaitTimeout เท่านั้น ห้าม failRun
+      //   ด้วย stale snapshot ที่นี่ (CAS miss → run ค้าง running)
+      console.error(`[workflowEngine] wait timeout processing failed for run ${run.run_id}:`, err);
     }
   }
 
@@ -1575,47 +1626,80 @@ export async function checkWaitTimeouts(): Promise<number> {
   return processed;
 }
 
-/** ประมวลผล wait timeout — branch "no_reply" หรือ จบ flow */
-async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc): Promise<void> {
+/** ประมวลผล wait timeout — branch "no_reply" หรือ จบ flow
+ *  คืน true = run ถูกจัดการจริง (walked/terminalized), false = skipped/aborted */
+async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc, signal?: AbortSignal): Promise<boolean> {
+  // ⚡ abort ก่อน acquire — zero writes (pre-aborted ไม่แตะ candidate เลย)
+  if (signal?.aborted) return false;
+
   // acquire ownership ก่อน (waiting=parked → CAS flip running / running=expired เท่านั้น)
   const acquired = await acquireRun(run.run_id);
-  if (!acquired) return; // owner อื่น active → skip
+  if (!acquired) return false; // owner อื่น active → skip
 
-  // ทำเครื่องหมายว่ากำลังประมวลผล (race-safe — กัน resume ซ้อน)
-  if (!(await ownedUpdateRun(acquired, { status: "running", waiting_for: undefined }))) return;
+  // ⚡ era-abort rollback — run ถูก flip เป็น running แล้ว ต้องคืน parked wait state
+  //   ด้วย fenced write ของ owner ปัจจุบัน (acquired snapshot — CAS owner+token)
+  //   CAS miss = owner ใหม่ reclaim ไปแล้ว → ห้ามเขียนทับ
+  //   (timeout scanner เห็นเฉพาะ waiting_for_reply → ทิ้ง running ไว้ = run หายไปตลอด)
+  const restoreWaitPark = () => ownedUpdateRun(acquired, {
+    status: "waiting_for_reply",
+    waiting_for: run.waiting_for ?? "next_message",
+    current_node_id: run.current_node_id,
+    wait_retry_count: run.wait_retry_count ?? 0,
+    wait_started_at: run.wait_started_at,
+    wait_node_id: run.wait_node_id,
+  });
 
-  const waitNode = workflow.nodes.find((n) => n.node_id === run.current_node_id);
-  if (!waitNode) {
-    await failRun(acquired, "wait node not found during timeout processing");
-    return;
-  }
+  try {
+    // abort ตั้งแต่ก่อนเดิน → rollback ทันที (ยังไม่ได้ล้าง wait fields)
+    if (signal?.aborted) { await restoreWaitPark(); return false; }
 
-  const noReplyNext = nextNodeIds(workflow, waitNode.node_id, WAIT_BRANCH.NO_REPLY);
-  const delivered: DeliveredMessage[] = [];
+    // ทำเครื่องหมายว่ากำลังประมวลผล (race-safe — กัน resume ซ้อน)
+    if (!(await ownedUpdateRun(acquired, { status: "running", waiting_for: undefined }))) return false;
 
-  // ล้าง wait state
-  if (!(await ownedUpdateRun(acquired, {
-    wait_retry_count: 0,
-    wait_started_at: undefined,
-    wait_node_id: undefined,
-  }))) return;
+    const waitNode = workflow.nodes.find((n) => n.node_id === run.current_node_id);
+    if (!waitNode) {
+      // CAS miss = เสีย fencing แล้ว → ไม่นับเป็น handled
+      return await failRun(acquired, "wait node not found during timeout processing");
+    }
 
-  if (noReplyNext.length > 0) {
-    // เดินตาม no_reply branch
-    const dummyMsg: EngineMessage = {
-      message_id: `timeout_${run.run_id}`,
-      conversation_id: run.conversation_id,
-      shop_id: run.shop_id,
-      platform: run.platform,
-      customer_id: run.customer_id,
-      text: "",
-      // ⚡ propagate sandbox source — run ของ botworker ต้องเขียน test store เท่านั้น
-      ...(run.test_source ? { testSource: run.test_source } : {}),
-    };
-    await walkGraph(workflow, { ...acquired, context: { ...acquired.context, customer_reply: "" } }, dummyMsg, noReplyNext[0]);
-  } else {
-    // ไม่มี no_reply edge → จบ flow ด้วย outcome=no_reply
-    await completeRun(workflow, acquired, acquired.context, delivered, "no_reply", `wait timeout (${run.wait_started_at?.toISOString()}) — no no_reply edge, flow ends`);
+    const noReplyNext = nextNodeIds(workflow, waitNode.node_id, WAIT_BRANCH.NO_REPLY);
+    const delivered: DeliveredMessage[] = [];
+
+    // ล้าง wait state
+    if (!(await ownedUpdateRun(acquired, {
+      wait_retry_count: 0,
+      wait_started_at: undefined,
+      wait_node_id: undefined,
+    }))) return false;
+
+    if (noReplyNext.length > 0) {
+      // เดินตาม no_reply branch
+      const dummyMsg: EngineMessage = {
+        message_id: `timeout_${run.run_id}`,
+        conversation_id: run.conversation_id,
+        shop_id: run.shop_id,
+        platform: run.platform,
+        customer_id: run.customer_id,
+        text: "",
+        // ⚡ propagate sandbox source — run ของ botworker ต้องเขียน test store เท่านั้น
+        ...(run.test_source ? { testSource: run.test_source } : {}),
+        // ⚡ era/cancellation signal — resumed let_ai_respond ออก queue เมื่อ shutdown
+        ...(signal ? { signal } : {}),
+      };
+      await walkGraph(workflow, { ...acquired, context: { ...acquired.context, customer_reply: "" } }, dummyMsg, noReplyNext[0]);
+    } else {
+      // ไม่มี no_reply edge → จบ flow ด้วย outcome=no_reply
+      await completeRun(workflow, acquired, acquired.context, delivered, "no_reply", `wait timeout (${run.wait_started_at?.toISOString()}) — no no_reply edge, flow ends`);
+    }
+    return true;
+  } catch (err) {
+    // era abort กลางเดิน → คืน parked wait state (fenced — acquired owner/token)
+    //   ห้าม terminalize — next-era timeout scan retry ได้โดยไม่ reply ซ้ำ
+    if (signal?.aborted) { await restoreWaitPark(); return false; }
+    // ⚡ real error หลัง acquire — terminalize ด้วย acquired fencing context
+    //    เท่านั้น (outer catch ถือ snapshot เก่า → CAS miss → run ค้าง running)
+    //    CAS miss = fencing หายระหว่างเดิน → false (ไม่นับเป็น handled)
+    return await failRun(acquired, `wait timeout processing error: ${(err as Error).message}`);
   }
 }
 

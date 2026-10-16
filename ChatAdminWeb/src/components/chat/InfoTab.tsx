@@ -1,9 +1,11 @@
 "use client";
 // InfoTab — แสดงข้อมูล conversation + stats + ประวัติปิดแชท (card ยืด/หด ได้)
 import { useState, useEffect } from "react";
-import { ChevronDown, ChevronRight, User, Store, MessageSquare, Bot, Headset, History, Package, ShoppingCart } from "lucide-react";
+import { ChevronDown, ChevronRight, User, Store, MessageSquare, Bot, Headset, History, Package, ShoppingCart, ShieldCheck } from "lucide-react";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
+import { confirm } from "@/components/ui/ConfirmDialog";
 import { ZAAPI_COLOR, BOT_COLOR, ADMIN_COLOR } from "@/lib/bubbleColors";
 import type { Conversation, ChatMessage, CloseHistoryRecord, ProblemCategory, ProductCard } from "@/lib/types";
 
@@ -183,12 +185,112 @@ export function InfoTab({ conversation, messages, closeHistory }: Props) {
         </div>
       </Section>
 
+      {/* ── เคลม/ประกัน — explicit admin claim outcome (Phase 2B.6) ── */}
+      {/* key = conversation+episode identity → remount reset busy/applied/error
+          เมื่อเปลี่ยน conversation หรือ episode (ห้าม state รั่วข้าม identity) */}
+      <ClaimSection
+        key={`${conversation.id}|${conversation.active_claim_episode_id ?? "-"}`}
+        conversation={conversation}
+      />
+
       {/* ── ประวัติปิดแชท (card ยืด/หด ได้) ── */}
       {/* ── ประวัติคำสั่งซื้อ ── */}
       <OrderHistorySection conversationId={conversation.id} />
 
       <CloseHistoryCards history={closeHistory} />
     </div>
+  );
+}
+
+/* ---------- Claim Section (explicit admin outcome — Phase 2B.6) ---------- */
+
+function ClaimSection({ conversation }: { conversation: Conversation }) {
+  const [busy, setBusy] = useState<"resolved" | "cancelled" | null>(null);
+  const [applied, setApplied] = useState<"resolved" | "cancelled" | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const episodeId = conversation.active_claim_episode_id;
+  const outcome = applied
+    ? { outcome: applied }
+    : conversation.claim_outcome;
+  const open = !!episodeId && !outcome;
+  const info = conversation.bot_claim_info;
+
+  // section แสดงเฉพาะเมื่อมี episode เปิดอยู่ หรือ outcome/info ที่ transport มาแล้ว
+  if (!episodeId && !conversation.claim_outcome && !info) return null;
+
+  async function submit(o: "resolved" | "cancelled") {
+    if (!episodeId || busy) return; // repeated-click guard
+    const ok = await confirm.ask({
+      title: o === "resolved" ? "ปิดเคลมนี้?" : "ยกเลิกเคลมนี้?",
+      message: "คำสั่งผูกกับ claim episode นี้เท่านั้น — ไม่ใช่การปิดแชท (แชทปิดแยกต่างหาก)",
+      confirmText: o === "resolved" ? "ปิดเคลม" : "ยกเลิกเคลม",
+      variant: o === "cancelled" ? "danger" : "primary",
+    });
+    if (!ok) return;
+    setBusy(o);
+    setErrorMsg(null);
+    try {
+      const res = await fetch(
+        `/api/admin/conversations/${encodeURIComponent(conversation.id)}/claim-outcome`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ episode_id: episodeId, outcome: o }),
+        }
+      );
+      const body = await res.json().catch(() => null);
+      if (res.ok && (body?.result === "applied" || body?.result === "already_applied")) {
+        // ⚡ authoritative persisted outcome เท่านั้น — conflicting retry
+        //   (เช่นกด cancelled แต่ episode จบ resolved ไปแล้ว) ต้องแสดง terminal จริง
+        const persisted = body?.claim_outcome?.outcome;
+        if (persisted === "resolved" || persisted === "cancelled") {
+          setApplied(persisted);
+        } else {
+          setErrorMsg("ผลลัพธ์จาก server ไม่สมบูรณ์ — รีเฟรชเพื่อดูสถานะจริง");
+        }
+      } else {
+        setErrorMsg(
+          body?.result === "stale_episode"
+            ? "claim episode เปลี่ยนไปแล้ว — รีเฟรชแชทอีกครั้ง"
+            : body?.result === "no_active_claim"
+              ? "ไม่มี claim ที่เปิดอยู่สำหรับ episode นี้"
+              : body?.error || `สั่งไม่สำเร็จ (HTTP ${res.status})`
+        );
+      }
+    } catch {
+      setErrorMsg("เชื่อมต่อไม่ได้ — ลองใหม่อีกครั้ง");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <Section title="เคลม/ประกัน" icon={ShieldCheck}>
+      {episodeId && <InfoRow label="Claim Episode" value={episodeId} mono />}
+      {info?.customer_name && <InfoRow label="ชื่อลูกค้า" value={info.customer_name} />}
+      {info?.customer_phone && <InfoRow label="เบอร์" value={info.customer_phone} mono />}
+      {info?.customer_order_id && <InfoRow label="ออเดอร์" value={info.customer_order_id} mono />}
+      {info?.purchase_date && <InfoRow label="วันที่ซื้อ" value={info.purchase_date} />}
+      {outcome && (
+        <InfoRow
+          label="ผลเคลม"
+          value={outcome.outcome === "resolved" ? "ปิดเคลมแล้ว" : "ยกเลิกเคลมแล้ว"}
+          badge={outcome.outcome === "resolved" ? "brand" : "red"}
+        />
+      )}
+      {open && (
+        <div className="flex gap-2 pt-1">
+          <Button size="sm" variant="primary" disabled={!!busy} onClick={() => submit("resolved")}>
+            {busy === "resolved" ? "กำลังสั่ง…" : "ปิดเคลม"}
+          </Button>
+          <Button size="sm" variant="danger" disabled={!!busy} onClick={() => submit("cancelled")}>
+            {busy === "cancelled" ? "กำลังสั่ง…" : "ยกเลิกเคลม"}
+          </Button>
+        </div>
+      )}
+      {errorMsg && <p className="text-xs text-vibrant-coral">{errorMsg}</p>}
+    </Section>
   );
 }
 

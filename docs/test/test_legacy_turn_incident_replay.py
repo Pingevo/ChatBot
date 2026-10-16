@@ -128,9 +128,19 @@ def _norm(v):
     return v
 
 
+def _get_path(doc: dict, path: str):
+    """Resolve a dotted Mongo path — returns (value, present)."""
+    cur = doc
+    for p in path.split("."):
+        if not isinstance(cur, dict) or p not in cur:
+            return None, False
+        cur = cur[p]
+    return cur, True
+
+
 def _match(doc: dict, filt: dict) -> bool:
     for k, cond in (filt or {}).items():
-        val = doc.get(k)
+        val, present = _get_path(doc, k) if "." in k else (doc.get(k), k in doc)
         if isinstance(cond, dict):
             if "$in" in cond:
                 if _norm(val) not in {_norm(x) for x in cond["$in"]}:
@@ -412,6 +422,11 @@ def _install(monkeypatch, fx: dict):
     monkeypatch.setenv("USE_CHAT_V3", "0")
     monkeypatch.setenv("USE_LEGACY_CHAT", "1")
     monkeypatch.setenv("USE_UNIT_INDEX", "0")
+    # ADMIN_MONGO_DB: .env overrides the module-level setdefault when a
+    # sibling test file imported shopeechat.app first — re-pin per test so
+    # _admin_db() routes to the seeded db, never an env-shadowed one
+    monkeypatch.setenv("ADMIN_MONGO_DB", ADMIN_DB)
+    monkeypatch.setenv("MONGO_DB", PRODUCT_DB)
     monkeypatch.setattr(runtime_config, "grouped_retrieval_shadow_enabled",
                         lambda: bool(flags.get("grouped_shadow", False)))
     monkeypatch.setattr(runtime_config,
@@ -447,10 +462,22 @@ def _install(monkeypatch, fx: dict):
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
 
     # intent classifier is LLM-backed — deterministic fixture injection
+    # row-level default + optional per-turn override (turn["intent_result"],
+    # keyed by message text — same structured boundary, zero extra calls)
     intent_result = dict(fx.get("intent_result") or
                          {"intent": "other", "confidence": 0.5})
-    monkeypatch.setattr(intent_classifier, "classify_intent",
-                        lambda message, history=None, shop=None: dict(intent_result))
+    _turn_results = {
+        t["text"]: dict(t["intent_result"])
+        for t in fx.get("turns", []) if t.get("intent_result")
+    }
+    intent_calls: list[dict] = []
+
+    def _fake_classify(message, history=None, shop=None):
+        intent_calls.append({"message": message})
+        return dict(_turn_results.get(message) or intent_result)
+
+    monkeypatch.setattr(intent_classifier, "classify_intent", _fake_classify)
+    captured.intent_calls = intent_calls
 
     # retrieval: serve collection docs as product cards (real to_product_card)
     shop = fx.get("shop")
@@ -492,11 +519,13 @@ def _install(monkeypatch, fx: dict):
     monkeypatch.setattr(order_store, "lookup_by_tracking",
                         lambda tn, shop_filter=None: None)
 
-    # handoff POST seam
+    # handoff POST seam — capture the call and report a confirmed outcome
+    # (the transport's own bounded-retry/state parsing lives in
+    # test_handoff_transport.py; here a stub success is the honest model)
     def _fake_send(req, ctx=None, *, reason="", **kw):
         handoff_calls.append({"reason": reason, "conversation_id":
                               getattr(req, "conversation_id", None)})
-        return {}
+        return {"outcome": {"state": "assigned"}}
     monkeypatch.setattr(app, "_send_handoff", _fake_send)
     try:
         from shopeechat import responses as _resp_mod
@@ -635,14 +664,13 @@ def test_l1_owner_probes(fx):
         pytest.skip("no owner probe")
     msg = fx["turns"][-1]["text"]
     if probe == "detect_human_request":
-        req = SimpleNamespace(message=msg, conversation_id="fx",
-                              shop=fx.get("shop"),
-                              ticket_state=fx.get("ticket_state"))
-        out = handoffs.detect_human_request(req, {})
+        # detection probe — decide_turn เจ้าของ decision; transport ไม่ re-detect
+        out = (handoffs.is_human_request(msg)
+               or handoffs.is_service_anger(msg))
         if fx["expected"]["action"] == "handoff":
-            assert out is not None, "expected handoff detection"
+            assert out, "expected handoff detection"
         else:
-            assert out is None, f"unexpected handoff: {out}"
+            assert not out, f"unexpected handoff detection"
     elif probe == "guards_spec_claim":
         # output boundary must flag spec claims not grounded in card context
         out = guards.check_output("ตัวนี้กันน้ำ IP68 นะคะ")
@@ -873,13 +901,23 @@ def _expectations_met(fx, records, captured):
 
     action = exp.get("action")
     if action == "locked":
-        if not getattr(resp, "handoff_to_admin", False):
-            fails.append("expected post-handoff lock (handoff_to_admin)")
+        # ⚡ 2B.5 boundary fix — "locked" = wait-only state, NOT a handoff
+        #   command: handoff_to_admin/handoff_reason/routing-path="handoff"
+        #   all mean "perform a new handoff" downstream — must stay clean.
+        if getattr(resp, "handoff_to_admin", False):
+            fails.append("locked response must not signal handoff_to_admin")
+        if getattr(resp, "handoff_reason", None) is not None:
+            fails.append(f"locked handoff_reason="
+                         f"{getattr(resp, 'handoff_reason', None)!r} want None")
+        _rd = getattr(resp, "routing_decision", None) or {}
+        if _rd.get("path") != "human_wait":
+            fails.append(f"locked routing path={_rd.get('path')!r} "
+                         "want 'human_wait'")
         if rec["llm_calls"]:
             fails.append(f"llm called {len(rec['llm_calls'])}x during lock")
-        hr = exp.get("handoff_reason")
-        if hr and getattr(resp, "handoff_reason", None) != hr:
-            fails.append(f"handoff_reason={getattr(resp, 'handoff_reason', None)!r}")
+        _prev_h = records[-2]["handoffs"] if len(records) > 1 else []
+        if len(rec["handoffs"]) != len(_prev_h):
+            fails.append("handoff POST fired during locked turn")
     elif action == "handoff":
         if not getattr(resp, "handoff_to_admin", False):
             fails.append("expected handoff_to_admin")
@@ -891,6 +929,15 @@ def _expectations_met(fx, records, captured):
             fails.append("expected answer but response handed off")
         if not (getattr(resp, "answer", "") or "").strip():
             fails.append("expected bot answer but resp.answer is empty")
+    elif action == "no_reply":
+        # ⚡ Phase 2C.3 — TurnPlan no_reply = noise/placeholder turn:
+        #   ไม่ตอบ ไม่เรียก LLM ไม่ handoff (bot silent โดยเจตนา)
+        if getattr(resp, "handoff_to_admin", False):
+            fails.append("no_reply response must not signal handoff_to_admin")
+        if (getattr(resp, "answer", "") or "").strip():
+            fails.append("expected empty answer for no_reply turn")
+        if rec["llm_calls"]:
+            fails.append(f"llm called {len(rec['llm_calls'])}x during no_reply")
     elif action == "claim_collect":
         claim = conversation_products.load_claim_state(fx.get("conversation_id"))
         if not claim:
@@ -1017,7 +1064,326 @@ def test_l3_chat_boundary(monkeypatch, fx):
     _gate(fx, fails, level=3)
 
 
+# ── Phase 2B.5: ticket-close/lock safety — episode identity, not just action ──
+
+_P2B5_SHOP = "KingGadgets"
+
+
+def _p2b5_fx(**over):
+    fx = {"id": "p2b5-dedicated", "shop": _P2B5_SHOP, "platform": "shopee",
+          "conversation_id": "fx-conv-p2b5-ded", "catalog": [],
+          "status": "positive", "levels": [3],
+          "intent_result": {"intent": "other", "confidence": 0.5},
+          "turns": []}
+    fx.update(over)
+    return fx
+
+
+def test_p2b5_closed_greeting_no_post_same_episode(monkeypatch):
+    """closed→bot + collecting claim + greeting → normal answer, ZERO new
+    handoff POST, same episode_id/stage — ticket close must not resolve,
+    cancel, duplicate, or re-escalate the claim episode."""
+    seed = {"stage": "collecting", "episode_id": "ep-keep",
+            "customer_name": "สมชาย ใจดี"}
+    fx = _p2b5_fx(
+        conversation_id="fx-conv-p2b5-keep", ticket_state="closed",
+        claim_state_seed=seed,
+        turns=[{"role": "model",
+                "text": "รับทราบค่ะ เดี๋ยวแอดมินดูแลเรื่องเคลมต่อนะคะ"},
+               {"text": "สวัสดีครับ"}])
+    records, _cap, _client = _replay(monkeypatch, fx)
+    resp = records[-1]["resp"]
+    assert not getattr(resp, "handoff_to_admin", False), \
+        "closed-ticket greeting must answer, not hand off"
+    assert records[-1]["handoffs"] == [], \
+        f"no new handoff POST during lock-free turn: {records[-1]['handoffs']}"
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-keep")
+    assert claim and claim.get("episode_id") == "ep-keep"
+    assert claim.get("stage") == "collecting"
+    assert claim.get("customer_name") == "สมชาย ใจดี"
+
+
+def test_p2b5_active_handoff_locks_and_writes_nothing(monkeypatch):
+    """open ticket + collecting claim + claim-field message → wait-admin
+    lock: no new POST, no claim write, episode untouched."""
+    seed = {"stage": "collecting", "episode_id": "ep-lock",
+            "customer_name": "สมชาย ใจดี"}
+    fx = _p2b5_fx(
+        conversation_id="fx-conv-p2b5-lock", ticket_state="open",
+        claim_state_seed=seed,
+        turns=[{"text": "0812345678"}])
+    records, _cap, _client = _replay(monkeypatch, fx)
+    resp = records[-1]["resp"]
+    # ⚡ wait-only contract: lock ≠ handoff command — flag/reason/path must
+    #   stay clean so downstream callers cannot re-fire a handoff
+    assert resp.handoff_to_admin is False
+    assert resp.handoff_reason is None
+    assert (resp.routing_decision or {}).get("path") == "human_wait"
+    assert records[-1]["handoffs"] == [], "lock must not POST again"
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-lock")
+    assert claim and claim.get("episode_id") == "ep-lock"
+    assert claim.get("stage") == "collecting"
+    assert claim.get("customer_name") == "สมชาย ใจดี"
+    assert not claim.get("customer_phone"), \
+        "locked turn must not write claim fields"
+
+
+def test_p2b5_double_close_idempotent(monkeypatch):
+    """close twice (two greeting turns under closed) → both answer normally,
+    zero POSTs, episode stable across both."""
+    seed = {"stage": "collecting", "episode_id": "ep-dbl"}
+    fx = _p2b5_fx(
+        conversation_id="fx-conv-p2b5-dbl", ticket_state="closed",
+        claim_state_seed=seed,
+        turns=[{"role": "model",
+                "text": "รับทราบค่ะ เดี๋ยวแอดมินดูแลเรื่องเคลมต่อนะคะ"},
+               {"text": "สวัสดีครับ"},
+               {"text": "สวัสดีครับ"}])
+    records, _cap, _client = _replay(monkeypatch, fx)
+    for i, rec in enumerate(records):
+        assert not getattr(rec["resp"], "handoff_to_admin", False), \
+            f"turn {i} must answer, not hand off"
+        assert rec["handoffs"] == [], f"turn {i} posted handoff"
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-dbl")
+    assert claim and claim.get("episode_id") == "ep-dbl"
+    assert claim.get("stage") == "collecting"
+
+
+def test_p2b5_handoff_failure_then_close_keeps_episode(monkeypatch):
+    """Failed claim handoff POST (transport down) must not resolve the
+    claim; admin closing afterwards must not erase/restart the episode."""
+    client, captured, handoff_calls = _install(monkeypatch, _p2b5_fx(
+        conversation_id="fx-conv-p2b5-fail", ticket_state="bot",
+        claim_state_seed={"stage": "collecting", "episode_id": "ep-fail"}))
+    # turn 1: claim field arrives but the handoff POST fails (transport owner
+    # stub → None). The merge must still persist the field.
+    monkeypatch.setattr(app, "_send_handoff", lambda *a, **k: None)
+    from shopeechat import responses as _resp_mod
+    monkeypatch.setattr(_resp_mod, "_send_handoff", lambda *a, **k: None)
+    history: list = []
+    resp1 = app.chat(app.ChatRequest(
+        message="0812345678", shop=_P2B5_SHOP, platform="shopee",
+        history=list(history), conversation_id="fx-conv-p2b5-fail",
+        ticket_state="bot", limit=5, simulate_assignment=True,
+        test_source="phase2b5"))
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-fail")
+    assert claim and claim.get("episode_id") == "ep-fail"
+    assert claim.get("customer_phone") == "0812345678", \
+        "field merge must persist even when the handoff POST fails"
+    history += [{"role": "user", "text": "0812345678"},
+                {"role": "model", "text": getattr(resp1, "answer", "") or ""},
+                {"role": "model",
+                 "text": "รับทราบค่ะ เดี๋ยวแอดมินดูแลเรื่องเคลมต่อนะคะ"}]
+    # turn 2: restore a RECORDING success stub first — a re-escalating POST
+    # (BUG-D) must show up in handoff_calls and flip handoff_to_admin.
+    def _cap_send(req, ctx=None, *, reason="", **kw):
+        handoff_calls.append({"reason": reason})
+        return {"outcome": {"state": "assigned"}}
+    monkeypatch.setattr(app, "_send_handoff", _cap_send)
+    monkeypatch.setattr(_resp_mod, "_send_handoff", _cap_send)
+    resp2 = app.chat(app.ChatRequest(
+        message="สวัสดีครับ", shop=_P2B5_SHOP, platform="shopee",
+        history=list(history), conversation_id="fx-conv-p2b5-fail",
+        ticket_state="closed", limit=5, simulate_assignment=True,
+        test_source="phase2b5"))
+    assert not getattr(resp2, "handoff_to_admin", False), \
+        "post-close greeting must not re-escalate"
+    assert handoff_calls == [], \
+        f"no handoff POST may fire on the closed+greeting turn: {handoff_calls}"
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-fail")
+    assert claim and claim.get("episode_id") == "ep-fail"
+    assert claim.get("stage") == "collecting"
+    assert claim.get("customer_phone") == "0812345678"
+
+
+def test_p2b5_stale_field_replay_same_episode(monkeypatch):
+    """closed ticket + collecting claim + re-sending an already-stored field
+    → merges into the SAME episode (no duplicate/restart)."""
+    seed = {"stage": "collecting", "episode_id": "ep-stale",
+            "customer_phone": "0812345678"}
+    fx = _p2b5_fx(
+        conversation_id="fx-conv-p2b5-stale", ticket_state="closed",
+        claim_state_seed=seed,
+        turns=[{"role": "model",
+                "text": "รับทราบค่ะ เดี๋ยวแอดมินดูแลเรื่องเคลมต่อนะคะ"},
+               {"text": "0812345678"}],
+        synthetic_pii=["phone"])
+    records, _cap, _client = _replay(monkeypatch, fx)
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-stale")
+    assert claim and claim.get("episode_id") == "ep-stale", \
+        "re-sending a stored field must stay in the same episode"
+    assert claim.get("customer_phone") == "0812345678"
+    assert claim.get("stage") == "collecting"
+
+
+# ── Phase 2B.5 boundary correction — single lock owner at /chat entry ────────
+
+def _assert_wait_only(resp):
+    """Wait-only contract — downstream callers branch on these fields:
+    handoff_to_admin/reason/routing-path mean "perform a NEW handoff",
+    never "already human-owned"."""
+    assert resp.handoff_to_admin is False
+    assert resp.handoff_reason is None
+    assert (resp.routing_decision or {}).get("path") == "human_wait"
+    assert "รอการติดต่อกลับ" in (resp.answer or ""), \
+        "lock must keep the wait-admin answer"
+
+
+def test_p2b5_wait_response_is_not_handoff_command(monkeypatch):
+    """R1 — active ticket → wait-admin answer with ZERO handoff-command
+    fields; no POST, no claim write, no LLM call."""
+    _client, captured, handoff_calls = _install(monkeypatch, _p2b5_fx(
+        conversation_id="fx-conv-p2b5-wait", ticket_state="handoff",
+        claim_state_seed={"stage": "collecting", "episode_id": "ep-wait"}))
+    resp = app.chat(app.ChatRequest(
+        message="สวัสดีครับ", shop=_P2B5_SHOP, platform="shopee",
+        history=[], conversation_id="fx-conv-p2b5-wait",
+        ticket_state="handoff", limit=5, test_source="phase2b5"))
+    _assert_wait_only(resp)
+    assert handoff_calls == [], "waiting state must not POST a new handoff"
+    assert captured.calls == [], "lock must not spend LLM calls"
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-wait")
+    assert claim and claim.get("episode_id") == "ep-wait"
+    assert claim.get("stage") == "collecting"
+
+
+def test_p2b5_v2_image_never_reaches_vision(monkeypatch):
+    """R3 — use_v2 + active ticket + image → lock fires at /chat BEFORE v2
+    dispatch: chat_v2 never entered, describe_images never called."""
+    _client, captured, handoff_calls = _install(monkeypatch, _p2b5_fx(
+        conversation_id="fx-conv-p2b5-v2img", ticket_state="open"))
+    from shopeechat import chat_v2 as _cv2
+    v2_calls, vision_calls = [], []
+    monkeypatch.setattr(_cv2, "chat_v2",
+                        lambda *a, **k: v2_calls.append(a) or {})
+    monkeypatch.setattr(llm, "describe_images",
+                        lambda *a, **k: vision_calls.append(a) or "")
+    resp = app.chat(app.ChatRequest(
+        message="[รูปภาพ]", shop=_P2B5_SHOP, platform="shopee",
+        images=["https://img.example/x.jpg"], use_v2=True,
+        history=[], conversation_id="fx-conv-p2b5-v2img",
+        ticket_state="open", limit=5, test_source="phase2b5"))
+    _assert_wait_only(resp)
+    assert v2_calls == [], "active ticket must not reach chat_v2"
+    assert vision_calls == [], "active ticket must not spend vision calls"
+    assert captured.calls == []
+    assert handoff_calls == []
+
+
+def test_p2b5_v3_never_dispatched_when_locked(monkeypatch):
+    """R4 — use_v3 + active ticket → lock fires before v3 dispatch."""
+    _client, captured, handoff_calls = _install(monkeypatch, _p2b5_fx(
+        conversation_id="fx-conv-p2b5-v3", ticket_state="pending"))
+    from shopeechat import chatbotv3
+    v3_calls = []
+    monkeypatch.setattr(chatbotv3, "chat_v3",
+                        lambda *a, **k: v3_calls.append(a) or {})
+    resp = app.chat(app.ChatRequest(
+        message="สวัสดีครับ", shop=_P2B5_SHOP, platform="shopee",
+        use_v3=True, history=[], conversation_id="fx-conv-p2b5-v3",
+        ticket_state="pending", limit=5, test_source="phase2b5"))
+    _assert_wait_only(resp)
+    assert v3_calls == [], "active ticket must not reach chatbotv3"
+    assert handoff_calls == []
+
+
+def test_p2b5_closed_states_still_dispatch_engines(monkeypatch):
+    """R4 control — closed/resolved/bot bypass the lock: v2 and v3
+    dispatch normally."""
+    _client, _cap, _hc = _install(monkeypatch, _p2b5_fx(
+        conversation_id="fx-conv-p2b5-disp", ticket_state="bot"))
+    from shopeechat import chatbotv3
+    from shopeechat import chat_v2 as _cv2
+    v2_calls, v3_calls = [], []
+    monkeypatch.setattr(
+        _cv2, "chat_v2",
+        lambda *a, **k: v2_calls.append(a) or {
+            "answer": "v2-ok", "products": [], "shop": _P2B5_SHOP,
+            "model": "stub"})
+    monkeypatch.setattr(
+        chatbotv3, "chat_v3",
+        lambda *a, **k: v3_calls.append(a) or {
+            "answer": "v3-ok", "products": [], "shop": _P2B5_SHOP,
+            "model": "stub"})
+    for state in ("closed", "resolved", "bot"):
+        app.chat(app.ChatRequest(
+            message="สวัสดีครับ", shop=_P2B5_SHOP, platform="shopee",
+            use_v2=True, history=[], conversation_id="fx-conv-p2b5-disp",
+            ticket_state=state, limit=5, test_source="phase2b5"))
+        app.chat(app.ChatRequest(
+            message="สวัสดีครับ", shop=_P2B5_SHOP, platform="shopee",
+            use_v3=True, history=[], conversation_id="fx-conv-p2b5-disp",
+            ticket_state=state, limit=5, test_source="phase2b5"))
+    assert len(v2_calls) == 3, f"closed states must reach chat_v2: {v2_calls}"
+    assert len(v3_calls) == 3, f"closed states must reach chatbotv3: {v3_calls}"
+
+
+def test_p2b7_video_placeholder_persists_has_image(monkeypatch):
+    """2B.7 regression pin — [วิดีโอ] turn on a collecting episode persists
+    canonical image evidence through the real path (app.chat → legacy SM →
+    _claim_transition → fake Mongo): has_image=True, same episode, and the
+    removed has_video alias never appears in persisted state."""
+    fx = _p2b5_fx(
+        conversation_id="fx-conv-p2b7-vid", ticket_state="bot",
+        claim_state_seed={"stage": "collecting", "episode_id": "ep-vid",
+                          "customer_name": "สมชาย ใจดี"},
+        turns=[{"text": "[วิดีโอ]"}],
+        synthetic_pii=["name"])
+    _records, _cap, _client = _replay(monkeypatch, fx)
+    claim = conversation_products.load_claim_state("fx-conv-p2b7-vid")
+    assert claim and claim.get("episode_id") == "ep-vid", \
+        "video evidence must merge into the same open episode"
+    assert claim.get("stage") == "collecting"
+    assert claim.get("has_image") is True, \
+        "[วิดีโอ] placeholder must persist as canonical has_image evidence"
+    assert "has_video" not in claim, \
+        "persisted claim_state must never carry the removed has_video field"
+
+
 # ── harness self-tests (Phase 0C): prove doubles/tripwires actually work ─────
+
+def _locked_fx():
+    return {"id": "selftest-locked", "status": "positive", "levels": [3],
+            "expected": {"action": "locked"}}
+
+
+def _locked_rec(**resp_kw):
+    base = dict(chat_engine="legacy", handoff_to_admin=False,
+                handoff_reason=None, routing_decision={"path": "human_wait"},
+                answer="รอแอดมิน")
+    base.update(resp_kw)
+    return {"resp": SimpleNamespace(**base), "llm_calls": [],
+            "handoffs": []}
+
+
+def test_harness_selftest_locked_accepts_wait_only():
+    """A genuine wait-only response must pass action=locked."""
+    fails = _expectations_met(_locked_fx(), [_locked_rec()], SimpleNamespace())
+    assert fails == [], f"wait-only response wrongly failed: {fails}"
+
+
+def test_harness_selftest_locked_rejects_handoff_flag():
+    """handoff_to_admin=True is a NEW-handoff command — must fail locked."""
+    fails = _expectations_met(
+        _locked_fx(), [_locked_rec(handoff_to_admin=True)], SimpleNamespace())
+    assert any("handoff_to_admin" in f for f in fails), fails
+
+
+def test_harness_selftest_locked_rejects_handoff_path():
+    """routing path 'handoff' is a handoff command — must fail locked."""
+    fails = _expectations_met(
+        _locked_fx(), [_locked_rec(routing_decision={"path": "handoff"})],
+        SimpleNamespace())
+    assert any("routing" in f for f in fails), fails
+
+
+def test_harness_selftest_locked_rejects_recorded_handoff():
+    """A recorded handoff POST on the locked turn must fail action=locked."""
+    rec = _locked_rec()
+    rec["handoffs"] = [{"reason": "post_handoff_waiting"}]
+    fails = _expectations_met(_locked_fx(), [rec], SimpleNamespace())
+    assert any("handoff POST" in f for f in fails), fails
+
 
 def _validator_mod():
     import importlib.util
@@ -1193,33 +1559,43 @@ def test_harness_import_boundary_subprocess():
 
 
 def test_meta_validator_turn_decision_expect():
-    """turn_decision_expect: per-user-turn TurnDecision expectations —
-    validator must enforce count/shape/action enum."""
+    """turn_decision_expect: per-user-turn TurnPlan expectations —
+    validator must enforce count/shape/primary_action/needs enum."""
     vmod = _validator_mod()
     ok = {"id": "meta-td", "status": "positive", "levels": [3],
           "shop": "MetaShop", "turns": [{"text": "ทัก"}, {"text": "ถาม"}],
           "catalog": [{"item_id": 1001.0, "shopname": "MetaShop"}]}
     # valid block must pass
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "unknown"}, {"action": "answer_product",
-                                "flags_contains": ["post_handoff_escape"]}]})
+        {"primary_action": "clarify", "needs": [],
+         "requires_clarification": True},
+        {"primary_action": "execute_needs",
+         "needs": [{"kind": "product", "operation": "describe"}],
+         "flags_contains": ["cert_question"]}]})
     assert not errs, errs
     # unknown nested key rejected
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "unknown"}, {"action": "unknown", "magic": 1}]})
+        {"primary_action": "clarify"},
+        {"primary_action": "clarify", "magic": 1}]})
     assert any("magic" in e for e in errs), errs
-    # invalid action rejected
+    # invalid primary_action rejected
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "spin"}, {"action": "unknown"}]})
-    assert any("action" in e for e in errs), errs
+        {"primary_action": "spin"}, {"primary_action": "clarify"}]})
+    assert any("primary_action" in e for e in errs), errs
+    # invalid need kind/operation rejected
+    errs = vmod.check_row({**ok, "turn_decision_expect": [
+        {"primary_action": "execute_needs",
+         "needs": [{"kind": "bogus", "operation": "describe"}]},
+        {"primary_action": "clarify"}]})
+    assert any("kind" in e for e in errs), errs
     # count must equal user-turn count
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "unknown"}]})
+        {"primary_action": "clarify"}]})
     assert any("turn" in e.lower() for e in errs), errs
     # flags_contains must be list[str]
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "unknown", "flags_contains": "x"},
-        {"action": "unknown"}]})
+        {"primary_action": "clarify", "flags_contains": "x"},
+        {"primary_action": "clarify"}]})
     assert any("flags_contains" in e for e in errs), errs
 
 
@@ -1399,60 +1775,65 @@ def test_meta_validator_tde_current_divergence_key():
           "expected_owner": "claim_lifecycle",
           "expected": {"action": "answer"}}
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "claim_request", "current": "claim_collect"}]})
+        {"primary_action": "execute_needs", "current": "clarify"}]})
     assert not errs, errs
-    # current == action is a no-op declaration → reject
+    # current == primary_action is a no-op declaration → reject
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "claim_collect", "current": "claim_collect"}]})
-    assert errs, "current==action must be rejected"
-    # current not in action enum → reject
+        {"primary_action": "execute_needs", "current": "execute_needs"}]})
+    assert errs, "current==primary_action must be rejected"
+    # current not in primary_action enum → reject
     errs = vmod.check_row({**ok, "turn_decision_expect": [
-        {"action": "claim_request", "current": "bogus"}]})
+        {"primary_action": "execute_needs", "current": "bogus"}]})
     assert errs
     # current on a positive row → reject (nothing diverges to declare)
     errs = vmod.check_row({**ok, "status": "positive",
                            "incident_levels": None,
                            "turn_decision_expect": [
-                               {"action": "claim_request",
-                                "current": "claim_collect"}]})
+                               {"primary_action": "execute_needs",
+                                "current": "clarify"}]})
     assert errs, "'current' must be incident-only"
 
 
 def test_meta_tde_entry_semantics():
-    """strict TurnDecision expectation semantics shared by the contract
+    """strict TurnPlan expectation semantics shared by the contract
     test and the shadow sweep (validator-owned helper)."""
     from validate_legacy_turn_fixtures import tde_entry_error  # noqa
     chk = tde_entry_error
     # incident + declared current + actual==current → expected divergence
-    assert chk({"action": "claim_request", "current": "claim_collect"},
-               "claim_collect", ["claim_resume"], incident=True) is None
+    assert chk({"primary_action": "execute_needs", "current": "clarify"},
+               {"primary_action": "clarify"}, ["claim_resume"],
+               incident=True) is None
     # incident + declared current + actual==desired → STALE incident
-    assert chk({"action": "claim_request", "current": "claim_collect"},
-               "claim_request", [], incident=True), \
-        "incident whose desired action now holds must fail (stale pin)"
+    assert chk({"primary_action": "execute_needs", "current": "clarify"},
+               {"primary_action": "execute_needs"}, [], incident=True), \
+        "incident whose desired primary_action now holds must fail (stale pin)"
     # incident + declared current + drifted actual → fail
-    assert chk({"action": "claim_request", "current": "claim_collect"},
-               "unknown", [], incident=True)
+    assert chk({"primary_action": "execute_needs", "current": "clarify"},
+               {"primary_action": "handoff"}, [], incident=True)
     # positive + mismatch → fail
-    assert chk({"action": "claim_collect"}, "claim_request", [],
+    assert chk({"primary_action": "execute_needs"},
+               {"primary_action": "clarify"}, [],
                incident=False)
     # positive + match → pass
-    assert chk({"action": "claim_collect"}, "claim_collect", [],
+    assert chk({"primary_action": "execute_needs",
+                "needs": [{"kind": "claim", "operation": "collect"}]},
+               {"primary_action": "execute_needs",
+                "needs": [{"kind": "claim", "operation": "collect"}]}, [],
                incident=False) is None
     # incident row WITHOUT current = current-pin — flags still asserted
-    assert chk({"action": "claim_collect",
+    assert chk({"primary_action": "execute_needs",
                 "flags_contains": ["claim_resume"]},
-               "claim_collect", [], incident=True), \
+               {"primary_action": "execute_needs"}, [], incident=True), \
         "flags_contains on incident current-pins must not be exempt"
 
 
 def test_meta_validator_turn_decision_nonstring_action():
-    """action ที่ไม่ใช่ string (list/dict/int) ต้อง reject ไม่ใช่ crash."""
+    """primary_action ที่ไม่ใช่ string (list/dict/int) ต้อง reject ไม่ใช่ crash."""
     vmod = _validator_mod()
     ok = {"id": "meta-td2", "status": "positive", "levels": [3],
           "shop": "MetaShop", "turns": [{"text": "ทัก"}],
           "catalog": [{"item_id": 1001.0, "shopname": "MetaShop"}]}
     for bad_action in ([], {"x": 1}, 5):
         errs = vmod.check_row({**ok, "turn_decision_expect": [
-            {"action": bad_action}]})
-        assert errs, f"action={bad_action!r} should fail validation"
+            {"primary_action": bad_action}]})
+        assert errs, f"primary_action={bad_action!r} should fail validation"

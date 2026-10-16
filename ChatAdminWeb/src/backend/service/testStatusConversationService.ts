@@ -114,7 +114,7 @@ export async function updateTestStatus(
   await upsertTestStatus(conversationId, source, fields);
 }
 
-/** ⚡ botworker parallel — assign ตรง (รับเรื่อง/โยนงาน) — atomic guard แบบ manualAssign ตัวจริง
+/** ⚡ botworker parallel — assign ตรง (รับเรื่อง/โยนงาน) — atomic guard แบบ commitHandoffState ตัวจริง
  *  คืน true ถ้าสำเร็จ, false ถ้า assigned_to เปลี่ยนไประหว่างทาง (โดนแย่ง)
  *  assignedStatus: "open" (default — botworker) หรือ "handoff"
  */

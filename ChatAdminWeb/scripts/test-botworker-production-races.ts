@@ -54,7 +54,6 @@ async function test(name: string, fn: () => Promise<void>) {
 
 function reset() {
   mocks.resetState();
-  rt.botworkerRuntime.flushErrorRetryMs = 5000; // คืนค่า default หลัง test ที่ย่อเวลา
 }
 
 function assert(cond: boolean, msg: string) {
@@ -256,6 +255,8 @@ function bufferRow(mid: string, conv: string, over: Record<string, unknown> = {}
     message_id: mid, conversation_id: conv, shop_id: "shop_1", platform: "shopee",
     text: `buffered ${mid}`, kind: "message", status: "buffered",
     received_at: new Date(),
+    // ⚡ Phase 2D correction — delayed-execution admission proof
+    msg_created_at: new Date(), admitted_edge: new Date(0),
     ...over,
   };
 }
@@ -841,7 +842,7 @@ async function main() {
       _id: "op_b4", status: "pending", owner_id: "w-dead", fencing_token: 5,
       lease_expires_at: new Date(Date.now() - 1000), created_at: new Date(),
     });
-    // ชะลอ cursor-read ของ caller แรกใน pickNextAgent — caller สอง exec เสร็จ
+    // ชะลอ cursor-read ของ caller แรกใน reserveNextAgent — caller สอง exec เสร็จ
     // (commit a1) ก่อน caller หนึ่งอ่าน cursor → ถ้าไม่มี ownership fencing
     // ทั้งคู่ exec → caller หนึ่งจะเห็น a1 แล้วจ่าย a2 (double-assign)
     let delayed = false;
@@ -914,7 +915,7 @@ async function main() {
       bufferRow("m_c1", "conv_c1", { claim_id: CLAIM_ID("m_c1"), owner_id: rt.botworkerRuntime.ownerId, fencing_token: 1 }),
     );
     mocks.fakeColl("chat_processing").push(claimDoc("m_c1", { status: "bot_answered", fencing_token: 3 }));
-    await buf.flushBuffer("conv_c1", processFn, markProcessed);
+    await buf.flushBuffer("shopee", "shop_1", "conv_c1", processFn, markProcessed);
     const rows = mocks.fakeColl("buffer_messages").filter((d: any) => d.kind !== "conv_lock");
     assert(rows.length === 0, `terminal-claim row must be deleted, got ${JSON.stringify(rows.map((r: any) => r.status))}`);
     assert(markProcessedCalls.some((m) => m.id === "m_c1" && m.status === "bot_answered"),
@@ -929,7 +930,7 @@ async function main() {
     mocks.fakeColl("chat_processing").push(claimDoc("m_c2", {
       status: "processing", owner_id: "w-other", fencing_token: 7, conversation_id: "conv_c2",
     }));
-    const res = await buf.flushBuffer("conv_c2", processFn, markProcessed);
+    const res = await buf.flushBuffer("shopee", "shop_1", "conv_c2", processFn, markProcessed);
     const row = mocks.fakeColl("buffer_messages").find((d: any) => d.message_id === "m_c2")!;
     assert(row && row.status === "buffered", `foreign active row must stay buffered, got ${row?.status}`);
     assert(state.calls.callBot === 0, "must not process foreign-owned claim");
@@ -937,22 +938,44 @@ async function main() {
     assert(claim.owner_id === "w-other" && claim.fencing_token === 7, "foreign claim must not be stolen");
   });
 
-  await test("C3 claimedIds=0 แต่มี retryable rows → ต้อง schedule retry", async () => {
+  // ⚡ A — PART 1 contract: NO autonomous lease-expiry execution.
+  //   lease expiry / timer / recovery / poll repetitions must never launch a
+  //   provider call for foreign/interrupted work — recovery reconciles dormant.
+  await test("C3 foreign claim lease expiry → zero provider across timer+20 recovery/poll/flush passes, claim settles dormant", async () => {
     seedConv("conv_c3");
-    rt.botworkerRuntime.flushErrorRetryMs = 40; // ย่อเวลา retry ให้ observe ได้
     mocks.fakeColl("buffer_messages").push(
       bufferRow("m_c3", "conv_c3", { claim_id: CLAIM_ID("m_c3"), owner_id: "w-other", fencing_token: 7 }),
     );
     mocks.fakeColl("chat_processing").push(claimDoc("m_c3", {
       status: "processing", owner_id: "w-other", fencing_token: 7, conversation_id: "conv_c3",
+      lease_expires_at: new Date(Date.now() + 60000), // foreign ACTIVE lease
     }));
-    let rowOps = 0;
-    state.updateOneHook = (coll: string) => { if (coll === "buffer_messages") rowOps++; };
-    await buf.flushBuffer("conv_c3", processFn, markProcessed);
-    const baseline = rowOps;
-    assert(baseline > 0, "setup: first flush must touch row ops");
-    await sleep(400); // รอ scheduled retry ยิง flush อีกรอบ
-    assert(rowOps > baseline, `no retry scheduled — rowOps stuck at ${baseline}`);
+    const scope = await svc.botWorkerService.resolveBotworkerScope(
+      await mocks.getSystemConfig(), new Date(0));
+    // 1) foreign-active → flush refuses, zero provider
+    await buf.flushBuffer("shopee", "shop_1", "conv_c3", processFn, markProcessed);
+    assert(state.calls.callBot === 0, `foreign active claim → no provider, got ${state.calls.callBot}`);
+    // 2) lease expires WITHOUT any new inbound — the old recheck timer would fire
+    //    a re-flush here and re-fence the expired claim → provider call. Must not.
+    const claim = mocks.fakeColl("chat_processing").find((d: any) => d._id === CLAIM_ID("m_c3"))!;
+    claim.lease_expires_at = new Date(Date.now() - 1);
+    await sleep(5400); // beyond old FOREIGN_CLAIM_RECHECK_MS — prove no autonomous fire
+    assert(state.calls.callBot === 0, `lease expiry launched provider: callBot=${state.calls.callBot}`);
+    const mid = mocks.fakeColl("buffer_messages").find((d: any) => d.message_id === "m_c3")!;
+    assert(mid.status !== "processing", `row must not silently execute, got ${mid.status}`);
+    // 3) 20 repeated timer-window/recovery/poll/flush passes — still zero provider;
+    //    claim reconciles to dormant bot_failed, row to dormant failed
+    for (let i = 0; i < 20; i++) {
+      await svc.botWorkerService.pollNewMessages(scope);
+      await svc.botWorkerService.recoverStaleBuffers(scope);
+      await buf.flushBuffer("shopee", "shop_1", "conv_c3", processFn, markProcessed);
+    }
+    assert(state.calls.callBot === 0, `autonomous execution across passes: callBot=${state.calls.callBot}`);
+    assert(mocks.fakeColl("shadow_replies").length === 0, "no reply may be produced");
+    const settled = mocks.fakeColl("chat_processing").find((d: any) => d._id === CLAIM_ID("m_c3"))!;
+    assert(settled.status === "bot_failed", `claim must reconcile to dormant bot_failed, got ${settled.status}`);
+    const row = mocks.fakeColl("buffer_messages").find((d: any) => d.message_id === "m_c3")!;
+    assert(row.status === "failed", `row must settle dormant failed, got ${row.status}`);
   });
 
   await test("C4 terminal ปน owned → owned batch สำเร็จ + terminal rows ไม่ค้าง", async () => {
@@ -965,7 +988,7 @@ async function main() {
       claimDoc("m_c4a", { conversation_id: "conv_c4" }),                 // owned active
       claimDoc("m_c4b", { conversation_id: "conv_c4", status: "bot_answered", owner_id: "w-dead", fencing_token: 5 }), // terminal
     );
-    const res = await buf.flushBuffer("conv_c4", processFn, markProcessed);
+    const res = await buf.flushBuffer("shopee", "shop_1", "conv_c4", processFn, markProcessed);
     assert(res.status === "buffer_flushed", `owned batch must process, got ${res.status}: ${res.detail}`);
     assert(state.calls.callBot === 1, `callBot=${state.calls.callBot} want 1 — owned member processed once`);
     const rows = mocks.fakeColl("buffer_messages").filter((d: any) => d.kind !== "conv_lock");

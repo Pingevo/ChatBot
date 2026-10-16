@@ -39,9 +39,20 @@ export async function getSystemConfig() {
 }
 
 export const botWorkerService = {
-  async pollNewMessages(since) {
-    const found = msgs.filter((m) => m.ts > since).map((m) => m.id);
-    console.log(`EV POLL since=${iso(since)} found=[${found.join(",")}]`);
+  // ⚡ Phase 2D — worker resolve scope 1 ครั้ง/cycle ผ่าน surface นี้;
+  //   global enable edge ถูกส่งเป็น arg ที่สอง (boundary ของ era นั้น)
+  async resolveBotworkerScope(config, globalEdge) {
+    console.log("EV RESOLVE_SCOPE");
+    return {
+      config, global_enabled_since: globalEdge,
+      pairs: [{ platform: "shopee", shop_id: "s1", cutoff: globalEdge }],
+    };
+  },
+  async pollNewMessages(scope) {
+    // boundary ของ era = global_enabled_since (per-pair cutoff ใน mock เดียวกัน)
+    const since = scope?.global_enabled_since;
+    const found = since ? msgs.filter((m) => m.ts > since).map((m) => m.id) : [];
+    console.log(`EV POLL since=${since ? iso(since) : "none"} found=[${found.join(",")}]`);
     return { found: found.length, processed: 0, results: [] };
   },
   async recoverStaleBuffers() {

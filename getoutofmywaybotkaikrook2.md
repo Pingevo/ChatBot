@@ -20,6 +20,643 @@
 
 ## กำลังทำ (active)
 
+### 🔧 Phase 2C.1 — Evolve TurnDecision In Place เป็น Multi-Need TurnPlan (2026-10-15) · RED→GREEN→verify เสร็จ · รอ independent review · ยังไม่ commit
+
+- **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `4edd273` · working tree & staging clean · Phase 2B ปิดและ commit แล้ว
+- **baseline counts (fresh)**:
+  - `docs/test/test_turn_decision.py`: **86 passed** (1.04s)
+  - `docs/test/test_turn_decision_shadow.py`: **17 passed** (0.93s) — shadow sweep `turns=85 missing=0`
+  - `docs/test/test_phase2_claim_state_contract.py`: **52 passed, 1 skipped** (0.07s)
+  - canonical Phase 2B batch: **313 passed, 19 skipped, 8 xfailed** (3.05s)
+  - `docs/test/validate_legacy_turn_fixtures.py`: **69 rows, all rows pass**
+- **scope**: ทำเฉพาะ Phase 2C.1 — evolve `turn_decision.py` in place จาก one-action `TurnDecision` เป็น multi-need `TurnPlan` (`TurnNeed` + `TurnPlan`) และอัปเดต shadow/validator/fixture/test consumers โดยลบ one-action contract/assertions ที่หมดหน้าที่ในรอบเดียวกัน · ห้ามเริ่ม 2C.2/2C.3/2D · ห้ามเพิ่ม keyword table / module คู่ขนาน / LLM call / retrieval call
+
+#### Root cause → Fix → Impact (waythrough format)
+- **error**: one-action `TurnDecision` บังคับ early-return action เดียวต่อ turn ทำให้ข้อความที่มีหลายความต้องการ (เช่น เคลม+ถามสินค้า `iss30-multi-intent-claim-plus-product`, สินค้า+ประกัน, เทียบ+compat, ขอแอดมิน+ถามสินค้า, ส่งรูป/วิดีโอ+ข้อความ) ข้อมูลหาย
+- **cause**: `decide_turn()` ใน `turn_decision.py` คืน `TurnDecision(action=...)` 1 ค่า และหยุดทันทีที่ตรงเงื่อนไขแรก
+- **fix**:
+  1. ลบ `TurnDecision` และแทนที่ in-place ด้วย `TurnNeed(kind, operation, subject_refs, confidence, provenance)` + `TurnPlan(primary_action, needs, ownership, claim, requires_clarification, normalized_message, flags)`
+  2. H1/H2 boundary: ใช้เฉพาะ canonical producers เดิม (`handoffs`, `warranty_flow._claim_lifecycle`, `warranty`, `order_store.extract_order_sn`, `message_detectors`, `route_context.resolve_route`) — **0 semantic keyword tables ใหม่**, **0 calls ไปยัง `build_retrieval_profile`/`build_retrieval_slots`/`build_retrieval_relations`/`device_compat`**
+  3. M2 boundary: เมื่อ `ownership == "human"` (`ticket_state` ∈ `{handoff,open,pending}`) คืน `primary_action="human_wait", needs=()` ทันทีก่อนประเมิน needs (zero need-extraction side effects); เมื่อ `ownership != "human"` และลูกค้าขอแอดมินพร้อมถามสินค้า เก็บทั้ง `human:handoff` และ `product` need
+  4. M1 honesty: อัปเดต `_turn_decision_shadow`, `validate_legacy_turn_fixtures.py`, `legacy_turn_incidents.jsonl` (29 rows เดิม + เพิ่ม `turn_decision_expect` บน `iss30-multi-intent-claim-plus-product` ให้ตรวจทั้ง `claim:collect`, `troubleshoot:describe`, `product:describe` และลบออกจาก `_KNOWN_INCIDENT_IDS`)
+- **impact ต่อเคสอื่น**: production `app.chat` answer path ยังไม่เปลี่ยนใน 2C.1 (contract + shadow step เท่านั้น); canonical batch 331 passed / 19 skipped / 8 xfailed (เพิ่มขึ้น +18 tests จาก 313 เดิม, 0 regressions)
+
+#### RED → GREEN Evidence & Verification (fresh)
+- **RED**:
+  - `test_turn_decision.py`: `ImportError: cannot import name 'TurnNeed' from 'shopeechat.turn_decision'`
+  - `test_turn_decision_shadow.py`: **9 failed, 8 passed** (`KeyError: 'primary_action'`, `TurnDecisionShadow` step ยังเป็น `action`/`reason` แบบเก่า)
+- **GREEN**:
+  - `docs/test/test_turn_decision.py`: **104 passed** (เพิ่ม 18 multi-need/H1/M2/media/order tests)
+  - `docs/test/test_turn_decision_shadow.py`: **17 passed** (`turns=85 missing=0`, 0 mismatches)
+  - `docs/test/test_phase2_claim_state_contract.py`: **52 passed, 1 skipped**
+  - Canonical Phase 2B+2C.1 batch: **331 passed, 19 skipped, 8 xfailed**
+  - `docs/test/validate_legacy_turn_fixtures.py`: **69 rows, all rows pass**
+  - `py_compile` (`turn_decision.py`, `app.py`, tests) + `git diff --check`: **clean**
+- **verdict**: `PHASE_2C1_MULTI_NEED_TURNPLAN_GREEN_READY_FOR_INDEPENDENT_REVIEW` — หยุดก่อน stage/commit
+
+#### 2C.1 Narrow Review-Fix (2026-10-15 — correction เสร็จ · verified · รอ final independent review · ยังไม่ commit)
+- **Findings จาก independent review (1 High + 2 Medium + 1 Low)**:
+  1. **Finding A (High) — `subject_refs` ปน heuristic `extract_model_keywords()`**: `decide_turn("มีสายชาร์จ type c ไหม")` เดิมได้ `subject_refs=("type",)` เพราะนำ `_model_kws` ไปรวมใน `_explicit_codes` → **RED**: `test_generic_model_keyword_is_signal_not_subject_identity` FAIL (`AssertionError: assert 'type' not in ('type',)`) → **Fix**: `_explicit_codes` ใช้เฉพาะ `_route.model_codes` (ทำให้ `_subject_refs` มีเฉพาะ `item_ids` จาก `_ITEM_TAG_RE` + `_route.model_codes` และ `order_sn` เฉพาะ order need; `_model_kws` ใช้เป็น signal ใน `_has_explicit_product` เท่านั้น) → **GREEN**: `"type"` ไม่อยู่ใน `subject_refs`, pins สำหรับ `[สินค้า: 123456]`→`("123456",)`, `AC65B`→`("AC65B",)`, order lookup→`("2508088B5T4W1D",)`, target device `iphone 15`→`()` ผ่านครบ
+  2. **Finding B (Medium) — inline compat tuple ซ้ำ + provenance สมมติ**: เดิม `turn_decision.py` มี `("ใช้กับ", "รองรับ", "เชื่อมต่อ", "เข้ากัน")` และ provenance `"route_context.compat_signal"` → **RED**: `test_compat_behavior_pins_and_provenance` FAIL (`AssertionError: assert 'route_context._REL_CONN_RE' in ('route_context.compat_signal',)`) → **Fix**: ลบ inline tuple ซ้ำ เปลี่ยนไปใช้ `route_context._REL_CONN_RE.search(low)` (canonical pure regex owner) และตั้ง provenance เป็น `"route_context._REL_CONN_RE"` (หรือ `"intent=compatibility_check"` เมื่อมาจาก intent) → **GREEN**
+  3. **Finding C (Medium) — honest multi-need mutation evidence**: RED รอบแรกเป็น type-availability RED (`ImportError: TurnNeed`) ไม่ใช่ behavioral RED ของ multi-need → ทำ controlled mutation บน `turn_decision.py` (SHA-256 ก่อนแก้ `f8f69614c30083efcf43d35fbb1944d297f40103b89f8c4e26b09c5c9f5eb0ad`, backup ไว้ `/tmp`) ให้ `_add_need` เก็บแค่ need แรก (`if needs: return`) → รัน mixed-need subset ได้ **9 failed**: `test_product_issue_not_anger_handoff`, `test_multi_need_claim_plus_product`, `test_multi_need_product_plus_warranty_policy`, `test_multi_need_model_warranty_duration_keeps_product_and_policy`, `test_multi_need_compare_plus_compat`, `test_multi_need_human_request_plus_product_info`, `test_multi_need_media_placeholder_plus_text`, `test_multi_need_video_placeholder_plus_claim_text`, `test_shadow_fixture_actions_contract` (จับ `iss30-multi-intent-claim-plus-product` และ `p2a-claim-resolved-new-request` ที่ secondary needs หาย) → restore จาก backup + ลบ `/tmp` backup + ยืนยัน SHA-256 กลับเป็น `f8f69614c30083efcf43d35fbb1944d297f40103b89f8c4e26b09c5c9f5eb0ad` เป๊ะ
+  4. **Finding D (Low) — dead `_ticket_active` + complexity honesty**: ลบ `_ticket_active` ออกจาก `turn_decision.py` (`rg` ยืนยัน 0 references ในโค้ด); รายงาน complexity ตามจริง: `_resolve_ownership` แทนที่ `_ticket_active` (module-level helper net **0**), เพิ่ม local nested aggregator `_add_need` **+1** (รวม helper/aggregator delta = **+1 nested aggregator, 0 module-level helpers**)
+- **Verification (fresh, post-correction)**:
+  - `test_turn_decision.py`: **107 passed** (เดิม 104 + 3 tests ใหม่สำหรับ Finding A/B)
+  - `test_turn_decision_shadow.py`: **17 passed** (`turns=85 missing=0`)
+  - `test_phase2_claim_state_contract.py`: **52 passed, 1 skipped**
+  - Canonical batch: **334 passed, 19 skipped, 8 xfailed**
+  - `validate_legacy_turn_fixtures.py`: **69 rows, all rows pass**
+  - `py_compile` 6 files OK · `git diff --check` clean · `rg` forbidden symbols = 0
+- **verdict**: `PHASE_2C1_REVIEW_FIXED_READY_FOR_FINAL_INDEPENDENT_REVIEW` — หยุดก่อน stage/commit
+
+#### 2C.1 Independent-Review Low Cleanup (2026-10-15 — correction เสร็จ · verified · รอ final review · ยังไม่ commit)
+
+- **ขอบเขต**: แก้ Low findings 4 จุดจาก independent review — pure deletion + docs correction เท่านั้น · ห้ามเพิ่ม helper/guard/abstraction/keyword/module · ห้ามเปลี่ยน decision behavior/subject_refs contract/public API · ห้าม RED test ปลอมสำหรับ dead code/docs
+- **Findings re-proven จาก source ปัจจุบัน**:
+  1. **L1 unreachable `elif` (`turn_decision.py:515-520`)**: `if` = `_has_explicit_product ∧ ¬(product|compare need)`; `elif` = `compat need ∧ ¬(product|compare need) ∧ (product_types ∨ charger_subtype ∨ _explicit_codes ∨ has_item_tag)` — disjunct ทุกตัวของเงื่อนไขสุดท้ายเป็น subset ของ `_has_explicit_product` ดังนั้นถ้าเงื่อนไขนั้นจริง `if` จะจับไปก่อนเสมอ → unreachable จริง, ไม่มี side effect นอก `_add_need` → ลบ block, behavior delta = 0
+  2. **L2 stale module docstring**: docstring เขียน compat owner เป็น `route_context._FOLLOWUP_KW` แต่ runtime ใช้ `route_context._REL_CONN_RE` → แก้ docstring ให้ตรง code เท่านั้น
+  3. **L3 stale shadow-test docstring**: `test_turn_decision_shadow.py` docstring อธิบาย trace แบบเก่า (`action/reason/confidence/flags/message_len`) ทั้งที่ trace จริงคือ `ok/primary_action/needs[{kind,operation,confidence,provenance}]/ownership/claim_stage/requires_clarification/flags/message_len` (+`error` เมื่อ ok=False) — test เอง assert `action`/`reason` ต้องไม่อยู่ → แก้ docstring ให้ตรง schema ที่ test อ่าน
+  4. **L4 SRS §6.35 Calls ไม่ครบ**: `decide_turn` อ่าน `order_store._ORDER_TAG_RE`/`_ORDER_SN_RE` เพื่อตรวจ order tag/SN signal จริงแต่ Calls cell ขาดสองรายการนี้ → เพิ่มพร้อมเหตุผลสั้น
+- **Exact edits**: ลบ unreachable `elif` 6 บรรทัด (turn_decision.py, behavior delta=0 เพราะเข้าไม่ถึง) · docstring compat owner `_FOLLOWUP_KW`→`_REL_CONN_RE` · shadow-test docstring → TurnPlan trace schema จริง · SRS §6.35 Calls เพิ่ม `_ORDER_TAG_RE`/`_ORDER_SN_RE` (ตรวจ order tag/SN signal)
+- **Verification (fresh, post-cleanup)**: `test_turn_decision.py` **107 passed** · `test_turn_decision_shadow.py` **17 passed** (`turns=85 missing=0`) · `test_phase2_claim_state_contract.py` **52 passed, 1 skipped** · canonical batch **334 passed, 19 skipped, 8 xfailed** · fixtures **69 rows pass** · `py_compile` + `git diff --check` clean · forbidden patterns (`_ticket_active`, inline compat tuple, retrieval/device calls) = **0** · direct `subject_refs` evidence เดิมครบ (`"type"`→`()`, item/model/order SN pinned, `iphone 15` ไม่เป็น subject ref, compat prov=`_REL_CONN_RE`)
+- **Deletion/complexity**: dead runtime −6 LOC (runtime LOC delta รวมตอนนี้ **+238 net**: turn_decision.py +381/−154, app.py +20/−9) · docs-only corrections 3 จุด · helper/guard/module/dependency/config/env/index/collection เพิ่ม = **0**
+- **verdict**: `PHASE_2C1_LOW_CLEANUP_COMPLETE_READY_FOR_PRECOMMIT` — หยุดก่อน stage/commit
+
+#### Phase 2C.1 Commit Closeout (committed — 2026-10-15)
+
+- **Commit 1**: `837d39f` `refactor: introduce multi-need turn planning` — 9 files, +1137/−532 (active log ถูก unstage ออกก่อน — commit นี้ไม่มี `getoutofmywaybotkaikrook2.md`)
+- **9-file manifest**: `chatbot/shopeechat/turn_decision.py` · `chatbot/shopeechat/app.py` · `docs/SRS_SSD.md` · roadmap rebaseline plan · `docs/test/fixtures/legacy_turn_incidents.jsonl` · `docs/test/test_legacy_turn_incident_replay.py` · `docs/test/test_turn_decision.py` · `docs/test/test_turn_decision_shadow.py` · `docs/test/validate_legacy_turn_fixtures.py`
+- **TurnPlan contract (frozen)**: `decide_turn` คืน multi-need `TurnPlan` (`primary_action` + independent `needs[]` + `ownership` + `claim` lifecycle view + `requires_clarification`) — `ownership=="human"` → `human_wait`,`needs=()` หยุดก่อน need extraction (zero side effects) · `subject_refs` = stable explicit identities เท่านั้น (item tag IDs + `route.model_codes` + `order_sn` บน order need; heuristic `extract_model_keywords` เป็น signal ไม่ใช่ subject) · compat owner = `route_context._REL_CONN_RE` · shadow `TurnDecisionShadow` ยัง observe-only trace-only (flag `USE_TURN_DECISION_SHADOW`, ไม่มี raw message/history/subject_refs)
+- **Low cleanup ที่รวมใน commit**: unreachable `elif` ถูกลบ (behavior delta=0) · docstrings + SRS §6.35 ตรง code (compat `_REL_CONN_RE`, Calls ครบ `_ORDER_TAG_RE`/`_ORDER_SN_RE`)
+- **Frozen verification (pre-commit)**: `test_turn_decision.py` 107 passed · `test_turn_decision_shadow.py` 17 passed (`turns=85 missing=0`) · `test_phase2_claim_state_contract.py` 52 passed + 1 skipped · canonical batch 334 passed / 19 skipped / 8 xfailed · fixture validator 69/69 · `py_compile` + `git diff --check` clean
+- **Complexity**: runtime net **+238 LOC** (turn_decision.py +381/−154, app.py +20/−9) · dead runtime removed **−6 LOC** (unreachable elif) · helpers/guards/modules/dependencies/config/env/indexes/collections added = **0 runtime** (module-level helper net 0: `_resolve_ownership` แทน `_ticket_active`; +1 local nested aggregator `_add_need`)
+- **Residual (ยังไม่ทำ — ห้าม claim เสร็จ)**: Phase 2C.2 `ConversationSubjectSet` (contextual/deictic turns ยัง `subject_refs=()`) · Phase 2C.3 production `chat()` consumption ของ TurnPlan/clarification
+- **safety**: worker/provider/LLM/real Mongo/`.env`/port 8010/push/PR/deploy = **0** · Commit 2 = active log only
+- **verdict**: `PHASE_2C1_COMMITTED_READY_FOR_PHASE_2C2`
+
+#### Phase 2C.2 — Persisted ConversationSubjectSet (2026-10-15) · เริ่มงาน · implementation-only ห้าม commit
+
+- **baseline ยืนยันแล้ว**: branch `feature-legacy-shopee-evidence-retrieval` @ `ba14fb4` (2C.1 head) · tree clean · staging ว่าง · re-run baseline ตรง accepted: focused 177 passed · canonical 334 passed / 19 skipped / 8 xfailed · validator 69/69 · `py_compile` clean
+- **PART 1 audit (producer/consumer/writer) สรุป**:
+  - **subject decision owners ≈16**: `conversation_products._compute_active` + `resolve_active_by_message` (kw ladder: `_SAME_PRODUCT_KWS`/`_SUGGESTION_REF_KWS`/`_GENERIC_Q_KWS`) · app.py blocks: ITEM-TAG+history-tag scan (978-1006) · IMG-ANCHOR (1161-1216) · warranty-policy prose model-parse (1452-1513) · FOLLOWUP-COMP (1519-1607 รวม **bot-prose model parse** 1568-1605) · ANCHOR-COMP (1614-1641) · POST-COMP-FUP (1643-1682) · PARTIAL-COMP (1684-1718) · LINK-FOLLOWUP (2734-2772) · CONV-ACTIVE apply (2781-2858) · ref-like bot-prose parse (3098-3225) · CARRY-FORWARD prose fuzzy (3662-3687) · TEXT-ANCHOR (5019-5034) · `handoffs.py` cert fallback `get_active_product` (457) · `knowledge_base.py` QA anchor `get_active_product` ×2 (1052,1111)
+  - **subject DB writers = 3 บน doc เดียว**: `save_timeline` (products+active_item_id, whole-array `$set`) · `add_product` (load-modify-save) · `add_order_anchor` (dotted `$set`) — +ghost calls `add_item_anchor`/`get_timeline` ใน `chat_v2.py` ที่ **ไม่มีอยู่จริง**ใน module (dead-path inconsistency → audit note)
+  - **app-local follow-up kw tables ≈20**: `_SAME_PRODUCT_KWS`/`_SUGGESTION_REF_KWS`/`_GENERIC_Q_KWS` (cp.py) + `_anchor_compare_kws`/`_pcf_comp_kws`/`_link_followup_kws`/`followup_indicators`×2/`other_model_indicators`/`reference_indicators`/`new_topic_indicators`/`_compat_*`×4/`_charging_spec_kws`/`_fuzzy_false_positive_types`/`ref_brands` prose set/...
+  - **subject-path Mongo reads/turn (worst case)**: ~8 conv_products loads + per-card product rebuilds (`_rebuild_card`) เพราะทุก getter `load_timeline` แยกกัน
+  - **establish clarify pattern (มีอยู่แล้ว)**: `superlative_no_match_clarify` (app.py:3970) + warranty multi-item ask (warranty.py:1112) → clarify ใน 2C.2 = deterministic `ChatResponse` pattern เดิม ไม่ใช่ TurnPlan action switch → **2C.3 boundary feasible**
+  - **other consumers (retain)**: order axis (`order_flow` anchors/`resolve_active_order_sn`) · claim axis (`warranty_flow` claim_state) · KB follow-up query merge (user text ไม่ใช่ bot prose — retrieval machinery) · REF-REGEX/MODEL-REGEX/FUZZY retrieval exec
+- **plan**: PART2 freeze minimal surface (ConversationSubjectSet + record/get/resolve ใน `conversation_products.py`, dotted `$set` เดียว, no prose) → PART3 RED tests (cases A–Q + e2e replay + ambiguity mutation) → PART4 migrate subject-selection points เท่านั้น (ITEM-TAG/IMG-ANCHOR/COMP ctx/LINK/CONV-ACTIVE/cert+QA fallback + writes ใน `_record_suggestion_products`/order items) + delete replaced owner blocks → PART5 green+deletion gate → PART6 complexity → PART7 docs → PART8 report
+- **retained→2C.3 (จะรายงานเป็น migration items)**: warranty-policy prose parse · CARRY-FORWARD prose fuzzy (no-subject conversations) · ref-like bot-prose parse (3098-3225) · retrieval query machinery ทั้งหมด · `chat_v2` dead engine
+
+#### Phase 2C.2 Design Correction (review findings H1–H3 + relation/read/accounting — 2026-10-15) · design-only ยังไม่เขียน tests/runtime
+
+- **H1 — one decision + ≤1 persistence call/turn (call-graph-verified)**:
+  - **decision owner**: `decide_subject_set` (pure, `conversation_products.py`) — precedence `explicit identity > explicit pair > selected batch > persisted-ref(consume) > none`; caller `= 1` textual site ภายใน `_record_suggestion_products` head (ครอบ 3 return paths: KB 2529 / web-search 4947 / product_store 4970) + 1 site ที่ ITEM-TAG anchor block (~1055) สำหรับ early-return path 1142 ที่ไม่ถึง recorder — mutually exclusive per turn path → writer callsites=2 textual, ≤1 write/turn; `decide == persisted` → skip write (idempotent replay)
+  - **evidence carrier**: `_subject_ev` per-turn dict — explicit_ids (item tag ~978 / IMG-ANCHOR ~1194 / TEXT-ANCHOR fetch-matched) · pair_ids (compare ctx + fetched pair) · resolved (ref resolution) · selected_ids (response products) · ops (intent/qtype/gate) — no per-callsite guard chain
+  - **ref resolution**: `resolve_subjects` pure เรียกครั้งเดียว ~1515 หลัง `_anchor_compare_ctx` init ก่อน FOLLOWUP-COMP (consumer แรก) — outcome ถูกส่งต่อให้ทุก migrated gate
+- **H2 — truthful persistence**: `record_subject_set(conv_id, subject_set, *, platform, shop) -> ConversationSubjectSet | None` — คืน set เฉพาะ acknowledged write; invalid input / PyMongo error → `None` (สอดคล้อง error contract เดิมของไฟล์: `load_timeline`→None, `save_timeline`→swallow); caller ห้าม claim saved เมื่อ None, ห้าม fallback เดา newest/active tail — persist-fail = ไม่มี subject (clarify ถ้า turn ต้องใช้)
+- **H3 — bot prose is never subject truth (disposition matrix, call-graph-verified)**:
+  | path | ops | selects subject? | 2C.2 disposition |
+  |---|---|---|---|
+  | warranty-policy prose parse 1452-1513 | policy (non-migrated) | rewrites req.message (retrieval enricher) — prose-derived | RETAIN→2C.3 (flagged, never feeds subject_set) |
+  | FOLLOWUP-COMP history-prose fallback 1579-1607 | compare (migrated) | selects pair from history text | DELETE — replaced by persisted set compare resolution |
+  | ref-like bot-prose parse 3098-3225 | price/link/describe (migrated) | selects models from latest bot answer → retrieval_message | DELETE — fires only when unresolved; migrated cases resolve via set |
+  | CARRY-FORWARD 3652-3687 | generic followups | fuzzy-match products on bot answer → `_ref_regex_products` | DELETE — prose→subject; non-ref generic turns → `no_subject_ref` honest |
+  - owner count รายงานจริง: migrated bot-prose subject selectors = **0**; retained prose-derived enricher (non-migrated policy op) = **1** → 2C.3 — ไม่ claim `16→1` โดยรวม
+- **Relation/update semantics (snapshot, not accumulator)**: `subject_set` = subdocument ทั้งก้อน via dotted `$set` field-level เท่านั้น (ไม่ replace doc) — same `subject_ids` → replace `relation`/`requested_operations`/`confidence`/`source_turn_id`/`updated_at` ด้วยค่า turn ปัจจุบัน (ห้าม merge ops สะสม); ref-consume (deictic resolved via persisted) ≠ new decision → 0 writes; order items **ไม่** auto-`alternatives` — persist เฉพาะเมื่อ structured product-answer path ยืนยัน order-product question, หลาย item + ไม่ชัด → prefer no write; `bundle` เฉพาะ evidence ยืนยัน
+- **Read/resolution surface**: `get_subject_set` ≤1 DB read/turn (load ~1515) → ส่ง `ConversationSubjectSet | None` ให้ `resolve_subjects(persisted, message)` (pure, ไม่รับ conversation_id ไม่ query ซ้ำ) → `SubjectResolution(outcome, subject_set)` NamedTuple — outcome ∈ {resolved, clarify, no_subject_ref} — malformed persisted → clarify/no_subject_ref ไม่ guess; visibility/sellability ไม่ตัดสินใน resolver; resolver ถูก consult เฉพาะเมื่อ turn ไม่มี explicit subject evidence (tag/img/model-kw — condition เดิม `not _current_has_model`)
+- **Corrected targets**: migrated subject decision owner = **1 module** (resolve+decide ใน `conversation_products.py`) · subject DB writer fn = **1** · subject-set reads/turn = **0–1** · writes/turn = **0–1** · migrated prose subject selectors = **0** · ไม่ claim global owner=1 (anchor-axis readers `get_active_product` ใน handoffs/kb + order axis retained → 2C.3)
+- **boundary**: feasible โดยไม่ต้อง full TurnPlan orchestration — clarify ใช้ deterministic `ChatResponse` pattern เดิม (superlative_no_match_clarify precedent); item-tag early-return มี callsite ของตัวเอง → ไม่ต้อง bridge/helper
+
+#### Phase 2C.2 Implementation (2026-10-15) · RED→GREEN→verify เสร็จ · รอ independent review · ยังไม่ commit
+
+##### Contract pins (P1–P3 — proven before runtime edits)
+
+- **P1 identity domain (Option B)**: `subject_ids` = normalized **item_id strings เท่านั้น** (canonical form เดียวกับ `_to_serializable`) — model code/kw เป็น *evidence* ที่ resolve เป็น item_id ก่อน persist; variant detail (`model_id`/`model_name`) คงอยู่บน `products[]` timeline entry — ไม่มี composite encoding · round-trip = `fetch_product_by_id` (status-agnostic) + `_materialize_card` timeline fallback
+- **P2 absent doc**: `insert_one` minimal `{conversation_id, subject_set, platform?, shop?, last_updated}` ใต้ `{conversation_id:1}` unique เดิม · E11000 → reread winner · ห้าม fabricate `products`/`active_item_id`/`order_anchors`/`claim_state`
+- **P3 concurrency**: production = bot-worker `bufferService` conv_lock (`convLockIdFor` E11000 claim) serialize `/chat` ต่อ conversation; direct `/chat`/test อาจข้าม → CAS fence `subject_set.subject_ids == expected` (None=missing∨null) + reread winner ครั้งเดียว, ไม่ retry, ไม่ LWW (pattern เดียวกับ `transition_claim_state`)
+
+##### RED → fixes (root cause ต่อจุด)
+
+- **RED**: `test_conversation_subject_set.py` ใหม่ — **58 AttributeError missing-contract** (ไม่มี `ConversationSubjectSet`/`get_subject_set`/`resolve_subjects`/`decide_subject_set`/`record_subject_set`) + 1 vacuous pass
+- **error 1**: subject unit tests ใช้ `cp._utcnow` ที่ไม่มี → fix test helper (module ใช้ `datetime.now(timezone.utc)` โดยตรง)
+- **error 2 — semantic conflict ที่พบระหว่าง wiring**: legacy conversation ที่มี 1 explicit customer anchor แต่ยังไม่มี `subject_set` (เช่น `anchor-link-followup` positive row) — literal "no persisted → clarify" ทำลาย positive เดิม → **fix = documented bootstrap**: `get_subject_set` คืน `SubjectSetView(effective, stored)` — effective = stored ∨ derived จาก `is_anchor` timeline entries เท่านั้น (1→single, หลาย→alternatives, conf 0.5; suggestion/prose ไม่ derive); CAS fence ใช้ `stored` (None = absent-field equality)
+- **error 3 — precedence bug ใน decide เดิม**: resolved-deictic turn ที่ pin products → selected batch ทับ relation `compare`→`alternatives` → fix: same-ids guard + `resolved` param (consume turn ไม่เขียนทับ ops ของ deciding turn)
+- **error 4 — q07 regression + compare e2e fail**: MODEL-REGEX fetch เฉพาะ kw แรก (`_cur_model_kws[0]`) + inline regex `[A-Za-z]+\d+[A-Za-z]*` ตัด digit-tail (`AC65B2`→`AC65B`+orphan `2`) → explicit "A เทียบ B" ได้สินค้าข้างเดียว → fix: compare wording + ≥2 model kws → fetch ทีละ kw merge (tokenizer = `extract_model_keywords` เดียวกับ evidence) → pair evidence ครบ → `compare{3002,3003}` persist + LLM ได้ทั้งคู่
+- **error 5 — anchor-stock-followup handoff regression**: seeded timeline-only subject (catalog ว่าง) — pin ใช้ `fetch_product_by_id` อย่างเดียว → None → products=0 → NO-PRODUCT-GUARD handoff → fix: `materialize_subject_cards` (timeline entry → `_materialize_card` rebuild→stored fallback; นอก timeline → `fetch_product_by_id`) = semantics เดิมของ `resolve_active_by_message` getters
+- **error 6 — tx-q18 silent swap ยังอยู่**: `_prepare_link_followup` แขน substitution fetch ทดแทน type เดียวกันเมื่อ subject UNLIST → non-subject 3002-3004 เข้า LLM input → fix: resolved-subject link path เรียก `_prepare_link_followup(alt_fetcher=None)` — เก็บ note/link-cut (subject_kept_link_may_be_cut) ไม่แทนที่
+- **error 7 — shadow MISSING**: clarify early return ส่ง `steps=[]` ทิ้ง TurnDecisionShadow step → fix: `steps=list(_steps)`
+- **error 8 — ≤1-read edge**: item-tag + doc ว่าง → view empty → fields None → main reload ยิงซ้ำ → fix: `_subject_view_loaded` flag
+
+##### Deletions (proven caller replacement)
+
+- `resolve_active_by_message` (cp.py — external callsite เดียวถูกแทนด้วย resolve+pin) + kw ladder consumption (`_SAME_PRODUCT_KWS`/`_SUGGESTION_REF_KWS`/`_GENERIC_Q_KWS` ย้ายเป็น canonical tables ใน resolver)
+- FOLLOWUP-COMP history-prose pair fallback · `_is_ref_like` block (~128 บรรทัด: markdown-link extraction + brand-model regex + `ref_brands`/`_stop_ref` sets + `reference_indicators`) · CARRY-FORWARD fuzzy-match-on-bot-answer · `resolve_active_by_message` callsite
+- เก็บไว้→2C.3: warranty-policy prose enricher (non-migrated op, rewrites req.message — retrieval-only ไม่แตะ subject) · timeline readers ใน kb/handoffs · order axis
+
+##### GREEN + incidents fixed
+
+- `test_conversation_subject_set.py`: **63 passed** (A–Q + R + P-contracts + mutations + e2e)
+- `test_legacy_turn_incident_replay.py`: tx-q08 (price followup pair) · tx-q09 (link followup pair) · tx-q18 (UNLIST anchor link no-swap) — **fixed → status flipped incident→positive** ตาม gate design; `anchor-link-followup`/`anchor-stock-followup`/`pos-anchor-item-card` positive คงเขียว
+- `test_turn_decision_shadow.py`: 17 (`turns=85 missing=0`)
+- canonical batch (contract+td+td-shadow+retrieval-shadow+5f-claim+5f-handoff+troubleshoot-5c+replay+subject): **401 passed / 19 skipped / 5 xfailed**
+- affected suites: anchor_compare+timeline_refresh+retrieval_profile **25** · link_followup_5c+availability_subjects_5c+compare_3way+candidate_pool×2+5f_availability_anchor **49** · units+unit_live_compare+cert×2+warranty_delivery **19** · retrieval/cluster **195** · availability+guards+qa×2+recent_qa **42**
+- script suites: handoff_transport **47/47** · guards ALL PASS · route_context ALL PASS · charger_subtype_parity **42/42** · unit_card_fields/classifier PASS · new_product_types **66/66**
+- pre-existing live-data failures (unchanged, ไม่เกี่ยวกับ 2C.2): `test_retrieval_profile_db` 16/17 (device check บน live catalog) · `test_sellable_units` count vs live DB (27807≠26970 — data drift)
+- fixture validator 69 rows · `py_compile` · `git diff --check` — clean
+
+##### Owner/writer/read accounting (จริง — ไม่ claim global=1)
+
+| metric | before | after |
+|---|---|---|
+| migrated subject decision owner | ~16 blocks | **1 module / 2 fns** (resolve+decide) |
+| subject DB writer fns | 3 timeline writers | **+1** `record_subject_set` (subject_set field เท่านั้น) |
+| writer callsites / writes-per-turn | scattered | **2 textual, ≤1 write/turn** (idempotent decide → skip) |
+| subject-set conv-doc reads/turn | 0 | **≤1** (`get_subject_set` + `_subject_view_loaded` fence) |
+| conv-doc reads incl. materialize | ~8 loads worst-case | **≤2** (view + materialize เมื่อ resolved) |
+| migrated bot-prose subject selectors | 3 | **0** |
+| retained prose-derived enricher | 1 (policy) | **1 → 2C.3** |
+| anchor-axis readers (kb/handoffs `get_active_product`) | 3 callsites | retained → 2C.3 |
+
+- runtime LOC: app.py **−~180 net** (ลบ prose/fuzzy blocks ~200, เพิ่ม subject wiring ~60) · conversation_products.py **+~300** (types+surface+docstrings) · deleted fns: `resolve_active_by_message` · deleted kw tables: `reference_indicators`, `ref_brands`/`_stop_ref` (inline) · added: 3 types + 5 fns + `_SUBJECT_*` canonical tables (ย้าย/รวมจาก app.py `_anchor_compare_kws`/`_link_followup_kws`)
+- **safety**: worker/provider/LLM/real Mongo/.env/port 8010/stage/commit/push/PR/deploy = **0**
+- **residual → 2C.3**: TurnPlan production consumption + action switch · warranty-policy prose enricher · kb/handoffs anchor-axis readers · remaining legacy follow-up heuristics ที่ไม่ใช่ subject truth
+- **verdict**: `PHASE_2C2_IMPLEMENTED_READY_FOR_INDEPENDENT_REVIEW` — unstaged
+
+#### Phase 2C.2 Root-Cause Review Fix (2026-10-15) · audit done → RED next · ยังไม่ commit
+
+- **findings verified from source (ไม่เชื่อ review โดยอัตโนมัติ)**:
+  - **A same-ids semantic race — CONFIRMED**: `record_subject_set` fence = `subject_set.subject_ids` เท่านั้น → T1/T2 อ่าน prior เดียวกัน T2 เขียน ids เดิมแต่ semantic ใหม่ แล้ว T1 (stale) ยังผ่าน fence → ทับ winner ได้ (relation/ops/confidence หาย) → fix: fence = dotted equality ทุก semantic field (ids+relation+ops+confidence+source_turn_id, ยกเว้น updated_at) — **ไม่ต้องเพิ่ม field** เพราะ subdoc fields ครบและ deterministic อยู่แล้ว; absent prior → fence `subject_ids: None` เดิม
+  - **B buffer-disabled concurrency — CONFIRMED (call graph)**: `bufferService.bufferOrProcess` → `!config.bufferEnabled` → `processMessage` ตรง (bufferService.ts:588-590); `acquireConvLock` อยู่ใน `flushBuffer` (344) เท่านั้น → overlap ได้จริง → writer ต้อง self-safe (A cover) — ไม่แก้ botworker รอบนี้
+  - **C identity domain — CONFIRMED 2 จุด**: (1) `_norm_subject_ids`/`record_subject_set` ไม่ reject non-canonical — "AC65B" persist เป็น subject_id ได้ → enforce digit-canonical ที่ `_norm_subject_ids` (drop) + `record_subject_set` (reject proposed ที่ normalize แล้วไม่เท่า input) + `_parse_subject_set` (stored non-canonical → malformed→None) (2) `materialize_subject_cards` `entries[sid]=p` = last-array-order wins สำหรับ same-item multi-variant → เลือก deterministic ตาม `_compute_active` semantic (is_anchor > latest `mentioned_at`) — structured evidence เดิม ไม่เพิ่ม resolver
+  - **D read-count — CONFIRMED**: resolved path อ่าน conv doc 2 ครั้ง (`get_subject_set.find_one` + `materialize_subject_cards.find_one`) → `SubjectSetView` รับ `products` มาด้วย, materialize เปลี่ยน signature รับ `products` (ตัด find_one ออก — caller เดียว app.py:1881)
+  - **E CAS-loss observability — CONFIRMED**: app.py:4901 log `'persisted' if _w is not None` — CAS-loss reread คืน winner (≠None) → log ว่า persisted ทั้งที่ proposed แพ้ → compare `_w == _decided` แยก committed กับ lost-to-winner
+  - **F keyword audit — DONE**: `_SUBJECT_LINK_KWS`/`_SUBJECT_PAIR_KWS` moved 1:1 จาก `_link_followup_kws`/`_anchor_compare_kws` (canonical) · `_SUBJECT_WHICH_KWS`+`_SET_COUNT_REF_RE` = semantics จำเป็นที่ไม่มี canonical owner (`_REL_QUESTION` กว้างเกิน — bare ไหน/อะไร; TurnPlan ไม่ classify ref form — 2C.3) → เก็บเป็น owner เดียวใน module พร้อมหลักฐาน · `_SAME_PRODUCT_KWS`/`_SUGGESTION_REF_KWS`/`_GENERIC_Q_KWS` canonical เดิมในไฟล์ · new semantic kw tables added = 0 · to delete = 0
+- **test-side updates ที่บังคับตาม**: letter ids "X"/"Y"/"W" ใน TestConcurrentTurns → numeric (domain enforcement); `SubjectSetView` 2→3 fields; `materialize_subject_cards` signature; `_subject_ev["persisted"]` → `"stored"` (truthful naming — เก็บ authoritative prior รวม winner หลัง CAS loss)
+- **preserve**: q08/q09/q18 positives · singular→clarify · bootstrap derive · claim/handoff/text/image/video paths · decide precedence · no bot-prose subject
+
+### 🔧 Phase 2B.7 — Residual Deletion + Complexity Gate (2026-10-14) · audit+delete เสร็จ · verified · ยังไม่ commit (รอ independent review)
+
+- **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `ad00048` (docs botworker drain atop `76a8064`) · tree clean · 2B.1–2B.6 committed
+- **เป้าหมาย**: inventory residual จาก call graph จริง (claim-stage writers, handoff bool writers, raw ticket-state readers, lifecycle predicates, marker fallback, dead fields เช่น `has_video`) → ลบเฉพาะที่พิสูจน์ producer/consumer/caller + replacement contract ครบ → verify → gate report
+- **หลัก**: ลบได้เมื่อพิสูจน์เท่านั้น · ยัง live/หลักฐานไม่พอ → เก็บ+รายงาน blocker · runtime เล็กลงหรือเท่าเดิม · ห้าม helper/guard/shim/flag/module ใหม่
+- **ข้อห้าม**: ไม่ worker/.env/มาแล้วจ้า/provider/LLM/real Mongo/port 8010/stage/commit/push/PR/deploy · ไม่แตะ 2C/2D/botworker · ไม่แตะ answer quality/retrieval/ranking/prompt
+
+#### Audit result + สิ่งที่ลบ
+
+- **error**: `has_video` — dead field ใน claim_state contract: zero truthy writer ตลอด git history (production เขียนได้แค่ `None`; video evidence fold เข้า `has_image` ผ่าน `วิดีโอ|video` placeholder มาตลอด) → reader `cs.get("has_video")` ใน `_merge_claim_slots` (wf:53) = dead `or`-branch
+- **cause**: field ถูกสร้างเป็น schema slot ตั้งแต่ claim-state epoch (368897f) แต่ไม่มี producer เขียนค่า truthy เลย — เหลือ reader + doc mentions เป็นกะเทาะ
+- **fix**: ลบ reader wf:53 · comment wf:66-67 · docstring `conversation_products.py:772` · schema.md row · test seed+assert (`test_phase2_claim_state_contract.py`) — pure deletion, ไม่มี behavior change (falsy เสมอ)
+- **impact ต่อเคสอื่น**: ไม่มี — executable contract (claim-state suite 52+1s, canonical batch 312) เขียวเหมือนเดิม; `handoff_claim` wire field เก็บไว้ (serialized, consumer นอก repo พิสูจน์ไม่ได้ว่าไม่มี); marker fallback `_is_active_post_handoff` + `order_flow` marker leg เก็บ (รองรับ caller ที่ไม่ส่ง ticket_state/ข้อมูล unstructured — executable tests pin อยู่)
+- **แก้ comment stale ด้วย**: `app.py` ChatRequest.ticket_state ยังบอก "handoff/open + marker → ล็อค (exceptions ใน KB)" — post-2B.5 คือ unconditional lock; SRS state-6 row เดียวกัน stale → แก้ทั้งคู่ให้ตรง contract จริง
+
+#### Owner/writer counts (ก่อน=หลัง — proven single owner, ไม่มีใครเพิ่ม)
+
+- claim transition owner = 1 (`_claim_transition`) · storage primitives = 2 · lifecycle evaluator = 1 (`_claim_lifecycle`) · outcome consumer = 1 (`_consume_claim_outcome`)
+- handoff transport writer = 1 (`_send_handoff`) · flag producers ทุกจุด gated บน typed outcome (unconditional `handoff_to_admin=True` = 0)
+- raw production ticket-state reader = **0** (prod อ่าน `status_conversation` เท่านั้น; raw `conversations` ที่เหลือ = labels write/contents display/test-store เท่านั้น)
+- dead-field reader `has_video` = 1 → **0** · helper/guard/shim/flag/module ใหม่ = **0** · runtime LOC net = **0** (in-place edits)
+- finding ที่ไม่ลบ (นอก scope 2B.7): `chat_models.py` dead dataclasses (`AnchorData`/`IntentData`/`SearchData`/`AnswerData` — zero refs แต่เป็น artifact ของ chat_v2 ไม่ใช่ residual ของ Phase 2B) · `clear-status` maintenance route (superadmin escape hatch ตั้งใจไว้) · `handoff_claim` wire field (serialized ทุก claim response — consumer ภายนอก repo พิสูจน์ไม่ได้)
+
+#### Verification (2B.7 — fresh, post-edit)
+
+- TS ownership transport **244/244** · Python handoff transport **47/47** · claim contract **52 passed + 1 skipped** · canonical Phase 2B batch **312 pass / 19 skip / 8 xfail** (identical baseline) · replay isolation **1 pass** · fixture validator **all rows pass** · warranty_delivery+guards **11/11** · cert_standards **66/0**
+- `py_compile` warranty_flow+conversation_products+app **OK** · `tsc --noEmit` **clean** · `npm run build` **pass** · `git diff --check` **clean**
+- anger suite: ไม่รันรอบนี้ — baseline 11 fail เดิมจาก `72c325e` (offline `_send_handoff` POST — pre-existing, รายงานแยก ไม่นับ green)
+- **safety**: worker=0 · provider/LLM=0 · real Mongo=0 · .env=0 · port 8010=0 · stage/commit/push/PR/deploy=0
+- **verdict: `PHASE_2B7_CLOSED_READY_FOR_INDEPENDENT_REVIEW`** — unstaged, รอ reviewer อิสระ
+
+#### 2B.7 Correction Round (2026-10-14 — correction เสร็จ · verified · ยังไม่ commit)
+
+- **Independent review verdict**: ไม่มี Critical/High · `has_video` deletion ถูกต้อง video input ทำงาน · แต่ deletion gate ไม่ครบ — เหลือ dead config + dead function surface
+- **Findings ที่ตรวจ source แล้วรับ (source-proven)**:
+  1. `post_handoff_exceptions` = dead writable config — Python reader ถูกลบตั้งแต่ 2B.5 (grep ทั้ง repo: ไม่มี runtime reader เหลือ) แต่ ChatAdminWeb ยังรับ/persist: `route.ts:51` body field · `:110` passthrough · `shopSettingsService.ts:27` doc field · `:45` DEFAULT · `:87` upsert opts · `:105-106` `$set` · `:136` insert default · UI control = **0** (ไม่มี .tsx เลย)
+  2. `_merge_claim_slots` dead surface — output keys `date`/`image` ไม่มี consumer ใดๆ (callers อ่านแค่ name/phone/order_id); params `has_date`/`has_image` มีไว้สร้าง 2 key ที่ไม่มีใครอ่าน (callers ส่งที่ wf:466, 1381 เท่านั้น) — persisted `purchase_date`/`has_image` เขียนโดย `_claim_transition` แยกอยู่แล้ว (wf:481-482, 1397-1398)
+  3. ticket_state enum docs stale — `app.py:166` + `SRS_SSD.md:213,1124` ขาด `bot`; `schema.md:312,920` ขาด `pending` (canonical `ConversationStatus` = 6 ค่า)
+  4. `load_claim_state` docstring ไม่ครบ persisted keys (ขาด episode_id/stage/resolved_*)
+  5. ไม่มี executable test ว่า `[วิดีโอ]`/`[video]` → persisted `has_image:true` (independent review ยืนยัน runtime ทำงานแต่ไม่มี pin)
+
+#### Correction applied + verification (fresh)
+
+- **ลบ write surface `post_handoff_exceptions` ทั้งหมด**: route body field + passthrough · service doc field/DEFAULT/upsert-opts/`$set`/insert-default — production TS เหลือ **0 refs** · UI = 0 อยู่แล้ว · fixture `lock-shop-exception-escape`+validator+meta-tests **เก็บ** (seed จำลอง legacy doc — executor wire เข้า fake admindb → pin "locked แม้ doc เคยมี field" ตามที่ task กำหนดให้รักษา) · `scripts/test-shop-settings.ts` ใหม่ (hooks+fakemongo harness เดิม — ไม่ใช่ parallel harness): create/update ไม่ persist field + legacy doc คง inert + faq_liveagent persist — **3/3**
+- **`_merge_claim_slots` slim**: params 4→**2** (`info, claim_state`) · output keys 5→**3** (`name/phone/order_id`) · kwarg call sites 2→**0** (v2+legacy แก้แล้ว) — merge tests 8 ผ่านเดิม
+- **video pin เพิ่ม**: `test_p2b7_video_placeholder_persists_has_image` — `[วิดีโอ]` บน seeded collecting episode ผ่าน `app.chat` จริง→legacy SM→`_claim_transition`→fake Mongo: `has_image is True` · same episode_id · `"has_video" not in claim` (airtight) — **mutation evidence**: ตัด `วิดีโอ|video` ออกจาก placeholder recognition → pin FAIL; revert → PASS
+- **docs**: `app.py:166` Field desc ครบ 6 states+lock semantics · SRS:145/213/583/1124 · schema.md status enum +pending · shop_settings section ลบ field row · `load_claim_state` docstring ครบ key set
+- **Verify**: TS ownership **244/244** · shop-settings **3/3** · Python transport **47/47** · claim contract **52+1s** · canonical batch **313 pass/19 skip/8 xfail** (baseline 312 + pin ใหม่; skip/xfail เดิม) · isolation+warranty_delivery **12/12** · fixture validator **all rows** · py_compile 3 files OK · tsc clean · npm build pass (84/84) · diff --check clean · anger **11 fail = baseline `72c325e` เดิมเป๊ะ** (offline `_send_handoff` POST — ไม่นับ green)
+- **LOC**: runtime **−18 net** (code −20: route −2/service −9/warranty_flow −9; docstring +2; app.py ±0) · test +22 (replay pin) + test-shop-settings.ts ใหม่
+- **safety**: worker/provider/LLM/real Mongo/.env/port 8010/stage/commit/push/PR/deploy = **0** · ไม่แตะ 2C/2D/botworker · helper/guard/shim/flag/module ใหม่ = **0**
+- **verdict: `PHASE_2B7_CORRECTED_READY_FOR_FINAL_READONLY_REVIEW`** — unstaged, รอ final read-only review
+
+#### Phase 2B.7 Commit Closeout (committed — 2026-10-14)
+
+- **Commit 1**: `56ec5f5` `refactor: remove residual phase 2b lifecycle state` — 11 files, +204/−49
+- **Root causes ที่ปิด**:
+  - `post_handoff_exceptions` = dead writable config — Python reader ลบตั้งแต่ 2B.5, TS ไม่มี reader แต่ API/service ยังเขียนได้ → ลบทั้ง write surface; doc เก่าใน DB ที่มี field = retained historical data ที่ runtime ignore (lock unconditional, ไม่มี migration)
+  - `has_video` = dead persisted alias — zero truthy writer ตลอด history (video → `has_image` ผ่าน `วิดีโอ|video` placeholder) → ลบ reader/doc/test-seed + เพิ่ม executable pin `[วิดีโอ]`→`has_image:true` same-episode + `"has_video" not in claim`
+  - `_merge_claim_slots` dead surface — params `has_date`/`has_image` + outputs `date`/`image` ไม่มี consumer → ลบ เหลือ `(info, claim_state)` → `{name,phone,order_id}`
+  - ticket/status docs ไม่ครบ → `ticket_state`/`status_conversation.status` enum แก้ให้ตรง canonical 6 ค่า (เพิ่ม `bot`/`pending`) + `load_claim_state` docstring ครบ persisted keys
+- **Complexity**: runtime net **−18** (code −20: route −2/service −9/warranty_flow −9; docstring +2; app.py ±0) · helpers/guards/shims/flags/modules **+0** · claim transition owner 1 · handoff transport owner 1 · raw prod ticket-state readers 0
+- **Verification (fresh, pre-commit)**: shop-settings **3/3** · ownership transport **244/244** · `tsc --noEmit` clean · pytest batch **296 pass/19 skip/8 xfail** (replay+contract+5f+td+td-shadow+isolation+warranty_delivery — canonical batch รวม retrieval_shadow+5f_handoff+troubleshoot = **313/19/8** เมื่อรันครบ) · handoff transport **47/47** · fixture validator **all rows** · `git diff --check` clean · `npm run build` 84/84 (รอบก่อนหน้า) · anger **11 fail = baseline `72c325e` เดิม** (offline `_send_handoff` POST — pre-existing, ไม่นับ green)
+- **Phase 2C/2D/botworker ไม่ถูกแตะ** · ไม่มี deploy/push/PR/worker/provider/LLM/real Mongo/`.env`/port 8010
+- **Residual ที่ยังเหลือจริง**: `chat_models.py` dead dataclasses (chat_v2 artifact นอก scope 2B) · `handoff_claim` wire field (serialized — consumer นอก repo พิสูจน์ไม่ได้) · anger suite 11 fails เดิม · `conversations_shp` duplicate remediation plan คง untracked แยกงาน
+- **Phase 2B complete — พร้อม Phase 2C ตามลำดับ roadmap (2C.1–2C.3 → 2D → Revised Phase 3)**
+
+### 🔧 Phase 2B.6 — Explicit Admin Claim Outcome (2026-10-14) · audit→RED→impl เสร็จ · verify/docs ค้าง · ยังไม่ commit
+
+- **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `c28edb1` (docs 2B.5 atop `e26456c`) · tree clean · 2B.1–2B.5 committed ทั้งหมด
+- **เป้าหมาย**: claim outcome ที่แอดมินสั่งชัดเจน (resolved|cancelled) ผูก episode_id — แยกจาก close/resolve/ticket status/handoff reason/bot text — `status_conversation` = transport+ownership owner, `conversation_products.claim_state` = lifecycle/evidence owner
+- **รูปแบบ**: audit ก่อน (read-first) → contract design → RED tests → implement → verify → docs — ห้าม commit ก่อน review
+- **ข้อห้าม**: ไม่ worker/.env/มาแล้วจ้า/provider/LLM/real Mongo/port 8010/push/PR/deploy · ไม่สร้าง `_TERMINAL_CLAIM_REASONS` กลับ (ตรวจ absent เท่านั้น) · ไม่ repurpose close/resolve routes · ไม่เพิ่ม collection/dep/env flag/helper ซ้อน
+- **residual จาก 2B.5**: `BLOCKED_BY_EXTERNAL_WRITER_REPO_REQUIRED` (inbound hook) + `BLOCKED_BY_MISSING_CLAIM_RESOLUTION_EVENT`/`BLOCKED_BY_CLAIM_EPISODE_IDENTITY` (ปิดใน phase นี้)
+
+#### Audit result (ไม่มี divergence — implement ต่อได้ตามที่อนุมัติ)
+
+- owner เดิมครบ: TS transport/ownership = `statusConversationService` เดียว · Py lifecycle evaluator = `_claim_lifecycle` เดียว · transition owner = `_claim_transition` เดียว · `_TERMINAL_CLAIM_REASONS` absent ✓
+- migration target ตาม roadmap:949 = `bot_claim_info`/`bot_handoff_*` บน raw `conversations` (writer เดียว `bot-handoff/route.ts` · **production reader = 0**) → ย้ายไป `status_conversation`
+- contract: `status_conversation` += `active_claim_episode_id` + `claim_outcome{episode_id,outcome,actor_id,occurred_at,event_id?}` · result enum `applied|already_applied|stale_episode|no_active_claim|invalid` · CAS fence `{conversation_id,active_claim_episode_id}` + bounded reread · audit dedupe `logAdminEvent(eventId=episode_id)` · `/chat` += top-level `claim_outcome` (ticket_state ยัง string)
+
+#### RED evidence (ก่อน implement)
+
+- `test_phase2_claim_state_contract.py`: **18 fail/34 pass** (`AttributeError: _consume_claim_outcome` + source pins)
+- `test_handoff_transport.py` U-section: **U1/U4 fail** (open episode/claim={} ไม่ hoist `episode_id`); U2/U3 green negative pins
+- `test-ownership-transport.ts`: **15 fail/205 pass** — CO1-2 (claim metadata ไม่ย้าย status_conversation) · CO3-8 (`applyClaimOutcome` ไม่มี) · CO9-13 (route ไม่มี) · CO14 (botCall ไม่ส่ง claim_outcome) · CO16 (route source pin) · **CO15 green** (close ไม่แตะ claim อยู่แล้ว)
+
+#### Implementation (ทุก owner เดิม — ไม่มี abstraction ใหม่)
+
+- TS: `StatusConversationDoc` += 5 fields · `recordClaimHandoff` + `applyClaimOutcome` (CAS fence + reread reconcile + `logAdminEvent` eventId=episode) · `AdminActionType` += `conversation.claim_outcome` · route ใหม่ `claim-outcome/route.ts` (requireAuth → validate → service → status map 200/409/422/401/500) · bot-handoff route ย้าย claim write→status service · `botCallService` prod payload += `claim_outcome` (ISO occurred_at; test/simulate omit) · `Conversation`/`MetaRow`/`mapToConversation`/detail GET expose fields · `InfoTab` claim section + ConfirmDialog
+- Py: `ChatRequest.claim_outcome` · `_consume_claim_outcome` (validate shape/episode/lifecycle_open → `_claim_transition` เดิม; malformed/mismatch/terminal = no-op) ที่ SM heads ทั้งสอง · `_send_handoff` hoist `episode_id` top-level เมื่อ lifecycle_open (ครอบ claim={})
+
+#### Fix log (error → cause → fix → impact)
+
+- `test_handoff_transport.py` hang ~98% CPU → `_send_handoff` ได้ dep ใหม่ `conversation_products` แต่ `_cp_stub` install ที่ :172 **หลัง** T-section call แรก (:108) → real import → Mongo→knowledge_base→sentence_transformers load + pkg-attr landmine (stub ไม่ชนะ `from . import` หลัง real import) → ย้าย `_cp_stub` install ไปก่อน section T (seam เดียวกับ stub ตัวอื่น) → **42/42 passed** · impact: test-seam เท่านั้น, production code ไม่เปลี่ยน
+- **Verify (fresh, post-impl)**: TS ownership transport **220/220** (CO1–CO16 + legacy 204) · claim contract **52 passed, 1 skipped** · handoff transport **42/42** · canonical batch (contract+td+5f+shadow+replay) **283 passed, 19 skipped, 8 xfailed** · siblings (replay_isolation+5f_handoff+troubleshoot_5c+td/5f/shadow dup) **156 passed** · fixture validator **all rows pass** · anger suite **11 fail = baseline signature** (offline `_send_handoff` POST — pre-existing, identical to `72c325e`) · `tsc --noEmit` clean · `npm run build` pass · `py_compile` 5 files OK · `git diff --check` clean
+- **Complexity/deletion gate**: evaluator=1 (`_claim_lifecycle`) · Py transition owner=1 (`_claim_transition`) · TS command owner=1 (`applyClaimOutcome`) · raw `conversations` claim writer **1→0** (`COLLECTIONS.conversations` refs in bot-handoff = 0) · claim metadata writer=1 (`recordClaimHandoff`→status_conversation) · keyword/reason/status terminal evidence=0 (`_TERMINAL_CLAIM_REASONS` absent, `_consume_claim_outcome` ไม่ scan text) · ordinary-close terminal=0 (close/resolve routes ไม่แตะ claim fields) · runtime LOC net **+408** (TS +350 incl. route ใหม่ 63 · Py +58) · helper/type เพิ่ม: `_consume_claim_outcome`, `recordClaimHandoff`, `applyClaimOutcome`, `ClaimOutcomeResult`, `ClaimOutcomeWire`, `ClaimSection`, claim-outcome route — ไม่มี abstraction ขนาน
+- **UI verify**: ไม่มี component test infra + browser จริงต้อง auth session+real Mongo → รายงานข้อจำกัด; code-level: `ClaimSection` render เฉพาะเมื่อมี episode/outcome/info · `Button`/`InfoRow`/`confirm.ask`/`Section` contracts ตรงทุกจุด (variant/size/badge/tone valid) · vertical stack + `flex gap-2` sm buttons เข้า sidebar/drawer · pending/success/error/repeated-click states ครบ
+- docs: SRS_SSD §5.0 ChatRequest + §6.9 `_consume_claim_outcome`/`_send_handoff`/SM heads + service rows · schema §2.24 fields+access + `conversations` deprecation notes · roadmap 2B.6 checklist ครบ
+- ยังไม่ stage/commit/push/deploy — รอ review (stop gate)
+
+### 🔍 Phase 2B.4 — Claim Episode/Lifecycle Owner (2026-10-14) · audit เสร็จ → รออนุญาต implement · ยังไม่ commit
+
+- **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `01d17d4` · tree สะอาด · commits 2B.2/2B.3 ยืนยัน (`1c26317`,`3775366`,`7e42bee`)
+- **root cause (code จริง)**: `_claim_collecting` (warranty_flow.py:69) ใช้ retained slots เป็น activation — `{stage:"resolved", customer_name:...}` → True · stage/episode write กระจาย 11 จุด + 2 direct `_cp_ts*` bypass · resolve/clear อนุมานจาก reason string + ticket_state — ไม่มี episode identity
+- **safety**: offline/fake เท่านั้น · ไม่ worker/.env/provider/LLM/TS · ไม่ stage/commit
+
+#### 📋 Audit census (อ่านจาก code จริง)
+
+- **lifecycle evaluators = 3+shadow**: `_claim_collecting` slot-predicate (call sites wf:288,295,412,1189,1196,1319,1389 + order_flow:68 + turn_decision:261) · `handle_warranty_flow` v2 + `handle_warranty_flow_legacy` = SM 2 ตัว · `decide_turn` = shadow (delegate `_claim_collecting`)
+- **direct stage writers = 11**: `_update_claim_state({stage:collecting})` v2:461,518,601 + `_handle_first_message_claim`:1007 + legacy:1134,1376,1482,1570,1819 · direct bypass `_cp_ts2.update_claim_state({stage:resolved})`:1115 + `_cp_ts.update_claim_state({stage:ts_suggested})`:1785
+- **clear writers = 3**: closed-ticket clear v2:327 + legacy:1247 · `_maybe_clear_claim_state`:123 (reason ∈ `_TERMINAL_CLAIM_REASONS` เป็น clear evidence)
+- **activation slots**: `customer_name, customer_phone, customer_order_id, purchase_date, has_image, has_video`
+- **`_TERMINAL_CLAIM_REASONS`** = {in_warranty, out_of_warranty, claim_info_incomplete} — live producers ครบ (ไม่มี dead entry) — ใช้เป็น clear evidence (ผิด role)
+- **persisted fields วันนี้**: `stage, customer_name, customer_phone, customer_order_id, purchase_date, has_image, has_video, started_at, updated_at` — ไม่มี `episode_id`/`resolved_at`/`resolution_reason`
+- **production paths**: `app.chat`→`handle_warranty_flow_legacy` (default) + `chat_v2`→`handle_warranty_flow` (opt-in) — owner ต้อง serve ทั้งคู่
+- **xfails/fixtures เป้าหมาย**: `test_desired_terminal_stage_beats_retained_slots` (strict) · `p2a-claim-resolved-new-request` (executor: handoff+reason `"claim"`+new episode เคลียร์ case fields; tde `claim_request`/`current:claim_collect`) · `p2a-claim-ticket-closed-*` ×3 (desired: ticket close ≠ claim resolution → claim รอด) · `p2a-claim-collect-name-phone` (secondary owner claim_field_acceptance)
+- **parity pins ต้องอัปเดต**: `claim-resolved-retained-slots` (tde claim_collect→unknown+contact_info) · `test_claim_collecting_marker` (slot-only→False) · `test_name_only_with_filled_slots_is_claim_collect` · `test_resolved_with_retained_slots_collects__parity_pin` · `test_clear_claim_state_unsets` · transport C4a/C4b (clear→resolve)
+
+#### 🛠 Corrected implementation plan (post-review 2026-10-14 — Corrections A–E applied)
+
+**Correction A — no reason-based resolution (แก้ plan เดิม)**: `_TERMINAL_CLAIM_REASONS`, `handoff_reason`, `claim_info_incomplete`, `warranty_claim_*` ลบจาก lifecycle authority — เป็น routing/audit metadata เท่านั้น (handoff สำเร็จ = ownership เปลี่ยน ไม่ใช่ claim จบ) · `_maybe_clear_claim_state`+`_TERMINAL_CLAIM_REASONS` ลบทิ้ง ไม่ rename · valid terminal evidence ใน 2B.4: (1) customer ยืนยันแก้สำเร็จหลัง troubleshoot (ts_success path :1109 เดิม) (2) persisted resolved|cancelled ที่อ่านจาก storage · admin event = 2B.6 ห้ามสร้างปลอม
+
+**Correction B — terminal เก็บ evidence ไว้**: →resolved/cancelled = preserve episode_id + collected fields เป็น terminal record + terminal metadata จาก valid evidence เท่านั้น · fresh claim หลัง terminal = episode ใหม่ + identity allowlist `customer_name,customer_phone` เท่านั้น + reset `customer_order_id,purchase_date,has_image,has_video` + started_at ใหม่
+
+**Correction C — fenced/idempotent persistence (audit เพิ่ม)**: `conversation_products` ไม่มี unique index บน conversation_id (ไม่มี create_index ใน repo เลย) · `ChatRequest` ไม่มี stable message_id → CAS บน expected episode = single-winner boundary · `update_claim_state` เดิม = read-modify-write whole-doc (non-atomic, LWW — race exposure จริง) · FakeColl `_match` ไม่ resolve dotted path (`doc.get(k)`) — ต้องขยายทั้ง 2 test fakes (Mongo จริงรองรับ natively) · `update_one` คืน matched_count (ใช้เป็น CAS signal ได้) · `$set` dotted key ทำงานใน `_apply` แล้ว · upsert insert-doc race (doc ยังไม่มีเลย) = pre-existing collection-wide hazard เทียบเท่า save_timeline/add_order_anchor — fenced CAS ปิด episode-level races; dup-doc window บันทึกเป็น residual (unique index = งาน 2B.5+)
+
+**Correction D — history = evidence ไม่ใช่ owner**: `absent + genuine claim-info marker + current field` → transition absent→collecting ผ่าน owner (persist ก่อนรับ field) · `terminal + stale marker` → ห้าม reopen — owner refuses non-fresh transition จาก terminal รวมศูนย์ (caller ไม่ต้อง guard เอง)
+
+**Correction E — interface**: `ClaimLifecycleView{episode_id, stage: absent|ts_suggested|collecting|resolved|cancelled, lifecycle_open, accepts_claim_fields}` — ชื่อเดียวตาม roadmap
+
+**Design**:
+1. `ClaimLifecycleView` (frozen dataclass) + `_claim_lifecycle(state)` evaluator เดียวใน warranty_flow.py — `lifecycle_open = stage∈{collecting,ts_suggested}`, `accepts_claim_fields = lifecycle_open` (open episode รับ claim-field submission; ts_suggested→collecting เมื่อรับ field); unknown/missing stage → absent
+2. `_claim_transition(req, claim_state, to, fields=None, fresh_claim=False)` — transition owner เดียว คืน authoritative state:
+   - `to=open-stage` + open → same-episode fenced merge (episode_id=None legacy doc → merge พร้อม episode_id ใหม่ = promotion)
+   - `to=collecting` + absent → new episode (`episode_id=uuid4`, started_at) + identity copy + fields — CAS fence `episode_id $exists:false`
+   - `to=collecting` + terminal + `fresh_claim=True` → new episode + identity allowlist copy เท่านั้น — CAS fence `episode_id==old`; fresh=True+open → same episode (retry-idempotent)
+   - terminal + `fresh_claim=False` → **refuse** (คืน state เดิม) — stale marker ปลอดภัยทุก caller
+   - `to=resolved` → fenced merge `{stage:resolved,resolved_at,resolution_reason}` preserve fields — caller เดียวคือ ts_success
+   - `to=cancelled` → ไม่มี producer ใน 2B.4 (2B.6) — ไม่ implement path ที่ไม่มี caller
+   - CAS miss → reread ครั้งเดียว → คืน authoritative winner · ห้าม retry loop
+3. `conversation_products` storage primitives เท่านั้น: `load_claim_state` (คงเดิม) · `transition_claim_state(cid,platform,shop,expected_episode_id,claim_state)` CAS update_one fence บน `claim_state.episode_id` (`$exists:false` เมื่อ None) — miss → reread → doc ยังไม่มี → fenced upsert ครั้งเดียว (residual window เดิม) · `merge_claim_fields(cid,episode_id,fields)` fenced dotted `$set` + updated_at — miss → reread · `update_claim_state`+`clear_claim_state` **ลบ** (unfenced/no callers)
+4. consumers: `order_flow:68`→`lifecycle_open`, `turn_decision:261`→`accepts_claim_fields`, wf gates ทั้ง v2+legacy → view เดียวกัน; marker legs (`_bot_asked_info`,`_bot_asked_claim_info`,`_warranty_ctx_in_history`) เข้า transition owner เสมอ — absent+marker → episode ใหม่ persist ก่อนรับ field; terminal → owner refuse
+5. fresh-claim routing: `_is_claim_request` + `not lifecycle_open` → `_handle_first_message_claim` เส้นทางเดียว v2+legacy — `_claim_transition(collecting,fresh_claim=True)` + `handoff_reason="claim"` (fixture pin; ts-failed path ยัง `warranty_claim`)
+6. ลบ: `_claim_collecting`, `_update_claim_state`/`_clear_claim_state` wrappers, closed-ticket clears :327/:1247 (**2B.5 prerequisite ปิดก่อนกำหนด — ticket close ≠ claim resolution; 2B.5 ยังเป็นเจ้าของ field-persistence/close-semantic tests ที่เหลือ — ห้ามประกาศ 2B.5 เสร็จ**), `_maybe_clear_claim_state`, `_TERMINAL_CLAIM_REASONS`, `_cp_ts*/_cp_ts2` bypasses :1115/:1785
+7. terminal handoff ไม่แตะ claim_state เลย (แค่ลบ call `_maybe_clear_claim_state` ที่ :775) — episode เปิดต่อได้ post-handoff (flow เดิมออกแบบไว้) — `clear_claim_state`/`$unset` path หายทั้งหมด
+
+**RED matrix** (ทั้งหมด fail ก่อน implement):
+- A terminal precedence: resolved+slots→not collecting; bare name/phone หลัง terminal → ไม่ reopen (`test_desired_terminal_stage_beats_retained_slots` un-xfail + เพิ่ม cancelled + marker-refusal)
+- B fresh episode: resolved/cancelled+explicit request → episode ใหม่≠เดิม, identity retained, case fields reset, started_at reset (`p2a-claim-resolved-new-request`)
+- C same episode: collecting continuation episode เดิม; name→phone persist episode เดียว (`p2a-claim-collect-name-phone`)
+- D ticket separation: closed ticket ไม่ clear (`p2a-claim-ticket-closed-*` ×3); terminal handoff ไม่ resolve/clear; handoff failure ไม่เปลี่ยน lifecycle
+- E history migration: absent+marker+field → persist collecting; terminal+stale marker → refuse
+- F race/idempotency: retry new-claim → episode เดิม; concurrent terminal→new → winner เดียว; stale-episode merge → miss+reread ไม่เขียนทับ; CAS loss → bounded reread
+
+**Un-xfails**: `test_desired_terminal_stage_beats_retained_slots`, `p2a-claim-resolved-new-request`, `p2a-claim-ticket-closed-keeps-state`, `p2a-claim-ticket-closed-product-question`, `p2a-claim-ticket-closed-phone-resume`, `p2a-claim-collect-name-phone` (ถ้าเขียวจริง) — fixture flips: status incident→positive, ลบ `current`/`incident_levels` pins, อัปเดต boundary_note
+
+### 🔍 Phase 2B.2 — Typed Handoff Outcome @ assignment owner (2026-10-12) · audit + RED contract ก่อน · ยังไม่ commit
+
+- **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `b4fbc82` (docs atop `d403f0a` fix 2B.1) · working tree dirty เดิม = `llm.py` M + `getoutofmywaybotkaikrook2.md` M + untracked diag/testscript/architecture doc — **leftovers ไม่แตะ**
+- **scope**: ทำ `handoffToAdmin()` คืน `HandoffOutcome` typed (`assigned|queued|failed`) จาก persisted DB จริง แทน `{assignedTo nullable}`+`ok:true` ambiguous · bot-handoff route + caller ใน scope migrate · `queued` = durable `pending_assignment` (มีจริงใน code — backlogService/assignPendingTicket consume) · Python copy/flag = Phase 2B.3 boundary (audit map เท่านั้น ไม่แก้)
+- **safety**: ไม่ worker/Mongo จริง/.env/provider/LLM/Shopee API · fake Mongo+hooks เท่านั้น · ไม่แก้ external Sellcenter writer · ไม่ stage/commit · ไม่แก้ runtime ก่อน audit+RED เสร็จ
+- **baseline suite**: `test-ownership-transport.ts` **159/159 PASS** (ก่อนแตะ)
+
+#### 📋 Audit findings (PART 1-3, อ่านจาก code จริง)
+
+**caller/owner map (prod handoff command — 3 callers เท่านั้น)**
+
+| caller | file:line | path |
+|---|---|---|
+| Python bot handoff | `api/admin/conversations/bot-handoff/route.ts:193` | prod branch (internal secret) |
+| admin manual handoff | `api/.../[conversationId]/handoff/route.ts:32` | `json({ok,...result})` — no UI caller พบ |
+| workflow assign_ticket auto | `workflowEngine.ts:1361` | `res.handoff={agentId:assignedTo,reason}` |
+
+**owner layers วันนี้ (ใน handoffToAdmin เดียวมี write ≥4 จุด)**
+- `handoffToAdmin` L74-175: getConv → getMeta → `reopenConversation`(unfenced upsert, wasClosed) → keep/reuse `assigned_to` → preferPrevious → `autoAssignConversation`→`tryAssign`(CAS fence `assigned_to null|missing`) → `updateStatus`(unfenced upsert) → `setPendingAssignment`(unfenced upsert `assigned_to:null`!) → `conversation.handoff` log
+- route L223-235: `conversation.handoff` log ซ้ำอีก 1 (รวม handoff log ≤3 + chat_assigned ≤2 + conversation.open ≤1 = **audit ≤6 rows/1 handoff**)
+- `simulateHandoff` L258-361 = **DEAD CODE** (~104 บรรทัด — simulate branch เรียก handoffToAdminTest ไม่ใช่ตัวนี้)
+
+**false-success sites**
+1. route → `{ok:true, assigned_to:null}` ทั้ง queued/failed — Python แยกไม่ได้
+2. `conversation.handoff` log ยิงแม้ `assigned_to=null` (queued) + route ยิงซ้ำ
+3. Python `guards._escalate` set `handoff_to_admin=True` หลัง fire-and-forget `_send_handoff` (returns `{}` on error ≡ `{assigned_to:null}` on queued)
+4. **`setPendingAssignment` unfenced upsert `assigned_to:null` → loser race clobber winner's committed assignment** (bug จริง — ไม่ใช่แค่ ambiguity): A wins tryAssign → B's tryAssign miss → B `setPendingAssignment(true)` ทับ `assigned_to:null` ของ A
+5. reopen→assign-fail window: closed conv ถูก reopen (handoff) แล้ว selection เจอปัญหา/throw → ค้าง unowned+no pending marker
+6. `tryAssign` ไม่ clear `closed_at`/`pending_assignment` → residue ต้องพึ่ง write ตามหลัง
+
+**queued = durable จริง**: `status:"handoff" + assigned_to:null + pending_assignment:true` — backlogService query `pending_assignment:true`, `assignPendingTicket` CAS claim, `/api/assignment/backlog` + `/backlog` page consume — **ไม่ใช้ `status:"pending"`** เพราะ (a) flag คือ durable marker เดิมที่ pipeline ทั้งสายอ่าน (b) UI filter มีแค่ `all|bot|handoff|closed` — queued ที่ status=pending จะหลุดจาก tab "ส่งต่อแอดมิน" (regression) (c) prompt: contract ต้องตรง DB จริง
+
+**outcome forms วันนี้**: `{assignedTo,assignedToName,reopened,assignmentReason}` + null-ambiguity + throw + route `ok:true` + Python `{}` — caller เดา 4 แบบ
+
+**implementation plan (minimal, owner เดิม)**:
+- `statusConversationService.commitHandoffState` (ใหม่ — fenced writer เดียว): `findOneAndUpdate(fence, $set, {upsert, returnDocument:"before"})` — fence `{assigned_to null|missing}` (fresh) หรือ `{assigned_to:X}` (closed+owner re-assert); assigned→`{status:handoff,assigned_to:X,assigned_at,mode,pending_assignment:false,closed_at:null,closed_by:null}`; queued→`{status:handoff,assigned_to:null,pending_assignment:true,reason,closed_at:null,closed_by:null}`; คืน `{committed,prior}` (prior=before doc → dedupe audit/transition; E11000→miss→caller converge)
+- `assignmentService.selectNextAgent` (extract จาก autoAssignConversation — shop-check+mode+buildPool+pickNextAgent) — autoAssignConversation refactor ใช้ตัวเดียวกัน (กัน duplicate selection logic)
+- `handoffToAdmin` → `Promise<HandoffOutcome>`: owned+!closed→converge assigned(0 write,0 log); closed+owner→commit re-assert; unowned→select→commit; miss→bounded re-read→converge; commit→settle reopen(wasClosed)+audit 1×; throw→failed
+- route: `{ok:true,outcome,assigned_to,...compat fields}` + ลบ log ซ้ำ; `[id]/handoff` spread outcome; workflowEngine auto → `handoff:{agentId,reason,state}`
+- ลบ dead `simulateHandoff`
+- out-of-scope inventory: handoffToAdminTest/test stores, manualAssign (explicit-admin CAS — assign route+workflow wantAdmin), assignPendingTicket (distributor CAS — status=handoff คงเดิมเข้ากันได้), reopen/close/resolve routes, Python (`_send_handoff`/`_escalate`/copy = 2B.3), external writer, bot_claim_info write (2B.6)
+
+#### ✅ RED→GREEN evidence (2026-10-12) · gate PASSES → implemented · ยังไม่ commit
+
+- **RED**: suite `test-ownership-transport.ts` + 13 tests (H1-H13) → **159/172** (H ทั้ง 13 FAIL honest — missing `.state`/`.outcome` contract + H7 race clobber จริง: loser `setPendingAssignment` ทับ winner `assigned_to:null`)
+- **Gate**: root cause+owner ชัด · RED honest (fakemongo รองรับ returnDocument:"before"/E11000/interleave hooks อยู่แล้ว) · ไม่มี arch ใหม่ (+1 method +1 extraction ใน owner เดิม) · outcome อยู่ใน handoffToAdmin เดิม · ไม่มี guard ซ้อน → **PASS → implement**
+- **Runtime changes**:
+  - `statusConversationService.commitHandoffState` (ใหม่ ~55 บรรทัด) — fenced writer เดียว: `findOneAndUpdate(fence,$set,{upsert,returnDocument:"before"})` fence `{assigned_to null|missing}`/`{assigned_to:X}`; assigned→`{status:handoff,owner,assigned_at,mode,pending_assignment:false,closed_at:null,closed_by:null}` / queued→`{status:handoff,assigned_to:null,pending_assignment:true}`; E11000→miss
+  - `assignmentService.selectNextAgent` (extract) — pure selection ใช้ร่วม autoAssignConversation+handoffToAdmin
+  - `handoffToAdmin` → `Promise<HandoffOutcome>`: owned+!closed→converge(0 write/log); select→commit; miss→re-read converge; committed→prior-doc dedupe → audit 1× (chat_assigned+conversation.handoff / queued→handoff only) + reopen settle ผ่าน recordReopen
+  - route bot-handoff: `outcome` + compat fields + **ลบ route handoff log ซ้ำ + dead `simulateHandoff` ~105 บรรทัด**
+  - `[id]/handoff` route + workflowEngine auto assign_ticket → consume outcome (+`state` ใน handoff result)
+- **GREEN**: **172/172 PASS** (H1-H13 ครบ + 159 เดิม) · tsc --noEmit clean · `next build` pass · `git diff --check` clean · regression: workflow-phase1 69/0, workflow-phase6 69/0, admin-logs-pagination 57/0, shadow-batch-isolation 22/0 (e2e ข้าม — real Mongo)
+- **SRS/schema**: อัปเดต SRS rows (handoffService/statusConversationService/assignmentService/route transport) + schema.md (assignment_reason field, commitHandoffState writer)
+- **bug ที่แก้จริง**: (a) race clobber — loser `setPendingAssignment` unfenced upsert ทับ `assigned_to:null` ของ winner (b) audit ≤6 rows/handoff → 1-2 หลัง commit (c) `assignedTo:null` ambiguity → typed state 3 ค่า (d) dead simulateHandoff (e) reopen→pending-fail window — commit เดิมคลุม close residue
+
+#### 🔍 Phase 2B.2 review-fix (2026-10-13) — independent review 2 High + 2 Medium · TDD RED→GREEN · ยังไม่ commit
+
+- **PART 0 verify (code จริงทั้ง 5 ข้อ = CONFIRMED)**:
+  1. `handoffToAdmin` post-CAS settle (`recordReopen`/`logAdminEvent`×2) throw → catch คืน `failed/persisted:false` ทั้งที่ meta committed แล้ว; retry ชน early-converge → audit/close-history ไม่ถูกซ่อมถาวร (ไม่มี durable unsettled marker)
+  2. `workflowEngine` auto คืน `{handoff:{agentId:null,state:"failed"}}` → `botWorkerService.settleWorkflowResult` เช็ก `wfResult.handoff ? "handed_off"` (presence-only) → failed กลายเป็น handed_off + `ref:null`; audit `workflow.assign_ticket` ยิง unconditional
+  3. workflow direct `admin_id` ใช้ `manualAssign():boolean` (parallel boolean owner — ไม่ clear pending/closed residue) + CAS แพ้คืน `meta?.assigned_to` (stale pre-race ไม่ใช่ persisted winner)
+  4. `pickNextAgent` เขียน cursor ใน selection ก่อน `commitHandoffState` — duplicate/concurrent 1 assignment กิน 2 ตำแหน่งคิว
+  5. catch ใส่ `e.message` ดิบลง `outcome.reason` → route `console.log` + API response — Mongo URI/query/newline leak
+- **RED gate**: suite **173/180** — I1/I2 settle-throw คืน `failed/persisted:false` ทั้งที่ commit แล้ว · I4 workflow auto failed ยัง surface `handoff` · I6 direct คืน untyped `{agentId}` · I7 CAS loser คืน stale `admin-1` แทน persisted winner · I8 1 assignment กิน cursor 2 ตำแหน่ง · I9 Mongo URI+credential+query+newline leak ผ่าน `outcome.reason`/route log · I5 queued pin PASS · 172 เดิมเขียวครบ zero regression
+- **design gate (ผ่าน — ไม่มี infra ใหม่)**: unsettled marker = `handoff_settled:false`+`handoff_event_id`+`handoff_reopened`+`handoff_rr_pool_key` persist **ใน commit CAS เดียวกัน** · stable identity = eid จาก committing caller (retry อ่านจาก doc ไม่ gen ใหม่) · audit dedupe ผ่าน `logAdminEvent(eventId)` sha256 `_id` เดิม · `markHandoffSettled` fenced บน eid · single owner = `handoffToAdmin({targetAdminId,actor})` (`manualAssign` ลบ — callers 2 จุด migrate) · cursor = `peekNextAgent` (no write) → commit persist poolKey → settle `markCursorAssigned(committed owner)` หลัง commit เท่านั้น · `failed` ไม่ surface `EngineResult.handoff` (type `Exclude<HandoffOutcomeState,"failed">` กัน compile-time)
+- **ผ่านแล้ว (Review-Fix Impl, 2026-10-13):**
+  - `statusConversationService.commitHandoffState` — tightened fences (committed ⟹ real transition: direct→owner∈{expected,null}, retained→assigned_to=expected, unowned→null, queued→+`pending_assignment≠true`, caller-claim-reopen→+`status∈{closed,resolved}` → `handoff_reopened` = fenced truth ไม่ใช่ stale read) + settlement marker ใน `$set` เดียวกัน + คืน after-doc · +`markHandoffSettled(convId,eid)` fenced clear · `manualAssign` ลบ
+  - `handoffService.handoffToAdmin` — crash-recovery: meta.`handoff_settled===false`→`settleHandoffTransition` ด้วย eid เดิม (recordReopen ตอน flag, `chat_assigned`+`conversation.handoff` audits, `markCursorAssigned`, eid-fenced clear — ทุก step idempotent) · settle throw → `{persisted:true,settled:false,error_code:"settle_error"}` ไม่ใช่ failed · CAS miss converge +ซ่อม settle ผู้ชนะ · `targetAdminId` direct-assign · sanitizer: catch→`{reason:"handoff failed",error_code:"handoff_error"}` (raw exception ไม่ออก outcome/API/stdout)
+  - `assignmentService` — `selectNextAgent`→`peekNextAgent` (cursor read-only, คืน poolKey) · +`markCursorAssigned(poolKey,agentId)` caller-owned post-commit · `autoAssignConversation` mark หลัง `tryAssign` สำเร็จ · `pickNextAgent` เหลือเป็น legacy test contract
+  - `workflowEngine assign_ticket` — prod direct `admin_id`→`handoffToAdmin({targetAdminId,actor:"workflow-engine"})` (CAS loser → persisted winner); prod auto+direct: `failed`→`{}` ไม่ surface handoff ไม่ยิง success audit; `EngineResult.handoff.state` = `Exclude<…,"failed">` → `botWorkerService.settleWorkflowResult` presence-check = `handed_off` ถูกต้องโดย type
+  - `[id]/assign` route — `manualAssign`→`handoffToAdmin({targetAdminId})`; 409 คืน persisted `assigned_to` ของผู้ชนะ
+  - `closeHistoryService.recordReopen` — audit-first คงไว้ (`conversation.open` eid-dedupe ก่อน stamp) — settle path เรียกด้วย `messageId=handoff_event_id`
+  - **Verify**: ownership transport **180/180** (I1–I9 ผ่าน + B1/B1b rewrite ผ่าน typed owner + H11 fenced-reopen แก้ regression รอบแรก) · workflow-phase1 69/0 · phase6 69/0 · admin-logs 57/0 · shadow-isolation 22/0 · botworker: idempotency 71/0, races 37/0, boundary 20/0, error-policy 38/0, recovery-freshness 59/0, mongo-safety 110/0, config-failclosed 4/0, enable-checkpoint 18/0 · `tsc --noEmit` ✓ · `next build` ✓ · `git diff --check` ✓
+  - Docs: SRS_SSD handoffService/assignmentService/statusConversationService/workflowEngine rows · schema.md +4 settlement fields +writer row +recordReopen callers
+  - กรณีพิเศษที่เจอระหว่าง impl: `onlyIfCloseRecord` gate ตอนแรกทำ H11 regression (closed conv ไม่มี close-history → open audit หาย) → root fix ที่ fence (`status∈{closed,resolved}` guard เมื่อ claim reopen) ทำให้ flag เป็น truth แทนการ gate ฝั่ง settle → param ถูกลบ
+  - **Verdict: `PHASE_2B2_ROOT_CAUSE_CLOSED`** — ยังไม่ stage/commit/push/deploy รอ review
+
+#### 🔍 Phase 2B.2 Architecture Correction (2026-10-13) — Settlement Liveness + Concurrent RR Correctness · audit/RED ก่อน · ยังไม่ commit
+
+- **PART 0 state diagram (code จริง)**:
+  ```
+  unowned/bot/closed → commit CAS {owner, eid, settled:false, reopened, rr_pool_key}
+    → settle: recordReopen? → chat_assigned? → conversation.handoff → markCursorAssigned? → markHandoffSettled(eid)
+    settled:true
+  ```
+  | transition | writer | retry | durable id | caller gets | process ตายตรงนั้น ใครปลุก |
+  |---|---|---|---|---|---|
+  | ownership commit | commitHandoffState CAS | CAS miss→converge re-read | meta doc | typed outcome | n/a (committed) |
+  | reopen stamp+open audit | settle→recordReopen | call ถัดไปเท่านั้น | eid | outcome.settled | **ไม่มี** |
+  | chat_assigned/handoff audit | settle→logAdminEvent | call ถัดไปเท่านั้น | eid dedupe | outcome.settled | **ไม่มี** |
+  | cursor mark | settle→markCursorAssigned | call ถัดไปเท่านั้น | pool_key doc | — | **ไม่มี** |
+  | settled flag | markHandoffSettled | call ถัดไปเท่านั้น | eid fence | — | **ไม่มี** |
+- **PART 0 findings (9/9 CONFIRMED)**:
+  1. `handoff_settled:false` ซ่อมเฉพาะ call ถัดไปของ `handoffToAdmin` — committed conv ล็อคบอท → Python ไม่ call ซ้ำ → **ไม่มี guaranteed repair owner**
+  2. bot-handoff route คืน 200 เมื่อ `settled:false` — Python `_send_handoff` best-effort **ไม่ retry non-2xx** (responses.py:94-99) + post-commit conv locked → ไม่มี second call ทั้งสองทิศ
+  3. workflow `failRun` = terminal (`status:"errored"`); `checkWaitTimeouts` scan เฉพาะ `waiting_for_reply`; completed run ไม่ retry → unsettled marker ทิ้งไว้
+  4. admin assign: human retry เท่านั้น (unguaranteed)
+  5. `peekNextAgent` read-only → conv X/Y พร้อมกัน peek cursor เดียวกัน → ได้ admin คนเดียวกันทั้งคู่ → rotation เสีย
+  6. `markCursorAssigned` unconditional update → event เก่า settle ช้าเขียนทับ cursor ของ transition ใหม่ (rewind)
+  7. `pickNextAgent` legacy wrapper (read+unconditional write — racy) ยัง exported ใช้โดย test path
+  8. CAS-loser converge คืน `settled` จาก pre-settle snapshot (m2 อ่านก่อน settle รัน)
+  9. `markHandoffSettled` ไม่เช็ก matchedCount
+- **caller inventory**: `commitHandoffState`→handoffToAdmin (prod owner เดียว) · `tryAssign`→autoAssignConversation+tests only · `autoAssignConversation`→tests only (botWorkerService = stale comment) · `setPendingAssignment`→tests only · `pickNextAgent`→doHandoffToAdminTest only · `peekNextAgent`→selectNextAgent · `markCursorAssigned`→settle+autoAssign · `markHandoffSettled`→settle · `reassignConversation`→/api/assignment/reassign (distinct admin-transfer command — ไม่กินคิว) · `assignPendingTicket`→backlogService (distinct queued→assigned command) · `recordReopen`→settle+reopenConversation+applyInbound (reopen side-effect owner เดียว)
+- **key code evidence**: `assignment_cursors.pool_key` มี unique index อยู่แล้ว (mongoClient.ts:152) → atomic CAS-claim ทำได้โดยไม่ต้องเพิ่ม index · `failRun`→`status:"errored"` terminal · `checkWaitTimeouts` leader-gated แต่ scan เฉพาะ waiting_for_reply · Python no-retry verified
+- **PART 1 RED (180/189 — 9 honest fails)**: J1/J2/J9 `settled`/`handoff_settled`/`handoff_rr_pool_key` marker ยังอยู่ · J3 committed-but-never-emitted doc → converge ไม่ emit → audits=0 (permanent gap) · J4 legacy paths ยังอยู่ · J5 `x=admin-1 y=admin-1` (multi-conv race reproduce) · J6 cursor=undefined (commit-miss ไม่ consume) · J7/J8 next=admin-2 (rewind/re-consume) — 180 เดิมเขียวครบ
+- **PART 2 architecture gate (PASS — zero new infra)**: settlement → **Option A' marker-free single-phase** (Option A caller-retry FAIL: Python best-effort no-retry + workflow failRun terminal + admin human-only; Option B extend checkWaitTimeouts = เพิ่ม background recovery → stop-trigger + couples web correctness กับ worker liveness; Option C transaction ไม่มี topology evidence) — ไม่เพิ่ม owner ให้ pending state แต่**ลบ pending state**: ownership CAS = guaranteed durable phase เดียว; emissions = eid-idempotent emit หลัง commit + re-emit ทุก converge (dedupe = free repair); residual = audit gap iff emit-fail+no-later-call (same window as marker design, detectable ผ่าน eid — precedent: `applyInboundOwnershipTransition` run model เดียวกันอยู่แล้ว) · RR → **reservation-order** (committed-order exact ข้าม 2 collections เป็นไปไม่ได้โดยไม่มี txn; `reserveNextAgent` = atomic CAS-claim `{pool_key,last:observed}→{last:next}` บน unique index เดิม; commit-miss→forfeit bounded skip; ไม่มี cursor write หลัง commit → rewind เป็นไปไม่ได้ by construction)
+- **ผ่านแล้ว (Architecture Impl, 2026-10-13):**
+  - `statusConversationService` — fields: `-handoff_settled -handoff_rr_pool_key +handoff_actor +handoff_reason` (transition truth ครบ — caller ใดก็ emit ด้วย attribution เดิม); `commitHandoffState` opts `-rrPoolKey +callerReason +actor`; **ลบ `markHandoffSettled`/`tryAssign`/`setPendingAssignment`** (parallel ownership/settlement paths)
+  - `assignmentService` — **`reserveNextAgent`** = cursor writer เดียว (atomic CAS-claim bounded 3: stale-observer loses→re-read); `selectNextAgent` คืน `{agentId,mode}`; **ลบ `peekNextAgent`/`pickNextAgent`/`markCursorAssigned`/`autoAssignConversation`**
+  - `handoffService` — `HandoffOutcome` ลบ `settled` (outcome = ownership truth only); `settleHandoffTransition`→`emitHandoffSideEffects` (persisted attribution, ไม่มี cursor, ไม่มี clear); `handoffToAdmin`: ลบ settle-pending block; converge/CAS-miss/post-commit ทุกจุด `tryEmitHandoff` (emit fail→warn เท่านั้น outcome ยัง truth); commit ส่ง `callerReason`/`actor`; `doHandoffToAdminTest` ใช้ `reserveNextAgent`
+  - tests — +J1–J9 (9 tests); **ลบ** B2/B5/B7/B9/B10/I8 (test-only functions + superseded contract); B6 re-seed ผ่าน seedMeta
+  - **Verify**: ownership transport **183/183** · workflow-phase1 69/0 · phase6 69/0 · admin-logs 57/0 · shadow-isolation 22/0 · botworker: idempotency 71/0, races 37/0 (B4 op-fence ผ่านใต้ reservation semantics), boundary 20/0, error-policy 38/0, recovery-freshness 59/0, mongo-safety 110/0, config-failclosed 4/0, enable-checkpoint 18/0 · `tsc --noEmit` ✓ · `next build` ✓ · `git diff --check` ✓
+  - Docs: SRS_SSD handoffService/assignmentService/statusConversationService rows · schema.md status_conversation +4 transition fields (−2 marker fields) + assignment_cursors access + writer list + recordReopen callers
+  - **Complexity**: functions −7 (`tryAssign`/`setPendingAssignment`/`autoAssignConversation`/`markHandoffSettled`/`peekNextAgent`/`pickNextAgent`/`markCursorAssigned`) +2 (`reserveNextAgent`/`emitHandoffSideEffects`+`tryEmitHandoff`); durable fields 4→4 (settled/rr_pool_key → actor/reason); ownership writers 1 (`commitHandoffState`); cursor writers 1 (`reserveNextAgent`); settlement-retry owners 0 (ไม่มี pending phase); outcome fields −1
+  - **Verdict: `PHASE_2B2_ARCHITECTURE_ROOT_CLOSED`** — residual documented (audit gap iff emit-fail+no-later-call, detectable via eid) · ยังไม่ stage/commit/push/deploy รอ review
+
+- **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `4c5e57a` (docs) atop `ad13494` (fix) · working tree dirty เดิม = `llm.py` modified + untracked `diag-worker-dup*`, `quarantine_rollback*`, `test_vision_dedupe`, architecture-audit doc — **leftovers ไม่แตะ**
+
+## Phase 2B.2 Final Root-Cause Correction — transport truth (2026-10-13, รอบ 3)
+
+- **เป้าหมาย**: 4 findings จาก independent review — A. contention กลายเป็น no_available_admin, B. route 200 ตอน failed, C. emit failure ถูก swallow ไม่มี repair caller, D. SRS contract เก่าซ้ำ — แก้ contract ต้นทาง ไม่เพิ่ม subsystem
+- **PART 0 audit — CONFIRMED ทั้งหมด**:
+  - A. `reserveNextAgent:155` return `null` รวม no-eligible+contention → `selectNextAgent.agentId:null` → `handoffToAdmin:222` → `desired:null` → commit `adminId:null` = **queued+`no_available_admin` persisted** ทั้งที่ eligible admins มี — contention เขียนสถานะโกหก durable
+  - B. `bot-handoff/route.ts:234` `json({ok:true,outcome,...})` — **200 ทุก state** incl. failed; `responses._send_handoff:87-93` คืน body บน 2xx ใดๆ (ไม่อ่าน outcome) → caller เห็น truthy
+  - C. `tryEmitHandoff:138-147` swallow emit error → outcome `persisted:true` → route 200 → Python หยุด — **repair caller ไม่มี** (bot หยุดตอบหลัง handoff → converge-emit ไม่มีใครเรียก) — mechanism มีแต่ไม่มี signal
+  - D. `SRS_SSD.md:985` tail มี stale block `commitHandoffState({conversationId,adminId,fenceOwner?...})→{committed,prior}` ขัด contract ใหม่ `{adminId,expectedOwner,direct,mode,reason,callerReason,actor,eventId,reopened}→{committed,doc}`
+  - **Python caller audit**: `_send_handoff` no-retry คืน `{}` ทุก failure; **11+ call sites** claim `handoff_to_admin=True`+คำตอบ "ส่งแอดมิน" โดยไม่อ่านผล: handoffs.py:328/388/600, order_flow.py:212/317, chat_v2.py:568/592, warranty_flow.py:1699/1925/2047, guards._escalate:384 — **app.py:4353 no_product_found ตั้ง flag=True โดยไม่มี transport call เลย** · direct urllib blocks: warranty_flow.py:762-801 (v2 builder), :976-1002 (tax follow-up fire-and-forget ไม่อ่าน response!), chatbotv3/engine.py:90 `_send_handoff_to_admin` (USE_CHAT_V3 production-reachable — impl ที่ 3) · `_maybe_clear_claim_state` (:805,:1731) clear บน attempt ไม่ใช่ผลจริง · `check_output(handoff_sent=True)` ข้าม output-policy ทั้งหมด — flag ปลอม = ปิด validation
+- **Design gate (PASS — zero new infra)**: (1) `reserveNextAgent`→discriminated `ReservationResult{result:"reserved",agentId}|"no_eligible_agent"|"contention"`; `selectNextAgent` propagate; `handoffToAdmin` map contention→`failed{reservation_contention}` **ก่อน commit — ไม่ persist อะไร**; (2) `emitHandoffSideEffects`→`Promise<boolean>` (merge tryEmitHandoff — ไม่ swallow อีกต่อไป); `HandoffOutcome.emit_incomplete` = transport signal (ไม่ใช่ durable marker — ownership truth ไม่ย้อน); (3) `handoffOutcomeHttpStatus(outcome)` shared mapper: failed→404/503/500 ตาม error_code, emit_incomplete→503, else 200 — test_source/simulate สร้าง outcome เดียวกัน (in_flight→failed→503); (4) Python `_send_handoff` = transport owner เดียว — `_post_handoff` bounded retry (same bytes→same identity): 2xx+outcome∈{assigned,queued}→body; 2xx+failed/no-outcome→None; 401/403/404/422→None immediate; 408/429/5xx/network/timeout→retry ≤3; caller ทุก site gate flag+answer บนผลจริง (shared `_HANDOFF_FAILED_ANSWER` copy); urllib dup blocks → `_send_handoff`; chatbotv3 → `_post_handoff` เดียวกัน · residual: emit-fail+retry-exhausted → audit gap (detectable ผ่าน eid) — report ตรงๆ ไม่ claim guaranteed
+- **RED evidence (ห้าม patch ก่อน)**:
+  - TS `test-ownership-transport.ts` **181/194** — RED 13: K1–K4 (typing/selection→queued เท็จ) · K6–K8/K10–K11 (route/test-path HTTP+outcome) · I1/I2/J1/J2 (emit_incomplete signal เดิมไม่มี) · K5 real CAS interleave + K9 queued-pin PASS แล้ว (reservation core รอด)
+  - Python `docs/test/test_handoff_transport.py` **12/29** — RED 17: T3/T4 (2xx+failed/ไม่มี outcome → truthy) · T5/T6/T9/T10 (zero retry) · C1–C5 (callers claim ส่งแอดมินบน exhaustion — flag=True+claim answer) · C6 (v3 ไม่มี retry) · C4a เผย test bug → answer ชน keep-collecting guard ("ได้รับข้อมูล") แก้เป็น terminal answer แล้ว
+- **กำลังทำ**: implementation — TS typed selection + emit_incomplete + route status mapper; Python `_send_handoff` bounded retry + caller gating + urllib consolidation; SRS stale-block rewrite
+- **ผ่านแล้ว (รอบ 3 — 2026-10-13)**:
+  - TS: `AgentSelection{reserved|no_eligible_agent|contention}` ที่ `reserveNextAgent` (CAS-miss ครบ cap→contention ไม่ใช่ null); `selectNextAgent` propagate+mode; `handoffToAdmin` map contention→`failed{reservation_contention}` ก่อน commit (zero durable write); `emitHandoffSideEffects`→boolean → `emit_incomplete` บนทุก outcome (ownership คงอยู่); `handoffOutcomeHttpStatus`: assigned/queued→200, `conversation_not_found`→404, failed/emit_incomplete→503 sanitized; assign/handoff admin routes ใช้ mapper เดียวกัน; `handoffToAdminTest` contention→`in_flight` ไม่ใช่ no_available_admin
+  - Python: `_send_handoff` = transport owner เดียว — `dict|None`, typed outcome เป็น authority (2xx+assigned/queued เท่านั้น), 4xx-permanent→None ทันที, 408/429/5xx/network→retry ≤3 payload เดิม; `HANDOFF_FAILED_REPLY` shared; callers ทุก site gate flag+answer+claim-clear บนผลจริง (handoffs×3, order_flow×2, chat_v2×3 incl. `_no_product_guard`, guards._escalate, warranty builder+tax+legacy block, app.py no_product_found — เดิม flag=True โดยไม่มี transport เลย)
+  - Consolidation: direct urllib handoff blocks ลบ 3 (warranty_flow ×2, chatbotv3 → delegate `_send_handoff`) + warranty_flow legacy transport block (~70 บรรทัด dup ของ `_build_warranty_claim_response` — crash บน None + flag ไม่ gate) → delegate builder เดียว
+  - SRS: ลบ stale `commitHandoffState({fenceOwner})→{committed,prior}` tail ซ้ำ · outcome +`emit_incomplete` · assignmentService typed selection · transport row HTTP matrix · `_send_handoff`/`_send_handoff_to_admin` contract ใหม่
+  - Test bug fix: `forceCursorMiss` เดิม set `last=pool[n%len]` ชน observed ได้ → sentinel คนละค่าเสมอ (K2/K6/K10/K11 เขียวหลังแก้ harness ไม่ใช่ prod)
+  - **Verify สด**: TS ownership **194/194** (K1–K11 ครบ) · Python **29/29** · error-policy 38 · idempotency 71 · races 37 · recovery 59 · boundary 20 · mongo-safety 110 · config 4 · enable 18 · py_compile 8 files · `tsc --noEmit` 0 · `npm run build` ✓ (84/84) · `git diff --check` ✓
+  - Residual (ตรงๆ): emit-fail+retry-exhausted+ไม่มี call ถัดไป → audit gap ถาวร (detectable ผ่าน `handoff_event_id` ไม่ใช่ guaranteed repair — ไม่มี durable outbox); contention→failed ทำให้ลูกค้าได้ fallback reply + conv ยัง bot-owned (bot ตอบต่อได้ ไม่ใช่งานหาย)
+  - **Verdict: `PHASE_2B2_TRANSPORT_TRUTH_CLOSED`** — 4 findings ปิดที่ต้นทาง · ไม่มี helper/subsystem ใหม่ · ยังไม่ stage/commit/push/deploy รอ review
+
+#### Legacy Path Closure (2026-10-13, รอบ 4 — 2 High + 1 Medium)
+
+- **PART 0 audit — CONFIRMED**:
+  - L-tax: `warranty_flow.handle_warranty_flow_legacy` ~1800-1847 — duplicate ของ canonical `_handle_tax_invoice_followup` (trigger logic เหมือนกัน verbatim) แต่ `_send_handoff` ทิ้งผล + `handoff_to_admin=True` unconditional + answer claim ส่งแอดมินเสมอ
+  - L-first: `handle_warranty_flow_legacy` ~1942-1981 — `_send_handoff` คืน `None` ได้ แต่เรียก `.get()` ทันที (AttributeError บน transport fail) + `handoff_to_admin=True` unconditional; canonical `_handle_first_message_claim`→`_build_warranty_claim_response` มี truth gating อยู่แล้ว
+  - T-src: `bot-handoff/route.ts` test_source branch — `handoffToAdminTest` return แล้วเขียน claim metadata (`bot_claim_info`/`bot_handoff_at`) + `logBotworkerEvent(bot_handoff)`/`logAdminEvent(conversation.handoff)` + `invalidateBotworkerCache` **ก่อน** `testOutcome` classify — `in_flight→failed→503` แต่ side effects เขียนไปแล้ว; `simulate` branch บัคเดียวกัน (claim write ก่อน sOutcome)
+- **Plan**: delegate ไม่ใช่ patch — legacy tax → `_handle_tax_invoice_followup`; legacy first-message → `_build_warranty_claim_response` (claim_ctx เดียวกับ canonical: `{"claim_topic":"เคลม/ซ่อม/ประกันสินค้า"}` = reason "warranty_claim" เหมือนเดิม; answer "รบกวนแจ้งข้อมูล" → keep-collecting guard รอด ไม่ clear stage); route → คำนวณ `tOutcome`/`sOutcome` ทันทีหลัง handoffToAdminTest + early return failed ก่อน side effects ทั้งสอง branch
+- **RED baseline (ก่อนแก้ — fail จาก behavior จริงทั้งหมด)**:
+  - Python `test_handoff_transport.py`: **32/35** — L1b (exhausted → flag=True + "ส่งต่อแอดมิน" answer), L2b (`AttributeError: 'NoneType' object has no attribute 'get'` บน transport fail), L2c; success paths L1a/L2a ผ่าน
+  - TS `test-ownership-transport.ts`: **194/196** — K12 (in_flight → 503 แต่ `bot_claim_info`+`bot_handoff_at` เขียนลง test_status_conversation ก่อน classify), K13 (simulate เขียน `bot_claim_info` ลง test_chat_sessions ก่อน sOutcome)
+- **Fixes (error → cause → fix → impact)**:
+  - L-tax: exhausted 503 → `handoff_to_admin=True` + "ส่งต่อแอดมิน" answer → legacy block duplicate ของ canonical ทิ้งผล `_send_handoff` → delegate `_handle_tax_invoice_followup` (owner เดิม, `tax_invoice_handoff` label เหมือนกัน) → tax branch เดิน canonical gating; canonical ได้ `intent`/`timing` จาก ctx คืบค่าที่ legacy เคย emit
+  - L-first: transport fail → `AttributeError 'NoneType'.get` / `handoff_to_admin=True` → inline `_send_handoff`+`.get`+flag unconditional → เก็บ troubleshoot-first/`auto_ctx`/`update_claim_state` แล้ว delegate tail → `_build_warranty_claim_response(claim_ctx={claim_topic, handoff_reason:"warranty_claim"}, source="warranty_claim_first_message")` → crash หาย, flag ตาม outcome, claim state เดิม (ask-info marker → ไม่ clear), `handoff_reason="warranty_claim"`/`reason`/simulate/timeout เหมือนเดิม; eval `_POLICY_SOURCES` ไม่กระทบ
+  - L-review (เจอเพิ่ม ระหว่าง audit): legacy review block ~84 บรรทัด duplicate `_handle_review_request` verbatim (extraction/name-filter/answer/flag เหมือนกัน) → delegate — flag semantics เดิม (mid-flow marker, future-tense answer)
+  - T-src: in_flight → claim metadata+bot_handoff audit+cache invalidation เขียนก่อน classify → `tOutcome`/`sOutcome` คำนวณทันทีหลัง `handoffToAdminTest` + early return failed → failed 503 side effects=0; success → side-effect path เดิม; retry converge exactly-once (K12)
+  - Builder: `source` param (default `warranty_claim_flow`) + emit `intent`/`timing` จาก ctx (pattern เดียวกับ `steps`/`image_desc_out`) → legacy fields ไม่หาย, callers เดิมไม่กระทบ
+- **GREEN**: Python **35/35** · TS ownership **196/196** · error-policy **38/38** · idempotency **71 passed** · production-races **37 passed** · recovery-freshness **59/59** · boundary **20/20** · mongo-safety **110 passed** · config-failclosed **4/4** · enable-checkpoint **18 passed** · `tsc --noEmit` 0 · `npm run build` ✓ · `py_compile` ✓ · `git diff --check` clean
+- **Audit**: `_send_handoff` call sites ทั้งหมด truth-gated (guards/builder/tax/order×2/app/chat_v2×3/handoffs×3/engine) · literal `handoff_to_admin=True` เหลือ 2 จุด — review marker (future-tense mid-flow) + post-handoff lock (persisted ticket_state) · helpers ใหม่ = 0 · transport owners = 1
+- **Test-contract fix**: `test_issue_5f_handoff`/`test_issue_5f_claim_flow` 8 tests pin old lying contract (unstubbed transport → flag/reason unconditional) → stub `_send_handoff` success ที่ app module + `conversation_id` ใน `_req` → 47 passed + 3 xfailed (HEAD baseline 33/39 เดิม) · SRS rows อัปเดต: builder `source` param + intent/timing, review/tax delegation, route ordering invariant
+- **Verdict**: legacy path closure เสร็จ — tax/review/first-message delegate canonical owner เดียว, test/simulate classify ก่อน side effects, runtime net ≈ −134 LOC (warranty_flow −145 / route +11), ยังไม่ stage/commit/push/deploy
+
+#### Review-Fix (2026-10-13, รอบ 5 — 2 High + 1 Medium จาก independent review)
+
+- **PART 0 audit — CONFIRMED ทั้ง 3**:
+  - F1: `warranty_flow.py:1150` legacy review delegate ส่ง `(warranty, _app_module, llm)` แต่ signature คือ `(_warranty_mod, llm, _app_module)` — swapped 2 ตัวท้าย → production review path crash `AttributeError: module 'shopeechat.app' has no attribute 'split_segments'` (app มี `_routing` แต่ไม่มี `split_segments`; llm มี `split_segments` แต่ไม่มี `_routing`)
+  - F2: `bot-handoff/route.ts` production branch — เขียน `bot_claim_info`/`bot_handoff_at`/`bot_handoff_reason` + invalidate caches ก่อน `handoffOutcomeHttpStatus` classify → failed outcome ทิ้ง success metadata (ต่างจาก test/simulate ที่แก้รอบก่อน)
+  - F3: `test_issue_5f_{handoff,claim_flow}.py` — `_app_mod._send_handoff = lambda` ที่ module import, ไม่ restore → process-global mutation รั่วข้าม module
+- **Contract check (F2-D)**: `handoffOutcomeHttpStatus` — emit_incomplete→503, state≠failed→200, failed→404/503; `emit_incomplete` = persisted assigned/queued → claim metadata เขียนได้ (ownership จริงเกิด), เกณฑ์คือ `state==="failed"` เท่านั้นที่ early-return
+- **RED baseline**:
+  - Python transport: **35/37** — L3a crash `AttributeError split_segments` (production entry จริง), L3b res=None — พิสูจน์ F1
+  - pytest: **42 passed, 1 failed** — `test_handoff_transport_owner_not_globally_stubbed` เห็น lambda (name `<lambda>`) — พิสูจน์ F3 leak
+  - TS ownership: **199/200** — K14 `bot_claim_info`/`bot_handoff_at`/`bot_handoff_reason` เขียนลง conversations doc บน failed — พิสูจน์ F2; K15/K16/K17 pin keep-behaviors (assigned/queued/emit_incomplete เขียน claim ได้)
+- **Minimal fix (3 edits, 0 helper ใหม่)**:
+  - `warranty_flow.py:1150` — argument order `(warranty, llm, _app_module)` ให้ตรง signature
+  - `bot-handoff/route.ts` production — ย้าย `handoffOutcomeHttpStatus`+respBody ขึ้นหลัง `handoffToAdmin` ทันที, `state==="failed"` early-return ก่อน claim write/cache invalidation (assigned/queued/emit_incomplete เดิน success path เดิม)
+  - `test_issue_5f_{handoff,claim_flow}.py` — module-level `_app_mod._send_handoff = lambda` → `@pytest.fixture(autouse=True)` + `monkeypatch.setattr` (restore ทุก test)
+- **SRS_SSD.md line 109**: ordering invariant ขยายครอบ production branch
+- **GREEN**: transport **37/37** · ownership **200/200** (K14 ผ่าน + K15-17 pin) · pytest **48 passed, 3 xfailed** (isolation test ผ่าน — stub restore) · error-policy 38 · idempotency 71 · production-races 37 · recovery-freshness 59 · boundary 20 · mongo-safety 110 · config-failclosed 4 · enable-checkpoint 18 · py_compile ✓ · tsc 0 · build ✓ · diff-check clean
+- **Audit**: `_handle_review_request` callers 2 จุด (V2:261 + legacy:1150) — argument order ตรง signature ทั้งคู่; ทุก branch ของ route classify ก่อน success side effects; classifier owner = `handoffOutcomeHttpStatus` ตัวเดียว
+- **Verdict**: `PHASE_2B2_LEGACY_PATH_REVIEW_FIXED` — runtime delta รอบนี้ ≈ +9 LOC (route reorder), warranty_flow ±0 (arg swap), ยังไม่ stage/commit/push/deploy
+
+#### Retry-Idempotency Evidence Correction (2026-10-13, รอบ 6 — test-honesty + 1 defect)
+
+- **PART 0 audit**: `bot_handoff_at` ไม่มี contract semantic ที่ไหนเลย (schema.md:1000 = bare `Date?`, reset script ถือ 3 fields เป็น handoff-episode marker เดียวกัน) → ยึดหลักข้อมูลไม่โกหก: retry logical handoff เดิมห้ามเลื่อนเวลาความสำเร็จแรก → **Case C**
+- **RED**: K17 retry — `bot_handoff_at` เลื่อนจาก `05:23:22.114Z` → req2 time (write ซ้ำทับทุก field) — defect จริง: claim write block `$set: new Date()` ไม่เช็คค่าเดิม
+- **Fix (minimal, update block เดิม)**: `bot_handoff_at: (conv as {bot_handoff_at?: Date}).bot_handoff_at ?? new Date()` — `conv` ถูก fetch ก่อน handoff อยู่แล้ว → อ่านค่าเดิมได้ฟรี, claim fields ยัง refresh ทุก attempt, 0 helper/query ใหม่
+- **K15**: เปลี่ยนจาก assert terminal value → วัดจริงผ่าน `queryLog` (updateOne conversations) = 1 write/req
+- **K17**: retry payload เดิมจริง → converge `existing_assignment` 200 + `bot_handoff_at` คงเดิม + claim intact + retry write = 1 + audit eid-dedupe เติมพอดี 2 events (chat_assigned + conversation.handoff)
+- **GREEN**: ownership **200/200** · error-policy 38 · boundary 20 · config-failclosed 4 · idempotency 71 · production-races 37 · recovery-freshness 59 · mongo-safety 110 · enable-checkpoint 18 · tsc 0 · build ✓ · diff-check clean · Python suites ไม่ได้รัน (ไม่มี Python file เปลี่ยน)
+- **Verdict**: `PHASE_2B2_RETRY_IDEMPOTENCY_FIXED` — runtime delta +1 LOC (expression เดิม), ยังไม่ stage/commit/push/deploy
+
+#### Handoff-Episode Timestamp Correction (2026-10-13, รอบ 7)
+
+- **PART 0 audit**: `existing_assignment` เป็น converge signal เพียวๆ ไม่ได้ — retained-owner commit ตอน conv closed ใช้ reason เดียวกัน (handoffService:212-215→319) แต่ commit path นั้น `reopened:true` เสมอ (fence ต้อง status closed) → compound `reason==="existing_assignment" && !outcome.reopened` = converge เดิมเท่านั้น (code-provable)
+- **Residual**: queued converge (`no_available_admin`,`reopened:false`) ชนกับ fresh queued commit — outcome เดิมแยกไม่ได้ โดยไม่แตะ handoffService → รายงานไว้ ไม่เดาสัญญาณ
+- **RED**: K18 — episode1 assigned → close (`statusSvc.closeConversation` จริง) → reopen bot (assigned_to cleared) → req2 `round_robin` commit ใหม่ — `bot_handoff_at` คง T1 เดิม (stale preserve)
+- **Fix**: expression เดิมใน claim write block — preserve `conv.bot_handoff_at` เฉพาะ `(existing_assignment && !reopened)`, นอกนั้น `new Date()`; 0 query/helper เพิ่ม (conv/outcome อยู่ในมือแล้ว)
+- **GREEN**: ownership **201/201** — K17 retry คง T1, K18 episode ใหม่ T2>T1 + audit per-episode exactly-once (2 docs/action = 2 eids); error-policy 38 · boundary 20 · config-failclosed 4 · enable-checkpoint 18 · idempotency 71 · recovery-freshness 59 · mongo-safety 110 · production-races 37 · tsc 0 · build ✓ · diff-check clean · Python suites ไม่รัน (ไม่มี Python diff)
+- **Docs**: schema.md §2.6 เพิ่ม 3 rows (bot_claim_info/bot_handoff_at/bot_handoff_reason + episode semantics); SRS line 109 เพิ่ม `bot_handoff_at` contract
+- **Verdict**: `PHASE_2B2_HANDOFF_EPISODE_TIMESTAMP_CLOSED` — runtime +4 LOC (expression conditional), ยังไม่ stage/commit/push/deploy
+
+#### Structural Episode Contract (2026-10-13, รอบ 8)
+
+- **Root cause**: `HandoffOutcome` ไม่มี structural truth ว่า outcome อยู่ episode เดิม/ใหม่ → route เดาด้วย `reason==="existing_assignment"` (queued converge แยกไม่ได้ + keyword collision retained-commit)
+- **Fix**: เพิ่ม `episode: "started"|"continued"|"none"` (type `HandoffEpisode`) ที่ HandoffOutcome + HandoffTestResult (type คนละตัว — sync ตาม contract); return sites: failedOutcome→none, converge assigned/queued→continued, CAS-miss→started (winner commit = episode ใหม่), committed→`wasClosed?started:(assigned_to||pending_assignment?continued:started)` — ครอบ direct transfer + queued→assigned upgrade; test path: in_flight/contention→none, recovered→continued, final→same meta rule
+- **Route**: `outcome.episode==="continued"` แทน reason string (0 helper/query เพิ่ม); mapper pass-through `r.episode`
+- **RED baseline**: 196/203 — J2,K15,K16,K17,K18,K19,K20 ทั้งหมด `episode===undefined` (field ไม่มี); K19 queued retry เลื่อน T1 จริง
+- **GREEN**: **203/203** — K19 queued retry T1 คงเดิม + audit eid-dedupe 1 doc; K20 upgrade `continued` T1 คงเดิม + pending cleared + audit per-transition (chat_assigned 1 / handoff 2); K17 assigned retry T1; K18 new episode T2>T1
+- **Consumers audit**: assign/handoff routes + workflowEngine ใช้ state/emit_incomplete เท่านั้น — ไม่แตก; Python `_send_handoff` อ่าน `outcome.state` เดิม (ไม่ต้องรู้ episode); 0 helper/classifier เพิ่ม
+- **GREEN อื่น**: error-policy 38 · boundary 20 · config-failclosed 4 · enable-checkpoint 18 · idempotency 71 · recovery-freshness 59 · mongo-safety 110 · production-races 37 · tsc 0 · build ✓ · diff-check clean · Python suites ไม่รัน (ไม่มี Python diff)
+- **Verdict**: `PHASE_2B2_STRUCTURAL_HANDOFF_EPISODE_CLOSED` — 1 field ใหม่, ยังไม่ stage/commit/push/deploy
+
+#### Structural Episode Simplification (2026-10-13, รอบ 9 — YAGNI deletion)
+
+- **Correction**: รอบ 8 เพิ่ม `HandoffEpisode` เพื่อ semantics ของ `bot_handoff_at` — audit พิสูจน์ field นี้ **ไม่มี production/UI/metric reader เลย** (writers เท่านั้น + reset script) → machinery ทั้งหมดเป็น over-engineering → ลบออกทั้งหมด
+- **ลบ**: `HandoffEpisode` type + `episode` field จาก HandoffOutcome/HandoffTestResult + ค่าใน return sites ทั้งหมด + route import/mapper/preserve-conditional → `bot_handoff_at: new Date()` ธรรมดา
+- **Contract ใหม่**: `bot_handoff_at` = last write/refresh time ของ claim metadata — ไม่ใช่ authority/first-success/dedupe signal (authority = status_conversation + outcome.state เหมือนเดิม); failed ยัง zero-write
+- **เก็บไว้ครบ**: failed early-return, K14 zero-write, K15 write-count, K16 queued write, K17 emit_incomplete→503→converge+audit once, K18 close→reopen→handoff ใหม่, K19 queued retry converge+audit dedupe, K20 upgrade+pending cleared+audit per-transition — timestamp asserts ผ่อนเป็น `instanceof Date && >= t1` ตาม contract
+- **GREEN**: **203/203** · error-policy 38 · boundary 20 · config-failclosed 4 · enable-checkpoint 18 · idempotency 71 · recovery-freshness 59 · mongo-safety 110 · production-races 37 · tsc 0 · build ✓ · diff-check clean · Python ไม่รัน (ไม่มี Python diff)
+- **Complexity**: types −1 (HandoffEpisode), outcome fields −1 (episode), route classification logic −1, runtime refs `episode`/`HandoffEpisode` = 0 (rg verified)
+- **Verdict**: `PHASE_2B2_EPISODE_OVERENGINEERING_REMOVED` — runtime net ลดลง, ยังไม่ stage/commit/push/deploy
+- **เป้าหมาย**: พิสูจน์จาก code จริงว่า path รับข้อความ Sellcenter → persist inbound ไม่เขียน `open` ทับ `status_conversation` + กำหนด contract transition บน inbound ใหม่
+- **safety**: audit จาก code เท่านั้น · ไม่ worker/Mongo จริง/.env/provider/LLM · ไม่แก้ production runtime รอบนี้ · ไม่ guard/helper/flag อุดอาการ · owner เดียว = statusConversationService · ไม่ stage/commit
+- **writer graph audit (code เสร็จแล้ว)**:
+  - `messages_shp` in-repo writers: `messageService.addMessage` (insert, caller เดียว = admin `/send` out-msg) + `botWorkerService` image_desc cache (updateOne additive) — **ไม่มี in-repo inbound writer**
+  - `conversations_shp` in-repo writers: `touchLastMessage` (last_message_*/unread_count), bot-handoff `bot_claim_info`, workflowEngine `labels` — **ไม่มี writer ของ status/assigned_to/closed_at บน raw conv** (createConversation/findOrCreate ถูกลบใน ad13494)
+  - `status_conversation` writers: statusConversationService (upsertMeta/tryAssign/manualAssign/assignPendingTicket CAS) + `/admin/maintenance/clear-status` (superadmin) + `reset-assignment-state.ts` (script gated) — **ไม่มี caller บน inbound event เพราะไม่มี inbound event ใน repo**
+  - Python `app.py`/llm/warranty เขียนเฉพาะ `conversation_products`+`test_chat_*` · `replay_compare`/`shadow_openrouter` อ่านอย่างเดียว · docker-compose ไม่มี sellcenter service
+- **boundary verdict (code — corrected A4)**: ไม่พบ in-repo writer/copy path ที่นำ raw status ไปเขียน meta; raw (`*_shp`) กับ meta (`status_conversation`) แยก collection ใน code ปัจจุบัน + readers meta-only ตั้งแต่ ad13494 — นี่คือสิ่งที่พิสูจน์ได้ใน repo · external writer implementation/permissions/retry semantics **ยังไม่ทราบ** (อยู่นอก repo — docs ชี้ shared Mongo dev.digital.in.th + env flags WEBHOOK_WORKER/ENABLE_POLL/BACKGROUND_SHOPEE_SYNC ที่ไม่มี code consume) · ต้องเห็น source/config/contract ของ external writer ก่อนปิด blocker — ห้ามอ้าง "dump เขียน meta ไม่ได้โดยโครงสร้าง" (พิสูจน์ไม่ได้ว่า process นั้นเขียนอะไรได้บ้าง)
+- **gap ที่เจอ**: `statusConversationService.reopenConversation` = production owner เดียวของ reopen — แต่ **unfenced** (upsertMeta unconditional, ไม่มี status filter, ไม่มี message identity, log+reopen-history ทุกครั้ง) → ถ้า external caller ยิงทุก inbound จะขโมย open/handoff conv จาก admin ได้ · `closed→bot` on inbound ไม่มี owner ใน repo (implicit: closed ไม่อยู่ใน Python lock set → บอทตอบได้อยู่แล้ว แต่ state ค้าง "closed" + retained assigned_to)
+- **PART 2 — 9 scenarios (trace จาก code)**: ① no-meta+inbound → dump ไม่แตะ meta (boundary pin) · ② bot+inbound → ตอบได้แต่ meta write ไม่จำเป็น · ③ **closed+inbound → ไม่มี transition เกิด** — bot ตอบได้เพราะ closed∉lock-set แต่ meta ค้าง closed+assigned_to → ขัด contract · ④ open/handoff/pending+inbound → admin-owned ล็อกถูก (readers meta-only) แต่ reopen("bot") ไม่มี fence — ถ้าถูกยิงจะขโมย · ⑤ duplicate → reopen ไม่ idempotent (log+history ทุก call) · ⑥ concurrent → ไม่มี CAS → ทั้งคู่ "สำเร็จ" · ⑦ dump-after-admin-change → meta ปลอดภัยเชิงโครงสร้าง (คนละ coll, readers meta-only) แต่ **dump rewrite conv ไม่ reopen doc** — ถ้าดีไซน์ตั้งใจให้ dump ยิง hook ต้องมี receiver ที่ยังไม่มี · ⑧ restart between persist+transition → ไม่มี transition step อยู่แล้ว → ไม่มี partial window ใน repo
+- **PART 3 — truth table (business)**: {missing,bot,closed,resolved}+new inbound → bot/no-op, bot ตอบ, claim ไม่เปลี่ยน · {open,handoff,pending}+inbound → คงเดิม+locked · stale inbound (ts<closed_at) → ไม่ transition · atomic filter ที่ต้องการ = `{conversation_id, status∈{closed,resolved}, closed_at<inboundTs}` · side-effect owner เดียว = statusConversationService
+- **PART 4 — RED contract tests W1–W13 ใน test-ownership-transport.ts** (production owner จริง ผ่าน reopenConversation alias — ไม่มี fake model): suite **112/121** — pins W1/W2/W10/W11 PASS · **RED 9 ตัว**: W3 pending ไม่ clear · W4 replay ไม่ no-op (log 2→4) · W5/W6/W7 open/handoff/pending ถูกพลิกเป็น bot · W8 ไม่มี CAS filter (filter={conversation_id} เดียว) · W9 ไม่มี closed_at staleness bound · W12 already-bot ยังเขียน+log · W13 missing meta ถูก fabricate doc+log · `tsc --noEmit` ผ่าน · ไม่มี regression (112 เดิมเขียวหมด)
+- **verdict**: `BLOCKED_BY_EXTERNAL_IMPLEMENTATION_EVIDENCE` — repo พิสูจน์ได้: ไม่มี inbound writer/receiver, meta boundary ปลอดภัยเชิงโครงสร้าง, transition owner ไม่ fenced/idempotent · repo พิสูจน์ไม่ได้: dump filter/upsert-shape/identity/atomicity/retry ของ external writer · **เสนอ seam เล็กสุด**: harden `reopenConversation` (owner เดิม) ให้ fenced CAS + no-op semantics แล้วให้ external boundary ยิง hook หลัง persist — ยังไม่ implement รอ review
+
+#### Review-Fix Round (2026-10-13, 2 High + 2 Medium addressed)
+
+- **A1 corrected — ingress contract**: missing meta + first inbound ต้อง **สร้าง** meta `{status:"bot",assigned_to:null}` (ไม่ใช่ปล่อยว่าง — roadmap ต้องการ explicit authoritative meta) โดยไม่เขียน reopen history/`conversation.open`; topic-only meta เติม `status:"bot"` รักษา fields; compat reader missing→bot คงไว้ (ไม่ใช่ ingress model)
+- **A2 corrected — real event + state assertions**: command signature `{conversationId, messageId, inboundAt:Date}`; W9 asserts exact CAS filter `{conversation_id, status∈{closed,resolved}, closed_at<$lt inboundAt}`; W10/W11 stale/equal = unchanged+meta identical+no side-effects; W14 race pin (admin flip closed→open ก่อน CAS → unchanged); W15 replay-after-reclose (E1→reclose T2→replay E1→unchanged)
+- **A3 corrected — command boundary**: ไม่ใช้ `reopenConversation` เป็น inbound command (callers จริง: reopen route, handoffService, conversationService wrapper) — สัญญาใหม่ `applyInboundOwnershipTransition` ใน statusConversationService owner เดิม; test seam = typed adapter ที่ fail ชัดว่า "command missing" (ห้าม simulate impl)
+- **A4 corrected — wording**: แก้ claim เกินพิสูจน์ (ดู boundary verdict ด้านบน) + W1 เป็น in-repo structural pin เท่านั้น
+- **RED gate (PART B)**: suite **109/125** — W1 pin PASS · W2–W17 fail ด้วยเหตุเดียว "applyInboundOwnershipTransition missing — RED forward contract" · 108 tests เดิมเขียวครบ (zero regression) · `tsc --noEmit` ✓ · `git diff --check` ✓
+- **PART C re-audit**: ไม่พบ external writer/webhook/receiver ใน repo (sync-shops = read-only `_shp`; routes ที่เขียน messages = outbound/test; env flags WEBHOOK_WORKER/ENABLE_POLL/LOST_PUSH_RECOVERY มีแต่ใน docs ไม่มี code consume; DEPLOY/docs ชี้ shared Mongo dev.digital.in.th) → outcome B · integration contract พร้อมส่งให้เจ้าของ Sellcenter
+- **PART D proposal**: `applyInboundOwnershipTransition` ~55 LOC ใน statusConversationService.ts เดิม (fenced CAS closed/resolved→bot + init CAS missing/no-status→bot + unchanged; history/audit เฉพาะ reopened; claim coll ไม่แตะ; reopenConversation/manual paths ไม่เปลี่ยน) — ยังไม่ implement รอ review
+
+#### Final Correction Round (2026-10-13, transport + side-effect ownership + bounded init)
+
+- **PART 1 transport**: auth owner พบ = `x-internal-secret` vs `serverConfig.chatbotInternalSecret` (bot-handoff route precedent + middleware PUBLIC_API exclusion + optional IP allowlist) · endpoint proposal `POST /api/internal/inbound-lifecycle` → validate{conversation_id,message_id,inbound_at} → delegate เท่านั้น (no Mongo in route) · status matrix 401/422/200{outcome}/500-retry · `logDataWriterEvent` พบแต่ zero callers → ยืนยัน data-writer integration เคยออกแบบไว้แต่ writer อยู่นอก repo
+- **PART 2 side-effect owner**: `recordReopen` มี `logAdminEvent("conversation.open")` ในตัว → proposal เดิม double-log จริง · contract แก้: side-effect owner เดียว = recordReopen ขยายรับ optional event identity(message_id) · crash window: mongoClient ไม่มี session/transaction + replica-set unproven → เลือก **option B** = CAS $set เก็บ `inbound_reopen_event_id` + unchanged-path identity check → re-emit audit idempotent (deterministic `_id`, E11000 dedupe ตาม botworker precedent) · state exactly-once เสมอ, audit converge เมื่อ event เดิมถูก retry
+- **PART 3 bounded init**: แก้ exception-as-normal-path — read once → absent: insertOne (E11000 → bounded re-read ครั้งเดียว ไม่ loop) → status missing/null: CAS on observed state → closed/resolved+fresh: fenced CAS → bot/open/handoff/pending/stale: unchanged zero-write · pipeline-update เทียบแล้วแพ้ — unchanged states ต้องการ zero write attempt
+- **PART 4+5 tests**: W18 literal `status:"pending"` → unchanged (แยกจาก handoff+pending_assignment) · W19 exactly-one conversation.open (W4 เสริม total=1) · W20 CAS-miss zero side-effects · W21 init zero side-effects · W22 crash window (hook inject → CAS commits + retry converge once) · W23 duplicate transport converged · W24–W26 transport source-RED (route exists / delegates+no mongo / auth-before-service) · no-op states assert `metaWrites()===0` + `noSideEffects()`
+- **RED gate**: suite **109/134** — legacy 108 + W1 เขียวครบ zero regression · RED 25 ตัว: service W2–W18+W23 "command missing" · side-effect W19–W22 เดียวกัน · transport W24–W26 "route missing" · `tsc --noEmit` ✓ · `git diff --check` ✓
+- **verdict**: `CONTRACT_READY_FOR_IMPLEMENTATION` — contract+algorithm+transport+side-effect ownership ครบและ RED ถูก boundary · external writer ยังคงต้อง hook เข้า endpoint (integration contract พร้อมส่ง)
+
+#### Contract Closure Round (2026-10-13, test-honesty — executable transport + real race + deterministic audit id)
+
+- **PART 1 executable transport**: W24–W26 regex-on-source ถูกแทนด้วย executable route tests W37–W47 — module hooks เพิ่ม importer-aware leaf seam: เฉพาะ importer ใต้ `/src/app/api/internal/` ที่ import statusConversationService → spy (record calls/args, return/throw ตาม state) · test file + real services ยังได้ real module (command missing = RED ตรง boundary) · spy = leaf mock เหมือน mongoClient/systemConfig — ไม่ใช่ production impl · auth tests พิสูจน์ auth-before-service ด้วย runtime call count (calls=0) ไม่ใช่ source order
+- **PART 2 real read/CAS race (W14 เขียนใหม่)**: เดิม mutate ก่อนเรียก command (ไม่ใช่ race จริง) → ใช้ `findOneAndUpdateHook`/`updateOneHook` barrier — admin mutation ลงระหว่าง dispatch read กับ fenced-CAS write → CAS miss → bounded re-read (findOne ≤2) → unchanged + open/admin-2 รอด + zero side-effects + CAS attempt=1 (no retry loop) · version เดิมถูกแทนที่ (ห้ามเก็บสอง tests พิสูจน์เรื่องเดียวกัน)
+- **PART 3 concurrent reconcile**: W27 = A wins CAS + ตายกลาง audit → B CAS miss → re-read เห็น bot+matching `inbound_reopen_event_id` → settle audit (log 1 + history marked) แต่คืน unchanged · W28 negative = loser เห็น event id คนละตัว → ไม่ settle · impl proposal แก้: **CAS miss ห้าม return ทันที — bounded re-read เพื่อ reconcile event identity**
+- **PART 4 deterministic audit id**: `_id = "adminlog:event:" + sha256(JSON.stringify([action, conversationId, messageId])).slice(0,32)` (node:crypto — ไม่มี dep ใหม่) · contract: eventId → deterministic _id · E11000 → re-read _id → identity ตรง = already-logged (ไม่ throw ไม่ dup) / ไม่ตรง = throw · non-E11000 → throw · legacy callers ไม่มี eventId → auto _id เดิม · W29–W34 RED (logger ยังไม่มี eventId) · W35 (non-E11000 propagate) + W36 (legacy compat) PASS — pins ที่โค้ดจริง satisfy อยู่แล้ว (fakemongo enforce _id unique เสมอ — E11000 ทำงานได้ทันที ไม่ต้อง uniqueKeys)
+- **PART 5 guarantee wording**: state transition = single-winner CAS (authoritative) · audit/history = idempotent convergence under retry/reconciliation — **ไม่ใช่ atomic transaction** · ไม่มี retry+crash → audit อาจขาด · `unchanged` = ไม่ต้องเปลี่ยน ownership เพิ่ม แต่ทำ idempotent settlement ของ event เดิมที่ commit แล้วได้ · ห้ามคำว่า exactly-once ไม่มีเงื่อนไข
+- **harness delta (test infra เท่านั้น — runtime diff = 0)**: mocks +inboundTransitionCalls/Args/Result/Error · hooks +importer-aware redirect · ไฟล์ใหม่ test-ownership-transport-inbound-svc-spy.mjs · fakemongo +insertOneHook (error-injection seam ตาม hook pattern เดิม)
+- **RED gate**: suite **111/152** — legacy 108 + W1 + W35 + W36 = 111 PASS (zero regression) · RED 41 แยก boundary: command missing ×24 (W2–W23, W27, W28) · deterministic logger ×6 (W29–W34) · route missing ×10 (W37–W45, W47) · middleware PUBLIC_API ×1 (W46 — executable: middleware จริงตอบ 401) · `tsc --noEmit` ✓ · `git diff --check` ✓
+- **verdict**: `CONTRACT_READY_FOR_IMPLEMENTATION` — transport executable (auth reuse: `x-internal-secret`+`CHATBOT_INTERNAL_SECRET`, PUBLIC_API entry ต้องเพิ่มตอน impl) · runtime proposal อัปเดต: CAS miss → bounded re-read reconcile · `logAdminEvent` +optional eventId → deterministic `_id` + E11000 identity-check · `recordReopen` +optional messageId → owner เดียวใส่ eventId/metadata ลง audit · route = transport adapter เท่านั้น · external writer ยังต้อง hook เข้า endpoint (integration contract พร้อม)
+- ยังไม่ stage/commit/push ตามคำสั่ง · runtime diff = 0
+
+### 🧭 Phase 2B.1+2B.1A — Authoritative Ownership Transport (2026-10-09) · **READY_FOR_CORRECTED_REAL_DB_DRY_RUN** · collection-scope + empty-source correction เสร็จ · รอ corrected read-only dry-run · ยังไม่ commit
+
+- **real dry-run gate (2026-10-09)**: อนุมัติ read-only dry-run 1 ครั้ง → preflight ผ่าน (branch/HEAD ✓ · contract ตรวจจาก code จริง ✓ · offline suite 36/36 + diff --check ✓) **แต่หยุดที่ env gate** — `ADMIN_MONGO_URI=unset`, `ADMIN_MONGO_DB=unset` ใน process ปัจจุบัน · ไม่รันคำสั่งจริง · ไม่หา fallback (ห้ามอ่าน .env ทุกชนิด) · real Mongo connections=0 · รอ env ที่ process ส่งมาให้เท่านั้น
+- **⚠️ real dry-run #1 (2026-10-09, ผู้ใช้รันเอง) — INVALID evidence**: exit 0 + scanned=0 + ทุก count=0 → **ผิด collection** — runner forward เฉพาะ `ADMIN_MONGO_URI`/`ADMIN_MONGO_DB` ไม่มี `ADMIN_MONGO_COLLECTION_CONVERSATIONS` → fallback `conversations` (ไม่มีใน admin DB — find บน collection ที่ไม่มี = empty cursor เงียบๆ) → vacuous pass · **ยกเลิกเป็น evidence ทั้งหมด — invariant ยัง unproven**
+- **collection-scope correction (E1–E5 RED→GREEN, offline เท่านั้น)**: source default → `conversations_shp` (ยืนยันกับ codebase: DEPLOY.md/schema.md/sync-shops/replay_compare — incident report เขียน `conversation_shp` singular แต่ของจริง plural) · target `status_conversation` เดิม · `message_shp`/`messages_shp` ไม่ถูกเปิด (collectionCalls pin) · **empty-source fail closed**: `scanned===0` → exit 1 ทั้ง dry-run/apply/audit + `empty_source:true` ใน output — vacuous scan ไม่มีวัน report clean อีก · E5 regression: `conversations` ว่าง + `conversations_shp` มี rows → CLI อ่าน shp (scanned>0) · D1/D3 seed authoritative row — success ไม่อาศัยฐานว่าง · override env ยังทำงาน explicit (E2) · suite 41/41
+- **final-audit empty-scope correction (F1–F5 RED→GREEN)**: dry-run/apply เดิม gate เฉพาะ `summary.scanned===0` — final audit scanned=0 (audit ไม่ถึง source) ยัง exit 0 ได้ → เพิ่ม `auditEmpty` ใน decideExit: ต้อง `summary.scanned>0` **และ** `audit.scanned>0` ทั้งคู่ · audit-only `scanned>0` เดิม · V12 fixture แก้ clean audit scanned 0→1 · cas_lost ยอม success เฉพาะ audit สะอาด+มีหลักฐานจริง · suite 46/46
+- **⚠️ real dry-run #2 (2026-10-09, ผู้ใช้รันเอง) — fail closed ทำงานถูกแต่ยัง scanned=0**: exit 1 + `empty_source:true` (gate ใหม่ทำงาน — ไม่ใช่ vacuous pass อีก) → แปลว่า `conversations_shp` ใน DB ที่เชื่อมไม่มี row match CANDIDATE_FILTER · สาเหตุคาด: (a) ชื่อ collection จริงอาจ `conversation_shp` singular ตาม incident report แรก — runner ไม่ได้ forward `ADMIN_MONGO_COLLECTION_CONVERSATIONS` เลยใช้ default ตรงๆ · (b) ADMIN_MONGO_DB ชี้ผิด DB · (c) rows จริงไม่มี assigned_to/closed_at เลย · **รอผู้ใช้ยืนยัน list_collection_names + evidence count จริง** — ยังไม่แก้ code จนกว่าจะรู้ชื่อ/DB ที่ถูก · diag script: `chatbot/testscript/diag_admin_collections.py` (read-only, counts only — ผู้ใช้รันเอง)
+- **diag #1+#2 result (2026-10-09, ผู้ใช้รัน)**: `conversations_shp` มีจริง 150,396 rows แต่ **evidence_rows=0 (full-scan count)** — `assigned_to`/`closed_at` ไม่มีในข้อมูลจริงเลย · distinct status=['open'] เท่านั้น · alt ownership fields ไม่มี · related collections (tickets/chat_accept_sessions/platform_team_assignments/assignment_cursors) ว่าง · status_conversation=2 docs (ไม่มี evidence fields) · **สรุป: invariant ผ่านแบบ vacuous — ไม่มี legacy human-owned row ขาด meta ให้ backfill** → verdict เสนอ `INVARIANT_VACUOUS_NO_BACKFILL_NEEDED` (ไม่ต้อง apply; gate ตอบด้วย census ไม่ใช่ migration) · caveat ที่บันทึก: ถ้า human-ownership เคยอยู่ใน raw fields แต่ dump ทับหมดแล้ว สถานะนั้นหายถาวร — backfill กู้ไม่ได้อยู่ดี
+
+- **scope**: lifecycle audit + test-honesty cleanup + offline backfill contract/harness · ห้ามแก้ production transport · ห้าม worker/DB/provider จริง
+- **code truth — transport defect (พิสูจน์แล้ว)**:
+  - `resolveTicketState` (botCallService L55-83) = producer เดียวของ `ticket_state` — `testSource`→`test_status_conversation` · `simulate`→`test_chat_sessions` · **production→`conversations` ← defect จริง** (raw dump ที่ sellcenter เขียนทับ ไม่ใช่ ownership source)
+  - transport = verbatim passthrough · `ticket_state` omit เมื่อ null · error ถูก try/catch กลืนเป็น null → error กับ missing แยกไม่ได้
+  - production branch **ไม่มี caller ใน tree** (botWorkerService/workflowEngine ส่ง testSource เสมอ; liveAssignment/test-assignment ใช้ callBot ท้องถิ่นไม่ส่ง ticket_state; TestChatClient ส่งเองผ่าน proxy) — เป็น reserved contract
+  - **defect severity สูงกว่าที่คิด**: `createConversation` เขียน `conversations.status="open"` เสมอ → transport ปัจจุบันส่ง "open" ให้ทุก fresh conv → Python lock-set (handoff/open/pending) → บอทเงียบผิด owner ทุกแชทใหม่
+- **status_conversation lifecycle (พิสูจน์จาก code)**:
+  - doc สร้างเฉพาะเมื่อ admin/system write (upsertMeta family) — fresh conv **ไม่มี doc** เป็นเรื่องปกติ
+  - close→"closed" · admin reopen→"handoff" · bot/customer reopen→"bot"(clear assigned) · resolve→"resolved" · pending→status="handoff"+assigned_to=null
+  - handoff owner เองใช้ `meta?.status || "bot"` (handoffService L80) **แต่เฉพาะ conv ที่ผ่าน 2J+ paths**
+- **BLOCKED evidence (เก็บเป็นบันทึก — ไม่ใช่ passing contract)**: legacy human-owned rows ไม่มี meta ได้จริง — `mapToConversation` derive "handoff"/"closed" จาก raw `assigned_to`/`closed_at` · `getAssignedConversationIds` นับ raw เป็น legacy source · send Phase 7.9 block admin ด้วย raw `assigned_to` · `send` ไม่เขียน meta · ไม่มี backfill ในประวัติ repo → missing⇒"bot" ผิดทิศอันตราย
+- **test honesty (PART 1)**: ลบ B1–B4 characterization tests ที่ล็อก defect เป็น PASS (-79 LOC) · เก็บ B5 pin (no conversationId → no ownership query + omit — positive boundary contract) · suite เหลือ **38 tests**
+- **migration contract (2B.1A — `scripts/backfill-legacy-ownership.ts`, hardened รอบ safety + final pre-dry-run correction)**:
+  - offline script เท่านั้น — request path ไม่เรียก · dry-run default · apply = exact token `--apply=BACKFILL_LEGACY_OWNERSHIP` (token อื่นที่ขึ้นต้น `--apply*` → refuse ก่อน connect) · `--audit` invariant-only · `--batch=N` integer 1–1000 validated ก่อน env/mongo import
+  - **client lifecycle (C1+D1–D3)**: `try/finally` ครอบ `connect()` — close() ทำงาน 1 ครั้งแม้ connect throw (dry-run ไม่ค้าง) · connect+close fail พร้อมกัน → output sanitized + exit non-zero · **cleanup failure ห้ามรายงาน success (D1)**: runCli เก็บผลใน `exitCode` ท้องถิ่น · ไม่ return ภายใน try · close() fail → sanitized log + final exit 1 · op error + close error ทั้งคู่ถูก log sanitized (cleanup ไม่ทับ op error) · exit matrix op×cleanup: สำเร็จ+สำเร็จ→decideExit · สำเร็จ+fail→1 · fail+สำเร็จ→1 · fail+fail→1
+  - **final audit เสมอ (C2)**: dry-run + apply รัน `auditOwnershipInvariant()` หลัง scan เสมอ (audit-only = audit ครั้งเดียว) — `_id` seek อาจพลาด row ที่ insert หลัง cursor → final audit เป็น truth gate
+  - **classification boundary เดียว (`classifyRow`)** — runBackfill + audit ใช้ร่วม: **conversation_id ต้อง canonical `v===v.trim()` (C3)** — whitespace-padded = invalid row · ไม่ trim/ไม่ normalize/ไม่ query meta — migration ไม่เขียน identity โดยปริยาย · meta.status known→skip / non-empty unknown→invalid_authoritative_status (block) · raw.closed_at valid finite Date→closed(ชนะ) / present-invalid→invalid · meta.assigned_to??raw.assigned_to non-empty string→handoff / present-invalid→invalid · closed_by invalid→omit+invalid_optional_fields · **raw.status ไม่อ่าน**
+  - fenced write `{conversation_id, $or:[status missing,null]}` + upsert + unique conv_id → concurrent write = cas_lost · ไม่ overwrite authoritative status
+  - **_id-seek pagination** (sort _id:1 + `_id>$gt` lastSeen — แทน skip/offset): rows หลัง cursor ถูก process ครั้งเดียว · หลังหมด = หน้าที่ของ final audit
+  - **counts-only output** — conversation_ids/per-row arrays ถูกลบทั้งหมด: mode/scanned/candidates/would_*/created/filled/skipped_authoritative/cas_lost/invalid_rows/invalid_authoritative_status/invalid_optional_fields/errors (+invariant_* ใน apply)
+  - `decideExit` จุดเดียวที่ CLI boundary — dry-run: actionable>0 ปกติ/ผ่าน แต่ fail เมื่อ summary หรือ final-audit มี errors/invalid/invalid_authoritative · audit/apply ผ่านเฉพาะ actionable=0 ∧ invalid=0 ∧ invalid_authoritative=0 ∧ errors=0 (cas_lost ยอมถ้า audit สะอาด) · `runCli` (rename จาก main, export สำหรับทดสอบ — orchestration ชุดเดียว) คืน code · `process.exitCode` เซ็ตที่ direct-invocation boundary เท่านั้น
+  - `safeErrorLabel` — safe name + finite numeric code เท่านั้น (ไม่มี message/stack/URI/host/DB)
+  - import purity: lazy `await import("mongodb")` + env อ่านใน runCli() เท่านั้น · invokedAsScript gate
+- **tests M1–M12 + V1–V18 + C1–C3 + D1–D3 + E1–E5 + F1–F5 GREEN (46/46 — fake Mongo + mongodb spy + fetch stub)**: M-block = derivation/fence/dry-run/sanitized/purity · V1–V6 strict classification · V7–V8 counts-only bounded ที่ 5,000 rows · V9 identical classify · V10–V14 exit matrix · V15 error sanitizer · V16 batch parser · V17 _id-seek + late-insert · V18 dry-run≠ready เมื่อ invalid · C1 connect-fail→close-once·exit-1·sanitized · C2 dry-run final audit จับ late row + actionable-only ผ่าน · C3 canonical ID · D1 success+close-fail→exit-1 (RED พิสูจน์โค้ดเดิมคืน 0) · D2 op-fail+close-fail→exit-1 op error ไม่ถูกทับ · D3 success+close-ok→exit-0 pin · E1 canonical binding (shp เท่านั้น) · E2 env override · E3 empty-source fail closed ทั้ง 3 mode · E4 non-empty clean → 0 · E5 wrong-source regression · F1/F2 summary-scanned>0+audit-scanned=0→1 · F3/F4 pins · F5 runCli vacuous-audit→1
+- **verify**: backfill **46/46** · error-policy (cleaned) **38/38** · boundary 20/20 · idempotency 71/71 · config-failclosed 4/4 · `tsc --noEmit` ✓ · `npm run build` ✓ · `git diff --check` ✓ · worker=0 real-Mongo=0 provider=0 .env=0 · fakemongo ไม่ได้แก้ · mongodb spy +collectionCalls (globalThis state)
+- **roadmap**: "Commit 2B.1A" gate ก่อน 2B.1 (อัปเดต hardened contract + แก้ date 2026-10-09) + prerequisite ใน 2B.1
+- **next sequence**: approval → **corrected read-only dry-run** (real Admin DB, `scanned>0` เป็น precondition — dry-run #1 scanned=0 ถูกยกเลิก) → review counts → apply approval → `--apply=BACKFILL_LEGACY_OWNERSHIP` → audit actionable=0∧invalid=0 → 2B.1 transport RED→GREEN → ลบ raw ownership fallbacks → commit/review
+- **residual**: **real-DB invariant ยังไม่ได้พิสูจน์** — dry-run #1 เชื่อมแล้วแต่อ่านผิด collection → evidence โมฆะ; corrected run ยังไม่ได้ทำ · SRS L977 ยังถูกต้องตาม code (runtime ไม่เปลี่ยน) · fakemongo dead key `statusConversations` ยังอยู่ (แก้ตอน 2B.1 implement) · fresh-conv no-doc ปลอดภัยเฉพาะหลัง legacy rows ถูก resolve
+
 ### 🚨 Botworker Incident Closure Part 1 — backlog audit + quarantine dry-run + enable-checkpoint design (2026-10-01) · READ-ONLY · ยังไม่ commit
 
 - **scope**: audit เท่านั้น — ห้าม worker/LLM/DB write/commit; incident: enable หลัง process ค้างหลายวัน → replay 2,288 inbound / 7,171 replies (ส่วนเกิน 4,883)
@@ -2229,3 +2866,1567 @@ inventory จุดที่ยังเป็น device/phone-specific hardlogi
 - **verify (combined branch)**: audit 41/41 · freshness 59/59 · checkpoint 18/18 · idempotency 43/43 · boundary 20/20 · races 37/37 · tsc clean · build ✓ · py_compile ✓ · all diffs clean
 - **leftovers**: `llm.py`, `test_vision_dedupe.py`, `quarantine_rollback.py`, `test_quarantine_rollback_verify.py` — excluded by spec, untouched
 - **NOT RUN**: real-Mongo runtime verify (verify-parallel unsafe — listPending ไม่จำกัด prefix) · quarantine/rollback ยังไม่ execute · worker off · Mongo write=0 · LLM/API=0 · no push/deploy
+
+#### [กำลังจะทำ] Botworker real-Mongo smoke harness — Part 1 safety gate (no execute)
+
+- **เป้าหมาย**: harness `verify-botworker-runtime-mongo.ts` + safety test `test-botworker-runtime-mongo-safety.ts` — isolated temp DB (`<prod>_botworker_verify_<rand>`) + local fake `/chat` + marker-token cleanup + fail-closed CLI (default dry-run, `--apply` ต้อง token) — Part 1 ไม่รัน Mongo writes จริง
+- **constraints**: production/runtime/UI/API=0 แก้ · worker off · no LLM/Shopee · no .env read/print · dynamic-import production services หลังตั้ง ADMIN_MONGO_DB/CHATBOT_BASE_URL_SHOPEE เท่านั้น · ไม่เรียก ensureIndexes (สร้างเฉพาะ minimal index ใน temp DB) · ห้าม commit/push
+- **ผล Part 1 (verify แล้ว, ยังไม่ commit)**: safety test **39/39** (RED ก่อน implement: `harness file exists` fail → GREEN) · dry-run prints sanitized plan exit=0 · `--apply` no-token/wrong-token → exit=1 **ก่อน** load env/Mongo · tsc clean · diff --check clean · harness 469 LOC (<500 gate) · guards=4 (apply token / db-name pattern+≠prod / cleanup marker+token / output sanitizer) · production LOC/helpers/schema/index=0 · scenarios S1–S6 implemented แต่ execute เฉพาะ --apply (Part 2 หลังอนุมัติ) · Mongo writes=0 · network binds=0 · runtime imports=0 · `verify-botworker-parallel` ไม่ถูกอ้างอิง
+- **residual**: scenario assertions ยังไม่ proven กับ Mongo จริง (ตัวเลข claim/reply/row ต้องยืนยันใน Part 2) · fake `/chat` รับ body เท่านั้น (ไม่เก็บ headers) · isolated name = `<prod>_botworker_verify_<rand16>` — prod prefix เป็นส่วนหนึ่งของ pattern โดยตั้งใจ (ต่างจาก prod name ตรงๆ)
+- **review fix (exit-code overwrite, verify แล้ว)**: `finally` เคยเขียน `process.exitCode=1` เมื่อ cleanup ล้ม แต่ `runApply` return 0 → `.then` เขียนทับเป็น 0 → temp DB ค้างแต่รายงาน success — **fix**: pure `smokeExitCode(failedAssertions, cleanupFailed)` + `runApply` ไม่มี return ใน try / ไม่แตะ `process.exitCode` (pin: count=2 เฉพาะ then+catch) · fake.close() fail → cleanupFailed แล้วทำ DB cleanup ต่อ · scenario throw → propagate ผ่าน finally → outer catch → exit 1 · 4-case control flow: pass/pass→0 · fail/pass→1 · pass/fail→1 · throw→1 · safety test 39→**47/47** (RED ก่อน fix: 7 fails ตรง finding) · tsc clean · --apply ยัง refuse ก่อน env load · Mongo writes=0
+
+#### [กำลังจะทำ] Botworker real-Mongo smoke Part 1.1/2 — Mongo client closure + one-shot apply
+
+- **root cause**: `mongoClient.getDb()` singleton MongoClient ไม่ถูกปิดใน runApply → socket/timer ค้าง process อาจไม่จบแม้ dropDatabase สำเร็จ — แก้ด้วย `db.client.close()` ใน nested finally (driver API ตรง ห้ามสร้าง production closeMongo helper)
+- **plan**: RED source-contract tests (client.close ใน finally / dropDatabase return check / close-fail→cleanupFailed / exitCode ยังเฉพาะ boundary) → minimal fix → GREEN → Part 2 one-shot --apply
+- **Part 1.1 (verify แล้ว)**: `db.client.close()` ใน nested finally + `dropDatabase()` return ต้อง true — RED 5 fails (no close / unchecked return) → GREEN **52/52** · tsc clean · dry-run ok
+- **Part 2 (รัน --apply ครั้งเดียว)**: exit=1 — **seed insert แรกถูก Mongo auth ปฏิเสธ** (`not authorized on <prod>_botworker_verify_<rand>` — user ไม่มีสิทธิ์เขียน DB อื่นนอก configured) → S1–S6 ไม่ได้ execute · writes=0 · cleanup refuse ถูกต้อง (no marker→no drop) · client close ทำงาน process จบปกติ · read-only `listDatabases` ยืนยัน `*_botworker_verify_*` = **0 DBs** — temp DB ไม่เคยถูกสร้างจริง (Mongo สร้าง lazily เมื่อ write แรกซึ่งถูก reject)
+- **finding ใหม่**: driver error message แสดง temp DB name เต็มใน console — sanitized guard ครอบเฉพาะ string ของเราเอง ไม่ครอบ error จาก Mongo (ต้อง sanitize e.message ใน Part 3 ถ้าจะใช้ต่อ)
+- **residual**: ต้องการ Mongo user ที่มีสิทธิ์ create/write/drop บน `*_botworker_verify_*` หรือ role `dbAdminAnyDatabase`/`readWriteAnyDatabase` — หรือเปลี่ยน approach เป็น separate verify user/URI (ต้องตัดสินใจนอก scope)
+- verdict งานนี้: REAL_MONGO_SMOKE_FAILED (auth boundary, ไม่ใช่ runtime bug) · Mongo writes=0 · LLM/API=0 · worker off
+
+---
+## งาน: Botworker real-Mongo smoke Part 3 — loopback-only disposable Mongo + error sanitization
+**สถานะ:** ✅ harness rewrite เสร็จ + verify ผ่าน — ❌ disposable Mongo ไม่มีในเครื่อง → apply ไม่ได้รัน
+
+### Baseline / RED / GREEN
+- Baseline ก่อนแก้: safety 52/52, tsc clean, dry-run 0
+- RED (new contract): 25 fails — verify URI validator, harness-constant DB name, sanitizer, source pins ทั้งหมด absent
+- GREEN: safety **73/73**, `npx tsc --noEmit` clean, dry-run exit 0, `git diff --check` clean
+
+### วิธีแก้ (harness only — production/runtime = 0)
+- `BOTWORKER_VERIFY_MONGO_URI` required ใน apply — `validateLoopbackMongoUri()` รับเฉพาะ `mongodb://` + host ∈ {127.0.0.1, localhost, [::1]} + explicit port ≠ 27017 + ไม่มี credentials/query — reject srv, non-loopback, malformed
+- `ADMIN_MONGO_URI` + `ADMIN_MONGO_DB` set จากค่า verified ก่อน dynamic import — DB name = `botworker_runtime_verify_<rand>` (harness constant, ไม่ derive จาก prod)
+- `sanitizeError(e, stage)` ตัวเดียวสำหรับทุก error path — whitelist: stage + error name + code เท่านั้น — ปิด raw driver message leak (ก่อนหน้านี้ leak temp DB name ทั้งก้อน)
+- apply-refusal matrix verified: empty/srv/non-loopback/27017/creds/no-port → exit 1 ทุกกรณีก่อน Mongo connect/bind
+
+### Disposable Mongo discovery → UNAVAILABLE
+- Option A native `mongod`: `which`+`/opt/homebrew/bin`+`/usr/local/bin`+`brew list` → ไม่มี binary
+- Option B cached Docker image: `docker` CLI ไม่มีอยู่ในเครื่องเลย (command not found)
+- ตามสเปก: ห้าม install/download/pull, ห้าม fallback production → **apply ไม่ได้รัน**
+- port 27017 closed — configured Mongo เป็น remote server
+
+### Files changed
+- `ChatAdminWeb/scripts/verify-botworker-runtime-mongo.ts` (+validator, +sanitizer, rewrite apply-boundary ~±60 LOC)
+- `ChatAdminWeb/scripts/test-botworker-runtime-mongo-safety.ts` (+21 checks = 73 total)
+- `getoutofmywaybotkaikrook2.md` (entry นี้)
+
+### Verdict: `DISPOSABLE_MONGO_UNAVAILABLE`
+Smoke harness พร้อมรันแล้ว — ขาดแค่ Mongo ที่เครื่องนี้: native `mongod` (brew install mongodb-community) หรือ cached mongo Docker image → rerun apply ครั้งเดียวตาม spec ได้ทันที
+
+---
+## งาน: Botworker smoke harness final safety correction — explicit URI provenance + strict error sanitizer
+**สถานะ:** ✅ เสร็จ (harness/test only — ไม่ได้รัน apply, disposable Mongo ยังไม่มี)
+
+### Finding 1 (High): verify-URI provenance — dotenv โหลดก่อนอ่าน URI
+- Root cause: `runApply()` โหลด `dotenv/config` ก่อนอ่าน `BOTWORKER_VERIFY_MONGO_URI` → URI อาจมาจาก `.env` แทน explicit env → provenance ไม่ชัด
+- RED: 2 pins fail (env-read + validate อยู่หลัง dotenv import — index 217/192 > 153)
+- Fix ขั้นต่ำ: ย้าย `const uri = validateLoopbackMongoUri(process.env[VERIFY_URI_ENV] || "")` ขึ้นก่อน `await import("dotenv/config")` — ลำดับใหม่: **approval token → explicit URI validate → dotenv → ADMIN_MONGO_URI/DB rebind → fake → dynamic imports**
+- ไม่มี fallback ไป ADMIN_MONGO_URI; dotenv ไม่เป็นแหล่ง verify URI อีกต่อไป
+
+### Finding 2 (Medium): sanitizer ไม่ใช่ whitelist จริง
+- Root cause: `e.name`/`code` ส่งออกโดยไม่กรอง → name/code ที่แปลก (URI, spaces, newline, string code) รั่วได้
+- RED: 7 fails (malicious name, spaces, uri-chars, string code, NaN, Infinity, non-Error)
+- Fix ขั้นต่ำใน `sanitizeError` ตัวเดิม: name ต้องผ่าน `/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/` มิฉะนั้น `"Error"`; code แสดงเฉพาะ `typeof number && Number.isFinite` — string/NaN/Infinity/object ไม่แสดง
+- แก้ pin regex ผิดของตัวเองด้วย: `\s*` backtrack ทำ lookahead ผ่านบน space → เปลี่ยนเป็น `(?!\s*["'`])` ตรงหลัง comma
+
+### Task 3: doc accuracy
+- test header `<prod>_botworker_verify_<rand>` → `botworker_runtime_verify_<rand>` + lifecycle line
+- harness header import-order แก้เป็น verify-URI → dotenv (เดิมเขียนกลับ)
+- แก้ wording รอบก่อน: refusal matrix เดิม reject หลัง dotenv (dotenv ถูกโหลดใน process แต่ไม่มีการเปิด/แสดงเนื้อหาไฟล์) — หลัง correction นี้ missing/invalid URI reject **ก่อน** dotenv แล้วจริง
+
+### Verify สด (ไม่มี --apply)
+- safety **88/88** (73 + 15 new: 9 sanitizer strict + 4 provenance pins + 2 stage-constant)
+- `npx tsc --noEmit` clean · dry-run exit 0 · `git diff --check` clean
+- refusal probes: token+no-URI → exit 1 ก่อน dotenv/bind; token+`:27017` → exit 1 ก่อน dotenv/bind; output sanitized ทั้งคู่
+- production/configured Mongo connections = 0 · Mongo writes = 0 · ports bound = 0 · LLM/Shopee = 0
+
+### Verdict: `HARNESS_SAFETY_READY_DISPOSABLE_MONGO_UNAVAILABLE`
+S1–S6 ยัง not executed/unproven — รอ disposable Mongo (native `mongod` หรือ cached image) เท่านั้น
+
+### Real-Mongo smoke closeout (2026-10-06) — ✅ proven on disposable MongoDB 5.0
+- Docker Desktop client/server `29.8.2`; image `mongo:5.0` native arm64; container ชั่วคราว bind เฉพาะ `127.0.0.1:27018`, ไม่ mount volume
+- preflight: safety **88/88**, `npx tsc --noEmit` clean, dry-run exit 0
+- apply รันหนึ่งครั้ง: S1–S6 **27/27 passed** — duplicate claim once, buffer batch once, HTTP 429 terminal `bot_failed`/no retry, new inbound พา failed turn เข้า history ครั้งเดียว, stale/evidence recovery finalize-only
+- cleanup: harness drop `botworker_runtime_verify_<rand>`; read-only `listDatabases` เหลือ `[]`; ลบ container `chatbot-mongo-smoke` แล้ว; เก็บ image ไว้สำหรับ rerun
+- fake `/chat` เท่านั้น: Gemini/OpenRouter/Shopee calls = 0; production/configured Mongo writes = 0
+- verdict: `REAL_MONGO_SMOKE_PROVEN`
+
+> **Committed:** `8fb416a test: add loopback-only botworker Mongo smoke harness` (3 files, +812) — staging ว่าง, leftovers untouched; S1–S6 พิสูจน์ภายหลังผ่าน disposable MongoDB 5.0 ครบแล้วตาม closeout ด้านบน
+
+---
+
+## [ผ่านแล้ว] /logs server-side pagination + responsive Pagination (2026-10-06) — ✅ fixed + verified
+
+- **requirement (user update ล่าสุด)**: PAGE_SIZE=100 (API default+clamp 1–100) · sort `{timestamp:-1,_id:-1}` · summary `รายการ X–Y จากทั้งหมด Z รายการ` · Pagination +optional props `showBoundaryButtons`/`responsive` (CSS-only: phone≤3/md≤5/lg≤maxButtons numbered) · poll 5s เฉพาะหน้า 1, silent, ไม่ reset filter/expanded/view/scroll · verify screenshot 4 viewports (375/768/1366/1920)
+- **baseline**: `/logs` fetch `limit=200` ครั้งเดียว + filter client-side ทั้งหมด ไม่มี pagination UI · API คืน `total=rows.length` (ผิด) · service `$sort timestamp:-1` ไม่มี `_id` tiebreaker · Pagination ใช้โดย shops/contacts/knowledge/ProductsTab (props ขั้นต่ำ — ห้ามเปลี่ยน behavior)
+- **root cause**: ไม่มี server-side pagination เลย — filter client-side บน 200 rows แรกทำให้ log เก่ากว่านั้นหาไม่เจอ + total ผิด + sort ไม่ deterministic
+- **วิธีแก้**:
+  - `adminLogService.listAdminLogsExtended` → คืน `{rows,page,pageSize,total,totalPages}` · pipeline เดียว: `$match(base)→$lookup→$addFields→$match(search)→$sort{timestamp:-1,_id:-1}→$facet{rows:[$skip,$limit],meta:[$count]}` · search regex-escape (reuse `safeRegexSearch`) ครอบ 8 fields รวม joined username/name · actionType exact ชนะ actionTypes
+  - `route.ts` → params ใหม่ `page`(≥1) `pageSize`(default 100, clamp 1–100) `admin_id` `action_type` `action_types`(CSV dedupe) `since`(invalid→ignore) `q`(≤100) — `limit` param เดิมถูกแทนด้วย pageSize
+  - `Pagination.tsx` → +`showBoundaryButtons`(«/» aria-label ไทย) +`responsive`(3 CSS clusters `md:hidden`/`md:flex lg:hidden`/`lg:flex` ผ่าน `windowPages` — numbered รวม ≤3/≤5/≤maxButtons) · default path algorithm เดิมไม่แตะ → 4 หน้าอื่น render เหมือนเดิม
+  - `logs/page.tsx` → `PAGE_SIZE=100` + `page/total/totalPages` state · loadLogs ส่ง server params (admin_id/action_type/action_types/q) + `reqSeq` stale-guard · filter ทุกจุด `setPage(1)` · search debounce 300ms · `usePolling {enabled: canViewLogs && page===1}` · row key `log._id` (แก้ expanded หลุดตอน poll) · footer summary+Pagination เดียวใช้ร่วม list/table
+  - `shop-settings/page.tsx` → `limit:50` → `pageSize:50` (caller เดียวที่ใช้ param เก่า — คง behavior 50 rows)
+- **verify**: TDD RED 44 fail → GREEN **51/51** (`scripts/test-admin-logs-pagination.ts` + fake-Mongo mocks) · `tsc --noEmit` clean · `next build` pass (warnings เดิมเท่า baseline) · `diff --check` clean
+- **browser verify จริง** (playwright + minted session dev account, ลบ session แล้ว): 4 viewports ทุกตัว hScroll=false, numbered visible phone=3/tablet=5/laptop=pc=7, table แสดงเฉพาะ lg+, page1=100 rows, last page 349=40 rows (34,840 total ตรง), next/last/first ใช้งานจริง, summary `รายการ 101–200 จากทั้งหมด 34,840 รายการ · หน้า 2 จาก 349` ตรง format, poll page1=1 call/5s page2=0
+- **เคสอื่น**: Pagination หน้าอื่นไม่เปลี่ยน (default path เดิม) · `/admin/logs` caller อื่นมีแค่ shop-settings (แก้แล้ว) · `listAdminLogs` ไม่แตะ
+- **ยังไม่ commit** — รอ user review diff ก่อนตามกฎข้อ 10
+
+### Review-fix รอบ 2: $lookup ก่อน pagination = performance regression (2026-10-06) — ✅ fixed + verified
+
+- **root cause**: pipeline แรกทำ `$lookup` admins บน log ทั้งชุดก่อน `$facet` — page 1 poll ทุก 5s = join ทั้ง ~34,840 records ต่อ request แม้แสดงแค่ 100
+- **RED evidence (fake pipeline วัด input จริง)**: F1 `lookup input=252` (page1, ต้อง ≤100) · F2 `input=252` (page3, ต้อง =52) · F3 top-level `$lookup` ก่อน `$facet` · F4 ไม่มี admin resolution query · F6 index ยังไม่มี — 51 tests เดิมยังผ่าน (mock ไม่พัง)
+- **วิธีแก้ (stage order เท่านั้น, semantics เดิม)**:
+  - `$match(base+search)` → `$sort{timestamp:-1,_id:-1}` → `$facet{ rows:[$skip,$limit,$lookup,$addFields,$project], meta:[$count] }`
+  - search username/name: `find()` admins ด้วย escaped regex เดียวกัน (projection `admin_id`, ≤1 query เฉพาะเมื่อมี q) → fold `{admin_id:{$in:ids}}` เข้า `$or` ร่วมกับ raw fields 6 ตัว — search semantics ไม่เปลี่ยน
+  - index ใหม่ 1 ตัวผ่าน owner เดิม: `safeCreateIndex(db, COLLECTIONS.adminLogs, { timestamp: -1, _id: -1 })` — ไม่รัน prod เอง, index เดิมครบ
+- **after (probe)**: `lookup_input page1=100, page3=52` (เทียบ before=252) · admin resolution findCalls: no-search=0, with-search=1
+- **verify**: focused suite **57/57** (51 เดิม + 6 ใหม่ — B15 rewrite บังคับ pipeline ใหม่ตาม prompt) · tsc clean · `next build` pass · `diff --check` clean · diff เฉพาะไฟล์ที่อนุญาต (service/mongoClient/2 test files) · ไม่มี UI เปลี่ยน → ไม่ mint session / ไม่ screenshot ใหม่
+- **complexity delta**: modules/deps/env/collections/helpers = 0 · indexes +1 · duplicate pagination paths = 0 · behavior change = query execution order only
+- **ยังไม่ commit** — งานเดิม + fix นี้รวม review เดียวรอ user อนุมัติ
+
+---
+## งาน: Phase BW-1 — Fix Duplicate-Poll Buffer Livelock + Prove Shutdown Gates
+**สถานะ:** 🚧 กำลังทำ — audit owner code + hypothesis ก่อน RED
+
+### BW-1 ผลงาน (หลัง verify)
+- **Root cause พิสูจน์จากโค้ด**: `insertToBuffer` กลืน E11000 คืน void → `bufferOrProcess` เดินต่อ → `clearTimer`+re-arm debounce ทุกครั้ง → poll (1s) < window (7s) → timer ไม่มีวันครบ = livelock (chain: poll→claim claimed(owner self+lease)→bufferOrProcess→E11000)
+- **Fix ขั้นต่ำที่ owner เดียว**: `insertToBuffer` คืน `"inserted"|"duplicate"`; duplicate ที่มี debounce/retry timer อยู่แล้วไม่ re-arm; duplicate ที่ timer หายหลัง transient failure ซ่อม deadline จาก `received_at` โดยไม่เริ่ม window ใหม่ — ไม่มี helper/flag/config ใหม่
+- **RED**: L1/L2/L3 fail จาก livelock/contract; review พบ L4 insert สำเร็จแต่ read ล้มก่อน arm timer → early-return ทำ row ค้าง (`processCalls=0`) → **GREEN 47/47** หลังซ่อม deadline
+- **Suites**: idempotency 46/46 · freshness 59/59 · enable-checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · build 84/84 · diff-check clean
+- **Shutdown gates** มีอยู่แล้ว (cite): freshness ~L782 (toggle-off+clearPendingWork→callBot=0, row survive), ~L945 (disabled-window silent + procTransitions=0), enable-checkpoint S1-S3
+- **SRS_SSD.md** อัปเดต bufferService row (duplicate contract)
+- **ยังไม่ทำ**: single-worker lease, 429/500 carry-forward, real-Mongo smoke (S1-S6 disposable)
+
+### BW-1 review-fix: missing-timer liveness gap (audit scratch + TDD)
+- **Finding (High) พิสูจน์จริง**: fix เดิม (`duplicate → early-return`) ทำ row ค้างถ้า insert สำเร็จแต่ `getBufferedMessages` throw ก่อน arm — duplicate ถัดไป return ตลอดโดยไม่มี timer → ไม่มี execution path จน restart. Controlled revert (guard เดิม) → L4 fail (`processCalls=0`) → restore scratch → pass
+- **Contract ที่ audit แล้วเก็บ scratch ไว้**: dup+timer(debounce|retry)→early return · dup+no timer+buffered>0→arm `max(0, latest received_at + window − now)` (deadline อิง original received_at ไม่เริ่ม window ใหม่) · dup+buffered=0→"batch already processing" · distinct→re-arm เดิม · max→immediate flush เดิม
+- **mocks scratch**: `findHook` field (+2 บรรทัด — fakemongo engine รองรับอยู่แล้ว, resetState null อยู่แล้ว)
+- **Network trap (Task 4)**: เพิ่มใน mocks.mjs owner เดียว — fetch/http.request/https.request/net.connect/Socket.connect throw `[test-net-trap]` + self-check T0
+- **Timing margins (Task 3)**: ไม่มี fake clock — widen L1(100ms window/check@140) L2(200ms/check@310) L4(120ms/check@180+) — margin ~40-70ms ทั้งสองฝั่ง
+- **Stale `.next/types`** เคยทำ tsc ด่า (dev-session artifact) — ลบ regen แล้ว clean
+- **Suites**: idempotency **48/48** · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · build 84/84
+- verdict: `ROOT_CAUSE_CLOSED` — ยังไม่ commit
+
+### BW-1 final test-honesty fix (test-only — runtime ไม่เปลี่ยน)
+- **F1 L4 timing**: window 120→300, repair@~120, intermediate checkpoint @~340 (original deadline 300 ผ่าน / incorrect fresh 420 ยังไม่ถึง) → assert `processCalls===1` โดยไม่ settle ก่อน; หลัง fresh deadline assert ยัง 1 + row consumed
+- **Controlled mutation**: repair delay → full `effectiveWindowMs` → `FAIL L4 processCalls=0 @t≈340` (ยิงตอน ~420) → restore → GREEN
+- **F2 T0 trap ครบ**: +https.request + `new net.Socket().connect` — matrix: fetch/http/https/net.connect/Socket.connect ทั้ง 5 throw `[test-net-trap]`; import graph audit — ไม่มี network client อื่น (mongodb driver ไม่โหลดเพราะ mongoClient ถูก redirect) → known boundaries covered
+- runtime diff ไม่เปลี่ยนจาก candidate · suites: idempotency 48/48 · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · build pass
+
+---
+## งาน: Phase BW-2 — Single Active Botworker Ownership
+**สถานะ:** 🚧 กำลังทำ — audit + RED contract tests เท่านั้น ยังไม่แก้ runtime
+
+### BW-2 audit (ก่อนแก้ — evidence จากโค้ดจริง)
+- **ไม่มี worker-leadership boundary เลย**: `pollNewMessages`/`recoverStaleBuffersAndClaims` ไม่มี gate — process ไหนก็ยิงได้; claim-level fencing (E11000/lease/CAS owner_id+fencing_token) เป็น backstop เดียว
+- **ownerId** = `worker-<pid>-<uuid>` ต่อ boot, scope = claim doc เท่านั้น — ไม่มี worker lease doc
+- **duplicate work จริงของ worker สองเครื่อง**: messages/chat_processing scan ทุก cycle, claim CAS ชน, recovery scans, deferred timers, `checkWaitTimeouts` scan, `bot.recovery_quarantine` log ซ้อน
+- **reuse leader doc พิสูจน์ว่าไม่ได้**: chat_processing → recoverStaleClaims scan `{status:processing,lease<now}` จะ CAS `no_action` ทับ lease (ไม่มี message_id→ไม่ fresh); buffer_messages → P1 orphan `deleteOne`; system_configs → admin save clobber + shape pollution; botworker_events/messages → UI log/inbox semantics
+- **proposal**: `botworker_state` singleton `_id:"botworker:leader"` {owner_id,fencing_token,lease_expires_at} — CAS acquire-on-entry ใน pollNewMessages + recovery เท่านั้น (vocabulary เดียวกับ claim protocol)
+- **two-instance honesty**: mocks ให้ `botworkerRuntime.ownerId` rebind ระหว่าง call (fake Mongo resolve owner dynamic = process แยกจริงที่ DB layer); assertion เฉพาะ DB-observable outcome (found/processed/claim owner/callBot) ไม่พึ่ง singleton in-memory
+- **RED 5/6**: M1 loser poll found=1/processed=1 · M2 loser recovery recovered=1 (steal งาน expired-claim ของ foreign owner!) · M4 expired lease ไม่ transfer · M5/M6 ไม่มี leader doc → acquire-on-entry ไม่มี · M3 green-pin (ไม่มี write ให้ห้าม — vacuous วันนี้)
+
+### BW-2 review-fix (audit/contract/tests — ยังไม่แก้ runtime)
+- **Corrected audit**: `system_configs` เป็น keyed docs — update path filter `{config_key:"main_config"}` → leader doc ภายใต้ key อื่นจะไม่ถูก config save clobber (แก้ claim เดิมที่บอกว่า clobber). เหลือเหตุผล semantic: coordination state ≠ admin configuration + blast radius (config tooling/migration/listing) → ยังเสนอ `botworker_state` singleton `_id:"botworker:leader"`, ไม่มี index เพิ่ม
+- **Two-instance honesty (fixed)**: DB-level tests เรียก `ensureLeadership(ownerId)` ด้วย explicit param — ไม่ rebind global ขณะงานค้าง; integration tests rebind `botworkerRuntime.ownerId` เฉพาะหลัง `settle()`; concurrent absent-acquire ทดสอบด้วย `Promise.all` (fake Mongo enforce `_id` E11000 จริง)
+- **Vacuous M3 (fixed)**: loser ต้อง produced found=0/processed=0/recovered=0/claim writes=0/buffer mutations=0/callBot=0 + leader doc untouched — RED วันนี้ (found=1/processed=1)
+- **Query-counter proof**: ใช้ `state.onQuery` seam ที่มีอยู่ (ครอบทุก op) — loser อนุญาตเฉพาะ `botworker_state`; pin poll+recovery+`botWorkerService.checkWaitTimeouts()` (proposed gated wrapper — workflowEngine→botWorkerService import ตรงจะวน circular dep จึง gate ที่ service surface)
+- **Lease/heartbeat contract pinned**: renew ก่อน expiry token ไม่เพิ่ม · expired takeover token+1 once · heartbeat เกิน lease span รักษา ownership · CAS lose→false · no heartbeat→lapse→takeover · leader loss ไม่ฆ่า in-flight claim work (message fencing เป็น owner) แต่ห้ามรับงานใหม่ · disable/shutdown ฆ่า heartbeat → lease lapse
+- **Rollout limitation (explicit)**: lease คุ้มเฉพาะ worker เวอร์ชันใหม่ — worker เก่าไม่อ่าน leader doc เลย; deployment gate = stop old workers → deploy → verify singleton leader doc → start 1 instance; BW-2 alone หยุด deployed worker เก่าไม่ได้
+- **RED สด**: 48 passed, 14 failed (M0a-f "coordinator contract missing" + M1-M8 real gaps: loser scan found=1, loser recovery stole foreign work=1, takeover ไม่เกิด, acquire-on-entry ไม่มี)
+
+### BW-2 contract final correction (tests/mocks เท่านั้น — runtime ยังไม่แตะ)
+- **onQuery ครบทุก op**: +updateMany/deleteOne/deleteMany/distinct/estimatedDocumentCount/aggregate (นับ attempt แม้ veto/unsupported) — meta-test M-INT พิสูจน์ทุกชนิด, จับ bug READ_OPS ขาด estimatedDocumentCount
+- **M0b แก้**: seed lease now+1000 (< leaderLeaseMs 5000) → renew → owner/token เดิม, newExpiry > oldExpiry และ ≈now+leaderLeaseMs (tolerance 2s)
+- **lifecycle semantics แยกชัด**: leadership loss = หยุด heartbeat + ปฏิเสธ admission ใหม่ (ไม่เรียก clearPendingWork, ไม่ abort in-flight ClaimContext work, รอบถัดไป reacquire ก่อน); disable/shutdown = clearPendingWork → abort era + heartbeat + timers ทั้งหมด
+- **M9 automatic heartbeat** *(superseded — ถูกแทนด้วย recovery-based M9 ใน "contract cleanup รอบสุดท้าย"; poll-acquire ไม่พิสูจน์ recovery path จริง)*: acquire ผ่าน poll → findHook block work-query 260ms (>3× lease 80ms) → heartbeat 20ms renew อัตโนมัติ ~12 beat → mid-block doc ยัง A/token1 → ensure(B)=false → หลัง block owner เดียว (test ไม่เรียก renew เอง)
+- **M10 CAS-loss race**: updateOne/findOneAndUpdateHook flip doc→B กลาง renewal write → CAS miss → A=false → heartbeat ตาย (0 writes หลัง loss) → admission ถัดไป scan 0 work collections
+- **M11 timer cleanup**: test() finally + reset() เรียก clearPendingWork (single stop owner) — post-cleanup sleep>4×heartbeat → 0 writes ใน botworker_state; heartbeat unref
+- **Collection parity**: mock COLLECTIONS + `botworkerState:"botworker_state"` — test/proposal อ้างผ่าน COLLECTIONS เท่านั้น ไม่ hardcode
+- **Naming honesty**: M0d=manual renewal · M1=sequential active-leader/loser (A settle ก่อน B) · concurrency จริงอยู่ M0a เท่านั้น
+- **RED สด**: 49 passed (48 เดิม + M-INT) / 17 failed — M0a-f contract missing, M1-M11 real gaps; sibling suites 59/18/20/37 unchanged, tsc clean
+
+### BW-2 contract cleanup รอบสุดท้าย (test/docs only)
+- **M9 → recovery จริง**: seed stale claim(expired owner A)+buffer row → `recoverStaleBuffers()` as A → findHook block work-query 260ms (lease 80/heartbeat 20, ≥3× margin) → mid-block doc A/token1 + ensure(B)=false (heartbeat renew อัตโนมัติ ~12 beat, test ไม่เรียก renew) → ปล่อย block → recovered=1, callBot=1, claim เดียว finalize owner A
+- **M-INT exact**: `op→bucket` map ตรง — assert reads==Σread-ops, writes==Σwrite-ops (ไม่ใช่ >=N; insertMany→insertOne delegate ระวังนับซ้ำ)
+- **Dedup**: ลบ M0d (manual renewal — ครอบโดย M0b+M9) + M0e (CAS-loss — ครอบโดย M0c+M10); คง M0a/b/c/f + M1-M11
+- **Test count จริง**: 64 tests — 49 pass (48 legacy + M-INT) / 15 RED (contract gaps ทั้งหมด)
+- **Complexity delta**: test file net −46 LOC จากรอบก่อน (ลบ 2 tests ~36 บรรทัด, M-INT rewrite, M9 rewrite)
+- siblings unchanged: 59/18/20/37 · tsc clean · diff-check clean
+
+### BW-2 implementation final round (runtime — รอ review ก่อน commit)
+- **M-INT honesty proof**: controlled mutation สลับ bucket `distinct`↔`updateMany` → RED `op distinct classified as write, want read` → restore → GREEN; baseline กลับ 49/15 ตรง
+- **Coordinator**: `ensureLeadership(ownerId = botworkerRuntime.ownerId)` — `botworker_state` singleton `_id:"botworker:leader"` {owner_id,fencing_token,lease_expires_at,updated_at}; absent→insert token 1 (E11000=loser) · self+active→renew CAS `{_id,owner_id,fencing_token}` ไม่เพิ่ม token · expired→takeover CAS `{+lease<now}` + `$inc token` ครั้งเดียว · foreign/CAS-miss→false · ไม่มี unfenced read-then-update
+- **Heartbeat**: `leaderHeartbeat` timer เดียว (unref, `leaderHeartbeatMs`) — arm หลัง acquire สำเร็จผ่าน `acquireWorkerLeadership()`; CAS-loss→`stopLeaderHeartbeat` ตัวเอง (ไม่ abort in-flight claim work); `clearPendingWork` += stop heartbeat
+- **Gates (3 จุดเท่านั้น)**: `pollNewMessages` + `recoverStaleBuffersAndClaims` + `botWorkerService.checkWaitTimeouts` (bot-worker.ts เรียก wrapper แทน workflowEngine ตรง) — loser = 0 work scan/0 mutation นอก state doc/0 provider call
+- **Ordering regression ที่พบ+แก้**: gate ไว้ *ก่อน* `eraSignal()`/`recoveryInFlight`/`activePolls` registration → waitForInFlight gap (R42) + era resurrect (R43/R51) → ย้าย gate เข้า *ใน* tracked run หลัง eraSignal capture ซิงก์ + เช็ค `signal.aborted` ก่อน/หลัง gate → freshness กลับ 59/59
+- **Runtime delta**: botWorkerService +~120 LOC (coordinator ~80, heartbeat ~20, gates ~10, export ~10) · botworkerRuntime +2 constants (leaderLeaseMs=15000, leaderHeartbeatMs=5000) · config.ts +1 key `botworkerState` · bot-worker.ts −1 import +1 call site · 0 feature flag / 0 index / 0 coordinator ตัวที่สอง
+- **Schema delta**: collection ใหม่ `botworker_state` doc `{_id,owner_id,fencing_token,lease_expires_at,updated_at}` — singleton `_id`, ไม่เพิ่ม index
+- **GREEN สด**: 64/64 (48 legacy + M-INT + 15 contract) · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · `npm run build` ผ่าน · diff-check clean
+- **Rollout invariant (ข้อจำกัด)**: lease คุ้มเฉพาะ worker code ใหม่ — worker เก่าไม่อ่าน leader doc; deploy ต้อง stop old workers ทั้งหมด → deploy → verify singleton → start 1 instance; BW-2 alone หยุด old deployed worker ไม่ได้
+- **Residual risks**: งาน in-flight ของ old-version worker ที่ไม่รู้ lease ยังรันต่อได้จน drain; takeover latency ≤leaderLeaseMs(15s) หลัง leader ตาย; lease clock เพิงพา wall clock ของ Mongo server+client เครื่องเดียว (test=host เดียวกัน)
+
+### BW-2 lifecycle review-fix (2 High + 1 Medium — ownership lifecycle เดียว)
+- **F1 heartbeat ใช้ verb ผิด semantics**: เดิม heartbeat tick เรียก `ensureLeadership()` — renew+takeover+reacquire ปนกัน → stale beat ที่ resume หลัง lease หมดสามารถ takeover เองโดยไม่ผ่าน admission → **แก้**: `ensureLeadership` คืน `LeaderCtx{owner_id,fencing_token}|false`; heartbeat ใช้ `renewLeadership(ctx)` verb ใหม่ — `findOne`→`leaderCtx!==ctx` superseded→true → owner/token mismatch→false → lease expired→false → fenced `updateOne{_id,owner_id,fencing_token,lease>now}` — renew-only ไม่มี takeover path; tick หยุดตัวเองเฉพาะเมื่อ `leaderCtx===ctx` เดิม (superseded ctx ไม่ฆ่า heartbeat ใหม่)
+- **F2 checkWaitTimeouts ไม่มี cancel/drain**: เดิม wrapper เป็น bare `async` — ไม่มี era signal, ไม่ register ใน tracked set → abort กลาง leadership lookup แล้ว engine ยังรัน + heartbeat arm ทับ shutdown + waitForInFlight ไม่รอ → **แก้**: capture `eraSignal()` sync ก่อน await → register `run` เข้า `inFlight` (reuse set เดิม) ก่อน gate → `signal.aborted || !(await acquireWorkerLeadership(signal))` — abort กลาง acquire → return false โดยไม่ arm (heartbeat stop เป็นของ clearPendingWork เท่านั้น — กันยิง heartbeat ของ era ใหม่ที่เพิ่ง arm)
+- **F3 same-process concurrent admission**: poll+recovery ชน absent doc → E11000 loser ได้ false → `acquireWorkerLeadership` ฝั่ง loser ไป `stopLeaderHeartbeat()` ฆ่า heartbeat ที่ winner เพิ่ง arm → lease ไม่ถูกต่อ → **แก้**: E11000/CAS miss → `rereadLeaderForOwner` bounded re-read ครั้งเดียว — winner เป็น ownerId เดียวกัน+active → คืน ctx นั้น (admission สำเร็จ); `false` เหลือเฉพาะ foreign/loss จริง → stop heartbeat ถูกต้อง
+- **RED evidence ก่อนแก้**: 64 pass / 5 fail — M12c (post-cleanup renewal write landed), M13 (engine ran after abort + heartbeat armed + drain ไม่รอ), M14 (heartbeat ถูกฆ่าโดย concurrent loser → lease lapsed) ล้วน RED ตาม design; M12a/M12b ผ่านบน impl เก่า (M12b เพราะ stale `now` capture ก่อน blocked findOne ทำให้ resumed call เห็น foreign doc เป็น active พอดี) — tests ยัง pin semantics ที่ถูกต้องหลังแก้
+- **GREEN หลังแก้**: 69/69 · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · build ผ่าน · diff-check clean
+- **Delta**: botWorkerService +~75 LOC รวม (LeaderCtx/reread/renewLeadership/acquireWorkerLeadership rewrite + 3 gate sites) · test file +5 tests (M12a-c, M13, M14) · 0 collection/flag/index เพิ่ม
+
+### BW-2 final admission-race correction (1 High + 1 Medium)
+- **F1 stale admission clock**: `ensureLeadership` เดิมจับ `now` ก่อน `await findOne` — lease หมดระหว่าง read แต่ stale-now ทำให้เข้า renew branch และ CAS filter `lease>staleNow` match เศษ lease → คืน ctx token เดิม + เขียน expiry ที่ตายแล้ว → **แก้**: ย้าย `now = Date.now()` ไปหลัง findOne — decision+filter+lease_expires_at+updated_at ทุก branch อิง post-read timestamp เดียว (แก้ในฟังก์ชันเดิม ไม่เพิ่ม helper)
+- **F2 stale admission result kills newer heartbeat**: `acquireWorkerLeadership` เดิม `if (!ctx) stopLeaderHeartbeat()` — ผล false ของ op ที่อ่าน stale/foreign view ฆ่า heartbeat ที่ admission ใหม่กว่าเพิ่ง arm (same-process re-acquire ติดตั้ง ctx ref ใหม่) → **แก้**: ลบ stop ออกจาก false path — heartbeat ตายเฉพาะ (a) `renewLeadership` fail (single loss detector) หรือ (b) `clearPendingWork` (single stop owner) — false ของ admission ไม่ใช่หลักฐานว่า armed ctx invalid
+- **RED evidence**: 69 pass / 2 fail (of 71) — M15 (stale-now renew คืน ctx token5 + lease ตายแล้ว แทนที่ takeover token6), M16 (stale B-view false ฆ่า heartbeat{ctx ใหม่} → lease lapsed ทั้งที่ doc ยังของเรา)
+- **M16 timeline**: A poll acquire ctx{A,1}+arm → rebind ownerId=B (loser-view) → op1 poll park ที่ leader findOne → rebind กลับ A → op2 recovery renew→`leaderCtx` ref ใหม่ (same token) → release op1 → read {A,1}=foreign(B)→false → stale false ต้องไม่ฆ่า heartbeat → lease renew ต่อ >150ms, token ค้าง 1, callBot=1
+- **GREEN หลังแก้**: 71/71 · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · build ผ่าน · diff-check clean
+- **Delta**: botWorkerService net +~8 LOC (ย้าย clock + ลบ false-path stop + comments) · test +2 tests (M15, M16) · 0 helper/coordinator เพิ่ม
+
+### BW-2 real-Mongo smoke gate (disposable Docker Mongo 7 — commit 9539f9e verified)
+- **Part 0 env-isolation fix (RED→GREEN)**: `verify-botworker-runtime-mongo.ts::runApply` เดิม `await import("dotenv/config")` — ขัดกฎ no-env-file → ลบออก + rebind strict env ทั้ง 5 ตัวจาก test-local constants เท่านั้น (ADMIN_MONGO_URI=validated loopback, ADMIN_MONGO_DB=verify_<rand>, ADMIN_JWT_SECRET/CHATBOT_INTERNAL_SECRET=`VERIFY_ONLY_*` fixed literals, CHATBOT_BASE_URL_SHOPEE=fake.url) ก่อน dynamic import ทุกตัว; safety suite เปลี่ยน dotenv-ordering pins → env-isolation pins → **110/110**
+- **Round 1 (S1–S6)**: disposable `mongo:7` container `--rm` bind `127.0.0.1:27018:27017` เท่านั้น → `--apply` exit 0, **27/27 PASS**; verdict เดิม `REAL_MONGO_CORE_SMOKE_PASS`
+- **Correction (reviewer)**: S1 loser เป็น **message-claim loser** (E11000 บน `botworker:claim:<mid>`) ไม่ใช่ **worker-leadership loser** — verdict รอบ 1 จึงถูกต้องแค่ core smoke; leadership race ยัง `BW2_REAL_MONGO_LEADERSHIP_RACE_UNPROVEN`
+- **Round 2 (S7–S9 added, TDD RED 7 fails → GREEN 110/110 safety)**: scenarios ใหม่เรียก `svc.ensureLeadership(explicitOwnerId)` ตรง (DB-level CAS จริง, ไม่ rebind process owner, ไม่มี sleep-เลือก-winner, ไม่มี retry)
+  - **S7 concurrent absent acquire = 5/5**: delete singleton → `Promise.all([A,B])` → winner เดียว/loser false · doc=1 · owner=winner · token=1 · fake calls+0
+  - **S8 active renew + foreign reject = 7/7**: winner renew → owner เดิม/token=1/lease เพิ่ม · loser→false · post-loser doc byte-identical (loser เขียน 0) · fake+0
+  - **S9 expired concurrent takeover = 8/8**: fenced expire `matchedCount=1` → `Promise.all([C,D])` → winner เดียว/other false · doc=1 · token=**2** พอดี · lease อนาคต · stale token-1 owner re-call→false · fake+0
+- **Round 2 apply**: exit 0, **S1–S9 = 47/47 PASS**; verdict **`BW2_REAL_MONGO_LEADERSHIP_PASS`**
+- **Cleanup**: harness marker/token-guarded dropDatabase → post-check `getDBNames()` = 0 verify DBs · container `--rm` removed · port 27018 closed · 0 volumes/containers เหลือ
+- **Safety**: worker ไม่เคยเปิด · provider/Python/Shopee calls = **0** (fake `/chat` in-process เท่านั้น, total 4 calls S1–S4) · `.env` ไม่ถูกอ่าน · configured/prod Mongo ไม่ถูกเชื่อม · ไม่มี retry --apply
+
+### BW-4/BW-5 error policy + single outbound concurrency owner (1 High root cause)
+- **Part 0 audit (จากโค้ดจริง)**: outbound bot calls = 3 paths — (a) `processClaimedMessage` direct (no-match → bot), (b) trigger `bot_answer` — ทั้งคู่ผ่าน `acquireBotSlot` ใน botWorkerService, (c) `workflowEngine.let_ai_respond` → `callBot` **ตรง** → limiter ไม่ครอบ (unbounded) · error path ถูกอยู่แล้ว: non-2xx→`bot call failed:<status>`→catch→terminal `bot_failed`, 0 retry owner · carry-forward = `getGroupedHistoryForBot` (failed inbound มาใน history ครั้งเดียว, current ไม่ซ้ำ, consecutive-fail group เป็น 1 turn)
+- **BW-4 (test-only, behavior ถูกอยู่แล้ว)**: suite ใหม่ `test-botworker-error-policy.ts` (hooks redirect เฉพาะ mongoClient+systemConfigService; `botCallService` real; fetch stub นับ call/peak/gate/status/reject/hang) — E1–E9: 429/500/network/timeout→fetch×1+terminal `bot_failed`+0 reply+0 auto-handoff · poll ซ้ำ fetch ค้าง 1 · new inbound→fetch+1, failed inbound ใน history×1, current ไม่ซ้ำ, 2 fails ต่อเนื่อง history bounded · empty answer→handed_off (pin)
+- **BW-5 root cause**: limiter ใน botWorkerService ครอบแค่ call sites ตัวเอง — `let_ai_respond` bypass ทั้งระบบ + queue ไม่รองรับ abort + `releaseBotSlot` admit waiter โดยไม่เช็ค limit ใหม่ → **แก้**: ย้าย limiter ไป `botCallService.callBot` (outbound boundary เดียวที่ทุก path ไหลผ่าน) gate ด้วย `testSource==="botworker"` เท่านั้น — acquire ก่อน fetch + release ใน finally + FIFO waiters ที่ remove ได้ด้วย AbortSignal (abort ก่อน/กลาง queue → ไม่เรียก fetch) + drain อ่าน limit ล่าสุดทุก release (ลด limit กลางคันไม่ admit จน active<limit ใหม่) → ลบ semaphore เดิมทั้งก้อน (ไม่เก็บ 2 ระบบคู่กัน)
+- **RED evidence**: 13/21 pass — C1 fetch=5>limit2 (callBot unlimited) · C3/C4 workflow bypass (2>1, 3>2) · C5 queued call abort ไม่ได้ (stuck) · C6 ownership-loss กลาง queue ยัง fetch=2 · C7 ลด limit แล้ว admit ต่อ (5>3) · C8 fetch=3>1 — ทุกเคสชี้ limiter อยู่ผิด boundary
+- **GREEN**: 21/21 · idempotency 71/71 · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · safety 110/110 · tsc clean · build ผ่าน · diff-check clean
+- **Complexity gate**: concurrency owner ก่อน/หลัง = 1→1 (ครอบคลุม 2/3→3/3 paths) · retry owner provider errors = 0→0 · config/flag/collection/index/module ใหม่ = 0 · shim = 0 (ลบ owner เดิมใน commit เดียว) · non-worker callers ไม่เปลี่ยน (C11 pin)
+- **Delta**: botCallService +limiter ~57 LOC + acquire/release wrap · botWorkerService −limiter ก้อนเดิม+config-read block+call-site wrappers ~65 LOC (diff ใหญ่เพราะ re-indent try/finally) · test files +3 (error-policy + hooks + mocks)
+
+### BW-5 review correction — cancellation threading + fail-stale limiter (3 High + 2 Medium findings)
+- **Review verdict เดิม `BW5_COST_CONCURRENCY_CLOSED` เร็วเกิน** — limiter ถูกย้ายมา boundary จริง แต่ cancellation/timeout/fail-stale contract ยังรั่ว → corrective fix บน HEAD `1ab78bf` (ห้าม amend)
+- **High 1 — workflow AI ไม่มี ownership/timeout signal**: `EngineMessage` ไม่มี `signal` → `let_ai_respond` เรียก `callBot` โดยไม่มี cancellation → queued workflow call ฆ่าไม่ได้ + fetch ไม่มี 90s bound → **แก้**: `EngineMessage.signal` + `engineMsg.signal = claimSignal` + `let_ai_respond` ส่ง `msg.signal` เข้า `callBot` + `checkWaitTimeouts(signal)` thread ถึง `processWaitTimeout` dummy msg (resumed let_ai_respond ตายพร้อม era)
+- **High 2 — kill switch ไม่ถึง claimed work ที่รอ queue**: era signal หยุดที่ launch boundary — `ProcessMessageFn` รับแค่ msg → claimed work ที่ queued ใน limiter ยิง fetch หลัง toggle off → **แก้**: `processMessage(msg, signal?)` combine `AbortSignal.any([era, abortCtrl])` = claimSignal เดียว → `processClaimedMessage`/`engineMsg`/`callBot` queue+fetch · queued waiter ถูก abort-remove → **ไม่ fetch, claim คง `processing`** (recoverable — `bot_cancelled` event แยกจาก provider error) — try ใน `processClaimedMessage` เดิมครอบแค่ trigger+bot → workflow throw หลุด catch ทำ processMessage reject (unhandled rejection crash ใน test) → **ขยาย try ให้ครอบ workflow resume+matchAndRun** = classification point เดียว (aborted→cancelled / else→bot_failed)
+- **High 3 — config read failure อาจ burst เป็น 50**: `getSystemConfig` กลืน DB error → `mergeWithSafety({})` (limit 50) — release เดิมอ่าน fresh+ใช้ตรงๆ → read ล้ม = เพดาน 50 → **แก้**: drain **fail-stale** — read 2 ครั้งเทียบ identity (`cachedConfig` ref เดียวกัน = healthy → fresh limit ใช้ได้ทั้งลด/เพิ่ม; doc ใหม่ = read ไม่เสถียร → `lastAcceptedBotCallLimit`) — ไม่เพิ่ม config owner
+- **Medium 1 — C6 strict**: `P2_STUCK_IN_QUEUE` เดิมยอมรับ → เปลี่ยนเป็น fail ทันที (waiter ต้อง settle, ไม่ fetch, ไม่ finalize stale claim)
+- **Medium 2 — C3/C4 exact workflow pin**: assert `workflow_actioned`/run doc/`WF_PROMPT_MARKER` ใน request body — direct fallback ผ่าน test ไม่ได้
+- **RED (pre-fix, D-series เพิ่มใน suite เดิม)**: D1 workflow queued+ownership loss → `P2_STUCK`/fetch+finalize · D2 hang ไม่มี timeout → slot รั่วถาวร (contaminate test ถัดไป — ย้ายไปรันท้าย) · D3/D4 falling edge กลาง queue → `fetch=2` (claimed work ยิงหลัง kill switch) · D5 configError → `fetch=3` (drain burst ผ่าน fallback)
+- **GREEN หลังแก้**: error-policy **26/26** (E1–E9 + C1–C12 + D1–D5) · idempotency 71/71 · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · safety 110/110 · dry-run exit 0 · tsc clean · build ผ่าน · diff-check clean · provider calls=0, worker=0, real Mongo=0, `.env` read=0
+- **Complexity gate**: concurrency owner=1 (callBot) · kill-switch owner=1 (`clearPendingWork`→eraAbort) · cancellation classifier=1 (catch เดียว) · timeout composer=1 (callBot fetchSignal, `botCallSignal` helper ใน worker ถูกลบ) · provider retry owner=0 · config/flag/collection/index/module ใหม่=0 (`bot_cancelled` = 1 union member ใน event type เดิม — ไม่ใช่ schema ใหม่)
+- **Residual**: `botCallTimeoutMs`=90s real ในโปรดักชัน (D2 ใช้ runtime override 80ms); recovery ของ claim ที่ cancelled ขึ้นกับ rising-edge เดิม (ไม่เปลี่ยน); drain identity-check พึ่ง `cachedConfig` ref — ถ้า getSystemConfig เปลี่ยนเป็น non-cached ต้อง revisit (pin ไว้ในคอมเมนต์โค้ด)
+
+### BW-5 final corrective fix — config health owner + post-response fence + wait-timeout rollback (3 High findings, corrective commits ต่อ `250a960`)
+- **F1 config failure burst ที่ admission**: `getSystemConfig` กลืน DB error → fresh fallback doc (limit=50) ทุก call → callBot เขียนทับ `lastAcceptedBotCallLimit` ก่อน acquire — identity check `a===b` กันเฉพาะ drain → **แก้**: `systemConfigService` เป็น last-known-good owner จุดเดียว — read ล้ม+เคยสำเร็จ → คืน `cachedConfig` เดิม; cold-start ล้ม → `{...mergeWithSafety({}), bot_concurrency_limit:1}` fail-closed · `callBot` ลบ `lastAcceptedBotCallLimit`+double-read identity check — admission+drain ใช้ contract เดียวจาก owner (admission: `confLimit>0 ? confLimit : 1`; drain: อ่านค่าเดียว ไม่เชื่อตัวเลข fallback)
+- **F2 kill-switch post-response race**: หลัง `callBot` resolve เช็คแค่ `ctx.lost` — era abort หลัง provider success ก่อน `finalizeClaims` ยัง finalize ได้ → **แก้**: fence เดียวที่ `processMessage` — `res.outcome && !ctx.lost && !claimSignal.aborted` → claim คง `processing` (recoverable); deterministic evidence (shadow_replies/run result) ที่ persist ไปแล้วถูก recovery reuse — ไม่เรียก provider ซ้ำ · ไม่เพิ่ม guard ทุก branch
+- **F3 wait-timeout abort→failRun**: outer `checkWaitTimeouts` catch ทุก error → `failRun(run)` ด้วย stale snapshot — fenced run (token mismatch) CAS miss → ค้าง `running` (scanner มองไม่เห็น); legacy/unfenced → `errored` terminal → **แก้**: `processWaitTimeout` (owner เดียว ถือ acquired ctx) — era abort ก่อน/กลางเดิน → `restoreWaitPark` fenced write คืน `waiting_for_reply` + preserve `wait_started_at`/`wait_node_id`/`waiting_for`/`current_node_id`/`wait_retry_count` (CAS miss = owner ใหม่ reclaim แล้ว → ไม่เขียนทับ) · outer catch แยก `signal.aborted` → continue (real error ยัง `failRun` เดิม)
+- **Test-infra**: fake-mongo `onQuery` เป็น awaitable (13 sites — pause gate ที่ persist boundary); mock `getSystemConfig` เปลี่ยนจาก throw → production-faithful contract (healthy: snapshot เป็น lastGood; error: `lastGood ?? fail-closed-1`) — RED run ชั่วคราวใช้ fresh-50 fallback model ตรง production เดิม
+- **RED evidence (pre-fix, 26/32)**: D6 `fetch=4` (admission ยึด fresh-50) · D7 `fetch=3` (cold-start admit 50) · D8 `claim=bot_answered` (finalize หลัง kill switch) · D9 `claim=workflow_actioned` · D10 `run.status=running` (fenced — failRun stale-token CAS miss) · D11 `run.status=errored` (legacy — unfenced failRun)
+- **GREEN หลังแก้**: error-policy **32/32** (E1–E9, C1–C12, D1–D11) · idempotency 71/71 · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · safety 110/110 · tsc clean · build ผ่าน · diff-check clean · provider calls=0 · worker=0 · real Mongo=0 · `.env`=0
+- **Owners หลังแก้**: config last-known-good = `systemConfigService` 1 จุด (`cachedConfig` เดิม — ไม่มี cache ซ้ำ) · outbound concurrency = `callBot` 1 จุด · kill switch = `clearPendingWork`→`eraAbort` 1 จุด · claim finalization fence = `processMessage` 1 จุด · wait-timeout rollback = `processWaitTimeout` 1 จุด · provider retry = 0 · object-identity health check = 0 · flags/config/collection/index ใหม่ = 0
+- **Delta**: systemConfigService +4 (catch คืน last-good/fail-closed) · botCallService −15 net (ลบ lastAccepted+identity check) · botWorkerService +1 condition · workflowEngine +~25 (restoreWaitPark closure + try/catch wrap + outer abort-skip) · tests +6 (D6–D11) + helpers (`pauseQuery`/`waitFor`) + fake-mongo await hook
+- **Residual**: era abort ระหว่าง persist writes อื่น (ไม่ใช่ reply evidence) ยังขึ้นกับ recovery เดิม; wait-timeout path ไม่ persist delivered ลง shadow_replies (contract เดิม — ไม่เปลี่ยน); legacy run abort → rollback ผ่าน acquired doc (acquire ใส่ owner ให้) — ไม่ใช่ fenced guarantee ของ run เดิม
+- **Verdict correction**: `BW5_COST_CONCURRENCY_CLOSED` รอบก่อนประกาศเร็ว — รอบนี้ปิดจริงหลัง 3 findings แก้+GREEN ครบ; `BW6_PREDEPLOY_READY` ยังถือว่า mock-verified เท่านั้น — canary/deploy ยังไม่ได้ทำ
+
+### BW-5 final root-cause correction (4 findings จาก reviewer, corrective commits ต่อ `2fbbe83`)
+- **A config failure → fail-closed field policy**: `getSystemConfig` เดิมคืน `cachedConfig` ทั้งก้อนตอน read ล้ม — `bot_worker_enabled`/`workflow_enabled`/`shadow_bot_enabled` stale-true → worker ทำงานต่อกลาง Mongo outage → **แก้**: warm-cache failure คืน projection ของ cached — enable switches 7 ตัว (`bot_worker_enabled`/`bot_buffer_enabled`/`workflow_enabled`/`shadow_bot_enabled`/`mock_mode_enabled`/`grouped_retrieval_shadow_enabled`/`grouped_retrieval_selection_enabled`) = false เสมอ, limits/windows/URLs/engine fields fail-stale (last-validated — `bot_concurrency_limit` คงค่า), cold-start = `{...mergeWithSafety({}), bot_concurrency_limit:1}` · cache owner ยัง 1 จุด
+- **B stale fencing context ใน timeout error path**: outer `checkWaitTimeouts` catch → `failRun(run)` ด้วย snapshot ก่อน acquire — `processWaitTimeout` ได้ token ใหม่แล้ว → CAS miss → run ค้าง `running` → **แก้**: `processWaitTimeout` (owner เดียว) → `Promise<boolean>` — non-abort error หลัง acquire → `failRun(acquired)` ด้วย fencing ปัจจุบัน; outer catch เหลือ log-only (ห้าม terminal write ด้วย stale snapshot)
+- **C abort boundary**: pre-aborted signal เดิมยัง acquire+restore (writes) และ loop เดินต่อ → **แก้**: `signal.aborted` check ก่อน `acquireRun` (zero write) + loop-top `break` (abort ระหว่าง → ไม่แตะ candidate ถัดไป) + `processed` นับเฉพาะ return true (จัดการจริง) — boundary เดียว ไม่มี guard ซ้อน
+- **D production-faithful config tests**: suite ใหม่ `test-botworker-config-failclosed.ts` (hooks redirect เฉพาะ `mongoClient` — `systemConfigService` = production จริง) — module-cache separation ซื่อสัตย์ด้วย case ordering (cold-start รันก่อน healthy) · F1 cold-start outage → worker=false+limit=1 · F2 healthy → DB fields จริง · F3 warm outage → switches false + limit last-validated · F4 recovery → ค่าจริงกลับ · mock contract ใน error-policy-mocks อัปเดตตาม (switches fail-closed + `lastGoodConfig?.limit ?? 1`)
+- **RED evidence (pre-fix)**: F3 `shadow_bot_enabled=true` stale กลาง outage (suite ใหม่ — `bot_worker_enabled` ก็ stale เช่นกัน) · D12 `processed=1` + runWrites>0 (pre-aborted ยัง acquire/restore) · D13 `run_b token=6` (abort แล้วยัง acquire candidate ถัดไป) · D14 `run.status=running` (provider-500 post-acquire → failRun stale-token CAS miss)
+- **GREEN หลังแก้**: error-policy **35/35** (E1–E9, C1–C12, D1–D14) · config-failclosed **4/4** · idempotency 71/71 · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · build ผ่าน · diff-check clean · provider=0 · worker=0 · real Mongo=0 · `.env`=0
+- **Delta**: systemConfigService +14 (fail-closed projection + policy comment) · workflowEngine +~25 (boolean return + pre-acquire check + loop break + inner failRun − outer stale-failRun − throw) · mocks +12 (contract mirror) · test +3 files (config suite) + D12–D14 + shared seed helpers (ลบ dup ใน D10/D11) · helpers runtime +0 · branches runtime +2/−2 net ~0 · owners: cache=1, timeout-transition=1, abort boundary=1 · flags/collections/modules ใหม่ = 0
+- **Residual**: `restoreWaitPark`/`failRun(acquired)` throw → outer log-only catch (DB write fail อยู่แล้ว — run ค้าง running จน lease expiry + recovery เดิม) · wait-timeout path ไม่ persist delivered ลง shadow_replies (contract เดิม) · `processMessage` finalize fence เดิม (era abort หลัง evidence persist) ไม่เปลี่ยน
+- **Readiness wording ที่แก้**: BW-5 ปิดได้เฉพาะหลัง production config suite + timeout races ผ่าน (รอบนี้ผ่านแล้ว) · BW-6 ยังไม่ deploy/canary — mock/fake-Mongo verified เท่านั้น
+
+### BW-5 final closure correction (1 High + 2 Medium, corrective commits ต่อ `b189357`)
+- **A cold-start outage อ่าน switches จาก env (High)**: cold-start catch คืน `{...mergeWithSafety({}), limit:1}` — `mergeWithSafety({})` → `getSafeDefaults()` อ่าน `BOT_WORKER_ENABLED`/`MOCK_MODE_ENABLED`/`SHADOW_BOT_ENABLED`/`BOT_BUFFER_ENABLED`/`WORKFLOW_ENABLED`/`USE_GROUPED_RETRIEVAL_SHADOW`/`USE_GROUPED_RETRIEVAL_SELECTION` จาก env (call-time) → env=true → switches true กลาง outage → **แก้**: `FAIL_CLOSED_SWITCHES` const object เดียวใน owner — warm=`{...cachedConfig, ...FAIL_CLOSED_SWITCHES}`, cold=`{...mergeWithSafety({}), ...FAIL_CLOSED_SWITCHES, bot_concurrency_limit:1}` — policy เดียวกันทั้งสอง failure path, healthy env-fallback ไม่เปลี่ยน
+- **B abort ระหว่าง getWorkflow await ยังเขียน cancel (Medium)**: loop-top check มีแล้วแต่ abort ลงกลาง `await getWorkflow` + lookup→null → `cancelIfAbandoned` ยัง updateOne `status:cancelled` → **แก้**: `signal.aborted` check อันเดียวหลัง await ก่อน write branch → break (boundary เดิม ไม่เพิ่ม guard ที่ call sites)
+- **C processed เกินจริงเมื่อ failRun CAS แพ้ (Medium)**: `failRun` คืน boolean อยู่แล้วแต่ caller ไม่ส่งต่อ — `await failRun(acquired); return true` → terminal CAS miss (foreign reclaim) ยังนับ handled → **แก้**: `return await failRun(acquired, ...)` ทั้ง wait-node-missing branch และ non-abort catch — true เฉพาะ terminal write สำเร็จ
+- **RED evidence (pre-fix, จริง)**: F1 `mock_mode_enabled=true` (env-true leak บน cold-start — เซ็ต 7 env vars ก่อน import) · D15 `workflow_runs writes=1` (abort กลาง parked findOneHook workflows → lookup→null → cancel write ยังทำ) · D16 `processed=1` (updateOneHook flip owner/token ก่อน errored write → CAS miss แต่ยังนับ)
+- **GREEN หลังแก้**: config-failclosed **4/4** (F1 cold env-true→all false+limit1 · F2 healthy+pin env-fallback `mock_mode_enabled=true` เมื่อ DB absent · F3 warm→switches false+limit คง · F4 recovery) · error-policy **37/37** (D1–D16) · idempotency 71/71 · freshness 59/59 · checkpoint 18/18 · boundary 20/20 · races 37/37 · tsc clean · build ผ่าน · diff-check clean
+- **Delta**: systemConfigService +13/−10 (FAIL_CLOSED_SWITCHES const — ลบ inline 7-key list ซ้ำระหว่าง warm/cold) · workflowEngine +9/−6 (post-await abort check +3, failRun-result returns) · helpers runtime +0 (const object ไม่ใช่ fn — ลด dup จริง) · branches +1 (post-lookup check) · owners: cache=1 / transition=1 / abort boundary=1 · flags/collections/modules = 0
+- **Test-infra**: config suite เซ็ต env switches=true ก่อน dynamic import (honest cold-start) · error-policy mocks เพิ่ม `findOneHook`/`updateOneHook` keys ใน state literal (tsc) · note: tsc incremental cache (`tsconfig.tsbuildinfo`) stale เคยหนึ่งครั้ง — ลบแล้วรันใหม่ clean
+- **Residual**: wait-node-missing `failRun` branch เป็น defensive (unreachable ผ่าน checkWaitTimeouts — outer filter require current_node_id=wait node) — fix ใส่ไว้ symmetric · abort ระหว่าง `coll.find(candidates)`/`logAdminEvent` ไม่มี write-run side effect (find=read, log=audit เท่านั้น) · era abort หลัง completeRun เริ่มเขียนแล้ว = contract เดิม
+- **Readiness**: BW-5 ปิดด้วย production config suite + timeout/accounting races ผ่านจริง · BW-6 ยังไม่ deploy/canary
+
+### BW-6 preflight G2+G3 (approved เฉพาะ G2+G3 — G4 ยังไม่อนุมัติ)
+- **G2 real-Mongo smoke PASS — `47/47` exit 0 รันเดียว บน HEAD `f316cdb`**: disposable `mongo:7` (image `1f995ad6fdb9` เดิม ไม่ pull) `--rm` bind `127.0.0.1:27018` เท่านั้น, ไม่มี volume/credentials — S1 claim idempotency+single reply · S2 buffered merge+row delete · S3 `bot_failed`+no re-invoke · S4 retry history-once · S5 stale→`no_action`+`stale_at_recovery` · S6 outcome preserved · S7 concurrent acquire winner เดียว/token=1 · S8 renew+foreign reject+doc byte-identical · S9 fenced takeover token=2+stale refused — `BOTWORKER_REAL_MONGO_SMOKE` token + loopback URI เท่านั้น, fake `/chat`, provider=0, worker=0
+- **G2 cleanup verified**: harness drop `botworker_runtime_verify_*` เอง → mongosh `getDBNames` กรอง verify = 0 DBs · `docker stop` + `--rm` → `ps -a` = 0 containers · port 27018 = 0 listeners
+- **G3 canary plan docs-only**: `docs/plans/botworker-canary-plan.md` — proven-vs-unproven matrix, staged enable (Stage 0 dry config `limit=1`/`workflow_enabled=false` → Stage A single-shop 30min obs → Stage B ramp 3+workflow 60min → Stage C ≥24h), success/failure criteria, dup-detection queries (`shadow_replies.inbound_message_id` unique, `chat_processing` claims, `admin_logs`, `botworker_state` lease), 429/500 monitoring, cost ceiling (limit=hard cap, calls ≤ inbound), kill switch 2 ระดับ (DB toggle ≤~7s / `compose stop`), rollback (claims processing → recovered next era, no data cleanup), pre-enable checklist — collection/field names verify จาก config.ts จริง
+- **ไม่แตะ**: runtime, worker, deploy, canary จริง, `.env`, push/PR — uncommitted doc รอ review
+
+### BW-6 G3 canary plan correction (docs-only, HEAD `f316cdb` — uncommitted รอ review)
+- **Review findings → fixed ใน `docs/plans/botworker-canary-plan.md`**:
+  - **single-shop ไม่จริง**: `pollNewMessagesInEra` query `{role:user, direction:in, created_timestamp>since}` ไม่มี `shop_id` filter (verify line 1418) → plan แยก 2 modes: **A isolated env/DB** (recommended — shop scope จริงเพราะ data มีแค่ test shop) vs **B production-global** (ทุก shop post-edge eligible — `limit=1` จำกัด concurrent calls เท่านั้น ไม่จำกัดร้าน/total calls; ต้อง pre-compute worst-case spend จาก inbound rate) — shop allowlist runtime อยู่นอก scope docs-only
+  - **cost ceiling ไม่ hard**: limit ≠ ceiling → mandatory values table (`EXECUTION_MODE`/`MAX_CANARY_DURATION_MINUTES`/`MAX_PROVIDER_CALLS`/`MAX_PROVIDER_COST_USD`/`OBSERVER_OWNER`/`ABORT_AUTHORITY`/`CANARY_START_TS`/`FORCED_STOP_TS` — ทุกช่อง `MUST_SET_BEFORE_G4` ห้าม invent) + hard-stop contract: provider-side budget/counter ที่เชื่อถือได้ หรือ G4=BLOCKED + wall-clock forced stop
+  - **workflow calls อาจ > inbound**: Stage A `workflow_enabled=false` คง ≤1 call/claimed turn; Stage B ต้องนับ calls ฝั่ง provider จริง ห้าม derive จาก inbound
+  - **shadow_replies ไม่พิสูจน์ calls หยุด**: 429/500/timeout ไม่มี reply doc → rollback verify = process state + worker logs + **provider dashboard (primary)** + claims/admin_logs supporting
+  - **emergency order แยก 2 กรณี**: normal = DB toggle→paused confirm→stop; cost spike = `compose stop` ก่อน→DB toggle ก่อน restart→verify process+provider activity
+  - **monitoring**: queries window-scoped (`CANARY_START`) + origin worker, 429/500 ดู 3 แหล่ง, cost criterion = ตัวเลขก่อน G4
+- **Gate**: G1 PASS · G2 PASS 47/47 (หลักฐานเดิมคงไว้ข้างบน) · G3 READY_FOR_REVIEW · **G4 BLOCKED_BY_MODE_AND_COST_LIMIT_APPROVAL** · G5 NOT APPROVED
+- **Uncommitted**: `docs/plans/botworker-canary-plan.md` (rewrite) + log นี้ — ห้าม stage จน review ผ่าน
+
+### BW-6 G3 final safety correction (docs-only, HEAD `f316cdb` — uncommitted รอ review)
+- **5 findings fixed ใน canary plan** (หลักฐาน G2 คงไว้ด้านบน ไม่รันซ้ำ):
+  - **High1 counter≠hard stop**: §4.1 บังคับ enforcement จริง — provider-enforced hard budget/rate cap (reject calls เมื่อชนเพดาน) หรือ automated supervisor อ่าน authoritative usage→`compose stop` เมื่อแตะ MAX_*; manual observer=monitoring เท่านั้น; ไม่มี→`BLOCKED_BY_MISSING_AUTOMATED_COST_STOP` + review evidence: mechanism owner/threshold/armed proof/stop action/usage-API-down behavior
+  - **High2 callBot≠provider call**: terminology §1 — worker request=HTTP `/chat`→Python, provider call=upstream OpenRouter/Gemini/search/model ใน Python (1 request อาจหลาย calls); Stage A พิสูจน์แค่ ≤1 **worker request**/turn ไม่ใช่ provider call; `MAX_PROVIDER_*` อ่าน provider-side usage เท่านั้น ห้าม derive จาก claims/inbound/callBot/shadow_replies; Mode B worst-case ต้อง `PROVIDER_COST_PER_CHAT_P95_USD` วัดจริง ไม่มี→BLOCKED
+  - **Med3 forced stop enforcement**: `FORCED_STOP_TS` เดียวไม่พอ → `FORCED_STOP_MECHANISM`+`OWNER`+`ARMED_AT` keys + armed proof + exact stop action + scheduler-fail fallback (cost-stop ยังตัด + observer hard-stop); ไม่ invent command ใช้ `MUST_SET_BEFORE_G4`
+  - **Med4 dup query origin filter**: verify `origin:"worker"|"workflow"`+`mode:"standalone"` (botWorkerService:472/538) + `__wf<N>` suffix — query ตรวจ same-identity dup เท่านั้น (multi workflow deliveries=ตั้งใจ)
+  - **Med5 mandatory thresholds**: เพิ่ม `MAX_BOT_FAILED_RATE_PERCENT`/`MAX_CONSECUTIVE_429`/`MAX_CONSECUTIVE_5XX`/`PROVIDER_COST_PER_CHAT_P95_USD`/`FORCED_STOP_MECHANISM`/`OWNER`/`ARMED_AT`/`COST_STOP_MECHANISM`/`ARMED_AT` — ทุกช่อง `MUST_SET_BEFORE_G4`, criteria อ้าง key ตรงๆ
+- **Gate**: `G4 = BLOCKED_BY_EXECUTION_MODE_AND_ENFORCED_LIMITS` (ปลดเมื่อ mode+thresholds+cost-per-chat+armed cost stop+armed forced stop+owners+rollback reviewed+explicit approval ครบ) · G5 NOT APPROVED
+- **Uncommitted**: plan rewrite + log นี้ — ห้าม stage จน review ผ่าน
+
+### BW-6 G3 cleanup — review passed, 2 จุดแก้เพิ่ม (docs-only, HEAD `f316cdb`)
+- **`COST_STOP_OWNER`** เพิ่มใน mandatory table (`MUST_SET_BEFORE_G4`) + อ้างตรงใน §4.1 evidence/checklist/G4 unblock — เจ้าของกลไก cost-stop จริง ห้ามแทนด้วย `OBSERVER_OWNER`/`ABORT_AUTHORITY` (คนละหน้าที่)
+- **p95 ≠ worst-case**: เปลี่ยน "worst-case spend" → **planned spend estimate (p95-based)** — สูตร `inbound_rate × PROVIDER_COST_PER_CHAT_P95_USD × duration` ใช้วางแผนเท่านั้น tail cost อาจเกิน; ตัวจำกัดจริง = `COST_STOP_MECHANISM` + provider-enforced limit
+- **G3 review ผ่าน → commit** `docs: add botworker canary safety gate` · G4 ยัง `BLOCKED_BY_EXECUTION_MODE_AND_ENFORCED_LIMITS` — ไม่ได้เปิด worker/deploy/canary
+
+### 2026-10-09 — Botworker intentional pause checkpoint
+- **สถานะ**: พักงาน Botworker โดยตั้งใจหลัง G1 fake/static PASS, G2 real-Mongo PASS 47/47 และ G3 canary safety plan commit `04f0e10`; worker ยังปิด, ไม่มี deploy/canary/push ใน checkpoint นี้
+- **งานที่เหลือก่อนปิด Botworker ทางเทคนิค**: Mode A end-to-end บน isolated environment/DB พร้อม enforced cost/time stop; ถ้าผ่านให้ถือว่างานโค้ด Botworker ปิดได้
+- **งานที่เหลือก่อน production rollout**: Mode B production-global canary (runtime ปัจจุบันไม่มี `shop_id` allowlist) หลังเลือก execution mode, กำหนด thresholds/cost-per-chat, arm automated cost stop + forced stop และได้รับอนุมัติ G4 แยกต่างหาก
+- **Gate ปัจจุบัน**: `G3_APPROVED_AND_COMMITTED` · `G4_BLOCKED_BY_EXECUTION_MODE_AND_ENFORCED_LIMITS` · `G5_NOT_APPROVED`
+- **ห้ามทำต่ออัตโนมัติ**: ห้ามเปิด/รัน botworker, deploy หรือ provider canary จนผู้ใช้กลับมาอนุมัติงาน Botworker โดยตรง
+
+### 2026-10-09 — Current-system architecture/root-cause audit (กำลังทำ, read-only)
+- **ขอบเขต**: เก็บและตรวจปัญหา 21 ข้อจากผู้ใช้เทียบกับ code/runtime owners, README, SRS/SSD, function/process, schema, plans, waythrough ทั้งสองไฟล์ และ git history จริง
+- **เป้าหมาย**: ระบุว่างานอยู่จุดไหน, behavior ใดใช้งานจริง/shadow/contract/dead, owner ที่ซ้ำกัน, root cause ของ hardcode/guard/helper/fallback ที่เพิ่มไม่จบ และ requirement mismatch โดยยังไม่ออกแบบ architecture ใหม่
+- **ข้อห้ามรอบนี้**: audit/docs only; ไม่แก้ runtime, ไม่เปิด botworker, ไม่เรียก provider, ไม่อ่าน `.env`/secret, ไม่ stage/commit/push/deploy
+- **หลักฐานแรก**: production default ยังเข้า legacy `_chat_impl`; `turn_decision` เป็น shadow-only; grouped selection เป็น flag-gated และ merge ทับบน base products; assignment ไม่มี load cap แต่ยังกรอง `is_accepting_chats` และมี pending/no-available path ซึ่งต้องเทียบ requirement ล่าสุดแยกต่างหาก
+
+### 2026-10-09 — Current-system architecture/root-cause audit (อ่านครบและบันทึกผลแล้ว)
+- **Artifact**: `docs/plans/2026-10-09-current-system-architecture-audit.md` — snapshot ข้อเท็จจริงของระบบปัจจุบัน, runtime/data map, root causes 9 กลุ่ม, mapping ปัญหา 21 ข้อ, requirement alignment, Phase 2A/2B status และข้อห้ามก่อน redesign; ไม่ใช่ implementation plan
+- **Critical handoff defect**: `app.py` no-product branch ตั้ง `handoff_to_admin=True` โดยไม่เรียก `_send_handoff`; `guards.enforce` เห็น flag แล้ว return; `_send_handoff` เองคืน `{}` เมื่อ fail และ callers หลายจุดไม่ได้ตรวจ success — desired action ถูกใช้แทน completed side effect
+- **Decision ownership**: production default = legacy 5,223 LOC; v2/v3 ยัง request/env-selectable; TurnDecision shadow-only; grouped retrieval เป็น augmentation merge; workflow→trigger→chatbot เพิ่ม decision stack หน้า Python อีกชั้น
+- **Lifecycle mismatch**: conversation close/ownership ถูกใช้ปน claim resolution; Phase 2A tests/audit มีแล้ว แต่ Phase 2B/2C replacement runtime ยังไม่เริ่ม และ explicit claim-resolution event ยังไม่มี
+- **KPI defect**: `response_rate_10min` ใช้ reply/message count หาร conversation count จึงเกิน 100% ได้ตามสูตร; `resolved=total-closed` ก็ไม่ใช่ business-resolution contract ที่ชัด
+- **Platform gap**: Shopee เท่านั้นที่มี chatbot runtime; Lazada/TikTok package ว่าง แม้ compose ระบุ collection/port แล้ว; order adapter ปัจจุบันเป็น collection เดียว default `ShpOrders`
+- **Complexity cause**: add-first/no-retirement, หลาย decision/evidence/answer owners, branch-local LLM/context merges, keyword เป็น flow control, tests pin incidents มากกว่า owner deletion, docs หลาย time layers
+- **Safety**: runtime/tests/config ไม่เปลี่ยน; worker/provider/Mongo/`.env` = 0; ไม่มี stage/commit/push/deploy; unrelated leftovers ไม่แตะ
+- **Exhaustive scope clarification**: inventory ครอบ product-owned source/routes/services/scripts/tests/contracts/plans/docs ทั้ง repo (Shopee 54 files, backend 52, API routes 99, Python test/audit 93, TS script tests 32); generated replay ดู schema+aggregate+representative failures, binary/vendor/cache ไม่นับเป็น architecture evidence, `.env*`/secret ไม่อ่าน
+- **Evidence-quality correction**: stored results ไม่ใช่ baseline เดียว — test-200 = HTTP 401 ทั้ง 220 rows (ใช้วัด quality ไม่ได้), comprehensive เก่า 359/385 คนละ evaluator, OpenRouter shadow 18 cases เฉลี่ย ~34.9k tokens/$0.014/11.25s, e2e 12 casesเฉลี่ย 9.73s max 36.3s
+- **Additional code defects**: dashboard return ก่อน cache population (unreachable cache); metric/status บาง route ยังอ่าน raw conversations ทั้งที่ ticket owner คือ status_conversation; order/tracking lookup ถอด shop filter เมื่อ scoped miss; TestChatClient มี workflow/trigger orchestration ซ้ำ; canonical UNLIST sibling exception ยังไม่มี owner เดียว
+- **Disposition**: keep availability resolver + unit/live join + evidence/OCR/history + workflow/assignment/botworker primitives; migrate legacy/trigger/selection/guards ไป owner เดียว; remove v2/v3 พร้อม callers/config/UI/tests ไม่ใช่ comment; แผนแรกที่เสนอ = state axes + typed handoff command/result ก่อน retrieval redesign
+
+### 2026-10-09 — Rebaseline Phase 2 plan revision (กำลังทำ, docs-only)
+- **การตัดสินใจของผู้ใช้**: แก้แผนเดิม `2026-09-30-legacy-shopee-unified-turn-evidence-retrieval-rebaseline-plan.md` ในที่เดิม ไม่สร้างแผนคู่ขนาน; สิ่งที่พิสูจน์แล้วและดีกว่าให้เก็บ
+- **ขอบเขต revision**: freeze Phase 2A เป็น evidence baseline; แก้ Phase 2B ให้ครอบ state axes + claim episode + verified handoff command/result + explicit admin-side claim outcome; แก้ Phase 2C ให้ TurnPlan multi-need มาก่อน authoritative subject set
+- **หลัก complexity**: migrate+delete ใน commit เดียว, ห้าม keyword/flag/shim/owner ใหม่แบบค้างคู่, v2/v3 frozen for deletion ไม่รับ semantic fix, botworker paused และอยู่นอก scope
+- **ข้อห้ามรอบนี้**: docs/plan only; ไม่แก้ runtime/tests/config, ไม่เปิด worker, ไม่เรียก provider/Mongo, ไม่อ่าน `.env`, ไม่ stage/commit/push/deploy
+
+### 2026-10-09 — Rebaseline Phase 2 plan revision (เสร็จ รอ review)
+- **แก้ไฟล์เดิม ไม่สร้าง plan ใหม่**: `docs/plans/2026-09-30-legacy-shopee-unified-turn-evidence-retrieval-rebaseline-plan.md` เป็น roadmap หลักต่อ; link spec ไป architecture audit 2026-10-09
+- **Phase 1/2A**: Phase 1 ระบุใหม่ให้ตรงของจริงว่า pure one-action shadow baseline เท่านั้น; Phase 2A freeze/accepted ที่ commit `37f6d30`, ห้ามเพิ่ม tests แทนการ implement
+- **Phase 2B revision**: 7 replacement commits — ownership transport จาก `status_conversation`; typed `assigned|queued|failed` handoff; Python result boundary; episode-aware claim lifecycle; ticket-close ไม่ clear claim; explicit admin `resolved|cancelled` claim outcome แยกจาก close/resolve conversation; residual deletion gate
+- **Phase 2C revision**: evolve `turn_decision.py` in place เป็น `TurnPlan.needs[]`; persisted `ConversationSubjectSet`; migrate compare/price/link/compat แล้วลบ app-local owner blocks; ห้าม `turn_policy.py`/subject module คู่ขนาน
+- **เก็บของดี**: availability/unit live join/evidence/OCR/history/workflow/assignment/botworker primitives; v2/v3 frozen for deletion; botworker paused/out of scope
+- **Complexity gates**: semantic keyword/rollout flag/long-lived shim ใหม่ = 0 ใน 2B/2C; owner count ต้องลด; migrated branch ลบ commit เดียว; refactor-only runtime net LOC <= 0
+- **Self-review corrections**: production ticket state pin ไป `status_conversation`; `queued` ต้อง persist `status=pending` และหยุด bot; failed ห้ามทิ้ง transient reopen; production claim metadata ย้ายออกจาก raw conversations; claim outcome ใช้ dedicated API/UI action ไม่ reuse close/resolve; `.env*` ห้ามอ่านใน plan
+- **Verification**: docs-only `git diff --check` clean; runtime/tests/config diff จากรอบนี้ = 0; worker/provider/Mongo = 0; ไม่มี stage/commit/push/deploy; unrelated leftovers ไม่แตะ
+- **Next gate**: รอ user review revision นี้; ถ้าอนุมัติ เริ่ม Phase 2B.1 ด้วย RED tests ก่อน implementation
+
+### 2026-10-09 — Rebaseline accepted + 2026-10-16 delivery checkpoint
+- **User decision**: รับ revised roadmap และผลลัพธ์ปลายทางที่รักษา anchor item, follow-up, history, `units.py`, live availability และ image/OCR/cert evidence; อนุมัติให้เริ่ม implementation ตามลำดับเดิม ไม่สร้าง roadmap คู่ขนาน
+- **Deadline**: เป้าหมาย 2026-10-16 = legacy Shopee core review/PR-ready ไม่ใช่ production deploy และไม่รวม Lazada/TikTok runtime, workflow-editor UX, KPI/rating redesign, botworker production canary หรือ production observation
+- **Definition of done**: Phase 2B state/handoff/claim truth + Phase 2C multi-need/subject continuity + one migrated candidate-pool/selection path; comparison/compat/stock/cert/warranty/troubleshooting/handoff ผ่าน `chat()` evidence; รายงาน quality/calls/latency/tokens/cost/owner count/direct writers/LOC; migrated legacy/shadow owner ลบใน commit เดียว
+- **Schedule**: 10 ต.ค. 2B.1-2B.3 · 11 ต.ค. 2B.4-2B.6 · 12 ต.ค. 2B.7+2C.1 · 13 ต.ค. 2C.2-2C.3 · 14 ต.ค. retrieval ownership · 15 ต.ค. quality/performance replay · 16 ต.ค. full regression/deletion audit/docs/PR readiness
+- **Safety/complexity gate**: RED-first; runtime phase ทำทีละ phase; semantic keyword/rollout flag/long-lived shim ใหม่ = 0; ห้าม helper/guard อุด incident; Critical/High จาก replay ต้องรายงาน blocker แทนการประกาศเสร็จ; botworker ยัง paused และห้ามเปิด/รัน
+- **Next action**: Phase 2B.1 authoritative ownership transport — audit current caller/tests, เขียน RED disagreement/missing-state tests ก่อนแตะ runtime; ห้าม provider/Mongo/worker/`.env`; ยังไม่ stage/commit จน review implementation รอบแรก
+
+### 2026-10-12 — Phase 2B.1A census gate closed + Phase 2B.1 started (กำลังทำ)
+- **Census verdict**: `diag_admin_collections.py` (read-only, user-run) → `conversations_shp` 150,396 docs, `assigned_to!=null ∨ closed_at` = **0 rows**, distinct status = `["open"]` เท่านั้น, field census ไม่มี ownership field อื่น; `status_conversation`=2 docs; assignment collections ว่าง — verdict `BACKFILL_NOT_APPLICABLE_CENSUS_COMPLETE`, migration apply = forbidden/no-op (ไม่มี raw evidence ให้กู้ และถ้าเคยมีก็ถูก dump ทับไปแล้ว)
+- **User direction**: census อนุมัติข้าม apply ได้ แต่ไม่อนุมัติ transport switch — ต้องทำ writer/reader contract tests ก่อน
+- **Phase 2B.1 scope ที่รับ**: `resolveTicketState` production → `status_conversation` เท่านั้น; meta-only readers (list map/filter, send conflict, assign fallback, [id] GET, team workload, workflowEngine assignee, autoAssign/reassign, shadow-inbox); missing meta → `ticket_state="bot"` (explicit unlocked — Python `_ACTIVE_TICKET_STATES={handoff,open,pending}` lock set); read error → fail closed ไม่เรียก Python
+- **Python boundary (audit)**: `turn_decision._ticket_active` lock = `{handoff,open,pending}`; "bot"/closed/resolved → unlock; `None` → history-scan fallback (ต้องส่ง "bot" explicit ห้าม omit)
+- **Safety**: ไม่มี Mongo จริง/.env/provider/worker; ไม่ stage/commit; TDD RED-first จาก fake mongo suite เดิม
+
+### 2026-10-12 — Phase 2B.1 authoritative ownership transport (เสร็จ รอ review)
+- **RED→GREEN**: `scripts/test-ownership-transport.ts` (ใหม่ — A transport ×11 / B writer ×15 / C reader ×11) เริ่ม 14/35 RED → **37/37 GREEN**; RED ตรง defect จริงทุกจุด (ไม่มี test typo)
+- **Transport**: `resolveTicketState` prod branch → `COLLECTIONS.statusConversation`; missing meta → `"bot"` explicit (Python `None` = history-scan fallback ห้าม omit), meta ไม่มี status → `"bot"`, read error → throw fail-closed (fetch ไม่ถูกเรียก), ไม่มี conversationId → ไม่ query
+- **Readers → meta-only**: `admin/conversations` list/mapToConversation/getAssignedConversationIds/status-filter/auto-reopen, `[id]` GET (status+assigned_to จาก meta; raw display เท่านั้น), `send` conflict guard (`meta.assigned_to`), `assign` route previous-owner, `team` workload counts (assigned/closedResolved/unassignedHandoff จาก meta; `total` = thread inventory เดิม), `shadow-inbox`/`botworker` conv map (`meta?.closed_at`), `workflowEngine` conditions conversation_status+assignee (prod), `autoAssignConversation` early-exit, `reassignConversation` `from_admin_id`
+- **Writer fix เจอระหว่างทาง**: `workflowEngine` `assign_ticket` direct-assign (prod) เคยเขียน `conversations.assigned_to` ดิบ (dump ทับได้ — ไม่มี authority) → เปลี่ยนเป็น `statusConversationService.manualAssign` CAS เหมือน testSource branch (direct assign = transfer semantics: expected previous = owner ปัจจุบัน)
+- **CAS contract**: `manualAssign`/`tryAssign` catch E11000 (unique `conversation_id` index + upsert ชน race) → return `false` ไม่ throw — เจอจาก fake mongo unique-index modeling
+- **Harness (test-only)**: fakemongo +aggregate ($match/$group accumulators), ObjectId/Date equality, uniqueKeys E11000, eager onQuery ของ aggregate (M-INT instrumentation contract — attempt นับแม้ cursor ไม่ถูก consume)
+- **Verify จริง**: tsc clean · `npm run build` clean (84/84) · `git diff --check` clean · suites: idempotency 71/71, production-races 37/37, recovery-freshness 59/59, boundary 20/20, error-policy 38/38, runtime-mongo-safety 110/110, config-failclosed 4/4, enable-checkpoint 18/18, ownership-backfill 46/46
+- **เจตนาเดิมรักษา**: claim lifecycle ไม่แตะ (close ≠ claim resolved); round-robin CAS/assignment config ไม่เปลี่ยน; ไม่มี keyword/helper/module/flag ใหม่; raw `conversations` เหลือเฉพาะ display/thread inventory; `findOrCreateConversation` dedup ใช้ raw status โดยตั้งใจ (thread identity ไม่ใช่ ownership)
+- **Safety**: ไม่มี Mongo จริง/.env/provider/LLM/`/chat` จริง/worker; ไม่ stage/commit/push/deploy; llm.py + diag-worker-dup* เป็น dirty เดิมไม่แตะ
+
+### 2026-10-12 — Phase 2B.1 Review Fix (2 High + 1 Medium) (เสร็จ รอ review)
+- **RED→GREEN**: ต่อ `test-ownership-transport.ts` เพิ่ม 16 tests → 14/53 RED ตรง defect จริง → **53/53 GREEN**
+- **F1 (High) — explicit owner clear**: `updateStatus(convId, status, assignedTo?: string|null)` — `undefined`=คง owner, `null`=ล้าง `assigned_to`+`assigned_at` (audit `close_history`/`admin_logs` อยู่ครบ), `string`=ตั้ง owner+`assigned_at`; `reassignConversation` ส่ง `newAgentId` ตรง (เคย `|| undefined` → unassign หาย), list auto-reopen ส่ง `null` (เคย `undefined` → persist owner ค้าง), `updateConversationStatus` widened pass-through — ไม่มี helper ใหม่
+- **F2 (High) — status filter บน meta**: `/api/admin/conversations?status=` เคยส่ง status เข้า raw filter (`conversations_shp.status`="open" หมด → match ผิด + total_count ผิด) → prefetch ids จาก `status_conversation`: `bot`=exclude meta status อื่น (missing/no-status meta=bot), อื่นๆ=include `{status}` ids; intersect `assigned_to` include-set / union exclude-set **ก่อน** limit+cursor; `include_count` ใช้ constraints ชุดเดียวกัน
+- **F3 (Medium) — canonical metric partition**: active=`{handoff,open,pending}`+owner, awaiting=`{handoff,pending}`+no owner, closed=`{closed,resolved}` (retained `assigned_to`=history ไม่ใช่ active), bot=missing/no-status/`bot` — `/api/team` (workload agg + realCounts เลิกหัก assigned/closed ซ้อน), `/api/stats/live` (เขียน ownership ใหม่ทั้งหมดบน meta id-sets ∩ range), `/api/stats/dashboard`
+- **Audit เจอเพิ่ม+แก้**: `stats/admin-activity` (raw assigned_to/status/closed_at ทั้ง route → meta-driven JS partition), `stats/performance` (3 raw reads → meta id-sets); หลังแก้ production ownership readers บน `conversations` = **0** — raw เหลือเฉพาะ inventory/display/time-bucket (`unread_count`, `last_message_*`, `created_at`, thread identity) + test-domain collections
+- **Harness (test-only)**: fakemongo +accumulators (`$max/$min/$push/$first/$last`), +stages (`$sort/$limit/$skip/$project`), shared `sortDocs`
+- **Verify จริง**: suite 53/53 · error-policy 38/38 · idempotency 71/71 · production-races 37/37 · recovery-freshness 59/59 · boundary 20/20 · runtime-mongo-safety 110/110 · config-failclosed 4/4 · enable-checkpoint 18/18 · ownership-backfill 46/46 · `tsc` clean · build 84/84 · `git diff --check` clean
+- **Safety**: ไม่มี Mongo จริง/.env/provider/LLM/worker; ไม่ stage/commit/push/deploy; `llm.py`+diag-worker-dup* dirty เดิมไม่แตะ; Phase 2B.2 typed handoff outcome ยัง out of scope
+
+### 2026-10-12 — Phase 2B.1 Review Fix Round 2 (กำลังทำ)
+- **รับงาน**: ปิด 2 High + 2 Medium — response rate >100%, status filter ขัด auto-reopen, ownership partition ไม่ exhaustive (open+no owner), unbounded meta scans/ID arrays; ห้าม guard/clamp/flow ซ้ำ, ห้าม stage/commit
+- **Root-cause map (audit เสร็จ)**:
+  - `computeResponseStats` numerator = reply **messages** ทุกฉบับ (3 replies ในแชทเดียว → numerator 3) ส่วน route หารด้วยจำนวน conversation → ได้ 300%; measurement unit ที่ถูก = **customer turn** (รัน user msgs ต่อเนื่อง → first qualifying out msg)
+  - auto-reopen: **ไม่มี inbound ingestion owner ใน codebase** (messages_shp/conversations_shp ถูก external dump เขียน — botWorkerService comment ยืนยัน read-only; botworker เป็น optional poller ที่อาจปิดอยู่ — auto-reopen ใน GET มีอยู่เพื่อ /tickets ไม่พึ่ง worker) → ย้ายไป ingest ไม่ได้; fix ที่ owner เดิม = hoist transition ก่อน status-ID prefetch ให้ filter/count/cache เห็น post-transition state (ไม่ใช่ post-filter guard)
+  - partition: awaiting ต้องเป็น `{handoff,open,pending}`+no owner (open+no-owner ยัง lock bot ตาม transport) — team ใช้ `{h,p}` อยู่
+  - query shape: stats routes โหลด `statusColl.find({}).toArray()` ทั้ง collection + ยิง `$in` array โตตาม meta — แก้เป็น meta-driven `$lookup` aggregation (meta→conv บน unique conversation_id index, range filter ใน pipeline) ไม่มี JS id arrays
+- **ผ่านแล้ว (Round 2, 2026-10-12):**
+  - G response rate: `computeResponseStats` เดิมนับ reply ทุกข้อความ÷จำนวน conv → 150-300%; แก้เป็น customer-turn walk (user-run→first qualifying reply) numerator/denominator population เดียวกัน → 1 turn 3 replies = 1 answered; 2 turns ตอบ 1 = 50%; avg=first response เท่านั้น; perAdmin ตาม actor; performance=adminOnly ตาม UI footnote; admin-activity rate=admin turns เดียวกัน
+  - H auto-reopen: เดิม transition post-fetch → ?status=closed คืน row ที่เพิ่ง reopen + total_count/cache เก่า + ?status=bot หาไม่เจอ; ไม่มี ingest owner ใน codebase (external dump เขียน messages_shp) → hoist transition ก่อน cache check+prefetch ใน route เดิม ผ่าน meta→conv $lookup (status idx→unique conv_id idx) + invalidate cache เมื่อเขียน; repeat GET idempotent
+  - J partition: awaiting={h,o,p}+no-owner ทุก endpoint (open+no-owner=awaiting ไม่ใช่ bot — team unassignedHandoff + live open_unassigned เดิมรวม bot ผิด); admin-activity unanswered +open, resolved +closed/bot (closed+owner=history เดิมหาย)
+  - J bounded: stats routes เปลี่ยน statusColl.find({}).toArray()+$in arrays → meta-driven $lookup aggs (status/assigned_to idx → unique conv_id idx → conv-side range match → group/count) + subtract pattern สำหรับ unanswered/per-shop; listConversations ลบ dead opts.status
+  - fakemongo: +$lookup/$unwind/$count, composite _id group keys, pipeline→onQuery
+  - RED 18 → GREEN 74/74; สำรอง suites: error-policy 38, idempotency 71, races 37, recovery 59, boundary 20, mongo-safety 110, config 4, enable 18, backfill 46; tsc/build/diff-check clean; ยังไม่ commit ตามคำสั่ง
+
+### 2026-10-12 — Phase 2B.1 Closure + Deletion Gate (กำลังทำ)
+- **รับงาน**: ปิด correctness gaps (response-time boundary, lifecycle write ใน list GET, unbounded status filter) + deletion gate (backfill tooling, dead exports, comment slimming) → runtime net ≤0 vs HEAD; RED-first, ห้าม stage/commit
+- **Baseline**: branch feature-legacy-shopee-evidence-retrieval @ 04f0e10 · suite 74/74 (J6 เคย flake เพราะ seed created_at ชน ms เดียวกับ route weekEnd exclusive $lt — แก้ seed เป็น now-5s) · src numstat net +95 · fakemongo +109
+- **Deletion inventory (audit เสร็จ)**:
+  - KEEP: statusConversationService (meta authority), conversationService.{getConversation,closeConversation,reopenConversation,updateConversationStatus,touchLastMessage}, stats routes, ownership suite
+  - REPLACE: computeResponseStats (boundary attribution — fetch ≥start, turn นับเมื่อ turn_ts∈[start,end)), list GET (conv-driven $lookup pipeline, read-only)
+  - DELETE: backfill-legacy-ownership.ts(379)+test-ownership-backfill*(948)+diag_admin_collections.py(122) — census ปิด invariant แล้ว; listConversations(sole caller=route), createConversation/findOrCreateConversation(genConversationId, 0 prod callers — B8 test pin เท่านั้น), wrappers setConversationTopic/setConversationItemIds/togglePinned/resetUnread (0 callers), getAssignedConversationIds, auto-reopen block ใน GET
+  - BLOCKED: closed→bot auto-reopen on inbound — audit ยืนยัน ไม่มี production inbound owner ใน repo (external dump เขียน messages_shp; botWorkerService เขียน test_status_conversation sandbox เท่านั้นโดย design; botCallService เป็น reader; bot-handoff=handoff callback ไม่ใช่ per-inbound) → BLOCKED_BY_MISSING_INBOUND_LIFECYCLE_OWNER
+- **Boundary truth table (computeResponseStats, owner เดียว)**:
+  - turn เข้า period เมื่อ turn_ts (user msg สุดท้ายของ run) ∈ [start,end) — fetch msgs `>= start` (forward ถึง data end; bounded โดย now ไม่ใช่ history ย้อนหลัง)
+  - user msg ใหม่หลัง end ต่อ run เดิม → turn_ts ขยับ → turn ไป period ถัดไป (reply ไม่ปิด turn ใน period นี้, ไม่มี double count)
+  - reply หลัง end ปิด turn ได้ปกติ (resolved state ไม่มีขอบเขตเวลา)
+  - turn ก่อน start + reply ใน range → out msg กระพริบเดี่ยวไม่มี run → ไม่นับ
+  - avg/within10/perAdmin ใช้ population เดียวกัน (turns attributed to period)
+- **Plan**: RED (K=boundary, L=read-only list, M=pipeline filter) → fix responseStats → ลบ lifecycle block+prefetch → pipeline list → ลบ tooling/dead exports/comment slim → complexity gate → battery
+- **ผ่านแล้ว (Closure+Deletion, 2026-10-13):**
+  - RED 12 honest fails (K1-3,K5-7 boundary + L1-4 read-only + M1 census + F1-5 premise) → GREEN 82/82
+  - K boundary: `computeResponseStats` เดิม fetch แค่ [start,end) ทั้ง user+reply → user 23:59+reply 00:01 นับ unanswered; แก้ fetch `>=start` (bounded by now) turn_ts attribution; reply ข้าม end ปิด turn ได้, user ใหม่ต่อ run → turn ย้าย period; route parity K7 ผ่าน owner เดียว
+  - L read-only list GET: ลบ auto-reopen block+prefetch ออกทั้งหมด (owner audit→ไม่มี production inbound owner ใน repo → ห้ามประดิษฐ์ owner); 2×GET=0 writes/0 meta query, cache-hit=0 DB; source pin L1
+  - M pipeline: list route เปลี่ยน meta census→`conversation_id.$in` arrays เป็น conv-driven `$lookup`+`$unwind`+meta `$match` ใน pipeline เดียวกับ rows/count (rows=count predicate เดียวกัน); no-meta-filter path join หลัง limit (page-scoped); 3-page cursor parity M2 ผ่าน
+  - Deletion: backfill tooling+tests+diag_admin_collections.py = **1,449 LOC ลบ** (census `BACKFILL_NOT_APPLICABLE_CENSUS_COMPLETE` บันทึก roadmap L816-825); dead exports conversationService (genConversationId/createConversation/findOrCreate/listConversations/4 wrappers = 172 LOC) + statusConversationService (setTopic/setItemIds/togglePinned/resetUnread 40 LOC — caller มีเฉพาะ dead wrappers+test); B8 ลบ (รองรับ dead fn เท่านั้น), B7 repoint→setPendingAssignment; generate-all-shadow.ts เปลี่ยนเป็น direct collection find; phase-history comments ตัด 20 จุด (เก็บ contract text)
+  - fakemongo: เพิ่ม ops 0 (net +109 = baseline — ทุก op มี production caller ใน 5 routes ที่แชร์ suite, เก็บไว้ตาม shortest-path)
+  - Complexity: src numstat net **−202** vs HEAD (+605/−807) ≤0 ✅
+  - Verify: transport 82, error-policy 38, idempotency 71, races 37, recovery 59, boundary 20, mongo-safety 110, config 4, enable 18; tsc/build(84)/diff-check clean; backfill suite ไม่รัน (tooling ลบแล้ว — invariant ปิดด้วย census)
+  - ยังไม่ commit ตามคำสั่ง; verdict BLOCKED_BY_MISSING_INBOUND_LIFECYCLE_OWNER (auto-reopen closed→bot ยังไม่มี owner — integration point เสนอ: external dump writer หรือ dedicated inbound poller ใน phase แยก)
+
+### 2026-10-13 — Phase 2B.1 Review Correction (กำลังทำ)
+- **รับงาน**: fix channel authz+pagination, query scalability (status/assigned ไม่ full-join), lifecycle owner audit ซ้ำ, response-time bounded query, generate-all-shadow dedup; net ≤0; RED-first; ห้าม stage/commit
+- **Baseline**: 04f0e10 · suite 82/82 · src net −202 · tsc/diff-check clean
+- **Part 1 audit (re-verify, schema.md L79/L1617-1618 + code)**: `messages_shp`/`conversations_shp` inbound (`role=user,direction=in`) **เขียนโดย Sellcenter dump เท่านั้น — external process นอก repo, sync ~ทุก 2 นาที**; ใน repo: Python app.py เขียนแค่ conversation_products/test_chat_*; messageService เขียนเฉพาะ out-msgs (admin send); botWorkerService เขียน chatProcessing/shadowReplies/botworkerState/botworker_messages + image_desc cache เท่านั้น → **BLOCKED_BY_EXTERNAL_INBOUND_WRITER**; integration contract ที่ต้องเพิ่ม: dump writer post-write hook CAS `status_conversation {status:bot, assigned_to:null}` เมื่อ meta closed + inbound ts>closed_at, หรือ inbound webhook → admin app (phase แยก — ห้าม poller/GET side-effect)
+- **Plan**: RED N (channel authz) + O (query shape) + P (response boundary probes) → fold channels_access เข้า baseMatch → meta-driven join ทิศ meta→conv สำหรับ status/assigned filter → responseStats bounded per-open-conv probe → generate-all-shadow single-client → battery
+- **ผ่านแล้ว (Review Correction, 2026-10-13):**
+  - RED 10 honest fails (N1-3 channel post-limit/starved count + O1/O2/O5/O6 conv-first full join + P1/P3/P5 unbounded `>=start` fetch) → GREEN **98/98**
+  - N channel authz: เดิม JS filter หลัง $limit → unauthorized rows กิน limit/count/cursor + `channels_access=[]` รั่วทุก channel; แก้ fold `{platform:{$in:access}}` ลง match เดียวกันทั้ง rows/count/cursor (privileged/[] = unrestricted เดิม); platform ที่ขอแต่ไม่มีสิทธิ์ → `$in:[]` (0 rows); N3 เจอ hasMore `docs.length===limit` false-positive บน exact-multiple → fetch limit+1 slice; cacheKey เดิมขาด me+channels (cross-admin leak สำหรับ assigned_to=me/authorized pop) → เพิ่มทั้งคู่
+  - O query shape: meta-bound filters (human status/assigned=me|<id>) → aggregate จาก `status_conversation` (indexed status/assigned_to $match) → `$lookup` conv → conv-side match → sort/limit; missing-meta filters (bot/unassigned) คง conv-first anti-join (missing meta อยู่นอก meta coll ทำ meta-first ไม่ได้โดย schema); default = conv sort/limit→page-scoped join เดิม; rows/count predicate เดียวกัน
+  - Real-Mongo explain (disposable mongo:7 loopback, 150,396 convs + 2,000 meta, production index set, container --rm cleaned): default+channel IXSCAN(sort-idx) docs=101 n=51 ~2ms · assigned_to IXSCAN(assigned_to_1) docs=667 ~16ms · status=handoff+channel docs=667 ~15ms · count(handoff) docs=667 — เทียบ conv-first เดิม status=handoff docs=75,198 ~1,389ms (~113×); status=bot anti-join docs=75,198 ~1,259ms = structural (missing-meta ต้องแทนได้ → bounded เมื่อ meta complete ที่ ingress = external writer เดียวกับ Part 1 blocker)
+  - P responseStats: เดิม fetch `>=start` ไม่มี upper bound อ่านถึงปัจจุบันทุกครั้ง; แก้ fetch เฉพาะ [start,end) + open-run resolution ด้วย per-conv probe (first post-end user/reply ผ่าน `$min`/`$first` aggregate — conv ที่ค้างเท่านั้น); user หลัง end ก่อน reply → run ต่อ → turn ย้าย period (ไม่นับ); reply ก่อน/ไม่มี user → ปิด turn; historical end เดือนก่อนอ่าน bounded; adminOnly probe role=admin
+  - Part 5: generate-all-shadow `withAdminDb` เปิด MongoClient ทุก call → client เดียวใน main + finally ปิดทุก path (รวม dry-run early return); fakemongo audit: ทุก op มี production caller จริง ($elemMatch ไม่มีใน engine เลย)
+  - Verify: transport 98/98 · error-policy 38 · idempotency 71 · races 37 · recovery 59 · boundary 20 · mongo-safety 110 · config 4 · enable 18 · tsc/build(84)/diff-check clean · src net −116 (≤0)
+  - Verdict: **BLOCKED_BY_EXTERNAL_INBOUND_WRITER** — correctness+scalability+response-bounds ปิดครบ แต่ `closed→bot` on inbound ต้องการ writer ใน Sellcenter dump (นอก repo) — integration contract: post-write hook CAS `status_conversation{status:bot,assigned_to:null}` เมื่อ meta.status∈{closed,resolved} + inbound.created_timestamp>closed_at, idempotent key=conversation_id+inbound_ts; ห้าม poller/GET side-effect ตามคำสั่ง
+  - ยังไม่ stage/commit/push ตามคำสั่ง
+
+### 2026-10-13 — Phase 2B.1 Final Review Fix (กำลังทำ)
+- **รับงาน**: จัดการ reviewer findings 2 High + 2 Medium — R1-R5 probes บน responseStats post-end probe (unbounded $in + unbounded time — ห้ามแก้จนกว่า business เลือก Option A/B/C), generate-all-shadow ใช้ singleton getDb แทน direct MongoClient, แยก scalability claims ตาม path, test-honesty (P1-5 + K disputed semantics → probe naming); verdict ต้องคง BLOCKED_*
+- **Baseline**: 04f0e10 · suite 98/98 · tsc/diff-check clean · src net −116
+- **UI poll audit (Part 3)**: useSharedConversations poll 3s ด้วย filter ที่ page mount — tickets = `assigned_to`(me/all/<id>) เท่านั้น ไม่มี status param; replay-compare/test-assignment/shadow-inbox = `assigned_to:"all"` → **ไม่มี UI page ใด poll `status=bot`/`unassigned`** — anti-join ~75k ใช้ได้เฉพาะ direct API call (ยังเป็น blocked path แต่ไม่ใช่ hot path ของ poller)
+- **Plan**: R1-R5 probes (assert facts, ชื่อ probe) → P1-5 + K post-end semantics เปลี่ยนเป็น probe naming → Part 2 single-owner getDb + RED source pins → report options A/B/C
+- **ผ่านแล้ว (Final Review Fix, 2026-10-13):**
+  - Probes R1-R5 (assert observed facts — ไม่ใช่ approved contract): R1 probe `$in` = openRuns population (n=7/7, closed turn excluded) — cardinality ไม่มีขอบ; R2 probe `$match` = `$gte:end` ไม่มี `$lt/$lte` — scan [end,∞); R3 same period re-report: reply post-end → answered 0→1, user+reply post-end → totalTurns 2→1 (report ไม่ frozen); R4 equal-ts post-end user+reply → impl `<` strict ให้ reply ชนะ (answered=1) ขัด in-range tie-break (user ก่อน); R5 adminOnly bot→user→admin post-end → original turn ย้าย period (total=0)
+  - **ไม่แก้ responseStats.ts** — post-end resolution semantics รอ business decision: Option A (frozen at end — ไม่ต้อง probe เลย, report นิ่ง, turn ค้าง unanswered ถาวร) / B (grace window — reply ภายใน window ปิด turn, ต้องมีค่าที่ user approve, probe bounded $lt) / C (open-ended — สิ่งที่ impl ทำอยู่, report เปลี่ยนย้อนหลัง, query cost ตามที่ probe วัด) → **BLOCKED_BY_RESPONSE_METRIC_BOUNDARY_DECISION**
+  - Q1-Q5 source pins (RED: Q1/Q2 fail บน direct MongoClient) → generate-all-shadow ใช้ `getDb()` singleton เดียวกับ listMessages/shadowReplyService; ปิด `db.client.close()` ใน finally ทุก path; close error catch แยกไม่ mask op error + exitCode=1 เมื่อ fail เดี่ยว; Q3-Q5 pass (cleanup/exit contract)
+  - Scalability claims แยกตาม path ใน SRS: default+assigned = indexed/page-scoped; bot/unassigned = unbounded anti-join ~75k/request (blocked); UI poll audit = ไม่มี page ใด poll bot/unassigned (tickets=assigned_to เท่านั้น, อื่น=all)
+  - Test-honesty: K1-3/K5-7 + P1-5 renamed `probe-*` (encode disputed post-end semantics — ไม่ใช่ approved contract); K4 คง contract (pre-start exclusion ไม่เกี่ยว post-end)
+  - Verify: transport **108/108** · error-policy 38 · idempotency 71 · races 37 · recovery 59 · boundary 20 · mongo-safety 110 · config 4 · enable 18 · tsc/build(84)/diff-check clean · src net −116 (ไม่เปลี่ยน — ไม่มี src edit รอบนี้) · direct MongoClient ใน script = 0
+  - Verdict: **BLOCKED_BY_RESPONSE_METRIC_DECISION_AND_EXTERNAL_INBOUND_WRITER**
+  - ยังไม่ stage/commit/push ตามคำสั่ง
+
+### 2026-10-13 — Phase 2B.1 Response Metric Contract Impl (Option B — กำลังทำ)
+- **รับงาน**: user อนุมัติ Option B — bounded grace window 24h; แทน open-ended post-end resolution, T1-T13 contract tests แทน probes, 21-requirement traceability, คง lifecycle blocker; ห้าม commit/deploy
+- **Baseline**: 04f0e10 · suite 108/108 · tsc/diff-check clean · src net −116
+- **RED (7 honest failures)**: T3/T4 reply ≥ graceEnd ยังปิด turn · T6 user ≥ graceEnd ย้าย turn · T7 equal-ts reply ชนะ (impl `<` strict) · T9 report ไม่ freeze · T10 probe ไม่มี `$lt` · T11 ไม่มี batching/$in=openRuns
+- **แก้ (responseStats.ts)**: `RESPONSE_ATTRIBUTION_GRACE_MS=24h` + `RESPONSE_PROBE_BATCH_SIZE=500` (policy owner เดียวในไฟล์); initial fetch คง [start,end); post-end probe = batched `$in`(≤500) + `$gte:end,$lt:graceEnd`; tie-break user-wins เทียบผ่าน sort order เดียวกับ in-range; ไม่มี events ≥ graceEnd ถูกอ่าน → report freeze; adminOnly/bot exclusion/pre-start/first-reply/denominator คงเดิม; public return type เดิม; ไม่มี env/flag/module/index/dependency ใหม่
+- **GREEN**: ownership transport 108/108 — T1-T13 ผ่าน (probe-K/P/R ลบ/เปลี่ยนเป็น contract; ไม่เก็บ probe ซ้ำเรื่องเดียวกัน)
+- **Real-Mongo explain** (query shape เปลี่ยน → ต้อง prove): disposable mongo:7 loopback, seed 100k msgs, index `{conversation_id:1,created_timestamp:1}`; batch probe `docs=1000 keys=1999 n=500 ms=4` — IXSCAN เสิร์ฟ 500-conv batch; container+script cleanup ครบ
+- **เหลือ**: SRS/roadmap/active-log docs, full verification battery, LOC accounting, final report
+- **ผ่านแล้ว (Option B impl, 2026-10-13):**
+  - Docs: SRS_SSD §response-rate metrics อัปเดตเป็น grace contract (24h, batch 500, freeze, tie user-wins); responseStats header/JSDoc ตรง implementation; roadmap +21-row Master Requirement Traceability (req→owner→action→phase→evidence→status)
+  - Traceability 21/21: #14 handoff reopen blocked โดย external inbound writer; #3 in_progress (−99 vs HEAD); #12 verified (response metric); ที่เหลือ not_started/in_progress ตาม phase map
+  - Full verify: transport 108/108 · error-policy 38 · idempotency 71 · races 37 · recovery 59 · boundary 20 · mongo-safety 110 · config 4 · enable 18 · tsc clean · build 84/84 · diff-check clean
+  - src net vs HEAD = −99 (เพิ่มจาก −116: +17 net ใน responseStats.ts = batch loop + grace bounds + 2 exported policy constants — justify: approved contract implementation)
+  - Test consolidation: probe-P1-P5 + probe-R1-R5 ลบ (covered โดย T3/T4/T6/T7/T9/T10/T11), K probes → contract tests, file = 1,683 บรรทัด (pre-round ≈1,690 — reconstructed จาก edit offsets, file untracked ไม่มี snapshot)
+  - Query after: probe = `$match{conv_id:{$in:≤500},created_timestamp:{$gte:end,$lt:end+24h},role}` ×2 agg/batch; explain: docs=1000 keys=1999 n=500 ms=4 บน {conversation_id,created_timestamp} IXSCAN; queries = 2×⌈openRuns/500⌉ — ไม่ใช่ N+1
+  - หลักฐานสะอาด: list GET writes=0 · provider/botworker/API=0 · prod Mongo=0 · env/flag/module/index/dep ใหม่=0
+  - Verdict: **RESPONSE_METRIC_CONTRACT_CLOSED_EXTERNAL_INBOUND_OWNER_BLOCKED**
+  - ยังไม่ stage/commit/push ตามคำสั่ง
+
+### 2026-10-13 — Phase 2B.1 Pre-Commit Gate + Commit 1 (ผ่านแล้ว)
+- Pre-commit gate: preflight ✓ · per-file audit 27 ไฟล์ครบ (ทุก hunk = ownership/meta-authority/metric contract — ไม่มี unrelated hunk) · fresh verify 9 suites ครบ + tsc + build 84/84 + diff-check · staged diff secret/forbidden scan ผ่าน (hit เดียว = `llm.py` path ใน traceability table — doc ref ไม่ใช่ไฟล์)
+- Commit 1: `ad13494` `fix: centralize conversation ownership and bound response metrics` — 27 ไฟล์ +3,106/−944, runtime net −99; reviewer อนุมัติ ไม่ใส่ Devin/Co-authored trailer ตามธรรมเนียม
+- ไม่ได้ stage: llm.py, diag-worker-dup*, quarantine/vision testscript, architecture-audit doc (leftovers ที่ถูกต้อง)
+- งานโค้ด Phase 2B.1 ปิดใน commit นี้ — แต่ **ไม่ใช่ deploy-ready**: `BLOCKED_BY_EXTERNAL_INBOUND_WRITER` ยังต้องพิสูจน์ external sync/import จะไม่เขียน `open` ทับ authoritative status หลัง deploy (closed→bot transition ต้องอยู่ที่ Sellcenter inbound boundary, idempotent+atomic)
+- Docs-only commit 2 (ไฟล์นี้) ตามมาแยกต่างหาก
+
+#### Implementation Round (2026-10-13, runtime — ผ่านแล้ว)
+- **เป้าหมาย**: 111/152 → GREEN ทั้งหมด · TDD ทีละ boundary · runtime diff จำกัด 4 ไฟล์+1 ใหม่
+- **Plan**: ① logAdminEvent +eventId → deterministic `_id` "adminlog:event:"+sha256([action,conv,eventId])[:32] + metadata.message_id=eventId · E11000→findOne(_id) identity check (match=already-logged/else throw) · ไม่มี eventId = เดิมเป๊ะ ไม่เพิ่ม read ② recordReopen +messageId → pass eventId ให้ logAdminEvent (side-effect owner เดียว) ③ applyInboundOwnershipTransition: flat read-dispatch (missing→insertOne[E11000→re-read once] / no-status→init CAS / closed,resolved+fresh→fenced CAS+recordReopen / miss→reconcile re-read / bot+event_id match→settle / else→unchanged) ④ route POST /api/internal/inbound-lifecycle (adapter เท่านั้น) + middleware PUBLIC_API entry
+- **ผ่านแล้ว (Runtime Impl, 2026-10-13):**
+  - `adminLogService.logAdminEvent` +`eventId` (optional): deterministic `_id` + `metadata.message_id=eventId` · E11000→re-read `_id` identity-check (action+conv+message_id ตรง=already-logged ไม่ throw/ไม่ dup · ไม่ตรงหรือ non-E11000=throw) · legacy callers ไม่มี eventId = path เดิมเป๊ะ zero extra read — **W29–W36 GREEN**
+  - `closeHistoryService.recordReopen` +`messageId` → ส่ง eventId ให้ logAdminEvent จุดเดียว (sole side-effect owner — statusConversationService ไม่เรียก logAdminEvent สำหรับ inbound path)
+  - `statusConversationService.applyInboundOwnershipTransition` +`InboundOwnershipEvent`/`InboundTransitionOutcome` types +`inbound_reopen_event_id` field (ไม่มี index ใหม่): bounded read-dispatch — missing→insertOne{bot,null,updated_at} (E11000→re-read ครั้งเดียว dispatch observed · ยัง null→unchanged fail-closed) · no-status→init CAS `{conv,$or:[status:$exists:false,null]}`→bot+assigned_to:null รักษา metadata · closed|resolved→staleness pre-check (zero-write stale/equal)→fenced CAS `{conv,status:$in[closed,resolved],closed_at:$lt inboundAt}`→bot+clear residue+event_id→recordReopen→reopened · CAS miss→bounded re-read reconcile เฉพาะ bot+matching event_id→settle → unchanged · bot+match→settle→unchanged · อื่น→unchanged zero-write — **W2–W28 GREEN**
+  - Route `src/app/api/internal/inbound-lifecycle/route.ts` (~50 LOC): x-internal-secret vs `serverConfig.chatbotInternalSecret` → validate (string/trim/non-empty/≤256, ISO-8601+tz ≤64) → delegate ครั้งเดียว → `200{ok,outcome}` / 401 / 422 / 500 generic (server-side log เท่านั้น ไม่ leak raw/secret) · zero Mongo import · middleware PUBLIC_API +1 entry — **W37–W50 GREEN**
+  - Fix ระหว่างทาง: `StatusConversationDoc.status/closed_by` +`| null` (typing ให้ตรง storage จริง — init CAS filter `status:null` + `$set closed_by:null` ผ่าน typecheck)
+  - **Verify: 155/155** (เพิ่ม W48–W50 overlong/no-tz/offset tests ตาม PART 6) · regression battery: error-policy 38 · idempotency 71 · races 37 · recovery 59 · boundary 20 · mongo-safety 110 · config 4 · enable 18 · `tsc --noEmit` ✓ · `npm run build` ✓ (route ขึ้น ƒ /api/internal/inbound-lifecycle) · `git diff --check` ✓
+  - Docs: schema.md +`inbound_reopen_event_id`/writer row · SRS_SSD statusConversationService row +route blocker อัปเดต · roadmap +inbound-lifecycle subsection
+  - **Verdict: `PHASE_2B1_RUNTIME_GREEN_EXTERNAL_HOOK_PENDING`** — in-repo receiver+owner เสร็จและพิสูจน์แล้ว · Sellcenter writer ต้อง POST หลัง persist (contract พร้อม) + topology/secret เป็น operator confirm · ยังไม่ stage/commit/push/deploy ตามคำสั่ง
+
+#### Review-Fix Round สุดท้าย (2026-10-13 — กำลังทำ)
+- **Findings**: M1 strict timestamp (`new Date` normalize 2026-02-30→Mar 2 — calendar-invalid date ถูกใช้ตัดสิน reopen) · M2 429 contract (middleware rate-limit 300/min ip:path ก่อน PUBLIC_API — external writer ต้องมี retry contract) · L3 docs accuracy (schema recordReopen callers + SRS fields ครบ 8)
+- **Plan**: RED W51–W53 (invalid calendar/overflow → 422, leap-day pin → 200) → single `parseInboundTimestamp` helper (regex capture + Date.UTC reverse-compare — ไม่พึ่ง new Date อย่างเดียว) → docs 429/integration contract + schema callers → verify battery เดิม
+- **ผ่านแล้ว (Review-Fix, 2026-10-13):**
+  - RED evidence: W51 `2026-02-30T00:00:00Z` → route รับ (200, calls=1 — new Date normalize) ขณะ W52/W53 ผ่านอยู่แล้ว → root cause = regex+`new Date` ไม่ตรวจ calendar
+  - Fix (root cause ตัวเดียว): `parseInboundTimestamp` ใน route — regex capture Y/Mo/D/H/Mi/S/frac/tz → ช่วงหลัก (month 1-12, hour≤23, min/sec≤59, off-hour≤23, off-min≤59) → `Date.UTC` re-compute + reverse-compare components บน instant (offMs-corrected) → ปฏิเสธ normalized dates · ไม่มี dep ใหม่ · helper parsing ตัวเดียว · **W51 GREEN**, suite **158/158** (+3: W51 invalid-day / W52 overflow clock+offset / W53 leap-day pin)
+  - Docs: SRS route cell + strict-validate/`parseInboundTimestamp` note · SRS service row + Called-by/Calls/Side-effects/Error ครบ 8 ตาม AGENTS §1 · roadmap + External delivery contract (200=success เท่านั้น · 401/422=permanent no blind retry · 429/5xx/network=retryable same identity bounded backoff writer-owned · at-least-once ปลอดภัยผ่าน receiver idempotency · 300/min ไม่เคลมว่าพอ) · schema.md recordReopen Update row + applyInboundOwnershipTransition caller/messageId
+  - Verify สด: ownership **158/158** · error-policy 38 · idempotency 71 · races 37 · recovery 59 · boundary 20 · mongo-safety 110 · config 4 · enable 18 · `tsc --noEmit` ✓ · `npm run build` ✓ · `git diff --check` ✓
+  - Runtime delta รอบนี้: route.ts +~36/−11 เท่านั้น (parse helper — src diff 4 ไฟล์คงเดิม) · ไม่มี retry impl ใน receiver · route zero-Mongo delegate ครั้งเดียว · worker/provider/Mongo/.env = 0
+  - **Verdict: `PHASE_2B1_RUNTIME_REVIEW_FIXED_EXTERNAL_HOOK_PENDING`** — external writer retry/topology ยังต้องพิสูจน์ก่อนลบ blocker · ยังไม่ stage/commit/push/deploy
+
+#### Timestamp Precision Final Correction (2026-10-13 — กำลังทำ)
+- **Finding (Medium จุดสุดท้าย)**: `Math.round(parseFloat("0."+F)*1000)` — `.999999` round→1000ms carry เป็นวินาทีถัดไป → reverse-check fail → reject timestamp ที่ควรรับ (Python ISO microsecond writer); `.1235`-class inputs ถูก round แทน truncate ทำให้ stored instant ≠ contract
+- **Plan**: W54 RED (microsecond frac → truncate 3 หลัก, offset+frac ไม่ carry) → แก้ fracMs เดียวใน `parseInboundTimestamp` = `Number(F.slice(0,3).padEnd(3,"0"))` (truncate, ไม่ round, ไม่ carry) → docs canonicalization note → verify battery เดิม → คาด 159/159
+- **ผ่านแล้ว (Precision Correction, 2026-10-13):**
+  - RED evidence: W54 case-2 `2026-10-05T07:00:00.999999+07:00` → **422** (`Math.round(0.999999*1000)`=1000ms → carry เป็นวินาทีถัดไป → reverse-check second mismatch → reject timestamp ที่ควรรับ)
+  - Fix (1 บรรทัด root cause): `fracMs = F ? Number(F.slice(0,3).padEnd(3,"0")) : 0` — truncate 3 หลัก ไม่ round ไม่ carry · comment ระบุ canonicalize→ms, sub-ms ไม่เก็บ · **159/159 GREEN** (W51–W53 คงเดิม)
+  - Docs: SRS route cell + "fractional seconds truncate→ms (sub-ms ไม่เก็บ)" · roadmap contract + fractional-seconds canonicalization clause
+  - Verify สด: ownership **159/159** · error-policy 38 · idempotency 71 · races 37 · recovery 59 · boundary 20 · mongo-safety 110 · config 4 · enable 18 · `tsc --noEmit` ✓ · `npm run build` ✓ (route ƒ) · `git diff --check` ✓
+  - Complexity delta รอบนี้: route.ts **+4/−2** เท่านั้น · helpers/functions เพิ่ม **1** (`parseInboundTimestamp`) · runtime modules/files เพิ่ม **1** (`inbound-lifecycle/route.ts`) · dependencies/config/env/indexes/collections เพิ่ม = **0** · ไม่มี abstraction layer/parallel owner ใหม่ · route zero-Mongo delegate ครั้งเดียว · ไม่มี retry impl ใน receiver · worker/provider/Mongo/.env = 0
+  - **Verdict: `PHASE_2B1_RUNTIME_FINAL_GREEN_EXTERNAL_HOOK_PENDING`** — external writer wiring ยังเป็น blocker เดิม · ยังไม่ stage/commit/push/deploy
+
+#### Commit Closeout (2026-10-13 — ผ่านแล้ว)
+- Commit 1: `d403f0a` `fix: add authoritative inbound ownership lifecycle` — 13 files +953/−10 (runtime +224/−5 · tests/harness +714/−1 · docs +15/−4)
+- Commit 2: `e3e0b4d` `docs: record phase 2b.1 inbound lifecycle closeout` — log-only +83
+- Complexity final: helpers/functions เพิ่ม 1 (`parseInboundTimestamp` local) · runtime modules/files เพิ่ม 1 (`inbound-lifecycle/route.ts`) · deps/config/env/indexes/collections เพิ่ม 0 · ownership owner 1→1 · ไม่มี abstraction layer/retry owner/guard family/parallel runtime path
+- Leftovers ไม่ถูกแตะ: llm.py · diag-worker-dup×5 · quarantine/vision×3 · architecture-audit doc
+- **Verdict: `PHASE_2B1_RUNTIME_COMMITTED_EXTERNAL_HOOK_PENDING`** — `BLOCKED_BY_EXTERNAL_WRITER_WIRING` ยังอยู่ · ไม่มี push/PR/deploy
+
+#### External Writer Audit (2026-10-13 — กำลังทำ, read-only TIMEBOX)
+- **Plan**: หา writer ตัวจริงที่ persist `messages_shp`/`conversations_shp` (role=user inbound) — sweep in-repo → sibling repos → topology → spec สิ่งที่ต้องขอจาก external owner
+- **ผ่านแล้ว (Writer Audit, read-only):**
+  - In-repo sweep: `messageService.addMessage` เขียน `messages_shp` แต่ caller เดียวคือ admin `/send` (role=admin, direction=out) · botWorkerService เขียน `shadow_replies` เท่านั้น (comment ชัด "ไม่เขียน messages_shp") · Python chatbot ไม่ resolve messages/conversations collections · `sync-shops.ts` อ่าน conversations_shp READ-ONLY เขียนเฉพาะ `shops` · bot-worker.ts = poll reader เท่านั้น → **ไม่มี in-repo inbound writer**
+  - Sibling repos sweep (`ChatbotPythonbackend/Chatbot/ChatbotPPing/ChatBotPDigg/ChatBotPhase1/biokoop chatbot/dataclean*`): zero code hits สำหรับ `messages_shp|conversations_shp` — `ChatBotPDigg` เป็น unified-inbox clone เขียน DB ตัวเอง (`zaapi_clone` mongoose `messages`/`conversations`), อ่าน sellcenter Mongo แค่ tokens — **ไม่ใช่ writer ของ admin DB นี้**
+  - Topology truth (SRS/DEPLOY): "Shopee (sellcenter mirror → MongoDB)" dump ทับ `conversations_shp`/`messages_shp`/`customers_shp`/`shops` ทุก ~2s ตรงลง shared `chatbot` Mongo (host :27017) — writer = **Sellcenter system (external infra)** ไม่มี service ใน docker-compose, ไม่มี process local
+  - Payload semantics: `created_timestamp` = platform time (message ที่แท้) → ใช้เป็น `inbound_at` ใน hook contract · `data_received_at` = writer persist time (debug field)
+  - **Verdict: `BLOCKED_BY_EXTERNAL_WRITER_REPO_REQUIRED`** — ต้องขอ Sellcenter repo/path + entrypoint จาก owner เพื่อวาง hook หลัง durable persist; receiver ไม่สร้าง caller ปลอม
+
+#### Phase 2B.2 Commit Closeout (2026-10-13 — ผ่านแล้ว)
+- Commit 1: `1c26317` `fix: make bot handoff outcomes authoritative` — 26 files +2721/−1023 (TS services/routes + Python bot + tests + SRS/schema)
+- Root causes ที่ปิด: legacy review swapped args (crash AttributeError) · failed handoff เขียน success metadata ก่อน classify · pytest transport stub leak ทั่ว global · reason-string ทาย episode ชน retained-commit · HandoffEpisode over-engineering → ลบ (YAGNI — `bot_handoff_at` ไม่มี reader เลย)
+- Verification (fresh ก่อน commit): ownership **203/203** · handoff-transport Python **37/37** · pytest 5 suites **59 passed 3 xfailed** · error-policy 38 · boundary 20 · config-failclosed 4 · enable-checkpoint 18 · idempotency 71 · recovery-freshness 59 · mongo-safety 110 · production-races 37 · py_compile 12 files OK · tsc 0 · build ✓ · diff-check clean
+- Complexity: types −1 (HandoffEpisode) · outcome fields −1 (episode) · route string-classification −1 · helpers/guards/modules/queries/config/index/collection เพิ่ม 0
+- Contract ปิดท้าย: `bot_handoff_at` = last claim-metadata refresh เท่านั้น (ไม่ใช่ authority/first-success/dedupe signal) · failed → zero success side effects · emit_incomplete → 503 retryable · authority = status_conversation + outcome.state
+- Leftovers ไม่ถูกแตะ/ไม่ถูก stage: llm.py (vision URL dedupe — งานอื่น) · diag-worker-dup×5 · quarantine/vision×3 · architecture-audit doc
+- Residual blockers: `BLOCKED_BY_EXTERNAL_WRITER_REPO_REQUIRED` ยังอยู่ · ไม่มี push/PR/deploy/worker/provider/real Mongo
+- **Verdict: `PHASE_2B2_HANDOFF_CLOSED_AND_COMMITTED`**
+
+#### Phase 2B.2 Post-Commit Contract Correction (2026-10-13 — กำลังทำ)
+- **Baseline**: HEAD `aed9fb3` — 2 findings จาก diff review:
+  - A. `_handle_review_request` (warranty_flow.py:707-718) คืน `handoff_to_admin=True`+`handoff_reason="review_request"`+routing `handoff` โดยไม่เคยเรียก `_send_handoff` — mid-flow response ที่แค่ขอลูกค้ายืนยัน ("ถ้าถูกต้องเดี๋ยวส่งต่อ"); flag=True ทำให้ `check_output` skip ทุก guard (guards.py:37)
+  - B. `handoffToAdmin` converge (handoffService.ts:188) gate แค่ `assigned_to && !wasClosed` — `{status:"bot", assigned_to:X}` คืน `state:"assigned"` ทั้งที่ `resolveTicketState` ยังส่ง "bot" ให้ Python
+- **Plan**: A — flip 3 fields เป็น bot_reply (confirm path มีอยู่แล้ว line 1492 → `_build_warranty_claim_response` → transport จริง); B — converge gate เพิ่ม `status ∈ {"handoff","open","pending"}` (set เดียวกับ Python handoffs.py:301) → `status:"bot"`/missing ไหลไป retained-owner fenced commit → normalize เป็น handoff โดย owner เดิม — ไม่มี helper/guard/ใหม่
+- **ผ่านแล้ว (Post-Commit Contract Correction, TDD):**
+  - RED: L3b `handoff_to_admin:True`+`path:handoff` (ไม่มี transport call — L3c ยืนยัน `calls==[]` ตั้งแต่ก่อนแก้) · H14 `{status:"bot",assigned_to:"admin-1"}` → converge คืน `assigned` แต่ meta ยัง `"bot"`
+  - Fix A: `warranty_flow.py` flip 3 fields — `handoff_to_admin:False`/`handoff_reason:None`/`routing("bot_reply")`; `handoff_claim` เก็บไว้ (claim-info data ไม่ใช่ success marker); guard-safe (`_VIOLATION_RES`/`_ESCALATE_RULES` ไม่ match review text)
+  - Fix B: `handoffService.ts` converge gate เพิ่ม `status∈{handoff,open,pending}` (set เดียวกับ `handoffs.py:301` ที่ Python อ่านผ่าน resolveTicketState) — inconsistent `{status:"bot"}+owner` ไหลเข้า retained-owner fenced commit (line 212→commitHandoffState fence `{assigned_to:expectedOwner}` ไม่ต้องการ status) → normalize `status:"handoff"` owner เดิม + eid audit · call ซ้ำ converge zero-write
+  - GREEN: ownership **204/204** (H14 ใหม่) · handoff-transport **38/38** (L3b/L3c ใหม่) · pytest 59+3xf · error-policy 38 · boundary 20 · config-failclosed 4 · enable-checkpoint 18 · idempotency 71 · recovery-freshness 59 · mongo-safety 110 · production-races 37 · py_compile OK · tsc 0 · build ✓ · diff-check clean
+  - Complexity: helpers 0 · guards 0 · modules/types/config/env/index/collection +0 · ownership writer 1→1 · runtime delta: warranty_flow −1 line · handoffService +6/−3 (gate+comment) — condition/return semantics เท่านั้น
+  - Residual: `_TERMINAL_CLAIM_REASONS` ยังมี `"review_request"` vestigial (ไม่มี call path ใช้ — `_maybe_clear_claim_state` ถูกเรียกเฉพาะใน `_build_warranty_claim_response`) — ไม่มีผล behavior
+  - ยังไม่ stage/commit — รอ review; suggested msg: `fix: align handoff flags with persisted lifecycle state`
+
+#### Phase 2B.2 Contract Correction Closeout (2026-10-13 — ผ่านแล้ว)
+- Commit: `3775366` `fix: align handoff flags with persisted lifecycle state` — 5 files +54/−19
+- Findings ปิด: (A) `_handle_review_request` false-success (`handoff_to_admin=True`+routing `handoff` โดยไม่มี `_send_handoff` → guard skip ทั้งหมด) → bot_reply contract; (B) `handoffToAdmin` converge ไม่เช็ค status → `{status:"bot"}+owner` คืน assigned โกหก → gate `status∈{handoff,open,pending}` แล้ว normalize ผ่าน retained-owner fenced commit
+- Cleanup: ลบ `"review_request"` จาก `_TERMINAL_CLAIM_REASONS` (vestigial — ไม่มี claim_ctx ผลิต reason นี้, `_maybe_clear_claim_state` reachable เฉพาะผ่าน `_build_warranty_claim_response`) → behavior delta = 0
+- Fresh verification: ownership **204/204** · handoff-transport **38/38** · pytest **59+3xf** · error-policy 38 · boundary 20 · config-failclosed 4 · enable-checkpoint 18 · idempotency 71 · recovery-freshness 59 · mongo-safety 110 · production-races 37 · py_compile OK · tsc 0 · build ✓ · diff-check clean
+- Complexity: helpers/guards/modules/types/config/env/index/collection +0 · ownership writer 1→1 · runtime diff = 2 condition/return fixes + 1 dead-contract removal
+- Leftovers ไม่แตะ: `.gitignore` (user's diag ignore) · `llm.py` · vision/quarantine×3 · architecture-audit · diag-worker-dup×5 (ignored, on disk)
+- Residual: `BLOCKED_BY_EXTERNAL_WRITER_REPO_REQUIRED` ยังอยู่ · ไม่มี push/PR/deploy/worker/provider/real Mongo
+- **Verdict: `PHASE_2B2_HANDOFF_CONTRACT_CORRECTED_AND_COMMITTED`**
+
+#### Leftover Cleanup + Commit Preparation (2026-10-13 — กำลังทำ)
+- **Scope**: ปิด working-tree leftovers แยก ownership ชัดเจน — vision URL dedupe (`llm.py` + focused test), architecture audit snapshot, และ local incident-tool ignore เท่านั้น
+- **Safety decision**: `diag-worker-dup*.ts` และ `quarantine_rollback*.py` เป็น local incident artifacts; rollback พึ่ง gitignored export และมี `--apply` เขียน DB จริง จึงเก็บบน disk แต่ไม่ commit source จนกว่าจะออกแบบ safety gate ใหม่
+- **Commit plan**: vision fix+test แยก · architecture audit docs-only แยก · `.gitignore` แยก · active log closeout แยก; exact-path staging เท่านั้น ห้าม `git add -A`
+- **ผ่านแล้ว (Leftover Cleanup Closeout)**: vision test 4/4 + py_compile ผ่าน (API keys loaded=0) → `6f29145` `fix: dedupe vision image URLs` (2 files) · architecture snapshot → `43bef5c` `docs: add current system architecture audit` (1 file; trailing whitespace แก้ก่อน commit) · local incident ignores → `9c1b779` `chore: ignore local incident diagnostics` (`.gitignore` only)
+- **Final state target**: tracked/untracked status ว่าง; diag-worker×5 + quarantine×2 ยังอยู่บน disk แต่ถูก ignore; ไม่มี worker/provider/Mongo/`.env`/push/PR/deploy
+
+#### Phase 2B.4 Claim Episode/Lifecycle Owner — GREEN + Isolation Fix (working tree — รอ review, ห้าม commit)
+- **Root cause เพิ่มที่พบระหว่าง GREEN**: shadow sweep พังเฉพาะเมื่อรันร่วม `test_issue_5f_claim_flow.py` — 5f import `shopeechat.app` ตรงๆ ก่อน `test_legacy_turn_incident_replay` ทำให้ `load_dotenv()` อ่าน `.env` จริง → `ADMIN_MONGO_DB=chatbot` ชน `setdefault("chatbot_admin")` ที่มาทีหลัง (no-op) → `cp._admin_db()` อ่าน `client["chatbot"]` (FakeDb ว่าง) แทน seeded `client["chatbot_admin"]` → `load_timeline` คืน None → claim_state/anchor หายหมดใน shadow snapshot → action 'unknown'/'locked' ทุก fixture ที่ seed claim/anchor. baseline ไม่พังเพราะ `decide_turn` มี history-marker fallback owner (mask bug นี้ไว้) — ตอนลบ second owner ตาม Correction D เลยโผล่
+- **วิธีแก้**: `_install` pin `ADMIN_MONGO_DB`/`MONGO_DB` ต่อ test (env-pinned boundary มีอยู่แล้ว — เติม 2 ตัวที่หลุด) — ไม่แตะ production code, ไม่เพิ่ม fallback
+- **ผลกระทบเคสอื่น**: sweep/executor replay ทุก fixture ได้ claim_state+anchor ถูกต้อง; `test_shadow_human_request_is_handoff` (baseline combo-fail) ผ่านด้วย `_fake_send` truthy outcome fix เดิม
+- **GREEN สุดท้าย (run เดียวกัน)**: `contract 30 + turn_decision 113 + 5f 18 + shadow 18 + replay 74` = **221 passed, 19 skipped, 9 xfailed, 0 failed**; handoff-transport script 38/38; qa_batch 12 passed + 4 failed (`_strip_kb_markup` — identical บน baseline, pre-existing ไม่เกี่ยว claim); py_compile 10 files OK; `git diff --check` clean
+- **xfail คงเหลือ 9 (honest)**: claim-persist×2 (routing interception — 2C scope), keeps-state (claim รอดแล้ว แต่ greeting re-escalate — ownership axis), อีก 6 ไม่เกี่ยว claim
+- **Un-xfails ปิดจริง**: `p2a-claim-resolved-new-request`, `p2a-claim-ticket-closed-product-question`, `p2a-claim-ticket-closed-phone-resume`, `p2a-claim-collect-name-phone` + baseline handoff-transport×5 หาย (fake คืน assigned outcome)
+- **ยังไม่ stage/commit/push** — รอ final report review
+
+#### Phase 2B.4 Review-Fix (PHASE_2B4_REVIEW_FIX_REQUIRED → กำลังทำ)
+- **H1 episode-only fence ไม่พอ**: stale writer `{e1,collecting}` merge หลัง e1→resolved จะเขียน stage กลับ (episode fence ยัง match) + terminal whole-state `$set claim_state` ลบ evidence ที่ concurrent writer เพิ่งเพิ่ม → plan: fence = `expected_episode_id + expected_stage` ทุก transition; terminal ผ่าน `merge_claim_fields` partial `$set` (stage/resolved_at/resolution_reason); whole-state เฉพาะ new-episode create; CAS miss → reread ครั้งเดียว
+- **H2 upsert ไม่มี uniqueness**: `conversation_products` ไม่มี unique index → concurrent create อาจได้ 2 docs → plan: `COLLECTIONS.conversationProducts` (config.ts) + `safeCreateIndex {conversation_id:1} unique` (mongoClient.ts owner เดิม); upsert path reconcile E11000 → reread 1 ครั้ง; ไม่มี Python index helper; deploy gate `BLOCKED_BY_CONVERSATION_PRODUCTS_UNIQUENESS_AUDIT` ค้างจน real census+index proof
+- **M1 race tests ไม่ interleave**: extend `_FakeColl` เดิมด้วย `docs` list + `interleave` hook queue (fire ก่อน apply ใน update_one) + calls log → deterministic interleave จริง
+- **M2 `.env` import purity**: `test_issue_5f_claim_flow.py` import `shopeechat.app` ก่อน trap → wrap dotenv stub รอบ shopeechat imports + restore + subprocess import-purity test
+- **ข้อห้ามคงเดิม**: ไม่เพิ่ม owner/fallback/reason table/helper ใหม่; `_claim_episode_fence` ลบ (inline filter); absent fence ใช้ Mongo null-equality (`field: None` match missing∨null)
+- **ผ่านแล้ว (Review-Fix RED→GREEN)**:
+  - RED จริง: R1 stale merge reopen resolved (`collecting` กลับมา) · R2 whole-state terminal ทิ้ง evidence · R3 CAS-loss · R4 single-doc · R5 index pin — 6 failed ก่อนแก้
+  - **ค้นพบเพิ่มระหว่าง fix**: create path ใช้ `update_one(upsert)` — rival insert ก่อน → upsert **match doc ของ rival แล้วทับ claim_state เงียบๆ** (ไม่ใช่แค่ dup doc) → เปลี่ยนเป็น `insert_one` + E11000→reread (unique index เป็นตัวตัดสิน)
+  - GREEN: contract **35/35** · รวมสุทธิ **227 passed, 19 skipped, 9 xfailed, 0 failed** · handoff-transport 38/38 · py_compile 4 files · tsc 0 error · `npm run build` ✓ · `git diff --check` clean
+  - `_claim_episode_fence` ลบแล้ว (inline filter) · helper รวม −1 · expected_stage fence ทุก write · terminal = partial `$set` เท่านั้น
+  - M2 ปิด: 5f wrap shopeechat imports ด้วย dotenv stub try/finally + subprocess purity test (`test_module_import_never_reads_dotenv`) — `.env` ไม่ถูกอ่านไม่ว่า collection order ไหน
+  - Changed files จริง = 17 (เพิ่ม config.ts + mongoClient.ts นอกชุดเดิม 15)
+  - **Deploy gate คงอยู่**: `BLOCKED_BY_CONVERSATION_PRODUCTS_UNIQUENESS_AUDIT` — real-DB duplicate census + index proof ยังไม่ได้รัน (ห้ามในรอบนี้) → offline pass เท่านั้น ยังไม่ production-safe
+
+#### Phase 2B.4 Test-Purity Correction (PHASE_2B4_LOGIC_PASS_TEST_PURITY_CORRECTION_REQUIRED → ผ่านแล้ว)
+- **Finding A (leaked alias)**: 5f import trap restore เฉพาะ `dotenv.load_dotenv` — `app.load_dotenv`/`knowledge_base.load_dotenv` bind stub lambda ค้างทั้ง process → RED: `test_load_dotenv_aliases_restored_after_import` FAILED (`app.load_dotenv` ≠ provider fn) → fix: finally restore ผ่าน `sys.modules.get()` ทั้ง 2 alias (replay file ทำ pattern นี้อยู่แล้ว lines 95-102)
+- **Finding B (self-import .env)**: `test_handoff_transport_owner_not_globally_stubbed` import `shopeechat.app` เอง → standalone run อ่าน `.env` จริง (proof: `[KEYS] โหลด API keys จำนวน: 9` ตอนรันเดี่ยว) → fix: `sys.modules.get` + `pytest.skip` เมื่อ app ไม่ได้โหลด — leakage check ทำงานเต็มใน combined order (issue_5f โหลด app ก่อน)
+- **GREEN**: standalone contract 34 passed+1 skipped, `[KEYS]` absent (app ไม่ถูก import เลย — .env=0 มี executable proof) · standalone 5f 18/18 (purity subprocess + alias restore) · combined 5f→contract: transport assertion **executes** (ไม่ skip) + aliases restored · full suite **228 passed, 19 skipped, 9 xfailed, 0 failed** · handoff-transport 38/38 · py_compile OK · `git diff --check` clean
+- **ไม่แตะ**: runtime, CAS, index, fixtures, expectations — TS/runtime diff คงเดิมจาก reviewed candidate · changed files จริง = **17**
+- **RED count แก้ไข**: รอบนี้ RED = 2 findings (A ผ่าน alias test fail จริง, B ผ่าน [KEYS]=9 evidence) — R6 ไม่นับ (ไม่มี pre-fix failing output)
+- **Deploy gate คงเดิม**: `BLOCKED_BY_CONVERSATION_PRODUCTS_UNIQUENESS_AUDIT`
+
+#### Phase 2B.4 Evidence Correction + Real-DB Audit Gate (กำลังทำ/บล็อก env)
+- **Test evidence corrected (fresh raw runs)**: contract standalone `34 passed, 1 skipped` (no `[KEYS]` — app ไม่ถูก import) · 5f standalone `18 passed` (18 tests จริง — รายงานก่อนหน้าเขียน 19 ผิด) · 5f+contract combined `53 passed` (transport leakage assertion executes, ไม่ skip) · turn_decision standalone `83 passed` (รายงานก่อนหน้าเขียน 113 ผิด — นับรวม suite อื่น) · shadow `18 passed` · replay `74 passed, 19 skipped, 9 xfailed` · full suite raw line: **`228 passed, 19 skipped, 9 xfailed, 5 warnings in 4.51s`** — per-file sum 35+83+18+18+74 = 228 ✓ ตรง
+- **Mongo census verdict: `PREFLIGHT_BLOCKED_ENV_MISSING`** — `ADMIN_MONGO_URI`/`ADMIN_MONGO_DB`/`MONGO_*` ทั้งหมด unset ใน process env; กฎห้ามอ่าน `.env` + ห้าม fallback → ไม่ connect เลย; ยังไม่มี total/duplicate/index census — `BLOCKED_BY_CONVERSATION_PRODUCTS_UNIQUENESS_AUDIT` คงเดิม ไม่ใช่ pass
+- **ยังไม่ stage/commit/push** · runtime/TS/fixtures ไม่แตะรอบนี้ · botworker/provider/API = 0 · Mongo writes = 0
+- **Real-DB census done (read-only, one-shot)**: ephemeral /tmp script · `load_dotenv(override=False)` โหลด root `.env` ตามการอนุญาตชั่วคราวภายใน subprocess เดียว; ไม่แสดงเนื้อหาหรือค่า env/URI/credentials และ environment สิ้นสุดพร้อม subprocess · collection `conversation_products` (env override unset → owner default) · **total=3112 · exists=3112 · missing=0 · null=0 · empty=0 · non-string=0 · duplicate_groups=0 · extra=0 · largest=0** · index: เหลือแค่ `_id_` ไม่มี index บน `conversation_id` (unique sparse contract ยังไม่ถูกสร้าง) · consistency checks pass ทั้งหมด · mongo_writes=0 · client closed · verdict `PHASE_2B4_CENSUS_PASS_INDEX_CREATION_APPROVAL_PENDING` — ข้อมูล clean, index รออนุมัติสร้างแยกต่างหาก
+
+#### Phase 2B.4 — COMMITTED closeout (commit 1: `8885a5a` `fix: fence warranty claim lifecycle transitions`, 16 files)
+- **Root causes ที่ปิด**: (1) retained slots/history/reason strings เคยเป็น lifecycle authority แข่งกัน (2) stale same-episode write reopen terminal ได้ (3) terminal whole-state `$set` ลบ concurrent evidence ได้ (4) upsert create path overwrite doc ของ rival เงียบๆ (5) ไม่มี unique index → concurrent-create correctness ไม่ถูกคุ้ม
+- **Final architecture**: `_claim_lifecycle` = evaluator เดียว · `_claim_transition` = transition owner เดียว · `transition_claim_state`+`merge_claim_fields` = storage primitives 2 ตัว · fence = `episode_id + expected_stage` · fresh episode ผ่าน `insert_one` · E11000 → reread ครั้งเดียวไม่ retry · terminal = partial dotted `$set` (เก็บ evidence เป็น audit record) · ไม่มี ticket-close/reason/history-marker เป็น lifecycle owner
+- **Verification (frozen pre-commit)**: `228 passed, 19 skipped, 9 xfailed` · handoff transport `38/38` · py_compile pass · `tsc --noEmit` pass · `npm run build` pass · diff checks clean
+- **Real-DB census**: 3112 docs · `conversation_id` ทุกตัวเป็น non-empty string · duplicate groups=0 · mongo writes=0 · index บน `conversation_id` ยังไม่มี
+- **Complexity**: evaluator=1 · transition owner=1 · storage write primitives=2 · retry loops=0 · whole-state terminal writes=0 · +1 collection config key · +1 unique sparse index declaration · ไม่มี dep/env/flag/module ใหม่
+- **.env ความจริง**: census โหลด root `.env` ครั้งเดียวภายใต้การอนุญาตชั่วคราวใน subprocess เดียว (ไม่แสดงค่า); Next build อาจ auto-load `.env` เอง — ห้ามอ้างว่า `.env=0` ทั้งรอบ
+- **BLOCKER เหลือ**: `INDEX_CREATION_APPROVAL_PENDING` — **committed code ยังไม่ deploy-approved**; ห้าม deploy ก่อน create unique index `{conversation_id:1} unique sparse` บน real DB + verify ด้วย `listIndexes` (data clean พร้อมแล้วตาม census)
+- **Real-DB index gate CLOSED**: หลัง approval token สร้าง `{conversation_id:1} unique sparse` บน `conversation_products` ผ่าน `create_index` ครั้งเดียว (ephemeral /tmp script, deleted after) — fresh census ก่อน DDL: total=3112, missing/null/empty/non-string=0, dup_groups=0 → `create_index` → returned `conversation_id_1` → `listIndexes` verify: `{conversation_id:1}` unique:true sparse:true ไม่มี partial filter, exact contract ✓ · indexes ตอนนี้ = `_id_` + `conversation_id_1` (ไม่มี index อื่นเปลี่ยน) · stats: connections=1, census_reads=2, create_index_calls=1, document_writes=0, list_indexes=2, client closed · `load_dotenv` โหลด root `.env` ครั้งเดียวภายใต้การอนุญาตชั่วคราว — ไม่แสดงค่า env/URI/credential ใด · verdict `PHASE_2B4_INDEX_CREATED_AND_VERIFIED_DEPLOY_STILL_NOT_APPROVED` — gate ปิดแล้ว แต่**ยังห้าม deploy/push/PR/botworker** จนกว่าจะมีการอนุมัติ deploy แยกต่างหาก
+
+#### Phase 2B.5 Corrected Implementation — Ticket-Close Semantics + Lone-Name (กำลังทำ — audit อนุมัติแล้ว, contract ถูกแก้)
+- **Baseline (fresh, session นี้)**: branch `feature-legacy-shopee-evidence-retrieval` @ `72c325e` clean · contract `34 passed, 1 skipped` · turn_decision `83` · shadow `18` · replay+5f `92 passed, 19 skipped, 9 xfailed` · handoff-transport standalone `38/38`
+- **Root causes (audit-proven)**: (1) legacy SM BUG-D elif (wf:1456-1493) map ข้อความ non-field ตอน collecting → handoff POST ซ้ำ (greeting หลัง ticket closed กระทบ) (2) `" " in name` branch-local checks 10 จุด reject ชื่อเดี่ยวที่ parser ให้มา + legacy confirm-correction (wf:1565-1594) ไม่มี `_claim_transition` persist (3) latent bug: legacy:1378 อ้าง `_is_post_handoff_product_q` ที่ define แค่ใน v2 (NameError เมื่อ image+warranty ctx)
+- **Contract ใหม่ (user-corrected)**: ticket `handoff/open/pending` = unconditional lock (wait-admin เท่านั้น — ไม่มี info/product/exception escape, ไม่มี claim write, ไม่มี POST ซ้ำ); `closed/resolved/bot` = normal pipeline ทั้งหมด; name validity owner เดียว = `extract_customer_info()` final output (2–40 ตัว, ไม่มี digit, ไม่บังคับ space) หลัง EN fallback; history scan เก็บ contextual denylist ลบแค่ shape checks
+- **แผน**: RED first (flip escape pins + fixtures ใหม่) → implement (ลบ BUG-D + `_is_question_msg`/`_QUESTION_MARKERS`, lock unconditional ทั้ง v2/legacy, ลบ `_post_handoff_gate`+escape kw tables ถ้าไม่มี consumer, `_get_post_handoff_exceptions`, td `_post_handoff_escape`/`_valid_claim_name`, correction persist, parser final check, merge precedence-only) → structural audit → fresh verify → docs
+- **ผล (implemented)**: RED 36 tests → GREEN ทั้งหมด · ลบแล้ว: BUG-D elif, `_QUESTION_MARKERS`/`_is_question_msg`, `_post_handoff_gate`, td `_post_handoff_escape`+`_valid_claim_name`+`post_handoff_exceptions` param, `_get_post_handoff_exceptions`, v2 `_post_handoff_info`/`_has_info`/`_is_post_handoff_exception` machinery, in-SM marker+second gate (legacy), shape re-checks ทุกจุด (ยกเว้น history contextual denylist ตาม contract) · เพิ่ม: unconditional lock ที่ `_chat_impl` (ก่อน deterministic responders ทั้งหมด) + `chat_v2._check_deterministic` + ทั้ง SM heads; `_is_active_post_handoff(req, history)` internalize marker; parser final gate ใน `extract_customer_info`; legacy confirm-correction `_claim_transition`; fix NameError `_is_post_handoff_product_q`→`_is_product_q` inline · structural audit: BUG-D branch=0, `claim_info_incomplete` producer=0, escape helpers=0, dup name validators นอก parser=0, evaluator=1/transition owner=1/storage writers=2, runtime −201 LOC net
+- **Verify (fresh)**: 5 suite + 7 sibling `284 passed, 19 skipped, 8 xfailed` · handoff-transport standalone `38/38` · py_compile 5 ไฟล์ OK · `git diff --check` clean · `test_anger_detection_regression` 11 fail **เท่ากับ baseline `72c325e` พอดี** (offline `_send_handoff` POST fail — pre-existing env, ไม่เกี่ยว diff) · SRS_SSD §6 อัปเดต (ลบ 3 dead rows: `_get_post_handoff_exceptions`/`_post_handoff_gate`/`_post_handoff_escape`+`_is_question_msg`) · ยังไม่ stage/commit/push/deploy — รอ review
+
+##### 2B.5 boundary correction (independent review: H1+H2+M3) — ผ่านแล้ว
+
+- **Root causes**: (1) `_build_post_handoff_response` set `handoff_to_admin=True`+`handoff_reason="post_handoff_waiting"`+routing `"handoff"` — downstream (liveAssignmentService/route.ts) ตี flag เป็นคำสั่ง handoff ใหม่ → re-POST ได้แม้ Python ไม่ POST (2) `chat_v2` รัน `_build_context`→`_run_vision`→`describe_images` ก่อน `_check_deterministic` — active ticket+รูป เสีย vision quota ก่อน lock (3) `use_v3` dispatch ก่อน lock — v3 bypass ownership ทั้งหมด
+- **วิธีแก้**: ย้าย lock เป็น owner เดียวที่ `_chat_impl` entry (บรรทัดแรกหลัง `_total_start`, ก่อน v3/v2 dispatch/`_db()`/vision/persona/shadow/deterministic/intent/LLM) — ใช้ `_is_active_post_handoff(req, req.history)` evaluator เดิม · wait response = `handoff_to_admin=False`/`handoff_reason=None`/routing `"human_wait"` (`post_handoff_waiting` เหลือแค่ steps+routing reason) · ลบ duplicate gates ทั้งหมด: v2 `_check_deterministic`, `handle_warranty_flow`, `handle_warranty_flow_legacy`, legacy `_chat_impl` gate · `_expectations_met` action=locked แก้เป็น assert wait-only (flag=False/reason=None/path=human_wait/0 llm/0 POST) + self-tests · fixtures locked ลบ `handoff_reason` pin (13 rows) · 5f direct-SM lock tests → `app.chat` boundary · shadow sweep skip boundary-locked turns (lock ก่อน shadow ตาม spec)
+- **ผลกระทบ**: direct SM call (bypass app.chat) ไม่มี lock อีกต่อไป — production entry เดียวคือ /chat; `turn_decision` pure อยู่ (ไม่ side-effect); wording ผ่าน `guards.enforce` ปลอดภัย (source `warranty_claim_flow` skip rewrite, escalate rules ไม่ match)
+- **Verify**: RED 41 fail vs pre-correction runtime (stash-check) → GREEN: replay+5f+contract+td+shadow `265 passed` + siblings `79 passed` + transport `38/38` · `tsc --noEmit` clean · `npm run build` green · owner count=1 (app.py:639) · runtime −214 LOC net · anger suite 11 fail = baseline `72c325e` เท่าเดิม · ยังไม่ stage/commit/push/deploy
+- **COMMITTED — closeout**: Commit 1 = `e26456c` `fix: centralize post-handoff ownership lock` (13 files, +673/−444) · Commit 2 = docs log entry นี้
+  - Root causes ที่ปิด: H1 (wait response ส่ง handoff command ไปหา downstream), H2 (v2 vision เสีย quota ก่อน lock), M3 (v3 bypass lock) + Phase 2B.5 ทั้งชุด (BUG-D catch-all, duplicate name validators, post-handoff escape machinery)
+  - Wait-only contract: `handoff_to_admin=False` / `handoff_reason=None` / routing `path="human_wait"` — `post_handoff_waiting` เหลือแค่ observability (steps + routing reason) — downstream `liveAssignmentService`/`test-assignment` ตี flag เป็น command เท่านั้น → ไม่มี re-POST
+  - Enforcement owner: 3 sites → **1** (`_chat_impl` entry, app.py:639 — ก่อน v3/v2/`_db()`/vision/persona/shadow/deterministic/intent/LLM)
+  - Runtime LOC delta รวม Phase 2B.5 vs `72c325e`: +105/−321 ≈ **net −216** (commit stat รวม docs/tests: +673/−444)
+  - Verification counts ที่ freeze ก่อน commit: focused batch **344 passed / 19 skipped / 8 xfailed** · handoff transport **38/38** · fixture validator 69 rows pass · `tsc --noEmit` clean · `npm run build` green · `git diff --check`/`--cached --check` clean
+  - `test_anger_detection_regression` **11 failures** = identical signature vs baseline `72c325e` (offline `_send_handoff` POST limitation — pre-existing, ไม่รวมใน green totals)
+  - Residual: `_is_active_post_handoff` ยังมี **compatibility marker fallback** (scan marker ใน model message ล่าสุด) เฉพาะเมื่อ `ticket_state` ไม่ทราบ — structured state ยังไม่แทน keyword 100%; direct SM call bypass `app.chat` ไม่ enforce ownership (by design — /chat คือ boundary เดียว)
+  - Next: **Phase 2B.6** (episode-scoped admin event สำหรับ explicit claim resolution/cancellation) แล้ว **2B.7** ก่อน 2C — 2C (multi-need turn planning + authoritative subjects) ยังไม่เริ่ม
+
+#### conversations_shp duplicate identity audit (ผ่าน read-only audit — รอ writer fix + cleanup approval)
+- **เหตุผล:** Next instrumentation สร้าง `{conversation_id:1} unique sparse` ไม่ผ่านด้วย E11000 ที่ `shp_103952262954224262`; ต้องแยกว่าเป็น duplicate ใน logical conversation เดียวหรือ ID ชนข้าม shop/platform ก่อนแก้ข้อมูลหรือ schema
+- **ขอบเขตที่อนุมัติ:** โหลด root `.env` ด้วย `load_dotenv(override=False)` ใน subprocess ชั่วคราวโดยห้ามแสดง/จดจำค่า; full duplicate census + target structural comparison + `listIndexes` เท่านั้น
+- **safety:** Mongo writes=0; ห้าม delete/merge/update/createIndex; ไม่เปิด botworker/provider/API; ปิด client และลบ `/tmp` script หลัง audit
+- **ผล census:** total=151,853 และทุก doc มี string `conversation_id`; duplicate groups=731, extra docs=1,004, group size 2/3/4/5 = 471/248/11/1; cross-shop=0, cross-platform=0, cross-nonempty-customer=0 (478 groups เป็น missing→filled customer field ไม่ใช่คนละลูกค้า)
+- **root cause evidence:** duplicate receive range 2026-09-04 ถึง 2026-10-14 → writer ยังสร้าง snapshot ใหม่แทน upsert logical conversation เดิม; target E11000 pair อยู่ shop/platform/customer เดียวกัน ต่างเฉพาะ message/timestamp snapshot fields
+- **cleanup readiness:** ตรวจ duplicate docs 1,735 ตัว; legacy admin residue=0; latest-by-data_received_at เก็บข้อมูลครบ 730/731 groups, มี 1 group ต้อง preserve `status` และเลือก last-message tuple จาก timestamp ใหม่สุดแทนการลบแบบ keep-latest ตรงๆ
+- **index state:** ไม่มี standalone `{conversation_id:1}`; มีเพียง non-unique `{shop_id:1,conversation_id:1}` และ indexes สำหรับ list/sort อื่น; Mongo writes=0, client closed ทุก run, `/tmp` script deleted
+- **verdict:** `CONVERSATIONS_DUPLICATE_ROOT_CAUSE_CONFIRMED_WRITER_FIX_REQUIRED_BEFORE_CLEANUP` — ห้ามลบ 1,004 docs หรือสร้าง unique index จน writer เปลี่ยนเป็น atomic upsert ที่ stable identity; หลัง writer fix จึง dry-run field-wise merge/delete แล้ว create+verify unique index
+- **remediation plan:** `docs/plans/2026-10-14-conversations-shp-duplicate-remediation-plan.md` — online writer-first, zero-service-downtime rollout, bounded CAS cleanup, unique-index gate, rollback และ 24h observation; ยังไม่ execute/commit
+
+#### Phase 2B.6 Review-Fix (กำลังทำ — independent review: H1+H2+M1+M2, ห้าม commit/2B.7)
+- **Root causes (source-proven)**:
+  - H1: `recordClaimHandoff` → `upsertMeta` unconditional `$set` (ไม่มี fence) → terminal episode resurrect / stale ep ทับ active ใหม่ / outcome เก่าค้าง block ep ใหม่; `applyClaimOutcome` CAS เช็คแค่ active ep — malformed `{active:ep1,outcome:ep1}` overwrite terminal ได้
+  - H2: route กลืน `recordClaimHandoff` throw → 2xx false success; `_send_handoff` อ่าน `conversation_products.load_claim_state` + `_claim_lifecycle` เองแบบ best-effort (hidden Mongo read ใน transport owner — เคยทำ test import real module → load sentence_transformers)
+  - M1: `ClaimSection` ไม่มี key → `busy/applied/errorMsg` รั่วข้าม conversation/episode switch
+  - M2: UI/type อ่าน `order_id` แต่ Python producers ทุกจุดส่ง `customer_order_id` (wf:469/525/569/1363/1427/1472 — keys จริง: customer_name/customer_phone/customer_order_id/purchase_date/claim_topic เท่านั้น; `order_id`/`product_name`/`warranty_status`/`warranty_months`/`expiry_date` ไม่มี producer)
+- **Correction plan (owner เดิมเท่านั้น — ไม่มี helper/guard/retry owner ใหม่)**:
+  1. `recordClaimHandoff` — episodeId present → fenced `findOneAndUpdate`+upsert: filter `{conversation_id, "claim_outcome.episode_id":{$ne:E}, $or:[{active:E},{active:null}]}` + `$set` พร้อม `claim_outcome:null` (same-open-ep refresh / null-active supersede เขียนได้; terminal-ep E fenced out; active E'≠E fenced out) · E11000 → CAS อีกครั้งเดียวบน winner doc (bounded, no loop) · episodeId absent → upsertMeta เดิม (non-claim unchanged)
+  2. `applyClaimOutcome` — เพิ่ม `"claim_outcome.episode_id":{$ne:episodeId}` ใน CAS filter → first-terminal-wins แม้ malformed seed
+  3. `_send_handoff` — ลบ hidden Mongo read (lines 96-107) → `episode_id` optional kwarg explicit; payload ใส่เมื่อมีค่า
+  4. `_build_warranty_claim_response` — รับ `claim_state` param → evaluate `_claim_lifecycle` → open⟹episode บังคับ (open-without-episode = transport identity failure → falsy handoff, ไม่ POST); 4 call sites (618/1030/1535/1775) ส่ง `_claim_state`/`claim_state` เดิมใน scope; `_handle_first_message_claim` capture `_claim_transition` return (เดิมทิ้ง)
+  5. bot-handoff route — `recordClaimHandoff` throw → `json({...respBody, ok:false}, 503)` retryable (ownership committed แล้ว → Python retry → converge+emit eid เดิม → audit once)
+  6. `ClaimSection` — `key={conversation.id + "|" + (active_claim_episode_id ?? "-")}` ที่ callsite (remount = reset local state); อ่าน `customer_order_id` แทน `order_id`, ลบ `product_name` row
+  7. types — `bot_claim_info.order_id`→`customer_order_id`, ลบ `product_name`/`warranty_status` (ไม่มี producer); `BotHandoffBody.claim` เหลือเฉพาะ runtime keys
+- **RED tests**: R1-R7,R9-R12 ใน test-ownership-transport.ts + R8 + U-rewrite ใน test_handoff_transport.py (U5 = no-Mongo-read pin ผ่าน counting stub)
+- **Residual ที่รับ**: delayed-stale-ep หลัง *อีก* episode terminal ไม่ distinguishable (episode_id=uuid4 ไม่มี ordering, doc มี outcome slot เดียว) — ตาม truth table ที่อนุมัติ
+- **แก้แล้ว (implemented, unstaged)**:
+  - `recordClaimHandoff` fenced write + `applyClaimOutcome` outcome-guard — error: terminal ep resurrect/stale ทับ active/outcome ทับได้ → cause: unconditional upsert + CAS ไม่เช็ค outcome เดิม → fix: fence `{claim_outcome.episode_id:{$ne:E}, $or:[{active:E},{active:null}]}` + CAS มี `claim_outcome.episode_id≠E` → impact: stale/duplicate handoff harmless; episode ใหม่ supersede outcome เก่า atomically; non-claim path (no episodeId) ไม่เปลี่ยน
+  - route `recordClaimHandoff` throw → 503 `ok:false` (เดิม catch แล้วต่อ→false 2xx); ownership committed คงอยู่ → Python retry converge ผ่าน `handoff_event_id` dedupe + metadata write once → impact: claim handoff completion ไม่มี false success; audit ไม่ซ้ำ
+  - `_send_handoff` ลบ `load_claim_state`/`_claim_lifecycle` hidden read → explicit `episode_id` kwarg; `_build_warranty_claim_response(claim_state=...)` + `_handle_first_message_claim` capture transition return (episode ที่ mint จริง); open-without-episode → ไม่ POST+flag False (identity failure ไม่ใช่ success); terminal → POST info-only; non-claim callers ทั้งหมดไม่ส่ง → ไม่มี key → impact: episode transport explicit เดียว ไม่มี hidden read
+  - `ClaimSection` key `{conv.id}|{active_claim_episode_id ?? "-"}` → remount reset busy/applied/errorMsg; `customer_order_id` canonical (route body/type/UI) — `order_id` producer=0 → contract ลบ → impact: UI แสดง order id จริง + state ไม่รั่ว
+- **F3-3 flake (test-only)**: error `total must be 5, got 0` intermittent → cause: seed `new Date()` shared instance เท่า route `end` (daily `$lt` exclusive) ใน ms เดียวกันเมื่อ JWT path เร็ว → fix: seed `now-1000ms` clamp ≥ local midnight+1 → impact: เคสอื่นไม่แตะ; 5 consecutive full runs green
+- **Verify (fresh, post-fix)**: TS ownership transport **231/231** ×5 consecutive (R1–R12 + CO1–CO16 + controls) · Python handoff transport **47/47** (U1–U5 + R8a–d + C4a/b sig-update) · claim contract **52 passed, 1 skipped** · canonical batch (contract+td+td-shadow+retrieval-shadow+5f-claim+5f-handoff+troubleshoot-5c+legacy-replay) **312 passed, 19 skipped, 8 xfailed** · replay import isolation exit 0 · fixture validator all rows pass · `py_compile` 3 ไฟล์ OK · `tsc --noEmit` clean · `npm run build` pass · `git diff --check` clean · anger suite **11 fail = baseline signature** (offline `_send_handoff` POST — pre-existing, identical `72c325e`)
+- **Structural audit**: `_send_handoff` Mongo/claim read=0 · episode producer=1 (`_claim_transition` 2 mint sites in-owner: new ep + legacy promote) · claim transport path=1 (builder→`_send_handoff`) · raw `conversations` claim writer=0 · claim metadata owner=1 · outcome owner=1 · lifecycle evaluator=1 · Python transition owner=1 · `_TERMINAL_CLAIM_REASONS`=0 · `order_id` UI contract=0 · helper/guard/retry owner ใหม่=0
+- **Complexity delta**: runtime net ≈ +60 LOC (fence filters + docstrings + explicit param plumbing) — ไม่มี module/helper/retry loop ใหม่
+- **ยังไม่ stage/commit/push/deploy — รอ review; Phase 2B.7 ยังไม่เริ่ม**
+
+##### 2B.6 Review-Fix รอบ 2 (independent review: F1+F2+F3 — กำลังทำ)
+
+- **Root causes (source-proven)**:
+  - F1: `recordClaimHandoff` → `Promise<void>` — fenced no-op (stale/terminal) ไม่มีผลลัพธ์ → route ยังคืน 2xx assigned/queued เดิม → Python ถือ stale handoff confirmed
+  - F2: `applyClaimOutcome` commit CAS ก่อน `logAdminEvent` — audit throw → route 500; retry เจอ persisted outcome → `already_applied` return โดยไม่ repair audit → audit หายถาวร
+  - F3: claim-outcome route คืน `already_applied` เปล่าๆ; InfoTab `setApplied(requested)` → conflicting retry (resolved→cancelled) แสดงผิดจาก authoritative
+- **Correction plan (owner เดิมเท่านั้น)**:
+  1. `recordClaimHandoff` → `{status: written|already_terminal|stale_episode, claimOutcome?}` — inspect fenced result; null/E11000-reconciled → bounded reread ครั้งเดียว classify (outcome.ep==E→already_terminal / active==E→written / active อื่น→stale_episode / anomalous→throw)
+  2. route: written→success เดิม · already_terminal→200 converged `{claim_metadata:"already_terminal", claim_outcome}` · stale_episode→409 `ok:false` (permanent 4xx → Python falsy no retry) · throw→503 เดิม — ownership committed ไม่ undo
+  3. `applyClaimOutcome` → `{result, claimOutcome}` — `already_applied` path call `logAdminEvent(eventId=ep)` ด้วย **persisted** actor/outcome (E11000 dedupe เป็น owner เดียวของ exactly-once; throw→propagate→retry repair)
+  4. claim-outcome route คืน `claim_outcome` persisted ทั้ง applied/already_applied
+  5. InfoTab `setApplied(body.claim_outcome.outcome)` — absent→errorMsg ไม่เดาค่า
+- **RED tests**: R13 stale-ep → typed stale + 409 + ep2 metadata intact · R14 terminal-ep → already_terminal + converged 200 + outcome truth · R15 audit crash → retry repair exactly-once · R16 conflicting retry → persisted outcome on wire + UI pin
+
+#### Phase 2D Botworker Platform/Shop Scope Gate — วางแผนแล้ว, รอ 2B/2C ปิดก่อน
+
+- **ลำดับ:** ทำ 2B.6 → 2B.7 → 2C.1-2C.3 ให้เสร็จก่อน แล้วทำ 2D ก่อน Revised Phase 3; ห้ามแทรก runtime diff เข้า working tree ของ 2B.6
+- **เป้าหมาย:** ทดลองคำตอบผ่าน `/botworker` sandbox กับร้านเดียวโดยไม่ส่งออก Shopee จริง และไม่เปิดสิทธิ์ให้ร้าน/platform อื่นโดยอุบัติเหตุ
+- **contract:** `global bot_worker_enabled AND platform enabled AND exact (platform,shop_id) shop.bot_worker_enabled`; missing/new config = OFF; `connected`/`enabled_for_chat` ไม่ถูกนำมาใช้แทน
+- **runtime owner:** resolve scope ครั้งเดียวต่อ cycle แล้วกรอง Mongo ก่อน claim; recovery ใช้ scope เดียวกัน; ไม่มี per-message settings lookup/guard chain/parallel poller; ปิดร้าน/platform = หยุด admission ใหม่และปล่อย in-flight จบ, global OFF = abort/drain เดิม
+- **UI:** `/shops` มี platform switches + switch ต่อร้าน พร้อม effective state; TikTok/Lazada default OFF จน backend พร้อม
+- **canary:** global+Shopee+ร้านเดียว, workflow OFF, concurrency=1, platform API calls=0, ร้านอื่น unclaimed; AI agent ห้ามเปิด botworker/live canary เอง ต้องมี operator approval แยก
+- **สถานะ:** plan-only; runtime/tests/schema ยังไม่เปลี่ยนจากรายการนี้
+
+**ผลลัพธ์ (2026-10-14 — review-fix round 2 เสร็จ, ยังไม่ commit)**
+- **RED**: 231/235 → fail เฉพาะ R13-R16 ด้วยเหตุที่คาด (recordClaimHandoff void=undefined, terminal no-op ไม่ classify, audit=0 หลัง retry, route ไม่มี claim_outcome บน wire) · เดิม 231 green ครบ
+- **Impl (owner เดิมทั้งหมด)**: `recordClaimHandoff → Promise<{status: written|already_terminal|stale_episode, claimOutcome?}>` — fenced write + E11000 reconcile + bounded reread ครั้งเดียว classify (ไม่ใช่ silent no-op) · bot-handoff route mapping: written→success · already_terminal→200 converged+claim_metadata marker+persisted outcome · **stale_episode→409 ok:false** · throw→503 · `applyClaimOutcome → {result, claimOutcome}` — already_applied path repair `logAdminEvent(eventId=ep)` ด้วย persisted actor/outcome ก่อน return (audit crash window ปิด — commit ก่อน audit ล้มแล้ว retry สามารถ repair ได้ ≤1 ครั้ง ผ่าน E11000 dedupe เดิม) · claim-outcome route คืน `claim_outcome` ทั้ง applied/already_applied · InfoTab อ่าน `body.claim_outcome.outcome` — absent→error ไม่สร้างค่าจากปุ่ม
+- **GREEN**: TS 235/235 (R13-16 ผ่าน + เดิม 231 ครบ; CO1-16 assertions อัปเดตเป็น `.result` เพราะ return shape เปลี่ยน) · Python transport 47/47 · claim contract 52+1s · canonical batch 312 pass/19 skip/8 xfail · replay isolation exit 0 · fixture validator all rows · py_compile OK · tsc clean · npm build pass · git diff --check clean · anger 11 fail = baseline signature เดิม (offline `_send_handoff` POST — เทียบ `72c325e` ตรงกัน ไม่ใช่ regression)
+- **Structural audit**: metadata writer=1 · outcome writer=1 · audit dedupe owner=1 (logAdminEvent E11000 — repair path ใช้ owner เดียว ไม่เพิ่ม settlement helper) · route claim-outcome Mongo access=0 · stale→2xx impossible (409 เท่านั้น) · UI ไม่ derive outcome จากค่าที่กด
+- ยังไม่ stage/commit — รออนุมัติ + Phase 2B.7 ยังไม่เริ่ม
+
+##### 2B.6 Review-Fix รอบ 3 — Final Handoff Ordering Correction (กำลังทำ)
+
+- **Finding (High — source-proven)**: `handoffToAdmin` commit ownership/reopen/audit ก่อน `recordClaimHandoff` classify — stale ep หรือ terminal ep ได้รับ verdict (409/already_terminal) หลัง side effects เกิดไปแล้ว: closed conv ถูก reopen, admin ถูก assign, audits เขียนแล้ว
+- **Root cause**: route ordering — `handoffToAdmin` (route:230) รันก่อน `recordClaimHandoff` (route:266); episode fence verdict มาหลัง ownership mutation
+- **Correction plan (reorder owner เดิม — ไม่มี helper/guard/module ใหม่)**:
+  1. request มี `episode_id` → `recordClaimHandoff` **ก่อน** `handoffToAdmin` (หลัง getConversation 404)
+  2. stale_episode→409 ทันที (handoff calls=0) · already_terminal→converged 200+persisted `claim_outcome` (handoff calls=0, ไม่ synthesize outcome — Python confirm เฉพาะ outcome.state∈{assigned,queued} → absent outcome = not confirmed) · written→ไป handoffToAdmin · throw→503 (handoff calls=0)
+  3. written แล้ว handoff fail → เก็บ metadata ไม่ rollback → retry same identity converge (fence ผ่าน same-ep refresh)
+  4. ไม่มี `episode_id` → non-claim flow เดิมทั้งหมด (claim-only write อยู่ post-handoff เหมือนเดิม)
+- **RED tests**: R17 stale→409+handoff=0+status/owner/audit ไม่เปลี่ยน · R18 terminal→converge ไม่มี handoff/reopen/synthetic outcome · R19 metadata throw→503+handoff=0 · R20 metadata-written→handoff retryable-fail→retry converge (ownership เดิม+metadata intact+audit once)
+
+**ผลลัพธ์ (2026-10-14 — review-fix round 3 เสร็จ, ยังไม่ commit)**
+- **RED**: 235/239 → fail เฉพาะ R17-R20 ด้วย ordering จริง (R17/R19 handoff calls=1, R18 reopened:true+assigned ก่อน terminal verdict — smoking gun, R20 meta=undefined เพราะ failed return ก่อน metadata write) · เดิม 235 green
+- **Impl**: reorder owner เดิมเท่านั้น — `recordClaimHandoff` เป็น gate หลัง getConversation/404 ก่อน `handoffToAdmin` เมื่อมี `episode_id`; stale→409 / terminal→200 converged (outcome:null — Python ไม่ confirm เพราะไม่มี outcome.state) / written→handoff / throw→503 — ทุก fail path handoff calls=0 · claim-only (no episode_id) อยู่ post-handoff เดิม · ไม่มี helper/guard/module/retry ใหม่
+- **GREEN**: TS 239/239 (R17-20 ผ่าน + เดิมครบ; R7 อัปเดตตาม ordering contract ใหม่ — metadata fail→ไม่มี ownership commit) · Python transport 47/47 · claim contract 52+1s · canonical batch 312/19s/8x · isolation exit 0 · fixtures all rows · py_compile OK · tsc clean · build pass · diff --check clean · anger 11 fail = baseline signature เดิม
+- **Ordering invariant ใหม่**: `conversation exists → episode fence/metadata → handoff ownership` — stale/terminal/metadata-fail paths ไม่มีทางถึง handoffToAdmin
+- ยังไม่ stage/commit — รอ review; Phase 2B.7 ยังไม่เริ่ม
+
+##### 2B.6 Review-Fix รอบ 4 — Atomic Episode Fence (TOCTOU gate↔ownership CAS) (กำลังทำ)
+
+- **Finding (High — source-proven)**: round-3 ordering ปิด sequential bypass แล้ว แต่ยังมี TOCTOU — gate `recordClaimHandoff(E)`→written แล้ว `handoffToAdmin`→`commitHandoffState` CAS มี fence เฉพาะ ownership (`assigned_to`/`pending_assignment`/`status`) **ไม่มี `active_claim_episode_id`/`claim_outcome.episode_id`** → terminalize E หรือ E2-active แทรกระหว่าง gate กับ CAS → CAS ยัง commit → assign/reopen บน episode ที่ตายแล้ว
+- **Race timeline**: req(E) gate→written → admin `applyClaimOutcome(E,resolved)` (outcome=E, active→null) → req(E) เดิม resume → ownership CAS ผ่าน → handoff assigned + audits emit — terminal E ถูก override
+- **Correction plan (atomic ที่ ownership CAS owner เดิม — ไม่มี helper/retry/parallel path)**:
+  1. `expectedClaimEpisodeId` optional param ไหล `route → handoffToAdmin → commitHandoffState`
+  2. CAS fence เดิม + `{active_claim_episode_id: E, claim_outcome.episode_id: {$ne: E}}` เมื่อมี E — atomic กับ status/assigned_to/pending/reopen/event-id write เดียวกัน
+  3. `handoffToAdmin`: meta read เดิม (getMeta) เช็ค claim verdict ก่อน converge — outcome.ep==E→terminal / active≠E→stale → return verdict (ไม่ emit); CAS miss → bounded reread เดิม → claim verdict ก่อน generic converge
+  4. verdict → `HandoffOutcome.claim_verdict + claim_outcome` (type เดิม ขยาย optional เท่านั้น) → route map เหมือน gate: stale→409 / terminal→200 converged+persisted outcome / ไม่ synthesize
+  5. ไม่มี `episode_id` → fence/behavior byte-equivalent เดิม
+- **RED tests**: R21 terminalize ระหว่าง gate↔CAS → ไม่ assign/reopen/audit + converged terminal · R22 E2 active ระหว่าง gate↔CAS → E1 ไม่ assign + E2 intact + 409 · R23 non-episode regression pin (pass ทั้งก่อน/หลัง) · R24 same-ep active ตลอด → assigned+audit once (pin)
+- baseline: TS 239 · transport 47
+
+**ผลลัพธ์ (2026-10-14 — review-fix round 4 เสร็จ, ยังไม่ commit)**
+- **RED**: 241/243 → R21/R22 fail จริงเพราะ `commitHandoffState` CAS ไม่มี episode fence (interleave terminalize/E2 แล้ว CAS ยัง commit → คืน `200 outcome.state:"assigned"` ทั้งคู่) · R23/R24 pass เป็น regression pins · เดิม 239 green
+- **Impl (atomic ที่ CAS owner เดิม — ไม่มี helper/guard/retry/module ใหม่)**: `expectedClaimEpisodeId` optional ไหล `bot-handoff/route.ts → handoffService.handoffToAdmin → statusConversationService.commitHandoffState` · CAS fence เพิ่ม `fence.active_claim_episode_id = E; fence["claim_outcome.episode_id"] = {$ne: E}` ใน `findOneAndUpdate` เดียวกับ ownership/reopen/event-id · `handoffToAdmin` เช็ค claim verdict บน initial `getMeta` และ CAS-miss re-read **ก่อน** generic converge + **ไม่ emit** audit เมื่อเป็น `already_terminal`/`stale_episode` · `HandoffOutcome` ขยาย optional `claim_verdict`/`claim_outcome` · route map verdict เดียวกับ gate (stale→409 `ok:false`, terminal→200 converged `outcome:null`+persisted `claim_outcome`) · absent `episode_id` → CAS filter ไม่เปลี่ยน
+- **GREEN & full verification**: TS ownership transport **243/243** · Python handoff transport **47/47** · claim contract **52+1s** · canonical Phase 2B batch **312 pass/19 skip/8 xfail** · error-policy **38/38** · boundary **20/20** · config-failclosed **4/4** · enable-checkpoint **18/18** · idempotency **71/71** · recovery-freshness **59/59** · runtime-mongo-safety **110/110** · production-races **37/37** · replay isolation exit 0 · fixture validator all rows · `py_compile` OK · `tsc --noEmit` clean · `npm run build` pass · `git diff --check` clean · anger **11 fail = baseline signature เดิม** (`72c325e`, offline `_send_handoff` POST — รายงานแยก ไม่นับ green)
+- **ยังไม่ stage/commit/push/deploy — รอ review; Phase 2B.7 ยังไม่เริ่ม**
+
+##### 2B.6 Final Cleanup + Independent Pre-Commit Gate (กำลังทำ)
+
+- **Manifest Partitioning (ยืนยันจาก working tree จริง — 21 entries รวม)**:
+  - **Phase 2B.6 = 20 entries** (19 modified + 1 untracked `ChatAdminWeb/src/app/api/admin/conversations/[conversationId]/claim-outcome/`)
+  - **Out-of-scope entry ที่ 21** = `?? docs/plans/2026-10-14-conversations-shp-duplicate-remediation-plan.md` (งาน duplicate audit แยกต่างหาก)
+  - **Out-of-scope hunks ในไฟล์ร่วม** = Phase 2D plan hunks ใน `docs/plans/2026-09-30-legacy-shopee-unified-turn-evidence-retrieval-rebaseline-plan.md` และ `getoutofmywaybotkaikrook2.md` (ต้องแยกออกตอน stage candidate)
+- **Known cleanup (comment/docs)**:
+  1. `statusConversationService.ts:454` comment บน `recordClaimHandoff` ยังเขียนว่าเรียกหลัง ownership commit → แก้ให้ตรง flow จริง (มี `episode_id` = gate ก่อน ownership commit + ownership CAS บังคับ atomic episode fence ซ้ำ; ไม่มี `episode_id` = หลัง ownership commit เดิม)
+  2. `SRS_SSD.md:109` ปรับคำอธิบาย `recordClaimHandoff` throw ให้แยกชัดระหว่าง episode gate (ก่อน handoff → 503 zero ownership commit) กับ non-episode claim refresh (หลัง handoff → 503 ownership คงอยู่)
+- **Independent Full-Diff Audit Finding (Medium — source-proven)**:
+  - `statusConversationService.commitHandoffState` (:305) ใช้ `{ upsert: true }` เสมอ แม้เมื่อมี `expectedClaimEpisodeId` และคืน `committed: true` โดยไม่เช็ค `Boolean(doc)`; บวกกับ `handoffService.handoffToAdmin` (:200) เช็ค `if (E && meta)` (ข้ามเมื่อ `meta == null`) → หากเรียก `commitHandoffState` หรือ `handoffToAdmin` พร้อม `expectedClaimEpisodeId` บน conversation ที่ไม่มี `status_conversation` doc (หรือ doc หายก่อน CAS), Mongo upsert จะคัดลอก `active_claim_episode_id: E` จาก filter ไปสร้าง doc ใหม่และ commit ownership สำเร็จ (`commitHandoffState` กลายเป็นแอบสร้าง claim episode เองโดยไม่ผ่าน `recordClaimHandoff`)
+  - **Fix plan (ใน owner เดิม)**:
+    1. `commitHandoffState`: `upsert: !opts.expectedClaimEpisodeId` และ `committed: Boolean(doc)` (เมื่อมี `expectedClaimEpisodeId` ต้อง match doc ที่เปิด episode นั้นอยู่แล้วเท่านั้น ห้าม upsert สร้างเอง)
+    2. `handoffToAdmin`: เปลี่ยน `if (E && meta)` เป็น `if (E)` (`meta?.claim_outcome?.episode_id === E` / `meta?.active_claim_episode_id !== E`) — ถ้า `meta` ไม่มีขณะมี `expectedClaimEpisodeId` ให้คืน `claim_verdict: "stale_episode"` ทันที ไม่ไป reserve cursor หรือ upsert
+  - **RED test**: R25 `expectedClaimEpisodeId` เมื่อไม่มี meta doc (ทั้ง `commitHandoffState` ตรงและ `handoffToAdmin`) → ห้าม upsert สร้าง episode/ownership ใหม่ (`committed: false` / `claim_verdict: "stale_episode"`, `metaOf === undefined`)
+
+**ผลลัพธ์ (2026-10-14 — Final Cleanup + Independent Pre-Commit Gate เสร็จ, staged เฉพาะ 2B.6 candidate, ยังไม่ commit)**
+- **RED (R25)**: 243/244 → R25 fail จริง (`got committed=true meta={"conversation_id":"r25a","active_claim_episode_id":"ep-ghost","status":"handoff","assigned_to":"admin-1",...}`) เพราะ `upsert: true` คัดลอก `active_claim_episode_id` จาก filter ไปสร้าง doc ใหม่
+- **Impl**: `commitHandoffState` ใช้ `upsert: !opts.expectedClaimEpisodeId` + `committed: Boolean(doc)` · `handoffToAdmin` เปลี่ยน `if (E && meta)` เป็น `if (E)` · แก้ comment `statusConversationService.ts` + docs `SRS_SSD.md`/`schema.md`/roadmap ให้ตรง flow จริง
+- **GREEN & Fresh Verification**: TS ownership transport **244/244** · Python handoff transport **47/47** · claim contract **52+1s** · canonical Phase 2B batch **312 pass/19 skip/8 xfail** · error-policy **38/38** · boundary **20/20** · config-failclosed **4/4** · enable-checkpoint **18/18** · idempotency **71/71** · recovery-freshness **59/59** · runtime-mongo-safety **110/110** · production-races **37/37** · replay isolation exit 0 · fixture validator all rows · `py_compile` OK · `tsc --noEmit` clean · `npm run build` pass · `git diff --check` clean · anger **11 fail = baseline signature เดิม** (`72c325e`, offline `_send_handoff` POST — รายงานแยก ไม่นับ green)
+- **Pre-commit staging**: stage เฉพาะ Phase 2B.6 20 entries (แยก Phase 2D plan hunks ใน roadmap/active log และแยก `conversations_shp` duplicate audit + `docs/plans/2026-10-14-conversations-shp-duplicate-remediation-plan.md` ไว้ใน unstaged working tree) · ยังไม่ commit/push/deploy — รอ review
+
+##### Phase 2B.6 Commit Closeout (committed — 2026-10-14)
+
+- **Commit 1**: `34a0756` `fix: make claim outcomes episode authoritative` — 20 files, +2128/-148 (13 runtime + 3 test + SRS/schema + roadmap Commit-2B.6 hunk + active log 2B.6 blocks)
+- **Final contracts (frozen)**:
+  - claim metadata owner = `recordClaimHandoff` (fenced write + typed `written|already_terminal|stale_episode`)
+  - outcome owner = `applyClaimOutcome` (CAS `claim_outcome.episode_id != ep` + `logAdminEvent` dedupe/repair)
+  - ownership owner = `commitHandoffState` (CAS เดียว: status/assigned_to/pending/reopen/event-id + episode fence)
+  - atomic expected-episode fence: `{active_claim_episode_id: E, claim_outcome.episode_id: {$ne: E}}` ใน `findOneAndUpdate` เดียวกัน
+  - missing-meta claim commit ห้าม upsert (`upsert: !expectedClaimEpisodeId`, `committed: Boolean(doc)`)
+  - terminal/stale classify บน initial meta + CAS-miss reread ก่อน generic converge/emit
+  - Python `_send_handoff` confirm เฉพาะ HTTP ok + `outcome.state ∈ {assigned, queued}` (converged-200 `outcome:null` ≠ success)
+- **RED→GREEN**: R21 terminal interleave gate↔CAS / R22 E2 interleave → RED ก่อน fix, GREEN หลัง atomic fence · R25 missing-meta no-upsert RED (`committed=true ep-ghost`) → GREEN · final **244/244**
+- **Frozen verification**: TS 244/244 · Python transport 47/47 · claim contract 52+1s · canonical batch 312/19s/8x · error-policy 38/38 · boundary 20/20 · config-failclosed 4/4 · enable-checkpoint 18/18 · idempotency 71/71 · recovery-freshness 59/59 · runtime-mongo-safety 110/110 · production-races 37/37 · replay isolation exit 0 · fixture validator pass · py_compile/tsc/build/diff-check clean
+- **anger suite 11 fail** = baseline-identical (`72c325e`, offline `_send_handoff` POST) — รายงานแยก ไม่นับ green
+- **botworker `inFlight` promise-identity leak** (`botWorkerService.ts:1897` add chained promise แต่ delete `p`) = pre-existing จาก commit `43d1ff1` — separate task ไม่รวมใน commit นี้
+- **Phase 2D plan hunks + `conversations_shp` duplicate-remediation plan/blocks ยังไม่รวม** — คงไว้ unstaged/untracked ใน working tree
+- **No push/PR/deploy/botworker/provider/real Mongo/port 8010** — next: Phase 2B.7 residual deletion + botworker inFlight leak fix (parallel tracks)
+
+#### Botworker inFlight Recovered-Promise Leak Fix (กำลังทำ — NEW SESSION 2026-10-14, branch เดิม `feature-legacy-shopee-evidence-retrieval` @ `51d65aa`)
+
+- **Preflight**: branch/HEAD/tree ตรง · bug origin = `43d1ff1` (`git log -L` ยืนยัน: บรรทัดนี้เข้าตั้งแต่ commit นั้น, `7340766` แค่เพิ่ม `signal` arg) · Phase 2B.6 (`34a0756`) ไม่แตะ `botWorkerService.ts` · baseline suite recovery-freshness = **59 tests**
+- **Root cause (source-proven `botWorkerService.ts:1897`)**: `const p = processMessage(...)` แล้ว `inFlight.add(p.catch(()=>{}).finally(()=>inFlight.delete(p)))` — object ที่ add = **chained promise** (`tracked`), object ที่ delete = **`p`** → `delete(p)` miss (p ไม่เคยอยู่ใน Set) → `tracked` ค้างใน `inFlight` ถาวรหลัง settle → recovery ทุกครั้งรั่ว settled promise · `waitForInFlight()` เห็น `inFlight.size>0` ตลอด → drain หมุนจน timeout ทุก call + `Promise.allSettled([...inFlight])` สร้าง garbage ซ้ำบน settled promises = CPU/alloc pressure · graceful shutdown ช้าเต็ม timeout หลังเคย recover claim · **ไม่**ทำให้ provider ถูกเรียกซ้ำ (work จบจริง แค่ tracking รั่ว)
+- **แผน (minimal, อนุมัติแล้ว)**: (1) RED test ใน `test-botworker-recovery-freshness.ts` — seed stale recoverable claim → recover ผ่าน `recoverStaleBuffers()` เดิม → รอ child จบจริง (`botInFlight`/`callBot`/claim terminal + `settle()`) → `waitForInFlight(1000)` ต้อง return ภายใน bounded checkpoint (<400ms margin); code เดิมต้อง FAIL (2) fix เฉพาะบรรทัดนั้น: `const tracked = p.catch(()=>{}); inFlight.add(tracked); tracked.then(()=>inFlight.delete(tracked));` — add/delete object เดียวกัน, rejection ถูก consume, ไม่มี helper/guard/retry/clear-all (3) GREEN ด้วย default heap + sequential regression + tsc + build (4) docs SRS + log (5) commit 1 = 3 files (service+test+SRS) · commit 2 = log closeout
+- **ข้อห้ามรอบนี้**: ไม่ branch/push/PR/deploy/worker/.env/real Mongo/provider/LLM/port 8010 · ไม่แตะ Phase 2B.7/2C/2D · ไม่เพิ่ม heap เพื่อซ่อน leak
+
+##### Botworker inFlight Leak — Commit Closeout (committed — 2026-10-14)
+
+- **Commit 1**: `76a8064` `fix: release recovered botworker promises` — 3 files, +31/-2 (`botWorkerService.ts` +5/-2 · `test-botworker-recovery-freshness.ts` R52+N7 wait · `docs/SRS_SSD.md` drain-identity clause)
+- **Bug origin**: `43d1ff1` (git log -L ยืนยัน — `7340766` แค่เพิ่ม `signal` arg); Phase 2B.6 (`34a0756`) ไม่แตะไฟล์นี้
+- **Promise identity before/after**: เดิม `inFlight.add(p.catch(()=>{}).finally(()=>inFlight.delete(p)))` — add `tracked` แต่ delete `p` → miss → settled promise รั่วถาวรต่อ recovery 1 ครั้ง · ใหม่ `const tracked = p.catch(()=>{}); inFlight.add(tracked); tracked.then(()=>inFlight.delete(tracked))` — object เดียวกัน, rejection consumed, drain เห็นงานจนจบจริง — ไม่มี helper/guard/retry/clear-all
+- **RED evidence**: full suite บน code เดิม **OOM (heap 4GB, ~176s, ตายที่ N7)** — waitForInFlight ทุก call spin `allSettled`+`setTimeout` alloc storm จน timeout เพราะ Set ไม่ว่าง · focused `/tmp` runner (R52 contract เดียวกัน, ไม่ commit): `waitForInFlight(1000)` คืน **1000ms** (เต็ม timeout) + callBot=1 claim=bot_answered = child จบจริงแต่ promise ค้าง · บันทึกเพิ่ม: flag@400ms checkpoint อ่านค่าผิดได้ (sleep-continuation ถูก starve โดย alloc storm) → assertion ใช้ **elapsed** แทน
+- **GREEN evidence (default heap, ไม่มี NODE_OPTIONS)**: runner เดิมคืน **0ms** · suite เต็ม **60/60** exit 0 ไม่ OOM ไม่ค้าง · regression sequential: idempotency **71/71** · enable-checkpoint **18/18** · boundary **20/20** · error-policy **38/38** · runtime-mongo-safety **110/110** · production-races **37/37** · `tsc --noEmit` clean · `npm run build` pass (84/84) · `git diff --check` clean
+- **Test-side correction (N7)**: settle() เห็นเฉพาะ in-flight work ไม่เห็น armed debounce timer — เดิมผ่านเพราะ drain leak burn ~80ms/round ให้ timer(60ms) ยิงทัน; drain ถูกต้องแล้ว return เร็ว → เพิ่ม deterministic wait (`callBot===0` loop ≤1s) ตาม pattern N5 — runtime semantics ไม่เปลี่ยน
+- **Structural audit**: `inFlight.add` owners = 3 — poll child `p.finally(delete p)` · recovered `tracked.then(delete tracked)` (fixed) · `checkWaitTimeouts` `run.then(delete,delete)` — identity ตรงครบ · `activePolls` owner เดียวตรงอยู่แล้ว · runtime LOC +3 net · query/provider/shutdown semantics ไม่เปลี่ยน · **shutdown ก่อน/หลัง**: เดิม drain ช้าเต็ม timeout+alloc storm หลังเคย recover; ใหม่ return เมื่องานจบจริง
+- **ไม่มี worker/provider/real Mongo/LLM/port 8010** — fake-mock offline เท่านั้น · **Phase 2B.7 ยังไม่เริ่ม** · ไม่ push/PR/deploy
+
+#### Phase 2C.2 Persisted ConversationSubjectSet — Contract Pins + RED (กำลังทำ — 2026-10-15, branch `feature-legacy-shopee-evidence-retrieval` @ `ba14fb4`)
+
+- **Baseline (fresh, pre-edit)**: `test_turn_decision.py` **107** · `test_turn_decision_shadow.py` **17** · `test_phase2_claim_state_contract.py` **52+1s** · canonical batch **334/19s/8x** · fixture validator **69 rows pass** · anchor/compare suites **23** · `py_compile`+`git diff --check` clean · state: tree มีเฉพาะ `getoutofmywaybotkaikrook2.md` modified + test file ใหม่ untracked
+- **P1 — identity domain = Option B (item_id เท่านั้น)**: `subject_ids` = normalized item_id string (`str(_to_serializable)` — form เดียวกับ `retrieval_policy._norm_id`: `123.0`/`123`/`"123.0"`→`"123"`) · model code/keyword = evidence เท่านั้น resolve→item_id ก่อน persist (ห้าม persist raw model string) · variant (`model_id`/`model_name`) อยู่บน timeline `products[]` entry เดิม — ไม่ encode composite ลง `subject_ids` · round-trip: `subject_ids → product_store.fetch_product_by_id` (ไม่มี status filter → UNLIST/historical resolve ได้)
+- **P2 — absent doc**: `insert_one` minimal `{conversation_id, subject_set, platform?, shop?, last_updated}` ใต้ unique `{conversation_id:1}` เดิม → E11000 → reread winner เท่านั้น · ห้ามสร้าง `products`/`active_item_id`/`order_anchors`/`claim_state` ปลอม · existing doc = dotted `$set` เฉพาะ `subject_set`+`last_updated`
+- **P3 — concurrency**: production serialization = bot-worker `bufferService` conv_lock (`convLockIdFor` deterministic doc, E11000 claim, lease reclaim) — proven สำหรับ `/chat` ที่มาจาก worker; direct `chat()` (testchat/replay) bypass → belt = CAS fence `{"conversation_id":c,"subject_set.subject_ids":expected_ids|None}` (pattern เดียวกับ claim-state fenced CAS, no retry) → miss → reread ครั้งเดียว → คืน winner จริง/`None` · malformed stored set = conservative non-clobber (object ที่ parse ไม่ได้ไม่ถูกทับ)
+- **RED evidence**: `docs/test/test_conversation_subject_set.py` ใหม่ — **58 failed / 1 vacuous-pass** บน code เดิม (`AttributeError: no attribute 'decide_subject_set'/'resolve_subjects'/'record_subject_set'/'get_subject_set'/'ConversationSubjectSet'`) = missing contract เท่านั้น · matrix: P1 normalize/round-trip/collision · P2 absent-minimal/preserve-fields/dup-race/exception/invalid · P3 stale-CAS/absent-belief/unrelated-fields · decide precedence (explicit>pair>batch, explicit∈pair→pair, conflict→explicit, single/batch, identical→None, ops-replace-not-accumulate, relation-change, topic-replace, dedup-ordered) · resolve matrix (singular/pair/set-size/which/link/generic × single/multi/none) · malformed-safe · mutation probes (first-pick + reversed-precedence) · e2e replay (item-card→single→deictic, compare pair→price followup, batch→alternatives, ambiguous→clarify+0 writes, bot-prose-never-persists, ≤1 read/turn, UNLIST subject, field preservation)
+- **Frozen surface (≤ approved max)**: `ConversationSubjectSet`(5 fields) + `SubjectResolution`(NamedTuple) + `get_subject_set`/`resolve_subjects`/`decide_subject_set`/`record_subject_set` · resolver pure (รับ persisted ที่ load แล้ว, no conv_id, no hidden read) · writer truthful (`→ set | None`) · `expected_prior` = CAS fence input
+- **ยังไม่ implement** — next: minimal cp.py impl → app.py wiring (1 decision/≤1 write per turn) → GREEN → full verification
+
+#### Phase 2C.2 Review-Fix Closeout (independent-review round — 2026-10-15, still unstaged @ `ba14fb4`)
+
+- **Findings audit (source/call-graph proven)**:
+  - A same-ID semantic race = **CONFIRMED** — CAS fence เดิมเช็คแค่ `subject_set.subject_ids` → stale writer ที่อ่าน prior เดียวกันเขียนทับ relation/ops/confidence ใหม่ได้ · fix = full-snapshot fence ใน `record_subject_set`: `subject_ids + relation + requested_operations + confidence + source_turn_id` เทียบ `expected_prior` ทั้งหมด (None→`subject_ids:null` match absent∨missing) · miss → reread winner 1 ครั้ง → คืน winner (caller แยก committed/lost ด้วย `==`) · ไม่มี retry/lock/version field ใหม่
+  - B buffer-disabled = **CONFIRMED but no change needed** — bot-worker `bufferEnabled=false` → `processMessage` ตรง (ไม่ผ่าน conv lock ใน flushBuffer) → ห้ามพึ่ง worker serialization; CAS เดิมทำ `record_subject_set` self-safe อยู่แล้ว → ไม่แตะ botworker
+  - C identity domain = **CONFIRMED** — `_to_serializable` ปล่อย "AC65B"/arbitrary string ผ่านเป็น subject id ได้ · fix = `_norm_subject_ids` (digit-canonical domain เท่านั้น, non-canonical drop) + `record_subject_set` refuse non-canonical (`!= proposed → None`) + `_parse_subject_set` fail-safe (malformed → conservative non-clobber) · multi-variant same-item → deterministic pick (is_anchor ก่อน แล้ว latest mentioned_at — structured evidence เดิม, ไม่ใช่ array-order)
+  - D read-once = **CONFIRMED** — `materialize_subject_cards` เดิม reread conv doc · fix = `SubjectSetView.products` รถบรรทุก timeline products ที่ load มากับ doc เดียวกัน → materialize ใช้ `products=` (0 doc reread); test นับ collection calls จริง (`_coll().find_one` spy ไม่ใช่ชื่อ fn)
+  - E CAS-loss observability = **CONFIRMED** — เดิม `"persisted" if _w is not None` → lost-CAS ก็ log persisted · fix = `_w == _decided → persisted · _w != _decided → lost-to-winner · None → write refused`; winner เข้า `subject_evidence["stored"]` เหมือนเดิม
+  - F keyword audit = **CONFIRMED partial** — `_SUBJECT_PAIR_KWS`/`_SUBJECT_LINK_KWS` เป็น literal copy ของ app.py `_anchor_compare_kws`/`_link_followup_kws` (gate owner เดิม) → dedup: app locals = alias ไป cp table (owner เดียวใน cp.py, −14 LOC) · `_SUBJECT_WHICH_KWS`/`_SET_COUNT_REF_RE` = new-but-necessary (bare "อันไหน"/"2 อันนี้" set-ref ไม่มี canonical owner — route_context tables คนละ semantics, TurnPlan consumption = 2C.3) — เก็บพร้อม comment provenance
+- **RED ก่อนแก้ (raw)**: `test_same_ids_semantic_change_is_a_cas_conflict` + `test_cas_loss_is_distinguishable_from_commit` + `test_raw_model_code_cannot_persist_as_subject_id` + `test_view_carries_products_and_materialize_skips_reread` = **4 failed** (missing contract: stale writer commit / model-code persist / view ไม่มี products / log persisted on loss) — pin tests เดิม (stale-id conflict/absent-winner) ผ่านอยู่แล้ว ไม่นับเป็น RED
+- **GREEN**: subject suite **71 passed** · replay+shadow **118 passed, 19 skipped, 5 xfailed** (q07 answer_level/q08/q09/q18 คง positive)
+- **Test-infra poison found & fixed (verification จริงเจอ)**: `test_conversation_subject_set` import replay module → replay suppresses `load_dotenv` ตอน import app → `.env` ไม่ถูกอ่านทั้ง process → live-DB test files ที่รันหลัง (anchor/refresh/profile — real Mongo ไม่มี fake) fallback `127.0.0.1:27017` → server-selection ค้าง ~30s/op = เหมือน hang · root-cause fix ใน **ไฟล์ตัวเอง** (ไม่แตะ replay module — isolation contract `test_replay_import_isolation` บังคับ zero side-effect): `dotenv.load_dotenv(ROOT/".env")` หลัง import → env เท่า clean process · validator เพิ่ม `fixed_in` metadata key สำหรับ incident→positive provenance
+- **Fresh verification (post-fix, run เดียวกัน)**: combined batch (subject+replay+td+shadow+claim+retrieval-shadow+5f-claim+5f-handoff+5c-troubleshoot+anchor+refresh+profile) **433 passed, 19 skipped, 5 xfailed in 5.42s** · wide offline batch **84 passed** · retrieval sweep **124 passed** · handoff transport **47/47** · fixture validator **all rows pass** · `py_compile` 5 files OK · `git diff --check` clean
+- **Complexity**: types +3 (`ConversationSubjectSet`/`SubjectResolution`/`SubjectSetView`) · public fns +5/−1 (`resolve_active_by_message` ลบ) · private helpers +5 · kw tables: −2 app literals (alias→cp) +2 new-necessary (which/set-count) · Mongo/turn ≤1 doc read + ≤1 write + ≤1 CAS reread · app.py +243/−383 net −140 · cp.py +421/−51 net +370 · retry loop=0 · process-lock=0 · duplicate resolver owner=0 · bot-prose subject parse=0 · redundant doc read=0 · subject-ID-only CAS=0
+- **ยัง unstaged/uncommitted** · ไม่ stage/commit/push/deploy/worker/.env-read-by-me/real-Mongo-by-me/port 8010 · Phase 2C.3 (TurnPlan consumption/action switch) ยังไม่เริ่ม
+
+#### Phase 2C.2 Final Safety + ABA Correction (กำลังทำ — 2026-10-15, unstaged @ `ba14fb4`)
+
+- **Preflight**: stale pytest trees (3× `test_numeric…+test_anchor_compare` จาก debug round ก่อน) killed เฉพาะ PID ตรง combo · port 8010 มี uvicorn `--reload` listener (PID 84243 — **ไม่ใช่ของ session นี้ ไม่แตะ รายงานเฉยๆ**) · ไม่มี botworker · tree = manifest เดิม
+- **PART 1 plan (test purity — CONFIRMED จาก source)**: test file ปัจจุบันเรียก `dotenv.load_dotenv(ROOT/".env")` — violation ชัด (อ่าน .env จริง) · root cause ของ contamination chain = `import test_legacy_turn_incident_replay` suppresses `load_dotenv` ตอน import app **และ knowledge_base** → `.env` ไม่ถูก load ทั้ง process → live-DB files ที่รันหลัง fallback `127.0.0.1:27017` → server-selection ~30s/op = hang · fix ที่ถูก: ลบ load_dotenv call + snapshot `os.environ` ก่อน replay import แล้ว restore additions (setdefault เพิ่มอย่างเดียว — `ADMIN_DB`/`PRODUCT_DB`/`COLL` เป็น hardcoded constants ปลอดภัย, `_install` ไม่อ่าน env) → import env-neutral, .env ไม่ถูก load/restore · live-DB files (`test_anchor_compare`/`test_timeline_card_refresh`/`test_retrieval_profile`/`test_retrieval_profile_db`/`test_sellable_units`) = `NOT_RUN_REAL_DB_REQUIRES_SEPARATE_APPROVAL` — ห้ามรวมใน offline count และห้าม batch ต่อท้าย replay-importing file · เพิ่ม purity probes: subprocess import (traps: load_dotenv/MongoClient/socket/urlopen = 0 calls, env Mongo keys identical) + order-independence (pytest subprocess [subject, turn_decision])
+- **PART 2-3 plan (ABA — CONFIRMED จาก source)**: full-snapshot fence ตรวจ A→B ได้แต่ A→B→A ผ่านเพราะ semantic กลับมาเท่าเดิม · repo convention = monotonic token (`fencing_token` leases/cursors, episode fences) → minimal fence = `subject_set.rev` int (+1 ต่อ commit, caller ไม่เคยเขียนเอง) · compat rule เดียว: pre-token doc = missing rev ≡ 0 (`_parse_subject_set` default, malformed→parse fail→non-clobber) · filter: prior.rev>0 → `subject_set.rev:r` · prior.rev==0 → `subject_set.rev:None` (missing∨null = pre-token เท่านั้น — write ไม่เคย persist 0) · prior None → `subject_set:None` (absent∨null — doc ที่มี subject_set rev-less ไม่ match = fail-safe ไม่ทับ) · commit คืน `replace(set, rev=r+1)`; **`rev` ต้อง `compare=False`** ใน dataclass มิฉะนั้น committed≠proposed ทำ caller `==` (committed/lost-to-winner) พัง · ABA timeline: A(rev1)→B(rev2)→A'(rev3); stale(prior rev1) → fence miss → reread 1 ครั้ง → คืน winner rev3
+- **PART 4 plan (keyword gate — CONFIRMED จาก source+fixtures)**: `_SUBJECT_PAIR_KWS`/`_SUBJECT_LINK_KWS` = 1:1 moved canonical (app literals ลบแล้ว, alias เหลือจุดเดียว) — เก็บ · `_SUBJECT_WHICH_KWS`/`_SET_COUNT_REF_RE` = new semantics ไม่มี canonical owner: TurnPlan มีแค่ explicit `subject_refs`+ops (ไม่มี deictic-kind/count signal — consumption = 2C.3), route_context `_REL_QUESTION`/`_SINGLE_ITEM_REF_KW`/`_SUPERLATIVE_KW`/`_COMPARISON_FOLLOWUP_KW` คนละ semantics · ลบทั้งคู่ตาม rule 5 → ผลกระทบ: "2 อันนี้/ทั้งสอง" → fallthrough `อันนี้`∈`_SAME_PRODUCT_KWS`→singular→n≥2→clarify = **q07 t3 deferred** (mark `pending_live_replay`+`pending_reason` ไม่ silent-flip) · bare "อันไหน/ตัวไหน" → no_subject_ref (unpinned — deferred) · unit tests ที่ pin removed semantics → ลบ/แปลงเป็น deferred-pin · verdict น่าจะ `PHASE_2C2_BLOCKED_BY_TURNPLAN_SIGNAL_SET_COUNT_DEIXIS` (q07-t3 set-count resolution ต้องรอ TurnPlan subject-arity/set-ref signal — 2C.3)
+- **ยังไม่ implement** — RED: purity probes + ABA test ก่อน แล้วค่อยแก้ runtime
+
+#### Phase 2C.2 Final Safety + ABA Correction — DONE (2026-10-15, unstaged @ `ba14fb4`)
+
+- **PART 1 test purity — DONE**: RED `impure:impure call: load_dotenv` (probe จับ `_dotenv.load_dotenv(ROOT/".env")` ที่ module level) → ลบ call+import · env snapshot/restore รอบ `import test_legacy_turn_incident_replay` (undo setdefault additions เท่านั้น — ไม่ load .env) · เพิ่ม `TestImportPurity` 3 tests: subprocess probe (traps load_dotenv/MongoClient/socket/urlopen = 0 calls + env identical added/removed/changed) + order-independence pytest subprocess ทั้งสองทิศ (recursion guard `SUBJECT_SET_ORDER_PROBE` env — nested run skip probes, ป้องกัน spawn loop ที่เคยพ่น 200+ pytest procs) · live-DB files ที่เคยปนใน batch (anchor_compare/timeline_card_refresh/retrieval_profile(_db)/sellable_units/unit_live_compare/compare_3way/grouped_retrieval_executor/compat_mode_filter + cert_standards/general_qtype_guards/new_product_types/qa_context_guard ที่ load_dotenv ที่ import) = `NOT_RUN_REAL_DB_REQUIRES_SEPARATE_APPROVAL`
+- **PART 2-3 ABA — DONE**: RED เดิม: `test_aba_returned_state_still_loses_stale_writer` — stale writer (prior=A rev-less) commit {9002} ทับ A' ได้เพราะ snapshot เท่ากัน (ids เดิมตลอด, `source_turn_id=None` = production shape) · GREEN: `ConversationSubjectSet.rev` (`field(default=0, compare=False)` — equality ยัง semantic → caller `==` committed/lost-to-winner ไม่พัง) · `_parse_subject_set` compat rule เดียว: missing rev ≡ 0, non-int/negative → unparseable → None (non-clobber) · `record_subject_set` fence: prior.rev>0 → `subject_set.rev:r` · rev=0 → `subject_set.rev:None` (pre-token) · prior=None → `subject_set:None` (doc มี set ไม่ match = fail-safe) · commit/insert persist rev = prior+1 / 1 · miss → find_one ครั้งเดียวคืน winner · E11000 → reread · **no retry/no lock/no new collection-index-flag**
+- **PART 4 keyword gate — DONE (blocked verdict)**: `_SUBJECT_WHICH_KWS`+`_SET_COUNT_REF_RE` ลบแล้ว (ไม่มี canonical owner — TurnPlan ไม่มี deictic-kind/count signal, route_context tables คนละ semantics) → new semantic kw tables = **0** แต่พฤติกรรม deferred: bare "อันไหนดี" → no_subject_ref · "อันไหน 2 อันนี้"/"ทั้งสอง" บน multi set → singular "อันนี้" → clarify · **q07 (`tx-q07-pair-continuity`) → `pending_live_replay` + `pending_reason` ชื่อ signal ที่ขาด (TurnPlan subject-arity/set-ref — 2C.3)** · `_SUBJECT_PAIR_KWS`/`_SUBJECT_LINK_KWS` = moved 1:1 canonical เก็บ (app literals ลบแล้วตั้งแต่รอบก่อน) · set_soft เหลือ `_SUPERLATIVE_KW` เท่านั้น, set_hard เหลือ `_SUBJECT_LINK_KWS` เท่านั้น
+- **Verify (fresh, offline only)**: subject suite **79 pass** · replay **100/20s/5x** (skip+1 = q07 deferral; xfail 5 เดิม — q10 ยัง incident คงที่) · offline batch 33 files **612 pass/20s/5x** ใน 16.85s (ไม่มี Mongo stall) · handoff transport **47/47** · fixture validator **all rows** · `py_compile` cp.py+test file OK · `git diff --check` clean · **TS files ไม่เปลี่ยน → ไม่รัน TS checks**
+- **Safety**: stage/commit/push/PR/deploy=0 · botworker=0 · port 8010 uvicorn listener (PID 84243 `--reload`) = เจออยู่แล้ว ไม่แตะ · .env read/load=0 (probe พิสูจน์ executable) · real Mongo=0 ใน batch นี้
+- **BLOCKER (ส่งต่อ 2C.3)**: `PHASE_2C2_BLOCKED_BY_TURNPLAN_SIGNAL_SET_COUNT_DEIXIS` — q07-t3 "อันไหน 2 อันนี้" pair-resolution ต้องรอ TurnPlan structured signal; bare which-of-set resolve ก็ deferred ด้วย
+
+---
+
+## Phase 2C.3 slice 1 — structured subject-reference signal (กำลังทำ)
+
+เป้าหมาย: ปิด 2C.2 blocker (q07 "อันไหน 2 อันนี้") ด้วย structured signal แทน kw table
+
+Boundary ที่ reuse (trace จาก source แล้ว):
+- `intent_classifier.classify_intent` — Pass-1 LLM JSON call ที่รันทุกข้อความ (Phase 6 ยกเลิก gate) → extend schema เดิม `subject_scope`/`subject_count` = 0 extra model call
+- `decide_turn(intent_result=...)` — รับ intent_result อยู่แล้ว → map ลง `TurnNeed.subject_scope`/`subject_count` (kind=="product" เท่านั้น)
+- `resolve_subjects` — เพิ่ม typed params (`subject_scope`, `subject_count`, `signal_confidence`) validate กับ persisted set: current_set+count match→resolved · current_single+n==1→resolved · missing/mismatch/invalid/low-conf→clarify · explicit→no_subject_ref (explicit evidence owner ชนะก่อน resolver เสมอ)
+- app callsite 1569 ส่ง `_intent_result` fields + `_intent_conf` (อยู่ใน scope อยู่แล้ว)
+- q07 t3 ได้ resolved pair → materialize_subject_cards pin ทั้งคู่ → llm_item_ids [3002,3003] (consumption path เดิมของ 2C.2)
+
+Harness: per-turn `intent_result` override keyed by message text (row-level key มีอยู่แล้ว — เพิ่ม turn-level; validator ไม่ whitelist turn keys → schema ไม่ขยาย)
+Fixture q07: t3 ใส่ intent_result {recommendation,conf0.8,target_device iphone,subject_scope current_set,count 2} → restore answer_level หลัง replay ผ่าน
+ข้อจำกัด: ไม่ใช่ completion ของ 2C.3 — action-switch/deletion ยังค้าง
+
+## Phase 2C.3 slice-1 — structured subject-reference signal — DONE (2C.2 blocker closed)
+
+**ผล:** q07 "iphone หละแนะนำอันไหน 2 อันนี้" resolve ผ่าน typed signal แทน kw table — verdict `PHASE_2C2_CLOSED_PHASE_2C3_STRUCTURED_REFERENCE_STARTED`
+
+**Boundary ที่ reuse:** `intent_classifier.classify_intent` (Pass-1 LLM JSON — Phase 6 รันทุกข้อความ) → extend schema เดิม `subject_scope`(`none|explicit|current_single|current_set`)+`subject_count` = **0 model call เพิ่ม** (พิสูจน์: `captured.intent_calls==2` ต่อ 2 user turns e2e)
+
+**เปลี่ยน:**
+- `intent_classifier.py` — prompt spec+example, `_DEFAULT_RESULT`, normalize (invalid scope→none, count cast fail/<1→null)
+- `turn_decision.py` — `TurnNeed.subject_scope`/`subject_count` (product needs เท่านั้น; `_subj_scope`/`_subj_count` extract จาก intent_result ที่ `decide_turn` รับอยู่แล้ว)
+- `conversation_products.py` — `resolve_subjects(..., *, subject_scope, subject_count, signal_confidence)` — typed signal ก่อน `_classify_subject_ref`: invalid→clarify · explicit→no_subject_ref · current_set+n+count absent/match→resolved · current_single+n==1→resolved · conf<0.7→clarify · none/absent→canonical path
+- `app.py` — callsite ส่ง `_intent_result` fields + `_intent_conf`; intent step output เพิ่ม 2 fields
+- replay harness — per-turn `intent_result` override keyed by message text + `captured.intent_calls` counter
+- fixture q07 — t3 override {recommend,0.8,iphone,current_set,2} → `answer_level` คืน (pending_reason ลบ)
+
+**Verify (fresh):** RED 15 fail ก่อน implement → GREEN: structured+td+shadow **220** · replay **101/19s/5x** (q07 unskip, q08/q09/q18 ครบ) · offline batch 37 files **774/19s/5x** + anger 11 = baseline signature เดิม (`72c325e` offline POST, ไม่ใช่ regression) · validator all rows · py_compile+diff --check clean · e2e: pair {4001,4002} resolve→LLM pool + intent_calls==2
+
+**ค้าง (2C.3 ต่อ):** TurnPlan action-switch consumption, branch deletion, `decide_turn` intent wiring เข้า production (shadow callsite ยังอยู่ก่อน classify ส่ง None), warranty-policy enricher, `get_active_product` readers
+
+## Phase 2C.3 — structured-reference owner correction (กำลังทำ)
+
+เป้าหมาย: production consume subject_scope/count ผ่าน TurnPlan owner เดียว — ลบ direct path `_intent_result` → `resolve_subjects`
+
+Call graph ใหม่: classify (1339, Pass-1 เดิม 1 ครั้ง/turn) → `_intent_result` → `decide_turn(intent_result=...)` post-classify (1 ครั้ง/turn) → product TurnNeed.scope/count → resolve_subjects
+
+Constraint ที่เจอจาก source:
+- shadow callsite เดิม @823 อยู่ก่อน classify → intent ยังไม่มี → ต้องย้ายมาหลัง plan computation
+- sweep `test_turn_decision_shadow` บังคับ step ทุก turn (bad==0) — turns ที่ early-return ก่อน classify (item_tag 1171, order_flow 1281, human 1320) ไม่มี interpretation เลยไม่มี plan → exemption เหมือน boundary_lock (no Intent step = no plan legitimately)
+- plan ต้องการ claim_state/active_item_id ที่ shadow เคย load_timeline เอง → ขยาย SubjectSetView +2 fields (claim_state, active_item_id) จาก find_one เดียวกัน = 0 extra read
+- resolve kwargs: scope/count จาก product need (first non-none) ใน plan; signal_confidence = _intent_conf (metadata ของ interpretation call, ไม่ใช่ signal)
+- fix classifier example: AC65B/AC65B2 = charger ไม่ใช่ powerbank
+
+## 2026-10-04 — Phase 2C.3 single-owner correction (structured subject signal)
+
+- error: production มี 2 owner ของ subject signal — resolver อ่าน
+  `_intent_result.get("subject_scope"/"subject_count")` ตรง ๆ ขณะที่
+  shadow callsite pre-classify เรียก `decide_turn` โดยไม่มี intent_result
+- root cause: decide_turn ไม่เคยถูกเรียกใน normal path → TurnPlan ไม่มี
+  production consumer; resolver เลยผูกกับ classifier output โดยตรง
+- fix: ย้าย `decide_turn(..., intent_result=_intent_result, claim_state=
+  _sv.claim_state, active_anchor=_sv.active_item_id)` ไปไว้หลัง Pass-1
+  ก่อน post_intent_handoffs (ครั้งเดียว/turn); `_turn_decision_shadow`
+  เหลือ serializer ของ plan เดียวกัน; resolver อ่าน scope/count จาก
+  product TurnNeed + signal conf จาก `TurnPlan.intent_confidence`;
+  `get_subject_set` แก้ให้ claim/aid/products ไหลแม้ doc ไม่มี subject
+  identity (เดิม return empty ทิ้ง claim → claim-resume plans เพี้ยน);
+  classifier example แก้ AC65B/AC65B2 = charger ไม่ใช่ powerbank
+- impact: q07 pair resolve เหมือนเดิม, q08/q09/q18 preserve;
+  tax/TISI/human/order early-return turns ที่ return ก่อน plan callsite
+  ไม่มี shadow step (sweep exempt เหมือน boundary_lock); tax/TISI
+  post-classify turns อ่าน subject doc 1 ครั้งเพิ่ม (ยัง ≤1/turn);
+  shadow tests 9 ตัวที่ pin internal-planner contract เดิมเขียนใหม่ตาม
+  single-plan API; ยังไม่ migrate action switches (งาน 2C.3 ที่เหลือ)
+- verify: subject+td+shadow 229 + replay 101 = 330 pass / 19s / 5x;
+  py_compile + git diff --check clean; decide_turn 1 callsite;
+  ไม่มี _intent_result→resolver path เหลือ
+
+## 2026-10-04 — Phase 2C.2 + 2C.3 structured-reference COMMITTED
+
+- Commit 1: `0179849` `refactor: make conversation subjects authoritative` — 16 files +2352/−596 (runtime 4 + docs 4 + tests/fixtures/harness 7 + validator + suite ใหม่ `test_conversation_subject_set.py` 1313 บรรทัด; ไฟล์นี้ไม่ commit)
+- ปิด contracts 2C.2: persisted `ConversationSubjectSet` (canonical item_id, one owner `decide_subject_set`, writer `record_subject_set`, reader `get_subject_set` ≤1 read/turn) · `resolve_active_by_message` + bot-prose subject selectors + duplicated app kw literals ลบหมด · q08/q09/q18 incident→positive
+- ABA fix: CAS fence = persisted monotonic `subject_set.rev` (+1/commit, compare=False semantic equality) — snapshot equality เดิมปิด ABA ไม่ได้; pre-token doc fence `rev:null` fail-safe
+- 2C.3 slice เสร็จ (structured reference เท่านั้น): Pass-1 `classify_intent` schema +`subject_scope`/`subject_count` (0 model callsite ใหม่) → `decide_turn` ครั้งเดียว/turn post-classify → product `TurnNeed` ถือ signal + `TurnPlan.intent_confidence` → `resolve_subjects` validate กับ persisted set (missing/mismatch/invalid/low-conf → clarify, zero guessing) · `_turn_decision_shadow` = serializer เฉยๆ
+- q07 "อันไหน 2 อันนี้" resolve ผ่าน TurnPlan จริง (ไม่ใช่ kw/regex/helper) — `answer_level` GREEN ใน mocked replay; `_SET_COUNT_REF_RE`/`_SUBJECT_WHICH_KWS` absent ตลอด; new semantic kw table = 0
+- Verify: offline batch 37 files **782 pass/19 skip/5 xfail** + anger **11 fail = baseline signature เดิม `72c325e`** (ไม่ใช่ regression, ไม่แก้) · validator all rows · py_compile + diff --check clean
+- ไม่ได้พิสูจน์: live classifier interpretation quality (mocked replay พิสูจน์ plumbing เท่านั้น), live-DB suites (ยังไม่รัน — ต้อง approve แยก)
+- ค้าง 2C.3: action-switch consumption ทุก need, branch deletion, warranty-policy enricher, `get_active_product` readers, live canary
+- Process: no push/PR/deploy · no worker/provider/Mongo/.env · port 8010 = pre-existing uvicorn watcher (ไม่แตะ)
+
+## Phase 2C.3 slice 2 — action-switch consumption + legacy branch deletion (กำลังทำ — branch `feature-legacy-shopee-evidence-retrieval` @ `880d36d`)
+
+เป้าหมาย: production consume `TurnPlan.primary_action` + `needs` เป็น action owner เดียว post-classify แล้วลบ branch ที่ owner ใหม่แทนที่แล้ว (orchestration migration ไม่ใช่ retrieval architecture ใหม่)
+
+Audit (call-graph proven จาก source ตอน audit):
+- `decide_turn` ถูกเรียก 1 ครั้ง post-classify (@~1466) แต่ `primary_action`/`needs` **ไม่มีผลกับ control flow** — plan เป็น observe-only; action ตัดสินเองที่ ~15 จุด (lock/item-tag return/order_flow/detect_hr/post_intent/resolver-clarify/warranty_flow/general/brand/kb/superlative/guard/websearch/final + comp/link selectors)
+- subject-side selectors ซ้ำ owner: FOLLOWUP-COMP/ANCHOR-COMP gate ด้วย kw (แต่ consume resolved set), POST-COMP-FUP/PARTIAL-COMP ใช้ anchor ladder (`get_anchor_history`/`get_active_product`/`get_previous_anchor`), LINK-FOLLOWUP gate ด้วย `_SUBJECT_LINK_KWS` + ladder fallback, `_is_followup_policy` enricher parse bot prose, item-tag else-arm = early answer decision ของตัวเอง
+- contract gap ใน `decide_turn` เดิม: `not needs → clarify` จะกลืน greeting/claim-resume text ("สวัสดีครับ", "ลองแล้วไม่หายเลยครับ") — gate แบบ pure switch ใช้ไม่ได้ → แก้ semantics: clarify เฉพาะ `_unanchored_followup_ask` (หรือ message ว่างจริง) · needs=() + ข้อความปกติ → execute_needs (empty needs = pipeline ปกติตอบ)
+
+Plan (RED batch เดียวก่อน → implement+delete ชุดเดียว):
+1. `decide_turn`: `requires_clarification = bool(_unanchored_followup_ask)` · primary_action=clarify เฉพาะ `unanchored and not needs` · suppress link need เมื่อ claim/order/policy need มีอยู่ (แทน exclusion list ใน app) — ย้าย `_gen_qtype` eval ขึ้นก่อน link (pure detector reorder)
+2. `app.py` gate เดียวหลัง shadow (~1478): human_wait→`_build_post_handoff_response` · no_reply→`ChatResponse(answer="",source="no_reply")` · clarify→deterministic subject-clarify text · handoff→`detect_human_request` transport (ย้ายมาจาก pre-classify) · execute_needs→fall through
+3. ลบ pre-classify `detect_human_request` callsite (~1294) — handoff dispatch อยู่ใน gate แทน (cost: human/anger turn จ่าย classify +1 call = ราคาของ unified shape)
+4. ลบ item-tag early-return arm (~1105-1168: `_is_set_q_multi` ladder call + elif tree + `llm.answer` return) — card turn ไหลผ่าน pipeline ปกติ, subject=explicit pin; `req.message = _clean or synth` ให้ classify/plan เห็นข้อความจริง; compat+target ยัง set `_hybrid_anchor_card`
+5. ลบ `_is_followup_policy` prose-parse (~1494-1555) → ย้ายหลัง resolve: `general_qtype=None` เมื่อ resolved set มี (subject pin supply product identity — ไม่ต้องเขียน message ทับ)
+6. unified subject consumption จุดเดียว (~1600): resolved set → `materialize_subject_cards` ครั้งเดียว → `_conv_active_card`/`_ref_regex_products`/`_is_conv_active` pin · compare ctx จาก pair เมื่อ (plan compare need ∨ relation=="compare") ∧ n≥2 · partial-comp: compare need + current model + single subject → ctx{"current"} · explicit-anchor turn → `_conv_active_card=anchor_card` — แทน FOLLOWUP-COMP/ANCHOR-COMP/POST-COMP-FUP/PARTIAL-COMP (4 gates ~145 LOC) + pin block (~1897)
+7. LINK-FOLLOWUP gate → `product:link` need ของ plan; serve `_subject_cards`/`_ref_regex_products` เท่านั้น (alt_fetcher=None); ลบ `get_anchor_and_suggestions` fallback + `_SUBJECT_LINK_KWS` gate
+8. CONV-ACTIVE (2837+): `_conv_active_card` มาจาก consumption site เดียว; guard chain เดิม (subtype/new-topic/compat) ทำงานบน explicit path ต่อ; เพิ่ม `_compare_need` ใน pin-suppress guard (แทน `_is_set_q_multi`)
+9. mixed product+policy: `general_qtype` + product need → ไม่ early-return answer_general; carry `build_general_context` context เข้า `_combined_extra` → llm.answer ตอบทั้งคู่ (policy-only turn ยัง early-return เดิม)
+
+Retain พร้อม blocker (ไม่ลบ — spec อนุญาต):
+- post-handoff lock @640 — ownership boundary ครอบ v2/v3/legacy ก่อน DB/LLM; ย้ายหลัง classify = จ่าย Mongo+LLM ต่อ locked turn + v2/v3 ไร้ gate → plan.human_wait arm อยู่ใน switch เพื่อ contract totality
+- `early_order_flow` @1250 — order/refund/tracking transports อยู่นอก TurnNeed vocabulary (refund→handoff reason/topic ของตัวเอง, order anchor); migrate ต้องสอน decide_turn kw surface ใหม่ → retained
+- `post_intent_handoffs` (tax/TISI) — deterministic domain responder อยู่หลัง plan แล้ว ไม่ใช่ local switch ที่ซ้ำ primary_action
+- `warranty_flow` — claim/troubleshoot domain owner self-decide ด้วย persisted state+history markers (ครอบ legacy conv ที่ไม่มี claim_state persisted — plan.claim เห็นเฉพาะ persisted)
+- general/brand/KB/superlative/guard/websearch/final-answer = execution owners เดิม
+- `_turn_decision_shadow` = serializer ของ plan จริง (observability ใน steps, ไม่ใช่ parallel path)
+
+RED batch: `docs/test/test_phase2c3_action_switch.py` — reuse offline harness (`_install`/`_replay`): human_wait lock, no_reply placeholder (RED: today LLM answers), plan-gate clarify, handoff-via-plan (RED: today no plan), mixed product+policy carry (RED: today policy-only), claim+product, admin+info need → handoff, q07-q09/q12-13/q15/q18 replay, subject ambiguity clarify, image/image_text/video, exactly-1 plan+resolve counters, zero duplicate retrieval/action.
+
+RED batch (pre-edit, raw): docs/test/test_phase2c3_action_switch.py 23 cases — **9 failed**:
+- no_reply ×3 ([สติกเกอร์]/[sticker]/[วิดีโอ] — เดิม bot ตอบ placeholder)
+- bare [รูปภาพ] no_reply (เดิมตอบ)
+- handoff_dispatched_by_plan + one_plan_for_handoff + admin+info (เดิม early-return ก่อน plan → decide_turn=0)
+- mixed product+policy (เดิม general_qtype early-return → products=[])
+- item_card_executes_via_plan (เดิม item-tag arm return ก่อน plan)
+14 passed (lock/clarify/ambiguity/claim+product plan/compare+compat/counts/no-dup/media pins) + 2 xfail (q10 ฯลฯ) + 1 skip
+
+### 2C.3 action-switch — ผลลัพธ์ (GREEN)
+
+ทำตาม plan ข้างบน + แก้เพิ่มจาก test ที่ RED→fail ระหว่าง implement:
+
+- `turn_decision` clarify semantics: clarify เฉพาะ unanchored follow-up / message ว่าง — เจอ edge เพิ่ม 3 จุด:
+  1. `[รูปภาพ]+question` → `has_visual_media` นับเป็น product ctx (รูป = subject evidence ลูกค้าส่งเอง) — เดิม clarify ผิดเพราะไม่มี anchor
+  2. history มี image turn (`visual_media_placeholder`/`image_desc`/`images`) = product ctx — เดิม normalize เป็น "" แล้ว skip → "สายแบบในรูปมีขายไหม" clarify ผิด
+  3. select-ask ("มีตัวไหนบ้าง") = self-anchoring browse — emit product:recommend เสมอ ไม่ต้องมี ctx (ต่างจาก stock/price/link ที่อ้าง subject เดิม) — เดิม unanchored→clarify ทำ sel-all-dead-evidence หลุด
+- `decide_subject_set` revert: pair/explicit same-ids+same-rel → write ใหม่ = pinned contract (ops replace) — แก้ churn ที่ callsite แทน: app ไม่ส่ง explicit id ที่ persist แล้วใน turn เดียวกัน (`_persisted_ids` filter) → item-tag turn เขียน 1 ครั้ง (tag block) ไม่ซ้ำที่ recorder
+- policy carry gate: `_productish_need` + concrete subject (tag/anchor/hybrid/model/resolved cards) เท่านั้น — "ไส้กรองผิดรุ่น" (policy + product-type ลอย) ยังตอบ general path
+- ลบ dead `_followup_original` getattr chain 6 จุด (setter ถูกลบไปกับ prose enricher)
+- harness+fixture ตาม contract ใหม่: `no_reply` action ใน validator/`_expectations_met`/`_ACTION_FAMILY` · iss30-noise-sticker → action=no_reply · 6 fixture tde clarify→execute_needs · shadow test pin ใหม่ (handoff ผ่าน plan step, q22q25 phone=execute_needs) · select-ask pins → execute_needs
+
+Verify (focused เท่านั้น, ยังไม่รัน broad batch):
+- `test_phase2c3_action_switch.py` 23p/1s/2xf · `test_turn_decision.py`+`test_conversation_subject_set.py` 208p · `test_turn_decision_shadow.py` ผ่าน · `test_legacy_turn_incident_replay.py` เต็มไฟล์ 101p/19s/5xf · `test_handoff_transport.py` 47/47 · `test_issue_5f_handoff.py`/`test_issue_5f_claim_flow.py` exit 0 · validator all rows pass · py_compile clean · `git diff --check` clean
+- LOC: app.py +173/−356 (net −183) · runtime files net −211 · รวม tests/docs +281/−393
+- ยังไม่ commit — รอ independent review ตาม plan
+
+## 2C.3 correction round — independent-review findings (2 High + 3 Medium)
+
+Plan (PART 0 verify → PART 1 test honesty → PART 2 RED → PART 3 minimal fix → PART 4 focused GREEN → PART 5 gate → PART 6 docs):
+
+- **H1 fail-closed planner**: `except Exception: _turn_plan=None` + `if _turn_plan is not None` = planner พังแล้ว legacy ยังรัน — แก้: except → shadow(None) + `raise HTTPException(500)` (boundary เดียวกับ llm RuntimeError sites) + เอา `is not None` guard ออกให้ switch เป็น unconditional (โครงสร้างพิสูจน์ fail-closed)
+- **H2 claim+product**: warranty owner early-return ที่ app callsite ทิ้ง product need — แก้ที่ orchestration boundary (app `_wfr` site): `_wfr` + `_productish_need` → fetch_products + llm.answer (1 retrieval/1 call — งานของ product need) merge เข้า `_wfr` response; claim owner logic ไม่แตะ
+- **M1 handoff re-detect/fallthrough**: `detect_human_request` เพิ่ม ctx `plan_decided_reason` — ตัด re-classify เมื่อ plan ตัดสินแล้ว (reason จาก need provenance); `_hr is None` → fail-closed HANDOFF_FAILED_REPLY (ห้ามตก bot answer)
+- **M2 vacuous test**: ใช้ `captured` ที่ `_install` คืนจริง (เลิก `replay._CapturedLLM()` ใหม่ที่ไม่ attached) + assert `== 1`
+- **M3 SRS**: อัปเดต `docs/SRS_SSD.md` sec.6 ทุกฟังก์ชันที่เปลี่ยน
+
+### RED evidence (focused, 4 tests)
+- `test_planner_exception_fails_closed` → `DID NOT RAISE HTTPException` (planner exception continued into legacy pipeline)
+- `test_handoff_never_falls_through_when_detector_declines` → `answer` call with products fired on a handoff turn (fallthrough confirmed)
+- `test_handoff_dispatch_uses_plan_decision` → transport ctx had `plan_decided_reason=None` (re-detection confirmed)
+- `test_claim_plus_product_both_owners_execute` → claim_state persisted BUT 0 answer calls / 0 product evidence (product need dropped at warranty early-return)
+- M2 repair (PART 1): replaced detached `replay._CapturedLLM()` with `_install`'s installed capture → observed exactly 1 real `answer` call → non-vacuous GREEN
+
+### GREEN + corrections (all 4 findings)
+- **H1**: `except → _turn_decision_shadow(None,_steps) + raise HTTPException(500)`; gate dedented to unconditional (plan รับประกัน); `if _turn_plan is not None` ที่ subject-signal block ถูกลบ (dead-defensive) → planner พัง = 500 ที่ boundary เดิม, zero retrieval/llm/handoff
+- **M1**: app ส่ง `plan_decided_reason` (map จาก human need provenance: `is_service_anger`→`customer_frustration` else `human_request`); `detect_human_request` consume decision ไม่ re-detect; `_hr is None` → `HANDOFF_FAILED_REPLY` fail-closed (ticket_state guard ยังอยู่ใน transport)
+- **H2**: `_wfr` site — plan มี product/compare/compat need → product owner ต่อ 1 ครั้ง (`_subject_cards` ที่ resolve แล้ว หรือ `fetch_products`+`_dedupe_products`+`llm.answer`) merge เข้า claim response (answer+products+usage) — claim text เดิมอยู่ครบ, ไม่ย้าย logic ไป TurnPlan
+- **M2**: test ใช้ captured จาก `_install` จริง + assert `==1` — repair แรกเจอ 0 calls เพราะ turn clarify (ไม่มี active subject) → เพิ่ม `active_item_id` ใน seed ให้เป็น eligible answer turn → observed exactly 1 answer call (non-vacuous, จะ fail ถ้ามี duplicate)
+- **M3**: `docs/SRS_SSD.md` — §5.2 table (rows 3/4 แก้ตามสถานะจริง, +7.5 TurnPlan gate, +6.5 warranty SM/mixed dispatch) + §6 entries (`_chat_impl`, `_turn_decision_shadow`, `detect_human_request`); roadmap 2C.3 note
+- **stale pin**: `test_shadow_error_never_breaks_chat` pin contract เก่า (planner raise → chat ไม่พัง) = H1 bug ตัวจริง → แก้เป็น pin 500 fail-closed
+
+Verify (focused): action_switch 27p/1s/2xf · turn_decision+subject_set+shadow 229p · claim+handoff 47p · transport script 47/47 · replay 101p/19s/5xf — **รวม 404p/20s/7xf** · py_compile clean · `git diff --check` clean
+Structure: decide_turn callsite=1 (1374) · resolve_subjects=1 (1523) · detect_human_request=1 (gate) · new helpers/tables/model-calls=0 · runtime +263/−377 **net −114** (app+handoffs+td) · total tracked +410/−420 net −10
+Owner count (honest): post-classify action-decision sites ~7→1 (gate); domain transports (lock/order/tax/cert/claim) ยังเป็น owner ของตัวเอง ไม่นับเป็น action duplicates — แก้คำ overclaim รอบก่อน: ตัวเลข 1 คือ "post-classify action selection" เท่านั้น
+
+## 2C.3 correction round 2 — handoff dominance + canonical path + transport re-detect removal
+
+`_wfr` return matrix (verified source):
+- `handoff_to_admin=True` → transport confirmed (claim builders + tax) → terminal
+- `answer == HANDOFF_FAILED_REPLY` → handoff attempted/blocked/failed → terminal (ห้าม silent-continue)
+- else → bot-owned claim response (review request / warranty-date / troubleshoot-KB / auto-answer / info-collect) → +productish need → continue canonical pipeline
+
+Plan:
+- **H1+H2+M1**: ลบ inline `fetch_products+llm.answer` block ที่ `_wfr` ทิ้ง → `_wfr` terminal เมื่อ `handoff_to_admin` หรือ `answer==HANDOFF_FAILED_REPLY`; bot-owned + productish need → `_mixed_claim_carry = _wfr["answer"]` แล้วไหลต่อ canonical path; compose ครั้งเดียวต่อ canonical answer boundary (`answer` ปกติ + `_ws_answer` web-search branch — boundary เดียวกัน 2 exits)
+- **M2**: `detect_human_request` = transport-only — `plan_decided_reason` required (`ctx.get` → None → return None, gate fail-closed); ลบ predicate fallback; migrate direct test callers → transport tests ส่ง reason ชัดเจน, detection tests migrate ไป `is_human_request`/`is_service_anger` (detection owner เดิมที่ decide_turn ใช้)
+- ตัวอย่าง claim+product "สินค้าเสียอยากเคลม อยากดูพาวเวอร์แบงค์ด้วย" → first-message claim → handoff confirmed → terminal (zero product work) — นี่คือ contract ใหม่
+
+### RED → GREEN (2C.3 correction round 2)
+
+RED (3/3 honest):
+- A `test_claim_handoff_dominates_product_need` — `llm.answer` รันหลัง confirmed handoff (answer_calls non-empty หลัง handoffs==1 ผ่านแล้ว)
+- B `test_bot_owned_claim_plus_product_canonical_path` — `_wfr` early-return; steps = `['history','vision','Intent','warranty_review']` ไม่มี RAG/LLM2
+- C `test_handoff_transport_never_reclassifies` — `detect_human_request(req,{})` re-classify ผ่าน predicates → return handoff dict แทน None
+
+Implementation:
+- `_wfr` boundary (app.py:1629): terminal เมื่อ `handoff_to_admin` หรือ `answer==HANDOFF_FAILED_REPLY` → return; bot-owned + productish need → `_mixed_claim_carry` = claim answer → ไหลต่อ pipeline เดิม; compose ครั้งเดียวต่อ `answer`/`_ws_answer` ก่อน ChatResponse (2 exits = boundary เดียวกัน)
+- ลบ inline `fetch_products`+`_dedupe_products`+`llm.answer`+merge block ทั้งก้อน (−36→+15 net ที่ boundary)
+- `detect_human_request`: `plan_decided_reason` required — absent → None (ไม่ re-classify); ลบ predicate fallback
+- test callers migrate: claim_flow ticket-guard ส่ง reason ชัดเจน; 5f_handoff/anger_regression = detection suites → `_handoff()` probe เหนือ `is_human_request`/`is_service_anger` (owner เดิม); transport script ส่ง reason; replay probe → predicate pair
+
+GREEN: action_switch 29p/1s/2xf · claim_flow+5f_handoff+anger_regression 86p · transport script 47/47 · turn_decision+subject_set+shadow 229p · replay 101p/19s/5xf · py_compile clean · diff --check clean
+
+Claim-response decision matrix (`_wfr`):
+- `handoff_to_admin=True` (claim builders + tax + human gate) → terminal — zero product work
+- `answer == HANDOFF_FAILED_REPLY` (attempted/blocked/failed — ทุก builder เขียนเมื่อ transport falsy) → terminal — honest failure คงเดิม
+- else (review request, warranty-date verdict, troubleshoot-KB, info-collect review, auto-answer) → bot-owned → +productish need → carry → canonical pipeline; ไม่มี need → return `_wfr` เหมือนเดิม
+
+## 2C.3 correction round 3 — typed disposition + single composition + required reason + real cost
+
+`_wfr` return shapes (verified — shared builders serve handle_warranty_flow + _legacy):
+- `_build_warranty_claim_response` — `handoff` param = attempted → terminal; False → continue_product
+- `_handle_review_request` — never handoff → continue_product
+- `_handle_tax_invoice_followup` — always attempts → terminal
+- `_handle_warranty_date_followup` (v2 helper) — never → continue_product
+- legacy inline: warranty_date_followup(1676) / warranty_auto(1704) / troubleshoot(1757) → continue_product
+- `_handle_first_message_claim` → delegates claim builder (handoff=True → terminal)
+
+Post-`_wfr` ChatResponse exits (reachable): general(1710) / brand(1754) / KB+mongo(2448) /
+superlative-clarify(3651) / no-product-found(4014) / ws(4637) / main(4661).
+Offline reachability: general(kw fallback)+brand+catalog doc, superlative(ไวสุด+0 products),
+no-product(seeking+0 products) — testable; KB (admindb.knowledge_base=[]) + ws (not configured) — unreachable offline → document.
+
+Plan:
+- H1: `warranty_disposition` field ("terminal"/"continue_product") เขียนที่ owner ทุก builder/dict;
+  app boundary `pop` + `=="terminal"`; ลบ prose compare
+- H2: composition owner เดียว = `_append_base_warranty(claim_carry=)` ที่ 4 exits ที่มันเรียกอยู่
+  (general/KB/main/ws); carry turns bypass alternates (general-elif, brand, kb-skip, superlative,
+  no-product-guard) → canonical boundary เดียว
+- H3: `detect_human_request(req, ctx, *, plan_decided_reason)` required kw-only; callers migrate
+- H4: pin `usage=={10,5,15}` + `cost==_gemini_cost(10,5)>0` + RAG/LLM2/timing
+
+### RED evidence (round 3 — 6/6 honest)
+
+- `test_failed_handoff_terminal_via_typed_disposition`: `warranty_disposition` ไม่มีใน `_wfr` keys → `None == 'terminal'` — control flow อ่าน prose เดิมจริง (mutated copy ยัง terminal ผ่าน string compare — ยืนยัน defect: lifecycle = copy)
+- `test_mixed_carry_general_branch_routes_canonical`: calls=`['answer_general']` — general branch ดักก่อน canonical (claim carry + product need หาย)
+- `test_mixed_carry_brand_branch_routes_canonical`: calls=`['answer_general']` — brand ctx branch ดักก่อน (fixture ต้อง set `brand.original_brand_name` จริงกว่าจะ RED)
+- `test_mixed_carry_superlative_clarify_routes_canonical`: calls=`[]` — superlative clarify return ก่อน boundary (LLM-free exit ทิ้ง carry)
+- `test_mixed_carry_no_product_guard_routes_canonical`: calls=`[]` — `_guard_arm1` ยิง `_send_handoff` + return (side effect ซ้ำ + carry หาย)
+- `test_handoff_transport_never_reclassifies`: `detect_human_request(req,{})` ไม่ raise TypeError — reason ยัง optional ctx.get
+
+GREEN-fixture note: ต้อง empty catalog สำหรับ superlative/no-product (fake fetch คืนทั้ง catalog → branch ไม่ fire) + brand docs ต้องมี `original_brand_name` — เคสแรกผ่าน vacuously ก่อนแก้ fixture (honest-RED repair)
+
+### GREEN (round 3 — ทุก finding ปิด)
+
+- **H1 typed disposition**: `_wfr` boundary อ่าน `warranty_disposition` (pop ก่อน ChatResponse + pop ที่ `chat_v2` boundary — field เป็น internal ไม่ใช่ API model); producers ทั้งหมดเขียน — `_build_warranty_claim_response`=`"terminal" if handoff else "continue_product"`, `_build_post_handoff_response`/`_handle_tax_invoice_followup`=terminal, `_handle_review_request`/`_handle_warranty_date_followup`+inline legacy dicts (warranty_date/warranty_auto/troubleshoot)=continue_product; ลบ prose compare `answer==HANDOFF_FAILED_REPLY` — test mutate copy แล้วยัง terminal ผ่าน typed signal (copy-independent ✓)
+- **H2 single composition**: carry turn ผ่าน canonical boundary เดียว — bypass gates ที่ entry ของ alternate families: `_policy_carry` elif รับ `_mixed_claim_carry` (policy ctx ไป `_combined_extra` → general ไม่ intercept), `brand_q=None` เมื่อ carry, KB lookup skip reason `"claim_carry"`, superlative clarify + no-product guard `not _mixed_claim_carry` (guard ห้ามยิง handoff ซ้ำบน bot-owned turn); compose เฉพาะ canonical `llm.answer`/`_ws_answer` exits (2 exits ของ boundary เดียวกัน — ไม่ paste ทุก return)
+- **H3 required decision**: `detect_human_request(req, ctx, *, plan_decided_reason)` kw-only required — omit→TypeError ก่อน predicate/transport ใดๆ; ลบ `ctx.get`+`if None→return None`+always-true `if _is_human_request or _is_angry` wrapper+unreachable `return None`; caller migration: app gate + transport script ×2 + claim_flow ×3 + action_switch (kwarg)
+- **H4 real metrics**: pin `resp.usage=={prompt:10,output:5,total:15}` + `resp.cost==_llm2_step["cost_usd"]>0` (vision-inclusive เดียวกับ canonical call) + RAG×1+LLM2×1+`timing["llm"]` present
+- **answer-family reachability**: general/brand/superlative/no-product — bypassed + tested (RED confirmed แต่ละ branch เคยดักจริง); KB (admindb.knowledge_base=[] offline) + web-search (is_configured=False) → unreachable ใน harness → ถูก document ไม่สร้าง fixture ปลอม
+- **fixture honesty**: superlative/no-product ต้อง empty catalog (fake fetch คืนทั้ง catalog → branch ไม่ fire); brand ต้อง `original_brand_name` จริง; spy ต้อง capture disposition ตอน call (boundary pop ลบ field ออกจาก dict object เดียวกัน)
+
+Verify: action_switch **34p/1s/2xf** · claim_flow+5f_handoff+anger+turn_decision+subject_set+shadow+replay **416p/19s/5xf** · transport script **47/47** · py_compile clean · `git diff --check` clean
+Runtime LOC: app+231/−371 · handoffs+7/−3 · td+18/−10 · warranty_flow+12/0 · chat_v2+5/−1 → **net −127 vs HEAD** (= round-2 state — typed contract + bypass gates ชดเชยด้วย prose compare/fallback/always-true-if/comment trims)
+Structure: `decide_turn`×1 (1374) · `resolve_subjects`×1 (1520) · `detect_human_request`×1 (1436 kw-only) · predicates=0 ใน transport · `HANDOFF_FAILED_REPLY` control-flow reads=0 (เหลือ presentation write เท่านั้น) · new helpers/tables/model-calls/modules=0 · ไม่มี branch ที่ลบไปถูก restore
+
+### กำลังจะทำ — PHASE 2C.3 CORRECTION ROUND 4 — GUARD-CHAIN REMOVAL + TYPED CONTRACTS
+
+- [ ] PART 0 — verified: `_mixed_claim_carry` guards routing at 5 sites (general `_policy_carry` elif / brand detect / KB skip / superlative clarify / npf guard); `_append_base_warranty` = existing shared finisher (4 app sites + v2); `warranty_disposition` = raw strings ×8 producers + `pop(...,"terminal")` fallback; `plan_decided_reason` accepts arbitrary strings (typo → anger)
+- [ ] H1 — remove carry from ALL branch-selection conditions; restore general/brand/KB/superlative/npf routing invariant
+- [ ] H2 — `_append_base_warranty(..., *, claim_guidance="")` = single composition owner; pass `_mixed_claim_carry` as data at every finisher callsite (incl. brand/superlative/npf which gain the call); delete 2 manual prepends
+- [ ] H3 — `_WarrantyDisposition` enum (TERMINAL/CONTINUE_PRODUCT) in warranty_flow; exhaustive consume in app (anything ≠ CONTINUE_PRODUCT → return; no string fallback)
+- [ ] H4 — `plan_decided_reason: Literal["human_request","customer_frustration"]` + explicit `ValueError` on invalid
+- [ ] RED tests: routing invariance per family (with/without carry same branch), KB seeded via kb_products, enum members, missing→fail-closed, TypeError/ValueError on handoff decision
+
+### ผ่านแล้ว — PHASE 2C.3 CORRECTION ROUND 4 — GUARD-CHAIN REMOVED + TYPED CONTRACTS (uncommitted)
+
+**RED → GREEN** (honest):
+- `test_carry_invariant_*` ×5 — `mixed.source='product_store'` ≠ `general:shipping_policy`/`general:brand_info`/`knowledge_base+mongo`/`superlative_no_match_clarify`/`no_product_found_handoff` — carry bypassed EVERY domain branch
+- `test_failed_handoff_terminal_via_typed_disposition` — `ImportError: _WarrantyDisposition` (enum absent; strings scattered)
+- `test_handoff_transport_never_reclassifies` — typo `plan_decided_reason` silently became customer_frustration (no closed set)
+
+**Fix (root cause — ownership contract, not per-return guards):**
+- `_mixed_claim_carry` removed from ALL branch-selection conditions (policy-elif, brand detect, KB skip, superlative, npf guard) → **routing invariant**: same ask → same domain branch with/without carry
+- `_append_base_warranty(*, claim_guidance="")` = single composition owner — guidance prepends once inside the finisher; param passed at all 7 answer families (general/brand/KB/superlative/npf/main/ws) + v2; 2 manual prepend blocks deleted
+- `_WarrantyDisposition` StrEnum (TERMINAL/CONTINUE_PRODUCT) in warranty_flow — all 8 producers write members; app boundary consumes exhaustively (`pop` + `is not CONTINUE_PRODUCT` → return); missing/unknown fail-closed; zero raw strings outside enum def
+- `plan_decided_reason: Literal["human_request","customer_frustration"]` + `ValueError` on invalid — closed set, no reinterpretation; `_reason`/`_HandoffDecision` aliases deleted
+
+**Impact**: claim carry = presentation data — domain routing (brand/KB/clarify/no-product safety) identical; npf guard's authoritative handoff preserved; carry turns no longer forced into canonical llm.answer; missing disposition can never become continue-product.
+
+**Verify**: action_switch 36p/1s/2xf · claim+5f+anger 86p · transport 47/47 · combined 452p/20s/7xf · py_compile clean · diff --check clean · runtime net **−127** vs HEAD (= round-3 bound — deletions ≥ additions). Broad suite deferred.
+
+### ผ่านแล้ว — PHASE 2C.3 CORRECTION ROUND 5 — HANDOFF-REASON OWNER CORRECTED (uncommitted)
+
+**RED → GREEN**: `test_handoff_reason_owned_by_plan_flag_not_provenance` — renamed `TurnNeed.provenance` (`handoffs.diagnostic_marker_renamed`) flipped `plan_decided_reason` to `human_request` despite `customer_frustration` flag → fixed: gate now reads `"customer_frustration" in _turn_plan.flags`; sibling `test_handoff_reason_human_request_without_frustration_flag` pins the no-flag→`human_request` contract.
+
+**Root cause**: provenance = diagnostic evidence (`handoffs.is_service_anger` marker serialized in TurnDecisionShadow) — app.py searched it to pick behavior; flag was already authoritative in `decide_turn` (line 386).
+
+**Impact**: diagnostic rename can never steer transport; zero new helpers/guards/types/tables/calls; LOC −130 vs HEAD (−3 vs round-4).
+
+**Verify**: 2 new tests green · action_switch+turn_decision 149p/1s/2xf · transport 47/47 · py_compile · diff --check clean. Broad suite deferred.
+
+## Phase 2C.3 — COMMITTED closeout (2026-10-15)
+
+- **Commit 1**: `0d200c9` `refactor: centralize turn action dispatch` — 17 files +1454/−551 (runtime 5 + SRS + roadmap + fixtures + 7 test files + validator + new `test_phase2c3_action_switch.py` 998 บรรทัด; ไฟล์นี้ไม่ commit — commit ถัดไปแยก)
+- **Root causes ที่ปิด**: (1) action ownership กระจาย — item-tag early-answer/pre-classify handoff/anchor-ladder selectors → TurnPlan.primary_action owner เดียว; (2) prose-derived lifecycle — `answer==HANDOFF_FAILED_REPLY`/`handoff_to_admin` → `_WarrantyDisposition` enum; (3) `_mixed_claim_carry` guard chain → presentation data ผ่าน `_append_base_warranty` เดียว; (4) handoff reason จาก provenance diagnostic → canonical `TurnPlan.flags` contract
+- **Owners สุดท้าย**: `decide_turn` ×1/turn (fail-closed 500) · `primary_action` gate ×1 · `resolve_subjects`/`ConversationSubjectSet` ×1 · `_send_handoff` transport ×1 · `_append_base_warranty` finalizer ×1 (claim_guidance kwarg เดียว)
+- **Typed contracts**: `_WarrantyDisposition`{TERMINAL,CONTINUE_PRODUCT} — 8 producers write members, boundary pop+consume exhaustively, missing/unknown→fail-closed, pop ก่อน ChatResponse + chat_v2 · `plan_decided_reason: Literal["human_request","customer_frustration"]` required — omit→TypeError, invalid→ValueError, predicates อยู่ใน decide_turn เท่านั้น
+- **Deleted**: item-tag early-answer arm · pre-classify detect_human_request · FOLLOWUP-COMP/ANCHOR-COMP/POST-COMP-FUP/PARTIAL-COMP selector blocks + pin duplication · warranty-policy prose enricher + `req._followup_original` machinery · LINK-FOLLOWUP kw-gate/anchor-ladder · `_ho_prov` provenance gate
+- **Retained (เหตุผลชัด)**: `post_intent_handoffs` (tax/cert — นอก TurnPlan scope) · `early_order_flow`/`auto_check_delivery_warranty` (order-side owners) · `_hybrid_anchor_card` compat merge · `_prepare_link_followup` availability notes · `_turn_decision_shadow` (serialize-only)
+- **Verify (รอบสุดท้าย)**: offline batch 47 files **831p/20s/7xf/5w/0f** (13 live-DB = NOT_RUN_REAL_DB + 5 port-8010 scripts excluded) · transport **47/47** · validator **all rows** · py_compile 6 files · diff --check clean · anger suite green เพราะ probe ย้ายไป predicate boundary (POST-baseline signature `72c325e` เกษียณ — transport tests fake transport แล้ว)
+- **LOC**: runtime net **−130 vs HEAD** (app +230/−393) · new helpers/flags/kw-tables/model-calls = 0 · enum ตัวเดียว (approved)
+- **Safety**: working tree clean หลัง commit · no push/PR/deploy/.env/Mongo/provider/botworker/port-8010 · Phase 2D = next, ยังไม่เริ่ม
+
+## กำลังจะทำ — PHASE 2D — BOTWORKER PLATFORM + SHOP SCOPE GATE (branch `feature-legacy-shopee-evidence-retrieval`, baseline สะอาด)
+
+### PART 0 — owner map (audit เสร็จ)
+
+| path | reads ตอนนี้ | admission point ตอนนี้ | scope consumer ที่เสนอ | side effects | tests |
+|---|---|---|---|---|---|
+| `bot-worker.ts` loop | `getSystemConfig` ×1/cycle | `bot_worker_enabled` global check เท่านั้น | resolve scope 1 ครั้ง/cycle → ส่งเข้า poll/recovery/waittimeout | enabledSince edge + clearPendingWork | enable-checkpoint |
+| `pollNewMessages→pollNewMessagesInEra` | `messages.find({role:user,direction:in,created_timestamp>since})` | discovery → claimMessage | `+ buildScopeFilter(scope)` ใน find | claim doc + buffer row + reply | scope-gate ใหม่ |
+| `bufferService.recoverStaleBuffers` | `buffer_messages.find({status∈[buffered,processing],kind≠conv_lock})` | enumerate→classify→flush | `+ scope filter` ใน find | row CAS/delete/flush | scope-gate ใหม่ |
+| `recoverStaleClaims` | `chat_processing.find({status:"processing",lease_expires_at<$lt})` | stale claim classify | `+ scope filter` ใน find | claim CAS/settle | scope-gate ใหม่ |
+| `checkWaitTimeouts` (workflowEngine) | `workflow_runs.find({status:"waiting_for_reply",wait_started_at:$exists})` | timeout resume→walkGraph→callBot | `+ scope filter` ใน find | run CAS + callBot | scope-gate ใหม่ |
+| `shopService` / `/api/shops/[id]` PATCH | `shops` coll | `connected` เท่านั้น | `+ bot_worker_enabled` field + `setShopBotWorker` | shop doc + `config.shop_toggle` audit | scope-gate ใหม่ |
+| `systemConfigService` / `/api/config` PUT | `system_configs.main_config` | `allowedKeys` whitelist | `+ bot_worker_platforms` field (whitelist+validate+fail-closed) | main_config + `config.update` audit | config-failclosed |
+| `/shops` page | `/api/shops` | — | platform switches + per-shop switch + effective-state label | PATCH/PUT | build/typecheck |
+
+- config owners ตอนนี้ = 1 (`systemConfigService` — `updateSystemConfig` writer เดียว; `/api/test-assignment` toggle_worker ก็ผ่าน writer เดิม)
+- admission owners = 1 (`botWorkerService` — delegated internals: bufferService.recoverStaleBuffers + workflowEngine.checkWaitTimeouts)
+- config reads/cycle = ~3 (cached 5s) · config reads/message = 0 · paths ที่ยิง bot ได้ = 4 (poll→bufferOrProcess/processMessage, stale-claim reclaim→processMessage, stale-buffer flush→processMessage, wait-timeout→let_ai_respond) + timer flush (งานที่ admit แล้วจบได้)
+- enable-era contract (คงเดิม): `enabledSince` ตั้งที่ rising edge/boot → poll filter `created_timestamp>since` → ข้อความก่อน era ไม่ถูก admit; recovery freshness `freshAfter=now−(max(window)+claimLease+60s)` → stale claim เก่า settle ไม่ยิง bot; BW-4 = error ทุกชนิด → terminal `bot_failed` ไม่มี error-class retry (retry เดียวในระบบ = stale in-flight claim reclaim ใน freshness window)
+- duplicate/obsolete scope logic ตอนนี้ = 0 (ยังไม่มี platform/shop gate เลย — ทุก inbound ผ่าน)
+
+### Contract ที่เสนอ (รออนุญาต)
+
+- `system_configs.main_config.bot_worker_platforms: {shopee?,tiktok?,lazada?}` — field เดียว; missing→OFF ทุกตัว; key นอก Platform→reject; ไม่มี env fallback; เข้า FAIL_CLOSED_SWITCHES
+- `shops.bot_worker_enabled: boolean` — field เดียว; missing→OFF; upsertShop setOnInsert=false
+- scope ที่ resolve = `{pairs:[{platform,shop_id}]}` — platform enabled ∩ shop.bot_worker_enabled (1 query/cycle); filter = `$or` grouped ต่อ platform `{platform,shop_id:{$in:[...]}}` — pair-exact; empty→zero admission (ไม่ query)
+- scope ไหล: bot-worker loop resolve ×1 → `pollNewMessages(since,scope)` / `recoverStaleBuffersAndClaims(scope)` / `checkWaitTimeouts(scope)`; deferred recovery timer resolve ใหม่เอง (pass แยก)
+- flushBuffer/timer paths = งานที่ admit แล้ว → ไม่เช็ค scope (global kill switch + era abort คงเดิม)
+- API: PATCH `/api/shops/[id]` {connected?, bot_worker_enabled?} + PUT `/api/config` {bot_worker_platforms} + GET `/api/shops` embed `bot_worker` meta
+- UI `/shops`: 3 platform switches + per-shop Botworker switch + effective-state label (global/platform/shop disabled/enabled) — แยกจาก connected/แชทปิด; no optimistic UI
+- ห้าม: worker start / live canary / commit / push / PR / .env / real Mongo / platform delivery
+
+### Baseline (green ก่อนแก้)
+
+config-failclosed 4/4 · boundary 20/20 · recovery-freshness 60/60 · error-policy 38/38 · idempotency 71/71 · enable-checkpoint 18/18 = 211/211
+
+### ผ่านแล้ว — PHASE 2D IMPLEMENTATION (uncommitted — หยุดก่อน commit/canary ตามสั่ง)
+
+**RED → GREEN**: `scripts/test-botworker-scope-gate.ts` 47 tests (truth table ×10 · admission ×12 · historical/first-enable ×10 · replay/idempotency ×7 · API ×8 · canary sim ×2) — honest RED 43/45 fail ก่อน implement (2 ที่ผ่าน = auth reject + non-boolean reject มีอยู่แล้ว) → 47/47 หลัง implement
+
+**สิ่งที่เพิ่ม (owner เดียวทุกจุด)**:
+- `main_config.bot_worker_platforms:{shopee,tiktok,lazada}` — field เดียวใน `SystemConfigDoc` + `FAIL_CLOSED_SWITCHES` + `allowedKeys`; PUT `/api/config` validate (plain object, keys ⊆ 3 platforms, boolean เท่านั้น, `true` เฉพาะ `BOTWORKER_BACKENDS`) + audit `config.update`
+- `shops.bot_worker_enabled` — field เดียว + `shopService.setShopBotWorker(shop_id,platform,enabled)` (upsertShop `$setOnInsert:false`); PATCH `/api/shops/[id]` {connected?,bot_worker_enabled?} — requirePageEdit + boolean check + 404 ก่อน partial write + audit `config.shop_toggle` ต่อ field; GET `/api/shops` embed `bot_worker:{global,platforms}` + row flag
+- `resolveBotworkerScope(config)` ใน botWorkerService (resolver เดียว) → `BotworkerCycleScope{config,pairs}`; `buildScopeFilter(pairs)`/`withScope(base,scope)`/`BotworkerScopePair` ใน botworkerRuntime (pure, ไม่มี circular dep) — filter = `$or` per-platform `{platform,shop_id:{$in}}` pair-exact; empty → `NullScope` deny-all
+- `BOTWORKER_BACKENDS=["shopee"]` ใน safety.ts — enforce 3 ชั้น (route validation 400 + resolver hard-exclude กัน direct-DB edit + UI disabled switches)
+- scope = **required param** ทุก admission signature: `pollNewMessages(since,scope)` / `recoverStaleBuffers(...,signal,scope)` / `recoverStaleClaims(scope)` / `checkWaitTimeouts(signal,scope)` — tsc บังคับ zero unscoped callers (old unscoped path ถูกลบใน diff เดียวกัน); caller ไม่ส่ง → self-resolve 1 ครั้ง (standalone safe)
+- `bot-worker.ts` resolve 1 ครั้ง/cycle → snapshot เดียวไหลทุก path; ทุก consumer ใช้ `scope.config` แทน re-read (config read/message = 0, divergence = 0); deferred recovery timer resolve fresh snapshot ต่อ pass
+- UI `/shops`: `src/lib/botworkerScope.ts` `effectiveBotworkerState` (shared page+drawer) — 3 platform switches (tiktok/lazada disabled "backend unavailable") + per-shop switch ใน ShopDetailDrawer + effective label (ปิด global/ปิด platform/ปิดร้าน/เปิดใช้งาน) — ToggleSwitch เดิม, no optimistic UI, PATCH แล้วค่อยอัปเดต state
+
+**Error → cause → fix ระหว่างทำ**:
+- route tests fail "updateSystemConfig is not a function" → mock export function แต่ route ใช้ aggregate object → mocks เพิ่ม `systemConfigService.updateSystemConfig`
+- recovery R31/R39/R43 deferred-wake empty pairs → mock `COLLECTIONS` ไม่มี `shops` (resolver lookup undefined collection) → เพิ่มใน `test-botworker-fakemongo.mjs`
+- tsc ~170 call-site errors → migrate ทุก suite ใส่ scope param + `resolveBotworkerScope` stub ใน enable-checkpoint mock
+- bufferService required-param-after-optional → ย้าย `signal`/`scope` order
+
+**Verify**: scope-gate **47/47** · recovery-freshness **60/60** · idempotency **71/71** · error-policy **38/38** · config-failclosed **4/4** · boundary **20/20** · enable-checkpoint **18/18** · runtime-mongo-safety **110/110** · production-races **37/37** · admin-logs **57/57** · shadow-batch **22/22** · shop-settings **3/3** · ownership-transport **244/244** · `tsc --noEmit` clean · `next build` clean (84 pages) · `git diff --check` clean — suites ที่ต้อง env จริง (verify-botworker-runtime-mongo, test-workflow-phase1/phase6, test-workflow-e2e, test-ensure-indexes) ไม่รันได้ offline (pre-existing, fail ที่ config.ts ก่อนแตะ scope code)
+
+**Owner/query counts**: config owner=1 · shop-flag owner=1 · runtime admission owner=1 · scope resolves=1/cycle · config reads/message=0 · parallel admission path=0 · platform-delivery callsites changed=0 · answer logic changed=0 · new collection/index/env/deps=0
+
+**Safety state**: worker ไม่เคย start · live canary ยังไม่ได้ run (ต้อง operator approval หลัง commit) · ไม่มี staging/deploy/push/PR · working tree มีแต่ uncommitted changes
+
+**Residual**: (1) provider 429/5xx retry policy ไม่มี — `bot_failed` terminal ตาม BW-4 (future decision แยก); (2) UI visual verification = manual gate (ไม่ได้ start dev server)
+
+**Verdict**: `PHASE_2D_SCOPE_AND_REPLAY_SAFETY_READY_FOR_INDEPENDENT_REVIEW` — มี manual gate `PHASE_2D_SCOPE_GATE_OFFLINE_GREEN_UI_VISUAL_REVIEW_PENDING` รอ visual check
+
+### ผ่านแล้ว — PHASE 2D REVIEW-FIX — ROOT CONTRACT CORRECTED (uncommitted)
+
+**Contract gaps ที่แก้ (root cause)**:
+- (a) `resolveBotworkerScope` ไม่เช็ค global `bot_worker_enabled` — global gate อยู่แค่ใน `bot-worker.ts` loop → caller ที่เรียก resolver+entry point ตรงๆ ใต้ global-OFF จะ admit ได้ → fix: resolver คืน `pairs:[]` เมื่อ `config.bot_worker_enabled !== true` ก่อน query shops (global ถูก fold เข้า scope owner เดียว ไม่มี guard แยกใน poll/recovery)
+- (b) `PATCH /api/shops/[id]` ไม่ enforce backend availability — tiktok/lazada shop PATCH `bot_worker_enabled:true` persist ได้ → fix: route reject 422 ก่อน write ทุก field เมื่อ `body.bot_worker_enabled===true && shop.platform ∉ BOTWORKER_BACKENDS` (reuse constant เดิม); disable (`false`) ยังทำได้เสมอ; drawer switch เปลี่ยนเป็น disable-only บน unsupported platform (latent flag ปิดได้ เปิดไม่ได้)
+
+**RED → GREEN**: เพิ่ม C8 (resolver pairs=0 ใต้ global OFF) + A6 (poll/recoverStaleBuffers/checkWaitTimeouts ผ่าน entry point จริง admit 0 ทั้งหมด + zero claim/buffer/reply/run mutation/provider) + X9/X10 (tiktok/lazada enable → 422 zero write/audit) + X11 (disable บน unsupported platform ยังทำได้) — RED 4 fail ตรง contract gap (X11 ผ่านอยู่แล้ว = disable path เดิม) → GREEN **52/52**
+
+**Evidence corrections (docs เท่านั้น runtime ไม่แตะ)**:
+- ~~"config reads/message = 0"~~ → แก้เป็น: scope DB lookups/message = 0; scope resolve = 1 ครั้ง/cycle; cached `getSystemConfig` ใน `processClaimedMessage` คงเดิมสำหรับ workflow flags (cache read ไม่ใช่ per-message scope DB read — ไม่ thread config ลึกลงเพื่อทำ metric)
+- ~~"empty scope → ไม่ยิง query"~~ → แก้เป็น: empty scope ผลิต structural deny-all filter `{shop_id:{$in:[]}}` — admission query อาจถูกยิงแต่ match/adopt/claim 0 rows เสมอ (ไม่เพิ่ม guard เพื่อเลี่ยง query)
+- ~~"caller ไม่ส่ง scope → self-resolve"~~ → ลบ: production signatures require scope เสมอ (ไม่มี self-resolve fallback — ตรวจจาก code จริง)
+- audit metadata shape แก้เป็น `{field,value,platform}` + top-level `shop_id` ตาม code จริง
+
+**Verify**: scope-gate **52/52** · recovery-freshness 60/60 · error-policy 38/38 · enable-checkpoint 18/18 · boundary 20/20 · config-failclosed 4/4 · shop-settings 3/3 · idempotency 71/71 · tsc clean · build clean · diff --check clean
+
+**Structural audit**: eligibility owner=1 (resolver — global/platform/shop fold ในที่เดียว) · backend-allowlist reuse `BOTWORKER_BACKENDS` (ไม่มี platform list ซ้ำ) · new helper/guard/fallback/module/dep/env/collection/index = 0 · runtime LOC: resolver +4, route +9, drawer +3 · Sellcenter ingestion/Tickets/admin replies/round robin/shadow storage/platform delivery ไม่แตะ · pre-era + terminal rows ยังไม่ admissible
+
+**Residual**: UI visual verification = manual gate ยังค้าง (ไม่มี dev server); provider 429/5xx retry = future decision (BW-4 terminal ตามเดิม)
+
+### ผ่านแล้ว — PHASE 2D FINAL INDEPENDENT REVIEW + UI CORRECTION (2026-10-16, branch `feature-legacy-shopee-evidence-retrieval` @ `9af48a0`, uncommitted — หยุดก่อน stage/commit ตามสั่ง)
+
+**PART 0 audit (done, read-only)**: HEAD `9af48a0` ✓ · `git diff --check` clean ✓ · manifest มีเฉพาะไฟล์ Phase 2D (runtime 8, API 3, UI 2, lib 1, tests/mocks 12, docs 3, log 1) · ไม่มีไฟล์นอกขอบเขต · call graph: bot-worker loop → `resolveBotworkerScope(config)` 1×/cycle → `pollNewMessages(since,scope)` / `recoverStaleBuffersAndClaims(scope)` (→ bufferService + recoverStaleClaims) / `checkWaitTimeouts(scope)` → workflowEngine — deferred timer resolve fresh snapshot · ทุก admission query ผ่าน `withScope` (pair-exact `$or` / deny-all `$in:[]`) · ทุก coll ที่ถูก scope มี `platform`+`shop_id` ครบ (messages/chat_processing/buffer_messages/workflow_runs ตรวจแล้ว) · PUT /api/config validate 422 ก่อน write · PATCH /api/shops/[id] validate+404+backend-check ก่อน write ทุก field → zero partial write · GET /api/shops embed `bot_worker` meta (fail-closed `.catch(null)`)
+
+**Review findings (independent)**:
+
+- **M1 (Medium)** — `handlePlatformToggle` ใน `/shops` page spread `botWorker.platforms` ทั้งก้อนเข้า `PUT /api/config` → ถ้า DB มี latent `tiktok:true`/`lazada:true` (เซ็ตผ่าน API ไม่ได้ — direct-DB edit เท่านั้น และ UI ไม่ render switch ของ unimplemented platform → ไม่มีทางปิดผ่าน UI) PUT จะ echo `tiktok:true` → 422 ทุกครั้ง → **platform switches ทั้งหมดติดตันใน UI จนกว่าจะแก้ DB เอง** — เคสเดียวกับ latent-flag contract (X9–X11 ที่ shop level) · root cause = payload echo ค่าที่ UI เองแก้ไม่ได้ · fix: สร้าง payload เฉพาะ key ที่ `implemented` (`buildBotWorkerPlatformPatch` ใน botworkerScope.ts — owner เดียวของ scope-meta logic) → key ที่ไม่ implement ไม่ถูกส่ง → normalize เป็น OFF เอง (self-heal) และไม่มีทาง echo `true` ผิด · ผลกระทบเคสอื่น: ปกติ payload `{shopee:next}` ผลลัพธ์เท่าเดิม; future multi-backend → implemented loop preserve ค่า platform อื่นที่ implement แล้ว
+- **L1 (doc drift)** — SRS + log เขียนว่า PUT validation reject ด้วย 400 แต่ code คืน 422 (ตรงกับ PATCH 422) → แก้ doc ให้ตรง code (test ยอมรับ `422||400` อยู่แล้ว)
+- **L2 (cosmetic)** — drawer suffix `({platform} ยังไม่มี backend)` ซ้ำ `bwEff.reason` เมื่อ reason = "platform ยังไม่มี backend" → render "ปิด — platform ยังไม่มี backend (tiktok ยังไม่มี backend)" → fix: แสดง suffix เฉพาะเมื่อ reason ไม่ได้ครอบอยู่แล้ว
+- **L3 (cosmetic)** — label `global:` ภาษาอังกฤษกลาง UI ไทย → `ทั้งระบบ:` ให้ตรง reason "ปิดทั้งระบบ" + ชัดว่า read-only
+- **L4** — หลัง PATCH สำเร็จ `load()` รีเฟรช list+meta แต่ `selectedShop` (drawer prop) ยัง object เก่า → fix: `load()` re-derive `selectedShop` จาก rows ใหม่ 1 บรรทัด → drawer กิน authoritative data จริงตาม requirement
+
+**Plan**: RED ก่อน (X12 ใน scope-gate suite — `buildBotWorkerPlatformPatch` ต้องไม่ echo non-implemented key / preserve implemented ค่าอื่น) → แก้เจ้าของเดิม → GREEN → final battery (13 suites + tsc + build + diff --check) → อัปเดต SRS/schema/roadmap/log · **ไม่ commit/push/deploy/start server/.env/Mongo/provider**
+
+**Result (verified 2026-10-16)**:
+
+- **M1 fixed (RED→GREEN)**: เพิ่ม `buildBotWorkerPlatformPatch(meta, platform, next)` ใน `src/lib/botworkerScope.ts` (scope-meta owner เดิม — ไม่สร้าง module ใหม่) — payload มีเฉพาะ `implemented` keys: non-backend ไม่ถูก echo (latent `true` จาก direct-DB ถูก normalize เป็น OFF เอง = self-heal) และ implemented siblings ถูก preserve สำหรับ multi-backend อนาคต · `page.tsx` ใช้ helper แทน spread meta · RED `X12 FAIL (not a function)` → GREEN **53/53**
+- **L2/L3/L4 fixed**: `botWorkerEffective` คืน `code` (semantic blocker: `global_off|no_backend|platform_off|shop_off|null`) — drawer suffix dedup เทียบ code ไม่เทียบ string ไทย · label `global:` → `ทั้งระบบ: … (อ่านอย่างเดียว)` · `load()` re-derive `selectedShop` จาก rows ใหม่ → drawer แสดง authoritative data หลัง save
+- **L1 fixed (docs)**: SRS + roadmap แก้ 400→422 ให้ตรง code
+- **Independent review (ไม่มี finding เพิ่ม)**: ทุก bot-invoking path ผ่าน scope เดียวกัน (required param, tsc-enforced, no self-resolve fallback) · pre-era/terminal rows ไม่ admissible · Sellcenter/Tickets/admin replies/round robin/platform delivery ไม่แตะ · partial-write เป็นไปไม่ได้ (validate ก่อน write ทุก field ทั้ง PATCH+PUT) · audit `config.update`/`config.shop_toggle` ต่อ field
+- **Verify (final battery)**: scope-gate **53/53** · recovery-freshness 60/60 · idempotency 71/71 · error-policy 38/38 · enable-checkpoint 18/18 · boundary 20/20 · config-failclosed 4/4 · production-races 37/37 · runtime-mongo-safety 110/110 · admin-logs 57/57 · shop-settings 3/3 · ownership-transport 244/244 · shadow-batch 22/22 = **737/737** · `tsc --noEmit` clean · `next build` clean · `git diff --check` clean
+- **Browser verification**: **BLOCKED** — ไม่มี dev server รันอยู่ (port 3000 ไม่มี listener, 8010 ไม่มี listener) · ไม่ได้ start server (จะ load `.env*` — ต้องขออนุญาตแยก) · component-level: tsc+build clean, ToggleSwitch เป็น `role=switch`+`aria-checked`+`aria-label`+focus ring เดิม, layout flex-wrap ทุกจุด (390/768/1440 safe โดย markup)
+- **Verdict**: `PHASE_2D_FINAL_REVIEW_AND_UI_READY_FOR_PRECOMMIT` — manual gate เดิมยังค้าง: visual browser check + live canary (operator approval หลัง commit)
+
+### กำลังทำ — PHASE 2D UI RELOCATION — per-shop switch ย้ายจาก drawer → shop card (2026-10-16, uncommitted)
+
+**PART 0 (done)**: HEAD `9af48a0` · staging empty · manifest 32 entries คงเดิม · card open drawer ผ่าน `Card onClick={() => setSelectedShop(s)}` — switch click ต้อง `stopPropagation` ที่ control row (DOM boundary ที่ถูกต้อง — ห้ามแตะ ToggleSwitch)
+
+**Plan (bounded — UI เท่านั้น ไม่แตะ runtime/API/contract)**:
+
+1. `page.tsx` — เพิ่ม control row บน card แทน text-only eff block (ตำแหน่งเดิม: ใต้ sync/chat เหนือ footer hint): `Bot` icon + `บอทตอบกลับ` | eff text (`botWorkerEffective` — owner เดิม) | `ToggleSwitch` เดิม · state `shopSavingId: string|null` (per-shop lock — ร้านอื่นไม่ถูกล็อก) · handler PATCH `/shops/{id}` → ไม่ optimistic → `load()` reload authoritative · disable rules: `!shopEditable` (`canEditPage "shop"` ตรง PATCH route) / `shopSavingId===s.shop_id` / `!impl && flag!==true` · stopPropagation ที่ row div (row = control zone — คลิกไม่เปิด drawer, card นอก row ยังเปิดได้)
+2. `ShopDetailDrawer.tsx` — ลบทั้งหมด: `bwEnabled`/`bwSaving`/sync effect/`toggleBotWorker`/`bwImpl`/`bwEff`/JSX row/props `botWorker`+`onChanged`/imports (ToggleSwitch, botWorkerEffective, BotWorkerMeta)/`ShopRow.bot_worker_enabled` — drawer กลับเป็น Workflow/Trigger/Persona/KB เท่านั้น
+3. `page.tsx` — ลบ `botWorker`/`onChanged` args ที่ callsite + ลบ `setSelectedShop` re-derive ใน `load()` (มีไว้ refresh drawer control ที่ถูกลบ)
+4. Verify: scope-gate + shop-settings + tsc + build + diff --check (runtime bytes ต้องไม่เปลี่ยน)
+
+**ห้าม**: helper/guard/state owner ใหม่, runtime/API/worker, commit/push/deploy/server/.env/Mongo
+
+**ผลลัพธ์ relocation round (2026-10-16)**:
+- page.tsx +~36: control row บน card (Bot icon + `บอทตอบกลับ` + eff text + ToggleSwitch), `shopSavingId: string|null`, `shopEditable=canEditPage("shop")`, `handleShopBotWorkerToggle` (PATCH → `load()` authoritative — ไม่ optimistic), stopPropagation ที่ row div, ลบ `selectedShop` re-derive + drawer args
+- ShopDetailDrawer.tsx −~75: ลบ bwEnabled/bwSaving/sync effect/toggleBotWorker/bwImpl/bwEff/JSX row/props botWorker+onChanged/imports ToggleSwitch+botworkerScope/`ShopRow.bot_worker_enabled` — เหลือ Workflow/Trigger/Persona/KB เท่านั้น (grep `botWorker|bot_worker|ToggleSwitch` = 0 hit)
+- runtime bytes: ไม่แตะ (mtime ทุก runtime file = เซสชันก่อน) — manifest 28+4 เดิม
+- verify: scope-gate 53/53 · shop-settings 3/3 · tsc clean · build clean (1349ms, 84 pages) · diff --check clean
+- dev server พบรันอยู่แล้ว (port 3000, next dev, cwd=repo) — visual gate เปิด browser preview รอ operator verify
+- docs: SRS `/shops` UI → "per-shop switch บน shop card"; roadmap append relocation note (history คงเดิม)
+
+### กำลังทำ — PHASE 2D CAS — per-shop botworker switch optimistic concurrency (2026-10-16, uncommitted)
+
+**PART 0 (done)**: HEAD `9af48a0` · staging empty · manifest 31 (27M+4U — drawer byte-identical HEAD ✓) · caller audit: `setShopBotWorker` มี caller เดียว = PATCH route; ไม่มี production caller ส่ง `{connected, bot_worker_enabled}` พร้อมกัน (UI PATCH เดียว = card handler ส่ง botworker เท่านั้น) → adopt single-command API
+
+**Root cause**: PATCH unconditional `$set` — two admins read same state → conflicting writes → later silently overwrites; UI `shopSavingId` เช็ก per-shop ทำให้ร้านแรกที่ยัง in-flight กลับมา enabled ได้เมื่อร้านสองเข้าคิว
+
+**Plan (เพิ่ม CAS ที่ owner เดิม — ไม่สร้าง lock/helper ใหม่)**:
+
+1. `setShopBotWorker(shopId, enabled, expected)` — `updateOne` เดียว + CAS filter: expected=true→`{shop_id,bot_worker_enabled:true}`; expected=false→`{shop_id,$or:[{bot_worker_enabled:false},{bot_worker_enabled:{$exists:false}}]}`; return `matchedCount===1` (ไม่ใช่ modifiedCount — idempotent write match แต่ไม่ modify)
+2. PATCH route: combined `connected`+`bot_worker_enabled` → 422; require `expected_bot_worker_enabled` boolean → 400; platform 422 ก่อน CAS; CAS miss → re-read ครั้งเดียว (missing→404 / exists→409 zero audit); connected-only เดิม
+3. page.tsx: ส่ง `{bot_worker_enabled:desired, expected_bot_worker_enabled:current===true}`; `shopSavingId!==null` → ล็อกทุก switch ใน browser นี้ (spinner เฉพาะร้านที่ save); 409 → `load()` + toast เฉพาะ; success → `load()` ก่อน toast.success
+4. Tests (RED ก่อน): X5/X6/X7/X9/X10/X11 ใส่ expected; X7c→X13 combined→422; X14 CAS matrix; X15 two stale callers (sequential = race เดียวกัน); X16 different shops; X17 expected missing/non-boolean→400
+
+**ห้าม**: distributed lock/transaction/helper/retry/queue/Set/ref registry; runtime admission bytes ต้องไม่เปลี่ยน (shopService=write owner แก้ได้ตาม spec); no commit
+
+**ผลลัพธ์ CAS round (2026-10-16)**:
+- RED (5): X13 combined→200(ต้อง 422) · X14d missing+exp true→200(ต้อง 409) · X14e stale→200(ต้อง 409) · X15 caller2→200(ต้อง 409) · X17 missing expected→200(ต้อง 400)
+- shopService.setShopBotWorker: unconditional $set → CAS `updateOne` เดียว (expected=false filter = `$or:[false,{$exists:false}]` — missing≡false) คืน matchedCount===1
+- route [id]: combined→422 · expected boolean required→400 · CAS miss→re-read ครั้งเดียว 404/409 zero audit · connected-only เดิม · audit เหมือนเดิม
+- page.tsx: ส่ง expected_bot_worker_enabled; shopSavingId!==null ล็อกทุก switch (browser-local เท่านั้น); 409→load()+toast เฉพาะ; success→load() ก่อน toast
+- GREEN: scope-gate 61/61 · shop-settings 3/3 · admin-logs 57/57 · config-failclosed 4/4 · tsc clean · build clean · diff --check clean
+- admission/runtime bytes ไม่เปลี่ยน — แตะเฉพาะ write owner (shopService) + route + page + tests + docs
+- drawer ยัง byte-identical HEAD (e74141…) — manifest 27M+4U
+
+### กำลังทำ — PHASE 2D PLATFORM-FENCE CAS — race platform flip ระหว่าง pre-read ↔ write (2026-10-16, uncommitted)
+
+**PART 0 (done)**: HEAD `9af48a0` · staging 0 · manifest 31 · `setShopBotWorker` caller เดียว = route · `BOTWORKER_BACKENDS=["shopee"]` owner เดียวใน safety.ts
+
+**Root cause**: route อ่าน `shop.platform` ก่อน CAS แต่ filter fence เฉพาะ `shop_id`+`bot_worker_enabled` — external shop sync flip platform ระหว่าง read↔write → persist `bot_worker_enabled:true` บน platform ที่ไม่รองรับ (worker ยัง fail-closed แต่ flag กลายเป็น latent invalid)
+
+**Plan**:
+1. RED: X18 hook flip platform ใน updateOne (shopee→tiktok หลัง pre-read) → ต้อง 422 zero write/audit/attempt=1 · X19 disable latent บน unsupported ยัง 200 · X20 enable stale expected (platform ปกติ) → 409 ไม่ใช่ 422
+2. `setShopBotWorker`: enabled=true → filter เพิ่ม `platform:{$in:BOTWORKER_BACKENDS}` (import จาก safety — ห้าม duplicate list); enabled=false → ไม่ fence platform (latent clear ได้เสมอ)
+3. route CAS miss → re-read ครั้งเดียว: missing→404 / enabling+platform ไม่รองรับ→422 / else→409
+4. ไม่แตะ worker/admission/platform-toggle/UI อื่น
+
+**ผลลัพธ์ platform-fence round (2026-10-16)**:
+- RED (1): X18 platform flip shopee→tiktok ใน updateOne hook → 200 (fence ขาด) → GREEN 422 หลัง fix
+- `setShopBotWorker`: enable → filter เพิ่ม `platform:{$in:[...BOTWORKER_BACKENDS]}` (import จาก safety — owner เดียว); disable → ไม่ fence
+- route CAS miss re-read: missing→404 / enable+unsupported→422 / else→409
+- mocks.mjs: เพิ่ม JSDoc type ให้ hook fields (ตาม convention ของ error-policy mocks — แก้ tsc error)
+- GREEN: scope-gate 64/64 · shop-settings 3/3 · admin-logs 57/57 · config-failclosed 4/4 · tsc clean · diff --check clean
+- visual gate: dev server ยังรัน (port 3000) แต่ auth cookie อยู่ที่ localhost:3000 — preview proxy origin ต่างกัน → ตรวจเองไม่ได้ → `VISUAL_GATE_BLOCKED_AUTH` (operator verify ที่ localhost:3000/shops)
+
+### กำลังทำ — PHASE 2D CLEAN-START + EXPLICIT ERROR RETRY + PER-SCOPE CUTOFF (2026-10-16, uncommitted)
+
+**PART 0 (done)** — frozen audit: HEAD `9af48a0` · staging 0 · manifest 31 · platform-fence CAS ยังครบ · drawer byte-identical HEAD
+
+**Owner counts (current)**:
+- normal inbound admission = 1 (`pollNewMessages` → claimMessage → bufferOrProcess)
+- recovery/reconciliation = 1 (`recoverStaleBuffersAndClaims`) — แต่มี provider path ข้างใน
+- explicit retry = 0 (ไม่มี)
+- claim transition = 1 (`claimMessage` + `finalizeClaims`)
+- buffer flush = 1 (`flushBuffer` — trigger ได้จาก timer + recovery)
+- workflow timeout resume = 1 (`checkWaitTimeouts` → `processWaitTimeout`)
+- provider invocation = 1 (`processClaimedMessage` → callBot/let_ai_respond)
+
+**Provider paths ที่ต้องตัดตาม contract ใหม่**:
+1. `recoverStaleBuffers` → classify "fresh" → `flushBuffer` → processMessage → provider  ← ลบ
+2. `recoverStaleClaims` → reclaim → `processMessage`  ← ลบ
+3. `claimMessage` expired-reclaim → return "claimed" → caller execute  ← เปลี่ยนเป็น reconcile→bot_failed
+4. `checkWaitTimeouts` → resume run เก่าก่อน cutoff → provider  ← ต้องตัดด้วย pair cutoff (settle cancelled)
+5. poll ใช้ `since` = global edge เท่านั้น — ไม่มี per-pair cutoff  ← ต้อง max(global,platform_at,shop_at)
+
+**Root cause ของปัญหา**: admission ไม่มี enable cutoff ต่อ scope — `since` เป็น global edge เพียงชั้นเดียว (platform/shop เปิดทีหลัง → backlog ช่วงปิดถูก admit) + recovery เป็น "re-execute" ไม่ใช่ reconcile + ไม่มี explicit retry surface เลย → restart/enable edge กินงานเก่าอัตโนมัติ
+
+**Plan (ตาม spec)**:
+1. `SystemConfigDoc.bot_worker_platform_enabled_at` (per-platform ts) — server-derived ใน `updateSystemConfig` write เดียวกับ flag (read-once edge detect); ไม่อยู่ใน allowedKeys; mergeWithSafety carry; missing+flag=true → resolver fail-closed
+2. `ShopDoc.bot_worker_enabled_at` — เขียนใน CAS `$set` เดียวของ `setShopBotWorker` (true→stamp / false→null)
+3. `BotworkerScopePair {platform, shop_id, cutoff}` + `BotworkerCycleScope.cutoffs: ReadonlyMap` + `global_enabled_since`; `resolveBotworkerScope(config, edge)` — global flag+edge, platform flag+at, shop flag+at ทุกชั้นต้องมีครบ
+4. `buildScopeFilter(pairs, tsField?)` — tsField → per-pair `{platform, shop_id, [ts]:{$gt:cutoff}}`; ไม่ส่ง → identity only (recovery enumerate)
+5. poll: `pollNewMessages(scope)` (ตัด `since`) → `withScope(q, scope, "created_timestamp")`
+6. `claimMessage` expired+no-evidence → finalize `bot_failed`/`interrupted_before_durable_outcome` (แทน "claimed"→execute); evidence finalize-only คงเดิม
+7. `classifyRecoveredBufferRow` → "delete"|"leave" เท่านั้น; ลบ `reconcileClaimedRow`+`rowSyncUpdate`+"fresh"
+8. `recoverStaleClaims` → evidence finalize-only / else CAS→`bot_failed`/`interrupted_before_durable_outcome`; ลบ re-execute block+`freshAfter`
+9. `bufferService.recoverStaleBuffers` → ลบ flush loop+processMessage/markProcessed params (เหลือ classify+delete)
+10. `checkWaitTimeouts` → query `waiting_for_reply` scoped → `wait_started_at > pair.cutoff` ? resume : `cancelIfAbandoned(pre_enable_cutoff)`
+11. `requestBotworkerRetry(message_id, by)` + `consumeRetryRequests(scope)` — request CAS บน claim (`bot_failed` เท่านั้น, attempt<max, inbound มีอยู่, scope persisted layers ON); request_id=`botworker:retry:<mid>:<attempt+1>`; consume: requested_at>cutoff → CAS→processing+processMessage ctx เดิม; ≤cutoff/cap → consume terminal mark
+12. route `POST /api/admin/botworker-retry` → `requirePageEdit("shop")` → 200/404/409/422
+13. bot-worker.ts: edge capture ก่อน resolve (reorder), `consumeRetryRequests(scope)` หลัง poll, `pollNewMessages(scope)`
+14. test migration: seedShop+enabled_at · config+platform_enabled_at · scopeOf(config, edge=epoch) · ลบ/เขียนใหม่เคสขัด contract (fresh-reclaim-execute, rising-edge flush)
+15. quarantine script `scripts/botworker-census.ts` (dry-run default — ไม่รันใน round นี้)
+
+**⚡ SUPERSEDED (2026-10-16)** — user เปลี่ยน contract: ไม่ใช่ explicit operator retry API; เป็น **error carry-forward**:
+- failed batch → dormant (claim `bot_failed` + buffer row `status:"failed"` เก็บ payload/batch_id/error/failed_at)
+- ตื่นเฉพาะ distinct inbound ใหม่ (platform,shop,conversation เดียวกัน, post-cutoff) → fenced carry claims bot_failed→processing (attempt++ ถ้า < max) → rows→buffered → debounce/max → flush รวม 1 call
+- capped → row `quarantined`; message ใหม่ทำงานอิสระ
+- ลบ: `flushRetryTimers`/`scheduleFlushRetry`/`LOCK_RETRY_MS`/flushErrorRetry timer, startup flush, expired-claim re-execute
+- recovery = reconcile only: evidence→finalize-only / no-evidence→claim bot_failed(interrupted)+row→failed (dormant, ไม่ลบ) / orphan→delete / foreign lease→leave
+- ไม่มี retry API/route/queue/collection ใหม่
+
+**Revised plan (ตาม contract ใหม่)**:
+1. enable timestamps เดิม: config `bot_worker_platform_enabled_at` (updateSystemConfig derive, atomic same write) + shop `bot_worker_enabled_at` (CAS $set เดียว)
+2. scope pairs + cutoff เดิม (`resolveBotworkerScope(config, edge)`, cutoffs map, buildScopeFilter tsField)
+3. poll `withScope(q, scope, "created_timestamp")` (ตัด since)
+4. claimMessage expired tail → evidence reclaim+finalize / no-evidence→CAS bot_failed(interrupted) (ไม่ reclaim+ไม่ inc attempt)
+5. flush failure: result.finalized+bot_failed → rows `status:"failed"`+error+failed_at (dormant); !finalized/catch → rows กลับ buffered แต่ไม่มี retry timer → recovery reconcile → failed dormant; ลบ scheduleFlushRetry+flushRetryTimers
+6. carry-forward owner = `bufferService.carryDormantRows(convId)` — เรียกใน bufferOrProcess เมื่อ new distinct insert เท่านั้น (duplicate → no carry); unbuffered mode: dormant rows มี → carry + insert row + flushBuffer ทันที; ไม่มี → processMessage เดิม
+7. classifyRecoveredBufferRow → "delete"|"leave" (settle ภายใน: claim terminal-success→row delete / bot_failed→row failed / missing→delete / expired→CAS bot_failed+row failed / foreign→leave); ลบ reconcileClaimedRow/rowSyncUpdate/"fresh"
+8. recoverStaleClaims → evidence finalize-only / else CAS bot_failed(interrupted); buffer pass เก็บ rows เป็น failed
+9. checkWaitTimeouts → wait_started_at > pair.cutoff ? resume : cancelIfAbandoned(pre_enable_cutoff)
+10. bot-worker: edge→resolve→recovery→poll(scope)+checkWaitTimeouts(scope)
+11. RED: CU(cutoff) + RE(reconcile) + D(dormancy via callBotError+sleep flush) + CF(carry-forward) + X21/X22 timestamp writes; migrate existing seeds
+
+### ผ่านแล้ว — PHASE 2D NEW-INBOUND + ERROR CARRY-FORWARD (2026-10-16, uncommitted)
+
+**ปัญหา**: Botworker กินงานเก่าอัตโนมัติ — admission ไม่มี per-scope cutoff (`since` = global edge ชั้นเดียว), recovery เป็น re-execute ไม่ใช่ reconcile, flush error ไม่มี retry surface ที่ปลอดภัย → restart/enable edge เรียก provider บน backlog ได้
+
+**สาเหตุ**: (1) poll ใช้ `since` ชั้นเดียว ไม่เช็ค platform/shop enable edge (2) `recoverStaleBuffers`/`recoverStaleClaims`/`claimMessage` expired-reclaim ลงท้าย processMessage → provider (3) `flushErrorRetryMs`+`scheduleFlushRetry` เป็น autonomous timer retry (4) ไม่มี dormant failed state → batch ที่ fail หายหรือหลุมดำ
+
+**วิธีแก้**:
+- Enable timestamps: `bot_worker_platform_enabled_at` derive ใน `updateSystemConfig` write เดียวกับ flag (CAS ไม่ต้อง — server-side read-once edge detect); `bot_worker_enabled_at` ใน `setShopBotWorker` CAS `$set` เดียว; missing timestamp+flag ON = fail-closed ทั้งสองชั้น
+- `resolveBotworkerScope(config, edge)` → pairs `{platform, shop_id, cutoff}` ที่ `cutoff = max(global_enabled_since, platform_at, shop_at)`; `pollNewMessages(scope)` admit `created_timestamp > cutoff` ต่อ exact pair; scope ว่าง = `$in:[]` structural deny
+- Recovery = reconcile-only (provider=0): `classifyRecoveredBufferRow` ตัดสิน orphan→delete / terminal→delete leftover / bot_failed+failed→leave dormant / cap→quarantine / evidence→finalize-only / no-evidence→settle `bot_failed`+row `failed` / foreign active→defer wake-up เดียว; `recoverStaleClaims` เหลือ evidence finalize-only / else CAS `bot_failed`; ลบ `reconcileClaimedRow`,`rowSyncUpdate`,`verifyForeignClaim`,freshness gate/`freshAfter`,stale re-execute,startup buffer flush
+- Dormant+carry-forward: flush technical-failure → `markRowsFailed` (rows `failed`+error+failed_at; claims `bot_failed` ผ่าน `markRowsDormant` fenced settle — ครอบ infra error ก่อน inner try เช่น `getConversation`); distinct inbound เดียวกัน exact triple → `carryDormantRows` fenced CAS revive (attempt+1,fencing+1) rows→`buffered` รวม debounce→flush ครั้งเดียว; cap→`quarantined`, message ใหม่อิสระ; duplicate/ข้าม conv/ข้าม shop/ข้าม platform/pre-cutoff/restart ไม่ wake
+- ลบ `flushErrorRetryMs`, `scheduleFlushRetry`, `flushRetryTimers` — เหลือ conv_lock recheck (liveness เท่านั้น); `checkWaitTimeouts` ตัดด้วย pair.cutoff (parked pre-cutoff → settle ไม่ resume)
+- `bot-worker.ts`: edge capture ก่อน resolve → recovery → `pollNewMessages(scope)`; enable checkpoint mocks รับ scope object แล้ว
+
+**ผลกระทบเคสอื่น**: claim fencing/stale recovery CAS/duplicate idempotency/trigger/workflow/handoff/delivery/audit/unsupported-platform 422/CAS 409 ครบเหมือนเดิม — suites ยืนยัน: scope-gate 88 · idempotency 71 · recovery-freshness (rewrite ใหม่ทั้ง suite) 39 · error-policy 38 · enable-checkpoint 18 · production-races 37 · boundary 20 · config-failclosed 4 · runtime-mongo-safety 110 · shop-settings 3 · admin-logs 57 · ownership-transport 244 · shadow-batch 22 — tsc + `npm run build` + `git diff --check` ผ่าน; workflow phase1/6/e2e ต้องการ env secrets (ADMIN_JWT_SECRET/CHATBOT_INTERNAL_SECRET) = environment-blocked ไม่ใช่ regression
+
+**ค้าง**: UI visual gate `/shops` blocked (dev server รันอยู่แต่ redirect `/login` — ไม่มี session, อ่าน .env ไม่ได้) · commit ยังไม่ได้ทำ (รอ user approval ตามกฎข้อ 10) · disposable-Mongo harness ยังไม่ได้ประเมิน
+
+### กำลังทำ — PHASE 2D CORRECTION ROUND (2026-10-16, uncommitted)
+
+**PART 0 audit (done)** — branch `feature-legacy-shopee-evidence-retrieval` HEAD `9af48a0`, staging 0, 32 dirty files intact, Phase 2D work present. Read both waythrough logs (log1 = frozen python history — ไม่มี botworker case ที่ต้อง preserve).
+
+**Root causes ที่พบจาก source (verify แล้ว ไม่ใช่จาก report เดิม)**:
+
+- **A autonomous lease-expiry exec**: `scheduleFlushRetry` ยิง `trackedFlush`→`flushBuffer` — call sites: LOCK_RECHECK_MS(50ms, lock-loss) + FOREIGN_CLAIM_RECHECK_MS(5s, foreign active claim) — re-fence `$or:[{owner self+token},{lease expired}]` ให้ flush ชิง claim หลัง lease หมด → provider call โดยไม่มี inbound ใหม่ → **ลบทั้ง map+fn+constants**; lock-loss → skip เปล่า (winner hand-off ครอบ); foreign-active → revert buffered (foreign owner finalize/expire เอง)
+- **liveness ที่ preserve**: winner flush จบ → release lock → arm debounce ให้ leftover buffered rows (delay = latest received_at + window − now, media-aware, `if (!bufferTimers.has(key))` กันทับ timer ที่ new inbound arm ไว้)
+- **B disable-during-debounce**: `flushBuffer` gate มีแค่ cached `bot_worker_enabled` → ไม่เช็ค platform/shop/cutoff ที่ delayed boundary → เปลี่ยนเป็น **single delayed-execution admission owner**: `getSystemConfig(true)` → `resolveBotworkerScope(cfg, row.admitted_edge)` → pair ต้องอยู่ + row ต้อง `carried===true || msg_created_at > pair.cutoff` → ไม่ผ่าน → fenced CAS claim→`no_action` + delete row (terminal ไม่ใช่ dormant — scope-superseded ไม่ใช่ technical failure)
+- **row fields ใหม่**: `msg_created_at` (inbound created_timestamp — poll forward เข้า bufferOrProcess) + `admitted_edge` (era edge ณ admission = current-era edge เสมอที่ flush — timer ตายเมื่อ era เปลี่ยน) + `carried` (set ตอน carryDormantRows revive — dormant rows ที่ carry แล้ว bypass cutoff check เพราะ wake-up gate คือ inbound ใหม่)
+- **classifier** ได้ scope → row `buffered|processing` + `!carried` + (`msg_created_at` ขาด หรือ ≤ pair.cutoff) + claim expired → settle `no_action`+delete (แทน dormant bot_failed); failed rows ข้าม check (dormant carryable เสมอ)
+- **C tuple partition**: `flushBuffer(platform, shopId, convId, ...)`; timer key = `convLockIdFor(platform,shop,conv)`; `getBufferedMessages`/`insertToBuffer`-adjacent/`persistDormantRow` queries ใส่ tuple ครบ; `acquireConvLock` เรียง arg เป็น (platform,shopId,convId)
+- **D platform CAS**: `setBotWorkerPlatformEnabled(platform, enabled, expected)` — updateOne filter `{config_key, $or:[{f:expected},{f:{$exists:false}}เมื่อ expected=false]}` + `$set {f:enabled, enabled_at.f: enabled?now:null}` → miss → reread 1 ครั้ง → 409; enabled===expected → no-op success (ไม่ write ไม่ขยับ ts); ลบ `bot_worker_platforms` ออกจาก updateSystemConfig + ลบ findOne→updateOne derive block; route: `bot_worker_platforms` ต้องมี 1 key เดียว + `expected_bot_worker_platforms` บังคับ → 400/422/409; UI ส่ง expected + 409→load() เหมือน shop toggle
+- **E media**: pin image/image_with_text/video carry-forward แยกเคส
+
+**RED suite placement**: A → production-races (แทน C3 recheck-proof); B/C/D/E → scope-gate (route handler จริงผ่าน mock service seam)
+
+**Result (verified 2026-10-16)**:
+
+- **Implement GREEN ผ่านแล้วทุก suite** — scope-gate 103/103 · production-races 37/37 · idempotency 71/71 · recovery-freshness 30/30 · error-policy 38/38 · enable-checkpoint 18/18 · boundary 20/20 · config-failclosed 4/4 · runtime-mongo-safety 110 · shop-settings 3 · admin-logs 57 · ownership-transport 244 · shadow-batch 22 · `tsc --noEmit`/`npm run build`/`git diff --check` clean
+
+- **เคสที่เจอระหว่าง fix (error→cause→fix→impact)**:
+  - CF/D1/I3 `E11000` บน dormant claim → `seedFailedRow` ใส่ claim ซ้ำกับ explicit `seedClaim` ของเทส → revert ให้ row-only เก็บ admission fields → เคสอื่นไม่กระทบ
+  - SD/TP/CF/X12 `callBot=0` → flush gate resolve scope → edge `Date(0)` (epoch) falsy → `edge ? new Date(edge) : null` = null → resolver fail-closed → sentinel -1 แทน → **root cause จริงของ gate ทั้ง batch**
+  - SD1-4 `recovery aborted` → `pollNewMessages` return ก่อน fire-and-forget claim เขียน row เสร็จ → wrapper เทสถัดไป `clearPendingWork` abort era → wait in-flight ก่อน assert (test-side fix)
+  - X12 409 → persisted `shopee` default true แต่ expected=false → set persisted=false ก่อน patch (CAS ทำงานถูก)
+  - C2/C3 foreign claim ถูก steal → re-fence filter ใช้ `row.owner_id` (foreign) match ได้ → filter `owner_id: botworkerRuntime.ownerId` เท่านั้น → foreign active ไม่โดนแตะ
+  - idempotency/recovery-freshness `provider=0` → fixture `created_timestamp: ++seq` (number ไม่ใช่ Date) → gate ปฏิเสธถูกต้อง → fixture → `new Date()`
+  - `setBotWorkerPlatformEnabled` upsert:true ผิด edge case → expected=true+missing doc จะ upsert-apply ทั้งที่ missing≡false ต้อง 409 → `upsert: !expected` (OFF→ON doc ใหม่ยังทำงาน)
+  - tsc scope-gate:1242 → literal-narrowed `shopee:false` เปรียบ `===true` → widen read ผ่าน `Record<string,boolean>`
+
+- **Structural audit**: provider-capable retry timers=0 (เหลือ debounce arm + ownership-gated winner hand-off ใน finally) · recovery provider paths=0 · conv-only lookups=0 (tuple=`convLockIdFor` เดียว) · read-then-write platform path=0 · scope admission owner=1 (flushBuffer) · new collections/deps/env/pollers=0
+
+**ค้าง**: UI visual gate `/shops` (login-blocked) · commit รอ approval · real-Mongo harness ยังไม่ได้รัน · env-gated workflow suites blocked by secrets
+
+### ผ่านแล้ว — PHASE 2D INDEPENDENT FINAL REVIEW CORRECTIONS (2026-10-16, uncommitted)
+
+**บริบท**: independent review session ที่ 2 (ทบทวน working tree เดิมจาก source+diff+fresh tests ไม่ใช่ report) — พบ defect จริง 5 จุด + test-honesty gap; แก้ที่ root cause owner ทุกจุด RED→GREEN
+
+**error → cause → fix → impact**:
+
+- **XP3/F5 `E11000` (production CAS defect)** → `setBotWorkerPlatformEnabled` ใช้ `upsert:!expected` — expected=false แต่ persisted=true → filter miss → upsert insert ชน unique `config_key` → E11000 escape เป็น 500 (route ต้อง 409) → catch `code===11000` map เข้า bounded-reread `reportCurrent` path เดิม (loser ยังได้ 409 + current truth; winner ไม่กระทบ; expected=false+doc missing upsert ยัง apply ปกติ — F7 pin)
+- **XP8/F6 lying no-op** → `enabled===expected` early-return `applied` โดยไม่ดู persisted — `(true,true)` บน flag=false ตอบ 200 ทั้งที่ flag ยัง OFF (และ `(false,false)` บน true = disable ที่ไม่เกิด) → zero-write `findOne` probe บน expected filter เดิม — match→no-op, miss→reread→409 (platform+shop owner เดียวกัน)
+- **X14f edge drift** → `setShopBotWorker` ไม่มี no-op path — `(true,true)` match CAS filter → restamp `bot_worker_enabled_at` ขยับ cutoff → probe เดียวกัน — edge คงเดิม, zero write
+- **X12 partial commit** → `PUT /api/config` loop CAS ทีละ platform key — key1 write+edge stamp แล้ว key2 miss → 409 แต่ key1 commit แล้ว (zero audit ด้วย) + mixed payload drop fields อื่นเงียบๆ → enforce single-command: foreign fields→422, `entries.length!==1`→422 ก่อน CAS เลย; `buildBotWorkerPlatformPatch` ไม่จำเป็นแล้ว → **ลบออกจาก botworkerScope.ts** + page inline `{[p]:next}`/`{[p]:seen}` — contract เดียวกับ PATCH shop
+- **R8 stale scope ใน recovery joiner** → `recoverStaleBuffersAndClaims` ส่ง `scope` (caller แรก) ให้ `classifyRecoveredBufferRow` ทั้งที่ enumerate+claims ใช้ `passScope` (joiner ล่าสุด) → row ที่ถูก supersede โดย edge ใหม่ถูก misclassify เป็น dormant carryable แทน `no_action`+delete → one-token fix `scope`→`passScope`
+- **M4 verify harness** → seed config/shop ขาด `bot_worker_platform_enabled_at`/`bot_worker_enabled_at` → resolver fail-closed → harness จะ throw ตอน resolve → seed timestamps ย้อนหลัง 60s (env-gated — static fix)
+- **M5 effective-state ambiguity** → `botWorkerEffective(null)` คืน `global_off`/`ปิดทั้งระบบ` — meta หาย (backend unavailable) แสดงเหมือน deliberate global-off → เพิ่ม `code:"unavailable"` แยก
+- **H2 test honesty** → scope-gate mock **reimplement** `setBotWorkerPlatformEnabled` (read-then-write) + `uniqueKeys` ไม่มี `system_configs` → หลบ defect ทั้งหมดข้างบน → hooks เพิ่ม `parentURL===MOCK_URL` exemption + mock delegate เข้า real fn (pre-sync ปู coll จาก state.config → real CAS → post-sync applied→state.config) + uniqueKeys + `sysWrites` นับเฉพาะ CAS-shape filter — XP/CF/SD/TP ทั้งหมดยังผ่าน real code
+- **X14e semantics update** → probe-path miss เป็น zero-write → assertion `1 updateOne`→`0` (no-retry contract คงเดิม)
+
+**Verification (fresh, post-fix)**: scope-gate **107/107** (เดิม 103 + XP8/X12-rewrite/X14f/X14g/R8) · config-failclosed **8/8** (+F5–F8 real-service CAS รวม E11000) · production-races 37 · idempotency 71 · recovery-freshness 30 · error-policy 38 · enable-checkpoint 18 · boundary 20 · runtime-mongo-safety 110 · shop-settings 3 · admin-logs 57 · ownership-transport 244 · shadow-batch 22 · `tsc --noEmit` clean · `npm run build` clean · `git diff --check` clean
+
+**Structural**: provider-capable timers = 1 mechanism (debounce arm + ownership-gated hand-off — ทั้งคู่ต้องมี admitted inbound ก่อน + era/scope re-resolve) · recovery provider paths = 0 · conv-only identity = 0 · read-then-write toggle = 0 · new retry loops/queues/collections/deps/env = 0 · helpers added by corrections: `reportCurrent` (local closure แทน duplicated reread ใน fn เดิม — net −dup) + probe findOne (read แทน write) — no helper/guard chain
+
+**Low findings (reported only)**: `settleScopeRejectedRow` CASes บน row-recorded owner/token (outcome-equivalent เพราะ rows ถึงจุดนี้ได้เฉพาะ claim ที่ยังไม่ execute) · stale comments อ้าง "flush retry/recheck" ที่ลบแล้ว · `markProcessed` second marker doc (harmless) · `expected_bot_worker_platforms` โดดเดี่ยวถูก whitelist เงียบๆ (harmless)
+
+**ค้าง**: UI visual gate `/shops` — **blocked by auth** (ไม่มี authenticated local session; ห้ามอ่าน .env/สร้าง credentials — source verification ครบ: platform switches page-level, per-shop switch บน card, 5-state effective code รวม unavailable, non-optimistic + 409 reload) · commit รอ approval · real-Mongo harness env-gated ไม่ได้รัน · workflow suites ต้องการ secrets
+
+### COMMIT CLOSEOUT — PHASE 2D (2026-10-16, local only — ไม่ push/PR/deploy)
+
+**Commit 1**: `29f2e9b90fa52b26dcc5f510aa8a1790c7a046de` — `fix: make botworker admission scope authoritative` — 32 files, +4248/−1951
+
+**Manifest (Commit 1)**:
+- runtime/UI (13): `bot-worker.ts` · `src/backend/lib/safety.ts` · `botWorkerService.ts` · `botworkerRuntime.ts` · `bufferService.ts` · `shopService.ts` · `systemConfigService.ts` · `workflowEngine.ts` · `src/lib/botworkerScope.ts`(new) · `api/config/route.ts` · `api/shops/route.ts` · `api/shops/[id]/route.ts` · `(console)/shops/page.tsx`
+- tests/harnesses (16): `test-botworker-scope-gate.ts`+`-mocks.mjs`+`-hooks.mjs`(new) · `test-botworker-config-failclosed.ts` · `-boundary-mocks.mjs` · `-enable-checkpoint-mocks.mjs` · `-error-policy-mocks.mjs`+`.ts` · `-fakemongo.mjs` · `-idempotency-mocks.mjs`+`.ts` · `-production-races-mocks.mjs`+`.ts` · `-recovery-freshness.ts` · `test-workflow-e2e.ts` · `verify-botworker-runtime-mongo.ts`
+- docs (3): `docs/SRS_SSD.md` · `docs/schema.md` · rebaseline plan
+- ไฟล์ log นี้อยู่ Commit 2 แยก (closeout หลัง commit หลักเสมอ)
+
+**Root causes ที่ปิด (independent-review round นี้)**: H1 platform-CAS upsert-miss → E11000→500 (แก้เป็น bounded-reread→409) · H2 scope-gate mock reimplement CAS จริง (delegate เข้า production fn + uniqueKeys) · M1 multi-key platform payload partial-commit (single-command 422) · M2 lying no-op + shop edge restamp (zero-write probe ทั้งคู่) · M3 recovery joiner stale scope (`scope`→`passScope`) · M4 verify-harness seed ขาด enable timestamps · M5 `botWorkerEffective(null)` แยก `code:"unavailable"`
+
+**Admission/cutoff contract (final)**: admit เฉพาะ global ON + platform ON (`BOTWORKER_BACKENDS`=shopee) + shop ON พร้อมกัน · `cutoff = max(global_enabled_since, bot_worker_platform_enabled_at[p], shop.bot_worker_enabled_at)` · strict `created_timestamp > cutoff` · flag ON แต่ timestamp ขาด = fail-closed · scope ว่าง = `$in:[]` structural deny · rising edge ใหม่ supersede งานเก่าเสมอ
+
+**Dormant carry-forward contract**: technical failure → rows `failed` (dormant, payload ครบ) + claims `bot_failed` — ไม่มี retry timer · wake เฉพาะ distinct inbound ใน exact tuple เดียว (`insertToBuffer`→`inserted` เท่านั้น; `duplicate` ไม่ re-arm ไม่ carry) · fenced CAS revive + `carried:true` bypass cutoff · attempt cap → `quarantined` · media text/image/image_with_text/video preserved (CF8/CF11/CF12)
+
+**CAS conflict contract**: platform+shop toggle = write เดียว filter-on-expected (missing≡false) · `enabled===expected` = zero-write probe (edge ไม่ขยับ) · miss/E11000 → bounded reread → 409 + zero write + zero audit · shop enable fence `platform∈BOTWORKER_BACKENDS` ใน updateOne เดียว · multi-key/mixed platform payload → 422 ก่อน write · UI ไม่ optimistic — 409 → load() authoritative
+
+**Path counts**: provider-capable timers = 1 mechanism (debounce + ownership-gated hand-off — ต้องมี admitted inbound + era/scope re-resolve) · recovery provider paths = 0 · autonomous retry/lease-expiry provider paths = 0 · conv-only identity paths = 0 · read-then-write toggle = 0 · new collections/deps/env/pollers/helper-chains = 0
+
+**Fresh verification (post-fix, รันซ้ำก่อน commit)**: scope-gate 107/107 · config-failclosed 8/8 · production-races 37/37 · idempotency 71/71 · recovery-freshness 30/30 · error-policy 38/38 · enable-checkpoint 18/18 · boundary 20/20 · runtime-mongo-safety 110/110 · shop-settings 3/3 · admin-logs 57/57 · ownership-transport 244/244 · shadow-batch 22/22 · `tsc --noEmit` clean · `npm run build` clean · `git diff --check` + `git diff --cached --check` clean
+
+**LOC (แยกประเภท)**: runtime/UI +1289/−553 (net +736 — ใหม่คือ scope machinery; service สุทธิ −120) · tests +2900/−1372 (scope-gate ใหม่ 1831 + mocks/hooks 283; recovery-freshness rewrite −1207) · docs +59/−26 · log entry นี้แยก Commit 2
+
+**ค้าง/ไม่ได้ทำ (สำคัญ)**: UI visual gate `/shops` = **login-blocked** (ไม่มี authenticated session; `.env` อ่านไม่ได้ — verify ระดับ source เท่านั้น) · `verify-botworker-runtime-mongo` (disposable real-Mongo harness) **ยังไม่ได้รัน** (env-gated; fix เป็น static proof) · workflow phase1/phase6/e2e env-blocked ด้วย secrets · local canary **ยังไม่ได้ทำ** · deploy **ยังไม่ได้ทำ** · **Phase 2D ไม่ใช่ production-approved — เป็น pre-commit closeout เท่านั้น**
+
+---
+
+### 🔧 กำลังทำ — PHASE 2D DISPOSABLE MONGO HARNESS CONTRACT CORRECTION (2026-10-16, branch `feature-legacy-shopee-evidence-retrieval` @ `78129be`, tree clean — หยุดก่อน stage/commit ตามสั่ง)
+
+**Real disposable-Mongo run จริงแล้ว (baseline RED — ห้ามสร้าง RED ปลอม)**: loopback `mongo:7` บน port ไม่ใช่ prod → temp DB `botworker_runtime_verify_<rand>` → `45 passed, 2 failed` → drop DB + remove container + git clean — fail 2 จุด: S5 ได้ `error=scope_superseded` (expected `stale_at_recovery`) · S6 ได้ terminal `no_action` (expected `bot_answered`)
+
+**PART 0 root cause (source-proven, ไม่ใช่ runtime defect)**:
+
+- **error**: harness S5/S6 expect เดิมอยู่บน pre-Phase-2D recovery contract (`stale_at_recovery`/`bot_answered` ผ่าน evidence เสมอ) แต่ production ได้ `scope_superseded`/`no_action`
+- **cause**: `classifyRecoveredBufferRow` (botWorkerService.ts:1702-1721) — row `buffered`+`!carried` + claim `processing` lease หมด → `superseded = !pair || !(row.msg_created_at instanceof Date) || msg_created_at <= pair.cutoff` → fenced CAS claim→`no_action`+`error=scope_superseded` + exact-identity delete row · S5/S6 seed rows **ไม่มี `msg_created_at`** → superseded จริงตาม contract · field เดียวที่ทำให้เข้า branch = `msg_created_at` (`admitted_edge` ไม่ถูกอ่านใน classifier — ใช้เฉพาะ flushBuffer delayed-execution gate :504 แต่ row ที่ admit จริงต้องมีทั้งคู่ตาม insertToBuffer:155-156) · S6 outcome evidence ไม่ถูก consult เพราะ scope block อยู่ก่อน claimMessage evidence reconcile (:1725) = contract ถูกต้อง
+- **offline fixtures ที่ทำงานอยู่**: recovery-freshness `bufferRow()` (:86) + scope-gate `seedBufferRow()` (:131)/`seedFailedRow()` (:146) seed `msg_created_at`+`admitted_edge` เสมอ + scope `cutoff:new Date(0)` → post-cutoff → RC1 dormant `bot_failed`/`failed`, RC2/RC3 finalize-only, R8 no_action superseded
+- **`stale_at_recovery` ไม่มีใน production เลย** — error string ตายตั้งแต่ Phase 2D reconcile contract (เจอแค่ใน harness/log/build artifact) · ไม่มี test ไหน pin `scope_superseded` error ตอนนี้ → harness จะเป็น pin แรก
+
+**Correction plan (harness + related contract test เท่านั้น — runtime 0)**:
+
+- `verify-botworker-runtime-mongo.ts`:
+  1. `RunCtx.scope` type ขยายให้มี `cutoff:Date` บน pairs + `global_enabled_since` (shape จริงของ BotworkerCycleScope — local type ไม่ import production)
+  2. S5 = scope-superseded: seed เดิม (ขาด admission evidence = legacy row จริง) → expect provider=0, claim `no_action`, `error=scope_superseded`, row deleted
+  3. S6 ใหม่ = post-cutoff no-evidence: row `msg_created_at = pair.cutoff+margin` + `admitted_edge=scope.global_enabled_since` (ใช้ค่า scope จริง) + expired claim ไม่มี evidence → expect provider=0, claim `bot_failed`+`interrupted_before_durable_outcome`, row `status:"failed"` retained; wait + recovery pass ซ้ำ → dormant คงเดิม calls=0
+  4. S7 = post-cutoff committed evidence (S6 เดิม + admission fields) → provider=0, claim `bot_answered`, outcome/reply_ids identity preserved, reply count=1, row deleted
+  5. leadership s7/s8/s9 → s8/s9/s10 (rename fns + callsites + SCENARIOS ids)
+  6. SCENARIOS matrix + comment header → S1–S10 ตรง executed scenarios
+- `test-botworker-runtime-mongo-safety.ts` (harness contract test โดยตรง): list check → S1–S10 · leadership scan เริ่ม `async function s8` · check names "S7–S9"→"S8–S10" · comment S1–S6→S1–S10
+- `getoutofmywaybotkaikrook2.md` — log entry นี้ + closeout
+- **ผลกระทบเคสอื่น**: production runtime/flush gate/classifier/scope = 0 แตะ · S1–S4,S8–S10 seed/behavior เดิม · fail-closed scope เดิมไม่ถูกอ่อนลง
+- **ห้าม**: runtime edit (เว้น PART 0 พบ defect ใหม่→STOP), helper/guard/retry/module/collection/dep/env เพิ่ม, `.env`/`มาแล้วจ้า.md`, commit/push/deploy/worker/provider call จริง
+
+### ✅ ผ่านแล้ว — PHASE 2D DISPOSABLE MONGO HARNESS CORRECTION (2026-10-16)
+
+**error → cause → fix → impact**: harness S5/S6 expect pre-2D contract (`stale_at_recovery`/`bot_answered`) แต่ได้ `scope_superseded`/`no_action` → seed rows ขาด `msg_created_at`+`admitted_edge` → classifier fail-close scope-superseded ถูกต้อง (ไม่ใช่ runtime defect) → แก้เฉพาะ harness: S5=superseded contract, S6 ใหม่=post-cutoff dormant `bot_failed`, S7=post-cutoff finalize-only `bot_answered`, leadership→S8–S10 · **impact**: runtime 0 บรรทัด; fail-closed scope เดิม; S1–S4 + leadership contracts คงเดิม
+
+**Changed files (harness/contract-test/log เท่านั้น — production runtime delta = 0 LOC)**:
+- `ChatAdminWeb/scripts/verify-botworker-runtime-mongo.ts` (+165/−63 เมื่อเทียบก่อนแก้: RunCtx scope type ตรง `BotworkerCycleScope`, SCENARIOS S1–S10, s5 assertion `scope_superseded`, s6 ใหม่ dormant re-pass proof, s7 evidence fields+reply_ids pin, s8–s10 rename)
+- `ChatAdminWeb/scripts/test-botworker-runtime-mongo-safety.ts` (±22: pin S1–S10, leadership scan s8→runApply, label S8–S10)
+- `getoutofmywaybotkaikrook2.md` (entry นี้)
+
+**Offline verification (fresh output)**:
+- `test-botworker-runtime-mongo-safety.ts` → **111 passed, 0 failed** (token/URI/marker/sanitize/S1–S10 pins ครบ)
+- `verify-botworker-runtime-mongo.ts` dry-run → plan S1–S10 ตรง executed, exit 0, **Mongo connections = 0**
+- `test-botworker-recovery-freshness.ts` → **30/30 passed**
+- `test-botworker-scope-gate.ts` → **107 passed, 0 failed** (SD/R/CF/K/X/TP/XP + carry-forward ครบ)
+- `npx tsc --noEmit` → clean · `git diff --check` → clean
+
+**Real disposable-Mongo re-run (run once, no retry)**:
+- port 27018 free → `docker run -d --rm -p 127.0.0.1:27018:27017 mongo:7` (loopback-only, no creds, no volume) → `ping: {ok:1}`
+- `BOTWORKER_REAL_MONGO_SMOKE=I_UNDERSTAND_ISOLATED_DB_WRITES BOTWORKER_VERIFY_MONGO_URI=mongodb://127.0.0.1:27018 npx tsx scripts/verify-botworker-runtime-mongo.ts --apply` → **55 passed, 0 failed**
+- Contract proof บน Mongo จริง: S5 `no_action`+`scope_superseded`+row deleted (calls=0) · S6 `bot_failed`+`interrupted_before_durable_outcome`+row dormant `failed` คงเดิมหลัง wait+re-pass (calls=0) · S7 finalize-only `bot_answered`+`reply_ids` preserved+reply count=1+row deleted (calls=0) · **dormant ไม่เคยถูกปลุกโดยไม่มี inbound ใหม่**
+- Output sanitized: ไม่มี URI/secret/DB random suffix (`botworker_runtime_verify_<rand>` masked)
+- **Cleanup proof**: `listDatabases` → `[admin, config, local]` เท่านั้น (temp DB dropped โดย harness marker+token guard) · `docker stop` → container auto-removed (`--rm`, `docker ps -a` ว่าง) · Mongo writes จำกัดเฉพาะ disposable DB
+
+**Status**: harness green on real Mongo — **พร้อม pre-commit candidate** (หยุดก่อน stage/commit ตามสั่ง — ไม่มี push/PR/deploy/provider/production Mongo)
+
+**Commit closeout**: Commit 1 = `94f8a33` `test: align botworker real-mongo recovery harness` — manifest `verify-botworker-runtime-mongo.ts` +113/−52, `test-botworker-runtime-mongo-safety.ts` +11/−11 (2 files, +124/−63) · original real run `45 passed / 2 failed` · root cause: S5/S6 seed rows ขาด Phase 2D admission evidence (`msg_created_at`+`admitted_edge`) → classifier `scope_superseded` ถูกต้อง · corrected real run `55 passed / 0 failed` (single `--apply`, disposable `mongo:7` loopback:27018, temp DB `botworker_runtime_verify_<rand>` dropped, container removed) · safety suite `111/111` · offline: recovery-freshness `30/30`, scope-gate `107/107`, `tsc --noEmit` clean, `git diff --check` clean · runtime files changed = **0** · ไม่มี production Mongo/provider/platform API/botworker start · ค้าง: authenticated `/shops` UI visual gate, provider hard budget, local one-shop canary (concurrency=1), deploy/canary approval
+### ผ่านแล้ว — PHASE 2D DEPLOY WORKER OPT-IN PROFILE (2026-10-16)
+
+**เป้าหมาย**: deploy server รัน default stack โดยไม่สร้าง/เริ่ม `bot-worker`; Botworker เปิดได้เฉพาะคำสั่ง explicit บนเครื่อง local เพื่อ canary ด้วย code revision เดียวกับ production
+
+**Root cause**: `bot-worker` อยู่ใน default Compose services พร้อม `restart: unless-stopped` ทำให้ `docker compose up -d --build` บน server เริ่ม worker โดยอัตโนมัติ แม้ operator ต้องการทดสอบ worker เฉพาะ local
+
+**Minimal plan**: เพิ่ม Compose profile `botworker` ให้ service เดิม; ไม่สร้าง service/env/script/guard ใหม่ · แก้ `docs/DEPLOY.md` และ comment ใน Compose ให้ default/local/one-time cleanup ชัด · executable gate: default `docker compose config --services` ต้องไม่มี worker และ `--profile botworker` ต้องมี worker · ไม่แตะ runtime, DB, provider หรือ container จริง
+
+**ผลลัพธ์**: `bot-worker` อยู่ใต้ profile `botworker`; default deploy services = `chatbot-shopee, chatadmin-web, caddy` และ explicit profile services เพิ่ม `bot-worker` · คู่มือระบุ one-time stop/remove container เดิมก่อน default deploy, local native command และ local Docker command · RED ก่อนแก้พบ worker ใน default; GREEN หลังแก้ default ไม่มี worker/profile มี worker · runtime/env/dependency/script เพิ่ม = 0
+
+**Commit closeout**: `285ab90` `chore: make botworker deployment opt-in` — `docker-compose.yml` + `docs/DEPLOY.md` เท่านั้น, +40/−9 · default worker ถูกถอดจาก deploy startup; local explicit profile/command คงอยู่ · ไม่มี container start/stop, DB, provider, `.env`, push หรือ deploy ในรอบ implementation

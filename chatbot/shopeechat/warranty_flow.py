@@ -23,105 +23,182 @@ States ที่จัดการ:
 """
 from __future__ import annotations
 
+import enum as _enum
 import json
 import os
 import re
 import sys
 import time as _time
+import uuid as _uuid
+from dataclasses import dataclass
 from typing import Any
 
 
-# ─── Claim-slot helpers (fill-once + question fallthrough) ──────────────────
+class _WarrantyDisposition(_enum.StrEnum):
+    """Warranty-owner lifecycle contract: TERMINAL → return now;
+    CONTINUE_PRODUCT → bot-owned, product need may continue.
+    Internal only — popped before ChatResponse."""
+    TERMINAL = "terminal"
+    CONTINUE_PRODUCT = "continue_product"
+
+
+# ─── Claim-slot helpers (fill-once) ─────────────────────────────────────────
 # ใช้ร่วมกัน handle_warranty_flow (v2) + handle_warranty_flow_legacy (app.py)
-_QUESTION_MARKERS = (
-    "ไหม", "มั้ย", "หรือ", "เหรอ", "หรอ", "ป่าว", "อะไร", "ยังไง", "อย่างไร",
-    "ทำไม", "เท่าไหร่", "เท่าไร", "กี่", "ตอนไหน", "ที่ไหน",
-    "how", "what", "why", "when", "where", "?", "？",
-)
-
-
-def _is_question_msg(text: str) -> bool:
-    """ข้อความเป็นคำถาม (ไม่ใช่ข้อมูลเคลม) — ใช้กัน swallow ใน collection states."""
-    t = (text or "").lower()
-    return any(m in t for m in _QUESTION_MARKERS)
-
-
-def _merge_claim_slots(info: dict, *, has_date: bool = False, has_image: bool = False,
-                       claim_state: dict | None = None) -> dict:
+def _merge_claim_slots(info: dict, *, claim_state: dict | None = None) -> dict:
     """รวม claim slots: ข้อความปัจจุบัน ∪ claim_state ที่ persist (fill-once).
 
     ค่าจากข้อความปัจจุบันชนะเสมอ (ลูกค้าแก้ข้อมูลได้) — ถ้าข้อความไม่มีใช้ค่าที่เคยเก็บ
     กันบอทถามข้อมูลที่ลูกค้าให้ไปแล้วซ้ำ (root cause ของ "ถามซ้ำ").
+    ⚡ 2B.5 — merge ทำ precedence เท่านั้น: name validity เป็นงานของ
+    warranty.extract_customer_info (owner เดียว — 2-40 ตัว, ไม่มี digit)
     """
     cs = claim_state or {}
-    _name = info.get("name") or cs.get("customer_name")
-    if _name and (len(_name) > 40 or " " not in _name or any(c.isdigit() for c in _name)):
-        _name = None
     return {
-        "name": _name,
+        "name": info.get("name") or cs.get("customer_name"),
         "phone": info.get("phone") or cs.get("customer_phone"),
         "order_id": info.get("order_id") or cs.get("customer_order_id"),
-        "date": has_date or bool(cs.get("purchase_date")),
-        "image": has_image or bool(cs.get("has_image") or cs.get("has_video")),
     }
 
 
-def _claim_collecting(claim_state: dict | None) -> bool:
-    """อยู่ในช่วงเก็บข้อมูลเคลมไหม — stage=collecting หรือมี slot ที่เก็บไว้แล้ว.
+# ─── Claim lifecycle owner (Phase 2B.4) ─────────────────────────────────────
+# episode/stage เป็น authority เดียว — retained slots เป็น audit/reuse data
+# เท่านั้น ไม่ใช่ activation signal; handoff/ticket close ไม่ใช่ claim
+# resolution (ownership axis คนละแกน); valid terminal producer ตอนนี้มีเฉพาะ
+# customer ยืนยันแก้สำเร็จหลัง troubleshoot + persisted terminal stage
+# (admin resolved|cancelled event = Phase 2B.6)
 
-    ใช้เป็น persisted marker ให้ info submission ถูกรับแม้ last model message
-    ไม่ใช่ warranty (เช่น ลูกค้าแทรกคำถามกลาง flow แล้วค่อยส่งข้อมูลต่อ).
-    """
+_CLAIM_OPEN_STAGES = frozenset(("collecting", "ts_suggested"))
+_CLAIM_TERMINAL_STAGES = frozenset(("resolved", "cancelled"))
+# identity allowlist — copy ข้าม episode ได้ (reuse เท่านั้น); case evidence
+# (customer_order_id, purchase_date, has_image) ไม่ข้าม episode
+_CLAIM_IDENTITY_FIELDS = ("customer_name", "customer_phone")
+
+
+@dataclass(frozen=True)
+class ClaimLifecycleView:
+    """snapshot ของ claim lifecycle ที่ evaluator เดียวคำนวณจาก claim_state."""
+    episode_id: str | None
+    stage: str  # absent | collecting | ts_suggested | resolved | cancelled
+    lifecycle_open: bool
+    accepts_claim_fields: bool
+
+
+def _claim_lifecycle(claim_state: dict | None) -> ClaimLifecycleView:
+    """evaluator เดียว — stage persist เท่านั้นที่นับ; slots ไม่มี authority."""
     cs = claim_state or {}
-    if cs.get("stage") == "collecting":
-        return True
-    return any(cs.get(k) for k in (
-        "customer_name", "customer_phone", "customer_order_id",
-        "purchase_date", "has_image", "has_video"))
+    stage = cs.get("stage")
+    if stage not in _CLAIM_OPEN_STAGES and stage not in _CLAIM_TERMINAL_STAGES:
+        stage = "absent"
+    open_ = stage in _CLAIM_OPEN_STAGES
+    return ClaimLifecycleView(
+        episode_id=cs.get("episode_id"),
+        stage=stage,
+        lifecycle_open=open_,
+        # collecting only — ts_suggested เป็น episode เปิด แต่ยังไม่รับข้อมูล
+        # (verdict หลัง troubleshoot ผ่าน ts-followup branch เท่านั้น)
+        accepts_claim_fields=stage == "collecting",
+    )
 
 
-def _update_claim_state(req, fields: dict) -> None:
-    """wrap conversation_products.update_claim_state (best-effort, merge fill-once)."""
-    if not req.conversation_id:
-        return
-    try:
-        from . import conversation_products as _cp
-        _cp.update_claim_state(req.conversation_id, req.platform, req.shop, fields)
-    except Exception:
-        pass
+def _claim_transition(req, claim_state: dict, to: str,
+                      fields: dict | None = None,
+                      fresh_claim: bool = False) -> dict:
+    """transition owner เดียวของ claim episode — คืน authoritative claim_state.
 
-
-def _clear_claim_state(req) -> None:
-    """wrap conversation_products.clear_claim_state (best-effort)."""
-    if not req.conversation_id:
-        return
-    try:
-        from . import conversation_products as _cp
-        _cp.clear_claim_state(req.conversation_id)
-    except Exception:
-        pass
-
-
-# handoff reasons ที่ปิดการเก็บข้อมูลจริง (ยืนยันแล้ว/ปรึกษาแอดมิน/ให้ข้อมูลไม่ครบ/ทวน)
-# — reason "warranty_claim" (default ของ ask-info/State-7 receipt) ไม่อยู่ใน set นี้
-#   เพราะ flow ออกแบบให้เก็บข้อมูลต่อหลัง handoff — clear ตอนนั้น = fill-once พัง
-_TERMINAL_CLAIM_REASONS = frozenset((
-    "warranty_claim_in_warranty", "warranty_claim_out_of_warranty",
-    "claim_info_incomplete", "review_request",
-))
-
-
-def _maybe_clear_claim_state(req, claim_ctx: dict, answer: str = "") -> None:
-    """ล้าง claim_state เฉพาะ terminal handoff (เลิกเก็บข้อมูลแล้ว).
-
-    ถ้าคำตอบ turn นี้ยังขอข้อมูล ("รบกวนแจ้งข้อมูล") หรือเพิ่งรับข้อมูล ("ได้รับข้อมูล")
-    → flow ออกแบบให้เก็บต่อ post-handoff → ห้าม clear ไม่ว่า reason จะเป็นอะไร
-    (ask-info prompt บาง path ใช้ reason in_warranty เหมือน confirm จริง).
+    - open episode + to open stage → merge เข้า episode เดิม (fenced)
+    - absent/terminal + fresh claim → episode ใหม่ (identity allowlist เท่านั้น
+      ข้าม; case evidence ของ episode เก่าไม่ปน)
+    - terminal + fresh_claim=False → refuse (คืน state เดิม) — marker/field
+      stale เปิด episode terminal ไม่ได้
+    - to resolved → เก็บ evidence เป็น terminal record + resolved_at
+    CAS miss → reread ครั้งเดียวผ่าน storage → คืน state ของผู้ชนะ
     """
-    if "รบกวนแจ้งข้อมูล" in answer or "ได้รับข้อมูล" in answer:
-        return
-    if claim_ctx.get("handoff_reason") in _TERMINAL_CLAIM_REASONS:
-        _clear_claim_state(req)
+    cs = dict(claim_state or {})
+    view = _claim_lifecycle(cs)
+    if view.stage in _CLAIM_TERMINAL_STAGES and not fresh_claim:
+        return cs
+    fields = {k: v for k, v in (fields or {}).items() if v is not None and v != ""}
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    from . import conversation_products as _cp
+
+    new_episode = view.stage == "absent" or (
+        view.stage in _CLAIM_TERMINAL_STAGES and fresh_claim)
+    if new_episode:
+        nxt = {
+            "episode_id": str(_uuid.uuid4()),
+            "stage": to,
+            "started_at": now,
+            "updated_at": now,
+        }
+        for k in _CLAIM_IDENTITY_FIELDS:
+            if cs.get(k):
+                nxt[k] = cs[k]
+        nxt.update(fields)
+        return _cp.transition_claim_state(
+            req.conversation_id, req.platform, req.shop,
+            expected_episode_id=(view.episode_id
+                                 if view.stage != "absent" else None),
+            expected_stage=(view.stage
+                            if view.stage != "absent" else None),
+            claim_state=nxt) or cs
+
+    if to in _CLAIM_TERMINAL_STAGES:
+        # terminal = same-episode partial $set — episode_id/evidence คงอยู่;
+        # whole-state replace ห้ามใช้ (concurrent evidence write จะหาย)
+        term = {"stage": to, "resolved_at": now,
+                "resolution_reason": "troubleshoot_confirmed"}
+        term.update(fields)
+        return _cp.merge_claim_fields(
+            req.conversation_id, episode_id=view.episode_id,
+            expected_stage=view.stage, fields=term) or cs
+
+    merge = dict(fields)
+    merge["stage"] = to
+    if view.episode_id is None:
+        # legacy episode-less open doc → promote ด้วย episode_id ใหม่ใน merge เดียว
+        merge["episode_id"] = str(_uuid.uuid4())
+    return _cp.merge_claim_fields(
+        req.conversation_id, episode_id=view.episode_id,
+        expected_stage=view.stage, fields=merge) or cs
+
+
+def _consume_claim_outcome(req, claim_state: dict | None) -> dict:
+    """apply explicit admin claim outcome (Phase 2B.6) — episode-scoped, idempotent.
+
+    req.claim_outcome = {episode_id, outcome: resolved|cancelled, actor_id,
+    occurred_at (ISO)} — transport จาก status_conversation ผ่าน /chat payload.
+    apply เฉพาะเมื่อ episode ตรงกับ active episode + lifecycle เปิดอยู่ —
+    ผ่าน _claim_transition เดียว (fencing เดิมครอบ race/replay/terminal);
+    malformed/stale/absent → no-op, คืน state เดิม.
+    """
+    oc = getattr(req, "claim_outcome", None)
+    if not isinstance(oc, dict):
+        return claim_state or {}
+    outcome = oc.get("outcome")
+    episode = oc.get("episode_id")
+    if (outcome not in _CLAIM_TERMINAL_STAGES
+            or not isinstance(episode, str) or not episode):
+        return claim_state or {}
+    cs = dict(claim_state or {})
+    view = _claim_lifecycle(cs)
+    if not view.lifecycle_open or view.episode_id != episode:
+        return cs
+    from datetime import datetime, timezone
+    occurred = oc.get("occurred_at")
+    resolved_at = None
+    if isinstance(occurred, str):
+        try:
+            resolved_at = datetime.fromisoformat(
+                occurred.replace("Z", "+00:00")).isoformat()
+        except ValueError:
+            resolved_at = None
+    fields = {
+        "resolution_reason": f"admin_{outcome}",
+        "resolved_by": oc.get("actor_id"),
+        "resolved_at": resolved_at or datetime.now(timezone.utc).isoformat(),
+    }
+    return _claim_transition(req, cs, outcome, fields=fields)
 
 
 # ─── Post-handoff lock helpers (5F-H4) ───────────────────────────────────────
@@ -144,56 +221,33 @@ _POST_HANDOFF_WARRANTY_KWS = (
 )
 
 
-def _is_active_post_handoff(req, history_marker: bool) -> bool:
-    """ticket_state = source of truth ของ post-handoff lock.
+def _is_active_post_handoff(req, history: list | None = None) -> bool:
+    """ticket_state = source of truth เดียวของ post-handoff lock.
 
-    - "handoff"/"open"/"pending" → active (ticket อยู่ฝั่งแอดมิน/distributor)
-      แม้ history ไม่มี handoff marker — เช่น history fetch fail
-    - "closed"/"resolved"/"bot" → ไม่ active (จบแล้ว/บอทคืนสิทธิ์ ตอบปกติ)
-    - ไม่ทราบ state (None/อื่น) → fallback history marker (backward compat)
+    - "handoff"/"open"/"pending" → active — ล็อคทุกข้อความ (content
+      ไม่มีสิทธิ์ override ownership — Phase 2B.5 unconditional)
+    - "closed"/"resolved"/"bot" → ไม่ active → pipeline ปกติ
+    - ไม่ทราบ state (None/อื่น) → fallback handoff marker ใน last model
+      text (backward compat — กรณี admin ไม่ส่ง ticket_state)
     """
     _ts = getattr(req, "ticket_state", None)
-    if _ts in ("closed", "resolved", "bot"):
-        return False
-    if _ts in ("handoff", "open", "pending"):
+    _state = (_ts.get("state") if isinstance(_ts, dict) else _ts) or ""
+    _state = str(_state).lower()
+    if _state in ("handoff", "open", "pending"):
         return True
-    return history_marker
-
-
-def _post_handoff_gate(req, ctx, _warranty_mod, _app_module, llm) -> dict | None:
-    """Post-handoff lock gate — คืน response "รอแอดมิน" ถ้าควรล็อค, None ถ้าปล่อย.
-
-    ปล่อยผ่านเมื่อ: ลูกค้าส่งข้อมูลเคลม (รูป/วันที่/order/phone/ชื่อ) /
-    ถาม product question ชัด / message match shop exception —
-    decision ขึ้นกับ req.message เท่านั้น ไม่ต้องการ history
-    """
-    _msg_lower = (req.message or "").lower()
-    _msg_is_image = req.message.strip() in (
-        "[รูปภาพ]", "[image]", "[วิดีโอ]", "[video]", "[sticker]", "[สติกเกอร์]")
-    _msg_has_image_placeholder = bool(re.search(
-        r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]",
-        req.message, re.IGNORECASE))
-    _info = _warranty_mod.extract_customer_info(
-        re.sub(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", "",
-               req.message, flags=re.IGNORECASE).strip())
-    _has_info = (
-        _msg_is_image or _msg_has_image_placeholder
-        or _warranty_mod.parse_purchase_date(req.message) is not None
-        or bool(_info["order_id"]) or bool(_info["phone"])
-        or (_info["name"] and len(_info["name"]) <= 40
-            and " " in _info["name"]))
-    if _has_info:
-        return None
-    if (any(kw in _msg_lower for kw in _POST_HANDOFF_PRODUCT_KWS)
-            and not any(kw in _msg_lower for kw in _POST_HANDOFF_WARRANTY_KWS)):
-        print(f"[POST-HANDOFF-ESCAPE] product question หลัง handoff → ปล่อยปกติ: {req.message!r}", file=sys.stderr)
-        return None
-    _exc = _app_module._get_post_handoff_exceptions(req.shop, req.platform)
-    if _exc and any(e.lower() in _msg_lower for e in _exc):
-        print(f"[POST-HANDOFF-EXCEPTION] match exception → ปล่อยปกติ: {req.message!r} exceptions={_exc}", file=sys.stderr)
-        return None
-    print(f"[POST-HANDOFF] ลูกค้าทักใหม่หลัง handoff → บอทหยุดตอบ บอกรอแอดมิน", file=sys.stderr)
-    return _build_post_handoff_response(req, ctx, _app_module, llm)
+    if _state in ("closed", "resolved", "bot"):
+        return False
+    _last_model = ""
+    for _h in reversed(list(history or [])):
+        _role = ((_h.get("role") if isinstance(_h, dict)
+                  else getattr(_h, "role", "")) or "")
+        if _role != "model":
+            continue
+        _last_model = ((_h.get("text") if isinstance(_h, dict)
+                        else getattr(_h, "text", "")) or "")
+        break
+    return any(m in _last_model for m in (
+        "มอบหมายงาน", "รอการติดต่อกลับ", "ดำเนินการเรื่อง", "แอดมินดูแล"))
 
 
 def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
@@ -227,14 +281,27 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
             _claim_state = _cp_claim.load_claim_state(req.conversation_id) or {}
         except Exception:
             pass
+    # ⚡ 2B.6 — explicit admin outcome ก่อน lifecycle evaluate (authoritative turn)
+    _claim_state = _consume_claim_outcome(req, _claim_state)
+    # ⚡ 2B.4 — lifecycle view จาก evaluator เดียว: marker/field evidence ใช้ได้
+    #   เฉพาะตอนไม่ terminal (terminal ต้อง explicit fresh claim เท่านั้น)
+    _view = _claim_lifecycle(_claim_state)
+    _accept_evidence = _view.lifecycle_open or _view.stage == "absent"
 
     # ── Pre-check: claim request detection ──
     _is_claim_request = _warranty_mod.detect_claim_request(req.message)
 
-    # ── State machine ทำงานเฉพาะเมื่อมี history ──
-    if not history:
-        # First-message claim (no history) → handle ที่ท้ายฟังก์ชัน
-        return _handle_first_message_claim(req, ctx, _is_claim_request, _warranty_mod, llm, _app_module)
+    # ── State machine ทำงานเฉพาะเมื่อมี history หรือ episode เปิดอยู่ ──
+    #   (persisted state เป็น authority — history fetch ว่างไม่ตัด resume)
+    if not history and not _view.lifecycle_open:
+        # First-message claim (no history, no open episode) → handle ที่ท้ายฟังก์ชัน
+        return _handle_first_message_claim(req, ctx, _is_claim_request, _warranty_mod, llm, _app_module, _claim_state)
+
+    # ⚡ 2B.4 — explicit claim request ตอนไม่มี open episode → fresh-claim path
+    #   เดียวกันเสมอ (absent/terminal → episode ใหม่ผ่าน transition owner;
+    #   marker เก่าบน terminal episode ห้าม reopen)
+    if _is_claim_request and not _view.lifecycle_open:
+        return _handle_first_message_claim(req, ctx, True, _warranty_mod, llm, _app_module, _claim_state)
 
     # ── ดึง last model message ──
     _last_model_msgs = [h for h in history if h.get("role") == "model"][-1:]
@@ -285,21 +352,19 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
         any(kw in _last_model_text for kw in _info_request_kws)
         and any(verb in _last_model_text for verb in _ask_verbs)
     )
-    if not _bot_asked_info and (_last_model_is_warranty or _claim_collecting(_claim_state)):
+    if not _bot_asked_info and _accept_evidence and (_last_model_is_warranty or _view.accepts_claim_fields):
         _all_model_text = " ".join(
             h.get("text", "") for h in history if h.get("role") == "model"
         ).lower()
         _bot_asked_info_ever = (
             (any(kw in _all_model_text for kw in _info_request_kws)
              and any(verb in _all_model_text for verb in _ask_verbs))
-            or _claim_collecting(_claim_state)
+            or _view.accepts_claim_fields
         )
         if _bot_asked_info_ever:
             _pre_info = _warranty_mod.extract_customer_info(req.message)
-            _pre_valid_name = (
-                _pre_info["name"] and len(_pre_info["name"]) <= 40 and " " in _pre_info["name"]
-                and not any(c.isdigit() for c in _pre_info["name"])
-            )
+            # ⚡ 2B.5 — name validity = parser output เท่านั้น (ลบ shape re-check)
+            _pre_valid_name = bool(_pre_info["name"])
             _pre_has_info = (
                 bool(_pre_info["order_id"]) or _pre_valid_name or bool(_pre_info["phone"])
             )
@@ -315,22 +380,6 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
         and any(kw in _last_model_text for kw in ("สนใจ", "ปรึกษา", "แอดมิน", "admin"))
     )
 
-    # ── State 6: post-handoff ──
-    _history_handoff_marker = any(
-        kw in _last_model_text
-        for kw in ("มอบหมายงาน", "รอการติดต่อกลับ", "ดำเนินการเรื่อง", "แอดมินดูแล")
-    )
-    if req.ticket_state == "closed":
-        _bot_handed_off = False
-        # ⚡ T5 — ticket ปิดแล้ว → เลิกเก็บข้อมูลเคลม (ล้าง marker resume)
-        if _claim_state:
-            _clear_claim_state(req)
-            _claim_state = {}
-    elif req.ticket_state in ("handoff", "open"):
-        _bot_handed_off = _history_handoff_marker
-    else:
-        _bot_handed_off = _history_handoff_marker
-
     # ── State 7: awaiting claim info ──
     _bot_asked_claim_info = (
         any(kw in _last_model_text for kw in ("วันที่ซื้อ", "ซื้อวันที่", "วันที่ ซื้อ", "purchase date", "ซื้อมาวันที่"))
@@ -341,41 +390,11 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
     _msg_has_image_placeholder = bool(re.search(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", req.message, re.IGNORECASE))
     _msg_has_date = _warranty_mod.parse_purchase_date(req.message) is not None
 
-    # ── Post-handoff logic ──
-    _post_handoff_info = _warranty_mod.extract_customer_info(
-        re.sub(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", "", req.message, flags=re.IGNORECASE).strip()
-    )
-    _post_handoff_has_info = (
-        _msg_is_image or _msg_has_image_placeholder or _msg_has_date
-        or bool(_post_handoff_info["order_id"])
-        or bool(_post_handoff_info["phone"])
-        or (_post_handoff_info["name"] and len(_post_handoff_info["name"]) <= 40 and " " in _post_handoff_info["name"])
-    )
-    _product_q_kws = (
-        "สายชาร์จ", "หัวชาร์จ", "ชุดชาร์จ", "แท่นชาร์จ", "พาวเวอร์แบงค์", "แบตสำรอง",
-        "แบตเตอรี่", "สาย usb", "สาย c", "สาย type", "หาสาย", "หาหัว", "หาแบต",
-        "มีสาย", "มีหัว", "มีแบต", "มีพาวเวอร์", "มีสินค้า", "ดูสินค้า", "แนะนำ",
-        "สอบถามสินค้า", "รุ่นไหนดี", "ราคา", "กี่บาท", "ชาร์จเร็ว", "watt", "วัตต์",
-        "สายแรง", "หัวแรง", "แบตแรง", "ชาร์จแรง", "pd 3.1", "gan", "wireless",
-        "สวัสดี", "hello", "hi ", "ขอดูสินค้า", "ขอสอบถาม",
-    )
-    _warranty_q_kws = (
-        "เคลม", "ประกัน", "ทวนข้อมูล", "ส่งสินค้า", "พัสดุ", "tracking", "EMS",
-        "เบอร์", "เลขคำสั่ง", "วันที่ซื้อ", "รูปสินค้า", "แสดงอาการ", "ความเสียหาย",
-        "เปลี่ยนสินค้า", "คืนสินค้า", "refund", "return", "เคลมสาย", "เคลมหัว",
-        "ใช้ไม่ได้", "ไม่ทำงาน", "ชาร์จไม่เข้า", "ไม่ชาร์จ", "ชาร์จไม่ติด",
-        "เสีย", "พัง", "ซ่อม", "ไม่ติด", "ค้าง",
-    )
-    _msg_lower_for_check = req.message.lower()
-    _has_product_kw = any(kw in _msg_lower_for_check for kw in _product_q_kws)
-    _has_warranty_kw = any(kw in _msg_lower_for_check for kw in _warranty_q_kws)
-    _is_post_handoff_product_q = _has_product_kw and not _has_warranty_kw
-    _post_handoff_exceptions = _app_module._get_post_handoff_exceptions(req.shop, req.platform)
-    _is_post_handoff_exception = bool(_post_handoff_exceptions) and any(
-        exc.lower() in _msg_lower_for_check for exc in _post_handoff_exceptions
-    )
-    if _bot_handed_off and not _post_handoff_has_info and not _is_post_handoff_product_q and not _is_post_handoff_exception:
-        return _build_post_handoff_response(req, ctx, _app_module, llm)
+    # ── product-question signal — ใช้เฉพาะกัน warranty-ctx ตอนส่งรูป ──
+    _msg_lower = req.message.lower()
+    _is_product_q = (
+        any(kw in _msg_lower for kw in _POST_HANDOFF_PRODUCT_KWS)
+        and not any(kw in _msg_lower for kw in _POST_HANDOFF_WARRANTY_KWS))
 
     # ── State 7: awaiting_claim_info → ลูกค้าส่งรูป/วิดีโอ ──
     _warranty_ctx_in_history = False
@@ -400,16 +419,18 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
             ).strip()
             if not _msg_without_placeholder:
                 _warranty_ctx_in_history = False
-        if _warranty_ctx_in_history and _is_post_handoff_product_q:
+        if _warranty_ctx_in_history and _is_product_q:
             _warranty_ctx_in_history = False
 
     _warranty_claim_handoff = False
     _warranty_claim_ctx: dict = {}
     _warranty_claim_answer = ""
 
-    # ⚡ T5 — _claim_collecting เพิ่มเป็นเงื่อนไขที่ 3: info submission หลังคำถามแทรก
-    #   (last model msg ไม่ใช่ warranty แล้ว) ยังถูกรับเข้า flow เพราะ claim_state persist
-    if (_bot_asked_claim_info or _warranty_ctx_in_history or _claim_collecting(_claim_state)) and not _bot_reviewed_info:
+    # ⚡ T5 — collecting episode (accepts_claim_fields) เพิ่มเป็นเงื่อนไขที่ 3:
+    #   info submission หลังคำถามแทรกยังถูกรับเข้า flow เพราะ claim_state persist;
+    #   marker ใช้ได้เฉพาะตอนไม่ terminal (_accept_evidence) — terminal ต้อง
+    #   explicit fresh claim; ts_suggested ยังไม่รับ field (verdict ผ่าน ts-followup)
+    if (_view.accepts_claim_fields or (_accept_evidence and (_bot_asked_claim_info or _warranty_ctx_in_history))) and not _bot_reviewed_info:
         _claim_clean_msg = re.sub(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", "", req.message, flags=re.IGNORECASE).strip()
         _parsed_date_str = None
         if _msg_has_date:
@@ -422,7 +443,8 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
         _info = _warranty_mod.extract_customer_info(_claim_clean_msg)
         _has_date = _msg_has_date
         _has_order = bool(_info["order_id"])
-        _has_name = _info["name"] and len(_info["name"]) <= 40 and " " in _info["name"]
+        # ⚡ 2B.5 — name validity = parser output เท่านั้น (ลบ shape re-check)
+        _has_name = bool(_info["name"])
         _has_phone = bool(_info["phone"])
         _has_image = _msg_is_image or _msg_has_image_placeholder
 
@@ -446,10 +468,7 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
             )
             _warranty_claim_handoff = True
             # ⚡ T5 — merge กับ claim_state: handoff claim ได้ข้อมูลครบ (ไม่ใช่แค่ turn นี้)
-            _slots = _merge_claim_slots(
-                _info, has_date=_has_date, has_image=_has_image,
-                claim_state=_claim_state,
-            )
+            _slots = _merge_claim_slots(_info, claim_state=_claim_state)
             _warranty_claim_ctx = {
                 "customer_name": _slots["name"],
                 "customer_phone": _slots["phone"],
@@ -457,9 +476,8 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
                 "purchase_date": _parsed_date_str or _claim_state.get("purchase_date"),
                 "claim_topic": "เคลม/ซ่อม/ประกันสินค้า",
             }
-            # ⚡ T5 — persist ข้อมูลที่ได้รับ (fill-once) — v2 เดิมไม่ save เลย
-            _update_claim_state(req, {
-                "stage": "collecting",
+            # ⚡ T5 — persist ข้อมูลที่ได้รับ (fill-once) ผ่าน transition owner เดียว
+            _claim_state = _claim_transition(req, _claim_state, "collecting", {
                 "customer_name": _info.get("name") if _has_name else None,
                 "customer_phone": _info.get("phone") if _has_phone else None,
                 "customer_order_id": _info.get("order_id") if _has_order else None,
@@ -468,13 +486,12 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
             })
 
     # ── State: awaiting_customer_info → ลูกค้าให้ข้อมูล ──
-    if _bot_asked_info and not _bot_reviewed_info and not _msg_has_date:
+    if _bot_asked_info and not _bot_reviewed_info and not _msg_has_date and _accept_evidence:
         _info = _warranty_mod.extract_customer_info(req.message)
-        _has_valid_name = _info["name"] and len(_info["name"]) <= 40 and " " in _info["name"]
+        # ⚡ 2B.5 — name validity = parser output เท่านั้น (ลบ shape re-check)
+        _has_valid_name = bool(_info["name"])
         _has_valid_phone = bool(_info["phone"])
         _has_valid_order = bool(_info["order_id"])
-        if _has_valid_name and any(c.isdigit() for c in _info["name"]):
-            _has_valid_name = False
         if _has_valid_name or _has_valid_phone or _has_valid_order:
             # ⚡ T5 — fill-once: รวม claim_state ที่ persist → ไม่ถาม slot ที่มีแล้วซ้ำ
             _slots = _merge_claim_slots(_info, claim_state=_claim_state)
@@ -515,8 +532,7 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
                 "claim_topic": "เคลม/ซ่อม/ประกันสินค้า",
             }
             # ⚡ T5 — persist slot ที่เพิ่งได้รับ (v2 เดิมไม่ save เลย)
-            _update_claim_state(req, {
-                "stage": "collecting",
+            _claim_state = _claim_transition(req, _claim_state, "collecting", {
                 "customer_name": _info.get("name") if _has_valid_name else None,
                 "customer_phone": _info.get("phone") if _has_valid_phone else None,
                 "customer_order_id": _info.get("order_id") if _has_valid_order else None,
@@ -533,12 +549,11 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
             _warranty_claim_ctx = {"handoff_reason": "warranty_claim_in_warranty"}
         else:
             _info = _warranty_mod.extract_customer_info(req.message)
-            _has_valid_name = _info["name"] and len(_info["name"]) <= 40 and " " in _info["name"]
+            # ⚡ 2B.5 — name validity = parser output เท่านั้น (ลบ shape re-check)
+            _has_valid_name = bool(_info["name"])
             _has_valid_phone = bool(_info["phone"])
             _has_valid_order = bool(_info["order_id"])
-            if _has_valid_name and any(c.isdigit() for c in _info["name"]):
-                _has_valid_name = False
-            if _has_valid_name or _has_valid_phone or _has_valid_order:
+            if (_has_valid_name or _has_valid_phone or _has_valid_order) and _accept_evidence:
                 # ⚡ T5 — merge claim_state: ลูกค้าแก้แค่บาง field → ค่าอื่นต้องยังอยู่
                 _slots = _merge_claim_slots(_info, claim_state=_claim_state)
                 _review_lines = []
@@ -560,7 +575,7 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
                     "customer_order_id": _slots["order_id"],
                     "claim_topic": "เคลม/ซ่อม/ประกันสินค้า",
                 }
-                _update_claim_state(req, {
+                _claim_state = _claim_transition(req, _claim_state, "collecting", {
                     "customer_name": _info.get("name") if _has_valid_name else None,
                     "customer_phone": _info.get("phone") if _has_valid_phone else None,
                     "customer_order_id": _info.get("order_id") if _has_valid_order else None,
@@ -597,14 +612,15 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
             )
             _warranty_claim_handoff = True
             _warranty_claim_ctx = {"handoff_reason": "warranty_claim_in_warranty"}
-            # ⚡ T5 — เริ่มเก็บข้อมูล: mark stage=collecting
-            _update_claim_state(req, {"stage": "collecting"})
+            # ⚡ 2B.4 — explicit claim request → fresh path ผ่าน owner (episode
+            #   ใหม่เมื่อ absent/terminal; open → episode เดิม)
+            _claim_state = _claim_transition(req, _claim_state, "collecting", fresh_claim=True)
 
     # ── ถ้ามี warranty claim answer → ส่ง handoff + return ──
     if _warranty_claim_answer:
         return _build_warranty_claim_response(
             req, ctx, _warranty_claim_answer, _warranty_claim_handoff,
-            _warranty_claim_ctx, _app_module, llm
+            _warranty_claim_ctx, _app_module, llm, claim_state=_claim_state
         )
 
     # ── Warranty date follow-up ──
@@ -630,7 +646,7 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
 
     # ── First-message claim (มี history แต่ state machine ไม่ได้จับ) ──
     if _is_claim_request:
-        return _handle_first_message_claim(req, ctx, True, _warranty_mod, llm, _app_module)
+        return _handle_first_message_claim(req, ctx, True, _warranty_mod, llm, _app_module, _claim_state)
 
     return None
 
@@ -662,12 +678,13 @@ def _handle_review_request(req, ctx, history, _warranty_mod, llm, _app_module) -
             _hist_order = _hinfo["order_id"]
         if _hinfo["name"] and not _hist_name:
             _hname = _hinfo["name"]
-            if (len(_hname) <= 40 and " " in _hname
-                    and not any(c.isdigit() for c in _hname)
-                    and not any(kw in _hname.lower() for kw in (
-                        "ทวน", "ทน", "คอย", "รูป", "ภาพ", "เคลม", "ส่ง", "พัสดุ",
-                        "สินค้า", "ไม่ทราบ", "ได้รับ", "หรือยัง",
-                    ))):
+            # ⚡ 2B.5 — shape/length/digit เป็นหน้าที่ parser (extract_customer_info)
+            #   ตรงนี้เหลือเฉพาะ contextual denylist กันข้อความเก่าที่ถูกตีความ
+            #   เป็นชื่อผิดบริบท (เช่น "ทวนเลขพัสดุ" → NER ยอมเป็นชื่อ)
+            if not any(kw in _hname.lower() for kw in (
+                    "ทวน", "ทน", "คอย", "รูป", "ภาพ", "เคลม", "ส่ง", "พัสดุ",
+                    "สินค้า", "ไม่ทราบ", "ได้รับ", "หรือยัง",
+            )):
                 _hist_name = _hname
     _review_lines = []
     if _hist_name:
@@ -704,17 +721,17 @@ def _handle_review_request(req, ctx, history, _warranty_mod, llm, _app_module) -
         "usage": {},
         "elapsed": _total,
         "cost": 0.0,
-        "handoff_to_admin": True,
-        "handoff_reason": "review_request",
+        "handoff_to_admin": False,
+        "handoff_reason": None,
         "handoff_claim": {
             "customer_name": _hist_name,
             "customer_phone": _hist_phone,
             "customer_order_id": _hist_order,
         },
+        "warranty_disposition": _WarrantyDisposition.CONTINUE_PRODUCT,
         "steps": ctx.get("steps", []) + [{"name": "warranty_review", "model": _model_name, "detail": "ทวนข้อมูลจาก history"}],
         "routing_decision": _app_module._routing(
-            "handoff", "warranty_review: ทวนข้อมูลจาก history",
-            handoff_reason="review_request",
+            "bot_reply", "warranty_review: ทวนข้อมูลจาก history",
         ),
         "image_desc": ctx.get("image_desc_out", ""),
     }
@@ -739,70 +756,62 @@ def _build_post_handoff_response(req, ctx, _app_module, llm) -> dict:
         "usage": {},
         "elapsed": _total,
         "cost": 0.0,
-        "handoff_to_admin": True,
-        "handoff_reason": "post_handoff_waiting",
+        # ⚡ 2B.5 — wait-only state, NOT a new-handoff command: downstream
+        #   callers (liveAssignmentService/replay) treat handoff_to_admin /
+        #   handoff_reason / routing path "handoff" as "perform a handoff"
+        #   — ต้องปล่อยทุก field ว่าง มิฉะนั้น caller POST ซ้ำ
+        "handoff_to_admin": False,
+        "handoff_reason": None,
         "handoff_claim": {},
-        "steps": ctx.get("steps", []) + [{"name": "post_handoff", "model": _model_name, "detail": "รอแอดมิน → ลูกค้าทักใหม่"}],
+        "warranty_disposition": _WarrantyDisposition.TERMINAL,
+        "steps": ctx.get("steps", []) + [{"name": "post_handoff", "model": _model_name, "detail": "post_handoff_waiting: รอแอดมิน → ลูกค้าทักใหม่"}],
         "routing_decision": _app_module._routing(
-            "handoff", "post_handoff: รอแอดมิน → บอทหยุดตอบ",
-            handoff_reason="post_handoff_waiting",
+            "human_wait", "post_handoff_waiting: รอแอดมิน → บอทหยุดตอบ",
         ),
         "image_desc": ctx.get("image_desc_out", ""),
     }
 
 
 def _build_warranty_claim_response(req, ctx, answer, handoff, claim_ctx,
-                                     _app_module, llm) -> dict:
-    """สร้าง response สำหรับ warranty claim พร้อม handoff API call."""
+                                     _app_module, llm, source="warranty_claim_flow",
+                                     claim_state: dict | None = None) -> dict:
+    """สร้าง response สำหรับ warranty claim พร้อม handoff API call.
+
+    claim_state = authoritative claim lifecycle state ของ caller (เป้าหมาย:
+    open episode ⟹ episode_id ส่งผ่าน transport explicitly — `_send_handoff`
+    ไม่อ่าน Mongo เอง). lifecycle open แต่ไม่มี episode_id หรือ claim_state
+    ไม่ทราบ → handoff ถือไม่สมบูรณ์: ไม่ POST + flag False (ห้าม false success)
+    """
     _model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
     _total = round(_time.time() - ctx.get("total_start", _time.time()), 2)
     _handoff_result: dict = {}
     _assigned_admin_name: str | None = None
     _assignment_reason: str | None = None
     if handoff and req.conversation_id:
-        try:
-            import urllib.request
-            import urllib.error
-            _handoff_url = os.environ.get(
-                "ADMIN_HANDOFF_URL",
-                "http://127.0.0.1:3000/api/admin/conversations/bot-handoff",
-            )
-            _handoff_payload = {
-                "conversation_id": req.conversation_id,
-                "shop_id": req.shop or "",
-                "platform": req.platform or "shopee",
-                "reason": claim_ctx.get("handoff_reason", "warranty_claim"),
-                "simulate": req.simulate_assignment,
-                "claim": {
-                    k: v for k, v in claim_ctx.items()
-                    if k != "handoff_reason" and v
-                },
-            }
-            _handoff_body = json.dumps(_handoff_payload).encode("utf-8")
-            _handoff_req = urllib.request.Request(
-                _handoff_url,
-                data=_handoff_body,
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Internal-Secret": os.environ.get("CHATBOT_INTERNAL_SECRET", ""),
-                },
-                method="POST",
-            )
-            try:
-                _handoff_resp = urllib.request.urlopen(_handoff_req, timeout=5)
-                _handoff_result = json.loads(_handoff_resp.read().decode("utf-8"))
-                _assigned_admin_name = _handoff_result.get("assigned_to_name")
-                _assignment_reason = _handoff_result.get("assignment_reason")
-            except urllib.error.HTTPError as _he:
-                print(f"[HANDOFF-V2] HTTP error: {_he.code} {_he.reason}", file=sys.stderr)
-            except Exception as _he:
-                print(f"[HANDOFF-V2] error: {_he}", file=sys.stderr)
-        except Exception as _e:
-            print(f"[HANDOFF-V2] setup error: {_e}", file=sys.stderr)
+        # claim episode identity มาจาก evaluator เดียวบน authoritative state —
+        # open ⟹ episode_id ต้องมี; ขาด = transport identity failure (fail closed)
+        _ep_view = _claim_lifecycle(claim_state) if claim_state is not None else None
+        _episode_id = (_ep_view.episode_id
+                       if _ep_view is not None and _ep_view.lifecycle_open
+                       else None)
+        if _ep_view is not None and (not _ep_view.lifecycle_open or _episode_id):
+            # transport owner เดียว — outcome ยืนยันเท่านั้นถึง claim/flag/clear
+            _handoff_result = _app_module._send_handoff(
+                req, None,
+                reason=claim_ctx.get("handoff_reason", "warranty_claim"),
+                claim={k: v for k, v in claim_ctx.items() if k != "handoff_reason" and v},
+                simulate=True, timeout=5.0, log_tag="HANDOFF-V2",
+                episode_id=_episode_id,
+            ) or {}
+        else:
+            print("[WARRANTY-CLAIM] handoff blocked: claim episode identity "
+                  "unavailable (lifecycle open แต่ไม่มี episode_id)", file=sys.stderr)
+        _assigned_admin_name = _handoff_result.get("assigned_to_name")
+        _assignment_reason = _handoff_result.get("assignment_reason")
 
-        # ⚡ T5 — clear claim_state เฉพาะ terminal handoff (ไม่ใช่ ask-info/receipt
-        #   ที่ยังเก็บข้อมูลต่อ) — เดิมไม่มี clear ใน v2 path เลย
-        _maybe_clear_claim_state(req, claim_ctx, answer)
+        # ⚡ 2B.4 — handoff สำเร็จเปลี่ยน conversation ownership ไม่ใช่ claim
+        #   resolution: claim_state คงอยู่ (lifecycle แยกจาก ticket; resolved/
+        #   cancelled มาจาก valid terminal evidence เท่านั้น)
 
         if _assigned_admin_name:
             _reason_thai = {
@@ -820,6 +829,11 @@ def _build_warranty_claim_response(req, ctx, answer, handoff, claim_ctx,
                 f"ดำเนินการเรื่อง{_reason_thai}ต่อนะคะ "
                 f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
             )
+        elif not _handoff_result:
+            # outcome ไม่ยืนยัน — base answer อาจ claim admin-contact → แทนด้วยข้อความตรงๆ
+            #   (queued ยืนยันแล้วแต่ไม่มีชื่อ → เก็บ base answer — claim รอแอดมินจริง)
+            from . import responses as _resp_mod
+            answer = _resp_mod.HANDOFF_FAILED_REPLY
 
     return {
         "answer": answer,
@@ -827,18 +841,23 @@ def _build_warranty_claim_response(req, ctx, answer, handoff, claim_ctx,
         "products": [],
         "shop": req.shop,
         "model": _model_name,
-        "source": "warranty_claim_flow",
+        "source": source,
         "usage": {},
         "elapsed": _total,
         "cost": 0.0,
-        "handoff_to_admin": handoff,
-        "handoff_reason": claim_ctx.get("handoff_reason"),
+        "intent": ctx.get("intent_result") or {},
+        "timing": ctx.get("timing_breakdown") or {},
+        # flag = authoritative outcome เท่านั้น (request handoff แต่ transport fail → False)
+        "handoff_to_admin": bool(handoff and _handoff_result),
+        "warranty_disposition": _WarrantyDisposition.TERMINAL if handoff else _WarrantyDisposition.CONTINUE_PRODUCT,
+        "handoff_reason": claim_ctx.get("handoff_reason") if handoff and _handoff_result else None,
         "handoff_claim": claim_ctx,
         "steps": ctx.get("steps", []),
         "routing_decision": _app_module._routing(
-            "handoff" if handoff else "bot_reply",
-            f"warranty_claim: {claim_ctx.get('handoff_reason', 'in_progress')}",
-            handoff_reason=claim_ctx.get("handoff_reason"),
+            "handoff" if (handoff and _handoff_result) else "bot_reply",
+            f"warranty_claim: {claim_ctx.get('handoff_reason', 'in_progress')}"
+            + ("" if not handoff or _handoff_result else " — handoff ไม่สำเร็จ"),
+            handoff_reason=claim_ctx.get("handoff_reason") if (handoff and _handoff_result) else None,
             assigned_admin=_handoff_result.get("assigned_to") if handoff and req.conversation_id else None,
             assigned_admin_name=_assigned_admin_name if handoff and req.conversation_id else None,
         ),
@@ -941,6 +960,7 @@ def _handle_warranty_date_followup(req, ctx, history, purchase_date, db,
         "usage": {},
         "elapsed": _total,
         "cost": 0.0,
+        "warranty_disposition": _WarrantyDisposition.CONTINUE_PRODUCT,
         "steps": ctx.get("steps", []),
         "routing_decision": _app_module._routing("bot_reply", "warranty_date_followup: คำนวณวันหมดประกัน"),
         "image_desc": ctx.get("image_desc_out", ""),
@@ -965,41 +985,22 @@ def _handle_tax_invoice_followup(req, ctx, history, _warranty_mod, _app_module, 
     )
     if not (_tax_consent or _tax_followup):
         return None
+    _model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    _total = round(_time.time() - ctx.get("total_start", _time.time()), 2)
+    # handoff — transport owner เดียว; outcome ยืนยันเท่านั้นถึง claim ส่งแอดมิน
+    _handoff_ok = bool(
+        _app_module._send_handoff(
+            req, None, reason="tax_invoice_request",
+            claim={"topic": "ใบกำกับภาษี"}, log_tag="TAX-HANDOFF-V2",
+        )
+    ) if req.conversation_id else False
+    from . import responses as _resp_mod
     _answer = (
         f"ได้ค่ะ เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
         f"เพื่อดำเนินการเรื่องใบกำกับภาษีให้นะคะ "
         f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+        if _handoff_ok else _resp_mod.HANDOFF_FAILED_REPLY
     )
-    _model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
-    _total = round(_time.time() - ctx.get("total_start", _time.time()), 2)
-    # handoff
-    if req.conversation_id:
-        try:
-            import urllib.request
-            _handoff_url = os.environ.get(
-                "ADMIN_HANDOFF_URL",
-                "http://127.0.0.1:3000/api/admin/conversations/bot-handoff",
-            )
-            _handoff_payload = {
-                "conversation_id": req.conversation_id,
-                "shop_id": req.shop or "",
-                "platform": req.platform or "shopee",
-                "reason": "tax_invoice_request",
-                "claim": {"topic": "ใบกำกับภาษี"},
-            }
-            _handoff_body = json.dumps(_handoff_payload).encode("utf-8")
-            _handoff_req = urllib.request.Request(
-                _handoff_url, data=_handoff_body,
-                headers={"Content-Type": "application/json",
-                         "X-Internal-Secret": os.environ.get("CHATBOT_INTERNAL_SECRET", "")},
-                method="POST",
-            )
-            try:
-                urllib.request.urlopen(_handoff_req, timeout=3)
-            except Exception as _he:
-                print(f"[TAX-HANDOFF-V2] failed: {_he}", file=sys.stderr)
-        except Exception as _he:
-            print(f"[TAX-HANDOFF-V2] error: {_he}", file=sys.stderr)
     return {
         "answer": _answer,
         "answer_segments": llm.split_segments(_answer),
@@ -1010,19 +1011,30 @@ def _handle_tax_invoice_followup(req, ctx, history, _warranty_mod, _app_module, 
         "usage": {},
         "elapsed": _total,
         "cost": 0.0,
-        "handoff_to_admin": True,
-        "handoff_reason": "tax_invoice_request",
+        "warranty_disposition": _WarrantyDisposition.TERMINAL,
+        "handoff_to_admin": _handoff_ok,
+        "handoff_reason": "tax_invoice_request" if _handoff_ok else None,
+        "intent": ctx.get("intent_result") or {},
+        "timing": ctx.get("timing_breakdown") or {},
         "steps": ctx.get("steps", []),
         "routing_decision": _app_module._routing(
-            "handoff", "tax_invoice: follow-up จาก history → ส่งแอดมิน",
-            handoff_reason="tax_invoice_request",
+            "handoff" if _handoff_ok else "bot_reply",
+            "tax_invoice: follow-up จาก history → ส่งแอดมิน" if _handoff_ok
+                else "tax_invoice: follow-up จาก history → handoff ไม่สำเร็จ",
+            handoff_reason="tax_invoice_request" if _handoff_ok else None,
         ),
         "image_desc": ctx.get("image_desc_out", ""),
     }
 
 
-def _handle_first_message_claim(req, ctx, is_claim, _warranty_mod, llm, _app_module) -> dict | None:
-    """State: first-message claim — claim request ไม่มี history หรือ state machine ไม่ได้จับ."""
+def _handle_first_message_claim(req, ctx, is_claim, _warranty_mod, llm, _app_module,
+                                claim_state: dict | None = None) -> dict | None:
+    """State: first-message claim — claim request ไม่มี history หรือ state machine ไม่ได้จับ.
+
+    explicit fresh claim request → transition owner เริ่ม episode ใหม่เมื่อ
+    absent/terminal (identity allowlist ข้ามได้, case evidence ไม่ข้าม);
+    open episode → ต่อ episode เดิม (retry/claim-request กลาง collect ไม่ fork).
+    """
     if not is_claim:
         return None
     _bot_name = ctx.get("bot_name", "เรา")
@@ -1038,12 +1050,14 @@ def _handle_first_message_claim(req, ctx, is_claim, _warranty_mod, llm, _app_mod
         f"และไม่ใช่ความเสียหายจากการใช้งานผิดวิธี น้ำเข้า หรือตกกระแทก "
         f"(ขึ้นกับเงื่อนไขเฉพาะรุ่น) หากข้อมูลครบ {_bot_name} จะตรวจสอบและประสานงานต่อให้ค่ะ"
     )
-    # ⚡ T5 — เริ่มเก็บข้อมูลเคลม: mark stage=collecting ให้ info submission รอบหน้า
-    #   ถูกรับแม้ last model message ไม่ใช่ warranty (คำถามแทรกระหว่าง flow)
-    _update_claim_state(req, {"stage": "collecting"})
-    _claim_ctx = {"claim_topic": "เคลม/ซ่อม/ประกันสินค้า"}
+    # ⚡ 2B.4 — explicit fresh claim request → episode lifecycle ผ่าน owner เดียว
+    #   (capture authoritative return — episode_id ของ episode ที่เพิ่ง mint
+    #   อยู่ใน state นี้ ไม่ใช่ claim_state เดิม)
+    claim_state = _claim_transition(req, claim_state or {}, "collecting", fresh_claim=True)
+    _claim_ctx = {"claim_topic": "เคลม/ซ่อม/ประกันสินค้า", "handoff_reason": "claim"}
     return _build_warranty_claim_response(
-        req, ctx, _answer, True, _claim_ctx, _app_module, llm
+        req, ctx, _answer, True, _claim_ctx, _app_module, llm,
+        claim_state=claim_state
     )
 
 
@@ -1097,17 +1111,22 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             _claim_state = _cp_claim.load_claim_state(req.conversation_id) or {}
         except Exception:
             pass
-    # ⚡ 5F-H4 — ticket_state lock ไม่ต้องการ history: ticket เปิดอยู่
-    #   (handoff/open/pending = ฝั่งแอดมินถืองาน) → post-handoff gate ทันที
-    #   แม้ history ว่าง/fetch fail — กัน bot ตอบเองตอนแอดมินควรดูแล
-    if _is_active_post_handoff(req, False):
-        _phr = _post_handoff_gate(req, ctx, warranty, _app_module, llm)
-        if _phr is not None:
-            return _phr
+    # ⚡ 2B.6 — explicit admin outcome ก่อน lifecycle evaluate (authoritative turn)
+    _claim_state = _consume_claim_outcome(req, _claim_state)
+    # ⚡ 2B.4 — lifecycle view จาก evaluator เดียว: marker/field evidence ใช้ได้
+    #   เฉพาะตอนไม่ terminal (terminal ต้อง explicit fresh claim เท่านั้น)
+    _view = _claim_lifecycle(_claim_state)
+    _accept_evidence = _view.lifecycle_open or _view.stage == "absent"
+
+    # ⚡ 2B.4 — explicit claim request ตอนไม่มี open episode → ข้าม SM ทั้งก้อน
+    #   ไป fresh-claim path เดียว (terminal/absent → episode ใหม่ผ่าน owner)
+    _fresh_claim = _is_claim_request and not _view.lifecycle_open
 
     # ⚡ ถ้ามี _anchor_compare_ctx (comparison/partial-comparison/post-comparison) → ข้าม warranty state machine
     #   กัน "คุณภาพเสียง" ถูก detect เป็น claim request ("เสียง" = พัง) ทั้งที่ลูกค้าถามเปรียบเทียบ
-    if history and not _anchor_compare_ctx:
+    # ⚡ 2B.4 — open episode รับ field ได้แม้ history ว่าง (persisted state เป็น
+    #   authority — marker ไม่ใช่ resume authority อยู่แล้ว)
+    if (history or _view.lifecycle_open) and not _anchor_compare_ctx and not _fresh_claim:
         # ⚡ Phase 8 — state machine guard ใช้ last model message เท่านั้น (ไม่ใช่ _recent_qa_pairs)
         #   เพราะต้องเช็คแค่ "model ตอบอะไรล่าสุด" ไม่ใช่บริบทยาว
         _last_model_msgs = [h for h in history if h.get("role") == "model"][-1:]
@@ -1130,7 +1149,7 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
         # ⚡ Troubleshoot-first follow-up — รอบก่อนบอทแนะนำวิธีแก้ (stage=ts_suggested
         #   หรือ last model msg มี marker) → ลูกค้ารายงานผล
         _ts_suggested = (
-            _claim_state.get("stage") == "ts_suggested"
+            _view.stage == "ts_suggested"
             or "ลองทำตามนี้ก่อน" in _last_model_text
         )
         if _ts_suggested and not _warranty_claim_answer:
@@ -1145,14 +1164,9 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             if _ts_success:
                 _warranty_claim_answer = (
                     f"ดีใจด้วยนะคะที่แก้ไขได้ ถ้ามีปัญหาอีกแจ้ง{_bot_name}ได้ตลอดเลยค่ะ")
-                if req.conversation_id:
-                    try:
-                        from . import conversation_products as _cp_ts2
-                        _cp_ts2.update_claim_state(
-                            req.conversation_id, req.platform, req.shop,
-                            {"stage": "resolved"})
-                    except Exception:
-                        pass
+                # ⚡ 2B.4 — valid terminal evidence เดียวตอนนี้: ลูกค้ายืนยันแก้ได้
+                #   หลัง troubleshoot → resolved ผ่าน owner (เก็บ evidence ไว้)
+                _claim_state = _claim_transition(req, _claim_state, "resolved")
                 print("[TS-FOLLOWUP] ลูกค้าแจ้งแก้ไขได้ → ปิดเคส ไม่ handoff", file=sys.stderr)
             elif _ts_failed or _is_claim_request:
                 _warranty_claim_answer = (
@@ -1166,8 +1180,8 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                     f"(ขึ้นกับเงื่อนไขเฉพาะรุ่น) หากข้อมูลครบ {_bot_name} จะตรวจสอบและประสานงานต่อให้ค่ะ")
                 _warranty_claim_handoff = True
                 _warranty_claim_ctx = {"handoff_reason": "warranty_claim"}
-                # ⚡ T5 — เริ่มเก็บข้อมูล: mark stage=collecting (reason ไม่ terminal → ไม่ถูก clear)
-                _update_claim_state(req, {"stage": "collecting"})
+                # ⚡ 2B.4 — เริ่มเก็บข้อมูล ผ่าน transition owner เดียว
+                _claim_state = _claim_transition(req, _claim_state, "collecting")
                 print("[TS-FOLLOWUP] วิธีแก้ไม่ได้ผล → claim info + handoff", file=sys.stderr)
 
         # ⚡ Phase 1F — Review request: ลูกค้าขอทวนข้อมูลที่ให้ไป
@@ -1180,88 +1194,9 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
         )
         _is_review_request = any(kw in req.message for kw in _review_request_kws)
         if _is_review_request and _last_model_is_warranty:
-            # ดึงข้อมูลจาก history — extract จากแต่ละ user message แยก เพื่อความแม่นยำ
-            _hist_name = None
-            _hist_phone = None
-            _hist_order = None
-            _hist_has_image = False
-            for h in history:
-                if h.get("role") != "user":
-                    continue
-                if h.get("images") or h.get("image_desc"):
-                    _hist_has_image = True
-                _htext = (h.get("text") or "").strip()
-                if not _htext:
-                    continue
-                # ข้าม placeholder และ message ที่ไม่ใช่ข้อมูล
-                _htext_clean = re.sub(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", "", _htext, flags=re.IGNORECASE).strip()
-                if not _htext_clean:
-                    continue
-                _hinfo = warranty.extract_customer_info(_htext_clean)
-                if _hinfo["phone"] and not _hist_phone:
-                    _hist_phone = _hinfo["phone"]
-                if _hinfo["order_id"] and not _hist_order:
-                    _hist_order = _hinfo["order_id"]
-                if _hinfo["name"] and not _hist_name:
-                    _hname = _hinfo["name"]
-                    # กรอง name ที่ไม่ใช่ชื่อจริง: ต้องมี space, สั้น, ไม่มีคำแปลกๆ
-                    # และต้องไม่มีตัวเลข (ถ้ามีตัวเลข → น่าจะเป็นเบอร์/order ไม่ใช่ชื่อ)
-                    if (len(_hname) <= 40 and " " in _hname
-                            and not any(c.isdigit() for c in _hname)
-                            and not any(kw in _hname.lower() for kw in (
-                                "ทวน", "ทน", "คอย", "รูป", "ภาพ", "เคลม", "ส่ง", "พัสดุ",
-                                "สินค้า", "ไม่ทราบ", "ได้รับ", "หรือยัง",
-                            ))):
-                        _hist_name = _hname
-            _review_lines = []
-            if _hist_name:
-                _review_lines.append(f"• ชื่อ-นามสกุล: {_hist_name}")
-            if _hist_phone:
-                _review_lines.append(f"• เบอร์โทร: {_hist_phone}")
-            if _hist_order:
-                _review_lines.append(f"• เลขที่คำสั่งซื้อ: {_hist_order}")
-            if _hist_has_image:
-                _review_lines.append("• รูป/วิดีโอแสดงอาการ: ส่งมาแล้ว")
-            if _review_lines:
-                _review_text = "\n".join(_review_lines)
-                _warranty_claim_answer = (
-                    f"รับทราบค่ะ ทวนข้อมูลที่ลูกค้าให้ไปนะคะ:\n"
-                    f"{_review_text}\n\n"
-                    f"ข้อมูลถูกต้องไหมคะ ถ้าถูกต้องเดี๋ยวส่งต่อให้แอดมินดำเนินการต่อนะคะ "
-                    f"ถ้าต้องการแก้ไขหรือเพิ่มเติม แจ้ง {_bot_name} ได้เลยค่ะ"
-                )
-            else:
-                _warranty_claim_answer = (
-                    f"ขออภัยค่ะ {_bot_name} ไม่พบข้อมูลที่ลูกค้าให้ไปในประวัติแชท "
-                    f"รบกวนแจ้งข้อมูลใหม่อีกครั้งนะคะ: วันที่ซื้อ · เลขที่คำสั่งซื้อ · "
-                    f"เบอร์โทร · รูป/วิดีโอแสดงอาการ"
-                )
-
+            # canonical owner: _handle_review_request — extract/answer/response เดียวกัน
             print(f"[WARRANTY-REVIEW] ลูกค้าขอทวนข้อมูล → สรุปจาก history", file=sys.stderr)
-            return dict(
-                answer=_warranty_claim_answer,
-                answer_segments=llm.split_segments(_warranty_claim_answer),
-                products=[],
-                shop=req.shop,
-                model=_model_name,
-                source="warranty_claim_flow",
-                usage={},
-                elapsed=round(_time.time() - _t0, 2),
-                cost=0.0,
-                handoff_to_admin=True,
-                handoff_reason="review_request",
-                handoff_claim={
-                    "customer_name": _hist_name,
-                    "customer_phone": _hist_phone,
-                    "customer_order_id": _hist_order,
-                },
-                steps=_steps + [{"name": "warranty_review", "model": _model_name, "detail": "ลูกค้าขอทวนข้อมูล → สรุปจาก history"}],
-                routing_decision=_app_module._routing(
-                    "handoff", "warranty_review: ทวนข้อมูลจาก history",
-                    handoff_reason="review_request",
-                ),
-                image_desc=_image_desc_out,
-            )
+            return _handle_review_request(req, ctx, history, warranty, llm, _app_module)
 
         # ตรวจ state จาก history
         # State 1: บอทเคยตอบ "รับประกัน X ปี" → ลูกค้าอาจจะถาม claim request
@@ -1299,24 +1234,22 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
         # (เช่น มี policy question แทรกกลาง) → ให้ตรวจ history ทั้งหมด
         # ⚡ Guard: ถ้า last model msg ไม่ใช่ warranty เลย → ไม่ใช้ fallback นี้
         #   ป้องกัน trigger cascade (Q1 warranty → Q2-Q4 product → Q5 โดนจับ)
-        # ⚡ T5 — _claim_collecting เป็นเงื่อนไขเสริม: claim_state persist = กำลังเก็บข้อมูล
+        # ⚡ T5 — lifecycle_open เป็นเงื่อนไขเสริม: open episode persist = กำลังเก็บข้อมูล
         #   แม้ last model msg ไม่ใช่ warranty (ลูกค้าแทรกคำถามกลาง flow แล้วส่งข้อมูลต่อ)
-        if not _bot_asked_info and (_last_model_is_warranty or _claim_collecting(_claim_state)):
+        if not _bot_asked_info and _accept_evidence and (_last_model_is_warranty or _view.accepts_claim_fields):
             _all_model_text = " ".join(
                 h.get("text", "") for h in history if h.get("role") == "model"
             ).lower()
             _bot_asked_info_ever = (
                 (any(kw in _all_model_text for kw in _info_request_kws)
                  and any(verb in _all_model_text for verb in _ask_verbs))
-                or _claim_collecting(_claim_state)
+                or _view.accepts_claim_fields
             )
             # ใช้แค่เมื่อลูกค้าให้ข้อมูลจริง (มี order_id/name/phone) ไม่ใช่ถามคำถาม
             if _bot_asked_info_ever:
                 _pre_info = warranty.extract_customer_info(req.message)
-                _pre_valid_name = (
-                    _pre_info["name"] and len(_pre_info["name"]) <= 40 and " " in _pre_info["name"]
-                    and not any(c.isdigit() for c in _pre_info["name"])
-                )
+                # ⚡ 2B.5 — name validity = parser output เท่านั้น (ลบ shape re-check)
+                _pre_valid_name = bool(_pre_info["name"])
                 _pre_has_info = (
                     bool(_pre_info["order_id"])
                     or _pre_valid_name
@@ -1340,28 +1273,6 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             for kw in ("ไม่อยู่ในช่วงประกัน", "หมดช่วงประกัน", "หมดประกัน", "out of warranty")
         ) and any(kw in _last_model_text for kw in ("สนใจ", "ปรึกษา", "แอดมิน", "admin"))
 
-        # State 6: post-handoff — บอทเคย handoff แอดมินแล้ว (คำตอบมี "มอบหมายงาน" / "รอการติดต่อกลับ")
-        # ลูกค้าทักใหม่ → ถ้าถามสินค้า/สเปค → ตอบปกติ, ถ้าไม่ → บอก "อยู่ระหว่างแอดมินตรวจสอบ"
-        # ⚡ Phase 2A — state-driven: ใช้ ticket_state เป็น primary source (ไม่ใช่ keyword scan)
-        #    ถ้า ticket_state == "closed" → บอทตอบปกติ (ข้าม post-handoff lock ทั้งหมด)
-        #    ถ้า ticket_state == "handoff"/"open" + มี handoff marker → ล็อค (ยกเว้น exceptions)
-        #    ถ้า ticket_state == None → fallback ใช้ history scan แบบเดิม (backward compat)
-        _history_handoff_marker = any(
-            kw in _last_model_text
-            for kw in ("มอบหมายงาน", "รอการติดต่อกลับ", "ดำเนินการเรื่อง", "แอดมินดูแล")
-        )
-        # ⚡ 5F-H4 — ticket_state เป็น source of truth: handoff/open/pending =
-        #   active lock แม้ history marker หาย; closed/resolved = ไม่ lock;
-        #   ไม่ทราบ state = fallback marker เดิม (backward compat)
-        _bot_handed_off = _is_active_post_handoff(req, _history_handoff_marker)
-        if req.ticket_state == "closed":
-            if _history_handoff_marker:
-                print(f"[POST-HANDOFF] ticket_state=closed → ข้าม lock แม้ history มี handoff marker", file=sys.stderr)
-            # ⚡ T5 — ticket ปิดแล้ว → เลิกเก็บข้อมูลเคลม (ล้าง marker resume กัน stale)
-            if _claim_state:
-                _clear_claim_state(req)
-                _claim_state = {}
-
         # State 7: บอทเคยขอข้อมูลเคลม (วันที่+order+รูป) → ลูกค้าอาจส่งรูป/วิดีโอหรือข้อมูลบางส่วน
         # ⚡ สำคัญ: ลูกค้าส่ง [รูปภาพ] หรือ [วิดีโอ] ตามที่บอทขอ → ต้องรับและเก็บเป็นข้อมูลเคลม
         _bot_asked_claim_info = (
@@ -1376,14 +1287,6 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
 
         # ตรวจว่าลูกค้าให้วันที่จริงไหม (ใช้ในหลาย state)
         _msg_has_date = warranty.parse_purchase_date(req.message) is not None
-
-        # ⚡ Post-handoff gate (5F-H4) — extract เป็น _post_handoff_gate เพื่อให้
-        #   no-history path ใช้ gate เดียวกัน (ticket_state = source of truth)
-        #   ปล่อยผ่านเมื่อ: ลูกค้าส่งข้อมูลเคลม / ถาม product question / shop exception
-        if _bot_handed_off:
-            _phr = _post_handoff_gate(req, ctx, warranty, _app_module, llm)
-            if _phr is not None:
-                return _phr
 
         # ── State 7: awaiting_claim_info → ลูกค้าส่งรูป/วิดีโอ หรือข้อมูลบางส่วน ──
         # ถ้าบอทเคยขอ วันที่+order+รูป แล้วลูกค้าส่งรูป/วิดีโอ หรือให้ข้อมูลบางส่วน
@@ -1424,14 +1327,20 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                     print(f"[WARRANTY-CTX-IMAGE] skip: ลูกค้าส่งรูปเฉยๆ ไม่มี warranty keyword → ปล่อยไปเส้นทางปกติ", file=sys.stderr)
             # ⚡ Guard: ถ้า message มี product keywords และไม่มี warranty keywords → ไม่ถือเป็น claim evidence
             #    (กัน case: ลูกค้าถาม "มีสายแรงกว่านี้ไหม [รูปภาพ]" ใน context warranty → ไม่ควรเป็น claim evidence)
-            if _warranty_ctx_in_history and _is_post_handoff_product_q:
+            #    ⚡ 2B.5 — fix latent NameError: ตัวแปรเดิมถูกประกาศเฉพาะ v2 scope
+            _is_product_q = (
+                any(kw in _current_msg_lower for kw in _POST_HANDOFF_PRODUCT_KWS)
+                and not any(kw in _current_msg_lower for kw in _POST_HANDOFF_WARRANTY_KWS))
+            if _warranty_ctx_in_history and _is_product_q:
                 _warranty_ctx_in_history = False
                 print(f"[WARRANTY-CTX-IMAGE] skip: message มี product keywords ไม่มี warranty keywords → ปล่อยไปเส้นทางปกติ", file=sys.stderr)
             elif _warranty_ctx_in_history:
                 print(f"[WARRANTY-CTX-IMAGE] ลูกค้าส่งรูป/วิดีโอ ใน context warranty → ถือเป็น claim evidence", file=sys.stderr)
-        # ⚡ T5 — _claim_collecting เพิ่มเป็นเงื่อนไขที่ 3: info submission หลังคำถามแทรก
-        #   (last model msg ไม่ใช่ warranty แล้ว) ยังถูกรับเข้า flow เพราะ claim_state persist
-        if (_bot_asked_claim_info or _warranty_ctx_in_history or _claim_collecting(_claim_state)) and not _bot_reviewed_info:
+        # ⚡ T5 — collecting episode (accepts_claim_fields) เป็นเงื่อนไขที่ 3:
+        #   info submission หลังคำถามแทรกยังถูกรับเข้า flow เพราะ claim_state persist;
+        #   marker ใช้ได้เฉพาะตอนไม่ terminal (_accept_evidence) — terminal ต้อง
+        #   explicit fresh claim; ts_suggested ยังไม่รับ field (verdict ผ่าน ts-followup)
+        if (_view.accepts_claim_fields or (_accept_evidence and (_bot_asked_claim_info or _warranty_ctx_in_history))) and not _bot_reviewed_info:
             # ⚡ ตัด image placeholder ออกก่อน extract info (กัน [รูปภาพ] ถูกตีความเป็นชื่อ)
             _claim_clean_msg = re.sub(r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]", "", req.message, flags=re.IGNORECASE).strip()
             # ⚡ ตัด date pattern ออกอีก (กัน "ซื้อวันที่ 15 ส.ค. 2567" ถูกตีความเป็นชื่อ)
@@ -1447,7 +1356,8 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             _info = warranty.extract_customer_info(_claim_clean_msg)
             _has_date = _msg_has_date
             _has_order = bool(_info["order_id"])
-            _has_name = _info["name"] and len(_info["name"]) <= 40 and " " in _info["name"]
+            # ⚡ 2B.5 — name validity = parser output เท่านั้น (ลบ shape re-check)
+            _has_name = bool(_info["name"])
             _has_phone = bool(_info["phone"])
             _has_image = _msg_is_image or _msg_has_image_placeholder
 
@@ -1475,10 +1385,7 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                 # ⚡ handoff=True เสมอ — แอดมินต้องรู้ว่าลูกค้าส่งข้อมูลใหม่มา
                 _warranty_claim_handoff = True
                 # ⚡ T5 — merge กับ claim_state: handoff claim ได้ข้อมูลครบ (ไม่ใช่แค่ turn นี้)
-                _slots = _merge_claim_slots(
-                    _info, has_date=_has_date, has_image=_has_image,
-                    claim_state=_claim_state,
-                )
+                _slots = _merge_claim_slots(_info, claim_state=_claim_state)
                 _warranty_claim_ctx = {
                     "customer_name": _slots["name"],
                     "customer_phone": _slots["phone"],
@@ -1487,9 +1394,8 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                     "claim_topic": "เคลม/ซ่อม/ประกันสินค้า",
                 }
                 print(f"[WARRANTY-CLAIM] post-handoff info received: date={_has_date} order={_has_order} name={_has_name} phone={_has_phone} image={_has_image}", file=sys.stderr)
-                # ⚡ BUG-D fix — save claim state ข้าม turn (+ T5: stage/purchase_date)
-                _update_claim_state(req, {
-                    "stage": "collecting",
+                # ⚡ BUG-D fix — save claim state ข้าม turn ผ่าน transition owner เดียว
+                _claim_state = _claim_transition(req, _claim_state, "collecting", {
                     "customer_name": _info.get("name") if _has_name else None,
                     "customer_phone": _info.get("phone") if _has_phone else None,
                     "customer_order_id": _info.get("order_id") if _has_order else None,
@@ -1497,61 +1403,19 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                     "has_image": True if _has_image else None,
                 })
 
-            # ⚡ BUG-D fix — fallback: บอทขอข้อมูลเคลมแล้ว แต่ลูกค้าพิมพ์อย่างอื่น
-            #   (เช่น "น้องใส่ไม่ได้", "ทำไงได้บ้างคะ", "ซื้อมาให้ลูกค่ะ")
-            #   → acknowledge + redirect แทนวนลูปขอข้อมูลเดิม
-            # ⚡ T5 — gate ขยายด้วย _claim_collecting (resume หลังคำถามแทรก)
-            elif (_bot_asked_claim_info or _claim_collecting(_claim_state)) and not _bot_reviewed_info:
-                # ⚡ T5 — ถ้าเป็นคำถามล้วน (ไม่ใช่ข้อมูลเคลม/ไม่ใช่ claim request ใหม่)
-                #   → fallthrough ให้ pipeline ปกติตอบ แทนกลืนด้วย canned+handoff
-                #   claim_state คงอยู่ → info รอบถัดไป resume ผ่าน _claim_collecting
-                if _is_question_msg(req.message) and not _is_claim_request:
-                    print(f"[WARRANTY-CLAIM] question mid-collection → fallthrough: {req.message!r}", file=sys.stderr)
-                else:
-                    # สรุปข้อมูลที่มีอยู่แล้วจาก claim_state (ถ้ามี)
-                    _existing_lines = []
-                    if _claim_state.get("customer_name"):
-                        _existing_lines.append(f"• ชื่อ-นามสกุล: {_claim_state['customer_name']}")
-                    if _claim_state.get("customer_phone"):
-                        _existing_lines.append(f"• เบอร์โทร: {_claim_state['customer_phone']}")
-                    if _claim_state.get("customer_order_id"):
-                        _existing_lines.append(f"• เลขที่คำสั่งซื้อ: {_claim_state['customer_order_id']}")
-                    if _claim_state.get("has_image"):
-                        _existing_lines.append("• รูป/วิดีโอแสดงอาการ: ส่งมาแล้ว")
-                    # สร้างข้อความ acknowledge + redirect
-                    if _existing_lines:
-                        _existing_text = "\n".join(_existing_lines)
-                        _warranty_claim_answer = (
-                            f"รับทราบค่ะ ข้อมูลที่ได้รับแล้ว:\n"
-                            f"{_existing_text}\n\n"
-                            f"รบกวนแจ้งข้อมูลที่เหลือเพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
-                            f"• วันที่ซื้อสินค้า\n• เลขที่คำสั่งซื้อ\n• รูปหรือวิดีโอแสดงอาการ\n\n"
-                            f"หากไม่สามารถให้ข้อมูลบางอย่างได้ "
-                            f"เดี๋ยวส่งต่อให้แอดมินดูแลและติดต่อกลับให้นะคะ"
-                        )
-                    else:
-                        _warranty_claim_answer = (
-                            f"รับทราบค่ะ หากไม่สามารถให้ข้อมูลเคลมได้ครบ "
-                            f"เดี๋ยวส่งต่อแชทนี้ให้แอดมินดูแลให้นะคะ "
-                            f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งค่ะ"
-                        )
-                    # handoff เพราะลูกค้าไม่สามารถให้ข้อมูลได้ครบ → แอดมินต้องดูแล
-                    _warranty_claim_handoff = True
-                    _warranty_claim_ctx = {"handoff_reason": "claim_info_incomplete"}
-                    print(f"[WARRANTY-CLAIM] BUG-D fallback: ลูกค้าพิมพ์ไม่ใช่ข้อมูลเคลม → acknowledge + handoff", file=sys.stderr)
+            # ⚡ 2B.5 — BUG-D catch-all ถูกลบ: ข้อความที่ไม่ใช่ข้อมูลเคลมระหว่าง
+            #   collecting → fallthrough ไป normal pipeline (ไม่บังคับ handoff;
+            #   episode คงอยู่ → field turn ถัดไป resume ผ่าน lifecycle view)
 
         # ── State: awaiting_customer_info → ลูกค้าให้ข้อมูล → ทวน + ถามยืนยัน ──
         # ต้องเป็น info request จริง (ไม่ใช่วันที่) และลูกค้าให้ข้อมูลจริง
-        if _bot_asked_info and not _bot_reviewed_info and not _msg_has_date:
+        if _bot_asked_info and not _bot_reviewed_info and not _msg_has_date and _accept_evidence:
             _info = warranty.extract_customer_info(req.message)
-            # ต้องมี phone หรือ name ที่สั้นและดูเป็นชื่อจริง (ไม่ใช่ประโยคยาว)
-            _has_valid_name = _info["name"] and len(_info["name"]) <= 40 and " " in _info["name"]
+            # ⚡ 2B.5 — name validity = parser output เท่านั้น (ลบ shape re-check)
+            _has_valid_name = bool(_info["name"])
             _has_valid_phone = bool(_info["phone"])
             # ⚡ ต้องมี order_id ก็นับว่าเป็นข้อมูลบางส่วน (เช่น ลูกค้าให้เลขคำสั่งซื้อก่อน)
             _has_valid_order = bool(_info["order_id"])
-            # ⚡ Phase 1F — ถ้า name มีตัวเลข → น่าจะเป็นเบอร์/order ไม่ใช่ชื่อ → ไม่นับเป็น valid name
-            if _has_valid_name and any(c.isdigit() for c in _info["name"]):
-                _has_valid_name = False
             if _has_valid_name or _has_valid_phone or _has_valid_order:
                 # ⚡ T5 — fill-once: รวม claim_state ที่ persist → ไม่ถาม slot ที่มีแล้วซ้ำ
                 _slots = _merge_claim_slots(_info, claim_state=_claim_state)
@@ -1593,9 +1457,8 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                     "claim_topic": "เคลม/ซ่อม/ประกันสินค้า",
                 }
                 print(f"[WARRANTY-CLAIM] info collected: {_info} merged={_slots}", file=sys.stderr)
-                # ⚡ BUG-D fix — save claim state ข้าม turn (+ T5: stage=collecting)
-                _update_claim_state(req, {
-                    "stage": "collecting",
+                # ⚡ BUG-D fix — save claim state ข้าม turn ผ่าน transition owner เดียว
+                _claim_state = _claim_transition(req, _claim_state, "collecting", {
                     "customer_name": _info.get("name") if _has_valid_name else None,
                     "customer_phone": _info.get("phone") if _has_valid_phone else None,
                     "customer_order_id": _info.get("order_id") if _has_valid_order else None,
@@ -1614,13 +1477,11 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             else:
                 # ลูกค้าแก้ข้อมูล ไม่ยืนยัน → ดึงข้อมูลใหม่และทวนอีกครั้ง
                 _info = warranty.extract_customer_info(req.message)
-                _has_valid_name = _info["name"] and len(_info["name"]) <= 40 and " " in _info["name"]
+                # ⚡ 2B.5 — name validity = parser output เท่านั้น (ลบ shape re-check)
+                _has_valid_name = bool(_info["name"])
                 _has_valid_phone = bool(_info["phone"])
                 _has_valid_order = bool(_info["order_id"])
-                # ⚡ Phase 1F — ถ้า name มีตัวเลข → ไม่นับเป็น valid name
-                if _has_valid_name and any(c.isdigit() for c in _info["name"]):
-                    _has_valid_name = False
-                if _has_valid_name or _has_valid_phone or _has_valid_order:
+                if (_has_valid_name or _has_valid_phone or _has_valid_order) and _accept_evidence:
                     _review_lines = []
                     if _has_valid_name:
                         _review_lines.append(f"• ชื่อ-นามสกุล: {_info['name']}")
@@ -1640,6 +1501,13 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                         "customer_order_id": _info["order_id"],
                         "claim_topic": "เคลม/ซ่อม/ประกันสินค้า",
                     }
+                    # ⚡ 2B.5 — persist correction ผ่าน transition owner เดียว
+                    #   (เดิม legacy rebuild ctx แต่ไม่เขียน → ข้อมูลแก้หาย)
+                    _claim_state = _claim_transition(req, _claim_state, "collecting", {
+                        "customer_name": _info.get("name") if _has_valid_name else None,
+                        "customer_phone": _info.get("phone") if _has_valid_phone else None,
+                        "customer_order_id": _info.get("order_id") if _has_valid_order else None,
+                    })
                     print(f"[WARRANTY-CLAIM] info corrected: {_info}", file=sys.stderr)
                 else:
                     # ลูกค้าไม่ได้ให้ข้อมูลใหม่ แต่ก็ไม่ได้ปฏิเสธ → ถือว่ายืนยัน (ส่งต่อแอดมิน)
@@ -1680,80 +1548,20 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                 # ⚡ handoff ทันที — ส่งให้แอดมินดูแล บอทยังรับข้อมูลเบื้องต้นได้
                 _warranty_claim_handoff = True
                 _warranty_claim_ctx = {"handoff_reason": "warranty_claim_in_warranty"}
-                # ⚡ T5 — เริ่มเก็บข้อมูล: mark stage=collecting (answer มี "รบกวนแจ้งข้อมูล"
-                #   → _maybe_clear_claim_state ข้าม → stage รอด)
-                _update_claim_state(req, {"stage": "collecting"})
+                # ⚡ 2B.4 — explicit claim request → fresh path ผ่าน owner (episode
+                #   ใหม่เมื่อ absent/terminal; open → episode เดิม)
+                _claim_state = _claim_transition(req, _claim_state, "collecting", fresh_claim=True)
                 print(f"[WARRANTY-CLAIM] claim request → ask date+order+photo + handoff immediately", file=sys.stderr)
 
         # ถ้ามี warranty claim answer → ส่งตอบก่อนเข้า flow อื่น
         if _warranty_claim_answer:
             _total_elapsed = _time.time() - _total_start
-
             print(f"[TIMING] WARRANTY-CLAIM: {_total_elapsed:.2f}s  handoff={_warranty_claim_handoff}", file=sys.stderr)
-
-            # ถ้าต้องส่งต่อแอดมิน → เรียก handoff API (best-effort, ไม่ block คำตอบ)
-            _handoff_result: dict = {}
-            _assigned_admin_name: str | None = None
-            _assignment_reason: str | None = None
-            if _warranty_claim_handoff and req.conversation_id:
-                _handoff_result = _app_module._send_handoff(
-                    req, None,
-                    reason=_warranty_claim_ctx.get("handoff_reason", "warranty_claim"),
-                    claim={k: v for k, v in _warranty_claim_ctx.items()
-                           if k != "handoff_reason" and v},
-                    simulate=True, timeout=5, log_tag="HANDOFF",
-                )
-                _assigned_admin_name = _handoff_result.get("assigned_to_name")
-                _assignment_reason = _handoff_result.get("assignment_reason")
-
-                # ── แก้คำตอบให้บอกลูกค้าว่า assign ให้ใคร เพราะอะไร ──
-                if _assigned_admin_name:
-                    _reason_thai = {
-                        "warranty_claim_in_warranty": "อยู่ในช่วงรับประกัน",
-                        "warranty_claim_out_of_warranty": "หมดช่วงรับประกัน",
-                        "warranty_claim": "เรื่องรับประกัน/เคลม",
-                    }.get(_warranty_claim_ctx.get("handoff_reason", ""), "เรื่องที่ต้องดำเนินการต่อ")
-                    _assign_thai = {
-                        "previous_reply_admin: ส่งคืน admin เดิมที่เคยตอบ": "แอดมินที่เคยดูแลคุณ",
-                        "round_robin: ไม่มี admin เดิม → จ่ายคิว": "แอดมินคนถัดไป",
-                        "existing_assignment: มี admin ดูแลอยู่แล้ว": "แอดมินที่ดูแลอยู่",
-                    }.get(_assignment_reason or "", "แอดมิน")
-                    _warranty_claim_answer += (
-                        f"\n\n📌 ขณะนี้ได้มอบหมายงานให้ {_assigned_admin_name} ({_assign_thai}) "
-                        f"ดำเนินการเรื่อง{_reason_thai}ต่อนะคะ "
-                        f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
-                    )
-
-            # ⚡ T5 — clear claim_state เฉพาะ terminal handoff (ยืนยัน/ให้ข้อมูลไม่ครบ)
-            #   เดิม clear ทุก handoff → State-7 receipt (handoff ทุกครั้ง) ลบ state
-            #   ที่เพิ่ง save ใน turn เดียวกัน = fill-once พัง (root cause "ถามซ้ำ")
-            if _warranty_claim_handoff and req.conversation_id:
-                _maybe_clear_claim_state(req, _warranty_claim_ctx, _warranty_claim_answer)
-
-            return dict(
-                answer=_warranty_claim_answer,
-                answer_segments=llm.split_segments(_warranty_claim_answer),
-                products=[],
-                shop=req.shop,
-                model=model_name,
-                source="warranty_claim_flow",
-                usage={},
-                elapsed=round(_total_elapsed, 2),
-                cost=0.0,
-                handoff_to_admin=_warranty_claim_handoff,
-                handoff_reason=_warranty_claim_ctx.get("handoff_reason"),
-                handoff_claim=_warranty_claim_ctx,
-                steps=_steps,
-                routing_decision=_app_module._routing(
-                    "handoff" if _warranty_claim_handoff else "bot_reply",
-                    f"warranty_claim: {_warranty_claim_ctx.get('handoff_reason', 'in_progress')}",
-                    handoff_reason=_warranty_claim_ctx.get("handoff_reason"),
-                    assigned_admin=_handoff_result.get("assigned_to") if _warranty_claim_handoff and req.conversation_id else None,
-                    assigned_admin_name=_assigned_admin_name if _warranty_claim_handoff and req.conversation_id else None,
-                    shop_settings_action=None,
-                    trigger_matched=None,
-                ),
-                image_desc=_image_desc_out,
+            # transport owner เดียว — outcome ยืนยันเท่านั้นถึง claim/flag/clear
+            return _build_warranty_claim_response(
+                req, ctx, _warranty_claim_answer, _warranty_claim_handoff,
+                _warranty_claim_ctx, _app_module, llm,
+                claim_state=_claim_state,
             )
 
     if history and not _is_followup_policy:
@@ -1889,62 +1697,18 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             usage={},
             elapsed=round(_total_elapsed, 2),
             cost=0.0,
+            warranty_disposition=_WarrantyDisposition.CONTINUE_PRODUCT,
             steps=_steps,
             routing_decision=_app_module._routing("bot_reply", "warranty_date_followup: คำนวณวันหมดประกัน"),
             image_desc=_image_desc_out,
         )
 
     # ===== Tax invoice follow-up from history =====
-    # ถ้าบอทเคยตอบเรื่องใบกำกับภาษี และลูกค้าตอบต่อ (เช่น "ต้องการค่ะ", "ส่งข้อมูลแล้ว")
-    # → ส่งต่อแอดมินเลย ไม่ต้องถามต่อ
+    # canonical owner: _handle_tax_invoice_followup — transport/result/flag/answer เดียวกัน
     if history and not _is_tax_invoice and not _is_claim_request:
-        _last_model_msgs_tax = [h for h in history if h.get("role") == "model"][-1:]
-        _last_model_text_tax = " ".join(h.get("text", "") for h in _last_model_msgs_tax).lower()
-        _bot_answered_tax = any(
-            kw in _last_model_text_tax
-            for kw in ("ใบกำกับภาษี", "ใบกำกับ", "ภาษี", "tax invoice", "invoice")
-        )
-        if _bot_answered_tax:
-            # ถ้าลูกค้าตอบสั้นๆ (consent หรือ follow-up) → handoff เลย
-            _tax_consent = warranty.detect_consent(req.message)
-            _tax_followup = any(
-                kw in req.message.lower()
-                for kw in ("ใบกำกับ", "ภาษี", "invoice", "เอกสาร", "จัดส่ง", "ไปรษณีย์",
-                           "เลขผู้เสียภาษี", "เลขภาษี", "หจก.", "บจก.", "สนง.")
-            )
-            # ⚡ ใช้แค่ consent + tax keywords — ไม่ใช้ short_followup เพราะจะจับ "สายชาร์จ" ที่เป็นคำถามใหม่
-            if _tax_consent or _tax_followup:
-                _tax_answer = (
-                    f"ได้ค่ะ เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
-                    f"เพื่อดำเนินการเรื่องใบกำกับภาษีให้นะคะ "
-                    f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
-                )
-                _total_elapsed = _time.time() - _total_start
-
-                if req.conversation_id:
-                    _app_module._send_handoff(req, None, reason="tax_invoice_request",
-                                  claim={"topic": "ใบกำกับภาษี"}, log_tag="TAX-HANDOFF")
-                print(f"[TIMING] TAX-HANDOFF: {_total_elapsed:.2f}s (follow-up)", file=sys.stderr)
-                return dict(
-                    answer=_tax_answer,
-                    answer_segments=llm.split_segments(_tax_answer),
-                    products=[],
-                    shop=req.shop,
-                    model=model_name,
-                    source="tax_invoice_handoff",
-                    usage={},
-                    elapsed=round(_total_elapsed, 2),
-                    cost=0.0,
-                    handoff_to_admin=True,
-                    handoff_reason="tax_invoice_request",
-                    timing=_timing_breakdown,
-                    steps=_steps,
-                    routing_decision=_app_module._routing(
-                        "handoff", "tax_invoice: follow-up จาก history → ส่งแอดมิน",
-                        handoff_reason="tax_invoice_request",
-                    ),
-                    image_desc=_image_desc_out,
-                )
+        _tax_resp = _handle_tax_invoice_followup(req, ctx, history, warranty, _app_module, llm)
+        if _tax_resp:
+            return _tax_resp
 
     # ===== Deterministic warranty answer จาก delivery-date auto-check =====
     # ⚡ Warranty-Delivery — ถ้าเช็คจาก delivery date ได้ผลชัดเจน → ตอบเลย ไม่เข้า LLM
@@ -1958,6 +1722,7 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             usage={},
             elapsed=round(_total_elapsed, 2),
             cost=0.0,
+            warranty_disposition=_WarrantyDisposition.CONTINUE_PRODUCT,
             timing=_timing_breakdown,
             steps=_steps,
             routing_decision=_app_module._routing(
@@ -2000,14 +1765,9 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                     f"เบื้องต้นลองทำตามนี้ก่อนนะคะ:\n{_ts_lines}\n\n"
                     f"ถ้าลองแล้วยังไม่หาย แจ้ง{_bot_name}ได้เลยค่ะ "
                     f"เดี๋ยวช่วยตรวจสอบเรื่องเคลม/รับประกันให้นะคะ")
-                if req.conversation_id:
-                    try:
-                        from . import conversation_products as _cp_ts
-                        _cp_ts.update_claim_state(
-                            req.conversation_id, req.platform, req.shop,
-                            {"stage": "ts_suggested"})
-                    except Exception:
-                        pass
+                # ⚡ 2B.4 — troubleshoot-first ตอบ explicit claim request → episode
+                #   ใหม่ที่ stage ts_suggested ผ่าน owner (fresh path เดียวกัน)
+                _claim_state = _claim_transition(req, _claim_state, "ts_suggested", fresh_claim=True)
                 print("[QA-KB] troubleshoot-first: แนะนำวิธีแก้ ยังไม่ handoff", file=sys.stderr)
                 _total_elapsed = _time.time() - _total_start
                 return dict(
@@ -2020,6 +1780,7 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                     usage={},
                     elapsed=round(_total_elapsed, 2),
                     cost=0.0,
+                    warranty_disposition=_WarrantyDisposition.CONTINUE_PRODUCT,
                     timing=_timing_breakdown,
                     steps=_steps,
                     routing_decision=_app_module._routing(
@@ -2036,47 +1797,14 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             print(f"[WARRANTY-AUTO] แนบ auto-check context ใน first-message claim answer", file=sys.stderr)
         print(f"[WARRANTY-CLAIM] first-message claim request → ask info + handoff immediately", file=sys.stderr)
 
-        # ⚡ T5 — เริ่มเก็บข้อมูล: mark stage=collecting (resume ข้ามคำถามแทรก)
-        _update_claim_state(req, {"stage": "collecting"})
+        # ⚡ 2B.4 — explicit fresh claim request → episode ใหม่เมื่อ absent/terminal
+        #   ผ่าน transition owner เดียว (open → episode เดิม)
+        _claim_state = _claim_transition(req, _claim_state, "collecting", fresh_claim=True)
 
-        # ⚡ handoff ทันที
-        _handoff_result: dict = {}
-        _assigned_admin_name: str | None = None
-        _assignment_reason: str | None = None
-        if req.conversation_id:
-            _handoff_result = _app_module._send_handoff(
-                req, None, reason="warranty_claim",
-                claim={"claim_topic": "เคลม/ซ่อม/ประกันสินค้า"},
-                simulate=True, timeout=5, log_tag="HANDOFF",
-            )
-            _assigned_admin_name = _handoff_result.get("assigned_to_name")
-            _assignment_reason = _handoff_result.get("assignment_reason")
-
-        if _assigned_admin_name:
-            _claim_first_answer += (
-                f"\n\n📌 ขณะนี้ได้มอบหมายงานให้ {_assigned_admin_name} "
-                f"ดำเนินการเรื่องรับประกัน/เคลมต่อนะคะ "
-                f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
-            )
-
-        return dict(
-            answer=_claim_first_answer,
-            answer_segments=llm.split_segments(_claim_first_answer),
-            products=[],
-            shop=req.shop,
-            model=model_name,
-            source="warranty_claim_first_message",
-            usage={},
-            elapsed=round(_total_elapsed, 2),
-            cost=0.0,
-            intent=_intent_result,
-            timing=_timing_breakdown,
-            steps=_steps,
-            handoff_to_admin=True,
-            handoff_reason="warranty_claim",
-            routing_decision=_app_module._routing(
-                "handoff", "warranty_claim: ขอข้อมูลลูกค้า + handoff ทันที (first message)",
-                handoff_reason="warranty_claim",
-            ),
-            image_desc=_image_desc_out,
+        # ⚡ handoff ทันที — canonical builder เป็น owner เดียวของ transport/result/flag/answer
+        return _build_warranty_claim_response(
+            req, ctx, _claim_first_answer, True,
+            {"claim_topic": "เคลม/ซ่อม/ประกันสินค้า", "handoff_reason": "claim"},
+            _app_module, llm, source="warranty_claim_first_message",
+            claim_state=_claim_state,
         )

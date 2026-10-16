@@ -8,7 +8,7 @@
   เว้นแต่ลูกค้าขอภาษาอื่น → ตอบอังกฤษ (detect เฉพาะ explicit request)
 - BUG-M: _strip_kb_markup post-check กันอ้างเท็จ "แอดมินมาแล้ว"
 - OBS-3: prompt rule อยู่ใน SYSTEM_INSTRUCTION / KB_SYSTEM_INSTRUCTION / general_instruction
-- BUG-D: conversation_products.load/update/clear_claim_state
+- BUG-D→2B.4: conversation_products.load/transition/merge_claim_fields
 """
 from __future__ import annotations
 
@@ -141,19 +141,18 @@ def test_obs3_rule_in_kb_system_instruction():
 
 def test_claim_state_functions_exist():
     assert callable(_cp.load_claim_state)
-    assert callable(_cp.update_claim_state)
-    assert callable(_cp.clear_claim_state)
+    assert callable(_cp.transition_claim_state)
+    assert callable(_cp.merge_claim_fields)
+    # 2B.4 — update/clear removed: merge-without-fence + clear violated
+    # lifecycle ownership (ticket close/handoff never resolve a claim)
+    assert not hasattr(_cp, "update_claim_state")
+    assert not hasattr(_cp, "clear_claim_state")
 
 
 def test_claim_state_load_none_for_missing():
     # Should not raise; returns None for missing conversation
     result = _cp.load_claim_state("nonexistent-conv-id-12345")
     assert result is None, f"Expected None, got: {result!r}"
-
-
-def test_claim_state_clear_no_error():
-    # Should not raise for missing conversation
-    _cp.clear_claim_state("nonexistent-conv-id-12345")
 
 
 # ─── Run ───────────────────────────────────────────────────
@@ -175,7 +174,6 @@ _TESTS = [
     ("OBS-3 rule in KB_SYSTEM_INSTRUCTION", test_obs3_rule_in_kb_system_instruction),
     ("BUG-D functions exist", test_claim_state_functions_exist),
     ("BUG-D load None for missing", test_claim_state_load_none_for_missing),
-    ("BUG-D clear no error", test_claim_state_clear_no_error),
 ]
 
 

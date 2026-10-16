@@ -25,13 +25,13 @@ ChatBotProductMS/                    (root — chatbot backend)
 |---------|-----------|------|-------------|-------|
 | chatbot-shopee | chatbot-shopee | 8010 (internal) | `.env` | พร้อมใช้ |
 | chatadmin-web | chatadmin-web | 3000 (internal) | `.env.web` | พร้อมใช้ |
-| bot-worker | bot-worker | — | `.env.web` | พร้อมใช้ |
 | caddy | caddy | 80, 443 | `docker/Caddyfile` | พร้อมใช้ |
 
-### Services อนาคต (profile — ยังไม่เปิด default)
+### Services แบบ profile — ไม่เปิดโดย default
 
 | Service | Container | Port | Profile | สถานะ |
 |---------|-----------|------|---------|-------|
+| bot-worker | bot-worker | — | `botworker` | local canary เท่านั้น |
 | chatbot-lazada | chatbot-lazada | 8011 | `lazada` | ⚠️ placeholder — ยังไม่มี app.py |
 | chatbot-tiktok | chatbot-tiktok | 8012 | `tiktok` | ⚠️ placeholder — ยังไม่มี app.py |
 
@@ -315,7 +315,11 @@ docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
 ```bash
 cd ChatBotProductMS
 
-# build + start ทุก service พร้อมกัน (default = shopee + admin + worker + caddy)
+# หลังอัปเกรดจาก compose รุ่นที่ worker เคยเป็น default ให้ลบ container เก่าบน serverครั้งเดียว
+docker compose stop bot-worker
+docker compose rm -f bot-worker
+
+# build + start default services (shopee + admin + caddy; ไม่เปิด bot-worker)
 docker compose up -d --build
 
 # ถ้าจะเปิด lazada/tiktok ด้วย (⚠️ ยังไม่มี app.py — container จะ crash)
@@ -330,7 +334,7 @@ docker compose up -d --build
 ### 5. ตรวจสอบ
 
 ```bash
-# ดู status ทุก container (ทุกตัวควรเป็น Up)
+# ดู status default containers (bot-worker ต้องไม่ทำงานบน deploy server)
 docker compose ps
 
 # ดู log ทั้งหมด
@@ -339,7 +343,6 @@ docker compose logs -f
 # ดู log แยก service
 docker compose logs -f chatbot-shopee
 docker compose logs -f chatadmin-web
-docker compose logs -f bot-worker
 docker compose logs -f caddy
 
 # ตรวจ health (จากใน host)
@@ -377,10 +380,21 @@ cd ChatAdminWeb && npx tsx scripts/seed-superadmin.mjs
 # rebuild หลังแก้โค้ด
 docker compose up -d --build
 
+# เปิด Botworker เฉพาะ local canary จาก ChatAdminWeb (ใช้ revision เดียวกับ production)
+cd ChatAdminWeb
+npx tsx scripts/bot-worker.ts
+
+# หรือรันเป็น local container เมื่อ root .env.web พร้อม
+cd ..
+docker compose --profile botworker up -d --build bot-worker
+
+# หยุดและลบ local Botworker หลังจบ canary
+docker compose stop bot-worker
+docker compose rm -f bot-worker
+
 # รีสตาร์ท service เดียว
 docker compose restart chatbot-shopee
 docker compose restart chatadmin-web
-docker compose restart bot-worker
 docker compose restart caddy
 
 # ดู log ย้อนหลัง 100 บรรทัด
@@ -432,7 +446,20 @@ MongoDB รันบน host ไม่ได้ containerize — ใน env ใ�
 **ไม่ต้องตั้ง** — docker-compose override เป็น `http://chatbot-shopee:8010` ฯลฯ ให้แล้ว ถ้าตั้งใน .env.web จะถูก override ทับอยู่ดี
 
 ### 6. BOT_WORKER_ENABLED
-docker-compose override เป็น `true` ให้ bot-worker แล้ว ไม่ต้องตั้งใน .env.web ก็ได้ (ตั้งไว้ก็ไม่กระทบ)
+`bot-worker` อยู่ใน profile `botworker` และไม่เริ่มพร้อม default deploy บน server การทดสอบ local ใช้คำสั่งเดิมจาก `ChatAdminWeb`:
+
+```bash
+cd ChatAdminWeb
+npx tsx scripts/bot-worker.ts
+```
+
+หรือใช้ local Docker เมื่อ root `.env.web` พร้อม:
+
+```bash
+docker compose --profile botworker up -d --build bot-worker
+```
+
+Compose override `BOT_WORKER_ENABLED=true` ให้ process แต่ admission จริงยังต้องผ่าน global + platform + shop switches ในฐานข้อมูลครบทุกชั้น การรัน local ที่เชื่อม production DB จึงเป็น production canary และอาจใช้ provider credit ได้
 
 ### 7. MONGO_COLLECTION
 docker-compose override `MONGO_COLLECTION` สำหรับแต่ละแพลตฟอร์ม:
@@ -472,9 +499,11 @@ docker compose logs chatbot-shopee --tail 50
 
 ### bot-worker ไม่ทำงาน
 ```bash
+docker compose --profile botworker up -d bot-worker
 docker compose logs bot-worker --tail 50
 ```
 ตรวจ:
+- ต้องเปิด profile `botworker` อย่างชัดเจน; default deploy จะไม่สร้างหรือเริ่ม worker
 - `BOT_WORKER_ENABLED` ต้องเป็น `true` (docker-compose override ให้แล้ว)
 - `ADMIN_MONGO_COLLECTION_MESSAGES` ใน `.env.web` ต้องถูกต้อง
 - chatbot-shopee ต้อง healthy (`docker compose ps`)
@@ -528,7 +557,7 @@ cd ChatBotProductMS
 # 1. ดึงโค้ดใหม่
 git pull
 
-# 2. rebuild + restart
+# 2. rebuild + restart default services (ไม่เปิด bot-worker)
 docker compose up -d --build
 
 # 3. ตรวจสอบ

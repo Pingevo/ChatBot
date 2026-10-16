@@ -46,119 +46,115 @@ export async function GET(req: NextRequest) {
   }
 
   const convColl = await getCollection(COLLECTIONS.conversations);
+  const statusColl = await getCollection(COLLECTIONS.statusConversation);
   const [admins, shops] = await Promise.all([
     auth.listAdmins(),
     shopService.listShops(),
   ]);
 
-  // ⚠️ sellcenter ไม่เขียน status → ใช้ derived: closed_at = ปิด, assigned_to = เปิด, อื่นๆ = บอทตอบ
-  const dateFilter = () => {
+  // ownership อ่านจาก status_conversation เท่านั้น
+  //   (raw conversations(_shp).status="open" ทั้งหมด + assigned_to/closed_at ถูก dump ทับ)
+  //   canonical partition (mutually exclusive):
+  //     closed    = meta status ∈ {closed,resolved} (assigned_to ที่ค้างไว้ = history ไม่ใช่ active)
+  //     active    = meta status ∈ {handoff,open,pending} + assigned_to nonempty
+  //     awaiting  = meta status ∈ {handoff,open,pending} + ไม่มี owner (open+no-owner อยู่ตรงนี้)
+  //     bot       = ไม่มี meta | ไม่มี status | status="bot"
+  //   bounded: meta-driven $lookup (status index → unique conversation_id index)
+  //   + range match ใน pipeline — ไม่มี find({}) / id arrays
+  const rangeCond = () => {
     const f: Record<string, unknown> = {};
     if (start) f.$gte = start;
     if (end) f.$lt = end;
-    return Object.keys(f).length ? { created_at: f } : {};
+    return f;
   };
+  const convRange = rangeCond();
+  const dateFilter = () => (Object.keys(convRange).length ? { created_at: convRange } : {});
+  const convJoinMatch = Object.keys(convRange).length ? { "conv.created_at": convRange } : {};
+  const convJoin = [
+    { $lookup: { from: COLLECTIONS.conversations, localField: "conversation_id", foreignField: "conversation_id", as: "conv" } },
+    { $unwind: "$conv" },
+  ];
 
-  // 1. Open conversation counts — "เปิด" = ไม่มี closed_at และ status ไม่ใช่ closed/resolved
-  const openAgg = await convColl.aggregate<{
-    _id: null;
-    total: number;
-    assigned: number;
-    unassigned: number;
-  }>([
-    {
-      $match: {
-        closed_at: { $in: [null, undefined] },
-        status: { $nin: ["closed", "resolved"] },
-        ...dateFilter(),
-      },
-    },
-    {
-      $group: {
-        _id: null,
-        total: { $sum: 1 },
-        assigned: { $sum: { $cond: [{ $ifNull: ["$assigned_to", false] }, 1, 0] } },
-        unassigned: { $sum: { $cond: [{ $ifNull: ["$assigned_to", false] }, 0, 1] } },
-      },
-    },
+  // partition agg — meta status×owner ∩ in-range convs (DB-side ทั้งหมด)
+  const partitionAgg = await statusColl.aggregate<{ _id: { s: string | null; o: string | null }; n: number }>([
+    { $match: { status: { $in: ["handoff", "open", "pending", "closed", "resolved"] } } },
+    ...convJoin,
+    ...(Object.keys(convJoinMatch).length ? [{ $match: convJoinMatch }] : []),
+    { $group: { _id: { s: "$status", o: { $ifNull: ["$assigned_to", null] } }, n: { $sum: 1 } } },
   ]).toArray();
-  const openStats = openAgg[0] || { _id: null, total: 0, assigned: 0, unassigned: 0 };
+  let activeCount = 0;
+  let awaitingCount = 0;
+  let closedCount = 0;
+  const workloadCount = new Map<string, number>(); // owner → active convs (in range)
+  for (const g of partitionAgg) {
+    const s = g._id.s;
+    const owner = g._id.o;
+    if (s === "closed" || s === "resolved") { closedCount += g.n; continue; }
+    if (owner != null && owner !== "") {
+      activeCount += g.n;
+      workloadCount.set(owner, (workloadCount.get(owner) || 0) + g.n);
+    } else {
+      awaitingCount += g.n;
+    }
+  }
+  const humanOpenCount = activeCount + awaitingCount;
 
-  // 2. Closed conversations count — มี closed_at หรือ status=closed/resolved
-  //    (sellcenter อาจเขียน status แต่ไม่เขียน closed_at)
-  const closedCount = await convColl.countDocuments({
-    $or: [
-      { closed_at: { $exists: true, $ne: null } },
-      { status: { $in: ["closed", "resolved"] } },
-    ],
-    ...dateFilter(),
-  });
-
-  // 3. Unanswered — open conversations with unread_count > 0
+  // 1-3. open / assigned / closed / unanswered — partition DB-side; total จาก inventory
   const UNANSWERED_MINUTES = 10;
   const threshold = new Date(Date.now() - UNANSWERED_MINUTES * 60_000);
-  const unansweredCount = await convColl.countDocuments({
-    closed_at: { $in: [null, undefined] },
-    status: { $nin: ["closed", "resolved"] },
-    unread_count: { $gt: 0 },
-    last_message_timestamp: { $lt: threshold },
-    ...dateFilter(),
-  });
-
-  // 4. Workload by admin — aggregation (เฉพาะที่มี assigned_to)
-  const workloadAgg = await convColl.aggregate<{ _id: string; count: number }>([
-    {
-      $match: {
-        closed_at: { $in: [null, undefined] },
-        status: { $nin: ["closed", "resolved"] },
-        assigned_to: { $exists: true, $nin: [null, ""] },
-        ...dateFilter(),
-      },
-    },
-    { $group: { _id: "$assigned_to", count: { $sum: 1 } } },
-    { $sort: { count: -1 } },
-  ]).toArray();
-  const adminMap = new Map(admins.map((a) => [a.admin_id, a]));
-  const workload = workloadAgg.map((w) => ({
-    admin_id: w._id,
-    name: adminMap.get(w._id)?.name || w._id,
-    count: w.count,
-  }));
-
-  // 5. Breakdown by shop — all open conversations
-  const shopAgg = await convColl.aggregate<{ _id: string; count: number }>([
-    {
-      $match: {
-        closed_at: { $in: [null, undefined] },
-        status: { $nin: ["closed", "resolved"] },
-        ...dateFilter(),
-      },
-    },
-    { $group: { _id: { $ifNull: ["$shop_name", "unknown"] }, count: { $sum: 1 } } },
-    { $sort: { count: -1 } },
-    { $limit: 20 },
-  ]).toArray();
-  const byConnection = shopAgg.map((s) => ({ name: s._id, value: s.count }));
-
-  // 6. Breakdown by derived status (บอทตอบ / เปิด / ปิด)
-  //    "ปิด" = มี closed_at หรือ status=closed/resolved (เหมือน closedCount)
-  const [botAnsweredCount, openHandoffCount] = await Promise.all([
+  const unreadJoinMatch = {
+    "conv.unread_count": { $gt: 0 },
+    "conv.last_message_timestamp": { $lt: threshold },
+    ...convJoinMatch,
+  };
+  const [totalInRange, unansweredAll, closedUnansweredAgg] = await Promise.all([
+    convColl.countDocuments(dateFilter()),
     convColl.countDocuments({
-      closed_at: { $in: [null, undefined] },
-      status: { $nin: ["closed", "resolved"] },
-      assigned_to: { $in: [null, undefined, ""] },
+      unread_count: { $gt: 0 },
+      last_message_timestamp: { $lt: threshold },
       ...dateFilter(),
     }),
-    convColl.countDocuments({
-      closed_at: { $in: [null, undefined] },
-      status: { $nin: ["closed", "resolved"] },
-      assigned_to: { $exists: true, $nin: [null, ""] },
-      ...dateFilter(),
-    }),
+    statusColl.aggregate<{ n: number }>([
+      { $match: { status: { $in: ["closed", "resolved"] } } },
+      ...convJoin,
+      { $match: unreadJoinMatch },
+      { $count: "n" },
+    ]).toArray(),
   ]);
+  const openTotal = totalInRange - closedCount;
+  const unansweredCount = unansweredAll - (closedUnansweredAgg[0]?.n || 0);
+  const openStats = { total: openTotal, assigned: activeCount, unassigned: awaitingCount };
+
+  // 4. Workload by admin — active meta owner ∩ in-range (closed+retained owner ไม่นับ)
+  const adminMap = new Map(admins.map((a) => [a.admin_id, a]));
+  const workload = [...workloadCount.entries()]
+    .map(([adminId, count]) => ({ admin_id: adminId, name: adminMap.get(adminId)?.name || adminId, count }))
+    .sort((a, b) => b.count - a.count);
+
+  // 5. Breakdown by shop — open conversations = all in-range − meta-closed per shop
+  const [shopAggAll, shopAggClosed] = await Promise.all([
+    convColl.aggregate<{ _id: string; count: number }>([
+      { $match: dateFilter() },
+      { $group: { _id: { $ifNull: ["$shop_name", "unknown"] }, count: { $sum: 1 } } },
+    ]).toArray(),
+    statusColl.aggregate<{ _id: string; count: number }>([
+      { $match: { status: { $in: ["closed", "resolved"] } } },
+      ...convJoin,
+      ...(Object.keys(convJoinMatch).length ? [{ $match: convJoinMatch }] : []),
+      { $group: { _id: { $ifNull: ["$conv.shop_name", "unknown"] }, count: { $sum: 1 } } },
+    ]).toArray(),
+  ]);
+  const closedByShop = new Map(shopAggClosed.map((s) => [s._id, s.count]));
+  const byConnection = shopAggAll
+    .map((s) => ({ name: s._id, value: s.count - (closedByShop.get(s._id) || 0) }))
+    .filter((s) => s.value > 0)
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 20);
+
+  // 6. Breakdown by status (บอทตอบ / เปิด / ปิด) — partition: openTotal = bot + humanOpen
   const statusBreakdown = [
-    { status: "bot_answered", label: "บอทตอบ", count: botAnsweredCount },
-    { status: "open", label: "เปิด", count: openHandoffCount },
+    { status: "bot_answered", label: "บอทตอบ", count: openTotal - humanOpenCount },
+    { status: "open", label: "เปิด", count: humanOpenCount },
     { status: "closed", label: "ปิด", count: closedCount },
   ];
 

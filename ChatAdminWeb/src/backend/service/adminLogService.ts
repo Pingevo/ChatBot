@@ -2,8 +2,10 @@
 // (previously scoped to ticket_id + admin_id + timestamp only) to also record
 // general admin actions (trigger/KB/user management/etc.), needed for the
 // "การทำงานของแอดมิน" statistics page. `ticket_id` is now optional.
+import { createHash } from "node:crypto";
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
+import { safeRegexSearch } from "../lib/regexEscape";
 
 export type AdminActionType =
   | "login"
@@ -29,6 +31,7 @@ export type AdminActionType =
   | "conversation.reply"
   | "conversation.handoff"
   | "conversation.resolve"
+  | "conversation.claim_outcome"
   // Phase 0 — assignment events (adapted from ChatBotPDigg AuditLog)
   | "chat_assigned"
   | "chat_reassigned"
@@ -197,19 +200,43 @@ export async function logAdminEvent(opts: {
   shop_id?: string;
   metadata?: Record<string, unknown>;
   ip?: string;
+  // ⚡ eventId — deterministic dedupe identity (inbound lifecycle audit):
+  //   _id = "adminlog:event:" + sha256([action, conversation_id, eventId])[:32]
+  //   E11000 + matching stored identity → already-logged (idempotent converge)
+  //   E11000 + mismatched identity / non-E11000 → throw (never blindly swallowed)
+  //   no eventId → auto _id + identical legacy behavior (no extra read)
+  eventId?: string;
 }): Promise<void> {
   const coll = await getCollection<AdminLogDoc>(COLLECTIONS.adminLogs);
-  await coll.insertOne({
+  const doc: AdminLogDoc = {
     admin_id: opts.actor === "system" ? "system" : opts.actor,
     action_type: opts.action_type,
     actor: opts.actor,
     target_admin_id: opts.target_admin_id,
     conversation_id: opts.conversation_id,
     shop_id: opts.shop_id,
-    metadata: opts.metadata || {},
+    metadata: opts.eventId
+      ? { ...(opts.metadata || {}), message_id: opts.eventId }
+      : opts.metadata || {},
     ip: opts.ip,
     timestamp: new Date(),
-  });
+  };
+  if (opts.eventId) {
+    doc._id = "adminlog:event:" + createHash("sha256")
+      .update(JSON.stringify([opts.action_type, opts.conversation_id ?? "", opts.eventId]))
+      .digest("hex").slice(0, 32) as AdminLogDoc["_id"];
+  }
+  try {
+    await coll.insertOne(doc);
+  } catch (e) {
+    if ((e as { code?: number })?.code !== 11000 || !opts.eventId) throw e;
+    const existing = await coll.findOne({ _id: doc._id } as Document);
+    const same = !!existing
+      && existing.action_type === doc.action_type
+      && (existing.conversation_id ?? "") === (doc.conversation_id ?? "")
+      && existing.metadata?.message_id === opts.eventId;
+    if (!same) throw e;
+  }
 }
 
 /**
@@ -280,39 +307,89 @@ export async function listAdminLogs(opts: {
 /**
  * Phase 7.10 — list logs + join username/name จาก admins collection
  * สำหรับ log viewer ที่ต้องแสดงชื่อคน ไม่ใช่แค่ admin_id
+ *
+ * pagination owner เดียวของ /logs — caller ส่ง page/pageSize (+ server filters)
+ * ได้ {rows,page,pageSize,total,totalPages} กลับ
+ *
+ * pipeline order: $match(base+search) → $sort → $facet
+ * — $lookup ต้องอยู่ใน facet.rows หลัง $skip/$limit เสมอ — join เฉพาะ rows ที่แสดง
+ *   (ห้าม join ก่อน paginate: poll หน้า 1 ทุก 5s จะ join admins ทั้ง collection ต่อ request)
+ * — search ครอบ joined username/name → resolve admin_ids ผ่าน find() 1 query แล้ว
+ *   fold เข้า $or ของ base $match (raw log fields + admin_id $in) ก่อน sort
+ * — $facet นับ total ใน pipeline เดียวกัน (ห้าม countDocuments แยก filter คนละชุด)
  */
 export async function listAdminLogsExtended(opts: {
   adminId?: string;
   actionType?: AdminActionType | string;
+  actionTypes?: string[];
   since?: Date;
-  limit?: number;
-} = {}): Promise<(AdminLogDoc & { username?: string; name?: string })[]> {
+  search?: string;
+  page?: number;
+  pageSize?: number;
+} = {}): Promise<{
+  rows: (AdminLogDoc & { username?: string; name?: string })[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}> {
   const coll = await getCollection<AdminLogDoc>(COLLECTIONS.adminLogs);
+  const p = opts.page ?? 1;
+  const ps = opts.pageSize ?? 100;
+  const page = Math.max(Number.isFinite(p) ? Math.floor(p) : 1, 1);
+  const pageSize = Math.min(Math.max(Number.isFinite(ps) ? Math.floor(ps) : 100, 1), 100);
   const filter: Record<string, unknown> = {};
   if (opts.adminId) filter.admin_id = opts.adminId;
   if (opts.actionType) filter.action_type = opts.actionType;
+  else if (opts.actionTypes?.length) filter.action_type = { $in: opts.actionTypes };
   if (opts.since) filter.timestamp = { $gte: opts.since };
+  const q = safeRegexSearch(opts.search);
+  if (q) {
+    // username/name อยู่ใน admins — resolve admin_ids ด้วย regex เดียวกัน (≤1 query)
+    const adminsColl = await getCollection<{ admin_id: string }>(COLLECTIONS.admins);
+    const rx = { $regex: q, $options: "i" };
+    const matched = await adminsColl
+      .find({ $or: [{ username: rx }, { name: rx }] }, { projection: { admin_id: 1 } })
+      .toArray();
+    filter.$or = [
+      ...["action_type", "admin_id", "conversation_id", "shop_id", "ticket_id", "target_admin_id"].map((f) => ({ [f]: rx })),
+      ...(matched.length ? [{ admin_id: { $in: matched.map((a) => a.admin_id) } }] : []),
+    ];
+  }
   const pipeline = [
     { $match: filter },
-    { $sort: { timestamp: -1 } },
-    { $limit: opts.limit || 200 },
+    { $sort: { timestamp: -1 as const, _id: -1 as const } },
     {
-      $lookup: {
-        from: COLLECTIONS.admins,
-        localField: "admin_id",
-        foreignField: "admin_id",
-        as: "_admin",
+      $facet: {
+        // paginate ก่อน join — $lookup เห็นเฉพาะ rows ของหน้านี้
+        rows: [
+          { $skip: (page - 1) * pageSize },
+          { $limit: pageSize },
+          {
+            $lookup: {
+              from: COLLECTIONS.admins,
+              localField: "admin_id",
+              foreignField: "admin_id",
+              as: "_admin",
+            },
+          },
+          {
+            $addFields: {
+              username: { $arrayElemAt: ["$_admin.username", 0] },
+              name: { $arrayElemAt: ["$_admin.name", 0] },
+            },
+          },
+          { $project: { _admin: 0 } },
+        ],
+        meta: [{ $count: "count" }],
       },
     },
-    {
-      $addFields: {
-        username: { $arrayElemAt: ["$_admin.username", 0] },
-        name: { $arrayElemAt: ["$_admin.name", 0] },
-      },
-    },
-    { $project: { _admin: 0 } },
   ];
-  return coll.aggregate<AdminLogDoc & { username?: string; name?: string }>(pipeline).toArray();
+  const [result] = await coll
+    .aggregate<{ rows: (AdminLogDoc & { username?: string; name?: string })[]; meta: { count: number }[] }>(pipeline)
+    .toArray();
+  const total = result?.meta?.[0]?.count ?? 0;
+  return { rows: result?.rows ?? [], page, pageSize, total, totalPages: Math.ceil(total / pageSize) };
 }
 
 /** Aggregate action counts per admin — powers the "การทำงานของแอดมิน" page. */

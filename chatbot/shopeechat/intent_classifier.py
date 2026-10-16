@@ -93,6 +93,14 @@ general_qtype: ถ้า intent=general_question ระบุประเภท�
 - "tax_invoice": ขอใบกำกับภาษี/ส่งข้อมูลใบกำกับภาษี (เช่น "ขอใบกำกับภาษี", "ออกใบกำภาษีได้ไหม")
 - null: ไม่ใช่คำถามทั่วไป
 
+subject_scope: ลูกค้าอ้างอิงสินค้าที่เคยคุยกันในบทสนทนา (subject set) แบบใด
+- "explicit": ระบุสินค้าชัดเจน (ชื่อรุ่น/รหัสสินค้า/การ์ดสินค้า)
+- "current_single": อ้างสินค้า 1 ชิ้นในกลุ่มปัจจุบัน ("อันนี้", "ตัวนี้", "ตัวเดิม", "อันเดิม")
+- "current_set": อ้างทั้งกลุ่มสินค้าปัจจุบัน ("2 อันนี้", "ทั้งสอง", "พวกนี้", "ชุดนี้", "อันไหนดีที่สุดในพวกนี้")
+- "none": ไม่อ้างอิงสินค้าเดิม (คำถามใหม่/ทั่วไป/ระบุประเภทสินค้าใหม่)
+
+subject_count: ตัวเลขจำนวนสินค้าที่ลูกค้าระบุ เฉพาะเมื่อ subject_scope=current_set ("2 อันนี้"→2, "ทั้งสาม"→3) — null ถ้าไม่ระบุตัวเลขหรือ scope อื่น
+
 confidence: ความมั่นใจ 0.0-1.0
 
 ตัวอย่าง:
@@ -128,6 +136,9 @@ confidence: ความมั่นใจ 0.0-1.0
 
 คำถาม: "พาวเวอร์แบงค์ใช้กับ oneplus 13 ได้ไหม"
 {"intent":"compatibility_check","product_type":"powerbank","charger_subtype":null,"target_device":"oneplus 13","device_connector":"usb-c","device_min_watt":80,"needs_description":true,"general_qtype":null,"confidence":0.9}
+
+คำถาม: "iphone หละแนะนำอันไหน 2 อันนี้" (history ล่าสุด: บอทเปรียบเทียบ AC65B กับ AC65B2)
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"adapter","target_device":"iphone","device_connector":"usb-c","device_min_watt":20,"needs_description":false,"general_qtype":null,"subject_scope":"current_set","subject_count":2,"confidence":0.9}
 
 คำถาม: "สายชาร์จใช้กับ iphone 13 ได้ไหม"
 {"intent":"compatibility_check","product_type":"charger","charger_subtype":"cable","target_device":"iphone 13","device_connector":"lightning","device_min_watt":20,"needs_description":true,"general_qtype":null,"confidence":0.9}
@@ -167,8 +178,12 @@ _DEFAULT_RESULT: dict[str, Any] = {
     "device_min_watt": None,
     "needs_description": False,
     "general_qtype": None,
+    "subject_scope": "none",
+    "subject_count": None,
     "confidence": 0.0,
 }
+
+_SUBJECT_SCOPES = {"none", "explicit", "current_single", "current_set"}
 
 
 def classify_intent(
@@ -238,6 +253,14 @@ def classify_intent(
         }
         if result.get("intent") not in valid_intents:
             result["intent"] = "other"
+        if result.get("subject_scope") not in _SUBJECT_SCOPES:
+            result["subject_scope"] = "none"
+        try:
+            _sc = result.get("subject_count")
+            _sc = None if _sc is None else int(_sc)
+            result["subject_count"] = _sc if _sc is None or _sc >= 1 else None
+        except (TypeError, ValueError):
+            result["subject_count"] = None
         if result.get("confidence") is None:
             result["confidence"] = 0.5
         # ใส่ default fields ที่อาจขาด

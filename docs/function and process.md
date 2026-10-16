@@ -655,7 +655,8 @@ workflow → trigger → bot (call Python /chat) → handoff (ถ้าต้อ
 - เก็บ timeline สินค้าในแชท (admin DB, collection `conversation_products`)
 - anchor product (ลูกค้าส่งมา) vs suggestion product (bot แนะนำ)
 - `add_product()`, `load_timeline()`, `save_timeline()`
-- `resolve_active_by_message()` — หา active product ตามกฎ
+- `get_subject_set()` + `resolve_subjects()` — authoritative conversation subject set (2C.2; แทน resolver ลำดับชั้นเก่าที่ถูกลบ) — resolver validate structured `subject_scope`/`subject_count` จาก intent Pass-1 กับ persisted set (2C.3 slice-1; explicit ชนะ upstream, current_set ต้อง count match, current_single ต้อง n==1, ไม่งั้น clarify)
+- `decide_subject_set()` + `record_subject_set()` — subject decision + fenced write (monotonic `subject_set.rev` CAS — +1 ต่อ commit, ABA-safe; same-ids semantic change = conflict เช่นเดิม)
 - `get_active_product()`, `get_suggestion_latest()`
 
 ### 3.12 Intent Classifier
@@ -663,7 +664,7 @@ workflow → trigger → bot (call Python /chat) → handoff (ถ้าต้อ
 **ไฟล์:** `chatbot/shopeechat/intent_classifier.py`
 
 - `should_run_pass1(message, claim_detected, product_types, has_warranty_history)`
-- `classify_intent(message, history, shop)` — เรียก LLM จำแนก intent
+- `classify_intent(message, history, shop)` — เรียก LLM จำแนก intent — output มี `subject_scope` (`none|explicit|current_single|current_set`) + `subject_count` (structured deictic reference, 2C.3 slice-1 — call เดิม ไม่เพิ่ม model call)
 
 ### 3.13 Web Search
 
@@ -963,7 +964,7 @@ pollNewMessages(since?)
 
 - `conversation_products` collection — timeline สินค้าในแชท
 - anchor (ลูกค้าส่งมา) vs suggestion (bot แนะนำ)
-- `resolve_active_by_message` — หา active product ตามกฎ
+- `subject_set` — persisted conversation subject set (2C.2) — follow-up deictic/set refs resolve จากชุดนี้
 - ทำให้ follow-up ไม่ลืมสินค้าเก่า
 
 ---

@@ -116,11 +116,11 @@ async function lookupConversations(convIds: string[]): Promise<Conversation[]> {
 
   return deduped.map((doc) => {
     const testMeta = testMetaMap.get(doc.conversation_id);
-    const effectiveAssignedTo = testMeta?.assigned_to || doc.assigned_to || null;
+    const effectiveAssignedTo = testMeta?.assigned_to || null;
     let derivedStatus: Conversation["status"];
     if (testMeta?.status) {
       derivedStatus = testMeta.status as Conversation["status"];
-    } else if (doc.closed_at) {
+    } else if (testMeta?.closed_at) {
       derivedStatus = "closed";
     } else if (effectiveAssignedTo) {
       derivedStatus = "handoff";

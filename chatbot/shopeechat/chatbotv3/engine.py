@@ -21,12 +21,10 @@ Flow:
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
-import urllib.request
-import urllib.error
+import types
 from typing import Any
 
 # ⚡ lazy imports — หลีกเลี่ยงการโหลด heavy modules (google.genai, pymongo) ตอน import
@@ -95,54 +93,27 @@ def _send_handoff_to_admin(
     claim: dict | None = None,
     simulate: bool = False,
 ) -> bool:
-    """ส่ง handoff ไป ChatAdminWeb จริง (เหมือน legacy app.py 1856-1884).
-
-    Args:
-        conversation_id: ID ของแชท
-        shop: ชื่อร้าน
-        platform: shopee/tiktok/lazada
-        reason: เหตุผล handoff (warranty_claim_detected / customer_negative_emotion / human_request)
-        claim: ข้อมูล claim (ถ้ามี)
-        simulate: ถ้า True → test_chat_sessions ไม่ใช่ conversations
+    """ส่ง handoff ไป ChatAdminWeb — delegate ไป transport owner เดียว
+    (`responses._send_handoff` — typed outcome + bounded retry อยู่ที่นั่นแห่งเดียว).
 
     Returns:
-        True ถ้าส่งสำเร็จ, False ถ้า fail
+        True เมื่อ authoritative outcome ยืนยัน (assigned/queued), False เมื่อไม่สำเร็จ
     """
     if not conversation_id:
         return False
-    try:
-        _handoff_url = os.environ.get(
-            "ADMIN_HANDOFF_URL",
-            "http://127.0.0.1:3000/api/admin/conversations/bot-handoff",
-        )
-        _payload = {
-            "conversation_id": conversation_id,
-            "shop_id": shop or "",
-            "platform": platform or "shopee",
-            "reason": reason,
-            "simulate": simulate,
-            "claim": claim or {},
-        }
-        _body = json.dumps(_payload).encode("utf-8")
-        _req = urllib.request.Request(
-            _handoff_url,
-            data=_body,
-            headers={
-                "Content-Type": "application/json",
-                "X-Internal-Secret": os.environ.get("CHATBOT_INTERNAL_SECRET", ""),
-            },
-            method="POST",
-        )
-        try:
-            urllib.request.urlopen(_req, timeout=5)
-            print(f"[HANDOFF-V3] sent to admin: reason={reason} conv={conversation_id}", file=sys.stderr)
-            return True
-        except Exception as _he:
-            print(f"[HANDOFF-V3] handoff failed: {_he}", file=sys.stderr)
-            return False
-    except Exception as _he:
-        print(f"[HANDOFF-V3] handoff error: {_he}", file=sys.stderr)
-        return False
+    from .. import responses as _resp_mod
+    _req = types.SimpleNamespace(
+        conversation_id=conversation_id,
+        shop=shop,
+        platform=platform,
+        simulate_assignment=simulate,
+        test_source=None,
+    )
+    _result = _resp_mod._send_handoff(
+        _req, None, reason=reason, claim=claim,
+        simulate=True, timeout=5.0, log_tag="HANDOFF-V3",
+    )
+    return bool(_result)
 
 
 # ─── Persona (ข้อ 2) ───────────────────────────────────────────────────────
@@ -304,16 +275,18 @@ def _make_handoff_response(
     ⚡ ข้อ 1 — เรียก handoff API จริงไป ChatAdminWeb (เหมือน legacy)
     ⚡ ข้อ 4 — แยก answer_segments ด้วย ||| (multi-bubble)
     """
-    # ส่ง handoff ไป ChatAdminWeb จริง
-    if conversation_id:
-        _send_handoff_to_admin(
-            conversation_id=conversation_id,
-            shop=shop,
-            platform=platform,
-            reason=reason,
-            claim=claim,
-            simulate=simulate,
-        )
+    # ส่ง handoff ไป ChatAdminWeb — outcome ยืนยันเท่านั้นถึง claim ส่งแอดมิน
+    _handoff_ok = _send_handoff_to_admin(
+        conversation_id=conversation_id,
+        shop=shop,
+        platform=platform,
+        reason=reason,
+        claim=claim,
+        simulate=simulate,
+    ) if conversation_id else False
+    if not _handoff_ok:
+        from .. import responses as _resp_mod
+        answer = _resp_mod.HANDOFF_FAILED_REPLY
 
     # แยก answer เป็น segments ด้วย ||| (เหมือน legacy multi-bubble)
     segments = [s.strip() for s in answer.split("|||") if s.strip()] if answer else []
@@ -328,8 +301,8 @@ def _make_handoff_response(
         "elapsed": round(elapsed, 2),
         "cost": 0.0,
         "answer_segments": segments or [answer] if answer else [],
-        "handoff_to_admin": True,
-        "handoff_reason": reason,
+        "handoff_to_admin": _handoff_ok,
+        "handoff_reason": reason if _handoff_ok else None,
         "handoff_claim": claim or {},
         "intent": {},
         "timing": {},
@@ -339,7 +312,8 @@ def _make_handoff_response(
         "web_search_model": None,
         "image_desc": "",
         "steps": steps or [],
-        "routing_decision": {"path": "handoff", "reason": reason},
+        "routing_decision": {"path": "handoff" if _handoff_ok else "bot_reply",
+                            "reason": reason if _handoff_ok else f"{reason} — handoff ไม่สำเร็จ"},
     }
 
 

@@ -22,6 +22,8 @@ const PUBLIC_API = [
   // ⚡ BUG-M fix — bot-handoff ใช้ internal secret auth (X-Internal-Secret) ไม่ใช่ admin JWT
   //    ถ้าไม่ใส่ตรงนี้ middleware จะตีก 401 ก่อนถึง route handler
   "/api/admin/conversations/bot-handoff",
+  // ⚡ inbound lifecycle — external Sellcenter writer hook, same internal-secret auth
+  "/api/internal/inbound-lifecycle",
 ];
 
 function isPublic(pathname: string): boolean {

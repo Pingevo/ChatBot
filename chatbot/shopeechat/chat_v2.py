@@ -435,7 +435,6 @@ def _check_deterministic(req, ctx: dict, history: list[dict], db) -> dict | None
     # ⚡ ย้าย logic จาก legacy บรรทัด 758-2440 มาเป็น helper
     #    เก็บ logic เดิมไว้ ไม่แก้ เพราะ deterministic flow ทำงานถูกแล้ว
     #    แค่ย้ายมาเป็น function แยก ไม่ mutate shared state
-    from . import warranty as _warranty_mod
 
     # 2.1 Order lookup
     _resp = _check_order_lookup(req, ctx, history, db)
@@ -558,17 +557,25 @@ def _check_tracking_lookup(req, ctx, history, db) -> dict | None:
 def _check_tax_invoice(req, ctx) -> dict | None:
     """Tax invoice handoff — ย้ายจาก legacy บรรทัด 1029-1095."""
     from . import warranty as _w
+    from . import responses as _resp_mod
     if not _w.detect_tax_invoice_request(req.message):
         return None
+    # outcome ยืนยันเท่านั้นถึง claim ส่งแอดมิน — ล้มเหลวตอบตรงๆ ห้ามโกหก
+    _handoff_ok = bool(
+        _app_module._send_handoff(req, ctx, reason="tax_invoice_request", claim_topic="ใบกำกับภาษี")
+    ) if req.conversation_id else False
     _answer = (
         f"ได้ค่ะ เดี๋ยวขออนุญาตส่งต่อแชทนี้ให้แอดมิน "
         f"เพื่อดำเนินการเรื่องใบกำกับภาษีให้นะคะ "
         f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+        if _handoff_ok else _resp_mod.HANDOFF_FAILED_REPLY
     )
-    _app_module._send_handoff(req, ctx, reason="tax_invoice_request", claim_topic="ใบกำกับภาษี")
     return _make_response(_answer, [], ctx, source="tax_invoice_handoff",
-                          handoff=True, handoff_reason="tax_invoice_request",
-                          routing=_app_module._routing("handoff", "tax_invoice: ส่งแอดมิน", handoff_reason="tax_invoice_request"))
+                          handoff=_handoff_ok, handoff_reason="tax_invoice_request" if _handoff_ok else "",
+                          routing=_app_module._routing(
+                              "handoff" if _handoff_ok else "bot_reply",
+                              "tax_invoice: ส่งแอดมิน" if _handoff_ok else "tax_invoice: handoff ไม่สำเร็จ",
+                              handoff_reason="tax_invoice_request" if _handoff_ok else None))
 
 
 def _check_human_request(req, ctx) -> dict | None:
@@ -585,14 +592,21 @@ def _check_human_request(req, ctx) -> dict | None:
     _msg_low = (req.message or "").lower().replace("ำ", "ัม")
     if not any(kw in _msg_low for kw in _HUMAN_KWS):
         return None
+    from . import responses as _resp_mod
+    _handoff_ok = bool(
+        _app_module._send_handoff(req, ctx, reason="human_request", claim_topic="ลูกค้าขอคุยกับแอดมิน")
+    ) if req.conversation_id else False
     _answer = (
         f"ขออภัยที่ให้รอนะคะ เดี๋ยวส่งต่อแชทนี้ให้แอดมินดูแลให้นะคะ "
         f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+        if _handoff_ok else _resp_mod.HANDOFF_FAILED_REPLY
     )
-    _app_module._send_handoff(req, ctx, reason="human_request", claim_topic="ลูกค้าขอคุยกับแอดมิน")
     return _make_response(_answer, [], ctx, source="human_request_handoff",
-                          handoff=True, handoff_reason="human_request",
-                          routing=_app_module._routing("handoff", "human_request: ส่งแอดมิน", handoff_reason="human_request"))
+                          handoff=_handoff_ok, handoff_reason="human_request" if _handoff_ok else "",
+                          routing=_app_module._routing(
+                              "handoff" if _handoff_ok else "bot_reply",
+                              "human_request: ส่งแอดมิน" if _handoff_ok else "human_request: handoff ไม่สำเร็จ",
+                              handoff_reason="human_request" if _handoff_ok else None))
 
 
 def _check_warranty_state_machine(req, ctx, history, db) -> dict | None:
@@ -605,7 +619,10 @@ def _check_warranty_state_machine(req, ctx, history, db) -> dict | None:
     คืน singleton cached client ถ้า close แล้วจะกระทบ context หลัก
     """
     from . import warranty_flow as _wf
-    return _wf.handle_warranty_flow(req, ctx, history, db)
+    _resp = _wf.handle_warranty_flow(req, ctx, history, db)
+    if _resp is not None:  # 2C.3 — pop internal disposition signal ก่อน payload
+        _resp.pop("warranty_disposition", None)
+    return _resp
 
 
 def _check_general_question(req, ctx, history, db) -> dict | None:
@@ -1303,20 +1320,31 @@ def _no_product_guard(req, ctx: dict, intent: dict, products: list[dict],
     if products:
         return None
     # มีสินค้า → ไป LLM2
-    # ไม่มีสินค้า + search แล้ว → ตอบไม่พบ + handoff
+    # ไม่มีสินค้า + search แล้ว → ตอบไม่พบ + handoff (outcome ยืนยันเท่านั้นถึง claim)
     print(f"[NO-PRODUCT-GUARD-V2] products=0 + search_used={search_used} → handoff", file=sys.stderr)
+    _handoff_ok = bool(_app_module._send_handoff(
+        req, ctx, reason="no_product_found",
+        claim={"topic": "ค้นสินค้าไม่พบ"},
+        simulate=True, log_tag="NO-PRODUCT-GUARD",
+    )) if req.conversation_id else False
     _answer = (
         "ขออภัยค่ะ ตอนนี้ระบบไม่พบข้อมูลสินค้าตามที่สอบถามไว้ "
         "เดี๋ยวขอส่งเรื่องให้แอดมินช่วยตรวจสอบและตอบกลับให้ไวที่สุดนะคะ "
         "ระหว่างนี้หากสนใจสินค้าอื่นสอบถามได้เลยค่ะ"
+        if _handoff_ok else
+        "ขออภัยค่ะ ตอนนี้ระบบไม่พบข้อมูลสินค้าตามที่สอบถามไว้ "
+        "ระหว่างนี้หากสนใจสินค้าอื่นสอบถามได้เลยค่ะ"
     )
     return _make_response(_answer, [], ctx, source="no_product_found_handoff",
-                          handoff=True, handoff_reason="no_product_found",
+                          handoff=_handoff_ok,
+                          handoff_reason="no_product_found" if _handoff_ok else None,
                           web_search_used=search_used,
                           routing=_app_module._routing(
-                              "handoff",
-                              "no_product_found: search แล้วยังไม่เจอ → handoff แอดมิน",
-                              handoff_reason="no_product_found",
+                              "handoff" if _handoff_ok else "bot_reply",
+                              "no_product_found: search แล้วยังไม่เจอ → handoff แอดมิน"
+                              if _handoff_ok else
+                              "no_product_found: search แล้วยังไม่เจอ (handoff ไม่สำเร็จ)",
+                              handoff_reason="no_product_found" if _handoff_ok else None,
                           ))
 
 

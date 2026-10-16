@@ -70,6 +70,7 @@
 | `testStatusConversation` | `test_status_conversation` | admin | test version ของ status |
 | `testChatSessions` | `test_chat_sessions` | admin | test chat session (Python เขียนหลัก) |
 | `botworkerEvents` | `botworker_events` | admin | botworker event log + handoff op idempotency docs |
+| `botworkerState` | `botworker_state` | admin | single-active botworker leadership lease (BW-2) |
 
 ### 1.3 DB connections (4 DBs)
 
@@ -308,7 +309,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `customer_id` | string | |
 | `to_name` | string | ชื่อลูกค้า |
 | `customer_avatar` | string? | |
-| `status` | string | open/closed/handoff/bot/resolved |
+| `status` | string | open/closed/handoff/bot/resolved/pending |
 | `topic` | string? | |
 | `item_ids` | string[]? | |
 | `pinned` | boolean | |
@@ -322,6 +323,9 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `closed_at` | Date? | ⚠️ โดน dump ทับ |
 | `closed_by` | string? | ⚠️ โดน dump ทับ |
 | `close_count` | number? | ⚠️ โดน dump ทับ |
+| `bot_claim_info` | object? | ⚠️ **Phase 2B.6 — writer ย้ายไป `status_conversation`** (dump ทับทุก 2 วิ); field นี้อาจคงจาก doc เก่า — ห้ามใช้เป็น authority |
+| `bot_handoff_at` | Date? | ⚠️ writer ย้ายไป `status_conversation` (2B.6) — **ไม่ใช่ ownership authority** (authority = `status_conversation` + `HandoffOutcome.state`) |
+| `bot_handoff_reason` | string? | ⚠️ writer ย้ายไป `status_conversation` (2B.6) — reason จาก bot-handoff request ล่าสุด |
 
 **⚠️ สำคัญ:** `assigned_to`, `closed_at`, `closed_by`, `close_count` โดน sellcenter dump ทับทุก 2 วินาที
 → ใช้ `status_conversation` เป็น source of truth สำหรับ admin-owned meta
@@ -395,6 +399,8 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `created_at` | Date | |
 | `updated_at` | Date | |
 | `enabled_for_chat` | boolean | toggle ใน /config |
+| `bot_worker_enabled` | boolean? | 2D — per-shop botworker scope gate; missing = OFF; ใช้ร่วมกับ `platform` เป็น exact pair `(platform, shop_id)` — **แยกจาก** `connected`/`enabled_for_chat`; PATCH = single-command `{bot_worker_enabled, expected_bot_worker_enabled}` (optimistic CAS — persisted≠expected → 409; missing ≡ false; **enable CAS fence `platform∈BOTWORKER_BACKENDS` atomically** — flip ระหว่าง read↔write → miss → 422; disable ไม่ fence; ส่งคู่ `connected` → 422; enable บน platform นอก `BOTWORKER_BACKENDS` → 422; disable ได้เสมอ) |
+| `bot_worker_enabled_at` | Date? | 2D — shop enable rising-edge timestamp; CAS write คู่กับ `bot_worker_enabled` (false→true: stamp now · true→true: คงเดิม · true→false: unset); switch true แต่ timestamp ขาด = **fail-closed** |
 | `disabled_by_user` | string? | |
 | `last_polled_at` | Date? | |
 | `status` | string? | |
@@ -404,7 +410,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 |---------|-------|--------|
 | Read | shopService | `/shops`, `/shops/[id]`, `/config`, `/dashboard`, `/workflows`, `/triggers`, `/quick-replies`, `/team` |
 | Write (upsert) | shopService.upsertShop + `scripts/sync-shops.ts` (aggregate จาก `conversations_shp`) | data writer / sync / script |
-| Update | setShopConnected, touchShopSync, toggleShopChatSync | `/shops/[id]`, `/config/shop/[shopId]` |
+| Update | setShopConnected, setShopBotWorker, touchShopSync, toggleShopChatSync | `/shops/[id]`, `/config/shop/[shopId]` |
 | Delete | ไม่มี | |
 
 **หน้าที่เข้าถึง:** `/shops`, `/config`, `/workflows`, `/triggers`, `/quick-replies`, `/team`, `/persona`, `/shop-settings`
@@ -632,7 +638,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 |---------|-------|--------|
 | Read | listCloseHistory, listCustomerCloseHistory | `/conversations/[id]/close-history` |
 | Write | recordClose | statusConversationService.closeConversation |
-| Update | recordReopen | statusConversationService.reopenConversation |
+| Update | recordReopen | statusConversationService.reopenConversation (manual/admin — ไม่ส่ง messageId), statusConversationService.applyInboundOwnershipTransition (inbound — ส่ง `messageId` เพื่อ deterministic audit identity ผ่าน `logAdminEvent(eventId)`; CAS loser/retry ของ event เดิม settle idempotently), handoffService.emitHandoffSideEffects (handoff reopen — `messageId = handoff_event_id`; เรียกหลัง commit และบน converge ใดๆ) |
 | Delete | ไม่มี | |
 
 **หน้าที่เข้าถึง:** `/tickets`, `/botworker` (close history panel)
@@ -679,7 +685,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `conversation_id` | string | ref |
 | `shop_id` | string | |
 | `platform` | string | |
-| `status` | string | trigger_matched/bot_answered/handed_off/bot_failed/no_action/workflow_actioned/workflow_resumed |
+| `status` | string | processing/claimed (in-flight) · terminal: trigger_matched/bot_answered/handed_off/bot_failed/no_action/workflow_actioned/workflow_resumed/bot_cancelled · **`bot_failed`** ใช้เป็น dormant state ของ technical failure ด้วย — แถว buffer `failed` ที่ claim `bot_failed` ต่ำกว่า attempt cap ถูก carry-forward ได้ (revive ผ่าน fenced CAS + attempt+1 ตอน distinct inbound ใหม่); `bot_failed` ที่ attempt เกิน cap = terminal |
 | `trigger_id` | string? | |
 | `trigger_action` | string? | bot_answer/handoff_admin |
 | `shadow_reply_id` | string? | ref shadow_replies |
@@ -755,7 +761,6 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `platform` | string | |
 | `faq_liveagent_enabled` | boolean | เปิด FAQ liveagent ไหม |
 | `faq_liveagent_action` | `"handoff" \| "bot_reply"` | action เมื่อ FAQ liveagent trigger |
-| `post_handoff_exceptions` | string[]? | keywords ที่บอทยังตอบได้หลัง handoff |
 | `notes` | string? | |
 | `created_at` | Date | |
 | `updated_at` | Date | |
@@ -767,11 +772,11 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 **Access:**
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
-| Read | shopSettingsService (Next.js), app.py (Python) | `/shop-settings`, Python `/chat` (post_handoff_exceptions) |
+| Read | shopSettingsService (Next.js) | `/shop-settings` |
 | Write (upsert) | upsertShopSettings, upsertShopSettingsBatch | `/shop-settings` POST |
 | Delete (soft) | deleteShopSettings | `/shop-settings/[id]` DELETE |
 
-**หน้าที่เข้าถึง:** `/shop-settings`, Python bot (อ่าน post_handoff_exceptions)
+**หน้าที่เข้าถึง:** `/shop-settings` — post-handoff lock เป็น unconditional (ไม่มี exception setting; field `post_handoff_exceptions` ใน doc เก่าถูก runtime ignore)
 
 ---
 
@@ -798,7 +803,9 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `mock_mode_enabled` | boolean | |
 | `shadow_bot_enabled` | boolean | |
 | `polling_interval_ms` | number | |
-| `bot_worker_enabled` | boolean | |
+| `bot_worker_enabled` | boolean | global kill switch (fail-closed) |
+| `bot_worker_platforms` | `{shopee,tiktok,lazada}: boolean` | 2D — platform-scope gate; missing/partial → ค่าที่ขาด = OFF; key นอก 3 platform → reject; `true` เฉพาะ platform ที่มี backend (`BOTWORKER_BACKENDS` = shopee) |
+| `bot_worker_platform_enabled_at` | `{platform: Date}` | 2D — per-platform enable rising-edge timestamp map; derive atomically ใน write เดียวกับ `bot_worker_platforms` (false→true: stamp now · true→true: คงเดิม · true→false: clear); flag true แต่ timestamp ขาด = **fail-closed** |
 | `bot_worker_interval_ms` | number | |
 | `bot_buffer_enabled` | boolean | |
 | `bot_buffer_window_ms` | number | 1000-30000 |
@@ -859,7 +866,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `last_assigned_admin_id` | string | admin ล่าสุดที่ถูกจ่าย |
 | `updated_at` | Date | |
 
-**Access:** internal ใน `assignmentService.autoAssignConversation/reassignConversation`
+**Access:** internal ใน `assignmentService.selectNextAgent`/`reserveNextAgent` — **reservation-order: ตำแหน่งคิวถูก claim แบบ atomic CAS บน doc นี้ ณ เวลาเลือก (unique `pool_key`) — ไม่มี writer อื่น**; commit ของ caller ล้มเหลว → position forfeit (bounded skip)
 
 ---
 
@@ -910,16 +917,28 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | Field | Type | หมายเหตุ |
 |-------|------|---------|
 | `conversation_id` | string | PK |
-| `assigned_to` | string? | admin_id |
-| `assigned_at` | Date? | |
+| `assigned_to` | string? \| null | admin_id; `null` = unassigned (clear owner โดย `updateStatus`/`reassign null`/auto-reopen/queued commit ใน `commitHandoffState`) |
+| `assigned_at` | Date? \| null | set เมื่อ assign; `null` เมื่อ owner ถูกล้าง (ไม่ลบ audit `close_history`/`admin_logs`) |
 | `assignment_mode_used` | string? | |
-| `status` | string? | open/closed/handoff/bot/resolved |
+| `status` | string? | open/closed/handoff/bot/resolved/pending |
 | `closed_at` | Date? | |
 | `closed_by` | string? | |
 | `close_count` | number? | |
 | `pinned` | boolean? | |
 | `topic` | string? | |
 | `item_ids` | string[]? | |
+| `pending_assignment` | boolean? | backlog handoff flag (หา admin ไม่ได้ → รอ distributor) — **queued outcome ของ handoff = `status:handoff` + `assigned_to:null` + flag นี้** |
+| `assignment_reason` | string? \| null | เหตุผลของ handoff outcome ล่าสุด (`no_available_admin` ตอน queued; handoff reason ตอน assigned; `null` เมื่อไม่มี) |
+| `inbound_reopen_event_id` | string? | message_id ของ inbound event ที่ชนะ fenced CAS (closed/resolved→bot) — CAS loser/retry เทียบ identity แล้ว settle audit idempotently; ไม่มี index ใหม่ |
+| `handoff_event_id` | string? \| null | dedupe identity ของ handoff transition ล่าสุด — เขียนใน CAS เดียวกับ ownership (`commitHandoffState`); side-effect emissions (`chat_assigned`/`conversation.handoff`/`conversation.open`/reopen stamp) เป็น eid-idempotent → emit หลัง commit + re-emit บน converge ใดๆ ไม่ทำซ้ำ (**ไม่มี pending-settlement phase — caller ใดก็ emit/repair ได้**) |
+| `handoff_reopened` | boolean? | commit นี้เป็น reopen จริงหรือไม่ — fenced truth: fence มี `status:{$in:[closed,resolved]}` เมื่อ caller claim reopen → `true` ⟹ prior ปิดจริง ณ CAS time (ไม่ใช่ stale read) |
+| `handoff_actor` | string? \| null | actor ของ transition (persisted — converge/repair emit ด้วย attribution เดิม) |
+| `handoff_reason` | string? \| null | caller free-text reason ของ transition (persisted — เหมือนกัน) |
+| `active_claim_episode_id` | string? \| null | **2B.6** — open Python claim episode (`episode_id` จาก `conversation_products.claim_state` — ส่งผ่าน `_send_handoff` payload แบบ explicit param → `recordClaimHandoff` เขียน; `applyClaimOutcome` เคลียร์เป็น null เมื่อ outcome applied) — **review-fix: fenced write** (`{claim_outcome.episode_id:{$ne:ep}, $or:[{active==ep},{active==null}]}`) — same-ep refresh / terminal no-resurrect / stale no-op / absent→open+clear outcome atomically · **round-2: fence verdict กลับเป็น typed result** — `recordClaimHandoff → {status: written\|already_terminal\|stale_episode, claimOutcome?}` (fenced no-op = classification ไม่ใช่ silent 2xx; stale→route 409) |
+| `claim_outcome` | object? \| null | **2B.6** — explicit admin terminal command ต่อ episode: `{episode_id, outcome: resolved\|cancelled, actor_id, occurred_at}` — immutable เมื่อ set (first terminal wins; fence `claim_outcome.episode_id ≠ target` ใน CAS — malformed `{active:E,outcome:E}` ก็ไม่ถูกทับ); dedupe identity = `episode_id` (audit `eventId=episode_id`) · **round-2**: `applyClaimOutcome` คืน `{result, claimOutcome}` persisted-authoritative — claim-outcome route ส่งต่อบน wire (UI ใช้ค่านี้ ไม่ใช่ค่าที่กด); already_applied path repair audit ด้วย persisted actor/outcome ก่อน return (audit-crash window ปิด — repair ≤1 ครั้ง) |
+| `bot_claim_info` | object? \| null | **2B.6** — claim payload จาก `/admin/conversations/bot-handoff` (ย้ายจาก raw `conversations` — dump ทับทุก 2 วิ) — refresh เฉพาะเมื่อ episode fence ผ่าน · canonical shape (Python claim ctx): `{customer_name, customer_phone, customer_order_id, purchase_date, claim_topic}` — **ไม่มี `order_id`** (review-fix: UI/API contract unify) |
+| `bot_handoff_at` | Date? \| null | **2B.6** — เวลา claim metadata ถูกเขียน/refresh ล่าสุด (ย้ายจาก raw `conversations`) |
+| `bot_handoff_reason` | string? \| null | **2B.6** — reason จาก bot-handoff request ล่าสุด (ย้ายจาก raw `conversations`) |
 | `updated_at` | Date | |
 
 **⚠️ สำคัญ:** Source of truth สำหรับ admin-owned meta — ไม่โดน sellcenter dump ทับ
@@ -928,7 +947,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
 | Read | getMeta, getMetaMap | `/admin/conversations`, assign/handoff/resolve/close/reopen routes |
-| Write/Update | upsertMeta, updateStatus, manualAssign, tryAssign, closeConversation, reopenConversation, setTopic, setItemIds, togglePinned, resetUnread | ทุก mutation route |
+| Write/Update | upsertMeta, updateStatus, closeConversation, reopenConversation, setTopic, setItemIds, togglePinned, resetUnread, commitHandoffState, assignPendingTicket, applyInboundOwnershipTransition, recordClaimHandoff, applyClaimOutcome | ทุก mutation route + `POST /api/internal/inbound-lifecycle` (external writer hook) + `POST /admin/conversations/[id]/claim-outcome` (2B.6 explicit claim outcome) + bot-handoff claim metadata; **ownership assignment ทั้งหมด (auto+direct) ผ่าน `commitHandoffState` เท่านั้น (round-4: เมื่อเป็น claim handoff มี `expectedClaimEpisodeId=E` CAS เดียวกันบังคับ `{active_claim_episode_id:E, claim_outcome.episode_id:{$ne:E}}` + `upsert:false` atomic กับ status/assigned_to/pending/reopen/event-id — ปิด TOCTOU gate↔ownership และห้าม upsert สร้าง episode เอง); claim outcome ผ่าน `applyClaimOutcome` เท่านั้น (CAS fence `active_claim_episode_id`)** |
 | Delete | ไม่มี | |
 
 **หน้าที่เข้าถึง:** `/tickets` (จริง), ทุก conversation mutation route
@@ -1108,17 +1127,22 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `owner_id` | string? | worker owner ของ claim |
 | `fencing_token` | number? | fence ตอน insert |
 | `kind` | string? | `"conv_lock"` = conversation-lock row (แยกจาก message rows); ไม่มี = message row |
-| `status` | string? | message row: `buffered`/`processing`; lock row: `locked`/`released` |
-| `batch_id` | string? | batch ที่ row ถูก claim เข้า |
+| `status` | string? | message row: `buffered`/`processing`/`failed` (dormant — technical flush failure; ไม่มี retry timer/lease polling — distinct inbound ใหม่ใน exact `(platform, shop_id, conversation_id)` เดียวกันเท่านั้นที่ carry-forward)/`quarantined` (attempt cap หมด, terminal); lock row: `locked`/`released` |
+| `batch_id` | string? | batch ที่ row ถูก claim เข้า — `batchIdFor(platform, shop_id, conversation_id, sortedMsgIds)` (tuple-aware) |
+| `error` | string? | technical failure class ของ dormant row (`status:"failed"`) |
+| `failed_at` | Date? | เวลาที่ row เข้า dormant failed state |
+| `msg_created_at` | Date? | `created_timestamp` ของ inbound — admission evidence; delayed-flush gate เช็ค `msg_created_at > pair.cutoff` ปัจจุบัน (superseded → `no_action` terminal, ไม่ใช่ dormant) |
+| `admitted_edge` | Date? | pair.cutoff ตอน admit — ใช้เป็น global-era component ตอน flush re-resolve scope |
+| `carried` | boolean? | `true` = dormant row ที่ถูก carry-forward โดย distinct inbound ใหม่ — bypass cutoff ที่ flush gate (wake gate คือ inbound eligibility แล้ว) |
 
-**Conversation-lock rows:** doc `kind:"conv_lock"` ใน collection เดียวกัน — มี `conversation_id`, `status:"locked"|"released"`, `owner_id`, `fencing_token`, `lease_expires_at`, `updated_at` (query แยกด้วย kind)
+**Conversation-lock rows:** doc `kind:"conv_lock"` ใน collection เดียวกัน — `_id` = `convLockIdFor(platform, shop_id, conversation_id)` (sha256 ของ tuple — **timer/lock/batch ทั้งหมด key ด้วย tuple เดียวกัน ไม่ใช่ conversation_id เดี่ยว**), มี `conversation_id`+`shop_id`+`platform`, `status:"locked"|"released"`, `owner_id`, `fencing_token`, `lease_expires_at`, `updated_at` (query แยกด้วย kind)
 
 **หมายเหตุ:** fields ใหม่ทั้งหมด optional บน collection เดิม — ไม่มี migration, ไม่มี collection/index ใหม่, legacy rows (ไม่มี claim_id/kind) อ่านได้เหมือนเดิม
 
 **Access:**
-| Read | getBufferedMessages | buffer service |
+| Read | getBufferedMessages(platform,shop_id,conversation_id) | buffer service |
 | Write | insertToBuffer, lock CAS | bufferOrProcess |
-| Delete | deleteBufferedMessages | flushBuffer |
+| Delete | deleteBatchRows | flushBuffer(platform,shop_id,conversation_id,…) |
 | Recover | recoverStaleBuffers | ตอน boot |
 
 **หน้าที่เข้าถึง:** `/test-chat` (test buffer), bot worker (production buffer)
@@ -1261,6 +1285,35 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 
 ---
 
+### 2.34 `botworker_state`
+
+**Purpose:** runtime coordination ของ bot worker — singleton leader lease คุม single-active-worker admission (BW-2); runtime state แยกจาก configuration (`system_configs`)
+
+**Singleton doc:** `_id: "botworker:leader"` — มี doc เดียวเสมอหลัง acquire ครั้งแรก; เข้าถึงด้วย `_id` เท่านั้น
+
+**Fields:**
+
+| Field | Type | หมายเหตุ |
+|-------|------|---------|
+| `_id` | string | `"botworker:leader"` เท่านั้น |
+| `owner_id` | string | owner process ปัจจุบัน (`botworkerRuntime.ownerId` = `worker-<pid>-<uuid>`) |
+| `fencing_token` | number | +1 ทุก expired takeover เท่านั้น — renew ไม่เพิ่ม |
+| `lease_expires_at` | Date | `now + botworkerRuntime.leaderLeaseMs`; หมดอายุ → takeover ได้ผ่าน CAS `{_id, owner_id, fencing_token, lease_expires_at<$lt:now}` |
+| `updated_at` | Date | write ล่าสุด |
+
+**Index:** ไม่มี custom index — `_id` built-in เท่านั้น (singleton doc)
+
+**Access:**
+
+| การกระทำ | โดยใคร | ผ่านไหน |
+|---------|-------|--------|
+| Read | leadership admission/renew (`ensureLeadership`/`renewLeadership`) | `botWorkerService` |
+| Write | acquire insert / renew CAS / takeover CAS | `botWorkerService` เท่านั้น |
+
+**หน้าที่เข้าถึง:** ไม่มี UI — worker runtime coordination เท่านั้น
+
+---
+
 ## 3. Product DB Collections (dbWallet — read-only)
 
 ### 3.1 Connection
@@ -1371,16 +1424,44 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `active_item_id` | string \| int? | anchor ล่าสุด |
 | `order_anchors` | array? | list ของ order ที่ลูกค้าส่งมา {order_sn, mentioned_at, ...} |
 | `active_order_sn` | string? | order ล่าสุด (อัปเดตทุกครั้งที่มี order anchor ใหม่) |
-| `claim_state` | object? | warranty claim state — {customer_name, customer_phone, customer_order_id, ...} merge-fill โดย `warranty_flow` |
+| `claim_state` | object? | warranty claim episode — ดู field breakdown ด้านล่าง (2B.4) |
+| `subject_set` | object? | **2C.2 — authoritative conversation subject set** (owner = `conversation_products.record_subject_set`, read = `get_subject_set`) — ดู breakdown ด้านล่าง |
 | `last_updated` | Date | |
+
+**Indexes:** `{conversation_id: 1} unique sparse` — declared ที่ index owner `ChatAdminWeb/src/backend/db/mongoClient.ts::ensureIndexes` ผ่าน `COLLECTIONS.conversationProducts` (config.ts) — Python request path ไม่สร้าง index; **deploy gate: `BLOCKED_BY_CONVERSATION_PRODUCTS_UNIQUENESS_AUDIT`** — ต้อง census duplicate + ยืนยัน index บน real DB ก่อนถือว่า production-safe
+
+**claim_state fields (Phase 2B.4 — lifecycle owner = `warranty_flow._claim_transition`, storage = `transition_claim_state`/`merge_claim_fields`):**
+| Field | Type | หมายเหตุ |
+|-------|------|---------|
+| `episode_id` | string | uuid ต่อ episode — absent/terminal+fresh claim → ค่าใหม่เสมอ |
+| `stage` | string | `collecting`/`ts_suggested` (open) · `resolved`/`cancelled` (terminal) — **lifecycle authority เดียว**; doc ที่มีแต่ slot fields ไม่มี stage = absent |
+| `started_at` | ISO string | เวลาเริ่ม episode (reset ทุก episode ใหม่) |
+| `updated_at` | ISO string | เวลา transition ล่าสุด |
+| `resolved_at` | ISO string? | เวลาเข้า terminal stage |
+| `resolution_reason` | string? | valid producer เดียวตอนนี้ `troubleshoot_confirmed` (customer ยืนยันแก้สำเร็จ); admin event = Phase 2B.6 |
+| `customer_name`/`customer_phone` | string? | **identity allowlist** — reuse ข้าม episode ได้ |
+| `customer_order_id`/`purchase_date`/`has_image` | various | **case evidence — ไม่ข้าม episode**; terminal episode เก็บเป็น audit record |
+
+**subject_set fields (Phase 2C.2 — decision owner = `decide_subject_set`, writer = `record_subject_set`, reader = `get_subject_set`, resolver = `resolve_subjects`):**
+| Field | Type | หมายเหตุ |
+|-------|------|---------|
+| `subject_ids` | array[string] | canonical **item_id strings เท่านั้น** (normalized/deduped/sorted) — model code/keyword เป็น evidence resolve เป็น item_id ก่อน persist; variant detail อยู่บน `products[]` entry ไม่ใช่ subject id |
+| `source_turn_id` | string? | turn ที่ตัดสิน (None เมื่อ transport ไม่มี turn id) |
+| `relation` | string | `single`/`compare`/`alternatives`/`bundle` |
+| `requested_operations` | array[string] | ops ของ **turn ที่ตัดสิน** — snapshot replace ไม่สะสม (consume turn ไม่เขียนทับ) |
+| `confidence` | number | 0-1 (anchor-derived bootstrap = 0.5 — เฉพาะ effective view ไม่ถูก persist เว้นแต่ decision จริง) |
+| `rev` | number | **CAS fence token — +1 ต่อ committed write** (convention เดียวกับ `fencing_token` ของ lease docs); writer เท่านั้นที่ set — caller/proposed set ใช้ 0 เสมอ; pre-token doc (เขียนก่อนมี field) parse เป็น 0 |
+| `updated_at` | Date | |
+
+**Update semantics:** dotted `$set:{subject_set,last_updated}` เท่านั้น — CAS fence = **`subject_set.rev` == expected_prior.rev** (monotonic — semantic snapshot อย่างเดียวปิด ABA ไม่ได้ เพราะ state กลับมาเท่าเดิมได้): `prior.rev>0` → `subject_set.rev:<rev>` · `prior.rev=0` → `subject_set.rev:null` (missing∨null = pre-token doc — write ไม่ persist 0) · `expected_prior=None` → `subject_set:null` (absent∨null — doc ที่มี set อยู่ไม่ match → fail-safe); stale writer miss → reread ครั้งเดียวคืน winner ไม่ retry (caller แยก committed/lost ด้วย `==` — `rev` compare=False จึงเป็น semantic equality: return≠proposed = lost-to-winner ห้ามนับเป็น persisted); absent doc → `insert_one` minimal `{conversation_id, subject_set(rev=1), platform?, shop?, last_updated}` ใต้ `{conversation_id:1}` unique เดิม (E11000 → reread winner) — **ห้ามสร้าง `products`/`active_item_id`/`order_anchors`/`claim_state` ปลอม**; `subject_ids` = canonical item_id strings เท่านั้น (`_norm_subject_ids` digit-canonical domain — model code/arbitrary string refuse `→None`); ≤1 subject-set read + 0-1 write ต่อ turn
 
 **product entry:** `{item_id, name, source: user_item_card|user_variation_card|user_order|bot_suggestion, mentioned_at, is_anchor, card?}`
 
 **Access:**
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
-| Read | load_timeline, get_active_product, get_suggestion_latest, resolve_active_by_message, get_active_order_sn, get_order_anchors, load_claim_state | Python `/chat` (app.py, chat_v2, warranty_flow, order_flow) |
-| Write/Update | save_timeline, add_product, add_order_anchor, update_claim_state, clear_claim_state | Python `/chat` |
+| Read | load_timeline, get_active_product, get_suggestion_latest, get_subject_set, materialize_subject_cards, get_active_order_sn, get_order_anchors, load_claim_state | Python `/chat` (app.py, chat_v2, warranty_flow, order_flow) |
+| Write/Update | save_timeline, add_product, add_order_anchor, record_subject_set (fenced rev CAS — `subject_set.rev` +1/commit, minimal absent-doc insert + E11000 reconcile), transition_claim_state (fenced episode+stage CAS — new-episode whole-state only, insert+E11000 reconcile), merge_claim_fields (fenced episode+stage dotted partial update — same-episode field merge AND terminal transition) | Python `/chat` |
 
 **หน้าที่เข้าถึง:** ไม่มี UI ตรง — Python bot ใช้ภายใน
 
@@ -1584,7 +1665,7 @@ vector (`exports/unit_embeddings.npz`) → merge+rank; ว่าง → fallback
 | `knowledge_base` | knowledgeBaseService, Python (fallback) | knowledgeBaseService | knowledgeBaseService | knowledgeBaseService (soft) | knowledge, shops, Python bot (legacy fallback) |
 | `tickets` | ticketService | ticketService | ticketService | ticketService (soft) | stats/dashboard |
 | `admin_logs` | adminLogService | ทุก service (audit), `cleanup-test-artifacts.ts` (read) | — | — | logs, analytics |
-| `conversations` | conversationService, หลาย route, workflowEngine, Python `replay_compare.py` | conversationService, sellcenter dump | conversationService, statusConversationService, `/labels` | — | tickets, botworker, shadow-inbox, ... |
+| `conversations` | conversationService, หลาย route, Python `replay_compare.py` | conversationService, sellcenter dump | conversationService, statusConversationService, `/labels` | — | tickets, botworker, shadow-inbox, ... — **`status`/`assigned_to`/`closed_at` = dump display fields เท่านั้น ไม่ใช่ ownership authority (Phase 2B.1)** |
 | `messages` | messageService, bot worker, liveAssignmentService, Python `replay_compare.py` | messageService, sellcenter dump | botWorkerService (image_desc cache) | — | tickets, botworker, shadow-inbox |
 | `shops` | shopService | shopService, `sync-shops.ts`, data writer | shopService | — | shops, config, workflows, triggers, ... |
 | `customers` | customerService | customerService (data writer) | customerService | — | contacts |
@@ -1602,7 +1683,7 @@ vector (`exports/unit_embeddings.npz`) → merge+rank; ว่าง → fallback
 | `assignment_cursors` | assignmentService | assignmentService | assignmentService | — | (internal) |
 | `shop_team_assignments` | assignmentService | assignmentService | assignmentService | assignmentService | team |
 | `platform_team_assignments` | assignmentService | assignmentService | assignmentService | assignmentService | team |
-| `status_conversation` | statusConversationService | statusConversationService | statusConversationService | `/admin/maintenance/clear-status` | tickets (จริง), mutation routes |
+| `status_conversation` | statusConversationService, botCallService (`ticket_state`), admin conversation routes (list/`[id]`/send/assign — status+assigned_to filter prefetch), team route (workload+counts), stats routes (`live`/`dashboard`/`admin-activity`/`performance` ownership metrics), workflowEngine (prod conditions+assign_ticket), assignmentService, handoffService | statusConversationService | statusConversationService | `/admin/maintenance/clear-status` | tickets (จริง), mutation routes |
 | `test_status_conversation` | testStatusConversationService, bot-handoff route | testStatusConversationService | testStatusConversationService | clearTestSource | botworker, shadow-inbox, test-assignment |
 | `test_chat_sessions` | Python `test_chat_api.py`, Next.js routes | Python `test_chat_api.py`, `shadow_openrouter.py` | Python, Next.js (bot_claim_info) | Python, `/admin/maintenance/soft-delete-all` | test-chat |
 | `test_chat_ratings` | testChatRatingService, adminKpiService | testChatRatingService (upsert) | testChatRatingService | `/admin/maintenance/soft-delete-all` | test-chat, admin-chat-result |

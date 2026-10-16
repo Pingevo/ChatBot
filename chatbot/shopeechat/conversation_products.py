@@ -19,8 +19,11 @@ from __future__ import annotations
 import os
 import re
 import time
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal, NamedTuple
+
+from . import route_context as _rc
 
 # Lazy import knowledge_base เพื่อใช้ _build_admin_client
 _kb = None
@@ -48,8 +51,8 @@ _SAME_PRODUCT_KWS = (
     "ตัวเดิม", "อันเดิม", "ของเดิม", "รุ่นเดิม", "แบบเดิม",
     "สินค้าเดิม", "อันที่ดู", "อันที่ถาม", "อันนั้น", "ตัวนั้น",
     "รุ่นนั้น", "แบบนั้น",
-    # ⚡ Phase 2Z+++ — เพิ่ม "อันนี้", "ตัวนี้", "รุ่นนี้" เพื่อให้ resolve_active_by_message
-    #    match ที่ข้อ 2 (anchor ล่าสุด) แทน default
+    # ⚡ Phase 2Z+++ — เพิ่ม "อันนี้", "ตัวนี้", "รุ่นนี้" ให้ deictic singular
+    #    match anchor ล่าสุดแทน default (owner ปัจจุบัน = resolve_subjects)
     "อันนี้", "ตัวนี้", "รุ่นนี้", "ชิ้นนี้", "สินค้านี้",
 )
 
@@ -434,54 +437,6 @@ def get_anchor_and_suggestions(conversation_id: str, limit: int = 5) -> list[dic
     return out[:limit]
 
 
-def resolve_active_by_message(
-    conversation_id: str,
-    message: str,
-    model_keywords: list[str] | None = None,
-) -> dict | None:
-    """resolve active product ตามกฎ:
-    1. ถ้า message มีชื่อรุ่นเฉพาะ → หาสินค้าที่ match ใน timeline
-    2. ถ้า message พูด "ตัวเดิม/อันเดิม" → anchor ล่าสุด
-    3. ถ้า message พูด "อันที่แนะนำ/ที่ส่งมา" → suggestion ล่าสุด
-    4. ถ้า message เป็น generic question → active product (anchor ล่าสุด)
-    5. ถ้าไม่ตรงเงื่อนไขไหน → active product (default)
-
-    Args:
-        conversation_id: ID ของแชท
-        message: คำถามลูกค้าปัจจุบัน
-        model_keywords: model keywords ที่ extract ได้จาก message (optional)
-
-    Returns:
-        product card (dict) หรือ None ถ้าไม่มี timeline
-    """
-    doc = load_timeline(conversation_id)
-    if not doc or not doc.get("products"):
-        return None
-
-    products = doc.get("products", [])
-    msg_lower = (message or "").lower().strip()
-
-    # 1. ถ้ามี model keyword → หาสินค้าที่ match ชื่อ (bounded — "PB100"≄"LPB100")
-    if model_keywords:
-        from . import product_store as _ps
-        for kw in model_keywords:
-            for p in products:
-                name = p.get("name") or ""
-                if _ps._model_token_in_name(name, kw):
-                    return _materialize_card(p, message=message)
-
-    # 2. "ตัวเดิม/อันเดิม" → anchor ล่าสุด
-    if any(kw in msg_lower for kw in _SAME_PRODUCT_KWS):
-        return get_active_product(conversation_id)
-
-    # 3. "อันที่แนะนำ/ที่ส่งมา" → suggestion ล่าสุด
-    if any(kw in msg_lower for kw in _SUGGESTION_REF_KWS):
-        return get_suggestion_latest(conversation_id)
-
-    # 4 & 5. default → active product
-    return get_active_product(conversation_id)
-
-
 # ─── Order anchor (Phase 3C) ──────────────────────────────
 # เก็บ order_sn ที่ลูกค้าส่งเข้ามา (order card / พิมพ์เลข) เป็น anchor
 # ใช้สำหรับ follow-up: ลูกค้าถาม "order เดิม" / "คำสั่งซื้อเดิม" → ใช้ active order
@@ -765,11 +720,13 @@ def get_previous_anchor(
 
 
 def load_claim_state(conversation_id: str) -> dict | None:
-    """โหลด claim state ของแชท.
+    """โหลด persisted `claim_state` dict ของแชท (canonical schema ใน docs/schema.md).
 
     Returns:
-        dict ที่มี fields: customer_name, customer_phone, customer_order_id,
-        purchase_date, has_image, has_video, started_at, updated_at
+        dict ของ episode ล่าสุด — lifecycle (`episode_id`, `stage`,
+        `started_at`, `updated_at`, `resolved_at`, `resolution_reason`,
+        `resolved_by`) + customer slots (`customer_name`, `customer_phone`,
+        `customer_order_id`) + evidence (`purchase_date`, `has_image`)
         หรือ None ถ้าไม่มี
     """
     if not conversation_id:
@@ -783,64 +740,575 @@ def load_claim_state(conversation_id: str) -> dict | None:
         return None
 
 
-def update_claim_state(
+def transition_claim_state(
     conversation_id: str,
-    platform: str | None = None,
-    shop: str | None = None,
-    fields: dict | None = None,
+    platform: str | None,
+    shop: str | None,
+    *,
+    expected_episode_id: str | None,
+    expected_stage: str | None,
+    claim_state: dict,
 ) -> dict | None:
-    """อัปเดต claim state — merge fields ใหม่เข้าไปใน state เดิม.
+    """new-episode whole-state write เท่านั้น — fenced CAS (storage primitive).
 
-    Args:
-        conversation_id: ID ของแชท
-        platform: platform (shopee/lazada/tiktok)
-        shop: ชื่อร้าน
-        fields: fields ใหม่ที่จะ merge เช่น {"customer_name": "John", "has_image": True}
+    ใช้เฉพาะ absent→episode ใหม่ / terminal→fresh episode; same-episode field
+    merge และ terminal transition ต้องผ่าน merge_claim_fields (partial $set).
+    fence = exact episode + exact stage ที่ caller คาด (None = missing∨null —
+    Mongo null-equality). miss → reread ครั้งเดียว คืน state ผู้ชนะ — ไม่ retry.
+
+    doc ยังไม่มีจริง → create ผ่าน insert_one; unique index {conversation_id:1}
+    (declared ที่ TS index owner) ทำให้ concurrent create แพ้ E11000 →
+    reread ครั้งเดียว คืน doc ของผู้ชนะ.
 
     Returns:
-        claim_state หลังอัปเดต หรือ None ถ้า error
+        claim_state ที่ commit แล้ว หรือ state ของผู้ชนะ หรือ None ถ้า error
+    """
+    if not conversation_id:
+        return None
+    filt = {
+        "conversation_id": conversation_id,
+        "claim_state.episode_id": expected_episode_id,
+        "claim_state.stage": expected_stage,
+    }
+    try:
+        res = _coll().update_one(
+            filt,
+            {"$set": {
+                "claim_state": claim_state,
+                "platform": platform or "",
+                "shop": shop or "",
+            }},
+        )
+        if getattr(res, "matched_count", 0):
+            return claim_state
+        doc = _coll().find_one({"conversation_id": conversation_id})
+        if doc is not None:
+            return doc.get("claim_state")
+        # doc ยังไม่มีจริง → insert (ไม่ใช่ upsert — upsert จะ match doc ของ
+        # rival ที่เพิ่ง insert แล้วทับ claim_state เงียบๆ); unique index
+        # {conversation_id:1} ทำให้ concurrent insert แพ้ E11000 → reread
+        try:
+            _coll().insert_one({
+                "conversation_id": conversation_id,
+                "claim_state": claim_state,
+                "platform": platform or "",
+                "shop": shop or "",
+            })
+            return claim_state
+        except Exception as e:
+            from pymongo.errors import DuplicateKeyError
+            if not isinstance(e, DuplicateKeyError):
+                raise
+            # E11000 — writer อื่นชนะ insert race → reread ครั้งเดียว
+            doc = _coll().find_one({"conversation_id": conversation_id})
+            return doc.get("claim_state") if doc else None
+    except Exception:
+        return None
+
+
+def merge_claim_fields(
+    conversation_id: str,
+    *,
+    episode_id: str | None,
+    expected_stage: str | None,
+    fields: dict | None,
+) -> dict | None:
+    """same-episode partial update — dotted $set เท่านั้น (storage primitive).
+
+    เขียนได้ก็ต่อเมื่อ episode_id AND stage ยังตรงที่ caller คาด — stale
+    writer (stage เดิม) เขียนทับ episode ที่เปลี่ยน stage แล้วไม่ได้.
+    $set เฉพาะ field ที่ส่งมา (skip None/empty — fill-once) + updated_at;
+    ใช้สำหรับ field merge และ same-episode stage transition (รวม terminal:
+    stage/resolved_at/resolution_reason) — ห้าม $set claim_state ทั้งก้อน.
+    miss → reread ครั้งเดียว คืน state ปัจจุบัน (authoritative).
+
+    Returns:
+        claim_state หลังเขียน (หรือของผู้ชนะถ้า fence miss) หรือ None ถ้า error
     """
     if not conversation_id:
         return None
     fields = fields or {}
+    filt = {
+        "conversation_id": conversation_id,
+        "claim_state.episode_id": episode_id,
+        "claim_state.stage": expected_stage,
+    }
     try:
         from datetime import datetime, timezone
-        _now = datetime.now(timezone.utc).isoformat()
-        # โหลด state เดิม
-        existing = load_claim_state(conversation_id) or {}
-        # merge fields ใหม่ (ไม่เขียนทับด้วย None/empty)
-        merged = dict(existing)
-        for k, v in fields.items():
-            if v is not None and v != "":
-                merged[k] = v
-        merged["updated_at"] = _now
-        if "started_at" not in merged:
-            merged["started_at"] = _now
-        # upsert ลง conversation_products
-        _coll().update_one(
-            {"conversation_id": conversation_id},
-            {
-                "$set": {
-                    "claim_state": merged,
-                    "platform": platform or "",
-                    "shop": shop or "",
-                },
-            },
-            upsert=True,
-        )
-        return merged
+        sets = {
+            f"claim_state.{k}": v
+            for k, v in fields.items()
+            if v is not None and v != ""
+        }
+        sets["claim_state.updated_at"] = datetime.now(timezone.utc).isoformat()
+        _coll().update_one(filt, {"$set": sets})
+        doc = _coll().find_one({"conversation_id": conversation_id})
+        return doc.get("claim_state") if doc else None
     except Exception:
         return None
 
 
-def clear_claim_state(conversation_id: str) -> None:
-    """ล้าง claim state หลัง handoff (แอดมินรับงานแล้ว)."""
-    if not conversation_id:
-        return
+# ─── Conversation subject set (Phase 2C.2) ──────────────────────────────
+# `subject_set` = snapshot ของ authoritative subject decision ปัจจุบันใน
+# conversation_products doc เดียวกัน — ไม่ใช่ history accumulator
+#
+# Identity domain: normalized item_id เท่านั้น (str(_to_serializable(v)) —
+# form เดียวกับ retrieval_policy._norm_id) · model code/keyword เป็น evidence
+# resolve → item_id ก่อน persist · variant detail (model_id/model_name)
+# อยู่บน timeline products[] entry เดิม
+#
+# Reads: get_subject_set ≤1/turn (caller ส่ง persisted ให้ resolver/decider)
+# Writes: record_subject_set 0-1/turn — CAS fence = persisted monotonic
+#         `subject_set.rev` (+1 ต่อ commit) — snapshot equality อย่างเดียว
+#         ปิด ABA ไม่ได้ (state กลับมาเท่าเดิมได้) → rev เปลี่ยนทุก write
+
+_SUBJECT_RELATIONS = ("single", "compare", "alternatives", "bundle")
+
+
+@dataclass(frozen=True)
+class ConversationSubjectSet:
+    """Snapshot ของ subject decision — item_id domain เท่านั้น.
+
+    rev = persisted CAS fence (server-side write counter, +1 ต่อ commit) —
+    caller/constructor ไม่เคย set เอง (decide/propose ใช้ rev=0 เสมอ; parse
+    อ่านจาก doc — pre-token doc ≡ 0). compare=False เพื่อให้ equality
+    ยังเป็น semantic (committed-vs-winner ตัดสินด้วย == proposed)"""
+    subject_ids: tuple[str, ...]
+    source_turn_id: str | None
+    relation: Literal["single", "compare", "alternatives", "bundle"]
+    requested_operations: tuple[str, ...]
+    confidence: float
+    rev: int = field(default=0, compare=False)
+
+
+class SubjectResolution(NamedTuple):
+    """ผล resolve deictic/follow-up ref — caller แยก 3 outcome ได้."""
+    outcome: Literal["resolved", "clarify", "no_subject_ref"]
+    subject_set: ConversationSubjectSet | None
+
+
+class SubjectSetView(NamedTuple):
+    """Read view ของ subject set — 1 DB read ต่อ turn.
+
+    effective: set ที่ resolver ใช้ — stored subject_set ถ้ามี ไม่งั้น
+      derive จาก explicit anchor entries (is_anchor=True — item_id
+      domain เดียวกัน; confidence 0.5 = derived ไม่ใช่ decided)
+      ครอบเคส conversation เก่าที่มี anchor แต่ยังไม่มี field
+    stored: raw persisted set (None = ไม่มี/ malformed) — CAS prior
+      สำหรับ record_subject_set.expected_prior เท่านั้น
+    products: timeline entries จาก doc เดียวกัน — ส่งให้
+      materialize_subject_cards (ห้ามอ่าน doc ซ้ำ)
+    claim_state / active_item_id: fields จาก doc เดียวกัน — context
+      สำหรับ TurnPlan (ห้ามอ่าน doc ซ้ำ; None เมื่อไม่มี doc)"""
+    effective: ConversationSubjectSet | None
+    stored: ConversationSubjectSet | None
+    products: tuple[dict, ...]
+    claim_state: dict | None = None
+    active_item_id: str | None = None
+
+
+# ── ref-signal tables (canonical kw owners — moved 1:1, no new semantics) ──
+#
+# Set-count deixis ("2 อันนี้","ทั้งสอง") / bare which-of-set resolve via the
+# structured subject_scope signal (intent Pass-1 → TurnNeed) validated in
+# resolve_subjects — never via a language table here.
+
+# pair ref — moved จาก app.py _anchor_compare_kws (canonical pair words)
+_SUBJECT_PAIR_KWS = (
+    "อันนี้กับอันก่อน", "อันนี้กับอันก่อนหน้า", "อันนี้กับอันนั้น",
+    "ตัวนี้กับตัวก่อน", "ตัวนี้กับตัวก่อนหน้า", "ตัวนี้กับตัวนั้น",
+    "อันนี้กับอันเดิม", "ตัวนี้กับตัวเดิม", "รุ่นนี้กับรุ่นก่อน",
+    "รุ่นนี้กับรุ่นก่อนหน้า", "อันนี้กับอันที่แล้ว", "ตัวนี้กับตัวที่แล้ว",
+)
+
+# link/set-demanding op — moved จาก app.py _link_followup_kws
+_SUBJECT_LINK_KWS = (
+    "ลิงค์", "ลิงก์", "ลิ้งค์", "ลิ้งก์", "link", "ขอลิงค์", "ขอลิงก์",
+    "ขอลิ้งค์", "ขอลิ้งก์", "ขอ link", "ขอ url", "url",
+    "ช่องทางซื้อ", "สั่งซื้อ", "ขอสั่ง", "ขอซื้อ", "สั่งได้เลย",
+    "ส่งลิงค์", "ส่งลิงก์", "ส่ง link", "ขอเว็บ", "เว็บสินค้า",
+)
+
+
+def _norm_subject_ids(ids) -> tuple[str, ...]:
+    """Normalize+dedupe เป็น canonical item_id strings, sort deterministic.
+
+    item_id domain เท่านั้น — value ที่ไม่ใช่ digit canonical form
+    (model code / arbitrary string) ไม่ใช่ item identity → drop"""
+    out = set()
+    for v in (ids or ()):
+        if v is None:
+            continue
+        s = str(_to_serializable(v))
+        if s.isdigit():
+            out.add(s)
+    return tuple(sorted(out, key=int))
+
+
+def _norm_ops(ops) -> tuple[str, ...]:
+    return tuple(sorted({str(o) for o in (ops or ()) if o}))
+
+
+def _subject_set_doc(ss: ConversationSubjectSet,
+                     now: datetime) -> dict:
+    return {
+        "subject_ids": list(ss.subject_ids),
+        "source_turn_id": ss.source_turn_id,
+        "relation": ss.relation,
+        "requested_operations": list(ss.requested_operations),
+        "confidence": float(ss.confidence),
+        "rev": int(ss.rev),
+        "updated_at": now,
+    }
+
+
+def _parse_subject_set(raw: Any) -> ConversationSubjectSet | None:
+    """Parse stored subject_set — malformed → None (fail safe, no guess).
+
+    Compatibility rule (เดียว): doc ที่เขียนก่อนมี rev field → missing/null
+    rev ≡ 0; rev ที่ cast เป็น int ≥0 ไม่ได้ → set ทั้งก้อน unparseable
+    → None (non-clobber — expected_prior ไม่ match, write refused)"""
+    if not isinstance(raw, dict):
+        return None
+    ids = raw.get("subject_ids")
+    rel = raw.get("relation")
+    ops = raw.get("requested_operations")
+    if not isinstance(ids, (list, tuple)) or not ids:
+        return None
+    if rel not in _SUBJECT_RELATIONS:
+        return None
+    if not isinstance(ops, (list, tuple)):
+        return None
     try:
-        _coll().update_one(
-            {"conversation_id": conversation_id},
-            {"$unset": {"claim_state": ""}},
-        )
+        conf = float(raw.get("confidence", 0.0))
+        rev = raw.get("rev")
+        rev = 0 if rev is None else int(rev)
+    except (TypeError, ValueError):
+        return None
+    if rev < 0:
+        return None
+    nids = _norm_subject_ids(ids)
+    if not nids:
+        return None                      # stored ids ไม่ใช่ item_id domain
+    return ConversationSubjectSet(
+        subject_ids=nids,
+        source_turn_id=raw.get("source_turn_id"),
+        relation=rel,
+        requested_operations=tuple(str(o) for o in ops if o),
+        confidence=conf,
+        rev=rev,
+    )
+
+
+def get_subject_set(conversation_id: str) -> SubjectSetView:
+    """โหลด subject view — DB read owner (≤1 call/turn).
+
+    effective = stored subject_set ถ้า parse ได้; ถ้าไม่มี field ให้ derive
+    จาก explicit customer anchors (is_anchor=True — identity domain เดียวกับ
+    subject_set; suggestion ไม่ derive) เพื่อให้ deictic resolve บน
+    conversation เก่าที่ยังไม่มี subject_set — 1 anchor → single,
+    หลาย anchor → alternatives (co-mentioned, relation ไม่ชัด)
+    """
+    empty = SubjectSetView(None, None, ())
+    if not conversation_id:
+        return empty
+    try:
+        doc = _coll().find_one({"conversation_id": conversation_id})
     except Exception:
-        pass
+        return empty
+    if not doc:
+        return empty
+    prods = tuple(doc.get("products") or ())
+    stored = _parse_subject_set(doc.get("subject_set"))
+    claim = doc.get("claim_state")
+    aid = doc.get("active_item_id")
+    if stored is not None:
+        return SubjectSetView(stored, stored, prods, claim, aid)
+    ids = _norm_subject_ids(
+        p.get("item_id") for p in prods
+        if p.get("is_anchor") and p.get("item_id") is not None)
+    if not ids:
+        # doc มีแต่ไม่มี subject identity — claim/anchor/products ของ doc
+        # ยังต้องไหลเข้า TurnPlan (claim resume, active anchor context)
+        return SubjectSetView(None, None, prods, claim, aid)
+    rel = "single" if len(ids) == 1 else "alternatives"
+    return SubjectSetView(
+        ConversationSubjectSet(ids, None, rel, (), 0.5), None, prods,
+        claim, aid)
+
+
+def _classify_subject_ref(msg: str) -> str:
+    """จำแนก ref form ในข้อความ: pair/singular/set_hard/set_soft/generic/none.
+
+    Canonical signals เท่านั้น — bare which-of-set / set-count deixis ไม่มี
+    structured owner จนกว่า TurnPlan consumption (2C.3) → ตก none/singular
+    ตาม canonical tables (deferred — ดู comment เหนือตาราง)"""
+    if not msg:
+        return "none"
+    if (any(kw in msg for kw in _SUBJECT_PAIR_KWS)
+            or any(kw in msg for kw in _rc._COMPARISON_FOLLOWUP_KW)):
+        return "pair"
+    if any(kw in msg for kw in
+           _SAME_PRODUCT_KWS + _SUGGESTION_REF_KWS + _rc._SINGLE_ITEM_REF_KW):
+        return "singular"
+    if any(kw in msg for kw in _SUBJECT_LINK_KWS):
+        return "set_hard"
+    if any(kw in msg for kw in _rc._SUPERLATIVE_KW):
+        return "set_soft"
+    if any(kw in msg for kw in _GENERIC_Q_KWS):
+        return "generic"
+    return "none"
+
+
+_SUBJECT_SCOPES = ("none", "explicit", "current_single", "current_set")
+_SUBJECT_SIGNAL_MIN_CONF = 0.7
+
+
+def resolve_subjects(
+    persisted: ConversationSubjectSet | None,
+    message: str,
+    *,
+    subject_scope: str | None = None,
+    subject_count: int | None = None,
+    signal_confidence: float | None = None,
+) -> SubjectResolution:
+    """Pure resolver — รับ persisted set ที่ load แล้ว (no hidden DB read).
+
+    Structured signal (planner/intent boundary) มาก่อน — resolver validate
+    typed input กับ persisted state เท่านั้น ไม่ interpret ภาษาเอง:
+      current_set + persisted + (count absent หรือ == set size) → resolved ทั้ง set
+      current_single + persisted n==1 → resolved
+      explicit → no_subject_ref (explicit identities ชนะ upstream แล้ว)
+      missing set / count mismatch / unknown scope / signal conf < 0.7
+        → clarify (zero guessing)
+    ไม่มี structured signal → canonical language path:
+      singular deictic → resolved เฉพาะ single-subject set (multi → clarify)
+      pair/set ops → resolved ทั้ง set · no set → clarify (set-demanding) หรือ
+      no_subject_ref (open question / ไม่มี ref signal)
+    """
+    n = len(persisted.subject_ids) if persisted else 0
+    if subject_scope:
+        if subject_scope not in _SUBJECT_SCOPES:
+            return SubjectResolution("clarify", None)
+        if subject_scope == "explicit":
+            return SubjectResolution("no_subject_ref", None)
+        if subject_scope in ("current_single", "current_set"):
+            if (signal_confidence is not None
+                    and signal_confidence < _SUBJECT_SIGNAL_MIN_CONF):
+                return SubjectResolution("clarify", None)
+            if subject_scope == "current_set":
+                if n and (subject_count is None or subject_count == n):
+                    return SubjectResolution("resolved", persisted)
+                return SubjectResolution("clarify", None)
+            return SubjectResolution(
+                "resolved" if n == 1 else "clarify",
+                persisted if n == 1 else None)
+        # scope == "none" → canonical path
+    sig = _classify_subject_ref((message or "").lower())
+    if sig == "pair":
+        return SubjectResolution(
+            "resolved" if n else "clarify", persisted if n else None)
+    if sig == "singular":
+        return SubjectResolution(
+            "resolved" if n == 1 else "clarify",
+            persisted if n == 1 else None)
+    if sig in ("set_hard", "set_soft", "generic"):
+        if n:
+            return SubjectResolution("resolved", persisted)
+        return SubjectResolution(
+            "clarify" if sig == "set_hard" else "no_subject_ref", None)
+    return SubjectResolution("no_subject_ref", None)
+
+
+def decide_subject_set(
+    persisted: ConversationSubjectSet | None,
+    *,
+    explicit_ids=(),
+    pair_ids=(),
+    resolved: ConversationSubjectSet | None = None,
+    selected_ids=(),
+    requested_operations=(),
+    source_turn_id=None,
+    confidence: float = 1.0,
+) -> ConversationSubjectSet | None:
+    """Single decision owner — explicit > pair > resolved consume > batch > none.
+
+    resolved = set ที่ resolver เพิ่ง consume ใน turn นี้ (deictic/generic ref)
+    — turn นั้นใช้ subject เดิมตอบ ไม่ใช่ตัดสิน subject ใหม่ → ห้ามให้
+    selected batch (สินค้าที่แสดง) ทับ set ที่ resolve มา
+
+    Returns:
+        set ใหม่ที่ควร persist หรือ None (ไม่มี subject / set ปัจจุบันเหมือน
+        persisted → idempotent, ไม่ต้องเขียน)
+    """
+    e = _norm_subject_ids(explicit_ids)
+    p = _norm_subject_ids(pair_ids)
+    s = _norm_subject_ids(selected_ids)
+    if e:
+        if len(p) >= 2 and set(e) <= set(p):
+            ids, rel = p, "compare"
+        elif len(e) == 1:
+            ids, rel = e, "single"
+        else:
+            ids, rel = e, "alternatives"
+    elif len(p) >= 2:
+        ids, rel = p, "compare"
+    elif resolved is not None:
+        # consume-only turn — subject ชุดเดิมยืน; ops snapshot เป็นของ turn ที่
+        #   ตัดสิน (consume turn ไม่เขียนทับ ops ของ decision เดิม)
+        r = resolved
+        if (persisted is not None
+                and r.subject_ids == persisted.subject_ids
+                and r.relation == persisted.relation):
+            return None
+        return ConversationSubjectSet(
+            subject_ids=r.subject_ids, source_turn_id=source_turn_id,
+            relation=r.relation,
+            requested_operations=_norm_ops(requested_operations)
+            or r.requested_operations,
+            confidence=r.confidence)
+    elif s:
+        ids, rel = s, ("single" if len(s) == 1 else "alternatives")
+    else:
+        return None
+    new = ConversationSubjectSet(
+        subject_ids=ids, source_turn_id=source_turn_id, relation=rel,
+        requested_operations=_norm_ops(requested_operations),
+        confidence=float(confidence))
+    if persisted and new.subject_ids == persisted.subject_ids and not e and not p:
+        # selected batch ชุดเดิม = ไม่มี decision ใหม่ — ห้ามให้ weakest
+        # evidence downgrade relation (เช่น compare → alternatives)
+        return None
+    return None if new == persisted else new
+
+
+def record_subject_set(
+    conversation_id: str,
+    subject_set: ConversationSubjectSet | None,
+    *,
+    expected_prior: ConversationSubjectSet | None = None,
+    platform: str | None = None,
+    shop: str | None = None,
+) -> ConversationSubjectSet | None:
+    """Persist subject_set — truthful outcome; ห้าม fabricate success.
+
+    CAS fence = `subject_set.rev` — persisted monotonic token (+1 ต่อ
+    committed write; semantic snapshot อย่างเดียวปิด ABA ไม่ได้เพราะ state
+    กลับมาเท่าเดิมได้ — convention เดียวกับ fencing_token ของ lease):
+      expected_prior.rev > 0  → {subject_set.rev: <rev>}
+      expected_prior.rev = 0  → {subject_set.rev: None}   (pre-token doc —
+                                missing∨null เท่านั้น; write ไม่ persist 0)
+      expected_prior = None   → {subject_set: None}       (absent∨null —
+                                doc ที่มี set อยู่แล้วไม่ match → คืน winner)
+    miss → reread ครั้งเดียว คืน winner จริง
+    (pattern เดียวกับ transition_claim_state — no retry)
+
+    doc ยังไม่มี → insert_one minimal ใต้ unique {conversation_id:1} →
+    E11000 → reread winner · ห้ามสร้าง products/active_item_id/
+    order_anchors/claim_state ปลอม
+
+    Returns:
+        set ที่ commit (rev+1) หรือ set ของผู้ชนะ (แยกได้ด้วย != proposed —
+        rev ไม่มีผลต่อ equality) หรือ None
+        (invalid input / write error / unparseable current state)
+    """
+    if not conversation_id or not isinstance(subject_set, ConversationSubjectSet):
+        return None
+    if subject_set.relation not in _SUBJECT_RELATIONS:
+        return None
+    if _norm_subject_ids(subject_set.subject_ids) != subject_set.subject_ids:
+        return None                      # non-canonical identity → refuse
+    now = datetime.now(timezone.utc)
+    prior_rev = expected_prior.rev if expected_prior is not None else None
+    new_rev = (prior_rev or 0) + 1
+    committed = replace(subject_set, rev=new_rev)
+    sdoc = _subject_set_doc(committed, now)
+    if expected_prior is not None:
+        filt = {"conversation_id": conversation_id,
+                "subject_set.rev": prior_rev if prior_rev else None}
+    else:
+        filt = {"conversation_id": conversation_id,
+                "subject_set": None}
+    try:
+        res = _coll().update_one(
+            filt, {"$set": {"subject_set": sdoc, "last_updated": now}})
+        if getattr(res, "matched_count", 0):
+            return committed
+        doc = _coll().find_one({"conversation_id": conversation_id})
+        if doc is not None:
+            return _parse_subject_set(doc.get("subject_set"))
+        try:
+            ins = {"conversation_id": conversation_id,
+                   "subject_set": sdoc, "last_updated": now}
+            if platform:
+                ins["platform"] = platform
+            if shop:
+                ins["shop"] = shop
+            _coll().insert_one(ins)
+            return committed
+        except Exception as e:
+            from pymongo.errors import DuplicateKeyError
+            if not isinstance(e, DuplicateKeyError):
+                raise
+            doc = _coll().find_one({"conversation_id": conversation_id})
+            return _parse_subject_set(doc.get("subject_set")) if doc else None
+    except Exception:
+        return None
+
+
+def materialize_subject_cards(
+    db,
+    subject_ids,
+    *,
+    products,
+    shop_filter: str | None = None,
+    message: str = "",
+) -> list[dict]:
+    """Subject ids → product cards (materialization owner — แทน timeline-getter
+    path ของ subject resolver เก่าที่ถูกลบใน 2C.2).
+
+    products = timeline entries ที่ load มากับ SubjectSetView — conv doc
+    ถูกอ่านครั้งเดียวที่ get_subject_set (ฟังก์ชันนี้ไม่มี DB read ของ doc)
+    per id: entry ใน timeline → _materialize_card (rebuild สด → fallback
+    stored card — legacy conversations ที่ item หายจาก catalog ยัง resolve
+    ได้ตามสัญญาเดิม) · id ไม่อยู่ timeline → fetch_product_by_id
+    (status-agnostic — unavailable/historical subject ยัง materialize)
+    same-item multi-variant → เลือก deterministic เหมือน _compute_active:
+    is_anchor ก่อน แล้ว latest mentioned_at (structured evidence — ไม่ใช่
+    array-order accident)
+    """
+    from . import product_store as _ps
+    ids = _norm_subject_ids(subject_ids)
+    if not ids:
+        return []
+    entries: dict[str, dict] = {}
+    for p in products or ():
+        pid = p.get("item_id")
+        if pid is None:
+            continue
+        sid = str(_to_serializable(pid))
+        cur = entries.get(sid)
+        cand = (bool(p.get("is_anchor")),
+                _normalize_dt(p.get("mentioned_at")))
+        cur_key = (bool(cur.get("is_anchor")),
+                   _normalize_dt(cur.get("mentioned_at"))) if cur else None
+        if cur_key is None or cand > cur_key:
+            entries[sid] = p
+    out: list[dict] = []
+    for sid in ids:
+        card = None
+        entry = entries.get(sid)
+        if entry is not None:
+            try:
+                card = _materialize_card(entry, message=message)
+            except Exception:
+                card = None
+        if card is None:
+            try:
+                card = _ps.fetch_product_by_id(
+                    db, sid, shop_filter=shop_filter)
+            except Exception:
+                card = None
+        if card:
+            out.append(card)
+    return out

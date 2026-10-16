@@ -25,6 +25,10 @@ import {
   replyIdFor,
   wfReplyId,
   opIdFor,
+  withScope,
+  resolveBotworkerScope,
+  type BotworkerCycleScope,
+  type BotworkerScopePair,
   type ClaimContext,
 } from "./botworkerRuntime";
 
@@ -34,10 +38,10 @@ import { assignmentService } from "./assignmentService";
 import { listMessages, getHistoryForBot, getGroupedHistoryForBot, toBotText, toBotImages, type MessageDoc } from "./messageService";
 import { getConversation } from "./conversationService";
 import { handoffService } from "./handoffService";
-import { assertPlatformApiDisabled, type Platform } from "../lib/safety";
+import { assertPlatformApiDisabled, BOTWORKER_BACKENDS, type Platform } from "../lib/safety";
 import type { ShadowReplyDoc } from "./shadowReplyService";
 import { bufferService, type BufferConfig, type BufferMessageDoc } from "./bufferService";
-import { getSystemConfig } from "./systemConfigService";
+import { getSystemConfig, type SystemConfigDoc } from "./systemConfigService";
 // ⚡ callBot ย้ายไป botCallService (แก้ circular dependency กับ workflowEngine)
 import { callBot } from "./botCallService";
 // ⚡ Workflow engine (แบบ Zaapi Flow Builder) — ① resume ② priority ③ บอท
@@ -223,12 +227,33 @@ async function findPersistedReplies(batchId: string | undefined): Promise<{
   return { ids, workflow: wf.length > 0, envelope };
 }
 
+// ─── dormant row transition (claim owner เดียว) ──
+//   settle claim → terminal แล้ว mark rows ของ claim นั้นเป็น dormant state:
+//   "failed" = carryable (inbound ใหม่ distinct ใน conv เดียวกันปลุกได้)
+//   "quarantined" = attempt cap หมด → terminal batch (ไม่ carry ตลอดกาล)
+async function markRowsDormant(claimId: string, to: "failed" | "quarantined", error?: string): Promise<void> {
+  const bufColl = await getCollection<BufferMessageDoc>(COLLECTIONS.bufferMessages);
+  if (to === "quarantined") {
+    await bufColl.updateMany(
+      { claim_id: claimId, kind: { $ne: "conv_lock" }, status: { $in: ["buffered", "processing", "failed"] } },
+      { $set: { status: "quarantined" } }
+    );
+    return;
+  }
+  // failed — ไม่ทับ rows ที่ dormant อยู่แล้ว (เก็บ error class เดิมไว้)
+  await bufColl.updateMany(
+    { claim_id: claimId, kind: { $ne: "conv_lock" }, status: { $in: ["buffered", "processing"] } },
+    { $set: { status: "failed", error: error ?? "interrupted_before_durable_outcome", failed_at: new Date() } }
+  );
+}
+
 // ─── claimMessage — single concurrent owner via deterministic _id ──
 //   absent → insert claim (E11000 = loser)
 //   processing + active lease + owner อื่น → loser
 //   processing + active lease + owner=ตัวเอง + ไม่ได้ in-flight → reuse ctx (buffer flush)
-//   processing + expired lease → reclaim doc เดิม (fencing++/attempt++)
-//   terminal → skip (ไม่แตะอีก)
+//   processing + expired lease → reconcile-only (provider=0):
+//     evidence → finalize-only · ไม่มี → settle bot_failed dormant · cap → terminal
+//   terminal → skip (ไม่แตะอีก — bot_failed ถูก revive ผ่าน carry-forward เท่านั้น)
 //   legacy terminal docs → skip (backward compat)
 
 async function claimMessage(msg: {
@@ -272,8 +297,9 @@ async function claimMessage(msg: {
     if (signal?.aborted) return { kind: "skip", detail: "recovery aborted" };
     // expired → attempt cap → bot_failed terminal (ไม่วน)
     // ⚡ CAS บน doc ที่เห็นจริง — worker อื่น reclaim ก่อน → filter ไม่ match → ห้าม terminal ทับ
+    //   dormant rows ของ batch ที่ cap หมด → quarantined (ไม่ carry ตลอดกาล)
     if ((existing.attempt || 1) >= botworkerRuntime.maxClaimAttempts) {
-      await coll.updateOne(
+      const capped = await coll.updateOne(
         {
           _id: claimId,
           status: "processing",
@@ -291,39 +317,44 @@ async function claimMessage(msg: {
           },
         }
       );
+      if (capped.matchedCount === 1) await markRowsDormant(claimId, "quarantined");
       return { kind: "skip", detail: "claim attempts exhausted → bot_failed" };
     }
-    // expired → reclaim doc เดิม (ไม่ insert ใหม่)
-    // ⚡ returnDocument:"after" — ctx ต้องถือ owner/token ใหม่ ไม่ใช่ snapshot ก่อน update
-    const reclaimed = await coll.findOneAndUpdate(
-      { _id: claimId, status: "processing", lease_expires_at: { $lt: now } },
-      {
-        $set: {
-          owner_id: botworkerRuntime.ownerId,
-          lease_expires_at: new Date(now.getTime() + botworkerRuntime.claimLeaseMs),
-          updated_at: now,
+    // ⚡ expired lease — reconcile-only (provider=0, ไม่มี re-execution):
+    //   committed outcome/reply → reclaim CAS เพื่อถือ fencing แล้ว finalize-only
+    //   ไม่มี evidence → settle bot_failed dormant (rows → failed; inbound ใหม่
+    //   distinct ใน conv เดียวกันเท่านั้นที่ carry-forward ต่อ)
+    const found = existing.outcome_type
+      ? { ids: [] as string[], workflow: false, envelope: undefined }
+      : await findPersistedReplies(existing.batch_id);
+    if (existing.outcome_type || found.ids.length > 0) {
+      const reclaimed = await coll.findOneAndUpdate(
+        { _id: claimId, status: "processing", lease_expires_at: { $lt: now } },
+        {
+          $set: {
+            owner_id: botworkerRuntime.ownerId,
+            lease_expires_at: new Date(now.getTime() + botworkerRuntime.claimLeaseMs),
+            updated_at: now,
+          },
+          $inc: { fencing_token: 1, attempt: 1 },
         },
-        $inc: { fencing_token: 1, attempt: 1 },
-      },
-      { returnDocument: "after" }
-    );
-    if (!reclaimed) {
-      return { kind: "skip", detail: "reclaim race lost" };
-    }
-    const ctx = ctxFromDoc(reclaimed);
-    // recovery: outcome recorded แล้ว crash ก่อน finalize → finalize only
-    if (reclaimed.outcome_type) {
-      await finalizeClaims(ctx, {
-        type: reclaimed.outcome_type,
-        reply_ids: reclaimed.reply_ids || [],
-        side_effects: reclaimed.side_effects || [],
-      });
-      return { kind: "finalized", status: reclaimed.outcome_type, detail: "recovered outcome → finalized" };
-    }
-    // recovery: reply persist แล้ว crash ก่อน finalize → finalize โดยไม่เรียก LLM ซ้ำ
-    // ⚡ outcome จาก envelope บน reply doc — ห้ามเดา (trigger_matched/handed_off ≠ guessable)
-    const found = await findPersistedReplies(reclaimed.batch_id);
-    if (found.ids.length > 0) {
+        { returnDocument: "after" }
+      );
+      if (!reclaimed) {
+        return { kind: "skip", detail: "reclaim race lost" };
+      }
+      const ctx = ctxFromDoc(reclaimed);
+      // recovery: outcome recorded แล้ว crash ก่อน finalize → finalize only
+      if (reclaimed.outcome_type) {
+        await finalizeClaims(ctx, {
+          type: reclaimed.outcome_type,
+          reply_ids: reclaimed.reply_ids || [],
+          side_effects: reclaimed.side_effects || [],
+        });
+        return { kind: "finalized", status: reclaimed.outcome_type, detail: "recovered outcome → finalized" };
+      }
+      // recovery: reply persist แล้ว crash ก่อน finalize → finalize โดยไม่เรียก LLM ซ้ำ
+      // ⚡ outcome จาก envelope บน reply doc — ห้ามเดา (trigger_matched/handed_off ≠ guessable)
       const env = found.envelope;
       const outcome = env?.outcome_type || (found.workflow ? "workflow_actioned" : "bot_answered");
       await finalizeClaims(ctx, {
@@ -340,8 +371,30 @@ async function claimMessage(msg: {
       });
       return { kind: "finalized", status: outcome, detail: "reply persisted → finalized without LLM" };
     }
-    // ไม่มี outcome/reply → re-execute (crash ก่อน side effect → caller ใช้ operation key dedupe)
-    return { kind: "claimed", ctx };
+    // ไม่มี durable outcome → settle เป็น canonical dormant failure (provider=0)
+    const settled = await coll.updateOne(
+      {
+        _id: claimId,
+        status: "processing",
+        lease_expires_at: { $lt: now },
+        owner_id: existing.owner_id,
+        fencing_token: existing.fencing_token,
+      },
+      {
+        $set: {
+          status: "bot_failed",
+          outcome_type: "bot_failed",
+          error: "interrupted_before_durable_outcome",
+          processed_at: new Date(),
+          updated_at: new Date(),
+        },
+      }
+    );
+    if (settled.matchedCount === 1) {
+      await markRowsDormant(claimId, "failed", "interrupted_before_durable_outcome");
+      return { kind: "skip", detail: "expired claim settled → bot_failed dormant" };
+    }
+    return { kind: "skip", detail: "settle CAS lost" };
   }
 
   // ไม่มี claim doc → legacy terminal check (backward compat 1,574 dup groups)
@@ -631,7 +684,7 @@ async function settleWorkflowResult(
 // ลำดับ:
 //   1. ถ้ามี assigned_to อยู่แล้ว → ใช้คนเดิม
 //   2. ถ้าไม่มี → หา admin คนสุดท้ายที่เคยตอบ (getLastReplyAdmin)
-//   3. ถ้าไม่มี → round-robin (autoAssignConversation)
+//   3. ถ้าไม่มี → round-robin (reserveNextAgent ผ่าน handoffToAdminTest)
 //   4. ถ้า conversation ปิดอยู่ → reopen ก่อน
 //
 // ⚡ botworker parallel sandbox — ใช้ handoffToAdminTest เท่านั้น
@@ -689,7 +742,10 @@ export async function processMessage(msg: {
   raw_payload?: unknown;
   images?: string[];  // ⚡ Phase 1F — image URLs รวมจาก buffer flush
   claimContext?: ClaimContext; // ⚡ batch flusher ส่ง ctx ของ member claims มา — ห้าม claim ซ้ำ
-}): Promise<{ status: string; detail: string; finalized: boolean; lost: boolean }> {
+  // ⚡ outer cancellation signal — era (kill switch/shutdown) / recovery abort
+  //   combine กับ claim ownership heartbeat เป็น claimSignal เดียว → ไหลถึง
+  //   processClaimedMessage → engineMsg → callBot queue/fetch
+}, signal?: AbortSignal): Promise<{ status: string; detail: string; finalized: boolean; lost: boolean }> {
   let ctx = msg.claimContext;
   if (!ctx) {
     const claimed = await claimMessage(msg);
@@ -706,14 +762,22 @@ export async function processMessage(msg: {
   //   (recovery เจอ same-owner + in-flight → leave ได้เพราะ executor จริงอยู่)
   for (const id of ctx.claim_ids) activeClaims.add(id);
   const abortCtrl = new AbortController();
+  // ⚡ claim signal = era cancellation + claim ownership — source รวมเดียวสำหรับ
+  //   outbound/queue/finalize boundary (timeout อยู่ใน callBot ไม่ใช่ที่นี่)
+  const claimSignal = signal
+    ? AbortSignal.any([signal, abortCtrl.signal])
+    : abortCtrl.signal;
   const heartbeat = startHeartbeat(ctx, abortCtrl);
   try {
-    const res = await processClaimedMessage(msg, ctx, abortCtrl.signal);
+    const res = await processClaimedMessage(msg, ctx, claimSignal);
     // fenced finalize — heartbeat lost (matchedCount=0) → ห้าม persist/finalize
     // ⚡ finalization contract: finalized เมื่อ terminal write ครบทุก claim_ids เท่านั้น
     //    lost/no-outcome → finalized=false → caller (flush) ห้ามลบ buffer rows
+    // ⚡ cancellation fence — era abort หลัง provider response แต่ก่อน finalize
+    //    → claim ค้าง processing (recoverable); evidence ที่ persist ไปแล้วถูก
+    //    recovery reuse — ห้าม finalize ใน cancelled era
     let finalized = false;
-    if (res.outcome && !ctx.lost) {
+    if (res.outcome && !ctx.lost && !claimSignal.aborted) {
       const n = await finalizeClaims(ctx, res.outcome);
       finalized = n === ctx.claim_ids.length;
     }
@@ -722,14 +786,6 @@ export async function processMessage(msg: {
     clearInterval(heartbeat);
     for (const id of ctx.claim_ids) activeClaims.delete(id);
   }
-}
-
-// bounded signal สำหรับ external bot call: timeout < lease + abort เมื่อเสีย ownership
-function botCallSignal(ownershipSignal: AbortSignal): AbortSignal {
-  return AbortSignal.any([
-    AbortSignal.timeout(botworkerRuntime.botCallTimeoutMs),
-    ownershipSignal,
-  ]);
 }
 
 // processing core — ต้องได้ ctx มาเท่านั้น (ห้าม claim เอง)
@@ -746,14 +802,6 @@ async function processClaimedMessage(msg: {
   // ⛔ Safety guard — กันเรียก platform API โดยไม่ตั้งใจ
   assertPlatformApiDisabled(msg.platform, "send");
   assertPlatformApiDisabled(msg.platform, "read");
-
-  // ⚡ Phase 2Q — อัปเดต concurrency limit จาก config (admin ปรับได้ใน /admin-config)
-  try {
-    const sysConfig = await getSystemConfig();
-    currentConcurrencyLimit = sysConfig.bot_concurrency_limit || 50;
-  } catch {
-    // ถ้าอ่าน config ไม่ได้ → ใช้ค่าเดิม
-  }
 
   // ดึง shop_name จาก conversation — Python bot ต้องการชื่อร้าน (ไม่ใช่ shop_id ตัวเลข)
   // เพื่อกรองสินค้าเฉพาะร้านที่ลูกค้าทักเข้ามา
@@ -831,8 +879,15 @@ async function processClaimedMessage(msg: {
     // ⚡ current-batch exclusion — let_ai_respond ตัด batch นี้ออกจาก history
     //   (ข้อความเดียวกันอยู่ใน msg.text/images แล้ว — ห้ามซ้ำเป็น history turn)
     exclude_message_ids: ctx.message_ids,
+    // ⚡ claim signal (era+ownership) — let_ai_respond ส่งต่อให้ callBot:
+    //   queued workflow call ต้องออกเมื่อ kill switch/ownership ตาย, fetch bounded ใน callBot
+    signal,
   };
 
+  // ⚡ try ต้องครอบ workflow sections ด้วย — matchAndRun/resumeFlow throw
+  //   (callBot abort/provider error) ต้องไหลถึง classification catch เดียวด้านล่าง
+  //   (signal.aborted → cancelled recoverable / else → bot_failed terminal)
+  try {
   if (wfConfig.workflow_enabled) {
     // ① Active Flow Resume — flow รอ reply อยู่ → ข้อความใหม่เข้า flow ก่อนเสมอ
     const activeRun = await workflowEngine.getActiveRun(msg.conversation_id);
@@ -900,7 +955,6 @@ async function processClaimedMessage(msg: {
     }
   }
 
-  try {
     // 2. Check trigger
     const trigger = await triggerService.matchTrigger(msg.text, {
       shopId: msg.shop_id,
@@ -988,27 +1042,21 @@ async function processClaimedMessage(msg: {
         includeSandboxAdmin: true,  // ⚡ merge botworker_messages (แอดมินใน parallel เคยตอบอะไร)
         excludeMessageIds: ctx.message_ids,
       });
-      // ⚡ Phase 2Q — acquire concurrency slot ก่อนยิงบอท
-      await acquireBotSlot();
-      let botResp;
-      try {
-        botResp = await callBot({
-          platform: msg.platform,
-          message: botText,
-          shopId: msg.shop_id,
-          shopName,
-          history,
-          ...(botImages.length > 0 ? { images: botImages } : {}),
-          // ⚡ Phase 2A — ส่ง conversationId + testSource (parallel sandbox — handoff เขียน test store)
-          conversationId: msg.conversation_id,
-          simulate: true,
-          testSource: WORKER_SOURCE,
-          // ⚡ bounded HTTP timeout + abort เมื่อเสีย ownership กลางคัน
-          signal: botCallSignal(signal),
-        });
-      } finally {
-        releaseBotSlot();
-      }
+      // ⚡ outbound concurrency อยู่ใน callBot (testSource=botworker) — owner เดียวครอบทุก path
+      const botResp = await callBot({
+        platform: msg.platform,
+        message: botText,
+        shopId: msg.shop_id,
+        shopName,
+        history,
+        ...(botImages.length > 0 ? { images: botImages } : {}),
+        // ⚡ Phase 2A — ส่ง conversationId + testSource (parallel sandbox — handoff เขียน test store)
+        conversationId: msg.conversation_id,
+        simulate: true,
+        testSource: WORKER_SOURCE,
+        // ⚡ claim signal (era+ownership) — timeout composition อยู่ใน callBot
+        signal,
+      });
       // heartbeat lost กลางคัน → stale owner — ห้าม persist/finalize
       if (ctx.lost) return { status: "lost_ownership", detail: "claim lost mid-bot-call" };
       const shadowReplyId = await storeBotReply({
@@ -1082,27 +1130,21 @@ async function processClaimedMessage(msg: {
       includeSandboxAdmin: true,  // ⚡ merge botworker_messages (แอดมินใน parallel เคยตอบอะไร)
       excludeMessageIds: ctx.message_ids,
     });
-    // ⚡ Phase 2Q — acquire concurrency slot ก่อนยิงบอท
-    await acquireBotSlot();
-    let botResp;
-    try {
-      botResp = await callBot({
-        platform: msg.platform,
-        message: botText,
-        shopId: msg.shop_id,
-        shopName,
-        history,
-        ...(botImages.length > 0 ? { images: botImages } : {}),
-        // ⚡ Phase 2A — ส่ง conversationId + testSource (parallel sandbox — handoff เขียน test store)
-        conversationId: msg.conversation_id,
-        simulate: true,
-        testSource: WORKER_SOURCE,
-        // ⚡ bounded HTTP timeout + abort เมื่อเสีย ownership กลางคัน
-        signal: botCallSignal(signal),
-      });
-    } finally {
-      releaseBotSlot();
-    }
+    // ⚡ outbound concurrency อยู่ใน callBot (testSource=botworker) — owner เดียวครอบทุก path
+    const botResp = await callBot({
+      platform: msg.platform,
+      message: botText,
+      shopId: msg.shop_id,
+      shopName,
+      history,
+      ...(botImages.length > 0 ? { images: botImages } : {}),
+      // ⚡ Phase 2A — ส่ง conversationId + testSource (parallel sandbox — handoff เขียน test store)
+      conversationId: msg.conversation_id,
+      simulate: true,
+      testSource: WORKER_SOURCE,
+      // ⚡ claim signal (era+ownership) — timeout composition อยู่ใน callBot
+      signal,
+    });
     // heartbeat lost กลางคัน → stale owner — ห้าม persist/finalize
     if (ctx.lost) return { status: "lost_ownership", detail: "claim lost mid-bot-call" };
 
@@ -1168,8 +1210,22 @@ async function processClaimedMessage(msg: {
     };
 
   } catch (err) {
-    // บอท error → บันทึก error — bot_failed terminal one-shot (ไม่ retry อัตโนมัติ)
     const errorMsg = err instanceof Error ? err.message : String(err);
+    // ⚡ cancellation ≠ provider error — kill switch (era) / ownership loss abort
+    //   outbound+queue: claim คง processing → rising-edge recovery รับต่อ
+    //   (timeout ของ fetch ไม่ abort claim signal → provider timeout ยังเป็น bot_failed)
+    if (signal.aborted) {
+      await logBotworkerEvent({
+        type: "bot_cancelled",
+        actor: "bot-worker",
+        conversation_id: msg.conversation_id,
+        shop_id: msg.shop_id,
+        platform: msg.platform,
+        metadata: { error: errorMsg },
+      });
+      return { status: "cancelled", detail: `cancelled: ${errorMsg}` };
+    }
+    // บอท error → บันทึก error — bot_failed terminal one-shot (ไม่ retry อัตโนมัติ)
     await logBotworkerEvent({
       type: "bot_error",
       actor: "bot-worker",
@@ -1191,32 +1247,178 @@ async function processClaimedMessage(msg: {
 //   10 คำถามเข้าพร้อมกัน → ยิง 10 reqs ไปบอทพร้อมกัน → บอทตอบทีละคำตอบเสร็จก่อนก็ตอบก่อน
 //   ไม่ใช่นั่งรอคำถามแรกเสร็จถึงเริ่มคำถามสอง และไม่ใช่รอทั้ง 10 เสร็จถึงส่งคำตอบ
 //
-// ⚡ Phase 2Q — Concurrency limiter (semaphore pattern)
-//   ถ้า buffer เปิด → 500 ข้อความเข้ามา → buffer รวมเป็น 200 context → flush พร้อมกัน
-//   ถ้าไม่จำกัด → ยิงบอท 200 reqs พร้อมกัน → Python bot โอเวอร์โหลด
-//   ใช้ bot_concurrency_limit จาก config (admin ปรับได้ใน /admin-config, default 50)
-let activeBotCalls = 0;
-let currentConcurrencyLimit = 50;
-const botCallQueue: Array<() => void> = [];
+// ─── Worker leadership — single active worker ต่อ production scope ──
+// ⚡ singleton doc botworker_state._id="botworker:leader" — CAS vocabulary เดียว
+//   กับ message claim (owner_id + fencing_token + lease_expires_at)
+//   acquire/renew/takeover อยู่ใน ensureLeadership() ฟังก์ชันเดียว — admission
+//   gates (poll/recovery/wait-timeout) เรียกผ่าน acquireWorkerLeadership() เท่านั้น
+//   ห้าม duplicate CAS protocol หรือสร้าง owner ที่สอง
 
-async function acquireBotSlot(): Promise<void> {
-  // ⚡ Phase 2Q — อ่าน limit จาก config ทุกครั้ง (admin อาจเปลี่ยนได้)
-  if (activeBotCalls < currentConcurrencyLimit) {
-    activeBotCalls++;
-    return;
-  }
-  await new Promise<void>((resolve) => {
-    botCallQueue.push(() => {
-      activeBotCalls++;
-      resolve();
-    });
-  });
+interface WorkerLeaderDoc extends Document {
+  _id: string;
+  owner_id: string;
+  fencing_token: number;
+  lease_expires_at: Date;
+  updated_at: Date;
 }
 
-function releaseBotSlot(): void {
-  activeBotCalls--;
-  const next = botCallQueue.shift();
-  if (next) next();
+const WORKER_LEADER_ID = "botworker:leader";
+
+// ⚡ fencing context ที่ admission capture — heartbeat renew ได้เฉพาะ ctx นี้
+//   (owner_id+fencing_token ตรงเป๊ะ + lease ยังไม่หมด) — ห้าม takeover/reacquire
+//   ผ่าน heartbeat; takeover เป็น admission-time operation เท่านั้น
+interface LeaderCtx {
+  owner_id: string;
+  fencing_token: number;
+}
+
+let leaderCtx: LeaderCtx | null = null; // lease ctx ปัจจุบันของ process (null = ไม่ถือ/invalid)
+
+// ⚡ bounded re-read หลัง CAS miss/E11000 — same-process concurrent admission
+//   (poll+recovery ชนกันบน absent doc) ต้องเห็น winner ที่เป็น ownerId เดียวกัน
+//   เป็น admission สำเร็จ ไม่ใช่ loss — re-read ครั้งเดียวเท่านั้น ห้าม loop
+async function rereadLeaderForOwner(
+  coll: Awaited<ReturnType<typeof getCollection<WorkerLeaderDoc>>>,
+  ownerId: string,
+): Promise<LeaderCtx | false> {
+  const d = await coll.findOne({ _id: WORKER_LEADER_ID });
+  if (d && d.owner_id === ownerId && (d.lease_expires_at?.getTime() || 0) > Date.now()) {
+    return { owner_id: ownerId, fencing_token: d.fencing_token };
+  }
+  return false;
+}
+
+// ⚡ DB-level verb — explicit ownerId param สำหรับ lease tests; production callers
+//   ใช้ default = process identity (botworkerRuntime.ownerId) เท่านั้น
+//   absent→insert(token 1) · mine+active→renew (token ไม่เพิ่ม) · expired→takeover
+//   CAS (+1 token) · foreign+active→false · CAS miss/E11000→bounded re-read
+//   (same-owner active → ctx; foreign → false) · ไม่มี unfenced read-then-update
+export async function ensureLeadership(
+  ownerId = botworkerRuntime.ownerId,
+): Promise<LeaderCtx | false> {
+  const coll = await getCollection<WorkerLeaderDoc>(COLLECTIONS.botworkerState);
+  const doc = await coll.findOne({ _id: WORKER_LEADER_ID });
+  // ⚡ clock ต้องจับหลัง read — lease อาจหมดระหว่าง await findOne; decision +
+  //   CAS filter + lease_expires_at/updated_at ของทุก branch อิง now รอบเดียวกัน
+  //   ที่นี่เท่านั้น (stale-now จะทำ renew expired doc ด้วย token เดิมผิด contract)
+  const now = Date.now();
+  if (doc) {
+    const active = (doc.lease_expires_at?.getTime() || 0) > now;
+    if (doc.owner_id === ownerId && active) {
+      // renew own lease — fenced ด้วย identity+token+lease>now (token เดิม ไม่ $inc;
+      //   lease ที่หมดอายุไปแล้วห้ามต่อ — takeover ต้องผ่าน expired branch เท่านั้น)
+      const r = await coll.updateOne(
+        {
+          _id: WORKER_LEADER_ID,
+          owner_id: ownerId,
+          fencing_token: doc.fencing_token,
+          lease_expires_at: { $gt: new Date(now) },
+        },
+        { $set: { lease_expires_at: new Date(now + botworkerRuntime.leaderLeaseMs), updated_at: new Date(now) } },
+      );
+      if (r.matchedCount === 1) return { owner_id: ownerId, fencing_token: doc.fencing_token };
+      return rereadLeaderForOwner(coll, ownerId); // CAS miss — bounded re-read
+    }
+    if (!active) {
+      // expired (owner ไหนก็ได้) — fenced takeover: identity+token+expiry ต้องตรง
+      //   snapshot ที่ observe ไว้; CAS miss = มีผู้ชนะอื่น → bounded re-read
+      const r = await coll.updateOne(
+        {
+          _id: WORKER_LEADER_ID,
+          owner_id: doc.owner_id,
+          fencing_token: doc.fencing_token,
+          lease_expires_at: { $lt: new Date(now) },
+        },
+        {
+          $set: {
+            owner_id: ownerId,
+            lease_expires_at: new Date(now + botworkerRuntime.leaderLeaseMs),
+            updated_at: new Date(now),
+          },
+          $inc: { fencing_token: 1 },
+        },
+      );
+      if (r.matchedCount === 1) return { owner_id: ownerId, fencing_token: doc.fencing_token + 1 };
+      return rereadLeaderForOwner(coll, ownerId);
+    }
+    return false; // foreign active lease — loser
+  }
+  // absent → insert singleton (E11000 = raced acquire — re-read พิสูจน์ winner)
+  try {
+    await coll.insertOne({
+      _id: WORKER_LEADER_ID,
+      owner_id: ownerId,
+      fencing_token: 1,
+      lease_expires_at: new Date(now + botworkerRuntime.leaderLeaseMs),
+      updated_at: new Date(now),
+    } as unknown as WorkerLeaderDoc);
+    return { owner_id: ownerId, fencing_token: 1 };
+  } catch (e) {
+    if ((e as { code?: number }).code === 11000) return rereadLeaderForOwner(coll, ownerId);
+    throw e;
+  }
+}
+
+// ⚡ renew verb — heartbeat เท่านั้นที่ใช้: ต่ออายุ lease ctx ที่ capture ตอน
+//   admission เท่านั้น (exact owner_id+fencing_token และ lease ต้องยังไม่หมด)
+//   ห้าม takeover/reacquire — ctx superseded → true (beat ใหม่ใช้ ctx ใหม่เอง)
+//   ctx invalid/foreign/expired → false → caller ตัดสิน stop heartbeat
+async function renewLeadership(ctx: LeaderCtx): Promise<boolean> {
+  const coll = await getCollection<WorkerLeaderDoc>(COLLECTIONS.botworkerState);
+  const d = await coll.findOne({ _id: WORKER_LEADER_ID });
+  if (leaderCtx !== ctx) return true; // ctx ถูก admission ใหม่แทนแล้ว — beat ถัดไปใช้ ctx ใหม่
+  if (!d || d.owner_id !== ctx.owner_id || d.fencing_token !== ctx.fencing_token) return false;
+  if ((d.lease_expires_at?.getTime() || 0) <= Date.now()) return false; // expired = takeover territory
+  const now = Date.now();
+  const r = await coll.updateOne(
+    {
+      _id: WORKER_LEADER_ID,
+      owner_id: ctx.owner_id,
+      fencing_token: ctx.fencing_token,
+      lease_expires_at: { $gt: new Date(now) },
+    },
+    { $set: { lease_expires_at: new Date(now + botworkerRuntime.leaderLeaseMs), updated_at: new Date(now) } },
+  );
+  return r.matchedCount === 1;
+}
+
+// ⚡ heartbeat owner เดียว — timer เดียวต่อ process; renew เฉพาะ leaderCtx ที่
+//   capture ตอน admission; renew fail หรือ ctx invalid → stop ตัวเอง
+//   (leadership loss ≠ shutdown: in-flight ClaimContext work ทำต่อ
+//   แต่ admission gate รอบถัดไปปฏิเสธงานใหม่)
+let leaderHeartbeat: NodeJS.Timeout | null = null;
+
+function startLeaderHeartbeat(): void {
+  if (leaderHeartbeat) return; // single timer — ห้ามซ้อน
+  leaderHeartbeat = setInterval(() => {
+    const ctx = leaderCtx;
+    if (!ctx) return stopLeaderHeartbeat();
+    renewLeadership(ctx)
+      .then((ok) => { if (!ok && leaderCtx === ctx) stopLeaderHeartbeat(); })
+      .catch(() => { if (leaderCtx === ctx) stopLeaderHeartbeat(); });
+  }, botworkerRuntime.leaderHeartbeatMs);
+  leaderHeartbeat.unref();
+}
+
+function stopLeaderHeartbeat(): void {
+  leaderCtx = null; // invalidate ctx — renew ที่ค้างอยู่ต้องไม่เขียนต่อ
+  if (leaderHeartbeat) clearInterval(leaderHeartbeat);
+  leaderHeartbeat = null;
+}
+
+// ⚡ admission gate เดียวของ worker — acquire สำเร็จ → capture ctx + arm heartbeat
+//   ล้มเหลว → คืน false เฉยๆ ห้าม stop heartbeat: false สะท้อน view ของ caller
+//   (อาจ stale หรือ owner อื่นใน test rebind) — ctx ที่ arm อยู่อาจเป็นของ
+//   admission ใหม่กว่า; heartbeat ตายด้วย renewLeadership fail (single loss
+//   detector) หรือ clearPendingWork (single stop owner) เท่านั้น
+//   era abort กลาง acquire → คืน false โดยไม่ arm — heartbeat lifecycle เป็น
+//   หน้าที่ของ clearPendingWork เช่นกัน
+async function acquireWorkerLeadership(signal?: AbortSignal): Promise<LeaderCtx | false> {
+  const ctx = await ensureLeadership();
+  if (!ctx || signal?.aborted) return false; // loser/era-dead — heartbeat ห้ามถูกแตะจากตรงนี้
+  leaderCtx = ctx;
+  startLeaderHeartbeat();
+  return ctx;
 }
 
 // track in-flight promises (เก็บไว้สำหรับ graceful shutdown เท่านั้น — ไม่ await ในลูป)
@@ -1224,23 +1426,38 @@ const inFlight = new Set<Promise<unknown>>();
 // ⚡ parent poll เองก็ต้องอยู่ใน drain — poll ที่รอ Mongo ข้าม shutdown ต้องถูกรอจนจบ
 const activePolls = new Set<Promise<unknown>>();
 
-export function pollNewMessages(since?: Date): Promise<{
+// ⚡ Phase 2D — scope resolver owner เดียวอยู่ใน botworkerRuntime (bufferService
+//   ใช้ delayed-execution revalidation ด้วย — ห้าม cycle) — re-export เพื่อ callers เดิม
+export { resolveBotworkerScope } from "./botworkerRuntime";
+
+export function pollNewMessages(scope: BotworkerCycleScope): Promise<{
   found: number;
   processed: number;
   results: { message_id: string; status: string; detail: string }[];
 }> {
-  // ⚡ era signal capture ก่อน await แรกเสมอ — poll ที่รอ Mongo ข้าม shutdown
-  //   ต้องตายพร้อม era เดิม (clearPendingWork abort ถึง) ห้ามสร้าง era ใหม่เอง
+  // ⚡ era signal capture ก่อน await แรกเสมอ (synchronous — ห้ามย้ายหลัง gate;
+  //   eraSignal() สร้าง controller ใหม่เมื่อเดิมถูก abort ดังนั้นต้องจับก่อน
+  //   shutdown จะได้ตายพร้อม era เดิม ไม่ resurrect era ใหม่)
+  // ⚡ Phase 2D — scope เป็น required snapshot ต่อ pass (resolve โดย caller):
+  //   disabled rows ถูก filter ที่ Mongo discovery ก่อน claim เสมอ
   const signal = eraSignal();
-  const run = pollNewMessagesInEra(since, signal);
+  const run = (async () => {
+    // ⚡ single-active-worker admission gate — loser ห้าม scan/mutate work
+    //   collections เลย; abort ก่อน/กลาง gate ต้องออกเงียบ (abort กลาง acquire →
+    //   acquireWorkerLeadership unwind เอง — heartbeat ไม่รอด shutdown)
+    if (signal.aborted || !(await acquireWorkerLeadership(signal))) {
+      return { found: 0, processed: 0, results: [] as { message_id: string; status: string; detail: string }[] };
+    }
+    return pollNewMessagesInEra(signal, scope);
+  })();
   activePolls.add(run);
   run.then(() => activePolls.delete(run), () => activePolls.delete(run));
   return run;
 }
 
 async function pollNewMessagesInEra(
-  since: Date | undefined,
-  signal: AbortSignal
+  signal: AbortSignal,
+  scope: BotworkerCycleScope
 ): Promise<{
   found: number;
   processed: number;
@@ -1249,20 +1466,19 @@ async function pollNewMessagesInEra(
   const coll = await getCollection<{
     message_id: string; conversation_id: string; shop_id: string;
     platform: Platform; role: string; direction: string; text: string;
-    raw_payload?: unknown;
+    raw_payload?: unknown; created_timestamp: Date;
   }>(COLLECTIONS.messages);
 
   // หาข้อความใหม่: role=user, direction=in, เรียงใหม่ล่าสุดก่อน
-  // ⚡ Phase 2P — ถ้ามี since → ประมวลผลเฉพาะข้อความที่เข้ามาหลัง since (กันประมวลผลข้อความเก่าตอนเปิดครั้งแรก)
-  // ⚡ Phase 2Q — ไม่ limit แล้ว — ดึงทั้งหมดที่เข้ามาใหม่ (buffer เป็นตัวคุมปริมาณจริง)
-  // ดึง raw_payload มาด้วย — สำหรับ rich-media messages (item card, order card, ...)
+  // ⚡ ดึง raw_payload มาด้วย — สำหรับ rich-media messages (item card, order card, ...)
   // ที่ text เป็น placeholder "[item]" ต้องใช้ raw_payload แปลงเป็น tag [สินค้า: <item_id>]
+  // ⚡ admission cutoff — per-pair created_timestamp > max(global,platform,shop edge)
+  //   อยู่ใน scope filter owner เดียว: ข้อความก่อนเปิด switch ไม่ถูก discover เลย
   const query: Record<string, unknown> = { role: "user", direction: "in" };
-  if (since) {
-    query.created_timestamp = { $gt: since };
-  }
+  // ⚡ Phase 2D — scope filter ก่อน claim เสมอ ({$and:[base,$or-pairs]} —
+  //   deny-all เมื่อ scope ว่าง → disabled rows ไม่ถูก discover เลย)
   const docs = await coll
-    .find(query)
+    .find(withScope(query, scope, "created_timestamp"))
     .sort({ created_timestamp: -1 })
     .toArray();
 
@@ -1279,8 +1495,8 @@ async function pollNewMessagesInEra(
     ).map((d) => d.message_id)
   );
 
-  // อ่าน buffer config จาก system config
-  const sysConfig = await getSystemConfig();
+  // อ่าน buffer config จาก cycle-scope snapshot (Phase 2D — ห้าม re-read ภายใน pass)
+  const sysConfig = scope.config;
   const bufferConfig: BufferConfig = {
     bufferEnabled: sysConfig.bot_buffer_enabled,
     bufferWindowMs: sysConfig.bot_buffer_window_ms,
@@ -1327,6 +1543,10 @@ async function pollNewMessagesInEra(
             platform: doc.platform,
             text: doc.text,
             raw_payload: doc.raw_payload,
+            // ⚡ admission proof — delayed-execution boundary (flush) revalidates
+            //   scope + cutoff จาก 2 fields นี้ (created_timestamp = platform event time)
+            created_timestamp: doc.created_timestamp,
+            admitted_edge: scope.global_enabled_since,
             claimContext: claimed.ctx,   // ⚡ row ถือ ctx ไปจนถึง batch processor
           },
           bufferConfig,
@@ -1376,15 +1596,14 @@ export async function waitForInFlight(timeoutMs = 10000): Promise<void> {
 // ⚠️ gate bot_worker_enabled ที่ orchestration boundary นี้ —
 //    worker ปิดต้องไม่ recover/flush/process เลย
 
-// ⚡ Incident closure — boot recovery precedence (per-row):
-//   P1 claim missing   → orphan row → delete + audit event
-//   P2 claim terminal  → work finalized แล้ว → delete row
-//   P3 committed evidence (outcome_type / reply_ids / persisted reply)
-//      → existing finalize-only path ผ่าน claimMessage (ไม่เรียก LLM) → delete row
-//   P4 ไม่มี evidence → freshness gate: row.received_at + claim.claimed_at
-//      ต้อง valid และอยู่ใน window ทั้งคู่ ถึงจะเข้า batch
-//      stale → CAS claim → no_action/stale_at_recovery → delete row
-//      CAS lost → leave row untouched
+// ⚡ Recovery = reconciliation-only (provider=0 — ไม่มี execution path):
+//   claim missing   → orphan row → delete + audit event
+//   claim terminal  → bot_failed: ต่ำกว่า cap → row dormant "failed" · cap → "quarantined"
+//                     outcome อื่น → งานจบแล้ว → delete row
+//   claim processing → active lease (self/foreign) → leave + deferred wake-up
+//                      expired → claimMessage reconcile: evidence → finalize-only
+//                      ไม่มี → settle bot_failed dormant (rows → failed)
+//   dormant failed rows → ไม่แตะ — inbound ใหม่ distinct เดียวปลุก (carry-forward)
 interface RecoveryStats { stale: number; orphan: number; finalized: number; deferredUntil?: number }
 
 // ⚡ deferred wake-up — foreign active-lease rows ต้องกลับมา recover ใน era เดิม
@@ -1407,124 +1626,48 @@ const rowIdentityFilter = (row: BufferMessageDoc, claimId: string) => ({
   owner_id: row.owner_id,
   fencing_token: row.fencing_token,
 });
-const rowSyncUpdate = (ctx: ClaimContext) => ({
-  $set: { status: "buffered" as const, owner_id: ctx.owner_id, fencing_token: ctx.fencing_token },
-});
-
-// leave ต้องมี execution path เสมอ — re-read claim ครั้งเดียว:
-//   terminal/missing → "delete" (row leftover) · อื่น → defer bounded wake-up แล้ว "leave"
-//   (lease active → ตื่นหลัง expiry · expired/ของเราแต่ไม่มี executor → +250ms bounded)
-async function verifyForeignClaim(claimId: string, stats: RecoveryStats): Promise<"delete" | "leave"> {
-  const procColl = await getCollection<ChatProcessingDoc>(COLLECTIONS.chatProcessing);
-  const c2 = await procColl.findOne({ _id: claimId });
-  if (!c2 || c2.status !== "processing") return "delete";
+// leave ต้องมี wake-up path เสมอ — defer bounded หลัง lease expiry เท่านั้น
+//   (ไม่มี execution path ใน recovery — provider=0)
+function deferUntilExpiry(stats: RecoveryStats, leaseExpires: Date | undefined): "leave" {
   stats.deferredUntil = Math.min(
     stats.deferredUntil ?? Number.MAX_SAFE_INTEGER,
-    c2.lease_expires_at?.getTime() ?? Date.now()
+    leaseExpires?.getTime() ?? Date.now()
   );
   return "leave";
 }
 
-// ⚡ shared reconciliation owner — P3/P4 ใช้ร่วมกันหลัง row CAS miss (bounded, claim fencing authority)
-//   ctx0=null → establish ownership ใน loop ผ่าน claimMessage (expired lease เท่านั้น)
-//   settleOnly=true → ข้าม repair loop เข้า settle terminal ทันที (claimed-stale path)
-async function reconcileClaimedRow(
+// ⚡ terminal claim → row settle — bot_failed: ต่ำกว่า cap → dormant "failed"
+//   (carryable — inbound ใหม่ distinct ปลุกได้) · cap → "quarantined" ·
+//   terminal อื่น → งานจบแล้ว → delete row (row เป็น leftover)
+async function settleRowForTerminalClaim(
   row: BufferMessageDoc,
   claim: ChatProcessingDoc,
-  ctx0: ClaimContext | null,
-  stats: RecoveryStats,
-  settleOnly = false,
-  signal?: AbortSignal
-): Promise<"fresh" | "delete" | "leave"> {
-  const procColl = await getCollection<ChatProcessingDoc>(COLLECTIONS.chatProcessing);
-  const bufColl = await getCollection<BufferMessageDoc>(COLLECTIONS.bufferMessages);
-  const claimId = row.claim_id || claimIdFor(row.message_id);
-  let ctx = ctx0;
-
-  if (!settleOnly) {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const claimNow = await procColl.findOne({ _id: claimId });
-      if (!claimNow || claimNow.status !== "processing") return "delete"; // winner terminal → row leftover
-      const leaseActive = (claimNow.lease_expires_at?.getTime() || 0) > Date.now();
-      if (ctx) {
-        if (claimNow.owner_id !== ctx.owner_id || claimNow.fencing_token !== ctx.fencing_token) {
-          if (!leaseActive) { ctx = null; continue; } // winner ตายแล้ว → reclaim รอบถัดไป
-          stats.deferredUntil = Math.min(
-            stats.deferredUntil ?? Number.MAX_SAFE_INTEGER, claimNow.lease_expires_at!.getTime());
-          return "leave"; // foreign owner ทำงานจริง — wake-up scheduled
-        }
-      } else {
-        if (leaseActive && claimNow.owner_id !== botworkerRuntime.ownerId) {
-          stats.deferredUntil = Math.min(
-            stats.deferredUntil ?? Number.MAX_SAFE_INTEGER, claimNow.lease_expires_at!.getTime());
-          return "leave";
-        }
-        const res = await claimMessage({
-          message_id: row.message_id, conversation_id: row.conversation_id,
-          shop_id: row.shop_id, platform: row.platform,
-        }, signal);
-        if (res.kind === "finalized") { stats.finalized++; return "delete"; }
-        if (res.kind === "skip") return verifyForeignClaim(claimId, stats); // re-read พิสูจน์ winner/in-flight
-        ctx = res.ctx;
-        continue; // ctx เพิ่งได้ → re-read ยืนยัน fencing รอบถัดไป
-      }
-      const rowNow = await bufColl.findOne({ message_id: row.message_id, claim_id: claimId });
-      if (!rowNow) {
-        // row หายแต่ claim ยังเป็นเรา → restore deterministic membership จาก snapshot เดิม
-        try {
-          const { _id: _drop, ...rest } = row;
-          await bufColl.insertOne({
-            ...rest, status: "buffered",
-            owner_id: ctx.owner_id, fencing_token: ctx.fencing_token,
-          } as BufferMessageDoc);
-          return "fresh";
-        } catch (e) {
-          if ((e as { code?: number }).code === 11000) continue; // concurrent insert → re-read รอบถัดไป
-          throw e;
-        }
-      }
-      if (rowNow.status === "buffered" && rowNow.owner_id === ctx.owner_id && rowNow.fencing_token === ctx.fencing_token)
-        return "fresh"; // row ตรง ctx อยู่แล้ว
-      // claim authority ยังของเรา → repair row เข้า ctx ด้วย fenced CAS บน identity ล่าสุดของ row
-      const upd = await bufColl.updateOne(rowIdentityFilter(rowNow, claimId), rowSyncUpdate(ctx));
-      if (upd.matchedCount === 1) return "fresh";
-    }
+  bufColl: Awaited<ReturnType<typeof getCollection<BufferMessageDoc>>>
+): Promise<"delete" | "leave"> {
+  if (claim.status !== "bot_failed") return "delete";
+  if (row.status === "quarantined") return "leave";
+  if ((claim.attempt || 1) >= botworkerRuntime.maxClaimAttempts) {
+    await bufColl.updateOne(
+      { message_id: row.message_id, kind: { $ne: "conv_lock" } },
+      { $set: { status: "quarantined" } }
+    );
+    return "leave";
   }
-  if (!ctx) return verifyForeignClaim(claimId, stats); // ไม่เคยถือ ownership → verified leave + wake-up
-
-  // settle — claim ของเรา → terminalize + ลบ row ด้วย identity ล่าสุด (ห้ามทิ้ง processing เปล่า)
-  const outcome = {
-    type: "no_action" as const,
-    reply_ids: claim.reply_ids || [],
-    side_effects: claim.side_effects || [],
-    extra: { error: "stale_at_recovery" },
-  };
-  for (let i = 0; i < 2; i++) {
-    const n = await finalizeClaims(ctx, outcome);
-    if (n > 0) {
-      stats.stale++;
-      const rowFinal = await bufColl.findOne({ message_id: row.message_id, claim_id: claimId });
-      if (rowFinal) await bufColl.deleteOne(rowIdentityFilter(rowFinal, claimId));
-      return "delete";
-    }
-    const c2 = await procColl.findOne({ _id: claimId });
-    if (!c2 || c2.status !== "processing") return "delete";
-    if (c2.owner_id !== ctx.owner_id || c2.fencing_token !== ctx.fencing_token) {
-      stats.deferredUntil = Math.min(
-        stats.deferredUntil ?? Number.MAX_SAFE_INTEGER,
-        c2.lease_expires_at?.getTime() ?? Date.now());
-      return "leave"; // foreign/concurrent winner — verified + wake-up scheduled
-    }
-    // doc ยังตรง ctx → miss เมื่อกี้ transient → loop ลอง finalize ซ้ำครั้งเดียว
+  if (row.status !== "failed") {
+    await bufColl.updateOne(rowIdentityFilter(row, row.claim_id || claimIdFor(row.message_id)), {
+      $set: {
+        status: "failed",
+        error: claim.error ?? "interrupted_before_durable_outcome",
+        failed_at: new Date(),
+      },
+    });
   }
-  // ⚡ exhausted — ห้าม bare leave โดยไม่มี wake-up: re-read → defer owner เดิม
-  //   (terminal→delete · processing→wake หลัง lease expiry · foreign→defer expiry)
-  return verifyForeignClaim(claimId, stats);
+  return "leave";
 }
 
 async function classifyRecoveredBufferRow(
-  row: BufferMessageDoc, freshAfter: Date, stats: RecoveryStats, signal: AbortSignal
-): Promise<"fresh" | "delete" | "leave"> {
+  row: BufferMessageDoc, stats: RecoveryStats, signal: AbortSignal, scope: BotworkerCycleScope
+): Promise<"delete" | "leave"> {
   // ⚡ per-row side-effect boundary — cancelled run ไม่แตะ row/claim ต่อ (recoverable)
   if (signal.aborted) return "leave";
   const procColl = await getCollection<ChatProcessingDoc>(COLLECTIONS.chatProcessing);
@@ -1532,14 +1675,14 @@ async function classifyRecoveredBufferRow(
   const claimId = row.claim_id || claimIdFor(row.message_id);
   const claim = await procColl.findOne({ _id: claimId });
 
-  // P1 — claim หาย → ไม่มี evidence เลย → orphan
+  if (row.status === "quarantined") return "leave";
+  // claim หาย → ไม่มี evidence เลย → orphan
   if (!claim) {
     stats.orphan++;
     return "delete";
   }
-  // P2 — claim terminal แล้ว → row เป็น leftover
   if (claim.status !== "processing") {
-    return "delete";
+    return settleRowForTerminalClaim(row, claim, bufColl);
   }
 
   // ⚡ same-owner + in-flight executor ใน process นี้ → leave ถูกต้อง
@@ -1547,76 +1690,56 @@ async function classifyRecoveredBufferRow(
   if (claim.owner_id === botworkerRuntime.ownerId && activeClaims.has(claimId)) {
     return "leave";
   }
-  // ⚡ foreign owner + lease ยัง active = in-flight จริง → defer wake-up หลัง expiry
-  if (claim.owner_id !== botworkerRuntime.ownerId &&
-      (claim.lease_expires_at?.getTime() || 0) > Date.now()) {
-    stats.deferredUntil = Math.min(
-      stats.deferredUntil ?? Number.MAX_SAFE_INTEGER, claim.lease_expires_at!.getTime());
-    return "leave";
+  // ⚡ active lease (owner ไหนก็ตาม) = in-flight จริง → defer wake-up หลัง expiry
+  if ((claim.lease_expires_at?.getTime() || 0) > Date.now()) {
+    return deferUntilExpiry(stats, claim.lease_expires_at);
   }
 
-  const rowFresh = row.received_at instanceof Date && row.received_at >= freshAfter;
-  const claimFresh = claim.claimed_at instanceof Date && claim.claimed_at >= freshAfter;
-
-  // P3 — committed evidence → finalize-only (claimMessage จัดการ outcome/reply branches)
-  const hasEvidence =
-    Boolean(claim.outcome_type) ||
-    (claim.reply_ids?.length ?? 0) > 0 ||
-    (await findPersistedReplies(claim.batch_id)).ids.length > 0;
-  if (hasEvidence) {
-    const res = await claimMessage({
-      message_id: row.message_id,
-      conversation_id: row.conversation_id,
-      shop_id: row.shop_id,
-      platform: row.platform,
-    }, signal);
-    if (res.kind === "finalized") {
-      stats.finalized++;
-      return "delete";
-    }
-    if (res.kind === "skip") return verifyForeignClaim(claimId, stats); // CAS lost → re-read พิสูจน์ winner
-    // ⚡ "claimed" = evidence หายหลัง reclaim — fencing/lease ใหม่อยู่ใน res.ctx เท่านั้น
-    //   ห้ามใช้ claim snapshot token → ต้อง settle/sync ผ่าน ctx ใหม่เสมอ
-    const ownedCtx = res.ctx;
-    if (!rowFresh || !claimFresh) {
-      // stale → fenced settle no_action ด้วย ctx ใหม่ (สำเร็จ → ลบ row + delete)
-      return reconcileClaimedRow(row, claim, ownedCtx, stats, true, signal);
-    }
-    // fresh ทั้งคู่ → sync row เข้า ctx ใหม่ด้วย exact-identity CAS → miss → shared reconcile
-    const upd = await bufColl.updateOne(rowIdentityFilter(row, claimId), rowSyncUpdate(ownedCtx));
-    if (upd.matchedCount === 1) return "fresh";
-    return reconcileClaimedRow(row, claim, ownedCtx, stats, false, signal);
-  }
-  // P4 — ไม่มี evidence → freshness gate (row + claim ต้อง fresh ทั้งคู่)
-  if (rowFresh && claimFresh) {
-    // crash-leftover: row ค้าง "processing" จาก flush ที่ตายกลางทาง → normalize กลับ buffered
-    if (row.status === "processing") {
-      const upd = await bufColl.updateOne(
-        rowIdentityFilter(row, claimId),
-        { $set: { status: "buffered" } }
+  // ⚡ scope-superseded ordinary buffered work (claim expired แล้ว) → terminal
+  //   settle: re-enable ห้ามกู้งานที่ buffer ก่อน cutoff ใหม่ — settle no_action +
+  //   delete row (ไม่ใช่ dormant technical failure — ห้ามกลายเป็น carryable)
+  //   dormant "failed" rows ข้าม check นี้เสมอ (carry-forward เป็นของมันเอง)
+  if (row.status !== "failed" && row.carried !== true) {
+    const pair = scope.pairs.find((p) => p.platform === row.platform && p.shop_id === row.shop_id);
+    const superseded = !pair || !(row.msg_created_at instanceof Date) ||
+      row.msg_created_at.getTime() <= pair.cutoff.getTime();
+    if (superseded) {
+      const now2 = new Date();
+      const upd = await procColl.updateOne(
+        { _id: claimId, status: "processing", owner_id: claim.owner_id, fencing_token: claim.fencing_token },
+        { $set: { status: "no_action", outcome_type: "no_action", error: "scope_superseded", processed_at: now2, updated_at: now2 } }
       );
-      if (upd.matchedCount === 1) return "fresh";
-      return reconcileClaimedRow(row, claim, null, stats, false, signal); // miss → reconcile (establish ownership ใน loop)
+      if (upd.matchedCount === 1) {
+        stats.stale++;
+        return "delete";
+      }
+      const c2x = await procColl.findOne({ _id: claimId });
+      if (!c2x) return "delete";
+      if (c2x.status !== "processing") return settleRowForTerminalClaim(row, c2x, bufColl);
+      return deferUntilExpiry(stats, c2x.lease_expires_at);
     }
-    return "fresh";
   }
-  const cas = await procColl.updateOne(
-    { _id: claimId, status: "processing", fencing_token: claim.fencing_token },
-    {
-      $set: {
-        status: "no_action",
-        outcome_type: "no_action",
-        error: "stale_at_recovery",
-        processed_at: new Date(),
-        updated_at: new Date(),
-      },
-    }
-  );
-  if (cas.matchedCount === 1) {
-    stats.stale++;
+
+  // expired → claim authority owner เดียว reconcile (provider=0):
+  //   evidence → finalize-only · ไม่มี → settle bot_failed dormant · cap → terminal
+  const res = await claimMessage({
+    message_id: row.message_id,
+    conversation_id: row.conversation_id,
+    shop_id: row.shop_id,
+    platform: row.platform,
+  }, signal);
+  if (res.kind === "finalized") {
+    stats.finalized++;
     return "delete";
   }
-  return verifyForeignClaim(claimId, stats); // CAS lost → re-read พิสูจน์ winner + wake-up
+  // skip — re-read claim เพื่อ settle row ตาม terminal state ล่าสุด
+  const c2 = await procColl.findOne({ _id: claimId });
+  if (!c2) return "delete";
+  if (c2.status !== "processing") {
+    return settleRowForTerminalClaim(row, c2, bufColl);
+  }
+  // ยัง processing — owner อื่นชนะระหว่าง settle / lease ใหม่ → defer ถึง expiry
+  return deferUntilExpiry(stats, c2.lease_expires_at);
 }
 
 // ⚡ enabled-era owner เดียว — AbortController หนึ่งตัวต่อ era (recovery passes +
@@ -1632,125 +1755,44 @@ function eraSignal(): AbortSignal {
   return eraAbort.signal;
 }
 
-async function recoverStaleClaims(freshAfter: Date, stats: RecoveryStats, signal: AbortSignal): Promise<number> {
+async function recoverStaleClaims(stats: RecoveryStats, signal: AbortSignal, scope: BotworkerCycleScope): Promise<number> {
   const procColl = await getCollection<ChatProcessingDoc>(COLLECTIONS.chatProcessing);
+  // ⚡ reconcile-only (provider=0 — ไม่มี re-execution path):
+  //   expired processing claims → claimMessage owner เดียวตัดสิน:
+  //   evidence → finalize-only · ไม่มี → settle bot_failed dormant · cap → terminal
   const stale = await procColl
-    .find({ status: "processing", lease_expires_at: { $lt: new Date() } })
+    .find(withScope({ status: "processing", lease_expires_at: { $lt: new Date() } }, scope))
     .toArray();
-  // ⚡ การ์ดแข็ง: claim ที่ยังมี buffer row ค้าง = งานของ batch recovery —
-  //   direct recovery ห้ามยิงทีละข้อความ (จะแตก batch เป็น N replies)
-  const mids = stale.map((c) => c.message_id).filter(Boolean) as string[];
-  const bufferedMid = new Set<string>();
-  if (mids.length > 0) {
-    const rows = await getCollection<BufferMessageDoc>(COLLECTIONS.bufferMessages).then((c) =>
-      c.find({ kind: "message", message_id: { $in: mids }, status: { $in: ["buffered", "processing"] } }).toArray()
-    );
-    for (const r of rows) bufferedMid.add(r.message_id);
-  }
-  let recovered = 0;
+  let settled = 0;
   for (const claim of stale) {
     try {
-      // ⚡ abort checkpoint — cancelled run หยุด launch claim/processMessage ทีละตัว
-      //   (งานค้างใน DB ปลอดภัย — rising edge ถัดไปกู้ต่อ)
+      // ⚡ abort checkpoint — cancelled run หยุดทีละตัว (งานค้างใน DB ปลอดภัย — edge ถัดไปกู้ต่อ)
       if (signal.aborted) break;
-      if (claim.message_id && bufferedMid.has(claim.message_id)) continue;
-      // ⚡ evidence ก่อน inbound lookup — committed outcome/reply finalize-only
-      //   ผ่าน claimMessage ได้โดยไม่ต้องมี inbound doc (inbound หายห้ามทับ bot_failed)
-      const hasEvidence =
-        Boolean(claim.outcome_type) ||
-        (claim.reply_ids?.length ?? 0) > 0 ||
-        (await findPersistedReplies(claim.batch_id)).ids.length > 0;
-      let ownedCtx: ClaimContext | undefined;
-      if (hasEvidence) {
-        const res = await claimMessage({
-          message_id: claim.message_id,
-          conversation_id: claim.conversation_id,
-          shop_id: claim.shop_id,
-          platform: claim.platform,
-        }, signal);
-        if (res.kind === "finalized") { stats.finalized++; continue; }
-        if (res.kind === "skip") continue; // reclaim CAS แพ้ → ไม่นับ ไม่ process
-        // ⚡ "claimed" = evidence หายหลัง reclaim — fencing/lease ใหม่อยู่ใน ctx เท่านั้น
-        //   snapshot `claim` เก่าใช้ CAS/terminal ไม่ได้แล้ว → ทุก op ข้างล่างใช้ ownedCtx
-        ownedCtx = res.ctx;
-      }
-      // ไม่มี committed evidence → freshness gate
-      //   claim เก่ากว่า enable boundary → CAS no_action/stale_at_recovery
-      const fresh = claim.claimed_at instanceof Date && claim.claimed_at >= freshAfter;
-      if (!fresh) {
-        if (ownedCtx) {
-          // reclaim แล้ว → fenced finalize ด้วย ctx ใหม่ (ห้ามใช้ snapshot token)
-          const n = await finalizeClaims(ownedCtx, {
-            type: "no_action",
-            reply_ids: claim.reply_ids || [],
-            side_effects: claim.side_effects || [],
-            extra: { error: "stale_at_recovery" },
-          });
-          if (n > 0) stats.stale++;
-        } else {
-          const cas = await procColl.updateOne(
-            { _id: claim._id, status: "processing", fencing_token: claim.fencing_token },
-            {
-              $set: {
-                status: "no_action",
-                outcome_type: "no_action",
-                error: "stale_at_recovery",
-                processed_at: new Date(),
-                updated_at: new Date(),
-              },
-            }
-          );
-          if (cas.matchedCount === 1) stats.stale++;
-        }
-        continue; // CAS lost → owner อื่นชนะ → skip โดยไม่ process
-      }
-      // reprocess path — ต้องมี inbound doc
-      const msgColl = await getCollection<{
-        message_id: string; conversation_id: string; shop_id: string;
-        platform: Platform; role: string; direction: string; text: string; raw_payload?: unknown;
-      }>(COLLECTIONS.messages);
-      const msg = await msgColl.findOne({ message_id: claim.message_id });
-      if (!msg) {
-        // inbound หายไป → finalize bot_failed กันค้าง
-        //   (ownedCtx: lease เพิ่ง renew → expired-lease filter จะ miss → ต้อง fenced ด้วย ctx)
-        if (ownedCtx) {
-          await finalizeClaims(ownedCtx, {
-            type: "bot_failed",
-            reply_ids: claim.reply_ids || [],
-            side_effects: claim.side_effects || [],
-            extra: { error: "inbound message missing at recovery" },
-          });
-        } else {
-          await procColl.updateOne(
-            { _id: claim._id, status: "processing", lease_expires_at: { $lt: new Date() } },
-            { $set: { status: "bot_failed", outcome_type: "bot_failed", error: "inbound message missing at recovery", processed_at: new Date(), updated_at: new Date() } }
-          );
-        }
-        continue;
-      }
-      if (!ownedCtx) {
-        const claimed = await claimMessage(msg, signal);
-        if (claimed.kind === "finalized") { stats.finalized++; continue; }
-        if (claimed.kind !== "claimed") continue;
-        ownedCtx = claimed.ctx;
-      }
-      if (signal.aborted) continue; // abort หลัง claim → ห้าม launch (claim คง lease ใหม่ → edge ถัดไปกู้)
-      const p = processMessage({ ...msg, claimContext: ownedCtx });
-      inFlight.add(p.catch(() => {}).finally(() => inFlight.delete(p)));
-      recovered++;
+      const res = await claimMessage({
+        message_id: claim.message_id,
+        conversation_id: claim.conversation_id,
+        shop_id: claim.shop_id,
+        platform: claim.platform,
+      }, signal);
+      if (res.kind === "finalized") { stats.finalized++; settled++; }
+      else if (res.kind === "skip" && res.detail.includes("bot_failed")) { stats.stale++; settled++; }
     } catch (err) {
       console.error(`[worker] stale claim recovery error for ${claim.message_id}:`, err);
     }
   }
-  return recovered;
+  return settled;
 }
 
 // ⚡ recovery single-flight — concurrent callers (rising edge / deferred timer / manual)
 //   coalesce เข้า pass เดียว; caller ที่มาระหว่าง pass → mark pending → rerun รอบเดียว
+// ⚡ Phase 2D — scope เป็น required snapshot; caller ที่ join ระหว่าง pass ฝาก scope
+//   ใหม่ไว้ใน recoveryScopeWanted → rerun pass ถัดไปใช้ scope ล่าสุด (ไม่ stale)
 let recoveryInFlight: Promise<{ recovered: number; conversations: string[] }> | null = null;
 let recoveryAgain = false;
+let recoveryScopeWanted: BotworkerCycleScope | null = null;
 
-async function recoverStaleBuffersAndClaims(): Promise<{ recovered: number; conversations: string[] }> {
+async function recoverStaleBuffersAndClaims(scope: BotworkerCycleScope): Promise<{ recovered: number; conversations: string[] }> {
+  recoveryScopeWanted = scope;
   if (recoveryInFlight) {
     recoveryAgain = true;
     return recoveryInFlight;
@@ -1760,34 +1802,37 @@ async function recoverStaleBuffersAndClaims(): Promise<{ recovered: number; conv
     // ⚡ controller หนึ่งตัวต่อ enabled era (ไม่ใช่ต่อ pass) — child work เช่น
     //   flush-retry callback อาจอยู่ข้าม pass; abort เดียวต้องถึงทุก child ใน era
     //   สร้างผ่าน eraSignal() เท่านั้น — reuse ตลอด era, era ใหม่เมื่อเดิมถูก abort
+    //   (capture ก่อน await แรก — eraSignal() สร้าง controller ใหม่หลัง abort
+    //   ดังนั้นต้องจับ sync ที่ entry ไม่ใช่หลัง leadership gate)
     const signal = eraSignal();
+    // ⚡ single-active-worker gate — loser ห้าม scan/reclaim เลย; abort ก่อน/กลาง
+    //   gate ต้องออกเงียบ (deferred timer เรียกผ่านฟังก์ชันนี้ → reacquire ทุก run)
+    if (signal.aborted || !(await acquireWorkerLeadership(signal))) {
+      return result;
+    }
     do {
       recoveryAgain = false;
-      // orchestration gate — disabled worker ห้าม recover/flush/process
-      const config = await getSystemConfig();
+      // ⚡ Phase 2D — scope snapshot ต่อ pass (joiner ล่าสุดชนะ — rerun เห็น scope ใหม่
+      //   เสมอ; ภายใน pass เดียวกัน immutable); orchestration gate กิน snapshot เดียวกัน
+      const passScope = recoveryScopeWanted ?? scope;
+      const config = passScope.config;
       if (!config.bot_worker_enabled) continue;
-      // ⚡ freshness boundary — recovery รับเฉพาะงานที่ยังอยู่ใน in-flight window
-      //   (buffer window + claim lease + grace) — เก่ากว่านี้ = ไม่พิสูจน์ owner ได้ → quarantine
-      const freshAfter = new Date(
-        Date.now() -
-          (Math.max(config.bot_buffer_window_ms || 0, config.bot_buffer_window_media_ms || 0) +
-            botworkerRuntime.claimLeaseMs +
-            60_000)
-      );
       const stats: RecoveryStats = { stale: 0, orphan: 0, finalized: 0 };
 
-      // ⚡ buffered batches ก่อนเสมอ — direct-claim recovery ต้องเห็นผล batch ก่อน
-      //   (มิฉะนั้น member claims ถูกยิง direct ทีละข้อความ = N replies แทน 1 batch)
+      // ⚡ buffer rows ก่อนเสมอ — classify ด้วย claim authority (orphan/terminal/
+      //   active/expired → delete/dormant/leave); reconcile-only ไม่มี flush
+      // ⚡ passScope ทั้งคู่ — joiner ล่าสุดคือ snapshot จริงของ pass นี้;
+      //   ใช้ scope เดิมของ caller แรก = stale cutoff → superseded row ถูก
+      //   misclassify เป็น dormant carryable แทนที่จะ settle no_action + delete
       const buffers = await bufferService.recoverStaleBuffers(
-        processMessage,
-        markProcessed,
-        (row) => classifyRecoveredBufferRow(row, freshAfter, stats, signal),
-        signal
+        (row) => classifyRecoveredBufferRow(row, stats, signal, passScope),
+        signal,
+        passScope
       );
       // ⚡ abort checkpoint — cancelled กลาง buffered phase → run จบทั้งหมด (break —
       //   ห้าม continue แล้วเริ่ม controller ใหม่จาก recoveryAgain ของ cancelled era)
       if (signal.aborted) { result = buffers; break; }
-      const claimRecovered = await recoverStaleClaims(freshAfter, stats, signal);
+      const claimRecovered = await recoverStaleClaims(stats, signal, passScope);
       // ⚡ deferred wake-up — rows ที่ defer ไว้ต้องกลับมา recover หลัง lease expiry
       //   ภายใน era เดิม (timer เดียว, unref — ไม่ busy-loop; falling edge ยกเลิกผ่าน clearPendingWork)
       //   scheduling เป็น side-effect boundary → cancelled run ห้ามฝาก wake-up ไว้
@@ -1798,8 +1843,11 @@ async function recoverStaleBuffersAndClaims(): Promise<{ recovered: number; conv
           deferredRecoveryAt = Date.now() + delay;
           deferredRecoveryTimer = setTimeout(() => {
             deferredRecoveryTimer = null;
-            recoverStaleBuffersAndClaims().catch((e) =>
-              console.error("[worker] deferred recovery error:", e));
+            // ⚡ Phase 2D — deferred pass resolve scope ใหม่ 1 ครั้ง — ต้องถือ
+            //   global edge ของ era เดิม (null → fail-closed ไม่แตะอะไรเลย)
+            getSystemConfig().then((c) => resolveBotworkerScope(c, passScope.global_enabled_since))
+              .then((s) => recoverStaleBuffersAndClaims(s))
+              .catch((e) => console.error("[worker] deferred recovery error:", e));
           }, delay);
           deferredRecoveryTimer.unref();
         }
@@ -1812,7 +1860,6 @@ async function recoverStaleBuffersAndClaims(): Promise<{ recovered: number; conv
             stale_claims: stats.stale,
             orphan_rows: stats.orphan,
             evidence_finalized: stats.finalized,
-            fresh_after: freshAfter.toISOString(),
           },
         });
       }
@@ -1839,10 +1886,26 @@ async function recoverStaleBuffersAndClaims(): Promise<{ recovered: number; conv
 export const botWorkerService = {
   processMessage,
   pollNewMessages,
+  resolveBotworkerScope,
   callBot,
   isProcessed,
   waitForInFlight,
+  ensureLeadership,
   recoverStaleBuffers: recoverStaleBuffersAndClaims,
+  // ⚡ workflow wait-timeout = top-level worker work — era signal capture sync
+  //   ก่อน await แรก + register ใน inFlight ทันที (shutdown drain ต้องรอ op นี้จบ)
+  //   abort ก่อน/กลาง gate → ออกเงียบ ห้ามเรียก engine ห้าม armed heartbeat รอด
+  //   (gate ผ่าน service surface — workflowEngine ไม่ import กลับมา)
+  checkWaitTimeouts: (scope: BotworkerCycleScope): Promise<number> => {
+    const signal = eraSignal();
+    const run = (async (): Promise<number> => {
+      if (signal.aborted || !(await acquireWorkerLeadership(signal))) return 0;
+      return workflowEngine.checkWaitTimeouts(signal, scope);
+    })();
+    inFlight.add(run);
+    run.then(() => inFlight.delete(run), () => inFlight.delete(run));
+    return run;
+  },
   clearAllBufferTimers: bufferService.clearAllBufferTimers,
   // ⚡ falling edge — ยกเลิก pending work ทั้งหมด: abort active recovery pass +
   //   buffer debounce + flush retry + deferred recovery timers
@@ -1850,6 +1913,7 @@ export const botWorkerService = {
   clearPendingWork: () => {
     eraAbort?.abort();      // abort era — boundary ถัดไปของทุก scheduled work ออกเงียบ
     recoveryAgain = false;  // rerun ที่ queue ไว้ใน cancelled era ห้ามเริ่มงานใหม่
+    stopLeaderHeartbeat();  // disable/shutdown — heartbeat ตาย → lease lapse
     bufferService.clearAllBufferTimers();
     cancelDeferredRecovery();
   },

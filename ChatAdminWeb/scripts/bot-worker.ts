@@ -18,7 +18,6 @@
 import "dotenv/config";
 import { botWorkerService } from "../src/backend/service/botWorkerService";
 import { getSystemConfig } from "../src/backend/service/systemConfigService";
-import { workflowEngine } from "../src/backend/service/workflowEngine";
 
 const DEFAULT_INTERVAL_MS = 1000;
 // ⚡ Phase 2Q — ไม่ limit แล้ว — ดึงทั้งหมดที่เข้ามาใหม่ (buffer + concurrency limiter เป็นตัวคุม)
@@ -54,16 +53,19 @@ async function main() {
   // ⚡ enabled gate ก่อน recovery — worker ปิดต้องไม่ flush/recover อะไรเลย
   const bootConfig = await getSystemConfig();
   if (bootConfig.bot_worker_enabled) {
-    // ⚡ capture enable edge ก่อน recovery — inbound ที่เข้าระหว่าง recovery ต้องถูก poll
-    //   (ถ้าตั้งใน loop หลัง recovery → created_timestamp < boundary → หลุดทั้ง era)
+    // ⚡ capture enable edge ก่อน resolve/recovery — inbound ที่เข้าระหว่าง recovery
+    //   ต้องถูก poll; edge = global cutoff ที่ scope resolver ใช้สร้าง pair cutoff
     enabledSince = new Date();
     console.log(`[bot-worker] ⚡ enable edge — processing only messages after ${enabledSince.toISOString()}`);
     // Recover stale buffers จาก buffer_messages collection (ถ้ามี)
     // กรณี bot-worker restart ขณะมีข้อความค้างใน buffer
+    // ⚡ reconcile-only — finalize durable evidence / settle dormant; provider=0
     try {
-      const recovered = await botWorkerService.recoverStaleBuffers();
+      const recovered = await botWorkerService.recoverStaleBuffers(
+        await botWorkerService.resolveBotworkerScope(bootConfig, enabledSince)
+      );
       if (recovered.recovered > 0) {
-        console.log(`[bot-worker] recovered ${recovered.recovered} stale buffer conversations`);
+        console.log(`[bot-worker] reconciled ${recovered.recovered} stale buffer rows`);
       }
     } catch (err) {
       console.error("[bot-worker] buffer recovery error:", err instanceof Error ? err.message : err);
@@ -88,22 +90,29 @@ async function main() {
           console.log(`[bot-worker] cycle ${cycle}: bot_worker_enabled=false → paused`);
         }
       } else {
-        if (!enabledSince) {
-          // ⚡ rising edge — capture boundary ก่อน recovery เสมอ
-          //   (inbound ที่เข้าระหว่าง recovery ต้องอยู่หลัง boundary ของ era นี้)
+        // ⚡ rising edge — capture boundary ก่อน scope resolve เสมอ:
+        //   edge คือ global cutoff — resolver ต้องเห็นค่านี้ก่อนสร้าง pair cutoff
+        const justRose = !enabledSince;
+        if (justRose) {
           enabledSince = new Date();
           console.log(`[bot-worker] ⚡ enable edge — processing only messages after ${enabledSince.toISOString()}`);
+        }
+        // ⚡ Phase 2D — resolve admission scope ครั้งเดียวต่อ cycle จาก config
+        //   snapshot เดียวกัน → poll/recovery/timeout-resume กิน scope เดียวกันเสมอ
+        const scope = await botWorkerService.resolveBotworkerScope(config, enabledSince);
+        if (justRose) {
+          // ⚡ reconcile-only — settle evidence/dormant; provider=0
           try {
-            const recovered = await botWorkerService.recoverStaleBuffers();
+            const recovered = await botWorkerService.recoverStaleBuffers(scope);
             if (recovered.recovered > 0) {
-              console.log(`[bot-worker] recovered ${recovered.recovered} stale buffer conversations`);
+              console.log(`[bot-worker] reconciled ${recovered.recovered} stale buffer rows`);
             }
           } catch (err) {
             console.error("[bot-worker] enable-edge recovery error:", err instanceof Error ? err.message : err);
           }
         }
         const interval = config.bot_worker_interval_ms || DEFAULT_INTERVAL_MS;
-        const result = await botWorkerService.pollNewMessages(enabledSince);
+        const result = await botWorkerService.pollNewMessages(scope);
 
         if (result.processed > 0) {
           console.log(`[bot-worker] cycle ${cycle}: found=${result.found} fired=${result.processed} (fire-and-forget)`);
@@ -112,7 +121,7 @@ async function main() {
         // ⚡ Phase 2 — เช็ค wait_for_reply timeout (ทุก cycle ถ้า workflow เปิด)
         if (config.workflow_enabled) {
           try {
-            const timedOut = await workflowEngine.checkWaitTimeouts();
+            const timedOut = await botWorkerService.checkWaitTimeouts(scope);
             if (timedOut > 0) {
               console.log(`[bot-worker] cycle ${cycle}: wait_timeout processed=${timedOut}`);
             }
