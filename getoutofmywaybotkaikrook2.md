@@ -4419,3 +4419,14 @@ config-failclosed 4/4 · boundary 20/20 · recovery-freshness 60/60 · error-pol
 **Status**: harness green on real Mongo — **พร้อม pre-commit candidate** (หยุดก่อน stage/commit ตามสั่ง — ไม่มี push/PR/deploy/provider/production Mongo)
 
 **Commit closeout**: Commit 1 = `94f8a33` `test: align botworker real-mongo recovery harness` — manifest `verify-botworker-runtime-mongo.ts` +113/−52, `test-botworker-runtime-mongo-safety.ts` +11/−11 (2 files, +124/−63) · original real run `45 passed / 2 failed` · root cause: S5/S6 seed rows ขาด Phase 2D admission evidence (`msg_created_at`+`admitted_edge`) → classifier `scope_superseded` ถูกต้อง · corrected real run `55 passed / 0 failed` (single `--apply`, disposable `mongo:7` loopback:27018, temp DB `botworker_runtime_verify_<rand>` dropped, container removed) · safety suite `111/111` · offline: recovery-freshness `30/30`, scope-gate `107/107`, `tsc --noEmit` clean, `git diff --check` clean · runtime files changed = **0** · ไม่มี production Mongo/provider/platform API/botworker start · ค้าง: authenticated `/shops` UI visual gate, provider hard budget, local one-shop canary (concurrency=1), deploy/canary approval
+### ผ่านแล้ว — PHASE 2D DEPLOY WORKER OPT-IN PROFILE (2026-10-16)
+
+**เป้าหมาย**: deploy server รัน default stack โดยไม่สร้าง/เริ่ม `bot-worker`; Botworker เปิดได้เฉพาะคำสั่ง explicit บนเครื่อง local เพื่อ canary ด้วย code revision เดียวกับ production
+
+**Root cause**: `bot-worker` อยู่ใน default Compose services พร้อม `restart: unless-stopped` ทำให้ `docker compose up -d --build` บน server เริ่ม worker โดยอัตโนมัติ แม้ operator ต้องการทดสอบ worker เฉพาะ local
+
+**Minimal plan**: เพิ่ม Compose profile `botworker` ให้ service เดิม; ไม่สร้าง service/env/script/guard ใหม่ · แก้ `docs/DEPLOY.md` และ comment ใน Compose ให้ default/local/one-time cleanup ชัด · executable gate: default `docker compose config --services` ต้องไม่มี worker และ `--profile botworker` ต้องมี worker · ไม่แตะ runtime, DB, provider หรือ container จริง
+
+**ผลลัพธ์**: `bot-worker` อยู่ใต้ profile `botworker`; default deploy services = `chatbot-shopee, chatadmin-web, caddy` และ explicit profile services เพิ่ม `bot-worker` · คู่มือระบุ one-time stop/remove container เดิมก่อน default deploy, local native command และ local Docker command · RED ก่อนแก้พบ worker ใน default; GREEN หลังแก้ default ไม่มี worker/profile มี worker · runtime/env/dependency/script เพิ่ม = 0
+
+**Commit closeout**: `285ab90` `chore: make botworker deployment opt-in` — `docker-compose.yml` + `docs/DEPLOY.md` เท่านั้น, +40/−9 · default worker ถูกถอดจาก deploy startup; local explicit profile/command คงอยู่ · ไม่มี container start/stop, DB, provider, `.env`, push หรือ deploy ในรอบ implementation
