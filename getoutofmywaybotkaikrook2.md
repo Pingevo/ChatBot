@@ -4028,3 +4028,340 @@ Structure: `decide_turn`×1 (1374) · `resolve_subjects`×1 (1520) · `detect_hu
 - **Verify (รอบสุดท้าย)**: offline batch 47 files **831p/20s/7xf/5w/0f** (13 live-DB = NOT_RUN_REAL_DB + 5 port-8010 scripts excluded) · transport **47/47** · validator **all rows** · py_compile 6 files · diff --check clean · anger suite green เพราะ probe ย้ายไป predicate boundary (POST-baseline signature `72c325e` เกษียณ — transport tests fake transport แล้ว)
 - **LOC**: runtime net **−130 vs HEAD** (app +230/−393) · new helpers/flags/kw-tables/model-calls = 0 · enum ตัวเดียว (approved)
 - **Safety**: working tree clean หลัง commit · no push/PR/deploy/.env/Mongo/provider/botworker/port-8010 · Phase 2D = next, ยังไม่เริ่ม
+
+## กำลังจะทำ — PHASE 2D — BOTWORKER PLATFORM + SHOP SCOPE GATE (branch `feature-legacy-shopee-evidence-retrieval`, baseline สะอาด)
+
+### PART 0 — owner map (audit เสร็จ)
+
+| path | reads ตอนนี้ | admission point ตอนนี้ | scope consumer ที่เสนอ | side effects | tests |
+|---|---|---|---|---|---|
+| `bot-worker.ts` loop | `getSystemConfig` ×1/cycle | `bot_worker_enabled` global check เท่านั้น | resolve scope 1 ครั้ง/cycle → ส่งเข้า poll/recovery/waittimeout | enabledSince edge + clearPendingWork | enable-checkpoint |
+| `pollNewMessages→pollNewMessagesInEra` | `messages.find({role:user,direction:in,created_timestamp>since})` | discovery → claimMessage | `+ buildScopeFilter(scope)` ใน find | claim doc + buffer row + reply | scope-gate ใหม่ |
+| `bufferService.recoverStaleBuffers` | `buffer_messages.find({status∈[buffered,processing],kind≠conv_lock})` | enumerate→classify→flush | `+ scope filter` ใน find | row CAS/delete/flush | scope-gate ใหม่ |
+| `recoverStaleClaims` | `chat_processing.find({status:"processing",lease_expires_at<$lt})` | stale claim classify | `+ scope filter` ใน find | claim CAS/settle | scope-gate ใหม่ |
+| `checkWaitTimeouts` (workflowEngine) | `workflow_runs.find({status:"waiting_for_reply",wait_started_at:$exists})` | timeout resume→walkGraph→callBot | `+ scope filter` ใน find | run CAS + callBot | scope-gate ใหม่ |
+| `shopService` / `/api/shops/[id]` PATCH | `shops` coll | `connected` เท่านั้น | `+ bot_worker_enabled` field + `setShopBotWorker` | shop doc + `config.shop_toggle` audit | scope-gate ใหม่ |
+| `systemConfigService` / `/api/config` PUT | `system_configs.main_config` | `allowedKeys` whitelist | `+ bot_worker_platforms` field (whitelist+validate+fail-closed) | main_config + `config.update` audit | config-failclosed |
+| `/shops` page | `/api/shops` | — | platform switches + per-shop switch + effective-state label | PATCH/PUT | build/typecheck |
+
+- config owners ตอนนี้ = 1 (`systemConfigService` — `updateSystemConfig` writer เดียว; `/api/test-assignment` toggle_worker ก็ผ่าน writer เดิม)
+- admission owners = 1 (`botWorkerService` — delegated internals: bufferService.recoverStaleBuffers + workflowEngine.checkWaitTimeouts)
+- config reads/cycle = ~3 (cached 5s) · config reads/message = 0 · paths ที่ยิง bot ได้ = 4 (poll→bufferOrProcess/processMessage, stale-claim reclaim→processMessage, stale-buffer flush→processMessage, wait-timeout→let_ai_respond) + timer flush (งานที่ admit แล้วจบได้)
+- enable-era contract (คงเดิม): `enabledSince` ตั้งที่ rising edge/boot → poll filter `created_timestamp>since` → ข้อความก่อน era ไม่ถูก admit; recovery freshness `freshAfter=now−(max(window)+claimLease+60s)` → stale claim เก่า settle ไม่ยิง bot; BW-4 = error ทุกชนิด → terminal `bot_failed` ไม่มี error-class retry (retry เดียวในระบบ = stale in-flight claim reclaim ใน freshness window)
+- duplicate/obsolete scope logic ตอนนี้ = 0 (ยังไม่มี platform/shop gate เลย — ทุก inbound ผ่าน)
+
+### Contract ที่เสนอ (รออนุญาต)
+
+- `system_configs.main_config.bot_worker_platforms: {shopee?,tiktok?,lazada?}` — field เดียว; missing→OFF ทุกตัว; key นอก Platform→reject; ไม่มี env fallback; เข้า FAIL_CLOSED_SWITCHES
+- `shops.bot_worker_enabled: boolean` — field เดียว; missing→OFF; upsertShop setOnInsert=false
+- scope ที่ resolve = `{pairs:[{platform,shop_id}]}` — platform enabled ∩ shop.bot_worker_enabled (1 query/cycle); filter = `$or` grouped ต่อ platform `{platform,shop_id:{$in:[...]}}` — pair-exact; empty→zero admission (ไม่ query)
+- scope ไหล: bot-worker loop resolve ×1 → `pollNewMessages(since,scope)` / `recoverStaleBuffersAndClaims(scope)` / `checkWaitTimeouts(scope)`; deferred recovery timer resolve ใหม่เอง (pass แยก)
+- flushBuffer/timer paths = งานที่ admit แล้ว → ไม่เช็ค scope (global kill switch + era abort คงเดิม)
+- API: PATCH `/api/shops/[id]` {connected?, bot_worker_enabled?} + PUT `/api/config` {bot_worker_platforms} + GET `/api/shops` embed `bot_worker` meta
+- UI `/shops`: 3 platform switches + per-shop Botworker switch + effective-state label (global/platform/shop disabled/enabled) — แยกจาก connected/แชทปิด; no optimistic UI
+- ห้าม: worker start / live canary / commit / push / PR / .env / real Mongo / platform delivery
+
+### Baseline (green ก่อนแก้)
+
+config-failclosed 4/4 · boundary 20/20 · recovery-freshness 60/60 · error-policy 38/38 · idempotency 71/71 · enable-checkpoint 18/18 = 211/211
+
+### ผ่านแล้ว — PHASE 2D IMPLEMENTATION (uncommitted — หยุดก่อน commit/canary ตามสั่ง)
+
+**RED → GREEN**: `scripts/test-botworker-scope-gate.ts` 47 tests (truth table ×10 · admission ×12 · historical/first-enable ×10 · replay/idempotency ×7 · API ×8 · canary sim ×2) — honest RED 43/45 fail ก่อน implement (2 ที่ผ่าน = auth reject + non-boolean reject มีอยู่แล้ว) → 47/47 หลัง implement
+
+**สิ่งที่เพิ่ม (owner เดียวทุกจุด)**:
+- `main_config.bot_worker_platforms:{shopee,tiktok,lazada}` — field เดียวใน `SystemConfigDoc` + `FAIL_CLOSED_SWITCHES` + `allowedKeys`; PUT `/api/config` validate (plain object, keys ⊆ 3 platforms, boolean เท่านั้น, `true` เฉพาะ `BOTWORKER_BACKENDS`) + audit `config.update`
+- `shops.bot_worker_enabled` — field เดียว + `shopService.setShopBotWorker(shop_id,platform,enabled)` (upsertShop `$setOnInsert:false`); PATCH `/api/shops/[id]` {connected?,bot_worker_enabled?} — requirePageEdit + boolean check + 404 ก่อน partial write + audit `config.shop_toggle` ต่อ field; GET `/api/shops` embed `bot_worker:{global,platforms}` + row flag
+- `resolveBotworkerScope(config)` ใน botWorkerService (resolver เดียว) → `BotworkerCycleScope{config,pairs}`; `buildScopeFilter(pairs)`/`withScope(base,scope)`/`BotworkerScopePair` ใน botworkerRuntime (pure, ไม่มี circular dep) — filter = `$or` per-platform `{platform,shop_id:{$in}}` pair-exact; empty → `NullScope` deny-all
+- `BOTWORKER_BACKENDS=["shopee"]` ใน safety.ts — enforce 3 ชั้น (route validation 400 + resolver hard-exclude กัน direct-DB edit + UI disabled switches)
+- scope = **required param** ทุก admission signature: `pollNewMessages(since,scope)` / `recoverStaleBuffers(...,signal,scope)` / `recoverStaleClaims(scope)` / `checkWaitTimeouts(signal,scope)` — tsc บังคับ zero unscoped callers (old unscoped path ถูกลบใน diff เดียวกัน); caller ไม่ส่ง → self-resolve 1 ครั้ง (standalone safe)
+- `bot-worker.ts` resolve 1 ครั้ง/cycle → snapshot เดียวไหลทุก path; ทุก consumer ใช้ `scope.config` แทน re-read (config read/message = 0, divergence = 0); deferred recovery timer resolve fresh snapshot ต่อ pass
+- UI `/shops`: `src/lib/botworkerScope.ts` `effectiveBotworkerState` (shared page+drawer) — 3 platform switches (tiktok/lazada disabled "backend unavailable") + per-shop switch ใน ShopDetailDrawer + effective label (ปิด global/ปิด platform/ปิดร้าน/เปิดใช้งาน) — ToggleSwitch เดิม, no optimistic UI, PATCH แล้วค่อยอัปเดต state
+
+**Error → cause → fix ระหว่างทำ**:
+- route tests fail "updateSystemConfig is not a function" → mock export function แต่ route ใช้ aggregate object → mocks เพิ่ม `systemConfigService.updateSystemConfig`
+- recovery R31/R39/R43 deferred-wake empty pairs → mock `COLLECTIONS` ไม่มี `shops` (resolver lookup undefined collection) → เพิ่มใน `test-botworker-fakemongo.mjs`
+- tsc ~170 call-site errors → migrate ทุก suite ใส่ scope param + `resolveBotworkerScope` stub ใน enable-checkpoint mock
+- bufferService required-param-after-optional → ย้าย `signal`/`scope` order
+
+**Verify**: scope-gate **47/47** · recovery-freshness **60/60** · idempotency **71/71** · error-policy **38/38** · config-failclosed **4/4** · boundary **20/20** · enable-checkpoint **18/18** · runtime-mongo-safety **110/110** · production-races **37/37** · admin-logs **57/57** · shadow-batch **22/22** · shop-settings **3/3** · ownership-transport **244/244** · `tsc --noEmit` clean · `next build` clean (84 pages) · `git diff --check` clean — suites ที่ต้อง env จริง (verify-botworker-runtime-mongo, test-workflow-phase1/phase6, test-workflow-e2e, test-ensure-indexes) ไม่รันได้ offline (pre-existing, fail ที่ config.ts ก่อนแตะ scope code)
+
+**Owner/query counts**: config owner=1 · shop-flag owner=1 · runtime admission owner=1 · scope resolves=1/cycle · config reads/message=0 · parallel admission path=0 · platform-delivery callsites changed=0 · answer logic changed=0 · new collection/index/env/deps=0
+
+**Safety state**: worker ไม่เคย start · live canary ยังไม่ได้ run (ต้อง operator approval หลัง commit) · ไม่มี staging/deploy/push/PR · working tree มีแต่ uncommitted changes
+
+**Residual**: (1) provider 429/5xx retry policy ไม่มี — `bot_failed` terminal ตาม BW-4 (future decision แยก); (2) UI visual verification = manual gate (ไม่ได้ start dev server)
+
+**Verdict**: `PHASE_2D_SCOPE_AND_REPLAY_SAFETY_READY_FOR_INDEPENDENT_REVIEW` — มี manual gate `PHASE_2D_SCOPE_GATE_OFFLINE_GREEN_UI_VISUAL_REVIEW_PENDING` รอ visual check
+
+### ผ่านแล้ว — PHASE 2D REVIEW-FIX — ROOT CONTRACT CORRECTED (uncommitted)
+
+**Contract gaps ที่แก้ (root cause)**:
+- (a) `resolveBotworkerScope` ไม่เช็ค global `bot_worker_enabled` — global gate อยู่แค่ใน `bot-worker.ts` loop → caller ที่เรียก resolver+entry point ตรงๆ ใต้ global-OFF จะ admit ได้ → fix: resolver คืน `pairs:[]` เมื่อ `config.bot_worker_enabled !== true` ก่อน query shops (global ถูก fold เข้า scope owner เดียว ไม่มี guard แยกใน poll/recovery)
+- (b) `PATCH /api/shops/[id]` ไม่ enforce backend availability — tiktok/lazada shop PATCH `bot_worker_enabled:true` persist ได้ → fix: route reject 422 ก่อน write ทุก field เมื่อ `body.bot_worker_enabled===true && shop.platform ∉ BOTWORKER_BACKENDS` (reuse constant เดิม); disable (`false`) ยังทำได้เสมอ; drawer switch เปลี่ยนเป็น disable-only บน unsupported platform (latent flag ปิดได้ เปิดไม่ได้)
+
+**RED → GREEN**: เพิ่ม C8 (resolver pairs=0 ใต้ global OFF) + A6 (poll/recoverStaleBuffers/checkWaitTimeouts ผ่าน entry point จริง admit 0 ทั้งหมด + zero claim/buffer/reply/run mutation/provider) + X9/X10 (tiktok/lazada enable → 422 zero write/audit) + X11 (disable บน unsupported platform ยังทำได้) — RED 4 fail ตรง contract gap (X11 ผ่านอยู่แล้ว = disable path เดิม) → GREEN **52/52**
+
+**Evidence corrections (docs เท่านั้น runtime ไม่แตะ)**:
+- ~~"config reads/message = 0"~~ → แก้เป็น: scope DB lookups/message = 0; scope resolve = 1 ครั้ง/cycle; cached `getSystemConfig` ใน `processClaimedMessage` คงเดิมสำหรับ workflow flags (cache read ไม่ใช่ per-message scope DB read — ไม่ thread config ลึกลงเพื่อทำ metric)
+- ~~"empty scope → ไม่ยิง query"~~ → แก้เป็น: empty scope ผลิต structural deny-all filter `{shop_id:{$in:[]}}` — admission query อาจถูกยิงแต่ match/adopt/claim 0 rows เสมอ (ไม่เพิ่ม guard เพื่อเลี่ยง query)
+- ~~"caller ไม่ส่ง scope → self-resolve"~~ → ลบ: production signatures require scope เสมอ (ไม่มี self-resolve fallback — ตรวจจาก code จริง)
+- audit metadata shape แก้เป็น `{field,value,platform}` + top-level `shop_id` ตาม code จริง
+
+**Verify**: scope-gate **52/52** · recovery-freshness 60/60 · error-policy 38/38 · enable-checkpoint 18/18 · boundary 20/20 · config-failclosed 4/4 · shop-settings 3/3 · idempotency 71/71 · tsc clean · build clean · diff --check clean
+
+**Structural audit**: eligibility owner=1 (resolver — global/platform/shop fold ในที่เดียว) · backend-allowlist reuse `BOTWORKER_BACKENDS` (ไม่มี platform list ซ้ำ) · new helper/guard/fallback/module/dep/env/collection/index = 0 · runtime LOC: resolver +4, route +9, drawer +3 · Sellcenter ingestion/Tickets/admin replies/round robin/shadow storage/platform delivery ไม่แตะ · pre-era + terminal rows ยังไม่ admissible
+
+**Residual**: UI visual verification = manual gate ยังค้าง (ไม่มี dev server); provider 429/5xx retry = future decision (BW-4 terminal ตามเดิม)
+
+### ผ่านแล้ว — PHASE 2D FINAL INDEPENDENT REVIEW + UI CORRECTION (2026-10-16, branch `feature-legacy-shopee-evidence-retrieval` @ `9af48a0`, uncommitted — หยุดก่อน stage/commit ตามสั่ง)
+
+**PART 0 audit (done, read-only)**: HEAD `9af48a0` ✓ · `git diff --check` clean ✓ · manifest มีเฉพาะไฟล์ Phase 2D (runtime 8, API 3, UI 2, lib 1, tests/mocks 12, docs 3, log 1) · ไม่มีไฟล์นอกขอบเขต · call graph: bot-worker loop → `resolveBotworkerScope(config)` 1×/cycle → `pollNewMessages(since,scope)` / `recoverStaleBuffersAndClaims(scope)` (→ bufferService + recoverStaleClaims) / `checkWaitTimeouts(scope)` → workflowEngine — deferred timer resolve fresh snapshot · ทุก admission query ผ่าน `withScope` (pair-exact `$or` / deny-all `$in:[]`) · ทุก coll ที่ถูก scope มี `platform`+`shop_id` ครบ (messages/chat_processing/buffer_messages/workflow_runs ตรวจแล้ว) · PUT /api/config validate 422 ก่อน write · PATCH /api/shops/[id] validate+404+backend-check ก่อน write ทุก field → zero partial write · GET /api/shops embed `bot_worker` meta (fail-closed `.catch(null)`)
+
+**Review findings (independent)**:
+
+- **M1 (Medium)** — `handlePlatformToggle` ใน `/shops` page spread `botWorker.platforms` ทั้งก้อนเข้า `PUT /api/config` → ถ้า DB มี latent `tiktok:true`/`lazada:true` (เซ็ตผ่าน API ไม่ได้ — direct-DB edit เท่านั้น และ UI ไม่ render switch ของ unimplemented platform → ไม่มีทางปิดผ่าน UI) PUT จะ echo `tiktok:true` → 422 ทุกครั้ง → **platform switches ทั้งหมดติดตันใน UI จนกว่าจะแก้ DB เอง** — เคสเดียวกับ latent-flag contract (X9–X11 ที่ shop level) · root cause = payload echo ค่าที่ UI เองแก้ไม่ได้ · fix: สร้าง payload เฉพาะ key ที่ `implemented` (`buildBotWorkerPlatformPatch` ใน botworkerScope.ts — owner เดียวของ scope-meta logic) → key ที่ไม่ implement ไม่ถูกส่ง → normalize เป็น OFF เอง (self-heal) และไม่มีทาง echo `true` ผิด · ผลกระทบเคสอื่น: ปกติ payload `{shopee:next}` ผลลัพธ์เท่าเดิม; future multi-backend → implemented loop preserve ค่า platform อื่นที่ implement แล้ว
+- **L1 (doc drift)** — SRS + log เขียนว่า PUT validation reject ด้วย 400 แต่ code คืน 422 (ตรงกับ PATCH 422) → แก้ doc ให้ตรง code (test ยอมรับ `422||400` อยู่แล้ว)
+- **L2 (cosmetic)** — drawer suffix `({platform} ยังไม่มี backend)` ซ้ำ `bwEff.reason` เมื่อ reason = "platform ยังไม่มี backend" → render "ปิด — platform ยังไม่มี backend (tiktok ยังไม่มี backend)" → fix: แสดง suffix เฉพาะเมื่อ reason ไม่ได้ครอบอยู่แล้ว
+- **L3 (cosmetic)** — label `global:` ภาษาอังกฤษกลาง UI ไทย → `ทั้งระบบ:` ให้ตรง reason "ปิดทั้งระบบ" + ชัดว่า read-only
+- **L4** — หลัง PATCH สำเร็จ `load()` รีเฟรช list+meta แต่ `selectedShop` (drawer prop) ยัง object เก่า → fix: `load()` re-derive `selectedShop` จาก rows ใหม่ 1 บรรทัด → drawer กิน authoritative data จริงตาม requirement
+
+**Plan**: RED ก่อน (X12 ใน scope-gate suite — `buildBotWorkerPlatformPatch` ต้องไม่ echo non-implemented key / preserve implemented ค่าอื่น) → แก้เจ้าของเดิม → GREEN → final battery (13 suites + tsc + build + diff --check) → อัปเดต SRS/schema/roadmap/log · **ไม่ commit/push/deploy/start server/.env/Mongo/provider**
+
+**Result (verified 2026-10-16)**:
+
+- **M1 fixed (RED→GREEN)**: เพิ่ม `buildBotWorkerPlatformPatch(meta, platform, next)` ใน `src/lib/botworkerScope.ts` (scope-meta owner เดิม — ไม่สร้าง module ใหม่) — payload มีเฉพาะ `implemented` keys: non-backend ไม่ถูก echo (latent `true` จาก direct-DB ถูก normalize เป็น OFF เอง = self-heal) และ implemented siblings ถูก preserve สำหรับ multi-backend อนาคต · `page.tsx` ใช้ helper แทน spread meta · RED `X12 FAIL (not a function)` → GREEN **53/53**
+- **L2/L3/L4 fixed**: `botWorkerEffective` คืน `code` (semantic blocker: `global_off|no_backend|platform_off|shop_off|null`) — drawer suffix dedup เทียบ code ไม่เทียบ string ไทย · label `global:` → `ทั้งระบบ: … (อ่านอย่างเดียว)` · `load()` re-derive `selectedShop` จาก rows ใหม่ → drawer แสดง authoritative data หลัง save
+- **L1 fixed (docs)**: SRS + roadmap แก้ 400→422 ให้ตรง code
+- **Independent review (ไม่มี finding เพิ่ม)**: ทุก bot-invoking path ผ่าน scope เดียวกัน (required param, tsc-enforced, no self-resolve fallback) · pre-era/terminal rows ไม่ admissible · Sellcenter/Tickets/admin replies/round robin/platform delivery ไม่แตะ · partial-write เป็นไปไม่ได้ (validate ก่อน write ทุก field ทั้ง PATCH+PUT) · audit `config.update`/`config.shop_toggle` ต่อ field
+- **Verify (final battery)**: scope-gate **53/53** · recovery-freshness 60/60 · idempotency 71/71 · error-policy 38/38 · enable-checkpoint 18/18 · boundary 20/20 · config-failclosed 4/4 · production-races 37/37 · runtime-mongo-safety 110/110 · admin-logs 57/57 · shop-settings 3/3 · ownership-transport 244/244 · shadow-batch 22/22 = **737/737** · `tsc --noEmit` clean · `next build` clean · `git diff --check` clean
+- **Browser verification**: **BLOCKED** — ไม่มี dev server รันอยู่ (port 3000 ไม่มี listener, 8010 ไม่มี listener) · ไม่ได้ start server (จะ load `.env*` — ต้องขออนุญาตแยก) · component-level: tsc+build clean, ToggleSwitch เป็น `role=switch`+`aria-checked`+`aria-label`+focus ring เดิม, layout flex-wrap ทุกจุด (390/768/1440 safe โดย markup)
+- **Verdict**: `PHASE_2D_FINAL_REVIEW_AND_UI_READY_FOR_PRECOMMIT` — manual gate เดิมยังค้าง: visual browser check + live canary (operator approval หลัง commit)
+
+### กำลังทำ — PHASE 2D UI RELOCATION — per-shop switch ย้ายจาก drawer → shop card (2026-10-16, uncommitted)
+
+**PART 0 (done)**: HEAD `9af48a0` · staging empty · manifest 32 entries คงเดิม · card open drawer ผ่าน `Card onClick={() => setSelectedShop(s)}` — switch click ต้อง `stopPropagation` ที่ control row (DOM boundary ที่ถูกต้อง — ห้ามแตะ ToggleSwitch)
+
+**Plan (bounded — UI เท่านั้น ไม่แตะ runtime/API/contract)**:
+
+1. `page.tsx` — เพิ่ม control row บน card แทน text-only eff block (ตำแหน่งเดิม: ใต้ sync/chat เหนือ footer hint): `Bot` icon + `บอทตอบกลับ` | eff text (`botWorkerEffective` — owner เดิม) | `ToggleSwitch` เดิม · state `shopSavingId: string|null` (per-shop lock — ร้านอื่นไม่ถูกล็อก) · handler PATCH `/shops/{id}` → ไม่ optimistic → `load()` reload authoritative · disable rules: `!shopEditable` (`canEditPage "shop"` ตรง PATCH route) / `shopSavingId===s.shop_id` / `!impl && flag!==true` · stopPropagation ที่ row div (row = control zone — คลิกไม่เปิด drawer, card นอก row ยังเปิดได้)
+2. `ShopDetailDrawer.tsx` — ลบทั้งหมด: `bwEnabled`/`bwSaving`/sync effect/`toggleBotWorker`/`bwImpl`/`bwEff`/JSX row/props `botWorker`+`onChanged`/imports (ToggleSwitch, botWorkerEffective, BotWorkerMeta)/`ShopRow.bot_worker_enabled` — drawer กลับเป็น Workflow/Trigger/Persona/KB เท่านั้น
+3. `page.tsx` — ลบ `botWorker`/`onChanged` args ที่ callsite + ลบ `setSelectedShop` re-derive ใน `load()` (มีไว้ refresh drawer control ที่ถูกลบ)
+4. Verify: scope-gate + shop-settings + tsc + build + diff --check (runtime bytes ต้องไม่เปลี่ยน)
+
+**ห้าม**: helper/guard/state owner ใหม่, runtime/API/worker, commit/push/deploy/server/.env/Mongo
+
+**ผลลัพธ์ relocation round (2026-10-16)**:
+- page.tsx +~36: control row บน card (Bot icon + `บอทตอบกลับ` + eff text + ToggleSwitch), `shopSavingId: string|null`, `shopEditable=canEditPage("shop")`, `handleShopBotWorkerToggle` (PATCH → `load()` authoritative — ไม่ optimistic), stopPropagation ที่ row div, ลบ `selectedShop` re-derive + drawer args
+- ShopDetailDrawer.tsx −~75: ลบ bwEnabled/bwSaving/sync effect/toggleBotWorker/bwImpl/bwEff/JSX row/props botWorker+onChanged/imports ToggleSwitch+botworkerScope/`ShopRow.bot_worker_enabled` — เหลือ Workflow/Trigger/Persona/KB เท่านั้น (grep `botWorker|bot_worker|ToggleSwitch` = 0 hit)
+- runtime bytes: ไม่แตะ (mtime ทุก runtime file = เซสชันก่อน) — manifest 28+4 เดิม
+- verify: scope-gate 53/53 · shop-settings 3/3 · tsc clean · build clean (1349ms, 84 pages) · diff --check clean
+- dev server พบรันอยู่แล้ว (port 3000, next dev, cwd=repo) — visual gate เปิด browser preview รอ operator verify
+- docs: SRS `/shops` UI → "per-shop switch บน shop card"; roadmap append relocation note (history คงเดิม)
+
+### กำลังทำ — PHASE 2D CAS — per-shop botworker switch optimistic concurrency (2026-10-16, uncommitted)
+
+**PART 0 (done)**: HEAD `9af48a0` · staging empty · manifest 31 (27M+4U — drawer byte-identical HEAD ✓) · caller audit: `setShopBotWorker` มี caller เดียว = PATCH route; ไม่มี production caller ส่ง `{connected, bot_worker_enabled}` พร้อมกัน (UI PATCH เดียว = card handler ส่ง botworker เท่านั้น) → adopt single-command API
+
+**Root cause**: PATCH unconditional `$set` — two admins read same state → conflicting writes → later silently overwrites; UI `shopSavingId` เช็ก per-shop ทำให้ร้านแรกที่ยัง in-flight กลับมา enabled ได้เมื่อร้านสองเข้าคิว
+
+**Plan (เพิ่ม CAS ที่ owner เดิม — ไม่สร้าง lock/helper ใหม่)**:
+
+1. `setShopBotWorker(shopId, enabled, expected)` — `updateOne` เดียว + CAS filter: expected=true→`{shop_id,bot_worker_enabled:true}`; expected=false→`{shop_id,$or:[{bot_worker_enabled:false},{bot_worker_enabled:{$exists:false}}]}`; return `matchedCount===1` (ไม่ใช่ modifiedCount — idempotent write match แต่ไม่ modify)
+2. PATCH route: combined `connected`+`bot_worker_enabled` → 422; require `expected_bot_worker_enabled` boolean → 400; platform 422 ก่อน CAS; CAS miss → re-read ครั้งเดียว (missing→404 / exists→409 zero audit); connected-only เดิม
+3. page.tsx: ส่ง `{bot_worker_enabled:desired, expected_bot_worker_enabled:current===true}`; `shopSavingId!==null` → ล็อกทุก switch ใน browser นี้ (spinner เฉพาะร้านที่ save); 409 → `load()` + toast เฉพาะ; success → `load()` ก่อน toast.success
+4. Tests (RED ก่อน): X5/X6/X7/X9/X10/X11 ใส่ expected; X7c→X13 combined→422; X14 CAS matrix; X15 two stale callers (sequential = race เดียวกัน); X16 different shops; X17 expected missing/non-boolean→400
+
+**ห้าม**: distributed lock/transaction/helper/retry/queue/Set/ref registry; runtime admission bytes ต้องไม่เปลี่ยน (shopService=write owner แก้ได้ตาม spec); no commit
+
+**ผลลัพธ์ CAS round (2026-10-16)**:
+- RED (5): X13 combined→200(ต้อง 422) · X14d missing+exp true→200(ต้อง 409) · X14e stale→200(ต้อง 409) · X15 caller2→200(ต้อง 409) · X17 missing expected→200(ต้อง 400)
+- shopService.setShopBotWorker: unconditional $set → CAS `updateOne` เดียว (expected=false filter = `$or:[false,{$exists:false}]` — missing≡false) คืน matchedCount===1
+- route [id]: combined→422 · expected boolean required→400 · CAS miss→re-read ครั้งเดียว 404/409 zero audit · connected-only เดิม · audit เหมือนเดิม
+- page.tsx: ส่ง expected_bot_worker_enabled; shopSavingId!==null ล็อกทุก switch (browser-local เท่านั้น); 409→load()+toast เฉพาะ; success→load() ก่อน toast
+- GREEN: scope-gate 61/61 · shop-settings 3/3 · admin-logs 57/57 · config-failclosed 4/4 · tsc clean · build clean · diff --check clean
+- admission/runtime bytes ไม่เปลี่ยน — แตะเฉพาะ write owner (shopService) + route + page + tests + docs
+- drawer ยัง byte-identical HEAD (e74141…) — manifest 27M+4U
+
+### กำลังทำ — PHASE 2D PLATFORM-FENCE CAS — race platform flip ระหว่าง pre-read ↔ write (2026-10-16, uncommitted)
+
+**PART 0 (done)**: HEAD `9af48a0` · staging 0 · manifest 31 · `setShopBotWorker` caller เดียว = route · `BOTWORKER_BACKENDS=["shopee"]` owner เดียวใน safety.ts
+
+**Root cause**: route อ่าน `shop.platform` ก่อน CAS แต่ filter fence เฉพาะ `shop_id`+`bot_worker_enabled` — external shop sync flip platform ระหว่าง read↔write → persist `bot_worker_enabled:true` บน platform ที่ไม่รองรับ (worker ยัง fail-closed แต่ flag กลายเป็น latent invalid)
+
+**Plan**:
+1. RED: X18 hook flip platform ใน updateOne (shopee→tiktok หลัง pre-read) → ต้อง 422 zero write/audit/attempt=1 · X19 disable latent บน unsupported ยัง 200 · X20 enable stale expected (platform ปกติ) → 409 ไม่ใช่ 422
+2. `setShopBotWorker`: enabled=true → filter เพิ่ม `platform:{$in:BOTWORKER_BACKENDS}` (import จาก safety — ห้าม duplicate list); enabled=false → ไม่ fence platform (latent clear ได้เสมอ)
+3. route CAS miss → re-read ครั้งเดียว: missing→404 / enabling+platform ไม่รองรับ→422 / else→409
+4. ไม่แตะ worker/admission/platform-toggle/UI อื่น
+
+**ผลลัพธ์ platform-fence round (2026-10-16)**:
+- RED (1): X18 platform flip shopee→tiktok ใน updateOne hook → 200 (fence ขาด) → GREEN 422 หลัง fix
+- `setShopBotWorker`: enable → filter เพิ่ม `platform:{$in:[...BOTWORKER_BACKENDS]}` (import จาก safety — owner เดียว); disable → ไม่ fence
+- route CAS miss re-read: missing→404 / enable+unsupported→422 / else→409
+- mocks.mjs: เพิ่ม JSDoc type ให้ hook fields (ตาม convention ของ error-policy mocks — แก้ tsc error)
+- GREEN: scope-gate 64/64 · shop-settings 3/3 · admin-logs 57/57 · config-failclosed 4/4 · tsc clean · diff --check clean
+- visual gate: dev server ยังรัน (port 3000) แต่ auth cookie อยู่ที่ localhost:3000 — preview proxy origin ต่างกัน → ตรวจเองไม่ได้ → `VISUAL_GATE_BLOCKED_AUTH` (operator verify ที่ localhost:3000/shops)
+
+### กำลังทำ — PHASE 2D CLEAN-START + EXPLICIT ERROR RETRY + PER-SCOPE CUTOFF (2026-10-16, uncommitted)
+
+**PART 0 (done)** — frozen audit: HEAD `9af48a0` · staging 0 · manifest 31 · platform-fence CAS ยังครบ · drawer byte-identical HEAD
+
+**Owner counts (current)**:
+- normal inbound admission = 1 (`pollNewMessages` → claimMessage → bufferOrProcess)
+- recovery/reconciliation = 1 (`recoverStaleBuffersAndClaims`) — แต่มี provider path ข้างใน
+- explicit retry = 0 (ไม่มี)
+- claim transition = 1 (`claimMessage` + `finalizeClaims`)
+- buffer flush = 1 (`flushBuffer` — trigger ได้จาก timer + recovery)
+- workflow timeout resume = 1 (`checkWaitTimeouts` → `processWaitTimeout`)
+- provider invocation = 1 (`processClaimedMessage` → callBot/let_ai_respond)
+
+**Provider paths ที่ต้องตัดตาม contract ใหม่**:
+1. `recoverStaleBuffers` → classify "fresh" → `flushBuffer` → processMessage → provider  ← ลบ
+2. `recoverStaleClaims` → reclaim → `processMessage`  ← ลบ
+3. `claimMessage` expired-reclaim → return "claimed" → caller execute  ← เปลี่ยนเป็น reconcile→bot_failed
+4. `checkWaitTimeouts` → resume run เก่าก่อน cutoff → provider  ← ต้องตัดด้วย pair cutoff (settle cancelled)
+5. poll ใช้ `since` = global edge เท่านั้น — ไม่มี per-pair cutoff  ← ต้อง max(global,platform_at,shop_at)
+
+**Root cause ของปัญหา**: admission ไม่มี enable cutoff ต่อ scope — `since` เป็น global edge เพียงชั้นเดียว (platform/shop เปิดทีหลัง → backlog ช่วงปิดถูก admit) + recovery เป็น "re-execute" ไม่ใช่ reconcile + ไม่มี explicit retry surface เลย → restart/enable edge กินงานเก่าอัตโนมัติ
+
+**Plan (ตาม spec)**:
+1. `SystemConfigDoc.bot_worker_platform_enabled_at` (per-platform ts) — server-derived ใน `updateSystemConfig` write เดียวกับ flag (read-once edge detect); ไม่อยู่ใน allowedKeys; mergeWithSafety carry; missing+flag=true → resolver fail-closed
+2. `ShopDoc.bot_worker_enabled_at` — เขียนใน CAS `$set` เดียวของ `setShopBotWorker` (true→stamp / false→null)
+3. `BotworkerScopePair {platform, shop_id, cutoff}` + `BotworkerCycleScope.cutoffs: ReadonlyMap` + `global_enabled_since`; `resolveBotworkerScope(config, edge)` — global flag+edge, platform flag+at, shop flag+at ทุกชั้นต้องมีครบ
+4. `buildScopeFilter(pairs, tsField?)` — tsField → per-pair `{platform, shop_id, [ts]:{$gt:cutoff}}`; ไม่ส่ง → identity only (recovery enumerate)
+5. poll: `pollNewMessages(scope)` (ตัด `since`) → `withScope(q, scope, "created_timestamp")`
+6. `claimMessage` expired+no-evidence → finalize `bot_failed`/`interrupted_before_durable_outcome` (แทน "claimed"→execute); evidence finalize-only คงเดิม
+7. `classifyRecoveredBufferRow` → "delete"|"leave" เท่านั้น; ลบ `reconcileClaimedRow`+`rowSyncUpdate`+"fresh"
+8. `recoverStaleClaims` → evidence finalize-only / else CAS→`bot_failed`/`interrupted_before_durable_outcome`; ลบ re-execute block+`freshAfter`
+9. `bufferService.recoverStaleBuffers` → ลบ flush loop+processMessage/markProcessed params (เหลือ classify+delete)
+10. `checkWaitTimeouts` → query `waiting_for_reply` scoped → `wait_started_at > pair.cutoff` ? resume : `cancelIfAbandoned(pre_enable_cutoff)`
+11. `requestBotworkerRetry(message_id, by)` + `consumeRetryRequests(scope)` — request CAS บน claim (`bot_failed` เท่านั้น, attempt<max, inbound มีอยู่, scope persisted layers ON); request_id=`botworker:retry:<mid>:<attempt+1>`; consume: requested_at>cutoff → CAS→processing+processMessage ctx เดิม; ≤cutoff/cap → consume terminal mark
+12. route `POST /api/admin/botworker-retry` → `requirePageEdit("shop")` → 200/404/409/422
+13. bot-worker.ts: edge capture ก่อน resolve (reorder), `consumeRetryRequests(scope)` หลัง poll, `pollNewMessages(scope)`
+14. test migration: seedShop+enabled_at · config+platform_enabled_at · scopeOf(config, edge=epoch) · ลบ/เขียนใหม่เคสขัด contract (fresh-reclaim-execute, rising-edge flush)
+15. quarantine script `scripts/botworker-census.ts` (dry-run default — ไม่รันใน round นี้)
+
+**⚡ SUPERSEDED (2026-10-16)** — user เปลี่ยน contract: ไม่ใช่ explicit operator retry API; เป็น **error carry-forward**:
+- failed batch → dormant (claim `bot_failed` + buffer row `status:"failed"` เก็บ payload/batch_id/error/failed_at)
+- ตื่นเฉพาะ distinct inbound ใหม่ (platform,shop,conversation เดียวกัน, post-cutoff) → fenced carry claims bot_failed→processing (attempt++ ถ้า < max) → rows→buffered → debounce/max → flush รวม 1 call
+- capped → row `quarantined`; message ใหม่ทำงานอิสระ
+- ลบ: `flushRetryTimers`/`scheduleFlushRetry`/`LOCK_RETRY_MS`/flushErrorRetry timer, startup flush, expired-claim re-execute
+- recovery = reconcile only: evidence→finalize-only / no-evidence→claim bot_failed(interrupted)+row→failed (dormant, ไม่ลบ) / orphan→delete / foreign lease→leave
+- ไม่มี retry API/route/queue/collection ใหม่
+
+**Revised plan (ตาม contract ใหม่)**:
+1. enable timestamps เดิม: config `bot_worker_platform_enabled_at` (updateSystemConfig derive, atomic same write) + shop `bot_worker_enabled_at` (CAS $set เดียว)
+2. scope pairs + cutoff เดิม (`resolveBotworkerScope(config, edge)`, cutoffs map, buildScopeFilter tsField)
+3. poll `withScope(q, scope, "created_timestamp")` (ตัด since)
+4. claimMessage expired tail → evidence reclaim+finalize / no-evidence→CAS bot_failed(interrupted) (ไม่ reclaim+ไม่ inc attempt)
+5. flush failure: result.finalized+bot_failed → rows `status:"failed"`+error+failed_at (dormant); !finalized/catch → rows กลับ buffered แต่ไม่มี retry timer → recovery reconcile → failed dormant; ลบ scheduleFlushRetry+flushRetryTimers
+6. carry-forward owner = `bufferService.carryDormantRows(convId)` — เรียกใน bufferOrProcess เมื่อ new distinct insert เท่านั้น (duplicate → no carry); unbuffered mode: dormant rows มี → carry + insert row + flushBuffer ทันที; ไม่มี → processMessage เดิม
+7. classifyRecoveredBufferRow → "delete"|"leave" (settle ภายใน: claim terminal-success→row delete / bot_failed→row failed / missing→delete / expired→CAS bot_failed+row failed / foreign→leave); ลบ reconcileClaimedRow/rowSyncUpdate/"fresh"
+8. recoverStaleClaims → evidence finalize-only / else CAS bot_failed(interrupted); buffer pass เก็บ rows เป็น failed
+9. checkWaitTimeouts → wait_started_at > pair.cutoff ? resume : cancelIfAbandoned(pre_enable_cutoff)
+10. bot-worker: edge→resolve→recovery→poll(scope)+checkWaitTimeouts(scope)
+11. RED: CU(cutoff) + RE(reconcile) + D(dormancy via callBotError+sleep flush) + CF(carry-forward) + X21/X22 timestamp writes; migrate existing seeds
+
+### ผ่านแล้ว — PHASE 2D NEW-INBOUND + ERROR CARRY-FORWARD (2026-10-16, uncommitted)
+
+**ปัญหา**: Botworker กินงานเก่าอัตโนมัติ — admission ไม่มี per-scope cutoff (`since` = global edge ชั้นเดียว), recovery เป็น re-execute ไม่ใช่ reconcile, flush error ไม่มี retry surface ที่ปลอดภัย → restart/enable edge เรียก provider บน backlog ได้
+
+**สาเหตุ**: (1) poll ใช้ `since` ชั้นเดียว ไม่เช็ค platform/shop enable edge (2) `recoverStaleBuffers`/`recoverStaleClaims`/`claimMessage` expired-reclaim ลงท้าย processMessage → provider (3) `flushErrorRetryMs`+`scheduleFlushRetry` เป็น autonomous timer retry (4) ไม่มี dormant failed state → batch ที่ fail หายหรือหลุมดำ
+
+**วิธีแก้**:
+- Enable timestamps: `bot_worker_platform_enabled_at` derive ใน `updateSystemConfig` write เดียวกับ flag (CAS ไม่ต้อง — server-side read-once edge detect); `bot_worker_enabled_at` ใน `setShopBotWorker` CAS `$set` เดียว; missing timestamp+flag ON = fail-closed ทั้งสองชั้น
+- `resolveBotworkerScope(config, edge)` → pairs `{platform, shop_id, cutoff}` ที่ `cutoff = max(global_enabled_since, platform_at, shop_at)`; `pollNewMessages(scope)` admit `created_timestamp > cutoff` ต่อ exact pair; scope ว่าง = `$in:[]` structural deny
+- Recovery = reconcile-only (provider=0): `classifyRecoveredBufferRow` ตัดสิน orphan→delete / terminal→delete leftover / bot_failed+failed→leave dormant / cap→quarantine / evidence→finalize-only / no-evidence→settle `bot_failed`+row `failed` / foreign active→defer wake-up เดียว; `recoverStaleClaims` เหลือ evidence finalize-only / else CAS `bot_failed`; ลบ `reconcileClaimedRow`,`rowSyncUpdate`,`verifyForeignClaim`,freshness gate/`freshAfter`,stale re-execute,startup buffer flush
+- Dormant+carry-forward: flush technical-failure → `markRowsFailed` (rows `failed`+error+failed_at; claims `bot_failed` ผ่าน `markRowsDormant` fenced settle — ครอบ infra error ก่อน inner try เช่น `getConversation`); distinct inbound เดียวกัน exact triple → `carryDormantRows` fenced CAS revive (attempt+1,fencing+1) rows→`buffered` รวม debounce→flush ครั้งเดียว; cap→`quarantined`, message ใหม่อิสระ; duplicate/ข้าม conv/ข้าม shop/ข้าม platform/pre-cutoff/restart ไม่ wake
+- ลบ `flushErrorRetryMs`, `scheduleFlushRetry`, `flushRetryTimers` — เหลือ conv_lock recheck (liveness เท่านั้น); `checkWaitTimeouts` ตัดด้วย pair.cutoff (parked pre-cutoff → settle ไม่ resume)
+- `bot-worker.ts`: edge capture ก่อน resolve → recovery → `pollNewMessages(scope)`; enable checkpoint mocks รับ scope object แล้ว
+
+**ผลกระทบเคสอื่น**: claim fencing/stale recovery CAS/duplicate idempotency/trigger/workflow/handoff/delivery/audit/unsupported-platform 422/CAS 409 ครบเหมือนเดิม — suites ยืนยัน: scope-gate 88 · idempotency 71 · recovery-freshness (rewrite ใหม่ทั้ง suite) 39 · error-policy 38 · enable-checkpoint 18 · production-races 37 · boundary 20 · config-failclosed 4 · runtime-mongo-safety 110 · shop-settings 3 · admin-logs 57 · ownership-transport 244 · shadow-batch 22 — tsc + `npm run build` + `git diff --check` ผ่าน; workflow phase1/6/e2e ต้องการ env secrets (ADMIN_JWT_SECRET/CHATBOT_INTERNAL_SECRET) = environment-blocked ไม่ใช่ regression
+
+**ค้าง**: UI visual gate `/shops` blocked (dev server รันอยู่แต่ redirect `/login` — ไม่มี session, อ่าน .env ไม่ได้) · commit ยังไม่ได้ทำ (รอ user approval ตามกฎข้อ 10) · disposable-Mongo harness ยังไม่ได้ประเมิน
+
+### กำลังทำ — PHASE 2D CORRECTION ROUND (2026-10-16, uncommitted)
+
+**PART 0 audit (done)** — branch `feature-legacy-shopee-evidence-retrieval` HEAD `9af48a0`, staging 0, 32 dirty files intact, Phase 2D work present. Read both waythrough logs (log1 = frozen python history — ไม่มี botworker case ที่ต้อง preserve).
+
+**Root causes ที่พบจาก source (verify แล้ว ไม่ใช่จาก report เดิม)**:
+
+- **A autonomous lease-expiry exec**: `scheduleFlushRetry` ยิง `trackedFlush`→`flushBuffer` — call sites: LOCK_RECHECK_MS(50ms, lock-loss) + FOREIGN_CLAIM_RECHECK_MS(5s, foreign active claim) — re-fence `$or:[{owner self+token},{lease expired}]` ให้ flush ชิง claim หลัง lease หมด → provider call โดยไม่มี inbound ใหม่ → **ลบทั้ง map+fn+constants**; lock-loss → skip เปล่า (winner hand-off ครอบ); foreign-active → revert buffered (foreign owner finalize/expire เอง)
+- **liveness ที่ preserve**: winner flush จบ → release lock → arm debounce ให้ leftover buffered rows (delay = latest received_at + window − now, media-aware, `if (!bufferTimers.has(key))` กันทับ timer ที่ new inbound arm ไว้)
+- **B disable-during-debounce**: `flushBuffer` gate มีแค่ cached `bot_worker_enabled` → ไม่เช็ค platform/shop/cutoff ที่ delayed boundary → เปลี่ยนเป็น **single delayed-execution admission owner**: `getSystemConfig(true)` → `resolveBotworkerScope(cfg, row.admitted_edge)` → pair ต้องอยู่ + row ต้อง `carried===true || msg_created_at > pair.cutoff` → ไม่ผ่าน → fenced CAS claim→`no_action` + delete row (terminal ไม่ใช่ dormant — scope-superseded ไม่ใช่ technical failure)
+- **row fields ใหม่**: `msg_created_at` (inbound created_timestamp — poll forward เข้า bufferOrProcess) + `admitted_edge` (era edge ณ admission = current-era edge เสมอที่ flush — timer ตายเมื่อ era เปลี่ยน) + `carried` (set ตอน carryDormantRows revive — dormant rows ที่ carry แล้ว bypass cutoff check เพราะ wake-up gate คือ inbound ใหม่)
+- **classifier** ได้ scope → row `buffered|processing` + `!carried` + (`msg_created_at` ขาด หรือ ≤ pair.cutoff) + claim expired → settle `no_action`+delete (แทน dormant bot_failed); failed rows ข้าม check (dormant carryable เสมอ)
+- **C tuple partition**: `flushBuffer(platform, shopId, convId, ...)`; timer key = `convLockIdFor(platform,shop,conv)`; `getBufferedMessages`/`insertToBuffer`-adjacent/`persistDormantRow` queries ใส่ tuple ครบ; `acquireConvLock` เรียง arg เป็น (platform,shopId,convId)
+- **D platform CAS**: `setBotWorkerPlatformEnabled(platform, enabled, expected)` — updateOne filter `{config_key, $or:[{f:expected},{f:{$exists:false}}เมื่อ expected=false]}` + `$set {f:enabled, enabled_at.f: enabled?now:null}` → miss → reread 1 ครั้ง → 409; enabled===expected → no-op success (ไม่ write ไม่ขยับ ts); ลบ `bot_worker_platforms` ออกจาก updateSystemConfig + ลบ findOne→updateOne derive block; route: `bot_worker_platforms` ต้องมี 1 key เดียว + `expected_bot_worker_platforms` บังคับ → 400/422/409; UI ส่ง expected + 409→load() เหมือน shop toggle
+- **E media**: pin image/image_with_text/video carry-forward แยกเคส
+
+**RED suite placement**: A → production-races (แทน C3 recheck-proof); B/C/D/E → scope-gate (route handler จริงผ่าน mock service seam)
+
+**Result (verified 2026-10-16)**:
+
+- **Implement GREEN ผ่านแล้วทุก suite** — scope-gate 103/103 · production-races 37/37 · idempotency 71/71 · recovery-freshness 30/30 · error-policy 38/38 · enable-checkpoint 18/18 · boundary 20/20 · config-failclosed 4/4 · runtime-mongo-safety 110 · shop-settings 3 · admin-logs 57 · ownership-transport 244 · shadow-batch 22 · `tsc --noEmit`/`npm run build`/`git diff --check` clean
+
+- **เคสที่เจอระหว่าง fix (error→cause→fix→impact)**:
+  - CF/D1/I3 `E11000` บน dormant claim → `seedFailedRow` ใส่ claim ซ้ำกับ explicit `seedClaim` ของเทส → revert ให้ row-only เก็บ admission fields → เคสอื่นไม่กระทบ
+  - SD/TP/CF/X12 `callBot=0` → flush gate resolve scope → edge `Date(0)` (epoch) falsy → `edge ? new Date(edge) : null` = null → resolver fail-closed → sentinel -1 แทน → **root cause จริงของ gate ทั้ง batch**
+  - SD1-4 `recovery aborted` → `pollNewMessages` return ก่อน fire-and-forget claim เขียน row เสร็จ → wrapper เทสถัดไป `clearPendingWork` abort era → wait in-flight ก่อน assert (test-side fix)
+  - X12 409 → persisted `shopee` default true แต่ expected=false → set persisted=false ก่อน patch (CAS ทำงานถูก)
+  - C2/C3 foreign claim ถูก steal → re-fence filter ใช้ `row.owner_id` (foreign) match ได้ → filter `owner_id: botworkerRuntime.ownerId` เท่านั้น → foreign active ไม่โดนแตะ
+  - idempotency/recovery-freshness `provider=0` → fixture `created_timestamp: ++seq` (number ไม่ใช่ Date) → gate ปฏิเสธถูกต้อง → fixture → `new Date()`
+  - `setBotWorkerPlatformEnabled` upsert:true ผิด edge case → expected=true+missing doc จะ upsert-apply ทั้งที่ missing≡false ต้อง 409 → `upsert: !expected` (OFF→ON doc ใหม่ยังทำงาน)
+  - tsc scope-gate:1242 → literal-narrowed `shopee:false` เปรียบ `===true` → widen read ผ่าน `Record<string,boolean>`
+
+- **Structural audit**: provider-capable retry timers=0 (เหลือ debounce arm + ownership-gated winner hand-off ใน finally) · recovery provider paths=0 · conv-only lookups=0 (tuple=`convLockIdFor` เดียว) · read-then-write platform path=0 · scope admission owner=1 (flushBuffer) · new collections/deps/env/pollers=0
+
+**ค้าง**: UI visual gate `/shops` (login-blocked) · commit รอ approval · real-Mongo harness ยังไม่ได้รัน · env-gated workflow suites blocked by secrets
+
+### ผ่านแล้ว — PHASE 2D INDEPENDENT FINAL REVIEW CORRECTIONS (2026-10-16, uncommitted)
+
+**บริบท**: independent review session ที่ 2 (ทบทวน working tree เดิมจาก source+diff+fresh tests ไม่ใช่ report) — พบ defect จริง 5 จุด + test-honesty gap; แก้ที่ root cause owner ทุกจุด RED→GREEN
+
+**error → cause → fix → impact**:
+
+- **XP3/F5 `E11000` (production CAS defect)** → `setBotWorkerPlatformEnabled` ใช้ `upsert:!expected` — expected=false แต่ persisted=true → filter miss → upsert insert ชน unique `config_key` → E11000 escape เป็น 500 (route ต้อง 409) → catch `code===11000` map เข้า bounded-reread `reportCurrent` path เดิม (loser ยังได้ 409 + current truth; winner ไม่กระทบ; expected=false+doc missing upsert ยัง apply ปกติ — F7 pin)
+- **XP8/F6 lying no-op** → `enabled===expected` early-return `applied` โดยไม่ดู persisted — `(true,true)` บน flag=false ตอบ 200 ทั้งที่ flag ยัง OFF (และ `(false,false)` บน true = disable ที่ไม่เกิด) → zero-write `findOne` probe บน expected filter เดิม — match→no-op, miss→reread→409 (platform+shop owner เดียวกัน)
+- **X14f edge drift** → `setShopBotWorker` ไม่มี no-op path — `(true,true)` match CAS filter → restamp `bot_worker_enabled_at` ขยับ cutoff → probe เดียวกัน — edge คงเดิม, zero write
+- **X12 partial commit** → `PUT /api/config` loop CAS ทีละ platform key — key1 write+edge stamp แล้ว key2 miss → 409 แต่ key1 commit แล้ว (zero audit ด้วย) + mixed payload drop fields อื่นเงียบๆ → enforce single-command: foreign fields→422, `entries.length!==1`→422 ก่อน CAS เลย; `buildBotWorkerPlatformPatch` ไม่จำเป็นแล้ว → **ลบออกจาก botworkerScope.ts** + page inline `{[p]:next}`/`{[p]:seen}` — contract เดียวกับ PATCH shop
+- **R8 stale scope ใน recovery joiner** → `recoverStaleBuffersAndClaims` ส่ง `scope` (caller แรก) ให้ `classifyRecoveredBufferRow` ทั้งที่ enumerate+claims ใช้ `passScope` (joiner ล่าสุด) → row ที่ถูก supersede โดย edge ใหม่ถูก misclassify เป็น dormant carryable แทน `no_action`+delete → one-token fix `scope`→`passScope`
+- **M4 verify harness** → seed config/shop ขาด `bot_worker_platform_enabled_at`/`bot_worker_enabled_at` → resolver fail-closed → harness จะ throw ตอน resolve → seed timestamps ย้อนหลัง 60s (env-gated — static fix)
+- **M5 effective-state ambiguity** → `botWorkerEffective(null)` คืน `global_off`/`ปิดทั้งระบบ` — meta หาย (backend unavailable) แสดงเหมือน deliberate global-off → เพิ่ม `code:"unavailable"` แยก
+- **H2 test honesty** → scope-gate mock **reimplement** `setBotWorkerPlatformEnabled` (read-then-write) + `uniqueKeys` ไม่มี `system_configs` → หลบ defect ทั้งหมดข้างบน → hooks เพิ่ม `parentURL===MOCK_URL` exemption + mock delegate เข้า real fn (pre-sync ปู coll จาก state.config → real CAS → post-sync applied→state.config) + uniqueKeys + `sysWrites` นับเฉพาะ CAS-shape filter — XP/CF/SD/TP ทั้งหมดยังผ่าน real code
+- **X14e semantics update** → probe-path miss เป็น zero-write → assertion `1 updateOne`→`0` (no-retry contract คงเดิม)
+
+**Verification (fresh, post-fix)**: scope-gate **107/107** (เดิม 103 + XP8/X12-rewrite/X14f/X14g/R8) · config-failclosed **8/8** (+F5–F8 real-service CAS รวม E11000) · production-races 37 · idempotency 71 · recovery-freshness 30 · error-policy 38 · enable-checkpoint 18 · boundary 20 · runtime-mongo-safety 110 · shop-settings 3 · admin-logs 57 · ownership-transport 244 · shadow-batch 22 · `tsc --noEmit` clean · `npm run build` clean · `git diff --check` clean
+
+**Structural**: provider-capable timers = 1 mechanism (debounce arm + ownership-gated hand-off — ทั้งคู่ต้องมี admitted inbound ก่อน + era/scope re-resolve) · recovery provider paths = 0 · conv-only identity = 0 · read-then-write toggle = 0 · new retry loops/queues/collections/deps/env = 0 · helpers added by corrections: `reportCurrent` (local closure แทน duplicated reread ใน fn เดิม — net −dup) + probe findOne (read แทน write) — no helper/guard chain
+
+**Low findings (reported only)**: `settleScopeRejectedRow` CASes บน row-recorded owner/token (outcome-equivalent เพราะ rows ถึงจุดนี้ได้เฉพาะ claim ที่ยังไม่ execute) · stale comments อ้าง "flush retry/recheck" ที่ลบแล้ว · `markProcessed` second marker doc (harmless) · `expected_bot_worker_platforms` โดดเดี่ยวถูก whitelist เงียบๆ (harmless)
+
+**ค้าง**: UI visual gate `/shops` — **blocked by auth** (ไม่มี authenticated local session; ห้ามอ่าน .env/สร้าง credentials — source verification ครบ: platform switches page-level, per-shop switch บน card, 5-state effective code รวม unavailable, non-optimistic + 409 reload) · commit รอ approval · real-Mongo harness env-gated ไม่ได้รัน · workflow suites ต้องการ secrets
+
+### COMMIT CLOSEOUT — PHASE 2D (2026-10-16, local only — ไม่ push/PR/deploy)
+
+**Commit 1**: `29f2e9b90fa52b26dcc5f510aa8a1790c7a046de` — `fix: make botworker admission scope authoritative` — 32 files, +4248/−1951
+
+**Manifest (Commit 1)**:
+- runtime/UI (13): `bot-worker.ts` · `src/backend/lib/safety.ts` · `botWorkerService.ts` · `botworkerRuntime.ts` · `bufferService.ts` · `shopService.ts` · `systemConfigService.ts` · `workflowEngine.ts` · `src/lib/botworkerScope.ts`(new) · `api/config/route.ts` · `api/shops/route.ts` · `api/shops/[id]/route.ts` · `(console)/shops/page.tsx`
+- tests/harnesses (16): `test-botworker-scope-gate.ts`+`-mocks.mjs`+`-hooks.mjs`(new) · `test-botworker-config-failclosed.ts` · `-boundary-mocks.mjs` · `-enable-checkpoint-mocks.mjs` · `-error-policy-mocks.mjs`+`.ts` · `-fakemongo.mjs` · `-idempotency-mocks.mjs`+`.ts` · `-production-races-mocks.mjs`+`.ts` · `-recovery-freshness.ts` · `test-workflow-e2e.ts` · `verify-botworker-runtime-mongo.ts`
+- docs (3): `docs/SRS_SSD.md` · `docs/schema.md` · rebaseline plan
+- ไฟล์ log นี้อยู่ Commit 2 แยก (closeout หลัง commit หลักเสมอ)
+
+**Root causes ที่ปิด (independent-review round นี้)**: H1 platform-CAS upsert-miss → E11000→500 (แก้เป็น bounded-reread→409) · H2 scope-gate mock reimplement CAS จริง (delegate เข้า production fn + uniqueKeys) · M1 multi-key platform payload partial-commit (single-command 422) · M2 lying no-op + shop edge restamp (zero-write probe ทั้งคู่) · M3 recovery joiner stale scope (`scope`→`passScope`) · M4 verify-harness seed ขาด enable timestamps · M5 `botWorkerEffective(null)` แยก `code:"unavailable"`
+
+**Admission/cutoff contract (final)**: admit เฉพาะ global ON + platform ON (`BOTWORKER_BACKENDS`=shopee) + shop ON พร้อมกัน · `cutoff = max(global_enabled_since, bot_worker_platform_enabled_at[p], shop.bot_worker_enabled_at)` · strict `created_timestamp > cutoff` · flag ON แต่ timestamp ขาด = fail-closed · scope ว่าง = `$in:[]` structural deny · rising edge ใหม่ supersede งานเก่าเสมอ
+
+**Dormant carry-forward contract**: technical failure → rows `failed` (dormant, payload ครบ) + claims `bot_failed` — ไม่มี retry timer · wake เฉพาะ distinct inbound ใน exact tuple เดียว (`insertToBuffer`→`inserted` เท่านั้น; `duplicate` ไม่ re-arm ไม่ carry) · fenced CAS revive + `carried:true` bypass cutoff · attempt cap → `quarantined` · media text/image/image_with_text/video preserved (CF8/CF11/CF12)
+
+**CAS conflict contract**: platform+shop toggle = write เดียว filter-on-expected (missing≡false) · `enabled===expected` = zero-write probe (edge ไม่ขยับ) · miss/E11000 → bounded reread → 409 + zero write + zero audit · shop enable fence `platform∈BOTWORKER_BACKENDS` ใน updateOne เดียว · multi-key/mixed platform payload → 422 ก่อน write · UI ไม่ optimistic — 409 → load() authoritative
+
+**Path counts**: provider-capable timers = 1 mechanism (debounce + ownership-gated hand-off — ต้องมี admitted inbound + era/scope re-resolve) · recovery provider paths = 0 · autonomous retry/lease-expiry provider paths = 0 · conv-only identity paths = 0 · read-then-write toggle = 0 · new collections/deps/env/pollers/helper-chains = 0
+
+**Fresh verification (post-fix, รันซ้ำก่อน commit)**: scope-gate 107/107 · config-failclosed 8/8 · production-races 37/37 · idempotency 71/71 · recovery-freshness 30/30 · error-policy 38/38 · enable-checkpoint 18/18 · boundary 20/20 · runtime-mongo-safety 110/110 · shop-settings 3/3 · admin-logs 57/57 · ownership-transport 244/244 · shadow-batch 22/22 · `tsc --noEmit` clean · `npm run build` clean · `git diff --check` + `git diff --cached --check` clean
+
+**LOC (แยกประเภท)**: runtime/UI +1289/−553 (net +736 — ใหม่คือ scope machinery; service สุทธิ −120) · tests +2900/−1372 (scope-gate ใหม่ 1831 + mocks/hooks 283; recovery-freshness rewrite −1207) · docs +59/−26 · log entry นี้แยก Commit 2
+
+**ค้าง/ไม่ได้ทำ (สำคัญ)**: UI visual gate `/shops` = **login-blocked** (ไม่มี authenticated session; `.env` อ่านไม่ได้ — verify ระดับ source เท่านั้น) · `verify-botworker-runtime-mongo` (disposable real-Mongo harness) **ยังไม่ได้รัน** (env-gated; fix เป็น static proof) · workflow phase1/phase6/e2e env-blocked ด้วย secrets · local canary **ยังไม่ได้ทำ** · deploy **ยังไม่ได้ทำ** · **Phase 2D ไม่ใช่ production-approved — เป็น pre-commit closeout เท่านั้น**
