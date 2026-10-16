@@ -10,6 +10,7 @@
 export const COLLECTIONS = {
   conversations: "conversations",
   messages: "messages",
+  shops: "shops", // ⚡ Phase 2D — botworker scope resolver reads shops coll
   bufferMessages: "buffer_messages",
   chatProcessing: "chat_processing",
   shadowReplies: "shadow_replies",

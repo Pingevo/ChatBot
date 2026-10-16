@@ -8,6 +8,102 @@
 // (ไม่สัญญา exactly-once LLM call — process ตายหลัง remote รับ request
 //  ก่อน local persist → reclaimer อาจยิงซ้ำใน crash window เท่านั้น)
 import { createHash, randomUUID } from "node:crypto";
+import { BOTWORKER_BACKENDS, type Platform } from "../lib/safety";
+import type { SystemConfigDoc } from "./systemConfigService";
+import { getCollection, COLLECTIONS } from "../db/mongoClient";
+
+// ─── Phase 2D — platform/shop admission scope (fail-closed) ──
+// eligible ⟺ global bot_worker_enabled AND platform enabled AND exact
+//   (platform, shop_id) shop.bot_worker_enabled — snapshot เดียวต่อ cycle/pass:
+//   resolve 1 ครั้งที่ caller → ส่งลงทุก bot-invoking entry (required, ไม่มี fallback)
+export interface BotworkerScopePair {
+  platform: string;
+  shop_id: string;
+  // ⚡ effective enable cutoff = max(global edge, platform_enabled_at, shop_enabled_at)
+  //   — resolver คำนวณครั้งเดียว; ทุก admission ใช้ค่านี้ (strict >)
+  cutoff: Date;
+}
+
+export interface BotworkerCycleScope {
+  config: SystemConfigDoc;
+  pairs: BotworkerScopePair[];
+  // in-memory global enable edge — worker owner เดียว (bot-worker.ts) ส่งเข้ามา;
+  //   เปิดครั้งแรก/เปิดใหม่ตลอด = edge ใหม่ → cutoff ใหม่ → งานเก่าไม่เข้า
+  global_enabled_since: Date | null;
+}
+
+/**
+ * scope → Mongo filter (pair-exact, grouped ต่อ platform)
+ *   pairs ว่าง/platform ไม่มี backend → deny-all `{shop_id:{$in:[]}}` — valid Mongo
+ *   match 0 เสมอ; ห้ามคืน null (caller เผลอ omit filter = unscoped query)
+ *
+ * tsField — ชื่อ timestamp field ของ collection นั้น (เช่น created_timestamp/
+ *   received_at/claimed_at/wait_started_at): filter กลายเป็น per-pair
+ *   {platform, shop_id, [tsField]:{$gt:pair.cutoff}} — admission cutoff อยู่ใน
+ *   owner เดียวกัน ไม่ใช่ guard แยกแต่ละ path
+ */
+export function buildScopeFilter(pairs: BotworkerScopePair[], tsField?: string): Record<string, unknown> {
+  const byPlatform = new Map<string, BotworkerScopePair[]>();
+  for (const p of pairs) {
+    if (!(BOTWORKER_BACKENDS as readonly string[]).includes(p.platform)) continue;
+    const arr = byPlatform.get(p.platform) ?? [];
+    arr.push(p);
+    byPlatform.set(p.platform, arr);
+  }
+  if (byPlatform.size === 0) return { shop_id: { $in: [] } };
+  const ors: Record<string, unknown>[] = [];
+  for (const [platform, ps] of byPlatform) {
+    if (tsField) for (const p of ps) ors.push({ platform, shop_id: p.shop_id, [tsField]: { $gt: p.cutoff } });
+    else ors.push({ platform, shop_id: { $in: ps.map((p) => p.shop_id) } });
+  }
+  return { $or: ors };
+}
+
+/**
+ * ผนวก scope เข้า query เดิมแบบไม่ทับ operator — {$and:[base, scopeFilter]}
+ *   base ที่มี $or/$and/เงื่อนไขเดิมคงรูปทั้งหมด (ห้าม object-spread merge)
+ */
+export function withScope(base: Record<string, unknown>, scope: BotworkerCycleScope, tsField?: string): Record<string, unknown> {
+  return { $and: [base, buildScopeFilter(scope.pairs, tsField)] };
+}
+
+/**
+ * scope resolver owner เดียว — อ่าน config+shops 1 ครั้ง → snapshot exact pairs
+ *   ที่ใช้ได้ทั้ง cycle (poll/recovery) และ delayed-execution boundary (buffer flush):
+ *   eligible ⟺ global ON ∧ platform ON(มี edge) ∧ shop ON(มี edge);
+ *   pair.cutoff = max(global edge, platform_enabled_at, shop_enabled_at) — strict >
+ *   switch ON แต่ timestamp ขาด → fail-closed (ไม่ใส่ pair)
+ */
+export async function resolveBotworkerScope(
+  config: SystemConfigDoc,
+  globalEnabledSince: Date | null
+): Promise<BotworkerCycleScope> {
+  const empty: BotworkerCycleScope = { config, pairs: [], global_enabled_since: globalEnabledSince };
+  if (config.bot_worker_enabled !== true || !(globalEnabledSince instanceof Date)) return empty;
+  const platformAt = config.bot_worker_platform_enabled_at ?? {};
+  const enabled = BOTWORKER_BACKENDS.filter(
+    (p) => config.bot_worker_platforms?.[p] === true && platformAt[p] instanceof Date
+  );
+  if (!enabled.length) return empty;
+  const shopsColl = await getCollection<{
+    platform: Platform; shop_id: string; bot_worker_enabled?: boolean; bot_worker_enabled_at?: Date | null;
+  }>(COLLECTIONS.shops);
+  const rows = await shopsColl.find(
+    { platform: { $in: enabled.slice() }, bot_worker_enabled: true },
+    { projection: { platform: 1, shop_id: 1, bot_worker_enabled_at: 1 } }
+  ).toArray();
+  const pairs: BotworkerScopePair[] = [];
+  for (const r of rows) {
+    if (!(r.bot_worker_enabled_at instanceof Date)) continue;
+    const pAt = platformAt[r.platform] as Date;
+    pairs.push({
+      platform: r.platform,
+      shop_id: r.shop_id,
+      cutoff: new Date(Math.max(globalEnabledSince.getTime(), pAt.getTime(), r.bot_worker_enabled_at.getTime())),
+    });
+  }
+  return { config, pairs, global_enabled_since: globalEnabledSince };
+}
 
 export const botworkerRuntime = {
   // lease ต้อง > botCallTimeoutMs + headroom สำหรับ finalize
@@ -18,9 +114,6 @@ export const botworkerRuntime = {
   // ⚡ audit: liveAssignmentService ใช้ AbortSignal.timeout(90_000) กับ endpoint เดียวกัน
   //    + 429-retry 60s waits → valid latency ถึง 90s+ — timeout ต่ำกว่านี้ตัดคำตอบจริง
   botCallTimeoutMs: 90000,
-  // flush error retry — claim owner/token เดิม re-fence ผ่าน expected-owner filter ได้
-  // จึง retry เร็วได้โดยไม่ต้องรอ lease หมด
-  flushErrorRetryMs: 5000,
   // owner identity unique ต่อ process boot — stale owner จาก process เก่า
   // เขียนทับไม่ได้เพราะ fencing_token เปลี่ยนทุก reclaim
   ownerId: `worker-${process.pid}-${randomUUID()}`,

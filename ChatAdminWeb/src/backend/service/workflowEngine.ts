@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { botworkerRuntime } from "./botworkerRuntime";
 import { getSystemConfig, type Platform } from "./systemConfigService";
+import { withScope, type BotworkerCycleScope } from "./botworkerRuntime";
 import { workflowService, type WorkflowDoc, type WorkflowNode, isMultiBranchCondition, type ConditionBranch, isPhase2WaitConfig, type WaitForReplyConfig, WAIT_BRANCH, isPhase3AddLabelConfig } from "./workflowService";
 import { callBot } from "./botCallService";
 import { getConversation, closeConversation, type ProblemCategory } from "./conversationService";
@@ -1539,8 +1540,9 @@ async function performAction(
 //    query: status=waiting_for_reply + wait_started_at มี + wait_started_at < now - timeout
 //    ⚠️ race-safe: ใช้ $set status=running ก่อนเดิน graph (เหมือน resumeFlow)
 
-export async function checkWaitTimeouts(signal?: AbortSignal): Promise<number> {
-  const config = await getSystemConfig();
+export async function checkWaitTimeouts(signal: AbortSignal | undefined, scope: BotworkerCycleScope): Promise<number> {
+  // ⚡ Phase 2D — config จาก cycle-scope snapshot (ห้าม re-read ภายใน pass)
+  const config = scope.config;
   if (!config.workflow_enabled) return 0;
 
   const coll = await getRunsCollection();
@@ -1551,10 +1553,18 @@ export async function checkWaitTimeouts(signal?: AbortSignal): Promise<number> {
   const globalTimeoutMs = config.workflow_run_timeout_ms || 1800000;
 
   // query run ที่ status=waiting_for_reply และมี wait_started_at
-  const candidates = await coll.find({
+  // ⚡ Phase 2D — scope filter: timeout-resume เป็น bot-invoking path เช่นกัน —
+  //   parked run ของ disabled (platform,shop) ไม่ถูก scan/acquire เลย
+  const candidates = await coll.find(withScope({
     status: "waiting_for_reply",
     wait_started_at: { $exists: true, $type: "date" },
-  }).toArray();
+  }, scope)).toArray();
+
+  // ⚡ per-pair effective cutoff — run ที่ park ก่อน enable ครบสามชั้น
+  //   ต้องไม่ resume เข้า provider work: settle cancelled (abandoned เท่านั้น —
+  //   owner อื่น lease active ทิ้งไว้ให้หมด lease แล้วรอบหน้า settle)
+  const pairCutoff = new Map<string, number>();
+  for (const p of scope.pairs) pairCutoff.set(`${p.platform}/${p.shop_id}`, p.cutoff.getTime());
 
   let processed = 0;
   for (const run of candidates) {
@@ -1562,6 +1572,16 @@ export async function checkWaitTimeouts(signal?: AbortSignal): Promise<number> {
     //   (zero acquire/write/provider สำหรับ candidate ที่ยังไม่ถึง)
     if (signal?.aborted) break;
     if (!run.wait_started_at) continue;
+    const cutoff = pairCutoff.get(`${run.platform}/${run.shop_id}`);
+    if (cutoff !== undefined && run.wait_started_at.getTime() <= cutoff) {
+      await cancelIfAbandoned(run, {
+        status: "cancelled",
+        outcome: "error",
+        completed_at: now,
+        error: "wait_started_at before effective enable cutoff — settled without resume",
+      });
+      continue;
+    }
     const ageMs = now.getTime() - run.wait_started_at.getTime();
 
     // หา wait node เพื่ออ่าน per-node timeout_ms

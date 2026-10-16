@@ -33,7 +33,6 @@ export const botworkerRuntime = {
   claimLeaseMs: 150000,      // production constant default (> timeout + finalize headroom)
   heartbeatMs: 50000,        // lease/3
   botCallTimeoutMs: 90000,   // = liveAssignmentService timeout (90s) — ห้ามต่ำกว่า valid latency
-  flushErrorRetryMs: 5000,   // flush error → retry delay (claim owner เดิม re-fence ได้ทันที)
   ownerId: "test-worker",
   // BW-2 contract constants — single-active-worker leadership (proposed, not yet in production)
   leaderLeaseMs: 5000,
@@ -55,6 +54,56 @@ export function convLockIdFor(platform, shopId, conv) {
 export const replyIdFor = (batchId) => `botworker:reply:${batchId}`;
 export const wfReplyId = (batchId, i) => `botworker:reply:${batchId}:wf${i}`;
 export const opIdFor = (claimId, kind) => `botworker:op:${claimId}:${kind}`;
+
+// ── Phase 2D — scope filter builders + resolver (implementation เดียวกับ botworkerRuntime.ts) ──
+// pure deterministic — mock คงพฤติกรรมเดิม: deny-all เมื่อ pairs ว่าง / backend ไม่รองรับ
+const MOCK_BOTWORKER_BACKENDS = ["shopee"];
+export function buildScopeFilter(pairs, tsField) {
+  const byPlatform = new Map();
+  for (const p of pairs) {
+    if (!MOCK_BOTWORKER_BACKENDS.includes(p.platform)) continue;
+    const arr = byPlatform.get(p.platform) ?? [];
+    arr.push(p);
+    byPlatform.set(p.platform, arr);
+  }
+  if (byPlatform.size === 0) return { shop_id: { $in: [] } };
+  const ors = [];
+  for (const [platform, ps] of byPlatform) {
+    if (tsField) for (const p of ps) ors.push({ platform, shop_id: p.shop_id, [tsField]: { $gt: p.cutoff } });
+    else ors.push({ platform, shop_id: { $in: ps.map((p) => p.shop_id) } });
+  }
+  return { $or: ors };
+}
+export function withScope(base, scope, tsField) {
+  return { $and: [base, buildScopeFilter(scope.pairs, tsField)] };
+}
+
+// ⚡ resolver mirror — production อ่าน shops coll จริง; tsField cutoff + fail-closed
+//   semantics เท่ากัน (timestamp ขาดขณะ ON → ไม่ใส่ pair)
+export async function resolveBotworkerScope(config, globalEnabledSince) {
+  const empty = { config, pairs: [], global_enabled_since: globalEnabledSince };
+  if (config.bot_worker_enabled !== true || !(globalEnabledSince instanceof Date)) return empty;
+  const platformAt = config.bot_worker_platform_enabled_at ?? {};
+  const enabled = MOCK_BOTWORKER_BACKENDS.filter(
+    (p) => config.bot_worker_platforms?.[p] === true && platformAt[p] instanceof Date
+  );
+  if (!enabled.length) return empty;
+  const shopsColl = await getCollection(COLLECTIONS.shops);
+  const rows = await shopsColl.find(
+    { platform: { $in: enabled.slice() }, bot_worker_enabled: true }
+  ).toArray();
+  const pairs = [];
+  for (const r of rows) {
+    if (!(r.bot_worker_enabled_at instanceof Date)) continue;
+    const pAt = platformAt[r.platform];
+    pairs.push({
+      platform: r.platform,
+      shop_id: r.shop_id,
+      cutoff: new Date(Math.max(globalEnabledSince.getTime(), pAt.getTime(), r.bot_worker_enabled_at.getTime())),
+    });
+  }
+  return { config, pairs, global_enabled_since: globalEnabledSince };
+}
 
 export const state = {
   calls: {
@@ -92,6 +141,11 @@ export const state = {
     bot_worker_enabled: true,
     bot_worker_interval_ms: 10,
     bot_concurrency_limit: 50,
+    // ⚡ Phase 2D — platform gate (shopee เท่านั้น = BOTWORKER_BACKENDS)
+    bot_worker_platforms: { shopee: true, tiktok: false, lazada: false },
+    // ⚡ Phase 2D — platform enable timestamp (epoch = admit-anything cutoff);
+    //   resolveBotworkerScope fail-closed เมื่อ timestamp หาย — seed ไว้เสมอ
+    bot_worker_platform_enabled_at: /** @type {Record<string, Date | null>} */ ({ shopee: new Date(0) }),
     workflow_enabled: false,
     workflow_priority: "workflow_first",
     bot_buffer_enabled: false,
@@ -145,7 +199,6 @@ export function resetState() {
   botworkerRuntime.claimLeaseMs = 150000;
   botworkerRuntime.heartbeatMs = 50000;
   botworkerRuntime.botCallTimeoutMs = 90000;
-  botworkerRuntime.flushErrorRetryMs = 5000;
   botworkerRuntime.ownerId = "test-worker";
   botworkerRuntime.leaderLeaseMs = 5000;
   botworkerRuntime.leaderHeartbeatMs = 1500;
@@ -155,6 +208,16 @@ export function resetState() {
   state.workflowResult = null;
   state.handoffResult = { assignedTo: null, assignmentReason: "test_none" };
   store.clear();
+  // ⚡ Phase 2D — deferred recovery / rising-edge passes resolve scope จาก
+  //   shops coll จริง → seed fixture shops ON (suites ใช้ shop_1/s/s1)
+  //   enabled_at = epoch → admit-anything cutoff (เทียบ config enabled_at เดิม)
+  for (const sid of ["shop_1", "s", "s1"]) {
+    fakeColl("shops").push({
+      shop_id: sid, shopname: sid, platform: "shopee",
+      connected: true, enabled_for_chat: false, bot_worker_enabled: true,
+      bot_worker_enabled_at: new Date(0),
+    });
+  }
 }
 
 // ── fake Mongo (shared engine — test-botworker-fakemongo.mjs) ─
@@ -184,6 +247,7 @@ export const getCollection = fm.getCollection;
 export const COLLECTIONS = {
   messages: "messages",
   conversations: "conversations",
+  shops: "shops", // ⚡ Phase 2D — scope resolver reads shops coll by canonical name
   chatProcessing: "chat_processing",
   shadowReplies: "shadow_replies",
   bufferMessages: "buffer_messages",

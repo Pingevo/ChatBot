@@ -136,6 +136,58 @@ async function main() {
       `recovery must restore DB values — worker=${c.bot_worker_enabled} limit=${c.bot_concurrency_limit}`);
   });
 
+  // ═══ F5–F8 — setBotWorkerPlatformEnabled CAS owner contract (production fn, fake mongo) ═══
+  //   expected=false CAS miss + upsert → insert ชน unique config_key → E11000
+  //   ต้องถูก map เป็น applied:false (route→409) — ห้าม throw 500 ออกไป
+  //   enabled===expected → zero-write probe; persisted≠expected → applied:false
+  //   (คำขอ idempotent ที่ expectation ตายแล้ว ไม่ใช่ "applied ลอยๆ")
+
+  await test("F5 enable race loser (expected=false, persisted=true) → applied:false — E11000 must not escape", async () => {
+    mocks.fakeColl("system_configs").length = 0;
+    mocks.fakeColl("system_configs").push({
+      config_key: "main_config", bot_worker_platforms: { shopee: true },
+      bot_worker_platform_enabled_at: { shopee: new Date(Date.now() - 60_000) },
+    });
+    const res = await cfg.setBotWorkerPlatformEnabled("shopee", true, false);
+    assert(res.applied === false && res.current === true,
+      `loser must get applied:false current:true, got ${JSON.stringify(res)}`);
+  });
+
+  await test("F6 idempotent intent on stale expectation (true, expected=true, persisted=false) → applied:false", async () => {
+    mocks.fakeColl("system_configs").length = 0;
+    mocks.fakeColl("system_configs").push({
+      config_key: "main_config", bot_worker_platforms: { shopee: false },
+    });
+    const res = await cfg.setBotWorkerPlatformEnabled("shopee", true, true);
+    assert(res.applied === false && res.current === false,
+      `stale expectation must be applied:false, got ${JSON.stringify(res)}`);
+  });
+
+  await test("F7 enable on missing doc (expected=false) → upsert applies + stamps edge", async () => {
+    mocks.fakeColl("system_configs").length = 0; // no main_config doc at all
+    const res = await cfg.setBotWorkerPlatformEnabled("shopee", true, false);
+    assert(res.applied === true && res.changed === true,
+      `missing-doc enable must apply via upsert: ${JSON.stringify(res)}`);
+    const doc = mocks.fakeColl("system_configs").find((d: any) => d.config_key === "main_config")!;
+    assert(doc.bot_worker_platforms?.shopee === true, "flag must persist");
+    assert(doc.bot_worker_platform_enabled_at?.shopee instanceof Date, "edge must stamp in the same write");
+  });
+
+  await test("F8 idempotent re-enable (expected=true, persisted=true) → applied no-change, edge preserved", async () => {
+    mocks.fakeColl("system_configs").length = 0;
+    const t0 = new Date(Date.now() - 60_000);
+    mocks.fakeColl("system_configs").push({
+      config_key: "main_config", bot_worker_platforms: { shopee: true },
+      bot_worker_platform_enabled_at: { shopee: t0 },
+    });
+    const res = await cfg.setBotWorkerPlatformEnabled("shopee", true, true);
+    assert(res.applied === true && res.changed === false,
+      `idempotent re-enable must be applied unchanged: ${JSON.stringify(res)}`);
+    const doc = mocks.fakeColl("system_configs").find((d: any) => d.config_key === "main_config")!;
+    assert(doc.bot_worker_platform_enabled_at?.shopee?.getTime() === t0.getTime(),
+      "enable edge must not move on no-op");
+  });
+
   const passed = results.filter((r) => r.ok).length;
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${passed}/${results.length} passed`);

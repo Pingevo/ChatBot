@@ -284,6 +284,9 @@ interface RunCtx {
   svc: Svc;
   fake: FakeChatbot;
   results: { id: string; ok: boolean; detail: string }[];
+  // ⚡ Phase 2D — required cycle-scope snapshot สำหรับ poll/recovery calls
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  scope: { config: any; pairs: { platform: string; shop_id: string }[] };
 }
 function expect(ctx: RunCtx, id: string, name: string, cond: boolean, detail = "") {
   ctx.results.push({ id, ok: cond, detail: cond ? name : `${name} — ${detail}` });
@@ -316,12 +319,11 @@ async function s1(ctx: RunCtx) {
 // S2 — buffer batch via production poll path
 async function s2(ctx: RunCtx) {
   const conv = `${ID_PREFIX}conv_s2`, m1 = `${ID_PREFIX}s2_m1`, m2 = `${ID_PREFIX}s2_m2`;
-  const since = new Date();
   const n0 = ctx.fake.calls.length;
   await sleep(5);
   await seedInbound(ctx, m1, conv, `${ID_PREFIX}s2 first`, new Date());
   await seedInbound(ctx, m2, conv, `${ID_PREFIX}s2 second`, new Date());
-  await ctx.svc.pollNewMessages(since);
+  await ctx.svc.pollNewMessages(ctx.scope);
   await ctx.svc.waitForInFlight(10000);
   await sleep(500); // debounce window 150ms + flush margin
   await ctx.svc.waitForInFlight(10000);
@@ -391,7 +393,7 @@ async function s5(ctx: RunCtx) {
     kind: "message", status: "buffered", claim_id: claimId,
     owner_id: `${ID_PREFIX}dead_owner`, fencing_token: 1,
   });
-  await ctx.svc.recoverStaleBuffers();
+  await ctx.svc.recoverStaleBuffers(ctx.scope);
   await ctx.svc.waitForInFlight(10000);
   const claim = await ctx.db.collection(ctx.COLLECTIONS.chatProcessing).findOne({ _id: claimId });
   const rows = await ctx.db.collection(ctx.COLLECTIONS.bufferMessages).find({ conversation_id: conv, kind: "message" }).toArray();
@@ -424,7 +426,7 @@ async function s6(ctx: RunCtx) {
     kind: "message", status: "buffered", claim_id: claimId,
     owner_id: `${ID_PREFIX}dead_owner`, fencing_token: 1,
   });
-  await ctx.svc.recoverStaleBuffers();
+  await ctx.svc.recoverStaleBuffers(ctx.scope);
   await ctx.svc.waitForInFlight(10000);
   const claim = await ctx.db.collection(ctx.COLLECTIONS.chatProcessing).findOne({ _id: claimId });
   const replies = await ctx.db.collection(ctx.COLLECTIONS.shadowReplies).find({ conversation_id: conv }).toArray();
@@ -535,10 +537,13 @@ async function runApply(): Promise<number> {
     // 3) dynamic imports — singletons bind temp DB + fake URL
     const mongo = await import("../src/backend/db/mongoClient");
     const { botWorkerService } = await import("../src/backend/service/botWorkerService");
+    const { getSystemConfig } = await import("../src/backend/service/systemConfigService");
     db = await mongo.getDb();
     const ctx: RunCtx = {
       db, COLLECTIONS: mongo.COLLECTIONS as Record<string, string>,
       svc: botWorkerService, fake, results: [],
+      // ⚡ Phase 2D — scope resolved จาก temp-DB จริง (seed ด้านล่าง) ผ่าน production resolver
+      scope: { config: {} as Record<string, unknown>, pairs: [] },
     };
 
     // 4) seed: marker first, temp-DB config, minimal index (never ensureIndexes)
@@ -547,10 +552,22 @@ async function runApply(): Promise<number> {
     await db.collection(ctx.COLLECTIONS.systemConfigs).insertOne({
       config_key: "main_config",
       bot_worker_enabled: true,          // temp DB only — production flag stays false
+      // ⚡ Phase 2D — platform gate: เฉพาะ shopee (backend implemented) + shop ON
+      bot_worker_platforms: { shopee: true, tiktok: false, lazada: false },
+      // ⚡ resolver fail-closes เมื่อ enabled flag=true แต่ขาด timestamp — seed ย้อนหลัง
+      //   ให้ scope เปิดจริง (inbound ที่ seed ทีหลังมี created_timestamp ใหม่กว่า cutoff)
+      bot_worker_platform_enabled_at: { shopee: new Date(Date.now() - 60_000) },
       bot_buffer_enabled: true,
       bot_buffer_window_ms: 150, bot_buffer_max_messages: 5,
       bot_buffer_window_media_ms: 300, bot_buffer_max_media_messages: 10,
     });
+    await db.collection("shops").insertOne({
+      shop_id: `${ID_PREFIX}shop`, shopname: `${ID_PREFIX}shop`, platform: "shopee",
+      connected: true, enabled_for_chat: false, bot_worker_enabled: true,
+      bot_worker_enabled_at: new Date(Date.now() - 60_000),
+    });
+    ctx.scope = await botWorkerService.resolveBotworkerScope(await getSystemConfig(), new Date());
+    if (!ctx.scope.pairs.length) throw new Error("scope resolution returned no pairs — verify cannot run");
 
     // 5) scenarios (S3→S4 share a conversation)
     await s1(ctx);

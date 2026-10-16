@@ -13,6 +13,11 @@
 
 export type Platform = "shopee" | "tiktok" | "lazada";
 
+// ⚡ Phase 2D — chatbot backends ที่ implement แล้วจริงสำหรับ botworker admission
+//   tiktok/lazada ยังไม่มี backend → ต้องเป็น OFF เสมอ (hard-stop กันพลาดทั้งฝั่ง
+//   config write และ scope resolution — เปลี่ยนได้เฉพาะแก้ไฟล์นี้เมื่อ backend พร้อม)
+export const BOTWORKER_BACKENDS: readonly Platform[] = ["shopee"];
+
 export const SAFETY = {
   // === Shopee — ห้ามยิง Shopee API ทุก endpoint ===
   shopeeLiveRead: false,      // get_conversation_list, get_message, get_one_conversation

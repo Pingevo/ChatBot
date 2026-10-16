@@ -35,6 +35,8 @@ export const state = {
   callBotHang: false, // ค้างจน caller abort ผ่าน params.signal
   config: {
     bot_worker_enabled: true,
+    bot_worker_platforms: { shopee: true, tiktok: false, lazada: false }, // ⚡ Phase 2D
+    bot_worker_platform_enabled_at: { shopee: new Date(0) }, // ⚡ Phase 2D cutoff edge
     bot_concurrency_limit: 50,
     workflow_enabled: false,
     workflow_priority: "workflow_first",
@@ -69,7 +71,14 @@ export function resetState() {
   state.callBotError = null;
   state.callBotHang = false;
   Object.assign(state.config, JSON.parse(JSON.stringify(DEFAULT_CONFIG)));
+  state.config.bot_worker_platform_enabled_at = { shopee: new Date(0) }; // Date dies in JSON round-trip
   fm.store.clear();
+  // ⚡ fixture shop — resolveBotworkerScope (flush boundary/recovery) ต้องมี
+  //   (platform, shop_id, enabled_at) ครบถึงจะ admit; epoch = admit-anything cutoff
+  fm.fakeColl("shops").push({
+    shop_id: "shop_1", shopname: "Shop 1", platform: "shopee",
+    connected: true, bot_worker_enabled: true, bot_worker_enabled_at: new Date(0),
+  });
 }
 
 // ── mongoClient mock ─────────────────────────────────────────

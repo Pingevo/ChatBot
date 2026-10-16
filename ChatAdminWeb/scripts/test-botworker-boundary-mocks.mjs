@@ -38,6 +38,7 @@ export const state = {
   callBotHang: false,
   config: {
     bot_worker_enabled: true,
+    bot_worker_platforms: { shopee: true, tiktok: false, lazada: false }, // ⚡ Phase 2D
     bot_concurrency_limit: 50,
     workflow_enabled: false,
     workflow_priority: "workflow_first",

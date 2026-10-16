@@ -43,6 +43,8 @@ export const state = {
   updateOneHook: null,
   config: {
     bot_worker_enabled: true,
+    bot_worker_platforms: { shopee: true, tiktok: false, lazada: false }, // ⚡ Phase 2D
+    bot_worker_platform_enabled_at: { shopee: new Date(0) }, // ⚡ Phase 2D cutoff edge
     bot_concurrency_limit: 50,
     workflow_enabled: false,
     workflow_priority: "workflow_first",
@@ -99,7 +101,13 @@ export function resetState() {
   state.queryPauseHits = 0;
   state.queryLog.length = 0;
   Object.assign(state.config, JSON.parse(JSON.stringify(DEFAULT_CONFIG)));
+  state.config.bot_worker_platform_enabled_at = { shopee: new Date(0) }; // Date dies in JSON round-trip
   fm.store.clear();
+  // ⚡ fixture shop — flush/recovery scope resolution ต้องมี enabled pair
+  fm.fakeColl("shops").push({
+    shop_id: "shop_1", shopname: "Shop 1", platform: "shopee",
+    connected: true, bot_worker_enabled: true, bot_worker_enabled_at: new Date(0),
+  });
 }
 
 export function queriesFor(coll) {
@@ -128,6 +136,7 @@ export const getSystemConfig = async () => {
       mock_mode_enabled: false,
       shadow_bot_enabled: false,
       bot_worker_enabled: false,
+      bot_worker_platforms: { shopee: false, tiktok: false, lazada: false }, // ⚡ Phase 2D fail-closed
       bot_buffer_enabled: false,
       workflow_enabled: false,
       grouped_retrieval_shadow_enabled: false,

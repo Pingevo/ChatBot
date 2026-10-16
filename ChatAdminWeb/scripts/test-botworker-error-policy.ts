@@ -40,6 +40,8 @@ let mocks: Mocks;
 let svc: Svc;
 let rt: Rt;
 let botCall: BotCall["callBot"];
+// ⚡ Phase 2D — required cycle-scope snapshot (fixtures ทั้งหมดอยู่ใน shop_1/shopee)
+let SCOPE: import("../src/backend/service/botworkerRuntime").BotworkerCycleScope;
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const results: { name: string; ok: boolean; err?: string }[] = [];
@@ -252,6 +254,7 @@ async function main() {
   svc = await import("../src/backend/service/botWorkerService");
   rt = await import("../src/backend/service/botworkerRuntime");
   botCall = (await import("../src/backend/service/botCallService")).callBot;
+  SCOPE = { config: mocks.state.config as never, global_enabled_since: new Date(0), pairs: [{ platform: "shopee", shop_id: "shop_1", cutoff: new Date(0) }] };
   installFetchStub();
 
   // ═══ BW-4: HTTP error mapping → terminal bot_failed ═══════
@@ -320,15 +323,15 @@ async function main() {
     seedUserMsg(conv, "m1", "qpoll", { created_timestamp: new Date() });
     mocks.state.fetchResponse = { status: 429, body: {} };
     await svc.ensureLeadership();
-    const p1 = await svc.pollNewMessages(since);
+    const p1 = await svc.pollNewMessages(SCOPE);
     await svc.waitForInFlight(5000);
     assert(p1.found === 1, `found=${p1.found}`);
     assert(claimDoc("m1")?.status === "bot_failed", `claim=${claimDoc("m1")?.status}`);
     const n1 = callParams().fetchCalls;
     // poll ซ้ำสองรอบ — terminal claim ต้อง skip ไม่ยิง fetch เพิ่ม
-    await svc.pollNewMessages(since);
+    await svc.pollNewMessages(SCOPE);
     await svc.waitForInFlight(5000);
-    await svc.pollNewMessages(since);
+    await svc.pollNewMessages(SCOPE);
     await svc.waitForInFlight(5000);
     assert(callParams().fetchCalls === n1, `fetch grew ${n1}→${callParams().fetchCalls} — terminal refired`);
     assert(n1 === 1, `fetch=${n1} want 1`);
@@ -689,7 +692,7 @@ async function main() {
     const since = new Date();
     await sleep(5);
     seedUserMsg(conv, "m1", "queued msg", { created_timestamp: new Date() });
-    await svc.pollNewMessages(since);
+    await svc.pollNewMessages(SCOPE);
     await sleep(80);
     assert(callParams().fetchCalls === 1,
       `fetch=${callParams().fetchCalls} — m1 must be queued behind holder`);
@@ -717,7 +720,7 @@ async function main() {
     const since = new Date();
     await sleep(5);
     seedUserMsg(conv, "m1", "wfkw queued", { created_timestamp: new Date() });
-    await svc.pollNewMessages(since);
+    await svc.pollNewMessages(SCOPE);
     await sleep(100);
     assert(callParams().fetchCalls === 1,
       `fetch=${callParams().fetchCalls} — workflow call must be queued`);
@@ -815,7 +818,7 @@ async function main() {
     const since = new Date();
     await sleep(5);
     seedUserMsg(conv, "m1", "direct post-resp", { created_timestamp: new Date() });
-    await svc.pollNewMessages(since);
+    await svc.pollNewMessages(SCOPE);
     await waitFor(() => mocks.state.queryPauseHits === 1);
     assert(mocks.state.queryPauseHits === 1,
       `pauseHits=${mocks.state.queryPauseHits} — reply persist boundary never reached`);
@@ -830,7 +833,7 @@ async function main() {
     // deterministic evidence persist ไปแล้ว (หยุด write กลางทางไม่ได้) — recovery reuse
     assert(repliesIn(conv).length === 1, `replies=${repliesIn(conv).length} — one persisted reply`);
     c!.lease_expires_at = new Date(Date.now() - 1000);
-    await svc.botWorkerService.recoverStaleBuffers();
+    await svc.botWorkerService.recoverStaleBuffers(SCOPE);
     assert(claimDoc("m1")?.status !== "processing",
       `claim=${claimDoc("m1")?.status} — recovery must finalize claim from committed evidence`);
     assert(callParams().fetchCalls === 1,
@@ -847,7 +850,7 @@ async function main() {
     const since = new Date();
     await sleep(5);
     seedUserMsg(conv, "m1", "wfkw post-resp", { created_timestamp: new Date() });
-    await svc.pollNewMessages(since);
+    await svc.pollNewMessages(SCOPE);
     await waitFor(() => mocks.state.queryPauseHits === 1);
     assert(mocks.state.queryPauseHits === 1,
       `pauseHits=${mocks.state.queryPauseHits} — workflow persist boundary never reached`);
@@ -863,7 +866,7 @@ async function main() {
       `claim=${c?.status} — post-response era-abort must not finalize claim`);
     assert(repliesIn(conv).length === 1, `replies=${repliesIn(conv).length} — one workflow reply persisted`);
     c!.lease_expires_at = new Date(Date.now() - 1000);
-    await svc.botWorkerService.recoverStaleBuffers();
+    await svc.botWorkerService.recoverStaleBuffers(SCOPE);
     assert(claimDoc("m1")?.status !== "processing",
       `claim=${claimDoc("m1")?.status} — recovery must finalize from committed evidence`);
     assert(callParams().fetchCalls === 1, "no provider call on recovery");
@@ -877,7 +880,7 @@ async function main() {
     const parkedAt = seedParkedRun("run_d10", "wf_wait", conv);
     mocks.state.fetchHang = true; // resumed let_ai_respond ค้างจน abort
     await svc.ensureLeadership();
-    const p = svc.botWorkerService.checkWaitTimeouts();
+    const p = svc.botWorkerService.checkWaitTimeouts(SCOPE);
     await waitFor(() => callParams().fetchCalls === 1, 3000);
     assert(callParams().fetchCalls === 1,
       `fetch=${callParams().fetchCalls} — resumed let_ai_respond must reach the stub`);
@@ -894,7 +897,7 @@ async function main() {
       `wait context lost — node=${run.wait_node_id} current=${run.current_node_id} waiting_for=${run.waiting_for}`);
     // era ใหม่ — timeout retry ทำต่อครั้งเดียว
     mocks.state.fetchHang = false;
-    await svc.botWorkerService.checkWaitTimeouts();
+    await svc.botWorkerService.checkWaitTimeouts(SCOPE);
     assert(callParams().fetchCalls === 2, `fetch=${callParams().fetchCalls} — retry once only`);
     const after = mocks.fakeColl("workflow_runs").find((d: any) => d.run_id === "run_d10");
     assert(after.status === "completed",
@@ -910,7 +913,7 @@ async function main() {
     const parkedAt = seedParkedRun("run_d11", "wf_wait_l", conv, false);
     mocks.state.fetchHang = true;
     await svc.ensureLeadership();
-    const p = svc.botWorkerService.checkWaitTimeouts();
+    const p = svc.botWorkerService.checkWaitTimeouts(SCOPE);
     await waitFor(() => callParams().fetchCalls === 1, 3000);
     assert(callParams().fetchCalls === 1,
       `fetch=${callParams().fetchCalls} — resumed let_ai_respond must reach the stub`);
@@ -982,7 +985,7 @@ async function main() {
     const ac = new AbortController();
     ac.abort();
     // ⚡ abort ก่อนเริ่ม candidate → zero acquire/write/provider calls
-    const n = await engine.workflowEngine.checkWaitTimeouts(ac.signal);
+    const n = await engine.workflowEngine.checkWaitTimeouts(ac.signal, SCOPE);
     assert(n === 0, `processed=${n} — aborted scan must report 0`);
     assert(callParams().fetchCalls === 0, `fetch=${callParams().fetchCalls} — no provider call`);
     assert(runWrites().length === 0,
@@ -1000,7 +1003,7 @@ async function main() {
     seedParkedRun("run_d13b", "wf_wait_d13", conv);
     mocks.state.fetchHang = true; // candidate แรกค้างใน fetch จน abort
     await svc.ensureLeadership();
-    const p = svc.botWorkerService.checkWaitTimeouts();
+    const p = svc.botWorkerService.checkWaitTimeouts(SCOPE);
     await waitFor(() => callParams().fetchCalls === 1, 3000);
     assert(callParams().fetchCalls === 1, `fetch=${callParams().fetchCalls}`);
     await svc.botWorkerService.clearPendingWork();
@@ -1025,7 +1028,7 @@ async function main() {
     //    fencing token ปัจจุบัน (acquired) ไม่ใช่ stale snapshot
     mocks.state.fetchResponse = { status: 500, body: { error: "boom" } };
     await svc.ensureLeadership();
-    const n = await svc.botWorkerService.checkWaitTimeouts();
+    const n = await svc.botWorkerService.checkWaitTimeouts(SCOPE);
     assert(n === 1, `processed=${n} — handled run counts once`);
     const run = mocks.fakeColl("workflow_runs").find((d: any) => d.run_id === "run_d14");
     assert(run.status === "errored",
@@ -1052,7 +1055,7 @@ async function main() {
       return new Promise<void>((r) => { releaseLookup = r; });
     };
     try {
-      const p = engine.workflowEngine.checkWaitTimeouts(ac.signal);
+      const p = engine.workflowEngine.checkWaitTimeouts(ac.signal, SCOPE);
       await waitFor(() => lookupEntered, 3000);
       ac.abort();          // ⚡ abort ระหว่าง workflow lookup (async gap)
       releaseLookup();     // lookup คืน null หลัง abort
@@ -1086,7 +1089,7 @@ async function main() {
     };
     try {
       await svc.ensureLeadership();
-      const n = await svc.botWorkerService.checkWaitTimeouts();
+      const n = await svc.botWorkerService.checkWaitTimeouts(SCOPE);
       assert(n === 0,
         `processed=${n} — terminal CAS miss = fencing loss, must not count as handled`);
       const run = mocks.fakeColl("workflow_runs").find((d: any) => d.run_id === "run_d16");

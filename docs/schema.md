@@ -399,6 +399,8 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `created_at` | Date | |
 | `updated_at` | Date | |
 | `enabled_for_chat` | boolean | toggle ใน /config |
+| `bot_worker_enabled` | boolean? | 2D — per-shop botworker scope gate; missing = OFF; ใช้ร่วมกับ `platform` เป็น exact pair `(platform, shop_id)` — **แยกจาก** `connected`/`enabled_for_chat`; PATCH = single-command `{bot_worker_enabled, expected_bot_worker_enabled}` (optimistic CAS — persisted≠expected → 409; missing ≡ false; **enable CAS fence `platform∈BOTWORKER_BACKENDS` atomically** — flip ระหว่าง read↔write → miss → 422; disable ไม่ fence; ส่งคู่ `connected` → 422; enable บน platform นอก `BOTWORKER_BACKENDS` → 422; disable ได้เสมอ) |
+| `bot_worker_enabled_at` | Date? | 2D — shop enable rising-edge timestamp; CAS write คู่กับ `bot_worker_enabled` (false→true: stamp now · true→true: คงเดิม · true→false: unset); switch true แต่ timestamp ขาด = **fail-closed** |
 | `disabled_by_user` | string? | |
 | `last_polled_at` | Date? | |
 | `status` | string? | |
@@ -408,7 +410,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 |---------|-------|--------|
 | Read | shopService | `/shops`, `/shops/[id]`, `/config`, `/dashboard`, `/workflows`, `/triggers`, `/quick-replies`, `/team` |
 | Write (upsert) | shopService.upsertShop + `scripts/sync-shops.ts` (aggregate จาก `conversations_shp`) | data writer / sync / script |
-| Update | setShopConnected, touchShopSync, toggleShopChatSync | `/shops/[id]`, `/config/shop/[shopId]` |
+| Update | setShopConnected, setShopBotWorker, touchShopSync, toggleShopChatSync | `/shops/[id]`, `/config/shop/[shopId]` |
 | Delete | ไม่มี | |
 
 **หน้าที่เข้าถึง:** `/shops`, `/config`, `/workflows`, `/triggers`, `/quick-replies`, `/team`, `/persona`, `/shop-settings`
@@ -683,7 +685,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `conversation_id` | string | ref |
 | `shop_id` | string | |
 | `platform` | string | |
-| `status` | string | trigger_matched/bot_answered/handed_off/bot_failed/no_action/workflow_actioned/workflow_resumed |
+| `status` | string | processing/claimed (in-flight) · terminal: trigger_matched/bot_answered/handed_off/bot_failed/no_action/workflow_actioned/workflow_resumed/bot_cancelled · **`bot_failed`** ใช้เป็น dormant state ของ technical failure ด้วย — แถว buffer `failed` ที่ claim `bot_failed` ต่ำกว่า attempt cap ถูก carry-forward ได้ (revive ผ่าน fenced CAS + attempt+1 ตอน distinct inbound ใหม่); `bot_failed` ที่ attempt เกิน cap = terminal |
 | `trigger_id` | string? | |
 | `trigger_action` | string? | bot_answer/handoff_admin |
 | `shadow_reply_id` | string? | ref shadow_replies |
@@ -801,7 +803,9 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `mock_mode_enabled` | boolean | |
 | `shadow_bot_enabled` | boolean | |
 | `polling_interval_ms` | number | |
-| `bot_worker_enabled` | boolean | |
+| `bot_worker_enabled` | boolean | global kill switch (fail-closed) |
+| `bot_worker_platforms` | `{shopee,tiktok,lazada}: boolean` | 2D — platform-scope gate; missing/partial → ค่าที่ขาด = OFF; key นอก 3 platform → reject; `true` เฉพาะ platform ที่มี backend (`BOTWORKER_BACKENDS` = shopee) |
+| `bot_worker_platform_enabled_at` | `{platform: Date}` | 2D — per-platform enable rising-edge timestamp map; derive atomically ใน write เดียวกับ `bot_worker_platforms` (false→true: stamp now · true→true: คงเดิม · true→false: clear); flag true แต่ timestamp ขาด = **fail-closed** |
 | `bot_worker_interval_ms` | number | |
 | `bot_buffer_enabled` | boolean | |
 | `bot_buffer_window_ms` | number | 1000-30000 |
@@ -1123,17 +1127,22 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `owner_id` | string? | worker owner ของ claim |
 | `fencing_token` | number? | fence ตอน insert |
 | `kind` | string? | `"conv_lock"` = conversation-lock row (แยกจาก message rows); ไม่มี = message row |
-| `status` | string? | message row: `buffered`/`processing`; lock row: `locked`/`released` |
-| `batch_id` | string? | batch ที่ row ถูก claim เข้า |
+| `status` | string? | message row: `buffered`/`processing`/`failed` (dormant — technical flush failure; ไม่มี retry timer/lease polling — distinct inbound ใหม่ใน exact `(platform, shop_id, conversation_id)` เดียวกันเท่านั้นที่ carry-forward)/`quarantined` (attempt cap หมด, terminal); lock row: `locked`/`released` |
+| `batch_id` | string? | batch ที่ row ถูก claim เข้า — `batchIdFor(platform, shop_id, conversation_id, sortedMsgIds)` (tuple-aware) |
+| `error` | string? | technical failure class ของ dormant row (`status:"failed"`) |
+| `failed_at` | Date? | เวลาที่ row เข้า dormant failed state |
+| `msg_created_at` | Date? | `created_timestamp` ของ inbound — admission evidence; delayed-flush gate เช็ค `msg_created_at > pair.cutoff` ปัจจุบัน (superseded → `no_action` terminal, ไม่ใช่ dormant) |
+| `admitted_edge` | Date? | pair.cutoff ตอน admit — ใช้เป็น global-era component ตอน flush re-resolve scope |
+| `carried` | boolean? | `true` = dormant row ที่ถูก carry-forward โดย distinct inbound ใหม่ — bypass cutoff ที่ flush gate (wake gate คือ inbound eligibility แล้ว) |
 
-**Conversation-lock rows:** doc `kind:"conv_lock"` ใน collection เดียวกัน — มี `conversation_id`, `status:"locked"|"released"`, `owner_id`, `fencing_token`, `lease_expires_at`, `updated_at` (query แยกด้วย kind)
+**Conversation-lock rows:** doc `kind:"conv_lock"` ใน collection เดียวกัน — `_id` = `convLockIdFor(platform, shop_id, conversation_id)` (sha256 ของ tuple — **timer/lock/batch ทั้งหมด key ด้วย tuple เดียวกัน ไม่ใช่ conversation_id เดี่ยว**), มี `conversation_id`+`shop_id`+`platform`, `status:"locked"|"released"`, `owner_id`, `fencing_token`, `lease_expires_at`, `updated_at` (query แยกด้วย kind)
 
 **หมายเหตุ:** fields ใหม่ทั้งหมด optional บน collection เดิม — ไม่มี migration, ไม่มี collection/index ใหม่, legacy rows (ไม่มี claim_id/kind) อ่านได้เหมือนเดิม
 
 **Access:**
-| Read | getBufferedMessages | buffer service |
+| Read | getBufferedMessages(platform,shop_id,conversation_id) | buffer service |
 | Write | insertToBuffer, lock CAS | bufferOrProcess |
-| Delete | deleteBufferedMessages | flushBuffer |
+| Delete | deleteBatchRows | flushBuffer(platform,shop_id,conversation_id,…) |
 | Recover | recoverStaleBuffers | ตอน boot |
 
 **หน้าที่เข้าถึง:** `/test-chat` (test buffer), bot worker (production buffer)

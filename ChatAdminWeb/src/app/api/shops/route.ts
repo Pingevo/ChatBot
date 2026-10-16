@@ -9,10 +9,15 @@
 //
 // Backward compat: if no pagination params are sent, returns all shops (legacy behavior
 // used by the config page and other callers that expect { rows, total }).
+// ⚡ Phase 2D — response ทุกรูปแบบแนบ `bot_worker` meta (global + per-platform +
+//   implemented backends) เพื่อให้ /shops คำนวณ effective state ของแต่ละ shop ได้
+//   โดยไม่ต้องอ่าน /api/config (ที่ล็อคเฉพาะ dev)
 import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { shopService } from "@/backend/service/shopService";
+import { systemConfigService } from "@/backend/service/systemConfigService";
+import { BOTWORKER_BACKENDS } from "@/backend/lib/safety";
 import type { Platform } from "@/backend/service/conversationService";
 
 export async function GET(req: NextRequest) {
@@ -27,10 +32,22 @@ export async function GET(req: NextRequest) {
   const pageParam = url.searchParams.get("page");
   const pageSizeParam = url.searchParams.get("pageSize");
 
+  // ⚡ Phase 2D — botworker scope meta (fail-closed: config อ่านไม่ได้ → ทุกชั้น OFF)
+  const config = await systemConfigService.getSystemConfig().catch(() => null);
+  const botWorker = {
+    global: config?.bot_worker_enabled === true,
+    platforms: {
+      shopee: config?.bot_worker_platforms?.shopee === true,
+      tiktok: config?.bot_worker_platforms?.tiktok === true,
+      lazada: config?.bot_worker_platforms?.lazada === true,
+    },
+    implemented: [...BOTWORKER_BACKENDS],
+  };
+
   // Legacy mode: no pagination params → return all (for config page + simple callers)
   if (!pageParam && !pageSizeParam && !search && !sortByParam) {
     const shops = await shopService.listShops(platform || undefined);
-    return json({ rows: shops, total: shops.length });
+    return json({ rows: shops, total: shops.length, bot_worker: botWorker });
   }
 
   const sortBy = (sortByParam || "created_at") as
@@ -57,5 +74,6 @@ export async function GET(req: NextRequest) {
     page,
     pageSize,
     totalPages: Math.ceil(total / pageSize),
+    bot_worker: botWorker,
   });
 }

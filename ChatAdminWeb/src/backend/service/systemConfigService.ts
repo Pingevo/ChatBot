@@ -41,6 +41,13 @@ export interface SystemConfigDoc extends Document {
   polling_interval_ms: number;
   bot_worker_enabled: boolean;       // Phase 9 — เปิด/ปิด bot worker (auto pipeline)
   bot_worker_interval_ms: number;    // Phase 9 — worker poll interval (default 2000)
+  // ⚡ Phase 2D — platform gate ของ botworker admission (missing = OFF ทุกตัว;
+  //   เปิดได้เฉพาะ BOTWORKER_BACKENDS — tiktok/lazada backend ยังไม่ implement)
+  bot_worker_platforms?: { shopee?: boolean; tiktok?: boolean; lazada?: boolean };
+  // ⚡ per-platform enable rising-edge — เขียน atomic พร้อม bot_worker_platforms
+  //   ใน updateSystemConfig (server-derived — ไม่อยู่ใน allowedKeys);
+  //   flag=true แต่ timestamp หาย/null → resolver fail-closed
+  bot_worker_platform_enabled_at?: { shopee?: Date | null; tiktok?: Date | null; lazada?: Date | null };
 
   // === Bot Message Buffering (Debounce) — admin-configurable ===
   bot_buffer_enabled: boolean;       // เปิด/ปิด message buffering
@@ -97,6 +104,8 @@ const CACHE_TTL_MS = 5000;
 //   env/DB/stale ห้ามรั่วเป็น true กลาง outage)
 const FAIL_CLOSED_SWITCHES = {
   bot_worker_enabled: false,
+  // ⚡ Phase 2D — platform scope ต้อง fail-closed เหมือน global switch
+  bot_worker_platforms: { shopee: false, tiktok: false, lazada: false },
   bot_buffer_enabled: false,
   workflow_enabled: false,
   shadow_bot_enabled: false,
@@ -165,6 +174,16 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
     polling_interval_ms: dbConfig.polling_interval_ms ?? safeDefaults.polling_interval_ms ?? 1000,
     bot_worker_enabled: dbConfig.bot_worker_enabled ?? safeDefaults.bot_worker_enabled ?? false,
     bot_worker_interval_ms: dbConfig.bot_worker_interval_ms ?? safeDefaults.bot_worker_interval_ms ?? 1000,
+    // ⚡ Phase 2D — normalize เป็น {platform:boolean} เสมอ; missing/unknown key = OFF
+    //   (ไม่มี env fallback — เปิด platform ต้องเขียน DB ผ่าน config owner เท่านั้น)
+    bot_worker_platforms: {
+      shopee: dbConfig.bot_worker_platforms?.shopee === true,
+      tiktok: dbConfig.bot_worker_platforms?.tiktok === true,
+      lazada: dbConfig.bot_worker_platforms?.lazada === true,
+    },
+    // ⚡ carry enable edges — ไม่ normalize (Date เท่านั้นที่นับเป็นเปิด;
+    //   null/missing = fail-closed ใน resolver)
+    bot_worker_platform_enabled_at: dbConfig.bot_worker_platform_enabled_at,
 
     // Buffer — จาก DB หรือ env
     bot_buffer_enabled: dbConfig.bot_buffer_enabled ?? safeDefaults.bot_buffer_enabled ?? false,
@@ -299,6 +318,8 @@ export async function updateSystemConfig(
     'polling_interval_ms',
     'bot_worker_enabled',
     'bot_worker_interval_ms',
+    // ⚡ bot_worker_platforms ไม่อยู่ใน whitelist นี้ — enable edge ต้องเขียนผ่าน
+    //   setBotWorkerPlatformEnabled (CAS on expected state) เจ้าของเดียวเท่านั้น
     'bot_buffer_enabled',
     'bot_buffer_window_ms',
     'bot_buffer_max_messages',
@@ -335,6 +356,72 @@ export async function updateSystemConfig(
   // Force refresh cache
   cachedConfig = null;
   return getSystemConfig(true);
+}
+
+/**
+ * ⚡ Phase 2D — platform enable-edge CAS owner เดียว (concurrency-safe):
+ *   client ส่ง expected persisted state → Mongo write filter บน expected เท่านั้น
+ *   (missing field ≡ false canonical) — write เดียวครอบ flag + timestamp edge:
+ *   OFF→ON stamp `bot_worker_platform_enabled_at.<platform>` ใน successful write
+ *   เดียวกัน · ON→OFF clear null · true→true idempotent = no write ไม่ขยับ edge
+ *   CAS miss → reread 1 ครั้ง (bounded) → caller แปลเป็น 409 · ไม่มี auto retry
+ */
+export async function setBotWorkerPlatformEnabled(
+  platform: string,
+  enabled: boolean,
+  expected: boolean,
+  updatedBy = 'admin'
+): Promise<{ applied: true; changed: boolean } | { applied: false; current: boolean }> {
+  const coll = await getCollection<SystemConfigDoc>(COLLECTIONS.systemConfigs);
+  const flagField = `bot_worker_platforms.${platform}`;
+  const atField = `bot_worker_platform_enabled_at.${platform}`;
+  const stateFilter: Record<string, unknown> = expected
+    ? { [flagField]: true }
+    : { $or: [{ [flagField]: false }, { [flagField]: { $exists: false } }] };
+  const reportCurrent = async () => {
+    const cur = await coll.findOne({ config_key: 'main_config' });
+    const flags = cur?.bot_worker_platforms as Record<string, unknown> | undefined;
+    return { applied: false as const, current: flags?.[platform] === true };
+  };
+
+  // ⚡ desired === caller's expected persisted state → idempotent no-op —
+  //   probe persisted จริง (zero write, edge ไม่ขยับ): persisted≠expected = stale
+  //   expectation → miss → caller แปลเป็น 409 (ห้ามตอบ applied ลอยๆ)
+  if (enabled === expected) {
+    const probe = await coll.findOne(
+      { config_key: 'main_config', ...stateFilter },
+      { projection: { _id: 1 } }
+    );
+    if (probe) return { applied: true, changed: false };
+    return reportCurrent();
+  }
+
+  try {
+    const applied = await coll.updateOne(
+      { config_key: 'main_config', ...stateFilter },
+      {
+        $set: {
+          [flagField]: enabled,
+          [atField]: enabled ? new Date() : null,
+          updated_by: updatedBy,
+          updated_at: new Date(),
+        },
+      },
+      // upsert เฉพาะ expected=false (missing ≡ false → OFF→ON บน doc ใหม่ถือว่าตรง CAS)
+      //   expected=true + missing doc ต้อง CAS miss → 409 ไม่ใช่ upsert
+      { upsert: !expected }
+    );
+    if (applied.matchedCount === 1 || applied.upsertedCount > 0) {
+      cachedConfig = null;
+      return { applied: true, changed: true };
+    }
+  } catch (e) {
+    // ⚡ expected=false + persisted=true → filter miss → upsert insert ชน unique
+    //   config_key → E11000 = CAS miss ของ race — แปลเป็น reread path เดียวกัน
+    if ((e as { code?: number }).code !== 11000) throw e;
+  }
+  // CAS miss → one bounded reread to report persisted truth (no retry)
+  return reportCurrent();
 }
 
 /**
@@ -529,6 +616,7 @@ export async function updateAdminConfig(
 export const systemConfigService = {
   getSystemConfig,
   updateSystemConfig,
+  setBotWorkerPlatformEnabled,
   testIntegration,
   getAdminConfig,
   updateAdminConfig,
