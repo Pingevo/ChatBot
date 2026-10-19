@@ -6,6 +6,7 @@ app.py เรียกหลัง USE_GROUPED_RETRIEVAL_SHADOW=1 เท่า�
 """
 from __future__ import annotations
 
+from . import generation_pointer as _gen
 from .route_context import build_retrieval_slots, build_retrieval_relations
 from .retrieval_planner import build_grouped_retrieval_requests
 from .retrieval_executor import execute_grouped_retrieval_requests
@@ -54,6 +55,7 @@ def run_grouped_retrieval_shadow(
     limit_per_request: int = 20,
     fetcher=None,
     legacy_fetcher="auto",
+    snap=_gen.SNAP_UNSET,
 ) -> dict:
     """profile → slots→relations→requests→executor(union)→pool → summary.
 
@@ -67,7 +69,7 @@ def run_grouped_retrieval_shadow(
         results = execute_grouped_retrieval_requests(
             requests, message=message, shop=shop, platform=platform,
             limit_per_request=limit_per_request,
-            fetcher=fetcher, legacy_fetcher=legacy_fetcher)
+            fetcher=fetcher, legacy_fetcher=legacy_fetcher, snap=snap)
         pool = build_candidate_pool(results, profile=profile)
         return _summary(results, pool)
     except Exception as exc:

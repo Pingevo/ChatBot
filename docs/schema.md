@@ -90,8 +90,10 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 |------------|--------------|---------|---------|
 | `conversation_products` | — (hardcoded) | `conversation_products.py` | bot runtime (`app.py`, `chat_v2`, `warranty_flow`, `order_flow`) |
 | `test_chat_logs` | — (hardcoded) | `test_chat_api.py` | `GET /test-chat/logs` (Python) |
-| `image_texts` | — (hardcoded) | `scripts/import_image_texts.py` | `product_store.py` (OCR cert search), `units.py` |
-| `sellable_units` | `ADMIN_MONGO_COLLECTION_UNITS` | `scripts/import_sellable_units.py` | `units.py` (unit index runtime) |
+| `image_texts` | — (hardcoded) | `scripts/build_image_texts*.py` (cache upsert) | **scripts เท่านั้น** (cache/state — runtime อ่าน `image_texts_<gid>` ผ่าน pointer) |
+| `sellable_units_<gid>` | derived จาก pointer | `scripts/import_sellable_units.py` | `units.py` (ผ่าน `EvidenceSnapshot` — base `sellable_units` เลิก publish) |
+| `image_texts_<gid>` | derived จาก pointer | `scripts/import_image_texts.py` `materialize_published` | `units.py`, `product_store.py` (ผ่าน snapshot) |
+| `sellable_units_meta` | — (hardcoded) | `scripts/publish_generation.py` (CAS) | `generation_pointer.py` (resolver เดียว) |
 | `kb_products` | `ADMIN_MONGO_COLLECTION_KB_PRODUCTS` | `docs/adminbase/script/import_adminbase.py` | `knowledge_base.py`, `units.py` |
 | `kb_qa` | `ADMIN_MONGO_COLLECTION_KB_QA` | `import_adminbase.py` | `knowledge_base.py`, `build_embeddings.py` |
 | `kb_raw` | `ADMIN_MONGO_COLLECTION_KB_RAW` | `import_adminbase.py` | — (audit trail — ยังไม่มี reader) |
@@ -1489,11 +1491,12 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 
 ---
 
-### 5.3 `image_texts`
+### 5.3 `image_texts` — **OCR processing cache (Phase 4B — ไม่ใช่ runtime source อีกต่อไป)**
 
-**ไฟล์:** `chatbot/shopeechat/scripts/import_image_texts.py` (เขียน) — collection name hardcoded
+**ไฟล์:** `chatbot/shopeechat/scripts/build_image_texts.py` (เขียน/อ่าน — fingerprint cache), `import_image_texts.py` (อ่านเพื่อ materialize เท่านั้น)
 
-**ใช้ทำอะไร:** OCR text จากรูปใน description/variant ของสินค้า (Gemini vision offline batch) — ใช้ตอน cert search + unit card
+**บทบาท:** mutable **processing cache/state** ของ OCR — fingerprint, status, attempts, reusable result;
+**runtime ห้ามอ่าน collection นี้โดยตรง** — evidence ที่ตอบลูกค้าอยู่ใน `image_texts_<gid>` (§5.9) ผ่าน pointer เท่านั้น
 
 **Fields:**
 | Field | Type | หมายเหตุ |
@@ -1502,26 +1505,37 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `image_url` | string | |
 | `item_ids` | int[] | items ที่ใช้รูปนี้ (desc + gallery + variant options) |
 | `kind` | string | desc_field / gallery / variant |
-| `text` | string | OCR result |
+| `text` | string | OCR result (reusable เมื่อ fingerprint เดิม) |
+| `fingerprint` | string | sha ของ image_url+kind — classify unchanged/changed — **accepted fingerprint (authoritative)** |
+| `status` | string | ok / retryable_error / deferred / skipped — **accepted status (authoritative)** |
+| `attempts` | int | ≤3 ต่อ image |
+| `error_class` | string? | quota / transport / parse … |
 | `truncated` | boolean? | |
 | `model` | string? | vision model ที่ใช้ |
-| `ts` | number | timestamp (เก็บเฉพาะ status=ok ล่าสุด) |
+| `pending_fingerprint` | string? | **Phase 4B-M1** — fingerprint ที่ OCR ล้มเหลว/deferred บน changed URL — accepted fields ไม่ถูกทับ; success → promote เป็น accepted + clear pending_* |
+| `pending_status` | string? | error / deferred ของ pending attempt |
+| `pending_error` | string? | error message ของ pending attempt |
+| `pending_error_class` | string? | quota / transient / permanent — **เป็นของ `pending_fingerprint` เท่านั้น**; fp เปลี่ยน (B→C) → เขียน class ของ C เสมอ (provider-deferred รวมถึง), ไม่ carry ของ fp เก่า |
+| `pending_attempts_total` | int? | **เป็นของ `pending_fingerprint` เท่านั้น** — สะสมข้าม run เฉพาะ fp เดียวกัน; ≥`MAX_ATTEMPTS` + `pending_fingerprint` == discovered → classify unchanged (bounded retry); fingerprint เปลี่ยน (B→C) → attempts reset เป็น 0 ก่อนนับ attempt แรกของ C และ pending_error/error_class ไม่ไหลข้าม fp; deferral ก่อน provider call ไม่นับ attempt |
+| `pending_last_generation_id` | string? | generation ที่พยายามล่าสุด |
+| `ts` | number | timestamp |
 
 **Access:**
-| เขียน | `import_image_texts.py` — upsert จาก `exports/image_texts.jsonl` |
-| อ่าน | `product_store.py` (cert search OCR source), `units.py` `attach_image_texts` |
+| เขียน | `build_image_texts*.py` — `_cache_upsert` ระหว่าง generation build (resume/fingerprint state) |
+| อ่าน | `build_image_texts*.py` (classify), `import_image_texts.py` (materialize → `image_texts_<gid>`) — **runtime readers = 0** |
 
 ---
 
-### 5.4 `sellable_units`
+### 5.4 `sellable_units_<gid>` — generation-scoped units (Phase 4B)
 
-**ไฟล์:** `chatbot/shopeechat/units.py` (อ่าน), `scripts/build_sellable_units.py` + `import_sellable_units.py` (เขียน)
+**ไฟล์:** `chatbot/shopeechat/units.py` (อ่าน — ผ่าน `EvidenceSnapshot.units_collection` เท่านั้น), `scripts/build_sellable_units.py` + `import_sellable_units.py` (เขียน `gen/<gid>/` → `sellable_units_<gid>`)
 
-**env:** `ADMIN_MONGO_COLLECTION_UNITS` (default `sellable_units`)
+**⚠️ base collection `sellable_units` เลิก publish แล้ว** — runtime ผูก collection จาก pointer
+(`sellable_units_meta.active.units_collection`) — ไม่มี writer เขียน base coll อีกต่อไป (delete gate)
 
 **ใช้ทำอะไร:** unit-level product index (item_id × model_id) — flag-gated `USE_UNIT_INDEX`
 listing หนึ่งมีหลายรุ่นย่อย ค้นระดับรุ่นย่อยที่ขายจริง — exact model_code → field filter →
-vector (`exports/unit_embeddings.npz`) → merge+rank; ว่าง → fallback legacy listing path
+vector (`gen/<gid>/unit_embeddings.npz` ใน snapshot เดียวกัน) → merge+rank; ว่าง → fallback legacy listing path
 
 **Fields:**
 | Field | Type | หมายเหตุ |
@@ -1540,14 +1554,17 @@ vector (`exports/unit_embeddings.npz`) → merge+rank; ว่าง → fallback
 | `sellable` | boolean | `item_status=="NORMAL" and stock>0` — ⚠️ อ่านสดจาก Mongo ทุกครั้ง (`_sellable_mask`) ไม่ใช้ค่าใน npz |
 | `answerable`, `oos_in_name`, `has_description`, `has_warranty_info` | boolean | |
 | `desc_sections` | object | parsed description sections |
-| `image_ids` | string[] | ref `image_texts` |
+| `image_ids` | string[] | ref `image_texts_<gid>` |
+| `ocr_text` | string | OCR ที่เข้า search_text (spec≤400/vmap≤200/product≤200, banner ออก, boilerplate ตัด) |
 | `search_text` | string | text ที่ embed ลง unit_embeddings.npz |
 
 **Indexes (สร้างโดย import script):** `unit_id`(unique), `model_codes`, `item_id`, `sellable`, `shop`, `product_type`
 
 **Access:**
-| เขียน | `import_sellable_units.py` — replace_one upsert จาก `exports/sellable_units.jsonl` |
-| อ่าน | `units.py` — runtime search; join `kb_products` (`attach_kb_specs`), `image_texts` (`attach_image_texts`), `ShpProducts` (`attach_listing_fields`) |
+| เขียน | `import_sellable_units.py` — drop+insert `sellable_units_<gid>` จาก `gen/<gid>/sellable_units.jsonl` (immutable หลัง validate) |
+| อ่าน | `units.py` — runtime search ผ่าน snapshot เท่านั้น; join `kb_products` (`attach_kb_specs`), `image_texts_<gid>` (`attach_image_texts(snap)`), `ShpProducts` (`attach_listing_fields`) |
+
+**Retention:** generation เก่าถูก cleanup หลังพ้น grace 24h (ไม่แตะ active/previous/young — `publish_generation.cleanup_old_generations`)
 
 ---
 
@@ -1621,6 +1638,48 @@ vector (`exports/unit_embeddings.npz`) → merge+rank; ว่าง → fallback
 - `source_file`, `source_sheet`, `source_row` — upsert key
 
 **Access:** เขียนอย่างเดียว — ยังไม่มี runtime reader (ใช้ trace/audit ย้อนหลัง)
+
+---
+
+### 5.8 `sellable_units_meta` — generation pointer (Phase 4B)
+
+**ไฟล์:** `chatbot/shopeechat/generation_pointer.py` (อ่าน — resolver เดียว), `scripts/publish_generation.py` (เขียน — CAS เดียว)
+
+**ใช้ทำอะไร:** pointer doc ตัวเดียว `{_id: "active"}` ชี้ generation ที่ serve อยู่ — activation = 1 fenced CAS;
+เก็บ `previous` snapshot ไว้ rollback
+
+**Fields (doc `_id="active"`):**
+| Field | Type | หมายเหตุ |
+|-------|------|---------|
+| `_id` | string | `"active"` ตลอด |
+| `generation_id` | string | `gYYYYMMDD-HHMMSS-[0-9a-f]{8}` — CAS filter key |
+| `units_collection` | string | `sellable_units_<gid>` (ต้อง derive จาก gid — foreign → invalid) |
+| `image_texts_collection` | string | `image_texts_<gid>` |
+| `units_npz` / `product_npz` / `units_jsonl` / `manifest_path` | string | path ใต้ `exports/gen/<gid>/` เท่านั้น (reject `..`/foreign) |
+| `manifest_sha256` | string | hash ของ finalized manifest |
+| `activated_at` | string | ISO timestamp ตอน CAS |
+| `previous` | object? | snapshot เดิม (rollback target) |
+
+**Access:**
+| เขียน | `publish_generation.publish` (CAS `update_one({_id:"active", generation_id:expected})`; bootstrap upsert `generation_id:{$exists:false}` fenced) / `rollback` |
+| อ่าน | `generation_pointer.resolve_snapshot` (≤1 read/TTL 5s — object เดิมใน window) |
+
+---
+
+### 5.9 `image_texts_<gid>` — published OCR evidence (Phase 4B)
+
+**ไฟล์:** `scripts/import_image_texts.py` `materialize_published` (เขียน), `units.attach_image_texts` + `product_store._admin_image_texts_coll` (อ่าน — ผ่าน snapshot เท่านั้น)
+
+**ใช้ทำอะไร:** OCR evidence **immutable ของ generation เดียว** — materialize จาก cache `image_texts` (§5.3)
+ตอน build; activation พร้อม units/npz ด้วย pointer flip เดียว — runtime ไม่เห็น cache mutation ระหว่าง build
+
+**Fields:** เหมือน §5.3 (published coll ไม่ต้องเก็บ `status/attempts/error_class` ที่เป็น processing state)
+
+**Access:**
+| เขียน | `import_image_texts.py` — drop+recreate จาก `gen/<gid>/image_texts.jsonl` |
+| อ่าน | `units.py`, `product_store.py` — **ผ่าน `snap.image_texts_collection` เท่านั้น** |
+
+**Retention:** cleanup หลัง grace 24h พร้อม gen เดียวกัน (§5.4)
 
 ---
 
@@ -1699,8 +1758,10 @@ vector (`exports/unit_embeddings.npz`) → merge+rank; ว่าง → fallback
 |------------|------|-------|---------|
 | `conversation_products` | Python bot runtime | Python bot runtime | product/order timeline + claim_state |
 | `test_chat_logs` | Python `/test-chat/logs` | Python `test_chat_api.py` | audit log test chat |
-| `image_texts` | `product_store.py`, `units.py` | `import_image_texts.py` | OCR จากรูปสินค้า |
-| `sellable_units` | `units.py` | `import_sellable_units.py` | unit index (flag `USE_UNIT_INDEX`) |
+| `image_texts` | `build_image_texts*.py`, `import_image_texts.py` (scripts only) | `build_image_texts*.py` | OCR processing cache — **runtime readers = 0 (Phase 4B)** |
+| `sellable_units_<gid>` | `units.py` (snapshot) | `import_sellable_units.py` | unit index ของ generation (flag `USE_UNIT_INDEX`) — base coll เลิก publish |
+| `image_texts_<gid>` | `units.py`, `product_store.py` (snapshot) | `import_image_texts.py` | published OCR evidence ของ generation |
+| `sellable_units_meta` | `generation_pointer.py` | `publish_generation.py` | active-generation pointer (CAS) |
 | `kb_products` | `knowledge_base.py`, `units.py` | `import_adminbase.py` | KB product spec/comparison |
 | `kb_qa` | `knowledge_base.py`, `build_embeddings.py` | `import_adminbase.py` | KB QA + general_faq |
 | `kb_raw` | — | `import_adminbase.py` | audit trail (ไม่มี reader) |

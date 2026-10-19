@@ -376,6 +376,9 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
 
     _is_tax_invoice = ctx.get("is_tax_invoice", False)
     _bot_name = ctx.get("bot_name", "ทางร้าน")
+    # Phase 4B — captured evidence snapshot จาก request owner (omitted → standalone)
+    from . import generation_pointer as _gen
+    _snap = ctx.get("snap", _gen.SNAP_UNSET)
     _steps = ctx.get("steps") or []
     _timing_breakdown = ctx.get("timing_breakdown") or {}
     _total_start = ctx.get("total_start", _time.time())
@@ -459,7 +462,8 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
         if not _cert_types and req.conversation_id:
             try:
                 from . import conversation_products as _cp_cert
-                _ac = _cp_cert.get_active_product(req.conversation_id)
+                _ac = _cp_cert.get_active_product(req.conversation_id,
+                                                  snap=_snap)
                 if _ac:
                     _cert_types = _rc_cert.requested_product_types(
                         _ac.get("name") or "")
@@ -475,6 +479,7 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
                 model_keyword=_tisi_model_kw or None,
                 limit=30,
                 type_filter=_cert_types or None,
+                snap=_snap,
             )
             if not _tisi_products and _cert_types:
                 # ไม่เจอในหมวดที่ถาม → ค้นไม่จำกัดหมวด เพื่อตอบ "ไม่พบในหมวดนี้ แต่มีอันอื่น"
@@ -484,6 +489,7 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
                     shop_filter=req.shop,
                     model_keyword=None,
                     limit=30,
+                    snap=_snap,
                 )
         except Exception as _te:
             print(f"[TISI] search error: {_te}", file=sys.stderr)

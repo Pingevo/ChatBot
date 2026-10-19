@@ -584,6 +584,7 @@ backup MongoDB ด้วยเครื่องมือปกติของ M
 
 ### Docker volumes ที่ควร backup
 - `hf_cache` — ไม่จำเป็น (โหลดใหม่ได้)
+- `exports_data` — **evidence generations ปัจจุบัน** (`exports/gen/<gid>/` + canonical npz) — ลบแล้ว generation ปัจจุบันหาย ต้อง build ใหม่
 - `caddy_data` — เก็บ SSL cert (โหลดใหม่ได้ แต่เสียเวลา)
 
 ```bash
@@ -596,17 +597,56 @@ docker run --rm -v chatbotproductms_caddy_data:/data -v $(pwd):/backup alpine \
   tar xzf /backup/caddy_data_backup.tar.gz -C /data
 ```
 
-## Data refresh (cron)
+## Data refresh — atomic generation publish (Phase 4B)
 
-bot อ่าน Mongo สด + auto-reload `.npz` เมื่อไฟล์เปลี่ยน (mtime) → rebuild ข้อมูลได้โดยไม่ต้อง restart
+runtime กิน generated evidence (units + OCR + npz ×2 + manifest) ผ่าน **pointer เดียว**
+(`sellable_units_meta.active` → `EvidenceSnapshot`) — generation ใหม่ build เต็มใน `exports/gen/<gid>/`
+แล้ว flip ทีเดียว; generation เก่า serve ต่อจน pointer เปลี่ยน → refresh ไม่มี downtime/ผสมข้อมูล
+
+### `exports_data` volume (ใหม่)
+
+- `docker-compose.yml` เพิ่ม `exports_data:/app/exports` ให้ `chatbot-shopee` — gen artifacts ที่ refresh
+  เขียนต้องเห็นจาก runtime container เดียวกัน
+- **named volume copy-up เฉพาะ first `up` เท่านั้น** — image ใหม่ใน `.dockerignore`-ed exports
+  **ไม่ reseed** volume ที่มีอยู่; ถ้าจะ seed canonical npz ครั้งแรกให้ copy เข้า volume เอง
+- ถ้า `docker compose down -v` → volume หาย = generation หาย → runtime fail-closed (units/OCR path
+  มืด) จนกว่า first publish ใหม่ — อย่า `-v` บน prod
+
+### First-generation bootstrap (deploy ครั้งแรกหลัง Phase 4B)
+
+1. deploy ตามปกติ — pointer ยังไม่มี → legacy path + canonical `exports/*.npz` ใช้ได้ตามเดิม
+   (**units/grouped generation path fail-closed — ยังไม่ claim semantic retrieval**)
+2. run refresh ครั้งแรก **manual นอกเวลา** (backlog OCR เต็มอาจนาน):
+   ```bash
+   docker compose exec chatbot-shopee /app/chatbot/shopeechat/scripts/refresh_data.sh
+   # หรือบน host repo: ./chatbot/shopeechat/scripts/refresh_data.sh
+   ```
+3. ตรวจ pointer + timing ใน log `exports/refresh_YYYYMMDD.log` — ผ่านแล้วค่อยเปิด cron
+
+### Cron — **operator gate (ยังไม่ติดตั้งใน repo/deploy)**
 
 ```cron
-# ทุกคืน 03:00 — export → units → embeddings → image OCR (incremental)
-0 3 * * *  /path/to/repo/chatbot/shopeechat/scripts/refresh_data.sh
+# Asia/Bangkok 09:00 — เปิดหลัง first-gen ผ่าน + timing evidence เท่านั้น
+0 9 * * *  /path/to/repo/chatbot/shopeechat/scripts/refresh_data.sh
 ```
 
-- lock กันรันซ้อน (`exports/.refresh.lock.d`) — cron วันถัดไปข้ามถ้ารอบก่อนยังไม่จบ
-- log: `exports/refresh_YYYYMMDD.log`
-- export fail → abort ทั้งหมด (ไม่ build บนข้อมูลผิด); ขั้นอื่น fail → log แล้วไปต่อ
-- image OCR เป็น incremental (resume จาก `image_texts.jsonl`) — คืนที่ไม่มีรูปใหม่จบในไม่กี่วินาที ไม่เสียค่า Gemini ซ้ำ
-- `kb_qa`/`kb_products` ไม่ต้องรอ cron — สดเองผ่าน TTL cache 5 นาที + lazy-embed
+- lock = **native `flock`** (`exports/.refresh.lock`) — run ซ้อน exit ก่อน Mongo/provider/artifact work;
+  kill/restart ปล่อย lock อัตโนมัติ ไม่มี stale lock
+- export fail → abort; publish fail ก่อน CAS → generation เก่ายัง active ครบ
+- image OCR = incremental fingerprint cache (`image_texts` = processing cache) — budget:
+  `IMGTXT_MAX_CALLS` (default 1500) + ≤3 attempts/image + `REFRESH_MAX_RUNTIME_MIN` (default 90m);
+  หมด budget → ที่เหลือ `deferred` (publish ต่อได้ ไม่ block)
+- **provider quota:** preferred dedicated `IMGTXT_GEMINI_API_KEY_*` pool; ถ้า share กับ chat keys
+  ต้อง explicit operator acceptance — counter เดิมไม่ได้นับ OCR calls
+- `kb_qa`/`kb_products` ไม่ต้องรอ cron — สดเองผ่าน TTL cache 5 นาที + lazy-embed (อยู่นอก contract)
+
+### Rollback (operator)
+
+```bash
+docker compose exec chatbot-shopee python -m chatbot.shopeechat.scripts.publish_generation \
+  --rollback --expected-active <gid-ที่-active-อยู่>
+```
+
+- swap `previous` snapshot กลับเป็น active ด้วย CAS เดียวกัน — stale request (expected ไม่ตรง)
+  → ไม่แตะ pointer
+- cleanup เก็บ previous generation ไว้ตลอด grace 24h (ไม่ลบ active/previous/young)

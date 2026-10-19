@@ -7,6 +7,7 @@ evidence แล้ว, role tag ผ่าน _context_note
 """
 from __future__ import annotations
 
+from . import generation_pointer as _gen
 from .route_context import build_retrieval_slots, build_retrieval_relations
 from .retrieval_planner import (
     build_grouped_retrieval_requests, channel_request)
@@ -45,6 +46,7 @@ def run_grouped_selection(
     compat_cards=(),
     kb_fetcher=None,
     supporting=(),
+    snap=_gen.SNAP_UNSET,
 ) -> dict | None:
     """profile → pipeline → selection (ไม่ merge base) — รันครั้งเดียวต่อ request.
 
@@ -78,7 +80,7 @@ def run_grouped_selection(
         results = execute_grouped_retrieval_requests(
             requests, message=message, shop=shop, platform=platform,
             fetcher=fetcher, legacy_fetcher=legacy_fetcher,
-            channels=channels)
+            channels=channels, snap=snap)
         pool = build_candidate_pool(results, profile=profile,
                                     supporting_evidence=tuple(supporting))
         sel = select_for_llm_context(

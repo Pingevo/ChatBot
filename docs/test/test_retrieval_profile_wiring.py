@@ -52,6 +52,7 @@ def test_fetch_unit_cards_forwards_profile(monkeypatch):
         seen.update(kwargs)
         return []
 
+    monkeypatch.setattr(units, "_resolve_snap", lambda s=None: None)
     monkeypatch.setattr(units, "fetch_units", _fake_fetch_units)
     sentinel = object()
     units.fetch_unit_cards("สายชาร์จ", retrieval_profile=sentinel)

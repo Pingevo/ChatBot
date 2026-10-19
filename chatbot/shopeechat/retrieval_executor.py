@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from . import generation_pointer as _gen
 from .retrieval_planner import RetrievalRequest
 from .retrieval_policy import make_evidence_card
 from .route_context import RetrievalProfile
@@ -82,7 +83,8 @@ def _request_profile(req: RetrievalRequest, query: str, shop: str | None,
     )
 
 
-def _legacy_evidence_fetcher(message: str, *, retrieval_profile, shop, limit):
+def _legacy_evidence_fetcher(message: str, *, retrieval_profile, shop, limit,
+                             snap=None):
     """legacy product_store path เป็น evidence source (observe-only) —
     fetch_products behavior เดิมไม่เปลี่ยน; SystemExit จาก client → error ต่อ attempt"""
     from . import product_store as _ps
@@ -92,7 +94,7 @@ def _legacy_evidence_fetcher(message: str, *, retrieval_profile, shop, limit):
     except (Exception, SystemExit) as exc:
         raise RuntimeError(f"legacy db unavailable: {exc}")
     return _ps.fetch_products(db, message, shop_filter=shop, limit=limit,
-                              retrieval_profile=retrieval_profile)
+                              retrieval_profile=retrieval_profile, snap=snap)
 
 
 def _bucket(card: dict, req: RetrievalRequest) -> tuple[str, str]:
@@ -139,14 +141,15 @@ def _bucket(card: dict, req: RetrievalRequest) -> tuple[str, str]:
 
 
 def _run_attempt(source: str, fetch_fn, query: str, prof, shop: str,
-                 limit: int, req: RetrievalRequest
+                 limit: int, req: RetrievalRequest, snap=None
                  ) -> tuple[list[dict], list[dict], list[dict],
                             SourceAttempt, tuple, tuple]:
     """fetch 1 source → tag evidence + แยก bucket — error ถูกจับใน attempt;
     คืน (elig, unav, rej, attempt, supporting, attachments) — 2 tuple ท้าย
     จาก channel result ที่เป็น evidence records (ไม่ผ่าน canonicalize)"""
     try:
-        res = fetch_fn(query, retrieval_profile=prof, shop=shop, limit=limit)
+        res = fetch_fn(query, retrieval_profile=prof, shop=shop, limit=limit,
+                       snap=snap)
     except (Exception, SystemExit) as exc:
         return [], [], [], SourceAttempt(
             source=source, raw_count=0, eligible_count=0,
@@ -186,6 +189,7 @@ def execute_grouped_retrieval_requests(
     fetcher=None,
     legacy_fetcher=None,
     channels: tuple = (),
+    snap=_gen.SNAP_UNSET,
 ) -> tuple[RetrievalExecutionResult, ...]:
     """execute request plan ทีละชิ้น — evidence-preserving observe-only.
 
@@ -196,7 +200,12 @@ def execute_grouped_retrieval_requests(
     failure isolated ต่อ channel เหมือน source attempt ปกติ)
     ทุก card ได้ _evidence.sources + _selection_reason (private — strip
     ด้วย retrieval_policy.strip_private_evidence ก่อนเข้า LLM)
+
+    snap = captured EvidenceSnapshot/None จาก request owner; omitted (SNAP_UNSET)
+    → executor resolve ครั้งเดียวที่ entry ตัวเอง (standalone execution)
     """
+    if snap is _gen.SNAP_UNSET:
+        snap = _gen.resolve_snapshot()
     if fetcher is None:
         from . import units as _units
         fetcher = _units.fetch_unit_evidence
@@ -234,7 +243,7 @@ def execute_grouped_retrieval_requests(
         ch_atts: list = []
         for src_name, fn in sources:
             e, u, r, att, s, a = _run_attempt(src_name, fn, query, prof, shop,
-                                            limit_per_request, req)
+                                            limit_per_request, req, snap)
             elig += e
             unav += u
             rej += r
@@ -269,7 +278,7 @@ def execute_grouped_retrieval_requests(
         # channel ที่พังไม่ทำ channel/source อื่นหาย (attempt.error ตามเดิม)
         prof = _request_profile(req, message, shop, platform)
         e, u, r, att, sup, ch_atts = _run_attempt(
-            req.source, fn, message, prof, shop, limit_per_request, req)
+            req.source, fn, message, prof, shop, limit_per_request, req, snap)
         results.append(RetrievalExecutionResult(
             request_id=req.request_id, source=req.source,
             slot_id=req.slot_id, relation_id=req.relation_id,

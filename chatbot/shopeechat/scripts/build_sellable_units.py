@@ -33,6 +33,65 @@ EXPORT_PATH = ROOT / "exports" / "ShpProducts.export.json"
 OUTPUT_PATH = ROOT / "exports" / "sellable_units.jsonl"
 COVERAGE_GATE = 0.90
 
+# ---- Phase 4B: published OCR evidence → unit search_text --------------------
+# เฉพาะ spec/variant_map/product เข้า search; banner = supporting-only (runtime
+# ใช้เป็น warranty_text); boilerplate = text เดียวกันโผล่ >20% ของ items ที่มี
+# OCR → ตัดทิ้ง (spec-sheet template / กระดาษรองจาน — ไม่ใช่เนื้อของ item)
+_OCR_KIND_CAPS = {"spec": 400, "variant_map": 200, "product": 200}
+_OCR_TOTAL_CAP = 800
+_OCR_BOILERPLATE_RATIO = 0.20
+_OCR_BOILERPLATE_MIN_DF = 2   # text ต้องโผล่ ≥2 items ถึงเรียก boilerplate ได้
+
+
+def _load_ocr_by_item(path: Path | None) -> dict[int, list[dict]]:
+    """gen image_texts.jsonl → item_id → [{kind,text}] — spec/vmap/product เท่านั้น"""
+    out: dict[int, list[dict]] = {}
+    if not path or not Path(path).exists():
+        return out
+    for line in open(path, encoding="utf-8"):
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        if e.get("kind") not in _OCR_KIND_CAPS or not e.get("text"):
+            continue  # banner/missing → ไม่เข้า search_text (supporting only)
+        t = re.sub(r"\s+", " ", str(e["text"]).strip())
+        if not t:
+            continue
+        for iid in e.get("item_ids") or []:
+            out.setdefault(iid, []).append({"kind": e["kind"], "text": t})
+    return out
+
+
+def _boilerplate_texts(ocr_map: dict[int, list[dict]]) -> set[str]:
+    """text ที่โผล่ใน > 20% ของ items-with-OCR — template noise ไม่ใช่เนื้อ item"""
+    if not ocr_map:
+        return set()
+    from collections import Counter
+    df = Counter()
+    for entries in ocr_map.values():
+        for t in {e["text"] for e in entries}:
+            df[t] += 1
+    return {t for t, c in df.items()
+            if c >= _OCR_BOILERPLATE_MIN_DF
+            and c > _OCR_BOILERPLATE_RATIO * len(ocr_map)}
+
+
+def _ocr_search_text(item_id: int, ocr_map: dict[int, list[dict]],
+                     boilerplate: set[str]) -> str:
+    """per-kind cap → ตัด boilerplate → dedupe exact → total cap 800 chars"""
+    parts, seen, total = [], set(), 0
+    for e in ocr_map.get(item_id) or []:
+        if e["text"] in boilerplate:
+            continue                        # เทียบ raw ก่อน cap (boilerplate set เก็บ raw)
+        t = e["text"][:_OCR_KIND_CAPS[e["kind"]]]
+        if not t or t in seen:
+            continue
+        if total + len(t) > _OCR_TOTAL_CAP:
+            continue
+        seen.add(t); parts.append(t); total += len(t)
+    return " ".join(parts)
+
 # ---- desc section markers (จาก format จริงใน export) ----
 _SECTION_MAP = (
     ("highlights", ("จุดเด่น", "จุดเด่นสินค้า", "ไฮไลท์", "highlight")),
@@ -156,7 +215,7 @@ def _price_of(model_doc: dict, doc: dict) -> float | None:
 
 
 def _build_unit(doc: dict, m: dict | None, sections: dict, image_ids: list[str],
-                idx: int = 0) -> dict:
+                idx: int = 0, ocr_text: str = "") -> dict:
     m = m or {}
     item_name = doc.get("item_name") or ""
     model_name = m.get("model_name") or ""
@@ -172,7 +231,8 @@ def _build_unit(doc: dict, m: dict | None, sections: dict, image_ids: list[str],
         model_id = int(model_id)
     display = item_name if not model_name else f"{item_name} — {model_name}"
     search_parts = [display, model_sku, " ".join(c["model_codes"]),
-                    c["product_type"] or "", " ".join(c["components"])]
+                    c["product_type"] or "", " ".join(c["components"]),
+                    ocr_text]
     # model_id หายใน multi-model listing → ใส่ index กัน unit_id ชนกัน
     unit_key = model_id if model_id is not None else ("solo" if idx == 0 else f"m{idx}")
     return {
@@ -205,31 +265,39 @@ def _build_unit(doc: dict, m: dict | None, sections: dict, image_ids: list[str],
         "has_warranty_info": bool(sections.get("warranty")),
         "desc_sections": sections,
         "image_ids": image_ids,
+        "ocr_text": ocr_text,
         "search_text": " ".join(p for p in search_parts if p).strip(),
     }
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--source", choices=["export", "mongo"], default="export")
-    args = ap.parse_args()
-    if args.source == "mongo":
-        sys.exit("--source mongo ยังไม่ implement — ใช้ export ก่อน (snapshot เดียวกับ census)")
+def build_units_file(export_path: Path, image_texts_path: Path | None,
+                     out_path: Path) -> int:
+    """สร้าง sellable_units.jsonl ของ generation เดียว — OCR-aware search_text.
 
+    missing evidence file → build ตามปกติ (missing OCR non-blocking);
+    gate: sellable units ที่ classify ได้ (confidence != low) < 90% → ValueError
+    (fail ก่อน publication — ไม่เขียนลง coll ชุดเก่า)
+    คืนจำนวน units ที่เขียน
+    """
+    ocr_map = _load_ocr_by_item(image_texts_path)
+    boilerplate = _boilerplate_texts(ocr_map)
     n_units = n_sellable = n_classified = 0
     conf_count = {"high": 0, "medium": 0, "low": 0}
     seen_ids = set()
     t0 = time.time()
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as out:
-        for doc in _iter_export_docs(EXPORT_PATH):
+    with open(out_path, "w", encoding="utf-8") as out:
+        for doc in _iter_export_docs(export_path):
             fl_text, image_ids = _field_list_parts(doc)
             desc_text = ((doc.get("description") or "") + "\n" + fl_text).strip()
             sections = _parse_desc_sections(desc_text)
+            ocr_text = _ocr_search_text(int(doc.get("item_id") or 0),
+                                        ocr_map, boilerplate)
             models = doc.get("model") or []
             if not models:
                 models = [None]
             for i, m in enumerate(models):
-                u = _build_unit(doc, m, sections, image_ids, idx=i)
+                u = _build_unit(doc, m, sections, image_ids, idx=i,
+                                ocr_text=ocr_text)
                 if u["unit_id"] in seen_ids:
                     continue
                 seen_ids.add(u["unit_id"])
@@ -242,12 +310,32 @@ def main() -> None:
                         n_classified += 1
     pct = n_classified / n_sellable * 100 if n_sellable else 0
     print(f"units={n_units} sellable={n_sellable} "
-          f"classified={n_classified} ({pct:.1f}% — gate ≥{COVERAGE_GATE*100:.0f}%)")
+          f"classified={n_classified} ({pct:.1f}% — gate ≥{COVERAGE_GATE*100:.0f}%)"
+          + (f" ocr_items={len(ocr_map)} boilerplate={len(boilerplate)}"
+             if ocr_map else ""))
     print(f"confidence: {conf_count}  elapsed={time.time()-t0:.0f}s")
-    print(f"output → {OUTPUT_PATH}")
-    if pct < COVERAGE_GATE * 100:
-        print("⛔ GATE FAIL — coverage ต่ำกว่าเกณฑ์ หยุดรายงานก่อนไปต่อ")
+    if n_sellable and pct < COVERAGE_GATE * 100:
+        raise ValueError(
+            f"GATE FAIL: classified {pct:.1f}% < {COVERAGE_GATE*100:.0f}%")
+    return n_units
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--export", type=Path, default=EXPORT_PATH)
+    ap.add_argument("--image-texts", type=Path, default=None,
+                    help="gen image_texts.jsonl — published OCR evidence (optional)")
+    ap.add_argument("--out", type=Path, default=OUTPUT_PATH)
+    ap.add_argument("--source", choices=["export", "mongo"], default="export")
+    args = ap.parse_args()
+    if args.source == "mongo":
+        sys.exit("--source mongo ยังไม่ implement — ใช้ export ก่อน (snapshot เดียวกับ census)")
+    try:
+        build_units_file(args.export, args.image_texts, args.out)
+    except ValueError as exc:
+        print(f"⛔ {exc}")
         sys.exit(2)
+    print(f"output → {args.out}")
 
 
 if __name__ == "__main__":

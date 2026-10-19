@@ -29,6 +29,7 @@ from typing import Any
 from fastapi import HTTPException
 
 # ⚡ chat_v2 imports — ใช้ module ที่มีอยู่แล้ว ไม่สร้างใหม่
+from . import generation_pointer as _gen
 from . import (
     app as _app_module,
     conversation_products as _cp,
@@ -1083,7 +1084,7 @@ def _retrieve_products(req, ctx: dict, history: list[dict], intent: dict,
             print(f"[MODEL-REGEX-V2] error: {_e}", file=sys.stderr)
 
     # 5.3 KB lookup
-    _kb_result = knowledge_base.lookup_kb(_retrieval_msg)
+    _kb_result = knowledge_base.lookup_kb(_retrieval_msg, snap=snap)
     _kb_context = ""
     _products: list[dict] = []
     # เพิ่ม follow-up products ก่อน (ถ้ามี)
@@ -1107,7 +1108,7 @@ def _retrieve_products(req, ctx: dict, history: list[dict], intent: dict,
         _mongo_q = " ".join(_kb_models[:5]) if _kb_models else _retrieval_msg
         _kb_products = product_store.fetch_products(
             db, message=_mongo_q, shop_filter=req.shop,
-            limit=ctx["limit"], desc_message=_desc_msg,
+            limit=ctx["limit"], desc_message=_desc_msg, snap=snap,
         )
         _products.extend(_kb_products)
         print(f"[RAG-V2] KB+Mongo: {len(_products)} products", file=sys.stderr)
@@ -1127,7 +1128,7 @@ def _retrieve_products(req, ctx: dict, history: list[dict], intent: dict,
         _more = product_store.fetch_products(
             db, message=_retrieval_msg, shop_filter=req.shop,
             limit=_fetch_limit, desc_message=_desc_msg,
-            is_compat_check=(_intent_label == "compatibility_check"),
+            is_compat_check=(_intent_label == "compatibility_check"), snap=snap,
         )
         # dedup
         _existing_ids = {p.get("item_id") or p.get("name") for p in _products}
@@ -1239,7 +1240,7 @@ def _search_if_needed(req, ctx: dict, history: list[dict], intent: dict,
         try:
             _new_products = product_store.fetch_products(
                 db, message=_search_q, shop_filter=req.shop,
-                limit=10, desc_message=req.message,
+                limit=10, desc_message=req.message, snap=snap,
             )
             print(f"[SEARCH-V2] re-query: {_search_q!r} → {len(_new_products)} products", file=sys.stderr)
         except Exception as _e:
@@ -1464,11 +1465,14 @@ def _make_response(answer: str, products: list[dict], ctx: dict, *,
 
 # ── Main Entry Point ─────────────────────────────────────────────────────────
 
-def chat_v2(req) -> dict:
+def chat_v2(req, snap=_gen.SNAP_UNSET) -> dict:
     """Pipeline หลัก — เรียก stages ตามลำดับ ไม่มี early return ในตัว.
 
     คืน ChatResponse dict (compatible กับ ChatResponse model ของ app.py)
     """
+    # Phase 4B — captured snapshot จาก /chat owner; standalone → resolve ครั้งเดียว
+    if snap is _gen.SNAP_UNSET:
+        snap = _gen.resolve_snapshot()
     # Stage 1: context
     ctx, history, client, db = _build_context(req)
     # Stage 2: deterministic fast paths

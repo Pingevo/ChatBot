@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 if TYPE_CHECKING:
     from .route_context import RetrievalProfile
 
+from . import generation_pointer as _gen
 from bson import ObjectId  # type: ignore
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
@@ -41,20 +42,22 @@ except ImportError:
 
 # ---- vector store (embeddings) ------------------------------------------------
 #
-# โหลด product embeddings จากไฟล์ .npz ที่สร้างโดย scripts/build_embeddings.py
-# ใช้สำหรับ semantic search (similarity ระหว่างคำถามลูกค้ากับสินค้า)
-# โหลด lazy ครั้งเดียวตอนใช้งาน แล้ว cache ไว้ตลอด session
+# product npz มาจาก EvidenceSnapshot เดียวกับ units/OCR เสมอ (Phase 4B) —
+# cache keyed by immutable generation path (ไม่ใช่ mtime — gen dir เป็น
+# immutable; path ใหม่ = generation ใหม่); pointer ยังไม่มี → canonical
+# exports npz (bootstrap path ก่อน first publish)
 
-_VECTOR_STORE: dict[str, Any] | None = None
-_VECTOR_MTIME: float = -1.0   # mtime ของ npz ที่โหลดไว้ — ไฟล์เปลี่ยน → auto-reload
+_VECTOR_STORES: dict[str, dict[str, Any]] = {}
+_VECTOR_STORE_CAP = 3
 _EMBEDDINGS_PATH = Path(__file__).resolve().parent.parent.parent / "exports" / "product_embeddings.npz"
 
 
-def _load_vector_store() -> dict[str, Any] | None:
-    """โหลด product embeddings จาก .npz — auto-reload เมื่อไฟล์เปลี่ยน (mtime).
+def _load_vector_store(snap=_gen.SNAP_UNSET) -> dict[str, Any] | None:
+    """โหลด product embeddings ของ generation ใน snapshot — cache ด้วย path.
 
-    stat ก่อน load เสมอ: ถ้า build replace ไฟล์ระหว่าง load → mtime ที่เก็บเก่ากว่าจริง
-    → request ถัดไป reload อีกครั้ง (self-healing). ไฟล์หาย/load fail → ใช้ cache เก่าต่อ.
+    snap=None → resolve pointer; ไม่มี pointer → canonical npz (bootstrap path
+    ก่อน first publish — ไม่ผูก generation contract)
+    npz ที่ฝัง generation_id ต้องตรง snap.generation_id — mismatch → fail closed.
 
     คืน dict ที่มี:
     - item_ids: numpy array ของ item_id (str)
@@ -62,41 +65,47 @@ def _load_vector_store() -> dict[str, Any] | None:
     - texts: numpy array ของ text ที่ embed
     - shops: numpy array ของ shopname (str) — ⚡ BUG-H fix สำหรับกรอง shop ก่อน similarity
     """
-    global _VECTOR_STORE, _VECTOR_MTIME
-    try:
-        mtime = _EMBEDDINGS_PATH.stat().st_mtime
-    except OSError:
-        return _VECTOR_STORE  # ไฟล์ไม่มี — เก่า→None (เหมือนเดิม), มี cache→ใช้ต่อ
-    if _VECTOR_STORE is not None and mtime == _VECTOR_MTIME:
-        return _VECTOR_STORE
+    if snap is _gen.SNAP_UNSET:
+        snap = _gen.resolve_snapshot()
+    path = Path(snap.product_npz) if snap is not None else _EMBEDDINGS_PATH
+    key = str(path)
+    if key in _VECTOR_STORES:
+        return _VECTOR_STORES[key]
     try:
         import numpy as np
         # 🔒 M1: Try loading without pickle first (safe), fall back with warning
         # ⚡ BUG-H fix — ถ้า access data["texts"] ล้มเหลว (object array) ให้ re-load ด้วย pickle
-        #   ก่อนหน้านี้: np.load(allow_pickle=False) โหลด header ได้ แต่ access ล้มเหลวที่ data["texts"]
-        #   → except ด้านนอกจับได้ → return None → vector search ใช้ไม่ได้
-        #   ตอนนี้: ถ้า access ล้มเหลว ให้ re-load ด้วย allow_pickle=True แล้วใช้ต่อ
         try:
-            data = np.load(_EMBEDDINGS_PATH, allow_pickle=False)
+            data = np.load(path, allow_pickle=False)
             _ = data["texts"]  # ทดสอบ access จริง (lazy load)
         except Exception:
             print("WARN: loading embeddings with allow_pickle=True (legacy format) — consider rebuilding with build_embeddings.py", file=sys.stderr)
-            data = np.load(_EMBEDDINGS_PATH, allow_pickle=True)
+            data = np.load(path, allow_pickle=True)
+        # Phase 4B — generation pairing: npz ของ pointer gen อื่นห้าม serve
+        if snap is not None:
+            npz_gid = (str(data["generation_id"].item())
+                       if "generation_id" in data.files else None)
+            if npz_gid != snap.generation_id:
+                print(f"[GEN] product npz generation_id={npz_gid!r} != pointer "
+                      f"{snap.generation_id} → fail closed", file=sys.stderr)
+                return _VECTOR_STORES.get(key)
         # ⚡ BUG-H fix — โหลด shops ด้วย (ถ้ามี — backward compat กับ .npz เก่าที่ไม่มี shops)
         _shops = data["shops"] if "shops" in data.files else None
-        _VECTOR_STORE = {
+        vs = {
             "item_ids": data["item_ids"],
             "embeddings": data["embeddings"],  # shape (n, 1024) float32
             "texts": data["texts"],
             "shops": _shops,  # None ถ้า .npz เก่า (ยังไม่ re-build)
         }
-        _VECTOR_MTIME = mtime
         if _shops is None:
             print("WARN: .npz ไม่มี field 'shops' — กรุณา re-build embeddings (python scripts/build_embeddings.py)", file=sys.stderr)
-        return _VECTOR_STORE
+        _VECTOR_STORES[key] = vs
+        while len(_VECTOR_STORES) > _VECTOR_STORE_CAP:
+            _VECTOR_STORES.pop(next(iter(_VECTOR_STORES)))
+        return vs
     except Exception as exc:
         print(f"WARN: cannot load vector store: {exc}")
-        return _VECTOR_STORE
+        return _VECTOR_STORES.get(key)
 
 
 def vector_search(
@@ -104,6 +113,7 @@ def vector_search(
     top_k: int = 30,
     item_status: str | None = "NORMAL",
     shop_filter: str | None = None,
+    snap=_gen.SNAP_UNSET,
 ) -> list[str]:
     """ค้นสินค้าที่ใกล้เคียงกับ query ด้วย cosine similarity.
 
@@ -120,7 +130,7 @@ def vector_search(
 
     คืน list ของ (item_id_str, similarity_score) เรียงจาก score สูงไปต่ำ.
     """
-    vs = _load_vector_store()
+    vs = _load_vector_store(snap)
     if vs is None:
         return []
 
@@ -805,6 +815,7 @@ def fuzzy_match_products(
     shop: str | None = None,
     limit: int = 5,
     score_threshold: int = 75,
+    snap=_gen.SNAP_UNSET,
 ) -> list[dict]:
     """ค้นสินค้าด้วย fuzzy matching (rapidfuzz) สำหรับรับพิมพ์ผิด.
 
@@ -843,7 +854,7 @@ def fuzzy_match_products(
                "nillkin", "ks", "elite", "actor"}
     try:
         from . import knowledge_base as _kb
-        _common |= _kb._known_brands()   # แบรนด์ทั้ง 182 จาก DB — ไม่ต้อง maintain list แยก
+        _common |= _kb._known_brands(snap=snap)   # แบรนด์ทั้ง 182 จาก DB — ไม่ต้อง maintain list แยก
     except Exception:
         pass
     base_tokens = [t.lower() for t in msg_tokens if len(t) >= 4]
@@ -3048,7 +3059,7 @@ def fetch_products(
     product_types_override: set[str] | None = None,
     charger_subtype_override: str | None = None,
     filter_unavailable: bool = False,
-    retrieval_profile: RetrievalProfile | None = None,
+    snap=_gen.SNAP_UNSET, retrieval_profile: RetrievalProfile | None = None,
 ) -> list[dict]:
     """กรองและดึงสินค้าที่เกี่ยวข้อง แล้วย่อเป็น product card ส่งให้ LLM.
 
@@ -3066,6 +3077,8 @@ def fetch_products(
             จาก message ในทุกจุดกรอง charger subtype เพราะ retrieval_message อาจถูกปนเปื้อน
             จาก reference/carry logic ทำให้ detect ผิด (เช่น ถามหัวชาร์จแต่ query มีชื่อสายชาร์จจาก history)
         retrieval_profile: request facts เดียวของ request (Task 4C pass-through — ยังไม่ใช้ตัดสินใจ)
+        snap: captured EvidenceSnapshot/None จาก request owner — omitted (SNAP_UNSET)
+            → resolve ครั้งเดียวที่ entry นี้ (standalone)
 
     ใช้ hybrid approach:
     1. ถ้ามี product type regex (phone/smartwatch/earphone/ฯลฯ) ใช้ regex approach เดิม
@@ -3074,6 +3087,11 @@ def fetch_products(
        ใช้ vector search (semantic) เพราะไม่มี regex ให้กรอง
     3. ถ้า vector search ไม่พร้อม ใช้ regex approach เดิมเป็น fallback
     """
+    # Task 4B — snapshot เดียวต่อ request: product npz + unit coll/npz + OCR coll
+    #   ต้อง generation เดียวกัน — request owner (_chat_impl) capture+ส่ง snap;
+    #   standalone caller (omitted → SNAP_UNSET) resolve ครั้งเดียวที่ entry นี้
+    snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
+
     # Task 4D — canonical request facts จาก RetrievalProfile
     #   profile=None → path เดิมทุกประการ; profile มีค่า → ใช้แทน detection จาก message
     _prof_types = (set(retrieval_profile.product_types)
@@ -3127,6 +3145,7 @@ def fetch_products(
                 product_types=product_types_override,
                 charger_subtype=charger_subtype_override,
                 retrieval_profile=retrieval_profile,
+                snap=snap,
             )
             if _ucards:
                 return _ucards
@@ -3235,14 +3254,14 @@ def fetch_products(
     # ใช้ vector search เฉพาะเมื่อไม่มี product type regex
     # (เพราะ regex กรองได้แม่นยำกว่าสำหรับสินค้าที่มี keyword ชัดเจน)
     if not has_type_regex:
-        vs = _load_vector_store()
+        vs = _load_vector_store(snap)
         if vs is not None:
             try:
                 # ดึงเยอะกว่า limit เพื่อให้มีตัวเลือกพอสำหรับ re-rank
                 # ⚡ BUG-H fix — ส่ง shop_filter ไป vector_search ให้กรอง shop ก่อน similarity
                 #   ก่อนหน้านี้: vector_search ค้นทุกร้าน → top_k เต็มไปด้วยสินค้าร้านอื่น
                 #   → สินค้าร้านที่ถามไม่ติด top_k → LLM ไม่เห็น → แต่ง "ทุกรุ่นเลิกจำหน่าย"
-                top_results = vector_search(message, top_k=max(limit * 4, 30), shop_filter=shop_filter)
+                top_results = vector_search(message, top_k=max(limit * 4, 30), shop_filter=shop_filter, snap=snap)
                 if top_results:
                     # top_results เป็น list ของ (item_id_str, similarity_score)
                     # สร้าง dict สำหรับเก็บ similarity score ของแต่ละ item_id
@@ -3978,13 +3997,20 @@ def _variant_cert_hit(option_name: str, certs: tuple[str, ...]) -> str | None:
     return None
 
 
-def _admin_image_texts_coll():
-    """collection image_texts จาก admin DB — lazy; fail → None (degrade เป็น desc-only)."""
+def _admin_image_texts_coll(snap=_gen.SNAP_UNSET, db=None):
+    """published OCR collection ของ snapshot (image_texts_g<gid>) — ไม่อ่าน
+    shared cache; ไม่มี generation/fail → None (degrade เป็น desc-only)."""
     try:
-        from . import knowledge_base as _kb
-        return _kb._admin_db()["image_texts"]
+        if snap is _gen.SNAP_UNSET:
+            snap = _gen.resolve_snapshot()
+        if snap is None:
+            return None
+        if db is None:
+            from . import knowledge_base as _kb
+            db = _kb._admin_db()
+        return db[snap.image_texts_collection]
     except Exception as exc:
-        print(f"[CERT] admin db unavailable: {exc}", file=sys.stderr)
+        print(f"[CERT] published OCR coll unavailable: {exc}", file=sys.stderr)
         return None
 
 
@@ -4011,9 +4037,10 @@ def search_cert_products(
     admin_db=None,
     type_filter: set[str] | None = None,
     stock_db=None,
+    snap=_gen.SNAP_UNSET,
 ) -> list[dict]:
-    """ค้นสินค้าที่มี cert ที่ถาม — 4 แหล่ง: description text + image_texts (admin DB)
-    + stock DB cert flags + variant option names.
+    """ค้นสินค้าที่มี cert ที่ถาม — 4 แหล่ง: description text + published OCR
+    (image_texts_g<gid> ใน snapshot) + stock DB cert flags + variant option names.
 
     Args:
         db: MongoDB database (product DB — read-only)
@@ -4023,6 +4050,8 @@ def search_cert_products(
             และไม่กรอง status (ตอบได้ว่ารุ่นนั้นมี/ไม่มี แม้ของหมด)
         limit: จำนวนสินค้าสูงสุด
         admin_db: admin DB handle (ทดสอบ inject ได้) — None → lazy _admin_image_texts_coll()
+        snap: EvidenceSnapshot ของ request (None → resolve ในนี้ — ต้องการ
+            published OCR collection เท่านั้น)
         type_filter: product_type ที่ลูกค้าระบุ (เช่น {"powerbank"} จาก
             _detect_product_types) — กรองเฉพาะ item_name ที่ match type นั้น
             (กันเคส "พาวแบง มี มอก." ได้ surge module ที่มี มอก. มาตอบผิดหมวด)
@@ -4104,8 +4133,10 @@ def search_cert_products(
     except Exception as exc:
         print(f"[CERT] desc search error: {exc}", file=sys.stderr)
 
-    # --- path 2: image_texts (admin DB) → item_ids → product docs ---
-    coll_it = admin_db["image_texts"] if admin_db is not None else _admin_image_texts_coll()
+    # --- path 2: published OCR evidence (image_texts_g<gid> ใน snapshot) ---
+    #   ไม่อ่าน shared cache — missing generation → skip (non-blocking)
+    snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
+    coll_it = _admin_image_texts_coll(snap, db=admin_db)
     if coll_it is not None:
         try:
             # image_id → (text, item_ids); broad regex + verify ใน Python
@@ -4256,6 +4287,7 @@ def search_tisi_products(
     limit: int = 30,
     admin_db=None,
     type_filter: set[str] | None = None,
+    snap=_gen.SNAP_UNSET,
 ) -> list[dict]:
     """ค้นสินค้าที่มี 'มอก.' (TISI standard) — wrapper ของ search_cert_products.
 
@@ -4265,7 +4297,7 @@ def search_tisi_products(
     results = search_cert_products(
         db, ("tisi",), shop_filter=shop_filter,
         model_keyword=model_keyword, limit=limit, admin_db=admin_db,
-        type_filter=type_filter)
+        type_filter=type_filter, snap=snap)
     for r in results:
         r["tisi_context"] = r.get("cert_context", "")
     return results

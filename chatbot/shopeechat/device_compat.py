@@ -16,6 +16,7 @@ import re
 import sys
 from typing import TYPE_CHECKING
 
+from . import generation_pointer as _gen
 from . import product_store
 
 if TYPE_CHECKING:
@@ -802,8 +803,8 @@ def _device_spec_lookup(
     hybrid_anchor_card: dict | None,
     llm_ctx_limit: int,
     resolve_subtype_fn=None,
-    retrieval_profile: RetrievalProfile | None = None,
-) -> tuple[str, list[dict], list[dict]]:
+    snap=_gen.SNAP_UNSET, retrieval_profile: RetrievalProfile | None = None,
+    ) -> tuple[str, list[dict], list[dict]]:
     """⚡ Extract device-spec-lookup logic เป็น helper — ใช้ได้ทั้ง KB path และ main path.
 
     ทำ 2 อย่าง:
@@ -878,6 +879,7 @@ def _device_spec_lookup(
                 shop_filter=req.shop,
                 limit=llm_ctx_limit,
                 desc_message=req.message,
+                snap=snap,
                 filter_unavailable=False,
                 product_types_override=_pto,
                 is_compat_check=True,  # re-query ของ compat — ข้าม unit index เหมือน main path
@@ -950,6 +952,7 @@ def _device_spec_lookup(
             limit=llm_ctx_limit,
             desc_message=req.message,
             filter_unavailable=False,
+            snap=snap,
             product_types_override=_chg_scope,
             # ⚡ compat re-query ต้องข้าม unit index (pool เล็ก →
             #   ของ spec สูงไม่เข้า context) + sweep กว้างเหมือน main path
@@ -1022,7 +1025,7 @@ def _device_spec_lookup(
                             filter_unavailable=False,
                             product_types_override=_chg_scope,
                             is_compat_check=True,
-                            retrieval_profile=retrieval_profile)
+                            retrieval_profile=retrieval_profile, snap=snap)
                         _n2 = 0
                         for _dp in _rq2 or []:
                             _dpid = str(_dp.get("item_id") or "")

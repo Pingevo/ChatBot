@@ -43,6 +43,9 @@ services:
     volumes:
       # HF model cache — ไม่ต้องโหลด 4GB ใหม่ทุกครั้งที่ restart
       - hf_cache:/app/.hf_cache
+      # evidence generations (exports/) — Docker copy-up เฉพาะตอนสร้าง volume
+      # ครั้งแรก; image update รอบหลังไม่ reseed — gen dirs/pointer คงอยู่
+      - exports_data:/app/exports
     extra_hosts:
       # ให้ container เข้าถึง MongoDB บน host (host.docker.internal → host IP)
       - "host.docker.internal:host-gateway"
@@ -198,6 +201,8 @@ services:
 
 volumes:
   hf_cache:
+    driver: local
+  exports_data:
     driver: local
   caddy_data:
     driver: local

@@ -422,7 +422,8 @@ def _install(monkeypatch, fx: dict):
 
     monkeypatch.setattr(product_store, "_cached_client", client)
     monkeypatch.setattr(knowledge_base, "_cached_admin_client", client)
-    monkeypatch.setattr(units, "_units_coll_cached", admindb["sellable_units"])
+    monkeypatch.setattr(units, "_units_coll",
+                        lambda snap=None: admindb["sellable_units"])
     monkeypatch.setattr(persona, "get_persona", lambda *a, **k: None)
     # remaining lazy client builders — pinned to the same fake so cert
     # (itStock), persona and order paths can never reach real Mongo

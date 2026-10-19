@@ -23,6 +23,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Literal, NamedTuple
 
+from . import generation_pointer as _gen
 from . import route_context as _rc
 
 # Lazy import knowledge_base เพื่อใช้ _build_admin_client
@@ -282,7 +283,7 @@ _LIVE_CARD_TTL = 30.0  # ponytail: cache 30s ต่อ (item_id, model_name) —
 _LIVE_CARD_CACHE: dict = {}
 
 
-def _rebuild_card(p: dict, message: str = "") -> dict | None:
+def _rebuild_card(p: dict, message: str = "", snap=_gen.SNAP_UNSET) -> dict | None:
     """สร้าง card ใหม่จาก live data — unit card ถ้า entry ระดับรุ่นย่อย, listing card ถ้าไม่ใช่.
 
     unit detection: entry.model_name (user anchors ระบุรุ่นย่อย) หรือ stored card
@@ -304,11 +305,13 @@ def _rebuild_card(p: dict, message: str = "") -> dict | None:
     if model_name:
         try:
             from . import units as _units
-            u = _units._units_coll().find_one(
+            snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
+            u = _units._units_coll(snap).find_one(
                 {"item_id": item_id, "model_name": model_name})
             if u:
                 # helper chain เดียวกับ fetch_unit_cards — unit card สดครบทุก field
-                u = _units.attach_image_texts(_units.attach_kb_specs([u]))[0]
+                u = _units.attach_image_texts(
+                    _units.attach_kb_specs([u]), snap)[0]
                 u["_listing"] = doc
                 return _units.to_unit_card(u)
         except Exception:
@@ -316,16 +319,21 @@ def _rebuild_card(p: dict, message: str = "") -> dict | None:
     return _ps.to_product_card(doc, message)
 
 
-def _materialize_card(p: dict, message: str = "") -> dict:
+def _materialize_card(p: dict, message: str = "", snap=_gen.SNAP_UNSET) -> dict:
     """คืน card ของ timeline entry — rebuild สดจาก DB ถ้าทำได้, fallback = stored card."""
     stored = p.get("card") or {"item_id": p.get("item_id"), "name": p.get("name")}
     try:
+        # cache identity รวม captured generation — card ที่สร้างจาก gen A
+        # ห้ามถูก reuse โดย request ที่ capture gen B/None (SNAP_UNSET =
+        # standalone → resolve ครั้งเดียวที่ entry นี้ ก่อนสร้าง key)
+        snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
         key = (str(_to_serializable(p.get("item_id"))),
-               str(p.get("model_name") or ""))
+               str(p.get("model_name") or ""),
+               snap.generation_id if snap is not None else None)
         hit = _LIVE_CARD_CACHE.get(key)
         if hit and (time.monotonic() - hit[0]) < _LIVE_CARD_TTL:
             return hit[1]
-        fresh = _rebuild_card(p, message=message)
+        fresh = _rebuild_card(p, message=message, snap=snap)
         if fresh:
             _LIVE_CARD_CACHE[key] = (time.monotonic(), fresh)
             return fresh
@@ -345,7 +353,7 @@ def _normalize_dt(dt: Any) -> datetime:
     return dt
 
 
-def get_active_product(conversation_id: str) -> dict | None:
+def get_active_product(conversation_id: str, snap=_gen.SNAP_UNSET) -> dict | None:
     """ดึง active product card ของแชท.
 
     Returns:
@@ -360,11 +368,11 @@ def get_active_product(conversation_id: str) -> dict | None:
     active_id_ser = _to_serializable(active_id)
     for p in doc.get("products", []):
         if _to_serializable(p.get("item_id")) == active_id_ser:
-            return _materialize_card(p)
+            return _materialize_card(p, snap=snap)
     return None
 
 
-def get_suggestion_latest(conversation_id: str) -> dict | None:
+def get_suggestion_latest(conversation_id: str, snap=_gen.SNAP_UNSET) -> dict | None:
     """ดึง suggestion product ล่าสุด (สินค้าที่ bot แนะนำ)."""
     doc = load_timeline(conversation_id)
     if not doc:
@@ -374,10 +382,10 @@ def get_suggestion_latest(conversation_id: str) -> dict | None:
         return None
     suggestions.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
     s = suggestions[0]
-    return _materialize_card(s)
+    return _materialize_card(s, snap=snap)
 
 
-def get_latest_suggestion_batch(conversation_id: str) -> list[dict]:
+def get_latest_suggestion_batch(conversation_id: str, snap=_gen.SNAP_UNSET) -> list[dict]:
     """ดึง suggestion batch ล่าสุด — สินค้าที่ bot แนะนำใน response เดิียวกัน.
 
     bot บันทึก suggestions ทีละชุดต่อเทิร์น (_record_suggestion_products append ต่อท้าย)
@@ -396,10 +404,11 @@ def get_latest_suggestion_batch(conversation_id: str) -> list[dict]:
         if p.get("is_anchor"):
             break
         batch.append(p)
-    return [_materialize_card(p) for p in batch]
+    return [_materialize_card(p, snap=snap) for p in batch]
 
 
-def get_anchor_and_suggestions(conversation_id: str, limit: int = 5) -> list[dict]:
+def get_anchor_and_suggestions(conversation_id: str, limit: int = 5,
+                               snap=_gen.SNAP_UNSET) -> list[dict]:
     """ดึง anchor ล่าสุด + suggestion ล่าสุด รวมกัน (dedup) สำหรับ follow-up ขอลิงค์.
 
     Returns:
@@ -424,14 +433,14 @@ def get_anchor_and_suggestions(conversation_id: str, limit: int = 5) -> list[dic
         if iid in seen_ids:
             continue
         seen_ids.add(iid)
-        out.append(_materialize_card(p))
+        out.append(_materialize_card(p, snap=snap))
     # แล้ว suggestions (ล่าสุดก่อน)
     for p in suggestions:
         iid = _to_serializable(p.get("item_id"))
         if iid in seen_ids:
             continue
         seen_ids.add(iid)
-        out.append(_materialize_card(p))
+        out.append(_materialize_card(p, snap=snap))
         if len(out) >= limit:
             break
     return out[:limit]
@@ -1263,6 +1272,7 @@ def materialize_subject_cards(
     products,
     shop_filter: str | None = None,
     message: str = "",
+    snap=_gen.SNAP_UNSET,
 ) -> list[dict]:
     """Subject ids → product cards (materialization owner — แทน timeline-getter
     path ของ subject resolver เก่าที่ถูกลบใน 2C.2).
@@ -1281,6 +1291,10 @@ def materialize_subject_cards(
     ids = _norm_subject_ids(subject_ids)
     if not ids:
         return []
+    # cache identity รวม captured generation (resolve ครั้งเดียวที่ entry —
+    # card ที่ cache จาก gen อื่นห้าม reuse; captured None = identity ของมันเอง)
+    snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
+    _gen_id = snap.generation_id if snap is not None else None
     entries: dict[str, dict] = {}
     for p in products or ():
         pid = p.get("item_id")
@@ -1320,10 +1334,10 @@ def materialize_subject_cards(
             if model_name:
                 wanted_iids.append(doc.get("item_id"))
         if wanted_iids:
-            udocs = list(_units._units_coll().find(
+            udocs = list(_units._units_coll(snap).find(
                 {"item_id": {"$in": wanted_iids}}).limit(50))
             udocs = _units.attach_image_texts(
-                _units.attach_kb_specs(udocs))
+                _units.attach_kb_specs(udocs), snap)
             for u in udocs:
                 key = (str(_to_serializable(u.get("item_id"))),
                        str(u.get("model_name") or ""))
@@ -1335,7 +1349,7 @@ def materialize_subject_cards(
         card = None
         entry = entries.get(sid)
         doc = docs_by_id.get(sid)
-        ckey = (sid, str((entry or {}).get("model_name") or ""))
+        ckey = (sid, str((entry or {}).get("model_name") or ""), _gen_id)
         hit = _LIVE_CARD_CACHE.get(ckey)
         if hit and (time.monotonic() - hit[0]) < _LIVE_CARD_TTL:
             card = hit[1]

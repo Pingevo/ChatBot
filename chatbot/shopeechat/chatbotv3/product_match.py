@@ -15,6 +15,7 @@ import re
 from typing import Any
 
 # ⚡ lazy import product_store — หลีกเลี่ยงการโหลด pymongo ตอน import
+from .. import generation_pointer as _gen
 _product_store = None
 
 
@@ -93,6 +94,7 @@ def match_products(
     shop_filter: str | None,
     db: Any,
     limit: int = 10,
+    snap=_gen.SNAP_UNSET,
 ) -> list[dict]:
     """match สินค้าที่ OpenRouter อ้างถึงในคำตอบ กับ ShpProducts จริง.
 
@@ -226,6 +228,7 @@ def get_shop_products_summary(
             shop_filter=shop_filter,
             limit=limit,
             filter_unavailable=False,  # ดึงทุก status — LLM ตัดสินใจเอง
+            snap=snap,
         )
         # fetch_products คืน list[dict] ที่เป็น product card แล้ว (to_product_card ทำในนั้น)
         return docs if docs else []

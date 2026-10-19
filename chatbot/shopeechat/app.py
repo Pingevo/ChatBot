@@ -27,6 +27,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(_REPO_ROOT / ".env")
 
 from . import llm, product_store, knowledge_base, persona, conversation_products, test_chat_api, device_compat, route_context as _rc
+from . import generation_pointer as _gen
 from .responses import _routing, _send_handoff
 
 app = FastAPI(
@@ -626,7 +627,7 @@ def chat(req: ChatRequest) -> ChatResponse:
     return _guards.enforce(resp, req)
 
 
-def _chat_impl(req: ChatRequest) -> ChatResponse:
+def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
     import time as _time
     _total_start = _time.time()
     # ⚡ 2B.5 — post-handoff ownership lock (production owner เดียวที่ /chat
@@ -641,12 +642,17 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         return ChatResponse(**_wf_lock._build_post_handoff_response(
             req, {"steps": [], "total_start": _total_start},
             sys.modules[__name__], llm))
+    # ⚡ Phase 4B — request-wide EvidenceSnapshot (request owner = _chat_impl):
+    #   resolve pointer ครั้งเดียวต่อ /chat request — consumer generated-source
+    #   ทุกตัวรับ captured value เดียวกัน (None คือ captured-None, ไม่ re-resolve);
+    #   pointer flip/TTL expiry ระหว่าง request ไม่เปลี่ยน generation ที่เห็น
+    _snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
     # ⚡ chatbotv3 — OpenRouter-first paradigm (2026-09-20)
     #   USE_CHAT_V3=1 หรือ req.use_v3=True → route ไป chatbotv3.engine.chat_v3
     #   ไม่กระทบ legacy/v2 (default ยังใช้ legacy/v2 ตาม USE_LEGACY_CHAT)
     if req.use_v3 or os.environ.get("USE_CHAT_V3", "0") == "1":
         from . import chatbotv3
-        _resp = chatbotv3.chat_v3(req)
+        _resp = chatbotv3.chat_v3(req, snap=_snap)
         _resp["chat_engine"] = "v3"  # ⚡ บันทึกว่าใช้ chatbotv3
         return ChatResponse(**_resp)
     # ⚡ chat_v2 — pipeline ใหม่ สลับด้วย env var หรือ per-request flag
@@ -655,7 +661,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
     #   req.use_v2=True            → บังคับ chat_v2 (สำหรับ shadowbot/replay โดยไม่กระทบ traffic จริง)
     if req.use_v2 or os.environ.get("USE_LEGACY_CHAT", "1") != "1":
         from . import chat_v2
-        _resp = chat_v2.chat_v2(req)
+        _resp = chat_v2.chat_v2(req, snap=_snap)
         _resp["chat_engine"] = "v2"  # ⚡ บันทึกว่าใช้ chat_v2
         return ChatResponse(**_resp)
     _timing_breakdown: dict[str, float] = {}  # pass1, retrieval, llm, total
@@ -1456,6 +1462,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
 
         # ===== Tax invoice + TISI handlers (ย้ายไป handoffs.post_intent_handoffs) =====
         _phr = _handoffs.post_intent_handoffs(req, {
+            "snap": _snap,
             "is_tax_invoice": _is_tax_invoice,
             "bot_name": _bot_name,
             "steps": _steps,
@@ -1558,7 +1565,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 _subject_cards = conversation_products.materialize_subject_cards(
                     db, _subject_res.subject_set.subject_ids[:5],
                     products=_subject_products,
-                    shop_filter=req.shop, message=req.message)
+                    shop_filter=req.shop, message=req.message, snap=_snap)
             except Exception as _e:
                 print(f"[SUBJECT-RES] materialize error: {_e}", file=sys.stderr)
                 _subject_cards = []
@@ -1605,6 +1612,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
 
         # ===== Warranty claim state machine (ย้ายไป warranty_flow.handle_warranty_flow_legacy) =====
         _wfr = _warranty_flow.handle_warranty_flow_legacy(req, {
+            "snap": _snap,
             "anchor_compare_ctx": _anchor_compare_ctx,
             "bot_name": _bot_name,
             "image_desc_out": _image_desc_out,
@@ -1811,7 +1819,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                               "shadow_enabled": True},
                     "output": _rshadow.run_grouped_retrieval_shadow(
                         _retrieval_profile, message=req.message,
-                        shop=req.shop, platform=req.platform or "shopee"),
+                        shop=req.shop, platform=req.platform or "shopee",
+                        snap=_snap),
                 })
             except Exception as _e:
                 print(f"[SHADOW] grouped-retrieval error: {_e}",
@@ -1917,7 +1926,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                             else "compat" if _compat_followup_skip_kb else "ref_indicator")
             print(f"[TIMING] KB lookup SKIPPED ({_skip_reason} follow-up)", file=sys.stderr)
         else:
-            kb_result = knowledge_base.lookup_kb(kb_query, retrieval_profile=_retrieval_profile)
+            kb_result = knowledge_base.lookup_kb(kb_query, retrieval_profile=_retrieval_profile, snap=_snap)
             print(f"[TIMING] KB lookup: {_time.time()-_t0:.2f}s  query={kb_query[:60]!r}", file=sys.stderr)
         if kb_result and kb_result.get("found"):
             kb_context = kb_result.get("context", "")
@@ -2035,7 +2044,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         shop_filter=req.shop,
                         limit=_llm_ctx_limit,
                         desc_message=_desc_msg,
-                        retrieval_profile=_retrieval_profile,
+                        retrieval_profile=_retrieval_profile, snap=_snap,
                     )
                 print(f"[TIMING] Mongo (KB merge): {_time.time()-_t1:.2f}s  query={mongo_query[:60]!r}  products={len(mongo_products)}", file=sys.stderr)
 
@@ -2048,7 +2057,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         shop_filter=req.shop,
                         limit=_llm_ctx_limit,
                         desc_message=_desc_msg,
-                        retrieval_profile=_retrieval_profile,
+                        retrieval_profile=_retrieval_profile, snap=_snap,
                     )
                     print(f"[TIMING] Mongo (original query): {_time.time()-_t2:.2f}s  query={req.message[:60]!r}  products={len(extra_products)}", file=sys.stderr)
                     # ต่อท้าย products ที่ไม่ซ้ำ
@@ -2258,7 +2267,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         hybrid_anchor_card=_hybrid_anchor_card,
                         llm_ctx_limit=_llm_ctx_limit,
                         resolve_subtype_fn=_resolve_charger_subtype,
-                        retrieval_profile=_retrieval_profile,
+                        retrieval_profile=_retrieval_profile, snap=_snap,
                     )
                     if _kb_device_products:
                         merged_products = merged_products + _kb_device_products
@@ -2275,6 +2284,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                                 platform=req.platform or "shopee",
                                 subject_cards=_subject_cards,
                                 compat_cards=_kb_device_products or (),
+                                snap=_snap,
                                 kb_fetcher=lambda *a, **k:
                                     knowledge_base.kb_product_evidence(
                                         db, kb_docs, shop=req.shop,
@@ -2413,6 +2423,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                                 vision_context=_vision_context,
                                 do_kb_lookup=False,  # KB branch ไม่ re-query KB (มี KB อยู่แล้ว)
                                 do_model_code_regex=False,  # KB branch ไม่ใช้ model code regex
+                                snap=_snap,
                                 do_dedup_rerank=False,  # KB branch ไม่ dedup/rerank (ใช้ products เดิม)
                                 req_limit=req.limit,
                                 retrieval_profile=_retrieval_profile,
@@ -3367,7 +3378,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         if not _ref_regex_products and not _ref_handled:
             try:
                 _fuzzy_products = product_store.fuzzy_match_products(
-                    db, req.message, shop=req.shop, limit=5, score_threshold=75
+                    db, req.message, shop=req.shop, limit=5, score_threshold=75,
+                    snap=_snap,
                 )
                 if _fuzzy_products:
                     _ref_regex_products = _fuzzy_products
@@ -3560,7 +3572,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     is_compat_check=False,
                     skip_charger_subtype=True,
                     product_types_override=set(),
-                    retrieval_profile=_retrieval_profile,
+                    retrieval_profile=_retrieval_profile, snap=_snap,
                 )
             else:
                 # ⚡ ใช้ charger_subtype เป็น override เพื่อกัน retrieval_message ปนเปื้อน
@@ -3612,7 +3624,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                                 shop_filter=req.shop,
                                 limit=5,
                                 desc_message=desc_message,
-                                retrieval_profile=_retrieval_profile,
+                                retrieval_profile=_retrieval_profile, snap=_snap,
                             )
                             for _p in _sub:
                                 _iid = str(_p.get("item_id") or _p.get("id") or "")
@@ -3637,7 +3649,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         skip_charger_subtype=_skip_sub,
                         charger_subtype_override=_intent_sub,
                         # ⚡ Phase 3 — RAG ไม่กรอง status/stock (LLM prompt กรองตอนแนะนำขาย)
-                        retrieval_profile=_retrieval_profile,
+                        retrieval_profile=_retrieval_profile, snap=_snap,
                     )
             # ⚡ ปิด block if not _ref_regex_products (ข้าม fetch ถ้ามี active product แล้ว)
         print(f"[TIMING] fetch_products: {_time.time()-_t1:.2f}s  (retrieval={retrieval_message!r})  products={len(products)}", file=sys.stderr)
@@ -3871,7 +3883,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     message="charger charging adapter cable",
                     shop_filter=req.shop,
                     limit=_llm_ctx_limit,
-                    retrieval_profile=_retrieval_profile,
+                    retrieval_profile=_retrieval_profile, snap=_snap,
                 )
                 # กรอง fallback ให้เหลือเฉพาะที่เกี่ยวข้อง:
                 # - ถ้าถาม adapter → เอา set + adapter (ไม่เอา cable เดี่ยว)
@@ -3920,7 +3932,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     message="สินค้า แนะนำ มาใหม่ โปรด",  # คำค้นกว้างๆ เพื่อดึงสินค้าทั่วไปของร้าน
                     shop_filter=req.shop,
                     limit=5,
-                    retrieval_profile=_retrieval_profile,
+                    retrieval_profile=_retrieval_profile, snap=_snap,
                 )
                 if alt_products:
                     products = alt_products
@@ -4096,7 +4108,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     missing_tokens = [t for t in model_tokens if t.lower() not in seen_tokens]
                     if missing_tokens:
                         _t_kb = _time.time()
-                        kb_comp = knowledge_base.lookup_kb(" ".join(missing_tokens),
+                        kb_comp = knowledge_base.lookup_kb(" ".join(missing_tokens), snap=_snap,
                                                            retrieval_profile=_retrieval_profile)
                         if kb_comp and kb_comp.get("found"):
                             for kd in kb_comp.get("kb_docs", []):
@@ -4127,7 +4139,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     message=alt_msg,
                     shop_filter=req.shop,
                     limit=5,
-                    retrieval_profile=_retrieval_profile,
+                    retrieval_profile=_retrieval_profile, snap=_snap,
                 )
                 # แยกกลุ่ม: UNLIST (ตอบ warranty) + NORMAL (แนะนำทางเลือก)
                 unlist_products = [p for p in products if p.get("status") != "NORMAL"]
@@ -4403,7 +4415,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             history=history,
             existing_products=products,
             retrieval_message=retrieval_message,
-            anchor_card=anchor_card,
+            anchor_card=anchor_card, snap=_snap,
             hybrid_anchor_card=_hybrid_anchor_card,
             llm_ctx_limit=_llm_ctx_limit,
             resolve_subtype_fn=_resolve_charger_subtype,
@@ -4416,7 +4428,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         # ⚡ QA-KB — คำแนะนำจาก kb_qa (trigger kw เท่านั้น; model/brand scoped ใน search_qa)
         _qa_ctx = knowledge_base.qa_context(
             req.message, conversation_id=req.conversation_id,
-            retrieval_profile=_retrieval_profile)
+            retrieval_profile=_retrieval_profile, snap=_snap)
         if _qa_ctx:
             _combined_extra = (_combined_extra + "\n\n" + _qa_ctx).strip()
         # ⚡ CODE-level compat filter — กรองสินค้าที่ connector ไม่ตรงกับอุปกรณ์ออก
@@ -4481,7 +4493,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     supporting=([{"kind": "qa", "text": _qa_ctx}]
                                 if _qa_ctx else [])
                                 + ([{"kind": "vision", "text": _vision_context}]
-                                   if _vision_context else []))
+                                   if _vision_context else []),
+                    snap=_snap)
             except Exception as _e:
                 print(f"[SELECTION] grouped-retrieval error: {_e}",
                       file=sys.stderr)
@@ -4628,7 +4641,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     do_model_code_regex=True,  # product_store branch ใช้ model code regex
                     do_dedup_rerank=True,  # product_store branch dedup + rerank
                     req_limit=req.limit,
-                    retrieval_profile=_retrieval_profile,
+                    retrieval_profile=_retrieval_profile, snap=_snap,
                 )
 
                 if _ws_r.get("search_used") and _ws_r.get("answer"):

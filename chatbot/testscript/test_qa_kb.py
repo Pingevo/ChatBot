@@ -123,8 +123,14 @@ def test_unit_card_and_banner():
                               "stock": 1, "price": 1, "image_ids": []})
     check("unit card warranty: '70mai' → None", c2["warranty"] is None)
     # banner join: unit ที่ image_ids ชี้ banner ที่มีคำว่าประกัน → warranty_text
+    # (published OCR collection ใน snapshot — ไม่อ่าน shared cache)
     try:
-        coll = _units._units_coll().database["image_texts"]
+        from chatbot.shopeechat import generation_pointer as _gp, knowledge_base as _kb
+        snap = _gp.resolve_snapshot()
+        if snap is None:
+            check("banner join", True, "skip — ยังไม่มี evidence generation")
+            return
+        coll = _kb._admin_db()[snap.image_texts_collection]
         banner = coll.find_one(
             {"kind": "banner",
              "text": {"$regex": "ประกัน|รับประกัน|เคลม|warranty", "$options": "i"}},

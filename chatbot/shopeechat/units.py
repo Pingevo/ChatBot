@@ -14,17 +14,16 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .route_context import RetrievalProfile
 
 import numpy as np
 
-_ROOT = Path(__file__).resolve().parent.parent.parent
-_UNIT_VEC_PATH = _ROOT / "exports" / "unit_embeddings.npz"
+from . import generation_pointer as _gen
 
-_UNITS_COLL_NAME = os.environ.get("ADMIN_MONGO_COLLECTION_UNITS", "sellable_units").strip()
+_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # subtype → unit product_type ที่ควรรวมใน filter (listing type ≠ unit type
 # เช่น "สายชาร์จ" อยู่ใน listing หัวชาร์จ แต่ unit product_type="cable")
@@ -35,57 +34,67 @@ _SUBTYPE_TO_TYPES = {
     "desktop": {"desktop_charger"}, "socket": {"socket"},
 }
 
-_units_coll_cached: Any = None
-_unit_vec: dict | None = None
-_unit_vec_mtime: float = -1.0   # mtime ของ npz ที่โหลดไว้ — ไฟล์เปลี่ยน → auto-reload
+# npz cache keyed by immutable generation path — ไม่ใช่ mtime (gen dir เป็น
+# immutable; path ใหม่ = generation ใหม่); cap กัน pointer flip-flop สะสม
+_VEC_CACHE: dict[str, dict] = {}
+_VEC_CACHE_CAP = 3
 
 
-def _units_coll():
-    """collection sellable_units จาก admin DB (lazy, reuse knowledge_base client)."""
-    global _units_coll_cached
-    if _units_coll_cached is None:
-        from . import knowledge_base as _kb
-        db_name = os.environ.get("ADMIN_MONGO_DB", "chatbot_admin").strip()
-        _units_coll_cached = _kb._build_admin_client()[db_name][_UNITS_COLL_NAME]
-    return _units_coll_cached
+def _resolve_snap(snap):
+    """snap ที่ส่งมา (captured — รวม None) หรือ resolve เมื่อ omitted (SNAP_UNSET —
+    standalone caller ไม่ได้อยู่ใน request ที่ capture แล้ว)"""
+    if snap is not _gen.SNAP_UNSET:
+        return snap
+    return _gen.resolve_snapshot()
 
 
-def _unit_vectors() -> dict | None:
-    """lazy load unit_embeddings.npz → {unit_ids, emb, shops}.
+def _units_coll(snap=_gen.SNAP_UNSET):
+    """units collection ของ generation ใน snapshot — pointer เดียวเป็นต้นทาง
+    (ไม่มี pointer/invalid → raise — caller ตัดสินใจ fail-closed หรือ fallback)"""
+    snap = _resolve_snap(snap)
+    if snap is None:
+        raise RuntimeError("[UNITS] no evidence generation — pointer missing/invalid")
+    from . import knowledge_base as _kb
+    return _kb._admin_db()[snap.units_collection]
 
-    Auto-reload เมื่อไฟล์เปลี่ยน (stat ก่อน load — build replace ระหว่าง load
-    → mtime เก่ากว่าจริง → request ถัดไป reload ซ้ำ self-healing).
-    ไฟล์หาย/load fail → ใช้ cache เก่าต่อ.
-    """
-    global _unit_vec, _unit_vec_mtime
+
+def _unit_vectors(snap) -> dict | None:
+    """unit vectors จาก snap.units_npz — cache ด้วย path + assert generation_id
+    ใน npz ตรง pointer gen เสมอ (mismatch → fail closed, ไม่ serve ผิด gen)"""
+    if snap is None:
+        return None
+    path = snap.units_npz
+    if path in _VEC_CACHE:
+        return _VEC_CACHE[path]
     try:
-        mtime = _UNIT_VEC_PATH.stat().st_mtime
-    except OSError:
-        return _unit_vec or None
-    if _unit_vec is not None and mtime == _unit_vec_mtime:
-        return _unit_vec or None
-    try:
-        z = np.load(_UNIT_VEC_PATH, allow_pickle=True)
-        _unit_vec = {"unit_ids": z["unit_ids"], "emb": z["embeddings"],
-                     "shops": z["shops"]}
-    except Exception:
-        if _unit_vec is None:
-            _unit_vec = {}
-    _unit_vec_mtime = mtime
-    return _unit_vec or None
+        z = np.load(path, allow_pickle=True)
+        if "generation_id" not in z.files or \
+                str(z["generation_id"].item()) != snap.generation_id:
+            print(f"[UNITS] npz generation_id != pointer gen "
+                  f"{snap.generation_id} → fail closed", file=sys.stderr)
+            return _VEC_CACHE.get(path)
+        vec = {"unit_ids": z["unit_ids"], "emb": z["embeddings"],
+               "shops": z["shops"]}
+    except Exception as exc:
+        print(f"[UNITS] vector load error ({path}): {exc}", file=sys.stderr)
+        return _VEC_CACHE.get(path)
+    _VEC_CACHE[path] = vec
+    while len(_VEC_CACHE) > _VEC_CACHE_CAP:
+        _VEC_CACHE.pop(next(iter(_VEC_CACHE)))
+    return vec
 
 
-def _sellable_mask(uids: list) -> np.ndarray:
-    """mask unit_id ที่ sellable=True — ดึงจาก Mongo (sellability เปลี่ยนได้ อบลง npz จะ stale)."""
-    sellable = {d["unit_id"] for d in _units_coll().find(
+def _sellable_mask(uids: list, snap=_gen.SNAP_UNSET) -> np.ndarray:
+    """mask unit_id ที่ sellable=True — ดึงจาก units collection ของ snapshot."""
+    sellable = {d["unit_id"] for d in _units_coll(snap).find(
         {"sellable": True}, {"unit_id": 1})}
     return np.array([str(u) in sellable for u in uids])
 
 
 def _vector_search(message: str, shop: str | None, top: int = 50,
-                   sellable_only: bool = False) -> list[tuple[str, float]]:
+                   sellable_only: bool = False, snap=_gen.SNAP_UNSET) -> list[tuple[str, float]]:
     """cosine sim บน unit embeddings → [(unit_id, score)] top-N (กรอง shop/sellable ก่อน)."""
-    uv = _unit_vectors()
+    uv = _unit_vectors(snap)
     if not uv or not message:
         return []
     try:
@@ -96,7 +105,7 @@ def _vector_search(message: str, shop: str | None, top: int = 50,
         if shop:
             mask &= np.array([s == shop for s in shops])
         if sellable_only:
-            mask &= _sellable_mask(uids)
+            mask &= _sellable_mask(uids, snap)
         sims = np.where(mask, emb @ q, -1.0)
         idx = np.argpartition(-sims, min(top, len(sims) - 1))[:top]
         out = [(str(uids[i]), float(sims[i])) for i in idx if sims[i] > 0.3]
@@ -117,11 +126,17 @@ def fetch_units(
     charger_subtype: str | None = None,
     route=None,
     retrieval_profile: RetrievalProfile | None = None,
+    snap=_gen.SNAP_UNSET,
 ) -> list[dict]:
     """ดึง units ที่เกี่ยวกับ message — exact code → field filter → vector → merge.
 
     Returns: list[unit doc + _score + _matched_by] (ว่าง = ให้ caller fallback)
     """
+    snap = _resolve_snap(snap)
+    if snap is None:
+        print("[UNITS] no active generation → fail closed (caller → legacy)",
+              file=sys.stderr)
+        return []
     from . import route_context as _rc
 
     # Task 4D — profile เป็น canonical facts owner: มี profile → ใช้ types/
@@ -143,7 +158,7 @@ def fetch_units(
         else route.model_codes)]
 
     try:
-        coll = _units_coll()
+        coll = _units_coll(snap)
         coll.find_one()  # ping — collection อาจยังไม่มี
     except Exception as exc:
         print(f"[UNITS] collection unavailable → legacy path: {exc}", file=sys.stderr)
@@ -171,7 +186,8 @@ def fetch_units(
             hits[u["unit_id"]] = u
 
     # 2) vector บน search_text → เติม field filter
-    vec = _vector_search(message, shop, top=50, sellable_only=sellable_only)
+    vec = _vector_search(message, shop, top=50, sellable_only=sellable_only,
+                         snap=snap)
     cand_ids = [uid for uid, _ in vec if uid not in hits]
     if cand_ids:
         q = dict(base_q)
@@ -369,14 +385,16 @@ def to_unit_card(unit: dict, route=None) -> dict:
 
 def attach_kb_specs(unit_docs: list[dict]) -> list[dict]:
     """spec inheritance — unit ที่ desc ว่าง ยืม canonical_specs จาก kb_products
-    ผ่าน model_codes (แก้ "บอกไม่มีข้อมูลทั้งที่ KB มี") — additive, docs เดิม."""
+    ผ่าน model_codes (แก้ "บอกไม่มีข้อมูลทั้งที่ KB มี") — additive, docs เดิม.
+    kb_products เป็น live source นอก generation contract — อ่าน admin DB ตรง"""
     need = [u for u in unit_docs
             if not u.get("has_description") and u.get("model_codes")]
     if not need:
         return unit_docs
     codes = sorted({c for u in need for c in u["model_codes"]})
     try:
-        kb = _units_coll().database["kb_products"]
+        from . import knowledge_base as _kb
+        kb = _kb._admin_db()["kb_products"]
         spec_of: dict[str, dict] = {}
         for doc in kb.find({"model_codes": {"$in": codes}},
                            {"model_codes": 1, "canonical_specs": 1}):
@@ -407,8 +425,9 @@ def _unit_warranty(unit: dict) -> dict | None:
 _WARRANTY_IMG_KWS = ("ประกัน", "รับประกัน", "เคลม", "warranty", "สินค้ามีปัญหา")
 
 
-def attach_image_texts(unit_docs: list[dict]) -> list[dict]:
-    """join image_texts (OCR รูป spec/desc) เข้า unit ผ่าน image_ids — additive.
+def attach_image_texts(unit_docs: list[dict], snap=_gen.SNAP_UNSET) -> list[dict]:
+    """join published OCR evidence (image_texts_g<gid> ใน snapshot) เข้า unit
+    ผ่าน image_ids — additive. ไม่อ่าน shared cache; ไม่มี generation → skip.
 
     image_text = text ของรูป kind=spec|product
     warranty_text = text ของรูป kind=banner ที่มีคำเกี่ยวกับประกัน
@@ -418,7 +437,11 @@ def attach_image_texts(unit_docs: list[dict]) -> list[dict]:
     if not iids:
         return unit_docs
     try:
-        coll = _units_coll().database["image_texts"]
+        snap = _resolve_snap(snap)
+        if snap is None:
+            return unit_docs        # ยังไม่มี generation — missing OCR non-blocking
+        from . import knowledge_base as _kb
+        coll = _kb._admin_db()[snap.image_texts_collection]
         text_of: dict[str, str] = {}
         warranty_of: dict[str, str] = {}
         for d in coll.find(
@@ -487,12 +510,15 @@ def fetch_unit_cards(message: str, retrieval_profile: RetrievalProfile | None = 
         from . import route_context as _rc
         route = _rc.resolve_route(message)
     limit = int(kwargs.pop("limit", 8))
+    # snapshot เดียวต่อ request — units coll + OCR coll + npz ต้อง gen เดียวกัน
+    snap = _resolve_snap(kwargs.pop("snap", _gen.SNAP_UNSET))
     # ⚡ overfetch 2× เพราะ sellable บน unit doc เป็น build-time snapshot —
     #   re-sort ด้วย live status หลัง join (ของที่ตายหลัง build ถูกดีดออกจาก top)
     #   แล้วค่อยตัด limit — code-hit ยังชนะเสมอ
     us = attach_listing_fields(attach_image_texts(attach_kb_specs(
         fetch_units(message, route=route, limit=limit * 2,
-                    retrieval_profile=retrieval_profile, **kwargs))))
+                    retrieval_profile=retrieval_profile, snap=snap,
+                    **kwargs)), snap=snap))
     us.sort(key=lambda u: (u.get("_matched_by") == "code",
                            _live_sellable(u), u.get("_score") or 0.0),
             reverse=True)
@@ -532,9 +558,11 @@ def fetch_unit_evidence(
         from . import route_context as _rc
         route = _rc.resolve_route(message)
     limit = int(kwargs.pop("limit", 8))
+    snap = _resolve_snap(kwargs.pop("snap", _gen.SNAP_UNSET))
     us = attach_listing_fields(attach_image_texts(attach_kb_specs(
         fetch_units(message, route=route, limit=limit * 2,
-                    retrieval_profile=retrieval_profile, **kwargs))))
+                    retrieval_profile=retrieval_profile, snap=snap,
+                    **kwargs)), snap=snap))
     us.sort(key=lambda u: (u.get("_matched_by") == "code",
                            _live_sellable(u), u.get("_score") or 0.0),
             reverse=True)

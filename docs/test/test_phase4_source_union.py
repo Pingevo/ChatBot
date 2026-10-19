@@ -300,8 +300,10 @@ def _stub_clients(monkeypatch, db):
     client = FakeClient({PRODUCT_DB: db, ADMIN_DB: FakeDb()})
     monkeypatch.setattr(product_store, "_cached_client", client)
     monkeypatch.setattr(knowledge_base, "_cached_admin_client", client)
-    monkeypatch.setattr(units, "_units_coll_cached",
-                        client[ADMIN_DB]["sellable_units"])
+    monkeypatch.setattr("shopeechat.generation_pointer.resolve_snapshot",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(units, "_units_coll",
+                        lambda snap=None: client[ADMIN_DB]["sellable_units"])
     monkeypatch.setenv("MONGO_DB", PRODUCT_DB)
     monkeypatch.setenv("MONGO_COLLECTION", COLL)
     return client

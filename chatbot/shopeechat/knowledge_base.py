@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .route_context import RetrievalProfile
 
+from . import generation_pointer as _gen
 from dotenv import load_dotenv
 from pathlib import Path
 from pymongo import MongoClient
@@ -666,6 +667,7 @@ def format_kb_context(
 
 
 def lookup_kb(message: str, *,
+              snap=_gen.SNAP_UNSET,
               retrieval_profile: RetrievalProfile | None = None) -> dict[str, Any] | None:
     """ค้น KB ตามข้อความลูกค้า.
 
@@ -819,7 +821,9 @@ _KNOWN_BRAND_SET = {
     "70mai", "viomi", "qcy", "ticwatch", "pioneer", "hoco", "adata",
     "apacer", "asus", "bear", "freetie", "binnifa", "godung",
 }
-_brand_cache: set[str] | None = None
+# entry เดียวต่อ generation — {"gen": gid|None, "ts": float, "brands": set}
+# (unit-derived brands เป็นของ gen ที่ capture — gen อื่นห้าม reuse)
+_brand_cache: dict | None = None
 # ค่า brand ใน DB ที่ไม่ใช่แบรนด์จริง / คำทั่วไปที่จะ false-detect ในข้อความลูกค้า
 _BRAND_JUNK = {
     "nobrand", "tws", "tws true wireless", "tripod", "vr toys", "free fire",
@@ -839,31 +843,43 @@ def _norm_brand(raw) -> str:
     return s if len(s) >= 3 and s not in _BRAND_JUNK else ""
 
 
-_brand_ts: float = 0.0
-
-
-def _known_brands() -> set[str]:
+def _known_brands(snap=_gen.SNAP_UNSET) -> set[str]:
     """แบรนด์ที่รู้จัก = _KNOWN_BRAND_SET ∪ distinct(brand) จาก kb_products+sellable_units.
 
-    แบรนด์ใหม่เข้าร้านได้ scope protection โดยไม่ต้องแก้ list — TTL 5 นาที (refresh
-    fail → ใช้ของเก่า), DB ล่มตั้งแต่แรก → baseline (fail-open เหมือนเดิม).
+    แบรนด์ใหม่เข้าร้านได้ scope protection โดยไม่ต้องแก้ list — TTL 5 นาที **ต่อ
+    generation** (unit-derived brands ผูกกับ snapshot ที่ capture — request ของ
+    gen อื่นห้าม reuse; read fail บน gen นั้น → baseline ของ gen นั้น ไม่ใช่
+    cache ของ gen เก่า), DB ล่มตั้งแต่แรก → baseline (fail-open เหมือนเดิม).
     """
-    global _brand_cache, _brand_ts
-    if _brand_cache is not None and time.time() - _brand_ts < _QA_DOCS_TTL:
-        return _brand_cache
+    global _brand_cache
+    snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
+    gen = snap.generation_id if snap is not None else None
+    if (_brand_cache is not None and _brand_cache["gen"] == gen
+            and time.time() - _brand_cache["ts"] < _QA_DOCS_TTL):
+        return _brand_cache["brands"]
     brands = set(_KNOWN_BRAND_SET)
+    ok = False
+    # 2 source อิสระ — failure ของฝั่งใดฝั่งหนึ่ง ห้ามลบ brands ของอีกฝั่ง
     try:
-        from . import units as _u
         raw = list(_kb_products_coll().distinct("brand"))
-        raw += list(_u._units_coll().distinct("brand.original_brand_name"))
         brands |= {b for b in (_norm_brand(x) for x in raw) if b}
-        _brand_cache = brands          # assign เฉพาะตอน distinct สำเร็จ
-        _brand_ts = time.time()
+        ok = True
     except Exception:
-        if _brand_cache is None:       # cold start + DB ล่ม → baseline
-            _brand_cache = brands
-            _brand_ts = time.time()
-    return _brand_cache
+        pass
+    if snap is not None:      # captured None → generated-unit read = 0
+        try:
+            from . import units as _u
+            raw = list(_u._units_coll(snap).distinct(
+                "brand.original_brand_name"))
+            brands |= {b for b in (_norm_brand(x) for x in raw) if b}
+            ok = True
+        except Exception:
+            pass
+    # ล้มทั้ง 2 source + มี entry ของ gen เดียวกัน → reuse stale ต่อ (TTL เดิม);
+    # อย่างอื่น cache ผล union ภายใต้ generation identity ของ request นี้
+    if ok or _brand_cache is None or _brand_cache["gen"] != gen:
+        _brand_cache = {"gen": gen, "ts": time.time(), "brands": brands}
+    return _brand_cache["brands"]
 
 
 # recall gate เท่านั้น — precision อยู่ที่ scoring (substring/sim/anchor)
@@ -1010,7 +1026,7 @@ def search_qa(message: str, *, model_codes: set[str] | None = None,
         elif known_brand:
             # generic doc แต่ topic เป็นแบรนด์อื่น → ข้าม (คำแนะนำแบรนด์อื่นไม่ใช่ generic จริง)
             topic_low = (d.get("topic") or "").lower()
-            topic_brand = next((b for b in _known_brands() if topic_low.startswith(b)), None)
+            topic_brand = next((b for b in _known_brands(snap) if topic_low.startswith(b)), None)
             if topic_brand and topic_brand != known_brand.lower():
                 continue
             if topic_brand:
@@ -1031,6 +1047,7 @@ def search_qa(message: str, *, model_codes: set[str] | None = None,
 
 
 def qa_context(message: str, *, conversation_id=None, claim: bool = False,
+               snap=_gen.SNAP_UNSET,
                retrieval_profile: RetrievalProfile | None = None) -> str:
     """context block '=== คำแนะนำจากฐานความรู้ (QA) ===' หรือ '' — entry ที่ app.py เรียก.
 
@@ -1051,7 +1068,7 @@ def qa_context(message: str, *, conversation_id=None, claim: bool = False,
     if conversation_id:
         try:
             from . import conversation_products as _cp
-            card = _cp.get_active_product(conversation_id)
+            card = _cp.get_active_product(conversation_id, snap=snap)
             if card:
                 anchor_iid = card.get("item_id")
                 for c in (card.get("model_codes") or []):
@@ -1063,14 +1080,14 @@ def qa_context(message: str, *, conversation_id=None, claim: bool = False,
     if codes:
         try:
             from . import units as _units_mod
-            doc = _units_mod._units_coll().find_one(
+            doc = _units_mod._units_coll(snap).find_one(
                 {"model_codes": {"$in": list(codes)}}, {"brand": 1})
             b = (doc or {}).get("brand")
             known_brand = (b.get("original_brand_name") if isinstance(b, dict) else str(b or "")) or None
         except Exception:
             pass
     if not known_brand:
-        known_brand = next((b for b in _known_brands() if b in low), None)
+        known_brand = next((b for b in _known_brands(snap) if b in low), None)
     hits = search_qa(message, model_codes=codes, anchor_item_id=anchor_iid,
                      known_brand=known_brand)
     if not hits:
@@ -1090,7 +1107,7 @@ def qa_context(message: str, *, conversation_id=None, claim: bool = False,
 
 def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
                          min_sim: float = 0.5, min_answer_len: int = 30,
-                         limit: int = 2) -> list[str]:
+                         limit: int = 2, snap=_gen.SNAP_UNSET) -> list[str]:
     """คืน list คำแนะนำแก้ปัญหาเบื้องต้น (field `a`) สำหรับ troubleshoot-first claim flow.
 
     Gate 3 ชั้น (กัน tips ไม่เกี่ยว):
@@ -1110,7 +1127,7 @@ def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
     if conversation_id:
         try:
             from . import conversation_products as _cp
-            card = _cp.get_active_product(conversation_id)
+            card = _cp.get_active_product(conversation_id, snap=snap)
             if card:
                 anchor_iid = anchor_iid or card.get("item_id")
                 for c in (card.get("model_codes") or []):
@@ -1122,7 +1139,7 @@ def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
     if codes:
         try:
             from . import units as _units_mod
-            doc = _units_mod._units_coll().find_one(
+            doc = _units_mod._units_coll(snap).find_one(
                 {"model_codes": {"$in": list(codes)}}, {"brand": 1})
             b = (doc or {}).get("brand")
             known_brand = (b.get("original_brand_name") if isinstance(b, dict) else str(b or "")) or None
@@ -1130,7 +1147,7 @@ def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
             pass
     if not known_brand:
         low = message.lower()
-        known_brand = next((b for b in _known_brands() if b in low), None)
+        known_brand = next((b for b in _known_brands(snap) if b in low), None)
     hits = search_qa(message, model_codes=codes, anchor_item_id=anchor_iid,
                      known_brand=known_brand)
     return [(h.get("a") or "").strip() for h in hits
