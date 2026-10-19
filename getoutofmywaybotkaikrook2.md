@@ -4430,3 +4430,247 @@ config-failclosed 4/4 · boundary 20/20 · recovery-freshness 60/60 · error-pol
 **ผลลัพธ์**: `bot-worker` อยู่ใต้ profile `botworker`; default deploy services = `chatbot-shopee, chatadmin-web, caddy` และ explicit profile services เพิ่ม `bot-worker` · คู่มือระบุ one-time stop/remove container เดิมก่อน default deploy, local native command และ local Docker command · RED ก่อนแก้พบ worker ใน default; GREEN หลังแก้ default ไม่มี worker/profile มี worker · runtime/env/dependency/script เพิ่ม = 0
 
 **Commit closeout**: `285ab90` `chore: make botworker deployment opt-in` — `docker-compose.yml` + `docs/DEPLOY.md` เท่านั้น, +40/−9 · default worker ถูกถอดจาก deploy startup; local explicit profile/command คงอยู่ · ไม่มี container start/stop, DB, provider, `.env`, push หรือ deploy ในรอบ implementation
+
+---
+
+### ✅ ผ่านแล้ว — REVISED PHASE 3: CANONICAL PRODUCT/VARIANT/AVAILABILITY SCHEMA (branch `feature-phase3-aswer-quality` @ `49e6004` — **uncommitted, ready for independent review** — ห้าม stage/commit/push)
+
+**เป้าหมาย**: normalize product/listing/variant/publish/stock/requested-option facts ผ่าน `make_evidence_card()` เจ้าเดียว ก่อน pool/selection — เปลี่ยน schema semantics ไม่ใช่ answer architecture
+
+**PART 0 audit (raw-value inventory จาก `exports/sellable_units.jsonl` 27,807 recs + fixtures)**:
+
+| raw source + field | ค่าจริงใน data | canonical field/value | trace |
+|---|---|---|---|
+| unit `product_type` | `charger, cable, powerbank, camera, earphone, case, phone, memory_card, screen_protector, smartwatch, ...` (broad taxonomy) | `canonical_type` = ค่าเดิม (single-valued) หรือ `_detect_product_types(name)` สำหรับ listing card (multi → first-by-`PRODUCT_TYPES`-order + candidates) | `_evidence.facts.type` |
+| unit `charger_subtype` | `adapter, cable_only, set, car_charger, wireless, desktop, null` | `canonical_roles` ⊂ `{adapter,cable,set,car_charger,wireless,desktop,socket}`: `adapter→{adapter}`, `cable_only→{cable}`, `set→{set,adapter,cable}`, อื่นๆ→`{self}` | `_evidence.facts.roles` |
+| unit `cable_subtype` | `c-to-c, usb-c, type-a, c-to-l, lightning, micro, null` | `variant_facets.connector` = ค่าเดิม (canonical vocab อยู่แล้ว); **ไม่ใช่ role** | `_evidence.facts.connector` |
+| `product_type=cable` หรือ name `_detect_charger_subtype→cable` | — | role `{cable}` แม้ไม่มี charger_subtype (listing card) | facts.roles |
+| `item_status`/`status` | `NORMAL, UNLIST, SELLER_DELETE, BANNED, DELETED, SHOPEE_DELETE, REVIEWING` | ผ่าน `catalog_status` (resolver เจ้าเดิม) → `publish_state`: `active/active_unknown_stock/out_of_stock→published`, `unlisted→unpublished`, `discontinued→deleted`, `unknown→unknown` | facts.publish |
+| `catalog_status` (resolver output) | `active, active_unknown_stock, out_of_stock, unlisted, discontinued, unknown` | `stock_state`: `active→in_stock`, `out_of_stock→out_of_stock`, อื่นๆ→`unknown` | facts.stock |
+| `customer_visible` (resolver) | bool | `customer_visibility`: `False→hidden`, `discontinued→historical_only`, อื่น→`visible` (fail-closed: catalog unknown→hidden) | facts.visibility |
+| `total_stock`/`stock`/`stock_info_v2`/`seller_stock`/`shopee_stock` | int (0 มีจริง) | resolver เจ้าเดิมคิด → `stock_state` เท่านั้น — ไม่ re-derive | — |
+| `variants[].stock`, `variants[].model_status` | int, `MODEL_NORMAL/MODEL_UNLIST/MODEL_DELETE/""` | per-row `stock_state` (`>0 in_stock`, `0 out_of_stock`, ไม่ใช่ตัวเลข→`unknown`) + `publish_state` (`MODEL_NORMAL→published`, `MODEL_UNLIST→unpublished`, `MODEL_DELETE→deleted`, else `unknown`) — raw fields คงไว้ | — |
+| `model_name`/`name` + `cable_subtype` | ชื่อ variant ("AL803 สีแดง", "Black") | `variant_facets`: `connector`(cable_subtype), `color` (segment ผ่าน `_is_color_or_version`/`_COLOR_WORDS` — vocab เดิม), `length_m` (regex `เมตร/ม./m` — pattern เดิมใน `_relation_constraints`) | facts.facets |
+| request `variant_terms` (route_context มีอยู่ แต่ไม่เคยส่ง) | `สีX`, `GB/TB/mAh/นิ้ว`, `ไซส์X` | `requested_variant_state`: `not_requested/available/out_of_stock/not_offered/unknown` — per-term match `variants[]` name containment + `tier_variation` options + unit self-name → aggregate worst: `not_offered>out_of_stock>unknown>available` | facts.requested |
+| soft_hints facet pair `(length_m\|power_w, val)` | relation constraints เดิม | เข้า `requested` เป็น (k,v) → facet equality บน `variant_facets`/rows; facet หาย→`unknown` ไม่ใช่ not_offered | facts.requested |
+
+**Derived eligibility (owner = adapter เจ้าเดียว)**: `sellable = publish_state==published ∧ stock_state==in_stock ∧ customer_visibility==visible ∧ requested_variant_state ∈ {not_requested, available}` — requested `unknown` ไม่ผ่าน sellable (withhold ไม่ใช่ negative claim); ค่าเดิม `sellable==available_for_sale` เมื่อไม่มี requested
+
+**Owner counts (ก่อนแก้)**: product-type derive = 2+ (`_detect_product_types` lazy ใน `_bucket`, name heuristics กระจาย) · publish/stock = 1 (`resolve_availability`) แต่ raw consumers อ่าน `status`/`_available_for_sale`/`customer_visible`/`catalog_status` เอง (`_bucket`, `_dedupe_sell_score`, `guards._card_available` fallback, `_score`, `_merge_group`, `retrieval_runtime`, `retrieval_selection` coverage) · requested-variant = 0 (ไม่มีเลย — `variant_terms` ไม่ถึง request) · canonical adapter = `make_evidence_card` เจ้าเดียว (merge-only วันนี้)
+
+**Raw branches ที่จะลบ (diff เดียวกัน)**: `_bucket` raw `product_type`/`charger_subtype`/`cable_subtype`/`customer_visible`/`_available_for_sale`/`_detect_product_types` lazy-call → canonical fields · `candidate_pool._merge_group._rich` (`_available_for_sale`+richness → `customer_visibility`>`sellable`>richness — แก้ mixed UNLIST+visible ด้วย) · `candidate_pool._score` subtype/sellable raw reads → `canonical_roles`/`sellable` · `retrieval_selection` subtype-coverage raw `charger_subtype`/`cable_subtype` → `canonical_roles` (แก้ live bug `cable_only≠cable` coverage miss) · `retrieval_runtime` subject `_available_for_sale` → `sellable` (field ไม่ขึ้น `_` → รอด `strip_private_evidence`) · `guards._card_available` raw fallback `status=="NORMAL" and not sold_out` → `resolve_availability` call (owner เดิม — card ไม่ผ่าน adapter ได้) · `_dedupe_sell_score` raw `status==NORMAL`/`sold_out`/`total_stock` → resolver tuple
+
+**Propagation ที่จำเป็น (manifest expansion justified)**: `route_context.RetrievalSlot.variant_terms` (ใหม่ — `_variant_terms(span)` ต่อ slot) + `retrieval_planner.RetrievalRequest.variant_terms` (field ท้าย, default `()`) + planner copy + executor `_request_profile` — เพราะ requested-option ไม่มี channel ไปถึง adapter เลย (proven: slot ไม่มี field, request ไม่มี field)
+
+**Retained (ไม่แตะ)**: `resolve_availability` (owner), `to_product_card`/`to_unit_card`/`_kb_doc_to_card` (producers stamp raw+resolver fields — adapter copy-through), `app.py` availability recompute+notes (owner call, legacy path ไม่ผ่าน adapter), `_prepare_link_followup`, `handoffs` cert label (owner call), `chat_v2.py`/`chat_v3.py` (parallel engine นอก scope), `_prepare_context`/`_prepare_llm_prompt`/`_select_products` (answer-side Phase 5), `_filter_charger_subtype` (fetch-time filter — ไม่ใช่ decision owner; raw field ยังต้องใช้เพราะ unit docs), `sold_out`/`status`/`catalog_status`/`total_stock` passthrough บน card (provenance), `_code_match` (identity ไม่ใช่ availability)
+
+**Test-first**: `docs/test/test_canonical_evidence_card.py` ใหม่ — RED batch: A) type/role (`cable_only→{cable}`, `c-to-c→connector`, `set→{set,adapter,cable}`, unknown→traced) B) publish/visibility (NORMAL→published+visible, UNLIST→unpublished+hidden, SELL_DELETE→deleted+historical_only, REVIEWING→unknown+hidden fail-closed) C) stock/variant (per-row stock_state, requested color available/OOS/not_offered, no-request→not_requested, missing data→unknown, one-dead-one-live) D) retrieval behavior (hidden→rejected, `cable_only` unit ใน cable-subtype request ผ่าน+coverage, mixed UNLIST+visible merge ใช้ visible, requested dead→unavailable ไม่ใช่ rejected, WPB100L UNLIST, iss29 "กล้องอย่างเดียว" exact-variant semantics, image_text evidence-only)
+
+**ห้าม**: LLM/provider call, keyword/regex table เพิ่ม, model/shop-specific condition, helper/guard chain, second old/new path, flag, Phase 4/5, `.env`/mongo/botworker/port 8010/stage/commit/push
+
+**ผลการทำจริง (implementation + verification — 2026-10-16)**:
+
+- **error → cause → fix → impact**:
+  1. `KeyError canonical_type`/30 fails ใน RED batch → `make_evidence_card` merge-only ไม่ produce canonical semantics → เพิ่ม `_canonicalize` ใน adapter (resolver delegation + vocab maps + per-row states + requested-variant resolution + sellable gate) → ทุก source card ได้ canonical fields ที่ boundary เดียว
+  2. `TypeError requested=` + `variant_terms` ไม่ถึง request → channel หายทั้ง chain → `RetrievalSlot.variant_terms` + `RetrievalRequest.variant_terms` + planner copy + `_request_profile`/`_run_attempt` ส่ง `requested` → requested-option ถึง adapter ครั้งแรก
+  3. `test_unknown_product_type` infer "bag" จากชื่อ fixture → fixture ไม่สะอาด (taxonomy detect ถูกต้อง) → แก้ fixture ไม่ใช่โค้ด
+  4. `test_multi_subtype_coverage` cable card ไม่นับ coverage → roles ว่างบน synthetic card + coverage อ่าน raw subtype เดิม → coverage ใช้ `canonical_roles` (cable_only→{cable} นับได้จริง)
+  5. `test_mixed_unlist_and_visible` IndexError → legacy card หลุดก่อน merge → `_merge_group._rich` = visibility→sellable→richness (visible ชนะ hidden แม้ OCR รวยกว่า)
+  6. 6 fails ใน `test_retrieval_selection` → fixture `_adapter`/`_cable` ไม่ stamp resolver fields ที่ `to_unit_card` จริงมีเสมอ → resolver ถูกต้อง mark unknown→hidden → แก้ fixtures stamp `status`/`catalog_status`/`customer_visible`/`availability_reason`
+  7. 4 fails ที่เหลือ (relation_target หาย) → soft_hints facet pairs ถูก feed เข้า `requested` ทำให้ preference กลายเป็น hard gate → scope เปลี่ยนเกิน Phase 3 → **revert**: `requested` = `req.variant_terms` เท่านั้น, soft_hints ยังเป็น ranking hint เดิม (ลบ `_REQUESTED_FACET_KEYS` + pair path)
+
+- **Root cause เดิม**: raw vocab กระจายตัดสินหลายที่ (`_bucket` อ่าน `customer_visible`/`_available_for_sale`/detect lazy, `_merge_group`/`_score` อ่าน `_available_for_sale`+subtype raw, selection coverage อ่าน `charger_subtype` raw, `_card_available`/`_dedupe_sell_score` re-derive `status`+`sold_out`) + requested-option ไม่มี channel → canonical adapter = boundary เดียว, consumers อ่าน canonical เท่านั้น
+
+- **Owner counts (หลังแก้ — proven by grep)**: canonical writer=1 (`_canonicalize` ใน `make_evidence_card` — `card["canonical_*"]=…` อยู่ที่เดียว) · publish/stock/requested-variant decision=1 (adapter module เดียว) · availability semantics=1 (`resolve_availability` — adapter delegate, ไม่มี parallel resolver) · raw `status`/`sold_out`/`_available_for_sale` reads ใน executor/pool/selection = **0** · make_evidence_card call sites: executor `_run_attempt` + harness L2 + tests เท่านั้น (ไม่มี parallel path) · UNLIST duplication=0 (resolver owns listing status; `MODEL_*` เป็น variant-row vocab คนละ field) · LLM calls ใหม่=0, model/shop condition ใหม่=0, keyword table ใหม่=`_SUBTYPE_ROLES` (inventory-backed, ต่อยอด `_SUBTYPE_TO_TYPES`) + canonical vocab maps ของ resolver output — regex facet = length/power extraction ไม่ใช่ semantic decision
+
+- **Requested-variant vs whole-product**: `sellable` ต้อง published∧in_stock∧visible∧requested∈{not_requested,available} — requested `out_of_stock`/`not_offered`/`unknown` → unavailable bucket `requested_variant:<state>` (card ยังขายได้แต่ option ที่ขอไม่พร้อม — ไม่ใช่ของหมดทั้งชิ้น); per-row `stock_state`/`publish_state` ไม่ promote ขึ้น whole-product
+
+- **Publish semantics**: `customer_visibility==hidden`→rejected `customer_hidden` (UNLIST-only) · `historical_only`→unavailable-answerable (spec/history ได้ ขายไม่ได้) · merge เลือก visible card เสมอ · unknown catalog_status→hidden (fail closed)
+
+- **Changed files**: `retrieval_policy.py` (+306 adapter internals: `_SUBTYPE_ROLES`/`_PUBLISH_STATE`/`_STOCK_STATE`/`_VISIBILITY`/`_MODEL_PUBLISH`/`_SELLABLE_RVS` + 10 helpers ใน boundary เดียว) · `retrieval_executor.py` (canonicalize-before-bucket, `_bucket` canonical-only, `requested` จาก variant_terms) · `retrieval_planner.py`/`route_context.py` (variant_terms chain) · `candidate_pool.py` (`_VIS_ORDER`, `_score`/`_merge_group`/pooled fields canonical) · `retrieval_selection.py` (canonical_roles coverage) · `retrieval_runtime.py` (`sellable`) · `guards.py` (`_card_available` canonical→stamp→resolver) · `product_store.py` (`_dedupe_sell_score` resolver tuple) · `docs/test/test_canonical_evidence_card.py` ใหม่ 29 tests · `test_retrieval_selection.py`/`test_legacy_turn_incident_replay.py` (fixture/harness align)
+
+- **Verification (fresh output)**: canonical suite **29/29** · focused retrieval batch (evidence+pool×2+executor+selection+subjects+5f) **107/107** · incident replay **101 pass/19 skip/5 xfail** · offline-focused batch (availability+wiring+subject+turn×2+charger parity+unit card+route_context+cert+qa_guard+units) **269/269** · `py_compile` 9 runtime files OK · `git diff --check` clean · LOC delta +446/−59 (retrieval_policy +306 = adapter boundary; consumers net-deleted raw logic)
+
+- **Residual risks / ยังไม่ได้ทำ**: live multi-subtype re-verify ยังไม่ได้รัน (offline replay ผ่าน — ต้อง live harness) · `soft_hints` facet→requested-option wiring ยังไม่ทำ (Phase 4/5 scope — soft stays soft) · `sellable` ไม่ขึ้น `_` prefix → รอด `strip_private_evidence` เข้าถึง LLM context (ตั้งใจ — flag บอกขายได้/ไม่ได้ เหมือนที่ `_available_for_sale` รอด strip อยู่แล้วเพราะ private keys มีแค่ `_evidence`/`_selection_reason`) · `docs/schema.md` ไม่แตะ (canonical fields = transient card fields ไม่ใช่ persisted DB)
+
+- **Verdict**: `PHASE_3_CANONICAL_PRODUCT_SCHEMA_READY_FOR_INDEPENDENT_REVIEW` — uncommitted ตามสั่ง (ไม่ stage/commit/push)
+
+> **⚠️ claim ถูกแก้ไขโดย PHASE 3 CORRECTION (entry ถัดไป)**: (1) "no helper chain" — เดิมมี `_option_rows`/`_requested_term_state`/`_color_facet` + facet regexes ที่ถูกลบ (helpers 15→13) (2) "requested_variant" ผิด root cause — per-term aggregation ไม่ใช่ SKU intersection; `_opt_hit` direction กลับกัน (3) `hidden_mentions` ทั้ง path ลบ (identity leak — baseline เก่าผิดไม่ใช่ feature) (4) dedupe precedence ผิด — `customer_visible` ทับทั้ง current/deleted ต้อง `_PUBLISH_RANK` (5) `guards._card_available` fallback ยังอยู่ — blocker = app.py product path ไม่ canonical (6) runtime LOC delta เดิมรายงาน +446/−59 ทั้ง tree — runtime-only หลัง correction = policy +314 · selection −16 · runtime −13 · product_store +3 (vs HEAD)
+
+### ✅ ผ่านแล้ว — PHASE 3 CORRECTION (root-cause fix of uncommitted canonical schema — probe-verified, no stage/commit/push)
+
+**Frozen state**: branch `feature-phase3-aswer-quality` @ `49e6004` + uncommitted Phase 3 diff · staging empty · tree = Phase 3 files only
+
+**Probe results (4 findings + 1 bonus — ทำซ้ำได้ก่อนแก้)**:
+
+| # | Finding | Probe evidence | Root cause |
+|---|---|---|---|
+| A | real message→requested signal เสื่อม | `build_retrieval_profile("มีสายชาร์จสีแดงไหม").variant_terms=("สีแดงไหม",)` — regex กิน "ไหม"; `"สีแดงยาว 2 เมตร"`→`("สีแดงยาว",)`; term `_opt_norm`→"แดงไหม" ไม่ match option "แดง" (`tn in opt_norm` ผิดทิศ) → requested resolve = not_offered ทั้งที่ option มีจริง | match direction term→option ต้องเป็น option∈term (symmetric containment); `"ยาว 2 เมตร"` parser เดิมไม่จับ → `()` → `not_requested` (honest gap — ห้ามแก้ด้วย regex ใหม่) |
+| B | per-term aggregation ปลอม combination | tier dims [สี,ความยาว] rows แดง-1ม(5)/น้ำเงิน-2ม(3) + requested ("สีแดง","2 เมตร") → rvs=`available`+sellable=True — ไม่มี SKU red+2m! | `_requested_term_state` resolve ทีละ term แยก row → worst-first รวม — ไม่เคย intersect dim×row; `_option_rows` เช็ค `oi in tier_index` = index ชนกันข้าม dimension |
+| C | UNLIST-only identity รั่ว | `sel.hidden_mentions=({'name':'สายชาร์จ WPB100L เลิกขาย','item_id':'h1','reason':'not_published'},)` — name+item_id เข้า customer context | `hidden_mentions` field + `retrieval_runtime` note path ถูกออกแบบให้ตอบ "ยังไม่เปิดขาย" — contract เก่า (5C) ผิดแผนใหม่: identity ต้องรั่ว=0, เหลือ aggregate count เท่านั้น |
+| D | dedupe เลือก deleted stale ชนะ current | `_dedupe_sell_score`: deleted-100 `(True,False,100,False,-50)` > active-OOS `(True,False,0,False,-100)` | `customer_visible` resolver เป็น True ทั้ง active และ discontinued → tie-break ด้วย stock → stale 100 ชนะ; ไม่มี publication-current precedence |
+
+**Correction plan (minimal — ลบมากกว่าเพิ่ม)**:
+
+1. `retrieval_policy._requested_variant_state` → structured resolver เดียว: term→(dim,opt) ผ่าน `tier_variation[].options` (symmetric containment — แก้ทิศ A ด้วยไม่ต้องแตะ regex) → `constraints{dim:{opts}}` → row ผ่าน iff `∀dim: row.tier_index[dim]∈opts` → `_best_row_state(matched)`; vocab มีแต่ term ไม่อยู่→`not_offered`; rows ขาด `tier_index`→`unknown`; ไม่มี tier vocab→row-name contains ∀terms (1 row ต้องมีครบ) → ไม่ match→`unknown` (name พิสูจน์ absence ไม่ได้ — แก้ test not_offered→unknown บน name-only path)
+   - **ลบ**: `_option_rows`, `_requested_term_state` (per-term aggregation + index collision)
+   - **ลบ**: `_FACET_LENGTH_RE`, `_FACET_POWER_RE`, `_color_facet`, `_COLOR_WORDS` import — `variant_facets` = connector (structured field) เท่านั้น; length/color จากชื่อ = fabricated
+   - `_canonical_roles` fallback: ใช้ `_ps._detect_charger_subtype(name)` owner fn แทน loop `_CHARGER_SUBTYPES` เอง
+2. UNLIST invisibility: ลบ `SelectionResult.hidden_mentions` + production loop + `retrieval_runtime` note path + hidden-only guard → `not sel.selected → None`; rejected summary เหลือ reason+count (ไม่มี identity)
+3. Dedupe: `_dedupe_sell_score` → `(pub_rank, available_for_sale, stock, promo, price)` — pub_rank จาก `_PUBLISH_STATE`+rank map ใน retrieval_policy (contract owner เดียว, lazy import); `_VIS_ORDER` ย้ายไป retrieval_policy เป็น shared rank
+4. `guards._card_available` — **เก็บ fallback**: callers = `_claim_grounded` วน `resp.products` ซึ่ง app.py legacy path (to_product_card) ป้อน — ไม่ canonical → blocker = app.py product path ยังไม่ผ่าน adapter (Phase 4+ scope)
+
+**Tests ที่ต้องแก้ (old baseline ผิด)**: `test_requested_other_color_unit_not_offered`→unknown · `test_availability_subjects_5c`×3 hidden_mentions sites · `test_issue_5f_availability_anchor`×1 · comment `test_link_followup_5c` (app path นอก scope — ตรวจก่อน)
+
+**ผลการแก้จริง (2026-10-16 — RED 9/13 → GREEN 43/43 canonical · 496 focused pass/0 fail)**:
+
+- **A (real signal)**: แก้ match direction ใน adapter (`_opt_hit` symmetric containment + ASCII-boundary) — term "สีแดงไหม"/"สีแดงยาว" ที่ parser กินคำติดยัง map option "แดง" ได้ · "ยาว 2 เมตร" parser เดิมไม่จับ → `()` → `not_requested` (honest gap — ไม่เพิ่ม regex)
+- **B (SKU intersection)**: `_requested_variant_state` เป็น structured resolver เดียว — term→(dim,opt) ผ่าน `tier_variation[].options` → row satisfy iff ∀dim `tier_index[dim]∈opts` → `_best_row_state(matched)`; vocab มีแต่ term ไม่อยู่→`not_offered`; rows ขาด `tier_index`→`unknown`; ไม่มี vocab→row-name ต้องมีทุก term → ไม่ match→`unknown` (แก้ test เก่า not_offered→unknown บน name-only — name พิสูจน์ absence ไม่ได้)
+- **C (UNLIST)**: ลบ `hidden_mentions` field+loop+runtime note path ทั้งหมด — `not sel.selected → None`; rejected summary เหลือ reason+count เท่านั้น (identity รั่ว=0) · แก้ test เก่า 4 ตัว (5c×3, 5f×1) เป็น assert absence+count-only
+- **D (dedupe)**: `_dedupe_sell_score` = `(_PUBLISH_RANK[publish_state], available_for_sale, stock, promo, price)` — `_PUBLISH_RANK={published:2,deleted:1,unpublished:0,unknown:0}` อยู่ retrieval_policy (contract owner เดียว, lazy import) → active OOS ชนะ deleted-100, hidden ไม่ชนะ visible
+
+**ลบ**: `_option_rows`, `_requested_term_state`, `_color_facet`, `_FACET_LENGTH_RE`, `_FACET_POWER_RE`, `_COLOR_WORDS` import, `_option_rows` index-collision logic, `hidden_mentions` (~45 บรรทัดรวม), test old-baseline 4 ตัว
+**เพิ่ม**: `_opt_hit` (containment boundary — structural ไม่ใช่ semantic table), `_PUBLISH_RANK` (ordering constant), combination resolver ใน `_requested_variant_state` (เดิม per-term chain)
+
+**Owner counts (post-correction, grep-verified)**: canonical writer=1 (`_canonicalize` — grep `card["..."]=`) · requested-variant resolver=1 (`_requested_variant_state` เจ้าเดียว เรียกที่เดียว) · per-term aggregation=0 · hidden_mentions production=0 · raw status/`_available_for_sale` reads ใน executor/pool/selection=0 · `make_evidence_card` call sites=executor+harness+tests (ไม่มี parallel path) · LLM calls=0 · semantic keyword tables ใหม่=0 (`_ASCII_EDGE`=boundary rule, `_PUBLISH_RANK`=canonical enum ordering — ทั้งคู่ไม่ใช่ product/keyword vocab)
+
+**LOC/helpers (honest — vs pre-correction Phase 3 state)**: policy 383→395 (+12 — resolver ละเอียดกว่าเดิม) · selection 255→238 (−17) · runtime 188→184 (−4) · product_store +5 → **net runtime −4 LOC** (marginal แต่ลบจริง) · module functions 15→13 (−2: −3 deleted, +1 `_opt_hit`) · semantic facet regexes 3→1 (`_OPT_NORM_RE` เหลือ; `_ASCII_EDGE` เป็น boundary ไม่ใช่ semantic)
+
+**Retained compatibility (honest blocker)**: `guards._card_available` เก็บ chain `sellable`→`_available_for_sale`→resolver — caller `_claim_grounded` วน `resp.products` ซึ่ง app.py legacy product path (to_product_card, ไม่ผ่าน adapter) ป้อน → blocker = app.py product path ยังไม่ canonicalize (Phase 4+ scope) · `app.py` UNLIST note/link-followup เป็น legacy path นอก scope เดิม
+
+**Verification**: canonical suite **43/43** · retrieval+subjects+5f+evidence+pool+executor **121/121** · incident replay **101p/19s/5x** · affected batch (route_context+availability+wiring+turn+units+unit_card+charger parity+cert+qa_guard+subject+link_followup) **รวม 496 pass/20 skip/5 xfail/0 fail** · `py_compile` OK · `git diff --check` clean
+
+**Residual**: live re-verify ยังไม่รัน · soft_hints→requested wiring ยังเป็น Phase 4+ · `variant_terms` parser gap ("ยาว 2 เมตร"→()) documented-accepted · dedupe/merge ใช้ `_PUBLISH_RANK`/`_VIS_ORDER` — 2 rank constants คนละ enum (publish vs visibility — semantics เดียวกันรายการคนละ field)
+
+**Verdict**: `PHASE_3_CANONICAL_SCHEMA_CORRECTED_READY_FOR_FINAL_REVIEW` — uncommitted ตามสั่ง
+
+### ✅ ผ่านแล้ว — PHASE 3 CORRECTION ROUND 2 (3 High + 2 Medium — probe-verified, no stage/commit/push)
+
+**Probe results (reproduced ก่อนแก้ ทุกข้อ)**:
+
+- **F1 unit-card real message** — `make_evidence_card(unit_card, requested=("สีแดงไหม",))` → `unknown`, `sellable=False` (หน่วยแดงจริงต้อง `available`)
+  - root cause: `to_unit_card` ส่ง `tier_variation: []` + variant row ไม่มี `tier_index` ทั้งที่ `lst` (joined listing) มี `tier_variation`+`model[].tier_index` ครบ → structured path ตก → name-containment "แดงไหม"⊄"al803สีแดง" → unknown → ไม่ sellable
+  - fix: unit card preserve `lst.tier_variation` + tier_index ของ model ตัวเอง (shape เดียวกับ to_product_card:759-775 — ไม่ parse prose)
+- **F2 overlapping options** — options `["แดง","แดงอิฐ"]`, แดง in-stock / แดงอิฐ OOS, request `"สีแดงอิฐ"` → `available` (ผิด ต้อง `out_of_stock`)
+  - root cause: `_opt_hit` symmetric containment → term "แดงอิฐ" match option ทั้งคู่ → constraints union {0,1} → SKU ไหนก็ได้
+  - fix: exact → unique-longest contained → tie/ambig → unknown; ห้าม union; term 2 ค่าใน dim เดียวกันที่ resolve คนละ option → unknown
+- **F3 merge re-entry** — `merge_selected_products([canon],[UNLIST legacy])` → คืน 2 ตัว (UNLIST re-เข้า LLM context)
+  - root cause: flag-ON callsites (app.py:2275 KB, 4453 main) merge selected เข้า base — canonical ไม่เป็น owner
+  - fix: flag ON → `selected_cards` replace products ที่ boundary; `run_grouped_selection` คืน dict (selected อาจว่าง) เมื่อ pipeline รันได้ vs None เฉพาะ exception — hidden-only/empty → products=[] ไม่ fallback legacy; flag OFF → legacy เดิม
+- **F4 private import** — `product_store._dedupe_sell_score` lazy-import `_PUBLISH_RANK`/`_PUBLISH_STATE` (private) จาก retrieval_policy — ownership ผิดทิศ
+  - fix: ย้าย maps ไป product_store (public `PUBLISH_STATE`/`PUBLISH_RANK` ข้าง `resolve_availability`) — retrieval_policy consume `_ps.PUBLISH_STATE`; product_store import retrieval_policy = 0
+- **F5 (medium) docs/test honesty** — SRS/log ต้องอัปเดต: unit tier evidence, flag ON=replace/OFF=rollout, ไม่ claim production activation
+
+**RED plan**: tests ใหม่ใน test_canonical_evidence_card.py — (a) real message→unit card→available ผ่าน tier evidence; (b) overlap→out_of_stock, exact/contained/tie→unknown, same-dim conflict→unknown; (c) run_grouped_selection empty→dict w/ empty cards, app source pin replace-not-merge ทั้ง 2 callsites; (d) product_store ไม่ import retrieval_policy private
+
+**ผลการแก้จริง (2026-10-16 — RED 11 fails → GREEN 521 pass/0 fail ทุก focused suite)**:
+
+- **F1 (unit card)**: `to_unit_card` preserve `lst.tier_variation` (shape to_product_card: `{name, options[]}` จาก `option_list`) + `tier_index` ของ model ตัวเอง (lookup `lst.model` by `model_id`) — structured evidence ไม่ parse prose · "มีสายชาร์จสีแดงไหม"→"สีแดงไหม" resolve ผ่าน vocab → `available`, sellable=True
+- **F2 (overlap)**: `_opt_hit`(symmetric union) ลบ → `_opt_in`(ทางเดียว option⊂term + boundary) · ต่อ term/dim: exact → unique-longest contained → tie/multi-dim/same-dim-conflict → `unknown` — ห้าม union; "สีแดงอิฐ"→idx1 เดียว → `out_of_stock` ถูกต้อง
+- **F3 (re-entry)**: `merge_selected_products` ลบ; `run_grouped_selection` คืน dict เสมอเมื่อ pipeline รันได้ (selected ว่าง=[]) — None เฉพาะ exception; dedupe selected inline ด้วย `_identity_keys` เดิม; app callsites ทั้ง KB(~2278)+main(~4455) → `products = selected_cards[:limit]` แทน merge — hidden-only/ว่าง → products=[] ไม่ fallback legacy; flag OFF → `_grouped_sel=None` → legacy เดิม 100%
+- **F4 (ownership)**: `PUBLISH_STATE`/`PUBLISH_RANK` ย้ายเป็น module constants ใน product_store (ข้าง resolve_availability — public owner เดียว); `_dedupe_sell_score` ใช้ตรง; retrieval_policy consume `_ps.PUBLISH_STATE`; **product_store import retrieval_policy = 0** (grep-verified)
+- **F5 (docs)**: SRS/roadmap อัปเดต contract ใหม่ + rollout note (flag OFF = Phase 3 inactive ใน production)
+
+**ลบ**: `_opt_hit` symmetric, option-union set logic, `merge_selected_products`, `_item_id` (dead), `base_products` param ของ prepare, `_PUBLISH_STATE`/`_PUBLISH_RANK` ใน policy, lazy private import ใน dedupe, 2 merge tests + แก้ 4 ตัวให้ contract ใหม่
+**เพิ่ม**: `_opt_in` (ทางเดียว — reshape `_opt_hit`), 2 module constants (ย้ายจาก policy), tier evidence ใน to_unit_card (+15 LOC — structured fields ตาม spec), dedupe inline ใน run, tests ใหม่ 11+แก้ 6
+
+**Structural gate (grep-verified)**: tier evidence structured ✓ · option ≤1/dim (`constraints[di]=oi` scalar) ✓ · row satisfy ∀dim ✓ · merge_selected_products 0 production refs ✓ · product_store→policy imports 0 ✓ · PUBLISH owner=1 ✓ · new helpers/flags/regex/model calls=0 (`_opt_in` reshape, constants moved — ไม่เพิ่มใหม่)
+
+**LOC (vs Round-1 end)**: runtime 184→154 (−30: merge+dead deleted) · policy 395→401 (+6: resolver ละเอียดกว่า — อนุญาต: structured logic แทน union ผิด) · units 534→549 (+15: required tier evidence) · product_store +10 (public maps) · app +6
+
+**Verification**: canonical **55/55** · runtime suite **19/19** · affected batch **521 pass/20 skip/5 xfail/0 fail** · py_compile OK · git diff --check clean
+
+**Retained/blocker (honest)**: `guards._card_available` fallback ยังอยู่ — blocker คือ app.py legacy product path (to_product_card ไม่ผ่าน adapter) — เหมือนเดิม · executor attempt-level error ไม่ใช่ pipeline error → dict ไม่ใช่ None (isolate โดยออกแบบ) · `merge_selected_products` ลบแล้ว — dedupe ของ selected ย้ายเข้า run เดียวกัน
+
+**Verdict**: `PHASE_3_CORRECTION_ROUND_2_READY_FOR_FINAL_REVIEW` — uncommitted ตามสั่ง · flag OFF = production ยังไม่ active (rollout gate เจ้าของแยก)
+
+### ✅ ผ่านแล้ว — PHASE 3 CORRECTION ROUND 3 (fail-closed answer boundary + Phase 4 activation blocker — no stage/commit/push)
+
+**PART 0 source facts (verified)**:
+
+- `run_grouped_selection` → None เฉพาะ pipeline exception (Round 2 contract)
+- callsites: app.py ~2276 (KB path `merged_products`) + ~4454 (main `products`) — `if _grouped_sel:` truthy gate
+- **fail-open**: `_sel_flag=True` + run→None → `_grouped_sel=None` → `if _grouped_sel:` false → legacy `products`/`merged_products` ไหลเข้า llm.answer ครบ — UNLIST/hidden identity รั่วเมื่อ canonical พัง
+- executor sources = `("units", fetcher)` + `("legacy", legacy_fetcher)` เท่านั้น — KB identity / compat / order-history / image-OCR ยังไม่มี (Phase 4)
+- KB path trigger: `knowledge_base.lookup_kb` found+context → `_merge_kb_mongo(kb_docs, mongo_products)` → shop filter (p["shop"]==req.shop) → boundary → llm.answer — harness: replay `_install` (test_legacy_turn_incident_replay) + monkeypatch lookup_kb
+
+**Plan**: RED executable tests ผ่าน `app.chat` + replay harness (flag ON × run→None × catalog UNLIST → llm.answer ต้องได้ products=[]) · fix = เปลี่ยน condition เป็น `_sel_flag` ownership ทั้ง 2 blocks · flag OFF เหมือนเดิม · record `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION`
+
+**ผลการแก้จริง (2026-10-16 — RED 3 fails → GREEN 527 pass/0 fail)**:
+
+- **root cause**: callsites gate `if _grouped_sel:` (truthiness) — run→None (exception) → falsy → legacy `products`/`merged_products` ไหลเข้า llm.answer → UNLIST 3001 ("WPB100L") รั่วขึ้น LLM context (probe: llm saw UNLIST card เต็ม)
+- **fix**: condition เป็น `_sel_flag` ownership — `if _sel_flag: products = selected_cards[:limit] if _grouped_sel else []` ทั้ง KB(~2278) + main(~4456); extra_context/steps ย้ายไปใต้ `if _grouped_sel:` ของตัวเอง · flag OFF → legacy เดิม 100%
+- **truth table**: OFF→legacy เดิม/run ไม่ถูกเรียก · ON+cards→เฉพาะ canonical · ON+empty→products=[] · ON+None/error→products=[] (fail closed)
+- **blocker บันทึก**: `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — executor มีแค่ units+legacy; KB identity/compat/order-history/image-OCR เป็น Phase 4 — ห้ามเปิด flag จน Phase 4 ลง
+- **docs**: SRS + roadmap แก้ claim "error→legacy fallback" → fail closed; test เก่า `test_flag_on_callsites_replace_not_merge` แก้เป็น `_sel_flag` pin
+- **tests**: `test_answer_boundary_fail_closed.py` ใหม่ (6 executable tests ผ่าน app.chat + replay harness — main None/raise, KB None, flag-OFF pin, empty, replace) · แก้ 1 stale source pin
+
+**Verification**: boundary suite 6/6 · canonical ~~56/56~~ **55/55** (แก้ใน R4 — นับผิด) · runtime ~~19/19~~ **13/13** (แก้ใน R4 — นับผิด) · affected batch **527 pass/20 skip/5 xfail/0 fail** · py_compile OK · git diff --check clean · delta: app.py +13/−10 boundary refactor เท่านั้น (helper/flag/module/model call ใหม่ = 0)
+
+**Verdict**: `PHASE_3_FAIL_CLOSED_BOUNDARY_FIXED_PHASE4_ACTIVATION_BLOCKED_READY_FOR_FINAL_REVIEW` — uncommitted ตามสั่ง
+
+---
+
+## ✅ Phase 3 Correction Round 4 — test-matrix completion + evidence honesty (ผ่านแล้ว — 2026-10-16)
+
+**สั่งทำ**: production boundary ผ่าน review แล้ว — round นี้แก้แค่ test matrix + evidence honesty; ห้ามแตะ production เว้น executable test เจอ defect จริง
+
+**ผลทำจริง**:
+
+- **boundary matrix เต็ม**: `test_answer_boundary_fail_closed.py` เขียนใหม่ — 10 executable tests ผ่าน `app.chat` จริง + replay harness — main×5 + KB×5 (flag OFF / ON+selected / ON+empty / ON+None / ON+raise)
+- **flag-OFF pin แข็งขึ้น**: assert `run_grouped_selection` call count == 0 **และ** legacy payload มี WPB100L name + normalized item_id 3001 (ไม่ใช่แค่ non-empty)
+- **KB-path proof**: `resp.source.startswith("knowledge_base")` — observable เดิมของระบบ ไม่ได้เพิ่ม instrumentation (KB seed ผ่าน `client[ADMIN_DB]["kb_products"].insert_one` เหมือน phase2c3)
+- **WPB100L absence pin**: name/item_id 3001/short_link ต้องไม่โผล่ใน *ทุก* llm product payload
+- **bug ใน test ตัวเองที่แก้**: import `chatbot.shopeechat.app` ทำให้เป็น module instance คนละตัวกับ `shopeechat.app` ที่ harness patch → seam ไม่ติด → real Mongo/intent call รั่ว (10 fails) — แก้เป็น import pattern ของ phase2c3 + autouse `_offline_guard` ในไฟล์เอง
+- **ไม่มี production RED**: assertion ที่แข็งขึ้นไม่เปิดเผย defect — production bytes ใน round นี้ = **0**
+- **stale wording แก้**: `test_pipeline_exception_returns_none_fallback` → `..._fail_closed` + comment "caller fallback legacy" ลบ; canonical:766 "error/fallback" → "pipeline exception → fail closed"
+
+**Verification (fresh standalone)**: boundary **10/10** · canonical **55/55** · runtime **13/13** · รวม 3 ไฟล์ **78 pass** (10+55+13 ✓) · affected batch+phase2c3 **570 pass/20 skip/7 xfail/0 fail** · py_compile OK · git diff --check clean · 0 staged
+
+**Round-3 count correction**: รายงานก่อนหน้าเคลม "canonical 56/56 · runtime 19/19" — จริงคือ **55/55 · 13/13** (standalone counts re-run ใน PART 0)
+
+**Verdict**: `PHASE_3_FAIL_CLOSED_MATRIX_COMPLETE_EVIDENCE_CORRECTED_READY_FOR_PRECOMMIT_REVIEW` — uncommitted ตามสั่ง
+
+---
+
+## ✅ Phase 3 Correction Round 5 — non-vacuous flag-ON assertions (ผ่านแล้ว — 2026-10-16)
+
+**สั่งทำ**: review เจอ flag-ON tests 8/10 เสี่ยง vacuous — loop over `_payloads` โดยไม่ assert non-empty + ไม่ pin pipeline call count — test-honesty เท่านั้น ห้ามแตะ production
+
+**ผลทำจริง**:
+
+- **8 flag-ON cases (main×4 + KB×4) แก้เป็น**: capture spy → `assert calls["n"] == 1` (pipeline ถูกเรียกพอดีครั้งเดียว) + `payloads = _payloads(captured); assert payloads` (มี LLM payload ≥1 ก่อน inspect) + per-payload assert เหมือนเดิม (`[_CANON_CARD]` / `[]` + `_assert_no_wpb100l` บน selected/none/exception)
+- **mutation RED proof** (test-only, revert หมดแล้ว):
+  - `captured.calls.clear()` → RED `AssertionError: expected at least one captured LLM product payload`
+  - flag OFF mutation (`grouped_selection=False`) → RED `assert 0 == 1` บน `calls["n"] == 1` — pipeline ถูก bypass จริงไม่ใช่ counter โกง
+- **stale comment**: ไม่มีเหลือ (R4 แก้หมดแล้ว)
+
+**Verification (fresh)**: boundary **10/10** · canonical+runtime+boundary รวม **78/78** (10+55+13 ✓) · py_compile OK · `git diff --check` clean · 0 staged
+
+**Production delta**: **0 bytes** — app.py/retrieval_*/SRS/roadmap ไม่ถูกแตะ round นี้ (แก้เฉพาะ test + log) · affected batch 570 = **carried evidence จาก R4 ไม่ rerun**
+
+**Verdict**: `PHASE_3_FAIL_CLOSED_MATRIX_NONVACUOUS_READY_FOR_PRECOMMIT_REVIEW` — uncommitted ตามสั่ง
+
+---
+
+## ✅ Phase 3 — Commit Closeout (2026-10-16)
+
+**Commit 1**: `3e8308f` — `refactor: canonicalize product availability evidence`
+- 20 files staged+committed ตาม pre-commit gate: runtime 11 (app/candidate_pool/guards/product_store/retrieval_executor/retrieval_planner/retrieval_policy/retrieval_runtime/retrieval_selection/route_context/units) · docs 2 (SRS_SSD/roadmap) · tests 7 (canonical 55 + boundary matrix 10 + 5 rewritten suites)
+- log ไฟล์นี้ไม่ได้อยู่ใน Commit 1 — Commit 2 แยกตาม gate
+
+**Root contracts completed (frozen diff audited เทียบ HEAD 49e6004)**:
+- canonical product type/roles — adapter `make_evidence_card` เจ้าเดียวที่ boundary
+- publish_state / stock_state / customer_visibility (visible/historical_only/hidden)
+- requested_variant_state — structured resolver: exact → unique-longest-contained → ≤1 option/dim → SKU row satisfy ทุก dim (ไม่ union)
+- structured unit tier evidence — `tier_variation` + model `tier_index` จาก joined listing (ไม่ parse prose)
+- UNLIST identity ห้ามรั่วเข้า canonical LLM context — rejected reason+count เท่านั้น, `hidden_mentions`+`merge_selected_products` deleted
+- answer boundaries ทั้งสอง (KB ~2278 / main ~4459) owned by `_sel_flag` — ON: replace/empty=[]/fail closed; OFF: legacy unchanged pipeline ไม่ถูกเรียก
+
+**Verification (frozen evidence)**: boundary 10/10 · canonical 55/55 · runtime 13/13 · combined 78/78 · affected batch 570 pass/20 skip/7 xfail/0 fail · py_compile 18 files OK · fixture validator all rows pass · `git diff --check` + `--cached --check` clean
+
+**Complexity**: runtime +468/−142 net +326 · functions +10/−2 · availability owner=1 · publication-map owner=1 · answer-context contract owner=1 · model/provider calls +0 · circular imports 0
+
+**Residual blocker**: `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — executor unions units+legacy เท่านั้น; KB identity/compat/order-history/image-OCR = Phase 4 — **flag ยัง OFF**
+
+**Safety**: ไม่มี push/PR/deploy/botworker/provider/Mongo/.env/port-8010 — commit locally เท่านั้น
