@@ -20,6 +20,71 @@
 
 ## กำลังทำ (active)
 
+### 🔍 PHASE 4B — Atomic Daily Evidence Refresh · ARCHITECTURE AUDIT + CONTRACT DESIGN (2026-10-19) · design-only รออนุญาต implement
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `8a52ba3` (4A committed `ec835af`+`8a52ba3`) · tree clean ก่อนเริ่ม · `grouped_retrieval_selection_enabled` OFF คงเดิม — รอบนี้ห้าม implement/flag/commit
+- **สั่งทำ**: audit pipeline เดิมจริง → prove failure windows → design generation/pointer contract → บันทึก plan → หยุดรออนุมัติ · ห้าม `.env`/Mongo จริง/provider/PyTorch/cron/botworker/port 8010/deploy/push
+
+#### PART 0 — pipeline เดิม (proven จาก source)
+
+- **order จริง** (`refresh_data.sh`): mkdir lock → `export_mongo.py ShpProducts` (fail→abort จุดเดียว) → product npz → `build_sellable_units.py` → `import_sellable_units.py` → unit npz → qa npz → OCR sellable → OCR nonsellable → `import_image_texts.py`
+- **artifacts**: `exports/ShpProducts.export.json` (เขียนทับ "w") · `sellable_units.jsonl` (เขียนทับ "w" ไม่มี tmp/rename) · `product_embeddings.npz`+`unit_embeddings.npz`+`qa_embeddings.npz` (tmp+`os.replace` แต่ verify **หลัง** replace แบบ print-only — `build_embeddings.py:154-162`) · `image_texts.jsonl` (append-only โตไม่หยุด — `_load_done` ข้ามเฉพาะ `status=="ok"` keyed `image_id` เท่านั้น → **URL เปลี่ยนไม่เคยตรวจ**) · Mongo: `sellable_units` (upsert ไม่มี delete → stale สะสม — พิสูจน์แล้ว: jsonl=26,970 vs Mongo=27,807) · `image_texts` (upsert ok-only)
+- **runtime mixing ต่อ request**: `units._units_coll()` (cached handle ตลอด process) + `_unit_vectors()` (mtime reload) + `_sellable_mask()` (live find ทุก vector search) + `image_texts` (kinds spec|product|banner — **variant_map ไม่ถูก join**) + `ShpProducts` live → **Mongo gen ใหม่ + npz gen เก่าผสมกันได้ตลอด** (import units รันก่อน build npz → window กว้าง)
+- **provider calls**: OCR = genai client ดิบ (`_next_client` → `generate_content`) **ข้าม `llm._generate` quota manager** — control จริงมีแค่ `--max-calls` + `MIN_INTERVAL` sleep; 429 → sleep 65s×3/img **ไม่มี run-level stop** → quota ตาย = เผาเวลา ~130s/รูปต่อเนื่อง + status="error" (ไม่ใช่ deferred) · embeddings = bge-m3 local (ไม่กิน API)
+- **lock**: `mkdir exports/.refresh.lock.d` — SIGKILL → `rmdir` trap ไม่ทำงาน → **lock ค้างถาวร refresh ข้ามทุกรอบตลอดกาล** เงียบๆ; guard เฉพาะ shell script (รัน py เดี่ยวชนกันได้)
+- **deploy model (proven)**: `exports/` gitignored ทั้งโฟลเดอร์ · `COPY exports/` เข้า image (npz+jsonl baked — `*.export.json` dockerignored) · **ไม่มี volume mount `/app/exports`** → artifacts ใน container = image-baked + ephemeral; DEPLOY.md มี cron `0 3 * * *` เป็น "แนะนำ" (waythrough: "unit index rebuild — cron/manual" ยังไม่ทำ → **cron ไม่เคย install**); `image_texts.jsonl` baked ใน image → container recreate → resume state ย้อนเวลา → OCR ซ้ำเผา quota
+- **failure windows proven**: (1) import units→live coll ก่อน npz → request ผสม gen (2) jsonl "w" crash → ไฟล์ตัดท้าย + import/npz สืบทอด (3) verify-after-replace print-only → corrupt npz publish แล้ว (4) Mongo สะสม stale units ไม่มีคู่ npz (5) `_unit_vec` เก็บ cache เก่าเมื่อ load fail → stale เงียบ (6) product npz+unit npz resolve คนละ mtime → ข้าม file gen ได้ (7) OCR quota→error เผาเวลาเป็นชม. (8) stale lock → หยุด refresh ถาวร (9) `image_texts.jsonl` append → รูปเดิมมีหลายบรรทัด latest-ts-wins แม้คุณภาพต่ำกว่า (10) container recreate → npz+jsonl ย้อน → ขาดคู่กับ Mongo gen ใหม่
+
+#### PART 1-3 — contract ที่ออกแบบ (minimal canonical)
+
+- **`generation_id`** = `gYYYYMMDD-HHMMSS` · artifacts ทุกชิ้น gen dir `exports/gen/<gid>/` {units jsonl, unit npz, product npz, ocr_results.jsonl, manifest.json} + `sellable_units_g<gid>` coll + pointer doc — gen ผิดห้าม combine
+- **order ใหม่**: lock(+pid stale-steal) → export → discover fingerprints → classify unchanged/new/changed/retryable/removed → bounded incremental OCR (quota→`deferred` run-level stop) → import image_texts (state owner, shared coll) → build units (OCR-aware search_text) → build npz (verify **ก่อน** replace + embed `generation_id`) → import `sellable_units_g<gid>` → validate counts/hashes/pairing → **pointer write เดียว** → manifest finalize → cleanup (เก็บ active+previous เท่านั้น) → unlock
+- **pointer**: `sellable_units_meta {_id:"active", generation_id, collection, units_npz, product_npz, units_jsonl, unit_count, npz_rows, previous:{...}, activated_at, manifest}` — `previous` embedded = rollback target → **rollback = pointer update เดียว**; QA npz อยู่นอก generation contract (KB domain ไม่ผูก export)
+- **request snapshot**: `units.resolve_unit_snapshot()` owner เดียว (pointer read ~30s TTL) → entry fns (`fetch_unit_cards`/`fetch_unit_evidence`) resolve ครั้งเดียวแล้ว thread `snap` ลง fetch_units/_vector_search/_sellable_mask — loaders ห้าม resolve เอง; `_units_coll()` compat wrapper (conversation_products/_known_brands ใช้ต่อได้)
+- **fail-closed**: pointer missing/invalid หรือ npz.gen≠pointer.gen → grouped semantic + unit path unavailable → legacy listing path (live ShpProducts+product npz) — **ห้ามเงียบ fallback `sellable_units` base**; base coll เป็น unreachable หลัง publish แรก (units dark จน gen แรก — runbook: refresh ทันทีหลัง deploy)
+- **OCR state owner = `image_texts` collection** (ไม่ใช่ jsonl — durable ข้าม container recreate): doc += `fingerprint`(image_id+normalized_url), `status`(ok|error|deferred), `error_class`, `attempts_total`, `last_generation_id`; removed→`item_ids=[]` detach คง audit; retry เฉพาะ retryable_error bounded; error ไม่ทับ ok record
+- **OCR→search_text**: kinds spec|variant_map|product เท่านั้น (spec≤400/vm≤200/product≤200 รวม≤800 chars) + dedupe + boilerplate filter (>K% listings ตัด) · banner→supporting-only เหมือนเดิม · full OCR ยัง attach ผ่าน `attach_image_texts`
+- **image_texts shared (ไม่ per-gen)** — additive evidence join by image_id; detach ทำผ่าน item_ids recompute ตอน import ก่อน publish
+- **execution env**: refresh รัน **ใน chatbot container** (`docker compose exec chatbot-shopee`) + เพิ่ม volume `exports_data:/app/exports` (1 บรรทัด compose — baked artifacts seed ครั้งแรก, durable ข้าม recreate) — แก้ช่องว่าง deploy model ที่ audit เจอ
+- **canonical jsonl copies**: publish copy `sellable_units.jsonl` ออก canonical path เพื่อ legacy consumers (typo_dict/diag tests) — copy หลัง pointer เท่านั้น
+- **09:00 Asia/Bangkok audit**: incremental OCR เฉลี่ยน้อย (recent daily chat usage 10-70 calls/model — headroom เยอะ) + embeddings local ไม่กิน quota → **09:00 feasible สำหรับ incremental**; แต่ OCR share `llm._API_KEYS` pool กับ chat → churn-day (รูปใหม่เยอะ) อาจแย่ง RPM — **แนะนำ dedicated `IMGTXT_GEMINI_API_KEY_*` pool (operator decision)** ไม่ใช่ blocker; รอบแรกที่ OCR backlog เต็มให้รัน manual off-hours ใน runbook; duration est: export นาที ×1 + units นาที ×1 + embed ~48k texts CPU ~1-2.5h + OCR นาที-ชม. → done ~ก่อนเที่ยง
+
+#### PART 4-6 — RED/offline tests + manifest (ย่อ — รายละเอียดใน roadmap section 4B)
+
+- **RED test file**: `docs/test/test_phase4b_refresh.py` (tmp dirs + FakeColl/fake-Mongo owners เดิม + leaf provider stub; ไม่โหลด torch/model จริง — `embed_texts`/`_extract_one` inject ได้)
+- **coverage**: B1 classify 6-state · B2 quota→deferred · B3 unchanged=0call/new=1/changed=1/retryable bounded · B4 staging coll+order · B5 verify-before-replace · B6 npz.gen≠pointer→fail-closed · B7 manifest fields no-secret · B8 publish fail→prev active · B9 kinds/caps/banner/dedupe · B10 missing OCR non-blocking · B11 concurrent 2nd run exits pre-provider · B12 stale-PID lock steal · B13 crash pre-pointer→old active / post-pointer→complete · B14 rollback pointer-only · B15 snapshot ตรึง gen เดิม mid-request · B16 prev survives cleanup, older dropped · B17 removed→detach · B18 error ไม่ทับ ok · B19 count mismatch blocks activation · B20 manifest no secrets · B21 partial OCR publish ok
+- **files to modify**: `refresh_data.sh` (rewrite order+lock+publish gate) · `build_image_texts.py`+`_nonsellable` (fingerprint/deferred/state-from-Mongo) · `import_image_texts.py` (state owner upsert+detach) · `build_sellable_units.py` (--gen-dir + OCR-aware search_text) · `build_embeddings.py` (--gen-dir + verify-before-replace + npz generation_id) · `import_sellable_units.py`→gen coll · **`publish_generation.py` NEW** (validate→pointer→manifest→cleanup = pointer owner เดียว) · `units.py` (`resolve_unit_snapshot`+thread snap+path-keyed npz cache) · `product_store.py` (`_load_vector_store` path-param) · `docker-compose.yml` (+exports_data volume) · `docs/DEPLOY.md`+`schema.md`+SRS+roadmap · test ใหม่
+- **deletion**: old publication path unreachable ใน diff เดียวกัน — `import_sellable_units` หยุดเขียน base coll, `_units_coll` resolve ผ่าน pointer เท่านั้น; `image_texts.jsonl` append-log เลิกเป็น state source (เหลือเป็น historic file); `_load_done` ถูกแทน state จาก collection
+
+#### Waythrough verdict (superseded โดย correction round ด้านล่าง)
+
+~~`PHASE_4B_DESIGN_READY_FOR_IMPLEMENTATION_APPROVAL`~~ — ถูก review ตีกลับ: 4 High + 3 Medium — design ยังไม่ atomic จริง 4 จุด
+
+#### 🔧 Phase 4B DESIGN CORRECTION round — 4 High + 3 Medium (2026-10-19) · design-only เสร็จ · รออนุญาต implement
+
+- **verify ก่อนแก้ (review findings ตรวจกับ source จริง — ถูกทั้ง 7 ข้อ)**:
+  - **H1** — `image_texts` shared+cache เป็น runtime source ตรง → รูปที่ OCR ระหว่าง build โผล่ให้ลูกค้าก่อน publish (mutable state ไม่ใช่ published evidence) — readers จริง 3 จุด: `units.attach_image_texts` (:421 `_units_coll().database["image_texts"]`), `product_store.search_cert_products` (:4108 `admin_db["image_texts"]`/`_admin_image_texts_coll`), `conversation_products` ผ่าน attach chain (:311, :1325) → แก้: **2 roles** — `image_texts` = OCR cache/state เท่านั้น (runtime ห้ามอ่าน) + `image_texts_g<gid>` = published evidence per-gen (immutable, pointer อ้างชื่อ, readers ทุกตัวกิน snapshot)
+  - **H2** — resolver ใน units.py ไม่ครอบ `product_store._load_vector_store` (product npz resolve แยกอิสระ) → แก้: `generation_pointer.py` module เดียว (owner เดียว, import แค่ knowledge_base lazy → ไม่มี cycle) — `EvidenceSnapshot` frozen dataclass ครอบ units_coll+image_texts_coll+units_npz+product_npz+jsonl+manifest; entry fns resolve ครั้งเดียว thread `snap=` ลงทุก loader; caches key ด้วย immutable path ไม่ใช่ mtime
+  - **H3** — "active+previous ปลอดภัย" เท็จ: publish ซ้ำวันเดียวกัน + request ค้าง → gen ที่ยังอ่านอยู่ถูกลบได้ → แก้: grace **24h fixed** (injected clock ใน test) — ห้ามลบ active / previous / อายุ<grace; failed staging แยก rule + ต้องพิสูจน์ absent จาก pointer ก่อน; cleanup best-effort หลัง activation เท่านั้น fail ไม่กระทบ pointer
+  - **H4** — "pointer write → manifest finalize" เท็จ (manifest pending = pointer อ้าง pending state) → แก้ order: build staging → validate → finalize files (tmp→os.replace) → **manifest finalized+verified ก่อน** → CAS pointer ครั้งเดียว → canonical copy (optional, tmp+replace) → cleanup (optional); หลัง CAS ไม่มี correctness write เหลือ
+  - **M1** — pointer `update_one` ธรรมดาแพ้ race (2 publishers เขียนทับกัน) → แก้: **CAS** `update_one({_id:"active", generation_id: expected}, …)` matched==1=won / ==0=lost→reread ครั้งเดียวไม่ retry; bootstrap = `upsert({_id:"active", generation_id:{$exists:False}}, full doc)` → doc มีอยู่→insert→DuplicateKeyError=conflict (fenced โดยไม่ต้อง transaction); rollback = CAS เดียวกัน + previous↔active swap, stale rollback matched==0 → ไม่ overwrite
+  - **M2** — custom `mkdir+PID+kill -0` protocol เปราะ → audit image จริง: **`python:3.11-slim` มี `/usr/bin/flock`** (verified `docker run` — util-linux เป็น required package) → ใช้ `exec 9>lock; flock -n 9 || exit` — auto-release ตอน exit/kill/container restart, cover ทั้ง run, ออกก่อน provider/Mongo write; fcntl stdlib เป็น contingency (ไม่ implement)
+  - **M3** — "09:00 safe จาก counter เดิม" เท็จ (batch OCR bypass quota manager — counter ไม่เคยนับ OCR) → แก้: hard contract `--max-calls` + `MAX_ATTEMPTS=3` + `--max-runtime-min` ใหม่ + limit→`deferred`; embeddings local แต่ duration = canary observation ไม่ใช่ claim; dedicated `IMGTXT_GEMINI_API_KEY_*` preferred, shared = explicit operator acceptance เท่านั้น; cron `0 9 * * *` **เปิดหลัง first-gen+timing evidence — operator gate ไม่ใช่ feasible-แล้ว**
+- **identity/bootstrap corrections เพิ่ม**: `generation_id` = `g<UTC %Y%m%d-%H%M%S>-<8hex>` (uuid4 suffix กันชน same-second) + allowlist regex `^g\d{8}-\d{6}-[0-9a-f]{8}$` validate pointer fields + derived-path check (`collection==sellable_units_{gid}`, npz path prefix `exports/gen/{gid}/`); named volume: copy-up เฉพาะ first create (image update ไม่ reseed — runbook ระบุ); pre-first-pointer: legacy listing path+canonical product npz ใช้ได้, **units/grouped path dark (fail-closed)** จนกว่า gen แรก — ไม่ claim semantic พร้อม
+- **corrected publication sequence**: flock → mint gid → export → discover/classify → bounded OCR → cache upsert → materialize `image_texts_g<gid>` → units (OCR-aware) → npz ×2 (verify ก่อน replace) → import `sellable_units_g<gid>` → validate counts/hashes/gen → **manifest finalize(tmp→replace)+verify hash** → **CAS pointer** → canonical copies (best-effort) → grace cleanup (best-effort) → lock auto-release
+- **manifest/files ที่แก้**: เพิ่ม `generation_pointer.py` (NEW resolver+dataclass owner เดียว), `import_image_texts.py` = cache-state owner เท่านั้น (เลิกเป็น runtime source), materialize `image_texts_g<gid>` ย้ายเข้า publish path; runtime: units/product_store/conversation_products/knowledge_base consumers ทุกตัวรับ `snap`; `attach_kb_specs` เปลี่ยน db handle เป็น `_kb._admin_db()` (kb_products ไม่ใช่ generated)
+- **ห้ามเหมือนเดิม**: implement/runtime edit/stage/commit/.env/Mongo จริง/provider/torch/cron/docker run/botworker/8010/deploy/flag/push — รอบนี้แก้ docs เท่านั้น (docker run เมื่อกี้เป็น read-only image inspection พิสูจน์ flock — ไม่แตะ deploy)
+
+#### Waythrough verdict (corrected)
+
+`PHASE_4B_DESIGN_CORRECTED_READY_FOR_IMPLEMENTATION_APPROVAL` — ทุก finding แก้ที่ contract (ไม่ใช่ guard patch); รอละเอียดอยู่ roadmap section 4B + รายงานรอบนี้ — **ยังไม่ implement**
+
+#### 🔨 Phase 4B IMPLEMENTATION — approved 2026-10-19 · กำลังทำ (RED→GREEN→delete→docs)
+
+- **กำลังจะทำ**: implement corrected contract ตาม roadmap 4B — RED tests ก่อน (`docs/test/test_phase4b_refresh.py`, offline: tmp dirs + FakeDb/GenColl reuse จาก replay suite + leaf stubs `_extract_one`/`embed_texts`/`_load_vector_store`-seams; ไม่มี torch/provider/Mongo จริง) → implement `generation_pointer.py` (owner เดียว: EvidenceSnapshot + validator + TTL resolver) → scripts (fingerprint classify, deferred cache, `image_texts_g<gid>` materialize, gen-dir builds, npz `generation_id` + verify-ก่อน-replace, `publish_generation.py` validate→manifest→CAS→rollback→cleanup) → runtime snap threading (units/product_store/conversation_products) → `refresh_data.sh` rewrite (flock native — verified `/usr/bin/flock` ใน python:3.11-slim) → compose `exports_data` volume → ลบ publication paths เก่าใน diff เดียวกัน → docs (SRS/schema/DEPLOY/roadmap)
+- **design ล็อกแล้ว** — ไม่ re-audit; รายละเอียดเต็มอยู่ roadmap section "Revised Phase 4B" + correction entry ด้านบน
+- **ห้าม**: .env/Mongo จริง/provider calls/torch/botworker/8010/docker exec/cron install/deploy/flag ON/push/PR; หยุดก่อน stage+commit
+
 ### ✅ PHASE 4A IMPLEMENTED (uncommitted, flag OFF) + 4B design-only — Source Union + Atomic Daily Refresh · (design 2026-10-19, impl round ล่าสุด) · รอ independent review
 
 - **baseline**: branch `feature-phase3-aswer-quality` @ `3b26920` · tree clean (แก้เฉพาะไฟล์นี้+roadmap) · staging empty · `git diff --check` clean · Phase 3 impl `3e8308f` · `grouped_retrieval_selection_enabled` = OFF contract (env `"0"`, fail-closed runtime_config, admin default false — live DB ไม่ได้อ่านเพราะห้าม Mongo)
@@ -4903,3 +4968,203 @@ config-failclosed 4/4 · boundary 20/20 · recovery-freshness 60/60 · error-pol
 - **blocker ยืน**: `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — รอ evidence-policy + answer-boundary review phases
 - **งานถัดไป**: Phase 4B design/review เท่านั้น (atomic daily evidence refresh — generation/pointer contract ใน roadmap) — ยังไม่ implement
 - **safety**: ไม่มี push/PR/deploy/flag-enable/Mongo/provider/botworker/port-8010/.env/cron/embedding-build — commit local เท่านั้น
+
+## ✅ Phase 4B — Atomic Daily Evidence Refresh IMPLEMENTATION (ผ่านแล้ว — uncommitted, flag OFF, รอ independent review)
+
+**สั่งทำ**: implement corrected Phase 4B contract (roadmap §"Revised Phase 4B" — 4 High + 3 Medium applied) — RED tests → minimal impl → deletion gate → focused offline verify → docs · ห้าม stage/commit/deploy/cron/flag
+
+### Root cause → Fix → Impact (per case)
+
+- **OCR shared `image_texts` = runtime source + mutable processing state ก้อนเดียว** → runtime readers (`attach_image_texts`, `search_cert_products`, `conversation_products` attach chain) อ่าน evidence ที่ยังไม่ publish + build เขียนปนกับ read → แยก 2 roles: `image_texts` = processing cache (fingerprint/status/attempts — scripts-only); `image_texts_<gid>` = published evidence ต่อ gen (immutable, materialize จาก cache, pointer อ้างชื่อ) → runtime ทุก reader กิน `snap.image_texts_collection` — **mutable cache readers = 0**
+- **generated sources resolve อิสระ → turn ผสม gen** (`units` coll live-mutated, npz ×2 แยก mtime, OCR shared coll) → `generation_pointer.py` ใหม่ = resolver owner เดียว: `EvidenceSnapshot` frozen dataclass ครอบ units coll + OCR coll + npz ×2 + jsonl + manifest + activated_at; `resolve_snapshot` TTL 5s คืน object เดิม; entry fns resolve ครั้งเดียว thread `snap=`; npz cache key = path + assert `generation_id` ใน npz == snap → mismatch fail closed → 1 request = 1 generation เสมอ
+- **active+previous retention ไม่พอสำหรับ in-flight** (same-day republish ลบ gen ที่ request ใช้อยู่) → grace **24h fixed**: cleanup ไม่แตะ active/previous/อายุ<grace; failed staging ต้อง absent จาก pointer ก่อนลบ; cleanup post-CAS best-effort (fail ไม่ย้อน activation); injected clock ใน test
+- **pointer write ก่อน manifest finalize** → publish order แก้: validate ทั้งหมด → manifest finalize (tmp→os.replace)+verify hash → **CAS ครั้งเดียว** → post-CAS เหลือแค่ canonical copies (tmp+replace)/cleanup — correctness writes หลัง CAS = 0
+- **pointer write ไม่ fence** → CAS contract: publish `update_one({_id:"active",generation_id:expected})` matched 1=won/0=lost+reread ครั้งเดียวไม่ retry; bootstrap `generation_id:{$exists:false}` upsert → DuplicateKeyError=conflict; rollback CAS เดียวกัน swap previous↔active (stale→matched 0)
+- **`mkdir .refresh.lock.d` → SIGKILL ทิ้ง lock ถาวร** (พิสูจน์สดใน session นี้ — killed export test ทิ้ง lock จริง) → native `flock -n 9` บน `exports/.refresh.lock` — fd ปิดเองตอน exit/kill/restart; run ซ้อน exit ก่อน Mongo/OCR/artifact work ทั้งหมด
+- **OCR batch bypass quota → นับ call ไม่ได้/ไม่มี cap** → `--max-calls` + `MAX_ATTEMPTS=3` + `--max-runtime-min`; fingerprint classify (unchanged→reuse 0 call; new/changed→1 call; retryable→bounded); quota/เวลาหมด→`deferred` (ไม่ burn 130s retry; publish ต่อได้)
+- **unit npz build ก่อน OCR → OCR ไม่เข้า search_text** → order ใหม่ OCR→materialize→units(OCR-aware: spec≤400+product text, banner ออก, boilerplate df≥2 dedupe)→npz×2(verify ก่อน replace)→import→publish
+- **`_load_done` jsonl-as-state + URL change ไม่ re-OCR** → ลบ `_load_done`; fingerprint = image_id+normalized_url → changed URL จับได้
+- **base `sellable_units` upsert ไม่มี delete + live-mutated** → import เขียน `sellable_units_<gid>` เท่านั้น (drop+insert หลัง validate); base coll เลิก publish (writer=0)
+
+### Structural gate (source-verified)
+
+- resolver owner = 1 (`generation_pointer`) · pointer mutation owner = 1 (`publish_generation`) · orchestrator = 1 (`refresh_data.sh`) · mutable `image_texts` runtime readers = 0 · base `sellable_units` writers = 0 · mtime generated-source resolvers = 0 (kb `_QA_VEC_PATH` mtime อยู่นอก contract) · new deps/flags = 0 · provider calls in request runtime = 0 · circular import = 0 (both orders OK) · grouped flag OFF เดิม · cron ไม่ได้ install
+- pointer validation: allowlist gid regex + derived coll/path (`sellable_units_{gid}`/`image_texts_{gid}`/`gen/{gid}/` + reject `..`/foreign) → malformed pointer fail closed = None
+- pre-first-pointer: canonical `exports/product_embeddings.npz` bootstrap path ใช้ได้ (legacy เดิม); units/grouped path dark — ไม่ claim semantic พร้อม
+
+### Verification (focused เท่านั้น)
+
+- RED: `test_phase4b_refresh.py` **39/39 fail** ครบทุก contract area (missing modules/symbols + script/deletion gates — clean collection)
+- GREEN: **39/39** · affected Phase 4A batch (hints/wiring/subject_set/source_union + refresh suite) **208 passed** · `test_legacy_turn_incident_replay` **101 passed/19 skipped/5 xfailed**
+- `py_compile` 13 changed py files OK · `bash -n refresh_data.sh` OK · `git diff --check` clean · import-order smoke pointer-first/consumers-first OK
+- Phase 4A test seams updated ตาม contract ใหม่: `_units_coll_cached`→`_units_coll(snap)`/`resolve_snapshot` patch (subject_set ×2, source_union, legacy_replay); `lambda:`→`lambda snap=None:` (hints ×3, wiring); `test_cert_standards` → `EvidenceSnapshot` + `image_texts_<gid>` fake; `test_qa_kb` live script → resolve_snapshot
+
+### สถานะ
+
+- `grouped_retrieval_selection_enabled` **OFF** เดิม · `USE_UNIT_INDEX` OFF เดิม
+- **operator gates ค้าง**: real Mongo privileges (`*_g*` create/drop, `sellable_units_meta` write), `exports_data` volume บน deploy host, `IMGTXT_GEMINI_API_KEY_*` pool decision, first manual refresh, `0 9 * * *` cron install (หลัง timing evidence เท่านั้น)
+- **safety**: ไม่มี stage/commit/push/PR/deploy/flag-enable/.env/real-Mongo/provider/PyTorch/botworker/port-8010/cron — working tree เท่านั้น
+
+## 🔧 Phase 4B — Narrow Review Correction กำลังทำ (2 High + 1 Medium + evidence fix)
+
+**สั่งทำ**: แก้ root cause 3 findings เท่านั้น — ห้าม redesign/เพิ่ม abstraction/แตะ phase อื่น
+
+**แผน (verify แล้วตาม receiving-code-review):**
+- **H1** `_gen_path_ok` substring `gen/{gid}/` in path → รับ foreign absolute/wrong filename/alt prefix → แก้เป็น **exact canonical mapping** (`exports/gen/<gid>/{unit_embeddings.npz|product_embeddings.npz|sellable_units.jsonl|manifest.json}` — shared constant เดียวใช้ทั้ง resolver+publisher); pointer เก็บ repo-relative เท่านั้น; snapshot convert → ROOT-absolute หลัง validate
+- **H2** `publish()` ไม่เช็ค `gen_dir == exports_root/gen/gid` + ไม่ validate gid ก่อน manifest/CAS + `_pointer_set_doc` เขียน host-absolute paths → validate gid regex ก่อนทุก write; resolve+require identity; pointer เขียน relative canonical เสมอ; reject → CAS/manifest/cleanup = 0
+- **M1** lock test รัน script ตัวจริง → ROOT=repo จริง เขียน lock/log ใน repo → copy script ไป `tmp_path/chatbot/shopeechat/scripts/` + fake flock/python ผ่าน PATH/REFRESH_PY; assert exit 0 + python ไม่ถูกเรียก + artifacts อยู่ใต้ tmp_path เท่านั้น + repo exports ไม่เปลี่ยน
+- **evidence fix**: manifest = 26 entries (23 modified + 3 untracked — รายงานเดิมเขียน "22 M" ผิด) + แก้ wording "no real Mongo" ตามที่กำหนด (RED run เดิมเข้า export connection path ก่อนถูก kill — ไม่มี proof ว่า connect/operation สำเร็จ)
+- test fixtures ที่ inject absolute npz paths (2 tests) ต้องเปลี่ยนเป็น canonical-relative + `gp.ROOT` monkeypatch → tmp_path (hermetic)
+
+## ✅ Phase 4B — Narrow Review Correction (ผ่านแล้ว — uncommitted, flag OFF)
+
+**สั่งทำ**: แก้ root cause 3 findings + evidence correction — ห้าม redesign/เพิ่ม abstraction
+
+### Root cause → Fix → Impact
+
+- **H1 — `_gen_path_ok` substring match** (`f"gen/{gid}/" in p`): รับ `/tmp/foreign/gen/<gid>/x`, `/Users/.../exports/gen/<gid>/`, `other/exports/...`, wrong filename, `//`, `.bak`, absolute-in-repo → **แก้**: `POINTER_PATH_FILES` mapping เดียว (`units_npz→unit_embeddings.npz`, `product_npz→product_embeddings.npz`, `units_jsonl→sellable_units.jsonl`, `manifest_path→manifest.json`) + `canonical_gen_relpath()`; `snapshot_from_pointer` เปรียบ `==` ตรง ๆ แล้วค่อย convert→`ROOT/`-absolute — pointer เก็บ repo-relative เท่านั้น → ผล: foreign/absolute/malformed paths reject ครบ (12 case); existing valid doc ไม่เปลี่ยนพฤติกรรม
+- **H2 — `publish()` ไม่ผูก gid/gen_dir/pointer-path**: artifacts validate ใน dir หนึ่ง แต่ `_pointer_set_doc` เขียน `{exports_root}/gen/{gid}` จาก param อื่น + ไม่เช็ค gid format ก่อน write + เขียน host-absolute paths → **แก้**: `GEN_ID_RE.fullmatch(gid)` + `gen_dir.resolve() == exports_root.resolve()/"gen"/gid` เป็น identity gate ก่อน validate → manifest → CAS (reject → CAS/manifest/cleanup = 0); `_pointer_set_doc` ใช้ `canonical_gen_relpath` ชุดเดียวกับ resolver → เขียน `exports/gen/<gid>/...` relative เสมอ → ผล: pointer portable ข้าม host/container; decouple validation↔pointer ไม่ได้อีก
+- **M1 — lock test ไม่ hermetic**: script derive ROOT จาก location ตัวเอง → test เดิมเขียน `exports/.refresh.lock`+log ใน repo จริง → **แก้**: copy script → `tmp_path/chatbot/shopeechat/scripts/` → ROOT=tmp_path; fake flock+python3 ผ่าน PATH/REFRESH_PY; assert exit 0, python ไม่ถูกเรียก, artifacts ใต้ `tmp_path/exports` เท่านั้น, repo exports before==after (name+mtime+size)
+- fixtures ที่ inject absolute npz paths (2 tests) → canonical-relative + `monkeypatch gp.ROOT=tmp_path` (hermetic)
+
+### Evidence correction (append — ไม่แก้ text เดิม)
+
+- working-tree manifest ที่ถูก = **26 entries: 23 modified + 3 untracked** (รายงานก่อนหน้าเขียน "22 M" — นับตก 1)
+- แก้ wording "no real Mongo activity" เป็น: *"The earlier RED run entered the old export connection path before termination; no successful connection or Mongo operation was proven. The corrected test is fully isolated and cannot enter that path."*
+
+### Verification
+
+- RED (ก่อน impl): 5 failed / 2 passed — ทุก failure ตรง defect (substring accept คืน snapshot เต็ม; publish สำเร็จทั้ง bad gid/mismatched dir; pointer เก็บ `/private/var/...` absolute)
+- GREEN: correction tests 7/7 → **full suite 45/45** → affected batch **315 passed / 19 skipped / 5 xfailed / 0 failed**
+- `py_compile` ×3 OK · `bash -n` OK · `git diff --check` clean · structural: pointer absolute paths=0 · canonical producer=1 · substring acceptance=0 · staged=0
+- **safety**: ไม่มี stage/commit/push/PR/deploy/cron/.env/provider/PyTorch/Docker/real-Mongo — test ใหม่ isolated สมบูรณ์ (ไม่เข้า connection path ใด ๆ)
+
+## 🔄 Phase 4B — Correction: Request-Wide Snapshot + OCR Accepted State (กำลังทำ)
+
+**สั่งทำ**: แก้ 1 High + 1 Medium จากรีวิว staged candidate — root-cause only, ห้าม redesign/guard-chain/phase ใหม่; unstage 25-file candidate ก่อนแก้ (staging ต้องว่างตอนจบ)
+
+### Findings
+
+- **H1 — snapshot per call ไม่ใช่ per request**: `fetch_products` resolve ทุกครั้ง (product_store:3090), `search_cert_products` resolve เอง (:4137), `_rebuild_card`/`materialize_subject_cards` resolve เอง (conv_products:308/:1327), unit/OCR fetchers มี `_resolve_snap` — pointer flip/TTL-expiry กลาง request → ผสม gen A+B ในคำตอบเดียว; TTL เป็นแค่ cache ไม่ใช่ correctness fence
+- **M1 — refresh fail ทับ accepted OCR**: error/deferred upsert เขียน `status` ทับ record ที่เคย ok → evidence หายจาก gen ถัดไปทั้งที่ text ใช้ได้ (ข้อมูลอ้างอิงจาก audit report — reviewer จัด Medium)
+
+### resolve_snapshot callsites (enumeration + classification)
+
+| site | classify |
+|---|---|
+| `app._chat_impl` | **request owner** — capture ครั้งเดียวก่อน generated-source touch แรก (post_intent_handoffs :1458) |
+| `product_store.fetch_products` :3090 | request-path caller — เปลี่ยนเป็น entry-semantics (`snap=_UNSET` → resolve เฉพาะ standalone) |
+| `product_store.search_cert_products` :4137 | internal/entry — sentinel semantics; handoffs ส่ง captured |
+| `product_store._load_vector_store` :69 | internal consumer — sentinel |
+| `product_store._admin_image_texts_coll` :4003 | internal consumer — sentinel |
+| `units._resolve_snap` :41 | resolver helper — sentinel-aware |
+| `units._units_coll` :52 / `fetch_units` :133 / `attach_image_texts` :438 | internal consumers — sentinel |
+| `units.fetch_unit_cards` :512 / `fetch_unit_evidence` :559 | entry — resolve เมื่อ omitted เท่านั้น |
+| `conv_products._rebuild_card` :308 / `materialize_subject_cards` :1327 | entry — sentinel semantics; `_materialize_card`/`get_active_product`-family รับ snap param |
+| `retrieval_executor` fetcher seam | `_run_attempt` ส่ง `snap=` → executor + `run_grouped_retrieval_shadow`/`run_grouped_selection` รับ `snap` param |
+
+### Plan
+
+- sentinel เดียว `generation_pointer.SNAP_UNSET` — แยก "argument omitted" (resolve standalone) vs "captured value" (ใช้ตามที่ส่งมา แม้ None) — explicit-param only, ไม่มี ContextVar/global state
+- `_chat_impl` capture `_snap` ครั้งเดียว → thread: handoffs ctx `"snap"`, materialize `snap=`, lookup_kb `snap=`, grouped shadow/selection `snap=`, fetch_products ×N `snap=`
+- `post_intent_handoffs`/`lookup_kb`/`get_active_product`/`get_suggestion_latest`/`get_latest_suggestion_batch`/`get_anchor_and_suggestions`/`_materialize_card`/`_rebuild_card`/`_legacy_evidence_fetcher` รับ `snap` param
+- OCR: accepted fields (status/fingerprint/text/kind/truncated) authoritative; changed-fp + ok-doc fail/deferred → pending_* fields (pending_fingerprint/status/error_class/attempts_total/last_generation_id); success → promote accepted=B + clear pending; publish เฉพาะ accepted fp == discovered fp (guard ใน unchanged branch); pending attempts bounded by MAX_ATTEMPTS
+
+## Phase 4B correction round 2 (2026-10-21) — request-wide snapshot + OCR accepted-state
+
+**Classification correction:** รอบ pre-commit ก่อนหน้าบันทึก 2 observations เป็น "informational" — ผิด: H1 (per-call resolution) + M1 (failed refresh overwrites accepted OCR) เป็น **correctness findings จริง** แก้ที่ root cause ในรอบนี้
+
+### H1 — snapshot per function call ไม่ใช่ per request (High)
+- **อาการ:** ทุก `fetch_products`/`search_cert_products`/internal `_resolve_snap` resolve pointer เอง → pointer flip หรือ TTL expiry กลาง request → gen A+B ปนในคำตอบเดียว
+- **RED (proven):** cert path → **3 resolves/request**, `_units_coll` เห็น gen A แต่ `_admin_image_texts_coll` เห็น gen B ×2 — units กับ OCR คนละ generation; captured-None path resolve 2× (None กลายเป็น B ได้)
+- **Root cause:** `_resolve_snap(snap)` ใช้ `None` หมายถึงทั้ง "ไม่ได้ส่ง" และ "capture แล้ว" → captured-None แยกจาก omitted ไม่ได้ + ไม่มี request owner
+- **Fix:** `SNAP_UNSET` sentinel ใน `generation_pointer.py` (owner เดียว) — `snap omitted → resolve เองครั้งเดียว; ค่าที่ส่ง (รวม None) → คืนตามนั้น`; **request owner = `_chat_impl`** resolve 1× post-lock pre-dispatch → `_snap` ไหลผ่าน explicit params: `fetch_products`×8, `lookup_kb`, `qa_context`, `materialize_subject_cards`, `get_active_product`, `fuzzy_match_products`, `_device_spec_lookup`, `reanswer`, `run_grouped_selection`/`_shadow`, `chat_v2`/`chatbotv3` dispatch, handoffs/warranty ผ่าน ctx dict (`ctx["snap"]`); executor resolve 1× ที่ entry เมื่อ standalone
+- **GREEN:** `TestRequestSnapshotOwnership` 5/5 — calls==1/request, ทุก consumer เห็น object A เดียวกัน, captured-None fail-closed ตลอด flip, 2 requests อาจได้ gen ต่างกัน, standalone resolve 1× ที่ boundary ตัวเอง
+- **Cross-case:** products/brands/types/subtypes ทุกตัวผ่าน snap เดียวกัน (ไม่มี hardcode); standalone callers (warmup, tests, scripts, shadowbot) resolve ที่ boundary ตัวเองเท่านั้น; `ContextVar` ไม่จำเป็น — explicit params พอ; ไม่มี global mutable state, ไม่มี module/owner ที่ 2
+
+### M1 — failed refresh ทับ accepted OCR state (Medium)
+- **อาการ:** accepted `ok`+fingerprint A + discovered B + fail/deferred → `_cache_upsert` เขียน `status=error|deferred` + `fingerprint=B` ทับ → A หาย + doc ผสม (fp=B, text=A)
+- **Fix:** `build_image_texts.py` — changed+accepted fail/deferred เขียน `pending_fingerprint/pending_status/pending_error/pending_error_class/pending_attempts_total/pending_last_generation_id` บน doc เดียวกัน (accepted fields ไม่แตะ); success → promote pending→accepted + `$unset` pending_*; unchanged-publish gate เพิ่ม `doc.fingerprint == fp` (accepted fp ต้องตรง discovered ถึง publish); `pending_attempts_total ≥ MAX_ATTEMPTS` → classify "unchanged" (bounded retry, B ไม่ publish); new image ไม่มี accepted → error/deferred ปกติ; `_cache_upsert` รองรับ `unset=` (write owner เดิมตัวเดียว)
+- **RED (proven):** 4/6 fail — accepted ถูกทับ, pending ไม่มี, retry ไม่ bounded; 2 pass (new-image error + removed semantics pins)
+- **GREEN:** `TestOcrAcceptedPending` 6/6
+- **Cross-case:** image_id/URL/kind ทุกตัวผ่าน logic เดียวกัน; quota stop/run-level stop/budget คงเดิม; ไม่มี collection/module/retry loop เพิ่ม
+
+**Verification:** correction tests 11/11 → `test_phase4b_refresh.py` 61/61 → affected batch 331 passed / 19 skipped / 5 xfailed / 0 failed → `py_compile` 17 files OK → `git diff --check` clean → staging empty (26→38 working-tree entries — ทั้งหมด Phase 4B scope)
+
+## 🔄 Phase 4B — Correction round 3: Generation-Aware Caches + Pending Identity (กำลังทำ)
+
+**สั่งทำ**: แก้ 1 High + 2 Medium — root-cause only, ห้าม redesign/new module/invalidation manager/stage/commit
+
+### Findings
+
+- **H1 — `_LIVE_CARD_CACHE` gen-blind**: key = `(item_id, model_name)` เท่านั้น (conv_products:326-333, :1344-1363) — request A cache card จาก gen A → request B (snapB ถูกต้อง) ได้ card A คืน ≤30s → ผสม gen ใน request ใหม่ — ละเมิด snapshot contract
+- **M1 — `_brand_cache` gen-blind**: `_known_brands` อ่าน `sellable_units_<gid>` ตาม snap แต่ cache เป็น global ตัวเดียว TTL 5 นาที (kb:824-868) — B ได้ generated brands ของ A
+- **M2 — pending retry budget ไม่ผูก fingerprint**: `_classify_images` เช็ก `pending_attempts_total >= MAX` โดยไม่ดู `pending_fingerprint == discovered` → B exhausted → C ถูกบล็อกตลอด; pending writes สะสม count/error ของ B ให้ C
+
+### Plan
+
+- H1: cache key รวม generation identity — `(item_id, model_name, gid_or_None-marker)`; resolve SNAP_UNSET ที่ entry ก่อนสร้าง key; ทั้ง 2 sites (`_materialize_card`, `materialize_subject_cards`) — TTL 30s คงเดิม, ไม่ clear ทั้ง cache
+- M1: `_brand_cache` → entry เดียว `{gen, ts, brands}` — hit เฉพาะ `gen == captured gen`; read fail บน B ไม่ fallback ไป A (cache baseline ภายใต้ key ของ B)
+- M2: exhausted check เพิ่ม `pending_fingerprint == fp`; pending writes reset attempts=0 + เคลียร์ error/error_class เมื่อ fingerprint เปลี่ยน B→C; deferral ก่อน call ไม่นับ attempt
+- ทั้งหมดใน write owner เดิม — ไม่มี helper/module/collection/flag เพิ่ม
+
+## Phase 4B correction round 3 (2026-10-21) — generation-keyed caches + pending fingerprint scope
+
+### H1 — `_LIVE_CARD_CACHE` gen-blind (High)
+- **อาการ:** key = `(item_id, model_name)` — card ที่สร้างจาก units/OCR ของ gen A ถูก serve ให้ request ที่ capture gen B (≤30s) ทั้งที่ consumer อื่นใช้ B
+- **RED (proven):** `CARD-A` ถูกคืนให้ request snapB ทั้ง `_materialize_card` และ `materialize_subject_cards`; captured-None ได้ card A
+- **Fix:** key รวม `snap.generation_id` (captured None = identity ของตัวเอง); resolve SNAP_UNSET ที่ entry ครั้งเดียวก่อนสร้าง key — 2 sites เดิม, TTL 30s คงเดิม, ไม่ clear cache ทั้งก้อน
+
+### M1 — `_brand_cache` gen-blind (Medium)
+- **อาการ:** global entry เดียว TTL 5 นาที — request B ได้ brand set ที่ gen A สร้าง
+- **RED (proven):** `_known_brands(snapB)` คืน A's set (ไม่มี `brand-b-gen`); captured-None ได้ generated brands ทั้งที่ไม่มี snapshot
+- **Fix:** `_brand_cache` = `{gen, ts, brands}` entry เดียว — hit เฉพาะ gen ตรง; read fail บน gen X → baseline ของ X (ไม่เอา cache gen อื่น); `_brand_ts` ถูกพับเข้า entry (ตัวแปรลดลง 1)
+
+### M2 — pending retry budget ไม่ผูก fingerprint (Medium)
+- **อาการ:** `_classify_images` เช็ก `pending_attempts_total >= MAX` โดยไม่ดูว่า pending_fingerprint == discovered → B exhausted → C ถูกบล็อกตลอด + writes สะสม count/error ของ B ให้ C
+- **RED (proven):** C ถูก block (calls=0 ทั้งที่ fp ใหม่), deferred-C สะสม attempts=MAX ของ B
+- **Fix:** exhausted check เพิ่ม `pending_fingerprint == fp`; `same_pending_fp`/`prev_pending_attempts` reset=0 เมื่อ fp เปลี่ยน — ทั้ง 3 write sites; deferral ก่อน provider call เขียน attempts=0 + เคลียร์ error ของ fp เก่า
+
+**Verification:** focused 10/10 → `test_phase4b_refresh.py` 71/71 → affected batch **345 passed / 19 skipped / 5 xfailed / 0 failed** → `py_compile` ×4 OK → `bash -n` OK → `git diff --check` clean → **staging empty**, working tree 38 entries (manifest เดิม — ไฟล์ใหม่รอบนี้ 0)
+
+## 🔄 Phase 4B — Correction round 4: KB-brand independence + deferred error_class (กำลังทำ)
+
+**สั่งทำ**: แก้ 2 Medium — root-cause only, ไม่แตะ findings ที่ปิดแล้ว
+
+### Findings
+
+- **M1 — kb_products brands หายเมื่อ units read ล้ม**: `_known_brands` ใส่ kb_products.distinct + units.distinct ใน try เดียว → `_units_coll(snap)` raise (รวม captured-None) → kb brands ที่อ่านได้แล้วถูกทิ้ง → เหลือแค่ static
+- **M2 — provider-deferred ไม่เขียน `pending_error_class`**: deferred-after-call write (:335-343) ตั้ง pending_fingerprint=C + error=C แต่ไม่เขียน error_class → class ของ B เหลือบน doc ที่ fp=C (inconsistent)
+
+### Plan
+
+- `_known_brands`: แยก failure boundary — kb_products read ใน try ตัวเอง, units read ใน try ตัวเอง; **snap=None → ข้าม units read ทั้งหมด (0 generated reads)**; cache write ภายใต้ gen key เดิม; ล้มทั้งคู่ + same-gen stale → reuse stale ต่อ (TTL เดิม)
+- deferred write: เพิ่ม `pending_error_class=_error_class(entry.get("error") or "")` — บรรทัดเดียวใน write owner เดิม
+
+## Phase 4B correction round 4 (2026-10-21) — KB-brand independence + deferred error_class
+
+### M1 — kb_products brands หายเมื่อ units ล้ม (Medium)
+- **อาการ:** `_known_brands` รวม `kb_products.distinct` + `_units_coll(snap).distinct` ใน try เดียว → units raise (รวม captured-None) → kb brands ที่อ่านสำเร็จถูกทิ้ง เหลือแค่ static
+- **RED (proven):** snap=None → `kb-only-brand` ไม่อยู่ใน result; snapB + units raise → kb brand หาย + มีโอกาส reuse cache A
+- **Fix:** 2 independent failure boundaries + `snap is not None` gate → captured-None อ่าน units **0 ครั้ง**; ล้มทั้งคู่ + same-gen stale → reuse stale ต่อ; partial → cache union ของ gen นั้น
+
+### M2 — provider-deferred ไม่เขียน `pending_error_class` (Medium)
+- **อาการ:** deferred-after-call write ตั้ง fingerprint=C + error=C แต่ไม่ตั้ง error_class → class ของ B (`rate_limit`) เหลือบน doc fp=C → state ผิดเพี้ยน
+- **RED (proven):** `pending_error_class == 'rate_limit'` (B) แทนที่จะเป็น `'quota'` (C)
+- **Fix:** เพิ่ม `pending_error_class=_error_class(entry.get("error") or "")` — 1 บรรทัดใน write owner เดิม (deferred pre-call path ยังเขียน None สำหรับ fp ใหม่ตาม contract เดิม)
+
+**Verification:** focused 10/10 (2 pin ยังเขียว) → `test_phase4b_refresh.py` 74/74 → affected batch **348 passed / 19 skipped / 5 xfailed / 0 failed** → `py_compile` ×3 OK → `bash -n` OK → `git diff --check` clean → staging empty, worktree 38 entries เดิม
+
+## ✅ Phase 4B closeout — committed (2026-10-21)
+
+**Commit 1:** `6d47ad3` refactor: publish retrieval evidence atomically per generation — **37 files** (runtime 16, scripts 8, tests 8, docs/config 5)
+
+**Root contracts:** immutable `exports/gen/<gid>/` artifacts (units/OCR coll + npz×2 + jsonl + manifest) → pointer `sellable_units_meta.active` flip เดียว (CAS-fenced, previous เก็บไว้ rollback); `_chat_impl` = request-snapshot owner เดียว (resolve 1× → `SNAP_UNSET`-threaded ทุก consumer — captured None = fail-closed, ห้าม resolve ซ้ำ); caches gen-keyed (`_LIVE_CARD_CACHE`, `_brand_cache`); OCR accepted fields authoritative + `pending_*` ผูก `pending_fingerprint` (promote+`$unset`, bounded, publish เฉพาะ fp ตรง); `_brand_cache` 2-source independent + captured-None อ่าน units 0 ครั้ง
+
+**Correction rounds:** R1 = 4 High+3 Medium (pre-commit audit) · R2 = request-wide snapshot + OCR accepted-state · R3 = generation-keyed caches + pending fp-scope · R4 = KB-brand independence + deferred error_class
+
+**Frozen verification:** affected batch **348 passed / 19 skipped / 5 xfailed / 0 failed** · `py_compile` 25 ไฟล์ OK · `bash -n` OK · `git diff [--cached] --check` clean · pointer write owner=1, cache upsert owner=1, mutable-image_texts runtime readers=0
+
+**Safety/state:** grouped retrieval selection **OFF** · product DB read-only · ไม่มี provider/Mongo/Docker/Botworker/cron execution ในรอบนี้
+
+**Operator gates ที่เหลือ:** real Mongo privileges (`*_g*` create/drop + `sellable_units_meta` write) · `exports_data` volume บน deploy host · `IMGTXT_GEMINI_API_KEY_*` pool decision · first manual bootstrap refresh · timing evidence ก่อนเปิด cron `0 9 * * *`
