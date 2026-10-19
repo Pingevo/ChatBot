@@ -378,14 +378,19 @@ class TurnDecision:
 }
 ```
 
-- [ ] Inventory raw product/subtype/status/stock/variant values from real fixtures.
-- [ ] RED-test `cable`, `cable_only`, and `c-to-c` normalization; unknown values remain traced unknown.
-- [ ] Evolve `make_evidence_card()` as the only canonical source adapter.
-- [ ] Separate requested-option status from whole-item sellability. Missing color is not sold out; one dead variant is not all-dead.
-- [ ] Enforce publish semantics: UNLIST-only is hidden; visible historical listing may answer spec/history; visible active listing is required to sell.
-- [ ] Remove raw-field checks from executor and selector.
+- [x] Inventory raw product/subtype/status/stock/variant values from real fixtures. (`exports/sellable_units.jsonl` + docs/test fixtures — recorded in active waythrough log)
+- [x] RED-test `cable`, `cable_only`, and `c-to-c` normalization; unknown values remain traced unknown. (`docs/test/test_canonical_evidence_card.py` — **55 tests after 2 correction rounds**, honest RED → GREEN both rounds)
+- [x] Evolve `make_evidence_card()` as the only canonical source adapter. (`requested=` param; `_canonicalize` internals delegate to `resolve_availability`; canonical writes at one site; executor canonicalizes before `_bucket`)
+- [x] Separate requested-option status from whole-item sellability. Missing color is not sold out; one dead variant is not all-dead. (`requested_variant_state` — **structured resolver**: term→exact/unique-longest-contained→one option per dim→SKU row must satisfy ALL dims; never union overlapping options)
+- [x] Enforce publish semantics: UNLIST-only is hidden; visible historical listing may answer spec/history; visible active listing is required to sell. (`customer_visibility` hidden→rejected (reason+count only — **no identity/name/item_id/hidden_mentions path**); `historical_only`→unavailable-answerable; `sellable` gate)
+- [x] Remove raw-field checks from executor and selector. (executor/pool/selection/guards/dedupe read canonical fields or resolver — zero raw `status`/`sold_out`/`_available_for_sale` decision branches)
+- [x] **Round-2 corrections:** unit cards preserve joined-listing `tier_variation`+model `tier_index` (structured, not prose); overlapping option names resolve most-specific only; flag-ON answer boundary **replaces** products with `selected_cards` (no legacy merge — `merge_selected_products` deleted); flag-OFF unchanged rollout; `PUBLISH_STATE`/`PUBLISH_RANK` owned by `product_store` beside `resolve_availability` (zero `product_store`→`retrieval_policy` imports)
 
-**Exit gate:** issue #29 stock case, live multi-subtype coverage, and WPB100L policy pass without selector-specific raw strings.
+**Exit gate:** issue #29 stock case, live multi-subtype coverage, and WPB100L policy pass without selector-specific raw strings. (offline replay 101 pass + canonical 55 pass + focused suites 521 pass — **live re-verify deferred; flag remains OFF in production rollout — grouped selection not yet active**)
+
+> **Rollout note (Round 2+3):** when `grouped_retrieval_selection_enabled()` is OFF, `run_grouped_selection` never runs and legacy product context is unchanged — Phase 3 canonical path is inactive in production until the flag is enabled. When ON, `selected_cards` **replace** the legacy product list at both `llm.answer` callsites (KB ~2278, main ~4456); empty/hidden-only selection yields empty product context; **pipeline exception/None → fail closed `products=[]` — legacy products never re-enter** (corrected from the earlier "fallback retained for errors" claim).
+>
+> **⚠️ Activation blocker:** `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — the executor today unions only `units` + `legacy` sources. Enabling the flag makes canonical selection own the *entire* product context, but KB product identity, compatibility candidates, order/history anchors, image/OCR evidence, and other required sources are Phase 4 work. The flag must remain OFF in production until Phase 4 source union lands; Phase 3 review proceeds offline only.
 
 ## Revised Phase 4: Complete The Evidence-Preserving Source Union
 

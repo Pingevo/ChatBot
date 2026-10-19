@@ -292,6 +292,12 @@ def to_unit_card(unit: dict, route=None) -> dict:
     img_ids = ([_vid] if _vid else
                (lst.get("image") or {}).get("image_id_list") or
                unit.get("image_ids") or [])
+    # ⚡ tier evidence จาก joined listing (shape เดียวกับ to_product_card) —
+    #   requested-option resolver ต้องการ structured vocab + tier_index ของ
+    #   model ตัวเอง (ไม่ parse prose); ไม่มี _listing/model → ว่าง (honest)
+    _mid = unit.get("model_id")
+    _m = next((m for m in (lst.get("model") or [])
+               if m.get("model_id") == _mid), None)
     return {
         # shape เดียวกับ product card
         "item_id": unit.get("item_id"),
@@ -328,10 +334,15 @@ def to_unit_card(unit: dict, route=None) -> dict:
             v for v in (unit.get("desc_sections") or {}).values() if v)[:4000],
         "variants": [{
             "name": unit.get("model_name"), "model_id": unit.get("model_id"),
+            "tier_index": (_m or {}).get("tier_index"),
             "stock": stock, "price": unit.get("price"),
             "model_status": model_status,
         }],
-        "tier_variation": [],
+        "tier_variation": [
+            {"name": tv.get("name"),
+             "options": [o.get("option") for o in tv.get("option_list") or []]}
+            for tv in (lst.get("tier_variation") or [])
+        ],
         # unit-level extras (shape เดิม + ข้อมูลรุ่นย่อย)
         "unit_id": unit.get("unit_id"),
         "model_id": unit.get("model_id"),

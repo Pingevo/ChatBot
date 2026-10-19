@@ -52,8 +52,6 @@ class SelectionResult:
     by_request: tuple[tuple[str, tuple[SelectedCandidate, ...]], ...]
     unavailable_evidence: tuple[dict, ...]   # stripped summaries (มีแต่หมด/เลิก)
     rejected_summary: tuple[dict, ...]       # counts by reason — debug เท่านั้น
-    # รุ่นที่ถามถึงแต่ UNLIST-only (ยังไม่ publish) — name-level note เท่านั้น
-    hidden_mentions: tuple[dict, ...] = ()
     trace: tuple[str, ...] = ()
 
 
@@ -147,21 +145,23 @@ def select_for_llm_context(
         picked = list(ranked[:per_request_limit])
         if len(req.subtypes) > 1:
             # coverage: subtype ที่ถามและมี candidate ต้องได้ ≥1 ที่ —
-            # subtype เดียวห้ามกิน quota ทั้ง request
+            # subtype เดียวห้ามกิน quota ทั้ง request (canonical_roles —
+            # cable_only/set นับเป็น cable/adapter coverage ตามจริง)
             present: set[str] = set()
             protected: set[int] = set()
+            req_subs = set(req.subtypes)
             for i, s in enumerate(picked):
-                sub = (s.card.get("charger_subtype")
-                       or s.card.get("cable_subtype"))
-                if sub in req.subtypes and sub not in present:
-                    present.add(sub)
-                    protected.add(i)
+                covered = set(s.card.get("canonical_roles") or ()) & req_subs
+                for sub in covered:
+                    if sub not in present:
+                        present.add(sub)
+                        protected.add(i)
             for sub in req.subtypes:
                 if sub in present:
                     continue
                 alt = next((s for s in ranked
-                            if (s.card.get("charger_subtype")
-                                or s.card.get("cable_subtype")) == sub), None)
+                            if sub in set(s.card.get("canonical_roles")
+                                          or ())), None)
                 if alt is None:
                     continue
                 if len(picked) < per_request_limit:
@@ -223,23 +223,8 @@ def select_for_llm_context(
                 "request_id": rid, "name": u.get("name"),
                 "item_id": c.item_id, "reason": c.reason,
                 "unavailable": True})
-    # hidden mentions — รุ่นที่ถามถึงแต่ UNLIST-only (ไม่ publish ไม่ใช้เป็น
-    # evidence) — ส่งแค่ชื่อให้ตอบ 'ยังไม่เปิดขาย' ได้
-    asked = {m.upper() for r in requests for m in r.model_codes}
-    hidden_out: list[dict] = []
-    seen_h: set[str] = set()
-    if asked:
-        for c in pool.rejected:
-            if c.reason != "customer_hidden" or not _code_match(c.card, asked):
-                continue
-            key = c.item_id or c.identity
-            if key in seen_h:
-                continue
-            seen_h.add(key)
-            hidden_out.append({"name": (c.card.get("name") or "").strip(),
-                               "item_id": c.item_id, "reason": "not_published"})
-    hidden_out = hidden_out[:5]
-    # rejected — summary counts เท่านั้น ไม่ส่ง card เข้า LLM
+    # hidden (UNLIST-only) → rejected 'customer_hidden' เท่านั้น — identity
+    # ห้ามรั่วเข้า customer context; เหลือแค่ aggregate count ใน summary
     rej_counts: dict[tuple[str, str], int] = {}
     for c in pool.rejected:
         for rid in c.request_ids:
@@ -250,5 +235,4 @@ def select_for_llm_context(
     return SelectionResult(
         selected=tuple(selected), by_request=tuple(by_req),
         unavailable_evidence=tuple(unav_out),
-        rejected_summary=tuple(rej_out),
-        hidden_mentions=tuple(hidden_out), trace=tuple(trace))
+        rejected_summary=tuple(rej_out), trace=tuple(trace))

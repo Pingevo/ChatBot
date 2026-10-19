@@ -149,10 +149,13 @@ def _pos_grounded(text: str, pos_rx) -> bool:
 
 
 def _card_available(p: dict) -> bool:
-    """card ขายได้จริง — ใช้ _available_for_sale ถ้ามี, fallback status+sold_out."""
+    """card ขายได้จริง — canonical sellable → resolver stamp → resolver owner."""
+    if "sellable" in p:
+        return bool(p.get("sellable"))
     if "_available_for_sale" in p:
         return bool(p.get("_available_for_sale"))
-    return p.get("status") == "NORMAL" and not p.get("sold_out")
+    from .product_store import resolve_availability
+    return bool(resolve_availability(p or {})["available_for_sale"])
 
 
 def _grounding_text(resp) -> str:

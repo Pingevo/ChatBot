@@ -515,6 +515,7 @@ class RetrievalSlot:
     compat_mode: str
     confidence: float
     fact_sources: tuple[tuple[str, str], ...] = ()
+    variant_terms: tuple[str, ...] = ()   # requested option(s) ของ slot นี้
 
 
 def _kw_positions(low: str, kw: str) -> list[int]:
@@ -780,6 +781,7 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
             confidence=0.6 if _ambiguous_device_target(
                 low, target) else (1.0 if effective else 0.4),
             fact_sources=profile.fact_sources,
+            variant_terms=profile.variant_terms,
         ),)
 
     # multi-slot: window ของ mention = [pos, next different-type pos)
@@ -830,6 +832,9 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
             sources.append(("model_codes", "span"))
         if target:
             sources.append(("target_device", scope))
+        vterms = _variant_terms(span)
+        if vterms:
+            sources.append(("variant_terms", "span"))
         slots.append(RetrievalSlot(
             slot_id=f"slot-{t}",
             source_span=span,
@@ -845,6 +850,7 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
             compat_mode=_compat_mode(frozenset({t}), primary_sub, target),
             confidence=0.8,
             fact_sources=tuple(sources),
+            variant_terms=vterms,
         ))
     return tuple(slots)
 

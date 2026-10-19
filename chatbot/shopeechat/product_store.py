@@ -701,6 +701,17 @@ def resolve_availability(card_or_doc: dict, *, model_doc: dict | None = None) ->
             "total_stock": stock, "customer_visible": vis}
 
 
+# catalog_status (resolve_availability owner เดียว) → canonical publish_state
+# + precedence — consumer ทุกตัว (adapter/dedupe) ต้องใช้ map นี้ที่เดียว
+PUBLISH_STATE = {
+    "active": "published", "active_unknown_stock": "published",
+    "out_of_stock": "published",
+    "unlisted": "unpublished", "discontinued": "deleted",
+}
+# publication precedence — listing ปัจจุบันชนะ historical/hidden เสมอ
+PUBLISH_RANK = {"published": 2, "deleted": 1, "unpublished": 0, "unknown": 0}
+
+
 def _doc_sellable(doc: dict) -> bool:
     """doc ขายได้จริงตอนนี้ไหม — delegate ไป resolve_availability (owner เดียว).
 
@@ -4219,18 +4230,20 @@ def _dedupe_base_name(name: str) -> str:
 
 
 def _dedupe_sell_score(p: dict) -> tuple:
-    """คะแนนสำหรับเลือก listing ที่ดีที่สุดสำหรับขาย.
+    """คะแนนสำหรับเลือก listing ที่ดีที่สุดสำหรับขาย — availability semantics
+    ผ่าน resolve_availability (owner เดียว ไม่ re-derive raw status เอง).
 
     เกณฑ์ (เรียงจากสำคัญที่สุดไปน้อยที่สุด):
-    1. status=NORMAL (True > False)
-    2. ไม่ sold_out (True > False)
+    1. publication state — current published > deleted > unpublished/unknown
+       (listing ปัจจุบันต้องชนะ stale duplicate เสมอ)
+    2. ขายได้จริง (NORMAL + stock>0)
     3. stock เยอะกว่า
     4. มีโปร (True > False)
     5. ราคาต่ำสุดถูกกว่า
     """
-    status_normal = p.get("status") == "NORMAL"
-    not_sold_out = not p.get("sold_out", False)
-    stock = p.get("total_stock") or 0
+    av = resolve_availability(p)
+    pub = PUBLISH_RANK.get(PUBLISH_STATE.get(av["catalog_status"]), 0)
+    stock = av["total_stock"] or 0
     has_promo = bool(p.get("price", {}).get("min") and p.get("price", {}).get("max")
                      and p.get("price", {}).get("min") != p.get("price", {}).get("max"))
     # ราคาต่ำสุด — ถูกกว่า = ดีกว่า (ใช้ค่าติดลบเพื่อให้ถูกกว่าได้ score สูงกว่า)
@@ -4238,7 +4251,7 @@ def _dedupe_sell_score(p: dict) -> tuple:
     min_price = price_info.get("min") or 0
     # ถ้าไม่มีราคา ให้ score ราคาเป็น 0 (ไม่ดีไม่แย่)
     price_score = -min_price if min_price else 0
-    return (status_normal, not_sold_out, stock, has_promo, price_score)
+    return (pub, av["available_for_sale"], stock, has_promo, price_score)
 
 
 def _dedupe_products(products: list[dict], *, log_label: str = "DEDUP") -> list[dict]:

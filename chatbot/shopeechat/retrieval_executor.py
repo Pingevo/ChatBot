@@ -73,7 +73,7 @@ def _request_profile(req: RetrievalRequest, query: str, shop: str | None,
         product_types=frozenset(ptypes),
         subtype=subtype,
         model_codes=req.model_codes,
-        variant_terms=(),
+        variant_terms=req.variant_terms,
         target_device=req.target_device,
         availability_mode=req.availability_mode,
         compat_mode=req.compat_mode,
@@ -94,41 +94,45 @@ def _legacy_evidence_fetcher(message: str, *, retrieval_profile, shop, limit):
 
 
 def _bucket(card: dict, req: RetrievalRequest) -> tuple[str, str]:
-    """card → (bucket, reason) — eligible / unavailable / rejected"""
-    # UNLIST/unknown = customer_hidden (ยังไม่ publish — ห้ามใช้เป็น evidence
-    # ตอบลูกค้าเลย ทั้ง spec/compare/link) — live status ชนะ unit snapshot เสมอ
-    if card.get("customer_visible") is False:
+    """canonical card → (bucket, reason) — eligible / unavailable / rejected.
+
+    input ต้องผ่าน make_evidence_card() แล้ว — อ่าน canonical fields เท่านั้น
+    (customer_visibility/canonical_type/canonical_roles/sellable ฯลฯ)
+    """
+    # hidden (ยังไม่ publish — UNLIST/unknown) ห้ามใช้เป็น evidence ตอบลูกค้า
+    if card.get("customer_visibility") == "hidden":
         return "rejected", "customer_hidden"
     from .units import _SUBTYPE_TO_TYPES
     eff_types = set(req.product_types)
     for s in req.subtypes:
         eff_types |= _SUBTYPE_TO_TYPES.get(s, set())
-    ptype = card.get("product_type")
-    if not ptype and eff_types:
-        # legacy card ไม่มี product_type field → detect จากชื่อ (generic taxonomy)
-        from .product_store import _detect_product_types
-        det = _detect_product_types(card.get("name") or "")
-        ptype = next((t for t in eff_types if t in det), None) \
-            or next(iter(det), None)
-    if eff_types and ptype and ptype not in eff_types:
+    canon = ((card.get("_evidence") or {}).get("facts") or {}).get("canonical") or {}
+    ctypes = set(canon.get("type_candidates") or ())
+    if card.get("canonical_type"):
+        ctypes.add(card["canonical_type"])
+    if eff_types and ctypes and not (ctypes & eff_types):
         return "rejected", "wrong_type"
     if req.subtypes:
-        expanded = set()
-        for s in req.subtypes:
-            expanded |= _SUBTYPE_TO_TYPES.get(s, set())
-        csub = (card.get("charger_subtype") or card.get("cable_subtype"))
-        # reject เฉพาะเมื่อ subtype evidence ชัดและไม่ตรง — unit type เช่น
-        # cable ที่เป็น expansion ของ req subtype ถือว่าตรง (csub อาจว่าง)
-        if csub and csub not in req.subtypes \
-                and (ptype or "") not in expanded:
+        roles = set(card.get("canonical_roles") or ())
+        # reject เฉพาะเมื่อ role evidence ชัดและไม่ตรง — roles ว่าง = ไม่มี
+        # evidence พอจะตัด (เช่น generic listing ที่ชื่อไม่บอก subtype)
+        if roles and not (roles & set(req.subtypes)):
             return "rejected", "subtype_mismatch"
     if req.target_device:
         from .device_compat import _extract_device_token
         dev = _extract_device_token(card.get("name") or "")
         if dev and dev != req.target_device:
             return "rejected", f"device_mismatch:{dev}"
-    if card.get("_available_for_sale"):
+    if card.get("sellable"):
         return "eligible", "ok"
+    # card ขายได้แต่ requested option ไม่พร้อม → unavailable ด้วยเหตุ variant
+    # (ไม่ใช่ของหมดทั้งชิ้น — ตอบ "สีที่ขอหมด/ไม่มี" ได้ตรง)
+    rvs = card.get("requested_variant_state")
+    if (rvs not in (None, "not_requested", "available")
+            and card.get("publish_state") == "published"
+            and card.get("stock_state") == "in_stock"
+            and card.get("customer_visibility") == "visible"):
+        return "unavailable", f"requested_variant:{rvs}"
     return "unavailable", card.get("availability_reason") or "unavailable"
 
 
@@ -148,9 +152,14 @@ def _run_attempt(source: str, fetch_fn, query: str, prof, shop: str,
     elig: list[dict] = []
     unav: list[dict] = []
     rej: list[dict] = []
+    # requested options = variant_terms ของ request เท่านั้น — soft_hints
+    # เป็น preference (constraint ranking) ไม่ใช่ hard option gate
+    requested = tuple(req.variant_terms or ())
     for c in cards:
-        b, why = _bucket(c, req)
-        cc = make_evidence_card(c, source=source, selection_reason=why)
+        # canonicalize ก่อน bucket เสมอ — _bucket อ่าน canonical fields เท่านั้น
+        cc = make_evidence_card(c, source=source, requested=requested)
+        b, why = _bucket(cc, req)
+        cc["_selection_reason"] = why
         (elig if b == "eligible" else
          unav if b == "unavailable" else rej).append(cc)
     return elig, unav, rej, SourceAttempt(

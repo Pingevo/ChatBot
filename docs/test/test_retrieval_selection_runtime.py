@@ -37,76 +37,83 @@ def _units_fetcher(adapter_cards, cable_cards):
 
 
 def _card(name, ptype, unit_id, item_id=None, avail=True, **kw):
+    # stamp resolver fields เหมือน to_unit_card output จริง
+    # (ไม่มี → resolver นับ unknown/hidden → canonical ดร็อป)
     c = {"name": name, "product_type": ptype, "_available_for_sale": avail,
          "unit_id": unit_id, "item_id": item_id or unit_id,
+         "status": "NORMAL" if avail else "SELLER_DELETE",
+         "total_stock": 3 if avail else 0,
+         "catalog_status": "active" if avail else "discontinued",
+         "customer_visible": True,
          "availability_reason": "" if avail else "sold_out"}
     c.update(kw)
     return c
 
 
-def _prep(msg=AD1404T_MSG, adapter_cards=(), cable_cards=(),
-          base_products=(), **kw):
+def _prep(msg=AD1404T_MSG, adapter_cards=(), cable_cards=(), **kw):
     from shopeechat.retrieval_runtime import prepare_grouped_selection
     return prepare_grouped_selection(
         _profile(msg), message=msg, shop="KingGadgets", platform="shopee",
-        base_products=list(base_products), limit=10,
+        limit=10,
         fetcher=_units_fetcher(adapter_cards, cable_cards),
         legacy_fetcher=lambda m, **k: [], **kw)
 
 
-def test_selected_first_then_base_merged():
+def test_selected_cards_are_the_products():
+    # canonical owns context — products = selected_cards เท่านั้น
     adapter = _card("CUKTECH AD1404T หัวชาร์จ", "charger", "ua1",
                     charger_subtype="adapter", model_codes=["AD1404T"])
     cable = _card("CTC620P สายมีจอ OLED 240W", "cable", "up1",
                   cable_subtype="cable", variants=[{"name": "2 เมตร"}])
-    base = [_card("สินค้า legacy เดิม", "charger", None, item_id="b1")]
-    out = _prep(adapter_cards=[adapter], cable_cards=[cable],
-                base_products=base)
+    out = _prep(adapter_cards=[adapter], cable_cards=[cable])
     assert out and out["products"]
     names = [p.get("name") for p in out["products"]]
     assert names[0] == "CUKTECH AD1404T หัวชาร์จ" or "AD1404T" in names[0]
     assert "CTC620P สายมีจอ OLED 240W" in names
-    assert "สินค้า legacy เดิม" in names          # base ไม่หาย
-    # selected (adapter+cable) ต้องมาก่อน base legacy
-    assert names.index("CTC620P สายมีจอ OLED 240W") \
-        < names.index("สินค้า legacy เดิม")
 
 
-def test_same_item_deduped_selected_wins():
-    adapter = _card("AD1404T unit", "charger", "ua1", item_id="i1",
-                    charger_subtype="adapter", model_codes=["AD1404T"])
-    base = [_card("AD1404T legacy listing", "charger", None, item_id="i1")]
-    out = _prep(adapter_cards=[adapter], base_products=base)
-    names = [p.get("name") for p in out["products"]]
-    assert "AD1404T unit" in names
-    assert "AD1404T legacy listing" not in names  # selected ชนะ item เดียวกัน
+def test_selected_deduped_across_requests():
+    # card เดียวกัน eligible ใต้หลาย request → selector ซ้ำได้ →
+    # run ต้องคัดซ้ำตาม identity (normalize เหมือน candidate_pool._norm_id)
+    # ไม่งั้น LLM เห็นสินค้าซ้ำ (ตอบมั่ว/เสีย quota)
+    from shopeechat.retrieval_runtime import prepare_grouped_selection
+    shared = _card("shared", "charger", "u1", item_id=123,
+                   charger_subtype="adapter", model_codes=["AD1404T"])
+    out = prepare_grouped_selection(
+        _profile(), message="m", shop="s", limit=10,
+        fetcher=lambda m, **kw: UnitEvidenceFetchResult(
+            cards=(shared,), raw_count=1, sellable_count=1,
+            unavailable_count=0, trace=("u",)),
+        legacy_fetcher=lambda m, **k: [])
+    names = [p["name"] for p in (out or {}).get("products", [])]
+    assert names.count("shared") <= 1
 
 
-def test_merge_dedupes_float_int_item_id():
-    # selected item_id=123 (int) vs base 123.0 (float) / "123.0" (float-str)
-    # — ต้อง normalize เหมือน candidate_pool._norm_id ไม่งั้น duplicate หลุดเข้า LLM
-    from shopeechat.retrieval_runtime import merge_selected_products
-    out = merge_selected_products(
-        [{"name": "selected", "item_id": 123}],
-        [{"name": "base-float", "item_id": 123.0},
-         {"name": "base-fstr", "item_id": "123.0"},
-         {"name": "base-other", "item_id": 456}],
-        limit=10)
-    names = [p["name"] for p in out]
-    assert names == ["selected", "base-other"]
-
-
-def test_error_returns_none_fallback():
+def test_fetcher_error_isolated_returns_empty_not_none():
+    # source attempt error ไม่ทำ pipeline ล้ม — รันสำเร็จแต่ selected ว่าง
+    # → dict(products=[]) (canonical owns: ว่าง=ว่าง) ไม่ใช่ fallback
     from shopeechat.retrieval_runtime import prepare_grouped_selection
 
     def boom(message, **kw):
         raise RuntimeError("units exploded")
 
     out = prepare_grouped_selection(
-        _profile(), message="m", shop="s", base_products=[{"name": "b"}],
+        _profile(), message="m", shop="s",
         limit=10, fetcher=boom, legacy_fetcher=lambda m, **k: [])
-    assert out is None or not out.get("products") or \
-        out["products"] == [{"name": "b"}]
+    assert out is not None and out["products"] == []
+
+
+def test_pipeline_exception_returns_none_fail_closed(monkeypatch):
+    # exception ระดับ pipeline (ไม่ใช่ attempt) → None → flag-ON caller fail
+    # closed เป็น product context ว่าง (legacy products ไม่ re-enter)
+    from shopeechat import retrieval_runtime as rr
+    monkeypatch.setattr(
+        rr, "build_retrieval_slots",
+        lambda p: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = rr.run_grouped_selection(
+        _profile(), message="m", shop="s",
+        fetcher=lambda m, **k: None, legacy_fetcher=lambda m, **k: [])
+    assert out is None
 
 
 def test_selected_cards_stripped_and_role_tagged():
@@ -159,10 +166,11 @@ def test_unavailable_summary_not_recommendation():
     assert "สายตาย" in extra                    # แต่เป็น evidence note
 
 
-def test_empty_selection_returns_none():
-    out = _prep(adapter_cards=[], cable_cards=[],
-                base_products=[{"name": "b"}])
-    assert out is None or out["products"] == [{"name": "b"}]
+def test_empty_selection_returns_empty_products():
+    # pipeline รันได้แต่ selected ว่าง → products ว่าง (canonical owns context
+    # — ว่าง=ว่าง ไม่ fallback legacy; None สงวนไว้เฉพาะ error)
+    out = _prep(adapter_cards=[], cable_cards=[])
+    assert out is not None and out["products"] == []
 
 
 def test_app_callsite_flag_gated_lazy():
@@ -181,8 +189,10 @@ def test_app_callsite_flag_gated_lazy():
     assert "retrieval_runtime" in window
     assert "run_grouped_selection" in window
     assert "try:" in window and "except" in window
-    # merge ที่ llm.answer callsites — ต้องมีอย่างน้อย 2 จุด (KB path + main)
-    assert src.count("merge_selected_products") >= 2
+    # flag ON → canonical selected แทน products ที่ llm.answer callsites
+    # — ห้าม merge base legacy (UNLIST re-entry) — ทั้ง KB path + main
+    assert "merge_selected_products" not in src
+    assert src.count('selected_cards"][:') >= 2
     assert "_grouped_sel" in window
 
 
@@ -194,52 +204,20 @@ def test_no_v2_v3_caller():
             assert "retrieval_runtime" not in src
             assert "prepare_grouped_selection" not in src
 
-
-def test_merge_dedupes_selected_among_themselves():
-    # regression 5E: card เดียวกัน eligible ใต้หลาย request → select_for_llm_context
-    # extend ต่อ request → selected ซ้ำ item_id → merge ต้องคัดซ้ำ (ตัวแรกชนะ)
-    # ไม่งั้น LLM เห็นสินค้าซ้ำ (ตอบมั่ว/เสีย quota)
-    from shopeechat.retrieval_runtime import merge_selected_products
-    dup_a = {"name": "first-pick", "item_id": 123, "_context_note": "r0"}
-    dup_b = {"name": "second-pick", "item_id": "123.0", "_context_note": "r1"}
-    out = merge_selected_products(
-        [dup_a, dup_b, {"name": "other", "item_id": 456}],
-        [{"name": "base-same", "item_id": 123},
-         {"name": "base-other", "item_id": 789}],
-        limit=10)
-    names = [p["name"] for p in out]
-    assert names == ["first-pick", "other", "base-other"]
-    # float/int normalize ข้าม selected ด้วย — "123.0" เท่ากับ 123
+def test_identity_keys_fallback_unit_model():
+    # card ไม่มี item_id → identity keys fallback unit_id/model_id
+    # (ใช้ใน dedupe ของ run_grouped_selection — card เดียวกันหลาย request)
+    from shopeechat.retrieval_runtime import _identity_keys
+    assert _identity_keys({"unit_id": "u1"}) == ["u:u1"]
+    assert _identity_keys({"model_id": "m9"}) == ["m:m9"]
+    assert _identity_keys({"item_id": 123.0}) == ["i:123"]
 
 
-def test_merge_dedupes_selected_unit_model_fallback():
-    # card ไม่มี item_id → fallback dedupe ด้วย unit_id/model_id
-    # (unit cards ทุกใบมี item_id แต่ edge card อาจไม่มี — กันซ้ำราย variant)
-    from shopeechat.retrieval_runtime import merge_selected_products
-    out = merge_selected_products(
-        [{"name": "v1", "unit_id": "u1"},
-         {"name": "v1-dup", "unit_id": "u1"},
-         {"name": "v2", "unit_id": "u2"},
-         {"name": "m1", "model_id": "m9"},
-         {"name": "m1-dup", "model_id": "m9"}],
-        [], limit=10)
-    names = [p["name"] for p in out]
-    assert names == ["v1", "v2", "m1"]
-
-
-def test_merge_does_not_dedupe_blank_identity_fields():
-    # hardening 5E: "" / whitespace ไม่ใช่ identity จริง — card เหล่านี้
-    # ต้องไม่ถูก dedupe กันเอง และ base ที่ id ว่างก็ห้ามถูกตัด
-    from shopeechat.retrieval_runtime import merge_selected_products
-    out = merge_selected_products(
-        [{"name": "blank-iid-1", "item_id": ""},
-         {"name": "blank-iid-2", "item_id": ""},
-         {"name": "blank-uid", "unit_id": ""},
-         {"name": "blank-mid", "model_id": "  "},
-         {"name": "no-id"}],
-        [{"name": "base-blank", "item_id": ""},
-         {"name": "base-real", "item_id": 42}],
-        limit=10)
-    names = [p["name"] for p in out]
-    assert names == ["blank-iid-1", "blank-iid-2", "blank-uid",
-                     "blank-mid", "no-id", "base-blank", "base-real"]
+def test_identity_keys_blank_fields_are_not_identity():
+    # hardening 5E: "" / whitespace ไม่ใช่ identity จริง — ห้ามสร้าง key
+    # (card id ว่างห้ามถูก dedupe กันเอง)
+    from shopeechat.retrieval_runtime import _identity_keys
+    assert _identity_keys({"item_id": ""}) == []
+    assert _identity_keys({"unit_id": ""}) == []
+    assert _identity_keys({"model_id": "  "}) == []
+    assert _identity_keys({}) == []

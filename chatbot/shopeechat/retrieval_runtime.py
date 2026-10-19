@@ -1,8 +1,9 @@
 """retrieval_runtime.py — Task 5B3-C: grouped-retrieval selection → LLM context.
 
 flag-gated (USE_GROUPED_RETRIEVAL_SELECTION): prepare สินค้าที่ selector
-เลือก + merge กับ products เดิม — caller fallback เป็นของเดิมเมื่อคืน None;
-output cards strip private evidence แล้ว, role tag ผ่าน _context_note
+เลือก — flag ON → canonical owns context (ว่าง=ว่าง / exception→None→caller
+fail closed products=[] — legacy ไม่ re-enter); output cards strip private
+evidence แล้ว, role tag ผ่าน _context_note
 """
 from __future__ import annotations
 
@@ -19,13 +20,6 @@ _ROLE_NOTE = {
                    "ให้บอกว่าเป็นรุ่นทดแทน",
     "relation_target": "สินค้าที่ใช้ร่วมกันได้ตามความสัมพันธ์ของคำถาม",
 }
-
-
-def _item_id(card: dict) -> str | None:
-    """item_id canonical — float/int-float-str normalize เหมือน candidate_pool"""
-    from .retrieval_policy import _norm_id
-    v = card.get("item_id")
-    return _norm_id(v) if v is not None else None
 
 
 def _identity_keys(card: dict) -> list[str]:
@@ -47,33 +41,6 @@ def _identity_keys(card: dict) -> list[str]:
     ) if k]
 
 
-def merge_selected_products(
-    selected_cards: list[dict],
-    base_products: list[dict] | None,
-    limit: int,
-) -> list[dict]:
-    """selected มาก่อน + base ที่ไม่ซ้ำ identity — dedupe (selected ตัวแรกชนะ) + cap.
-
-    selected ซ้ำกันเองก็ถูกคัด (card เดียวกัน eligible ใต้หลาย request →
-    select_for_llm_context extend ต่อ request อาจซ้ำ) — ไม่งั้น LLM เห็นซ้ำ
-    """
-    merged: list[dict] = []
-    seen: set[str] = set()
-    for c in selected_cards or []:
-        keys = _identity_keys(c)
-        if keys and any(k in seen for k in keys):
-            continue
-        seen.update(keys)
-        merged.append(c)
-    for p in base_products or []:
-        keys = _identity_keys(p)
-        if keys and any(k in seen for k in keys):
-            continue
-        seen.update(keys)
-        merged.append(p)
-    return merged[:limit]
-
-
 def run_grouped_selection(
     profile,
     *,
@@ -87,8 +54,9 @@ def run_grouped_selection(
 ) -> dict | None:
     """profile → pipeline → selection (ไม่ merge base) — รันครั้งเดียวต่อ request.
 
-    Returns {"selected_cards", "extra_context", "summary"} หรือ None เมื่อ
-    error/ไม่มี selection — caller ใช้ products เดิมต่อ (fallback)
+    Returns {"selected_cards", "extra_context", "summary"} เสมอเมื่อ pipeline
+    รันสำเร็จ (selected_cards อาจว่าง — canonical owns context: ว่าง=ว่าง);
+    None เฉพาะ exception — flag-ON caller fail closed (products=[])
     """
     try:
         slots = build_retrieval_slots(profile)
@@ -104,19 +72,22 @@ def run_grouped_selection(
             unavailable_limit=unavailable_limit)
     except Exception:
         return None
-    # ไม่มีของขายได้ ≠ ไม่มีคำตอบ — hidden_mentions (รุ่นที่ถามแต่ยังไม่ publish)
-    # ยังต้องไปถึง LLM เป็น extra_context เพื่อตอบ "ยังไม่เปิดขาย" ตรงๆ
-    if not sel.selected and not sel.hidden_mentions:
-        return None
 
     # selected cards — role tag ผ่าน _context_note (stripped แล้วจาก selector)
+    # dedupe ตาม identity (card เดียวกัน eligible ใต้หลาย request → ซ้ำได้
+    # — selected ตัวแรกชนะ) ไม่งั้น LLM เห็นสินค้าซ้ำ
     selected_cards: list[dict] = []
+    seen: set[str] = set()
     for s in sel.selected:
+        keys = _identity_keys(s.card)
+        if keys and any(k in seen for k in keys):
+            continue
+        seen.update(keys)
         card = dict(s.card)
         note = _ROLE_NOTE.get(s.role)
         if note:
             card["_context_note"] = note
-        if s.role == "subject" and not card.get("_available_for_sale"):
+        if s.role == "subject" and not card.get("sellable", False):
             # subject ที่ไม่ขาย — ตอบ spec/compare/history ได้ แต่ห้ามบอกว่าซื้อได้
             card["_context_note"] = (
                 f"{note or ''} — สินค้านี้ยังไม่พร้อมจำหน่าย "
@@ -137,18 +108,6 @@ def run_grouped_selection(
                 "หมายเหตุ: พบสินค้าที่เกี่ยวข้องในร้านแต่ยังไม่พร้อมจำหน่าย "
                 "(หมดสต็อก/เลิกขาย/ถูกลบ) — ใช้เป็นข้อมูลเท่านั้น "
                 "ห้ามแนะนำเป็นสินค้าที่ซื้อได้: " + ", ".join(names))
-    # UNLIST-only รุ่นที่ถามถึง — name-level note (ไม่ใช่ spec/link evidence)
-    hnames: list[str] = []
-    for h in sel.hidden_mentions:
-        n = (h.get("name") or "").strip()
-        if n and n not in hnames:
-            hnames.append(n)
-    if hnames:
-        hnote = ("หมายเหตุ: รุ่นที่ลูกค้าถามถึงบางรุ่นยังไม่เปิดขาย/ยังไม่มีจำหน่าย"
-                 "ในร้านตอนนี้ (listing ยังไม่ publish): " + ", ".join(hnames)
-                 + " — ให้แจ้งลูกค้าตรงๆ ห้ามส่งลิงค์หรือบอกว่าซื้อได้ "
-                 "และเสนอรุ่นทดแทนชนิดเดียวกันได้")
-        extra_context = f"{extra_context}\n{hnote}" if extra_context else hnote
 
     role_counts: dict[str, int] = {}
     for s in sel.selected:
@@ -174,14 +133,15 @@ def prepare_grouped_selection(
     message: str,
     shop: str | None,
     platform: str = "shopee",
-    base_products: list[dict] | None = None,
     limit: int = 30,
     per_request_limit: int = 3,
     unavailable_limit: int = 5,
     fetcher=None,
     legacy_fetcher="auto",
 ) -> dict | None:
-    """run_grouped_selection + merge base — helper แบบครบจบ (tests/probes)"""
+    """run_grouped_selection + cap — helper แบบครบจบ (tests/probes);
+    products = selected_cards เท่านั้น (canonical owns context เมื่อ pipeline
+    รันได้ — ไม่ merge legacy base เด็ดขาด)"""
     out = run_grouped_selection(
         profile, message=message, shop=shop, platform=platform,
         per_request_limit=per_request_limit,
@@ -189,9 +149,7 @@ def prepare_grouped_selection(
         fetcher=fetcher, legacy_fetcher=legacy_fetcher)
     if out is None:
         return None
-    merged = merge_selected_products(out["selected_cards"], base_products,
-                                     limit)
-    out["summary"] = {**out["summary"], "merged_total": len(merged),
-                      "base_kept": len(merged) - len(out["selected_cards"])}
-    return {"products": merged, "extra_context": out["extra_context"],
+    products = out["selected_cards"][:limit]
+    out["summary"] = {**out["summary"], "merged_total": len(products)}
+    return {"products": products, "extra_context": out["extra_context"],
             "summary": out["summary"]}

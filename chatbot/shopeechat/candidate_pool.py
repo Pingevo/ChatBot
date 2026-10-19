@@ -79,10 +79,17 @@ def _norm_name(card: dict) -> str:
     return re.sub(r"\s+", " ", (card.get("name") or "").lower()).strip()
 
 
+# customer_visibility → merge preference — visible > historical > hidden:
+# product เดียวกันที่มีทั้ง UNLIST record และ visible record ต้องใช้ของที่มองเห็น
+_VIS_ORDER = {"visible": 2, "historical_only": 1, "hidden": 0}
+
+
 def _merge_group(group: list[dict]) -> dict:
-    """รวม cards identity เดียวกัน — keep card ที่ sellable/richer + merge sources"""
+    """รวม cards identity เดียวกัน — keep card ที่ visible/sellable/richer +
+    merge sources (canonical fields มาจาก card ที่ชนะเท่านั้น)"""
     def _rich(c):
-        return (bool(c.get("_available_for_sale")),
+        return (_VIS_ORDER.get(c.get("customer_visibility"), -1),
+                bool(c.get("sellable")),
                 bool(c.get("canonical_specs") or c.get("image_text")),
                 len(c))
     best = max(group, key=_rich)
@@ -110,10 +117,10 @@ def _score(card: dict, res: RetrievalExecutionResult, anchor: bool,
     if codes:
         s += 2.0
         why.append(f"code:{next(iter(codes))}")
-    csub = card.get("charger_subtype") or card.get("cable_subtype")
-    if csub and csub in res.subtypes:
+    sub_hit = set(card.get("canonical_roles") or ()) & set(res.subtypes)
+    if sub_hit:
         s += 1.0
-        why.append(f"subtype:{csub}")
+        why.append(f"subtype:{sorted(sub_hit)[0]}")
     if res.target_device:
         from .device_compat import _extract_device_token
         if _extract_device_token(card.get("name") or "") == res.target_device:
@@ -122,7 +129,7 @@ def _score(card: dict, res: RetrievalExecutionResult, anchor: bool,
     if res.relation_id:
         s += 0.5
         why.append("relation_target")
-    if card.get("_available_for_sale"):
+    if card.get("sellable"):
         s += 0.5
         why.append("sellable")
     ns = len((card.get("_evidence") or {}).get("sources", []))
@@ -216,12 +223,15 @@ def build_candidate_pool(
                 evidence.append(EvidenceAttachment(
                     kind="image_text", identity=identity, item_id=iid,
                     linked_candidate=identity, trace=("image_text",)))
-            csub = card.get("charger_subtype") or card.get("cable_subtype")
+            roles = set(card.get("canonical_roles") or ())
+            csub = next(iter(sorted(
+                (roles & set(res.subtypes)) or roles)), None)
             pooled.append(PooledCandidate(
                 identity=identity, item_id=iid, model_id=mid, unit_id=uid,
                 sources=sources, request_ids=(res.request_id,),
                 slot_id=res.slot_id, relation_id=res.relation_id,
-                product_type=card.get("product_type"), subtype=csub,
+                product_type=(card.get("canonical_type")
+                            or card.get("product_type")), subtype=csub,
                 bucket=bucket,
                 reason=next((r for r in reasons if r not in ("ok", "")), "ok"),
                 score=sc,

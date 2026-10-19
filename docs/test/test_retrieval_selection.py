@@ -18,6 +18,7 @@ from shopeechat.retrieval_planner import build_grouped_retrieval_requests  # noq
 from shopeechat.retrieval_executor import execute_grouped_retrieval_requests  # noqa: E402
 from shopeechat.candidate_pool import build_candidate_pool  # noqa: E402
 from shopeechat.retrieval_selection import select_for_llm_context  # noqa: E402
+from shopeechat.retrieval_policy import make_evidence_card  # noqa: E402
 
 AD1404T_MSG = ("หัวชาร์จ AD1404T ใช้กับสายชาร์จไหนได้บ้างในร้านเรา "
                "ขอแบบมีจอ ยาว 2 เมตรและได้เต็มสปีด")
@@ -51,17 +52,27 @@ def _pool(msg=AD1404T_MSG, adapter_cards=(), cable_cards=()):
     return build_candidate_pool(results, profile=prof), reqs, prof
 
 
+def _stamped(avail=True, **kw):
+    """resolver fields ที่ to_unit_card/to_product_card stamp เสมอใน production"""
+    return {"status": "NORMAL", "total_stock": 5 if avail else 0,
+            "catalog_status": "active" if avail else "out_of_stock",
+            "customer_visible": True, "_available_for_sale": avail,
+            "availability_reason": ("normal_positive_stock" if avail
+                                    else "normal_zero_stock"), **kw}
+
+
 def _adapter(name="CUKTECH AD1404T หัวชาร์จ 140W", **kw):
     c = {"name": name, "product_type": "charger", "charger_subtype": "adapter",
-         "_available_for_sale": True, "item_id": "a1", "unit_id": "ua1",
-         "model_codes": ["AD1404T"]}
+         "item_id": "a1", "unit_id": "ua1", "model_codes": ["AD1404T"],
+         **_stamped(kw.pop("_available_for_sale", True))}
     c.update(kw)
     return c
 
 
 def _cable(name, unit_id, **kw):
     c = {"name": name, "product_type": "cable", "cable_subtype": "cable",
-         "_available_for_sale": True, "item_id": unit_id, "unit_id": unit_id}
+         "item_id": unit_id, "unit_id": unit_id,
+         **_stamped(kw.pop("_available_for_sale", True))}
     c.update(kw)
     return c
 
@@ -191,7 +202,9 @@ def test_multi_subtype_quota_one_subtype_cannot_eat_all():
     res = RetrievalExecutionResult(
         request_id="req-0", source="slot", slot_id="slot-charger",
         subtypes=req.subtypes, model_codes=(),
-        eligible_candidates=tuple(cards),
+        # executor emits canonical cards เสมอ — simulate output ผ่าน adapter
+        eligible_candidates=tuple(
+            make_evidence_card(c, source="units") for c in cards),
         source_attempts=(SourceAttempt("units", 4, 4, 0, 0, ("t",)),))
     pool = build_candidate_pool((res,))
     sel = select_for_llm_context(pool, (req,), None, per_request_limit=3)

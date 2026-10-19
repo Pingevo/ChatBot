@@ -31,6 +31,7 @@ class RetrievalRequest:
     soft_hints: tuple[tuple[str, str], ...] = ()
     relation_id: str | None = None
     confidence: float = 1.0
+    variant_terms: tuple[str, ...] = ()   # requested option(s) — canonical adapter
 
 
 def _slot_types(slots: tuple[RetrievalSlot, ...], slot_id: str
@@ -77,6 +78,7 @@ def _slot_request(req_id: str, slot: RetrievalSlot,
         hard_filters=tuple(hard),
         soft_hints=tuple(soft),
         confidence=slot.confidence,
+        variant_terms=slot.variant_terms,
     )
 
 
@@ -109,6 +111,7 @@ def _relation_request(req_id: str, rel_id: str, rel: RetrievalRelation,
         soft_hints=tuple(soft),
         relation_id=rel_id,
         confidence=rel.confidence,
+        variant_terms=(target_slot.variant_terms if target_slot else ()),
     )
 
 

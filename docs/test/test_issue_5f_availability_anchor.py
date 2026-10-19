@@ -98,17 +98,23 @@ def _req(rid="r0", codes=("AC99X",), mode="answerable_all"):
         codes, None, mode, "none")
 
 
-def test_hidden_only_grouped_selection_returns_mentions_not_products():
-    # รุ่นที่ถามถึงมีแต่ UNLIST → ไม่เข้า selected/unavailable; ส่งแค่
-    # hidden_mentions (name-only) ให้ตอบ "ยังไม่เปิดขาย"
+def test_hidden_only_grouped_selection_leaks_no_identity():
+    # รุ่นที่ถามถึงมีแต่ UNLIST → ไม่เข้า selected/unavailable และ identity
+    # ห้ามรั่วเข้า output ใดๆ — เหลือแค่ rejected count (reason+count เท่านั้น)
     hidden = {"name": "AC99X หัวชาร์จ", "item_id": "h1",
               "customer_visible": False, "_available_for_sale": False,
               "availability_reason": "unlisted", "model_codes": ["AC99X"],
               "product_type": "charger", "total_stock": 440}
     sel = _sel([hidden], _req())
     assert not sel.selected
-    assert not any(u.get("item_id") == "h1" for u in sel.unavailable_evidence)
-    assert any(h.get("item_id") == "h1" for h in sel.hidden_mentions)
+    assert not getattr(sel, "hidden_mentions", ())
+    assert not any(u.get("item_id") == "h1"
+                   or "AC99X" in str(u.get("name") or "")
+                   for u in sel.unavailable_evidence)
+    assert not any("item_id" in r or "name" in r
+                   for r in sel.rejected_summary)
+    assert any(r["reason"] == "customer_hidden" and r["count"] == 1
+               for r in sel.rejected_summary)
 
 
 def test_unlist_with_stock_never_recommended():

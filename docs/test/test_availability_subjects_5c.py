@@ -123,12 +123,18 @@ def test_unlist_goes_rejected_customer_hidden():
     assert rej and rej[0].reason == "customer_hidden"
 
 
-def test_unlist_only_model_hidden_mention():
-    """UNLIST-only model → mention ชื่อระดับ name เพื่อตอบ 'ยังไม่เปิดขาย' (ไม่ใช่ spec evidence)"""
+def test_unlist_only_model_no_identity_leak():
+    """UNLIST-only model → identity ห้ามรั่วเข้า output ใดๆ (name/item_id/mention)"""
     c = _unit("WPB100L powerbank", "WPB100L", status="UNLIST")
     prof, reqs, results, pool, sel = _run("สนใจ WPB100L", unit_cards=[c])
-    names = [h.get("name") for h in getattr(sel, "hidden_mentions", ())]
-    assert any("WPB100L" in (n or "") for n in names), sel
+    assert not getattr(sel, "hidden_mentions", ())
+    assert not any(s.card.get("item_id") == c["item_id"] for s in sel.selected)
+    assert not any(u.get("item_id") == c["item_id"]
+                   or "WPB100L" in str(u.get("name") or "")
+                   for u in sel.unavailable_evidence)
+    # rejected summary เหลือ reason+count เท่านั้น
+    assert not any("item_id" in r or "name" in r
+                   for r in sel.rejected_summary)
 
 
 def test_visible_duplicate_preferred_over_unlist():
@@ -184,9 +190,10 @@ def test_unlist_compare_target_not_subject():
         "AC65B เทียบกับ AC65B2 ต่างกันยังไง", unit_cards=[a, b])
     ids = [s.card.get("item_id") for s in sel.selected]
     assert "i-ac65b" in ids and "i-ac65b2" not in ids
-    # แต่ชื่อต้องถูก mention เป็น hidden (ตอบ "ยังไม่เปิดขาย" ได้)
-    assert any("AC65B2" in (h.get("name") or "")
-               for h in getattr(sel, "hidden_mentions", ()))
+    # UNLIST-only → identity ห้ามรั่วเลย (ไม่มี hidden mention)
+    assert not getattr(sel, "hidden_mentions", ())
+    assert not any("AC65B2" in str(u.get("name") or "")
+                   for u in sel.unavailable_evidence)
 
 
 def test_role_notes_in_runtime():
@@ -208,10 +215,9 @@ def test_price_followup_keeps_compare_subjects():
     assert "i-ac65b" in ids or "i-ac65b2" in ids
 
 
-def test_hidden_only_grouped_selection_keeps_note():
-    # regression hardening: ลูกค้าถามเฉพาะรุ่น UNLIST → sel.selected ว่าง
-    # แต่ hidden_mentions มี → run_grouped_selection ต้องไม่คืน None
-    # เพื่อให้ LLM ตอบ "ยังไม่เปิดขาย" แทนที่จะ fallback เส้นทางอื่นเงียบๆ
+def test_hidden_only_grouped_selection_returns_none():
+    # UNLIST-only → ไม่มี selected → ไม่มี context ถึง LLM เลย (identity ห้ามรั่ว —
+    # เดิมส่ง note 'ยังไม่เปิดขาย' พร้อมชื่อรุ่น ซึ่งคือ identity leak)
     hidden = _unit("WPB100L powerbank 20000mAh", "WPB100L", status="UNLIST")
     prof = _profile("สนใจพาวแบงก์ WPB100L")
     out = retrieval_runtime.run_grouped_selection(
@@ -220,10 +226,11 @@ def test_hidden_only_grouped_selection_keeps_note():
             cards=(hidden,), raw_count=1, sellable_count=0,
             unavailable_count=0, trace=("fake",)),
         legacy_fetcher=lambda m, **kw: [])
+    # pipeline รันได้แต่ selected ว่าง → dict(selected_cards=[]) —
+    # identity ห้ามรั่ว และไม่มี products/context ของตัวนี้
     assert out is not None
     assert out["selected_cards"] == []
-    assert "WPB100L" in (out["extra_context"] or "")
-    assert "ยังไม่เปิดขาย" in out["extra_context"]
+    assert "WPB100L" not in str(out)
 
 
 def test_model_not_normal_listing_normal_not_customer_visible():

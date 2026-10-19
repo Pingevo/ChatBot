@@ -759,9 +759,10 @@ def _l2_run(fx, drop_group_pred=None):
                 # unit cards carry subtype fields — annotate the fixture card
                 # the same way so selection's per-subtype coverage sees it
                 card.setdefault("charger_subtype", sub)
-            b, why = retrieval_executor._bucket(card, req)
-            ec = retrieval_policy.make_evidence_card(
-                card, source="fixture", selection_reason=why)
+            # executor contract: canonicalize ก่อน bucket เสมอ
+            ec = retrieval_policy.make_evidence_card(card, source="fixture")
+            b, why = retrieval_executor._bucket(ec, req)
+            ec["_selection_reason"] = why
             (elig if b == "eligible" else
              unav if b == "unavailable" else rej).append(ec)
         results.append(retrieval_executor.RetrievalExecutionResult(

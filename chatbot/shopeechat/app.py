@@ -1818,8 +1818,9 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                       file=sys.stderr)
 
         # ⚡ Task 5B3-C — grouped-retrieval selection (flag-gated)
-        #   compute ครั้งเดียว — merge เข้า products ที่ llm.answer callsites
-        #   error/empty → _grouped_sel=None → products เดิมต่อ (fallback)
+        #   compute ครั้งเดียว — แทน products ที่ llm.answer callsites
+        #   (canonical owns context เมื่อ flag ON: selected ว่าง=products ว่าง;
+        #   error/None → fail closed products=[] — legacy ไม่ re-enter เด็ดขาด)
         _grouped_sel = None
         _sel_flag = False
         try:
@@ -2271,11 +2272,14 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         merged_products = merged_products + _kb_device_products
                         print(f"[DEVICE-SPEC-LOOKUP-KB] merge {len(_kb_device_products)} สินค้าจาก re-query เข้า merged_products (now {len(merged_products)})", file=sys.stderr)
 
-                    # ⚡ Task 5B3-C — merge selected context (flag on เท่านั้น)
+                    # ⚡ Task 5B3-C — flag ON = canonical owns product context:
+                    #   selection พัง/None → fail closed (products=[])
+                    #   ห้าม legacy products ไหลเข้า LLM
+                    if _sel_flag:
+                        merged_products = (
+                            _grouped_sel["selected_cards"][:_llm_ctx_limit]
+                            if _grouped_sel else [])
                     if _grouped_sel:
-                        merged_products = _rr.merge_selected_products(
-                            _grouped_sel["selected_cards"], merged_products,
-                            _llm_ctx_limit)
                         if _grouped_sel.get("extra_context"):
                             _hybrid_extra_ctx = (
                                 _hybrid_extra_ctx + "\n\n"
@@ -4449,10 +4453,13 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         if products and _pending_context_note:
             _add_context_note(products, _pending_context_note)
             print(f"[DEBUG-3D] injected context_note len={len(_pending_context_note)} products[0]_has_note=True", file=sys.stderr)
-        # ⚡ Task 5B3-C — merge selected context (flag on เท่านั้น)
+        # ⚡ Task 5B3-C — flag ON = canonical owns product context:
+        #   selection พัง/None → fail closed (products=[])
+        #   ห้าม legacy products ไหลเข้า LLM
+        if _sel_flag:
+            products = (_grouped_sel["selected_cards"][:_llm_ctx_limit]
+                        if _grouped_sel else [])
         if _grouped_sel:
-            products = _rr.merge_selected_products(
-                _grouped_sel["selected_cards"], products, _llm_ctx_limit)
             if _grouped_sel.get("extra_context"):
                 _combined_extra = (_combined_extra + "\n\n"
                                    + _grouped_sel["extra_context"]).strip()
