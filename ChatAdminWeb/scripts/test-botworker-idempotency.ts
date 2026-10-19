@@ -88,6 +88,7 @@ function msgDoc(messageId: string, conversationId: string) {
     type: "text",
     text: `inbound ${messageId}`,
     created_timestamp: 1,
+    shop_ctx: { config_shop_key: "shop_1", shopname: "shop_1" },
   };
 }
 
@@ -200,6 +201,14 @@ function reset() {
   mocks.state.config.bot_worker_enabled = true;
   mocks.state.config.bot_buffer_enabled = false;
   mocks.state.config.bot_buffer_window_ms = 60;
+  // ⚡ resolver contract — flush re-resolves scope: shops row + conversations evidence
+  mocks.fakeColl("shops").push({
+    shop_id: "shop_1", platform: "shopee", shopname: "shop_1",
+    connected: true, bot_worker_enabled: true, bot_worker_enabled_at: new Date(0),
+  });
+  mocks.fakeColl("conversations").push({
+    conversation_id: "conv_seed", shop_id: "shop_1", shop_name: "shop_1", platform: "shopee",
+  });
 }
 
 function assert(cond: boolean, msg: string) {
@@ -214,9 +223,9 @@ async function main() {
     config: mocks.state.config as never,
     global_enabled_since: new Date(0),
     pairs: [
-      { platform: "shopee", shop_id: "shop_1", cutoff: new Date(0) },
-      { platform: "shopee", shop_id: "s", cutoff: new Date(0) },
-      { platform: "shopee", shop_id: "s1", cutoff: new Date(0) },
+      { platform: "shopee", shop_id: "shop_1", config_shop_key: "shop_1", shopname: "shop_1", cutoff: new Date(0) },
+      { platform: "shopee", shop_id: "s", config_shop_key: "s", shopname: "s", cutoff: new Date(0) },
+      { platform: "shopee", shop_id: "s1", config_shop_key: "s1", shopname: "s1", cutoff: new Date(0) },
     ],
   };
   const { state } = mocks;
@@ -1196,7 +1205,7 @@ async function main() {
       bufferEnabled: true, bufferWindowMs: 500, bufferMaxMessages: 10,
       bufferWindowMediaMs: 500, bufferMaxMediaMessages: 20,
     };
-    const m = { message_id: "mL3", conversation_id: "conv_l3", shop_id: "shop_1", platform: "shopee" as const, text: "hi", created_timestamp: new Date(), admitted_edge: new Date(0) as Date | null };
+    const m = { message_id: "mL3", conversation_id: "conv_l3", shop_id: "shop_1", platform: "shopee" as const, text: "hi", created_timestamp: new Date(), admitted_edge: new Date(0) as Date | null, shop_ctx: { config_shop_key: "shop_1", shopname: "shop_1" } };
     const markStub = async () => {};
 
     const r1 = await buf.bufferOrProcess(m, cfg, svc.processMessage, markStub);
@@ -1222,6 +1231,7 @@ async function main() {
       message_id: "mL4", conversation_id: "conv_l4", shop_id: "shop_1",
       platform: "shopee" as const, text: "repair timer",
       created_timestamp: new Date(), admitted_edge: new Date(0) as Date | null,
+      shop_ctx: { config_shop_key: "shop_1", shopname: "shop_1" },
       claimContext: {
         claim_id: CLAIM_ID("mL4"), claim_ids: [CLAIM_ID("mL4")],
         owner_id: runtime.ownerId, fencing_token: 1,

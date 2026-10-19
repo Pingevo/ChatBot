@@ -142,6 +142,7 @@ function makeMsg(text: string, conversationId: string): EngineMessage {
     message_id: `test_e2e_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     conversation_id: conversationId,
     shop_id: "test_e2e_shop",
+    config_shop_key: "test_e2e_shop",
     platform: "shopee",
     text,
   };
@@ -220,7 +221,7 @@ async function main() {
   const timeoutCount = await workflowEngine.checkWaitTimeouts(undefined, {
     config: await getSystemConfig(),
     global_enabled_since: new Date(0),
-    pairs: [{ platform: "shopee", shop_id: "test_e2e_shop", cutoff: new Date(0) }],
+    pairs: [{ platform: "shopee", shop_id: "test_e2e_shop", config_shop_key: "test_e2e_shop", shopname: "test_e2e_shop", cutoff: new Date(0) }],
   });
   assert(timeoutCount >= 0, `D: checkWaitTimeouts รันสำเร็จ (processed=${timeoutCount})`);
 

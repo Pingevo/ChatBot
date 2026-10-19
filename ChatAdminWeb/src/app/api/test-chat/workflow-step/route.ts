@@ -53,6 +53,7 @@ export async function POST(req: NextRequest) {
     message_id: `testwf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     conversation_id: sessionId, // test chat ใช้ session_id เป็น conversation_id (แยกโซนกับ worker)
     shop_id: shop,
+    config_shop_key: shop, // test-chat shop param = config identity ตรงๆ (required contract)
     platform,
     text: message,
     history: body.history, // test chat ส่ง history จาก client → engine ไม่ต้องดึงจาก messages
@@ -66,14 +67,20 @@ export async function POST(req: NextRequest) {
       // resume พัง → ให้ client ไป trigger/bot ตามเดิม (ไม่ทิ้งข้อความ)
       return json({ status: "no_workflow", detail: `resume error: ${result.detail}` });
     }
-    return json({
-      status: "workflow_resumed",
-      messages: result.delivered,
-      handoff: result.handoff || null,
-      detail: result.detail,
-      run_id: result.run_id,
-      workflow_id: result.workflow_id,
-    });
+    // no_match = run จบแล้ว ข้อความไม่ถูก flow กิน → ไป match stage ต่อ (ไม่ return)
+    if (result.status !== "no_match" && result.status !== "in_flight") {
+      return json({
+        status: "workflow_resumed",
+        messages: result.delivered,
+        handoff: result.handoff || null,
+        detail: result.detail,
+        run_id: result.run_id,
+        workflow_id: result.workflow_id,
+      });
+    }
+    if (result.status === "in_flight") {
+      return json({ status: "no_workflow", detail: result.detail });
+    }
   }
 
   // ② Priority

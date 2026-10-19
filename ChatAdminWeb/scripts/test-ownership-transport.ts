@@ -436,7 +436,7 @@ async function main() {
     seedAssignWorkflow();
     seedConv("b14"); // raw conv มีอยู่ — ไม่มี assigned_to
     const res = await wf.matchAndRun({
-      message_id: "m-b14", conversation_id: "b14", shop_id: "shop-1",
+      message_id: "m-b14", conversation_id: "b14", shop_id: "shop-1", config_shop_key: "shop-1",
       platform: "shopee", text: "สวัสดีครับ",
     });
     assert(res.status === "actioned", `matchAndRun status=${res.status} detail=${res.detail}`);
@@ -453,7 +453,7 @@ async function main() {
     seedConv("b15");
     seedMeta("b15", { status: "handoff", assigned_to: "admin-1" });
     const res = await wf.matchAndRun({
-      message_id: "m-b15", conversation_id: "b15", shop_id: "shop-1",
+      message_id: "m-b15", conversation_id: "b15", shop_id: "shop-1", config_shop_key: "shop-1",
       platform: "shopee", text: "สวัสดีครับ",
     });
     assert(res.handoff?.agentId === "admin-9",
@@ -2476,7 +2476,7 @@ async function main() {
     });
     seedConv("h10");
     const res = await wf.matchAndRun({
-      message_id: "m-h10", conversation_id: "h10", shop_id: "shop-1",
+      message_id: "m-h10", conversation_id: "h10", shop_id: "shop-1", config_shop_key: "shop-1",
       platform: "shopee", text: "สวัสดีครับ",
     });
     assert((res.handoff as any)?.state === "assigned" && res.handoff?.agentId === "admin-1",
@@ -2653,7 +2653,7 @@ async function main() {
       if (coll === "status_conversation") throw new Error("simulated commit failure");
     };
     const res = await wf.matchAndRun({
-      message_id: "m-i4", conversation_id: "i4", shop_id: "shop-1",
+      message_id: "m-i4", conversation_id: "i4", shop_id: "shop-1", config_shop_key: "shop-1",
       platform: "shopee", text: "สวัสดีครับ",
     });
     clearHooks();
@@ -2682,7 +2682,7 @@ async function main() {
     });
     seedConv("i5");
     const res = await wf.matchAndRun({
-      message_id: "m-i5", conversation_id: "i5", shop_id: "shop-1",
+      message_id: "m-i5", conversation_id: "i5", shop_id: "shop-1", config_shop_key: "shop-1",
       platform: "shopee", text: "สวัสดีครับ",
     });
     assert(res.handoff?.state === "queued" && res.handoff.agentId === null,
@@ -2708,7 +2708,7 @@ async function main() {
     });
     seedConv("i6");
     const res = await wf.matchAndRun({
-      message_id: "m-i6", conversation_id: "i6", shop_id: "shop-1",
+      message_id: "m-i6", conversation_id: "i6", shop_id: "shop-1", config_shop_key: "shop-1",
       platform: "shopee", text: "สวัสดีครับ",
     });
     assert(res.handoff?.state === "assigned" && res.handoff.agentId === "admin-2",
@@ -2744,7 +2744,7 @@ async function main() {
       }
     };
     const res = await wf.matchAndRun({
-      message_id: "m-i7", conversation_id: "i7", shop_id: "shop-1",
+      message_id: "m-i7", conversation_id: "i7", shop_id: "shop-1", config_shop_key: "shop-1",
       platform: "shopee", text: "สวัสดีครับ",
     });
     clearHooks();
@@ -3041,7 +3041,7 @@ async function main() {
     seedConv("j9");
     insertErrorOnce("chat_assigned");
     const res = await wf.matchAndRun({
-      message_id: "m-j9", conversation_id: "j9", shop_id: "shop-1",
+      message_id: "m-j9", conversation_id: "j9", shop_id: "shop-1", config_shop_key: "shop-1",
       platform: "shopee", text: "สวัสดีครับ",
     });
     clearHooks();

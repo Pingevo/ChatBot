@@ -45,7 +45,7 @@ export const botWorkerService = {
     console.log("EV RESOLVE_SCOPE");
     return {
       config, global_enabled_since: globalEdge,
-      pairs: [{ platform: "shopee", shop_id: "s1", cutoff: globalEdge }],
+      pairs: [{ platform: "shopee", shop_id: "s1", config_shop_key: "s1", shopname: "s1", cutoff: globalEdge }],
     };
   },
   async pollNewMessages(scope) {

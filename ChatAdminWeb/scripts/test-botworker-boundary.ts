@@ -384,6 +384,7 @@ async function main() {
     const r = await svc.processMessage({
       message_id: "m_cur", conversation_id: conv, shop_id: "shop_1",
       platform: "shopee", text: "CURRENT combined text", claimContext: ctx,
+      shop_ctx: { config_shop_key: "shop_1", shopname: "shop_1" },
     });
     assert(mocks.state.calls.callBot === 1, `callBot=${mocks.state.calls.callBot} status=${r.status}: ${r.detail}`);
     const params = mocks.state.callBotParams[0];
@@ -407,6 +408,7 @@ async function main() {
       message_id: "m_b1", conversation_id: conv, shop_id: "shop_1",
       platform: "shopee", text: "first of batch second of batch",
       images: ["https://img.example.com/batch.png"], claimContext: ctx,
+      shop_ctx: { config_shop_key: "shop_1", shopname: "shop_1" },
     });
     assert(mocks.state.calls.callBot === 1, `callBot=${mocks.state.calls.callBot} status=${r.status}`);
     const params = mocks.state.callBotParams[0];
@@ -443,6 +445,7 @@ async function main() {
     const r = await svc.processMessage({
       message_id: "m_cur", conversation_id: conv, shop_id: "shop_1",
       platform: "shopee", text: "wfkw CURRENT wf question", claimContext: ctx,
+      shop_ctx: { config_shop_key: "shop_1", shopname: "shop_1" },
     });
     assert(mocks.state.calls.callBot === 1, `callBot=${mocks.state.calls.callBot} status=${r.status} ${r.detail}`);
     const params = mocks.state.callBotParams[0];
@@ -597,6 +600,7 @@ async function main() {
     const r = await svc.processMessage({
       message_id: "m_cur", conversation_id: conv, shop_id: "shop_1",
       platform: "shopee", text: "hello", claimContext: ctx,
+      shop_ctx: { config_shop_key: "shop_1", shopname: "shop_1" },
     });
     assert(r.status === "bot_failed", `expected bot_failed, got ${r.status}`);
     assert(r.finalized === true, "claim must be finalized terminal, not left processing");

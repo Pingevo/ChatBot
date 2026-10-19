@@ -29,6 +29,7 @@ import {
   resolveBotworkerScope,
   type BotworkerCycleScope,
   type ClaimContext,
+  type ShopMessageContext,
 } from "./botworkerRuntime";
 
 // ─── Types ────────────────────────────────────────────────
@@ -404,6 +405,9 @@ type ProcessMessageFn = (msg: {
   raw_payload?: unknown;
   images?: string[];  // ⚡ Phase 1F — image URLs รวมจากทุก message ใน buffer
   claimContext?: ClaimContext;
+  // ⚡ resolved shop context จาก pair ณ flush boundary (scope re-resolve แล้วข้างบน)
+  //   REQUIRED — dispatcher ห้ามเดา identity เอง
+  shop_ctx: ShopMessageContext;
   // ⚡ era/kill-switch signal — forward เข้า claim signal ของ processMessage
   //   (queued outbound ต้องออกเมื่อ era ตาย — claimed work ห้ามเริ่ม provider call ใหม่)
 }, signal?: AbortSignal) => Promise<{ status: string; detail: string; finalized: boolean; lost: boolean }>;
@@ -686,6 +690,8 @@ export async function flushBuffer(
 
     try {
       // ประมวลผลเป็น 1 message — processor ได้ ctx จึงไม่ claim ซ้ำ
+      // ⚡ shop_ctx จาก pair ของ delayed-execution gate (scope ที่ re-resolve สดๆ
+      //   ข้างบน) — eligible>0 ⇒ pair มีเสมอ (pair ขาด → rows ถูก settle หมดแล้ว)
       const result = await processMessage({
         message_id: firstMsg.message_id,
         conversation_id: firstMsg.conversation_id,
@@ -695,6 +701,7 @@ export async function flushBuffer(
         raw_payload: firstMsg.raw_payload,
         images: allImages.length > 0 ? allImages : undefined,
         claimContext: ctx,
+        shop_ctx: { config_shop_key: pair!.config_shop_key, shopname: pair!.shopname },
       }, signal);
 
       // ⚡ finalization contract — ลบ rows เฉพาะเมื่อ finalize ครบทุก member claim
@@ -789,6 +796,9 @@ export async function bufferOrProcess(
     created_timestamp?: Date;
     admitted_edge?: Date | null;
     claimContext?: ClaimContext; // ⚡ claim ก่อนเข้า buffer เสมอ — row ถือ ctx
+    // ⚡ resolved shop context — REQUIRED (immediate path ใช้ตรง; buffered path ไม่
+    //   persist ctx ลง row — flush attach จาก pair ที่ re-resolve เองเสมอ)
+    shop_ctx: ShopMessageContext;
   },
   config: BufferConfig,
   processMessage: ProcessMessageFn,

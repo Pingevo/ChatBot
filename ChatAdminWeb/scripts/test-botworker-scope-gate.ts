@@ -253,6 +253,7 @@ async function main() {
 
   await test("C3 platform ON + exact (platform,shop_id) ON → 1 pair; missing/false/other-platform excluded", async () => {
     seedShop("s1", "shopee", true);
+    seedConv("conv_c3", "s1");           // transport evidence (Shop Context contract)
     seedShop("s2", "shopee", false);
     seedShop("s3", "shopee");            // missing → OFF
     seedShop("t1", "tiktok", true);      // platform flag OFF → excluded
@@ -284,6 +285,7 @@ async function main() {
 
   await test("C6 same shop_id on another platform must not inherit access", async () => {
     seedShop("dup", "shopee", true);
+    seedConv("conv_c6", "dup", "shopee"); // transport evidence ฝั่ง shopee เท่านั้น
     seedShop("dup", "tiktok", true);
     const scope = await scopeOf();
     assert(JSON.stringify(pairKeys(scope)) === JSON.stringify(["shopee/dup"]),
@@ -475,6 +477,7 @@ async function main() {
 
   await test("R7 deny-all compose: base query with $or + empty scope → zero docs, nothing overwritten", async () => {
     seedShop("s1", "shopee", true);
+    seedConv("conv_r7", "s1");           // transport evidence → pair emits on non-empty scope
     const emptyScope = await scopeOf({ bot_worker_platforms: { shopee: false, tiktok: false, lazada: false } });
     const base = { status: "processing", $or: [{ a: 1 }, { b: 2 }] };
     const scoped = rt.withScope(base as never, emptyScope);
@@ -751,6 +754,7 @@ async function main() {
   await test("CU4 effective cutoff = max(global edge, platform_at, shop_at)", async () => {
     const g = new Date(1000), p = new Date(2000), s = new Date(3000);
     seedShop("s1", "shopee", true, { enabledAt: s });
+    seedConv("conv_cu4", "s1");          // transport evidence
     const scope = await scopeOf({ bot_worker_platform_enabled_at: { shopee: p } }, g);
     assert(scope.pairs.length === 1, `pairs=${JSON.stringify(scope.pairs)}`);
     assert(scope.pairs[0].cutoff.getTime() === 3000, `cutoff=${scope.pairs[0].cutoff?.toISOString()}`);
@@ -1015,6 +1019,7 @@ async function main() {
 
   await test("RE1 claim with persisted outcome → finalize-only, provider=0", async () => {
     seedShop("s1", "shopee", true);
+    seedConv("conv_re2", "s1");          // transport evidence
     seedMsg("m_re2", "conv_re2", { shop: "s1" });
     seedClaim("m_re2", { conv: "conv_re2", shop: "s1", claimedAgoMs: 5000, outcome_type: "bot_answered", reply_ids: [] });
     const scope = await scopeOf();
@@ -1026,6 +1031,7 @@ async function main() {
 
   await test("RE2 orphan buffer row (claim missing) → deleted, provider=0", async () => {
     seedShop("s1", "shopee", true);
+    seedConv("conv_re3", "s1");          // transport evidence
     seedBufferRow("m_re3", "conv_re3", 2000, { shop: "s1" });
     const scope = await scopeOf();
     await svc.botWorkerService.recoverStaleBuffers(scope);
@@ -1658,6 +1664,7 @@ async function main() {
         lease_expires_at: new Date(Date.now() + 300000),
         batch_id: "b_tp2", message_ids: ["m_tp2t"], platform: "tiktok",
       },
+      shop_ctx: { config_shop_key: "s1", shopname: "s1" },
     } as never,
       { bufferEnabled: true, bufferWindowMs: 60, bufferMaxMessages: 10 },
       svc.botWorkerService.processMessage, async () => {});

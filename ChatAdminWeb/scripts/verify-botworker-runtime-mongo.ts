@@ -297,7 +297,7 @@ interface RunCtx {
   // ⚡ Phase 2D — required cycle-scope snapshot สำหรับ poll/recovery calls
   //   (shape = BotworkerCycleScope — local type, ห้าม import production)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  scope: { config: any; pairs: { platform: string; shop_id: string; cutoff: Date }[]; global_enabled_since: Date | null };
+  scope: { config: any; pairs: { platform: string; shop_id: string; config_shop_key: string; shopname?: string; cutoff: Date }[]; global_enabled_since: Date | null };
 }
 function expect(ctx: RunCtx, id: string, name: string, cond: boolean, detail = "") {
   ctx.results.push({ id, ok: cond, detail: cond ? name : `${name} — ${detail}` });
@@ -317,7 +317,8 @@ async function s1(ctx: RunCtx) {
   const n0 = ctx.fake.calls.length;
   await seedInbound(ctx, mid, conv, `${ID_PREFIX}s1 hello`, new Date());
   const msg = { message_id: mid, conversation_id: conv, shop_id: `${ID_PREFIX}shop`, platform: "shopee", text: `${ID_PREFIX}s1 hello` };
-  const [a, b] = await Promise.all([ctx.svc.processMessage({ ...msg }), ctx.svc.processMessage({ ...msg })]);
+  const msgWithCtx = { ...msg, shop_ctx: { config_shop_key: `${ID_PREFIX}shop`, shopname: `${ID_PREFIX}shop` } };
+  const [a, b] = await Promise.all([ctx.svc.processMessage(msgWithCtx), ctx.svc.processMessage(msgWithCtx)]);
   const claims = await ctx.db.collection(ctx.COLLECTIONS.chatProcessing).find({ message_id: mid }).toArray();
   const replies = await ctx.db.collection(ctx.COLLECTIONS.shadowReplies).find({ conversation_id: conv }).toArray();
   expect(ctx, "S1", "bot called once", ctx.fake.calls.length - n0 === 1, `calls=${ctx.fake.calls.length - n0}`);
@@ -356,12 +357,12 @@ async function s3(ctx: RunCtx): Promise<{ conv: string; mid: string; oldText: st
   const n0 = ctx.fake.calls.length;
   await seedInbound(ctx, mid, conv, oldText, new Date(Date.now() - 60000));
   ctx.fake.setMode(429, { error: "rate_limited" });
-  const r = await ctx.svc.processMessage({ message_id: mid, conversation_id: conv, shop_id: `${ID_PREFIX}shop`, platform: "shopee", text: oldText });
+  const r = await ctx.svc.processMessage({ message_id: mid, conversation_id: conv, shop_id: `${ID_PREFIX}shop`, platform: "shopee", text: oldText, shop_ctx: { config_shop_key: `${ID_PREFIX}shop`, shopname: `${ID_PREFIX}shop` } });
   ctx.fake.setMode(200, SUCCESS_BODY);
   const claim = await ctx.db.collection(ctx.COLLECTIONS.chatProcessing).findOne({ message_id: mid });
   const replies = await ctx.db.collection(ctx.COLLECTIONS.shadowReplies).find({ conversation_id: conv }).toArray();
   const callsAfterFail = ctx.fake.calls.length - n0;
-  await ctx.svc.processMessage({ message_id: mid, conversation_id: conv, shop_id: `${ID_PREFIX}shop`, platform: "shopee", text: oldText });
+  await ctx.svc.processMessage({ message_id: mid, conversation_id: conv, shop_id: `${ID_PREFIX}shop`, platform: "shopee", text: oldText, shop_ctx: { config_shop_key: `${ID_PREFIX}shop`, shopname: `${ID_PREFIX}shop` } });
   expect(ctx, "S3", "claim terminal bot_failed", claim?.status === "bot_failed", `status=${claim?.status} r=${r.status}`);
   expect(ctx, "S3", "call count stays 1 after re-invoke", callsAfterFail === 1 && ctx.fake.calls.length - n0 === 1, `calls=${ctx.fake.calls.length - n0}`);
   expect(ctx, "S3", "no phantom reply", replies.length === 0, `replies=${replies.length}`);
@@ -375,7 +376,7 @@ async function s4(ctx: RunCtx, p: { conv: string; mid: string; oldText: string }
   const mid2 = `${ID_PREFIX}s4_m2`, newText = `${ID_PREFIX}s4 new-turn text`;
   const n0 = ctx.fake.calls.length;
   await seedInbound(ctx, mid2, p.conv, newText, new Date());
-  await ctx.svc.processMessage({ message_id: mid2, conversation_id: p.conv, shop_id: `${ID_PREFIX}shop`, platform: "shopee", text: newText });
+  await ctx.svc.processMessage({ message_id: mid2, conversation_id: p.conv, shop_id: `${ID_PREFIX}shop`, platform: "shopee", text: newText, shop_ctx: { config_shop_key: `${ID_PREFIX}shop`, shopname: `${ID_PREFIX}shop` } });
   const body = ctx.fake.calls[n0]?.body as AnyDoc | undefined;
   const hist = JSON.stringify(body?.history ?? []);
   const claim = await ctx.db.collection(ctx.COLLECTIONS.chatProcessing).findOne({ message_id: mid2 });
@@ -625,6 +626,12 @@ async function runApply(): Promise<number> {
       shop_id: `${ID_PREFIX}shop`, shopname: `${ID_PREFIX}shop`, platform: "shopee",
       connected: true, enabled_for_chat: false, bot_worker_enabled: true,
       bot_worker_enabled_at: new Date(Date.now() - 60_000),
+    });
+    // ⚡ Shop Context — resolver ต้องการ transport evidence ใน conversations
+    //   (canonical id หรือ (platform,shopname)→id 1:1; row ไม่มี evidence = fail-closed)
+    await db.collection(ctx.COLLECTIONS.conversations).insertOne({
+      conversation_id: `${ID_PREFIX}conv_evi`, shop_id: `${ID_PREFIX}shop`,
+      shop_name: `${ID_PREFIX}shop`, platform: "shopee",
     });
     ctx.scope = await botWorkerService.resolveBotworkerScope(await getSystemConfig(), new Date());
     if (!ctx.scope.pairs.length) throw new Error("scope resolution returned no pairs — verify cannot run");

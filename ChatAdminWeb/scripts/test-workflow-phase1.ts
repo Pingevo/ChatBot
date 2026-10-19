@@ -86,6 +86,7 @@ const baseMsg: EngineMessage = {
   message_id: "m1",
   conversation_id: "conv1",
   shop_id: "shop1",
+  config_shop_key: "shop1",
   platform: "shopee",
   text: "สเปคหัวชาร์จ",
 };

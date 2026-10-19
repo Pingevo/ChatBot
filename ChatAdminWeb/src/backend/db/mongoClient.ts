@@ -114,6 +114,14 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.conversations, { pinned: -1, last_message_timestamp: -1 }),
     // ⚡ Phase 1 pagination — compound sort + cursor tiebreaker (กันข้ามแชทที่ timestamp เดียวกัน)
     safeCreateIndex(db, COLLECTIONS.conversations, { pinned: -1, last_message_timestamp: -1, conversation_id: -1 }),
+    // ⚡ botworker scope mapping (2D-review) — name branch {platform,shop_name∈}
+    //   ต้องไม่ COLLSCAN; partial $gt:"" = usable string shop_name เท่านั้น
+    //   (docs ส่วนใหญ่ไม่มี shop_name ห้าม bloat) — declaration เท่านั้น,
+    //   production index creation = operator approval gate แยกต่างหาก
+    safeCreateIndex(db, COLLECTIONS.conversations, { platform: 1, shop_name: 1, shop_id: 1 }, {
+      name: "platform_1_shop_name_1_shop_id_1",
+      partialFilterExpression: { shop_name: { $gt: "" } },
+    }),
     // ⚡ Phase 1 pagination — index สำหรับ pre-fetch assigned_to ids
     safeCreateIndex(db, COLLECTIONS.statusConversation, { conversation_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.statusConversation, { assigned_to: 1 }, { sparse: true }),

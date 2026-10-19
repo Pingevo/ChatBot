@@ -132,7 +132,7 @@ async function main() {
   mocks = await import("./test-botworker-idempotency-mocks.mjs");
   svc = await import("../src/backend/service/botWorkerService");
   const { state } = mocks;
-  SCOPE = { config: mocks.state.config as never, global_enabled_since: new Date(0), pairs: [{ platform: "shopee", shop_id: "shop_1", cutoff: new Date(0) }] };
+  SCOPE = { config: mocks.state.config as never, global_enabled_since: new Date(0), pairs: [{ platform: "shopee", shop_id: "shop_1", config_shop_key: "shop_1", shopname: "shop_1", cutoff: new Date(0) }] };
 
   // ═══ RC — reconcile matrix (provider=0 เสมอ) ═══
 

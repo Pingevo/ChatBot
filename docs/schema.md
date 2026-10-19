@@ -334,6 +334,8 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 
 ชื่อจริงใน production: `conversations_shp` (env `ADMIN_MONGO_COLLECTION_CONVERSATIONS`)
 
+**Indexes (declared `mongoClient.ts::ensureIndexes`):** `{platform:1, shop_id:1, pinned:-1, last_message_timestamp:-1}` + variants เดิม; **2D-correction-r3:** `{platform:1, shop_name:1, shop_id:1}` non-unique, `partialFilterExpression:{shop_name:{$gt:""}}` (docs ไม่มี usable `shop_name` ไม่เข้า index) — รองรับ botworker scope mapping `$or` name-branch (per-name eq clause); **declaration = code เท่านั้น — production index ยังไม่ได้สร้าง/verify** (separate operator approval gate ก่อน Botworker ON)
+
 **Access:**
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
@@ -401,7 +403,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `created_at` | Date | |
 | `updated_at` | Date | |
 | `enabled_for_chat` | boolean | toggle ใน /config |
-| `bot_worker_enabled` | boolean? | 2D — per-shop botworker scope gate; missing = OFF; ใช้ร่วมกับ `platform` เป็น exact pair `(platform, shop_id)` — **แยกจาก** `connected`/`enabled_for_chat`; PATCH = single-command `{bot_worker_enabled, expected_bot_worker_enabled}` (optimistic CAS — persisted≠expected → 409; missing ≡ false; **enable CAS fence `platform∈BOTWORKER_BACKENDS` atomically** — flip ระหว่าง read↔write → miss → 422; disable ไม่ fence; ส่งคู่ `connected` → 422; enable บน platform นอก `BOTWORKER_BACKENDS` → 422; disable ได้เสมอ) |
+| `bot_worker_enabled` | boolean? | 2D — per-shop botworker scope gate; missing = OFF; ใช้ร่วมกับ `platform` เป็น exact pair `(platform, shop_id)` — **แยกจาก** `connected`/`enabled_for_chat`; **2D-correction:** scope pair ที่ emit = `{platform, shop_id=resolved transport id, config_shop_key=shops.shop_id, shopname, cutoff}` — `shops.shop_id` อาจเป็น name-fallback (writer bug เก่า) → resolver map ผ่าน `conversations` evidence (canonical id หรือ `(platform,shopname)→id` 1:1; missing/ambiguous → exclude fail-closed); PATCH = single-command `{bot_worker_enabled, expected_bot_worker_enabled}` (optimistic CAS — persisted≠expected → 409; missing ≡ false; **enable CAS fence `platform∈BOTWORKER_BACKENDS` atomically** — flip ระหว่าง read↔write → miss → 422; disable ไม่ fence; ส่งคู่ `connected` → 422; enable บน platform นอก `BOTWORKER_BACKENDS` → 422; disable ได้เสมอ) |
 | `bot_worker_enabled_at` | Date? | 2D — shop enable rising-edge timestamp; CAS write คู่กับ `bot_worker_enabled` (false→true: stamp now · true→true: คงเดิม · true→false: unset); switch true แต่ timestamp ขาด = **fail-closed** |
 | `disabled_by_user` | string? | |
 | `last_polled_at` | Date? | |
@@ -1226,7 +1228,8 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `workflow_id` | string | ref |
 | `workflow_version` | number | version ตอน run |
 | `conversation_id` | string | ref |
-| `shop_id` | string | |
+| `shop_id` | string | transport identity |
+| `config_shop_key` | string? | **2D-review:** config identity (`shops.shop_id`) freeze ตอน `createRun` — timeout/resume path ใช้ค่านี้ (ไม่มี msg ctx); absent = legacy run ก่อน field → reader ใช้ `shop_id` (runtime field เท่านั้น ไม่ใช่ migration) |
 | `platform` | string | |
 | `customer_id` | string? | |
 | `status` | string | running/waiting_for_reply/completed/cancelled/errored |
@@ -1250,6 +1253,8 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `error` | string? | |
 
 **หมายเหตุ:** `operation_key`/`result`/`resume_results`/ownership fields เป็น optional บน collection เดิม — ไม่มี migration, ไม่มี index ใหม่, legacy runs (ไม่มี operation_key) ทำงานเหมือนเดิม
+
+**EngineResult semantics (2D-correction-r3):** `status:"error"` = true error เท่านั้น — `recoverable:boolean` **required** ที่ type level (false = matched-path death/committed, caller ห้าม fallback; true = op ไม่ commit, caller fall through ได้); non-error status (`actioned`/`resumed`/`no_match`/`exit_to_bot`/`exit_drop`/`in_flight`) ไม่มี recoverable ที่มีความหมาย; resume บน terminal/non-active run → `no_match` (ไม่ใช่ error) — persisted `result`/`resume_results` เก่าที่ไม่มี recoverable field เป็น legacy snapshot อ่านได้ตามเดิม (ไม่ถูก branch ด้วย recoverable ใน dispatcher)
 
 **Access:**
 | Read | getActiveRun | workflow engine |

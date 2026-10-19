@@ -99,6 +99,11 @@ export async function resolveBotworkerScope(config, globalEnabledSince) {
     pairs.push({
       platform: r.platform,
       shop_id: r.shop_id,
+      // ⚡ mirror of production pair contract — fixtures use canonical identity
+      //   (transport id == config key == shopname); mapping evidence จริงถูกพิสูจน์
+      //   ใน scope-gate/shop-context/verify suites ที่รัน resolver จริง
+      config_shop_key: r.shop_id,
+      shopname: r.shopname ?? r.shop_id,
       cutoff: new Date(Math.max(globalEnabledSince.getTime(), pAt.getTime(), r.bot_worker_enabled_at.getTime())),
     });
   }

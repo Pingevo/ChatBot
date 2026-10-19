@@ -28,6 +28,7 @@ import {
   withScope,
   resolveBotworkerScope,
   type BotworkerCycleScope,
+  type ShopMessageContext,
   type BotworkerScopePair,
   type ClaimContext,
 } from "./botworkerRuntime";
@@ -742,10 +743,18 @@ export async function processMessage(msg: {
   raw_payload?: unknown;
   images?: string[];  // ⚡ Phase 1F — image URLs รวมจาก buffer flush
   claimContext?: ClaimContext; // ⚡ batch flusher ส่ง ctx ของ member claims มา — ห้าม claim ซ้ำ
+  // ⚡ resolved shop context จาก scope pair — REQUIRED (resolver owner เดียว attach
+  //   ที่ poll/flush); caller ที่ขาด ctx = contract violation → fail closed
+  shop_ctx: ShopMessageContext;
   // ⚡ outer cancellation signal — era (kill switch/shutdown) / recovery abort
   //   combine กับ claim ownership heartbeat เป็น claimSignal เดียว → ไหลถึง
   //   processClaimedMessage → engineMsg → callBot queue/fetch
 }, signal?: AbortSignal): Promise<{ status: string; detail: string; finalized: boolean; lost: boolean }> {
+  // ⚡ contract boundary — shop_ctx ต้องมาจาก resolved scope pair เสมอ (poll/flush
+  //   attach); ขาด ctx = caller violate contract → reject ก่อน claim (fail closed)
+  if (!msg.shop_ctx || !msg.shop_ctx.config_shop_key || !msg.shop_ctx.shopname) {
+    throw new Error("processMessage: shop_ctx {config_shop_key,shopname} required — resolve scope ก่อนส่งเข้า");
+  }
   let ctx = msg.claimContext;
   if (!ctx) {
     const claimed = await claimMessage(msg);
@@ -798,15 +807,19 @@ async function processClaimedMessage(msg: {
   raw_payload?: unknown;
   images?: string[];
   claimContext?: ClaimContext;
+  shop_ctx: ShopMessageContext; // ⚡ resolved scope context — required contract
 }, ctx: ClaimContext, signal: AbortSignal): Promise<{ status: string; detail: string; outcome?: ClaimOutcome }> {
   // ⛔ Safety guard — กันเรียก platform API โดยไม่ตั้งใจ
   assertPlatformApiDisabled(msg.platform, "send");
   assertPlatformApiDisabled(msg.platform, "read");
 
-  // ดึง shop_name จาก conversation — Python bot ต้องการชื่อร้าน (ไม่ใช่ shop_id ตัวเลข)
-  // เพื่อกรองสินค้าเฉพาะร้านที่ลูกค้าทักเข้ามา
+  // ⚡ shop context — resolved scope ctx เท่านั้น (required — processMessage ปฏิเสธ
+  //   caller ที่ไม่ส่ง): msg.shop_id = transport id เสมอ; config_shop_key =
+  //   shops.shop_id (config-record domain); shopname = catalog key → /chat `shop`
+  //   ไม่มี identity fallback — transport id ไม่เคยเป็น product/persona key
   const conv = await getConversation(msg.conversation_id);
-  const shopName = conv?.shop_name || undefined;
+  const configShopKey = msg.shop_ctx.config_shop_key;
+  const shopName = msg.shop_ctx.shopname;
 
   // ── Guard: ตรวจสถานะ conversation จาก test_status_conversation (source=botworker) เท่านั้น ──
   // ⚡ botworker parallel sandbox — ไม่อ่าน/ไม่เขียน status_conversation จริง
@@ -865,7 +878,9 @@ async function processClaimedMessage(msg: {
   const engineMsg = {
     message_id: msg.message_id,
     conversation_id: msg.conversation_id,
-    shop_id: msg.shop_id,
+    shop_id: msg.shop_id,            // transport domain — run records/runtime identity
+    config_shop_key: configShopKey,  // config domain — workflow/assignment matching
+    shopname: shopName,              // catalog domain — engine bot calls (/chat shop)
     platform: msg.platform,
     text: botText,
     customer_id: conv?.customer_id,
@@ -898,10 +913,18 @@ async function processClaimedMessage(msg: {
         //   คืนโดยไม่มี outcome → claim ค้าง processing → lease หมดแล้ว retry เอง
         return { status: "in_flight", detail: wfResult.detail };
       }
-      if (wfResult.status === "error") {
-        // resume พัง → ข้อความนี้ตกไป trigger/bot ตามปกติ (ไม่ทิ้งลูกค้า)
-        console.error(`[worker] workflow resume error: ${wfResult.detail}`);
-      } else {
+      if (wfResult.status === "error" && wfResult.recoverable === false) {
+        // ⚡ matched-path death (typed field — ไม่ classify จาก reason text): op/run
+        //   ตายหลัง commit → side effect อาจเกิดโดยไม่มีหลักฐาน → terminal ห้าม fall
+        return {
+          status: "bot_failed",
+          detail: `workflow resume error: ${wfResult.detail}`,
+          outcome: { type: "bot_failed", reply_ids: [], extra: { error: wfResult.detail } },
+        };
+      }
+      // ⚡ no_match (run จบแล้ว/resume ไม่ applicable) + error recoverable:true —
+      //   ข้อความยังไม่ถูก flow ใดกิน → fall through ไป match/trigger/bot ตามปกติ
+      if (wfResult.status !== "error" && wfResult.status !== "no_match") {
         const r = await settleWorkflowResult(msg, botText, wfResult, "workflow_resumed", ctx);
         return { status: r.status, detail: r.detail, outcome: r.outcome };
       }
@@ -915,9 +938,8 @@ async function processClaimedMessage(msg: {
         return { status: "in_flight", detail: wfResult.detail };
       }
       if (wfResult.status === "error" && wfResult.recoverable === false) {
-        // ⚡ committed op ตาย terminal (errored/cancelled/corrupt/missing) — op อาจทำ
-        //   side effect ไปแล้วโดยไม่มีหลักฐาน → fall ไป bot จะซ้ำโดยไม่รู้ตัว;
-        //   settle เป็น bot_failed terminal ปลอดภัยกว่า (claim ไม่ค้าง retry ไม่จบ)
+        // ⚡ matched-path death (typed field — ไม่ใช่ reason text) → terminal;
+        //   op อาจทำ side effect ไปแล้ว → LLM ซ้ำอันตราย — ห้าม fall ไป trigger/bot
         return {
           status: "bot_failed",
           detail: wfResult.detail,
@@ -951,13 +973,14 @@ async function processClaimedMessage(msg: {
           outcome: { type: "no_action", reply_ids: [] },
         };
       }
-      // exit_to_bot / no_match / error → fall through ไป trigger → บอท (ตาม pipeline ปกติ)
+      // exit_to_bot / no_match → fall through ไป trigger → บอท (ตาม pipeline ปกติ)
+      //   error ไม่ fall — matched-path failure = bot_failed ข้างบนแล้ว
     }
   }
 
-    // 2. Check trigger
+    // 2. Check trigger — config domain: shop_ids[] เก็บ shops.shop_id ของ admin
     const trigger = await triggerService.matchTrigger(msg.text, {
-      shopId: msg.shop_id,
+      shopId: configShopKey,
       platform: msg.platform,
     });
 
@@ -966,7 +989,7 @@ async function processClaimedMessage(msg: {
       if (trigger.action === "handoff_admin") {
         // ส่งให้แอดมิน — round-robin (operation key → handoff owner dedupe ตอน crash retry)
         const { agentId, mode, inFlight } = await pickAgent(
-          msg.shop_id, msg.platform, msg.conversation_id, undefined,
+          configShopKey, msg.platform, msg.conversation_id, undefined,
           opIdFor(ctx.claim_id, "handoff")
         );
         if (inFlight) {
@@ -1099,7 +1122,7 @@ async function processClaimedMessage(msg: {
         return { status: "in_flight", detail: wfResult.detail };
       }
       if (wfResult.status === "error" && wfResult.recoverable === false) {
-        // ⚡ committed op ตาย terminal — settle bot_failed เหมือน branch workflow_first
+        // ⚡ matched-path death (recoverable:false typed field) — bot_failed terminal
         return {
           status: "bot_failed",
           detail: wfResult.detail,
@@ -1117,7 +1140,7 @@ async function processClaimedMessage(msg: {
           outcome: { type: "no_action", reply_ids: [] },
         };
       }
-      // exit_to_bot / no_match / error → ไปบอท (fall through)
+      // exit_to_bot / no_match → ไปบอท (fall through); error = bot_failed ข้างบน
     }
 
     // ── ไม่แมทช์ trigger → ส่งให้บอทตอบ → เก็บใน shadow_replies ──
@@ -1151,7 +1174,7 @@ async function processClaimedMessage(msg: {
     if (!botResp.answer || botResp.answer.trim() === "") {
       // บอทตอบไม่ได้ → ส่งต่อแอดมิน
       const { agentId, mode, inFlight } = await pickAgent(
-        msg.shop_id, msg.platform, msg.conversation_id, "bot empty answer",
+        configShopKey, msg.platform, msg.conversation_id, "bot empty answer",
         opIdFor(ctx.claim_id, "handoff")
       );
       if (inFlight) {
@@ -1529,6 +1552,13 @@ async function pollNewMessagesInEra(
     //   claim แพ้ (E11000/lease active/terminal) → skip ไม่เรียก LLM
     const p = (async () => {
       try {
+        // ⚡ shop context — doc ผ่าน scope filter มาแล้ว → pair (platform+transport)
+        //   มีเสมอ; miss = invariant violation → fail closed ก่อน claim (0 query)
+        const pair = scope.pairs.find((p) => p.platform === doc.platform && p.shop_id === doc.shop_id);
+        if (!pair) {
+          console.log(`  [worker] ${doc.message_id.slice(0, 20)}... → skip: no scope pair (unresolved ctx)`);
+          return;
+        }
         const claimed = await claimMessage(doc, signal);
         if (claimed.kind !== "claimed") {
           const detail = claimed.kind === "skip" ? claimed.detail : `${claimed.status}: ${claimed.detail}`;
@@ -1548,6 +1578,7 @@ async function pollNewMessagesInEra(
             created_timestamp: doc.created_timestamp,
             admitted_edge: scope.global_enabled_since,
             claimContext: claimed.ctx,   // ⚡ row ถือ ctx ไปจนถึง batch processor
+            shop_ctx: { config_shop_key: pair.config_shop_key, shopname: pair.shopname },
           },
           bufferConfig,
           processMessage,
