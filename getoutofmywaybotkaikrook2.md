@@ -20,6 +20,76 @@
 
 ## กำลังทำ (active)
 
+### ✅ PHASE 4A IMPLEMENTED (uncommitted, flag OFF) + 4B design-only — Source Union + Atomic Daily Refresh · (design 2026-10-19, impl round ล่าสุด) · รอ independent review
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `3b26920` · tree clean (แก้เฉพาะไฟล์นี้+roadmap) · staging empty · `git diff --check` clean · Phase 3 impl `3e8308f` · `grouped_retrieval_selection_enabled` = OFF contract (env `"0"`, fail-closed runtime_config, admin default false — live DB ไม่ได้อ่านเพราะห้าม Mongo)
+- **active blocker**: `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — executor union วันนี้มีแค่ `units` + `legacy` (proven `retrieval_executor.py:194-196`) — flag ห้ามเปิดจนกว่า Phase 4+ phases ถัดไปอนุมัติ
+- **scope รอบนี้**: correction ของ design เดิม (identity 2 domains, control-flow จริง, stale anchor, KB safety, honest budget) + เพิ่ม Phase 4B atomic daily refresh — design/doc เท่านั้น
+- **ห้าม**: implement/เขียน test, semantic keyword table, helper/guard chain, policy ใน executor, second pool, model/provider call ใหม่, unbounded query, Phase 5/7 scope, botworker/admin UI, `.env`/Mongo/provider/port 8010/stage/commit/push, cron install
+- **corrections จากรายงานเดิม**: (a) identity `item_id→unit_id→name` ผิด — merge ได้ข้าม variant; แก้เป็น 2 domains (ด้านล่าง) (b) "ย้าย 2 callsites" ผิด — จริงคือ execution callsite เดียวที่ app.py:1831 (ก่อน branch split) + consumption 2 จุด (KB:2278, main:4459) → ลบจุดเดิมแล้วย้ายเข้า branch หลัง evidence พร้อม (c) "+0 queries" ผิด — มี bounded reads เพิ่มสูงสุด +5/turn (ดู budget) (d) O9 แก้ข้อเท็จจริง: truncation เงียบอยู่ที่ pool `pooled[:per_request_limit]` (`candidate_pool.py:242`) ไม่ใช่ executor
+
+#### Identity model (2 domains — corrected, final contract)
+- **Candidate identity** (1 key/card, finest granularity): `u:{unit_id}`/`v:{item_id}#{model_id}` (variant — unit_id ที่ parse `item:model` ได้ → v-key เดียวกัน) → `i:{item_id}` (listing-level เท่านั้น) → `n:{shop}:{normalized_name}` + `identity_quality="name_only"`
+- merge iff identity_key เดียวกันเท่านั้น · `m:{model_id}` เดี่ยว **ห้าม** merge (model_sku ข้าม item ชนกันได้ — bug เดิม `var_idx`/`_identity_keys`) · variant ต่างกันห้าม merge เพราะ share item_id
+- **Listing vs variant (A — corrected)**: ถ้า item มี ≥1 **non-rejected** variant candidate → listing `i:` ของ item นั้น **ห้าม** เป็น selectable candidate — evidence ของมันแปลงเป็น attachment domain `item` join ทุก variant (source provenance ยังติด candidate); ถ้า variant มีแต่ rejected (hidden) → listing ยังเป็น candidate ปกติ; ไม่มี variant เลย → listing เป็น candidate เสมอ
+- **Attachment identity**: domain `item` (`i:` → join ทุก variant ของ item) · domain `model`/`v` (`v:{iid}#{mid}`/`u:` → เฉพาะ variant ที่ตรง; ไม่มี variant candidate → fallback listing `i:` + trace) · domain `name` (`n:` เท่านั้น, low-confidence) · attachment join ไม่เคย collapse candidate
+- `EvidenceAttachment` +`identity_domain` + `payload: dict|None` (bounded: snapshot/listing evidence เท่านั้น) · `PooledCandidate` +`identity_quality` + `linked_item_id`
+
+#### Phase 4B design notes (B+C — design only, ห้าม implement รอบนี้)
+- **One generation snapshot per request**: แต่ละ request resolve `{generation_id, collection, npz}` ครั้งเดียวแล้วใช้ snapshot เดิมทั้ง Mongo unit lookup + embedding lookup — loaders ห้าม resolve pointer เอง · versioned NPZ immutable, `os.replace` เฉพาะ temp→final ใน generation path เดียวกันก่อน activation · pointer write เดียว activate pair ที่ validate แล้ว · mismatch ห้าม combine artifacts ข้าม generation
+- **Fail-closed pointer**: pointer หาย/invalid/อ่านไม่ได้ → ห้าม fallback เงียบไป base `sellable_units` — grouped semantic selection unavailable → keyword/non-generation path เดิม (หรือ fail closed) · เก็บ previous gen ไว้ rollback + in-flight requests · cleanup gen เก่าเฉพาะหลัง bounded grace period — ห้ามลบทันทีหลัง activation
+
+#### Control flow (corrected — 1 profile/1 union/1 pool/1 selection per eligible turn)
+- ลบ execution callsite ที่ `app.py:1831` (ก่อน branch split — computed ก่อน evidence พร้อม)
+- KB path (kb_docs ไม่ว่าง): `run_grouped_selection(...)` หลัง `_merge_kb_mongo`+`_device_spec_lookup`, ก่อน consumption 2278 — kwargs: `subject_cards`, `compat_cards=_kb_device_products`, `kb_cards` (pre-resolved), `supporting=`
+- Main path: `run_grouped_selection(...)` หลัง `_device_spec_lookup`+`qa_context`, ก่อน consumption 4459 — kwargs: `subject_cards`, `compat_cards=_device_additional`, `kb_fetcher=` (lazy owner), `supporting=`
+- KB/main mutually exclusive → runtime รัน callsite เดียวเสมอ; orchestration คงใน `retrieval_runtime`; app.py ส่งแค่ pre-resolved evidence (ไม่ duplicate source logic)
+- executor +`channels=((name, fn), ...)` → synthetic `RetrievalRequest(request_id="channel:{name}", source="channel", empty filters)` ต่อ channel (bucket = availability-only เพราะ `eff_types` ว่าง → ไม่ reject ที่ 113) → append เข้า `requests` ที่ส่ง selector → channel ได้ quota ตัวเอง (ไม่กิน quota ของ slot)
+
+#### Stale subject/anchor contract
+- snapshot = identity+history เท่านั้น ไม่ใช่ live truth · collect ids ทั้งหมด → **1 batched** `product_store.fetch_products_by_ids` (owner ใหม่ — verified ไม่มี owner เดิมรองรับ `$in` batch; `_rebuild_card`/`fetch_product_by_id` = find_one/entry = N+1) + ≤1 `sellable_units` batch สำหรับ model-level entries
+- live hit → live card (`_live=True`) · miss → stored snapshot `_snapshot_only=True` + strip `short_link`/`link` (purchase affordance)
+- `make_evidence_card` snapshot branch: `_snapshot_only` → publish=unknown, stock=unknown, `customer_visibility="historical_only"`, `availability_reason="snapshot_stale"` → sellable=False → unavailable bucket (`_VIS_ORDER` รองรับ historical_only อยู่แล้ว)
+- live+snapshot same identity → `_merge_group` live wins · snapshot evidence เก็บผ่าน attachment `kind="subject_snapshot"` (+payload) — ตอบ spec/history ได้, ห้ามขาย/ลิงก์ (promoted-subject note มีอยู่แล้ว runtime:90-95)
+
+#### KB-only safety contract
+- kb doc + item_id → `kb_product` attachment join candidate เดิม (item domain)
+- kb doc + model_code (ไม่มี item_id) → kb fetcher ยิง **1 bounded** shop-scoped model listing lookup (`fetch_products_by_models` owner ใหม่ — `$or` regex, limit 20) → matches = candidates (sources+="kb"); kb doc = attachment domain `model`; no match → `supporting_evidence` เท่านั้น
+- kb doc name-only → `supporting_evidence` record เท่านั้น — **ไม่ใช่ candidate เด็ดขาด** (กัน "ร้านมีแต่หมด" เท็จผ่าน unavailable note)
+- kb_qa/kb_raw/vision text → `supporting_evidence` เสมอ · KB text ไม่มีสิทธิ์บอก stock/publish
+
+#### Honest query budget (flag-ON union, per eligible turn)
+- always: units ≈5 Mongo reads/request (sellable-set+units `$in`+kb_products+image_texts+listing join) ×R(1-2) · legacy `fetch_products` ≈2-5/request ×R — เท่าเดิม
+- conditional: subjects ≤2/turn (`$in` batch — **แทน** `_rebuild_card`/`fetch_product_by_id` find_one×N เดิม → net ≤0 เมื่อ ≥2 subjects) · kb ≤3/turn (bounded light scan + full docs + model listing) เฉพาะเมื่อมี model/product identity
+- reused (+0): compat (`_device_additional`), supporting (qa/vision), OCR joins (นับใน units แล้ว)
+- **max additional vs today: +5 bounded reads worst-case, โดยทั่วไป +0-2** · LLM/provider +0 · local npz เท่าเดิม · ทุก cursor มี `.limit` · ไม่มี N+1 · source fail 1 ตัวไม่กระทบตัวอื่น (attempt.error เดิม)
+
+#### Phase 4A manifest + RED tests (ทำแล้ว — ผลลัพธ์ที่ท้ายไฟล์: "Phase 4A implementation record")
+- **files**: `retrieval_executor.py` (channels + `RetrievalExecutionResult.supporting_evidence`/`attachment_evidence`) · `retrieval_runtime.py` (kwargs + channel requests→selector + `_identity_keys` single-key) · `candidate_pool.py` (`identity_key`/`identity_quality`/`linked_item_id`/attachment domains/`supporting_evidence` populate/dropped-candidate trace) · `retrieval_policy.py` (`_snapshot_only` branch) · `product_store.py` (`include_unit_index` + `fetch_products_by_ids` + `fetch_products_by_models`) · `conversation_products.py` (`materialize_subject_cards` batch) · `knowledge_base.py` (kb channel owner + cap light scan) · `app.py` (del callsite 1831 + 2 branch callsites) · SRS + `docs/test/test_phase4_source_union.py` (new)
+- **RED tests 4A** (owner→expected RED): T1 channel attempts absent · T2 `include_unit_index`+partial-units listing visible · T3a/b/c kb identity tiers (model→bounded lookup+attach / no-match→supporting / name-only→supporting) · T4 supporting populated · T5 subject cards candidates · T6 compat channel · T7 anchor marks · T8 deleted anchor→unavailable `snapshot_stale` ไม่มี link · T9 order-linked item · T10 image_text attachment+trace · T11 image/video regression pin (GREEN) · T12 per-channel failure isolation · T13 bucket sweep pin · T14a cross-source same-identity merge · **T14b two variants one item_id stay 2 candidates (RED วันนี้: `var_idx`/`_identity_keys` collapse ผ่าน `i:`/`m:` shared)** · T15 item-level attach→ทุก variant, model-level→variant เดียว · T16 name-only no-merge+low-confidence · T17 dropped-candidate trace · T18 counts incl. supporting/attachment · T19 LLM calls +0 pin · **T20 call count==1 ทั้ง 2 branches (spy)** · T21 snapshot+live merge live-wins + `subject_snapshot` attachment · T22 stale published/stock → never sellable
+
+#### Phase 4B — Atomic Daily Evidence Refresh (design-only; no cron install)
+- **current-order facts (verified)**: `refresh_data.sh` ทำ unit embeddings **ก่อน** OCR → OCR ไม่เข้า search_text ของรอบเดียวกัน · unit `search_text` ไม่มี OCR (build_sellable_units.py:174-175) · npz tmp+`os.replace` แต่ verify **หลัง** replace (build_embeddings.py:154-172) · unit import upsert เข้า live collection ไม่มี generation boundary · stale units ไม่เคยถูกลบ
+- **order ใหม่**: lock → export snapshot → discover image identities (fingerprint) → OCR เฉพาะ new/changed/error-retry → import image_texts → build units จาก snapshot เดียวกัน + OCR (คราวนี้มีผล) → build embeddings (staging `exports/gen/<gid>/`) → validate ทุก artifact → publish (npz `os.replace` → pointer write) → runtime auto-reload → retain gen ก่อนหน้า 1 ชุด → drop ที่เก่ากว่า
+- **`generation_id`** เดียวทั้ง run — manifest บันทึก: gid, timestamps, doc/unit counts, embed rows/dims, OCR discovered/new/success/error/deferred, artifact hashes/sizes, validation, published/failed — ห้าม log secret/customer data
+- **Atomic publish — แนะนำ B′ (collection-per-generation + pointer doc)**: `sellable_units_meta {_id, active:{collection:"sellable_units_g<gid>", generation_id, npz:"unit_embeddings_g<gid>.npz"}}` · `_units_coll()` resolve ผ่าน pointer (TTL cache ~30-60s, fail→fallback ชื่อ base) · publish = `update_one` เดียว atomic · rollback = pointer กลับ · stale units เป็นไปไม่ได้ (แยก collection) · query sites ไม่ต้องแก้ · **A (rename)** ตัดเพราะ: ต้อง `renameCollection` privilege (ไม่ verified), rebuild indexes, และที่สำคัญ — **npz↔collection pairing ด้วย mtime+rename เป็น 2 atomic ops แยกกัน → มีหน้าต่าง generation ไม่ตรง (recall เงียบ)**; B′ ผูก pair ใน pointer เดียว + npz ฝัง `generation_id` → runtime assert `npz.gen == pointer.gen`, mismatch → degrade keyword path (bounded, ไม่ corrupt)
+- **Incremental OCR**: fingerprint = `image_id + normalized_url` (content hash เฉพาะตอน download อยู่แล้ว) · new→OCR · error→retry bounded (≤N/run) · same id+url เปลี่ยน→reprocess · unchanged ok→skip · removed→เก็บ record แต่ `item_ids` คำนวณจาก export ปัจจุบัน (ไม่ attach) · quota หมด→`deferred` (ไม่ใช่ error) · partial finish OK — success เข้า gen นี้ ที่เหลือรอบหน้า · counts ใน manifest
+- **OCR→embedding**: `kind=spec|variant_map|product` เข้า `search_text` ภายใต้ cap (spec ≤400/variant_map ≤200/product ≤200 ตัวอักษร, รวม ≤800) + dedupe + boilerplate filter (ข้อความที่โผล่ >K% ของ listings ตัด) · `kind=banner`/noise → supporting-only ห้ามเข้า embedding · full OCR คงเป็น attachment (`attach_image_texts` เดิม)
+- **ops safety**: dir lock กัน overlap (มีอยู่) · bounded OCR calls/run · แนะนำ dedicated `IMGTXT_*` quota — ถ้าไม่มี document ว่า 03:00 ปลอดภัยกว่า 09:00 (แย่ง quota ช่วงลูกค้าใช้งาน) · export fail→abort · OCR partial ไม่ corrupt gen · validation fail→ไม่ publish · gen เก่ายัง active · AI ไม่ install cron — operator ตั้งเองหลัง deploy
+- **Phase 4B files**: `scripts/refresh_data.sh` (reorder+staging+publish) · `scripts/build_image_texts.py` (fingerprint/retry/deferred) · `scripts/build_sellable_units.py` (gid+OCR-aware search_text) · `scripts/build_embeddings.py` (verify-before-replace+gid npz) · `scripts/import_sellable_units.py`→staging coll+pointer publish · `units.py` (pointer-aware `_units_coll`+npz gen pairing) · `docs/DEPLOY.md` (corrected order+ops doc เมื่อ implement — ตอนนี้ doc ปัจจุบันยังถูกต้อง) · `docs/test/test_phase4b_refresh.py` (new) · SRS
+- **RED tests 4B**: B1 fingerprint classify · B2 quota→deferred · B3 staging coll+pointer order · B4 verify-before-replace · B5 npz↔gen pairing · B6 manifest counts/hash · B7 publish fail→prev active · B8 OCR→search_text kinds/caps/banner-exclusion/dedupe · B9 missing OCR non-blocking · B10 lock pin
+
+#### Waythrough verdict
+`PHASE_4A_SOURCE_UNION_READY_FOR_INDEPENDENT_REVIEW_PHASE4B_NOT_STARTED` — Phase 4A implement+verify เสร็จ (record ท้ายไฟล์) · 4B ยัง design-only ห้ามรวม diff เดียว
+
+#### 🔧 Phase 4A review-fix round — 2 High + 2 Medium (กำลังทำ)
+- **baseline**: branch `feature-phase3-aswer-quality` · manifest เดิม · staging empty · defect ที่ 1 reproduce แล้ว: `v:i1#m1` จาก request+compat channel → **2 PooledCandidate rows** (request_ids/sources แยก — set-masked)
+- **F1 (High)**: `build_candidate_pool` dedupe per-`RetrievalExecutionResult` → แก้เป็น **global identity grouping** ต่อ turn — groups รวมข้าม results, request_ids สะสม, per-request score/role/quota คงผ่าน by_request + `req.slot_id`/`req.relation_id` ที่ selector
+- **F2 (High)**: `kb_product_evidence` attach ทุก model_doc กับทุก found product (cross-model contamination) → per-doc matching ด้วย `_doc_matches_model`/`_model_token_in_name` (boundary-aware, ไม่เพิ่ม regex table) — matched→attach (model row match→`v:` domain, item_name→`i:` domain), unmatched→supporting ราย doc
+- **F3 (Medium)**: KB callsite ส่ง `supporting` เป็น dict → `tuple(dict)` กลายเป็น keys "kind"/"text" → แก้ producer ส่ง list ของ dict (main path ถูกอยู่แล้ว)
+- **F4 (Medium)**: `fetch_product_docs_by_ids` unscoped fallback → cross-shop live card รั่ว → shop_filter มี → scoped query เดียว ไม่ fallback (missing→snapshot); ไม่มี shop_filter → 1 unscoped query (query budget: scoped=1 ลงจาก ≤2)
+- **ห้าม**: redesign 4A, 4B, เปิด flag, stage/commit, helper/guard chain, cleanup layer
+
 ### 🔧 Phase 2C.1 — Evolve TurnDecision In Place เป็น Multi-Need TurnPlan (2026-10-15) · RED→GREEN→verify เสร็จ · รอ independent review · ยังไม่ commit
 
 - **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `4edd273` · working tree & staging clean · Phase 2B ปิดและ commit แล้ว
@@ -4674,3 +4744,162 @@ config-failclosed 4/4 · boundary 20/20 · recovery-freshness 60/60 · error-pol
 **Residual blocker**: `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — executor unions units+legacy เท่านั้น; KB identity/compat/order-history/image-OCR = Phase 4 — **flag ยัง OFF**
 
 **Safety**: ไม่มี push/PR/deploy/botworker/provider/Mongo/.env/port-8010 — commit locally เท่านั้น
+
+---
+
+## ✅ Phase 4A — Source Union IMPLEMENTATION record (ผ่านแล้ว — uncommitted, flag OFF, รอ independent review)
+
+**สั่งทำ**: implement Phase 4A เท่านั้น — evidence-preserving source union หลัง grouped-selection flag, 1 canonical pool/turn, ลบ early execution · ห้าม 4B/Phase5/เปิด flag/stage/commit
+
+**baseline**: branch `feature-phase3-aswer-quality` @ `3b26920` · แก้เฉพาะไฟล์ใน manifest · staging empty · `git diff --check` clean
+
+### Root cause → Fix → Impact (per case)
+
+- **error**: 2 units ใต้ item เดียว merge เหลือ candidate เดียว + `m:{model_id}` เดี่ยว merge ข้าม item
+  - **cause**: `var_idx` merge ด้วย `m:` ล้วน + `item_owner` ยัด listing เข้ากลุ่ม variant แรก; `_identity_keys` คืน `i:`+`u:`+`m:` ทั้งหมด → unit 2 ตัว share `i:X` ถูก final dedupe ยุบ
+  - **fix**: `_identity_key` owner เดียว (`v:`/`u:`→`im:item#model`→`i:`→`n:` — 1 key/card, merge iff key เท่ากัน); `_identity_keys` (runtime) delegate ไป owner เดียว; `_join_attachment` owner เดียว (item/model/name domains); listing `i:` ที่มี non-rejected variant → แปลงเป็น item-domain attachment (ไม่ใช่ selectable); rejected variant ไม่ suppress listing
+  - **impact ต่อเคสอื่น**: `test_retrieval_selection`/`_runtime` ที่ pin identity เก่า migrate เป็น contract ใหม่; listing-merge เดิมที่เคยช่วย dedupe ผิดหายไปโดยตั้งใจ
+- **error**: subject materialize ทำ `find_one`×N ต่อ entry
+  - **cause**: `materialize_subject_cards` วน `_materialize_card`→`_rebuild_card`→`fetch_product_by_id` ทีละ id
+  - **fix**: collect ids → `fetch_product_docs_by_ids` (1 bounded `$in`, ≤2 attempts) + ≤1 `sellable_units` find — live doc เจ้าของ publish/stock/link
+  - **impact**: model-level entry → unit card จาก batch เดียวกัน; live miss → snapshot `_snapshot_only`
+- **error**: snapshot/stale subject เคยเลี้ยง truth จาก fields เก่า
+  - **fix**: `_canonicalize` snapshot branch — `_snapshot_only` → publish/stock=unknown, `customer_visibility=historical_only`, `availability_reason=snapshot_stale`, sellable=False, strip link; merge กับ live → live wins + emit `subject_snapshot` attachment
+  - **impact**: ตอบ spec/history ได้ ห้ามขาย/ลิงก์ — พฤติกรรมเดิมของ runtime note คงไว้
+- **error**: KB name-only/text เสี่ยงกลายเป็น candidate หรือบอก stock/publish
+  - **fix**: `kb_product_evidence` owner — item_id→attachment, model→1 bounded shop-scoped `fetch_products_by_models` ($or regex, limit) → live listing cards, no-match/name-only→supporting; `_canonicalize` เรียก resolver เฉพาะ card ที่มี availability primitives (กัน `model` string ของ KB doc ทำ `resolve_availability` ล้ม — latent crash)
+  - **impact**: KB ไม่เคยผลิต sellability/publish/stock
+- **error**: selection คำนวณก่อน branch evidence พร้อม (exec ที่ app.py:1831 ก่อน branch split)
+  - **fix**: ลบ early callsite; KB branch (หลัง `_merge_kb_mongo`+`_device_spec_lookup`, ก่อน consumption 2278) + main branch (หลัง qa_context, ก่อน consumption 4473) เรียก `run_grouped_selection` เจ้าเดียว — mutually exclusive → 1 exec/turn; app ส่งแค่ `subject_cards`/`compat_cards`/`kb_fetcher`/`supporting`
+  - **impact**: executor +`channels` (synthetic `channel_request` ต่อ channel — quota ตัวเอง ไม่กิน slot); `RetrievalExecutionResult` +supporting/attachment; source fail isolated ผ่าน `attempt.error` เดิม
+- **error (test-side, ระหว่างทาง)**: `sys` ไม่ได้ import ใน conversation_products → batch-fallback log crash; shadow fixture ขาด canonical stamps → resolver ตีเป็น unknown/hidden (pre-existing บน HEAD — ยืนยันแล้ว); FakeColl `_match` ขาด `$or`
+  - **fix**: import `sys`; fixture +canonical status fields (intent เดิม); `_match` +`$or` (additive harness)
+  - **impact**: ไม่มี production behavior change จาก 3 จุดนี้
+
+### Structural gate (source-verified)
+
+- **execution/turn = 1**: `run_grouped_selection` callsites = app.py:2272 (KB) + 4476 (main) — branches mutually exclusive, early exec ลบแล้ว (grep: ไม่มี callsite อื่นใน app.py)
+- **candidate identity owner = 1**: `candidate_pool._identity_key` (runtime `_identity_keys` delegate) · **attachment-join owner = 1**: `candidate_pool._join_attachment` (1 def / 1 callsite) · **subject batch owner = 1**: `materialize_subject_cards` (0 `find_one` ใน body; 1 units `find` + `fetch_product_docs_by_ids` ≤2 attempts)
+- **listing+variant ไม่ duplicate**: non-rejected variant ≥1 → listing เป็น attachment; **cross-item `m:` merge เป็นไปไม่ได้**: ไม่มี `m:`-alone key เหลือ
+- **legacy cards ห้ามกลับเข้ามา**: `if _sel_flag:` → `products = _grouped_sel["selected_cards"] if _grouped_sel else []` ทั้ง 2 boundaries (ไม่ merge กับ `_products`); flag-ON None/raise → `[]`
+- **flag OFF**: `grouped_retrieval_selection_enabled`/`USE_GROUPED_RETRIEVAL_SELECTION="0"` ไม่ถูกแตะ; admin default false
+- **4B production files changed = 0**: `units.py`, `refresh_data.sh`, `build_*.py`, `import_sellable_units.py`, `DEPLOY.md`, cron — ไม่อยู่ใน diff
+- **new model/provider calls = 0** (grep diff: 0) · **new keyword tables = 0** · **parallel old/new execution = 0**
+
+### Deltas (honest)
+
+- runtime **+548/−89** (app +44/−11 · candidate_pool +166/−40 · conversation_products +67/−7 · knowledge_base +97/0 · product_store +80/0 · executor +42/−6 · planner +17/0 · policy +23/−4 · runtime +36/−21)
+- top-level functions **+6** (`_identity_key`, `_join_attachment`, `kb_product_evidence`, `fetch_product_docs_by_ids`, `fetch_products_by_models`, `channel_request`) — ทุกตัว own boundary จริง; nested helpers +3 (`_payload`,`_sup`,`_norm`); ลบ nested `_key` −1
+- queries: subjects find_one×N → ≤3 bounded (`$in` ≤2 + units ≤1) · kb +≤1 model listing · compat/supporting/OCR +0 (reuse) · **worst-case +5 bounded reads/turn, ทั่วไป +0-2** — ตรง budget ที่ประกาศ
+- tests: `test_phase4_source_union.py` ใหม่ 648 บรรทัด (26 cases) · migrated tests 4 files (+26/−8) · harness additive `$or`
+
+### Verification (fresh, focused เท่านั้น — ไม่มี broad regression)
+
+- contract suite: **RED 23F/3P (honest missing-feature) → GREEN 26/26**
+- focused suite รวม (12 files — contract 26 + retrieval_selection 82 + selection_runtime 25 + shadow 7 + executor 30 + requests 21 + boundary 10 + subject_set + availability_subjects_5c + canonical_card + kb_import + incident_replay 101): **358 passed, 19 skipped, 5 xfailed, 0 failed** (fresh run เดียว)
+- standalone `test_compat_mode_filter.py`: self-checks PASS (script ไม่ใช่ pytest)
+- `py_compile` 9 touched files ✓ · `git diff --check` clean · fixture validator ไม่ต้องรัน (fixtures ไม่เปลี่ยน) · 0 staged
+
+**Residual blocker**: `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — source union เสร็จแล้วแต่ flag ยัง OFF จนกว่า evidence-policy + answer-boundary review phases อนุมัติ
+
+**Safety**: ไม่มี Mongo/provider/botworker/port-8010/deploy/cron/.env/stage/commit/push — working tree เท่านั้น
+
+---
+
+## ✅ Phase 4A REVIEW-FIX round — 2 High + 2 Medium findings (ผ่านแล้ว — uncommitted, flag OFF)
+
+**สั่งทำ**: fix 4 findings จาก independent source audit ที่ owners เดิมเท่านั้น — ห้าม redesign 4A / เริ่ม 4B / เปิด flag / stage / commit
+
+**baseline**: branch เดิม @ `3b26920`, tree = Phase 4A uncommitted; ก่อนแก้ reproduce defect จริง (`v:i1#m1` จาก request+compat → pool มี 2 rows identity เดียวกัน sources แยก)
+
+### Root cause → Fix → Impact (per finding)
+
+- **error (High-1)**: identity เดียวกันจาก 2 results → `PooledCandidate` 2 rows (request_ids/sources แตกเป็น 2 ส่วน; set(identity) ปิดบังได้)
+  - **cause**: `build_candidate_pool` dedupe ภายใน result เดียวแล้ว `all_pooled += pooled` — group ใหม่ต่อ result ไม่ merge ข้าม turn
+  - **fix**: global grouping — เก็บ cards ทุก result เข้า `groups[identity]` เดียวก่อนสร้าง candidate; merge sources+request_ids ข้าม turn; per-request score/role/slot/relation เก็บที่ `request_scores`/`by_request`; attachment join บน unique list; per-result dedupe path เดิมถูก restructure ออกใน diff เดียวกัน (ไม่มี cleanup ภายหลัง)
+  - **impact**: `select_for_llm_context` วน `c.request_ids` อยู่แล้ว → candidate เดียวเข้าร่วมทุก request ที่ match พร้อม request-specific role; final selected 1 row
+- **error (High-2)**: KB attachment `model=K9` ผูกเข้า product K10/K90 (cross-model contamination)
+  - **cause**: `kb_product_evidence` fetch products รวมครั้งเดียวแล้ว loop `for doc in found: for d in model_docs:` — ผูกทุก doc เข้าทุก product
+  - **fix**: match ต่อ doc — `_doc_matches_model`/`_model_token_in_name` เจ้าของเดิม (boundary-aware: K9≠K90) หา row ที่ตรง → attach เฉพาะ item/model นั้น; doc ที่ไม่ match → supporting อิสระ; query ยัง 1 bounded shop-scoped `$or`
+  - **impact**: ตาราง semantic/regex ใหม่ = 0; name-only ยัง supporting-only
+- **error (Med-3)**: pool ได้ supporting เป็น string `"kind"`/`"text"` แทน dict
+  - **cause**: KB callsite ส่ง `{"kind","text"}` bare dict → iterate dict = keys เป็นสตริง (tuple-key shape)
+  - **fix**: producer ส่ง `[{"kind","text"}]` เหมือน main branch (`_qa_ctx`/`_vision_context`); ไม่เพิ่ม coercion ใน runtime
+  - **impact**: records เป็น dict end-to-end; main path ไม่เปลี่ยน
+- **error (Med-4)**: subject ของร้านอื่นกลายเป็น live card ข้าม shop
+  - **cause**: `fetch_product_docs_by_ids` scoped miss → unscoped fallback query หยิบ doc ร้านอื่น id เดียวกัน
+  - **fix**: ลบ unscoped fallback เมื่อมี `shop_filter` — scoped miss = missing → `materialize_subject_cards` emit `_snapshot_only` (historical_only, sellable=False, ไม่มี link); unscoped 1 query อนุญาตเฉพาะไม่มี shop_filter; `fetch_product_by_id` ไม่แตะ (ไม่อยู่ path นี้)
+  - **impact**: query budget ลดเหลือ 1 product read (ไม่ใช่ ≤2) — บันทึก SRS แก้ตาม
+- **error (test-side)**: FakeColl `_get_path` เดินทาง `model.model_name` ลง list ไม่ได้ → bounded `$or` query ไม่ match docs ใน harness (Mongo จริง match array elements)
+  - **fix**: `_get_path` descend เข้า list fields (additive harness เหมือน `$or` รอบก่อน)
+  - **impact**: ไม่มี production behavior change
+
+### Structural gate (re-verified)
+
+- duplicate identity rows ใน pool = **0** (assert ด้วย list len ไม่ใช่ set) · 1 canonical candidate owner · no second pool · no cleanup chain
+- 2 variants/item = 2 candidates · same model_id ต่าง item = separate · item attachment join ต่อ unique candidate 1 ครั้ง
+- KB cross-model contamination = 0 · unmatched docs → supporting · supporting dict records end-to-end · cross-shop live card = 0 (snapshot เท่านั้น)
+- `run_grouped_selection` callsites ยัง 2 (mutually exclusive → 1 exec/turn) · flag OFF · 4B files = 0 · helper/flag/module/provider เพิ่ม = 0
+
+### Deltas (review-fix เท่านั้น)
+
+- runtime (vs pre-review-fix tree — diff vs HEAD รวม 4A+fix เป็นก้อนเดียว): candidate_pool restructure เป็น global grouping · knowledge_base per-doc match · app.py 1 จุด (`{"kind"…}` → `[{"kind"…}]`) · product_store ลบ unscoped fallback block (~9 บรรทัด, ฟังก์ชันยัง all-new vs HEAD) · retrieval_selection ใช้ request-scoped slot/relation/score จาก `req`/`request_scores`; top-level functions **+0**, helpers **+0**, obsolete per-result group logic ลบใน diff เดียวกัน
+- tests: contract +13 cases (648→893 บรรทัด; A-identity 6, B-KB 4, C-shape 2, D-scope 1)
+
+### Verification
+
+- **RED 10F/5P** (assert failures จริง: dup rows `['v:i1#m1','v:i1#m1']`, cross-model attach `{'7001':['K9','K10']}`, bare-dict supporting, cross-shop doc) → **GREEN 39/39**
+- focused suites รวม: **332 passed, 0 failed** (replay 101 + boundary + pool/selection/runtime + subject/materialize + KB)
+- **broad offline regression (ครั้งเดียว, implementation freeze แล้ว): 971 passed / 20 skipped / 7 xfailed / 0 failed, 22.1s** — docs/test/* ทุกไฟล์ที่ collect offline ได้; excluded: live-server files (test_flow/200/all_conditions/comprehensive/pingevox_mistore/unit_live_compare/compare_3way ชน :8010), test_car_charger_regression (Mongo จริง), script-style (compat_mode_filter — standalone PASS; handoff_transport — standalone 47/47 PASS; sellable_units — FAIL เดิม `27807≠26970` stale export count, pre-existing ไม่เกี่ยว diff), docs/test/test/ (live subdir)
+- `py_compile` 9 files ✓ · `git diff --check` clean · fixture validator ไม่ต้อง (fixtures ไม่เปลี่ยน)
+
+**Residual blocker เดิม**: `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — flag OFF จน evidence-policy + answer-boundary review อนุมัติ
+
+**Safety**: ไม่มี Mongo/provider/botworker/port-8010/deploy/cron/.env/stage/commit/push
+
+---
+
+## ✅ Narrow correction — test-collection root cause (ผ่านแล้ว — uncommitted)
+
+**สั่งทำ**: rename `docs/test/test_unit_hybrid_sweep.py` → `diag_unit_hybrid_sweep.py` เท่านั้น — ไม่แตะ runtime, ไม่เพิ่ม guard/mock/import-hook/pytest config
+
+**cause**: ไฟล์เป็น prototype/diagnostic script (ไม่มี `test_*` fn — เห็นเฉพาะ `mode_a_vector`/`mode_b_sweep`/`_w`/`_show`) แต่ชื่อ `test_*` → pytest collect แล้ว import module → CASES loop ที่ module level (L127, ไม่มี `__main__` guard) รัน `mode_a_vector` → `_emb_mod.embed_query` → `from shopeechat import embedding` load SentenceTransformer/PyTorch ตอน collection (CPU ~9 นาทีในรอบ broad ก่อนหน้า) — **classification ผิด ไม่ใช่ PyTorch defective**
+
+**fix**: `git mv` → `docs/test/diag_unit_hybrid_sweep.py` (ไม่ match `test_*.py` discovery — verified `fnmatch`=False) + docstring run command อัปเดตเป็น path ใหม่; benchmark behavior ไม่เปลี่ยน; stale `.pyc` ใน `__pycache__` ลบ; external refs = 0 (เหลือเฉพาะบรรทัด waythrough นี้ที่อ้างชื่อเก่าเพื่อบันทึก rename)
+
+**verify**: contract `test_phase4_source_union.py` **39/39** · `py_compile` renamed file ✓ · `git diff --check` clean · **runtime bytes changed = 0** (chatbot/ diff stat เหมือนก่อน correction เป๊ะ: 10 files +700/−141) · **ไม่ได้รัน script** (ตั้งใจให้ load model จริงเมื่อรันเอง) · ไม่ re-run 971 batch (runtime ไม่เปลี่ยน)
+
+**evidence correction**: รอบ broad 971 passed/20 skipped/7 xfailed ที่รายงานก่อนเป็น **curated offline-safe batch** (ignore list: live-server/mongo files + script-style `sys.exit` + sellable_units ที่ fail stale-count เดิม) — **ไม่ใช่ "ทุก .py ใต้ docs/test"**; ผล 971 ยัง valid สำหรับไฟล์ที่รัน แต่ `test_unit_hybrid_sweep` อยู่ใน batch นั้นและทำให้เสียเวลา model-load โดยไม่จำเป็น — rename นี้แก้ที่ root cause (ไฟล์ไม่ใช่ pytest suite แต่ชื่อหลอกว่าเป็น)
+
+---
+
+## ✅ Phase 4A — COMMIT CLOSEOUT (committed locally, flag OFF, ไม่ push)
+
+**Commit 1** `ec835af` — `refactor: unify retrieval evidence sources` — 18 files +1708/−181 (10 runtime + SRS + roadmap + 4 migrated tests + contract ใหม่ 893 บรรทัด + rename `test_unit_hybrid_sweep.py → diag_unit_hybrid_sweep.py` 99% similar) — **log นี้ไม่อยู่ใน commit**
+
+**Commit 2** — `docs: record phase 4a source union closeout` — ไฟล์นี้ไฟล์เดียว (append-only)
+
+### Canonical contract ที่ commit
+
+- **source union**: 1 profile/turn → executor `channels=` (subjects/compat/KB ผ่าน `channel_request` synthetic rows, quota แยก, failure isolated) → 1 pool → 1 selection; callsites 2 จุด (KB @2272 / main @4476) mutually exclusive (KB return @2448) → ≤1 exec/turn; domain owners เดิมคงเดิม
+- **global candidate identity**: `build_candidate_pool` group ด้วย `_identity_key` ข้ามทุก result ของ turn — 1 `PooledCandidate`/identity, sources+request_ids union; per-request score/slot/relation คงอยู่ผ่าน `request_scores`/`by_request` + `_request_score`; variants ต่างกันไม่ merge; model_id เดียวกันต่าง item ไม่ merge (ไม่มี `m:`-alone key); ไม่มี post-hoc cleanup
+- **KB evidence isolation**: `kb_product_evidence` per-doc match (`_doc_matches_model`/`_model_token_in_name` boundary — K9≠K90) → attach เฉพาะ doc↔product ที่ตรง; unmatched → supporting อิสระ; 1 bounded shop-scoped `$or`; KB ไม่เคยสร้าง sellable truth
+- **strict shop scope**: `fetch_product_docs_by_ids` scoped query เดียวไม่มี fallback — missing → `_snapshot_only` (historical_only, sellable=False, strip link); batch error → snapshot ทั้งหมด (fail-safe)
+- **supporting shape**: producer ส่ง `[{"kind","text"}]` ทั้ง KB/main — records เป็น dict end-to-end, runtime ไม่ coerce
+- **answer boundary**: flag OFF → ไม่ execute; flag ON → selected แทน products (ไม่ merge base, `merge_selected_products` ไม่มี); empty/None/exception → fail closed `[]`; hidden/UNLIST ไม่เข้า LLM payload
+- **diagnostic rename**: `test_unit_hybrid_sweep.py` เป็น prototype script (ไม่มี `test_*` fn, CASES loop ที่ module level → `embed_query` → PyTorch load ตอน collection ~9 นาที) → `diag_unit_hybrid_sweep.py` — root cause = classification ผิด ไม่ใช่ PyTorch defective; content เหมือนเดิมยกเว้น docstring run path
+
+### Frozen verification (bytes ไม่เปลี่ยนตั้งแต่ verify — carry เข้า commit)
+
+- contract `test_phase4_source_union.py` **39/39** · focused affected batch (16 files) **421 passed / 19 skipped / 5 xfailed / 0 failed** · curated broad offline batch **971 passed / 20 skipped / 7 xfailed / 0 failed** (ไม่ใช่ทุก .py — live/mongo/script files excluded) · `py_compile` 16 files ✓ · `git diff --check` + `--cached` clean · secret scan clean
+
+### Deltas (vs HEAD 3b26920)
+
+- runtime +700/−141 (10 files) · top-level +8 (`_identity_key`, `_join_attachment`, `_kb_model_row_match`, `kb_product_evidence`, `fetch_product_docs_by_ids`, `fetch_products_by_models`, `channel_request`, `_request_score`) + `KbEvidenceResult` dataclass + nested `_payload`/`_sup`/`_norm` · ลบ: nested `_key`, per-result `var_idx`/`item_owner` grouping, `m:`-alone merge, early exec callsite, unscoped cross-shop fallback · owners: pool/identity/join/context = 1 ตัวต่อ boundary · new flag/module/dep/provider call = 0 · Phase 4B runtime = 0
+
+### สถานะ
+
+- `grouped_retrieval_selection_enabled` **OFF** เดิม (env `"0"`, DB absent, fail-closed) · admin default false ไม่แตะ
+- **blocker ยืน**: `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — รอ evidence-policy + answer-boundary review phases
+- **งานถัดไป**: Phase 4B design/review เท่านั้น (atomic daily evidence refresh — generation/pointer contract ใน roadmap) — ยังไม่ implement
+- **safety**: ไม่มี push/PR/deploy/flag-enable/Mongo/provider/botworker/port-8010/.env/cron/embedding-build — commit local เท่านั้น
