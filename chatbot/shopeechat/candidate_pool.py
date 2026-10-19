@@ -21,31 +21,36 @@ from .retrieval_executor import RetrievalExecutionResult
 @dataclass(frozen=True)
 class PooledCandidate:
     """candidate เดียวหลัง dedupe+rank — ไม่ mutate card ต้นทาง"""
-    identity: str                     # dedupe key ที่ชนะ
+    identity: str                     # candidate key ที่ชนะ (v:/u:/i:/n:)
     item_id: str | None
     model_id: str | None
     unit_id: str | None
     sources: tuple[str, ...]          # _evidence.sources รวมทุก source
-    request_ids: tuple[str, ...]
-    slot_id: str
+    request_ids: tuple[str, ...]      # ทุก request ที่ contribute identity นี้
+    slot_id: str                      # slot ของ request ที่ score ดีสุด (per-request slot → ดู req ใน selector)
     relation_id: str | None
     product_type: str | None
     subtype: str | None
     bucket: str                       # eligible/unavailable/rejected
     reason: str
-    score: float
+    score: float                      # max per-request score
     trace: tuple[str, ...]
     card: dict
     is_anchor: bool = False
+    identity_quality: str = ""        # "name_only" เมื่อ key=n: (low confidence)
+    linked_item_id: str | None = None  # item_id ของ variant candidates
+    request_scores: tuple[tuple[str, float], ...] = ()  # (request_id, score) ต่อ contributing request
 
 
 @dataclass(frozen=True)
 class EvidenceAttachment:
-    """group-B evidence — anchor/KB/image-text ที่ผูกกับ candidate/identity"""
-    kind: str                         # "anchor" | "kb_product" | "image_text"
-    identity: str
+    """group-B evidence — anchor/KB/image-text/listing ที่ผูกกับ candidate/identity"""
+    kind: str                         # "anchor" | "kb_product" | "image_text" | "listing" | "subject_snapshot"
+    identity: str                     # attachment identity key (i:/v:/n:)
     item_id: str | None
     linked_candidate: str | None      # identity ของ candidate ที่ attach
+    identity_domain: str = ""         # "item" | "model" | "name" | "" (self)
+    payload: dict | None = None       # bounded evidence (specs/snapshot)
     trace: tuple[str, ...] = ()
 
 
@@ -77,6 +82,60 @@ def _card_ids(card: dict) -> tuple[str | None, str | None, str | None]:
 
 def _norm_name(card: dict) -> str:
     return re.sub(r"\s+", " ", (card.get("name") or "").lower()).strip()
+
+
+def _identity_key(card: dict) -> tuple[str, str]:
+    """candidate identity (owner เดียว) — finest-grained key เดียวต่อ card.
+
+    unit_id → u:{uid} (unit_id รูป item:model → v:{iid}#{mid} canonical
+    เดียวกับ item_id+model_id) · item_id+model_id → v:{iid}#{mid} ·
+    item_id เดี่ยว → i:{iid} (listing-level เท่านั้น) · ไม่มี stable id
+    → n:{shop}:{norm_name} (low confidence) · model_id เดี่ยวไม่เคยเป็น
+    identity (model_sku ชนข้าม item ได้) · merge iff key เดียวกันเท่านั้น
+
+    Returns (key, domain) — domain ∈ {"variant","item","name"} ·
+    key="" = ไม่มี identity (ไม่ merge กับใคร)
+    """
+    from .retrieval_policy import _norm_id
+    uid, mid, iid = _card_ids(card)
+    if uid:
+        if ":" in uid:
+            p, m = uid.split(":", 1)
+            return f"v:{_norm_id(p)}#{_norm_id(m)}", "variant"
+        return f"u:{uid}", "variant"
+    if iid and mid:
+        return f"v:{iid}#{mid}", "variant"
+    if iid:
+        return f"i:{iid}", "item"
+    name = _norm_name(card)
+    if name:
+        return f"n:{card.get('shop') or ''}:{name}", "name"
+    return "", ""
+
+
+def _join_attachment(att: EvidenceAttachment, pooled: list[PooledCandidate]
+                     ) -> list[EvidenceAttachment]:
+    """resolve attachment → candidate identities ตาม identity_domain —
+    item → ทุก variant ของ item · model → variant ที่ตรง (fallback listing
+    i:) · name → candidate key เดียวกันเท่านั้น · join ไม่เคย collapse"""
+    import dataclasses
+    dom = att.identity_domain or ""
+    ident = att.identity or ""
+    iid = att.item_id or (ident[2:] if ident.startswith("i:") else None)
+    targets: list[PooledCandidate] = []
+    if dom == "item" and iid:
+        targets = [c for c in pooled if c.item_id == iid]
+    elif dom in ("model", "variant") and ident:
+        targets = [c for c in pooled if c.identity == ident]
+        if not targets and iid:
+            targets = [c for c in pooled if c.identity == f"i:{iid}"]
+    elif ident:
+        targets = [c for c in pooled if c.identity == ident]
+    if targets:
+        return [dataclasses.replace(att, linked_candidate=t.identity,
+                                    trace=att.trace + ("linked",))
+                for t in targets]
+    return [dataclasses.replace(att, trace=att.trace + ("unlinked",))]
 
 
 # customer_visibility → merge preference — visible > historical > hidden:
@@ -145,12 +204,17 @@ def build_candidate_pool(
     *,
     profile=None,
     per_request_limit: int | None = None,
+    supporting_evidence: tuple = (),
 ) -> CandidatePool:
     """execution results → pool กลาง (observe-only, ไม่ mutate input).
 
-    dedupe identity: unit_id/model_id (variant) → item_id (listing) →
-    norm name+shop · variant ต่าง unit/model id ไม่ merge · item-level card
-    merge เข้า variant ของ item เดียวกัน · ต่าง item ไม่ merge
+    dedupe identity = _identity_key (finest key เดียว/card — merge iff key
+    เดียวกัน) **global ข้ามทุก result ของ turn** — identity เดียวกันจากหลาย
+    request/channel เป็น PooledCandidate row เดียวที่สะสม request_ids;
+    variant ต่าง key ไม่ merge · listing i:X แปลงเป็น item attachment เมื่อ
+    item X มี non-rejected variant candidate (variant ที่ rejected เพียว
+    ไม่ suppress listing) · ต่าง item ไม่ merge · attachment join ตาม
+    domain ไม่เคย collapse candidates
     """
     from .retrieval_policy import _norm_id
     anchor_ids = {_norm_id(i) for i in
@@ -163,96 +227,197 @@ def build_candidate_pool(
     rej_out: list[PooledCandidate] = []
     by_req: list[tuple[str, tuple[PooledCandidate, ...]]] = []
     evidence: list[EvidenceAttachment] = []
+    supporting: list[dict] = list(supporting_evidence or ())
     trace: list[str] = []
+
+    # ── pass 1: GLOBAL dedupe groups — identity เดียวกันข้ามทุก result อยู่
+    #    group เดียว (owner เดียวต่อ turn — ไม่ใช่ต่อ request) ──
+    groups: dict[str, list[tuple[dict, str, RetrievalExecutionResult]]] = {}
+    domains: dict[str, str] = {}
+    seq = 0
     for res in results:
-        # ── dedupe ภายใน request (รวม cross-source) — พก bucket ที่ executor
-        #    ตัดสินไว้ ห้าม re-derive จาก _available_for_sale ──
-        merged: list[list[tuple[dict, str]]] = []
-        var_idx: dict[str, int] = {}      # unit/model id → merged idx
-        item_owner: dict[str, int] = {}   # item_id → merged idx
         cards_by_bucket = (
             [(c, "eligible") for c in res.eligible_candidates]
             + [(c, "unavailable") for c in res.unavailable_evidence]
             + [(c, "rejected") for c in res.rejected_evidence])
         for card, bkt in cards_by_bucket:
-            uid, mid, iid = _card_ids(card)
-            keys = [k for k in (f"u:{uid}" if uid else None,
-                              f"m:{mid}" if mid else None) if k]
-            idx = None
-            for k in keys:
-                if k in var_idx:
-                    idx = var_idx[k]
-                    break
-            if idx is None and not keys and iid and iid in item_owner:
-                # listing-level card (ไม่มี unit/model id) merge เข้า variant เดิม
-                idx = item_owner[iid]
-            if idx is None:
-                idx = len(merged)
-                merged.append([(card, bkt)])
-                for k in keys:
-                    var_idx[k] = idx
-                if iid and iid not in item_owner:
-                    item_owner[iid] = idx
-            else:
-                merged[idx].append((card, bkt))
-        pooled: list[PooledCandidate] = []
-        for group in merged:
-            card = _merge_group([c for c, _ in group])
-            uid, mid, iid = _card_ids(card)
-            identity = uid or mid or iid \
-                or f"name:{_norm_name(card)}:{card.get('shop') or ''}"
-            ev = card.get("_evidence") or {}
-            sources = tuple(ev.get("sources") or ["unknown"])
-            reasons = [c.get("_selection_reason") or "" for c, _ in group]
-            # bucket = ดีที่สุดในกลุ่ม (eligible > unavailable > rejected)
-            buckets = {b for _, b in group}
-            bucket = ("eligible" if "eligible" in buckets else
-                      "unavailable" if "unavailable" in buckets else "rejected")
-            is_anchor = bool(anchor_ids) and iid in anchor_ids
+            key, dom = _identity_key(card)
+            if not key:
+                key = f"?:{seq}"       # ไม่มี identity — ไม่ merge กับใคร
+                seq += 1
+            groups.setdefault(key, []).append((card, bkt, res))
+            domains[key] = dom
+        supporting.extend(res.supporting_evidence)
+
+    variant_items: set[str] = set()
+    for key, group in groups.items():
+        if domains[key] != "variant":
+            continue
+        if any(b != "rejected" for _, b, _ in group):
+            _, _, iid0 = _card_ids(group[0][0])
+            if iid0:
+                variant_items.add(iid0)
+
+    # listing i:X → item attachment เมื่อ X มี non-rejected variant ใน
+    # pool (union เดียวต่อ turn); variant ที่ rejected เพียวไม่ suppress listing
+    listing_cards: dict[str, dict] = {}
+    for key in [k for k, g in groups.items()
+                if domains[k] == "item"
+                and _card_ids(g[0][0])[2] in variant_items]:
+        lc = _merge_group([c for c, _, _ in groups.pop(key)])
+        listing_cards[_card_ids(lc)[2]] = lc
+
+    # ── pass 2: PooledCandidate เดียวต่อ global identity — card merge ครั้ง
+    #    เดียว, score/request facts คง per-request ผ่าน request_scores ──
+    all_pooled: list[PooledCandidate] = []
+    key_cand: dict[str, PooledCandidate] = {}
+    key_scores: dict[str, dict[str, float]] = {}
+    pending_atts: list[EvidenceAttachment] = []
+    for key, group in groups.items():
+        card = _merge_group([c for c, _, _ in group])
+        uid, mid, iid = _card_ids(card)
+        identity = key if not key.startswith("?:") else (
+            iid or f"n:{card.get('shop') or ''}:{_norm_name(card)}")
+        lcard = listing_cards.get(iid) if domains[key] == "variant" else None
+        if lcard is not None:
+            # listing evidence merge เข้า variant card — live listing
+            # fields ที่ variant ไม่มี (variants rows/short_link ฯลฯ)
+            # แต่ canonical availability ของ variant ชนะเสมอ
+            lsrc = (lcard.get("_evidence") or {}).get("sources") or ()
+            ev = dict(card.get("_evidence") or {})
+            srcs = list(ev.get("sources") or [])
+            for s in lsrc:
+                if s not in srcs:
+                    srcs.append(s)
+            ev["sources"] = srcs
+            card["_evidence"] = ev
+            for f in ("short_link", "image_url", "tier_variation",
+                      "variants"):
+                if not card.get(f) and lcard.get(f):
+                    card[f] = lcard[f]
+        sources = tuple(
+            (card.get("_evidence") or {}).get("sources") or ["unknown"])
+        reasons = [c.get("_selection_reason") or "" for c, _, _ in group]
+        # bucket = ดีที่สุดในกลุ่ม (eligible > unavailable > rejected)
+        buckets = {b for _, b, _ in group}
+        bucket = ("eligible" if "eligible" in buckets else
+                  "unavailable" if "unavailable" in buckets else "rejected")
+        is_anchor = bool(anchor_ids) and iid in anchor_ids
+        # per-request scoring — res facts ของแต่ละ contributing request
+        contrib: dict[str, RetrievalExecutionResult] = {}
+        for _, _, res in group:
+            contrib.setdefault(res.request_id, res)
+        scores: dict[str, float] = {}
+        why_all: list[str] = []
+        for rid, res in contrib.items():
             sc, why = _score(card, res, is_anchor, anchor_priority)
-            if is_anchor:
-                evidence.append(EvidenceAttachment(
-                    kind="anchor", identity=identity, item_id=iid,
-                    linked_candidate=identity,
-                    trace=(f"profile.anchor_item_ids:{iid}",)))
-            if card.get("canonical_specs"):
-                evidence.append(EvidenceAttachment(
-                    kind="kb_product", identity=identity, item_id=iid,
-                    linked_candidate=identity, trace=("canonical_specs",)))
-            if card.get("image_text"):
-                evidence.append(EvidenceAttachment(
-                    kind="image_text", identity=identity, item_id=iid,
-                    linked_candidate=identity, trace=("image_text",)))
-            roles = set(card.get("canonical_roles") or ())
-            csub = next(iter(sorted(
-                (roles & set(res.subtypes)) or roles)), None)
-            pooled.append(PooledCandidate(
-                identity=identity, item_id=iid, model_id=mid, unit_id=uid,
-                sources=sources, request_ids=(res.request_id,),
-                slot_id=res.slot_id, relation_id=res.relation_id,
-                product_type=(card.get("canonical_type")
-                            or card.get("product_type")), subtype=csub,
-                bucket=bucket,
-                reason=next((r for r in reasons if r not in ("ok", "")), "ok"),
-                score=sc,
-                trace=tuple([f"why:{w}" for w in why]
-                            + ([f"merged:{len(group)}"] if len(group) > 1 else [])),
-                card=card, is_anchor=is_anchor))
-        pooled.sort(key=lambda c: c.score, reverse=True)
+            scores[rid] = sc
+            for w in why:
+                if w not in why_all:
+                    why_all.append(w)
+        best_rid = max(scores, key=lambda r: scores[r])
+        best_res = contrib[best_rid]
+        if is_anchor:
+            evidence.append(EvidenceAttachment(
+                kind="anchor", identity=identity, item_id=iid,
+                linked_candidate=identity,
+                trace=(f"profile.anchor_item_ids:{iid}",)))
+        if card.get("canonical_specs"):
+            evidence.append(EvidenceAttachment(
+                kind="kb_product", identity=identity, item_id=iid,
+                linked_candidate=identity, trace=("canonical_specs",)))
+        if card.get("image_text"):
+            evidence.append(EvidenceAttachment(
+                kind="image_text", identity=identity, item_id=iid,
+                linked_candidate=identity, trace=("image_text",)))
+        for scard in (c for c, _, _ in group if c.get("_snapshot_only")):
+            evidence.append(EvidenceAttachment(
+                kind="subject_snapshot", identity=identity, item_id=iid,
+                linked_candidate=identity,
+                payload={k: scard.get(k) for k in
+                         ("name", "specs", "price") if scard.get(k) is not None},
+                trace=("snapshot_merged",)))
+        roles = set(card.get("canonical_roles") or ())
+        csub = next(iter(sorted(
+            (roles & set(best_res.subtypes)) or roles)), None)
+        cand = PooledCandidate(
+            identity=identity, item_id=iid, model_id=mid, unit_id=uid,
+            sources=sources, request_ids=tuple(contrib),
+            slot_id=best_res.slot_id,
+            relation_id=next((r.relation_id for r in contrib.values()
+                              if r.relation_id), None),
+            product_type=(card.get("canonical_type")
+                        or card.get("product_type")), subtype=csub,
+            bucket=bucket,
+            reason=next((r for r in reasons if r not in ("ok", "")), "ok"),
+            score=scores[best_rid],
+            trace=tuple([f"why:{w}" for w in why_all]
+                        + [f"req:{rid}={round(s, 3)}"
+                           for rid, s in scores.items()]
+                        + ([f"merged:{len(group)}"] if len(group) > 1 else [])),
+            card=card, is_anchor=is_anchor,
+            identity_quality=("name_only" if identity.startswith("n:")
+                              else ""),
+            linked_item_id=(iid if domains[key] == "variant" else None),
+            request_scores=tuple((rid, s) for rid, s in scores.items()))
+        key_cand[key] = cand
+        all_pooled.append(cand)
+        key_scores[key] = scores
+
+    for iid, lcard in listing_cards.items():
+        pending_atts.append(EvidenceAttachment(
+            kind="listing", identity=f"i:{iid}", item_id=iid,
+            linked_candidate=None, identity_domain="item",
+            payload=lcard,
+            trace=("listing→item-attachment",)))
+    for res in results:
+        for att in res.attachment_evidence:
+            if isinstance(att, EvidenceAttachment):
+                pending_atts.append(att)
+            elif isinstance(att, dict):
+                pending_atts.append(EvidenceAttachment(
+                    kind=att.get("kind", "evidence"),
+                    identity=att.get("identity") or "",
+                    item_id=att.get("item_id"),
+                    linked_candidate=att.get("linked_candidate"),
+                    identity_domain=att.get("identity_domain") or "",
+                    payload=att.get("payload"),
+                    trace=tuple(att.get("trace") or ())))
+
+    # ── pass 3: per-request membership + quota — request ตัดเฉพาะ membership
+    #    ของตัวเอง (rank ด้วย per-request score); candidate รอดใน ≥1 request
+    #    จึงเข้า global buckets (identity เดียวกันไม่ตายเพราะ quota request เดียว) ──
+    seen_out: set[str] = set()
+    for res in results:
+        mems = [(key_cand[k], key_scores[k][res.request_id])
+                for k, g in groups.items()
+                if any(r is res for _, _, r in g)]
+        mems.sort(key=lambda t: t[1], reverse=True)
         if per_request_limit is not None:
-            pooled = pooled[:per_request_limit]
-        for c in pooled:
+            mems = mems[:per_request_limit]
+        for c, _ in mems:
+            if c.identity in seen_out:
+                continue
+            seen_out.add(c.identity)
             (elig_out if c.bucket == "eligible"
-             else unav_out if c.bucket == "unavailable" else rej_out).append(c)
+             else unav_out if c.bucket == "unavailable"
+             else rej_out).append(c)
         by_req.append((res.request_id,
-                       tuple(c for c in pooled if c.bucket == "eligible")))
-        trace.append(f"{res.request_id}: merged={len(merged)} "
-                     f"elig={sum(1 for c in pooled if c.bucket == 'eligible')}")
+                       tuple(c for c, _ in mems if c.bucket == "eligible")))
+        trace.append(f"{res.request_id}: merged={len(mems)} "
+                     f"elig={sum(1 for c, _ in mems if c.bucket == 'eligible')}")
+
+    # ── attachment join รวดเดียว — pool-wide (attachments จาก channel หนึ่ง
+    #    link ไป candidate ของ request อื่นได้เสมอ — union เดียวต่อ turn) ──
+    for att in pending_atts:
+        evidence.extend(_join_attachment(att, all_pooled))
+
     elig_out.sort(key=lambda c: c.score, reverse=True)
     unav_out.sort(key=lambda c: c.score, reverse=True)
     rej_out.sort(key=lambda c: c.score, reverse=True)
     return CandidatePool(
         eligible=tuple(elig_out), unavailable=tuple(unav_out),
         rejected=tuple(rej_out), by_request=tuple(by_req),
-        evidence_pool=tuple(evidence), supporting_evidence=(),
+        evidence_pool=tuple(evidence),
+        supporting_evidence=tuple(supporting),
         trace=tuple(trace))

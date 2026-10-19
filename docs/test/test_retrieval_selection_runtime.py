@@ -186,9 +186,12 @@ def test_app_callsite_flag_gated_lazy():
     idx = src.index(flag_fn)
     window = src[max(0, idx - 400):idx + 1500]
     assert "import runtime_config" in window
-    assert "retrieval_runtime" in window
-    assert "run_grouped_selection" in window
-    assert "try:" in window and "except" in window
+    # Phase 4A — execution ย้ายหลัง branch evidence resolve: callsite เดียวต่อ
+    # branch (KB + main, mutually exclusive → runtime ≤1 exec/turn) ทั้งคู่
+    # lazy import + try/except fail-closed เหมือนเดิม
+    n_calls = src.count("_rr.run_grouped_selection(")
+    assert n_calls == 2, f"expected exactly 2 branch callsites, got {n_calls}"
+    assert "from . import retrieval_runtime as _rr" in src
     # flag ON → canonical selected แทน products ที่ llm.answer callsites
     # — ห้าม merge base legacy (UNLIST re-entry) — ทั้ง KB path + main
     assert "merge_selected_products" not in src
@@ -205,12 +208,15 @@ def test_no_v2_v3_caller():
             assert "prepare_grouped_selection" not in src
 
 def test_identity_keys_fallback_unit_model():
-    # card ไม่มี item_id → identity keys fallback unit_id/model_id
-    # (ใช้ใน dedupe ของ run_grouped_selection — card เดียวกันหลาย request)
+    # Phase 4A corrected contract — candidate identity = finest key เดียว
+    # (owner: candidate_pool._identity_key): unit_id→u:, item_id+model_id→v:,
+    # item_id เดี่ยว→i: — model_id เดี่ยวไม่เคยเป็น identity (model_sku ชน
+    # ข้าม item ได้) และไม่มี m:-key fallback อีกต่อไป
     from shopeechat.retrieval_runtime import _identity_keys
     assert _identity_keys({"unit_id": "u1"}) == ["u:u1"]
-    assert _identity_keys({"model_id": "m9"}) == ["m:m9"]
+    assert _identity_keys({"model_id": "m9"}) == []
     assert _identity_keys({"item_id": 123.0}) == ["i:123"]
+    assert _identity_keys({"item_id": "i9", "model_id": "m9"}) == ["v:i9#m9"]
 
 
 def test_identity_keys_blank_fields_are_not_identity():

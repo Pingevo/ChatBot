@@ -115,6 +115,23 @@ def _relation_request(req_id: str, rel_id: str, rel: RetrievalRelation,
     )
 
 
+def channel_request(name: str) -> RetrievalRequest:
+    """synthetic request สำหรับ evidence channel (subjects/compat/kb/...) —
+    selector iterates RetrievalRequest rows เท่านั้น จึงต้องมี row ของตัวเอง;
+    filters ว่างทั้งหมด → candidate bucket ด้วย availability + type guard
+    ของ card เท่านั้น (channel fetcher มีสิทธิ์ scoped อยู่แล้ว)"""
+    return RetrievalRequest(
+        request_id=f"ch:{name}",
+        slot_id=name,
+        source=name,
+        product_types=frozenset(),
+        subtypes=frozenset(),
+        model_codes=(),
+        target_device=None,
+        availability_mode="",
+        compat_mode="")
+
+
 def build_grouped_retrieval_requests(
         profile: RetrievalProfile,
         slots: tuple[RetrievalSlot, ...],

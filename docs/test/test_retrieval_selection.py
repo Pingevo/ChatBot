@@ -126,7 +126,9 @@ def test_constraint_ranking_display_length_speed():
         ])
     sel = select_for_llm_context(pool, reqs, prof)
     targets = [s for s in sel.selected if s.role == "relation_target"]
-    assert targets[0].identity == "u-full"
+    # Phase 4A — identity = candidate key ที่มี domain prefix (owner:
+    # candidate_pool._identity_key) — raw unit_id ไม่ใช่ identity อีกต่อไป
+    assert targets[0].identity == "u:u-full"
     assert targets[0].constraint_hits
     assert "display" in targets[0].constraint_hits
 

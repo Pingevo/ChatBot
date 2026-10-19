@@ -1294,21 +1294,81 @@ def materialize_subject_cards(
                    _normalize_dt(cur.get("mentioned_at"))) if cur else None
         if cur_key is None or cand > cur_key:
             entries[sid] = p
+    # ── Phase 4A — one bounded identity batch (แทน find_one×N ของ
+    #    _rebuild_card): live listing doc เป็นเจ้าของ publish/stock/link
+    #    truth; หายจาก catalog → snapshot เท่านั้น (ขายไม่ได้/ไม่มีลิงก์)
+    docs_by_id: dict[str, dict] = {}
+    try:
+        docs_by_id = _ps.fetch_product_docs_by_ids(
+            db, ids, shop_filter=shop_filter)
+    except Exception as _e:
+        print(f"[SUBJECT-RES] batch resolve error: {_e}")
+    # ── at most one bounded units batch — เฉพาะ entries ระดับรุ่นย่อย ──
+    from . import units as _units
+    units_by_key: dict[tuple[str, str], dict] = {}
+    try:
+        wanted_iids: list = []
+        for sid in ids:
+            entry = entries.get(sid)
+            doc = docs_by_id.get(sid)
+            if entry is None or doc is None:
+                continue
+            card_stored = entry.get("card") or {}
+            vlist = card_stored.get("variants") or []
+            model_name = entry.get("model_name") or (
+                vlist[0].get("name") if len(vlist) == 1 else None)
+            if model_name:
+                wanted_iids.append(doc.get("item_id"))
+        if wanted_iids:
+            udocs = list(_units._units_coll().find(
+                {"item_id": {"$in": wanted_iids}}).limit(50))
+            udocs = _units.attach_image_texts(
+                _units.attach_kb_specs(udocs))
+            for u in udocs:
+                key = (str(_to_serializable(u.get("item_id"))),
+                       str(u.get("model_name") or ""))
+                units_by_key[key] = u
+    except Exception:
+        pass
     out: list[dict] = []
     for sid in ids:
         card = None
         entry = entries.get(sid)
-        if entry is not None:
+        doc = docs_by_id.get(sid)
+        ckey = (sid, str((entry or {}).get("model_name") or ""))
+        hit = _LIVE_CARD_CACHE.get(ckey)
+        if hit and (time.monotonic() - hit[0]) < _LIVE_CARD_TTL:
+            card = hit[1]
+        if card is None and doc is not None:
             try:
-                card = _materialize_card(entry, message=message)
+                card_stored = (entry or {}).get("card") or {}
+                vlist = card_stored.get("variants") or []
+                model_name = (entry or {}).get("model_name") or (
+                    vlist[0].get("name") if len(vlist) == 1 else None)
+                ukey = (str(_to_serializable(doc.get("item_id"))),
+                        str(model_name or ""))
+                u = units_by_key.get(ukey) if model_name else None
+                if u is not None:
+                    u = dict(u)
+                    u["_listing"] = doc
+                    card = _units.to_unit_card(u)
+                else:
+                    card = _ps.to_product_card(doc, message)
+                _LIVE_CARD_CACHE[ckey] = (time.monotonic(), card)
             except Exception:
                 card = None
         if card is None:
-            try:
-                card = _ps.fetch_product_by_id(
-                    db, sid, shop_filter=shop_filter)
-            except Exception:
-                card = None
+            # live หาย/พัง → stored snapshot เท่านั้น: identity+history —
+            # ห้าม claim live state, ขายไม่ได้, ไม่มีลิงก์ขาย
+            if entry is not None:
+                stored = dict(entry.get("card") or {
+                    "item_id": entry.get("item_id"),
+                    "name": entry.get("name")})
+                if stored:
+                    stored.pop("short_link", None)
+                    stored.pop("link", None)
+                    stored["_snapshot_only"] = True
+                    card = stored
         if card:
             out.append(card)
     return out

@@ -129,9 +129,15 @@ def _norm(v):
 
 
 def _get_path(doc: dict, path: str):
-    """Resolve a dotted Mongo path — returns (value, present)."""
+    """Resolve a dotted Mongo path — returns (value, present). List fields
+    descend into elements (Mongo array semantics → returns list of values)."""
     cur = doc
     for p in path.split("."):
+        if isinstance(cur, list):
+            cur = [x.get(p) for x in cur if isinstance(x, dict) and p in x]
+            if not cur:
+                return None, False
+            continue
         if not isinstance(cur, dict) or p not in cur:
             return None, False
         cur = cur[p]
@@ -140,22 +146,30 @@ def _get_path(doc: dict, path: str):
 
 def _match(doc: dict, filt: dict) -> bool:
     for k, cond in (filt or {}).items():
+        if k == "$or":
+            if not any(_match(doc, sub) for sub in cond):
+                return False
+            continue
         val, present = _get_path(doc, k) if "." in k else (doc.get(k), k in doc)
+        vals = val if isinstance(val, list) else [val]  # array → any-element
         if isinstance(cond, dict):
             if "$in" in cond:
-                if _norm(val) not in {_norm(x) for x in cond["$in"]}:
+                if not any(_norm(v) in {_norm(x) for x in cond["$in"]}
+                           for v in vals):
                     return False
             if "$regex" in cond:
                 opts = cond.get("$options", "")
                 flags = re.IGNORECASE if "i" in opts else 0
-                if not re.search(cond["$regex"], str(val or ""), flags):
+                if not any(re.search(cond["$regex"], str(v or ""), flags)
+                           for v in vals):
                     return False
-            if "$ne" in cond and _norm(val) == _norm(cond["$ne"]):
+            if "$ne" in cond and any(
+                    _norm(v) == _norm(cond["$ne"]) for v in vals):
                 return False
             if "$exists" in cond and (val is not None) != bool(cond["$exists"]):
                 return False
         else:
-            if _norm(val) != _norm(cond):
+            if not any(_norm(v) == _norm(cond) for v in vals):
                 return False
     return True
 

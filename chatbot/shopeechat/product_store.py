@@ -3755,6 +3755,87 @@ def fetch_product_by_id(
     return to_product_card(doc, desc_message or "")
 
 
+def fetch_product_docs_by_ids(
+    db,
+    item_ids,
+    *,
+    shop_filter: str | None = None,
+    limit: int = 50,
+) -> dict[str, dict]:
+    """ดึง raw product docs หลาย item_id ด้วย $in batch เดียว — bounded.
+
+    Returns {norm_item_id_str: doc} — ใช้สำหรับ subject/anchor identity
+    resolution (แทน find_one ต่อชิ้น) · **shop_filter มี → scoped query
+    เดียวเท่านั้น (subject truth ต้อง strict shop — missing ต้อง missing
+    ห้าม fallback ไป doc ของร้านอื่น)** · ไม่มี shop_filter → 1 unscoped
+    query
+    """
+    coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+    collection = db[coll_name]
+    id_values: list = []
+    for iid in item_ids or ():
+        try:
+            f = float(iid)
+            for v in (int(f), f):
+                if v not in id_values:
+                    id_values.append(v)
+        except (ValueError, TypeError):
+            if iid not in id_values:
+                id_values.append(iid)
+    if not id_values:
+        return {}
+
+    def _norm(v) -> str:
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))
+        if isinstance(v, str):
+            try:
+                f = float(v)
+            except ValueError:
+                return v
+            return str(int(f)) if f.is_integer() else v
+        return str(v)
+
+    out: dict[str, dict] = {}
+    if shop_filter:
+        q = {"item_id": {"$in": id_values},
+             "shopname": {"$regex": f"^{re.escape(shop_filter)}$",
+                          "$options": "i"}}
+        for doc in collection.find(q, PRODUCT_PROJECTION).limit(limit):
+            out[_norm(doc.get("item_id"))] = doc
+        return out
+    for doc in collection.find(
+            {"item_id": {"$in": id_values}}, PRODUCT_PROJECTION
+    ).limit(limit):
+        out.setdefault(_norm(doc.get("item_id")), doc)
+    return out
+
+
+def fetch_products_by_models(
+    db,
+    model_tokens,
+    *,
+    shop: str | None = None,
+    limit: int = 30,
+) -> list[dict]:
+    """bounded model-code lookup — $or regex ต่อ token เดียว query ชุดเดียว
+    scoped ร้าน (KB product evidence resolution เท่านั้น — ไม่ใช่ทั่วไป)"""
+    coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+    collection = db[coll_name]
+    tokens = [re.escape(str(t).strip()) for t in (model_tokens or ())
+              if str(t or "").strip()]
+    if not tokens:
+        return []
+    q: dict[str, Any] = {
+        "$or": [{"item_name": {"$regex": t, "$options": "i"}}
+                for t in tokens]
+        + [{"model.model_name": {"$regex": t, "$options": "i"}}
+           for t in tokens]}
+    if shop:
+        q["shopname"] = {"$regex": f"^{re.escape(shop)}$", "$options": "i"}
+    return list(collection.find(q, PRODUCT_PROJECTION).limit(limit))
+
+
 def list_shops(db) -> list[str]:
     """รายชื่อร้านในเครือทั้งหมด."""
     coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"

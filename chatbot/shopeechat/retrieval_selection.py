@@ -87,6 +87,15 @@ def _constraint_hit(key: str, val: str, text: str) -> bool:
     return False
 
 
+def _request_score(c: PooledCandidate, req: RetrievalRequest) -> float:
+    """score ของ candidate ภายใต้ request นี้ — per-request facts คง (Phase 4A
+    global pool: candidate เดียวอาจมี score ต่างกันต่อ contributing request)"""
+    for rid, s in c.request_scores:
+        if rid == req.request_id:
+            return s
+    return c.score
+
+
 def _select_one(c: PooledCandidate, req: RetrievalRequest,
                 text_cache: dict) -> SelectedCandidate:
     """PooledCandidate → SelectedCandidate (constraint score + strip)"""
@@ -97,7 +106,7 @@ def _select_one(c: PooledCandidate, req: RetrievalRequest,
     text = text_cache[cid]
     hints = [(k, v) for k, v in req.soft_hints if k not in _META_HINT_KEYS]
     hits = tuple(k for k, v in hints if _constraint_hit(k, v, text))
-    score = c.score + len(hits)
+    score = _request_score(c, req) + len(hits)
     why = [t[4:] for t in c.trace if t.startswith("why:")]
     why += [f"hint:{k}" for k in hits]
     if _code_match(card, req.model_codes):
@@ -107,8 +116,8 @@ def _select_one(c: PooledCandidate, req: RetrievalRequest,
     else:
         role = req.source
     return SelectedCandidate(
-        role=role, request_id=req.request_id, slot_id=c.slot_id,
-        relation_id=c.relation_id, identity=cid,
+        role=role, request_id=req.request_id, slot_id=req.slot_id,
+        relation_id=req.relation_id, identity=cid,
         score=round(score, 3), constraint_hits=hits,
         reason="; ".join(why) or "eligible",
         card=strip_private_evidence(card))
@@ -194,16 +203,17 @@ def select_for_llm_context(
                  if _code_match(c.card, req.model_codes)]
         if not cands:
             continue
-        ranked = sorted(cands, key=lambda c: c.score, reverse=True)
+        ranked = sorted(cands, key=lambda c: _request_score(c, req),
+                        reverse=True)
         subjects: list[SelectedCandidate] = []
         for c in ranked[:len(req.model_codes)]:
             if c.identity in promoted:
                 continue
             promoted.add(c.identity)
             subjects.append(SelectedCandidate(
-                role="subject", request_id=req.request_id, slot_id=c.slot_id,
-                relation_id=c.relation_id, identity=c.identity,
-                score=round(c.score, 3), constraint_hits=(),
+                role="subject", request_id=req.request_id, slot_id=req.slot_id,
+                relation_id=req.relation_id, identity=c.identity,
+                score=round(_request_score(c, req), 3), constraint_hits=(),
                 reason=f"unavailable_subject:{c.reason}",
                 card=strip_private_evidence(c.card)))
         if subjects:

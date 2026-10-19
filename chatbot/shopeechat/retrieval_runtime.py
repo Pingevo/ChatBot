@@ -8,9 +8,10 @@ evidence แล้ว, role tag ผ่าน _context_note
 from __future__ import annotations
 
 from .route_context import build_retrieval_slots, build_retrieval_relations
-from .retrieval_planner import build_grouped_retrieval_requests
+from .retrieval_planner import (
+    build_grouped_retrieval_requests, channel_request)
 from .retrieval_executor import execute_grouped_retrieval_requests
-from .candidate_pool import build_candidate_pool
+from .candidate_pool import _identity_key, build_candidate_pool
 from .retrieval_selection import select_for_llm_context
 
 _ROLE_NOTE = {
@@ -23,22 +24,11 @@ _ROLE_NOTE = {
 
 
 def _identity_keys(card: dict) -> list[str]:
-    """dedupe keys ของ card — item_id → unit_id → model_id (canonical เหมือน
-    candidate_pool._norm_id); ไม่มี identity เลย → [] (dedupe ไม่ได้ เก็บหมด)"""
-    from .retrieval_policy import _norm_id
-
-    def _key(prefix, v):
-        # "" / whitespace / None → ไม่ใช่ identity จริง — ไม่สร้าง key
-        if v is None:
-            return None
-        nv = _norm_id(v)
-        return f"{prefix}:{nv}" if nv and nv.strip() else None
-
-    return [k for k in (
-        _key("i", card.get("item_id")),
-        _key("u", card.get("unit_id")),
-        _key("m", card.get("model_id")),
-    ) if k]
+    """dedupe keys ของ card — candidate identity owner เดียว
+    (candidate_pool._identity_key): key เดียวต่อ card (variant→v:/u:, listing
+    →i:, name→n:); ไม่มี identity เลย → [] (dedupe ไม่ได้ เก็บหมด)"""
+    key, _ = _identity_key(card)
+    return [key] if key else []
 
 
 def run_grouped_selection(
@@ -51,8 +41,18 @@ def run_grouped_selection(
     unavailable_limit: int = 5,
     fetcher=None,
     legacy_fetcher="auto",
+    subject_cards=(),
+    compat_cards=(),
+    kb_fetcher=None,
+    supporting=(),
 ) -> dict | None:
     """profile → pipeline → selection (ไม่ merge base) — รันครั้งเดียวต่อ request.
+
+    subject_cards/compat_cards = branch evidence ที่ resolve แล้ว (owner =
+    conversation_products/device_compat) · kb_fetcher = deferred KB product
+    evidence fn (signature เดียวกับ fetch_fn ของ executor — run ใน executor
+    เพื่อ isolate failure) · supporting = non-candidate evidence records
+    (kb_qa/kb_raw/vision) เข้า pool.supporting_evidence
 
     Returns {"selected_cards", "extra_context", "summary"} เสมอเมื่อ pipeline
     รันสำเร็จ (selected_cards อาจว่าง — canonical owns context: ว่าง=ว่าง);
@@ -62,12 +62,27 @@ def run_grouped_selection(
         slots = build_retrieval_slots(profile)
         relations = build_retrieval_relations(profile, slots)
         requests = build_grouped_retrieval_requests(profile, slots, relations)
+        # evidence channels — synthetic request rows เพื่อให้ selector iterate
+        # ได้ (quota แยกต่อ channel); fetch = closure บน pre-resolved data
+        channels: list = []
+        if subject_cards:
+            cards = tuple(subject_cards)
+            channels.append((channel_request("subjects"),
+                             lambda *a, _d=cards, **k: _d))
+        if compat_cards:
+            cards = tuple(compat_cards)
+            channels.append((channel_request("compat"),
+                             lambda *a, _d=cards, **k: _d))
+        if kb_fetcher is not None:
+            channels.append((channel_request("kb"), kb_fetcher))
         results = execute_grouped_retrieval_requests(
             requests, message=message, shop=shop, platform=platform,
-            fetcher=fetcher, legacy_fetcher=legacy_fetcher)
-        pool = build_candidate_pool(results, profile=profile)
+            fetcher=fetcher, legacy_fetcher=legacy_fetcher,
+            channels=channels)
+        pool = build_candidate_pool(results, profile=profile,
+                                    supporting_evidence=tuple(supporting))
         sel = select_for_llm_context(
-            pool, requests, profile,
+            pool, requests + tuple(r for r, _ in channels), profile,
             per_request_limit=per_request_limit,
             unavailable_limit=unavailable_limit)
     except Exception:

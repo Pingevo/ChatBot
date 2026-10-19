@@ -12,7 +12,7 @@
 จุดประสงค์: พิสูจน์ว่า compat/type-scoped query ต้อง sweep ตาม field ไม่ใช่ similarity —
 ของที่ spec สูงพอไม่เคยเข้า pool เพราะ text ไม่คล้าย query
 
-รัน: .venv/bin/python docs/test/test_unit_hybrid_sweep.py
+รัน: .venv/bin/python docs/test/diag_unit_hybrid_sweep.py
 """
 from __future__ import annotations
 

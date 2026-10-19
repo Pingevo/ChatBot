@@ -392,23 +392,62 @@ class TurnDecision:
 >
 > **⚠️ Activation blocker:** `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — the executor today unions only `units` + `legacy` sources. Enabling the flag makes canonical selection own the *entire* product context, but KB product identity, compatibility candidates, order/history anchors, image/OCR evidence, and other required sources are Phase 4 work. The flag must remain OFF in production until Phase 4 source union lands; Phase 3 review proceeds offline only.
 
-## Revised Phase 4: Complete The Evidence-Preserving Source Union
+## Revised Phase 4A: Complete The Evidence-Preserving Source Union (Runtime)
 
 **Purpose:** Put every relevant source into one bounded pool while keeping support text separate from products.
 
-**Files:** Modify executor, pool, KB, compatibility, and conversation owners; add unified-source tests; update SRS/log.
+**Files:** Modify executor, runtime, pool, policy, product_store, conversation_products, knowledge_base, app callsites; add unified-source tests; update SRS/log.
 
-- Product candidates: unit, listing, exact identity, compatibility candidate, KB product identity, order/history anchor.
-- Evidence attachments: `kb_product`, `image_texts`, and stock/spec joins by normalized identity.
-- Supporting evidence: `kb_qa` and `kb_raw`; never a product candidate without product identity.
+- Product candidates: unit, listing, exact identity, compatibility candidate, KB product identity (item/model only), order/history anchor, subject snapshot (historical-only).
+- Evidence attachments: `kb_product`, `image_texts`, `subject_snapshot`, `compat`, `anchor` joined by identity domain.
+- Supporting evidence: `kb_qa`, `kb_raw`, unmatched/name-only KB records, vision text; never a product candidate without product identity.
 
-- [ ] RED-test source omission, partial unit result, KB-only evidence, missing live anchor, source failure, and bounded limits.
-- [ ] Add bounded adapters; record raw/eligible/unavailable/rejected counts and reasons.
-- [ ] Attach evidence by `_norm_id`; use name matching only when no identity exists and record low confidence.
-- [ ] Dedupe cross-source evidence without merging distinct variants.
-- [ ] Probe active, all-dead, UNLIST, stale model, null type, and missing OCR fixtures.
+**Identity contract (corrected — two domains):**
+- Candidate identity: `u:{unit_id}`/`v:{item_id}#{model_id}` (variant key — parseable `item:model` unit_ids canonicalize to the same `v:` key) → `i:{item_id}` → `n:{shop}:{name}` + `identity_quality` marker. Merge iff identical key; `m:{model_id}`-alone merging is forbidden (cross-item collision); variants sharing item_id never merge.
+- Listing vs variant: when ≥1 non-rejected variant candidate exists for an item, the listing `i:` card must not remain a selectable candidate — its evidence converts to `item`-domain attachments joined to every matching variant (source provenance retained). Rejected-only variants never suppress the listing; with no variants the listing stays a normal candidate.
+- Attachment identity: `item` domain joins all variants of an item; `model`/`v` domain joins only the matching variant (listing fallback + trace); `name` domain is low-confidence and never merges variants. Attachment joins never collapse candidates.
 
-**Exit gate:** reviewed recall never decreases and no source hides another because it returned first.
+**Control flow:** the single early `run_grouped_selection` callsite (app.py:1831) is deleted; each mutually exclusive branch (KB / main) invokes the same `retrieval_runtime` owner once *after* its branch evidence is resolved → exactly one profile, one source union, one candidate pool, one selection per eligible turn.
+
+**Bounded fetchers:** `fetch_products_by_ids` (batched subject/anchor identity — replaces per-entry find_one N+1), `fetch_products_by_models` (one `$or` model listing lookup scoped to shop for KB model-code docs), `fetch_products(include_unit_index=False)` for the legacy channel (kills unit early-return hiding + mislabeled cards).
+
+- [x] RED-test source omission, partial unit result, KB-only evidence, missing live anchor, stale snapshot, source failure, bounded limits, variant non-merge, attachment domains, single-callsite-per-branch — `docs/test/test_phase4_source_union.py` (26 cases; honest RED 23F/3P → GREEN 26/26).
+- [x] Add bounded adapters; record raw/eligible/unavailable/rejected counts and reasons per source attempt — `channel_request` (planner) + `channels` (executor) + `kb_product_evidence`/`fetch_product_docs_by_ids`/`fetch_products_by_models`.
+- [x] Attach evidence by identity domain; name-only matching records explicit low confidence and never merges variants — `_join_attachment` owner (item/model/name domains), `identity_quality` marker.
+- [x] Stale subject/anchor snapshots: `_snapshot_only` → `historical_only`/`unknown` states, `sellable=False`, no purchase link; live evidence always wins the merge — `_canonicalize` snapshot branch + materialize live-over-snapshot.
+- [x] KB-only records without shop listing/unit evidence remain supporting evidence — never sellable candidates — name-only/no-identity → supporting channel; KB prose cannot set publish/stock (availability-primitives guard).
+- [x] Populate `pool.supporting_evidence` + `attachment_evidence`; trace dropped candidates at per-request truncation.
+- [x] Probe active, all-dead, UNLIST, stale model, null type, and missing OCR fixtures.
+
+**Review-fix round (4 findings — 2 High + 2 Medium — verified and corrected at existing owners):**
+- [x] Global pool dedupe: `build_candidate_pool` groups by `_identity_key` across **all** execution results of the turn — one `PooledCandidate` per identity with merged `sources`/`request_ids`; per-request scoring/role/slot/relation preserved via `request_scores`/`by_request`; attachment join targets the unique global list. No post-hoc cleanup pass.
+- [x] KB model ownership: `kb_product_evidence` matches each fetched product to its exact KB model doc via `_doc_matches_model`/`_model_token_in_name` (boundary-aware — K9≠K90); unmatched model docs → supporting evidence independently; still one bounded shop-scoped query.
+- [x] Supporting shape: KB `app.py` callsite passes `[{"kind","text"}]` sequence like the main branch — no bare dict (which iterated into `"kind"`/`"text"` string records); runtime keeps record contract, no coercion added.
+- [x] Strict shop scope: `fetch_product_docs_by_ids` queries only the given shop when `shop_filter` is supplied — unscoped fallback deleted; missing scoped ids → `_snapshot_only` historical cards (sellable=False, no link); one unscoped query allowed only when no shop filter.
+- RED 10F/5P → GREEN 39/39 contract cases; broad offline regression 971 passed / 20 skipped / 7 xfailed once.
+
+**Implementation status (4A complete — flag OFF):** single `_identity_key`/`_join_attachment`/materialize owners; one canonical candidate per identity per turn; 2 mutually-exclusive branch callsites (early exec deleted); broad suite green (971 passed incl. incident replay + contract 39); `units.py`, refresh/build/import/DEPLOY untouched.
+
+**Exit gate:** reviewed recall never decreases, no source hides another because it returned first, and exactly one union/pool/selection executes per eligible turn on each branch. Flag remains OFF.
+
+## Revised Phase 4B: Atomic Daily Evidence Refresh
+
+**Purpose:** Keep product exports, image text, sellable units, and embeddings fresh daily without downtime or half-published artifacts.
+
+**Files:** Modify `scripts/refresh_data.sh`, `build_image_texts.py`, `build_sellable_units.py`, `build_embeddings.py`, `import_sellable_units.py`, `units.py` (pointer-aware read); update DEPLOY/SRS/log; add refresh-contract tests.
+
+- One `generation_id` per run; all artifacts (snapshot, units JSONL, NPZs, staging collection, manifest) carry/verify against it.
+- Corrected order: export → image-identity discovery → incremental OCR → image_texts import → units build (OCR-aware) → embeddings → validate → publish → retain previous generation.
+- Publish model (chosen): collection-per-generation `sellable_units_g<gid>` + atomic pointer document `sellable_units_meta.active {collection, generation_id, npz}`; NPZ embeds `generation_id` and runtime asserts pointer↔file pairing, degrading to keyword path on mismatch. Rollback = pointer write. Stale units impossible by construction. (Rejected: `renameCollection` — unverified privileges + mtime/rename pairing gap.)
+- Request-level generation snapshot: each request resolves `{generation_id, collection, npz}` once and uses that immutable snapshot for the whole request — loaders never re-resolve the pointer independently. Versioned NPZ files are immutable; `os.replace` only publishes temp→final within the same generation path before activation. The single pointer write activates the already-validated pair; a mismatch must never combine artifacts across generations.
+- Fail-closed pointer: missing/invalid/unreadable pointer must not fall back silently to the base `sellable_units` collection — grouped semantic selection becomes unavailable and the existing keyword/non-generation path applies (or fail closed). Keep the previous generation for rollback and in-flight requests; delete older generations only after a bounded grace period, never immediately after activation.
+- Incremental OCR: fingerprint `image_id+normalized_url`; new/changed/error-retry within bounds; removed images keep records but detach; quota-exhausted → `deferred`, not failed; partial OCR never blocks publish.
+- OCR→embedding: only `spec|variant_map|product` kinds enter unit `search_text` under caps/dedupe/boilerplate filter; `banner` stays supporting-only; full OCR remains an attachment.
+- Manifest records non-secret operational metadata only (counts, hashes, validation, status).
+- [ ] RED-test fingerprint classification, deferred quota, staging/pointer order, verify-before-replace, npz↔generation pairing, manifest, rollback, OCR caps/exclusion, non-blocking missing OCR.
+- [ ] Document cron contract (dedicated OCR quota preferred; otherwise 03:00 safer than 09:00). AI agent never installs cron; operator configures post-deploy.
+
+**Exit gate:** a failed run leaves the previous accepted generation untouched; a successful run atomically publishes a consistent Mongo+NPZ generation pair; one rollback generation is retained.
 
 ## Revised Phase 5: Field Evidence, Policy Eligibility, And Compatibility Proof
 

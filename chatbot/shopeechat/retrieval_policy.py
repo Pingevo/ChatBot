@@ -255,25 +255,44 @@ def _canonicalize(card: dict, requested) -> dict:
     """raw card → canonical fields + facts trace — adapter internals เจ้าเดียว."""
     from . import product_store as _ps
 
+    # snapshot = identity/history เท่านั้น — ห้าม resolve live availability
+    # จาก stored fields (stale) และห้ามบอก publish/stock truth
+    snap = bool(card.get("_snapshot_only"))
     # availability semantics — resolver owner เดียว; stamped fields ชนะ
     cs = card.get("catalog_status")
     cv = card.get("customer_visible")
     need_av = (cs is None or cv is None
                or not card.get("availability_reason"))
-    av = _ps.resolve_availability(card) if need_av else None
+    # resolver ใช้ได้เฉพาะ card ที่มี availability primitives — KB/prose card
+    # ที่ไม่มี status fields ข้าม resolver (fields อื่นเช่น model:str ไม่ใช่
+    # Shopee model rows) → publish/stock ยัง unknown ตาม contract
+    has_av_primitives = (
+        "status" in card or "item_status" in card
+        or cs is not None or cv is not None
+        or card.get("total_stock") is not None
+        or card.get("_available_for_sale") is not None
+        or card.get("sold_out") is not None
+        or card.get("availability_reason")
+        or isinstance(card.get("model"), (list, tuple)))
+    av = (_ps.resolve_availability(card)
+          if need_av and has_av_primitives and not snap else None)
     if cs is None:
-        cs = av["catalog_status"]
+        cs = (av or {}).get("catalog_status") or "unknown"
     if cv is None:
         # ขาด visibility แต่มี status → resolver; มีแค่ catalog_status →
         # semantics เดียวกับ resolver (unlisted/unknown = ไม่เคย publish)
-        cv = (av["customer_visible"]
-              if ("status" in card or "item_status" in card)
+        cv = (av["customer_visible"] if av is not None
+              and ("status" in card or "item_status" in card)
               else cs not in ("unlisted", "unknown"))
     reason = card.get("availability_reason") or (av or {}).get("reason") or ""
 
     publish = _ps.PUBLISH_STATE.get(cs, "unknown")
     stock_st = _STOCK_STATE.get(cs, "unknown")
     vis = "hidden" if cv is False else _VISIBILITY.get(cs, "hidden")
+    if snap:
+        publish, stock_st, vis, reason = (
+            "unknown", "unknown", "historical_only", "snapshot_stale")
+        card["availability_reason"] = "snapshot_stale"
 
     # type — unit field ชนะ; ไม่มี → detect จากชื่อ (multi → candidates)
     ptype = card.get("product_type")

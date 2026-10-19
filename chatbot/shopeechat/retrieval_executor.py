@@ -43,6 +43,8 @@ class RetrievalExecutionResult:
     source_attempts: tuple[SourceAttempt, ...] = ()
     hard_filters: tuple[tuple[str, str], ...] = ()
     soft_hints: tuple[tuple[str, str], ...] = ()
+    supporting_evidence: tuple = ()
+    attachment_evidence: tuple = ()
     trace: tuple[str, ...] = ()
     error: str | None = None
 
@@ -138,17 +140,22 @@ def _bucket(card: dict, req: RetrievalRequest) -> tuple[str, str]:
 
 def _run_attempt(source: str, fetch_fn, query: str, prof, shop: str,
                  limit: int, req: RetrievalRequest
-                 ) -> tuple[list[dict], list[dict], list[dict], SourceAttempt]:
-    """fetch 1 source → tag evidence + แยก bucket — error ถูกจับใน attempt"""
+                 ) -> tuple[list[dict], list[dict], list[dict],
+                            SourceAttempt, tuple, tuple]:
+    """fetch 1 source → tag evidence + แยก bucket — error ถูกจับใน attempt;
+    คืน (elig, unav, rej, attempt, supporting, attachments) — 2 tuple ท้าย
+    จาก channel result ที่เป็น evidence records (ไม่ผ่าน canonicalize)"""
     try:
         res = fetch_fn(query, retrieval_profile=prof, shop=shop, limit=limit)
     except (Exception, SystemExit) as exc:
         return [], [], [], SourceAttempt(
             source=source, raw_count=0, eligible_count=0,
             unavailable_count=0, rejected_count=0,
-            trace=(f"{source} error",), error=str(exc))
+            trace=(f"{source} error",), error=str(exc)), (), ()
     cards = tuple(res.cards) if hasattr(res, "cards") else tuple(res)
     raw = getattr(res, "raw_count", len(cards))
+    sup = tuple(getattr(res, "supporting_evidence", ()) or ())
+    atts = tuple(getattr(res, "attachment_evidence", ()) or ())
     elig: list[dict] = []
     unav: list[dict] = []
     rej: list[dict] = []
@@ -165,7 +172,7 @@ def _run_attempt(source: str, fetch_fn, query: str, prof, shop: str,
     return elig, unav, rej, SourceAttempt(
         source=source, raw_count=raw, eligible_count=len(elig),
         unavailable_count=len(unav), rejected_count=len(rej),
-        trace=tuple(getattr(res, "trace", ()) or ()))
+        trace=tuple(getattr(res, "trace", ()) or ())), sup, atts
 
 
 def execute_grouped_retrieval_requests(
@@ -178,11 +185,15 @@ def execute_grouped_retrieval_requests(
     observe_only: bool = True,
     fetcher=None,
     legacy_fetcher=None,
+    channels: tuple = (),
 ) -> tuple[RetrievalExecutionResult, ...]:
     """execute request plan ทีละชิ้น — evidence-preserving observe-only.
 
     source ต่อ request: units (fetcher, default=fetch_unit_evidence)
     + legacy product_store (legacy_fetcher — None=ปิด, "auto"=adapter จริง)
+    + channels (optional evidence channels — ((RetrievalRequest, fetch_fn),)
+    จาก channel_request(); run ครั้งเดียวต่อ channel ไม่ผูก slot request,
+    failure isolated ต่อ channel เหมือน source attempt ปกติ)
     ทุก card ได้ _evidence.sources + _selection_reason (private — strip
     ด้วย retrieval_policy.strip_private_evidence ก่อนเข้า LLM)
     """
@@ -219,12 +230,16 @@ def execute_grouped_retrieval_requests(
         unav: list[dict] = []
         rej: list[dict] = []
         attempts: list[SourceAttempt] = []
+        sup: list = []
+        ch_atts: list = []
         for src_name, fn in sources:
-            e, u, r, att = _run_attempt(src_name, fn, query, prof, shop,
-                                        limit_per_request, req)
+            e, u, r, att, s, a = _run_attempt(src_name, fn, query, prof, shop,
+                                            limit_per_request, req)
             elig += e
             unav += u
             rej += r
+            sup += s
+            ch_atts += a
             attempts.append(att)
             if att.error:
                 trace.append(f"{src_name}_error={att.error}")
@@ -245,5 +260,26 @@ def execute_grouped_retrieval_requests(
             rejected_evidence=tuple(rej),
             source_attempts=tuple(attempts),
             hard_filters=req.hard_filters, soft_hints=req.soft_hints,
+            supporting_evidence=tuple(sup),
+            attachment_evidence=tuple(ch_atts),
             trace=tuple(trace), error=req_error))
+    for req, fn in channels:
+        # channel = synthetic request + fetch เดียว — evidence channels
+        # (subjects/compat/kb/...) run ครั้งเดียวต่อ turn; error isolated —
+        # channel ที่พังไม่ทำ channel/source อื่นหาย (attempt.error ตามเดิม)
+        prof = _request_profile(req, message, shop, platform)
+        e, u, r, att, sup, ch_atts = _run_attempt(
+            req.source, fn, message, prof, shop, limit_per_request, req)
+        results.append(RetrievalExecutionResult(
+            request_id=req.request_id, source=req.source,
+            slot_id=req.slot_id, relation_id=req.relation_id,
+            subtypes=req.subtypes, model_codes=req.model_codes,
+            target_device=req.target_device,
+            eligible_candidates=tuple(e),
+            unavailable_evidence=tuple(u),
+            rejected_evidence=tuple(r),
+            source_attempts=(att,),
+            supporting_evidence=tuple(sup),
+            attachment_evidence=tuple(ch_atts),
+            trace=(f"channel={req.source}",), error=att.error))
     return tuple(results)

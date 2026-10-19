@@ -1818,7 +1818,9 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                       file=sys.stderr)
 
         # ⚡ Task 5B3-C — grouped-retrieval selection (flag-gated)
-        #   compute ครั้งเดียว — แทน products ที่ llm.answer callsites
+        #   flag resolution เท่านั้น — execution ย้ายไปหลัง branch evidence
+        #   resolve (KB path ก่อน boundary ~2278 / main path ก่อน ~4459):
+        #   branch ต่อกัน mutually exclusive → run ครั้งเดียวต่อ turn
         #   (canonical owns context เมื่อ flag ON: selected ว่าง=products ว่าง;
         #   error/None → fail closed products=[] — legacy ไม่ re-enter เด็ดขาด)
         _grouped_sel = None
@@ -1828,16 +1830,6 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             _sel_flag = _rcfg.grouped_retrieval_selection_enabled()
         except Exception:
             _sel_flag = False
-        if _sel_flag and _retrieval_profile is not None:
-            try:
-                from . import retrieval_runtime as _rr
-                _grouped_sel = _rr.run_grouped_selection(
-                    _retrieval_profile, message=req.message, shop=req.shop,
-                    platform=req.platform or "shopee")
-            except Exception as _e:
-                print(f"[SELECTION] grouped-retrieval error: {_e}",
-                      file=sys.stderr)
-                _grouped_sel = None
 
         # ===== ขั้นที่ 1: เช็ค Knowledge Base ก่อน =====
         # ถ้าเป็น follow-up (เช่น "เคลมยังไง", "รับประกัน") ให้เอา model จาก history มาค้น KB ด้วย
@@ -2271,6 +2263,29 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     if _kb_device_products:
                         merged_products = merged_products + _kb_device_products
                         print(f"[DEVICE-SPEC-LOOKUP-KB] merge {len(_kb_device_products)} สินค้าจาก re-query เข้า merged_products (now {len(merged_products)})", file=sys.stderr)
+
+                    # ⚡ Task 5B3-C — grouped execution ครั้งเดียวต่อ turn
+                    #   (หลัง branch evidence resolve: subjects/compat/kb)
+                    if _sel_flag and _retrieval_profile is not None:
+                        try:
+                            from . import retrieval_runtime as _rr
+                            _grouped_sel = _rr.run_grouped_selection(
+                                _retrieval_profile, message=req.message,
+                                shop=req.shop,
+                                platform=req.platform or "shopee",
+                                subject_cards=_subject_cards,
+                                compat_cards=_kb_device_products or (),
+                                kb_fetcher=lambda *a, **k:
+                                    knowledge_base.kb_product_evidence(
+                                        db, kb_docs, shop=req.shop,
+                                        message=req.message),
+                                supporting=([{"kind": "kb",
+                                              "text": kb_context}]
+                                            if kb_context else ()))
+                        except Exception as _e:
+                            print(f"[SELECTION] grouped-retrieval error: {_e}",
+                                  file=sys.stderr)
+                            _grouped_sel = None
 
                     # ⚡ Task 5B3-C — flag ON = canonical owns product context:
                     #   selection พัง/None → fail closed (products=[])
@@ -4453,6 +4468,24 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         if products and _pending_context_note:
             _add_context_note(products, _pending_context_note)
             print(f"[DEBUG-3D] injected context_note len={len(_pending_context_note)} products[0]_has_note=True", file=sys.stderr)
+        # ⚡ Task 5B3-C — grouped execution ครั้งเดียวต่อ turn
+        #   (หลัง branch evidence resolve: subjects/compat/QA/vision)
+        if _sel_flag and _retrieval_profile is not None:
+            try:
+                from . import retrieval_runtime as _rr
+                _grouped_sel = _rr.run_grouped_selection(
+                    _retrieval_profile, message=req.message, shop=req.shop,
+                    platform=req.platform or "shopee",
+                    subject_cards=_subject_cards,
+                    compat_cards=_device_additional or (),
+                    supporting=([{"kind": "qa", "text": _qa_ctx}]
+                                if _qa_ctx else [])
+                                + ([{"kind": "vision", "text": _vision_context}]
+                                   if _vision_context else []))
+            except Exception as _e:
+                print(f"[SELECTION] grouped-retrieval error: {_e}",
+                      file=sys.stderr)
+                _grouped_sel = None
         # ⚡ Task 5B3-C — flag ON = canonical owns product context:
         #   selection พัง/None → fail closed (products=[])
         #   ห้าม legacy products ไหลเข้า LLM
