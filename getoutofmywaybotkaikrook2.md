@@ -61,6 +61,49 @@
 2. **processes ยังรัน**: Next.js dev + uvicorn :8010 — รอผู้ใช้หยุดหรืออนุญาต kill (preflight contract: clean soak)
 3. **tree ไม่ clean ตาม contract**: plan+waythrough modified (docs เก่า) — ผู้ใช้ตัดสินว่า commit/docs-closeout ก่อนหรือยอมรับ state นี้
 
+#### PHASE 5 — IMPLEMENTATION COMPLETE (2026-10-20) · uncommitted ตามสั่ง · รอ independent review
+
+- **error→cause→fix→impact**:
+  - F1 RED `ImportError: policy_resolver` ×48 + legacy-inference ×1 — module/typed contracts ไม่มี → สร้าง `chatbot/shopeechat/policy_resolver.py` (owner เดียว 3 surfaces) → GREEN 52/52
+  - F2 legacy-inference test รั่วไป Mongo จริง (pymongo not authorized) — `get_general_faq` ใช้ cached admin client → stub `get_general_faq` ตรงๆ ใน test seam — ไม่มี real DB path อีก
+  - F3 `tx-policy-wrong-model-filter` incident กลายเป็น pass — typed decision `ineligible` ถูกต้อง → flip `status: incident→positive` + `incident_levels` ถอด
+  - F4 `pos-policy-seller-wrong-item` fail — ข้อความ complaint จริงชน `order_problem` (owner คนละตัว) → เปลี่ยน wording fixture เป็น hypothetical "ถ้า" (suppress order_problem, exercise policy path) → `eligible` via typed decision
+  - F5 compat truth-table — declared connector set ที่ disjoint จาก device = explicit negative proof (ตาม `_filter_compat_products` semantics เดิม); missing evidence เท่านั้นที่ unknown — resolver+test แก้ตาม
+  - F6 `_filter_compat_products` refactor self_compat reorder — `compat+ambiguous` ทำลำดับเสีย → `_outcomes` record per-product + `kept` คงลำดับเดิม
+  - F7 `tx-q12-positive-compat` incident — subject PB200P (model-regex/tier-A) หลุดเพราะ ambiguous merge-back เกิดเฉพาะ compat<2 → hoist `_tier_a_ids` ก่อน filter + `protected_ids` param: **asked subject ไม่ถูก verdict ซ่อน** (unknown/incompatible อยู่ — คำตอบต้องพูดถึงมัน); ambiguous ที่ไม่ใช่ subject ยังลบตาม pinned behavior → incident → `positive`
+- **new module `policy_resolver.py` (553 บรรทัด, pure stdlib — 0 DB/network/provider)**: `PolicyQuery`/`PolicyDecision`/`PolicyRule` frozen dataclasses · `resolve_policy` = eligibility owner เดียว (effective-date → scope → reason/condition/order_state → specificity → priority → version; conflict/incomplete/expired → `admin_review`/`unknown` ไม่เคย eligible) · `active_policy_rules()` = `()` — production activation BLOCKED (ไม่มี structured source — missing records → unknown/admin_review, ไม่ fallback FAQ/desc/history) · `FieldEvidence` + `extract_field_facts`/`device_field_facts` (fact ผูก subject identity เดียว — ไม่มี fact = unknown) · `CompatProof`/`CompatDecision` + `resolve_compat` = compat owner เดียว (declared proof ก่อน → derive: connector match/disjoint/bridge/missing; fits/works_with = declares_device เท่านั้น) · `claim_supported` (issue-28 typed guard) · `lookup_device_spec` (pass-through) · `build_policy_query`/`policy_rule_from_dict`/`compat_proof_from_dict` (structured-input adapters)
+- **runtime integration**: `_chat_impl` — `build_policy_query`+`resolve_policy` ก่อน `build_general_context`; decision appended `_policy_carry` (mixed-need) / `gen_context` (pure general) → prose explain หลัง decision เท่านั้น · `knowledge_base.build_general_context`: return_policy = `general_faq` เท่านั้น (desc-scrape ตัด — คง shipping+warranty-fallback ซึ่งไม่ใช่ eligibility surface) · `device_compat._filter_compat_products`: per-product verdict delegate ให้ `resolve_compat` เจ้าของเดียว (compatible→compat, incompatible→drop, unknown/admin→ambiguous merge-back เดิม, protected_ids=subject คงอยู่)
+- **RED→GREEN**: RED — 48×ImportError + 1×legacy-inference proven (desc-scrape ใส่ "รับเปลี่ยน/คืนได้ภายใน 7 วัน" เข้า context จริง) + replay `pos-`fail/`tx-`xfail → GREEN: contract suite **52/52** · compat script **144/144** · replay l3 **103 passed** (tx-policy+pos-policy+tx-q12 positive) · focused batch 92 passed (general-guards/cert×2/pool×2/evidence-card/fail-closed) · claim/warranty batch 99 passed · validator `integrity: all rows pass` · `py_compile`+`git diff --check` clean · secret scan clean (env-name/prose hits เท่านั้น)
+- **structural gate**: policy owner=1 (`resolve_policy`) · compat owner=1 (`resolve_compat`) · fact ทุกตัวผูก canonical subject_id · prose เปลี่ยน decision ไม่ได้ (decision คำนวณก่อน context เสมอ) · bot prose ไม่ใช่ evidence · unknown≠ineligible · compat-absent≠incompatible · keyword/regex table ใหม่=0 (reuse `_CERT_SEARCH_RES`/`_has_cert`/`_spec_tokens`/`_extract_product_connectors`) · provider call ใหม่=0 · env/flag/collection/dependency ใหม่=0
+- **retained legacy (caller+blocker)**: `_SKIP_TYPES`/`_compat_mode` mode gate (device_compat:358-404 — mode detection ไม่ใช่ verdict owner; ลบต้อง focused replay ของมันเอง) · `product_store` phone→charger override (:3186-3208 — retrieval-type gate เหตุเดียวกัน) · `guards.enforce` return_claim/spec_claim (output boundary หลัง decision — complementary) · `order_flow` return/refund handoffs (complaint owner ไม่เคยตัดสิน eligibility) · `_extract_policy_from_descriptions` คงเฉพาะ shipping+warranty-fallback (explanatory ไม่ใช่ eligibility)
+- **runtime delta (unstaged)**: +policy_resolver.py 553 · app.py +38/−24 · device_compat +49/−40 · knowledge_base +7/−1 · net helpers: `protected_ids` param +`_outcomes` tracking (รองรับ subject-boundary contract — ไม่ใช่ guard chain)
+- **files touched**: `policy_resolver.py` (new) · `app.py` · `device_compat.py` · `knowledge_base.py` · `test_phase5_field_policy_compat.py` (new 708) · `test_legacy_turn_incident_replay.py` (+30 — policy_records/policy_decision seam) · `validate_legacy_turn_fixtures.py` (+3) · `legacy_turn_incidents.jsonl` (3 rows: policy_records+expectations+2 status flips+1 wording) · SRS §5.2/6.5/6.14/6.38 · plan checklist · ไฟล์นี้
+- **สถานะ**: runtime ทั้งหมด **unstaged+uncommitted** ตามสั่ง · verdict `PHASE_5_FIELD_POLICY_COMPAT_READY_FOR_INDEPENDENT_REVIEW`
+
+#### PHASE 5 — INDEPENDENT REVIEW-FIX ROUND (2026-10-20) · PART 0 verified · กำลังทำ
+
+- **frozen state**: branch `feature-phase3-aswer-quality` HEAD `f67c27b` (docs commit เดิม) · 11 ไฟล์ unstaged (runtime+test+docs ของ Phase 5) · staging empty · services หยุดทั้งหมด (8010/3000/bot-worker ไม่มี process) · grouped selection flag path OFF คงเดิม
+- **findings verified ต่อ source (ไม่รับแบบ performative)**:
+  - H1 จริง — app.py:1661 ส่ง `policy_decision: outcome=...` เป็น text marker เข้า LLM context; `guards.enforce` ไม่เคยอ่าน typed decision; `return_claim` rule ตัดสินจาก prose grounding (`_claim_grounded` เทียบ grounding_text/cards)
+  - H2 จริง — decision compute ที่ :1653 แต่ model/item branch (:1668 `general_qtype=None`) ไม่มี carry path → decision หาย; mixed-need ได้แค่ text
+  - H3 จริง — `resolve_policy` เก็บ `required_evidence` เข้า decision (:223) แต่ไม่เคยเช็ค presence → eligible ได้ทั้งที่ evidence ขาด
+  - H4 จริง — `_INTENT_PROMPT`+`_DEFAULT_RESULT` ไม่มี `policy_reason`/`policy_item_condition`; fixtures inject เอง → production เสมอ "unknown"
+  - H5 จริง — `claim_supported`/`lookup_device_spec`/`POLICY_OUTCOMES`/`COMPAT_OUTCOMES` ไม่มี production caller; `spec_claim` ใน enforce = substring เทียบ `_evidence_pool` (union ทุก card → ข้าม product ได้); `attach_kb_specs` (units.py:386-406) เขียน `canonical_specs` ยืมจาก kb doc ตาม model_codes → card contaminated โดยไม่มี provenance
+  - H6 จริง — `_src` compute แล้วที่ :645 แต่ `device_field_facts` ไม่รับ source → intent hint กลายเป็น fact พิสูจน์ incompatible ได้; `if not compat: return products` คืนสินค้าที่ proven incompatible กลับเป็น recommendation
+  - M1 จริง — :220-230 compare outcomes ของทุก active match → general allow + shop-specific deny = rule_conflict (ผิด — specific ต้องชนะ)
+  - M2 จริง — constants/wrappers test-only เหลือค้าง
+- **correction plan (root-cause, batch เดียว)**:
+  1. `PolicyQuery` += `evidence_ids`/`conflicting_evidence` (supplied identities เท่านั้น); `PolicyDecision` += `missing_evidence`; winning rule ขาด required evidence → `admin_review` (`missing_required_evidence`/`evidence_conflict`) — ห้าม eligible/ineligible
+  2. M1 — tier เดียว: sort (-specificity,-priority) → winning tier → dedupe same rule_id by version/effective_from desc → conflict เฉพาะ equal winners; lower tier ไม่มีวัน conflict
+  3. H4 — `_INTENT_PROMPT`/`_DEFAULT_RESULT` += `policy_reason`/`policy_item_condition` closed-enum (enum ชุดเดียวใน policy_resolver — no dup table); invalid/missing → "unknown"; route เดิม intent_result → build_policy_query (ไม่มี side channel)
+  4. H1+H2 — `_policy_decision` object เก็บไว้; attach `routing_decision["policy_decision"]` (typed dict + policy_type) ที่ทุก exit ที่ turn ไปถึง (general :1733 + product-flow returns); `enforce` กิน decision → `return_claim` polarity ด้วย claim rx + `_NEGATION_RE` เดิม (no new keyword table): eligible→positive pass/negative rewrite เป็นข้อความ eligible; ineligible→positive rewrite เป็น honest negative; unknown/admin_review→ทุก claim → admin-review phrasing; prose/FAQ/history เปลี่ยน verdict ไม่ได้อีก
+  5. H5 — `spec_claim` check ใน enforce เปลี่ยนจาก substring pool → `extract_field_facts` ต่อ card แล้วเทียบ `spec_tokens`/`certifications` ของ subject identities (`routing_decision["subject_ids"]` จาก `_subject_cards`+tier-A; ไม่มี subject → union ทุก shown card); `attach_kb_specs` stamp `_specs_origin="kb_inherit"` → facts จาก KB-borrowed specs ใช้ ground ไม่ได้ (source!=kb_inherit เท่านั้น)
+  6. H6 — `device_field_facts(…, source=)` เก็บ provenance (spec-db/web-structured/web-parse/intent); resolve_compat: target connector จาก hint-level → unknown เสมอ (hint พิสูจน์ไม่ได้ทั้งทางบวกลบ); ลบ `if not compat: return products` เมื่อมี negative proof → คืน compat+protected เท่านั้น (incompatible ไม่กลับเป็น recommendation); self_compat เดียวกัน
+  7. M2 — ลบ `POLICY_OUTCOMES`/`COMPAT_OUTCOMES`/`lookup_device_spec`; `claim_supported` มี caller จริงใน enforce หรือลบทิ้ง
+  8. fixture honesty — เพิ่ม realistic seller-wrong-item complaint (ไม่มี "ถ้า") → order_problem owner (ask_order/handoff) ไม่ใช่ policy answer
+- **RED batch**: 10 items ตาม spec (contradictory-LLM, unknown+positive-prose, model/item decision reach, evidence matrix, classifier enum, subject-vs-cross-product, hint-cannot-prove, all-incompatible-not-returned, precedence matrix, real-complaint-owner)
+- **ห้าม**: commit/stage/push · parallel path ที่สอง · keyword/regex table ใหม่ · provider call ใหม่ · collection/env/flag · แตะ Botworker/workflow/Analytics/Phase 6/cron/deploy
+
 ### 🔍 PHASE 4B — Atomic Daily Evidence Refresh · ARCHITECTURE AUDIT + CONTRACT DESIGN (2026-10-19) · design-only รออนุญาต implement
 
 - **baseline**: branch `feature-phase3-aswer-quality` @ `8a52ba3` (4A committed `ec835af`+`8a52ba3`) · tree clean ก่อนเริ่ม · `grouped_retrieval_selection_enabled` OFF คงเดิม — รอบนี้ห้าม implement/flag/commit
@@ -5377,3 +5420,257 @@ config-failclosed 4/4 · boundary 20/20 · recovery-freshness 60/60 · error-pol
 - **roadmap added**: 3 bounded tracks — A Analytics Truth (window/timezone/source/labels, ลบ fake/aliased metrics), B Audit Event Correctness (single event vocabulary + dedupe), C Provider/Cost Observability (actual provider/model, safe key ref, tokens/cost/correlation)
 - **parallel rule**: Track A แยก branch/worktree ได้หลัง Botworker soak ปิด; Track B/C ห้ามขนานกับ chatbot answer-flow เพราะแตะ shared runtime/event boundaries; shared docs มี integration owner เดียว
 - **safety**: เอกสารเท่านั้น — runtime/tests/config/Mongo/provider/Botworker process = 0 แตะ; ไม่ stage/commit/push
+
+## Phase 5 Review-Fix Round — RED (verified before implementation)
+
+- 21/27 correction unit tests RED; 6 pass (r1-ineligible via legacy ungrounded rewrite, r6-subject/kb_inherit grounding, r9-equal-rank/expired — already correct).
+- Replay: pos-policy-return-model-item + pos-policy-return-tagged-item FAIL — decision computed but dropped before product-flow boundary (H2 live). pos-complaint-seller-wrong-item-real PASS — complaint owner already wins (protection test).
+- Causes verified in source: resolve_policy conflicts across ALL matched rules (no tiering), required_evidence collected-not-gated, _DEFAULT_RESULT lacks policy_* fields, enforce() never reads routing_decision["policy_decision"], spec_claim grounds on pooled card+grounding text (cross-product leak), intent_connector fact has no provenance (can prove incompatible), `if not compat: return products` echoes proven-incompatible items.
+- Plan: one batch — resolver (evidence gate + precedence tier + provenance + enum clamps), classifier emits/validates policy_* fields, guards consumes typed decision for return_claim + subject-scoped field facts for spec_claim, device_compat passes source + no echo of all-incompatible, app.py carries typed decision on all 7 post-decision return sites. No new provider calls/collections/flags; active_policy_rules() stays () — production blocker unchanged.
+
+## Phase 5 Review-Fix Round — GREEN + closeout (same working tree, uncommitted)
+
+**error→cause→fix→impact per finding:**
+
+- **H1 — PolicyDecision เป็นแค่ prompt text**: `guards.enforce` ไม่อ่าน decision → typed dict ติด `routing_decision["policy_decision"]` ผ่าน `_rd_extra()` ที่ return site ทั้ง 7; `_enforce_policy_claim` (ก่อน skip gate) บังคับ eligibility phrasing — eligible→positive เท่านั้น, ineligible→negative เท่านั้น, unknown/admin_review→admin-review text เสมอ; generic `return_claim` ข้ามเมื่อ decision active. LLM พูดขัด → rewrite ไม่ให้พลิก outcome. impact: general/mixed/model-item paths ทุก answer family — FAQ/history ยังอธิบาย process ได้แต่ตัดสินไม่ได้
+- **H2 — decision หลุดใน product path**: `_pdec` คำนวณครั้งเดียวที่ general_qtype block → `_rd_extra()` closure อ่าน subject cards+anchor → `policy_decision` + `subject_ids` (canonical) ติด routing_decision; model-item + tagged-item fixtures prove ตัวเดียวกันถึง boundary
+- **H3 — required_evidence เก็บแต่ไม่ gate**: PolicyQuery += `evidence_ids`/`evidence_by_subject`/`conflicting_evidence`; winner rule ประกาศ evidence ที่ขาด/ขัด → `admin_review` + `missing_evidence` ระบุชื่อ — ไม่ infer จาก prose
+- **H4 — classifier ไม่มี policy fields**: prompt JSON contract + `_DEFAULT_RESULT` += `policy_reason`/`policy_item_condition`/`policy_order_state`; closed-enum validate → invalid → `unknown`; call เดิม 0 provider calls เพิ่ม
+- **H5 — field evidence test-only**: `enforce` spec_claim เปลี่ยนจาก pooled-text substring → `_spec_fact_grounded` เช็ค `claim_supported` บน `extract_field_facts` ของ card ที่ identity ∈ `routing_decision["subject_ids"]` เท่านั้น; ไม่มี subject_ids → pool เดิม; `kb_inherit` facts ไม่ ground; `_SPEC_CLAIM_RE` รองรับ comma-group numbers (`20,000mAh` = 1 token — fix claim-side vs fact-side split `000mah`). `attach_kb_specs` stamp `_specs_origin="kb_inherit"`; `claim_supported` ได้ production caller จริง (อยู่ต่อ), `_evidence_pool` เหลือ serve `_identity_pool` เท่านั้น
+- **H6 — intent hint กลายเป็น fact + all-incompatible echo กลับ**: `_filter_compat_products` ส่ง `source` ไปกับ device spec ("spec-db"/"web-parse"/"intent"); `device_field_facts`/`resolve_compat` gate device connector ด้วย `_DEVICE_STRUCTURED_SOURCES={spec-db,web-structured}` — intent → `hint_only_device_evidence`→unknown เสมอ; ลบ `if not compat: return products`; all-negative → protected เท่านั้น + incompatible protected ได้ `_context_note` "ห้ามแนะนำเป็นตัวเลือก" (explanation-only)
+- **M1 — conflict ทั้ง active set**: precedence tier (specificity→priority→version/effective) เลือก winner ก่อน → conflict เฉพาะใน tier เท่ากัน; general allow + specific deny = deny ชนะ (ไม่ใช่ conflict); equal-rank conflict → `admin_review` rule_conflict คงเดิม
+- **M2 — dead surface**: ลบ `lookup_device_spec` (test-only pass-through), `POLICY_OUTCOMES`, `COMPAT_OUTCOMES`; `claim_supported` keep — production caller = guards boundary
+
+**fixture honesty**: `pos-complaint-seller-wrong-item-real` (non-hypothetical — ไม่มี ถ้า/สมมติ) → `order_problem` owner answers (ask order_sn), `policy_decision` ไม่ปรากฏ — complaint ไม่ถูกแปลงเป็น policy answer; hypothetical `pos-policy-seller-wrong-item`/`tx-…` อยู่ policy route ตาม design. `pos-policy-return-tagged-item` message แก้เป็น `ผิดรุ่นเอง` wording — `ใช้ไม่ได้เลย` เดิมเป็น claim-symptom → warranty_claim handoff (correct owner — fixture draft bug ไม่ใช่ production defect)
+
+**test-fix notes**: `FieldEvidence` fixtures += `status="known"`; `PolicyQuery` field names (`canonical_product_types`/`item_condition`/`event_time`); rules += `source`; `resolve_compat` keyword-only; `device_field_facts` specs += `"source": "spec-db"` (structured-evidence contract); conflict test split — equal-priority → admin_review (rule_conflict คงอยู่), priority-5 deny → wins (M1 contract); `PolicyDecision` += `missing_evidence` field
+
+**results (all frozen green)**: contract suite 81/81 · spec-grounding 36/36 · compat script 144/144 · replay l3 105p+19skip+4xfail (5 policy/complaint fixtures pass) · general-qtype guards 27/27 · unit_classifier 10/10 · qa_context_guard 4/4 · claim_flow + troubleshoot_claim + phase2_claim_state + warranty_delivery scripts exit 0 · validator `integrity: all rows pass` · py_compile×7 + `git diff --check` clean · `test_guards.py` fail = pre-existing env blocker (needs evidence-generation pointer — identical at HEAD `f67c27b`)
+
+**impact on other cases**: spec comma-grouping ขยาย claim+facts symmetric — "1, 2 พอร์ต" ไม่ over-match (unit required); `_ref_regex_products` bound `[]` early — falsy เท่าเดิมทุก consumer; protected_ids = raw item_id str (tier-A hoisted); `_context_note` reuse = channel เดิมไม่ใช่ surface ใหม่
+
+**safety**: `active_policy_rules()` ยัง `()` — production blocker ตั้งใจ; 0 new collections/env/flags/deps/provider calls; product DB read-only; ไม่แตะ Botworker/workflow/Analytics/Phase6; test_guards env blocker unchanged; all files unstaged
+
+## Phase 5 R2 — Typed-Authority + Evidence-Boundary Correction (uncommitted)
+
+**frozen state (PART 0 verified)**: branch `feature-phase3-aswer-quality`, HEAD `f67c27b`, staging empty, `git diff --check` clean, ports 8010/3000 free, grouped-retrieval flags OFF (env unset), manifest = 12 modified + 2 untracked (`policy_resolver.py`, `test_phase5_field_policy_compat.py`).
+
+**findings verified against current source:**
+
+- **H1 phrase-scan misses contradictions**: `_RETURN_CLAIM_ANY = เปลี่ยน(สินค้า|ใหม่)?ได้|คืน(สินค้า|ของ|เงิน)ได้|รับเปลี่ยน|รับคืน` — `เปลี่ยนไม่ได้`, `คืนไม่ได้`, `ไม่เข้าเงื่อนไขการเปลี่ยน/คืน` never match (ไม่มี `ได้` adjacent) → decision=eligible + LLM denial ผ่าน untouched
+- **H2 multi-subject grounding leak**: `_spec_fact_grounded` returns True ถ้า subject ใดก็ตามมี token — claim เกี่ยวกับ A ถูก ground ด้วย facts ของ B; ไม่มี structured claim→subject relation ใน answer contract (answer_segments = plain strings) → fail closed
+- **M1 no production evidence source**: `build_policy_query` ไม่มี evidence params เลย; `req.order_sn`=customer text (unverified), `lookup_order` รันเฉพาะ claim path, `load_claim_state`=customer-collected fields ของ episode อื่น (ไม่ attributable ต่อ query นี้ — threading มันคือ inject unrelated evidence) → ไม่มี authoritative source → fail-closed `admin_review` คงไว้ + document blocker
+- **M2 opaque version lexicographic**: `best[r.rule_id]` เลือกด้วย `(_day(effective_from), version)` — `"9" > "10"` string compare → winner ผิด; effective_from ไม่ validate ที่ from_dict
+
+**plan (deletion over addition, 0 new vocab/helpers/owners):**
+
+1. enforce: typed decision → deterministic final answer text per outcome (replace regex clause scan); delete `_enforce_policy_claim`+`_RETURN_CLAIM_ANY` (caller เดียว); `_RETURN_CLAIM_CORE` คงไว้ (return_claim legacy rule ใช้); answer_segments regenerate; guard_rewritten="policy_decision"
+2. `_spec_fact_grounded`: len(subject_ids)>1 → fail closed (no attribution structure exists — state honestly); ==1 → that subject only; 0 → legacy card-facts+grounding pool
+3. production evidence: document activation blocker in SRS/roadmap — ไม่มี verified structured source ที่ decision point; resolver gating tests retained; `build_policy_query` ไม่เพิ่ม adapter
+4. version precedence: dedupe by rule_id via `effective_from` เท่านั้น (ไม่เทียบ version string); same-date same-outcome → converge deterministic (first-in-tier); same-date conflicting → rule_conflict/admin_review; malformed effective date → `date.fromisoformat` (stdlib) reject at from_dict; update resolve_policy docstring
+
+**RED targets**: deterministic-render tests (contradiction phrasings + mutation-proof equality), multi-subject fail-closed, unrelated-subject isolation, evidence-source-blocker test, same-date conflict / newer-effective-wins / malformed-date reject. 0 new helpers/vocab/owners.
+
+**R2 implementation + GREEN (all 4 findings closed):**
+
+1. **enforce deterministic render** (guards.py:299-321): handoff check ก่อนเสมอ → typed `policy_decision` (return_exchange) render `_POLICY_TEXT_*` เป็น final answer ทั้งก้อน + return ทันที — ไม่ผ่าน escalate/rewrite tier เพราะ deterministic text ไม่มี claim/escalate content; **cover empty LLM answer ด้วย** (early `not answer` return ย้ายลงไปอยู่หลัง decision block). `_enforce_policy_claim`+`_RETURN_CLAIM_ANY` ลบ (0 refs); `_RETURN_CLAIM_CORE` คงไว้เฉพาะ legacy `return_claim` rule ที่ไม่มี typed decision
+2. **`_spec_fact_grounded` fail-closed**: `len(_sids)>1 → False` เสมอ — free-form answer ไม่มี claim↔subject structure (ไม่ parse product name จาก prose); `==1` → FieldEvidence ของ subject นั้นเท่านั้น; `0` → legacy pool (model_claim path เดิมต้องใช้)
+3. **production evidence blocker documented**: `build_policy_query` ไม่มี adapter เพิ่ม — `evidence_*` ว่างใน production → `admin_review` fail-closed คงไว้ (SRS+roadmap state ตรง); resolver-level gate tests retained (r3 ครบ required+supplied→winner / missing→admin_review+missing_evidence)
+4. **version = opaque identity**: `best[r.rule_id]` เทียบ `_day(effective_from)` เท่านั้น; same-day same-outcome converge (first in tier); same-day conflict → `rule_conflict`→`admin_review`; malformed ISO date → `from_dict` reject via stdlib `datetime.fromisoformat`; `matched_rule_ids` dedup; docstring `resolve_policy` อัปเดต
+
+**RED→GREEN honest**: 8 RED เดิม (denial phrases survive / `"9">"10"` / malformed date pass / multi-subject leak) + 1 mutation-proof edge พบตอน fix (empty answer short-circuit → render ย้ายก่อน `not answer` return) → 96/96 contract GREEN; replay+spec-grounding 141p; compat 144/144; general-guards 27/27; classifier 10/10; qa_context 4/4; warranty_delivery + claim_flow exit 0; validator integrity pass; `git diff --check` clean; py_compile clean
+
+**complexity delta**: runtime helpers −1 (`_enforce_policy_claim`), regex tables −1 (`_RETURN_CLAIM_ANY`), phrase variants +0, policy owners =1, spec-grounding owners =1, new modules/deps/model calls =0 — net deletion
+
+**remaining blocker (activation)**: ไม่มี verified structured evidence source ที่ decision point — `req.order_sn`=customer text; `order_store.lookup_order` รันเฉพาะ claim path; `load_claim_state` = episode อื่น → production `evidence_*` คงว่าง → typed decision ทุก turn = `unknown`/`admin_review` จนกว่าจะมี authoritative record store (ตามที่ designed ไว้)
+
+## Phase 5 R3 — Composition + Policy-Record Correction (uncommitted)
+
+**frozen (PART 0)**: branch `feature-phase3-aswer-quality`, HEAD `f67c27b`, staging empty, diff clean, ports free, grouped OFF, manifest 12M+2U unchanged.
+
+**findings verified:**
+- **A HIGH mixed-answer destruction**: enforce:311-323 replaces WHOLE answer with `_POLICY_TEXT_*` when `_pdec_active` — product flow paths (model-item 1700-1707 / productish-need 1708-1724 / tagged-item) carry `_pdec` via `_rd_extra` → product info lost
+- **B error masking**: `LLM_ERROR_REPLY` check (:326) runs after policy render → provider failure masked by policy text
+- **C ISO not normalized**: `from_dict` validates via fromisoformat but stores raw → `_day()`=raw[:10] string compare — `"20240101"` beats `"2024-06-01"` lexicographically (June loses)
+- **D false convergence**: same rule_id max-day records ALL kept in winners → `required_evidence`/`source_versions` UNIONED into invented rule while outcomes set-collapse — semantically different records reported as one converged winner
+- **LOW**: `:347` dead `_pdec_active` (unreachable after :323 return)
+- **structure**: TurnNeed independent needs + `_policy_carry`→`extra_context` exists → composition mode decidable at branch (1700/1708) — NOT blocked
+
+**plan (0 new helpers/vocab/owners):**
+1. `_rd_extra` += `composition` (`policy_only`|`mixed` decided once at general_qtype branch — path a/b→mixed, else policy_only)
+2. `_policy_carry`: return_policy eligibility prose/decision-txt removed on mixed turns (product LLM never sees eligibility); `_policy_decision_txt` deleted (dead — enforce owns outcome)
+3. enforce order: handoff→LLM_ERROR→read decision+mode; policy_only→replace whole; mixed→ordinary tier on product answer then append ONE `|||` segment (idempotent `_final in answer`); rebuild segments once; delete dead `:347` condition
+4. resolver: `from_dict` normalize dates→canonical `YYYY-MM-DD` + reject until<from; same-id same-day → semantic-dup dedupe else rule_conflict; no union; docstring updated
+5. harness: `llm_reply` fixture key + `answer_contains`/`answer_must_not_contain` expected keys; marker-in-LLM-input check dropped (marker dead); fixtures assert final content
+
+**R3 implementation + GREEN (all 4 findings closed):**
+
+1. **composition mode**: `_pdec_mode` init `policy_only` → `"mixed"` ที่ 2 branch (model/item skip :1702, productish-need :1712) — ตัดสินจาก TurnPlan needs + general_qtype ตรงนั้นเท่านั้น; `_rd_extra` ใส่ `"composition"` ใน policy_decision dict
+2. **`_policy_carry` de-delegation**: return_policy eligibility prose + decision marker ถูกถอดออกจาก `_policy_carry` — product LLM เป็น owner เฉพาะ product need (`llm_must_not_contain:["policy_decision"]` pin); `_policy_decision_txt` deleted ทั้งตัว (dead — enforce owns outcome); qtype อื่น carry context ปกติ
+3. **enforce ordering**: handoff→LLM_ERROR escalate→policy compose →`policy_only`=replace whole→return; `mixed`=ordinary tier (escalate/rewrite/spec/model) บน product answer ก่อน แล้ว append deterministic segment เดียว `|||` (idempotent `_final in resp.answer`)→segments rebuild ครั้งเดียว; mixed+empty answer → policy segment alone; dead `:347` `_pdec_active` condition ลบ (return_claim tier ใช้ได้ใน mixed — spontaneous LLM eligibility claim ยังถูก ungrounded-rewrite ก่อน append)
+4. **resolver**: `from_dict` normalize effective_from/until→canonical `YYYY-MM-DD` (`_dt.fromisoformat().date().isoformat()`); until<from→reject; resolve_policy same-id same-day→semantic signature (outcome/reason/conditions/states/shops/subjects/types/required_evidence/priority/until — version/source=provenance excluded) — 1 sig→dedupe, >1 sig→rule_conflict/admin_review naming ambiguous ids, no union; docstring updated
+5. **harness**: `llm_reply` fixture key + expected `answer_contains`/`answer_contains_once`/`llm_must_not_contain`; marker-in-llm-input check ลบ (marker dead); 4 policy fixtures assert final content (model-item+tagged-item = mixed survive, 2 pure = deterministic whole)
+
+**RED→GREEN**: 12 honest RED (mixed destruction×4, error mask×2, ISO×3, false-convergence×2, dead cond) → 117/117 contract; replay 105p; spec-grounding 36/36; compat 144/144; action-switch+turn_decision 150p; guards 27/27; classifier 10/10; qa_context 4/4; validator clean; diff-check clean; py_compile clean
+
+**complexity delta R3**: helpers +0, regex/vocab +0, owners: policy=1 composition=1 (enforce), functions +0 this round, runtime `_policy_decision_txt` var deleted — net deletion; `test_guards.py` script = pre-existing Mongo env blocker unchanged
+
+**remaining blocker**: production required-evidence supply unchanged (activation blocked)
+
+## Phase 5 R4 — Composition-Authority + Event-Time Correction (uncommitted)
+
+**frozen**: HEAD f67c27b, 12M+2U, staging empty, diff clean, 8010 free.
+
+**defects verified:**
+- **M1**: `guards.py:455` `_final not in resp.answer` = prose-membership idempotency — incoming LLM text containing the exact deterministic sentence makes composition silently skipped (no marker/segments); `:324` `answer != _final` skips canonicalization+marker when prose equals final
+- **M2**: `_day(v)=v[:10]` raw slice — `event_time="20240101"` vs canonical rule date compares lexicographically (`"0">"-"` → not pending → wrongly active); `_effective_status:207-211` raw string compare
+
+**plan (0 helpers/vocab/owners):**
+1. enforce: idempotency authority = `guard_rewritten=="policy_decision"` (structural) — drop prose-membership; policy_only always canonicalizes answer+segments+marker; mixed composes at most once (skip when marker set)
+2. `_effective_status`: parse event_time via stdlib fromisoformat → canonical `YYYY-MM-DD` → compare directly against canonical rule dates; malformed/missing + dated rule → unverifiable; `_day` retained only where rule fields need (canonical → can compare directly)
+
+**R4 implementation + GREEN:**
+
+1. **M1 structural authority**: `_final not in resp.answer` ลบ — idempotency = `guard_rewritten=="policy_decision"` เท่านั้น; `policy_only` canonicalize เสมอ (answer+segments+marker แม้ prose ตรง final); `mixed` compose ≤1 ครั้ง → byte-stable re-run; `_day` ลบ (0 refs — canonical compare ตรงๆ)
+2. **M2 canonical event_time**: `_effective_status` parse `event_time` ด้วย `_dt.fromisoformat().date().isoformat()` → malformed/missing+dated rule → `unverifiable` fail-closed; rule dates canonical → compare ตรง; `resolve_policy` `_max_day`/`_tops` ใช้ `effective_from` canonical ตรง
+
+**RED→GREEN**: 4 honest RED (answer==final skips marker / prose-contains-final skips compose / basic event wrongly active / malformed activates dated rule) → 127/127 contract; policy fixtures 4/4; replay 105p; spec-grounding 36/36; general-guards 27/27; action-switch+turn_decision 150p; compat 144/144; classifier 10/10; validator clean; py_compile clean; diff-check clean
+
+**delta R4**: helpers −1 (`_day` deleted), regex/vocab +0, owners unchanged (decision=`resolve_policy`, composition=`enforce`), functions −1, model calls +0
+
+**remaining blocker**: production required-evidence supply unchanged (activation blocked)
+
+## Phase 5 R5 — Mixed-Policy Single-Owner Feasibility Audit (uncommitted — BLOCKED)
+
+**frozen**: HEAD f67c27b, 12M+2U, staging empty, diff clean.
+
+**defect reproduced (HIGH)**: mixed turn — typed eligible + LLM prose "WPB100L ราคา 990 บาทค่ะ เคสนี้เปลี่ยนไม่ได้นะคะ"
+→ final `...เคสนี้เปลี่ยนไม่ได้นะคะ ||| เปลี่ยน/คืนได้ตามเงื่อนไขของทางร้านนะคะ` — สอง policy conclusion ขัดกันตรงๆ
+(`return_claim` rewrite regex ไม่ match "เปลี่ยนไม่ได้" — negation หลุด tier ปกติ, typed segment ต่อท้าย → contradiction ค้าง)
+
+**feasibility audit — typed separation exists? NO:**
+- `ChatResponse.answer`/`answer_segments` = prose blob เดียว; `|||` split เป็น presentation เท่านั้น (app.py:202) — ไม่มี kind/ownership
+- `llm.answer` คืน string เดียว; input = `desc_message = req.message` (app.py:2555→4588) — คำถาม policy อยู่ใน message ที่ product LLM เห็นเสมอ
+- `TurnNeed` มี kind/operation/subject_refs/confidence/provenance/subject_scope/subject_count — ไม่มี per-need question_text → scope input ให้ product LLM ไม่ได้โดยไม่ parse message (forbidden)
+- `_policy_carry` (R3) ตัด eligibility context แล้ว แต่ตัดคำถามใน message ไม่ได้
+- ไม่มี product_answer field / deterministic product renderer
+
+**why every in-contract route fails:**
+1. clause/sentence strip in enforce → prose parsing (forbidden: keyword/regex/sanitizer)
+2. "don't answer policy" instruction / `|||` ordering trust → prompt compliance ไม่ใช่ correctness boundary (forbidden) + LLM เล่นเองได้อยู่ดี
+3. deterministic product render จาก card → เปลี่ยน product answer owner ทั้งระบบ = Phase 8 architecture
+4. per-need scoped input + typed segment → ต้องมี contract ใหม่ทั้งสองฝั่ง = Phase 8
+
+**minimum Phase 8 contract (BLOCKED_BY_TYPED_MIXED_ANSWER_SEGMENT_REQUIRED):**
+1. `TurnNeed` ได้ `scoped_question` (Pass-1 interpretation model emit ต่อ need — schema extension ของ model เดิม ไม่ใช่ extra call/regex split) หรือ product path รับ need-scoped input ที่มาจาก structured fields
+2. response contract มี typed ownership: `product_answer`/typed `answer_segments[{kind,text}]` → enforce compose product text + policy segment เดียวจาก PolicyDecision
+3. ด้วย (1) product LLM ไม่เห็น policy question → ไม่มี trigger ให้ emit conclusion; residual spontaneous-emission risk = baseline เดียวกับ pure product turn (positive claim มี rewrite tier อยู่แล้ว)
+4. ถ้าต้องการ zero-tolerance (mocked injection ต้องรอดไม่ได้เลย) → product text ต้อง deterministic render จาก card — decision ใหญ่กว่า ต้องตัดสินใน Phase 8; typed segment เพียงอย่างเดียวลบ arbitrary prose ใน product blob ไม่ได้โดยไม่ parse
+
+**decision**: หยุดตาม stop condition — ไม่ ship heuristic; runtime ไม่ถูกแตะในรอบนี้
+
+## Phase 5 R5 — Roadmap Correction And Work Transfer (2026-10-20)
+
+**decision:** แก้แผนหลัง feasibility audit ยืนยันว่า mixed product+return-policy ปิดให้ปลอดภัยใน Phase 5 ไม่ได้ด้วย `answer`/`answer_segments` แบบ prose ปัจจุบัน โดยไม่ใช้ keyword/regex sanitizer หรือเชื่อ prompt compliance. Historical R3/R4 evidence คงไว้ แต่ไม่ถือเป็น activation approval.
+
+**Phase 5 closeout scope:** เก็บ typed `PolicyResolver`, required-evidence gate, identity-scoped field evidence, compatibility proof, canonical rule/event dates, deterministic `policy_only`, error/handoff ordering. ถอนหรือ disable automatic mixed textual composition; mixed return-policy ต้อง fail closed เป็น admin review/handoff และคง product cards ได้เฉพาะที่ไม่ทำให้เกิด policy prose สองเจ้าของ.
+
+**moved work:**
+- **Phase 6:** ขยาย owner เดิม `classify_intent → decide_turn → TurnPlan` ให้ independent needs มี requested fields/ranking/relation/typed scope; ห้ามสร้าง planner/model call ใหม่; ลบ semantic keyword branch ที่ถูกแทนใน diff เดียวกัน.
+- **Phase 7:** สร้าง need-scoped product request/`AnswerContext`; product LLM ห้ามได้รับ return-policy question/context; prompt instruction อย่างเดียวไม่ใช่ correctness boundary.
+- **Phase 8:** typed answer ownership (`product`/`policy`/`claim`) + finalizer เดียว; `PolicyDecision` render policy segment เดียว; mutation test ต้องกัน typed eligible+LLM denial และ typed ineligible+LLM approval ก่อนเปิด mixed automatic answering.
+
+**next immediate task:** Phase 5 closeout correction — deactivation/fail-closed mixed path, focused RED→GREEN, regression, final pre-commit review. Logging/Analytics Truth เริ่มหลัง Phase 5 commit ตาม sequencing เดิม.
+
+## Phase 5 Final Closeout — Mixed Fail-Closed Deactivation Plan (uncommitted)
+
+**frozen**: HEAD f67c27b, 14-entry manifest, staging empty, diff clean. Roadmap transfer entries verified present (Phase 6 per-need interpretation / Phase 7 need-scoped context / Phase 8 typed segments).
+
+**earliest defer point**: `app.py:1689-1729` — `_pdec = resolve_policy(...)` สำเร็จแล้ว (return_policy), `_subject_cards`/`anchor_card` materialized (1564-1581), `llm.answer` ยังไม่ถูกเรียก (4587). เงื่อนไข defer = `_pdec is not None` และเข้าเงื่อนไขสอง branch เดิมที่เคย set `composition=mixed`:
+- `return_policy + (_current_has_model or _tagged_item_id)`
+- `return_policy + _productish_need + (_subject_cards | anchor_card | _hybrid_anchor_card)`
+
+**plan (0 helpers/regex/modules/model calls):**
+1. app.py: mixed return-policy turn → `_send_handoff(reason="policy_mixed_review")` ก่อน product LLM → success = `handoff_to_admin=True` + `_POLICY_TEXT_ADMIN_REVIEW`; failure = `handoff_to_admin=False` + `HANDOFF_FAILED_REPLY`; products = already-resolved cards เท่านั้น (ไม่ fetch เพิ่ม); `routing_decision` คง `policy_decision` diagnostic
+2. enforce: `HANDOFF_FAILED_REPLY` = terminal (identity check เหมือน `LLM_ERROR_REPLY`) ก่อน policy block — typed render ห้ามกลืน failed transport; ลบ `_pmode`/`_pdec_composed`/mixed append branch; `not answer`+`_pdec_active` sub-branch กลายเป็น dead (policy_only return ก่อนเสมอ) → ลบ
+3. app.py: ลบ `_pdec_mode` + serialized `composition` ใน `_rd_extra`; return_policy ที่ไม่ defer → pure general flow (policy_only)
+4. fixtures: `pos-policy-return-model-item`/`tagged-item` → action=handoff + admin-review answer + llm_calls=0; contract tests เขียนใหม่สำหรับ deferred contract
+
+**closeout implementation + GREEN:**
+
+1. `app._chat_impl`: defer block ที่ `general_qtype` block หลัง `resolve_policy` — `_pdec` + (`_current_has_model`/`_tagged_item_id`/productish+subjects) → `_send_handoff(reason="policy_mixed_review")` ก่อน product LLM → ok=admin-review text + `handoff_to_admin=True`; fail=`HANDOFF_FAILED_REPLY` + flag False; products=already-resolved cards (subject/ref_regex/anchor dedup by identity, cap req.limit — ไม่ fetch เพิ่ม); `routing_decision` คง `policy_decision`+`subject_ids` diagnostics
+2. `guards.enforce`: `HANDOFF_FAILED_REPLY` terminal (identity check) ก่อน policy block; mixed append branch + `_pmode`/`_pdec_composed` + dead empty-answer sub-branch ลบ; `policy_only` render เหลือเส้นเดียว
+3. `_rd_extra`: serialized `composition` + `_pdec_mode` ลบ
+4. fixtures: pos-policy-return-{model,tagged}-item → action=handoff + `llm_max_calls:0` + admin-review answer + `turn_decision_expect:execute_needs` (plan=execute_needs, response=handoff — ความจริงสองชั้น); `llm_reply` ตั้ง contradictory trap (ไม่ถูกเรียก)
+5. tests: ลบ mixed-activation tests (R3×6+R4×4) → closeout contract tests (terminal/stale-key/no-append) + 7 app.chat boundary tests (defer/cards/4-outcomes/failure/controls)
+
+**RED→GREEN**: 9 honest RED (terminal overwrite + 2 fixtures + 6 boundary) → contract 124/124; replay 114p/19s/4x; spec-grounding+general-guards+action-switch+turn_decision+shadow+qa_context+recent_qa 337p; compat 144/144; classifier 10/10; handoff_transport 47/47; warranty_delivery 11/11; claim/5f/phase2 scripts exit 0; validator clean; py_compile clean; diff-check clean; shadow fixture contract green
+
+**mutation proof**: defer bypass→llm_calls≥1 fail; fake-success→flag=True fail; eligible-on-mixed→admin-review assert fail; policy_only bypass→9 deterministic fails — all reverted, 0 residue
+
+**delta closeout**: helpers +0, regex/vocab +0, functions ±0 this round, model calls +0; deleted machinery: `_pdec_mode`, serialized `composition`, mixed append branch, `_pdec_composed`, 10 mixed tests; owners: decision=`resolve_policy`, render=`enforce`, transport=`_send_handoff`
+
+**remaining blocker**: production required-evidence supply unchanged (activation blocked — pure policy renders `unknown`/`admin_review` text never eligible); `test_guards.py` Mongo env blocker unchanged; mixed auto-answer stays OFF until Phase 6/7/8 gates
+
+## Phase 5 R6 — Pure return_policy unknown/admin_review → authoritative handoff (uncommitted)
+
+**defect (High) verified from source**: `active_policy_rules()` production → `()` → pure return_policy resolves `unknown` → defer block skips (no productish need) → `general_qtype` flow calls `llm.answer_general` (wasted model call) → `enforce` renders `_POLICY_TEXT_ADMIN_REVIEW` → **no `_send_handoff`** — customer told admin will review, nobody notified.
+
+**plan — restructure existing `_pdec` defer block into ONE decision/action owner:**
+- `_pd_mixed` = existing mixed condition (unchanged)
+- `_pd_mixed` OR outcome ∈ {unknown, admin_review} → `_send_handoff` ครั้งเดียว — reason `policy_mixed_review` / `policy_review_required`; success → `_POLICY_TEXT_ADMIN_REVIEW` + flags; failure/no conv_id → `HANDOFF_FAILED_REPLY`, flag False
+- pure eligible/ineligible → deterministic `_POLICY_TEXT_*` return ตรง (zero model, no handoff; enforce re-render same bytes + marker = byte-stable)
+- `_pd_cards` dedup เดียวแชร์ทั้งสอง branch; `image_desc=_image_desc_out` เพิ่มทั้ง returns (schema parity)
+- dead after restructure: pure return_policy → answer_general unreachable (shared block เหลือสำหรับ qtype อื่น)
+- fixtures: tx-policy-wrong-model-filter → `llm_max_calls:0` (แทน `llm_general_qtype`); pos-policy-seller-wrong-item → +`llm_max_calls:0`
+- `test_r5_pure_policy_still_deterministic` rewrite → llm_calls==[], no handoff
+
+**test-isolation defect found + fixed (handoff_transport stub bypass):**
+
+- error: combined `pytest` batch (5 files) hang >11min ~100% CPU — `pymongo_server_monitor_thread` churn `sock_connect`/`socket_getaddrinfo`, main thread park ใน `topology._select_servers_loop`/`threading.wait` — **unintended Mongo connection attempt** เกิดระหว่าง collection; **ไม่มี successful connection / Mongo write ที่สังเกตได้**
+- เพราะ: `test_handoff_transport.py` stub ด้วย `sys.modules["shopeechat.X"] = stub` เพียงทางเดียว — แต่ `warranty_flow:1110` ใช้ `from . import conversation_products` ซึ่ง resolve ผ่าน **package attribute** `shopeechat.conversation_products` ก่อน; เมื่อ `test_phase2c3_action_switch` (line 36→replay→`shopeechat.app`, line 46 `from shopeechat import conversation_products`) import module จริงมาก่อน → package attr ชี้ของจริง → stub bypass → `load_claim_state` → `_coll` → `_admin_db` → `_build_admin_client` → `MongoClient()` construct + `admin.command("ping")` attempt → park (host unreachable) — faulthandler dump พิสูจน์ chain ที่ `test_handoff_transport.py:416` (L2 legacy first-message claim)
+- แก้ด้วย: `_stub_module(name, mod)` inject ทั้ง `sys.modules` และ `setattr(package)` ทั้ง 6 stubs (conversation_products, llm, app, product_store, warranty, knowledge_base); `setdefault` → forced assignment (real module อาจถูก import มาก่อน) — test file เท่านั้น production ไม่แตะ — **fix กัน recurrence**
+- evidence wording ที่ถูกต้อง: combined `--collect-only` จบด้วย `SystemExit` INTERNALERROR = **ไม่ใช่ green suite** (script-style quirk เดิม ไม่แก้ใน round นี้); `test_handoff_transport.py` verified **เฉพาะ script mode** 47/47; ไฟล์ pytest ที่เหลือ verified แบบ individual เท่านั้น — manifest 14→15 (test file ใหม่เข้า diff)
+
+**R6 implementation + GREEN:**
+
+1. `app._chat_impl` `_pdec` block restructured เป็น decision/action owner เดียว: `_pd_mixed` OR outcome ∈ {unknown, admin_review} → `_send_handoff` 1 ครั้ง (`policy_mixed_review`/`policy_review_required`); success → `_POLICY_TEXT_ADMIN_REVIEW` + flags; fail → `HANDOFF_FAILED_REPLY`; pure eligible/ineligible → deterministic `_POLICY_TEXT_*` return ตรง zero-model; `_pd_cards` dedup แชร์; `image_desc` ทั้ง returns; `routing_decision` คง decision diagnostics
+2. fixtures: tx-policy-wrong-model-filter `llm_general_qtype`→`llm_max_calls:0`; pos-policy-seller-wrong-item +`llm_max_calls:0`
+3. tests: `test_r5_pure_policy_still_deterministic` rewrite; +6 R6 tests (unknown-production-empty, admin_review, failure, eligible, ineligible, param)
+
+**RED→GREEN**: 6 honest RED (`answer_general` ran on pure turns: context=`ยังไม่มีข้อมูลนโยบายรับคืน...` + llm_calls=[{fn:answer_general,qtype:return_policy}]) → 14/14 focused; contract+replay 243p/19s/4x
+
+**mutation proof (4/4, reverted, 0 residue)**: bypass handoff→`handoffs==0` fail; success-wording-on-failure→`answer==HANDOFF_FAILED_REPLY` fail; owner-block bypass→`answer_general` calls fail; eligible→handoff→`handoffs==[]` fail
+
+**owners**: decision=`resolve_policy`, render=`enforce` (policy_only+marker), transport=`_send_handoff`, action gate= `_pdec` block เดียว — no duplicate path; helpers/regex/keyword/model calls +0; `active_policy_rules()` ยัง `()` production
+
+## Phase 5 — pre-commit gate (staged 14, log unstaged)
+
+**full-diff audit (15 files ทุก hunk)**: findings = **0 Critical/High/Medium** — audit verified: resolve_policy sole eligibility owner (empty records→unknown); R6 owner block single handoff/deterministic; mixed fail-closed unchanged; FieldEvidence identity-scoped + intent≠proof; HANDOFF_FAILED_REPLY terminal; no new helpers/keywords/regex/model calls; `_send_handoff` ยัง transport owner เดียว; `active_policy_rules()` ยัง `()`
+- info note: `qtype != warranty_policy` → `== shipping_policy` ทำ desc-scrape หายจาก brands/categories/shops/tax_invoice ด้วย (prose ไม่เกี่ยว — noise reduction, ตั้งใจตอน R3); warranty-fallback ยังเรียก scrape ได้ (kb:459 เมื่อไม่มี FAQ) — SRS/roadmap ถูกอยู่แล้ว
+
+**verification (fresh, per-file เท่านั้น — no combined run)**: focused r5/r6 14p · contract 124p · replay 119p/19s/4x · spec_grounding 36p · action_switch 39p/1s/1x · turn_decision 111p · unit_classifier 10/10 (script) · handoff_transport 47/47 (script) · compat 144/144 (script) · warranty_delivery 11/11 (script) · validator clean · py_compile 11 files · diff-check clean — script-mode counts ≠ pytest results (รายงานแยก)
+
+**secret/artifact scan**: staged diff — env names เท่านั้น (MONGO_DB/COLL/HF_OFFLINE = names not values), `token` = code identifiers, URLs = fixture `s.shopee.co.th/fx*` synthetic; no absolute paths, no credentials, no debug prints, no pycache — clean
+
+**staged**: 14 entries (7 runtime + SRS + roadmap + fixtures + 4 test files) — `getoutofmywaybotkaikrook2.md` = sole unstaged file; `git diff --cached --check` clean; **no commit/push/PR**
+
+**remaining blockers**: production policy-record supply (activation gate — `active_policy_rules()→()`); `test_guards.py` Mongo env blocker (pre-existing); `test_handoff_transport` sys.exit-at-collection quirk (script-mode design, verified script only); mixed auto-answer → Phase 6/7/8 exit gates
+
+## ✅ Phase 5 — COMMITTED (closeout)
+
+**Commit 1**: `14c6998d4d8fbe0fee59a125a7d6d0d6ea5bfdfd` — `refactor: make policy decisions evidence authoritative` — 14 files (+3254/−118): runtime `app/device_compat/guards/intent_classifier/knowledge_base/units/policy_resolver(new)` + `SRS_SSD` + rebaseline plan + fixtures + `test_handoff_transport/test_legacy_turn_incident_replay/test_phase5_field_policy_compat(new)/validate_legacy_turn_fixtures`
+
+**contracts closed**: (1) `PolicyDecision`/`resolve_policy` = typed eligibility owner เดียว (empty records→unknown, conflict/missing-evidence→admin_review, deterministic precedence); (2) `FieldEvidence` identity-scoped per subject — missing = unknown ไม่ใช่ negative; (3) `resolve_compat` evidence-based compat (intent/kb_inherit hint ≠ proof); (4) pure eligible/ineligible = deterministic zero-model; (5) unknown/admin_review = `_send_handoff` authoritative handoff ครั้งเดียว (`policy_review_required`); (6) mixed product+policy = fail-closed `policy_mixed_review` ก่อน product LLM; (7) failed transport = `HANDOFF_FAILED_REPLY` terminal ที่ enforce
+
+**frozen verification counts**: pytest per-file — focused r5/r6 14p · contract 124p · replay 119p/19s/4x · spec_grounding 36p · action_switch 39p/1s/1x · turn_decision 111p; script-mode — unit_classifier 10/10 · `test_handoff_transport.py` 47/47 · compat 144/144 · warranty_delivery 11/11 (script counts ไม่ใช่ pytest); validator clean; py_compile×11; `git diff --check`/`--cached --check` clean — combined pytest `SystemExit INTERNALERROR` ไม่ claim เป็น green เด็ดขาด
+
+**Mongo evidence**: 1 unintended connection attempt ตอน combined collection (`test_handoff_transport:416`→`warranty_flow:1110`→`conversation_products` real module ผ่าน package attr) — ไม่มี successful connection/write; แก้ด้วย `_stub_module` inject ทั้ง sys.modules+package attr (test-only)
+
+**complexity delta**: helpers/guards/keywords/regex/model calls +0; owners: decision=`resolve_policy`, compat=`resolve_compat`, render=`enforce`, transport=`_send_handoff`, action=`_pdec` block — no parallel old/new path
+
+**work transferred**: Phase 6 structured per-need interpretation (`classify_intent→decide_turn→TurnPlan` เดิม) · Phase 7 need-scoped product request/context · Phase 8 typed answer segments + one finalizer — mixed auto-answer เปิดได้เฉพาะเมื่อ gates ครบ
+
+**remaining blocker**: `active_policy_rules()` ยัง `()` — production policy-record supply = activation gate; `test_guards.py` env blocker; `pos-fail-sku-bypass` xfail
+
+**no push/PR/deploy/.env/provider/services** — Phase 6 ยังไม่เริ่ม
