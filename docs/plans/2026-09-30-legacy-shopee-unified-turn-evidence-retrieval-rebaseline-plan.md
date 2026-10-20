@@ -534,6 +534,42 @@ class PolicyDecision:
 
 **Exit gate:** issue #28 passes without model-specific code; positive Mi 17/iPhone cases remain; unknown evidence never becomes a negative claim; filter wrong-model replay is `ineligible`, seller-fault positive fixtures retain their configured outcome, and no policy outcome is inferred from bot history or broad prose.
 
+## Operational Track After Phase 5: Logging And Analytics Truth
+
+**Priority:** Start only after Phase 5 is committed. Complete Analytics Truth before Phase 6; provider observability may not run in parallel with chatbot answer-flow work because it touches shared Python boundaries.
+
+**Purpose:** Make the three analytics pages and operational logs report persisted evidence rather than aliases, residual arithmetic, hard-coded deltas, or unauditable provider assumptions. This track observes the runtime; it must not become another decision owner for chatbot, workflow, trigger, handoff, or botworker behavior.
+
+### Track A: Analytics Truth
+
+- [ ] Define one explicit time-window and timezone contract shared by `/analytics/live`, `/analytics/performance`, and `/analytics/admin-activity`; return the window in every API response.
+- [ ] Replace aliased chart payloads and hard-coded deltas/sparklines with independently computed series. Unsupported metrics return `null`/`unavailable`, never fabricated zeroes or reused `customersByChannel` data.
+- [ ] Count bot answers, admin answers, unanswered turns, connected shops, and SLA only from their authoritative persisted events/statuses. Zaapi/external `role=admin` rows without a verified admin actor must not inflate admin response metrics.
+- [ ] Fix the dashboard cache write path and remove debug output that can leak implementation details.
+- [ ] Add route/service contract tests for empty data, mixed platforms, boundary timestamps, missing actor identity, status partitions, and truthful unavailable metrics.
+
+**Track A exit gate:** all three pages use the same declared window/timezone; every displayed number maps to one named source/query; no chart aliases or hard-coded trends remain; labels describe exactly what is counted.
+
+### Track B: Audit Event Correctness
+
+- [ ] Inventory every `admin_logs` writer and reader; define one action vocabulary and minimum event fields (`event_id`, `action`, actor identity/type, platform, shop/conversation identity where applicable, occurred time, correlation identity, outcome).
+- [ ] Remove duplicate writes at the owning command boundary. Preserve one durable event per accepted command; retries reuse the same event identity where the command is idempotent.
+- [ ] Reconcile emitted actions with consumers such as `/team`; delete or migrate reader expectations for actions no producer emits.
+- [ ] Keep customer text, credentials, full provider payloads, and raw prompts out of audit events.
+
+**Track B exit gate:** writer/reader action census has no orphan required action, duplicate command events converge, and admin-activity totals are reproducible from stored rows.
+
+### Track C: Provider And Cost Observability
+
+- [ ] At the existing provider-call boundary, persist one sanitized usage event with role, requested provider/model, actual provider/model after fallback, safe key reference/hash (never the key), token counts, cost, latency, outcome/error class, message/turn correlation, and retry/attempt identity.
+- [ ] Cover Gemini, OpenRouter web search, intent, vision/video, and answer roles without adding provider calls or changing routing/fallback behavior.
+- [ ] Make repeated delivery/recovery/finalization idempotent for usage accounting; one provider attempt must not be charged twice in analytics.
+- [ ] Expose provider/model/key-reference and cost views only after completeness tests prove that unknown usage is displayed as unknown rather than zero.
+
+**Track C exit gate:** an operator can trace each charged provider attempt to one turn and actual model/key reference without seeing secrets; totals equal the underlying usage-event sum; missing telemetry is explicit.
+
+**Safety and sequencing:** Track A may use a separate branch/worktree after the Botworker soak closes. Tracks B/C remain sequential with chatbot/runtime work. Each track updates its own tests, SRS/schema where contracts change, and active waythrough entry; shared-document conflicts are resolved once by the integration owner. No real provider call, production write, or analytics backfill is authorized by this roadmap entry.
+
 ## Revised Phase 6: One Selector With Coverage And Roles
 
 **Purpose:** Select per need from the canonical pool and stop appending arbitrary legacy products afterward.

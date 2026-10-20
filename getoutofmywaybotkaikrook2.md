@@ -20,6 +20,47 @@
 
 ## กำลังทำ (active)
 
+### 🔍 PHASE 5 — Field Evidence · Policy Eligibility · Compatibility Proof (2026-10-20) · PART 0 AUDIT DONE · รออนุญาต implement
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `20879cb` (HEAD `docs: record botworker shop-context closeout`) · uncommitted: plan roadmap + ไฟล์นี้ (docs เดิมเท่านั้น) · staging empty · `grouped_retrieval_selection_enabled` OFF contract คงเดิม (runtime_config `_flag` → env/admin, default false — ห้ามเปิด)
+- **processes**: bot-worker หยุดแล้ว (cycle 42150, `bot_worker_enabled=false`) · **Next.js dev (PID 5462/5468) + uvicorn :8010 (PID 5405) ยังรันอยู่** — flagged ให้ผู้ใช้ ไม่ kill เอง
+- **สั่งทำ**: read-only Part 0 audit + root-cause plan → รอ approval → RED batch → implement minimal → focused verify → docs → verdict `PHASE_5_FIELD_POLICY_COMPAT_READY_FOR_INDEPENDENT_REVIEW` · ห้าม Analytics/Phase 6/Botworker/.env/มาแล้วจ้า.md/Mongo จริง/provider/8010/commit/push/PR/deploy/flag
+
+#### PART 0 — root causes proven จาก source (read-only)
+
+- **RC1 — policy eligibility ตัดสินด้วย prose**: `build_general_context(qtype=return_policy)` (`knowledge_base.py:427-467`) = `get_general_faq("รับคืน")` prose + `_extract_policy_from_descriptions(mongo,"return")` (`:353-394`, scrape section จาก description สินค้า NORMAL ≤5 ร้าน) → `llm.answer_general` (app.py:1684) → **LLM ตัดสินเองจาก prose ทั่วไป** — FAQ/bot history เข้า context เสมอ (ไม่ scope shop/category/reason/condition/order_state) → filter incident: ลูกค้าซื้อผิดรุ่นเอง แต่ prose "รับเปลี่ยน/คืน" ทั่วไป → bot ยืนยันเปลี่ยนได้ซ้ำ (transcript Q5/Q6/Q10-Q12, fixture `tx-policy-wrong-model-filter` = `answer_level`, `expected_owner=policy_eligibility`)
+- **RC1b — mixed-need carry**: app.py:1654-1668 `_policy_carry` ส่ง context เดียวกันนี้เข้า product flow เมื่อ general_qtype+productish need → eligibility leak อีกทาง
+- **RC1c — guards.enforce return_claim rewrite** (`guards.py:89-96,282-310`): text-vs-prose catch หลัง LLM — ถ้า grounding_text มี "เปลี่ยน|คืน" token ผ่าน `_pos_grounded` → claim ผ่าน (grounding เป็น prose ไม่ใช่ decision); ไม่มี structured decision เลย
+- **RC2 — spec/cert claims ไม่มี typed field evidence**: claim คือ free text ใน card fields (description_excerpt/raw_description/image_text/canonical_specs dict) — LLM ดูดข้ามสินค้า; `guards.enforce` spec_claim/model_claim (5F-D/issue-28) catch หลังตอบด้วย substring-in-evidence-pool (ไม่ใช่ fact) — `search_cert_products` (product_store:4031+) หา cert text ใน description+image_texts+stock flags+variant names โดยไม่ scope ว่า cert นั้นเป็นของ subject นั้นจริงหรือข้ามสินค้า; `units.attach_kb_specs` ยืม canonical_specs ผ่าน model_codes (ชื่อ code เดียวกันข้าม listing → leak ข้ามสินค้าได้)
+- **RC3 — compatibility ไม่มี explicit proof**: `_filter_compat_products` (device_compat) filter ด้วย connector string match เทียบ DEVICE_SPECS/web specs — ผลคือ filter list (implicit), ไม่มี compatible/incompatible/unknown object; `_SKIP_TYPES={"phone","voucher"}` (:358) ข้าม device ประเภทนี้; `product_store` phone→charger override (~:3208) = broad-type assumption ที่ต้องแทนหลัง replay pass; absence of proof ไม่มีตัวแทน → unknown vs incompatible แยกกันไม่ได้
+- **RC4 — policy-record source ไม่มี**: audit `docs/schema.md` + ChatAdminWeb — `kb_qa`/`knowledge_base` มีแค่ `general_faq` prose (type/topic/answer/a/question_patterns/applies_to_*); ChatAdminWeb "policy" hits = workflow `false_branch_policy` (ไม่เกี่ยว) → **ไม่มี authoritative structured policy source** → ตาม contract: typed resolver ทำงานกับ supplied records/fixtures เท่านั้น + report production activation เป็น blocker · **ห้าม** สร้าง collection/env/flag/admin editor ใหม่
+
+#### owner census (writers/readers ปัจจุบัน)
+
+- **return/exchange eligibility**: writers — `build_general_context` (faq+desc prose), `_policy_carry` (mixed-need), `answer_general` LLM, `order_flow.early_order_flow` (`_RETURN_REFUND_KWS`/`_ORDER_PROBLEM_*`/`_ADDRESS_REQUEST_KWS` → handoff เสมอ ไม่ตัดสิน), `guards.enforce` return_claim (boundary catch) — readers — app.py:1640-1716 general branch + mixed-need + `tx-policy-wrong-model-filter`/`pos-policy-seller-wrong-item` fixtures
+- **warranty eligibility**: `warranty.auto_check_delivery_warranty`/`auto_check_warranty`/`is_in_warranty`/`check_warranty_status` (deterministic date math, None=indeterminate — unknown ซื่อสัตย์อยู่แล้ว) + `warranty_flow.handle_warranty_flow_legacy` (claim state machine) + `_append_base_warranty` (แนบเงื่อนไขท้าย answer — explanation ไม่ใช่ decision) + `warranty.detect_claim_request` (detector)
+- **specs/certs**: unit card fields (`canonical_specs`,`image_text`,`warranty_text`,`description_excerpt`,`raw_description`,`model_codes`,`product_type`,`charger_subtype` ฯลฯ) + `to_product_card` fields + `attach_image_texts` (published `image_texts_g<gid>` join by image_ids, kinds spec|product|banner) + `attach_kb_specs` (kb_products by model_codes) + `search_cert_products` (desc+OCR+stock flags+variant names, scope shop/model/type/subtype ที่ handoffs.py:437-508) + `device_specs_data.DEVICE_SPECS` (device-side specs: connector/wired_w/wireless_w/protocols/year — **ไม่ใช่** product specs) + `guards.enforce` spec/model claim
+- **compatibility**: `device_compat._device_spec_lookup` (DEVICE_SPECS+web parse → re-query products) + `_compat_mode` + `_filter_compat_products` + `_SKIP_TYPES` + `_apply_product_tiers` + `product_store` phone→charger override + `route_context._compat_mode` (profile compat_mode) + `retrieval_planner` compat slots + app.py:2259/4411 callsites + `compat_cards` ไป grouped runtime (flag OFF)
+- **OCR/image-text**: `units.attach_image_texts` (gen-scoped published join) + `search_cert_products` image_texts + vision `_vision_context` (customer images) + history `image_desc`
+- **Phase 4 evidence contracts (committed, verify แล้ว)**: `RetrievalProfile/Slot/Relation/Request`, `RetrievalExecutionResult` (eligible/unavailable/rejected/supporting/attachment), `CandidatePool`/`PooledCandidate` (identity_key `u:`/`v:`/`i:`/`n:` + identity_quality + attachments), `EvidenceAttachment`, `retrieval_policy.make_evidence_card`, `retrieval_runtime.run_grouped_selection` (flag-gated fail-closed)
+
+#### PART 1-5 — plan (รออนุญาต)
+
+- **typed contracts (module ใหม่ 1 ตัว ตาม dataclass patterns เดิม — `policy_evidence.py` หรือรวมใน module เดียวที่ผู้ใช้อนุมัติ)**: `PolicyQuery`/`PolicyDecision` (outcome ∈ eligible|ineligible|admin_review|unknown), `PolicyRule` record (identity+version+scope+reason+conditions+order_states+outcome+required_evidence+priority+effective dates+source), `FieldEvidence` (subject identity + fact_key + normalized value + source + source_version + status + provenance), `CompatibilityProof`/`CompatDecision` (compatible|incompatible|unknown + proof refs)
+- **deterministic resolve**: effective date → scope (shop/category/subject exact) → reason+condition+order_state match → specificity → priority/version → conflict/expired/mismatched → admin_review|unknown; missing records → unknown (ไม่ใช่ eligible)
+- **field evidence**: แปลง card fields (canonical_specs/image_text/warranty/cert hits) เป็น identity-scoped FieldEvidence ผูก `PooledCandidate.identity_key`/subject_ids — missing OCR = status unknown; cert scope ด้วย subject+type+subtype+visibility
+- **compat proof**: relation target vs subject — explicit structured proof เท่านั้น; generic type assumption ไม่ใช่ proof; customer evidence ขัด DB-missing → admin_review; absence → unknown
+- **integration**: TurnPlan needs (policy/compat/claim) → Phase 4 pool (existing) → resolver ให้ typed decisions ที่ selector/answer boundary เดิม — **ไม่** ย้าย routing/selection/composition; general FAQ prose คงเป็น explanation หลัง decision เท่านั้น
+- **legacy deletions (diff เดียวกัน เมื่อ replay ผ่าน)**: `_extract_policy_from_descriptions` เป็น eligibility owner (คงเป็น explanation ได้ถ้าไม่ decide) · `answer_general` eligibility inference (return_policy path) · spec carry-over ที่เสีย identity · compat defaults จาก broad type · `phone→charger`/`_SKIP_TYPES` หลัง focused replay
+- **RED batch**: `docs/test/test_phase5_field_policy_compat.py` (ใหม่) + fixture extension `tx-policy-wrong-model-filter`/`pos-policy-seller-wrong-item` (structured policy data ใน fixture ไม่ใช่ production special-case) + validator allowlist keys ใหม่ + issue-28/`compat-unknown-not-negative`/Mi17-iPhone regressions — offline seams เดิม (FakeClient/_CapturedLLM/_install)
+- **ห้าม**: keyword/regex table ใหม่ · model/provider call ใหม่ · extra retrieval pass · helper/guard/fallback chain · parallel old/new path · collection/env/flag/dependency ใหม่ · shop/product/incident hardcode · Phase 4 publication/cron แตะ · Botworker/analytics/delivery · net-negative บังคับ — รายงาน LOC delta จริง
+
+#### blockers ที่รายงานก่อน implement
+
+1. **production policy-record source ไม่มี** — resolver ทำงานกับ supplied records/fixtures; activation ต้องมี structured policy data จริง (admin decision — ห้ามสร้าง collection/editor เอง)
+2. **processes ยังรัน**: Next.js dev + uvicorn :8010 — รอผู้ใช้หยุดหรืออนุญาต kill (preflight contract: clean soak)
+3. **tree ไม่ clean ตาม contract**: plan+waythrough modified (docs เก่า) — ผู้ใช้ตัดสินว่า commit/docs-closeout ก่อนหรือยอมรับ state นี้
+
 ### 🔍 PHASE 4B — Atomic Daily Evidence Refresh · ARCHITECTURE AUDIT + CONTRACT DESIGN (2026-10-19) · design-only รออนุญาต implement
 
 - **baseline**: branch `feature-phase3-aswer-quality` @ `8a52ba3` (4A committed `ec835af`+`8a52ba3`) · tree clean ก่อนเริ่ม · `grouped_retrieval_selection_enabled` OFF คงเดิม — รอบนี้ห้าม implement/flag/commit
@@ -5285,3 +5326,54 @@ config-failclosed 4/4 · boundary 20/20 · recovery-freshness 60/60 · error-pol
 - **Low cleanups**: stale resolver comment (index declared แล้ว) แก้เป็น declaration-only + operator gate; FakeMongo shops fixture ลบ `config_shop_key` (ไม่ใช่ persisted field)
 - **safety ตอน commit**: Next.js OFF, Botworker OFF, Python chatbot ไม่แตะ, `.env` ไม่เคยอ่าน, ไม่มี DDL/deploy/push/PR/provider/production Mongo; disposable containers ถูกลบหมด
 - **next gate**: read-only production `listIndexes`/census → explicit DDL approval → create+verify `{platform,shop_name,shop_id}` บน `conversations_shp` จริง → restart Next.js → local SuperITMall canary (concurrency=1) → ค่อยพิจารณา enable switches
+
+## 🔍 Botworker Mapping Index — Read-Only Production Preflight (2026-10-19) · กำลังทำ
+
+- **error→cause→fix→impact**: ไม่มี error — เป็น gate ตาม closeout ด้านบน: index `{platform:1,shop_name:1,shop_id:1}` declare แล้วใน `mongoClient.ts` แต่ production `conversations_shp` ยังไม่สร้าง/ไม่ verify → รอบนี้ preflight read-only เพื่อตัดสินว่าสร้างได้ปลอดภัยไหม + resolver query shape รองรับจริงไหม; ผลกระทบเคสอื่น = 0 (ไม่มี write)
+- **repo state (verified)**: branch `feature-phase3-aswer-quality`, HEAD `20879cb`, working tree clean, staging empty; Next.js OFF, Botworker OFF (port 3000/8010 ว่าง — มี stale `test-workflow-e2e.ts` tsx processes หลับอยู่ 8-33 นาที = orphan test script ไม่ใช่ declared services, observe-only ไม่แตะ)
+- **PART 0 static proof (committed source)**: (a) `COLLECTIONS.conversations` ← env `ADMIN_MONGO_COLLECTION_CONVERSATIONS` (production = `conversations_shp`, schema.md §2.6); (b) index declaration 1 จุดเดียวใน `ensureIndexes` — `mongoClient.ts:121-124` `{platform:1,shop_name:1,shop_id:1}` name `platform_1_shop_name_1_shop_id_1` ไม่มี `unique` + `partialFilterExpression:{shop_name:{$gt:""}}`; (c) resolver `botworkerRuntime.ts:129-148` = aggregate เดียว `$match:{$or:[{platform,shop_id:{$in:ids}}, {platform,shop_name:<name>} ต่อ name]}` → `$group{_id:{platform,shop_id,shop_name}}` — canonical (platform,shop_id) + per-name eq terms, **ไม่มี `$in` บน shop_name**; (d) test I1/I2 ใน `test-botworker-shop-context.ts` pin contract เดียวกัน; (e) ไม่มี document migration/alternate identity owner
+- **plan**: /tmp script เดียว (ไม่เข้า repo) — `load_dotenv(override=False)` รอบเดียวตาม temporary authorization, env รายงานแค่ set/unset, MongoClient ตัวเดียว bounded timeouts, `client.close()` ใน finally, ops เฉพาะ `ping`/`list_indexes`/`aggregate`/`count_documents`/`find_one`/`explain`, sanitized errors (class+code เท่านั้น), ไม่พิมพ์ documents/literals/credentials
+- **checks**: census counts (total/bad platform|shop_name|shop_id/partial-filter-match/dup groups+extra+max ของ `(platform,shop_name,shop_id)`) → listIndexes contract compare → explain 3 shape (canonical / name / combined ตาม production aggregate)
+- **safety**: Mongo writes=0, createIndex=0, ไม่แตะ .env นอก load_dotenv, ไม่แตะ `มาแล้วจ้า.md`, ไม่ restart/stop process ใดๆ, ไม่ commit/push — verdict เดียว: `ALREADY_PRESENT_AND_VERIFIED` | `CREATION_APPROVAL_PENDING` | `BLOCKED_BY_CONFLICTING_INDEX_DEFINITION` | `PREFLIGHT_BLOCKED_*`
+
+#### interim result — PREFLIGHT_BLOCKED (2026-10-19)
+
+- **script**: `/tmp/bw_mapping_index_preflight.py` — op surface proven static: `ping`/`list_indexes`/`aggregate`/`count_documents`/`find_one`/`explain` เท่านั้น, ไม่มี write/createIndex/import app modules/retry; subprocess เดียวรันแล้ว exit — **dotenv authorization consumed**
+- **findings จาก run เดียว (authorized)**: connect OK (mode=uri); `ADMIN_MONGO_DB`→`chatbot` (ตรง census เก่า); **`ADMIN_MONGO_COLLECTION_CONVERSATIONS` unset ใน root `.env`** → resolve ได้ `conversations` = collection ว่าง/ไม่มี (0 docs, 0 indexes — census vacuous); production ตั้งค่าจริงผ่าน `.env.web` (`ADMIN_MONGO_COLLECTION_CONVERSATIONS=conversations_shp` — DEPLOY.md:209, schema.md §2.6 ยืนยัน)
+- **blocker**: "one isolated audit subprocess ... expires when the subprocess exits" — re-run เพื่อ census `conversations_shp` ต้องการ subprocess/dotenv รอบใหม่ → หยุดรอ authorization (ไม่ยิงรอบสองเอง)
+- **state**: ops counters {ping:1, list_indexes:1, aggregate:1, count_documents:5, find_one:1, explain:3}, writes=0, client_closed=true, /tmp script ลบแล้ว, `git diff --check` clean, staging empty — ไฟล์ที่แตะ = log นี้ไฟล์เดียว
+- **ต้องการเพื่อปิดงาน**: subprocess authorized รอบใหม่ที่ pin audit target = `conversations_shp` (ชื่อจาก committed docs ไม่ใช่ secret — creds/db เหมือนเดิมจาก root `.env`) + ยังคง report env presence `ADMIN_MONGO_COLLECTION_CONVERSATIONS`=unset เป็น finding
+- **verdict (รอบแรก)**: `PREFLIGHT_BLOCKED_COLLECTION_ENV_UNSET_SINGLE_SUBPROCESS_CONSUMED`
+
+#### completed round — APPROVE_PREFLIGHT_RERUN (2026-10-19) · read-only เสร็จ
+
+- **rerun scope**: subprocess เดียวเพิ่ม, pin `conversations_shp`, op surface เดิม proven (ping/list_indexes/aggregate/count_documents/find_one/explain); assertions ผ่าน (collection exists + total>0); writes=0, client closed, /tmp ลบแล้ว
+- **PART 2 census (DB `chatbot`, `conversations_shp` จริง)**: total=153,154 · platform bad=0 · shop_id bad=0 · shop_name missing/null/empty/non-str=134,696 (87.9%) · **docs matching partial `{shop_name:{$gt:""}}` = 18,458** → index จะเล็ก ~12% ของ collection (partial filter ทำงานตาม design) · dup groups `(platform,shop_name,shop_id)`=50, extra=153,100, largest=43,349 — **structural ไม่ใช่ anomaly**: triple เป็น shop-level key (conv นับพัน share triple เดียวกัน + null-name docs collapse เป็นกลุ่มใหญ่) → non-unique index ถูกต้องตาม spec, duplicates ไม่ block creation
+- **PART 3 listIndexes (10 indexes)**: `platform_1_shop_name_1_shop_id_1` **absent** · ไม่มี same-name conflict · ไม่มี same-contract-other-name · platform-prefixed ที่มีอยู่: `platform_1_shop_id_1_pinned_-1_last_message_timestamp_-1`, `platform_1_shop_id_1_unread_count_1_pinned_-1_last_message_timestamp_-1`, `platform_1_status_1_unread_count_1` (non-unique, no partial ทั้งหมด)
+- **PART 4 explain (BEFORE — index ยังไม่มี, literals จาก eligible doc จริง ไม่พิมพ์)**:
+  - canonical `{platform,shop_id∈}`: IXSCAN `platform_1_shop_id_1_pinned_-1_last_message_timestamp_-1` (platform+shop prefix) — docsExamined=12,174, keys=12,174, nReturned=12,174, ~20ms — bounded ด้วย shop selectivity แต่ scan ทั้ง shop history
+  - name `{platform,shop_name=}`: IXSCAN platform-prefix เดิม + in-memory filter — **docsExamined=149,738 (~98% collection), keys=149,738, nReturned=1,118, ~151ms** — pain point จริง: เกือบ full-platform scan ต่อ name term
+  - combined `$or` production shape: SUBPLAN→OR IXSCAN index เดิม — docsExamined=161,912 (=12,174+149,738), nReturned=12,174, ~159ms — 0 COLLSCAN แต่ examine เกิน total docs
+  - caveat: stage list รวม rejectedPlans (collector walk ทั้ง tree); executionStats สะท้อน winning plan เท่านั้น
+- **env finding**: `ADMIN_MONGO_COLLECTION_CONVERSATIONS` ยัง unset ใน root `.env` (local dev default `conversations`); production resolve `conversations_shp` ผ่าน `.env.web` — ไม่ใช่ blocker ของ DDL แต่เป็น config note
+- **verdict**: `BOTWORKER_MAPPING_INDEX_CREATION_APPROVAL_PENDING` — รอ token `APPROVE_BOTWORKER_MAPPING_INDEX_DDL` (สร้าง index เดียว + listIndexes/explain verify; ห้ามเปิด Next.js/Botworker ในรอบ DDL)
+
+#### DDL round — APPROVE_BOTWORKER_MAPPING_INDEX_DDL (2026-10-19) · ✅ CREATED+VERIFIED
+
+- **pre-gates**: collection exists (153,154 docs), same-name index absent → create 1 ครั้ง; repo state เดิม (branch/HEAD 20879cb, log-only diff), Next.js+Botworker OFF ต่อเนื่อง
+- **DDL**: `create_index({platform:1,shop_name:1,shop_id:1}, name=platform_1_shop_name_1_shop_id_1, unique=false, partialFilterExpression={shop_name:{$gt:""}})` บน `chatbot.conversations_shp` — counter create_index=1, doc_writes=0
+- **post-verify listIndexes**: contract ตรงทุกข้อ (name/key order/non-unique/partial `{shop_name:{$gt:""}}`)
+- **explain AFTER (literals จาก eligible doc จริง ไม่พิมพ์ — doc ต่างจาก preflight round → counts เปรียบเทียบเชิงทิศทาง)**:
+  - name `{platform,shop_name=}`: **PROJECTION_COVERED → IXSCAN `platform_1_shop_name_1_shop_id_1`** (covered query — 0 FETCH) · docsExamined=0, keys=1,804, nReturned=1,804, ~4ms — BEFORE 149,738 docs/~151ms → **ตัดทิ้งทั้งหมด**
+  - combined `$or`: SUBPLAN→OR — name arm ใช้ index ใหม่ (covered), id arm ใช้ `platform_1_shop_id_1_pinned_-1_last_message_timestamp_-1` · docsExamined=13,651, keys=15,455, nReturned=13,651, ~29ms — BEFORE 161,912 docs/~159ms
+  - 0 COLLSCAN · `uses_target_index=true` ทั้งสอง branch · resolver production shape (aggregate `$match:$or` + `$group`) hit index ตาม design
+- **safety**: doc writes=0 · ops {ping:1, count_documents:1, list_indexes:2, find_one:1, explain:2, create_index:1} · client closed · /tmp script ลบแล้ว · `git diff --check` clean · staging empty · ไฟล์แตะ = log นี้ไฟล์เดียว · ไม่ start service/deploy/push/commit
+- **verdict**: `BOTWORKER_MAPPING_INDEX_CREATED_AND_VERIFIED`
+- **next gate (ตาม closeout ด้านบน)**: restart Next.js → local SuperITMall canary (concurrency=1) → พิจารณา enable switches — ยังไม่เริ่มในรอบนี้
+
+## 🗺️ Logging/Analytics Roadmap Scheduling (2026-10-20) · plan-only
+
+- **decision**: Phase 5 มาก่อน เพราะแก้ evidence/policy/compatibility ซึ่งเป็น correctness ของคำตอบโดยตรง; Logging/Analytics เริ่มหลัง Phase 5 commit และก่อน Phase 6
+- **roadmap added**: 3 bounded tracks — A Analytics Truth (window/timezone/source/labels, ลบ fake/aliased metrics), B Audit Event Correctness (single event vocabulary + dedupe), C Provider/Cost Observability (actual provider/model, safe key ref, tokens/cost/correlation)
+- **parallel rule**: Track A แยก branch/worktree ได้หลัง Botworker soak ปิด; Track B/C ห้ามขนานกับ chatbot answer-flow เพราะแตะ shared runtime/event boundaries; shared docs มี integration owner เดียว
+- **safety**: เอกสารเท่านั้น — runtime/tests/config/Mongo/provider/Botworker process = 0 แตะ; ไม่ stage/commit/push
