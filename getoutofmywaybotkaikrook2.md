@@ -5674,3 +5674,120 @@ config-failclosed 4/4 · boundary 20/20 · recovery-freshness 60/60 · error-pol
 **remaining blocker**: `active_policy_rules()` ยัง `()` — production policy-record supply = activation gate; `test_guards.py` env blocker; `pos-fail-sku-bypass` xfail
 
 **no push/PR/deploy/.env/provider/services** — Phase 6 ยังไม่เริ่ม
+
+## Phase 6 — One Selector With Structured Per-Need Coverage (plan)
+
+**baseline (frozen @542a5ba, tree clean)**: turn_decision 111p · subject-set (conversation_products) ยังไม่รันเต็ม · selection/pool suites pass · incident replay 119p/19s/4x (xfail: inc-ad1404t-relation, tx-q10-cert-scope, tx-q22q25-*, iss30) · validator 72 fixtures clean · py_compile owner modules clean
+
+**owner map (source-audited)**: semantic=`intent_classifier.classify_intent`(1 call)+`turn_decision.decide_turn`(1 call) → `TurnPlan`; identity=`candidate_pool._identity_key`+`route_context` codes; subject-set=`conversation_products` (`get_subject_set`≤1, `resolve_subjects`≤1, `materialize_subject_cards`); need=`TurnPlan/TurnNeed`; pool=`build_candidate_pool`; selector=`retrieval_selection.select_for_llm_context` (1 owner); availability=`product_store.resolve_availability`→`retrieval_policy._canonicalize/_bucket`; compat=`device_compat`; policy=`policy_resolver.resolve_policy`; answer=`llm.answer`+`guards.enforce`+deterministic replies
+
+**structured fields existing**: TurnNeed{kind,operation,subject_refs,confidence,provenance,subject_scope,subject_count}; profile{types,subtype,codes,target_device,availability_mode,compat_mode,anchors,fact_sources}; slot/relation/request เต็ม scope+constraints; card canonical_{type,roles}+publish/stock/visibility/sellable; subject refs+set+persisted lifecycle
+
+**missing (proved by audit → add on TurnNeed เท่านั้น)**: `product_types`/`subtypes` (need-level scope สำหรับ per-need request attribution — req มีแต่ need ไม่มี), `target_device` (compat/device need bind — app.py:4627 ยังอ่าน intent ตรงหลัง plan), `ranking`=(field,"max"|"min") (superlative เป็น kw-table re-decision ใน app.py:3856+ ไม่มี structured owner)
+
+**semantic branches after TurnPlan (inventory)**:
+- superlative kw tables `_SUPERLATIVE_KW/_watt_kw/_cap_kw/_weight_kw` + nested extractors (app.py ~3856-3919) → REPLACE: `TurnNeed.ranking` (mapping ย้าย→route_context) + selector ordering; extractors mah/weight ย้ายไป device_compat เคียง `_extract_max_wattage`
+- `_compat_target_device=intent_result.get("target_device")` (app.py ~4627) → REPLACE: `_retrieval_profile.target_device` (facts owner เดียวกัน)
+- other-model filter (`is_other_model_question` kws + bot-prose regex ~2986-3006/3924+) → RETAINED-BLOCKED: flag-off legacy preselection + prose-parse; canonical replacement = subject-exclusion ใน selector (defer)
+- history subtype/type carry (3079+) + `_superlative_followup` gates (2926/3009/3019/3064/3213/3671/3692) → RETAINED-BLOCKED: flag-off path only (canary `_sel_flag` discards `products`)
+- `conversation_products` resolver kw tables (_SUBJECT_PAIR/LINK/SAME_PRODUCT) → RETAINED: resolver fallback path เมื่อไม่มี structured signal (existing contract)
+- ref-name mongo regex fallback (~3997-4038) → RETAINED-BLOCKED: flag-off legacy fetch path
+
+**call graph before**: classify(1)→decide_turn(1)→resolve_subjects(≤1)→profile/slots/relations/requests/executor/pool→select_for_llm_context(1 per turn)×2 sites(KB ~2443, main ~4658)→`products`→(flag-off ยัง sort/filter/append; flag-on discard)→llm.answer→enforce
+
+**call graph after**: เหมือนเดิม + `needs` เข้า `run_grouped_selection→select_for_llm_context`; selector ทำ per-need attribution+dedupe+roles(subject/relation_target/alternative/historical_evidence/slot; hidden_mention=rejected-only)+`by_need`/`uncovered_needs`; intent `product_type`∈charger-subtype domain normalize→subtype proposal (resolve_route+profile boundary เดิม); `build_retrieval_relations` เพิ่ม reversed-order `ที่ใช้กับ` (target ก่อน connector); `_compat_target_device`←profile; superlative sort อ่าน `plan.ranking` แทน kw tables (kw tables/extractors inline ลบ)
+
+**AD1404T root cause**: msg="อยากได้สายที่ใช้กับ AD1404T ..." — 'สาย' bare ไม่ใช่ subtype kw → subtype=None; relation parser forward-order เท่านั้น (target ต้องอยู่หลัง connector) → miss; intent product_type='cable' ไม่ normalize เข้า subtype (ไม่ใช่ type name) → profile types={charger} ไม่ cover cable
+**fix**: (a) intent product_type∈_CHARGER_SUBTYPES → subtype proposal (types ยัง pure); (b) relation parser: `ที่` นำหน้า connector → target ฝั่งก่อน (`สาย` shorthand→cable / kw mention), source=code/kw หลัง connector, constraints=tail หลัง source, ask-marker gate กัน claim sentence; (c) harness L1 coverage check union subtypes เข้า type domain (สอดคล้อง `_bucket` eff_types/`_request_covers`) → fixture flip GREEN (status incident→positive in same diff)
+
+**gates**: no 2nd planner/LLM/keyword-table owner; per-request quota เดิม; dedupe identity precedence subject>relation_target>historical_evidence>alternative>slot; promoted unavailable published→subject, discontinued/snapshot→historical_evidence; `customer_hidden`→rejected label `hidden_mention` เท่านั้น; mixed product+policy handoff คง (Phase 5); no stage/commit/push/services/.env/8010
+
+## Phase 6 — complexity-correction round (H1/M1/M2)
+
+**review findings (verified กับ source ก่อนแก้ — ทั้ง 3 จริง)**
+- H1: `_need_types/_need_subtypes/_need_ranking` เป็น turn-scoped vars → `_add_need` stamp เหมือนกันทุก productish need — probe "พาวเวอร์แบงค์แนะนำ + สายใช้กับ AD1404T" compat need ได้ {charger,powerbank}+wattage ranking (scope รั่วข้าม need)
+- M1: `SelectionResult.by_need/uncovered_needs` = test-only — production readers 0 (แค่ selection internals + 2 tests) → Phase 7 surface ดึงมาก่อนเวลา
+- M2: `_REL_ASK` marker table สร้างใหม่เพื่อกัน claim sentence ("สายที่ใช้กับ X เสีย") — semantic kw gate ใหม่ผิดกฎ; structured signal ที่มีอยู่ = `profile.intent` (resolved — warranty_claim→claim)
+
+**fixes**
+- H1 → per-producer scope ใน `_add_need`: product/compare = route∪intent scope (≥0.7); compat = intent scope ∪ kw mentions ใน connector window ±30 (`_REL_CONN_RE` — mention นอก window เป็นของ ask อื่น); non-productish = ว่าง; แยกตัวแปร `_compat_types/_compat_subtypes` ออกจาก product scope; merge same-kind need รวมเฉพาะ field ตัวเอง
+- M1 → ลบ `by_need`/`uncovered_needs`/`_need_key` + coverage-report block + 2 tests — เหลือ `_needs_for_request` (ranking attribution ที่ `need.ranking` sort ใช้จริง)
+- M2 → ลบ `_REL_ASK`; gate = `profile.intent ∈ {claim,warranty}` → `()` ที่หัว `build_retrieval_relations` (eligibility เดิม `_REL_QUESTION` forward เท่านั้นคงไว้); reversed branch ยัง structural parse (head-type ก่อน "ที่"+conn, source หลัง)
+- consolidation เพิ่มเติม: `_intent_charger_subtype`+`_intent_product_type` รวมเป็น `_intent_product_scope` เดียว; rank-extractor dispatch ย้ายไป `device_compat.spec_rank_key`/`_SPEC_RANK_EXTRACTORS` (owner เดียว — app.py map + selection name-map ลบทิ้ง); `_rank_key_fn` shim ลบ; `_needs_for_request` ปรับโครงสร้าง semantics เดิม
+
+**red→green**: mixed-scope test RED (compat need มี powerbank) → GREEN หลัง per-producer scope; AD1404T request/claim pair ยังผ่าน (request parse ครบ, claim blocked ผ่าน intent gate)
+
+**verified**: 465p/20s/3x focused batch (phase6+turn_decision+selection+runtime+profile+relations+replay+source_union+5f+profile_db+profile_hints) · 177p sweep หลัง consolidation · py_compile · diff --check clean — xfail/skip เป็น baseline เดิม (ไม่ claim green)
+
+**complexity**: runtime `+386/−81 = +305 net` (จาก +333 — ลบ speculative ~50, เพิ่ม honest per-need ~20) — floor = reversed parser ~75 + need-scope contract ~75 + selector needs/roles/dedupe ~105 + moved code ~45; tables: `_RANK_FIELD_KWS` ย้าย verbatim (bare "w" quirk เดิมคง), `_ROLE_RANK`/`_SPEC_RANK_EXTRACTORS`/`_PRODISH_NEED_KINDS`/`_SCOPE_NEED_KINDS` = precedence/dispatch/domain maps ไม่ใช่ semantic kw; **new semantic kw tables = 0**
+
+**residual**: compat-parity wattage sort ผูก relation_target/compat-source requests (slot reqs attribute product need) — ตรง old-behavior scope; bare-"w" quirk pre-existing ไม่แก้จนกว่า regression จริง
+
+## Phase 6 — final ownership correction (H1 bidirectional + H2 typed eligibility)
+
+**H1 root cause**: scope block ยัง union route scope (turn-wide) เข้า product need + connector-window reconstruction (±30) เป็น second parser ใน decide_turn — "พาวเวอร์แบงค์แนะนำ + สายใช้กับ AD1404T" product need ได้ {charger,powerbank} (charger รั่วจาก compat ask)
+**fix**: scope = per-producer structured evidence เท่านั้น — product/compare (`_SCOPE_NEED_KINDS`) รับ intent product scope (≥0.7); compat/อื่น ว่างเสมอ (relation scope = RetrievalRequest downstream); ลบ window block + `_compat_types/_compat_subtypes/_need_types/_need_subtypes/_route_subs` + cross-module `_kw_type_mentions/_mention_subtype` calls (`_REL_CONN_RE` เหลือเฉพาะ compat detection เดิม baseline); ranking_compat rebase: route∪intent ∩ {charger,powerbank} (parity เดิม — fix under-fire เมื่อ intent ไม่ใช่ compatibility_check เช่น AD1404T recommendation)
+**verify**: bidirectional test — product={powerbank} ไม่มี charger/cable; compat=∅ ไม่มี powerbank; compat ranking wattage เท่านั้น, product None
+
+**H2 root cause**: `profile.intent` gate ยังเป็น prose-derived boundary + "other" intent pass ผ่าน (AD1404T recommendation→other ต้องการ relation แต่ claim→other ก็ผ่านได้ถ้า pattern ตรง — ไม่มี typed boundary)
+**fix**: `build_retrieval_relations(profile, slots, *, allow_reversed=False)` — reversed branch เฉพาะเมื่อ flag; caller (`run_grouped_selection`) derive `any(n.kind in _PRODISH_NEED_KINDS for n in needs)` — TurnPlan productish need = typed eligibility; claim/warranty-only/absent/malformed → fail closed; ลบ profile.intent gate (forward unchanged)
+**verify**: matrix test — productish→rel, claim-only needs→(), needs=()→(), unknown intent→(), malformed intent→decide_turn raise (fail closed ที่ plan boundary), mixed product+claim→productish governs
+
+**delta**: runtime `+381/−84 = +297 net` (turn_decision 55/1 — window ลบ; route_context 124/11; runtime 8/2) · tests: 151+294 green (21s/4x baseline) · validator 72 rows pass · compile+diff-check clean
+**residual**: `retrieval_shadow` ไม่มี needs → allow_reversed=False (fail closed — shadow อาจขาด reversed relation ใน diagnostic, observe-only); `need.product_types/subtypes` consumer เดียว = `_needs_for_request` ranking attribution
+
+## Phase 6 — intent boundary + shadow parity correction
+
+**findings (verified)**: (1) `float(intent.get("confidence") or 0.0)` ใน decide_turn raise บน malformed confidence — มี raw float() 3 จุด (app:1286, route_context resolve_route, turn_decision) = ไม่มี normalization owner; (2) `_PRODISH_NEED_KINDS` เป็น private const ของ selector ถูก import โดย runtime — kind domain ไม่มี owner จริง; (3) `retrieval_shadow` ไม่รับ needs → allow_reversed=False เสมอ แตกต่าง production
+
+**fixes**
+- `route_context._intent_confidence` = normalize owner เดียว (malformed/missing → 0.0); consumers 3 จุด (turn_decision, resolve_route, app) ลบ raw float() ทิ้ง — consumer ห้าม convert ซ้ำ; `_intent_product_scope` harden non-str → None (boundary เดียวกัน)
+- `PRODUCTISH_NEED_KINDS` ย้ายเป็น public const ใน turn_decision (owner ของ TurnNeedKind); runtime+shadow import ตรง, selection import alias `_PRODISH_NEED_KINDS` — domain owner เดียว
+- `run_grouped_retrieval_shadow(needs=())` + derive `allow_reversed` เหมือน production พอดี (typed contract เดียวกัน); app.py shadow callsite ส่ง `_turn_plan.needs`; absent needs → fail closed เหมือนเดิม
+
+**verify**: malformed suite (garbage/object/list/dict → conf 0.0, plan+profile รอด, intent scope gated off); shadow/prod spy parity [True] vs [True, False]; 573 tests green (26+360+187); raw float(confidence) sites = 0; kind domain owner = 1; banned symbols = 0
+
+**delta**: runtime `+402/−88 = +314 net` (shadow +6/1, route_context +13 normalize owner, turn_decision +6); helpers ใหม่: `_intent_confidence` (replaces 3 raw conversions)
+
+## Phase 6 — bounded confidence + final pre-commit gate
+
+**finding**: `_intent_confidence` รับแต่ TypeError/ValueError — boundary รั่ว: `"NaN"→nan`, `"Infinity"/inf/-inf→ผ่าน`, `True→1.0` (bool เปิด gate ≥0.7 → intent scope ถูก apply!), `-0.1`/`1.1`→ผ่านนอก range
+
+**fix**: rename เป็น public `route_context.intent_confidence` (cross-module owner เดียว) — bool reject ก่อน, `float()` + `math.isfinite` + `0.0<=c<=1.0`, อื่นทั้งหมด → 0.0; `_intent_product_scope` → `intent_product_scope` (consistency เดียวกัน — cross-module consumers 4 จุด)
+
+**audit**: flags OFF (env default "0" ทั้ง selection+shadow); zero banned symbols; no parallel paths; selector dedupe/roles คงเดิม; media paths ผ่าน replay ทั้งหมด
+
+**verify**: boundary suite 13 cases + malformed suite; 555 tests green (phase6 27 + turn_decision + profile/db/hints + relations + selection + runtime + shadow + replay + union + subject_set + action_switch + 5f + grouped_executor + units); validator pass; compile clean; diff --check clean
+
+**delta**: runtime `+408/−88 = +320 net` (route_context +6 จาก bounded impl + import math)
+
+## Phase 6 — test isolation correction (parity test hang)
+
+**incident**: `test_shadow_and_production_same_reversed_eligibility` mock เฉพาะ `build_retrieval_relations` — shadow calls ยังใช้ `fetcher=None`/`legacy_fetcher="auto"` → executor เดินทางเข้า real retrieval (Mongo/unit/legacy) → suite ค้างที่ test นี้ (reproduce: 16 tests ผ่านแล้วหยุด, ต้อง interrupt)
+
+**fix (test-only, runtime frozen)**: monkeypatch ทั้ง 2 module bindings — `build_retrieval_relations` (spy เดิมเก็บ flag) + `execute_grouped_retrieval_requests` → `()`; ลบ manual save/restore + try/finally; executor = leaf boundary เดียวที่ตรง purpose (verify eligibility derivation)
+
+**verify**: parity test alone 0.96s; suite standalone 27 passed 0.40s (~1.7s wall) — no hang; batch 528 passed; compile/validator/diff --check clean; runtime numstat unchanged (+408/−88 = +320 net) — zero production bytes รอบนี้
+
+## Phase 6 — CLOSEOUT (committed)
+
+**commit**: `ee6cf63` `refactor: make retrieval selection need authoritative` (17 files, +1136/−121) — parent `542a5ba`
+
+**ownership contracts**
+- `TurnNeed` = per-need structured contract เดียว: `product_types`/`subtypes` เฉพาะ product/compare (intent scope ≥0.7, `intent_product_scope`); compat/อื่น = ว่าง — relation scope เป็น RetrievalRequest/relations owner เดิม; `ranking` = (canonical field, max|min) จาก `detect_ranking` ∪ compat parity
+- mixed scope isolation ทั้งสองทิศ: product/recommend = {powerbank} เท่านั้น, compat = ว่าง (ไม่ inherit กัน)
+- selector = 1 execution ต่อ turn บน canonical pool; request→need attribution + `need.ranking` sort + identity dedupe + role precedence (subject>relation_target>historical_evidence>alternative>slot; hidden_mention label-only)
+- reversed relation (`สายที่ใช้กับ AD1404T`) eligible เฉพาะ typed productish need — `PRODUCTISH_NEED_KINDS` owner = `turn_decision`; production + shadow derive `allow_reversed` เหมือนกัน (absent needs → fail closed)
+- `intent_confidence` (public, `route_context` owner เดียว) — bool/non-finite/out-of-range/malformed/missing → 0.0; consumer ห้าม raw `float()` ซ้ำ (3 raw sites ถูกแทนที่)
+
+**removed**: `SelectionResult.by_need`/`uncovered_needs`/`_need_key` (Phase 7 surface — deferred to AnswerContext เมื่อมี consumer จริง), `_REL_ASK` (semantic kw gate), app.py ranking kw tables + nested extractors + `_rank_extractors` map + `_RANK_EXTRACTOR_NAMES` + `_rank_key_fn` shim, ±30 connector-window scope reconstruction, `profile.intent` eligibility gate, raw `float(confidence)` ×3
+
+**new semantic kw tables**: 0 (`_RANK_FIELD_KWS` ย้าย verbatim)
+
+**flags**: `USE_GROUPED_RETRIEVAL_SELECTION` + `USE_GROUPED_RETRIEVAL_SHADOW` = OFF (env default "0") — pipeline เดิมยังเป็น production path
+
+**verification**: Phase 6 suite 27/27 (~0.4s, parity test isolated ด้วย monkeypatch executor — ก่อนหน้าเคย hang ที่ legacy_fetcher="auto"); affected batch 528 passed/21 skipped/4 xfailed (baseline-identical); fixture validator 72 rows; py_compile clean; diff --check clean; runtime delta +408/−88 = +320 net
+
+**deferred**: Phase 7 = need-scoped AnswerContext (unanswered_needs/card-cap/web-gate/token measure — ยังไม่ implement); Phase 8 = typed answer composition
+
+**safety**: ไม่มี push/PR/deploy/.env/Mongo/provider/botworker/8010; staging empty หลัง commit
