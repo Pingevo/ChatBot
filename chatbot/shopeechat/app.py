@@ -766,12 +766,10 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
             # ไม่มี strong keyword ต่างจาก anchor → ใช้ anchor
             return _anchor_sub
 
-        # 4. ไม่มี anchor → intent
-        if intent_result and intent_result.get("product_type") == "charger":
-            _intent_sub_val = intent_result.get("charger_subtype")
-            if _intent_sub_val in ("adapter", "cable", "set", "car_charger",
-                                   "wireless", "desktop", "socket"):
-                return _intent_sub_val
+        # 4. ไม่มี anchor → intent (Phase 6: table ย้ายไป route_context helper)
+        _int_sub_norm = _rc.intent_product_scope(intent_result or {})[1]
+        if _int_sub_norm:
+            return _int_sub_norm
 
         # 5. ไม่มี anchor, ไม่มี intent → msg (แม้ไม่ใช่ strong keyword)
         if _msg_sub:
@@ -1285,7 +1283,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         # ===== Phase 6 — แก้ hardcoded detection ให้ใช้ intent_result เป็นหลัก =====
         # Confidence threshold: ใช้ 0.7 (สอดคล้องกับ warranty override เดิม)
         _INTENT_CONF_THRESHOLD = 0.7
-        _intent_conf = float(_intent_result.get("confidence") or 0)
+        _intent_conf = _rc.intent_confidence(_intent_result)
         _intent_name = _intent_result.get("intent")
         _intent_gq = _intent_result.get("general_qtype")
 
@@ -1982,7 +1980,9 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     "output": _rshadow.run_grouped_retrieval_shadow(
                         _retrieval_profile, message=req.message,
                         shop=req.shop, platform=req.platform or "shopee",
-                        snap=_snap),
+                        snap=_snap,
+                        needs=(_turn_plan.needs
+                               if _turn_plan else ())),
                 })
             except Exception as _e:
                 print(f"[SHADOW] grouped-retrieval error: {_e}",
@@ -2446,6 +2446,8 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                                 platform=req.platform or "shopee",
                                 subject_cards=_subject_cards,
                                 compat_cards=_kb_device_products or (),
+                                needs=(_turn_plan.needs
+                                       if _turn_plan else ()),
                                 snap=_snap,
                                 kb_fetcher=lambda *a, **k:
                                     knowledge_base.kb_product_evidence(
@@ -3854,64 +3856,23 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         products = product_store._dedupe_products(products, log_label="DEDUP")
 
         # ── Superlative ranking: เรียงสินค้าตามค่าที่ลูกค้าถาม "สุด" ──
-        # เช่น "ชาร์จไวสุด/แรงสุด" → extract ค่า W จากชื่อ/spec แล้ว sort จากมากไปน้อย
-        # เพื่อให้สินค้าที่แรงสุดจริงขึ้น top ของ context ที่ส่ง LLM
-        # (ปัญหาเดิม: RAG sort ตาม relevance score ทั่วไป ทำให้ P23 210W ตกไปอันดับ 11+)
-        # ใช้ spec fields จาก CSV schema: output_power_w, capacity_mah, package_weight
-        # ⚡ ขยาย: trigger เมื่อ superlative_q หรือ compatibility_check (ถามหาสินค้าที่รองรับ device)
-        # เพื่อให้สินค้าสเปคสูงสุดที่รองรับขึ้น top ของ context
-        _is_compat_check = _intent_result.get("intent") == "compatibility_check"
-        _is_charger_compat = _is_compat_check and _intent_result.get("product_type") in ("charger", "powerbank")
-        if (_is_superlative_q or _is_charger_compat) and len(products) > 1:
-            # ⚡ Phase 3b — _extract_max_watt ย้ายไปเป็น module-level helper `_extract_max_wattage`
-            def _extract_max_mah(p: dict) -> float:
-                """extract ค่า mAh สูงสุดจาก spec field ก่อน ถ้าไม่มีค่อยดึงจากชื่อ."""
-                spec_mah = p.get("capacity_mah") or p.get("specs", {}).get("capacity_mah")
-                if spec_mah and isinstance(spec_mah, (int, float)) and spec_mah > 0:
-                    return float(spec_mah)
-                variants = p.get("variants") or []
-                max_v = 0.0
-                for v in variants:
-                    vm = v.get("capacity_mah")
-                    if vm and isinstance(vm, (int, float)) and vm > max_v:
-                        max_v = float(vm)
-                if max_v > 0:
-                    return max_v
-                name = p.get("name") or p.get("item_name") or ""
-                if not name:
-                    return 0.0
-                matches = re.findall(r"(\d+(?:\.\d+)?)\s*mah\b", name.lower())
-                if not matches:
-                    return 0.0
-                return max(float(m) for m in matches)
-            def _extract_weight(p: dict) -> float:
-                """extract น้ำหนัก (kg) จาก spec field."""
-                w = p.get("package_weight") or p.get("specs", {}).get("package_weight")
-                if w and isinstance(w, (int, float)) and w > 0:
-                    return float(w)
-                return 999.0  # ถ้าไม่มีข้อมูล ให้ตกไปอยู่ท้าย (เบาสุด = น้ำหนักน้อยสุด)
-            # ตรวจว่าลูกค้าถามเรื่อง wattage (ไว/แรง) หรือ capacity (จุมากสุด) หรือ weight (เบาสุด) หรืออื่นๆ
-            _super_msg_lower = (req.message or "").lower()
-            _watt_kw = ("ไว", "แรง", "เร็ว", "w", "watt", "ชาร์จไว", "จ่ายไฟ")
-            _cap_kw = ("จุ", "ความจุ", "mah", "capacity", "แบตเยอะ", "แบตมาก")
-            _weight_kw = ("เบา", "น้ำหนัก", "weight", "เบาสุด", "น้อยสุด")
-            _is_watt_q = any(kw in _super_msg_lower for kw in _watt_kw)
-            _is_cap_q = any(kw in _super_msg_lower for kw in _cap_kw)
-            _is_weight_q = any(kw in _super_msg_lower for kw in _weight_kw)
-            # ⚡ compatibility_check สำหรับ charger/cable → sort by wattage desc เสมอ
-            # เพื่อให้สินค้าสเปคสูงสุด (เช่น 6A 240W) ขึ้น top ของ context
-            if _is_charger_compat and not _is_watt_q:
-                products.sort(key=lambda p: device_compat._extract_max_wattage(p), reverse=True)
-                print(f"[COMPAT-RANK] sort by wattage (desc)  top3: {[device_compat._extract_max_wattage(p) for p in products[:3]]}", file=sys.stderr)
-            elif _is_watt_q:
-                products.sort(key=lambda p: device_compat._extract_max_wattage(p), reverse=True)
-                print(f"[SUPERLATIVE-RANK] sort by wattage (desc)  top3: {[device_compat._extract_max_wattage(p) for p in products[:3]]}", file=sys.stderr)
-            elif _is_cap_q:
-                products.sort(key=lambda p: _extract_max_mah(p), reverse=True)
-                print(f"[SUPERLATIVE-RANK] sort by capacity (desc)  top3: {[_extract_max_mah(p) for p in products[:3]]}", file=sys.stderr)
-            elif _is_weight_q:
-                products.sort(key=lambda p: _extract_weight(p))
-                print(f"[SUPERLATIVE-RANK] sort by weight (asc)  top3: {[_extract_weight(p) for p in products[:3]]}", file=sys.stderr)
+        # Phase 6 — ranking เป็น structured field บน TurnNeed (owner:
+        #   route_context.detect_ranking + compat-check intent); compat need
+        #   ชนะ product need (parity: charger/powerbank compat → wattage เสมอ)
+        # spec fields ตาม CSV schema: output_power_w, capacity_mah, package_weight
+        _sup_rank = next(
+            (n.ranking for n in _turn_plan.needs
+             if n.ranking and n.kind == "compat"), None) or next(
+            (n.ranking for n in _turn_plan.needs if n.ranking), None)
+        if _sup_rank and len(products) > 1:
+            _rank_fn = device_compat.spec_rank_key(_sup_rank[0])
+            if _rank_fn:
+                products.sort(key=lambda p: _rank_fn(p),
+                              reverse=(_sup_rank[1] == "max"))
+                print(f"[SUPERLATIVE-RANK] sort by {_sup_rank[0]} "
+                      f"({_sup_rank[1]})  top3: "
+                      f"{[_rank_fn(p) for p in products[:3]]}",
+                      file=sys.stderr)
             # ⚡ Phase 8 — จำกัดเหลือ LLM context limit หลัง sort (ไม่ใช่ req.limit)
             #   เพราะ superlative ต้องการให้ LLM เห็นสินค้าเยอะพอเพื่อเปรียบเทียบ
             #   frontend display ยังใช้ req.limit ใน ChatResponse
@@ -4327,7 +4288,10 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 # สำหรับ compatibility check ให้เก็บเยอะกว่า req.limit เพื่อให้ LLM เห็นทุกรุ่น
                 # ⚡ Phase 8 — _merge_limit ใช้ _LLM_CONTEXT_LIMIT (30) ไม่ใช่ req.limit
                 #   สำหรับ compatibility check ให้เก็บเยอะกว่าปกติเพื่อให้ LLM เห็นทุกรุ่น
-                _merge_limit = max(_llm_ctx_limit * 4, 80) if _is_compat_check else _llm_ctx_limit
+                _merge_limit = max(_llm_ctx_limit * 4, 80) if (
+                    _turn_plan and any(n.kind == "compat"
+                                       for n in _turn_plan.needs)
+                ) else _llm_ctx_limit
                 products = merged[:_merge_limit]
 
         # ⚡ Phase 3d (2026-09-19) — _available_for_sale mark (ทุกกรณี นอก if has_unlist)
@@ -4624,7 +4588,11 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         #    ก่อน tier merge เพื่อให้ LLM เห็นเฉพาะสินค้าที่ compat จริง
         #    ถ้ากรองแล้วว่าง/เหลือน้อย → fallback คืนทั้งหมด (ปลอดภัย ไม่ over-filter)
         #    protected_ids = tier-A subject — ของที่ลูกค้าถามตรงไม่ถูก filter ลบ
-        _compat_target_device = _intent_result.get("target_device") or ""
+        # Phase 6 — device target จาก canonical profile (facts owner เดียว)
+        #   แทนการอ่าน intent_result ตรงหลัง TurnPlan
+        _compat_target_device = (
+            _retrieval_profile.target_device if _retrieval_profile else ""
+        ) or ""
         if _compat_target_device and products:
             _compat_md, _asked_type = device_compat._compat_mode(
                 _intent_result.get("product_type"), req.message)
@@ -4660,6 +4628,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     platform=req.platform or "shopee",
                     subject_cards=_subject_cards,
                     compat_cards=_device_additional or (),
+                    needs=(_turn_plan.needs if _turn_plan else ()),
                     supporting=([{"kind": "qa", "text": _qa_ctx}]
                                 if _qa_ctx else [])
                                 + ([{"kind": "vision", "text": _vision_context}]

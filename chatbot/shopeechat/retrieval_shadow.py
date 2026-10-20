@@ -11,6 +11,7 @@ from .route_context import build_retrieval_slots, build_retrieval_relations
 from .retrieval_planner import build_grouped_retrieval_requests
 from .retrieval_executor import execute_grouped_retrieval_requests
 from .candidate_pool import build_candidate_pool
+from .turn_decision import PRODUCTISH_NEED_KINDS
 
 
 def _summary(results, pool) -> dict:
@@ -56,6 +57,7 @@ def run_grouped_retrieval_shadow(
     fetcher=None,
     legacy_fetcher="auto",
     snap=_gen.SNAP_UNSET,
+    needs=(),
 ) -> dict:
     """profile → slots→relations→requests→executor(union)→pool → summary.
 
@@ -64,7 +66,10 @@ def run_grouped_retrieval_shadow(
     """
     try:
         slots = build_retrieval_slots(profile)
-        relations = build_retrieval_relations(profile, slots)
+        relations = build_retrieval_relations(
+            profile, slots,
+            allow_reversed=any(n.kind in PRODUCTISH_NEED_KINDS
+                               for n in needs))
         requests = build_grouped_retrieval_requests(profile, slots, relations)
         results = execute_grouped_retrieval_requests(
             requests, message=message, shop=shop, platform=platform,

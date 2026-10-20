@@ -596,14 +596,16 @@ class PolicyDecision:
 
 **Files:** Modify selector, runtime, and pool; extend tests/replay; update SRS/log.
 
-- [ ] RED-test multi-type/subtype, compare pair, relation pair, subject, unavailable subject, hidden mention, and alternatives.
-- [ ] **Moved from Phase 5 R5:** extend the existing `classify_intent` → `decide_turn` → `TurnPlan` path (no second planner/model call) so each independent need carries structured requested fields/ranking/relation and enough typed scope to build a need-specific request. Exact identities and persisted lifecycle state remain deterministic authorities; intent remains a proposal. Delete each replaced semantic keyword branch in the same diff.
-- [ ] Select from canonical types/roles/facets only.
-- [ ] Keep `subject`, `relation_target`, `alternative`, `historical_evidence`, and `hidden_mention` distinct.
-- [ ] In canary mode, make legacy base products a preselection source, not a postselection append.
-- [ ] Keep unavailable/rejected summaries outside recommendations.
+- [x] RED-test multi-type/subtype, compare pair, relation pair, subject, unavailable subject, hidden mention, and alternatives.
+- [x] **Moved from Phase 5 R5:** extend the existing `classify_intent` → `decide_turn` → `TurnPlan` path (no second planner/model call) so each independent need carries structured requested fields/ranking/relation and enough typed scope to build a need-specific request. Exact identities and persisted lifecycle state remain deterministic authorities; intent remains a proposal. Delete each replaced semantic keyword branch in the same diff.
+- [x] Select from canonical types/roles/facets only.
+- [x] Keep `subject`, `relation_target`, `alternative`, `historical_evidence`, and `hidden_mention` distinct.
+- [x] In canary mode, make legacy base products a preselection source, not a postselection append. *(grouped path unions `legacy_fetcher` results into the canonical pool before selection; flags remain OFF — see closeout)*
+- [x] Keep unavailable/rejected summaries outside recommendations.
 
 **Exit gate:** Q6-Q10, Q15-Q18, AD1404T, and live multi-subtype probes pass; selected duplicates are zero; one existing TurnPlan owns all needs; no parallel semantic planner or new keyword fallback remains; mixed product and policy needs can be represented separately without parsing answer prose.
+
+**Phase 6 closeout (committed — see waythrough `getoutofmywaybotkaikrook2.md` for the hash):** `TurnNeed` carries only honestly owned structured scope/ranking — product/compare needs receive intent product scope (conf≥0.7 via `route_context.intent_product_scope`); compat and other kinds stay empty because `RetrievalRequest`/relations remain the relation-scope owner (no turn-wide scope stamping, no connector-window reconstruction). Mixed product+compat scope is isolated in both directions (powerbank cannot leak into compat; charger/cable cannot leak into product). The selector consumes one `TurnPlan` for request→need attribution and `need.ranking` ordering; identity dedupe and role precedence (`subject > relation_target > historical_evidence > alternative > slot`, `hidden_mention` label-only) are canonical. Reversed relations (`สายที่ใช้กับ AD1404T`) require typed productish needs via `PRODUCTISH_NEED_KINDS` (owner: `turn_decision`); production and `retrieval_shadow` derive the same `allow_reversed` contract, absent needs fail closed. `intent_confidence` (single normalization owner) bounds malformed/bool/non-finite/out-of-range confidence to `0.0` — fail closed, no exception. `SelectionResult.by_need`/`uncovered_needs` were removed as speculative Phase 7 surface — deferred to Phase 7 `AnswerContext` when a real consumer exists. `_REL_ASK` deleted; zero new semantic keyword tables (`_RANK_FIELD_KWS` moved verbatim from the deleted app.py superlative block). Grouped retrieval flags (`USE_GROUPED_RETRIEVAL_SELECTION`/`_SHADOW`) remain OFF. Phase 7 still owns need-scoped answer context (incl. `unanswered_needs`, card-cap replacement, prompt-token measurement, web gate); Phase 8 still owns typed answer composition. Fixed-card-cap removal, web-search planning, and prompt-token measurement were **not** implemented in Phase 6. **Frozen verification:** Phase 6 suite 27/27; affected batch 528 passed / 21 skipped / 4 xfailed (baseline-identical); fixture validator 72 rows pass; `py_compile` clean; `git diff --check` clean; runtime delta +408/−88 = +320 net.
 
 ## Revised Phase 7: Bounded Answer Context And Web Gate
 

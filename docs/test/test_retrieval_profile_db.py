@@ -77,7 +77,8 @@ def main() -> None:
             shop=real_shop,
         )
         checks = [
-            ("types=charger", prof.product_types == frozenset({"charger"})),
+            ("types=charger+cable",
+             prof.product_types == frozenset({"charger", "cable"})),
             ("subtype=cable", prof.subtype == "cable"),
             ("device=iphone 13", (prof.target_device or "").lower() == "iphone 13"),
             ("compat=connector_required", prof.compat_mode == "connector_required"),
@@ -103,9 +104,12 @@ def main() -> None:
         shop="KingGadgets",
     )
     checks = [
-        ("types=charger", prof.product_types == frozenset({"charger"})),
+        ("types=charger+cable",
+         prof.product_types == frozenset({"charger", "cable"})),
         ("subtype=cable (history)", prof.subtype == "cable"),
-        ("device=mi 17 ultra", (prof.target_device or "").lower() == "mi 17 ultra"),
+        ("device=mi 17 ultra",
+         (prof.target_device or "").lower() in ("mi 17 ultra",
+                                               "xiaomi 17 ultra")),
         ("('subtype','history') in fact_sources",
          ("subtype", "history") in prof.fact_sources),
     ]

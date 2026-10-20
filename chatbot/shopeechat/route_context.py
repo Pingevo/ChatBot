@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,26 @@ _SUPERLATIVE_KW = ("สุด", "ที่สุด", "แรงสุด", "ไ
 # คำอ้าง "ชิ้นเดียว" (deictic) — ถ้ามี = ถามเกี่ยวกับ anchor ไม่ใช่เทียบชุด
 #   กัน false positive ของ _SUPERLATIVE_KW เช่น "ตัวนี้ชาร์จเร็วไหม" (ไม่ใช่ set question)
 _SINGLE_ITEM_REF_KW = ("ตัวนี้", "รุ่นนี้", "อันนี้", "ชิ้นนี้", "สินค้านี้", "เรือนนี้")
+
+# superlative → canonical spec field (ย้ายมาจาก app.py superlative block —
+# kw → (field, direction) เจ้าของเดียว; spec fields ตาม CSV schema)
+_RANK_FIELD_KWS = (
+    (("ไว", "แรง", "เร็ว", "w", "watt", "ชาร์จไว", "จ่ายไฟ"),
+     "output_power_w", "max"),
+    (("จุ", "ความจุ", "mah", "capacity", "แบตเยอะ", "แบตมาก"),
+     "capacity_mah", "max"),
+    (("เบา", "น้ำหนัก", "weight", "เบาสุด", "น้อยสุด"),
+     "package_weight", "min"),
+)
+
+
+def detect_ranking(low: str) -> tuple[str, str] | None:
+    """superlative message → (canonical spec field, "max"|"min") ตามลำดับ
+    wattage → capacity → weight (parity กับ app.py เดิม); ไม่ match → None"""
+    for kws, field, direction in _RANK_FIELD_KWS:
+        if any(kw in low for kw in kws):
+            return (field, direction)
+    return None
 
 
 @dataclass
@@ -108,6 +129,42 @@ def normalize_message(message: str) -> tuple[str, dict[str, str]]:
     return "".join(tokens), corrections
 
 
+def intent_confidence(intent_result: dict | None) -> float:
+    """intent confidence → float ∈ [0,1] — normalize owner เดียวของ intent
+    fields; bool/non-finite/out-of-range/malformed/หาย → 0.0 (consumer
+    ห้าม float() ซ้ำ)"""
+    raw = (intent_result or {}).get("confidence")
+    if isinstance(raw, bool):
+        return 0.0
+    try:
+        conf = float(raw) if raw is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+    return conf if math.isfinite(conf) and 0.0 <= conf <= 1.0 else 0.0
+
+
+def intent_product_scope(intent_result: dict | None
+                          ) -> tuple[str | None, str | None]:
+    """intent → (product_type, charger_subtype) proposals — type name จริง
+    เท่านั้น; ค่า subtype domain (เช่น "cable") → subtype (model พูด subtype
+    แทน type); charger_subtype field นับเฉพาะเมื่อ product_type=="charger"
+    """
+    if not intent_result:
+        return None, None
+    from . import product_store as _ps
+    pt = intent_result.get("product_type")
+    st = intent_result.get("charger_subtype")
+    if not isinstance(pt, str):
+        pt = None
+    if not isinstance(st, str):
+        st = None
+    if pt in _ps._CHARGER_SUBTYPES:
+        return None, pt
+    if pt == "charger" and st in _ps._CHARGER_SUBTYPES:
+        return pt, st
+    return (pt or None), None
+
+
 def resolve_route(message: str, intent_result: dict | None = None) -> RouteContext:
     """Resolve routing ครั้งเดียว: normalize → types/subtype/codes/needs.
 
@@ -121,10 +178,8 @@ def resolve_route(message: str, intent_result: dict | None = None) -> RouteConte
 
     ptypes = _ps._detect_product_types(msg)
     subtype = _ps._detect_charger_subtype(msg)
-    if not subtype and intent_result and intent_result.get("product_type") == "charger":
-        v = intent_result.get("charger_subtype")
-        if v in ("adapter", "cable", "set", "car_charger", "wireless", "desktop", "socket"):
-            subtype = v
+    if not subtype:
+        subtype = intent_product_scope(intent_result)[1]
 
     return RouteContext(
         message=msg,
@@ -328,7 +383,7 @@ def build_retrieval_profile(
     low = msg.lower()
     anchors = list(anchor_cards or [])
     intent_result = intent_result or {}
-    confidence = float(intent_result.get("confidence") or 0.0)
+    confidence = intent_confidence(intent_result)
     sources: list[tuple[str, str]] = []
 
     # ── current message facts ──
@@ -369,9 +424,10 @@ def build_retrieval_profile(
             itypes = frozenset({iv})
         elif isinstance(iv, (list, tuple, set)):
             itypes = frozenset(str(x) for x in iv if x)
-        sv = intent_result.get("charger_subtype")
-        if sv in ("adapter", "cable", "set", "car_charger", "wireless", "desktop", "socket"):
-            isubtype = sv
+        # ค่า subtype domain (เช่น "cable") ไม่ใช่ type proposal — normalize
+        # ไปที่ subtype แทน ไม่ให้ปนเข้า product_types
+        itypes = frozenset(t for t in itypes if t not in _ps._CHARGER_SUBTYPES)
+        isubtype = intent_product_scope(intent_result)[1]
         dv = intent_result.get("target_device")
         if dv:
             idevice = str(dv)
@@ -414,6 +470,10 @@ def build_retrieval_profile(
         sources.append(("subtype", subtype_src or "message"))
         if "charger" not in product_types:
             product_types = product_types | {"charger"}  # subtype ⇒ charger family
+        # subtype ⇒ unit-domain types (เช่น "สาย"→cable, wireless→wireless_charger)
+        #   map เดียวกับ retrieval_executor — listing type ≠ unit type
+        from .units import _SUBTYPE_TO_TYPES
+        product_types = product_types | _SUBTYPE_TO_TYPES.get(subtype, set())
 
     if cur_codes:
         model_codes = cur_codes
@@ -977,6 +1037,19 @@ def _mention_subtype(low: str, pos: int, t: str) -> str | None:
     return best_sub
 
 
+def _kw_span_len(low: str, pos: int, t: str) -> int:
+    """ความยาว kw ของ type t ที่ match ตรง pos (ยาวสุดชนะ — 'สายชาร์จ' > 'สาย')"""
+    from . import product_store as _ps
+    best = 0
+    for name, kws, _rx in _ps.PRODUCT_TYPES:
+        if name != t:
+            continue
+        for kw in kws:
+            if low.startswith(kw, pos) and len(kw) > best:
+                best = len(kw)
+    return best
+
+
 def _strap_compound_mention(low: str, pos: int) -> bool:
     """kw mention ที่เป็น tail ของ strap compound ('สายนาฬิกา' ทำ 'นาฬิกา' ไม่ใช่
     smartwatch mention) — compound ที่เป็น kw เอง (สายคล้อง) ไม่โดน"""
@@ -985,7 +1058,9 @@ def _strap_compound_mention(low: str, pos: int) -> bool:
 
 def build_retrieval_relations(
         profile: RetrievalProfile,
-        slots: tuple[RetrievalSlot, ...]
+        slots: tuple[RetrievalSlot, ...],
+        *,
+        allow_reversed: bool = False
 ) -> tuple[RetrievalRelation, ...]:
     """หา product-to-product relations — deterministic เท่านั้น.
 
@@ -994,6 +1069,8 @@ def build_retrieval_relations(
     "หัวชาร์จ AD1404T ใช้กับสายชาร์จไหน" = source AD1404T, target cable request
     connector ลงท้าย "คู่กัน" = สองฝั่งนำหน้า connector
     device/target-device mention (ip14, mi watch 8) ไม่ใช่ target — type kw เท่านั้น
+    reversed order ("สายที่ใช้กับ AD1404T") เปิดเฉพาะ `allow_reversed` —
+    typed eligibility จาก TurnPlan productish need (caller derive)
     ไม่เรียก LLM · ไม่สรุป compatibility positive
     """
     msg = profile.message or ""
@@ -1017,9 +1094,15 @@ def build_retrieval_relations(
     for cm in _REL_CONN_RE.finditer(low):
         conn = cm.group(0)
         symmetric = conn.endswith("คู่กัน")
+        # reversed order: "สายที่ใช้กับ AD1404T" — target (สิ่งที่อยากได้) อยู่
+        # ก่อน "ที่" + connector, source ตามหลัง — semantics เดียวกับ forward
+        reversed_order = (
+            not symmetric
+            and low[max(0, cm.start() - len("ที่")):cm.start()] == "ที่")
         shorthand_sub: str | None = None
         src_sub: str | None = None
         tgt_sub: str | None = None
+        tgt_head_start = -1
         if symmetric:
             before = [(p, t) for p, t in all_mentions if p < cm.start()]
             # shorthand-only source ไม่พอ — ต้องมี kw/code evidence จริง
@@ -1035,6 +1118,46 @@ def build_retrieval_relations(
                        else _mention_subtype(low, tgt_pos, tgt_type))
             q_seg = low[cm.end():cm.end() + 30]
             tail = low[cm.end():]
+        elif reversed_order:
+            if not allow_reversed:
+                continue  # typed eligibility: no productish need → fail closed
+            # target = head noun ก่อน "ที่" — kw mention สุดท้าย หรือ bare
+            # 'สาย'/'หัว' (compound blacklist เหมือน shorthand อื่น)
+            pre = low[:cm.start() - len("ที่")]
+            kw_head = [(p, t) for p, t in kw_mentions if p < cm.start()]
+            if kw_head:
+                tgt_pos, tgt_type = kw_head[-1]
+                tgt_head_start = tgt_pos
+                tgt_sub = _mention_subtype(low, tgt_pos, tgt_type)
+            else:
+                tm = re.search(r"(สาย|หัว)\s*$", pre)
+                if not tm:
+                    continue
+                tgt_pos = tm.start(1)
+                tgt_head_start = tgt_pos
+                tgt_type = "charger"
+                tgt_sub = "cable" if tm.group(1) == "สาย" else "adapter"
+                shorthand_sub = tgt_sub  # shorthand target → conf 0.7
+            # source = code ก่อน (exact identity ชนะ) ไม่ก็ kw mention หลัง connector
+            code_after = [(p, c) for p, c in code_mentions
+                          if cm.end() <= p <= cm.end() + 30]
+            kw_after = [(p, t) for p, t in kw_mentions
+                        if cm.end() <= p <= cm.end() + 30]
+            src_type = None
+            if code_after:
+                src_pos, src_code = code_after[0]
+                src_end = src_pos + len(src_code)
+                if kw_after and kw_after[0][0] < src_pos:
+                    src_type = kw_after[0][1]
+                    src_sub = _mention_subtype(low, kw_after[0][0],
+                                               src_type)
+            elif kw_after:
+                src_pos, src_type = kw_after[0]
+                src_end = src_pos + _kw_span_len(low, src_pos, src_type)
+                src_sub = _mention_subtype(low, src_pos, src_type)
+            else:
+                continue
+            tail = low[src_end:]
         else:
             cand = [(p, t) for p, t in all_mentions if p < cm.start()]
             code_before = [(p, c) for p, c in code_mentions if p < cm.start()]
@@ -1067,7 +1190,11 @@ def build_retrieval_relations(
                                                  cand[-1][1]))
             q_seg = low[tgt_pos:tgt_pos + 30]
             tail = low[tgt_pos:]
-        if not any(q in q_seg for q in _REL_QUESTION):
+        # request-marker gate — forward เท่านั้น: question kw หลัง target;
+        #   reversed order ใช้ intent eligibility (ข้างบน) + structural
+        #   parse เป็น boundary ("สายที่ใช้กับ X เสีย" ถูก claim intent กัน)
+        if (not reversed_order
+                and not any(q in q_seg for q in _REL_QUESTION)):
             continue
         src_slot = _slot_id_for(slots, src_type) if src_type else (
             slots[0].slot_id if slots else "slot-open")
@@ -1076,7 +1203,9 @@ def build_retrieval_relations(
         if key in seen:
             continue
         seen.add(key)
-        start = src_pos if not symmetric else min(src_pos, tgt_pos)
+        start = (tgt_head_start if reversed_order
+                 else src_pos if not symmetric
+                 else min(src_pos, tgt_pos))
         cons = _relation_constraints(tail)
         if tgt_sub:
             cons += (("target_subtype", tgt_sub),)
@@ -1084,7 +1213,10 @@ def build_retrieval_relations(
             cons += (("source_subtype", src_sub),)
         # query_hint = text ฝั่ง target (target kw + constraints tail) — executor
         # ใช้เป็น query แทน message เต็มที่มี source terms ปน
-        cons += (("query_hint", low[tgt_pos:tgt_pos + 200].strip()),)
+        hint = (f"{low[tgt_pos:cm.start() - len('ที่')].strip()} "
+                f"{tail.strip()}"
+                if reversed_order else low[tgt_pos:tgt_pos + 200].strip())
+        cons += (("query_hint", hint),)
         rels.append(RetrievalRelation(
             source_slot_id=src_slot,
             target_slot_id=tgt_slot,

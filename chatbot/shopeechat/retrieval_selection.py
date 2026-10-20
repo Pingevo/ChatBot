@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from .candidate_pool import CandidatePool, PooledCandidate
 from .retrieval_planner import RetrievalRequest
 from .retrieval_policy import strip_private_evidence
+from .turn_decision import PRODUCTISH_NEED_KINDS as _PRODISH_NEED_KINDS
 
 # keys ที่เป็น routing metadata — ไม่ใช่ product evidence ไม่ให้ score
 _META_HINT_KEYS = frozenset(
@@ -35,7 +36,9 @@ def _code_match(card: dict, codes) -> bool:
 @dataclass(frozen=True)
 class SelectedCandidate:
     """candidate ที่ผ่าน selection — card strip private evidence แล้ว"""
-    role: str                         # "subject" | "alternative" | "slot" | "relation_target"
+    role: str                         # "subject" | "alternative" | "slot" |
+                                      #   "relation_target" | "historical_evidence"
+                                      #   | channel name ("kb" ฯลฯ)
     request_id: str
     slot_id: str
     relation_id: str | None
@@ -96,6 +99,25 @@ def _request_score(c: PooledCandidate, req: RetrievalRequest) -> float:
     return c.score
 
 
+# role precedence สำหรับ identity dedupe — identity เดียวกันอาจถูกเลือก
+# ใต้หลาย request; เก็บ role ที่มี semantics มากสุด
+# (subject=อ้างถึงตรง > relation_target=สิ่งที่ขอผ่าน relation >
+#  historical_evidence=หลักฐานอดีต > alternative=ตัวทดแทน > slot=generic)
+_ROLE_RANK = {"subject": 5, "relation_target": 4, "historical_evidence": 3,
+              "alternative": 2, "slot": 1}
+# card state → role override (หลัง subject/channel) — snapshot-stale
+# evidence (persisted mention ที่ไม่มี live record) เป็น role แยก ไม่ใช่
+# recommendation; discontinued live record ยังเป็น subject ได้ตามปกติ
+def _is_historical(card: dict) -> bool:
+    return bool(card.get("_snapshot_only"))
+
+
+# hidden mentions (UNLIST-only/customer_hidden) ไม่มีวันเข้า selected —
+# ปรากฏใน rejected summary ภายใต้ label นี้เท่านั้น (role ที่แยกชัด)
+_HIDDEN_MENTION_REASON = "customer_hidden"
+_HIDDEN_MENTION_LABEL = "hidden_mention"
+
+
 def _select_one(c: PooledCandidate, req: RetrievalRequest,
                 text_cache: dict) -> SelectedCandidate:
     """PooledCandidate → SelectedCandidate (constraint score + strip)"""
@@ -111,6 +133,12 @@ def _select_one(c: PooledCandidate, req: RetrievalRequest,
     why += [f"hint:{k}" for k in hits]
     if _code_match(card, req.model_codes):
         role = "subject"
+    elif req.source == "subjects":
+        role = "subject"  # resolved persisted subjects
+    elif _is_historical(card):
+        role = "historical_evidence"
+    elif req.source in ("relation_target", "compat"):
+        role = "relation_target"
     elif req.model_codes and req.source == "slot":
         role = "alternative"
     else:
@@ -123,11 +151,46 @@ def _select_one(c: PooledCandidate, req: RetrievalRequest,
         card=strip_private_evidence(card))
 
 
+def _need_scope(need) -> set:
+    """scope ของ need — types ∪ subtypes ∪ subject_refs (union semantics
+    เหมือน _bucket eff_types — ไม่ expand subtype→unit type ตรงนี้)"""
+    return (set(getattr(need, "product_types", ()) or ())
+            | set(getattr(need, "subtypes", ()) or ())
+            | set(getattr(need, "subject_refs", ()) or ()))
+
+
+def _req_scope(req: RetrievalRequest) -> set:
+    return (set(req.product_types or ()) | set(req.subtypes or ())
+            | set(req.model_codes or ()))
+
+
+def _needs_for_request(req: RetrievalRequest, needs: tuple) -> tuple:
+    """request → productish needs ที่มันคลุม — a request อาจ serve หลาย need
+    (coverage ไม่ใช่ exclusive ownership)"""
+    prodish = [n for n in needs if n.kind in _PRODISH_NEED_KINDS]
+    if req.source in ("relation_target", "compat"):
+        out = [n for n in prodish if n.kind == "compat"]
+        if out or req.source == "compat":
+            return tuple(out)
+    if req.source == "subjects":
+        # subjects channel = persisted subject materialization — คลุมเฉพาะ
+        # need ที่อ้าง subject_refs (identity ตรง) หรือ need ไร้ scope
+        out = [n for n in prodish
+               if getattr(n, "subject_refs", ()) or not _need_scope(n)]
+    elif req.source in ("slot", "relation_target"):
+        out = [n for n in prodish
+               if not _need_scope(n) or _need_scope(n) & _req_scope(req)]
+    else:
+        out = list(needs)  # kb/อื่นๆ = context channel ทุก need
+    return tuple(out)
+
+
 def select_for_llm_context(
     pool: CandidatePool,
     requests: tuple[RetrievalRequest, ...],
     profile=None,
     *,
+    needs: tuple = (),
     per_request_limit: int = 3,
     unavailable_limit: int = 5,
 ) -> SelectionResult:
@@ -136,12 +199,17 @@ def select_for_llm_context(
     per-request quota: แต่ละ request ได้ quota ของตัวเอง — relation target
     ไม่ถูก source product กิน quota · constraint hints เพิ่ม score ไม่ตัดทิ้ง
     · unavailable เก็บเป็น evidence summary · rejected เป็น summary counts
+
+    Phase 6: needs (TurnNeed tuple) → request→need attribution (identity
+    dedupe role precedence + need.ranking ordering)
     """
     req_by_id = {r.request_id: r for r in requests}
     text_cache: dict[str, str] = {}
     selected: list[SelectedCandidate] = []
     by_req: list[tuple[str, tuple[SelectedCandidate, ...]]] = []
     trace: list[str] = []
+    req_needs = {r.request_id: _needs_for_request(r, needs)
+                 for r in requests} if needs else {}
     elig_by_req: dict[str, list[PooledCandidate]] = {}
     for c in pool.eligible:
         for rid in c.request_ids:
@@ -183,6 +251,20 @@ def select_for_llm_context(
                     picked[evict] = alt
                     protected.add(evict)
                 present.add(sub)
+        # need.ranking → sort picks ตาม canonical spec field (owner เดิมคือ
+        #   app.py superlative kw tables → detect_ranking + device_compat
+        #   extractors)
+        rank = next((getattr(n, "ranking", None)
+                     for n in req_needs.get(req.request_id, ())
+                     if getattr(n, "ranking", None)), None)
+        if rank:
+            from . import device_compat as _dc
+            keyfn = _dc.spec_rank_key(rank[0])
+            if keyfn:
+                picked = sorted(
+                    picked,
+                    key=lambda s: (keyfn(s.card), s.score),
+                    reverse=(rank[1] == "max"))
         picked = tuple(picked)
         selected.extend(picked)
         by_req.append((req.request_id, picked))
@@ -211,7 +293,9 @@ def select_for_llm_context(
                 continue
             promoted.add(c.identity)
             subjects.append(SelectedCandidate(
-                role="subject", request_id=req.request_id, slot_id=req.slot_id,
+                role=("historical_evidence" if _is_historical(c.card)
+                      else "subject"),
+                request_id=req.request_id, slot_id=req.slot_id,
                 relation_id=req.relation_id, identity=c.identity,
                 score=round(_request_score(c, req), 3), constraint_hits=(),
                 reason=f"unavailable_subject:{c.reason}",
@@ -233,15 +317,36 @@ def select_for_llm_context(
                 "request_id": rid, "name": u.get("name"),
                 "item_id": c.item_id, "reason": c.reason,
                 "unavailable": True})
-    # hidden (UNLIST-only) → rejected 'customer_hidden' เท่านั้น — identity
+    # hidden (UNLIST-only) → rejected 'hidden_mention' เท่านั้น — identity
     # ห้ามรั่วเข้า customer context; เหลือแค่ aggregate count ใน summary
     rej_counts: dict[tuple[str, str], int] = {}
     for c in pool.rejected:
         for rid in c.request_ids:
             key = (rid, c.reason.split(":")[0])
             rej_counts[key] = rej_counts.get(key, 0) + 1
-    rej_out = [{"request_id": rid, "reason": why, "count": n}
+    rej_out = [{"request_id": rid,
+                "reason": (_HIDDEN_MENTION_LABEL
+                           if why == _HIDDEN_MENTION_REASON else why),
+                "count": n}
                for (rid, why), n in sorted(rej_counts.items())]
+
+    # identity dedupe — identity เดียวกันอาจถูกเลือกใต้หลาย request;
+    # role precedence สูงสุดชนะ → zero duplicate selected identities
+    best: dict[str, SelectedCandidate] = {}
+    order: list[str] = []
+    for s in selected:
+        cur = best.get(s.identity)
+        if cur is None or _ROLE_RANK.get(s.role, 0) > _ROLE_RANK.get(
+                cur.role, 0):
+            best[s.identity] = s
+        if s.identity not in order:
+            order.append(s.identity)
+    if len(order) != len(selected):
+        # selected = final output (deduped); by_request = per-request
+        #   attribution เต็ม — candidate เดียวกันเล่นได้หลาย request
+        selected = [best[i] for i in order]
+        trace.append(f"dedupe: {len(selected)} unique identities")
+
     return SelectionResult(
         selected=tuple(selected), by_request=tuple(by_req),
         unavailable_evidence=tuple(unav_out),

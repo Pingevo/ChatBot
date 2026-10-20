@@ -61,6 +61,50 @@ def _extract_max_wattage(p: dict) -> float:
     return max(float(m) for m in matches)
 
 
+def _extract_max_mah(p: dict) -> float:
+    """extract ค่า mAh สูงสุดจาก spec field ก่อน ถ้าไม่มีค่อยดึงจากชื่อ."""
+    spec_mah = p.get("capacity_mah") or p.get("specs", {}).get("capacity_mah")
+    if spec_mah and isinstance(spec_mah, (int, float)) and spec_mah > 0:
+        return float(spec_mah)
+    variants = p.get("variants") or []
+    max_v = 0.0
+    for v in variants:
+        vm = v.get("capacity_mah")
+        if vm and isinstance(vm, (int, float)) and vm > max_v:
+            max_v = float(vm)
+    if max_v > 0:
+        return max_v
+    name = p.get("name") or p.get("item_name") or ""
+    if not name:
+        return 0.0
+    matches = re.findall(r"(\d+(?:\.\d+)?)\s*mah\b", name.lower())
+    if not matches:
+        return 0.0
+    return max(float(m) for m in matches)
+
+
+def _extract_weight_kg(p: dict) -> float:
+    """extract น้ำหนัก (kg) จาก spec field — ไม่มีข้อมูล → 999.0 (ตกท้ายเสมอ)"""
+    w = p.get("package_weight") or p.get("specs", {}).get("package_weight")
+    if w and isinstance(w, (int, float)) and w > 0:
+        return float(w)
+    return 999.0
+
+
+# canonical spec field (route_context.detect_ranking / TurnNeed.ranking)
+#   → rank extractor — sort-key dispatch owner เดียว
+_SPEC_RANK_EXTRACTORS = {
+    "output_power_w": _extract_max_wattage,
+    "capacity_mah": _extract_max_mah,
+    "package_weight": _extract_weight_kg,
+}
+
+
+def spec_rank_key(field: str):
+    """canonical spec field → extractor fn (None ถ้า field แปลก)"""
+    return _SPEC_RANK_EXTRACTORS.get(field)
+
+
 def _wattage_asc_key(p: dict, min_watt: float | None = None) -> tuple:
     """sort key สำหรับเรียง wattage ascending แบบ "adequate first".
 

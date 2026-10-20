@@ -110,6 +110,12 @@ TurnSubjectScope = Literal[
 _TURN_SUBJECT_SCOPES = frozenset(
     {"none", "explicit", "current_single", "current_set"})
 
+# kinds ที่ selector ต้องเลือก evidence ให้ — แบก product scope/ranking
+# productish kind domain (typed TurnNeedKind contract owner — consumer:
+# selector attribution, reversed-relation eligibility ฯลฯ)
+PRODUCTISH_NEED_KINDS = frozenset({"product", "compare", "compat"})
+_SCOPE_NEED_KINDS = frozenset({"product", "compare"})
+
 
 @dataclass(frozen=True)
 class TurnNeed:
@@ -117,7 +123,13 @@ class TurnNeed:
 
     subject_scope/subject_count = structured deictic reference จาก
     interpretation boundary (intent Pass-1) — kind=="product" เท่านั้น;
-    resolver validate กับ persisted ConversationSubjectSet"""
+    resolver validate กับ persisted ConversationSubjectSet
+    product_types/subtypes = intent product scope (≥0.7) — เฉพาะ kinds
+    ใน _SCOPE_NEED_KINDS (product/compare); compat/อื่น = ว่าง (relation
+    scope เป็นของ RetrievalRequest downstream) — selector ใช้ attribute
+    request → need
+    ranking = (canonical spec field, "max"|"min") — owner:
+    route_context.detect_ranking / compat-check intent"""
     kind: TurnNeedKind
     operation: TurnNeedOp
     subject_refs: tuple[str, ...] = ()
@@ -125,6 +137,9 @@ class TurnNeed:
     provenance: tuple[str, ...] = ()
     subject_scope: TurnSubjectScope = "none"
     subject_count: int | None = None
+    product_types: frozenset[str] = frozenset()
+    subtypes: frozenset[str] = frozenset()
+    ranking: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -241,7 +256,7 @@ def decide_turn(
     """สร้าง TurnPlan ของ turn — pure, deterministic (ยกเว้น intent_result ที่ caller ส่งมา)."""
     intent: dict = intent_result if isinstance(intent_result, dict) else {}
     intent_name = intent.get("intent")
-    intent_conf = float(intent.get("confidence") or 0.0)
+    intent_conf = _rc.intent_confidence(intent)
     # structured subject deictic signal — validate typed contract, no language
     # interpretation here (resolver validates against persisted set)
     _subj_scope = intent.get("subject_scope")
@@ -322,6 +337,11 @@ def decide_turn(
         ("media_placeholder",) if "media_placeholder" in flags else ()
     )
     needs: list[TurnNeed] = []
+    # productish need scope (Phase 6) — populate หลัง _route/_is_sup_kw
+    # resolve แล้ว; เฉพาะ _SCOPE_NEED_KINDS แบก scope (intent evidence
+    # เท่านั้น); compat/kinds อื่น scope ว่าง + ranking ตาม kind
+    _need_ranking: tuple[str, str] | None = None
+    _need_ranking_compat: tuple[str, str] | None = None
 
     def _add_need(kind: TurnNeedKind, op: TurnNeedOp,
                   refs: tuple[str, ...] = (), conf: float = 1.0,
@@ -329,6 +349,16 @@ def decide_turn(
         full_prov = tuple(dict.fromkeys(prov + media_prov))
         _scope = _subj_scope if kind == "product" else "none"
         _count = _subj_count if kind == "product" else None
+        if kind in _SCOPE_NEED_KINDS:
+            _ptypes, _subs = _intent_types, _intent_subtypes
+        else:
+            _ptypes, _subs = frozenset(), frozenset()
+        if kind == "compat":
+            _rank = _need_ranking_compat or _need_ranking
+        elif kind in _SCOPE_NEED_KINDS:
+            _rank = _need_ranking
+        else:
+            _rank = None
         for idx, existing in enumerate(needs):
             if existing.kind == kind and existing.operation == op:
                 merged_refs = tuple(dict.fromkeys(existing.subject_refs + refs))
@@ -341,6 +371,9 @@ def decide_turn(
                     provenance=merged_prov,
                     subject_scope=_scope,
                     subject_count=_count,
+                    product_types=_ptypes | existing.product_types,
+                    subtypes=_subs | existing.subtypes,
+                    ranking=_rank or existing.ranking,
                 )
                 return
         needs.append(TurnNeed(
@@ -351,6 +384,9 @@ def decide_turn(
             provenance=full_prov,
             subject_scope=_scope,
             subject_count=_count,
+            product_types=_ptypes,
+            subtypes=_subs,
+            ranking=_rank,
         ))
 
     # 4. explicit human request (predicate เจ้าของ: handoffs)
@@ -422,6 +458,21 @@ def decide_turn(
     ))
     _subject_refs = tuple(dict.fromkeys(list(item_ids) + list(_explicit_codes)))
 
+    # product scope ต่อ need = structured evidence ของ producer เท่านั้น:
+    # product/compare รับ intent product scope (conf≥0.7 — type name จริง
+    # / subtype domain normalize); compat + kinds อื่น = ว่าง — relation
+    # scope เป็นของ RetrievalRequest/relations downstream (decide_turn ไม่
+    # re-parse prose); ห้าม stamp turn-wide route scope
+    _route_types = frozenset(_route.product_types)  # ranking basis เท่านั้น
+    _intent_types: frozenset[str] = frozenset()
+    _intent_subtypes: frozenset[str] = frozenset()
+    if intent_conf >= 0.7:
+        _ipt, _ist = _rc.intent_product_scope(intent)
+        if _ipt:
+            _intent_types = frozenset({_ipt})
+        if _ist:
+            _intent_subtypes = frozenset({_ist})
+
     # 6.5 cert standards (มอก./CE/...)
     _is_cert = bool(_warranty.detect_cert_question(norm))
     if _is_cert:
@@ -456,6 +507,14 @@ def decide_turn(
     _is_select_ask = any(kw in low for kw in _SELECT_ASK_KWS)
     _is_cmp_kw = any(kw in low for kw in _rc._COMPARISON_FOLLOWUP_KW)
     _is_sup_kw = any(kw in low for kw in _rc._SUPERLATIVE_KW)
+
+    # ranking (Phase 6 — owner เดิมคือ app.py superlative kw tables):
+    #   superlative → canonical spec field; compatibility_check + charger/
+    #   powerbank intent → wattage desc (เดิม app.py _is_charger_compat sort)
+    if _is_sup_kw:
+        _need_ranking = _rc.detect_ranking(low)
+    if (_route_types | _intent_types) & {"charger", "powerbank"}:
+        _need_ranking_compat = ("output_power_w", "max")
 
     _unanchored_followup_ask = False
 

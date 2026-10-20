@@ -87,7 +87,7 @@ pymongo.MongoClient.__init__ = lambda self, *a, **k: _import_leak(
 try:
     from shopeechat import app, conversation_products, embedding, guards, handoffs, llm  # noqa: E402
     from shopeechat import knowledge_base, order_store, persona, product_store  # noqa: E402
-    from shopeechat import route_context, runtime_config, units, warranty_flow, web_search  # noqa: E402
+    from shopeechat import route_context, runtime_config, turn_decision, units, warranty_flow, web_search  # noqa: E402
     from shopeechat import intent_classifier  # noqa: E402
 finally:
     (dotenv.load_dotenv, socket.socket.connect, urllib.request.urlopen,
@@ -628,6 +628,19 @@ def _profile_for(fx):
     )
 
 
+def _allow_reversed(fx):
+    """reversed-relation eligibility = typed TurnPlan productish need —
+    derivation เดียวกับ retrieval_runtime callsite (fail closed เมื่อ plan
+    raise หรือไม่มี productish need)"""
+    try:
+        needs = turn_decision.decide_turn(
+            fx["turns"][-1]["text"], history=[],
+            intent_result=fx.get("intent_result")).needs
+    except Exception:
+        return False
+    return any(n.kind in ("product", "compare", "compat") for n in needs)
+
+
 @pytest.mark.parametrize("fx", L1_FX, ids=[f["id"] for f in L1_FX])
 def test_l1_profile_and_parse(fx):
     pe = fx.get("profile_expect") or {}
@@ -672,7 +685,8 @@ def test_l1_profile_and_parse(fx):
                 fails.append(f"slot subtypes {got} missing "
                              f"{set(se['subtypes_union']) - got}")
         if se.get("relation"):
-            rels = route_context.build_retrieval_relations(prof, slots)
+            rels = route_context.build_retrieval_relations(
+                prof, slots, allow_reversed=_allow_reversed(fx))
             exp = se["relation"]
             hit = False
             for r in rels:
@@ -682,8 +696,8 @@ def test_l1_profile_and_parse(fx):
                 tgt_types = set(tgt.product_types) if tgt else set()
                 if (set(exp["source_types"]) & src_types
                         and set(exp["target_types"]) & tgt_types
-                        and set(exp.get("constraints") or [])
-                        <= set(r.constraints)):
+                        and {tuple(c) for c in (exp.get("constraints") or [])}
+                        <= {tuple(c) for c in r.constraints}):
                     hit = True
             if not hit:
                 fails.append(f"relation {exp} not found (rels={list(rels)})")
@@ -778,7 +792,8 @@ def _l2_run(fx, drop_group_pred=None):
     msg = fx["turns"][-1]["text"]
     prof = _profile_for(fx)
     slots = route_context.build_retrieval_slots(prof)
-    rels = route_context.build_retrieval_relations(prof, slots)
+    rels = route_context.build_retrieval_relations(
+        prof, slots, allow_reversed=_allow_reversed(fx))
     reqs = retrieval_planner.build_grouped_retrieval_requests(prof, slots, rels)
     docs = [d for d in (fx.get("catalog") or [])
             if not (drop_group_pred and drop_group_pred(_card_group(d)))]

@@ -14,6 +14,7 @@ from .retrieval_planner import (
 from .retrieval_executor import execute_grouped_retrieval_requests
 from .candidate_pool import _identity_key, build_candidate_pool
 from .retrieval_selection import select_for_llm_context
+from .turn_decision import PRODUCTISH_NEED_KINDS
 
 _ROLE_NOTE = {
     "subject": "สินค้าที่ลูกค้าถามถึงหรืออ้างอิงโดยตรง",
@@ -46,6 +47,7 @@ def run_grouped_selection(
     compat_cards=(),
     kb_fetcher=None,
     supporting=(),
+    needs=(),
     snap=_gen.SNAP_UNSET,
 ) -> dict | None:
     """profile → pipeline → selection (ไม่ merge base) — รันครั้งเดียวต่อ request.
@@ -62,7 +64,10 @@ def run_grouped_selection(
     """
     try:
         slots = build_retrieval_slots(profile)
-        relations = build_retrieval_relations(profile, slots)
+        relations = build_retrieval_relations(
+            profile, slots,
+            allow_reversed=any(n.kind in PRODUCTISH_NEED_KINDS
+                               for n in needs))
         requests = build_grouped_retrieval_requests(profile, slots, relations)
         # evidence channels — synthetic request rows เพื่อให้ selector iterate
         # ได้ (quota แยกต่อ channel); fetch = closure บน pre-resolved data
@@ -85,6 +90,7 @@ def run_grouped_selection(
                                     supporting_evidence=tuple(supporting))
         sel = select_for_llm_context(
             pool, requests + tuple(r for r, _ in channels), profile,
+            needs=needs,
             per_request_limit=per_request_limit,
             unavailable_limit=unavailable_limit)
     except Exception:

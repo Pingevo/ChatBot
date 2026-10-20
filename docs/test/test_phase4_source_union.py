@@ -133,6 +133,9 @@ def _union(reqs=(_req(),), units_cards=(), legacy_cards=(),
         chans.append((channel_request(name), fn))
     results = execute_grouped_retrieval_requests(
         tuple(reqs), message="m", shop=SHOP,
+        # snap=None → standalone/hermetic: ไม่ resolve generation pointer
+        #   (เดิมพึ่ง module-cache จาก test ก่อนหน้า — order-dependent)
+        snap=None,
         fetcher=lambda m, **k: _ures(units_cards),
         legacy_fetcher=lambda m, **k: list(legacy_cards),
         channels=chans)
@@ -683,9 +686,13 @@ def test_global_identity_single_row_across_two_requests():
     assert len(rows) == 1, (
         f"duplicate candidate rows: {[c.identity for c in pool.eligible]}")
     assert set(rows[0].request_ids) == {"r1", "r2"}
-    sel_rids = {s.request_id for s in sel.selected
-                if s.identity == "v:i1#m1"}
+    # Phase 6: selected = deduped final output (identity 1 row);
+    #   per-request plays ดูที่ by_request attribution
+    sel_rids = {s.request_id for _rid, picks in sel.by_request
+                for s in picks if s.identity == "v:i1#m1"}
     assert sel_rids == {"r1", "r2"}, "candidate ต้องเล่นได้ทั้ง 2 requests"
+    sel_rows = [s for s in sel.selected if s.identity == "v:i1#m1"]
+    assert len(sel_rows) == 1, "selected ต้อง dedupe identity เหลือ 1 row"
 
 
 def test_request_specific_slot_and_relation_preserved():
@@ -704,11 +711,13 @@ def test_request_specific_slot_and_relation_preserved():
         model_codes=(), target_device=None,
         availability_mode="", compat_mode="")
     _, pool, sel = _union(reqs=(r1, r2), units_cards=[shared])
-    s2 = next(s for s in sel.selected
+    # Phase 6: selected dedupe identity — per-request slot/relation
+    #   คงอยู่ใน by_request attribution
+    s2 = next(s for _rid, picks in sel.by_request for s in picks
               if s.request_id == "r2" and s.identity == "v:i1#m1")
     assert s2.slot_id == "s2"
     assert s2.relation_id == "rel-9"
-    s1 = next(s for s in sel.selected
+    s1 = next(s for _rid, picks in sel.by_request for s in picks
               if s.request_id == "r1" and s.identity == "v:i1#m1")
     assert s1.slot_id == "s1"
 

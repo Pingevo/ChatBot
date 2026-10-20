@@ -113,7 +113,8 @@ def test_hidden_only_grouped_selection_leaks_no_identity():
                    for u in sel.unavailable_evidence)
     assert not any("item_id" in r or "name" in r
                    for r in sel.rejected_summary)
-    assert any(r["reason"] == "customer_hidden" and r["count"] == 1
+    # Phase 6: pool reason customer_hidden → summary label hidden_mention
+    assert any(r["reason"] == "hidden_mention" and r["count"] == 1
                for r in sel.rejected_summary)
 
 
