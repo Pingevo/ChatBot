@@ -5791,3 +5791,319 @@ config-failclosed 4/4 · boundary 20/20 · recovery-freshness 60/60 · error-pol
 **deferred**: Phase 7 = need-scoped AnswerContext (unanswered_needs/card-cap/web-gate/token measure — ยังไม่ implement); Phase 8 = typed answer composition
 
 **safety**: ไม่มี push/PR/deploy/.env/Mongo/provider/botworker/8010; staging empty หลัง commit
+
+## Phase 7 — Bounded AnswerContext + Pre-Answer Web Gate (PART 0-2 · รออนุญาต implement)
+
+**baseline**: branch `feature-phase3-aswer-quality` @ `ef70e83` (Phase 6 closeout `ee6cf63`+`ef70e83` verified) · clean tree · staging empty · focused baseline GREEN (offline): phase6+selection_runtime+shadow = 47p · policy/guards/qa_ctx batch = 124p · flags `USE_GROUPED_RETRIEVAL_SELECTION`+`USE_GROUPED_RETRIEVAL_SHADOW` = OFF
+
+**สั่งทำ**: one `AnswerContext` compiler — typed Phase 6 output → sole product-answer LLM input ใต้ grouped-selection flag + pre-answer web gate · phase นี้ own context construction + web admission เท่านั้น (final answer composition = Phase 8) · ห้าม enable flags/mixed product+policy auto-answer/botworker/rollout · ห้าม stage/commit
+
+**PART 0 — owner map (verified from source)**
+- `llm.answer` callsites: `app.py:2482` (KB path — `products=merged_products`, msg=`req.message`, extra=`_vision_context+_hybrid_extra_ctx+_kb_device_extra`) · `app.py:4655` (main — `products=products`, msg=`desc_message`, extra=`_combined_extra`) · `web_search.py:972` (LLM2 ใน `reanswer` — `products=_final_products` (merged ใหม่+เก่า), extra=search_info+kb_context) · `chat_v2.py:1390` = engine แยก (USE_LEGACY_CHAT≠1) — out of scope
+- fixed limits: `_LLM_CONTEXT_LIMIT=30` (app:378, override `req.llm_context_limit`) · `per_request_limit=3`/`unavailable_limit=5` (retrieval_runtime) · `_merge_limit=max(30*4,80)` compat (4291) · slices: 2544/3879/4645/2469 · `exact[:3]` (4204) · `unlist[:2]` (4276) · alt `limit=5` (4061/4268) · `raw_description[:3000]` (llm:1077) · history model-text `[:200]` (llm:1456)
+- post-selection assembly (main path 3856→4646): dedupe → superlative sort+cap → other-model exclude (bot-prose parse) → REF-NAME/shop/charger-subtype fallbacks (+`_context_note`) → NO-PRODUCT-GUARD → `exact[:3]` follow-up → compare unique+KB fill → unlist alt-merge → `_available_for_sale` stamp+`_pending_context_note` → rejection-memory extra → `_combined_extra` (vision+reject+superlative+policy_carry) → hybrid anchor prepend → anchor-compare/partial insert → `_device_additional` extend+`_device_spec_extra` → `qa_ctx` → `_filter_compat_products` → `_apply_product_tiers(30)` → context_note → **[flag ON: `products=selected_cards[:30]` + extra_context append]** → `llm.answer`
+- web flow (POST-answer วันนี้): `should_use_web_search(answer,intent,products,msg)` — trigger จาก answer uncertainty markers / pass1 conf<0.5 (no products) / compat negative|no_products|device_specific|short / spec-kw negative|no_products / generic negative answer → `reanswer()` → `search_and_extract` (OpenRouter `:online`) → DB re-query (kw+model-code regex+KB) → merge → `llm.answer` LLM2 (products ทั้งก้อน resend) — KB path เดียวกัน (2560-2614)
+- token/cost utils ที่มี: `llm._gemini_cost` (USD), `usage_metadata`→`usage_info{prompt,output,total}`, `_sum_usage`, `steps[].tokens_in/out`+cost×36 THB · **ไม่มี pre-call token estimator** → `estimated_tokens` ต้องมี estimator เล็ก (chars/4, no dep)
+- flag-ON ปัจจุบัน: legacy fetch/merge chain ทั้งหมดยังรันแล้วถูก discard ที่ 4644/2467 (waste) — Phase 7 compile ต้องให้ typed path เป็น owner จริง + ลบ flatten เก่าใน diff เดียว
+
+**baseline measurement (offline, `legacy_turn_incidents.jsonl`)**: 72 incidents · 45 มี catalog (≤6 cards/fixture, 187 cards รวม) · `llm._build_context` serialized: incl_desc mean=5089 / p95=7119 chars (~1.8K tok est) · slim p95=5192 (~1.3K) · marginal ~1091 chars/card → **30-card projection ~33K chars (~8K tok)** — fixture ไม่ถึง production regime (30 cards×full desc ≈53-56K tok ตาม report) → p95 gate จะ report exact sample size + projection labeled (ห้าม fabricate)
+
+**PART 1 — feasibility verdict: PASS**
+- product-only task ประกอบได้โดยไม่แตะ customer prose: `TurnNeed(kind/operation/subject_refs/scope/types/subtypes/ranking)` + `RetrievalRequest` + `SelectionResult.by_request` + `_needs_for_request` + `pool.supporting_evidence` + `PolicyDecision` = typed ทั้งหมด
+- mixed product+policy: policy need ไม่มี product-request attribution (slots=product scope) → products/evidence ไม่มี policy content โดยโครงสร้าง; production mixed turn ยัง fail-closed ที่ `_pdec` gate ก่อน answer call → "complete mixed message ไม่ถึง product call" = structural guarantee
+- ไม่ต้องการ per-need question text — นั่นคือ Phase 8 blocker (scoped question/typed segments) ที่ defer อยู่แล้ว; Phase 7 compile context เท่านั้น
+- contract fields ทุกตัวมี typed source; `estimated_tokens` = estimator ใหม่เล็กเพียงอย่างเดียวที่ต้องเพิ่ม (ไม่มี util เดิม — justified)
+
+**PART 2 — contract + after call graph (proposed)**
+`answer_context.py` (module ใหม่ = compiler owner เดียว):
+- `@dataclass(frozen=True) AnswerContext`: `products` (identity-deduped, field-scoped per need op, per-need quota, hard cap) · `evidence` (typed supporting: qa/vision/kb + web-derived หลัง admission) · `availability_notes` (typed `unavailable_evidence` — ไม่ใช่ recommendation) · `policy_decisions` (PolicyDecision objects — channel แยก ไม่ผสม products) · `unanswered_needs` (needs ไร้ coverage — typed) · `estimated_tokens` (chars/4 บน product+evidence payload; system prompt วัดแยกใน llm) · `trace`
+- `compile_answer_context(needs, selection, pool, policy_decisions=(), per_need, cap)`
+- `decide_web_admission(ctx) → (bool, reason)`: admit iff ∃ unanswered `compat` need (external device evidence เท่านั้น); deny = local-existence/price/stock/link ops, unresolved `subject_refs` (local identity), ทุกอย่าง covered → deny
+- `augment_with_web(ctx, ws_result) → ctx'` (products += new deduped เท่านั้น, evidence += web record)
+- `render_extra(ctx) → str` (evidence+availability+policy notes — typed→text boundary เดียว, owner = compiler)
+- `llm.answer` += optional `answer_context` param: products=ctx.products verbatim (pre-scoped), extra=render_extra, include_desc bypassed (scoping ทำแล้ว)
+- **after (flag ON, implemented)**: `TurnPlan.needs → profile → slots/relations/requests → executor/pool → select_for_llm_context → _typed_answer_boundary[decide_web_admission → admit?search_and_extract] → compile_answer_context → llm.answer_typed(context=ctx)` — answer-model calls = **0 หรือ 1; ไม่เกิน 1 เสมอ** (compile fail / ctx ว่าง → deterministic reply, 0 calls — legacy llm.answer ไม่ re-enter); flag OFF = เดิมทั้งหมด
+- **deleted branches (same diff)**: `run_grouped_selection` flatten (`selected_cards` stamping+`extra_context` prose) → typed `sel` expose; app `_grouped_sel["selected_cards"][:30]`+extra_context append ทั้ง 2 sites (2467-2475, 4644-4650); flag-OFF legacy chain ไม่แตะ (production path)
+
+**ห้าม**: clause split / prose strip / prompt "ignore policy" / 2nd intent call / bot-answer parse / helper-guard-fallback chain · re-run retrieval · legacy append หลัง compile · flag ON · Phase 8 segments/finalizer · new deps · new model/provider calls · new semantic kw/regex tables
+
+**รออนุญาต**: RED suite `docs/test/test_phase7_answer_context.py` (20 items) → implement minimal → focused verify → docs → report (no stage/commit)
+
+## Phase 7 — PART 2 DESIGN CORRECTION (H1/H2/M1/M2/M3) · รออนุญาต RED
+
+### corrected contracts — `answer_context.py` (module ใหม่ = compiler owner เดียว)
+
+```python
+@dataclass(frozen=True)
+class NeedTask:
+    """per-need typed task — compiled จาก structured data เท่านั้น
+    (ไม่มี customer prose; render เป็น deterministic generation ไม่ใช่ extraction)"""
+    kind: str                          # "product"|"compare"|"compat" (productish เท่านั้น)
+    operation: str                     # TurnNeedOp verbatim
+    subject_names: tuple[str, ...]     # resolved card names (DB data — ไม่ใช่ prose ลูกค้า)
+    subject_refs: tuple[str, ...]      # structured refs (model codes/item ids — token ตรงๆ)
+    scope: tuple[str, ...]             # product_types ∪ subtypes (need ∪ attributed requests)
+    constraints: tuple[tuple[str, str], ...]  # typed pairs เท่านั้น: req.soft_hints (non-meta)
+                                       #   + hard_filters + variant_terms
+    target: str | None                 # external target — req/profile.target_device หรือ
+                                       #   relation source identity
+    ranking: tuple[str, str] | None
+
+@dataclass(frozen=True)
+class AnswerTask:
+    tasks: tuple[NeedTask, ...]
+    trace: tuple[str, ...]
+    # render() → closed-template task text per kind/op (generation จาก typed fields — ห้ามเอา message มาแปะ)
+
+@dataclass(frozen=True)
+class AnswerContext:
+    task: AnswerTask                   # ← H1: sole typed task — req.message/desc_message ห้ามข้าม boundary
+    products: tuple[dict, ...]         # field-scoped per need op, identity-deduped, per-need quota, hard cap
+    evidence: tuple[dict, ...]         # typed {kind: qa|vision|kb|web|device_spec, scope key, payload}
+    availability_notes: tuple[dict, ...]  # sel.unavailable_evidence verbatim (typed — ไม่ใช่ recommendation)
+    policy_decisions: tuple            # PolicyDecision objects — channel แยก ไม่ผสม products
+    unanswered_needs: tuple            # typed view: (need_index, kind, operation, subject_refs, scope, target, reason)
+    estimated_tokens: int              # ceil(utf8_bytes/3) — conservative, labeled estimated
+    trace: tuple[str, ...]
+```
+
+### compiler inputs/outputs
+
+- **in**: `needs` (TurnPlan.needs) · `selection: SelectionResult` (typed — `run_grouped_selection` ต้อง expose) · `pool: CandidatePool` (supporting_evidence + identities incl. rejected → resolved-identity check) · `requests: tuple[RetrievalRequest]` · `profile: RetrievalProfile` (target_device/variant facts) · `policy_decisions: tuple` · quotas (`per_need`, `hard_cap`)
+- **out**: `AnswerContext` (มี `.task` ข้างใน) — `AnswerTask`+`AnswerContext` compile พร้อมกันรอบเดียว
+- **ลูกค้า**: `llm.answer_typed(context=ctx, shop_hint, history, model, persona_extra, intent_result)` — signature ไม่มี `message`/`products`/`extra_context` prose params → ส่ง req.message เข้าไม่ได้ทางโครงสร้าง
+
+### M1 — attribution owner
+
+`retrieval_selection._needs_for_request` → promote เป็น **public `needs_for_request`** (owner = selector module — มันเข้าใจ request source semantics: subjects/slot/relation_target/compat/channel); selector ใช้เองต่อสำหรับ `need.ranking` sort; compiler consume เหมือนกัน — implementation เดียว ไม่มีสำเนา 2 ชุด
+
+### H2 — web admission (typed, conservative default deny)
+
+```python
+@dataclass(frozen=True)
+class WebAdmission:
+    allowed: bool
+    reason: Literal[  # closed enum — ไม่ใช่ arbitrary strings
+        "admitted_external_evidence_need",
+        "no_unanswered_need", "not_productish",
+        "local_fact_operation",            # price|stock|link ops
+        "local_catalog_existence",         # browse/recommend zero-coverage = local question
+        "unresolved_local_identity",       # subject_refs ไม่ resolve เป็น local identity
+        "no_external_target",              # ไม่มี typed target_device/relation target
+        "local_evidence_sufficient",       # ctx.evidence มี device_spec ครอบ target แล้ว
+        "web_already_supplied",            # evidence kind=="web" scope key ตรงแล้ว
+        "not_configured", "compiler_unavailable"]
+    need_index: int | None
+```
+
+**truth table (allow ต้องผ่านทุกเงื่อนไข):**
+1. `n` ∈ unanswered_needs และ n.kind ∈ PRODUCTISH → else deny
+2. n.subject_refs ทุกตัว resolve เป็น pool identity (eligible∪unavailable∪rejected) → else `unresolved_local_identity`
+3. n.operation ∉ {price, stock, link} → else `local_fact_operation`
+4. n มี typed external target (request/profile `target_device` ที่ไม่ใช่ local identity) → else `no_external_target` หรือ `local_catalog_existence` (recommend/browse ไม่มี target)
+5. ctx.evidence ไม่มี local device_spec ครอบ target → else `local_evidence_sufficient`
+6. ctx.evidence ไม่มี kind=="web" scope key เดียวกัน → else `web_already_supplied`
+7. `web_search.is_configured()` → else `not_configured`
+
+→ spec/product need ที่มี external device target อาจ admit ได้; compat need ไร้ target → deny; `kind=="compat"` ไม่ใช่เงื่อนไขเพียงพอ
+
+### M2 — flag/LLM truth table
+
+| state | behavior |
+|---|---|
+| flag OFF | legacy `llm.answer(message=req.message/desc_message, products=..., extra_context=...)` — unchanged |
+| flag ON + compile OK | `llm.answer_typed(context=ctx)` เท่านั้น — typed task+context เท่านั้นถึง product LLM |
+| flag ON + compile fail (`run_grouped_selection`→None หรือ compile raise) | fail closed: deterministic no-data reply, **0 model call**, ไม่มี legacy re-entry |
+| products ว่าง + typed evidence/notes/policy มี | `answer_typed` 1 ครั้ง (products=[]+typed evidence rendered — "typed handling") |
+| ctx ว่างหมด (no products/evidence/notes/policy) | deterministic no-data reply — 0 model call |
+| external unanswered need + admission allowed | `search_and_extract` ก่อน (search query = compiled need render — ไม่ใช่ req.message) → `augment_with_web` → `answer_typed` 1 ครั้ง |
+| web adds no new evidence | ctx เดิม → `answer_typed` 1 ครั้ง (no LLM2 เลย — single-call design) |
+| web adds evidence | compile ctx' ครั้งเดียว (products += deduped new, evidence += web record) → `answer_typed` 1 ครั้ง |
+| mixed product+policy | `_pdec` fail-closed handoff เดิม — ไม่ถึง answer call (Phase 8) |
+
+→ answer-model calls = **0 หรือ 1; ไม่เกิน 1** ใต้ flag ON (compile fail / ctx ว่างหมด → deterministic 0 calls); LLM2 double-send concept ถูกแทนด้วย single post-merge call
+
+### M3 — token estimate
+
+`est_tokens = ceil(len(text.encode("utf-8")) / 3)` — conservative bound (Thai ~3B/char → ≈1 tok/char worst case; ASCII overestimate ~33%) · document เป็น `estimated` ไม่ใช่ provider truth · system prompt (`SYSTEM_INSTRUCTION+persona+lang_inst`) วัดแยกใน `llm.answer_typed` ด้วย formula เดียวกัน · cost = `_gemini_cost(est_prompt, est_output)` labeled estimated — gate `<1 THB` report เป็น measurement-pending/conservative-estimate (ไม่ claim proven)
+
+### deleted branches (same diff)
+
+- `retrieval_runtime.run_grouped_selection` tail: `selected_cards` flatten+`_ROLE_NOTE` stamping+unavailable→`extra_context` prose → replace ด้วย typed `{selection, pool, requests, summary}` (role notes/field-scoping ย้ายเข้า compiler); `prepare_grouped_selection` → thin wrapper compile
+- `app.py:2467-2475` (KB) + `4644-4650` (main): `_grouped_sel["selected_cards"][:_llm_ctx_limit]` + `extra_context` append → แทนด้วย compile→gate→`answer_typed` wiring
+- flag-OFF chain ทั้งหมดคง (production path); flag-ON legacy assembly (fetch/merge/dedupe/tiers ~3697-4646) กลายเป็น dead-output — residual: ยังรันเพื่อ feed channels (`_device_additional`→compat_cards, `_qa_ctx`/`_vision_context`→supporting) — deactivation เป็น follow-up ไม่ใช่ phase นี้
+
+### feasibility verdict — **PASS + 1 residual (named, ไม่ใช่ contract blocker)**
+
+- typed fields ครอบทุก contract field: task (kind/op/subject names+refs/scope/typed constraints/target/ranking), products (by_request+quota), evidence (pool.supporting+unavailable), policy (PolicyDecision), unanswered (need−coverage), trace
+- **residual — `value_constraints` producer ไม่มี upstream**: budget/price-range ("งบ 500") ถูก extract เฉพาะใน `product_store._extract_price_range` (prose→Mongo filter, ไม่ใช่ typed fact); intent schema ไม่มี price field → `NeedTask.constraints` แบกเฉพาะ typed pairs ที่มีอยู่ (task ไม่ fabricate แต่จะ lose qualifier ของ turn ที่มี prose-only constraint — context ยัง enforce ที่ retrieval เดิม) → owner ที่ถูก = structured extraction boundary (`turn_decision`/`route_context` slot scope หรือ intent schema extension) — **Phase 8/upstream blocker สำหรับ task fidelity, ไม่ใช่ compile blocker**
+- ตามนี้ `NeedTask.constraints` ต้อง render เฉพาะ typed pairs เท่านั้น — absent ⇒ ไม่พูดถึง (fail-silent บน qualifier, ไม่ใช่ fabrication)
+
+### รออนุญาต
+
+RED suite `docs/test/test_phase7_answer_context.py` (20 items) → implement → focused verify → docs → report · no stage/commit/provider/Mongo/flag-on
+
+## Phase 7 — IMPLEMENTATION PLAN (authorized)
+
+### value-constraint owner (1 parser, single typed result)
+- `route_context.build_retrieval_profile`: `value_constraints=profile` field ใหม่ — extract ครั้งเดียวผ่าน `product_store._extract_price_range(msg)` (parser เดิม) → `(("price_min",N),("price_max",M))`; fact_sources += ("value_constraints","message") เมื่อ non-empty
+- `retrieval_planner`: `RetrievalRequest.value_constraints` — planner stamp จาก profile ลง slot/relation requests (channels=())
+- `retrieval_executor._request_profile`: pass `value_constraints=req.value_constraints` ลง synthetic profile
+- `product_store.fetch_products`: `vc = getattr(profile,"value_constraints",None)` — typed ชนะ; fallback `_extract_price_range(message)` เฉพาะเมื่อ profile ไม่มี field (compat สำหรับ profile-less caller); ลบ parse ซ้ำที่ relax block (3483) reuse price_min/max ที่คำนวณแล้ว
+- `NeedTask.value_constraints` = profile.value_constraints (turn-level typed result — parse-once/no clause splitting)
+
+### answer_context.py (module ใหม่ — compiler owner เดียว)
+NeedTask/AnswerTask(closed-template render)/UnansweredNeed/AnswerContext(task/products/evidence/availability_notes/policy_decisions/unanswered_needs/estimated_tokens/trace)/WebAdmission — compile_answer_context(needs, selection, pool, requests, profile, policy_decisions, web_evidence) + decide_web_admission(needs, selection, requests, pool, profile, web_configured) + estimate_tokens(text)=ceil(utf8/3) + context_text(shop_hint)
+- products: per-need quota(4) ผ่าน needs_for_request(public)→by_request, sort ROLE_RANK desc→score desc, global identity dedupe, hard cap 15; field-scope per op (closed map); _context_note จาก role (ย้าย _ROLE_NOTE semantics เข้า compiler)
+- evidence: pool.supporting_evidence + pool.evidence_pool attachments + web_evidence records
+- unanswered_needs: productish need ไร้ selected coverage; policy need ไร้ matching decision
+- admission (pre-compile, deny-first): ตาม truth table — unresolved identity/local op/catalog browse/no target/local spec-db hit/web already supplied/not_configured → deny
+
+### retrieval_selection.py
+- `_needs_for_request` → public `needs_for_request` (owner เดียว — selector+compiler ใช้ร่วม); `_ROLE_RANK` → `ROLE_RANK`
+
+### retrieval_runtime.py
+- run_grouped_selection คืน {"selection","pool","requests","summary"} — ลบ selected_cards/extra_context flatten + _ROLE_NOTE/_identity_keys; prepare_grouped_selection → thin compile wrapper
+
+### llm.py
+- `answer_typed(context, *, shop_hint, history, model, persona_extra)` — ไม่มี message/products/extra_context params; system=SYSTEM_INSTRUCTION+persona+_lang_instruction(task_text); user_prompt=context.context_text(shop_hint)+task render+trailer เดิม; usage_info += estimated_prompt_tokens/estimated_system_tokens (labeled); share `_history_contents` helper กับ answer()
+
+### app.py (flag-ON boundary เท่านั้น — flag OFF untouched)
+- ทั้ง 2 sites (KB ~2440 / main ~4623): selection→decide_web_admission→(allowed→search_and_extract(message=typed query render))→compile_answer_context(web_evidence)→answer_typed ≤1 call; compile fail/empty ctx → deterministic canned reply 0 calls; response.products=ctx.products
+- post-answer `should_use_web_search/reanswer` block: + `not _sel_flag` guard
+- supporting เพิ่ม device_spec record เมื่อ _device_specs/_kb_device_specs มี (typed coverage ให้ gate)
+
+## Phase 7 — combined-batch Mongo hang fix (test-isolation, verify แล้ว)
+
+**อาการ**: affected 8-file batch ค้าง >10 นาที — pytest CPU~0%, stack มี `pymongo_server_monitor_thread`; faulthandler dump: `test_fetcher_error_isolated` → `prepare_grouped_selection` → `execute_grouped_retrieval_requests` → `generation_pointer.resolve_snapshot` → `find_one` → `MongoClient(127.0.0.1:27017)` connection refused, server-selection ~30s/ครั้ง × หลาย test → hang.
+
+**root cause (class D — collection-order contamination, test-only)**: ไฟล์ test ที่ import `shopeechat.app` ผ่าน replay harness ทำให้ `knowledge_base._load_env()` ถูก stub (load_dotenv no-op) ระหว่าง import → `ADMIN_MONGO_URI` ไม่มีใน env → `_build_admin_client` fallback host default `127.0.0.1:27017` → MongoClient จริง → `find_one` block รอ server selection 30s. standalone (env โหลดจริงจาก .env → ADMIN_MONGO_URI → reachable) เลยผ่าน — ปัญหาโผล่เฉพาะ combined process ที่ .env ถูก stub
+
+**fix (ที่ owner — test callsites)**: ทุก test callsite ที่เรียก `execute_grouped_retrieval_requests`/`run_grouped_selection`/`run_grouped_retrieval_shadow`/`prepare_grouped_selection` ต้องส่ง `snap=None` (captured value = no snapshot — documented seam เดียวกับ test_phase4_source_union:138) → executor ไม่ resolve pointer เลย เพิ่ม `snap` param ให้ `prepare_grouped_selection` (forward ไป run_grouped_selection — เดิมลืมส่งต่อ seam). ไฟล์ที่แก้: test_retrieval_selection_runtime, test_canonical_evidence_card, test_availability_subjects_5c, test_phase6_need_selection, test_phase4_source_union, test_grouped_retrieval_executor, test_candidate_pool_sources_5d, test_candidate_pool_union, test_retrieval_selection, test_issue_5f_availability_anchor, test_retrieval_shadow + `test_live_units_fetch_smoke` (integration by design — ไม่แตะ)
+
+**regression pin**: `test_snap_unset_still_resolves_pointer` (probe ว่า omit snap → resolve จริง — เห็น seam) + `test_snap_none_skips_pointer_resolution` (snap=None → resolve ไม่ถูกเรียก)
+
+**ผล**: batch เดิมที่ hang >10min → **1.26s / 230 passed**; legacy-shape failures 22 ตัว (selected_cards/extra_context/_ROLE_NOTE/_identity_keys/legacy-llm payload) ถูก migrate เป็น typed contract ทั้งหมด — no production guard added (test-only fix)
+
+**note**: ระหว่าง diagnose มี `resolve_snapshot`/`_admin_db` probe 1 ครั้งที่ hit real admin Mongo (`.env` ADMIN_MONGO_URI → find_one sellable_units_meta → None, read-only) — พฤติกรรมเดียวกับที่ test เจอ ไม่ใช่ของใหม่
+
+## Phase 7 — REVIEW CORRECTION ROUND (authorized, stop before commit)
+
+**findings (verified in code):**
+- H1 raw prose crosses: `_typed_answer_boundary(history=_qa10)` → `answer_typed(history)` → `_history_contents` → `_generate`; producer `supporting` blobs `{"qa":_qa_ctx}`/`{"vision":_vision_context}`/`{"kb":kb_context}` → `context_text` renders arbitrary text
+- H2 evidence not need-scoped: `compile_answer_context` copies all `pool.supporting_evidence`+attachments, caps by position, no need attribution
+- H3 admission: `subject_refs==()` bypasses identity check; selected card = coverage แม้ external evidence ยังขาด; `_local_evidence_answers` re-calls private `device_compat._resolve_device_spec` (duplicate lookup); `_admission_query` ต่อท้าย hardcoded "charging spec port watt"; `saw_uncovered` dead var
+- M1 `policy_decisions` ทำ `is_empty` False แต่ `context_text`/`answer_typed` ไม่ render → policy-only ctx ยิง product LLM ได้โดยไม่มี policy evidence
+- M2 ไม่มี cost gate evidence (p95 / sample / THB)
+- P1 offline safety: diagnostic ก่อนหน้า load `.env` ทางอ้อม + read real admin Mongo 1 ครั้ง (disclosed แล้วใน entry ก่อนหน้า)
+
+**correction design:**
+1. boundary/answer_typed ลบ `history` param — `_history_contents` เหลือเฉพาะ legacy `answer` (flag OFF); web_search_fn ไม่รับ history; follow-up identity มาจาก typed needs/subject_refs/requests เดิม
+2. evidence closed schema: supporting kinds = {device_spec,kb,kb_product,vision,image_text,video,web}; attachment kinds = {anchor,kb_product,image_text,listing,subject_snapshot}; ทุก record ต้องมี typed attribution: need_index/need_indices | request_id→req_needs | target→_need_target | subject_refs/identity→need identity set; ไม่มี → omit + trace `evidence_dropped:*`; qa/raw blobs ไม่เข้า; attachments attribute ผ่าน linked_candidate→pooled cand→request_ids→req_needs (owner เดียว)
+3. `candidate_pool.build_candidate_pool`: channel supporting records ได้ `"request_id": res.request_id` ตอน merge (attribution เดิมที่หายไป)
+4. producer tags: kb blob → `request_id="ch:kb"`; vision → `subject_refs` จาก `_subject_cards` identities; device_spec → `target` (มีอยู่); web record → `need_index=adm.need_index`; qa record ลบออกจาก callsite
+5. admission rewrite: coverage = target? external evidence (pool records เท่านั้น, normalized-exact target match) : selected cards; identity = resolved subject_refs OR attributed selected; deny order = local_fact_op → recommend(catalog) → unresolved identity → no target → not configured → admit (one need, first admissible); `_resolve_device_spec` call ลบ; query = typed target+op+scope+subject identity เท่านั้น
+6. policy: `policy_decisions` field ออกจาก AnswerContext/compile/boundary/callsites (no Phase-7 consumer); `is_empty` = products|evidence|notes; needs ที่มี deferred kinds → boundary deterministic 0 calls (mixed ยัง fail-closed ที่ _pdec gate ก่อน)
+7. cost evidence: offline replay fixture measurement (legacy _build_context tokens vs ctx.estimated_tokens, system prompt แยก, median/p95, THB จาก llm pricing util)
+
+**files**: answer_context.py, llm.py, app.py (boundary+2 callsites), candidate_pool.py (request_id tag), tests + docs/test/test_phase7_boundary_review.py (new RED), SRS, rebaseline plan, log
+
+**results (verify แล้ว — post-cleanup re-run อยู่ด้านล่าง):**
+- RED 20 failures ตรง findings (history param present, need_indices missing, unattributed copied, scopeless-no-identity admitted, covered-by-selected, _resolve_device_spec re-called, suffix ใน query, mixed→1 call); 5 pins ผ่านตั้งแต่แรก (ops-table, policy-only-empty, offline probe, unresolved-refs, single-turn)
+- implementation: boundary+answer_typed ไม่มี history; evidence closed schema + attribution (`_ref_needs_map`/`_attribute`/`_compile_evidence`); admission rewrite per design; `policy_decisions` ลบออกทั้ง AnswerContext/compile/boundary/callsites; deferred-kind gate 0 calls; web record มี need_index; query typed-only
+- migrated tests: `test_phase7_answer_context.py` — 4 cases ที่เข้ารหัส old contract (web_deny_local_evidence_sufficient → device_spec record ใน pool; covered case → no-target; media paths → attributed records); `supporting=` producers ได้ request_id/subject_refs
+- GREEN: review suite 25/25; phase7 suite 41/41; affected batch 225; replay 120; py_compile/diff --check/validator green
+- cost evidence (n=40 fixture turns): legacy ctx est. 1,954 p95 → Phase7 ctx est. 1,043 p95 (−46.6% ≥30% gate); system prompt est. 27,209; est. p95 cost 0.336 THB <1 THB gate; web calls=0 local turns; answer calls ≤1
+- safety counters รอบนี้: `.env` read = **1 line โดยไม่ตั้งใจ** (flag check grep ไปโดนบรรทัดเดียว `USE_GROUPED_RETRIEVAL_SHADOW=1` — disclosed, จะไม่ทำซ้ำ); indirect `.env` load รอบก่อน = 1 (probe); Mongo real read รวม = 1 (รอบก่อน — diagnostic `resolve_snapshot` find_one→None); รอบนี้ subprocess purity test: dotenv calls=0, Mongo connections=0
+- cleanup: `_ref_needs_map` hoist `dict(selection.by_request)` ออกจาก loop
+- Phase 8 blockers ยังอยู่: typed answer composition/finalizer, mixed product+policy auto-answer, `BLOCKED_BY_PHASE4_SOURCE_UNION` activation blocker
+
+## Phase 7 — REVIEW ROUND 2: need-scoped products + evidence bounds + cost proof + deferred owner (authorized)
+
+**findings (verified in source):**
+- A: `compile_answer_context` emits flat `products` — `seen_ids` dedupe silently drops 2nd-need ownership; `context_text` json.dumps cards ไม่มี task link → combined payload ไม่รู้ product ของ need ไหน
+- B: `_compile_evidence._take` = `{**dict(e)}` whole-dict copy → unknown fields/diagnostics ข้าม boundary; `EVIDENCE_LIMIT=8` bound count ไม่ bound size; `context_text` มี 5-key payload fallback chain
+- C: cost test เทียบ `_build_context` vs `ctx.estimated_tokens` = product-context เท่านั้น — 46.6% ไม่ใช่ total prompt reduction
+- D: `_typed_answer_boundary` อ่าน private `_acx._POLICY_NEED_KINDS` + `compile_answer_context` classify set เดียวกันอีก = 2 owners; `[LLM DEBUG]` prints ใหม่ใน `answer_typed`
+
+**correction design:**
+1. products: emit `card["need_indices"]` per product (typed need indices — field เดียวกับ evidence); dedupe hit → union indices ลง emitted card เดิม (ไม่เพิ่ม payload); quota/hard_cap ยังกัน intake ใหม่ แต่ยัง union ได้; serialize ผ่าน json.dumps เดิม → ownership ใน payload จริง
+2. evidence: closed emit schema `{kind,need_indices,target?,identity?,linked_candidate?,item_id?,payload?}` — `_take` รับเฉพาะ fields นี้; payload = first non-empty(payload|data|text|search_info|results) normalize→str (dict/list→json.dumps) bound ≤ `_EVIDENCE_TEXT_BYTES`(1200B utf-8, cut ที่ byte boundary) + trace `evidence_truncated:*`; total rendered ≤ EVIDENCE_LIMIT×cap; `context_text` render `e["payload"]` ตัวเดียว (ลบ fallback chain)
+3. deferred single owner = `compile_answer_context` (mark `UnansweredNeed.reason="deferred"` อยู่แล้ว): boundary compile ก่อน → `any(u.reason=="deferred")` → defer ก่อน admission/web (0 calls, 0 web); web_used → recompile ด้วย web_evidence; app.py ไม่แตะ `_POLICY_NEED_KINDS` อีก
+4. cost test: capture `_generate` payload จริงทั้งสองฝั่ง (legacy `llm.answer` vs `llm.answer_typed`) offline บน fixture turns เดียวกัน → report product-ctx p95 (gate≥30% เดิม) + complete-prompt median/p95/reduction แยก + cost ทั้งสองฝั่ง; phase7 p95 cost <1 THB เดิม; ไม่มี total-reduction threshold ใหม่
+5. cleanup: ลบ `[LLM DEBUG]` prints ใน `answer_typed` (3 บรรทัด); usage accounting คงไว้
+
+**files**: answer_context.py, app.py (boundary), llm.py (prints), test_phase7_boundary_review.py (RED+rewrite cost), SRS, plan, log
+
+**results (verify แล้ว):**
+- RED 6 failures ตรง findings: A ×2 (`need_indices` KeyError ใน serialized payload — ownership ไม่มีจริง); B ×3 (sentinel fields รอดเข้า `ctx.evidence` / cap ไม่มี / `_EVIDENCE_TEXT_BYTES` missing); D ×1 (`_POLICY_NEED_KINDS` ใน boundary source). pins ที่ pass ตั้งแต่แรก: `deferred_never_invokes_web` (gate เดิม defer ก่อน admission อยู่แล้ว) + cost-rewrite measurement
+- implementation: products emit `need_indices` + union on dedupe (outer hard_cap break ลบ — loop ยัง scan ต่อเพื่อ union/shared ได้ แต่ intake ใหม่ถูก `continue` กั้น); `_take` emit closed `_EVIDENCE_OUT_FIELDS` + payload normalize (dict `{"text"}`→text / dict|list อื่น→json.dumps) bound ≤`_EVIDENCE_TEXT_BYTES`(1200B) + `evidence_truncated:*` trace; context_text อ่าน `e["payload"]` ตัวเดียว; boundary compile-first → consume `UnansweredNeed.reason=="deferred"` → defer ก่อน admission/web; web_used → recompile; `[LLM DEBUG]` 3 บรรทัดใน answer_typed ลบ
+- mutation proofs: ลบ ownership stamp → 2 tests fail (KeyError) → revert; restore `{**dict(e)}` → 2 tests fail (sentinel+unbounded) → revert — tree สะอาด ไม่มี mutation ค้าง
+- GREEN: review 32/32, phase7 31/31, fail_closed+media+attribution batch 216p/1s, replay 120p, py_compile/diff --check/validator integrity pass
+- cost (fixture n=40, complete-`_generate`-payload capture ทั้งสองฝั่ง): product-ctx p95 1,954→1,071 (−45.2% ≥30% gate); **complete prompt p95 29,746→29,103 (−2.2% — ตรงไปตรงมา: system prompt est. 27,209 share กันทั้งสองฝั่ง เลยกินส่วนต่าง); est. cost p95 0.3483→0.3413 THB (gate <1 ผ่าน)** — 46.6% ของรอบก่อน = product-context only, ไม่ใช่ total
+- structural checks: `dict(e)` ใน compile = 0; app.py `_POLICY_NEED_KINDS` refs = 0 (owner เดียวใน answer_context); `[LLM DEBUG]` ใน answer_typed = 0; keyword/regex tables ใหม่ = 0 (`_EVIDENCE_OUT_FIELDS`/`_EVIDENCE_TEXT_KEYS` = field-name contracts); provider calls ใหม่ = 0; flags ไม่แตะ
+- safety รอบนี้: `.env` reads = 0; Mongo = 0; providers = 0 (capture patch `_generate`/`get_model`/`_client` leaf)
+
+## Phase 7 — REVIEW ROUND 3: web specs + single compile + visible numbering + render bounds (authorized)
+
+**findings (verified in source):**
+- F1 web `device_specs` ถูกทิ้ง: `_EVIDENCE_TEXT_KEYS`/OUT_FIELDS ไม่มีช่อง — result ที่มีแต่ specs → evidence ว่างเปล่า
+- F2 boundary compile AnswerContext 2 ครั้ง (pre + post-web) — ผิด one-final-context contract + deferred check ทำหลัง compile (เสียงาน)
+- F3 internal `need_indices` 0-based แต่ render `งานที่ N` 1-based — product JSON `[0]` ขัด evidence `(งานที่ 1)`
+- F4 bound เฉพาะ payload — target/identity/linked_candidate/item_id ไม่ bounded → record/block รวมเกิน cap ได้
+
+**correction design:**
+1. web record normalize ที่ boundary producer: `payload` = sanitized search_info + `json.dumps(device_specs)` (รวม field เดียวก่อนเข้า compile — web_used เหลือ {kind,target,need_index,payload}); unknown provider fields/URL ไม่ข้าม (URL strip เดิม)
+2. AnswerTask เพิ่ม `deferred: tuple[UnansweredNeed,...]` — `compile_answer_task` classify deferred (owner เดียว — `_POLICY_NEED_KINDS` อยู่ในนั้นที่เดียว); `compile_answer_context` consume `task.deferred` เข้า unanswered_needs ไม่ classify ซ้ำ; boundary = task compile 1 → `task.deferred` → defer (ctx compile 0, web 0, answer 0) → admission → web → `compile_answer_context(task=task)` **call site เดียว** → answer ≤1
+3. serialization: `context_text` render product `need_indices` +1 (1-based — internal 0-based คงเดิม, card canonical ไม่ mutate — copy ตอน render); evidence ords 1-based อยู่แล้ว → visible numbering ตรงกัน
+4. record-level bound: `_EVIDENCE_RECORD_BYTES` (แทน `_EVIDENCE_TEXT_BYTES`) — วัด json-serialized record ทั้งก้อน; structural fields เกิน budget → omit + `evidence_dropped:record_too_large` trace (identity ห้ามตัด); payload ตัดให้พอดี remaining budget ที่ byte boundary + `evidence_truncated:*`; declared block bound = `EVIDENCE_LIMIT × RECORD + overhead` วัดจาก context_text จริง
+
+**files**: answer_context.py, app.py (boundary), test_phase7_boundary_review.py (RED+update round-2 assertions), SRS, plan, log
+
+## Phase 8 backlog — System Prompt Distillation (planned, not started)
+
+- **why**: Phase 7 exact-payload fixture measurement showed product context p95 `1,954→1,071` (−45.2%) but complete prompt p95 only `29,746→29,103` (−2.2%) because the shared system prompt is estimated at ~27,209 tokens. Context bounding alone therefore does not materially reduce total input cost.
+- **when**: execute only after Phase 8 typed segments + single finalizer are authoritative. Do not mix this work into the active Phase 7 correction, because the finalizer must own deterministic safety behavior before matching prose clauses can be removed.
+- **scope**: build a clause-to-owner ledger for `SYSTEM_INSTRUCTION`; delete exact duplicates, legacy-only clauses, and rules already enforced by canonical availability/evidence, `PolicyDecision`, compatibility proof, typed segments, or the finalizer. Keep one compact core for persona/language, evidence-only answering, typed-task execution, and no fabrication. Task-specific instructions reuse `AnswerTask`/typed segments — no keyword tables, second intent/planner call, sanitizer chain, or per-case prompt branches.
+- **proof**: capture exact `_generate` system+contents before/after on identical replay turns; report median/p95 total input tokens, provider usage when available, labeled offline estimates, THB cost, and answer-call count. Run protected replay + mutation tests for availability/link/compat/policy/claim/language/formatting/unsupported claims. Prompt caching is optional and never counted as guaranteed savings.
+- **exit**: zero unowned safety-clause deletion, zero protected behavior regression, one answer boundary, and honest total-prompt/cost reduction evidence. No target percentage is invented before the baseline experiment.
+- **status**: roadmap entry added only; runtime/tests/config unchanged; implementation pending Phase 8.
+
+**results (verify แล้ว):**
+- RED 14 failures ตรง findings: F1 ×2 (`device_specs` ไม่ถึง payload/ctx); F2 ×4 (web-success ctx compile ×2, policy/mixed ctx compile 1, call sites=2); F3 ×3 (serialized `need_indices=[0]`/`[0,1]` 0-based หลุดเข้า LLM payload); F4 ×5 (`_EVIDENCE_RECORD_BYTES`/`_EVIDENCE_BLOCK_BYTES` ไม่มี, oversized target emit ทั้งก้อน)
+- implementation: web_used normalize ที่ producer → `{kind,target,need_index,payload}` (info URL-strip + specs json.dumps รวม field เดียว); `AnswerTask.deferred` field ใหม่ + `compile_answer_task` classify deferred (owner เดียว — `_POLICY_NEED_KINDS` ref เหลือใน task compiler จุดเดียว); `compile_answer_context` seed `unanswered` จาก `task.deferred` (ลบ classification block); boundary = task→deferred→admission→web→compile 1 call site→answer; `_take` record-bound (struct overflow→omit+`record_too_large`; payload converging byte-prefix cut วัด json จริง + trace); context_text serialize `need_indices`+1 (render-copy, canonical card ไม่แตะ)
+- GREEN: review 44/44, phase7 31/31, focused media/attribution batch รวม 260p/1s, replay 120p/19s/3x, validator integrity pass, py_compile/diff --check clean
+- cost re-measure หลัง serialization change: **ค่าเดิมทุกตัว** — product-ctx p95 1,954→1,071 (−45.2%), complete p95 29,746→29,103 (−2.2%), est cost 0.3483→0.3413 THB (fixture n=40)
+- structural gates: `compile_answer_context(` ใน boundary = 1 site; `compile_answer_task(` = 1; `_POLICY_NEED_KINDS` ใน app.py = 0 (ใน answer_context เหลือ owner เดียว compile_answer_task); `dict(e)`/`{**dict` whole-copy = 0; `งานที่ 0`/visible task 0 = 0 (tests assert); `[LLM DEBUG]` ใหม่ = 0 (เหลือเฉพาะ legacy `answer` pre-existing ที่ HEAD — ไม่แตะ, unrelated); helpers/flags/modules/provider calls ใหม่ = 0
+- safety รอบนี้: `.env`=0, Mongo=0, providers=0, flags ไม่แตะ, staging=0
+
+## Phase 7 — DOC-CONSISTENCY FIX + PRE-COMMIT AUDIT (authorized, docs-only)
+
+- stale `_EVIDENCE_TEXT_BYTES` ใน module docstring ของ answer_context.py → แก้เป็น contract จริง: record ≤ `_EVIDENCE_RECORD_BYTES` / structural overflow → omit / payload cut + trace / block ≤ `_EVIDENCE_BLOCK_BYTES`
+- `_typed_answer_boundary` docstring (app.py): ลบ claim "ทุก branch พัง → 0-call" — เขียน exact behavior: invalid/deferred → 0-call deterministic; web failure → local typed evidence answer ≤1; legacy llm.answer ไม่ re-enter
+- SRS row `_typed_answer_boundary`: เพิ่ม `compile_answer_task` ใน Calls + แก้ error column ตาม behavior จริง
+- verify: review 44/44 · phase7 31/31 · py_compile OK · diff --check clean · `_EVIDENCE_TEXT_BYTES` ใน source .py = 0 refs (เหลือเฉพาะ historical log entries)
+- audit 28 paths: boundary call sites task=1/ctx=1/web=1/answer=1; deferred owner เดียว (`compile_answer_task`); runtime diff ไม่มี env/Mongo/network/subprocess; grouped flags ไม่แตะ; staging 0
+
+## Phase 7 — CLOSEOUT (committed)
+
+**Commit 1**: `c00d82e` — refactor: introduce need-scoped answer context (27 paths: 9 runtime + answer_context.py ใหม่ + SRS + roadmap + 14 test files รวม 2 suite ใหม่)
+
+**final call graph (flag-ON เท่านั้น):**
+`run_grouped_selection` → `_typed_answer_boundary`: sel extract → `compile_answer_task` ×1 (deferred-kind classification owner เดียว → `task.deferred`) → deferred? `EMPTY_CONTEXT_REPLY` ก่อน compile (ctx 0 / web 0 / answer 0) → `decide_web_admission` (deny-first, pool evidence เท่านั้น ไม่ re-run spec resolver) →[admit]→ `search_and_extract` ×1 (typed query; result normalize: URL-stripped `search_info` + `json.dumps(device_specs)` → closed `payload` เดียว — specs ไม่ถูกทิ้งอีกต่อไป) → `compile_answer_context` **call site เดียวต่อ turn** → `llm.answer_typed` ≤1 (single user turn — history/prose/policy_decisions ไม่มีช่องรับ)
+
+**multi-need / need_indices contract:** ทุก product card carry `need_indices` (structural ownership — selector/needs_for_request attribution เดิม ไม่มี selector เพิ่ม); identity เดียวข้ามหลาย need → union ลง card เดิม (quota ไม่กั้น union); serialized payload ใช้ **1-based visible task numbers** ตรงกับ `งานที่ N` ของ task render + evidence `(งานที่ N)` — internal 0-based คงเดิม; per-need quota 4 / identity dedupe / role precedence / hard cap 15 คงเดิม
+
+**evidence contract:** closed field schema `{kind,need_indices,target?,identity?,linked_candidate?,item_id?,payload?}`; kinds = device_spec/kb/kb_product/vision/image_text/video/web + attachments (anchor/kb_product/image_text/listing/subject_snapshot); unattributed → omit + `evidence_dropped:*`; record ≤ `_EVIDENCE_RECORD_BYTES`(1500B — structural overflow → omit + `record_too_large`, identity ห้ามตัด); payload byte-prefix cut + `evidence_truncated:*`; rendered block ≤ `_EVIDENCE_BLOCK_BYTES`; count ≤ 8
+
+**deferred behavior (fail-closed จนถึง Phase 8):** policy-only และ mixed product+policy → 0 product answer calls + 0 web calls — owner เดียว = `compile_answer_task` (`_POLICY_NEED_KINDS` ref เดียวใน module; app.py = 0); upstream `_pdec` gate ยัง fail-close เหมือนเดิม
+
+**token/cost (fixture n=40, labeled estimates — complete `_generate` payload capture ทั้งสองฝั่ง):** product-ctx p95 1,954→1,071 (−45.2%); complete-prompt p95 29,746→29,103 (−2.2% — system prompt ~27,209 share กัน); est. cost p95 0.3483→0.3413 THB
+
+**verification (frozen):** boundary review 44/44 · answer_context suite 31/31 · affected batch 260p/1s · replay 120p/19s/3x · py_compile/diff --check/validator integrity green · mutation proofs (ownership stamp / whole-dict copy) revert ครบ
+
+**flags:** `USE_GROUPED_RETRIEVAL_SELECTION`/`_SHADOW` OFF เหมือนเดิม — activation blocker `BLOCKED_BY_PHASE4_SOURCE_UNION` ยังอยู่
+
+**Phase 8 blockers:** typed answer composition + single finalizer (per-need segments, หนึ่ง PolicyDecision-rendered segment, byte-stable); mixed product+policy auto-answer ยัง OFF; **system-prompt-distillation backlog** (ดู backlog entry ด้านบน — clause→owner ledger ของ SYSTEM_INSTRUCTION หลัง finalizer authoritative)
+
+**safety:** `.env`/Mongo/provider/botworker/8010/deploy ไม่แตะรอบ closeout; log entries เก่าครบทุกอัน
