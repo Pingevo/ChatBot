@@ -38,7 +38,19 @@ _cp_calls: list[str] = []
 _cp_stub.transition_claim_state = lambda *a, **k: _cp_calls.append("transition") or k.get("claim_state")
 _cp_stub.merge_claim_fields = lambda *a, **k: _cp_calls.append("merge")
 _cp_stub.load_claim_state = lambda *a, **k: None
-sys.modules["shopeechat.conversation_products"] = _cp_stub
+
+
+def _stub_module(name: str, mod) -> None:
+    """Inject ทั้ง sys.modules และ package attribute — `from . import X`
+    ภายใน production module resolve ผ่าน package attr ก่อน; ถ้า test file
+    อื่น import module จริงมาก่อน attr นั้นจะชี้ของจริง → stub ทั้งสองทาง
+    มิฉะนั้น real _admin_db()/MongoClient จะถูกสร้าง (offline leak)."""
+    fq = f"shopeechat.{name}"
+    sys.modules[fq] = mod
+    setattr(sys.modules["shopeechat"], name, mod)
+
+
+_stub_module("conversation_products", _cp_stub)
 
 PASS = FAIL = 0
 
@@ -164,19 +176,19 @@ check("T10b retry payload = bytes เดิม (same identity)", len(set(calls))
 print("== C. caller-level: stub app/llm modules ==")
 
 # stub shopeechat.app / llm / product_store / warranty / conversation_products —
-# caller modules import ภายใน function → resolve จาก sys.modules
+# caller modules import ภายใน function → resolve จาก package attr/sys.modules
 _llm_stub = types.ModuleType("shopeechat.llm")
 _llm_stub.split_segments = lambda s: [s] if s else []
 _llm_stub.LLM_ERROR_REPLY = "__llm_error__"
-sys.modules["shopeechat.llm"] = _llm_stub
+_stub_module("llm", _llm_stub)
 
 _app_stub = types.ModuleType("shopeechat.app")
 _app_stub._send_handoff = _responses._send_handoff   # real transport (urlopen patched)
 _app_stub._routing = _responses._routing
-sys.modules["shopeechat.app"] = _app_stub
+_stub_module("app", _app_stub)
 
-sys.modules.setdefault("shopeechat.product_store", types.ModuleType("shopeechat.product_store"))
-sys.modules.setdefault("shopeechat.warranty", types.ModuleType("shopeechat.warranty"))
+_stub_module("product_store", types.ModuleType("shopeechat.product_store"))
+_stub_module("warranty", types.ModuleType("shopeechat.warranty"))
 
 import shopeechat.handoffs as _handoffs_mod
 import shopeechat.warranty_flow as _wf_mod
@@ -383,7 +395,7 @@ _warranty_stub.is_in_warranty = lambda *_a: {}
 # knowledge_base stub — first-message claim block เรียก qa_troubleshoot_tips
 _kb_stub = types.ModuleType("shopeechat.knowledge_base")
 _kb_stub.qa_troubleshoot_tips = lambda *a, **k: None
-sys.modules["shopeechat.knowledge_base"] = _kb_stub
+_stub_module("knowledge_base", _kb_stub)
 
 # conversation_products stub เพิ่ม load_claim_state (collecting gate อ่าน)
 _cp_stub.load_claim_state = lambda *a, **k: {}

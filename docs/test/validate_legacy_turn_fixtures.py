@@ -49,6 +49,8 @@ _TOP_LEVEL_KEYS = {
     "expectation_note",    # metadata: L1/L2-only expectation prose (no assert)
     "noncatalog_item_reason",  # metadata: why expected ids are absent
     "fixed_in",            # metadata: change that turned an incident positive
+    "policy_records",      # Phase 5: supplied versioned policy rules (dicts)
+    "llm_reply",           # Phase 5-R3: canned LLM reply text (mixed composition)
 }
 _EXPECTED_KEYS = {
     "action", "handoff_reason", "web_search",
@@ -56,7 +58,8 @@ _EXPECTED_KEYS = {
     "llm_card_status", "llm_history_or_context_contains",
     "llm_forbidden_card_types", "llm_max_calls", "llm_general_qtype",
     "resp_max_products", "claim_state_exists", "final_claim_state",
-    "link_policy",
+    "link_policy", "policy_decision", "resp_source",
+    "answer_contains", "answer_contains_once", "llm_must_not_contain",
 }
 _PROFILE_KEYS = {
     "product_types", "product_types_any", "target_device",

@@ -509,13 +509,17 @@ def _install(monkeypatch, fx: dict):
 
     monkeypatch.setattr(product_store, "fetch_products", _fake_fetch)
 
-    # llm boundaries captured
+    # llm boundaries captured; fixture may pin a product-bearing canned
+    # reply (Phase 5-R3: mixed composition must prove the product-owner
+    # answer text survives the policy segment append at enforce)
     for name in ("answer", "answer_general", "answer_with_kb"):
         fn = getattr(llm, name, None)
         if fn is not None:
             cap = _CapturedLLM()
             cap._fn = name
             cap.calls = captured.calls  # share log across entry points
+            if fx.get("llm_reply"):
+                cap.reply = fx["llm_reply"]
             monkeypatch.setattr(llm, name, cap)
 
     # web search off + forbidden
@@ -526,6 +530,20 @@ def _install(monkeypatch, fx: dict):
             monkeypatch.setattr(web_search, name,
                                 lambda *a, **k: pytest.fail(
                                     f"web_search.{name} called but web_search expected off"))
+
+    # Phase 5 policy records — fixture-supplied versioned rules replace the
+    # (empty) production seam for this turn only; fixtures without the key
+    # keep the real (empty) source so production activation stays honest
+    if fx.get("policy_records"):
+        try:
+            from shopeechat import policy_resolver
+        except ImportError:
+            pass  # module not implemented yet — policy_decision expectation fails downstream
+        else:
+            _rules = tuple(policy_resolver.policy_rule_from_dict(d)
+                           for d in fx["policy_records"])
+            monkeypatch.setattr(policy_resolver, "active_policy_rules",
+                                lambda *a, **k: _rules)
 
     # orders
     orders = {str(o.get("order_sn")): o for o in (fx.get("orders") or [])}
@@ -1025,6 +1043,48 @@ def _expectations_met(fx, records, captured):
         for needle in exp["llm_history_or_context_contains"]:
             if needle not in blob:
                 fails.append(f"llm input missing {needle!r}")
+    if exp.get("policy_decision"):
+        # Phase 5-R1 — the typed PolicyDecision must reach the answer
+        # boundary as data (routing_decision), not only marker text in
+        # the LLM prompt. Assert outcome (+ matched rules when pinned)
+        # on the boundary object; the context marker is kept as a
+        # phrasing aid and asserted too.
+        pde = exp["policy_decision"]
+        rd_pdec = ((getattr(resp, "routing_decision", None) or {})
+                   .get("policy_decision") or {})
+        if rd_pdec.get("outcome") != pde["outcome"]:
+            fails.append(
+                f"policy_decision outcome={pde['outcome']!r} absent from "
+                f"routing_decision (got {rd_pdec.get('outcome')!r})")
+        for rid in pde.get("matched_rule_ids") or []:
+            if rid not in (rd_pdec.get("matched_rule_ids") or ()):
+                fails.append(
+                    f"policy rule {rid!r} absent from routing_decision")
+    # Phase 5-R3 — final answer content assertions: product-owner text and
+    # the deterministic policy segment must both survive composition;
+    # the eligibility marker/prose must never reach the product LLM.
+    _ans = getattr(resp, "answer", "") or ""
+    for needle in exp.get("answer_contains") or []:
+        if needle not in _ans:
+            fails.append(f"answer missing {needle!r} (got {_ans!r})")
+    for needle in exp.get("answer_contains_once") or []:
+        if _ans.count(needle) != 1:
+            fails.append(f"answer must contain {needle!r} exactly once "
+                         f"(count={_ans.count(needle)})")
+    if exp.get("llm_must_not_contain"):
+        blob = json.dumps(
+            [{"h": c["history"], "x": c["extra_context"],
+              "c": c["context"]}
+             for c in rec["llm_calls"]],
+            ensure_ascii=False, default=str)
+        for needle in exp["llm_must_not_contain"]:
+            if needle in blob:
+                fails.append(f"llm input must not contain {needle!r}")
+    if exp.get("resp_source"):
+        _src = getattr(resp, "source", "") or ""
+        if not _src.startswith(exp["resp_source"]):
+            fails.append(f"resp.source {_src!r} not under "
+                         f"{exp['resp_source']!r}")
     if exp.get("llm_general_qtype"):
         qts = {c.get("qtype") for c in rec["llm_calls"]
                if c.get("fn") == "answer_general"}
@@ -1853,3 +1913,259 @@ def test_meta_validator_turn_decision_nonstring_action():
         errs = vmod.check_row({**ok, "turn_decision_expect": [
             {"primary_action": bad_action}]})
         assert errs, f"primary_action={bad_action!r} should fail validation"
+
+
+# ══════════════════════════════════════════════════════════════════
+# Phase 5 closeout — mixed product+return-policy fail-closed defer
+#   (R5: untyped prose blob cannot separate product/policy conclusions;
+#   defer before the product LLM call — replacement = Phase 6/7/8)
+# ══════════════════════════════════════════════════════════════════
+
+def _r5_fx(fid):
+    return next(f for f in L3_FX if f["id"] == fid)
+
+
+def test_r5_mixed_model_item_defers_before_llm(monkeypatch):
+    """return_policy + model → handoff transport exactly once, zero LLM
+    calls, deterministic admin-review answer, typed decision kept."""
+    records, captured, client = _replay(
+        monkeypatch, _r5_fx("pos-policy-return-model-item"))
+    rec = records[-1]
+    resp = rec["resp"]
+    from shopeechat import guards as _g
+    assert rec["llm_calls"] == [], \
+        f"product LLM ran on a mixed policy turn: {rec['llm_calls']}"
+    assert len(rec["handoffs"]) == 1 and \
+        rec["handoffs"][0]["reason"] == "policy_mixed_review"
+    assert resp.handoff_to_admin is True
+    assert resp.handoff_reason == "policy_mixed_review"
+    assert resp.answer == _g._POLICY_TEXT_ADMIN_REVIEW
+    for _t in (_g._POLICY_TEXT_ELIGIBLE, _g._POLICY_TEXT_INELIGIBLE):
+        assert _t not in resp.answer
+    pdec = (resp.routing_decision or {}).get("policy_decision") or {}
+    assert pdec.get("outcome") == "ineligible"
+    assert pdec.get("policy_type") == "return_exchange"
+
+
+def test_r5_mixed_tagged_item_defers_with_cards(monkeypatch):
+    """tagged-item + return_policy → same defer; the already-resolved
+    tagged card stays attached (no extra retrieval)."""
+    records, captured, client = _replay(
+        monkeypatch, _r5_fx("pos-policy-return-tagged-item"))
+    rec = records[-1]
+    resp = rec["resp"]
+    from shopeechat import guards as _g
+    assert rec["llm_calls"] == []
+    assert len(rec["handoffs"]) == 1
+    assert resp.handoff_to_admin is True
+    assert resp.answer == _g._POLICY_TEXT_ADMIN_REVIEW
+    assert _card_ids(resp.products or []) == {5001}, \
+        f"tagged card must remain attached: {resp.products}"
+
+
+@pytest.mark.parametrize("outcome",
+                         ["eligible", "ineligible", "unknown",
+                          "admin_review"])
+def test_r5_mixed_all_outcomes_defer_identically(monkeypatch, outcome):
+    """every typed outcome takes the same deferred admin-review path —
+    Phase 5 never auto-renders eligibility for mixed turns."""
+    import copy
+    fx = copy.deepcopy(_r5_fx("pos-policy-return-model-item"))
+    if outcome == "unknown":
+        # 'unknown' is a decision outcome — no matching rule may carry it;
+        # empty record source resolves to unknown honestly.
+        fx["policy_records"] = []
+    else:
+        for _r in fx["policy_records"]:
+            _r["outcome"] = outcome
+    records, captured, client = _replay(monkeypatch, fx)
+    rec = records[-1]
+    resp = rec["resp"]
+    from shopeechat import guards as _g
+    assert rec["llm_calls"] == []
+    assert resp.handoff_to_admin is True
+    assert resp.answer == _g._POLICY_TEXT_ADMIN_REVIEW
+    for _t in (_g._POLICY_TEXT_ELIGIBLE, _g._POLICY_TEXT_INELIGIBLE):
+        assert _t not in resp.answer
+    assert ((resp.routing_decision or {}).get("policy_decision") or {}
+            ).get("outcome") == outcome
+
+
+def test_r5_mixed_handoff_failure_no_success_claim(monkeypatch):
+    """failed transport → no flag, no admin-review wording, no LLM, no
+    eligibility conclusion — existing HANDOFF_FAILED_REPLY contract."""
+    fx = _r5_fx("pos-policy-return-model-item")
+    client, captured, handoff_calls = _install(monkeypatch, fx)
+
+    def _fail_send(req, ctx=None, *, reason="", **kw):
+        handoff_calls.append({"reason": reason})
+        return None
+    monkeypatch.setattr(app, "_send_handoff", _fail_send)
+    from shopeechat import responses as _resp_mod
+    monkeypatch.setattr(_resp_mod, "_send_handoff", _fail_send)
+    turn = fx["turns"][0]
+    resp = app.chat(app.ChatRequest(
+        message=turn["text"], shop=fx.get("shop"),
+        platform=fx.get("platform", "shopee"), history=[],
+        conversation_id=fx.get("conversation_id"), limit=5,
+        simulate_assignment=True, test_source="phase0_replay"))
+    from shopeechat import guards as _g
+    assert captured.calls == []
+    assert len(handoff_calls) == 1
+    assert resp.handoff_to_admin is False
+    assert resp.handoff_reason is None
+    assert resp.answer == _resp_mod.HANDOFF_FAILED_REPLY
+    assert _g._POLICY_TEXT_ADMIN_REVIEW not in resp.answer
+    for _t in (_g._POLICY_TEXT_ELIGIBLE, _g._POLICY_TEXT_INELIGIBLE):
+        assert _t not in resp.answer
+
+
+def test_r5_pure_policy_still_deterministic(monkeypatch):
+    """control — pure return_policy + authoritative ineligible →
+    deterministic typed rendering, zero model calls, no handoff."""
+    records, captured, client = _replay(
+        monkeypatch, _r5_fx("tx-policy-wrong-model-filter"))
+    rec = records[-1]
+    resp = rec["resp"]
+    from shopeechat import guards as _g
+    assert rec["llm_calls"] == [], \
+        f"pure return_policy must be zero-model: {rec['llm_calls']}"
+    assert rec["handoffs"] == []
+    assert resp.handoff_to_admin is False
+    assert resp.handoff_reason is None
+    assert resp.answer == _g._POLICY_TEXT_INELIGIBLE
+    assert ((resp.routing_decision or {}).get("policy_decision") or {}
+            ).get("outcome") == "ineligible"
+
+
+def test_r5_ordinary_product_flow_unchanged(monkeypatch):
+    """control — non-policy product turn still calls the product answer
+    path exactly once and returns the canned reply."""
+    records, captured, client = _replay(
+        monkeypatch, _r5_fx("iss29-bare-model-catalog"))
+    rec = records[-1]
+    resp = rec["resp"]
+    assert rec["llm_calls"] and rec["llm_calls"][-1].get("fn") == "answer"
+    assert resp.handoff_to_admin is False
+    assert (resp.routing_decision or {}).get("policy_decision") is None
+
+
+# ══════════════════════════════════════════════════════════════════
+# Phase 5 R6 — pure return_policy unknown/admin_review → authoritative
+# handoff; eligible/ineligible → deterministic zero-model render.
+#   (defect: unknown/admin_review reached answer_general — model call
+#   discarded + admin-review promise without any handoff)
+# ══════════════════════════════════════════════════════════════════
+
+_R6_PURE_FX = {
+    "id": "r6-pure-policy", "shop": "FilterShopTH", "platform": "shopee",
+    "conversation_id": "fx-r6-pure", "catalog": [],
+    "intent_result": {"intent": "general_question", "confidence": 0.9,
+                      "general_qtype": "return_policy",
+                      "policy_reason": "customer_wrong_model",
+                      "policy_item_condition": "sealed"},
+    "turns": [{"text": "ถ้าซื้อผิดรุ่นเอง ขอเปลี่ยนได้ไหมคะ"}],
+    "llm_reply": "ห้ามถูกเรียก — pure policy turn ต้องไม่ใช้ LLM",
+}
+
+
+def _r6_fx(records=None):
+    import copy
+    fx = copy.deepcopy(_R6_PURE_FX)
+    if records is not None:
+        fx["policy_records"] = records
+    return fx
+
+
+def _r6_rule(outcome):
+    return [{"rule_id": "r6-rule", "version": "fx-2026-01",
+             "policy_type": "return_exchange", "outcome": outcome,
+             "reason": "customer_wrong_model", "shops": ["FilterShopTH"],
+             "priority": 10, "source": "fixture-policy"}]
+
+
+def test_r6_pure_unknown_production_empty_rules_handoff(monkeypatch):
+    """production `active_policy_rules()` is empty → outcome unknown →
+    exactly one `policy_review_required` handoff, zero LLM calls."""
+    records, captured, client = _replay(monkeypatch, _r6_fx())
+    rec = records[-1]
+    resp = rec["resp"]
+    from shopeechat import guards as _g
+    assert rec["llm_calls"] == [], \
+        f"answer_general ran on pure unknown policy turn: {rec['llm_calls']}"
+    assert len(rec["handoffs"]) == 1
+    assert rec["handoffs"][0]["reason"] == "policy_review_required"
+    assert resp.handoff_to_admin is True
+    assert resp.handoff_reason == "policy_review_required"
+    assert resp.answer == _g._POLICY_TEXT_ADMIN_REVIEW
+    for _t in (_g._POLICY_TEXT_ELIGIBLE, _g._POLICY_TEXT_INELIGIBLE):
+        assert _t not in resp.answer
+    pdec = (resp.routing_decision or {}).get("policy_decision") or {}
+    assert pdec.get("outcome") == "unknown"
+    assert pdec.get("policy_type") == "return_exchange"
+
+
+def test_r6_pure_admin_review_decision_handoff(monkeypatch):
+    """explicit admin_review typed decision → same authoritative handoff."""
+    records, captured, client = _replay(
+        monkeypatch, _r6_fx(_r6_rule("admin_review")))
+    rec = records[-1]
+    resp = rec["resp"]
+    from shopeechat import guards as _g
+    assert rec["llm_calls"] == []
+    assert len(rec["handoffs"]) == 1
+    assert rec["handoffs"][0]["reason"] == "policy_review_required"
+    assert resp.handoff_to_admin is True
+    assert resp.answer == _g._POLICY_TEXT_ADMIN_REVIEW
+
+
+def test_r6_pure_unknown_handoff_failure_no_success_claim(monkeypatch):
+    """failed transport → HANDOFF_FAILED_REPLY, no flag/reason, no
+    admin-review wording, zero LLM calls."""
+    fx = _r6_fx()
+    client, captured, handoff_calls = _install(monkeypatch, fx)
+
+    def _fail_send(req, ctx=None, *, reason="", **kw):
+        handoff_calls.append({"reason": reason})
+        return None
+    monkeypatch.setattr(app, "_send_handoff", _fail_send)
+    from shopeechat import responses as _resp_mod
+    monkeypatch.setattr(_resp_mod, "_send_handoff", _fail_send)
+    turn = fx["turns"][0]
+    resp = app.chat(app.ChatRequest(
+        message=turn["text"], shop=fx.get("shop"),
+        platform=fx.get("platform", "shopee"), history=[],
+        conversation_id=fx.get("conversation_id"), limit=5,
+        simulate_assignment=True, test_source="phase0_replay"))
+    from shopeechat import guards as _g
+    assert captured.calls == []
+    assert len(handoff_calls) == 1
+    assert resp.handoff_to_admin is False
+    assert resp.handoff_reason is None
+    assert resp.answer == _resp_mod.HANDOFF_FAILED_REPLY
+    assert _g._POLICY_TEXT_ADMIN_REVIEW not in resp.answer
+    for _t in (_g._POLICY_TEXT_ELIGIBLE, _g._POLICY_TEXT_INELIGIBLE):
+        assert _t not in resp.answer
+
+
+@pytest.mark.parametrize("outcome,text_key",
+                         [("eligible", "_POLICY_TEXT_ELIGIBLE"),
+                          ("ineligible", "_POLICY_TEXT_INELIGIBLE")])
+def test_r6_pure_authoritative_outcome_no_handoff_no_llm(
+        monkeypatch, outcome, text_key):
+    """authoritative eligible/ineligible → deterministic text, zero model,
+    no handoff, typed decision retained in routing_decision."""
+    records, captured, client = _replay(
+        monkeypatch, _r6_fx(_r6_rule(outcome)))
+    rec = records[-1]
+    resp = rec["resp"]
+    from shopeechat import guards as _g
+    assert rec["llm_calls"] == []
+    assert rec["handoffs"] == [], \
+        f"authoritative {outcome} must not handoff: {rec['handoffs']}"
+    assert resp.handoff_to_admin is False
+    assert resp.handoff_reason is None
+    assert resp.answer == getattr(_g, text_key)
+    assert _g._POLICY_TEXT_ADMIN_REVIEW not in resp.answer
+    assert ((resp.routing_decision or {}).get("policy_decision") or {}
+            ).get("outcome") == outcome

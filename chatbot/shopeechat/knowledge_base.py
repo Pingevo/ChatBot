@@ -435,12 +435,14 @@ def build_general_context(
         faq = get_general_faq(kb_topic) if kb_topic else None
         faq_answer = (faq or {}).get("answer", "") or ""
 
-        # 2. ดึงจาก Mongo description — เฉพาะ return/shipping (ไม่ใช่ warranty)
-        #    สำหรับ warranty: ใช้แค่ general_faq เพราะเป็นเงื่อนไขทั่วไป
+        # 2. ดึงจาก Mongo description — เฉพาะ shipping เท่านั้น
+        #    Phase 5: return_policy ห้ามใช้ desc-scrape — prose ต่อชิ้นของสินค้า
+        #    ไม่ใช่หลักฐาน eligibility (ตัดสินด้วย PolicyDecision เท่านั้น)
+        #    warranty: ใช้แค่ general_faq เพราะเป็นเงื่อนไขทั่วไป
         #    ถ้าดึงจาก description สินค้า จะทำให้ LLM ยกตัวอย่างสินค้าเฉพาะมาตอบ
         #    ทั้งที่ลูกค้ายังไม่ได้ถามสินค้าใดเฉพาะเจาะจง
         mongo_sections = ""
-        if mongo_db is not None and qtype != "warranty_policy":
+        if mongo_db is not None and qtype == "shipping_policy":
             coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
             mongo_coll = mongo_db[coll_name]
             policy_key = qtype.replace("_policy", "")

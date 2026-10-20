@@ -74,6 +74,17 @@ _REWRITE_SKIP_PREFIXES = (
 #     เพราะ "ไม่รับคืน" มี "คืน" แต่เป็นความหมายตรงข้าม (NEW-3 residual)
 #   mode "stock" — grounded เมื่อมี card ที่ขายได้จริง (_available_for_sale)
 #     ไม่ใช่เช็คข้อความ (BUG-K: claim "พร้อมส่ง" ทั้งที่ทุก card หมด/เลิกขาย)
+# Phase 5 — return-claim vocabulary เดียว ใช้ร่วมกันทั้ง generic prose path
+#   (lookbehind กัน negation) และ typed-policy path (ไม่มี lookbehind —
+#   polarity ตรวจด้วย _NEGATION_RE lookback แยกเอา)
+_RETURN_CLAIM_CORE = (
+    r"(?:เปลี่ยน(?:สินค้า|ใหม่)?ได้|คืน(?:สินค้า|ของ|เงิน)ได้"
+    r"|รับเปลี่ยน|รับคืน)")
+# deterministic conclusion text ตาม typed outcome — ไม่ใช่ prose ที่ LLM เลือกเอง
+_POLICY_TEXT_ELIGIBLE = "เปลี่ยน/คืนได้ตามเงื่อนไขของทางร้านนะคะ"
+_POLICY_TEXT_INELIGIBLE = "เคสนี้ยังไม่เข้าเงื่อนไขการเปลี่ยน/คืนนะคะ"
+_POLICY_TEXT_ADMIN_REVIEW = ("เรื่องการเปลี่ยน/คืนสินค้า "
+                           "เดี๋ยวขอให้แอดมินตรวจสอบเงื่อนไขให้นะคะ")
 _REWRITE_RULES = (
     ("promo_claim", re.compile(
         r"(?<!ไม่)(?<!ไม่ได้)"
@@ -87,8 +98,7 @@ _REWRITE_RULES = (
      "text",
      "เรื่องของแถม/โปรโมชั่น เดี๋ยวขอให้แอดมินตรวจสอบให้นะคะ"),
     ("return_claim", re.compile(
-        r"(?<!ไม่สามารถ)(?<!ไม่)(?<!ไม่ได้)"
-        r"(?:เปลี่ยน(?:สินค้า|ใหม่)?ได้|คืน(?:สินค้า|ของ|เงิน)ได้|รับเปลี่ยน|รับคืน)"
+        r"(?<!ไม่สามารถ)(?<!ไม่)(?<!ไม่ได้)" + _RETURN_CLAIM_CORE
     ),
      re.compile(r"(?:เปลี่ยน|คืน|แลกเปลี่ยน|return|refund)", re.I),
      (),
@@ -123,7 +133,7 @@ _MODEL_TOKEN_STOP = re.compile(
 #   3 กลุ่ม: <เลข><หน่วย> / IPxx rating / protocol version (PD3.0/QC4/WiFi6)
 #   + bare protocol ที่เจาะจง (UFCS/PPS/GaN/Qi) — negation นำหน้าข้ามใน enforce
 _SPEC_CLAIM_RE = re.compile(
-    r"(?:\d+(?:\.\d+)?\s*(?:"
+    r"(?:\d+(?:[.,]\d+)*\s*(?:"
     r"mAh|mWh|Wh|mA|kW|W|kV|V|A|Hz|kHz|MHz|GHz"
     r"|GB|TB|MB|KB|Gbps|Mbps|MP|ATM|dB|nits?|ohm|Ω"
     r"|วัตต์|โวลต์|แอมป์|นิ้ว|มม\.?|ซม\.?|เมตร"
@@ -228,6 +238,34 @@ _CLAUSE_BOUNDARY = re.compile(
     r"\n|\|\|\||(?<=[.!?])\s|(?:ค่ะ|คะ|ครับ|ครับผม|จ้า|จ๊ะ|นะคะ|นะค่ะ|นะครับ)\s+")
 
 
+def _spec_fact_grounded(resp, tok: str) -> bool:
+    """Phase 5 H5/R2 — spec claim ต้อง ground ด้วย FieldEvidence ของ
+    subject เดียวกันเท่านั้น (identity-scoped).
+
+    - 0 subject_ids → legacy pool: cards ทั้งหมด + grounding_text
+    - 1 subject_id → facts ของ subject นั้นเท่านั้น
+    - >1 subject_ids → fail closed เสมอ: free-form answer ไม่มีโครงสร้าง
+      ผูก claim↔subject (answer_segments = plain text) — fact ของ A ห้าม
+      ไป ground claim ของ B และไม่มีทางรู้ว่า claim พูดถึงใคร
+    """
+    from . import policy_resolver as _pr, candidate_pool as _cp
+    _rd = getattr(resp, "routing_decision", None)
+    _sids = set(_rd.get("subject_ids") or ()) if isinstance(_rd, dict) else set()
+    if len(_sids) > 1:
+        return False
+    cards = list(getattr(resp, "products", None) or [])
+    if _sids:
+        cards = [p for p in cards if _cp._identity_key(p)[0] in _sids]
+    for _p in cards:
+        _sid = _cp._identity_key(_p)[0]
+        if _sid and _pr.claim_supported(
+                _pr.extract_field_facts(_p), _sid, tok):
+            return True
+    if _sids:
+        return False  # subject-scoped turn — grounding_text ไม่ผูก identity
+    return tok in set(_pr._spec_tokens(_grounding_text(resp)))
+
+
 def _replace_clause(text: str, start: int, end: int, repl: str) -> str:
     """แทนที่ clause ทั้งก้อนที่ครอบ span [start,end) ด้วย repl —
     กันเหลือเศษข้อความของ claim เดิมค้างกลางประโยค."""
@@ -256,11 +294,47 @@ def enforce(resp, req):
     import sys as _sys
     try:
         answer = getattr(resp, "answer", "") or ""
-        if not answer or getattr(resp, "handoff_to_admin", False):
+        if getattr(resp, "handoff_to_admin", False):
             return resp
         from . import llm as _llm
+        from . import responses as _resp_mod
+        # R3 — failure contract ก่อน policy composition เสมอ: provider
+        #   error ต้อง escalate ไม่ให้ข้อความนโยบายกลืนความล้มเหลว
         if answer == _llm.LLM_ERROR_REPLY:
             _escalate(resp, req, reason="llm_error", rule_name="llm_error")
+            return resp
+        # Phase 5 closeout — handoff-failure reply เป็น terminal: typed
+        #   policy render/rewrite tier ห้ามเขียนทับคำตอบที่บอกว่า transport
+        #   ล้มเหลว (identity check เหมือน LLM_ERROR_REPLY — ไม่ใช่ prose scan)
+        if answer == _resp_mod.HANDOFF_FAILED_REPLY:
+            return resp
+        # Phase 5 H1/R2/R3 — typed PolicyDecision ใน routing_decision เป็น
+        #   owner เดียวของ return_exchange eligibility — render deterministic
+        #   text ตาม outcome ตรงๆ: ไม่ scan LLM prose เพื่อตัดสินว่าเห็นด้วย
+        #   ไหม (phrase list ไม่มีทางครอบทุกรูปแบบคำ)
+        #   R5 closeout — mixed composition deleted: return-policy turns
+        #   ที่มี product need fail-close เป็น handoff ใน app._chat_impl
+        #   ก่อน product LLM; ที่เหลือคือ pure policy → render เต็มคำตอบ
+        #   structural marker `guard_rewritten=="policy_decision"` คือ
+        #   idempotency authority เดียว (R4)
+        _rd0 = getattr(resp, "routing_decision", None)
+        _pdec = (_rd0.get("policy_decision")
+                 if isinstance(_rd0, dict) else None)
+        _pdec_active = isinstance(_pdec, dict) and \
+            _pdec.get("policy_type") == "return_exchange"
+        if _pdec_active:
+            _oc = _pdec.get("outcome")
+            _final = (_POLICY_TEXT_ELIGIBLE if _oc == "eligible"
+                      else _POLICY_TEXT_INELIGIBLE if _oc == "ineligible"
+                      else _POLICY_TEXT_ADMIN_REVIEW)
+            resp.answer = _final
+            resp.answer_segments = _llm.split_segments(_final)
+            if isinstance(_rd0, dict):
+                _rd0["guard_rewritten"] = "policy_decision"
+            print(f"[GUARD-ENFORCE] policy_decision outcome={_oc} "
+                  "→ deterministic render", file=_sys.stderr)
+            return resp
+        if not answer:
             return resp
         for _name, _rx, _repl in _ESCALATE_RULES:
             if _rx.search(answer):
@@ -342,21 +416,23 @@ def enforce(resp, req):
                 #   ลูกค้าไม่ใช่หลักฐาน spec ("รองรับ 65W ไหม" ห้าม ground ตัวเอง)
                 #   negation นำหน้า ("ไม่รองรับ IP68") = ปฏิเสธ spec ไม่ใช่ claim → ข้าม
                 #   loop ≤4 เคลียร์หลาย clause; token normalize = strip ช่องว่าง+lower
+                #   Phase 5 H5 — grounding เปลี่ยนเป็น typed FieldEvidence:
+                #   routing_decision["subject_ids"] มี → เฉพาะ facts ของ subject
+                #   identity นั้นเท่านั้น (spec ของ product อื่นในหน้าไม่ ground);
+                #   ไม่มี → card ทั้งหมด + grounding_text เหมือนเดิม
                 _rd = getattr(resp, "routing_decision", None)
                 if not _rewritten and not (isinstance(_rd, dict) and _rd.get("guard_rewritten")):
-                    _pool_ns = None
                     for _ in range(4):
                         _ans = getattr(resp, "answer", "") or ""
                         _bad_spec = None
                         for _sm in _SPEC_CLAIM_RE.finditer(_ans):
                             if _NEGATION_RE.search(_ans[max(0, _sm.start() - 20):_sm.start()]):
                                 continue
-                            if _pool_ns is None:
-                                _pool_ns = re.sub(
-                                    r"[\s,]+", "", _evidence_pool(resp))
-                            if re.sub(r"[\s,]+", "", _sm.group(0)).lower() not in _pool_ns:
-                                _bad_spec = _sm
-                                break
+                            _tok = re.sub(r"[\s,]+", "", _sm.group(0)).lower()
+                            if _spec_fact_grounded(resp, _tok):
+                                continue
+                            _bad_spec = _sm
+                            break
                         if not _bad_spec:
                             break
                         _new = _replace_clause(

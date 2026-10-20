@@ -404,6 +404,10 @@ def attach_kb_specs(unit_docs: list[dict]) -> list[dict]:
             specs = next((spec_of[c] for c in u["model_codes"] if spec_of.get(c)), None)
             if specs:
                 u["canonical_specs"] = specs
+                # Phase 5 — provenance: specs ยืมมาจาก kb_products ผ่าน
+                #   model_codes ของ unit เอง (identity-bound ไม่ข้าม product)
+                #   แต่ต้องบอกตรงว่าไม่ใช่ declared spec ของ listing
+                u["_specs_origin"] = "kb_inherit"
     except Exception as exc:
         print(f"[UNITS] kb spec inherit error: {exc}", file=sys.stderr)
     return unit_docs

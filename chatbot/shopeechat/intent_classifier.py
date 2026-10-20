@@ -101,6 +101,26 @@ subject_scope: ลูกค้าอ้างอิงสินค้าที�
 
 subject_count: ตัวเลขจำนวนสินค้าที่ลูกค้าระบุ เฉพาะเมื่อ subject_scope=current_set ("2 อันนี้"→2, "ทั้งสาม"→3) — null ถ้าไม่ระบุตัวเลขหรือ scope อื่น
 
+policy_reason: สาเหตุที่ลูกค้าอยากเปลี่ยน/คืน (เฉพาะเมื่อ general_qtype="return_policy" หรือคำถามเกี่ยวกับเปลี่ยน/คืน) — เลือกจาก:
+- "customer_wrong_model": ลูกค้าซื้อผิดรุ่นเอง / อยากเปลี่ยนเพราะเลือกผิด
+- "seller_wrong_item": ทางร้านส่งผิดรุ่น/ผิดของ
+- "defect": สินค้าชำรุด/ใช้งานไม่ได้
+- "damage": สินค้าเสียหายระหว่างขนส่ง/แกะกล่องเจอของเสีย
+- "unknown": ไม่ได้ระบุ / ไม่ใช่คำถามเปลี่ยนคืน
+
+policy_item_condition: สภาพสินค้าที่ลูกค้าบอก (เฉพาะกรณีเปลี่ยน/คืน) — เลือกจาก:
+- "sealed": ยังไม่แกะซีล/กล่อง
+- "outer_opened": แกะกล่องนอกแล้ว แต่ยังไม่ใช้งาน
+- "inner_opened": แกะซีลใน/ใช้งานครั้งเดียว
+- "used": ใช้งานแล้ว
+- "unknown": ไม่ได้ระบุ / ไม่เกี่ยวกับเปลี่ยนคืน
+
+policy_order_state: สถานะออเดอร์ที่เกี่ยวข้อง (เฉพาะกรณีเปลี่ยน/คืน) — เลือกจาก:
+- "unshipped": ยังไม่จัดส่ง
+- "shipped": จัดส่งแล้ว/อยู่ระหว่างขนส่ง
+- "delivered": ได้รับของแล้ว
+- "unknown": ไม่ได้ระบุ / ไม่เกี่ยวกับเปลี่ยนคืน
+
 confidence: ความมั่นใจ 0.0-1.0
 
 ตัวอย่าง:
@@ -147,7 +167,10 @@ confidence: ความมั่นใจ 0.0-1.0
 {"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"shipping_policy","confidence":0.95}
 
 คำถาม: "มีรับคืนไหม"
-{"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"return_policy","confidence":0.95}
+{"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"return_policy","policy_reason":"unknown","policy_item_condition":"unknown","policy_order_state":"unknown","confidence":0.95}
+
+คำถาม: "ถ้าซื้อผิดรุ่นเอง ยังไม่ได้แกะเลย เปลี่ยนได้ไหม"
+{"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"return_policy","policy_reason":"customer_wrong_model","policy_item_condition":"sealed","policy_order_state":"delivered","confidence":0.9}
 
 คำถาม: "รับประกันกี่ปี"
 {"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"warranty_policy","confidence":0.95}
@@ -180,6 +203,10 @@ _DEFAULT_RESULT: dict[str, Any] = {
     "general_qtype": None,
     "subject_scope": "none",
     "subject_count": None,
+    # Phase 5 — typed policy signals (closed enum; invalid → "unknown")
+    "policy_reason": "unknown",
+    "policy_item_condition": "unknown",
+    "policy_order_state": "unknown",
     "confidence": 0.0,
 }
 
@@ -255,6 +282,14 @@ def classify_intent(
             result["intent"] = "other"
         if result.get("subject_scope") not in _SUBJECT_SCOPES:
             result["subject_scope"] = "none"
+        # Phase 5 — policy signals: closed enums เท่านั้น, ค่าอื่น → unknown
+        from . import policy_resolver as _polres
+        if result.get("policy_reason") not in _polres.POLICY_REASONS:
+            result["policy_reason"] = "unknown"
+        if result.get("policy_item_condition") not in _polres.POLICY_CONDITIONS:
+            result["policy_item_condition"] = "unknown"
+        if result.get("policy_order_state") not in _polres.POLICY_ORDER_STATES:
+            result["policy_order_state"] = "unknown"
         try:
             _sc = result.get("subject_count")
             _sc = None if _sc is None else int(_sc)
