@@ -82,7 +82,7 @@ def _run(msg, unit_cards=(), legacy_cards=(), history=()):
     results = execute_grouped_retrieval_requests(
         reqs, message=msg, shop="KingGadgets",
         fetcher=units_fetcher,
-        legacy_fetcher=lambda m, **kw: list(legacy_cards))
+        legacy_fetcher=lambda m, **kw: list(legacy_cards), snap=None)
     pool = build_candidate_pool(results, profile=prof)
     sel = select_for_llm_context(pool, reqs, prof)
     return prof, reqs, results, pool, sel
@@ -197,9 +197,11 @@ def test_unlist_compare_target_not_subject():
 
 
 def test_role_notes_in_runtime():
-    """role note: subject=ถามถึงโดยตรง · alternative=ทดแทน · unavailable subject มีเตือน"""
-    assert "ทดแทน" in retrieval_runtime._ROLE_NOTE.get("alternative", "")
-    assert "ถามถึง" in retrieval_runtime._ROLE_NOTE.get("subject", "")
+    """role note: subject=ถามถึงโดยตรง · alternative=ทดแทน · unavailable subject มีเตือน
+    (Phase 7: owner ย้ายไป answer_context — compiler เป็น role-note owner เดียว)"""
+    from shopeechat import answer_context as _acx
+    assert "ทดแทน" in _acx._ROLE_NOTE.get("alternative", "")
+    assert "ถามถึง" in _acx._ROLE_NOTE.get("subject", "")
 
 
 def test_price_followup_keeps_compare_subjects():
@@ -225,12 +227,12 @@ def test_hidden_only_grouped_selection_returns_none():
         fetcher=lambda m, **kw: UnitEvidenceFetchResult(
             cards=(hidden,), raw_count=1, sellable_count=0,
             unavailable_count=0, trace=("fake",)),
-        legacy_fetcher=lambda m, **kw: [])
-    # pipeline รันได้แต่ selected ว่าง → dict(selected_cards=[]) —
-    # identity ห้ามรั่ว และไม่มี products/context ของตัวนี้
+        legacy_fetcher=lambda m, **kw: [], snap=None)
+    # pipeline รันได้แต่ selected ว่าง → selection.selected=() —
+    # identity ห้ามรั่ว และไม่มี products/context ของตัวนี้ (Phase 7 typed shape)
     assert out is not None
-    assert out["selected_cards"] == []
-    assert "WPB100L" not in str(out)
+    assert out["selection"].selected == ()
+    assert "WPB100L" not in str(out["selection"])
 
 
 def test_model_not_normal_listing_normal_not_customer_visible():

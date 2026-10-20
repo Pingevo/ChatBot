@@ -80,6 +80,7 @@ def _request_profile(req: RetrievalRequest, query: str, shop: str | None,
         target_device=req.target_device,
         availability_mode=req.availability_mode,
         compat_mode=req.compat_mode,
+        value_constraints=req.value_constraints,
     )
 
 

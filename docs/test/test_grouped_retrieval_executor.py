@@ -72,7 +72,8 @@ def test_relation_executes_base_and_target_requests():
         if prof.subtype != "cable"
         else _card("cable 2m", "cable", charger_subtype="cable")])
     results = execute_grouped_retrieval_requests(
-        reqs, message="ignored", shop="KingGadgets", fetcher=fetcher)
+        reqs, message="ignored", shop="KingGadgets", fetcher=fetcher,
+        snap=None)
 
     assert len(results) == 2
     base = next(r for r in results if r.source == "slot")
@@ -96,7 +97,7 @@ def test_exact_model_executes_identity_request_only():
     reqs = _pipeline("รุ่น AD1404T ยังมีขายไหม")
     fetcher = _FakeFetcher(lambda prof: [_card("AD1404T", "charger")])
     results = execute_grouped_retrieval_requests(
-        reqs, message="x", shop="KingGadgets", fetcher=fetcher)
+        reqs, message="x", shop="KingGadgets", fetcher=fetcher, snap=None)
 
     assert len(results) == 1
     assert fetcher.calls[0]["profile"].model_codes == ("AD1404T",)
@@ -106,7 +107,8 @@ def test_exact_model_executes_identity_request_only():
 def test_device_compat_no_relation_target():
     reqs = _pipeline("หัวชาร์จ AD653T ใช้กับ ip14 ได้ไหม")
     results = execute_grouped_retrieval_requests(
-        reqs, message="x", shop="KingGadgets", fetcher=_FakeFetcher())
+        reqs, message="x", shop="KingGadgets", fetcher=_FakeFetcher(),
+        snap=None)
 
     assert all(r.source != "relation_target" for r in results)
     assert not any(k == "target_device" for k, _ in results[0].hard_filters)
@@ -115,7 +117,8 @@ def test_device_compat_no_relation_target():
 def test_bare_head_executes_nothing():
     reqs = _pipeline("หัวอันนี้ใช้กับสายไหน")
     assert execute_grouped_retrieval_requests(
-        reqs, message="x", shop="KingGadgets", fetcher=_FakeFetcher()) == ()
+        reqs, message="x", shop="KingGadgets", fetcher=_FakeFetcher(),
+        snap=None) == ()
 
 
 def test_multi_slot_separate_quota_no_cross_fill():
@@ -126,7 +129,7 @@ def test_multi_slot_separate_quota_no_cross_fill():
         _card("เคส iPhone 15", "case", unit_id="c1")]
         if "case" in prof.product_types else [])
     results = execute_grouped_retrieval_requests(
-        reqs, message="x", shop="KingGadgets", fetcher=fetcher)
+        reqs, message="x", shop="KingGadgets", fetcher=fetcher, snap=None)
 
     by_slot = {}
     for r in results:
@@ -147,7 +150,7 @@ def test_all_dead_units_become_unavailable_evidence_not_lost():
     fetcher = _FakeFetcher(lambda prof: [
         _card("AD1404T dead", "charger", avail=False, unit_id="dead1")])
     results = execute_grouped_retrieval_requests(
-        reqs, message="x", shop="KingGadgets", fetcher=fetcher)
+        reqs, message="x", shop="KingGadgets", fetcher=fetcher, snap=None)
 
     r = results[0]
     assert r.eligible_candidates == ()
@@ -164,7 +167,7 @@ def test_wrong_device_card_goes_rejected_not_eligible():
         _card("ฟิล์ม Mi Band 8 Pro", "screen_protector"),
         _card("ฟิล์มกันรอยสำหรับ iPhone 15", "screen_protector")])
     results = execute_grouped_retrieval_requests(
-        reqs, message="x", shop="KingGadgets", fetcher=fetcher)
+        reqs, message="x", shop="KingGadgets", fetcher=fetcher, snap=None)
 
     r = results[0]
     names = {c["name"] for c in r.eligible_candidates}
@@ -186,7 +189,7 @@ def test_wrong_type_card_rejected():
         reqs, message="x", shop="KingGadgets", fetcher=_FakeFetcher(
             lambda prof: [
                 _card("สายชาร์จ type-c", "cable", charger_subtype="cable"),
-                _card("เคส iPhone 15", "case")]))[0]
+                _card("เคส iPhone 15", "case")]), snap=None)[0]
     assert [c["name"] for c in r.eligible_candidates] == ["เคส iPhone 15"]
     assert r.rejected_evidence[0]["name"] == "สายชาร์จ type-c"
 
@@ -197,7 +200,7 @@ def test_subtype_mismatch_rejected_in_cable_target():
     fetcher = _FakeFetcher(lambda prof: [
         _card("หัวชาร์จ", "charger", charger_subtype="adapter")])
     results = execute_grouped_retrieval_requests(
-        reqs, message="x", shop="KingGadgets", fetcher=fetcher)
+        reqs, message="x", shop="KingGadgets", fetcher=fetcher, snap=None)
     target = next(r for r in results if r.source == "relation_target")
     assert target.eligible_candidates == ()
     assert target.rejected_evidence
@@ -214,7 +217,7 @@ def test_source_error_isolated_not_fatal():
         return _res([_card("ฟิล์ม iPhone 15", "screen_protector")])
 
     results = execute_grouped_retrieval_requests(
-        reqs, message="x", shop="KingGadgets", fetcher=flaky)
+        reqs, message="x", shop="KingGadgets", fetcher=flaky, snap=None)
     assert results[0].error == "db down"
     assert any(r.error is None and r.eligible_candidates
                for r in results[1:])
@@ -247,7 +250,7 @@ def test_multi_subtype_slot_fetch_not_narrowed_to_one_subtype():
 
     results = execute_grouped_retrieval_requests(
         (req,), message="หัวชาร์จกับสายชาร์จ", shop="s",
-        fetcher=subtype_filtered_fetcher, legacy_fetcher=None)
+        fetcher=subtype_filtered_fetcher, legacy_fetcher=None, snap=None)
     got = {c.get("charger_subtype") or c.get("cable_subtype")
            for c in results[0].eligible_candidates}
     assert {"adapter", "cable"} <= got

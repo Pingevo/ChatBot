@@ -641,17 +641,15 @@ def test_flag_off_skips_union_and_preserves_legacy_payload(monkeypatch):
 
 
 def test_flag_on_source_failure_fails_closed(monkeypatch):
-    """flag ON + pipeline raise → products=[] fail closed — legacy ไม่ re-enter."""
+    """flag ON + pipeline raise → deterministic reply, 0 answer-model calls —
+    legacy llm.answer/legacy products ไม่ re-enter (typed boundary fail-closed)."""
     calls = _spy_run(monkeypatch, exc=RuntimeError("boom"))
     resp, captured = _chat(monkeypatch, _fx("on", grouped=True),
                            "มี WPB100L ไหม")
     assert calls["n"] == 1
-    payloads = _payloads(captured)
-    assert payloads
-    for pl in payloads:
-        assert pl == [], pl
-        for p in pl:
-            assert "WPB100L" not in str(p.get("name", ""))
+    assert not [c for c in captured.calls
+                if c["fn"] in ("answer", "answer_typed")], (
+        f"pipeline failure must not reach the model: {captured.calls}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -857,7 +855,7 @@ def test_run_grouped_selection_supporting_records_passed_intact(monkeypatch):
         prof, message="มี WPB100L ไหม", shop=SHOP, platform="shopee",
         fetcher=lambda m, **k: _ures([]),
         legacy_fetcher=lambda m, **k: [],
-        supporting=sup)
+        supporting=sup, snap=None)
     assert out is not None
     got = captured.get("sup")
     assert got is not None and all(isinstance(r, dict) for r in got), (

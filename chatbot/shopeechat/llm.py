@@ -1332,6 +1332,31 @@ def describe_images(
     return "\n".join(descriptions), total_usage
 
 
+def _history_contents(history: list[dict] | None,
+                      single_product: bool) -> list[dict]:
+    """แปลง history → Gemini contents — model answer ตัดเหลือ 200 chars
+    (ยกเว้น context มีสินค้าเดียว = คุยเรื่องเดียวกัน → ส่งเต็ม);
+    แนบ image_desc ใน user text (Phase 1A multimodal)."""
+    contents: list[dict] = []
+    for h in history or ():
+        role = h.get("role", "user")
+        text = h.get("text", "")
+        if role not in ("user", "model"):
+            role = "user"
+        # ⚡ Phase 1A multimodal — แนบ image_desc ใน history text ถ้ามี
+        #    ทำให้ LLM หลักเห็น description ของรูปเก่าโดยไม่ต้องอ่านรูปซ้ำ
+        _h_img_desc = h.get("image_desc", "")
+        if _h_img_desc and role == "user":
+            text = f"{text} (รูปที่ส่ง: {_h_img_desc})"
+        # สำหรับคำตอบ model ก่อนหน้า ให้ส่งแค่สรุปสั้นๆ ไม่ส่ง full answer
+        # เพื่อป้องกัน LLM อ้างอิงสินค้าจากคำตอบเดิมแทน context ปัจจุบัน
+        # ⚡ แต่ถ้ามีแค่ 1 สินค้าใน context = คุยเรื่องเดียวกัน → ส่ง history เต็ม
+        if role == "model" and len(text) > 200 and not single_product:
+            text = text[:200] + "... (คำตอบก่อนหน้า อย่าอ้างอิงสินค้าจากนี้)"
+        contents.append({"role": role, "parts": [{"text": text}]})
+    return contents
+
+
 def answer(
     message: str,
     products: list[dict],
@@ -1436,26 +1461,7 @@ def answer(
         f"ให้ตอบว่าเปลี่ยนได้ไหม + ขนาดสาย + วิธีเปลี่ยนเบื้องต้น ไม่ใช่ตอบแค่ 'เปลี่ยนได้ค่ะ'"
     )
 
-    contents: list[Any] = []
-    if history:
-        # นับจำนวนสินค้าใน context — ถ้ามีแค่ 1 สินค้า = คุยเรื่องเดียวกัน → ส่ง history เต็ม
-        _single_product = len(products) == 1
-        for h in history:
-            role = h.get("role", "user")
-            text = h.get("text", "")
-            if role not in ("user", "model"):
-                role = "user"
-            # ⚡ Phase 1A multimodal — แนบ image_desc ใน history text ถ้ามี
-            #    ทำให้ LLM หลักเห็น description ของรูปเก่าโดยไม่ต้องอ่านรูปซ้ำ
-            _h_img_desc = h.get("image_desc", "")
-            if _h_img_desc and role == "user":
-                text = f"{text} (รูปที่ส่ง: {_h_img_desc})"
-            # สำหรับคำตอบ model ก่อนหน้า ให้ส่งแค่สรุปสั้นๆ ไม่ส่ง full answer
-            # เพื่อป้องกัน LLM อ้างอิงสินค้าจากคำตอบเดิมแทน context ปัจจุบัน
-            # ⚡ แต่ถ้ามีแค่ 1 สินค้าใน context = คุยเรื่องเดียวกัน → ส่ง history เต็ม
-            if role == "model" and len(text) > 200 and not _single_product:
-                text = text[:200] + "... (คำตอบก่อนหน้า อย่าอ้างอิงสินค้าจากนี้)"
-            contents.append({"role": role, "parts": [{"text": text}]})
+    contents: list[Any] = _history_contents(history, len(products) == 1)
     contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
     # DEBUG: log context ที่ส่ง LLM
@@ -1501,6 +1507,74 @@ def answer(
         usage_info = {"prompt": prompt_t, "output": output_t, "total": total_t}
         print(f"[LLM] model={model_name}  prompt={prompt_t}  output={output_t}  total={total_t}  products={len(products)}")
 
+    return _strip_kb_markup((resp.text or "").strip()), usage_info
+
+
+def answer_typed(
+    *,
+    context,
+    shop_hint: str | None = None,
+    model: str | None = None,
+    persona_extra: str = "",
+) -> tuple[str, dict]:
+    """Phase 7 grouped-path answer — input เดียว = typed AnswerContext.
+
+    signature ไม่มี message/products/merged_products/extra_context/history —
+    `context.task.render()` คือ instruction contract เดียว (closed-template
+    จาก typed need fields — raw customer prose/history ข้าม boundary ไม่ได้;
+    follow-up identity มาจาก typed needs/subject_refs/requests เท่านั้น);
+    `context.context_text()` คือ product payload ที่ bounded + attributed.
+    estimated tokens = ceil(utf8_bytes/3) — estimate เท่านั้น ไม่ใช่
+    provider truth.
+    """
+    from .answer_context import estimate_tokens as _est_tokens
+    try:
+        _client()
+    except RuntimeError as exc:
+        return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ", {"prompt": 0, "output": 0, "total": 0}
+    model_name = (model or get_model("chat")).strip()
+    task_text = context.task.render()
+    system_instruction = SYSTEM_INSTRUCTION + persona_extra + _lang_instruction(task_text)
+    ctx_body = context.context_text(shop_hint=shop_hint)
+    user_prompt = (
+        f"{ctx_body}\n\n"
+        f"งานที่ต้องทำ:\n{task_text}\n\n"
+        f"สำคัญ: ตอบจากข้อมูลสินค้าใน context ด้านบนเป็นหลัก "
+        f"สินค้าที่ตรงกับคำถามมากที่สุดอยู่ลำดับแรกของ context\n\n"
+        f"⚠️ ความยาวคำตอบ: ตอบให้ครบถ้วน ไม่สั้นเกินไป ไม่ยาวเกินไป "
+        f"ประมาณ 2-3 บรรทัด (60-120 คำ) — อย่าตอบแค่ 1 ประโยคสั้นๆ "
+        f"ถ้ามีข้อมูลที่เป็นประโยชน์ให้ตอบครบ พร้อมรายละเอียดที่เกี่ยวข้อง "
+        f"แต่ไม่ต้องยาวจนเกินไป"
+    )
+    contents: list[Any] = [{"role": "user", "parts": [{"text": user_prompt}]}]
+
+    usage_info = {"prompt": 0, "output": 0, "total": 0}
+    try:
+        resp = _generate(
+            model_name,
+            contents,
+            {
+                "system_instruction": system_instruction,
+                "temperature": 0.3,
+                "max_output_tokens": 4096,
+            },
+            role="chat",
+        )
+    except genai_errors.ClientError as exc:
+        return _error_reply(exc, "answer_typed"), usage_info
+    except Exception as exc:
+        return _error_reply(exc, "answer_typed"), usage_info
+
+    usage = getattr(resp, "usage_metadata", None)
+    if usage:
+        prompt_t = getattr(usage, "prompt_token_count", 0) or 0
+        output_t = getattr(usage, "candidates_token_count", 0) or 0
+        total_t = getattr(usage, "total_token_count", 0) or (prompt_t + output_t)
+        usage_info = {"prompt": prompt_t, "output": output_t, "total": total_t}
+        print(f"[LLM] answer_typed model={model_name}  prompt={prompt_t}  output={output_t}  total={total_t}  products={len(context.products)}")
+    usage_info["estimated_context_tokens"] = context.estimated_tokens
+    usage_info["estimated_system_tokens"] = _est_tokens(system_instruction)
+    usage_info["estimated_prompt_tokens"] = _est_tokens(user_prompt)
     return _strip_kb_markup((resp.text or "").strip()), usage_info
 
 

@@ -97,7 +97,7 @@ def _run(cards, req, legacy_cards=()):
         (req,), message="q", shop="s",
         fetcher=lambda m, **kw: _ures(cards),
         legacy_fetcher=(lambda m, **kw: _ures(legacy_cards))
-        if legacy_cards else None)
+        if legacy_cards else None, snap=None)
 
 
 # ── A) type/role normalization ───────────────────────────────────────────────
@@ -576,11 +576,12 @@ def test_unlist_only_run_grouped_selection_returns_empty_not_none():
         _real_path("สายชาร์จ WPB100L มีไหม")[0],
         message="สายชาร์จ WPB100L มีไหม", shop="s",
         fetcher=lambda m, **kw: _ures([_unlist_card()]),
-        legacy_fetcher=lambda m, **kw: [])
+        legacy_fetcher=lambda m, **kw: [], snap=None)
     assert out is not None
-    assert out["selected_cards"] == []
-    # hidden identity ห้ามรั่ว — ไม่มี unavailable evidence ของ UNLIST
-    assert "WPB100L" not in str(out)
+    assert out["selection"].selected == ()
+    # hidden identity ห้ามรั่ว — ไม่มี unavailable evidence ของ UNLIST ใน
+    # selection (LLM-facing artifact; pool internals ไม่ถึง LLM)
+    assert "WPB100L" not in str(out["selection"])
 
 
 # ── Correction Round 2 — RED probes (probe-verified ก่อนเขียน) ───────────────
@@ -753,13 +754,13 @@ def test_flag_on_callsites_replace_not_merge():
     src = _app_source()
     assert "merge_selected_products" not in src
     lines = src.splitlines()
+    # Phase 7 — answer boundary = _typed_answer_boundary (KB + main callsite)
     hits = [i for i, l in enumerate(lines)
-            if 'selected_cards"][:_llm_ctx_limit]' in l]
+            if "_typed_answer_boundary(" in l and "= _typed" in l]
     assert len(hits) == 2, f"expected 2 answer boundaries, found {len(hits)}"
     for i in hits:
         ctx = "\n".join(lines[i - 3:i + 2])
         assert "if _sel_flag:" in ctx
-        assert "else [])" in ctx      # run→None → products=[] (fail closed)
 
 
 def test_run_grouped_selection_empty_returns_dict_not_none():
@@ -770,9 +771,9 @@ def test_run_grouped_selection_empty_returns_dict_not_none():
         _real_path("มีสายชาร์จไหม")[0],
         message="มีสายชาร์จไหม", shop="s",
         fetcher=lambda m, **kw: _ures([]),
-        legacy_fetcher=lambda m, **kw: [])
+        legacy_fetcher=lambda m, **kw: [], snap=None)
     assert out is not None
-    assert out["selected_cards"] == []
+    assert out["selection"].selected == ()
 
 
 # ── D) publication-map ownership direction ───────────────────────────────────

@@ -32,6 +32,9 @@ class RetrievalRequest:
     relation_id: str | None = None
     confidence: float = 1.0
     variant_terms: tuple[str, ...] = ()   # requested option(s) — canonical adapter
+    # typed value constraints (งบ/ช่วงราคา) — owner: RetrievalProfile ที่
+    # planner stamp ลงมา; executor ส่งต่อให้ fetch ผ่าน synthetic profile
+    value_constraints: tuple[tuple[str, int], ...] = ()
 
 
 def _slot_types(slots: tuple[RetrievalSlot, ...], slot_id: str
@@ -46,7 +49,8 @@ def _slot_types(slots: tuple[RetrievalSlot, ...], slot_id: str
 
 
 def _slot_request(req_id: str, slot: RetrievalSlot,
-                  src_sub: str | None = None) -> RetrievalRequest | None:
+                  src_sub: str | None = None,
+                  value_constraints: tuple = ()) -> RetrievalRequest | None:
     """base request จาก slot — skip slot ที่ไม่มีอะไรให้ค้น (ไม่มี type/code);
     src_sub (จาก relation source_subtype) แคบ subtype เหลือฝั่ง source"""
     if not slot.product_types and not slot.model_codes:
@@ -79,11 +83,13 @@ def _slot_request(req_id: str, slot: RetrievalSlot,
         soft_hints=tuple(soft),
         confidence=slot.confidence,
         variant_terms=slot.variant_terms,
+        value_constraints=tuple(value_constraints),
     )
 
 
 def _relation_request(req_id: str, rel_id: str, rel: RetrievalRelation,
-                      slots: tuple[RetrievalSlot, ...]) -> RetrievalRequest:
+                      slots: tuple[RetrievalSlot, ...],
+                      value_constraints: tuple = ()) -> RetrievalRequest:
     """target request จาก relation — target คือ product GROUP (ไม่ใช่ code);
     constraints เป็น soft hints, target_subtype เข้า subtypes"""
     types = _slot_types(slots, rel.target_slot_id)
@@ -112,6 +118,7 @@ def _relation_request(req_id: str, rel_id: str, rel: RetrievalRelation,
         relation_id=rel_id,
         confidence=rel.confidence,
         variant_terms=(target_slot.variant_terms if target_slot else ()),
+        value_constraints=tuple(value_constraints),
     )
 
 
@@ -145,14 +152,16 @@ def build_grouped_retrieval_requests(
     · shop/platform อยู่ใน profile ไม่ซ้ำใน request · ไม่ mutate input
     """
     reqs: list[RetrievalRequest] = []
+    vc = tuple(getattr(profile, "value_constraints", ()) or ())
     src_sub = {rel.source_slot_id: dict(rel.constraints)["source_subtype"]
                for rel in relations
                if "source_subtype" in dict(rel.constraints)}
     for i, s in enumerate(slots):
-        r = _slot_request(f"req-{i}", s, src_sub.get(s.slot_id))
+        r = _slot_request(f"req-{i}", s, src_sub.get(s.slot_id),
+                          value_constraints=vc)
         if r is not None:
             reqs.append(r)
     for j, rel in enumerate(relations):
         reqs.append(_relation_request(f"req-{len(reqs)}", f"rel-{j}", rel,
-                                      slots))
+                                      slots, value_constraints=vc))
     return tuple(reqs)

@@ -48,7 +48,7 @@ def _pool(msg=AD1404T_MSG, adapter_cards=(), cable_cards=()):
 
     results = execute_grouped_retrieval_requests(
         reqs, message=msg, shop="KingGadgets",
-        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [])
+        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [], snap=None)
     return build_candidate_pool(results, profile=prof), reqs, prof
 
 

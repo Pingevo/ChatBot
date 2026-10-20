@@ -247,7 +247,12 @@ def build_candidate_pool(
                 seq += 1
             groups.setdefault(key, []).append((card, bkt, res))
             domains[key] = dom
-        supporting.extend(res.supporting_evidence)
+        # channel supporting records ผูก request_id ของผู้ผลิต — typed
+        # attribution สำหรับ answer_context compiler (record ที่มีอยู่แล้วไม่เขียนทับ)
+        for _e in res.supporting_evidence or ():
+            if isinstance(_e, dict) and not _e.get("request_id"):
+                _e = {**_e, "request_id": res.request_id}
+            supporting.append(_e)
 
     variant_items: set[str] = set()
     for key, group in groups.items():

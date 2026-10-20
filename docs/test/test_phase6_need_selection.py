@@ -89,7 +89,8 @@ def _pool_for(msg, intent=None, adapter_cards=(), cable_cards=()):
 
     results = execute_grouped_retrieval_requests(
         reqs, message=msg, shop="KingGadgets",
-        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [])
+        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [],
+        snap=None)
     return build_candidate_pool(results, profile=prof), reqs, prof
 
 
@@ -478,11 +479,11 @@ def test_shadow_and_production_same_reversed_eligibility(monkeypatch):
     retrieval_runtime.run_grouped_selection(
         prof, message=AD1404T_MSG, shop="s",
         fetcher=lambda m, **k: None,
-        legacy_fetcher=lambda m, **k: [], needs=productish)
+        legacy_fetcher=lambda m, **k: [], needs=productish, snap=None)
     _rs.run_grouped_retrieval_shadow(
-        prof, message=AD1404T_MSG, shop="s", needs=productish)
+        prof, message=AD1404T_MSG, shop="s", needs=productish, snap=None)
     _rs.run_grouped_retrieval_shadow(
-        prof, message=AD1404T_MSG, shop="s")  # needs absent
+        prof, message=AD1404T_MSG, shop="s", snap=None)  # needs absent
 
     assert seen_prod == [True], f"production flag — {seen_prod}"
     assert seen_shadow == [True, False], (
@@ -651,7 +652,7 @@ def test_grouped_selection_calls_selector_once(monkeypatch):
     out = retrieval_runtime.run_grouped_selection(
         prof, message=AD1404T_MSG, shop="KingGadgets",
         fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [],
-        needs=needs)
+        needs=needs, snap=None)
     assert len(calls) == 1, f"selector ต้องถูกเรียกครั้งเดียว — {len(calls)}"
     assert calls[0] is not None and len(calls[0]) == len(needs), (
         f"needs ต้องถูกส่งเข้า selector — {calls}")

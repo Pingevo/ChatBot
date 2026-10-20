@@ -63,7 +63,7 @@ def test_cross_source_dedupe_same_item():
     results = execute_grouped_retrieval_requests(
         (req,), message="m", shop="s",
         fetcher=lambda m, **kw: _res(calls["units"]),
-        legacy_fetcher=lambda m, **kw: list(calls["legacy"]))
+        legacy_fetcher=lambda m, **kw: list(calls["legacy"]), snap=None)
     pool = build_candidate_pool(results)
     assert len(pool.eligible) == 1
     assert set(pool.eligible[0].sources) == {"units", "legacy"}
@@ -87,7 +87,7 @@ def test_relation_target_uses_query_hint():
     assert any(r.source == "relation_target" for r in reqs)
     execute_grouped_retrieval_requests(
         reqs, message="หัวชาร์จ AD1404T ใช้กับสายชาร์จไหนได้บ้าง",
-        shop="KingGadgets", fetcher=fetcher, legacy_fetcher=None)
+        shop="KingGadgets", fetcher=fetcher, legacy_fetcher=None, snap=None)
     rel_req = next(r for r in reqs if r.source == "relation_target")
     qh = dict(rel_req.soft_hints).get("query_hint")
     assert qh and qh in seen  # query_hint ถูกใช้เป็น fetch query จริง
@@ -111,7 +111,8 @@ def test_per_request_quota_isolation_multi_type():
         return _res(per[next(it).request_id])
 
     results = execute_grouped_retrieval_requests(
-        reqs, message="m", shop="s", fetcher=fetcher, legacy_fetcher=None)
+        reqs, message="m", shop="s", fetcher=fetcher, legacy_fetcher=None,
+        snap=None)
     pool = build_candidate_pool(results)
     sel = select_for_llm_context(pool, reqs, per_request_limit=3)
     by = dict(sel.by_request)
@@ -128,7 +129,7 @@ def test_all_dead_request_preserves_unavailable_evidence():
                            "answerable_all", "none")
     results = execute_grouped_retrieval_requests(
         (req,), message="m", shop="s",
-        fetcher=lambda m, **kw: _res(dead), legacy_fetcher=None)
+        fetcher=lambda m, **kw: _res(dead), legacy_fetcher=None, snap=None)
     pool = build_candidate_pool(results)
     assert not pool.eligible and len(pool.unavailable) == 1
     sel = select_for_llm_context(pool, (req,))
@@ -144,7 +145,8 @@ def test_anchor_tags_only_fetched_cards():
                            frozenset(), (), None, "sellable_first", "none")
     results = execute_grouped_retrieval_requests(
         (req,), message="m", shop="s",
-        fetcher=lambda m, **kw: _res([anchor_card]), legacy_fetcher=None)
+        fetcher=lambda m, **kw: _res([anchor_card]), legacy_fetcher=None,
+        snap=None)
     pool = build_candidate_pool(results, profile=prof)
     assert pool.eligible[0].is_anchor is True
     assert any(e.kind == "anchor" for e in pool.evidence_pool)

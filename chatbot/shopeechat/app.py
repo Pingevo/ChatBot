@@ -619,6 +619,110 @@ def _turn_decision_shadow(plan, steps: list[dict]) -> None:
                       "error": type(_e).__name__})
 
 
+def _typed_answer_boundary(sel: dict, *, needs: tuple, profile,
+                           shop: str | None = None,
+                           platform: str = "shopee",
+                           persona_extra: str = "", model: str | None = None,
+                           web_search_fn=None,
+                           web_configured: bool | None = None) -> dict:
+    """Phase 7 — grouped flag-ON answer boundary เดียวต่อ turn.
+
+    typed pipeline artifacts (selection/pool/requests จาก
+    run_grouped_selection) → compile_answer_task ครั้งเดียว (owner เดียว
+    ของ deferred-kind classification — `task.deferred` typed signal) →
+    deferred? deterministic defer ก่อน compile → typed web admission →
+    optional web search (producer normalize specs+info → payload) →
+    compile AnswerContext ครั้งเดียวต่อ turn → zero-or-one
+    llm.answer_typed call —
+    raw customer message / history / legacy products / extra_context
+    ข้าม boundary นี้ไม่ได้ (signature ไม่มีช่องรับ); follow-up identity
+    มาจาก typed needs/subject_refs/requests เท่านั้น.
+
+    error contract ตามจริง: sel=None/artifacts invalid/task compile fail/
+    ctx compile fail/ctx ว่าง/deferred turn → deterministic
+    EMPTY_CONTEXT_REPLY, answer_calls=0; web search พัง → ต่อด้วย local
+    typed evidence (answer ≤1, web_used=None); legacy llm.answer ไม่
+    re-enter; deferred kinds (policy/claim/order/troubleshoot) →
+    deterministic defer ก่อน compile/admission/web (composition =
+    Phase 8 owner; product context ไม่ consume policy decisions).
+    """
+    from . import answer_context as _acx
+    zero = {"prompt": 0, "output": 0, "total": 0}
+
+    def _done(answer, usage, ctx=None, adm=None, web=None, calls=0):
+        return {"answer": answer, "usage": usage, "context": ctx,
+                "admission": adm, "web_used": web, "answer_calls": calls}
+    if sel is None:
+        return _done(_acx.EMPTY_CONTEXT_REPLY, zero)
+    try:
+        pool = sel["pool"]
+        requests = tuple(sel["requests"])
+        selection = sel["selection"]
+    except Exception:
+        return _done(_acx.EMPTY_CONTEXT_REPLY, zero)
+    # task compile ครั้งเดียว — compile_answer_task เป็น owner เดียวของ
+    # deferred-kind classification; boundary consume typed `task.deferred`
+    # เท่านั้น — ไม่ classify kind string เอง
+    try:
+        task = _acx.compile_answer_task(
+            needs=needs, selection=selection, pool=pool, requests=requests,
+            profile=profile)
+    except Exception:
+        return _done(_acx.EMPTY_CONTEXT_REPLY, zero)
+    # deferred needs → deterministic defer ก่อน AnswerContext compile /
+    # admission / web เสมอ — ctx compile 0, web 0, answer calls 0
+    # (mixed composition = Phase 8 owner)
+    if task.deferred:
+        return _done(_acx.EMPTY_CONTEXT_REPLY, zero)
+    web_used = None
+    try:
+        adm = _acx.decide_web_admission(
+            needs=needs, selection=selection, pool=pool,
+            requests=requests, profile=profile, web_configured=web_configured)
+    except Exception:
+        adm = _acx.WebAdmission(False, "internal_error")
+    if adm.allowed and web_search_fn is not None:
+        try:
+            res = web_search_fn(message=adm.query, shop=shop,
+                                platform=platform,
+                                reason="phase7_external_evidence")
+            _info = (res.get("search_info") if isinstance(res, dict)
+                     else getattr(res, "search_info", "")) or ""
+            _specs = (res.get("device_specs") if isinstance(res, dict)
+                      else getattr(res, "device_specs", ())) or ()
+            if res is not None and (_info or _specs):
+                info = re.sub(r"https?://[^\s\u0e00-\u0e7f\"'\[\]{}()<>]+",
+                              "", _info).strip()
+                # producer normalize: sanitized info + structured specs →
+                # closed `payload` field เดียวก่อนเข้า compile — unknown
+                # provider fields/URL ไม่ข้าม boundary
+                payload = "\n".join(p for p in (
+                    info,
+                    json.dumps(list(_specs), ensure_ascii=False,
+                               default=str) if _specs else "") if p)
+                web_used = {"kind": "web", "target": adm.target,
+                            "need_index": adm.need_index,
+                            "payload": payload}
+        except Exception:
+            web_used = None  # web พัง → ตอบด้วย local evidence เท่านั้น
+    # final AnswerContext compile ครั้งเดียวต่อ turn (รวม web evidence)
+    try:
+        ctx = _acx.compile_answer_context(
+            needs=needs, selection=selection, pool=pool,
+            requests=requests, profile=profile, task=task,
+            web_evidence=(web_used,) if web_used else ())
+    except Exception:
+        return _done(_acx.EMPTY_CONTEXT_REPLY, zero, adm=adm,
+                     web=web_used)
+    if ctx.is_empty:
+        return _done(_acx.EMPTY_CONTEXT_REPLY, zero, ctx=ctx, adm=adm,
+                     web=web_used)
+    answer, usage = llm.answer_typed(
+        context=ctx, shop_hint=shop,
+        persona_extra=persona_extra, model=model)
+    return _done(answer, usage, ctx=ctx, adm=adm, web=web_used, calls=1)
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
     # ⚡ RC-A — output policy boundary จุดเดียว: enforce หลัง engine คืนคำตอบ
@@ -2454,42 +2558,53 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                                         db, kb_docs, shop=req.shop,
                                         message=req.message),
                                 supporting=([{"kind": "kb",
-                                              "text": kb_context}]
+                                              "request_id": "ch:kb",
+                                              "payload": {"text": kb_context}}]
                                             if kb_context else ()))
                         except Exception as _e:
                             print(f"[SELECTION] grouped-retrieval error: {_e}",
                                   file=sys.stderr)
                             _grouped_sel = None
 
-                    # ⚡ Task 5B3-C — flag ON = canonical owns product context:
-                    #   selection พัง/None → fail closed (products=[])
-                    #   ห้าม legacy products ไหลเข้า LLM
+                    # ⚡ Phase 7 — flag ON = typed boundary owns product context:
+                    #   AnswerTask+AnswerContext เท่านั้นที่ไปถึง LLM;
+                    #   พัง/ว่าง → deterministic reply (0 answer call);
+                    #   legacy llm.answer ไม่ re-enter
                     if _sel_flag:
-                        merged_products = (
-                            _grouped_sel["selected_cards"][:_llm_ctx_limit]
-                            if _grouped_sel else [])
+                        from . import web_search as _ws
+                        _tb = _typed_answer_boundary(
+                            _grouped_sel,
+                            needs=(_turn_plan.needs
+                                   if _turn_plan else ()),
+                            profile=_retrieval_profile,
+                            shop=req.shop,
+                            platform=req.platform or "shopee",
+                            persona_extra=_persona_extra,
+                            model=model_name,
+                            web_search_fn=_ws.search_and_extract)
+                        merged_products = list(
+                            _tb["context"].products) if _tb["context"] else []
                     if _grouped_sel:
-                        if _grouped_sel.get("extra_context"):
-                            _hybrid_extra_ctx = (
-                                _hybrid_extra_ctx + "\n\n"
-                                + _grouped_sel["extra_context"]).strip()
                         _steps.append({
                             "name": "GroupedRetrievalSelection",
                             "input": {"path": "kb"},
                             "output": _grouped_sel["summary"]})
 
-                    try:
-                        answer, usage_info = llm.answer(
-                            message=req.message,
-                            products=merged_products,
-                            shop_hint=req.shop,
-                            history=_qa10,
-                            persona_extra=_persona_extra,
-                            intent_result=_intent_result,
-                            extra_context=(_vision_context + _hybrid_extra_ctx + _kb_device_extra).strip(),
-                        )
-                    except RuntimeError as exc:
-                        raise HTTPException(status_code=500, detail=str(exc))
+                    if _sel_flag:
+                        answer, usage_info = _tb["answer"], _tb["usage"]
+                    else:
+                        try:
+                            answer, usage_info = llm.answer(
+                                message=req.message,
+                                products=merged_products,
+                                shop_hint=req.shop,
+                                history=_qa10,
+                                persona_extra=_persona_extra,
+                                intent_result=_intent_result,
+                                extra_context=(_vision_context + _hybrid_extra_ctx + _kb_device_extra).strip(),
+                            )
+                        except RuntimeError as exc:
+                            raise HTTPException(status_code=500, detail=str(exc))
                     _total_elapsed = _time.time() - _total_start
 
                     prompt_t = usage_info.get("prompt", 0)
@@ -2563,7 +2678,9 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     from . import web_search as _ws_kb_check
                     _kb_ws_used = False
                     _ws_r: dict = {"search_used": False, "search_model": ""}
-                    if _ws_kb_check.is_configured():
+                    # Phase 7 — flag ON: web admission+search ทำก่อน answer
+                    # ที่ _typed_answer_boundary แล้ว → post-answer gate ปิด
+                    if _ws_kb_check.is_configured() and not _sel_flag:
                         _kb_should_search, _kb_search_reason = _ws_kb_check.should_use_web_search(
                             answer=answer,
                             intent_result=_intent_result,
@@ -4621,6 +4738,15 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         # ⚡ Task 5B3-C — grouped execution ครั้งเดียวต่อ turn
         #   (หลัง branch evidence resolve: subjects/compat/QA/vision)
         if _sel_flag and _retrieval_profile is not None:
+            # ⚡ Phase 7 — evidence เข้า typed boundary เฉพาะผ่าน closed
+            #   schema + typed attribution; raw QA prose (qa blob) ไม่ข้าม
+            #   boundary; vision ต้องผูก subject identities จาก
+            #   _subject_cards (model_codes + i:item_id)
+            _vision_refs = tuple(dict.fromkeys(
+                [m for c in (_subject_cards or [])
+                 for m in (c.get("model_codes") or ())]
+                + [f"i:{c.get('item_id')}" for c in (_subject_cards or [])
+                   if c.get("item_id")]))
             try:
                 from . import retrieval_runtime as _rr
                 _grouped_sel = _rr.run_grouped_selection(
@@ -4629,40 +4755,51 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     subject_cards=_subject_cards,
                     compat_cards=_device_additional or (),
                     needs=(_turn_plan.needs if _turn_plan else ()),
-                    supporting=([{"kind": "qa", "text": _qa_ctx}]
-                                if _qa_ctx else [])
-                                + ([{"kind": "vision", "text": _vision_context}]
-                                   if _vision_context else []),
+                    supporting=([{"kind": "vision", "text": _vision_context,
+                                   "subject_refs": _vision_refs}]
+                                if _vision_context and _vision_refs else [])
+                                + ([{"kind": "device_spec",
+                                     "target": (_retrieval_profile.target_device
+                                                or ""), "data": _device_specs}]
+                                   if _device_specs else []),
                     snap=_snap)
             except Exception as _e:
                 print(f"[SELECTION] grouped-retrieval error: {_e}",
                       file=sys.stderr)
                 _grouped_sel = None
-        # ⚡ Task 5B3-C — flag ON = canonical owns product context:
-        #   selection พัง/None → fail closed (products=[])
-        #   ห้าม legacy products ไหลเข้า LLM
+        # ⚡ Phase 7 — flag ON = typed boundary owns product context:
+        #   AnswerTask+AnswerContext เท่านั้นที่ไปถึง LLM; พัง/ว่าง →
+        #   deterministic reply (0 answer call); legacy llm.answer ไม่ re-enter
         if _sel_flag:
-            products = (_grouped_sel["selected_cards"][:_llm_ctx_limit]
-                        if _grouped_sel else [])
+            from . import web_search as _ws
+            _tb = _typed_answer_boundary(
+                _grouped_sel,
+                needs=(_turn_plan.needs if _turn_plan else ()),
+                profile=_retrieval_profile,
+                shop=req.shop, platform=req.platform or "shopee",
+                persona_extra=_persona_extra,
+                model=model_name, web_search_fn=_ws.search_and_extract)
+            products = list(
+                _tb["context"].products) if _tb["context"] else []
         if _grouped_sel:
-            if _grouped_sel.get("extra_context"):
-                _combined_extra = (_combined_extra + "\n\n"
-                                   + _grouped_sel["extra_context"]).strip()
             _steps.append({"name": "GroupedRetrievalSelection",
                            "input": {"path": "main"},
                            "output": _grouped_sel["summary"]})
-        try:
-            answer, usage_info = llm.answer(
-                message=desc_message,
-                products=products,
-                shop_hint=req.shop,
-                history=_qa10,
-                persona_extra=_persona_extra,
-                intent_result=_intent_result,
-                extra_context=_combined_extra,
-            )
-        except RuntimeError as exc:
-            raise HTTPException(status_code=500, detail=str(exc))
+        if _sel_flag:
+            answer, usage_info = _tb["answer"], _tb["usage"]
+        else:
+            try:
+                answer, usage_info = llm.answer(
+                    message=desc_message,
+                    products=products,
+                    shop_hint=req.shop,
+                    history=_qa10,
+                    persona_extra=_persona_extra,
+                    intent_result=_intent_result,
+                    extra_context=_combined_extra,
+                )
+            except RuntimeError as exc:
+                raise HTTPException(status_code=500, detail=str(exc))
         _llm_elapsed = _time.time() - _llm_start
         _total_elapsed = _time.time() - _total_start
         print(f"[TIMING] LLM: {_llm_elapsed:.2f}s  TOTAL: {_total_elapsed:.2f}s", file=sys.stderr)
@@ -4744,7 +4881,9 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         #   การดึงสินค้าอื่นมาทับจะทำให้ context loss รุนแรงขึ้น
         # ⚡ Legacy Fix (2026-09-15) — ใช้ _web_search_reanswer ร่วมกับ KB branch
         from . import web_search as _ws
-        if _ws.is_configured() and not _is_conv_active:
+        # Phase 7 — flag ON: web admission+search ทำก่อน answer ที่
+        # _typed_answer_boundary แล้ว → post-answer gate (LLM2) ปิดเด็ดขาด
+        if _ws.is_configured() and not _is_conv_active and not _sel_flag:
             _should_search, _search_reason = _ws.should_use_web_search(
                 answer=answer,
                 intent_result=_intent_result,

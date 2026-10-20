@@ -360,6 +360,11 @@ class _CapturedLLM:
         if fn == "answer_general":
             products = list(kwargs.get("products") or [])
             context = kwargs.get("context", args[1] if len(args) > 1 else None)
+        elif fn == "answer_typed":
+            # typed boundary: context = AnswerContext — scoped products live
+            # on ctx.products (raw message/products never cross this seam)
+            context = kwargs.get("context")
+            products = list(getattr(context, "products", None) or ())
         else:
             products = list(kwargs.get("products")
                             or (args[1] if len(args) > 1 else []))
@@ -512,7 +517,8 @@ def _install(monkeypatch, fx: dict):
     # llm boundaries captured; fixture may pin a product-bearing canned
     # reply (Phase 5-R3: mixed composition must prove the product-owner
     # answer text survives the policy segment append at enforce)
-    for name in ("answer", "answer_general", "answer_with_kb"):
+    for name in ("answer", "answer_general", "answer_with_kb",
+                 "answer_typed"):
         fn = getattr(llm, name, None)
         if fn is not None:
             cap = _CapturedLLM()

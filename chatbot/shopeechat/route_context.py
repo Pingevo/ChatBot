@@ -244,6 +244,10 @@ class RetrievalProfile:
     compat_mode: str
     anchor_item_ids: tuple[str, ...] = ()
     fact_sources: tuple[tuple[str, str], ...] = ()
+    # typed value constraints (งบ/ช่วงราคา) — parse ครั้งเดียวที่นี่ผ่าน
+    # product_store._extract_price_range (owner เดียว) — retrieval และ
+    # AnswerTask consume typed result เดียวกัน ไม่มี downstream re-parse
+    value_constraints: tuple[tuple[str, int], ...] = ()
 
 
 def _bounded_history_facts(history: list[dict] | None) -> dict:
@@ -512,6 +516,14 @@ def build_retrieval_profile(
     else:
         target_device = None
 
+    # value constraints — existing parser เดียว parse ครั้งเดียวต่อ turn
+    _vmin, _vmax = _ps._extract_price_range(msg)
+    value_constraints: tuple[tuple[str, int], ...] = tuple(
+        ([("price_min", _vmin)] if _vmin is not None else [])
+        + ([("price_max", _vmax)] if _vmax is not None else []))
+    if value_constraints:
+        sources.append(("value_constraints", "message"))
+
     intent = _resolved_intent(msg, intent_result, model_codes, anchors)
 
     return RetrievalProfile(
@@ -528,6 +540,7 @@ def build_retrieval_profile(
         compat_mode=_compat_mode(product_types, subtype, target_device),
         anchor_item_ids=anchor_ids,
         fact_sources=tuple(sources),
+        value_constraints=value_constraints,
     )
 
 

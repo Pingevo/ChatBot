@@ -142,6 +142,49 @@ def _spy_run(monkeypatch, result=None, exc=None) -> dict:
     return calls
 
 
+def _typed_sel(cards, msg):
+    """REAL grouped artifact dict (selection/pool/requests/summary) via the
+    real pipeline with stub fetchers — the typed shape _typed_answer_boundary
+    consumes. snap=None: never resolves the generation pointer (offline seam
+    — see test_phase4_source_union)."""
+    from shopeechat import route_context, turn_decision as _td
+    from shopeechat.units import UnitEvidenceFetchResult
+    _ir = {"intent": "product_recommend", "confidence": 0.9}
+    prof = route_context.build_retrieval_profile(
+        msg, history=[], intent_result=_ir, shop=SHOP)
+    needs = _td.decide_turn(msg, history=[], intent_result=_ir).needs
+    return rr.run_grouped_selection(
+        prof, message=msg, shop=SHOP, platform="shopee",
+        fetcher=lambda m, **kw: UnitEvidenceFetchResult(
+            cards=tuple(cards), raw_count=len(cards),
+            sellable_count=sum(
+                1 for c in cards if c.get("_available_for_sale")),
+            unavailable_count=0, trace=("t",)),
+        legacy_fetcher=lambda m, **k: [], needs=needs, snap=None)
+
+
+def _canon_unit():
+    """_CANON_CARD as a units-evidence card (resolver fields stamped — the
+    shape selection emits before the compiler scopes it for the LLM)."""
+    return {"name": "AC65B FX Charger 65W", "product_type": "charger",
+            "charger_subtype": "adapter", "unit_id": "u-ac65b",
+            "item_id": "4001", "model_id": "AC65B",
+            "model_codes": ["AC65B"], "_available_for_sale": True,
+            "status": "NORMAL", "total_stock": 3, "catalog_status": "active",
+            "customer_visible": True, "availability_reason": ""}
+
+
+def _typed_calls(captured) -> list:
+    """captured answer-model calls (typed boundary)."""
+    return [c for c in captured.calls if c["fn"] == "answer_typed"]
+
+
+def _answer_calls(captured) -> list:
+    """any product-answer model call (legacy answer or typed)."""
+    return [c for c in captured.calls
+            if c["fn"] in ("answer", "answer_typed")]
+
+
 def _chat(monkeypatch, fx: dict, message: str):
     """Install seams for fx and run ONE real chat() turn."""
     client, captured, _handoffs = _install(monkeypatch, fx)
@@ -202,29 +245,31 @@ def test_main_flag_off_legacy_payload_pinned(harness_off, monkeypatch):
 
 
 def test_main_flag_on_selected_replaces(harness_on, monkeypatch):
+    # real typed artifact — boundary must compile → ONE answer_typed call
+    # carrying scoped products; legacy llm.answer must not run at all
     calls = _spy_run(monkeypatch,
-                     result={"selected_cards": [_CANON_CARD],
-                             "summary": {"n": 1}})
+                     result=_typed_sel([_canon_unit()], MAIN_MSG))
     resp, captured = _chat(monkeypatch, harness_on, MAIN_MSG)
     assert resp.source == "product_store", resp.source
     assert calls["n"] == 1
-    payloads = _payloads(captured)
-    assert payloads, "expected at least one captured LLM product payload"
-    for pl in payloads:
-        assert pl == [_CANON_CARD], pl
+    typed = _typed_calls(captured)
+    assert len(typed) == 1, f"expected ONE answer_typed call: {captured.calls}"
+    names = [str(p.get("name", "")) for p in typed[0]["products"]]
+    assert any("AC65B" in n for n in names), names
+    assert all(c["fn"] != "answer" for c in captured.calls), (
+        "legacy llm.answer must not re-enter under flag ON")
     _assert_no_wpb100l(captured)
 
 
 def test_main_flag_on_empty_sends_empty(harness_on, monkeypatch):
-    calls = _spy_run(monkeypatch,
-                     result={"selected_cards": [], "summary": {"n": 0}})
+    # empty typed context → deterministic reply, ZERO answer-model calls
+    calls = _spy_run(monkeypatch, result=_typed_sel((), MAIN_MSG))
     resp, captured = _chat(monkeypatch, harness_on, MAIN_MSG)
     assert resp.source == "product_store", resp.source
     assert calls["n"] == 1
-    payloads = _payloads(captured)
-    assert payloads, "expected at least one captured LLM product payload"
-    for pl in payloads:
-        assert pl == [], pl
+    assert not _answer_calls(captured), (
+        f"empty context must not call the model: {captured.calls}")
+    _assert_no_wpb100l(captured)
 
 
 def test_main_flag_on_none_fails_closed(harness_on, monkeypatch):
@@ -232,10 +277,8 @@ def test_main_flag_on_none_fails_closed(harness_on, monkeypatch):
     resp, captured = _chat(monkeypatch, harness_on, MAIN_MSG)
     assert resp.source == "product_store", resp.source
     assert calls["n"] == 1
-    payloads = _payloads(captured)
-    assert payloads, "expected at least one captured LLM product payload"
-    for pl in payloads:
-        assert pl == [], pl
+    assert not _answer_calls(captured), (
+        f"None artifacts must not call the model: {captured.calls}")
     _assert_no_wpb100l(captured)
 
 
@@ -244,10 +287,8 @@ def test_main_flag_on_exception_fails_closed(harness_on, monkeypatch):
     resp, captured = _chat(monkeypatch, harness_on, MAIN_MSG)
     assert resp.source == "product_store", resp.source
     assert calls["n"] == 1
-    payloads = _payloads(captured)
-    assert payloads, "expected at least one captured LLM product payload"
-    for pl in payloads:
-        assert pl == [], pl
+    assert not _answer_calls(captured), (
+        f"pipeline failure must not call the model: {captured.calls}")
     _assert_no_wpb100l(captured)
 
 
@@ -274,28 +315,26 @@ def test_kb_flag_off_legacy_payload_pinned(harness_off_kb, monkeypatch):
 
 def test_kb_flag_on_selected_replaces(harness_on_kb, monkeypatch):
     calls = _spy_run(monkeypatch,
-                     result={"selected_cards": [_CANON_CARD],
-                             "summary": {"n": 1}})
+                     result=_typed_sel([_canon_unit()], KB_MSG))
     resp, captured = _chat(monkeypatch, harness_on_kb, KB_MSG)
     _assert_kb_path(resp)
     assert calls["n"] == 1
-    payloads = _payloads(captured)
-    assert payloads, "expected at least one captured LLM product payload"
-    for pl in payloads:
-        assert pl == [_CANON_CARD], pl
+    typed = _typed_calls(captured)
+    assert len(typed) == 1, f"expected ONE answer_typed call: {captured.calls}"
+    names = [str(p.get("name", "")) for p in typed[0]["products"]]
+    assert any("AC65B" in n for n in names), names
+    assert all(c["fn"] != "answer" for c in captured.calls), (
+        "legacy llm.answer must not re-enter under flag ON")
     _assert_no_wpb100l(captured)
 
 
 def test_kb_flag_on_empty_sends_empty(harness_on_kb, monkeypatch):
-    calls = _spy_run(monkeypatch,
-                     result={"selected_cards": [], "summary": {"n": 0}})
+    calls = _spy_run(monkeypatch, result=_typed_sel((), KB_MSG))
     resp, captured = _chat(monkeypatch, harness_on_kb, KB_MSG)
     _assert_kb_path(resp)
     assert calls["n"] == 1
-    payloads = _payloads(captured)
-    assert payloads, "expected at least one captured LLM product payload"
-    for pl in payloads:
-        assert pl == [], pl
+    assert not _answer_calls(captured), (
+        f"empty context must not call the model: {captured.calls}")
 
 
 def test_kb_flag_on_none_fails_closed(harness_on_kb, monkeypatch):
@@ -303,10 +342,8 @@ def test_kb_flag_on_none_fails_closed(harness_on_kb, monkeypatch):
     resp, captured = _chat(monkeypatch, harness_on_kb, KB_MSG)
     _assert_kb_path(resp)
     assert calls["n"] == 1
-    payloads = _payloads(captured)
-    assert payloads, "expected at least one captured LLM product payload"
-    for pl in payloads:
-        assert pl == [], pl
+    assert not _answer_calls(captured), (
+        f"None artifacts must not call the model: {captured.calls}")
     _assert_no_wpb100l(captured)
 
 
@@ -315,10 +352,8 @@ def test_kb_flag_on_exception_fails_closed(harness_on_kb, monkeypatch):
     resp, captured = _chat(monkeypatch, harness_on_kb, KB_MSG)
     _assert_kb_path(resp)
     assert calls["n"] == 1
-    payloads = _payloads(captured)
-    assert payloads, "expected at least one captured LLM product payload"
-    for pl in payloads:
-        assert pl == [], pl
+    assert not _answer_calls(captured), (
+        f"pipeline failure must not call the model: {captured.calls}")
     _assert_no_wpb100l(captured)
 
 

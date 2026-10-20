@@ -86,7 +86,8 @@ def _sel(cards, req):
     from shopeechat.retrieval_selection import select_for_llm_context
     res = execute_grouped_retrieval_requests(
         (req,), message="q", shop="s",
-        fetcher=lambda m, **kw: _ures(cards), legacy_fetcher=None)
+        fetcher=lambda m, **kw: _ures(cards), legacy_fetcher=None,
+        snap=None)
     pool = build_candidate_pool(res)
     return select_for_llm_context(pool, (req,))
 

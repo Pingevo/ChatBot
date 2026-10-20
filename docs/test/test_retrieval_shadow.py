@@ -116,7 +116,7 @@ def test_shadow_summary_shape_and_counts():
 
     out = rs.run_grouped_retrieval_shadow(
         _profile(), message="m", shop="KingGadgets",
-        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [])
+        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [], snap=None)
     assert out["ok"] is True
     assert out["request_count"] >= 1
     assert out["counts"]["eligible"] >= 1
@@ -140,7 +140,7 @@ def test_shadow_summary_has_no_private_keys():
 
     out = rs.run_grouped_retrieval_shadow(
         _profile(), message="m", shop="s",
-        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [])
+        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [], snap=None)
     keys = set(_walk_keys(out))
     assert "_evidence" not in keys
     assert "_selection_reason" not in keys

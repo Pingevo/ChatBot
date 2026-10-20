@@ -985,6 +985,18 @@ def _extract_price_range(message: str) -> tuple[int | None, int | None]:
     return None, None
 
 
+def _price_bounds(retrieval_profile, message: str
+                  ) -> tuple[int | None, int | None]:
+    """ช่วงราคา — typed `retrieval_profile.value_constraints` ชนะเมื่อมี
+    (parse ครั้งเดียวที่ interpretation boundary = route_context);
+    caller ที่ไม่มี profile → parser เดิม fallback (owner เดียวกัน)."""
+    vc = getattr(retrieval_profile, "value_constraints", None)
+    if vc is not None:
+        d = dict(vc)
+        return d.get("price_min"), d.get("price_max")
+    return _extract_price_range(message)
+
+
 # ร้านในเครือทั้งหมด (จากข้อมูล 32 ร้าน) — ใช้จับชื่อร้านในคำถามลูกค้า
 KNOWN_SHOPS: tuple[str, ...] = (
     "ThaiSuperPhone", "YoupinOfficialStore", "XiaomiEcoSystem", "SuperITMall",
@@ -2474,6 +2486,7 @@ def build_query(
     message: str,
     shop_filter: str | None = None,
     product_types: set[str] | None = None,
+    retrieval_profile=None,
 ) -> dict:
     """สร้าง MongoDB query จากคำถามลูกค้า.
 
@@ -2491,7 +2504,9 @@ def build_query(
     shops = _detect_shops(message)
     brands = _detect_brands(message)
     categories = _detect_categories(message)
-    price_min, price_max = _extract_price_range(message)
+    # typed value_constraints (parse ครั้งเดียวที่ profile) ชนะ;
+    # ไม่มี profile → parser เดิม (owner เดียว ไม่ใช่ parser ที่สอง)
+    price_min, price_max = _price_bounds(retrieval_profile, message)
     if product_types is None:
         product_types = _detect_product_types(message)
 
@@ -3235,7 +3250,10 @@ def fetch_products(
             product_types = kept_types
 
     # สร้าง filter สำหรับกรองใน Mongo
-    base_filter = build_query(message, shop_filter=shop_filter, product_types=product_types)
+    base_filter = build_query(message, shop_filter=shop_filter,
+                              product_types=product_types,
+                              retrieval_profile=retrieval_profile)
+    _price_min, _price_max = _price_bounds(retrieval_profile, message)
 
     # ตรวจ intent เพื่อใช้ใน vector search path
     # (vector search มี hardcode item_status=NORMAL เพื่อความปลอดภัย แต่ warranty intent ต้องเห็น non-NORMAL)
@@ -3480,7 +3498,7 @@ def fetch_products(
         relaxed_q = {k: v for k, v in base_filter.items() if k != price_key}
         # ถ้ามี price filter อยู่ก่อน แปลว่าลูกค้าถามงบ ให้เรียงตามราคาใกล้เคียงที่สุด
         if price_key in base_filter:
-            pm, pM = _extract_price_range(message)
+            pm, pM = _price_min, _price_max  # typed bounds เดียวกับ build_query
             target = pM if pM is not None else pm
             if target is not None:
                 # ดึงเยอะแล้ว sort ใน Python (เพราะ model.price_info.current_price อาจเป็น array)

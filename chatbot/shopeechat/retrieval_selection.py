@@ -15,7 +15,8 @@ from .retrieval_policy import strip_private_evidence
 from .turn_decision import PRODUCTISH_NEED_KINDS as _PRODISH_NEED_KINDS
 
 # keys ที่เป็น routing metadata — ไม่ใช่ product evidence ไม่ให้ score
-_META_HINT_KEYS = frozenset(
+# (public — Phase 7 compiler กรอง key เดียวกันออกจาก task constraints)
+META_HINT_KEYS = frozenset(
     {"query_hint", "target_subtype", "source_subtype"})
 
 
@@ -103,8 +104,9 @@ def _request_score(c: PooledCandidate, req: RetrievalRequest) -> float:
 # ใต้หลาย request; เก็บ role ที่มี semantics มากสุด
 # (subject=อ้างถึงตรง > relation_target=สิ่งที่ขอผ่าน relation >
 #  historical_evidence=หลักฐานอดีต > alternative=ตัวทดแทน > slot=generic)
-_ROLE_RANK = {"subject": 5, "relation_target": 4, "historical_evidence": 3,
-              "alternative": 2, "slot": 1}
+# public — Phase 7 compiler ใช้ precedence เดียวกันสำหรับ per-need ordering
+ROLE_RANK = {"subject": 5, "relation_target": 4, "historical_evidence": 3,
+             "alternative": 2, "slot": 1}
 # card state → role override (หลัง subject/channel) — snapshot-stale
 # evidence (persisted mention ที่ไม่มี live record) เป็น role แยก ไม่ใช่
 # recommendation; discontinued live record ยังเป็น subject ได้ตามปกติ
@@ -126,7 +128,7 @@ def _select_one(c: PooledCandidate, req: RetrievalRequest,
     if cid not in text_cache:
         text_cache[cid] = _card_text(card)
     text = text_cache[cid]
-    hints = [(k, v) for k, v in req.soft_hints if k not in _META_HINT_KEYS]
+    hints = [(k, v) for k, v in req.soft_hints if k not in META_HINT_KEYS]
     hits = tuple(k for k, v in hints if _constraint_hit(k, v, text))
     score = _request_score(c, req) + len(hits)
     why = [t[4:] for t in c.trace if t.startswith("why:")]
@@ -164,9 +166,12 @@ def _req_scope(req: RetrievalRequest) -> set:
             | set(req.model_codes or ()))
 
 
-def _needs_for_request(req: RetrievalRequest, needs: tuple) -> tuple:
+def needs_for_request(req: RetrievalRequest, needs: tuple) -> tuple:
     """request → productish needs ที่มันคลุม — a request อาจ serve หลาย need
-    (coverage ไม่ใช่ exclusive ownership)"""
+    (coverage ไม่ใช่ exclusive ownership)
+
+    canonical request→need attribution owner เดียว (public — Phase 7
+    answer_context compiler consume function เดียวกันนี้ ห้าม copy)"""
     prodish = [n for n in needs if n.kind in _PRODISH_NEED_KINDS]
     if req.source in ("relation_target", "compat"):
         out = [n for n in prodish if n.kind == "compat"]
@@ -208,7 +213,7 @@ def select_for_llm_context(
     selected: list[SelectedCandidate] = []
     by_req: list[tuple[str, tuple[SelectedCandidate, ...]]] = []
     trace: list[str] = []
-    req_needs = {r.request_id: _needs_for_request(r, needs)
+    req_needs = {r.request_id: needs_for_request(r, needs)
                  for r in requests} if needs else {}
     elig_by_req: dict[str, list[PooledCandidate]] = {}
     for c in pool.eligible:
@@ -336,7 +341,7 @@ def select_for_llm_context(
     order: list[str] = []
     for s in selected:
         cur = best.get(s.identity)
-        if cur is None or _ROLE_RANK.get(s.role, 0) > _ROLE_RANK.get(
+        if cur is None or ROLE_RANK.get(s.role, 0) > ROLE_RANK.get(
                 cur.role, 0):
             best[s.identity] = s
         if s.identity not in order:
