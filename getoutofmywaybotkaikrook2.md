@@ -20,6 +20,45 @@
 
 ## กำลังทำ (active)
 
+### ✅ PHASE 9 — Workflow/Trigger Ownership Consolidation (session date) · PART 0-5 DONE · COMMITTED `c2fe7e2` · Phase 10 next
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `7d68f08` (Phase 8 closeout commit) · tree clean · staging empty · grouped flags OFF · ไม่ start worker/Next/provider (next dev PID 34514 ที่เห็น = user process เก่า ไม่แตะ)
+- **baseline counts**: workflow-phase1 **69/69** · phase6 **69/69** · botworker error-policy **38/38** · idempotency **71/71** · production-races **37/37** · boundary **20/20** · ownership-transport **244/244** · `tsc --noEmit` clean · workflow-e2e รันไม่ได้ (ต้อง real Mongo; docker daemon ตาย — prior session verify 16/16 บน disposable mongo:7)
+- **สั่งทำ**: production dispatch owner เดียว (`processClaimedMessage`) ตัดสิน path เดียวต่อ claimed message — precedence คงที่: ownership gate → active workflow resume → new workflow match → trigger → chatbot fallback → terminal outcome · ห้าม commit/push/PR/Mongo จริง/provider/.env
+- **audit ยืนยัน call graph ตรง expected** (ไม่มี divergence ที่ต้องหยุด):
+  - dispatch owner = `processClaimedMessage` เดียว (production) — แต่ precedence ซ้ำใน Test Chat route+client (copy ที่ 2)
+  - answer paths: settleWorkflowResult→storeWorkflowDelivered / `"both"` storeWorkflowDelivered+ต่อ trigger (double-answer) / trigger template+bot_answer+handoff / fallback callBot
+  - duplicated branches ที่จะลบ: `workflow_priority==="workflow_first"||"both"` gate (~:934) · `"both"` inner block (store แล้วต่อ trigger ~:950-967) · `"trigger_first"` post-trigger matchAndRun (~:1117-1144) · route `phase` param + client after_trigger call
+  - **bug เจอเพิ่ม**: resume `exit_to_bot`/`exit_drop` ถูก settle เป็น `workflow_resumed` (~:927) — ข้อความถูกกลืน ไม่ต่อ trigger/bot ตาม contract (ต้องแก้ใน Phase 9: exit_to_bot→trigger, exit_drop→no_action)
+  - `recoverable:true` ไม่มี producer จริงใน engine (type-space เท่านั้น) — dispatcher gate `recoverable===false` เพียงพอ; fallthrough arm คงไว้ตาม type
+  - `workflow_priority` readers: dispatcher ×3 + test-chat route :88 + config/API/UI surfaces (safe defaults/merge/allowedKeys/ADMIN_CONFIGURABLE_KEYS/api/config validate/api/admin-config validate/admin-config select/config page interface :42)
+  - `liveAssignmentService` (:589/:958) + `/api/test-assignment` (:824) = QA replay surface (trigger→bot, ไม่มี workflow stage, ไม่ใช่ inbound dispatch owner) — out of scope
+- **plan**: `workflowEngine.runInboundWorkflowStage` (shared boundary: resume-if-active → match-if-unconsumed; exit_to_bot skip match) → dispatcher ใช้ result เดียว map terminal/fallthrough · Test Chat route เรียก stage เดียวกัน (ลบ phase/priority) · ลบ `workflow_priority` ทั้ง runtime surface (type+defaults+merge+whitelists+API validate+UI select+mock seeds) — persisted DB value เป็น inert tombstone · RED test `scripts/test-phase9-dispatch.ts` ก่อนแก้
+- **RED (honest, 24p/6f — ทุก fail = contract violation):** A2 resume exit_to_bot → `workflow_resumed` (ข้อความถูกกลืน) · A3 resume exit_drop → `workflow_resumed` (ควร no_action) · D15 `priority="both"` → workflow ตอบแล้ว trigger ตอบซ้ำ (shadow ×2) · D16 `trigger_first` → trigger ชนะ workflow ที่ match (invert) · F29/F30 → test-chat route+client มี precedence copy ของตัวเอง
+- **GREEN → implementation (owner เดียว, transition table ตาม user-corrected spec):**
+  - `workflowEngine.ts`: `runInboundWorkflowStage` (resume-if-active → match ต่อ table) + `runInboundDispatch` (stage → trigger leaf → bot leaf; leaf callbacks จาก caller — typed `status`/`recoverable` เท่านั้น ไม่มี reason parse)
+  - `botWorkerService.ts`: ลบ blocks ① resume-gate ② workflow_first/both ④ trigger_first → `runInboundDispatch` call เดียว + leaf bodies เดิม (settleWorkflowResult/storeWorkflowDelivered/trigger handoff+template/bot_answer/callBot+shadow) · ลบ `wfConfig`/`triggerService` reads
+  - `TestChatClient.tsx`: ลบ client-side workflow→trigger→flush sequencing + `phase`/`after_trigger` → request เดียว `/api/test-chat/dispatch` + `dispatchAndRender` typed-result renderer
+  - `src/app/api/test-chat/dispatch/route.ts` ใหม่: buffer combine + `runInboundDispatch` owner เดียว + sandbox leaf adapters (test stores, handoffToAdminTest, no platform delivery/prod Mongo) · ลบ `/api/test-chat/workflow-step` + `/api/test-chat/flush`
+  - `systemConfigService`/API routes/UI: `workflow_priority` ถูกถอดจาก type/safe-default/merge/allowedKeys/ADMIN_CONFIGURABLE_KEYS/validate/select/page-interface — persisted DB value = inert tombstone · `workflow_enabled`/`workflow_run_timeout_ms` คงเดิม
+- **verify GREEN**: phase9-dispatch **38/38** · idempotency **71/71** · production-races **37/37** · boundary **20/20** · error-policy **38/38** · ownership-transport **244/244** · config fail-closed **8/8** · recovery/freshness **30/30** · runtime Mongo-safety **111/111** · shadow batch-isolation **22/22** · buffer/media carry-forward **107/107** · `tsc --noEmit` clean · `git diff --check` clean
+- **fix ระหว่างทาง**: idempotency mock เพิ่ม `runInboundDispatch` surface (mock เดิม replace ทั้ง engine export) · F33/F37 fixture seed แก้ (keyword+condition / operation_key completed-mid-resume) · B9 source pin ย้ายไป owner file · `git diff --check` trailing whitespace จาก sed reindent + `// ` header strip ถูกเก็บกลับ
+- **net**: dispatch decision owners 2→1 · precedence implementations 2→1 · `"both"`/`"trigger_first"` runtime 0 · duplicate Test Chat precedence 0 · ไม่มี module/dep/env/collection ใหม่ (route test-chat/dispatch เป็น adapter เดียวกันกับเดิม)
+- **review-fix round (M1+M2 Test Chat buffer lifecycle):**
+  - M1 root cause: route อ่าน snapshot แล้ว `deleteMany{conversation_id}` **ก่อน** dispatch → in_flight/bot_error/exception ทำ input หาย + filter กว้างกว่า snapshot (row แทรกหลัง read โดนลบ); fix: `consumed` flag ใน leaf (terminal-consume เท่านั้น: actioned/resumed/exit_drop/error!recoverable/trigger ok/fallback ok) → ลบ `{conversation_id, message_id:{$in:snapshotIds}}` หลัง dispatch เดียว
+  - M2 root cause: `combinedText = msgs.length>0 ? rows.join : body.message` → stale rows กลืน direct message; fix: `input_mode` typed field — `direct`(default)=body.message ไม่แตะ buffer · `buffered`=snapshot rows เท่านั้น (body.message=combined ไม่นับซ้ำ) · ค่าอื่น→422; client ส่ง `input_mode` ชัดทั้ง 2 call sites
+  - RED: 16-case route-level suite (`scripts/test-phase9-testchat-buffer.ts`, real POST handler + fake mongo + real engine/handoff/jwt) — honest RED 7p/9f (retain×4, filter-shape×2, direct-shadow×2, mode-422×1) → GREEN 16/16
+  - mocks fix: fakemongo COLLECTIONS เพิ่ม key `sessions` (authService ต้องอ่าน — หายไปทำ requireAuth 401)
+  - verify: testchat-buffer **16/16** · phase9-dispatch **38/38** · idempotency **71/71** · races **37/37** · boundary **20/20** · error-policy **38/38** · ownership-transport **244/244** · scope-gate **107/107** · config-failclosed **8/8** · tsc clean · `git diff --check` clean
+- **closeout (committed 2026 — commit `c2fe7e2` `refactor: centralize inbound workflow dispatch`, 26 files +2309/−1134):**
+  - final dispatch order (owner เดียว `workflowEngine.runInboundDispatch`): ownership gate → active workflow resume → permitted new match → trigger → bot fallback → terminal outcome เดียว
+  - configurable precedence ถูกลบทั้งหมด: `"both"`/`"trigger_first"` runtime = 0 · `workflow_priority` ไม่มี runtime/UI/API reader (persisted = inert) · Test Chat duplicate orchestration = 0 (request เดียว + typed render)
+  - Test Chat buffer contract: `input_mode` typed (direct=body only ไม่แตะ buffer / buffered=snapshot rows เท่านั้น / อื่น=422) · cleanup = snapshot `message_id` $in หลัง terminal-consume เท่านั้น · in_flight/bot_error/exception retain
+  - **accepted residual Low**: cleanup delete ล้มหลัง terminal side-effect สำเร็จ → rows คงอยู่ manual retry อาจทำ sandbox action ซ้ำ (ไม่มี exactly-once — Mongo cleanup vs external effect ไม่ atomic; production botworker คง claim/idempotency boundary เดิม ไม่กระทบ)
+  - grouped retrieval flags **ยัง OFF** — Phase 9 ไม่ activate retrieval · production botworker claim/fencing/idempotency ไม่เปลี่ยน
+  - verify (fresh, pre-commit): ตาม counts ข้างบน · workflow-e2e ยัง blocked (ต้อง real/disposable mongo — daemon ตาย; prior verify 16/16) · secret/path scan clean
+  - safety: ไม่มี push/PR/deploy/service/.env/real-Mongo/provider/8010 · Phase 10 = next (owner map, deletion, replay, canary)
+
 ### ✅ PHASE 8 — Typed Answer Composition + Single Finalizer (2026-10-22) · PART 0-6 DONE · uncommitted · รอ independent review
 
 - **baseline**: branch `feature-phase3-aswer-quality` @ `931d41f` (`docs: record phase 7 answer context closeout`; Phase 7 closeout `c00d82e` อยู่ก่อนหน้า) · tree clean · staging empty · grouped flags OFF (`runtime_config._flag` → DB→env, default false; tests monkeypatch seam) · pytest venv `.venv`
