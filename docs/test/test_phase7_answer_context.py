@@ -260,6 +260,14 @@ def test_unrelated_need_gets_no_other_products():
 
 # ── 9/10/11/12/13: flag + answer-call truth table ───────────────────────────
 
+def _final_text(out):
+    """customer-visible text ของ composition — finalizer render owner
+    (_render_composition + EMPTY fallback); Phase 8 migration จาก
+    _final_text(out) dict access."""
+    from shopeechat import app as _a
+    return _a._render_composition(out) or acx.EMPTY_CONTEXT_REPLY
+
+
 def _fake_grouped_sel(needs, profile, cards=(), supporting=()):
     prodish = [n for n in needs if n.kind in td.PRODUCTISH_NEED_KINDS]
     reqs = tuple(
@@ -297,7 +305,7 @@ def test_flag_on_compiler_once_answer_once(monkeypatch):
     gs = _fake_grouped_sel((need,), _profile(), cards=(sc,))
     out = _app._typed_answer_boundary(
         gs, needs=(need,), profile=_profile(), web_configured=False)
-    assert calls["typed"] == 1 and out["answer_calls"] == 1
+    assert calls["typed"] == 1 and out.answer_calls == 1
 
 
 def test_compiler_failure_zero_model_calls(monkeypatch):
@@ -306,11 +314,11 @@ def test_compiler_failure_zero_model_calls(monkeypatch):
                         lambda **k: pytest.fail("answer_typed must not run"))
     out = _app._typed_answer_boundary(
         None, needs=(), profile=_profile(), web_configured=False)
-    assert out["answer_calls"] == 0 and out["answer"]
+    assert out.answer_calls == 0 and _final_text(out)
     out2 = _app._typed_answer_boundary(
         {"selection": None}, needs=(), profile=_profile(),
         web_configured=False)
-    assert out2["answer_calls"] == 0
+    assert out2.answer_calls == 0
 
 
 def test_fully_empty_context_zero_calls(monkeypatch):
@@ -320,7 +328,7 @@ def test_fully_empty_context_zero_calls(monkeypatch):
     gs = _fake_grouped_sel((), _profile())  # no needs → no tasks/products
     out = _app._typed_answer_boundary(gs, needs=(), profile=_profile(),
                                       web_configured=False)
-    assert out["answer_calls"] == 0 and out["answer"] == acx.EMPTY_CONTEXT_REPLY
+    assert out.answer_calls == 0 and _final_text(out) == acx.EMPTY_CONTEXT_REPLY
 
 
 def test_empty_products_with_evidence_one_typed_call(monkeypatch):
@@ -338,7 +346,7 @@ def test_empty_products_with_evidence_one_typed_call(monkeypatch):
                                         "text": "รูปสายชาร์จ"},))
     out = _app._typed_answer_boundary(
         gs, needs=(need,), profile=_profile(), web_configured=False)
-    assert calls["typed"] == 1 and out["answer_calls"] == 1
+    assert calls["typed"] == 1 and out.answer_calls == 1
 
 
 # ── 14/15: typed web admission truth table ──────────────────────────────────
@@ -472,7 +480,7 @@ def test_web_runs_before_only_answer_call(monkeypatch):
         gs, needs=(n,), profile=_profile(), web_configured=True,
         web_search_fn=lambda **kw: _web(**kw))
     assert order == ["web", "answer"], order
-    assert out["answer_calls"] == 1 and out["web_used"]
+    assert out.answer_calls == 1 and out.web_used
 
 
 def test_web_no_new_evidence_still_one_answer_call(monkeypatch):
@@ -492,7 +500,7 @@ def test_web_no_new_evidence_still_one_answer_call(monkeypatch):
     # web ไม่ให้ evidence → context ว่าง → deterministic (0 calls) หรืออย่างมาก
     # typed call เดียว — invariant คือ "never more than one answer call"
     assert calls["web"] == 1 and calls["typed"] <= 1
-    assert out["answer_calls"] <= 1 and not out["web_used"]
+    assert out.answer_calls <= 1 and not out.web_used
 
 
 # ── 18/20: media paths + mixed fail-closed ──────────────────────────────────

@@ -85,6 +85,13 @@ def _import_app(monkeypatch):
     return _app, calls
 
 
+def _final_text(out):
+    """customer-visible text ของ composition — finalizer render owner
+    (_render_composition + EMPTY fallback); Phase 8 migration จาก
+    out["answer"] dict access."""
+    from shopeechat import app as _a
+    return _a._render_composition(out) or acx.EMPTY_CONTEXT_REPLY
+
 def _need_product(op="recommend", types=("earphone",), refs=()):
     return TurnNeed(kind="product", operation=op, subject_refs=tuple(refs),
                     product_types=frozenset(types))
@@ -165,7 +172,7 @@ def test_boundary_generate_payload_purity(monkeypatch):
     out = _app._typed_answer_boundary(
         {"selection": sel, "pool": pool, "requests": (req,)},
         needs=(need,), profile=_profile(), web_configured=False)
-    assert out["answer_calls"] == 1
+    assert out.answer_calls == 1
     text = _payload_text(captured)
     for s in (SENT_QA, SENT_POL, GHOST):
         assert s not in text, f"sentinel leaked into _generate payload: {s!r}"
@@ -627,12 +634,18 @@ def test_policy_only_needs_zero_answer_calls(monkeypatch):
     out = _app._typed_answer_boundary(
         {"selection": _selection(), "pool": _pool(), "requests": ()},
         needs=(_need_policy(),), profile=_profile(), web_configured=False)
-    assert out["answer_calls"] == 0 and typed_calls == []
-    assert out["answer"]
+    assert out.answer_calls == 0 and typed_calls == []
+    # Phase 8 — policy need ไม่มี typed decision → deferred unanswered,
+    #   zero results → deterministic reply (ห้าม invent จาก prose)
+    assert out.results == ()
+    assert [(u.kind, u.reason) for u in out.unanswered_needs] == [
+        ("policy", "deferred")]
+    assert _final_text(out)
 
 
-def test_mixed_product_policy_needs_zero_answer_calls(monkeypatch):
-    """mixed turn → deterministic defer — Phase 8 เจ้าของ composition."""
+def test_mixed_product_policy_compose_preserves_both(monkeypatch):
+    """Phase 8 — mixed turn composes: product need ตอบได้ผ่าน answer_typed
+    ครั้งเดียว; policy need ไม่มี decision → deferred (ไม่ kill ทั้ง turn)."""
     _app, _ = _import_app(monkeypatch)
     typed_calls = []
     monkeypatch.setattr(llm, "answer_typed",
@@ -643,8 +656,11 @@ def test_mixed_product_policy_needs_zero_answer_calls(monkeypatch):
         {"selection": sel, "pool": _pool(), "requests": (req,)},
         needs=(_need_product(), _need_policy()), profile=_profile(),
         web_configured=False)
-    assert out["answer_calls"] == 0 and typed_calls == []
-    assert out["answer"]
+    assert out.answer_calls == 1 and len(typed_calls) == 1
+    assert [r.domain for r in out.results] == ["product"]
+    assert [(u.kind, u.reason) for u in out.unanswered_needs] == [
+        ("policy", "deferred")]
+    assert _final_text(out) == "mix"
 
 
 # ---------------------------------------------------------------------------
@@ -660,9 +676,9 @@ def test_boundary_has_no_private_deferred_kind_access(monkeypatch):
         "(UnansweredNeed.reason='deferred')")
 
 
-def test_deferred_turn_never_invokes_web_search(monkeypatch):
-    """defer ต้องก่อน admission/web — compat need ที่ admissible จริง
-    + policy need → web_search_fn ต้องไม่ถูกเรียก (0 calls)."""
+def test_deferred_kind_does_not_gate_productish_admission(monkeypatch):
+    """Phase 8 — policy need ไม่ kill ทั้ง turn: compat need ที่ admissible
+    จริงยัง evaluate admission/web ปกติ (≤1 call); policy deferred."""
     _app, _ = _import_app(monkeypatch)
     web_calls = []
     typed_calls = []
@@ -678,8 +694,10 @@ def test_deferred_turn_never_invokes_web_search(monkeypatch):
         needs=(_need_compat(), _need_policy()), profile=_profile(),
         web_search_fn=lambda **kw: web_calls.append(kw) or {},
         web_configured=True)
-    assert out["answer_calls"] == 0 and typed_calls == []
-    assert web_calls == [], "deferred turn ห้ามเรียก web search"
+    assert len(web_calls) <= 1, f"web at most once: {web_calls}"
+    assert out.answer_calls <= 1
+    assert any(u.kind == "policy" and u.reason == "deferred"
+               for u in out.unanswered_needs)
 
 
 # ---------------------------------------------------------------------------
@@ -713,10 +731,10 @@ def test_web_device_specs_only_reach_captured_context(monkeypatch):
     out = _app._typed_answer_boundary(
         sel_dict, needs=needs, profile=_profile(),
         web_search_fn=_web, web_configured=True)
-    assert len(web_calls) == 1 and out["answer_calls"] == 1
-    web_ev = [e for e in out["context"].evidence if e["kind"] == "web"]
+    assert len(web_calls) == 1 and out.answer_calls == 1
+    web_ev = [e for e in out.context.evidence if e["kind"] == "web"]
     assert len(web_ev) == 1 and web_ev[0]["need_indices"] == (0,), \
-        out["context"].evidence
+        out.context.evidence
     payload = web_ev[0].get("payload") or ""
     assert "usb-c" in payload and "25" in payload, web_ev
     assert "usb-c" in _payload_text(captured)
@@ -737,8 +755,8 @@ def test_web_info_and_specs_survive_in_one_bounded_payload(monkeypatch):
     out = _app._typed_answer_boundary(
         sel_dict, needs=needs, profile=_profile(),
         web_search_fn=_web, web_configured=True)
-    web_ev = [e for e in out["context"].evidence if e["kind"] == "web"]
-    assert len(web_ev) == 1, out["context"].evidence
+    web_ev = [e for e in out.context.evidence if e["kind"] == "web"]
+    assert len(web_ev) == 1, out.context.evidence
     payload = web_ev[0].get("payload") or ""
     assert "found spec sheet" in payload and "usb-pd" in payload, payload
     assert SENT_EVIDENCE not in repr(web_ev[0])
@@ -792,7 +810,7 @@ def test_single_compile_product_no_web(monkeypatch):
         {"selection": sel, "pool": _pool(), "requests": (req,)},
         needs=(_need_product(),), profile=_profile(), web_configured=False)
     assert counts == {"task": 1, "ctx": 1}, counts
-    assert out["answer_calls"] == 1 and len(ans) == 1
+    assert out.answer_calls == 1 and len(ans) == 1
 
 
 def test_single_compile_web_success(monkeypatch):
@@ -806,7 +824,7 @@ def test_single_compile_web_success(monkeypatch):
         web_search_fn=lambda **kw: web_calls.append(kw)
         or {"search_info": "spec info"}, web_configured=True)
     assert counts == {"task": 1, "ctx": 1}, counts
-    assert len(web_calls) == 1 and out["answer_calls"] == 1
+    assert len(web_calls) == 1 and out.answer_calls == 1
 
 
 def test_single_compile_web_failure(monkeypatch):
@@ -823,7 +841,7 @@ def test_single_compile_web_failure(monkeypatch):
         sel_dict, needs=needs, profile=_profile(),
         web_search_fn=_web, web_configured=True)
     assert counts == {"task": 1, "ctx": 1}, counts
-    assert len(web_calls) == 1 and out["answer_calls"] <= 1
+    assert len(web_calls) == 1 and out.answer_calls <= 1
 
 
 def test_single_compile_policy_only_no_context(monkeypatch):
@@ -836,11 +854,13 @@ def test_single_compile_policy_only_no_context(monkeypatch):
         needs=(_need_policy(),), profile=_profile(),
         web_search_fn=lambda **kw: web_calls.append(kw) or {},
         web_configured=True)
-    assert counts == {"task": 1, "ctx": 0}, counts
-    assert web_calls == [] and out["answer_calls"] == 0
+    # Phase 8 — ctx compile ครั้งเดียวต่อ turn (deferred kinds ไม่ block
+    #   compile; policy-only → ctx ว่าง → zero answer calls, web 0)
+    assert counts == {"task": 1, "ctx": 1}, counts
+    assert web_calls == [] and out.answer_calls == 0
 
 
-def test_single_compile_mixed_no_context(monkeypatch):
+def test_single_compile_mixed_product_answers_once(monkeypatch):
     _app, _ = _import_app(monkeypatch)
     counts = _spy_compile(monkeypatch)
     web_calls = []
@@ -852,8 +872,11 @@ def test_single_compile_mixed_no_context(monkeypatch):
         needs=(_need_product(), _need_policy()), profile=_profile(),
         web_search_fn=lambda **kw: web_calls.append(kw) or {},
         web_configured=True)
-    assert counts == {"task": 1, "ctx": 0}, counts
-    assert web_calls == [] and out["answer_calls"] == 0
+    # Phase 8 — product need ตอบผ่าน answer_typed ครั้งเดียว; policy
+    #   deferred (ไม่มี decision); ctx compile ครั้งเดียว
+    assert counts == {"task": 1, "ctx": 1}, counts
+    assert web_calls == [] and out.answer_calls == 1
+    assert [r.domain for r in out.results] == ["product"]
 
 
 # ---------------------------------------------------------------------------

@@ -52,7 +52,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from .retrieval_planner import RetrievalRequest
@@ -207,7 +207,7 @@ class UnansweredNeed:
     subject_refs: tuple[str, ...]
     scope: tuple[str, ...]
     target: str | None
-    reason: Literal["no_selection", "deferred"]
+    reason: Literal["no_selection", "deferred", "no_answer"]
 
 
 @dataclass(frozen=True)
@@ -808,3 +808,109 @@ def decide_web_admission(*, needs: tuple, selection: SelectionResult,
         return deny("covered")  # ทุก productish need มี coverage แล้ว
     except Exception:
         return deny("internal_error")
+
+
+# ── Phase 8 — typed answer composition (owner เดียว) ────────────────────────
+# render order ของ segments: claim guidance ก่อน (collection-state message
+#   จาก warranty flow — customer ต้องเห็นก่อน) → product answer → policy
+#   conclusion ท้าย (ข้อสรุป eligibility ไม่นำหน้าคำตอบสินค้า)
+_DOMAIN_ORDER = {"claim": 0, "product": 1, "policy": 2}
+
+
+@dataclass(frozen=True)
+class DomainResult:
+    """typed per-need result — domain owner เดิมผลิต (composer ไม่สร้าง
+    business logic): text = rendered segment (claim guidance / product
+    answer); outcome = policy outcome — finalizer render ผ่าน render
+    owner เดียว (guards.policy_outcome_text)."""
+    domain: str                       # claim|product|policy
+    need_indices: tuple[int, ...]     # 0-based need attribution
+    text: str = ""
+    outcome: str = ""
+
+
+@dataclass(frozen=True)
+class AnswerComposition:
+    """one typed composition contract ต่อ turn — input เดียวของ finalizer.
+    results = needs ที่ domain owner ผลิต result จริง; unanswered_needs =
+    needs ที่ไม่มี authoritative result (ห้าม invent); context =
+    AnswerContext เดิม (product evidence boundary ไม่เปลี่ยน)."""
+    results: tuple[DomainResult, ...] = ()
+    unanswered_needs: tuple[UnansweredNeed, ...] = ()
+    products: tuple[dict, ...] = ()
+    usage: dict = field(default_factory=dict)
+    answer_calls: int = 0
+    web_used: dict | None = None
+    admission: WebAdmission | None = None
+    context: AnswerContext | None = None
+    trace: tuple[str, ...] = ()
+
+
+def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
+                   product_text: str = "", policy_decision=None,
+                   claim_guidance: str = "", usage: dict | None = None,
+                   answer_calls: int = 0, web_used: dict | None = None,
+                   admission: WebAdmission | None = None
+                   ) -> AnswerComposition:
+    """typed per-need results → AnswerComposition ครั้งเดียวต่อ turn.
+
+    - claim_guidance (warranty-flow CONTINUE_PRODUCT carry) → claim
+      result covering kind=="claim" needs
+    - product_text (llm.answer_typed output) → product result covering
+      ctx task needs ที่มี coverage (unanswered อยู่แล้วไม่ถูก cover)
+    - policy_decision (policy_resolver output) → policy result covering
+      kind=="policy" needs — outcome เท่านั้น (render = finalizer)
+    - need ที่ไม่มี typed result → UnansweredNeed เดิม/ใหม่
+      (deferred|no_selection) — ห้าม synthesize จาก prose/raw text
+    """
+    results: list[DomainResult] = []
+    covered: set[int] = set()
+    ctx_unanswered = list(context.unanswered_needs) if context else []
+    unans_idx = {u.need_index for u in ctx_unanswered}
+    if claim_guidance:
+        idxs = tuple(i for i, n in enumerate(needs) if n.kind == "claim")
+        covered.update(idxs)
+        results.append(DomainResult("claim", idxs, text=claim_guidance))
+    if product_text and context is not None:
+        idxs = tuple(sorted(
+            {t.need_index for t in context.task.tasks} - unans_idx))
+        covered.update(idxs)
+        results.append(DomainResult("product", idxs, text=product_text))
+    if policy_decision is not None:
+        idxs = tuple(i for i, n in enumerate(needs) if n.kind == "policy")
+        covered.update(idxs)
+        results.append(DomainResult(
+            "policy", idxs, outcome=policy_decision.outcome))
+    results.sort(key=lambda r: _DOMAIN_ORDER.get(r.domain, 9))
+    if context is not None:
+        unanswered = [u for u in ctx_unanswered
+                      if u.need_index not in covered]
+        if not product_text:
+            # task need มี coverage แต่ไม่มี product result (answer เท่า
+            # "") — ต้อง surface เป็น unanswered ไม่ให้หายทั้ง need
+            present = {u.need_index for u in unanswered}
+            unanswered += [
+                UnansweredNeed(t.need_index, t.kind, t.operation,
+                               t.subject_refs, t.scope, t.target,
+                               "no_answer")
+                for t in context.task.tasks
+                if t.need_index not in covered
+                and t.need_index not in present]
+        unanswered = tuple(unanswered)
+    else:
+        unanswered = tuple(
+            UnansweredNeed(
+                i, n.kind, n.operation, tuple(n.subject_refs or ()),
+                _need_scope(n), None,
+                "deferred" if n.kind in _POLICY_NEED_KINDS
+                else "no_selection")
+            for i, n in enumerate(needs) if i not in covered)
+    trace = tuple(context.trace if context else ()) + tuple(
+        f"compose {r.domain} needs={list(r.need_indices)}"
+        for r in results)
+    return AnswerComposition(
+        results=tuple(results), unanswered_needs=unanswered,
+        products=context.products if context else (),
+        usage=dict(usage or {}), answer_calls=answer_calls,
+        web_used=web_used, admission=admission, context=context,
+        trace=trace)

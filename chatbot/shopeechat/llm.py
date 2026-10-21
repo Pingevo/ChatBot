@@ -188,7 +188,7 @@ def _lang_instruction(message: str) -> str:
     )
 
 
-SYSTEM_INSTRUCTION = """คุณเป็นผู้ช่วยขายหญิงที่เป็นมิตรและสุภาพ ให้คำปรึกษาสินค้ากับกลุ่มร้านค้าออนไลน์ในเครือเครือข่ายเรา
+_SYS_CORE_A = """คุณเป็นผู้ช่วยขายหญิงที่เป็นมิตรและสุภาพ ให้คำปรึกษาสินค้ากับกลุ่มร้านค้าออนไลน์ในเครือเครือข่ายเรา
 (ร้านในเครือทั้งหมด เช่น ThaiSuperPhone, YoupinOfficialStore, XiaomiEcoSystem, SuperITMall,
 KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ดูร้านจริงจาก field `shop` ใน context).
 
@@ -276,9 +276,17 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
       หากซื้อสินค้าผ่าน Shopee สามารถใช้เลขคำสั่งซื้อเป็นหลักฐานการซื้อได้เลยค่ะ
       หากต้องการลงทะเบียนเพิ่มเติม รบกวนแจ้งแอดมินเพื่อตรวจสอบขั้นตอนเฉพาะรุ่นให้นะคะ"
     - เหตุผล: QA พบบอทแต่ง QR Code ที่ไม่มีจริง ทำให้ลูกค้าสแกนแล้วไม่ได้ประโยชน์
-- **ถ้า state machine ส่งคำตอบให้แล้ว** (source=warranty_claim_flow หรือ warranty_date_followup):
+"""
+
+# stale บน typed path — ภายใต้ Phase 8 composition LLM ยังถูกเรียกเพื่อ
+#   product tasks แม้ claim guidance มาจาก state machine แล้ว (ประโยค
+#   "LLM จะไม่ถูกเรียกเลย" ไม่จริงบน typed payload); legacy flag-OFF path
+#   ยังเป็นจริง → เก็บใน SYSTEM_INSTRUCTION เดิมเท่านั้น
+_SYS_LEGACY_CLAIM_NOTE = """- **ถ้า state machine ส่งคำตอบให้แล้ว** (source=warranty_claim_flow หรือ warranty_date_followup):
   LLM จะไม่ถูกเรียกเลย — คำตอบเป็น deterministic
-- การเสนอขาย/แนะนำสินค้าใหม่: เฉพาะ status=NORMAL เท่านั้น (เหมือนเดิม)
+"""
+
+_SYS_CORE_B = """- การเสนอขาย/แนะนำสินค้าใหม่: เฉพาะ status=NORMAL เท่านั้น (เหมือนเดิม)
 
 กฎการตอบ:
 - ตอบเป็นภาษาไทยเสมอ (แม้ลูกค้าจะพิมพ์ภาษาอื่น — เว้นแต่มี Language instruction ต่อท้าย prompt นี้) สุภาพ เป็นมิตร กระชับ
@@ -619,6 +627,14 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
 - ถ้า state machine ส่งคำตอบให้แล้ว → ทำตาม flow นั้น ไม่ต้องเสนอขาย
 - เหตุผล: การเสนอขายระหว่างลูกค้าแจ้งเคลม = ไม่เหมาะสม ทำให้ลูกค้ารู้สึกไม่ได้รับการช่วยเหลือ
 """
+
+# legacy/flag-OFF prompt เดิม — byte-identical กับก่อน split (pin ด้วย
+#   sha256 ใน test_phase8_composition)
+SYSTEM_INSTRUCTION = _SYS_CORE_A + _SYS_LEGACY_CLAIM_NOTE + _SYS_CORE_B
+# Phase 8 — typed answer path prompt = SYSTEM_INSTRUCTION ลบ
+#   _SYS_LEGACY_CLAIM_NOTE (stale เดียวที่พิสูจน์ได้); safety/grounding/
+#   shop isolation/availability/claim/handoff/language คงครบ
+TYPED_SYSTEM_INSTRUCTION = _SYS_CORE_A + _SYS_CORE_B
 
 
 # ---- API key rotation (round-robin) -------------------------------------------
@@ -1534,7 +1550,7 @@ def answer_typed(
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ", {"prompt": 0, "output": 0, "total": 0}
     model_name = (model or get_model("chat")).strip()
     task_text = context.task.render()
-    system_instruction = SYSTEM_INSTRUCTION + persona_extra + _lang_instruction(task_text)
+    system_instruction = TYPED_SYSTEM_INSTRUCTION + persona_extra + _lang_instruction(task_text)
     ctx_body = context.context_text(shop_hint=shop_hint)
     user_prompt = (
         f"{ctx_body}\n\n"

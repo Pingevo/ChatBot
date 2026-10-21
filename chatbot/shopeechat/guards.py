@@ -85,6 +85,16 @@ _POLICY_TEXT_ELIGIBLE = "เปลี่ยน/คืนได้ตามเง
 _POLICY_TEXT_INELIGIBLE = "เคสนี้ยังไม่เข้าเงื่อนไขการเปลี่ยน/คืนนะคะ"
 _POLICY_TEXT_ADMIN_REVIEW = ("เรื่องการเปลี่ยน/คืนสินค้า "
                            "เดี๋ยวขอให้แอดมินตรวจสอบเงื่อนไขให้นะคะ")
+
+
+def policy_outcome_text(outcome: str) -> str:
+    """typed outcome → deterministic conclusion text — render owner เดียว
+    (app pure render / composition finalizer / enforce ใช้ร่วมกัน)."""
+    return (_POLICY_TEXT_ELIGIBLE if outcome == "eligible"
+            else _POLICY_TEXT_INELIGIBLE if outcome == "ineligible"
+            else _POLICY_TEXT_ADMIN_REVIEW)
+
+
 _REWRITE_RULES = (
     ("promo_claim", re.compile(
         r"(?<!ไม่)(?<!ไม่ได้)"
@@ -324,9 +334,43 @@ def enforce(resp, req):
             _pdec.get("policy_type") == "return_exchange"
         if _pdec_active:
             _oc = _pdec.get("outcome")
-            _final = (_POLICY_TEXT_ELIGIBLE if _oc == "eligible"
-                      else _POLICY_TEXT_INELIGIBLE if _oc == "ineligible"
-                      else _POLICY_TEXT_ADMIN_REVIEW)
+            _final = policy_outcome_text(_oc)
+            # Phase 8 — composed turn: structured-marker validation เท่านั้น
+            #   (composition marker exists + "policy" ∈ domains +
+            #   policy_text == canonical outcome text). ห้าม inspect
+            #   answer prose เลย — finalizer เป็น owner เดียวของ segment
+            #   render/insert; canonical sentence ใน product prose ไม่ใช่
+            #   structural proof.  marker valid → return resp ตรง
+            #   (byte-identical); marker invalid/mismatch → fail closed
+            #   ด้วย deterministic wholesale render เดิม (typed outcome
+            #   ชนะ — ไม่ recover จาก prose).  ไม่มี marker → wholesale
+            #   render เดิม (flag-OFF pure policy — byte-identical)
+            _comp = (_rd0.get("composition")
+                     if isinstance(_rd0, dict) else None)
+            if _comp is not None:
+                # domains contract = list เท่านั้น (producer stamp เป็น
+                #   list) — non-list (str substring / dict keys /
+                #   tuple / None) = malformed → marker invalid, ไม่มี
+                #   coercion/membership บน type อื่น
+                _domains = _comp.get("domains") \
+                    if isinstance(_comp, dict) else None
+                _marker_ok = (
+                    isinstance(_comp, dict)
+                    and isinstance(_domains, list)
+                    and "policy" in _domains
+                    and _comp.get("policy_text") == _final
+                )
+                if _marker_ok:
+                    return resp
+                resp.answer = _final
+                resp.answer_segments = _llm.split_segments(_final)
+                if isinstance(_rd0, dict):
+                    _rd0["guard_rewritten"] = "policy_decision"
+                    _rd0["composition_marker_invalid"] = True
+                print(f"[GUARD-ENFORCE] policy_decision outcome={_oc} "
+                      "→ invalid composition marker → deterministic render "
+                      "(fail closed)", file=_sys.stderr)
+                return resp
             resp.answer = _final
             resp.answer_segments = _llm.split_segments(_final)
             if isinstance(_rd0, dict):

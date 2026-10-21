@@ -624,42 +624,53 @@ def _typed_answer_boundary(sel: dict, *, needs: tuple, profile,
                            platform: str = "shopee",
                            persona_extra: str = "", model: str | None = None,
                            web_search_fn=None,
-                           web_configured: bool | None = None) -> dict:
-    """Phase 7 — grouped flag-ON answer boundary เดียวต่อ turn.
+                           web_configured: bool | None = None,
+                           policy_decision=None,
+                           claim_guidance: str = ""):
+    """Phase 7+8 — grouped flag-ON answer boundary เดียวต่อ turn.
 
     typed pipeline artifacts (selection/pool/requests จาก
     run_grouped_selection) → compile_answer_task ครั้งเดียว (owner เดียว
     ของ deferred-kind classification — `task.deferred` typed signal) →
-    deferred? deterministic defer ก่อน compile → typed web admission →
-    optional web search (producer normalize specs+info → payload) →
-    compile AnswerContext ครั้งเดียวต่อ turn → zero-or-one
-    llm.answer_typed call —
-    raw customer message / history / legacy products / extra_context
-    ข้าม boundary นี้ไม่ได้ (signature ไม่มีช่องรับ); follow-up identity
-    มาจาก typed needs/subject_refs/requests เท่านั้น.
+    typed web admission → optional web search (producer normalize
+    specs+info → payload) → compile AnswerContext ครั้งเดียวต่อ turn →
+    zero-or-one llm.answer_typed call → compose_answer ครั้งเดียว →
+    AnswerComposition (finalizer render ที่ app — boundary ไม่ผลิต
+    customer prose); raw customer message / history / legacy products /
+    extra_context ข้าม boundary นี้ไม่ได้ (signature ไม่มีช่องรับ);
+    follow-up identity มาจาก typed needs/subject_refs/requests เท่านั้น.
+
+    Phase 8 — deferred kinds (task.deferred) ไม่ kill ทั้ง turn อีก:
+    productish tasks ทำงานต่อจน AnswerContext; typed results ที่มีผู้ผลิต
+    (policy_decision จาก policy_resolver / claim_guidance จาก warranty
+    flow / product_text จาก answer_typed) cover need ของตัวเอง — ไม่มี
+    result → unanswered (ห้าม invent).
 
     error contract ตามจริง: sel=None/artifacts invalid/task compile fail/
-    ctx compile fail/ctx ว่าง/deferred turn → deterministic
-    EMPTY_CONTEXT_REPLY, answer_calls=0; web search พัง → ต่อด้วย local
+    ctx compile fail/ctx ว่าง → composition ที่มีแต่ unanswered (+typed
+    results ที่มีอยู่), answer_calls=0; web search พัง → ต่อด้วย local
     typed evidence (answer ≤1, web_used=None); legacy llm.answer ไม่
-    re-enter; deferred kinds (policy/claim/order/troubleshoot) →
-    deterministic defer ก่อน compile/admission/web (composition =
-    Phase 8 owner; product context ไม่ consume policy decisions).
+    re-enter; product context ไม่ consume policy decisions.
     """
     from . import answer_context as _acx
     zero = {"prompt": 0, "output": 0, "total": 0}
 
-    def _done(answer, usage, ctx=None, adm=None, web=None, calls=0):
-        return {"answer": answer, "usage": usage, "context": ctx,
-                "admission": adm, "web_used": web, "answer_calls": calls}
+    def _done(ctx=None, adm=None, web=None, calls=0, usage=None,
+              product_text=""):
+        return _acx.compose_answer(
+            needs=needs, context=ctx, product_text=product_text,
+            policy_decision=policy_decision,
+            claim_guidance=claim_guidance,
+            usage=zero if usage is None else usage,
+            answer_calls=calls, web_used=web, admission=adm)
     if sel is None:
-        return _done(_acx.EMPTY_CONTEXT_REPLY, zero)
+        return _done()
     try:
         pool = sel["pool"]
         requests = tuple(sel["requests"])
         selection = sel["selection"]
     except Exception:
-        return _done(_acx.EMPTY_CONTEXT_REPLY, zero)
+        return _done()
     # task compile ครั้งเดียว — compile_answer_task เป็น owner เดียวของ
     # deferred-kind classification; boundary consume typed `task.deferred`
     # เท่านั้น — ไม่ classify kind string เอง
@@ -668,12 +679,7 @@ def _typed_answer_boundary(sel: dict, *, needs: tuple, profile,
             needs=needs, selection=selection, pool=pool, requests=requests,
             profile=profile)
     except Exception:
-        return _done(_acx.EMPTY_CONTEXT_REPLY, zero)
-    # deferred needs → deterministic defer ก่อน AnswerContext compile /
-    # admission / web เสมอ — ctx compile 0, web 0, answer calls 0
-    # (mixed composition = Phase 8 owner)
-    if task.deferred:
-        return _done(_acx.EMPTY_CONTEXT_REPLY, zero)
+        return _done()
     web_used = None
     try:
         adm = _acx.decide_web_admission(
@@ -712,15 +718,79 @@ def _typed_answer_boundary(sel: dict, *, needs: tuple, profile,
             requests=requests, profile=profile, task=task,
             web_evidence=(web_used,) if web_used else ())
     except Exception:
-        return _done(_acx.EMPTY_CONTEXT_REPLY, zero, adm=adm,
-                     web=web_used)
+        return _done(adm=adm, web=web_used)
     if ctx.is_empty:
-        return _done(_acx.EMPTY_CONTEXT_REPLY, zero, ctx=ctx, adm=adm,
-                     web=web_used)
+        return _done(ctx=ctx, adm=adm, web=web_used)
     answer, usage = llm.answer_typed(
         context=ctx, shop_hint=shop,
         persona_extra=persona_extra, model=model)
-    return _done(answer, usage, ctx=ctx, adm=adm, web=web_used, calls=1)
+    return _done(ctx=ctx, adm=adm, web=web_used, calls=1, usage=usage,
+                 product_text=answer)
+
+
+def _render_composition(comp) -> str:
+    """AnswerComposition → answer text: canonical-order segments + dedupe
+    identical; policy outcome render ผ่าน owner เดียว
+    (guards.policy_outcome_text); provider-error sentinel ชนะทั้งหมด —
+    failure contract: enforce escalate ต้องเห็น sentinel เดี่ยวๆ."""
+    from . import answer_context as _acx
+    from . import guards as _guards
+    if any(r.text == llm.LLM_ERROR_REPLY for r in comp.results):
+        return llm.LLM_ERROR_REPLY
+    parts: list[str] = []
+    seen: set[str] = set()
+    for r in sorted(comp.results,
+                    key=lambda r: _acx._DOMAIN_ORDER.get(r.domain, 9)):
+        text = (r.text if r.domain != "policy"
+                else _guards.policy_outcome_text(r.outcome))
+        if text and text not in seen:
+            seen.add(text)
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _finalize_answer(comp, *, message: str, limit: int, products,
+                     source: str, shop: str | None, model: str | None,
+                     elapsed, cost, intent, timing, steps, routing_decision,
+                     image_desc: str = "") -> ChatResponse:
+    """production finalizer เดียวของ typed path — AnswerComposition →
+    ChatResponse เดียว. render/dedupe/warranty-append/segments/composition
+    marker ทำที่นี่ครั้งเดียว — sole normal-path composition renderer;
+    downstream branch ไม่แตะ prose บน valid-marker path (enforce อาจ
+    deterministic wholesale-replace ทั้ง answer เฉพาะเมื่อ marker
+    invalid — fail-closed guard, ไม่ใช่ composition); pure function
+    ของ comp (เรียกซ้ำ byte-identical)."""
+    from . import answer_context as _acx
+    from . import guards as _guards
+    answer = _render_composition(comp) or _acx.EMPTY_CONTEXT_REPLY
+    answer = _append_base_warranty(answer, message)
+    rd = dict(routing_decision or {})
+    rd["composition"] = {
+        "domains": [r.domain for r in comp.results],
+        "unanswered": [u.need_index for u in comp.unanswered_needs],
+        "policy_text": next(
+            (_guards.policy_outcome_text(r.outcome)
+             for r in comp.results if r.domain == "policy"), None)}
+    return ChatResponse(
+        answer=answer,
+        answer_segments=llm.split_segments(answer),
+        products=list(products or [])[:limit],
+        shop=shop,
+        model=model,
+        source=source,
+        usage=dict(comp.usage or {}),
+        elapsed=elapsed,
+        cost=cost,
+        intent=intent,
+        timing=timing,
+        web_search_used=comp.web_used is not None,
+        web_search_reason=(comp.admission.reason
+                           if comp.web_used and comp.admission else None),
+        web_search_model=None,
+        steps=steps,
+        routing_decision=rd,
+        image_desc=image_desc,
+    )
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -1750,6 +1820,17 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 print(f"[INTENT] general_qtype {_gq_before} → bypass to product flow", file=sys.stderr)
         _pdec = None          # typed PolicyDecision — object เดียวต่อ turn
         _pdec_ptype = ""      # policy_type ของ decision (ใส่ใน routing_decision)
+        _pd_compose = False   # Phase 8 — typed composition gate (flag-ON only)
+        # ⚡ Phase 8 — grouped-selection flag อ่านครั้งเดียวต่อ turn ก่อน
+        #   _pdec gate (เดิมอ่าน ~2102 หลัง general branch — mixed compose
+        #   decision ต้องรู้ flag ก่อน gate; mid-turn flip = ทั้งก้อนเดิม
+        #   ใช้ค่าเดียวกัน)
+        _sel_flag = False
+        try:
+            from . import runtime_config as _rcfg
+            _sel_flag = _rcfg.grouped_retrieval_selection_enabled()
+        except Exception:
+            _sel_flag = False
 
         def _rd_extra() -> dict:
             """typed decision + canonical subject identities ที่ต้องติดไป
@@ -1809,6 +1890,14 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                              or (_productish_need and (
                                  _subject_cards or anchor_card
                                  or _hybrid_anchor_card)))
+                # Phase 8 — typed composition gate: flag ON + productish
+                #   need + authoritative outcome (eligible/ineligible) →
+                #   product need ทำงานต่อผ่าน typed boundary; _pdec ไหล
+                #   เป็น typed input (ไม่ใช่ prose); unknown/admin_review/
+                #   flag OFF → precedence เดิม (handoff/pure render)
+                _pd_compose = bool(
+                    _sel_flag and _productish_need
+                    and _pdec.outcome in ("eligible", "ineligible"))
                 # already-resolved safe cards only — ห้าม fetch/retrieve
                 #   เพิ่มเพื่อ presentation
                 from . import candidate_pool as _pool
@@ -1825,7 +1914,8 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                         continue
                     _pd_seen.add(_k)
                     _pd_cards.append(_c)
-                if _pd_mixed or _pdec.outcome in ("unknown", "admin_review"):
+                if (_pd_mixed and not _pd_compose) or _pdec.outcome in (
+                        "unknown", "admin_review"):
                     from . import guards as _guards
                     from . import responses as _resp_mod
                     _pd_reason = ("policy_mixed_review" if _pd_mixed
@@ -1873,43 +1963,48 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                             **_rd_extra()},
                         image_desc=_image_desc_out,
                     )
-                # pure eligible/ineligible — deterministic render เจ้าของ
-                #   decision เดียว; enforce re-render ค่าเดิม + marker
-                #   (byte-stable idempotent)
-                from . import guards as _guards
-                _pd_text = (_guards._POLICY_TEXT_ELIGIBLE
-                            if _pdec.outcome == "eligible"
-                            else _guards._POLICY_TEXT_INELIGIBLE)
-                print(f"[POLICY-DECISION] pure return_policy → "
-                      f"deterministic outcome={_pdec.outcome}",
-                      file=sys.stderr)
-                return ChatResponse(
-                    answer=_pd_text,
-                    answer_segments=llm.split_segments(_pd_text),
-                    products=_pd_cards[:req.limit],
-                    shop=req.shop,
-                    model=model_name,
-                    source="policy_decision",
-                    usage={"prompt": 0, "output": 0, "total": 0},
-                    intent=_intent_result if isinstance(_intent_result, dict) else {},
-                    web_search_used=False,
-                    steps=_steps,
-                    timing={"total": round(_time.time() - _total_start, 3)},
-                    routing_decision={**_routing(
-                        "bot_reply",
-                        f"pure return_policy → deterministic typed "
-                        f"outcome={_pdec.outcome} — zero model, no handoff"),
-                        **_rd_extra()},
-                    image_desc=_image_desc_out,
-                )
+                if _pd_compose:
+                    # Phase 8 — mixed compose: หลุดไป product flow โดย
+                    #   _pdec ยังผูกอยู่ (typed input ของ boundary —
+                    #   policy evidence ไม่เข้า product retrieval prompt)
+                    general_qtype = None
+                else:
+                    # pure eligible/ineligible — deterministic render เจ้าของ
+                    #   decision เดียว; enforce re-render ค่าเดิม + marker
+                    #   (byte-stable idempotent)
+                    from . import guards as _guards
+                    _pd_text = _guards.policy_outcome_text(_pdec.outcome)
+                    print(f"[POLICY-DECISION] pure return_policy → "
+                          f"deterministic outcome={_pdec.outcome}",
+                          file=sys.stderr)
+                    return ChatResponse(
+                        answer=_pd_text,
+                        answer_segments=llm.split_segments(_pd_text),
+                        products=_pd_cards[:req.limit],
+                        shop=req.shop,
+                        model=model_name,
+                        source="policy_decision",
+                        usage={"prompt": 0, "output": 0, "total": 0},
+                        intent=_intent_result if isinstance(_intent_result, dict) else {},
+                        web_search_used=False,
+                        steps=_steps,
+                        timing={"total": round(_time.time() - _total_start, 3)},
+                        routing_decision={**_routing(
+                            "bot_reply",
+                            f"pure return_policy → deterministic typed "
+                            f"outcome={_pdec.outcome} — zero model, no handoff"),
+                            **_rd_extra()},
+                        image_desc=_image_desc_out,
+                    )
             # ถ้าเป็น warranty_policy/return_policy แต่ message มี model keyword (เช่น "P01 รับประกันกี่ปี")
             # หรือมี item_id (ลูกค้าคลิกสินค้ามา) ให้ skip general flow ไป product flow แทน
             # เพราะลูกค้าถามรับประกันของสินค้าเฉพาะรุ่น ต้องดึงสินค้า (รวม UNLIST/sold_out) มาให้ LLM ตอบ
             if general_qtype in ("warranty_policy", "return_policy") and (_current_has_model or _tagged_item_id):
                 print(f"[INTENT] warranty_policy with model/item_id → skip general, go to product flow", file=sys.stderr)
                 general_qtype = None
-            elif _productish_need and (_subject_cards or _tagged_item_id or anchor_card
-                                       or _hybrid_anchor_card or _current_has_model):
+            elif (_productish_need and not _pd_compose
+                  and (_subject_cards or _tagged_item_id or anchor_card
+                       or _hybrid_anchor_card or _current_has_model)):
                 # ⚡ Phase 2C.3 — mixed product+policy need: non-eligibility
                 #   context ติดไปเป็น extra_context ของ product answer;
                 #   gate = product side มี concrete subject
@@ -2093,18 +2188,13 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                       file=sys.stderr)
 
         # ⚡ Task 5B3-C — grouped-retrieval selection (flag-gated)
-        #   flag resolution เท่านั้น — execution ย้ายไปหลัง branch evidence
+        #   flag resolution ย้ายไปก่อน _pdec gate (~1752 — Phase 8 compose
+        #   decision ต้องรู้ flag); execution ยังอยู่หลัง branch evidence
         #   resolve (KB path ก่อน boundary ~2278 / main path ก่อน ~4459):
         #   branch ต่อกัน mutually exclusive → run ครั้งเดียวต่อ turn
         #   (canonical owns context เมื่อ flag ON: selected ว่าง=products ว่าง;
         #   error/None → fail closed products=[] — legacy ไม่ re-enter เด็ดขาด)
         _grouped_sel = None
-        _sel_flag = False
-        try:
-            from . import runtime_config as _rcfg
-            _sel_flag = _rcfg.grouped_retrieval_selection_enabled()
-        except Exception:
-            _sel_flag = False
 
         # ===== ขั้นที่ 1: เช็ค Knowledge Base ก่อน =====
         # ถ้าเป็น follow-up (เช่น "เคลมยังไง", "รับประกัน") ให้เอา model จาก history มาค้น KB ด้วย
@@ -2581,9 +2671,11 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                             platform=req.platform or "shopee",
                             persona_extra=_persona_extra,
                             model=model_name,
-                            web_search_fn=_ws.search_and_extract)
+                            web_search_fn=_ws.search_and_extract,
+                            policy_decision=_pdec,
+                            claim_guidance=_mixed_claim_carry)
                         merged_products = list(
-                            _tb["context"].products) if _tb["context"] else []
+                            _tb.context.products) if _tb.context else []
                     if _grouped_sel:
                         _steps.append({
                             "name": "GroupedRetrievalSelection",
@@ -2591,7 +2683,10 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                             "output": _grouped_sel["summary"]})
 
                     if _sel_flag:
-                        answer, usage_info = _tb["answer"], _tb["usage"]
+                        # Phase 8 M1 — callsite ไม่ render prose;
+                        #   final answer เกิดใน _finalize_answer เท่านั้น
+                        usage_info = _tb.usage
+                        answer = ""
                     else:
                         try:
                             answer, usage_info = llm.answer(
@@ -2631,6 +2726,8 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                         },
                     })
                     # record LLM2 step for KB path
+                    #   flag ON — finalizer render เดียว → output ว่างไว้
+                    #   แล้วเติมจาก resp.answer หลัง _finalize_answer
                     _steps.append({
                         "name": "LLM2",
                         "model": model_name,
@@ -2649,6 +2746,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                             "answer_full_length": len(answer),
                         },
                     })
+                    _llm2_step_idx = len(_steps) - 1
                     # ส่ง merged_products เป็น products (เพื่อให้ frontend แสดงได้)
                     products = [knowledge_base._kb_doc_to_card(d) if "_kb_only" in d else d for d in merged_products]
                     # dedup สินค้าที่ชื่อใกล้เคียงกัน (เช่น P01 ซ้ำหลาย listing ต่าง prefix โปร)
@@ -2669,7 +2767,11 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                             "แล้วแนะนำเฉพาะสินค้า status=NORMAL เท่านั้น"
                         )
                         _add_context_note(products, _kb_unlist_note)
-                    answer = _append_base_warranty(answer, req.message, claim_guidance=_mixed_claim_carry)
+                    if not _sel_flag:
+                        # flag ON: claim guidance + warranty append เป็น
+                        #   composition segment/finalizer job — ห้ามแตะ
+                        #   answer ที่ callsite
+                        answer = _append_base_warranty(answer, req.message, claim_guidance=_mixed_claim_carry)
                     _timing_breakdown["total"] = round(_time.time() - _total_start, 3)
 
                     # ── Web search fallback (ด่านสุดท้าย) ──
@@ -2731,12 +2833,40 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                                 print(f"[WEB-SEARCH] KB branch reanswer done  total={_total_elapsed:.2f}s  products={len(products)}", file=sys.stderr)
 
                     # ⚡ Legacy Fix — source label สะท้อน web search ที่ใช้
-                    _kb_source = "knowledge_base+mongo+web_search" if _kb_ws_used else "knowledge_base+mongo"
+                    _kb_source = ("knowledge_base+mongo+web_search"
+                                  if (_kb_ws_used or
+                                      (_sel_flag and _tb.web_used))
+                                  else "knowledge_base+mongo")
                     # ⚡ บันทึก suggestion products ลง conversation_products timeline
                     #    กัน case: kb+mongo ตอบแล้วไม่บันทึก → active product ว่าง
                     #    → คำถามถัดไป (เช่น "ขอลิงค์กับรูป") ไม่มี active ใช้ → ดึงสินค้าอื่นมาแทน
                     _record_suggestion_products(req, products[:req.limit],
                                                 subject_evidence=_subject_ev)
+                    if _sel_flag:
+                        # Phase 8 — finalizer เดียวของ typed path;
+                        #   LLM2 step สังเกต finalized answer หลัง render
+                        #   (resp.steps เป็น list copy ของ _steps —
+                        #   patch บน resp.steps ตรง ๆ)
+                        _resp = _finalize_answer(
+                            _tb, message=req.message, limit=req.limit,
+                            products=products, source=_kb_source,
+                            shop=req.shop, model=model_name,
+                            elapsed=round(_total_elapsed, 2),
+                            cost=round(cost, 6),
+                            intent=_intent_result,
+                            timing=_timing_breakdown, steps=_steps,
+                            routing_decision={
+                                **_routing(
+                                    "bot_reply",
+                                    "kb+mongo: พบใน knowledge base + "
+                                    "product store → บอทตอบ"),
+                                **_rd_extra()},
+                            image_desc=_image_desc_out)
+                        _resp.steps[_llm2_step_idx]["output"] = {
+                            "answer": _resp.answer[:500],
+                            "answer_full_length": len(_resp.answer),
+                        }
+                        return _resp
                     return ChatResponse(
                         answer=answer,
                         answer_segments=llm.split_segments(answer),
@@ -4778,15 +4908,20 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 profile=_retrieval_profile,
                 shop=req.shop, platform=req.platform or "shopee",
                 persona_extra=_persona_extra,
-                model=model_name, web_search_fn=_ws.search_and_extract)
+                model=model_name, web_search_fn=_ws.search_and_extract,
+                policy_decision=_pdec,
+                claim_guidance=_mixed_claim_carry)
             products = list(
-                _tb["context"].products) if _tb["context"] else []
+                _tb.context.products) if _tb.context else []
         if _grouped_sel:
             _steps.append({"name": "GroupedRetrievalSelection",
                            "input": {"path": "main"},
                            "output": _grouped_sel["summary"]})
         if _sel_flag:
-            answer, usage_info = _tb["answer"], _tb["usage"]
+            # Phase 8 M1 — callsite ไม่ render prose;
+            #   final answer เกิดใน _finalize_answer เท่านั้น
+            usage_info = _tb.usage
+            answer = ""
         else:
             try:
                 answer, usage_info = llm.answer(
@@ -4834,6 +4969,8 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
             },
         })
         # record LLM2 step (ตัวตอบ — gemini 3.5 flash lite)
+        #   flag ON — finalizer render เดียว → output ว่างไว้
+        #   แล้วเติมจาก resp.answer หลัง _finalize_answer
         _steps.append({
             "name": "LLM2",
             "model": model_name,
@@ -4855,7 +4992,11 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 "answer_full_length": len(answer),
             },
         })
-        answer = _append_base_warranty(answer, desc_message, claim_guidance=_mixed_claim_carry)
+        _llm2_step_idx = len(_steps) - 1
+        if not _sel_flag:
+            # flag ON: claim guidance + warranty append เป็น composition
+            #   segment/finalizer job — ห้ามแตะ answer ที่ callsite
+            answer = _append_base_warranty(answer, desc_message, claim_guidance=_mixed_claim_carry)
         # ส่ง product cards ทั้งหมดที่เป็น context ให้ frontend (เหมือนเดิม)
         # frontend จะโชว์ว่าคำตอบนี้ใช้สินค้าอะไรตัดสินใจบ้าง
         # LLM จะเลือกแนะนำไม่เกิน 3 รายการจาก context เอง (ตาม prompt)
@@ -4965,6 +5106,31 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
 
         _record_suggestion_products(req, products_for_response,
                                     subject_evidence=_subject_ev)
+        if _sel_flag:
+            # Phase 8 — finalizer เดียวของ typed path;
+            #   LLM2 step สังเกต finalized answer หลัง render
+            #   (resp.steps เป็น list copy ของ _steps —
+            #   patch บน resp.steps ตรง ๆ)
+            _resp = _finalize_answer(
+                _tb, message=desc_message, limit=req.limit,
+                products=products_for_response,
+                source=("product_store+web_search" if _tb.web_used
+                        else "product_store"),
+                shop=req.shop, model=model_name,
+                elapsed=round(_total_elapsed, 2),
+                cost=round(cost, 6),
+                intent=_intent_result, timing=_timing_breakdown,
+                steps=_steps,
+                routing_decision={
+                    **_routing("bot_reply",
+                               "product_store: ค้นพบสินค้า → บอทตอบ"),
+                    **_rd_extra()},
+                image_desc=_image_desc_out)
+            _resp.steps[_llm2_step_idx]["output"] = {
+                "answer": _resp.answer[:500],
+                "answer_full_length": len(_resp.answer),
+            }
+            return _resp
         return ChatResponse(
             answer=answer,
             answer_segments=llm.split_segments(answer),
