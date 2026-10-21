@@ -230,7 +230,6 @@ function pauseQuery(coll: string, op: string): () => void {
 /** seed workflow ที่ trigger("wfkw") → let_ai_respond (pattern เดียวกับ E7 boundary) */
 function seedAiWorkflow() {
   mocks.state.config.workflow_enabled = true;
-  mocks.state.config.workflow_priority = "workflow_first";
   mocks.fakeColl("workflows").push({
     workflow_id: "wf_ai", name: "wf_ai", enabled: true, status: "published", is_deleted: false,
     shop_ids: ["shop_1"], platforms: ["shopee"], trigger_frequency: "every_time",

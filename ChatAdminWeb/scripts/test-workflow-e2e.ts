@@ -162,7 +162,7 @@ async function main() {
   } else {
     savedWorkflowEnabled = config.workflow_enabled;
   }
-  console.log(`  workflow_enabled=true ✓ · priority=${config.workflow_priority}\n`);
+  console.log(`  workflow_enabled=true ✓ (fixed order workflow→trigger→bot)\n`);
 
   // สร้าง flow
   const wfId = await createSampleFlow();

@@ -39,7 +39,6 @@ interface SystemConfig {
   bot_worker_interval_ms: number;
   // ⚡ Workflow engine (แบบ Zaapi Flow Builder)
   workflow_enabled: boolean;
-  workflow_priority: "workflow_first" | "trigger_first" | "both";
   workflow_run_timeout_ms: number;
   // Bot URLs
   shopee_bot_url: string;

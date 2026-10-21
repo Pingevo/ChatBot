@@ -34,7 +34,6 @@ import {
 } from "./botworkerRuntime";
 
 export type { ClaimContext } from "./botworkerRuntime";
-import { triggerService } from "./triggerService";
 import { assignmentService } from "./assignmentService";
 import { listMessages, getHistoryForBot, getGroupedHistoryForBot, toBotText, toBotImages, type MessageDoc } from "./messageService";
 import { getConversation } from "./conversationService";
@@ -866,15 +865,9 @@ async function processClaimedMessage(msg: {
   // ⚡ Phase 1F — ถ้ามี msg.images (จาก buffer flush รวมหลายรูป) ให้ใช้แทน toBotImages
   const botImages = msg.images && msg.images.length > 0 ? msg.images : toBotImages(msg);
 
-  // ⚡ Workflow engine (แบบ Zaapi Flow Builder) — อ้างอิง docs/plans/workflow-planner.md
-  // ① Active Flow Resume (เสมอ ไม่สน priority) — แชทนี้มี flow ที่กำลังรอ reply อยู่ไหม?
-  //    มี → ส่งข้อความเข้า flow เดิม (resume) → จบ
-  // ② Priority (workflow_first default) — workflow ก่อน trigger
-  //    workflow_first: workflow ฮิต → จบ / ไม่ฮิต → trigger → บอท
-  //    both: workflow ฮิต → deliver แล้วไป trigger ต่อ (⚠️ ตอบซ้ำได้ — planner เตือนแล้ว)
-  //    trigger_first: ตรวจหลัง trigger ไม่ match (ดูด้านล่าง)
-  // ③ บอท — เหมือนเดิม ไม่แตะ
-  const wfConfig = await getSystemConfig();
+  // ⚡ Phase 9 — single fixed-order dispatch owner (shared กับ Test Chat):
+  //   active resume → new match → trigger → bot — หนึ่ง inbound = หนึ่ง terminal
+  //   outcome; persisted workflow_priority เป็น inert legacy field (ไม่มี reader)
   const engineMsg = {
     message_id: msg.message_id,
     conversation_id: msg.conversation_id,
@@ -903,133 +896,132 @@ async function processClaimedMessage(msg: {
   //   (callBot abort/provider error) ต้องไหลถึง classification catch เดียวด้านล่าง
   //   (signal.aborted → cancelled recoverable / else → bot_failed terminal)
   try {
-  if (wfConfig.workflow_enabled) {
-    // ① Active Flow Resume — flow รอ reply อยู่ → ข้อความใหม่เข้า flow ก่อนเสมอ
-    const activeRun = await workflowEngine.getActiveRun(msg.conversation_id);
-    if (activeRun) {
-      const wfResult = await workflowEngine.resumeFlow(activeRun, engineMsg);
-      if (wfResult.status === "in_flight") {
-        // ⚡ run ถูก owner อื่นกำลัง execute — ห้าม settle/finalize/เขียน outcome
-        //   คืนโดยไม่มี outcome → claim ค้าง processing → lease หมดแล้ว retry เอง
-        return { status: "in_flight", detail: wfResult.detail };
-      }
-      if (wfResult.status === "error" && wfResult.recoverable === false) {
+    return await workflowEngine.runInboundDispatch<{
+      status: string; detail: string; outcome?: ClaimOutcome;
+    }>(engineMsg, msg.text, {
+      workflowInFlight: (r) => ({ status: "in_flight", detail: r.detail }),
+      workflowError: (r) => ({
         // ⚡ matched-path death (typed field — ไม่ classify จาก reason text): op/run
         //   ตายหลัง commit → side effect อาจเกิดโดยไม่มีหลักฐาน → terminal ห้าม fall
-        return {
-          status: "bot_failed",
-          detail: `workflow resume error: ${wfResult.detail}`,
-          outcome: { type: "bot_failed", reply_ids: [], extra: { error: wfResult.detail } },
-        };
-      }
-      // ⚡ no_match (run จบแล้ว/resume ไม่ applicable) + error recoverable:true —
-      //   ข้อความยังไม่ถูก flow ใดกิน → fall through ไป match/trigger/bot ตามปกติ
-      if (wfResult.status !== "error" && wfResult.status !== "no_match") {
-        const r = await settleWorkflowResult(msg, botText, wfResult, "workflow_resumed", ctx);
-        return { status: r.status, detail: r.detail, outcome: r.outcome };
-      }
-    }
-
-    // ② workflow_first / both — ลอง match workflow ก่อน trigger
-    if (wfConfig.workflow_priority === "workflow_first" || wfConfig.workflow_priority === "both") {
-      const wfResult = await workflowEngine.matchAndRun(engineMsg);
-      if (wfResult.status === "in_flight") {
-        // ⚡ run เดียวกันกำลังถูก execute โดย owner อื่น — ห้ามตกไป trigger/bot ซ้ำ
-        return { status: "in_flight", detail: wfResult.detail };
-      }
-      if (wfResult.status === "error" && wfResult.recoverable === false) {
-        // ⚡ matched-path death (typed field — ไม่ใช่ reason text) → terminal;
-        //   op อาจทำ side effect ไปแล้ว → LLM ซ้ำอันตราย — ห้าม fall ไป trigger/bot
-        return {
-          status: "bot_failed",
-          detail: wfResult.detail,
-          outcome: { type: "bot_failed", reply_ids: [], extra: { error: wfResult.detail } },
-        };
-      }
-      if (wfResult.status === "actioned" || wfResult.status === "resumed") {
-        if (wfConfig.workflow_priority === "workflow_first") {
-          const r = await settleWorkflowResult(msg, botText, wfResult, "workflow_actioned", ctx);
-          return { status: r.status, detail: r.detail, outcome: r.outcome };
-        }
-        // both → deliver แล้วไป trigger ต่อ (ตอบซ้ำได้ — ไม่แนะนำ แต่ planner ให้เลือกได้)
-        await storeWorkflowDelivered({
-          messageId: msg.message_id,
-          messageText: botText,
-          conversationId: msg.conversation_id,
-          shopId: msg.shop_id,
-          platform: msg.platform,
-          delivered: wfResult.delivered,
-          workflowId: wfResult.workflow_id || "",
-          batchId: ctx.batch_id,
-          inboundMessageIds: ctx.message_ids,
-          outcomeEnvelope: { outcome_type: "workflow_actioned", workflow_id: wfResult.workflow_id },
-        });
-        // ไม่ return — ไป trigger ต่อ
-      } else if (wfResult.status === "exit_drop") {
-        // condition false + exit_drop → cancel flow + ทิ้งข้อความ
-        return {
-          status: "workflow_exit_drop",
-          detail: wfResult.detail,
-          outcome: { type: "no_action", reply_ids: [] },
-        };
-      }
-      // exit_to_bot / no_match → fall through ไป trigger → บอท (ตาม pipeline ปกติ)
-      //   error ไม่ fall — matched-path failure = bot_failed ข้างบนแล้ว
-    }
-  }
-
-    // 2. Check trigger — config domain: shop_ids[] เก็บ shops.shop_id ของ admin
-    const trigger = await triggerService.matchTrigger(msg.text, {
-      shopId: configShopKey,
-      platform: msg.platform,
-    });
-
-    if (trigger) {
-      // ── แมทช์ trigger ──
-      if (trigger.action === "handoff_admin") {
-        // ส่งให้แอดมิน — round-robin (operation key → handoff owner dedupe ตอน crash retry)
-        const { agentId, mode, inFlight } = await pickAgent(
-          configShopKey, msg.platform, msg.conversation_id, undefined,
-          opIdFor(ctx.claim_id, "handoff")
-        );
-        if (inFlight) {
-          // ⚡ handoff op กำลังถูก caller อื่น execute — ห้าม finalize เป็น handed_off(ว่าง)
-          return { status: "in_flight", detail: `handoff op in-flight for ${msg.conversation_id}` };
-        }
-        await logBotworkerEvent({
-          type: "bot_handoff",
-          actor: "bot-worker",
-          conversation_id: msg.conversation_id,
-          shop_id: msg.shop_id,
-          platform: msg.platform,
-          metadata: { trigger_id: trigger.trigger_id, assigned_to: agentId, delivered_to_platform: false },
-        });
-        return {
-          status: "handed_off",
-          detail: `trigger→handoff→${agentId || "no agent"}`,
-          outcome: {
-            type: "handed_off",
-            reply_ids: [],
-            side_effects: [{ type: "handoff", ref: agentId, at: new Date() }],
-            extra: {
-              trigger_id: trigger.trigger_id,
-              trigger_action: "handoff_admin",
-              assigned_to: agentId || undefined,
-              assignment_mode: mode,
+        status: "bot_failed",
+        detail: r.detail,
+        outcome: { type: "bot_failed", reply_ids: [], extra: { error: r.detail } },
+      }),
+      workflowHandled: async (r) => {
+        const s = await settleWorkflowResult(msg, botText, r,
+          r.status === "resumed" ? "workflow_resumed" : "workflow_actioned", ctx);
+        return { status: s.status, detail: s.detail, outcome: s.outcome };
+      },
+      workflowExitDrop: (r) => ({
+        status: "workflow_exit_drop",
+        detail: r.detail,
+        outcome: { type: "no_action", reply_ids: [] },
+      }),
+      triggerMatched: async (trigger) => {
+        // ── แมทช์ trigger ──
+        if (trigger.action === "handoff_admin") {
+          // ส่งให้แอดมิน — round-robin (operation key → handoff owner dedupe ตอน crash retry)
+          const { agentId, mode, inFlight } = await pickAgent(
+            configShopKey, msg.platform, msg.conversation_id, undefined,
+            opIdFor(ctx.claim_id, "handoff")
+          );
+          if (inFlight) {
+            // ⚡ handoff op กำลังถูก caller อื่น execute — ห้าม finalize เป็น handed_off(ว่าง)
+            return { status: "in_flight", detail: `handoff op in-flight for ${msg.conversation_id}` };
+          }
+          await logBotworkerEvent({
+            type: "bot_handoff",
+            actor: "bot-worker",
+            conversation_id: msg.conversation_id,
+            shop_id: msg.shop_id,
+            platform: msg.platform,
+            metadata: { trigger_id: trigger.trigger_id, assigned_to: agentId, delivered_to_platform: false },
+          });
+          return {
+            status: "handed_off",
+            detail: `trigger→handoff→${agentId || "no agent"}`,
+            outcome: {
+              type: "handed_off",
+              reply_ids: [],
+              side_effects: [{ type: "handoff", ref: agentId, at: new Date() }],
+              extra: {
+                trigger_id: trigger.trigger_id,
+                trigger_action: "handoff_admin",
+                assigned_to: agentId || undefined,
+                assignment_mode: mode,
+              },
             },
-          },
-        };
-      }
+          };
+        }
 
-      // ⚡ bot_template — trigger bot_answer ที่ตั้ง template → ตอบ template ทันทีไม่เรียกบอท (เหมือน test-chat)
-      if (trigger.bot_template) {
+        // ⚡ bot_template — trigger bot_answer ที่ตั้ง template → ตอบ template ทันทีไม่เรียกบอท (เหมือน test-chat)
+        if (trigger.bot_template) {
+          const shadowReplyId = await storeBotReply({
+            messageId: msg.message_id,
+            messageText: botText,
+            conversationId: msg.conversation_id,
+            shopId: msg.shop_id,
+            platform: msg.platform,
+            botResp: { answer: trigger.bot_template, source: "trigger_bot_answer" },
+            triggerId: trigger.trigger_id,
+            replyId: replyIdFor(ctx.batch_id),
+            batchId: ctx.batch_id,
+            inboundMessageIds: ctx.message_ids,
+            outcomeEnvelope: { outcome_type: "trigger_matched", trigger_id: trigger.trigger_id, trigger_action: "bot_answer" },
+          });
+          await logBotworkerEvent({
+            type: "bot_reply",
+            actor: "bot-worker",
+            conversation_id: msg.conversation_id,
+            shop_id: msg.shop_id,
+            platform: msg.platform,
+            metadata: { trigger_id: trigger.trigger_id, shadow_reply_id: shadowReplyId, used_bot_template: true, delivered_to_platform: false },
+          });
+          return {
+            status: "trigger_matched",
+            detail: `trigger→bot_template→${shadowReplyId}`,
+            outcome: {
+              type: "trigger_matched",
+              reply_ids: [shadowReplyId],
+              extra: { trigger_id: trigger.trigger_id, trigger_action: "bot_answer", shadow_reply_id: shadowReplyId },
+            },
+          };
+        }
+
+        // trigger.action === "bot_answer" → เรียกบอท → เก็บใน shadow_replies
+        // ⚡ grouped history — รวม user messages ติดกันเป็น 1 turn + fallback Zaapi
+        //    exclude current batch — ctx.message_ids อยู่ใน message/images ของ request แล้ว
+        const history = await getGroupedHistoryForBot({
+          conversationId: msg.conversation_id,
+          platform: msg.platform,
+          maxTurns: 10,
+          includeSandboxAdmin: true,  // ⚡ merge botworker_messages (แอดมินใน parallel เคยตอบอะไร)
+          excludeMessageIds: ctx.message_ids,
+        });
+        // ⚡ outbound concurrency อยู่ใน callBot (testSource=botworker) — owner เดียวครอบทุก path
+        const botResp = await callBot({
+          platform: msg.platform,
+          message: botText,
+          shopId: msg.shop_id,
+          shopName,
+          history,
+          ...(botImages.length > 0 ? { images: botImages } : {}),
+          // ⚡ Phase 2A — ส่ง conversationId + testSource (parallel sandbox — handoff เขียน test store)
+          conversationId: msg.conversation_id,
+          simulate: true,
+          testSource: WORKER_SOURCE,
+          // ⚡ claim signal (era+ownership) — timeout composition อยู่ใน callBot
+          signal,
+        });
+        // heartbeat lost กลางคัน → stale owner — ห้าม persist/finalize
+        if (ctx.lost) return { status: "lost_ownership", detail: "claim lost mid-bot-call" };
         const shadowReplyId = await storeBotReply({
           messageId: msg.message_id,
           messageText: botText,
           conversationId: msg.conversation_id,
           shopId: msg.shop_id,
           platform: msg.platform,
-          botResp: { answer: trigger.bot_template, source: "trigger_bot_answer" },
+          botResp,
           triggerId: trigger.trigger_id,
           replyId: replyIdFor(ctx.batch_id),
           batchId: ctx.batch_id,
@@ -1042,196 +1034,108 @@ async function processClaimedMessage(msg: {
           conversation_id: msg.conversation_id,
           shop_id: msg.shop_id,
           platform: msg.platform,
-          metadata: { trigger_id: trigger.trigger_id, shadow_reply_id: shadowReplyId, used_bot_template: true, delivered_to_platform: false },
+          metadata: { trigger_id: trigger.trigger_id, shadow_reply_id: shadowReplyId, delivered_to_platform: false },
         });
         return {
           status: "trigger_matched",
-          detail: `trigger→bot_template→${shadowReplyId}`,
+          detail: `trigger→bot_answer→${shadowReplyId}`,
           outcome: {
             type: "trigger_matched",
             reply_ids: [shadowReplyId],
             extra: { trigger_id: trigger.trigger_id, trigger_action: "bot_answer", shadow_reply_id: shadowReplyId },
           },
         };
-      }
-
-      // trigger.action === "bot_answer" → เรียกบอท → เก็บใน shadow_replies
-      // ⚡ grouped history — รวม user messages ติดกันเป็น 1 turn + fallback Zaapi
-      //    exclude current batch — ctx.message_ids อยู่ใน message/images ของ request แล้ว
-      const history = await getGroupedHistoryForBot({
-        conversationId: msg.conversation_id,
-        platform: msg.platform,
-        maxTurns: 10,
-        includeSandboxAdmin: true,  // ⚡ merge botworker_messages (แอดมินใน parallel เคยตอบอะไร)
-        excludeMessageIds: ctx.message_ids,
-      });
-      // ⚡ outbound concurrency อยู่ใน callBot (testSource=botworker) — owner เดียวครอบทุก path
-      const botResp = await callBot({
-        platform: msg.platform,
-        message: botText,
-        shopId: msg.shop_id,
-        shopName,
-        history,
-        ...(botImages.length > 0 ? { images: botImages } : {}),
-        // ⚡ Phase 2A — ส่ง conversationId + testSource (parallel sandbox — handoff เขียน test store)
-        conversationId: msg.conversation_id,
-        simulate: true,
-        testSource: WORKER_SOURCE,
-        // ⚡ claim signal (era+ownership) — timeout composition อยู่ใน callBot
-        signal,
-      });
-      // heartbeat lost กลางคัน → stale owner — ห้าม persist/finalize
-      if (ctx.lost) return { status: "lost_ownership", detail: "claim lost mid-bot-call" };
-      const shadowReplyId = await storeBotReply({
-        messageId: msg.message_id,
-        messageText: botText,
-        conversationId: msg.conversation_id,
-        shopId: msg.shop_id,
-        platform: msg.platform,
-        botResp,
-        triggerId: trigger.trigger_id,
-        replyId: replyIdFor(ctx.batch_id),
-        batchId: ctx.batch_id,
-        inboundMessageIds: ctx.message_ids,
-        outcomeEnvelope: { outcome_type: "trigger_matched", trigger_id: trigger.trigger_id, trigger_action: "bot_answer" },
-      });
-      await logBotworkerEvent({
-        type: "bot_reply",
-        actor: "bot-worker",
-        conversation_id: msg.conversation_id,
-        shop_id: msg.shop_id,
-        platform: msg.platform,
-        metadata: { trigger_id: trigger.trigger_id, shadow_reply_id: shadowReplyId, delivered_to_platform: false },
-      });
-      return {
-        status: "trigger_matched",
-        detail: `trigger→bot_answer→${shadowReplyId}`,
-        outcome: {
-          type: "trigger_matched",
-          reply_ids: [shadowReplyId],
-          extra: { trigger_id: trigger.trigger_id, trigger_action: "bot_answer", shadow_reply_id: shadowReplyId },
-        },
-      };
-    }
-
-    // ⚡ trigger_first — trigger ไม่ match → ลอง workflow ก่อนไปบอท (planner ②)
-    if (wfConfig.workflow_enabled && wfConfig.workflow_priority === "trigger_first") {
-      const wfResult = await workflowEngine.matchAndRun(engineMsg);
-      if (wfResult.status === "in_flight") {
-        // ⚡ run กำลังถูก owner อื่น execute — ห้ามตกไปบอทซ้ำ / ห้าม finalize
-        return { status: "in_flight", detail: wfResult.detail };
-      }
-      if (wfResult.status === "error" && wfResult.recoverable === false) {
-        // ⚡ matched-path death (recoverable:false typed field) — bot_failed terminal
-        return {
-          status: "bot_failed",
-          detail: wfResult.detail,
-          outcome: { type: "bot_failed", reply_ids: [], extra: { error: wfResult.detail } },
-        };
-      }
-      if (wfResult.status === "actioned" || wfResult.status === "resumed") {
-        const r = await settleWorkflowResult(msg, botText, wfResult, "workflow_actioned", ctx);
-        return { status: r.status, detail: r.detail, outcome: r.outcome };
-      }
-      if (wfResult.status === "exit_drop") {
-        return {
-          status: "workflow_exit_drop",
-          detail: wfResult.detail,
-          outcome: { type: "no_action", reply_ids: [] },
-        };
-      }
-      // exit_to_bot / no_match → ไปบอท (fall through); error = bot_failed ข้างบน
-    }
-
-    // ── ไม่แมทช์ trigger → ส่งให้บอทตอบ → เก็บใน shadow_replies ──
-    // ⚡ grouped history — รวม user messages ติดกันเป็น 1 turn + fallback Zaapi
-    //    exclude current batch — ctx.message_ids อยู่ใน message/images ของ request แล้ว
-    const history = await getGroupedHistoryForBot({
-      conversationId: msg.conversation_id,
-      platform: msg.platform,
-      maxTurns: 10,
-      includeSandboxAdmin: true,  // ⚡ merge botworker_messages (แอดมินใน parallel เคยตอบอะไร)
-      excludeMessageIds: ctx.message_ids,
-    });
-    // ⚡ outbound concurrency อยู่ใน callBot (testSource=botworker) — owner เดียวครอบทุก path
-    const botResp = await callBot({
-      platform: msg.platform,
-      message: botText,
-      shopId: msg.shop_id,
-      shopName,
-      history,
-      ...(botImages.length > 0 ? { images: botImages } : {}),
-      // ⚡ Phase 2A — ส่ง conversationId + testSource (parallel sandbox — handoff เขียน test store)
-      conversationId: msg.conversation_id,
-      simulate: true,
-      testSource: WORKER_SOURCE,
-      // ⚡ claim signal (era+ownership) — timeout composition อยู่ใน callBot
-      signal,
-    });
-    // heartbeat lost กลางคัน → stale owner — ห้าม persist/finalize
-    if (ctx.lost) return { status: "lost_ownership", detail: "claim lost mid-bot-call" };
-
-    if (!botResp.answer || botResp.answer.trim() === "") {
-      // บอทตอบไม่ได้ → ส่งต่อแอดมิน
-      const { agentId, mode, inFlight } = await pickAgent(
-        configShopKey, msg.platform, msg.conversation_id, "bot empty answer",
-        opIdFor(ctx.claim_id, "handoff")
-      );
-      if (inFlight) {
-        // ⚡ handoff op กำลังถูก caller อื่น execute — ห้าม finalize
-        return { status: "in_flight", detail: `handoff op in-flight for ${msg.conversation_id}` };
-      }
-      await logBotworkerEvent({
-        type: "bot_handoff",
-        actor: "bot-worker",
-        conversation_id: msg.conversation_id,
-        shop_id: msg.shop_id,
-        platform: msg.platform,
-        metadata: { reason: "bot empty answer", assigned_to: agentId, delivered_to_platform: false },
-      });
-      return {
-        status: "handed_off",
-        detail: `no trigger→bot empty→handoff→${agentId || "no agent"}`,
-        outcome: {
-          type: "handed_off",
-          reply_ids: [],
-          side_effects: [{ type: "handoff", ref: agentId, at: new Date() }],
-          extra: { assigned_to: agentId || undefined, assignment_mode: mode },
-        },
-      };
-    }
-
-    // บอทตอบได้ → persist reply idempotently → finalize ใน wrapper (ไม่เขียน messages_shp)
-    const shadowReplyId = await storeBotReply({
-      messageId: msg.message_id,
-      messageText: botText,
-      conversationId: msg.conversation_id,
-      shopId: msg.shop_id,
-      platform: msg.platform,
-      botResp,
-      replyId: replyIdFor(ctx.batch_id),
-      batchId: ctx.batch_id,
-      inboundMessageIds: ctx.message_ids,
-      outcomeEnvelope: { outcome_type: "bot_answered" },
-    });
-    await logBotworkerEvent({
-      type: "bot_reply",
-      actor: "bot-worker",
-      conversation_id: msg.conversation_id,
-      shop_id: msg.shop_id,
-      platform: msg.platform,
-      metadata: { shadow_reply_id: shadowReplyId, delivered_to_platform: false },
-    });
-    return {
-      status: "bot_answered",
-      detail: `no trigger→bot→${shadowReplyId}`,
-      outcome: {
-        type: "bot_answered",
-        reply_ids: [shadowReplyId],
-        extra: { shadow_reply_id: shadowReplyId },
       },
-    };
+      botFallback: async () => {
+        // ⚡ grouped history — รวม user messages ติดกันเป็น 1 turn + fallback Zaapi
+        //    exclude current batch — ctx.message_ids อยู่ใน message/images ของ request แล้ว
+        const history = await getGroupedHistoryForBot({
+          conversationId: msg.conversation_id,
+          platform: msg.platform,
+          maxTurns: 10,
+          includeSandboxAdmin: true,  // ⚡ merge botworker_messages (แอดมินใน parallel เคยตอบอะไร)
+          excludeMessageIds: ctx.message_ids,
+        });
+        // ⚡ outbound concurrency อยู่ใน callBot (testSource=botworker) — owner เดียวครอบทุก path
+        const botResp = await callBot({
+          platform: msg.platform,
+          message: botText,
+          shopId: msg.shop_id,
+          shopName,
+          history,
+          ...(botImages.length > 0 ? { images: botImages } : {}),
+          // ⚡ Phase 2A — ส่ง conversationId + testSource (parallel sandbox — handoff เขียน test store)
+          conversationId: msg.conversation_id,
+          simulate: true,
+          testSource: WORKER_SOURCE,
+          // ⚡ claim signal (era+ownership) — timeout composition อยู่ใน callBot
+          signal,
+        });
+        // heartbeat lost กลางคัน → stale owner — ห้าม persist/finalize
+        if (ctx.lost) return { status: "lost_ownership", detail: "claim lost mid-bot-call" };
 
+        if (!botResp.answer || botResp.answer.trim() === "") {
+          // บอทตอบไม่ได้ → ส่งต่อแอดมิน
+          const { agentId, mode, inFlight } = await pickAgent(
+            configShopKey, msg.platform, msg.conversation_id, "bot empty answer",
+            opIdFor(ctx.claim_id, "handoff")
+          );
+          if (inFlight) {
+            // ⚡ handoff op กำลังถูก caller อื่น execute — ห้าม finalize
+            return { status: "in_flight", detail: `handoff op in-flight for ${msg.conversation_id}` };
+          }
+          await logBotworkerEvent({
+            type: "bot_handoff",
+            actor: "bot-worker",
+            conversation_id: msg.conversation_id,
+            shop_id: msg.shop_id,
+            platform: msg.platform,
+            metadata: { reason: "bot empty answer", assigned_to: agentId, delivered_to_platform: false },
+          });
+          return {
+            status: "handed_off",
+            detail: `no trigger→bot empty→handoff→${agentId || "no agent"}`,
+            outcome: {
+              type: "handed_off",
+              reply_ids: [],
+              side_effects: [{ type: "handoff", ref: agentId, at: new Date() }],
+              extra: { assigned_to: agentId || undefined, assignment_mode: mode },
+            },
+          };
+        }
+
+        // บอทตอบได้ → persist reply idempotently → finalize ใน wrapper (ไม่เขียน messages_shp)
+        const shadowReplyId = await storeBotReply({
+          messageId: msg.message_id,
+          messageText: botText,
+          conversationId: msg.conversation_id,
+          shopId: msg.shop_id,
+          platform: msg.platform,
+          botResp,
+          replyId: replyIdFor(ctx.batch_id),
+          batchId: ctx.batch_id,
+          inboundMessageIds: ctx.message_ids,
+          outcomeEnvelope: { outcome_type: "bot_answered" },
+        });
+        await logBotworkerEvent({
+          type: "bot_reply",
+          actor: "bot-worker",
+          conversation_id: msg.conversation_id,
+          shop_id: msg.shop_id,
+          platform: msg.platform,
+          metadata: { shadow_reply_id: shadowReplyId, delivered_to_platform: false },
+        });
+        return {
+          status: "bot_answered",
+          detail: `no trigger→bot→${shadowReplyId}`,
+          outcome: {
+            type: "bot_answered",
+            reply_ids: [shadowReplyId],
+            extra: { shadow_reply_id: shadowReplyId },
+          },
+        };
+      },
+    });
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     // ⚡ cancellation ≠ provider error — kill switch (era) / ownership loss abort

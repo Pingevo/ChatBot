@@ -492,6 +492,32 @@ export const workflowEngine = {
   cancelActiveRuns: async () => 0,
   // BW-2 pin — inner timeout scan must never run under a non-leader
   checkWaitTimeouts: async () => { state.calls.checkWaitTimeouts++; return 0; },
+  // ⚡ Phase 9 — mirror transition table ของ owner จริงบน leaf seeds เดิม
+  //   (suite นี้ทดสอบ claim/outcome/idempotency — precedence อยู่ใน owner เดียว)
+  runInboundWorkflowStage: async (msg) => {
+    const config = await getSystemConfig();
+    if (!config.workflow_enabled) {
+      return { status: "no_match", detail: "workflow engine disabled", delivered: [] };
+    }
+    const activeRun = await workflowEngine.getActiveRun(msg.conversation_id);
+    if (activeRun) {
+      const res = await workflowEngine.resumeFlow(activeRun, msg);
+      if (res.status !== "no_match") return res;
+    }
+    return workflowEngine.matchAndRun(msg);
+  },
+  runInboundDispatch: async (msg, triggerText, leaves) => {
+    const res = await workflowEngine.runInboundWorkflowStage(msg);
+    if (res.status === "in_flight") return leaves.workflowInFlight(res);
+    if (res.status === "error" && res.recoverable === false) return leaves.workflowError(res);
+    if (res.status === "actioned" || res.status === "resumed") return leaves.workflowHandled(res);
+    if (res.status === "exit_drop") return leaves.workflowExitDrop(res);
+    const trigger = await triggerService.matchTrigger(triggerText, {
+      shopId: msg.config_shop_key, platform: msg.platform,
+    });
+    if (trigger) return leaves.triggerMatched(trigger);
+    return leaves.botFallback();
+  },
 };
 
 export async function logBotworkerEvent(evt) {

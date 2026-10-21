@@ -671,13 +671,13 @@ class AnswerContext:
 
 **Files:** Audit then modify the actual workflow/trigger orchestration owner; add precedence/state tests; update docs/log. Botworker changes require its paused-canary gate to be reopened explicitly.
 
-- [ ] Inventory workflow resume/match, trigger match, chatbot invocation, delivery, and multi-output ownership.
-- [ ] Choose one precedence contract for active workflow, new workflow, trigger, and TurnPlan; remove `both` behavior where it can emit competing customer answers.
-- [ ] Gate workflow/trigger execution by authoritative ownership and verified command outcomes from Phase 2B.
-- [ ] Label shadow generation as non-delivered; no shadow/test state may prove a live handoff.
-- [ ] Delete duplicate TestChatClient orchestration or make it call the production owner rather than reimplementing precedence.
+- [x] Inventory workflow resume/match, trigger match, chatbot invocation, delivery, and multi-output ownership.
+- [x] Choose one precedence contract for active workflow, new workflow, trigger, and TurnPlan; remove `both` behavior where it can emit competing customer answers.
+- [x] Gate workflow/trigger execution by authoritative ownership and verified command outcomes from Phase 2B.
+- [x] Label shadow generation as non-delivered; no shadow/test state may prove a live handoff.
+- [x] Delete duplicate TestChatClient orchestration or make it call the production owner rather than reimplementing precedence.
 
-**Exit gate:** one orchestration order exists; workflow/trigger cannot bypass ownership or produce an untracked second answer.
+**Exit gate:** one orchestration order exists; workflow/trigger cannot bypass ownership or produce an untracked second answer. **Met (implemented, uncommitted — see waythrough `getoutofmywaybotkaikrook2.md`):** `workflowEngine.runInboundDispatch` is the single dispatch owner (fixed order: active resume → new match → trigger → bot). `workflow_priority` excised from all runtime readers/type/defaults/validation/UI; persisted values are inert. TestChatClient sends one `/api/test-chat/dispatch` request to the same owner with sandbox leaf adapters; legacy `workflow-step`/`flush` routes and client-side `phase`/`after_trigger` sequencing deleted. Executable Phase 9 suite: 38/38. Review-fix round: explicit `input_mode` contract (direct/buffered, no inference) + snapshot-scoped buffer cleanup (delete only consumed snapshot `message_id`s after terminal result; `in_flight`/bot error/exception retain rows) — route lifecycle suite 16/16.
 
 ## Revised Phase 10: Mandatory Deletion, Replay, Canary, Release
 
@@ -1331,7 +1331,7 @@ Acceptance ledger for the 21 user requirements. `blocked` rows cite the blocking
 
 | # | Requirement | Current owner/path | Action | Target phase | Acceptance evidence | Status |
 |---|---|---|---|---|---|---|
-| 1 | Workflow/trigger consolidation | `src/backend/service/workflowEngine.ts`, `src/app/api/triggers/` | replace (single gated owner) | Phase 9 | trigger/workflow suites + ownership gate tests | not_started |
+| 1 | Workflow/trigger consolidation | `src/backend/service/workflowEngine.ts` (`runInboundDispatch`), `botWorkerService.ts`, `src/app/api/test-chat/dispatch/` | replace (single gated owner) | Phase 9 | Phase 9 dispatch suite 38/38 + idempotency/races/boundary/error-policy green | done (uncommitted — awaiting review) |
 | 2 | Deep product specs | `product_store.py`, `knowledge_base.py` | replace (canonical schema) | Phase 3+5 | schema fixture + field-evidence tests | not_started |
 | 3 | Complexity reduction | repo-wide (`ChatAdminWeb/src` net LOC vs HEAD) | keep (gate per phase) | every phase / Phase 10 | numstat net ≤0 at each phase close | in_progress (2B.1: −116) |
 | 4 | Latency/cost | `llm.py` pipeline, shadow cost metrics | replace (one answer boundary) | Phase 8 | bounded context + per-call cost report | partial — typed answer boundary + finalizer shipped behind flag OFF (uncommitted→committed this closeout); item-tag/web-enriched migration + cost report ค้าง |

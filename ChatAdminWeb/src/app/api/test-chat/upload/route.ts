@@ -1,6 +1,6 @@
 // POST /api/test-chat/upload — อัปโหลดรูป/วิดีโอสำหรับ test chat
 // รับ multipart/form-data field "file" → เก็บใน Mongo test_chat_uploads → คืน URL
-// URL ที่คืนใช้ส่งให้ bot ผ่าน buffer/flush ได้ (bot ดึงผ่าน /api/test-chat/uploads/[id])
+// URL ที่คืนใช้ส่งให้ bot ผ่าน buffer/dispatch ได้ (bot ดึงผ่าน /api/test-chat/uploads/[id])
 //
 // ⚡ Phase 1F — ทำให้ test chat ส่งรูปจริงให้ bot ได้ (ไม่ใช่แค่ placeholder [รูปภาพ])
 import { NextRequest } from "next/server";

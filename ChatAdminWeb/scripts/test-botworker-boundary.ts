@@ -428,7 +428,6 @@ async function main() {
     seedUserMsg(conv, "m_cur", "CURRENT wf question");
     // workflow trigger("wfkw") → let_ai_respond
     mocks.state.config.workflow_enabled = true;
-    mocks.state.config.workflow_priority = "workflow_first";
     mocks.fakeColl("workflows").push({
       workflow_id: "wf_ai", name: "wf_ai", enabled: true, status: "published", is_deleted: false,
       shop_ids: ["shop_1"], platforms: ["shopee"], trigger_frequency: "every_time",

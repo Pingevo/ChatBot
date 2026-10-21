@@ -61,7 +61,8 @@ export interface SystemConfigDoc extends Document {
 
   // === Workflow Engine (แบบ Zaapi Flow Builder) — superadmin/dev configurable ===
   workflow_enabled: boolean;              // สวิตช์เปิด/ปิด workflow engine ทั้งหมด
-  workflow_priority: 'workflow_first' | 'trigger_first' | 'both';  // ลำดับ workflow vs trigger
+  // ⚡ Phase 9 — workflow_priority ถูกถอด: fixed order workflow→trigger→bot ใน owner เดียว
+  //   (persisted legacy value ใน DB คงอยู่เป็น inert data — ไม่มี runtime reader)
   workflow_run_timeout_ms: number;        // flow รอ reply เกินเวลานี้ → cancel อัตโนมัติ
 
   // === Assignment — admin-configurable ===
@@ -129,7 +130,6 @@ function getSafeDefaults(): Partial<SystemConfigDoc> {
     bot_buffer_max_media_messages: Number(process.env.BOT_BUFFER_MAX_MEDIA_MESSAGES || 10),
     bot_concurrency_limit: Number(process.env.BOT_CONCURRENCY_LIMIT || 50),
     workflow_enabled: process.env.WORKFLOW_ENABLED === 'true',
-    workflow_priority: (process.env.WORKFLOW_PRIORITY as 'workflow_first' | 'trigger_first' | 'both') || 'workflow_first',
     workflow_run_timeout_ms: Number(process.env.WORKFLOW_RUN_TIMEOUT_MS || 1800000),
     // ⚡ G2 — default true = จ่ายงานให้แอดมินคนเดิม (behavior เดิม)
     assignment_prefer_previous_admin: process.env.ASSIGNMENT_PREFER_PREVIOUS_ADMIN !== 'false',
@@ -193,9 +193,8 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
     bot_buffer_max_media_messages: dbConfig.bot_buffer_max_media_messages ?? safeDefaults.bot_buffer_max_media_messages ?? 10,
     bot_concurrency_limit: dbConfig.bot_concurrency_limit ?? safeDefaults.bot_concurrency_limit ?? 50,
 
-    // Workflow engine — จาก DB หรือ env (default: ปิด + workflow_first + timeout 30 นาที)
+    // Workflow engine — จาก DB หรือ env (default: ปิด + timeout 30 นาที)
     workflow_enabled: dbConfig.workflow_enabled ?? safeDefaults.workflow_enabled ?? false,
-    workflow_priority: dbConfig.workflow_priority ?? safeDefaults.workflow_priority ?? 'workflow_first',
     workflow_run_timeout_ms: dbConfig.workflow_run_timeout_ms ?? safeDefaults.workflow_run_timeout_ms ?? 1800000,
 
     // ⚡ G2 — assignment: จ่ายงานให้แอดมินคนเดิม (default true = behavior เดิม)
@@ -263,7 +262,6 @@ export async function getSystemConfig(forceRefresh = false): Promise<SystemConfi
         bot_buffer_max_media_messages: safeDefaults.bot_buffer_max_media_messages ?? 10,
         bot_concurrency_limit: safeDefaults.bot_concurrency_limit ?? 50,
         workflow_enabled: safeDefaults.workflow_enabled ?? false,
-        workflow_priority: safeDefaults.workflow_priority ?? 'workflow_first',
         workflow_run_timeout_ms: safeDefaults.workflow_run_timeout_ms ?? 1800000,
         // ⚡ G2 — default true = จ่ายงานให้แอดมินคนเดิม
         assignment_prefer_previous_admin: safeDefaults.assignment_prefer_previous_admin ?? true,
@@ -326,7 +324,6 @@ export async function updateSystemConfig(
     'bot_buffer_window_media_ms',
     'bot_buffer_max_media_messages',
     'workflow_enabled',
-    'workflow_priority',
     'workflow_run_timeout_ms',
     'shopee_bot_url',
     'tiktok_bot_url',
@@ -566,9 +563,8 @@ export const ADMIN_CONFIGURABLE_KEYS = [
   'bot_buffer_max_media_messages',
   // ⚡ Phase 2Q — concurrency limit (admin ปรับได้)
   'bot_concurrency_limit',
-  // Workflow engine — admin เปิด/ปิด + ปรับ priority ได้
+  // Workflow engine — admin เปิด/ปิดได้ (order คงที่ — Phase 9)
   'workflow_enabled',
-  'workflow_priority',
   'workflow_run_timeout_ms',
   // ⚡ G2 — assignment: จ่ายงานให้แอดมินคนเดิมที่เคยตอบ หรือ round-robin
   'assignment_prefer_previous_admin',

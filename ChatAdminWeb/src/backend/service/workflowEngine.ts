@@ -23,6 +23,7 @@ import { getConversation, closeConversation, type ProblemCategory } from "./conv
 import { resolveTemplate, type TemplateVars } from "./templateService";
 import { getHistoryForBot, getGroupedHistoryForBot, toBotImages } from "./messageService";
 import { handoffService, type HandoffOutcomeState } from "./handoffService";
+import { matchTrigger, type TriggerDoc } from "./triggerService";
 import { getCustomer } from "./customerService";
 import { logAdminEvent } from "./adminLogService";
 // ⚡ botworker parallel — test store + sandbox event log (ใช้เมื่อ msg.testSource มี)
@@ -781,6 +782,59 @@ async function doResumeFlow(run: WorkflowRunDoc, msg: EngineMessage): Promise<En
   const result = await walkGraph(workflow, { ...run, context }, msg, next[0], msg.operation_key);
   if (result.status === "actioned") return { ...result, status: "resumed" };
   return result;
+}
+
+// ─── Phase 9 — single inbound dispatch owner ──────────────
+
+/** workflow stage ของ fixed inbound pipeline — bot-worker + Test Chat ใช้
+ *  boundary เดียวกัน (ห้ามก๊อป precedence):
+ *    ไม่มี active run  → matchAndRun
+ *    resume no_match   → matchAndRun (run เดิมจบแล้ว — ข้อความยังไม่ถูก flow กิน)
+ *    สถานะอื่น (รวม exit_to_bot / error recoverable=true) → คืนตามเดิม ห้าม
+ *    match ซ้ำ — run เดิมอาจยังมี side effect; caller map ไป trigger/bot */
+export async function runInboundWorkflowStage(msg: EngineMessage): Promise<EngineResult> {
+  const config = await getSystemConfig();
+  if (!config.workflow_enabled) {
+    return { status: "no_match", detail: "workflow engine disabled", delivered: [] };
+  }
+  const activeRun = await getActiveRun(msg.conversation_id);
+  if (activeRun) {
+    const res = await resumeFlow(activeRun, msg);
+    if (res.status !== "no_match") return res;
+  }
+  return matchAndRun(msg);
+}
+
+/** leaf side-effect/render ของแต่ละ caller — precedence อยู่ใน owner ตัวเดียว */
+export interface InboundDispatchLeaves<R> {
+  workflowHandled(res: EngineResult): R | Promise<R>;   // actioned | resumed — terminal
+  workflowExitDrop(res: EngineResult): R | Promise<R>;  // terminal — ทิ้งข้อความ
+  workflowError(res: EngineResult): R | Promise<R>;     // error recoverable:false — terminal
+  workflowInFlight(res: EngineResult): R | Promise<R>;  // non-terminal — stop (ห้าม finalize)
+  triggerMatched(trigger: TriggerDoc): R | Promise<R>;  // trigger ตรง — caller รัน action
+  botFallback(): R | Promise<R>;                        // ไม่มี trigger — caller เรียก bot
+}
+
+/** Phase 9 — fixed order: active resume → new match → trigger → bot.
+ *  หนึ่ง inbound = หนึ่ง terminal outcome; branch บน typed status/recoverable
+ *  เท่านั้น (ห้าม parse reason string); workflow_priority ไม่มีผลแล้ว */
+export async function runInboundDispatch<R>(
+  msg: EngineMessage,
+  triggerText: string,
+  leaves: InboundDispatchLeaves<R>,
+): Promise<R> {
+  const res = await runInboundWorkflowStage(msg);
+  if (res.status === "in_flight") return leaves.workflowInFlight(res);
+  if (res.status === "error" && res.recoverable === false) return leaves.workflowError(res);
+  if (res.status === "actioned" || res.status === "resumed") return leaves.workflowHandled(res);
+  if (res.status === "exit_drop") return leaves.workflowExitDrop(res);
+  // no_match | exit_to_bot | error recoverable=true → trigger → bot
+  const trigger = await matchTrigger(triggerText, {
+    shopId: msg.config_shop_key,
+    platform: msg.platform,
+  });
+  if (trigger) return leaves.triggerMatched(trigger);
+  return leaves.botFallback();
 }
 
 // ─── Phase 2 — wait_for_reply resume with retry/timeout ──
@@ -1734,4 +1788,6 @@ export const workflowEngine = {
   resumeFlow,
   checkWaitTimeouts,
   validateWaitAnswer,
+  runInboundWorkflowStage,
+  runInboundDispatch,
 };

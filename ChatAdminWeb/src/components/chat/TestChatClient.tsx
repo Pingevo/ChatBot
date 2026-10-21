@@ -1036,86 +1036,203 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       : undefined;
     saveMessageToSession("user", message, undefined, directImages);
 
+    // ⚡ Phase 9 — request เดียว; owner ฝั่ง server ตัดสิน workflow→trigger→bot
     try {
-      // ⚡ Step 1: Check trigger ก่อน (เหมือน bot-worker)
-      let triggerMatched: { name: string; action: string; bot_template?: string; topic?: string } | null = null;
-      try {
-        const tr = await fetch("/api/triggers/match", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message, shop_id: shop, platform }),
-        });
-        const tj = await tr.json().catch(() => ({}));
-        console.log("[TRIGGER-CHECK] response:", tr.status, tj);
-        if (tj?.matched && tj?.trigger) {
-          triggerMatched = tj.trigger;
-          toast.info(`⚡ trigger: ${tj.trigger.name} → ${tj.trigger.action}`);
+      await dispatchAndRender({
+        spinnerId: spinnerMsg.id,
+        history: priorHistory,
+        message,
+        inputMode: "direct",
+        images: directImages,
+        userText: message,
+        pushUserHistory: false,
+      });
+    } finally {
+      setSending(false);
+      inputRef.current?.focus();
+    }
+  }
+
+  // ⚡ Phase 9 — single dispatch request; server (runInboundDispatch owner เดียวกับ
+  //   bot-worker) ตัดสิน workflow→trigger→bot. client render typed result เท่านั้น —
+  //   ห้าม sequence/เลือก precedence เอง
+  async function dispatchAndRender(opts: {
+    spinnerId: number | null;
+    history: Record<string, unknown>[];
+    message: string;
+    inputMode: "direct" | "buffered"; // ⚡ typed contract — server ไม่ infer จาก rows
+    images?: string[];
+    userText: string;          // text ที่ push เข้า historyRef ตอน render
+    userImages?: string[];     // images สำหรับ history entry
+    pushUserHistory: boolean;  // buffered path push combined ตอน render; normal path push ไปแล้ว
+    bufferedCount?: number;    // จำนวนข้อความรวม (buffered path — ใส่ buffer_flush step/hint)
+  }): Promise<void> {
+    const { spinnerId } = opts;
+    const pushUserHistory = () => {
+      if (!opts.pushUserHistory) return;
+      historyRef.current.push({
+        role: "user", text: opts.userText,
+        ...(opts.userImages && opts.userImages.length > 0 ? { images: [...opts.userImages] } : {}),
+      });
+    };
+    const bufferHint = (opts.bufferedCount ?? 0) > 1
+      ? `<br><span style="font-size:11px;opacity:0.5">รวมจาก ${opts.bufferedCount} ข้อความ</span>` : "";
+    try {
+      const res = await fetch("/api/test-chat/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: currentSessionId,
+          input_mode: opts.inputMode,
+          message: opts.message,
+          shop,
+          platform,
+          history: opts.history,
+          limit,
+          ...(opts.images && opts.images.length > 0 ? { images: opts.images } : {}),
+          ...(sessionStatus ? { ticket_state: sessionStatus } : {}),
+        }),
+      });
+      const d = await res.json().catch(() => ({}));
+
+      // ── workflow handled (actioned/resumed) — render delivered messages ──
+      if (d.status === "workflow_actioned" || d.status === "workflow_resumed") {
+        const flowMsgs: { text: string; source: string }[] = Array.isArray(d.messages) ? d.messages : [];
+        // ⚡ workflow handoff (assign_ticket action) → แสดงสถานะส่งต่อ
+        if (d.handoff && d.handoff.agentId) {
+          const agentName = d.handoff.agentId;
+          const handoffReason = d.handoff.reason || "workflow assign_ticket";
+          setHandedOff(true);
+          setAssignedAdminName(agentName);
+          setAssignmentReason(handoffReason);
+          toast.success(`🔀 workflow จ่ายงานให้: ${agentName}`);
         }
-      } catch (err) {
-        console.error("[TRIGGER-CHECK] error:", err);
+        pushUserHistory();
+        if (flowMsgs.length === 0) {
+          // flow ทำ action แต่ไม่มี message (เช่น assign อย่างเดียว) → แสดง status box
+          historyRef.current.push({ role: "model", text: `⚙️ workflow: ${d.detail}` });
+          setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
+            ...m,
+            html: `<div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:8px 12px;color:var(--color-info);font-size:13px">🔀 workflow: ${escapeHtml(d.detail || "")}</div>`,
+            stats: { source: "workflow_action" } as MsgStats,
+            isGroupLast: true,
+          } : m));
+          saveMessageToSession("model", `⚙️ workflow: ${d.detail}`);
+        } else {
+          for (const fm of flowMsgs) historyRef.current.push({ role: "model", text: fm.text });
+          let firstRendered = false;
+          setMessages((prev) => {
+            let next = [...prev];
+            for (const fm of flowMsgs) {
+              const segs = splitAnswerSegments(fm.text);
+              const bubbles = segs.length > 0 ? segs : [fm.text];
+              const stats: MsgStats = { source: fm.source || "workflow" };
+              if (!firstRendered) {
+                // message แรก → แทนที่ spinner
+                const idx = next.findIndex((m) => m.id === spinnerId);
+                if (idx !== -1) {
+                  next[idx] = { ...next[idx], html: formatAnswer(bubbles[0]), raw: bubbles[0], stats, ...(bubbles.length === 1 ? { isGroupLast: true } : {}) };
+                  firstRendered = true;
+                }
+                const extraMsgs: Msg[] = bubbles.slice(1).map((seg, si) => ({
+                  id: msgIdCounter++, role: "bot", html: formatAnswer(seg), raw: seg, stats,
+                  ...(si === bubbles.length - 2 ? { isGroupLast: true } : {}),
+                }));
+                next = [...next, ...extraMsgs];
+              } else {
+                const extraMsgs: Msg[] = bubbles.map((seg, si) => ({
+                  id: msgIdCounter++, role: "bot", html: formatAnswer(seg), raw: seg, stats,
+                  ...(si === bubbles.length - 1 ? { isGroupLast: true } : {}),
+                }));
+                next = [...next, ...extraMsgs];
+              }
+            }
+            // ถ้า spinner ยังไม่ถูกแทนที่ (firstRendered=false ไม่ได้เกิด) → ลบทิ้ง
+            if (!firstRendered && spinnerId !== null) next = next.filter((m) => m.id !== spinnerId);
+            return next;
+          });
+          for (const fm of flowMsgs) saveMessageToSession("model", fm.text);
+        }
+        toast.info(`🔀 workflow: ${d.detail}`);
+        return;
       }
 
-      // ⚡ Step 2: ถ้า trigger action = handoff_admin → ส่งต่อแอดมินเลย ไม่เรียก bot
-      if (triggerMatched && triggerMatched.action === "handoff_admin") {
-        // เรียก handoff API (simulate mode)
-        let adminName = "";
-        let assignReason = triggerMatched.name;
-        if (currentSessionId) {
-          try {
-            const hr = await fetch("/api/admin/conversations/bot-handoff", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                conversation_id: currentSessionId,
-                shop_id: shop,
-                platform,
-                reason: triggerMatched.name,
-                simulate: true,
-              }),
-            });
-            const hj = await hr.json().catch(() => ({}));
-            if (hj?.assigned_to_name) adminName = hj.assigned_to_name;
-            if (hj?.assignment_reason) assignReason = hj.assignment_reason;
-          } catch (e) { console.error("[HANDOFF] admin fetch failed:", e); }
-        }
+      // ── workflow exit_drop — flow cancel + ทิ้งข้อความ ──
+      if (d.status === "exit_drop") {
+        setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
+          ...m,
+          html: `<div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:8px 12px;color:var(--color-error);font-size:13px">⛔ workflow: condition ไม่ผ่าน (exit_drop) — รบกวนพิมพ์ใหม่อีกครั้งนะคะ</div>`,
+          isGroupLast: true,
+        } : m));
+        toast.info(`⛔ workflow exit_drop: ${d.detail}`);
+        return;
+      }
+
+      // ── workflow terminal error (matched-path death) — terminal ──
+      if (d.status === "workflow_error") {
+        setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
+          ...m,
+          html: `<div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:8px 12px;color:var(--color-error);font-size:13px">⚠️ workflow error: ${escapeHtml(d.detail || "")}</div>`,
+          isGroupLast: true,
+        } : m));
+        toast.info(`⚠️ workflow error: ${d.detail}`);
+        return;
+      }
+
+      // ── workflow in_flight — owner อื่นกำลัง execute → stop (non-terminal) ──
+      if (d.status === "in_flight") {
+        setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
+          ...m,
+          html: `<div style="color:var(--color-info);font-size:13px">⏳ workflow กำลังประมวลผล — รบกวนลองใหม่อีกครั้ง</div>`,
+          isGroupLast: true,
+        } : m));
+        return;
+      }
+
+      // ── trigger handoff_admin → ส่งต่อแอดมิน (simulate — test store) ──
+      if (d.status === "trigger_handoff") {
+        const trigName = d.trigger?.name || "";
+        const adminName = d.assigned_to_name || "";
+        const assignReason = d.assignment_reason || trigName;
         const handoffText = `🔀 ส่งต่อแอดมิน${adminName ? `: ${adminName}` : ""}\nเหตุผล: ${assignReason}`;
         setHandedOff(true);
         setAssignedAdmin(null);
         setAssignedAdminName(adminName || null);
         setAssignmentReason(assignReason);
         toast.success(handoffText);
-        setMessages((prev) =>
-          prev.map((m) => (m.id === spinnerMsg.id ? {
-            ...m,
-            html: `<div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:8px 12px;color:var(--color-info);font-size:13px">⚡ trigger: ${escapeHtml(triggerMatched!.name)} → 🔀 ส่งต่อแอดมิน${adminName ? `: <b>${escapeHtml(adminName)}</b>` : ""}<br><span style="font-size:11px;opacity:0.7">เหตุผล: ${escapeHtml(assignReason)}</span></div>`,
-            stats: {
-              source: "trigger_handoff",
-              handoff_to_admin: true,
-              handoff_reason: assignReason,
-              routing_decision: { path: "handoff", trigger_matched: triggerMatched.name, assigned_admin_name: adminName },
-            } as MsgStats,
-            isGroupLast: true,
-          } : m))
-        );
+        pushUserHistory();
         historyRef.current.push({ role: "model", text: handoffText });
         saveMessageToSession("model", handoffText);
-        setSending(false);
+        setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
+          ...m,
+          html: `<div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:8px 12px;color:var(--color-info);font-size:13px">⚡ trigger: ${escapeHtml(trigName)} → 🔀 ส่งต่อแอดมิน${adminName ? `: <b>${escapeHtml(adminName)}</b>` : ""}<br><span style="font-size:11px;opacity:0.7">เหตุผล: ${escapeHtml(assignReason)}</span>${bufferHint}</div>`,
+          stats: {
+            source: "trigger_handoff",
+            handoff_to_admin: true,
+            handoff_reason: assignReason,
+            routing_decision: { path: "handoff", trigger_matched: trigName, assigned_admin_name: adminName },
+          } as MsgStats,
+          isGroupLast: true,
+        } : m));
         return;
       }
 
-      // ⚡ Step 3: ถ้า trigger action = bot_answer และมี bot_template → ใช้ template ตอบเลย ไม่เรียก bot
-      if (triggerMatched && triggerMatched.action === "bot_answer" && triggerMatched.bot_template) {
-        const templateText = triggerMatched.bot_template;
+      // ── trigger bot_answer + bot_template → ใช้ template ──
+      if (d.status === "trigger_template") {
+        const trigName = d.trigger?.name || "";
+        const templateText = d.template_text || "";
         const segments = splitAnswerSegments(templateText);
         const bubbles = segments.length > 0 ? segments : [templateText];
+        pushUserHistory();
         historyRef.current.push({ role: "model", text: templateText });
         const stats: MsgStats = {
           source: "trigger_bot_answer",
-          routing_decision: { path: "bot_reply", trigger_matched: triggerMatched.name },
+          routing_decision: { path: "bot_reply", trigger_matched: trigName },
         };
+        toast.info(`⚡ trigger: ${trigName} → template`);
         setMessages((prev) => {
           const next = [...prev];
-          const idx = next.findIndex((m) => m.id === spinnerMsg.id);
+          const idx = next.findIndex((m) => m.id === spinnerId);
           if (idx === -1) return prev;
           next[idx] = {
             ...next[idx],
@@ -1135,73 +1252,74 @@ export function TestChatClient({ platform }: { platform: Platform }) {
           return [...next, ...extraMsgs];
         });
         saveMessageToSession("model", templateText, stats);
-        setSending(false);
         return;
       }
 
-      // ⚡ Step 4: ปกติ — ส่งให้ bot
-      const payload: Record<string, unknown> = { message, limit, history: priorHistory };
-      if (shop) payload.shop = shop;
-      // ⚡ ส่ง conversation_id (ใช้ session_id) + simulate_assignment เพื่อจำลองการจ่ายงาน
-      if (currentSessionId) {
-        payload.conversation_id = currentSessionId;
-        payload.simulate_assignment = true;
-      }
-      // ⚡ Phase 2A — ส่ง ticket_state ให้บอท (state-driven handoff reset)
-      if (sessionStatus) {
-        payload.ticket_state = sessionStatus;
-      }
-      // ⚡ Phase 1F — ส่ง images ให้ bot (แปลง URL สัมพันธ์เป็น absolute)
-      if (images.length > 0) {
-        const origin = window.location.origin;
-        payload.images = images.map((i) => (i.url.startsWith("http") ? i.url : `${origin}${i.url}`));
-      }
-      const r = await fetch("/api/chatbot/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        const errText = `เกิดข้อผิดพลาด (${r.status}): ${j.detail || j.error || r.statusText || "ไม่ทราบสาเหตุ"}`;
-        setMessages((prev) =>
-          prev.map((m) => (m.id === spinnerMsg.id ? { ...m, html: `<span style="color:var(--color-error-soft)">${escapeHtml(errText)}</span>` } : m))
-        );
+      // ── bot_error → แสดง error ใน bubble ──
+      if (d.status === "bot_error") {
+        const errText = `เกิดข้อผิดพลาด: ${d.error || "ไม่ทราบสาเหตุ"}`;
+        setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
+          ...m, html: `<span style="color:var(--color-error-soft)">${escapeHtml(errText)}</span>`,
+        } : m));
         return;
       }
-      const answerText = j.answer || "(ไม่มีคำตอบ)";
-      // ⚡ A2 — cache image_desc ที่ bot คืนกลับมา ลง history entry ล่าสุด (user message)
-      //   ทำให้ turn ถัดไปส่ง image_desc ใน history → bot ไม่ต้อง re-read รูปซ้ำ
-      if (j.image_desc && historyRef.current.length > 0) {
-        const lastIdx = historyRef.current.length - 1;
-        if (historyRef.current[lastIdx].role === "user") {
-          historyRef.current[lastIdx].image_desc = String(j.image_desc);
-        }
+
+      // ── empty → ไม่มี input (buffer ว่าง) → ลบ spinner ──
+      if (d.status === "empty") {
+        if (spinnerId !== null) setMessages((prev) => prev.filter((m) => m.id !== spinnerId));
+        return;
       }
-      // ⚡ Multi-bubble — bot แบ่งคำตอบด้วย ||| (หรือ answer_segments จาก Python)
-      // split เป็นหลาย segment แล้วสร้างหลาย message (แทนที่ spinnerMsg ด้วย segment แรก + เพิ่มที่เหลือ)
-      const segments: string[] = Array.isArray(j.answer_segments) && j.answer_segments.length > 0
-        ? j.answer_segments.map((s: string) => String(s).trim()).filter((s: string) => s.length > 0)
+
+      // ── trigger_bot_answer / bot_answered → bot bubbles + stats ──
+      const answerText = d.answer || "(ไม่มีคำตอบ)";
+      const segments: string[] = Array.isArray(d.answer_segments) && d.answer_segments.length > 0
+        ? d.answer_segments.map((s: string) => String(s).trim()).filter((s: string) => s.length > 0)
         : splitAnswerSegments(answerText);
       const bubbles = segments.length > 0 ? segments : [answerText];
+      // ⚡ A2 — push user พร้อม images แล้ว cache image_desc หลัง bot ตอบ
+      pushUserHistory();
+      if (d.image_desc && historyRef.current.length > 0) {
+        const lastIdx = historyRef.current.length - 1;
+        if (historyRef.current[lastIdx].role === "user") {
+          historyRef.current[lastIdx].image_desc = String(d.image_desc);
+        }
+      }
       historyRef.current.push({ role: "model", text: answerText });
-      setLastProducts(j.products || []);
+      setLastProducts(d.products || []);
       const stats: MsgStats = {
-        elapsed: typeof j.elapsed === "number" ? j.elapsed : undefined,
-        usage: j.usage || undefined,
-        cost: typeof j.cost === "number" ? j.cost : undefined,
-        model: j.model,
-        source: j.source,
-        intent: j.intent || undefined,
-        timing: j.timing || undefined,
-        retrieval_info: j.retrieval_info || undefined,
-        web_search_used: j.web_search_used === true,
-        web_search_reason: j.web_search_reason || undefined,
-        web_search_model: j.web_search_model || undefined,
-        steps: Array.isArray(j.steps) ? j.steps : undefined,
-        handoff_to_admin: j.handoff_to_admin === true,
-        handoff_reason: j.handoff_reason || undefined,
-        routing_decision: j.routing_decision || undefined,
+        elapsed: typeof d.elapsed === "number" ? d.elapsed : undefined,
+        usage: d.usage || undefined,
+        cost: typeof d.cost === "number" ? d.cost : undefined,
+        model: d.model,
+        source: d.source,
+        intent: d.intent || undefined,
+        timing: d.timing || undefined,
+        retrieval_info: d.retrieval_info || undefined,
+        web_search_used: d.web_search_used === true,
+        web_search_reason: d.web_search_reason || undefined,
+        web_search_model: d.web_search_model || undefined,
+        // ⚡ เพิ่ม buffer_flush step ที่จุดเริ่มต้นของ steps (แสดงว่า merge อะไรบ้าง)
+        steps: (opts.bufferedCount ?? 0) > 0 && Array.isArray(d.steps) ? [
+          {
+            name: "buffer_flush",
+            model: "",
+            tokens_in: 0,
+            tokens_out: 0,
+            time_s: 0,
+            cost_usd: 0,
+            cost_thb: 0,
+            input: {
+              message_count: d.message_count || 0,
+              combined_message: (d.combined_message || "").slice(0, 500),
+              message_ids: d.message_ids || [],
+            },
+            output: null,
+          },
+          ...d.steps,
+        ] : (Array.isArray(d.steps) ? d.steps : undefined),
+        handoff_to_admin: d.handoff_to_admin === true,
+        handoff_reason: d.handoff_reason || undefined,
+        routing_decision: d.routing_decision || undefined,
       };
       // ⚡ เด้ง toast แจ้ง handoff + ตั้ง handedOff state
       if (stats.handoff_to_admin) {
@@ -1212,6 +1330,8 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         setAssignedAdminName(adminName);
         setAssignmentReason(reason);
         toast.success(`🔀 ส่งต่อแอดมิน${adminName ? `: ${adminName}` : ""}\nเหตุผล: ${reason}`);
+      } else if (d.trigger?.name) {
+        toast.info(`⚡ trigger: ${d.trigger.name}`);
       } else if (stats.routing_decision?.trigger_matched) {
         toast.info(`⚡ trigger: ${stats.routing_decision.trigger_matched}`);
       }
@@ -1230,14 +1350,14 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       // segment สุดท้าย → มี sessionMsgIndex + isGroupLast (สำหรับ RateBox)
       setMessages((prev) => {
         const next = [...prev];
-        const idx = next.findIndex((m) => m.id === spinnerMsg.id);
+        const idx = next.findIndex((m) => m.id === spinnerId);
         if (idx === -1) return prev;
         // แทนที่ spinner ด้วย segment แรก (พร้อม stats + products)
         next[idx] = {
           ...next[idx],
           html: formatAnswer(bubbles[0]),
           raw: bubbles[0],
-          products: j.products || [],
+          products: d.products || [],
           stats,
           // ⚡ ถ้ามี segment เดียว → เป็น first และ last พร้อมกัน
           ...(bubbles.length === 1 ? { isGroupLast: true } : {}),
@@ -1260,14 +1380,9 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       // save bot response to session
       saveMessageToSession("model", answerText, stats);
     } catch {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === spinnerMsg.id ? { ...m, html: '<span style="color:var(--color-error-soft)">เกิดข้อผิดพลาดในการเชื่อมต่อ server</span>' } : m
-        )
-      );
-    } finally {
-      setSending(false);
-      inputRef.current?.focus();
+      setMessages((prev) => prev.map((m) =>
+        m.id === spinnerId ? { ...m, html: '<span style="color:var(--color-error-soft)">เกิดข้อผิดพลาดในการเชื่อมต่อ server</span>' } : m
+      ));
     }
   }
 
@@ -1313,369 +1428,19 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       ...(h.image_desc ? { image_desc: h.image_desc } : {}),
     }));
 
-    // ⚡ Workflow step helper — เรียก workflow engine (เหมือน bot-worker ①②) แล้วจัดการผล
-    // phase "entry" = จุดเริ่ม (resume + workflow_first/both) / "after_trigger" = trigger ไม่ match (trigger_first)
-    // return true = workflow จัดการแล้ว (จบ flow นี้) / false = ไป trigger/bot ตามเดิม
-    const runWorkflowStep = async (phase: "entry" | "after_trigger"): Promise<boolean> => {
-      try {
-        const wsRes = await fetch("/api/test-chat/workflow-step", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            session_id: currentSessionId,
-            message: combinedText,
-            shop,
-            platform,
-            history: priorHistory,
-            phase,
-          }),
-        });
-        const ws = await wsRes.json().catch(() => ({}));
-
-        if (ws.status === "workflow_actioned" || ws.status === "workflow_resumed") {
-          const flowMsgs: { text: string; source: string }[] = Array.isArray(ws.messages) ? ws.messages : [];
-          // ⚡ workflow handoff (assign_ticket action) → แสดงสถานะส่งต่อ
-          if (ws.handoff && ws.handoff.agentId) {
-            const agentName = ws.handoff.agentId;
-            const handoffReason = ws.handoff.reason || "workflow assign_ticket";
-            setHandedOff(true);
-            setAssignedAdminName(agentName);
-            setAssignmentReason(handoffReason);
-            toast.success(`🔀 workflow จ่ายงานให้: ${agentName}`);
-          }
-          // render delivered messages ของ flow (แบบเดียวกับ template — split + format)
-          historyRef.current.push({ role: "user", text: combinedText, ...(bufferedImagesRef.current.length > 0 ? { images: [...bufferedImagesRef.current] } : {}) });
-          if (flowMsgs.length === 0) {
-            // flow ทำ action แต่ไม่มี message (เช่น assign อย่างเดียว) → แสดง status box
-            historyRef.current.push({ role: "model", text: `⚙️ workflow: ${ws.detail}` });
-            setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
-              ...m,
-              html: `<div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:8px 12px;color:var(--color-info);font-size:13px">🔀 workflow: ${escapeHtml(ws.detail || "")}</div>`,
-              stats: { source: "workflow_action" } as MsgStats,
-              isGroupLast: true,
-            } : m));
-            saveMessageToSession("model", `⚙️ workflow: ${ws.detail}`);
-          } else {
-            for (const fm of flowMsgs) historyRef.current.push({ role: "model", text: fm.text });
-            let firstRendered = false;
-            setMessages((prev) => {
-              let next = [...prev];
-              for (const fm of flowMsgs) {
-                const segs = splitAnswerSegments(fm.text);
-                const bubbles = segs.length > 0 ? segs : [fm.text];
-                const stats: MsgStats = { source: fm.source || "workflow" };
-                if (!firstRendered) {
-                  // message แรก → แทนที่ spinner
-                  const idx = next.findIndex((m) => m.id === spinnerId);
-                  if (idx !== -1) {
-                    next[idx] = { ...next[idx], html: formatAnswer(bubbles[0]), raw: bubbles[0], stats, ...(bubbles.length === 1 ? { isGroupLast: true } : {}) };
-                    firstRendered = true;
-                  }
-                  const extraMsgs: Msg[] = bubbles.slice(1).map((seg, si) => ({
-                    id: msgIdCounter++, role: "bot", html: formatAnswer(seg), raw: seg, stats,
-                    ...(si === bubbles.length - 2 ? { isGroupLast: true } : {}),
-                  }));
-                  next = [...next, ...extraMsgs];
-                } else {
-                  const extraMsgs: Msg[] = bubbles.map((seg, si) => ({
-                    id: msgIdCounter++, role: "bot", html: formatAnswer(seg), raw: seg, stats,
-                    ...(si === bubbles.length - 1 ? { isGroupLast: true } : {}),
-                  }));
-                  next = [...next, ...extraMsgs];
-                }
-              }
-              // ถ้า spinner ยังไม่ถูกแทนที่ (firstRendered=false ไม่ได้เกิด) → ลบทิ้ง
-              if (!firstRendered && spinnerId !== null) next = next.filter((m) => m.id !== spinnerId);
-              return next;
-            });
-            for (const fm of flowMsgs) saveMessageToSession("model", fm.text);
-          }
-          toast.info(`🔀 workflow: ${ws.detail}`);
-          bufferSpinnerIdRef.current = null;
-          setIsBuffering(false);
-          setBufferedCount(0);
-          setSending(false);
-          return true; // workflow จัดการแล้ว — ไม่ไป trigger/bot
-        }
-
-        if (ws.status === "exit_drop") {
-          // flow cancel + ทิ้งข้อความ → แสดง hint แล้วจบ (ลูกค้าต้องพิมพ์ใหม่)
-          setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
-            ...m,
-            html: `<div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:8px 12px;color:var(--color-error);font-size:13px">⛔ workflow: condition ไม่ผ่าน (exit_drop) — รบกวนพิมพ์ใหม่อีกครั้งนะคะ</div>`,
-            isGroupLast: true,
-          } : m));
-          toast.info(`⛔ workflow exit_drop: ${ws.detail}`);
-          bufferSpinnerIdRef.current = null;
-          setIsBuffering(false);
-          setBufferedCount(0);
-          setSending(false);
-          return true;
-        }
-
-        // no_workflow → ไป trigger/bot ตามเดิม
-        return false;
-      } catch (err) {
-        console.error("[WORKFLOW-STEP] error:", err);
-        return false; // fail-safe → ไป trigger/bot ตามเดิม
-      }
-    };
-
+    // ⚡ Phase 9 — request เดียว; owner ฝั่ง server ตัดสิน workflow→trigger→bot
     try {
-      // ⚡ ① Workflow step (entry) — resume active flow + workflow_first/both priority
-      // server เป็นคนตัดสิน priority (trigger_first จะตอบ no_workflow ทันทีใน phase entry)
-      if (await runWorkflowStep("entry")) return;
-
-      // ⚡ Check trigger บน combined message (เหมือน bot-worker ตอน flush)
-      let triggerMatched: { name: string; action: string; bot_template?: string; topic?: string } | null = null;
-      try {
-        const tr = await fetch("/api/triggers/match", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: combinedText, shop_id: shop, platform }),
-        });
-        const tj = await tr.json().catch(() => ({}));
-        if (tj?.matched && tj?.trigger) {
-          triggerMatched = tj.trigger;
-          toast.info(`⚡ trigger: ${tj.trigger.name} → ${tj.trigger.action} (จาก ${msgs.length} ข้อความรวม)`);
-        }
-      } catch (err) {
-        console.error("[TRIGGER-CHECK] error:", err);
-      }
-
-      // ⚡ trigger handoff_admin → ส่งต่อแอดมิน
-      if (triggerMatched && triggerMatched.action === "handoff_admin") {
-        let adminName = "";
-        let assignReason = triggerMatched.name;
-        if (currentSessionId) {
-          try {
-            const hr = await fetch("/api/admin/conversations/bot-handoff", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                conversation_id: currentSessionId,
-                shop_id: shop,
-                platform,
-                reason: triggerMatched.name,
-                simulate: true,
-              }),
-            });
-            const hj = await hr.json().catch(() => ({}));
-            if (hj?.assigned_to_name) adminName = hj.assigned_to_name;
-            if (hj?.assignment_reason) assignReason = hj.assignment_reason;
-          } catch (e) { console.error("[HANDOFF] admin fetch failed:", e); }
-        }
-        const handoffText = `🔀 ส่งต่อแอดมิน${adminName ? `: ${adminName}` : ""}\nเหตุผล: ${assignReason}`;
-        setHandedOff(true);
-        setAssignedAdmin(null);
-        setAssignedAdminName(adminName || null);
-        setAssignmentReason(assignReason);
-        toast.success(handoffText);
-        historyRef.current.push({ role: "user", text: combinedText, ...(bufferedImagesRef.current.length > 0 ? { images: [...bufferedImagesRef.current] } : {}) });
-        historyRef.current.push({ role: "model", text: handoffText });
-        // ⚡ ไม่ save combinedText ซ้ำ — b1, b2 ถูก save ไปแล้วตอนพิมพ์ (saveMessageToSession ใน buffer flow)
-        saveMessageToSession("model", handoffText);
-        setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
-          ...m,
-          html: `<div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:8px 12px;color:var(--color-info);font-size:13px">⚡ trigger: ${escapeHtml(triggerMatched!.name)} → 🔀 ส่งต่อแอดมิน${adminName ? `: <b>${escapeHtml(adminName)}</b>` : ""}<br><span style="font-size:11px;opacity:0.7">เหตุผล: ${escapeHtml(assignReason)}</span><br><span style="font-size:11px;opacity:0.5">รวมจาก ${msgs.length} ข้อความ</span></div>`,
-          stats: {
-            source: "trigger_handoff",
-            handoff_to_admin: true,
-            handoff_reason: assignReason,
-            routing_decision: { path: "handoff", trigger_matched: triggerMatched.name, assigned_admin_name: adminName },
-          } as MsgStats,
-          isGroupLast: true,
-        } : m));
-        bufferSpinnerIdRef.current = null;
-        setIsBuffering(false);
-        setBufferedCount(0);
-        setSending(false);
-        return;
-      }
-
-      // ⚡ trigger bot_answer + bot_template → ใช้ template
-      if (triggerMatched && triggerMatched.action === "bot_answer" && triggerMatched.bot_template) {
-        const templateText = triggerMatched.bot_template;
-        const segments = splitAnswerSegments(templateText);
-        const bubbles = segments.length > 0 ? segments : [templateText];
-        historyRef.current.push({ role: "user", text: combinedText, ...(bufferedImagesRef.current.length > 0 ? { images: [...bufferedImagesRef.current] } : {}) });
-        historyRef.current.push({ role: "model", text: templateText });
-        const stats: MsgStats = {
-          source: "trigger_bot_answer",
-          routing_decision: { path: "bot_reply", trigger_matched: triggerMatched.name },
-        };
-        setMessages((prev) => {
-          const next = [...prev];
-          const idx = next.findIndex((m) => m.id === spinnerId);
-          if (idx === -1) return prev;
-          next[idx] = {
-            ...next[idx],
-            html: formatAnswer(bubbles[0]),
-            raw: bubbles[0],
-            stats,
-            ...(bubbles.length === 1 ? { isGroupLast: true } : {}),
-          };
-          const extraMsgs: Msg[] = bubbles.slice(1).map((seg, si) => ({
-            id: msgIdCounter++,
-            role: "bot",
-            html: formatAnswer(seg),
-            raw: seg,
-            stats,
-            ...(si === bubbles.length - 2 ? { isGroupLast: true } : {}),
-          }));
-          return [...next, ...extraMsgs];
-        });
-        // ⚡ ไม่ save combinedText ซ้ำ — b1, b2 ถูก save ไปแล้วตอนพิมพ์
-        saveMessageToSession("model", templateText, stats);
-        bufferSpinnerIdRef.current = null;
-        setIsBuffering(false);
-        setBufferedCount(0);
-        setSending(false);
-        return;
-      }
-
-      // ⚡ ② Workflow step (after_trigger) — trigger ไม่ match → ลอง workflow ก่อนบอท (trigger_first)
-      if (await runWorkflowStep("after_trigger")) return;
-
-      // ⚡ ไม่ match trigger → flush ผ่าน API (ส่ง combined ไป bot)
-      const fr = await fetch("/api/test-chat/flush", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: currentSessionId,
-          shop,
-          platform,
-          history: priorHistory,
-          limit,
-        }),
+      await dispatchAndRender({
+        spinnerId,
+        history: priorHistory,
+        message: combinedText,
+        inputMode: "buffered",
+        images: flushedImages,
+        userText: combinedText,
+        userImages: flushedImages,
+        pushUserHistory: true,
+        bufferedCount: msgs.length,
       });
-      const fj = await fr.json().catch(() => ({}));
-
-      if (fj.status === "empty") {
-        if (spinnerId !== null) setMessages((prev) => prev.filter((m) => m.id !== spinnerId));
-        bufferSpinnerIdRef.current = null;
-        setIsBuffering(false);
-        setBufferedCount(0);
-        setSending(false);
-        return;
-      }
-
-      if (fj.status === "bot_error") {
-        const errText = `เกิดข้อผิดพลาด: ${fj.error || "ไม่ทราบสาเหตุ"}`;
-        setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
-          ...m, html: `<span style="color:var(--color-error-soft)">${escapeHtml(errText)}</span>`,
-        } : m));
-        bufferSpinnerIdRef.current = null;
-        setIsBuffering(false);
-        setBufferedCount(0);
-        setSending(false);
-        return;
-      }
-
-      // ⚡ ประมวลผล bot response (เหมือน normal flow)
-      const answerText = fj.answer || "(ไม่มีคำตอบ)";
-      const segments: string[] = Array.isArray(fj.answer_segments) && fj.answer_segments.length > 0
-        ? fj.answer_segments.map((s: string) => String(s).trim()).filter((s: string) => s.length > 0)
-        : splitAnswerSegments(answerText);
-      const bubbles = segments.length > 0 ? segments : [answerText];
-      // ⚡ A2 — push user พร้อม images แล้ว cache image_desc หลัง bot ตอบ
-      historyRef.current.push({ role: "user", text: combinedText, ...(bufferedImagesRef.current.length > 0 ? { images: [...bufferedImagesRef.current] } : {}) });
-      if (fj.image_desc && historyRef.current.length > 0) {
-        const lastIdx = historyRef.current.length - 1;
-        if (historyRef.current[lastIdx].role === "user") {
-          historyRef.current[lastIdx].image_desc = String(fj.image_desc);
-        }
-      }
-      historyRef.current.push({ role: "model", text: answerText });
-      setLastProducts(fj.products || []);
-      const stats: MsgStats = {
-        elapsed: typeof fj.elapsed === "number" ? fj.elapsed : undefined,
-        usage: fj.usage || undefined,
-        cost: typeof fj.cost === "number" ? fj.cost : undefined,
-        model: fj.model,
-        source: fj.source,
-        intent: fj.intent || undefined,
-        timing: fj.timing || undefined,
-        retrieval_info: fj.retrieval_info || undefined,
-        web_search_used: fj.web_search_used === true,
-        web_search_reason: fj.web_search_reason || undefined,
-        web_search_model: fj.web_search_model || undefined,
-        // ⚡ เพิ่ม buffer_flush step ที่จุดเริ่มต้นของ steps (แสดงว่า merge อะไรบ้าง)
-        steps: Array.isArray(fj.steps) ? [
-          {
-            name: "buffer_flush",
-            model: "",
-            tokens_in: 0,
-            tokens_out: 0,
-            time_s: 0,
-            cost_usd: 0,
-            cost_thb: 0,
-            input: {
-              message_count: fj.message_count || 0,
-              combined_message: (fj.combined_message || "").slice(0, 500),
-              message_ids: fj.message_ids || [],
-            },
-            output: null,
-          },
-          ...fj.steps,
-        ] : undefined,
-        handoff_to_admin: fj.handoff_to_admin === true,
-        handoff_reason: fj.handoff_reason || undefined,
-        routing_decision: fj.routing_decision || undefined,
-      };
-      if (stats.handoff_to_admin) {
-        const adminName = (stats.routing_decision?.assigned_admin_name as string) || (stats.routing_decision?.assigned_admin as string) || null;
-        const reason = stats.handoff_reason || "unknown";
-        setHandedOff(true);
-        setAssignedAdmin(stats.routing_decision?.assigned_admin as string || null);
-        setAssignedAdminName(adminName);
-        setAssignmentReason(reason);
-        toast.success(`🔀 ส่งต่อแอดมิน${adminName ? `: ${adminName}` : ""}\nเหตุผล: ${reason}`);
-      } else if (stats.routing_decision?.trigger_matched) {
-        toast.info(`⚡ trigger: ${stats.routing_decision.trigger_matched}`);
-      }
-      setTotals((t) => ({
-        turns: t.turns + 1,
-        elapsed: t.elapsed + (stats.elapsed || 0),
-        prompt: t.prompt + (stats.usage?.prompt || 0),
-        output: t.output + (stats.usage?.output || 0),
-        total: t.total + (stats.usage?.total || 0),
-        cost: t.cost + (stats.cost || 0),
-        wsTurns: t.wsTurns + (stats.web_search_used ? 1 : 0),
-        wsCost: t.wsCost + (stats.web_search_used ? (stats.cost || 0) : 0),
-        wsTokens: t.wsTokens + (stats.web_search_used ? (stats.usage?.total || 0) : 0),
-      }));
-      setMessages((prev) => {
-        const next = [...prev];
-        const idx = next.findIndex((m) => m.id === spinnerId);
-        if (idx === -1) return prev;
-        next[idx] = {
-          ...next[idx],
-          html: formatAnswer(bubbles[0]),
-          raw: bubbles[0],
-          products: fj.products || [],
-          stats,
-          ...(bubbles.length === 1 ? { isGroupLast: true } : {}),
-        };
-        const extraMsgs: Msg[] = bubbles.slice(1).map((seg, si) => {
-          const isLast = si === bubbles.length - 2;
-          return {
-            id: msgIdCounter++,
-            role: "bot",
-            html: formatAnswer(seg),
-            raw: seg,
-            ...(isLast ? { isGroupLast: true, stats } : {}),
-          } as Msg;
-        });
-        next.splice(idx + 1, 0, ...extraMsgs);
-        return next;
-      });
-      // ⚡ ไม่ save combinedText ซ้ำ — b1, b2 ถูก save ไปแล้วตอนพิมพ์
-      saveMessageToSession("model", answerText, stats);
-    } catch {
-      setMessages((prev) => prev.map((m) =>
-        m.id === spinnerId ? { ...m, html: '<span style="color:var(--color-error-soft)">เกิดข้อผิดพลาดในการเชื่อมต่อ server</span>' } : m
-      ));
     } finally {
       bufferSpinnerIdRef.current = null;
       setIsBuffering(false);
