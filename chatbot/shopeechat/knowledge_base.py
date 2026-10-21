@@ -973,8 +973,8 @@ def _qa_embed_missing(docs: list[dict]) -> None:
 
 
 def search_qa(message: str, *, model_codes: set[str] | None = None,
-              anchor_item_id: str | None = None,
-              known_brand: str | None = None, limit: int = 3) -> list[dict]:
+              anchor_item_id: str | None = None, known_brand: str | None = None,
+              snap=_gen.SNAP_UNSET, limit: int = 3) -> list[dict]:
     """ค้น kb_qa — hybrid: embedding sim + substring + model/item anchor boost.
 
     Model rules (กันคำแนะนำข้ามรุ่น):
@@ -1091,7 +1091,7 @@ def qa_context(message: str, *, conversation_id=None, claim: bool = False,
     if not known_brand:
         known_brand = next((b for b in _known_brands(snap) if b in low), None)
     hits = search_qa(message, model_codes=codes, anchor_item_id=anchor_iid,
-                     known_brand=known_brand)
+                     known_brand=known_brand, snap=snap)
     if not hits:
         return ""
     print(f"[QA] hits={len(hits)} levels={[h['_qa_level'] for h in hits]} "
@@ -1151,7 +1151,7 @@ def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
         low = message.lower()
         known_brand = next((b for b in _known_brands(snap) if b in low), None)
     hits = search_qa(message, model_codes=codes, anchor_item_id=anchor_iid,
-                     known_brand=known_brand)
+                     known_brand=known_brand, snap=snap)
     return [(h.get("a") or "").strip() for h in hits
             if h.get("_qa_level") in ("model", "item", "brand")
             and h.get("_qa_sim", 0.0) >= min_sim

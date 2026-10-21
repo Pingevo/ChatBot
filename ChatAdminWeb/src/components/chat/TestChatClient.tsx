@@ -897,6 +897,12 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       toast.info("แชทถูกส่งต่อแอดมินแล้ว — กด 'ปิดแชท (ให้บอทตอบต่อ)' เพื่อคุยกับบอทอีกครั้ง");
       return;
     }
+    // ⚡ Phase 10B — ไม่มี session → reject ก่อน mutation ใดๆ (server จะตอบ
+    //   422 "session_id is required" — แต่ turn ที่ล้มเหลวห้ามเข้า history/persist)
+    if (!currentSessionId) {
+      toast.error("กรุณาสร้างหรือเลือกแชทก่อนส่งข้อความ");
+      return;
+    }
     setInput("");
     setPendingImages([]);
     // ⚡ reset textarea height หลังส่ง
@@ -1029,12 +1035,10 @@ export function TestChatClient({ platform }: { platform: Platform }) {
       ...(h.images ? { images: h.images } : {}),
       ...(h.image_desc ? { image_desc: h.image_desc } : {}),
     }));
-    historyRef.current.push({ role: "user", text: message, ...(images.length > 0 ? { images: images.map((i) => i.url.startsWith("http") ? i.url : `${window.location.origin}${i.url}`) } : {}) });
     // ⚡ Phase 1F — save พร้อม images (สำหรับ reload)
     const directImages = images.length > 0
       ? images.map((i) => i.url.startsWith("http") ? i.url : `${window.location.origin}${i.url}`)
       : undefined;
-    saveMessageToSession("user", message, undefined, directImages);
 
     // ⚡ Phase 9 — request เดียว; owner ฝั่ง server ตัดสิน workflow→trigger→bot
     try {
@@ -1045,7 +1049,11 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         inputMode: "direct",
         images: directImages,
         userText: message,
-        pushUserHistory: false,
+        userImages: directImages,
+        // ⚡ Phase 10B — user turn commit ที่ terminal-render เท่านั้น
+        //   (จุดเดียวกับ buffered path) — failed/non-terminal ห้ามเข้า history
+        pushUserHistory: true,
+        persistUser: true,
       });
     } finally {
       setSending(false);
@@ -1064,7 +1072,8 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     images?: string[];
     userText: string;          // text ที่ push เข้า historyRef ตอน render
     userImages?: string[];     // images สำหรับ history entry
-    pushUserHistory: boolean;  // buffered path push combined ตอน render; normal path push ไปแล้ว
+    pushUserHistory: boolean;  // push user turn ตอน terminal render (ทั้ง direct/buffered)
+    persistUser?: boolean;     // direct path — persist user turn ที่จุดเดียวกัน
     bufferedCount?: number;    // จำนวนข้อความรวม (buffered path — ใส่ buffer_flush step/hint)
   }): Promise<void> {
     const { spinnerId } = opts;
@@ -1074,6 +1083,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         role: "user", text: opts.userText,
         ...(opts.userImages && opts.userImages.length > 0 ? { images: [...opts.userImages] } : {}),
       });
+      if (opts.persistUser) saveMessageToSession("user", opts.userText, undefined, opts.userImages);
     };
     const bufferHint = (opts.bufferedCount ?? 0) > 1
       ? `<br><span style="font-size:11px;opacity:0.5">รวมจาก ${opts.bufferedCount} ข้อความ</span>` : "";
@@ -1094,6 +1104,16 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         }),
       });
       const d = await res.json().catch(() => ({}));
+
+      // ⚡ Phase 10B — transport failure → แสดง detail/error จริง เท่านั้น —
+      //   ห้ามไหลเข้า answer branch เป็น "(ไม่มีคำตอบ)" และห้าม commit user turn
+      if (!res.ok) {
+        const errText = `เกิดข้อผิดพลาด: ${d.detail || d.error || `HTTP ${res.status}`}`;
+        setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
+          ...m, html: `<span style="color:var(--color-error-soft)">${escapeHtml(errText)}</span>`,
+        } : m));
+        return;
+      }
 
       // ── workflow handled (actioned/resumed) — render delivered messages ──
       if (d.status === "workflow_actioned" || d.status === "workflow_resumed") {
@@ -1255,14 +1275,8 @@ export function TestChatClient({ platform }: { platform: Platform }) {
         return;
       }
 
-      // ── bot_error → แสดง error ใน bubble ──
-      if (d.status === "bot_error") {
-        const errText = `เกิดข้อผิดพลาด: ${d.error || "ไม่ทราบสาเหตุ"}`;
-        setMessages((prev) => prev.map((m) => m.id === spinnerId ? {
-          ...m, html: `<span style="color:var(--color-error-soft)">${escapeHtml(errText)}</span>`,
-        } : m));
-        return;
-      }
+      // ── bot_error → server ส่ง non-2xx เสมอ (bot.httpStatus || 500) —
+      //   handled โดย !res.ok branch ด้านบน แล้ว
 
       // ── empty → ไม่มี input (buffer ว่าง) → ลบ spinner ──
       if (d.status === "empty") {
