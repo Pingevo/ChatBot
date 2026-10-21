@@ -657,7 +657,7 @@ workflow → trigger → bot (call Python /chat) → handoff (ถ้าต้อ
 - `add_product()`, `load_timeline()`, `save_timeline()`
 - `get_subject_set()` + `resolve_subjects()` — authoritative conversation subject set (2C.2; แทน resolver ลำดับชั้นเก่าที่ถูกลบ) — resolver validate structured `subject_scope`/`subject_count` จาก intent Pass-1 กับ persisted set (2C.3 slice-1; explicit ชนะ upstream, current_set ต้อง count match, current_single ต้อง n==1, ไม่งั้น clarify)
 - `decide_subject_set()` + `record_subject_set()` — subject decision + fenced write (monotonic `subject_set.rev` CAS — +1 ต่อ commit, ABA-safe; same-ids semantic change = conflict เช่นเดิม)
-- `get_active_product()`, `get_suggestion_latest()`
+- `get_active_product()`, `get_anchor_history()`, `get_previous_anchor()`
 
 ### 3.12 Intent Classifier
 

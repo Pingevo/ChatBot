@@ -54,3 +54,24 @@ def grouped_retrieval_shadow_enabled() -> bool:
 def grouped_retrieval_selection_enabled() -> bool:
     return _flag("grouped_retrieval_selection_enabled",
                  "USE_GROUPED_RETRIEVAL_SELECTION")
+
+
+def web_search_enabled() -> bool:
+    """global web-search operator toggle — strict bool: เปิดได้เฉพาะ
+    persisted main_config.web_search_enabled == True เท่านั้น
+    missing/invalid/DB-error → OFF · ไม่มี env fallback"""
+    return get_runtime_config().get("web_search_enabled") is True
+
+
+def sanitize_or_model(model: str) -> str:
+    """OpenRouter `:online` policy owner เดียว — web_search_enabled()
+    is True เท่านั้นที่คง terminal `:online`; OFF/malformed/read-error
+    → strip (offline model เดิมส่งต่อ byte-identical เมื่อไม่มี suffix)"""
+    try:
+        on = web_search_enabled() is True
+    except Exception:
+        on = False
+    if not on and isinstance(model, str) \
+            and model.lower().endswith(":online"):
+        return model[: -len(":online")]
+    return model

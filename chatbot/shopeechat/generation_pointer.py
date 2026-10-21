@@ -156,16 +156,3 @@ def reset_cache() -> None:
     global _cache
     with _cache_lock:
         _cache = None
-
-
-def npz_generation_id(npz_path: str | Path):
-    """อ่าน generation_id ที่ฝังใน npz — คืน str หรือ None (ไฟล์เก่า/เสีย)"""
-    try:
-        import numpy as np
-        z = np.load(npz_path, allow_pickle=True)
-        if "generation_id" not in z.files:
-            return None
-        v = z["generation_id"]
-        return str(v.item() if hasattr(v, "item") else v)
-    except Exception:
-        return None

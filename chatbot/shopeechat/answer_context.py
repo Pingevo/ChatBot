@@ -53,7 +53,10 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from .policy_resolver import CompatDecision
 
 from .retrieval_planner import RetrievalRequest
 from .retrieval_selection import (
@@ -207,7 +210,21 @@ class UnansweredNeed:
     subject_refs: tuple[str, ...]
     scope: tuple[str, ...]
     target: str | None
-    reason: Literal["no_selection", "deferred", "no_answer"]
+    reason: Literal["no_selection", "deferred", "no_answer", "no_evidence"]
+
+
+@dataclass(frozen=True)
+class CompatVerdict:
+    """typed compat conclusion ที่ผ่าน exact (subject,target,relation)
+    gate แล้ว — composition input เดียวของ verdict segment;
+    `decision` = CompatDecision เดิมทั้งก้อน (proof identity+reason
+    ไม่หาย) — model ไม่เห็น raw proof dict"""
+    need_index: int
+    subject_id: str
+    subject_name: str                  # display name จาก selected card
+    target: str                        # normalized verdict target
+    relation: str                      # exact typed relation เดียว
+    decision: CompatDecision
 
 
 @dataclass(frozen=True)
@@ -229,6 +246,10 @@ class AnswerContext:
     unanswered_needs: tuple[UnansweredNeed, ...]
     estimated_tokens: int           # ceil(utf8_bytes/3) — estimate เท่านั้น
     trace: tuple[str, ...] = ()
+    # typed compat decisions ที่ผ่าน exact (subject,target,relation)
+    # proof — deterministic verdict segment ที่ composition (ไม่ใช่
+    # model task / ไม่ใช่ evidence context ของ model)
+    compat_verdicts: tuple[CompatVerdict, ...] = ()
 
     @property
     def is_empty(self) -> bool:
@@ -245,16 +266,20 @@ class AnswerContext:
                 f"⚠️ สำคัญอย่างยิ่ง: ลูกค้าทักเข้ามาที่ร้าน {shop_hint} โดยเฉพาะ "
                 f"ให้ตอบเฉพาะสินค้าจากร้าน {shop_hint} เท่านั้น "
                 f"ห้ามเสนอ/แนะนำ/เปรียบเทียบสินค้าจากร้านอื่นในเครือเด็ดขาด\n")
-        header += f"จำนวนสินค้าใน context: {len(self.products)}\n\n"
-        if self.products:
-            # visible numbering = 1-based งานที่ N เดียวกับ task/evidence
-            # render — internal need_indices ยัง 0-based; translate เฉพาะ
-            # serialized copy (canonical card ไม่ถูก mutate)
-            body = json.dumps(
-                [{**p, "need_indices": [i + 1 for i in p["need_indices"]]}
-                 if p.get("need_indices") else p
-                 for p in self.products],
-                ensure_ascii=False, indent=2)
+        # original need_index → visible ordinal — owner เดียวกับ
+        # AnswerTask.render (position ใน surviving tasks); internal
+        # need_index/need_indices ไม่ renumber — translate เฉพาะตอน
+        # serialize (canonical records ไม่ถูก mutate)
+        ordinal = {t.need_index: pos
+                   for pos, t in enumerate(self.task.tasks, 1)}
+        ser_products = [
+            {**p, "need_indices": ords}
+            for p in self.products
+            if (ords := [ordinal[i] for i in p.get("need_indices") or ()
+                         if i in ordinal])]
+        header += f"จำนวนสินค้าใน context: {len(ser_products)}\n\n"
+        if ser_products:
+            body = json.dumps(ser_products, ensure_ascii=False, indent=2)
         else:
             body = ("ไม่พบข้อมูลสินค้าที่ตรงกับคำถามในระบบค้นหา\n"
                     "ห้ามสรุปว่าสินค้าหมดสต็อก เลิกขาย หรือไม่มีจำหน่าย "
@@ -263,9 +288,12 @@ class AnswerContext:
         if self.evidence:
             ev_lines = []
             for e in self.evidence:
+                ords = "+".join(str(ordinal[i])
+                                for i in e.get("need_indices") or ()
+                                if i in ordinal)
+                if not ords:
+                    continue  # ไม่มี surviving model-task owner → ไม่เข้า context
                 kind = e.get("kind", "evidence")
-                ords = "+".join(str(i + 1)
-                                for i in e.get("need_indices") or ())
                 tgt = e.get("target") or e.get("identity") or ""
                 ev_lines.append(
                     f"- [{kind}](งานที่ {ords}) {tgt} "
@@ -300,6 +328,19 @@ def _norm_target(v) -> str:
     return re.sub(r"\s+", " ", str(v or "")).strip().lower()
 
 
+def device_spec_for_target(specs, target) -> dict | None:
+    """เลือก device_spec dict ที่ device normalize ตรง target เดียว —
+    first-match deterministic (contract เดียวกับ boundary web record);
+    non-dict/malformed → ข้าม; ไม่พบ → None (producer ไม่ emit evidence)"""
+    tn = _norm_target(target)
+    if not tn:
+        return None
+    for sp in specs or ():
+        if isinstance(sp, dict) and _norm_target(sp.get("device")) == tn:
+            return sp
+    return None
+
+
 def _req_needs_map(requests: tuple, needs: tuple) -> dict[str, tuple]:
     return {r.request_id: needs_for_request(r, needs) for r in requests}
 
@@ -314,12 +355,16 @@ def _need_scope(need) -> tuple[str, ...]:
 
 
 def _need_target(need, reqs, profile) -> str | None:
+    """external target = semantic property ของ compat/relation need
+    เท่านั้น (owner ของ external-relation work) — request/profile target
+    ที่ propagate เข้า product/describe/recommend need ไม่ทำให้ task
+    นั้นกลายเป็น compatibility claim"""
+    if need.kind != "compat":
+        return None
     for r in reqs:
         if r.target_device:
             return r.target_device
-    if need.kind == "compat":
-        return getattr(profile, "target_device", None)
-    return None
+    return getattr(profile, "target_device", None)
 
 
 def _cand_keys(identity, item_id, model_id, card) -> set[str]:
@@ -408,6 +453,149 @@ def _attribute(e: dict, *, req_needs, idx_of, prodish_idx,
         if k:
             idxs.update(ref_needs.get(k, ()))
     return tuple(sorted(idxs & prodish_idx))
+
+
+# request sources ที่เป็น products-for-device channel — target ที่นี่
+# คือ shopping semantic (selection คือคำตอบอยู่แล้ว) ไม่ใช่ verdict claim
+_RELATION_REQ_SOURCES = frozenset({"relation_target", "compat"})
+
+def _need_relation(reqs_n, tn: str) -> str | None:
+    """exact typed relation ของ verdict target tn — แหล่งที่ยอมรับเท่านั้น:
+    `RetrievalRequest.relation_type` (RetrievalRelation → request ตรงๆ)
+    หรือ `compat_mode` ผ่าน canonical owner (`policy_resolver
+    .compat_relation_for_mode`) — distinct set ต้อง == 1 ไม่งั้น None
+    (missing/ambiguous/explicit-conflict → fail closed, ห้ามเดา)"""
+    from . import policy_resolver as _pr
+    rels: set[str] = set()
+    for r in reqs_n:
+        if _norm_target(getattr(r, "target_device", None)) != tn:
+            continue
+        rt = getattr(r, "relation_type", None)
+        if rt not in (None, ""):
+            if str(rt) not in _pr.COMPAT_RELATIONS:
+                return None   # malformed explicit relation → fail closed
+            rels.add(str(rt))
+        rm = _pr.compat_relation_for_mode(
+            getattr(r, "compat_mode", "") or "")
+        if rm:
+            rels.add(rm)
+    return next(iter(rels)) if len(rels) == 1 else None
+
+
+def _verdict_target_decisions(i: int, tn: str, need, reqs_n, *, by_req,
+                              pool, web_evidence, req_needs, idx_of,
+                              prodish_idx, target_of, ref_needs
+                              ) -> tuple[tuple[CompatVerdict, ...],
+                                         tuple[str, ...]]:
+    """(subject,target,relation)-scoped verdict ของทุก subject ใน compat
+    need เดียว — `resolve_compat` ครั้งเดียวต่อ subject ด้วย relation
+    เดียวที่ typed contract ระบุ (`_need_relation`); decided iff outcome
+    ∈ {compatible,incompatible}; คืน (verdicts, unresolved_names) —
+    subject ที่ decide ไม่ได้/ไม่มี card ต้องไม่หายเงียบ และ evidence
+    ของ subject หนึ่งไม่ cover อีก subject:
+
+    - declared proof: record ที่ attribute เข้า need นี้ผ่าน
+      `compat_proof_from_dict` เท่านั้น (malformed/unknown source →
+      reject fail closed; resolver filter subject/target/relation ตรง)
+    - derived: device_field_facts(target data) + extract_field_facts
+      (subject card) ผ่าน resolve_compat owner เดิม
+
+    target-only record / record ของ subject อื่น / target อื่น /
+    relation อื่น / web prose ไม่มี structured data → ไม่ใช่ coverage"""
+    from . import candidate_pool as _cpool
+    from . import policy_resolver as _pr
+
+    rel = _need_relation(reqs_n, tn)
+    refs = {_norm_ref(r) for r in (need.subject_refs or ())}
+    subjects: list[tuple[str, dict, tuple[str, ...]]] = []
+    seen_s: set[str] = set()
+    for r in reqs_n:
+        for s in by_req.get(r.request_id, ()):
+            card = s.card or {}
+            keys = _cand_keys(s.identity, card.get("item_id"),
+                              card.get("model_id"), card)
+            matched = tuple(x for x in (need.subject_refs or ())
+                            if _norm_ref(x) in keys)
+            if refs and not matched:
+                continue  # card นี้ไม่ใช่ subject ของ need นี้
+            sid = _cpool._identity_key(card)[0] if card else ""
+            if sid and sid not in seen_s:
+                seen_s.add(sid)
+                subjects.append((sid, card, matched))
+    named = {x for _, _, m in subjects for x in m}
+    # subject_ref ที่ไม่มี selected card เลย = subject ที่ resolve ไม่ได้
+    unres: list[str] = [r for r in (need.subject_refs or ())
+                        if r not in named]
+    if not rel or not subjects:
+        for sid, _card, m in subjects:
+            unres.extend(m or (sid,))
+        return (), tuple(dict.fromkeys(unres))
+
+    def _declared(rec: dict) -> None:
+        if rec.get("subject_id") and rec.get("relation") \
+                and rec.get("verdict"):
+            try:
+                declared.append(_pr.compat_proof_from_dict({
+                    "subject_id": str(rec["subject_id"]),
+                    "target": f"device:{tn}",
+                    "relation": rec["relation"],
+                    "verdict": rec["verdict"],
+                    "facts": tuple(rec.get("facts") or ()),
+                    "source": rec.get("source"),
+                    "source_version": rec.get("source_version") or ""}))
+            except (ValueError, TypeError):
+                pass   # malformed/unknown source → ไม่ใช่ proof (fail closed)
+
+    declared: list = []
+    t_facts: list = []
+    for rec in pool.supporting_evidence or ():
+        if not isinstance(rec, dict) \
+                or _norm_target(rec.get("target")) != tn:
+            continue
+        if i not in _attribute(rec, req_needs=req_needs, idx_of=idx_of,
+                               prodish_idx=prodish_idx,
+                               target_of=target_of, ref_needs=ref_needs):
+            continue
+        _declared(rec)
+        data = rec.get("data")
+        if isinstance(data, dict):
+            t_facts.extend(_pr.device_field_facts(tn, data))
+    for e in web_evidence or ():
+        if not isinstance(e, dict) \
+                or _norm_target(e.get("target")) != tn:
+            continue
+        if i not in _attribute(e, req_needs=req_needs, idx_of=idx_of,
+                               prodish_idx=prodish_idx,
+                               target_of=target_of, ref_needs=ref_needs):
+            continue
+        _declared(e)
+        data = e.get("data")
+        if isinstance(data, dict):
+            t_facts.extend(_pr.device_field_facts(tn, data))
+    verdicts: list[CompatVerdict] = []
+    for sid, card, matched in subjects:
+        card_keys = _cand_keys(sid, card.get("item_id"),
+                               card.get("model_id"), card)
+        decl_n = tuple(_pr.CompatProof(
+                sid, p.target, p.relation, p.verdict, p.facts,
+                p.source, p.source_version)
+            for p in declared
+            if _norm_ref(p.subject_id) in card_keys)
+        s_facts = _pr.extract_field_facts(card, subject_id=sid,
+                                          mentions=(tn,))
+        dec = _pr.resolve_compat(
+            subject_id=sid, target=f"device:{tn}", relation=rel,
+            subject_facts=s_facts, target_facts=tuple(t_facts),
+            declared=decl_n)
+        if dec.outcome in ("compatible", "incompatible"):
+            verdicts.append(CompatVerdict(
+                need_index=i, subject_id=sid,
+                subject_name=(card.get("name")
+                              or card.get("item_name") or sid),
+                target=tn, relation=rel, decision=dec))
+        else:
+            unres.extend(matched or (sid,))
+    return tuple(verdicts), tuple(dict.fromkeys(unres))
 
 
 def _compile_evidence(pool: CandidatePool, web_evidence: tuple, *,
@@ -626,25 +814,106 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     prodish_idx = {i for i, n in enumerate(needs)
                    if n.kind in PRODUCTISH_NEED_KINDS}
     idx_of = {id(n): i for i, n in enumerate(needs)}
+    ref_needs = _ref_needs_map(needs, requests, selection, pool,
+                               prodish_idx)
     target_of: dict[int, str | None] = {}
     products: list[dict] = []
     emitted: dict[str, dict] = {}   # identity → card ที่อยู่ใน payload
     unanswered: list[UnansweredNeed] = list(task.deferred)
     trace: list[str] = []
+    # pass 1 — target ownership: compat need เท่านั้นที่มี external
+    # target; verdict target (slot/profile source — ไม่ใช่
+    # products-for-device channel) ต้องมี subject-target coverage ผ่าน
+    # resolve_compat; ไม่มี → need+task หาย และ request ที่ carry target
+    # นั้นของ subject-owner เดียวกันถือเป็น relation context ที่พิสูจน์
+    # ไม่ได้ (tainted — products ของมัน drop จากทุก need)
+    for i, n in enumerate(needs):
+        if n.kind in PRODUCTISH_NEED_KINDS:
+            reqs_i = _need_requests(n, requests, req_needs)
+            # evidence/context target = task target (compat เท่านั้น) หรือ
+            # request-carried target (attribution context — ไม่ใช่ claim)
+            target_of[i] = _need_target(n, reqs_i, profile) or next(
+                (r.target_device for r in reqs_i if r.target_device),
+                None)
+    uncovered: set[int] = set()
+    decided: dict[int, tuple[CompatVerdict, ...]] = {}
+    partial_refs: dict[int, tuple[str, ...]] = {}
+    tainted_reqs: set[str] = set()
+    for i, n in enumerate(needs):
+        if n.kind != "compat" or i not in prodish_idx:
+            continue
+        tn = _norm_target(target_of.get(i))
+        if not tn:
+            continue
+        reqs_n = _need_requests(n, requests, req_needs)
+        carriers = [r for r in reqs_n
+                    if _norm_target(r.target_device) == tn]
+        verdict = (not carriers) or any(
+            r.source not in _RELATION_REQ_SOURCES for r in carriers)
+        if not verdict:
+            continue  # products-for-device — selection คือคำตอบอยู่แล้ว
+        verdicts, unres = _verdict_target_decisions(
+                i, tn, n, reqs_n, by_req=by_req, pool=pool,
+                web_evidence=web_evidence, req_needs=req_needs,
+                idx_of=idx_of, prodish_idx=prodish_idx,
+                target_of=target_of, ref_needs=ref_needs)
+        for v in verdicts:
+            trace.append(f"need[{i}] verdict target={tn!r} "
+                         f"subject={v.subject_id} "
+                         f"relation={v.relation} → "
+                         f"{v.decision.outcome}")
+        if verdicts:
+            decided[i] = verdicts
+            if not unres:
+                continue  # ทุก subject decided
+            partial_refs[i] = unres
+        uncovered.add(i)
+        refs_i = {_norm_ref(x) for x in (n.subject_refs or ())}
+        # taint scope = unresolved subject refs เท่านั้น (need ไม่มี refs →
+        # {} → carrier ทุกตัว tainted เหมือนเดิม — sid ไม่ใช่ ref space)
+        scope_refs = {_norm_ref(x) for x in unres} & refs_i
+        for r in carriers:
+            if r.source in _RELATION_REQ_SOURCES:
+                continue
+            codes = {_norm_ref(x) for x in (r.model_codes or ())}
+            if codes and scope_refs and not (codes & scope_refs):
+                continue  # request นี้เป็น context ของ subject อื่น
+            tainted_reqs.add(r.request_id)
+        trace.append(f"need[{i}] verdict target={tn!r} "
+                     + (f"unresolved={list(unres)} → partial "
+                        if verdicts else "")
+                     + "no_evidence → dropped")
     for i, n in enumerate(needs):
         scope = tuple(sorted(set(n.product_types or ())
                              | set(n.subtypes or ())))
         if n.kind not in PRODUCTISH_NEED_KINDS:
             continue   # deferred จัดการแล้วบน task (classification owner เดียว)
         reqs_n = _need_requests(n, requests, req_needs)
-        target_of[i] = _need_target(n, reqs_n, profile)
+        if i in uncovered:
+            unanswered.append(UnansweredNeed(
+                i, n.kind, n.operation,
+                tuple(partial_refs.get(i) or n.subject_refs or ()),
+                scope, target_of[i], "no_evidence"))
+            continue
+        tainted = False
         cands = [s for r in reqs_n for s in by_req.get(r.request_id, ())]
+        if tainted_reqs:
+            kept = [s for s in cands if s.request_id not in tainted_reqs]
+            tainted = len(kept) < len(cands)
+            cands = kept
         cands.sort(key=lambda s: (ROLE_RANK.get(s.role, 0), s.score),
                    reverse=True)
         if not cands:
-            unanswered.append(UnansweredNeed(
-                i, n.kind, n.operation, tuple(n.subject_refs or ()),
-                scope, target_of[i], "no_selection"))
+            if i in decided:
+                # verdict ยืนอยู่บน typed evidence — products หายเพราะ
+                # taint ของ need อื่นแต่ decision ไม่ได้อาศัย card display
+                trace.append(f"need[{i}] compat verdict kept "
+                             "(products dropped)")
+            else:
+                unanswered.append(UnansweredNeed(
+                    i, n.kind, n.operation, tuple(n.subject_refs or ()),
+                    scope, target_of[i],
+                    "no_evidence" if tainted else "no_selection"))
             continue
         took = 0
         for s in cands:
@@ -670,12 +939,32 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             products.append(card)
         trace.append(f"need[{i}] {n.kind}/{n.operation} "
                      f"cand={len(cands)} took={took}")
-    ref_needs = _ref_needs_map(needs, requests, selection, pool,
-                               prodish_idx)
+    # uncovered (no_evidence) + decided (verdict → deterministic segment)
+    # ทั้งคู่ไม่เป็น model task; evidence ที่ attribute เฉพาะ needs เหล่านี้
+    # ไม่เข้า model context (proof ถูก consume โดย decision แล้ว)
+    dropped = uncovered | set(decided)
+    if dropped:
+        task = AnswerTask(
+            tasks=tuple(t for t in task.tasks
+                        if t.need_index not in dropped),
+            deferred=task.deferred, trace=task.trace)
     evidence = _compile_evidence(
         pool, web_evidence, req_needs=req_needs, idx_of=idx_of,
         prodish_idx=prodish_idx, target_of=target_of,
         ref_needs=ref_needs, trace=trace)
+    if dropped:
+        kept_ev: list[dict] = []
+        for e in evidence:
+            idxs = tuple(j for j in e.get("need_indices", ())
+                         if j not in dropped)
+            if not idxs and e.get("need_indices"):
+                trace.append(
+                    f"evidence_dropped:uncovered_need "
+                    f"kind={e.get('kind')}")
+                continue
+            e["need_indices"] = idxs
+            kept_ev.append(e)
+        evidence = kept_ev
     notes = tuple(dict(u) for u in (selection.unavailable_evidence or ()))
     payload = json.dumps(
         {"products": products, "evidence": evidence,
@@ -685,7 +974,9 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
         task=task, products=tuple(products), evidence=tuple(evidence),
         availability_notes=notes, unanswered_needs=tuple(unanswered),
         estimated_tokens=estimate_tokens(payload),
-        trace=tuple(trace) + tuple(selection.trace or ()))
+        trace=tuple(trace) + tuple(selection.trace or ()),
+        compat_verdicts=tuple(v for i in sorted(decided)
+                              for v in decided[i]))
 
 
 # ── pre-answer typed web gate ───────────────────────────────────────────────
@@ -716,7 +1007,8 @@ def _external_targets(pool: CandidatePool) -> tuple[set, set]:
         t = _norm_target(e.get("target"))
         if not t:
             continue
-        if e.get("kind") == "device_spec":
+        if e.get("kind") == "device_spec" \
+                and isinstance(e.get("data"), dict):
             spec.add(t)
         elif e.get("kind") == "web":
             web.add(t)
@@ -760,7 +1052,9 @@ def decide_web_admission(*, needs: tuple, selection: SelectionResult,
             reqs_n = _need_requests(n, requests, req_needs)
             selected_n = [s for r in reqs_n
                           for s in by_req.get(r.request_id, ())]
-            target = _need_target(n, reqs_n, profile)
+            target = _need_target(n, reqs_n, profile) or next(
+                (r.target_device for r in reqs_n if r.target_device),
+                None)
             tn = _norm_target(target)
             if tn and tn in spec_targets:
                 if first_deny is None:
@@ -814,7 +1108,17 @@ def decide_web_admission(*, needs: tuple, selection: SelectionResult,
 # render order ของ segments: claim guidance ก่อน (collection-state message
 #   จาก warranty flow — customer ต้องเห็นก่อน) → product answer → policy
 #   conclusion ท้าย (ข้อสรุป eligibility ไม่นำหน้าคำตอบสินค้า)
-_DOMAIN_ORDER = {"claim": 0, "product": 1, "policy": 2}
+_DOMAIN_ORDER = {"claim": 0, "compat": 1, "product": 2, "policy": 3}
+
+
+def _compat_segment(v: CompatVerdict) -> str:
+    """deterministic verdict segment — subject display + target +
+    outcome เท่านั้น (typed fields; ไม่มี proof dict/prose เสริม)"""
+    if v.decision.outcome == "compatible":
+        return (f"{v.subject_name} ใช้งานร่วมกับ {v.target} ได้ค่ะ")
+    if v.decision.outcome == "incompatible":
+        return f"{v.subject_name} ใช้งานร่วมกับ {v.target} ไม่ได้ค่ะ"
+    return ""   # outcome นอก whitelist → ไม่ render compat claim
 
 
 @dataclass(frozen=True)
@@ -871,6 +1175,17 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
         idxs = tuple(i for i, n in enumerate(needs) if n.kind == "claim")
         covered.update(idxs)
         results.append(DomainResult("claim", idxs, text=claim_guidance))
+    if context is not None:
+        # typed compat verdicts → deterministic segment ต่อ need (ครั้ง
+        # เดียวต่อ need — decision เป็น authoritative conclusion ไม่ใช่
+        # boolean permission สำหรับ model)
+        for v in context.compat_verdicts or ():
+            seg = _compat_segment(v)
+            if not seg:
+                continue   # outcome นอก whitelist → ไม่ cover ด้วย claim ปลอม
+            covered.add(v.need_index)
+            results.append(DomainResult(
+                "compat", (v.need_index,), text=seg))
     if product_text and context is not None:
         idxs = tuple(sorted(
             {t.need_index for t in context.task.tasks} - unans_idx))
@@ -884,7 +1199,8 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
     results.sort(key=lambda r: _DOMAIN_ORDER.get(r.domain, 9))
     if context is not None:
         unanswered = [u for u in ctx_unanswered
-                      if u.need_index not in covered]
+                      if u.need_index not in covered
+                      or (u.reason == "no_evidence" and u.subject_refs)]
         if not product_text:
             # task need มี coverage แต่ไม่มี product result (answer เท่า
             # "") — ต้อง surface เป็น unanswered ไม่ให้หายทั้ง need

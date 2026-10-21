@@ -677,6 +677,14 @@ def _filter_compat_products(
     if compat_mode in ("skip", "model_fit"):
         return products
 
+    # compat decision owner = policy_resolver เดียว — mode→relation ผ่าน
+    # canonical owner; mode ที่ไม่มี typed relation (unknown/none/ฯลฯ)
+    # → ไม่กรองเลย (safe: ไม่ over-filter จาก relation ที่เดา)
+    from . import policy_resolver as _pr
+    _relation = _pr.compat_relation_for_mode(compat_mode)
+    if _relation is None:
+        return products
+
     # resolve device connector: spec DB/web parse ก่อน → intent (LLM guess) last
     device_connector = ""
     device_min_watt: float | None = None
@@ -707,9 +715,7 @@ def _filter_compat_products(
     #   ตัวกรองนี้ map typed outcome → bucket เดิมเท่านั้น:
     #   compatible → compat · incompatible → dropped ·
     #   unknown/admin_review → ambiguous (ไม่เคยตี unknown เป็น incompatible)
-    from . import candidate_pool as _cp, policy_resolver as _pr
-
-    _relation = "connects" if compat_mode == "self_compat" else "charges"
+    from . import candidate_pool as _cp
     # H6 — provenance ต้องติดไปกับ fact: structured source เท่านั้นที่
     # prove compat/incompat ได้; intent/web-parse hint → unknown เสมอ
     _dev_facts = _pr.device_field_facts(

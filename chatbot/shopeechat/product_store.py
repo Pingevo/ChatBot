@@ -3886,20 +3886,6 @@ def list_categories(db) -> list[str]:
 
 # ── มอก. (TISI) certification search ──────────────────────────────────────────
 
-# Pattern สำหรับตรวจ "มอก." (TISI standard) ใน description
-# ต้องมีจุดตามหลัง "มอก" และไม่ใช่ "หมอก." หรือ "เสมอก."
-# lookbehind มี ส ด้วย — "เสมอกัน" เก็บเป็น [เ][ส][ม][อ][ก] (เ เป็นสระของ ส)
-# ตัวก่อน "มอก" คือ ส ไม่ใช่ เ → block ด้วย ส
-_TISI_PATTERN = re.compile(r"(?<![หสเ])มอก\.")
-
-
-def _has_tisi(text: str) -> bool:
-    """ตรวจว่าข้อความมี 'มอก.' (TISI standard) หรือไม่ (กรอง false positive เช่น หมอก/เสมอกัน)."""
-    if not text:
-        return False
-    return bool(_TISI_PATTERN.search(text))
-
-
 def _extract_match_context(text: str, pattern: "re.Pattern", window: int = 80) -> str:
     """ดึงข้อความรอบ match แรกของ pattern — context สั้นๆ ส่งให้ LLM/answer."""
     if not text:
@@ -3913,11 +3899,6 @@ def _extract_match_context(text: str, pattern: "re.Pattern", window: int = 80) -
     # ทำความสะอาด: ตัดบรรทัดว่างติดๆ
     snippet = re.sub(r"\n{3,}", "\n\n", snippet)
     return snippet
-
-
-def _extract_tisi_context(text: str, window: int = 80) -> str:
-    """ดึงข้อความรอบ 'มอก.' เพื่อสร้าง context สั้นๆ ส่งให้ LLM/answer."""
-    return _extract_match_context(text, _TISI_PATTERN, window)
 
 
 # ── cert standards search (superset ของ TISI) ────────────────────────────────
@@ -4436,7 +4417,6 @@ def _type_query_word(type_name: str) -> str:
         if tn == type_name and kws:
             return kws[0]
     return type_name
-
 
 
 def _shop_type_counts(db, shop: str | None) -> dict[str, int]:

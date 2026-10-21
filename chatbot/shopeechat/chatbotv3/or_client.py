@@ -194,6 +194,15 @@ def call_or(
     else:
         messages.append({"role": "user", "content": _safe_user})
 
+    #  global web-search boundary — `main_config.web_search_enabled`
+    # !== true → provider request ต้องไม่ใช้ `:online`/web plugin บน
+    # engine ใดก็ตาม (v3 ผ่าน call_or ทางเดียว); fail-closed เมื่ออ่าน
+    # config ไม่ได้; offline model ปกติผ่านเดิม — owner เดียว
+    # `runtime_config.sanitize_or_model` (llm `_openrouter_generate`
+    # ใช้ตัวเดียวกัน)
+    from .. import runtime_config as _rcfg
+    model = _rcfg.sanitize_or_model(model)
+
     payload = {
         "model": model,
         "messages": messages,

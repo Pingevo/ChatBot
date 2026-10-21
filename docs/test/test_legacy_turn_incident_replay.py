@@ -452,6 +452,11 @@ def _install(monkeypatch, fx: dict):
     monkeypatch.setattr(runtime_config,
                         "grouped_retrieval_selection_enabled",
                         lambda: bool(flags.get("grouped_selection", False)))
+    # Phase 10A — global web-search operator toggle: pinned per fixture like
+    # the grouped flags (default OFF; web_on fixtures set it true)
+    _web_on = bool(flags.get("web_search"))
+    monkeypatch.setattr(runtime_config, "web_search_enabled",
+                        lambda: _web_on)
 
     # ── embedding boundary — bge-m3 (HF) behind embed_query; return a
     # deterministic zero vector so vector paths run their no-similarity
@@ -528,14 +533,20 @@ def _install(monkeypatch, fx: dict):
                 cap.reply = fx["llm_reply"]
             monkeypatch.setattr(llm, name, cap)
 
-    # web search off + forbidden
-    monkeypatch.setattr(web_search, "is_configured", lambda: False)
+    # web search — OFF by default (provider call = hard fail); web_on
+    # fixtures must supply web_result for search_and_extract
+    monkeypatch.setattr(web_search, "is_configured", lambda: _web_on)
     monkeypatch.setattr(web_search, "should_use_web_search", lambda *a, **k: False)
+
+    def _fake_web(*a, **k):
+        if not _web_on or not isinstance(fx.get("web_result"), dict):
+            pytest.fail("web_search called but web_search expected off",
+                        pytrace=False)
+        return dict(fx["web_result"])
+
     for name in ("search_and_extract", "reanswer", "search_and_answer"):
         if getattr(web_search, name, None) is not None:
-            monkeypatch.setattr(web_search, name,
-                                lambda *a, **k: pytest.fail(
-                                    f"web_search.{name} called but web_search expected off"))
+            monkeypatch.setattr(web_search, name, _fake_web)
 
     # Phase 5 policy records — fixture-supplied versioned rules replace the
     # (empty) production seam for this turn only; fixtures without the key
@@ -1092,6 +1103,10 @@ def _expectations_met(fx, records, captured):
         if _ans.count(needle) != 1:
             fails.append(f"answer must contain {needle!r} exactly once "
                          f"(count={_ans.count(needle)})")
+    for needle in exp.get("answer_must_not_contain") or []:
+        if needle in _ans:
+            fails.append(f"answer must not contain {needle!r} "
+                         f"(got {_ans!r})")
     if exp.get("llm_must_not_contain"):
         blob = json.dumps(
             [{"h": c["history"], "x": c["extra_context"],

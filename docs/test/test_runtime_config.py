@@ -144,3 +144,54 @@ def test_no_v2_v3_caller():
         p = ROOT / "chatbot" / "shopeechat" / f"{mod}.py"
         if p.exists():
             assert "runtime_config" not in p.read_text()
+
+
+# ── Phase 10A — web_search_enabled global operator toggle ────────────────────
+# strict bool owner: missing/invalid/DB-error → OFF; NO env fallback (ไม่เหมือน
+# grouped flags ที่มี env เดิม) — เปิดได้เฉพาะผ่าน persisted main_config
+
+def test_web_search_missing_is_off(monkeypatch):
+    _patch_db(monkeypatch, doc={"config_key": "main_config"})
+    assert rc.web_search_enabled() is False
+
+
+def test_web_search_invalid_values_are_off(monkeypatch):
+    for bad in ("true", 1, "1", "yes", None, {"enabled": True}):
+        _patch_db(monkeypatch, doc={
+            "config_key": "main_config", "web_search_enabled": bad})
+        assert rc.web_search_enabled() is False, bad
+        rc._cache = None
+        rc._ts = 0.0
+
+
+def test_web_search_db_true_on(monkeypatch):
+    _patch_db(monkeypatch, doc={
+        "config_key": "main_config", "web_search_enabled": True})
+    assert rc.web_search_enabled() is True
+
+
+def test_web_search_no_env_fallback(monkeypatch):
+    """env ใดๆ ห้ามเปิด toggle เอง — เขียนได้เฉพาะ persisted main_config"""
+    _patch_db(monkeypatch, doc={"config_key": "main_config"})
+    for env in ("WEB_SEARCH_ENABLED", "USE_WEB_SEARCH",
+                "OPENROUTER_WEB_SEARCH"):
+        monkeypatch.setenv(env, "1")
+        assert rc.web_search_enabled() is False, env
+
+
+def test_web_search_db_error_is_off(monkeypatch):
+    _patch_db(monkeypatch, exc=RuntimeError("mongo down"))
+    assert rc.web_search_enabled() is False
+
+
+def test_is_configured_requires_toggle_and_key(monkeypatch):
+    """shared boundary: OFF+key → False · ON+no key → False · ON+key → True —
+    provider calls = 0 เมื่อ OFF แม้ OpenRouter key ยังตั้งอยู่"""
+    from shopeechat import web_search as ws
+    monkeypatch.setattr(ws, "_get_openrouter_key", lambda: "fx-key")
+    monkeypatch.setattr(rc, "web_search_enabled", lambda: False)
+    assert ws.is_configured() is False
+    monkeypatch.setattr(rc, "web_search_enabled", lambda: True)
+    assert ws.is_configured() is True
+    monkeypatch.setattr(ws, "_get_openrouter_key", lambda: "")
+    assert ws.is_configured() is False

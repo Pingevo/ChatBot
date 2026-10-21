@@ -99,8 +99,10 @@ def _log_ai_usage(entry: dict) -> None:
 
 
 def is_configured() -> bool:
-    """ตรวจว่าตั้งค่า OpenRouter แล้วหรือไม่."""
-    return bool(_get_openrouter_key())
+    """ตรวจว่า web search ใช้งานได้ — global operator toggle AND OpenRouter key.
+    toggle OFF → False เสมอ (provider calls = 0 แม้ key ตั้งอยู่)"""
+    from . import runtime_config as _rc  # lazy — กัน import loop
+    return _rc.web_search_enabled() and bool(_get_openrouter_key())
 
 
 # connector vocab ที่ downstream resolver ใช้ (ตรงกับ _resolve_device_spec)

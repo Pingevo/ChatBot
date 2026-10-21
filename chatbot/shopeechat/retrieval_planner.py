@@ -30,6 +30,7 @@ class RetrievalRequest:
     hard_filters: tuple[tuple[str, str], ...] = ()
     soft_hints: tuple[tuple[str, str], ...] = ()
     relation_id: str | None = None
+    relation_type: str | None = None   # RetrievalRelation.relation_type verbatim
     confidence: float = 1.0
     variant_terms: tuple[str, ...] = ()   # requested option(s) — canonical adapter
     # typed value constraints (งบ/ช่วงราคา) — owner: RetrievalProfile ที่
@@ -116,6 +117,7 @@ def _relation_request(req_id: str, rel_id: str, rel: RetrievalRelation,
         hard_filters=tuple(hard),
         soft_hints=tuple(soft),
         relation_id=rel_id,
+        relation_type=rel.relation_type,
         confidence=rel.confidence,
         variant_terms=(target_slot.variant_terms if target_slot else ()),
         value_constraints=tuple(value_constraints),

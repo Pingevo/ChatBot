@@ -709,6 +709,14 @@ def _typed_answer_boundary(sel: dict, *, needs: tuple, profile,
                 web_used = {"kind": "web", "target": adm.target,
                             "need_index": adm.need_index,
                             "payload": payload}
+                # structured spec ของ target เดียวกันเก็บเป็น typed data —
+                # coverage อ่านผ่าน device_field_facts เท่านั้น (closed
+                # `payload` ยังเป็น text เดียวกันสำหรับ model context) —
+                # selector เดียวกับ grouped producer (device_spec_for_target)
+                _sp = _acx.device_spec_for_target(_specs, adm.target)
+                if _sp is not None:
+                    web_used["data"] = {**_sp, "source": _sp.get("source")
+                                        or "web-structured"}
         except Exception:
             web_used = None  # web พัง → ตอบด้วย local evidence เท่านั้น
     # final AnswerContext compile ครั้งเดียวต่อ turn (รวม web evidence)
@@ -719,7 +727,10 @@ def _typed_answer_boundary(sel: dict, *, needs: tuple, profile,
             web_evidence=(web_used,) if web_used else ())
     except Exception:
         return _done(adm=adm, web=web_used)
-    if ctx.is_empty:
+    # model ถูกเรียกเฉพาะเมื่อมี task ที่ต้องตอบจริง — ctx ว่าง หรือ turn
+    # มีแต่ typed deterministic results (compat verdict / deferred) →
+    # composition อย่างเดียว, 0 answer-model call
+    if ctx.is_empty or not ctx.task.tasks:
         return _done(ctx=ctx, adm=adm, web=web_used)
     answer, usage = llm.answer_typed(
         context=ctx, shop_hint=shop,
@@ -4338,7 +4349,8 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
             _ws_guard_check.is_configured()
             and not _is_conv_active
         )
-        if not _vision_context and not _guard_ws_available:
+        if not _vision_context and not _guard_ws_available \
+                and not _sel_flag:
             try:
                 _guard_ref_models = ref_models
             except NameError:
@@ -4879,6 +4891,12 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                    if c.get("item_id")]))
             try:
                 from . import retrieval_runtime as _rr
+                # typed data ต้องเป็น dict เดียวที่ normalize ตรง target
+                # เท่านั้น (consumer อ่านเฉพาะ dict — list shape ถูกเมิน
+                # เงียบๆ แล้วปิด web admission ผิด); ไม่ match → ไม่ emit
+                from . import answer_context as _acx
+                _device_spec_data = _acx.device_spec_for_target(
+                    _device_specs, _retrieval_profile.target_device)
                 _grouped_sel = _rr.run_grouped_selection(
                     _retrieval_profile, message=req.message, shop=req.shop,
                     platform=req.platform or "shopee",
@@ -4890,8 +4908,11 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                                 if _vision_context and _vision_refs else [])
                                 + ([{"kind": "device_spec",
                                      "target": (_retrieval_profile.target_device
-                                                or ""), "data": _device_specs}]
-                                   if _device_specs else []),
+                                                or ""),
+                                     "data": {**_device_spec_data,
+                                              "source": _device_spec_data.get(
+                                                  "source") or "web-structured"}}]
+                                   if _device_spec_data else []),
                     snap=_snap)
             except Exception as _e:
                 print(f"[SELECTION] grouped-retrieval error: {_e}",

@@ -372,80 +372,6 @@ def get_active_product(conversation_id: str, snap=_gen.SNAP_UNSET) -> dict | Non
     return None
 
 
-def get_suggestion_latest(conversation_id: str, snap=_gen.SNAP_UNSET) -> dict | None:
-    """ดึง suggestion product ล่าสุด (สินค้าที่ bot แนะนำ)."""
-    doc = load_timeline(conversation_id)
-    if not doc:
-        return None
-    suggestions = [p for p in doc.get("products", []) if not p.get("is_anchor")]
-    if not suggestions:
-        return None
-    suggestions.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
-    s = suggestions[0]
-    return _materialize_card(s, snap=snap)
-
-
-def get_latest_suggestion_batch(conversation_id: str, snap=_gen.SNAP_UNSET) -> list[dict]:
-    """ดึง suggestion batch ล่าสุด — สินค้าที่ bot แนะนำใน response เดิียวกัน.
-
-    bot บันทึก suggestions ทีละชุดต่อเทิร์น (_record_suggestion_products append ต่อท้าย)
-    → batch ล่าสุด = trailing run ของ non-anchor entries ท้าย products list
-    ถ้า entry ท้ายเป็น anchor (ลูกค้าส่ง item card มาหลังสุด) → คืน []
-
-    Returns:
-        list ของ cards (ใหม่→เก่า) หรือ [] ถ้าไม่มี suggestion ท้ายลิสต์
-        (caller ตัดสินใจเองว่าต้องการกี่ตัว — batch ตัวเดียวอาจ pair กับ anchor ล่าสุด)
-    """
-    doc = load_timeline(conversation_id)
-    if not doc:
-        return []
-    batch: list[dict] = []
-    for p in reversed(doc.get("products") or []):
-        if p.get("is_anchor"):
-            break
-        batch.append(p)
-    return [_materialize_card(p, snap=snap) for p in batch]
-
-
-def get_anchor_and_suggestions(conversation_id: str, limit: int = 5,
-                               snap=_gen.SNAP_UNSET) -> list[dict]:
-    """ดึง anchor ล่าสุด + suggestion ล่าสุด รวมกัน (dedup) สำหรับ follow-up ขอลิงค์.
-
-    Returns:
-        list ของ product cards — anchor ก่อน แล้วตามด้วย suggestions (dedup by item_id)
-    """
-    doc = load_timeline(conversation_id)
-    if not doc:
-        return []
-    products = doc.get("products", []) or []
-    if not products:
-        return []
-    # แยก anchor / suggestion
-    anchors = [p for p in products if p.get("is_anchor")]
-    suggestions = [p for p in products if not p.get("is_anchor")]
-    anchors.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
-    suggestions.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
-    out = []
-    seen_ids = set()
-    # anchor ก่อน (ล่าสุดก่อน)
-    for p in anchors:
-        iid = _to_serializable(p.get("item_id"))
-        if iid in seen_ids:
-            continue
-        seen_ids.add(iid)
-        out.append(_materialize_card(p, snap=snap))
-    # แล้ว suggestions (ล่าสุดก่อน)
-    for p in suggestions:
-        iid = _to_serializable(p.get("item_id"))
-        if iid in seen_ids:
-            continue
-        seen_ids.add(iid)
-        out.append(_materialize_card(p, snap=snap))
-        if len(out) >= limit:
-            break
-    return out[:limit]
-
-
 # ─── Order anchor (Phase 3C) ──────────────────────────────
 # เก็บ order_sn ที่ลูกค้าส่งเข้ามา (order card / พิมพ์เลข) เป็น anchor
 # ใช้สำหรับ follow-up: ลูกค้าถาม "order เดิม" / "คำสั่งซื้อเดิม" → ใช้ active order
@@ -574,25 +500,6 @@ def get_active_order_sn(conversation_id: str) -> str | None:
     if not doc:
         return None
     return doc.get("active_order_sn")
-
-
-def get_order_anchors(conversation_id: str) -> list[dict]:
-    """ดึง order anchors ทั้งหมดของแชท.
-
-    Returns:
-        list ของ {order_sn, mentioned_at, summary} เรียงจากใหม่→เก่า
-    """
-    doc = load_timeline(conversation_id)
-    if not doc:
-        return []
-    anchors = doc.get("order_anchors", [])
-    # sort ใหม่→เก่า
-    anchors_sorted = sorted(
-        anchors,
-        key=lambda a: a.get("mentioned_at", datetime.min) if isinstance(a.get("mentioned_at"), datetime) else datetime.min,
-        reverse=True,
-    )
-    return anchors_sorted
 
 
 def resolve_active_order_sn(

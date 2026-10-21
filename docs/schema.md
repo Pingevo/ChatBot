@@ -817,6 +817,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `bot_buffer_window_media_ms` | number | |
 | `bot_buffer_max_media_messages` | number | |
 | `bot_concurrency_limit` | number | 1-500 |
+| `web_search_enabled` | boolean | global web-search toggle (fail-closed) — `true` เท่านั้นที่อนุญาต `web_search.search_and_extract`/`reanswer` และ provider `:online`/web-plugin บนทุก engine (legacy, v2, typed boundary, chatbotv3 `call_or`); missing/invalid/DB error → OFF |
 | `workflow_enabled` | boolean | |
 | `workflow_priority` | string | workflow_first/trigger_first/both |
 | `workflow_run_timeout_ms` | number | 60000-86400000 |
@@ -1467,7 +1468,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 **Access:**
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
-| Read | load_timeline, get_active_product, get_suggestion_latest, get_subject_set, materialize_subject_cards, get_active_order_sn, get_order_anchors, load_claim_state | Python `/chat` (app.py, chat_v2, warranty_flow, order_flow) |
+| Read | load_timeline, get_active_product, get_anchor_history, get_previous_anchor, get_subject_set, materialize_subject_cards, get_active_order_sn, resolve_active_order_sn, load_claim_state | Python `/chat` (app.py, chat_v2, warranty_flow, order_flow) |
 | Write/Update | save_timeline, add_product, add_order_anchor, record_subject_set (fenced rev CAS — `subject_set.rev` +1/commit, minimal absent-doc insert + E11000 reconcile), transition_claim_state (fenced episode+stage CAS — new-episode whole-state only, insert+E11000 reconcile), merge_claim_fields (fenced episode+stage dotted partial update — same-episode field merge AND terminal transition) | Python `/chat` |
 
 **หน้าที่เข้าถึง:** ไม่มี UI ตรง — Python bot ใช้ภายใน

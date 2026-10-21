@@ -51,6 +51,7 @@ _TOP_LEVEL_KEYS = {
     "fixed_in",            # metadata: change that turned an incident positive
     "policy_records",      # Phase 5: supplied versioned policy rules (dicts)
     "llm_reply",           # Phase 5-R3: canned LLM reply text (mixed composition)
+    "web_result",          # Phase 10A: canned search_and_extract result (web_on fixtures)
 }
 _EXPECTED_KEYS = {
     "action", "handoff_reason", "web_search",
@@ -60,6 +61,7 @@ _EXPECTED_KEYS = {
     "resp_max_products", "claim_state_exists", "final_claim_state",
     "link_policy", "policy_decision", "resp_source",
     "answer_contains", "answer_contains_once", "llm_must_not_contain",
+    "answer_must_not_contain",
 }
 _PROFILE_KEYS = {
     "product_types", "product_types_any", "target_device",

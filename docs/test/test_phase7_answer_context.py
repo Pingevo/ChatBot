@@ -45,13 +45,14 @@ TurnNeed = td.TurnNeed
 
 def _req(rid="req-0", slot="slot-a", source="slot", types=("earphone",),
          subs=(), codes=(), target=None, soft=(), hard=(), rel=None,
-         variants=(), vc=()):
+         rel_type=None, cm="none", variants=(), vc=()):
     return RetrievalRequest(
         request_id=rid, slot_id=slot, source=source,
         product_types=frozenset(types), subtypes=frozenset(subs),
         model_codes=tuple(codes), target_device=target,
-        availability_mode="sellable_first", compat_mode="none",
+        availability_mode="sellable_first", compat_mode=cm,
         hard_filters=tuple(hard), soft_hints=tuple(soft), relation_id=rel,
+        relation_type=rel_type,
         variant_terms=tuple(variants), value_constraints=tuple(vc))
 
 
@@ -354,7 +355,8 @@ def test_empty_products_with_evidence_one_typed_call(monkeypatch):
 def _ext_need(op="compat", kind="compat", refs=("AC65B",), target=True):
     n = TurnNeed(kind=kind, operation=op, subject_refs=tuple(refs))
     reqs = (_req(codes=("AC65B",),
-                 target="galaxy z99 fakephone" if target else None),)
+                 target="galaxy z99 fakephone" if target else None,
+                 cm="connector_required"),)
     pool = _pool((_pooled("i:1", "1", codes=("AC65B",)),))
     return n, reqs, pool
 
@@ -467,8 +469,12 @@ def test_web_runs_before_only_answer_call(monkeypatch):
     monkeypatch.setattr(llm, "answer_typed",
                         lambda **k: (order.append("answer"), ("ok", {}))[1])
     n, reqs, pool = _ext_need()
-    gs = {"selection": _selection(), "pool": pool, "requests": reqs,
-          "summary": {}}
+    # subject card ที่ web-structured spec พิสูจน์ verdict ได้จริง
+    # (connector usb-c ทั้งสองฝั่ง → resolve_compat → compatible)
+    card = _sel_card("i:1", "slot", "req-0", "AC65B C to C cable",
+                     model_codes=["AC65B"])
+    gs = {"selection": _selection((card, "req-0")), "pool": pool,
+          "requests": reqs, "summary": {}}
 
     def _web(**kw):
         order.append("web")
@@ -479,8 +485,12 @@ def test_web_runs_before_only_answer_call(monkeypatch):
     out = _app._typed_answer_boundary(
         gs, needs=(n,), profile=_profile(), web_configured=True,
         web_search_fn=lambda **kw: _web(**kw))
-    assert order == ["web", "answer"], order
-    assert out.answer_calls == 1 and out.web_used
+    # connector match → exact-relation verdict → deterministic compat
+    # segment (answer model ไม่ถูกเรียก — compat-only authoritative)
+    assert order == ["web"], order
+    assert out.answer_calls == 0 and out.web_used
+    res = [r for r in out.results if r.domain == "compat"]
+    assert res and "ใช้งานร่วมกับ" in res[0].text
 
 
 def test_web_no_new_evidence_still_one_answer_call(monkeypatch):
@@ -593,3 +603,129 @@ def test_estimated_tokens_counts_payload():
                     product_types=frozenset({"earphone"}))
     ctx = _compile((need,), sel, _pool(), (_req(),), _profile())
     assert ctx.estimated_tokens > 100, "cards must contribute to estimate"
+
+
+# ── audit H3 — visible task ordinals vs serialized need_indices ─────────────
+
+def _dropped_compat_need(refs, target, types, rid, card_name):
+    """uncovered compat need: slot-carried target + card + ไม่มี proof →
+    verdict required, dec=None → uncovered → task dropped"""
+    need = TurnNeed(kind="compat", operation="compat",
+                    subject_refs=tuple(refs),
+                    product_types=frozenset(types))
+    req = _req(rid=rid, types=tuple(types), codes=tuple(refs),
+               target=target, cm="bluetooth_general")
+    card = _sel_card(f"i:{rid[-1]}", "subject", rid, card_name,
+                     model_codes=list(refs))
+    return need, req, card
+
+
+def test_dropped_need_shifts_serialized_ordinals():
+    """need0 dropped → surviving need1 renders งานที่ 1 และ serialized
+    need_indices ต้อง map เป็น ordinal เดียวกัน (ไม่ใช่ index เดิม+1=2)"""
+    n0, req0, c0 = _dropped_compat_need(
+        ("W01",), "strava", ("smartwatch",), "req-0", "W01 watch")
+    n1 = TurnNeed(kind="product", operation="recommend",
+                  product_types=frozenset({"earphone"}))
+    sc = _sel_card("i:9", "subject", "req-1", "Earphone X")
+    sel = _selection((c0, "req-0"), (sc, "req-1"))
+    req1 = _req(rid="req-1", types=("earphone",))
+    ctx = _compile((n0, n1), sel, _pool((_pooled("i:9", "9",
+                                                request_ids=("req-1",)),)),
+                   (req0, req1), _profile())
+    assert ctx.task.tasks and all(
+        t.need_index == 1 for t in ctx.task.tasks), (
+        "surviving task ต้องเก็บ original need_index=1 (ไม่ renumber)")
+    assert "งานที่ 1" in ctx.task.render() \
+        and "งานที่ 2" not in ctx.task.render()
+    body = ctx.context_text()
+    assert "งานที่ 2" not in body, (
+        "serialized need_indices ต้อง map เป็น visible ordinal — "
+        "index เดิม+1=2 ชี้ผิดงาน")
+    assert '"need_indices": [\n      1' in body
+
+
+def test_multiple_drops_before_survivor_maps_to_one():
+    """needs 0,1 dropped → need2 survive = งานที่ 1 เสมอ"""
+    n0, req0, c0 = _dropped_compat_need(
+        ("W01",), "strava", ("smartwatch",), "req-0", "W01 watch")
+    n0b, req0b, c0b = _dropped_compat_need(
+        ("AC9",), "gps watch", ("tv",), "req-2", "AC9 box")
+    n2 = TurnNeed(kind="product", operation="recommend",
+                  product_types=frozenset({"earphone"}))
+    sc = _sel_card("i:9", "subject", "req-1", "Earphone X")
+    sel = _selection((c0, "req-0"), (c0b, "req-2"), (sc, "req-1"))
+    req1 = _req(rid="req-1", types=("earphone",))
+    ctx = _compile((n0, n0b, n2), sel,
+                   _pool((_pooled("i:9", "9", request_ids=("req-1",)),)),
+                   (req0, req0b, req1), _profile())
+    body = ctx.context_text()
+    assert "งานที่ 2" not in body and "งานที่ 3" not in body
+    assert '"need_indices": [\n      1' in body
+
+
+def test_two_surviving_needs_keep_ordinals():
+    """needs 0,2 survive / 1 dropped → ordinals 1,2 (ไม่ใช่ 1,3)"""
+    n0 = TurnNeed(kind="product", operation="recommend",
+                  product_types=frozenset({"earphone"}))
+    n1, req1, c1 = _dropped_compat_need(
+        ("W01",), "strava", ("smartwatch",), "req-1", "W01 watch")
+    n2 = TurnNeed(kind="product", operation="describe",
+                  product_types=frozenset({"cable"}))
+    sc0 = _sel_card("i:9", "subject", "req-0", "Earphone X")
+    sc2 = _sel_card("i:8", "subject", "req-2", "Cable Y")
+    sel = _selection((sc0, "req-0"), (c1, "req-1"), (sc2, "req-2"))
+    req0 = _req(rid="req-0", types=("earphone",))
+    req2 = _req(rid="req-2", types=("cable",))
+    ctx = _compile((n0, n1, n2), sel,
+                   _pool((_pooled("i:9", "9", request_ids=("req-0",)),
+                         _pooled("i:8", "8", request_ids=("req-2",)))),
+                   (req0, req1, req2), _profile())
+    rendered = ctx.task.render()
+    assert rendered.count("งานที่") == 2
+    body = ctx.context_text()
+    assert "งานที่ 3" not in body
+    assert '"need_indices": [\n      1' in body
+    assert '"need_indices": [\n      2' in body
+
+
+def test_product_with_only_dropped_owner_excluded():
+    """decided compat need → task dropped → card ที่มี owner เฉพาะ need
+    นั้นต้องไม่เข้า model context (verdict deterministic อยู่แล้ว)"""
+    need = TurnNeed(kind="compat", operation="compat",
+                    subject_refs=("AC65B",),
+                    product_types=frozenset({"cable"}))
+    req = _req(types=("cable",), codes=("AC65B",), target="iphone 15",
+               cm="connector_required")
+    card = _sel_card("i:1", "subject", "req-0", "สายชาร์จ C to C",
+                     model_codes=["AC65B"], connector="usb-c")
+    pool = _pool(supporting=(
+        {"kind": "device_spec", "target": "iphone 15",
+         "data": {"connector": "usb-c", "source": "spec-db"},
+         "subject_refs": ("i:1",)},))
+    ctx = _compile((need,), _selection((card, "req-0")), pool,
+                   (req,), _profile())
+    assert ctx.compat_verdicts, "setup: need decided → task dropped"
+    body = ctx.context_text()
+    assert "สายชาร์จ C to C" not in body, (
+        "card ที่ own โดย decided/dropped need เท่านั้น ต้องไม่เข้า "
+        "model context — verdict segment แยก deterministic อยู่แล้ว")
+
+
+def test_no_drop_baseline_ordinals_unchanged():
+    """baseline: ไม่มี drop → indices 0,1 → ordinals 1,2 เหมือนเดิม"""
+    n0 = TurnNeed(kind="product", operation="recommend",
+                  product_types=frozenset({"earphone"}))
+    n1 = TurnNeed(kind="product", operation="describe",
+                  product_types=frozenset({"cable"}))
+    sc0 = _sel_card("i:9", "subject", "req-0", "Earphone X")
+    sc1 = _sel_card("i:8", "subject", "req-1", "Cable Y")
+    ctx = _compile((n0, n1),
+                   _selection((sc0, "req-0"), (sc1, "req-1")),
+                   _pool((_pooled("i:9", "9", request_ids=("req-0",)),
+                         _pooled("i:8", "8", request_ids=("req-1",)))),
+                   (_req(rid="req-0", types=("earphone",)),
+                    _req(rid="req-1", types=("cable",))), _profile())
+    body = ctx.context_text()
+    assert '"need_indices": [\n      1' in body
+    assert '"need_indices": [\n      2' in body

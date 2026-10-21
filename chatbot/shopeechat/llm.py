@@ -853,10 +853,6 @@ def _save_quota_day() -> None:
 _load_quota_day()
 
 
-def _day_used(model: str) -> int:
-    return _q_day.get(_dt.date.today().isoformat(), {}).get(model, 0)
-
-
 def _acquire(model: str, est_tokens: int) -> str:
     """รอจนกว่าจะยิงได้ (RPM/TPM window) + นับ daily — คืน model ที่จะใช้จริง
     (primary RPD เต็ม → สลับ fallback model ทันที)"""
@@ -939,8 +935,12 @@ def _openrouter_generate(model: str, contents, config: dict):
     import urllib.request as _ureq
     from types import SimpleNamespace as _NS
     from . import web_search as _ws
+    from . import runtime_config as _rc
 
     or_model = model if "/" in model else f"google/{model}"
+    # global web-search toggle — owner เดียวกับ or_client.call_or:
+    # web_search_enabled() is True เท่านั้นที่คง `:online`
+    or_model = _rc.sanitize_or_model(or_model)
     body: dict = {
         "model": or_model,
         "messages": _or_messages(contents, config),

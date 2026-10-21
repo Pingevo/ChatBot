@@ -547,13 +547,43 @@ class CompatDecision:
     reason_codes: tuple[str, ...]
 
 
+COMPAT_RELATIONS = frozenset({"charges", "connects", "fits", "works_with"})
+# compat_mode → relation เดียว (typed enum translation — ไม่ใช่ keyword
+# match; owner เดียวสำหรับทุก consumer — ห้าม broad else→charges)
+_MODE_RELATION = {
+    "connector_required": "charges",
+    "power_required": "charges",
+    "charging": "charges",
+    "model_fit": "fits",
+    "self_compat": "connects",
+    "bluetooth_general": "works_with",
+}
+
+
+def compat_relation_for_mode(mode: str | None) -> str | None:
+    """canonical compat_mode → relation — unknown/none/skip/""/malformed
+    → None (fail closed, ไม่เดา/ไม่ fallback เป็น charges)"""
+    return _MODE_RELATION.get(mode if isinstance(mode, str) else "")
+# known contract sources ของ declared proof — customer ผ่าน shape แต่
+# resolver downgrade เป็น admin_review เสมอ (unverified); นอก set = unknown
+# → reject (fail closed, ไม่ coerce เป็น trusted)
+COMPAT_PROOF_SOURCES = frozenset(
+    {"spec-db", "web-structured", "customer"})
+
+
 def compat_proof_from_dict(d: dict) -> CompatProof:
+    """validated CompatProof builder — owner เดียวของ dict→proof;
+    malformed/unknown-source → ValueError (caller fail closed)."""
     missing = [k for k in ("subject_id", "target", "relation",
                            "verdict", "source") if not d.get(k)]
     if missing:
         raise ValueError(f"compat proof missing {missing}")
+    if d["relation"] not in COMPAT_RELATIONS:
+        raise ValueError(f"compat relation {d['relation']!r} invalid")
     if d["verdict"] not in ("compatible", "incompatible"):
         raise ValueError(f"compat verdict {d['verdict']!r} invalid")
+    if d["source"] not in COMPAT_PROOF_SOURCES:
+        raise ValueError(f"compat proof source {d['source']!r} unknown")
     return CompatProof(
         subject_id=str(d["subject_id"]), target=str(d["target"]),
         relation=str(d["relation"]), verdict=d["verdict"],

@@ -211,7 +211,9 @@ def test_app_callsite_flag_gated_lazy():
     # เจ้าของเดียว (KB + main callsite คนละจุด — mutually exclusive)
     n_tb = src.count("= _typed_answer_boundary(")
     assert n_tb == 2, f"expected exactly 2 typed boundary callsites, got {n_tb}"
-    assert "_grouped_sel" in window
+    # _grouped_sel init อยู่ใน chat() var block หลัง branch split (Phase 4A
+    # ย้าย execution ลง branch bodies — ห่าง flag_fn หลักพันบรรทัด)
+    assert "_grouped_sel" in src
 
 
 def test_no_v2_v3_caller():

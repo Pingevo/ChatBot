@@ -99,8 +99,8 @@ export async function PUT(req: NextRequest) {
       return error("llm_context_limit must be between 10 and 50", 422);
     }
   }
-  // ⚡ Task 5B3-D — grouped retrieval flags ต้องเป็น boolean เท่านั้น
-  for (const key of ["grouped_retrieval_shadow_enabled", "grouped_retrieval_selection_enabled"]) {
+  // ⚡ Task 5B3-D — grouped retrieval flags + Phase 10A web-search gate ต้องเป็น boolean เท่านั้น
+  for (const key of ["grouped_retrieval_shadow_enabled", "grouped_retrieval_selection_enabled", "web_search_enabled"]) {
     if (key in body && typeof body[key] !== "boolean") {
       return error(`${key} must be a boolean`, 422);
     }

@@ -91,6 +91,11 @@ export interface SystemConfigDoc extends Document {
   grouped_retrieval_shadow_enabled: boolean;    // observe-only pipeline (log เทียบ)
   grouped_retrieval_selection_enabled: boolean; // ⚠️ มีผลกับคำตอบจริงเมื่อเปิด
 
+  // ⚡ Phase 10A — global web-search operator gate (bot อ่านจาก DB ≤5s)
+  //   strict bool: เปิดได้เฉพาะ persisted true · missing/invalid → OFF
+  //   ไม่มี env fallback — OFF = zero external web/provider calls ทุก path
+  web_search_enabled: boolean;
+
   updated_by: string;
   updated_at: Date;
 }
@@ -113,6 +118,7 @@ const FAIL_CLOSED_SWITCHES = {
   mock_mode_enabled: false,
   grouped_retrieval_shadow_enabled: false,
   grouped_retrieval_selection_enabled: false,
+  web_search_enabled: false,
 } as const;
 
 // ค่า default สำหรับสวิตช์ปลอดภัย (อ่านจาก env ตอน boot)
@@ -216,6 +222,10 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
     grouped_retrieval_shadow_enabled: dbConfig.grouped_retrieval_shadow_enabled ?? safeDefaults.grouped_retrieval_shadow_enabled ?? false,
     grouped_retrieval_selection_enabled: dbConfig.grouped_retrieval_selection_enabled ?? safeDefaults.grouped_retrieval_selection_enabled ?? false,
 
+    // ⚡ Phase 10A — web-search operator gate: strict bool, no env fallback
+    //   (persisted true เท่านั้นที่เปิด — invalid/missing → OFF)
+    web_search_enabled: dbConfig.web_search_enabled === true,
+
     updated_by: dbConfig.updated_by || 'system',
     updated_at: dbConfig.updated_at || new Date(),
   };
@@ -276,6 +286,8 @@ export async function getSystemConfig(forceRefresh = false): Promise<SystemConfi
         // ⚡ Task 5B3-D — grouped retrieval (default ปิด)
         grouped_retrieval_shadow_enabled: safeDefaults.grouped_retrieval_shadow_enabled ?? false,
         grouped_retrieval_selection_enabled: safeDefaults.grouped_retrieval_selection_enabled ?? false,
+        // ⚡ Phase 10A — web-search operator gate (default ปิด, no env fallback)
+        web_search_enabled: false,
         updated_by: 'initial_setup',
         updated_at: new Date(),
       };
@@ -334,6 +346,8 @@ export async function updateSystemConfig(
     // ⚡ Task 5B3-D — grouped retrieval (dev-only)
     'grouped_retrieval_shadow_enabled',
     'grouped_retrieval_selection_enabled',
+    // ⚡ Phase 10A — web-search operator gate (dev-only)
+    'web_search_enabled',
   ];
 
   const sanitized: Record<string, unknown> = { updated_by: updatedBy, updated_at: new Date() };
