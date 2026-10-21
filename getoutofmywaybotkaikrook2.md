@@ -20,6 +20,84 @@
 
 ## กำลังทำ (active)
 
+### ✅ PHASE 8 — Typed Answer Composition + Single Finalizer (2026-10-22) · PART 0-6 DONE · uncommitted · รอ independent review
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `931d41f` (`docs: record phase 7 answer context closeout`; Phase 7 closeout `c00d82e` อยู่ก่อนหน้า) · tree clean · staging empty · grouped flags OFF (`runtime_config._flag` → DB→env, default false; tests monkeypatch seam) · pytest venv `.venv`
+- **baseline focused counts**: phase7+boundary_review+fail_closed **85p/1.5s** · phase5+6+2c3+4+4b **356p/1.6s** (1 skip 1 xfail) · replay+phase6 **147p** (19 skip 3 xfail) · validator **72 rows integrity pass** (`exec:grouped_selection_on 0` — flag-ON มีเฉพาะ unit/harness tests)
+- **สั่งทำ**: typed composition owner เดียว + production finalizer เดียว ที่ orchestration boundary เดิม (flag-ON path เท่านั้น — flag OFF ไม่เปลี่ยน) · ห้าม commit/push/PR/deploy/Mongo/provider/.env/8010 · verdict เฉพาะเมื่อ focused gates ผ่านครบ
+
+#### PART 0 — audit (read-only, proven จาก source)
+
+**owner census ปัจจุบัน (composition/finalization sites กระจาย):**
+1. `_typed_answer_boundary` (app.py:622-723) — typed product-only: `task.deferred → EMPTY_CONTEXT_REPLY` (kill ทั้ง turn), return dict `{answer,usage,context,admission,web_used,answer_calls}`
+2. KB flag-ON site (app.py:2573-2759) — `answer=_tb["answer"]` + `_append_base_warranty(claim_guidance=_mixed_claim_carry)` + inline `ChatResponse`
+3. Main flag-ON site (app.py:4773-4984) — เหมือน KB site (local composition ซ้ำ)
+4. `_pdec` gate (app.py:1807-1904) — `_pd_mixed`→fail-closed handoff; pure→deterministic render (`_POLICY_TEXT_*` ternary — render owner ซ้ำกับ enforce:327)
+5. `_wfr` (app.py:1736-1742) — TERMINAL→`ChatResponse(**_wfr)`; CONTINUE_PRODUCT→`_mixed_claim_carry` (string prepend ผ่าน `_append_base_warranty`)
+6. `guards.enforce` `_pdec_active` (guards.py:325-336) — wholesale `resp.answer=_final` → ทำลาย composed segments ถ้า composition เกิด
+7. `early_order_flow` (app.py:~1293, pre-plan) — terminal response เมื่อ intercept; return `None` เมื่อไม่ (order_flow.py:658)
+8. `answer_general`/`brand`/`human_wait`/`clarify`/`no_reply`/`handoff` — own returns ก่อน boundary (single-domain ไม่ใช่ composition)
+
+**call-site counts (ต่อ turn):** `decide_turn` 1 (:1483) · `resolve_subjects` 1 (:1627) · `run_grouped_selection` ≤1 (KB:2547 XOR main:4752) · `answer_typed` ≤1 (:720 ใน boundary) · `llm.answer` flag-OFF 2 sites (:2597/:4792) + chat_v2:1390 (engine แยก, out of scope) · `answer_general` 2 (:1946/:1992) · `search_and_extract` ≤1 (boundary :686) · post-answer `reanswer` gated `not _sel_flag` (:2692/:4905) · `_typed_answer_boundary` 2 sites mutually-exclusive (:2575/:4775) · `guards.enforce` 1 (:732 outer boundary) · `_append_base_warranty` — shared append helper ใช้ในหลาย site (finalizer semantics เดิมกระจาย)
+
+**root causes:**
+- RC-A: composition ซ้ำ 2 site (KB/main) + claim prepend ผ่าน `_append_base_warranty` — "one composition owner" ไม่มี
+- RC-B: `task.deferred` kill ทั้ง turn — deferred needs ไม่ถูก compose; product need ที่ตอบได้หายไปด้วย
+- RC-C: `_pd_mixed` fail-closed handoff แม้ typed outcome eligible/ineligible — product answer หาย + admin เสียงาน (R5 residual เจตนา รอ Phase 8)
+- RC-D: `enforce._pdec_active` wholesale overwrite — ไม่รองรับ composed answer (จะลบ product segment)
+- RC-E: policy outcome→text render ซ้ำ 2 ที่ (app.py:1880 / enforce:327)
+
+**flag-ordering fact**: `_pdec` gate (:1807) ทำงานก่อน `_sel_flag` read (:2102) — compose decision ต้องอ่าน flag ก่อน gate → hoist read ไว้จุดเดียว (~1752) แชร์ gate+branches (กัน mid-turn flip)
+**order/troubleshoot facts**: `early_order_flow` return None เฉพาะตอนไม่ intercept — order need ที่หลุดมาถึง boundary = ไม่มี typed order result → unanswered (terminal precedence คงเดิม); troubleshoot ไม่มี typed owner output → unanswered (ไม่ invent)
+
+#### PART 1 — design (ตาม contract เป๊ะ)
+
+**typed per-need results (reuse — ไม่สร้างใหม่):** product=`AnswerContext`+`answer_typed` text · policy=`PolicyDecision` (render owner เดียวใหม่ `guards.policy_outcome_text(outcome)`) · claim=warranty-flow guidance string (CONTINUE_PRODUCT carry) · order=terminal upstream ไม่ถึง composer
+
+**contracts ใหม่ (answer_context.py — typed-answer owner เดิม, ไม่มี module ใหม่):**
+```python
+@dataclass(frozen=True)
+class DomainResult:
+    domain: str                  # "claim"|"product"|"policy"
+    need_indices: tuple[int,...] # 0-based attribution
+    text: str = ""               # rendered (claim guidance/product answer)
+    outcome: str = ""            # policy outcome — finalizer renders
+
+@dataclass(frozen=True)
+class AnswerComposition:
+    results: tuple[DomainResult,...]      # canonical order claim→product→policy
+    unanswered_needs: tuple[UnansweredNeed,...]
+    products: tuple[dict,...]             # ctx.products (need_indices stamped)
+    usage: dict; answer_calls: int
+    web_used: dict|None; admission: object|None
+    context: object|None                  # AnswerContext
+    trace: tuple[str,...]
+```
+`compose_answer(*, needs, context, product_text, policy_decision, claim_guidance, usage, answer_calls, web_used, admission)` → `AnswerComposition` — pure typed, zero I/O; deferred need ที่มี result → covered (หลุด unanswered), ไม่มี → `UnansweredNeed` คงไว้ (ห้าม invent)
+
+**boundary**: `_typed_answer_boundary(sel, *, needs, profile, shop, platform, persona_extra, model, web_search_fn, web_configured, policy_decision=None, claim_guidance="")` → return `AnswerComposition` (แทน dict — migrate stale `out[...]` tests); `task.deferred` ไม่ kill turn แล้ว — productish tasks ทำต่อ (admission→web≤1→ctx→answer_typed≤1) แล้ว `compose_answer` ครั้งเดียว; ctx ว่าง → product needs unanswered (ไม่มี segment); `web_configured` callsites ส่ง `is_configured()` จริง (เดิมไม่ส่ง → web dead — plumbing fix)
+
+**finalizer เดียว**: `app._finalize_answer(comp, *, message, limit, products, source, shop, model, elapsed, cost, intent, timing, steps, routing_decision, image_desc="") -> ChatResponse` — join segments (dedupe text เหมือนกัน) → ว่าง → `EMPTY_CONTEXT_REPLY` → `_append_base_warranty` ครั้งเดียว → `split_segments` ครั้งเดียว → stamp `routing_decision["composition"]={domains,unanswered,policy_text}` → `ChatResponse` · **ไม่มี branch แตะ prose หลัง finalizer**
+
+**`_pd_compose` gate (app.py:1807)**: `_pdec` + outcome∈{eligible,ineligible} + `_productish_need` + `_sel_flag` → `general_qtype=None` ตกลง product flow (`_pdec` ไหลถึง boundary); unknown/admin_review → handoff เดิม (terminal precedence); flag-OFF → เดิมทุกอย่าง; `elif` `_policy_carry` guard `not _pd_compose` (กัน KB read เสียงาน flag-ON)
+
+**guards**: `policy_outcome_text(outcome)` render owner เดียว (enforce+app pure-render+finalizer ใช้ร่วม) · `enforce._pdec_active` + `rd["composition"]["policy_text"]` → **composition branch**: รักษา canonical segment + `_replace_clause` ลบ foreign return-claim ทั้งสอง polarity นอก segment (`_FOREIGN_RETURN_CLAIM_RE` = `_RETURN_CLAIM_CORE` + negation wrappers — owner เดียวกันกับ vocabulary เดิม ไม่ตัดสิน polarity) · ไม่มี marker → wholesale render เดิม (flag-OFF byte-identical)
+
+**precedence (ต่ำ→สูง):** EMPTY_CONTEXT_REPLY(ไม่มี result) < product segment < policy segment(eligible/ineligible) < claim guidance (first) < order-flow terminal < policy unknown/admin_review handoff < claim TERMINAL/post-handoff lock < human_wait/no_reply/clarify/handoff (primary_action)
+
+**before→after call graph (flag-ON mixed product+policy eligible):**
+```
+before: decide_turn → _pdec → _pd_mixed → _send_handoff → ChatResponse(admin_review)   [product need หาย]
+after:  decide_turn → _pdec → _pd_compose → grouped_selection(≤1) → _typed_answer_boundary(policy_decision,claim_guidance)
+        → task→admission→web≤1→ctx→answer_typed≤1 → compose_answer(×1) → _finalize_answer(×1) → ChatResponse → guards.enforce(×1)
+```
+
+**deletions ใน diff เดียวกัน:** `task.deferred→EMPTY_CONTEXT_REPLY` early-return · flag-ON `answer=_tb["answer"]`+claim-prepend 2 sites · render ternary ซ้ำ (app:1880+enforce:327 → `policy_outcome_text`)
+
+**retained + blockers:** `_pdec` unknown/admin_review handoff (terminal precedence) · flag-OFF mixed handoff (prod path ไม่เปลี่ยน) · pure-policy render (single domain ไม่ใช่ composition) · `early_order_flow`/`_wfr` TERMINAL (owner precedence) · `_append_base_warranty` flag-OFF + ใน finalizer · `answer_general`/brand (single-domain owner)
+
+**stale tests ต้อง migrate (contract เปลี่ยนโดยตั้งใจ — ไม่ใช่ production failure):** `test_mixed_product_policy_needs_zero_answer_calls` (mixed ตอนนี้ compose → product call 1 ไม่ใช่ 0) · `test_deferred_turn_never_invokes_web_search` (policy need ไม่ block compat admission/web≤1) · `out["..."]` dict access ทั้งหมด → attribute/`_finalize_answer`
+
 ### 🔍 PHASE 5 — Field Evidence · Policy Eligibility · Compatibility Proof (2026-10-20) · PART 0 AUDIT DONE · รออนุญาต implement
 
 - **baseline**: branch `feature-phase3-aswer-quality` @ `20879cb` (HEAD `docs: record botworker shop-context closeout`) · uncommitted: plan roadmap + ไฟล์นี้ (docs เดิมเท่านั้น) · staging empty · `grouped_retrieval_selection_enabled` OFF contract คงเดิม (runtime_config `_flag` → env/admin, default false — ห้ามเปิด)
@@ -6107,3 +6185,126 @@ NeedTask/AnswerTask(closed-template render)/UnansweredNeed/AnswerContext(task/pr
 **Phase 8 blockers:** typed answer composition + single finalizer (per-need segments, หนึ่ง PolicyDecision-rendered segment, byte-stable); mixed product+policy auto-answer ยัง OFF; **system-prompt-distillation backlog** (ดู backlog entry ด้านบน — clause→owner ledger ของ SYSTEM_INSTRUCTION หลัง finalizer authoritative)
 
 **safety:** `.env`/Mongo/provider/botworker/8010/deploy ไม่แตะรอบ closeout; log entries เก่าครบทุกอัน
+
+## Phase 8 — IMPLEMENTATION + VERIFICATION (uncommitted · รอ independent review)
+
+**root causes ที่แก้:** RC-B `task.deferred` kill ทั้ง turn (deferred need ลาก product answer ตกไปด้วย) · RC-C `_pd_mixed` handoff แม้ typed outcome พร้อม · RC-D `enforce` wholesale overwrite ลบ composed segments · RC-E policy render ซ้ำ 2 ที่ · RC-A composition ซ้ำ 2 callsite
+
+**build (ตาม PART 1 design เป๊ะ):**
+- `answer_context.py`: `DomainResult` + `AnswerComposition` + `compose_answer` (pure typed, zero I/O) + `_DOMAIN_ORDER` claim→product→policy; task need ที่มี coverage แต่ answer ว่าง → `UnansweredNeed("no_answer")` (กัน need หาย)
+- `app.py`: `_typed_answer_boundary` return `AnswerComposition` (รับ `policy_decision`/`claim_guidance` typed inputs — policy evidence ไม่เข้า product prompt); `_sel_flag` hoist ก่อน `_pdec` gate; `_pd_compose` = flag+productish+eligible/ineligible → ตก product flow พร้อม `_pdec`; unknown/admin_review/flag-OFF precedence เดิม; `_render_composition` + `_finalize_answer` (production finalizer เดียว — render/dedupe/warranty-append/segments/composition marker จุดเดียว, byte-stable); callsite 2 จุด (`_append_base_warranty` gated `not _sel_flag` — claim guidance เป็น segment แล้ว)
+- `guards.py`: `policy_outcome_text` render owner เดียว (pure render + finalizer + enforce) · composition branch ใน `_pdec_active`: canonical segment คงอยู่ + `_strip_foreign_return_claims` ลบ foreign claim ทั้ง 2 polarity (กิน trailing boundary กัน particle ค้าง, restore `\n\n` separator) · ไม่มี marker → wholesale render เดิม byte-identical
+- **deletions**: `task.deferred→EMPTY_CONTEXT_REPLY` early-return · flag-ON `answer=_tb["answer"]`+claim-prepend ทั้ง 2 site · render ternary ซ้ำ
+
+**errors→fixes (ระหว่าง implement):**
+- strip bug: `_replace_clause` เหลือ particle `นะคะ` ค้าง + dedupe merge `บาทค่ะ`→`บาทนะคะ` → fix กิน trailing boundary + restore paragraph sep
+- 3 Phase-7 stale tests หลัง migrate (`out[...]` → attribute + `ctx:0`→`ctx:1` compile-once semantics + mixed ตอบ product ได้แล้ว) — contract เปลี่ยนตั้งใจ ไม่ใช่ production failure
+- `test_handoff_transport.py`/`test_guards.py` = script-style (Mongo/self-exec) — รันแบบ script 47/47 pass; ไม่ใช่ pytest suite
+- **pre-existing flake (ไม่เกี่ยว Phase 8 — verify บน HEAD แล้ว)**: `test_phase4b_refresh` `_install_script_stubs` patch `dotenv.load_dotenv` module-level → `test_load_dotenv_aliases_restored_after_import` fail เมื่อรันต่อกันใน session เดียว; standalone ผ่าน; stash-verify บน HEAD fail เหมือนกัน
+
+**PART 4 — prompt distillation (honest, bounded):**
+- baseline: `SYSTEM_INSTRUCTION` 81,625 B / ~27,209 est tokens (sha256 `9b209fe7…` pin)
+- clause→owner audit: เจอ **1 stale block พิสูจน์ได้** = "state machine ส่งคำตอบ → LLM จะไม่ถูกเรียกเลย" (243 B — false ภายใต้ composition: LLM ยังถูกเรียกเพื่อ product tasks); history-conditioned bullet ครึ่ง-alive (fallback clause ยัง fire ได้ — retain); kind-gated blocks (compare table/compat dual-tier/ranking) ตัดไม่ได้เพราะ classifier mislabel → ตัดแล้ว rule หายตอน fire จริง (not provably neutral — retain); ห้ามบอกราคา/status≠NORMAL/sold_out restatement ×3-4 = differently-worded emphasis (retain — unproven-safe to remove)
+- split: `_SYS_CORE_A` + `_SYS_LEGACY_CLAIM_NOTE` + `_SYS_CORE_B` → `SYSTEM_INSTRUCTION` byte-identical (sha256 match) · `TYPED_SYSTEM_INSTRUCTION` = core A+B (81,382 B / ~27,128 tok, −243 B) · `answer_typed` ใช้ TYPED · equivalence tests pin hash + concat + anchors + spy `_generate` config
+
+**verification (actual):**
+- Phase 8 suite **43/43** (RED 33f/5p → GREEN) — composition contracts, boundary, finalizer, enforce branch, E2E flag-ON mixed (`chat()` จริงผ่าน `_install` harness: compose×1/finalize×1/model≤1/web≤1/dedupe/marker), prompt distillation
+- migrated: `test_phase7_answer_context` 30/30 · `test_phase7_boundary_review` (ผ่านหลัง migrate dict→attribute + 3 stale-semantic rewrites + 2 compile-count pins) · fail_closed รวม **128/128**
+- focused batch: policy/guards/claim/handoff/order-adjacent/replay/validators/candidate/evidence/cert/warranty **567p/20s/4x** + phase4b 74/74 + handoff script 47/47 + fixtures integrity pass
+- py_compile ×4 files OK · `git diff --check` clean
+- **flags OFF**: `USE_GROUPED_RETRIEVAL_SELECTION`/`_SHADOW` ไม่แตะ (`_sel_flag` read 1×/turn เดิม); `.env`/Mongo/provider/botworker/8010/staging/commit/push/PR = 0
+
+**call counts (flag-ON turn):** decide_turn 1 · resolve_subjects 1 · grouped_selection ≤1 (XOR KB/main) · web admission 1 · web ≤1 · answer_typed ≤1 · **compose_answer 1 · _finalize_answer 1** · enforce 1 · merge LLM call = 0 (composer pure code)
+
+**changed files (7)**: `chatbot/shopeechat/{answer_context,app,guards,llm}.py` + `docs/test/test_phase7_{answer_context,boundary_review}.py` (migration) + `docs/test/test_phase8_composition.py` (new 868 บรรทัด) + ไฟล์นี้ — diff: +557/−120
+
+**remaining blockers (unchanged)**: `BLOCKED_BY_PHASE4_SOURCE_UNION` activation blocker ยังอยู่ — flag-ON path นี้ deploy ไม่ได้จนกว่าจะ unblock; human_wait/no_reply/clarify/handoff/order-terminal precedence คงเดิมทุกอย่าง
+
+**verdict**: PHASE_8_TYPED_COMPOSITION_READY_FOR_INDEPENDENT_REVIEW (working tree เท่านั้น — ห้าม commit จนกว่าผู้ใช้อนุญาต)
+
+## Phase 8 — STRUCTURAL CORRECTION ROUND (uncommitted · HEAD 931d41f · ห้าม stage/commit)
+
+**review findings ที่แก้ (bot-prose parsing / double render / order contract / type):**
+
+- **H1 — bot-prose regex parsing ลบทิ้งทั้งหมด**: `_FOREIGN_RETURN_CLAIM_RE` + `_strip_foreign_return_claims` + composition strip branch ใน `guards.enforce` — error คือ enforce ไป parse generated prose เพื่อหา/ลบ foreign return-claim ซึ่งขัด "no generated-answer parser" contract · แก้โดยลบ parser ทั้งชุด (ไม่มี regex/keyword/sanitizer แทน) → composition branch เหลือ structural presence guarantee เท่านั้น: `policy_text` marker + canonical segment หาย → เติมท้ายครั้งเดียว (idempotent) · **impact/residual ที่ต้องซื่อสัตย์**: model ที่เขียน policy prose ใน product segment จะไม่ถูก strip แล้ว — prevention เดิมทำได้เพียง structural: policy need ไม่ถูกส่งเข้า product task render เลย (task scoping — hallucination vector หลักถูกตัด) · residual spontaneous-prose กันไม่ได้โดยไม่ parse prose → **activation blocker เพิ่ม**: `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE` — flag ต้อง OFF ต่อ
+- **M1 — finalizer เดียวจริง**: ลบ `answer = _render_composition(_tb)` ที่ KB/main callsites — error คือ callsite render prose เองก่อน finalize (render 2 จุด) · แก้: `usage_info = _tb.usage` + `answer=""` (flag-OFF path เดิม), `_render_composition` เหลือ production caller เดียว = `_finalize_answer` · LLM2 step เดิมอ่าน `answer` → แก้เป็น observe finalized answer: `_llm2_step_idx` จำตำแหน่ง step → หลัง `_resp = _finalize_answer(...)` patch `_resp.steps[_llm2_step_idx]["output"]` = `resp.answer[:500]`/len (resp.steps = dict copies ของ _steps — patch บน resp ตรง) → zero second-render, ordering/fields เดิม · spy test pin: compose=1/render=1/finalize=1/split_segments=1 + `finalized == [resp.answer]` (ไม่มี post-finalizer prose mutation)
+- **M2 — order = upstream-terminal (trace + E2E proof)**: `early_order_flow` intercept ก่อน `decide_turn` เสมอ — return dict ครบทุก intercept (order_lookup/tracking/return-refund/handoff/not-found) → composition ไม่มีโอกาส execute order; order need ที่ไม่ถูก intercept (ไม่มี order_sn) → unanswered `deferred` (composer ไม่ fabricate) · E2E `test_product_plus_order_message_terminal_order_flow`: message product+order_sn → `source=order_lookup`, `run_grouped_selection`=0, compose/finalize=0, answer_typed=0, lookup×1 · **blocker ที่ซื่อสัตย์**: composition ตอบ product-side ของ turn ที่ order flow intercept ไม่ได้ — order flow กินทั้ง message ก่อน plan exists; การเปลี่ยน = ย้าย intercept ลงหลัง plan (architecture ใหญ่กว่า Phase 8 scope)
+- **L1 — type contract**: `UnansweredNeed.reason` Literal += `"no_answer"` (code ตรง SRS ที่เขียนไว้แล้ว)
+
+**verification (actual, focused เท่านั้น):**
+- Phase 8 suite **45/45** (H1 strip tests → structural ownership tests; M1 spy counts; M2 terminal E2E)
+- Phase 7 + boundary + guards + fail-closed: **85/85**
+- replay suite (order/claim/policy turns จริง): **120p/19s/3x**
+- claim/handoff/warranty/phase4/6 batch: **311p** + pre-existing dotenv flake 1 (verified เหมือนกันบน HEAD; standalone 30/30)
+- validators: gold_retrieval 5/5 + legacy fixtures integrity pass · py_compile ×3 · `git diff --check` clean
+- **flags**: `USE_GROUPED_RETRIEVAL_SELECTION` OFF (env fallback); `grouped_retrieval_shadow_enabled` = DB `true` บน local Mongo (pre-existing ambient state — Phase 8 ไม่แตะ; tests pin off ผ่าน `_install` seam เสมอ)
+- structural: prose parsers=0 · semantic tables +0 · `_render_composition` callers = `_finalize_answer` เท่านั้น · staging empty · ไม่มี commit
+
+**verdict**: PHASE_8_STRUCTURAL_COMPOSITION_CORRECTED_READY_FOR_FINAL_REVIEW
+
+## Phase 8 — STRUCTURAL MARKER CORRECTION (uncommitted · HEAD 931d41f · ห้าม stage/commit)
+
+**finding:** enforce composition branch ยังใช้ `_final in answer` (prose membership) ตัดสิน + append canonical prose หลัง finalizer — prose ยัง control behavior (canonical sentence ใน product prose หลอก presence check ได้) + finalizer ไม่ใช่ prose owner เดียว
+
+**fix (marker-only validation, zero prose inspection):**
+- `guards.enforce` `_pdec_active` + `composition` marker present → validate structured metadata เท่านั้น: marker is dict + `"policy" ∈ marker.domains` + `marker.policy_text == policy_outcome_text(pdec.outcome)`
+- marker valid → `return resp` byte-identical (answer/answer_segments ไม่แตะ — ไม่มี scan/split/replace/append/rewrite)
+- marker invalid/mismatch → **fail closed = wholesale deterministic render `_final`** (existing pure-policy behavior เดิม) + `guard_rewritten="policy_decision"` + `composition_marker_invalid=True` — ไม่ recover จาก prose
+- ไม่มี marker → wholesale render เดิม (flag-OFF/pure-policy byte-identical)
+- `_finalize_answer` = prose owner เดียวยืนยัน (canonical policy segment insert ที่นี่เท่านั้น — test pin count==1 แม้ product text เท่า canonical ก็ dedupe)
+- deleted: `_final in answer` membership + append path + `split_segments` re-call บน compose path
+
+**tests (structural, ไม่ใช่ prose assertions):**
+- valid marker + injected clause / prose ไร้ canonical → byte-identical ทั้งคู่ (prose ไม่ถูก consult)
+- canonical sentence ใน prose + marker ขาด "policy" domain → fail closed (prose ≠ proof)
+- policy_text mismatch → wholesale `_final` + marker-invalid flag
+- finalizer exactly-one canonical segment (รวมเคส product text = canonical → dedupe)
+- spy: compose/render/finalize/split = 1 each; post-finalizer prose mutation = 0 (E2E pin เดิม)
+
+**verification (actual):** Phase 8 **47/47** · Phase7+boundary+guards+failclosed+replay+gold **210p/19s/3x** · policy/claim/warranty batch **210p** · fixture integrity pass · py_compile ×3 · `git diff --check` clean
+
+**flags (honest):** `USE_GROUPED_RETRIEVAL_SELECTION` OFF (env fallback); `grouped_retrieval_shadow_enabled` ambient local DB `true` (observed previously — operator state, ไม่แตะ/ไม่ connect Mongo รอบนี้); activation blocked เหมือนเดิม (`BLOCKED_BY_PHASE4_SOURCE_UNION` + `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE`)
+
+**verdict**: PHASE_8_STRUCTURAL_MARKER_CLOSED_READY_FOR_FINAL_PRECOMMIT_REVIEW
+
+## Phase 8 — MARKER TYPE VALIDATION CORRECTION (uncommitted · HEAD 931d41f · ห้าม stage/commit)
+
+**finding:** `"policy" in (_comp.get("domains") or ())` รับ malformed type ผ่าน Python membership — `domains="not-policy-domain"` (substring), `{"policy":True}` (dict keys), `("policy",)` (tuple) ทั้งผ่าน → enforce return unchecked prose โดยไม่ set `composition_marker_invalid` (fail-open บน corrupt marker)
+
+**root cause:** membership expression บน untyped value — producer `_finalize_answer` stamp `domains` เป็น `list` เสมอ (app.py:766) แต่ consumer ไม่ได้บังคับ type
+
+**fix (minimal — enforce producer contract เดิม):** capture `_domains = _comp.get("domains")` → `_marker_ok` = `isinstance(_comp, dict) and isinstance(_domains, list) and "policy" in _domains and policy_text == _final` — ไม่มี coercion/iterable generic; valid → byte-identical เดิม, malformed/mismatch → wholesale deterministic render `_final` + `guard_rewritten` + `composition_marker_invalid=True` เดิม, absent → pure-policy render เดิม
+
+**docs accuracy fix:** `_finalize_answer` docstring + SRS row — "ไม่มี branch แตะ prose หลังจุดนี้" → "sole normal-path composition renderer; enforce อาจ wholesale-replace ทั้ง answer เฉพาะเมื่อ marker invalid (fail-closed guard, ไม่ใช่ composition)"
+
+**RED→GREEN (actual):** parametrize 4 malformed cases — RED 3 (`"not-policy-domain"`, `{"policy":True}`, `("policy",)`) / `None` pass เดิม → GREEN 51/51 หลัง fix; valid-list case byte-identical คงเดิม
+
+**verification:** Phase 8 suite 51/51 · Phase7+boundary+guards+qa+failclosed **136p** · policy/claim/warranty **152p** · py_compile ×2 · `git diff --check` clean · structural: ไม่มี `in answer`/`re.`/scan ใน composition branch (window-grep verified)
+
+**delta:** runtime helpers +0 · regex/keyword tables +0 · model calls +0 · production code +7/−6 lines (guards) + docstring fix (app)
+
+**flags:** `USE_GROUPED_RETRIEVAL_SELECTION` OFF; ambient `grouped_retrieval_shadow_enabled` = local DB `true` (operator state — ไม่แตะ/ไม่ connect); activation blockers เดิม: `BLOCKED_BY_PHASE4_SOURCE_UNION` + `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE` + marker-validation fail-closed = ยังต้อง OFF
+
+**verdict**: PHASE_8_MARKER_TYPE_VALIDATION_CORRECTED_READY_FOR_FINAL_PRECOMMIT_REVIEW
+
+## ✅ Phase 8 — TYPED ANSWER COMPOSITION CLOSEOUT (committed · branch feature-phase3-aswer-quality)
+
+**commit 1**: `968eae9` `refactor: compose typed answers by need` — 9 files (+1571/−137): `answer_context.py` `app.py` `guards.py` `llm.py` `SRS_SSD.md` `test_phase7_answer_context.py` `test_phase7_boundary_review.py` `test_phase8_composition.py` (new) `rebaseline-plan.md` (status correction)
+
+**root contracts implemented:**
+- `DomainResult`/`AnswerComposition`/`compose_answer` (pure typed combine, single call/turn — `answer_context.py`)
+- `_typed_answer_boundary` → `AnswerComposition` (policy_decision/claim_guidance typed inputs — ไม่เข้า product prompt)
+- `_finalize_answer` = sole normal-path finalizer (render/order/dedupe/warranty-append/segments/marker เดียวต่อ turn); `_render_composition` internal helper (caller เดียว = finalizer); callsites ไม่ render prose — LLM2 step observe `resp.answer` post-finalize
+- `guards.enforce` composition branch = structured-marker validator เท่านั้น (`isinstance(domains,list)` + exact `"policy"` member + `policy_text`==`policy_outcome_text(outcome)`); valid → byte-identical; malformed/mismatch → deterministic wholesale fail-closed; absent → pure-policy render เดิม; **zero prose inspection — canonical sentence ใน product prose ไม่ใช่ structural proof**
+- `UnansweredNeed.reason` += `"no_answer"` · `TYPED_SYSTEM_INSTRUCTION` (−243 B stale block; legacy prompt byte-identical sha256-pinned)
+- `early_order_flow` upstream-terminal คงเดิม (intercept ก่อน TurnPlan — E2E pin `source=order_lookup`, compose/finalize/answer_typed = 0); order need ที่ไม่ intercept → unanswered `deferred` (composer ไม่ fabricate)
+
+**corrections ผ่านมาแล้วในรอบนี้:** H1 prose-parser ลบทั้งชุด → marker-only validation → malformed `domains` type (str/dict/tuple/None) fail-closed (`isinstance(list)` + exact member) — RED 3 → GREEN
+
+**final verification (actual, offline-safe เท่านั้น):** Phase 8 **51/51** · combined focused batch **576p/20s/4x** (phase7+boundary+guards+failclosed+replay+claim+warranty+policy+validators) · fixture integrity pass · `py_compile` ×4 · `git diff --check` clean · `_render_composition` production caller = `_finalize_answer` เดียว · prose-parser references = 0
+
+**runtime delta:** production +419/−87 LOC · +6 fns (`compose_answer`, `_render_composition`, `_finalize_answer`, `policy_outcome_text`, `DomainResult`, `AnswerComposition`) · −1 fn (`_strip_foreign_return_claims` + `_FOREIGN_RETURN_CLAIM_RE` regex deleted) · regex/keyword tables net −1 · modules/deps/flags +0 · model ≤1 · web ≤1/turn
+
+**flags/activation:** `USE_GROUPED_RETRIEVAL_SELECTION` OFF เดิม (ไม่มี diff เปิด flag) · ambient `grouped_retrieval_shadow_enabled` = local DB `true` (operator state — ไม่แตะ) · **activation blockers ยืนยันเหลือ: `BLOCKED_BY_PHASE4_SOURCE_UNION` + `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE`** — mixed auto-answer ปิดอยู่; no deployment/activation approval ใน commit นี้
+
+**ไม่ทำ:** item-tag/spec+web-enriched+flag-OFF callsite migration · finalizer normalization consolidation · evidence-scoped numeric/cert validation ใหม่ · full clause→owner distillation ledger — backlog ไว้ใน roadmap closeout note
