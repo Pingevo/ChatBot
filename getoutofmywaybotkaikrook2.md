@@ -20,6 +20,52 @@
 
 ## กำลังทำ (active)
 
+### 🔧 PHASE 10B — live-canary correction: QA snapshot propagation + Test Chat failure boundaries (✅ corrected + verified GREEN · committed)
+
+- **วิธีแก้ (ตาม plan — root cause เท่านั้น):**
+  - `knowledge_base.py`: `search_qa` += keyword-only `snap=_gen.SNAP_UNSET`; `qa_context`+`qa_troubleshoot_tips` forward `snap=snap` — `_known_brands(snap)` ใช้ param เดียว ไม่มี resolve ซ้ำ
+  - `TestChatClient.tsx`: `send()` reject ก่อน mutation เมื่อไม่มี session (toast ไทย) · `dispatchAndRender` เช็ค `res.ok` ก่อน status branches → render `detail`/`error` จริง · direct user turn commit ย้ายไป terminal sites เท่านั้น (`pushUserHistory:true + persistUser:true`) · ลบ dead `bot_error` branch (server ส่ง non-2xx เสมอ)
+- **RED honest (ก่อนแก้)**: python 9/9 fail (7× NameError @kb:1031 + TypeError kwarg + signature pin) · client 12 fail/4 pass (dispatch fired w/ session_id:null · "(ไม่มีคำตอบ)" บน 422 · failed turn เข้า historyRef+persist · retry duplicate)
+- **GREEN**: snapshot suite **9/9** · client boundary **16/16** · qa_context_guard+phase4b **74/74** · compat_mode_filter **144/144** · phase10 compat/ownership scripts exit0 · phase5 policy exit0 · retrieval_profile exit0 · handoff_transport **47/47** · phase9-dispatch **38/38** · testchat-buffer **16/16** · ownership-transport **244/244** · test_qa_kb **26/27** (1 fail = pre-existing env quirk `import chatbot.` — ไม่เกี่ยว snap) · `tsc --noEmit` clean · py_compile clean · `git diff --check` clean
+- **structural gates**: search_qa callers ทั้งสอง forward snap · `_known_brands` owner defined ทุก callsite · snapshot resolution 1×/request · failed direct turn ไม่เข้า model history · non-2xx ไม่ render "(ไม่มีคำตอบ)" · buffer retention เดิม · keyword/regex tables ใหม่ 0 · provider/model calls ใหม่ 0 · retry/fallback ใหม่ 0 · v2/v3 ไม่แตะ · flags เดิม · ไม่มี provider/DB/config activity ตอนแก้
+- **SRS §6**: rows `search_qa`/`qa_context`/`qa_troubleshoot_tips` อัปเดต (snap input + ownership + calls) · roadmap Stage1#4 เพิ่ม finding+correction note
+- **ผลกระทบเคสอื่น**: standalone `search_qa` (SNAP_UNSET→resolve เดิม) · known_brand scope เดิม · buffered retention เดิม · exit_drop/workflow_error/in_flight ไม่ commit (ตรง buffered เดิม) · ไม่มี failed-turn ใน model history
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `a03f2bb` · tree clean · staging empty · services เดิมปล่อยไว้ (Python :8010 ×2, node :3000) · Botworker OFF · web search OFF · ไม่แตะ v2/v3/provider/Mongo จริง/.env/push/PR/deploy
+- **observed live failure**: Test Chat `รุ่น IMILAB W01 เชื่อมต่อกับ Strava ได้ไหม` → real `/chat` 500 `NameError: name 'snap' is not defined` @ `knowledge_base.py:1031` (`_known_brands(snap)` ใน `search_qa`) — path: `_chat_impl → qa_context(snap=_snap) → search_qa → _known_brands(snap)` (snap = free var)
+
+#### PART 0 — audit (read-only, proven จาก source)
+
+- **root cause (python)**: commit `6d47ad3` ("publish retrieval evidence atomically per generation") เปลี่ยน `_known_brands()` → `_known_brands(snap=_gen.SNAP_UNSET)` แล้วอัปเดตทุก callsite — รวม callsite ข้างใน body ของ `search_qa` (:1031) — แต่ไม่เคยเพิ่ม `snap` ให้ signature ของ `search_qa` และ `qa_context`/`qa_troubleshoot_tips` ไม่ส่งต่อ — defect class เดียวกับ Phase 10A r5 (`chat_v2` free-var snap จาก commit เดียวกัน)
+- **reachability**: เข้า `elif known_brand:` เฉพาะเมื่อ `known`(model_codes) ว่าง/ไม่ match และ `known_brand` truthy — W01 turn มี "เชื่อมต่อ" trigger kw + imilab ใน message → พังทุกครั้งที่ถึงบรรทัดนี้
+- **search_qa callers ทั้งหมด**: `qa_context`(kb:1093) + `qa_troubleshoot_tips`(kb:1153) เท่านั้นใน production · `testscript/test_qa_kb.py` (standalone script — SNAP_UNSET path คงเดิม) · `test_qa_context_guard.py` monkeypatch ทั้งฟังก์ชัน (kwarg-compatible)
+- **snapshot contract**: `snap=_gen.SNAP_UNSET` sentinel — caller ที่ capture แล้วส่งต่อ; `SNAP_UNSET` → `_known_brands` resolve เองครั้งเดียว (standalone preserved — pattern เดียวกับ `product_store.py:857 snap=snap`)
+- **Test Chat mutations (traced)**:
+  - `send()` (:890) **ไม่มี session guard** — `session_id: currentSessionId`(null) → server `error("session_id is required",422)` → body `{detail}`
+  - direct flow: `historyRef.push(user)` (:1032) + `saveMessageToSession("user")` (:1037) **ก่อน** dispatch → failed turn เข้า model history → retry ส่งซ้ำ (history+input)
+  - `dispatchAndRender` (:1059): `d = await res.json()` **ไม่เช็ค `res.ok`** → non-2xx (`{detail}`/`{error}`) ไม่มี `status` → หลุดเข้า answer branch → render `(ไม่มีคำตอบ)` เป็น fake bot answer + history/persist mutation
+  - buffered path ถูกอยู่แล้ว: `pushUserHistory()` เรียกเฉพาะ accepted-terminal sites (workflow_actioned/resumed :1110, trigger_handoff :1203, trigger_template :1226, bot answer :1280); bot_error/in_flight/exit_drop/workflow_error ไม่ commit — **commit points เดียวกันนี้คือสัญญาที่ direct mode ต้องตาม**
+  - server side ถูกอยู่แล้ว: bot_error → non-2xx + retain rows; 422 session_id → `{detail}`; cleanup เฉพาะ terminal-consume (Phase 9 pin)
+
+#### แผนแก้ (minimal, root cause — ไม่มี helper/guard/fallback ใหม่)
+
+- **Python** (`knowledge_base.py` — 3 บรรทัดจริง):
+  1. `search_qa(..., snap=_gen.SNAP_UNSET)` keyword-only param — default ตาม generation snapshot contract เดิม (caller ไม่ส่ง → `_known_brands` resolve เองเช่นเดิม)
+  2. `qa_context` :1093 → `search_qa(..., snap=snap)`
+  3. `qa_troubleshoot_tips` :1153 → `search_qa(..., snap=snap)`
+  - ห้าม resolve ซ้ำใน search_qa / ห้าม helper / ห้ามเปลี่ยน semantics — `_known_brands(snap)` callsite เดิมใช้ param ใหม่เท่านั้น
+- **TestChatClient.tsx**:
+  1. `send()`: `if (!currentSessionId) { toast.info("สร้างหรือเลือกแชททดสอบก่อนส่งข้อความ"); return; }` หลัง handedOff check — ก่อน clear input/สร้าง bubble/history/persist (draft ไม่หาย)
+  2. `dispatchAndRender`: `if (!res.ok)` ก่อนทุก status branch → render `เกิดข้อผิดพลาด: {d.detail || d.error || `server ตอบ ${res.status}`}` (escapeHtml) ใน spinner → return (ไม่แตะ historyRef/persist) — `bot_error` branch เดิม (server ส่ง non-2xx เสมอ) กลายเป็น dead → ลบ
+  3. direct commit ย้ายไป terminal เท่านั้น: ลบ :1032/:1037 pre-dispatch; `dispatchAndRender` += `persistUser` opt — `pushUserHistory()` ทำ `saveMessageToSession("user",userText,…,userImages)` เมื่อ persistUser; direct ส่ง `pushUserHistory:true, persistUser:true, userImages:directImages`; buffered คงเดิม (persist ตอน buffer-time แล้ว)
+- **ผลกระทบเคสอื่น**: `search_qa` standalone callers (test_qa_kb script) ได้ SNAP_UNSET→resolve เดิม; known_brand-scoped docs semantics เดิม; buffered retention เดิม; exit_drop/workflow_error/in_flight ไม่ commit (ตรง buffered ปัจจุบัน); model history ไม่มี failed turn
+
+#### RED test plan (honest — ก่อน implement)
+
+- **python** `docs/test/test_qa_snapshot_propagation.py` (pytest, offline): stub `kb._qa_docs`+`_qa_vectors`+`_admin_db`(GenDb)+`units._units_coll` เท่านั้น (search_qa จริง) — T1 known_brand path ไม่ NameError · T2 snap byte-identical ถึง `_known_brands` (spy-wrap ผ่าน original) · T3/T4 `qa_context`/`qa_troubleshoot_tips` forward S (`resolve_snapshot` monkeypatch→fail = leak detector) · T5 omitted snap → resolve 1× (`_known_brands` owner) · T6 explicit snap → 0 resolve/0 Mongo
+- **TS** `scripts/test-testchat-client-boundary.ts` + hooks/mocks (tsx loader-hook pattern เดิม): stub `react`(mini useState/useRef/useEffect cells)+jsx-runtime+next/link+lucide+ui components+services/apiClient — drive REAL `TestChatClient` ผ่าน textarea `onKeyDown`; fetch stub นับ dispatch/persist calls — C1 no-session → 0 dispatch/0 bubble/0 history/0 persist + Thai toast (RED) · C2 500 → detail render ไม่ใช่ "(ไม่มีคำตอบ)" + no history commit (RED) · C3 retry post-500 → body.history ไม่มี failed turn (RED) · C4 success → user+model commit (pin) · C5 buffered → bot_error retain/no commit (pin)
+- **docs**: SRS §6 rows `search_qa`/`qa_context`/`qa_troubleshoot_tips` (snap input + Calls/Called by + snapshot ownership) · roadmap `2026-09-30-…rebaseline-plan.md` Phase 10 section · log นี้
+
 ### ✅ PHASE 9 — Workflow/Trigger Ownership Consolidation (session date) · PART 0-5 DONE · COMMITTED `c2fe7e2` · Phase 10 next
 
 - **baseline**: branch `feature-phase3-aswer-quality` @ `7d68f08` (Phase 8 closeout commit) · tree clean · staging empty · grouped flags OFF · ไม่ start worker/Next/provider (next dev PID 34514 ที่เห็น = user process เก่า ไม่แตะ)
