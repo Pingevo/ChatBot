@@ -6523,6 +6523,20 @@ E. ~1,500-line ON-dead legacy compute → `BLOCKED_UNTIL_GROUPED_CANARY_ACCEPTED
 
 ---
 
+## Zaapi workflow + KB/pool program — approved design backlog (2026-10-21, plan-only)
+
+- แผนหลักใหม่: `docs/plans/2026-10-21-zaapi-workflow-kb-pool-master-plan.md`
+- start gate: ปิดและ commit Phase 10 ก่อน ห้ามเริ่ม runtime/UI/schema implementation หรือปน commit กับ Phase 10 working tree ปัจจุบัน
+- workflow scope: node ที่เกี่ยวข้องกับ Facebook, LINE, TikTok, Shopee, Lazada ทั้ง Trigger/Condition/Action/Utility ต้องมี behavior จริง; platform/node ที่ยังไม่มี connector ต้อง unavailable + publish ไม่ผ่าน ห้าม fake success
+- import contract: นำชื่อ flow/graph/node positions/edges/portable config เข้าเป็น local draft; regenerate local IDs; Zaapi account/shop/user/team/version IDs เป็น audit metadata หรือ unresolved bindings เท่านั้น แล้วค่อย map ภายหลัง
+- central pool switches: `kb`, `mongo_catalog`, `units`, `image_text` คุม admission ก่อน source fetch; ทุก source ที่เปิดยังรวมเข้า canonical pool/selection/answer path เดิม
+- KB contract: `pool_sources.kb` เป็น on/off คนละชั้นกับ `kb_source`; `kb_source` มีแค่ `legacy | zaapi`, ไม่มี `both`, ไม่มี silent fallback; legacy pipeline/collections คงเดิม, Zaapi ใช้ collection ใหม่หนึ่งชุด, สลับแบบ atomic หลัง readiness ผ่าน, rollback ด้วย switch โดยไม่ลบข้อมูล
+- estimate: first useful delivery 2-3 สัปดาห์; full real-node coverage 5 platforms แบบ sequential ราว 10-16 working weeks หรือ 6-9 weeks เมื่อแยก 3 isolated tracks หลัง freeze contracts; API/event/send permission เป็น uncertainty หลัก
+- ordered backlog locked in master plan §12: Phase10A review/commit → grouped canary → Phase8 residual/fallback retirement → system-prompt distillation → Phase4B refresh + Phase5 policy data → Logging/Analytics Truth (analytics, audit events, provider cost) → Botworker production canary → DB/writer maintenance → pool switches/strict legacy|zaapi KB → node registry/editor/import → real five-platform adapters/canaries. Parallel work allowed only after shared contracts freeze and only in isolated worktrees with one integration owner for shared docs/schema/config.
+- safety: รอบนี้ plan/docs only; ไม่แก้ runtime/test/config/schema, ไม่ stage/commit, ไม่อ่าน `.env`/secret, ไม่แตะ Mongo/provider/services
+
+---
+
 ## Phase 10A — Correction Round 5 (final correctness gaps) — กำลังทำ
 
 **verified findings (read-only proof ก่อนแก้):**
