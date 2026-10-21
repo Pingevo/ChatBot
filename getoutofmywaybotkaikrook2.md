@@ -6347,3 +6347,276 @@ NeedTask/AnswerTask(closed-template render)/UnansweredNeed/AnswerContext(task/pr
 **flags/activation:** `USE_GROUPED_RETRIEVAL_SELECTION` OFF เดิม (ไม่มี diff เปิด flag) · ambient `grouped_retrieval_shadow_enabled` = local DB `true` (operator state — ไม่แตะ) · **activation blockers ยืนยันเหลือ: `BLOCKED_BY_PHASE4_SOURCE_UNION` + `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE`** — mixed auto-answer ปิดอยู่; no deployment/activation approval ใน commit นี้
 
 **ไม่ทำ:** item-tag/spec+web-enriched+flag-OFF callsite migration · finalizer normalization consolidation · evidence-scoped numeric/cert validation ใหม่ · full clause→owner distillation ledger — backlog ไว้ใน roadmap closeout note
+
+## Phase 10 Backlog Decision — Global Web Search Toggle (planned, not implemented)
+
+**User decision (2026-10-21):** ระบบต้องใช้ข้อมูลที่ร้านมีเท่านั้นเป็นค่าเริ่มต้น แต่เก็บความสามารถ web search ไว้หลัง global toggle สำหรับ operator; ยังไม่ลบโมดูล/คีย์ OpenRouter และยังไม่เปิด search ในรอบนี้.
+
+- config owner: `system_configs.main_config.web_search_enabled` (boolean); missing/invalid = **OFF**, ไม่มี env fallback ที่เปิดเอง
+- OFF contract: ทุก runtime path (legacy/typed/v2/KB/product/compat) ต้องถูกบังคับที่ shared execution boundary ให้ provider/network web-search calls = 0 แม้มี OpenRouter keys; `web_search_used=false`
+- ON contract: เพียงอนุญาต existing typed admission เท่านั้น ไม่ใช่ค้นทุกคำถาม; search ยังคง bounded ตาม evidence reason เดิม
+- no-evidence contract: local product/KB/units/OCR/policy พิสูจน์ไม่ได้ → deterministic unknown/typed unanswered; ห้ามให้ LLM อนุมานจากสินค้ารุ่นใกล้เคียง, brand/category, history หรือ bot prose
+- regression แรก: IMILAB W01 → ถาม GPS/pace → ถามต่อ Strava; ไม่มี local structured proof ต้องไม่ claim ว่า Glory Fit sync Strava และ web calls ต้องเป็น 0 เมื่อ OFF
+- admin: global toggle จุดเดียวใน System Config, persisted value เป็น authority, update ผ่าน config/audit owner เดิมแล้ว reload authoritative state; ไม่เพิ่ม per-shop/per-platform toggle
+- scope/safety: งานนี้เป็น Phase 10; ตอนบันทึกนี้ runtime/tests/config/schema ยังไม่เปลี่ยน, ไม่มี provider/Mongo/`.env`/service/flag activity และยังไม่ถือว่า implemented
+
+## Phase 10A — IMPLEMENTATION PLAN: Web Search Toggle + Compat Evidence Gate + npf Gate (uncommitted · ห้าม stage/commit)
+
+**baseline:** HEAD `e4a6202` · authorized planning diffs เหลือ: roadmap +2 lines (`web_search_enabled` + no-evidence contract) + ไฟล์นี้ backlog decision · grouped flags OFF · services ไม่แตะ
+
+**user-approved scope (2026-10-21):**
+
+A. `main_config.web_search_enabled` (bool strict — missing/invalid/OFF; ไม่มี env fallback)
+   - Python: `runtime_config.web_search_enabled()` + `web_search.is_configured()` AND-key — shared boundary เดียวปิดทุก path (legacy reanswer · typed admission · v2 · KB · device_compat · npf guard · `search_and_extract`/`reanswer` early-return)
+   - Next.js: `systemConfigService` interface+merge+FAIL_CLOSED+defaultDoc+allowedKeys · `/api/config` PUT boolean validation · `/config` page safeSwitches toggle · audit = `logAdminEvent` เดิม
+B. W01/Strava RED fixtures ×2 (OFF incident + ON contract) + mutation variants — prior bot prose / generic smartwatch cards / brand-category ไม่ใช่ evidence; web OFF → calls=0; fabricated prose ไม่ถึงลูกค้า
+C. npf guard `app.py:4341` += `and not _sel_flag` — ไม่ preempt canonical pipeline
+D. dead symbols เท่านั้น (zero production callers — ไม่ inline, ไม่แตะ flag-OFF stack)
+E. ~1,500-line ON-dead legacy compute → `BLOCKED_UNTIL_GROUPED_CANARY_ACCEPTED_AND_FALLBACK_RETIRED`
+
+**compat gate (typed-boundary contract — user approved):** compat need ที่มี external target ต้องมี typed evidence (device_spec/web record ของ target — reuse `_external_targets` + post-admission web_evidence); ไม่มี → `UnansweredNeed(no_evidence)` + drop NeedTask จาก ctx.task — model ไม่เคยเห็น target จึงเคลมไม่ได้; no-target compat คงเดิม; ห้าม keyword/regex/prose parsing
+
+**files (expected net runtime ≈ +60/−15):** `runtime_config.py` +8 · `web_search.py` +5 · `answer_context.py` +35 (no_evidence rule + task filter + Literal) · `app.py` +1 (npf gate) · `systemConfigService.ts` ~+12 · `api/config/route.ts` +6 · `config/page.tsx` +2 · tests: `test_runtime_config.py` +cases · `test_legacy_turn_incident_replay.py` (`answer_must_not_contain` + web_on seam ~+15) · fixtures +2 rows · `validate_legacy_turn_fixtures.py` +1 key · dead symbols −TBD
+
+**blockers:** `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE` stays OPEN (task-filter closes instruction surface เท่านั้น — arbitrary model prose ไม่มี prose parser); ON-dead legacy compute → `BLOCKED_UNTIL_GROUPED_CANARY_ACCEPTED_AND_FALLBACK_RETIRED`
+
+## Phase 10A — WEB SEARCH CONTROL + EVIDENCE GATE + npf GATE + DEAD SYMBOLS (uncommitted · ห้าม stage/commit)
+
+**case record (W01→Strava):**
+- **error:** flag-ON turn ยังแต่ง "Glory Fit ซิงค์กับ Strava" — model instruction ได้รับ task `ใช้กับ strava` ทั้งที่ target ไร้ evidence
+- **root cause:** `compile_answer_task` สร้าง NeedTask ให้ productish need ทุก need โดยไม่เช็ค target coverage; `subjects`-channel card (W01 identity) cover scope → task ผ่าน; `target_device` propagate เข้า describe-need ด้วย → 2 tasks ร้องขอ target ลอยๆ; `decide_web_admission` คำนวณ coverage แล้วแต่ task ยังถูกสร้าง
+- **fix (typed-boundary contract):** `compile_answer_context` — productish need ที่ normalized target ∉ `spec_targets ∪ web_targets ∪ web_evidence targets` → `UnansweredNeed(no_evidence)` + drop task + ไม่ emit products → model ไม่เห็น unsupported target (ไม่มี keyword/regex/prose parsing); `reason` Literal += `no_evidence`
+- **ผลกระทบเคสอื่น:** no-target compat (ใช้ได้กับรุ่นไหน / ตอบด้วย catalog identity) คงเดิม — suite phase6/7/8 + selection + compat script 144/144 ผ่าน; `inc-w01-strava-off` = xfail โดยตั้งใจ (flag-OFF legacy limitation — typed fix อยู่ใน canonical pipeline เท่านั้น ตาม scope ที่อนุมัติ)
+
+**implemented:**
+- `runtime_config.web_search_enabled()` — strict bool, fail-closed, ไม่มี env fallback (+`is_configured()` = toggle AND key → ปิดทุก path ผ่าน boundary เดียว)
+- npf guard `app.py:4341` += `not _sel_flag` — grouped ON ได้ canonical deterministic answer แทน legacy handoff
+- Next.js: `systemConfigService` (interface/merge/FAIL_CLOSED/defaultDoc/allowedKeys) + `/api/config` boolean validation + `/config` page safeSwitches — toggle เดียว persisted owner เดียว audit เดิม
+- harness: `answer_must_not_contain` key + web-on seam · fixtures +3 rows (w01-off incident / w01-on positive / w01-web-on positive / npf-preempt positive) · validator +1 key
+- dead symbols −26 (zero production callers, grep-proved): `RateMessageRequest` `TestChatMessage` `SearchData` `AnswerData` `WarrantyClaimContext`+`to_dict` `parse_purchase_date` `detect_purchase_date_and_order` `compat_proof_from_dict` `npz_generation_id` `_day_used` `_has_tisi` `_extract_tisi_context` `get_suggestion_latest` `get_latest_suggestion_batch` `get_anchor_and_suggestions` `get_order_anchors` `_extract_item_id` `_extract_order_sn` `_extract_tracking` `_has_image_placeholder` `_is_image_only` `_extract_product_subtype` `_extract_product_types` + orphans `_TISI_PATTERN` `_TRACKING_RE` `_ITEM_TAG_RE` `_ORDER_TAG_RE` `_IMAGE_PLACEHOLDER_RE` `_PHONE_PATTERN` `_mask_digits`
+
+**verification (offline-safe):** replay 123p/4x (2 xfail ใหม่ = w01-off + pre-existing) · runtime_config 17p · phase6/7/8+selection+guards 91p · phase5+qa+general 166p · claim/conversation/availability 184p · availability 21p · phase4b 74p · compat script 144/144 · cert script 66/66 · validator 76 rows pass · py_compile+tsc clean · `git diff --check` clean · stale pin `test_app_callsite_flag_gated_lazy` fixed (pre-existing fail บน base)
+
+**delta:** runtime net ≈ **−260 LOC** · fns −26 · regex tables −5 · helpers/flags/model calls +0 (เว้น toggle owner ใหม่ 1 ตัวตามแผน)
+
+**flags:** `USE_GROUPED_RETRIEVAL_SELECTION` OFF · `web_search_enabled` DB field = operator state (default OFF — ไม่แตะ) · activation blockers เดิม + `BLOCKED_UNTIL_GROUPED_CANARY_ACCEPTED_AND_FALLBACK_RETIRED` (~1,500-line ON-dead compute — ยังใช้เป็น OFF path จึงลบไม่ได้)
+
+**verdict**: PHASE_10A_WEB_SEARCH_CONTROL_AND_EVIDENCE_GATE_READY_FOR_INDEPENDENT_REVIEW
+
+## Phase 10A — INDEPENDENT REVIEW CORRECTION ROUND (uncommitted · ห้าม stage/commit)
+
+**case record (review findings H1–H4):**
+- **H1 error:** `test_products_carry_need_ownership_in_serialized_context` — `Cable B` หายจาก serialized products (91p/1f)
+- **H1 root cause:** `_need_target` propagate `request.target_device` ให้ทุก need kind + gate ใหม่ drop ทุก productish need ที่ target ไร้ evidence → compat need ผ่าน `relation_target` request (products-for-device channel — selection คือคำตอบ ไม่ใช่ verdict claim) โดน drop; W01 describe need ก็รับ strava target เหมือนกัน → claim surface กระจาย
+- **H1 fix (typed ownership):** external target = semantic property ของ compat/relation need เท่านั้น — (a) `_need_target` scope เหลือ compat need (non-compat task ไม่ render `ใช้กับ` อีก); (b) compat need ที่ target มาจาก `relation_target`/`compat` source = products-for-device → ไม่ gate; (c) compat need ที่ target มาจาก slot/profile (verdict target) แต่ไร้ subject-target coverage → `UnansweredNeed(no_evidence)` + drop task + drop products ที่เลือกผ่าน request อันนั้น; (d) selected products ที่เลือกผ่าน verdict-target request ที่ uncovered = relation context → drop จากทุก need (W01 describe เสีย products → ctx empty → model 0 calls)
+- **H2 root cause:** `chatbotv3/or_client.py` `MODEL_LLM2` default `:online` + `call_or` ส่ง model ตรงเข้า payload — bypass `web_search.is_configured()` ทั้งหมดผ่าน `/chat` `use_v3`
+- **H2 fix:** sanitize ที่ `call_or` boundary เดียว — `web_search_enabled()!==true` → strip `:online` suffix ก่อนสร้าง payload (OFF ยังตอบ offline ได้ปกติ 1 call); ON → model เดิม; lazy-import runtime_config, exception → fail-closed OFF
+- **H3 root cause:** `_external_targets` ลด evidence เหลือ target-string set → record `target==strava` ของ subject อื่น/ไม่มี subject link cover ได้หมด
+- **H3 fix:** coverage = per-(need,subject,target) ผ่าน `resolve_compat` owner เดิม — declared `CompatProof` dict (subject_id+target+relation+verdict) attributed เข้า need นั้น หรือ derived `device_field_facts(target data)` + `extract_field_facts(subject card)` → outcome compatible|incompatible เท่านั้นที่ cover; target-only record ไม่มี subject/relation proof = ไม่ cover
+- **H4:** `inc-w01-strava-off` คง intentional xfail — flag-OFF legacy path ยัง leak (activation blocker ไม่ใช่ production green)
+
+**files:** `answer_context.py` (target ownership + subject-target coverage + tainted-product drop) · `chatbotv3/or_client.py` (+sanitize) · tests: ใหม่ `docs/test/test_phase10_target_ownership.py` + v3 boundary tests · docs: SRS/roadmap/schema.md/log
+
+**correction implemented + verified (RED→GREEN):**
+- **RED (9 fail เจาะ finding):** `test_describe_need_unowned_target_is_not_its_claim` · `test_relation_channel_compat_target_is_products_for_device` · `test_shared_tainted_request_products_drop_everywhere` · `test_describe_clean_products_survive_mixed_taint` (H1) · `test_same_target_other_subject_proof_does_not_cover` · `test_target_only_web_record_does_not_authorize_claim` (H3) · v3 `:online` ×3 (H2) — contract pins (compat no_evidence / mixed product / different-target / exact-proof / structured-connector / ON-model) ผ่านตั้งแต่แรก
+- **fix (typed owners เดิม ไม่มี keyword/prose/parser เพิ่ม):**
+  - `answer_context._need_target` → compat-only (non-compat task ไม่ render `ใช้กับ` — claim surface ตัดที่ typed field)
+  - `compile_answer_context`: compat need verdict target (slot/profile source — `relation_target`/`compat` = products-for-device ไม่ gate) → `_verdict_target_covered` (declared `CompatProof` subject_id ตรง card canonical sid หรือ `resolve_compat` verdict จาก subject/target facts); uncovered → `UnansweredNeed(no_evidence)` + task หาย + taint request (subject-owner-scoped: model_codes ∩ subject_refs — request ของ subject อื่นไม่ taint) → products ของ request นั้น drop จากทุก need; evidence records ที่ attribute เฉพาะ dropped needs drop ด้วย
+  - `target_of`/`decide_web_admission`: `_need_target` (compat) ∪ first request-carried target — evidence attribution/admission คง semantics เดิม
+  - `app._typed_answer_boundary`: web_used record += `data` (structured specs ของ target ตัวเดียว + source=web-structured) — payload text คงเดิม
+  - `chatbotv3/or_client.call_or`: `web_search_enabled()!==true` → strip `:online` ก่อน payload (lazy import, exception → fail-closed OFF) — offline model ปกติ, ON → `:online` เดิม
+- **contract correction (1 จุด):** `test_web_runs_before_only_answer_call` — เพิ่ม selected subject card (connector usb-c) เพราะ coverage ใหม่ต้องการ subject facts ที่ resolver prove ได้ — intent เดิม (web→answer ordering + 1 call) คงไว้
+- **GREEN:** regression cmd `test_runtime_config + phase7_answer_context + phase7_boundary_review` + ใหม่ 2 files = **108p/0f** (เดิม 91p/1f) · replay+phase8+selection_runtime **189p/19s/4x** (inc-w01-strava-off xfail เดิม — flag-OFF leak ยังแสดง fabricated claim จริง) · offline batch **694p/1s/1x** + **151p/1s** · compat script **144/144** · cert script pass · validator **76 rows pass** · chat_api+units **11p** · `py_compile`/`tsc`/`git diff --check` clean · dead-symbol deletions re-verified caller-free (hits ที่เหลือ = symbols ชื่อซ้ำคนละตัวใน module อื่น)
+- **ผลกระทบเคสอื่น:** describe need ที่มีแต่ tainted products → no_evidence (W01 describe); non-compat task ไม่ render `ใช้กับ` อีก (เลิก target claim surface); v3 OFF → model เป็น non-online equivalent (ตอบปกติ 1 call)
+- **ยังไม่แก้ (ตาม scope):** `inc-w01-strava-off` flag-OFF path ยัง leak (intentional xfail — activation blocker ไม่ใช่ green claim); `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE` (model อาจ fabricate จาก context อื่น — ไม่มี prose guard); `BLOCKED_UNTIL_GROUPED_CANARY_ACCEPTED_AND_FALLBACK_RETIRED`
+- **delta (รอบนี้):** answer_context ~+100 (ฟังก์ชันใหม่ `_verdict_target_covered` 1 ตัว + restructure gate) · or_client +12 · app.py +10 · tests ใหม่ 2 files · SRS/roadmap/schema/log
+
+**verdict**: PHASE_10A_REVIEW_FINDINGS_CORRECTED_READY_FOR_FINAL_PRECOMMIT_REVIEW
+
+**final verification (correction round ปิดท้าย):**
+- reviewer regression cmd (runtime_config + phase7_answer_context + phase7_boundary_review): **92p/0f**
+- รวมทั้ง suite เดียว (38 files ยกเว้น phase4b): **1068p/21s/5x** · phase4b แยก invocation: **74p** (ตาม batch เดิมของรายงาน)
+- `py_compile` answer_context/or_client/ไฟล์ test ใหม่ OK · `git diff --check` clean · staging ว่าง · 2 ไฟล์ใหม่ยัง untracked
+
+**pre-existing test-infra finding (ไม่ใช่ของรอบนี้):** `test_phase4b_refresh._install_script_stubs` แทน `dotenv.load_dotenv` ด้วย lambda ตอน collection แล้วไม่ restore → ถ้ารัน claim_flow กับ phase4b ใน pytest process เดียวกัน `test_load_dotenv_aliases_restored_after_import` fail — reproduce ได้ด้วย pair 2 ไฟล์เดียว ไม่เกี่ยวกับ diff นี้ (ไฟล์ทั้งคู่มาจาก commit 6d47ad3 ก่อนหน้า) — รายงานไว้ให้ final review ตัดสิน ไม่แตะตาม scope
+
+## Phase 10A — CORRECTION ROUND 2: typed compat decision (uncommitted · ห้าม stage/commit)
+
+**case record (review findings H1/H2/M1 — relation/validation/composition):**
+- **H1 error (proof captured):** `_verdict_target_covered` loop `("connects","charges","works_with","fits")` → declared proof `W01 charges Strava` เปิดคำถาม `works_with` ได้ — relation ถูกเดาไม่ใช่ typed identity (subject,target,relation)
+- **H2 error (proof captured):** emitted evidence record drop `subject_id`/`relation`/`verdict`/`source` (closed `_EVIDENCE_OUT_FIELDS`) → model เห็น "มี spec ของ strava" แต่ไม่เห็น verdict → ยังต้องเดา; accepted proof ใช้เปิด task เฉยๆ ไม่ถึง composition
+- **M1 error:** `CompatProof` สร้างตรงจาก dict ใน answer_context — `source=""` ผ่าน; validator `compat_proof_from_dict` เคยถูกลบเพราะไร้ caller → restore ตอนมี caller จริง
+
+**แผนแก้ (root cause, typed owners เดิม — ไม่มี keyword/prose parser/helper chain):**
+1. `RetrievalRequest` += `relation_type` (default None) — `_relation_request` stamp `rel.relation_type` (propagation เดียว ไม่เพิ่ม owner)
+2. `policy_resolver`: restore `compat_proof_from_dict` + validation (non-empty subject/target/relation/verdict/source · relation ∈ COMPAT_RELATIONS · verdict ∈ {compatible,incompatible} · source ∈ COMPAT_PROOF_SOURCES={spec-db,web-structured,customer} — customer ผ่าน shape แต่ resolver downgrade → admin_review เสมอ)
+3. `answer_context._need_relation(need, reqs_n, tn)`: relation candidates = carriers' `relation_type` ∪ `_COMPAT_MODE_RELATION[compat_mode]` (unambiguous map เท่านั้น — connector_required/power_required/charging→charges · model_fit→fits · self_compat→connects · bluetooth_general→works_with; none/skip/""/unknown → ไม่มี) — distinct set ต้อง == 1 ไม่งั้น fail closed
+4. `_verdict_target_covered` → `_verdict_target_decision`: declared proofs ผ่าน `compat_proof_from_dict` เท่านั้น (malformed → drop fail-closed) + `resolve_compat` **ครั้งเดียวต่อ subject** ด้วย relation เดียว — ไม่มี loop
+5. H2 — `AnswerContext` += `compat_verdicts: tuple[CompatVerdict]` (need_index, subject_id, subject_name, target, relation, decision typed); covered compat need = ไม่มี task + products คง (subject card) + verdict record; `compose_answer` อ่านจาก ctx → `DomainResult("compat")` deterministic segment (compatible/incompatible); unknown/admin_review → `UnansweredNeed(no_evidence)` เดิม (deterministic ยังไม่พบข้อมูล path); boundary: `ctx.is_empty or not ctx.task.tasks` → skip model (compat-only covered → 0 calls, mixed → ≤1)
+6. `_DOMAIN_ORDER` += compat (claim→compat→product→policy)
+
+**mechanical test updates:** `_req` += `cm`/`rel_type` params; phase10 tests ใส่ compat_mode; `test_exact_subject_target_proof_covers_own_need`/`test_structured_connector_facts_cover_via_resolver`/`test_same_target_other_subject_proof_does_not_cover` → covered compat = verdict record ไม่ใช่ task; `test_web_runs_before_only_answer_call` → compat-only covered → 0 calls + deterministic segment (web ordering คง)
+
+**expected impact/เคสอื่น:** compat covered = deterministic segment (ไม่ใช่ model prose); compat uncovered = no_evidence เดิม; relation channel/products-for-device ไม่เปลี่ยน; w01-web-on: works_with ต้องการ declares_device — bluetooth/connector facts ไม่ prove integration → อาจ no_evidence (verify)
+
+**correction implemented + verified (RED→GREEN + 3 mutation proofs):**
+- **RED (12 fail เจาะ finding):** `test_charges_proof_does_not_cover_works_with_need` · `test_works_with_proof_does_not_cover_charges` · `test_missing_relation_fails_closed` · `test_ambiguous_relation_fails_closed` · `test_connector_facts_cover_exact_relation_only` (H1) · `test_covered_compat_produces_verdict_not_task` · `test_final_answer_contains_verdict_exactly_once` · `test_compat_only_turn_zero_answer_calls` · `test_mixed_product_compat_one_answer_call` (H2) · `test_proof_empty_source_rejected` · `test_proof_unknown_source_rejected` · `test_invalid_verdict_rejected` (M1) — contract pins 4 (different-subject/target isolation, customer→admin, invalid-relation) ผ่านตั้งแต่แรก
+- **fix ตามแผน — typed owners เดิม:** `RetrievalRequest.relation_type` + `_relation_request` stamp (1 owner เดียว); `compat_proof_from_dict` restored (raise ValueError → caller catch → reject record); `_need_relation` exact-relation resolver (distinct set==1 else fail closed — carrier requests เท่านั้น, profile-only target = residual producer gap → no_evidence); `_verdict_target_decision` → `CompatVerdict` record (resolve_compat 1×/subject ด้วย rel เดียว); `AnswerContext.compat_verdicts`; `compose_answer` compat DomainResult + `_compat_segment` + `_DOMAIN_ORDER`; `app._typed_answer_boundary` gate `not ctx.task.tasks` → 0 calls
+- **files:** `answer_context.py` (+~200: CompatVerdict/_need_relation/_COMPAT_MODE_RELATION/_verdict_target_decision/compat_verdicts/compose compat) · `retrieval_planner.py` (+relation_type field+stamp) · `policy_resolver.py` (+compat_proof_from_dict+COMPAT_PROOF_SOURCES restored) · `app.py` (model gate comment+condition) · test ใหม่ `test_phase10_compat_decision.py` (16 tests) · phase10/phase7 tests mechanical updates · SRS/roadmap/log
+- **GREEN:** focused suite (target_ownership+compat_decision+phase7_ac+phase7_boundary+phase8+runtime_config+v3_boundary) **175p/0f** · replay **123p/19s/4x** (xfail count เดิม — flag-OFF xfail คง honest) · compat script **144/144** · cert standards **66/66** · validator **76 rows** · offline-safe batch ยกเว้น phase4b **1084p/21s/5x** + phase4b แยก **74p** · `py_compile`/`tsc`/`git diff --check` clean
+- **mutation proofs (apply→fail→revert ทีละตัว):** (1) bluetooth_general→charges = 3 tests fail (relation identity enforced) ✓ revert; (2) ลบ compat results จาก compose = 2 tests fail (decision ถึง final answer) ✓ revert; (3) ลบ source validation = `test_proof_unknown_source_rejected` fail (rumor source accepted) ✓ revert — หลัง revert ทั้งหมด compat tests **27p/0f**
+- **ผลกระทบเคสอื่น:** compat covered = deterministic segment need ละครั้ง (claim→compat→product→policy); compat-only → 0 model calls; mixed → product model ≤1 + compat segment จาก decision; works_with ต้องการ declares_device เท่านั้น (bluetooth connector = hint-only ไม่ prove integration — W01→Strava ยัง unknown); customer-only proof → admin_review → no_evidence; relation_channel/products-for-device ไม่เปลี่ยน
+- **ยังไม่แก้ (ตาม scope):** `inc-w01-strava-off` flag-OFF xfail เดิม (activation blocker); `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE`; `BLOCKED_UNTIL_GROUPED_CANARY_ACCEPTED_AND_FALLBACK_RETIRED`; phase4b dotenv stub pollution (pre-existing ไม่แตะ); profile-only verdict target ไร้ carrier request = residual producer gap → fail closed (documented — ไม่มี typed relation source)
+
+**verdict**: PHASE_10A_TYPED_COMPAT_DECISION_READY_FOR_FINAL_PRECOMMIT_REVIEW
+
+## Phase 10A — CORRECTION ROUND 3: compat_mode→relation owner consolidation (uncommitted · ห้าม stage/commit)
+
+**case record (duplicate-owner finding — verified valid):**
+- **audit (PART 0):** producers — `route_context._compat_mode` → {connector_required, power_required, bluetooth_general, none} (typed path → Profile/Slot/Request); `device_compat._compat_mode` → {charging, model_fit, self_compat, skip, unknown} (legacy path → `_filter_compat_products`)
+- **duplicate decision sites:** (1) `answer_context._COMPAT_MODE_RELATION` (r2 — 6-entry map ครอบ 2 vocabularies); (2) `device_compat.py:712` `_relation = "connects" if compat_mode == "self_compat" else "charges"` (broad else→charges)
+- **drift proof (reachable วันนี้):** `_compat_mode` คืน `"unknown"` ผ่าน 677 early-return (เฉพาะ skip/model_fit) → ถึง 712 → `charges` — unknown mode charge-filters จริง (drop incompatible products); map ACX ให้ `unknown→None` (fail closed) — semantics ต่างกัน; `model_fit`: ACX→fits vs DC-ternary→charges (รอดเพราะ 677 accident); `bluetooth_general`: ACX→works_with vs DC→charges
+- **non-relation consumers (ไม่แตะ):** `product_store:3119` (is_compat_check bool) · `retrieval_executor:82` (passthrough) · `device_compat:677/764` (filter structure)
+
+**แผนแก้ (canonical owner เดียว):**
+1. `policy_resolver` += `_MODE_RELATION` (private table) + public `compat_relation_for_mode(mode) -> str|None` — contract: connector_required/power_required/charging→charges · model_fit→fits · self_compat→connects · bluetooth_general→works_with · อื่นทั้งหมด→None
+2. `answer_context`: ลบ `_COMPAT_MODE_RELATION`; `_need_relation` เรียก owner เดิม (distinct-set==1 คง — explicit rel_type + mapped mode ขัดกัน → ambiguous fail closed)
+3. `device_compat`: ลบ ternary; `_relation = _pr.compat_relation_for_mode(compat_mode)` + `None → return products` (unknown mode เลิก charge-filter — ตรง "safe ไม่ over-filter" ของตัวกรองเอง)
+
+**expected impact:** `unknown` mode → คืน products ทั้งหมดแทน charge-filter (ปลอดภัยกว่า); self_compat/charging/model_fit/skip ไม่เปลี่ยน; typed path ทุก mode เดิม
+
+**correction implemented + verified (RED→GREEN):**
+- **RED (4 fail เจาะ finding):** `test_canonical_owner_mode_truth_table`/`test_canonical_owner_unknown_modes_fail_closed` (AttributeError — owner ไม่มี) · `test_device_compat_unknown_mode_no_charges_fallback` (unknown mode → DROP 'สายชาร์จ C to Lightning' ผ่าน charges — duplicate-owner drift พิสูจน์ได้) · `test_device_compat_none_mode_no_filtering` (none → charge-filtered เช่นกัน) — contract pins 4 (known-modes regression, explicit-without-mode, matching accepted, conflict fail-closed) ผ่านตั้งแต่แรก
+- **fix:** `policy_resolver` += `_MODE_RELATION`(private)+`compat_relation_for_mode` (mode ไม่ใช่ str → "" → None); `answer_context` ลบ `_COMPAT_MODE_RELATION` + `_need_relation` เรียก owner; `device_compat` ลบ ternary → `_relation = _pr.compat_relation_for_mode(compat_mode)` ก่อน spec resolution + `None → return products`
+- **GREEN:** `test_phase10_compat_decision` **24p** · compat-mode script **144/144** · typed suite (target_ownership+phase5_compat+phase7×2+phase8) **261p** · replay+runtime_config+v3 **145p/19s/4x** (W01-off xfail เดิม) · cert **66/66** · validator all rows · py_compile/diff-check clean
+- **structural gates:** canonical owners=1 · `_COMPAT_MODE_RELATION`=0 · `else→charges`=0 · relation loops=0 · keyword/regex ใหม่=0 · provider/model calls ใหม่=0 · flags OFF เดิม
+- **behavior delta จริง 1 จุด:** `_filter_compat_products` mode=unknown/none/malformed → คืน products ทั้งหมด (เดิม charge-filter) — self_compat/charging/model_fit/skip semantics เดิม (144/144 pin)
+
+**verdict**: PHASE_10A_COMPAT_RELATION_OWNER_CONSOLIDATED_READY_FOR_FINAL_PRECOMMIT_REVIEW
+
+---
+
+## Phase 10A — Correction Round 4 (audit H1/H2/H3) — กำลังทำ
+
+**final audit พบ 3 High (flag-ON path เท่านั้น — flag-OFF production ไม่กระทบ) + Medium pre-existing chat_v2 (ไม่แก้รอบนี้) + safety incidents 2 รายการ**
+
+**safety incidents (record — ไม่ investigate ผ่าน production data):**
+1. `test_comprehensive.py` — pytest เผลอรัน suite ที่ POST จริงไป `127.0.0.1:8010` (service กำลัง listen) ก่อน interrupt — provider usage อาจเกิด; results files ไม่ถูกเขียน (Aug 14 เดิม)
+2. `test_anchor_compare.py` — `cp.add_product`/`_coll().delete_many` + `time.sleep` = real Mongo writes (timestamped test prefix) ก่อน interrupt — ถูก kill ก่อนครบ chunk
+→ ทั้งสองถูกแบนจาก offline batch ถาวร; batch ใหม่ = 51 files + executor (-k deselect live smoke) = 1385p/21s/5x + phase4b 74p แยก process
+
+**แผนแก้ (3 fixes, minimal):**
+- **H1** `app.py:4905` grouped supporting record ส่ง `data: list[dict]` แต่ consumer อ่านเฉพาะ dict → verdict path ตาย + spec_targets ปิด web admission ผิด → **extract `answer_context.device_spec_for_target(specs,target)` selector เดียว (first-match normalized, contract เดียวกับ web path)** → emit `{**sp,"source":...}` dict เดียวหรือไม่ emit record เลย (no record → no spec coverage → admission eligible); web path :715 ใช้ selector เดียวกัน (dedupe)
+- **H2** `llm._openrouter_generate` ไม่ strip `:online` → **shared owner เดียว `runtime_config.openrouter_model_for_web`... (ชื่อจริง: `sanitize_or_model`)** — `web_search_enabled() is True` เท่านั้นที่คง `:online`; llm+or_client เรียก owner เดียวกัน
+- **H3** `context_text` serialize `need_indices` = original index+1 แต่ task render = positional → หลัง drop เลขขัดกัน → **serialization-only map `ordinal={need_index→position}` จาก task.tasks**; products/evidence ที่ไม่เหลือ surviving owner → ไม่เข้า model context; internal index ไม่แตะ; composition/verdict เดิม
+
+**out of scope:** chat_v2 `snap` NameError (pre-existing @HEAD), LOW findings, W01 flag-OFF xfail, phase4b pollution
+
+**correction implemented + verified (RED→GREEN):**
+- **RED (16 fail เจาะ finding):** H1 — 4×AttributeError (`device_spec_for_target` ไม่มี) + `test_unusable_spec_data_does_not_mark_coverage` (list data → `local_evidence_sufficient` — admission poison พิสูจน์ได้); H2 — 7 fail (`llm._openrouter_generate` ส่ง `:online` ดิบ + owner ไม่มี + route-through pins); H3 — 4 fail (serialized `งานที่ 2` ชี้ผิดหลัง drop + decided-owner card เข้า context) — pins 2 (`list_shaped_spec_data_cannot_cover_verdict`, `no_drop_baseline`) ผ่านตั้งแต่แรก; test-bug fixes ระหว่างทาง: `no_selection` need ไม่ drop (ต้องใช้ uncovered verdict), urlopen context-manager, selector test entry ไม่ normalize ตรง
+- **fix:** H1 — `answer_context.device_spec_for_target` (first-match normalized, dict-only) + `_external_targets` require `isinstance(data,dict)` สำหรับ device_spec coverage + `app.py` grouped producer emit dict เดียว+`source` เดิมหรือ `web-structured` ไม่ก็ไม่ emit + web path :715 dedupe ใช้ selector เดียวกัน · H2 — `runtime_config.sanitize_or_model` (`web_search_enabled() is True` เท่านั้นที่คง `:online`) + `call_or`/`_openrouter_generate` เรียก owner เดียวกัน (ลบ inline strip) · H3 — `context_text` ordinal map `{need_index→surviving position}` เดียวสำหรับ products+evidence; owner ถูก drop หมด → record ออกจาก model context
+- **GREEN:** focused (compat30+boundary12+phase7-36+ownership11+runtime17) **106p** · typed suite (phase5+phase8+runtime+replay) **313p/19s/4x** · corrected batch A=302p B=150p/1deselect C=577p/20s/5x D=300p + phase4b 74p = **1403p/20s/5x** · compat 144/144 · cert 66/66 · validator all rows · py_compile/tsc/diff-check clean
+- **structural gates:** `data: list` producer=0 · selector owners=1 · `endswith(":online")` นอก runtime_config=0 · sanitize owners=1 · ordinal map=1 · compat relation owner=1 (ไม่แตะ) · answer calls compat-only=0/mixed≤1 (pin เดิม) · keyword/regex/provider-call ใหม่=0 · `_sel_flag` อ่าน `grouped_retrieval_selection_enabled` เดิม OFF
+- **behavior delta จริง:** flag-ON path เท่านั้น — ① grouped device-spec ที่ match target ได้ verdict จริง (เดิม list→dict ตาย) + ไม่ match ไม่ poison admission ② `llm` OR role config ไม่ส่ง `:online` เมื่อ toggle OFF ③ serialized `งานที่ N` ตรง task เสมอ + decided/dropped-owner records ไม่เข้า model context; flag-OFF production ไม่เปลี่ยน
+
+**verdict**: PHASE_10A_HIGH1_HIGH2_HIGH3_CORRECTED_READY_FOR_FINAL_PRECOMMIT_REVIEW
+
+---
+
+## Phase 10A — Correction Round 5 (final correctness gaps) — กำลังทำ
+
+**verified findings (read-only proof ก่อนแก้):**
+- **A. chat_v2 snap free-variable** — `chat_v2` resolve `snap` ครั้งเดียว (:1403) แต่ `_retrieve_products` (931) + `_search_if_needed` (1112) ไม่มี param `snap` — ใช้ `snap` เป็น free var ที่ :1016,1040,1060,1172 → NameError เมื่อถึงบรรทัดนั้น; callers :1419/1422 ไม่ส่ง snap · `_cp.add_item_anchor`(726)/`_cp.get_timeline`(806) ไม่มีใน `conversation_products` (จริง: `add_product`/`load_timeline`) → AttributeError ถูก try/except กลืน — anchor timeline v2 ไม่เคยถูกเขียน/อ่าน (reachable เมื่อ conversation_id มี)
+- **B. multi-subject compat** — `_verdict_target_decision` return ทันทีที่ subject แรก decided (:578 ใน loop) → subject ถัดไปไม่เคยถึง resolve_compat; subject ที่ resolve ไม่ได้หายเงียบ
+- **C. malformed typed fields** — `_need_relation`: `rt and rt in COMPAT_RELATIONS` → invalid non-empty relation_type ถูกข้าม → compat_mode ช่วยได้ (ผิด contract) · `_compat_segment`: non-"compatible" → render "ไม่ได้ค่ะ" hard negative (unknown outcome กลายเป็น false negative)
+- **D. stale docs** — `function and process.md`:660 + `schema.md`:1471 ยังอ้าง `get_suggestion_latest`/`get_order_anchors` ที่ถูกลบใน Phase 10
+
+**แผน:** A — เพิ่ม `snap` param ให้ 2 helpers + ส่งจาก callsite เดียว; `_cp` calls → `add_product`/`load_timeline` · B — `_verdict_target_decisions` คืน (verdicts, unresolved-subject-names) ทุก subject; partial → CompatVerdict + UnansweredNeed(subject_refs=unresolved) + taint เฉพาะ carrier ของ unresolved · C — invalid non-empty relation_type → fail closed ทันที; `_compat_segment` whitelist compatible+incompatible อย่างเดียว (compose ข้าม empty segment ไม่ cover need) · D — แก้ stale refs ใน active docs
+**out of scope:** Zaapi plan (touch ไม่ได้), W01 flag-OFF xfail, phase4b pollution, grouped activation
+
+**correction round 5 implemented + verified (RED→GREEN):**
+- **RED (8 fail เจาะ finding):** A — `_retrieve_products/_search_if_needed` TypeError (`snap` kwarg ไม่มี) + chat_v2 resolve ครั้งแต่ไม่ propagate; B — two-subject ได้ verdict เดียว (order-sensitive: reversed → i:2 เท่านั้น), unresolved subject หายเงียบ; C — malformed `relation_type` ถูก compat_mode repair, outcome="unknown" render hard negative
+- **fix:** A — `snap` param ทั้งสอง helpers + ส่งจาก `chat_v2` callsite เดียว (resolve 1×/request คงเดิม); `_cp.add_item_anchor`→`_cp.add_product(source="user_item_card",is_anchor=True)`; `_cp.get_timeline`→`_cp.load_timeline(...).products` · B — `_verdict_target_decisions` คืน `(verdicts, unresolved_names)` ทุก subject + partial_refs → `UnansweredNeed(subject_refs=unresolved)` + taint scope=unresolved refs ∩ need refs (∅→taint ทุก carrier เดิม) · C — non-empty `relation_type` ∉ COMPAT_RELATIONS → `_need_relation` None ทันที; `_compat_segment` whitelist compatible|incompatible เท่านั้น (compose skip empty → ไม่ cover) + compose keep subject-scoped no_evidence unanswered
+- **GREEN:** focused 195p · typed/replay suite 175p/19s/4x (W01 xfail คงเดิม) · corrected batch A=302 B=319/19s/4x/1deselect C=472/1s/1x D=244 + phase4b 74p = **1411p/20s/5x** · compat 144/144 · cert 66/66 · py_compile/tsc/diff-check clean
+- **structural:** snap free-var=0 · resolve_snapshot=1 ต่อ request · `_cp` dead calls=0 · verdict fn callers ผ่าน `_verdict_target_decisions` เดียว · deleted-symbol refs ใน active docs=0 (SRS refs ที่เหลือชี้ symbol ที่ยังมีชีวิตใน app/turn_decision/message_detectors; plan docs เป็น historical) · keyword/regex/provider-call ใหม่=0 · Zaapi plan + backlog block ไม่แตะ
+- **behavior delta จริง:** v2 engine ใช้ได้จริงแล้ว (เดิม NameError ทุก turn เมื่อถึง retrieve/search) + anchor timeline persist/follow-up ทำงาน · compat need หลาย subject ครบ + partial ไม่หายเงียบ · malformed typed fields fail closed
+
+**verdict**: PHASE_10A_FINAL_CORRECTIONS_READY_FOR_INDEPENDENT_PRECOMMIT_REVIEW
+
+---
+
+## Phase 10A Correction Round 6 — final v2 boundary closure (uncommitted)
+
+**Scope (อนุญาตสุดท้ายที่แตะ v2/v3):** ปิด `chat_v2._check_general_question` ที่เรียก
+`knowledge_base.get_general_context` (ไม่มีจริง → AttributeError→500 ทุก general
+question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacements.
+
+- **Root cause:** v2 เรียก callee ที่ไม่มีอยู่จริง; owner ของจริง =
+  `knowledge_base.build_general_context` (คืน dict {qtype, context, meta} ไม่ใช่
+  raw string).
+- **Fix (minimal):** เขียน call ให้ตรง legacy contract (`app.py:2041-2050`):
+  `shop_filter = req.shop if qtype in ("categories","brands") else None` →
+  `build_general_context(qtype, mongo_db=db, shop_filter=…)` → scoped ว่าง retry
+  unscoped ครั้งเดียว → ไม่มี result/context → None → `_kb_ctx =
+  result["context"]`. `answer_general`/response/routing/error คงเดิมทุกอย่าง.
+- **RED→GREEN:** 6 RED honest (4 general-boundary + structural refs + followup
+  data shape) → `test_chat_v2_snapshot.py` 10/10; focused suite **202p**;
+  py_compile + `git diff --check` clean; executable `get_general_context`
+  refs = **0**.
+- **Owner tests ใหม่:** `add_product` (conversation_id/platform/shop/item_id/
+  name/`source=user_item_card`/card/`is_anchor=True`) + `load_timeline` →
+  `entry["card"]` + dedupe item_id + ≤5 ใบ.
+- **กฎแช่แข็ง:** Phase 10 is the final authorized v2/v3 modification phase.
+  Later phases target legacy and must not modify v2/v3 without explicit
+  authorization.
+- SRS §6 row + §10#1 + §9 roadmap อัปเดต; plan file เพิ่ม r6 status line;
+  Zaapi plan/backlog ไม่แตะ.
+
+---
+
+## Phase 10A — pre-canary closeout (committed)
+
+- **Commit 1** `e5e64177f90041396722afb051a310cc7567aa7e` —
+  `refactor: close phase 10a evidence boundaries` — 34 files approved
+  by final independent review: 16 bot runtime (answer_context, app,
+  chat_models, chat_v2, chatbotv3/or_client, conversation_products,
+  device_compat, generation_pointer, llm, policy_resolver,
+  product_store, retrieval_planner, runtime_config, test_chat_api,
+  warranty, web_search) + 3 ChatAdminWeb (config page/route/service)
+  + 7 modified tests/fixtures + 4 new test files
+  (test_chat_v2_snapshot, test_chatbotv3_web_boundary,
+  test_phase10_compat_decision, test_phase10_target_ownership)
+  + SRS + schema + function-and-process + rebaseline plan.
+- **verification (frozen, unchanged since review):** focused **202p** ·
+  curated batch 52 files **1418p/20s/5x/1 deselected** · phase4b **74p**
+  isolated · compat script **144/144** · cert **66/66** · validator all
+  rows · py_compile 16 files · tsc · `git diff --check` clean.
+- **web-search contract:** `main_config.web_search_enabled is True`
+  เท่านั้นที่เปิด — missing/malformed/DB-error → OFF, ไม่มี env
+  fallback; OFF = zero provider/web calls ทุก path +
+  `:online` stripped ที่ `runtime_config.sanitize_or_model` owner
+  เดียว (or_client.call_or + llm._openrouter_generate).
+- **multi-subject compat contract:** ทุก subject ใน compat need resolve
+  อิสระผ่าน `resolve_compat` + `_need_relation` exact typed relation;
+  declared proof scoped ต่อ subject (evidence ของ subject หนึ่งไม่
+  cover อีก subject); unresolved → typed `no_evidence` ไม่หายเงียบ;
+  outcome compatible/incompatible เท่านั้นที่ render claim.
+- **v2 boundary closure:** `resolve_snapshot` 1 ครั้ง/request +
+  param threading (free-var snap=0) · `_check_general_question` →
+  `build_general_context` legacy contract (mongo_db=db, shop scope
+  เฉพาะ categories/brands + unscoped retry 1 ครั้ง) · anchor →
+  `add_product` · follow-up → `load_timeline` — SRS §10#1 ปิดครบ 3.
+- **grouped flags remain OFF** (`grouped_retrieval_shadow_enabled`,
+  `grouped_retrieval_selection_enabled`) — ไม่มี activation ในงานนี้.
+- **accepted Low (informational doc debt):** `chatbotv3/rich_parse.py`
+  docstring provenance ยังชี้ chat_v2 regex constants ที่ถูกลบ —
+  historical copy-note ไม่ใช่ live-reference claim; ไม่แก้ใน closeout
+  นี้ตาม review (post-review freeze).
+- **freeze:** Phase 10 is the final authorized v2/v3 modification
+  phase — later phases must not modify v2/v3 without explicit
+  authorization.
+- **remaining Phase 10 gates:** grouped one-shop canary acceptance →
+  `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE` →
+  `BLOCKED_UNTIL_GROUPED_CANARY_ACCEPTED_AND_FALLBACK_RETIRED` →
+  rollback/deploy notes → final 21-requirement acceptance.
+- **no push/PR/deploy/canary** — commit เท่านั้น.
