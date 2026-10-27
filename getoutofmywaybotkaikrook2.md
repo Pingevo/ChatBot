@@ -6895,3 +6895,168 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
 - Next step requires a **new Dev Worker session** to write the R1 implementation
   plan; R1 implementation itself has not started.
 - No push/PR/merge/deploy/runtime activation.
+
+## 🔄 Zaapi Workflow Runtime R1 — Implementation Plan (2026-10-27 · worktree `zaapi-workflow-foundation` · branch `codex/zaapi-workflow-foundation` @ `65f88b0`)
+
+### กำลังจะทำ — R1 implementation plan (planning-only round)
+
+- Frozen baseline verified: branch `codex/zaapi-workflow-foundation` @
+  `65f88b0`, clean tree, empty staging, chain `65f88b0→8451aab→ba7f5b9→3193fd7`,
+  canonical spec committed at `8451aab`. Phase 10B untouched
+  (`feature-phase3-aswer-quality` @ `20f9e69`, 51 dirty paths — read-only check).
+- Source audit (rg + targeted reads): persistence owner = `workflowService.ts`
+  (`applyImportBatch` import/claim/fence, `saveWorkflowDraft` CAS,
+  `getWorkflowImportDetail` readiness, `_assertActivationAllowed` gate);
+  runtime dispatch owner = `workflowEngine.ts` (`runInboundDispatch`,
+  `matchAndRun` → `listWorkflows({enabledOnly:true, publishedOnly:true})` →
+  imported drafts engine-invisible); import parsing = `zaapiImport.ts` (pure);
+  registry/capability + publish gates = `nodeRegistry.ts`; editor CAS/import UI
+  = `WorkflowEditor.tsx`; routes = `/api/workflows{,/[id],/[id]/toggle,
+  /[id]/restore,/import}`; identity sources = `shops`/`admins`/
+  `shop_team_assignments`/`platform_team_assignments`/`conversations.labels`
+  distinct (no teams or ticket_fields collections — flagged in plan);
+  fake-Mongo seams = `test-botworker-fakemongo.mjs` +
+  `test-workflow-persistence-{hooks,mocks}.mjs`; audit owner =
+  `adminLogService.logAdminEvent`.
+- Deliverable: exactly one new file
+  `docs/superpowers/plans/2026-10-27-zaapi-workflow-r1-implementation.md`
+  covering `saveBindingResolutionBatch`, immutable version-scoped mappings,
+  derived account scope, overlap publish blocker, minimal binding UI/API —
+  no runtime activation, no new collections/indexes, no engine changes.
+- ห้าม stage/commit/push; ห้ามแตะ Phase 10B; implementation not started.
+
+### R1 plan — เสร็จแล้ว (verification passed · implementation not started)
+
+- **Source audit result**: all owners confirmed from callsites — persistence
+  `workflowService.ts` (`applyImportBatch:514-723` claim/fence/repoint,
+  `saveWorkflowDraft:745-846` CAS, `getWorkflowImportDetail:863-888` readiness,
+  `_assertActivationAllowed:249-269` gate on update/toggle/CAS); dispatch
+  `workflowEngine.runInboundDispatch:821` → `matchAndRun` →
+  `listWorkflows({enabledOnly:true, publishedOnly:true})` → imported drafts
+  engine-invisible; importer `zaapiImport.ts` pure; readiness/capability
+  `nodeRegistry.ts`; editor CAS + import modal `WorkflowEditor.tsx`; routes
+  `/api/workflows{,/[id](GET/PATCH/DELETE),/[id]/toggle,/[id]/restore,/import}`;
+  indexes `mongoClient.ensureIndexes` (declarations only); identity sources
+  `shops`/`admins`/`shop_team_assignments`/`platform_team_assignments`/
+  `conversations.distinct("labels")` — **no `teams`/`ticket_fields` collections**
+  → those kinds unresolvable in R1 (publish-blocking, user-decision flag);
+  audit `adminLogService.logAdminEvent` (+`workflow.binding_resolve` planned);
+  fake-Mongo seams `test-botworker-fakemongo.mjs` hooks +
+  `test-workflow-persistence-{hooks,mocks}.mjs` reused, no new harness.
+- **Plan path**: `docs/superpowers/plans/2026-10-27-zaapi-workflow-r1-implementation.md`
+  (569 lines — frozen baseline, evidence table, persisted/API contracts,
+  11-step CAS sequence, carry-forward + overlap + failure/recovery truth
+  tables, 10-task TDD sequence covering all 27 required failure cases,
+  complexity budget vs spec §18, exit gate, R2A–R5 boundary).
+- **Key contracts**: request = `{workflow_id, expected_version, version_id,
+  proposed:[{binding_id, mappings:[{source_index, local_id, platform?, shop_id?}],
+  repeat?}]}` — client never supplies source identity (server loads
+  `WorkflowBindingDoc`); deterministic `wv_`/`wb_` ids + `requirement_fp`
+  (SHA-256 ordered `source_values` — equality authoritative, digest index-only);
+  single `updateOne` commit = pointer+`version`+`enabled:false`+`draft`+
+  derived `platforms`/`shop_ids`; overlap recorded in `publish_blockers`,
+  saves still commit disabled drafts; `team`/`ticket_field`/`url` kinds
+  publish-blocking in R1.
+- **Blockers/questions**: (1) `team` kind has no local entity — planned as
+  unresolvable/publish-blocking; needs user decision if team resolution is
+  required in R1. (2) `saveWorkflowDraft` carry-forward today clones by
+  surviving `node_id` only — plan upgrades to `requirement_fp` gate per spec §8.
+- **Verification**: `git diff --check` clean; `git status --short` = `M
+  getoutofmywaybotkaikrook2.md` + `??` plan file only (documentation-only);
+  `git diff --name-status`/`--numstat` = `M 29/0` log; zero TBD/TODO/FIXME in
+  plan; no secrets/local absolute paths in plan; no runtime/test/schema files
+  changed; staging empty; workflow worktree `codex/zaapi-workflow-foundation`
+  @ `65f88b0` chain verified.
+- **Phase 10B drift (external, read-only observed)**: HEAD moved
+  `20f9e69 → fd4e682` (`+40a7d77 refactor`, `+fd4e682 docs closeout`), dirty
+  `51 → 1` — change made outside this session; this session ran only
+  `git -C` read-only checks on that worktree.
+- **Implementation not started** — stop before stage/commit; next gate = user
+  review of the plan.
+
+### R1 plan — correction round (review H1–H3 + budget honesty · planning-only)
+
+- **H1 fixed**: GET contract now returns `bindings[].sources:[{source_index,
+  display_value}]` — server-produced display from sanitized `source_values`;
+  `"[redacted]"`/`REDACT_VALUE` values stay redacted; client POST still carries
+  only `binding_id`+`source_index`+local target; display fields in request → 422.
+- **H2 fixed**: canonical spec §5 request schema completed with
+  `repeat?: boolean` (default false; server-side exact equality; same kind+scope;
+  no cross-kind; expansion during validation pre-artifacts; `repeated[]` echoed
+  in result). Plan + spec aligned; planner unchanged (references by name only).
+- **H3 fixed**: match-all hole removed — zero valid account mappings with
+  account requirements present ⇒ empty scope + `account_scope` blocker +
+  disabled/draft; overlap reads resolved mappings only, never empty arrays as
+  global; intentionally-global imported workflows need a separate approved
+  contract (not inferred).
+- **PART 4 fixed**: route is thin (auth → service → HTTP); new public
+  `getBindingResolutionView` inside `workflowService` owns all binding/candidate
+  Mongo reads; routes never call `getCollection`/`find`/`distinct`.
+- **PART 5 fixed**: honest budget table — public methods +2
+  (`saveBindingResolutionBatch`, `getBindingResolutionView`), private helpers
+  +2 (`_overlapBlockers` approved #4, `_sha256Hex` digest primitive), guards +0,
+  per-kind validators eliminated (one typed switch inside the owner), residual
+  additions disclosed explicitly for budget approval.
+- **PART 6 fixed**: Task 1 RED now calls absent `saveBindingResolutionBatch` +
+  asserts zero docs/zero audit; fake-Mongo field round-trip removed as a "RED";
+  `tsc --noEmit` is the type-contract gate; tasks renumbered to 10.
+- **PART 7 fixed**: fresh baselines recorded — persistence **210/210**,
+  foundation **161/161** (corpus opt-in skipped); no fabricated new-suite count.
+- **PART 8 fixed**: UI frozen — `BindingResolutionPanel.tsx` (presentational)
+  + `WorkflowEditor.tsx` wiring; executable method = SSR markup assertions +
+  service/API tests + `tsc` + explicit browser canary in exit gate; no new
+  frontend test dependency (none exists: no vitest/jest/testing-library).
+- **PART 9 (decided)**: team bindings unresolved + publish-blocking in R1;
+  no fake team collection / no team→admin mapping; UI shows "team mapping
+  unavailable — local team identity not defined"; deferred to later adapter/
+  data-contract round.
+- **PART 10**: workflow baseline strict (`codex/zaapi-workflow-foundation` @
+  `65f88b0`, docs-only dirty); Phase 10B external — read-only observed
+  `fd4e682`, 2 dirty paths; not an R1 blocker.
+- Files changed this round: spec §5 schema completion (+repeat +repeat-rules),
+  R1 plan rewritten, this log. No runtime/test/schema/UI code touched.
+
+### R1 plan — final correction round (budget closure + safe commits + frozen route tests · planning-only)
+
+- **PART 1 — budget closed, zero pending approvals**: spec §18 rewritten —
+  full-design function/helper total +4 = `saveBindingResolutionBatch`,
+  `getBindingResolutionView` (R1), `normalizeCanonicalExec`,
+  `materializeExecutableWorkflow` (R2A); R1 private helpers +0 (SHA-256 inline
+  `createHash` at assignment sites, overlap inline in `getWorkflowImportDetail`,
+  derived scope inline in commit path, one typed `switch` for local targets,
+  no nested functions); guards/owners +0. `_overlapBlockers`/`_sha256Hex`
+  removed from plan.
+- **PART 2 — independently-safe commits**: restructured to 9 tasks — Task 1 =
+  complete direct-resolution contract (all validation + artifacts + CAS +
+  audit + full RED matrix + crash/conflict + zero-audit-on-reject;
+  `repeat:true` → fail-closed `unsupported`); Task 2 = repeat expansion only;
+  then scope/carry/overlap/ownership/route/UI/acceptance. No commit ships a
+  writable method with incomplete validation or unimplemented request fields.
+- **PART 3 — route-test mechanism frozen**: dedicated hooks/mocks pair —
+  redirect `authorize` (auth ctx stub), `workflowService` (stub owner + call
+  spy), `mongoClient` (throwing — proves zero direct Mongo); real route module
+  imported post-register; real `NextRequest`; exported GET/POST invoked with
+  `{params}`; assert status+JSON for 200/404/200/409/422 + delegation args +
+  auth short-circuit. No new dependency, no pure-mapping helper.
+- **PART 4 — quality leftovers removed**: single Harness paragraph, no
+  "if any"/"decide at implementation" wording, baselines stated as fresh
+  non-corpus 161/161 vs separate opt-in corpus census.
+- **PART 5 — interfaces re-audited**: per-task files/methods/RED symptom/GREEN/
+  regression/commit boundary listed; no hidden helpers anywhere.
+- Fresh baselines retained: persistence **210/210**, foundation **161/161**.
+- Team stays unresolved/publish-blocking (approved R1 constraint);
+  source-display read-only server-produced; zero-account fail-closed;
+  routes Mongo-free.
+- Files changed: spec §18 (+8), plan rewritten (573 lines), this log.
+  Runtime/test/UI delta this round: **0 bytes**.
+
+### R1 plan commit closeout
+
+- Commit 1: `193120d` `docs: plan Zaapi workflow binding resolution` — canonical
+  runtime-spec correction + R1 implementation plan only (2 files, +594/−2).
+- Final plan contract: four-function budget closed; source identity is visible but
+  server-authoritative; unresolved account scope is fail-closed; routes are thin;
+  team bindings remain publish-blocking; imported workflows remain disabled/draft.
+- Next step requires a **new Dev Worker session** to execute R1 task-by-task with
+  TDD. R1 implementation has not started.
+- No push/PR/merge/deploy/runtime activation.
