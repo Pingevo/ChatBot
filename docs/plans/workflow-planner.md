@@ -18,7 +18,9 @@
 
 1. **trigger เดิมไม่ทิ้ง** — ใช้ต่อเป็น "basic automation" คู่ขนานกับ workflow
 2. **บอท (intent→rag→llm2→search→rag→llm2) ไม่แตะ** — คงเดิม ไม่ดึง intent ออกมา
-3. **workflow กับ trigger ทำงานแยกกัน** — เลือกลำดับได้จาก config
+3. ~~**workflow กับ trigger ทำงานแยกกัน** — เลือกลำดับได้จาก config~~ —
+   **SUPERSEDED:** Phase 9 ลำดับคงที่ใน owner เดียว (`runInboundDispatch`);
+   ไม่มี ordering config (ดู §② และ spec V3 §1/§10)
 4. **flow มี state** — ถ้า flow รอ reply ข้อความใหม่เข้า flow ก่อน ไม่ไป trigger/bot
 
 ---
@@ -425,10 +427,15 @@ UI: เพิ่มในหน้า `/config` ที่มีอยู่แ�
    - flow ต้องเคารพ guard นี้ด้วย ถ้าแอดมินรับแชท flow ที่รอ reply ต้อง cancel อัตโนมัติ
 
 4. **หลาย flow ฮิตพร้อมกัน** — ต้องตั้งกฎว่าเอาอันไหน
-   - แนะนำ: เรียงตาม field `priority` ถ้าไม่มี → ตาม `created_at`
+   - ~~แนะนำ: เรียงตาม field `priority` ถ้าไม่มี → ตาม `created_at`~~ —
+     **SUPERSEDED (V3 §10):** imported flows — `|E|>1` → **execute ไม่เลย**
+     (fail closed, log conflict) → trigger → bot; ไม่มี priority/created_at
+     winner; overlap ต้องแก้ด้วย scope/disable/contract เท่านั้น
 
-5. **Test Chat** — Test Chat ไม่ผ่าน bot-worker → ไม่ผ่าน workflow
-   - ถ้าอยากให้ Test Chat ผ่าน workflow → เพิ่มในภายหลัง
+5. **Test Chat** — ~~Test Chat ไม่ผ่าน bot-worker → ไม่ผ่าน workflow~~ —
+   **SUPERSEDED:** `/api/test-chat/dispatch` เรียก `runInboundDispatch` โดยตรง
+   (owner เดียวกับ bot-worker) → workflow stage ผ่านอยู่แล้ว; V3 §12 เพิ่ม
+   typed sandbox context สำหรับ draft/version override
 
 6. **Shadow Inbox / Test Assignment** — ใช้ `processMessage` ตรงๆ
    - ถ้าอยากให้ replay ผ่าน workflow → ทำภายหลัง
@@ -443,3 +450,33 @@ UI: เพิ่มในหน้า `/config` ที่มีอยู่แ�
 | `workflow_enabled` | `false` (default) | ต้องเปิดเองในหน้า config |
 | `workflow_run_timeout_ms` | `1800000` (30 นาที) | flow รอ reply เกิน 30 นาที → cancel |
 | `false_branch_policy` | `"exit_to_bot"` | ลูกค้าเปลี่ยนเรื่อง → ปล่อยให้บอทตอบ |
+
+---
+
+## Zaapi Runtime Rebaseline V3 (status — 2026-10-27)
+
+**Current stage:** design approved; R1 implementation plan **not written**;
+no runtime code started.
+
+**Canonical design spec:** `docs/superpowers/specs/2026-10-27-zaapi-workflow-runtime-design.md`
+
+**Persistence foundation commits:**
+
+- `3193fd7` `feat: persist imported workflow drafts safely`
+- `ba7f5b9` `docs: record workflow persistence closeout`
+
+**Approved contract (summary — spec is authoritative):**
+
+- Same `wf_imp_` workflow_id on re-import; new immutable `WorkflowVersionDoc`;
+  pointer repoint only when newer seq; forced `enabled:false`/`draft`.
+- Version-scoped immutable binding `mappings[]`; client never supplies source
+  identity; `saveBindingResolutionBatch` = one CAS batch commit.
+- Pure in-memory `materializeExecutableWorkflow`; engine reads canonical-exec
+  (`ce/1`) dialect only.
+- Overlap: `|E|>1` → execute none → trigger → bot. No priority/created_at winner.
+- Activation gates §17 of spec; no production activation in R1–R4.
+
+**Round order:** R1 (binding-resolution CAS + overlap blocker + minimal UI) →
+R2A (ce/1 normalization + materializer + safe idempotent nodes) → R2B (external
+adapters — blocked pending separate approval) → R3 (version pinning + trace) →
+R4 (authenticated sandbox) → R5 (DDL + canary + activation review).
