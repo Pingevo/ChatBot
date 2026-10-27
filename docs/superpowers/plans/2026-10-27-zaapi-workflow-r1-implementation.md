@@ -394,22 +394,24 @@ Harness convention: `register(new URL("./<hooks>.mjs", import.meta.url))` before
 - Modify: `src/backend/service/adminLogService.ts` — `"workflow.binding_resolve"` in `AdminActionType`.
 - Test: `scripts/test-workflow-binding-resolution.ts` (new — registers `test-workflow-persistence-hooks.mjs`).
 
-- [ ] RED 1 (absence): import fixture via `applyImportBatch`; call `svcAny.saveBindingResolutionBatch(wfId, validReq, "admin_t")` → **absent/fails**; zero new docs across all 5 colls; zero `workflow.binding_resolve` events.
-- [ ] RED 2 (validation matrix — every case asserts reject + zero writes + zero audit): stale `expected_version`; stale `version_id`; `workflow_id` mismatch; binding from other workflow/version; `source_index` OOB; duplicate `binding_id`; duplicate `(binding_id, source_index)`; forbidden keys (`source_value`, `source_fp`, `node_id`, `display_value`, `sources`); account missing `platform`/`shop_id`; nonexistent shop; label not in `conversations.distinct`; missing/inactive `admin_id`; `team`/`ticket_field`/`url` proposals; partial mapping; non-imported workflow; `repeat:true` → `unsupported`.
-- [ ] RED 3 (happy path shape): direct resolution → `{ok:true, version, version_id, resolved, unresolved, invalid, publish_blockers, overlap_conflicts}`; new `WorkflowVersionDoc` (seq+1, graph identical, fingerprint covers graph+resolution); version-scoped bindings `resolved` with `via:"direct"`, `source_fp` = 64-hex SHA-256, `resolved_by`; old version+bindings byte-identical; pointer+`enabled:false`+`draft`+derived scope flipped atomically; `workflow.binding_resolve` audit emitted **after** commit only.
-- [ ] RED 4 (crash/conflict): `insertOneHook` throw mid-bindings → retry resumes on deterministic ids; `updateOneHook` veto on commit → `conflict`, orphans never current; concurrent duplicate request → one winner, loser `conflict`; forced failures emit **no** success audit.
-- [ ] Impl: complete method (no repeat expansion); commits nothing until every validation branch exists.
-- [ ] GREEN: `npx tsx scripts/test-workflow-binding-resolution.ts` all sections green; `npx tsc --noEmit` clean.
-- [ ] Regression: `npx tsx scripts/test-workflow-persistence.ts` still 210/210.
-- [ ] Commit: `feat: saveBindingResolutionBatch direct-resolution contract`
+- [x] RED 1 (absence): import fixture via `applyImportBatch`; call `svcAny.saveBindingResolutionBatch(wfId, validReq, "admin_t")` → **absent/fails**; zero new docs across all 5 colls; zero `workflow.binding_resolve` events.
+- [x] RED 2 (validation matrix — every case asserts reject + zero writes + zero audit): stale `expected_version`; stale `version_id`; `workflow_id` mismatch; binding from other workflow/version; `source_index` OOB; duplicate `binding_id`; duplicate `(binding_id, source_index)`; forbidden keys (`source_value`, `source_fp`, `node_id`, `display_value`, `sources`); account missing `platform`/`shop_id`; nonexistent shop; label not in `conversations.distinct`; missing/inactive `admin_id`; `team`/`ticket_field`/`url` proposals; partial mapping; non-imported workflow; `repeat:true` → `unsupported`.
+- [x] RED 3 (happy path shape): direct resolution → `{ok:true, version, version_id, resolved, unresolved, invalid, publish_blockers, overlap_conflicts}`; new `WorkflowVersionDoc` (seq+1, graph identical, fingerprint covers graph+resolution); version-scoped bindings `resolved` with `via:"direct"`, `source_fp` = 64-hex SHA-256, `resolved_by`; old version+bindings byte-identical; pointer+`enabled:false`+`draft`+derived scope flipped atomically; `workflow.binding_resolve` audit emitted **after** commit only.
+- [x] RED 4 (crash/conflict): `insertOneHook` throw mid-bindings → retry resumes on deterministic ids; `updateOneHook` veto on commit → `conflict`, orphans never current; concurrent duplicate request → one winner, loser `conflict`; forced failures emit **no** success audit.
+- [x] Impl: complete method (no repeat expansion); commits nothing until every validation branch exists.
+- [x] GREEN: `npx tsx scripts/test-workflow-binding-resolution.ts` all sections green; `npx tsc --noEmit` clean.
+- [x] Regression: `npx tsx scripts/test-workflow-persistence.ts` still 210/210.
+- [x] Commit: `feat: saveBindingResolutionBatch direct-resolution contract` (landed `c3d6c89`)
 
 ### Task 2: Repeat expansion
 
 **Files:** `src/backend/service/workflowService.ts` (step 5 inside the method); test additions.
 
-- [ ] RED: `repeat:true` on account proposal → sibling bindings with identical source value + same `kind` + same scope get `via:"repeat"` mappings; `repeated[]` echoes every expanded target; cross-kind never transfers (account value inside a label binding is never mapped); `repeat` absent → `via:"direct"`; repeat expansion that would leave a sibling still partial → sibling stays `unresolved` (no auto-complete beyond same-value matches); crash mid-repeat-artifacts → retry idempotent.
-- [ ] Impl: expansion block inside step 5 only.
-- [ ] GREEN + regression + commit: `feat: binding-resolution repeat-apply`
+- [x] RED: `repeat:true` on account proposal → sibling bindings with identical source value + same `kind` + same scope get `via:"repeat"` mappings; `repeated[]` echoes every expanded target; cross-kind never transfers (account value inside a label binding is never mapped); `repeat` absent → `via:"direct"`; repeat expansion that would leave a sibling still partial → sibling stays `unresolved` (no auto-complete beyond same-value matches); crash mid-repeat-artifacts → retry idempotent.
+- [x] Impl: expansion block inside step 5 only.
+- [x] GREEN + regression + commit: `feat: binding-resolution repeat-apply` (implementation commit `ba6027b`)
+
+> **Task 2 closeout:** repeat expansion implemented inside `saveBindingResolutionBatch` step-5/step-7 only — exact same-kind sibling expansion by `canonicalJson` deep equality (no substring/keyword/fuzzy/regex, no cross-kind, no scope inference), `via:"repeat"` + `repeated[]` sorted by binding_id→source_index; no new helper/guard/keyword/decision owner; production unique-index blocker still open; Task 3 not started.
 
 ### Task 3: Fail-closed account scope
 

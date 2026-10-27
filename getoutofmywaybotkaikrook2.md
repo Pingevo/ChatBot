@@ -7360,3 +7360,146 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
     + `(workflow_id,version_seq)` ต้อง verify ก่อน expose writable binding API.
   - Phase 10B: ไม่ถูกแตะโดย session นี้ (dirty entries เพิ่มเป็น user-side
     activity ใน worktree นั้น — ไม่เกี่ยวกับ commit นี้).
+
+### กำลังจะทำ — R1 TASK 2: repeat expansion (implementation session)
+
+- **baseline (verified this session)**: worktree
+  `ChatBotProductMS-worktrees/zaapi-workflow-foundation` · branch
+  `codex/zaapi-workflow-foundation` @ `701b55e` (`docs: record workflow R1
+  task 1 closeout`) · tree clean · staging empty · `git diff --check` clean ·
+  `saveBindingResolutionBatch` caller = test file + service export เท่านั้น
+  (ไม่มี route/production caller).
+- **Phase 10B read-only record**: `/Users/itdev4/Documents/GitHub/
+  ChatBotProductMS` · branch `feature-phase3-aswer-quality` @ `fd4e682` · 6
+  dirty paths (5 modified: answer_context/app/SRS_SSD/master-plan/waythrough2
+  + 1 untracked test_phase10b) — **ห้ามแตะ** ไม่ write/stage/stash/copy ข้าม.
+- **trace (PART 1 — owner เดียว `workflowService.ts:921-1398`)**:
+  strict-shape+forbidden-scan (932-1000; **`repeat===true` reject :976** —
+  keep type check :977) → load wf+import (1004) → CAS pre-checks (1009) →
+  `versionBindings` scoped+sorted + persisted invariants (1019-1067) →
+  bounds/coverage `targetWork` + `carriedMaps` (1070-1100) → typed switch
+  (1102-1156) → `resolutionByBinding` (1158-1196) → derived scope (1198) →
+  versionPayload+fp (1204-1232) → artifact verify-or-insert+multiplicity
+  (1234-1296) → expected binding set+exact gate (1298-1362) → commit CAS
+  (1364-1379) → audit+result (1381-1397; `repeated:0`/`repeated:[]` hardcode).
+- **bounded change (inline ใน owner เดิมเท่านั้น — plan §6 step 5+7)**:
+  1) ลบ reject :976 (`repeat===true`) — **คง type check :977** ไว้
+  2) step-5 area (หลัง carriedMaps, ก่อน typed switch): ต่อ proposal
+     `repeat===true` → source value จาก server binding (`source_values[
+     source_index]`, bounds ผ่าน step 5 ก่อนแล้ว) → scan `versionBindings`
+     scope เดิม (sort แล้ว → deterministic) — candidate = `kind` เดียวกัน +
+     `canonicalJson(sVals[i]) === canonicalJson(srcVal)` **exact เท่านั้น**
+     (ไม่ substring/keyword/regex/cross-kind) · skip ตัวเอง (`binding_id`
+     เดิม) · sibling ที่ proposed อยู่แล้ว → เทียบ proposal mapping: ตรง =
+     no-op / ต่าง = reject · dedupe repeat-candidates (key=`binding:index`;
+     ต่าง target = reject) → สร้าง `ResolutionMapping{via:"repeat",
+     source_fp: sha256(canonicalJson(v)), state:"valid"}` + push `targetWork`
+     (เข้า typed switch เดิม — invalid target → typed reject เหมือน proposed)
+  3) step-7 merge (non-proposed loop เดิม): เฉพาะ binding ที่มี repeat
+     candidates — existing (carried re-validated) ที่ index เดียวกัน: ไม่มี
+     → append+`repeated[]` · valid+target เดียวกัน → no-op · validต่าง /
+     invalid → **typed validation reject ก่อนเขียน** (ต้อง explicit direct
+     proposal) · merged sort source_index · status = invalid≥1 → invalid /
+     coverage ครบ → resolved / อื่น → unresolved · path ไม่มี repeat =
+     Task-1 branches เดิมเป๊ะ (status เดิม)
+  4) result/audit: `repeated[]` sort binding_id→source_index · audit
+     `repeated: repeated.length` (แทน hardcode 0) · return `repeated`
+  5) fp = `stableFingerprint({...versionPayload, resolution})` ครอบ expanded
+     mappings อัตโนมัติ (resolutionByBinding รวม repeat แล้ว) → retry
+     deterministic เดิม
+- **ห้าม (constraints)**: runtime public methods +0 · private helpers +0 ·
+  nested fns +0 · guards +0 · decision owners +0 · collections/indexes/
+  workers/queues/deps/flags +0 · no semantic keyword/phrase/regex/mapper ·
+  ไม่แตะ workflowEngine/src/app/src/components/routes · ไม่มี route ให้
+  method นี้ · imported workflows ยัง enabled:false/status:"draft" ·
+  production unique-index blocker คงค้าง · Phase 10B ห้ามแตะ.
+- **RED plan (extend `test-workflow-binding-resolution.ts` เท่านั้น)**:
+  fixture `SRC_REPEAT` ใหม่ — A1[zacc_1,zacc_2]·A2[zacc_1,zacc_9](partial)·
+  A3[zacc_2](full)·A4[ZACC_1," zacc_1 ",zacc_12,1](near-miss)·L1[zlab_1]·
+  L2[zlab_1,"zacc_1"](cross-kind trap+partial)·U1[zusr_1,zusr_5]·
+  U2[zusr_1](full)·T1[zteam_1] → assert: via:"direct"/"repeat" ถูกต้อง ·
+  repeated[] exact+sorted · partial sibling unresolved · cross-kind ไม่
+  transfer · scope fields เฉพาะ account · exact equality = canonicalJson
+  (object key-order เท่ากันนับเท่ากัน; case/whitespace/substring/numeric/
+  partial-object ไม่นับ) · existing same-target=no-op / different-valid /
+  invalid → reject ก่อนเขียน · same-binding ไม่ self-expand · default no
+  repeat → no expansion · determinism (reversed order → version_id เดิม) ·
+  crash/retry ทุก boundary · safety regressions (forbidden keys+repeat /
+  out-of-scope+repeat / repeat non-boolean) · RED ต้อง fail เพราะ
+  repeat:true ยัง unsupported — reject-reason asserts กัน false-green.
+- **stop gate**: Task 2 เท่านั้น · ห้าม stage/commit · หยุด pre-commit
+  review gate · verdict ต้องมี evidence จริง.
+
+### ผ่านแล้ว — R1 TASK 2: repeat expansion (TDD verified)
+
+- **RED (recorded)**: 571 pass / **77 fail** — ทุก fail เพราะ
+  `repeat:true` ยัง reject `"unsupported: repeat expansion not implemented
+  (R1 task 2)"` (§14-19) หรือ expansion ไม่มี (§15-18); ไม่มี
+  source-text-only assert.
+- **implementation (inline ใน `saveBindingResolutionBatch` เท่านั้น)**:
+  ลบ reject `repeat===true` เดิม (คง `repeat must be a boolean` ไว้) →
+  ต่อ proposal `repeat===true` อ่าน source value จาก server-owned
+  `b.source_values[source_index]` → scan `versionBindings` (scope
+  workflow/version เดียวกัน + sort แล้ว) — candidate = `kind` เดียวกัน +
+  `canonicalJson` deep equality เท่านั้น · skip ตัวเอง · sibling ที่
+  proposed อยู่ → เทียบ proposal (ตรง=no-op/ต่าง=reject) ·
+  repeat-vs-repeat ต่าง target → reject · rm `{via:"repeat", state:"valid",
+  source_fp: sha256(canonicalJson(v)), resolved_by/at}` push `targetWork`
+  (typed switch เดิม = authority — invalid target → typed reject) →
+  step-7 merge: existing valid+target เดียวกัน = no-op / ต่างหรือ invalid =
+  reject ก่อนเขียน (explicit direct เท่านั้นแก้ได้) / ไม่มี → append +
+  `repeated[]` · merged sort source_index · status = invalid≥1 → invalid /
+  complete valid coverage → resolved / อื่น → status เดิม ·
+  `repeated[]` sort binding_id→source_index · audit `repeated:
+  repeated.length` (แทน hardcode 0) · fp ครอบ expanded ผ่าน
+  `resolutionByBinding` เดิม → version_id deterministic.
+- **GREEN/regression (verified ณ เวลาที่เขียน)**:
+  `test-workflow-binding-resolution` **645/645** · `test-workflow-persistence`
+  **210/210** · `test-workflow-foundation` **161/161** · `npx tsc --noEmit`
+  clean · `git diff --check` clean.
+- **crash/retry evidence**: orphan-after-commit → reversed-order retry
+  version_id เดิม · BSON round-trip → version_id เดิม · crash @first/
+  mid-binding insert → retry complete + zero dup ids · concurrent → 1
+  winner/1 conflict · CAS loser → fresh winner version/id · zero success
+  audit ทุก forced-failure path.
+- **structural audit**: changed = workflowService.ts (+inline ภายใน owner
+  เดิม), test file, log — workflowEngine/src/app/src/components ไม่แตะ ·
+  `saveBindingResolutionBatch` callers = test + service export เท่านั้น
+  (ไม่มี route) · public methods/private helpers/named nested fns/guards/
+  regexes/keyword tables/decision owners/collections/indexes/workers/
+  deps/flags **+0** (arrow callbacks ใน find/some/every/sort ภายใน loop =
+  idiom เดียวกับโค้ดเดิม) · Task-1 BSON/artifact/multiplicity/CAS/invariant
+  tests เขียวครบ · imported workflows ยัง enabled:false/status:"draft" ·
+  Phase 10B ไม่แตะ (fd4e682, 6 dirty paths เดิม — user-side).
+- **blocker คงค้าง (เหมือนเดิม)**: production Mongo ต้อง verify unique
+  indexes `workflow_versions.version_id` + `(workflow_id, version_seq)`
+  ก่อนเปิด writable route — Task 1/2 ยังไม่ expose surface ใดๆ.
+- **git state ณ closeout**: working tree มีเฉพาะ 3 ไฟล์แก้ (service + test +
+  log) · ไม่ stage ไม่ commit — รอ pre-commit review gate.
+
+### closeout — R1 TASK 2 committed
+
+- **Commit 1 (implementation)**: `ba6027b` `feat: binding-resolution
+  repeat-apply` — manifest: `ChatAdminWeb/src/backend/service/
+  workflowService.ts` + `ChatAdminWeb/scripts/test-workflow-binding-
+  resolution.ts` เท่านั้น (docs/log แยก commit ถัดไป).
+- **fresh verification ก่อน commit**: binding-resolution **645/645** ·
+  persistence **210/210** · foundation **161/161** · `npx tsc --noEmit`
+  clean · `git diff --check` clean.
+- **repeat behavior**: proposal `repeat:true` → exact same-kind sibling
+  expansion ใน version เดียวกันเท่านั้น (`canonicalJson` deep equality —
+  ไม่มี substring/keyword/fuzzy/regex · ไม่ cross-kind · ไม่ infer scope) ·
+  expanded mappings `via:"repeat"` ผ่าน typed switch เดิม · existing
+  same-target = no-op / different|invalid = fail-closed ·
+  `repeated[]` sort binding_id→source_index · audit `repeated` count ·
+  deterministic fingerprint+artifacts (retry idempotent).
+- **complexity delta vs 701b55e**: public methods +0 · private helpers +0 ·
+  named nested fns +0 · guards +0 · semantic regexes +0 · keyword tables
+  +0 · decision owners +0 · collections/indexes/workers/deps/flags +0.
+- **blocker คงค้าง**: production unique indexes
+  (`workflow_versions.version_id` + `(workflow_id, version_seq)`) ยังไม่
+  verified — ห้ามเปิด writable route จนกว่าจะเช็คจริง.
+- **Task 3 ยังไม่เริ่ม** · **Phase 10B ไม่แตะ** (fd4e682, dirty เดิม —
+  user-side เท่านั้น) · ไม่ push/PR/merge/deploy/DDL · ไม่แตะ real Mongo.
+- **Commit 2 (docs closeout)**: plan status checkboxes + log นี้ —
+  `docs: record workflow R1 task 2 closeout`.
