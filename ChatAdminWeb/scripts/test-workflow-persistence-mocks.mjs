@@ -31,6 +31,10 @@ export const COLLECTIONS = {
   workflowImportBatches: "workflow_import_batches",
   workflowRawSnapshots: "workflow_raw_snapshots",
   workflowBindings: "workflow_bindings",
+  // binding-resolution local-target identities (validation reads only)
+  shops: "shops",
+  admins: "admins",
+  conversations: "conversations",
 };
 
 export async function getCollection(name) { return mongo.getCollection(name); }

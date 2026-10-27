@@ -59,6 +59,7 @@ export type AdminActionType =
   | "workflow.toggle"
   | "workflow.import_apply"
   | "workflow.cas_save"
+  | "workflow.binding_resolve"
   | "workflow.run_completed"
   | "workflow.run_errored"
   | "workflow.run_timeout"
