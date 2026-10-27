@@ -1274,6 +1274,30 @@ export async function saveBindingResolutionBatch(
   const derivedShopIds = [...new Set([...resolutionByBinding.values()]
     .flatMap((r) => r.mappings.filter((m) => m.state === "valid" && m.shop_id != null).map((m) => m.shop_id as string)))].sort();
 
+  // 8b) scope readiness — version-scoped account requirements
+  //     (kind==="account" && count>0) truth table: eligible mapping =
+  //     state==="valid" + platform + shop_id present · complete ต่อเมื่อ
+  //     status==="resolved" + eligible === count (invalid status ไม่มี auto
+  //     repair — explicit direct resolution เท่านั้น) · zero eligible →
+  //     no-resolved blocker · coverage/status ไม่ครบ → incomplete blocker ·
+  //     ไม่มี requirement บน imported workflow → explicit global-scope blocker
+  //     (empty scope ≠ authorization — save ยัง commit disabled/draft เสมอ
+  //     ให้ admin resolve ต่อได้)
+  const accountReqs = versionBindings.filter((b) => b.kind === "account" && b.count > 0);
+  const scopeBlockers: string[] = [];
+  if (accountReqs.length > 0) {
+    const eligiblePerReq = accountReqs.map((b) => (resolutionByBinding.get(b.binding_id)?.mappings ?? [])
+      .filter((m) => m.state === "valid" && m.platform != null && m.shop_id != null).length);
+    if (eligiblePerReq.every((n) => n === 0)) {
+      scopeBlockers.push("account_scope: no resolved account mappings");
+    } else if (accountReqs.some((b, i) => resolutionByBinding.get(b.binding_id)?.status !== "resolved"
+        || eligiblePerReq[i] !== b.count)) {
+      scopeBlockers.push("account_scope: incomplete account mappings");
+    }
+  } else if (wf.import != null) {
+    scopeBlockers.push("scope: explicit global scope approval required");
+  }
+
   // 9) version payload = canonical graph เดิม + derived scope + complete resolution —
   //    fingerprint ครอบคลุม resolution → retry deterministic
   // versionPayload ต้องมี BSON-safe shape เดียว — undefined-valued keys ถูก BSON drop
@@ -1469,7 +1493,7 @@ export async function saveBindingResolutionBatch(
     });
   } catch { /* post-commit audit failure — commit สำเร็จแล้ว */ }
   return { ok: true, version: seq, version_id: versionId,
-    resolved, unresolved, invalid, repeated, publish_blockers: [], overlap_conflicts: [] };
+    resolved, unresolved, invalid, repeated, publish_blockers: scopeBlockers, overlap_conflicts: [] };
 }
 
 // ─── Import detail surface (UI read model) ────────────────
@@ -1500,6 +1524,24 @@ export async function getWorkflowImportDetail(workflowId: string): Promise<Workf
     version?.nodes || wf.nodes, version?.edges || wf.edges, wf.platforms || [],
     binds.map((b) => ({ node_id: b.node_id, kind: b.kind })),
   );
+  // scope readiness — recompute จาก version-scoped account bindings
+  // (authoritative — ไม่ใช่ wf.platforms/shop_ids) ด้วย truth table เดียวกับ
+  // write owner: zero eligible → no-resolved · status!=="resolved" หรือ coverage
+  // ไม่ครบ → incomplete · imported workflow ไม่มี requirement → global-scope
+  // blocker (canonical workflow wf.import==null → behavior เดิม)
+  const accountReqs = binds.filter((b) => b.kind === "account" && b.count > 0);
+  const scopeBlockers: string[] = [];
+  if (accountReqs.length > 0) {
+    const eligiblePerReq = accountReqs.map((b) => (b.resolution?.mappings ?? [])
+      .filter((m) => m.state === "valid" && m.platform != null && m.shop_id != null).length);
+    if (eligiblePerReq.every((n) => n === 0)) {
+      scopeBlockers.push("account_scope: no resolved account mappings");
+    } else if (accountReqs.some((b, i) => b.status !== "resolved" || eligiblePerReq[i] !== b.count)) {
+      scopeBlockers.push("account_scope: incomplete account mappings");
+    }
+  } else if (wf.import != null) {
+    scopeBlockers.push("scope: explicit global scope approval required");
+  }
   return {
     workflow_id: wf.workflow_id, name: wf.name,
     source: wf.import?.source ?? null,
@@ -1510,7 +1552,7 @@ export async function getWorkflowImportDetail(workflowId: string): Promise<Workf
     fingerprint: version?.fingerprint ?? null,
     bindings: binds.map((b) => ({ node_id: b.node_id, field_path: b.field_path, kind: b.kind, count: b.count, status: b.status })),
     unresolved_bindings: binds.filter((b) => b.status === "unresolved").length,
-    publish_blockers: capability.errors,
+    publish_blockers: [...capability.errors, ...scopeBlockers],
   };
 }
 

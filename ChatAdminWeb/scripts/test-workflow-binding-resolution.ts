@@ -98,6 +98,30 @@ const SRC_REPEAT = {
   ],
 };
 
+// ─── Fixture: zero account-kind requirements (Task 3) — label + user เท่านั้น ───
+const SRC_NOACC = {
+  loadedVersionId: "wv-src-N",
+  versions: [{ workflowVersionId: "wv-src-N", status: "active" }],
+  nodes: [
+    { id: "t1", type: "message_received", position: { x: 0, y: 0 },
+      data: { name: "trig", nodeType: "trigger", nextStepId: "c1" } },
+    { id: "c1", type: "label", position: { x: 100, y: 0 },
+      data: { name: "cond", nodeType: "condition",
+              conditions: [{ labelIds: ["zlab_1"], nextStepId: "a1" }], noMatchNextStepId: "a2" } },
+    { id: "a1", type: "chat_assign", position: { x: 200, y: 0 },
+      data: { name: "assign", nodeType: "action",
+              action: { assignment: { userIds: ["zusr_1"] } } } },
+    { id: "a2", type: "send_message", position: { x: 300, y: 0 },
+      data: { name: "reply", nodeType: "action",
+              action: { message: { text: "hi" } } } },
+  ],
+  edges: [
+    { source: "t1", target: "c1", sourceHandle: null },
+    { source: "c1", target: "a1", sourceHandle: "condition-index-0" },
+    { source: "c1", target: "a2", sourceHandle: "no-match" },
+  ],
+};
+
 async function main() {
   const mocks: Mocks = await import("./test-workflow-persistence-mocks.mjs");
   const imp: Imp = await import("../src/lib/workflow/zaapiImport");
@@ -221,6 +245,31 @@ async function main() {
       (((b?.resolution as { mappings?: Record<string, unknown>[] })?.mappings) ?? [])
         .slice().sort((x, y) => (x.source_index as number) - (y.source_index as number));
     return { wfId, wfDoc, verDoc, binds, bA1, bA2, bA3, bA4, bL1, bL2, bU1, bU2, bT1, req, versionBinds, mapsOf };
+  }
+
+  // no-account fixture (Task 3) — bindings = label + user เท่านั้น
+  async function setupNoAcc(srcWfId: string) {
+    const src = { ...SRC_NOACC, workflowId: srcWfId,
+      loadedVersionId: `wv-src-${srcWfId}`, versions: [{ workflowVersionId: `wv-src-${srcWfId}`, status: "active" }] };
+    const batch = previewZaapiFlows({ flows: [src] }, { indexRows: [{ wid: srcWfId, name: `noacc ${srcWfId}` }] });
+    await svcAny.applyImportBatch(batch, "admin_t");
+    const wfId = "wf_imp_" + _sh(srcWfId);
+    const wfDoc = (await svc.getWorkflow(wfId)) as Record<string, unknown>;
+    const verDoc = (await collDocs(COLLECTIONS.workflowVersions))
+      .find((v) => v.workflow_id === wfId && v.version_id === wfDoc.current_version_id) as Record<string, unknown>;
+    const binds = (await collDocs(COLLECTIONS.workflowBindings))
+      .filter((b) => b.workflow_id === wfId && b.version_id === verDoc.version_id);
+    const byKind = (k: string) => binds.find((b) => b.kind === k) as Record<string, unknown>;
+    const req = () => ({
+      workflow_id: wfId,
+      expected_version: wfDoc.version,
+      version_id: verDoc.version_id,
+      proposed: [
+        { binding_id: byKind("label").binding_id, mappings: [ { source_index: 0, local_id: "vip" } ] },
+        { binding_id: byKind("user").binding_id, mappings: [ { source_index: 0, local_id: "adm_u1" } ] },
+      ],
+    });
+    return { wfId, wfDoc, verDoc, binds, byKind, req };
   }
 
   async function callResolve(wfId: string, req: unknown): Promise<Record<string, unknown> | undefined> {
@@ -1524,6 +1573,303 @@ async function main() {
           { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }] },
       (r) => ok(typeof r.validation === "string" && r.validation.includes("scope"),
         "repeat on stale-version binding → out-of-scope reject"));
+  }
+
+  // ═══ 20. R1 Task 3 — fail-closed derived account scope ═══
+  console.log("\n=== 20. Account scope — zero valid mappings (A) ===");
+  const BLOCKER_NONE = "account_scope: no resolved account mappings";
+  const BLOCKER_PARTIAL = "account_scope: incomplete account mappings";
+
+  {
+    // A — account requirements exist + zero valid mappings: non-account resolution
+    // commits disabled/draft + derived [] + exact blocker — empty scope ≠ authorization
+    const fx = await setupImported("workflow_T3_A");
+    const res = await callResolve(fx.wfId, { workflow_id: fx.wfId,
+      expected_version: fx.wfDoc.version, version_id: fx.verDoc.version_id,
+      proposed: [{ binding_id: fx.byKind("label").binding_id, mappings: [
+        { source_index: 0, local_id: "vip" } ] }] });
+    ok(res != null && res.ok === true, `A → non-account resolution still commits (${JSON.stringify(res)?.slice(0, 140)})`);
+    eq(canonicalJson(res?.publish_blockers), canonicalJson([BLOCKER_NONE]),
+      "A → publish_blockers = exactly [account_scope: no resolved account mappings]");
+    const wfA = (await svc.getWorkflow(fx.wfId)) as Record<string, unknown>;
+    eq(wfA?.enabled, false, "A → stays disabled");
+    eq(wfA?.status, "draft", "A → stays draft");
+    eq(wfA?.current_version_id, res?.version_id, "A → pointer+scope land atomically");
+    eq(canonicalJson(wfA?.platforms), "[]", "A → derived platforms = []");
+    eq(canonicalJson(wfA?.shop_ids), "[]", "A → derived shop_ids = []");
+    const vdocA = (await collDocs(COLLECTIONS.workflowVersions)).find((v) => v.version_id === res?.version_id);
+    eq(canonicalJson(vdocA?.platforms), "[]", "A → version doc platforms = []");
+    eq(canonicalJson(vdocA?.shop_ids), "[]", "A → version doc shop_ids = []");
+    const detA = await svc.getWorkflowImportDetail(fx.wfId) as { publish_blockers?: string[] } | null;
+    ok((detA?.publish_blockers ?? []).includes(BLOCKER_NONE), "A → getWorkflowImportDetail reports same blocker");
+    ok(!(await svc.listWorkflows({ enabledOnly: true, publishedOnly: true, shopId: "shop_s1", platform: "shopee" }))
+      .some((w) => w.workflow_id === fx.wfId), "A → listWorkflows(enabledOnly+publishedOnly+scope) never exposes it");
+  }
+
+  console.log("\n=== 21. Account scope — partial resolution (B) ===");
+  {
+    // B — resolve เฉพาะบาง account requirement → derived เฉพาะ valid resolved;
+    // unresolved account bindings คง block readiness; ไม่ infer scope เพิ่ม
+    const R = await setupRepeat("workflow_T3_B");
+    const res = await callResolve(R.wfId, { workflow_id: R.wfId,
+      expected_version: R.wfDoc.version, version_id: R.verDoc.version_id,
+      proposed: [{ binding_id: R.bA3().binding_id, mappings: [
+        { source_index: 0, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }] });
+    ok(res != null && res.ok === true, "B → partial account resolution commits");
+    eq(canonicalJson(res?.publish_blockers), canonicalJson([BLOCKER_PARTIAL]),
+      "B → exactly one deterministic incomplete blocker");
+    const wfB = (await svc.getWorkflow(R.wfId)) as Record<string, unknown>;
+    eq(canonicalJson(wfB?.platforms), '["tiktok"]', "B → derived platforms = only resolved account's platform");
+    eq(canonicalJson(wfB?.shop_ids), '["shop_s2"]', "B → derived shop_ids = only resolved account's shop");
+    eq(wfB?.enabled, false, "B → stays disabled");
+    eq(wfB?.status, "draft", "B → stays draft");
+    const detB = await svc.getWorkflowImportDetail(R.wfId) as { publish_blockers?: string[] } | null;
+    ok((detB?.publish_blockers ?? []).includes(BLOCKER_PARTIAL), "B → getWorkflowImportDetail reports incomplete blocker");
+  }
+
+  console.log("\n=== 22. Account scope — invalid carried target (C) ===");
+  {
+    // C — resolve accounts ก่อน → ลบ shop target → re-resolution ถัดไป re-validate
+    // carried → state:invalid + ออกจาก derived + ยัง block; ไม่มี hidden repair
+    const fx = await setupImported("workflow_T3_C");
+    const r1 = await callResolve(fx.wfId, fx.req());
+    eq(r1?.ok, true, "C setup → accounts resolved");
+    const wfC1 = (await svc.getWorkflow(fx.wfId)) as Record<string, unknown>;
+    const vbC = (await collDocs(COLLECTIONS.workflowBindings))
+      .filter((b) => b.workflow_id === fx.wfId && b.version_id === wfC1.current_version_id);
+    const labC = vbC.find((b) => b.kind === "label") as Record<string, unknown>;
+    await (await mongo.getCollection(COLLECTIONS.shops)).deleteOne({ shop_id: "shop_s1" });
+    const r2 = await callResolve(fx.wfId, { workflow_id: fx.wfId,
+      expected_version: wfC1.version, version_id: wfC1.current_version_id,
+      proposed: [{ binding_id: labC.binding_id, mappings: [{ source_index: 0, local_id: "vip" }] }] });
+    await (await mongo.getCollection(COLLECTIONS.shops)).insertOne({ shop_id: "shop_s1", platform: "shopee", shopname: "S1", connected: true });
+    ok(r2 != null && r2.ok === true, "C → carried invalid target does not fail the save (disabled draft)");
+    eq(canonicalJson(r2?.publish_blockers), canonicalJson([BLOCKER_PARTIAL]),
+      "C → incomplete blocker (one account mapping invalidated)");
+    const wfC2 = (await svc.getWorkflow(fx.wfId)) as Record<string, unknown>;
+    eq(canonicalJson(wfC2?.shop_ids), '["shop_s2"]', "C → deleted target excluded from derived shop_ids");
+    eq(canonicalJson(wfC2?.platforms), '["tiktok"]', "C → deleted target's platform excluded");
+    const accC = ((await collDocs(COLLECTIONS.workflowBindings))
+      .filter((b) => b.version_id === r2?.version_id))
+      .find((b) => b.kind === "account") as Record<string, unknown>;
+    eq(accC?.status, "invalid", "C → account binding marked invalid");
+    const mapsC = ((accC?.resolution as { mappings?: Record<string, unknown>[] })?.mappings ?? [])
+      .slice().sort((x, y) => (x.source_index as number) - (y.source_index as number));
+    eq(mapsC[0]?.state, "invalid", "C → deleted-target mapping state:invalid (no hidden repair)");
+    eq(mapsC[0]?.shop_id, "shop_s1", "C → original target preserved (no replacement shop)");
+    ok(mapsC[0]?.invalidated_at != null, "C → invalidated_at recorded");
+    eq(mapsC[1]?.state, "valid", "C → surviving target still valid");
+  }
+
+  console.log("\n=== 23. Account scope — last valid mapping disappears (D) ===");
+  {
+    // D — valid mapping สุดท้ายหาย → derived กลับ [] + no-resolved blocker + ineligible
+    const fx = await setupImported("workflow_T3_D");
+    const r1 = await callResolve(fx.wfId, fx.req());
+    eq(r1?.ok, true, "D setup → accounts resolved");
+    const wfD1 = (await svc.getWorkflow(fx.wfId)) as Record<string, unknown>;
+    eq(sorted(wfD1?.shop_ids), '["shop_s1","shop_s2"]', "D setup → derived had both shops");
+    const vbD = (await collDocs(COLLECTIONS.workflowBindings))
+      .filter((b) => b.workflow_id === fx.wfId && b.version_id === wfD1.current_version_id);
+    const labD = vbD.find((b) => b.kind === "label") as Record<string, unknown>;
+    const shopsColl = await mongo.getCollection(COLLECTIONS.shops);
+    await shopsColl.deleteOne({ shop_id: "shop_s1" });
+    await shopsColl.deleteOne({ shop_id: "shop_s2" });
+    const r2 = await callResolve(fx.wfId, { workflow_id: fx.wfId,
+      expected_version: wfD1.version, version_id: wfD1.current_version_id,
+      proposed: [{ binding_id: labD.binding_id, mappings: [{ source_index: 0, local_id: "vip" }] }] });
+    await shopsColl.insertOne({ shop_id: "shop_s1", platform: "shopee", shopname: "S1", connected: true });
+    await shopsColl.insertOne({ shop_id: "shop_s2", platform: "tiktok", shopname: "S2", connected: true });
+    ok(r2 != null && r2.ok === true, "D → save still commits as disabled draft");
+    eq(canonicalJson(r2?.publish_blockers), canonicalJson([BLOCKER_NONE]),
+      "D → zero valid account mappings → no-resolved blocker");
+    const wfD2 = (await svc.getWorkflow(fx.wfId)) as Record<string, unknown>;
+    eq(canonicalJson(wfD2?.platforms), "[]", "D → derived platforms back to []");
+    eq(canonicalJson(wfD2?.shop_ids), "[]", "D → derived shop_ids back to []");
+    eq(wfD2?.enabled, false, "D → still disabled");
+    eq(wfD2?.status, "draft", "D → still draft");
+    const detD = await svc.getWorkflowImportDetail(fx.wfId) as { publish_blockers?: string[] } | null;
+    ok((detD?.publish_blockers ?? []).includes(BLOCKER_NONE), "D → getWorkflowImportDetail reports no-resolved blocker");
+    ok(!(await svc.listWorkflows({ enabledOnly: true, publishedOnly: true, shopId: "shop_s2", platform: "tiktok" }))
+      .some((w) => w.workflow_id === fx.wfId), "D → engine-visible list excludes it");
+  }
+
+  console.log("\n=== 24. Account scope — fully resolved (E) ===");
+  {
+    // E — account requirements ครบทุก source ด้วย valid mapping → ไม่มี account_scope
+    // blocker; scope server-derived เท่านั้น; non-account blockers ไม่เปลี่ยน
+    const fx = await setupImported("workflow_T3_E");
+    const res = await callResolve(fx.wfId, fx.req());
+    eq(res?.ok, true, "E → full account resolution commits");
+    eq(canonicalJson(res?.publish_blockers), "[]", "E → publish_blockers empty (no account_scope)");
+    const wfE = (await svc.getWorkflow(fx.wfId)) as Record<string, unknown>;
+    eq(sorted(wfE?.platforms), '["shopee","tiktok"]', "E → derived platforms = unique sorted from mappings");
+    eq(sorted(wfE?.shop_ids), '["shop_s1","shop_s2"]', "E → derived shop_ids = unique sorted from mappings");
+    const v1E = (await collDocs(COLLECTIONS.workflowVersions)).find((v) => v.version_id === fx.verDoc.version_id);
+    eq(canonicalJson(v1E?.platforms), canonicalJson(fx.verDoc.platforms), "E → v1 version scope unchanged (old version immutable)");
+    eq(canonicalJson(v1E?.shop_ids), canonicalJson(fx.verDoc.shop_ids), "E → v1 version shop_ids unchanged");
+    const detE = await svc.getWorkflowImportDetail(fx.wfId) as { publish_blockers?: string[] } | null;
+    ok(!(detE?.publish_blockers ?? []).some((b) => String(b).startsWith("account_scope")),
+      "E → getWorkflowImportDetail has no account_scope blocker (non-account blockers unchanged)");
+  }
+
+  console.log("\n=== 25. Scope — no account requirements (F, corrected M2) ===");
+  const BLOCKER_GLOBAL = "scope: explicit global scope approval required";
+  {
+    // F — workflow ไม่มี account-kind requirement → ไม่มี account_scope blocker
+    // (ห้าม invent requirements) แต่ empty imported scope ≠ authorization →
+    // global-scope blocker เดียว
+    const fx = await setupNoAcc("workflow_T3_F");
+    ok(fx.binds.length > 0 && fx.binds.every((b) => b.kind !== "account"), "F fixture → zero account-kind bindings");
+    const res = await callResolve(fx.wfId, fx.req());
+    eq(res?.ok, true, "F → label+user resolution commits");
+    eq(canonicalJson(res?.publish_blockers), canonicalJson([BLOCKER_GLOBAL]),
+      "F → exactly [scope: explicit global scope approval required] (no account_scope)");
+    const wfF = (await svc.getWorkflow(fx.wfId)) as Record<string, unknown>;
+    eq(canonicalJson(wfF?.platforms), "[]", "F → derived platforms []");
+    eq(canonicalJson(wfF?.shop_ids), "[]", "F → derived shop_ids []");
+    eq(wfF?.enabled, false, "F → stays disabled");
+    eq(wfF?.status, "draft", "F → stays draft");
+    const detF = await svc.getWorkflowImportDetail(fx.wfId) as { publish_blockers?: string[] } | null;
+    ok((detF?.publish_blockers ?? []).includes(BLOCKER_GLOBAL), "F → getWorkflowImportDetail reports global-scope blocker");
+    ok(!(detF?.publish_blockers ?? []).some((b) => String(b).startsWith("account_scope")),
+      "F → getWorkflowImportDetail has no account_scope blocker (none invented)");
+    ok(!(await svc.listWorkflows({ enabledOnly: true, publishedOnly: true, shopId: "shop_s1", platform: "shopee" }))
+      .some((w) => w.workflow_id === fx.wfId), "F → engine-visible list excludes it");
+  }
+
+  console.log("\n=== 26. Account scope — atomicity / regression pins (G) ===");
+  {
+    // stale expected_version → pointer + derived scope unchanged
+    const fx1 = await setupImported("workflow_T3_G1");
+    const wfG0 = canonicalJson(await svc.getWorkflow(fx1.wfId));
+    await expectReject("G stale expected_version (unresolved accounts)", fx1.wfId,
+      { ...fx1.req(), expected_version: 99 });
+    eq(canonicalJson(await svc.getWorkflow(fx1.wfId)), wfG0, "G stale → pointer+scope byte-identical");
+
+    // crash before pointer CAS → old pointer + old derived scope stay together
+    const fx2 = await setupImported("workflow_T3_G2");
+    const wfG20 = canonicalJson(await svc.getWorkflow(fx2.wfId));
+    armUpdateFail(COLLECTIONS.workflows, 1);
+    const thrG = await act(() => svcAny.saveBindingResolutionBatch?.(fx2.wfId,
+      { workflow_id: fx2.wfId, expected_version: fx2.wfDoc.version, version_id: fx2.verDoc.version_id,
+        proposed: [{ binding_id: fx2.byKind("label").binding_id, mappings: [{ source_index: 0, local_id: "vip" }] }] }, "admin_t"));
+    disarm();
+    ok(thrG != null, "G crash before commit CAS → throws");
+    eq(canonicalJson(await svc.getWorkflow(fx2.wfId)), wfG20, "G crash → old pointer+old scope together (no half-flip)");
+
+    // CAS conflict → no half-written scope
+    const fx3 = await setupImported("workflow_T3_G3");
+    let flippedG = false;
+    st.updateOneHook = async (coll: string) => {
+      if (coll === COLLECTIONS.workflows && !flippedG) {
+        flippedG = true;
+        st.updateOneHook = undefined;
+        await (await mongo.getCollection(COLLECTIONS.workflows)).updateOne(
+          { workflow_id: fx3.wfId }, { $set: { version: 42 } });
+      }
+    };
+    const rG3 = await callResolve(fx3.wfId, { workflow_id: fx3.wfId,
+      expected_version: fx3.wfDoc.version, version_id: fx3.verDoc.version_id,
+      proposed: [{ binding_id: fx3.byKind("label").binding_id, mappings: [{ source_index: 0, local_id: "vip" }] }] });
+    disarm();
+    eq(rG3?.conflict, true, "G CAS conflict → conflict response");
+    const wfG3 = (await svc.getWorkflow(fx3.wfId)) as Record<string, unknown>;
+    eq(canonicalJson(wfG3?.platforms), canonicalJson(fx3.wfDoc.platforms), "G conflict → platforms not half-written");
+    eq(canonicalJson(wfG3?.shop_ids), canonicalJson(fx3.wfDoc.shop_ids), "G conflict → shop_ids not half-written");
+    eq(wfG3?.current_version_id, fx3.wfDoc.current_version_id, "G conflict → pointer stays at old version");
+
+    // Task 2 repeat semantics preserved: kind=account + state=valid contributes;
+    // label/user repeats never contribute; partial account coverage still blocked
+    const R = await setupRepeat("workflow_T3_G4");
+    const rG4 = await callResolve(R.wfId, R.req());
+    eq(rG4?.ok, true, "G repeat batch resolves");
+    eq(canonicalJson(rG4?.publish_blockers), canonicalJson([BLOCKER_PARTIAL]),
+      "G → repeat leaves partial account coverage → incomplete blocker");
+    const wfG4 = (await svc.getWorkflow(R.wfId)) as Record<string, unknown>;
+    eq(sorted(wfG4?.platforms), '["shopee","tiktok"]', "G → repeat scope = valid account mappings only");
+    eq(sorted(wfG4?.shop_ids), '["shop_s1","shop_s2"]', "G → repeat scope has no label/user local_ids");
+    const vbG4 = await R.versionBinds(rG4?.version_id);
+    const accG4 = vbG4.find((b) => b.kind === "account" && (b.source_values as unknown[]).length === 1);
+    eq(accG4?.status, "resolved", "G → sibling account binding resolved solely via repeat");
+    eq(R.mapsOf(accG4)[0]?.via, "repeat", "G → its valid mapping is via:repeat (repeat contributes to scope)");
+
+    // label mapping named like a shop → never enters account scope
+    await (await mongo.getCollection(COLLECTIONS.conversations))
+      .insertOne({ conversation_id: "conv_trap", labels: ["shop_s1"] });
+    const fx5 = await setupNoAcc("workflow_T3_G5");
+    const rG5 = await callResolve(fx5.wfId, { workflow_id: fx5.wfId,
+      expected_version: fx5.wfDoc.version, version_id: fx5.verDoc.version_id,
+      proposed: [
+        { binding_id: fx5.byKind("label").binding_id, mappings: [{ source_index: 0, local_id: "shop_s1" }] },
+        { binding_id: fx5.byKind("user").binding_id, mappings: [{ source_index: 0, local_id: "adm_u1" }] },
+      ] });
+    eq(rG5?.ok, true, "G → shop-named label resolves");
+    const wfG5 = (await svc.getWorkflow(fx5.wfId)) as Record<string, unknown>;
+    eq(canonicalJson(wfG5?.shop_ids), "[]", "G → label local_id 'shop_s1' never enters account scope");
+    eq(canonicalJson(wfG5?.platforms), "[]", "G → no platform leaked from label/user mappings");
+  }
+
+  // ═══ 27. Task 3 correction M1 — sticky invalid status with count-complete mappings ═══
+  console.log("\n=== 27. Account scope — invalid status + complete mappings stays blocked (M1) ===");
+  {
+    // resolve accounts → ลบ shop → carried invalid (status invalid) → restore shop
+    // → carried revalidate กลับ valid ครบ count แต่ status ค้าง "invalid"
+    // (sticky-invalid path — contract เดิม: explicit direct resolution เท่านั้นที่
+    // repair ได้) → readiness ต้องยัง blocked
+    const fx = await setupImported("workflow_T3_M1");
+    const r1 = await callResolve(fx.wfId, fx.req());
+    eq(r1?.ok, true, "M1 setup → accounts resolved");
+    const wfM1 = (await svc.getWorkflow(fx.wfId)) as Record<string, unknown>;
+    const vbM1 = (await collDocs(COLLECTIONS.workflowBindings))
+      .filter((b) => b.workflow_id === fx.wfId && b.version_id === wfM1.current_version_id);
+    const labM1 = vbM1.find((b) => b.kind === "label") as Record<string, unknown>;
+
+    await (await mongo.getCollection(COLLECTIONS.shops)).deleteOne({ shop_id: "shop_s1" });
+    const r2 = await callResolve(fx.wfId, { workflow_id: fx.wfId,
+      expected_version: wfM1.version, version_id: wfM1.current_version_id,
+      proposed: [{ binding_id: labM1.binding_id, mappings: [{ source_index: 0, local_id: "vip" }] }] });
+    eq(r2?.ok, true, "M1 → invalid carried target commits");
+    const wfM2 = (await svc.getWorkflow(fx.wfId)) as Record<string, unknown>;
+    const accM1a = ((await collDocs(COLLECTIONS.workflowBindings))
+      .filter((b) => b.version_id === wfM2.current_version_id))
+      .find((b) => b.kind === "account") as Record<string, unknown>;
+    eq(accM1a?.status, "invalid", "M1 → binding status invalid after target delete");
+
+    await (await mongo.getCollection(COLLECTIONS.shops)).insertOne({ shop_id: "shop_s1", platform: "shopee", shopname: "S1", connected: true });
+    const vbM1b = (await collDocs(COLLECTIONS.workflowBindings))
+      .filter((b) => b.workflow_id === fx.wfId && b.version_id === wfM2.current_version_id);
+    const labM1b = vbM1b.find((b) => b.kind === "label") as Record<string, unknown>;
+    const r3 = await callResolve(fx.wfId, { workflow_id: fx.wfId,
+      expected_version: wfM2.version, version_id: wfM2.current_version_id,
+      proposed: [{ binding_id: labM1b.binding_id, mappings: [{ source_index: 0, local_id: "vip" }] }] });
+    ok(r3 != null && r3.ok === true, "M1 → revalidating resolution commits");
+    const accM1b = ((await collDocs(COLLECTIONS.workflowBindings))
+      .filter((b) => b.version_id === r3?.version_id))
+      .find((b) => b.kind === "account") as Record<string, unknown>;
+    const mapsM1 = ((accM1b?.resolution as { mappings?: Record<string, unknown>[] })?.mappings ?? [])
+      .filter((m) => m.state === "valid" && m.platform != null && m.shop_id != null);
+    eq(mapsM1.length, 2, "M1 → both carried mappings revalidated to valid (count-complete eligible)");
+    eq(accM1b?.status, "invalid", "M1 → binding status stays invalid — no hidden repair");
+    eq(canonicalJson(r3?.publish_blockers), canonicalJson([BLOCKER_PARTIAL]),
+      "M1 → invalid status + count-complete mappings still blocked (incomplete)");
+    const detM1 = await svc.getWorkflowImportDetail(fx.wfId) as { publish_blockers?: string[] } | null;
+    ok((detM1?.publish_blockers ?? []).includes(BLOCKER_PARTIAL), "M1 → getWorkflowImportDetail reports incomplete blocker");
+    const wfM3 = (await svc.getWorkflow(fx.wfId)) as Record<string, unknown>;
+    eq(wfM3?.enabled, false, "M1 → stays disabled");
+    eq(wfM3?.status, "draft", "M1 → stays draft");
+
+    // persisted read-model pin — status unresolved/invalid despite count-complete
+    // valid mappings → detail ต้อง fail closed (ไม่เชื่อ count อย่างเดียว)
+    const bindsColl = await mongo.getCollection(COLLECTIONS.workflowBindings);
+    await bindsColl.updateOne({ binding_id: accM1b?.binding_id }, { $set: { status: "unresolved" } });
+    const detPinU = await svc.getWorkflowImportDetail(fx.wfId) as { publish_blockers?: string[] } | null;
+    ok((detPinU?.publish_blockers ?? []).includes(BLOCKER_PARTIAL),
+      "M1 pin → detail fails closed on status:unresolved + complete mappings");
+    await bindsColl.updateOne({ binding_id: accM1b?.binding_id }, { $set: { status: "resolved" } });
+    const detPinR = await svc.getWorkflowImportDetail(fx.wfId) as { publish_blockers?: string[] } | null;
+    ok(!(detPinR?.publish_blockers ?? []).some((b) => String(b).startsWith("account_scope")),
+      "M1 pin → status:resolved + complete mappings clears blocker (contract intact)");
   }
 
   // ═══ summary ═══
