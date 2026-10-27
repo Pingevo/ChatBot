@@ -6859,3 +6859,39 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
   `BLOCKED_UNTIL_GROUPED_CANARY_ACCEPTED_AND_FALLBACK_RETIRED` →
   rollback/deploy notes → final 21-requirement acceptance.
 - **no push/PR/deploy/canary** — commit เท่านั้น.
+
+---
+
+## Zaapi Workflow Runtime — design audit closeout (2026-10-27)
+
+- Design-audit rounds completed: V1 audit → V2 correction → V3 correction —
+  all read-only; zero code changes during audit.
+- **Design V3 approved** by user, with three mandatory binding clarifications:
+  (A) exact re-import carry-forward conditions; (B) client input not
+  authoritative for source identity (server reads source_values itself);
+  (C) `saveBindingResolutionBatch` crash/retry CAS contract (deterministic
+  artifacts → single pointer-flip commit → conflict loser; no multi-doc
+  exactly-once claim).
+- Canonical spec written:
+  `docs/superpowers/specs/2026-10-27-zaapi-workflow-runtime-design.md`
+- `docs/plans/workflow-planner.md` gained a "Zaapi Runtime Rebaseline V3"
+  status section (history preserved — append-only).
+- Implementation **not started**. Next gate = R1 implementation plan
+  (binding-resolution CAS + mappings + scope owner + carry-forward + overlap
+  publish blocker + minimal UI/API — no runtime activation).
+- Phase 10B untouched.
+- Worktree state: baseline HEAD `ba7f5b9`; staging empty; **only three
+  audited documentation paths changed** (`docs/superpowers/specs/2026-10-27-
+  zaapi-workflow-runtime-design.md` new, `docs/plans/workflow-planner.md`,
+  this log). No implementation/test/schema files changed.
+
+### Design-spec commit closeout
+
+- Commit 1: `8451aab` `docs: define Zaapi workflow runtime design` — canonical
+  runtime spec + workflow planner only (2 files, +542/−4).
+- Design corrections included: server-authoritative `binding_id` request,
+  atomic pointer+derived-scope CAS, overlap save-as-draft/publish-block contract,
+  and SUPERSEDED markers for stale planner behavior.
+- Next step requires a **new Dev Worker session** to write the R1 implementation
+  plan; R1 implementation itself has not started.
+- No push/PR/merge/deploy/runtime activation.
