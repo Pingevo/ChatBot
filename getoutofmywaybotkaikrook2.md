@@ -7503,3 +7503,253 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
   user-side เท่านั้น) · ไม่ push/PR/merge/deploy/DDL · ไม่แตะ real Mongo.
 - **Commit 2 (docs closeout)**: plan status checkboxes + log นี้ —
   `docs: record workflow R1 task 2 closeout`.
+
+### กำลังจะทำ — R1 TASK 3: fail-closed derived account scope (implementation session)
+
+- **baseline (verified this session)**: worktree
+  `ChatBotProductMS-worktrees/zaapi-workflow-foundation` · branch
+  `codex/zaapi-workflow-foundation` @ `9c465c7` (`docs: record workflow R1
+  task 2 closeout`) · tree clean · staging empty · `git diff --check`
+  clean · baseline tests fresh: binding-resolution **645/645**.
+- **Phase 10B read-only record**: `/Users/itdev4/Documents/GitHub/
+  ChatBotProductMS` · branch `feature-phase3-aswer-quality` @ `fd4e682` ·
+  6 dirty paths (answer_context.py, app.py, SRS_SSD.md, master-plan,
+  waythrough2 + untracked test_phase10b) — **ห้ามแตะ** ไม่
+  write/stage/stash/copy ข้าม worktree.
+- **trace (PART 1 — owner เดียว `workflowService.ts`)**: `resolutionByBinding`
+  (:1207-1269) ครอบทุก version-scoped binding · derived scope (:1272-1275)
+  กรอง `state==="valid"` + platform/shop_id present อยู่แล้ว ·
+  `versionPayload`+`stableFingerprint` (:1282-1305) deterministic · commit
+  CAS เดียว (:1438-1446) pointer+version+enabled:false+draft+scope
+  atomically · **defect: return `publish_blockers: []` hardcode (:1472)** —
+  ไม่มี account_scope blocker ทั้งที่ account requirements อาจไม่มี valid
+  mapping เลย · `getWorkflowImportDetail` publish_blockers =
+  `capability.errors` เท่านั้น (:1513) + `unresolved_bindings` นับเฉพาะ
+  `status==="unresolved"` (:1512 — `invalid` ไม่ถูกนับ) ·
+  `listWorkflows` (:233-236) ตี `shop_ids`/`platforms` ว่าง = match-all
+  scope → empty unresolved account scope ต้องไม่กลายเป็น eligibility
+  (disabled/draft + blocker คือ safety ทั้งคู่) ·
+  `_assertActivationAllowed` (:254-274) ใช้ detail เดิม (FOUNDATION_GATES
+  runtimeActivation=false).
+- **bounded change (inline ใน owner เดิมเท่านั้น — plan §6 step 8 + Task 3)**:
+  1) หลัง `resolutionByBinding` เสร็จ ที่ derived-scope site เดิม:
+     account requirements = `versionBindings` ที่ `kind==="account" &&
+     count>0` · eligible scope mapping = `state==="valid"` + platform +
+     shop_id present · zero valid → `account_scope: no resolved account
+     mappings` · coverage ไม่ครบ → account_scope blocker ตัวเดียว
+     (deterministic, ไม่ใช่ต่อ source/index) · ครบ → ไม่มี blocker · ไม่มี
+     account requirement → ไม่มี blocker (prompt override — plan §4 บรรทัด
+     "blocker still emitted" ถูกแก้เป็น no-blocker ตาม worker prompt F)
+  2) result `publish_blockers` = blocker array นี้แทน hardcode `[]`
+     (save ยัง commit disabled/draft เสมอ — ไม่ reject)
+  3) `getWorkflowImportDetail` recompute structural account readiness จาก
+     version-scoped bindings (authoritative — ไม่ใช่ WorkflowDoc.
+     platforms/shop_ids): กฎเดียวกัน 3 ทาง + no-requirements→no-blocker
+  4) derivedPlatforms/derivedShopIds คงเดิม (unique+sorted+server-derived)
+- **ห้าม (constraints)**: ไม่มี helper/nested fn/guard/decision owner/
+  collection/index/worker/dep/flag/regex/keyword table ใหม่ · ไม่แตะ
+  workflowEngine/src/app/src/components/routes/node registry/Task 4+ · ไม่
+  expose saveBindingResolutionBatch ผ่าน route · imported workflows คง
+  enabled:false/status:"draft" · Task 1/2 byte-for-byte นอก account-scope ·
+  ไม่แก้ production unique-index blocker · fake Mongo เท่านั้น · Phase
+  10B ห้ามแตะ · ห้าม stage/commit — หยุด pre-commit review gate.
+- **RED plan (extend `test-workflow-binding-resolution.ts` เท่านั้น)**:
+  cases A–G ตาม worker prompt — zero valid mappings →
+  `account_scope: no resolved account mappings` + derived [] + disabled/
+  draft + detail รายงาน blocker เดียวกัน + listWorkflows ไม่ expose ·
+  partial resolution → derived เฉพาะ valid + blocker · invalid carried
+  target → excluded + blocked · last valid mapping หาย → [] + blocked ·
+  full coverage → ไม่มี account_scope blocker + derived exact · ไม่มี
+  account requirement → ไม่มี blocker · atomicity/regression pins (stale
+  expected_version, crash ก่อน CAS, CAS conflict, immutability, Task 2
+  repeat scope semantics เดิม, label/user named-values ไม่เข้า scope).
+  RED ต้อง fail เพราะ `publish_blockers:[]` hardcode — asserts blocker กัน
+  false-green.
+
+### R1 TASK 3 — ผลลัพธ์ (implementation done — ยังไม่ stage/commit)
+
+- **Root cause**: `saveBindingResolutionBatch` return `publish_blockers: []`
+  hardcode ที่ท้ายฟังก์ชัน — derived scope (kind account + state valid +
+  platform/shop_id present) คำนวณถูกแล้ว แต่ "zero/partial valid account
+  coverage" ไม่ถูกแปลงเป็น readiness signal · `getWorkflowImportDetail`
+  emit เฉพาะ `capability.errors` + `unresolved_bindings` นับเฉพาะ
+  `status==="unresolved"` (invalid ไม่ถูกนับ) · `listWorkflows` ตี
+  `shop_ids`/`platforms` ว่าง = match-all → ความปลอดภัยพึ่ง
+  enabled:false/draft อย่างเดียว ไม่มี blocker contract สำหรับ activation
+  ขั้นต่อไป.
+- **RED evidence (honest)**: suite ใหม่ 708 passed / **8 failed** — เฟล
+  เฉพาะ blocker asserts ทั้งหมด: A result `[]` vs
+  `[account_scope: no resolved account mappings]` + A detail · B result
+  `[]` vs `[account_scope: incomplete account mappings]` + B detail · C
+  result `[]` vs `[account_scope: incomplete account mappings]` · D result
+  `[]` vs `[account_scope: no resolved account mappings]` + D detail · G
+  repeat `[]` vs `[account_scope: incomplete account mappings]` — สาเหตุ
+  เดียวคือ hardcode `publish_blockers: []` + read path ไม่ recompute.
+- **Implementation (bounded, inline ใน owner เดิม — ไม่มี helper)**:
+  1) `saveBindingResolutionBatch` step-8b หลัง derived scope
+     (`workflowService.ts` ~:1277-1293): `accountReqs` =
+     `versionBindings.filter(kind==="account" && count>0)` ·
+     `eligiblePerReq` = จำนวน mappings ที่ `state==="valid"` + platform +
+     shop_id present ต่อ requirement · zero eligible ทั้งหมด → push
+     `account_scope: no resolved account mappings` · มี requirement ที่
+     eligible ≠ count → push `account_scope: incomplete account mappings`
+     (ตัวเดียว, deterministic) · ครบ/ไม่มี requirement → [] · result
+     `publish_blockers` = array นี้แทน hardcode `[]` (:1490) — save ยัง
+     commit disabled/draft เสมอ (ไม่ reject เมื่อ coverage ไม่ครบ)
+  2) `getWorkflowImportDetail` (:1521-1536): recompute truth table เดียวกัน
+     จาก version-scoped `binds[].resolution.mappings` (authoritative —
+     ไม่ใช่ WorkflowDoc.platforms/shop_ids) →
+     `publish_blockers: [...capability.errors, ...accountScopeBlockers]`
+     (:1546)
+- **GREEN + regression (fresh หลัง implement)**:
+  binding-resolution **716/716** (645 baseline + 71 Task 3 asserts) ·
+  persistence **210/210** · foundation **161/161** · `tsc --noEmit` clean ·
+  `git diff --check` clean.
+- **Structural audit**: `saveBindingResolutionBatch` ยัง write owner เดียว ·
+  `getWorkflowImportDetail` ยัง readiness read owner ·
+  `_assertActivationAllowed` ยัง consume detail เดิม (ไม่มี guard เพิ่ม) ·
+  ไม่มี route/UI/engine/runtime/registry edit · `account_scope` strings
+  อยู่เฉพาะ 2 owner sites · derived arrays คง unique+sorted+server-derived
+  เดิม · label/user mappings (รวมถึง local_id "shop_s1") ไม่เข้า scope ·
+  Task 2 repeat semantics คงเดิม (valid account repeat contributes,
+  invalid ไม่) · imported workflows ยัง enabled:false/status:"draft" ·
+  `FOUNDATION_GATES.runtimeActivation` ไม่เปลี่ยน · Phase 10B ไม่แตะ.
+- **Complexity delta**: public methods +0 · private helpers +0 · named
+  nested functions +0 · guards +0 · semantic regexes +0 · keyword tables
+  +0 · decision owners +0 · collections +0 · indexes +0 · workers/queues
+  +0 · dependencies +0 · feature flags +0 (เพิ่มเฉพาะ inline blocks ใน 2
+  existing functions).
+- **Changed files**: `ChatAdminWeb/src/backend/service/workflowService.ts`
+  (2 inline blocks + 2 return-field swaps) ·
+  `ChatAdminWeb/scripts/test-workflow-binding-resolution.ts`
+  (SRC_NOACC fixture + setupNoAcc + section 20-26 cases A–G) ·
+  `docs/superpowers/plans/2026-10-27-zaapi-workflow-r1-implementation.md`
+  (sync derived-scope/step-8 text กับ truth table ที่ implement +
+  in-progress evidence note — Task 3 **ยังไม่ mark complete**) · log นี้.
+- **ยังค้าง (ไม่ใช่งาน Task 3 — ห้ามแตะในงานนี้)**: production Mongo
+  unique index บน `workflow_bindings(workflow_id,version_id,node_id,
+  field_path)` + `workflow_versions(workflow_id,version_seq)` —
+  blocker เดิมจาก Task 1/2 ยังเปิดอยู่ (test ใช้ fake Mongo ไม่มี index
+  enforcement; prod DDL = separate approval) · Task 4+ ยังไม่เริ่ม.
+- **Stop gate**: ไม่ stage/ไม่ commit — รอ code review ก่อนประกาศ
+  pre-commit readiness.
+
+### กำลังจะทำ — R1 TASK 3 correction round 1 (M1 + M2)
+
+- **frozen state (verified)**: worktree เดิม · branch เดิม · HEAD
+  `9c465c7` · same 4 modified files (service, test, plan, log) · staging
+  empty · `git diff --check` clean · Phase 10B ไม่แตะ.
+- **M1 root cause (traced)**: carried-only branch ใน step 7
+  (`workflowService.ts`:1240-1246) ตั้ง `status: carried.some(invalid)
+  ? "invalid" : b.status` — downgrade เป็น invalid ได้แต่ไม่เคย upgrade
+  กลับ resolved → เมื่อ shop target ถูกลบแล้ว restore, resolution ถัดไป
+  revalidate carried → state:"valid" ครบ count แต่ status ค้าง "invalid"
+  · Task-3 logic เดิมเช็คเฉพาะ eligible count === count → ไม่มี blocker
+  → ขัด spec gate `unresolved==0 && invalid==0` · **fix**: complete
+  readiness ต้อง `status === "resolved"` + eligible === count (ทั้ง write
+  path ผ่าน resolutionByBinding.status และ read path ผ่าน persisted
+  b.status) — ไม่ auto-repair status (explicit direct resolution เท่านั้น
+  ตาม contract เดิม).
+- **M2 root cause**: workflow ที่ไม่มี account requirement → derived []
+  + publish_blockers [] → ดูเหมือน ready ทั้งที่ empty scope ถูก
+  listWorkflows ตีเป็น match-all · canonical plan กำหนด empty imported
+  scope = blocked state · **fix**: เมื่อ imported workflow (wf.import !=
+  null — write path guaranteed โดย :1007 gate) มี accountReqs ว่าง →
+  append blocker เดียว `scope: explicit global scope approval required`
+  (ไม่ใช่ account blocker — ไม่ invent requirement, ไม่ authorize global)
+  ทั้ง write result + read detail · canonical (non-imported) workflow ไม่
+  โดน (wf.import == null → behavior เดิม).
+- **bounded change**: แก้เฉพาะ 2 inline Task-3 blocks เดิม — rename
+  accountScopeBlockers → scopeBlockers (มี non-account blocker แล้ว) ·
+  ไม่มี helper/function/guard/table/owner/flag/dep เพิ่ม · blocker
+  ordering deterministic (account blockers ก่อน scope blocker เป็น mutual
+  exclusive branches) · ไม่แตะ CAS/fingerprint/raw provenance/listWorkflows
+  /FOUNDATION_GATES/routes/UI/engine · ไม่ persist blocker strings.
+- **RED plan**: M1 — resolve accounts → ลบ shop_s1 → re-resolve (status
+  invalid, s1 invalid) → restore shop → re-resolve อีกครั้ง (carried
+  revalidate → valid ครบ count แต่ status ค้าง invalid) → assert
+  `incomplete` blocker ทั้ง result+detail + disabled/draft + ไม่มี hidden
+  repair · persisted pin — updateOne status "unresolved"/"invalid" บน
+  complete-valid binding → detail ต้อง fail closed · M2 — อัปเดต case F
+  เดิม: publish_blockers === [`scope: explicit global scope approval
+  required`] + detail same + listWorkflows ไม่ expose + disabled/draft +
+  ไม่มี account_scope blocker.
+
+### R1 TASK 3 correction round 1 — ผลลัพธ์ (ยังไม่ stage/commit)
+
+- **M1 root cause (confirmed)**: carried-only branch step 7
+  (`workflowService.ts`:1240-1246) `status: carried.some(invalid) ?
+  "invalid" : b.status` — revalidated-to-valid mappings ไม่ upgrade status
+  → binding ค้าง "invalid" พร้อม count-complete valid mappings · logic
+  เดิมเช็คเฉพาะ eligible count → blocker หาย → ขัด spec activation gate
+  `unresolved==0 && invalid==0` · **fix**: complete readiness = status
+  ==="resolved" + eligible===count (write: resolutionByBinding.status;
+  read: persisted b.status) — ไม่ auto-repair.
+- **M2 root cause**: imported workflow ไม่มี account requirement →
+  publish_blockers [] ทั้งที่ empty scope = match-all ใน listWorkflows ·
+  **fix**: accountReqs ว่าง + wf.import != null → `scope: explicit global
+  scope approval required` ตัวเดียว ทั้ง write result + read detail ·
+  canonical workflow (wf.import==null) ไม่เปลี่ยน.
+- **RED evidence (honest)**: 727 passed / **5 failed** — F result
+  `[]` vs [`scope: explicit global scope approval required`] + F detail ·
+  M1 result `[]` vs [`account_scope: incomplete account mappings`] + M1
+  detail · M1 persisted pin (status:unresolved + complete mappings) —
+  เฟลเฉพาะ contract ที่ขาด; setup asserts (sticky invalid, count-complete)
+  ผ่าน ยืนยัน trace.
+- **Implementation**: แก้เฉพาะ 2 inline Task-3 blocks เดิมใน
+  `workflowService.ts` — rename accountScopeBlockers → scopeBlockers ·
+  incomplete condition เพิ่ม `status !== "resolved"` check · else-if
+  `wf.import != null` → push global-scope blocker · write path ใช้
+  versionBindings + resolutionByBinding.status · read path ใช้ persisted
+  binds[].status + resolution.mappings · deterministic ordering เดิม.
+- **GREEN + regression (fresh)**: binding-resolution **732/732** (716 +
+  16 correction asserts) · persistence **210/210** · foundation
+  **161/161** · `tsc --noEmit` clean · `git diff --check` clean · Task
+  1–2 asserts ยังเขียวทั้งหมด.
+- **Structural audit**: inline blocks 2 จุดเดิมเท่านั้น — public methods
+  +0 · private helpers +0 · named nested functions +0 · guards +0 ·
+  semantic regexes +0 · keyword tables +0 · decision owners +0 ·
+  collections/indexes/workers/deps/flags +0 · ไม่แตะ routes/UI/engine/
+  registry/listWorkflows/FOUNDATION_GATES · blocker strings ไม่เข้า
+  provenance/fingerprint · invalid status ไม่มี implicit repair · Task 4
+  ไม่เริ่ม · Phase 10B ไม่แตะ.
+- **ยังค้าง**: production Mongo unique-index blocker ยังเปิด (เดิม) ·
+  explicit global-scope contract = future approval · Task 4+ ยังไม่เริ่ม.
+- **Stop gate**: ไม่ stage/ไม่ commit — รอ pre-commit review.
+
+### R1 TASK 3 — FINAL CLOSEOUT (committed)
+
+- **Commit 1 (impl+tests)**: `020118ad6dfdb7c92e51dc2c89ec0d8f4dd242e3`
+  `feat: fail-closed derived account scope` — 2 files:
+  `ChatAdminWeb/src/backend/service/workflowService.ts` +
+  `ChatAdminWeb/scripts/test-workflow-binding-resolution.ts`.
+- **Commit 2 (docs)**: จะเขียน hash หลัง commit เสร็จ — manifest =
+  plan doc + log นี้เท่านั้น.
+- **Implementation manifest**: step-8b inline block ใน
+  `saveBindingResolutionBatch` (versionBindings + resolutionByBinding
+  .status/.mappings) + result `publish_blockers: scopeBlockers` · inline
+  recompute ใน `getWorkflowImportDetail` (persisted binds[].status +
+  resolution.mappings — authoritative, ไม่ใช่ WorkflowDoc scope) +
+  `publish_blockers: [...capability.errors, ...scopeBlockers]` · test:
+  SRC_NOACC fixture + setupNoAcc + sections 20-27 (cases A-G + M1 + M2).
+- **Final truth table**: account requirements มี + zero eligible →
+  `account_scope: no resolved account mappings` · มี + status!=="resolved"
+  หรือ eligible≠count → `account_scope: incomplete account mappings` ·
+  resolved+ครบ → ไม่มี blocker · imported workflow ไม่มี requirement →
+  `scope: explicit global scope approval required` (ไม่ใช่ account blocker)
+  · canonical workflow → behavior เดิม.
+- **M1/M2 correction**: M1 — complete readiness ต้อง status==="resolved"
+  (sticky invalid + count-complete mappings ยัง blocked; ไม่มี silent
+  repair) · M2 — empty imported scope = blocked ผ่าน global-scope blocker
+  (empty scope ≠ match-all authorization).
+- **Final verification (fresh)**: binding-resolution 732/732 ·
+  persistence 210/210 · foundation 161/161 · `tsc --noEmit` clean ·
+  `git diff --check` clean · Task 1-2 asserts เขียวครบ.
+- **Complexity delta**: public methods +0 · private helpers +0 · named
+  nested functions +0 · guards +0 · semantic regexes +0 · keyword tables
+  +0 · decision owners +0 · collections/indexes/workers/deps/flags +0 ·
+  blockers = readiness output only (ไม่เข้า Mongo/fingerprint/provenance).
+- **ยืนยัน**: imported workflows คง enabled:false/status:"draft" ·
+  invalid status ไม่มี implicit repair · production unique-index blocker
+  ยังเปิด · Task 4 ยังไม่เริ่ม · Phase 10B ไม่แตะ · ไม่มี
+  push/PR/merge/deploy/DDL/real Mongo/provider activity.
