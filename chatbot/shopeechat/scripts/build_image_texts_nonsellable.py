@@ -52,7 +52,8 @@ def main() -> None:
     from chatbot.shopeechat import knowledge_base as _kb
     counts = B.run_generation_ocr(work, db=_kb._admin_db(),
                                   gen_dir=args.gen_dir, gid=args.gid,
-                                  max_calls=args.max_calls, deadline_ts=deadline)
+                                  max_calls=args.max_calls, deadline_ts=deadline,
+                                  scope="nonsellable")
     print(f"Done (nonsellable): {counts}")
 
 

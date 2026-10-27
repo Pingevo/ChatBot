@@ -662,6 +662,15 @@ class TestEnforceComposition:
 
     _REQ = SimpleNamespace(message="m", history=[])
 
+    _SEGS = [
+        {"domain": "product", "origin": "model",
+         "text": "WPB100L ราคา 990 บาทค่ะ",
+         "need_indices": [0], "subject_ids": []},
+        {"domain": "policy", "origin": "deterministic",
+         "text": guards._POLICY_TEXT_INELIGIBLE,
+         "need_indices": [1], "subject_ids": []},
+    ]
+
     def test_valid_marker_returns_byte_identical(self):
         """marker ครบ+ตรง → answer/answer_segments ไม่แตะ (แม้ product
         segment จะมี injected clause — prose ไม่ใช่ input ของ guard)."""
@@ -671,7 +680,8 @@ class TestEnforceComposition:
             answer,
             {**_PDEC_RD, "composition": {
                 "domains": ["product", "policy"],
-                "policy_text": guards._POLICY_TEXT_INELIGIBLE}})
+                "policy_text": guards._POLICY_TEXT_INELIGIBLE,
+                "segments": list(self._SEGS)}})
         out = guards.enforce(resp, self._REQ)
         assert out.answer == answer
         assert out.answer_segments == resp.answer_segments
@@ -684,7 +694,8 @@ class TestEnforceComposition:
             "WPB100L ราคา 990 บาทค่ะ พร้อมส่งค่ะ",
             {**_PDEC_RD, "composition": {
                 "domains": ["product", "policy"],
-                "policy_text": guards._POLICY_TEXT_INELIGIBLE}})
+                "policy_text": guards._POLICY_TEXT_INELIGIBLE,
+                "segments": list(self._SEGS)}})
         out = guards.enforce(resp, self._REQ)
         assert out.answer == resp.answer == (
             "WPB100L ราคา 990 บาทค่ะ พร้อมส่งค่ะ")
@@ -1012,12 +1023,13 @@ class TestPromptDistillation:
 
     def test_typed_prompt_drops_only_stale_block(self):
         assert llm.TYPED_SYSTEM_INSTRUCTION == (
-            llm._SYS_CORE_A + llm._SYS_CORE_B)
+            llm._SYS_CORE_A + llm._SYS_CORE_B + llm._SYS_TYPED_CARD_NOTE)
         assert llm.SYSTEM_INSTRUCTION == (
             llm._SYS_CORE_A + llm._SYS_LEGACY_CLAIM_NOTE + llm._SYS_CORE_B)
         dropped = (len(llm.SYSTEM_INSTRUCTION.encode("utf-8"))
                    - len(llm.TYPED_SYSTEM_INSTRUCTION.encode("utf-8")))
-        assert dropped == len(llm._SYS_LEGACY_CLAIM_NOTE.encode("utf-8"))
+        assert dropped == (len(llm._SYS_LEGACY_CLAIM_NOTE.encode("utf-8"))
+                           - len(llm._SYS_TYPED_CARD_NOTE.encode("utf-8")))
 
     def test_typed_prompt_excludes_stale_claim(self):
         assert "LLM จะไม่ถูกเรียกเลย" not in llm.TYPED_SYSTEM_INSTRUCTION

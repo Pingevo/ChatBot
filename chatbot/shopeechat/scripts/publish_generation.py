@@ -84,13 +84,15 @@ def _read_pointer(db) -> dict | None:
     return db[POINTER_COLL].find_one({"_id": POINTER_ID})
 
 
-def validate_generation(gen_dir: Path, db, gid: str) -> dict:
+def validate_generation(gen_dir: Path, db, gid: str,
+                        require_description: bool = False) -> dict:
     """counts/hashes/generation pairing — mismatch ใด ๆ → ValueError (หยุดก่อน CAS).
 
     ตรวจ: artifacts ครบ, units jsonl == units coll count, unit npz rows ==
     units count, product npz rows > 0, ทั้ง npz ฝัง generation_id == gid,
-    image_texts evidence file count == published coll count (0 ทั้งคู่ก็ผ่าน —
-    missing OCR non-blocking)
+    image_texts evidence file count == published coll count + generation
+    OCR counts ของ gid เดียวกัน (empty publish ผ่านเฉพาะเมื่อ counts
+    พิสูจน์ว่า source ว่างจริง — r7 gate)
     """
     gen_dir = Path(gen_dir)
     required = ("sellable_units.jsonl", "unit_embeddings.npz",
@@ -113,15 +115,138 @@ def validate_generation(gen_dir: Path, db, gid: str) -> dict:
         raise ValueError(f"product npz generation_id {prod_gid!r} != {gid}")
     if prod_rows <= 0:
         raise ValueError("product npz empty")
+    # Phase 10B — description-chunk artifact เป็น optional: มี ⇒ schema gate
+    #   เต็มรูปแบบก่อน CAS; ไม่มี ⇒ generation ยัง valid (gen เก่าก่อน Phase
+    #   10B ไม่กลายเป็น invalid — runtime desc source คืนว่างตาม contract)
+    desc_npz = gen_dir / "description_embeddings.npz"
+    desc_rows = 0
+    if require_description and not desc_npz.exists():
+        # operator precondition: Phase 10B gen ใหม่ต้องมี description source —
+        #   missing artifact = publication reject (ไม่ใช่ empty-source publish)
+        raise ValueError(
+            "description_embeddings.npz required but missing — "
+            "description build must succeed before publish")
+    if desc_npz.exists():
+        import numpy as np
+        _z = np.load(desc_npz, allow_pickle=True)
+        _dgid = (str(_z["generation_id"].item())
+                 if "generation_id" in _z.files else None)
+        if _dgid != gid:
+            raise ValueError(
+                f"description npz generation_id {_dgid!r} != {gid}")
+        desc_rows = int(_z["embeddings"].shape[0])
+        if _z["embeddings"].ndim != 2 or _z["embeddings"].shape[1] != 1024:
+            raise ValueError(
+                f"description npz emb dim {_z['embeddings'].shape}")
+        if not np.isfinite(_z["embeddings"]).all():
+            raise ValueError("description npz non-finite embeddings")
+        for _k in ("item_ids", "chunk_ids", "shops", "texts"):
+            if _k not in _z.files or len(_z[_k]) != desc_rows:
+                raise ValueError(f"description npz {_k} rows != {desc_rows}")
+        if len({str(c) for c in _z["chunk_ids"]}) != desc_rows:
+            raise ValueError("description npz duplicate chunk_ids")
+        for _iid, _cid in zip(_z["item_ids"], _z["chunk_ids"]):
+            if not str(_cid).startswith(f"{_iid}:"):
+                raise ValueError(
+                    f"description npz chunk_id {_cid} !~ item_id {_iid}")
+    if require_description and desc_rows <= 0:
+        raise ValueError(
+            "description_embeddings.npz required but empty (0 rows)")
     it_count = _count_jsonl(gen_dir / "image_texts.jsonl")
     it_coll = db[f"image_texts_{gid}"].count_documents({})
     if it_coll != it_count:
         raise ValueError(
             f"image_texts_{gid} count {it_coll} != evidence file {it_count}")
+    # r8 completeness gate — sidecar + jsonl + generated collection ต้อง
+    #   พิสูจน์ผลลัพธ์เดียวกันครบทั้งสอง scope ก่อน CAS เสมอ:
+    #   sidecar parse ได้ + gid ตรง + completed_scopes = 2 scopes +
+    #   scopes keys ตรง completed_scopes + per-scope counters ครบเป็น
+    #   int≥0 (ไม่ใช่ bool) + finals int≥0 +
+    #   unique_discovered = ผลรวม scope-discovered (worklists disjoint) +
+    #   published_evidence == jsonl count + coll count == jsonl (ด้านบน) +
+    #   reusable/carried>0 ⇒ evidence>0 + empty ⇒ unique_discovered==0
+    #   (mismatch ใด ๆ → reject ก่อน CAS — pointer เดิมคงเดิม)
+    cdoc = None
+    counts_path = gen_dir / "image_texts.counts.json"
+    if counts_path.exists():
+        try:
+            _c = json.loads(counts_path.read_text(encoding="utf-8"))
+            if (_c.get("generation_id") == gid
+                    and isinstance(_c.get("scopes"), dict)):
+                cdoc = _c
+        except Exception:
+            cdoc = None
+    if cdoc is None:
+        raise ValueError(
+            f"image_texts_{gid} without valid generation OCR counts — "
+            "carry-forward step did not run (publish rejected)")
+    cscopes = cdoc.get("scopes") or {}
+    if set(cdoc.get("completed_scopes") or []) != {"sellable",
+                                                 "nonsellable"}:
+        raise ValueError(
+            f"image_texts_{gid} incomplete scopes "
+            f"{cdoc.get('completed_scopes')} — both sellable and "
+            "nonsellable must complete (publish rejected)")
+    # r9 shape gate — completed_scopes เพียงอย่างเดียวไม่ใช่ proof: scope keys
+    #   + counter types + finals ต้อง structurally valid (scopes:{} fabricated
+    #   เคยผ่าน — completed ถูกเช็คแต่ scopes keys ไม่เคยถูก verify)
+    if set(cscopes) != {"sellable", "nonsellable"}:
+        raise ValueError(
+            f"image_texts_{gid} scopes keys {sorted(cscopes)} != "
+            "{sellable,nonsellable} (publish rejected)")
+    if set(cdoc.get("completed_scopes") or []) != set(cscopes):
+        raise ValueError(
+            f"image_texts_{gid} completed_scopes != scopes keys")
+    _req = ("discovered", "reusable", "carried", "new", "changed",
+            "deferred", "malformed", "duplicate")
+    for sname in ("sellable", "nonsellable"):
+        sc = cscopes[sname]
+        if not isinstance(sc, dict):
+            raise ValueError(
+                f"image_texts_{gid} scope {sname} not an object")
+        for k in _req:
+            v = sc.get(k)
+            if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                raise ValueError(
+                    f"image_texts_{gid} scope {sname}.{k} invalid: {v!r}")
+    for k in ("unique_discovered", "published_evidence"):
+        v = cdoc.get(k)
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            raise ValueError(
+                f"image_texts_{gid} {k} invalid: {v!r}")
+    unique_discovered = cdoc.get("unique_discovered")
+    if unique_discovered != sum(
+            (cscopes.get(s) or {}).get("discovered") or 0
+            for s in ("sellable", "nonsellable")):
+        raise ValueError(
+            f"image_texts_{gid} unique_discovered {unique_discovered} "
+            "!= scope discovered sum")
+    published_evidence = cdoc.get("published_evidence")
+    if published_evidence != it_count:
+        raise ValueError(
+            f"image_texts_{gid} published_evidence {published_evidence} "
+            f"!= evidence file count {it_count}")
+    carried_total = sum((sc.get("reusable") or 0) + (sc.get("carried") or 0)
+                        for sc in cscopes.values())
+    if carried_total > 0 and it_count == 0:
+        raise ValueError(
+            f"image_texts_{gid} empty but counts show carried/reusable "
+            "evidence — refusing empty publish")
+    if it_count == 0 and unique_discovered != 0:
+        raise ValueError(
+            f"image_texts_{gid} empty but unique_discovered="
+            f"{unique_discovered} — source was not empty")
     return {
         "unit_count": unit_count, "npz_rows": npz_rows,
-        "product_rows": prod_rows, "image_texts_count": it_count,
-        "sha256": {name: sha256_file(gen_dir / name) for name in required
+        "product_rows": prod_rows, "desc_rows": desc_rows,
+        "image_texts_count": it_count,
+        "image_texts_scopes": cscopes,
+        "image_texts_unique_discovered": unique_discovered,
+        "image_texts_published_evidence": published_evidence,
+        "image_texts_completed_scopes": sorted(
+            cdoc.get("completed_scopes") or []),
+        "sha256": {name: sha256_file(gen_dir / name)
+                   for name in (*required, "description_embeddings.npz")
                    if (gen_dir / name).exists()},
     }
 
@@ -191,7 +316,8 @@ def _pointer_set_doc(gid: str, stats: dict, manifest_sha: str,
 
 
 def publish(db, gen_dir: Path, gid: str, expected_current: str | None = "auto",
-            exports_root: Path | None = None) -> str:
+            exports_root: Path | None = None,
+            require_description: bool = False) -> str:
     """validate → manifest → one CAS → cleanup — คืน published|bootstrap|conflict:*
 
     expected_current: "auto" = อ่านจาก pointer ปัจจุบัน (None ถ้าไม่มี) — CAS
@@ -212,13 +338,34 @@ def publish(db, gen_dir: Path, gid: str, expected_current: str | None = "auto",
         raise ValueError(
             f"gen_dir {gen_dir} != {exports_root / 'gen' / gid} — "
             "pointer ต้องอ้าง gen dir เดียวกับที่ validate")
-    stats = validate_generation(gen_dir, db, gid)
+    stats = validate_generation(gen_dir, db, gid,
+                                require_description=require_description)
+    counts = {
+        "units": stats["unit_count"], "unit_npz_rows": stats["npz_rows"],
+        "products": stats["product_rows"],
+        "image_texts": stats["image_texts_count"],
+        "image_texts_unique_discovered":
+            stats["image_texts_unique_discovered"],
+        "image_texts_published_evidence":
+            stats["image_texts_published_evidence"],
+        "image_texts_completed_scopes":
+            stats["image_texts_completed_scopes"]}
+    if stats["desc_rows"]:                       # Phase 10B artifact present
+        counts["description_chunks"] = stats["desc_rows"]
+    # per-scope counters → disjoint-safe sums (worklists disjoint — ทุก key
+    #   ยกเว้น discovered ที่ถูกบันทึกเป็น unique_discovered แล้ว)
+    for sc in stats["image_texts_scopes"].values():
+        for k, v in sc.items():
+            if k == "discovered":
+                continue
+            if isinstance(v, int) and not isinstance(v, bool):
+                counts[f"image_texts_{k}"] = (
+                    counts.get(f"image_texts_{k}", 0) + v)
+    if stats["image_texts_count"] == 0:
+        counts["image_texts_empty"] = True
     manifest = {
         "generation_id": gid, "status": "validated",
-        "validated_at": _utc_now_iso(), "counts": {
-            "units": stats["unit_count"], "unit_npz_rows": stats["npz_rows"],
-            "products": stats["product_rows"],
-            "image_texts": stats["image_texts_count"]},
+        "validated_at": _utc_now_iso(), "counts": counts,
         "sha256": stats["sha256"],
     }
     _mpath, msha = finalize_manifest(gen_dir, manifest)
@@ -303,6 +450,8 @@ def main() -> int:
                     help="expected current gid | none (bootstrap) | auto")
     ap.add_argument("--rollback", action="store_true")
     ap.add_argument("--expected-active", default="")
+    ap.add_argument("--require-description", action="store_true",
+                    help="Phase 10B operator precondition: description_embeddings.npz ต้องมีและ valid ก่อน CAS")
     args = ap.parse_args()
     from chatbot.shopeechat.knowledge_base import _admin_db  # noqa: E402
     db = _admin_db()
@@ -311,7 +460,8 @@ def main() -> int:
         print(res)
         return 0 if res == "rolled_back" else 1
     expected = {"auto": "auto", "none": None}.get(args.expected, args.expected)
-    res = publish(db, args.gen_dir, args.gid, expected_current=expected)
+    res = publish(db, args.gen_dir, args.gid, expected_current=expected,
+                  require_description=args.require_description)
     print(res)
     return 0 if res in ("published", "bootstrap") else 1
 

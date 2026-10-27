@@ -60,9 +60,9 @@ if TYPE_CHECKING:
 
 from .retrieval_planner import RetrievalRequest
 from .retrieval_selection import (
-    META_HINT_KEYS, ROLE_RANK, SelectionResult, needs_for_request)
+    META_HINT_KEYS, SelectionResult, needs_for_request)
 from .candidate_pool import CandidatePool
-from .turn_decision import PRODUCTISH_NEED_KINDS
+from .turn_decision import PRODUCTISH_NEED_KINDS, _FACT_DESCRIBE
 
 # bounds — products ต่อ need แล้ว hard cap รวม; evidence bounded ทั้ง
 # count + per-record serialized bytes (ทั้ง record ไม่ใช่แค่ payload —
@@ -88,7 +88,7 @@ EMPTY_CONTEXT_REPLY = (
 # card fields ที่เข้า customer context — closed set; desc หนักเฉพาะ op ที่ต้อง
 # (recommend/price/link/stock = slim เสมอ — ตัด full-desc-per-product เดิม)
 _BASE_CARD_FIELDS = frozenset({
-    "name", "shop", "price", "warranty", "short_link", "image_url",
+    "name", "item_id", "shop", "price", "warranty", "short_link", "image_url",
     "has_promotion", "is_flash_sale", "variants", "tier_variation",
     "brand", "category", "sold_out", "total_stock", "status",
     "catalog_status", "_available_for_sale", "sellable",
@@ -98,6 +98,17 @@ _BASE_CARD_FIELDS = frozenset({
 })
 _DESC_OPS = frozenset({"describe", "compare", "compat", "lookup", "collect"})
 _DESC_FIELDS = frozenset({"description_excerpt", "weight", "dimension"})
+# typed requested_facts (describe-family) admit evidence fields ของ item
+#   นั้นเองแม้ op เป็น fact-op (stock/price) — owner: TurnNeed.requested_facts
+_FACT_DESC_FIELDS = _DESC_FIELDS | frozenset({"raw_description"})
+_FACT_DESC_FAMILY = _FACT_DESCRIBE
+# intent requested_facts → FieldEvidence fact_key (join ของ 2 contract —
+# consumer boundary เจ้าเดียว: card fields/evidence ที่ cover อยู่แล้ว
+# (price/stock/link/description/compatibility) ไม่ต้อง emit ซ้ำ)
+_REQUESTED_FACT_KEYS = {
+    "data_transfer_speed": ("data_transfer_mbps",),
+    "charging_speed": ("output_power_w",),
+}
 
 # closed evidence schema — kinds ที่เข้า product context ได้เท่านั้น
 _SUPPORTING_KINDS = frozenset({
@@ -127,6 +138,9 @@ _ROLE_NOTE = {
     "alternative": "สินค้าแนะนำทดแทน — ไม่ใช่รุ่นที่ลูกค้าถามถึงโดยตรง "
                    "ให้บอกว่าเป็นรุ่นทดแทน",
     "relation_target": "สินค้าที่ใช้ร่วมกันได้ตามความสัมพันธ์ของคำถาม",
+    "historical_evidence":
+        "สินค้าที่เคยคุยกันก่อนหน้า — ใช้เป็นข้อมูลอ้างอิงเท่านั้น "
+        "ไม่ใช่สินค้าที่แนะนำในคำตอบนี้",
 }
 
 # closed render templates keyed by typed operation เท่านั้น (generation —
@@ -167,6 +181,7 @@ class NeedTask:
     value_constraints: tuple[tuple[str, int], ...] = ()  # profile owner
     target: str | None = None                    # external device/relation tgt
     ranking: tuple[str, str] | None = None
+    requested_facts: tuple[str, ...] = ()        # intent contract keys verbatim
 
 
 @dataclass(frozen=True)
@@ -195,6 +210,10 @@ class AnswerTask:
                 (f"งบขั้นต่ำ {v} บาท" if k == "price_min"
                  else f"งบไม่เกิน {v} บาท")
                 for k, v in t.value_constraints]
+            if t.requested_facts:
+                parts.append(
+                    "เรื่อง " + "/".join(
+                        _FACT_LABEL.get(f, f) for f in t.requested_facts))
             if t.ranking:
                 parts.append(f"เรียงตาม {t.ranking[0]} "
                              f"{'มากสุด' if t.ranking[1] == 'max' else 'น้อยสุด'}")
@@ -250,11 +269,26 @@ class AnswerContext:
     # proof — deterministic verdict segment ที่ composition (ไม่ใช่
     # model task / ไม่ใช่ evidence context ของ model)
     compat_verdicts: tuple[CompatVerdict, ...] = ()
+    # typed constraint/target gate notes — near-miss (proven-fail dropped)
+    # และ unverified-target summary; evidence-bound เท่านั้น
+    #   {"need_index", "item", "detail"} — renderer อยู่ใน context_text
+    constraint_notes: tuple[dict, ...] = ()
+    # need ที่ evaluated candidates ทั้งหมด proven-fail → typed verdict
+    #   → deterministic segment ที่ composition (เช่นเดียวกับ compat
+    #   verdict — model ไม่ต้อง render conclusion เอง)
+    #   {"need_index", "items": [{"identity","item","detail"}]}
+    constraint_segments: tuple[dict, ...] = ()
+    # eval-measured spec values = typed product evidence ผูก identity
+    #   เจ้าของค่าเสมอ — {"identity","name","fact_key","value"}; ค่าที่
+    #   ลูกค้าถามไม่เข้าช่องนี้ (measured ≠ ask). guard ตรวจ claim กับ
+    #   evidence ของ identity เดียวกันที่ clause ระบุเท่านั้น — ห้ามเป็น
+    #   flat/global authority (ค่าของ A ห้ามรับรอง claim ของ B)
+    spec_measured_facts: tuple[dict, ...] = ()
 
     @property
     def is_empty(self) -> bool:
         return not (self.products or self.evidence
-                    or self.availability_notes)
+                    or self.availability_notes or self.constraint_notes)
 
     def context_text(self, shop_hint: str | None = None) -> str:
         """serialize products+evidence+notes เป็น prompt context —
@@ -308,6 +342,14 @@ class AnswerContext:
                         "พร้อมจำหน่าย (หมดสต็อก/เลิกขาย/ถูกลบ) — "
                         "ใช้เป็นข้อมูลเท่านั้น ห้ามแนะนำเป็นสินค้าที่ซื้อได้: "
                         + ", ".join(dict.fromkeys(names)))
+        if self.constraint_notes:
+            lines = [(f"- {str(n.get('item'))}: {str(n.get('detail') or '')}"
+                      if n.get('item')
+                      else f"- {str(n.get('detail') or '')}").rstrip()
+                     for n in self.constraint_notes]
+            out += ("\n\nข้อจำกัดที่ตรวจพบจาก evidence "
+                    "(ห้ามสรุปเกิน — สินค้าที่ไม่ผ่านเงื่อนไข/พิสูจน์ว่า"
+                    "ไม่เข้ากันถูกตัดออกแล้ว):\n" + "\n".join(lines))
         return out
 
 
@@ -480,6 +522,62 @@ def _need_relation(reqs_n, tn: str) -> str | None:
         if rm:
             rels.add(rm)
     return next(iter(rels)) if len(rels) == 1 else None
+
+
+# ── typed spec-constraint labels (display เท่านั้น — field keys เป็นของ
+#   intent_classifier contract; Thai label = renderer ไม่ใช่ interpreter) ──
+_SPEC_FIELD_LABEL = {
+    "data_transfer_mbps": "ความเร็วถ่ายโอนข้อมูล",
+    "output_power_w": "กำลังชาร์จ",
+    "capacity_mah": "ความจุแบตเตอรี่",
+    "cable_length_m": "ความยาวสาย",
+}
+_FEATURE_LABEL = {"magnetic": "สาย/หัวแม่เหล็ก"}
+_OP_LABEL = {"gte": "อย่างน้อย", "lte": "ไม่เกิน", "gt": "มากกว่า",
+             "lt": "น้อยกว่า", "eq": "เท่ากับ"}
+# fail phrasing ที่วาง threshold ใต้ negation "ไม่" — customer-facing line
+# ผ่าน spec_claim grounding (ค่าที่ถามไม่ใช่ product evidence)
+_OP_NEG_LABEL = {"gte": "ไม่ถึง", "lte": "ไม่ได้ต่ำกว่า", "gt": "ไม่เกิน",
+                 "lt": "ไม่น้อยกว่า", "eq": "ไม่เท่ากับ"}
+# requested_facts key → Thai label (render เท่านั้น — keys เป็นของ
+#   intent_classifier closed enum)
+_FACT_LABEL = {
+    "price": "ราคา", "stock": "สต็อก", "link": "ลิงก์สินค้า",
+    "description": "รายละเอียดสินค้า", "warranty": "ระยะเวลารับประกัน",
+    "data_transfer_speed": "ความเร็วถ่ายโอนข้อมูล",
+    "charging_speed": "ความเร็วชาร์จ/กำลังไฟ",
+    "compatibility": "ความเข้ากันได้",
+}
+
+
+def _spec_label(key: str) -> str:
+    return _SPEC_FIELD_LABEL.get(key) or _FEATURE_LABEL.get(key) or key
+
+
+def _constraint_fail_label(res: dict) -> str:
+    """eval fail → near-miss detail text (evidence-bound เท่านั้น)."""
+    from . import policy_resolver as _pr
+    parts: list[str] = []
+    for k in res.get("failed") or ():
+        d = (res.get("detail") or {}).get(k)
+        if d:
+            op, want, got = d
+            parts.append(
+                f"{_spec_label(k)} {_pr.format_constraint_value(k, got)} "
+                f"{_OP_NEG_LABEL.get(op, 'ไม่ตรง')} "
+                f"{_pr.format_constraint_value(k, want)} ที่ต้องการ")
+        else:
+            parts.append(_spec_label(k))
+    sat = [_spec_label(k) for k in res.get("satisfied") or ()]
+    head = f"ผ่าน {'/'.join(sat)} แต่ " if sat else ""
+    return head + "; ".join(parts)
+
+
+def _constraint_unknown_label(res: dict) -> str:
+    """eval unknown → limitation note (unproven ≠ disproven — ห้ามยืนยัน)"""
+    labels = [_spec_label(k) for k in res.get("unknown") or ()]
+    return ("ยังไม่มีข้อมูลยืนยัน " + "/".join(labels) +
+            " ของรุ่นนี้ — ห้ามยืนยันเงื่อนไขนั้น") if labels else ""
 
 
 def _verdict_target_decisions(i: int, tn: str, need, reqs_n, *, by_req,
@@ -763,7 +861,9 @@ def compile_answer_task(*, needs: tuple, selection: SelectionResult,
             constraints=tuple(cons),
             value_constraints=vc,
             target=_need_target(n, reqs_n, profile),
-            ranking=n.ranking))
+            ranking=n.ranking,
+            requested_facts=tuple(
+                getattr(n, "requested_facts", ()) or ())))
         trace.append(f"task[{i}] {n.kind}/{n.operation} "
                      f"reqs={[r.request_id for r in reqs_n]}")
     return AnswerTask(tasks=tuple(tasks), deferred=tuple(deferred),
@@ -775,9 +875,26 @@ def _scope_card(card: dict, need, role: str) -> dict:
     caller skip ก่อนแล้ว แต่กันซ้ำที่นี่อีกชั้น)."""
     if card.get("customer_visibility") == "hidden":
         return {}
+    # typed fact request = describe-family evidence admission บน fact-op
+    #   ด้วย ("speed เท่าไหร่" op อาจ stock/describe — evidence เดียวกัน)
+    _facts = set(getattr(need, "requested_facts", ()) or ())
     allowed = _BASE_CARD_FIELDS | (
-        _DESC_FIELDS if need.operation in _DESC_OPS else frozenset())
+        _DESC_FIELDS if need.operation in _DESC_OPS else frozenset()) | (
+        _FACT_DESC_FIELDS if _facts & _FACT_DESC_FAMILY else frozenset())
     out = {k: card[k] for k in card if k in allowed}
+    # requested facts → typed spec_facts เจาะจง (first-class field —
+    # model ไม่ต้องขุด prose; emit เฉพาะ fact ที่ evidence มีจริง —
+    # extract_field_facts ไม่มี fact = unknown ไม่ใช่ 0)
+    wanted = {fk for f in _facts
+              for fk in _REQUESTED_FACT_KEYS.get(f, ())}
+    if wanted:
+        from . import policy_resolver as _pr
+        sf = {fe.fact_key: fe.value
+              for fe in _pr.extract_field_facts(
+                  card, subject_id=str(card.get("item_id") or ""))
+              if fe.fact_key in wanted and fe.status == "known"}
+        if sf:
+            out["spec_facts"] = sf
     note = _ROLE_NOTE.get(role)
     if note:
         out["_context_note"] = note
@@ -821,6 +938,16 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     emitted: dict[str, dict] = {}   # identity → card ที่อยู่ใน payload
     unanswered: list[UnansweredNeed] = list(task.deferred)
     trace: list[str] = []
+    cnotes: list[dict] = []         # typed gate notes (constraint/target)
+    note_extra: dict[str, list[str]] = {}   # identity → limitation notes
+    sf_extra: dict[str, dict] = {}          # identity → measured spec values
+    # eval-measured spec values — typed evidence ผูก identity เจ้าของค่า
+    #   ({identity,name,fact_key,value}) — guard ground เฉพาะ clause-bound
+    measured_facts: list[dict] = []
+    det_segments: list[dict] = []           # no-match verdict segments
+    no_match: set[int] = set()   # need ที่ candidates ทุกใบ proven-fail
+    note_replace: dict[str, str] = {}  # identity → note แทน role note ทั้งก้อน
+    product_verdicts: list[CompatVerdict] = []  # decided proofs บน product needs
     # pass 1 — target ownership: compat need เท่านั้นที่มี external
     # target; verdict target (slot/profile source — ไม่ใช่
     # products-for-device channel) ต้องมี subject-target coverage ผ่าน
@@ -839,6 +966,7 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     decided: dict[int, tuple[CompatVerdict, ...]] = {}
     partial_refs: dict[int, tuple[str, ...]] = {}
     tainted_reqs: set[str] = set()
+    tainted_idents: set[str] = set()
     for i, n in enumerate(needs):
         if n.kind != "compat" or i not in prodish_idx:
             continue
@@ -869,16 +997,28 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             partial_refs[i] = unres
         uncovered.add(i)
         refs_i = {_norm_ref(x) for x in (n.subject_refs or ())}
+        unres_refs = {_norm_ref(x) for x in unres}
         # taint scope = unresolved subject refs เท่านั้น (need ไม่มี refs →
         # {} → carrier ทุกตัว tainted เหมือนเดิม — sid ไม่ใช่ ref space)
-        scope_refs = {_norm_ref(x) for x in unres} & refs_i
+        scope_refs = unres_refs & refs_i
         for r in carriers:
             if r.source in _RELATION_REQ_SOURCES:
                 continue
             codes = {_norm_ref(x) for x in (r.model_codes or ())}
             if codes and scope_refs and not (codes & scope_refs):
                 continue  # request นี้เป็น context ของ subject อื่น
-            tainted_reqs.add(r.request_id)
+            if refs_i:
+                tainted_reqs.add(r.request_id)
+            else:
+                # ไม่มี declared subject — unres คือ anonymous candidates ที่
+                #   verdict ไม่ได้ (missing connector evidence ฯลฯ): drop
+                #   เฉพาะ card เหล่านั้น ไม่ poison request ทั้งก้อน —
+                #   decided-compatible cards ยังเป็นคำตอบของ turn ได้
+                for _s in by_req.get(r.request_id, ()):
+                    if (_cand_keys(_s.identity, _s.card.get("item_id"),
+                                   _s.card.get("model_id"), _s.card)
+                            & unres_refs):
+                        tainted_idents.add(_s.identity)
         trace.append(f"need[{i}] verdict target={tn!r} "
                      + (f"unresolved={list(unres)} → partial "
                         if verdicts else "")
@@ -897,18 +1037,214 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             continue
         tainted = False
         cands = [s for r in reqs_n for s in by_req.get(r.request_id, ())]
-        if tainted_reqs:
-            kept = [s for s in cands if s.request_id not in tainted_reqs]
+        if (n.operation in LOCAL_FACT_OPS
+                and any(r.source == "subjects" for r in reqs_n)):
+            # fact-op (price/stock/link) คำตอบเป็นของ resolved subject
+            # เท่านั้น — slot/context candidates ไม่ใช่ fact ของ item นี้
+            cands = [s for s in cands if s.role == "subject"]
+        if tainted_reqs or tainted_idents:
+            kept = [s for s in cands
+                    if s.request_id not in tainted_reqs
+                    and s.identity not in tainted_idents]
             tainted = len(kept) < len(cands)
             cands = kept
-        cands.sort(key=lambda s: (ROLE_RANK.get(s.role, 0), s.score),
-                   reverse=True)
+        # ── current-need type/subtype eligibility — card ต้องเข้ากับ
+        #   scope ที่ need declare; channels ที่ข้าม retrieval filters
+        #   (history/subjects/context) ต้องผ่าน current need เหมือน
+        #   candidate ใหม่ทุกข้อ — subject_refs-pinned = explicit identity
+        #   authority → exempt; subtype evidence ขาด → ยืนยัน subtype
+        #   ไม่ได้ → ออก (fail closed); compare/compat needs ไม่ gate
+        #   (scope fields ของมันว่างตาม contract — relation ไม่ใช่
+        #   product-type boundary). อยู่ก่อน constraint/verdict ทั้งหมด —
+        #   card ที่ตก scope = ไม่ใช่ candidate ของ need นี้ → ไม่มี
+        #   constraint note/verdict/deterministic segment/model evidence
+        #   (adapter turn ไม่ narrate cable — canonical subtype contract
+        #   เป็น authority ของ eligibility ไม่ใช่เหตุข้าม gate)
+        if n.kind == "product" and (n.subtypes or n.product_types):
+            _nsubs = set(n.subtypes or ())
+            _ntypes = set(n.product_types or ())
+            _nrefs = {str(x) for x in (n.subject_refs or ())}
+            _kept = []
+            for s in cands:
+                _c = s.card or {}
+                _cid = str(_c.get("item_id")
+                           or _c.get("linked_item_id") or "")
+                if _cid and _cid in _nrefs:
+                    _kept.append(s)
+                    continue
+                _roles = set(_c.get("canonical_roles") or ())
+                _ctype = str(_c.get("canonical_type")
+                             or _c.get("product_type") or "")
+                if _nsubs and not (_roles & _nsubs):
+                    trace.append(f"need[{i}] scope_mismatch {s.identity}")
+                    continue
+                if _ntypes and _ctype and _ctype not in _ntypes:
+                    trace.append(f"need[{i}] scope_mismatch {s.identity}")
+                    continue
+                _kept.append(s)
+            cands = _kept
+        # ── compat need: decided-incompatible = typed verdict เท่านั้น —
+        #   ออกจาก products ทุก role (compat segment render conclusion;
+        #   ห้าม image/link/CTA เหมือน constraint-failed); compatible →
+        #   role note ถูกต้องอยู่แล้ว; undecided → need ถูก uncovered กั้น
+        #   ก่อนถึงตรงนี้
+        if n.kind == "compat":
+            from . import candidate_pool as _cpool
+            vmap = {v.subject_id: v for v in decided.get(i, ())}
+            tn_i = _norm_target(target_of.get(i))
+            kept = []
+            for s in cands:
+                sid = (_cpool._identity_key(s.card or {})[0]
+                       or s.identity)
+                v = vmap.get(sid)
+                if v and v.decision.outcome == "incompatible":
+                    cnotes.append({
+                        "need_index": i,
+                        "item": (s.card or {}).get("name") or s.identity,
+                        "detail": f"หลักฐานยืนยันว่าไม่เข้ากันกับ {tn_i}"
+                                  f" — ไม่นำเสนอเป็นคำตอบ"})
+                    trace.append(
+                        f"need[{i}] verdict_incompatible {s.identity}")
+                    continue
+                kept.append(s)
+            cands = kept
+        # ── typed spec/feature constraint gate — canonical eval owner
+        #   (policy_resolver.eval_spec_constraints ← extract_field_facts):
+        #   proven-fail candidates drop + near-miss note; unknown = keep +
+        #   limitation (unproven ≠ disproven); subject/historical roles ไม่
+        #   drop — annotate แทน (identity/reference ไม่ใช่ candidate ใหม่)
+        from . import candidate_pool as _cpool
+        from . import policy_resolver as _pr
+        cons = tuple(dict.fromkeys(
+            list(getattr(n, "spec_constraints", ()) or ())
+            + [c for r in reqs_n for c in (r.spec_constraints or ())]))
+        feats = tuple(dict.fromkeys(
+            list(getattr(n, "required_features", ()) or ())
+            + [f for r in reqs_n for f in (r.required_features or ())]))
+        if cons or feats:
+            kept = []
+            dropped_c = 0
+            failed_refs: dict[str, dict] = {}   # identity → near-miss meta
+            for s in cands:
+                sid = (_cpool._identity_key(s.card or {})[0]
+                       or s.identity)
+                res = _pr.eval_spec_constraints(
+                    _pr.extract_field_facts(
+                        s.card or {}, subject_id=sid), cons, feats)
+                # measured spec values → typed spec_facts บน card ที่ emit
+                #   + identity-scoped measured evidence (guard ground เฉพาะ
+                #   clause ที่ระบุ identity เจ้าของค่า — ไม่ใช่ flat/global)
+                if res.get("detail"):
+                    sf_extra.setdefault(s.identity, {}).update(
+                        {f_: d[2] for f_, d in res["detail"].items()
+                         if len(d) > 2})
+                    for f_, d in res["detail"].items():
+                        if len(d) > 2:
+                            measured_facts.append({
+                                "identity": s.identity,
+                                "name": (s.card or {}).get("name") or "",
+                                "fact_key": f_, "value": d[2]})
+                if res["status"] == "fail":
+                    # proven-fail = typed diagnostic เท่านั้น — ทุก role
+                    #   ออกจาก answer products (ห้าม image/link/CTA);
+                    #   subject/historical เก็บเป็น near-miss metadata สำหรับ
+                    #   deterministic segment (ไม่ใช่ card ที่ model เห็น)
+                    lbl = _constraint_fail_label(res)
+                    cnotes.append({
+                        "need_index": i,
+                        "item": (s.card or {}).get("name") or s.identity,
+                        "detail": lbl})
+                    if s.role in ("subject", "historical_evidence"):
+                        failed_refs[s.identity] = {
+                            "identity": s.identity,
+                            "item": (s.card or {}).get("name") or s.identity,
+                            "detail": lbl}
+                    dropped_c += 1
+                    trace.append(
+                        f"need[{i}] constraint_fail {s.identity}")
+                    continue
+                if res["status"] == "unknown":
+                    lbl = _constraint_unknown_label(res)
+                    if lbl:
+                        note_extra.setdefault(s.identity, []).append(lbl)
+                kept.append(s)
+            if dropped_c and not kept:
+                cnotes.append({
+                    "need_index": i,
+                    "item": None,
+                    "detail": "ไม่มีสินค้าที่ผ่านเงื่อนไขครบทุกข้อใน"
+                              " catalog — แจ้งสถานะตรงๆ ห้ามเสนอสินค้า"
+                              "ที่ไม่ผ่านเงื่อนไขเป็นคำตอบ"})
+                # typed verdict → deterministic segment (owner เดียวกับ
+                #   compat verdict — model ไม่ต้อง render conclusion เอง);
+                #   near-miss items = proven-fail identities เท่านั้น
+                det_segments.append({
+                    "need_index": i,
+                    "items": list(failed_refs.values())})
+                no_match.add(i)
+            cands = kept
+        # ── product/compare need + typed target → verdict gate เดียวกับ
+        #   compat need (resolve_compat per (subject,target,relation)):
+        #   decided-incompatible → drop (+note); undecided → เก็บเป็น
+        #   candidate พร้อม limitation (unverified ≠ catalog-empty);
+        #   decided-compatible verdicts ไหลเป็น typed proof artifact
+        ptn = _norm_target(target_of.get(i))
+        if ptn and n.kind != "compat":
+            verdicts_t, _unres_t = _verdict_target_decisions(
+                i, ptn, n, reqs_n, by_req=by_req, pool=pool,
+                web_evidence=web_evidence, req_needs=req_needs,
+                idx_of=idx_of, prodish_idx=prodish_idx,
+                target_of=target_of, ref_needs=ref_needs)
+            # verdicts เฉพาะ candidates ที่ผ่าน current-need eligibility —
+            #   card ที่ตก scope ไม่ใช่ candidate → ไม่สมควรได้ verdict/
+            #   segment บน need นี้ (adapter turn ไม่ narrate cable)
+            _cand_sids = {
+                (_cpool._identity_key(s.card or {})[0] or s.identity)
+                for s in cands}
+            verdicts_t = [v for v in verdicts_t
+                          if v.subject_id in _cand_sids]
+            vmap = {v.subject_id: v for v in verdicts_t}
+            product_verdicts.extend(verdicts_t)
+            unres_ids = set(_unres_t)
+            kept = []
+            for s in cands:
+                sid = (_cpool._identity_key(s.card or {})[0]
+                       or s.identity)
+                v = vmap.get(sid)
+                oc = v.decision.outcome if v else ""
+                if oc == "incompatible":
+                    # decided-incompatible = typed diagnostic เท่านั้น —
+                    #   ทุก role ออกจาก products (verdict segment render
+                    #   conclusion; ห้าม image/link/CTA เหมือน constraint-
+                    #   failed — ไม่ใช่ recommendation product)
+                    cnotes.append({
+                        "need_index": i,
+                        "item": (s.card or {}).get("name")
+                                or s.identity,
+                        "detail": f"หลักฐานยืนยันว่าไม่เข้ากันกับ {ptn}"
+                                  f" — ไม่นำเสนอเป็นคำตอบ"})
+                    trace.append(
+                        f"need[{i}] target_incompatible {s.identity}")
+                    continue
+                if oc != "compatible" and (
+                        sid in unres_ids or s.identity in unres_ids):
+                    # evaluated แต่ decide ไม่ได้ (ไม่ใช่ unevaluated)
+                    note_extra.setdefault(s.identity, []).append(
+                        f"ยังไม่มีข้อมูลยืนยันว่าเข้ากันกับ {ptn}"
+                        f" โดยตรง — นำเสนอเป็นตัวเลือกเท่านั้น")
+                kept.append(s)
+            cands = kept
+        # presentation order = canonical selection order verbatim —
+        #   selection (retrieval_selection) เป็น ordering owner เดียว:
+        #   request-iteration precedence + pick order (subject-first
+        #   partition + form tier ใน pick loop) — ctx ไม่ re-derive
+        #   form/role semantics
         if not cands:
-            if i in decided:
+            if i in decided or i in no_match:
                 # verdict ยืนอยู่บน typed evidence — products หายเพราะ
-                # taint ของ need อื่นแต่ decision ไม่ได้อาศัย card display
-                trace.append(f"need[{i}] compat verdict kept "
-                             "(products dropped)")
+                # gate ของ need เอง/need อื่นแต่ deterministic decision
+                # (compat / no-match constraint) ครอบคลุม need แล้ว
+                trace.append(f"need[{i}] verdict kept (products dropped)")
             else:
                 unanswered.append(UnansweredNeed(
                     i, n.kind, n.operation, tuple(n.subject_refs or ()),
@@ -933,6 +1269,16 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             card = _scope_card(s.card, n, s.role)
             if not card:
                 continue  # hidden — ห้ามเข้า products
+            if s.identity in note_replace:
+                card["_context_note"] = note_replace[s.identity]
+            for extra in note_extra.get(s.identity, ()):
+                card["_context_note"] = (
+                    (card.get("_context_note") or "") + " — " + extra
+                ).strip(" —")
+            if s.identity in sf_extra:
+                card["spec_facts"] = {
+                    **sf_extra[s.identity],
+                    **(card.get("spec_facts") or {})}
             card["need_indices"] = (i,)   # structural task ownership
             emitted[s.identity] = card
             took += 1
@@ -940,9 +1286,11 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
         trace.append(f"need[{i}] {n.kind}/{n.operation} "
                      f"cand={len(cands)} took={took}")
     # uncovered (no_evidence) + decided (verdict → deterministic segment)
-    # ทั้งคู่ไม่เป็น model task; evidence ที่ attribute เฉพาะ needs เหล่านี้
-    # ไม่เข้า model context (proof ถูก consume โดย decision แล้ว)
-    dropped = uncovered | set(decided)
+    # ทั้งหมดไม่เป็น model task; evidence ที่ attribute เฉพาะ needs เหล่านี้
+    # ไม่เข้า model context (proof/verdict ถูก consume โดย decision แล้ว) —
+    #   no_match = candidates ทุกใบ proven-fail → deterministic constraint
+    #   verdict ครอบคลุม (model ไม่ตัดสิน pass/fail เอง)
+    dropped = uncovered | set(decided) | no_match
     if dropped:
         task = AnswerTask(
             tasks=tuple(t for t in task.tasks
@@ -968,7 +1316,8 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     notes = tuple(dict(u) for u in (selection.unavailable_evidence or ()))
     payload = json.dumps(
         {"products": products, "evidence": evidence,
-         "availability_notes": notes, "task": task.render()},
+         "availability_notes": notes, "constraint_notes": cnotes,
+         "task": task.render()},
         ensure_ascii=False, default=str)
     return AnswerContext(
         task=task, products=tuple(products), evidence=tuple(evidence),
@@ -976,7 +1325,13 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
         estimated_tokens=estimate_tokens(payload),
         trace=tuple(trace) + tuple(selection.trace or ()),
         compat_verdicts=tuple(v for i in sorted(decided)
-                              for v in decided[i]))
+                              for v in decided[i])
+                         + tuple(product_verdicts),
+        constraint_notes=tuple(cnotes),
+        constraint_segments=tuple(det_segments),
+        spec_measured_facts=tuple(
+            {f"{f['identity']}|{f['fact_key']}": f
+             for f in measured_facts}.values()))
 
 
 # ── pre-answer typed web gate ───────────────────────────────────────────────
@@ -1108,7 +1463,8 @@ def decide_web_admission(*, needs: tuple, selection: SelectionResult,
 # render order ของ segments: claim guidance ก่อน (collection-state message
 #   จาก warranty flow — customer ต้องเห็นก่อน) → product answer → policy
 #   conclusion ท้าย (ข้อสรุป eligibility ไม่นำหน้าคำตอบสินค้า)
-_DOMAIN_ORDER = {"claim": 0, "compat": 1, "product": 2, "policy": 3}
+_DOMAIN_ORDER = {"claim": 0, "compat": 1, "constraint": 2,
+                 "product": 3, "policy": 4}
 
 
 def _compat_segment(v: CompatVerdict) -> str:
@@ -1121,6 +1477,17 @@ def _compat_segment(v: CompatVerdict) -> str:
     return ""   # outcome นอก whitelist → ไม่ render compat claim
 
 
+def _constraint_segment(seg: dict) -> str:
+    """deterministic no-match verdict segment — headline + kept
+    subject/historical near-miss lines (evidence-bound labels เท่านั้น);
+    dropped candidates ไม่ถูก name ที่นี่ (ไม่อยู่ใน products → token
+    ไม่ ground — detail ของพวกมันอยู่ใน constraint_notes ให้ model)."""
+    items = [f"- {it.get('item')}: {it.get('detail')}"
+             for it in (seg.get("items") or ()) if it.get("item")]
+    return "ยังไม่มีสินค้าที่ผ่านเงื่อนไขครบทุกข้อค่ะ" + (
+        "\n" + "\n".join(items) if items else "")
+
+
 @dataclass(frozen=True)
 class DomainResult:
     """typed per-need result — domain owner เดิมผลิต (composer ไม่สร้าง
@@ -1131,6 +1498,13 @@ class DomainResult:
     need_indices: tuple[int, ...]     # 0-based need attribution
     text: str = ""
     outcome: str = ""
+    # composition provenance (final acceptance) — deterministic segments
+    #   ผลิตจาก typed owner (verdict/constraint/policy/claim) ไม่ต้องให้
+    #   guard infer identity จาก prose: finalizer stamp ลง composition
+    #   marker, enforce validate origin+exact text แล้ว exempt claims
+    #   ใน span นั้น; model segments ยังผ่าน FieldEvidence checks
+    origin: str = "model"             # deterministic|model
+    subject_ids: tuple = ()           # owning identities ของ segment
 
 
 @dataclass(frozen=True)
@@ -1174,7 +1548,8 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
     if claim_guidance:
         idxs = tuple(i for i, n in enumerate(needs) if n.kind == "claim")
         covered.update(idxs)
-        results.append(DomainResult("claim", idxs, text=claim_guidance))
+        results.append(DomainResult(
+            "claim", idxs, text=claim_guidance, origin="deterministic"))
     if context is not None:
         # typed compat verdicts → deterministic segment ต่อ need (ครั้ง
         # เดียวต่อ need — decision เป็น authoritative conclusion ไม่ใช่
@@ -1185,17 +1560,76 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
                 continue   # outcome นอก whitelist → ไม่ cover ด้วย claim ปลอม
             covered.add(v.need_index)
             results.append(DomainResult(
-                "compat", (v.need_index,), text=seg))
+                "compat", (v.need_index,), text=seg,
+                origin="deterministic", subject_ids=(v.subject_id,)))
+        # typed no-match verdicts (evaluated candidates ทั้งหมด proven-
+        # fail) → deterministic segment เช่นเดียวกับ compat verdict
+        for seg in context.constraint_segments or ():
+            text = _constraint_segment(seg)
+            if text:
+                covered.add(seg["need_index"])
+                results.append(DomainResult(
+                    "constraint", (seg["need_index"],), text=text,
+                    origin="deterministic",
+                    subject_ids=tuple(
+                        str(it.get("identity")) for it in
+                        (seg.get("items") or ()) if it.get("identity"))))
     if product_text and context is not None:
         idxs = tuple(sorted(
             {t.need_index for t in context.task.tasks} - unans_idx))
         covered.update(idxs)
-        results.append(DomainResult("product", idxs, text=product_text))
+        # model text = prose เท่านั้น — single protocol-boundary
+        #   normalization (ไม่ใช่ Markdown parser): bubble ที่มี link/
+        #   image markup (`](`) = card-attempt → drop ทั้ง bubble (fail
+        #   closed — strip แล้วเหลือ name debris ซ้ำกับ deterministic
+        #   card); bubble ที่เหลือแต่ชื่อ product ตรง typed card = model
+        #   echo → drop; `**` residual ของ model → strip (emphasis ไม่ใช่
+        #   ช่องทางของ model — claim mutation ไม่เคยอยู่ใน markup);
+        #   deterministic segments ไม่ผ่าน normalization นี้ —
+        #   model-emitted prose อื่น (รวม leading particle) เป็น
+        #   model-output residual ไม่ใช่ compose concern
+        _names = {re.sub(r"\s+", " ", str(p.get("name") or "")).strip()
+                  for p in context.products}
+        _names.discard("")
+        _out = []
+        for _b in product_text.split("|||"):
+            if "](" in _b:
+                continue
+            _b = re.sub(r"\s+", " ", _b.replace("**", "")).strip()
+            if _b and _b not in _names:
+                _out.append(_b)
+        _ptext = " ||| ".join(_out)
+        results.append(DomainResult("product", idxs, text=_ptext))
+        # deterministic product cards — render owner เดียวของ card/link/
+        #   image: composed จาก typed card fields ที่ eligibility เลือก
+        #   แล้วเท่านั้น — model ไม่เป็นเจ้าของ CTA markup; claim
+        #   validation ไม่เคยแตะ card spans (origin=deterministic +
+        #   provenance identities); card ไม่ cover need เพิ่ม — ติดตาม
+        #   product result (owner = card's own need_indices)
+        from . import candidate_pool as _cpool
+        for _p in context.products:
+            _pn = str(_p.get("name") or "").strip()
+            _img = str(_p.get("image_url") or "").strip()
+            _lnk = str(_p.get("short_link") or "").strip()
+            if not _pn or not (_img or _lnk):
+                continue   # card ต้องมี name + CTA evidence อย่างน้อย 1
+            _lines = [f"**{_pn}**"]
+            if _img:
+                _lines.append(f"![{_pn}]({_img})")
+            if _lnk:
+                _lines.append(f"[สั่งซื้อ {_pn}]({_lnk})")
+            _pid = _cpool._identity_key(_p)[0] or None
+            results.append(DomainResult(
+                "product", tuple(_p.get("need_indices") or ()),
+                text="|||\n" + "\n".join(_lines),
+                origin="deterministic",
+                subject_ids=(_pid,) if _pid else ()))
     if policy_decision is not None:
         idxs = tuple(i for i, n in enumerate(needs) if n.kind == "policy")
         covered.update(idxs)
         results.append(DomainResult(
-            "policy", idxs, outcome=policy_decision.outcome))
+            "policy", idxs, outcome=policy_decision.outcome,
+            origin="deterministic"))
     results.sort(key=lambda r: _DOMAIN_ORDER.get(r.domain, 9))
     if context is not None:
         unanswered = [u for u in ctx_unanswered

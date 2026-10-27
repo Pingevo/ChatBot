@@ -181,8 +181,9 @@ def _score(card: dict, res: RetrievalExecutionResult, anchor: bool,
         s += 1.0
         why.append(f"subtype:{sorted(sub_hit)[0]}")
     if res.target_device:
-        from .device_compat import _extract_device_token
-        if _extract_device_token(card.get("name") or "") == res.target_device:
+        from .device_compat import _device_candidates
+        if (next((cn or rw for rw, cn in _device_candidates(
+                card.get("name") or "")), None) == res.target_device):
             s += 1.0
             why.append("device")
     if res.relation_id:

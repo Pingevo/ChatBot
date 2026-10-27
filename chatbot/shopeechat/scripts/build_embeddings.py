@@ -30,6 +30,7 @@ import numpy as np
 
 from chatbot.shopeechat.embedding import (
     EMBEDDING_DIM,
+    build_description_chunks,
     build_doc_text,
     clean_item_name,
     embed_texts,
@@ -110,10 +111,60 @@ def build_product_npz(export_path: Path, out: Path, generation_id: str = "",
         embeddings=emb), out, len(docs), generation_id)
 
 
+def build_description_npz(export_path: Path, out: Path, generation_id: str = "",
+                          embed=None, tokenizer=None) -> int:
+    """ShpProducts export → description_embeddings.npz (Phase 10B) —
+    chunk = build_description_chunks (owner เดียว, measured-B contract);
+    row = (item_id, chunk_id=<iid>:<i>, shop, text, vector) — คืน row count.
+    item doc contract เดียวกับ build_product_npz (item_name+item_id);
+    duplicate item doc → first wins; empty/malformed → zero rows (fail
+    closed — ไม่เคยสร้าง chunk-only identity)"""
+    t0 = time.time()
+    with open(export_path, encoding="utf-8") as f:
+        data = json.load(f)
+    item_ids, chunk_ids, shops, texts = [], [], [], []
+    seen_ids: set = set()
+    for d in data:
+        iid = d.get("item_id")
+        if not d.get("item_name") or not iid:
+            continue                # malformed/missing identity → ข้าม
+        iid = str(iid)
+        if iid in seen_ids:
+            continue                # duplicate item doc → first wins
+        chunks = build_description_chunks(d.get("description") or "",
+                                          tokenizer=tokenizer)
+        if not chunks:
+            continue                # empty desc → zero rows (ถูกต้อง)
+        seen_ids.add(iid)
+        for ci, text in enumerate(chunks):
+            item_ids.append(iid)
+            chunk_ids.append(f"{iid}:{ci}")
+            shops.append(str(d.get("shopname") or ""))
+            texts.append(text)
+    print(f"  items={len(seen_ids)} chunks={len(texts)} "
+          f"({time.time()-t0:.1f}s) → embed")
+    if len(set(chunk_ids)) != len(chunk_ids):
+        raise ValueError("duplicate (item_id, chunk_id) rows")
+    emb = _embed_all(texts, embed)
+    if emb.shape != (len(texts), EMBEDDING_DIM):
+        raise ValueError(f"desc embeddings shape {emb.shape} != "
+                         f"({len(texts)},{EMBEDDING_DIM})")
+    if not np.isfinite(emb).all():
+        raise ValueError("non-finite description embeddings")
+    return _save_verified_npz(dict(
+        item_ids=np.array(item_ids, dtype="<U24"),
+        chunk_ids=np.array(chunk_ids, dtype="<U40"),
+        shops=np.array(shops, dtype="<U64"),
+        texts=np.array(texts, dtype=object),
+        embeddings=emb), out, len(texts), generation_id)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--units", action="store_true",
                     help="embed unit.search_text จาก sellable_units.jsonl → unit_embeddings.npz")
+    ap.add_argument("--description", action="store_true",
+                    help="embed description chunks จาก export → description_embeddings.npz")
     ap.add_argument("--qa", action="store_true",
                     help="embed kb_qa 'topic | q' จาก admin Mongo → qa_embeddings.npz")
     ap.add_argument("--export", type=Path, default=EXPORT_PATH)
@@ -148,7 +199,12 @@ def main() -> None:
         print(f"saved {out} ({out.stat().st_size/1024:.0f} KB)")
         return
 
-    if args.units:
+    if args.description:
+        n = build_description_npz(
+            args.export,
+            args.out or (args.export.parent / "description_embeddings.npz"),
+            args.gid)
+    elif args.units:
         n = build_units_npz(args.units_path,
                             args.out or UNITS_OUTPUT_PATH, args.gid)
     else:

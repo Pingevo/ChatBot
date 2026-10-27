@@ -168,6 +168,15 @@
 - ห้ามใช้ guard/helper เป็นตัวแก้ปัญหา — มอง guard เป็นทางลัด ใช้ได้เฉพาะเมื่อจำเป็นต้องใช้จริงๆ เท่านั้น
 - ก่อนลงมือแก้ไขทุกครั้ง ต้องเขียน plan วิเคราะห์/audit ก่อน (root cause คืออะไร, กระทบเคสไหนบ้าง, จะแก้ยังไง) แล้วถามผู้ใช้และรออนุญาตก่อนเสมอ — ห้ามแก้ก่อนได้รับอนุญาต
 
+#### กฎ complexity containment (mandatory)
+
+- business behavior ต้องแก้ที่ typed owner เดิมที่มีอยู่ — ห้ามสร้าง owner ใหม่เพื่อหลบ
+- การขยาย semantic keyword/phrase/regex (ตารางคำใหม่, คำใหม่ในตาราง, pattern ใหม่ที่ตีความข้อความ) ต้องขออนุญาตผู้ใช้โดยตรงก่อนเสมอ
+- guard ทำได้เฉพาะ validate safety/schema invariants — ห้าม infer intent, product type/subtype, retrieval scope, product identity, compatibility, หรือ business semantics ของคำตอบ
+- ทุก correction round ต้องรายงาน net change ของ helpers, guards, regexes, keyword tables, และ decision owners — correction ที่เพิ่ม mechanism count ห้ามทำถ้าไม่ได้รับอนุญาตชัดเจน
+- local patch ซ้ำหลายจุดสำหรับปัญหาเดียวกัน ต้องถูกรวมเป็น owner เดียว หรือรายงานเป็น missing data contract (อย่าปะต่อ)
+- source-text test (เช็คว่ามี/ไม่มีโค้ด) อย่างเดียวไม่พอ — ต้องมี executable behavioral test พิสูจน์พฤติกรรมจริง
+
 ### 10. กฎการ commit / branch / PR
 
 - ทำงานบน branch เสมอ — ห้าม commit ตรง `main`

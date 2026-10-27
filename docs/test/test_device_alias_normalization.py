@@ -20,7 +20,7 @@ def _profile(message: str):
 
 def test_compact_xiaomi_phone_alias_becomes_target_device():
     assert device_compat.normalize_device_alias("mi14pro") == "xiaomi 14 pro"
-    assert device_compat._extract_device_token("สายชาร์จใช้กับ mi14pro") == "xiaomi 14 pro"
+    assert next((cn or rw for rw, cn in device_compat._device_candidates("สายชาร์จใช้กับ mi14pro")), None) == "xiaomi 14 pro"
     prof = _profile("สายชาร์จใช้กับ mi14pro")
     assert prof.target_device == "xiaomi 14 pro"
     assert prof.compat_mode == "connector_required"
@@ -41,7 +41,7 @@ def test_thai_iphone_alias_normalizes():
 def test_product_model_codes_are_not_target_devices():
     for value in ("HA835", "AD1203P", "CMC615", "CTC615W"):
         assert device_compat.normalize_device_alias(value) is None
-        assert device_compat._extract_device_token(f"มีรุ่น {value} ไหม") is None
+        assert next((cn or rw for rw, cn in device_compat._device_candidates(f"มีรุ่น {value} ไหม")), None) is None
 
 
 def test_device_aliases_do_not_become_product_model_codes():

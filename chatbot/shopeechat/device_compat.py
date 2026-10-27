@@ -91,12 +91,51 @@ def _extract_weight_kg(p: dict) -> float:
     return 999.0
 
 
+# data-transfer speed tokens — canonical Mbps normalization owner (regex
+#   เดียว ไม่มี kw table): "480Mbps"/"480 Mbps" → 480, "10Gbps"/"10 Gbps"→10000
+_DATA_SPEED_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(gbps|mbps)\b", re.IGNORECASE)
+
+
+def _extract_data_transfer_mbps(p: dict) -> float:
+    """extract ความเร็วถ่ายโอนข้อมูล (Mbps) — spec field → variants → ชื่อ+desc.
+
+    canonical field: data_transfer_mbps (canonical_specs/specs/variants) —
+    text normalize เฉพาะ Mbps/Gbps token ตรงๆ (Gbps×1000) ไม่ infer จาก
+    USB generation ("USB4" ฯลฯ ไม่ใช่ค่าที่ประกาศตรง)
+    ไม่มี evidence → 0.0 (caller ถือเป็น unknown ไม่ใช่ negative)
+    """
+    spec_v = (p.get("data_transfer_mbps")
+              or p.get("specs", {}).get("data_transfer_mbps")
+              or p.get("canonical_specs", {}).get("data_transfer_mbps"))
+    if spec_v and isinstance(spec_v, (int, float)) and spec_v > 0:
+        return float(spec_v)
+    max_v = 0.0
+    for v in p.get("variants") or []:
+        vv = v.get("data_transfer_mbps")
+        if vv and isinstance(vv, (int, float)) and vv > max_v:
+            max_v = float(vv)
+    if max_v > 0:
+        return max_v
+    # text surface เดียวกับ policy_resolver._card_text (canonical card text)
+    text = " ".join(str(p.get(k) or "") for k in (
+        "name", "item_name", "description", "raw_description",
+        "description_excerpt", "image_text", "warranty_text"))
+    for m in _DATA_SPEED_RE.finditer(text):
+        v = float(m.group(1))
+        if m.group(2).lower() == "gbps":
+            v *= 1000.0
+        max_v = max(max_v, v)
+    return max_v
+
+
 # canonical spec field (route_context.detect_ranking / TurnNeed.ranking)
 #   → rank extractor — sort-key dispatch owner เดียว
 _SPEC_RANK_EXTRACTORS = {
     "output_power_w": _extract_max_wattage,
     "capacity_mah": _extract_max_mah,
     "package_weight": _extract_weight_kg,
+    "data_transfer_mbps": _extract_data_transfer_mbps,
 }
 
 
@@ -352,23 +391,21 @@ _NON_DEVICE_TOKENS = frozenset({
 })
 
 
-def _extract_device_token(msg: str) -> str | None:
-    """⚡ ดึง target_device จากข้อความแบบ generic — ไม่ hardcode ชื่อรุ่น.
+def _device_candidates(msg: str):
+    """yield (raw_span, canon|None) ของ device-token candidates ตาม position.
 
-    จับ token รูป "letters+digits(+variant word)" — ครอบทุกรุ่นปัจจุบัน+อนาคต
-    (iphone 18 / galaxy s27 / pixel 10 / apple watch 9 / redmi note 14 …)
-    โดยไม่ต้องอัปเดต list เมื่อมี device ใหม่
-
-    กรอง false positive 2 ชั้น:
+    filters เดียวกับ _extract_device_token เดิม (false positive 2 ชั้น):
     - head อยู่ใน _NON_DEVICE_TOKENS (pd3 / usb4 / qi2 / gen 2 / set 3 / note 14 ลอยๆ)
     - รูป letters+digits+letters glued ทั้งก้อน (CTC615W / AD653U) = product code ไม่ใช่ device
-    """
+    candidate ที่ยังไม่ผ่าน authoritative validation เป็น unverified —
+    caller เจ้าของ role ตัดสินเอง (target device ต้องผ่าน _SPEC_INDEX)"""
     low = (msg or "").lower()
     for _m in _DEVICE_TOKEN_RE.finditer(low):
         cand = _m.group(0).strip()
         canon = normalize_device_alias(cand)
         if canon:
-            return canon
+            yield cand, canon
+            continue
         head_m = re.match(r"[a-z]+", cand)
         if (head_m and head_m.group(0) in _NON_DEVICE_TOKENS
                 and cand not in _SPEC_INDEX):
@@ -382,13 +419,12 @@ def _extract_device_token(msg: str) -> str | None:
             if (_cc and cand not in _SPEC_INDEX
                     and not _spec_brand(_cc.group(1))):
                 continue
-        return cand
+        yield cand, None
     # regex หลักไม่เจอ → probe alias form (mi14pro glued / ไอโฟน14โปร)
     for _m in _DEVICE_ALIAS_PROBE_RE.finditer(low):
         canon = normalize_device_alias(_m.group(0))
         if canon:
-            return canon
-    return None
+            yield _m.group(0), canon
 
 
 # ── compat mode classification (category-level — ไม่ใช่ model-level hardcode) ──
@@ -918,7 +954,8 @@ def _device_spec_lookup(
     # (ไม่ hardcode ชื่อรุ่น — ครอบทุก device ปัจจุบัน+อนาคต)
     _resolved_target_device = intent_result.get("target_device") or ""
     if not _resolved_target_device:
-        _resolved_target_device = _extract_device_token(req.message) or ""
+        _resolved_target_device = next(
+            (cn or rw for rw, cn in _device_candidates(req.message)), "")
 
     if not _resolved_target_device:
         return "", [], []
@@ -1179,5 +1216,12 @@ def _device_spec_lookup(
         _additional_products.sort(key=lambda p: _wattage_asc_key(p, _dev_min_watt))
         print(f"[DEVICE-SPEC-LOOKUP] sort pool (min_watt={_dev_min_watt}) "
               f"top3: {[_extract_max_wattage(p) for p in _additional_products[:3]]}W", file=sys.stderr)
+
+    # spec-db hit = structured device evidence (source="spec-db" อยู่ใน record
+    #   อยู่แล้ว) — typed boundary (device_spec supporting → compat verdict)
+    #   ต้องการ device facts จาก dict นี้; web short-circuit อยู่แล้วเมื่อ
+    #   _db_spec hit จึงไม่มี entry ซ้ำ
+    if _db_spec:
+        _device_ws_specs = [_db_spec, *_device_ws_specs]
 
     return _device_spec_extra, _additional_products, _device_ws_specs

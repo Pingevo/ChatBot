@@ -78,7 +78,9 @@ def test_bare_head_without_source_builds_no_relation_request():
 
 
 def test_low_confidence_slot_marks_soft_hints_not_hard_filters():
-    prof, slots, rels = _pipeline("หัวชาร์จกับ Mi Watch 8")
+    # 'เชื่อมกับ' = compat connector แต่ ambiguous (bare-กับ pattern —
+    # เสี่ยง device คือ product อีกชิ้น) → confidence 0.6 → soft hints
+    prof, slots, rels = _pipeline("หัวชาร์จเชื่อมกับ mi watch 8")
     reqs = build_grouped_retrieval_requests(prof, slots, rels)
 
     assert any(r.confidence < 0.8 for r in reqs)

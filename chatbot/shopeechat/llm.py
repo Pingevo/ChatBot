@@ -69,13 +69,19 @@ def _strip_kb_markup(text: str) -> str:
     # ⚡ T10 — markdown table → bullet list (แชท Shopee render ตารางไม่ได้)
     #   บรรทัด `| a | b |` → `• a: b · c: d` (ใช้ header เป็น label เมื่อมี separator row)
     #   ไม่มี header → `• a · b · c`
+    #   บรรทัดที่เป็น pipe-run ล้วน (`||`, `|||`, `||||`) = bubble delimiter
+    #   ของ protocol ไม่ใช่ table row — ข้ามการ convert (กลืน delimiter =
+    #   การ์ดติด prose + deterministic provenance find() พัง)
     _lines = text.split("\n")
     _out_lines = []
     _li = 0
     while _li < len(_lines):
-        if re.match(r"^\s*\|.*\|\s*$", _lines[_li]):
+        if re.match(r"^\s*\|.*\|\s*$", _lines[_li]) \
+                and not re.fullmatch(r"\|{2,}", _lines[_li].strip()):
             _rows = []
-            while _li < len(_lines) and re.match(r"^\s*\|.*\|\s*$", _lines[_li]):
+            while _li < len(_lines) \
+                    and re.match(r"^\s*\|.*\|\s*$", _lines[_li]) \
+                    and not re.fullmatch(r"\|{2,}", _lines[_li].strip()):
                 _rows.append([c.strip() for c in _lines[_li].strip().strip("|").split("|")])
                 _li += 1
             _sep_idx = next(
@@ -117,8 +123,10 @@ def _strip_kb_markup(text: str) -> str:
     # ⚡ BUG-M — post-check คำอ้างเท็จ "แอดมินมาแล้ว/รับเรื่องแล้ว" ย้ายไป guards.enforce
     #   (ชั้น boundary ที่ escalate จริง ไม่ใช่แค่แก้ข้อความ — RC-A)
     # ⚡ issue #19 — normalize bubble delimiter: LLM พิมพ์ `||`/`||||` แทน `|||` เป็นครั้งคราว
-    #   → split_segments พลาด การ์ดติดฟองข้อความ; บังคับ run ของ pipe ≥2 → ` ||| `
-    text = re.sub(r"\s*\|{2,}\s*", " ||| ", text)
+    #   → split_segments พลาด การ์ดติดฟองข้อความ; บังคับ run ของ pipe ≥2 → `|||
+    #   — whitespace รอบ delimiter คงเดิม (`|||\n` ต้นบรรทัด = deterministic
+    #   card prefix ต้องไม่กลายเป็น ` ||| ` — byte contract ของ composition)
+    text = re.sub(r"(\s*)\|{2,}(\s*)", r"\1|||\2", text)
     return text.strip()
 
 
@@ -631,10 +639,22 @@ _SYS_CORE_B = """- การเสนอขาย/แนะนำสินค้
 # legacy/flag-OFF prompt เดิม — byte-identical กับก่อน split (pin ด้วย
 #   sha256 ใน test_phase8_composition)
 SYSTEM_INSTRUCTION = _SYS_CORE_A + _SYS_LEGACY_CLAIM_NOTE + _SYS_CORE_B
+# Phase 10B r2 — typed path เท่านั้น: การ์ดสินค้า (ชื่อ+รูป+ลิงก์สั่งซื้อ)
+#   เป็น deterministic rendering จาก typed card fields (composition
+#   owner) — model ตอบเป็น prose เท่านั้น ห้าม emit link/image markup
+_SYS_TYPED_CARD_NOTE = """\
+- ⚠️ product task override: **ห้ามใส่ markdown ใดๆ** (`![..](..)`,
+  `[..](..)`, `**bold**`) ในคำตอบเด็ดขาด — ระบบ render การ์ดสินค้า
+  (ชื่อ+รูป+ลิงก์สั่งซื้อ) อัตโนมัติต่อท้ายคำตอบจากข้อมูลสินค้าจริง —
+  เขียน pitch/คำตอบเป็น plain prose + `|||` bubbles เท่านั้น
+"""
+
 # Phase 8 — typed answer path prompt = SYSTEM_INSTRUCTION ลบ
 #   _SYS_LEGACY_CLAIM_NOTE (stale เดียวที่พิสูจน์ได้); safety/grounding/
-#   shop isolation/availability/claim/handoff/language คงครบ
-TYPED_SYSTEM_INSTRUCTION = _SYS_CORE_A + _SYS_CORE_B
+#   shop isolation/availability/claim/handoff/language คงครบ —
+#   + _SYS_TYPED_CARD_NOTE (typed-path-only override; legacy prompt
+#   byte-identical)
+TYPED_SYSTEM_INSTRUCTION = _SYS_CORE_A + _SYS_CORE_B + _SYS_TYPED_CARD_NOTE
 
 
 # ---- API key rotation (round-robin) -------------------------------------------
@@ -1556,8 +1576,16 @@ def answer_typed(
         f"{ctx_body}\n\n"
         f"งานที่ต้องทำ:\n{task_text}\n\n"
         f"สำคัญ: ตอบจากข้อมูลสินค้าใน context ด้านบนเป็นหลัก "
-        f"สินค้าที่ตรงกับคำถามมากที่สุดอยู่ลำดับแรกของ context\n\n"
-        f"⚠️ ความยาวคำตอบ: ตอบให้ครบถ้วน ไม่สั้นเกินไป ไม่ยาวเกินไป "
+        f"สินค้าที่ตรงกับคำถามมากที่สุดอยู่ลำดับแรกของ context\n"
+        + ("ถ้ามีหัวข้อ \"ข้อจำกัดที่ตรวจพบจาก evidence\" หรือ "
+           "\"_context_note\" ที่บอกข้อจำกัด/เงื่อนไขที่ไม่ผ่าน "
+           "ต้องเล่าให้ลูกค้าทราบตรงๆ เสมอ "
+           "(เช่น สินค้าที่เคยคุยผ่านเงื่อนไขบางข้อแต่ไม่ผ่านเงื่อนไขอื่น) "
+           "— ห้ามละเว้นเพียงเพราะคำตอบดูไม่ดี\n"
+           if (context.constraint_notes
+               or any(" — " in (p.get("_context_note") or "")
+                      for p in context.products)) else "")
+        + f"\n⚠️ ความยาวคำตอบ: ตอบให้ครบถ้วน ไม่สั้นเกินไป ไม่ยาวเกินไป "
         f"ประมาณ 2-3 บรรทัด (60-120 คำ) — อย่าตอบแค่ 1 ประโยคสั้นๆ "
         f"ถ้ามีข้อมูลที่เป็นประโยชน์ให้ตอบครบ พร้อมรายละเอียดที่เกี่ยวข้อง "
         f"แต่ไม่ต้องยาวจนเกินไป"

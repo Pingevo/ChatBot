@@ -168,21 +168,24 @@ def test_accessory_phrase_marks_device_shared_without_compat_connector():
 
 
 def test_single_accessory_keeps_inferred_phone_out_of_product_types():
-    """'เคส iPhone 15' — single slot ก็ต้องกรอง pseudo-type ออกเช่นกัน."""
+    """'เคส iPhone 15' — single slot ก็ต้องกรอง pseudo-type ออกเช่นกัน;
+    device-param ไม่มี connector → ไม่ใช่ compat target (r7 typed-domain —
+    identity อยู่ใน soft channel/model_terms ไม่ใช่ target_device role)"""
     prof = _profile("มีเคส iPhone 15 ไหม")
     slots = route_context.build_retrieval_slots(prof)
     assert len(slots) == 1
     assert slots[0].product_types == frozenset({"case"})
-    assert slots[0].target_device == "iphone 15"
+    assert slots[0].target_device is None
 
 
 def test_inferred_device_family_rule_is_not_phone_specific():
-    """กฎเดียวกันกับ family อื่น — 'เคส Mi Watch 8' ไม่สร้าง smartwatch slot."""
+    """กฎเดียวกันกับ family อื่น — 'เคส Mi Watch 8' ไม่สร้าง smartwatch slot;
+    device-param ที่ไม่มี connector ไม่ถูก promote เป็น target (r7)"""
     prof = _profile("มีเคส Mi Watch 8 ไหม")
     slots = route_context.build_retrieval_slots(prof)
     assert len(slots) == 1
     assert slots[0].product_types == frozenset({"case"})
-    assert slots[0].target_device == "mi watch 8"
+    assert slots[0].target_device is None
 
 
 def test_inferred_only_model_keeps_product_type_fallback():

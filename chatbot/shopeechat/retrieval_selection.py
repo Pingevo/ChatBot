@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from .candidate_pool import CandidatePool, PooledCandidate
 from .retrieval_planner import RetrievalRequest
-from .retrieval_policy import strip_private_evidence
+from .retrieval_policy import strip_private_evidence, _SUBTYPE_ROLES
 from .turn_decision import PRODUCTISH_NEED_KINDS as _PRODISH_NEED_KINDS
 
 # keys ที่เป็น routing metadata — ไม่ใช่ product evidence ไม่ให้ score
@@ -133,11 +133,19 @@ def _select_one(c: PooledCandidate, req: RetrievalRequest,
     score = _request_score(c, req) + len(hits)
     why = [t[4:] for t in c.trace if t.startswith("why:")]
     why += [f"hint:{k}" for k in hits]
-    if _code_match(card, req.model_codes):
+    # exact item-id refs = subject authority: typed ids เป็น owner ของ
+    #   subject role — grouping-time narrowing รับประกันว่า candidate ของ
+    #   pinned request ผ่าน exact item/linked เท่านั้น (sibling ที่แชร์
+    #   model code เดียวกันห้าม promote ผ่าน _code_match)
+    if any(str(r).isdigit() for r in (req.subject_refs or ())):
+        role = "subject"
+    elif _code_match(card, req.model_codes):
         role = "subject"
     elif req.source == "subjects":
         role = "subject"  # resolved persisted subjects
-    elif _is_historical(card):
+    elif req.source == "history" or _is_historical(card):
+        # history channel = prior-subject reference (live record จริง) —
+        #   role เดียวกับ snapshot-stale: หลักฐานอดีต ไม่ใช่ recommendation
         role = "historical_evidence"
     elif req.source in ("relation_target", "compat"):
         role = "relation_target"
@@ -154,16 +162,20 @@ def _select_one(c: PooledCandidate, req: RetrievalRequest,
 
 
 def _need_scope(need) -> set:
-    """scope ของ need — types ∪ subtypes ∪ subject_refs (union semantics
-    เหมือน _bucket eff_types — ไม่ expand subtype→unit type ตรงนี้)"""
+    """scope ของ need — types ∪ subtypes ∪ subject_refs ∪ target_refs
+    (union semantics เหมือน _bucket eff_types — ไม่ expand subtype→unit
+    type ตรงนี้)"""
     return (set(getattr(need, "product_types", ()) or ())
             | set(getattr(need, "subtypes", ()) or ())
-            | set(getattr(need, "subject_refs", ()) or ()))
+            | set(getattr(need, "subject_refs", ()) or ())
+            | set(getattr(need, "target_refs", ()) or ()))
 
 
 def _req_scope(req: RetrievalRequest) -> set:
     return (set(req.product_types or ()) | set(req.subtypes or ())
-            | set(req.model_codes or ()))
+            | set(req.model_codes or ()) | set(req.subject_refs or ())
+            | set(req.target_refs or ())
+            | ({req.target_device} if req.target_device else set()))
 
 
 def needs_for_request(req: RetrievalRequest, needs: tuple) -> tuple:
@@ -177,11 +189,19 @@ def needs_for_request(req: RetrievalRequest, needs: tuple) -> tuple:
         out = [n for n in prodish if n.kind == "compat"]
         if out or req.source == "compat":
             return tuple(out)
+    if req.source == "history":
+        # reference channel — attribute เข้า product/compare needs เท่านั้น
+        #   (history card ไม่ใช่ compat-need subject — ห้ามเข้า verdict pass)
+        return tuple(n for n in prodish if n.kind != "compat")
     if req.source == "subjects":
         # subjects channel = persisted subject materialization — คลุมเฉพาะ
-        # need ที่อ้าง subject_refs (identity ตรง) หรือ need ไร้ scope
+        # need ที่อ้าง subject_refs (identity ตรง) · deictic scope
+        # (current_single/current_set = referent คือ resolved subject,
+        # inferred types เป็น context ไม่ใช่ identity) · หรือ need ไร้ scope
         out = [n for n in prodish
-               if getattr(n, "subject_refs", ()) or not _need_scope(n)]
+               if getattr(n, "subject_refs", ()) or not _need_scope(n)
+               or getattr(n, "subject_scope", "none")
+                  in ("current_single", "current_set")]
     elif req.source in ("slot", "relation_target"):
         out = [n for n in prodish
                if not _need_scope(n) or _need_scope(n) & _req_scope(req)]
@@ -215,15 +235,61 @@ def select_for_llm_context(
     trace: list[str] = []
     req_needs = {r.request_id: needs_for_request(r, needs)
                  for r in requests} if needs else {}
+    # exact item-id subject_refs — request ถามถึง item เฉพาะตัว: typed
+    #   ids เป็น identity authority ของ request นั้น ทุก channel —
+    #   narrowing จุดเดียวที่ candidate-grouping (eligible + unavailable
+    #   promotion): sibling/delisted listings ที่แชร์ model code ไม่เข้า
+    #   scope ของ pinned request; variants ผ่าน linked_item_id
+    req_refs = {
+        r.request_id: frozenset(
+            str(x) for x in (r.subject_refs or ()) if str(x).isdigit())
+        for r in requests}
     elig_by_req: dict[str, list[PooledCandidate]] = {}
-    for c in pool.eligible:
-        for rid in c.request_ids:
-            elig_by_req.setdefault(rid, []).append(c)
+    unav_by_req: dict[str, list[PooledCandidate]] = {}
+    for bucket, src in ((elig_by_req, pool.eligible),
+                        (unav_by_req, pool.unavailable)):
+        for c in src:
+            for rid in c.request_ids:
+                refs = req_refs.get(rid)
+                if refs and str(c.item_id or "") not in refs \
+                        and str(c.linked_item_id or "") not in refs:
+                    continue
+                bucket.setdefault(rid, []).append(c)
     for req in requests:
         cands = elig_by_req.get(req.request_id, [])
         ranked = sorted(
             (_select_one(c, req, text_cache) for c in cands),
             key=lambda s: (len(s.constraint_hits), s.score), reverse=True)
+        # form-exact preference: request (หรือ need ที่ map — compat channel
+        #   ไม่มี subs ของตัวเอง) ถาม form subtype เดียว → stable partition
+        #   ด้วย typed facts เท่านั้น (ordering owner เดียว — ไม่มี tier
+        #   helper/magic numbers):
+        #   (a) form non-match หลังสุด  (b) proven-form ก่อน / proven-non-match
+        #       หลังสุด = XOR ของ form-match กับ roles_source=='field'
+        #   (c) standalone shape (roles ⊆ scope∪intrinsic) ก่อน composite —
+        #       composite = fallback ไม่ถูก ban; structured ก่อน detect
+        #   scope ไม่ใช่ form subtype เดียว → ไม่ reorder (hits,score คงเดิม)
+        _fscope = set(req.subtypes)
+        if not _fscope:
+            for _n in req_needs.get(req.request_id, ()):
+                _fscope |= set(getattr(_n, "subtypes", ()) or ())
+        _fs_set = _fscope & set(_SUBTYPE_ROLES)
+        if len(_fs_set) == 1:
+            _fs = next(iter(_fs_set))
+            _ok_roles = set(_SUBTYPE_ROLES[_fs]) | (
+                {"adapter"} if set(_SUBTYPE_ROLES[_fs]) - {"cable"}
+                else set())
+            ranked = sorted(ranked, key=lambda s: (
+                _fs not in (s.card.get("canonical_roles") or ()),
+                (_fs in (s.card.get("canonical_roles") or ()))
+                    != (s.card.get("roles_source") == "field"),
+                not set(s.card.get("canonical_roles") or ()) <= _ok_roles,
+            ))
+            if ranked and not any(
+                    s.card.get("roles_source") == "field" for s in ranked):
+                trace.append(
+                    f"{req.request_id}: missing_structured_form "
+                    f"(eligible={len(ranked)} all name-detect)")
         picked = list(ranked[:per_request_limit])
         if len(req.subtypes) > 1:
             # coverage: subtype ที่ถามและมี candidate ต้องได้ ≥1 ที่ —
@@ -270,7 +336,11 @@ def select_for_llm_context(
                     picked,
                     key=lambda s: (keyfn(s.card), s.score),
                     reverse=(rank[1] == "max"))
-        picked = tuple(picked)
+        # subject = identity authority → นำหน้า picks ของ request เสมอ
+        #   (stable partition — membership/ORDER ภายในฝั่งเดิมคงที่;
+        #   presentation precedence อยู่ที่นี่ไม่ใช่ AnswerContext)
+        picked = tuple(sorted(
+            picked, key=lambda s: 0 if s.role == "subject" else 1))
         selected.extend(picked)
         by_req.append((req.request_id, picked))
         trace.append(f"{req.request_id}: elig={len(cands)} "
@@ -278,10 +348,6 @@ def select_for_llm_context(
     # compare/spec (answerable_all) + ถามถึง model code ตรงๆ → ยก unavailable
     # ที่ customer-visible ขึ้นเป็น subject (ตอบ spec/compare ได้พร้อม label)
     # — ไม่กิน quota ของ alternative, cap ตามจำนวน codes ที่ถาม
-    unav_by_req: dict[str, list[PooledCandidate]] = {}
-    for c in pool.unavailable:
-        for rid in c.request_ids:
-            unav_by_req.setdefault(rid, []).append(c)
     promoted: set[str] = set()
     for req in requests:
         if req.availability_mode != "answerable_all" or not req.model_codes:
@@ -307,7 +373,10 @@ def select_for_llm_context(
                 card=strip_private_evidence(c.card)))
         if subjects:
             selected.extend(subjects)
-            by_req = [(rid, tuple(list(cs) + subjects) if rid == req.request_id
+            # promoted subject นำหน้า picks ของ request (identity
+            #   authority — presentation precedence ที่ selection)
+            by_req = [(rid, tuple(list(subjects) + list(cs))
+                       if rid == req.request_id
                        else cs) for rid, cs in by_req]
             trace.append(f"{req.request_id}: unavailable_subjects="
                          f"{len(subjects)}")

@@ -185,6 +185,24 @@ def fetch_units(
             u["_score"], u["_matched_by"] = 2.0 + bonus, "code"
             hits[u["unit_id"]] = u
 
+    # exact item subject — typed identity authority (anchor_item_ids ←
+    #   digit-shaped subject_refs ของ request ผ่าน executor profile): units
+    #   ของ item ที่ถูก pin ตรงต้องเห็นทุก form แม้ inferred type ของ request
+    #   ต่างจาก unit product_type (bundle ถาม adapter) — shop/sellable =
+    #   base_q เดิม ไม่ widen ไป sibling/shop อื่น; code-hit ยังชนะ
+    item_ids: list[int] = []
+    if retrieval_profile is not None:
+        for r in retrieval_profile.anchor_item_ids or ():
+            try:
+                item_ids.append(int(r))
+            except (TypeError, ValueError):
+                continue
+    if item_ids:
+        for u in coll.find({**base_q, "item_id": {"$in": item_ids}}
+                           ).limit(limit * 3):
+            u["_score"], u["_matched_by"] = 2.0, "item"
+            hits.setdefault(u["unit_id"], u)
+
     # 2) vector บน search_text → เติม field filter
     vec = _vector_search(message, shop, top=50, sellable_only=sellable_only,
                          snap=snap)
@@ -202,10 +220,11 @@ def fetch_units(
             d["_score"], d["_matched_by"] = score_of.get(d["unit_id"], 0.0), "vector"
             hits.setdefault(d["unit_id"], d)
 
-    # availability tier: code-hit ชนะเสมอ ("HA835 มีไหม" ต้องเห็น HA835 แม้ตาย)
+    # availability tier: exact-asked hit (code/item) ชนะเสมอ ("HA835 มีไหม"
+    # / "item นี้" ต้องเห็นแม้ตาย)
     # → sellable (build-time snapshot; live re-sort อยู่ใน fetch_unit_cards หลัง join) → score
     ranked = sorted(hits.values(),
-                    key=lambda u: (u["_matched_by"] == "code",
+                    key=lambda u: (u["_matched_by"] in ("code", "item"),
                                    bool(u.get("sellable")), u["_score"]),
                     reverse=True)[:limit]
     print(f"[UNITS] msg={message[:40]!r} codes={codes} hits={len(ranked)} "
@@ -373,7 +392,10 @@ def to_unit_card(unit: dict, route=None) -> dict:
         "cable_subtype": unit.get("cable_subtype"),
         "camera_subtype": unit.get("camera_subtype"),
         "model_codes": unit.get("model_codes"),
-        "canonical_specs": unit.get("canonical_specs"),
+        # canonical owner — missing/None/non-dict → {}; dict → preserve
+        "canonical_specs": (unit.get("canonical_specs")
+                            if isinstance(unit.get("canonical_specs"), dict)
+                            else {}),
         "oos_in_name": unit.get("oos_in_name"),
         "has_warranty_info": unit.get("has_warranty_info"),
         "has_description": unit.get("has_description"),
@@ -523,7 +545,7 @@ def fetch_unit_cards(message: str, retrieval_profile: RetrievalProfile | None = 
         fetch_units(message, route=route, limit=limit * 2,
                     retrieval_profile=retrieval_profile, snap=snap,
                     **kwargs)), snap=snap))
-    us.sort(key=lambda u: (u.get("_matched_by") == "code",
+    us.sort(key=lambda u: (u.get("_matched_by") in ("code", "item"),
                            _live_sellable(u), u.get("_score") or 0.0),
             reverse=True)
     top = us[:limit]
@@ -531,7 +553,7 @@ def fetch_unit_cards(message: str, retrieval_profile: RetrievalProfile | None = 
     #   pool อาจตายหมดทั้งที่ live catalog มีของขาย → คืน [] ให้ caller ตก legacy
     #   (legacy sweep อ่าน status/stock สด + pool กว้างกว่า)
     #   ยกเว้น code-hit — "HA835 มีไหม" ต้องเห็น HA835 แม้ตาย (ตอบ "หมด/เลิกขาย" ได้)
-    if top and not any(u.get("_matched_by") == "code" for u in top) \
+    if top and not any(u.get("_matched_by") in ("code", "item") for u in top) \
             and not any(_live_sellable(u) for u in top):
         print("[UNITS] pool all-dead post-join → legacy fallback", file=sys.stderr)
         return []
@@ -567,7 +589,7 @@ def fetch_unit_evidence(
         fetch_units(message, route=route, limit=limit * 2,
                     retrieval_profile=retrieval_profile, snap=snap,
                     **kwargs)), snap=snap))
-    us.sort(key=lambda u: (u.get("_matched_by") == "code",
+    us.sort(key=lambda u: (u.get("_matched_by") in ("code", "item"),
                            _live_sellable(u), u.get("_score") or 0.0),
             reverse=True)
     cards = tuple(to_unit_card(u, route) for u in us[:limit])

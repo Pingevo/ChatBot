@@ -85,10 +85,18 @@ if ! run "unit npz" "$PY" chatbot/shopeechat/scripts/build_embeddings.py --units
         --out "$GEN_DIR/unit_embeddings.npz" --gid "$GID"; then
     step "ABORT — unit embeddings failed"; exit 1
 fi
+# Phase 10B — description-chunk npz: mandatory artifact ของ gen ใหม่ —
+#   build fail → abort ก่อน publish (ไม่ publish gen ที่ขาด description source)
+if ! run "description npz" "$PY" chatbot/shopeechat/scripts/build_embeddings.py \
+        --description --export "$GEN_EXPORT" \
+        --out "$GEN_DIR/description_embeddings.npz" --gid "$GID"; then
+    step "ABORT — description embeddings failed"; exit 1
+fi
 
 # validate + manifest + one fenced pointer CAS (rollback: publish_generation.py --rollback)
 if ! run "publish $GID" "$PY" chatbot/shopeechat/scripts/publish_generation.py \
-        --gen-dir "$GEN_DIR" --gid "$GID" --expected auto; then
+        --gen-dir "$GEN_DIR" --gid "$GID" --expected auto \
+        --require-description; then
     step "ABORT — publish failed (previous generation stays active)"
     exit 1
 fi

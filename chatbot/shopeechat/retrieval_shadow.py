@@ -65,7 +65,7 @@ def run_grouped_retrieval_shadow(
     error ใดๆ คืน {"ok": False, "error": ...} ไม่ทำ runtime ล้ม
     """
     try:
-        slots = build_retrieval_slots(profile)
+        slots = build_retrieval_slots(profile, needs=needs)
         relations = build_retrieval_relations(
             profile, slots,
             allow_reversed=any(n.kind in PRODUCTISH_NEED_KINDS

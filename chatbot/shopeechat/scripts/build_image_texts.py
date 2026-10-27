@@ -182,14 +182,16 @@ def _error_class(msg: str) -> str:
 
 
 def _classify_images(discovered: dict[str, str], cache: dict[str, dict]) -> dict[str, str]:
-    """image_id → unchanged|new|changed|retryable_error|deferred|removed.
+    """image_id → unchanged|new|changed|retryable_error|deferred.
 
     - unchanged: cache ok + fingerprint ตรง → reuse evidence (0 provider call)
       — รวม error ที่ไม่ retryable/attempts หมดแล้วด้วย (skip — ไม่เผาอีก)
     - new: ไม่เคยอยู่ใน cache; changed: fingerprint ต่าง (URL เปลี่ยน)
     - retryable_error: error ที่ retry ได้และ attempts_total < MAX_ATTEMPTS
     - deferred: run ก่อนตัดงบ — run นี้ทำต่อได้ภายใต้ budget เดียวกัน
-    - removed: อยู่ใน cache แต่ไม่อยู่ใน catalog gen นี้ → detach
+    - cache-only ids ไม่ถูก classify — scoped run ไม่ใช่เจ้าของ record ข้าม
+      scope (r8: ไม่มี cross-scope removed/detach; orphan ค้างใน cache
+      เฉยๆ เข้า generation ไม่ได้เพราะ evidence มาจาก worklist เท่านั้น)
     """
     out: dict[str, str] = {}
     for iid, url in discovered.items():
@@ -198,7 +200,14 @@ def _classify_images(discovered: dict[str, str], cache: dict[str, dict]) -> dict
             out[iid] = "new"
             continue
         fp = _fingerprint(iid, url)
-        if doc.get("fingerprint") != fp:
+        # fingerprint-equivalence — new-schema: field fp ตรง; legacy evidence
+        #   record (ก่อน cache-state schema — ไม่มี fingerprint/status) ใช้
+        #   image_url normalize เทียบตรง (semantic เดียวกับ fp)
+        doc_fp = doc.get("fingerprint")
+        fp_match = (doc_fp == fp if doc_fp is not None else
+                    _normalize_url(doc.get("image_url"))
+                    == _normalize_url(url))
+        if not fp_match:
             # accepted ok คงอยู่ + pending retry budget หมด → หยุด OCR (bounded
             # ข้าม run) — เก็บ accepted เดิมไว้, ไม่ publish (fp ต่างกัน).
             # budget เป็นของ pending_fingerprint เดียวกันเท่านั้น — fingerprint
@@ -216,14 +225,15 @@ def _classify_images(discovered: dict[str, str], cache: dict[str, dict]) -> dict
             out[iid] = "deferred"
         elif status == "ok":
             out[iid] = "unchanged"
+        elif status is None:
+            # legacy evidence record — reusable เมื่อมี text; ไม่มี = changed
+            #   (ต้อง OCR ใหม่ — evidence ไม่ครบ)
+            out[iid] = "unchanged" if doc.get("text") else "changed"
         elif (status == "error" and doc.get("error_class") in _RETRYABLE_ERRORS
               and (doc.get("attempts_total") or 0) < MAX_ATTEMPTS):
             out[iid] = "retryable_error"
         else:
             out[iid] = "unchanged"
-    for iid in cache:
-        if iid not in discovered:
-            out[iid] = "removed"
     return out
 
 
@@ -253,23 +263,33 @@ def _evidence_record(item: dict, doc: dict) -> dict:
 
 
 def run_generation_ocr(work: list[dict], db, gen_dir: Path, gid: str,
-                       max_calls: int, deadline_ts: float | None = None) -> dict:
+                       max_calls: int, deadline_ts: float | None = None,
+                       scope: str = "") -> dict:
     """bounded incremental OCR สำหรับ generation เดียว.
 
     - classify vs cache → unchanged reuse evidence (0 calls), work classes OCR
       ต่อ item ภายใต้ max_calls (นับทุก attempt) + deadline
     - budget/เวลาหมด หรือ provider quota → ที่เหลือ status=deferred ใน cache
       (ไม่ใช่ error, ไม่ทำ generation fail) + run-level stop
-    - removed → item_ids=[] (audit คงไว้ใน cache, ไม่อยู่ใน published set)
-    - เขียน gen_dir/image_texts.jsonl = evidence set สมบูรณ์ของ gen (reuse+fresh)
+    - scoped run classify เฉพาะ worklist ของตัวเอง — cache-only/orphan rows
+      ไม่ถูกแตะ (r8: ไม่มี cross-scope detach); evidence เข้า generation
+      เฉพาะที่ intersect export ปัจจุบันเท่านั้น
+    - merge owner เดียวของ gen_dir/image_texts.jsonl = evidence set สมบูรณ์
+      ของ gen — union ของ run ทุก scope (reuse+fresh), run evidence ชนะตาม
+      image_id, malformed rows ถูก drop + count
+    - เขียน gen_dir/image_texts.counts.json = per-scope+totals breakdown
+      (manifest/publish-gate evidence — empty publish ต้องมี record นี้)
     """
     coll = db["image_texts"]
-    cache = {d["image_id"]: d for d in coll.find({})}
+    cache_docs = list(coll.find({}))
+    cache = {d["image_id"]: d for d in cache_docs if d.get("image_id")}
+    malformed_cache = len(cache_docs) - len(cache)
     discovered = {w["image_id"]: w["image_url"] for w in work}
     cls = _classify_images(discovered, cache)
     evidence: list[dict] = []
     counts = {"unchanged": 0, "new": 0, "changed": 0, "retryable_error": 0,
-              "deferred": 0, "removed": 0, "processed": 0, "calls": 0}
+              "deferred": 0, "processed": 0, "calls": 0}
+    carried = reusable = emitted_new = 0
     calls_used = 0
     stop = False
     for item in work:
@@ -282,11 +302,26 @@ def run_generation_ocr(work: list[dict], db, gen_dir: Path, gid: str,
         if state == "unchanged":
             counts["unchanged"] += 1
             doc = cache.get(iid) or {}
-            # publish เฉพาะ accepted record ที่ fingerprint ตรง discovered —
-            # accepted fp เก่า (URL เปลี่ยน) ห้ามไหลเข้า generation ใหม่
-            if (doc.get("status") == "ok" and doc.get("text")
-                    and doc.get("fingerprint") == fp):
+            dfp = doc.get("fingerprint")
+            fp_ok = (dfp == fp if dfp is not None else
+                     _normalize_url(doc.get("image_url"))
+                     == _normalize_url(item["image_url"]))
+            # publish เฉพาะ accepted record ที่ fingerprint-equivalent —
+            #   new-schema fp match หรือ legacy evidence (status ขาด) ที่
+            #   image_url ตรง; accepted fp เก่า (URL เปลี่ยน) ห้ามไหลเข้า gen
+            if (doc.get("status") in ("ok", None) and doc.get("text")
+                    and fp_ok):
+                reusable += 1
                 evidence.append(_evidence_record(item, doc))
+                carried += 1
+            continue
+        # zero-call bootstrap = read-only บน shared cache — นับ work classes
+        #   ลง sidecar เท่านั้น (deferred = ยังต้อง OCR); ไม่ upsert/pending/
+        #   extract เลย — daily refresh (budget>0) ใช้ path เดิมข้างล่าง
+        if max_calls <= 0:
+            counts[state] += 1
+            if state != "deferred":
+                counts["deferred"] += 1
             continue
         # accepted ok + fingerprint เปลี่ยน → เก็บ accepted ไว้, เขียน pending_*
         has_accepted = (state == "changed"
@@ -330,6 +365,7 @@ def run_generation_ocr(work: list[dict], db, gen_dir: Path, gid: str,
                           unset=_PENDING_FIELDS,
                           **base)
             evidence.append(_evidence_record(item, entry))
+            emitted_new += 1
         elif entry["status"] == "deferred":
             if has_accepted:
                 _cache_upsert(coll, iid,
@@ -370,16 +406,69 @@ def run_generation_ocr(work: list[dict], db, gen_dir: Path, gid: str,
                     + int(entry.get("attempts") or 1),
                     **base)
         time.sleep(MIN_INTERVAL)
-    for iid, state in cls.items():
-        if state != "removed":
-            continue
-        counts["removed"] += 1
-        _cache_upsert(coll, iid, item_ids=[], last_generation_id=gid)
-    if evidence:
+    # merge owner เดียวของ evidence file — scope runs ต้อง union ไม่ overwrite
+    #   (sellable→nonsellable ต่อเนื่อง); row ของ run นี้ชนะ image_id เดิม;
+    #   malformed/ไม่มี image_id → drop + count (fail closed — ห้าม carry ของเสีย)
+    ev_path = gen_dir / "image_texts.jsonl"
+    merged: dict[str, dict] = {}
+    malformed = malformed_cache
+    duplicate = 0
+    if ev_path.exists():
+        for line in open(ev_path, encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                malformed += 1
+                continue
+            iid = row.get("image_id")
+            if not iid:
+                malformed += 1
+                continue
+            if iid in merged:
+                duplicate += 1
+            merged[iid] = row
+    for e in evidence:
+        if e["image_id"] in merged:
+            duplicate += 1
+        merged[e["image_id"]] = e
+    if merged:
         gen_dir.mkdir(parents=True, exist_ok=True)
-        with open(gen_dir / "image_texts.jsonl", "w", encoding="utf-8") as f:
-            for e in evidence:
-                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        with open(ev_path, "w", encoding="utf-8") as f:
+            for iid in sorted(merged):
+                f.write(json.dumps(merged[iid], ensure_ascii=False) + "\n")
+    counts.update(carried=carried, reusable=reusable, new_evidence=emitted_new,
+                  malformed=malformed, duplicate=duplicate,
+                  evidence=len(merged), discovered=len(discovered))
+    # counts sidecar — pre-CAS publication proof เดียว (validate_generation
+    #   gate): scope ถูก mark complete ตอน write นี้สำเร็จเท่านั้น; write fail
+    #   → run fail ตาม (ห้าม print-แล้วไปต่อ — sidecar หาย = incomplete gen)
+    counts_path = gen_dir / "image_texts.counts.json"
+    side = (json.loads(counts_path.read_text(encoding="utf-8"))
+            if counts_path.exists() else {})
+    scopes = dict(side.get("scopes") or {})
+    scopes[scope or "run"] = {
+        "discovered": len(discovered), "reusable": reusable,
+        "carried": carried, "new": counts["new"],
+        "changed": counts["changed"], "deferred": counts["deferred"],
+        "malformed": malformed, "duplicate": duplicate}
+    completed = set(side.get("completed_scopes") or [])
+    if scope in ("sellable", "nonsellable"):
+        completed.add(scope)
+    unique_discovered = sum(scopes[s].get("discovered") or 0
+                            for s in ("sellable", "nonsellable")
+                            if s in scopes)
+    body = {"generation_id": gid,
+            "completed_scopes": sorted(completed),
+            "scopes": scopes,
+            "unique_discovered": unique_discovered,
+            "published_evidence": len(merged)}
+    tmp = counts_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(body, ensure_ascii=False, indent=1) + "\n",
+                   encoding="utf-8")
+    os.replace(tmp, counts_path)
     print(f"ocr gen={gid} counts={counts} evidence={len(evidence)}")
     return counts
 
@@ -541,7 +630,7 @@ def main() -> None:
     db = _kb._admin_db()
     counts = run_generation_ocr(work, db=db, gen_dir=args.gen_dir,
                                 gid=args.gid, max_calls=args.max_calls,
-                                deadline_ts=deadline)
+                                deadline_ts=deadline, scope=args.scope)
     print(f"Done: {counts}")
 
 

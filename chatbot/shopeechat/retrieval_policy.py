@@ -229,26 +229,42 @@ def _variant_facets(card: dict) -> dict:
     return {"connector": conn} if conn else {}
 
 
-def _canonical_roles(card: dict, types: set) -> set:
-    """roles จาก components (unit facts) + subtype map + type + name detect."""
+def _canonical_roles(card: dict, types: set) -> tuple[set, bool]:
+    """roles จาก components (unit facts) + subtype map + type + name detect.
+
+    คืน (roles, detected) — detected=True เมื่อ role ใดมาจาก name
+    inference (type ที่ detect เอง หรือ charger-subtype name-detect
+    fallback) — card ไม่มี structured form field = unproven form,
+    ห้ามนับเป็น standalone proof ที่ selection/presentation."""
     roles: set = set()
+    detected = False
     comps = card.get("components")
     if isinstance(comps, (list, tuple, set)):
         roles.update(c for c in comps if isinstance(c, str) and c)
+    # charger_subtype = form-classification ของ charger device — ใช้ได้
+    #   เฉพาะเมื่อ structured type ไม่ใช่ cable: สายชาร์จไม่ใช่อุปกรณ์
+    #   ชาร์จ → form roles (wireless/car/desktop/set/adapter) ไม่ apply
+    #   ('สายชาร์จแม่เหล็ก' ที่ upstream stamp 'wireless' = stale
+    #   name-derived evidence ห้ามเพิ่ม phantom role เหนือ
+    #   product_type/components/cable_subtype ที่ถูกต้อง)
     csub = card.get("charger_subtype")
-    roles.update(_SUBTYPE_ROLES.get(csub) or ())
+    if csub and "cable" not in types:
+        roles.update(_SUBTYPE_ROLES.get(csub) or ())
     cam = card.get("camera_subtype")
     if cam:
         roles.add(cam)
     if "cable" in types:
         roles.add("cable")
+        if not card.get("product_type"):
+            detected = True  # cable type นี้มาจาก name-detect ไม่ใช่ field
     if not roles and "charger" in types:
         # listing card ไม่มี unit fields — detect จากชื่อผ่าน owner เดิม
         from . import product_store as _ps
-        roles.update(
-            _SUBTYPE_ROLES.get(
-                _ps._detect_charger_subtype(card.get("name") or "")) or ())
-    return roles
+        name_roles = _SUBTYPE_ROLES.get(
+            _ps._detect_charger_subtype(card.get("name") or "")) or ()
+        roles.update(name_roles)
+        detected = detected or bool(name_roles)
+    return roles, detected
 
 
 def _canonicalize(card: dict, requested) -> dict:
@@ -301,7 +317,9 @@ def _canonicalize(card: dict, requested) -> dict:
         cand = set(_ps._detect_product_types(card.get("name") or "") or ())
     ctype = ptype or (sorted(cand)[0] if cand else None)
 
-    roles = _canonical_roles(card, cand)
+    roles, roles_detected = _canonical_roles(card, cand)
+    roles_source = ("detect" if roles_detected
+                    else ("field" if roles else "none"))
     facets = _variant_facets(card)
 
     # variant rows → per-row canonical states (copy — ห้าม mutate source)
@@ -318,6 +336,7 @@ def _canonicalize(card: dict, requested) -> dict:
 
     card["canonical_type"] = ctype
     card["canonical_roles"] = sorted(roles)
+    card["roles_source"] = roles_source
     card["variant_facets"] = facets
     card["publish_state"] = publish
     card["stock_state"] = stock_st
@@ -350,6 +369,7 @@ def _canonicalize(card: dict, requested) -> dict:
         "type_source": "field" if ptype else ("detect" if cand else "none"),
         "type_candidates": sorted(cand),
         "roles": sorted(roles),
+        "roles_source": roles_source,
         "catalog_status": cs,
         "publish": publish, "stock": stock_st, "visibility": vis,
         "facets": facets or None,
@@ -394,6 +414,7 @@ def make_evidence_card(product: dict, *, source: str,
             sv = _norm_id(value)
             if sv not in ids:
                 ids.append(sv)
+            card[field] = sv  # canonical emit — opaque str identity เท่านั้น
         meta[key] = ids
 
     facts = dict(meta.get("facts") or {})

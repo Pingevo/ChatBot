@@ -1212,6 +1212,26 @@ class TestE2E:
                     for p in (c.get("products") or [])]
         assert 4001 in t2_items or str(4001) in [str(i) for i in t2_items]
 
+    def test_noncode_product_question_resolves_persisted_subject(
+            self, monkeypatch):
+        """Spec question without model code must reach the persisted-subject
+        resolver — loose keyword extraction ('Speed','data') must not veto."""
+        calls = []
+        real = cp.resolve_subjects
+        monkeypatch.setattr(
+            cp, "resolve_subjects",
+            lambda *a, **k: calls.append(1) or real(*a, **k))
+        fx = _fx([
+            {"text": "สอบถามหน่อย", "item_id": "4001"},
+            {"text": "Speed data เท่าไหร่?ครับ"},
+        ])
+        records, captured, client = replay._replay(monkeypatch, fx)
+        assert calls, "persisted-subject resolver vetoed by non-code text"
+        t2_items = [str(replay._norm(p.get("item_id")))
+                    for c in records[1]["llm_calls"]
+                    for p in (c.get("products") or [])]
+        assert t2_items == ["4001"], t2_items
+
     def test_compare_pair_persists_and_price_followup_resolves(
             self, monkeypatch):
         fx = _fx([

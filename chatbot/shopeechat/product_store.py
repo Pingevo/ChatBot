@@ -108,6 +108,174 @@ def _load_vector_store(snap=_gen.SNAP_UNSET) -> dict[str, Any] | None:
         return _VECTOR_STORES.get(key)
 
 
+# ---- description-chunk vector source (Phase 10B — grouped channel only) ----
+#
+# description_embeddings.npz = per-generation artifact (rows: item_ids,
+# chunk_ids "<item_id>:<index>", embeddings, shops, texts, generation_id).
+# Path derives from snap.generation_id (pointer/snapshot contract ไม่เปลี่ยน);
+# generation ที่ยังไม่มี artifact → loader คืน None → source นี้ว่าง (fail
+# closed — ไม่มีผลกับ gen เก่า).  item-level recall เท่านั้น: chunk hits
+# aggregate กลับ item_id ด้วย max score ก่อนสร้าง card — pool/selection
+# เป็น owner เดิมของ ranking; source นี้ไม่ใช่ stock/price/variant authority
+
+_DESC_NPZ_NAME = "description_embeddings.npz"
+_DESC_VEC_CACHE: dict[str, dict] = {}
+_DESC_VEC_CAP = 3
+
+
+def _desc_vectors(snap) -> dict | None:
+    """description-chunk vectors ของ snapshot gen — path-keyed cache + assert
+    generation_id ใน npz (contract เดียวกับ units._unit_vectors)"""
+    if snap is None:
+        return None
+    path = str(Path(__file__).resolve().parent.parent.parent
+               / "exports" / "gen" / snap.generation_id / _DESC_NPZ_NAME)
+    if path in _DESC_VEC_CACHE:
+        return _DESC_VEC_CACHE[path]
+    try:
+        import numpy as np
+        z = np.load(path, allow_pickle=True)
+        if "generation_id" not in z.files or \
+                str(z["generation_id"].item()) != snap.generation_id:
+            print(f"[DESC] npz generation_id != pointer gen "
+                  f"{snap.generation_id} → fail closed", file=sys.stderr)
+            return _DESC_VEC_CACHE.get(path)
+        vec = {"item_ids": z["item_ids"], "chunk_ids": z["chunk_ids"],
+               "emb": z["embeddings"], "shops": z["shops"],
+               "texts": z["texts"]}
+        n = len(vec["item_ids"])
+        if not (len(vec["chunk_ids"]) == len(vec["shops"])
+                == len(vec["texts"]) == len(vec["emb"]) == n):
+            print("[DESC] npz row-count mismatch → fail closed",
+                  file=sys.stderr)
+            return _DESC_VEC_CACHE.get(path)
+    except Exception as exc:
+        print(f"[DESC] vector load error: {exc}", file=sys.stderr)
+        return _DESC_VEC_CACHE.get(path)
+    _DESC_VEC_CACHE[path] = vec
+    while len(_DESC_VEC_CACHE) > _DESC_VEC_CAP:
+        _DESC_VEC_CACHE.pop(next(iter(_DESC_VEC_CACHE)))
+    return vec
+
+
+def _desc_item_docs(item_ids: list) -> dict:
+    """ShpProducts docs ของ hit item ids — read-only (item_id เป็น int ทั้งสอง
+    ฝั่ง); item ที่ listing หายไป → ไม่มี key → fetcher ข้าม (fail closed)"""
+    if not item_ids:
+        return {}
+    db_name = os.environ.get("MONGO_DB", "").strip()
+    coll = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() \
+        or "ShpProducts"
+    out: dict = {}
+    for d in get_client()[db_name][coll].find(
+            {"item_id": {"$in": list(item_ids)}}):
+        out[d["item_id"]] = d
+    return out
+
+
+def fetch_description_evidence(
+    message: str,
+    *,
+    retrieval_profile=None,
+    shop: str | None = None,
+    limit: int = 8,
+    snap=_gen.SNAP_UNSET,
+):
+    """description-chunk vector recall → 1 item candidate ต่อ item_id.
+
+    contract เดียวกับ units.fetch_unit_evidence (คืน UnitEvidenceFetchResult):
+    chunk hits aggregate max score ต่อ item (deterministic — argsort desc);
+    profile.anchor_item_ids → restrict hits เป็น item นั้นเท่านั้น (exact-item
+    ห้ามถูกแทนด้วยสินค้าที่ chunk ใกล้กว่า); shop filter ผ่าน npz shops.
+    **ไม่มี semantic threshold** — bounded recall เท่านั้น: masked/NaN/±inf
+    reject เป็น invalid row; ranking/relevance = pool/selection owner.
+    card = to_product_card + _score (field เดิมของ pool) + _desc_hit
+    {item_id, chunk_id, chunk_index, score} provenance — chunk อื่นไม่เก็บ
+    """
+    from . import units as _units   # lazy — UnitEvidenceFetchResult owner
+    snap = _units._resolve_snap(snap)
+    dv = _desc_vectors(snap)
+    empty = _units.UnitEvidenceFetchResult(
+        cards=(), raw_count=0, sellable_count=0, unavailable_count=0,
+        trace=("description: no artifact/hits",))
+    if not dv or not message:
+        return empty
+    try:
+        import numpy as np
+        from . import embedding as _emb
+
+        def _canon_iid(x) -> str | None:
+            """npz/anchor item_id → canonical digit identity; รับ digits หรือ
+            "digits.0*" (export double "x.0" ตาม convention product npz) —
+            int(whole) ตรง ไม่ผ่าน float (precision >2^53);
+            fraction/non-digit/sign/exp → None (ข้าม — fail closed)"""
+            if x is None or isinstance(x, bool):
+                return None
+            text = str(x).strip()
+            if not text:
+                return None
+            if "." in text:
+                whole, frac = text.split(".", 1)
+                if not frac or set(frac) != {"0"} or not whole.isdigit():
+                    return None
+            else:
+                whole = text
+            if not whole.isdigit():
+                return None
+            return str(int(whole))
+
+        emb, item_ids = dv["emb"], dv["item_ids"]
+        sims = emb @ _emb.embed_query(message)
+        if shop:
+            sims = np.where(
+                np.array([s == shop for s in dv["shops"]]), sims, -np.inf)
+        anchor_raw = (getattr(retrieval_profile, "anchor_item_ids", ()) or ())
+        anchors = {c for c in (_canon_iid(a) for a in anchor_raw)
+                   if c is not None}
+        if anchor_raw:
+            # anchor ระบุแต่ canon ไม่ได้เลย → restrict เป็น ∅ (fail closed)
+            sims = np.where(
+                np.array([_canon_iid(i) in anchors for i in item_ids]),
+                sims, -np.inf)
+        best: dict[str, tuple] = {}
+        for i in np.argsort(-sims)[: max(1, limit * 8)]:
+            s = float(sims[i])
+            if not np.isfinite(s):
+                continue                    # masked/NaN/±inf = invalid row
+            iid = _canon_iid(item_ids[i])
+            if iid is None:
+                continue                    # malformed identity → ข้าม
+            if iid not in best:
+                best[iid] = (s, int(i))      # argsort desc → first = max
+        top_items = sorted(best.items(), key=lambda kv: -kv[1][0])[:limit]
+        if not top_items:
+            return empty
+        docs = _desc_item_docs([int(i) for i, _ in top_items])
+        cards = []
+        for iid, (score, row) in top_items:
+            doc = docs.get(int(iid))
+            if doc is None:
+                continue
+            c = to_product_card(doc, message)
+            c["_score"] = score
+            c["_desc_hit"] = {
+                "item_id": iid,
+                "chunk_id": f"{iid}:{str(dv['chunk_ids'][row]).rsplit(':', 1)[-1]}",
+                "chunk_index": int(
+                    str(dv["chunk_ids"][row]).rsplit(":", 1)[-1]),
+                "score": score}
+            cards.append(c)
+        sellable = sum(1 for c in cards if c.get("_available_for_sale"))
+        return _units.UnitEvidenceFetchResult(
+            cards=tuple(cards), raw_count=len(best),
+            sellable_count=sellable, unavailable_count=len(cards) - sellable,
+            trace=(f"description chunks={len(item_ids)} items={len(best)} "
+                   f"cards={len(cards)}",))
+    except Exception as exc:
+        print(f"[DESC] fetch error: {exc}", file=sys.stderr)
+        return empty
+
+
 def vector_search(
     query: str,
     top_k: int = 30,
@@ -1928,15 +2096,14 @@ def _detect_charger_subtype(message: str) -> str | None:
     if "หัวชาร" in _low_fixed and "หัวชาร์จ" not in _low_fixed:
         _low_fixed = _low_fixed.replace("หัวชาร", "หัวชาร์จ")
     low = _low_fixed
-    # เช็ค set ก่อน เพราะ "ชุดชาร์จ" อาจมี "ชาร์จ" อยู่ด้วย
-    for sub, kws in _CHARGER_SUBTYPES.items():
-        if sub in ("cable", "adapter"):
-            continue  # เช็ค cable/adapter ทีหลัง เพราะต้องดู position
-        if any(kw in low for kw in kws):
-            return sub
-    # เช็ค adapter และ cable พร้อมกัน
-    adapter_kws = _CHARGER_SUBTYPES["adapter"]
     cable_kws = _CHARGER_SUBTYPES["cable"]
+    # คำนวณ cable/adapter signals ก่อน charger-form subtype loop —
+    #   cable head-noun (kw-table หรือ "สาย" shorthand) ใน text ทำให้
+    #   charger-form kw เป็น modifier ของสายชาร์จ
+    #   ('สายชาร์จแม่เหล็ก' = magnetic cable, 'สายชาร์จในรถ' = in-car
+    #   cable, 'สาย magsafe' = magsafe cable) ไม่ใช่ wireless/car/
+    #   desktop charger — precedence ของ canonical signals เดิม
+    adapter_kws = _CHARGER_SUBTYPES["adapter"]
     # "gan" ต้องเป็น word boundary ไม่ใช่ส่วนของ "gan3"/"gan2" (ชื่อรุ่น)
     _has_adapter = any(kw in low for kw in adapter_kws if kw != "gan")
     # เช็ค "gan" เป็นคำเดี่ยวเท่านั้น (ไม่ใช่ gan3, gan2, ฯลฯ)
@@ -2024,6 +2191,20 @@ def _detect_charger_subtype(message: str) -> str | None:
                 _has_adapter = True
             if not _has_cable and "สาย" in low and "ไร้สาย" not in low and "ไร้ สาย" not in low:
                 _has_cable = True
+    # เช็ค set ก่อน เพราะ "ชุดชาร์จ" อาจมี "ชาร์จ" อยู่ด้วย; form-specific
+    #   subtypes (wireless/car/desktop/socket) ไม่ apply เมื่อมี cable
+    #   head-noun แล้ว — form kw ในวลีสายชาร์จเป็น modifier ของสาย
+    for sub, kws in _CHARGER_SUBTYPES.items():
+        if sub in ("cable", "adapter"):
+            continue  # cable/adapter resolve จาก position ด้านล่าง
+        if sub == "set":
+            if any(kw in low for kw in kws):
+                return sub
+            continue
+        if _has_cable:
+            continue
+        if any(kw in low for kw in kws):
+            return sub
     # ── Compatibility constraint: "ใช้กับสาย c to c", "ใช้สาย c to c" ──
     # ถ้า message มี "ใช้กับสาย" หรือ "ใช้สาย" + cable keyword แต่ไม่มี adapter keyword
     # → ลูกค้าถามว่าหัวชาร์จที่ใช้กับสายนี้ได้ไหม (constraint) ไม่ใช่ขอซื้อสาย
@@ -2065,14 +2246,15 @@ def _filter_charger_subtype(docs: list[dict], subtype: str) -> list[dict]:
     """กรอง charger docs ตาม subtype ที่ลูกค้าถาม.
 
     ลำดับการตรวจ (priority สูง → ต่ำ เพื่อกันสินค้าตกหล่น):
-    1. set: มี "ชุด"/"set"/"combo"/"ready to go" ในชื่อ
-    2. desktop: มี "แท่นชาร์จ"/"desktop charger"/"charging station" ในชื่อ
-       (ต้องเช็คก่อน adapter เพราะ "แท่นชาร์จ desktop" มี "ชาร์จ" ลอยๆ)
-    3. car_charger: มี "car charger"/"หัวชาร์จในรถ"/"ชาร์จในรถ"/"ที่ชาร์จรถ" ในชื่อ
+    1. socket: มี "ปลั๊กไฟ"/"smart plug"/"smart socket"/"ปลั๊ก wifi" ในชื่อ
+    2. car_charger: มี "car charger"/"หัวชาร์จในรถ"/"ชาร์จในรถ"/"ที่ชาร์จรถ" ในชื่อ
        (ต้องเช็คก่อน adapter เพราะ "หัวชาร์จในรถ" มี "หัวชาร์จ" ลอยๆ)
-    4. wireless: มี "ไร้สาย"/"wireless charger"/"magsafe"/"แม็กเซฟ"/"magnetic" ในชื่อ
-       (ต้องเช็คก่อน cable เพราะ "ชาร์จไร้สาย" มี "สาย" ลอยๆ)
-    5. socket: มี "ปลั๊กไฟ"/"smart plug"/"smart socket"/"ปลั๊ก wifi" ในชื่อ
+    3. wireless: มี "ไร้สาย"/"wireless charger"/"magsafe"/"แม็กเซฟ"/"magnetic" ในชื่อ
+       (ต้องเช็คก่อน desktop/cable เพราะ "แท่นชาร์จไร้สาย" มี "แท่นชาร์จ" ลอยๆ
+       และ "ชาร์จไร้สาย" มี "สาย" ลอยๆ)
+    4. desktop: มี "แท่นชาร์จ"/"desktop charger"/"charging station" ในชื่อ
+       (ต้องเช็คก่อน adapter เพราะ "แท่นชาร์จ desktop" มี "ชาร์จ" ลอยๆ)
+    5. set: มี "ชุด"/"set"/"combo"/"ready to go" ในชื่อ
     6. adapter: มี "หัวชาร์จ"/"adapter"/"gan" ในชื่อ (ไม่ใช่ desktop/car)
     7. cable: มี "สายชาร์จ"/"cable"/"สาย type" ฯลฯ ในชื่อ (ไม่ใช่ wireless)
 
@@ -2120,12 +2302,18 @@ def _filter_charger_subtype(docs: list[dict], subtype: str) -> list[dict]:
     }
     for d in docs:
         name = (d.get("item_name") or d.get("name") or "").lower()
-        # ลำดับ priority: desktop → car_charger → wireless → socket → set → adapter → cable → other
+        # ลำดับ priority: socket → car_charger → wireless → desktop → set → adapter → cable → other
         # (เช็ค subtype เฉพาะก่อน เพื่อกัน keyword ลอยๆ ทำให้ classify ผิด)
-        is_desktop = any(kw in name for kw in desktop_kw)
-        is_car = any(kw in name for kw in car_charger_kw)
-        is_wireless = any(kw in name for kw in wireless_kw)
-        is_socket = any(kw in name for kw in socket_kw)
+        # cable head-noun = form kw ในวลีสายชาร์จเป็น modifier ของสาย
+        #   ('สายชาร์จแม่เหล็ก' = magnetic cable, 'สายชาร์จในรถ' = in-car
+        #   cable) ไม่ใช่ wireless/car/desktop/socket จริง — precedence
+        #   เดียวกับ _detect_charger_subtype: มี cable kw → form subtype
+        #   ไม่ apply (สายไม่ใช่อุปกรณ์ชาร์จ)
+        has_cable_kw = any(kw in name for kw in cable_kw)
+        is_socket = not has_cable_kw and any(kw in name for kw in socket_kw)
+        is_car = not has_cable_kw and any(kw in name for kw in car_charger_kw)
+        is_wireless = not has_cable_kw and any(kw in name for kw in wireless_kw)
+        is_desktop = not has_cable_kw and any(kw in name for kw in desktop_kw)
         # set = มี indicator ชัดเจน (ชุด/set/combo/ready to go)
         is_set = (
             any(kw in name for kw in set_kw)
@@ -2147,15 +2335,19 @@ def _filter_charger_subtype(docs: list[dict], subtype: str) -> list[dict]:
         )
 
         # classify ตาม priority — subtype เฉพาะก่อน ไม่งั้น "แท่นชาร์จ desktop"
-        # จะโดนจับเป็น adapter เพราะมี "ชาร์จ" ลอยๆ
+        # จะโดนจับเป็น adapter เพราะมี "ชาร์จ" ลอยๆ — wireless ก่อน desktop
+        # เพราะ "ไร้สาย" = functional property ('แท่นชาร์จไร้สาย' = wireless
+        # pad) ตรงกับลูกค้าที่ถาม wireless ขณะที่ 'แท่นชาร์จ' แค่บอกรูปทรง
+        # — precedence เดียวกับ _detect_charger_subtype (car → wireless →
+        # desktop)
         if is_socket:
             classified["socket"].append(d)
-        elif is_desktop:
-            classified["desktop"].append(d)
         elif is_car:
             classified["car_charger"].append(d)
         elif is_wireless:
             classified["wireless"].append(d)
+        elif is_desktop:
+            classified["desktop"].append(d)
         elif is_set:
             classified["set"].append(d)
         elif is_adapter:
@@ -3932,6 +4124,12 @@ def _has_cert(text: str, certs: tuple[str, ...]) -> str | None:
         if pat and pat.search(text):
             return c
     return None
+
+
+# (product feature evidence ถูกลบ — sellable_units/card ไม่มี structured
+#  feature field สำหรับ closed-set tokens เช่น magnetic; runtime keyword
+#  inference บน card text ถูกยกเลิก → feature ที่ไม่มี structured evidence
+#  เป็น unknown ใน constraint eval — MISSING_STRUCTURED_PRODUCT_FEATURE_EVIDENCE)
 
 
 # ── stock DB cert source (itStock.Products — STOCK_URI/STOCK_DB) ─────────────

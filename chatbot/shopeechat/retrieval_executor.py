@@ -81,6 +81,11 @@ def _request_profile(req: RetrievalRequest, query: str, shop: str | None,
         availability_mode=req.availability_mode,
         compat_mode=req.compat_mode,
         value_constraints=req.value_constraints,
+        # exact item identity — digit-shaped subject_refs = typed item ids
+        #   (r6 selection authority เดียวกัน); fetch_units อ่านผ่าน field
+        #   เดิมนี้เพื่อ item-scoped channel (name-shaped refs ไม่ใช่ item id)
+        anchor_item_ids=tuple(
+            str(r) for r in (req.subject_refs or ()) if str(r).isdigit()),
     )
 
 
@@ -115,19 +120,43 @@ def _bucket(card: dict, req: RetrievalRequest) -> tuple[str, str]:
     ctypes = set(canon.get("type_candidates") or ())
     if card.get("canonical_type"):
         ctypes.add(card["canonical_type"])
+    card_item_ids = (card.get("_evidence") or {}).get("item_ids") or ()
     if eff_types and ctypes and not (ctypes & eff_types):
-        return "rejected", "wrong_type"
+        # เฉพาะ trusted identity ที่ชนะ inferred type gate: canonical
+        #   item_ids ∈ typed subject_refs (exact item) หรือ model_codes
+        #   (matcher เดียวกับ fetch recall: _model_token_in_name) —
+        #   soft model_term = unverified recall evidence ไม่ใช่ authority
+        from . import product_store as _ps
+        name = card.get("name") or ""
+        if (not any(_ps._model_token_in_name(name, c)
+                    for c in req.model_codes)
+                and not any(i in req.subject_refs for i in card_item_ids)):
+            return "rejected", "wrong_type"
     if req.subtypes:
         roles = set(card.get("canonical_roles") or ())
         # reject เฉพาะเมื่อ role evidence ชัดและไม่ตรง — roles ว่าง = ไม่มี
         # evidence พอจะตัด (เช่น generic listing ที่ชื่อไม่บอก subtype)
         if roles and not (roles & set(req.subtypes)):
             return "rejected", "subtype_mismatch"
+    devs: list[str] = []
+    if req.target_device or req.subject_refs:
+        from .device_compat import _device_candidates
+        devs = [cn or rw for rw, cn in _device_candidates(
+            card.get("name") or "")]
+    dev = devs[0] if devs else None
+    from . import product_store as _ps
     if req.target_device:
-        from .device_compat import _extract_device_token
-        dev = _extract_device_token(card.get("name") or "")
         if dev and dev != req.target_device:
-            return "rejected", f"device_mismatch:{dev}"
+            # own-model = structured identity เท่านั้น: typed subject refs /
+            # trusted model codes / canonical item_ids — card-name prose
+            # หรือ soft term ไม่ใช่ identity proof
+            own_model = (dev in {r.lower() for r in req.subject_refs}
+                         or any(_ps._model_token_in_name(dev, c)
+                                for c in req.model_codes)
+                         or any(i in req.subject_refs
+                                for i in card_item_ids))
+            if not own_model:
+                return "rejected", f"device_mismatch:{dev}"
     if card.get("sellable"):
         return "eligible", "ok"
     # card ขายได้แต่ requested option ไม่พร้อม → unavailable ด้วยเหตุ variant

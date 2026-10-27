@@ -27,7 +27,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(_REPO_ROOT / ".env")
 
 from . import llm, product_store, knowledge_base, persona, conversation_products, test_chat_api, device_compat, route_context as _rc, policy_resolver, candidate_pool as _cp
-from dataclasses import asdict as _dc_asdict
+from dataclasses import asdict as _dc_asdict, replace as _dc_replace
 from . import generation_pointer as _gen
 from .responses import _routing, _send_handoff
 
@@ -781,7 +781,22 @@ def _finalize_answer(comp, *, message: str, limit: int, products,
         "unanswered": [u.need_index for u in comp.unanswered_needs],
         "policy_text": next(
             (_guards.policy_outcome_text(r.outcome)
-             for r in comp.results if r.domain == "policy"), None)}
+             for r in comp.results if r.domain == "policy"), None),
+        # structured provenance — deterministic segment รักษา
+        #   origin+identities+exact text; enforce validate marker shape
+        #   แล้ว exempt claims ใน span นั้น (ไม่ infer identity จาก
+        #   prose — malformed/mismatch → fail closed ไม่มี exemption)
+        "segments": [
+            {"domain": r.domain, "origin": r.origin, "text": r.text,
+             "need_indices": list(r.need_indices),
+             "subject_ids": [str(x) for x in (r.subject_ids or ())]}
+            for r in comp.results]}
+    # eval-measured spec evidence = typed product evidence ผูก identity
+    #   (ask values ไม่รวม) — artifact/audit channel; deterministic
+    #   segment claims ground ผ่าน provenance marker เท่านั้น
+    if comp.context is not None:
+        rd["spec_measured"] = list(
+            comp.context.spec_measured_facts or ())
     return ChatResponse(
         answer=answer,
         answer_segments=llm.split_segments(answer),
@@ -1159,12 +1174,25 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         #              (3) tag เคยปรากฏใน history (ลูกค้าแชร์การ์ดไว้ก่อนหน้า แล้วถามต่อ
         #                  เช่น "โหลดแอปอื่นมาดูได้ไหม") — ใช้เป็น anchor ต่อ ถ้าคำถามปัจจุบัน
         #                  ไม่ได้เอ่ยถึงรุ่น/แบรนด์อื่นที่ชัดเจน (ไม่ใช่การเปลี่ยนหัวข้อ)
+        # ⚡ Phase 8 — grouped-selection flag อ่านครั้งเดียวต่อ turn (ก่อน
+        #   item-tag block — grouped path ต้องรู้ตั้งแต่ history-anchor scan);
+        #   mid-turn flip = ทั้งก้อนเดิมใช้ค่าเดียวกัน
+        _sel_flag = False
+        try:
+            from . import runtime_config as _rcfg
+            _sel_flag = _rcfg.grouped_retrieval_selection_enabled()
+        except Exception:
+            _sel_flag = False
         _tagged_item_id = req.item_id or _extract_item_id_tag(req.message)
         _is_from_history_anchor = False
         _hybrid_anchor_card = None  # ⚡ 2026-09-12 — anchor สำหรับ hybrid merge (compat+target_device)
         # ⚡ 2026-09-16 — default anchor_card=None (กัน UnboundLocalError เมื่อไม่มี _tagged_item_id)
         anchor_card = None
-        if not _tagged_item_id and history:
+        # ⚡ Phase 10B — grouped path มี ConversationSubjectSet + resolver เป็น
+        #   owner เดียวของ subject continuity; history tag scan ข้างล่างเป็น
+        #   legacy fallback เท่านั้น — ถ้าปล่อยทั้งสอง anchor จะไหลเข้า
+        #   tag_item_ids ทุกเทิร์น → poison subject_refs/clobber persisted set
+        if not _tagged_item_id and history and not _sel_flag:
             _current_model_kw = knowledge_base.extract_model_keywords(req.message)
             # ⚡ ถ้ามี model keyword ของสินค้าอื่น → new topic (เปลี่ยนรุ่น)
             # ⚡ ถ้ามี new topic keywords → new topic
@@ -1569,6 +1597,8 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 active_anchor=(
                     {"item_id": _sv.active_item_id}
                     if _sv and _sv.active_item_id else None),
+                tag_item_ids=(
+                    (_tagged_item_id,) if _tagged_item_id else ()),
                 intent_result=_intent_result,
             )
         except Exception:
@@ -1609,6 +1639,20 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 answer=("ขอโทษค่ะ ลูกค้าหมายถึงสินค้าตัวไหนคะ "
                         "ช่วยแจ้งชื่อรุ่นหรือส่งการ์ดสินค้าให้หน่อยนะคะ"),
                 products=[], source="subject_clarify", shop=req.shop,
+                model=model_name,
+                usage={"prompt": 0, "output": 0, "total": 0},
+                intent=(_intent_result
+                        if isinstance(_intent_result, dict) else {}),
+                web_search_used=False, steps=list(_steps),
+                timing={"total": round(_time.time() - _total_start, 3)},
+            )
+        if _turn_action == "greeting":
+            # typed social turn — deterministic greeting ตอบตรง (deterministic
+            #   reply เหมือน no_reply/clarify); ไม่เข้า retrieval/resolver
+            #   → persisted subject set ไม่ถูกแตะ
+            return ChatResponse(
+                answer="สวัสดีค่ะ สนใจสินค้าตัวไหนหรือมีอะไรให้ช่วยไหมคะ",
+                products=[], source="greeting", shop=req.shop,
                 model=model_name,
                 usage={"prompt": 0, "output": 0, "total": 0},
                 intent=(_intent_result
@@ -1704,15 +1748,34 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         if _subj_explicit:
             _subject_ev["explicit_ids"] = _subj_explicit
         if not (_tagged_item_id or anchor_card or _hybrid_anchor_card
-                or _current_has_model or _is_claim_request):
-            _subject_res = conversation_products.resolve_subjects(
-                _subject_effective, (req.message or "").lower(),
-                subject_scope=_plan_scope,
-                subject_count=_plan_count,
-                signal_confidence=_plan_sig_conf)
-            if (_subject_res.outcome == "resolved"
+                or _is_claim_request):
+            # explicit-subject gate: typed TurnPlan surface เท่านั้น —
+            #   subject_refs ไม่ว่าง = ข้อความมี explicit subject identity
+            #   ของตัวเอง (codes/item refs) → turn นี้ owned โดย explicit
+            #   channel (pair/explicit) → resolver ไม่ต้องทำงาน; target-side
+            #   codes (post-connector) ไม่ใช่ subject → ไม่ veto
+            _has_explicit_subject = bool(_turn_plan and any(
+                n.subject_refs for n in _turn_plan.needs))
+            if not _has_explicit_subject:
+                _subject_res = conversation_products.resolve_subjects(
+                    _subject_effective, (req.message or "").lower(),
+                    subject_scope=_plan_scope,
+                    subject_count=_plan_count,
+                    signal_confidence=_plan_sig_conf)
+            if (_subject_res and _subject_res.outcome == "resolved"
                     and _subject_res.subject_set):
                 _subject_ev["resolved"] = _subject_res.subject_set
+                # deictic ownership boundary: current_single resolve ได้
+                #   canonical id เดียว → stamp เข้า typed need.subject_refs
+                #   (exact-item authority — slot/request/selection จำกัด
+                #   identity เดียว; owner = turn_decision)
+                if _turn_plan is not None:
+                    _stamped_needs = _td.apply_resolved_subject_refs(
+                        _turn_plan.needs,
+                        _subject_res.subject_set.subject_ids)
+                    if _stamped_needs != _turn_plan.needs:
+                        _turn_plan = _dc_replace(
+                            _turn_plan, needs=_stamped_needs)
         if _subject_res and _subject_res.outcome == "clarify":
             return ChatResponse(
                 answer=("ขอโทษค่ะ ลูกค้าหมายถึงสินค้าตัวไหนคะ "
@@ -1762,6 +1825,24 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         elif anchor_card and not _hybrid_anchor_card:
             _subject_cards = [anchor_card]
             _conv_active_card = anchor_card
+        # history reference channel (grouped เท่านั้น) — subject set เดิมที่
+        #   ไม่ถูก anchor/resolve ใน turn นี้ เข้าเป็น reference evidence
+        #   (historical_evidence role) ไม่ใช่ subject ของคำถามใหม่; identity
+        #   continuity ยังเป็น resolver เจ้าของเดียว
+        _history_cards: list[dict] = []
+        if (_sel_flag and _productish_need and not _subject_cards
+                and not _has_explicit_subject
+                and _subject_effective is not None
+                and getattr(_subject_effective, "subject_ids", ())):
+            try:
+                _history_cards = conversation_products.materialize_subject_cards(
+                    db, list(_subject_effective.subject_ids)[:3],
+                    products=_subject_products,
+                    shop_filter=req.shop, message=req.message, snap=_snap)
+            except Exception as _e:
+                print(f"[HISTORY-REF] materialize error: {_e}",
+                      file=sys.stderr)
+                _history_cards = []
         # compare pair ctx — plan compare need หรือ persisted relation=compare;
         #   ต้อง subject ≥2 (set เดี่ยวไม่มีอะไรเทียบ)
         if (not _anchor_compare_ctx and len(_subject_cards) >= 2
@@ -1832,17 +1913,6 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         _pdec = None          # typed PolicyDecision — object เดียวต่อ turn
         _pdec_ptype = ""      # policy_type ของ decision (ใส่ใน routing_decision)
         _pd_compose = False   # Phase 8 — typed composition gate (flag-ON only)
-        # ⚡ Phase 8 — grouped-selection flag อ่านครั้งเดียวต่อ turn ก่อน
-        #   _pdec gate (เดิมอ่าน ~2102 หลัง general branch — mixed compose
-        #   decision ต้องรู้ flag ก่อน gate; mid-turn flip = ทั้งก้อนเดิม
-        #   ใช้ค่าเดียวกัน)
-        _sel_flag = False
-        try:
-            from . import runtime_config as _rcfg
-            _sel_flag = _rcfg.grouped_retrieval_selection_enabled()
-        except Exception:
-            _sel_flag = False
-
         def _rd_extra() -> dict:
             """typed decision + canonical subject identities ที่ต้องติดไป
             กับ routing_decision ทุก return site — guards.enforce (answer
@@ -1853,11 +1923,15 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 _d["policy_decision"] = {
                     "policy_type": _pdec_ptype,
                     **_dc_asdict(_pdec)}
-            _sc = (list(_subject_cards or [])
-                   + list(_ref_regex_products or []))
-            for _ac in (anchor_card, _hybrid_anchor_card):
-                if _ac:
-                    _sc.append(_ac)
+            # grouped path: subject_ids = resolved subject เท่านั้น —
+            # legacy ref-regex/anchor candidates ไม่ใช่ typed subject
+            # authority (ปนเข้า → len>1 → spec_claim fail-closed ทั้งคำตอบ)
+            _sc = list(_subject_cards or [])
+            if not _sel_flag:
+                _sc += list(_ref_regex_products or [])
+                for _ac in (anchor_card, _hybrid_anchor_card):
+                    if _ac:
+                        _sc.append(_ac)
             from . import candidate_pool as _pool  # _cp ถูก shadow เป็น conversation_products ข้างบน
             _sids: list[str] = []
             for _c in _sc:
@@ -2157,6 +2231,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 shop=req.shop,
                 platform=req.platform or "shopee",
                 anchor_cards=_resolved_anchor_cards,
+                history_cards=_history_cards,
             )
         except Exception as _e:
             print(f"[PROFILE] build error: {_e}", file=sys.stderr)
@@ -2651,6 +2726,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                                 platform=req.platform or "shopee",
                                 subject_cards=_subject_cards,
                                 compat_cards=_kb_device_products or (),
+                                history_cards=_history_cards,
                                 needs=(_turn_plan.needs
                                        if _turn_plan else ()),
                                 snap=_snap,
@@ -2658,6 +2734,8 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                                     knowledge_base.kb_product_evidence(
                                         db, kb_docs, shop=req.shop,
                                         message=req.message),
+                                desc_fetcher=product_store
+                                    .fetch_description_evidence,
                                 supporting=([{"kind": "kb",
                                               "request_id": "ch:kb",
                                               "payload": {"text": kb_context}}]
@@ -3036,7 +3114,8 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     constraints["material"] = mat
                     break
             # device: generic token extractor — ไม่ hardcode ชื่อรุ่น (ครอบทุก device ปัจจุบัน+อนาคต)
-            _dev_tok = device_compat._extract_device_token(low)
+            _dev_tok = next((cn or rw for rw, cn in
+                             device_compat._device_candidates(low)), None)
             if _dev_tok:
                 constraints["device"] = _dev_tok
             return constraints
@@ -4902,6 +4981,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     platform=req.platform or "shopee",
                     subject_cards=_subject_cards,
                     compat_cards=_device_additional or (),
+                    history_cards=_history_cards,
                     needs=(_turn_plan.needs if _turn_plan else ()),
                     supporting=([{"kind": "vision", "text": _vision_context,
                                    "subject_refs": _vision_refs}]
@@ -4913,6 +4993,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                                               "source": _device_spec_data.get(
                                                   "source") or "web-structured"}}]
                                    if _device_spec_data else []),
+                    desc_fetcher=product_store.fetch_description_evidence,
                     snap=_snap)
             except Exception as _e:
                 print(f"[SELECTION] grouped-retrieval error: {_e}",

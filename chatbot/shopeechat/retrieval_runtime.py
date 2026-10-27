@@ -8,6 +8,8 @@ executor→pool→selector ครั้งเดียว แล้วคืน 
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 from . import generation_pointer as _gen
 from .route_context import build_retrieval_slots, build_retrieval_relations
 from .retrieval_planner import (
@@ -34,6 +36,8 @@ def run_grouped_selection(
     supporting=(),
     needs=(),
     snap=_gen.SNAP_UNSET,
+    history_cards=(),
+    desc_fetcher=None,
 ) -> dict | None:
     """profile → pipeline → selection (ไม่ merge base) — รันครั้งเดียวต่อ request.
 
@@ -48,12 +52,13 @@ def run_grouped_selection(
     None เฉพาะ exception — flag-ON caller fail closed (deterministic reply)
     """
     try:
-        slots = build_retrieval_slots(profile)
+        slots = build_retrieval_slots(profile, needs=needs)
         relations = build_retrieval_relations(
             profile, slots,
             allow_reversed=any(n.kind in PRODUCTISH_NEED_KINDS
                                for n in needs))
-        requests = build_grouped_retrieval_requests(profile, slots, relations)
+        requests = build_grouped_retrieval_requests(
+            profile, slots, relations, needs=needs)
         # evidence channels — synthetic request rows เพื่อให้ selector iterate
         # ได้ (quota แยกต่อ channel); fetch = closure บน pre-resolved data
         channels: list = []
@@ -65,16 +70,41 @@ def run_grouped_selection(
             cards = tuple(compat_cards)
             channels.append((channel_request("compat"),
                              lambda *a, _d=cards, **k: _d))
+        if history_cards:
+            # prior-subject reference channel — cards ที่เคยคุยกันเข้า
+            #   context เป็น historical_evidence (ไม่ใช่ candidate ของ
+            #   need ปัจจุบัน — ต่างจาก subjects channel ที่ resolve identity)
+            cards = tuple(history_cards)
+            channels.append((channel_request("history"),
+                             lambda *a, _d=cards, **k: _d))
         if kb_fetcher is not None:
             channels.append((channel_request("kb"), kb_fetcher))
+        if desc_fetcher is not None and any(
+                n.kind in PRODUCTISH_NEED_KINDS for n in needs):
+            # description-chunk recall (Phase 10B) — candidate-recall source
+            #   only: subject_refs ของ turn ผ่านเข้า channel request →
+            #   fetcher restrict hits ตาม anchor_item_ids เดิม (exact-item
+            #   isolation); pool/selection เจ้าเดิมตัดสินเสมอ
+            channels.append((replace(
+                channel_request("description"),
+                subject_refs=tuple(
+                    getattr(profile, "anchor_item_ids", ()) or ())),
+                            desc_fetcher))
         results = execute_grouped_retrieval_requests(
             requests, message=message, shop=shop, platform=platform,
             fetcher=fetcher, legacy_fetcher=legacy_fetcher,
             channels=channels, snap=snap)
         pool = build_candidate_pool(results, profile=profile,
                                     supporting_evidence=tuple(supporting))
+        # request-iteration order = candidate precedence contract
+        #   (selection = ordering owner เดียว): subjects channel ก่อน —
+        #   persisted subject = identity authority ของ need ที่มัน serve
+        _sel_requests = (
+            tuple(r for r, _ in channels if r.source == "subjects")
+            + requests
+            + tuple(r for r, _ in channels if r.source != "subjects"))
         sel = select_for_llm_context(
-            pool, requests + tuple(r for r, _ in channels), profile,
+            pool, _sel_requests, profile,
             needs=needs,
             per_request_limit=per_request_limit,
             unavailable_limit=unavailable_limit)
@@ -99,7 +129,7 @@ def run_grouped_selection(
     # (answer_context.compile_answer_context) owner เดียว — runtime ไม่สร้าง
     # selected_cards/extra_context อีก (legacy grouped assembly ถูกลบแล้ว)
     return {"selection": sel, "pool": pool,
-            "requests": requests + tuple(r for r, _ in channels),
+            "requests": _sel_requests,
             "summary": summary}
 
 

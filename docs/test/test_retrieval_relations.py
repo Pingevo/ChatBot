@@ -68,16 +68,24 @@ def test_product_list_without_connector_has_no_relation():
 
 
 def test_device_brand_is_not_product_brand_for_accessory():
+    """'มีเคส xiaomi mi watch 8' — xiaomi คือ device brand ไม่ใช่ product
+    brand (r8: typed target_refs จาก need ขับเคลื่อน brand filter —
+    mi watch 8 = device constraint ของ case-need)"""
+    from shopeechat import turn_decision as _td
     prof = _profile("มีเคส xiaomi mi watch 8 ไหม")
-    slots = route_context.build_retrieval_slots(prof)
+    tp = _td.decide_turn("มีเคส xiaomi mi watch 8 ไหม",
+                         history=[], intent_result=None)
+    slots = route_context.build_retrieval_slots(prof, needs=tp.needs)
     assert len(slots) == 1
     assert slots[0].product_types == frozenset({"case"})
-    assert slots[0].target_device in {"xiaomi mi watch 8", "mi watch 8"}
+    assert slots[0].target_device == "mi watch 8"
     assert "xiaomi" not in {b.lower() for b in slots[0].brand_hints}
 
 
 def test_ambiguous_device_without_product_keyword_is_low_confidence():
-    prof = _profile("หัวชาร์จกับ Mi Watch 8")
+    """connector 'เชื่อมกับ' ยังคง ambiguous (bare-กับ ending — device อาจ
+    เป็น product อีกชิ้น) → low confidence 0.6 (pre-existing flag)"""
+    prof = _profile("หัวชาร์จเชื่อมกับ mi watch 8")
     slots = route_context.build_retrieval_slots(prof)
     charger = next(s for s in slots if "charger" in s.product_types)
     assert charger.target_device in (None, "mi watch 8")

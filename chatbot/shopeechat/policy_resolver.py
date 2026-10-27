@@ -448,6 +448,14 @@ def extract_field_facts(card: dict, *, subject_id: str = "",
             sid, key, _norm_val(val), "known", source,
             source_version, prov))
 
+    # scoped ctx card อาจถูกตัด field text ออกเหลือ typed spec_facts —
+    #   fold กลับเป็น fact row (extract owner เดียว → guard/verifier เห็น
+    #   fact เดียวกับตอน eval)
+    _sf = card.get("spec_facts")
+    if isinstance(_sf, dict):
+        for k, v in _sf.items():
+            add(str(k), v, "spec_facts", f"spec_facts.{k}")
+
     specs = card.get("canonical_specs") or card.get("specs") or {}
     # specs ที่ยืมมาจาก attach_kb_specs (model_codes ของ unit เอง — identity
     # เดียวกัน ไม่ใช่ข้าม product) ต้องบอก provenance ตรง — hint grade
@@ -474,6 +482,14 @@ def extract_field_facts(card: dict, *, subject_id: str = "",
     add("connector", conns, "card_text", "connector extract")
     add("output_w", device_compat._extract_max_wattage(card) or None,
         "card", "output_power_w|variants|name")
+    # canonical numeric/feature facts (extractor owner เดียวกัน — ไม่มี
+    #   evidence → ไม่ emit row = unknown ไม่ใช่ negative)
+    add("data_transfer_mbps",
+        device_compat._extract_data_transfer_mbps(card) or None,
+        "card", "data_transfer_mbps|variants|name+desc")
+    # features: structured feature field ไม่มีบน card/unit contract →
+    #   ไม่ emit row (unknown ไม่ใช่ negative — keyword inference บน card
+    #   text ถูกลบ: MISSING_STRUCTURED_PRODUCT_FEATURE_EVIDENCE)
     months = _warranty_months(card)
     if months:
         add("warranty", months, "card", "warranty|name")
@@ -481,6 +497,87 @@ def extract_field_facts(card: dict, *, subject_id: str = "",
         if _declares(card, m):
             add("declares_device", m, "card_text", "name+description")
     return tuple(facts)
+
+
+# ══════════════════════════════════════════════════════════════════
+# typed spec-constraint eval — numeric/feature evidence owner เดียว
+# (FieldEvidence จาก extract_field_facts เท่านั้น; ไม่มี evidence → unknown)
+
+_CMP_OPS = {
+    "gte": lambda a, b: a >= b,
+    "lte": lambda a, b: a <= b,
+    "gt": lambda a, b: a > b,
+    "lt": lambda a, b: a < b,
+    "eq": lambda a, b: a == b,
+}
+_CONSTRAINT_UNITS = {
+    "data_transfer_mbps": "Mbps", "output_power_w": "W",
+    "capacity_mah": "mAh", "cable_length_m": "m"}
+
+
+def eval_spec_constraints(
+        facts,
+        spec_constraints: tuple[tuple[str, str, float], ...] = (),
+        required_features: tuple[str, ...] = ()) -> dict:
+    """FieldEvidence tuple × typed constraints/features → verdict map.
+
+    fail = fact evidence มีจริงและขัดเงื่อนไข (best numeric claim ต่ำกว่า/
+    สูงกว่า threshold); ไม่มี fact row/cast ไม่ได้ → unknown (ห้ามตีเป็น
+    negative); borrowed (_KB_INHERIT_SOURCE) specs เป็น hint grade —
+    ไม่ ground verdict; required_features: token ไม่อยู่ → unknown
+    returns {"status","satisfied","failed","unknown","detail"} — failed/
+    unknown/satisfied คือ key names; detail[field]=(op,want,best)
+    """
+    fmap: dict[str, list] = {}
+    for f in facts or ():
+        if getattr(f, "source", "") == _KB_INHERIT_SOURCE:
+            continue  # borrowed spec — hint grade, ไม่ ground verdict
+        fmap.setdefault(f.fact_key, []).append(f)
+    satisfied: list[str] = []
+    failed: list[str] = []
+    unknown: list[str] = []
+    detail: dict[str, tuple] = {}
+    for field_, op, want in spec_constraints or ():
+        fn = _CMP_OPS.get(op)
+        nums: list[float] = []
+        for f in fmap.get(field_, ()):
+            for v in (f.value if isinstance(f.value, tuple)
+                      else (f.value,)):
+                try:
+                    nums.append(float(v))
+                except (TypeError, ValueError):
+                    continue
+        if fn is None or not nums:
+            unknown.append(field_)
+            continue
+        best = max(nums)  # card claim semantics "สูงสุดถึง" — best value
+        detail[field_] = (op, float(want), best)
+        if fn(best, float(want)):
+            satisfied.append(field_)
+        else:
+            failed.append(field_)
+    if required_features:
+        feats = {str(v).lower() for f in fmap.get("features", ())
+                 for v in (f.value if isinstance(f.value, tuple)
+                           else (f.value,))}
+        for f_ in required_features:
+            (satisfied if str(f_).lower() in feats
+             else unknown).append(f_)
+    status = ("none" if not (spec_constraints or required_features)
+              else "fail" if failed
+              else "pass" if not unknown else "unknown")
+    return {"status": status, "satisfied": satisfied,
+            "failed": failed, "unknown": unknown, "detail": detail}
+
+
+def format_constraint_value(field: str, value: float) -> str:
+    """constraint field value → human unit ("10Gbps" สำหรับ Mbps≥1000 ที่
+    ลงตัว, "480Mbps", "240W") — display owner เดียวของ spec contract"""
+    if field == "data_transfer_mbps" and value >= 1000 \
+            and float(value) % 1000 == 0:
+        return f"{value / 1000:g}Gbps"
+    unit = _CONSTRAINT_UNITS.get(field, "")
+    return f"{value:g}{unit}"
 
 
 def device_field_facts(device_name: str, spec: dict
@@ -502,12 +599,42 @@ def device_field_facts(device_name: str, spec: dict
     return tuple(facts)
 
 
+# spec token → canonical field unit normalize (scale เดียวกับ intent
+# spec_constraints: 10Gbps→10000 = data_transfer_mbps canonical value)
+_FIELD_UNITS = {
+    "data_transfer_mbps": (("gbps", 1000.0), ("mbps", 1.0)),
+    "output_w": (("kw", 1000.0), ("w", 1.0)),
+    "output_power_w": (("kw", 1000.0), ("w", 1.0)),
+    "capacity_mah": (("ah", 1000.0), ("mah", 1.0)),
+    "cable_length_m": (("mm", 0.001), ("cm", 0.01), ("m", 1.0)),
+}
+_TOK_NUM_RE = re.compile(r"^(\d+(?:\.\d+)?)([a-z]+)$")
+
+
+def _tok_field_value(tok: str):
+    """spec token → ({canonical fact_keys}, normalized value) — unit scale
+    เดียวกับ _FIELD_UNITS (field aliases ร่วมหน่วยคืนครบ); หน่วยไม่อยู่ใน
+    ตาราง → None (ไม่ ground)."""
+    m = _TOK_NUM_RE.match(tok)
+    if not m:
+        return None
+    num, unit = float(m.group(1)), m.group(2)
+    fields = {fk for fk, aliases in _FIELD_UNITS.items()
+              if any(u == unit for u, _ in aliases)}
+    if not fields:
+        return None
+    scale = next(s for fk in fields
+                 for u, s in _FIELD_UNITS[fk] if u == unit)
+    return frozenset(fields), num * scale
+
+
 def claim_supported(facts, subject_id: str, token: str) -> bool:
     """claim token ถูก support โดย facts ของ subject นั้นเองเท่านั้น —
     subject อื่น/ไม่มี evidence → False (unknown, ไม่ใช่ negative)."""
     t = _norm_tok(token)
     if not t:
         return False
+    tn = _tok_field_value(t)
     for f in facts or ():
         if f.subject_id != subject_id:
             continue
@@ -522,6 +649,13 @@ def claim_supported(facts, subject_id: str, token: str) -> bool:
         if isinstance(f.value, str) and _norm_tok(f.value) == t \
                 and f.fact_key not in ("spec_tokens", "declares_device"):
             return True
+        if tn and f.fact_key in tn[0]:
+            for v in vals:
+                try:
+                    if float(v) == tn[1]:
+                        return True
+                except (TypeError, ValueError):
+                    continue
     return False
 
 

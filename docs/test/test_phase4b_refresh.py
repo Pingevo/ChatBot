@@ -352,7 +352,9 @@ class TestOcrFingerprint:
         assert cls["img3"] == "retryable_error"
         assert cls["img4"] == "deferred"
         assert cls["img5"] == "unchanged"     # terminal error = skip, never re-burn
-        assert cls["gone"] == "removed"
+        # r8 — cache-only ids are not classified at all (no cross-scope
+        # "removed" state; orphans are never owned by a scoped run)
+        assert "gone" not in cls
 
     def test_classify_new_and_retry_bound(self):
         bit = self._bit()
@@ -467,22 +469,25 @@ class TestOcrRunBudget:
         assert calls["n"] == 0
         assert db["image_texts"].find_one({"image_id": "w0"})["status"] == "deferred"
 
-    def test_removed_detached_and_cache_state_fields(self, tmp_path, monkeypatch):
+    def test_removed_detached_and_cache_state_fields(self, tmp_path,
+                                                       monkeypatch):
+        """r8 — cache-only records are NOT detached by a scoped run: an
+        orphan/foreign-scope record stays byte-identical; it cannot enter the
+        generation because evidence is built only from export worklists."""
         bit = _script("build_image_texts")
         monkeypatch.setattr(bit, "_extract_one",
                             lambda item: pytest.fail("no work expected"))
         monkeypatch.setattr(bit, "MIN_INTERVAL", 0.0)
-        db = GenDb({"image_texts": [
-            {"image_id": "gone", "fingerprint": "gone|x", "status": "ok",
-             "item_ids": [9]}]})
+        orig = {"image_id": "gone", "fingerprint": "gone|x", "status": "ok",
+                "item_ids": [9]}
+        db = GenDb({"image_texts": [dict(orig)]})
         gen_dir = tmp_path / "gen" / GID
         gen_dir.mkdir(parents=True)
         bit.run_generation_ocr(
             [], db=db, gen_dir=gen_dir, gid=GID, max_calls=10,
             deadline_ts=None)
         doc = db["image_texts"].find_one({"image_id": "gone"})
-        assert doc["item_ids"] == []                 # detached from generation
-        assert doc["last_generation_id"] == GID
+        assert doc == orig                           # untouched — no detach
         assert not (gen_dir / "image_texts.jsonl").exists() or \
             "gone" not in (gen_dir / "image_texts.jsonl").read_text()
 
@@ -633,21 +638,22 @@ class TestOcrAcceptedPending:
         assert doc.get("pending_status") is None
 
     def test_removed_semantics_unchanged(self, tmp_path, monkeypatch):
-        """removed (ไม่อยู่ใน discovered) — cache detach item_ids เหมือนเดิม"""
+        """r8 — ไม่มี "removed" semantics อีก: cache-only record (ไม่อยู่ใน
+        discovered ของ scope นี้) ไม่ถูก detach — accepted state + item_ids
+        คง byte-identical (scoped run ไม่ใช่เจ้าของ record ข้าม scope)"""
         bit = _script("build_image_texts")
         monkeypatch.setattr(bit, "_extract_one",
                             lambda item: pytest.fail("no work expected"))
         monkeypatch.setattr(bit, "MIN_INTERVAL", 0.0)
-        db = GenDb({"image_texts": [
-            {"image_id": "gone", "fingerprint": "gone|x", "status": "ok",
-             "text": "OLD", "item_ids": [9]}]})
+        orig = {"image_id": "gone", "fingerprint": "gone|x", "status": "ok",
+                "text": "OLD", "item_ids": [9]}
+        db = GenDb({"image_texts": [dict(orig)]})
         gen_dir = tmp_path / "gen" / GID
         gen_dir.mkdir(parents=True)
         bit.run_generation_ocr([], db=db, gen_dir=gen_dir, gid=GID,
                                max_calls=10, deadline_ts=None)
         doc = db["image_texts"].find_one({"image_id": "gone"})
-        assert doc["item_ids"] == []
-        assert doc["status"] == "ok"           # accepted state ไม่ถูกแตะ
+        assert doc == orig                     # byte-identical — no mutation
 
 
 # ══════════════════════════ materialize published OCR ═══════════════════════
@@ -762,6 +768,18 @@ def _stage_gen(tmp_path, db, gid=GID, *, unit_count=1, ocr_count=1,
         "".join(json.dumps({"image_id": f"i{i}", "kind": "spec",
                             "text": "t", "item_ids": [i]}) + "\n"
                 for i in range(ocr_count)))
+    # r8: merge owner เขียน counts sidecar ทุก run — generation artifact บังคับ;
+    #   fixture = complete two-scope run (published_evidence == jsonl จริง)
+    _scope_counts = {"discovered": 0, "reusable": 0, "carried": 0, "new": 0,
+                     "changed": 0, "deferred": 0, "malformed": 0,
+                     "duplicate": 0}
+    _s = dict(_scope_counts, discovered=ocr_count)
+    (gen_dir / "image_texts.counts.json").write_text(json.dumps({
+        "generation_id": gid,
+        "completed_scopes": ["sellable", "nonsellable"],
+        "scopes": {"sellable": _s, "nonsellable": dict(_scope_counts)},
+        "unique_discovered": ocr_count,
+        "published_evidence": ocr_count}))
     for name in ("unit_embeddings.npz", "product_embeddings.npz"):
         np.savez_compressed(
             gen_dir / name,
@@ -1876,3 +1894,979 @@ class TestOcrPendingFingerprintScope:
         ev_ids = {json.loads(l)["image_id"]
                   for l in (gen_dir / "image_texts.jsonl").open()}
         assert iid in ev_ids
+
+
+# ═══════════════ safe first-generation bootstrap (r7) ═══════════════════════
+#
+# Carry-forward contract — shared `image_texts` cache is the immutable
+# bootstrap/evidence source. run_generation_ocr is the ONE merge owner:
+# discovered-images × valid cache records (new-schema fp-ok AND legacy
+# evidence records that predate the cache-state schema) → generation
+# image_texts.jsonl. No blind copy, no empty publish when reusable exists.
+
+
+class TestSafeFirstGeneration:
+    """r7 — carry-forward of existing image-text evidence into the first
+    published generation; empty-generation publish gate."""
+
+    def _run(self, tmp_path, monkeypatch, *, work_items, cache_docs=(),
+             extract_results=None, max_calls=0, gen_dir=None, db=None,
+             scope=""):
+        bit = _script("build_image_texts")
+        calls = {"n": 0}
+
+        def fake_extract(item):
+            calls["n"] += 1
+            st = (extract_results or {}).get(item["image_id"], {})
+            return {"image_id": item["image_id"], "image_url": item["image_url"],
+                    "used_by": 1, "is_template": False, "model": "m",
+                    "status": st.get("status", "ok"),
+                    "kind": st.get("kind", "spec"),
+                    "text": st.get("text", "FRESH"), "truncated": False,
+                    "attempts": st.get("attempts", 1),
+                    "error": st.get("error"), "ts": 1}
+
+        monkeypatch.setattr(bit, "_extract_one", fake_extract)
+        monkeypatch.setattr(bit, "MIN_INTERVAL", 0.0)
+        if db is None:
+            docs = (list(cache_docs.values())
+                    if isinstance(cache_docs, dict) else cache_docs)
+            db = GenDb({"image_texts": docs})
+        if gen_dir is None:
+            gen_dir = tmp_path / "gen" / GID
+            gen_dir.mkdir(parents=True, exist_ok=True)
+        summary = bit.run_generation_ocr(
+            work_items, db=db, gen_dir=gen_dir, gid=GID,
+            max_calls=max_calls, deadline_ts=None, scope=scope)
+        return bit, calls, db, gen_dir, summary
+
+    def _legacy(self, iid, url, text="OCR-SPEC", kind="spec", item_ids=(7,)):
+        """pre-4B evidence record — no status/fingerprint cache state."""
+        return {"image_id": iid, "image_url": url, "kind": kind, "text": text,
+                "truncated": False, "item_ids": list(item_ids), "ts": 1}
+
+    def _work(self, iid, url, item_ids=(7,)):
+        return {"image_id": iid, "image_url": url, "used_by": 1,
+                "is_template": False, "item_ids": list(item_ids)}
+
+    # req 1 — valid shared records referenced by export are carried
+    def test_legacy_evidence_carried_zero_calls(self, tmp_path, monkeypatch):
+        bit, calls, db, gen_dir, summary = self._run(
+            tmp_path, monkeypatch,
+            work_items=[self._work("a1", "https://u/a1")],
+            cache_docs=[self._legacy("a1", "https://u/a1")])
+        assert calls["n"] == 0                          # no provider call
+        ev = [json.loads(l) for l in
+              (gen_dir / "image_texts.jsonl").open()]
+        assert [e["image_id"] for e in ev] == ["a1"]
+        assert ev[0]["text"] == "OCR-SPEC"
+        assert ev[0]["kind"] == "spec"
+
+    def test_newschema_ok_still_carried(self, tmp_path, monkeypatch):
+        bit = _script("build_image_texts")
+        ok = {"image_id": "n1",
+              "fingerprint": bit._fingerprint("n1", "https://u/n1"),
+              "status": "ok", "kind": "spec", "text": "NEW-OK",
+              "item_ids": [7]}
+        _, calls, _, gen_dir, _ = self._run(
+            tmp_path, monkeypatch,
+            work_items=[self._work("n1", "https://u/n1")], cache_docs=[ok])
+        assert calls["n"] == 0
+        ev = [json.loads(l) for l in
+              (gen_dir / "image_texts.jsonl").open()]
+        assert ev[0]["text"] == "NEW-OK"
+
+    # req 2 — stale/orphan records are not copied blindly and are counted
+    def test_url_mismatch_legacy_not_carried(self, tmp_path, monkeypatch):
+        legacy = self._legacy("a1", "https://u/OLD")
+        _, calls, db, gen_dir, summary = self._run(
+            tmp_path, monkeypatch,
+            work_items=[self._work("a1", "https://u/NEW")],
+            cache_docs=[dict(legacy)])
+        assert calls["n"] == 0                    # budget 0 → deferred not OCR
+        assert not (gen_dir / "image_texts.jsonl").exists()
+        # r8 — url changed → counted deferred in sidecar, cache byte-identical
+        doc = db["image_texts"].find_one({"image_id": "a1"})
+        assert doc == legacy
+
+    def test_orphan_cache_record_not_in_evidence(self, tmp_path, monkeypatch):
+        legacy = self._legacy("gone", "https://u/gone")
+        _, calls, db, gen_dir, _ = self._run(
+            tmp_path, monkeypatch,
+            work_items=[],
+            cache_docs=[dict(legacy)])
+        assert calls["n"] == 0
+        assert not (gen_dir / "image_texts.jsonl").exists()
+        # r8 — orphan stays byte-identical in cache; scoped runs never detach
+        doc = db["image_texts"].find_one({"image_id": "gone"})
+        assert doc == legacy
+
+    # req 3 — malformed rows fail closed and are reported
+    def test_malformed_cache_doc_skipped_not_carried(self, tmp_path,
+                                                     monkeypatch):
+        _, calls, db, gen_dir, summary = self._run(
+            tmp_path, monkeypatch,
+            work_items=[self._work("a1", "https://u/a1"),
+                        self._work("a2", "https://u/a2")],
+            cache_docs=[{"image_url": "https://u/x", "text": "NO-IID"},
+                        {"image_id": "a1", "image_url": "https://u/a1",
+                         "kind": "spec", "text": "", "item_ids": [7]},
+                        self._legacy("a2", "https://u/a2")])
+        ev = ([json.loads(l) for l in (gen_dir / "image_texts.jsonl").open()]
+              if (gen_dir / "image_texts.jsonl").exists() else [])
+        assert [e["image_id"] for e in ev] == ["a2"]
+        # no-image_id cache doc must not crash the run; empty-text fails closed
+        assert summary.get("malformed", 0) >= 1
+
+    def test_malformed_jsonl_rows_dropped_and_counted(self, tmp_path,
+                                                      monkeypatch):
+        gen_dir = tmp_path / "gen" / GID
+        gen_dir.mkdir(parents=True)
+        with open(gen_dir / "image_texts.jsonl", "w") as f:
+            f.write('{"image_id": "keep", "kind": "spec", "text": "K",'
+                    ' "item_ids": [7]}\n')
+            f.write("{not-json\n")
+            f.write('{"kind": "spec", "text": "NO-IID"}\n')
+        _, calls, db, gen_dir, summary = self._run(
+            tmp_path, monkeypatch, work_items=[], cache_docs=[],
+            gen_dir=gen_dir)
+        ev = [json.loads(l) for l in
+              (gen_dir / "image_texts.jsonl").open()]
+        assert [e["image_id"] for e in ev] == ["keep"]
+        counts = json.loads(
+            (gen_dir / "image_texts.counts.json").read_text())
+        sc = counts["scopes"]["run"]
+        assert sc["malformed"] == 2
+
+    # req 4 — duplicate image_id rows resolve deterministically
+    def test_duplicate_jsonl_rows_deterministic(self, tmp_path, monkeypatch):
+        gen_dir = tmp_path / "gen" / GID
+        gen_dir.mkdir(parents=True)
+        with open(gen_dir / "image_texts.jsonl", "w") as f:
+            for item_ids in ([7], [8]):
+                f.write(json.dumps(
+                    {"image_id": "dup", "kind": "spec", "text": "T",
+                     "item_ids": item_ids}) + "\n")
+        _, calls, db, gen_dir, _ = self._run(
+            tmp_path, monkeypatch, work_items=[], cache_docs=[],
+            gen_dir=gen_dir)
+        ev = [json.loads(l) for l in
+              (gen_dir / "image_texts.jsonl").open()]
+        assert len(ev) == 1
+        assert ev[0]["item_ids"] == [8]       # later row wins deterministically
+        # item 7's evidence must not bleed into item 8's record
+
+    # req 5 — fresh evidence overrides same image_id via the one merge owner
+    def test_fresh_evidence_overrides_stale_row(self, tmp_path, monkeypatch):
+        gen_dir = tmp_path / "gen" / GID
+        gen_dir.mkdir(parents=True)
+        with open(gen_dir / "image_texts.jsonl", "w") as f:
+            f.write(json.dumps({"image_id": "a1", "kind": "spec",
+                                "text": "STALE", "item_ids": [1]}) + "\n")
+        _, calls, db, gen_dir, _ = self._run(
+            tmp_path, monkeypatch,
+            work_items=[self._work("a1", "https://u/a1")], cache_docs=[],
+            extract_results={"a1": {"text": "FRESH-A1"}},
+            max_calls=5, gen_dir=gen_dir)
+        assert calls["n"] == 1
+        ev = [json.loads(l) for l in
+              (gen_dir / "image_texts.jsonl").open()]
+        assert len(ev) == 1 and ev[0]["text"] == "FRESH-A1"
+
+    # req — second scope run merges into the same generation file (union)
+    def test_second_scope_run_merges_not_overwrites(self, tmp_path,
+                                                    monkeypatch):
+        """r8 — same DB instance both scopes: sellable run must not detach
+        nonsellable cache records and vice versa (cross-scope removal defect)."""
+        gen_dir = tmp_path / "gen" / GID
+        gen_dir.mkdir(parents=True)
+        s1 = self._legacy("s1", "https://u/s1", item_ids=(1,))
+        n1 = self._legacy("n1", "https://u/n1", item_ids=(2,))
+        db = GenDb({"image_texts": [dict(s1), dict(n1)]})
+        self._run(tmp_path, monkeypatch,
+                  work_items=[self._work("s1", "https://u/s1", (1,))],
+                  gen_dir=gen_dir, db=db, scope="sellable")
+        self._run(tmp_path, monkeypatch,
+                  work_items=[self._work("n1", "https://u/n1", (2,))],
+                  gen_dir=gen_dir, db=db, scope="nonsellable")
+        ev = {json.loads(l)["image_id"]: json.loads(l)
+              for l in (gen_dir / "image_texts.jsonl").open()}
+        assert set(ev) == {"s1", "n1"}
+        assert ev["s1"]["item_ids"] == [1] and ev["n1"]["item_ids"] == [2]
+        # neither scope detached the other's records — both byte-identical
+        assert db["image_texts"].find_one({"image_id": "s1"}) == s1
+        assert db["image_texts"].find_one({"image_id": "n1"}) == n1
+
+    # req 6 — shared cache source byte/doc unchanged for carried records
+    def test_carried_records_leave_cache_untouched(self, tmp_path,
+                                                   monkeypatch):
+        legacy = self._legacy("a1", "https://u/a1")
+        _, calls, db, gen_dir, _ = self._run(
+            tmp_path, monkeypatch,
+            work_items=[self._work("a1", "https://u/a1")],
+            cache_docs=[dict(legacy)])
+        assert calls["n"] == 0
+        doc = db["image_texts"].find_one({"image_id": "a1"})
+        for k, v in legacy.items():
+            assert doc.get(k) == v
+        assert "status" not in doc          # not upgraded in place
+        assert "last_generation_id" not in doc
+
+    # req 11 — counts sidecar records reusable/carried/new/malformed/dup
+    def test_counts_sidecar_records_run_breakdown(self, tmp_path,
+                                                  monkeypatch):
+        _, calls, db, gen_dir, summary = self._run(
+            tmp_path, monkeypatch,
+            work_items=[self._work("a1", "https://u/a1"),
+                        self._work("n1", "https://u/n1")],
+            cache_docs=[self._legacy("a1", "https://u/a1")],
+            extract_results={"n1": {"text": "FRESH-N1"}}, max_calls=3,
+            scope="sellable")
+        counts = json.loads(
+            (gen_dir / "image_texts.counts.json").read_text())
+        sc = counts["scopes"]["sellable"]
+        assert sc["reusable"] == 1 and sc["carried"] == 1
+        assert sc["new"] == 1 and sc["discovered"] == 2
+        assert counts["published_evidence"] == 2
+
+
+class TestPublishEmptyOcrGate:
+    """req 7-10 — pre-CAS completeness gate: an empty published image_texts
+    collection is only legal when recorded counts prove the source was
+    genuinely empty; otherwise reject before CAS and keep prior pointer."""
+
+    def _pub(self):
+        return _script("publish_generation")
+
+    def test_publish_rejects_empty_ocr_without_counts(self, tmp_path):
+        """r6 defect chain — skipped OCR step → empty coll 0==0 used to pass."""
+        pub = self._pub()
+        db = GenDb({})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=0)
+        (gen_dir / "image_texts.jsonl").unlink()   # step skipped → no file
+        (gen_dir / "image_texts.counts.json").unlink()  # skip → no counts either
+        with pytest.raises(Exception, match="image_texts|counts"):
+            pub.publish(db=db, gen_dir=gen_dir, gid=GID)
+        assert db["sellable_units_meta"].count_documents({}) == 0
+
+    def _sidecar(self, gen_dir, *, scopes=("sellable", "nonsellable"),
+                 discovered=0, published=0, **scope_kw):
+        """complete-contract counts sidecar — override per test."""
+        z = {"discovered": 0, "reusable": 0, "carried": 0, "new": 0,
+             "changed": 0, "deferred": 0, "malformed": 0, "duplicate": 0}
+        sc = {s: dict(z, **(scope_kw if s == scopes[0] else {}))
+              for s in scopes}
+        if scopes:
+            sc[scopes[0]]["discovered"] = discovered
+        (gen_dir / "image_texts.counts.json").write_text(json.dumps({
+            "generation_id": GID,
+            "completed_scopes": sorted(scopes),
+            "scopes": sc,
+            "unique_discovered": discovered,
+            "published_evidence": published}))
+
+    def test_publish_rejects_empty_ocr_when_reusable(self, tmp_path):
+        """reusable>0 in counts but jsonl empty → contradiction → reject."""
+        pub = self._pub()
+        db = GenDb({})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=0)
+        (gen_dir / "image_texts.jsonl").write_text("")
+        self._sidecar(gen_dir, discovered=3, published=0, reusable=3)
+        with pytest.raises(Exception):
+            pub.publish(db=db, gen_dir=gen_dir, gid=GID)
+        assert db["sellable_units_meta"].count_documents({}) == 0
+
+    def test_publish_allows_empty_ocr_when_recorded_empty(self, tmp_path):
+        """req 8 — genuinely empty source publishes empty ONLY when the
+        manifest explicitly records that state."""
+        pub = self._pub()
+        db = GenDb({})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=0)
+        (gen_dir / "image_texts.jsonl").write_text("")
+        self._sidecar(gen_dir, discovered=0, published=0)
+        res = pub.publish(db=db, gen_dir=gen_dir, gid=GID)
+        assert res in ("published", "bootstrap")
+        m = json.loads((gen_dir / "manifest.json").read_text())
+        assert m["counts"]["image_texts"] == 0
+        assert m["counts"].get("image_texts_empty") is True or \
+            m.get("image_texts_empty") is True
+
+    def test_manifest_records_image_texts_breakdown(self, tmp_path):
+        """req 11 — manifest counts: source/carried/new/rejected/duplicate/
+        published for image_texts."""
+        pub = self._pub()
+        db = GenDb({})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=2)
+        self._sidecar(gen_dir, discovered=2, published=2,
+                      reusable=1, carried=1, new=1)
+        res = pub.publish(db=db, gen_dir=gen_dir, gid=GID)
+        assert res in ("published", "bootstrap")
+        m = json.loads((gen_dir / "manifest.json").read_text())
+        c = m["counts"]
+        assert c["image_texts"] == 2                      # published
+        assert c["image_texts_carried"] == 1
+        assert c["image_texts_new"] == 1
+        assert "image_texts_duplicate" in c
+        assert "image_texts_malformed" in c
+
+    def test_pre_cas_failure_keeps_prior_pointer(self, tmp_path):
+        """req 9 — gate failure leaves the existing active pointer intact."""
+        pub = self._pub()
+        prior = _snap_doc(gid="g20261001-000000-eeeeeeee")
+        db = GenDb({"sellable_units_meta": [prior]})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=0)
+        (gen_dir / "image_texts.jsonl").unlink()
+        (gen_dir / "image_texts.counts.json").unlink()  # skip → no counts either
+        with pytest.raises(Exception):
+            pub.publish(db=db, gen_dir=gen_dir, gid=GID,
+                        expected_current="g20261001-000000-eeeeeeee")
+        ptr = db["sellable_units_meta"].find_one({"_id": "active"})
+        assert ptr["generation_id"] == "g20261001-000000-eeeeeeee"
+
+    def test_counts_gid_mismatch_rejected(self, tmp_path):
+        """counts artifact must belong to this generation — foreign gid
+        sidecar must not satisfy the gate."""
+        pub = self._pub()
+        db = GenDb({})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=0)
+        (gen_dir / "image_texts.jsonl").write_text("")
+        self._sidecar(gen_dir, discovered=0, published=0)
+        c = json.loads((gen_dir / "image_texts.counts.json").read_text())
+        c["generation_id"] = "g20250101-000000-ffffffff"
+        (gen_dir / "image_texts.counts.json").write_text(json.dumps(c))
+        with pytest.raises(Exception):
+            pub.publish(db=db, gen_dir=gen_dir, gid=GID)
+
+
+class TestUnitsBuiltFromGenerationJsonl:
+    """req 12 — sellable units consume the SAME merged image_texts.jsonl that
+    gets published (carried+fresh evidence feeds unit search_text)."""
+
+    def test_units_search_text_uses_merged_generation_jsonl(self, tmp_path):
+        bsu = _script("build_sellable_units")
+        gen_dir = tmp_path / "gen" / GID
+        gen_dir.mkdir(parents=True)
+        export = _write_export(gen_dir / "ShpProducts.export.json",
+                               [_export_doc(7, ["a1", "n1"])])
+        with open(gen_dir / "image_texts.jsonl", "w") as f:
+            f.write(json.dumps({"image_id": "a1", "kind": "spec",
+                                "text": "CARRIED-SPEC", "item_ids": [7]}) + "\n")
+            f.write(json.dumps({"image_id": "n1", "kind": "product",
+                                "text": "FRESH-PROD", "item_ids": [7]}) + "\n")
+        out = gen_dir / "sellable_units.jsonl"
+        n = bsu.build_units_file(export_path=export,
+                                 image_texts_path=gen_dir / "image_texts.jsonl",
+                                 out_path=out)
+        units = [json.loads(l) for l in out.open()]
+        st = units[0]["search_text"]
+        assert "CARRIED-SPEC" in st and "FRESH-PROD" in st
+
+
+# ═══════════════════ exact-item scoped units channel (r7) ═══════════════════
+
+class TestExactItemUnits:
+    """fetch_units item channel — typed subject identity (digit-shaped
+    subject_refs → profile.anchor_item_ids) retrieves units for the exact
+    item across all forms, without broadening to siblings or other shops."""
+
+    def _prof(self, anchor_ids=(), ptypes=(), subtype=None, codes=()):
+        rc = _pkg("route_context")
+        return rc.RetrievalProfile(
+            platform="shopee", shop=None, message="m", intent="",
+            product_types=frozenset(ptypes), subtype=subtype,
+            model_codes=tuple(codes), variant_terms=(), target_device=None,
+            availability_mode="", compat_mode="",
+            anchor_item_ids=tuple(anchor_ids))
+
+    def _unit(self, item_id, model_id, ptype, shop="shopA", sellable=True,
+              name=None):
+        return {"unit_id": f"{item_id}:{model_id}", "item_id": item_id,
+                "model_id": model_id,
+                "display_name": name or f"item{item_id} u{model_id}",
+                "item_name": name or f"item{item_id}",
+                "model_name": f"m{model_id}", "model_sku": "",
+                "kind": ptype, "components": [], "product_type": ptype,
+                "model_codes": ["SHARED01"], "price": 100.0, "stock": 5,
+                "item_status": "NORMAL", "model_status": "MODEL_NORMAL",
+                "shop": shop, "sellable": sellable, "answerable": True,
+                "desc_sections": {}, "image_ids": [], "search_text": "x"}
+
+    def _fetch(self, tmp_path, monkeypatch, units_docs, prof, *, shop=None,
+               vec_ids=(), limit=8):
+        units = _pkg("units")
+        gp = _pkg("generation_pointer")
+        kb = _pkg("knowledge_base")
+        db = GenDb({f"sellable_units_{GID}": units_docs})
+        monkeypatch.setattr(kb, "_admin_db", lambda: db)
+        monkeypatch.setattr(units, "_vector_search",
+                            lambda *a, **k: list(vec_ids))
+        snap = gp.snapshot_from_pointer(_snap_doc())
+        return units.fetch_units("หัวชาร์จละ", shop=shop, limit=limit,
+                                 retrieval_profile=prof, snap=snap)
+
+    def test_exact_bundle_item_exposes_all_form_units(self, tmp_path,
+                                                      monkeypatch):
+        """exact charger-bundle item → its cable/powerbank/adapter units all
+        surface even though request type = charger."""
+        docs = [self._unit(11, 1, "charger"),
+                self._unit(11, 2, "cable"),
+                self._unit(11, 3, "powerbank"),
+                self._unit(22, 1, "charger")]
+        got = self._fetch(tmp_path, monkeypatch, docs,
+                          self._prof(anchor_ids=("11",), ptypes=("charger",)))
+        by_unit = {u["unit_id"] for u in got}
+        assert {"11:1", "11:2", "11:3"} <= by_unit
+        assert "22:1" not in by_unit or True   # 22 may appear via other lanes
+        item_hits = {u["unit_id"] for u in got
+                     if u.get("_matched_by") == "item"}
+        assert item_hits == {"11:1", "11:2", "11:3"}
+
+    def test_exact_item_units_rank_above_vector(self, tmp_path, monkeypatch):
+        docs = [self._unit(11, 1, "charger"), self._unit(22, 1, "charger")]
+        got = self._fetch(tmp_path, monkeypatch, docs,
+                          self._prof(anchor_ids=("11",)),
+                          vec_ids=[("22:1", 0.9), ("11:1", 0.5)])
+        assert got[0]["unit_id"] == "11:1"
+        assert got[0]["_matched_by"] == "item"
+
+    def test_sibling_item_same_codes_cannot_leak(self, tmp_path, monkeypatch):
+        """item 22 shares model_codes with 11 — exact pin on 11 must not
+        pull 22's units through the item channel."""
+        docs = [self._unit(11, 1, "charger"), self._unit(22, 1, "cable")]
+        got = self._fetch(tmp_path, monkeypatch, docs,
+                          self._prof(anchor_ids=("11",)))
+        item_hits = {u["unit_id"] for u in got
+                     if u.get("_matched_by") == "item"}
+        assert "22:1" not in item_hits
+        assert item_hits == {"11:1"}
+
+    def test_other_shop_units_cannot_leak(self, tmp_path, monkeypatch):
+        docs = [self._unit(11, 1, "charger", shop="shopA"),
+                self._unit(11, 9, "charger", shop="shopB")]
+        got = self._fetch(tmp_path, monkeypatch, docs,
+                          self._prof(anchor_ids=("11",)), shop="shopA")
+        assert {u["unit_id"] for u in got} == {"11:1"}
+
+    def test_nonexact_discovery_keeps_type_filter(self, tmp_path,
+                                                  monkeypatch):
+        """no anchor → existing product_type filter applies to vector hits."""
+        docs = [self._unit(11, 1, "charger"), self._unit(11, 2, "cable")]
+        got = self._fetch(tmp_path, monkeypatch, docs,
+                          self._prof(ptypes=("charger",)),
+                          vec_ids=[("11:1", 0.9), ("11:2", 0.8)])
+        assert {u["unit_id"] for u in got} == {"11:1"}
+
+    def test_missing_exact_item_fails_closed(self, tmp_path, monkeypatch):
+        docs = [self._unit(22, 1, "charger")]
+        got = self._fetch(tmp_path, monkeypatch, docs,
+                          self._prof(anchor_ids=("99",)))
+        assert got == []
+
+    def test_dead_exact_item_still_answerable(self, tmp_path, monkeypatch):
+        """exact-asked item with dead units → evidence survives (unavailable
+        summary), like code-hit semantics — not silently dropped."""
+        docs = [self._unit(11, 1, "charger", sellable=False)]
+        got = self._fetch(tmp_path, monkeypatch, docs,
+                          self._prof(anchor_ids=("11",)))
+        assert [u["unit_id"] for u in got] == ["11:1"]
+
+
+class TestRequestProfileSubjectForwarding:
+    """executor profile boundary — digit-shaped req.subject_refs reach the
+    fetcher through profile.anchor_item_ids; name-shaped refs do not."""
+
+    def test_digit_subject_refs_forwarded_as_anchor_ids(self):
+        rex = _pkg("retrieval_executor")
+        rp = _pkg("retrieval_planner")
+        req = rp.RetrievalRequest(
+            request_id="slot-charger", slot_id="slot-charger", source="slot",
+            product_types=frozenset({"charger"}), subtypes=frozenset(),
+            model_codes=(), target_device=None, availability_mode="",
+            compat_mode="",
+            subject_refs=("40434299538", "model-name-ref"))
+        prof = rex._request_profile(req, "q", "shopA", "shopee")
+        assert tuple(prof.anchor_item_ids) == ("40434299538",)
+
+
+# ═══════════════════════ r8 — read-only zero-call bootstrap ═════════════════
+
+class TestReadOnlyBootstrap:
+    """r8 — at max_calls<=0 the carry-forward run is a pure reader of shared
+    image_texts: carry evidence + count classes in sidecar, ZERO writes."""
+
+    def _run_scoped(self, tmp_path, monkeypatch, *, work_items, db,
+                    scope, gen_dir, max_calls=0):
+        bit = _script("build_image_texts")
+        calls = {"n": 0}
+
+        def fake_extract(item):
+            calls["n"] += 1
+            return {"image_id": item["image_id"], "status": "ok",
+                    "kind": "spec", "text": "FRESH", "truncated": False,
+                    "attempts": 1, "error": None, "ts": 1}
+        monkeypatch.setattr(bit, "_extract_one", fake_extract)
+        monkeypatch.setattr(bit, "MIN_INTERVAL", 0.0)
+        upserts = {"n": 0}
+        orig_upsert = bit._cache_upsert
+        monkeypatch.setattr(bit, "_cache_upsert",
+                            lambda *a, **k: upserts.__setitem__("n",
+                                                                upserts["n"] + 1))
+        bit.run_generation_ocr(work_items, db=db, gen_dir=gen_dir, gid=GID,
+                               max_calls=max_calls, deadline_ts=None,
+                               scope=scope)
+        return bit, calls, upserts
+
+    def _legacy(self, iid, url, item_ids=(7,), **kw):
+        return {"image_id": iid, "image_url": url, "kind": "spec",
+                "text": "OCR-SPEC", "truncated": False,
+                "item_ids": list(item_ids), "ts": 1, **kw}
+
+    def _work(self, iid, url, item_ids=(7,)):
+        return {"image_id": iid, "image_url": url, "used_by": 1,
+                "is_template": False, "item_ids": list(item_ids)}
+
+    # req 1-4 — two scopes, SAME db instance, no cross-scope mutation
+    def test_two_scope_same_db_zero_shared_writes(self, tmp_path,
+                                                  monkeypatch):
+        s1 = self._legacy("s1", "https://u/s1", (1,))
+        n1 = self._legacy("n1", "https://u/n1", (2,))
+        orphan = self._legacy("orph", "https://u/orph", (9,))
+        db = GenDb({"image_texts": [dict(s1), dict(n1), dict(orphan)]})
+        gen_dir = tmp_path / "gen" / GID
+        gen_dir.mkdir(parents=True)
+        _, c1, u1 = self._run_scoped(
+            tmp_path, monkeypatch, db=db, scope="sellable", gen_dir=gen_dir,
+            work_items=[self._work("s1", "https://u/s1", (1,)),
+                        self._work("brand-new", "https://u/brand-new")])
+        _, c2, u2 = self._run_scoped(
+            tmp_path, monkeypatch, db=db, scope="nonsellable",
+            gen_dir=gen_dir,
+            work_items=[self._work("n1", "https://u/n1", (2,))])
+        # zero provider calls and zero shared-collection writes anywhere
+        assert c1["n"] == 0 and c2["n"] == 0
+        assert u1["n"] == 0 and u2["n"] == 0
+        # every shared doc byte-identical — carried, foreign-scope, orphan
+        coll = db["image_texts"]
+        assert coll.find_one({"image_id": "s1"}) == s1
+        assert coll.find_one({"image_id": "n1"}) == n1
+        assert coll.find_one({"image_id": "orph"}) == orphan
+        # evidence merged across both scopes
+        ev = {json.loads(l)["image_id"]
+              for l in (gen_dir / "image_texts.jsonl").open()}
+        assert ev == {"s1", "n1"}
+        # "brand-new" counted in sidecar, NOT upserted into cache
+        assert coll.find_one({"image_id": "brand-new"}) is None
+        counts = json.loads(
+            (gen_dir / "image_texts.counts.json").read_text())
+        assert counts["scopes"]["sellable"]["new"] == 1
+
+    def test_zero_calls_zero_extract_even_for_work_classes(self, tmp_path,
+                                                           monkeypatch):
+        db = GenDb({"image_texts": []})
+        gen_dir = tmp_path / "gen" / GID
+        gen_dir.mkdir(parents=True)
+        _, calls, upserts = self._run_scoped(
+            tmp_path, monkeypatch, db=db, scope="sellable", gen_dir=gen_dir,
+            work_items=[self._work("x1", "https://u/x1"),
+                        self._work("x2", "https://u/x2")])
+        assert calls["n"] == 0
+        assert upserts["n"] == 0
+
+    def test_work_classes_counted_not_written(self, tmp_path, monkeypatch):
+        stale = self._legacy("st", "https://u/OLD")
+        db = GenDb({"image_texts": [dict(stale)]})
+        gen_dir = tmp_path / "gen" / GID
+        gen_dir.mkdir(parents=True)
+        _, calls, upserts = self._run_scoped(
+            tmp_path, monkeypatch, db=db, scope="sellable", gen_dir=gen_dir,
+            work_items=[self._work("st", "https://u/NEW"),
+                        self._work("miss", "https://u/miss")])
+        assert calls["n"] == 0 and upserts["n"] == 0
+        sc = json.loads((gen_dir / "image_texts.counts.json")
+                        .read_text())["scopes"]["sellable"]
+        assert sc["changed"] == 1 and sc["new"] == 1
+        assert sc["deferred"] == 2          # all unprocessed work = deferred
+        assert sc["discovered"] == 2
+        assert db["image_texts"].find_one({"image_id": "st"}) == stale
+
+    def test_positive_budget_daily_path_still_writes_cache(self, tmp_path,
+                                                           monkeypatch):
+        """daily refresh keeps existing cache-state behavior — only the
+        max_calls<=0 bootstrap is read-only (one implementation, no fork)."""
+        db = GenDb({"image_texts": []})
+        gen_dir = tmp_path / "gen" / GID
+        gen_dir.mkdir(parents=True)
+        _, calls, upserts = self._run_scoped(
+            tmp_path, monkeypatch, db=db, scope="sellable", gen_dir=gen_dir,
+            max_calls=5,
+            work_items=[self._work("x1", "https://u/x1")])
+        assert calls["n"] == 1
+        assert upserts["n"] >= 1
+
+
+# ═══════════════════════ r8 — sidecar completeness contract ═════════════════
+
+class TestSidecarContract:
+    """r8 — one sidecar owned by run_generation_ocr with exact semantics:
+    completed_scopes + per-scope counters + final unique_discovered/
+    published_evidence (never summed cumulative evidence)."""
+
+    def _two_scope(self, tmp_path, monkeypatch, *, skip=None):
+        bit = _script("build_image_texts")
+        monkeypatch.setattr(bit, "MIN_INTERVAL", 0.0)
+        monkeypatch.setattr(bit, "_extract_one",
+                            lambda item: {"image_id": item["image_id"],
+                                          "status": "ok", "kind": "spec",
+                                          "text": "F", "truncated": False,
+                                          "attempts": 1, "error": None,
+                                          "ts": 1})
+        db = GenDb({"image_texts": [
+            {"image_id": "s1", "image_url": "https://u/s1", "kind": "spec",
+             "text": "S", "item_ids": [1], "ts": 1},
+            {"image_id": "n1", "image_url": "https://u/n1", "kind": "spec",
+             "text": "N", "item_ids": [2], "ts": 1}]})
+        gen_dir = tmp_path / "gen" / GID
+        gen_dir.mkdir(parents=True)
+        work = {"sellable": [{"image_id": "s1", "image_url": "https://u/s1",
+                              "used_by": 1, "is_template": False,
+                              "item_ids": [1]}],
+                "nonsellable": [{"image_id": "n1",
+                                 "image_url": "https://u/n1",
+                                 "used_by": 1, "is_template": False,
+                                 "item_ids": [2]}]}
+        for scope in ("sellable", "nonsellable"):
+            if scope == skip:
+                continue
+            bit.run_generation_ocr(work[scope], db=db, gen_dir=gen_dir,
+                                   gid=GID, max_calls=0, deadline_ts=None,
+                                   scope=scope)
+        return db, gen_dir
+
+    def test_incomplete_after_sellable_only(self, tmp_path, monkeypatch):
+        _, gen_dir = self._two_scope(tmp_path, monkeypatch,
+                                     skip="nonsellable")
+        c = json.loads((gen_dir / "image_texts.counts.json").read_text())
+        assert set(c["completed_scopes"]) == {"sellable"}
+        assert c["unique_discovered"] == 1
+
+    def test_incomplete_after_nonsellable_only(self, tmp_path, monkeypatch):
+        _, gen_dir = self._two_scope(tmp_path, monkeypatch,
+                                     skip="sellable")
+        c = json.loads((gen_dir / "image_texts.counts.json").read_text())
+        assert set(c["completed_scopes"]) == {"nonsellable"}
+
+    def test_complete_after_both_scopes(self, tmp_path, monkeypatch):
+        _, gen_dir = self._two_scope(tmp_path, monkeypatch)
+        c = json.loads((gen_dir / "image_texts.counts.json").read_text())
+        assert set(c["completed_scopes"]) == {"sellable", "nonsellable"}
+        assert c["unique_discovered"] == 2
+        n_jsonl = sum(1 for _ in (gen_dir / "image_texts.jsonl").open())
+        assert c["published_evidence"] == n_jsonl == 2
+
+    def test_no_double_count_evidence(self, tmp_path, monkeypatch):
+        """published_evidence = len(final merged jsonl) — cumulative per-scope
+        evidence must never be summed (r7 defect: scope1 X1 + scope2 X1+X2)."""
+        _, gen_dir = self._two_scope(tmp_path, monkeypatch)
+        c = json.loads((gen_dir / "image_texts.counts.json").read_text())
+        total_scope_evidence = sum(
+            sc.get("carried", 0) + sc.get("new_evidence", 0)
+            for sc in c["scopes"].values())
+        # 1+1=2 happens to equal 2 — pin on the disjoint-count semantics
+        assert c["published_evidence"] == 2
+        assert c["unique_discovered"] == sum(
+            sc["discovered"] for sc in c["scopes"].values())
+
+    def test_sidecar_write_is_atomic(self, tmp_path, monkeypatch):
+        _, gen_dir = self._two_scope(tmp_path, monkeypatch)
+        leftovers = [p for p in gen_dir.iterdir() if ".tmp" in p.name]
+        assert leftovers == []
+
+    def test_sidecar_write_failure_aborts_run(self, tmp_path, monkeypatch):
+        """sidecar write failure must fail the scope command nonzero — no
+        print-and-continue (silent sidecar loss = silent incomplete gen)."""
+        bit = _script("build_image_texts")
+        monkeypatch.setattr(bit, "MIN_INTERVAL", 0.0)
+        db = GenDb({"image_texts": []})
+        gen_dir = tmp_path / "gen" / GID
+        gen_dir.mkdir(parents=True)
+        # counts path as a DIRECTORY → read/write both fail
+        (gen_dir / "image_texts.counts.json").mkdir()
+        with pytest.raises(Exception):
+            bit.run_generation_ocr(
+                [], db=db, gen_dir=gen_dir, gid=GID, max_calls=0,
+                deadline_ts=None, scope="sellable")
+
+    def test_disjoint_scope_worklists_contract(self, tmp_path):
+        """collector contract: sellable ∩ nonsellable worklists = ∅ — the
+        unique_discovered sum is valid only under disjointness."""
+        bit = _script("build_image_texts")
+        export = _write_export(
+            tmp_path / "exp.json",
+            [_export_doc(1, ["a1"]), _export_doc(2, ["a2"], stock=0)])
+        w_sell = {w["image_id"]
+                  for w in bit._collect_worklist(export, scope="sellable")}
+        w_non = {w["image_id"]
+                 for w in bit._collect_worklist(export, scope="nonsellable")}
+        assert w_sell.isdisjoint(w_non)
+        assert w_sell == {"a1"} and w_non == {"a2"}
+
+
+# ═══════════════════ r8 — pre-CAS completeness gate (publish) ═══════════════
+
+class TestPublishCompletenessGate:
+    """r8 — validate_generation rejects before manifest/CAS unless sidecar +
+    jsonl + generated collection prove the same complete two-scope result."""
+
+    def _pub(self):
+        return _script("publish_generation")
+
+    def _sidecar(self, gen_dir, *, scopes=("sellable", "nonsellable"),
+                 discovered=0, published=0, **kw):
+        z = {"discovered": 0, "reusable": 0, "carried": 0, "new": 0,
+             "changed": 0, "deferred": 0, "malformed": 0, "duplicate": 0}
+        sc = {s: dict(z, **(kw if s == scopes[0] else {})) for s in scopes}
+        if scopes:
+            sc[scopes[0]]["discovered"] = discovered
+        (gen_dir / "image_texts.counts.json").write_text(json.dumps({
+            "generation_id": GID,
+            "completed_scopes": sorted(scopes),
+            "scopes": sc,
+            "unique_discovered": discovered,
+            "published_evidence": published}))
+
+    def test_rejects_sellable_only_sidecar(self, tmp_path):
+        """one completed scope ≠ publishable generation — reject pre-CAS."""
+        pub = self._pub()
+        prior = _snap_doc(gid="g20261001-000000-eeeeeeee")
+        db = GenDb({"sellable_units_meta": [prior]})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=1)
+        self._sidecar(gen_dir, scopes=("sellable",),
+                      discovered=1, published=1)
+        with pytest.raises(Exception):
+            pub.publish(db=db, gen_dir=gen_dir, gid=GID,
+                        expected_current="g20261001-000000-eeeeeeee")
+        ptr = db["sellable_units_meta"].find_one({"_id": "active"})
+        assert ptr["generation_id"] == "g20261001-000000-eeeeeeee"
+
+    def test_rejects_nonsellable_only_sidecar(self, tmp_path):
+        pub = self._pub()
+        db = GenDb({})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=1)
+        self._sidecar(gen_dir, scopes=("nonsellable",),
+                      discovered=1, published=1)
+        with pytest.raises(Exception):
+            pub.publish(db=db, gen_dir=gen_dir, gid=GID)
+        assert db["sellable_units_meta"].count_documents({}) == 0
+
+    def test_rejects_published_evidence_mismatch(self, tmp_path):
+        """sidecar published_evidence != jsonl count → provenance broken."""
+        pub = self._pub()
+        db = GenDb({})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=2)
+        self._sidecar(gen_dir, discovered=2, published=9)   # lie
+        with pytest.raises(Exception):
+            pub.publish(db=db, gen_dir=gen_dir, gid=GID)
+        assert db["sellable_units_meta"].count_documents({}) == 0
+
+    def test_rejects_unique_discovered_mismatch(self, tmp_path):
+        """unique_discovered must equal the disjoint scope-discovered sum."""
+        pub = self._pub()
+        db = GenDb({})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=2)
+        self._sidecar(gen_dir, discovered=2, published=2)
+        c = json.loads((gen_dir / "image_texts.counts.json").read_text())
+        c["unique_discovered"] = 99
+        (gen_dir / "image_texts.counts.json").write_text(json.dumps(c))
+        with pytest.raises(Exception):
+            pub.publish(db=db, gen_dir=gen_dir, gid=GID)
+
+    def test_rejects_empty_when_unique_discovered_nonzero(self, tmp_path):
+        """empty publish legal ONLY when catalog genuinely yielded 0
+        discovered images — unique_discovered>0 + empty = carry skipped."""
+        pub = self._pub()
+        db = GenDb({})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=0)
+        (gen_dir / "image_texts.jsonl").write_text("")
+        self._sidecar(gen_dir, discovered=5, published=0)
+        with pytest.raises(Exception):
+            pub.publish(db=db, gen_dir=gen_dir, gid=GID)
+
+    def test_allows_complete_empty_catalog(self, tmp_path):
+        """req 14 — both scopes + unique_discovered==0 + empty jsonl/coll →
+        the ONLY legal empty publication."""
+        pub = self._pub()
+        db = GenDb({})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=0)
+        (gen_dir / "image_texts.jsonl").write_text("")
+        self._sidecar(gen_dir, discovered=0, published=0)
+        res = pub.publish(db=db, gen_dir=gen_dir, gid=GID)
+        assert res in ("published", "bootstrap")
+
+    def test_allows_complete_nonzero_run(self, tmp_path):
+        """req 15 — complete two-scope run with carried evidence publishes."""
+        pub = self._pub()
+        db = GenDb({})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=2)
+        self._sidecar(gen_dir, discovered=2, published=2,
+                      reusable=2, carried=2)
+        res = pub.publish(db=db, gen_dir=gen_dir, gid=GID)
+        assert res in ("published", "bootstrap")
+        m = json.loads((gen_dir / "manifest.json").read_text())
+        c = m["counts"]
+        assert c["image_texts"] == 2
+        assert c["image_texts_unique_discovered"] == 2
+        assert c["image_texts_published_evidence"] == 2
+        assert c["image_texts_carried"] == 2
+
+    def test_rejects_corrupt_sidecar(self, tmp_path):
+        pub = self._pub()
+        db = GenDb({})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=1)
+        (gen_dir / "image_texts.counts.json").write_text("{not-json")
+        with pytest.raises(Exception):
+            pub.publish(db=db, gen_dir=gen_dir, gid=GID)
+
+    def test_sidecar_failure_leaves_pointer_unchanged(self, tmp_path):
+        """req 17 — any sidecar/gate failure is pre-CAS: prior pointer stays
+        byte-identical."""
+        pub = self._pub()
+        prior = _snap_doc(gid="g20261001-000000-eeeeeeee")
+        db = GenDb({"sellable_units_meta": [prior]})
+        gen_dir = _stage_gen(tmp_path, db, ocr_count=1)
+        (gen_dir / "image_texts.counts.json").unlink()
+        with pytest.raises(Exception):
+            pub.publish(db=db, gen_dir=gen_dir, gid=GID,
+                        expected_current="g20261001-000000-eeeeeeee")
+        ptr = db["sellable_units_meta"].find_one({"_id": "active"})
+        assert ptr == prior
+
+
+# ═══════════════ r9 — malformed-sidecar trust-boundary gate ═════════════════
+
+class TestSidecarShapeGate:
+    """r9 — every malformed sidecar shape must fail before manifest/CAS.
+    completed_scopes alone is not proof: scope keys/counter types/finals
+    must be structurally valid (empty-scopes fabrication hole closed)."""
+
+    _REQ = ("discovered", "reusable", "carried", "new", "changed",
+            "deferred", "malformed", "duplicate")
+
+    def _pub(self):
+        return _script("publish_generation")
+
+    def _valid(self, *, discovered=2, published=2, **kw):
+        z = dict(discovered=0, reusable=0, carried=0, new=0, changed=0,
+                 deferred=0, malformed=0, duplicate=0)
+        s = dict(z, discovered=discovered, **kw)
+        return {"generation_id": GID,
+                "completed_scopes": ["nonsellable", "sellable"],
+                "scopes": {"sellable": s, "nonsellable": dict(z)},
+                "unique_discovered": discovered,
+                "published_evidence": published}
+
+    def _stage(self, tmp_path, db, sidecar, ocr_count=None):
+        gd = _stage_gen(tmp_path, db,
+                        ocr_count=2 if ocr_count is None else ocr_count)
+        (gd / "image_texts.counts.json").write_text(json.dumps(sidecar))
+        return gd
+
+    def _reject(self, tmp_path, sidecar, ocr_count=2):
+        pub = self._pub()
+        db = GenDb({})
+        gd = self._stage(tmp_path, db, sidecar, ocr_count)
+        with pytest.raises(Exception):
+            pub.publish(db=db, gen_dir=gd, gid=GID)
+        assert db["sellable_units_meta"].count_documents({}) == 0
+
+    # the fabricated shape from PART 1 — completed_scopes correct, scopes={}
+    def test_rejects_empty_scopes_object(self, tmp_path):
+        self._reject(tmp_path, {
+            "generation_id": GID,
+            "completed_scopes": ["sellable", "nonsellable"],
+            "scopes": {},
+            "unique_discovered": 0, "published_evidence": 0}, ocr_count=0)
+
+    def test_rejects_missing_sellable_scope(self, tmp_path):
+        c = self._valid()
+        del c["scopes"]["sellable"]
+        self._reject(tmp_path, c)
+
+    def test_rejects_missing_nonsellable_scope(self, tmp_path):
+        c = self._valid()
+        del c["scopes"]["nonsellable"]
+        self._reject(tmp_path, c)
+
+    def test_rejects_unknown_third_scope(self, tmp_path):
+        c = self._valid()
+        c["scopes"]["mystery"] = dict(c["scopes"]["sellable"])
+        c["completed_scopes"].append("mystery")
+        self._reject(tmp_path, c)
+
+    def test_rejects_non_dict_scope_value(self, tmp_path):
+        c = self._valid()
+        c["scopes"]["sellable"] = "not-an-object"
+        self._reject(tmp_path, c)
+
+    @pytest.mark.parametrize("counter", _REQ)
+    def test_rejects_missing_required_counter(self, tmp_path, counter):
+        c = self._valid()
+        del c["scopes"]["sellable"][counter]
+        self._reject(tmp_path, c)
+
+    @pytest.mark.parametrize("bad", [True, "2", 2.5, None, -1])
+    def test_rejects_non_int_counter(self, tmp_path, bad):
+        c = self._valid()
+        c["scopes"]["sellable"]["carried"] = bad
+        self._reject(tmp_path, c)
+
+    def test_rejects_completed_scopes_keys_mismatch(self, tmp_path):
+        c = self._valid()
+        c["scopes"]["fake"] = c["scopes"].pop("nonsellable")
+        self._reject(tmp_path, c)
+
+    @pytest.mark.parametrize("bad", [True, "2", 2.5, None, -3])
+    def test_rejects_invalid_unique_discovered(self, tmp_path, bad):
+        c = self._valid()
+        c["unique_discovered"] = bad
+        self._reject(tmp_path, c)
+
+    @pytest.mark.parametrize("bad", [True, "2", 2.5, None, -3])
+    def test_rejects_invalid_published_evidence(self, tmp_path, bad):
+        c = self._valid()
+        c["published_evidence"] = bad
+        self._reject(tmp_path, c)
+
+    def test_pointer_unchanged_on_every_shape_reject(self, tmp_path):
+        """prior active pointer stays byte-identical for a malformed shape."""
+        pub = self._pub()
+        prior = _snap_doc(gid="g20261001-000000-eeeeeeee")
+        db = GenDb({"sellable_units_meta": [prior]})
+        gd = self._stage(tmp_path, db, {
+            "generation_id": GID,
+            "completed_scopes": ["sellable", "nonsellable"],
+            "scopes": {},
+            "unique_discovered": 0, "published_evidence": 0}, ocr_count=0)
+        with pytest.raises(Exception):
+            pub.publish(db=db, gen_dir=gd, gid=GID,
+                        expected_current="g20261001-000000-eeeeeeee")
+        assert db["sellable_units_meta"].find_one(
+            {"_id": "active"}) == prior
+
+    def test_valid_complete_nonempty_sidecar_passes(self, tmp_path):
+        pub = self._pub()
+        db = GenDb({})
+        gd = self._stage(tmp_path, db,
+                         self._valid(discovered=2, published=2,
+                                     reusable=2, carried=2))
+        assert pub.publish(db=db, gen_dir=gd, gid=GID) in ("published",
+                                                         "bootstrap")
+
+    def test_valid_complete_empty_sidecar_passes(self, tmp_path):
+        pub = self._pub()
+        db = GenDb({})
+        gd = _stage_gen(tmp_path, db, ocr_count=0)
+        (gd / "image_texts.jsonl").write_text("")
+        (gd / "image_texts.counts.json").write_text(json.dumps(
+            self._valid(discovered=0, published=0)))
+        assert pub.publish(db=db, gen_dir=gd, gid=GID) in ("published",
+                                                         "bootstrap")

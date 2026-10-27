@@ -94,8 +94,10 @@ def test_selection_reason_absent_when_not_passed():
 
 def test_public_fields_preserved():
     got = retrieval_policy.make_evidence_card(_card(), source="legacy")
-    for k in ("item_id", "name", "catalog_status", "price"):
+    for k in ("name", "catalog_status", "price"):
         assert got[k] == _card()[k]
+    # canonical emit: item_id = opaque str identity (no numeric passthrough)
+    assert got["item_id"] == "123"
 
 
 # ── strip_private_evidence ──
@@ -105,7 +107,7 @@ def test_strip_private_evidence_removes_internal_keys():
     got = retrieval_policy.strip_private_evidence(card)
     assert "_evidence" not in got
     assert "_selection_reason" not in got
-    assert got["item_id"] == 123
+    assert got["item_id"] == "123"
     assert got["name"] == "ZMI Powerbank"
 
 
