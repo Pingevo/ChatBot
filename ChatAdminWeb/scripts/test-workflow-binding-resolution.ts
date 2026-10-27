@@ -8,11 +8,12 @@
 //   owner อยู่บน workflowService เท่านั้น · strict-shape + forbidden keys → typed
 //   reject + zero writes + zero audit · stale pointer/version → conflict · binding
 //   นอก version scope → reject · typed switch: account/label/user resolvable,
-//   team/ticket_field/url unresolvable · partial coverage → reject · repeat:true →
-//   unsupported fail-closed · happy path → immutable version + version-scoped
-//   resolved bindings (server-computed source_fp, via:"direct") + pointer+scope CAS
-//   เดียว + audit หลัง commit · crash → deterministic artifacts retry ได้ · orphan
-//   ไม่เป็น current · concurrent same expected_version → winner เดียว
+//   team/ticket_field/url unresolvable · partial coverage → reject · happy path →
+//   immutable version + version-scoped resolved bindings (server-computed source_fp,
+//   via:"direct") + pointer+scope CAS เดียว + audit หลัง commit · crash →
+//   deterministic artifacts retry ได้ · orphan ไม่เป็น current · concurrent same
+//   expected_version → winner เดียว · Task 2: repeat:true → exact-equality
+//   same-kind sibling expansion (via:"repeat" + repeated[] + merge fail-closed)
 
 import { register } from "node:module";
 register(new URL("./test-workflow-persistence-hooks.mjs", import.meta.url));
@@ -57,6 +58,45 @@ const SRC_BIND = {
 };
 
 const FORBIDDEN_KEYS = ["node_id", "field_path", "kind", "source_value", "source_fp", "source_values", "requirement_fp", "display_value", "sources"];
+
+// ─── Fixture: repeat-expansion siblings (Task 2) — trigger เดียว, bindings กระจาย ───
+//   A1[zacc_1,zacc_2] · A2[zacc_1,zacc_9] partial sibling · A3[zacc_2] full sibling
+//   A4 near-miss [ZACC_1, " zacc_1 ", zacc_12, 1] — ไม่มี exact match เลย
+//   L1[zlab_1] · L2[zlab_1,"zacc_1"] — index0 label-match / index1 = account VALUE
+//   ใน kind label (cross-kind trap) · U1[zusr_1,zusr_5] · U2[zusr_1] full sibling
+//   T1[zteam_1] (unresolvable)
+const SRC_REPEAT = {
+  loadedVersionId: "wv-src-R",
+  versions: [{ workflowVersionId: "wv-src-R", status: "active" }],
+  nodes: [
+    { id: "t1", type: "message_received", position: { x: 0, y: 0 },
+      data: { name: "trig", nodeType: "trigger", accountIds: ["zacc_1", "zacc_2"], nextStepId: "c1" } },
+    { id: "c1", type: "label", position: { x: 100, y: 0 },
+      data: { name: "cond1", nodeType: "condition",
+              conditions: [{ labelIds: ["zlab_1"], nextStepId: "c2" }], noMatchNextStepId: "a1" } },
+    { id: "c2", type: "label", position: { x: 200, y: 0 },
+      data: { name: "cond2", nodeType: "condition",
+              conditions: [{ labelIds: ["zlab_1", "zacc_1"], nextStepId: "a1" }], noMatchNextStepId: "a2" } },
+    { id: "a1", type: "chat_assign", position: { x: 300, y: 0 },
+      data: { name: "assign", nodeType: "action",
+              action: { assignment: { teamIds: ["zteam_1"], userIds: ["zusr_1", "zusr_5"] } },
+              accountIds: ["zacc_1", "zacc_9"], nextStepId: "a3" } },
+    { id: "a2", type: "chat_unassign", position: { x: 400, y: 0 },
+      data: { name: "unassign", nodeType: "action",
+              action: { userIds: ["zusr_1"], accountIds: ["zacc_2"] } } },
+    { id: "a3", type: "send_message", position: { x: 500, y: 0 },
+      data: { name: "reply", nodeType: "action",
+              action: { accountIds: ["ZACC_1", " zacc_1 ", "zacc_12", 1] } } },
+  ],
+  edges: [
+    { source: "t1", target: "c1", sourceHandle: null },
+    { source: "c1", target: "c2", sourceHandle: "condition-index-0" },
+    { source: "c1", target: "a1", sourceHandle: "no-match" },
+    { source: "c2", target: "a1", sourceHandle: "condition-index-0" },
+    { source: "c2", target: "a2", sourceHandle: "no-match" },
+    { source: "a1", target: "a3", sourceHandle: null },
+  ],
+};
 
 async function main() {
   const mocks: Mocks = await import("./test-workflow-persistence-mocks.mjs");
@@ -105,6 +145,7 @@ async function main() {
   await (await mongo.getCollection(COLLECTIONS.shops)).insertOne({ shop_id: "shop_s2", platform: "tiktok", shopname: "S2", connected: true });
   await (await mongo.getCollection(COLLECTIONS.conversations)).insertOne({ conversation_id: "conv_lab", labels: ["vip", "gold"] });
   await (await mongo.getCollection(COLLECTIONS.admins)).insertOne({ admin_id: "adm_u1", role: "agent", active: true });
+  await (await mongo.getCollection(COLLECTIONS.admins)).insertOne({ admin_id: "adm_u2", role: "agent", active: true });
   await (await mongo.getCollection(COLLECTIONS.admins)).insertOne({ admin_id: "adm_off", role: "agent", active: false });
 
   type Fx = Awaited<ReturnType<typeof setupImported>>;
@@ -134,6 +175,52 @@ async function main() {
       ],
     });
     return { wfId, wfDoc, verDoc, binds, byKind, req };
+  }
+
+  async function setupRepeat(srcWfId: string) {
+    const src = { ...SRC_REPEAT, workflowId: srcWfId,
+      loadedVersionId: `wv-src-${srcWfId}`, versions: [{ workflowVersionId: `wv-src-${srcWfId}`, status: "active" }] };
+    const batch = previewZaapiFlows({ flows: [src] }, { indexRows: [{ wid: srcWfId, name: `repeat ${srcWfId}` }] });
+    await svcAny.applyImportBatch(batch, "admin_t");
+    const wfId = "wf_imp_" + _sh(srcWfId);
+    const wfDoc = (await svc.getWorkflow(wfId)) as Record<string, unknown>;
+    const verDoc = (await collDocs(COLLECTIONS.workflowVersions))
+      .find((v) => v.workflow_id === wfId && v.version_id === wfDoc.current_version_id) as Record<string, unknown>;
+    const binds = (await collDocs(COLLECTIONS.workflowBindings))
+      .filter((b) => b.workflow_id === wfId && b.version_id === verDoc.version_id);
+    // sibling selectors — exact source_values identity (assert ด้วยค่าจริง ไม่ใช่ index)
+    const byVals = (kind: string, vals: unknown[], pool = binds) => pool.find((b) => b.kind === kind
+      && canonicalJson(b.source_values) === canonicalJson(vals)) as Record<string, unknown>;
+    const bA1 = (pool = binds) => byVals("account", ["zacc_1", "zacc_2"], pool);
+    const bA2 = (pool = binds) => byVals("account", ["zacc_1", "zacc_9"], pool);
+    const bA3 = (pool = binds) => byVals("account", ["zacc_2"], pool);
+    const bA4 = (pool = binds) => pool.find((b) => b.kind === "account"
+      && (b.source_values as unknown[]).includes("zacc_12")) as Record<string, unknown>;
+    const bL1 = (pool = binds) => byVals("label", ["zlab_1"], pool);
+    const bL2 = (pool = binds) => byVals("label", ["zlab_1", "zacc_1"], pool);
+    const bU1 = (pool = binds) => byVals("user", ["zusr_1", "zusr_5"], pool);
+    const bU2 = (pool = binds) => byVals("user", ["zusr_1"], pool);
+    const bT1 = (pool = binds) => byVals("team", ["zteam_1"], pool);
+    // request หลัก — ทุก proposal repeat:true (expansion ทุก sibling ที่ exact-match)
+    const req = () => ({
+      workflow_id: wfId,
+      expected_version: wfDoc.version,
+      version_id: verDoc.version_id,
+      proposed: [
+        { binding_id: bA1().binding_id, repeat: true, mappings: [
+          { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+          { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] },
+        { binding_id: bL1().binding_id, repeat: true, mappings: [ { source_index: 0, local_id: "vip" } ] },
+        { binding_id: bU1().binding_id, repeat: true, mappings: [
+          { source_index: 0, local_id: "adm_u1" }, { source_index: 1, local_id: "adm_u2" } ] },
+      ],
+    });
+    const versionBinds = async (versionId: unknown) =>
+      (await collDocs(COLLECTIONS.workflowBindings)).filter((b) => b.version_id === versionId);
+    const mapsOf = (b: Record<string, unknown> | undefined) =>
+      (((b?.resolution as { mappings?: Record<string, unknown>[] })?.mappings) ?? [])
+        .slice().sort((x, y) => (x.source_index as number) - (y.source_index as number));
+    return { wfId, wfDoc, verDoc, binds, bA1, bA2, bA3, bA4, bL1, bL2, bU1, bU2, bT1, req, versionBinds, mapsOf };
   }
 
   async function callResolve(wfId: string, req: unknown): Promise<Record<string, unknown> | undefined> {
@@ -263,9 +350,11 @@ async function main() {
   await expectReject("non-imported workflow", legacyWf.workflow_id,
     { workflow_id: legacyWf.workflow_id, expected_version: legacyWf.version, version_id: "wv_none",
       proposed: [{ binding_id: "wb_any", mappings: [{ source_index: 0, local_id: "x" }] }] });
-  await expectReject("repeat:true → unsupported fail-closed", A.wfId,
-    { ...A.req(), proposed: [{ ...A.req().proposed[1], repeat: true }] },
-    (r) => ok(typeof r.validation === "string" && r.validation.includes("unsupported"), "repeat reject message names unsupported"));
+  // Task 2 contract: repeat:true supported — sibling ไม่มี → resolve ปกติ (isolated fixture)
+  const AR = await setupImported("workflow_BIND_AR");
+  const rRep = await callResolve(AR.wfId, { ...AR.req(), proposed: [{ ...AR.req().proposed[1], repeat: true }] });
+  ok(rRep != null && rRep.ok === true, "repeat:true with no same-kind sibling → resolves normally");
+  eq((rRep?.repeated as unknown[] | undefined)?.length, 0, "repeat:true no sibling → repeated[] empty");
   await expectReject("unknown workflow → not_found", "wf_ghost_never_existed",
     { workflow_id: "wf_ghost_never_existed", expected_version: 1, version_id: "wv_x",
       proposed: [{ binding_id: "wb_x", mappings: [{ source_index: 0, local_id: "x" }] }] },
@@ -353,8 +442,9 @@ async function main() {
   // graph fields on workflow doc ไม่ถูกแตะ (pointer move only)
   eq(canonicalJson(wfAfter?.nodes), (canonicalJson(A.wfDoc.nodes)), "workflow doc nodes unchanged by resolution");
 
-  eq(resolveEvents().length, 1, "exactly one workflow.binding_resolve audit event");
-  const ev = resolveEvents()[0] as { actor?: string; metadata?: Record<string, unknown> };
+  const ev = resolveEvents().slice(-1)[0] as { actor?: string; metadata?: Record<string, unknown> };
+  ok(resolveEvents().filter((e) => (e as { metadata?: { workflow_id?: string } }).metadata?.workflow_id === A.wfId).length === 1,
+    "exactly one workflow.binding_resolve audit event for this workflow");
   eq(ev?.actor, "admin_t", "audit actor");
   eq(ev?.metadata?.workflow_id, A.wfId, "audit metadata workflow_id");
   eq(auditAtCommit, evPre, "audit emitted only AFTER commit (events==baseline at CAS time)");
@@ -1002,6 +1092,439 @@ async function main() {
     () => ({ status: "bogus" }));
   await corruptV2("M3 resolved with non-valid coverage", "workflow_BIND_M3M", "label",
     (d, maps) => ({ resolution: { mappings: [{ ...maps[0], state: "invalid" }] } }));
+
+  // ═══ 14. R1 Task 2 — basic exact repeat + cross-kind isolation + scope contract ═══
+  console.log("\n=== 14. Repeat expansion — basic exact + cross-kind + scope ===");
+  {
+    const R = await setupRepeat("workflow_RPT_A");
+    const expectedRepeated = [
+      { binding_id: R.bA2().binding_id as string, source_index: 0 },
+      { binding_id: R.bA3().binding_id as string, source_index: 0 },
+      { binding_id: R.bL2().binding_id as string, source_index: 0 },
+      { binding_id: R.bU2().binding_id as string, source_index: 0 },
+    ].sort((x, y) => x.binding_id === y.binding_id ? x.source_index - y.source_index : (x.binding_id < y.binding_id ? -1 : 1));
+    const res = await callResolve(R.wfId, R.req());
+    ok(res != null && res.ok === true, `repeat batch → ok:true (${JSON.stringify(res)?.slice(0, 160)})`);
+    eq(canonicalJson(res?.repeated), canonicalJson(expectedRepeated), "repeated[] = exact expanded (binding_id,source_index) pairs, sorted");
+    eq(res?.resolved, 5, "resolved=5 (A1,L1,U1 direct + A3,U2 via repeat)");
+    eq(res?.unresolved, 4, "unresolved=4 (A2,A4,L2,T1 — partial/untouched/team)");
+    eq(res?.invalid, 0, "invalid=0");
+
+    const vb = await R.versionBinds(res?.version_id);
+    const mapsA1 = R.mapsOf(R.bA1(vb));
+    eq(R.bA1(vb)?.status, "resolved", "A1 original proposal → resolved");
+    ok(mapsA1.length === 2 && mapsA1.every((m) => m.via === "direct"),
+      "A1 → only proposed mappings, all via:direct (no self-manufactured repeat rows)");
+    const bA2v = R.bA2(vb);
+    const mapsA2 = R.mapsOf(bA2v);
+    eq(bA2v?.status, "unresolved", "A2 partial sibling → stays unresolved (no auto-complete)");
+    eq(mapsA2.length, 1, "A2 → exactly the matched index persisted (unmatched index not fabricated)");
+    eq(mapsA2[0]?.source_index, 0, "A2 → repeat applied at source_index 0 only");
+    eq(mapsA2[0]?.local_id, "shop_s1", "A2 repeat → carries confirmed local_id");
+    eq(mapsA2[0]?.platform, "shopee", "A2 repeat → carries confirmed platform");
+    eq(mapsA2[0]?.shop_id, "shop_s1", "A2 repeat → carries confirmed shop_id");
+    eq(mapsA2[0]?.via, "repeat", "A2 → via:repeat");
+    eq(mapsA2[0]?.state, "valid", "A2 → repeat mapping validated (state:valid)");
+    eq(mapsA2[0]?.source_fp, fp256("zacc_1"), "A2 → server-computed source_fp");
+    const bA3v = R.bA3(vb);
+    const mapsA3 = R.mapsOf(bA3v);
+    eq(bA3v?.status, "resolved", "A3 full-coverage sibling → resolved via repeat");
+    eq(mapsA3.length, 1, "A3 → complete coverage via repeat");
+    eq(mapsA3[0]?.via, "repeat", "A3 → via:repeat");
+    eq(mapsA3[0]?.local_id, "shop_s2", "A3 → proposal's confirmed target for zacc_2");
+    eq(mapsA3[0]?.shop_id, "shop_s2", "A3 → confirmed shop_id (no inference)");
+    const bA4v = R.bA4(vb);
+    eq(bA4v?.status, "unresolved", "A4 near-miss sibling → untouched unresolved");
+    eq(R.mapsOf(bA4v).length, 0, "A4 → zero mappings (case/whitespace/substring/numeric never repeat)");
+    const bL2v = R.bL2(vb);
+    const mapsL2 = R.mapsOf(bL2v);
+    eq(bL2v?.status, "unresolved", "L2 partial sibling → unresolved");
+    eq(mapsL2.length, 1, "L2 → only the label-matched index persisted");
+    eq(mapsL2[0]?.source_index, 0, "L2 → repeat at label-matched index only");
+    eq(mapsL2[0]?.local_id, "vip", "L2 → label repeat transfers only to label binding");
+    eq(mapsL2[0]?.via, "repeat", "L2 → via:repeat");
+    ok(mapsL2[0] != null && !("platform" in mapsL2[0]) && !("shop_id" in mapsL2[0]),
+      "L2 → scope fields never written on non-account mapping");
+    ok(!mapsL2.some((m) => m.source_index === 1),
+      "L2[1] = zacc_1 inside label binding → NO account mapping transferred (cross-kind isolation)");
+    const bU2v = R.bU2(vb);
+    const mapsU2 = R.mapsOf(bU2v);
+    eq(bU2v?.status, "resolved", "U2 user sibling → resolved via user repeat");
+    eq(mapsU2[0]?.local_id, "adm_u1", "U2 → user repeat transfers only to user binding");
+    ok(mapsU2[0] != null && !("platform" in mapsU2[0]) && !("shop_id" in mapsU2[0]),
+      "U2 → no scope fields on user mapping");
+    eq(R.bT1(vb)?.status, "unresolved", "T1 team → unresolved");
+    const ev = resolveEvents().slice(-1)[0] as { metadata?: Record<string, unknown> } | undefined;
+    eq(ev?.metadata?.repeated, expectedRepeated.length, "audit metadata repeated = repeated[].length");
+    const wfR = (await svc.getWorkflow(R.wfId)) as Record<string, unknown>;
+    eq(sorted(wfR?.platforms), '["shopee","tiktok"]', "repeat → derived platforms from direct+repeat account mappings");
+    eq(sorted(wfR?.shop_ids), '["shop_s1","shop_s2"]', "repeat → derived shop_ids from direct+repeat account mappings");
+  }
+
+  // ═══ 15. R1 Task 2 — exact value authority (canonicalJson — no keyword/fuzzy) ═══
+  console.log("\n=== 15. Repeat — exact value authority ===");
+  {
+    const R = await setupRepeat("workflow_RPT_B");
+    // object value: คีย์สลับลำดับต้องนับ equal ตาม canonicalJson (ไม่ใช่ JSON.stringify)
+    const bcoll = await mongo.getCollection(COLLECTIONS.workflowBindings);
+    await bcoll.updateOne({ binding_id: R.bA1().binding_id as string },
+      { $set: { source_values: ["zacc_1", { a: 1, b: 2 }] } });
+    await bcoll.updateOne({ binding_id: R.bA2().binding_id as string },
+      { $set: { source_values: ["zacc_1", { b: 2, a: 1 }] } });
+    await bcoll.updateOne({ binding_id: R.bA4().binding_id as string },
+      { $set: { source_values: ["ZACC_1", " zacc_1 ", "zacc_12", 1, { a: 1 }], count: 5 } });
+    eq(fp256({ a: 1, b: 2 }), fp256({ b: 2, a: 1 }), "canonicalJson probe → object key-order equal");
+    const reqB = {
+      workflow_id: R.wfId, expected_version: R.wfDoc.version, version_id: R.verDoc.version_id,
+      proposed: [{ binding_id: R.bA1().binding_id, repeat: true, mappings: [
+        { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+        { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }],
+    };
+    const res = await callResolve(R.wfId, reqB);
+    ok(res != null && res.ok === true, "object-value repeat batch → ok:true");
+    const vb = await R.versionBinds(res?.version_id);
+    // source_values เปลี่ยนแล้ว (mutate) → เลือก sibling ด้วย node/field/kind identity
+    const key2 = (src: Record<string, unknown>) => vb.find((b) => b.node_id === src.node_id
+      && b.field_path === src.field_path && b.kind === src.kind);
+    const bA2v = key2(R.bA2());
+    const mapsA2 = R.mapsOf(bA2v);
+    eq(bA2v?.status, "resolved", "A2 → resolved (exact string + object key-order equality)");
+    eq(mapsA2.length, 2, "A2 → both indexes repeated (zacc_1 exact + object canonical-equal)");
+    eq(mapsA2[1]?.source_index, 1, "A2[1] → repeated by canonical object equality");
+    eq(mapsA2[1]?.via, "repeat", "A2[1] → via:repeat");
+    eq(mapsA2[1]?.source_fp, fp256({ b: 2, a: 1 }), "A2[1] → source_fp over canonical value");
+    eq(mapsA2[1]?.local_id, "shop_s2", "A2[1] → proposal target for the object value");
+    const bA4v = key2(R.bA4());
+    eq(R.mapsOf(bA4v).length, 0,
+      "near-miss values (case/whitespace/substring/numeric/partial-object) → never repeat");
+    const expectedRep = [
+      { binding_id: R.bA2().binding_id as string, source_index: 0 },
+      { binding_id: R.bA2().binding_id as string, source_index: 1 },
+    ];
+    eq(canonicalJson(res?.repeated), canonicalJson(expectedRep), "repeated[] = only exact-equality expansions");
+  }
+
+  // ═══ 16. R1 Task 2 — same-binding isolation / coverage contract / default / unresolvable ═══
+  console.log("\n=== 16. Repeat — isolation / coverage / default / unresolvable ===");
+  {
+    // G — repeat:true ไม่ยกเลิก complete-coverage ของ proposal เดิม
+    const R = await setupRepeat("workflow_RPT_G");
+    await expectReject("repeat:true + partial proposal coverage", R.wfId,
+      { workflow_id: R.wfId, expected_version: R.wfDoc.version, version_id: R.verDoc.version_id,
+        proposed: [{ binding_id: R.bA1().binding_id, repeat: true, mappings: [
+          { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" } ] }] },
+      (r) => ok(typeof r.validation === "string" && r.validation.includes("partial"),
+        "repeat proposal → still held to complete-coverage contract"));
+
+    // unresolvable kind + repeat → typed-switch reject (expansion ไม่ bypass target checks)
+    const R2 = await setupRepeat("workflow_RPT_G2");
+    await expectReject("repeat:true on team binding → unresolvable", R2.wfId,
+      { workflow_id: R2.wfId, expected_version: R2.wfDoc.version, version_id: R2.verDoc.version_id,
+        proposed: [{ binding_id: R2.bT1().binding_id, repeat: true, mappings: [
+          { source_index: 0, local_id: "team_any" } ] }] },
+      (r) => ok(typeof r.validation === "string" && r.validation.includes("unresolvable"),
+        "team repeat → unresolvable typed reject"));
+
+    // H — repeat omitted → no expansion at all
+    const R3 = await setupRepeat("workflow_RPT_H");
+    const reqH = {
+      workflow_id: R3.wfId, expected_version: R3.wfDoc.version, version_id: R3.verDoc.version_id,
+      proposed: [
+        { binding_id: R3.bA1().binding_id, mappings: [
+          { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+          { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] },
+        { binding_id: R3.bL1().binding_id, mappings: [ { source_index: 0, local_id: "vip" } ] },
+        { binding_id: R3.bU1().binding_id, mappings: [
+          { source_index: 0, local_id: "adm_u1" }, { source_index: 1, local_id: "adm_u2" } ] },
+      ],
+    };
+    const resH = await callResolve(R3.wfId, reqH);
+    ok(resH != null && resH.ok === true, "repeat omitted → resolves normally");
+    eq((resH?.repeated as unknown[] | undefined)?.length, 0, "repeat omitted → repeated[] empty");
+    const vbH = await R3.versionBinds(resH?.version_id);
+    ok(R.mapsOf(R.bA1(vbH)).every((m) => m.via === "direct"), "repeat omitted → all mappings via:direct");
+    for (const [tag, sel] of [["A2", R3.bA2], ["A3", R3.bA3], ["L2", R3.bL2], ["U2", R3.bU2]] as [string, (p?: never) => Record<string, unknown>][]) {
+      const doc = sel(vbH as never);
+      eq(doc?.status, "unresolved", `no-repeat → sibling ${tag} stays unresolved`);
+      eq(R.mapsOf(doc).length, 0, `no-repeat → sibling ${tag} gets zero mappings`);
+    }
+    // repeat:false explicit → same as omitted
+    const R4 = await setupRepeat("workflow_RPT_H2");
+    const reqH2 = { ...reqH, workflow_id: R4.wfId, expected_version: R4.wfDoc.version, version_id: R4.verDoc.version_id,
+      proposed: [
+        { binding_id: R4.bA1().binding_id, repeat: false, mappings: reqH.proposed[0].mappings },
+        { binding_id: R4.bL1().binding_id, repeat: false, mappings: reqH.proposed[1].mappings },
+        { binding_id: R4.bU1().binding_id, repeat: false, mappings: reqH.proposed[2].mappings },
+      ] };
+    const resH2 = await callResolve(R4.wfId, reqH2);
+    ok(resH2 != null && resH2.ok === true, "repeat:false → resolves normally");
+    eq((resH2?.repeated as unknown[] | undefined)?.length, 0, "repeat:false → repeated[] empty");
+    const vbH2 = await R4.versionBinds(resH2?.version_id);
+    eq(R.mapsOf(R4.bA3(vbH2)).length, 0, "repeat:false → sibling untouched");
+  }
+
+  // ═══ 17. R1 Task 2 — no implicit overwrite (existing-mapping merge rules) ═══
+  console.log("\n=== 17. Repeat — no implicit overwrite ===");
+  {
+    // F1 — existing EXACT same valid target → no-op (no duplicate row, not in repeated[])
+    const R = await setupRepeat("workflow_RPT_F1");
+    const reqStep1 = { workflow_id: R.wfId, expected_version: R.wfDoc.version, version_id: R.verDoc.version_id,
+      proposed: [{ binding_id: R.bA2().binding_id, mappings: [
+        { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+        { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }] };
+    const r1 = await callResolve(R.wfId, reqStep1);
+    eq(r1?.ok, true, "F1 setup → sibling resolved directly first");
+    const wfR = (await svc.getWorkflow(R.wfId)) as Record<string, unknown>;
+    const vb2 = await R.versionBinds(wfR.current_version_id);
+    const reqStep2 = { workflow_id: R.wfId, expected_version: wfR.version, version_id: wfR.current_version_id,
+      proposed: [{ binding_id: R.bA1(vb2).binding_id, repeat: true, mappings: [
+        { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+        { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }] };
+    const r2 = await callResolve(R.wfId, reqStep2);
+    ok(r2 != null && r2.ok === true, "F1 → repeat against same-target sibling resolves (no-op merge)");
+    const expectedRepF1 = [{ binding_id: R.bA3(vb2).binding_id as string, source_index: 0 }];
+    eq(canonicalJson(r2?.repeated), canonicalJson(expectedRepF1),
+      "F1 → repeated[] excludes no-op index (only newly applied listed)");
+    const vb3 = await R.versionBinds(r2?.version_id);
+    const mapsA2v3 = R.mapsOf(R.bA2(vb3));
+    eq(mapsA2v3.length, 2, "F1 → sibling keeps exactly its 2 mappings (no duplicate row)");
+    eq(mapsA2v3[0]?.local_id, "shop_s1", "F1 → existing valid mapping untouched (no overwrite)");
+    ok(mapsA2v3.every((m) => m.via === "direct"), "F1 → existing direct mappings keep via:direct");
+
+    // F2 — existing DIFFERENT valid mapping at same index → fail closed before writes
+    const R5 = await setupRepeat("workflow_RPT_F2");
+    const rF2a = await callResolve(R5.wfId, { workflow_id: R5.wfId, expected_version: R5.wfDoc.version,
+      version_id: R5.verDoc.version_id,
+      proposed: [{ binding_id: R5.bA2().binding_id, mappings: [
+        { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+        { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }] });
+    eq(rF2a?.ok, true, "F2 setup → sibling resolved directly first");
+    const wfR5 = (await svc.getWorkflow(R5.wfId)) as Record<string, unknown>;
+    const vbR5 = await R5.versionBinds(wfR5.current_version_id);
+    await expectReject("repeat vs different valid existing mapping", R5.wfId,
+      { workflow_id: R5.wfId, expected_version: wfR5.version, version_id: wfR5.current_version_id,
+        proposed: [{ binding_id: R5.bA1(vbR5).binding_id, repeat: true, mappings: [
+          { source_index: 0, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" },
+          { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }] },
+      (r) => ok(typeof r.validation === "string" && !r.validation.includes("unsupported"),
+        "different valid existing mapping → fail closed (requires explicit direct proposal)"));
+
+    // F3 — existing INVALID/diverged mapping → still requires explicit direct (no hidden repeat repair)
+    const R6 = await setupRepeat("workflow_RPT_F3");
+    const rF3a = await callResolve(R6.wfId, { workflow_id: R6.wfId, expected_version: R6.wfDoc.version,
+      version_id: R6.verDoc.version_id,
+      proposed: [{ binding_id: R6.bA2().binding_id, mappings: [
+        { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+        { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }] });
+    eq(rF3a?.ok, true, "F3 setup → sibling resolved directly first");
+    await (await mongo.getCollection(COLLECTIONS.shops)).deleteOne({ shop_id: "shop_s1" });
+    const wfR6 = (await svc.getWorkflow(R6.wfId)) as Record<string, unknown>;
+    const vbR6 = await R6.versionBinds(wfR6.current_version_id);
+    await expectReject("repeat vs invalid carried mapping (target deleted)", R6.wfId,
+      { workflow_id: R6.wfId, expected_version: wfR6.version, version_id: wfR6.current_version_id,
+        proposed: [{ binding_id: R6.bA1(vbR6).binding_id, repeat: true, mappings: [
+          { source_index: 0, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" },
+          { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }] },
+      (r) => ok(typeof r.validation === "string" && !r.validation.includes("unsupported"),
+        "invalid existing mapping → fail closed (no hidden repeat repair)"));
+    await (await mongo.getCollection(COLLECTIONS.shops)).insertOne({ shop_id: "shop_s1", platform: "shopee", shopname: "S1", connected: true });
+
+    // F4 — two repeat proposals same target → dedupe (one mapping, one repeated[] entry)
+    const R7 = await setupRepeat("workflow_RPT_F4");
+    await (await mongo.getCollection(COLLECTIONS.workflowBindings)).updateOne(
+      { binding_id: R7.bA3().binding_id as string }, { $set: { source_values: ["zacc_1"] } });
+    const rF4 = await callResolve(R7.wfId, { workflow_id: R7.wfId, expected_version: R7.wfDoc.version,
+      version_id: R7.verDoc.version_id,
+      proposed: [
+        { binding_id: R7.bA1().binding_id, repeat: true, mappings: [
+          { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+          { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] },
+        { binding_id: R7.bA2().binding_id, repeat: true, mappings: [
+          { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+          { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] },
+      ] });
+    ok(rF4 != null && rF4.ok === true, "F4 → same-target repeat proposals dedupe");
+    const vbF4 = await R7.versionBinds(rF4?.version_id);
+    const mapsA3F4 = R.mapsOf((vbF4 as Record<string, unknown>[]).find((b) => b.kind === "account" && (b.source_values as unknown[])[0] === "zacc_1" && (b.source_values as unknown[]).length === 1));
+    eq(mapsA3F4.length, 1, "F4 → shared sibling index gets exactly one repeat mapping");
+    eq((rF4?.repeated as unknown[] | undefined)?.length, 1, "F4 → repeated[] lists the deduped index once");
+
+    // F5 — two repeat proposals different target at same sibling index → fail closed
+    const R8 = await setupRepeat("workflow_RPT_F5");
+    await (await mongo.getCollection(COLLECTIONS.workflowBindings)).updateOne(
+      { binding_id: R8.bA3().binding_id as string }, { $set: { source_values: ["zacc_1"] } });
+    await expectReject("repeat-vs-repeat conflicting targets", R8.wfId,
+      { workflow_id: R8.wfId, expected_version: R8.wfDoc.version, version_id: R8.verDoc.version_id,
+        proposed: [
+          { binding_id: R8.bA1().binding_id, repeat: true, mappings: [
+            { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+            { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] },
+          { binding_id: R8.bA2().binding_id, repeat: true, mappings: [
+            { source_index: 0, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" },
+            { source_index: 1, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" } ] },
+        ] },
+      (r) => ok(typeof r.validation === "string" && !r.validation.includes("unsupported"),
+        "repeat-vs-repeat conflict → fail closed (no silent winner)"));
+  }
+
+  // ═══ 18. R1 Task 2 — determinism + crash/retry with repeat artifacts ═══
+  console.log("\n=== 18. Repeat — determinism + crash/retry ===");
+  {
+    // I — reversed proposal/mapping order → same deterministic artifacts (same-fixture crash-retry)
+    const R = await setupRepeat("workflow_RPT_I");
+    armUpdateFail(COLLECTIONS.workflows, 1);
+    const thrI = await act(() => svcAny.saveBindingResolutionBatch?.(R.wfId, R.req(), "admin_t"));
+    disarm();
+    ok(thrI != null, "repeat → first attempt crashed at commit (orphan artifacts)");
+    const orphanI = (await collDocs(COLLECTIONS.workflowVersions))
+      .find((v) => v.workflow_id === R.wfId && v.version_seq === 2) as Record<string, unknown> | undefined;
+    ok(orphanI != null, "repeat → orphan version artifact exists after crash");
+    const reqRev = {
+      workflow_id: R.wfId, expected_version: R.wfDoc.version, version_id: R.verDoc.version_id,
+      proposed: [...R.req().proposed].reverse().map((p) => ({ ...p, mappings: [...p.mappings].reverse() })),
+    };
+    const rI = await callResolve(R.wfId, reqRev);
+    eq(rI?.ok, true, "repeat → reversed-order retry resolves");
+    eq(rI?.version_id, orphanI?.version_id, "repeat → order-independent fingerprint → same version_id");
+    const vbI = await R.versionBinds(rI?.version_id);
+    ok(R.mapsOf(R.bA2(vbI)).every((m) => m.source_index === 0), "repeat → expanded mappings sorted by source_index");
+    ok((rI?.repeated as Record<string, unknown>[] | undefined)?.every((r2, i, a) => i === 0
+      || String(a[i - 1].binding_id) < String(r2.binding_id)
+      || (a[i - 1].binding_id === r2.binding_id && (a[i - 1].source_index as number) < (r2.source_index as number))) === true,
+      "repeat → repeated[] sorted binding_id then source_index");
+
+    // I2 — BSON round-trip artifacts → retry reuses same version_id (with repeat payload)
+    const R9 = await setupRepeat("workflow_RPT_I2");
+    armUpdateFail(COLLECTIONS.workflows, 1);
+    const thrI2 = await act(() => svcAny.saveBindingResolutionBatch?.(R9.wfId, R9.req(), "admin_t"));
+    disarm();
+    ok(thrI2 != null, "repeat BSON → first attempt crashed at commit");
+    const orphanI2 = (await collDocs(COLLECTIONS.workflowVersions))
+      .find((v) => v.workflow_id === R9.wfId && v.version_seq === 2) as Record<string, unknown> | undefined;
+    for (const collName of [COLLECTIONS.workflowVersions, COLLECTIONS.workflowBindings]) {
+      const c = await mongo.getCollection(collName);
+      const docs = await c.find({ workflow_id: R9.wfId }).toArray() as Record<string, unknown>[];
+      for (const d of docs) {
+        const rt = bsonDeserialize(bsonSerialize(d)) as Record<string, unknown>;
+        await c.deleteOne({ _id: d._id });
+        await c.insertOne(rt);
+      }
+    }
+    const rI2 = await callResolve(R9.wfId, R9.req());
+    eq(rI2?.ok, true, "repeat BSON → retry after round-trip resolves");
+    eq(rI2?.version_id, orphanI2?.version_id, "repeat BSON → retry reuses same version_id");
+
+    // J — crash @first binding insert → pointer unchanged + retry reuses deterministic artifacts
+    const R10 = await setupRepeat("workflow_RPT_J1");
+    const wfJ0 = canonicalJson(await svc.getWorkflow(R10.wfId));
+    const evJ0 = resolveEvents().length;
+    armInsertFail(COLLECTIONS.workflowBindings, 1);
+    const thrJ1 = await act(() => svcAny.saveBindingResolutionBatch?.(R10.wfId, R10.req(), "admin_t"));
+    ok(thrJ1 != null, "repeat crash @first binding insert → throws");
+    disarm();
+    eq(canonicalJson(await svc.getWorkflow(R10.wfId)), wfJ0, "repeat crash → pointer+scope byte-identical");
+    eq(resolveEvents().length, evJ0, "repeat crash → zero success audit");
+    const rJ1 = await callResolve(R10.wfId, R10.req());
+    eq(rJ1?.ok, true, "repeat crash → retry resolves");
+    const vbJ1 = await R10.versionBinds(rJ1?.version_id);
+    eq(R.mapsOf(R.bA3(vbJ1))[0]?.via, "repeat", "repeat retry → expanded artifacts persisted deterministically");
+    eq((await collDocs(COLLECTIONS.workflowVersions)).filter((v) => v.workflow_id === R10.wfId).length, 2,
+      "repeat retry → zero duplicate version docs");
+
+    // J2 — crash mid-bindings → retry completes exact set, zero dup ids
+    const R11 = await setupRepeat("workflow_RPT_J2");
+    armInsertFail(COLLECTIONS.workflowBindings, 5);
+    const thrJ2 = await act(() => svcAny.saveBindingResolutionBatch?.(R11.wfId, R11.req(), "admin_t"));
+    ok(thrJ2 != null, "repeat crash mid-bindings → throws");
+    disarm();
+    const rJ2 = await callResolve(R11.wfId, R11.req());
+    eq(rJ2?.ok, true, "repeat mid-bindings → retry resolves");
+    const bindsJ2 = (await collDocs(COLLECTIONS.workflowBindings)).filter((b) => b.version_id === rJ2?.version_id);
+    eq(bindsJ2.length, 9, "repeat mid-bindings → binding set complete (9)");
+    eq(new Set(bindsJ2.map((b) => b.binding_id as string)).size, 9, "repeat mid-bindings → zero duplicate binding_ids");
+
+    // J3 — CAS loser reports fresh winner state (repeat payload)
+    const R12 = await setupRepeat("workflow_RPT_J3");
+    let flippedJ = false;
+    st.updateOneHook = async (coll: string) => {
+      if (coll === COLLECTIONS.workflows && !flippedJ) {
+        flippedJ = true;
+        st.updateOneHook = undefined;
+        await (await mongo.getCollection(COLLECTIONS.workflows)).updateOne(
+          { workflow_id: R12.wfId }, { $set: { version: 7, current_version_id: "wv_winner_repeat" } });
+      }
+    };
+    const rJ3 = await callResolve(R12.wfId, R12.req());
+    disarm();
+    eq(rJ3?.ok, false, "repeat CAS loser → rejected");
+    eq(rJ3?.conflict, true, "repeat CAS loser → conflict");
+    eq(rJ3?.current_version, 7, "repeat CAS loser → fresh winner version reported");
+    eq(rJ3?.current_version_id, "wv_winner_repeat", "repeat CAS loser → fresh winner version_id reported");
+
+    // J4 — concurrent identical repeat requests → exactly one pointer winner
+    const R13 = await setupRepeat("workflow_RPT_J4");
+    const fnJ4 = svcAny.saveBindingResolutionBatch;
+    const [sJ4a, sJ4b] = await Promise.allSettled([
+      typeof fnJ4 === "function" ? fnJ4(R13.wfId, R13.req(), "admin_t") : Promise.resolve(undefined),
+      typeof fnJ4 === "function" ? fnJ4(R13.wfId, R13.req(), "admin_t") : Promise.resolve(undefined),
+    ]);
+    const valsJ4 = [sJ4a, sJ4b].map((s) => (s.status === "fulfilled" ? (s as PromiseFulfilledResult<Record<string, unknown> | undefined>).value : undefined));
+    eq(valsJ4.filter((v) => v?.ok === true).length, 1, "concurrent repeat → exactly one winner");
+    ok(valsJ4.some((v) => v?.conflict === true), "concurrent repeat → loser conflict");
+    const wfJ4 = (await svc.getWorkflow(R13.wfId)) as Record<string, unknown>;
+    const pointJ4 = (await collDocs(COLLECTIONS.workflowVersions)).find((v) => v.version_id === wfJ4?.current_version_id);
+    ok(pointJ4 != null, "concurrent repeat → pointer references real winner doc");
+  }
+
+  // ═══ 19. R1 Task 2 — safety regressions (repeat must not weaken any gate) ═══
+  console.log("\n=== 19. Repeat — safety regressions ===");
+  {
+    const R = await setupRepeat("workflow_RPT_K");
+    // client-supplied identity keys + repeat → forbidden-key reject ยังอยู่
+    await expectReject("repeat + client-supplied source_value", R.wfId,
+      { workflow_id: R.wfId, expected_version: R.wfDoc.version, version_id: R.verDoc.version_id,
+        proposed: [{ binding_id: R.bA1().binding_id, repeat: true, source_value: "zacc_1", mappings: [
+          { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+          { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }] },
+      (r) => ok(typeof r.validation === "string" && r.validation.includes("forbidden"),
+        "repeat + forbidden key → forbidden reject"));
+    await expectReject("repeat + client-supplied kind", R.wfId,
+      { workflow_id: R.wfId, expected_version: R.wfDoc.version, version_id: R.verDoc.version_id,
+        proposed: [{ binding_id: R.bA1().binding_id, repeat: true, kind: "account", mappings: [
+          { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+          { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }] },
+      (r) => ok(typeof r.validation === "string" && r.validation.includes("forbidden"),
+        "repeat + kind key → forbidden reject"));
+    // out-of-scope binding + repeat → scope reject (ไม่ใช่ unsupported)
+    const Rother = await setupRepeat("workflow_RPT_K2");
+    await expectReject("repeat on out-of-scope binding", R.wfId,
+      { workflow_id: R.wfId, expected_version: R.wfDoc.version, version_id: R.verDoc.version_id,
+        proposed: [{ binding_id: Rother.bA1().binding_id, repeat: true, mappings: [
+          { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+          { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }] },
+      (r) => ok(typeof r.validation === "string" && r.validation.includes("scope"),
+        "repeat on foreign binding → out-of-scope reject"));
+    // repeat non-boolean → type reject เดิมยังอยู่
+    await expectReject("repeat non-boolean", R.wfId,
+      { workflow_id: R.wfId, expected_version: R.wfDoc.version, version_id: R.verDoc.version_id,
+        proposed: [{ binding_id: R.bA1().binding_id, repeat: "yes", mappings: [
+          { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+          { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }] },
+      (r) => ok(typeof r.validation === "string" && r.validation.includes("boolean"),
+        "repeat non-boolean → type reject"));
+    // binding from another version + repeat → scope reject
+    const Rold = await setupRepeat("workflow_RPT_K3");
+    const rOld = await callResolve(Rold.wfId, Rold.req());
+    eq(rOld?.ok, true, "K3 setup resolve ok");
+    const wfOld = (await svc.getWorkflow(Rold.wfId)) as Record<string, unknown>;
+    await expectReject("repeat on stale-version binding", Rold.wfId,
+      { workflow_id: Rold.wfId, expected_version: wfOld.version, version_id: wfOld.current_version_id,
+        proposed: [{ binding_id: Rold.bA1().binding_id, repeat: true, mappings: [
+          { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+          { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }] },
+      (r) => ok(typeof r.validation === "string" && r.validation.includes("scope"),
+        "repeat on stale-version binding → out-of-scope reject"));
+  }
 
   // ═══ summary ═══
   const countsEnd = await allCounts();

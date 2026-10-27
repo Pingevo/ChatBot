@@ -857,7 +857,8 @@ export async function saveWorkflowDraft(
 // supplied source identity ถูก reject (forbidden keys ทุกระดับ).
 // Commit = updateOne เดียว (pointer+version+derived scope พร้อมกัน) หลัง immutable
 // version doc + version-scoped bindings เขียน (deterministic ids → retry/E11000
-// idempotent). audit หลัง commit เท่านั้น. repeat:true → fail closed จนถึง Task 2
+// idempotent). audit หลัง commit เท่านั้น. repeat:true → exact same-kind sibling
+// expansion ใน version เดียวกัน (canonicalJson equality เท่านั้น — ไม่มี fuzzy)
 export interface ResolutionMapping {
   source_index: number;
   source_fp: string;            // sha256 hex — server-computed จาก source_values
@@ -879,7 +880,7 @@ export interface BindingResolutionRequest {
   version_id: string;           // current_version_id ที่ client อ้าง
   proposed: {
     binding_id: string;
-    repeat?: boolean;           // unsupported ใน R1 Task 1
+    repeat?: boolean;           // Task 2 — expand target ไป exact same-kind siblings
     mappings: { source_index: number; local_id: string; platform?: Platform; shop_id?: string }[];
   }[];
 }
@@ -973,7 +974,6 @@ export async function saveBindingResolutionBatch(
     if (typeof p.binding_id !== "string" || !p.binding_id.trim()) return { ok: false, validation: "proposal binding_id required" };
     if (seenBinding.has(p.binding_id)) return { ok: false, validation: `duplicate binding_id: ${p.binding_id}` };
     seenBinding.add(p.binding_id);
-    if (p.repeat === true) return { ok: false, validation: "unsupported: repeat expansion not implemented (R1 task 2)" };
     if (p.repeat !== undefined && typeof p.repeat !== "boolean") return { ok: false, validation: "repeat must be a boolean" };
     if (!Array.isArray(p.mappings) || p.mappings.length === 0) {
       return { ok: false, validation: `proposal ${p.binding_id}: mappings must be a non-empty array` };
@@ -1098,6 +1098,54 @@ export async function saveBindingResolutionBatch(
     carriedMaps.set(b.binding_id, copies);
     for (const cm of copies) targetWork.push({ b, m: cm, carried: cm });
   }
+  // repeat expansion — proposal repeat:true: exact same-kind sibling ใน version
+  // เดียวกันเท่านั้น (canonicalJson deep equality — ไม่มี substring/keyword/regex,
+  // ไม่ cross-kind, ไม่ infer scope); target ใช้ค่า confirm ของ proposal เดิม,
+  // repeat mapping เข้า typed switch เดียวกัน (ไม่ bypass target existence)
+  const repeatApplied = new Map<string, ResolutionMapping[]>();
+  const repeated: { binding_id: string; source_index: number }[] = [];
+  for (const p of proposed) {
+    if (p.repeat !== true) continue;
+    const b = bindingById.get(p.binding_id)!;
+    for (const m of p.mappings) {
+      const srcCj = canonicalJson(b.source_values[m.source_index]);
+      for (const sb of versionBindings) {
+        if (sb.binding_id === b.binding_id || sb.kind !== b.kind) continue;
+        for (let i = 0; i < sb.source_values.length; i++) {
+          if (canonicalJson(sb.source_values[i]) !== srcCj) continue;
+          const sibProposal = proposed.find((q) => q.binding_id === sb.binding_id);
+          if (sibProposal) {
+            const pm = sibProposal.mappings.find((q) => q.source_index === i)!;
+            if (pm.local_id !== m.local_id || pm.platform !== m.platform || pm.shop_id !== m.shop_id) {
+              return { ok: false, validation: `binding ${sb.binding_id}: repeat conflicts with proposed mapping at source_index ${i}` };
+            }
+            continue;
+          }
+          const prev = (repeatApplied.get(sb.binding_id) ?? []).find((r) => r.source_index === i);
+          if (prev) {
+            if (prev.local_id !== m.local_id || prev.platform !== m.platform || prev.shop_id !== m.shop_id) {
+              return { ok: false, validation: `binding ${sb.binding_id}: repeat conflict at source_index ${i} — proposals map the same source to different targets` };
+            }
+            continue;
+          }
+          const rm: ResolutionMapping = {
+            source_index: i,
+            source_fp: createHash("sha256").update(canonicalJson(sb.source_values[i])).digest("hex"),
+            local_id: m.local_id,
+            ...(m.platform !== undefined ? { platform: m.platform } : {}),
+            ...(m.shop_id !== undefined ? { shop_id: m.shop_id } : {}),
+            state: "valid",
+            resolved_by: actor,
+            resolved_at: now,
+            via: "repeat",
+          };
+          targetWork.push({ b: sb, m: rm });
+          const bucket = repeatApplied.get(sb.binding_id);
+          if (bucket) bucket.push(rm); else repeatApplied.set(sb.binding_id, [rm]);
+        }
+      }
+    }
+  }
 
   // 6) typed switch — local-target existence ตาม kind (account scope fields ใช้ได้
   //    เฉพาะ account) — proposed invalid → reject; carried invalid → mark state
@@ -1178,7 +1226,8 @@ export async function saveBindingResolutionBatch(
   for (const b of versionBindings) {
     if (proposedIds.has(b.binding_id)) continue;
     const carried = carriedMaps.get(b.binding_id);
-    if (!carried?.length) {
+    const rms = repeatApplied.get(b.binding_id);
+    if (!carried?.length && !rms?.length) {
       resolutionByBinding.set(b.binding_id, { status: b.status,
         mappings: (b.resolution?.mappings ?? []).map((m) => {
           const c = { ...m } as unknown as Record<string, unknown>;
@@ -1188,9 +1237,33 @@ export async function saveBindingResolutionBatch(
         conflict: b.resolution?.conflict });
       continue;
     }
+    if (!rms?.length) {
+      resolutionByBinding.set(b.binding_id, {
+        status: carried!.some((m) => m.state === "invalid") ? "invalid" : b.status,
+        mappings: carried!,
+        conflict: b.resolution?.conflict,
+      });
+      continue;
+    }
+    // repeat merge — existing ที่ index เดียวกัน: valid+target เดียวกัน = no-op;
+    // ต่างหรือ invalid → fail closed (explicit direct proposal เท่านั้นที่แก้ได้)
+    const merged = [...(carried ?? [])];
+    for (const rm of rms) {
+      const ex = merged.find((m) => m.source_index === rm.source_index);
+      if (ex === undefined) {
+        merged.push(rm);
+        repeated.push({ binding_id: b.binding_id, source_index: rm.source_index });
+        continue;
+      }
+      if (ex.state === "valid" && ex.local_id === rm.local_id
+        && ex.platform === rm.platform && ex.shop_id === rm.shop_id) continue;
+      return { ok: false, validation: `binding ${b.binding_id}: repeat conflicts with existing mapping at source_index ${rm.source_index} — requires explicit direct proposal` };
+    }
+    merged.sort((x, y) => x.source_index - y.source_index);
     resolutionByBinding.set(b.binding_id, {
-      status: carried.some((m) => m.state === "invalid") ? "invalid" : b.status,
-      mappings: carried,
+      status: merged.some((m) => m.state === "invalid") ? "invalid"
+        : (merged.length === b.count && merged.every((m) => m.state === "valid") ? "resolved" : b.status),
+      mappings: merged,
       conflict: b.resolution?.conflict,
     });
   }
@@ -1385,16 +1458,18 @@ export async function saveBindingResolutionBatch(
     else if (r.status === "invalid") invalid++;
     else unresolved++;
   }
+  repeated.sort((x, y) => x.binding_id === y.binding_id
+    ? x.source_index - y.source_index : (x.binding_id < y.binding_id ? -1 : 1));
   try {
     await logAdminEvent({
       action_type: "workflow.binding_resolve", actor,
       metadata: { workflow_id: workflowId, version_id: versionId, seq,
-        resolved, unresolved, invalid, repeated: 0, overlap: [],
+        resolved, unresolved, invalid, repeated: repeated.length, overlap: [],
         platforms: derivedPlatforms, shop_ids: derivedShopIds },
     });
   } catch { /* post-commit audit failure — commit สำเร็จแล้ว */ }
   return { ok: true, version: seq, version_id: versionId,
-    resolved, unresolved, invalid, repeated: [], publish_blockers: [], overlap_conflicts: [] };
+    resolved, unresolved, invalid, repeated, publish_blockers: [], overlap_conflicts: [] };
 }
 
 // ─── Import detail surface (UI read model) ────────────────
