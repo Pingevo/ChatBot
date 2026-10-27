@@ -98,6 +98,107 @@
 - **ขอบเขต**: registry/import/export/preview UI เท่านั้น; imported drafts ยังคงปิด save/publish, ไม่เพิ่ม Zaapi runtime executor หรือ per-node execution checkpoint
 - **แยก worktree**: Phase 10B บน `feature-phase3-aswer-quality` @ `20f9e69` ยังคง dirty 51 ไฟล์โดยไม่เปลี่ยน; path ที่ทับกันมีเพียง active log และจะตรวจตอนรวม branch ภายหลัง
 - **ถัดไป**: commit active log แยก; ยังไม่ push/PR/merge/deploy/Mongo/provider
+
+#### ZAAPI WORKFLOW PERSISTENCE + BINDING FOUNDATION (2026-10-27 — กำลังทำ)
+
+- **baseline**: branch `codex/zaapi-workflow-foundation` @ `3d6d6f8` (clean — A1-A3 committed แล้ว) · Phase 10B `feature-phase3-aswer-quality` @ `20f9e69` dirty 51 files เดิม (ไม่แตะ) · engine อ่านผ่าน `listWorkflows({enabledOnly, publishedOnly})` → imported drafts (enabled:false/draft) ไม่มีทาง execute
+- **เป้าหมาย**: canonical drafts → Mongo persistence ในสถานะ disabled draft + immutable provenance/batch/version/binding records; ยังห้าม publish/execute
+- **owner map (reuse เดิมเท่านั้น)**:
+  - `workflowService.ts` = persistence owner เดียวของ workflow domain — เพิ่ม `applyImportBatch`/`saveWorkflowDraft(CAS)`/`getWorkflowImportDetail` ที่นี่ (ไม่สร้าง service/repository ใหม่)
+  - `mongoClient.ts` `ensureIndexes` = index owner เดียว; `config.ts` `collections` = collection-name owner เดียว (env-backed + default เหมือนเดิม)
+  - `adminLogService.logAdminEvent` = audit surface เดิม
+  - `zaapiImport.ts` = pure preview owner เดิม (apply ไม่ re-parse source — consume report เดิม)
+  - `test-botworker-fakemongo.mjs` = fake-Mongo harness เดิม + module-register hooks convention เดิม
+- **collections ใหม่ (ตาม master plan §schema เท่านั้น)**: `workflow_versions` (immutable canonical + fingerprint + batch ref) · `workflow_import_batches` (source/fingerprint/counts/warnings/conflicts/status) · `workflow_raw_snapshots` (sanitized provenance + source ids + fingerprint; credentials masked; immutable) · `workflow_bindings` (workflow_id/version_id/node_id/field_path/kind/count/source_ref/source_values/status)
+- **indexes (declared เท่านั้น ไม่สร้าง production)**: versions unique(workflow_id,version_seq) + fingerprint · batches unique(batch_id) + (source,source_fingerprint) · snapshots unique(snapshot_id)+fingerprint · bindings unique(binding_id) + (workflow_id,version_id) + (workflow_id,status)
+- **import apply contract**: batch ต้อง ok + zero unsupported → reject+zero writes · deterministic ids (wib_/wf_imp_/wv_/wrs_/wb_ = shortHash ของ content) · identical apply → `already_applied` + zero dup · fingerprint เปลี่ยน → append version_seq+1 (ไม่แก้ version เก่า) · conflict (batch_id เดิม fingerprint ต่าง / workflow source ต่าง) → fail closed · enabled:false/status:draft เสมอ · ไม่ auto-publish
+- **CAS save**: `saveWorkflowDraft(workflowId, fields, expectedVersion)` → updateOne filter `version:expectedVersion` → matchedCount 0 = conflict → ไม่เขียนทับ · success → version doc ใหม่ + bindings carry-forward เฉพาะ node ที่ยังอยู่ (ที่เหลือ mark invalid)
+- **API/UI น้อยสุด**: `POST /api/workflows/import` (preview→apply server-side) · `PATCH /api/workflows/[id]` รับ `expected_version`→CAS (ไม่ใส่ = legacy path) · GET เพิ่ม source_ref/bindings summary/publish blockers · editor: Apply button + CAS save + publish disabled พร้อมเหตุผล
+- **ไม่ทำ**: binding-resolution UI, execution trace, executors/adapters, enable imported flows, production indexes, engine/runtime touch, KB/pool/Python
+- **test**: `scripts/test-workflow-persistence.ts` + hooks/mocks เดิม convention (redirect mongoClient+adminLogService → fake) — behavioral matrix ทั้งหมดตาม spec
+- **ผล verify (GREEN · uncommitted — pre-commit stop)**: persistence **74/74** synthetic · **85/85** กับ corpus (`ZAAPI_EXPORT_DIR`) — 21 flows / 218 nodes / 248 edges (225 source + 23 synthesized) / 119 bindings persist · re-apply zero dup · foundation **183/183** census · phase1+phase6 **69/69** · `tsc --noEmit` clean · `git diff --check` clean · `workflowEngine.ts` diff = 0 bytes · Phase 10B unchanged (51 dirty, `20f9e69`)
+- **behavioral matrix proven**: dry-run 0 writes · malformed/unsupported batch → throw + 0 writes · stale CAS → conflict (matchedCount 0) · race CAS → 1 success + 1 conflict · credential token absent จากทุก persisted doc · executable config 0 external IDs · bindings carry-forward ตาม node ที่รอด · import detail แสดง unresolved+blockers
+- **ทำเพิ่มจาก plan**: `platforms` ใน doc = intersect LOCAL_ENGINE_PLATFORMS (facebook/line ของ zaapi อยู่ใน raw เท่านั้น — doc field เป็น runtime Platform union) · `AdminActionType` += `workflow.import_apply`/`workflow.cas_save` · `WorkflowDocDTO` += `version` · DATA_SCHEMA เพิ่ม 5 collections ใน "ห้ามแตะ"
+
+##### CORRECTION ROUND — persistence atomicity + activation ownership (2026-10-27 — กำลังทำ)
+
+- **findings verified จาก source**:
+  - H1: `updateWorkflow`/:264 allowlist มี `enabled`/`status` + `toggleWorkflow`:306 — ไม่มี provenance/publish check → imported draft เปิดได้ผ่าน legacy PATCH/toggle
+  - H2: `applyImportBatch`:427 — `existing` batch → `already_applied` ไม่ดู `status`/completeness → crash ค้าง in_progress ตอบ success เท็จ
+  - H3: `saveWorkflowDraft` — CAS bump `version`+fields ก่อน (:583) → version doc (:595) → pointer (:607) → bindings (:617) = crash ระหว่างทางได้ `version=N+1` แต่ไม่มี version doc/pointer stale
+  - M1: `CAS_SAVE_ALLOWLIST`:558 ไม่มี `enabled`/`status` → editor ส่งมาแล้วถูก drop เงียบๆ ตอบ success
+  - M2: `:623` clone bindings ของ node ที่ถูกลบเป็น `status:"invalid"` เข้า current version — contract คือ carry เฉพาะ surviving node_ids
+- **correction plan (owner เดิมเท่านั้น)**:
+  - A. activation invariant ใน mutation owner เดียว (`_assertActivationAllowed`): `enabled:true`/`status:"published"` บน `import`-provenance doc → ต้องผ่าน `getWorkflowImportDetail` readiness (unresolved=0 + blockers=0) ไม่งั้น throw — บังคับ updateWorkflow/toggleWorkflow/saveWorkflowDraft; legacy workflows พฤติกรรมเดิม
+  - B. batch recovery: claim CAS `in_progress/failed`→`applying` (single caller; miss = 409) · `already_applied` เฉพาะ `applied`+completeness gate (versions/snapshots/bindings/workflow-pointer ครบ) · per-flow resume ด้วย deterministic ids (findOne→insert, E11000→verify) · write fail → `status:"failed"`+last_error → retry payload เดิมซ่อมต่อ
+  - C. CAS reorder: immutable version+binding carry เขียนก่อน (deterministic → retry idempotent) → CAS pointer commit ทีเดียว (fields+version+current_version_id ใน updateOne เดียว) → audit หลัง commit (try/catch — audit fail ไม่กลืน commit)
+  - D. legacy fields: CAS รับ `enabled`/`status` — imported ผ่าน invariant เดียวกับข้อ A; legacy apply ตามเดิม (ไม่ drop เงียบ)
+  - E. bindings carry เฉพาะ surviving node_ids — node ถูกลบไม่ clone
+  - API truth: activation blocker → 422 (existing catch convention) · infra → 500 · in-progress → 409 (`.code="IMPORT_IN_PROGRESS"`)
+  - fake Mongo: hook seams เดิม (insertOneHook/updateOneHook) สำหรับ failure injection · uniqueKeys enforce อยู่แล้ว · ไม่มี tx → ordered writes + commit point
+- **ผล verify (GREEN · uncommitted)**: persistence synthetic **141/141** · corpus apply **152/152** · foundation census **183/183** · phase1+phase6 **69/69** · `tsc --noEmit` clean · `git diff --check` clean · `workflowEngine.ts` diff = 0 bytes · Phase 10B unchanged (51 dirty, `20f9e69`)
+- **fix ระหว่างทาง**: revision-2 ติด completeness gate — `import.batch_id` ค้าง batch แรก → update pointer พร้อม refresh batch_id ใน `$set` เดียวกัน
+- **behavioral matrix proven**: imported activation blocked ทุก mutation path (update/toggle/CAS) · legacy enabled/status apply ผ่าน CAS · unknown field → explicit reject · crash @version/snapshot/mid-bindings/workflow/finalize/batch-insert → batch `failed`+claim release → retry resume → applied+zero dup · concurrent apply → winner+IMPORT_IN_PROGRESS·CAS crash ทุก boundary → runtime state เดิม + retry commit point เดียวพริก fields+version+pointer · bindings carry เฉพาะ surviving node_ids (historical version เก็บเดิม immutable)
+
+###### CORRECTION ROUND 2 — activation gate + claim lease + historical replay + CAS identity (2026-10-27 — กำลังทำ)
+
+- **findings verified จาก source**:
+  - H1: `_assertActivationAllowed` เช็คแค่ unresolved/blockers — flow bindings=0 + supported nodes ผ่าน gate ได้ ทั้งที่ `FOUNDATION_GATES.runtimeActivation=false`
+  - H2: `claimed_by` ไม่มี lease/expiry — process ตายก่อน catch → claim ค้าง → retry ได้ IMPORT_IN_PROGRESS ถาวร
+  - H3: `_batchComplete` เช็ค `wf.import.batch_id===batchId` + `current_version_id` — historical replay (V1→V2→reapply V1) fail gate → reconcile → repoint workflow กลับ V1
+  - H4: CAS `versionId`/fingerprint = `{nodes,edges}` เท่านั้น — payload ต่าง (name/platforms/priority) ชน identity เดียวกัน; orphan version doc ที่ seq เดียวกัน ขวาง payload ใหม่ถาวร (unique version_seq)
+- **correction plan (owner เดิมเท่านั้น)**:
+  - A. `_assertActivationAllowed` += `publishReadiness(validation)` — FOUNDATION_GATES=false → imported block ทุกตัวรอบนี้; legacy เดิม
+  - B. `claim_token`+`claim_expires_at` แทน `claimed_by` — acquire CAS filter `claim_expires_at ∈ {null, ≤now}` · finalize/release filter รวม token (stale claimant เขียนไม่ได้) · LEASE=60s const · ไม่มี worker
+  - C. `_batchComplete` = artifact completeness เท่านั้น (version `import_batch_id+fingerprint`, snapshot, bindings count) — ไม่ผูก current pointer · repoint เฉพาะเมื่อ seq ใหม่กว่า current version_seq · historical replay → already_applied ไม่ repoint
+  - D. version fingerprint = canonical payload ครบ field ที่ version owner รับผิดชอบ (name/description/shop_ids/platforms/trigger_frequency/false_branch_policy/priority/nodes/edges/handle_labels) — versionId มาจาก fingerprint เดียวกัน · orphan seq collision → seq bump loop (commit `$set version:seq` แทน `$inc`) · activation state (enabled/status/is_deleted) ไม่อยู่ version history
+  - E. revision apply `$set` += `enabled:false, status:"draft"` — force-off ก่อน graph/pointer flip ใน update เดียวกัน
+- **ผล verify (GREEN · uncommitted)**: persistence synthetic **176/176** · corpus apply **187/187** · foundation **183/183** · phase1+phase6 **69/69** · `tsc --noEmit` clean · `git diff --check` clean · `workflowEngine.ts` = 0 bytes · Phase 10B unchanged (51 dirty, `20f9e69`)
+- **truth tables proven**: zero-binding supported imported → activation blocked ทุก path (publishReadiness gate) · active lease→409/expired→takeover/stale token fenced · V1→V2→reapply V1 → already_applied+zero docs+pointer stays V2 · incomplete historical → reconcile artifacts only · CAS payload→distinct version id · orphan seq→bump recover · concurrent→1 winner+loser conflict+pointer=winner payload · revision apply force disabled/draft atomic กับ pointer flip
+- **CAS payload contract**: version-owned = name/description/shop_ids/platforms/trigger_frequency/false_branch_policy/priority/nodes/edges/handle_labels · activation state (enabled/status/is_deleted) ไม่อยู่ version history · commit `$set version:seq` (ไม่ $inc) เพื่อสะท้อน orphan seq-skip
+
+####### CORRECTION ROUND 3 — CAS bypass + stale-claimant fencing (2026-10-27 — กำลังทำ)
+
+- **findings verified จาก source**:
+  - H1: PATCH ไม่ส่ง expected_version → `updateWorkflow` legacy path เขียน version-owned fields (nodes/edges/name/…) บน imported doc โดยไม่สร้าง WorkflowVersionDoc / ไม่ขยับ current_version_id — API boundary bypass CAS ได้
+  - H2: `claim_token` fence เฉพาะ finalize/release — lease หมดอายุกลาง apply → claimant ใหม่ takeover แต่ claimant เก่ายัง insert/update workflow pointer ต่อได้ก่อนรู้ว่าเสีย claim
+  - M3: `_batchComplete` เช็ค bindings ด้วย count เท่านั้น — count ถูกแต่ identity หาย/ถูกแทน → applied เท็จ
+- **correction plan (owner เดิมเท่านั้น)**:
+  - A. `updateWorkflow`: `before.import` + fields มี version-owned key → throw `CAS_REQUIRED` (route → 422 explicit, ไม่ใช่ 404) — activation-only fields ผ่าน invariant เดิม; legacy เดิม
+  - B. `_assertImportClaim(batches, batchId, claim)` ก่อน workflow insert/update ทุกครั้งใน apply loop — stale → IMPORT_IN_PROGRESS; finalize/release fence เดิม; ไม่มี timer/worker
+  - C. `_batchComplete` bindings → per-expected `binding_id` identity check (deterministic id เดิม) ไม่ใช่ count-only
+- **ผลหลังแก้ (verified)**: persistence synthetic **201/201** · corpus **212/212** · foundation census **183/183** · Phase 1 **69/69** · Phase 6 **69/69** · `tsc --noEmit` clean · `git diff --check` clean · engine diff **0 bytes**
+- **RED ก่อนแก้**: non-CAS name/priority บน imported เขียนจริง (version +2, ไม่มี version doc) · stale claimant เขียน flow2 + takeover B ถูก own lease ขวาง → `IMPORT_IN_PROGRESS` ค้าง · (binding identity ผ่าน RED ผ่าน corruption path — count match เท็จ already_applied ถูกจับโดย identity check ใหม่)
+- **fix**: `updateWorkflow` เช็ค `before.import` + version-owned key → `CAS_REQUIRED` (route → 422 explicit) · `_assertImportClaim` ก่อน workflows insertOne/updateOne ทุกครั้ง · `_batchComplete` per-binding `binding_id` lookup · takeover test ใช้ expired-lease semantics
+
+####### CORRECTION ROUND 4 — lease liveness + exact binding set + complexity (กำลังทำ)
+
+- **findings verified**: `_assertImportClaim` เช็ค expiry แต่ไม่ renew → valid claimant ที่ import >60s เจ๊งเอง · `_batchComplete` ยอมรับ extra binding identity (subset check only) → corrupt+extra → already_applied เท็จ · `VERSION_OWNED` ซ้ำ allowlist ที่มีอยู่
+- **plan (owner เดิม)**: `_assertImportClaim` → atomic validate+renew `updateOne{batch_id,claim_token,status:"in_progress"}` `$set claim_expires_at=now+LEASE` matchedCount=0 → IMPORT_IN_PROGRESS · `_batchComplete` → exact set equality, extra → IMPORT_INVALID (fail closed, bogus เก็บไว้ inspect) · ลบ VERSION_OWNED → classify structural: enabled/status = activation, อื่น = version-owned
+- **ผลหลังแก้ (verified)**: persistence synthetic **208/208** · corpus **219/219** · foundation **183/183** · Phase 1/6 **69/69** · tsc clean · diff-check clean · engine **0 bytes** · Phase 10B **51 dirty @ 20f9e69**
+- **behavior**: valid owner renew lease (expired+token เดิม → updateOne match → continue ข้าม 60s) · token เปลี่ยน → renew/mutate ไม่ได้ · corrupt+extra binding → IMPORT_INVALID fail-closed (bogus preserved) · missing-only → reconcile → applied
+
+####### CORRECTION ROUND 5 — binding multiplicity (verified 2026-10-27)
+
+- **finding**: `_batchComplete` ใช้ Set identity → persisted rows 2 แถวที่ binding_id เดียวกัน collapse เป็น member เดียว → already_applied เท็จ (unique index declared แต่ production DDL ยังไม่สร้าง → app validation ต้องไม่ assume uniqueness)
+- **fix (owner เดิม, +1 line)**: `_batchComplete` เพิ่ม `persisted.length !== persistedIds.size` → "corrupt" — exact set = row count + identity set + every expected present
+- **test**: dup-row injection ผ่าน fake Mongo (ชั่วคราวปิด uniqueKeys.workflow_bindings จำลอง pre-DDL) → IMPORT_INVALID, corrupt rows preserved
+- **ผล**: synthetic **210/210** · corpus **221/221** · foundation **183/183** · Phase 1/6 **69/69** · tsc clean · engine **0 bytes** · Phase 10B unchanged
+
+####### CLOSEOUT — workflow persistence committed (commit `3193fd7`)
+
+- **commit**: `3193fd73554ae277ccbc200fdb977b693288adcb` "feat: persist imported workflow drafts safely" — 12 files, +1625/−5 — `workflowService.ts` +598, persistence test suite +833, import route (new), PATCH/toggle routes, mongoClient/config/adminLogService, WorkflowEditor, DATA_SCHEMA
+- **persistence contract**: deterministic ids (`wib_`/`wf_imp_`/`wv_`/`wb_`) · `applyImportBatch` claims batch (claim_token+lease) → per-flow immutable version+snapshot+bindings → workflow upsert → completeness gate → finalize · `saveWorkflowDraft` CAS — immutable artifacts first, single CAS `updateOne` commit point · historical batch = artifact-scoped, no repoint
+- **activation gate**: imported workflow ห้าม `enabled:true`/`status:"published"` ทุก path (`updateWorkflow`/`toggleWorkflow`/CAS/revision apply) — `publishReadiness` gate, `FOUNDATION_GATES.runtimeActivation=false` → ทุก imported flow ปิดในรอบนี้ · legacy unchanged
+- **CAS ownership**: imported non-CAS mutation ของ version-owned fields → `CAS_REQUIRED` (422) — enabled/status ผ่าน activation invariant เดิม, ทุก allowed field อื่น = version-owned
+- **lease/fencing**: `_assertImportClaim` = atomic validate+renew per mutable boundary — token เดิม renew ได้ (ข้าม 60s), token เปลี่ยน → IMPORT_IN_PROGRESS + fenced finalize/release · **limitation (honest)**: check-then-write = 2 DB ops — fence จับ stale claimant ที่ boundary ทุกครั้ง แต่ใน write op เดียวกัน interleave ยังเปิดอยู่ (ไม่มี tx) — ไม่ claim exactly-once
+- **historical replay**: V1→V2→reapply-V1 → `already_applied`, pointer คง V2, zero dup · incomplete historical → reconcile artifacts เท่านั้น
+- **binding completeness**: exact set — row count == identity set == expected ids; missing → reconcile; extra/dup → `IMPORT_INVALID` fail-closed (corrupt rows preserved, ไม่ลบอัตโนมัติ)
+- **frozen counts**: synthetic **210/210** · corpus **221/221** · foundation **183/183** · Phase 1/6 **69/69** · tsc/diff-check clean
+- **complexity delta**: +1 route · +3 service methods · +1 fence helper · +4 collections · +11 index declarations · 0 new decision owners/regex/keyword tables/workers/timers
+- **blockers คงเหลือ**: binding-resolution UI, executors/adapters, runtime execution/trace, production index DDL, imported workflow activation
+- **Phase 10B**: `feature-phase3-aswer-quality` @ `20f9e69`, 51 dirty files — untouched · no push/PR/deploy/DDL/real-Mongo activity
+
 ### 🔧 PHASE 10B — live-canary correction: QA snapshot propagation + Test Chat failure boundaries (✅ corrected + verified GREEN · committed)
 
 - **วิธีแก้ (ตาม plan — root cause เท่านั้น):**
