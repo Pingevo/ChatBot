@@ -18,7 +18,12 @@ export async function POST(
     return error("enabled (boolean) is required", 422);
   }
 
-  const ok = await workflowService.toggleWorkflow(workflowId, body.enabled, r.ctx.admin.admin_id);
-  if (!ok) return error("workflow not found", 404);
-  return json({ ok: true, enabled: body.enabled });
+  try {
+    const ok = await workflowService.toggleWorkflow(workflowId, body.enabled, r.ctx.admin.admin_id);
+    if (!ok) return error("workflow not found", 404);
+    return json({ ok: true, enabled: body.enabled });
+  } catch (err) {
+    // activation invariant (imported drafts) → 422 เหมือน PATCH validation convention
+    return error((err as Error).message, 422);
+  }
 }

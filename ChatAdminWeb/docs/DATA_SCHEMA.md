@@ -15,6 +15,7 @@ sellcenter เขียนข้อมูลแชทจาก Shopee (และ
 - `admin_logs`, `system_configs`
 - `shops`, `customers`, `triggers`
 - `shadow_replies`, `quick_replies`, `close_history`
+- `workflows`, `workflow_versions`, `workflow_import_batches`, `workflow_raw_snapshots`, `workflow_bindings` — workflow engine + Zaapi import persistence (immutable versions/provenance; imported drafts stay `enabled:false`/`draft`)
 
 ---
 

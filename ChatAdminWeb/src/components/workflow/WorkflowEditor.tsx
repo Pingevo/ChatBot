@@ -47,6 +47,7 @@ interface FlowSettings {
 interface WorkflowDocDTO {
   workflow_id: string;
   name: string;
+  version?: number;
   description?: string;
   enabled: boolean;
   shop_ids: string[];
@@ -98,6 +99,13 @@ function EditorInner({ workflowId }: { workflowId: string }) {
 
   const [settings, setSettings] = useState<FlowSettings>(defaultSettings);
   const [wfVersion, setWfVersion] = useState(0); // track ว่า save แล้ว
+  const [loadedVersion, setLoadedVersion] = useState<number | null>(null); // CAS expected_version
+  const [importDetail, setImportDetail] = useState<{
+    source_ref?: { workflowId?: string; loadedVersionId?: string } | null;
+    current_version_id?: string | null; fingerprint?: string | null;
+    unresolved_bindings?: number; publish_blockers?: string[];
+    bindings?: { node_id: string; field_path: string; kind: string; count: number; status: string }[];
+  } | null>(null);
   const [loaded, setLoaded] = useState(isNew);
   const [saving, setSaving] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -131,6 +139,8 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
         const wf: WorkflowDocDTO = d.workflow;
+        setLoadedVersion(wf.version ?? null);
+        setImportDetail(d.import_detail ?? null);
         setSettings({
           name: wf.name,
           description: wf.description || "",
@@ -284,6 +294,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         status: settings.status,
         nodes: wfNodes,
         edges: wfEdges,
+        ...(isNew || loadedVersion == null ? {} : { expected_version: loadedVersion }),
       };
       const r = await fetch(isNew ? "/api/workflows" : `/api/workflows/${workflowId}`, {
         method: isNew ? "POST" : "PATCH",
@@ -291,12 +302,17 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         body: JSON.stringify(body),
       });
       const d = await r.json().catch(() => ({}));
+      if (r.status === 409) {
+        toast.error(`เวอร์ชันขัดกัน — ${d.detail || d.error || "reload ก่อนแก้"}`);
+        return;
+      }
       if (!r.ok) {
         toast.error(`บันทึกไม่สำเร็จ: ${d.detail || d.error || d.message || `HTTP ${r.status}`}`);
         return;
       }
       toast.success(isNew ? "สร้าง workflow แล้ว" : "บันทึกแล้ว");
       setWfVersion(0);
+      if (typeof d.version === "number") setLoadedVersion(d.version);
       if (isNew && d.workflow?.workflow_id) {
         router.push(`/workflows/${d.workflow.workflow_id}`);
       }
@@ -624,6 +640,11 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         >
           <AlertTriangle size={14} />
           <span className="hidden sm:inline">Publish</span>
+          {importDetail && (importDetail.unresolved_bindings ?? 0) > 0 && (
+            <span className="hidden md:inline text-[10px] text-warning" title={(importDetail.publish_blockers || []).join("\n")}>
+              · {importDetail.unresolved_bindings} unresolved bindings
+            </span>
+          )}
         </button>
         <button
           onClick={save}
@@ -816,6 +837,26 @@ function EditorInner({ workflowId }: { workflowId: string }) {
               <button onClick={doImport} className="mt-2 px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand text-white hover:opacity-90">
                 Preview import
               </button>
+              {importBatch.length > 0 && (
+                <button
+                  onClick={async () => {
+                    try {
+                      const flows = JSON.parse(importFlowsText);
+                      const idx = importIndexText.trim() ? JSON.parse(importIndexText) : undefined;
+                      const r = await fetch("/api/workflows/import", {
+                        method: "POST", headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ flows, indexRows: idx?.rows ?? (Array.isArray(idx) ? idx : undefined) }),
+                      });
+                      const d = await r.json().catch(() => ({}));
+                      if (!r.ok) { toast.error(`apply ไม่สำเร็จ: ${d.detail || d.error || `HTTP ${r.status}`}`); return; }
+                      toast.success(`apply: ${d.flow_count} flows → ${d.workflow_ids?.length ?? 0} disabled drafts (batch ${d.batch_id})${d.already_applied ? " — already applied" : ""} · ${d.bindings_total} unresolved bindings`);
+                    } catch (err) { toast.error(`apply ผิดพลาด: ${(err as Error).message}`); }
+                  }}
+                  className="mt-2 ml-2 px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-600 text-white hover:opacity-90"
+                >
+                  Apply as disabled drafts
+                </button>
+              )}
               {importBatch.length > 0 && (
                 <div className="mt-3 border border-border rounded-lg divide-y divide-border">
                   {importBatch.map((r) => (

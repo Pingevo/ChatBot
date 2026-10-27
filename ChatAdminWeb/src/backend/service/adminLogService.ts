@@ -57,6 +57,8 @@ export type AdminActionType =
   | "workflow.delete"
   | "workflow.restore"
   | "workflow.toggle"
+  | "workflow.import_apply"
+  | "workflow.cas_save"
   | "workflow.run_completed"
   | "workflow.run_errored"
   | "workflow.run_timeout"
