@@ -20,6 +20,84 @@
 
 ## กำลังทำ (active)
 
+### 🔧 ZAAPI WORKFLOW FOUNDATION — parallel-safe registry/import/export/UI (worktree `zaapi-workflow-foundation` @ `20f9e69`, branch `codex/zaapi-workflow-foundation`)
+
+- **baseline**: worktree clean · `tsc --noEmit` exit0 · `git diff --check` clean · phase1+phase6 workflow tests 69/69 (ต้อง dummy env `ADMIN_JWT_SECRET`/`CHATBOT_INTERNAL_SECRET` เพราะ `config.ts` throw ตอน module load — pre-existing, ไม่แตะ secrets) · workflow-e2e ไม่รัน (ต้อง Mongo จริง — out of scope) · Phase 10B checkout ไม่แตะ
+- **Zaapi census (independent verify)**: flows 21 · nodes 218 · edges 225 · distinct node types used 31 · `node-types.json` catalogue = 31 เท่ากัน (คือ used set) · basic automations 4 (active 1 = `chatCloserAutomation`) · platform scopeจาก accounts: Facebook/LINE Official/Shopee/Lazada/TikTok (+Instagram นอก scope) · 31 types: message_received, label_added, marketplace_order_created, marketplace_return_refund_requested, marketplace_review_added (trigger) · message_content, business_hours, label, conversation_assignee, last_interaction, customer_waiting_time, event_time, review_rating, ai_review_sentiment (condition) · send_message, add_label, remove_label, chat_assign, chat_unassign, close_chat, reply_to_review, add_note_to_review, mark_review_as_follow_up, send_marketplace_order_card, send_button_template, set_ticket_field, chatbot, jump_to (action) · delay, wfr, randomizer (utility/wait)
+- **edge handle vocab**: `null`/`(default)` · `condition-index-N` · `no-match` · `ai-chatbot-escalate`/`ai-chatbot-timeout` · `wfr-success`/`wfr-no-respond` · `btn-template-condition-index-N`/`btn-template-expired`/`btn-template-none-selected` · `randomizer-path-N`
+- **plan (owner เดียวต่อ concern, no new deps, no Mongo/API writes)**:
+  - `src/lib/workflow/graph.ts` ใหม่ = ย้าย pure types (`WorkflowNode`/`WorkflowEdge`/config guards/`WAIT_BRANCH`) + `validateWorkflowGraph` จาก `workflowService.ts` — service re-export คง API เดิม → validator owner ยังตัวเดียว แต่ import ได้โดยไม่ชน env gate
+  - `src/lib/workflow/nodeRegistry.ts` ใหม่ = canonical registry เดียว (CanonicalNodeDefinition: type/family/handles/configSchema/platforms/capabilities/runtimeExecutor/idempotencyClass/availability) — ครอบ 31 used types + catalogue-only types (trigger/condition/action/utility) + 14 local executor subtypes · `zaapiType` alias per def สำหรับ import · availability per platform pair (local-exec → supported: shopee/tiktok/lazada, requires_adapter: facebook/line · zaapi-only → requires_adapter ตาม platform หรือ unavailable)
+  - `src/lib/workflow/zaapiImport.ts` ใหม่ = pure import preview (all-flows.json / flow file / flow object): strip accountIds/userIds/labelIds/ticket-field ids → unresolvedBindings · canonical draft = WorkflowNode/Edge shape เดิม (positions/edges/branch order/handles preserved) · fingerprint deterministic (canonical JSON + FNV-1a) · report: counts/unsupported/bindings/conflicts (label-chain + trigger overlap + basic-automation overlap)
+  - `src/lib/workflow/workflowExport.ts` ใหม่ = export canonical/raw-sanitized/zaapi-projection + `importCanonicalDraft` round-trip · omitted fields listed
+  - `WorkflowEditor.tsx`: palette ← registry (group by family + search + platform filter + availability badge, non-supported ไม่ draggable) · toolbar += Validate/Import preview/Export · inspector += registry meta + unresolved bindings + validation errors · Save disabled เมื่อ imported (ไม่เขียน Mongo) · Publish disabled เสมอรอบนี้
+  - `scripts/test-workflow-foundation.ts` = executable tests ครบ contract + SSR smoke (react-dom/server) สำหรับ palette/inspector
+- **scope guard**: ไม่แตะ workflowEngine/workflowService runtime logic/API routes/Mongo/KB/Pool/เชื่อมต่อ platform · ไม่เพิ่ม dep · ไม่มี second runner/registry · ไม่มี keyword/regex semantic tables ใหม่
+- **ผล verify (GREEN · ยังไม่ commit — pre-commit stop)**: `test-workflow-foundation` **67/67** · phase1+phase6 **69/69 ต่อชุด** · `tsc --noEmit` clean · `git diff --check` clean · registry 67 defs (trigger 22/condition 19/action 22/utility 4) — ครอบ 31 used types + catalogue เหลือ · import preview: 21 flows/218 nodes/225 edges · bindings 26 · conflicts trigger_overlap+label_chain+basic_automation_overlap · round-trip positions/edges/handles ครบ · publish gate ปิดทุก draft (persistence out of scope) · Phase 10B checkout verify unchanged (branch+HEAD+dirty list เดิม)
+- **fix ระหว่างทาง**: `workflowService` — types+validator ย้าย → `src/lib/workflow/graph.ts` (re-export คง API) — ทำให้ test/UI import ได้โดยไม่ชน env gate ของ `config.ts` · dynCond helper ย้ายนอก array literal · deterministic sort ใน export → handleLabels round-trip เทียบ canonicalJson
+
+#### REVIEW-FIX ROUND A (2026-10-27) — ปิด findings ก่อน first commit
+
+**baseline ก่อนแก้**: foundation 67/67 · phase1 69/69 · phase6 69/69 · worktree = workflow branch @ 20f9e69 (uncommitted foundation) · Phase 10B checkout dirty เดิม (ห้ามแตะ) · manifest: /tmp/zaapi-manifests/before-partA.txt
+
+**audit จาก source จริง (read-only /Users/itdev4/Downloads/zaapi — proven, ไม่เดา)**:
+- nested external IDs มีจริงใน `data.action.assignment.teamIds/userIds` (15+15) · `data.action.label.labelIds` · `data.action.setTicketField.ticketFieldId` (3) · `data.conditions[].labelIds/assigneeUserId` (69 labelIds รวมทุกชั้น / 9 assigneeUserId) — `extractBindings`/`portableConfig` เดิมตรวจเฉพาะ `data.*` ชั้นบน → nested IDs หลุดเข้า canonical `config` + bindings นับไม่ครบ (26 → นับจริงต้องมากกว่า)
+- `nextStepId` 215 จุด: nested `conditions[i].nextStepId` เทียบ edge `condition-index-i` match 70/70 (redundant → strip ได้) · **แต่ top-level `data.nextStepId` ที่ไม่มี edge = 23 จุด ล้วนเป็น `jump_to`** — jump target อยู่ใน nextStepId เท่านั้น ไม่มี edge → strip ทิ้ง = flow ขาดลิงก์ (ต้องสร้าง edge ให้ / dangling → block)
+- `all-flows.json` flows ไม่มี `name` — ชื่ออยู่ `_index_data.json` `rows[].wid/name` — UI เดิมอ่าน `parsed.rows` จากไฟล์เดียวกัน → ชื่อเป็น generic เสมอ
+- `threw || true` / `... || true` ใน test = assertion ผ่านเสมอ · test hardcode `/Users/itdev4/Downloads/zaapi` (เครื่องเจาะจง)
+- `draft` ไม่มี raw snapshot layer → raw export ไม่มีของจริงให้ส่ง · binding มีแค่ {node,kind,count} ไม่พอ rebind
+
+**root cause**: `extractBindings`/`portableConfig` เป็น flat scan ชั้นเดียว — Zaapi data model เก็บ bindings ลึกใน `action.*`/`conditions[]`; nextStepId ถูก drop แบบไม่แยกกรณี (redundant vs sole-carrier); name ถูก resolve จาก source เดียวกันแบบ fuzzy (stem includes)
+
+**วิธีแก้ (owner เดิมเท่านั้น — zaapiImport.ts / workflowExport.ts / WorkflowEditor.tsx / test-workflow-foundation.ts, ไม่มี sanitizer/mapper ชุดใหม่)**:
+1. zaapiImport: recursive config walker — strip binding keys (plural+singular: accountIds, userIds, teamIds, labelIds, channelIds, shopIds, adminIds, ticketFieldIds, ticketFieldId, assigneeUserId, accountId/userId/teamId/labelId/shopId/channelId/creatorId) ทุกระดับ → `BindingRequirement{node_id,field_path,kind,count,source_ref}` (source_ref=path ใน raw — ไม่เก็บค่า ID จริงใน binding)
+2. nextStepId/noMatchNextStepId/sourceMsgStepId strip ทุกระดับ + เก็บเป็น step-refs: nested → verify ตรง edge (mismatch=warning) · top-level ไม่มี edge → synthesize edge (jump_to carrier) · dangling → unresolvedStepRef → structural/capability block publish
+3. `draft.raw` = provenance layer (engine ไม่ใช้): sanitized source flow (credential/url keys → "[redacted]", external IDs เก็บไว้สำหรับ rebind) + sourceRef{workflowId,loadedVersionId,versionStatuses,fingerprint}
+4. `resolveFlowName(flow,indexRows)`: match `row.wid === workflowId` exact — missing index → warning · ไม่พบ wid → warning+generic · wid ซ้ำ → error; UI = 2 file inputs (flows+index) แทน textarea+parsed.rows
+5. workflowExport: sanitize() ใช้ต่อ (raw export redacts IDs→counts เหมือนเดิม) + manifest เก็บ workflowId/version identity · exportCanonical ครอบ bindings+sourceRef (ไม่รวม raw blob) · UI เพิ่ม raw export เฉพาะ imported draft
+6. test: ลบ `|| true`, synthetic fixtures (nested IDs/missing+dup name/malformed graph/dangling step/redaction/unknown node), real corpus census opt-in ผ่าน ZAAPI_EXPORT_DIR
+
+**ผลกระทบเคสอื่น**: phase1/phase6 ใช้ validateWorkflowGraph+types จาก graph.ts (ไม่แตะ) · workflowService re-export คง API · bindings count เพิ่มขึ้น = ถูกต้อง (นับครบขึ้น) · jump_to flows ได้ edges เพิ่ม = graph ถูกขึ้น · canonical export fingerprint เปลี่ยน (เนื้อหาเปลี่ยนจริง) — expected
+
+**RED→GREEN evidence (verified 2026-10-27)**:
+
+- **RED (ก่อนแก้)**: `test-workflow-foundation` **78 pass / 49 fail** — fail ครบตาม findings: nested IDs (labelIds/teamIds/userIds/ticketFieldId) หลุดเข้า canonical config · bindings ไม่มี field_path/source_ref · ไม่มี draft.raw · ไม่มี stepRefs/unresolvedStepRefs · jump_to ไม่ได้ edge · nameStatus/parseZaapiImportInputs ไม่มี · canonical package มี external ids · raw manifest ไม่มี workflow/version identity · zaapi projection ไม่ restore data.name + omitted ไม่ครบ
+- **แก้แล้ว (owner เดิม 3 ไฟล์ + test)**:
+  - `zaapiImport.ts` — walker เดียว `cleanConfigObject/Value` รีเคอร์ซีฟทุกระดับ: binding keys (plural+singular) → `BindingRequirement{node_id,field_path,kind,count,source_ref}` (source_ref ชี้เข้า raw · ไม่มี id จริงใน binding) · `*StepId` → step-refs (redundant=resolved · ไม่มี edge=synthesize carrier · dangling=`unresolvedStepRefs` → capability.ok=false block publish) · credential keys → `[redacted]` · `draft.raw` = `provenanceSnapshot(flow)` (engine ไม่ใช้, ids เก็บไว้ rebind) · `sourceRef{workflowId,loadedVersionId,versionStatuses,sourceStatus,fingerprint}` · `resolveFlowName` exact `wid===workflowId` (missing_index/missing_name/ambiguous+warning · stem-substring ไม่นับ · flow.name authoritative · opts.name=provided) · `parseZaapiImportInputs(flowsText,indexText)` = UI path จริง · batch เพิ่ม `synthesizedEdges`
+  - `workflowExport.ts` — `exportRawSource(draft)` อ่าน `draft.raw` + `manifest{workflowId,loadedVersionId,name,nodeCount,edgeCount,bindingsTotal,sourceFingerprint}` · sanitize ใช้ BINDING_KEYS เดียวกับ import (ไม่ซ้ำ vocab) + flow-level id keys→counts · `exportZaapi` restore `data.name`←`config.label` + omittedFields เพิ่ม `raw`
+  - `WorkflowEditor.tsx` — import modal = 2 file inputs (flows + index) → `parseZaapiImportInputs` · รายงาน name warnings/stepRefs synthesized/dangling ต่อ flow · export menu เพิ่ม "Raw source (sanitized)" เฉพาะ imported draft ที่มี raw · bindings แสดง `@ field_path` · `canvasToDraft` propagate `raw`
+  - `test-workflow-foundation.ts` — ลบ `|| true` ทั้งหมด · synthetic fixtures: nested IDs ทุกชั้น/dangling step ref/missing+dup+ambiguous name/malformed graph/redaction/unknown node · corpus census opt-in `ZAAPI_EXPORT_DIR` เท่านั้น (ไม่ hardcode path)
+- **GREEN**: synthetic **130/130** · census (`ZAAPI_EXPORT_DIR=/Users/itdev4/Downloads/zaapi`) **152/152** — 21 flows / 218 nodes / 225 source edges + 23 synthesized jump carriers = 248 canonical · bindings นับครบ **119** (เดิม 26) · 113 external id values → zero leak ใน canonical · ทุก binding source_ref resolve ใน raw ได้จริง · 21/21 flows ได้ชื่อจาก index exact wid · zero name warnings · phase1 **69/69** · phase6 **69/69** · `tsc --noEmit` clean · `git diff --check` clean
+- **complexity delta**: helper ใหม่ +2 (`cleanConfigObject/Value` walker — mechanism เดียวครอบ binding+stepRef+redact, ลบ extractBindings/portableConfig เดิม = net -2 flat scanners) · `resolveFlowName`/`parseZaapiImportInputs`/`provenanceSnapshot` = import-contract ใหม่ตามสัญญา · regex: `STEP_KEY`/`REDACT_VALUE`/`ID_KEY`/`URL_KEY` = structural key-pattern เท่านั้น ไม่ใช่ semantic text-matching (ไม่เพิ่ม keyword table ตีความข้อความ) · decision owner ใหม่ = 0
+- **manifests**: workflow worktree `codex/zaapi-workflow-foundation` @ `20f9e69` · modified: workflowService.ts, WorkflowEditor.tsx, log · untracked: `src/lib/workflow/` (graph/nodeRegistry/zaapiImport/workflowExport), `scripts/test-workflow-foundation.ts` · **Phase 10B checkout เหมือนเดิม**: `feature-phase3-aswer-quality` @ `20f9e69`, 51 dirty files ไม่ถูกแตะ
+- **สถานะ**: รอ first-commit approval gate — ยังไม่ commit/push/PR
+
+##### REVIEW-FIX ROUND A2 (2026-10-27) — 2 findings ก่อน pre-commit review (verified)
+
+- **F1 rebind loss — root cause**: `exportCanonical` drop `draft.raw` (comment เดิมสันนิษฐาน raw ไม่ใช่ canonical), `importCanonicalDraft` ไม่ restore `raw`, `exportRawSource.sanitize()` collapse `BINDING_KEYS`/id keys → `{redacted_count}` → export→reimport แล้ว `source_ref` ชี้ค่าที่ไม่มี = "lossless" เท็จ
+- **F1 แก้**: `exportCanonical` embed `workflow.raw` (provenance — executable config ยังไม่มี external ids; ids อยู่ใน raw layer เท่านั้น) · `importCanonicalDraft` restore `raw` → ทุก binding `source_ref` resolve ได้หลัง round-trip · `exportRawSource` ใช้ `provenanceSnapshot` (mask owner เดียวกับ import — ลบ `sanitize`/`ID_KEY`/`URL_KEY` ซ้ำ) — external id values เก็บไว้ (คือ rebind data), credentials masked, `nodeText`/`domNodeCount` drop · UI label → "provenance — credentials masked"
+- **F2 randomizer handle — root cause**: `expectedHandleFor` ไม่มี case `paths[i].nextStepId` → ตก default (null) ทั้งที่ source edge ใช้ `randomizer-path-i` → same-target/wrong-handle ถูกนับ resolved พร้อม warning เทียม
+- **F2 แก้**: `expectedHandleFor` += `(?:^|\.)paths\[(\d+)\]\.nextStepId$` → `randomizer-path-i` · `StepRefReport` += `mismatched` — target ถูกแต่ handle ขัด = mismatched + explicit warning (ไม่นับ resolved เงียบ ๆ) · synthesized edge ใช้ expected handle เดิม
+- **RED→GREEN**: RED 7 fail (randomizer warnings/synth handle/mismatch + reimport raw missing) → synthetic **152/152** · census **174/174** (step refs corpus: 225 resolved / 23 synthesized / 7 provenance / **0 mismatched** — randomizer flow เดิม 2 false warnings → 0; bindings rebindable **119/119** ผ่าน source_ref→raw) · phase1 **69/69** · phase6 **69/69** · `tsc --noEmit` clean · `git diff --check` clean
+- **complexity delta**: helper -1 (ลบ `sanitize` ซ้ำ ใช้ `provenanceSnapshot` เดียว) · regex -2 (ลบ `ID_KEY`/`URL_KEY` — `REDACT_VALUE` เดียวพอ) +1 field match (`paths[...]` ใน expectedHandleFor — edge-vocab ไม่ใช่ semantic text) · `StepRefReport` +1 count field · decision owner +0
+- **manifests**: workflow worktree unchanged branch/HEAD `20f9e69` · Phase 10B dirty 51 files เดิมไม่แตะ · imported drafts ยัง `enabled:false`/draft — engine runtime ไม่เปลี่ยน · ยังไม่ commit
+
+###### REVIEW-FIX ROUND A3 (2026-10-27) — mismatched handle ไม่ fail-closed (verified)
+
+- **root cause**: `mismatched` นับแล้วแต่ไม่เข้า fail-closed — `preview.ok`/`capability.ok` เช็คเฉพาะ `unresolvedStepRefs`
+- **แก้ (importer owner เดิม)**: เพิ่ม `mismatchedStepRefs` คู่ `unresolvedStepRefs` → per-ref `capability.errors` (`node zn_*: field_path …`, ไม่มี external ids) + `capability.ok=false` + `preview.ok` รวม mismatched; report expose `mismatchedStepRefs`; UI แสดง "handle mismatch (blocks publish)"
+- **RED→GREEN**: RED 4 fail (preview ok=true ทั้งที่ mismatch + ไม่มี error entry) → synthetic **161/161** · census **183/183** · phase1+phase6 **69/69 ต่อชุด** · `tsc --noEmit`/`git diff --check` clean · corpus mismatched=0 (source edges ตรง handle ทั้งหมด)
+- **complexity delta**: helper +0 · guard +0 (ใช้ fail-closed path เดิมของ dangling refs) · regex/keyword +0 · decision owner +0 · report +1 field (`mismatchedStepRefs`)
+- **note**: `publishReadiness.canPublish` ยัง false เสมอใน foundation round (FOUNDATION_GATES) — mismatch error เป็น layer เพิ่มใน capability.errors ไม่ใช่ gate ใหม่
+- **Phase 10B**: dirty 51 files เดิม ไม่แตะ · ยังไม่ commit
+
+###### WORKFLOW FOUNDATION — commit closeout (2026-10-27)
+
+- **Commit 1**: `1fed111` `feat: add Zaapi workflow import foundation` — 7 ไฟล์ workflow เท่านั้น; active log ไม่อยู่ใน commit นี้
+- **ยืนยันใหม่ก่อน commit**: synthetic 161/161 · Zaapi corpus 183/183 · workflow Phase 1 69/69 · Phase 6 69/69 · `tsc --noEmit` ผ่าน · `git diff --cached --check` ผ่าน; staged diff scan ไม่พบ key/URI/path ลับ
+- **ขอบเขต**: registry/import/export/preview UI เท่านั้น; imported drafts ยังคงปิด save/publish, ไม่เพิ่ม Zaapi runtime executor หรือ per-node execution checkpoint
+- **แยก worktree**: Phase 10B บน `feature-phase3-aswer-quality` @ `20f9e69` ยังคง dirty 51 ไฟล์โดยไม่เปลี่ยน; path ที่ทับกันมีเพียง active log และจะตรวจตอนรวม branch ภายหลัง
+- **ถัดไป**: commit active log แยก; ยังไม่ push/PR/merge/deploy/Mongo/provider
 ### 🔧 PHASE 10B — live-canary correction: QA snapshot propagation + Test Chat failure boundaries (✅ corrected + verified GREEN · committed)
 
 - **วิธีแก้ (ตาม plan — root cause เท่านั้น):**
