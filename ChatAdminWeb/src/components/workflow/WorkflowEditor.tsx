@@ -15,7 +15,15 @@ import { Button } from "@/components/ui/Button";
 import { toast } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import { nodeTypes, toXYFlowType, NODE_TYPE_META, SUBTYPE_META, type FlowNodeType } from "./nodes";
-import { Plus, Settings2, X, Save, Trash2, ArrowLeft } from "lucide-react";
+import { Plus, Settings2, X, Save, Trash2, ArrowLeft, Upload, Download, CheckCircle2, AlertTriangle } from "lucide-react";
+import {
+  WORKFLOW_PLATFORMS, listByFamily, getNodeDef, nodeAvailabilityFor,
+  availabilityBadge, validateCanonicalDraft, publishReadiness,
+  type WorkflowPlatform, type NodeFamily,
+} from "@/lib/workflow/nodeRegistry";
+import { parseZaapiImportInputs, type CanonicalDraft, type ImportPreviewReport, type BindingRequirement } from "@/lib/workflow/zaapiImport";
+import { exportCanonical, exportZaapi, exportRawSource } from "@/lib/workflow/workflowExport";
+import { validateWorkflowGraph, type WorkflowNode } from "@/lib/workflow/graph";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -69,19 +77,13 @@ const defaultSettings: FlowSettings = {
   status: "draft",
 };
 
-// palette: type → subtypes ที่มี
-const PALETTE: { type: FlowNodeType; subtypes: string[] }[] = [
-  { type: "trigger", subtypes: ["message_received"] },
-  {
-    type: "condition",
-    subtypes: ["message_content", "conversation_status", "business_hours", "new_vs_returning", "assignee"],
-  },
-  {
-    type: "action",
-    subtypes: ["send_message", "let_ai_respond", "assign_ticket", "add_label", "close_ticket", "add_note", "send_http", "jump_to"],
-  },
-  { type: "wait", subtypes: ["wait_for_reply"] },
-];
+// ⚡ palette/validation/import/export ทั้งหมดอ่านจาก canonical node registry
+//    (src/lib/workflow/nodeRegistry.ts) — registry เดียวเป็น metadata owner
+const FAMILY_ORDER: NodeFamily[] = ["trigger", "condition", "action", "utility"];
+const PALETTE: { type: FlowNodeType; subtypes: string[] }[] = FAMILY_ORDER.map((f) => ({
+  type: (f === "utility" ? "wait" : f) as FlowNodeType,
+  subtypes: listByFamily(f).map((d) => d.type),
+}));
 
 let idCounter = 1;
 function genNodeId(): string {
@@ -346,7 +348,113 @@ function EditorInner({ workflowId }: { workflowId: string }) {
   const [paletteOpen, setPaletteOpen] = useState(true);
   const [settingsPanelOpen, setSettingsPanelOpen] = useState(false);
 
+  // ── Foundation: registry-driven import/export/validate state ──
+  const [importedDraft, setImportedDraft] = useState<CanonicalDraft | null>(null);
+  const [importReport, setImportReport] = useState<ImportPreviewReport | null>(null);
+  const [importBindings, setImportBindings] = useState<BindingRequirement[]>([]);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFlowsText, setImportFlowsText] = useState("");
+  const [importIndexText, setImportIndexText] = useState("");
+  const [importFlowsFileName, setImportFlowsFileName] = useState("");
+  const [importIndexFileName, setImportIndexFileName] = useState("");
+  const [importBatch, setImportBatch] = useState<ImportPreviewReport[]>([]);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [paletteSearch, setPaletteSearch] = useState("");
+  const [platformFilter, setPlatformFilter] = useState<WorkflowPlatform | "">("");
+  const [lastValidation, setLastValidation] = useState<{
+    structural: { ok: boolean; errors: string[] };
+    capability: ReturnType<typeof validateCanonicalDraft>;
+  } | null>(null);
+
+  /** canvas → canonical draft shape (pure — no persistence) */
+  const canvasToDraft = useCallback((): CanonicalDraft => ({
+    name: settings.name || "untitled",
+    source: importedDraft ? "zaapi" : "local",
+    status: "draft",
+    enabled: false,
+    platforms: settings.platforms as WorkflowPlatform[],
+    nodes: nodes.map((n) => ({
+      node_id: n.id,
+      type: (n.type || "wf_action").replace("wf_", "") as WorkflowNode["type"],
+      subtype: String(n.data.subtype || ""),
+      config: n.data.config || {},
+      position: n.position,
+    })),
+    edges: edges.map((e) => ({
+      edge_id: e.id,
+      source_node_id: e.source,
+      target_node_id: e.target,
+      ...(e.sourceHandle && e.sourceHandle !== "out" ? { branch: e.sourceHandle } : {}),
+    })),
+    handleLabels: importedDraft?.handleLabels || {},
+    bindings: importBindings,
+    sourceRef: importedDraft?.sourceRef || { workflowId: "", loadedVersionId: "", versionStatuses: [], sourceStatus: "", fingerprint: "" },
+    raw: importedDraft?.raw,
+  }), [settings, nodes, edges, importedDraft, importBindings]);
+
+  const runValidate = useCallback(() => {
+    const d = canvasToDraft();
+    const structural = validateWorkflowGraph({ nodes: d.nodes, edges: d.edges });
+    const capability = validateCanonicalDraft(d.nodes, d.edges, d.platforms, d.bindings);
+    setLastValidation({ structural, capability });
+    if (structural.ok && capability.ok) toast.success("graph ผ่าน validation");
+    else toast.error([...structural.errors, ...capability.errors].join(" · ") || "validation failed");
+  }, [canvasToDraft]);
+
+  const doImport = useCallback(() => {
+    if (!importFlowsText.trim()) { toast.error("เลือกไฟล์ flows JSON ก่อน (all-flows.json หรือ flow file)"); return; }
+    try {
+      const { batch } = parseZaapiImportInputs(importFlowsText, importIndexText || undefined);
+      setImportBatch(batch.reports);
+      const nameIssues = batch.reports.filter((r) => r.nameStatus !== "ok" && r.nameStatus !== "provided").length;
+      toast.success(`import preview: ${batch.flowCount} flows / ${batch.nodeCount} nodes / ${batch.edgeCount} edges${nameIssues ? ` — ${nameIssues} flow(s) ไม่มีชื่อจริง` : ""}`);
+    } catch (err) {
+      toast.error(`import ไม่สำเร็จ: ${(err as Error).message}`);
+    }
+  }, [importFlowsText, importIndexText]);
+
+  /** โหลด draft จาก import report ลง canvas — draft-only, ไม่เขียน Mongo */
+  const loadReportToCanvas = useCallback((report: ImportPreviewReport) => {
+    setImportedDraft(report.draft);
+    setImportReport(report);
+    setImportBindings(report.bindings);
+    setSettings((s) => ({ ...s, name: report.name, status: "draft", enabled: false }));
+    setNodes(report.draft.nodes.map((n) => ({
+      id: n.node_id,
+      type: toXYFlowType(n.type as FlowNodeType),
+      position: n.position,
+      data: {
+        subtype: n.subtype, config: n.config || {},
+        importMeta: { source: "zaapi", handleLabels: report.draft.handleLabels[n.node_id] || {} },
+      },
+    })));
+    setEdges(report.draft.edges.map((e) => ({
+      id: e.edge_id, source: e.source_node_id, target: e.target_node_id,
+      sourceHandle: e.branch || "out",
+      ...(e.branch ? { label: report.draft.handleLabels[e.source_node_id]?.[e.branch] || e.branch } : {}),
+      markerEnd: { type: MarkerType.ArrowClosed },
+    })));
+    setImportOpen(false);
+    setWfVersion((v) => v + 1);
+    toast.success(`โหลด draft "${report.name}" (${report.nodeCount} nodes) — source zaapi, bindings ยังไม่ resolve`);
+  }, [setNodes, setEdges]);
+
+  const doExport = useCallback((kind: "canonical" | "zaapi" | "raw") => {
+    const d = canvasToDraft();
+    const pkg = kind === "canonical" ? exportCanonical(d) : kind === "raw" ? exportRawSource(d) : exportZaapi(d);
+    const blob = new Blob([JSON.stringify(pkg, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${d.name || "workflow"}.${kind}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setExportOpen(false);
+  }, [canvasToDraft]);
+
   const dirty = wfVersion !== 0;
+  // imported zaapi draft → bindings unresolved + persistence อยู่นอก scope รอบนี้ → save/publish disabled
+  const saveBlocked = !!importedDraft || !settings.name.trim() || saving;
+  const saveBlockReason = importedDraft ? "imported draft — bindings ยังไม่ resolve และ persistence ไม่อยู่ใน scope รอบนี้" : !settings.name.trim() ? "ตั้งชื่อ workflow ก่อน" : "";
 
   // ⚡ กันออกจากหน้าโดยไม่บันทึก — 2 ชั้น:
   //   1) beforeunload = ปิดแท็บ/refresh (browser chrome — แก้ UI ไม่ได้ เป็นของ browser)
@@ -458,7 +566,48 @@ function EditorInner({ workflowId }: { workflowId: string }) {
           <Settings2 size={14} />
           <span>Settings</span>
         </button>
+        <button
+          onClick={runValidate}
+          className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border bg-surface text-text-muted border-border hover:text-text transition-colors"
+          title="ตรวจ graph + capability (pure — ไม่แตะ server)"
+        >
+          <CheckCircle2 size={14} />
+          <span>Validate</span>
+        </button>
+        <button
+          onClick={() => setImportOpen(true)}
+          className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border bg-surface text-text-muted border-border hover:text-text transition-colors"
+          title="Zaapi workflow import preview (dry-run — ไม่เขียน DB)"
+        >
+          <Upload size={14} />
+          <span>Import</span>
+        </button>
+        <div className="relative">
+          <button
+            onClick={() => setExportOpen(!exportOpen)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border bg-surface text-text-muted border-border hover:text-text transition-colors"
+            title="Export canonical / zaapi-compatible JSON"
+            aria-haspopup="menu" aria-expanded={exportOpen}
+          >
+            <Download size={14} />
+            <span>Export</span>
+          </button>
+          {exportOpen && (
+            <div role="menu" className="absolute left-0 top-full mt-1 z-50 bg-surface border border-border rounded-lg shadow-lg py-1 min-w-44">
+              <button role="menuitem" onClick={() => doExport("canonical")} className="w-full text-left px-3 py-2 text-xs hover:bg-surface-2">Canonical package (lossless)</button>
+              {importedDraft?.raw != null && (
+                <button role="menuitem" onClick={() => doExport("raw")} className="w-full text-left px-3 py-2 text-xs hover:bg-surface-2">Raw source (provenance — credentials masked)</button>
+              )}
+              <button role="menuitem" onClick={() => doExport("zaapi")} className="w-full text-left px-3 py-2 text-xs hover:bg-surface-2">Zaapi-compatible projection</button>
+            </div>
+          )}
+        </div>
         <div className="flex-1" />
+        {importedDraft && (
+          <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-full bg-brand/10 text-brand whitespace-nowrap" title="draft จาก zaapi import — save/publish ปิดจนกว่า bindings จะ resolve">
+            ● imported draft
+          </span>
+        )}
         {dirty ? (
           <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-full bg-warning/10 text-warning whitespace-nowrap" title="มีการแก้ไขยังไม่ได้บันทึก">
             ● ยังไม่บันทึก
@@ -469,9 +618,17 @@ function EditorInner({ workflowId }: { workflowId: string }) {
           </span>
         ) : null}
         <button
+          disabled
+          title={publishReadiness({ ok: true, errors: [], unsupportedNodes: [], blockedNodes: [], unresolvedBindings: [] }).reason}
+          className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-semibold rounded-lg bg-surface-2 text-text-muted opacity-50 cursor-not-allowed"
+        >
+          <AlertTriangle size={14} />
+          <span className="hidden sm:inline">Publish</span>
+        </button>
+        <button
           onClick={save}
-          disabled={saving || !settings.name.trim()}
-          title="บันทึก workflow"
+          disabled={saveBlocked}
+          title={saveBlockReason || "บันทึก workflow"}
           className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-semibold rounded-lg bg-brand text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
         >
           <Save size={14} />
@@ -508,29 +665,63 @@ function EditorInner({ workflowId }: { workflowId: string }) {
               lg:relative lg:static
               fixed inset-y-0 left-0 z-40 shadow-xl lg:shadow-none
             `}>
-              <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center justify-between mb-2">
                 <div className="text-xs font-bold text-text">เพิ่ม Node</div>
                 <button onClick={() => setPaletteOpen(false)} className="lg:hidden w-9 h-9 rounded-lg hover:bg-surface-2 flex items-center justify-center" aria-label="ปิดเมนู Node" title="ปิด">
                   <X size={16} className="text-text-muted" />
                 </button>
               </div>
+              <input
+                value={paletteSearch}
+                onChange={(e) => setPaletteSearch(e.target.value)}
+                placeholder="ค้นหา node…"
+                aria-label="ค้นหา node"
+                className="w-full mb-2 text-xs px-2 py-1.5 rounded-md border border-border bg-surface text-text focus:outline-none focus:ring-1 focus:ring-brand/30"
+              />
+              <select
+                value={platformFilter}
+                onChange={(e) => setPlatformFilter(e.target.value as WorkflowPlatform | "")}
+                aria-label="กรองตาม platform"
+                className="w-full mb-3 text-xs px-2 py-1.5 rounded-md border border-border bg-surface text-text"
+              >
+                <option value="">ทุก platform</option>
+                {WORKFLOW_PLATFORMS.map((p) => (
+                  <option key={p} value={p}>{p}</option>
+                ))}
+              </select>
               {PALETTE.map((group) => {
                 const meta = NODE_TYPE_META[group.type];
+                const items = group.subtypes
+                  .map((sub) => getNodeDef(sub)!)
+                  .filter((d) => {
+                    if (paletteSearch && !(d.label + " " + d.type).toLowerCase().includes(paletteSearch.toLowerCase())) return false;
+                    return true;
+                  });
+                if (items.length === 0) return null;
                 return (
                   <div key={group.type} className="mb-3">
                     <div className="text-[10px] font-bold mb-1.5" style={{ color: meta.color }}>
                       {meta.icon} {meta.label}
                     </div>
-                    {group.subtypes.map((sub) => (
-                      <button
-                        key={sub}
-                        onClick={() => { addNode(group.type, sub); if (window.innerWidth < 1024) setPaletteOpen(false); }}
-                        className="w-full text-left px-2 py-1.5 mb-1 text-xs rounded-md border hover:bg-surface-2 transition-colors flex items-center gap-1.5"
-                        style={{ borderColor: meta.border, backgroundColor: meta.bg }}
-                      >
-                        {SUBTYPE_META[sub]?.icon} {SUBTYPE_META[sub]?.label || sub}
-                      </button>
-                    ))}
+                    {items.map((d) => {
+                      const av = platformFilter ? nodeAvailabilityFor(d, platformFilter) : { state: d.availability };
+                      const usable = av.state === "supported";
+                      return (
+                        <button
+                          key={d.type}
+                          disabled={!usable}
+                          onClick={() => { addNode(group.type, d.type); if (window.innerWidth < 1024) setPaletteOpen(false); }}
+                          title={av.state === "supported" ? d.description : `${availabilityBadge(av.state)} — ${av.reason || ""}`}
+                          className="w-full text-left px-2 py-1.5 mb-1 text-xs rounded-md border transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-surface-2"
+                          style={{ borderColor: meta.border, backgroundColor: meta.bg }}
+                        >
+                          {SUBTYPE_META[d.type]?.icon} <span className="flex-1 min-w-0 truncate">{d.label}</span>
+                          <span className={`shrink-0 text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${av.state === "supported" ? "bg-success/10 text-success" : av.state === "requires_adapter" ? "bg-warning/10 text-warning" : "bg-error/10 text-error"}`}>
+                            {availabilityBadge(av.state)}
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
                 );
               })}
@@ -579,12 +770,87 @@ function EditorInner({ workflowId }: { workflowId: string }) {
                   onUpdateConfig={updateSelectedConfig}
                   onUpdateSubtype={updateSelectedSubtype}
                   onDelete={deleteSelected}
+                  bindings={importBindings.filter((b) => b.node_id === selectedNode.id)}
+                  validation={lastValidation}
                 />
               ) : (
                 <FlowSettingsPanel settings={settings} setSettings={(s) => { setSettings(s); setWfVersion((v) => v + 1); }} shops={shops} />
               )}
             </div>
           </>
+        )}
+
+        {/* ── Import preview modal — dry-run zaapi JSON (ไม่เขียน DB) ── */}
+        {importOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div className="bg-surface border border-border rounded-xl shadow-xl w-full max-w-xl max-h-[85vh] overflow-y-auto p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div className="text-sm font-bold">Zaapi Import Preview (dry-run)</div>
+                <button onClick={() => { setImportOpen(false); setImportBatch([]); }} aria-label="ปิด import preview" title="ปิด" className="w-8 h-8 rounded-lg hover:bg-surface-2 flex items-center justify-center">
+                  <X size={16} className="text-text-muted" />
+                </button>
+              </div>
+              <div className="text-[11px] text-text-muted mb-2">
+                เลือก 2 ไฟล์: <b>all-flows.json</b> (หรือ flow file เดียว) + <b>_index_data.json</b> (ชื่อ flow จริง — ไม่ส่ง = ชื่อ generic + warning)
+              </div>
+              <label className="block text-[11px] font-semibold text-text-muted mb-1">flows JSON</label>
+              <input
+                type="file" accept=".json,application/json" aria-label="flows JSON file"
+                onChange={async (e) => {
+                  const f = e.target.files?.[0];
+                  if (f) { setImportFlowsText(await f.text()); setImportFlowsFileName(f.name); }
+                }}
+                className="w-full text-xs mb-2"
+              />
+              {importFlowsFileName && <div className="text-[10px] text-text-subtle mb-1">เลือกแล้ว: {importFlowsFileName}</div>}
+              <label className="block text-[11px] font-semibold text-text-muted mb-1">index JSON (optional — ชื่อ flow จาก _index_data.json)</label>
+              <input
+                type="file" accept=".json,application/json" aria-label="index JSON file"
+                onChange={async (e) => {
+                  const f = e.target.files?.[0];
+                  if (f) { setImportIndexText(await f.text()); setImportIndexFileName(f.name); }
+                }}
+                className="w-full text-xs"
+              />
+              {importIndexFileName && <div className="text-[10px] text-text-subtle mt-1">เลือกแล้ว: {importIndexFileName}</div>}
+              <button onClick={doImport} className="mt-2 px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand text-white hover:opacity-90">
+                Preview import
+              </button>
+              {importBatch.length > 0 && (
+                <div className="mt-3 border border-border rounded-lg divide-y divide-border">
+                  {importBatch.map((r) => (
+                    <div key={r.flowKeyHash} className="p-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-xs font-semibold truncate">{r.name}</div>
+                        <button onClick={() => loadReportToCanvas(r)} className="shrink-0 px-2 py-1 text-[11px] font-medium rounded-md border border-border hover:bg-surface-2">
+                          โหลดลง canvas
+                        </button>
+                      </div>
+                      <div className="text-[10px] text-text-muted mt-1">
+                        {r.nodeCount} nodes · {r.edgeCount} edges · {r.bindings.length} bindings ·{" "}
+                        {r.unsupportedTypes.length > 0 ? `${r.unsupportedTypes.length} unsupported` : "types ครบ"} ·{" "}
+                        {r.structural.ok ? "graph ok" : `graph error: ${r.structural.errors[0] || ""}`}
+                        {r.stepRefs.synthesized > 0 && ` · ${r.stepRefs.synthesized} jump edges synthesized`}
+                        {r.unresolvedStepRefs.length > 0 && ` · ${r.unresolvedStepRefs.length} dangling step refs (blocks publish)`}
+                        {r.stepRefs.mismatched > 0 && ` · ${r.stepRefs.mismatched} handle mismatch (blocks publish)`}
+                      </div>
+                      {r.nameStatus !== "ok" && r.nameStatus !== "provided" && (
+                        <div className="text-[10px] text-warning mt-0.5">⚠ {r.warnings.find((w) => /index|name/i.test(w)) || `name ${r.nameStatus}`}</div>
+                      )}
+                      {r.conflicts.length > 0 && (
+                        <div className="text-[10px] text-warning mt-0.5">{r.conflicts.length} conflict(s)</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {importReport && (
+                <div className="mt-3 text-[11px] text-text-muted">
+                  โหลดแล้ว: {importReport.name} — fingerprint {importReport.fingerprint.slice(0, 20)}…
+                </div>
+              )}
+            </div>
+          </div>
         )}
       </div>
     </div>
@@ -594,18 +860,25 @@ function EditorInner({ workflowId }: { workflowId: string }) {
 // ─── Node config panel — dynamic fields ตาม subtype ──
 
 function NodeConfigPanel({
-  node, allNodes, onUpdateConfig, onUpdateSubtype, onDelete,
+  node, allNodes, onUpdateConfig, onUpdateSubtype, onDelete, bindings = [], validation = null,
 }: {
   node: Node<WFNodeData>;
   allNodes: Node<WFNodeData>[];
   onUpdateConfig: (key: string, value: unknown) => void;
   onUpdateSubtype: (subtype: string) => void;
   onDelete: () => void;
+  bindings?: BindingRequirement[];
+  validation?: { structural: { ok: boolean; errors: string[] }; capability: ReturnType<typeof validateCanonicalDraft> } | null;
 }) {
   const cfg = node.data.config || {};
   const subtype = node.data.subtype;
   const type = (node.type || "").replace("wf_", "") as FlowNodeType;
   const subtypesOfSameType = PALETTE.find((p) => p.type === type)?.subtypes || [];
+  const regDef = getNodeDef(subtype);
+  const importMeta = node.data.importMeta as { source?: string; handleLabels?: Record<string, string> } | undefined;
+  const nodeIssues = validation
+    ? [...validation.capability.unsupportedNodes, ...validation.capability.blockedNodes].filter((i) => i.node_id === node.id)
+    : [];
 
   const inputStyle: React.CSSProperties = {
     width: "100%", padding: "6px 10px", borderRadius: 8, border: "1px solid var(--color-border)",
@@ -631,6 +904,33 @@ function NodeConfigPanel({
           ))}
         </select>
       </div>
+
+      {/* ── Registry metadata — type/version/family/availability/executor ── */}
+      {regDef && (
+        <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--color-border)", borderRadius: 8, fontSize: 11, lineHeight: 1.6, opacity: 0.85 }}>
+          <div><b>{regDef.label}</b> <span style={{ opacity: 0.6 }}>v{regDef.version} · {regDef.family}</span></div>
+          <div>availability: <b>{availabilityBadge(regDef.availability)}</b>{regDef.availability !== "supported" ? " — publish จะถูก block" : ""}</div>
+          <div>executor: {regDef.runtimeExecutor || "ไม่มี (requires adapter)"}</div>
+          {nodeIssues.map((i) => (
+            <div key={i.reason} style={{ color: "var(--color-error)" }}>⚠ {i.reason}</div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Imported source metadata (read-only) + unresolved bindings ── */}
+      {importMeta?.source === "zaapi" && (
+        <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--color-brand)", borderRadius: 8, fontSize: 11, lineHeight: 1.6 }}>
+          <div style={{ fontWeight: 700 }}>source: zaapi (read-only)</div>
+          {importMeta.handleLabels && Object.keys(importMeta.handleLabels).length > 0 && (
+            <div>handles: {Object.entries(importMeta.handleLabels).map(([h, l]) => `${h}=${l}`).join(" · ")}</div>
+          )}
+          {bindings.length > 0 && (
+            <div style={{ color: "var(--color-warning)" }}>
+              unresolved bindings: {bindings.map((b) => `${b.kind}×${b.count} @ ${b.field_path}`).join(", ")}
+            </div>
+          )}
+        </div>
+      )}
 
       {subtype === "message_received" && (
         <div style={fieldGap}>
