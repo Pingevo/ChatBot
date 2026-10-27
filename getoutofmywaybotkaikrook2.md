@@ -7060,3 +7060,303 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
 - Next step requires a **new Dev Worker session** to execute R1 task-by-task with
   TDD. R1 implementation has not started.
 - No push/PR/merge/deploy/runtime activation.
+
+### กำลังจะทำ — R1 TASK 1: `saveBindingResolutionBatch` direct-resolution contract (implementation session)
+
+- **baseline (verified this session)**: worktree
+  `ChatBotProductMS-worktrees/zaapi-workflow-foundation` · branch
+  `codex/zaapi-workflow-foundation` @ `09d4d29` (`docs: record workflow R1
+  planning closeout`) · tree clean · staging empty · chain
+  `09d4d29 → 193120d → 65f88b0` verified · spec + R1 plan committed.
+- **baseline test counts (fresh runs)**: `test-workflow-persistence.ts`
+  **210/210** · `test-workflow-foundation.ts` **161/161** non-corpus
+  (ZAAPI_EXPORT_DIR census = separate opt-in, ไม่รันใน Task 1).
+- **Task 1 scope (ตาม plan §11 เท่านั้น)**: types
+  (`BindingResolutionRequest`/`BindingResolutionResult`/`BindingResolutionView`/
+  `ResolutionMapping`) + `WorkflowBindingDoc.resolution` + `createHash` import +
+  `saveBindingResolutionBatch` ใน `workflowService.ts` (steps 1–4 + 6–12 ตาม
+  plan §6 — strict-shape → load workflow → import provenance → CAS pre-checks →
+  load bindings → bounds/dup → typed switch per kind → complete coverage →
+  `repeat:true` fail-closed `unsupported` → inline SHA-256 → deterministic
+  artifacts → derived scope → single pointer+scope CAS → post-commit audit) +
+  `workflow.binding_resolve` ใน `adminLogService.ts` +
+  `scripts/test-workflow-binding-resolution.ts` ใหม่ (RED→GREEN).
+- **ไม่ทำใน Task 1**: repeat expansion (Task 2) · `account_scope` blocker /
+  fail-closed scope semantics (Task 3) · carry-forward `requirement_fp` gate
+  (Task 4) · overlap readiness (Task 5) · scope ownership/`invalid_bindings`
+  (Task 6) · `getBindingResolutionView` + API route (Task 7) · UI (Task 8) ·
+  acceptance matrix/docs (Task 9) · production index DDL · activation.
+- **runtime files expected to change**: `src/backend/service/workflowService.ts`
+  · `src/backend/service/adminLogService.ts` · new
+  `scripts/test-workflow-binding-resolution.ts` · mocks/hooks เฉพาะถ้าจำเป็น
+  สำหรับ failure injection · log นี้.
+- **complexity budget (plan §10)**: public methods +1 เท่านั้นใน Task 1
+  (`getBindingResolutionView` = Task 7) · private helpers +0 · guards +0 ·
+  nested functions +0 · collections/indexes +0 · workers +0 · regexes +0 ·
+  dependencies +0 · activation paths +0.
+- **Phase 10B isolation**: `/Users/itdev4/Documents/GitHub/ChatBotProductMS`
+  observed read-only — branch `feature-phase3-aswer-quality` @ `fd4e682`, 3
+  dirty paths (SRS_SSD.md, master-plan, waythrough2) — ไม่แตะ ไม่ stage/commit/
+  stash/copy ข้าม worktree.
+- **stop gate**: Task 1 เท่านั้น · ห้าม stage/commit · หยุดที่ pre-commit
+  review gate · verdict ต้องการ evidence จริง (RED→GREEN + regression +
+  tsc + diff --check).
+
+#### Task-1 closeout (RED→GREEN verified — NOT staged/committed)
+
+- **RED evidence (pre-implementation run)**:
+  `test-workflow-binding-resolution.ts` → **130 passed / 104 failed** —
+  owner `saveBindingResolutionBatch` absent (`typeof !== "function"` ❌) ·
+  ทุก typed-reject case = `undefined` ❌ · happy-path artifacts ไม่ถูกสร้าง
+  ❌ · crash cases inert ❌ — zero-writes/immutability pins ✅ (ผ่านเพราะ
+  ไม่มี owner เขียนอะไรเลย) · contract-unreachable probe ✅ (CAS เดิม
+  resolve bindings ไม่ได้ — carried ยัง `unresolved`, ไม่มี
+  `workflow.binding_resolve` event บน surface ใดๆ).
+- **Root contract implemented** (`workflowService.ts` +388 บรรทัด,
+  method เดียว ~290): strict-shape inline + forbidden-key deep-scan →
+  load workflow → import provenance → `expected_version`/`version_id`
+  conflict pre-checks → server-owned bindings `{workflow_id, version_id}`
+  → bounds/coverage/duplicates → typed switch เดียว (account=shops ·
+  label=`conversations.distinct("labels").flat()` · user=admins
+  active !== false · team/ticket_field/url=unresolvable ·
+  default=unresolvable · scope fields เฉพาะ account) → complete coverage
+  → `repeat:true` fail-closed `"unsupported: repeat expansion..."` →
+  source_fp = `createHash("sha256").update(canonicalJson(v)).digest("hex")`
+  inline → fp = `stableFingerprint({...versionPayload, resolution})` →
+  seq-bump/orphan-resume loop เดียวกับ `saveWorkflowDraft` → immutable
+  version doc + version-scoped bindings (E11000-tolerant inserts =
+  idempotent ทั้ง retry/concurrent) → derived platforms/shop_ids inline →
+  **commit = `workflows.updateOne` เดียว**
+  `{current_version_id, version:seq, enabled:false, status:"draft",
+  platforms, shop_ids, updated_at, updated_by}` → audit
+  `workflow.binding_resolve` หลัง CAS สำเร็จเท่านั้น.
+- **GREEN counts (fresh)**: binding-resolution **240/240** · persistence
+  **210/210** (baseline คง) · foundation non-corpus **161/161** (baseline
+  คง) · `tsc --noEmit` clean · repo-root `git diff --check` clean.
+- **Failure/recovery verified**: crash @first-binding insert → throw +
+  pointer/scope byte-identical + orphan version + retry reuses
+  deterministic `version_id` (zero dup) · crash mid-bindings → partial
+  orphans + retry เติมครบ 6/6 zero-dup-id · crash @commit CAS →
+  artifacts ครบ + pointer เดิม + retry idempotent · concurrent-writer
+  flip (hook bump version) → `matchedCount=0` → typed `conflict` +
+  orphan version อยู่แต่ **ไม่เป็น current** + scope เดิม · concurrent
+  identical `expected_version` → winner เดียว + loser `conflict` +
+  pointer = winner doc · ทุก rejection/failure → zero success audit;
+  audit emitted หลัง commit เท่านั้น (probe: events==baseline ณ CAS time).
+- **Complexity delta**: public methods +1 (`saveBindingResolutionBatch`)
+  · private helpers +0 · standalone guards +0 · nested functions +0 ·
+  decision owners +0 (single switch site) · collections +0 · indexes +0
+  (`mongoClient.ts` diff 0) · workers/timers/queues +0 · regexes +0 ·
+  dependencies +0 (`node:crypto` builtin + `canonicalJson` export เดิม)
+  · activation paths +0 (`workflowEngine.ts`/`src/app`/`src/components`
+  diff = 0 bytes, `FOUNDATION_GATES` คง) · หมายเหตุซื่อสัตย์:
+  `forbiddenKeys` = method-local schema literal (required โดย
+  strict-shape contract — ไม่ใช่ module-level decision table).
+- **Harness note**: `test-workflow-persistence-mocks.mjs` +3 collection
+  names (`shops`/`admins`/`conversations`) — required ให้ typed switch
+  resolve ผ่าน mocked `COLLECTIONS` map; fake-mongo `distinct` ไม่
+  flatten array fields → service ใช้ `.flat()` (semantics เดียวกับ real
+  Mongo distinct — zero harness logic change).
+- **Changed files**: `src/backend/service/workflowService.ts` (M, +388)
+  · `src/backend/service/adminLogService.ts` (M, +1 action type) ·
+  `scripts/test-workflow-persistence-mocks.mjs` (M, +4) ·
+  `scripts/test-workflow-binding-resolution.ts` (new, 481 บรรทัด) ·
+  log นี้ — **ไม่มีไฟล์ใดถูก stage หรือ commit**.
+- **Remaining R1 tasks (ยังไม่แตะ)**: Task 2 repeat expansion · Task 3
+  fail-closed derived-account-scope + `account_scope` blocker · Task 4
+  exact carry-forward (`requirement_fp` gate) · Task 5 overlap readiness
+  (`conflict` marker/`overlap_conflicts`) · Task 6 activation/scope
+  ownership + `invalid_bindings` readiness · Task 7 route +
+  `getBindingResolutionView` (type freeze ไว้แล้ว) · Task 8 UI ·
+  Task 9 acceptance/cleanup.
+- **Phase 10B**: ยังคง untouched — ไม่มี write/stage/commit/stash/copy
+  ข้าม worktree ตลอด session.
+- **Git/safety state**: HEAD `09d4d29` + working-tree changes เท่านั้น ·
+  staging empty · ไม่มี push/PR/merge/activation — **พร้อม pre-commit
+  review gate**.
+
+#### Task-1 CORRECTION ROUND — artifact integrity + exact gates (RED→GREEN verified — NOT staged/committed)
+
+- **Review findings accepted (ทุกข้อเป็น defect จริง — ยืนยันจาก source)**:
+  C1 broad `catch E11000→continue` บน version+binding inserts swallow ทุก
+  collision (seq-occupied, corrupt identity, phantom) · H1
+  `findOne(binding_id)→continue` เชื่อ id อย่างเดียว ไม่เทียบ payload + ไม่มี
+  exact-set gate · M1 `p.mappings` order รั่วเข้า `stableFingerprint` →
+  order-variant = semantic duplicate · M2 strict-shape มีแค่ blacklist 9 keys
+  → unknown keys ผ่านเงียบๆ · M3 persisted binding docs เชื่อทั้งหมด ไม่เช็ค
+  invariant · M4 CAS-miss รายงาน `wf.version`/`wf.current_version_id` ที่จับ
+  ก่อน race.
+- **RED evidence (pre-correction run)**: **297 passed / 90 failed** — Race A
+  loser conflict รายงาน stale version ❌ · Race C phantom E11000 →
+  swallow แล้ว commit dangling pointer จริง ❌ · H1 ทั้ง 7 corruption
+  variants + extra + dup + missing → swallow หมด ไม่มี fail-closed ❌ ·
+  M1 fp เปลี่ยนตาม order + mappings เก็บตาม request order ❌ · M2
+  `enabled`/`status`/`extra`/`bogus`/`shopId`/`sourceIndex` + negative
+  version + whitespace + non-union platform → ผ่าน/เขียนจริง ❌ · M3
+  ทุก invariant violation → proceed (count mismatch, stale stored fp, dup
+  stored index, resolved+partial) ❌ · M4 conflict รายงาน stale (1===7
+  case) ❌ · Race B = regression pin (ผ่านก่อนแก้ — seq-bump เดิมทำงานถูก).
+- **Root cause (C1)**: `catch code!==11000 → else continue` ตีความ E11000
+  ว่า "deterministic artifact เดิม" เสมอ — จริงๆ E11000 อาจมาจาก
+  same-version_id, seq-unique ชน payload ต่าง, หรือ artifact corrupt —
+  swallow ทำให้ pointer ชี้ version ที่ไม่มี doc จริงได้ (Race C พิสูจน์).
+- **Corrected algorithm (inline, helper +0)**: ต่อ seq candidate →
+  reread `$or:[{version_id},{workflow_id,version_seq}]` → per-candidate
+  canonical-payload compare (`{...cand, _id:"x", created_at:"x",
+  created_by:"x"}` normalize volatile — `canonicalize` ไม่ drop undefined
+  keys + Date→`{}` จึงต้อง normalize แทน strip) → version_id match+payload
+  เท่ากัน = reuse, mismatch = throw corrupt-identity · seq ต่าง id = seqTaken
+  → bump · ว่าง = insert · E11000 = reread อีกรอบด้วยกฎเดียวกัน →
+  ไม่มี artifact อธิบายได้ = rethrow (fail closed).
+- **Exact binding-set gate (H1)**: build expected docs ก่อน → per-doc
+  `findOne` verify canonical payload (resolution mappings normalize
+  `resolved_by/resolved_at/invalidated_at`→"x" เพราะ retry actor/time เปลี่ยน)
+  → insert+E11000 reread-verify → **post-loop gate**: find scope
+  `{workflow_id, version_id}` → exact id set + multiplicity + payload เทียบ
+  `expectedBindProj` map → ผิด = throw ก่อน CAS เสมอ (corrupt rows เก็บไว้
+  inspect — ไม่ auto-delete).
+- **M1 canonicalization**: `versionBindings` sort key +=
+  `|binding_id` · proposed+carried mappings sort `source_index` ก่อน
+  storage+fp input · `source_values` ไม่ sort (order authoritative) →
+  reversed retry reuse orphan `version_id` เดิม (pin พิสูจน์).
+- **M2 exact shape**: per-level allowlist (top 4 / proposal 3 / mapping 4)
+  + `expected_version >= 0` + string `.trim()` non-empty + platform ∈
+  `LOCAL_ENGINE_PLATFORMS` (union เดียวกับ `Platform` type).
+- **M3 persisted invariants (ก่อน mapping เสมอ, throw fail-closed)**:
+  count = int ≥0, `source_values` array, `len===count`, id fields non-empty,
+  stored mappings: unique int source_index in-bounds + stored source_fp
+  เท่ากับ `sha256(canonicalJson(source_value))` recompute, `resolved` ⇒
+  complete valid coverage.
+- **M4**: CAS `matchedCount===0` → `workflows.findOne` ครั้งเดียว → รายงาน
+  winner จริง + ไม่ auto-retry.
+- **GREEN counts (fresh)**: binding-resolution **389/389** · persistence
+  **210/210** · foundation **161/161** · `tsc --noEmit` clean ·
+  `git diff --check` clean.
+- **Race/concurrency verified**: different-payload race → winner เดียว +
+  loser conflict รายงาน winner จริง (fresh reread) + pointer→real doc +
+  pointed payload = winner request + bindings ทุกตัวชี้ version มีจริง ·
+  seeded seq-collision → bump ผ่าน + real doc ลง + version=landed seq ·
+  phantom E11000 → throw + zero writes + no dangling pointer.
+- **Complexity delta**: public methods +1 (คง — เพียงขยายภายใน method
+  เดิม) · private helpers/guards/nested fns/decision owners/collections/
+  indexes/workers/regexes/deps/activation +0 · method-local schema literals
+  (allowedTop/allowedProposal/allowedMapping/forbiddenKeys) = required
+  contract, ไม่ใช่ module tables.
+- **Changed files (คง manifest เดิม)**: `workflowService.ts` (+498 รวม
+  correction) · `adminLogService.ts` (+1) · mocks (+4) · test file (~800
+  บรรทัด) · log นี้ — **ไม่มี stage/commit**.
+- **Test-harness honesty notes**: M1 ใช้ same-fixture crash-retry (ตัด name
+  confound — fp รวม name) · M3 corrupt-carried cases propose account (team
+  proposal จะ reject ก่อน invariant = dishonest) · dup-row case ปิด
+  uniqueness จน seed+real ลงทั้งคู่ แล้ว restore.
+- **Remaining R1 tasks (ยังไม่แตะ)**: Task 2–9 เหมือนเดิม · `repeat:true`
+  ยังคง fail-closed unsupported · ไม่มี scope blocker/carry-forward redesign/
+  overlap/activation/route/UI/engine.
+- **Git/safety state**: branch `codex/zaapi-workflow-foundation` @ `09d4d29`
+  + working-tree changes เท่านั้น · staging empty · Phase 10B untouched
+  (`fd4e682`, 3 dirty files ของมันเอง) — **พร้อม pre-commit review gate
+  รอบ correction**.
+
+#### Task-1 CORRECTION ROUND 2 — BSON shape + version multiplicity + mapping invariants (plan → RED)
+
+- **frozen state verified**: branch `codex/zaapi-workflow-foundation` @
+  `09d4d29` · manifest เดิม (4M + 1??) · staging empty · `git diff --check`
+  clean · Phase 10B `fd4e682` read-only เท่านั้น.
+- **findings accepted (verified จาก source)**:
+  - **BSON undefined→null (High)**: MongoClient ไม่ set `ignoreUndefined` →
+    `platform:undefined`/`shop_id:undefined` บน label/user mappings serialize
+    เป็น `null` ใน real BSON → reread → canonical compare `null !== undefined`
+    → **retry ใน real Mongo fail-closed เท็จตลอด** (fake preserve undefined →
+    test เดิมมองไม่เห็น) · carried mapping `platform:null` → `!== undefined`
+    → scope-fields check เจ๊ง · แผน: canonical BSON-safe shape — optional
+    fields เขียนเฉพาะเมื่อมีจริง (conditional presence ใน proposed mappings,
+    carried copies, fp input, version description/import_batch_id) + strip
+    undefined ใน carried copies + `delete` แทน `=undefined` · ไม่แตะ
+    MongoClient global · ไม่ loosen compare.
+  - **version_seq multiplicity (High)**: fake enforce unique เฉพาะ
+    `version_id`; production `(workflow_id, version_seq)` เป็น declaration
+    เท่านั้น → 2 docs seq เดียวอยู่ร่วมกับ committed pointer ได้ → แผน:
+    post-artifact scope check — `idOwners===1 && seqOwners===1 && seqOwner
+    .version_id===versionId` ก่อน binding/CAS เสมอ · multiplicity → throw
+    (preserve ทุก row) · **blocker ซื่อสัตย์**: check นี้ไม่แทน atomic unique
+    index — production unique บน `version_id` + `(workflow_id, version_seq)`
+    ต้อง verify ก่อน expose writable binding API (no DDL ในรอบนี้).
+  - **M3 mapping invariants (Medium)**: ตอนนี้เช็คแค่ index/bounds/fp/coverage
+    → เพิ่ม: local_id non-empty · state ∈ {valid,invalid} · via ∈
+    {direct,repeat} · resolved_by non-empty · resolved_at instanceof Date ·
+    account ⇒ platform+shop_id present + platform ∈ union + local_id===shop_id
+    · non-account ⇒ platform/shop_id absent (null=corrupt) · invalidated_at
+    Date / invalid_reason non-empty string เมื่อ present · carried boolean ·
+    status ∈ enum.
+- **RED เพิ่ม (ก่อนแก้)**: §11 BSON round-trip artifacts→retry reuse · §12
+  seq multiplicity seeded + concurrent-barrier (uniqueKeys ปิด + finally
+  restore) + version_id dup · §13 mapping-invariant mutations ×13 (ผ่าน
+  corruptV2 helper — propose account valid เพื่อให้ invariant ตัวเดียวจับ).
+
+- **ROUND 2 ผลจริง (RED→GREEN verified)**:
+  - **RED baseline**: 426 passed / **65 failed** — BSON probe (key dropped
+    ไม่ใช่ null!), retry-after-roundtrip version_id drift, 12a/12b/12c
+    multiplicity committed, M3 ×13 mutations swallowed.
+  - **Root cause จริงลึกกว่ารีพอร์ต**: `canonicalize` render `undefined`
+    literal แต่ **bson@7 DROP undefined-valued keys** (probe: `{a:undefined}`
+    → ไม่มี key เลย) — poison 3 ชั้น: (1) generated docs เขียน
+    `platform:undefined` → real BSON drop → reread ≠ expected projection;
+    (2) **fp ไม่เสถียรข้าม BSON round-trip** — `versionPayload.edges` จาก
+    `curVersion` ที่ผ่าน BSON แล้วขาด `branch` → fp₂≠fp₁ → versionId ใหม่ →
+    semantic duplicate (พิสูจน์: retry คืน `wv_1upklyv` ≠ orphan `wv_13rhvnr`);
+    (3) `_id:undefined`/invalidation `=undefined` เขียน shape เพี้ยน.
+  - **Fix (inline ใน owner เดิม, no helper)**: `versionPayload` strip ผ่าน
+    `JSON.parse(JSON.stringify())` (payload=plain JSON ไม่มี Date → safe);
+    proposed/carried/passthrough mappings conditional field-presence +
+    delete-undefined-key loops (เก็บ Date ไว้ — ไม่ใช้ JSON-strip บน mappings
+    เพราะมี `resolved_at:Date`); `delete w.carried.invalidated_at` แทน
+    `=undefined`; insert conditional `source_ref`/`import_batch_id`; ทุก
+    projection compare = `canonicalJson(JSON.parse(JSON.stringify(norm)))`
+    — field-presence canonical (absent≡undefined) **โดยไม่ loosen เนื้อหา**.
+  - **Multiplicity gate (post-land, ก่อน binding writes)**: re-read
+    `{workflow_id,version_seq}` + `{version_id}` → ต้อง exactly-1 owner
+    แต่ละกุญแจ + เป็น artifact เดียวกันตาม canonical payload — divergence →
+    throw; rows ทั้งหมด preserved · **ไม่ atomic**: app-level check เท่านั้น
+    — production unique index ยังเป็น blocker (บันทึกไว้ด้านล่าง).
+  - **Race A semantics แก้ตาม contract ใหม่**: B start หลัง A ลง version
+    (`onInsert` post-write seam) → B เห็น seq occupancy → bump seq3 → CAS
+    แพ้ → 1 winner + conflict fresh values (deterministic) · forced
+    double-land (12b barrier) → ทั้งคู่ fail-closed → 0 commits = ตาม spec.
+  - **M3 invariants**: เพิ่ม inline ใน persisted block เดิม — status enum;
+    local_id non-empty; state/via enum; resolved_by non-empty;
+    resolved_at/invalidated_at `instanceof Date`; invalid_reason non-empty
+    string เมื่อ present; account ⇒ platform ∈ union + shop_id non-empty +
+    local_id===shop_id; non-account ⇒ scope fields ต้อง absent (`null`≠absent
+    → reject arbitrary null ตาม spec).
+  - **GREEN**: binding-resolution **499/499** · persistence **210/210** ·
+    foundation **161/161** · `tsc --noEmit` clean · `git diff --check` clean.
+  - **Audit**: public methods +1 (`saveBindingResolutionBatch` เท่านั้น —
+    ไม่มี public ใหม่เพิ่ม) · private helpers `_*` +0 · nested fn +0 ·
+    guards/regexes/tables/workers/collections/indexes/deps +0 · no generic
+    ignore-unknown-fields compare (JSON-strip เฉพาะ undefined-valued keys —
+    BSON-semantic equivalence) · ทุก E11000 reread+verify · `repeat:true`
+    reject :976 · engine/app/routes/components 0-byte diff · imported ยัง
+    disabled+draft.
+  - **⚠ PRODUCTION BLOCKER (ค้าง — ห้าม expose/activate writable binding
+    API ก่อนแก้)**: unique indexes บน `workflow_versions.version_id` และ
+    `(workflow_id, version_seq)` ต้อง verified ใน production Mongo —
+    app-level multiplicity gate เป็น detection layer เท่านั้น ไม่ใช่ atomic
+    guarantee (insert 2 รายการที่ seq เดียวกันยังเกิดได้ถ้า index ขาด).
+  - **Git/safety**: branch `codex/zaapi-workflow-foundation` @ `09d4d29` ·
+    staging empty · nothing committed · Phase 10B `fd4e682` untouched.
+    **Verdict: ZAAPI_WORKFLOW_R1_TASK1_BSON_AND_VERSION_MULTIPLICITY_CLOSED_READY_FOR_REVIEW**
+
+- **COMMIT (user-approved)**:
+  - `c3d6c89` `feat: saveBindingResolutionBatch direct-resolution contract` —
+    4 files: `workflowService.ts` (+555), `adminLogService.ts` (+1),
+    `test-workflow-persistence-mocks.mjs` (+4),
+    `test-workflow-binding-resolution.ts` (new, 1018 lines). Active log
+    excluded ตามกฎ; commit แยกด้านล่าง.
+  - Verification ณ commit time (re-run ล่าสุด): binding-resolution 499/499 ·
+    persistence 210/210 · foundation 161/161 · `tsc --noEmit` clean ·
+    `git diff --check` clean · engine/app/components 0-byte diff ·
+    imported workflows ยัง disabled/draft · `repeat:true` fail-closed.
+  - ⚠ BLOCKER คงค้าง: production unique indexes `workflow_versions.version_id`
+    + `(workflow_id,version_seq)` ต้อง verify ก่อน expose writable binding API.
+  - Phase 10B: ไม่ถูกแตะโดย session นี้ (dirty entries เพิ่มเป็น user-side
+    activity ใน worktree นั้น — ไม่เกี่ยวกับ commit นี้).
