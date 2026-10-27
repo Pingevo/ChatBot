@@ -118,6 +118,7 @@ One request schema — the only contract:
   version_id: string,            // current version under CAS
   proposed: [{
     binding_id: string,          // client never supplies node_id/field_path/kind
+    repeat?: boolean,            // §6 repeat-resolution; default false
     mappings: [{
       source_index: number,      // position in binding.source_values[]
       local_id: string,
@@ -246,6 +247,16 @@ The resolution API accepts only: `workflow_id`, `expected_version`, `version_id`
 bindings containing the same exact source identity — verified by exact value
 equality + same kind + same scope. Never auto-fills; account mappings never
 transfer to label/user/team.
+
+- `repeat` is optional and defaults to `false`.
+- The server performs exact source-value equality itself from its own binding
+  documents; the client never sends a source value or fingerprint.
+- A repeat target requires the same `kind` and the same scope contract; no
+  cross-kind transfer.
+- Repeat expansion happens inside `saveBindingResolutionBatch` during
+  validation, **before** any artifact write.
+- Expanded (repeated) targets are returned in the resolution result so the
+  admin can see exactly which bindings changed.
 
 ## 7. Pure in-memory executable materializer
 
@@ -486,8 +497,16 @@ Honest estimate: sequential R1→R5 ≈ **13–19 working days** + unbounded R2B
 
 ## 18. Complexity budget
 
-- helpers +4: `ce/1` normalizer (importer), `materializeExecutableWorkflow`,
-  `saveBindingResolutionBatch`, overlap check inside publish readiness
+- function/helper total +4 across the full design:
+  - `saveBindingResolutionBatch` — R1 public service method
+  - `getBindingResolutionView` — R1 public read-model method (binding UI/API view)
+  - `normalizeCanonicalExec` — R2A `ce/1` normalizer (importer)
+  - `materializeExecutableWorkflow` — R2A
+- R1 private helpers +0: overlap computed inline inside `getWorkflowImportDetail`;
+  SHA-256 computed inline at each assignment via
+  `createHash("sha256").update(canonicalJson(v)).digest("hex")`; local-target
+  validation is one typed switch inside `saveBindingResolutionBatch`; derived
+  scope computed inline in its commit path; no nested functions
 - guards +0 standalone; registries +0; decision owners +0; workers/timers +0
   (delay reuses `checkWaitTimeouts`); collections +0; required indexes +0
   (optional `source_fp` digest index — measured first)
