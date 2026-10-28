@@ -987,6 +987,8 @@ def resolve_subjects(
     subject_scope: str | None = None,
     subject_count: int | None = None,
     signal_confidence: float | None = None,
+    subject_refs: tuple = (),
+    persisted_code_index: dict | None = None,
 ) -> SubjectResolution:
     """Pure resolver — รับ persisted set ที่ load แล้ว (no hidden DB read).
 
@@ -994,7 +996,13 @@ def resolve_subjects(
     typed input กับ persisted state เท่านั้น ไม่ interpret ภาษาเอง:
       current_set + persisted + (count absent หรือ == set size) → resolved ทั้ง set
       current_single + persisted n==1 → resolved
-      explicit → no_subject_ref (explicit identities ชนะ upstream แล้ว)
+      explicit + item-id refs (digit) → no_subject_ref (explicit identities
+        ชนะ upstream แล้ว)
+      explicit + code-shaped refs → equivalence กับ persisted_code_index
+        (item_id → codes จาก canonical _extract_codes บน card name — caller
+        สร้างจาก timeline data ที่ load อยู่แล้ว): refs ทุกตัว ⊆ codes ของ
+        persisted item เดียว → resolved narrowed set · ไม่ match/unprovable
+        → no_subject_ref (ห้าม substitute) · match >1 item → clarify
       missing set / count mismatch / unknown scope / signal conf < 0.7
         → clarify (zero guessing)
     ไม่มี structured signal → canonical language path:
@@ -1007,6 +1015,28 @@ def resolve_subjects(
         if subject_scope not in _SUBJECT_SCOPES:
             return SubjectResolution("clarify", None)
         if subject_scope == "explicit":
+            _refs = tuple(
+                str(r).strip() for r in (subject_refs or ())
+                if str(r).strip())
+            if any(r.isdigit() for r in _refs):
+                return SubjectResolution("no_subject_ref", None)
+            _want = {r.upper() for r in _refs}
+            if _want and persisted and persisted_code_index:
+                _matched = tuple(
+                    str(sid) for sid in persisted.subject_ids
+                    if _want <= {str(c).strip().upper()
+                                 for c in persisted_code_index.get(sid)
+                                 or ()})
+                if len(_matched) == 1:
+                    return SubjectResolution(
+                        "resolved", ConversationSubjectSet(
+                            subject_ids=_matched,
+                            source_turn_id=persisted.source_turn_id,
+                            relation="single",
+                            requested_operations=(),
+                            confidence=persisted.confidence))
+                if len(_matched) > 1:
+                    return SubjectResolution("clarify", None)
             return SubjectResolution("no_subject_ref", None)
         if subject_scope in ("current_single", "current_set"):
             if (signal_confidence is not None

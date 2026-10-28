@@ -727,20 +727,23 @@ class TestCurrentSingleIdentityOwnership:
 
     def test_resolved_single_id_stamps_current_single_need(self):
         out = td.apply_resolved_subject_refs(
-            self._needs(), ("27639651334",))
+            self._needs(), ("27639651334",),
+            plan_scope="current_single")
         assert out[0].subject_refs == ("27639651334",), \
             "resolved canonical id must enter typed need.subject_refs"
 
     def test_none_scope_not_stamped(self):
         needs = (TurnNeed(kind="product", operation="recommend",
                           subject_scope="none"),)
-        out = td.apply_resolved_subject_refs(needs, ("27639651334",))
+        out = td.apply_resolved_subject_refs(needs, ("27639651334",),
+                                             plan_scope="none")
         assert out[0].subject_refs == (), \
             "fresh recommendation must not inherit resolved identity"
 
     def test_multi_resolved_not_stamped(self):
         out = td.apply_resolved_subject_refs(
-            self._needs(), ("27639651334", "999"))
+            self._needs(), ("27639651334", "999"),
+            plan_scope="current_single")
         assert out[0].subject_refs == (), \
             "current_single with >1 resolved id is ambiguous — no stamp"
 
@@ -748,7 +751,8 @@ class TestCurrentSingleIdentityOwnership:
         needs = (TurnNeed(kind="product", operation="describe",
                           subject_scope="current_single",
                           subject_refs=("111",)),)
-        out = td.apply_resolved_subject_refs(needs, ("27639651334",))
+        out = td.apply_resolved_subject_refs(needs, ("27639651334",),
+                                             plan_scope="current_single")
         assert out[0].subject_refs == ("111",), \
             "explicit typed refs are authoritative — never overwritten"
 
@@ -757,7 +761,8 @@ class TestCurrentSingleIdentityOwnership:
         exact-item authority limits selection to the resolved card —
         siblings/bundles must not reach AnswerContext."""
         stamped = td.apply_resolved_subject_refs(
-            self._needs(), ("27639651334",))
+            self._needs(), ("27639651334",),
+            plan_scope="current_single")
         cmc = _cmc_card()
         sib1 = dict(_cmc_card(), item_id="53852136362",
                     name="CUKTECH AD1003T + CMC615P เซตหัวชาร์จ+สาย")
@@ -784,7 +789,8 @@ class TestCurrentSingleIdentityOwnership:
 
     def test_context_carries_only_resolved_product(self):
         stamped = td.apply_resolved_subject_refs(
-            self._needs(), ("27639651334",))
+            self._needs(), ("27639651334",),
+            plan_scope="current_single")
         req = _req(subject_refs=("27639651334",))
         subj = _sel_card("i:27639651334", "subject", "req-0",
                          _CMC_NAME, raw_description=_CMC_DESC)

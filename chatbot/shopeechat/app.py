@@ -1764,12 +1764,46 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
             #   codes (post-connector) ไม่ใช่ subject → ไม่ veto
             _has_explicit_subject = bool(_turn_plan and any(
                 n.subject_refs for n in _turn_plan.needs))
-            if not _has_explicit_subject:
+            _subj_refs_all = tuple(dict.fromkeys(
+                str(r) for n in (_turn_plan.needs if _turn_plan else ())
+                for r in n.subject_refs if str(r).strip()))
+            # item-id refs (digit) = explicit identity เดิม → veto resolver
+            #   เหมือนก่อน; code-shaped refs = name-level ref — consult
+            #   resolver เฉพาะ explicit scope เพื่อผูก persisted subject
+            #   เดิมผ่าน code index (ห้าม substitute สินค้าใหม่ด้วยของเก่า)
+            _has_item_ref = any(str(r).isdigit() for r in _subj_refs_all)
+            _consult = (not _has_item_ref
+                        and (not _has_explicit_subject
+                             or _plan_scope == "explicit"))
+            if _consult:
+                _persisted_codes = None
+                if (_has_explicit_subject
+                        and _subject_effective is not None
+                        and getattr(
+                            _subject_effective, "subject_ids", ())):
+                    # code index จาก timeline card names ที่ load อยู่แล้ว
+                    #   (canonical _extract_codes owner เดิม — DB read +0)
+                    from .scripts.unit_classifier import _extract_codes
+                    _persisted_codes = {}
+                    for _p in (_subject_products or ()):
+                        _pid = _p.get("item_id")
+                        if _pid is None:
+                            continue
+                        _sid = str(conversation_products._to_serializable(_pid))
+                        if _sid not in _subject_effective.subject_ids:
+                            continue
+                        _codes = tuple(_extract_codes(
+                            str((_p.get("card") or {}).get("name")
+                                or _p.get("name") or "")))
+                        if _codes:
+                            _persisted_codes[_sid] = _codes
                 _subject_res = conversation_products.resolve_subjects(
                     _subject_effective, (req.message or "").lower(),
                     subject_scope=_plan_scope,
                     subject_count=_plan_count,
-                    signal_confidence=_plan_sig_conf)
+                    signal_confidence=_plan_sig_conf,
+                    subject_refs=_subj_refs_all,
+                    persisted_code_index=_persisted_codes)
             if (_subject_res and _subject_res.outcome == "resolved"
                     and _subject_res.subject_set):
                 _subject_ev["resolved"] = _subject_res.subject_set
@@ -1780,7 +1814,8 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 if _turn_plan is not None:
                     _stamped_needs = _td.apply_resolved_subject_refs(
                         _turn_plan.needs,
-                        _subject_res.subject_set.subject_ids)
+                        _subject_res.subject_set.subject_ids,
+                        plan_scope=_plan_scope)
                     if _stamped_needs != _turn_plan.needs:
                         _turn_plan = _dc_replace(
                             _turn_plan, needs=_stamped_needs)

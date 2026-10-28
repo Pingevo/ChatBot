@@ -871,26 +871,46 @@ def decide_turn(
     )
 
 
-def apply_resolved_subject_refs(needs, subject_ids):
+def apply_resolved_subject_refs(needs, subject_ids, *,
+                                plan_scope: str | None):
     """resolved persisted subject → typed need.subject_refs (ownership
     boundary เดียวของ deictic scope — caller: app.py หลัง resolver resolved).
 
     subject_scope=current_single + resolver คืน canonical id เดียว → id
     นั้น stamp เป็น subject_refs (exact-item authority ต่อใน slot/request/
-    selection — sibling/bundle ไม่ fan-out). scope อื่น (none/explicit/
-    current_set) · resolved ≠ 1 ตัว · subject_refs มีอยู่แล้ว → คงเดิม
-    (explicit typed refs เป็น authority เสมอ — ไม่ overwrite).
+    selection — sibling/bundle ไม่ fan-out).
 
-    Input: needs = TurnNeed tuple; subject_ids = resolver output ids.
+    resolution ผ่าน explicit code-equivalence (plan_scope='explicit' —
+    caller ส่ง scope ที่ resolution ถูกผลิต; resolver resolve ได้ก็ต่อเมื่อ
+    non-digit refs ทุกตัว covered โดย persisted item เดียว) → union stamp
+    id + code refs เดิม (named ref คงไว้สำหรับ render, digit id เป็น
+    exact-item authority)
+
+    scope อื่น (none/current_set) · resolved ≠ 1 ตัว · refs มี digit ·
+    plan_scope ไม่ใช่ explicit → คงเดิม (explicit typed refs เป็น
+    authority เสมอ — ไม่ substitute กับ item ที่ไม่ได้พิสูจน์).
+
+    Input: needs = TurnNeed tuple; subject_ids = resolver output ids;
+    plan_scope = scope ที่ resolver ถูกเรียก (ค่าเดียวกับที่ส่งให้
+    resolve_subjects — caller เป็น authority ไม่ re-derive จาก needs).
     Output: TurnNeed tuple (frozen — replace สร้าง instance ใหม่เฉพาะ need
     ที่ stamp; caller ตัดสินใจ replace ใน TurnPlan)."""
     ids = tuple(str(i) for i in (subject_ids or ()))
     if len(ids) != 1:
         return tuple(needs)
-    return tuple(
-        _dc_replace(n, subject_refs=ids)
-        if (n.kind in PRODUCTISH_NEED_KINDS
-            and n.subject_scope == "current_single"
-            and not n.subject_refs)
-        else n
-        for n in needs)
+
+    def _stamp(n):
+        if n.kind not in PRODUCTISH_NEED_KINDS:
+            return n
+        if (n.subject_scope == "current_single"
+                and not n.subject_refs):
+            return _dc_replace(n, subject_refs=ids)
+        if (plan_scope == "explicit"
+                and n.subject_refs
+                and all(not str(r).strip().isdigit()
+                        for r in n.subject_refs)):
+            return _dc_replace(
+                n, subject_refs=ids + tuple(n.subject_refs))
+        return n
+
+    return tuple(_stamp(n) for n in needs)
