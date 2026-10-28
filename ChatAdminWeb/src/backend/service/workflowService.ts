@@ -1795,6 +1795,13 @@ export async function saveBindingResolutionBatch(
     throw new Error(`binding set incomplete — ${seenBindIds.size}/${expectedBindIds.size} persisted`);
   }
 
+  // overlap readiness (ก่อน pointer CAS): owner เดียว evaluate บน target-version
+  // artifacts ที่ persist แล้ว — snapshot ณ เวลานี้ ไม่ใช่ cross-workflow txn ·
+  // eval fail/artifact หาย → throw ก่อน commit (ไม่ flip pointer ไม่ emit audit)
+  const readiness = await getWorkflowImportDetail(workflowId, versionId);
+  if (!readiness) throw new Error(`target version ${versionId} unreadable for readiness — refusing commit`);
+  const overlapConflicts = readiness.overlap_conflicts;
+
   // 12) commit — pointer+version+derived scope ใน updateOne เดียว (half-update ไม่มี)
   const commit = await workflows.updateOne(
     { workflow_id: workflowId, is_deleted: { $ne: true }, version: expected },
@@ -1825,12 +1832,12 @@ export async function saveBindingResolutionBatch(
     await logAdminEvent({
       action_type: "workflow.binding_resolve", actor,
       metadata: { workflow_id: workflowId, version_id: versionId, seq,
-        resolved, unresolved, invalid, repeated: repeated.length, overlap: [],
+        resolved, unresolved, invalid, repeated: repeated.length, overlap: overlapConflicts,
         platforms: derivedPlatforms, shop_ids: derivedShopIds },
     });
   } catch { /* post-commit audit failure — commit สำเร็จแล้ว */ }
   return { ok: true, version: seq, version_id: versionId,
-    resolved, unresolved, invalid, repeated, publish_blockers: scopeBlockers, overlap_conflicts: [] };
+    resolved, unresolved, invalid, repeated, publish_blockers: scopeBlockers, overlap_conflicts: overlapConflicts };
 }
 
 // ─── Import detail surface (UI read model) ────────────────
@@ -1846,19 +1853,25 @@ export interface WorkflowImportDetail {
   bindings: { node_id: string; field_path: string; kind: string; count: number; status: BindingStatus }[];
   unresolved_bindings: number;
   publish_blockers: string[];
+  overlap_conflicts: string[];
 }
 
-export async function getWorkflowImportDetail(workflowId: string): Promise<WorkflowImportDetail | null> {
+// versionId (server-internal เท่านั้น): resolution path ส่ง target version ที่
+// artifacts persist แล้วก่อน pointer CAS — ไม่ส่ง = current_version_id เดิม
+export async function getWorkflowImportDetail(workflowId: string, versionId?: string): Promise<WorkflowImportDetail | null> {
   const wf = await getWorkflow(workflowId);
   if (!wf) return null;
   const versions = await getCollection<WorkflowVersionDoc>(COLLECTIONS.workflowVersions);
-  const version = wf.current_version_id
-    ? await versions.findOne({ version_id: wf.current_version_id })
-    : null;
+  const version = versionId != null
+    ? await versions.findOne({ version_id: versionId, workflow_id: workflowId })
+    : (wf.current_version_id ? await versions.findOne({ version_id: wf.current_version_id }) : null);
+  if (versionId != null && !version) return null; // target artifact หาย/ของ workflow อื่น → fail closed
   const bindings = await getCollection<WorkflowBindingDoc>(COLLECTIONS.workflowBindings);
   const binds = version ? await bindings.find({ workflow_id: workflowId, version_id: version.version_id }).toArray() : [];
   const capability = validateCanonicalDraft(
-    version?.nodes || wf.nodes, version?.edges || wf.edges, wf.platforms || [],
+    version?.nodes || wf.nodes, version?.edges || wf.edges,
+    // override path: wf.platforms ยังเป็น scope เดิมก่อน CAS → ใช้ scope ที่ persist ใน target version
+    versionId != null ? (version?.platforms ?? []) : (wf.platforms || []),
     binds.map((b) => ({ node_id: b.node_id, kind: b.kind })),
   );
   // scope readiness — recompute จาก version-scoped account bindings
@@ -1879,6 +1892,46 @@ export async function getWorkflowImportDetail(workflowId: string): Promise<Workf
   } else if (wf.import != null) {
     scopeBlockers.push("scope: explicit global scope approval required");
   }
+  // overlap readiness — eligibility = message_received trigger + valid resolved
+  // account pairs เท่านั้น (zero valid ≠ match-all); candidate เรียง workflow_id
+  // deterministic, report ทุกตัวที่ชน (ไม่มี winner/priority/first-match)
+  const thisScope = new Set<string>();
+  for (const b of accountReqs)
+    for (const m of b.resolution?.mappings ?? [])
+      if (m.state === "valid" && m.platform != null && m.shop_id != null)
+        thisScope.add(`${m.platform}|${m.shop_id}`);
+  const hasMsgTrigger = (version?.nodes || wf.nodes)
+    .some((n) => n.type === "trigger" && n.subtype === "message_received");
+  const overlapConflicts: string[] = [];
+  if (hasMsgTrigger && thisScope.size > 0) {
+    const workflows = await getCollection<WorkflowDoc>(COLLECTIONS.workflows);
+    const others = (await workflows.find({ is_deleted: { $ne: true }, workflow_id: { $ne: workflowId } }).toArray())
+      .sort((x, y) => (x.workflow_id < y.workflow_id ? -1 : 1));
+    for (const other of others) {
+      if (other.import != null) {
+        // imported side — resolved scope + trigger อ่านจาก current-version เดียวกัน
+        const ov = other.current_version_id ? await versions.findOne({ version_id: other.current_version_id }) : null;
+        const oscope = new Set<string>();
+        for (const b of ov ? await bindings.find({ workflow_id: other.workflow_id, version_id: ov.version_id }).toArray() : [])
+          if (b.kind === "account" && b.count > 0)
+            for (const m of b.resolution?.mappings ?? [])
+              if (m.state === "valid" && m.platform != null && m.shop_id != null)
+                oscope.add(`${m.platform}|${m.shop_id}`);
+        if ((ov?.nodes || other.nodes).some((n) => n.type === "trigger" && n.subtype === "message_received")
+          && [...oscope].some((k) => thisScope.has(k)))
+          overlapConflicts.push(`overlap with imported workflow ${other.workflow_id}`);
+      } else if (other.enabled === true && other.status === "published"
+          && other.nodes.some((n) => n.type === "trigger")) {
+        // legacy side — engine เดิม fire trigger ทุก subtype; scope = doc arrays, ว่าง = all
+        const oplats = other.platforms || [], oshops = other.shop_ids || [];
+        if ([...thisScope].some((k) => {
+          const i = k.indexOf("|");
+          return (oplats.length === 0 || oplats.includes(k.slice(0, i) as Platform))
+              && (oshops.length === 0 || oshops.includes(k.slice(i + 1)));
+        })) overlapConflicts.push(`overlap with legacy workflow ${other.workflow_id}`);
+      }
+    }
+  }
   return {
     workflow_id: wf.workflow_id, name: wf.name,
     source: wf.import?.source ?? null,
@@ -1889,7 +1942,8 @@ export async function getWorkflowImportDetail(workflowId: string): Promise<Workf
     fingerprint: version?.fingerprint ?? null,
     bindings: binds.map((b) => ({ node_id: b.node_id, field_path: b.field_path, kind: b.kind, count: b.count, status: b.status })),
     unresolved_bindings: binds.filter((b) => b.status === "unresolved").length,
-    publish_blockers: [...capability.errors, ...scopeBlockers],
+    publish_blockers: [...capability.errors, ...scopeBlockers, ...overlapConflicts],
+    overlap_conflicts: overlapConflicts,
   };
 }
 

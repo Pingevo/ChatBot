@@ -122,6 +122,37 @@ const SRC_NOACC = {
   ],
 };
 
+// ─── Fixture: overlap-ready imported flow (Task 5) — message_received + accountIds×1 ───
+const SRC_OV = {
+  loadedVersionId: "wv-src-OV",
+  versions: [{ workflowVersionId: "wv-src-OV", status: "active" }],
+  nodes: [
+    { id: "t1", type: "message_received", position: { x: 0, y: 0 },
+      data: { name: "trig", nodeType: "trigger", accountIds: ["zacc_o"], nextStepId: "a1" } },
+    { id: "a1", type: "send_message", position: { x: 100, y: 0 },
+      data: { name: "reply", nodeType: "action", action: { message: { text: "hi" } } } },
+  ],
+  edges: [
+    { source: "t1", target: "a1", sourceHandle: null },
+  ],
+};
+
+// label_added trigger — account scope มีแต่ไม่ใช่ message trigger → ไม่มี overlap eligibility
+const SRC_OV_LAB = {
+  loadedVersionId: "wv-src-OVL",
+  versions: [{ workflowVersionId: "wv-src-OVL", status: "active" }],
+  nodes: [
+    { id: "t1", type: "label_added", position: { x: 0, y: 0 },
+      data: { name: "trig", nodeType: "trigger", nextStepId: "a1" } },
+    { id: "a1", type: "send_message", position: { x: 100, y: 0 },
+      data: { name: "reply", nodeType: "action", action: { message: { text: "hi" } },
+              accountIds: ["zacc_ol"] } },
+  ],
+  edges: [
+    { source: "t1", target: "a1", sourceHandle: null },
+  ],
+};
+
 async function main() {
   const mocks: Mocks = await import("./test-workflow-persistence-mocks.mjs");
   const imp: Imp = await import("../src/lib/workflow/zaapiImport");
@@ -1872,10 +1903,242 @@ async function main() {
       "M1 pin → status:resolved + complete mappings clears blocker (contract intact)");
   }
 
+  // ═══ 28. Task 5 — overlap readiness ═══
+  console.log("\n=== 28. Task 5 — overlap readiness ===");
+  // dedicated shops — scope ไม่ชน fixture เก่า (Task 1-4 sections resolve shop_s*/conv_lab)
+  const shopsColl5 = await mongo.getCollection(COLLECTIONS.shops);
+  for (const [sid, plat] of [["shop_o1", "shopee"], ["shop_o2", "shopee"], ["shop_o3", "tiktok"],
+    ["shop_o4", "shopee"], ["shop_o5", "shopee"], ["shop_od", "shopee"]] as const) {
+    await shopsColl5.insertOne({ shop_id: sid, platform: plat, shopname: sid, connected: true });
+  }
+
+  async function setupOv(srcWfId: string, srcBase: unknown) {
+    const src = { ...(srcBase as Record<string, unknown>), workflowId: srcWfId,
+      loadedVersionId: `wv-src-${srcWfId}`, versions: [{ workflowVersionId: `wv-src-${srcWfId}`, status: "active" }] };
+    const batch = previewZaapiFlows({ flows: [src] }, { indexRows: [{ wid: srcWfId, name: `ov ${srcWfId}` }] });
+    await svcAny.applyImportBatch(batch, "admin_t");
+    return { wfId: "wf_imp_" + _sh(srcWfId) };
+  }
+  // fresh-state request — version/binding เปลี่ยนทุก save → re-read ทุกครั้ง
+  async function ovReq(wfId: string, platform: string, shopId: string) {
+    const w = (await svc.getWorkflow(wfId)) as Record<string, unknown>;
+    const v = (await collDocs(COLLECTIONS.workflowVersions))
+      .find((x) => x.workflow_id === wfId && x.version_id === w.current_version_id) as Record<string, unknown>;
+    const acc = (await collDocs(COLLECTIONS.workflowBindings))
+      .find((b) => b.workflow_id === wfId && b.version_id === v.version_id && b.kind === "account") as Record<string, unknown>;
+    return {
+      workflow_id: wfId, expected_version: w.version as number, version_id: v.version_id as string,
+      proposed: [{ binding_id: acc.binding_id as string, mappings: [
+        { source_index: 0, local_id: shopId, platform, shop_id: shopId } ] }],
+    };
+  }
+  // cast — server-only override param; suite ต้อง compile ได้ทั้งก่อน/หลัง implementation
+  const detailFor = svc.getWorkflowImportDetail as unknown as
+    (w: string, v?: string) => Promise<{ overlap_conflicts?: string[]; publish_blockers?: string[] } | null>;
+  const ovStr = (wfId: string) => `overlap with imported workflow ${wfId}`;
+  const legStr = (wfId: string) => `overlap with legacy workflow ${wfId}`;
+
+  // ─── 28.1 imported/imported — resolved pair เดียวกัน + message_received ทั้งคู่ → conflict สองทิศ
+  const O1 = await setupOv("workflow_OV_O1", SRC_OV);
+  const O2 = await setupOv("workflow_OV_O2", SRC_OV);
+  await callResolve(O1.wfId, await ovReq(O1.wfId, "shopee", "shop_o1"));
+  await callResolve(O2.wfId, (await ovReq(O2.wfId, "shopee", "shop_o1")));
+  const detO1 = await detailFor(O1.wfId);
+  const detO2 = await detailFor(O2.wfId);
+  eq(canonicalJson(detO1?.overlap_conflicts), canonicalJson([ovStr(O2.wfId)]), "O1 → overlap_conflicts lists O2");
+  eq(canonicalJson(detO2?.overlap_conflicts), canonicalJson([ovStr(O1.wfId)]), "O2 → overlap_conflicts lists O1");
+  ok((detO1?.publish_blockers ?? []).includes(ovStr(O2.wfId)), "O1 → publish_blockers carries overlap (activation gate)");
+  ok((detO2?.publish_blockers ?? []).includes(ovStr(O1.wfId)), "O2 → publish_blockers carries overlap");
+
+  // ─── 28.2 imported/legacy — enabled+published + trigger node + scope-intersect (empty = match-all)
+  const mkLegacy = (name: string, platforms: string[], shopIds: string[], enabled: boolean, status: "draft" | "published") =>
+    svc.createWorkflow({ name, createdBy: "admin_t",
+      nodes: [
+        { node_id: "ln1", type: "trigger", subtype: "message", config: {}, position: { x: 0, y: 0 } },
+        { node_id: "ln2", type: "action", subtype: "send_text", config: {}, position: { x: 100, y: 0 } },
+      ],
+      edges: [{ edge_id: "le1", source_node_id: "ln1", target_node_id: "ln2" }],
+      platforms: platforms as never[], shopIds, enabled, status });
+  const LEG_SAME = await mkLegacy("ov-leg-same", ["shopee"], ["shop_o1"], true, "published");
+  const LEG_EMPTY = await mkLegacy("ov-leg-empty", [], [], true, "published");
+  const LEG_DRAFT = await mkLegacy("ov-leg-draft", ["shopee"], ["shop_o1"], true, "draft");
+  const LEG_OFF = await mkLegacy("ov-leg-off", ["shopee"], ["shop_o1"], false, "published");
+  const LEG_DISJ = await mkLegacy("ov-leg-disj", ["lazada"], ["shop_o9"], true, "published");
+  // legacy ที่ไม่มี trigger node — insert ตรง (graph validation ไม่ให้สร้างผ่าน createWorkflow)
+  await (await mongo.getCollection(COLLECTIONS.workflows)).insertOne({
+    workflow_id: "wf_leg_notrig", name: "ov-leg-notrig", enabled: true, status: "published",
+    platforms: ["shopee"], shop_ids: ["shop_o1"],
+    nodes: [{ node_id: "la1", type: "action", subtype: "send_text", config: {}, position: { x: 0, y: 0 } }],
+    edges: [], version: 1, is_deleted: false,
+    created_at: new Date(), created_by: "admin_t", updated_at: new Date(), updated_by: "admin_t" });
+  const ov1 = (await detailFor(O1.wfId))?.overlap_conflicts ?? [];
+  ok(ov1.includes(legStr(LEG_SAME.workflow_id)), "legacy enabled+published same scope → conflict");
+  ok(ov1.includes(legStr(LEG_EMPTY.workflow_id)), "legacy empty scope (match-all) → conflict");
+  ok(ov1.includes(ovStr(O2.wfId)), "imported O2 conflict persists alongside legacy");
+  ok(!ov1.includes(legStr(LEG_DRAFT.workflow_id)), "legacy draft → no conflict");
+  ok(!ov1.includes(legStr(LEG_OFF.workflow_id)), "legacy disabled → no conflict");
+  ok(!ov1.includes(legStr(LEG_DISJ.workflow_id)), "legacy disjoint scope → no conflict");
+  ok(!ov1.includes(legStr("wf_leg_notrig")), "legacy without trigger node → no conflict");
+  eq(ov1.length, 3, "O1 → exactly 3 overlap entries (O2 + 2 legacy)");
+  // retire match-all fixture — ค้างไว้จะชน resolved scope ทุกตัวของ section นี้
+  await (await mongo.getCollection(COLLECTIONS.workflows)).updateOne(
+    { workflow_id: LEG_EMPTY.workflow_id }, { $set: { enabled: false } });
+
+  // ─── 28.3 disjoint imported scope — ไม่ conflict ทั้งสองทิศ
+  const O3 = await setupOv("workflow_OV_O3", SRC_OV);
+  await callResolve(O3.wfId, await ovReq(O3.wfId, "tiktok", "shop_o3"));
+  eq(canonicalJson((await detailFor(O3.wfId))?.overlap_conflicts), "[]", "O3 disjoint scope → no conflicts");
+  ok(!(((await detailFor(O1.wfId))?.overlap_conflicts ?? []).includes(ovStr(O3.wfId))), "O1 → O3 not listed (disjoint)");
+
+  // ─── 28.4 non-message_received trigger — contribute scope แต่ไม่ใช่ message axis → ไม่ conflict
+  const O_LAB = await setupOv("workflow_OV_OLAB", SRC_OV_LAB);
+  await callResolve(O_LAB.wfId, await ovReq(O_LAB.wfId, "shopee", "shop_o1"));
+  eq(canonicalJson((await detailFor(O_LAB.wfId))?.overlap_conflicts), "[]",
+    "label_added trigger → own readiness contributes nothing");
+  const ov1d = (await detailFor(O1.wfId))?.overlap_conflicts ?? [];
+  ok(!ov1d.includes(ovStr(O_LAB.wfId)), "O1 → O_LAB (no message_received) not listed as candidate");
+  eq(ov1d.length, 2, "O1 → still 2 after LEG_EMPTY retired (O_LAB adds none)");
+
+  // ─── 28.5 zero-valid / unresolved / invalid — ไม่มี eligibility ไม่ใช่ match-all; Task-3 blockers คง
+  const O_NOACC = await setupNoAcc("workflow_OV_NOACC");
+  const detNOACC = await detailFor(O_NOACC.wfId);
+  eq(canonicalJson(detNOACC?.overlap_conflicts), "[]", "no account reqs → no overlap scope (not match-all)");
+  ok((detNOACC?.publish_blockers ?? []).includes(BLOCKER_GLOBAL), "no-account → global-scope blocker intact");
+  const O_UNRES = await setupOv("workflow_OV_UNRES", SRC_OV);   // account ค้าง unresolved
+  const detUNRES = await detailFor(O_UNRES.wfId);
+  eq(canonicalJson(detUNRES?.overlap_conflicts), "[]", "unresolved account → no overlap contribution");
+  ok((detUNRES?.publish_blockers ?? []).includes(BLOCKER_NONE), "unresolved → account_scope blocker intact");
+  const O_DUP = await setupOv("workflow_OV_DUP", SRC_OV);
+  const O_INV = await setupOv("workflow_OV_INV", SRC_OV);
+  await callResolve(O_DUP.wfId, await ovReq(O_DUP.wfId, "shopee", "shop_od"));
+  await callResolve(O_INV.wfId, await ovReq(O_INV.wfId, "shopee", "shop_od"));
+  ok(((await detailFor(O_DUP.wfId))?.overlap_conflicts ?? []).includes(ovStr(O_INV.wfId)),
+    "O_DUP → O_INV conflicted while mapping valid");
+  await shopsColl5.deleteOne({ shop_id: "shop_od" });
+  const wInv = (await svc.getWorkflow(O_INV.wfId)) as Record<string, unknown>;
+  await svcAny.saveWorkflowDraft(O_INV.wfId, { name: "inv-reval" }, wInv.version as number, "admin_t");
+  const detINV = await detailFor(O_INV.wfId);
+  eq(canonicalJson(detINV?.overlap_conflicts), "[]", "invalid mapping → zero overlap scope (contributes nothing)");
+  ok((detINV?.publish_blockers ?? []).includes(BLOCKER_NONE), "invalid → account_scope blocker returns (Task-3 intact)");
+  const ovDUP = (await detailFor(O_DUP.wfId))?.overlap_conflicts ?? [];
+  ok(!ovDUP.includes(ovStr(O_INV.wfId)), "O_DUP → invalid-scope O_INV no longer listed");
+  eq(ovDUP.length, 0, "O_DUP → no remaining conflicts");
+
+  // ─── 28.6 overlap-producing resolution — commit disabled/draft + report conflicts
+  const O5 = await setupOv("workflow_OV_O5", SRC_OV);
+  const O6 = await setupOv("workflow_OV_O6", SRC_OV);
+  const r5 = await callResolve(O5.wfId, await ovReq(O5.wfId, "shopee", "shop_o2"));
+  eq(canonicalJson(r5?.overlap_conflicts), "[]", "first occupant → no overlap (pin)");
+  const evO6 = state.adminEvents.length;
+  const r6 = await callResolve(O6.wfId, await ovReq(O6.wfId, "shopee", "shop_o2"));
+  ok(r6 != null && r6.ok === true, "overlap-producing resolution → commits (save not blocked)");
+  eq(canonicalJson(r6?.overlap_conflicts), canonicalJson([ovStr(O5.wfId)]), "res.overlap_conflicts reports O5");
+  eq(canonicalJson(r6?.publish_blockers), "[]", "res.publish_blockers stays scope-only (overlap ไม่ปน)");
+  const wO6 = (await svc.getWorkflow(O6.wfId)) as Record<string, unknown>;
+  eq(wO6?.enabled, false, "O6 → enabled:false"); eq(wO6?.status, "draft", "O6 → status:draft");
+  eq(wO6?.version, 2, "O6 → pointer bumped to v2");
+  const evO6last = resolveEvents().slice(-1)[0] as { metadata?: Record<string, unknown> };
+  eq(evO6last?.metadata?.workflow_id, O6.wfId, "audit → this workflow");
+  eq(canonicalJson(evO6last?.metadata?.overlap), canonicalJson([ovStr(O5.wfId)]),
+    "audit metadata.overlap = target-version conflicts");
+  eq(state.adminEvents.length, evO6 + 1, "exactly one audit emitted");
+  ok(((await detailFor(O5.wfId))?.overlap_conflicts ?? []).includes(ovStr(O6.wfId)),
+    "O5 → symmetric conflict on next readiness read");
+
+  // ─── 28.7 narrowing scope — conflict หายใน readiness รอบถัดไป (recompute ไม่มี persist)
+  const r6b = await callResolve(O6.wfId, await ovReq(O6.wfId, "shopee", "shop_o4"));
+  eq(canonicalJson(r6b?.overlap_conflicts), "[]", "narrowed resolution → no overlap (pin)");
+  eq(canonicalJson((await detailFor(O6.wfId))?.overlap_conflicts), "[]", "O6 detail cleared after narrowing");
+  ok(!(((await detailFor(O5.wfId))?.overlap_conflicts ?? []).includes(ovStr(O6.wfId))),
+    "O5 → O6 no longer listed (symmetric clear)");
+
+  // ─── 28.8 ordering — evaluate TARGET version (v2) ไม่ใช่ v1 ที่ pointer ชี้อยู่
+  const W = await setupOv("workflow_OV_W", SRC_OV);
+  await callResolve(W.wfId, await ovReq(W.wfId, "shopee", "shop_o5"));   // v1 → disjoint scope
+  const rW = await callResolve(W.wfId, await ovReq(W.wfId, "shopee", "shop_o2"));  // v2 → overlaps O5
+  eq(canonicalJson(rW?.overlap_conflicts), canonicalJson([ovStr(O5.wfId)]),
+    "v2-overlap reported — evaluation reads proposed version not stale v1");
+
+  // ─── 28.9 competing CAS — conflict path ไม่รายงาน overlap (ไม่ใช่ version ของเรา)
+  const W2 = await setupOv("workflow_OV_W2", SRC_OV);
+  const reqW2 = await ovReq(W2.wfId, "shopee", "shop_o2");
+  st.updateOneHook = async (coll: string, filter?: unknown, update?: unknown) => {
+    const f = filter as { workflow_id?: string } | undefined;
+    const u = update as { $set?: { current_version_id?: string } } | undefined;
+    if (coll === COLLECTIONS.workflows && f?.workflow_id === W2.wfId && u?.$set?.current_version_id) {
+      const d = (await mongo.getCollection(COLLECTIONS.workflows)).docs
+        .find((x: Record<string, unknown>) => x.workflow_id === W2.wfId) as Record<string, unknown> | undefined;
+      if (d) { d.version = 99; d.current_version_id = "wv_competitor"; }
+    }
+  };
+  const rW2 = await callResolve(W2.wfId, reqW2);
+  disarm();
+  ok(rW2?.ok === false && rW2?.conflict === true, "competing CAS → conflict (pin)");
+  eq(rW2?.current_version, 99, "conflict echoes winner version (pin)");
+  eq(rW2?.current_version_id, "wv_competitor", "conflict echoes winner version_id (pin)");
+  ok(rW2?.overlap_conflicts === undefined,
+    "conflict path → no overlap fields (evaluated version ไม่ใช่ committed version)");
+  eq(resolveEvents().filter((e) => (e as { metadata?: { workflow_id?: string } }).metadata?.workflow_id === W2.wfId).length,
+    0, "lost CAS → zero success audit for this workflow");
+
+  // ─── 28.10 override fail-closed — missing/foreign version_id → null (ไม่ fallback เงียบ)
+  const vO2 = (await collDocs(COLLECTIONS.workflowVersions)).find((x) => x.workflow_id === O2.wfId) as Record<string, unknown>;
+  eq(await detailFor(O1.wfId, vO2.version_id as string), null, "foreign version_id → null (ownership-scoped)");
+  eq(await detailFor(O1.wfId, "wv_nonexistent_target"), null, "missing version_id → null (fail closed)");
+  ok((await detailFor(O1.wfId)) != null, "ordinary read unaffected (pin)");
+
+  // ─── 28.11 evaluation failure ก่อน CAS — ไม่ commit, ไม่ audit; artifacts อาจ persist แล้ว (crash/retry)
+  const O_FAIL = await setupOv("workflow_OV_FAIL", SRC_OV);
+  const reqFail = await ovReq(O_FAIL.wfId, "shopee", "shop_o2");
+  const evFail = resolveEvents().length;
+  const wFailPre = canonicalJson(await svc.getWorkflow(O_FAIL.wfId));
+  (st as { findOneHook?: (c: string, f?: unknown) => Promise<void> }).findOneHook =
+    async (coll: string, filter?: unknown) => {
+      const f = filter as Record<string, unknown> | undefined;
+      // override lookup signature = {version_id, workflow_id} — ordinary reads ไม่ชน
+      if (coll === COLLECTIONS.workflowVersions && typeof f?.workflow_id === "string" && typeof f?.version_id === "string") {
+        throw new Error("injected readiness-eval failure");
+      }
+    };
+  const rFail = await callResolve(O_FAIL.wfId, reqFail);
+  (st as Record<string, unknown>).findOneHook = undefined;
+  ok(typeof rFail?.__thrown === "string" && String(rFail.__thrown).includes("readiness-eval"),
+    "evaluation failure → save rejects before pointer CAS");
+  eq(canonicalJson(await svc.getWorkflow(O_FAIL.wfId)), wFailPre, "pointer/version/enabled/status unchanged");
+  eq(resolveEvents().length, evFail, "no success audit emitted");
+  // หมายเหตุ: version doc + binding rows อาจ persist แล้วก่อน eval (immutable artifacts
+  // ตาม crash/retry design) — assert เฉพาะ pointer+audit ไม่ assert zero writes
+
+  // ─── 28.12 target-version platforms — override ใช้ version.platforms ไม่ใช่ stale doc platforms
+  const O_PLAT = await setupOv("workflow_OV_PLAT", SRC_OV);
+  const rPlat = await callResolve(O_PLAT.wfId, await ovReq(O_PLAT.wfId, "shopee", "shop_o1"));
+  const v2Plat = rPlat?.version_id as string | undefined;
+  // จำลอง pre-CAS staleness — doc platforms ต่างจาก target-version platforms
+  await (await mongo.getCollection(COLLECTIONS.workflows)).updateOne(
+    { workflow_id: O_PLAT.wfId }, { $set: { platforms: ["facebook"] } });
+  const detV2Plat = await detailFor(O_PLAT.wfId, v2Plat);
+  ok(!(detV2Plat?.publish_blockers ?? []).includes("2 node ไม่พร้อม publish"),
+    "override read → capability ใช้ version.platforms (shopee→supported) ไม่ใช่ stale doc (facebook)");
+  const detOrdPlat = await detailFor(O_PLAT.wfId);
+  ok((detOrdPlat?.publish_blockers ?? []).includes("2 node ไม่พร้อม publish"),
+    "ordinary read → คงใช้ doc-level platforms (facebook→requires_adapter) — semantics เดิม");
+  await (await mongo.getCollection(COLLECTIONS.workflows)).updateOne(
+    { workflow_id: O_PLAT.wfId }, { $set: { platforms: ["shopee"] } });
+
+  // ─── 28.13 overlap ไม่ persist — resolution.conflict ว่างทุก version ล่าสุด
+  for (const [nm, wfId] of [["O5", O5.wfId], ["O6", O6.wfId], ["W", W.wfId]] as const) {
+    const w = (await svc.getWorkflow(wfId)) as Record<string, unknown>;
+    const bs = (await collDocs(COLLECTIONS.workflowBindings))
+      .filter((b) => b.workflow_id === wfId && b.version_id === w.current_version_id);
+    ok(bs.length > 0 && bs.every((b) => (b.resolution as Record<string, unknown> | undefined)?.conflict === undefined),
+      `${nm} → no persisted resolution.conflict (overlap = readiness-computed)`);
+  }
+
   // ═══ summary ═══
   const countsEnd = await allCounts();
   const totalWfs = (await collDocs(COLLECTIONS.workflows)).length;
-  eq(countsEnd[COLLECTIONS.workflowRawSnapshots], totalWfs - 1, "raw snapshots = imported workflows only (resolution writes none; -1 legacy)");
+  const legacyWfs = (await collDocs(COLLECTIONS.workflows)).filter((w) => w.import == null).length;
+  eq(countsEnd[COLLECTIONS.workflowRawSnapshots], totalWfs - legacyWfs, "raw snapshots = imported workflows only (resolution writes none)");
 }
 
 main().then(() => {
