@@ -8267,3 +8267,104 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
   และ `git diff --check` ผ่าน; ไม่แก้ source/test ระหว่าง split
 - Task 6+ ยังไม่เริ่ม; production unique-index blocker ยังเปิด;
   ไม่แตะ Phase 10B และไม่ push/merge/deploy
+
+### กำลังจะทำ — R1 TASK 6: imported scope ownership enforcement (implementation session, approved plan §11 Task 6)
+
+- **baseline (verified 2026-10-28)**: worktree `zaapi-workflow-foundation` ·
+  branch `codex/zaapi-workflow-foundation` @ `8038286` (chain
+  `8038286 → b502bd3 → 566411f`) · tree clean · staging ว่าง ·
+  Phase 10B (`feature-phase3-aswer-quality` @ `fd4e682`, 11 dirty paths
+  = activity ภายนอก) ไม่แตะ
+- **Task 6 scope (ตาม plan เท่านั้น)**:
+  1. `saveWorkflowDraft` reject `shop_ids`/`platforms` บน imported workflow
+     (`before.import != null`) — scope = derived จาก resolved account
+     bindings เท่านั้น (spec §9: doc-level fields ไม่ใช่ editable);
+     legacy workflow ไม่เปลี่ยน
+  2. `getWorkflowImportDetail` += `invalid_bindings` (count
+     `status==="invalid"` จาก binds เดียวกับ `unresolved_bindings` —
+     source of truth เดียว ไม่มี side channel)
+  3. `_assertActivationAllowed` += `invalid_bindings === 0` — gate =
+     unresolved+invalid+blockers ทั้งหมด === 0 (spec §17 gate 1)
+  4. `toggleWorkflow`/`updateWorkflow` enable บน fully-resolved imported →
+     ยัง blocked โดย `FOUNDATION_GATES.runtimeActivation=false` (pin)
+- **audit ที่ verify แล้วก่อนเขียน**: `CAS_SAVE_ALLOWLIST` รับ
+  `shop_ids`/`platforms` อยู่ — reject แบบ presence (เทียบ `updateWorkflow`
+  CAS_REQUIRED convention) · persistence suite ไม่มี CAS call ที่ส่ง
+  scope fields บน imported (casEPayload/casGPayload ใช้คำนวณ fingerprint
+  เท่านั้น) · `updateWorkflow` non-CAS path reject scope อยู่แล้วผ่าน
+  CAS_REQUIRED · pre-existing "N external binding ยังไม่ resolve" blocker
+  (all-binds fail-closed จาก Task 3) คงเดิม — ไม่แก้ blocker semantics
+  ใน Task นี้
+- **ไม่ทำใน Task 6**: helper/nested fn/guard function/decision owner/
+  collection/index/worker/queue/dep/flag/regex/keyword table ใหม่ ·
+  routes/UI/engine/registry/listWorkflows · production index DDL ·
+  push/PR/deploy · Task 7+ · real Mongo/provider
+- **baseline tests (run สดก่อน RED)**: binding-resolution 789 ·
+  persistence 452 · foundation 161 — ต้องไม่ลด
+- **RED plan**: section 29 ท้าย `test-workflow-binding-resolution.ts`
+  (harness เดิม) — imported CAS scope reject (throws + zero version/
+  binding/audit/doc-change) · legacy scope fields ผ่านเดิม ·
+  `invalid_bindings` count จาก binding status · fully-resolved imported
+  enable blocked ทุก mutation path (toggle/update/CAS) · unresolved/
+  invalid/blockers แต่ละตัว block อิสระ · contract pins
+  (publish_blockers scope-only, overlap แยก, enabled:false/draft)
+- **stop gate**: Task 6 เท่านั้น · ห้าม stage/commit · หยุด pre-commit
+  review gate · verdict ต้องมี evidence จริง
+
+### R1 TASK 6 — imported scope ownership enforcement (verified, pre-commit stop)
+
+- **impl (inline เท่านั้น — 3 checks ใน owners เดิม, 0 helper ใหม่)**:
+  1. `saveWorkflowDraft` — `before.import != null` + `shop_ids`/`platforms`
+     อยู่ใน `safeFields` (post-allowlist, presence-based) → throw
+     `imported workflow scope derives from resolved account bindings —
+     <keys> not editable via draft save` ก่อน version/binding/audit/doc
+     write ใดๆ; legacy (no `import`) ผ่านเดิม
+  2. `getWorkflowImportDetail` — `WorkflowImportDetail.invalid_bindings`
+     = `binds.filter(status==="invalid").length` บน `binds` array
+     เดียวกับ `unresolved_bindings` (version-scoped; ไม่มี second
+     status computation)
+  3. `_assertActivationAllowed` — `validationOk` เพิ่ม
+     `invalid_bindings === 0`; error message surface invalid count;
+     ยังผ่าน `publishReadiness` เดิม → `runtimeActivation=false`
+     ทำให้ imported enable block end-to-end แม้ readiness สะอาด
+- **RED (บันทึกจริงก่อน impl)**: 12 failures — 4× scope write accepted
+  (shop_ids/platforms/empty arrays/mixed enabled), 4× writes happened
+  (version +1, binding carry, cas_save audit +1, doc mutated),
+  3× `invalid_bindings === undefined`, 1× gate message ไม่มี invalid
+  count; pins ทั้งหมดผ่านระหว่าง RED
+- **GREEN (run สดหลัง impl)**: binding-resolution **827/827**
+  (789 → +38 asserts · section 29 ครอบคลุม scope reject ×4, zero-write
+  ×4, name/CAS_REQUIRED pins, legacy scope pass, invalid_bindings นับ
+  จาก status, fully-resolved enable blocked toggle/update/CAS,
+  independent gates, contract pins), persistence **452/452**,
+  foundation **161/161**, `npx tsc --noEmit` exit 0,
+  `git diff --check` exit 0
+- **diff**: `workflowService.ts` +17/−1 (4 hunks: validationOk,
+  error msg, scope-check block, interface+return field) ·
+  `test-workflow-binding-resolution.ts` +109/−0 (section 29 pure
+  insertion) · ไฟล์อื่นไม่แตะ (engine/route/registry/schema/UI คงเดิม)
+- **complexity ซื่อสัตย์**: inline safety checks 3 จุดใน owners เดิม —
+  0 new guard functions, 0 nested functions, 0 owners/collections/
+  indexes/workers/deps/flags/routes/regex/keyword tables; signature
+  เปลี่ยนเฉพาะ `WorkflowImportDetail` interface (+1 field)
+- **contract pins ยืนยัน**: `res.publish_blockers` scope-only ·
+  `overlap_conflicts` แยก · committed imports `enabled:false`/`draft` ·
+  engine-invisible · `listWorkflows` ไม่เปลี่ยน
+- **สถานะ**: staging ว่าง · HEAD `8038286` คงเดิม · Phase 10B
+  (`fd4e682`, dirty เดิม) ไม่แตะ · production unique-index blocker
+  ยังเปิด · Task 7+ ยังไม่เริ่ม
+- **รอ reviewer**: commit `feat: imported scope ownership enforcement`
+  + docs closeout — แยก 2 commits ตามรูปแบบเดิม รออนุมัติ
+
+### R1 TASK 6 closeout — แยก feature และ docs ตามรูปแบบ branch
+
+- ผู้ใช้อนุมัติ commit Task 6: feature `e223f77
+  feat: imported scope ownership enforcement` มีเฉพาะ
+  `workflowService.ts` และ `test-workflow-binding-resolution.ts`;
+  plan และ active log นี้อยู่ใน docs closeout commit แยกต่างหาก
+- reviewer ตรวจ diff จริง + รันเทสต์เองก่อน commit: binding-resolution
+  827/827, persistence 452/452, foundation 161/161, `npx tsc --noEmit`
+  และ `git diff --check` ผ่าน; complexity ยืนยันจาก diff —
+  เช็ค inline 3 จุดใน owners เดิม, 0 helper/guard function ใหม่
+- Task 7+ ยังไม่เริ่ม; production unique-index blocker ยังเปิด;
+  ไม่แตะ Phase 10B และไม่ push/merge/deploy
