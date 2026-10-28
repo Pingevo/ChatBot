@@ -8164,3 +8164,106 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
   merge/deploy · Phase 10B ไม่แตะ · Task 5 ไม่เริ่ม · production
   unique-index blocker ยังเปิด · `getWorkflowImportDetail` all-bindings
   blocker = pre-existing Task-3 fail-closed → Task 6 `invalid_bindings`.
+
+### กำลังจะทำ — R1 TASK 5: overlap readiness (implementation session, approved plan)
+
+- **baseline**: worktree `zaapi-workflow-foundation` · branch
+  `codex/zaapi-workflow-foundation` @ `566411f` · tree clean · staging ว่าง ·
+  Phase 10B (`feature-phase3-aswer-quality` @ `fd4e682`, 11 dirty paths =
+  activity ภายนอก) ไม่แตะ
+- **ผล audit + approved design (reviewer ปฏิเสธ post-commit delegation)**:
+  overlap ต้อง evaluate **ก่อน pointer CAS** (step 10 ของ plan) ผ่าน owner
+  เดียว = `getWorkflowImportDetail` — เพิ่ม optional server-only param
+  `versionId` ให้อ่าน target-version artifacts (version doc + bindings
+  persisted ก่อน CAS อยู่แล้วตาม crash/retry design) · lookup scoped
+  `{version_id, workflow_id}` → missing/foreign → null → caller throw
+  ก่อน commit (ไม่ flip pointer ไม่ emit success audit) · override path
+  ใช้ `version.platforms` (derived scope ที่ persist ใน version doc) ไม่ใช่
+  `wf.platforms` ที่ stale ก่อน CAS; ordinary path คง `wf.platforms` เดิม
+- **overlap semantics**: imported/imported = intersect valid resolved
+  `(platform|shop_id)` pairs + `message_received` trigger ทั้งสองฝั่ง ·
+  imported/legacy = `enabled:true` + `status:"published"` + มี trigger node
+  (engine เดิม subtype-agnostic) + legacy scope semantics (ว่าง=match-all)
+  เทียบ imported resolved scope ที่ non-empty · zero valid/invalid/
+  unresolved mappings → ไม่มี eligibility ไม่ใช่ match-all · disjoint/ไม่มี
+  trigger → ไม่ conflict · deterministic ทุก candidate ไม่มี winner semantics
+- **response contract**: detail `publish_blockers` += overlap strings +
+  field ใหม่ `overlap_conflicts` · result `publish_blockers` คง scope-only
+  (exact-eq asserts เดิม) + `overlap_conflicts` แยก · audit
+  `metadata.overlap` · CAS conflict path ไม่ส่ง overlap fields · overlap
+  ไม่ persist ใน `resolution.conflict` · save ยัง commit disabled/draft
+- **RED-first TDD**: Task-5 section ท้าย `test-workflow-binding-resolution.ts`
+  — 12 cases ตาม approved plan (imported/imported สองทิศ, legacy matrix,
+  disjoint, no-trigger, zero/invalid mappings, overlap-save commit,
+  narrowing clear, v1→v2 ordering, competing CAS ไม่รายงาน overlap,
+  eval-failure ไม่ commit/audit, foreign version_id fail-closed,
+  target-version platforms, ไม่ persist conflict) แล้วค่อยแก้ service
+- **scope guard**: แตะเฉพาะ `workflowService.ts` + suite เดิม · ไม่แตะ
+  engine/routes/UI/collections/indexes/workers/deps/flags · ไม่เริ่ม Task 6
+
+### R1 TASK 5 ผลลัพธ์ — overlap readiness (pre-commit review — ยังไม่ stage/commit)
+
+- **baseline ก่อนแก้**: `codex/zaapi-workflow-foundation` @ `566411f` · tree clean ·
+  suites fresh 732/732 + 452/452 + 161/161 · Phase 10B ไม่แตะ
+- **แผนที่อนุมัติ (reviewer ปฏิเสธ post-commit delegation รอบแรก)**: overlap
+  evaluate **ก่อน pointer CAS** ผ่าน `getWorkflowImportDetail(workflowId, versionId?)`
+  — optional server-only param อ่าน target-version artifacts ที่ persist ก่อน CAS
+  อยู่แล้ว · lookup scoped `{version_id, workflow_id}` → missing/foreign → null →
+  caller throw (fail closed ไม่ flip pointer ไม่ emit success audit) · override
+  path ใช้ `version.platforms` (wf.platforms stale ก่อน CAS — imported docs
+  diverge ไม่ได้เพราะ updateWorkflow CAS-gated อยู่แล้ว); ordinary path คงเดิม
+- **implementation (workflowService.ts only)**: `WorkflowImportDetail.overlap_conflicts`
+  + inline overlap block ใน readiness owner — eligibility = `message_received`
+  trigger + valid resolved `(platform|shop_id)` pairs เท่านั้น · imported candidate
+  = import!=null + current-version trigger + pair intersect · legacy candidate =
+  enabled+published + trigger node (subtype-agnostic ตาม engine เดิม) + doc-scope
+  product intersect (ว่าง=match-all เทียบ resolved pairs) · sort workflow_id
+  deterministic รายงานทุกตัว ไม่มี winner · save path: owner call ก่อน commit →
+  `overlap_conflicts` → res + audit `metadata.overlap` · `res.publish_blockers`
+  คง scope-only (exact-eq asserts คงอยู่) · conflict path ไม่ส่ง overlap ·
+  `resolution.conflict` ไม่แตะ (overlap ไม่ persist)
+- **RED evidence (ก่อนแก้ production)**: 26 failures ใน section 28 —
+  `overlap_conflicts` ไม่มี field บน detail · res/audit hardcode `[]` ·
+  foreign version_id ไม่ถูก reject (param ไม่มี) · ไม่มี pre-CAS eval
+  (hook ไม่ยิง → save commit + audit) — pins ที่ผ่านอยู่แล้ว label "pin" ไว้
+- **fix ระหว่าง GREEN (test-side, ไม่ใช่ production)**: legacy match-all fixture
+  (empty scope) ชน resolved scope ทุกตัว → retire หลัง assert ของมันเอง +
+  re-pin count — implementation ถูกต้องตาม contract อยู่แล้ว
+- **Verification (fresh, run จริง session นี้)**: binding-resolution **789/789**
+  (732 baseline → +57 asserts) · persistence **452/452** · foundation **161/161**
+  · `npx tsc --noEmit` exit 0 · `git diff --check` exit 0
+- **complexity**: helpers +0 · guards +0 · regexes +0 · keyword tables +0 ·
+  decision owners +0 · dup blocks +0 · collections/indexes/workers/deps/flags +0
+  · signature +1 optional param (owner เดิม) · null-readiness fail-closed +
+  ownership-scoped query = safety checks ภายใน owner เดิม ไม่ใช่ guard ใหม่
+- **ไฟล์**: `workflowService.ts` (+~50 บรรทัด) · `test-workflow-binding-resolution.ts`
+  (section 28 + fixture SRC_OV/SRC_OV_LAB + summary assert legacy-count dynamic)
+  · plan Task 5 evidence · waythrough2 entry นี้
+- **stop gate**: staging ว่าง · ไม่ stage/commit/push/PR/deploy · Phase 10B ไม่แตะ
+  · Task 6+ ไม่เริ่ม · production unique-index blocker ยังเปิด
+
+### R1 TASK 5 correction — แก้ evidence ไม่ใช่โค้ด (reviewer pass โค้ด แต่ยังไม่อนุมัติ commit)
+
+- **สิ่งที่ผิดในรายงานก่อนหน้า**: เขียนว่า `guards +0` — ไม่ตรงกับงานจริง ที่เพิ่ม
+  safety check 2 จุดภายใน owner เดิม: (1) target-version lookup แบบ ownership-scoped
+  `{version_id, workflow_id}` → missing/foreign → null → caller throw ก่อน CAS;
+  (2) `!readiness → throw` ก่อน pointer CAS ใน `saveBindingResolutionBatch` —
+  guard *function* ใหม่ยัง +0 แต่ safety checks ต้องนับ +2 แยกกันชัดๆ
+- **แก้แล้วใน plan evidence**: `safety checks/guards +2` (inside existing owners)
+  + guard functions +0 · decision owners +0 แยกบรรทัดเดิม
+- **ตัวเลข diff ที่ถูก (live `git diff --numstat` เทียบ reviewer snapshot)**:
+  `workflowService.ts` **+62/−8** (รายงานเดิมเขียน "+~50" ผิด) ·
+  `test-workflow-binding-resolution.ts` **+264/−1** · plan doc +5/−3+1 แก้ ·
+  log +77+append นี้ — ไฟล์โค้ด/เทสไม่แตะรอบนี้
+
+### R1 TASK 5 closeout — แยก feature และ docs ตามรูปแบบ branch
+
+- ผู้ใช้อนุมัติให้แทนที่ commit รวม `e8e6f83` ด้วยสอง commit: feature
+  `b502bd3 feat: overlap publish blocker in readiness` มีเฉพาะ
+  `workflowService.ts` และ `test-workflow-binding-resolution.ts`;
+  plan และ active log นี้อยู่ใน docs closeout commit แยกต่างหาก
+- ทดสอบสดก่อนแยก commit บน source tree เดียวกัน: binding-resolution
+  789/789, persistence 452/452, foundation 161/161, `npx tsc --noEmit`
+  และ `git diff --check` ผ่าน; ไม่แก้ source/test ระหว่าง split
+- Task 6+ ยังไม่เริ่ม; production unique-index blocker ยังเปิด;
+  ไม่แตะ Phase 10B และไม่ push/merge/deploy
