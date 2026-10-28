@@ -2134,6 +2134,115 @@ async function main() {
       `${nm} → no persisted resolution.conflict (overlap = readiness-computed)`);
   }
 
+  // ═══ 29. Task 6 — imported scope ownership + activation gate ═══
+  console.log("\n=== 29. Task 6 — imported scope ownership + activation gate ===");
+  // dedicated shops — scope ไม่ชน fixture เก่า
+  for (const [sid, plat] of [["shop_t6", "shopee"], ["shop_t6i", "shopee"], ["shop_t6f", "shopee"], ["shop_t6l", "lazada"]] as const) {
+    await shopsColl5.insertOne({ shop_id: sid, platform: plat, shopname: sid, connected: true });
+  }
+  const casSaveEvents = () => state.adminEvents.filter((e) => (e as { action_type?: string }).action_type === "workflow.cas_save");
+
+  // ─── 29.1 imported CAS carries shop_ids/platforms → throws; zero version/binding/audit/doc writes
+  const SC = await setupOv("workflow_T6_SC", SRC_OV);
+  const scWf = (await svc.getWorkflow(SC.wfId)) as Record<string, unknown>;
+  const scVer0 = (await collDocs(COLLECTIONS.workflowVersions)).filter((v) => v.workflow_id === SC.wfId).length;
+  const scBind0 = canonicalJson((await collDocs(COLLECTIONS.workflowBindings)).filter((b) => b.workflow_id === SC.wfId));
+  const scDoc0 = canonicalJson(scWf);
+  const ev0_29 = casSaveEvents().length;
+  const scMsg1 = await act(() => svcAny.saveWorkflowDraft(SC.wfId, { shop_ids: ["shop_t6"] }, scWf.version as number, "admin_t"));
+  ok(scMsg1 != null && String(scMsg1).includes("shop_ids"), "imported CAS shop_ids → throws");
+  const scMsg2 = await act(() => svcAny.saveWorkflowDraft(SC.wfId, { platforms: ["lazada"] }, scWf.version as number, "admin_t"));
+  ok(scMsg2 != null && String(scMsg2).includes("platforms"), "imported CAS platforms → throws");
+  const scMsg3 = await act(() => svcAny.saveWorkflowDraft(SC.wfId, { shop_ids: [], platforms: [] }, scWf.version as number, "admin_t"));
+  ok(scMsg3 != null, "imported CAS empty scope arrays → throws (mutation จริง)");
+  const scMsg4 = await act(() => svcAny.saveWorkflowDraft(SC.wfId, { enabled: false, shop_ids: ["shop_t6"] }, scWf.version as number, "admin_t"));
+  ok(scMsg4 != null, "imported CAS scope mixed with enabled → throws");
+  eq((await collDocs(COLLECTIONS.workflowVersions)).filter((v) => v.workflow_id === SC.wfId).length, scVer0,
+    "scope rejects → zero new version docs");
+  eq(canonicalJson((await collDocs(COLLECTIONS.workflowBindings)).filter((b) => b.workflow_id === SC.wfId)), scBind0,
+    "scope rejects → zero binding changes");
+  eq(casSaveEvents().length, ev0_29, "scope rejects → zero cas_save audit");
+  eq(canonicalJson(await svc.getWorkflow(SC.wfId)), scDoc0, "scope rejects → workflow doc byte-identical");
+  const scWfCur = (await svc.getWorkflow(SC.wfId)) as Record<string, unknown>;
+  const rName = await svcAny.saveWorkflowDraft(SC.wfId, { name: "t6-scope-ok" }, scWfCur.version as number, "admin_t") as Record<string, unknown>;
+  ok(rName?.ok === true, "imported CAS non-scope field (name) → still passes (pin)");
+  const scUp = await act(() => svcAny.updateWorkflow(SC.wfId, { shop_ids: ["shop_t6"] }));
+  ok(scUp != null, "updateWorkflow scope on imported → rejected via CAS_REQUIRED (existing pin)");
+
+  // ─── 29.2 legacy workflow → shop_ids/platforms pass unchanged (pin)
+  const LEG6 = await mkLegacy("t6-legacy", ["lazada"], ["shop_t6l"], false, "draft");
+  const leg6Wf = (await svc.getWorkflow(LEG6.workflow_id)) as Record<string, unknown>;
+  const rLeg = await svcAny.saveWorkflowDraft(LEG6.workflow_id, { shop_ids: ["shop_t6"], platforms: ["lazada"] }, leg6Wf.version as number, "admin_t") as Record<string, unknown>;
+  ok(rLeg?.ok === true, "legacy CAS scope fields → passes (unchanged contract)");
+  const leg6After = (await svc.getWorkflow(LEG6.workflow_id)) as Record<string, unknown>;
+  eq(canonicalJson(leg6After?.shop_ids), canonicalJson(["shop_t6"]), "legacy → shop_ids applied");
+  eq(canonicalJson(leg6After?.platforms), canonicalJson(["lazada"]), "legacy → platforms applied");
+
+  // ─── 29.3 carried/resolved mapping target deleted → invalid_bindings counted in detail
+  const IV = await setupOv("workflow_T6_IV", SRC_OV);
+  await callResolve(IV.wfId, await ovReq(IV.wfId, "shopee", "shop_t6i"));
+  await shopsColl5.deleteOne({ shop_id: "shop_t6i" });
+  const ivWf = (await svc.getWorkflow(IV.wfId)) as Record<string, unknown>;
+  await svcAny.saveWorkflowDraft(IV.wfId, { name: "t6-inv-reval" }, ivWf.version as number, "admin_t");
+  const detIV = await svc.getWorkflowImportDetail(IV.wfId) as
+    { unresolved_bindings?: number; invalid_bindings?: number; bindings?: { status?: string }[] } | null;
+  eq(detIV?.unresolved_bindings, 0, "invalid case → unresolved_bindings = 0 (pin)");
+  eq(detIV?.invalid_bindings, 1, "invalid case → invalid_bindings = 1 (same binding-status source)");
+  eq(detIV?.bindings?.[0]?.status, "invalid", "invalid case → bindings[].status consistent with count (pin)");
+
+  // ─── 29.4 fully-resolved imported → enable blocked by FOUNDATION_GATES ทุก mutation path
+  const FULL = await setupOv("workflow_T6_FULL", SRC_OV);
+  await callResolve(FULL.wfId, await ovReq(FULL.wfId, "shopee", "shop_t6f"));
+  const detFULL = await svc.getWorkflowImportDetail(FULL.wfId) as
+    { unresolved_bindings?: number; invalid_bindings?: number; overlap_conflicts?: string[] } | null;
+  eq(detFULL?.unresolved_bindings, 0, "fully-resolved → unresolved = 0 (pin)");
+  eq(detFULL?.invalid_bindings, 0, "fully-resolved → invalid_bindings = 0");
+  eq(canonicalJson(detFULL?.overlap_conflicts), "[]", "fully-resolved → no overlap (dedicated scope)");
+  const tgMsg = await act(() => svcAny.toggleWorkflow(FULL.wfId, true));
+  ok(tgMsg != null && String(tgMsg).includes("foundation gate not open"),
+    "toggle enable fully-resolved imported → blocked by FOUNDATION_GATES");
+  const upMsg = await act(() => svcAny.updateWorkflow(FULL.wfId, { enabled: true }));
+  ok(upMsg != null && String(upMsg).includes("foundation gate not open"),
+    "updateWorkflow enable fully-resolved imported → blocked by FOUNDATION_GATES");
+  const fullWf = (await svc.getWorkflow(FULL.wfId)) as Record<string, unknown>;
+  const casMsg = await act(() => svcAny.saveWorkflowDraft(FULL.wfId, { enabled: true }, fullWf.version as number, "admin_t"));
+  ok(casMsg != null && String(casMsg).includes("foundation gate not open"),
+    "CAS enable fully-resolved imported → blocked by FOUNDATION_GATES");
+  const fullAfter = (await svc.getWorkflow(FULL.wfId)) as Record<string, unknown>;
+  eq(fullAfter?.enabled, false, "fully-resolved → enabled stays false (pin)");
+  eq(fullAfter?.status, "draft", "fully-resolved → status stays draft (pin)");
+
+  // ─── 29.5 gate semantics — unresolved / invalid / blockers each independently blocks; legacy unaffected
+  const tgIv = await act(() => svcAny.toggleWorkflow(IV.wfId, true));
+  ok(tgIv != null, "invalid>0 → toggle enable blocked (activation gate)");
+  ok(tgIv != null && String(tgIv).includes("1 invalid"), "gate error surfaces invalid count");
+  const UN6 = await setupOv("workflow_T6_UN", SRC_OV);
+  const tgUn = await act(() => svcAny.toggleWorkflow(UN6.wfId, true));
+  ok(tgUn != null, "unresolved>0 → toggle enable blocked (pin)");
+  const NB6 = await setupNoAcc("workflow_T6_NB");
+  await callResolve(NB6.wfId, NB6.req());
+  const detNB = await svc.getWorkflowImportDetail(NB6.wfId) as
+    { unresolved_bindings?: number; invalid_bindings?: number; publish_blockers?: string[] } | null;
+  eq(detNB?.unresolved_bindings, 0, "blockers-only → unresolved = 0 (pin)");
+  eq(detNB?.invalid_bindings, 0, "blockers-only → invalid_bindings = 0");
+  ok((detNB?.publish_blockers ?? []).includes(BLOCKER_GLOBAL), "blockers-only → global-scope blocker present (pin)");
+  const tgNb = await act(() => svcAny.toggleWorkflow(NB6.wfId, true));
+  ok(tgNb != null, "blockers>0 with unresolved=invalid=0 → enable blocked (pin)");
+  const rLegTg = await svcAny.toggleWorkflow(LEG6.workflow_id, true);
+  ok(rLegTg === true, "legacy workflow → toggle enable unaffected (pin)");
+  eq((await svc.getWorkflow(LEG6.workflow_id))?.enabled, true, "legacy → enabled applied (pin)");
+
+  // ─── 29.6 contract pins — res.publish_blockers scope-only · overlap แยก · committed disabled/draft
+  const OV6 = await setupOv("workflow_T6_OV", SRC_OV);
+  const rOv6 = await callResolve(OV6.wfId, await ovReq(OV6.wfId, "shopee", "shop_o1"));
+  ok(rOv6?.ok === true, "contract pin → overlapping resolution still commits");
+  eq(canonicalJson(rOv6?.publish_blockers), "[]", "contract pin → res.publish_blockers stays scope-only");
+  ok(Array.isArray(rOv6?.overlap_conflicts) && (rOv6.overlap_conflicts as unknown[]).length > 0,
+    "contract pin → res.overlap_conflicts reported separately");
+  const ov6Wf = (await svc.getWorkflow(OV6.wfId)) as Record<string, unknown>;
+  eq(ov6Wf?.enabled, false, "contract pin → committed disabled");
+  eq(ov6Wf?.status, "draft", "contract pin → committed draft");
+
   // ═══ summary ═══
   const countsEnd = await allCounts();
   const totalWfs = (await collDocs(COLLECTIONS.workflows)).length;

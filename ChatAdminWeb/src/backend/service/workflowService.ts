@@ -259,7 +259,8 @@ async function _assertActivationAllowed(
   if (fields.enabled !== true && fields.status !== "published") return;
   if (!before.import) return;
   const detail = await getWorkflowImportDetail(workflowId);
-  const validationOk = !!detail && detail.unresolved_bindings === 0 && detail.publish_blockers.length === 0;
+  const validationOk = !!detail && detail.unresolved_bindings === 0 && detail.invalid_bindings === 0
+    && detail.publish_blockers.length === 0;
   // publishReadiness = foundation gate owner — runtimeActivation=false → imported block ทุกตัวรอบนี้
   const ready = validationOk && publishReadiness({
     ok: validationOk, errors: detail?.publish_blockers ?? [],
@@ -268,6 +269,7 @@ async function _assertActivationAllowed(
   if (!ready) {
     throw new Error(
       `imported workflow activation blocked: ${detail?.unresolved_bindings ?? "?"} unresolved bindings, ` +
+      `${detail?.invalid_bindings ?? "?"} invalid bindings, ` +
       `${detail?.publish_blockers.length ?? "?"} publish blockers, foundation gate not open — resolve before enabling/publishing`
     );
   }
@@ -986,6 +988,18 @@ export async function saveWorkflowDraft(
   if (unknown.length > 0) throw new Error("unsupported fields: " + unknown.join(","));
   const safeFields = pickAllowed(fields as Record<string, unknown>, CAS_SAVE_ALLOWLIST);
   await _assertActivationAllowed(workflowId, before, safeFields);
+  // imported workflow: shop_ids/platforms เป็น derived index (recompute จาก resolved
+  // account bindings ตอน version write) — ไม่ใช่ editable field ผ่าน draft save
+  // spec §9: doc-level scope ไม่ใช่ authority ของ imported flow; legacy ผ่านเดิม
+  if (before.import) {
+    const scopeKeys = (["shop_ids", "platforms"] as const).filter((k) => safeFields[k] !== undefined);
+    if (scopeKeys.length > 0) {
+      throw new Error(
+        `imported workflow scope derives from resolved account bindings — ` +
+        `${scopeKeys.join(", ")} not editable via draft save`
+      );
+    }
+  }
   const mergedNodes = (safeFields.nodes as WorkflowNode[] | undefined) ?? before.nodes;
   const mergedEdges = (safeFields.edges as WorkflowEdge[] | undefined) ?? before.edges;
   const graph = validateWorkflowGraph({ nodes: mergedNodes, edges: mergedEdges });
@@ -1852,6 +1866,7 @@ export interface WorkflowImportDetail {
   fingerprint: string | null;
   bindings: { node_id: string; field_path: string; kind: string; count: number; status: BindingStatus }[];
   unresolved_bindings: number;
+  invalid_bindings: number;
   publish_blockers: string[];
   overlap_conflicts: string[];
 }
@@ -1942,6 +1957,7 @@ export async function getWorkflowImportDetail(workflowId: string, versionId?: st
     fingerprint: version?.fingerprint ?? null,
     bindings: binds.map((b) => ({ node_id: b.node_id, field_path: b.field_path, kind: b.kind, count: b.count, status: b.status })),
     unresolved_bindings: binds.filter((b) => b.status === "unresolved").length,
+    invalid_bindings: binds.filter((b) => b.status === "invalid").length,
     publish_blockers: [...capability.errors, ...scopeBlockers, ...overlapConflicts],
     overlap_conflicts: overlapConflicts,
   };
