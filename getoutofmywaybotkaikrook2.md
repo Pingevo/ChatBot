@@ -8459,3 +8459,119 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
   blocker ยังค้าง · Task 8 (UI panel) **ยังไม่เริ่ม**
 - **ค้างต่อ reviewer**: commit รอ explicit approval — two-commit split
   (`feat: binding-resolution API route + read view` แล้ว docs closeout)
+
+### กำลังจะทำ — R1 TASK 8: BindingResolutionPanel UI + editor wiring + SSR asserts (implementation session, approved plan §11 Task 8)
+
+- **frozen state (verified 2026-10-28)**: worktree `zaapi-workflow-foundation` ·
+  branch `codex/zaapi-workflow-foundation` @ `d664dcf` (chain
+  `d664dcf → 11f83e2 → a461aeb`) · tree clean · staging empty ·
+  Phase 10B HEAD ตอนนี้ `3dfcf9c` (เลื่อนจาก `fd4e682` — external activity ·
+  dirty paths = งานภายนอก) ไม่แตะ
+- **baseline tests (run สดก่อน RED)**: routes 35/35 · binding-resolution 872/872 ·
+  persistence 452/452 · foundation 161/161 — ต้องไม่ลด
+- **Task 8 scope (ตาม plan §11 Task 8 + §5 view contract เท่านั้น)**:
+  1. `src/components/workflow/BindingResolutionPanel.tsx` — ใหม่,
+     presentational เท่านั้น (render `BindingResolutionView` + emit events
+     ขึ้น editor — zero fetch/validation/business logic)
+  2. `WorkflowEditor.tsx` wiring — panel เข้า `NodeConfigPanel` สำหรับ
+     imported workflows (`importDetail.source != null`) · derived
+     `platforms`/`shop_ids` read-only + "derived from resolved bindings" note ·
+     `loadedVersion` refresh จาก POST success · 409 → toast + reload offer
+     (confirm.ask → reload) · repeat checkbox → `repeat:true` ใน payload
+  3. SSR markup asserts ใน `test-workflow-binding-resolution.ts` ผ่าน
+     `renderToStaticMarkup` (react-dom เป็น dep อยู่แล้ว — ไม่มี dep ใหม่)
+- **design choices (จะรายงานใน pre-commit report)**:
+  - editor SSR ไม่ได้ — `WorkflowEditor.tsx` มี `import "@xyflow/react/dist/style.css"`
+    → tsx throw `Unexpected token '.'` (verify จริง) → extract derived-scope
+    subtree เป็น `DerivedScopeFields` export ใน panel file (file เดียว งบ +1)
+    แล้ว SSR ตัวนั้น — ตาม prompt fallback "extract the exact JSX subtree"
+  - POST trigger = per-binding resolve button → `onResolve(binding_id)` emit
+    ขึ้น editor (proposed[] เดียวต่อ submit — map ตรงกับ contract)
+  - `isImported` = `importDetail.source != null` (detail คืน non-null แม้ legacy —
+    source:null) — ไม่ใช่ `importDetail != null`
+  - unresolvable kind copy: team = plan-mandated literal · ticket_field/url =
+    "unavailable … (publish-blocking)" — copy ใหม่ รายงานไว้
+- **ไม่ทำใน Task 8**: helper/nested fn/decision owner/collection/index/worker/
+  dep/flag/regex ใหม่ · service methods ใหม่ (งบ §10: UI components +1 เท่านั้น) ·
+  jsdom/automation (interaction = browser canary ตอน R1 exit — Task 9) ·
+  enable path สำหรับ imported · commit/push/PR · production index DDL ·
+  real Mongo/provider · Phase 10B
+- **RED plan**: section 31 ท้าย `test-workflow-binding-resolution.ts` —
+  display_value ข้าง source_index labels · kind-scoped options present/absent
+  per bucket · team "team mapping unavailable — local team identity not
+  defined" · ticket_field/url unavailable notes · "[redacted]" literal ·
+  overlap/blocker chips · DerivedScopeFields read-only + note ·
+  contract pins (panel zero fetch/service imports · editor payload allowed
+  keys only · no client identity editing)
+- **stop gate**: Task 8 เท่านั้น · ห้าม stage/commit · หยุด pre-commit
+  review gate · verdict ต้องมี evidence จริง
+
+### ผล Task 8 (verified 2026-10-28, pre-commit stop — ยังไม่ commit)
+
+- **RED (ก่อน impl)**: section 31 เพิ่มแล้ว → run → **38 fail** (module
+  `BindingResolutionPanel` ไม่มี + editor wiring ไม่มี) — fail ด้วยเหตุ
+  ที่ถูก (absent module/wiring ไม่ใช่ test error)
+- **Impl**: `BindingResolutionPanel.tsx` ใหม่ 226 บรรทัด — props =
+  `view` + controlled `picks`/`repeats`/`submitting` + emit `onPick`/
+  `onRepeat`/`onResolve` เท่านั้น · `WorkflowEditor.tsx` +152/−4:
+  `isImported = importDetail.source != null` → GET view ตอน load ·
+  `refreshBindingView` + `resolveBinding` (POST allowed keys · 409 →
+  toast + confirm.ask → reload · success → `setLoadedVersion(d.version)`)
+  · `resolution` bundle → NodeConfigPanel (filter `nodeId`) ·
+  `FlowSettingsPanel imported` → `DerivedScopeFields` แทน editable scope ·
+  status select + enable switch `disabled` เมื่อ imported
+- **GREEN (fresh)**: binding-resolution **919/919** (872+47 asserts ใหม่) ·
+  routes 35/35 · persistence 452/452 · foundation 161/161 · `tsc --noEmit`
+  clean · `git diff --check` clean
+- **test-suite fixes ระหว่าง GREEN (ไม่แตะ production)**:
+  - cross-bucket assert แก้ — `shop_s1` เป็น label candidate จริง
+    (seed `conv_trap` §26 ตั้งใจ collide) → เช็ค leak ด้วย account-option
+    format `· S1 (` + `adm_u1` แทน
+  - service-owner pin scan เฉพาะ runtime imports (`import type` erase —
+    contract ใช้ type จริงจาก workflowService ดีกว่า re-declare)
+  - POST locator = `"/bindings\`, {"` — `/bindings` ตัวแรกคือ GET loader
+- **contract pins พิสูจน์**: panel zero `fetch(`/XHR/axios · zero
+  `useState`/`useEffect`/dynamic import · ไม่มี runtime service import ·
+  ไม่แตะ `source_values`/`source_fp`/`requirement_fp` · markup interpolate
+  เฉพาะ `display_value` string จาก server · editor payload =
+  `workflow_id`/`expected_version`/`version_id`/`proposed[{binding_id,
+  repeat?, mappings}]` เท่านั้น
+- **งบ §10**: UI components +1 พอดี (panel file เดียว รวม
+  `DerivedScopeFields` — extract ตาม sanctioned fallback เพราะ editor
+  import `.css` SSR ด้วย tsx ไม่ได้ — verify แล้ว) · service methods/
+  routes/helpers/regex/dep ใหม่ = 0
+- **pre-commit checkpoint**: branch @ `d664dcf` ไม่เปลี่ยน · staging ว่าง ·
+  ไฟล์ที่แตะ = BindingResolutionPanel.tsx ใหม่, WorkflowEditor.tsx,
+  test-workflow-binding-resolution.ts, plan file, log นี้ · Phase 10B
+  (HEAD เลื่อนเป็น `2278501` — external activity ต่อเนื่อง) ไม่แตะ ·
+  production unique-index blocker ยังค้าง · browser canary เหลือตอน
+  §16 exit gate — Task 9 **ยังไม่เริ่ม**
+- **ค้างต่อ reviewer**: commit รอ explicit approval — ชื่อสำรองไว้
+  `feat: binding-resolution panel UI` (two-commit split ตาม plan §15)
+
+### Task 8 correction round 1 (verified 2026-10-28, pre-commit stop — ยังไม่ commit)
+
+- **finding (reviewer)**: `UNAVAILABLE_KIND_NOTE` fail-open — kind
+  `channel`/`shop` (emit จาก `BINDING_KEYS` `channelIds`/`shopIds`) +
+  unknown kind ไหนก็ตามไม่อยู่ในตาราง → `resolvable=true` → render
+  repeat checkbox + resolve button ที่ disabled ถาวรพร้อม hint หลอก
+  ในขณะที่ server switch reject ผ่าน `default:` — UI/server posture ขัดกัน
+- **วิธีแก้ (ตาม reviewer spec เป๊ะ)**: invert predicate เป็น allowlist —
+  `resolvable = kind ∈ {account,label,user}` (สาม kind เดียวกับ service
+  validation switch) · kind อื่นทั้งหมด → unavailable path ·
+  `UNAVAILABLE_KIND_NOTE` คงไว้สำหรับ kind-specific copy (team literal
+  verbatim) + generic fallback `{kind} mapping unavailable in R1
+  (publish-blocking)` · ไม่มี function/helper/table ใหม่ — predicate
+  inversion + fallback string ใน component เดิม (panel +4 บรรทัดสุทธิ)
+- **§31.9 RED-first**: fixture node data `channelIds:["zchan_1"]` +
+  `shopIds:["zshop_1"]` → run → **6 fail** (channel/shop มี data-rbid +
+  "resolve binding" แต่ไม่มี note; "no picker" ผ่านก่อน fix แล้ว —
+  confirm gap คือ affordances ไม่ใช่ options)
+- **GREEN fresh**: binding-resolution **928/928** (919+9 asserts) ·
+  routes 35/35 · persistence 452/452 · foundation 161/161 ·
+  `tsc --noEmit` clean · `git diff --check` clean
+- **delta vs pre-correction**: panel +4 net · test +42 (§31.9) ·
+  plan/log appends · WorkflowEditor ไม่แตะรอบนี้
+- **pre-commit checkpoint**: branch @ `d664dcf` ไม่เปลี่ยน · staging
+  ว่าง · Phase 10B ไม่แตะ · browser canary ยังค้างที่ §16 (Task 9
+  ยังไม่เริ่ม) · commit รอ reviewer re-inspect + explicit approval
