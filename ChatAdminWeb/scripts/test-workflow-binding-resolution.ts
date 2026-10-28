@@ -2243,6 +2243,131 @@ async function main() {
   eq(ov6Wf?.enabled, false, "contract pin → committed disabled");
   eq(ov6Wf?.status, "draft", "contract pin → committed draft");
 
+  // ═══ 30. Task 7 — getBindingResolutionView read-view (plan §5) + display safety ═══
+  {
+    const callView = async (wfId: string): Promise<Record<string, unknown> | undefined | null> => {
+      const fn = svcAny.getBindingResolutionView;
+      if (typeof fn !== "function") return undefined; // RED — owner absent
+      try { return await fn(wfId) as Record<string, unknown> | null; }
+      catch (e) { return { __thrown: (e as Error).message }; }
+    };
+
+    // 30.1 shape + sources pairing + candidates + counts — unresolved imported fixture
+    const V1 = await setupImported("workflow_VIEW1");
+    const v1 = await callView(V1.wfId) as Record<string, unknown> | undefined | null;
+    ok(v1 != null, "view → non-null for imported workflow");
+    eq(v1?.workflow_id, V1.wfId, "view.workflow_id = workflow id");
+    eq(v1?.version_id, V1.verDoc.version_id, "view.version_id = current_version_id pointer");
+    eq(v1?.expected_version, V1.wfDoc.version, "view.expected_version = wf.version (CAS counter)");
+
+    type VB = { binding_id: string; node_id: string; field_path: string; kind: string; count: number;
+      status: string; sources?: { source_index: number; display_value: string }[];
+      resolution?: Record<string, unknown> };
+    const vBinds = (v1?.bindings ?? []) as VB[];
+    eq(vBinds.length, V1.binds.length, "view.bindings covers every version-scoped binding");
+    const vAcc = vBinds.find((b) => b.kind === "account");
+    eq(vAcc?.binding_id, V1.byKind("account").binding_id as string, "view account binding_id matches persisted doc");
+    ok(typeof vAcc?.node_id === "string" && typeof vAcc?.field_path === "string", "view binding → node_id/field_path present");
+    eq(vAcc?.count, 2, "view account count = 2 source values");
+    eq(vAcc?.status, "unresolved", "view account status = unresolved");
+    eq(vAcc?.sources?.length, 2, "view account sources = per-value");
+    eq(vAcc?.sources?.[0]?.source_index, 0, "view sources[0].source_index");
+    eq(vAcc?.sources?.[0]?.display_value, "zacc_1", "view sources[0].display_value = stored value verbatim");
+    eq(vAcc?.sources?.[1]?.source_index, 1, "view sources[1].source_index");
+    eq(vAcc?.sources?.[1]?.display_value, "zacc_2", "view sources[1].display_value pairing");
+
+    const vCand = v1?.candidates as Record<string, unknown> | undefined;
+    const accs = (vCand?.accounts ?? []) as { platform: string; shop_id: string; shopname: string }[];
+    const shopDocs = (await collDocs(COLLECTIONS.shops)) as { platform: string; shop_id: string; shopname: string }[];
+    const expAccs = shopDocs.map((s) => ({ platform: s.platform, shop_id: s.shop_id, shopname: s.shopname }))
+      .sort((a, b) => (`${a.platform}|${a.shop_id}` < `${b.platform}|${b.shop_id}` ? -1 : 1));
+    eq(JSON.stringify(accs), JSON.stringify(expAccs), "candidates.accounts = all shops sorted (platform,shop_id)");
+    ok(accs.every((a) => typeof a.shopname === "string"), "candidates.accounts carry shopname display");
+    const convDocs = await collDocs(COLLECTIONS.conversations);
+    const expLabels = [...new Set(convDocs.flatMap((c) => (Array.isArray(c.labels) ? c.labels : []) as string[]))].sort();
+    eq(JSON.stringify(vCand?.labels), JSON.stringify(expLabels), "candidates.labels = distinct sorted");
+    const usrs = (vCand?.users ?? []) as { admin_id: string; display: string }[];
+    const expUsrs = (await collDocs(COLLECTIONS.admins)).filter((a) => a.active !== false)
+      .sort((x, y) => ((x.admin_id as string) < (y.admin_id as string) ? -1 : 1));
+    eq(JSON.stringify(usrs.map((u) => u.admin_id)), JSON.stringify(expUsrs.map((a) => a.admin_id)),
+      "candidates.users = active admins only (inactive excluded), sorted");
+    ok(usrs.every((u) => typeof u.display === "string" && !("password_hash" in u) && !("email" in u)),
+      "candidates.users display = safe fields only (no secrets)");
+    eq(JSON.stringify(vCand?.teams), "[]", "candidates.teams = empty (unresolvable kind)");
+    eq(JSON.stringify(vCand?.ticket_fields), "[]", "candidates.ticket_fields = empty (unresolvable kind)");
+    eq(JSON.stringify(vCand?.urls), "[]", "candidates.urls = empty (unresolvable kind)");
+
+    const det1 = await svcAny.getWorkflowImportDetail(V1.wfId) as Record<string, unknown>;
+    eq(v1?.unresolved, det1.unresolved_bindings, "view.unresolved = detail.unresolved_bindings");
+    eq(v1?.invalid, det1.invalid_bindings, "view.invalid = detail.invalid_bindings");
+    eq(JSON.stringify(v1?.publish_blockers), JSON.stringify(det1.publish_blockers), "view.publish_blockers = detail's");
+    eq(JSON.stringify(v1?.overlap_conflicts), JSON.stringify(det1.overlap_conflicts), "view.overlap_conflicts = detail's");
+
+    // 30.2 url binding — stored "[redacted]" renders "[redacted]" · raw URL never leaks
+    const vUrl = vBinds.find((b) => b.kind === "url");
+    eq(vUrl?.sources?.[0]?.display_value, "[redacted]", "url binding display_value = \"[redacted]\"");
+    ok(vUrl != null && !("resolution" in vUrl), "url binding → no resolution echo (unresolvable)");
+    ok(v1 != null && !JSON.stringify(v1).includes("sekret-br"), "view → raw URL credential never leaks");
+    ok(v1 != null && !JSON.stringify(v1).includes("img.example.com"), "view → raw URL host never leaks");
+
+    // 30.3 display safety — REDACT_VALUE-matching stored value → "[redacted]" · non-primitive → canonicalJson truncated
+    const SRC_SAFE = {
+      workflowId: "workflow_SAFE", loadedVersionId: "wv-src-S",
+      versions: [{ workflowVersionId: "wv-src-S", status: "active" }],
+      nodes: [
+        { id: "t1", type: "message_received", position: { x: 0, y: 0 },
+          data: { name: "trig", nodeType: "trigger",
+                  accountIds: ["zacc_token_x", "zacc_ok"], nextStepId: "a1" } },
+        { id: "a1", type: "send_message", position: { x: 100, y: 0 },
+          data: { name: "reply", nodeType: "action",
+                  action: { labelIds: [{ id: "zlobj", note: "n".repeat(200) }] } } },
+      ],
+      edges: [{ source: "t1", target: "a1", sourceHandle: null }],
+    };
+    const sBatch = previewZaapiFlows({ flows: [SRC_SAFE] }, { indexRows: [{ wid: "workflow_SAFE", name: "safe" }] });
+    await svcAny.applyImportBatch(sBatch, "admin_t");
+    const sWfId = "wf_imp_" + _sh("workflow_SAFE");
+    const vS = await callView(sWfId) as Record<string, unknown> | undefined | null;
+    const sAcc = ((vS?.bindings ?? []) as VB[]).find((b) => b.kind === "account");
+    eq(sAcc?.sources?.[0]?.display_value, "[redacted]", "REDACT_VALUE-matching stored value → \"[redacted]\"");
+    eq(sAcc?.sources?.[1]?.display_value, "zacc_ok", "plain value renders verbatim");
+    const sLab = ((vS?.bindings ?? []) as VB[]).find((b) => b.kind === "label");
+    const sDisp = sLab?.sources?.[0]?.display_value ?? "";
+    ok(sDisp.startsWith("{") && sDisp.includes("\"id\":\"zlobj\"") && sDisp.endsWith("…"),
+      `non-primitive → canonicalJson truncated (len=${sDisp.length})`);
+    ok(sDisp.length <= 121, "truncated display_value bounded");
+    ok(vS != null && !JSON.stringify(vS).includes("zacc_token_x"), "REDACT_VALUE-matching value never leaks");
+    const sStoredLab = (await collDocs(COLLECTIONS.workflowBindings))
+      .find((b) => b.workflow_id === sWfId && b.kind === "label");
+    ok(sStoredLab != null && typeof sStoredLab.source_values !== "undefined",
+      "non-primitive fixture produced persisted source_values");
+
+    // 30.4 absent workflow → null (route maps to 404)
+    eq(await callView("wf_absent_xyz"), null, "absent workflow → view null");
+    eq(await callView(sWfId) === null, false, "present workflow → non-null (control)");
+
+    // 30.5 resolution echo — resolved binding แสดง resolution verbatim จาก persisted doc
+    const V2 = await setupImported("workflow_VIEW2");
+    const res2 = await callResolve(V2.wfId, V2.req());
+    ok(res2?.ok === true, "view resolution fixture → resolution commit ok");
+    const wfDoc2 = (await svc.getWorkflow(V2.wfId)) as Record<string, unknown>;
+    const v2 = await callView(V2.wfId) as Record<string, unknown> | undefined | null;
+    eq(v2?.version_id, wfDoc2.current_version_id, "post-commit view.version_id = new pointer");
+    eq(v2?.expected_version, wfDoc2.version, "post-commit view.expected_version = bumped version");
+    const rAcc = ((v2?.bindings ?? []) as VB[]).find((b) => b.kind === "account");
+    eq(rAcc?.status, "resolved", "resolved binding → status resolved in view");
+    const pAcc = (await collDocs(COLLECTIONS.workflowBindings))
+      .find((b) => b.workflow_id === V2.wfId && b.version_id === wfDoc2.current_version_id && b.kind === "account");
+    eq(canonicalJson(rAcc?.resolution), canonicalJson(pAcc?.resolution), "view.resolution = persisted resolution verbatim");
+
+    // contract pin — read view เขียน artifacts/audit = 0
+    const countsV = await allCounts();
+    const evV = state.adminEvents.length;
+    await callView(V2.wfId);
+    eq(canonicalJson(await allCounts()), canonicalJson(countsV), "view → zero artifact writes (read-only)");
+    eq(state.adminEvents.length, evV, "view → zero audit events");
+  }
+
   // ═══ summary ═══
   const countsEnd = await allCounts();
   const totalWfs = (await collDocs(COLLECTIONS.workflows)).length;

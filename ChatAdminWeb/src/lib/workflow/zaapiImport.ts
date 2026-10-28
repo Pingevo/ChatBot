@@ -54,7 +54,8 @@ export const BINDING_KEYS: Record<string, string> = {
 // action.chatbot.escalationStepId, waitForReply.validReplyStepId, …)
 const STEP_KEY = /stepid$/i;
 // credential/secret-ish keys → redact ทั้งใน canonical config และ raw snapshot
-const REDACT_VALUE = /url|webhook|token|secret|apikey|api_key|password/i;
+// export (Task 7): binding-resolution view reuses regex เดียวกันสำหรับ display safety
+export const REDACT_VALUE = /url|webhook|token|secret|apikey|api_key|password/i;
 
 export interface BindingRequirement {
   node_id: string;      // local canonical node id (zn_*)

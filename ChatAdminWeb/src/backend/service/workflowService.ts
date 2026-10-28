@@ -14,9 +14,11 @@ import { logAdminEvent } from "./adminLogService";
 import { pickAllowed } from "../lib/sanitizeFields";
 import { validateWorkflowGraph } from "../../lib/workflow/graph";
 import {
-  stableFingerprint, provenanceSnapshot, canonicalJson,
+  stableFingerprint, provenanceSnapshot, canonicalJson, REDACT_VALUE,
   type BatchImportReport, type BindingRequirement, type CanonicalDraft,
 } from "../../lib/workflow/zaapiImport";
+import type { ShopDoc } from "./shopService";
+import type { AdminDoc } from "./authService";
 import { validateCanonicalDraft, publishReadiness, LOCAL_ENGINE_PLATFORMS } from "../../lib/workflow/nodeRegistry";
 import type {
   WorkflowTriggerFrequency, WorkflowFalseBranchPolicy, WorkflowStatus,
@@ -1253,10 +1255,11 @@ export interface BindingResolutionResult {
   overlap_conflicts?: string[];
 }
 
-// Task 7 (route) consumes — type ถูกกำหนดใน Task 1 เพื่อ freeze contract
+// Task 7 (route) consumes — read-view contract ตาม plan §5 (server-produced display data)
 export interface BindingResolutionView {
   workflow_id: string;
-  version_id: string;
+  version_id: string | null;
+  expected_version: number;
   bindings: {
     binding_id: string;
     node_id: string;
@@ -1264,10 +1267,21 @@ export interface BindingResolutionView {
     kind: string;
     count: number;
     status: BindingStatus;
-    requirement_fp: string;
-    sources: { source_index: number; display_value: string; resolved?: ResolutionMapping }[];
-    conflict?: string;
+    sources: { source_index: number; display_value: string }[];
+    resolution?: WorkflowBindingDoc["resolution"];
   }[];
+  candidates: {
+    accounts: { platform: Platform; shop_id: string; shopname: string }[];
+    labels: string[];
+    users: { admin_id: string; display: string }[];
+    teams: [];
+    ticket_fields: [];
+    urls: [];
+  };
+  unresolved: number;
+  invalid: number;
+  publish_blockers: string[];
+  overlap_conflicts: string[];
 }
 
 export async function saveBindingResolutionBatch(
@@ -1963,6 +1977,68 @@ export async function getWorkflowImportDetail(workflowId: string, versionId?: st
   };
 }
 
+// GET /bindings read-view (R1 Task 7) — compose getWorkflowImportDetail +
+// version-scoped bindings + candidate reads ทั้งหมดใน owner นี้ (ไม่มี read owner ที่สอง)
+// display_value = server-produced เท่านั้น: "[redacted]" หรือค่าที่ match
+// REDACT_VALUE → "[redacted]" · non-primitive → canonicalJson truncated ·
+// credential/URL ไม่ leak ทุก path (source_values mask แล้วตอน import)
+export async function getBindingResolutionView(workflowId: string): Promise<BindingResolutionView | null> {
+  const wf = await getWorkflow(workflowId);
+  if (!wf) return null;
+  const detail = await getWorkflowImportDetail(workflowId);
+  if (!detail) return null;
+  const versionId = wf.current_version_id ?? null;
+  const bindings = await getCollection<WorkflowBindingDoc>(COLLECTIONS.workflowBindings);
+  const binds = versionId
+    ? (await bindings.find({ workflow_id: workflowId, version_id: versionId }).toArray())
+        .sort((a, b) => {
+          const ka = `${a.node_id}|${a.field_path}|${a.kind}|${a.binding_id}`;
+          const kb = `${b.node_id}|${b.field_path}|${b.kind}|${b.binding_id}`;
+          return ka < kb ? -1 : ka > kb ? 1 : 0;
+        })
+    : [];
+  // candidates — local targets ที่ resolve ได้จริงตาม validation switch (account/label/user)
+  const shops = await getCollection<ShopDoc>(COLLECTIONS.shops);
+  const admins = await getCollection<AdminDoc>(COLLECTIONS.admins);
+  const conversations = await getCollection(COLLECTIONS.conversations);
+  const accounts = (await shops.find({}).toArray())
+    .map((s) => ({ platform: s.platform, shop_id: s.shop_id, shopname: s.shopname }))
+    .sort((a, b) => (`${a.platform}|${a.shop_id}` < `${b.platform}|${b.shop_id}` ? -1 : 1));
+  const labelVals = (await conversations.distinct("labels", {})) as unknown[];
+  const labels = [...new Set(labelVals.flat() as string[])].sort();
+  const users = (await admins.find({ active: { $ne: false } }).toArray())
+    .map((a) => ({ admin_id: a.admin_id, display: a.name || a.username || a.admin_id }))
+    .sort((a, b) => (a.admin_id < b.admin_id ? -1 : 1));
+  return {
+    workflow_id: wf.workflow_id,
+    version_id: versionId,
+    expected_version: wf.version,
+    bindings: binds.map((b) => ({
+      binding_id: b.binding_id, node_id: b.node_id, field_path: b.field_path,
+      kind: b.kind, count: b.count, status: b.status,
+      sources: (Array.isArray(b.source_values) ? b.source_values : []).map((v, i) => {
+        const obj = v !== null && typeof v === "object";
+        const cj = obj ? canonicalJson(v) : null;
+        const masked = v === "[redacted]"
+          || (typeof v === "string" && REDACT_VALUE.test(v))
+          || (cj != null && REDACT_VALUE.test(cj));
+        return {
+          source_index: i,
+          display_value: masked ? "[redacted]"
+            : cj != null ? (cj.length > 120 ? cj.slice(0, 120) + "…" : cj)
+            : String(v),
+        };
+      }),
+      ...(b.resolution ? { resolution: b.resolution } : {}),
+    })),
+    candidates: { accounts, labels, users, teams: [], ticket_fields: [], urls: [] },
+    unresolved: binds.filter((b) => b.status === "unresolved").length,
+    invalid: binds.filter((b) => b.status === "invalid").length,
+    publish_blockers: detail.publish_blockers,
+    overlap_conflicts: detail.overlap_conflicts,
+  };
+}
+
 export const workflowService = {
   createWorkflow,
   listWorkflows,
@@ -1974,6 +2050,7 @@ export const workflowService = {
   applyImportBatch,
   saveWorkflowDraft,
   saveBindingResolutionBatch,
+  getBindingResolutionView,
   getWorkflowImportDetail,
   validateWorkflowGraph,
 };
