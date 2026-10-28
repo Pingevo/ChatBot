@@ -24,6 +24,8 @@ import {
 import { parseZaapiImportInputs, type CanonicalDraft, type ImportPreviewReport, type BindingRequirement } from "@/lib/workflow/zaapiImport";
 import { exportCanonical, exportZaapi, exportRawSource } from "@/lib/workflow/workflowExport";
 import { validateWorkflowGraph, type WorkflowNode } from "@/lib/workflow/graph";
+import { BindingResolutionPanel, DerivedScopeFields, type BindingPick } from "./BindingResolutionPanel";
+import type { BindingResolutionView } from "@/backend/service/workflowService";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -101,11 +103,20 @@ function EditorInner({ workflowId }: { workflowId: string }) {
   const [wfVersion, setWfVersion] = useState(0); // track ว่า save แล้ว
   const [loadedVersion, setLoadedVersion] = useState<number | null>(null); // CAS expected_version
   const [importDetail, setImportDetail] = useState<{
+    source?: "zaapi" | "canonical" | null;
     source_ref?: { workflowId?: string; loadedVersionId?: string } | null;
     current_version_id?: string | null; fingerprint?: string | null;
     unresolved_bindings?: number; publish_blockers?: string[];
     bindings?: { node_id: string; field_path: string; kind: string; count: number; status: string }[];
   } | null>(null);
+  // imported marker — detail คืน non-null แม้ legacy (source:null) → เช็ค source โดยตรง
+  const isImported = importDetail?.source != null;
+  // binding-resolution surface (R1 Task 8) — view = server-produced เท่านั้น
+  // picks/repeats = controlled picker state ที่ panel emit ขึ้นมา
+  const [resolutionView, setResolutionView] = useState<BindingResolutionView | null>(null);
+  const [picks, setPicks] = useState<Record<string, Record<number, BindingPick | undefined>>>({});
+  const [repeats, setRepeats] = useState<Record<string, boolean>>({});
+  const [resolving, setResolving] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(isNew);
   const [saving, setSaving] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -141,6 +152,12 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         const wf: WorkflowDocDTO = d.workflow;
         setLoadedVersion(wf.version ?? null);
         setImportDetail(d.import_detail ?? null);
+        if (d.import_detail?.source != null) {
+          try {
+            const rb = await fetch(`/api/workflows/${workflowId}/bindings`);
+            if (rb.ok) setResolutionView(await rb.json());
+          } catch { /* view absent → panel hidden */ }
+        }
         setSettings({
           name: wf.name,
           description: wf.description || "",
@@ -322,6 +339,86 @@ function EditorInner({ workflowId }: { workflowId: string }) {
       setSaving(false);
     }
   }, [settings, nodes, edges, isNew, workflowId, router]);
+
+  // ── Binding resolution (imported workflows) ──
+  // refresh เฉพาะ server-derived state (version/detail/scope/view) — ไม่แตะ
+  // ชื่อ/canvas state ของ user
+  const refreshBindingView = useCallback(async () => {
+    try {
+      const rb = await fetch(`/api/workflows/${workflowId}/bindings`);
+      if (rb.ok) setResolutionView(await rb.json());
+      const rw = await fetch(`/api/workflows/${workflowId}`);
+      if (rw.ok) {
+        const dw = await rw.json();
+        const w: WorkflowDocDTO | undefined = dw.workflow;
+        if (w) {
+          setLoadedVersion(w.version ?? null);
+          setImportDetail(dw.import_detail ?? null);
+          setSettings((s) => ({ ...s, shop_ids: w.shop_ids || [], platforms: w.platforms || [] }));
+        }
+      }
+    } catch { /* refresh ล้ม — state เดิมคงไว้ */ }
+  }, [workflowId]);
+
+  // POST /api/workflows/[id]/bindings — payload = allowed keys เท่านั้น
+  // (binding_id + source_index + local target + repeat); identity ทุกอย่าง
+  // server โหลดเองจาก binding docs — client ไม่เคยส่ง source value/fp
+  const resolveBinding = useCallback(async (bindingId: string) => {
+    if (!resolutionView || loadedVersion == null || resolutionView.version_id == null) return;
+    const b = resolutionView.bindings.find((x) => x.binding_id === bindingId);
+    if (!b) return;
+    const bp = picks[bindingId] || {};
+    const mappings = b.sources
+      .map((s) => ({ source_index: s.source_index, ...(bp[s.source_index] || {}) }))
+      .filter((m) => typeof m.local_id === "string" && m.local_id.length > 0);
+    if (mappings.length !== b.sources.length) {
+      toast.error("เลือก target ให้ครบทุก source ก่อน resolve");
+      return;
+    }
+    setResolving(bindingId);
+    try {
+      const r = await fetch(`/api/workflows/${workflowId}/bindings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workflow_id: workflowId,
+          expected_version: loadedVersion,
+          version_id: resolutionView.version_id,
+          proposed: [{
+            binding_id: bindingId,
+            ...(repeats[bindingId] ? { repeat: true } : {}),
+            mappings,
+          }],
+        }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.status === 409) {
+        // stale expected_version — เสนอ reload ให้ดูสถานะล่าสุด (ย้ายไป version ปัจจุบัน)
+        toast.error(`เวอร์ชันขัดกัน — ${d.detail || "reload ก่อนแก้"}`);
+        const okReload = await confirm.ask({
+          title: "เวอร์ชันขัดกัน",
+          message: "workflow ถูกแก้โดย session อื่น — โหลดใหม่เพื่อดูสถานะล่าสุด?",
+          confirmText: "โหลดใหม่",
+          cancelText: "อยู่ต่อ",
+        });
+        if (okReload) window.location.reload();
+        return;
+      }
+      if (!r.ok || d.ok === false) {
+        toast.error(`resolve ไม่สำเร็จ: ${d.detail || d.error || `HTTP ${r.status}`}`);
+        return;
+      }
+      toast.success(`resolved — workflow version ${d.version}`);
+      setLoadedVersion(d.version);
+      setPicks((p) => { const n = { ...p }; delete n[bindingId]; return n; });
+      setRepeats((p) => { const n = { ...p }; delete n[bindingId]; return n; });
+      await refreshBindingView();
+    } catch (err) {
+      toast.error(`resolve ผิดพลาด: ${(err as Error).message}`);
+    } finally {
+      setResolving(null);
+    }
+  }, [resolutionView, loadedVersion, workflowId, picks, repeats, refreshBindingView]);
 
   const toggleEnabled = useCallback(async () => {
     if (isNew) {
@@ -539,6 +636,8 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         />
         <select
           value={settings.status}
+          disabled={isImported}
+          title={isImported ? "imported workflow — status เปลี่ยนไม่ได้ (activation ถูก block ฝั่ง server)" : undefined}
           onChange={(e) => { setSettings((s) => ({ ...s, status: e.target.value as FlowSettings["status"] })); setWfVersion((v) => v + 1); }}
           className={`shrink-0 text-xs font-medium px-2 py-2 rounded-lg border focus:outline-none ${settings.status === "published"
             ? "border-success/40 bg-success/10 text-success"
@@ -551,8 +650,11 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         <button
           role="switch"
           aria-checked={settings.enabled}
+          disabled={isImported}
           onClick={toggleEnabled}
-          title={settings.enabled ? "เปิดใช้งานอยู่ — กดเพื่อปิด" : "ปิดใช้งานอยู่ — กดเพื่อเปิด"}
+          title={isImported
+            ? "imported workflow — enable blocked ฝั่ง server จนกว่า activation gates จะผ่าน"
+            : settings.enabled ? "เปิดใช้งานอยู่ — กดเพื่อปิด" : "ปิดใช้งานอยู่ — กดเพื่อเปิด"}
           className="shrink-0 inline-flex items-center gap-1.5"
         >
           <span className={`relative w-9 h-5 rounded-full transition-colors ${settings.enabled ? "bg-success" : "bg-surface-2 border border-border"}`}>
@@ -793,9 +895,19 @@ function EditorInner({ workflowId }: { workflowId: string }) {
                   onDelete={deleteSelected}
                   bindings={importBindings.filter((b) => b.node_id === selectedNode.id)}
                   validation={lastValidation}
+                  resolution={isImported && resolutionView ? {
+                    view: resolutionView, picks, repeats, submitting: resolving,
+                    onPick: (bid, idx, p) => setPicks((prev) => {
+                      const cur = { ...(prev[bid] || {}) };
+                      if (p) cur[idx] = p; else delete cur[idx];
+                      return { ...prev, [bid]: cur };
+                    }),
+                    onRepeat: (bid, r) => setRepeats((prev) => ({ ...prev, [bid]: r })),
+                    onResolve: resolveBinding,
+                  } : null}
                 />
               ) : (
-                <FlowSettingsPanel settings={settings} setSettings={(s) => { setSettings(s); setWfVersion((v) => v + 1); }} shops={shops} />
+                <FlowSettingsPanel settings={settings} setSettings={(s) => { setSettings(s); setWfVersion((v) => v + 1); }} shops={shops} imported={isImported} />
               )}
             </div>
           </>
@@ -901,7 +1013,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
 // ─── Node config panel — dynamic fields ตาม subtype ──
 
 function NodeConfigPanel({
-  node, allNodes, onUpdateConfig, onUpdateSubtype, onDelete, bindings = [], validation = null,
+  node, allNodes, onUpdateConfig, onUpdateSubtype, onDelete, bindings = [], validation = null, resolution = null,
 }: {
   node: Node<WFNodeData>;
   allNodes: Node<WFNodeData>[];
@@ -910,6 +1022,15 @@ function NodeConfigPanel({
   onDelete: () => void;
   bindings?: BindingRequirement[];
   validation?: { structural: { ok: boolean; errors: string[] }; capability: ReturnType<typeof validateCanonicalDraft> } | null;
+  resolution?: {
+    view: BindingResolutionView;
+    picks: Record<string, Record<number, BindingPick | undefined>>;
+    repeats: Record<string, boolean>;
+    submitting: string | null;
+    onPick: (binding_id: string, source_index: number, pick: BindingPick | null) => void;
+    onRepeat: (binding_id: string, repeat: boolean) => void;
+    onResolve: (binding_id: string) => void;
+  } | null;
 }) {
   const cfg = node.data.config || {};
   const subtype = node.data.subtype;
@@ -970,6 +1091,22 @@ function NodeConfigPanel({
               unresolved bindings: {bindings.map((b) => `${b.kind}×${b.count} @ ${b.field_path}`).join(", ")}
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── Binding resolution panel (imported workflows เท่านั้น) ── */}
+      {resolution && (
+        <div style={fieldGap}>
+          <BindingResolutionPanel
+            view={resolution.view}
+            nodeId={node.id}
+            picks={resolution.picks}
+            repeats={resolution.repeats}
+            submitting={resolution.submitting}
+            onPick={resolution.onPick}
+            onRepeat={resolution.onRepeat}
+            onResolve={resolution.onResolve}
+          />
         </div>
       )}
 
@@ -1915,11 +2052,12 @@ function SendMessageConfigPanel({
 // ─── Flow settings panel (แสดงเมื่อไม่ได้เลือก node) ──
 
 function FlowSettingsPanel({
-  settings, setSettings, shops,
+  settings, setSettings, shops, imported = false,
 }: {
   settings: FlowSettings;
   setSettings: (s: FlowSettings) => void;
   shops: ShopOption[];
+  imported?: boolean;
 }) {
   const inputStyle: React.CSSProperties = {
     width: "100%", padding: "6px 10px", borderRadius: 8, border: "1px solid var(--color-border)",
@@ -1945,6 +2083,14 @@ function FlowSettingsPanel({
         />
       </div>
 
+      {/* imported workflows: scope เป็น server-derived (จาก resolved account
+          bindings) → render read-only subtree เดียว แทน editable pickers */}
+      {imported ? (
+        <div style={fieldGap}>
+          <DerivedScopeFields platforms={settings.platforms} shop_ids={settings.shop_ids} shops={shops} />
+        </div>
+      ) : (
+      <>
       <div style={fieldGap}>
         <label style={labelStyle}>ร้านที่ใช้ flow นี้ (ไม่เลือก = ใช้ร่วมทุกร้าน)</label>
         {shops.length === 0 ? (
@@ -2003,6 +2149,8 @@ function FlowSettingsPanel({
         </div>
         <div style={{ fontSize: 10, opacity: 0.5, marginTop: 3 }}>ไม่เลือก = ทุก platform</div>
       </div>
+      </>
+      )}
 
       <div style={fieldGap}>
         <label style={labelStyle}>ความถี่ที่ flow ทำงาน</label>

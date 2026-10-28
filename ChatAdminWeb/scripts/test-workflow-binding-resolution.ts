@@ -2368,6 +2368,221 @@ async function main() {
     eq(state.adminEvents.length, evV, "view → zero audit events");
   }
 
+  // ═══ 31. Task 8 — BindingResolutionPanel SSR markup + editor wiring contract ═══
+  // presentational contract เท่านั้น: panel render display data จาก view +
+  // emit events — ไม่มี fetch/validation/business logic ฝั่ง client
+  // (editor SSR ตรงไม่ได้ — WorkflowEditor.tsx import .css → tsx throw;
+  // derived-scope subtree อยู่ใน panel file → SSR ตัวนั้น)
+  {
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { createElement: h } = await import("react");
+    const { readFileSync } = await import("node:fs");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let Panel: any = undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let DerivedScope: any = undefined;
+    try {
+      const m = await import("../src/components/workflow/BindingResolutionPanel");
+      Panel = m.BindingResolutionPanel;
+      DerivedScope = m.DerivedScopeFields;
+    } catch { /* RED — module absent */ }
+
+    const UI = await setupImported("workflow_UI1");
+    const view = await svcAny.getBindingResolutionView(UI.wfId) as Record<string, unknown> | null;
+    type VB2 = { binding_id: string; node_id: string; field_path: string; kind: string;
+      status: string; sources: { source_index: number; display_value: string }[] };
+    const uiBinds = (view?.bindings ?? []) as VB2[];
+
+    const noop = () => {};
+    const ssr = (v: unknown, extra?: Record<string, unknown>) => {
+      if (!Panel || !v) return "";
+      try {
+        return renderToStaticMarkup(h(Panel as never, {
+          view: v, picks: {}, repeats: {},
+          onPick: noop, onRepeat: noop, onResolve: noop, ...extra,
+        }));
+      } catch (e) { return `__ssr_throw:${(e as Error).message}`; }
+    };
+    const markup = ssr(view);
+    const blockOf = (mk: string, bid: string) => {
+      const s = mk.indexOf(`data-binding="${bid}"`);
+      if (s === -1) return "";
+      const next = mk.indexOf("data-binding=", s + 1);
+      return mk.slice(s, next === -1 ? mk.length : next);
+    };
+
+    // 31.1 module + per-source rows — display_value ข้าง source_index label
+    ok(Panel != null, "BindingResolutionPanel export exists (presentational component)");
+    ok(DerivedScope != null, "DerivedScopeFields export exists (extracted read-only scope subtree)");
+    ok(markup.length > 0 && !markup.startsWith("__ssr_throw"), `panel SSR produces markup (len=${markup.length})`);
+    const accB = uiBinds.find((b) => b.kind === "account")!;
+    eq(accB.sources.length, 2, "fixture account binding → 2 sources");
+    for (const s of accB.sources) {
+      const idxPos = markup.indexOf(`source ${s.source_index}`);
+      const valPos = markup.indexOf(s.display_value);
+      ok(idxPos !== -1 && valPos !== -1 && valPos > idxPos,
+        `display_value "${s.display_value}" renders beside source_index ${s.source_index} label`);
+    }
+    ok(markup.includes(accB.node_id) && markup.includes(accB.field_path),
+      "binding row → node_id + field_path render (position context)");
+
+    // 31.2 kind-scoped candidates — present per kind, absent across buckets
+    const labB = uiBinds.find((b) => b.kind === "label")!;
+    const usrB = uiBinds.find((b) => b.kind === "user")!;
+    ok(markup.includes("S1") && markup.includes("shop_s1"), "account binding → account candidates (shopname + shop_id)");
+    ok(markup.includes("shopee") && markup.includes("tiktok"), "account candidates show platform");
+    ok(markup.includes("vip") && markup.includes("gold"), "label binding → label candidates");
+    ok(markup.includes("adm_u1"), "user binding → user display candidates");
+    const selSlice = (mk: string, bid: string) => {
+      const s = mk.indexOf(`data-bid="${bid}"`);
+      if (s === -1) return "";
+      const e = mk.indexOf("</select>", s);
+      return e === -1 ? "" : mk.slice(s, e);
+    };
+    const accSel = selSlice(markup, accB.binding_id);
+    ok(accSel.length > 0 && !accSel.includes("vip") && !accSel.includes("adm_u1"),
+      "account select → account candidates only (no label/user leak)");
+    const labSel = selSlice(markup, labB.binding_id);
+    // shop_s1 เป็น label candidate จริง (conv_trap seed) → เช็ค cross-bucket leak:
+    // account option format "platform · shopname (" + user admin_id
+    ok(labSel.length > 0 && !labSel.includes("· S1 (") && !labSel.includes("adm_u1"),
+      "label select → label candidates only (no account/user leak)");
+    const usrSel = selSlice(markup, usrB.binding_id);
+    ok(usrSel.length > 0 && !usrSel.includes("shop_s1") && !usrSel.includes("vip"),
+      "user select → user candidates only");
+
+    // 31.3 unresolvable kinds — mandated copy + no picker
+    const teamB = uiBinds.find((b) => b.kind === "team")!;
+    const tfB = uiBinds.find((b) => b.kind === "ticket_field")!;
+    const urlB = uiBinds.find((b) => b.kind === "url")!;
+    ok(markup.includes("team mapping unavailable — local team identity not defined"),
+      "team row → mandated unavailable note verbatim");
+    const teamBlock = blockOf(markup, teamB.binding_id);
+    ok(teamBlock.length > 0 && !teamBlock.includes("<select"), "team row → no candidate picker");
+    const tfBlock = blockOf(markup, tfB.binding_id);
+    ok(tfBlock.length > 0 && !tfBlock.includes("<select") && /unavailable/i.test(tfBlock),
+      "ticket_field row → unavailable state, no picker");
+    const urlBlock = blockOf(markup, urlB.binding_id);
+    ok(urlBlock.length > 0 && !urlBlock.includes("<select") && /unavailable/i.test(urlBlock),
+      "url row → unavailable state, no picker");
+
+    // 31.4 redacted display — literal render, zero credential leak
+    ok(markup.includes("[redacted]"), "url source display_value renders \"[redacted]\" literally");
+    ok(!markup.includes("img.example.com") && !markup.includes("sekret-br"),
+      "raw URL host/credential never appear in markup");
+
+    // 31.5 counts + publish_blockers / overlap_conflicts chips from view data
+    ok(markup.includes("unresolved") && markup.includes(String(view?.unresolved)),
+      "unresolved/invalid counts render");
+    const pbs = (view?.publish_blockers ?? []) as string[];
+    ok(pbs.length > 0 && pbs.every((s) => markup.includes(s)),
+      "publish_blockers render as chips (all view strings)");
+    const ovMk = ssr({ ...(view as Record<string, unknown>), overlap_conflicts: ["overlap with imported workflow wf_chip"] });
+    ok(ovMk.includes("overlap with imported workflow wf_chip"), "overlap_conflicts render as chips");
+
+    // 31.6 resolution echo + repeat checkbox + resolve affordance
+    const UI2 = await setupImported("workflow_UI2");
+    const res2 = await callResolve(UI2.wfId, UI2.req());
+    ok(res2?.ok === true, "SSR fixture → resolution commit ok");
+    const view2 = await svcAny.getBindingResolutionView(UI2.wfId) as Record<string, unknown> | null;
+    const m2 = ssr(view2);
+    ok(m2.includes("resolved"), "resolved binding → status renders");
+    ok(m2.includes("shop_s1") && m2.includes("shop_s2"), "resolved mappings → local targets echo");
+    ok(m2.includes("direct"), "resolved mapping → via badge renders");
+    ok(markup.includes('type="checkbox"'), "unresolved resolvable binding → repeat checkbox renders");
+    ok(/resolve/i.test(markup), "unresolved resolvable binding → resolve affordance renders");
+    const rpMk = ssr(view, { repeats: { [accB.binding_id]: true } });
+    const rpStart = rpMk.indexOf(`data-rbid="${accB.binding_id}"`);
+    ok(rpStart !== -1 && rpMk.slice(rpStart, rpStart + 300).includes("checked"),
+      "repeats prop → repeat checkbox checked state renders");
+
+    // 31.7 derived scope — read-only render (extracted subtree, editor css-import blocks tsx SSR)
+    const scopeMk = DerivedScope ? renderToStaticMarkup(h(DerivedScope as never, {
+      platforms: ["shopee", "tiktok"], shop_ids: ["shop_s1", "shop_s2"],
+      shops: [
+        { shop_id: "shop_s1", shopname: "S1", platform: "shopee" },
+        { shop_id: "shop_s2", shopname: "S2", platform: "tiktok" },
+      ],
+    })) : "";
+    ok(scopeMk.includes("derived from resolved bindings"), "derived scope → \"derived from resolved bindings\" note");
+    ok(scopeMk.includes("S1") && scopeMk.includes("shop_s1"), "derived scope → shop display renders");
+    ok(scopeMk.includes("shopee") && scopeMk.includes("tiktok"), "derived scope → platforms render");
+    ok(!scopeMk.includes("<input") && !scopeMk.includes('type="checkbox"'),
+      "derived scope → zero editable inputs (read-only)");
+
+    // 31.8 contract pins — static source inspection
+    let panelSrc = "", edSrc = "";
+    try {
+      panelSrc = readFileSync(new URL("../src/components/workflow/BindingResolutionPanel.tsx", import.meta.url), "utf8");
+      edSrc = readFileSync(new URL("../src/components/workflow/WorkflowEditor.tsx", import.meta.url), "utf8");
+    } catch { /* unreadable → asserts fail */ }
+    ok(panelSrc.length > 0, "panel source readable");
+    ok(!/fetch\s*\(|XMLHttpRequest|axios/i.test(panelSrc), "panel performs zero HTTP (presentational)");
+    // type-only imports erase at compile — runtime coupling is the pin
+    const panelRuntime = panelSrc.replace(/import\s+type[^\n]*\n/g, "");
+    ok(!/workflowService|mongoClient|getCollection|adminLog/i.test(panelRuntime), "panel imports no service/db owner (runtime)");
+    ok(!/source_values|source_fp|requirement_fp/.test(panelSrc), "panel never reads source identity fields (display_value only)");
+    ok(!/useState|useEffect/.test(panelSrc) || !/fetch\s*\(/.test(panelSrc),
+      "panel holds no fetch side-effects even if stateful");
+    ok(edSrc.includes("/bindings"), "editor wires /bindings route");
+    // first `/bindings` hits are GET loaders — POST = the only fetch with a 2nd arg
+    const postIdx = edSrc.indexOf("/bindings`, {");
+    const paySlice = postIdx === -1 ? "" : edSrc.slice(Math.max(0, postIdx - 1500), postIdx + 900);
+    ok(postIdx !== -1 && paySlice.includes("proposed") && paySlice.includes("binding_id")
+      && paySlice.includes("expected_version") && paySlice.includes("version_id"),
+      "editor payload carries allowed top-level keys (workflow_id/expected_version/version_id/proposed)");
+    ok(postIdx !== -1 && paySlice.includes("repeat"),
+      "editor payload emits repeat flag path");
+    ok(!/(?<![-\w])(?:node_id|field_path|kind|source_value|source_fp|source_values|requirement_fp|display_value|sources)\s*:/.test(paySlice),
+      "editor payload assembly → zero forbidden client keys");
+    ok(/setLoadedVersion\(\s*d\.version\s*\)/.test(edSrc) || /setLoadedVersion\(/.test(edSrc.slice(postIdx, postIdx + 2500)),
+      "POST success → loadedVersion refreshed from response");
+    const postSlice = postIdx === -1 ? "" : edSrc.slice(postIdx, postIdx + 2500);
+    ok(postSlice.includes("409") && postSlice.includes("confirm.ask") && postSlice.includes("location.reload"),
+      "POST 409 → toast + confirm-based reload offer");
+    ok(edSrc.includes("DerivedScopeFields"), "editor renders extracted read-only scope subtree on imported");
+    ok(edSrc.includes("importDetail"), "editor gates imported state via importDetail");
+
+    // 31.9 unresolvable-kind allowlist (reviewer finding) — service switch accept
+    // เฉพาะ account/label/user; channel/shop/unknown → unavailable path เหมือน
+    // server `default:` (fail-closed). fixture: node data channelIds/shopIds
+    // (BINDING_KEYS emit "channel"/"shop" — verify ใน zaapiImport.ts:50-51)
+    const srcC = { ...SRC_BIND, workflowId: "workflow_UI3",
+      loadedVersionId: "wv-src-UI3", versions: [{ workflowVersionId: "wv-src-UI3", status: "active" }],
+      nodes: [
+        { id: "t1", type: "message_received", position: { x: 0, y: 0 },
+          data: { name: "trig", nodeType: "trigger", accountIds: ["zacc_1"], nextStepId: "s1" } },
+        { id: "s1", type: "send_message", position: { x: 100, y: 0 },
+          data: { name: "send", nodeType: "action", channelIds: ["zchan_1"], shopIds: ["zshop_1"] } },
+      ],
+      edges: [{ source: "t1", target: "s1", sourceHandle: null }],
+    };
+    const batchC = previewZaapiFlows({ flows: [srcC] }, { indexRows: [{ wid: "workflow_UI3", name: "ui3" }] });
+    await svcAny.applyImportBatch(batchC, "admin_t");
+    const wfIdC = "wf_imp_" + _sh("workflow_UI3");
+    const viewC = await svcAny.getBindingResolutionView(wfIdC) as { bindings?: VB2[] } | null;
+    const mkC = ssr(viewC);
+    const chanB = (viewC?.bindings ?? []).find((b) => b.kind === "channel");
+    const shopB = (viewC?.bindings ?? []).find((b) => b.kind === "shop");
+    const accB3 = (viewC?.bindings ?? []).find((b) => b.kind === "account");
+    ok(chanB != null && shopB != null && accB3 != null, "channel/shop fixture → kinds emitted alongside account");
+    const chanBlk = chanB ? blockOf(mkC, chanB.binding_id) : "";
+    ok(chanBlk.length > 0 && /unavailable/i.test(chanBlk), "channel row → unavailable note renders");
+    ok(chanBlk.includes("channel mapping unavailable in R1 (publish-blocking)"),
+      "channel row → generic fallback note (no kind-specific copy)");
+    ok(!chanBlk.includes("<select"), "channel row → no candidate picker");
+    ok(!chanBlk.includes("data-rbid"), "channel row → no repeat checkbox");
+    ok(!chanBlk.includes("resolve binding"), "channel row → no resolve affordance");
+    const shopBlk = shopB ? blockOf(mkC, shopB.binding_id) : "";
+    ok(shopBlk.includes("shop mapping unavailable in R1 (publish-blocking)"),
+      "shop row → generic fallback note");
+    ok(!shopBlk.includes("<select") && !shopBlk.includes("data-rbid") && !shopBlk.includes("resolve binding"),
+      "shop row → unavailable path (no picker/repeat/resolve)");
+    const accBlk3 = accB3 ? blockOf(mkC, accB3.binding_id) : "";
+    ok(accBlk3.includes("<select") && accBlk3.includes("data-rbid") && accBlk3.includes("resolve binding"),
+      "mixed-kind view → resolvable kinds still show picker + repeat + resolve");
+  }
+
   // ═══ summary ═══
   const countsEnd = await allCounts();
   const totalWfs = (await collDocs(COLLECTIONS.workflows)).length;
