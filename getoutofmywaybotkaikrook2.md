@@ -7379,3 +7379,366 @@ py_compile: product_store/retrieval_runtime/app/bench ✓ · git diff --check �
 - grouped retrieval NOT activated (flags unchanged); zero deployment; zero production-acceptance claim
 - Remaining sequence: deploy code + NEW_GID artifacts without pointer flip → server-side validation → coordinated fenced CAS (expected=OLD_GID) → bounded grouped canary → QA review → acceptance or rollback
 - Deferred Low: `retrieval_policy._norm_id` float()-based normalization ("1e3"→"1000" alias, >2^53 precision loss) — separate pre-existing owner, out of scope, unresolved
+
+## 2026-10-27 — Phase 10B local-Docker activation rehearsal → BLOCKED (daemon down)
+
+- Frozen state verified: branch feature-phase3-aswer-quality @fd4e682, parent impl 40a7d77, staging empty, unstaged เฉพาะ docs/plans/2026-10-21-zaapi-workflow-kb-pool-master-plan.md, untracked 0
+- Docker gate FAIL: ไม่มี socket (/var/run/docker.sock, ~/.docker/run/docker.sock), ไม่มี dockerd/colima/orbstack process — client v29.8.2 แต่ daemon ไม่รัน
+- Per runbook ห้าม start Docker Desktop ผ่าน automation → รอผู้ใช้เปิดเอง
+- Verdict: PHASE_10B_LOCAL_DOCKER_WAITING_FOR_DAEMON — zero docker/artifact/mongo action; canonical gen dirs ไม่ถูกแตะ; pointer ยัง OLD_GID; git unchanged
+
+## 2026-10-27 — Phase 10B local-Docker activation rehearsal → PASSED (server deployment pending)
+
+- Topology: lab `/tmp/phase10b-local-canary-20261027-144351`; net `phase10b-net-…-144351` = `docker network --internal` (egress ไม่มี — host port publish บน internal net ล้มเหลวตามคาด); mongo `phase10b-mongo-…-144351` (mongo:7, ไม่ publish port); chat `phase10b-chat-…-144351` (8010 in-net only, health ผ่าน `docker exec`); DBs `phase10b_canary_product`/`_admin`
+- No-production proof: preflight assert MONGO_URI+ADMIN_MONGO_URI host = disposable container เท่านั้น (ไม่มี credentials/digital.in.th/IP); env providers ว่าง, ENABLE_* ทั้งหมด false; startup log `[KEYS] 0 keys`; log scan ไม่มี non-local target; internal net ปิด channel ออกทั้งหมด → shared production pointer ไม่มีทางถูกแตะ
+- Build: `chatbot-phase10b-canary:fd4e682` = sha256:fa0944886f… (13.8GB, 4m28s) จาก committed Dockerfile — image commit HEAD fd4e682
+- Seed: products 11,792; `sellable_units_<OLD|NEW>` 28,048/28,072; `image_texts_<OLD|NEW>` 13,823×2; pointer seed = OLD (owner `_pointer_set_doc` serialization)
+- Pre-CAS: pointer ×2 = OLD, snapshot resolve = OLD; `validate_generation(NEW, require_description=True)` → 28,072 units / 27,183 desc chunks / 13,823 image texts / 11,792 products
+- CAS: `publish_generation --expected OLD --require-description` → `published` (1 attempt, fenced); pointer ×2 = NEW; `previous` = OLD; manifest sha 8e8770ef…
+- Runtime: image โหลด NEW snapshot + BGE-M3 จาก host HF cache ro (`HF_HUB_OFFLINE=1`, 0 downloads); grouped selection ON (env ใน container เท่านั้น); web_search OFF asserted
+- Deterministic canary 10 turns + desc probe — counters: gemini 0 / web 0 / openrouter 0 / mongo_write 0
+  - A: tag 28018035569 exact; "Speed data เท่าไหร่ครับ" → data_transfer_speed (ไม่ใช่ price); anchor คงเดิม; desc admit เฉพาะ chunk 28018035569:0 (มี "480 Mbps")
+  - B: `10Gbps + แม่เหล็ก` → spec_constraints+required_features structured; subject_refs ว่าง (ไม่ reuse anchor); ตอบ honest no-match ไม่ fabricate
+  - C: tag CTL301 → greeting คง subject → `Xiaomi 17 Ultra` = typed compat/recommend target (usb-c/90W, drop lightning-incompat) → `หัวชาร์จล่ะ` เลือกหัวชาร์จตาม device ctx, CTL301 ไม่หลุดใน ctx; greeting ท้าย ok
+  - D: fresh-conv greetings → greeting path ถูก
+  - E: query จาก desc ของ item B (27639651334) → unanchored B ชนะ 0.9152 > A 0.8486 แต่ anchored A admit เฉพาะ chunk ของ A (raw_count=1) — cross-item isolation คงอยู่ใต้ competitor ที่แข็งกว่า
+- Rollback: `--rollback --expected-active NEW` → `rolled_back` (1 attempt); pointer ×2 = OLD; `previous` = NEW
+- Provider QA: skipped (ไม่มี credential ใน lab — by design); deterministic path ครบ
+- Results: `docs/test/results/phase10b_local_docker_rehearsal_20261027-144351.{json,md}` + `canary_20261027-075435.json`
+- Cleanup: ลบ chat+mongo containers (−v), network, lab dir ทั้งหมด; 0 canary containers/networks/volumes เหลือ; canonical `exports/gen/<OLD|NEW>` 14 files hash == baseline; git status ไม่เปลี่ยนนอกจาก log นี้ (สังเกต docs/SRS_SSD.md มี user-side edit ก่อน run — ไม่ได้แตะ)
+- Verdict: PHASE_10B_LOCAL_DOCKER_REHEARSAL_PASSED_SERVER_DEPLOYMENT_PENDING — deploy + production CAS ยังค้างตามเดิม
+
+## 2026-10-27 — Phase 10B localhost Gemini QA (process-local NEW_GID) → PASSED (server deployment pending)
+
+- Frozen: branch feature-phase3-aswer-quality @fd4e682 · staging empty · diff-check clean · 0 stray procs · :8010 free · unstaged เดิม 3 files (SRS user-edit + Zaapi plan + log นี้)
+- Pointer ×2 pre = g20261024-072533-2be3443e (activated_at 2026-10-24T08:44:30Z); validate_generation(NEW, require_description=True) = VALIDATE_OK (units 28,072 / npz 28,072 / products 11,792 / desc 27,183 / image_texts 13,823); NEW-scoped collections ยืนยัน
+- Gemini usable keys = 19 (count only); provider pinned gemini ทุก answer role process-locally
+- Execution: /tmp wrapper เดียว (ลบแล้ว) — H.install() seams + resolve_snapshot override คืน NEW_GID EvidenceSnapshot เดียว (ไม่มี pointer write/CAS/manifest) + get_provider pin + cap guard (gemini ≤20, deadline 12min) + pymongo CommandListener (read/write proof)
+- No-provider probe: product npz 11,792 · unit npz 28,072 · desc npz 27,183 · CMC615P chunks 27639651334.0:0/:1 reachable (chunk0 has 480) · pointer ยัง OLD
+- Run: pingevox 5 turns + wattaka_sana 3 turns, fresh conv ids qa10b-* — elapsed 95.6s; gemini=13 (8 intent + 5 answer_typed), attempts=13, e503=0, e429=0, web=0, OR=0, mongo_write=0 (barrier+listener)
+- Per-turn: snap_gid=NEW ทุกเทิร์น · P-Q1 exact CTL301 grounded · P-Q2/Q5 greeting zero retrieval · P-Q3 ATC615+ATC310N connector_match, CTL301 connector_disjoint explained no-CTA · P-Q4 adapter scope + Xiaomi inherit, ctx/resp = เดียวกับ after13 (bundles-first residual เดิม — structured listing form evidence ขาดตาม blocker เดิม) · W-Q1 exact CMC615P · W-Q2 **480Mbps answered** (desc chunk admitted — est_ctx_tokens 7,390; improvement vs OLD_GID defer) · W-Q3 deterministic no-match + near-miss เฉพาะ "480Mbps ไม่ถึง 10Gbps" ไม่มี magnetic pass-claim/CTA
+- Verdict: PHASE_10B_LOCALHOST_GEMINI_QA_PASSED_SERVER_DEPLOYMENT_PENDING — all 8 turns PASS
+- Results: docs/test/results/phase10b/pingevox_wattaka_1793089442_newgid_live.{json,md} (gitignored)
+- Post: pointer ×2 = OLD unchanged · gen artifacts เดิม (ls identical) · mongo writes=0 · 0 stray procs · git diff เฉพาะ 3 files เดิม + log นี้ · no commit/push/deploy/CAS
+- Residuals เหลือ: P-Q4 bundles-first ordering (missing structured listing form — blocker เดิม) · spec under-claim defer clause · persona "abubu" = config จริงของ CukTechThailand ไม่ใช่ corruption
+
+### 2026-10-2x — Phase 10B localhost QA รอบ 2 (NEW_GID, Gemini จริง): aumpornpoonsiri IMILAB W01 (SuperITMall) 3 เทิร์น — 2 FAIL_COMPOSITION
+
+- Setup เดิม (process-local NEW snap + H.install + live spies + die-barriers + cap20/12min + listener): item=18408364022 (SuperITMall, "[ลดเหลือ 699] IMILAB W01"), conv qa10b-aumporn-1793090004
+- gemini=6 (3 intent + 3 answer_typed) attempts=6 · e503=0 e429=0 · web=0 OR=0 · mongo writes=0 (harness+listener; ops find=96 getMore=15 distinct=2) · snap_gid=NEW ทุกเทิร์น · pointer pre/mid/post ×4 = OLD · 51.4s
+- Evidence (item doc 18408364022): desc มี Glory/70 ✓, ไม่มี GPS/Strava/ชีพจร/เพซ — ตรงกับคำตอบ Zaapi (70 โหมด + Glory Fit อย่างเดียว, ที่เหลือ "ไม่มีข้อมูลระบุ")
+- **Q1 PASS**: [สินค้า:18408364022] → exact item, ctx/resp/card/link ทั้งหมด = item เดียว, spec คร่าว (1.69"/100 faces/SpO2/Imilab Fit) grounded ใน name+desc
+- **Q2 FAIL_COMPOSITION** (คำถาม GPS จากมือถือ + ชีพจร/เวลา/ระยะทาง/เพซระหว่างวิ่ง): intent=product_spec compat_mode=bluetooth_general tgt_dev=IMILAB W01 · `unanswered=[{i:1, no_evidence}]` — ระบบตรวจได้ว่า need ตอบไม่ได้ แต่ composition **เงียบทิ้ง** → ตอบเป็น spec dump ทั่วไป (70 โหมด/Glory Fit/SpO2/3ATM grounded ทั้งหมด, ไม่มี fabrication) แต่ไม่เคยบอก "ไม่มีข้อมูลระบุ" → ลูกค้าไม่ได้คำตอบ yes/no
+- **Q3 FAIL_COMPOSITION** (Strava): intent=compatibility_check tgt=['สตาวา'] · ตอบ "รองรับ iOS/Android ผ่าน Imilab Fit + Glory Fit" — ไม่แตะ Strava, ไม่มี explicit "ไม่สามารถยืนยัน" (unanswered=[] — need ไม่ถูก track) + subject drift เป็น alternatives [W01,W02] พร้อม card W02 + CTA
+- **Pattern ใหม่ (defect, ไม่แก้ใน session นี้ตามข้อจำกัด)**: เมื่อ need = spec/compat ที่ evidence ไม่มี → composition deflect เป็น spec dump/แอปทั่วไป แทนที่จะประกาศ "ไม่มีข้อมูลระบุไว้ จึงไม่สามารถยืนยัน" ตาม Zaapi reference — grounded แต่ unresponsive
+- Results: docs/test/results/phase10b/aumporn_w01_1793090004_newgid_live.{json,md} (gitignored)
+- Verdict เคสนี้: PHASE_10B_LOCALHOST_GEMINI_QA_FAILED (behavioral — ไม่ใช่ infra; ไม่มี fabrication/evidence leak)
+
+### 2026-10-2x — Phase 10B correction round: answer-completeness data contract (กำลังทำ — plan ก่อนแก้)
+
+**Root cause (trace เสร็จแล้ว — 2 boundary แยกกัน ไม่ใช่จุดเดียว):**
+
+- **Q2 (no_evidence หาย)**: `compile_answer_context` ผลิต `UnansweredNeed(no_evidence)` ถูกต้อง → `compose_answer` เก็บใน `comp.unanswered_needs` → แต่ `_render_composition` (app.py) render เฉพาะ `comp.results` — **ไม่มี renderer ของ UnansweredNeed เลย** → outcome "cannot-confirm" ไม่ถึง text (เหลือแต่ observability `rd.composition.unanswered`) → model เห็นแค่ product task → spec dump แทนคำตอบ
+- **Q3 (target หาย + W02 drift)**: 2 sub-defects
+  - `_need_target` (answer_context) อ่านเฉพาะ `RetrievalRequest.target_device`/`profile.target_device` = device-normalized เท่านั้น — `route_context` โดย contract เก็บ non-device target (app/service เช่น `สตาวา`) ไว้ใน `target_refs` → `target_of[compat]=None` → verdict machinery ข้าม → need covered โดย products → ตอบเงียบๆ ไม่แตะ Strava
+  - `compile_answer_context` admit `role="alternative"` ให้ทุก operation — alternatives ควรมีเฉพาะ need ที่ขอ recommend → need describe/compat scope=explicit ได้ sibling W02 เข้า products → card+CTA W02 → `selected_ids=[W01,W02]` → subject set polluted เป็น pair
+
+**Fix plan (existing typed owners เท่านั้น — 0 guard/regex/keyword/helper-chain ใหม่):**
+
+1. `_need_target` — compat need: fallback `need.target_refs` หลัง request/profile target_device (typed verbatim target — generic ทุก label ไม่ใช่เฉพาะ Strava)
+2. `compile_answer_context` — per-need `cands`: `operation != "recommend"` → drop `role=="alternative"` (pattern เดียวกับ LOCAL_FACT_OPS subject-only filter ที่มีอยู่แล้ว)
+3. `_unanswered_segment` (answer_context, deterministic renderer ข้าง `_compat_segment`/`_constraint_segment`) + `_render_composition` append segments ของ `comp.unanswered_needs` (ข้าม deferred — owner อื่นจัดการ) — render จาก typed fields verbatim (target/subject_refs/scope/reason): no_evidence/no_answer → "ไม่มีข้อมูลยืนยัน...ไม่สามารถยืนยันได้"; no_selection → "ไม่พบข้อมูล...ในระบบของร้าน" — ไม่ใช่ "ไม่รองรับ" ทั้งสิ้น
+
+**Impact pre-analysis**: recommend op (มีไหม/แบบไหน/อันไหนดี/adapter pivot P-Q4) alternatives คงเดิม · stock/price/link (LOCAL_FACT_OPS) เดิมมี subject-gate อยู่แล้ว · device-target compat (Xiaomi/CTL301) path เดิม target_device → verdict unchanged · app-target compat = uncovered→no_evidence เสมอ (rel=None เพราะไม่มี carrier — fail-closed ถูกต้องตาม spec) · "มี X ไหม" X ไม่อยู่ → เปลี่ยนจาก "มี Y แนะนำ" เป็น "ไม่พบ X" ตาม contract ที่กำหนด · EMPTY_CONTEXT_REPLY ถูกแทนด้วย segment เมื่อทุก need unresolved — honest กว่าเดิม
+
+**RED tests ก่อนแก้**: (A) mixed grounded+no_evidence render; (B) arbitrary external-app target → unresolved UnansweredNeed; (C) describe+alternative → exact subject only; (D) need completeness invariant; (E) W01 3-turn replay offline; (F) arbitrary labels ×2
+
+### 2026-10-2x — Phase 10B answer-completeness correction (เสร็จ — verified live + offline)
+
+**Error → cause → fix → impact (ตามที่แก้จริง):**
+
+- **Q2 no_evidence outcome หายที่ render**: `comp.unanswered_needs` ไม่มี renderer → เพิ่ม `_unanswered_segment` (answer_context — deterministic, typed fields verbatim, deferred ข้าม) + `_render_composition` append ท้ายหลัง results; impact: ทุก unresolved productish need ได้ customer-visible outcome — no_evidence/no_answer = cannot-confirm, no_selection = ไม่พบในระบบ; **ห้าม "ไม่รองรับ"** เสมอ
+- **Q3 external target หาย**: `_need_target` อ่านแค่ request/profile `target_device` → +fallback `need.target_refs` (verbatim) — app/service target ไหลเข้า verdict machinery → uncovered → no_evidence+segment name target ได้; impact: Garmin Connect/Google Fit/Fitbit/unknown app ทำงานเหมือนกัน (test arbitrary labels ×2 ผ่าน)
+- **W02 drift**: gate แรก blanket `operation != "recommend"` → **regress**: `test_main_flag_on_selected_replaces` (มี WPB100L ไหม → AC65B substitute) fail เพราะ describe need ที่ subject ไม่มี card เลยต้องใช้ alternative เป็น substitute — **refine เป็น `!= "recommend" and มี subject-role cand`**: subject coverage อยู่ → alternative = drift ตัด; subject ว่าง → alternative = substitute เจตนาของ selection owner คงไว้
+- **partial-unresolved render ambiguity (review finding)**: compat need ที่ verdict decided บาง subject + unresolved บางส่วน — render แบบ blanket "…กับ {target}" ฟังดูขัดกับ verdict ที่ยืนยันแล้ว → scope เป็น: named ref → "{ref} — …กับ {target}"; id/sid refs (i:/v:/u:/n: typed prefix + digit filter — schema-aware ไม่ใช่ prose) → "สินค้าที่ตรวจสอบไม่ได้ — …กับ {target}"; ไม่มี refs → "การเชื่อมต่อ…กับ {target}" เหมือนเดิม
+
+**Complexity delta**: helper +1 (`_unanswered_segment` — class เดียวกับ `_compat_segment`/`_constraint_segment`) · guard +0 · regex +0 · keyword/phrase table +0 · decision owner +0 (render ที่ composition owner เดิม) · fallback: +1 field source ใน `_need_target` cascade (typed target_refs ไม่ใช่ owner ใหม่) · flag +0 · provider call +0 · dep +0
+
+**Verification (final code):**
+- RED→GREEN: test_phase10b_answer_completeness.py 9 tests — incident replay offline + arbitrary labels + substitute anti-regression + partial-scope render + invariant
+- Regression: fail-closed boundary + phase7 + phase8 + boundary-review = 150 · r12+typed+ownership+need_selection+compat = 255 · selection/runtime+turn_decision+subject_set+grouped+pingevox = 272 · r12+slots+relations = 190 · exact_item+canonical+desc+named = 136 — all green
+- Live Gemini NEW_GID (final code): W01 3 turns — Q1 exact; Q2 grounded + `สำหรับW01 — การเชื่อมต่อหรือความเข้ากันได้กับ IMILAB W01 — ไม่มีข้อมูลยืนยัน…` (ctx=W01 เดี่ยว, W02 ออก); Q3 `สำหรับการเชื่อมต่อหรือความเข้ากันได้กับ สตาวา — ไม่มีข้อมูลยืนยัน…` (ctx=W01, no W02 card/CTA) — gemini=6, web=0, OR=0, mongo_write=0, pointer OLD pre+post
+- Live regression (code ก่อน gate-refine — model path เหมือนกัน): pingevox 5 + wattaka 3 ครบ — gemini=19, counters 0; pingevox Q3 tail ใหม่ scope "สินค้าที่ตรวจสอบไม่ได้" ไม่ขัด verdict
+- Results: docs/test/results/phase10b/phase10b_answerfix_1793092897_newgid_live.{json,md} (all 11 turns), phase10b_answerfix_1793093368/1793093613_newgid_live.{json,md} (W01 reruns)
+- SRS: §2.3 accidental scan-review fragment ลบ (restore ประโยค IRON RULE เดิม — diff §2.3 หายเป็นศูนย์); §6 update `_render_composition`/`UnansweredNeed`/`compile_answer_context` + เพิ่มแถว `_unanswered_segment`
+- Pointer: shared active = g20261024-072533-2be3443e unchanged ×3 checks/run · NEW_GID = process-local EvidenceSnapshot override เท่านั้น · ไม่มี CAS/deploy/CAS-write
+- Git: staging empty · M answer_context/app/SRS/log + untracked test + user files เดิม (Zaapi plan, SRS — fragment เท่านั้นที่แก้ตามสั่ง)
+
+### 2026-10-2x — Phase 10B typed multi-fact correction: W01 Q2 capability-ask decomposition (กำลังทำ — plan ก่อนแก้)
+
+**Root cause (trace เสร็จ — boundary แรกที่ fail = intent schema เอง):**
+
+- intent contract ไม่มี slot สำหรับ "ความสามารถที่ลูกค้าถามว่าสินค้าทำได้ไหม" — `requested_facts`/`required_features` = closed enum, `spec_constraints` = numeric-only → model ยัด capability asks (phone-GPS / บันทึกระยะทาง-เพซ / live display ชีพจร-เวลา-ระยะทาง-เพซ) ลง `requested_facts=["description"]` + mis-slot subject `IMILAB W01` ลง `target_device`
+- downstream ทุก owner faithful propagate defect: `_REL_CONN_RE` เจอ "เชื่อมต่อ" + `_has_target_dev` → compat need trefs=("IMILAB W01") = **self-compat**; profile.target_device=idevice verbatim → `target_of` fallback ดึง label เดิมกลับ → tail "ความเข้ากันได้กับ IMILAB W01" แทน asks จริง
+- asked capabilities ไม่เคยเข้า typed record ใดเลย → ไม่มี owner ไหนพิจารณาได้ → หายเงียบ แล้ว spec dump แทนคำตอบ
+
+**Fix plan (existing typed owners เท่านั้น — 0 keyword/regex/helper-chain/guard ใหม่):**
+
+1. `intent_classifier` — field ใหม่ `capability_asks`: list ของ capability labels (สิ่งที่ลูกค้าถามว่าสินค้าทำได้/มีไหม — functions/connectivity/sensors/display) — shape-validation เท่านั้น (bounded non-empty strs, ไม่มี content classification); `target_device` doc ชี้ชัด = counterpart device เท่านั้น ไม่ใช่สินค้าที่ถาม
+2. `route_context.intent_fact_scope` → 4-tuple +asks (re-validate shape, fail closed)
+3. `turn_decision` — `TurnNeed.capability_asks` + merge union + `_tgt_refs` self-drop (ref ที่ codes ทับ subject-side codes หรือ normalize เท่า subject ref = ไม่ใช่ counterpart — generic identity invariant จาก `_extract_codes`/`resolve_route` split ที่มีอยู่) + stamp asks บน product need
+4. `answer_context` — `UnansweredNeed.capability_asks`; asks eval per-need ผ่าน `eval_spec_constraints` features channel เดิม (satisfied→claimable note, unknown→forbid-note + `UnansweredNeed(no_evidence, capability_asks=…)`); uncovered emissions attach asks; `_unanswered_segment` name ทุก ask verbatim
+
+**Pre-impact**: asks ไม่แตะ retrieval/selection (subject card เดิม serve); satisfied-ask path เปิดเมื่อ structured feature evidence มีจริงเท่านั้น (วันนี้ = ว่าง → unknown เสมอ); self-drop ตัดเฉพาะ ref ที่ code ทับ subject codes — target ต่างชื่อ/ต่าง code คงเดิม (Strava/AD1404T/iPhone ไม่กระทบ)
+
+### 2026-10-2x — Phase 10B typed multi-fact correction: W01 Q2 capability asks (เสร็จ — verified live final bytes)
+
+**Error → cause → fix → impact (ตามที่แก้จริง):**
+
+- **capability asks หายที่ intent boundary**: schema ไม่มี slot → เพิ่ม `capability_asks` ใน `classify_intent` (open labels, shape-normalize ≤200 chars/≤8 ตัว, dedupe — ไม่ใช่ closed enum; prompt doc + ตัวอย่าง few-shot 1 อันเพื่อ anchor นิยาม field); impact: คำถาม "ทำ X ได้ไหม" ทุก product_type เข้า typed contract
+- **self-compat target**: `IMILAB W01` หลุดเป็น target ของ subject W01 → `_tgt_refs` ใน `decide_turn` drop ref ที่ normalize เท่า subject ref หรือ codes ทับ subject-side codes (ผ่าน `_extract_codes` เดิม — ไม่มี regex/kw ใหม่) + `build_retrieval_profile` drop `intent.target_device` แบบเดียวกัน; impact: ref ต่างชื่อ (สตาวา/iphone/AD1404T/มือถือ) คงเป็น target ตามเดิม — proven ด้วย regression
+- **asks ไหลข้าม typed chain**: `intent_fact_scope` → 4-tuple; `TurnNeed.capability_asks` + `_add_need` merge + post-pass stamp บน product need (describe ก่อน, ไม่มี → emit describe ใหม่); `UnansweredNeed.capability_asks`; asks eval ใน `compile_answer_context` ผ่าน `eval_spec_constraints` features channel เดิม (satisfied→claimable note; unknown→limitation note "ห้ามยืนยัน" + `UnansweredNeed(no_evidence, capability_asks=…)`); `_unanswered_segment` name ทุก ask verbatim
+- **render**: `สำหรับW01 — เชื่อมต่อ GPS จากมือถือเพื่อบันทึกระยะทางและเพซวิ่ง / ดูชีพจร เวลา ระยะทาง และเพซบนหน้าจอนาฬิกาขณะวิ่ง — ไม่มีข้อมูลยืนยัน…` — แทนที่เดิม "ความเข้ากันได้กับ IMILAB W01"
+
+**Complexity delta (net)**: helpers +0 · guards +0 (self-drop = schema-invariant enforcement ที่ boundary เดิม ไม่ใช่ guard ใหม่) · regexes +0 · keyword/phrase tables +0 · typed schema fields +1 (`capability_asks` — propagate ผ่าน record เดิม ×3) · decision owners +0 · fallbacks +0 · feature flags +0 · provider calls +0 · deps +0; prompt few-shot example +1 (schema doc ไม่ใช่ runtime condition)
+
+**Verification (final bytes — digest proof):**
+- RED→GREEN: test_phase10b_answer_completeness.py 13 tests — W01 Q2 incident shape + generic self-target (ZX200) + multi-ask partial coverage + render naming
+- Regression: answer-completeness 13 · typed+ownership+related 255 · broad 171+141 · grouped retrieval 71 · route/profile/requests 179 · turn_decision+incident+classifier+compat-script 372 · fixture validator pass · py_compile 4 ไฟล์ · `git diff --check` clean
+- Live Gemini final bytes (`phase10b_answerfix_1793097324_newgid_live.{json,md}` — `code_bytes_frozen=true` pre==post sha256 ของ 5 runtime files):
+  - W01 Q1: stock+describe grounded (variant-aware, card เดียว)
+  - W01 Q2: spec text + tail name asks 2 ตัว verbatim; intent สกัด target=`มือถือ` (ไม่ใช่ IMILAB W01); compat tail `มือถือ` cannot-confirm; ไม่มี spec-dump ทดแทน, ไม่มี fabricated yes/no
+  - W01 Q3: `สตาวา` target เดิม + ask `เชื่อมเข้ากับแอปสตาวา` — cannot-confirm ×2 (asks tail + compat tail — redundant แต่ honest); resp_products = W01 เดียว ไม่มี W02
+  - Pingevox 5/5 · Wattaka 3/3 (Q2 480Mbps exact-item; Q3 honest 10Gbps+magnetic no-match + per-item constraint notes)
+- Counters: gemini=19 (≤24) attempts=19 (503=0, 429=0) answer_typed=8 ≤1/answerable turn · web=0 · openrouter=0 · mongo_write=0 · elapsed 97.5s < 15min
+- Pointer: pre==post `g20261024-072533-2be3443e` (OLD_GID) · NEW_GID `g20261027-025541-563ca0f0` process-local เท่านั้น
+- Git: staging empty · dirty = 5 runtime + SRS + log + live harness spy + untracked test + user Zaapi plan (ไม่แตะ)
+
+**Verdict**: PHASE_10B_TYPED_MULTI_FACT_CORRECTED_PRECOMMIT_READY — ยังไม่ commit ตามคำสั่ง
+
+### 2026-10-2x — Phase 10B correction round 2: capability_asks source-grounding + dedupe (กำลังทำ — plan ก่อนแก้)
+
+**Findings ที่จะแก้:**
+
+- **M1**: asks = open labels ที่ model generate — normalize เฉพาะ shape ไม่พิสูจน์ว่ามาจาก message ลูกค้า → hallucinated label ไหลถึง deterministic customer text ได้
+- **M2**: few-shot ใน prompt ใช้ W01/GPS incident จริง — incident-specific hardcode
+- **M3**: ask "เชื่อมเข้ากับแอปสตาวา" + compat target "สตาวา" render ซ้ำ 2 tails ของ need เดียวกัน
+- **M4**: asks ถูกส่งเข้า `eval_spec_constraints` ช่อง required_features — open label ไม่ใช่ canonical feature key; satisfied-path เทียม
+
+**Fix plan (existing owners เท่านั้น):**
+
+1. `intent_classifier` — grounding validation ที่ normalization เดิม: ask ต้องเป็น normalized substring ของ `message` (strip whitespace + casefold — structural เท่านั้น); found → เก็บ span ต้นฉบับของลูกค้าเป็น display text; not found → drop fail-closed; helper `_grounded_excerpt` ตัวเดียว (char-index map, ไม่มี keyword/regex) · ลบ few-shot W01 → ตัวอย่างสินค้าสมมติทั่วไป + เพิ่ม instruction: asks = exact excerpts, ห้าม paraphrase, ห้ามซ้ำ relation_target/target_device/requested_facts/required_features/spec_constraints
+2. `turn_decision` — typed ownership dedupe ที่ `_cap_asks` post-pass: ask ถูก target t ∈ `_tgt_refs` own เมื่อ norm(t) ⊂ norm(ask) และ residue เป็น relation-clause เท่านั้น (pre: หลัง `_REL_CONN_RE.sub` เหลือ ≤8 ตัว = connector+modifier; post ≤8 ตัว = question tail) → drop ask (compat need ครอบ outcome เดียว); residue ยาว = capability content อิสระ → keep — structural จาก typed grounded fields ไม่ใช่ keyword table
+3. `answer_context` — ลบ `eval_spec_constraints` open-label eval ทั้ง block: asks = residual เสมอ → emit `UnansweredNeed(no_evidence, capability_asks=…)` + forbid-note ตรงๆ (format เดิม); ไม่มี satisfied-by-string-equality path เหลือ
+
+**Pre-impact**: dedupe ยิงเฉพาะเมื่อ t อยู่ใน `_tgt_refs` จริง (typed) — W01 Q2 (trefs=มือถือ, residue ยาว) asks คงอยู่; Q3 (trefs=สตาวา, ask=clause เดียวกัน) dedupe → compat tail เดียว; classifier grounding ตัด hallucination ตั้งแต่ producer
+
+**ผลแก้จริง (r15 — done):**
+
+- **M1 fix**: `_grounded_excerpt` ตัวเดียวใน `intent_classifier` — fold ลบ whitespace+casefold แล้ว substring-match บน message; display text = span ต้นฉบับลูกค้า (ไม่ใช่ casing ของ model); ไม่เจอ → drop fail-closed; bound ≤200/≤8 เดิม
+- **M2 fix**: few-shot W01/GPS incident ถูกแทนด้วยตัวอย่างสมมติ (หูฟัง ตัดเสียงรบกวน/ปรับเพลง) + instruction: asks = exact excerpts, ห้าม paraphrase/ซ้ำ relation_target/requested_facts/required_features/spec_constraints
+- **M3 fix**: dedupe post-emit ใน `decide_turn` — ask ที่ residue = relation-clause เท่านั้น (prefix หลัง `_REL_CONN_RE.sub` ≤12 + suffix ≤10) → drop (compat tail own); residue ยาว → keep; `_REL_CONN_RE` เดิม reuse ไม่มี regex ใหม่
+- **M4 fix**: ลบ block ที่ส่ง open asks เข้า `eval_spec_constraints` features channel — residual asks → `UnansweredNeed(no_evidence)` ตรงๆ + limitation note เดิม; ไม่มี satisfied-by-equality path เหลือ
+- **บั๊กพบระหว่างทาง**: dedupe รอบแรกวางก่อน compat need emit → `_ctrefs` ว่าง → ย้ายเป็น post-pass หลังทุก need emit (order-free); residue bound เดิม ≤8 เข้มไปสำหรับ `เชื่อมแอป` (9) → ปรับ 12/10 (post เป็น discriminator จริง — Q2 residue ~33 ยัง keep)
+
+**Complexity delta (net)**: helpers +1 (`_grounded_excerpt` — producer validation เดียว) · guards +0 · regexes +0 (`_REL_CONN_RE` reuse) · keyword/phrase tables +0 · typed schema fields +0 · decision owners +0 · fallbacks +0 · provider calls +0; few-shot incident example −1 → generic +1; open-label feature-eval path −1
+
+**Verification:**
+- RED→GREEN: test_phase10b_answer_completeness.py 20 tests (7 ใหม่: ungrounded drop / source-span display / no-incident-prompt / relation-own / independent-survive / Q3-single-outcome / no-canonical-eval)
+- Regression: focused batch 296 · Phase10/retrieval/grouped/Pingevox batch 666 · compat_mode script PASS · fixture validators pass · py_compile 5 ไฟล์ · `git diff --check` clean · staging empty
+- Live Gemini final bytes (`phase10b_answerfix_1793098964_newgid_live.{json,md}` — digest `67b74c06df72ca9d6c916104` pre==post):
+  - W01 Q2: asks = source spans verbatim ×2 → tail เดียว name ทั้งคู่ + compat tail GPS cannot-confirm; ไม่มี self-target/spec-dump
+  - W01 Q3: `สตาวา` compat tail **เดียว** — duplicate ask tail หายแล้ว; cards = W01 เท่านั้น ไม่มี W02
+  - Pingevox 5/5 · Wattaka 3/3 (480Mbps exact-item + honest 10Gbps+magnetic no-match)
+- Counters: gemini=19 ≤24 · answer_typed=8 ≤1/answerable turn · web=0 · openrouter=0 · mongo_write=0 · elapsed 346.9s < 15min · aborted=None
+- Pointer: pre==post `g20261024-072533-2be3443e` · NEW_GID `g20261027-025541-563ca0f0` process-local
+
+**Verdict**: PHASE_10B_CAPABILITY_SOURCE_GROUNDING_CORRECTED_PRECOMMIT_READY — ยังไม่ commit ตามคำสั่ง
+
+### 2026-10-2x — Phase 10B correction round 3: live-QA regression (partial evidence / power-ranking / exact-item isolation) — PART 0 audit เท่านั้น ยังไม่แตะ runtime
+
+**Frozen state**: branch `feature-phase3-aswer-quality` · HEAD `fd4e682` · staging empty · `git diff --check` clean · pointer OLD_GID `g20261024-072533-2be3443e` (ไม่แตะ) · NEW_GID process-local เท่านั้น · Zaapi plan ไม่แตะ
+
+**Evidence audit จาก `phase10b_answerfix_1793098964_newgid_live.json` (final bytes จริง):**
+
+- **A. W01 Q2 — partial evidence → blanket cannot-confirm + GPS outcome ซ้ำ**
+  plan: product describe need (subj=W01, tgt=GPS) แบก asks 2 ตัว (`เชื่อมต่อ GPS…เพซวิ่ง`, `ดูชีพจร…หน้าจอนาฬิกา`) + compat need (subj=W01, tgt=GPS) — ทั้งคู่ `no_evidence` → 2 tails ซ้อนเรื่อง GPS เดียวกัน
+  item `18408364022` description ยืนยัน: ตรวจชีพจร 24 ชม., 70 sport modes, Imilab Fit/Glory Fit — แต่ asks tail ตีกลับทั้งก้อน (ชีพจรมีหลักฐานจริงแต่โดนตี cannot-confirm รวม)
+  root: `compile_answer_context` L1282-1292 emit `UnansweredNeed(no_evidence)` สำหรับทุก ask โดยไม่เช็กว่า need มี subject-attributed evidence — asks ไม่เคยไปถึง answer task เลย (NeedTask ไม่มี field แบก)
+  + `_rel_owned` nested helper ใน `decide_turn` (char thresholds 12/10) ทำให้ ask ที่ own relation-clause หลุดเป็น outcome แยกเมื่อ residue ยาว
+
+- **B. Pingevox Xiaomi 17 Ultra — ranking ทำหลัง truncate**
+  Q3 `req-0` eligible 42 → picked 3 · Q4 eligible 20 → picked 3
+  `retrieval_selection` L260-262 sort `ranked` ด้วย (constraint_hits,score) → L282-287 form partition → **L293 `picked = ranked[:per_request_limit]` (truncate ก่อน)** → L325-338 `need.ranking` sort บน `picked` ทีหลัง → adequate candidates ถูกตัดก่อน ranking เห็น
+  `filter_compatible_products` (device_compat L836) sort `_wattage_asc_key(p, min_watt)` อยู่แล้ว (adequate-first) แต่ selection re-sort ทิ้ง
+  spec typed: `_lookup_spec_db("xiaomi 17 ultra")` → min_watt=90, usb-c, HyperCharge/PD/PPS/QC; pool มี 90/100/120/140W จริง (log `[DEVICE-SPEC-LOOKUP] sort pool (min_watt=90) top3: [90.0,100.0,120.0]W`) แต่เลือก ATC310N (3A/60W) + CTL301 (Lightning→verdict incompatible ตัวเดียวที่ถูก) — 60W เสนอเป็น "ใช้งานร่วมกับได้" เต็มๆ ไม่มี slower label
+
+- **C. Wattaka CMC615P Q2 — exact-item local-fact → sibling/CarPlay leak**
+  message `Speed data เท่าไหร่?ครับ` ไม่มี explicit identity แต่ intent emit `subject_scope='explicit'` (ungrounded — `_subject_refs=()`)
+  → `resolve_subjects` L1009-1010: `explicit` → `no_subject_ref` → persisted single `27639651334` ไม่ถูก consume
+  → need ไม่มี subject_refs → slot request ไม่ pin (`retrieval_executor` L87 `anchor_item_ids` ว่าง) + `_subject_cards` ว่าง → `_conv_active_card` ว่าง → `profile.anchor_item_ids` ว่าง → description channel (`fetch_description_evidence` restrict contract มีอยู่แล้ว) ไม่ restrict → 12 eligible → เลือก sibling 51810334388/41933733847/49353001832
+  → `decide_subject_set` เห็น selected_ids 4 ตัว → persist `alternatives{4}` (corrupt subject set)
+  → `compile_answer_context`: op=describe ไม่อยู่ใน `LOCAL_FACT_OPS` gate (L1051 — gate เฉพาะ price/stock/link) → sibling cands เข้า ctx → answer รวม "ทุกรุ่น 480Mbps เหมือนกัน" + CarPlay จาก sibling description
+
+**Root causes (owner-level):**
+1. asks placement เป็น all-or-nothing ที่ ctx layer — ไม่มี path ให้ ask+evidence เข้า task (partial evidence) · owner: `answer_context` + `NeedTask`/render contract
+2. relation ownership ตัดสินด้วย char-threshold helper (`_rel_owned`) แทน typed target containment · owner: `decide_turn`
+3. pick-determining sort ทำหลัง truncation · owner: `retrieval_selection`
+4. scope `explicit` ไม่มี refs = contradictory typed state ไม่ถูก repair → resolver ข้าม anchor · owner: `decide_turn` (`_subj_scope` normalization — chain ล่างมีอยู่ครบ)
+
+**Fix plan (existing owners/fields เท่านั้น — รอ approval):**
+A. `NeedTask.capability_asks` + propagate เมื่อ need มี subject-role cand; render asks + per-subclaim separation instruction ใน `AnswerTask.render()` (closed template เดิม); ctx: asks→task เมื่อมี subject cand, ไม่มี → `UnansweredNeed` เดิม; ลบ blanket "ห้ามยืนยัน" note เมื่อ asks ไป task
+B. ลบ `_rel_owned` + thresholds; post-pass: ask containing `norm(t) in norm(ask)` (t ∈ emitted compat needs' target_refs) → stamp บน compat need ตัวนั้น (ask span เดิมครั้งเดียว); residual → product need; `_unanswered_segment`: asks present → ask span เป็น topic (name subject prefix) → target named once
+C. `retrieval_selection`: `need.ranking` + `_wattage_asc_key(card, min_watt)` ย้ายขึ้น sort บน `ranked` ก่อน `picked=ranked[:limit]`; min_watt จาก `_lookup_spec_db(req.target_device or profile.target_device เมื่อ source=='compat')`; picked ที่ watt<min → `_context_note` "จ่ายไฟต่ำกว่าสเปค — ชาร์จช้ากว่าปกติ" (note machinery เดิม)
+D. `decide_turn`: `_subj_scope=='explicit'` + `not _subject_refs` + need มี `requested_facts` → `current_single` → resolver( persisted n==1)→apply_resolved_subject_refs stamp→executor anchor_item_ids→fetch_units item-scoped + `_conv_active_card`→profile.anchor_item_ids→description restrict→subject_set single→ctx anchor เดียว; edge: n==0/n>1 → clarify (honest)
+
+**Implementation plan (r16 — approved):**
+
+- **`turn_decision.py`**:
+  1. `_add_need` — `_scope` normalization: `explicit` + `facts` non-empty + `_subject_refs` ว่าง → `current_single` (fact-question ไร้ explicit identity = ungrounded scope → resolver machinery เดิม consume; recommend/compat ไม่แตะ เพราะ facts ว่าง)
+  2. ลบ `_rel_owned` + thresholds ทั้งก้อน → post-pass typed containment: ask ที่ `norm(t) in norm(ask)` สำหรับ t ∈ target_refs ของ compat need → move ไป compat need (span เดิมครั้งเดียว); residual อยู่ product need
+- **`answer_context.py`**:
+  3. `NeedTask.capability_asks` field เดียว
+  4. `compile_answer_task` — propagate เมื่อ `n.kind=="product"` และมี ≥1 subject-role cand ใน request selections
+  5. `AnswerTask.render()` — asks line + per-subclaim separation instruction (closed template)
+  6. `compile_answer_context` — `_asks_on_task` predicate (product + subject cand ที่ selection); asks→task ไม่ emit UnansweredNeed/ไม่ติด forbid-note; UnansweredNeed carry asks เฉพาะเมื่อไม่ on task (3 จุด: uncovered/empty/asks-block); gate `LOCAL_FACT_OPS` ขยายครอบ `requested_facts` needs เมื่อมี subjects-source request (local-fact = ของ resolved subject เท่านั้น — owner เดิม)
+  7. `_unanswered_segment` — asks present → ask span เป็น topic (subject prefix คง) → target named once
+- **`retrieval_selection.py`**:
+  8. ย้าย `need.ranking` sort ขึ้นมาทำบน `ranked` ก่อน truncate
+  9. device-adequacy: `req.target_device or profile.target_device (compat channel)` → `_lookup_spec_db` → `min_watt` → `_wattage_asc_key` sort บน `ranked` ก่อน `picked`
+  10. post-picked typed labels: watt<min → `_context_note` ช้ากว่าปกติ; variants หลาย watt + ไม่มี selected variant → note กำลังไฟขึ้นกับตัวเลือก (ไม่ใช่ full-speed claim)
+- **Tests**: เพิ่มใน `test_phase10b_answer_completeness.py` (section r16) + อัปเดต 4 tests ที่ encode พฤติกรรมเก่า (asks on task / compat ownership)
+- **ไฟล์ที่แตะ**: 3 runtime + test + SRS + log เท่านั้น
+
+### r16 PART 1-2 — RED→GREEN implementation (approved existing-owner fixes)
+
+**RED**: 15 failing tests (r16 section + 5 updated-contract tests) → **GREEN**: 35/35 + regression 1024 passed/1 skipped + script validators (compat_mode_filter, legacy_turn_incident_replay, qa_context_guard) exit 0 · `py_compile` OK · `git diff --check` clean · staging empty
+
+- A: `NeedTask.capability_asks` + propagate เมื่อ ≥1 subject-role cand (`compile_answer_task`) + render asks+subclaim instruction (`AnswerTask.render`); ctx: asks→task เมื่อ subject cand, ไม่มี→UnansweredNeed เดิม + `_ask_unanswered` strip asks ออก task (single outcome)
+- B: ลบ `_rel_owned`+thresholds → typed containment move (norm(t)∈norm(ask) → compat need own); `_unanswered_segment`: ask-span-contains-target → span เป็น topic (target named once)
+- C: `need.ranking` + `_wattage_asc_key(card,min_watt)` ย้ายก่อน `picked=ranked[:limit]`; dev=req.target_device or profile.target_device (source=='compat'); below-target pick→`_context_note` ช้ากว่าปกติ; mixed-variant ไม่มี typed power→variant note; `_scope_card` merge pre-stamped note
+- D: `_add_need` scope repair — `explicit`+facts+ไม่มี refs→`current_single` (ทั้ง merge/append branches); ctx gate: `LOCAL_FACT_OPS` gate ขยายครอบ digit-pinned `subject_refs` needs (exact-item → subject-only cands)
+- ข้อค้นพบ: `test_exact_item_resolution_stamps_subject_refs` PASS ตั้งแต่ก่อนแก้ = chain ล่าง (resolver→stamp→anchor→restrict) ทำงานถูก — ขาดแค่ scope ที่ต้น
+
+
+### r16 PART 3 — live QA verification (final bytes)
+
+- Live QA run: `phase10b_answerfix_1793158164_newgid_live` — 3 convs / 11 turns, gemini=19 (cap 24), answer_typed=8, web=0, openrouter=0, mongo_write=0, mongo listener writes=0, digest pre==post, pointer unchanged, aborted=None, 129s
+- **Live-QA fix #1 (ระหว่าง QA):** asks ยังไป tail เพราะ predicate `role=="subject"` เดี่ยว — W01 subject card หลุดจาก request-selection (req-0 compat carrier taint) เหลือ description-channel cand ของ item เดียวกัน → ขยาย predicate เป็น resolved-subject-identity match (`_subj_ids` จาก `needs_for_request` cands; `_cand_keys`∩`_subj_ids` non-empty) ทั้ง 2 layer (task propagation + ctx admission) — typed เดิม ไม่มี helper ใหม่ → rerun: asks เข้า task, model แยก confirmed (HR 24h/70 modes/Imilab Fit) vs unconfirmed (GPS tail เดียว, display/pace ไม่ claim false)
+- **Live-QA fix #2:** ctx admission เดิมเทียบ ref-string (W01≠item id) — เปลี่ยนเป็น identity-set match ตาม design เดิม (subject identities จาก selected request candidates)
+- ผล acceptance ทั้งหมดบน bytes สุดท้าย:
+  - W01 Q2: confirmed ใน prose + GPS `no_evidence` tail 1 อัน (count "สตาวา"/GPS ไม่ซ้ำ) ✓
+  - W01 Q3: `สตาวา` ปรากฏ 1 ครั้งใน answer + 1 UnansweredNeed(compat) ✓
+  - Pingevox Q3/Q4: adequate candidates ก่อน (WCJ153 90W, ATC615 100W, AD1003 120W/100W) — ไม่มี 60W/65W เป็น full-speed primary; CTL301 → incompatible verdict ซื่อสัตย์; unverifiable tail ✓
+  - Wattaka Q2: `ctx_ids=['27639651334']` ตัวเดียว — C2C615/CTC615U/ATC310N/CarPlay ไม่รั่ว; 480Mbps ตอบจาก evidence ตัวเอง ✓
+  - Wattaka Q3: grounded negative (480Mbps < 10Gbps) ✓
+- ข้อสังเกต: Pingevox Q4 mixed listing ไม่ claim full-speed แบบไม่มี variant evidence (verdict+note ครอบ); below-target ไม่โดนเลือกเป็น primary รอบนี้
+- SRS_SSD.md อัปเดต 6 rows (select_for_llm_context/NeedTask/compile_answer_task/compile_answer_context/decide_turn/_unanswered_segment)
+- staging ว่าง, ไม่ commit ตาม requirement ของ phase นี้
+
+### 2026-10-28 — Phase 10B pre-commit review LOW-1..4: TEST-ONLY regression proof (approved plan — ยังไม่แก้ production)
+
+**Frozen baseline (verify แล้ว):** branch `feature-phase3-aswer-quality` · HEAD `fd4e6822a815e752a33b70244a0ceee55c27c3fb` · staging ว่าง · `git diff --check` clean · dirty เดิม = 6 runtime (r14/15/16) + SRS + Zaapi plan (unrelated) + live QA harness + log นี้ + untracked `test_phase10b_answer_completeness.py` · baseline offline ผ่าน 35+51 tests <1s ไม่มี Mongo/provider
+
+**Scope (approved TEST-ONLY):** แตะได้เฉพาะ `docs/test/test_phase10b_answer_completeness.py` + log นี้ · ห้ามแตะ `chatbot/shopeechat/`, SRS, frozen log, Zaapi plan, QA harness, .env/มาแล้วจ้า.md · ห้าม stage/commit/push/deploy/CAS/provider/Mongo · production fix ต้องขออนุมัติแยกรอบใหม่
+
+**Hypotheses (traced แล้ว — ยังไม่ proven จนกว่าเทสจะรัน):**
+
+- **LOW-1** `capability_asks` อาจหายจาก customer-visible deterministic unanswered: (a) `_unanswered_segment` return `no_selection` ก่อนถึง asks block (answer_context.py:1576-1580 vs 1600-1609) (b) `compose_answer` synth `no_answer` ตอน `product_text==""` โดยไม่ใส่ `t.capability_asks` (1766-1772) (c) `compose_answer(context=None)` synth `no_selection` ไม่ใส่ asks (1775-1781 — reachable ผ่าน `_done()` app.py:667/673/682)
+- **LOW-2** `_add_need` scope repair ยิงเฉพาะ `facts` ไม่ว่าง (turn_decision.py:449-451 append, 422-427 merge) — need แบกเฉพาะ `spec_constraints`/`required_features`/`capability_asks` + `explicit` ไร้ refs → ไม่ repair → `resolve_subjects` explicit→`no_subject_ref` (conversation_products.py:1009-1010) → persisted single ไม่ถูก consume (producible ผ่าน catch-all emit :788-794 / asks-emit :812-814)
+- **LOW-3** unknown-wattage pick ไม่มี `_context_note` เมื่อ device มี min_watt (retrieval_selection.py:360-385 — `_w` falsy + `output_power_w` ว่าง + `_vw≤1` → ไม่มี branch) และ `resolve_compat` charges/connects ใช้ connector อย่างเดียว (policy_resolver.py:794-819) → ไม่มี owner อื่นสื่อ power-uncertainty
+- **LOW-4** ask ownership (turn_decision.py:820-842 — `norm(t) ⊂ norm(ask)` → compat own): intrinsic-capability ask ที่กล่าวถึง target ก็ถูก move; undecided → tail name verbatim (bounded) แต่ **decided-compat** → task ถูก drop (answer_context.py:1362-1370) + verdict cover need (compose :1681-1688) → ask อาจหายเงียบ (severity สูงกว่าเดิมถ้า proven)
+
+**เทสที่วางไว้ (executable behavioral — offline เท่านั้น):**
+
+- LOW-1: (A) need+asks, selection ว่าง → no_selection → render ต้อง name ask (คาด RED) · (B) ctx task แบก asks + `product_text=""` → no_answer → render ต้อง name ask (คาด RED) · (C) `compose_answer(context=None)` → render ต้อง name ask (คาด RED) · control: no_evidence name asks อยู่แล้ว (GREEN เดิม)
+- LOW-2: decide_turn intent `subject_scope="explicit"` ไร้ refs — carrier แยกกัน: spec_constraints only / required_features only / capability_asks only → assert `current_single` (คาด RED); producibility ต้องพิสูจน์ need ถูก emit จริง (ไม่ใช่ synthetic state — ถ้า emit ไม่เกิด classify UNREACHABLE_INPUT); controls: explicit มี refs คงเดิม, recommend ห้าม narrow, zero/multi subjects → clarify (GREEN เดิม)
+- LOW-3: (A) unknown-watt card (ไม่มี output_power_w/variants) + stub `_lookup_spec_db` min_watt=90 → assert `_context_note` (คาด RED) · (B) ผ่าน scoped ctx — เช็ก verdict/note owner อื่นสื่อ uncertainty หรือยัง (ถ้าสื่อแล้ว → DISPROVED) · controls: below-target label, mixed-variant note, rank-before-truncate (GREEN เดิม)
+- LOW-4: (A) true relation ask มี target → compat own + outcome ถูก (GREEN เดิม) · (B) intrinsic ask กล่าวถึง target + compat undecided → ask named verbatim (คาด GREEN=bounded) · (C) intrinsic ask + **decided-compat** → assert ask ยังมี outcome (คาด RED ถ้าหาย) · label สมมติ ≥2 ตัว (Example Dock, Alpha Sync) · control: `test_ask_with_compat_target_moves_to_compat_need_once`
+
+**Classification ต่อเคส**: PROVEN_REGRESSION / DISPROVED / UNREACHABLE_INPUT / INCONCLUSIVE — RED ต้องเป็น assertion fail จากพฤติกรรมจริง ไม่ใช่ setup error · complexity delta รอบนี้: production helpers/guards/regex/kw-tables/owners/flags/deps/provider = **+0** (เทสอย่างเดียว)
+
+#### ผลรันจริง (executable proof — รันแยกตัว ทุกตัว <1.4s, subprocess timeout 60s)
+
+- **LOW-1 → PROVEN_REGRESSION ×3** (boundary จริง 3 จุด):
+  - `test_no_selection_answer_names_capability_asks` RED — asks ถึง `UnansweredNeed(no_selection)` จริง (premise GREEN) แต่ rendered outcome = `ส่วนสินค้า W01 — ไม่พบข้อมูลในระบบของร้านค่ะ` ไม่มี ask — **failing boundary = `_unanswered_segment` no_selection early-return ก่อน asks block (answer_context.py:1576-1580)**
+  - `test_no_answer_unanswered_keeps_capability_asks` RED — premise: `NeedTask.capability_asks` มี (GREEN เดิม) แต่ synth `UnansweredNeed(..., "no_answer", capability_asks=())` — **boundary = `compose_answer` no_answer synth (answer_context.py:1766-1769 ไม่ copy asks)**
+  - `test_context_absent_answer_names_capability_asks` RED — synth `UnansweredNeed(..., "no_selection", capability_asks=())` — **boundary = `compose_answer` context-absent synth (answer_context.py:1775-1781 ไม่ copy asks/target)**
+- **LOW-2 → PROVEN_REGRESSION ×3** (ทุก carrier producible ผ่าน decide_turn จริง — premise GREEN ทั้งหมด):
+  - `test_spec_only_explicit_scope_normalizes_current_single` RED — product/describe แบก `spec_constraints` อยู่ `explicit` ไร้ refs
+  - `test_feature_only_explicit_scope_normalizes_current_single` RED — `required_features=("magnetic",)` เหมือนกัน
+  - `test_ask_only_explicit_scope_normalizes_current_single` RED — `capability_asks` เหมือนกัน
+  - **boundary = `_add_need` scope-repair gate เช็กเฉพาะ `facts` (turn_decision.py:449-451) → explicit→`no_subject_ref` → persisted single ไม่ถูก consume → fan-out shape เดียวกับ Wattaka Q2 ผ่าน carrier อื่น**
+- **LOW-3 → PROVEN_REGRESSION ×2**:
+  - `test_unknown_wattage_pick_gets_uncertainty_note` RED — unknown-watt pick (ไม่มี output_power_w/variants/name-watt) + structured min_watt=90 → `_context_note=None`
+  - `test_decided_compat_unknown_wattage_surfaces_power_caveat` RED — verdict `compatible` (reason `connector_match`) แต่ `_context_note` มีแค่ role note ทั่วไป ไม่มี caveat ว่า full-speed ยืนยันไม่ได้ — **boundary = `resolve_compat` charges/connects ใช้ connector เพียงอย่างเดียว (policy_resolver.py:794-819) + note branches ไม่มี "unknown" case (retrieval_selection.py:360-385)**
+- **LOW-4 → ผสม — PROVEN_REGRESSION ที่ decided edge (severity สูงสุดของรอบ)**:
+  - `test_intrinsic_ask_named_when_compat_undecided` GREEN — intrinsic ask กล่าวถึง "Example Dock" ถูก move ไป compat (typed containment) → undecided → rendered name ask verbatim (bounded/non-breaking)
+  - `test_intrinsic_ask_named_when_compat_undecided_second_label` GREEN ("Alpha Sync" — generalize)
+  - `test_decided_compat_intrinsic_ask_still_reaches_outcome` **RED** — declared works_with proof → verdict `compatible` → task drop (answer_context.py:1362-1369) + verdict cover (compose :1681-1688) → answer = `Generic Watch A ใช้งานร่วมกับ example dock ได้ค่ะ\n\nspec ของ Generic Watch A` — **intrinsic ask "แสดง Example Dock บนหน้าจอ" หายเงียบทุกช่องทาง (task/verdict/unanswered) — need-completeness failure จริง: verdict ตอบ relation แต่ไม่ตอบ intrinsic capability**
+- **existing GREEN controls ยังผ่านครบ**: ไฟล์เดิม 35/35 + เทสใหม่ GREEN 2 = 37 passed, 9 failed (เฉพาะเทสใหม่ที่ตั้งใจ RED) · `test_capability_asks_named_when_whole_need_uncovered` (no_evidence asks) · `test_ungrounded_explicit_fact_need_normalizes_scope` (facts carrier) · explicit+refs คงเดิม · recommend ไม่ narrow · current_single 0/multi→clarify · `test_ask_with_compat_target_moves_to_compat_need_once` · below-target/mixed-variant/rank-before-truncate controls
+- **regression batches (offline, timeout-bounded)**: `test_phase7_answer_context.py` 36 pass · `test_phase10_compat_decision.py` 35 pass · `test_phase10_target_ownership.py` 11 pass · `test_phase10b_exact_item_identity.py` 15 pass · `test_turn_decision.py`+`test_retrieval_selection.py`+`test_retrieval_selection_runtime.py`+`test_conversation_subject_set.py`+`test_retrieval_slots.py` **255 pass** — unexpected: `compat_decision + exact_item_identity` รวมกันค้าง >60s **เมื่อ compat_decision รันก่อน** (reversed → 50 pass 0.91s) — hazard เดิมที่ `test_retrieval_selection_runtime.py:250-255` เคยบันทึก: `_import_app` stub `load_dotenv` → env ไม่โหลด → MongoClient default 127.0.0.1 → server-selection ~30s/call; ทุกไฟล์ผ่านแยกรัน — pre-existing infra quirk ไม่เกี่ยวกับ hypotheses
+- **git/state**: `git diff --check` clean · staging 0 ไฟล์ · HEAD `fd4e6822` branch `feature-phase3-aswer-quality` เดิม · runtime diffs เหมือน baseline เป๊ะ (acx+146/app+8/ic+51/rsel+70/rc+40/td+101) · แตะเฉพาะ test file (929→1215 บรรทัด) + log นี้ · ไม่มี provider/Mongo/service/generation-pointer activity จากเทสรอบนี้ (ยกเว้น hazard ข้างต้นที่เป็น pre-existing test-infra quirk ของ suites ที่มีอยู่ก่อน)
+- **ยังไม่ได้แก้อะไร**: 9 RED tests ตั้งใจค้างไว้ — production fix ต้อง separate plan+approval (owner-level) + SRS + pre-commit review · เสนอลำดับ fix: LOW-4c (silently-dropped ask — need-completeness failure) > LOW-1 (customer ไม่เห็นคำถามที่ตอบไม่ได้ 3 edges) > LOW-2 (follow-up fan-out risk) > LOW-3 (charger wattage uncertainty)
+
+### 2026-10-28 — Phase 10B LOW-4c: Dev Worker investigation round (read-only + offline test — ยังไม่แก้ production)
+
+**Frozen baseline (verify แล้วตรงเป๊ะ):** branch `feature-phase3-aswer-quality` · HEAD `fd4e6822a815e752a33b70244a0ceee55c27c3fb` · staging 0 · `git diff --check` clean · dirty เดิม (acx+146/app+8/ic+51/rsel+70/rc+40/td+101 + SRS + Zaapi plan + QA harness + log นี้) · test file untracked 1215 บรรทัดเดิม · ไม่มี worker อื่นแตะ relevant hunks
+
+**Part 1 — RED proof VALIDATED (PROVEN_REGRESSION confirmed):**
+
+- `pytest docs/test/test_phase10b_answer_completeness.py -k 'intrinsic_ask|decided_compat_intrinsic|ask_with_compat_target|relation_target_owns|w01_q3_relation|w01_q2_shape'` → **1 failed, 6 passed, 0.79s**
+- `test_decided_compat_intrinsic_ask_still_reaches_outcome` RED — answer = `Generic Watch A ใช้งานร่วมกับ example dock ได้ค่ะ\n\nspec ของ Generic Watch A` — ask "แสดง Example Dock บนหน้าจอ" หายทุกช่อง (task drop + verdict cover + ไม่มี UnansweredNeed)
+- generalize: Alpha Sync + Garmin Connect (decided) → silent drop เหมือนกัน
+- introspect: need[0] compat(asks) → decided(2 verdicts รวม need[1] product+target path) → task ni=1 product เท่านั้นรอด; controls: undecided → ask named verbatim (GREEN), relation ask + decided → silent **ถูกต้อง** (verdict ตอบมัน)
+
+**Part 2 — first failing boundary + missing data contract (CONFIRMED):**
+
+- boundary: `compile_answer_context` decided-set — verdicts ครบ subject → `continue` (answer_context.py:1024-1029) ข้าม `uncovered.add` → task drop (1362) + compose `covered.add(need_index)` (1685) → verdict coverage = **need-granular แต่ asks เป็น sub-need outcome ที่ไม่มี channel**
+- **missing data contract จริง:** relation ask vs intrinsic ask ผลิต TurnNeed typed state เหมือนกันเป๊ะ (compat + capability_asks=[span มี target]) — ทุก uniform fix จะ fail ฝั่งใดฝั่งหนึ่ง: emit tail ทุกตัว → relation ask ขัด verdict (works+cannot-confirm), ride task → duplicate/contradiction, keep silent → bug เดิม
+- ต้องการ typed distinction ที่ producer (model = semantic authority เดิม) — alternatives เสนอผู้ใช้ตัดสินก่อนแก้ (รอ approval)
+
+**scope รอบนี้:** อ่าน/รันเทสอย่างเดียว — ไม่แตะ production/test file, ไม่มี Mongo/provider/service/pointer action
+
+### 2026-10-28 — Phase 10B W01 Q2: TWO-FIX implementation (APPROVED) — FIX A identity/retrieval → FIX B no-selection response
+
+**Frozen baseline (verify แล้วตรงเป๊ะ):** branch `feature-phase3-aswer-quality` · HEAD `fd4e6822a815e752a33b70244a0ceee55c27c3fb` · staging 0 · `git diff --check` clean · dirty เดิม (acx/app/ic/rsel/rc/td + SRS + Zaapi plan + QA harness + log นี้) · test file untracked 1215 บรรทัด · artifact `docs/test/results/phase10b/low4c_live_1793167341.json`
+
+**Root causes (proven รอบสืบสวน — 2 ตัวอิสระ):**
+
+- **Identity (FIX A — incident root):** Q2 needs แบก `subject_refs=('W01',)` (code-shape จาก `_explicit_codes`/route.model_codes ไม่ใช่ item id) → app gate `_has_explicit_subject` (app.py:~1765) ข้าม `resolve_subjects` → `_subject_res=None`, anchor None → `_subject_cards=[]` → **ไม่มี ch:subjects เลย** (artifact sel_trace เหลือแค่ req-0 elig=0 + ch:description elig=0) → `no_selection` · พิสูจน์ exec: `resolve_subjects(explicit)→no_subject_ref` vs `current_single→resolved{18408364022}` · card name จริง `[ลดเหลือ 699] IMILAB W01 …` → `_extract_codes → ['W01','30D']` ⊇ refs → equivalence provable typed
+- **Render (FIX B — secondary):** `_unanswered_segment` (answer_context.py:~1576) early-return `no_selection` "ไม่พบข้อมูลในระบบของร้าน" ก่อน `capability_asks` block → display ask หาย + wording กว้างเกินสิ่งที่ typed state รู้ (ไม่ใช่ "ร้านไม่มี" — ctx_text เองก็สั่งห้ามสรุปหมด/เลิกขาย)
+
+**Approved plan (ยึดตาม approval verbatim):**
+
+- FIX A: `resolve_subjects` +2 typed params (`subject_refs`, `persisted_code_index`) — explicit scope + code refs → equivalence ผ่าน persisted card-name codes ด้วย canonical `_extract_codes` (owner เดิม ไม่ใช่ mechanism ใหม่) → 1 match `resolved`(narrowed set), >1 `clarify`, 0/unprovable `no_subject_ref` · app gate: digit refs veto เหมือนเดิม (mixed ก็ skip), code refs consult เฉพาะ `_plan_scope=='explicit'` · `apply_resolved_subject_refs` union-stamp `(ids + refs)` เฉพาะเมื่อ plan-scope=='explicit' (ทุก non-digit ref covered — partial → no substitution) · code index จาก `_subject_products` (timeline เดิม — DB read +0)
+- FIX B: ลบ early return → `no_selection` ไหลผ่าน named-topic + asks + clause ใหม่ "ยังไม่พบข้อมูลของสินค้านี้ในเทิร์นนี้ จึงยังตอบไม่ได้ค่ะ" (ไม่อ้าง absence) · no-asks เคสคงเดิม
+- Truth table A–H + mixed-refs + partial-coverage controls · complexity: helpers+0/guards+0/regex+0/kw+0/owners+0/fallbacks+0/flags+0/deps+0/provider+0 · typed params +2 (resolve_subjects) เท่านั้น
+- out-of-scope ตายตัว: LOW-1b/1c, LOW-4c, LOW-2, LOW-3 (RED ตั้งใจค้าง)
+
+**RED step (FIX A):** เทสใหม่ใน `test_phase10b_answer_completeness.py` — resolver truth table + e2e (decide_turn จริง → resolve → stamp → run_grouped_selection(ch:subjects) → compile → render)
+
+**FIX A — GREEN + regression evidence (รันจริง `.venv/bin/python -B -m pytest -p no:cacheprovider`):**
+
+- RED → GREEN: เทสใหม่ 4 ตัว (resolver truth table: code≡persisted→resolved narrowed / code≠persisted→no_subject_ref / mixed digit+code→skip / partial coverage→no substitution / multi-match→clarify + e2e decide_turn จริง) — RED เดิม `TypeError: unexpected keyword argument 'subject_refs'` ×4 → GREEN ทั้งหมด; e2e พิสูจน์ persisted `{18408364022}` + plan `('W01',)` → stamped `('18408364022','W01')` → `ch:subjects` selects card จริง → ctx item-attributed → ทุก ask ได้ outcome (GPS/display = cannot-confirm เพราะ card ไม่มีหลักฐาน — คำตอบที่ถูก) → ไม่มี W02 leak
+- `test_phase10b_answer_completeness.py` ทั้งไฟล์ (50 เทส): 41 passed, 9 failed = intentional-RED 8 (out-of-scope LOW-x) + `test_no_selection_answer_names_capability_asks` (FIX B ยังไม่แก้ตอนนั้น)
+- `test_conversation_subject_set.py` + `test_turn_decision.py` + `test_phase10b_exact_item_identity.py`: **228 passed**
+- `test_phase7_answer_context.py` + `test_retrieval_slots.py` + `test_retrieval_profile.py` + `test_phase2c3_action_switch.py`: **107 passed** (resolver call-site spy `test_resolve_subjects_called_exactly_once` ยังผ่าน — production call เดียว)
+- `test_phase10_compat_decision.py` + `test_phase10_target_ownership.py`: **46 passed** (รัน exact_item_identity ก่อน compat ตาม hazard เดิม)
+- `test_retrieval_selection.py` + `test_retrieval_selection_runtime.py` + `test_grouped_retrieval_requests.py` + `test_grouped_retrieval_executor.py` + `test_retrieval_relations.py`: **67 passed**
+- unexpected failures: **0** · skips: canary scripts (ต้อง live service — ไม่รันตาม hard limit) · flag-OFF fixtures ไม่มี suite เฉพาะ
+- `py_compile` 3 ไฟล์ OK · `git diff --check` clean · staging 0
+
+**Caller audit `resolve_subjects` (ก่อนเปลี่ยน signature):** production call site เดียว `app.py:~1801` (`test_resolve_subjects_called_exactly_once` ยืนยัน source count=1) · spies/refs ใน test: phase2c3 / retrieval_profile / canary_exact_item_attribution / canary_phase10b_grouped / live_pingevox_mistore_inproc / completeness / exact_item_identity / conversation_subject_set — params ใหม่ทั้งคู่ default `()`/`None` → caller เดิม behavior คงเดิม (ไม่ส่ง = code path ไม่แตะ)
+
+**FIX B — RED→GREEN + regression evidence:**
+
+- RED เดิม (proven): `test_no_selection_answer_names_capability_asks` fail — rendered `ส่วนสินค้า W01 — ไม่พบข้อมูลในระบบของร้านค่ะ` (ask หาย)
+- GREEN: `1 passed in 0.59s` — rendered ใหม่ `ส่วนสินค้า W01 — ดูชีพจร เวลา ระยะทาง และเพซบนหน้าจอนาฬิกา — ยังไม่พบข้อมูลของสินค้านี้ในเทิร์นนี้ จึงยังตอบไม่ได้ค่ะ` (ask verbatim + ไม่อ้าง absence)
+- controls ผ่าน: no_selection ไม่มี asks → `ส่วนสินค้า W01 — ไม่พบข้อมูลในระบบของร้านค่ะ` เดิม · generic no-subject → `ส่วนสินค้าที่ตรงกับคำถามนี้ — <ask> — ยังไม่พบ…เทิร์นนี้…` · no_evidence compat → `สำหรับW01 — เชื่อมต่อ GPS จากมือถือ — ไม่มีข้อมูลยืนยัน…` คงเดิม
+- ไฟล์ completeness ทั้งหมดหลัง FIX B (รันจริง): **42 passed, 8 failed** (50 เทส) — ทั้ง 8 = intentional-RED out-of-scope (LOW-1b no_answer synth / LOW-1c context=None synth / LOW-2 explicit-scope ×3 / LOW-3 wattage ×2 / LOW-4c decided-compat) — ไม่ใช่ regression ใหม่; `test_no_selection_answer_names_capability_asks` ออกจากกลุ่ม fail แล้ว
+- complexity delta จริง: helpers+0 / guards+0 / regex+0 / kw tables+0 / owners+0 / fallbacks+0 / flags+0 / deps+0 / provider calls+0 / typed params +2 (`resolve_subjects` เท่านั้น) — ตรง approved เป๊ะ
+- SRS_SSD §6 อัปเดตครบทุกฟังก์ชันที่แตะ: `resolve_subjects`, `apply_resolved_subject_refs`, app gate (`_chat_impl` subject-resolution block), `_unanswered_segment`
+- **final state:** staging 0 · commit 0 · HEAD `fd4e6822` · ไม่แตะ frozen log/Zaapi/QA artifacts · ไม่มี Mongo/provider/service/pointer activity
+
+**วิธีแก้ (สั้น):** code ref ไม่ใช่ item identity → resolver เช็ก equivalence กับ persisted card-name codes (canonical `_extract_codes` owner เดิม) ก่อนตัดสิน explicit → match เดียว resolved, >1 clarify, 0 ไม่ substitute · stamp เป็น union คง named ref ไว้ render + id เป็น exact authority · renderer เอ่ยชื่อ ask verbatim ทุกตัวแล้วบอก "ยังไม่พบข้อมูลของสินค้านี้ในเทิร์นนี้" แทน "ไม่พบข้อมูลในระบบของร้าน" → ลูกค้าเห็นคำถามตัวเองครบ + ไม่โดนบอกว่าร้านไม่มีของทั้งที่มี

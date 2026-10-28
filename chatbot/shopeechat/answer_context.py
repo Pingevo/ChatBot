@@ -1577,7 +1577,14 @@ def _unanswered_segment(u: UnansweredNeed) -> str:
         topic = named[0] if named else (
             str(u.scope[0]) if u.scope else "")
         thing = f"สินค้า {topic}" if topic else "สินค้าที่ตรงกับคำถามนี้"
-        return f"ส่วน{thing} — ไม่พบข้อมูลในระบบของร้านค่ะ"
+        _asks_txt = " / ".join(str(a).strip() for a in (u.capability_asks or ())
+                               if str(a).strip())
+        if not _asks_txt:
+            return f"ส่วน{thing} — ไม่พบข้อมูลในระบบของร้านค่ะ"
+        # selection ว่างเทิร์นนี้ ≠ ร้านไม่มีสินค้า — name ask verbatim แล้ว
+        #   บอกตรงๆ ว่าเทิร์นนี้ยังไม่มีข้อมูลตอบ (ไม่อ้าง absence/capability)
+        return (f"ส่วน{thing} — {_asks_txt} — "
+                f"ยังไม่พบข้อมูลของสินค้านี้ในเทิร์นนี้ จึงยังตอบไม่ได้ค่ะ")
     if u.operation == "compat" and target:
         if named:
             topic = (f"{' / '.join(named)} — "
