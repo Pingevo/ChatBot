@@ -401,15 +401,15 @@ listing path:
 | `_active_keys` | effective key set | — | list[str] | get_key_pool, env | _next_api_key | ตาม `key_source.gemini`: env/single/db (default db) | fallback env |
 | `get_provider` | provider ต่อ role | role | str | get_llm_config | _generate | roles: chat/vision/intent/openrouter_search | env fallback |
 | `get_model` | model ต่อ role | role | str | get_llm_config | _generate, callers | เช่น chat→`GEMINI_MODEL` | env fallback |
-| `_next_api_key` | round-robin key | — | str | _active_keys | _client, _generate | cycle ข้าม key เกิน quota | RuntimeError เมื่อหมด |
-| `_client` | genai client | — | Client | _next_api_key | describe_*, answer_* | client ต่อ key (กัน shared-transport closed bug) | — |
+| `_next_api_key` | round-robin key | — | str | _active_keys | _client, _generate | index-modulo ข้าม `_DEAD_KEYS` (401/UNAUTHENTICATED ใน process) bounded ≤len(keys) | RuntimeError เมื่อหมด/dead หมด |
+| `_client` | genai client | api_key? | Client | _next_api_key | describe_*, answer_*, _generate | client ต่อ key (กัน shared-transport closed bug); api_key ที่เลือกแล้ว inject ได้ | — |
 | `_load_quota_day` | โหลด quota counter | — | dict | json file | _acquire | day-reset | file read |
 | `_save_quota_day` | persist quota | — | — | json file | _record_tokens | — | file write |
 | `_acquire` | เลือก key ใต้ quota | model, est_tokens | key str | _q_day, RPD/RPM/TPM env | _generate | skip key เกิน limit | RuntimeError quota หมด |
 | `_record_tokens` | นับ usage | model, resp | — | _gemini_cost, _save_quota_day | _generate | update counters | file write |
 | `_or_messages` | Gemini contents→OR messages | contents, config | list[dict] | — | _openrouter_generate | role map + flatten | — |
 | `_openrouter_generate` | call OpenRouter | model, contents, config | (text, resp) | urllib POST, _or_messages, `runtime_config.sanitize_or_model` (lazy) | _generate | ใช้เมื่อ provider=openrouter; **Phase 10A r4: model ผ่าน `sanitize_or_model` ก่อน payload — `:online` คงได้เฉพาะ toggle is True (owner เดียวกับ `or_client.call_or` — ไม่มี bypass path)** | HTTP error→raise |
-| `_generate` | **unified generation** | model, contents, config, est_tokens | (text, usage) | _acquire, _client/_openrouter_generate, _record_tokens | answer*, intent_classifier | Gemini SDK หรือ OR → usage dict | RuntimeError เมื่อทุก key fail |
+| `_generate` | **unified generation** | model, contents, config, est_tokens | (text, usage) | _acquire, _next_api_key, _client/_openrouter_generate, _record_tokens, `_DEAD_KEYS` | answer*, intent_classifier | Gemini SDK หรือ OR → usage dict; 401/UNAUTHENTICATED → mark key dead + retry key ถัดไปใน call เดียว ≤len(pool); 429 → model fallback 1 ครั้ง | RuntimeError เมื่อทุก key fail/dead หมด |
 | `split_segments` | multi-bubble split | answer | list[str] | — | _make_response(v2), engine v3, app | split `|||`, strip | — |
 | `_build_context` | product context block | products, shop_hint, options | str | card fields | answer() | serialize cards + `_context_note` + availability flags | — |
 | `describe_image` | vision 1 ไฟล์ | url, shop_hint, history_context | (text, usage) | urllib fetch, _client, types.Part.from_bytes | describe_images | bytes→Part; video suffix→180s + video prompt; MIME จาก Content-Type+suffix; `_VISION_PROMPT` กัน hallucination | net fetch; error→("",{}) |
