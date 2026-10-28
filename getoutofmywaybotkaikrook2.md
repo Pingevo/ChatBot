@@ -8368,3 +8368,94 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
   เช็ค inline 3 จุดใน owners เดิม, 0 helper/guard function ใหม่
 - Task 7+ ยังไม่เริ่ม; production unique-index blocker ยังเปิด;
   ไม่แตะ Phase 10B และไม่ push/merge/deploy
+
+### กำลังจะทำ — R1 TASK 7: thin bindings route + read view + route suite (implementation session, approved plan §11 Task 7)
+
+- **frozen state (verified 2026-10-28)**: worktree `zaapi-workflow-foundation` ·
+  branch `codex/zaapi-workflow-foundation` @ `a461aeb` (chain
+  `a461aeb → e223f77 → 8038286`) · tree clean · staging empty ·
+  Phase 10B (`feature-phase3-aswer-quality` @ `fd4e682`, 12 dirty paths =
+  activity ภายนอก) ไม่แตะ
+- **baseline tests (run สดก่อน RED)**: binding-resolution 827/827 ·
+  persistence 452/452 · foundation 161/161 · `npx tsc --noEmit` exit 0
+- **Task 7 scope (ตาม plan §11 Task 7 + §5/§13 เท่านั้น)**:
+  1. `getBindingResolutionView(workflowId)` — public method ที่สองใน
+     `workflowService.ts` — compose `getWorkflow` + `getWorkflowImportDetail`
+     + `bindings.find({workflow_id, version_id: current_version_id})` +
+     `shops`/`admins`/`conversations.distinct` — คืน `BindingResolutionView`
+     ตาม plan §5 (expected_version=wf.version, version_id=current_version_id,
+     sources[{source_index, display_value}], resolution verbatim,
+     candidates{accounts/labels/users, teams/ticket_fields/urls ว่าง},
+     unresolved/invalid/publish_blockers/overlap_conflicts)
+  2. `src/app/api/workflows/[workflowId]/bindings/route.ts` — thin:
+     GET `requireAuth`→view→json/404 · POST `requirePageEdit`→readJson→
+     `saveBindingResolutionBatch`→status map (404/409/422/500) · zero Mongo
+  3. display safety: `"[redacted]"`/`REDACT_VALUE`-matching → `"[redacted]"` ·
+     non-primitive → `canonicalJson` truncate · ไม่มี credential/URL leak
+  4. route suite ใหม่ตาม §13: `test-workflow-binding-routes.ts` +
+     `-hooks.mjs` + `-mocks.mjs` (authorize/workflowService/mongoClient
+     redirect → mongoClient throw = zero-Mongo proof)
+- **design choice (จะรายงานใน pre-commit report)**: `BindingResolutionView`
+  interface เดิม (:1257 จาก Task 1 freeze) ต่างจาก plan §5 — ปรับตาม plan §5
+  (worker prompt กำหนด "per plan §5" ชัด) · REDACT_VALUE export จาก
+  zaapiImport (reuse — ไม่ใช่ regex ใหม่)
+- **ไม่ทำใน Task 7**: helper/nested fn/guard function/decision owner/
+  collection/index/worker/queue/dep/flag/regex/keyword table ใหม่ ·
+  engine/registry/listWorkflows · UI/panel (Task 8) · commit/push/PR ·
+  production index DDL · real Mongo/provider · Phase 10B
+- **RED plan**: section 30 ท้าย `test-workflow-binding-resolution.ts`
+  (view shape/sources pairing/candidates/redaction/non-primitive/absent→null)
+  + route suite ใหม่ (GET 200/404, POST 200/409/422+forbidden keys,
+  delegation args, auth short-circuit, zero-Mongo)
+- **stop gate**: Task 7 เท่านั้น · ห้าม stage/commit · หยุด pre-commit
+  review gate · verdict ต้องมี evidence จริง
+
+### ผ่านแล้ว (verified, pre-commit stop) — R1 TASK 7: thin bindings route + read view + route suite
+
+- **วิธีทำ (root owner เดียว — ไม่มี owner/owner helper ใหม่)**:
+  - `workflowService.ts` เพิ่ม `getBindingResolutionView(workflowId)` — public
+    method ที่สองตาม plan — compose `getWorkflow` + `getWorkflowImportDetail`
+    + `bindings.find({workflow_id, version_id: current_version_id})` + อ่าน
+    `shops`/`admins`/`conversations.distinct("labels")` ทั้งหมดใน owner เดียวกัน
+    · `BindingResolutionView` interface ปรับตาม plan §5 (stub เดิมของ Task 1
+    diverge — worker prompt กำหนด "per plan §5" ชัด): เพิ่ม `expected_version
+    (=wf.version)`, `version_id` เป็น `string|null`, `resolution` verbatim,
+    `candidates`, `unresolved`/`invalid`/`publish_blockers`/`overlap_conflicts`
+  - display safety inline ใน `.map` เดียว (ไม่มี helper/nested fn):
+    `"[redacted]"` literal หรือ `REDACT_VALUE`-matching stored value →
+    `"[redacted]"` · non-primitive → `canonicalJson` truncate 120 chars + "…" ·
+    `REDACT_VALUE` export จาก `zaapiImport.ts` (reuse regex เดิม — ไม่ใช่ regex ใหม่)
+  - route `src/app/api/workflows/[workflowId]/bindings/route.ts` thin เท่านั้น:
+    GET `requireAuth`→view→json/404 · POST `requirePageEdit("workflow")`→
+    `readJson`→`saveBindingResolutionBatch(wfId, body, r.ctx.admin.admin_id)`→
+    status map (not_found→404 · conflict→409 +current_version · validation→422 ·
+    throw→500 · body ไม่ parse→400 ตาม PATCH convention) · body ส่ง verbatim
+    (forbidden keys reject ฝั่ง service strict-shape — route ไม่ filter เอง) ·
+    zero direct Mongo (mock mongoClient throw ทุก entry = proof จริง)
+- **RED ก่อน impl**: route suite 30 ล้มจริง (route module ยังไม่มี — import
+  throw; 5 ที่ผ่าน = vacuous guards) · service suite 42 ล้มจริง (method absent
+  → callView undefined — fixture persist ถูกพิสูจน์ฝั่ง RED แล้ว)
+- **GREEN สด (verify ล่าสุดหลัง impl)**: `test-workflow-binding-routes.ts`
+  **35/35** exit 0 · `test-workflow-binding-resolution.ts` **872/872**
+  (827 + 45 asserts section 30) exit 0 · `test-workflow-persistence.ts`
+  **452/452** exit 0 · `test-workflow-foundation.ts` **161/161** exit 0 ·
+  `npx tsc --noEmit` exit 0 · `git diff --check` exit 0
+- **complexity delta vs plan §10**: route handlers +2 (งบ +2) · public
+  methods +1 (งบ +1) · test files +1 suite (งบ +1) · helpers/guards/nested
+  fns/decision owners/regexes/keyword tables/deps/flags/collections/indexes
+  ทั้งหมด +0 — display safety อยู่ inline ใน `.map` callback เท่านั้น
+- **contract pins ยืนยัน**: client POST รับเฉพาะ §6B fields (forbidden
+  `source_value`/`display_value`/`sources` → 422 ผ่าน service validation —
+  route ไม่ pre-filter) · `display_value` เป็น read-only server-produced ·
+  imported workflows ยัง `enabled:false`/`status:"draft"`/engine-invisible ·
+  view เขียน artifacts/audit = 0 (read-only พิสูจน์ใน section 30) ·
+  credential/URL ไม่ leak (sekret-br/img.example.com/zacc_token_x ไม่อยู่ใน
+  view JSON เลย)
+- **pre-commit checkpoint**: branch `codex/zaapi-workflow-foundation` @
+  `a461aeb` ไม่เปลี่ยน · staging ว่าง · ไฟล์ที่แตะ = workflowService.ts,
+  zaapiImport.ts (export เท่านั้น), route.ts ใหม่, 3 route-suite files ใหม่,
+  test-workflow-binding-resolution.ts (section 30), plan file, log นี้ ·
+  Phase 10B (`fd4e682`, dirty จากงานภายนอก) ไม่แตะ · production unique-index
+  blocker ยังค้าง · Task 8 (UI panel) **ยังไม่เริ่ม**
+- **ค้างต่อ reviewer**: commit รอ explicit approval — two-commit split
+  (`feat: binding-resolution API route + read view` แล้ว docs closeout)
