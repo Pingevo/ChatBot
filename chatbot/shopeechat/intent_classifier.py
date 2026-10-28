@@ -16,6 +16,7 @@
     "charger_subtype": "cable|adapter|set|car_charger|wireless|desktop|socket|null",
     "target_device": "iphone 4s|samsung s25 ultra|null",
     "relation_target": "ชื่อคู่ความสัมพันธ์ที่ลูกค้าระบุในข้อความ|null",
+    "capability_asks": ["ข้อความตรงจากคำถามลูกค้าที่ถามว่าสินค้าทำ/มีไหม"],
     "needs_description": bool,
     "general_qtype": "warranty_policy|return_policy|shipping_policy|brands|categories|shops|tax_invoice|null",
     "confidence": 0.0-1.0,
@@ -67,6 +68,8 @@ target_device: ถ้าลูกค้าระบุอุปกรณ์ท�
   ⚠️ สกัด target_device ทุกครั้งที่ลูกค้าระบุอุปกรณ์เป้าหมาย ไม่ว่า intent จะเป็นอะไร
   (เช่น product_recommend + "อยากได้ของที่ใช้กับ xiaomi 17 ultra" → target_device="xiaomi 17 ultra")
   ไม่ใช่เฉพาะ compatibility_check เท่านั้น
+  ⚠️ target_device คืออุปกรณ์คู่ที่ใช้ร่วมกับสินค้าเท่านั้น — ห้ามใส่ตัวสินค้าที่ลูกค้าถามถึงเอง
+  (สินค้าที่ถามไม่ใช่ counterpart ของตัวเอง; ฟังก์ชัน/ความสามารถที่ถาม → capability_asks แทน)
 
 relation_target: ถ้าลูกค้าถามความเข้ากันได้/การเชื่อมต่อ/การใช้ร่วมกับ "สิ่ง" ที่ระบุชื่อไว้ในข้อความ
   ให้คัดชื่อนั้นตามที่ลูกค้าเขียน (อุปกรณ์ แอป บริการ หรือรุ่นสินค้าก็ได้) — หรือ null ถ้าไม่มี
@@ -110,6 +113,14 @@ spec_constraints: list ของเงื่อนไขสเปกเชิง
 
 required_features: list ของคุณสมบัติสินค้าที่ลูกค้าบังคับ (closed set; ไม่มี → [])
 - "magnetic": สายแม่เหล็ก/หัวแม่เหล็ก/ข้อต่อแม่เหล็ก (magnetic connector/cable)
+
+capability_asks: list ของความสามารถ/ฟังก์ชันที่ลูกค้าถามว่าสินค้าทำได้หรือมีไหม (ไม่มี → [])
+- เช่น "ตัดเสียงรบกวนตอนคุยโทร", "ปรับเพลงจากตัวอุปกรณ์", "กันน้ำ", "โทรออกได้"
+- ต้องคัดเป็นข้อความตรงจากคำถามลูกค้าเท่านั้น (exact excerpt — ห้าม paraphrase/แต่งเพิ่ม/แปล)
+- ห้ามซ้ำสิ่งที่สกัดไปแล้วใน relation_target/target_device หรือ requested_facts/
+  required_features/spec_constraints — capability_asks เก็บเฉพาะส่วนที่เหลือ
+- ไม่ใช่ spec ตัวเลข (→ spec_constraints), ไม่ใช่ข้อเท็จจริงมาตรฐาน (→ requested_facts),
+  ไม่ใช่คู่เชื่อมต่อ/อุปกรณ์/แอปที่ระบุชื่อ (→ target_device/relation_target)
 
 general_qtype: ถ้า intent=general_question ระบุประเภทคำถามทั่วไป (ถ้าไม่ใช่ general_question → null)
 - "warranty_policy": ถามนโยบาย/เงื่อนไขรับประกัน (เช่น "รับประกันกี่ปี", "มีประกันไหม", "เคลมยังไง")
@@ -221,6 +232,9 @@ confidence: ความมั่นใจ 0.0-1.0
 คำถาม: "มีรุ่น 10Gbps ขึ้นไปและเป็นสายแม่เหล็กไหม"
 {"intent":"product_recommend","product_type":"charger","charger_subtype":"cable","target_device":null,"needs_description":false,"general_qtype":null,"subject_scope":"none","spec_constraints":[{"field":"data_transfer_mbps","op":"gte","value":10000}],"required_features":["magnetic"],"confidence":0.95}
 
+คำถาม: "หูฟังรุ่นนี้ตัดเสียงรบกวนเวลาคุยโทรได้ไหม แล้วปรับเพลงจากตัวหูฟังได้หรือไม่"
+{"intent":"product_spec","product_type":"earphone","charger_subtype":null,"target_device":null,"needs_description":true,"general_qtype":null,"subject_scope":"explicit","requested_facts":["description"],"capability_asks":["ตัดเสียงรบกวนเวลาคุยโทร","ปรับเพลงจากตัวหูฟัง"],"confidence":0.95}
+
 ตอบเป็น JSON เท่านั้น ห้ามมีคำอธิบาย
 """
 
@@ -249,6 +263,8 @@ _DEFAULT_RESULT: dict[str, Any] = {
     "requested_facts": [],
     "required_features": [],
     "spec_constraints": [],
+    # capability asks = residual source-grounded excerpt จาก message ลูกค้า
+    "capability_asks": [],
     "confidence": 0.0,
 }
 
@@ -283,6 +299,25 @@ def norm_spec_constraints(raw) -> tuple[tuple[str, str, float], ...]:
         except (TypeError, ValueError):
             continue
     return tuple(dict.fromkeys(out))
+
+
+def _grounded_excerpt(text: str, message: str) -> str | None:
+    """source validation เดียวของ capability_asks — text ต้องเป็น substring
+    ของ message หลัง structural fold (ลบ whitespace + casefold เท่านั้น);
+    คืน span ต้นฉบับของลูกค้าเป็น display text; ไม่เจอ → None (fail closed)."""
+    needle = "".join(text.split()).casefold()
+    if not needle or len(needle) > 200:
+        return None
+    chars: list[str] = []
+    pos: list[int] = []
+    for i, c in enumerate(message):
+        if not c.isspace():
+            chars.append(c.casefold())
+            pos.append(i)
+    j = "".join(chars).find(needle)
+    if j < 0:
+        return None
+    return message[pos[j]:pos[j + len(needle) - 1] + 1].strip()
 
 
 def classify_intent(
@@ -376,6 +411,22 @@ def classify_intent(
             {"field": f, "op": op, "value": v}
             for f, op, v in norm_spec_constraints(
                 result.get("spec_constraints"))]
+        # capability_asks = residual capability questions — ต้องเป็น
+        # exact excerpt จาก message ลูกค้าเท่านั้น (source-grounded;
+        # structural fold: whitespace + casefold) — display text = span
+        # ต้นฉบับของลูกค้า; ไม่เจอใน message → drop fail-closed
+        _ca = result.get("capability_asks")
+        _seen_ca: set[str] = set()
+        _kept_ca: list[str] = []
+        for _x in (_ca if isinstance(_ca, (list, tuple)) else ()):
+            _span = _grounded_excerpt(str(_x), message)
+            if _span is None:
+                continue
+            _k = "".join(_span.split()).casefold()
+            if _k not in _seen_ca:
+                _seen_ca.add(_k)
+                _kept_ca.append(_span)
+        result["capability_asks"] = _kept_ca[:8]
         # relation_target ต้อง grounded — คัดมาจากข้อความลูกค้าจริงเท่านั้น;
         # ไม่ใช่ str / ไม่อยู่ใน message / spec-like → None (fail closed)
         _rt = result.get("relation_target")

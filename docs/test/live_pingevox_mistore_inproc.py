@@ -68,6 +68,7 @@ def _decide_spy(msg, **k):
                        "feats": tuple(getattr(n, "required_features", ()) or ()),
                        "cons": [list(c) for c in
                                 (getattr(n, "spec_constraints", ()) or ())],
+                       "asks": tuple(getattr(n, "capability_asks", ()) or ()),
                        "subject_scope": n.subject_scope,
                        "subject_count": n.subject_count,
                        "confidence": n.confidence,
@@ -119,7 +120,9 @@ def _ctx_spy(*a, **k):
         {"item_id": str(p.get("item_id")), "name": p.get("item_name"),
          "fields": sorted(p.keys())} for p in ctx.products]
     _cur_t["ctx_text"] = ctx.context_text()
-    _cur_t["unanswered"] = [{"i": u.need_index, "reason": u.reason}
+    _cur_t["unanswered"] = [{"i": u.need_index, "reason": u.reason,
+                             "asks": tuple(
+                                 getattr(u, "capability_asks", ()) or ())}
                             for u in ctx.unanswered_needs]
     _cur_t["constraint_notes"] = [
         dict(n) for n in (getattr(ctx, "constraint_notes", ()) or ())]

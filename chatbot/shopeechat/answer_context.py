@@ -52,7 +52,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -182,6 +182,10 @@ class NeedTask:
     target: str | None = None                    # external device/relation tgt
     ranking: tuple[str, str] | None = None
     requested_facts: tuple[str, ...] = ()        # intent contract keys verbatim
+    # source-grounded asks ที่มี exact-subject attributed evidence —
+    #   model แยก subclaim ตามหลักฐาน (partial evidence ≠ blanket
+    #   cannot-confirm); ไม่มี subject evidence → UnansweredNeed เดิม
+    capability_asks: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -214,6 +218,12 @@ class AnswerTask:
                 parts.append(
                     "เรื่อง " + "/".join(
                         _FACT_LABEL.get(f, f) for f in t.requested_facts))
+            if t.capability_asks:
+                parts.append(
+                    "คำถามความสามารถ: " + " / ".join(t.capability_asks)
+                    + " — ตอบเฉพาะส่วนที่หลักฐานใน context ยืนยัน "
+                      "ส่วนที่ไม่มีหลักฐานให้แจ้งตรงๆ ว่ายังไม่มีข้อมูล"
+                      "ยืนยัน ห้ามตอบว่า \"ไม่รองรับ\"")
             if t.ranking:
                 parts.append(f"เรียงตาม {t.ranking[0]} "
                              f"{'มากสุด' if t.ranking[1] == 'max' else 'น้อยสุด'}")
@@ -230,6 +240,10 @@ class UnansweredNeed:
     scope: tuple[str, ...]
     target: str | None
     reason: Literal["no_selection", "deferred", "no_answer", "no_evidence"]
+    # capability asks ที่ unresolved (typed verbatim จาก TurnNeed —
+    #   renderer name ได้ทุกตัวโดยไม่ parse prose); ว่าง = unresolved
+    #   ทั้ง need
+    capability_asks: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -406,7 +420,12 @@ def _need_target(need, reqs, profile) -> str | None:
     for r in reqs:
         if r.target_device:
             return r.target_device
-    return getattr(profile, "target_device", None)
+    # non-device target (app/service label — route_context เก็บ device
+    #   view เท่านั้นใน target_device): typed target_refs ของ need เป็น
+    #   authoritative verbatim — ต้องไหลเข้า verdict/unresolved machinery
+    #   มิฉะนั้น need ถูก cover ด้วย product candidates แล้วหายเงียบ
+    return (getattr(profile, "target_device", None)
+            or next(iter(need.target_refs or ()), None))
 
 
 def _cand_keys(identity, item_id, model_id, card) -> set[str]:
@@ -863,7 +882,15 @@ def compile_answer_task(*, needs: tuple, selection: SelectionResult,
             target=_need_target(n, reqs_n, profile),
             ranking=n.ranking,
             requested_facts=tuple(
-                getattr(n, "requested_facts", ()) or ())))
+                getattr(n, "requested_facts", ()) or ()),
+            capability_asks=tuple(
+                getattr(n, "capability_asks", ()) or ()
+                if any(
+                    s.role == "subject" or s.identity in {
+                        _s.identity for _r in reqs_n
+                        for _s in by_req.get(_r.request_id, ())
+                        if _s.role == "subject"}
+                    for s in cands) else ())))
         trace.append(f"task[{i}] {n.kind}/{n.operation} "
                      f"reqs={[r.request_id for r in reqs_n]}")
     return AnswerTask(tasks=tuple(tasks), deferred=tuple(deferred),
@@ -896,6 +923,9 @@ def _scope_card(card: dict, need, role: str) -> dict:
         if sf:
             out["spec_facts"] = sf
     note = _ROLE_NOTE.get(role)
+    _pre = card.get("_context_note")        # selection-stamped label
+    if _pre:
+        note = f"{_pre} — {note}" if note else _pre
     if note:
         out["_context_note"] = note
     if role == "subject" and not card.get("sellable", False):
@@ -937,6 +967,7 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     products: list[dict] = []
     emitted: dict[str, dict] = {}   # identity → card ที่อยู่ใน payload
     unanswered: list[UnansweredNeed] = list(task.deferred)
+    _ask_unanswered: set[int] = set()   # asks → deterministic tail (strip task)
     trace: list[str] = []
     cnotes: list[dict] = []         # typed gate notes (constraint/target)
     note_extra: dict[str, list[str]] = {}   # identity → limitation notes
@@ -1033,15 +1064,28 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             unanswered.append(UnansweredNeed(
                 i, n.kind, n.operation,
                 tuple(partial_refs.get(i) or n.subject_refs or ()),
-                scope, target_of[i], "no_evidence"))
+                scope, target_of[i], "no_evidence",
+                capability_asks=tuple(
+                    getattr(n, "capability_asks", ()) or ())))
             continue
         tainted = False
         cands = [s for r in reqs_n for s in by_req.get(r.request_id, ())]
-        if (n.operation in LOCAL_FACT_OPS
+        if ((n.operation in LOCAL_FACT_OPS
+             or any(str(r).isdigit() for r in (n.subject_refs or ())))
                 and any(r.source == "subjects" for r in reqs_n)):
-            # fact-op (price/stock/link) คำตอบเป็นของ resolved subject
-            # เท่านั้น — slot/context candidates ไม่ใช่ fact ของ item นี้
+            # fact-op (price/stock/link) หรือ exact-item pinned need —
+            #   คำตอบเป็นของ resolved subject เท่านั้น; slot/history/
+            #   context candidates ไม่ใช่ fact ของ item นี้ (sibling
+            #   ห้ามข้าม exact-item boundary)
             cands = [s for s in cands if s.role == "subject"]
+        if n.operation != "recommend" and any(
+                s.role == "subject" for s in cands):
+            # alternative = typed substitute ของ selection owner —
+            #   subject coverage อยู่แล้ว → เพิ่ม alternative = sibling
+            #   drift ที่ลูกค้าไม่ได้ขอ (W02 ใน W01 follow-up); subject
+            #   ไม่มี card เลย → alternative = substitute answer เจตนา
+            #   (มี WPB100L ไหม → เสนอ AC65B แทน — ห้าม filter)
+            cands = [s for s in cands if s.role != "alternative"]
         if tainted_reqs or tainted_idents:
             kept = [s for s in cands
                     if s.request_id not in tainted_reqs
@@ -1249,8 +1293,33 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                 unanswered.append(UnansweredNeed(
                     i, n.kind, n.operation, tuple(n.subject_refs or ()),
                     scope, target_of[i],
-                    "no_evidence" if tainted else "no_selection"))
+                    "no_evidence" if tainted else "no_selection",
+                    capability_asks=tuple(
+                        getattr(n, "capability_asks", ()) or ())))
             continue
+        # ── capability asks (typed contract: TurnNeed.capability_asks ←
+        #   intent_classifier) — source-grounded spans: exact-subject
+        #   attributed evidence มี → asks ride task (model แยก subclaim
+        #   ตามหลักฐาน — partial evidence ไม่ใช่ blanket cannot-confirm);
+        #   ไม่มี subject evidence → limitation note (ห้ามยืนยัน) +
+        #   deterministic UnansweredNeed ที่ name ทุก ask — missing
+        #   evidence = cannot-confirm เสมอ ไม่ใช่ negative claim
+        _asks = tuple(getattr(n, "capability_asks", ()) or ())
+        if _asks and not any(
+                s.role == "subject" or s.identity in {
+                    _s.identity for _r in reqs_n
+                    for _s in by_req.get(_r.request_id, ())
+                    if _s.role == "subject"}
+                for s in cands):
+            _lbl = ("ยังไม่มีข้อมูลยืนยัน " + "/".join(_asks) +
+                    " ของรุ่นนี้ — ห้ามยืนยันเงื่อนไขนั้น")
+            for s in cands:
+                note_extra.setdefault(s.identity, []).append(_lbl)
+            unanswered.append(UnansweredNeed(
+                i, n.kind, n.operation, tuple(n.subject_refs or ()),
+                scope, target_of[i], "no_evidence",
+                capability_asks=_asks))
+            _ask_unanswered.add(i)
         took = 0
         for s in cands:
             prev = emitted.get(s.identity)
@@ -1291,10 +1360,13 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     #   no_match = candidates ทุกใบ proven-fail → deterministic constraint
     #   verdict ครอบคลุม (model ไม่ตัดสิน pass/fail เอง)
     dropped = uncovered | set(decided) | no_match
-    if dropped:
+    if dropped or _ask_unanswered:
         task = AnswerTask(
-            tasks=tuple(t for t in task.tasks
-                        if t.need_index not in dropped),
+            tasks=tuple(
+                (_dc_replace(t, capability_asks=())
+                 if t.need_index in _ask_unanswered else t)
+                for t in task.tasks
+                if t.need_index not in dropped),
             deferred=task.deferred, trace=task.trace)
     evidence = _compile_evidence(
         pool, web_evidence, req_needs=req_needs, idx_of=idx_of,
@@ -1486,6 +1558,58 @@ def _constraint_segment(seg: dict) -> str:
              for it in (seg.get("items") or ()) if it.get("item")]
     return "ยังไม่มีสินค้าที่ผ่านเงื่อนไขครบทุกข้อค่ะ" + (
         "\n" + "\n".join(items) if items else "")
+
+
+def _unanswered_segment(u: UnansweredNeed) -> str:
+    """deterministic render ของ unresolved productish need — typed fields
+    verbatim (target/subject_refs/scope) ไม่มี prose inference; deferred =
+    domain owner อื่นรับผิดชอบ (policy/claim/order) ไม่ render ที่นี่;
+    missing evidence = cannot-confirm เสมอ ไม่ใช่ negative claim;
+    subject_refs = unresolved refs — named ref (model code ฯลฯ) name ได้,
+    id/identity-key ref ไม่ raw-print (schema prefix/digit filter)"""
+    if u.reason == "deferred":
+        return ""
+    refs = tuple(str(x).strip() for x in (u.subject_refs or ())
+                 if str(x).strip())
+    named = [x for x in refs if not x.isdigit() and ":" not in x]
+    target = str(u.target or "").strip()
+    if u.reason == "no_selection":
+        topic = named[0] if named else (
+            str(u.scope[0]) if u.scope else "")
+        thing = f"สินค้า {topic}" if topic else "สินค้าที่ตรงกับคำถามนี้"
+        return f"ส่วน{thing} — ไม่พบข้อมูลในระบบของร้านค่ะ"
+    if u.operation == "compat" and target:
+        if named:
+            topic = (f"{' / '.join(named)} — "
+                     f"การเชื่อมต่อหรือความเข้ากันได้กับ {target}")
+        elif refs:
+            # partial/whole unresolved โดยไม่มี named subject (refs เป็น
+            #   id/sid) — scope กับส่วนที่ตรวจไม่ได้ ไม่ blanket ทั้ง target
+            topic = (f"สินค้าที่ตรวจสอบไม่ได้ — "
+                     f"การเชื่อมต่อหรือความเข้ากันได้กับ {target}")
+        else:
+            topic = f"การเชื่อมต่อหรือความเข้ากันได้กับ {target}"
+    else:
+        topic = named[0] if named else (
+            str(u.scope[0]) if u.scope else "" or target)
+    # capability asks = requested-area labels (typed verbatim จาก
+    #   TurnNeed → UnansweredNeed — ไม่ใช่ prose re-parse): unresolved
+    #   ask ทุกตัวต้องถูก name ใน outcome ของตัวเอง; ask span ที่มี target
+    #   อยู่แล้ว (ownership = typed containment) → span เป็น topic หลัก —
+    #   target named once ใน span เดิม ไม่ซ้ำใน clause intro
+    if u.capability_asks:
+        _asks_txt = " / ".join(str(a).strip() for a in u.capability_asks
+                               if str(a).strip())
+        if _asks_txt:
+            _tn = "".join(target.split()).casefold()
+            if _tn and _tn in "".join(_asks_txt.split()).casefold():
+                _pre = " / ".join(named)
+                topic = f"{_pre} — {_asks_txt}" if _pre else _asks_txt
+            else:
+                topic = f"{topic} — {_asks_txt}" if topic else _asks_txt
+    when = f"สำหรับ{topic}" if topic else "สำหรับคำถามนี้"
+    return (f"{when} — ไม่มีข้อมูลยืนยันจากข้อมูลสินค้าที่มี "
+            f"จึงไม่สามารถยืนยันได้ค่ะ")
 
 
 @dataclass(frozen=True)

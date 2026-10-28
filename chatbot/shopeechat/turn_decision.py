@@ -148,7 +148,14 @@ class TurnNeed:
     required_features = คุณสมบัติสินค้าบังคับ (closed set —
     intent_classifier.REQUIRED_FEATURES เช่น "magnetic")
     spec_constraints = (field, op, value) canonical numeric constraints —
-    shape owner: intent_classifier.norm_spec_constraints"""
+    shape owner: intent_classifier.norm_spec_constraints
+    capability_asks = residual source-grounded excerpt ของความสามารถที่
+    ลูกค้าถามว่าสินค้าทำได้/มีไหม (owner: intent_classifier —
+    producer-side excerpt validation vs message; stamp เฉพาะ
+    product-kind needs — subject ของ need คือ owner ของ asks; ask ที่
+    residue เป็นเพียง relation clause ของ compat target ถูก dedupe
+    ที่นี่; ไม่มี structured evidence → unknown → cannot-confirm
+    explicit)"""
     kind: TurnNeedKind
     operation: TurnNeedOp
     subject_refs: tuple[str, ...] = ()
@@ -163,6 +170,7 @@ class TurnNeed:
     requested_facts: tuple[str, ...] = ()
     required_features: tuple[str, ...] = ()
     spec_constraints: tuple[tuple[str, str, float], ...] = ()
+    capability_asks: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -377,7 +385,8 @@ def decide_turn(
                   refs: tuple[str, ...] = (), conf: float = 1.0,
                   prov: tuple[str, ...] = (),
                   trefs: tuple[str, ...] = (),
-                  facts: tuple[str, ...] = ()) -> None:
+                  facts: tuple[str, ...] = (),
+                  asks: tuple[str, ...] = ()) -> None:
         full_prov = tuple(dict.fromkeys(prov + media_prov))
         _scope = _subj_scope if kind == "product" else "none"
         _count = _subj_count if kind == "product" else None
@@ -410,7 +419,12 @@ def decide_turn(
                     target_refs=merged_trefs,
                     confidence=max(existing.confidence, conf),
                     provenance=merged_prov,
-                    subject_scope=_scope,
+                    subject_scope=("current_single"
+                                   if (_scope == "explicit"
+                                       and (facts
+                                            or existing.requested_facts)
+                                       and not merged_refs)
+                                   else _scope),
                     subject_count=_count,
                     product_types=_ptypes | existing.product_types,
                     subtypes=_subs | existing.subtypes,
@@ -421,6 +435,8 @@ def decide_turn(
                         existing.required_features + _feats)),
                     spec_constraints=tuple(dict.fromkeys(
                         existing.spec_constraints + _cons)),
+                    capability_asks=tuple(dict.fromkeys(
+                        existing.capability_asks + asks)),
                 )
                 return
         needs.append(TurnNeed(
@@ -430,7 +446,9 @@ def decide_turn(
             target_refs=trefs,
             confidence=conf,
             provenance=full_prov,
-            subject_scope=_scope,
+            subject_scope=("current_single"
+                           if (_scope == "explicit" and facts and not refs)
+                           else _scope),
             subject_count=_count,
             product_types=_ptypes,
             subtypes=_subs,
@@ -438,6 +456,7 @@ def decide_turn(
             requested_facts=facts,
             required_features=_feats,
             spec_constraints=_cons,
+            capability_asks=asks,
         ))
 
     # 4. explicit human request (predicate เจ้าของ: handoffs)
@@ -544,11 +563,23 @@ def decide_turn(
         _rel_tgt = ""
     _seen_t: set[str] = set()
     _tgt_refs: list[str] = []
+    # product ไม่มีวันเป็น counterpart ของตัวเอง — ref ที่ normalize เท่า
+    #   subject ref หรือ codes ทับ subject-side codes = mis-slot (เช่น
+    #   intent target_device="IMILAB W01" ขณะ subject คือ W01) → drop;
+    #   target ต่างชื่อ/ต่าง code (สตาวา/AD1404T/iphone) ไม่กระทบ
+    _subj_keys_l = {str(r).lower() for r in _subject_refs}
+    _subj_codes_l = {c.lower() for c in _explicit_codes
+                     if c.lower() not in _tgt_code_names}
+    from .scripts.unit_classifier import _extract_codes as _xcodes
     for _v in (list(_route.target_devices) + list(_tgt_codes)
                + [_intent_tgt, _rel_tgt]):
-        if _v and _v.lower() not in _seen_t:
-            _seen_t.add(_v.lower())
-            _tgt_refs.append(_v)
+        _vl = str(_v or "").strip()
+        if (not _vl or _vl.lower() in _seen_t
+                or _vl.lower() in _subj_keys_l
+                or {c.lower() for c in _xcodes(_vl)} & _subj_codes_l):
+            continue
+        _seen_t.add(_vl.lower())
+        _tgt_refs.append(_v)
     _tgt_refs = tuple(_tgt_refs)
     _subj_l = {r.lower() for r in _subject_refs}
     _compat_subject = tuple(dict.fromkeys(
@@ -575,15 +606,17 @@ def decide_turn(
     _req_facts: tuple[str, ...] = ()
     _req_features: tuple[str, ...] = ()
     _req_specs: tuple[tuple[str, str, float], ...] = ()
+    _cap_asks: tuple[str, ...] = ()
     if intent_conf >= 0.7:
         _ipt, _ist = _rc.intent_product_scope(intent)
         if _ipt:
             _intent_types = frozenset({_ipt})
         if _ist:
             _intent_subtypes = frozenset({_ist})
-        # typed fact/spec contract — same conf gate กับ product scope
-        _req_facts, _req_features, _req_specs = _rc.intent_fact_scope(
-            intent)
+        # typed fact/spec/capability contract — same conf gate กับ
+        #   product scope
+        _req_facts, _req_features, _req_specs, _cap_asks = \
+            _rc.intent_fact_scope(intent)
 
     # 6.5 cert standards (มอก./CE/...)
     _is_cert = bool(_warranty.detect_cert_question(norm))
@@ -759,6 +792,54 @@ def decide_turn(
         _add_need("product", _op, refs=_prod_subject,
                   trefs=_prod_target, conf=0.75,
                   prov=("route_context.resolve_route",))
+
+    # capability asks (intent typed contract) — stamp บน product need
+    #   เดียว (describe ก่อน ไม่มีก็ product ตัวแรก; ไม่มี product need
+    #   เลย → emit describe ใหม่ carry asks) — ask ทุกตัวต้องไหลเป็น
+    #   typed data ของ need ที่ถามถึง subject นั้น ไม่หายที่ boundary นี้
+    if _cap_asks:
+        _ask_idx = next(
+            (j for j, _n in enumerate(needs)
+             if _n.kind == "product" and _n.operation == "describe"),
+            next((j for j, _n in enumerate(needs)
+                  if _n.kind == "product"), None))
+        if _ask_idx is not None:
+            needs[_ask_idx] = _dc_replace(
+                needs[_ask_idx],
+                capability_asks=tuple(dict.fromkeys(
+                    needs[_ask_idx].capability_asks + _cap_asks)))
+        else:
+            _add_need("product", "describe", refs=_prod_subject,
+                      trefs=_prod_target, conf=0.8, asks=_cap_asks,
+                      prov=("intent.capability_asks",))
+
+    # typed ask ownership (หลังทุก need emit แล้ว — order-free): ask span
+    #   ที่มี typed compat target = outcome ของ compat need ตัวนั้น → move
+    #   ครั้งเดียว คง span ต้นฉบับ; ask ที่ไม่มี compat target → คง need
+    #   เดิม (product-side capability outcome)
+    for _j in range(len(needs)):
+        _n = needs[_j]
+        if not _n.capability_asks:
+            continue
+        _kept: list = []
+        for _a in _n.capability_asks:
+            _an = "".join(str(_a).split()).casefold()
+            _owner = next(
+                (_i for _i, _m in enumerate(needs)
+                 if _m.kind == "compat" and any(
+                     ((_tn := "".join(str(_t).split()).casefold())
+                      and _tn in _an)
+                     for _t in (_m.target_refs or ()))),
+                None)
+            if _owner is None or _owner == _j:
+                _kept.append(_a)
+            else:
+                needs[_owner] = _dc_replace(
+                    needs[_owner],
+                    capability_asks=tuple(dict.fromkeys(
+                        needs[_owner].capability_asks + (_a,))))
+        if tuple(_kept) != _n.capability_asks:
+            needs[_j] = _dc_replace(_n, capability_asks=tuple(_kept))
 
     requires_clarification = bool(_unanchored_followup_ask)
 

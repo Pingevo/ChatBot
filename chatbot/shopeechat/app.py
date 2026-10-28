@@ -757,6 +757,14 @@ def _render_composition(comp) -> str:
         if text and text not in seen:
             seen.add(text)
             parts.append(text)
+    # unresolved productish needs = explicit outcome ของตัวเอง — render
+    #   ท้ายหลัง grounded segments (deterministic จาก typed fields —
+    #   deferred needs เป็นของ domain owner อื่น ไม่ render ตรงนี้)
+    for u in comp.unanswered_needs:
+        seg = _acx._unanswered_segment(u)
+        if seg and seg not in seen:
+            seen.add(seg)
+            parts.append(seg)
     return "\n\n".join(parts)
 
 

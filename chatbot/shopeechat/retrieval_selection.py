@@ -290,6 +290,36 @@ def select_for_llm_context(
                 trace.append(
                     f"{req.request_id}: missing_structured_form "
                     f"(eligible={len(ranked)} all name-detect)")
+        # need.ranking → sort ranked ก่อน truncate (owner เดิม — canonical
+        #   spec field บน pool เต็ม ไม่ใช่ prefix ที่ตัดแล้ว); device
+        #   adequacy — owner เดียวกับ filter_compatible_products
+        #   (_wattage_asc_key + _lookup_spec_db, typed spec เท่านั้น):
+        #   adequate (watt ≥ spec) ก่อน / ตัวเล็กพอ spec ก่อน / below-target
+        #   ท้าย — ตัดก่อนเรียงทำให้ตัวพอ spec หลุดก่อน ranking เห็น
+        rank = next((getattr(n, "ranking", None)
+                     for n in req_needs.get(req.request_id, ())
+                     if getattr(n, "ranking", None)), None)
+        _dev = req.target_device or (
+            getattr(profile, "target_device", None)
+            if req.source == "compat" else None)
+        _minw = None
+        _spec = None
+        if rank or _dev:
+            from . import device_compat as _dc
+            if rank:
+                keyfn = _dc.spec_rank_key(rank[0])
+                if keyfn:
+                    ranked = sorted(
+                        ranked,
+                        key=lambda s: (keyfn(s.card), s.score),
+                        reverse=(rank[1] == "max"))
+            if _dev:
+                _spec = _dc._lookup_spec_db(_dev)
+                _minw = (_spec or {}).get("min_watt") if _spec else None
+                if _minw:
+                    ranked = sorted(
+                        ranked,
+                        key=lambda s: _dc._wattage_asc_key(s.card, _minw))
         picked = list(ranked[:per_request_limit])
         if len(req.subtypes) > 1:
             # coverage: subtype ที่ถามและมี candidate ต้องได้ ≥1 ที่ —
@@ -322,25 +352,37 @@ def select_for_llm_context(
                     picked[evict] = alt
                     protected.add(evict)
                 present.add(sub)
-        # need.ranking → sort picks ตาม canonical spec field (owner เดิมคือ
-        #   app.py superlative kw tables → detect_ranking + device_compat
-        #   extractors)
-        rank = next((getattr(n, "ranking", None)
-                     for n in req_needs.get(req.request_id, ())
-                     if getattr(n, "ranking", None)), None)
-        if rank:
-            from . import device_compat as _dc
-            keyfn = _dc.spec_rank_key(rank[0])
-            if keyfn:
-                picked = sorted(
-                    picked,
-                    key=lambda s: (keyfn(s.card), s.score),
-                    reverse=(rank[1] == "max"))
         # subject = identity authority → นำหน้า picks ของ request เสมอ
         #   (stable partition — membership/ORDER ภายในฝั่งเดิมคงที่;
         #   presentation precedence อยู่ที่นี่ไม่ใช่ AnswerContext)
         picked = tuple(sorted(
             picked, key=lambda s: 0 if s.role == "subject" else 1))
+        if _minw:
+            # below-target อาจอยู่เป็นตัวเลือก — แต่ต้องติด label ช้ากว่า
+            #   ปกติ (_context_note เดิม); mixed-variant listing ที่ไม่มี
+            #   typed power เดี่ยว ห้ามเสนอเป็น full-speed primary
+            _devname = (_spec or {}).get("device") or _dev
+            for s in picked:
+                _w = _dc._extract_max_wattage(s.card)
+                if _w and _w < _minw:
+                    s.card["_context_note"] = (
+                        f"จ่ายไฟ {_w:g}W ต่ำกว่าสเปค {_devname} "
+                        f"({_minw:g}W) — ชาร์จได้แต่ช้ากว่าปกติ")
+                elif not (
+                        s.card.get("output_power_w")
+                        or (s.card.get("specs") or {}).get(
+                            "output_power_w")):
+                    _vw = sorted({
+                        float(v["output_power_w"])
+                        for v in (s.card.get("variants") or ())
+                        if isinstance(v.get("output_power_w"), (int, float))
+                        and v["output_power_w"] > 0})
+                    if len(_vw) > 1:
+                        s.card["_context_note"] = (
+                            "มีหลายตัวเลือกกำลังไฟ "
+                            f"({'/'.join(f'{v:g}W' for v in _vw)}) — "
+                            "ยืนยันตัวเลือกที่ลูกค้าต้องการก่อน ห้ามสรุป"
+                            "ว่าชาร์จเต็มสเปคเมื่อยังไม่ได้เลือกรุ่น")
         selected.extend(picked)
         by_req.append((req.request_id, picked))
         trace.append(f"{req.request_id}: elig={len(cands)} "

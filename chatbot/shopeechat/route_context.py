@@ -185,13 +185,16 @@ def intent_product_scope(intent_result: dict | None
 
 def intent_fact_scope(intent_result: dict | None
                       ) -> tuple[tuple[str, ...], tuple[str, ...],
-                                 tuple[tuple[str, str, float], ...]]:
-    """intent → (requested_facts, required_features, spec_constraints) —
-    typed fact/spec contract accessor เดียว (consumer ห้ามอ่าน raw keys
-    ตรง); closed enums อยู่ที่ producer (intent_classifier) — accessor
-    re-validate shape แล้ว drop ค่านอก contract (fail closed)"""
+                                 tuple[tuple[str, str, float], ...],
+                                 tuple[str, ...]]:
+    """intent → (requested_facts, required_features, spec_constraints,
+    capability_asks) — typed fact/spec/capability contract accessor เดียว
+    (consumer ห้ามอ่าน raw keys ตรง); closed enums อยู่ที่ producer
+    (intent_classifier) — accessor re-validate shape แล้ว drop ค่านอก
+    contract (fail closed); capability_asks = open labels — shape check
+    เท่านั้น (non-empty str), ไม่มี vocabulary gate"""
     if not intent_result:
-        return (), (), ()
+        return (), (), (), ()
     from . import intent_classifier as _ic
     rf = intent_result.get("requested_facts")
     facts = tuple(dict.fromkeys(
@@ -201,8 +204,13 @@ def intent_fact_scope(intent_result: dict | None
     feats = tuple(dict.fromkeys(
         str(x) for x in (fx if isinstance(fx, (list, tuple)) else ())
         if str(x) in _ic.REQUIRED_FEATURES))
+    ca = intent_result.get("capability_asks")
+    asks = tuple(dict.fromkeys(
+        s for s in (str(x).strip() for x in
+                    (ca if isinstance(ca, (list, tuple)) else ()))
+        if s))
     return facts, feats, _ic.norm_spec_constraints(
-        intent_result.get("spec_constraints"))
+        intent_result.get("spec_constraints")), asks
 
 
 def resolve_route(message: str, intent_result: dict | None = None) -> RouteContext:
@@ -537,7 +545,8 @@ def build_retrieval_profile(
     # typed spec contract (closed enums — accessor เดียว; conf gate เดียว
     #   กับ product scope)
     if confidence >= 0.7:
-        _rf, req_features, spec_constraints = intent_fact_scope(intent_result)
+        _rf, req_features, spec_constraints, _ = intent_fact_scope(
+            intent_result)
     else:
         req_features, spec_constraints = (), ()
 
@@ -629,8 +638,19 @@ def build_retrieval_profile(
         target_device = cur_device
         sources.append(("target_device", "message"))
     elif idevice:
-        target_device = idevice
-        sources.append(("target_device", "intent"))
+        # target_device = counterpart เท่านั้น — label ที่ codes ทับกับ
+        #   subject-side codes ของ message นี้ (connector split owner:
+        #   resolve_route) คือ product ที่ลูกค้าถามเอง ไม่ใช่ counterpart
+        #   (W01 live incident: model mis-slot "IMILAB W01" ลง target)
+        _rt = resolve_route(msg, intent_result)
+        _tgt_code_l = {c.lower() for c in _rt.target_codes}
+        _subj_code_l = {c.lower() for c in _rt.model_codes
+                        if c.lower() not in _tgt_code_l}
+        if {c.lower() for c in _extract_codes(idevice)} & _subj_code_l:
+            target_device = None
+        else:
+            target_device = idevice
+            sources.append(("target_device", "intent"))
     elif is_followup and hist["device"]:
         target_device = hist["device"]
         sources.append(("target_device", "history"))
