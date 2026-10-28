@@ -1129,10 +1129,6 @@ def _build_context(products: list[dict], shop_hint: str | None = None,
                     desc = p["description_excerpt"]
                     if desc and desc.strip():
                         card["description_excerpt"] = desc
-                    elif "raw_description" in p and p["raw_description"]:
-                        # ⚡ BUG-O fix — fallback ใช้ raw_description ถ้า excerpt ว่าง
-                        #   กรณี keyword ไม่ match แต่ข้อมูลจริงมีใน description
-                        card["description_excerpt"] = p["raw_description"][:3000]
                     else:
                         card["description_excerpt"] = "(ไม่มีรายละเอียดสินค้าเพิ่มเติม)"
                         # เพิ่ม context_note ชัดๆ ว่าห้ามเอา desc สินค้าอื่นมาตอบ
