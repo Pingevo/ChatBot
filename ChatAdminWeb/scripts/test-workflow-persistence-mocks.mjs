@@ -9,7 +9,8 @@ import { createFakeMongo } from "./test-botworker-fakemongo.mjs";
 export const state = {
   uniqueKeys: {
     workflows: ["workflow_id"],
-    workflow_versions: ["version_id"],
+    // production-declared unique: version_id + compound (workflow_id, version_seq)
+    workflow_versions: ["version_id", "workflow_id+version_seq"],
     workflow_import_batches: ["batch_id"],
     workflow_raw_snapshots: ["snapshot_id"],
     workflow_bindings: ["binding_id"],

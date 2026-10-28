@@ -7753,3 +7753,414 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
   invalid status ไม่มี implicit repair · production unique-index blocker
   ยังเปิด · Task 4 ยังไม่เริ่ม · Phase 10B ไม่แตะ · ไม่มี
   push/PR/merge/deploy/DDL/real Mongo/provider activity.
+
+### กำลังจะทำ — R1 TASK 4: exact binding carry-forward (re-import + editor CAS)
+
+- **frozen state (verified 2026-10-28)**: worktree
+  `ChatBotProductMS-worktrees/zaapi-workflow-foundation` · branch
+  `codex/zaapi-workflow-foundation` @ `c6efc7d` (`docs: record workflow R1
+  task 3 closeout`) · tree clean · staging empty · `git diff --check`
+  clean · chain `c6efc7d → 020118a → 9c465c7 → ba6027b → 701b55e →
+  c3d6c89` verified · spec + R1 plan committed.
+- **Phase 10B read-only record**: `/Users/itdev4/Documents/GitHub/
+  ChatBotProductMS` · branch `feature-phase3-aswer-quality` @ `fd4e682` ·
+  10 dirty paths (9 modified: answer_context/app/intent_classifier/
+  route_context/turn_decision/SRS_SSD/master-plan/live_pingevox/
+  waythrough2 + 1 untracked test_phase10b) — **ห้ามแตะ** ไม่
+  write/stage/stash/copy ข้าม worktree.
+- **Task 4 scope (ตาม plan §11 Task 4 + worker prompt เท่านั้น)**:
+  exact carry-forward ใน 2 mutation paths ของ `workflowService.ts`
+  เจ้าของ persistence เดิม — `applyImportBatch` binding-insert loop +
+  `saveWorkflowDraft` surviving-node carry block · carry เฉพาะเมื่อทุก
+  condition ตรง exact (same source_workflow_id / canonical node_id /
+  field_path / kind / ordered source_values / count / scope contract /
+  mapped local target still exists+valid) → copy mappings
+  `carried:true` preserve via/state · fail ข้อใดข้อหนึ่ง → unresolved
+  ใหม่ ไม่ partial/heuristic · carried target หาย → `state:"invalid"` +
+  binding `invalid` · node removed → binding absent · re-import =
+  immutable version ใหม่เสมอ · pointer ไม่ย้อนกลับ.
+- **ไม่ทำใน Task 4**: helper/nested fn/guard/decision owner/collection/
+  index/worker/queue/dep/flag/semantic regex/keyword table/mapping
+  framework ใหม่ทุกชนิด · second persistence owner ·
+  workflowEngine/runtime · UI/API routes/components/node registry/Task
+  5+ · route ใหม่ · activation (imported workflows คง
+  enabled:false/status:"draft") · production unique-index blocker ยังเปิด
+  · push/merge/deploy/DDL/PR · real Mongo/provider.
+- **baseline tests (จะ run สดก่อนเขียน RED)**: binding-resolution 732 ·
+  persistence 210 · foundation 161 — ต้องไม่ลด.
+- **RED plan**: extend `test-workflow-persistence.ts` เท่านั้น (harness
+  เดิม fake Mongo เท่านั้น) — A) re-import exact-carry (direct/repeat/
+  account/non-account/no-metadata) B) mismatch matrix (ทีละเงื่อนไข:
+  source_workflow_id/node_id/field_path/kind/values order/values/count/
+  scope/target missing/node removed) C) idempotency+historical replay
+  D) editor CAS matrix (rename/non-binding edit/node deleted/
+  field removed/subtype+kind+field_path changed/values changed/target
+  deleted→invalid) E) CAS+failure (stale version/crash pre-CAS/
+  crash mid-bindings/concurrent winner-loser/no success audit/
+  old immutable) F) scope+readiness regression (carried valid account
+  → scope / invalid excluded / repeat contributes only valid /
+  label/user/team ไม่เข้า scope / Task 3 blockers คง / disabled+draft).
+- **stop gate**: Task 4 เท่านั้น · ห้าม stage/commit · หยุด pre-commit
+  review gate · verdict ต้องมี evidence จริง.
+
+### R1 TASK 4 ผลลัพธ์ — exact carry-forward implemented (pre-commit review — ยังไม่ stage/commit)
+
+- **Root cause**: `applyImportBatch` binding loop (เดิม `workflowService.ts:637-647`)
+  insert binding ใหม่ `status:"unresolved"` เสมอ — carry-forward ไม่มีเลย,
+  re-import เวอร์ชันที่ resolve แล้ว mapping หายหมด. `saveWorkflowDraft` carry
+  block (เดิม `:815-830`) clone `resolution` verbatim ตาม surviving `node_id`
+  เพียงเงื่อนไขเดียว — subtype เปลี่ยนก็ยัง carry, source_fp↔source_values ไม่
+  เช็ค (positional source_index ชี้ผิดตัวได้), local target ถูกลบก็ยัง
+  `state:"valid"` ค้าง (stale authorization).
+- **RED evidence**: 37 honest failures บน persistence suite (290 pass/37 fail)
+  — carry resolved/carried:true/via preserved/scope fields · partial carry
+  (resolved count 3 === 0) · deleted/scope-dead target → invalid semantics
+  ไม่มี · CAS subtype-drop/corruption-unresolved ไม่ทำ · scope blocker +
+  heal/sticky pins fail. (ก่อน RED สะอาด ต้องแก้ test 2 จุด: vacuous `.every()`
+  บน mappings ว่าง → เพิ่ม length asserts; source_values-only change ไม่เปลี่ยน
+  canonical fingerprint → ทุก mismatch case ต้องมี canonical edit คู่เพื่อบังคับ
+  version ใหม่ — field_path case เคย crash `IMPORT_INVALID` เพราะชน identity.)
+- **Exact carry-forward contract (implement แล้ว, inline ทั้ง 2 owner)**:
+  re-import carry source = predecessor `version_seq-1` เท่านั้น (ไม่ใช่
+  `current_version_id` — historical reconcile ต้อง refill unresolved ไม่ดึง
+  resolution จาก version ใหม่กว่า) · requirement gate = `node_id`+`field_path`
+  +`kind`+`count`+ordered `source_values` ตรงด้วย `canonicalJson` (exact value
+  equality authoritative — ไม่มี fuzzy/heuristic/digest-index) · resolution
+  carry เฉพาะเมื่อทุก mapping `source_index` in-range + `source_fp` คำนวณใหม่
+  เท่าเดิมบน `source_values` ชุดใหม่ · carried mappings `carried:true` (import
+  path เท่านั้น — CAS คง flag verbatim), `via`/`source_fp`/`resolved_by/at`
+  เดิม · target revalidation = typed switch เดียวกับ resolution batch
+  (account→shops platform+shop_id+local_id===shop_id · label→conversations
+  .distinct("labels") · user→active admin · อื่น→invalid) · status =
+  `mappings.some(invalid) ? "invalid" : prevStatus` — invalid sticky heal ผ่าน
+  direct resolution เท่านั้น.
+- **Re-import truth table**: identical requirement + targets ยัง valid →
+  carried resolved + `carried:true` + via คง · count/field_path/kind/
+  values-order/values-value เปลี่ยน → affected binding unresolved ใหม่
+  (siblings ที่ exact ยัง carry — partial carry per-binding) · node removed →
+  binding absent ใน version ใหม่ · mapped target ถูกลบ/platform เปลี่ยน →
+  mapping `state:"invalid"` + `invalidated_at`/`invalid_reason` + binding
+  `invalid` (เก็บ inspect ไม่ drop เงียบ) · identical replay → already_applied
+  zero writes · replay batch เก่า → pointer ไม่ย้อน · historical reconcile →
+  refill unresolved เสมอ.
+- **Editor CAS truth table**: rename/description/position/non-binding edit →
+  carry verbatim (ไม่เติม carried flag — CAS ไม่ใช่ import revision) · node
+  deleted → binding dropped · type/subtype เปลี่ยนบน node_id เดิม → bindings
+  ของ node นั้น dropped ทั้งหมด (requirement หาย — canonical config ไม่มี
+  external ids ให้ rebind) · source_fp ไม่ตรง source_values (corruption/drift)
+  → binding อยู่แต่ resolution ถูกลบ → unresolved · target ถูกลบ → mapping
+  invalid + binding invalid sticky · target restore → mapping state heal เป็น
+  valid แต่ binding status คง invalid (explicit resolution เท่านั้นที่ heal).
+- **Crash/retry**: `armInsertFail` กลาง carried-binding write → throw; retry
+  deterministic ids เดิม → artifact set ครบ `carried:true` ทุก mapping · CAS
+  crash ก่อน commit → version+pointer เดิมไม่ขยับ, retry สำเร็จ · stale
+  `expected_version` → conflict zero writes (pin จาก suite เดิมยังเขียว).
+- **Regression (fresh run)**: persistence **327/327** (+117 assertions จาก
+  baseline 210) · binding-resolution **732/732** ตรง baseline · foundation
+  **161/161** · `npx tsc --noEmit` clean · `git diff --check` clean.
+- **Complexity delta**: public methods +0 · private helpers +0 · named nested
+  fns +0 (inline `.filter` callback เดียว) · guards +0 · semantic regexes +0 ·
+  keyword tables +0 · decision owners +0 · collections/indexes/workers/deps/
+  flags +0 · routes/UI/engine +0 — หมายเหตุ: typed revalidation switch เดิมมี
+  1 จุด (resolution batch) ตอนนี้ inline 3 จุด (Task 4 เพิ่ม 2) ตามข้อบังคับ
+  "no new helpers" — mechanism count เดิม, ไม่มี abstraction ใหม่.
+- **ยืนยัน**: old version/binding docs byte-identical ทุกเส้นทาง (assert
+  canonicalJson ก่อน/หลัง) · imported workflows คง enabled:false/status:"draft"
+  · `listWorkflows({enabledOnly:true,publishedOnly:true})` ยัง 0 ·
+  workflowEngine ไม่แตะ · production unique-index blocker ยังเปิด ·
+  Phase 10B worktree ไม่แตะ (re-verify: `fd4e682` + 10 dirty paths เดิม) ·
+  Task 5 ยังไม่เริ่ม · **ยังไม่ stage/commit — หยุดที่ pre-commit review gate
+  ตามคำสั่ง**.
+
+- **Pre-commit code review (read-only subagent บน working-tree diff)**: verdict
+  "With fixes" — Critical 0 · Important 2 · Minor 4.
+  - แก้แล้วใน diff นี้: (a) conflict-only resolution divergence — import path
+    เก็บ `{mappings:[],conflict}` marker parity กับ CAS verbatim; (b) CAS fp
+    gate เพิ่ม `Array.isArray(source_values)` — corrupt doc กลายเป็น graceful
+    unresolved แทน TypeError crash (schema-safety ไม่ใช่ semantic guard);
+    (c) test §28 retry assertion เดิม vacuous (every ∈ enum ทั้งหมด) →
+    tighten เป็น count===4 + resolved + mappings valid.
+  - บันทึกเป็นหนี้/follow-up (อยู่นอก 2 carry blocks — ข้อบังคับห้ามแตะ):
+    (1) repoint `$set` ใน applyImportBatch เขียน `platforms:[]` (d.platforms
+    เสมอว่างจาก zaapiImport) แต่ไม่แตะ `shop_ids` → doc-level scope fields
+    diverge หลัง carried re-import — inconsistency เดิมที่ carry ทำให้เห็น;
+    readiness ไม่กระทบ (authoritative = version bindings; disabled/draft
+    engine-invisible) → defer Task 6 (imported scope ownership);
+    (2) applyImportBatch version insert ไม่มี seq-collision verify/bump เหมือน
+    CAS/resolution writers → crash-orphan + ต่าง fingerprint = wedge บน
+    production unique index (fake-Mongo เห็นไม่ได้) → follow-up รวมกับ
+    production unique-index blocker;
+    (3) `getWorkflowImportDetail` ส่ง bindings ทั้งหมดเข้า
+    validateCanonicalDraft → blocker "N external binding ยังไม่ resolve"
+    ติดแม้ resolved ครบ (pre-existing Task 3, fail-closed, Task 6
+    invalid_bindings จะแยก);
+    (4) revalidation switch inline 3 จุด — mandated โดย no-new-helpers.
+- **Post-review verification (fresh)**: persistence 328/328 ·
+  binding-resolution 732/732 · foundation 161/161 · tsc --noEmit clean ·
+  git diff --check clean · ยังไม่ stage/commit.
+
+### R1 TASK 4 — correction round (Findings A/B/C จาก reviewer — แก้ที่ owner เดิม ไม่ defer)
+
+- **Finding A — account scope บน re-import (root cause + contract proof)**:
+  contract พิสูจน์จาก Task 3 write owner (`workflowService.ts:1591-1600`) —
+  resolution commit เขียน `current_version_id` + `version` + `platforms` +
+  `shop_ids` derived scope ใน updateOne เดียว ("half-update ไม่มี") →
+  invariant = pointer กับ doc-scope ต้องขยับพร้อมกันเสมอ · repoint ของ
+  applyImportBatch (เดิม `:735-745`) flip pointer แต่เขียน `platforms` จาก
+  `d.platforms` (= [] เสมอใน zaapiImport:318) และไม่แตะ `shop_ids` →
+  derived scope หาย/ค้าง → **defer ไป Task 6 ไม่ได้** (Task 6 = reject client
+  scope edits — คนละเรื่อง); แก้ใน repoint updateOne เดิม: derive scope จาก
+  version ใหม่'s valid account mappings (formula เดียวกับ step-8
+  `:1401-1405`) + `version: seq` แทน `$inc` (counter ต้อง mirror pointed seq
+  เหมือน CAS/resolution writers).
+- **Finding B — binding-consuming field removal (CAS)**: canonical config
+  strip เฉพาะ binding key — container structure persist (`cleanConfigObject`
+  คง `{}`/non-binding keys ของ parent ไว้) → แยก "field removed" จาก
+  "unchanged" ได้ด้วยข้อมูลจริง: resolve parent path ของ `field_path` ใน new
+  node config — หาย = requirement หาย → drop (ไม่ใช่ unresolved — binding ที่
+  อ้าง requirement ที่ไม่มี = false data) · root-level field (parent "") =
+  config root เสมอมี → carry (การลบ external id express ไม่ได้ใน canonical
+  config ตั้งแต่แรก — by design ไม่ใช่ detection gap) · positional container
+  swap (conditions[0] ถูกแทนด้วย condition อื่นที่ strip เหมือนกัน) แยกไม่ได้
+  — documented positional-identity gap เดียวกับ source_index class.
+- **Finding C — crash-orphan + production unique (workflow_id, version_seq)**:
+  applyImportBatch version insert เดิมไม่มี seq-slot check (CAS/resolution
+  writers มี verify/bump) → orphan + divergent fingerprint = E11000 wedge บน
+  production (reproduced จริงด้วย fake-Mongo compound-key seam ใหม่ —
+  `enforceUnique` รองรับ `"a+b"` keys; mocks declare `workflow_id+version_seq`
+  ตาม production DDL) · แก้ = fold insert เข้า verify/bump loop ทั้ง
+  applyImportBatch + saveWorkflowDraft — E11000 = check→insert race → verify
+  slot ใหม่ (same-fp resume / ต่าง-fp bump) ไม่ทะลุเป็น 500 · ผลข้างเคียงที่
+  index เปิดเผย: concurrent CAS loser เคย insert dup-seq เงียบๆ แล้วค่อย
+  conflict — ตอนนี้ E11000 → race-verify → clean conflict ตามเดิม ·
+  FENCE/RENEW positional findOne hooks ปรับ count 2→3 (+1 versions-findOne
+  ต่อ flow จาก seq-check) — intent เดิมคงไว้.
+- **RED evidence (จริง)**: platforms `[]` vs derived `["shopee","tiktok"]` ·
+  shop_ids stale `["shop_cf1","shop_cf2"]` vs derived `["shop_cf2"]` /
+  `["shop_cf1"]` (count-change/deleted-target cases) · `binding-consuming
+  field removed → binding absent` carry เกิน (subtype-only gate เดิม) ·
+  `{"code":11000}` wedge จริง + duplicate (wfId,seq) rows + version counter
+  1≠3 · regression side-effect: `loser → conflict response` + `stale claimant
+  flow1` — ทั้งคู่ fix แล้วเขียว.
+- **Verification (fresh, post-correction)**: persistence **346/346** ·
+  binding-resolution **732/732** · foundation **161/161** · `npx tsc --noEmit`
+  clean · `git diff --check` clean.
+- **Complexity delta (แยกชัดตามข้อกำหนด)**: public methods +0 · private
+  helpers +0 · named nested fns +0 · guards +0 (Array.isArray = schema
+  safety ใน predicate เดิม) · semantic regexes +0 (structural path-split
+  `/[.\[]/` + `/\[(\d+)\]/` = syntax parsing ของ field_path ที่มี owner
+  format เดิมอยู่แล้ว — ไม่ใช่ semantic/keyword) · keyword tables +0 ·
+  logical decision owners +0 (workflowService.ts owner เดียว) · duplicated
+  typed decision blocks = 3 sites (revalidation switch — รายงานตรงๆ ว่าเป็น
+  duplication ที่ no-new-helpers บังคับ; scope-derivation inline 2 sites
+  mirror formula เดียวกับ step-8) · collections/indexes +0 · workers/queues
+  +0 · dependencies +0 · flags +0 · test-infra: fake-Mongo compound-key
+  seam +1 (enforceUnique `+`-join — declared-DDL fidelity, ไม่ใช่ production
+  mechanism).
+- **ยืนยัน**: direct/repeat via คงเดิม · sticky invalid status คงเดิม · old
+  version/binding byte-identical ทุก path · CAS/CAS-conflict/retry เขียว ·
+  disabled/draft ทุก re-import · global-scope blocker คงเดิม · Phase 10B
+  ไม่แตะ · Task 5 ไม่เริ่ม · production unique-index blocker ยังเปิด (หมายเหตุ:
+  seq-collision gap ของ applyImportBatch + check→insert race ของ CAS —
+  2 ใน 3 writers — แก้แล้ว; saveBindingResolutionBatch มี protocol แข็งกว่า
+  อยู่แล้ว — E11000 catch → reread ทั้งสองกุญแจ → canonical artifact verify →
+  reuse/bump/fail-closed + post-land multiplicity gate `:1543-1573` —
+  ยืนยันรูปแบบ fix ที่เลือกสอดคล้องกัน) · ยังไม่ stage/commit.
+
+### R1 TASK 4 — correction round 2 (Findings D/E + TDD evidence gap)
+
+- **Finding D — concurrent imports คนละ batch ถอย pointer ได้จริง**:
+  claim แยกตาม batch_id → batch ต่าง fingerprint apply พร้อมกัน; repoint
+  เดิมเช็ก `seq > curSeq` จาก read เก่าแต่ `updateOne` filter เช็กแค่
+  workflow_id/is_deleted → seq ต่ำเขียนทับ seq สูงได้ · RED จริง: pointer
+  `wv_nqm53!==wv_bllfdq`, version counter `3===4`, doc scope เขียนจาก LO
+  version · fix = repoint filter เพิ่ม `current_version_id: existingWf
+  .current_version_id` — atomic stale-pointer check ณ commit; matchedCount
+  =0 → skip (artifacts = immutable historical revision เหมือน reconcile).
+- **Finding D side-finding — carry source seq-1 ผิดบน divergent branch**:
+  interleave จริงเปิดเผยว่า HI (bump→seq4) carry จาก seq-1=LO orphan
+  (requirement ต่างกัน) → unresolved ผิดปกติ — unpointed orphan ไม่ใช่
+  lineage predecessor · fix = forward revision carry จาก pointed version
+  ณ ตอนอ่าน (`existingWf.current_version_id`); dupVersion reconcile คง
+  seq-1 (no newer-version bleed).
+- **Finding E — E11000 ต้องจำแนกกุญแจ**: loop เดิม catch แล้ว verify seq
+  อย่างเดียว → version_id conflict ที่ seq ว่างวนค่าเดิมไม่จบ (sentinel
+  จับ attempts=4 จริง) + CAS `findOne({version_id})` reuse โดยไม่เช็ก
+  fingerprint → ชี้ foreign artifact ได้จริง (pointer ไป wv_1pe0kdz) ·
+  fix ทั้ง 2 writers: byId found → same-fp resume / ต่าง-fp corrupt
+  deterministic identity fail-closed · seq slot found → same-fp resume /
+  ต่าง-fp bump · ไม่มีผู้อธิบาย → rethrow (inexplicable E11000 fail closed).
+- **TDD evidence gap ปิดแล้ว**: field-container removal RED พิสูจน์บน
+  disposable pre-Task-4 worktree (`git worktree add /tmp/wf-t4-baseline
+  c6efc7d` + test files ปัจจุบัน + node_modules symlink — ไม่แตะ dirty
+  tree) → `binding-consuming field removed → binding absent` + `(4===3)`
+  fail ถูกเหตุบน impl เก่า — worktree ลบแล้ว (git worktree remove --force).
+- **Fixture lesson (จด)**: LO race fixture แรกเปลี่ยนแค่ accountIds →
+  fingerprint เดิม (external ids stripped) → already_applied ไม่ถึง repoint
+  — mismatch fixture ต้องมี canonical change คู่เสมอ.
+- **Verification (fresh)**: persistence **367/367** · binding-resolution
+  **732/732** · foundation **161/161** · tsc --noEmit clean (ลบ debug
+  probe scripts/_probe-race.ts ออกแล้ว) · git diff --check clean.
+- **Complexity delta (ตาม diff จริง)**: helpers/private fns +0 · business
+  guards +0 · semantic regexes +0 · structural path-parse regex 2 (เดิม —
+  field_path เท่านั้น) · keyword tables +0 · logical owners +0
+  (workflowService.ts) · duplicated decision blocks: revalidation switch
+  3 sites + scope-derivation 2 sites + E11000 key-discrimination 2 sites
+  (mirror resolution writer :1543-1559 — no-new-helpers constraint) ·
+  collections/indexes/workers/deps/flags +0 · test-infra: fake-Mongo
+  compound-key + deferred-updateOne interleave seam.
+- **ยืนยัน**: direct/repeat via/sticky invalid/exact carry/immutable
+  history/derived scope/global-scope blocker/disabled+draft คงครบ ·
+  production unique-index blocker ยังเปิด (app-level seq+id safety ครบ
+  3/3 writers แล้ว) · Phase 10B ไม่แตะ (HEAD fd4e682 คงเดิม; dirty paths
+  เพิ่มจากฝั่ง user เอง) · Task 5 ไม่เริ่ม · ยังไม่ stage/commit.
+
+### R1 TASK 4 — correction round 3 (Findings F/G + tsc)
+
+- **Finding F — repoint first-writer-wins ทิ้ง revision สูงกว่า**: pointer-
+  identity CAS (`current_version_id == old`) ข้าม HI เมื่อ LO repoint
+  ก่อนแม้ HI seq สูงกว่า · RED จริง (pointer wv_rn2ui8!==wv_jzu1kq,
+  version 3!==4, scope = LO narrow) · fix = repoint filter เปลี่ยนเป็น
+  `version: {$lt: seq}` — monotone guard ณ commit: ไม่ถอย + ไม่ทิ้ง
+  revision สูงกว่าเพราะ pointer เปลี่ยนหลัง stale read.
+- **Finding G — fingerprint-only ≠ artifact identity**: dupVersion/
+  clash/byId/slot เช็กแค่ fingerprint → same-fp foreign doc ถูก reuse +
+  pointer/bindings ชี้ artifact ผิดจริง (observed: pointer ไป wv_me75js +
+  bindings 4 rows เขียนใต้ foreign version_id) · fix ทั้ง 2 writers +
+  dupVersion path: canonical projection เปรียบทุก content field,
+  normalize เฉพาะ {_id, created_at, created_by, import_batch_id}
+  (volatile/provenance — batch ต่างกัน reconcile fp เดียวกันได้) ·
+  same-fp diff-proj → corrupt deterministic identity fail-closed.
+- **tsc fix**: `.then` บน unknown/implicit-any → try/catch typed; probe
+  file ลบแล้ว · `schema_version` literal → `as const`; undefined-strip
+  ผ่าน `dd` alias คง expectedDoc typed.
+- **Verification (fresh)**: persistence **385/385** · binding-resolution
+  **732/732** · foundation **161/161** · tsc --noEmit clean · diff-check
+  clean · HEAD c6efc7d · staging ว่าง · Phase 10B ไม่แตะ · Task 5 ไม่เริ่ม.
+
+### R1 TASK 4 — correction round 4 (Findings H/I/J)
+
+- **Finding H — _batchComplete ผสม provenance เข้า completeness**: version
+  lookup เช็ก `import_batch_id: batchId` → batch [A'+B] ที่ A' reuse
+  version ของ batch1 → หาไม่เจอ → batch wedge (artifacts ถูกต้องจริง) ·
+  fix = completeness เช็ก identity `{workflow_id, fingerprint}` — batch_id
+  เป็น provenance (สอดคล้อง G-decision) · RED จริง: batch "failed" ทั้ง
+  artifacts ครบ (ผ่าน I-throw ก่อน; wedge จะโผล่ต่อเนื่อง).
+- **Finding I — source_ref เป็น provenance ไม่ใช่ content**: report.fp
+  คำนวณจาก {name,nodes,edges} เท่านั้น → loadedVersionId/versionStatuses/
+  sourceStatus/raw-fp เปลี่ยนได้ที่ canonical เดิม · projection ทุก site
+  normalize `source_ref → {workflowId}` (key เดียวที่ derive จาก
+  workflow_id — zero false-positive) · RED จริง: same-fp + meta เปลี่ยน
+  ถูก corrupt-throw → batch ล้มทั้งก้อน.
+- **Finding J — assert อิง artifact จริง**: เดิม `hiPtr ? 4 : 4` (hiPtr
+  จาก race คนละตัว + hardcode 4) · แก้ = lookup HI version ด้วย
+  {workflow_id, fingerprint} → assert current_version_id===version_id,
+  version===version_seq, scope เทียบ derived จาก bindings ของ HI version
+  จริง · LO lookup เพิ่ม workflow_id scope.
+- **Fixture lesson**: fingerprint ครอบคลุม name+nodes+edges — cross-batch
+  same-fp ต้องใช้ name เดิมด้วย (indexRows name ต่างกัน → fp ต่าง →
+  dupVersion ไม่เคยโดนเลย).
+- **Verification (fresh)**: persistence **393/393** · binding-resolution
+  **732/732** · foundation **161/161** · tsc clean · diff-check clean ·
+  HEAD c6efc7d · staging ว่าง · Phase 10B ไม่แตะ · Task 5 ไม่เริ่ม.
+
+### R1 TASK 4 — correction round 5 (Finding K)
+
+- **Root cause**: canonical fp = {name,nodes,edges} ไม่ครอบคลุม external
+  source_values → values-only re-import ได้ batchId เดิม → `already_applied`
+  swallow; dupVersion/_batchComplete เลือก version ด้วย fp อย่างเดียว →
+  variant ต่าง requirement ชนกัน · RED จริง 9 asserts (already_applied,
+  no new version, stale bindings).
+- **Fix (owners เดิม)**: (1) batchFp += requirement key ต่อ flow —
+  `node_id|field_path|kind|count|canonicalJson(source_values)` sorted
+  (values resolve ผ่าน _resolveRawPath เดิม — importer ไม่แตะ) →
+  values-changed input = batch ต่าง ไม่ already_applied · (2) dupVersion =
+  candidates by fp → canonical proj verify (G) → requirement-set classify:
+  exact→reuse/reconcile · subset(missing)→reconcile refill ·
+  superset/dup/bogus-identity→_impErr IMPORT_INVALID (claim-held path →
+  status failed เหมือนเดิม) · disjoint→version ใหม่ (forward revision,
+  carry จาก pointed เหมือนเดิม) · (3) _batchComplete เลือก version ด้วย
+  fp+req เดียวกัน — pure-superset→"corrupt", missing→null→reconcile.
+- **Classification truth table (same-fp candidates)**: req-set เท่ากัน
+  → reuse · persisted⊂expected → reconcile · persisted⊋expected/bogus
+  identity → corrupt · อื่น (values/count ต่าง) → variant (new version)
+  — 2 same-fp versions coexist ได้ (version_id ต่าง seq).
+- **Hook recalibration**: dupVersion ใช้ find() ไม่ใช่ findOne →
+  FENCE/RENEW positional count 3→2 (intent เดิม: steal/expire ขณะ flow2).
+- **Verification (fresh)**: persistence **420/420** · binding-resolution
+  **732/732** · foundation **161/161** · tsc clean · diff-check clean ·
+  HEAD c6efc7d · staging ว่าง · Phase 10B ไม่แตะ · Task 5 ไม่เริ่ม.
+
+### R1 TASK 4 — correction round 6 (Finding L)
+
+- **Root cause**: requirement existence ขึ้นกับ raw values (empty field →
+  0 req) ซึ่ง canonical fp ไม่ครอบ → subset/superset classify แยก
+  "incomplete retry" ออกจาก "requirement variant เพิ่ม/ลบ binding" ไม่ได้:
+  empty-set cand ถูกเลือกเป็น incomplete → เขียน binding ใหม่ใต้ immutable
+  v1 (mutate!) · cand ที่มี row เกิน → corrupt ทั้งที่เป็น variant ถูกต้อง
+- **Discriminator**: snapshot raw ของ candidate เอง — persisted row ต้องถูก
+  input ของมัน explain (resolve source_ref → ค่าเดียวกัน) ไม่งั้น bogus →
+  corrupt; missing req ที่ resolve EXACT ใน cand.raw = same-input
+  incomplete → reconcile; resolve ว่าง/ต่าง = variant → version ใหม่
+- **Truth table**: empty→non-empty → version ใหม่ + acc2 unresolved (v1
+  byte-identical) · non-empty→empty → version ใหม่ไม่มี binding นั้น (ไม่
+  corrupt) · changed values → variant (K เดิม) · missing→reconcile ·
+  dup/bogus→corrupt · replay idempotent ทุกทาง
+- **Verification (fresh)**: persistence **445/445** · binding-resolution
+  **732/732** · foundation **161/161** · tsc clean · diff-check clean ·
+  HEAD c6efc7d · staging ว่าง · Phase 10B ไม่แตะ · Task 5 ไม่เริ่ม
+
+### R1 TASK 4 — correction round 7 (Finding M)
+
+- **Root cause**: `_batchComplete` exact req-set branch `version = cand;
+  break` ก่อนตรวจ row/raw legitimacy — tuples มาจาก binding docs (ไม่ใช่
+  raw) → snapshot raw corrupt แต่ binding docs intact = already_applied
+  ผ่านโดยไม่ validate ว่า source_values resolve จาก cand.raw จริง
+- **RED จริง**: corrupt snapshot raw (accountIds → zacc_corrupt_*) แล้ว
+  replay → `already_applied: true` ไม่มี error เลย (2 asserts failed)
+- **Fix**: row legitimacy check (resolve source_ref ใน cand.raw ==
+  source_values, non-empty, no dup tuple) รันก่อน exact-match select ทุก
+  candidate — exact tuples แต่ rows/raw ไม่สอดคล้อง → sawCorrupt →
+  "corrupt" → IMPORT_INVALID · missing>0 → null → reconcile (claim-held
+  path เดิม) · extras bogus → corrupt · extras legit → variant เดิม
+- **Verification (fresh)**: persistence **452/452** · binding-resolution
+  **732/732** · foundation **161/161** · tsc clean · diff-check clean ·
+  HEAD c6efc7d · staging ว่าง · Phase 10B ไม่แตะ · Task 5 ไม่เริ่ม
+
+### R1 TASK 4 ผลลัพธ์สุดท้าย — committed closeout (feat: exact binding carry-forward)
+
+- **frozen-state re-verify (session นี้)**: worktree
+  `ChatBotProductMS-worktrees/zaapi-workflow-foundation` · branch
+  `codex/zaapi-workflow-foundation` @ `c6efc7d` · staging ว่าง · modified
+  = 6 ไฟล์ Task 4 ตาม reviewer snapshot เป๊ะ (test-botworker-fakemongo/
+  test-workflow-persistence-mocks/test-workflow-persistence/
+  workflowService/plan/waythrough2) · `git diff --check` clean.
+- **independent diff review (ไม่อิง worker report เดิม)**: hunks อยู่ใน
+  `_batchComplete`/`applyImportBatch`/`saveWorkflowDraft` เท่านั้น —
+  req-identity batchFp (values-only re-import = batch ต่าง) · canonical
+  proj + requirement-set classification ใน dupVersion/_batchComplete ·
+  exact carry gate + source_fp integrity + typed target revalidation ·
+  derived scope (platforms+shop_ids) repoint atomic · monotone version
+  CAS `version:{$lt:seq}` แทน `$inc` · CAS carriers filter resolve
+  parent container · E11000 key discrimination · fake-Mongo compound
+  unique `workflow_id+version_seq` mirror production DDL · tests §26-29
+  (carry matrix/idempotency/concurrent/E11000/variants/corrupt/CAS/
+  scope-readiness) · plan evidence + waythrough2 append-only (+373 บรรทัด
+  ไม่มีลบ). scope ตรง Task 4 ไม่มี out-of-scope.
+- **Phase 10B (read-only check)**: branch `feature-phase3-aswer-quality`
+  @ `fd4e682` ตรง record — dirty set เพิ่ม 1 path (`retrieval_selection.py`
+  modified) เทียบ snapshot เดิม 10 paths = activity ภายนอก worktree นั้น
+  ไม่ใช่จาก session นี้ (zero writes ข้าม) — บันทึกไว้ ไม่แตะ.
+- **verification (fresh ก่อน commit — run จริง session นี้)**: persistence
+  **452/452** · binding-resolution **732/732** · foundation **161/161** ·
+  `npx tsc --noEmit` exit 0 · `git diff --check` exit 0.
+- **doc closeout**: plan checklist Task 4 → [x] ครบ + evidence block
+  ปรับเป็น closeout record (เพิ่ม correction rounds 3–7 G–M summary +
+  final verification 452/452) · waythrough2 ต่อท้าย entry นี้เท่านั้น
+  (file 1 ไม่แตะ).
+- **commit**: stage เฉพาะ 6 ไฟล์ Task 4 → commit
+  `feat: exact binding carry-forward` (SHA รายงานใน worker report —
+  entry นี้เขียนก่อน commit เลยอ้าง message ไม่ใช่ SHA) · ไม่ push/PR/
+  merge/deploy · Phase 10B ไม่แตะ · Task 5 ไม่เริ่ม · production
+  unique-index blocker ยังเปิด · `getWorkflowImportDetail` all-bindings
+  blocker = pre-existing Task-3 fail-closed → Task 6 `invalid_bindings`.
